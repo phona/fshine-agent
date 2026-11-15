@@ -50,7 +50,7 @@
 - **通知意图（enum）**：`accepted | started | waiting_user | resumed | completed | failed | cancelled | timed_out | resource_limited`（阶段进展/里程碑由 state fact 生成；低层事件仅入证据）。
 - **outbox（同库最小表）**：`notifications(id, task_id, kind, state_version, payload_json, created_at, delivered_at, attempts, last_error)`；唯一 `(task_id, kind, state_version)`；同进程**有界**重试（退避 + attempts 上限）；未送达在 tasks/ops 可见。
 - **渠道无关**：`NotificationSink.send(notification): Promise<DeliveryReceipt>`；server 集成时注入 WeCom sink；测试用假发送器。
-- **事实性**：payload 仅来自底账事实（不得编造百分比/重试/原因）；业务语言；Request ID 仅追溯，非凭据。
+- **事实性**：payload 仅来自底账事实（不得编造百分比/重试/原因）；业务语言；Request ID 仅追溯，非凭据。R5 补字段（只补字段说明，不改语义）：payload 白名单新增 `missing?: string[]`（waiting_user 时必带，取底账 `pendingQuestion.missing` 同口径的非空字符串条目，使通知能说出「需要你补什么」）；唯一键去重与有界重试语义不变。
 - **通知失败/延迟不得改变任务实际结果**；Main 可读：P4 提供只读查询（`listNotifications(taskId)` / 未送达集合），供 tasks/ops 与后续只读工具使用（**不自动注入对话历史**）。
 - **测试**：写点与去重、重试与 attempts、失败可见、终态不静默丢、字段来源、假渠道投递。
 - **blocked**：后台真实通知的黑盒验收 **blocked-by-P6**（接入后完成）。

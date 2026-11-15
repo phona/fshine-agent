@@ -237,3 +237,101 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
     }
   });
 });
+
+describe('R5 通知：投递驱动与 B 通道事实注入', () => {
+  it('⑬ 落库即试投失败后，下一次渠道回合开头 drain 补投（deliverPending 有真实调用方）', async () => {
+    const dir = tempDir();
+    const dbPath = path.join(dir, 'state.db');
+    let failFirst = true;
+    const sentKinds: string[] = [];
+    const flakySink: NotificationSink = {
+      async send(notification) {
+        sentKinds.push(notification.kind);
+        // 首次投递失败（outbox 记 retry_scheduled，退避基数 1s）。
+        if (failFirst) {
+          failFirst = false;
+          return { delivered: false, error: '（测试）渠道暂不可用' };
+        }
+        return { delivered: true };
+      },
+    };
+    const executor = new FakeExecutor([async () => ({ kind: 'completed', resultText: 'W202611：documents 共 3 条。' })]);
+    const records: ServerDriverRecord[] = [];
+    const plans = new Map<string, ServerPlan>([
+      ['查 documents W202611', { delegates: ['查 documents W202611'], reply: '已受理，稍后通知你。' }],
+      ['还在吗', { reply: '在的。' }],
+    ]);
+    const server = await createServer({
+      env: { LLM_MODEL: 'test-model' },
+      config: testConfig('background'),
+      dbPath,
+      createDrivers: () => ({ mainDriver: plannedDriver(plans, records), workerDriver: unreachableDriver() }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+      taskExecutor: executor,
+      notificationSink: flakySink,
+      logger: () => {},
+    });
+    const reader = createNotificationReader(dbPath);
+    try {
+      await server.handler(incoming('user-a', 'conv-a', 'msg-1', '查 documents W202611'));
+      // 首投失败 → 至少一条未送达。
+      await vi.waitFor(() => expect(reader.undelivered().length).toBeGreaterThan(0));
+      // 退避到点（基数 1s）后，用户下一次回合开头 drain 一次 pending → 补投成功。
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      await server.handler(incoming('user-a', 'conv-a', 'msg-2', '还在吗'));
+      await vi.waitFor(() => expect(reader.undelivered()).toEqual([]));
+      expect(sentKinds.length).toBeGreaterThanOrEqual(4);
+    } finally {
+      reader.close();
+      server.close();
+    }
+  });
+
+  it('⑭ B 通道：后台终态事实在下一次回合以普通 user 消息注入（幂等 + 有界）', async () => {
+    const dir = tempDir();
+    const dbPath = path.join(dir, 'state.db');
+    const executor = new FakeExecutor([async () => ({ kind: 'completed', resultText: 'W202611：documents 共 3 条。' })]);
+    const records: ServerDriverRecord[] = [];
+    const plans = new Map<string, ServerPlan>([
+      ['查 documents W202611', { delegates: ['查 documents W202611'], reply: '已受理，稍后通知你。' }],
+      ['下一步', { reply: '收到事实。' }],
+      ['再一步', { reply: '好。' }],
+    ]);
+    const server = await createServer({
+      env: { LLM_MODEL: 'test-model' },
+      config: testConfig('background'),
+      dbPath,
+      createDrivers: () => ({ mainDriver: plannedDriver(plans, records), workerDriver: unreachableDriver() }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+      taskExecutor: executor,
+      notificationSink: new FakeSink(),
+      logger: () => {},
+    });
+    try {
+      await server.handler(incoming('user-a', 'conv-a', 'msg-1', '查 documents W202611'));
+      await server.handler(incoming('user-a', 'conv-a', 'msg-2', '下一步'));
+      // 第二回合的 Main 消息序列：… + 注入的 [任务事实] user 消息 + 本回合用户消息（均为普通 user role）。
+      const second = records[1]!.messages;
+      const injected = second.filter(
+        (message) => (message as { role?: string; content?: unknown }).role === 'user'
+          && typeof (message as { content?: unknown }).content === 'string'
+          && ((message as { content: string }).content.startsWith('[任务事实]')),
+      );
+      expect(injected).toHaveLength(1);
+      const injectedText = (injected[0] as { content: string }).content;
+      expect(injectedText).toContain('办完了');
+      expect(injectedText).toContain('查 documents W202611');
+      expect(injectedText).not.toContain('task_status');
+      // 幂等：第三回合不再重复注入同一事实。
+      await server.handler(incoming('user-a', 'conv-a', 'msg-3', '再一步'));
+      const third = records[2]!.messages;
+      expect(third.filter(
+        (message) => (message as { content?: unknown }).content !== undefined
+          && typeof (message as { content?: unknown }).content === 'string'
+          && (message as { content: string }).content.startsWith('[任务事实]'),
+      )).toHaveLength(1);
+    } finally {
+      server.close();
+    }
+  });
+});

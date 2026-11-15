@@ -74,6 +74,8 @@ export interface NotificationPayload {
   reason?: NotificationReason;
   /** Request ID 仅追溯，非凭据。 */
   requestIds?: readonly string[];
+  /** R5 补字段：waiting_user 时缺什么的条目（底账 pendingQuestion.missing）。 */
+  missing?: readonly string[];
 }
 
 /**
@@ -91,6 +93,8 @@ export interface NotificationFact {
   name?: string;
   reason?: NotificationReason;
   requestIds?: readonly string[];
+  /** R5 补字段：waiting_user 必带（底账 pendingQuestion.missing）。 */
+  missing?: readonly string[];
 }
 
 /** 白名单违规（编造/未知字段、非法枚举、缺必填）：拒绝写入，不污染 outbox。 */
@@ -199,6 +203,7 @@ const FACT_KEYS: ReadonlySet<string> = new Set([
   'name',
   'reason',
   'requestIds',
+  'missing',
 ]);
 
 const SCHEMA = `
@@ -301,6 +306,12 @@ function validateFact(fact: NotificationFact): void {
   ) {
     throw new NotificationPayloadError('requestIds 必须是非空字符串数组（仅追溯用）。');
   }
+  if (
+    fact.missing !== undefined
+    && (!Array.isArray(fact.missing) || fact.missing.some((item) => typeof item !== 'string' || item.trim() === ''))
+  ) {
+    throw new NotificationPayloadError('missing 必须是非空字符串数组（底账 pendingQuestion.missing 同口径）。');
+  }
 }
 
 function buildPayload(fact: NotificationFact): NotificationPayload {
@@ -310,6 +321,7 @@ function buildPayload(fact: NotificationFact): NotificationPayload {
     ...(fact.name === undefined ? {} : { name: fact.name }),
     ...(fact.reason === undefined ? {} : { reason: fact.reason }),
     ...(fact.requestIds === undefined ? {} : { requestIds: [...fact.requestIds] }),
+    ...(fact.missing === undefined ? {} : { missing: [...fact.missing] }),
   };
 }
 

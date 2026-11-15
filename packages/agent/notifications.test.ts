@@ -447,3 +447,33 @@ describe('P4 只读查询与持久化（P4-T05 只读形态：不注入对话历
     db.close();
   });
 });
+
+describe('R5 补字段：payload.missing（waiting_user 缺什么的条目）', () => {
+  it('waiting_user 事实携带 missing：落库 payload 原样带出', () => {
+    const dbPath = tempDbPath();
+    const sink = new FakeSink();
+    const { outbox } = harness(dbPath, sink);
+    const recorded = outbox.record(fact({
+      kind: 'waiting_user',
+      missing: ['开票日期', '报销归属项目'],
+    }));
+    expect(recorded.notification.payload.missing).toEqual(['开票日期', '报销归属项目']);
+    outbox.close();
+  });
+
+  it('missing 非法形状被拒且不落库（非空字符串数组）', () => {
+    const dbPath = tempDbPath();
+    const { outbox } = harness(dbPath, new FakeSink());
+    for (const bad of [
+      ['ok', ''],
+      ['ok', 3],
+      '开票日期',
+    ] as unknown[]) {
+      expect(() => outbox.record(fact({ kind: 'waiting_user', missing: bad as never }))).toThrow(
+        NotificationPayloadError,
+      );
+    }
+    expect(outbox.listNotifications()).toEqual([]);
+    outbox.close();
+  });
+});
