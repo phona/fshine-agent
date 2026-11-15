@@ -2718,6 +2718,87 @@ TMPDIR=/home/tao/.tmp node scripts/eval/pi-native/a-metrics.mjs   # exit 0，33 
 
 ---
 
+## 八十三、Pi 原生替换 · 阶段三最终替换（A 裁决后完整替换）（2026-11-15，分支 `exp/pi-native-session-compaction`）状态：**实验分支·待裁决**
+
+> 角色：**集成 / 台账登记**（本 run 唯一台账写者）。承接 §七十八（阶段一 GO 条件式）、§七十九（阶段二最小原型）、§八十（D1 反向绊线独立复核）、§八十一（最小 B 验证 `bHolds=false`）、§八十二（A 度量与 A/C 对照）。**owner 裁决 A（2026-11-15，已生效）**：接受 Pi「请求 → Overflow Recovery → 有界恢复/失败」，**撤销**「新架构必须不发送任何必然超窗请求」；**旧 D1 绊线 FAIL 记录保留、不得事后修改**。据此，阶段三把**产品驱动真正切换到 Pi 原生**并**整体删除 fshine 自研压缩编排（含 D1 臂）**。本登记对应 HEAD `78c22d0`（实现）+ `7741752`（A 口径冻结）；A 验收口径文档为 `docs/product/exp-pi-native-A-acceptance.md`。版本口径：只读锁 **`@earendil-works/pi-agent-core@0.85.1`（不升级）**。
+
+### 1. 工作区核验（本会话实跑）
+
+- `git -C ~/projects/fshine-agent-exp-pi-session rev-parse --show-toplevel` = `.../fshine-agent-exp-pi-session`（**≠ 主仓** `.../fshine-agent`）；`rev-parse --abbrev-ref HEAD` = `exp/pi-native-session-compaction`；登记前 `git status --short` 空。**通过。**
+
+### 2. A 口径冻结（真实模型前）
+
+`docs/product/exp-pi-native-A-acceptance.md` **已冻结（真实模型前）**：§1 A 验收口径（**A-1** 每事件至多 1 次 over-window 发射 / **A-2** 有界收敛（总发出 ≤ 2、必收束）/ **A-3** `retry_scheduled = 0`，三者须同时成立）；§2 **适用范围限制**（`≤1 次/事件` **仅为当前假模型场景观测值，不是所有真实业务回合的普适上界**，须按真实 Pi 生命周期复核后冻结）；§3 七项可靠性判据；§4 D1 FAIL 记录保留；§6 局限；§7 实施期裁定补充（`piCompactionSettings` 属 **Pi API 契约**，非第二套机制）。**零真实模型**：全部读数为假 `Models`/假 `streamFn` 夹具，`baseURL=http://127.0.0.1:9`。
+
+### 3. Pi 唯一转录（本会话读码）
+
+- `packages/agent/src/pi-driver.ts:287-298` `createPiTurnDriver` 改用公开 `AgentHarness.create` + `MemorySessionRepo`（`:285-286`）；转录、压缩触发、压缩执行、摘要、尾段保留、溢出恢复**全部交 Pi**（`compaction`/`retry`/`tools`）。业务层只读投影 `projectTranscript`（`:426-429`）。
+- **唯一** fshine→Pi 交互为窗口派生的 `CompactionSettings`（`piCompactionSettings`，`pi-driver.ts:93`，纯配置、无决策/安全 math）。
+- 事件监听仅保留可归因日志：`retry_scheduled`→`pi_driver_retry_scheduled`（`:305-314`）、`run_end`→`pi_driver_model_error`（`:315-319`）。**不再有** host 侧请求前压缩臂、emergency 触发、溢出恢复臂。
+
+### 4. 删除清单与净行数（含 D1）（本会话实跑核验）
+
+- 提交读数（`git show --stat HEAD`）：**30 files changed, 911 insertions(+), 2381 deletions(-)**，净 **−1470** 行。
+- `packages/agent/src/pi-driver.ts`：**1256 → 621 行**（`git show HEAD~1:packages/agent/src/pi-driver.ts | wc -l` = 1256；`wc -l` = 621；净 **−635**）。
+- **整体删除**（生产函数/常量/臂，与 §八十一 §7 清单逐项一致；已确认符号在 `pi-driver.ts` 零出现）：`compactTranscriptWithPi` / `compactionSettingsFor` / `splitForCompaction`（含 `takeSummaryChunk` / `clampMessageForSummary`）/ `summarizeWithinWindow` / `trimToBudget` / `degradeByDropping` / `isContextOverflowError`；**请求前 force 压缩臂 D1**、回合内 emergency 触发、溢出恢复臂；常量 `SUMMARY_PROMPT_OVERHEAD_TOKENS` / `MAX_SUMMARY_CHUNKS` / `COMPACTION_INSTRUCTIONS` / `CONTEXT_REQUEST_FRAMING_TOKENS` / `MIN_OUTPUT_BUDGET_TOKENS` / `CONTEXT_WINDOW_FLOOR_TOKENS` / `invariantReserveTokens` / `invariantLimitTokens` / `fixedRequestOverheadTokens` / `COMPACTION_CAPTURE_SUMMARY_ENV` 等。
+- 契约：`TurnDriver.compact?()` 方法自 `packages/agent/src/driver-contract.ts:42-45` 删除。
+- 专属测试/夹具**整体删除**（文件已不存在，本会话 `test -e` 确认）：`compaction-window.test.ts`（−193）/ `compaction-metrics.test.ts`（−225）/ `compaction-product.test.ts`（−91）/ `pi-driver-context-invariant.test.ts`（−231）/ `scripts/eval/piopt/piopt-phase3.test.ts`（−431）/ `scripts/eval/p3/compaction-proof.ts`（−70）；`experiments.test.ts` 移除 host 压缩用例（−47）。
+- **无两套并存**：`pi-native-tripwire.test.ts` 的 forbidden-symbol 静态守卫（§6）禁止任何已删符号/事件回潮。
+
+### 5. 业务边界保持（本会话核验）
+
+- `git diff --name-only HEAD~1 HEAD` 改动面**不含** `packages/contracts/src/execution-contract.ts`、Worker 系统提示词、任务账本（task-registry 源码）、权限体系——**未触碰**（`grep -c 'execution-contract\|worker'` = 0）。
+- `packages/agent/src/pi-driver.ts` 保留：`toAgentTool`（工具适配，`:555`）、`createProviderToolNameMap`（`:503`）、服务端确定性回复 `synthesizeAssistant`（`:417-418`）、取消/截止 abort 合成（`:262-274`）、空回复/失败归因（`:338-376`）、单次 `final_text_nudge`（`:380-399`）——**工具调用/结果配对、取消/通知/失败语义不变**。
+- 其余改动文件为**测试/装配/评测脚本**（`apps/server/server.test.ts`、多个 `*.test.ts`、`scripts/eval/**`），非业务模块。
+
+### 6. T1–T12 与反向绊线（本会话实跑，窗口 8192 / 40000 / 128000）
+
+- `packages/agent/pi-native-compaction.test.ts`（**32 tests 通过**）：**T1** 短对话不无故压缩；**T2** 达阈 Pi 自动压缩（摘要进转录）；**T3** 长历史连续压缩无零收益循环；**T4** 大型工具结果不破坏 tool_call/result 配对 + 工具恰好执行一次；**T5** 当前回合超预算——**按 A 口径**有界收束、总发出 ≤ 3、允许一次必然超窗外发（断言 `observed.some(over)`）；**T6** 摘要失败原生有界；**T7** Overflow Recovery 恢复并完成；**T8** 压缩后找回重要信息（对象/游标/最近消息）；**T9** 多 Session 并行无跨会话污染；**T10** 多 principal 无串线；**T11** 压缩后仍能经 Task Registry 找回真实任务结果；**T12** 连续五回合生命周期稳定不丢上下文。每项**均含真实断言**（非占位）。
+- `packages/agent/pi-native-tripwire.test.ts`（**20 tests 通过**）：**A** 禁回潮静态守卫（16 个已删符号在 `pi-driver.ts` 零出现）；**B** 配置适配承重（`compaction.enabled=false` → Pi 不压缩；`piCompactionSettings(8192)` → 压缩 `completed`）；**C** A 口径 `retry_scheduled=0`（必然超窗场景不得记录 `pi_driver_retry_scheduled`）。**故意破坏（把符号/臂加回）即红。**
+
+### 7. tsc · unit 读数（本会话实跑）
+
+```
+cd ~/projects/fshine-agent-exp-pi-session
+TMPDIR=/home/tao/.tmp npm run typecheck   # exit 0（tsc --noEmit，无输出）
+TMPDIR=/home/tao/.tmp npm test            # exit 0：Test Files 83 passed (83)；Tests 874 passed (874)
+```
+
+- typecheck **exit 0**；全量 vitest **83 文件 / 874 用例全绿、0 失败**（较 §八十一 874 总例数**不减**；组成变化＝退役仅验证已删机制的用例、新增 T1–T12 与反向绊线）。
+
+### 8. 七项可靠性判据（A 口径；当前证据状态）
+
+| # | 判据 | 证据（本会话） | 状态 |
+|---|---|---|---|
+| ① | 溢出恢复/失败**有界** | T5/T7 + a-metrics G1–G4 收束、总发出 ≤ 2 | 已证（假模型夹具） |
+| ② | **无无限重试、无零收益摘要循环** | T3/T6 有界；tripwire C `retry_scheduled=0` | 已证（假模型夹具） |
+| ③ | **无未经授权的工具执行** | 授权路径未在本夹具激活 | **本夹具未测** |
+| ④ | **不因模型重试重复执行业务操作** | T4 `executions=['lookup']` | 已证（假模型夹具） |
+| ⑤ | **无虚假完成/取消回执** | 失败→显式错误（`pi_driver_model_error`/空回复归因）；取消回执未构造 | 部分覆盖 |
+| ⑥ | **无跨 principal、跨 Session 信息泄漏** | T9/T10 隔离断言通过 | 已证（假模型夹具） |
+| ⑦ | **压缩不破坏工具调用与结果对应** | T4 显式 toolCall↔toolResult 配对断言 | 已证（假模型夹具） |
+
+### 9. D1 FAIL 记录保留（不改）
+
+- §八十（`docs/decision-log.md:2452-2505`）D1 反向绊线 FAIL 记录**保留、未改**；原始 FAIL 行、三夹具（`tripwire-d1*.mjs`）与结论「D1 不可删 / Pi 公开面无发送前 seam」作为**历史判据并存**。
+- `docs/product/exp-pi-native-A-acceptance.md` §4 登记该 FAIL 为「**已接受的风险姿态**」，**不删除、不改写、不通过**；§八十一 `bHolds=false`（工具结果续发维度不成立）同样保留、未被 A 口径触及。
+
+### 10. 未跑真实模型（明示）
+
+- 全部读数来自假 `Models` + 假 `streamFn`；**真实模型、真实 provider 未跑**。§2 适用范围（`≤1 次/事件` 普适性）**未冻结**，待真实 Pi 生命周期复核。
+- **不外推**为真实模型行为、真实成本或真实 provider 的错误分类率。
+
+### 11. 残余观察点（如实登记；非机制、不影响 A 验收；未在本 run 处理）
+
+- 本 run **只删产品机制**；部分**评测观察脚本/夹具**仍以字符串形式列出已删事件名（`context_emergency_compact` / `context_compacted` / `context_compact_failed` / `pi_driver_context_overflow_recovered` / `pi_driver_pre_request_compacted`）作为**观测标签**（`scripts/eval/p3/p3*-session.ts`、`scripts/eval/business-e2e/experiments/{judge,executor,cases}.ts`；`experiments.test.ts` 以 `console.warn` 合成该事件测判分逻辑）。
+- 这些引用**不再由 `pi-driver.ts` 发出**（该事件已随机制删除），**不构成第二套压缩机制**、不影响 A 验收；作为**后续清理项**登记（本 run 未处理）。
+
+**指针**：`packages/agent/src/pi-driver.ts:246-420,426-429`（Pi 原生装配 + 只读投影）、`packages/agent/pi-native-compaction.test.ts`、`packages/agent/pi-native-tripwire.test.ts`、`packages/agent/src/driver-contract.ts:42-45`、`docs/product/exp-pi-native-A-acceptance.md`；关联 §七十八–§八十二。
+
+**状态：实验分支·待裁决。**（A 口径已冻结于真实模型前；待真实 Pi 生命周期复核适用范围。）
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
