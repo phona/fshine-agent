@@ -1517,6 +1517,48 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 五十八、R5 Phase 4 · 独立审计结论（四轴状态 / 判官质量 / 问题清单 / blocked）（2026-11-15，分支 `arch/r5-p4audit`）
+
+**状态：待合入。**（零产品改动、零真实模型额度消耗）
+
+### ① 审计口径
+
+- 审计 worktree `arch/r5-p4audit`（基线 = `arch/integration` 启动时 HEAD）；**只读 + 零真实模型额度**（未跑任何 eval/ask 真实模型调用）。
+- 核心纪律执行：不以聚合 `report.json` 单独定论——七路均抽验原始 trace 与执行事实（`inputs/replies/meta/tool-calls/task-facts/tasks/audit.jsonl`，证据根 `~/projects/fshine-agent-r5-phase2/.runtime/r5phase2/`，gitignored）；Phase 3 长稳未跑，四轴中稳定性轴强制标「未验证」；判据假阳/豁免/无效样本/CI 与样本数/夹具冒充真实模型/blocked 误记 passed 逐项核查。
+- 唯一汇总产出：`docs/product/r5-phase4-audit.md`（commit `fdc4006`）；本审计未改任何代码/数据/证据/台账（本条 decision-log 登记除外）。
+
+### ② 四轴状态
+
+| 轴 | 状态 |
+|---|---|
+| 功能 | 已验证（真实模型，探索性 N≤2/场景；Phase 2 8/8，trace 抽验一致） |
+| 可靠性 | 已验证（真实模型，探索性；违例计数全 0、失败如实转述；P0-B/P0-C 代码与测试面成立，P0-C 指定测试本审计实跑 19/19 绿） |
+| 稳定性（长稳） | **未验证**（Phase 3 尚未开跑；不得以 Phase 2 全绿提前认定） |
+| 执行扩散 | 部分已验证：D1–D6 真实模型（worst=A ×13，N≤2 探索性，D6 仅 N=1）；D7 与写越权负例**仅确定性夹具**（`report.regraded.json` 的 covered 仅夹具口径，不得读作真实模型证据）；真实模型多用户面/写面/跨 principal 面零覆盖 |
+
+### ③ 判官质量
+
+判官无假阳、无漏报造假、无豁免滥用、无调用次数造假；白名单运行前冻结且哈希一致；聚合与原始 trace 一致（8+5 样本 `meta.turns == inputs.turns == replies 行数` 全 True；`verdict.pass=true` ×8；Phase 2 43 调用 / 97,012 tokens、D 轴 26 调用 / 51,391 tokens、阶段 20/20 恰用满，独立复算吻合）。已知口径问题（不改读数、已登记）：D6 `activeTasksPeak` 工具值 6 vs 逐任务真值 3；`postCancelResidue` 不分 taskId（DS-3#1 residue=true / taskSpecificResidue=false，见 `d6-crosscheck.json`）。
+
+### ④ 问题清单（按严重度）
+
+1. 中：稳定性轴完全未验证（Phase 3 未跑）——四轴报告不得宣称通过。
+2. 中：写越权与跨 principal 越权在真实模型面零覆盖（D7 仅夹具、写面仅单测）。
+3. 低：7 个中断会话的调用与 token 消耗不可独立核验（仅预注册登记、无磁盘残件；报告已如实标「不可考」，不构成虚报）。
+4. 低：`scripts/eval/business-e2e/spread-judge/spread-axis.test.ts:89` 依赖毫秒碰撞，脆弱测试（本审计环境确定性红）。
+5. 低：`packages/agent/pi-driver.ts:658` 注释与依赖事实不符（注释级）。
+6. 低：D6 指标口径偏差（peak=6 vs 3；residue 不分 taskId）。
+7. 信息：P0-C 三项残余缺口（预算耗尽不中止在飞回合、匿名后台许可预算不消费、违约槽位泄漏未测）。
+8. 信息：阶段额度 20/20 已满。未发现项：聚合与 trace 不一致、无效样本混入、夹具冒充真实模型、blocked 误记 passed。
+
+### ⑤ blocked 与边界
+
+- **唯一硬阻塞**：阶段真实模型额度 20/20 恰用满——后续任何真实模型批次（含 Phase 3 长稳）须 owner 先扩容。
+- 边界：单模型（step-3.7-flash）、单基线、dummy 执行层夹具、一次采样、全样本 N≤3，结论一律探索性；不接真实平台。
+- 回退：本条与 `docs/product/r5-phase4-audit.md` 均为 docs 追加，`git revert` 对应提交即可；不 push/不合并/不碰 main/tag。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
