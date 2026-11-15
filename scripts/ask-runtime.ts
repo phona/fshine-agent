@@ -472,7 +472,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
     }
     const drivers = input.createDrivers !== undefined
       ? input.createDrivers(input.env)
-      : { mainDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env) }), workerDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env) }) };
+      : { mainDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), reuseConversation: true }), workerDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env) }) };
 
     // P6：background = 受理/后台路径；runner 进程级共享（server 注入），缺省按本会话执行面构建。
     let runner = input.taskRunner;

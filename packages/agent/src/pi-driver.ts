@@ -107,7 +107,16 @@ export function piCompactionSettings(contextWindow: number): CompactionSettings 
 export function plannerMessagesToLlm(messages: readonly AgentMessage[]): Message[] {
   return messages.flatMap((message): Message[] => {
     if (message.role === 'user' || message.role === 'assistant' || message.role === 'toolResult') return [message];
-    const custom = message as unknown as { role?: string; customType?: string; content?: unknown; timestamp?: number };
+    const custom = message as unknown as { role?: string; customType?: string; content?: unknown; summary?: unknown; timestamp?: number };
+    // Pi 原生压缩摘要（role=compactionSummary）必须进 provider 请求：否则复用同一会话时
+    // 压缩后的摘要对模型不可见（转录仍在 session 里，但请求里被本投影器丢弃）。
+    if (custom.role === 'compactionSummary' && typeof custom.summary === 'string') {
+      return [{
+        role: 'user',
+        content: [{ type: 'text', text: `【此前会话摘要】\n${custom.summary}` }],
+        timestamp: custom.timestamp ?? 0,
+      }];
+    }
     if (custom.role !== 'custom' || !['background_task_event', 'background_task_roster'].includes(custom.customType ?? '')
       || typeof custom.content !== 'string' || !custom.content.trim()) return [];
     return [{ role: 'user', content: [{ type: 'text', text: custom.content }], timestamp: custom.timestamp ?? 0 }];
@@ -166,11 +175,51 @@ export interface PiTurnDriverOptions {
   contextWindow?: number;
   /** 注入的模型运行时（测试/嵌入用）。 */
   runtime?: PiModelRuntime;
+  /**
+   * 会话生命周期归属（任务书 §4.1）：true = 本驱动实例**首次 run 创建一次** Pi
+   * Session/Harness，后续 run 复用它（跨回合保留 Pi 原生转录与压缩状态）；
+   * false/缺省 = 每回合一次性会话（Worker/直测沿用，行为逐字节不变）。
+   * 生产装配只在**业务会话级**驱动（Main）上传 true：驱动实例随业务会话创建，
+   * 因此会话生命周期随业务会话、不随回合。
+   */
+  reuseConversation?: boolean;
 }
 
 export interface PiModelRuntime {
   models: MutableModels;
   model: Model<Api>;
+}
+
+type ConversationHarness = Awaited<ReturnType<typeof AgentHarness.create>>['harness'];
+type ConversationLane = Awaited<ReturnType<ConversationHarness['lane']>>;
+
+/**
+ * 本驱动实例持有的 Pi 会话（仅 reuseConversation）。
+ * slot.current 是回合归因槽：事件 listener 只随会话注册一次，每回合指向本回合的计数/失败。
+ */
+interface Conversation {
+  harness: ConversationHarness;
+  lane: ConversationLane;
+  slot: { current: { retryScheduled: number; runFailure?: { code: string; message: string } } | undefined };
+}
+
+/**
+ * 宿主转录是否仍是上一回合投影的前缀扩展（reuseConversation 的增量追加判据）。
+ * 正常路径下宿主原样保留交回的投影数组元素引用；引用不同再按 JSON 等价兜底，
+ * 仍不等价则视为分叉（异常路径，调用方重建会话）。
+ */
+function isPrefixExtension(prefix: readonly AgentMessage[], messages: readonly AgentMessage[]): boolean {
+  if (messages.length < prefix.length) return false;
+  for (let index = 0; index < prefix.length; index += 1) {
+    if (prefix[index] === messages[index]) continue;
+    try {
+      if (JSON.stringify(prefix[index]) === JSON.stringify(messages[index])) continue;
+    } catch {
+      return false;
+    }
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -255,6 +304,90 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
   // Pi 配置适配：把窗口派生的绝对 CompactionSettings 交给 Pi（非压缩机制，见函数注释）。
   const compaction = piCompactionSettings(model.contextWindow);
 
+  // 会话生命周期（§4.1）：reuseConversation 时本实例持有唯一 Pi 会话，跨回合连续；
+  // 否则每次 run 一次性（既有行为）。
+  const reuseConversation = options.reuseConversation === true;
+  let conversation: Promise<Conversation> | undefined;
+  /** 上一回合交回的投影转录（仅 reuseConversation）：用于只追加新增尾部，不重灌历史。 */
+  let lastProjected: AgentMessage[] | undefined;
+
+  const openConversation = async (
+    tools: ReturnType<typeof toAgentTool>[],
+    systemPrompt: string,
+  ): Promise<Conversation> => {
+    const repo = new MemorySessionRepo();
+    const session = await repo.create({}, BACKGROUND_CONTEXT);
+    const created = await AgentHarness.create({
+      session,
+      models,
+      model,
+      tools: tools as never,
+      activeToolNames: tools.map((tool) => tool.name),
+      systemPrompt,
+      ...(thinkingLevel ? { thinkingLevel } : {}),
+      toProviderMessages: plannerMessagesToLlm,
+      compaction,
+      retry: MAIN_MODEL_RETRY_POLICY,
+    }, BACKGROUND_CONTEXT);
+    const harness = created.harness;
+    const lane = await harness.lane('main', BACKGROUND_CONTEXT);
+
+    // 模型错误/瞬时重试的可归因事件（Pi 原生生命周期事件转成宿主结构化日志）。
+    // 归因槽按回合切换（slot.current），复用会话时 listener 只注册一次、不随回合泄漏。
+    const slot: Conversation['slot'] = { current: undefined };
+    harness.events.on('retry_scheduled', (event) => {
+      if (slot.current) slot.current.retryScheduled += 1;
+      console.warn(JSON.stringify({
+        event: 'pi_driver_retry_scheduled',
+        attempt: event.attempt,
+        maxAttempts: event.maxAttempts,
+        delayMs: event.delayMs,
+        errorMessage: String(event.errorMessage).slice(0, 500),
+      }));
+    });
+    harness.events.on('run_end', (event) => {
+      if (event.status === 'failed' && slot.current) {
+        slot.current.runFailure = { code: event.error.code, message: event.error.message };
+      }
+    });
+    return { harness, lane, slot };
+  };
+
+  /**
+   * 取本回合的会话：复用模式下首次创建、其后只换本回合工具闭包（exec/onStep 不能钉死首回合）；
+   * 每回合一次性模式下新建。
+   */
+  const acquireConversation = async (
+    tools: ReturnType<typeof toAgentTool>[],
+    systemPrompt: string,
+  ): Promise<Conversation> => {
+    if (!reuseConversation) {
+      const active = await openConversation(tools, systemPrompt);
+      active.slot.current = { retryScheduled: 0 };
+      return active;
+    }
+    if (conversation === undefined) {
+      conversation = openConversation(tools, systemPrompt);
+      // 创建失败不缓存，下一回合重试（fail-closed，不钉死坏会话）。
+      conversation.catch(() => { conversation = undefined; });
+    }
+    const active = await conversation;
+    await active.harness.setTools(tools as never, BACKGROUND_CONTEXT);
+    await active.lane.setActiveTools(tools.map((tool) => tool.name), BACKGROUND_CONTEXT);
+    active.slot.current = { retryScheduled: 0 };
+    return active;
+  };
+
+  /** 丢弃复用会话（异常/转录分叉时重建；正常路径不触发）。 */
+  const discardConversation = async (): Promise<void> => {
+    const previous = conversation;
+    conversation = undefined;
+    lastProjected = undefined;
+    if (previous === undefined) return;
+    const closed = await previous.catch(() => undefined);
+    if (closed !== undefined) await closed.harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
+  };
+
   return {
     async run(input: TurnDriverInput): Promise<TurnDriverResult> {
       const providerToolNames = createProviderToolNameMap(input.tools);
@@ -280,50 +413,32 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         abort.signal,
       ));
 
-      let harness: Awaited<ReturnType<typeof AgentHarness.create>>['harness'] | undefined;
+      let harness: Conversation['harness'] | undefined;
       try {
-        const repo = new MemorySessionRepo();
-        const session = await repo.create({}, BACKGROUND_CONTEXT);
-        const created = await AgentHarness.create({
-          session,
-          models,
-          model,
-          tools: tools as never,
-          activeToolNames: tools.map((tool) => tool.name),
-          systemPrompt: input.systemPrompt,
-          ...(thinkingLevel ? { thinkingLevel } : {}),
-          toProviderMessages: plannerMessagesToLlm,
-          compaction,
-          retry: MAIN_MODEL_RETRY_POLICY,
-        }, BACKGROUND_CONTEXT);
-        harness = created.harness;
-        const lane = await harness.lane('main', BACKGROUND_CONTEXT);
+        let active = await acquireConversation(tools, input.systemPrompt);
+        harness = active.harness;
+        let lane = active.lane;
 
-        // 模型错误/瞬时重试的可归因事件（Pi 原生生命周期事件转成宿主结构化日志）。
-        let runFailure: { code: string; message: string } | undefined;
-        let retryScheduled = 0;
-        harness.events.on('retry_scheduled', (event) => {
-          retryScheduled += 1;
-          console.warn(JSON.stringify({
-            event: 'pi_driver_retry_scheduled',
-            attempt: event.attempt,
-            maxAttempts: event.maxAttempts,
-            delayMs: event.delayMs,
-            errorMessage: String(event.errorMessage).slice(0, 500),
-          }));
-        });
-        harness.events.on('run_end', (event) => {
-          if (event.status === 'failed') {
-            runFailure = { code: event.error.code, message: event.error.message };
-          }
-        });
-
-        // 转录即状态：把上一轮的 Pi 原生转录（含工具调用与结果）重新喂给本回合的会话；
-        // 本回合新的用户消息由 prompt 发起（run 要求以用户消息收尾）。
+        // 转录即状态：首回合把宿主历史喂给 Pi 会话；复用会话时只追加新增尾部
+        // （生产上即 taskFactProvider 新注入的事实与新的用户消息），不重灌旧投影。
         const last = input.messages[input.messages.length - 1];
         const lastIsUser = last !== undefined && (last as { role?: string }).role === 'user';
         const history = lastIsUser ? input.messages.slice(0, -1) : input.messages;
-        for (const message of history) await lane.appendMessage(message, BACKGROUND_CONTEXT);
+        let toAppend: AgentMessage[] = history;
+        if (reuseConversation && lastProjected !== undefined) {
+          if (isPrefixExtension(lastProjected, input.messages)) {
+            const delta = input.messages.slice(lastProjected.length);
+            toAppend = lastIsUser ? delta.slice(0, -1) : delta;
+          } else {
+            // 宿主转录与 Pi 会话不再同源（异常路径）：重建会话并全量追加，保证正确性优先。
+            await discardConversation();
+            active = await acquireConversation(tools, input.systemPrompt);
+            harness = active.harness;
+            lane = active.lane;
+            toAppend = history;
+          }
+        }
+        for (const message of toAppend) await lane.appendMessage(message, BACKGROUND_CONTEXT);
 
         const runContext = withAbortSignal(abort.signal, BACKGROUND_CONTEXT);
         if (lastIsUser) {
@@ -333,7 +448,10 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
           }
         }
 
+        const slot = active.slot;
         let messages = await projectTranscript(lane);
+        const runFailure = slot.current?.runFailure;
+        const retryScheduled = slot.current?.retryScheduled ?? 0;
 
         // 供应商错误归因：run 失败 / 错误 assistant 必须可查（不许静默吞成空文本）。
         if (runFailure !== undefined) {
@@ -398,6 +516,9 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
           }
         }
 
+        // 复用会话：记住本回合交回的投影，下一回合只追加新增尾部（Pi 原生转录/压缩状态
+        // 留在同一会话里，不再靠宿主重灌投影转录续上下文）。
+        lastProjected = messages;
         return { text, messages };
       } catch (error) {
         console.error(JSON.stringify({
@@ -405,11 +526,14 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
           errorType: error instanceof Error ? error.name : 'UnknownError',
           message: error instanceof Error ? error.message.slice(0, 300) : String(error),
         }));
+        // 异常后会话中可能有半程条目、与宿主转录不再同源：丢弃并下一回合重建（不硬续坏状态）。
+        if (reuseConversation) await discardConversation();
         return { text: '', messages: [...input.messages] };
       } finally {
         clearTimeout(timer);
         if (input.signal) input.signal.removeEventListener('abort', onParentAbort);
-        if (harness) await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
+        // 一次性会话随回合关闭；复用会话随驱动实例（=业务会话）存活，此处不关闭。
+        if (!reuseConversation && harness) await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
       }
     },
 
