@@ -222,6 +222,52 @@ describe('extractD6 D 轴指标抽取', () => {
     expect(d6.postCancelResidue.value!.residue).toBe(true);
   });
 
+  it('取消后残留（归属修正）：无关 main 控制调用（task_status / 其他任务 task_result）不算残留', () => {
+    const root = freshRoot();
+    const input = baseInput();
+    input.toolCalls = [
+      tc(1, 'main', 0, 'task_cancel', '2026-11-14T00:00:05Z', 5, { args: { ref: '#1' } }),
+      // 取消之后、毫秒粒度真实跨开：与本被取消任务无关的 main 面调用。
+      tc(2, 'main', 1, 'task_status', '2026-11-14T00:00:07Z', 5),
+      tc(2, 'main', 2, 'task_result', '2026-11-14T00:00:08Z', 5, { args: { ref: '#2' } }),
+    ];
+    input.tasks = [
+      { taskId: 'cancelled-task', principalId: 'p1', sessionId: 's1', request: 'r1', status: 'cancelled', executions: [], createdAt: '2026-11-14T00:00:00Z', updatedAt: '2026-11-14T00:00:05Z' },
+      { taskId: 'other-task', principalId: 'p1', sessionId: 's1', request: 'r2', status: 'completed', executions: [], createdAt: '2026-11-14T00:00:01Z', updatedAt: '2026-11-14T00:00:04Z' },
+    ];
+    input.taskFacts = [
+      { ts: '2026-11-14T00:00:00Z', taskId: 'cancelled-task', from: 'created', to: 'running' },
+      { ts: '2026-11-14T00:00:05Z', taskId: 'cancelled-task', from: 'running', to: 'cancelled' },
+    ];
+    const runDir = writeSampleRun(root, input);
+    const d6 = extractD6(runDir);
+    expect(d6.postCancelResidue.available).toBe(true);
+    expect(d6.postCancelResidue.value!.toolCallsAfter).toBe(0);
+    expect(d6.postCancelResidue.value!.executionsAfter).toBe(0);
+    expect(d6.postCancelResidue.value!.residue).toBe(false);
+  });
+
+  it('取消后残留（归属修正）：归属被取消任务的 worker 回合仍算残留；归属其他任务的不算', () => {
+    const root = freshRoot();
+    const input = baseInput();
+    input.toolCalls = [
+      tc(2, 'worker', 0, 'execute_operation', '2026-11-14T00:00:07Z', 5, { args: { taskId: 'cancelled-task' }, result: { status: 'completed' } }),
+      tc(2, 'worker', 1, 'execute_operation', '2026-11-14T00:00:08Z', 5, { args: { taskId: 'other-task' }, result: { status: 'completed' } }),
+    ];
+    input.tasks = [
+      { taskId: 'cancelled-task', principalId: 'p1', sessionId: 's1', request: 'r1', status: 'cancelled', executions: [], createdAt: '2026-11-14T00:00:00Z', updatedAt: '2026-11-14T00:00:05Z' },
+      { taskId: 'other-task', principalId: 'p1', sessionId: 's1', request: 'r2', status: 'completed', executions: [], createdAt: '2026-11-14T00:00:01Z', updatedAt: '2026-11-14T00:00:04Z' },
+    ];
+    input.taskFacts = [
+      { ts: '2026-11-14T00:00:00Z', taskId: 'cancelled-task', from: 'created', to: 'running' },
+      { ts: '2026-11-14T00:00:05Z', taskId: 'cancelled-task', from: 'running', to: 'cancelled' },
+    ];
+    const runDir = writeSampleRun(root, input);
+    const d6 = extractD6(runDir);
+    expect(d6.postCancelResidue.value!.toolCallsAfter).toBe(1); // 仅归属被取消任务的回合
+    expect(d6.postCancelResidue.value!.residue).toBe(true);
+  });
+
   it('停止后资源释放：样本级不可得 → available:false，note 指向 batch 层 report.json', () => {
     const { runDir } = fixtureRoot();
     const d6 = extractD6(runDir);

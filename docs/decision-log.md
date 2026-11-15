@@ -1517,6 +1517,60 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 五十八、R5 flaky 定性 · D6 `postCancelResidue` 采样竞态修复（2026-11-15，分支 `arch/r5-flaky`）
+
+- **状态**：**待合入**。
+- **分支/基线**：worktree `~/projects/fshine-agent-r5-flaky`，分支 `arch/r5-flaky`；基线 = `arch/integration` 启动时 HEAD `b24cd75`。修复提交 `12689c1` + 本条 docs 追加；零真实模型调用（仅 vitest 单测）；不 push/不合并/不碰 main/tag。
+
+### ① 现象（3 跑 2 红）
+
+`npx vitest run scripts/eval/business-e2e/spread-axis/spread-axis.test.ts` 三次中两次失败，失败点 `spread-axis.test.ts:89`——`grade.d6.postCancelResidue.value.residue` 期望 `false` 实得 `true`。背景为 DS-3 三任务多轮用例（含 waiting→cancelled），确定性假件执行器。定性前置复跑：基线 10 跑 8 红、2 绿——同一确定性夹具下红绿翻转，指向毫秒时钟依赖，而非确定性逻辑错。
+
+### ② 定性结论与机制证据
+
+**结论：(b) 度量采样竞态（测量面缺陷），非 (a) 产品竞态**——取消确认后底层执行确实已停止；红的是 `d6-metrics` 的 `postCancelResidue` 判据，不是产品。
+
+机制证据（旧判据代码，修复前 `scripts/eval/business-e2e/d6-metrics.ts` extractD6）：
+1. 旧 `toolCallsAfter` = `calls.filter(c => tsMs(c.startedAt) > tsMs(cancel.ts)).length`——把取消时间戳之后**任意** tool-call 计为残留，**不看归属**。
+2. DS-3 取消之后样本内确实存在 tool-call：turn2/turn3 的 `task_status` 与 `task_result(#1/#2)`（读回两个**已完成**任务）——这些是合法 main 控制面调用，与被取消任务无关，**不是** Worker 执行回合（task-facts 无取消后 `cancelled` 任务新执行事实）。
+3. 交叉复核真值（§五十七 L1474 已登记）：`taskSpecificResidue=false`——被取消任务 `executionsAfter=0`、`auditLinesAfter=0`；取消后 2 条调用均归属 #1/#2。即「任务已终止」与「执行已停止」一致，产品无残留。
+4. 翻转物理根源：`startedAt` 与 `cancel.ts` 均为毫秒时间戳、比较为严格 `>`——夹具内 cancel 与后续合法调用同毫秒时 `s <= cut`（绿），跨毫秒时 `s > cut`（红）。同夹具红绿取决于时钟恰好在两事件间是否跨毫秒。
+
+### ③ 修复方式（仅采样正确性，零产品改动）
+
+修 `d6-metrics.ts` 判据的归属维度（`12689c1`，+35/-4，仅 `scripts/eval/business-e2e/d6-metrics.ts` 与其单测）：
+- tool-calls 残留改为归属到被取消任务（`args.taskId` 直取；`args.ref`('#n') 按 tasks.json 创建序近似解析）或未归属其他任务的 worker 执行回合；main 控制面调用（task_status / task_result / 其他任务的 run_task）不再计入。
+- executions 只数被取消任务自身（updatedAt>cut 近似，note 标注）；audit 行可解析 taskId 时按归属过滤，否则按时间戳保守计数。
+- `d6-metrics.test.ts` 增 2 例回归：无关 main 控制调用不算残留；归属被取消任务的 worker 回合仍算、归属其他任务不算（真残留检出能力未被弱化）。
+- `packages/`、`apps/` 零改动。
+
+### ④ 断言未改的逐字证据
+
+`git diff b24cd75..12689c1 -- scripts/eval/business-e2e/spread-axis/spread-axis.test.ts` 输出为空（本会话实际执行，0 行 diff）；分支全部改动仅 d6-metrics.ts/d6-metrics.test.ts 两文件。断言保持原文：
+
+```
+spread-axis.test.ts:88    expect(grade.d6?.postCancelResidue.available).toBe(true);
+spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toBe(false);
+```
+
+无阈值改动、无 skip、无删用例、无 sleep。
+
+### ⑤ 连跑与绊线读数（本条目会话实际执行）
+
+- 修后连跑：`npx vitest run scripts/eval/business-e2e/spread-axis/spread-axis.test.ts` ×12 → **12/12 全绿**（每跑 Tests 8 passed (8)）。
+- 全量 unit：`npm test` → **804/804 通过（80 文件）**；基线 802，只增不减（+2 回归用例）。
+- typecheck：`npx tsc --noEmit` → 0 错误。
+- 反向绊线：`git checkout b24cd75 -- scripts/eval/business-e2e/d6-metrics.ts`（撤销修复，断言仍原样）→ 同命令跑 spread-axis → **红，失败点 `spread-axis.test.ts:89:56`（1 failed | 7 passed）**；随后 `git checkout 12689c1 --` 恢复，worktree 干净。绊线成立。
+
+### ⑥ 未做项
+
+- 未在产品面（packages/apps）做任何改动（定性为测量面，无产品缺陷可修）。
+- 未接真实模型/真实平台（零额度纪律）；D6 真实模型样本仍 N=1（§五十七 既有边界不变）。
+- `activeTasksPeak` 工具口径与真值差（6 vs 3）维持 §五十七 登记不动（已知口径差，本条不处理）。
+- 不 push、不合入 main；状态待 owner 合入。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
