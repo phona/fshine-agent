@@ -2521,6 +2521,53 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ---
 
+## 八十、B3 · R6 Harness 完整调用计量（2026-11-15，分支 `arch/r6-accounting`，基线 = `arch/integration` @ `b90f12f`）状态：**待合入**
+
+> 本轮 = R6 长会话验收的**评测侧**计量增强：把「**主模型调用 + Pi 摘要调用 + 重试（+ 溢出恢复）**」**全部**逐次记账，并**全部**纳入**单实验硬停（先验拒绝）**。**不改产品语义**（`packages/**`、`apps/**` 未动）、**不改已冻结口径**（150 / 3,000,000 / 2h 仍逐字取预注册 §十三.D）。**未启动真实模型 Wave1**。
+
+### 1. 记账面（逐次，`scripts/eval/r6/accounting.ts`）
+
+- `ModelCallRecord`：`seq` / `kind(main|summary|retry|overflow_recovery)` / `sessionId+turn` / `tokens{input,output,total}` / `tokensObserved` / `durationMs`；`accountCalls()` → `AccountedUsage`（总计 + `byKind`）。
+- **Pi 摘要独立计数**：`summary` 由会话面 `modelCallLedger()` 按**实际发起**逐次记录，**不读** `session.budget().summaryCalls`（旧路径摘要绕过 budget）。
+- **重试**（`retry`）与**溢出恢复 / 压缩附带调用**（`overflow_recovery`）逐次显式归属。
+- **反向绊线**：`missingCallKinds(usage, REQUIRED_CALL_KINDS)` 要求 `main`/`summary`/`retry` **三类齐全**（`overflow_recovery` 为第四类跟踪项，`accounting.ts:31`）——漏记任一类即判红。
+- 落盘：`evidence.ts` `SessionEvidence` 增 `modelCalls` + `callAccounting`，写 `model-calls.jsonl`。
+
+### 2. 硬停（先验拒绝）
+
+- `R6_HARD_LIMITS` 逐字取预注册 §十三.D：`maxModelCalls=150` / `maxTokens=3,000,000` / `wallMs=2h`（`accounting.ts:66-70`）；`input.limits` 仅供测试注入更小上限。
+- 判定顺序固定 `ms → calls → tokens`（`accounting.ts:178-180`）。
+- **先验 = 请求前检查**：`CallAccountingGuard.precheck()` 在回合 `send` **之前**跑；累计 `>=` 上限即抛 `R6HardStopError`、**不发起该请求**（有界失败），首次事实落 `evidence.budgetStopped`。
+- **`calls` 口径 = 四类合计**；`tokens` 仅当全部记录 `tokensObserved` 时启用（未观测不虚增、不伪造）。
+
+### 3. 与生产 budget 解耦（未改生产语义）
+
+- `TaskBudget` / `resource-policy` / `pi-driver` 一行未动；记账与硬停由 harness 自己的 `CallAccountingGuard` 承担，**不依赖也不写**生产 budget hook。
+- `evidence.budgetUsed`（会话面聚合，原样保留）与 `evidence.callAccounting`（评测侧全量逐次账本）**并列留档**，可交叉核对。
+
+### 4. 交付物
+
+- `scripts/eval/r6/accounting.ts`（+ `accounting.test.ts`）；`harness.ts` 回填 `modelCallLedger` + 回合前 precheck；`evidence.ts` + `fake-session.ts` 支撑。
+- `docs/product/b3-r6-call-accounting.md`（记账面 / 硬停口径 / 解耦说明 / 测试证据）。
+- 实现 commit：`9fda9a2`。
+
+### 5. 测试证据（本会话实跑）
+
+- 命令：`npx vitest run scripts/eval/r6`（cwd = R6 worktree，`TMPDIR=/home/tao/.tmp`，零网零 key、假会话）。
+- 结果：**Test Files 7 passed（7）；Tests 66 passed（66）**。覆盖：三类记账齐 + 会话/回合关联 + `model-calls.jsonl` 落盘；`calls` / `tokens`（**含摘要调用**）/ `wallMs` 超限**拒发**、判定顺序 `ms`；反向绊线（去 `summary` 计数 → 7 例红；`precheck` 不复用 → 4 例红，均已回滚）。
+
+### 6. 边界 / 前置条件
+
+- **Wave1 须待完整实验硬停闭合后才启动**；本增强（记账 + 先验硬停 + 确定性测试）为该前置的一部分。
+- 生产 `HarnessSession` 适配器 `modelCallLedger` **未接线**（待 Wave1 前冒烟）；未提供 ledger 时退化为按 `budget().calls` 差补记「主模型」粗记录（`tokensObserved=false`，不虚增）。
+- 不改 Worker 提示、不引第二套压缩 / 会话机制；证据落 `.runtime/r6/`（gitignored，不 `git add`）。
+
+**指针**：`docs/product/b3-r6-call-accounting.md`、`scripts/eval/r6/accounting.ts`、`scripts/eval/r6/harness.ts`、`scripts/eval/r6/evidence.ts`；关联 §七十九（R6 预注册修订 + Harness 建设）、§七十八（R6 预注册准备档）。
+
+**状态：待合入。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
