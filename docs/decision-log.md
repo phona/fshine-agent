@@ -2350,6 +2350,55 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ---
 
+## 七十八、Pi 原生压缩替换实验 · 阶段一「能力核实与接入路径」· 归档登记（2026-11-15，分支 `exp/pi-native-session-compaction`，基线 = `arch/integration` 启动时 HEAD `84a22fa`）状态：**实验分支·待裁决**
+
+> 角色：本 worktree 为阶段一核实节点，**只核实、不实施替换**。配套文档：`docs/product/exp-pi-native-session-phase1.md`。版本口径：只读锁版本 **`@earendil-works/pi-agent-core@0.85.1`（不升级）**（`node_modules/@earendil-works/pi-agent-core/package.json:3`）。公开判则：被根入口 `.`（`dist/index.d.ts`）re-export **或**位于 `package.json exports` 子路径内 = 公开；`dist/**` 深路径 import 未导出者 = 内部。下列行号均为 0.85.1 分发物 `dist/**`。
+
+### 1. 工作区核验（本会话实跑）
+
+- `pwd` / `git rev-parse --show-toplevel` = `.../fshine-agent-exp-pi-session`（**≠ 主仓** `/home/tao/projects/fshine-agent`）；`git rev-parse --abbrev-ref HEAD` = `exp/pi-native-session-compaction`；HEAD `bf94b92`；`git merge-base HEAD arch/integration` = **`84a22fa`**（基线一致）。**通过。**
+
+### 2. 五项链能力（有·无）
+
+| # | 能力 | 有/无 | 一手证据 |
+|---|---|---|---|
+| 1 | Session 转录管理（持有完整对话、跨回合追加、持久化/恢复） | **有** | 转录 = Branch 上 `Entry` 有序链（`session/types.d.ts:51` union，`:344` id/parentId/seq）；`StorageBackedSession.getBranchTip/appendToBranch`（`session/session.d.ts:69-77`）；`MemorySessionRepo`/`JsonlSessionRepo`（`session/index.d.ts:5-7`） |
+| 2 | 自动压缩触发（threshold / manual / overflow） | **有** | 阈值配置 `CompactionSettings{enabled,reserveTokens,keepRecentTokens}`（`compaction.d.ts:31-38`）；默认 `{true,16384,20000}`（`compaction.js:75-79`）；公式 `contextTokens > contextWindow - reserveTokens`（`compaction.js:144-148`）；checkpoint 调 `prepareCompactionThreshold`（`runtime/drive/checkpoint.js:60` → `structural.js:837-869`，判定 `:863`）；`compaction_start.reason: "manual"\|"threshold"\|"overflow"`（`agent-harness.d.ts:374-376`） |
+| 3 | 原生摘要及尾段保留（摘要 + `retainedTail` 持久化 + 重建上下文） | **有** | `prepareCompaction` 产 `messagesToSummarize` + `retainedTail`（`compaction.js:413-479`）；`CompactionEntry.retainedTail`（`compaction.d.ts:22-23`）；切点 `findCutPoint`（`compaction.js:253`） |
+| 4 | Overflow Recovery（每代一次门控，有界） | **有** | 检测 `isContextOverflow \|\| isRecoverableLength`（`runtime/drive/response.js:111-115`）；恢复经 `prepareOverflowCompaction`（`structural.js:872-887`，`overflowRecoveryUsed` 门控 `:873`）；再次 overflow → 直接 `providerError` 终态失败（`response.js:139-143`），**无死循环** |
+| 5 | 有界失败处理（摘要失败/压缩失败/无法切分） | **有** | 切点不落 `toolResult`（`compaction.js:221-222`），无切点回落 `firstKeptEntryIndex=startIndex`（`:255-256`）；摘要失败 `CompactionError` 传播；事件 `compaction_end.status: "completed"\|"failed"\|"declined"\|"aborted"`（`agent-harness.d.ts:379-395`） |
+
+**结论：五项齐备。**
+
+### 3. 公开 vs 内部 API 边界
+
+- **公开**：`exports` 8 入口 —— `.`、`./node`、`./harness/context`、`./harness/env/nodejs`、`./harness/runtime/reducer`、`./harness/session`、`./harness/session/testing`、`./package.json`（亲验 `package.json exports`）。关键符号：`AgentHarness`/`AgentHarnessOptions`（`agent-harness.d.ts:617-715`；root `.` 经 `index.d.ts:6`）、`Session`/`SessionRepo`/`Entry`/`MemorySessionRepo`/`JsonlSessionRepo`（`session/index.d.ts:5-9`）、压缩原子件（`index.d.ts:8` 一行 re-export `compact`/`prepareCompaction`/`shouldCompact`/`DEFAULT_COMPACTION_SETTINGS`…）、`Context`（`./harness/context`）、`reduceLaneSnapshot`。
+- **内部**（不 import）：驱动管线 `prepareCompactionThreshold`/`prepareOverflowCompaction`/`publishResponse`/`runCheckpoint` 等（`runtime/drive/*.js`）；`compactWithRequest`/`summarize…` 未 re-export 者；`harness/session/context.ts`（`buildSessionContext`，`session/index.d.ts` 未 re-export）；`StorageBackedSession` 自述 **"Package-internal typed boundary"**（`session/session.d.ts:35`）。
+- **边界结论**：原子件 + 类型 + `AgentHarness` 接口 + Session 仓储 = 公开；驱动管线 = 内部，由公开 `AgentHarness` 在内部驱动，消费者**无需 import**。
+
+### 4. 接入路径（fshine 所需公开入口，最小形态）
+
+现状 `packages/agent/src/pi-driver.ts` 用 root `.` 的 `Agent` + 自填 `transformContext` + 自研编排（`compactTranscriptWithPi` 等），**未使用** `AgentHarness`/`Session`。替换最小形态仅需**三处公开入口**：① `AgentHarness`（root `.`）+ `SessionRepo`（`./harness/session`）+ `Context`（`./harness/context`）；每回合 `harness.lane('main', ctx)` → `lane.prompt(text, undefined, ctx)`（`agent-harness.d.ts:648-649,680`）复用**同一 session/lane**；压缩/阈值/溢出/失败恢复**全交 `AgentHarness` 内部**（`AgentHarnessOptions.compaction` `:629` / `setCompactionSettings` `:696`；`lane.compact` `:652-654`）。**不 import 内部符号、不复制 Pi 源码。**
+
+### 5. GO / NO-GO 判定
+
+**GO（条件式：能力准入层面通过）。** 准入条件「五项能力齐备」**满足**（§2，逐项有一手 `文件:行号` 证据）；「公开可达」**满足**（`AgentHarness` + `SessionRepo` + `Context` 构成完整公开生命周期入口，内部管线无需消费者 import）。**条件**（阶段二关闭）：① 装配可行性未实测（worktree 无 `node_modules`，零真实模型下未跑通）；② 成本/影响面不在本阶段结论内 —— 与既有 §七十七 `RECOMMENDED_OPTION=A（成本导向）` **不矛盾**（本判定为能力导向），取向差异须 owner 在阶段二数据齐备后统一裁定。
+
+### 6. 原型计划（阶段二：证伪/证实，仍可零真实模型，用假 `Models`/`setDefaultStreamFn`）
+
+S1 跨回合转录连续 · S2 threshold 自动压缩 · S3 overflow 恢复（二次 overflow 有界失败）· S4 工具配对（切点不落 `toolResult`）· S5 摘要失败有界重试 · S6 无可压缩 `NothingToCompact`。判据 = 仅用 §4 公开入口装配出等价行为；**任一须 import §3 内部符号或复制源码 → 转 NO-GO**（本阶段未发现此类阻塞）。
+
+### 7. 未实施替换
+
+- **阶段一零产品代码改动**（只新增 `docs/`）：`packages/`、`apps/`、Worker 提示、任务账本、执行契约、权限均未改；**未升级 Pi**、lockfile 未动；不复制 Pi 源码、不引新抽象、不依赖未导出内部实现；`.runtime` 未 `git add`。本阶段所有运行路径结论均为**静态源码/类型阅读所得**（未运行 harness 装配）。
+- **回退**：本登记为 docs-only，`git revert` 对应提交即可；不 push / 不合并 / 不碰 main/tag。
+
+**指针**：`docs/product/exp-pi-native-session-phase1.md`（阶段一全文）；`node_modules/@earendil-works/pi-agent-core/dist/**`（0.85.1）；既有关联 §六十九、§七十、§七十七。
+
+**状态：实验分支·待裁决。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
