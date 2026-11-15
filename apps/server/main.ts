@@ -15,6 +15,7 @@ import { WecomBotChannel } from '@fshine/channel-wecom';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import { explicitConfigFrom } from '../../scripts/resolve-config-path';
 import { createServer, resolveSingleProfile } from './server';
+import { createFileNotificationSink } from './notification-file-sink';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -34,7 +35,13 @@ async function main(): Promise<void> {
     ? path.resolve(config.store.dbPath)
     : path.join(REPO_ROOT, '.runtime', 'state.db');
 
-  const server = await createServer({ env, config, dbPath });
+  // R5 A 通道缺省：渠道无关落盘 sink（background 时生效；真实企微 sink 仍 blocked，不接真实平台）。
+  const server = await createServer({
+    env,
+    config,
+    dbPath,
+    notificationSink: createFileNotificationSink(path.join(path.dirname(dbPath), 'notifications.jsonl')),
+  });
   const channel = new WecomBotChannel({ env, platformRoot: profile.root });
   await channel.start(server.handler);
   console.log(JSON.stringify({ event: 'server_started', configPath, profileId, dbPath }));

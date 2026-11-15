@@ -244,6 +244,12 @@ export interface RuntimeOptions {
    */
   mainSkillRegistry?: SkillRegistry;
   /**
+   * R5 B 通道（事实进上下文）：注入器由装配方提供（事实源在装配层，如通知 outbox 挂钩）。
+   * 回合开始时调用一次；返回非空文本即以普通 user-role 消息注入主对话（不造 custom
+   * message type、不改 Pi 消息流不变量）。注入器自身保证幂等与有界。
+   */
+  taskFactProvider?: (principalId: string, sessionId: string) => string | undefined;
+  /**
    * Worker 可信工作目录（渲染进 Worker 系统提示的工作目录约束块）。
    * 来源必须是装配层持有的可信路径（如 profile.root）；不得取模型输出或用户消息。
    * 缺省不注入 = Worker 提示与现行常量逐字节相同。
@@ -599,6 +605,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const progress: string[] = [];
       const taskIds: string[] = [];
       currentTurnDeadline = Date.now() + mainTurnMs;
+      const factsMessage = options.taskFactProvider?.(options.principalId, options.sessionId);
+      if (factsMessage !== undefined && factsMessage.trim() !== '') {
+        mainMessages = [...mainMessages, userMessage(factsMessage)];
+      }
       mainMessages = [...mainMessages, userMessage(text)];
       const mainResult = await options.mainDriver.run({
         systemPrompt: options.mainSystemPrompt,

@@ -1,0 +1,84 @@
+/**
+ * R5 通知文案渲染（纯函数；零数据库/渠道依赖）。
+ *
+ * 规则（owner 授权文案层）：
+ *   · 9 类 kind 折叠成 4 类用户语言：开始办了 / 需要你一句话 / 办完了·没办成 / 已按你说的停了；
+ *   · reason 人话映射且失败分级：result_unknown 必须说「不确定做没做完，需要再确认」（严禁读作成功）；
+ *   · 内部术语黑名单机械断言：渲染器拼装的文本不得含 task_status/resource_limited/requestId/
+ *     uuid/request_N/绝对路径/W 窗口码（name 是用户原话，按规则原样保留，不在断言范围）；
+ *   · 每条输出必含 name（缺省机械回落「未命名任务」）。
+ */
+import type { NotificationKind, NotificationPayload, NotificationReason } from './notifications';
+
+/** 黑名单违规（渲染器拼装了内部术语）：拒绝输出。 */
+export class NotificationLanguageError extends Error {
+  constructor(term: string) {
+    super(`通知文案含内部术语「${term}」：渲染器不得输出内部形态。`);
+    this.name = 'NotificationLanguageError';
+  }
+}
+
+const BLACKLIST: readonly RegExp[] = [
+  /task_status/i,
+  /resource_limited/i,
+  /requestId/i,
+  /request_\d+/i,
+  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+  /(?:^|[\s：:，（(「『])\/[^/\s]+\//,
+  /\bW\d+\b/,
+];
+
+/** 机械断言：文本不得含内部术语（黑名单见上）。 */
+export function assertUserLanguage(text: string): void {
+  for (const pattern of BLACKLIST) {
+    const hit = pattern.exec(text);
+    if (hit !== null) throw new NotificationLanguageError(hit[0]);
+  }
+}
+
+const NAME_PLACEHOLDER = '\u0000name\u0000';
+
+/** reason → 用户语言（失败分级；result_unknown 不读作成功）。 */
+const REASON_TEXT: Record<NotificationReason, string> = {
+  result_unknown: '不确定做没做完，需要再确认',
+  resource_limited: '系统太忙，这个没接',
+  timeout: '跑太久先停了',
+  cancelled_by_user: '已按你说的停了',
+  failed_confirmed: '没办成',
+};
+
+/** name 用户原话占位替换后的模板先行黑名单断言，再回填 name。 */
+function assemble(template: string, name: string): string {
+  assertUserLanguage(template);
+  return template.split(NAME_PLACEHOLDER).join(name);
+}
+
+/** 一条通知 → 用户语言字符串（kind 9→4 折叠；输入仅 payload 白名单字段）。 */
+export function renderNotification(input: { kind: NotificationKind; payload: NotificationPayload }): string {
+  const name = input.payload.name !== undefined && input.payload.name.trim() !== ''
+    ? input.payload.name
+    : '未命名任务';
+  const reason = input.payload.reason;
+  const missing = input.payload.missing ?? [];
+  switch (input.kind) {
+    case 'accepted':
+    case 'started':
+    case 'resumed':
+      return assemble(`开始办了：${NAME_PLACEHOLDER}。`, name);
+    case 'waiting_user':
+      return assemble(
+        `需要你一句话：${NAME_PLACEHOLDER}——还缺：${missing.length > 0 ? missing.join('、') : '未说明'}。`,
+        name,
+      );
+    case 'completed':
+      return assemble(`办完了：${NAME_PLACEHOLDER}。`, name);
+    case 'failed':
+      return assemble(`${REASON_TEXT[reason ?? 'failed_confirmed']}：${NAME_PLACEHOLDER}。`, name);
+    case 'timed_out':
+      return assemble(`${REASON_TEXT.timeout}：${NAME_PLACEHOLDER}。`, name);
+    case 'resource_limited':
+      return assemble(`${REASON_TEXT.resource_limited}：${NAME_PLACEHOLDER}。`, name);
+    case 'cancelled':
+      return assemble(`${REASON_TEXT.cancelled_by_user}：${NAME_PLACEHOLDER}。`, name);
+  }
+}

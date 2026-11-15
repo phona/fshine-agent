@@ -108,6 +108,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   // P6/P4：background 才启用新受理/后台/通知路径；缺省 inline 零新增路径。
   let runner: TaskRunner | undefined;
   let outbox: NotificationOutbox | undefined;
+  let notificationAttachment: ReturnType<typeof attachNotificationOutbox> | undefined;
   if (dispatchMode === 'background') {
     runner = (await createBackgroundDispatch({
       env: deps.env,
@@ -125,11 +126,20 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     if (deps.notificationSink !== undefined) {
       outbox = createNotificationOutbox({ dbPath: deps.dbPath, sink: deps.notificationSink });
       // server 进程：事实落库后异步触发投递（终态通知即刻推送；同进程有界重试）。
-      attachNotificationOutbox(taskRegistry, outbox, { deliverOnRecord: true });
+      // R5 B 通道：同一挂钩缓冲机械事实，下一次回合开始前以普通 user 消息注入主对话。
+      notificationAttachment = attachNotificationOutbox(taskRegistry, outbox, { deliverOnRecord: true });
     }
     // 重启恢复：新进程第一次 pump（queued 重领 / 过期租约 → result_unknown 不重放 / completed 不重跑）。
     runner.pump();
   }
+
+  /**
+   * R5 投递驱动（零定时器）：除落库即试投（deliverOnRecord）外，每次用户回合开始时
+   * drain 一次 pending（piggyback 在既有回合上；无 outbox 时为空操作）。
+   */
+  const drainNotifications = async (): Promise<void> => {
+    if (outbox !== undefined) await outbox.deliverPending();
+  };
 
   /** 会话按（principal, session）双键缓存：群聊里不同用户不共享同一个会话对象。 */
   const sessions = new Map<string, Promise<Session>>();
@@ -157,6 +167,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           ...(runner === undefined ? {} : { taskRunner: runner }),
           ...(deps.createDrivers !== undefined ? { createDrivers: deps.createDrivers } : {}),
           ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
+          ...(notificationAttachment === undefined ? {} : { taskFactProvider: notificationAttachment.taskFactProvider }),
         });
         return assembled.session;
       })();
@@ -225,6 +236,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       return await replayed;
     }
     const pending = enqueueSessionTurn(`${principalId}\u0000${sessionId}`, async () => {
+      await drainNotifications();
       const session = await sessionFor(principalId, sessionId);
       return await session.send(message.text);
     }).then(
@@ -256,7 +268,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   return {
     handler,
     async deliverPending() {
-      if (outbox !== undefined) await outbox.deliverPending();
+      await drainNotifications();
     },
     close() {
       sessions.clear();

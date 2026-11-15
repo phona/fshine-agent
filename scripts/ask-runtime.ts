@@ -53,6 +53,7 @@ import {
   type NotificationReason,
   type NotificationSink,
 } from '../packages/agent/src/notifications';
+import { renderNotification } from '../packages/agent/src/notification-render';
 import { createResourcePolicy, resolveRuntimeConfig, type ResourcePolicy } from '../packages/agent/src/resource-policy';
 import type { TaskRegistry } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
@@ -187,6 +188,8 @@ export interface SessionAssemblyInput {
   notificationSink?: NotificationSink;
   /** P4：outbox attempts 上限（缺省模块缺省 5；reader 需同值对账）。 */
   notificationMaxAttempts?: number;
+  /** R5 B 通道：机械事实注入器（server 由 attachNotificationOutbox 返回值提供）。 */
+  taskFactProvider?: NotificationAttachment['taskFactProvider'];
   /** P6：runner 覆盖（测试确定性：leaseMs/时钟/属主）。 */
   runnerOptions?: { leaseMs?: number; owner?: string; now?: () => Date };
 }
@@ -325,22 +328,44 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
 export interface NotificationHookOptions {
   /** true = 每条事实落库后异步触发一次投递（server 进程：终态通知即刻推送）。 */
   deliverOnRecord?: boolean;
+  /** R5 B 通道：单次注入上限（缺省 5）；超出汇总成一条计数陈述。 */
+  factInjectionLimit?: number;
+}
+
+/** R5 B 通道注入器：用户下一次回合开始前取走本 (principal, session) 的待注入机械事实。 */
+export interface NotificationAttachment {
+  taskFactProvider(principalId: string, sessionId: string): string | undefined;
 }
 
 /**
  * registry 事实 → 通知 outbox（P4 §4 冻结口径的唯一接线点）：
  *   · `onTaskFact(fact)` 单回调；有通知意图才 record（cancelling/unexecuted 等过渡态不写）；
  *   · stateVersion 缺省 = fact.at（同一事实重复触发稳定去重）；payload 仅底账白名单字段；
- *   · 投递失败不影响任务事实（outbox 自身语义）。
+ *   · 投递失败不影响任务事实（outbox 自身语义）；
+ *   · R5 B 通道：同一回调把终态/待补事实按 scope 缓冲为待注入文本（渲染器纯函数产出，
+ *     幂等 = 事实键去重（有界 FIFO），有界 = 单次注入条数上限），由
+ *     `taskFactProvider` 在下一次回合开始时取走（普通 user-role 注入，见 execution-runtime）。
  */
+const B_CHANNEL_KINDS = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'resource_limited', 'waiting_user']);
+const INJECTED_KEYS_LIMIT = 1024;
+
 export function attachNotificationOutbox(
   registry: TaskRegistry,
   outbox: NotificationOutbox,
   options: NotificationHookOptions = {},
-): void {
+): NotificationAttachment {
+  const injectionLimit = options.factInjectionLimit ?? 5;
+  const pendingFacts: Array<{ scopeKey: string; line: string }> = [];
+  const injectedKeys = new Set<string>();
   registry.onTaskFact((fact) => {
     const kind = notificationKindForTransition(fact.from, fact.to, fact.reason as NotificationReason | undefined);
     if (kind === undefined) return;
+    // R5 补字段：waiting_user 时从底账读回 pendingQuestion.missing（事实钩子无 scope，
+    // 底账自身即事实来源；读不到不编造）。
+    const record = (registry as unknown as {
+      get(taskId: string): { principalId: string; sessionId: string; pendingQuestion?: { missing?: readonly string[] } };
+    }).get(fact.taskId);
+    const missing = kind === 'waiting_user' ? record.pendingQuestion?.missing : undefined;
     outbox.record({
       taskId: fact.taskId,
       kind,
@@ -349,11 +374,51 @@ export function attachNotificationOutbox(
       taskNo: fact.taskNo,
       name: fact.name,
       ...(fact.reason === undefined ? {} : { reason: fact.reason }),
+      ...(missing === undefined ? {} : { missing }),
     });
+    if (B_CHANNEL_KINDS.has(kind)) {
+      const key = `${fact.taskId}:${kind}:${fact.stateVersion ?? fact.at}`;
+      if (!injectedKeys.has(key)) {
+        injectedKeys.add(key);
+        if (injectedKeys.size > INJECTED_KEYS_LIMIT) {
+          injectedKeys.delete(injectedKeys.keys().next().value as string);
+        }
+        pendingFacts.push({
+          scopeKey: `${record.principalId}\u0000${record.sessionId}`,
+          line: renderNotification({
+            kind,
+            payload: {
+              at: fact.at,
+              taskNo: fact.taskNo,
+              name: fact.name,
+              ...(fact.reason === undefined ? {} : { reason: fact.reason }),
+              ...(missing === undefined ? {} : { missing }),
+            },
+          }),
+        });
+      }
+    }
     if (options.deliverOnRecord === true) {
       void outbox.deliverPending().catch(() => {});
     }
   });
+  return {
+    taskFactProvider(principalId, sessionId) {
+      const scopeKey = `${principalId}\u0000${sessionId}`;
+      const mine: string[] = [];
+      for (let index = pendingFacts.length - 1; index >= 0; index -= 1) {
+        if (pendingFacts[index]!.scopeKey === scopeKey) {
+          mine.unshift(pendingFacts[index]!.line);
+          pendingFacts.splice(index, 1);
+        }
+      }
+      if (mine.length === 0) return undefined;
+      if (mine.length > injectionLimit) {
+        return `[任务事实] 自上次对话以来有 ${mine.length} 项任务状态变化（超出单次注入上限 ${injectionLimit} 条），请用任务查询工具查看。`;
+      }
+      return `[任务事实] ${mine.join('\n')}`;
+    },
+  };
 }
 
 /**
@@ -454,6 +519,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       dispatchMode,
       ...(runner === undefined ? {} : { taskRunner: runner }),
       ...(mainSkillRegistry === undefined ? {} : { mainSkillRegistry }),
+      ...(input.taskFactProvider === undefined ? {} : { taskFactProvider: input.taskFactProvider }),
       mainTurnMs: resolved.mainTurnMs,
       workerTurnMs: resolved.workerTurnMs,
       // 可信工作目录：装配层持有的 profile.root（绝不取模型输出/用户消息）。
