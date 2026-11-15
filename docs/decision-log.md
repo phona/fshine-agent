@@ -2799,6 +2799,91 @@ TMPDIR=/home/tao/.tmp npm test            # exit 0：Test Files 83 passed (83)�
 
 ---
 
+## 八十四、Pi 原生替换 · 阶段四（真实模型 A/B/C）（2026-11-15，分支 `exp/pi-native-session-compaction`）状态：**实验分支·待裁决**
+
+> 角色：**集成 / 台账登记**（本 run 唯一台账写者）。承接 §七十八–§八十三。阶段三已把产品驱动整体切到 Pi 原生并删净 fshine 自研压缩（含 D1）；**本阶段首次用真实模型跑三场景读数**，只新增评测夹具（`scripts/eval/pi-native/r5p4-real.ts`、`r5p4-bare.ts`，`git show --stat 1331b51` = 2 files / +698，**零产品码改动**）。模型固定 **`step-3.7-flash`**（命令显式 `LLM_MODEL=step-3.7-flash`，provider `openai-completions`），**未混入其他模型**。原始证据落 `.runtime/r5p4/`（`.gitignore:17` 忽略，未入库）。预注册见 `.runtime/r5p4/prereg.md`（真实调用前写下，跑后未改判据、未重采样）。
+
+### 1. 工作区核验（本会话实跑）
+
+- `git -C ~/projects/fshine-agent-exp-pi-session rev-parse --show-toplevel` = `.../fshine-agent-exp-pi-session`（**≠ 主仓** `.../fshine-agent`）；`rev-parse --abbrev-ref HEAD` = `exp/pi-native-session-compaction`；登记前 `git status --short` **空**；HEAD = `1331b51`。**通过。**
+
+### 2. 模型 · 窗口 · 是否降窗（逐组登记）
+
+| 样本 | 驱动形态 | 窗口 | 模型声明上限 | 降窗 | maxTokens | 压缩设置 |
+|---|---|---|---|---|---|---|
+| A 主样本 `.runtime/r5p4/A-bare` | bare `AgentHarness` 单会话 | **16384** | 262144（`GET /models`） | **是** | 2048 | reserve 4096 / keepRecent 4915 |
+| B 主样本 `.runtime/r5p4/B-w24576` | product 装配链（background） | **24576** | 262144 | **是** | 2048 | 同上 |
+| C 主样本 `.runtime/r5p4/C-bare` | bare `AgentHarness` 单会话 | **16384** | 262144 | **是** | 2048 | 同上 |
+
+- 降窗用于**提前触发真实阈值压缩**（`piCompactionSettings`），16384/24576 均 **< 模型实际能力 262144**，不超模型能力；**provider 级真实溢出（>262144）未作主路径**（成本/时延不可行，见 §8 局限）。
+- `provider-models.get.json` 实测 `max_input_tokens=262144`、`owned_by=stepai`；A/B/C 全部 `provider=openai-completions`、`model=step-3.7-flash`。
+- **两种驱动形态并存**（如实登记，非产品码改动）：A/C 用 Pi 设计用法的单一长生命周期 `AgentHarness`+`MemorySessionRepo` 会话（可订阅原生 `compaction_start/end`）；B 用产品装配链 `assembleSessionCore` + `createPiTurnDriver`（每回合重建 harness 并重灌投影转录），因 `run_task/task_status/task_result/task_cancel` 任务底账只在该装配下存在。
+
+### 3. 三主样本读数（预注册 N=3，每场景 1 个独立多轮会话）
+
+| 样本 | 回合 | 模型调用（主/Worker） | 摘要调用 | 阈值压缩（start→completed） | 空回复 | `retry_scheduled` | 工具调用↔结果配对 | wall |
+|---|---|---|---|---|---|---|---|---|
+| A-bare | 16 | 49（流式 21 + 摘要 28） | 28 | **27 → 27 completed** | **0** | **0** | **5/5**（`execute_operation` 全 completed） | 243476 ms（4m03s） |
+| B-w24576 | 10 | 18（main 16 / worker 2） | 0 | **0**（24576 下未触阈） | 0 | —（无错误事件） | **7/7**（run_task/execute_operation/task_status/task_result/task_cancel） | 32140 ms |
+| C-bare | 13 | 42（流式 18 + 摘要 24） | 24 | **23 → 23 completed** | **0** | **0** | **5/5**（`execute_operation` 全 completed） | 240365 ms（4m00s） |
+
+- A/C 压缩条目实测 `tokensBefore` 区间：A **13106–15731**、C **12908–15250**；保留尾段消息数 A **7–16**、C **6–18**（`turns.json` 去重后 27/23 条 `compaction` 投影）。压缩后会话均继续正常对话。
+- B 主样本 `summaryCalls=0`、`compaction_starts=0`：**该窗口下未触及压缩阈值**，B 的「压缩后追问」未被真实压缩触及（见 §6、§8）。所有样本 `stoppedAtLimit=false`。
+
+### 4. 五项判据（按预注册口径）
+
+| # | 判据 | 本会话实测证据 | 结论 |
+|---|---|---|---|
+| ① | **压缩恢复**（真实溢出→恢复或有界失败） | A 27/27、C 23/23 `compaction_end status=completed`，压缩后继续多轮、0 空回复；A/C 分别有 2 次 / 7 次**摘要调用** `finish_reason=length`（输出触 2048 上限）但压缩仍 `completed`、会话未坏。provider 级真实溢出未触发。 | **主样本通过**（阈值压缩路径）；**真实 >262144 溢出未测** |
+| ② | **工具续发有界**（工具结果致超窗后的续发） | 工具配对 A 5/5、B 7/7、C 5/5；样本内工具结果均较小（96–539 字符），**未构造出「工具结果直接致超窗」的独立用例**；观察到的 `length` 截断均为**摘要调用**（A 2/28、C 7/24），非工具续发，且无 `retry_scheduled`。 | **未直接触发**；同类有界行为成立（不无界） |
+| ③ | **重复副作用**（重试不得重复执行任务） | B：`#1` 经 `run_task`→多次 `task_status`/`task_result`/`task_cancel` 后，Task Registry 仍**仅 1 条 execution**（`req_a636afc8…`）；`#2` 直接 `failed/resource_limited`、**0 条 execution**。A-bare/C-bare 各 5 次执行均一次一结果。A-8192 pilot `#1` 有 2 条 execution，来自同一 `run_task` 内 Worker 的 recent→W2 两步查询（仅 3 次 `run_task` 对应 3 个任务），**非模型重试重放**（参数未落证据，见 §8）。 | **未发现重复执行** |
+| ④ | **失败上界** | 全部样本 `retryScheduled=0`；A/C 压缩次数有限（27/23，随回合推进而非循环）；product 降窗失败为**逐回合**空回复，事件内不自动重试（见 §7）。A/C 有背景回合每回合触发 **1–3 次**压缩（A 峰值 3、C 峰值 3），源于用户每轮投喂 ~5.9k 字背景块跨阈，**非零收益循环**。 | **未发现无界重试/零收益循环** |
+| ⑤ | **真实 token·成本** | 见 §5；`usage.cost` 全部为 **0**（provider 未返回计价），**不编造成本**。 | **已记录** |
+
+### 5. 真实 token · 耗时（逐会话）
+
+| 样本 | calls | input | output | totalTokens（provider usage，含 cacheRead） | cacheRead | wall |
+|---|---|---|---|---|---|---|
+| A-bare | 49 | 151531 | 36736 | **329835** | 141568 | 243476 ms |
+| B-w24576 | 18 | 19343 | 3717 | **144596** | 121536（=total−in−out，用量未单列） | 32140 ms |
+| C-bare | 42 | 202292 | 34768 | **289668** | 52608 | 240365 ms |
+
+- 逐次调用 token/耗时见各样本 `model-calls.jsonl`（A/C：`kind=streamSimple|completeSimple` + `usage`；B：`kind=stream` + `label=main|worker`）。
+- 成本：provider `usage.cost` 全 0，本次**无法给出真实货币成本**；只能报告 token 与耗时。
+
+### 6. 压缩后追问（早期信息 / 用户明示约束 / 任务事实）
+
+- **A（27 次压缩后）**：第 7、14、15 回合均正确复述「项目代号 **蓝鲸-42** / **简体中文**」（用户明示约束跨 20+ 次压缩保持）；第 16 回合追问**最早背景 A1 的主题**时回答「在现有对话历史中**未记录 A1 的具体内容**……请提供 A1 内容」——早期细节丢失但**未编造**（诚实缺失）。
+- **C（23 次压缩后）**：第 13 回合问第 1 段背景，回答「当前可访问的对话记录中仅包含第 4 至第 9 段（C4–C9）……**未找到第 1 段背景（C1）**」——同样诚实缺失、未编造。第 9–12 回合对内容相同的 C4–C9 反复概括（用户连续投喂同文），**属用户输入重复，不是压缩重复摘要**。
+- **B（10 回合，窗口 24576，未发生压缩）**：第 8 回合正确回溯最早任务「**#1**」及其原文结果（recent 窗口无数据、无法统计条数）；第 10 回合正确列出 2 个任务及状态（#1 completed / #2 failed）；第 9 回合 `task_cancel` 返回 `outcome=terminal`，回复如实转述「状态 completed（终端状态）」，**未谎称已取消**。因**未触压缩**，B 的「压缩后追问」在本主样本中**未被验证**（见 §8）。
+
+### 7. 稳定性：product 装配链在降窗下压缩后空回复（如实登记，未判硬失败）
+
+| 补充样本（非 N=3 主样本） | 窗口 | 回合 | 空回复 | 现象 |
+|---|---|---|---|---|
+| `.runtime/r5p4/A`（product） | 24576 | 16 | **7**（第 10–16 回合） | 真实阈值压缩后出现 `Assistant request exceeded the context window`（`finish_reason=length`），该回合空回复 |
+| `.runtime/r5p4/A-8192-pilot`（product） | 8192 | 10 | **6**（第 4、6–10 回合） | 同上 |
+| `.runtime/r5p4/B`（product） | 8192 | 10 | **7**（第 4–10 回合） | 同上 |
+
+- 三组均为 `pi_driver_empty_reply`，**`retryScheduled=0`**、`attempt=1`、`driverEvents` 中无自动重试；**事件内有界**。裸 `AgentHarness` 单会话在同等窗口（A 27 次、C 23 次压缩）**0 空回复**，差异定位在「每回合重建 harness + 重灌投影转录」的装配接法，**不是 Pi 压缩本身**。
+- 按预注册硬失败清单（无界恢复 / 任务重复执行 / 越权 / 虚假完成或取消回执）**均未命中**，故**不判 `blocked`**；但该 product 降窗稳定性问题**阻断「稳定通过」结论**，登记待 owner 裁决（定位修复 vs 仅在正常大窗口下使用）。原始事件见各样本 `events.jsonl`/`summary.json`。
+
+### 8. 局限（N=3 探索性，不外推）
+
+- 预注册 **N=3、每场景 1 个会话**，只作探索性读数，**不作统计推断**；未重采样、未筛绿。
+- **provider 级真实溢出（>262144）未测**；压缩均为阈值压缩（真实模型、真实摘要调用）。
+- **B 主样本未触压缩**（24576、18 calls、0 summary），其「压缩后追问早期任务」未在真实压缩条件下验证；B/8192 补充样本触发了压缩但出现空回复。
+- 判据 ②「工具结果直接导致超窗后的续发」**未构造独立用例**；A-8192 pilot `#1` 的 2 条 execution 参数未落证据，无法逐参数确认其非重放（现有证据仅显示同一 `run_task` 内两步查询）。
+- 摘要调用达输出上限：A **2/28**、C **7/24** 次 `finish_reason=length`（输出 2048）——摘要可能被截断，压缩仍标 `completed`；本次未评估摘要截断对信息保真的影响。
+- 成本不可得（`usage.cost=0`）；`maxTokens=2048` 在小窗下易与窗口冲突，8192 窗输出频繁触顶。
+- 证据文件 `.runtime/r5p4/` 为 gitignored 原始材料，**未入库**；仓库内仅评测夹具（`scripts/eval/pi-native/r5p4-*.ts`）。
+
+**指针**：`.runtime/r5p4/prereg.md`、`.runtime/r5p4/{A-bare,B-w24576,C-bare}/{turns,model-calls,summary,tasks,execs,events}.*`、补充 `.runtime/r5p4/{A,A-8192-pilot,B}/`、`scripts/eval/pi-native/r5p4-real.ts`、`scripts/eval/pi-native/r5p4-bare.ts`；关联 §七十八–§八十三。
+
+**状态：实验分支·待裁决。**（真实模型三场景探索性读数已登记；product 装配链降窗压缩后空回复待定；待 owner 裁决。未改判据、未重采样、未改产品码。）
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
