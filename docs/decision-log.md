@@ -2593,6 +2593,59 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ---
 
+## 八十一、B2 · opt-in 改造（owner 裁决）（2026-11-15，分支 `arch/wecom-silent-shadow`，基线 = `arch/integration`，opt-in commit `ba35af9`）状态：**待合入**
+
+> 承接 §八十（B2 Silent Shadow 出站机械闸门）。§八十 把出站投递**缺省设为 `silent`**，副作用是「正常模式」也会被静默。本轮按 **owner 裁决**把语义改为 **opt-in**：真实投递必须**显式声明**，缺失或非法一律 **fail-safe 抑制**；同时**生产装配显式声明 `live`** 保住既有产品语义。仍是**零真实模型、零真实平台/凭据**（确定性替身夹具）。**未引新宿主治理框架/状态机/路由**——只在既有闸门模块上扩展。
+
+### 1. owner 裁决（逐条落实）
+
+| # | 裁决 | 落实 |
+| --- | --- | --- |
+| ① | **正常模式维持既有语义**：显式 `deliveryMode='live'` 时按既有渠道语义正常回帧/主动消息 | 显式 `live` → `live`，闸门 `wrap` **原样返回同一实例**（不拦）——既有 live 用例全部**显式传 `live`**，语义不变 |
+| ② | **Shadow 模式禁止全部真实出站**：六类用户可见路径全抑制、投递=0、尝试可观测 | 显式 `shadow` 归为 `silent`（`resolveDeliveryMode`），与 §八十 覆盖矩阵同一闸门；新增专测（六类 + 投递=0 + 证据） |
+| ③ | **新真实渠道必须显式声明模式**（未声明=不允许真实出站） | 新增 `isDeliveryModeDeclared`；真实渠道未声明时构造期留 `wecom_delivery_mode_undeclared` 日志（`reason: missing\|invalid`） |
+| ④ | **默认配置缺失或非法 → 禁止真实出站**（fail-safe，退化为 silent） | `resolveDeliveryMode`：`undefined`→`silent`；非法值→`silent`（**且非法优先于 env 开关**，不因 env=live 放行） |
+| ⑤ | **不扩展新的宿主治理系统** | 仅扩展 `silent-shadow-gate.ts`（+`adapter.ts` 装配/日志），无新框架/状态机/路由 |
+
+### 2. 机制改动（最小）
+
+- **`packages/channel-wecom/src/silent-shadow-gate.ts`**
+  - `resolveDeliveryMode(explicit, env)`（`silent-shadow-gate.ts:49-57`）：`explicit==='live'`→`live`；`explicit∈{'silent','shadow'}`→`silent`；**`explicit` 为其它非 `undefined` 值→`silent`（非法，优先于 env）**；`explicit===undefined` 时才回落 env，且 env 必须**逐字** `live`（`trim()` 后大小写敏感）才 `live`，否则 `silent`。
+  - 新增 `isDeliveryModeDeclared(explicit, env)`（`:66-72`）：显式 ∈ {`live`,`silent`,`shadow`} 或（缺失且 env 逐字 `live`）→ 已声明；缺失或非法→未声明。
+  - 类型：`DeliveryMode = 'live'|'silent'|'shadow'`（声明面）、`EffectiveDeliveryMode = 'live'|'silent'`（生效面，只有两种）。
+- **`packages/channel-wecom/src/adapter.ts`**：`deliveryMode` 选项语义注释改为 opt-in；构造期在 `resolveDeliveryMode` 后接入 `isDeliveryModeDeclared`，未声明即 `console.warn` 结构化 `wecom_delivery_mode_undeclared`（含 `resolvedMode`/`reason`/`hint`，**不含用户正文**）；`deliveryMode` 字段类型收窄为 `EffectiveDeliveryMode`。
+- **`packages/channel-wecom/src/index.ts`**：导出 `isDeliveryModeDeclared` 与 `EffectiveDeliveryMode`。
+- **`apps/server/main.ts:45`**：生产装配 `new WecomBotChannel({ ..., deliveryMode: 'live' })`——**显式声明 live**，`npm start` 既有回帧语义不变；启动日志 `server_started.deliveryMode` 反映声明状态（本装配 `"live"`）。
+
+### 3. 验收（本会话实跑读数）
+
+- `npx vitest run packages/channel-wecom/adapter.silent-shadow.test.ts apps/server/server.test.ts`（cwd = 本 worktree，`TMPDIR=/home/tao/.tmp`）→ **Test Files 2 passed（2）；Tests 22 passed（22）**（19 + 3）。
+- `npm test`（全量）→ **Test Files 93 passed（93）；Tests 942 passed | 3 todo（945）**（基线 §八十 = 936 passed + 3 todo；**+6，例数不减**）。
+- `npm run typecheck`（`tsc --noEmit`）→ **exit 0**。
+
+### 4. 覆盖与反向绊线（新增 6 例：`adapter.silent-shadow.test.ts`）
+
+- **解析表**（`resolveDeliveryMode`）：`live`→live；`silent`/`shadow`→silent；`undefined`/`LIVE`/`live `（尾空格）/`''`/`on`→silent；非法 `nonsense` 即使 `env.live` 仍 silent；`undefined` + `env.live`→live。
+- **`isDeliveryModeDeclared`**：三合法模式 true；缺失 false；env 逐字 live + 缺失 true；`nonsense`/`''` false。
+- **显式 `shadow`**：与 silent 等价——六类路径全抑制、`sdk.userVisibleCalls===0`、`upload` 也不触达、证据含 `response_stream`/`upload_media`/`reply_media`/`send_message`，`deliveryMode==='silent'`。
+- **缺失模式**：真实渠道投递=0 且留 `wecom_delivery_mode_undeclared` 日志。
+- **非法模式**（`'live '` 尾空格）：投递=0 且留日志。
+- **反向绊线**：`resolveDeliveryMode(undefined,{})==='silent'`、`!=='live'`；非法值即使 env=live 也 `silent`。
+- **既有 live 用例语义不变**：`start(mode)` 测试助手显式传 `live`（或环境开关用例显式设 env=live），`wrap` 原样返回——证明「零投递」来自闸门而非替身吞掉。
+
+**反向绊线实跑核验**（本会话）：把 `silent-shadow-gate.ts:56` 缺失分支故意改成 `return 'live'` 后 `npx vitest run packages/channel-wecom/adapter.silent-shadow.test.ts` → **5 failed | 14 passed**（含「缺失模式」「反向绊线」「缺省=静默」「环境开关逐字」），随即 `git checkout` 还原、工作区干净。**证：把「缺失模式」改成放行，对应用例必红。**
+
+### 5. 授权边界与局限（如实登记）
+
+- 本 run **零真实模型、零真实平台/凭据**；读数为**确定性替身夹具**结果，**不构成生产/平台行为结论**；**未执行任何真实企微联调**（承 §八十 §6「待凭据」）。
+- **不改 Worker 提示/任务账本/执行契约语义，不引第二套压缩/会话机制，不扩展新宿主治理系统**；改动只在既有唯一出站传输面收口（闸门模块 + 适配器装配 + 生产装配声明一行）。
+
+**指针**：`packages/channel-wecom/src/silent-shadow-gate.ts`、`packages/channel-wecom/src/adapter.ts`、`packages/channel-wecom/adapter.silent-shadow.test.ts`、`apps/server/main.ts`；关联 §八十（B2 Silent Shadow 出站机械闸门）。
+
+**状态：待合入。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
