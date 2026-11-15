@@ -1949,6 +1949,35 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 
 
 
+## 七十、R5-B 压缩前无状态预判设计 · 归档登记（2026-11-15，分支 `arch/r5-bdesign`，基线 = arch/integration @`63d935e`）状态：**待合入**
+
+> 编号说明：本 worktree 基线处 decision-log 最大号为 §六十八；arch/integration 此后已落 §六十九（本分支不可见），为避免合入冲突按主仓当前最大号 +1 取 §七十。
+> 详细设计见 `docs/product/r5-b-precheck-design.md`（提交 `516c4e6` + `771aec6`）；本条只做决定面登记。**未实施任何产品代码改动。**
+
+**B 设计范围**：研究能否在**调用摘要模型之前**、用**现有可压缩区间与 token 预算**判断「这次压缩是否有意义」，从而**不发起无收益的摘要调用**。约束：优先无状态（纯函数，只用当前转录 + 窗口 + 预算）；**不默认采用事后确定性丢弃**；**不新增 Runtime 冷却器/状态机**；**无法安全继续时有界失败**（不反复调模型、不无限重试）。交付方式：docs-only、**零产品代码改动、零真实模型调用**。
+
+**事前判定思路**（判定点：`compactTranscriptWithPi` 内、`splitForCompaction` 之后、`summarizeWithinWindow` 之前，`packages/agent/src/pi-driver.ts:543`↔`:577`——此处 prefix/kept 已定且**尚未发起任何模型调用**）。用到的既有量：`estimateContextTokens(messages).tokens`（=`tokensBefore`，`:540`）、partition 后 `prefix`/`kept`（`:543`）、`settings.reserveTokens`（`:539`）、`target = max(1, W − reserveTokens)`（`:598`，== 软触发线）、`limit = W − Δ − MIN_OUTPUT`（`:661`）、`SUMMARY_PROMPT_OVERHEAD_TOKENS`（`:261`）、`MIN_OUTPUT_BUDGET_TOKENS`（`:292`）。核心不变式：产物 = `[摘要消息, ...kept]` ⇒ **`tokensAfter ≥ keptTok + summaryFloor`**。两条**严格可证（非启发式）**判定：**(1) 零缩减** `prefixTok ≤ summaryFloor` ⇒ NOT_WORTH(reason=`zero_reduction`)（摘要不可能小于被替换量）；**(2) 无法达标循环** `keptTok + summaryFloor ≥ target 且 estTok ≤ limit` ⇒ NOT_WORTH(reason=`tail_at_or_over_target_loop`)（保留尾段自身已达/超目标，任何非负摘要都改不了 `tokensAfter ≥ target`，**结构上无法终止再触发**）。命中即发 `context_compact_precheck_skipped`、**不调用摘要模型**、原样返回。触发线几何：W=8192 下 `compactionSettingsFor(8192, Δ=4656)` ⇒ reserve=5680 ⇒ `target = limit = 软阈值 = 2512` 三线重合（**三线重合的前提是把真实会话 Δ=4656 传入**；`scripts/eval/p3/compaction-proof.ts` 夹具未传 Δ、自带 Δ=4166，实跑读数为 `threshold=6144 / limit=3002`，**两口径不同、勿混用**）。
+
+**四边界**（逐类判定与预期行为）：
+- **① 有可压缩候选但摘要零收益**（最核心）：`prefix.length>0` 且 `keptTok+summaryFloor≥target`（或 `prefixTok≤summaryFloor`）⇒ NOT_WORTH；发 `context_compact_precheck_skipped`、**不调摘要模型**、`compactTranscriptWithPi` 原样返回 `messages`。
+- **② 当前回合自身已超窗**（无前缀）：`prefix.length==0` ⇒ NO_CANDIDATE，落**既有** `no_cut` 分支（`pi-driver.ts:549-575`）：`estTok>limit` ⇒ 抛 `context_invariant_violated`（有界失败），否则 `context_compact_no_cut` 原样返回；**与现状逐字节一致**。
+- **③ 无历史可压缩**（prefix 空）：同 ②，既有 `no_cut` 路径、原样返回、放行请求；**不伪造摘要**。
+- **④ 正常溢出恢复**：大前缀小尾段 `keptTok+summaryFloor<target` ⇒ WORTH，**照常摘要、行为不变**；且即便误判 NOT_WORTH，三处**既有兜底**仍兜底——`transformContext` 原样返回（`:701-711`）、overflow 臂 `tokensAfter>=tokensBefore` break（`:750`）、`run()` INV 臂抛错（`:669`）→catch（`:676-678`）——保证**不外发超窗请求、不无限重试**。
+
+**有界失败定义**：「不值得压」本身是**跳过决定，非失败**。判 NOT_WORTH 的两种原因**如实入事件**：`zero_reduction` / `tail_at_or_over_target_loop`。**仅当** `estTok>limit`（转录越硬安全上界、请求不可交付）**且**判 NOT_WORTH 时升级为有界失败：**一次判定、立即拒绝、不发请求、不重试、不调摘要模型**。**事件名以源码为准**：预判 NOT_WORTH 发生在 `prefix.length>0`，`compactTranscriptWithPi` 原样返回；超窗随后落 `run()` pre-request 臂（`:662-686`），catch 发 **`pi_driver_context_invariant_rejected`**（`:676-678`）。**`context_invariant_violated`（`:555-556`）只在 `prefix.length==0` 的 `no_cut` 分支发出**，**预判自身不发该事件**。有界性：预判**无双状态、无重试计数**；结构不变则结论不变 ⇒ 不会反复调模型；结构改变（产生有效前缀）自动转 WORTH。
+
+**回归测试清单**（全部走假模型运行时、**零网络**、`calls()` 计数）：1 零收益夹具判 NOT_WORTH 且 `calls()==0`（W=8192 几何、reason=`tail_at_or_over_target_loop`）；2 零缩减 `prefixTok≤summaryFloor` ⇒ NOT_WORTH(`zero_reduction`)、`calls()==0`；3 边界②复用 `noCutOverLimit`（`pi-driver-context-invariant.test.ts:114`）⇒ 仍抛 `context_invariant_violated`、`calls()==0`；4 边界③小转录原样返回、`calls()==0`、无异常；5 边界④大前缀小尾段 ⇒ WORTH、`calls()>0`、产物含【此前会话摘要】且 tokens 下降（`compaction-product.test.ts` 判据）；**6 反向绊线 A：给一个确实可压缩的转录把 `compactionWorthwhile` 打桩为 NOT_WORTH ⇒ 该用例必须红**（`calls()==0` 且 `tokensAfter==tokensBefore` 且既有兜底触发），真值 WORTH 时必须绿；**7 反向绊线 B：对 W=8192 与 128k 断言 `target==W−reserveTokens`、`limit==W−Δ−MIN_OUTPUT`，并断言 W=8192 下 `target==limit==2512`**（防缩放公式漂移）；8 回归 `compactionSettingsFor` 缺省臂逐字段一致。**口径说明**：`794 passed` 取自审计既有读数，是实施后需保持的**目标**；**本设计未复跑全量**，仅复跑被点名的两个测试文件（9 passed、零网络夹具）。
+
+**是否值得改产品代码**：**值得，但仅为有界、纯函数、可证的最小切片**（**只做** 2.3 的严格可证 NOT_WORTH 跳过；**不做**启发式常量、**不做**冷却器、**不做**默认事后丢弃）。代价估计：只改 `packages/agent/src/pi-driver.ts` 一个文件（新增 `compactionWorthwhile` 纯函数 + `summaryFloor` 常量约 25-35 行；判定点插入 + `context_compact_precheck_skipped` 事件约 10-15 行）+ 一个测试文件约 120-180 行（多数复用既有假运行时）。**风险低**（边界④三重兜底保证误判也不外发超窗请求、不无限重试）。**128k 生产窗口触发频率无读数、不外推**，实施前建议在 128k 复测规则(2)命中率。
+
+**未实施**：本次登记**零产品代码改动**（仅新增设计文档 + 追记本条目）、**零新增模型调用**、未 `git add` 任何 `.runtime` 证据。`compactionWorthwhile` 纯函数、`context_compact_precheck_skipped` 事件、上列全部回归/绊线用例**一律未实施**。
+
+**待 owner 裁决**：是否实施该最小切片；128k 生产窗口复测规则(2)命中率的前置；与主仓 §六十九（压缩机制归属审计）的 D1/D2/D3 关系（本设计与 D1 删重**互不冲突、可分别裁**）。
+
+**状态：待合入。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
