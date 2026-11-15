@@ -2449,6 +2449,63 @@ S1 跨回合转录连续 · S2 threshold 自动压缩 · S3 overflow 恢复（�
 
 ---
 
+## 八十、Pi 原生替换 · D1 反向绊线独立复核（2026-11-15，分支 `exp/pi-native-session-compaction`）状态：**实验分支·待裁决**
+
+> 角色：D1 反向绊线**独立复核**（本 run 唯一台账写者）。承接 §七十八（阶段一 GO 条件式）、§七十九（阶段二最小原型）。夹具：`scripts/eval/pi-native/tripwire-d1.mjs`（首轮，`a997e26`）、`tripwire-d1-recheck.mjs`（独立复核，`c8d5761`）、`tripwire-d1-tao.mjs`（第三方独立复现，`20ea3a2`）。版本口径：只读锁 `@earendil-works/pi-agent-core@0.85.1`。**零真实模型**：仅假 `Models`/假 `streamFn`，`baseUrl=http://localhost`，`streamDeferred`/`fetchDeferred` 均 `throw 'n/a'`。
+
+### 1. 工作区核验（本会话实跑）
+
+- `pwd` / `git rev-parse --show-toplevel` = `.../fshine-agent-exp-pi-session`（**≠ 主仓** `.../fshine-agent`）；`git rev-parse --abbrev-ref HEAD` = `exp/pi-native-session-compaction`；复核前 `git status --porcelain` 空。**通过。**
+
+### 2. 复现命令与原始输出（本会话实跑，三夹具）
+
+```
+node scripts/eval/pi-native/tripwire-d1.mjs          # exit 1（其门「超窗请求发出数 == 0」FAIL —— 即 D1 不可删）
+node scripts/eval/pi-native/tripwire-d1-recheck.mjs  # exit 0
+node scripts/eval/pi-native/tripwire-d1-tao.mjs      # exit 0
+```
+
+关键原始行（逐字）：
+
+- `tripwire-d1.mjs`：`assistant stream calls = 1  (over-window = 1)`；`first promptTokens = 20073  budget = 7168`；`run_end = [{"status":"failed","error":"assistant_error"}]`；`retry_scheduled count = 0`；`[FAIL] (a) knowably over-window requests sent == 0  -> overWindowCalls=1`。退出码 `1`。
+- `tripwire-d1-recheck.mjs`：`assistant stream calls = 1  (over-window = 1)`；`compaction_start = ["threshold"]`；`compaction_end = [{"status":"completed","reason":"threshold"}]`；`run_end = [{"status":"failed","error":"assistant_error"}]`；`retry_scheduled count = 0`；`before_request event = [{"keys":["attempt","lane","model","runId","step","streamOptions"],"hasMessages":false,"hasContextWindow":false,"step":"compaction"},{"keys":[...],"step":"assistant"}]`；`transform_context event = [{"messageCount":2}]`；`public veto hook available = no`。退出码 `0`。
+- `tripwire-d1-tao.mjs`：compaction **关** → `streamCalls=2  overWindowSent=2`、`compaction_start=["overflow"]`、`run_end=[{"status":"failed","code":"assistant_error"}]`、`retry_scheduled=0`；compaction **开** → `streamCalls=1  overWindowSent=1  compEnd=["completed"]`；抛错 `before_request` → 仍发出（`calls=1 overWindow=1`）；`estimateContextTokens([giant]).tokens = 20000`、`shouldCompact(20000, 8192, {...}) = true`。退出码 `0`。
+
+三夹具结论一致：**一个已知必然超窗的请求被实际发出**（compaction 开 = 1 次；关 = 2 次，含 1 次 overflow-recovery 重发），**未在发起前拒绝**。
+
+### 3. 发出次数与有界性
+
+- **发出次数**：必然超窗请求至少发出 1 次（compaction 开）／2 次（compaction 关），从不为 0。
+- **有界失败**：三夹具一致 `run_end status=failed`（`code/error=assistant_error`）、`retry_scheduled=0`；无无限重试。`tripwire-d1-tao.mjs` 另证：即便 `before_request` 处理器**抛错**，请求仍被发出（处理器不能否决发送）。→ **有界失败：是。**
+
+### 4. Pi 0.85.1 是否提供「发送前尺寸预判/拒绝」能力（只读源码/类型，本会话）
+
+- **Hook 面**：公开 hook 注册表 `HookMap` = `node_modules/@earendil-works/pi-agent-core/dist/harness/agent-harness.d.ts:485-604`，共 11 个 hook：`before_run`(:486) `before_drive`(:495) `before_run_end`(:501) `transform_context`(:510) `before_request`(:520) `before_payload`(:531) `after_response`(:540) `before_tool`(:550) `after_tool`(:564) `before_compaction`(:582) `before_navigation`(:593)。
+- `before_request`（:520-530）event 仅 `{model, step, attempt, streamOptions}`、result 仅 `{streamOptions?}`——**无 block/decline 变体**；`before_payload`（:531-539）result 仅 `{payload}`——**无 veto**。
+- **对照**：hook 层确有否决机制，但**唯独不给发送尺寸门**——`before_tool` result 含 `block?:{reason,terminate?}`（:558-561）；`before_compaction` result 含 `decline?:boolean`（:589）；`before_navigation` result 含 `decline?:boolean`（:600）。
+- 全包 `*.d.ts` 搜 `maxInputTokens|wouldOverflow|estimateBeforeSend|preSend|beforeSend|wouldExceed|wouldBlock|preDispatch|preflight|sendGuard|canSend` 等 → **零命中**（仅 `structural.d.ts:20`、`types.d.ts:226`、`lane.d.ts:53` 三处无关注释）。
+- 所有 `block?/decline?` 出现点均为工具/压缩/导航：`agent-harness.d.ts:558`、`:589`、`:600`；`types.d.ts:41`（`BeforeToolCallResult`）；`execution/tools.d.ts:24`（`BeforeToolDecision`）。**无一为发送尺寸门。**
+- 估算**辅助函数确实存在但未接发送路径**：`dist/harness/compaction/compaction.d.ts:57` `estimateContextTokens`、`:59` `shouldCompact`、`:61` `estimateTokens`、`:42` `calculateContextTokens`；经 root `dist/index.d.ts:8` 再导出。夹具 2/4 证明：`shouldCompact(...) = true` 的同时请求仍被发出——**纯判定函数，非发送前门**。
+- `AgentHarnessOptions`（`agent-harness.d.ts:617-637`）字段：`session, models, model, thinkingLevel, activeToolNames, tools, toolContext, systemPrompt, resources, streamOptions, retry, compaction, steeringMode, followUpMode, toolExecution, toProviderMessages, entryProjectors`——**无任何尺寸门字段**（`toProviderMessages` 是 `AgentMessage[]→Message[]` 变换，不能拒绝发送）。
+
+**四问结论（确定）**：①发起模型请求前拒绝=**否**；②发出次数=**1（compaction 开）/ 2（关），恒 ≥1**；③有界失败=**是**（`run_end failed`、`retry_scheduled=0`）；④Pi 公开面无「发送前尺寸预判/拒绝」钩子=**确认无**。
+
+### 5. T5 结论（「当前回合超过预算 → 不发送必然超窗请求」）
+
+**三态判定 = 「Pi 不提供」**。Pi 0.85.1 有公开尺寸**估算**函数（`estimateContextTokens`/`shouldCompact`），但**未接入发送路径**；hook 层有 `block/decline` 否决机制，却**不覆盖请求发送**；`AgentHarnessOptions` 无尺寸门。故**当前回合超过预算时，Pi 自身不会拒绝发起该必然超窗请求**。→ **D1 不可删**（反向绊线成立：删除 D1 宿主侧防线后，新路径把必然超窗请求直接发出）。
+
+### 6. 对替换的影响
+
+- 在 T5 这一维度上，**Pi 原生替换 blocked**：单纯改用 Pi 原生路径**不能**替代「发送前拒绝必然超窗请求」这一能力，D1 相关防线需保留（或由宿主侧最小实现承担，待裁）。
+- 本复核与 §七十九、`a997e26` 提交信息「据裁定保留 D1，替换 blocked」一致；成本/影响面取向仍须 owner 统一裁定（§七十七 `RECOMMENDED_OPTION=A` 成本导向 vs §七十八 能力导向）。
+- 本复核未改任何产品码（`packages/**`、`apps/**` 未动），仅只读探查 Pi 类型面 + 实跑既有夹具。
+
+**指针**：`scripts/eval/pi-native/tripwire-d1.mjs`、`tripwire-d1-recheck.mjs`、`tripwire-d1-tao.mjs`（夹具）；`scripts/eval/pi-native/OUTPUT-tripwire-d1-recheck.txt`、`OUTPUT-tripwire-d1-tao.txt`（归档原始输出）；`node_modules/@earendil-works/pi-agent-core/dist/harness/agent-harness.d.ts:485-604`、`dist/harness/compaction/compaction.d.ts:42-61`、`dist/index.d.ts:8`（0.85.1 公开面）；关联 §六十九、§七十、§七十七、§七十八、§七十九。
+
+**状态：实验分支·待裁决。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
