@@ -2884,6 +2884,61 @@ TMPDIR=/home/tao/.tmp npm test            # exit 0：Test Files 83 passed (83)�
 
 ---
 
+## 八十五、阶段三补丁 · 单长生命周期 Pi Session（§4.1）（2026-11-15，分支 `exp/pi-native-session-compaction`）状态：**实验分支·待裁决**
+
+> 角色：**集成 / 台账登记**（本 run 唯一台账写者）。承接 §八十四：阶段四真实模型暴露 **product 装配链 `assembleSessionCore` + `createPiTurnDriver` 在降窗压缩后 `pi_driver_empty_reply`**（`Assistant request exceeded the context window`、`retryScheduled=0`），同窗口裸 `AgentHarness` 单会话 0 空。本补丁按任务书 §4.1「同一业务会话多轮交互复用同一个 Pi Session；不允许每回合重建丢失上下文的 Pi Session」做**最小改动**修复。提交 **`7e20fbd`**（`git show --stat` = 4 files / +454 −42），**未烧真实模型**（确定性夹具 + 假模型）。
+
+### 1. 工作区核验（本会话实跑）
+
+- `git -C ~/projects/fshine-agent-exp-pi-session rev-parse --show-toplevel` = `.../fshine-agent-exp-pi-session`（**≠ 主仓**）；`--abbrev-ref HEAD` = `exp/pi-native-session-compaction`；登记前 `git status --short` **空**；HEAD = `7e20fbd`。**通过。**
+
+### 2. 根因（每回合重建会话）
+
+- `packages/agent/src/pi-driver.ts`（改前）`run()` 体内每回合 `new MemorySessionRepo()` → `repo.create` → `AgentHarness.create(...)` → `harness.lane('main')`，`finally` 每回合 `harness.close(...)`；为在新空会话上续上下文，每回合把宿主投影转录（`projectTranscript` 产出的「摘要 + 保留尾段」）重新 `appendMessage` 灌一遍。
+- 后果：Pi 的 session entries / usage·阈值估算 / 压缩条目 / 溢出恢复所依赖的会话状态**回合间不连续**；降窗压缩后下一回合是以「【此前会话摘要】+ 尾段」起头的新会话，叠加新请求即触超窗、`length` 恢复失败 → 空回复。**违反 §4.1。**
+
+### 3. 改法（最小改动，不引第二套会话/压缩机制）
+
+1. `packages/agent/src/pi-driver.ts`
+   - 新增构造期开关 `PiTurnDriverOptions.reuseConversation?: boolean`（**缺省 false** = 每回合一次性，Worker/直测行为不变）。
+   - 抽出 `openConversation()`；`reuseConversation` 时**本驱动实例首次 run 创建一次并持有**，后续 run 复用（会话生命周期随业务会话、不随回合）。
+   - 事件 listener 随会话注册一次；`retry_scheduled` / `run_end` 归因改为 per-run 槽 `slot.current`（不随回合重复订阅、不只认首回合）。
+   - 每回合 `harness.setTools()` + `lane.setActiveTools()` 换本回合工具闭包（`exec`/`onStep` 不钉死首回合）。
+   - 投影转录改**增量追加**：记住上一回合交回的 `lastProjected`，后续回合只追加 `input.messages` 相对它的新增尾部（生产上即新注入事实 + 新用户消息）；不再重灌历史。宿主转录与 Pi 会话不再同源（异常路径）→ 重建会话并全量追加（正确性优先）。
+   - `plannerMessagesToLlm` 补 `role=compactionSummary` → provider user 文本：复用会话时 Pi 原生摘要须进请求，否则压缩后摘要对模型不可见（改前该角色被投影器丢弃，靠宿主重灌摘要伪装可见）。
+2. `scripts/ask-runtime.ts:475`：`assembleSessionCore` 缺省装配**仅 Main 驱动**传 `reuseConversation: true`（会话对象由 server 按 `(principal, session)` 缓存）；**Worker 驱动保持每回合一次性**（每委派任务独立会话，不跨任务串上下文）。
+
+- **未新增第二套会话/压缩机制**；压缩触发/摘要/尾段/溢出恢复仍全部归 Pi；**A 口径不变**。
+
+### 4. 验收（本会话实跑，零真实模型）
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| ① typecheck | `npm run typecheck` | **0 错误** |
+| ② 全量单测 | `npm test` | 84 文件 / 877 例：**876 通过，1 失败**（见下） |
+| ③ 回归（本缺陷反向绊线） | `npx vitest run packages/agent/pi-native-long-lived-session.test.ts` | **3/3 通过** |
+| ④ T1–T12 | `npx vitest run packages/agent/pi-native-compaction.test.ts` | **32/32 通过** |
+
+- **② 的唯一失败为既有问题，与本次改动无关**：`scripts/p0-assembly-single-point.test.ts` 报 `scripts/eval/pi-native/r5p4-bare.ts` 第二装配点；`git show --stat 1331b51` 显示该夹具由**阶段四评测夹具提交**引入（`r5p4-bare.ts` +300），`git show --stat 7e20fbd` **不含** `r5p4-bare.ts`。**例数 877 未减**。
+- **③ 新增 `packages/agent/pi-native-long-lived-session.test.ts`（3 条）**：①**机制绊线**——spy `MemorySessionRepo.prototype.create`，`reuseConversation` 下同一驱动连跑 5 回合**只创建 1 个 Session**；缺省（每回合一次性）基线 5 回合 = 5 个会话（该断言即反向绊线：实现回退成逐回合重建则 ① 先红，报 `expected 5 to be 1`）。②**行为回归**——假模型（provider 派发前按窗口执法，超出返回溢出错误）、`W=8192`、12 回合长历史 → **每回合回复非空**、任何请求 `over=0`、峰值 ≤ 窗口、发生 ≥2 次 Pi 原生压缩且压缩后宿主投影仍见 Pi 原生摘要。③**工具闭包**——两回合各触发一次工具调用，`exec`/`onStep` 分别为本回合闭包。
+- **④ 业务边界不变量不退化**：tool 配对 / principal·session 隔离 / 不重复执行等沿用既有用例，均在 ② 全量套件内通过；Worker 每回合一次性语义由 ① 基线断言兜底。
+
+### 5. 硬边界遵守
+
+- **不改** Worker 提示/任务账本/执行契约语义；**不放宽 A 验收口径**；**不引** Runtime 治理；**不重引入**自研压缩。改动仅：`packages/agent/src/pi-driver.ts`、`scripts/ask-runtime.ts`、新增 `packages/agent/pi-native-long-lived-session.test.ts`、新增 `docs/product/exp-pi-native-long-lived-session.md`（4 files）。`.runtime/` 未入库。
+
+### 6. 局限（如实）
+
+- 确定性夹具**无法复刻真实 provider 的 `finish_reason=length, output≈1`**；在假模型下「每回合重建」与「复用会话」的内容投影等价，故**行为**反向绊线由**机制**绊线（Session 创建次数）承担，**空回复归零仍需阶段四同类真实模型复跑确认（本次未跑真实模型）**。
+- 复用会话在进程内持有 `MemorySessionRepo`（纯内存、无定时器），随驱动实例/业务会话释放；未新增显式 `close` 表面（`TurnDriver` 契约未变）；server sessions map 不驱逐成功会话（沿用既有，未新增清理）。
+- 同一驱动实例的并发 `run()` 未加锁；生产按 `(principal, session)` 串行化回合、Worker 驱动一次性，当前无并发复用路径。
+
+**指针**：`packages/agent/src/pi-driver.ts`、`scripts/ask-runtime.ts:475`、`packages/agent/pi-native-long-lived-session.test.ts`、`docs/product/exp-pi-native-long-lived-session.md`、提交 `7e20fbd`；关联 §七十八–§八十四。**未烧真实模型。**
+
+**状态：实验分支·待裁决。**（product 装配链单长生命周期会话已改并过确定性验收；真实模型空回复归零待阶段四复跑确认；待 owner 裁决。）
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
