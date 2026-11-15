@@ -489,14 +489,15 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // （镜像 inline ⑮ 的拒绝形状），不进入执行；有排队位时受理为 queued（队列 = 底账
       // queued 行，runner 不据 policy 排队许可直派发）。旋钮解释归 policy（单一配置源）。
       if (policy !== undefined) {
-        const background = policy.snapshot().background;
-        if (background.active >= background.limit) {
-          const probe = policy.acquire('background', { taskId });
-          if (probe.ok === false) {
-            return rejectedBackgroundDelegation(taskId, request, probe.message);
-          }
-          policy.release(probe);
+        // P0-C 审计修复：受理即以真实 taskId 探测准入（不再只在池满时探测）。除保留池满
+        // 确定性拒绝外，这一步让 policy 在受理时建立该任务的共享预算（§2 budgets 以
+        // acquire(taskId) 为建账入口）——否则 runner.pump 的匿名许可使 meterRound 的
+        // budgetFor(taskId) 全部落「未知任务预算」而静默跳过，后台回合实际消耗不入账。
+        const probe = policy.acquire('background', { taskId });
+        if (probe.ok === false) {
+          return rejectedBackgroundDelegation(taskId, request, probe.message);
         }
+        policy.release(probe);
       }
       const accepted = taskRunner!.submit({
         taskId,
