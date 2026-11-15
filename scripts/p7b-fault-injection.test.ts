@@ -181,6 +181,7 @@ interface AssembleOptions {
   notificationSink?: NotificationSink;
   backgroundConcurrency?: number;
   queueCapacity?: number;
+  taskBudget?: { ms: number; calls: number };
   runnerOptions?: { leaseMs?: number; now?: () => Date; owner?: string };
 }
 
@@ -208,6 +209,7 @@ async function assembleBackground(options: AssembleOptions): Promise<Awaited<Ret
       dispatchMode: 'background',
       backgroundConcurrency: options.backgroundConcurrency ?? 1,
       queueCapacity: options.queueCapacity ?? 0,
+      ...(options.taskBudget === undefined ? {} : { taskBudget: options.taskBudget }),
     },
     ...(options.taskExecutor === undefined ? {} : { taskExecutor: options.taskExecutor }),
     ...(options.notificationSink === undefined ? {} : { notificationSink: options.notificationSink }),
@@ -671,6 +673,42 @@ describe('P7-T06 故障注入 · ⑤ 池满（backgroundConcurrency=1 + queueCap
       expect(rows.some((row) => row.kind === 'resource_limited')).toBe(true);
     } finally {
       gate.resolve({ kind: 'failed', reason: '（测试清理）' });
+      await settleQuietly(assembled);
+      assembled.close();
+    }
+  });
+});
+
+describe('R5 前置批 P0-C 回归 · 后台回合计入任务预算（受理即建账）', () => {
+  it('真实装配下后台回合 consume(calls=1) 入任务预算；预算耗尽后同任务接续被拒', async () => {
+    const dbPath = path.join(tempDir(), 'state.db');
+    const executor = new FakeExecutor([
+      async () => ({ kind: 'needs_input', question: { missing: ['x'] } }),
+      async () => ({ kind: 'failed', reason: '（测试）预算耗尽不得再执行' }),
+    ]);
+    const records: MainDriverRecord[] = [];
+    const plans = new Map<string, MainPlan>([['查一下', { delegates: ['查一下'], reply: '已受理。' }]]);
+    const assembled = await assembleBackground({
+      dbPath,
+      taskExecutor: executor,
+      notificationSink: new FakeSink(),
+      mainPlans: plans,
+      records,
+      taskBudget: { ms: 1_000_000, calls: 1 },
+    });
+    try {
+      const turn = await assembled.session.send('查一下');
+      const taskId = turn.taskIds[0]!;
+      await assembled.runner!.whenIdle();
+      expect(assembled.taskRegistry.get(taskId, SCOPE_A).status).toBe('waiting_user');
+      // 修复前：runner.pump 匿名许可 → budgetFor(taskId) 抛「未知任务预算」→ meterRound
+      // 静默跳过（后台实际消耗不入账）。修复后受理即建账，回合照计。
+      expect(assembled.policy.budgetFor(taskId).used.calls).toBe(1);
+      // 预算 calls=1 已耗尽：同任务接续被确定性拒绝，不产生第二次执行。
+      const resumed = assembled.runner!.resume(taskId, { answer: 'x', scope: SCOPE_A });
+      expect(resumed).toEqual({ outcome: 'rejection', taskId, reason: 'budget_exhausted' });
+      expect(executor.calls).toHaveLength(1);
+    } finally {
       await settleQuietly(assembled);
       assembled.close();
     }

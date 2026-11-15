@@ -1398,6 +1398,47 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 五十五、R5 前置批 · 预算精确复算 + P0-C 五项确定性审计 + P0-B 实测核实（2026-11-15，分支 `arch/r5-preaudit`）
+
+- **状态**：**待合入**。
+- **分支/基线**：worktree `~/projects/fshine-agent-r5-preaudit`，分支 `arch/r5-preaudit`；基线 = `arch/integration` 启动时 HEAD `502d98d`。本批**零真实模型额度**（不跑 eval、不跑真实 ask；P0-B 用确定性假件，未发任何真实请求）。
+- **提交链**（身份显式 `Tao <34084876+phona@users.noreply.github.com>`）：`930265e`（P0-B 报告）→ `6a5ade1`（P0-C 审计修复 + 回归）；本条目为 docs 追加提交。产物：`.runtime/r5preaudit/ledger.md` / `p0c.md` / `p0b.md`。
+
+### ① 预算精确复算（`.runtime/r5preaudit/ledger.md`）
+
+- **口径**：按唯一运行标识（worktree + out-dir）去重；每运行分别统计**创建会话数 / 实际模型调用数 / 无效样本数**，三者不混计；superseded / hung / invalid 一律计入消耗（真实烧了额度），不抹除。
+- **结论（严格口径累计，14 个真实运行 + 各 gate 目录 0/0/0）**：
+  - **创建会话 150**（18+18+7+18+18+18+9+6+4+4+3+3+6+18）；
+  - **实际模型调用有记录 707 次**；hung 两批另有 ≥6 次未落盘调用（进程 143 终止、meta 未写、精确数不可考，按日志 `pi_driver_empty_reply` 次数登记下界），**下界 713**，未虚报；
+  - **无效样本 39** = superseded 25（bizprobe2 r2 的 18 + r3 的 7）+ invalid 6（compaction-run1）+ hung 8（run2/run3 各 4）。
+- **与既有台账 125/150 对账**：台账 L1201/L1202 只按 step37 重跑计 r2=41、r3=40，漏掉了被 superseded 的 `r2`（18 会话/43 调用）与 `r3`（7 会话/≥6 调用，运行中断、无 report.json、meta 仅落 3 份但 work/ 下 7 个 `db/state.db` 证会话均创建）——**低估 25 个会话**。r2 与 r2-step37 的 meta 内容不同，核实为两次独立真实执行，非重复计数。
+- **修正后余额**：严格口径已消耗 150/150，原余额 0；owner 已批 **150→170**，本阶段新增上限 20，即当前可用额度 20（仅限本阶段）；后续任何真实模型批次须 owner 先确认在 20 内或再扩容。逐批数字与 report.json 路径见 ledger.md 明细表。
+
+### ② P0-C 五项确定性审计（`.runtime/r5preaudit/p0c.md`，提交 `6a5ade1`）
+
+- **① 取消已发出但 Worker 未退出时并发许可不提前释放：通过，无缺陷**（许可释放在 settle finally，不发生在实际执行结束前）。
+- **② Worker 取消后实际模型调用与资源消耗仍被计入：发现真缺陷**——生产路径后台回合的 taskBudget 计量被**静默跳过**：runner.pump 用匿名许可 + 旧受理侧仅池满时才探测 → `budgetFor(taskId)` 抛「未知任务预算」→ `meterRound` 静默跳过，后台任务实际消耗（calls/ms）从不入 taskBudget。
+- **③ finally 路径覆盖异常/取消/超时不漏计：通过，无缺陷**。
+- **④ budgetFor 可选端口不让正式后台执行绕过预算策略：与②同根因**（可选端口在匿名许可路径上失效，即②的静默跳过形态）。
+- **⑤ 取消/重复提交/幂等重放不产生重复执行或重复计量：通过，无缺陷**（submit 对重复 taskId 确定性拒绝；落定后 finally 一次计量、之后不再消费）。
+- **最小修复**（仅 3 文件 +344/−7）：execution-runtime 后台受理无条件以真实 taskId 探测准入（保留池满确定性拒绝语义），探测即建账，meterRound 不再落空。**红→绿实证**：新增 `packages/agent/r5preaudit-p0c.test.ts` 8 例（runner + 真实 policy）+ `scripts/p7b-fault-injection.test.ts` 真实装配端到端 1 例；stash 修复先红后绿。`npm run typecheck`=0、`npm test` **794 passed** 只增不减（基线 746）。不扩产品范围、冻结面未触及（`queueCapacity>0` 上界维持 §五十四的只登记不改）。
+- **回退**：`git revert 6a5ade1`（及本条目提交）。
+
+### ③ P0-B 实测核实（`.runtime/r5preaudit/p0b.md`，提交 `930265e`）
+
+- **结论：通过，未发现行为缺陷**。强制压缩前后的实际 token 估算（T/Δ/LIMIT）与首条请求路径（INV 复核在 run() 请求前生效，不依赖 transformContext 是否先执行）均以**确定性假件实测**成立，非仅单元公式。零真实请求、零模型额度。
+- **观察项（不构成缺陷，不改码）**：`pi-driver.ts:658` 关于 transformContext 时序的注释与依赖事实不符，已登记；按最小改动纪律不动。
+
+### ④ 独立复核结论
+
+- **passed=true**（实际复核实跑：核三口径复算与 125/150 差异根因、P0-C 五项判定与最小 diff/回归红绿、P0-B 假件实测证据、零额度约束遵守）。
+
+### ⑤ 边界与回退
+
+- 本批不改冻结面、不扩产品范围；修复仅 P0-C②④ 一处最小 diff。回退按上述各 `git revert`。hung 批精确调用数不可考，按日志下界登记，**不得**事后补估为精确值。台账 125→150 修正即刻生效，后续批次的额度申报一律以严格三口径为准。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
