@@ -2271,6 +2271,81 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 
 **局限**：128k 生产窗口未实测——所有等价性/回归读数来自单测与夹具（缺省 128k 为常量构造，非真实 128k 会话）；生产 128k 下 emergency 线触发频率无读数、不外推。本条 `文件:行号` 以分支 `arch/r5-d23` 为准（与 R5-C 计量合入后主仓行号已漂移，以主仓代码复核为准）。
 
+---
+
+## 七十七、R5 · Pi 压缩复用评估（Pi-First：既有编排复用 vs 自研切片）· 归档登记（2026-11-15，分支 `arch/r5-piopt`，基线 = `arch/integration` @ `c2f3f5e`）状态：**待合入**
+
+> 角色：本 worktree 为并行调研的**唯一仲裁节点**。评估「能否在 Agent Core 路径直接复用 Pi 压缩编排」的可行性、公开/内部 API 边界、迁移 Session 的可删范围与影响面。配套五文档：`docs/product/pi-compaction-api-audit.md`（导出面/公开 vs 内部）、`pi-compaction-options.md`（A/B/C/S/T 对照）、`pi-compaction-poc.md`（实测）、`pi-compaction-migration-plan.md`（方案 A 实施）、`pi-compaction-decision.md`（可机检摘要）。
+
+### 1. 评估范围与版本口径
+
+- **范围**：① 能否在 Agent Core 路径直接复用 Pi 压缩编排；② 是否存在稳定公开 API；③ 迁移 Session 能否真删自研压缩；④ 影响面（多 principal / 异步取消通知 / 装配同源 / 复制源码）。
+- **锁版本口径（亲验）**：`package.json:11-12` 声明 `@earendil-works/pi-agent-core`/`pi-ai` `^0.85.1`；lockfile 锁定 **0.85.1**；本会话 `node -e "require('./node_modules/@earendil-works/pi-agent-core/package.json').version"` → **`0.85.1`**。跨 worktree 仅此单一版本，**无版本混谈**。下列行号均为 0.85.1 分发物 `dist/**` 与当前 `packages/agent/src/pi-driver.ts`。
+- **公开 API 判则**：符号须被根入口 `.`（`dist/index.d.ts`）re-export **或**位于 `package.json` `exports` 子路径内，才可能被消费者 `import`；否则即使函数存在也是**内部 API**，不得当稳定公开 API。亲验 `exports` 仅 8 入口（无 `./harness/compaction/*`）；`dist/index.d.ts:8` 一行 re-export 压缩面 16 符号（`compact`/`prepareCompaction`/`shouldCompact`/`estimateContextTokens`/`estimateTokens`/`generateSummary`/`findCutPoint`/`DEFAULT_COMPACTION_SETTINGS`…）。
+
+### 2. B 可行性结论（压缩前无状态预判）
+
+- **定形**：B = A + 在 `splitForCompaction`（`pi-driver.ts:384`）后、`summarizeWithinWindow`（`:441`）前插入**纯函数**预判（NOT_WORTH ⇒ 不发摘要调用）。设计见 §七十（`compactTranscriptWithPi` 前置判定两式：`tokensAfter ≥ keptTok + summaryFloor` 则跳过）。
+- **结论：可行但「待证」，不予本轮实施**。前置为新增机制准入五条（AGENTS.md）+ **128k 生产窗口复测**，二者**均未完成**；其证据前置 C（观测）亦未完成。
+- **缺陷真实性已实测**：PoC ②b/⑥ 复现「有 prefix 但尾段自身超目标时仍发起摘要且 `tokensAfter ≥ tokensBefore`」的零收益调用（本会话亲跑，见 §4）；与 §六十九 的 55/79 零收益结构同源。
+- **风险可控性**：预判为「跳过决定非失败」，误判有**三重既有兜底**——`transformContext` 原样返回（`pi-driver.ts:701-711`）、overflow 臂 `tokensAfter>=tokensBefore` break、`run()` INV 臂抛错→catch（`:669`→`:676-678`）。预判无状态（无双计数器/无冷却器），**不引入第二套会话状态**。
+
+### 3. C 影响面结论（现状 + 观测落盘）
+
+- **C 本体：可行（纯观测）**——不改编排，落盘摘要正文 + 计量观测（§七十一 六项计量已落）。
+
+  **复用整套编排（S/T）的影响面（静态分析，未做迁移原型）**：
+- **多 principal**：fshine 会话身份是确定性不变量——`Session` 携带 `readonly principalId`/`sessionId`（`packages/agent/src/execution-runtime.ts:279-288`），据此建 `TaskScope` 与任务归属校验；而 Pi `SessionMetadata` 只有 `id/createdAt/storageVersion/cwd/parentSessionId/…`（`node_modules/@earendil-works/pi-agent-core/dist/harness/session/types.d.ts:399`），**无任何 principal/归属概念**。⇒ 迁 S 后 principal 仍只能留 fshine 侧，Pi Session 退化为纯转录容器，压缩产物与任务 scope 之间**多一层搬运与对账**；归属纪律不被 Pi 破坏（Pi 不碰 task），但多 principal 隔离更依赖 fshine 不变式。
+- **异步取消 / 通知**：取消是执行层生命周期复用（`task_cancel` 直接 `runner.cancel(...)` 原样转述 `CancelOutcome`，`execution-runtime.ts:408-413`）；通知是**独立 outbox**（`packages/agent/src/notifications.ts:1-20`，投递成败不改任务结果，含 `cancelled` 意图 `:28-40`）。两条链**均不依赖会话转录/压缩产物** ⇒ 迁 S **对异步取消通知无影响**。
+- **装配同源**：生产装配在 `scripts/ask-runtime.ts:305`/`:475` 调 `createPiTurnDriver`，其模型运行时**由 env 构造的真实 Pi runtime**；PoC 直接调生产函数并注入**确定性假 `PiModelRuntime`**（`scripts/eval/piopt/piopt-phase3.test.ts:37-106`，不发网络请求）。⇒ PoC 结论只在该**函数层**成立，**未在 `ask`/`eval` 真实装配下复验**（结论已降级，登记为未验证）。
+- **选项 T（内存 Session 只借上下文管理，不迁整套）**：可行但有硬约束——`./harness/session` 在 exports 子路径内，`MemorySessionRepo` 可达；但 `StorageBackedSession` 自述「**Package-internal typed boundary**」（`node_modules/@earendil-works/pi-agent-core/dist/harness/session/session.d.ts:35`），按判则**不得当稳定公开 API**；且 `AgentOptions` **无 session 字段**（`agent.ts`），fshine `new Agent(...)` 无法把 Pi Session 接进循环，镜像须**手工**由转录灌入。⇒ T = 「多一套内存转录 + 一个灌入适配层」，只省中间两段，仍删不掉 INV/缩放/裁剪/降解四处；**判据仍指向 A，T 仅登记，未做原型、未验证**。
+
+### 4. PoC 已测 / 未验证
+
+**已测（本会话亲跑 `TMPDIR=/home/tao/.tmp npx vitest run scripts/eval/piopt/piopt-phase3.test.ts` → `Test Files 1 passed (1)`；`Tests 11 passed | 3 todo (14)`；`722ms`）**，对生产函数 `compactTranscriptWithPi`（`pi-driver.ts:532-618`）与 `createPiTurnDriver().run()` 的机械行为，确定性假模型驱动：
+- ① 有效压缩：`29649→20460`，首条原生摘要、严格下降并回落阈值下、当前回合保留。
+- ②a 未越阈值：`summaryRequests.length==0`，原样返回。
+- ②b/⑥ **零收益调用复现**：`5011→5042`、`5042→5042`，每轮 `summaryChunks≥1`（缺陷真实，§七十 precheck 未实施故未被避免）。
+- ③a/③b **有界失败**：no_cut 且超 LIMIT 时一次请求都不发（`streamCalls()==0`，发 `context_invariant_violated`/`pi_driver_context_invariant_rejected`）。
+- ④ 保护当前回合；⑤ 摘要输入有界（`promptTokens+maxTokens ≤ window`）且尾段内 `toolResult` 原文字节一字不改；⑦ 机制面保留清单（对象标识/游标/未决问题）送达；⑧ **执行事实独立于转录**——转录压掉 `ORD-…` 后 `task-registry` 仍原样读回 `taskNo/name/resultText`。
+
+**未验证（不默认通过）**：
+- ⑦ 摘要正文的**语义质量**（无损保留与否）——需真实模型判质量，本轮零付费，**未验证**。
+- ②b/⑥ 在 **128k 生产窗口**的命中率与用户级影响——无真实长会话读数，**不外推**（PoC 几何取自 W=8192）。
+- ⑤ 大型工具结果在**执行层侧**的裁剪策略——PoC 只覆盖驱动消费侧，**未验证**。
+- Pi harness `structural.js` overflow 管线（`prepareOverflowCompaction`）**未运行**（只读静态阅读）。
+- PoC 与**生产装配不同源**（§3）：已测项仅在函数层成立，**未在真实装配复验**。
+- S/T **无迁移原型**；对多 principal 的影响为源码静态分析。
+
+### 5. 成本核算
+
+- **A（删重收敛 D1+D2+D3）**：净删约 **26 行**（`run()` 请求前 INV 复核臂 `pi-driver.ts:661-686`）+ 注释改写 3 行（`:658-660`）+ 常量合并（`:657`/`:661` 二写合一）；**无新机制、无新状态、不新增文件**。收益 = 单一来源、消灭三处重复。**D3 恒等（代数可证）**：`EMERGENCY_OVERFLOW_HEADROOM_TOKENS=1024`、`MIN_OUTPUT_BUDGET_TOKENS=1024`（`pi-driver.ts:31/292`）⇒ `emergencyHeadroom = max(1024, Δ+1024) ≡ Δ+1024`，其阈值 `W−emergencyHeadroom = W−Δ−1024 = invariantLimit`（`:657` vs `:661`），二源同值。
+- **S/T（迁/挂 Session 复用整套编排）**：收益 = 至多少维护约 **100–150 行**编排；代价 = 引入第二套会话状态 + 同步对账 + 一处新失败面 + 迁移风险，且**仍删不掉** INV 不变式（`:266-307`）、窗口缩放 `compactionSettingsFor`（`:324-344`）、产物裁剪 `trimToBudget`（`:481-491`）、确定性降解 `degradeByDropping`（`:498-515`）四处（Pi 0.85.1 无对应物）。**代价 > 现有编排的最小修复 ⇒ 判据要求明确建议不迁移**。
+- **复制 Pi 源码**：**判据层面否决**——AGENTS.md 明令「不能把复制 Pi 源码包装成复用 Pi」。现状 fshine **仅从根入口 `import` 公开原子件**（`pi-driver.ts:6`），**未复制**；`compact`/`prepareCompaction` 本就公开可 `import`（约束在其输入类型 `Entry[]`，非可达性）。
+
+### 6. RECOMMENDED_OPTION 与 DECISION_REQUIRED
+
+```
+RECOMMENDED_OPTION=A(条件式)     # 删重收敛 D1+D2+D3
+NOT_RECOMMENDED=[S,T]            # 整套迁 Session / 内存 Session 只借上下文管理
+COPY_PI_SOURCE=false            # 复用靠 import，不复制 Pi 源码（判据否决）
+PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
+```
+
+**DECISION_REQUIRED**：
+1. 是否采纳 **A（条件式）**，并授权实施前**先跑反向绊线**（migration-plan §4 矩阵第 6/7 项）作为落地 Gate。
+2. **A Step 3（删 `run()` INV 复核臂）的「失败面等价性」未验证**——`transformContext` 抛错时 Agent 路径是否产生等价于 `pi_driver_context_invariant_rejected` 的可观测失败面，是 D1 能否落地的关键未知；须由 Step 0 绊线关闭，否则 D1 回退（仅保留 D2/D3）。
+3. **B 是否推进**（前置：C 观测证据 + 128k 复测 + 新增机制准入五条）。
+4. **S/T 是否仅登记不推进**（本评估建议不推进；未做原型）。
+
+### 7. 未实施任何迁移
+
+- **产品代码零修改**：`packages/`、`apps/` 未改；**未升级 Pi**（`package.json`/lockfile 未动）；不改 Worker 提示；不重设计会话架构；不迁移/删除现有压缩编排。
+- **本轮新增仅**：`scripts/eval/piopt/piopt-phase3.test.ts`（431 行，PoC）+ 5 篇 `docs/product/pi-compaction-*.md` + 本条日志。`.runtime` 未 `git add`。
+- **回退**：本评估为 docs + 隔离测试追加，`git revert` 对应提交即可；不 push / 不合并 / 不碰 main/tag。
+
+**指针**：`docs/product/pi-compaction-api-audit.md`、`pi-compaction-options.md`、`pi-compaction-poc.md`、`pi-compaction-migration-plan.md`、`pi-compaction-decision.md`；生产代码 `packages/agent/src/pi-driver.ts`；关联 §六十九（归属审计）、§七十（B 设计）。
+
 **状态：待合入。**
 
 ---
