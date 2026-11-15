@@ -2461,6 +2461,64 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ---
 
+## 七十九、R6 · 预注册修订与 Harness 建设（2026-11-15，分支 `arch/r6-harness`，基线 = `arch/integration` @ `e2d12bd`）状态：**待合入**
+
+> 本轮 = R6 的**预注册修订 + Harness/Oracle/证据采集基建 + 确定性测试**。**零真实模型调用、零真实平台/凭据**；**产品代码零改动**（`packages/**`、`apps/**` 未动，`git diff e2d12bd..e980e3a -- packages apps` 为空）；观测面**只采集事实、不改压缩触发/门控**。逐条落实 owner 裁决（窗口政策 / G1G2G3 / 五条硬改）。
+
+### 1. owner 裁决逐条落实
+
+- **① 窗口政策 = 混合（冻结）**：Wave1 每轨 **2×40k 探索 + 1×128k 生产窗口可行性**，五轨合计 **15**。40k 结果**只用于**验证压缩生命周期机械事实/测试设施/缺陷复现，**不外推生产**；128k 会话**必须确认实际模型能力与生产装配一致**（G3-M2，不得靠缩窗或注压缩量冒充）；**两组分别报告**（预注册 §2.1 / §七.1）。
+- **② 入口门槛 G1/G2/G3**：G1（阶段一 GO）、G2（阶段二原型实际证明「压缩由 Pi 原生 Session/Harness 自动触发执行」，非旧 fshine 编排或手动调压缩函数）**已达成**；G3（真实模型/窗口装配/Dummy 隔离/principal 隔离/证据采集）**确定性部分已落地并自验**，**真实模型项标注「待 Wave1 前冒烟」**。三者齐备 → **授权自动启动 Wave1（不再申请）**；任一不满足 → 停止交证据（预注册 §七.2）。
+- **③ 五条硬改**：
+  - ③.1 **CMP1–CMP9 / H6 / FI-1–FI-3 全部改为面向 Pi 原生生命周期**的行为判据，**不再绑定 fshine 私有事件/函数/重试常量**（`splitForCompaction`/`MAIN_MODEL_RETRY_DELAYS_MS` 等仅出现在**禁令语句**中，见预注册 §105/§312、harness §155；阈值为**预注册数字**：零收益连串上限 2、单回合调用上限 4、摘要分片上限 16）。
+  - ③.2 **三态处置（覆盖不足/环境中断/产品故障）分离，冻结**：优先序 **product_fault > environment_interrupted > insufficient_coverage > valid**；**产品故障触发的硬停/无法完成压缩样本保留并判负，不得简单作废**（防幸存者偏差）；实现 `scripts/eval/r6/evidence.ts` `classifySample`（预注册 §2.5）。
+  - ③.3 **统计功效诚实**：废止「新臂 Wilson 下界 ≥ baseline − δ」类**数学上几乎无法通过**的门槛（N=15 时 Wilson 下界上限 ≈0.796）；改为**差异区间**（Newcombe，仓库已有 `newcombe95`/`classifyV2`）；**Wave1 一律不作可靠性概率结论**；**Wave2 的 N/δ/检验形态整体待重新裁决**（预注册 §2.4）。
+  - ③.4 **删除旧「全局配额已满」阻塞描述**，保留**单实验硬停 + 真实模型调用完整计量**（预注册 §6.1）。
+  - ③.5 **128k 大载荷压力测试与普通业务多轮交互分开归因**（`TurnSpec.kind`），**不把人工大载荷压力结果外推成日常业务可靠性**（预注册 §3.7、harness §2.5）。
+- **④ 架构纪律**：不改 Worker 提示；不新增 fshine 自研压缩机制；**不因评测失败擅自给 Pi 增加宿主侧压缩治理**；**Pi 迁移失败时如实报告，不用旧机制暗中兜底制造通过结果**（预注册 §〇、harness §十）。修订后 **Wave1 口径冻结**（见下 §6）。
+
+### 2. 交付物（修订版 v2）
+
+- `docs/product/r6-longsession-prereg.md` = **修订版 v2**：含 §〇 纪律、§一 T1–T5、§2.3 冻结失败分类 E-A..E-K、§2.4 统计口径+功效、§2.5 三态处置、§三 五轨 LS1–LS5、§四 UX 六指标（Wave1 只读）、§五 硬零 H1–H7、§六 单实验硬停/停止条件/会话有效门槛、§七 Wave 分阶段+窗口政策+G1/G2/G3、§十 故障注入 FI-1..FI-8（Pi 原生边界）、§十三 **Wave1 冻结口径块**。
+- `docs/product/r6-longsession-harness-design.md` = **修订版 v2**：§一 观测只采集事实不改触发/门控；§二 负载生成器；§三/§四 事实 Oracle / Task Registry Oracle；§五 证据 schema（事实字段）；§七 FI-1..FI-3 Pi 原生边界；§八 复用与缺口；§十 边界与提交纪律；§十一 测试基建说明与运行方式。
+
+### 3. 测试基建（`scripts/eval/r6/`，测试代码，产品码零改动）
+
+`oracle.ts`（事实 Oracle + `judgeTaskContinuity` 任务 Oracle）、`compaction.ts`（`R6_COMPACTION_BOUNDS` + `analyzeCompaction`/`judgeCompactionLifecycle`）、`load-generator.ts`、`evidence.ts`（`collectEvidence`/`classifySample`）、`harness.ts`、`g3-readiness.ts`、`fake-session.ts`（测试支持）。共 13 文件（7 模块 + 6 `.test.ts`）。
+
+### 4. 确定性测试读数（**本会话实跑**）
+
+- 命令：`npx vitest run scripts/eval/r6`（cwd = R6 worktree，`TMPDIR=/home/tao/.tmp`，零网零 key、假模型）。
+- 结果：**Test Files 6 passed（6）；Tests 51 passed（51）**。覆盖：事实 Oracle（exact/unanswerable/clarify/session_value + 会话聚合）、任务 Oracle（H3/H4/H5/E-G/五态）、压缩生命周期（有效数/零收益连串/H6.a/H6.b/覆盖不足/证据缺口）、负载生成器（逐轨计划/推进器确定性）、三态处置优先序与证据 schema、端到端管线（假会话）、G3 确定性四项。
+
+### 5. G3 就绪核查（确定性可验部分；`scripts/eval/r6/g3-readiness.ts` + `.test.ts`）
+
+- **确定性四项**（`runG3Checks`，全部 pass）：**窗口装配**（生产缺省窗口常量 = 冻结值，env 覆盖需显式登记）、**Dummy 隔离**（执行面根必须在仓内 dummy 夹具下且未开真实写；夹具外根须 fail）、**principal 隔离**（真实 Task Registry 上跑跨 principal 越权探针，必抛 `TaskOwnershipError`）、**证据采集**（假会话证据落盘 schema 齐全）。
+- **真实模型项**（可达性/128k 实际能力/生产同源装配）：`wave1SmokeItems()` 标注 `wave1-smoke-pending`，**不冒充通过**，**待 Wave1 前冒烟**。
+
+### 6. Wave1 冻结口径块（运行前不再改，运行后只追加报告）
+
+- **A. 逐轨构成**：五轨各 2×40k + 1×128k；10×40k + 5×128k = **15**。
+- **B. 窗口与报告**：40k `LLM_CONTEXT_WINDOW=40000`（只验生命周期/设施/缺陷复现，不外推生产）；128k 生产窗口（须与生产装配一致，G3-M2）；**两组分别报告、禁混池**。
+- **C. 冻结失败分类**：E-A..E-K；硬零 H1–H7；三态处置 §2.5。
+- **D. 单实验硬停**：`maxModelCalls=150` / `maxTokens=3,000,000` / `wallMs=2h`（长稳轨按设计时长）；**真实模型调用完整计量（含摘要调用）**。
+- **E. 会话有效门槛**：≥3 次有效压缩 + 窗口装配一致 + 无硬停 + 证据 schema 完整。
+- **F. 停止条件**：①硬停触达停留证；②任一硬零命中→整批 FAIL 停止；③infra 门失败→批次不开始；④同因连续失败（跨会话 ≥2）→停该轨登记 blocker。
+- **G. 生命周期判据上限（Pi 原生、冻结数字）**：零收益连串上限 2（≥3 判负）；单回合模型调用上限 4；单次摘要分片上限 16；每会话有效压缩下限 3（与 `scripts/eval/r6/compaction.ts` `R6_COMPACTION_BOUNDS` 同步）。
+- **H. 结论强度**：Wave1 **一律探索性**（只读、不判非劣效、不作可靠性概率结论）。
+
+### 7. 本轮未执行 / 局限（如实登记）
+
+- **零真实模型调用、零 128k 实测、零真实平台/凭据、未跑任何 Wave1 批次**；上述 51 项确定性测试为**假模型机械事实**，**不构成生产/模型行为结论**。
+- 真实模型、128k 实际能力、生产同源装配**未验证**（G3 真实模型项待 Wave1 前冒烟）。
+- **未进行泛化架构调研**（仅做落地所需最小核实）；**Wave2 方案待重新裁决**。
+
+**指针**：`docs/product/r6-longsession-prereg.md`、`docs/product/r6-longsession-harness-design.md`、`scripts/eval/r6/**`；关联 §七十八（R6 预注册与负载设计准备档）、§七十五（Pi 压缩复用评估、迁移未实施）、§六十五/§六十九（R5 W=8192 长稳，不得外推 128k）。
+
+**状态：待合入。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
