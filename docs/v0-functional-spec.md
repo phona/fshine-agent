@@ -1,6 +1,8 @@
 # fshine-agent 功能规格
 
-状态：当前实现基线
+> **状态（2026-11-15 注记）：本文件部分章节为已删机制的历史描述。** 正文 §4.1「申报本轮需要委派」「计划门按重量决定…」等宿主侧申报/计划门/预算梯子机制已随 Minimal Rewrite 删除（`grep -rn 'validatePlanEntities' packages apps scripts config` 零命中；`packages/contracts/src/execution-contract.ts:25` 明写「计划门与预算梯子归执行层，不在这里开第二份裁决面」）。现行口径以 `AGENTS.md` 现状节 + `docs/decision-log.md` §十一/§十三 为准；其余章节按历史基线阅读。
+
+状态：历史功能规格（原自述「当前实现基线」，见上注）
 
 架构：[`v0-architecture.md`](v0-architecture.md)
 
