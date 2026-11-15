@@ -2881,6 +2881,78 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ---
 
+## 八十六、MU-6 复跑 · 重启恢复（多 principal，B1 接线后）（2026-11-15，分支 `arch/r6-mu6`，基线 = `arch/integration` 启动时 HEAD `ebdaf71`）状态：**待合入**
+
+> 本轮 = R6 多用户确定性用例组（§八十二 MU-1～MU-10）中 **MU-6「重启恢复（多 principal）」** 的复跑落地：B1 接线（§八十五）已合入基线 `ebdaf71`，MU-6 的旧 `BLOCKED` 占位依赖解除，转为**真实确定性判据**。场景：≥3 principal 各**独立会话**同 `dbPath` 交办 → **关闭 server** → **同 `dbPath` 重建** → 各再发消息。**零真实模型 / 零真实平台 / 零真实写**（假渠道 + 假主驱动 + 确定性后台执行器 + 真实临时文件系统）。**复用既有装配**（`createServer` + `(principalId, sessionId)` 双键 + B1 `TranscriptStore` 接线）；**不以 `registry.get` 直调代替交互路径**（场景走 `server.handler`，判定读 Task Registry 只读快照）；**不建第二套会话 / 压缩机制**。
+
+### 1. 依赖与解锁
+
+- MU-6 旧版因依赖 **B1 会话持久化未合入**而标 `BLOCKED`（`mu-cases.ts` 旧版探测 `packages/agent/src/session-persistence.ts` 缺失即 BLOCKED）。
+- B1 接线已随 `ebdaf71 merge(b1-wiring)` 合入基线：`SessionPersistence` 接入 `createServer` 真实会话生命周期（打开载入 / 回合后增量持久化 / 写失败 fail-open）。依赖满足，MU-6 转为真实用例。
+
+### 2. 装配（复用，不建第二套）
+
+| 复用点 | 位置 | 作用 |
+| --- | --- | --- |
+| `createServer`（生产同源） | `apps/server/server.ts:100` | MU 经 `createMuServer` 走同一装配链 |
+| `(principalId, sessionId)` 双键会话缓存 | `apps/server/server.ts:163-208` | 逐 `(principal, session)` 独立句柄，物理隔离 |
+| B1 `TranscriptStore` 接线 | `apps/server/server.ts:119-120,170,191` | `openOrCreate` 打开即载入、回合后增量持久化 |
+| 会话存储根缺省 | `apps/server/server.ts:119` | `<dbPath 目录>/sessions` → 同 `dbPath` 重建即恢复 |
+| `close()` 释放 | `apps/server/server.ts:302-309` | 关停后同 `dbPath` 重建须先释放（否则读到陈旧内存态） |
+| Task Registry 只读快照 | `mu-support.ts:401-419` `readTasks` | 判定读 `TaskView` 快照，**非** `registry.get` 直调 |
+
+### 3. 场景形状（`scripts/eval/r6/multiuser/mu6-restart.ts`）
+
+- ≥3 principal：`mu-alice` / `mu-bob` / `mu-carol`，各一独立会话 `conv-<user>`（`sessionId = wecom:conv-<user>`）。
+- **background 模式**（唯此模式有 `runner.pump` 重启路径，③「任务不重放」才有机械意义）。
+- 每 principal 首回合 `delegate`（后台任务，请求原文含本人标记，如 `TAG-ALICE 重启前交办`）；次回合 `turn`（普通追问，如 `TAG-ALICE 重启后追问`）。
+- 假后台执行器 `TagKeyedExecutor` 按 `request` 派生**确定性**结果 `resultText = RESULT:<该请求标记>`（不依赖调用顺序）。
+- 步骤：`server1` 并发投递 3 首回合 → 等 3 任务 `completed` → `await server1.server.close()` → **同 `dbPath` / 同 `dir`** 重建 `server2`（新执行器 = 重放检测器）→ 各发次回合。
+
+### 4. 四断言判据（任一命中即 FAIL）
+
+| # | 断言 | 机械判据 | 硬零码 |
+| --- | --- | --- | --- |
+| ① | **各自转录恢复** | 次回合上下文含**本人**首回合用户原文与 assistant 回复（`messagesText` 检） | `cross_principal_leak` |
+| ② | **不跨 principal 串读** | 次回合上下文不含他人标记；每 principal 恰一任务且请求标记匹配、不含他人标记 | `cross_principal_leak` / `task_crossover` |
+| ③ | **任务不重放** | 重启后（pump + 追问回合）新 executor 调用计数 = 0 | `task_crossover` |
+| ④ | **结果找回** | 重启后经 Task Registry 取回首回合任务真实结果（`replyText === RESULT:<tag>`、`status === completed`） | `task_crossover` |
+
+> ②③④ 复用 `MuHardZero` 既有词汇（`cross_principal_leak` / `task_crossover`），**不扩张**硬零码集合。③ 重放 = 任务连续性违规，映射到 `task_crossover`；`evidence.replayCallsAfterTurn` 给出专属机械证据。
+
+**「不改既有 MU 判据」口径**：MU-1～5、7～10 的用例实现与断言**逐字未改**；MU-8 仍 `BLOCKED`。MU-6 本身即本任务落地对象（旧版是 `BLOCKED` 占位，**非既有判据**），故 `mu-cases.ts` 的 `mu6` 与 `mu.test.ts` 的 MU-6 断言由占位改为真实判据；`mu.test.ts` 汇总用例的 `BLOCKED` 期望由 `['MU-6','MU-8']` 收窄为 `['MU-8']`。
+
+### 5. 证据（**本会话实跑**；cwd = MU-6 worktree `arch/r6-mu6`，`TMPDIR=/home/tao/.tmp`，零网零 key）
+
+| 检查 | 命令 | 结果 |
+| --- | --- | --- |
+| 定向 | `npx vitest run scripts/eval/r6/multiuser/mu.test.ts` | **12 passed**（含 MU-6 PASS） |
+
+MU-6 实测证据落 `.runtime/r6/multiuser/MU-6/evidence.json`（**未** `git add`）：`hardZeroHits=[]`；`restored`（`mu-alice`/`mu-bob`/`mu-carol`）全 `true`；`transcriptViolations=[]`；`taskViolations=[]`；`replayCallsAfterPump=0`、`replayCallsAfterTurn=0`、`noReplay=true`；`resultRetrieval` 三 principal 全 `ok=true`（`status=completed`、`replyText=RESULT:TAG-ALICE` / `RESULT:TAG-BOB` / `RESULT:TAG-CAROL`）；`taskCountBeforeRestart=3`、`taskCountAfterRestart=3`（**未重放**）。
+
+**反向绊线**：临时把 `server.ts` 的 `transcriptStore` 置 `undefined` → MU-6 转红（`expected 'FAIL' to be 'PASS'`）；已 `git checkout` 复原。
+
+### 6. 五要素记录（一次实测；taskId 为 UUID 实例，逐字见 `evidence.json`）
+
+| principalId | sessionId | taskId | request | deliveredTo |
+| --- | --- | --- | --- | --- |
+| `wecom:mu-alice` | `wecom:conv-mu-alice` | `task_577a29ef-…7363656` | `TAG-ALICE 重启前交办` | `wecom:conv-mu-alice` |
+| `wecom:mu-bob` | `wecom:conv-mu-bob` | `task_1e547e2a-…fe92bb` | `TAG-BOB 重启前交办` | `wecom:conv-mu-bob` |
+| `wecom:mu-carol` | `wecom:conv-mu-carol` | `task_1bda94d7-…b457e5f6` | `TAG-CAROL 重启前交办` | `wecom:conv-mu-carol` |
+| `wecom:mu-alice` | `wecom:conv-mu-alice` | —（次回合无任务） | `TAG-ALICE 重启后追问` | `wecom:conv-mu-alice` |
+| `wecom:mu-bob` | `wecom:conv-mu-bob` | — | `TAG-BOB 重启后追问` | `wecom:conv-mu-bob` |
+| `wecom:mu-carol` | `wecom:conv-mu-carol` | — | `TAG-CAROL 重启后追问` | `wecom:conv-mu-carol` |
+
+### 7. 结论
+
+MU-6 在本基线（含 B1 接线）上 **PASS**：三 principal 同 `dbPath` 关停重建后，①各自转录恢复、②不跨 principal 串读、③任务不重放、④结果找回四类断言全部成立，硬零命中为空。未改产品码、未引第二套会话 / 压缩机制、未接真实平台 / 写、`.runtime` 未 `git add`。
+
+**指针**：`docs/product/r6-mu6-followup.md`（装配 / 判据 / 证据 / 五要素 / 结论）；`scripts/eval/r6/multiuser/mu6-restart.ts`、`mu-cases.ts`、`mu.test.ts`；关联 §八十二（MU 场景组）、§八十五（B1 接线）。
+
+**状态：待合入。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
