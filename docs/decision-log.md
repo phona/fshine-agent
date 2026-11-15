@@ -2521,6 +2521,78 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ---
 
+## 八十、B2 Silent Shadow 出站机械闸门（默认静默 / 六类路径覆盖矩阵 / 反向绊线 / 未联调待凭据）（2026-11-15，分支 `arch/wecom-silent-shadow`，基线 = `arch/integration` 启动时 HEAD `b90f12f`）状态：**待合入**
+
+> 本轮 = 企微只读影子的**出站侧机械闸门（B2）**：把「默认静默、机械覆盖全部用户可见发送路径、每次尝试可观测、实际用户可见投递 = 0」做成可核验的确定性机制。**零真实模型、零真实平台/凭据**（闸门用确定性替身夹具）；**未执行任何真实企微联调**（见 §6）。**不改 Worker 提示/任务账本语义，不引第二套压缩/会话机制。** 承接 §七十五（企微只读影子 E2E 准入审计 §五「已知落点」）。
+
+### 1. 机制：唯一传输面整体包裹（不是逐条堵）
+
+- **真实出站传输只有一条**——官方 SDK 的 `SdkClientLike`；适配器里**所有**用户可见发送路径最终都落到这个客户端的五个方法上（`replyStream` 同步回帧/进度/终态/降级目标、`sendMessage` 主动文字/终帧拒收降级、`sendMediaMessage` 主动文件/图片、`replyMedia` 被动图片/文件回传、`uploadMedia` 上传前置）。
+- **机械保障**：新增 `SilentShadowGate`（`packages/channel-wecom/src/silent-shadow-gate.ts`）把客户端**整体**包一层；适配器构造期包裹工厂出口（`adapter.ts:204` `this.clientFactory = () => this.gate.wrap(baseFactory())`），于是 `start()` 建出的客户端已是**被闸替身**，`reply()` / `notice` / `sendToConversation` / 降级分支全部经 `this.client`，无一漏网——覆盖收在**唯一出口**，不是逐条堵。
+- **缺省静默**：`resolveDeliveryMode`（`silent-shadow-gate.ts:154-160`）仅在**显式选项** `deliveryMode:'live'` 或**显式环境开关** `FSHINE_WECOM_DELIVERY=live`（逐字，`trim()` 后大小写敏感）下放行；未设/空串/其它值一律 silent。**不引入向真实平台的隐式回退。**
+- **放行（非投递）**：`on`/`connect`/`disconnect`（长连接是收消息前提）、`downloadFile`（入站附件下载）。静默影子因此仍是一条**忠实的干跑**：入站照收、回合照跑、投递被截。
+- **可观测证据**：每次被抑制的发送追加一条 `SuppressedSend`（时间/方法/是否用户可见/字节数——**不含正文**，避免把用户内容写进日志）+ 一行结构化日志 `wecom_silent_shadow_suppressed`；`channel.shadowEvidence()`（`adapter.ts:293-302`）返回 `{ mode, suppressed, userVisibleSuppressed, events }`；启动日志含 `deliveryMode`（`apps/server/main.ts` server_started）。
+
+### 2. 覆盖矩阵：六类路径 × 抑制 / 可观测 / 投递=0
+
+测试文件 `packages/channel-wecom/adapter.silent-shadow.test.ts`（13 例）+ `apps/server/server.test.ts` 端到端 1 例。底层是记录调用的替身 `DeliveryRecorder`；静默模式下它**全零**——即「实际用户可见投递 = 0」的直接读数。
+
+| # | 路径 | 触发 | 被抑制的底层调用 | 可观测证据 | 投递=0 | 用例 |
+| --- | --- | --- | --- | --- | --- | --- |
+| ① | 同步回帧（ACK） | 文本消息到达 | `replyStream`(ACK) | `reply_stream` | `sdk.userVisibleCalls===0` | `test.ts:135` |
+| ② | 进度 | `progress()` | `replyStream`(finish=false) | `reply_stream` | 0 | `test.ts:148`（3 条：ack+进度+终帧） |
+| ③ | 终态 | handler 返回文本/多文件 | `replyStream`(finish=true)+`uploadMedia`+`replyMedia` | `reply_stream`/`upload_media`/`reply_media` | 0 | `test.ts:163`（2/2/2） |
+| ④ | 异常 | handler 抛错→FALLBACK | `replyStream`(finish=true) | `reply_stream` | 0 | `test.ts:185`（2 条：ack+FALLBACK） |
+| ⑤ | 拒绝 | 宿主未开通文案经终帧 | `replyStream`(finish=true) | `reply_stream` | 0 | `test.ts:197`（2 条）+ 端到端 |
+| ⑥ | 主动消息 | `sendToConversation(route, reply)` | `sendMessage`+`uploadMedia`+`sendMediaMessage` | `send_message`/`upload_media`/`send_media` | 0 | `test.ts:209`（1/2/2；回执仍成形但底层零调用） |
+| 补 | 计划通知（notice） | handler `await notice(...)` | `replyStream` | `reply_stream` | 0 | `test.ts:234`（3 条） |
+
+端到端（`server.test.ts:288`）：未开通 principal → 宿主产出**拒绝文案**并登记 `message_refused`（路径确实跑到），但底层 stub **零帧**（`frames.toHaveLength(0)`），`shadowEvidence.mode==='silent'` 且 `userVisibleSuppressed>=1`。
+
+> 说明：静默模式下被抑制的 `replyStream` 恒 resolve，故**终帧降级**（`reply()` 的 `sendMessage` 分支）不会被触发；而降级目标 `sendMessage` 已由 ⑥ 与单元用例覆盖在同一闸门下，无独立通路。
+
+### 3. 反向绊线（绕过闸门 → 测试必红）
+
+| 绊线 | 断言 | 若被绕过 |
+| --- | --- | --- |
+| 缺省静默 | 不传 `deliveryMode` 时 `mode==='silent'` **且** `sdk.userVisibleCalls===0` **且** `userVisibleSuppressed>=1`（`test.ts:255`） | 缺省翻 live / 闸门被摘 → 替身收到 ack+终帧 → 红 |
+| 显式 live 不拦 | `deliveryMode:'live'` 时替身**确实收到** ≥2 帧、`suppressed===0`（`test.ts:268`） | 证明「零投递」来自闸门，而非替身吞掉 |
+| 环境开关 | 仅逐字 `live` 放行；`'1'/'LIVE'/''/未设` 全静默（`test.ts:279`、`test.ts:289`） | 缺省翻 live → 红 |
+| 单元 | silent：`wrap` 返回**新实例**且底层零调用、连接/入站透传；live：`wrap` **原样返回同一实例**（`test.ts:308`、`test.ts:332`） | 闸门退化为透传 → 红 |
+
+### 4. 改动清单（最小）
+
+- 新增 `packages/channel-wecom/src/silent-shadow-gate.ts`（闸门 + 模式解析 + 证据）。
+- `packages/channel-wecom/src/adapter.ts`：新增 `deliveryMode` 选项（缺省静默）、构造期包裹工厂、`shadowEvidence()` 访问器。
+- `packages/channel-wecom/src/index.ts`：导出闸门与类型。
+- `apps/server/main.ts`：启动日志补 `deliveryMode`。
+- 既有机械测试（adapter/adapter.degrade/notice/server：`git show 0731e82 --stat` 共 +7/-4）**显式** `deliveryMode:'live'`——它们测的是适配器真实投递行为，保留原语义；缺省静默由新用例专项覆盖。**未删/未弱化任何断言。**
+- 新增 `packages/channel-wecom/adapter.silent-shadow.test.ts`（13 例）、`server.test.ts` 端到端 1 例。
+- **零真实模型**：确定性替身夹具；**typecheck 0；`npm test` 936 passed + 3 todo（例数不减）**。
+
+### 5. 本轮实跑读数（本会话核验）
+
+- `npx vitest run packages/channel-wecom/adapter.silent-shadow.test.ts apps/server/server.test.ts`（cwd = 本 worktree，`TMPDIR=/home/tao/.tmp`）→ **Test Files 2 passed（2）；Tests 16 passed（16）**（13 + 3）。
+- `npm test`（全量）→ **Test Files 93 passed（93）；Tests 936 passed | 3 todo（939）**。（首跑曾出现 3 例 `[vitest-worker]: Timeout calling "onTaskUpdate"` 的 worker RPC 超时假红；原样重跑即 93/93 全绿——属并行负载下的基础设施抖动，非本轮代码。）
+- `npm run typecheck`（`tsc --noEmit`）→ **exit 0**。
+
+### 6. 联调运行手册与「未联调（待凭据）」登记
+
+- **手册**（全文见 `docs/product/b2-silent-shadow-gate.md` §4）：前置 = 独立测试租户 `botId`/`secret`（非生产）+ 白名单测试账号（`config/agent.yaml` `principals` 只列测试账号）+ **Dummy 执行层**（`contextProfiles.<id>.gateway` 指仓内 dummy，只读不写真实数据）+ 临时目录落盘。运行 = **先影子**（不设开关 `npm start`，启动日志 `deliveryMode:"silent"`，被抑制发送逐条落 `wecom_silent_shadow_suppressed`，测试账号端**零机器人消息**）→ **后放行**（`FSHINE_WECOM_DELIVERY=live npm start`，仅测试租户+白名单）。**回退/熔断**：去掉/置非 `live` 值重启即回静默；`principals` 白名单即时收紧到空集即全线拒绝。
+- **未联调（待凭据）**：真实企微联调需**独立测试租户凭据 + 白名单测试账号**，当前**不具备 → 如实登记「待凭据」**；本轮**未执行任何真实联调**，§2/§5 的读数为**确定性替身夹具**结果，**不构成生产/平台行为结论**。
+
+### 7. 授权边界与局限（如实登记）
+
+- 本 run **不连生产租户、不向非白名单真实用户发消息、不碰真实业务数据/写**；**不执行真实企微联调**（待凭据）。
+- **非用户可见旁路已核实**：通知 sink = **文件**（`apps/server/notification-file-sink.ts`；`main.ts` 装配）写 `notifications.jsonl`，**不是用户可见投递**，故不经闸门；将来若接真实企微 sink，其用户可见发送必经 `sendToConversation`（已覆盖于 ⑥）。附件落盘、任务库写入均为本地状态。
+- **不改 Worker 提示/任务账本语义，不引第二套压缩/会话机制**；闸门只在**唯一出站传输面**收口，不改适配器业务逻辑。
+
+**指针**：`packages/channel-wecom/src/silent-shadow-gate.ts`、`packages/channel-wecom/adapter.silent-shadow.test.ts`、`docs/product/b2-silent-shadow-gate.md`；关联 §七十五（企微只读影子 E2E 准入审计 §五 落点）、§六十七（通知 A+B 通道最小实现）。
+
+**状态：待合入。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
