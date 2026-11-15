@@ -49,7 +49,6 @@ function fakeDriver(result: (input: TurnDriverInput) => TurnDriverResult | Promi
       runs.push(input);
       return result(input);
     },
-    compact: async (messages) => messages,
   };
   return { driver, runs };
 }
@@ -137,7 +136,7 @@ describe('P3 预算硬停（执行器侧机械强制）', () => {
     await expect(enforcedWorker.run(baseInput())).rejects.toBeInstanceOf(P3BudgetHardStopError);
   });
 
-  it('未触发硬停时透传：text/messages 原样，compact/synthesizeAssistant 透传', async () => {
+  it('未触发硬停时透传：text/messages 原样透传', async () => {
     const messages = [assistantMessage('kept', 5)];
     const { driver } = fakeDriver(() => ({ text: 'reply', messages }));
     const ledger = createBudgetLedger({ maxModelCalls: 10 });
@@ -145,7 +144,6 @@ describe('P3 预算硬停（执行器侧机械强制）', () => {
     const result = await enforced.run(baseInput({ messages: [] }));
     expect(result.text).toBe('reply');
     expect(result.messages).toBe(messages);
-    await expect(enforced.compact!(messages)).resolves.toBe(messages);
     expect(ledger.stopped).toBeNull();
   });
 

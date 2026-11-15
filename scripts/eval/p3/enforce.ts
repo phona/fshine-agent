@@ -239,7 +239,6 @@ export function createEnforcingDriver(
         cancelTimer?.();
       }
     },
-    ...(inner.compact ? { compact: inner.compact.bind(inner) } : {}),
     ...(inner.synthesizeAssistant ? { synthesizeAssistant: inner.synthesizeAssistant.bind(inner) } : {}),
   };
   return wrapped;

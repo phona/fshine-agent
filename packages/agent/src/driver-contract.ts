@@ -42,8 +42,6 @@ export interface TurnDriverResult {
 
 export interface TurnDriver {
   run(input: TurnDriverInput): Promise<TurnDriverResult>;
-  /** 上下文压缩（Pi 原生 compact 的宿主侧收敛）。超阈值时替换旧消息为摘要 + 保留最近尾巴。 */
-  compact?(messages: DriverMessage[], opts?: { force?: boolean }): Promise<DriverMessage[]>;
   /**
    * 服务端确定性回复合成原生 assistant 消息：必须带完整内部形状
    * （api/provider/model/usage/stopReason），否则该转录进入下一模型回合时结算会报错。

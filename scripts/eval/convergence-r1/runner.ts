@@ -286,7 +286,6 @@ function recordingDriver(inner: TurnDriver, agent: 'main' | 'worker', sink: Reco
       else sink.workerTranscripts.push({ turn, messages: result.messages });
       return result;
     },
-    ...(inner.compact ? { compact: inner.compact.bind(inner) } : {}),
     ...(inner.synthesizeAssistant ? { synthesizeAssistant: inner.synthesizeAssistant.bind(inner) } : {}),
   };
   return wrapped;

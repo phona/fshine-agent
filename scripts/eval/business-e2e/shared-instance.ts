@@ -63,7 +63,10 @@ export function toolCallAssistant(name: string, args: Record<string, unknown>, i
     api: 'openai-completions',
     provider: 'llm',
     model: 'test-model',
-    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15 },
+    usage: {
+      input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
     stopReason: 'toolUse',
     timestamp: Date.now(),
   } as unknown as AgentMessage;
@@ -76,7 +79,10 @@ export function textAssistant(text: string): AgentMessage {
     api: 'openai-completions',
     provider: 'llm',
     model: 'test-model',
-    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15 },
+    usage: {
+      input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
     stopReason: 'stop',
     timestamp: Date.now(),
   } as unknown as AgentMessage;
@@ -94,26 +100,29 @@ function streamOf(message: AgentMessage) {
 
 /** 假 Pi 驱动：按调用顺序消费共享响应队列（回合顺序 = 测试编排顺序，确定性）。 */
 function queueDriverFor(queue: AgentMessage[]) {
+  const model = {
+    id: 'test-model',
+    name: 'test-model',
+    api: 'openai-completions',
+    provider: 'llm',
+    baseUrl: 'http://127.0.0.1:9',
+    reasoning: true,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 40_000,
+    maxTokens: 32_000,
+  } as unknown as PiModelRuntime['model'];
   const runtime: PiModelRuntime = {
-    model: {
-      id: 'test-model',
-      name: 'test-model',
-      api: 'openai-completions',
-      provider: 'llm',
-      baseUrl: 'http://127.0.0.1:9',
-      reasoning: true,
-      input: ['text'],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 40_000,
-      maxTokens: 32_000,
-    } as unknown as PiModelRuntime['model'],
+    model,
     models: {
+      getModel: () => model,
       streamSimple: async () => {
         const response = queue.shift();
         if (!response) throw new Error('共享实例夹具：假模型响应队列已空（脚本编排不完整）。');
         return streamOf(response);
       },
       completeSimple: async () => textAssistant('【夹具摘要】'),
+      cancelDeferred: async () => {},
     } as unknown as MutableModels,
   };
   return createPiTurnDriver({ env: { LLM_MODEL: 'test-model' }, runtime });
@@ -208,7 +217,6 @@ function recordingDriver(inner: TurnDriver, driver: 'main' | 'worker', sink: Dri
       }
       return result;
     },
-    ...(inner.compact ? { compact: inner.compact.bind(inner) } : {}),
     ...(inner.synthesizeAssistant ? { synthesizeAssistant: inner.synthesizeAssistant.bind(inner) } : {}),
   };
   return wrapped;

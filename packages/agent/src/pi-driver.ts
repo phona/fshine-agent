@@ -1,10 +1,26 @@
 /**
- * PiTurnDriver:基于 pi.dev 生态(@earendil-works/pi-agent-core + pi-ai)的回合驱动。
- * 模型走原生 function calling(无自定义 JSON 协议);流式响应;空闲超时。
- * 事实类进度(重试等)由 host 钩子负责;工具级进度在本驱动的 execute 内渲染。
+ * PiTurnDriver：基于 pi.dev 生态（@earendil-works/pi-agent-core + pi-ai）的回合驱动。
+ *
+ * Pi 原生 Session/Harness 是**会话转录与压缩生命周期的唯一所有者**：
+ *   · 转录由 `AgentHarness` + `SessionRepo` 持有（业务层只读投影，见 projectTranscript）；
+ *   · 压缩的触发 / 执行（摘要）/ 尾段保留 / 溢出恢复全部由 Pi 决定与执行；
+ *   · fshine 不再实现任何第二套摘要 / 裁剪 / 阈值判定 / 降级 / 重试 / 溢出恢复。
+ *
+ * fshine 只保留两件不可转交的事：
+ *   ① 把宿主转录喂给 Pi 并把 Pi 的转录读回（业务层投影）；
+ *   ② 依 Pi 契约传入 `CompactionSettings`（见 piCompactionSettings —— **Pi 配置适配，非压缩机制**）。
+ *
+ * 模型走原生 function calling（无自定义 JSON 协议）；流式响应；空闲超时。
  */
-import { Agent, type AgentTool, DEFAULT_COMPACTION_SETTINGS, estimateContextTokens, estimateTokens, generateSummaryWithUsage, serializeConversation, shouldCompact, type AgentMessage, type CompactionSettings } from '@earendil-works/pi-agent-core';
-import { BACKGROUND_CONTEXT } from '@earendil-works/pi-agent-core/harness/context';
+import {
+  AgentHarness,
+  DEFAULT_COMPACTION_SETTINGS,
+  type AgentMessage,
+  type AgentToolResult,
+  type CompactionSettings,
+} from '@earendil-works/pi-agent-core';
+import { MemorySessionRepo, type Entry } from '@earendil-works/pi-agent-core/harness/session';
+import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/pi-agent-core/harness/context';
 import {
   createModels,
   createProvider,
@@ -15,46 +31,21 @@ import {
   type Message,
   type Model,
   type MutableModels,
-  type Usage,
+  type RetryPolicy,
 } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
-import { isRetryableAssistantError } from '@earendil-works/pi-ai/utils/retry';
 import { Type } from 'typebox';
 import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver-contract';
 import { renderToolStepText } from './step-text';
 
-const IDLE_TIMEOUT_MS = 90_000; // 流式空闲超时:每收到一个 chunk(含 reasoning 增量)即重置
-const OVERALL_TIMEOUT_MS = 300_000; // 单次模型调用总上限(兜底,正常由回合预算约束)
-/** 主模型瞬时失败的原地重试延迟（与 worker 同族，只是主驱动原先没有这条腿）。 */
-const MAIN_MODEL_RETRY_DELAYS_MS: readonly number[] = [1_000, 2_000];
-
-/**
- * 供应商错误话术 → 是否「上下文超限」。超限重试同一条请求没有意义，必须先压缩再重发；
- * 限流/5xx/网络等瞬时错误不在此列（它们走 isRetryableAssistantError 的有界重试）。
- */
-const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
-  /context[_ ]length/i,
-  /maximum context/i,
-  /max(?:imum)? context (?:window|length)/i,
-  /exceeds? (?:the )?context/i,
-  /context window/i,
-  /prompt is too long/i,
-  /input is too long/i,
-  /too many tokens/i,
-  /token limit/i,
-  /reduce the length/i,
-];
-
-export function isContextOverflowError(message: string | undefined): boolean {
-  if (!message) return false;
-  return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(message));
-}
+/** 主模型瞬时失败的有界重试策略（交给 Pi 原生 RetryPolicy 执行；同旧 [1000,2000] 两次延迟）。 */
+const MAIN_MODEL_RETRY_POLICY: RetryPolicy = { enabled: true, maxRetries: 2, baseDelayMs: 1_000 };
 
 /**
  * 空回复的第二种形状：模型以 `stopReason=stop` 收尾，但 content 只有 thinking 块、
- * 没有 text（今天实测：主模型只输出了思考过程）。这不是供应商错误也不是窗口爆了，
- * 催一次「给出最终文本」通常就能收尾；有正文/toolResult 终结/error/aborted 都不催。
+ * 没有 text。这不是供应商错误也不是窗口爆了，催一次「给出最终文本」通常就能收尾；
+ * 有正文/toolResult 终结/error/aborted 都不催。
  */
 export function shouldNudgeFinalReply(messages: readonly AgentMessage[], text: string): boolean {
   if (text.trim()) return false;
@@ -70,9 +61,7 @@ const PROVIDER_TOOL_NAME_RE = /^[A-Za-z0-9_-]+$/;
 /**
  * 模型的上下文窗口缺省值（token）。**这是缺省，不是能力声明本身**：真实部署的窗口由
  * 模型能力提供（createPiModelRuntime 的 capabilities / PiTurnDriverOptions.contextWindow，
- * 装配层持有配置、驱动只收参数）——硬编码的那一份会直接决定压缩阈值
- * （阈值 = contextWindow − reserveTokens），窗口声明错了，压缩要么永远不触发（窗口爆了
- * 才知道），要么过早触发。未提供能力时沿用本缺省值，行为与提供能力前逐字节一致。
+ * 装配层持有配置、驱动只收参数）。未提供能力时沿用本缺省值。
  */
 export const DEFAULT_CONTEXT_WINDOW = 128_000;
 /** 单次输出上限的缺省值（token）：同 DEFAULT_CONTEXT_WINDOW，属能力声明的一部分。 */
@@ -80,10 +69,38 @@ export const DEFAULT_MAX_TOKENS = 32_000;
 
 /** 模型能力声明（部署层提供；驱动只收参数，不猜、不按名字查表）。 */
 export interface PiModelCapabilities {
-  /** 上下文窗口（token）：压缩阈值与溢出判定都用它。 */
+  /** 上下文窗口（token）。 */
   contextWindow?: number;
   /** 单次输出上限（token）。 */
   maxTokens?: number;
+}
+
+/**
+ * **Pi 配置适配（Integration），非压缩机制。**
+ *
+ * Pi 的 `shouldCompact(tokens, W, settings)` 要求调用方提供**绝对** `CompactionSettings`
+ * （`@earendil-works/pi-agent-core` 的 `CompactionSettings` 只有
+ * `enabled/reserveTokens/keepRecentTokens` 三个绝对字段，无窗口相对字段、无缩放助手）。
+ * Pi 缺省值按 128k 窗口设计（reserve=16384、keepRecent=20000）：小窗口下 reserve 会
+ * 超过窗口本身，不缩放则 Pi 自身行为已失效（短回合被压、零收益循环）。
+ *
+ * 因此本函数只做一件纯配置的事：**窗口装得下 Pi 缺省就沿用缺省，否则按比例缩放**——
+ * 这是履行 Pi 契约的入参，**不含任何 fshine 的压缩决策/安全闸 math**（无 INV 下界、
+ * 无 Δ、无 emergency 线、无 shouldCompact 复刻）。触发/执行/摘要/尾段/溢出恢复全归 Pi。
+ *
+ * 纯函数、无副作用、无外部依赖。
+ */
+export function piCompactionSettings(contextWindow: number): CompactionSettings {
+  const defaults = DEFAULT_COMPACTION_SETTINGS;
+  if (!Number.isFinite(contextWindow)
+    || contextWindow >= defaults.reserveTokens + defaults.keepRecentTokens) {
+    return { ...defaults };
+  }
+  return {
+    enabled: true,
+    reserveTokens: Math.max(1, Math.min(defaults.reserveTokens, Math.floor(contextWindow * 0.25))),
+    keepRecentTokens: Math.max(1, Math.min(defaults.keepRecentTokens, Math.floor(contextWindow * 0.3))),
+  };
 }
 
 /** Core Agent drops custom messages by default; explicitly project only our host task context. */
@@ -96,6 +113,7 @@ export function plannerMessagesToLlm(messages: readonly AgentMessage[]): Message
     return [{ role: 'user', content: [{ type: 'text', text: custom.content }], timestamp: custom.timestamp ?? 0 }];
   });
 }
+
 /** Kimi coding/OpenAI-compatible endpoint's supported reasoning controls. */
 export const KIMI_THINKING_LEVEL_MAP = {
   off: null,
@@ -113,8 +131,6 @@ export type PiThinkingLevel = (typeof PI_THINKING_LEVELS)[number];
 
 /**
  * 校验思考深度原始值:合法原样返回,空串归一为 undefined(= 不带思考参数),非法抛中文错误。
- * `envVarName` 只进错误信息:同一份词表被 LLM_THINKING_LEVEL 与 LLM_MAIN_THINKING_LEVEL
- * 两个入口共用(词表只有这一个权威位置),报错必须指向真正配错的那一个变量。
  */
 export function parsePiThinkingLevel(rawValue: string | undefined, envVarName: string): PiThinkingLevel | undefined {
   const value = rawValue ?? '';
@@ -127,8 +143,7 @@ export function parsePiThinkingLevel(rawValue: string | undefined, envVarName: s
 
 /**
  * 校验上下文窗口的原始声明（token）：空串/未设置归一为 undefined（回落 128k 缺省），
- * 非法值抛中文错误。窗口是压缩阈值的唯一来源——把一个写错的值静默当成缺省，
- * 会让压缩在真实窗口之外才触发（T7 的贴边空回复正是这样发生的），所以这里 fail-fast。
+ * 非法值抛中文错误。
  */
 export function parseContextWindow(rawValue: string | number | undefined, envVarName: string): number | undefined {
   if (rawValue === undefined) return undefined;
@@ -143,26 +158,13 @@ export function parseContextWindow(rawValue: string | number | undefined, envVar
 
 export interface PiTurnDriverOptions {
   env: Record<string, string | undefined>;
-  /**
-   * 显式模型 id(分层模型接缝):装配层持有配置,按 LLM_MAIN_MODEL(缺省回落 LLM_MODEL)
-   * 解析后传入,驱动不自行读取 Main 专用 env。缺省(不传)回落 env.LLM_MODEL——
-   * 直连调用方(scripts/ask.ts 等手工入口)与历史行为逐字段一致。
-   */
+  /** 显式模型 id(分层模型接缝)。缺省(不传)回落 env.LLM_MODEL。 */
   modelId?: string;
-  /**
-   * 显式思考深度:装配层按 LLM_MAIN_THINKING_LEVEL(缺省回落 LLM_THINKING_LEVEL)校验后
-   * 传入。缺省(不传)回落 env.LLM_THINKING_LEVEL(此处校验,报错指向该变量)。
-   */
+  /** 显式思考深度。缺省(不传)回落 env.LLM_THINKING_LEVEL。 */
   thinkingLevel?: PiThinkingLevel;
-  /**
-   * 显式模型能力(上下文窗口，token):同 modelId/thinkingLevel，装配层持有配置、驱动只收
-   * 参数。缺省 = DEFAULT_CONTEXT_WINDOW(128_000)，与提供能力前的行为逐字节一致。
-   */
+  /** 显式模型能力(上下文窗口，token)。缺省 = DEFAULT_CONTEXT_WINDOW。 */
   contextWindow?: number;
-  /**
-   * 注入的模型运行时（测试/嵌入用）。缺省 = 按 env 构造；注入时不读 env 的连接字段，
-   * 只用于直测驱动控制流（模型错误分流、收尾催问）而不发真实请求。
-   */
+  /** 注入的模型运行时（测试/嵌入用）。 */
   runtime?: PiModelRuntime;
 }
 
@@ -172,14 +174,7 @@ export interface PiModelRuntime {
 }
 
 /**
- * 环境范围认证上下文：先查驱动收到的 env（装配下传的 effectiveEnv / 直连调用方
- * 传入的 env），缺失才回落库默认上下文（process.env + node:fs）。
- *
- * 为什么必须显式织入（issue #20 切片 C+D 回归 / Codex blocking）：pi-ai 默认认证
- * 上下文只读 process.env（库 auth/context.js 头注："Default auth context: env vars
- * from process.env"），而部署配置把 LLM_API_KEY 派生进 effectiveEnv——只把它当
- * options.env 传进来，认证解析看不到它，首次模型请求必然失败。密钥不写回
- * process.env：装配层设计注释已明令，进程级注入会让模型经工具面拿到密钥。
+ * 环境范围认证上下文：先查驱动收到的 env，缺失才回落库默认上下文。
  */
 function envScopedAuthContext(
   env: Record<string, string | undefined>,
@@ -197,9 +192,6 @@ function envScopedAuthContext(
 
 /**
  * 从 env 构建 kimi 兼容的 pi 模型集合与认证上下文;env 缺失在创建时即抛中文错误。
- *
- * 导出给认证链接线测试用（`pi-driver-auth.test.ts` 走库的 `Models.getAuth` 解析面，
- * 不起网络）。生产入口仍是 `createPiTurnDriver`。
  */
 export function createPiModelRuntime(
   env: Record<string, string | undefined>,
@@ -219,8 +211,6 @@ export function createPiModelRuntime(
     throw new Error(`缺少环境变量 ${missing.join('、')},无法初始化 LLM 客户端`);
   }
 
-  // kimi coding 端点不接受 developer 角色(pi 对 reasoning 模型的默认行为),
-  // 按 pi-ai 文档用 compat.supportsDeveloperRole=false 显式声明,模型推理能力不受影响
   const kimiModel: Model<'openai-completions'> = {
     id: modelId,
     name: modelId,
@@ -228,14 +218,10 @@ export function createPiModelRuntime(
     provider: 'llm',
     baseUrl,
     reasoning: true,
-    // Kimi accepts reasoning_effort, but only the ordinary low/medium/high
-    // values are meaningful. Explicitly reject Pi's opt-in xhigh/max levels.
     compat: { supportsDeveloperRole: false, supportsReasoningEffort: true },
     thinkingLevelMap: KIMI_THINKING_LEVEL_MAP,
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    // 能力来自调用方声明（模型能力），未声明时用缺省常数——不再是这里的魔法字面量。
-    // 显式声明先校验：非法窗口值不允许静默回落到缺省（那会让压缩阈值与真实窗口脱节）。
     contextWindow: parseContextWindow(capabilities.contextWindow, 'contextWindow') ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: capabilities.maxTokens ?? DEFAULT_MAX_TOKENS,
   };
@@ -256,844 +242,239 @@ export function createPiModelRuntime(
   return { models, model };
 }
 
-/** 摘要请求的模板/系统提示余量（token）：`<conversation>` 包裹 + 摘要指令 + system prompt。 */
-const SUMMARY_PROMPT_OVERHEAD_TOKENS = 1_024;
-/** 一次压缩最多串行发起的摘要请求数；超过说明前缀远超窗口，按摘要失败处理。 */
-const MAX_SUMMARY_CHUNKS = 16;
-const COMPACTION_INSTRUCTIONS = '这是助手会话的压缩。摘要必须保留:1)当前正在处理的对象标识与名称;2)当前的处理范围;3)最近一次工具结果里的分页游标原值(用户要靠它翻页);4)用户的关键意图与未决问题;5)已得出的中间结论与未完成的步骤(长任务靠它续跑)。如果输入包含宿主标明的历史引用,必须保留其来源是“用户消息附带的引用”;引用是转述数据,不得总结成用户本人直接陈述、选择、确认或授权。如果更早的消息因窗口限制被省略,如实写明省略了哪一段,不得把省略的内容补写成事实。';
-
-/**
- * P0-B 输出/压缩不变式（先证后码）。
- *
- * 记 W=声明的 contextWindow（parseContextWindow fail-fast，不虚报、不改写）；
- * T=estimateContextTokens(转录)——压缩与钳制的计量面；MIN_OUTPUT=1024 为生成有效回复的
- * 最小输出预算。钳制（trim/degrade）按完整请求算、压缩按转录算，两者的最坏差值
- * Δ_worst = 4096（序列化/催问消息等请求框架开销上界）+ sys + tools（系统提示与工具
- * schema 的估算 token）。**每次请求不变式 INV**：W − (T + Δ_worst) ≥ MIN_OUTPUT，
- * 即 T ≤ W − Δ_worst − MIN_OUTPUT =: LIMIT。证明三条保证：
- *  ① 输出预算耗尽前能触发有效压缩：回合前压缩阈值 = W − reserveTokens，本函数保证
- *     reserveTokens ≥ Δ_worst + MIN_OUTPUT ⇒ 压缩产物 target = W − reserveTokens ≤ LIMIT
- *     （trimToBudget 强制产物 ≤ target）⇒ INV 在请求前成立；回合内 emergency 线与
- *     INV 线同源（headroom = Δ_worst + MIN_OUTPUT，见 invariantReserveTokens；原
- *     max(1024, Δ_worst+MIN_OUTPUT) 因 1024=MIN_OUTPUT 且 Δ_worst≥0 恒等价）⇒ 恰在
- *     INV 将被破坏的下一条请求前触发 force 压缩（见 createPiTurnDriver 的 transformContext）。
- *  ② 压缩后有足够空间生成有效回复：摘要请求自身有界（summaryInputAllowance =
- *     W − maxTokens − SUMMARY_PROMPT_OVERHEAD − 上一轮摘要），产物 trim 到 target ⇒
- *     压缩后仍留 ≥ MIN_OUTPUT 输出预算。
- *  ③ 窗口过小 ⇒ INV 无解 ⇒ 明确拒绝而不是把必然失败的请求发出去：装配期
- *     W < CONTEXT_WINDOW_FLOOR_TOKENS（Δ 的常数部分 + MIN_OUTPUT + 摘要模板 + keepRecent
- *     下限；sys/tools 装配期未知，取下界）抛错拒绝该能力声明；运行期按实际 Δ_worst
- *     复核，no_cut 且 T > LIMIT 时抛错有界失败、不发请求（见 compactTranscriptWithPi）。
- *  ④ 不改 contextWindow 数值、不碰 node_modules、不建第二套摘要/记忆。
- */
-/** 完整请求相对转录估算的最坏框架差值（token）：序列化、催问/省略声明消息等上界。 */
-export const CONTEXT_REQUEST_FRAMING_TOKENS = 4_096;
-/** 生成有效回复的最小输出预算（token）：INV 的固定右项。 */
-export const MIN_OUTPUT_BUDGET_TOKENS = 1_024;
-/** 装配期窗口下界：4096 + 1024 + 1024(摘要模板) + 512(keepRecent 下限)，sys/tools 未知取 0。 */
-export const CONTEXT_WINDOW_FLOOR_TOKENS =
-  CONTEXT_REQUEST_FRAMING_TOKENS + MIN_OUTPUT_BUDGET_TOKENS + SUMMARY_PROMPT_OVERHEAD_TOKENS + 512;
-
-/**
- * P0-B 单一阈值来源（D3 单源合一）：每次请求的不变式预留 = Δ_worst + MIN_OUTPUT。
- *
- * 原实现有两条独立阈值来源：回合内 emergency 线 headroom = max(EMERGENCY_OVERFLOW_HEADROOM_TOKENS,
- * Δ+MIN_OUTPUT) 与请求前 INV 线 limit = W − Δ − MIN_OUTPUT。因那第二个常量与
- * MIN_OUTPUT_BUDGET_TOKENS 同值(1024) 且 Δ≥0：max(1024, Δ+1024) ≥ Δ+1024 恒真、且等号恒取
- * （a≤x ⇒ max(a,x)=x），两线逐输入同一触发点。收敛为本函数单一来源后，emergency 线与 INV 线
- * 由同一 reserve 派生，物理同源；不再保留第二常量。
- */
-export function invariantReserveTokens(fixedOverheadTokens: number): number {
-  return fixedOverheadTokens + MIN_OUTPUT_BUDGET_TOKENS;
-}
-
-/** INV 安全上界 LIMIT = W − invariantReserveTokens(Δ)（与 emergency 线同源构造）。 */
-export function invariantLimitTokens(contextWindow: number, fixedOverheadTokens: number): number {
-  return contextWindow - invariantReserveTokens(fixedOverheadTokens);
-}
-
-/** 运行期完整请求固定开销估算：Δ_worst = 4096 + sys + tools（与 INV 同口径）。 */
-export function fixedRequestOverheadTokens(
-  systemPrompt: string,
-  tools: ReadonlyArray<{ name: string; description: string; inputSchema: unknown }>,
-): number {
-  const sys = Math.ceil(systemPrompt.length / 4);
-  const toolsText = tools
-    .map((tool) => `${tool.name}\n${tool.description}\n${JSON.stringify(tool.inputSchema)}`)
-    .join('\n');
-  return CONTEXT_REQUEST_FRAMING_TOKENS + sys + Math.ceil(toolsText.length / 4);
-}
-
-/**
- * 按模型能力推导压缩设置（T7 窗口贴边修复；P0-B 增不变式下界）。
- *
- * 为什么不能直接用 DEFAULT_COMPACTION_SETTINGS：那组常数按 128k 窗口设计
- * （reserveTokens=16384、keepRecentTokens=20000）。窗口只有 40000 时阈值 = 23616，
- * 一旦跨过，摘要请求会把已超窗的整段转录塞给模型——输入 + 摘要输出预留超过窗口，
- * 摘要必然失败，转录原样返回，主请求继续贴边/越窗，模型只能回空。keepRecentTokens
- * 不缩放还会把小窗口下的**全部消息**留下再拼摘要，产物比输入更长（压缩方向反了）。
- *
- * 缩放规则：默认设置装得下（窗口 ≥ reserveTokens + keepRecentTokens = 36384，含 128k
- * 缺省与 40k 这类窗口）就沿用默认阈值；装不下的窗口按 25% 预留摘要、30% 保留尾段。
- * P0-B 不变式：无论走哪条臂，reserveTokens ≥ fixedOverheadTokens + MIN_OUTPUT_BUDGET
- * （fixedOverheadTokens = Δ_worst，缺省 0 = 调用方未知 sys/tools，保持旧行为）——
- * 「reserve ≥ SAFETY + 固定余量」不再当充分条件，预留必须按最坏差值缩放（证明见上）。
- */
-export function compactionSettingsFor(contextWindow: number, fixedOverheadTokens = 0): CompactionSettings {
-  const invariantReserve = invariantReserveTokens(fixedOverheadTokens);
-  // 默认设置装得下（保留尾段 + 摘要预留都在窗口内）就沿用默认阈值，但 reserve 不得
-  // 低于不变式下界（大声明开销的大工具面会把 Δ_worst 推到默认 16384 之上）。
-  if (!Number.isFinite(contextWindow)
-    || contextWindow >= DEFAULT_COMPACTION_SETTINGS.reserveTokens + DEFAULT_COMPACTION_SETTINGS.keepRecentTokens) {
-    return {
-      ...DEFAULT_COMPACTION_SETTINGS,
-      reserveTokens: Math.max(DEFAULT_COMPACTION_SETTINGS.reserveTokens, invariantReserve),
-    };
-  }
-  const reserveTokens = Math.max(
-    invariantReserve,
-    Math.min(DEFAULT_COMPACTION_SETTINGS.reserveTokens, Math.floor(contextWindow * 0.25)),
-  );
-  const keepRecentTokens = Math.max(512, Math.min(
-    DEFAULT_COMPACTION_SETTINGS.keepRecentTokens,
-    Math.floor(contextWindow * 0.3),
-  ));
-  return { enabled: true, reserveTokens, keepRecentTokens };
-}
-
-function roleOf(message: AgentMessage | undefined): string | undefined {
-  return (message as { role?: string } | undefined)?.role;
-}
-
-function lastUserIndex(messages: readonly AgentMessage[]): number {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (roleOf(messages[index]) === 'user') return index;
-  }
-  return -1;
-}
-
-/** 单条消息在摘要 prompt 里的估算 token（与 generateSummary 的 serializeConversation 同口径）。 */
-function summaryMessageTokens(message: AgentMessage): number {
-  return Math.ceil(serializeConversation(plannerMessagesToLlm([message])).length / 4);
-}
-
-function summaryChunkTokens(chunk: readonly AgentMessage[]): number {
-  return SUMMARY_PROMPT_OVERHEAD_TOKENS + chunk.reduce((total, message) => total + summaryMessageTokens(message), 0);
-}
-
-/**
- * 摘要请求的输入预算：窗口 − 摘要输出预留 − 模板余量 − 上一轮摘要。
- * ≤0 表示这个窗口连一次有界摘要都发不出去（异常小的窗口），调用方按失败降解。
- */
-function summaryInputAllowance(
-  contextWindow: number,
-  maxTokens: number,
-  previousSummary: string | undefined,
-): number {
-  const previous = previousSummary ? Math.ceil(previousSummary.length / 4) : 0;
-  return contextWindow - maxTokens - SUMMARY_PROMPT_OVERHEAD_TOKENS - previous;
-}
-
-/**
- * 切出「摘要前缀 / 保留尾段」。
- * 两条纪律：① 最后一条 user 消息及其之后的内容（当前回合）在装得下时整轮保留；
- * ② 尾段不能以 toolResult 开头——那会把 assistant toolCall 与结果拆散，provider 会拒绝。
- */
-function splitForCompaction(
-  messages: readonly AgentMessage[],
-  keepRecentTokens: number,
-): { prefix: AgentMessage[]; kept: AgentMessage[] } {
-  let start = messages.length;
-  let keptTokens = 0;
-  while (start > 0 && keptTokens < keepRecentTokens) {
-    start -= 1;
-    keptTokens += estimateTokens(messages[start]!);
-  }
-  const lastUser = lastUserIndex(messages);
-  // 没有 user 消息的转录（测试夹具/异常持久化）按估算切点即可；真实转录总有当前回合。
-  if (lastUser >= 0) {
-    const lastTurnTokens = estimateContextTokens(messages.slice(lastUser)).tokens;
-    if (lastTurnTokens <= keepRecentTokens) {
-      // 当前回合本身装得下：整轮保留，切点不能越过它的 user 消息。
-      start = Math.min(start, lastUser);
-    } else if (start <= lastUser) {
-      // 当前回合太大必须切：至少保留最后一条 user 之后的内容。
-      start = lastUser + 1;
-    }
-  }
-  // 尾段不能以 toolResult 开头：那会把 assistant toolCall 与结果拆散，provider 会拒绝。
-  while (start > 0 && roleOf(messages[start]) === 'toolResult') start -= 1;
-  if (start <= 0) return { prefix: [], kept: [...messages] };
-  return { prefix: messages.slice(0, start), kept: messages.slice(start) };
-}
-
-/** 取一段装得进 allowance 的前缀分片；单条就超预算时返回它自己，由调用方截断。 */
-function takeSummaryChunk(remaining: readonly AgentMessage[], allowance: number): AgentMessage[] {
-  const chunk: AgentMessage[] = [];
-  let used = SUMMARY_PROMPT_OVERHEAD_TOKENS;
-  for (const message of remaining) {
-    const cost = summaryMessageTokens(message);
-    if (chunk.length > 0 && used + cost > allowance) break;
-    chunk.push(message);
-    used += cost;
-    if (used > allowance) break;
-  }
-  return chunk;
-}
-
-/** 单条消息都比预算大时：摘要只读截断后的文本（只改摘要输入，不改转录）。 */
-function clampMessageForSummary(message: AgentMessage, allowance: number): AgentMessage {
-  const maxChars = Math.max(0, (allowance - SUMMARY_PROMPT_OVERHEAD_TOKENS) * 4);
-  const text = serializeConversation(plannerMessagesToLlm([message]));
-  return {
-    role: 'user',
-    content: `${text.slice(0, maxChars)}\n…（单条消息过长，摘要只读取前 ${maxChars} 字符）`,
-    timestamp: Date.now(),
-  } as unknown as AgentMessage;
-}
-
-/**
- * 压缩触发原因（观测枚举）。**只用于计量归因，不参与任何触发/门控判断**——
- * 是否压缩、压缩哪一段完全由既有的阈值 / INV 复核 / overflow 逻辑决定。
- *  · threshold     —— 阈值命中（shouldCompact 为真，非 force）
- *  · invariant     —— 回合前 INV 复核（force，请求前把关）
- *  · overflow      —— 回合内应急压缩 / 供应商上下文超限恢复（force）
- *  · turn_boundary —— TurnDriver.compact() 的回合边界调用
- */
-export type CompactionTrigger = 'threshold' | 'invariant' | 'overflow' | 'turn_boundary';
-
-/** 一次压缩运行里摘要调用的 token 用量（各分片累加；供应商未报告时按 0）。 */
-export interface SummaryTokenUsage {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-  totalTokens: number;
-}
-
-/** 一次压缩运行的产物形态（观测；不改变行为）。 */
-export type CompactionOutcome = 'compacted' | 'no_cut' | 'failed' | 'degraded' | 'rejected';
-
-/**
- * 一次压缩运行的六项计量（结构化日志事件 `context_compaction_metrics` 的载荷）：
- * 触发原因、调用与触发点的关联标识、摘要调用次数、摘要 token、耗时、压缩前后长度。
- * `summaryText` 只在显式开关打开时出现——缺省不落盘摘要正文。
- */
-export interface CompactionMetrics {
-  trigger: CompactionTrigger;
-  correlationId: string;
-  outcome: CompactionOutcome;
-  summaryCalls: number;
-  summaryUsage: SummaryTokenUsage;
-  elapsedMs: number;
-  tokensBefore: number;
-  tokensAfter: number;
-  /** 摘要正文：仅显式开关（见 compactionCaptureEnabled）打开时存在，缺省不落盘。 */
-  summaryText?: string;
-}
-
-/** 摘要正文捕获开关：缺省关闭；只允许在隔离测试环境显式打开（观测正文用，非生产）。 */
-export const COMPACTION_CAPTURE_SUMMARY_ENV = 'FSHINE_CAPTURE_COMPACTION_SUMMARY';
-
-/** 解析摘要正文捕获开关：空串 / `0` / `false` / 未设置一律视为关闭。 */
-export function compactionCaptureEnabled(
-  env: Record<string, string | undefined> | undefined,
-): boolean {
-  const raw = env?.[COMPACTION_CAPTURE_SUMMARY_ENV];
-  if (typeof raw !== 'string') return false;
-  const value = raw.trim().toLowerCase();
-  return value !== '' && value !== '0' && value !== 'false';
-}
-
-let compactionCorrelationSequence = 0;
-
-/** 新的一次压缩关联标识：把摘要调用（计量）与触发点（同一次压缩）关联起来。 */
-export function newCompactionCorrelationId(): string {
-  compactionCorrelationSequence += 1;
-  return `cmp_${Date.now().toString(36)}_${compactionCorrelationSequence.toString(36)}`;
-}
-
-function emptySummaryUsage(): SummaryTokenUsage {
-  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
-}
-
-/** 把一次摘要调用的 provider usage 累加进总量（缺字段按 0，供应商未报告时静默）。 */
-function addSummaryUsage(total: SummaryTokenUsage, usage: Usage | undefined): void {
-  if (!usage) return;
-  total.input += usage.input ?? 0;
-  total.output += usage.output ?? 0;
-  total.cacheRead += usage.cacheRead ?? 0;
-  total.cacheWrite += usage.cacheWrite ?? 0;
-  total.totalTokens += usage.totalTokens ?? 0;
-}
-
-/**
- * 有界摘要：每一条摘要请求的「输入 + maxTokens」都必须装进模型窗口；
- * 前缀超过单次预算时按 oldest-first 分片、携带上一条摘要续写（不丢中间段）。
- */
-async function summarizeWithinWindow(
-  prefix: readonly AgentMessage[],
-  runtime: PiModelRuntime,
-  settings: CompactionSettings,
-): Promise<
-  | { ok: true; text: string; chunks: number; usage: SummaryTokenUsage; elapsedMs: number }
-  | { ok: false; error: string; chunks: number; usage: SummaryTokenUsage; elapsedMs: number }
-> {
-  const { models, model } = runtime;
-  const maxTokens = Math.min(
-    Math.floor(0.8 * settings.reserveTokens),
-    model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
-  );
-  let remaining = [...prefix];
-  let previous: string | undefined;
-  let chunks = 0;
-  // 六项计量：调用次数=chunks、token=usage 累加、耗时=每次调用墙钟累加。
-  const usage = emptySummaryUsage();
-  let elapsedMs = 0;
-  while (remaining.length > 0) {
-    if (chunks >= MAX_SUMMARY_CHUNKS) {
-      return { ok: false, error: `摘要分片超过上限 ${MAX_SUMMARY_CHUNKS}（前缀 ${prefix.length} 条）`, chunks, usage, elapsedMs };
-    }
-    const allowance = summaryInputAllowance(model.contextWindow, maxTokens, previous);
-    // 预算连模板余量都装不下：这个窗口物理上做不了有界摘要（异常小的能力声明）。
-    if (allowance <= SUMMARY_PROMPT_OVERHEAD_TOKENS) {
-      return { ok: false, error: `摘要输入预算不足（${allowance} ≤ 模板余量）`, chunks, usage, elapsedMs };
-    }
-    let chunk = takeSummaryChunk(remaining, allowance);
-    if (chunk.length === 0) return { ok: false, error: '摘要分片为空', chunks, usage, elapsedMs };
-    if (summaryChunkTokens(chunk) > allowance) chunk = [clampMessageForSummary(chunk[0]!, allowance)];
-    const startedAt = Date.now();
-    const summary = await generateSummaryWithUsage(
-      plannerMessagesToLlm(chunk), models, model,
-      settings.reserveTokens,
-      COMPACTION_INSTRUCTIONS,
-      previous, undefined, undefined, undefined, BACKGROUND_CONTEXT,
-    );
-    elapsedMs += Date.now() - startedAt;
-    if (!summary.ok) return { ok: false, error: String(summary.error), chunks, usage, elapsedMs };
-    addSummaryUsage(usage, summary.value.usage);
-    previous = summary.value.text;
-    remaining = remaining.slice(chunk.length);
-    chunks += 1;
-  }
-  return { ok: true, text: previous ?? '', chunks, usage, elapsedMs };
-}
-
-/** 尾段仍超预算时，按整轮从最旧处丢；最后一个 user 消息及其之后永不丢。 */
-function trimToBudget(messages: readonly AgentMessage[], target: number): AgentMessage[] {
-  let result = [...messages];
-  while (result.length > 1 && estimateContextTokens(result).tokens > target) {
-    const lastUser = lastUserIndex(result);
-    if (lastUser <= 1) break;
-    let cut = 1;
-    while (cut < lastUser && roleOf(result[cut]) !== 'user') cut += 1;
-    result = [result[0]!, ...result.slice(cut)];
-  }
-  return result;
-}
-
-/**
- * 摘要不可用且已经超窗时的确定性降解：丢掉最旧消息、保留最后一条 user 及之后的消息，
- * 并在上下文里显式声明「更早内容已省略」。宁可让本轮基于最近的对话内容作答，也不要
- * 把超窗请求发给模型拿一句零数字兜底。
- */
-function degradeByDropping(messages: readonly AgentMessage[], target: number): AgentMessage[] {
-  const lastUser = lastUserIndex(messages);
-  let kept = messages.slice(lastUser >= 0 ? lastUser : Math.max(0, messages.length - 1));
-  while (kept.length > 1 && estimateContextTokens(kept).tokens > target) kept = kept.slice(1);
-  const notice = {
-    role: 'user',
-    content: '【此前的对话因上下文压缩失败已省略】只能依据下面保留下来的最近消息回答；不要编造被省略的内容。',
-    timestamp: Date.now(),
-  } as unknown as AgentMessage;
-  const output = [notice, ...kept];
-  console.warn(JSON.stringify({
-    event: 'context_compact_degraded',
-    tokensBefore: estimateContextTokens([...messages]).tokens,
-    tokensAfter: estimateContextTokens(output).tokens,
-    dropped: messages.length - kept.length,
-  }));
-  return output;
-}
-
-/**
- * 原生 compact 的宿主侧收敛：阈值判断 → pi 原生摘要 → 保留最近尾段。
- *
- * 为什么是显式函数而不是 createPiTurnDriver 里的一段闭包：压缩产物到底是什么
- * （原生摘要 + 保留尾段，没有第三块宿主声明）必须能用假模型运行时直测——生产调用点
- * 仍然只有 createPiTurnDriver 的 compact 一处，测试直接调这一段生产代码。
- * force:true 跳过阈值判断强制压缩（会话过期软着陆，旧转录压成摘要种子）。
- *
- * 产物纪律：**直接用 pi 原生 compact 的返回值**（摘要消息 + 保留尾段）。宿主不再往产物
- * 里塞自己的块（曾经的"压缩引用索引 sidecar"制造了宿主影子状态：它随每次压缩复利、
- * 要求模型去调用历史检索工具读"更早引用"，而那条工具路径已删除）。
- *
- * T7 起压缩设置随窗口缩放，摘要请求本身有界（见 compactionSettingsFor /
- * summarizeWithinWindow）：贴着窗口的转录也必须能压出「摘要 + 装得下的尾段」。
- */
-export async function compactTranscriptWithPi(
-  messages: AgentMessage[],
-  opts: {
-    force?: boolean;
-    fixedOverheadTokens?: number;
-    /** 触发原因（观测归因）；缺省按 force 解析为 turn_boundary / threshold。 */
-    trigger?: CompactionTrigger;
-    /** 调用与触发点关联标识；缺省生成。 */
-    correlationId?: string;
-    /** 仅显式开关打开时捕获摘要正文（缺省不落盘）。 */
-    captureSummaryText?: boolean;
-  } | undefined,
-  runtime: PiModelRuntime,
-): Promise<AgentMessage[]> {
-  const { model } = runtime;
-  const fixedOverhead = opts?.fixedOverheadTokens ?? 0;
-  // 六项计量只在观测面新增：是否触发压缩完全由既有 force/threshold 逻辑决定。
-  const trigger = opts?.trigger ?? (opts?.force ? 'turn_boundary' : 'threshold');
-  const correlationId = opts?.correlationId ?? newCompactionCorrelationId();
-  const captureSummaryText = opts?.captureSummaryText === true;
-  const settings = compactionSettingsFor(model.contextWindow, fixedOverhead);
-  const est = estimateContextTokens(messages);
-  if (!opts?.force && !shouldCompact(est.tokens, model.contextWindow, settings)) return messages;
-
-  /** 发出一次压缩运行的结构化计量事件（与既有事件并存，不替换、不改行为）。 */
-  const emitMetrics = (metrics: {
-    outcome: CompactionOutcome;
-    summaryCalls: number;
-    summaryUsage: SummaryTokenUsage;
-    elapsedMs: number;
-    tokensAfter: number;
-    summaryText?: string;
-  }): void => {
-    const event: CompactionMetrics = {
-      trigger,
-      correlationId,
-      outcome: metrics.outcome,
-      summaryCalls: metrics.summaryCalls,
-      summaryUsage: metrics.summaryUsage,
-      elapsedMs: metrics.elapsedMs,
-      tokensBefore: est.tokens,
-      tokensAfter: metrics.tokensAfter,
-    };
-    if (captureSummaryText && metrics.summaryText !== undefined) event.summaryText = metrics.summaryText;
-    console.log(JSON.stringify({ event: 'context_compaction_metrics', ...event }));
-  };
-
-  let { prefix, kept } = splitForCompaction(messages, settings.keepRecentTokens);
-  if (prefix.length === 0 && opts?.force) {
-    // 强制压缩（会话过期软着陆）：整段旧转录压成摘要种子，不要求切出保留尾段。
-    prefix = [...messages];
-    kept = [];
-  }
-  if (prefix.length === 0) {
-    // 全部消息都在当前回合里：没有可摘要的前缀，压缩帮不上忙（不伪造摘要）。
-    // P0-B 不变式③：no_cut 且转录已超 LIMIT（W − Δ_worst − MIN_OUTPUT）时，
-    // INV 无解——明确拒绝（有界失败），不把必然拿空回复的请求发给模型。
-    const limit = invariantLimitTokens(model.contextWindow, fixedOverhead);
-    if (est.tokens > limit) {
-      console.error(JSON.stringify({
-        event: 'context_invariant_violated',
-        tokens: est.tokens,
-        limit,
-        contextWindow: model.contextWindow,
-        fixedOverhead,
-        messages: messages.length,
-      }));
-      emitMetrics({
-        outcome: 'rejected',
-        summaryCalls: 0,
-        summaryUsage: emptySummaryUsage(),
-        elapsedMs: 0,
-        tokensAfter: est.tokens,
-      });
-      throw new Error(
-        `上下文不变式不满足：转录 ${est.tokens} token 超过本窗口安全上界 ${limit}`
-        + `（window=${model.contextWindow}，固定开销=${fixedOverhead}），已拒绝发请求。`,
-      );
-    }
-    console.warn(JSON.stringify({
-      event: 'context_compact_no_cut',
-      tokens: est.tokens,
-      contextWindow: model.contextWindow,
-      messages: messages.length,
-    }));
-    emitMetrics({
-      outcome: 'no_cut',
-      summaryCalls: 0,
-      summaryUsage: emptySummaryUsage(),
-      elapsedMs: 0,
-      tokensAfter: est.tokens,
-    });
-    return messages;
-  }
-
-  const summary = await summarizeWithinWindow(prefix, runtime, settings);
-  if (!summary.ok) {
-    console.warn(JSON.stringify({
-      event: 'context_compact_failed',
-      error: summary.error.slice(0, 200),
-      tokens: est.tokens,
-      contextWindow: model.contextWindow,
-      messages: messages.length,
-    }));
-    if (est.tokens > model.contextWindow) {
-      const degraded = degradeByDropping(messages, Math.max(1, model.contextWindow - settings.reserveTokens));
-      // 摘要在失败前可能已发起若干分片：次数/token/耗时照记，产物形态标 degraded。
-      emitMetrics({
-        outcome: 'degraded',
-        summaryCalls: summary.chunks,
-        summaryUsage: summary.usage,
-        elapsedMs: summary.elapsedMs,
-        tokensAfter: estimateContextTokens(degraded).tokens,
-      });
-      return degraded;
-    }
-    emitMetrics({
-      outcome: 'failed',
-      summaryCalls: summary.chunks,
-      summaryUsage: summary.usage,
-      elapsedMs: summary.elapsedMs,
-      tokensAfter: est.tokens,
-    });
-    return messages;
-  }
-
-  const summaryMessage = {
-    role: 'user',
-    content: `【此前会话摘要】\n${summary.text}\n(以上为此前对话的压缩摘要;具体数据请以重新调用工具的结果为准;更早的逐字内容已不在上下文中)`,
-    timestamp: Date.now(),
-  } as unknown as AgentMessage;
-  let output = [summaryMessage, ...kept];
-  const target = Math.max(1, model.contextWindow - settings.reserveTokens);
-  if (estimateContextTokens(output).tokens > target) {
-    const trimmed = trimToBudget(output, target);
-    console.log(JSON.stringify({
-      event: 'context_compact_trimmed',
-      tokensBefore: est.tokens,
-      tokensAfter: estimateContextTokens(trimmed).tokens,
-      removedMessages: output.length - trimmed.length,
-    }));
-    output = trimmed;
-  }
-  console.log(JSON.stringify({
-    event: 'context_compacted',
-    tokensBefore: est.tokens,
-    tokensAfter: estimateContextTokens(output).tokens,
-    keptMessages: kept.length,
-    summaryChunks: summary.chunks,
-    contextWindow: model.contextWindow,
-  }));
-  emitMetrics({
-    outcome: 'compacted',
-    summaryCalls: summary.chunks,
-    summaryUsage: summary.usage,
-    elapsedMs: summary.elapsedMs,
-    tokensAfter: estimateContextTokens(output).tokens,
-    summaryText: summary.text,
-  });
-  return output;
-}
-
 /** 从 env 构建 kimi 兼容的 pi 驱动;env 缺失在创建时即抛中文错误。 */
 export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
   const modelId = options.modelId ?? options.env.LLM_MODEL ?? '';
   const { models, model } = options.runtime ?? createPiModelRuntime(options.env, modelId, {
-    // 能力声明只有显式传入这一条来源：装配层持有配置，驱动不猜、不按模型名查表。
     ...(options.contextWindow !== undefined ? { contextWindow: options.contextWindow } : {}),
   });
-  // P0-B 不变式③装配期拒绝：窗口低于下界（Δ 常数部分 + MIN_OUTPUT + 摘要模板 +
-  // keepRecent 下限；sys/tools 装配期未知取 0）时，压缩/钳制预留互相挤占、INV 无解，
-  // 拒绝该能力声明（fail-fast），不静默回落、不虚报窗口。
-  if (model.contextWindow < CONTEXT_WINDOW_FLOOR_TOKENS) {
-    throw new Error(
-      `contextWindow ${model.contextWindow} 低于装配期下界 ${CONTEXT_WINDOW_FLOOR_TOKENS}`
-      + '（请求框架 + 最小输出预算 + 摘要模板 + 保留尾段下限）：该窗口无法安全满足压缩不变式，拒绝该能力声明。',
-    );
-  }
 
-  // 思考深度(pi 统一抽象):off/minimal/low/medium/high/xhigh/max。
-  // 是否生效取决于模型/端点是否支持思考参数;不支持的供应商 pi-ai 静默忽略。
-  // 词表与校验在 parsePiThinkingLevel(模块级唯一定义);装配层显式传入时已校验过,
-  // 走到 env 回落才在这里报错,错误信息仍指向 LLM_THINKING_LEVEL。
   const thinkingLevel = options.thinkingLevel
     ?? parsePiThinkingLevel(options.env.LLM_THINKING_LEVEL, 'LLM_THINKING_LEVEL');
+
+  // Pi 配置适配：把窗口派生的绝对 CompactionSettings 交给 Pi（非压缩机制，见函数注释）。
+  const compaction = piCompactionSettings(model.contextWindow);
 
   return {
     async run(input: TurnDriverInput): Promise<TurnDriverResult> {
       const providerToolNames = createProviderToolNameMap(input.tools);
+
+      // 取消/截止：父级取消信号 + 回合截止，合成一个 abort 信号交给 Pi 的运行上下文。
+      const abort = new AbortController();
+      const onParentAbort = () => abort.abort();
+      if (input.signal) {
+        if (input.signal.aborted) abort.abort();
+        else input.signal.addEventListener('abort', onParentAbort, { once: true });
+      }
+      const remaining = input.deadline - Date.now();
+      if (remaining <= 0) {
+        if (input.signal) input.signal.removeEventListener('abort', onParentAbort);
+        return { text: '', messages: [...input.messages] };
+      }
+      const timer = setTimeout(() => abort.abort(), Math.max(1, remaining));
+
       const tools = input.tools.map((tool) => toAgentTool(
         tool,
         input,
         providerToolNames.get(tool.name)!,
-      )) as unknown as AgentTool<any, any>[];
-      // 转录即状态:messages 是上一轮持久化的 pi 原生转录(含工具调用与结果),直接续用
-      let initialMessages = input.messages;
-      // P0-B：本次回合的完整请求固定开销 Δ_worst（sys+tools 实测于此），与下面两条阈值线
-      // 同口径——预留 ≥ Δ_worst + MIN_OUTPUT 保证恰在 INV 将被破坏前触发压缩。
-      const fixedOverhead = fixedRequestOverheadTokens(input.systemPrompt, input.tools);
-      // P0-B 单一阈值来源（D3 单源合一）：outputReserve = Δ_worst + MIN_OUTPUT 由同一处派生
-      // 两条线——下面的请求前 INV 线与 transformContext 里的回合内 emergency 线。
-      // 两线原各自独立：emergency 线用 max(1024, Δ+1024)、INV 线用 W−Δ−1024；因那第二个
-      // 常量与 MIN_OUTPUT_BUDGET_TOKENS 同值(1024)且 Δ≥0，max(1024, Δ+1024) ≥ Δ+1024 恒真、
-      // 等号恒取，故两者逐输入同一触发点，收敛为单源（见 invariantReserveTokens）。
-      const outputReserve = invariantReserveTokens(fixedOverhead);
-      // P0-B INV 请求前把关：transformContext 对**每条**模型请求（含本回合首条）都执行，
-      // 因此本复核是纵深防御的第二道闸（不是唯一把关）——违反 W − T − Δ ≥ MIN_OUTPUT 时先
-      // force 压缩，仍无解（no_cut 会抛错、产物超线）则有界失败，一次请求都不发。
-      const invariantLimit = model.contextWindow - outputReserve;
-      if (estimateContextTokens(initialMessages).tokens > invariantLimit) {
-        try {
-          // 关联标识把这次摘要调用与「回合前 INV 复核」这个触发点绑定（同一 id 也进触发点事件）。
-          const correlationId = newCompactionCorrelationId();
-          const compacted = await compactTranscriptWithPi(
-            initialMessages,
-            {
-              force: true,
-              fixedOverheadTokens: fixedOverhead,
-              trigger: 'invariant',
-              correlationId,
-              captureSummaryText: compactionCaptureEnabled(options.env),
-            },
-            { models, model },
-          );
-          if (estimateContextTokens(compacted).tokens > invariantLimit) throw new Error('压缩产物仍超过安全上界');
-          initialMessages = compacted;
-          console.info(JSON.stringify({
-            event: 'pi_driver_pre_request_compacted',
-            correlationId,
-            contextWindow: model.contextWindow,
-            fixedOverhead,
-          }));
-        } catch (error) {
-          console.error(JSON.stringify({
-            event: 'pi_driver_context_invariant_rejected',
-            errorType: error instanceof Error ? error.name : 'UnknownError',
-            message: error instanceof Error ? error.message.slice(0, 300) : String(error),
-            contextWindow: model.contextWindow,
-            fixedOverhead,
-          }));
-          return { text: '', messages: input.messages };
-        }
-      }
+        abort.signal,
+      ));
 
-      const agent = new Agent({
-        initialState: {
-          systemPrompt: input.systemPrompt,
-          model,
-          tools,
-          messages: initialMessages,
-          ...(thinkingLevel ? { thinkingLevel } : {}),
-        },
-        streamFn: models.streamSimple.bind(models),
-        convertToLlm: plannerMessagesToLlm,
-        // 回合内应急压缩（T7）：工具循环把上下文推到窗口边缘时，在**下一条模型请求前**
-        // 压一次，而不是把超窗请求发出去换一个空回复。正常回合靠回合前压缩，这里只是
-        // 兜底；压完的视图装得下就不会在同一回合里反复触发。
-        transformContext: async (messages: AgentMessage[]): Promise<AgentMessage[]> => {
-          const tokens = estimateContextTokens(messages).tokens;
-          if (tokens <= model.contextWindow - outputReserve) return messages;
-          const correlationId = newCompactionCorrelationId();
-          console.warn(JSON.stringify({
-            event: 'context_emergency_compact',
-            correlationId,
-            tokens,
-            contextWindow: model.contextWindow,
-            messages: messages.length,
-          }));
-          return compactTranscriptWithPi(messages, {
-            force: true,
-            fixedOverheadTokens: fixedOverhead,
-            trigger: 'overflow',
-            correlationId,
-            captureSummaryText: compactionCaptureEnabled(options.env),
-          }, { models, model });
-        },
-      });
-
-      const remaining = input.deadline - Date.now();
-      if (remaining <= 0) return { text: '', messages: agent.state.messages };
-      let timedOut = false;
-      const abortTimer = setTimeout(() => {
-        timedOut = true;
-        agent.abort();
-      }, Math.max(1, remaining));
-
-      // 模型瞬时失败：观测（errorMessage 进日志，不再静默吞成空文本）+ 有界重试。
-      // pi-agent-core 遇 stopReason=error 正常 return 不抛异常，错误只在 state.errorMessage；
-      // 原先主驱动不看它，宿主只看到空文本 → 兜底一句零数字的「查询失败」。两类分流：
-      //   · 上下文超限：先压缩（有界摘要）再重发同一条请求；
-      //   · 限流/5xx/网络（pi-ai 判据）：原地等一小段再重发。
-      // 超时/abort 是宿主自己的收尾事实，不重试。
-      let modelAttempt = 0;
+      let harness: Awaited<ReturnType<typeof AgentHarness.create>>['harness'] | undefined;
       try {
-        for (;;) {
-          await agent.continue();
-          if (timedOut) break;
-          const errorMessage = agent.state.errorMessage;
-          if (!errorMessage) break;
+        const repo = new MemorySessionRepo();
+        const session = await repo.create({}, BACKGROUND_CONTEXT);
+        const created = await AgentHarness.create({
+          session,
+          models,
+          model,
+          tools: tools as never,
+          activeToolNames: tools.map((tool) => tool.name),
+          systemPrompt: input.systemPrompt,
+          ...(thinkingLevel ? { thinkingLevel } : {}),
+          toProviderMessages: plannerMessagesToLlm,
+          compaction,
+          retry: MAIN_MODEL_RETRY_POLICY,
+        }, BACKGROUND_CONTEXT);
+        harness = created.harness;
+        const lane = await harness.lane('main', BACKGROUND_CONTEXT);
+
+        // 模型错误/瞬时重试的可归因事件（Pi 原生生命周期事件转成宿主结构化日志）。
+        let runFailure: { code: string; message: string } | undefined;
+        let retryScheduled = 0;
+        harness.events.on('retry_scheduled', (event) => {
+          retryScheduled += 1;
+          console.warn(JSON.stringify({
+            event: 'pi_driver_retry_scheduled',
+            attempt: event.attempt,
+            maxAttempts: event.maxAttempts,
+            delayMs: event.delayMs,
+            errorMessage: String(event.errorMessage).slice(0, 500),
+          }));
+        });
+        harness.events.on('run_end', (event) => {
+          if (event.status === 'failed') {
+            runFailure = { code: event.error.code, message: event.error.message };
+          }
+        });
+
+        // 转录即状态：把上一轮的 Pi 原生转录（含工具调用与结果）重新喂给本回合的会话；
+        // 本回合新的用户消息由 prompt 发起（run 要求以用户消息收尾）。
+        const last = input.messages[input.messages.length - 1];
+        const lastIsUser = last !== undefined && (last as { role?: string }).role === 'user';
+        const history = lastIsUser ? input.messages.slice(0, -1) : input.messages;
+        for (const message of history) await lane.appendMessage(message, BACKGROUND_CONTEXT);
+
+        const runContext = withAbortSignal(abort.signal, BACKGROUND_CONTEXT);
+        if (lastIsUser) {
+          const runResult = await lane.prompt([last], runContext);
+          if (!runResult.ok) {
+            console.error(JSON.stringify({ event: 'pi_driver_run_rejected', reason: String(runResult.error) }));
+          }
+        }
+
+        let messages = await projectTranscript(lane);
+
+        // 供应商错误归因：run 失败 / 错误 assistant 必须可查（不许静默吞成空文本）。
+        if (runFailure !== undefined) {
           console.error(JSON.stringify({
             event: 'pi_driver_model_error',
-            attempt: modelAttempt + 1,
-            errorMessage: errorMessage.slice(0, 500),
+            attempt: 1,
+            errorCode: runFailure.code,
+            errorMessage: runFailure.message.slice(0, 500),
+            retryScheduled,
             contextWindow: model.contextWindow,
           }));
-          // 剥掉结尾的 error assistant：continue() 只认 user/toolResult 结尾（SDK _prepareRetry 同款）。
-          const messages = agent.state.messages;
-          const last = messages[messages.length - 1] as { role?: string } | undefined;
-          if (last?.role === 'assistant') agent.state.messages = messages.slice(0, -1);
-          if (modelAttempt >= MAIN_MODEL_RETRY_DELAYS_MS.length) break;
-          if (isContextOverflowError(errorMessage)) {
-            const tokensBefore = estimateContextTokens(agent.state.messages).tokens;
-            const correlationId = newCompactionCorrelationId();
-            const compacted = await compactTranscriptWithPi(agent.state.messages, {
-              force: true,
-              fixedOverheadTokens: fixedOverhead,
-              trigger: 'overflow',
-              correlationId,
-              captureSummaryText: compactionCaptureEnabled(options.env),
-            }, { models, model });
-            const tokensAfter = estimateContextTokens(compacted).tokens;
-            if (tokensAfter >= tokensBefore) break; // 压不动：重发只会再撞同一面墙
-            agent.state.messages = compacted;
-            console.info(JSON.stringify({
-              event: 'pi_driver_context_overflow_recovered',
-              correlationId,
-              attempt: modelAttempt + 1,
-              tokensBefore,
-              tokensAfter,
-              messagesAfter: compacted.length,
+        }
+        const failedAssistant = lastAssistantStop(messages);
+        if (failedAssistant?.stopReason === 'error' || failedAssistant?.stopReason === 'aborted') {
+          console.error(JSON.stringify({
+            event: 'pi_driver_failed_assistant',
+            stopReason: failedAssistant.stopReason,
+            errorMessage: failedAssistant.errorMessage?.slice(0, 500),
+            contextWindow: model.contextWindow,
+          }));
+        }
+
+        let text = finalReplyText(messages);
+
+        if (!text) {
+          // 空回复必须留下可归因的形状。
+          const lastMessage = messages[messages.length - 1] as {
+            role?: string; stopReason?: string; errorMessage?: string; content?: unknown;
+          } | undefined;
+          console.warn(JSON.stringify({
+            event: 'pi_driver_empty_reply',
+            role: lastMessage?.role,
+            stopReason: lastMessage?.stopReason,
+            errorMessage: lastMessage?.errorMessage?.slice(0, 300),
+            contentBlocks: Array.isArray(lastMessage?.content)
+              ? lastMessage.content.map((block) => (block as { type?: string }).type ?? 'unknown')
+              : typeof lastMessage?.content,
+            contextWindow: model.contextWindow,
+          }));
+        }
+
+        // 只思考没正文：催一次最终文本（一轮一次）。催问作为 user 消息进入转录——
+        // 它是本回合真实发生过的一次宿主请求，不是隐藏改写。
+        if (shouldNudgeFinalReply(messages, text) && Date.now() < input.deadline) {
+          console.warn(JSON.stringify({ event: 'pi_driver_final_text_nudge', contextWindow: model.contextWindow }));
+          const nudgeContext = withAbortSignal(abort.signal, BACKGROUND_CONTEXT);
+          try {
+            await lane.prompt(FINAL_REPLY_NUDGE, undefined, nudgeContext);
+          } catch (error) {
+            console.error(JSON.stringify({
+              event: 'pi_driver_final_text_nudge_failed',
+              errorType: error instanceof Error ? error.name : 'UnknownError',
+            }));
+          }
+          messages = await projectTranscript(lane);
+          text = finalReplyText(messages);
+          if (!text) {
+            console.warn(JSON.stringify({
+              event: 'pi_driver_final_text_nudge_empty',
               contextWindow: model.contextWindow,
             }));
-          } else if (isRetryableAssistantError({ stopReason: 'error', errorMessage } as Parameters<typeof isRetryableAssistantError>[0])) {
-            await new Promise((resolve) => setTimeout(resolve, MAIN_MODEL_RETRY_DELAYS_MS[modelAttempt]));
-            if (timedOut || Date.now() >= input.deadline) break;
-          } else {
-            break; // 非瞬时错误：重试无意义
           }
-          modelAttempt += 1;
         }
+
+        return { text, messages };
       } catch (error) {
         console.error(JSON.stringify({
           event: 'pi_driver_error',
           errorType: error instanceof Error ? error.name : 'UnknownError',
+          message: error instanceof Error ? error.message.slice(0, 300) : String(error),
         }));
-        return { text: '', messages: agent.state.messages };
+        return { text: '', messages: [...input.messages] };
       } finally {
-        clearTimeout(abortTimer);
+        clearTimeout(timer);
+        if (input.signal) input.signal.removeEventListener('abort', onParentAbort);
+        if (harness) await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
       }
-
-      // Aborted/error assistant messages may contain a partial streamed answer.
-      // Never expose that as a successful response.
-      if (timedOut || hasFailedAssistantMessage(agent.state.messages)) {
-        const failed = agent.state.messages[agent.state.messages.length - 1] as {
-          stopReason?: string;
-          errorMessage?: string;
-        } | undefined;
-        if (!timedOut) {
-          console.error(JSON.stringify({
-            event: 'pi_driver_failed_assistant',
-            stopReason: failed?.stopReason,
-            errorMessage: failed?.errorMessage?.slice(0, 500),
-            contextWindow: model.contextWindow,
-          }));
-        }
-        return { text: '', messages: agent.state.messages };
-      }
-
-      // 取终结文本:最后一条 assistant 的正文;若工具以确定性话术终结(terminate),
-      // 最后一条是 toolResult,取其文本
-      let text = '';
-      for (let i = agent.state.messages.length - 1; i >= 0; i -= 1) {
-        const message = agent.state.messages[i] as {
-          role?: string;
-          content?: unknown;
-          stopReason?: string;
-        } | undefined;
-        if (message?.role === 'assistant') {
-          text = textFromContent(message.content);
-          if (message.stopReason !== 'stop') text = '';
-          break;
-        }
-        if (message?.role === 'toolResult') {
-          text = textFromContent(message.content);
-          break;
-        }
-      }
-      if (!text) {
-        // 空回复必须留下可归因的形状（下一轮排查不用再靠猜"是不是窗口爆了"）。
-        const last = agent.state.messages[agent.state.messages.length - 1] as {
-          role?: string;
-          stopReason?: string;
-          errorMessage?: string;
-          content?: unknown;
-        } | undefined;
-        console.warn(JSON.stringify({
-          event: 'pi_driver_empty_reply',
-          role: last?.role,
-          stopReason: last?.stopReason,
-          errorMessage: last?.errorMessage?.slice(0, 300),
-          contentBlocks: Array.isArray(last?.content)
-            ? last.content.map((block) => (block as { type?: string }).type ?? 'unknown')
-            : typeof last?.content,
-          contextWindow: model.contextWindow,
-        }));
-      }
-      // 只思考没正文：催一次最终文本（一轮一次）。催问作为 user 消息进入转录——
-      // 它是本回合真实发生过的一次宿主请求，不是隐藏改写；失败仍走原有空回复兜底。
-      if (shouldNudgeFinalReply(agent.state.messages, text) && Date.now() < input.deadline) {
-        console.warn(JSON.stringify({ event: 'pi_driver_final_text_nudge', contextWindow: model.contextWindow }));
-        agent.state.messages = [
-          ...agent.state.messages,
-          { role: 'user', content: FINAL_REPLY_NUDGE, timestamp: Date.now() } as unknown as AgentMessage,
-        ];
-        try {
-          await agent.continue();
-        } catch (error) {
-          console.error(JSON.stringify({
-            event: 'pi_driver_final_text_nudge_failed',
-            errorType: error instanceof Error ? error.name : 'UnknownError',
-          }));
-        }
-        if (!timedOut && !agent.state.errorMessage) {
-          const last = agent.state.messages[agent.state.messages.length - 1] as {
-            role?: string;
-            content?: unknown;
-            stopReason?: string;
-          } | undefined;
-          if (last?.role === 'assistant') {
-            text = last.stopReason === 'stop' ? textFromContent(last.content) : '';
-          } else if (last?.role === 'toolResult') {
-            text = textFromContent(last.content);
-          }
-        }
-        if (!text) {
-          console.warn(JSON.stringify({
-            event: 'pi_driver_final_text_nudge_empty',
-            errorMessage: agent.state.errorMessage?.slice(0, 300),
-            contextWindow: model.contextWindow,
-          }));
-        }
-      }
-      // 转录交还 runtime 持久化:包含本回合全部用户消息/工具调用/结果
-      return { text, messages: agent.state.messages };
     },
 
-    /** 上下文压缩（pi 原生 compact 的宿主侧收敛，实现见 compactTranscriptWithPi）：超阈值时
-     *  摘要替换旧消息、保留最近尾巴；失败不阻塞回合。 */
-    async compact(messages: AgentMessage[], opts?: { force?: boolean }): Promise<AgentMessage[]> {
-      return compactTranscriptWithPi(messages, {
-        ...opts,
-        correlationId: newCompactionCorrelationId(),
-        captureSummaryText: compactionCaptureEnabled(options.env),
-      }, { models, model });
-    },
-    // 服务端确定性回复(确认码直执)合成原生形状 assistant 消息,防止毒化下一模型回合
+    // 服务端确定性回复（确认码直执）合成原生 assistant 消息，防止毒化下一模型回合
     synthesizeAssistant: (text: string): AgentMessage =>
       toPiMessage({ role: 'assistant', content: text }, modelId),
   };
 }
 
-/** 有界历史/当前消息 → pi 的 AgentMessage。assistant 必须带完整内部形状
- *  (api/provider/model/usage),否则 pi-ai 结算 usage 时会崩溃(2026-09-16 实测)。 */
+/**
+ * 把 Pi 会话分支投影成宿主转录（业务层只读投影）：压缩条目替换其之前的一切为
+ * 「摘要 + 保留尾段」；普通消息原样保留（含宿主 custom 事件、工具调用与结果）。
+ */
+async function projectTranscript(lane: {
+  findEntries(query: undefined, context: typeof BACKGROUND_CONTEXT): Promise<Entry[]>;
+}): Promise<AgentMessage[]> {
+  const entries = [...await lane.findEntries(undefined, BACKGROUND_CONTEXT)].sort((a, b) => a.seq - b.seq);
+  let messages: AgentMessage[] = [];
+  for (const entry of entries) {
+    if (entry.type === 'compaction') {
+      messages = [summaryToMessage(entry.summary, entry.timestamp), ...entry.retainedTail];
+    } else if (entry.type === 'message') {
+      messages.push(entry.message);
+    }
+  }
+  return messages;
+}
+
+/** Pi 压缩摘要 → 宿主转录里的一条用户消息（包装文案固定，不承载压缩决策）。 */
+function summaryToMessage(summary: string, timestamp: number): AgentMessage {
+  return {
+    role: 'user',
+    content: `【此前会话摘要】\n${summary}`,
+    timestamp,
+  } as unknown as AgentMessage;
+}
+
+/** 最后一条 assistant 的 stopReason/errorMessage（无则 undefined）。 */
+function lastAssistantStop(messages: readonly AgentMessage[]): { stopReason?: string; errorMessage?: string } | undefined {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] as { role?: string; stopReason?: string; errorMessage?: string } | undefined;
+    if (message?.role === 'assistant') return { stopReason: message.stopReason, errorMessage: message.errorMessage };
+  }
+  return undefined;
+}
+
+/**
+ * 取终结文本：最后一条 assistant 的正文（stopReason 必须为 stop）；若最后一条是
+ * toolResult（工具以确定性话术终结），取其文本。
+ */
+function finalReplyText(messages: readonly AgentMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] as { role?: string; content?: unknown; stopReason?: string } | undefined;
+    if (message?.role === 'assistant') {
+      const text = message.stopReason === 'stop' ? textFromContent(message.content) : '';
+      return text;
+    }
+    if (message?.role === 'toolResult') {
+      return textFromContent(message.content);
+    }
+  }
+  return '';
+}
+
+/** 有界历史/当前消息 → pi 的 AgentMessage。assistant 必须带完整内部形状，否则结算会崩溃。 */
 function toPiMessage(
   message: { role: string; content: string },
   modelId: string,
@@ -1118,20 +499,11 @@ function toPiMessage(
 
 /**
  * Build provider-facing names independently from domain tool names.
- *
- * Domain tools may use names such as `workflow.start`, while OpenAI-compatible
- * function calling only accepts `[A-Za-z0-9_-]{1,64}`.  Keep ordinary names
- * unchanged for backwards-compatible transcripts, and only rewrite names
- * that the provider cannot accept.  The returned map is deliberately one-way:
- * execution always closes over the original discovered tool name.
  */
 export function createProviderToolNameMap(tools: readonly DiscoveredTool[]): Map<string, string> {
   const result = new Map<string, string>();
   const used = new Set<string>();
 
-  // Reserve names that can be sent unchanged first. This prevents an
-  // invalid name such as `workflow.start` from stealing an existing
-  // `workflow_start` function name.
   for (const tool of tools) {
     if (isProviderToolName(tool.name)) {
       result.set(tool.name, tool.name);
@@ -1171,8 +543,6 @@ function fitProviderToolName(base: string, original: string): string {
 }
 
 function stableNameHash(value: string): string {
-  // Small deterministic FNV-1a hash; this is only a collision suffix, not a
-  // security boundary or identifier exposed to the domain implementation.
   let hash = 0x811c9dc5;
   for (let i = 0; i < value.length; i += 1) {
     hash ^= value.charCodeAt(i);
@@ -1181,17 +551,17 @@ function stableNameHash(value: string): string {
   return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
+/** 构造 Pi Harness 原生工具定义（execute 收 Harness 的回调/上下文参数并忽略之）。 */
 export function toAgentTool(
   tool: DiscoveredTool,
   input: TurnDriverInput,
   providerName = tool.name,
+  signal?: AbortSignal,
 ) {
   return {
     name: providerName,
     label: tool.name,
     description: tool.description,
-    // host tools/list 的 inputSchema 是标准 JSON Schema,typebox 兼容该子集;
-    // 注入可选 progress 参数:模型可提供一句话意图短语,仅用于进度帧
     parameters: Type.Unsafe({
       ...tool.inputSchema,
       properties: {
@@ -1205,12 +575,16 @@ export function toAgentTool(
         },
       },
     }),
-    execute: async (_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) => {
-      // progress 是给进度帧的意图短语,不进工具参数
+    execute: async (
+      _toolCallId: string,
+      params: Record<string, unknown>,
+      _onUpdate?: unknown,
+      _toolContext?: unknown,
+      _invocation?: unknown,
+      _context?: unknown,
+    ): Promise<AgentToolResult<unknown>> => {
       const { progress, ...args } = params as Record<string, unknown> & { progress?: unknown };
       const phrase = typeof progress === 'string' ? progress : '';
-      // 帧文本由 renderToolStepText 一处合成：内部工具与协议材料复读都不出帧；
-      // 返回 null 时静默跳过——空串会在渠道上投出一条空进度帧,比不发帧更糟。
       const step = renderToolStepText(tool.name, phrase);
       if (step) input.onStep(step);
       try {
@@ -1224,6 +598,7 @@ export function toAgentTool(
           // 确定性失败话术直接终结回合,不经模型复述
           return {
             content: [{ type: 'text' as const, text: error.message }],
+            details: {},
             terminate: true,
           };
         }
@@ -1231,16 +606,6 @@ export function toAgentTool(
       }
     },
   };
-}
-
-function hasFailedAssistantMessage(messages: readonly unknown[]): boolean {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i] as { role?: unknown; stopReason?: unknown } | undefined;
-    if (message?.role === 'assistant') {
-      return message.stopReason === 'aborted' || message.stopReason === 'error';
-    }
-  }
-  return false;
 }
 
 function textFromContent(content: unknown): string {

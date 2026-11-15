@@ -20,7 +20,10 @@ function assistant(content: unknown[], stopReason = 'stop', errorMessage?: strin
     api: 'openai-completions',
     provider: 'llm',
     model: 'step-3.7-flash',
-    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15 },
+    usage: {
+      input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
     stopReason,
     ...(errorMessage ? { errorMessage } : {}),
     timestamp: Date.now(),
@@ -40,20 +43,22 @@ function streamOf(message: AgentMessage) {
 
 function fakeRuntime(responses: AgentMessage[]): { runtime: PiModelRuntime; calls: () => number } {
   let calls = 0;
+  const model = {
+    id: 'step-3.7-flash',
+    name: 'step-3.7-flash',
+    api: 'openai-completions',
+    provider: 'llm',
+    baseUrl: 'http://127.0.0.1:9',
+    reasoning: true,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 40_000,
+    maxTokens: 32_000,
+  } as unknown as PiModelRuntime['model'];
   const runtime: PiModelRuntime = {
-    model: {
-      id: 'step-3.7-flash',
-      name: 'step-3.7-flash',
-      api: 'openai-completions',
-      provider: 'llm',
-      baseUrl: 'http://127.0.0.1:9',
-      reasoning: true,
-      input: ['text'],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 40_000,
-      maxTokens: 32_000,
-    } as unknown as PiModelRuntime['model'],
+    model,
     models: {
+      getModel: () => model,
       streamSimple: async () => {
         calls += 1;
         const response = responses.shift();
@@ -62,6 +67,7 @@ function fakeRuntime(responses: AgentMessage[]): { runtime: PiModelRuntime; call
       },
       // 压缩摘要用（溢出恢复路径会先压缩再重发）。
       completeSimple: async () => assistant([{ type: 'text', text: '【夹具摘要】此前对话已折叠。' }]),
+      cancelDeferred: async () => {},
     } as unknown as MutableModels,
   };
   return { runtime, calls: () => calls };
@@ -99,25 +105,25 @@ describe('T7 主驱动收尾控制流', () => {
     }
   });
 
-  it('上下文超限错误：先压缩再重发，交回恢复后的正文', async () => {
+  it('上下文超限错误：Pi 原生溢出恢复有界（至多一次重发）后交回正文', async () => {
     const { runtime, calls } = fakeRuntime([
       assistant([], 'error', 'maximum context length exceeded: 48430 + 13107 > 40000'),
       assistant([{ type: 'text', text: '压缩后恢复的正文。' }]),
     ]);
-    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const driver = createPiTurnDriver({ env: { LLM_MODEL: 'step-3.7-flash' }, runtime });
+      const u = (text: string, ts: number) => ({ role: 'user', content: text, timestamp: ts } as unknown as AgentMessage);
       const result = await driver.run(input([
-        { role: 'user', content: 'x'.repeat(60_000), timestamp: 1 } as unknown as AgentMessage,
+        u('第一轮问题', 1),
+        assistant([{ type: 'text', text: '第一轮答复' }]),
+        u('第二轮问题', 2),
+        u('x'.repeat(2_000), 3),
       ]));
 
-      expect(result.text).toBe('压缩后恢复的正文。');
-      expect(calls(), '超限错误后必须重发一次（不是把空文本交回宿主）').toBe(2);
-      expect(info.mock.calls.map((call) => String(call[0])).some((line) => line.includes('pi_driver_context_overflow_recovered'))).toBe(true);
-      expect(error.mock.calls.map((call) => String(call[0])).some((line) => line.includes('pi_driver_model_error'))).toBe(true);
+      expect(result.text, 'Pi 原生溢出恢复后交回正文').toBe('压缩后恢复的正文。');
+      expect(calls(), '溢出恢复至多重发一次（有界，不无限重试）').toBe(2);
     } finally {
-      info.mockRestore();
       error.mockRestore();
     }
   });

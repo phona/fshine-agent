@@ -41,7 +41,10 @@ function assistant(content: unknown[], stopReason = 'stop', errorMessage?: strin
     api: 'openai-completions',
     provider: 'llm',
     model: 'step-3.7-flash',
-    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15 },
+    usage: {
+      input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
     stopReason,
     ...(errorMessage ? { errorMessage } : {}),
     timestamp: Date.now(),

@@ -120,3 +120,14 @@ TMPDIR=/home/tao/.tmp node scripts/eval/pi-native/a-metrics.mjs   # exit 0，fai
 ---
 
 **状态：已冻结（真实模型前）。** 待真实 Pi 生命周期复核后，按 §2 复核并冻结「`≤1 次/事件`」的适用范围。
+
+---
+
+## 7. 实施期裁定补充（Integration，2026-11-15，owner 裁决）
+
+> 本补充由 owner 裁定授权追加；§1–§6 冻结内容不变。
+
+- **fshine 仅提供 Pi 要求的 `CompactionSettings`（按窗口派生）**：属 **Pi API 契约**，**不构成第二套压缩/阈值机制**。
+- 依据：Pi 0.85.1 的 `shouldCompact(tokens, W, settings)` 要求调用方提供**绝对** `CompactionSettings`（仅 `enabled/reserveTokens/keepRecentTokens` 三个绝对字段，**无窗口相对字段、无缩放助手**，见 `@earendil-works/pi-agent-core` `harness/compaction/compaction.d.ts:31-40`）。Pi 缺省按 128k 设计（reserve=16384、keepRecent=20000），在 `W=8192` 下 reserve 超过窗口本身——**不缩放则 Pi 自身行为已失效**（本会话黑盒实测，零真实模型：短回合被压、`compaction_end=["completed","completed"]`）。
+- 边界：该派生**只由 `contextWindow` 推导 `reserveTokens`/`keepRecentTokens`**（窗口 ≥ Pi 缺省和 → 用 Pi 缺省；否则按比例缩放），**纯配置、无副作用**；**不含任何 fshine 压缩决策/安全闸 math**（无 INV 下界臂、无 Δ、无 emergency 线、无 `shouldCompact` 复刻、无 split/summarize/trim/degrade）。触发/执行/摘要/尾段/溢出恢复**全部由 Pi 决定与执行**（`AgentHarness`）。
+- 生产实现：`packages/agent/src/pi-driver.ts` 的 `piCompactionSettings`；反向绊线 `packages/agent/pi-native-tripwire.test.ts`（守卫「不得回潮」的自研压缩符号/事件）。

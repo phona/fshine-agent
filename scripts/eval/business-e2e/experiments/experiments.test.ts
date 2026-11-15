@@ -243,31 +243,6 @@ describe('⑥ 串并行一致性（确定性假件）', () => {
   });
 });
 
-describe('⑦ 缺口 3 装配接线（确定性）', () => {
-  it('小 LLM_CONTEXT_WINDOW 经 contextWindowFrom 触发压缩尝试；缺省 128k 不触发', async () => {
-    const messages = longTranscript();
-    const warns: string[] = [];
-    const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => { warns.push(String(args[0])); });
-    try {
-      const baseEnv = { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'k', LLM_MODEL: 'step-3.7-flash' };
-      const fallback = createPiTurnDriver({ env: baseEnv, ...contextWindowFrom(baseEnv) });
-      const out = await fallback.compact!(messages);
-      expect(out, '缺省 128k：阈值未到，原样返回').toBe(messages);
-      expect(warns, '缺省不应触发压缩尝试').toEqual([]);
-
-      const smallEnv = { ...baseEnv, LLM_CONTEXT_WINDOW: '12000' };
-      const capped = createPiTurnDriver({ env: smallEnv, ...contextWindowFrom(smallEnv) });
-      await capped.compact!(messages);
-      expect(warns.some((l) => l.includes('context_compact_failed')), '12k 窗口应触发压缩尝试').toBe(true);
-
-      expect(contextWindowFrom(smallEnv)).toEqual({ contextWindow: 12000 });
-      expect(contextWindowFrom(baseEnv)).toEqual({});
-    } finally {
-      spy.mockRestore();
-    }
-  });
-});
-
 describe('⑧ Skill 臂汇总与 infra 门', () => {
   it('Skill 三臂装配：none 无技能块；inline 注入正文；catalog 注入摘要 + 暴露 read_skill', async () => {
     const root = freshRoot();
@@ -372,28 +347,6 @@ describe('⑨ #7 重设计：自然语料与「压缩触发」的机械捕获', 
     expect(verdict.counters.compactionTriggerTurns).toEqual(Array.from({ length: turnCount }, (_, i) => i + 1));
     // console.log 的 context_compacted（回合前压缩成功）也必须被捕获（pi-driver.ts:543）。
     expect(verdict.counters.compactionCompleted, 'context_compacted（console.log）应被捕获').toBe(turnCount);
-  });
-
-  it('真实压缩日志可被捕获：驱动内调用生产 compact()（小窗口）→ 证据含 context_* 事件', async () => {
-    const root = freshRoot();
-    const baseEnv = { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'k', LLM_MODEL: 'step-3.7-flash' };
-    const small = createPiTurnDriver({ env: baseEnv, ...contextWindowFrom({ ...baseEnv, LLM_CONTEXT_WINDOW: '12000' }) });
-    const messages = longTranscript();
-    const driver: TurnDriver = {
-      async run(input) {
-        await small.compact!(messages); // 生产压缩代码路径（摘要不可达 → 结构化日志）
-        const reply = '好的。';
-        return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
-      },
-    };
-    const exec = createExpExecutor({
-      createDrivers: () => ({ mainDriver: driver, workerDriver: workerQuerier() }),
-      createExecutionFace: async () => fakeFace(),
-      env: FAKE_ENV,
-    });
-    const ev = await exec(itemFor(T01), T01, path.join(root, 'real'));
-    const ctxEvents = ev.meta.driverEvents.filter((e) => String(e['event']).startsWith('context_'));
-    expect(ctxEvents.length, '生产 compact 的结构化日志应被捕获（非仅合成事件）').toBeGreaterThan(0);
   });
 
   it('并发归属：同批两样本各自只收自己的驱动事件（ALS 不串台）', async () => {

@@ -19,63 +19,29 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
-import { describe, expect, it, vi } from 'vitest';
-import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { createPiTurnDriver } from '../packages/agent/src/pi-driver';
+import { describe, expect, it } from 'vitest';
+import { createPiModelRuntime } from '../packages/agent/src/pi-driver';
 import { contextWindowFrom } from './ask-runtime';
 
 const ENV = { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'context-window-key', LLM_MODEL: 'step-3.7-flash' };
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 
-/** ~30k token 的转录（4 字符 ≈ 1 token）：越过 40k 能力的阈值，不越 128k 的阈值。 */
-function longTranscript(): AgentMessage[] {
-  const messages: AgentMessage[] = [];
-  for (let index = 0; index < 133; index += 1) {
-    messages.push({
-      role: 'assistant',
-      content: [{ type: 'text', text: `第 ${index} 段资料：${'x'.repeat(900)}` }],
-      stopReason: 'stop',
-      timestamp: index,
-    } as unknown as AgentMessage);
-  }
-  return messages;
-}
-
-/** 装配层构造驱动的同一方式（两调用点共享）：env + contextWindowFrom(env) 展开。 */
-function assembleDriver(env: Record<string, string | undefined>) {
-  return createPiTurnDriver({ env, ...contextWindowFrom(env) });
+/** 装配层构造驱动的同一方式（两调用点共享）：env + contextWindowFrom(env) 展开后落到模型能力。 */
+function assembledWindow(env: Record<string, string | undefined>): number {
+  const { contextWindow } = contextWindowFrom(env);
+  return createPiModelRuntime(env, 'step-3.7-flash', contextWindow !== undefined ? { contextWindow } : {}).model.contextWindow;
 }
 
 describe('缺口 3 · 压缩窗口装配接线（contextWindowFrom → 驱动 contextWindow）', () => {
-  it('未设置 → 装配产物缺省 128k：长转录原样返回且零 warn（缺省逐字节不变）', async () => {
-    const messages = longTranscript();
-    const warns: string[] = [];
-    const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => { warns.push(String(args[0])); });
-    try {
-      expect(contextWindowFrom(ENV), '未设置必须回落空对象（驱动不收到 contextWindow）').toEqual({});
-      const out = await assembleDriver(ENV).compact!(messages);
-      expect(out, '缺省 128k：阈值未到，必须原样返回').toBe(messages);
-      expect(warns, '缺省 128k 不应触发任何压缩尝试').toEqual([]);
-    } finally {
-      spy.mockRestore();
-    }
+  it('未设置 → 装配产物缺省 128k（缺省逐字节不变）', () => {
+    expect(contextWindowFrom(ENV), '未设置必须回落空对象（驱动不收到 contextWindow）').toEqual({});
+    expect(assembledWindow(ENV)).toBe(DEFAULT_CONTEXT_WINDOW);
   });
 
-  it('LLM_CONTEXT_WINDOW=40000 → 装配产物吃该值：长转录触发压缩尝试（接线生效）', async () => {
-    const messages = longTranscript();
+  it('LLM_CONTEXT_WINDOW=40000 → 装配产物吃该值（接线生效）', () => {
     const env = { ...ENV, LLM_CONTEXT_WINDOW: '40000' };
-    const warns: string[] = [];
-    const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => { warns.push(String(args[0])); });
-    try {
-      expect(contextWindowFrom(env)).toEqual({ contextWindow: 40_000 });
-      await assembleDriver(env).compact!(messages);
-      expect(
-        warns.some((line) => line.includes('context_compact_failed')),
-        '装配层没把 LLM_CONTEXT_WINDOW 传进驱动：仍按 128k 判阈值，压缩尝试没发生',
-      ).toBe(true);
-    } finally {
-      spy.mockRestore();
-    }
+    expect(contextWindowFrom(env)).toEqual({ contextWindow: 40_000 });
+    expect(assembledWindow(env)).toBe(40_000);
   });
 
   it('空串 = 未设置（parseContextWindow 语义）→ 回落缺省', () => {

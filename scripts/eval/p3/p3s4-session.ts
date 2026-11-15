@@ -201,7 +201,6 @@ async function run(): Promise<void> {
         };
         return await inner.run(wrappedInput);
       },
-      ...(inner.compact ? { compact: inner.compact.bind(inner) } : {}),
       ...(inner.synthesizeAssistant ? { synthesizeAssistant: inner.synthesizeAssistant.bind(inner) } : {}),
     };
     return wrapped;

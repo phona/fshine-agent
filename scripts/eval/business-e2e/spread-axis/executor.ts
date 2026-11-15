@@ -99,7 +99,6 @@ function recordingDriver(inner: TurnDriver, agent: 'main' | 'worker', sink: Sink
       };
       return await inner.run(wrappedInput);
     },
-    ...(inner.compact ? { compact: inner.compact.bind(inner) } : {}),
     ...(inner.synthesizeAssistant ? { synthesizeAssistant: inner.synthesizeAssistant.bind(inner) } : {}),
   };
   return wrapped;

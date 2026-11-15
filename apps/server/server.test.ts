@@ -71,7 +71,10 @@ function toolCallAssistant(name: string, args: Record<string, unknown>, id: stri
     api: 'openai-completions',
     provider: 'llm',
     model: 'test-model',
-    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15 },
+    usage: {
+      input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
     stopReason: 'toolUse',
     timestamp: Date.now(),
   } as unknown as AgentMessage;
@@ -84,7 +87,10 @@ function textAssistant(text: string): AgentMessage {
     api: 'openai-completions',
     provider: 'llm',
     model: 'test-model',
-    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15 },
+    usage: {
+      input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
     stopReason: 'stop',
     timestamp: Date.now(),
   } as unknown as AgentMessage;
@@ -101,26 +107,29 @@ function streamOf(message: AgentMessage) {
 }
 
 function driverFor(responses: AgentMessage[]) {
+  const model = {
+    id: 'test-model',
+    name: 'test-model',
+    api: 'openai-completions',
+    provider: 'llm',
+    baseUrl: 'http://127.0.0.1:9',
+    reasoning: true,
+    input: ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 40_000,
+    maxTokens: 32_000,
+  } as unknown as PiModelRuntime['model'];
   const runtime: PiModelRuntime = {
-    model: {
-      id: 'test-model',
-      name: 'test-model',
-      api: 'openai-completions',
-      provider: 'llm',
-      baseUrl: 'http://127.0.0.1:9',
-      reasoning: true,
-      input: ['text'],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 40_000,
-      maxTokens: 32_000,
-    } as unknown as PiModelRuntime['model'],
+    model,
     models: {
+      getModel: () => model,
       streamSimple: async () => {
         const response = responses.shift();
         if (!response) throw new Error('假模型运行时没有更多响应');
         return streamOf(response);
       },
       completeSimple: async () => textAssistant('【夹具摘要】'),
+      cancelDeferred: async () => {},
     } as unknown as MutableModels,
   };
   return createPiTurnDriver({ env: { LLM_MODEL: 'test-model' }, runtime });
