@@ -1996,6 +1996,14 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 - 本次登记**零产品代码改动**（仅追记本条目）、**零新增模型调用**、未 `git add` 任何 `.runtime` 证据；D1/D2/D3 及其前置（反向绊线、128k 复测）一律**待 owner 裁决后另批实施**，本条目不含实施排期。
 - **状态：待合入。**
 
+**结论（2026-11-15，owner 裁决；原「待 owner 裁决」逐条销项）**
+- **D1 → 保留，不删**。反向绊线（run `dwfrun-8e6c9232`，分支 `arch/r5-ac`）实证：删除 `run()` 请求前 INV 复核臂后，`transformContext` 臂**单独拦不住**不可救输入——请求仍实际发出（`calls=1`），由 `run()` catch 兜底成空文本/`pi_driver_error`，而非请求前有界失败。**「删 D1 后由 `transformContext` 单独把关」的等价性假设被证伪**；D1 承重。原推荐 A（D1+D2+D3 整包删）**不成立**。
+- **D2 → 授权实施**：修正 `pi-driver.ts:658-660` 失实注释为如实陈述（`transformContext` 每请求（含首条）执行；`run()` 复核为纵深防御）。
+- **D3 → 授权实施（须行为等价验证）**：`emergencyHeadroom`（:657）与 `invariantLimit`（:661）收敛为**单一阈值来源**。恒等式：`EMERGENCY_OVERFLOW_HEADROOM_TOKENS = MIN_OUTPUT_BUDGET_TOKENS = 1024`（:31/:292）⇒ `max(1024, Δ+1024) ≡ Δ+1024`（∀ Δ≥0，等号恒成立）⇒ 两线恒等。须在**多窗口/多配置**（≥4 组：缺省 128k、40k、8192、Δ 极小）验证语义一致，并补**恒等断言单测**。
+- **B → 未被否决**：owner 澄清「**否决的只是删除 D1，不是 Agent 路径的最小修复方案**」。B（零收益循环最小机制修复，设计见 §七十）实施=新增预判机制，属 `DECISION_REQUIRED`，**仍待裁**；前置=128k 生产窗口复测规则(2)命中率。
+- **过期 `DECISION_REQUIRED` 清除**：①「保留 D1 vs 删除并新增闸」→ 已决（**保留 D1**）；②「D2/D3 能否在保留 D1 下分别做」→ 已决（**可，授权实施**）；③「是否可把关完全交给 Pi（删 D1）」→ 已决（**否**，绊线证伪）。
+- **实施归属**：D2/D3 由独立切片（分支 `arch/r5-d23`）实施并按 TDD/绊线纪律复核合入；本条只登记裁定。
+
 ---
 
 
@@ -2025,6 +2033,11 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 **待 owner 裁决**：是否实施该最小切片；128k 生产窗口复测规则(2)命中率的前置；与主仓 §六十九（压缩机制归属审计）的 D1/D2/D3 关系（本设计与 D1 删重**互不冲突、可分别裁**）。
 
 **状态：待合入。**
+
+**结论（2026-11-15，owner 裁决）**
+- owner 澄清：**否决的只是删除 D1，不是 Agent 路径的最小修复方案**；本 B 设计**未被否决**，仍属「Agent 路径的最小修复方案」可选形态。
+- 但 B 实施=新增预判机制（`compactionWorthwhile` 纯函数 + `context_compact_precheck_skipped` 事件），属「新增机制 / 改变语义」范畴 → **列为 `DECISION_REQUIRED`，暂不实施**；前置=128k 生产窗口复测规则(2)命中率。
+- 与 §六十九 关系：D1 已裁**保留**；D2/D3 已裁**实施**；B 与 D2/D3 **互不冲突、可分别裁**（owner 确认）。
 
 ---
 
