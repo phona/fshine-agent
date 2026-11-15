@@ -1517,6 +1517,51 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 五十八、R5 Phase 3 准备 · 中断根因 / 预注册 / 执行器硬停与压缩窗口证明（2026-11-15，分支 `arch/r5-p3prep`，基线 = arch/integration b24cd75）
+
+**状态：待合入。** 本批零真实模型调用（全部证据 = 只读代码 + 确定性夹具 + 单测）；产品代码零改动（新增仅 `scripts/eval/p3/` harness 面：enforce.ts / enforce.test.ts / compaction-proof.ts）。
+
+### ① 7 个中断会话根因判定与证据
+
+- 根因 = **实施 Agent 侧模型 GLM-5.3（bigmodel）的 5 小时使用配额（providerCode 1308）**，非受测模型 step-3.7-flash 的供应商配额。
+- 证据（由中断调查会话提供，见下「证据落盘」注）：zcode 日志两批 turn.failed 级 1308（11-14 21:45 本地 6 条 + 11-15 11:51 本地 1 条 = 共 7 条），全部 modelId=GLM-5.3，与台账登记的 7 个中断样本一一对应；step-3.7-flash 走 eval 管线不经 zcode，日志中零失败记录，且 Phase 2 收尾 13 样本（8 业务 + 5 D 轴）正常跑完。
+- GLM-5.3 配额当前可用（13:00 本地后 322 条成功请求，含调查会话自身）；但 5 小时窗滚动，长批次仍可能触顶——与 owner 预留 2 个中断会话一致。
+- **证据落盘注**：调查会话报告称结论写入 `.runtime/r5p3prep/rootcause.md`；本登记时实际 `ls .runtime/r5p3prep/` 只有 `prep.md` 与 `prereg.md`，rootcause.md 未在盘上——根因结论按调查会话报告原文登记，zcode 日志原始行未由本会话独立复核。
+
+### ② 受测模型与消耗 / Phase 3 模型一致性
+
+- Phase 2 实测模型 = **step-3.7-flash**：7 份 infra-gate.json + infra-gate-experiments.json + d-axis/report.json.infraGate 逐份实读钉住；meta.json 无模型字段，样本级不可独立验证。
+- Phase 3 未发现任何预注册钉模型记录；当前 `.env`（主仓与 r5-phase2 worktree）为 step-5-preview ≠ step-3.7-flash；r5-p3prep 无 .env。
+- 判定：**若 Phase 3 以 step-3.7-flash 以外模型开跑，属独立实验，不混入既有统计**；若续用 step-3.7-flash，须预注册显式钉住并以 infra-gate 实跑确认运行时环境。
+- 本准备批消耗 0 真实会话（零额度核查见 prereg §3）。
+
+### ③ 预注册与每样本硬上限（`.runtime/r5p3prep/prereg.md`，gitignored）
+
+- P3-A（A1–A3 长稳压缩链，六环验收：①压缩前存在需保留任务上下文 ②Pi 真实触发压缩 ③压缩成功且上下文预期变化 ④压缩后继续交办 ⑤Worker 正确使用保留上下文 ⑥最终结果无对象漂移/重复执行）；P3-B（B1 多任务交替/话题切换、B2 取消后继续派发）；P3-C（C1 预算耗尽、C2 运行中取消——**区分任务终态与执行进程实际停止**）。
+- 每样本硬上限（任一触发即执行器强停留证）：A 60 调用/400k tokens/30min；B 80/500k/30min；C1 6/30k/2min；C2 40/300k/10min。每样本 1 trial，不重跑不筛绿；INCONCLUSIVE 原样登记。
+
+### ④ 执行器强制停接线与测试
+
+- `scripts/eval/p3/enforce.ts`：`createBudgetLedger` + `createEnforcingDriver` 包装 TurnDriver，main/worker 共享 ledger；三类硬停点（回合前零调用拒绝、回合内每次 exec 前复核、墙钟 AbortController 到点打断在途请求），事件留证 `p3_budget_call` / `p3_budget_hard_stop` / `p3_budget_wall_abort`。
+- 钉住测试 `scripts/eval/p3/enforce.test.ts`：`npx vitest run scripts/eval/p3/enforce.test.ts` → **6/6 绿**（2026-11-15 实测）。预算耗尽由执行器机械停、不依赖 Agent 自觉，已有确定性测试钉死。
+
+### ⑤ 窗口可触发压缩证明
+
+- 选定 contextWindow **W=8192**（≥ 装配下界 6656）。确定性证明：`node --import tsx scripts/eval/p3/compaction-proof.ts` → exit 0：夹具转录（真实多轮业务对话，40 轮）≈ 11,320 tokens > 阈值 6,144（W−2048）→ shouldCompact=true，且 > INV 复核线 3,002 → 回合前 force 压缩必走；对照 W=128,000 不触发（阈值 111,616）——窗口选择是有效变量，非无意义填充。
+- 真实运行触发证明面 = 驱动事件 `pi_driver_pre_request_compacted` / `context_compacted`；**未见事件 P3-A 不得判通过**。
+
+### ⑥ 是否可进入真实长稳（blocking 判定）
+
+- **blocking：无**——预注册齐备、硬停接线与测试已落、压缩窗口已实测可触发、根因澄清为基建配额非产品缺陷。
+- 已知非阻断项登记：① spread-axis.test.ts DS-3 background 用例在基线 b24cd75 即红（`spread-axis.test.ts:89`，主仓与 worktree 同红，非本批引入）；② GLM-5.3 五小时配额滚动，长批次可能再触顶（已由中断预留 2 会话对冲）；③ Phase 3 开跑前须按 §② 钉模型并过 infra-gate。
+
+### ⑦ 预算与边界
+
+- 预算 170 → **175**；本阶段追加 **≤5 真实会话**（长稳正式 3 + 中断预留 2）；本准备批消耗 0。
+- 零产品代码改动；证据根 `.runtime/r5p3prep/` gitignored 未 git add；不 push/不合并/不碰 main/tag。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
