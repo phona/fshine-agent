@@ -44,6 +44,7 @@ import {
   createSession,
   createTaskExecutor,
   type Session,
+  type TranscriptStore,
   type WorkerSkill,
 } from '../packages/agent/src/execution-runtime';
 import {
@@ -190,6 +191,10 @@ export interface SessionAssemblyInput {
   notificationMaxAttempts?: number;
   /** R5 B 通道：机械事实注入器（server 由 attachNotificationOutbox 返回值提供）。 */
   taskFactProvider?: NotificationAttachment['taskFactProvider'];
+  /** B1：会话转录持久化端口（装配方构造具体存储注入）；缺省 undefined = 不落盘会话（现行为）。 */
+  transcriptStore?: TranscriptStore;
+  /** B1：转录读/写失败上报（fail-open 日志；缺省静默）。 */
+  onTranscriptError?: (error: unknown) => void;
   /** P6：runner 覆盖（测试确定性：leaseMs/时钟/属主）。 */
   runnerOptions?: { leaseMs?: number; owner?: string; now?: () => Date };
 }
@@ -520,6 +525,8 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       ...(runner === undefined ? {} : { taskRunner: runner }),
       ...(mainSkillRegistry === undefined ? {} : { mainSkillRegistry }),
       ...(input.taskFactProvider === undefined ? {} : { taskFactProvider: input.taskFactProvider }),
+      ...(input.transcriptStore === undefined ? {} : { transcriptStore: input.transcriptStore }),
+      ...(input.onTranscriptError === undefined ? {} : { onTranscriptError: input.onTranscriptError }),
       mainTurnMs: resolved.mainTurnMs,
       workerTurnMs: resolved.workerTurnMs,
       // 可信工作目录：装配层持有的 profile.root（绝不取模型输出/用户消息）。

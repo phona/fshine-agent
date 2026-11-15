@@ -199,6 +199,21 @@ export interface WorkerSkill {
   content: string;
 }
 
+/**
+ * 会话转录端口（依赖注入；runtime 只认接口，**不** import 任何具体存储实现）。
+ *
+ * 装配层提供实现（如复用 Pi `JsonlSessionRepo` 的 `session-persistence.ts`）。语义：
+ *   · `readTranscript()`：打开会话时**现读**该 `(principalId, sessionId)` 的完整转录
+ *     （每次调用都从存储读，宿主不留第二份可变副本——Pi entry-log 是唯一转录所有者）；
+ *   · `append(message)`：回合结束后向存储**追加一条**本条新增的转录消息（Pi 原生 message 形状）。
+ *
+ * 与 `PersistedSession`（session-persistence.ts:57）结构化相容——装配层直接注入后者。
+ */
+export interface TranscriptStore {
+  readTranscript(): Promise<readonly DriverMessage[]>;
+  append(message: DriverMessage): Promise<void>;
+}
+
 export interface RuntimeOptions {
   /** 可信身份：来自装配/渠道事实，绝不来自模型输入。 */
   principalId: string;
@@ -255,6 +270,14 @@ export interface RuntimeOptions {
    * 缺省不注入 = Worker 提示与现行常量逐字节相同。
    */
   workerWorkspaceRoot?: string;
+  /**
+   * B1 会话持久化端口（装配层注入具体实现；缺省 undefined = 逐字节现行为：转录仅内存 mainMessages）。
+   * 注入后：打开会话时从存储载入转录、回合结束后把**本回合新增**消息增量持久化。
+   * 写失败 fail-open（不回滚回合），读/写错误经 `onTranscriptError` 上报。
+   */
+  transcriptStore?: TranscriptStore;
+  /** B1：转录读/写失败的上报回调（fail-open 日志；缺省静默吞掉，不影响回合）。 */
+  onTranscriptError?: (error: unknown) => void;
 }
 
 /** 前台回合被资源策略确定性拒绝（queued 排队等晋升后不适用；携带机械 reason）。 */
@@ -419,7 +442,19 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     return runner.resume(resolveTaskId(refFromArgs(args)), { answer, scope });
   }
 
+  const transcriptStore = options.transcriptStore;
   let mainMessages: DriverMessage[] = [];
+  let persistedCount = 0;
+  // 打开→载入：注入存储时现读完整转录（宿主不留第二份副本；Pi entry-log 是唯一所有者）。
+  // 读失败 fail-open：不阻塞会话打开（退化为空转录），错误经 onTranscriptError 上报。
+  if (transcriptStore !== undefined) {
+    try {
+      mainMessages = [...(await transcriptStore.readTranscript())];
+      persistedCount = mainMessages.length;
+    } catch (error) {
+      options.onTranscriptError?.(error);
+    }
+  }
   /** 本回合 Main 的截止时刻：委派算出的 Worker 截止不能越过它（再留收尾余量）。 */
   let currentTurnDeadline = 0;
 
@@ -645,6 +680,20 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         deadline: currentTurnDeadline,
       });
       mainMessages = [...mainResult.messages];
+      // 回合后→持久化：把本回合**新增**消息逐条增量追加到存储（Pi 单条 entry 追加 = 线性，
+      // 不重写全文），每追加成功一条推进 persistedCount。写失败 fail-open：已成功的追加保留、
+      // 剩余不再尝试、**不回滚本回合**（回复照常返回），错误经 onTranscriptError 上报。
+      if (transcriptStore !== undefined) {
+        while (persistedCount < mainMessages.length) {
+          try {
+            await transcriptStore.append(mainMessages[persistedCount]!);
+          } catch (error) {
+            options.onTranscriptError?.(error);
+            break;
+          }
+          persistedCount += 1;
+        }
+      }
       // P1（S1）：本回合最终回复逐字存档——同回合各任务行同值；空白回复/回合失败不落
       // （缺省=无最终回复存档，显示层不用执行层汇报冒充）。
       // background：受理话术不落任务行（结果由 runner 在确认 completed 后经 archiveReply

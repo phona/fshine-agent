@@ -29,6 +29,7 @@ import {
   type NotificationSink,
 } from '../../packages/agent/src/notifications';
 import { createResourcePolicy } from '../../packages/agent/src/resource-policy';
+import { SessionPersistence } from '../../packages/agent/src/session-persistence';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import type { TaskExecutor, TaskRunner } from '../../packages/agent/src/task-runner';
 import { loadMainSkillDelivery, loadWorkerSkills } from '../../packages/agent/src/worker-skills';
@@ -55,6 +56,12 @@ export interface ServerDeps {
   dbPath: string;
   /** dummy 执行层审计落盘目录；缺省 .runtime/server/state。 */
   stateDir?: string;
+  /**
+   * B1 会话转录持久化根目录；缺省 `<dbPath 所在目录>/sessions`（同一部署状态根——
+   * 重启用同一 dbPath 即恢复；测试各用临时 dbPath 自动隔离，无跨用例串扰）。
+   * 每 principal 在其下获得独立子树（隔离），装配层是唯一构造具体存储处。
+   */
+  sessionStoreDir?: string;
   /** 测试注入：Pi 回合驱动工厂；缺省真实 Pi 驱动（读 env）。 */
   createDrivers?: (env: NodeJS.ProcessEnv) => { mainDriver: TurnDriver; workerDriver: TurnDriver };
   /** 测试注入：执行面；缺省仓内 dummy CLI（按 profile root+gateway spawn）。 */
@@ -70,7 +77,11 @@ export interface Server {
   handler: ReplyHandler;
   /** 显式触发通知投递（同进程有界重试；background 无 outbox 时为空操作）。 */
   deliverPending(): Promise<void>;
-  close(): void;
+  /**
+   * 释放底账与 B1 会话存储句柄。返回 Promise：调用方可 await 以确保存储句柄已释放
+   * （进程内「重启」= close 后同 dbPath 重建时须先释放，否则同文件二次打开会读到陈旧内存态）。
+   */
+  close(): Promise<void>;
 }
 
 /**
@@ -101,6 +112,12 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   const mainSkills = await loadMainSkillDelivery(profile.root, profile.mainSkillRoots ?? [], profile.mainSkillMode ?? 'inline');
   const mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, profile.executorLabel)}${mainSkills.promptBlock}\n\n${MAIN_PROTOCOL_NOTE}`;
   const stateDir = deps.stateDir ?? path.join(REPO_ROOT, '.runtime', 'server', 'state');
+
+  // B1 会话转录持久化：装配层是唯一构造具体存储处（复用 Pi JsonlSessionRepo 的独立存储层）。
+  // cwd 跨重启必须稳定（Pi 的 (cwd, id) 是会话身份的一半；变了会解析到不同身份，见
+  // session-persistence.ts 与 Pi repo 的 header id/cwd 一致性校验）。
+  const sessionStoreDir = deps.sessionStoreDir ?? path.join(path.dirname(deps.dbPath), 'sessions');
+  const sessionPersistence = new SessionPersistence({ rootDir: sessionStoreDir, cwd: REPO_ROOT });
 
   // P5：资源策略进程级一份（跨会话共享账本）；缺省 runtime 段 = 现行为缺省（单并发/无队列）。
   const dispatchMode = deps.config.runtime?.dispatchMode ?? 'inline';
@@ -148,6 +165,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     let pending = sessions.get(key);
     if (pending === undefined) {
       pending = (async () => {
+        // B1：为本 (principal, session) 打开/新建独立存储句柄（跨 principal 物理隔离），
+        // 作为 runtime 的转录端口注入——打开即从存储载入转录，回合后增量持久化。
+        const transcriptStore = await sessionPersistence.openOrCreate(principalId, sessionId);
         // 共享装配核心：执行面缺省 = 仓内 dummy CLI（按 profile root+gateway spawn），
         // 驱动缺省 = 真实 Pi 驱动；底账/提示词/技能为启动时装载的同一份（注入不回写）。
         const assembled = await assembleSessionCore({
@@ -168,6 +188,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           ...(deps.createDrivers !== undefined ? { createDrivers: deps.createDrivers } : {}),
           ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
           ...(notificationAttachment === undefined ? {} : { taskFactProvider: notificationAttachment.taskFactProvider }),
+          transcriptStore,
+          // fail-open 日志：转录读/写失败不阻塞回合，只上报（错误面由入口按既有归类处理）。
+          onTranscriptError: (error) =>
+            log({
+              event: 'transcript_store_error',
+              principalId,
+              sessionId,
+              message: error instanceof Error ? error.message : String(error),
+            }),
         });
         return assembled.session;
       })();
@@ -270,10 +299,13 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     async deliverPending() {
       await drainNotifications();
     },
-    close() {
+    async close() {
       sessions.clear();
       outbox?.close();
       taskRegistry.close();
+      // B1：释放会话存储句柄（PI Session mutation barrier + JsonlStorage）；awaitable 以便
+      // 进程内「重启」在同一测试里先释放再重建（同 dbPath 重建不得二次打开同一文件）。
+      await sessionPersistence.close();
     },
   };
 }
