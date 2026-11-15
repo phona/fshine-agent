@@ -9,6 +9,7 @@
 > - 口径：docs-only；产品代码零改动；`.runtime` 不入库；不改 `docs/decision-log.md`（集成 Agent 单点写）。
 > - 判据纪律：每个面给「**已实现 / 仅接口 / 缺失**」三分类并附 `文件:行号` 证据；**接口/类型/函数存在一律不读作能力已实现**（本轮实际出现了一个反向案例：**入站能力有真实实现**，见 ①）。
 > - 与既有就绪件的关系：`docs/product/real-read-readiness.md`（三步接入设计与安全评审）、`docs/product/real-shadow-runbook.md`（执行面双源 shadow，**不接渠道**）、`docs/product/r4-shadow-dryrun.md`（双源读数）。本档专审**企微入站/出站面**——即上述就绪件明确排除的「渠道面」。
+> - **证据复核（本次）**：本档所有 `文件:行号` 引用由本会话对 worktree `arch/r5-wecom-audit` 逐条重读源码核验（`grep -n` / `sed -n`，见各结论旁证据）；行号以本分支当前工作树为准。**未做联调**：本档为静态审计，未启动 server、未连企微、未跑真实模型。
 
 ## 0. 结论摘要
 
@@ -118,7 +119,7 @@
 
 **缺失**
 
-- **真实企微 `NotificationSink` 实现 = 0**：全仓非测试 `NotificationSink` 引用只有 `notification-file-sink.ts`（唯一实现）；无任何把 `Notification` 渲染 `renderNotification` 后经企微送达的 sink。
+- **真实企微 `NotificationSink` 实现 = 0**：全仓非测试 `NotificationSink` 实现只有落盘 sink 一个（`notification-file-sink.ts:11`）；脚本层另有测试替身 `RecordingSink`（`scripts/shadow/double-source-harness.ts:45`）与 `InjectingSink`（`scripts/stab/fakes.ts:205`），均为记录/注入假件，不是真实投递。无任何把 `Notification` 渲染 `renderNotification` 后经企微送达的 sink。
 - `renderNotification` 当前唯一非测试消费点是 R5 B 通道的**进程内经会话注入**（`scripts/ask-runtime.ts:388`），**不是**企微出站。
 
 **判定**：**不得把「sink 类型/函数存在」读作能力已实现**。真实企微出站通知投递**今天为 0**——影子阶段出站通知只能落盘（`notifications.jsonl`），这对「只读影子」是**合格**的（影子本就不要真实通知外发）。
@@ -158,7 +159,7 @@
 - 执行子进程 env 白名单（凭据隔离，fail-closed）：`packages/agent/src/worker-env.ts:25-35`（仅 `PATH/HOME/TMPDIR`）。
 - 评测隔离门（fail-closed，root 必须在仓内夹具下 + gateway 存在 + 审计通道可写回）：`scripts/eval/safety-gate.ts:17-59`。
 - 影子源开关 fail-closed（未知源含 `real` 即拒）：`scripts/shadow/fixtures/execution-sources.ts:96-102`；`realConnection:false` 明示（`scripts/shadow/double-source-harness.ts:531`）。
-- 既有纪律：shadow 阶段不接渠道、不产用户可见结果（`docs/product/real-read-readiness.md:31`）。
+- 既有纪律：shadow 阶段不接渠道、不产用户可见结果（`docs/product/real-read-readiness.md:80`，「影子只读（无用户流量）……不接渠道、不产用户可见结果」）。
 
 **缺口（须在准入里明说）**
 
@@ -192,7 +193,7 @@
 **Step 4 — 写入面关闭（只读）**
 - 动作：只开放执行层自述 `access=read` 的 operation；无写/确认/取消/产物（后续切片）。
 - 准入证据：`execution-runtime.ts:454-456` 越权拒绝路径单测绿；本影子**零写尝试**（执行层 audit 无 write 行）。
-- 风险：dummy 之外的真实层若声明写 → 越权拒绝路径先拦（`execution-runtime.ts:196-202` 注释 + 测试）。**回退**：撤列。
+- 风险：dummy 之外的真实层若声明写 → 越权拒绝路径先拦（集合外 operation 在发起执行前抛错：`execution-runtime.ts:453-456`；worker 工具面同判：`execution-runtime.ts:778-779`）。**回退**：撤列。
 
 **Step 5 — 证据落盘**
 - 动作：打开 executions 底账 + 执行层 `EXECUTION_AUDIT_PATH` + notifications.jsonl（`main.ts:43`）。
@@ -248,3 +249,12 @@
   - `docs/product/p4-notifications.md`（通知 outbox 实施报告）。
   - `docs/product/r5-phase4-audit.md`（四轴/Phase 4 汇总，长期试用证据面）。
   - 代码：`packages/channel-wecom/src/adapter.ts`、`apps/server/main.ts`、`apps/server/server.ts`、`apps/server/notification-file-sink.ts`、`packages/agent/src/notifications.ts`、`packages/agent/src/execution-runtime.ts`、`packages/core/src/config.ts`。
+
+## 7. 局限（本档不能回答的）
+
+- **未联调、未运行**：本档全是静态阅读 + 源码核验，**未启动 server、未连接企微、未跑执行、未跑真实模型**。因此「入站就绪」是**代码面判断**，不是「今天实际收到过一条真实帧」的运行证据；任何运行结果仍须在 owner 授权后按 §3 执行取得。
+- **无 SDK 认证面证据**：② 的残余风险（身份取自 SDK 帧、适配层无签名校验）只做到「宿主侧无第二道机械校验」这一事实判断；官方 SDK 认证强度**未在仓内**，本档不评估。
+- **无真实跨用户/长稳样本**：③ 的会话隔离只有确定性单测，无真实多用户样本；长稳/跨天不属本轮（见 §5）。
+- **行号时效**：所有 `文件:行号` 以本分支当前工作树为准；基线漂移后须复核。
+- **不构成安全结论/授权**：本档是准入判断，既非安全审计也非接入授权；§4 任一 gate 未过即 fail-closed，不得读作已就绪。
+
