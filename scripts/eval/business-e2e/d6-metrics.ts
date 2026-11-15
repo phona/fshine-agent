@@ -235,19 +235,46 @@ export function extractD6(runDir: string): D6Metrics {
     postCancelResidue = { available: false, source: 'task-facts.jsonl / notifications.jsonl', note: 'not-applicable：本 run 无取消事实（无 to=cancelled 事实、无 cancel 通知），不按 0 计' };
   } else {
     const cut = tsMs(cancel.ts);
-    const toolCallsAfter = calls.filter((c) => { const s = tsMs(c.startedAt); return !Number.isNaN(s) && !Number.isNaN(cut) && s > cut; }).length;
+    // 归属：调用 args 带 taskId 直接归属；带 ref（'#n'）按 tasks.json 创建序近似解析；
+    // 均无则不可归属（undefined）。
+    const refIndex = new Map<string, string>();
+    (tasksExport?.tasks ?? []).forEach((t, i) => refIndex.set(`#${i + 1}`, t.taskId));
+    const attributedTaskId = (c: ToolCallRecord): string | undefined => {
+      const args = (c.args ?? {}) as { taskId?: unknown; ref?: unknown };
+      if (typeof args.taskId === 'string' && args.taskId !== '') return args.taskId;
+      if (typeof args.ref === 'string' && refIndex.has(args.ref)) return refIndex.get(args.ref);
+      return undefined;
+    };
+    // 残留=被取消任务自身在取消之后的执行活动，不是「取消之后任意调用」：
+    // main 面控制调用（task_status / task_result / 其他任务的 run_task）与被取消任务无关，
+    // 毫秒粒度下会把合法后续轮误计成残留（测量面缺陷，非产品竞态）。判据：
+    //   tool-calls —— 归属到被取消任务，或未归属到其他任务的 worker 执行回合；
+    //   executions —— 仅被取消任务自身（updatedAt>cut 为新增近似）；
+    //   audit —— 可解析且带 taskId 时按归属过滤，否则按时间戳保守计数。
+    const toolCallsAfter = calls.filter((c) => {
+      const s = tsMs(c.startedAt);
+      if (Number.isNaN(s) || Number.isNaN(cut) || s <= cut) return false;
+      const attr = attributedTaskId(c);
+      if (attr !== undefined && attr !== cancel.taskId) return false;
+      return attr === cancel.taskId || c.agent === 'worker';
+    }).length;
     // executions 行无独立时间戳：以所属任务 updatedAt>cut 为新增近似（note 标注）。
     const executionsAfter = (tasksExport?.tasks ?? [])
+      .filter((t) => t.taskId === cancel.taskId)
       .filter((t) => { const u = tsMs(t.updatedAt); return !Number.isNaN(u) && !Number.isNaN(cut) && u > cut; })
       .reduce((a, t) => a + t.executions.length, 0);
-    const auditLinesAfter = readJsonl<{ ts?: string }>(path.join(runDir, 'audit.jsonl'))
-      .filter((r) => { const t = r.ts === undefined ? NaN : tsMs(r.ts); return !Number.isNaN(t) && !Number.isNaN(cut) && t > cut; }).length;
+    const auditLinesAfter = readJsonl<{ ts?: string; taskId?: unknown }>(path.join(runDir, 'audit.jsonl'))
+      .filter((r) => {
+        const t = r.ts === undefined ? NaN : tsMs(r.ts);
+        if (Number.isNaN(t) || Number.isNaN(cut) || t <= cut) return false;
+        return !(typeof r.taskId === 'string' && r.taskId !== cancel.taskId);
+      }).length;
     const residue = toolCallsAfter > 0 || executionsAfter > 0 || auditLinesAfter > 0;
     postCancelResidue = {
       available: true,
       value: { cancelledTaskId: cancel.taskId, cancelledAt: cancel.ts, toolCallsAfter, executionsAfter, auditLinesAfter, residue },
       source: 'task-facts.jsonl + tool-calls.json + tasks.json + audit.jsonl',
-      note: `残留=取消时间戳之后的 tool-calls / executions / audit 新行（任一>0 即残留）；executions 行无独立时间戳，以任务 updatedAt 近似`,
+      note: `残留=被取消任务自身在取消时间戳之后的执行活动（归属到该任务的 tool-calls / 未归属其他任务的 worker 回合 / 该任务 executions 新行 / 归属该任务的 audit 新行，任一>0 即残留）；executions 行无独立时间戳，以任务 updatedAt 近似；ref 按 tasks.json 创建序近似解析`,
     };
   }
 
