@@ -264,7 +264,50 @@ const MAX_SUMMARY_CHUNKS = 16;
 const COMPACTION_INSTRUCTIONS = '这是助手会话的压缩。摘要必须保留:1)当前正在处理的对象标识与名称;2)当前的处理范围;3)最近一次工具结果里的分页游标原值(用户要靠它翻页);4)用户的关键意图与未决问题;5)已得出的中间结论与未完成的步骤(长任务靠它续跑)。如果输入包含宿主标明的历史引用,必须保留其来源是“用户消息附带的引用”;引用是转述数据,不得总结成用户本人直接陈述、选择、确认或授权。如果更早的消息因窗口限制被省略,如实写明省略了哪一段,不得把省略的内容补写成事实。';
 
 /**
- * 按模型能力推导压缩设置（T7 窗口贴边修复）。
+ * P0-B 输出/压缩不变式（先证后码）。
+ *
+ * 记 W=声明的 contextWindow（parseContextWindow fail-fast，不虚报、不改写）；
+ * T=estimateContextTokens(转录)——压缩与钳制的计量面；MIN_OUTPUT=1024 为生成有效回复的
+ * 最小输出预算。钳制（trim/degrade）按完整请求算、压缩按转录算，两者的最坏差值
+ * Δ_worst = 4096（序列化/催问消息等请求框架开销上界）+ sys + tools（系统提示与工具
+ * schema 的估算 token）。**每次请求不变式 INV**：W − (T + Δ_worst) ≥ MIN_OUTPUT，
+ * 即 T ≤ W − Δ_worst − MIN_OUTPUT =: LIMIT。证明三条保证：
+ *  ① 输出预算耗尽前能触发有效压缩：回合前压缩阈值 = W − reserveTokens，本函数保证
+ *     reserveTokens ≥ Δ_worst + MIN_OUTPUT ⇒ 压缩产物 target = W − reserveTokens ≤ LIMIT
+ *     （trimToBudget 强制产物 ≤ target）⇒ INV 在请求前成立；回合内 emergency 线
+ *     headroom = max(1024, Δ_worst + MIN_OUTPUT) ⇒ 恰在 INV 将被破坏的下一条请求前触发
+ *     force 压缩（见 createPiTurnDriver 的 transformContext）。
+ *  ② 压缩后有足够空间生成有效回复：摘要请求自身有界（summaryInputAllowance =
+ *     W − maxTokens − SUMMARY_PROMPT_OVERHEAD − 上一轮摘要），产物 trim 到 target ⇒
+ *     压缩后仍留 ≥ MIN_OUTPUT 输出预算。
+ *  ③ 窗口过小 ⇒ INV 无解 ⇒ 明确拒绝而不是把必然失败的请求发出去：装配期
+ *     W < CONTEXT_WINDOW_FLOOR_TOKENS（Δ 的常数部分 + MIN_OUTPUT + 摘要模板 + keepRecent
+ *     下限；sys/tools 装配期未知，取下界）抛错拒绝该能力声明；运行期按实际 Δ_worst
+ *     复核，no_cut 且 T > LIMIT 时抛错有界失败、不发请求（见 compactTranscriptWithPi）。
+ *  ④ 不改 contextWindow 数值、不碰 node_modules、不建第二套摘要/记忆。
+ */
+/** 完整请求相对转录估算的最坏框架差值（token）：序列化、催问/省略声明消息等上界。 */
+export const CONTEXT_REQUEST_FRAMING_TOKENS = 4_096;
+/** 生成有效回复的最小输出预算（token）：INV 的固定右项。 */
+export const MIN_OUTPUT_BUDGET_TOKENS = 1_024;
+/** 装配期窗口下界：4096 + 1024 + 1024(摘要模板) + 512(keepRecent 下限)，sys/tools 未知取 0。 */
+export const CONTEXT_WINDOW_FLOOR_TOKENS =
+  CONTEXT_REQUEST_FRAMING_TOKENS + MIN_OUTPUT_BUDGET_TOKENS + SUMMARY_PROMPT_OVERHEAD_TOKENS + 512;
+
+/** 运行期完整请求固定开销估算：Δ_worst = 4096 + sys + tools（与 INV 同口径）。 */
+export function fixedRequestOverheadTokens(
+  systemPrompt: string,
+  tools: ReadonlyArray<{ name: string; description: string; inputSchema: unknown }>,
+): number {
+  const sys = Math.ceil(systemPrompt.length / 4);
+  const toolsText = tools
+    .map((tool) => `${tool.name}\n${tool.description}\n${JSON.stringify(tool.inputSchema)}`)
+    .join('\n');
+  return CONTEXT_REQUEST_FRAMING_TOKENS + sys + Math.ceil(toolsText.length / 4);
+}
+
+/**
+ * 按模型能力推导压缩设置（T7 窗口贴边修复；P0-B 增不变式下界）。
  *
  * 为什么不能直接用 DEFAULT_COMPACTION_SETTINGS：那组常数按 128k 窗口设计
  * （reserveTokens=16384、keepRecentTokens=20000）。窗口只有 40000 时阈值 = 23616，
@@ -273,21 +316,26 @@ const COMPACTION_INSTRUCTIONS = '这是助手会话的压缩。摘要必须保�
  * 不缩放还会把小窗口下的**全部消息**留下再拼摘要，产物比输入更长（压缩方向反了）。
  *
  * 缩放规则：默认设置装得下（窗口 ≥ reserveTokens + keepRecentTokens = 36384，含 128k
- * 缺省与 40k 这类窗口）就逐字段返回默认值，压缩时机一点不变；装不下的窗口按 25% 预留
- * 摘要、30% 保留尾段，保证「保留尾段 + 摘要输出 + 模板余量」一定装得进窗口。
+ * 缺省与 40k 这类窗口）就沿用默认阈值；装不下的窗口按 25% 预留摘要、30% 保留尾段。
+ * P0-B 不变式：无论走哪条臂，reserveTokens ≥ fixedOverheadTokens + MIN_OUTPUT_BUDGET
+ * （fixedOverheadTokens = Δ_worst，缺省 0 = 调用方未知 sys/tools，保持旧行为）——
+ * 「reserve ≥ SAFETY + 固定余量」不再当充分条件，预留必须按最坏差值缩放（证明见上）。
  */
-export function compactionSettingsFor(contextWindow: number): CompactionSettings {
-  // 默认设置装得下（保留尾段 + 摘要预留都在窗口内）就逐字段沿用默认值：
-  // 128k 缺省、以及 40k 这类仍能容纳 20000+16384 的窗口都保持原有阈值，
-  // 不因 T7 修复改变它们的压缩时机。只有装不下时才按比例缩放。
+export function compactionSettingsFor(contextWindow: number, fixedOverheadTokens = 0): CompactionSettings {
+  const invariantReserve = fixedOverheadTokens + MIN_OUTPUT_BUDGET_TOKENS;
+  // 默认设置装得下（保留尾段 + 摘要预留都在窗口内）就沿用默认阈值，但 reserve 不得
+  // 低于不变式下界（大声明开销的大工具面会把 Δ_worst 推到默认 16384 之上）。
   if (!Number.isFinite(contextWindow)
     || contextWindow >= DEFAULT_COMPACTION_SETTINGS.reserveTokens + DEFAULT_COMPACTION_SETTINGS.keepRecentTokens) {
-    return DEFAULT_COMPACTION_SETTINGS;
+    return {
+      ...DEFAULT_COMPACTION_SETTINGS,
+      reserveTokens: Math.max(DEFAULT_COMPACTION_SETTINGS.reserveTokens, invariantReserve),
+    };
   }
-  const reserveTokens = Math.max(1_024, Math.min(
-    DEFAULT_COMPACTION_SETTINGS.reserveTokens,
-    Math.floor(contextWindow * 0.25),
-  ));
+  const reserveTokens = Math.max(
+    invariantReserve,
+    Math.min(DEFAULT_COMPACTION_SETTINGS.reserveTokens, Math.floor(contextWindow * 0.25)),
+  );
   const keepRecentTokens = Math.max(512, Math.min(
     DEFAULT_COMPACTION_SETTINGS.keepRecentTokens,
     Math.floor(contextWindow * 0.3),
@@ -483,11 +531,12 @@ function degradeByDropping(messages: readonly AgentMessage[], target: number): A
  */
 export async function compactTranscriptWithPi(
   messages: AgentMessage[],
-  opts: { force?: boolean } | undefined,
+  opts: { force?: boolean; fixedOverheadTokens?: number } | undefined,
   runtime: PiModelRuntime,
 ): Promise<AgentMessage[]> {
   const { model } = runtime;
-  const settings = compactionSettingsFor(model.contextWindow);
+  const fixedOverhead = opts?.fixedOverheadTokens ?? 0;
+  const settings = compactionSettingsFor(model.contextWindow, fixedOverhead);
   const est = estimateContextTokens(messages);
   if (!opts?.force && !shouldCompact(est.tokens, model.contextWindow, settings)) return messages;
 
@@ -499,6 +548,23 @@ export async function compactTranscriptWithPi(
   }
   if (prefix.length === 0) {
     // 全部消息都在当前回合里：没有可摘要的前缀，压缩帮不上忙（不伪造摘要）。
+    // P0-B 不变式③：no_cut 且转录已超 LIMIT（W − Δ_worst − MIN_OUTPUT）时，
+    // INV 无解——明确拒绝（有界失败），不把必然拿空回复的请求发给模型。
+    const limit = model.contextWindow - fixedOverhead - MIN_OUTPUT_BUDGET_TOKENS;
+    if (est.tokens > limit) {
+      console.error(JSON.stringify({
+        event: 'context_invariant_violated',
+        tokens: est.tokens,
+        limit,
+        contextWindow: model.contextWindow,
+        fixedOverhead,
+        messages: messages.length,
+      }));
+      throw new Error(
+        `上下文不变式不满足：转录 ${est.tokens} token 超过本窗口安全上界 ${limit}`
+        + `（window=${model.contextWindow}，固定开销=${fixedOverhead}），已拒绝发请求。`,
+      );
+    }
     console.warn(JSON.stringify({
       event: 'context_compact_no_cut',
       tokens: est.tokens,
@@ -558,6 +624,15 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
     // 能力声明只有显式传入这一条来源：装配层持有配置，驱动不猜、不按模型名查表。
     ...(options.contextWindow !== undefined ? { contextWindow: options.contextWindow } : {}),
   });
+  // P0-B 不变式③装配期拒绝：窗口低于下界（Δ 常数部分 + MIN_OUTPUT + 摘要模板 +
+  // keepRecent 下限；sys/tools 装配期未知取 0）时，压缩/钳制预留互相挤占、INV 无解，
+  // 拒绝该能力声明（fail-fast），不静默回落、不虚报窗口。
+  if (model.contextWindow < CONTEXT_WINDOW_FLOOR_TOKENS) {
+    throw new Error(
+      `contextWindow ${model.contextWindow} 低于装配期下界 ${CONTEXT_WINDOW_FLOOR_TOKENS}`
+      + '（请求框架 + 最小输出预算 + 摘要模板 + 保留尾段下限）：该窗口无法安全满足压缩不变式，拒绝该能力声明。',
+    );
+  }
 
   // 思考深度(pi 统一抽象):off/minimal/low/medium/high/xhigh/max。
   // 是否生效取决于模型/端点是否支持思考参数;不支持的供应商 pi-ai 静默忽略。
@@ -575,7 +650,40 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         providerToolNames.get(tool.name)!,
       )) as unknown as AgentTool<any, any>[];
       // 转录即状态:messages 是上一轮持久化的 pi 原生转录(含工具调用与结果),直接续用
-      const initialMessages = input.messages;
+      let initialMessages = input.messages;
+      // P0-B：本次回合的完整请求固定开销 Δ_worst（sys+tools 实测于此）与 emergency 线
+      // 同口径缩放——headroom ≥ Δ_worst + MIN_OUTPUT 保证恰在 INV 将被破坏前触发压缩。
+      const fixedOverhead = fixedRequestOverheadTokens(input.systemPrompt, input.tools);
+      const emergencyHeadroom = Math.max(EMERGENCY_OVERFLOW_HEADROOM_TOKENS, fixedOverhead + MIN_OUTPUT_BUDGET_TOKENS);
+      // P0-B INV 请求前把关：pi-agent-core 的 transformContext 只在回合内兜底，首条请求
+      // 前不经过它——这里显式复核 W − T − Δ ≥ MIN_OUTPUT；违反时先 force 压缩，仍无解
+      // （no_cut 会抛错、产物超线）则有界失败，一次请求都不发。
+      const invariantLimit = model.contextWindow - fixedOverhead - MIN_OUTPUT_BUDGET_TOKENS;
+      if (estimateContextTokens(initialMessages).tokens > invariantLimit) {
+        try {
+          const compacted = await compactTranscriptWithPi(
+            initialMessages,
+            { force: true, fixedOverheadTokens: fixedOverhead },
+            { models, model },
+          );
+          if (estimateContextTokens(compacted).tokens > invariantLimit) throw new Error('压缩产物仍超过安全上界');
+          initialMessages = compacted;
+          console.info(JSON.stringify({
+            event: 'pi_driver_pre_request_compacted',
+            contextWindow: model.contextWindow,
+            fixedOverhead,
+          }));
+        } catch (error) {
+          console.error(JSON.stringify({
+            event: 'pi_driver_context_invariant_rejected',
+            errorType: error instanceof Error ? error.name : 'UnknownError',
+            message: error instanceof Error ? error.message.slice(0, 300) : String(error),
+            contextWindow: model.contextWindow,
+            fixedOverhead,
+          }));
+          return { text: '', messages: input.messages };
+        }
+      }
 
       const agent = new Agent({
         initialState: {
@@ -592,14 +700,14 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         // 兜底；压完的视图装得下就不会在同一回合里反复触发。
         transformContext: async (messages: AgentMessage[]): Promise<AgentMessage[]> => {
           const tokens = estimateContextTokens(messages).tokens;
-          if (tokens <= model.contextWindow - EMERGENCY_OVERFLOW_HEADROOM_TOKENS) return messages;
+          if (tokens <= model.contextWindow - emergencyHeadroom) return messages;
           console.warn(JSON.stringify({
             event: 'context_emergency_compact',
             tokens,
             contextWindow: model.contextWindow,
             messages: messages.length,
           }));
-          return compactTranscriptWithPi(messages, { force: true }, { models, model });
+          return compactTranscriptWithPi(messages, { force: true, fixedOverheadTokens: fixedOverhead }, { models, model });
         },
       });
 
@@ -637,7 +745,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
           if (modelAttempt >= MAIN_MODEL_RETRY_DELAYS_MS.length) break;
           if (isContextOverflowError(errorMessage)) {
             const tokensBefore = estimateContextTokens(agent.state.messages).tokens;
-            const compacted = await compactTranscriptWithPi(agent.state.messages, { force: true }, { models, model });
+            const compacted = await compactTranscriptWithPi(agent.state.messages, { force: true, fixedOverheadTokens: fixedOverhead }, { models, model });
             const tokensAfter = estimateContextTokens(compacted).tokens;
             if (tokensAfter >= tokensBefore) break; // 压不动：重发只会再撞同一面墙
             agent.state.messages = compacted;

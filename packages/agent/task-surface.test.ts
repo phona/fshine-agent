@@ -259,6 +259,79 @@ describe('缺口 1 · 对话面任务工具', () => {
     expect(rejected.status).toBe('completed');
   });
 
+  it('P0-A：裸数字 ref 命中本会话任务（与 #编号 / taskId 三形态一致）', async () => {
+    const registry = createTaskRegistry();
+    seed(registry, SCOPE_A, 't1', '查 documents 窗口 W202611');
+
+    const bare = await build([{ tool: 'task_status', args: { ref: '1' } }], { registry });
+    await bare.session.send('任务 1 怎么样了');
+    const hit = value<Record<string, unknown>>(bare.turns[0]!.results[0]!);
+    expect(hit.taskId).toBe('t1');
+
+    const invalid = await build([{ tool: 'task_status', args: { ref: '999' } }], { registry });
+    await invalid.session.send('查 999');
+    const miss = invalid.turns[0]!.results[0]!;
+    expect(miss.ok, '无效编号必须表现为找不到').toBe(false);
+    if (!miss.ok) expect(miss.error).toBeInstanceOf(TaskOwnershipError);
+  });
+
+  it('P0-A：裸数字跨 principal/跨会话同编号仍 TaskOwnershipError（不泄露存在性）', async () => {
+    const registry = createTaskRegistry();
+    seed(registry, SCOPE_A, 'task-a', 'A 的任务');          // A：#1
+    seed(registry, SCOPE_B, 'task-b', 'B 的任务');          // B：#2
+
+    const b = await build([{ tool: 'task_status', args: { ref: '1' } }], { scope: SCOPE_B, registry });
+    await b.session.send('查 1');
+    const result = b.turns[0]!.results[0]!;
+    expect(result.ok, 'A 的 1 对 B 必须表现为找不到').toBe(false);
+    if (!result.ok) expect(result.error).toBeInstanceOf(TaskOwnershipError);
+  });
+
+  it('P0-A：inline 受理回执含可引用 taskNo（与 background 回执格式一致）', async () => {
+    // inline 模式（无 runner）下 run_task 直接走 delegate：回执必须带 taskNo，否则用户无编号可引用。
+    const registry = createTaskRegistry();
+    // 复用 toolingMain：调用 run_task，workerDriver 由宿主使用——用最简假件驱动 worker 汇报。
+    // 这里只验证回执字段：让 workerDriver 返回一段非空文本即可（CompleteExecutor 不适用 inline）。
+    const turns: RecordedTurn[] = [];
+    const session = await createSession({
+      principalId: SCOPE_A.principalId,
+      sessionId: SCOPE_A.sessionId,
+      client: new FaceClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver: toolingMain([{ tool: 'run_task', args: { task: '查 documents 窗口 W202611' } }], turns),
+      workerDriver: {
+        async run() {
+          return { text: '（测试 Worker 汇报）', messages: [] } as never;
+        },
+      },
+      mainSystemPrompt: '（测试）',
+      taskRegistry: registry,
+      dispatchMode: 'inline',
+      workerTurnMs: 60_000,
+    });
+    await session.send('帮我查一下');
+    const receipt = value<Record<string, unknown>>(turns[0]!.results[0]!);
+    expect(receipt.taskNo, 'inline 回执必须带 taskNo（当前会话首任务为 1）').toBe(1);
+    expect(typeof receipt.taskId).toBe('string');
+  });
+
+  it('P0-A：取消后查询同编号：状态如实为 cancelled（可查、不复活）', async () => {
+    const registry = createTaskRegistry();
+    seed(registry, SCOPE_A, 'q', '排队任务', 'queued');
+
+    const { session, turns, runner } = await build([
+      { tool: 'task_cancel', args: { ref: '1' } },
+      { tool: 'task_status', args: { ref: '1' } },
+    ], { registry });
+    await session.send('取消然后查一下');
+    await runner!.whenIdle();
+
+    const cancelled = value<Record<string, unknown>>(turns[0]!.results[0]!);
+    expect(cancelled.outcome).toBe('cancelled');
+    const hit = value<Record<string, unknown>>(turns[0]!.results[1]!);
+    expect(hit.status).toBe('cancelled');
+  });
+
   it('未传 runner：治理工具不上面，调用治理工具名 → Main 工具面之外的调用（fail-closed）', async () => {
     const registry = createTaskRegistry();
     seed(registry, SCOPE_A, 't1', '任务');
