@@ -3034,6 +3034,82 @@ MU-6 在本基线（含 B1 接线）上 **PASS**：三 principal 同 `dbPath` �
 
 ---
 
+## 八十七、P2 业务 E2E 预注册准备（七类场景 / 判据 / 硬停 / 失败分类 / 证据 schema / 合流依赖）（2026-11-15，分支 `arch/p2-prereg`，基线 = `arch/integration` 启动时 HEAD `f37d11d`）状态：**待合入·准备档（未执行）**
+
+> 本轮 = **只文档、零真实模型、不跑测试**：产出 P2「业务端到端验收」预注册 `docs/product/p2-business-e2e-prereg.md`（v2，含 owner 侧复核逐条修订），把待执行的七类业务场景、样本量 N 与预算、判据、单实验硬停、失败分类、证据 schema、R6 Harness 复用映射与**合流依赖**冻结在跑之前，防跑后口径漂移 / 挑样本。**未跑任何 P2 样本、未调真实模型、未改产品码 / Worker 提示 / 账本 / 契约、未碰真实平台 / 写；`.runtime` 未 `git add`；`docs/decision-log.md` 除本条外未动。** P2 执行前的合流与适配器前置见 §8、§9。
+
+### 0. 编号说明（既有重号，不改动）
+
+> 本文件当前存在两处 `## 八十六、`（MU-8 复跑、MU-6 复跑；历史两分支合并产物）。本条按「当前最大号 86 + 1」取 **八十七**；重号留集成 Agent 单点裁定，本条不改动既有条目。
+
+### 1. 七类场景（逐场景业务话术 + Oracle）
+
+| 类 | 业务话术（要点） | Oracle（机械） |
+| --- | --- | --- |
+| S1 自然语言交办 | 一句话交办一件事（单会话多轮） | 任务真实到达终态 + 回复如实 + 事实与 registry 一致（tolerance=0） |
+| S2 异步执行中继续对话 | background 受理后在飞时插入对话，再回收结果 | 首回合快照非终态 + 完成闸晚于 T2 + 最终真完成（否则 `insufficient_coverage`） |
+| S3 查进度与结果 | 「刚才那个办到哪了 / 结果给我」 | 同 sessionId 内真实结果取回 + 事实一致 |
+| S4 修改·取消·再交办 | 「改成 X / 算了取消 / 再按 Y 来一单」 | `cancelCalled` 真发生 + `cancelled` 态 + 回复如实（H5） |
+| S5 进程重启后恢复 | 交办 → 关停 → 重启 → 「刚才那单怎样了」 | 同 `dbPath` 关停重建 + 转录由存储加载（真重启，否则 `insufficient_coverage`） |
+| S6 多用户并发与隔离 | ≥3 principal 并发各自交办 / 各自会话 | 会合栅 3 到达真交错 + 无跨 principal / 跨 Session 泄漏 |
+| S7 失败·超时·成本上限 | S7a 执行失败 / S7b 超时 / S7c 成本触顶 | 子例路径真实触发（`failed/COLLECTION_FAULT` / `timed_out` / 有界硬停） |
+
+> 冻结时已补齐三处可执行性缺口：S2 必 `dispatchMode='background'`（`mu-support.ts:341`）；S7b 需 eval 侧 deadline-honoring Worker 驱动 + 不返回执行 gate（否决则记 `insufficient_coverage`）；覆盖判定接缝 `classifyP2Sample` + `p2Coverage`（§5.1，薄包装、不改 `evidence.ts`）。
+
+### 2. 预注册 N 与预算 · 统计口径
+
+- **样本量**：S1/S2/S3/S4/S5 各 N=3（各 3 会话）；**S6 N=3（每样本 = 3-principal 并发批次，共 9 会话）**；S7 N=3（S7a/S7b/S7c 各 1 样本，共 3 会话）。**合计 21 样本 / 27 会话**，另加 **1 装配冒烟会话**（不计入结论）。
+- **统计口径（诚实）**：N=3 时 3/3 的 Wilson 95% 下界 = **0.4385**（区间极宽），**只读、不作稳定性概率结论**；逐场景报 k/N + Wilson 95% CI（`stats.ts:69`）。口径纠偏：0.342 是 2/2 下界，禁止引作 P2 读数。
+- **总预算上界（算术上限，非全局额度闸）**：单会话硬停 `150 calls / 3,000,000 tokens / 2h`（`accounting.ts:66` `R6_HARD_LIMITS`，冻结）→ 27 会话 × 150 = **4,050 calls**；27 × 3M = **81,000,000 tokens**；27 × 2h。全局额度放行由协调员单点。
+
+### 3. 判据
+
+- **机械判据（确定性，硬；任一硬零命中 → 该批 FAIL）**：业务完成率、事实与任务一致（`judgeFactAnswer`，tolerance=0）、控制意图如实回执、无虚假完成（H4）、无虚假取消（H5）、无重复执行（H3）、无编号混淆（E-G）、无跨 principal 泄漏、无跨 Session 泄漏、无越权执行（MU-5）、通知不误投（MU-7）、无串行假并发（`Rendezvous`）、压缩有界（H6）。
+- **行为判据（模型面，计数不硬否决）**：无谓澄清 / 用户介入 / 误答空答 / 指代理解失败，只统计、与机械项分开报告。
+- **成本与时长上限（硬）**：calls `>=150` / tokens `>=3M` / 墙钟 `>=2h` 即先验拒绝下一请求（`CallAccountingGuard.precheck`，判定序 `ms→calls→tokens`），触达记有界失败、该样本不计通过。
+
+### 4. 单实验硬停与停止条件
+
+- **硬停**取冻结值 `maxModelCalls=150 / maxTokens=3,000,000 / wallMs=2h`（改此块 = 改冻结口径，禁；只允许测试注入更小上限）；先验=发起下一请求**之前**检查，达限抛 `R6HardStopError`、不发起该请求。
+- **停止条件**：①任一硬零命中 → 该批 FAIL 并停跑新样本；②单会话硬停 → 该会话记有界失败；③装配/环境门（模型不可得 / 端点不可达 / 装配与声明不符）→ **blocking、退出码 2、不烧样本**；④环境中断 → 登记待重跑；⑤达 27 会话预算上界即停。
+
+### 5. 失败分类（三态冻结；**产品故障样本不作废**）
+
+对齐 `evidence.ts:24` `SampleDisposition` / `:111` `classifySample`（优先级 产品故障 > 环境中断 > 覆盖不足 > 有效）：`product_fault`（保留并判负，进分母，防幸存者偏差）；`environment_interrupted`（登记待重跑，不判产品负）；`insufficient_coverage`（保留留档、不用于结论）；`valid`（计入 k/N）。**P2 接缝**：`classifyP2Sample` 在 `classifySample` 之上补七类场景覆盖维度，产品故障不被吞。
+
+### 6. 证据 schema（逐会话）
+
+复用 `evidence.ts:64` `SessionEvidence` 并叠 MU 五要素记录（`MuDeliveryRecord`），**不新建第二套证据层**。P2 必填：交办原文（`turns[].text`）、回复（`replies[]`）、任务事实（`taskTurns/tasksFinal`）、执行轨迹（`toolCalls[]` + MU `execRecords`）、压缩事件（`compactionAttempts[]`）、token（`budgetUsed/callAccounting/modelCalls[]`）、耗时（`startedAt/endedAt` + `replies[].durationMs`）、`deliveredTo`（`MuDeliveryRecord.deliveredTo`）、处置（`SampleDisposition` + 硬零命中 `hardZeroHits`）、`p2Coverage`（P2 胶水新增，与 R6 `coverageSufficient` 并列）。落盘 `.runtime/**` 一律 gitignored、**不得 `git add`**。
+
+### 7. 复用 R6 Harness 的映射
+
+复用优先于抽象：**不新建**判定 / 证据 / 记账 / 并发 / 重启框架，全部复用 `scripts/eval/r6/**` 与 `multiuser/**`——`runHarnessSession`（`harness.ts:82`）、`judgeFactAnswer/judgeTaskContinuity`（`oracle.ts`）、`judgeCompactionLifecycle`（`compaction.ts:126`）、`CallAccountingGuard`（`accounting.ts:194`）、`SessionEvidence/classifySample/collectEvidence`（`evidence.ts`）、`createMuServer/Rendezvous/MuDeliveryRecord/judgeMuTasks`（`mu-support.ts`）、`mu6Restart`（`mu6-restart.ts:104`）、`wilson95`（`stats.ts:69`）。**关键前置接缝**（eval 侧、非产品码）：真实模型 Main 适配器（`modelCallLedger()` 必须逐次暴露主/摘要/重试/溢出恢复）+ Dummy Worker + `classifyP2Sample`/S2 完成闸/S7b 驱动。
+
+### 8. 合流依赖（**`DECISION_REQUIRED`，待 owner 批准**）
+
+**分叉事实（本会话实测）**：`exp/pi-native-session-compaction` = `be61a74`（Pi 原生替换·阶段三，未跑真实模型）、`arch/integration` = `f37d11d`；分叉点 `git merge-base` = **`84a22fa`**；`rev-list --count` = **18 / 31**（exp 独有 18、integration 独有 31）。两侧**共同改动文件**（即文本冲突面）= **仅 `apps/server/server.test.ts` 与 `docs/decision-log.md`**。`git merge-tree --write-tree`（本会话实跑）= 合并树 **`6fd0d9a…`**，`Auto-merging apps/server/server.test.ts`、`CONFLICT (content): Merge conflict in docs/decision-log.md`——**唯一内容冲突在 `docs/decision-log.md`**，`server.test.ts` 可自动合并但须语义复核。
+
+**结论**：P2 被测对象（真实模型 Main + B1 恢复接线 + Pi 原生会话/压缩 + MU 隔离）**横跨两分支**，必须先合流再跑，否则测到「半装配」、结论不可归属。**合流并合入 `arch/integration` 需 owner 批准**（owner 曾明确「不授权直接合入 `arch/integration`」）。
+
+**建议合流方案**：自 `f37d11d` 拉独立合流分支 `arch/p2-merge-candidate`（**不合入、不 push**）→ merge `exp`；`docs/decision-log.md` 冲突**归集成 Agent 单点裁定**、`apps/server/server.test.ts` 按合流后行为语义复核 → 验证 `tsc` + `npm test` 全量 + 关键确定性用例（MU 全套含 MU-6/MU-8、B1 接线、B2 silent-shadow、Pi 压缩生命周期）→ 附证据**提请 owner 批准**，由集成 Agent 单点合入 → **合入后再跑 P2**。
+
+**integration 前置已就绪（本会话实测 5/5 YES）**：`ebdaf71 / 56554fb / 0d44fbe / b7c62bd / f37d11d` 均为 `arch/integration` HEAD 祖先（`git merge-base --is-ancestor`）。
+
+**`DECISION_REQUIRED`（提交 owner）**：①是否批准按上述独立合流分支验证后合入 `arch/integration`；②`decision-log.md` 冲突裁决归属（建议集成 Agent 单点）；③P2 的 `step-3.7-flash` + Dummy Worker 装配口径确认。**以上未批，P2 不启动。**
+
+### 9. 未执行 / 局限（如实登记）
+
+- **未跑 P2**：零样本、零真实模型、零真实平台/写；本轮所有读数为**只读预演**（merge-tree / ancestor / rev-list）。
+- **真实模型 Main 适配器尚未接线**：`r6-longsession-harness-design.md:171`「真实生产同源装配适配器接线」仍列「仍待 Wave1」，现有只有零模型 `FakeHarnessSession`（`fake-session.ts`）——P2 执行前须在 `scripts/eval/**` 补 Main=真实 Pi + Dummy Worker 的 eval 侧适配器（非产品码）。
+- **合流未执行**：仅只读预演；分叉未合并、`arch/integration` 未动；合入待 owner 批。
+- **测试未跑**：本 run 纪律为「不跑测试」，故未执行 tsc / vitest；相关闸门留至合流分支与 P2 执行前。
+
+**指针**：`docs/product/p2-business-e2e-prereg.md`（预注册全文）；关联 §八十五（B1 接线）、§八十六（MU-8 / MU-6 复跑）、`docs/product/r6-longsession-harness-design.md`（适配器 wave）。
+
+**状态：待合入·准备档（未执行）。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
