@@ -1,218 +1,198 @@
-# CAP-01 · Main / Worker 文件处理与交付能力（v7）
+# CAP-01 · Main / Worker 文件处理与交付能力（v8）
 
-> 状态：**设计稿 v7**。只改文档：不实施、不改生产配置、不合入 integration。
-> **v7 的唯一依据是 owner 裁决**：Excel 可流式；**接受 Agent 写临时代码解析**；不做沙箱，用简易保护；当前目标是**捋顺架构 + 上线测试**，不是继续堆功能。
-> 因此 v6 的大量机制被删除，不是被优化。
-
----
-
-## 0. 相对 v6 删掉了什么（因为"允许写代码"而不再需要）
-
-| v6 的机制 | 为什么删 |
-|---|---|
-| 五个算子（`dedupe/group_sum/filter/select/sort`） | 代码想怎么写就怎么写；**同时消除"长成查询 DSL"的风险** |
-| 读上限三层 + `approxTokens` 预告 | 数据不进上下文；只有脚本读，且是流式 |
-| 有损检测（zip 扫图表/透视/宏）与"一律拒写" | **永远不改原件**：代码读原件、产出新文件，损坏问题从根上消失 |
-| `excel_read` / `excel_transform` / `file_publish` 三工具 | 收敛为 **`run_code` 一个工具 + 交付动作** |
-| `artifacts/` + `state=published` + publish 幂等 | 交付是"本轮交付集"，不建产物库 |
-| `FileStore` 端口 + 内存/SQLite 双实现 | 直接用现有 `task-store` 的同一个库、一张表 |
-
-**保留**：`fileId`（模型唯一引用）、workspace、副本不改原件、交付失败必须可观测、越权同码、原子写。
+> 状态：**设计稿 v8**。只改文档：不实施、不改生产配置、不合入 integration。
+> v7 → v8 依据：四路独立复核（执行器安全 / 交付链 / 复杂度 / 边界）+ 本机实测。
+> **核心变化**：用 **Node 24 权限模型**（`--permission`）把代码执行约束成"只能读写 run 目录"——不再靠"最小 env"这种假保护。
 
 ---
 
-## 1. 架构（三条线）
+## 0. 一句话
 
-**先把"宿主"拆成四个实名**（后续章节只用这些名字，不再用笼统的"Host"）：
+给 Main 和 Worker 一个**受限的 `run_js` 工具**加一张宿主管理的工作区：Agent 写代码处理用户上传的文件，产物经宿主登记、用现有渠道交付；**不建沙箱、不建文件平台、不改 Execution Contract**。
+
+---
+
+## 1. 架构：四个实名
 
 | 实名 | 落点 | 只负责 |
 |---|---|---|
-| **装配层** assemble | `scripts/ask-runtime.ts`、`apps/server/server.ts` | 构造 fileStore / workspace 根 / 执行面装饰器并注入；不写业务 |
-| **会话运行时** runtime | `packages/agent/src/execution-runtime.ts` | exec 闭包、`fileId` 解析、`run_task` 与任务工具；不 import 渠道类型 |
-| **文件区监管** fileStore | `file_refs` + workspace 布局 + 物化/登记/清理 | **唯一**写文件事实的地方；被 assemble 注入、被 runtime 调用 |
+| **装配层** assemble | `scripts/ask-runtime.ts`、`apps/server/server.ts`、`apps/server/main.ts` | 构造 fileStore 与 `runJsExecutor` 并注入；持有投递端口；不写业务 |
+| **会话运行时** runtime | `packages/agent/src/execution-runtime.ts` | exec 闭包、`fileId` 解析、`run_task`/任务工具；不 import 渠道类型、不直接 spawn |
+| **文件区监管** fileStore | `file_refs` + workspace 布局 + 物化/登记/清理 | **唯一**写文件事实的地方 |
 | **渠道适配** channel | `packages/channel-wecom/src/adapter.ts` | 只收发字节与回执；不做裁决 |
 
-```
-模型
-├─ run_code({ code, inputs:[fileId…], deliver?:[文件名…] })
-│     → runtime：解析 fileId → fileStore 物化输入（只读）
-│     → 子进程执行（cwd=会话 work/）→ 扫描 work/_out/ → fileStore 登记成新 fileId
-│     → 返回：{ exitCode, stdout(截断), outputs:[{fileId,name,bytes}] }
-└─ execute_operation({ operation, args })      ← 业务能力，仍归执行层
-      → runtime：args 里的 fileId 换成执行层可见路径 → 适配器 → 执行层
+**`run_js` 的 spawn 归谁**：runtime **不 spawn**（`import-boundary.test.ts:189` 禁止 runtime 值闭包出现 `node:child_process`）。用**注入端口**：
 
-assemble：把本轮 deliver 的文件交给 channel 发送，并把成功/失败写回事实
+```ts
+// RuntimeOptions / TaskExecutorOptions 增加
+runJsExecutor: (input: RunJsInput) => Promise<RunJsOutput>
+// 实现在 packages/agent/src/run-js-executor.ts（可 import worker-env），
+// 只在 assemble 构造并注入；把该文件加入 import-boundary 的 ENTRIES 审查面，
+// 并更新 worker-env.ts:17「唯一的执行层子进程面」注释（现在有两个子进程面）。
 ```
-
-**职责**：Agent 决定"写什么代码"；宿主只给**一张工作区、一组 fileId、一条交付通道**；执行层仍是唯一能碰平台的地方。
 
 ---
 
-## 2. `run_code` 契约
+## 2. `run_js` 契约
 
 ```jsonc
-{ "code": "const XLSX=require('exceljs'); …",
-  "inputs": ["file_a"],            // 只读，宿主物化到 work/_in/
-  "deliver": ["汇总.xlsx"],        // 可选：本轮要交付的文件名（相对 work/_out/）
-  "timeoutMs": 60000 }             // 可选，受上限约束
+{ "code": "const XLSX = require('exceljs'); …",   // CommonJS，写进 run 目录的 run.cjs
+  "inputs": ["file_a"] }                          // 只读，宿主物化到 <run>/in/
 ```
 
 返回：
 ```jsonc
 { "exitCode": 0,
-  "stdout": "…（截断，上限常量）…",
-  "stderr": "…（截断）…",
-  "outputs": [ { "fileId": "file_b", "name": "汇总.xlsx", "bytes": 20480 } ],
-  "delivered": [ { "name": "汇总.xlsx", "status": "sent" | "failed" } ] }
+  "stdout": "…（流式截断）…", "stderr": "…（流式截断）…",
+  "outputs": [ { "fileId": "file_b", "name": "汇总.xlsx", "bytes": 20480 } ] }
 ```
 
-**硬规则**
-- 输入只读：`work/_in/<fileId>.<ext>`，脚本改不动原件（`sha256` 前后校验）；
-- 输出目录 `work/_out/`：执行完扫描 → 每个文件登记成**新 `fileId`**（copy-on-register，登记即快照字节，避免 path 漂移）；
-- 只有 `work/` 内可读写；`in/`、`artifacts/`、宿主目录一律不可达（路径在宿主侧生成，脚本拿到的路径已经限定）；
-- `stdout/stderr` 有上限并截断，**不把数据回灌上下文**——脚本应只打印摘要；
-- **产物 = 新文件**，永不覆盖用户原件；因此**不需要有损检测**。
+**没有 `deliver` 参数、没有 `timeoutMs`、没有 `delivered` 返回**：
+- **`<run>/out/` 就是交付箱**——里面每个文件都登记并**本轮交付**；中间文件写 `<run>/scratch/`；
+- 超时/上限是宿主常量，模型只能把请求调小；
+- 交付发生在回合末（§7），工具返回时不可知。
 
-**已实测的实现事实（ExcelJS 4.4.0，5000 行 × 8 列 / 253KB）**
-- `readFile` 245 ms、retained heap 14.3 MB、RSS +80 MB；**`readFile` 无 timeout/abort**，`load()` 在 Buffer 拼完后同步跑 → **必须靠子进程 kill 来实现超时**（v7 的子进程模型天然满足）；
-- **流式读取可用**：`ExcelJS.stream.xlsx.WorkbookReader`（owner 已确认接受流式）；
-- 只判结构（sheet 名、`<dimension ref>`）约 105 ms、临时内存 1.6 MB——脚本想快速探查时用这条，而不是 `readFile`。
-
-### 2.4 幂等（防回合重放产生垃圾与重复交付）
-
-`run_code` **不在 U3 的 `dispatchKey` 重放窗口内**（那套只覆盖 `execute_operation`），必须自带幂等键：
-
+**目录（每次调用独立，不共享）**
 ```
-idempotencyKey = sha256(principalId, sessionId, turnId,
-                        sorted(inputs.map(f => f.fileId + "\0" + f.sha256)),
-                        sha256(code))
+<workspace>/<h>/<s>/runs/<runId>/in      只读输入（fileId 物化）
+                              /out       交付箱（写；宿主扫这里）
+                              /scratch   中间文件（写；永不当产物）
 ```
-
-- 执行**前**登记 `run_code_runs(key, status=running, outputs)`；
-- 同键重入 → **不执行**，直接返回已记录的 `exitCode` 与 `outputs`；
-- 交付集按 `idempotencyKey` 去重，**同一键只交付一次**；
-- 键由宿主生成，模型不可提供、不可影响（与 `dispatchKey` 同一纪律）。
 
 ---
 
-## 3. 简易保护（**明确不是沙箱**）
+## 3. 简易保护：Node 权限模型（**实测有效，不是沙箱**）
 
-| 措施 | 做法 |
+```
+node --permission \
+     --allow-fs-read=<runDir> \
+     --allow-fs-read=<repo>/node_modules \
+     --allow-fs-write=<runDir>/out \
+     --allow-fs-write=<runDir>/scratch \
+     <runDir>/run.cjs
+```
+
+| 实测项（Node v24.20.0） | 结果 |
 |---|---|
-| 进程隔离 | 子进程执行，cwd = 会话 `work/`；不带宿主进程内的任何对象 |
-| 凭据隔离 | 最小 env：`PATH/HOME/TMPDIR`（复用既有 worker env 白名单），**不含任何 API key / token** |
-| 资源上限 | `--max-old-space-size`、墙钟超时、输出字节上限、单次输出文件数上限 |
-| 路径限定 | 只给 `work/_in`、`work/_out` 的路径；宿主侧生成，模型与脚本都拿不到别处 |
-| 能力限定 | 工具是**数据处理原语**，脚本不得调执行层（执行层仍走 `execute_operation`）；Pi 内置 bash 仍关闭 |
-| 审计 | 每次调用记录：脚本 sha256、输入 fileId、输出 fileId、exitCode、耗时、超限原因 |
+| 读宿主 `.env` | **ERR_ACCESS_DENIED**（无权限模型时可读 1594 字节） |
+| 调 `child_process` | **ERR_ACCESS_DENIED**（连 spawn 执行层网关都被拦） |
+| 写未授权目录 | ERR_ACCESS_DENIED；授权 `out`/`scratch` 后可写 |
+| `require('yaml')`（NODE_PATH + 授权 node_modules） | **正常** |
+| `fetch` | **未被拦**（网络仍是洞） |
 
-**明确登记为残余风险**：无 OS 级隔离、无网络阻断（仅靠不传凭据与最小 env）。这是本阶段的取舍，不宣称安全边界。
+**env**：只给 `PATH` + `NODE_PATH=<repo>/node_modules`；`HOME`/`TMPDIR` 指向 `runDir` 下的空目录，**不给真实 HOME**，不带任何 `LLM_*`/`WECOM_*`/`NODE_OPTIONS`。
+**进程管理**：`detached:true` + `spawn`；超时/中止 `kill(-pid,'SIGKILL')` 杀**进程组**（`SIGTERM` 在同步 CPU 循环不可靠，孙进程会逃逸）。
+**输出**：`stdout/stderr` 在 `data` 回调里计数，超限即丢弃并标 `truncated`（不要先全读再截）。
+**产物登记**：`lstat` 只收普通文件、拒 symlink/hardlink（`nlink===1`）、uid 校验、大小与份数上限；从**同一个 fd** 流式读字节做 copy-on-register。
+
+**如实登记的残余风险**
+1. **网络未阻断**：脚本可外传它能读到的内容（已限制在 runDir + node_modules + 注入输入）；
+2. 无 OS 级隔离（Node 权限模型不是容器）；
+3. 提示注入仍可驱动模型写恶意代码——但它读不到 `.env`，最坏是写坏产物；
+4. 文件类型检查不是机密性边界。
 
 ---
 
-## 4. 文件与事实
-
-- **`fileId`**：模型唯一引用；路径永不进模型。
-- **表**（放现有 `task-store`，一张表，不建第二套持久化栈）：
+## 4. 文件事实（8 列）
 
 ```sql
 file_refs(
-  file_id TEXT PRIMARY KEY, principal_id TEXT, session_id TEXT,
-  task_id TEXT NULL,          -- Task 私有副本
-  source_message_id TEXT NULL, attachment_index INTEGER NULL,
-  name TEXT, sha256 TEXT, bytes INTEGER,
-  state TEXT,                 -- pending | active   （交付不落状态）
-  created_at INTEGER,
-  UNIQUE(principal_id, session_id, source_message_id, attachment_index)
+  file_id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, session_id TEXT NOT NULL,
+  name TEXT NOT NULL, sha256 TEXT NOT NULL, bytes INTEGER NOT NULL,
+  activated_at INTEGER NULL,        -- NULL = pending；非 NULL = 可读（同时是 TTL 起点）
+  created_at INTEGER NOT NULL
 )
+-- S2 追加：task_id TEXT NULL（Worker 只解析当前任务；Main 只解析 task_id IS NULL）
 ```
-- `path` **不落库**：按 `(principal, session, task, file_id)` 布局派生；磁盘文件名用 `file_id`（扩展名取自 `name`）。
-- 副本（Task 输入、脚本输出、执行层回程）**一律新 `file_id`**；唯一键只约束"入站原始附件"（`source_message_id` 非空的行），副本行 `source_message_id = NULL`，不冲突。
-  **实测确认**：SQLite 的 UNIQUE 把 NULL 视为互不相同（`(p,s,NULL,NULL)` 插两次=2 行），所以副本行不冲突；但**入站幂等只有在 `source_message_id` 与 `attachment_index` 都非 NULL 时才生效**（单附件写 `0`）。
-- **迁移口径**：`TASK_STORE_SCHEMA_VERSION` 必须 **4 → 5**；`backupBeforeMigration` 的谓词要扩到"新表缺失"，否则只加表不会备份，且不升版本会因同名 `.backup-v4` 已存在而静默跳过备份。
-- **作用域规则（必须写进代码，S0 验收依赖它）**：Main 只解析 `task_id IS NULL` 的行；Worker 只解析 `task_id = 当前任务` 的行。否则 Main 的文件在 Worker 里是可读的，"越权被拒"这条根本测不出。
-- 越权 / 不存在 / 过期：**同一错误码 `FILE_REF_UNAVAILABLE`**，不泄漏存在性。
+
+- **没有 `state` 枚举**：`activated_at IS NULL` 即 pending。
+- **不存 `path`**：按 `(principal, session, task, file_id)` 派生；文件名用 `file_id`（扩展名取自 `name`）。
+- **暂缓** `source_message_id` / `attachment_index`：当前企微文件消息一条一个文件；跨重启重投靠 TTL 清孤儿。
+- **暂不升 schema 版本**：纯新增表走 `CREATE TABLE IF NOT EXISTS`；若坚持升版本，只改 `backupBeforeMigration` 谓词。
+- **越权/不存在/过期同码** `FILE_REF_UNAVAILABLE`（防存在性 oracle）；内部另记机械 `reason` 只进日志，不进用户话术。
+
+**激活语义**：**带文字的消息激活本会话全部 pending 文件**（TTL 内），**不按 messageId**——指令消息本身不带附件，按 messageId 永远找不到。
 
 ---
 
-## 5. 入站与交付
+## 5. 幂等：进程内 Map，不建表
 
-**入站**：下载 → 算 sha256 → **在 `attachmentOnly` 早退之前**分配 `fileId`（修 `server.ts:257-261` 的现有顺序）→ `state=pending`；用户交办时按 **该消息的 `messageId`** 提升为 `active`（不是"全会话所有 pending 一起激活"）。
+`run_js` 不在 U3 `dispatchKey` 窗口内。用**进程内 Map**：
 
-**交付**：
-- `run_code` 的 `deliver` 名单 → 本轮交付集（内存 Set）→ `TurnResult.files` → handler 返回 `RichChannelReply.files` → adapter；
-- **失败必须可观测**：正常回复路径的文件失败当前只 `log wecom_file_fail`（`adapter.ts:681-693`）——**必须改成向 Host 返回失败事实**（catch 或返回值，二选一，S1 内定），用户得到"文件未送达"话术；
-- 三种事实分开：**产物存在 ≠ 任务成功 ≠ 文件送达**；
-- 文本只给文件名，不给路径。
+```
+key = (principalId, sessionId, turnNo, sha256(code), sorted(inputFileIds))
+value = { exitCode, outputs }
+```
 
----
-
-## 6. 与执行层的关系
-
-- 文件要交给执行层（例如浏览器上传）：宿主把 `fileId` **物化**到 `<platformRoot>/tmp/task_<id>/`，在 dispatch 时把 args 里的 `fileId` 换成**相对平台根的路径**。
-- **翻译位置（实测约束）**：
-  1. 只有两处 `client.execute`——inline `execution-runtime.ts:711`、background `:1132`；Main 没有 execute 路径；
-  2. `request.args` 是 `Readonly<Record<string, unknown>>` → **不能原地改**，构造新对象 `{...request, args: {...request.args, [key]: relPath}}`；
-  3. **翻译必须在 `claimAndRunOperation` 之前**（`:703`/`:1122`），否则复制失败会被记成 `call_interrupted` → 任务落 `result_unknown`（错误分类）；文件桥的失败应是普通 `UserError`。
-  4. `RuntimeOptions` / `TaskExecutorOptions` 目前**没有 `platformRoot`**（只有 `workerWorkspaceRoot`，语义不同）→ 必须显式新增，不要复用。
-- **参数声明**：实际声明位置是 `fixtures/platforms/<p>/capabilities.json` 的 `args.flags[].style`（不是 `operations.json`）；`declaredArgsOf` 已把 `style` 投影成 `type`，`style:"file"` 能通过现有 `lint-operations.js` 与 loader 校验。但**借用 CLI 的 `style` 表达行为语义不对**——建议改用专用字段（如 `kind:"file"`），并**同步修改** `execution-contract.ts` 里"type 只作展示、不参与业务判断"的注释，否则后来者会照注释删掉它。
-- 执行层返回文件：`data.files[{name,path,…}]` → 宿主登记成新 `fileId`、剥掉 `path`；出现内联 base64 一律剥离并记事件。
-  **翻译点不能放适配器**（`dummy-cli-client.ts` 自述"只翻译不裁决"，且依赖 core 会把 better-sqlite3 拖进适配器值闭包）→ 放在**装配层装饰器**（`defaultExecutionFace` 处包一层 `ExecutionClient`）或 **runtime 出口**（`:711`/`:1132` 拿到 outcome 后、返回给驱动前）。
-  **background 模式要注意**：server 解析执行面两次（`:134-150` 与 `:175-190`，后者未传 face）→ 是两个 client；`FileStore` 与装饰器必须是**同一个实例**注入两处，否则入站登记与出站查找分叉。
+- `turnNo` 是进程内回合号（`execution-runtime.ts:526`）；**Pi 原生重试不产生新 `send()`**，重试同键 → 命中不重跑；
+- **不要用 `attempt`**（`:363-377` 每个 recovery +1）——那会让每次重试换键、脚本跑两遍；
+- `send()` 的 `finally` 清空 Map；
+- **跨重启不保证**：重启后渠道重投是新回合，重新执行是正确行为。文档明确写"S1 只保证进程内、同一回合的交付"。
 
 ---
 
-## 7. 阶段与验收
+## 6. 与执行层：不进契约
+
+- 文件交给执行层：assemble 把本任务输入物化到 `<platformRoot>/tmp/task_<id>/`，**执行层声明一个目录参数**（如 `--input-dir`），宿主替换该值。
+  **不引入 `kind:"file"`**——`execution-contract.ts:41-43` 写着 type 只作展示、`:61` 写着 args 对宿主不透明；按 kind 遍历 args 会让宿主"看懂"args，是契约蔓延的起点。
+- 翻译位置：**assemble 装饰器**（持有 `platformRoot`），不是 runtime 出口。
+- 执行层返回文件：`data.files[...]` → **runtime 出口**登记成新 `fileId`、剥 `path`、剥离内联 base64。**不能在适配器登记**（适配器拿不到 scope，且会依赖 core 的 sqlite）。
+- **background 会解析执行面两次**（`server.ts:134-150`、`:175-190`）→ fileStore 与装饰器必须**同一实例**注入两处。
+
+**Native vs MCP 判据（补回）**：本地数据文件 → `run_js`；平台/SaaS 副作用 → `execute_operation`；MCP = 未来外部协议客户端，**未准入**。
+
+---
+
+## 7. 交付：主动投递（B），失败必须可见
+
+```
+run_js 产出 → fileStore 登记 → 回合末 TurnResult.files（中性类型）
+   → handler 只返回 text；文件由 assemble 注入的 fileDelivery.sendToConversation() 发出
+   → 成功/失败事实 + 用户可见话术
+```
+
+```ts
+// execution-runtime.ts 内定义，不 import 渠道类型
+export interface TurnFileRef { fileId: string; name: string; bytes: number }
+// TurnResult 增加可选 files?: readonly TurnFileRef[]
+```
+
+**为什么选 B**：回复路径的文件失败**只 log 不抛**（`adapter.ts:681-693`，有测试钉住），拿不到失败信号；主动投递同步抛 `WecomChannelDeliveryError`（带 `receipt.parts`，逐文件可知）。改动量 2 个生产文件 + 1 个测试（A 是 3–4 个 + 契约 + 2 个测试）。
+
+**必守四条**
+1. handler **只返回 text**，主动投递**只传 files**——否则文本发两遍；
+2. **"只有文件、正文为空"不能判回合失败**（改 `server.ts:279-281`），否则走不到投递；
+3. **`deliveryMode` 非 `live` 记 `suppressed`，不许记 `sent`**（silent 闸让上传返回成功但用户看不到）；S1 验收跑 `live`；
+4. 无投递端口时 **fail-closed**（"文件未送达（当前渠道不支持文件投递）" + `delivery_unavailable`）。
+
+**失败事实**：结构化事件 + 用户话术；**S1 不建表**——没有"重发"消费者，建表就是没有消费者的状态。跨重启查询若将来需要，再加 `delivery_facts`。
+
+**出口清理**：`stripServerPaths` 在 `execution-runtime.ts` 返回前调用一次（覆盖 `ask`/server/`task_result`）；剥完为空且有文件 → 宿主话术"文件已生成（见附件）"。
+
+---
+
+## 8. 阶段（重切）
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **S0** | 依赖 `exceljs`；`file_refs` 一张表 + 派生路径；workspace；`run_code` 子进程执行器（三条上限 + 最小 env + 审计）；Main/Worker 双侧接入 | 12 行 Excel：脚本读原件、产出新文件、**原件 sha256 不变**；超时/超内存被拒且有可读原因；Worker 拿到 Main 的 `fileId` 被拒 |
-| **S1** | 入站（含 `attachmentOnly` 顺序修复 + 按 `messageId` 提升）、清单注入、交付链路 + **失败可观测** | 用户上传 → "去重后按客户汇总" → **不建 Task** → 收到文件；**故意让文件发送失败 → 用户看到"未送达"，系统记录失败** |
-| **S2** | `run_task.inputFiles`、Task 副本（新 `file_id`）、Worker 同工具、`type:"file"` 桥、执行层回程登记 | Worker 用 `run_code` 处理 → 脚本内不调执行层 → 产物回 Main → 交付；5000 行文件**流式处理**（内存峰值可测、上下文不增长） |
+| **S0** | `exceljs` 依赖；`file_refs` 一表；workspace/run 目录；`run-js-executor`（权限模型 + 进程组 kill + 输出截断 + 产物扫描 + 审计）；**不接 Main、不接渠道** | 直接插一行 `file_refs` → 脚本读 `in/`、写 `out/` → 产物登记成新 `fileId`、**原件 sha256 不变**；读 `.env` 被拒；`child_process` 被拒；超时被进程组 kill |
+| **S1** | Main 接 `run_js`；入站登记（**修 `attachmentOnly` 早退在查重之前**）；清单注入；交付（B）+ 失败可观测 | 用户传 12 行 Excel + 一句话 → **不建 Task** → 收到文件且内容正确（Oracle 重解析）；**故意让投递失败 → 用户看到"未送达"、系统记失败、不记 sent** |
+| **S2** | `run_task.inputFiles`；Task 副本（新 `file_id`）；Worker 接 `run_js`；执行层目录参数桥；回程登记 | Worker 处理 → **数据不进任何模型上下文**（工具参数里无行数据）→ 产物回 Main → 交付 |
 
-**判据分层**：Runtime 只判机械项（exitCode、超时、字节/份数、原件 sha256、归属）｜Eval Oracle **重新解析输出文件**判业务正确性（去重集合、客户汇总）。
-
----
-
-## 8. 不做
-
-自研 Excel 解析器 ｜ 算子词表 / 查询 DSL ｜ 有损检测与 zip 扫描 ｜ 沙箱 / 容器 / 网络命名空间 ｜ 文件 Worker ｜ Direct/Delegate Router ｜ 文件权限平台 ｜ 产物库与跨天重发 ｜ `transport` 分层 ｜ 版本握手 ｜ PDF/Word ｜ 真实 SaaS 写入。
+**S0 的"Worker 越权被拒"挪到 S2**（v7 写错了：Worker 工具面到 S2 才加）。
+**并发**：缺省 `mainConcurrency=1`/`queueCapacity=0`，一个 60s 脚本期间其它会话会被 `queue_full` 拒；`timeoutMs` 按这个成本定（S3 再谈并发）。
 
 ---
 
-## 9. 残余风险（登记，不宣称已解决）
+## 9. 不做
 
-1. 代码**无 OS 级隔离、无网络阻断**——只靠最小 env + 工作区路径 + 资源上限；
-2. 脚本是模型生成的 → **不保证确定性**，Eval 必须判输出文件、不判脚本；
-3. `run_code` 与"任意代码执行"只差一层措辞，边界靠**能力描述 + 不传凭据 + 不通过它编排执行层**维持；
-4. 大文件仍受宿主内存与超时限制；"流式"能压低峰值，不消除时限；
-5. 交付失败的可观测依赖 adapter 改造（回复路径当前吞错），S1 内必须落地。
+自研 Excel 解析器 ｜ 算子词表 / 查询 DSL ｜ 有损检测 ｜ 沙箱 / 容器 / 网络命名空间 ｜ 文件 Worker ｜ Router ｜ 文件权限平台 ｜ 产物库与跨天重发 ｜ `transport` 分层 ｜ `kind:"file"` 契约字段 ｜ `run_code_runs` 第二张表 ｜ PDF/Word ｜ 真实 SaaS 写入。
 
 ---
 
-## 10. 复核后补充的实现约束（v7，来自可实现性实测）
+## 10. 复核后仍开放的四条（已给处置，不需再讨论）
 
-1. **`unexecuted` 是终态**：Worker 只做文件、没碰平台 → 任务判 `unexecuted`。**Host 必须对 `unexecuted`/`failed` 也做一次产物收集**，否则"纯文件误委派"会丢产物。
-2. **共享 dispatch 不能合成一个函数**：Main 是**路由器**（`run_task`/`task_*`/`read_skill`），两个 Worker 是**执行器**（差异仅 `runOperation` vs `claimAndRunOperation`、`onUnresolved`、是否记 `executed`、scope 来源）。拆成 `createToolDispatcher(handlers)` + `runDeclaredOperation({...})`；同时扩 Worker 工具面（`:859`、`:1159`）与 exec 路由（`:740`、`:1112`）——这两处文档原来没列。
-3. **`exceljs` 的 `readFile` 没有超时/中止**：v7 的子进程模型用 kill 兜住；但要接受"解析是 CPU-bound 同步"，单用户可接受，S3 并发门再谈 worker thread。
-4. **`stripServerPaths` 生产路径零消费**：终稿出口必须调一次，否则 `tmp/task_<id>/…` 会随回复发给用户。
-5. **交付链要落的具体文件**：`TurnResult`（`execution-runtime.ts:301-307`）加 `files`；handler（`server.ts:274-297`）返回 `RichChannelReply`；`main.ts:42-47` 先建 server 后建 channel → 需要注入投递端口或调整构造顺序；失败要能在**回复路径**上被捕获（当前 `adapter.ts:681-693` 只 log）。
-
----
-
-## 11. S2 改动清单（按 v7 重列，替代 v6 那份）
-
-**必做（inline 也要）**
-1. `RUN_TASK_TOOL_SCHEMA` 加 `inputFiles`（`execution-runtime.ts:57-74`；`additionalProperties:false`，不加直接被拒）。
-2. **建 Task 副本**：新 `file_id`、复制后在**目标字节**上校验 `sha256`。
-3. `renderWorkerDelegation`（`:330-362`）注入副本 `fileId`（调用点 `:860`）。
-4. **Worker 工具面加 `run_code`**（`:859`、`:1159`），并让两个 exec 闭包路由它（`:740`、`:1112`）；用 `createToolDispatcher` + `runDeclaredOperation` 拆分，**不要合成一个 context bag**。
-5. Worker 产出的 `outputs` 进入本轮交付集（inline 回执 `:877`）。
-6. 执行层调用前的 **`fileId → 路径` 翻译**（`type:"file"` 声明），位置在 `claimAndRunOperation` **之前**（`:703`/`:1122`）。
-7. 执行层回程 `data.files[]` → fileStore 登记（**runtime 出口**，不是适配器）。
-8. **`unexecuted`/`failed` 时也收集产物**（否则纯文件误委派会丢产物）。
-
-**仅当 S2 包含 background 才做**
-9. `TaskExecutionInput` / `TaskExecutionOutcome`、`TaskRecord`、`tasks` 表迁移、`taskResult` 视图、background 受理回执。
-
-**明确不做**：`statusView` 里塞 `files`（噪声 + 扩大泄漏面）。
+1. **`_in` 可写**：脚本能改输入再改回（`sha256` 只能发现）。处置：`in/` 与 `out/` 分目录，写权限只给 `out`/`scratch`（Node 权限模型支持）。
+2. **宿主同步登记会阻塞**（50MB 哈希 30ms）：处置：copy-on-register 走流式 + 异步。
+3. **`unexecuted` 会丢产物**：处置：Host 对 `unexecuted`/`failed` 也扫 `out/`（S2）。
+4. **background 交付链**：处置：S2 若含 background，`TaskExecutionInput/Outcome` + 受理回执一并改；否则 S2 明确只做 inline。
