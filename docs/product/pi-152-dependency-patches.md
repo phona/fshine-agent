@@ -13,7 +13,8 @@
 - 补丁守卫测试：`packages/agent/pi-152-u1-output-floor.test.ts`（无补丁时 4 例红、1 例绿；有补丁 5 例绿）；
   `packages/agent/pi-152-u2-empty-summary.test.ts`（无 U2 补丁时 5 例中 4 例红、1 例正向对照绿；有补丁 5 例绿）。
 - 常驻绊线：`packages/agent/pi-152-patch-applied-tripwire.test.ts`（断言 U1 `derivedFloor` 与 U2 写库拒绝
-  确实存在且生效；实测 `--reverse` 后 `4 failed | 1 passed (5)`，重新打上后 `5 passed (5)`）。
+  确实存在且生效；实测 `--reverse` 后 `4 failed | 1 passed (5)`，重新打上后 `5 passed (5)`；
+  2026-11-16 独立复核复跑一致）。
 - 当前补丁栈（两个包、三个文件）：`@earendil-works+pi-ai+1.5.2.patch`（U1）、
   `@earendil-works+pi-coding-agent+1.5.2.patch`（U2）。`npm run postinstall` 输出两行 ✔ 即全部就位。
 
@@ -25,7 +26,8 @@ U2 提交（`b930b34`）当时引用的 `.runtime/pi152-stageB/injection/report4
 `passed=false`：引用目标与所声称的补丁状态不一致。
 
 更正方式：**不修改旧证据内容、不改判据**；用 `patch-package --reverse` / `patch-package` 两次受控运行
-重新生成前后对照，并把原始 JSON 的**机械投影**提交为仓库内不可变文件：
+重新生成前后对照，并把原始 JSON 的**机械投影**提交为仓库内不可变文件。下表两份均为
+**2026-11-16 重新复现**（re-generated），**不是**被覆盖的 `.runtime/.../report4.json` 历史原始件：
 
 | 读数 | 不可变证据文件 | 补丁状态 | 生成命令 |
 |---|---|---|---|
@@ -60,8 +62,43 @@ U2 提交（`b930b34`）当时引用的 `.runtime/pi152-stageB/injection/report4
 - `dist/api/openai-completions.js:578-585`：有 `maxTokens` 就写 `max_completion_tokens` ⇒ 真实请求
   `max_completion_tokens: 1`（证据：stageB 原始运行产物，当次记录 A 12 次 / B 5 次；该产物 gitignored、
   未入库，见「证据更正」节）。
-- 后果：thinking 模型的唯一 token 落在 thinking 块，正文为空、`stopReason=length`、`usage.reasoning=0`，
-  上层看不出错误（stageB 轨迹记录 J3，同上未入库）。
+- 后果：thinking 模型的唯一 token 落在 thinking 块，正文为空、`stopReason=length`、`usage.reasoning=0`
+  （stageB 轨迹记录 J3，同上未入库）。
+
+**根因复核与原文纠正（2026-11-16，插桩实测）**：
+
+- **原文错在哪一句**：旧版本节末写「上层看不出错误」。它与同节「验证读数」的 A 前
+  `压缩 start/完成/失败 = 12 / 1 / 11`、以及「剩余上下文不足的去向」里
+  `isRecoverableLength → compaction_start(reason=overflow)` 自相矛盾：若上层看不出错误，
+  就不会有 12 次压缩启动。该句作废，正确因果链见下。
+- **调用点实参（逐处核对实际执行文件）**：全仓 `isRecoverableLength` 仅一个调用点
+  `pi-coding-agent/dist/core/agent-session.js:2533`
+  `isRecoverableLength(assistantMessage, messageModel.maxTokens)`；`messageModel` 来自
+  `:2499 this._modelForMessage(assistantMessage)`（`:313-318`：非虚拟模型即当前模型），
+  所以实参是**模型声明的 `maxTokens`（本例 2048，未夹紧）**，既不是本次请求实发的
+  `max_completion_tokens`（clamp 后的 1/1024），也不是显式 `options.maxTokens`。
+  这与 `pi-ai/dist/utils/overflow.js:174-176` 的调用约定一致（"original limit before any
+  context-based clamping"）；实现见 `:177-178`。
+- **实测分支走向**（一次性临时插桩：用同一组参数调用真实
+  `buildBaseOptions`/`isRecoverableLength`，再对真实 `AgentSession._checkCompaction`
+  注入 length 消息并读事件；不改包内源码逻辑）：
+
+  | 补丁状态 | 本次请求实际 cap | 注入消息 | `isRecoverableLength(msg, 2048)` | 实际分支 |
+  |---|---|---|---|---|
+  | reverse（上游原状） | 1 | `stopReason=length`, `usage.output=1` | **true** | `compaction_start(reason=overflow)`；摘要请求 cap=1 → `compaction_end` 带 `Context overflow recovery failed: Summarization failed: generation hit the token cap…`、`willRetry=false` |
+  | applied（U1+U2） | 1024 | `stopReason=length`, `usage.output=1024` | **true** | `compaction_start(reason=overflow)`；摘要请求 cap=1024 → 摘要成功、`compaction_end(willRetry=true)` |
+
+  反事实对照（同一实测脚本）：把实参换成「本次请求实际 cap」（1 或 1024）时
+  `isRecoverableLength` 均为 **false**——即「补丁前按请求 cap 传参」会漏掉恢复；
+  现有调用点传的是 `model.maxTokens`，所以 1-token 回合仍被判为可恢复。
+  另：`isContextOverflow` 的 length 分支要求 `usage.output === 0`（`overflow.js:163`），
+  1-token 回合不满足，因此本例不是被 overflow 判据捕获，而是被 `isRecoverableLength` 捕获。
+- **纠正后的因果链**：`room<1024` → 请求 cap=1（摘要请求同样 cap=1）→ thinking 吃掉唯一
+  token、正文空、`stopReason=length`、`output=1` → `isRecoverableLength(msg, model.maxTokens=2048)`
+  = true → 进入有界 compact-and-retry；但**恢复所用的摘要请求走同一 clamp、cap 同为 1** →
+  摘要 `length` → 恢复失败（有界失败，带 `errorMessage`）→ 用户最终看到空正文。
+  即：上层**看得出**异常并尝试恢复，失败点在恢复路径自身也被夹到 1 token；不是「上层看不见」。
+  补丁把主请求与摘要请求的 room 推导值都抬到 1024，恢复才得以完成。
 
 **修复思路（最小）**：只给「由 room 推导出来的上限」加下限，且**只在调用方未显式给 `maxTokens` 时**生效；
 显式 `options.maxTokens` 传 `derivedFloor = 1`，仍只受 room 约束（不会被下限抬高）。下限取 **1024**，
@@ -117,6 +154,21 @@ index a119bf9..1c4fd32 100644
 `MIN_MAX_TOKENS`、margin 公式、`MIN_OUTPUT_WITH_RATIO_MARGIN` 分支；Pi 的 overflow 检测/恢复（U1 不改恢复逻辑）。
 另两处直接调 `clampMaxTokensToContext` 的调用（`anthropic-messages.js:956`、`bedrock-converse-stream.js:446`）
 走 3 参调用 ⇒ `derivedFloor` 取默认 1，行为不变（未在本补丁范围内，避免越过已验证路径）。
+
+**显式 `maxTokens` 边界补测（2026-11-16 实测；模型 `contextWindow=16384` / `model.maxTokens=2048`）**：
+显式请求传 `derivedFloor=MIN_MAX_TOKENS(1)`，即 `min(请求值, max(1, room))`；
+`room = contextWindow − input − margin`（16k 窗口下 margin 恒为固定 4096，故 `room = 12288 − input`）。
+
+| 显式请求 | room ≥ 请求值 | room ∈ (1024, 请求值) | room ∈ (1,1024) | room ≤ 0 |
+|---|---|---|---|---|
+| `maxTokens=2048` | `room=8288` → **2048** | `room=1788` → **1788**（受 room 约束） | `room=288` → **288**（1024 下限不生效） | **1** |
+| `maxTokens=8192` | `room=8288` → **8192**（不被 `model.maxTokens` 截回） | `room=2288` → **2288** | `room=288` → **288** | **1** |
+
+- 结论：显式 `maxTokens` **不被 1024 下限抬高**，仍只受 room 约束；room 为正且小于请求值时返回 room。
+- 边界注意：显式值大于 `model.maxTokens` 时，本层不按 `model.maxTokens` 截断（8192 在 room 允许时原样返回）；
+  服务端是否接受由 provider 决定。
+- 对照（未显式 `maxTokens`）：`room=288 → 1024`、`room<0 → 1024`、`room≥2048 → model.maxTokens(2048)`；
+  下限只改变原本会落到 <1024 的位置。
 
 **删除条件**：上游在 `simple-options.js` 里区分「显式请求」与「缺省」并给 room 推导值设可用下限
 （等价于：`options.maxTokens === undefined` 时 `clamp ≥ 某个非退化下限`）后删除本补丁与守卫测试。
