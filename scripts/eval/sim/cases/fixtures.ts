@@ -40,6 +40,24 @@ export const SIM_FIXTURES: readonly SimFixtureDeclaration[] = Object.freeze([
     ],
     note: 'dummy 首次在任何 state-dir 调用时按 seedState() 自建；每 trial 的 state-dir 独立，互不共享。',
   },
+  {
+    id: 'dummy-platform:write',
+    kind: 'dummy-cli-default-seed',
+    fixtureRoot: 'scripts/eval/fixtures/dummy-platform',
+    collections: ['alpha'],
+    deterministicFaults: [
+      {
+        collection: 'alpha',
+        field: 'receiptLoss',
+        effect: '写入已生效但宿主拿不到回执（SIM-10；由 ../write-system 确定性注入，不是产品行为）',
+      },
+    ],
+    note: [
+      '写场景（SIM-09/10）用 ../write-system 的确定性假系统：ask 装配当前只开放读切片',
+      '（scripts/ask-runtime.ts 的 allowedOperations = 只读集合），真实跑批到不了 dummy.commit。',
+      '因此写场景单列在 SIM_WRITE_CASES，不冒充「产品已支持写」。',
+    ].join(''),
+  },
 ]);
 
 export function resolveFixtureDeclaration(id: string): SimFixtureDeclaration {

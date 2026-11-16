@@ -121,6 +121,16 @@ export function hasRepeatedUserIntent(userMessages: readonly string[]): boolean 
   return true;
 }
 
+/**
+ * 泄漏硬规则（进模拟用户 system prompt）：**不得复述系统给出的任何数值**来「确认」。
+ *
+ * 背景（sim5 SIM-05#2）：模拟用户回了「alpha 2 条合计 2000，收到」——它把系统给的答案
+ * 复述了一遍。污染检测按设计把该 trial 作废（用户消息出现真值），机制正确但整条样本浪费。
+ * 这条规则让模拟用户用「收到了 / 明白了」确认，不给它复述机会；检测本身不放松。
+ */
+export const SIM_NO_ECHO_NUMBERS_RULE =
+  '你绝不能再复述或引用系统给出的任何数字、条数、金额、编号来「确认」或追问；需要确认时只用「收到了」「明白了」这类不含任何数值的措辞。';
+
 /** 构造模拟用户 prompt。**不得**接收 fixtureId/oracleId/真值——参数类型即边界。 */
 export function buildSimulatorPrompt(view: SimulatorView): SimulatorPrompt {
   const system = [
@@ -128,6 +138,7 @@ export function buildSimulatorPrompt(view: SimulatorView): SimulatorPrompt {
     '你不知道正确答案，也不掌握系统内部接口、日志或工具返回值。',
     '你的任务：像真实用户一样与系统对话；目标达成后主动收尾，做不到就放弃。',
     '系统已经清楚回答过的问题不要再问；不要为了确认而重复同一句话；目标达成就立即 finish(satisfied)。',
+    SIM_NO_ECHO_NUMBERS_RULE,
     '严格按协议输出：只输出一个 JSON 动作，不要输出解释或多余文本。',
   ].join('');
   const authoring = [

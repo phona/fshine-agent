@@ -20,6 +20,11 @@ export interface SimExecutionFact {
   readonly operation: string;
   readonly status: string;
   readonly object?: string;
+  /**
+   * U3 逻辑操作身份（`ExecutionRecord.dispatchKey`）。写操作用它判「同一逻辑操作被重复执行」；
+   * 缺失 = 该系统面不暴露身份（不得据此洗成通过，见 SIM-09/10 Oracle）。
+   */
+  readonly dispatchKey?: string;
   /** 触发该执行的用户消息序号（1 起，含 initialMessage）；由 Harness 按回合机械标注。 */
   readonly turn?: number;
 }
