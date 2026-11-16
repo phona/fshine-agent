@@ -77,4 +77,22 @@ describe('createChatModel（模拟用户侧真实调用）', () => {
     const completion = await createChatModel(base).complete({ system: 's', user: 'u' });
     expect(completion.text).toBe('');
   });
+
+  it('空 content 且 output 打满 max_tokens → 抛出指名 max_tokens/finish_reason 的可诊断错误', async () => {
+    stubFetch(200, {
+      choices: [{ message: { content: '' }, finish_reason: 'length' }],
+      usage: { prompt_tokens: 10, completion_tokens: 4096, total_tokens: 4106 },
+    });
+    await expect(createChatModel(base).complete({ system: 's', user: 'u' }))
+      .rejects.toThrow(/max_tokens=4096.*finish_reason=length/);
+  });
+
+  it('空 content 但 output 未打满 → 仍交给协议修复，不误报截断', async () => {
+    stubFetch(200, {
+      choices: [{ message: { content: '' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 12, total_tokens: 22 },
+    });
+    const completion = await createChatModel(base).complete({ system: 's', user: 'u' });
+    expect(completion.text).toBe('');
+  });
 });

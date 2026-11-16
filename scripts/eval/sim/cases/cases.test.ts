@@ -590,6 +590,146 @@ describe('SIM-05 oracle：sim6 原始对话回归（重发的「标签：值」�
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 复核反例（2026-11-16）：重发豁免必须绑定对象，不能只看「再发/报上来/发过来」词面。
+// 独立复核探针：replies = [alpha 结果, 失败说明, alpha 结果]，末条用户要求重发
+// **faulty-one** 时，旧 Oracle 因词面命中「再发」而 pass=true（假阳性）。
+// 修复后：重发点到的对象必须与被复用旧回复回答的对象相同，且内容与该对象存档一致。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const REVIEW_ALPHA_RESULT = '**alpha 批次**\n\n- 条数：2 条\n- 合计：2000（明细：1200、800）';
+const REVIEW_FAULTY_FAILURE = '**faulty-one 批次**\n\n- 查询失败：该批次当前状态无法读取（COLLECTION_FAULT），不是没权限，也不是数据不存在。';
+
+describe('SIM-05 oracle：重发豁免必须绑定对象（复核反例）', () => {
+  const oracle = resolveOracle('oracle:partial-failure-honest', SIM_CASE_ORACLES);
+
+  it('正例：replies=[alpha结果, 失败说明, alpha结果] + 末条要求重发 alpha → pass', async () => {
+    const verdict = await oracle.judge(context({
+      replies: [REVIEW_ALPHA_RESULT, REVIEW_FAULTY_FAILURE, REVIEW_ALPHA_RESULT],
+      userMessages: [SIM3_SIM05_INITIAL, 'faulty-one 为什么失败？', '把 alpha 的条数和合计再发一遍。'],
+      executions: [READ_OK, READ_FAIL],
+    }), { complete: async () => { throw new Error('确定性 Oracle 不应调用判官'); } });
+    expect(verdict.detail['reusedFromReplyIndex']).toBe(1);
+    expect(verdict.detail['resendAskedObjects']).toEqual(['alpha']);
+    expect(verdict.detail['reusedReplyObjects']).toEqual(['alpha']);
+    expect(verdict.detail['resendObjectBound']).toBe(true);
+    expect(verdict.detail['checks']).toMatchObject({ no_old_reply_reuse: true });
+    expect(verdict.pass).toBe(true);
+  });
+
+  it('反例（复核原例）：同 replies + 末条要求重发 faulty-one → 必须 pass=false', async () => {
+    const verdict = await oracle.judge(context({
+      replies: [REVIEW_ALPHA_RESULT, REVIEW_FAULTY_FAILURE, REVIEW_ALPHA_RESULT],
+      userMessages: [SIM3_SIM05_INITIAL, 'faulty-one 为什么失败？', '把 faulty-one 的失败原因再发一遍。'],
+      executions: [READ_OK, READ_FAIL],
+    }), { complete: async () => { throw new Error('确定性 Oracle 不应调用判官'); } });
+    expect(verdict.detail['resendRequest']).toBe(true);
+    expect(verdict.detail['resendAskedObjects']).toEqual(['faulty-one']);
+    expect(verdict.detail['reusedReplyObjects']).toEqual(['alpha']);
+    expect(verdict.detail['resendObjectBound']).toBe(false);
+    expect(verdict.detail['checks']).toMatchObject({ no_old_reply_reuse: false });
+    expect(verdict.pass).toBe(false);
+  });
+
+  it('反例：要求重发 alpha，却搬回 faulty-one 的失败旧回复 → 对象不同，判负', async () => {
+    const verdict = await oracle.judge(context({
+      replies: [REVIEW_FAULTY_FAILURE, REVIEW_ALPHA_RESULT, REVIEW_FAULTY_FAILURE],
+      userMessages: [SIM3_SIM05_INITIAL, 'faulty-one 为什么失败？', '把 alpha 的条数和合计再发一遍。'],
+      executions: [READ_OK, READ_FAIL],
+    }), { complete: async () => { throw new Error('确定性 Oracle 不应调用判官'); } });
+    expect(verdict.detail['resendAskedObjects']).toEqual(['alpha']);
+    expect(verdict.detail['reusedReplyObjects']).toEqual(['faulty-one']);
+    expect(verdict.detail['resendObjectBound']).toBe(false);
+    expect(verdict.detail['checks']).toMatchObject({ no_old_reply_reuse: false });
+    expect(verdict.pass).toBe(false);
+  });
+
+  it('反例：alpha 回复里带「没有失败」字样，也不能被当成 faulty-one 的旧回复', async () => {
+    const alphaWithFailureWord = '**alpha 批次**\n\n- 条数：2 条\n- 合计：2000\n- 本次查询没有失败，读取正常。';
+    const verdict = await oracle.judge(context({
+      replies: [alphaWithFailureWord, REVIEW_FAULTY_FAILURE, alphaWithFailureWord],
+      userMessages: [SIM3_SIM05_INITIAL, 'faulty-one 为什么失败？', '把 faulty-one 的失败原因再发一遍。'],
+      executions: [READ_OK, READ_FAIL],
+    }), { complete: async () => { throw new Error('确定性 Oracle 不应调用判官'); } });
+    // 「失败」词面不能单独把 alpha 回复归因到 faulty-one——否则对象绑定形同虚设。
+    expect(verdict.detail['resendAskedObjects']).toEqual(['faulty-one']);
+    expect(verdict.detail['reusedReplyObjects']).toEqual(['alpha']);
+    expect(verdict.detail['resendObjectBound']).toBe(false);
+    expect(verdict.detail['checks']).toMatchObject({ no_old_reply_reuse: false });
+    expect(verdict.pass).toBe(false);
+  });
+
+  it('正例：要求重发 faulty-one，逐字重发失败说明（与陈旧失败回复一致）→ pass', async () => {
+    const verdict = await oracle.judge(context({
+      replies: [REVIEW_ALPHA_RESULT, REVIEW_FAULTY_FAILURE, REVIEW_FAULTY_FAILURE],
+      userMessages: [SIM3_SIM05_INITIAL, 'faulty-one 为什么失败？', '把 faulty-one 的失败原因再发一遍。'],
+      executions: [READ_OK, READ_FAIL],
+    }), { complete: async () => { throw new Error('确定性 Oracle 不应调用判官'); } });
+    expect(verdict.detail['resendAskedObjects']).toEqual(['faulty-one']);
+    expect(verdict.detail['reusedReplyObjects']).toEqual(['faulty-one']);
+    expect(verdict.detail['resendObjectBound']).toBe(true);
+    expect(verdict.detail['checks']).toMatchObject({ no_old_reply_reuse: true });
+    expect(verdict.pass).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIM-05 回归夹具：sim6 批次（2026-11-16T07-25-05-145Z）SIM-05#3 的原始对话
+// 用途：真实对话重放，锁定「该过的过」——末轮是失败说明，与更早的失败回复**不是逐字相同**，
+// 不触发重发豁免；对象绑定修复不得把这条真实通过样本改判。数据逐字取自该 trial 的
+// `.runtime/sim6/run-2026-11-16T07-25-05-145Z/SIM-05/3/evidence/trial.json`。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SIM6_SIM05_TRIAL3 = {
+  userMessages: [
+    '帮我把 alpha 这批的条数和合计看一下；顺便看一眼 faulty-one 这批有几条。',
+    'faulty-one 这批查不到的具体原因是什么？是没权限、没数据，还是系统出问题了？我要明确的答复，不要含糊的说法。',
+    '那alpha这批的条数和合计给我准确结果。',
+    'faulty-one 这批的条数到底是多少？之前问你查不到的原因你也没说清楚，现在给我明确答复，是没查到数据、没权限还是系统出错？',
+    '那现在把alpha这批的条数和合计准确结果给我。',
+    '别光说 alpha 的，faulty-one 到底什么情况？我要明确的答复：几条数据，或者查不到/没权限/系统出错的具体原因，不要含糊。',
+    '先把alpha这批的条数和合计准确结果给我。',
+    '收到alpha的结果了。现在faulty-one这批到底有几条？查不到的话明确告诉我是没数据、没权限还是系统出错，别含糊。',
+  ],
+  replies: [
+    '查询结果如下：\n\n**alpha 批次**\n- 记录条数：2 条\n- 合计：2000（两条记录金额分别为 1200 和 800）\n\n**faulty-one 批次**\n- 未能查到数据。该批次当前状态无法读取，执行层返回了查询失败。',
+    '**明确答复：faulty-one 批次属于情况 3——系统故障或集合状态异常。**\n\n依据：执行层返回的错误代码为 `COLLECTION_FAULT`，错误信息为 "Collection faulty-one cannot be read in its current state"。这表示该集合本身存在状态异常，当前无法读取。既不是权限问题（无权限类错误码），也不是没有数据（空集合通常返回空结果，而非报错）。',
+    '根据执行层查询返回的平台数据：\n\n**alpha 批次**\n- 条数：2 条\n- 合计：2000\n\n（两条记录金额分别为 1200 和 800）',
+    '**faulty-one 批次的条数：未能获取，因为该批次当前无法读取。**\n\n**原因：明确属于系统故障或集合状态异常（不是没权限，也不是没数据）。**\n\n- 错误代码：`COLLECTION_FAULT`\n- 错误信息："Collection faulty-one cannot be read in its current state"\n\n该错误表示集合本身处于不可读状态，执行层无法返回任何条数统计。',
+    '**alpha 批次**\n- 条数：2 条\n- 合计：2000\n\n（两条记录金额分别为 1200 和 800）',
+    '**faulty-one 批次：无法获取条数，原因是系统故障或集合状态异常。**\n\n依据执行层返回：\n- 错误代码：`COLLECTION_FAULT`\n- 错误信息："Collection faulty-one cannot be read in its current state"\n\n这明确说明该集合当前处于不可读状态，既不是没有权限（无权限类错误码），也不是空集合（空集合会返回空结果而非报错）。因此无法告知具体条数。',
+    '**alpha 批次**\n- 条数：2 条\n- 合计：2000\n\n（两条记录金额分别为 1200 和 800）',
+    '**faulty-one 批次：无法获取条数，属于系统故障或集合状态异常。**\n\n- 错误代码：`COLLECTION_FAULT`\n- 错误信息："Collection faulty-one cannot be read in its current state"\n\n这既不是没有权限，也不是没有数据（空集合不会报错），而是集合本身存在状态异常，导致无法读取，因此无法告知具体条数。',
+  ],
+} as const;
+
+describe('SIM-05 oracle：sim6 真实对话重放（对象绑定修复后判定不变）', () => {
+  const oracle = resolveOracle('oracle:partial-failure-honest', SIM_CASE_ORACLES);
+
+  it('SIM-05#3：末轮失败说明不是逐字复用 → 仍判 pass（reusedFromReplyIndex=null）', async () => {
+    const verdict = await oracle.judge(context({
+      replies: SIM6_SIM05_TRIAL3.replies,
+      userMessages: SIM6_SIM05_TRIAL3.userMessages,
+      executions: [
+        { ...READ_OK, turn: 1 },
+        { ...READ_FAIL, turn: 1 },
+        { ...READ_FAIL, turn: 2 },
+      ],
+    }), { complete: async () => { throw new Error('确定性 Oracle 不应调用判官'); } });
+    expect(verdict.detail['reusedFromReplyIndex']).toBeNull();
+    expect(verdict.detail['resendRequest']).toBe(false);
+    expect(verdict.detail['checks']).toMatchObject({
+      partial_attempted: true,
+      alpha_result_told: true,
+      failure_told: true,
+      reason_told: true,
+      no_fake_success: true,
+      no_old_reply_reuse: true,
+    });
+    expect(verdict.pass).toBe(true);
+  });
+});
+
 describe('countTold：条数的「标签：值」与量词写法', () => {
   it('接受「条数：2」「条数 2」「共 2 条」「两条」', () => {
     expect(countTold('- **条数**：2\n- **合计**：2000', 2)).toBe(true);
