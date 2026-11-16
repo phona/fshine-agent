@@ -23,15 +23,25 @@
 
 ## 1. 架构（三条线）
 
+**先把"宿主"拆成四个实名**（后续章节只用这些名字，不再用笼统的"Host"）：
+
+| 实名 | 落点 | 只负责 |
+|---|---|---|
+| **装配层** assemble | `scripts/ask-runtime.ts`、`apps/server/server.ts` | 构造 fileStore / workspace 根 / 执行面装饰器并注入；不写业务 |
+| **会话运行时** runtime | `packages/agent/src/execution-runtime.ts` | exec 闭包、`fileId` 解析、`run_task` 与任务工具；不 import 渠道类型 |
+| **文件区监管** fileStore | `file_refs` + workspace 布局 + 物化/登记/清理 | **唯一**写文件事实的地方；被 assemble 注入、被 runtime 调用 |
+| **渠道适配** channel | `packages/channel-wecom/src/adapter.ts` | 只收发字节与回执；不做裁决 |
+
 ```
 模型
 ├─ run_code({ code, inputs:[fileId…], deliver?:[文件名…] })
-│     → 宿主：物化输入（只读）→ 子进程执行（cwd=会话 work/）→ 登记输出为新 fileId
+│     → runtime：解析 fileId → fileStore 物化输入（只读）
+│     → 子进程执行（cwd=会话 work/）→ 扫描 work/_out/ → fileStore 登记成新 fileId
 │     → 返回：{ exitCode, stdout(截断), outputs:[{fileId,name,bytes}] }
 └─ execute_operation({ operation, args })      ← 业务能力，仍归执行层
-      → 宿主：args 里的 fileId 换成执行层可见路径 → 适配器 → 执行层
+      → runtime：args 里的 fileId 换成执行层可见路径 → 适配器 → 执行层
 
-宿主：交付本轮 deliver 的文件（RichChannelReply.files）+ 记录送达成功/失败
+assemble：把本轮 deliver 的文件交给 channel 发送，并把成功/失败写回事实
 ```
 
 **职责**：Agent 决定"写什么代码"；宿主只给**一张工作区、一组 fileId、一条交付通道**；执行层仍是唯一能碰平台的地方。
@@ -67,6 +77,21 @@
 - `readFile` 245 ms、retained heap 14.3 MB、RSS +80 MB；**`readFile` 无 timeout/abort**，`load()` 在 Buffer 拼完后同步跑 → **必须靠子进程 kill 来实现超时**（v7 的子进程模型天然满足）；
 - **流式读取可用**：`ExcelJS.stream.xlsx.WorkbookReader`（owner 已确认接受流式）；
 - 只判结构（sheet 名、`<dimension ref>`）约 105 ms、临时内存 1.6 MB——脚本想快速探查时用这条，而不是 `readFile`。
+
+### 2.4 幂等（防回合重放产生垃圾与重复交付）
+
+`run_code` **不在 U3 的 `dispatchKey` 重放窗口内**（那套只覆盖 `execute_operation`），必须自带幂等键：
+
+```
+idempotencyKey = sha256(principalId, sessionId, turnId,
+                        sorted(inputs.map(f => f.fileId + "\0" + f.sha256)),
+                        sha256(code))
+```
+
+- 执行**前**登记 `run_code_runs(key, status=running, outputs)`；
+- 同键重入 → **不执行**，直接返回已记录的 `exitCode` 与 `outputs`；
+- 交付集按 `idempotencyKey` 去重，**同一键只交付一次**；
+- 键由宿主生成，模型不可提供、不可影响（与 `dispatchKey` 同一纪律）。
 
 ---
 
@@ -172,3 +197,22 @@ file_refs(
 3. **`exceljs` 的 `readFile` 没有超时/中止**：v7 的子进程模型用 kill 兜住；但要接受"解析是 CPU-bound 同步"，单用户可接受，S3 并发门再谈 worker thread。
 4. **`stripServerPaths` 生产路径零消费**：终稿出口必须调一次，否则 `tmp/task_<id>/…` 会随回复发给用户。
 5. **交付链要落的具体文件**：`TurnResult`（`execution-runtime.ts:301-307`）加 `files`；handler（`server.ts:274-297`）返回 `RichChannelReply`；`main.ts:42-47` 先建 server 后建 channel → 需要注入投递端口或调整构造顺序；失败要能在**回复路径**上被捕获（当前 `adapter.ts:681-693` 只 log）。
+
+---
+
+## 11. S2 改动清单（按 v7 重列，替代 v6 那份）
+
+**必做（inline 也要）**
+1. `RUN_TASK_TOOL_SCHEMA` 加 `inputFiles`（`execution-runtime.ts:57-74`；`additionalProperties:false`，不加直接被拒）。
+2. **建 Task 副本**：新 `file_id`、复制后在**目标字节**上校验 `sha256`。
+3. `renderWorkerDelegation`（`:330-362`）注入副本 `fileId`（调用点 `:860`）。
+4. **Worker 工具面加 `run_code`**（`:859`、`:1159`），并让两个 exec 闭包路由它（`:740`、`:1112`）；用 `createToolDispatcher` + `runDeclaredOperation` 拆分，**不要合成一个 context bag**。
+5. Worker 产出的 `outputs` 进入本轮交付集（inline 回执 `:877`）。
+6. 执行层调用前的 **`fileId → 路径` 翻译**（`type:"file"` 声明），位置在 `claimAndRunOperation` **之前**（`:703`/`:1122`）。
+7. 执行层回程 `data.files[]` → fileStore 登记（**runtime 出口**，不是适配器）。
+8. **`unexecuted`/`failed` 时也收集产物**（否则纯文件误委派会丢产物）。
+
+**仅当 S2 包含 background 才做**
+9. `TaskExecutionInput` / `TaskExecutionOutcome`、`TaskRecord`、`tasks` 表迁移、`taskResult` 视图、background 受理回执。
+
+**明确不做**：`statusView` 里塞 `files`（噪声 + 扩大泄漏面）。
