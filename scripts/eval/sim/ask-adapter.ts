@@ -18,6 +18,10 @@ import path from 'node:path';
 import { assembleAskRuntime } from '../../ask-runtime';
 import type { DriverMessage } from '../../../packages/agent/src/driver-contract';
 import type { SimSystemCall, SimSystemTurn, SimSystemUnderTest } from './run';
+import {
+  discoverSkillCatalog, skillReadsFromTranscript, unavailableSkillDiscovery,
+  type SimSkillDiscovery, type SimSkillRead,
+} from './skill-telemetry';
 
 export interface AskRuntimeSystemInput {
   /** 该 trial 独立运行目录（sessionDir 的上层；state.db 也落这里）。 */
@@ -27,6 +31,11 @@ export interface AskRuntimeSystemInput {
   readonly env: NodeJS.ProcessEnv;
   /** 透传给装配的 argv（只读其中的 --config=）。 */
   readonly argv?: readonly string[];
+  /**
+   * Main 技能目录（装配参数，非配置键）：同时用于装配与只读发现遥测。
+   * 缺省 = 不传，装配走 `<repo>/.agents/skills` 默认发现；遥测记 available=false（不猜）。
+   */
+  readonly mainSkillsDir?: string;
 }
 
 export interface AskRuntimeSystem extends SimSystemUnderTest {
@@ -76,19 +85,40 @@ export async function createAskRuntimeSystem(input: AskRuntimeSystemInput): Prom
     sessionId: input.sessionId,
     ...(input.principalId === undefined ? {} : { principalId: input.principalId }),
     dbPath: path.join(input.runtimeDir, 'state.db'),
+    ...(input.mainSkillsDir === undefined ? {} : { mainSkillsDir: input.mainSkillsDir }),
   });
+  /** 技能发现读数（只读；未给装配参数 = 不暴露，记 available=false）。 */
+  const skillProbe = input.mainSkillsDir === undefined
+    ? undefined
+    : await discoverSkillCatalog({ mainSkillsDir: input.mainSkillsDir });
+  const filesByName = skillProbe?.filesByName;
+  const absoluteRoots = skillProbe?.absoluteRoots ?? [];
+  /** 已上报过的 skill 读取（toolCallId 去重；转录重投影/压缩丢弃旧消息也不重报）。 */
+  const reportedSkillReads = new Set<string>();
   /** 已上报过的 assistant 调用键（转录重投影是只读的；压缩丢弃旧消息也不重报）。 */
   const seen = new Set<string>();
   let observable = false;
   return {
     async send(text): Promise<SimSystemTurn> {
       const turn = await runtime.session.send(text);
+      const transcript = runtime.session.transcript();
       const fresh: SimSystemCall[] = [];
-      for (const usage of assistantUsages(runtime.session.transcript())) {
+      for (const usage of assistantUsages(transcript)) {
         observable = true;
         if (seen.has(usage.key)) continue;
         seen.add(usage.key);
         fresh.push({ kind: 'main', tokens: usage.tokens, tokensObserved: true });
+      }
+      // 技能读取遥测：从同一份只读转录派生，按 toolCallId 去重（轮次由用户消息序号机械标注）。
+      const freshSkillReads: SimSkillRead[] = [];
+      for (const read of await skillReadsFromTranscript({
+        messages: transcript,
+        ...(filesByName === undefined ? {} : { filesByName }),
+        absoluteRoots,
+      })) {
+        if (reportedSkillReads.has(read.toolCallId)) continue;
+        reportedSkillReads.add(read.toolCallId);
+        freshSkillReads.push(read);
       }
       // 一次 usage 都没拿到 → undefined（run.ts 据此标注系统面记账不可得，不补零）。
       const calls: SimSystemCall[] | undefined = observable ? fresh : undefined;
@@ -107,7 +137,11 @@ export async function createAskRuntimeSystem(input: AskRuntimeSystemInput): Prom
         injectionApplied: false,
         injectionReason: 'ask 装配未暴露注入接缝',
         ...(calls === undefined ? {} : { calls }),
+        ...(freshSkillReads.length === 0 ? {} : { skillReads: freshSkillReads }),
       };
+    },
+    skillDiscovery(): SimSkillDiscovery {
+      return skillProbe?.discovery ?? unavailableSkillDiscovery('未提供 mainSkillsDir 装配参数（该面不暴露 catalog）');
     },
     close() {
       runtime.close();
