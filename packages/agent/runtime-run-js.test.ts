@@ -300,7 +300,7 @@ describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', (
     }
   });
 
-  it('⑥ 清单注入：机械事实只有 fileId/name/bytes（没有行数据/路径/sha256）；字节数随 TurnResult 带出', async () => {
+  it('⑥ 清单注入：每行 name/fileId/bytes + 脚本内路径（没有行数据/宿主路径/sha256）；字节数随 TurnResult 带出', async () => {
     const providerCalls: Array<[string, string]> = [];
     const fx = await makeFixture({
       fileManifestProvider: (principalId, sessionId) => {
@@ -315,7 +315,8 @@ describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', (
       const first = await fx.session.send('处理这份明细');
       expect(providerCalls[0]).toEqual([SCOPE.principalId, SCOPE.sessionId]);
 
-      // 注入面：清单消息只有三字段；不含 sha256 / 路径 / 其它机械行键。
+      // 注入面：清单每行 name/fileId/bytes + 脚本内路径（in/<fileId><安全扩展名>，修复轮 ⑤）；
+      // 不含 sha256 / 宿主路径（斜杠只允许出现在机械派生的 in/ 前缀里）。
       expect(fx.capture.injections[0]).toHaveLength(1);
       const manifest = fx.capture.injections[0]![0]!;
       expect(manifest).toContain('file_abc123def456');
@@ -323,9 +324,10 @@ describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', (
       expect(manifest).toContain('20480');
       const lines = manifest.split('\n');
       expect(lines[0]).toContain('[本会话文件清单]');
-      expect(lines[1]).toMatch(/^- 明细\.xlsx（fileId: file_abc123def456，20480 字节）$/);
+      expect(lines[1]).toMatch(/^- 明细\.xlsx（fileId: file_abc123def456，20480 字节；脚本内路径：in\/file_abc123def456\.xlsx）$/);
       expect(manifest).not.toContain('sha256');
-      expect(manifest).not.toContain('/');
+      // 宿主路径边界：清单里唯一的斜杠是脚本内路径的 in/ 前缀，无任何宿主绝对/相对路径。
+      expect(manifest.replaceAll('脚本内路径：in/', '')).not.toContain('/');
       // 观察项：清单字节数随 TurnResult 带出（= 注入文本的 UTF-8 字节数）。
       expect(first.fileManifestBytes).toBe(Buffer.byteLength(manifest, 'utf8'));
 

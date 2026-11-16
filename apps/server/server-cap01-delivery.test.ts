@@ -328,15 +328,16 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
       expect(capture.injections[0]).toEqual([]);
       expect(capture.toolNames[0]).toContain('run_js');
 
-      // 第二回合：清单 = 本会话已激活文件，字段只有 fileId/name/bytes。
+      // 第二回合：清单 = 本会话已激活文件，每行 name/fileId/bytes + 脚本内路径（修复轮 ⑤）。
       expect(capture.injections[1]).toHaveLength(1);
       const manifest = capture.injections[1]![0]!;
       const lines = manifest.split('\n');
       expect(lines[0]).toContain('[本会话文件清单]');
-      expect(lines[1]).toMatch(/^- 汇总\.txt（fileId: file_[0-9a-f]{32}，13 字节）$/);
+      expect(lines[1]).toMatch(/^- 汇总\.txt（fileId: file_[0-9a-f]{32}，13 字节；脚本内路径：in\/file_[0-9a-f]{32}\.txt）$/);
       expect(manifest).not.toContain('summary-bytes'); // 没有文件内容（行数据不进清单）
       expect(manifest).not.toContain('sha256');
-      expect(manifest).not.toContain('/');
+      // 宿主路径边界：清单里唯一的斜杠是脚本内路径的 in/ 前缀，无任何宿主绝对/相对路径。
+      expect(manifest.replaceAll('脚本内路径：in/', '')).not.toContain('/');
       const done = logs.filter((line) => line['event'] === 'message_done').at(-1);
       const injected = capture.injections[1]![0]!;
       expect(done?.['fileManifestBytes']).toBe(Buffer.byteLength(injected, 'utf8'));

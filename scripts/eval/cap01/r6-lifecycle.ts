@@ -339,7 +339,7 @@ function registeredFileIdsOf(logs: ReadonlyArray<Record<string, unknown>>, princ
   return fileIds;
 }
 
-/** 渲染清单的行解析（renderFileManifest 的行形状：- <name>（fileId: <id>，<n> 字节））。 */
+/** 渲染清单的行解析（renderFileManifest 的行形状：- <name>（fileId: <id>，<n> 字节[；脚本内路径：in/…]）——脚本内路径段（CAP-01 修复轮 ⑤）可选，两代行形状都收）。 */
 interface ManifestEntry {
   name: string;
   fileId: string;
@@ -348,7 +348,7 @@ interface ManifestEntry {
 
 function manifestEntriesOf(injections: readonly string[]): ManifestEntry[] {
   const entries: ManifestEntry[] = [];
-  const linePattern = /^- (.+?)（fileId: (file_[0-9a-f]{32})，(\d+) 字节）$/gm;
+  const linePattern = /^- (.+?)（fileId: (file_[0-9a-f]{32})，(\d+) 字节(?:；脚本内路径：in\/[^）]+)?）$/gm;
   for (const text of injections) {
     for (const match of text.matchAll(linePattern)) {
       entries.push({ name: match[1]!, fileId: match[2]!, bytes: Number(match[3]) });

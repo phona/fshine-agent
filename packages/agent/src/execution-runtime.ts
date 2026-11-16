@@ -49,7 +49,7 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, RuntimeTurnEvent, TurnDriver, TurnDriverResult } from './driver-contract';
 import { ToolUserError } from './driver-contract';
-import { FileRefUnavailableError, type CopiedTaskInput, type TaskInputCopier } from './file-store';
+import { FileRefUnavailableError, safeExtensionOf, type CopiedTaskInput, type TaskInputCopier } from './file-store';
 export type { TaskInputCopier } from './file-store';
 import type { RunJsExecutor, RunJsOutput } from './run-js-executor';
 // 执行层文件桥（CAP-01 S2 ②③④）：装配层构造注入；runtime 只认端口形状（type-only），
@@ -197,7 +197,13 @@ export const RUN_JS_TOOL_DESCRIPTION =
   + '超时与资源上限由宿主决定，只能通过把请求调小来适配。'
   // CAP-01 修复轮（R2-S1，接口事实声明）：声明沙箱的模块面——模型此前首调 require("xlsx")
   // （未安装）失败后转去 run_task 兜底建 Task。只声明能力边界，不写业务流程话术。
-  + '可用模块只有 exceljs（require("exceljs")，读写 xlsx）；没有 xlsx/xlsx-style/csv-parse 等包。';
+  + '可用模块只有 exceljs（require("exceljs")，读写 xlsx）；没有 xlsx/xlsx-style/csv-parse 等包。'
+  // CAP-01 修复轮（⑤，接口事实声明）：声明输入文件在脚本内的路径约定——清单每条已给出
+  // 「脚本内路径」（in/<fileId><安全扩展名>，与宿主物化的 materializedName 同一公式）；
+  // 模型此前先写 in/<fileId>（无扩展名）失败一次才改对。路径只由 fileId + 安全扩展名派生，
+  // 不由原始文件名拼出（机械事实，不是业务流程话术）。
+  + '输入文件在脚本内的路径固定为 in/<fileId><安全扩展名>（文件清单每条已给出「脚本内路径」，按它读取）；'
+  + '路径只由 fileId 和安全扩展名派生，不由原始文件名拼出。';
 export const RUN_JS_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
@@ -367,7 +373,8 @@ export interface RuntimeOptions {
   /**
    * CAP-01 S1 清单注入（机械事实，与 taskFactProvider 同机制）：装配层提供本会话已激活
    * （activated_at IS NOT NULL，TTL 内）文件清单——字段只有 fileId/name/bytes（渲染见
-   * renderFileManifest，清单不含内容/路径/sha256）。每回合开始时调用一次；非空时以普通
+   * renderFileManifest，清单不含内容/宿主路径/sha256；脚本内路径由渲染侧按 fileId 派生）。
+   * 每回合开始时调用一次；非空时以普通
    * user-role 消息注入主对话。
    */
   fileManifestProvider?: (principalId: string, sessionId: string) => readonly TurnFileRef[];
@@ -420,13 +427,26 @@ export interface TurnFileRef {
 export const FILES_GENERATED_NOTICE = '文件已生成（见附件）';
 
 /**
- * 文件清单注入文本（CAP-01 S1，机械事实渲染）：每行只有 fileId/name/bytes 三字段——
- * **清单没有行数据**（不含文件内容、不含路径、不含 sha256）是清单注入的硬边界（v8 §8 S1）。
+ * 清单行渲染（CAP-01 修复轮 ⑤，机械事实）：name/fileId/bytes 之外，每条给出**脚本内路径**
+ * ——与 file-store 物化输入的 materializedName 同一公式（in/<fileId><安全扩展名>，见
+ * file-store materializeInputs），只由 fileId + 安全扩展名派生，**不由原始文件名拼路径**。
+ * 显示名做机械净化：name 里的路径分隔符与 `..` 序列不进清单文本（name 只用于识别文件；
+ * 路径注入面在结构上封死——净化只影响显示，不碰 file_refs 原值）。
+ */
+function manifestLineOf(file: TurnFileRef): string {
+  const displayName = file.name.replaceAll(/(\.\.[/\\]?|[/\\])/g, '_');
+  return `- ${displayName}（fileId: ${file.fileId}，${file.bytes} 字节；脚本内路径：in/${file.fileId}${safeExtensionOf(file.name)}）`;
+}
+
+/**
+ * 文件清单注入文本（CAP-01 S1，机械事实渲染）：每行 name/fileId/bytes + 脚本内路径
+ * （in/<fileId><安全扩展名>，CAP-01 修复轮 ⑤）——**清单没有行数据**（不含文件内容、
+ * 不含宿主路径、不含 sha256）仍是清单注入的硬边界（v8 §8 S1）。
  */
 export function renderFileManifest(files: readonly TurnFileRef[]): string {
   return [
     '[本会话文件清单]（机械事实：以下文件已激活可用；处理文件时用 run_js 的 inputs 按 fileId 引用）',
-    ...files.map((file) => `- ${file.name}（fileId: ${file.fileId}，${file.bytes} 字节）`),
+    ...files.map((file) => manifestLineOf(file)),
   ].join('\n');
 }
 
@@ -466,15 +486,16 @@ function userMessage(text: string): DriverMessage {
 }
 
 /**
- * Worker 任务文件清单注入文本（CAP-01 S2 ①，机械事实渲染）：每行只有 fileId/name/bytes
- * 三字段——**清单没有行数据**（不含文件内容、不含路径、不含 sha256，与 Main 清单同一硬
+ * Worker 任务文件清单注入文本（CAP-01 S2 ①，机械事实渲染）：每行 name/fileId/bytes +
+ * 脚本内路径（in/<fileId><安全扩展名>，CAP-01 修复轮 ⑤，与 Main 清单同一公式）——
+ * **清单没有行数据**（不含文件内容、不含宿主路径、不含 sha256，与 Main 清单同一硬
  * 边界，v8 §8）。Worker 只解析当前任务的绑定行（v8 §4），清单给出的是交办副本/任务文件
  * 面的引用面——Main 的源 fileId 不进 Worker 转录。
  */
 export function renderWorkerFileManifest(files: readonly TurnFileRef[]): string {
   return [
     '[本任务文件清单]（机械事实：以下文件已随任务交付；处理文件时用 run_js 的 inputs 按 fileId 引用）',
-    ...files.map((file) => `- ${file.name}（fileId: ${file.fileId}，${file.bytes} 字节）`),
+    ...files.map((file) => manifestLineOf(file)),
   ].join('\n');
 }
 

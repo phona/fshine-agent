@@ -148,6 +148,22 @@ describe('run_js 描述：模块面接口事实（R2-S1）', () => {
   });
 });
 
+describe('run_js 描述：脚本内路径约定（修复轮 ⑤）', () => {
+  it('静态常量：声明 in/<fileId><安全扩展名> 与「脚本内路径」字段，路径不由原始文件名拼出', () => {
+    // 与清单渲染的「脚本内路径」字段同一条约定（file-manifest-script-paths.test.ts 钉渲染面）。
+    expect(RUN_JS_TOOL_DESCRIPTION).toContain('脚本内路径');
+    expect(RUN_JS_TOOL_DESCRIPTION).toContain('in/<fileId><安全扩展名>');
+    expect(RUN_JS_TOOL_DESCRIPTION).toContain('路径只由 fileId 和安全扩展名派生');
+    expect(RUN_JS_TOOL_DESCRIPTION).toContain('不由原始文件名拼出');
+  });
+
+  it('负例：不含业务流程话术', () => {
+    for (const phrase of BUSINESS_FLOW_NEGATIVES) {
+      expect(RUN_JS_TOOL_DESCRIPTION).not.toContain(phrase);
+    }
+  });
+});
+
 describe('run_task 描述：inputFiles 接口事实（R2-S2）', () => {
   it('注入复制面时：描述写清「把要处理的本会话 fileId 放进 inputFiles；不带则 Worker 拿不到任何文件」', async () => {
     expect(RUN_TASK_TOOL_DESCRIPTION_WITH_INPUT_FILES).toContain('inputFiles');
