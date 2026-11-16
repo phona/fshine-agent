@@ -13,6 +13,10 @@
  *      附：正文空且无文件仍按既有「回合失败」处理（分支两侧都钉住）；
  *   ⑥ server 级清单注入：下一回合的机械事实只有 fileId/name/bytes（无文件内容/sha256），
  *      message_done 记 fileManifestBytes 观察项。
+ *
+ * CAP-01 修复轮（R7-F3）：①b 投递成功后事件写失败 → 结果不得被日志写失败改写——回合
+ * 结果仍是 sent、用户话术无「未送达」、不产生「请重试」诱导；失败的写只降级成一条独立
+ * 观测事件（不触达用户）。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -145,6 +149,11 @@ interface Fixture {
 async function makeFixture(input: {
   steps: readonly DriverStep[];
   port?: FileDeliveryPort;
+  /**
+   * 事件写失败注入（R7-F3）：谓词命中的日志写抛错（模拟事件存储不可写），其余照常记录。
+   * 抛错先于记录（存储挂了就什么都不落），未命中行进 logs 供断言。
+   */
+  throwsOnLog?: (line: Record<string, unknown>) => boolean;
 }): Promise<Fixture> {
   const dir = tempDir();
   const logs: Array<Record<string, unknown>> = [];
@@ -160,7 +169,10 @@ async function makeFixture(input: {
       readOnlyOperations: ['dummy.query'],
     }),
     ...(input.port === undefined ? {} : { fileDelivery: input.port }),
-    logger: (line) => logs.push(line),
+    logger: (line) => {
+      if (input.throwsOnLog?.(line) === true) throw new Error('（测试注入）事件写失败：存储不可写');
+      logs.push(line);
+    },
   });
   return { server, logs, capture };
 }
@@ -187,6 +199,34 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
       const done = logs.find((line) => line['event'] === 'message_done');
       expect(done?.['fileDelivery']).toEqual({ status: 'delivery_failed', files: 1 });
       expect(calls).toHaveLength(1); // live 确实发起了投递
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('①b 投递成功后事件写失败（R7-F3）→ 结果仍是 sent、话术无「未送达」、不诱导重试', async () => {
+    const { port, calls } = livePort();
+    const { server, logs } = await makeFixture({
+      steps: [{ execCalls: [RUN_JS_CALL], text: '汇总完成。' }],
+      port,
+      // R7-F3 故障注入：file_delivery 的 sent 事件写抛错（事件存储不可写），其余事件照常记录。
+      throwsOnLog: (line) => line['event'] === 'file_delivery' && line['status'] === 'sent',
+    });
+    try {
+      const reply = await server.handler(incoming('m-logfail', '帮我汇总'));
+      // 用户话术：投递已成功，日志写失败不得改写结果——无「未送达」、无「请重试」诱导。
+      expect(reply).toContain('汇总完成。');
+      expect(reply).not.toContain('未送达');
+      expect(reply).not.toContain('请重试');
+      // 事实面：回合结果仍记 sent；端口确实收到字节（只投一次，无重复交付）。
+      const done = logs.find((line) => line['event'] === 'message_done');
+      expect(done?.['fileDelivery']).toEqual({ status: 'sent', files: 1 });
+      expect(calls).toHaveLength(1);
+      // 失败的写只降级为一条独立观测事件（status 仍 sent），不产生任何 delivery_failed 事实。
+      const observed = logs.filter((line) => line['event'] === 'file_delivery_log_write_failed');
+      expect(observed).toHaveLength(1);
+      expect(observed[0]!['status']).toBe('sent');
+      expect(logs.some((line) => line['status'] === 'delivery_failed')).toBe(false);
     } finally {
       await server.close();
     }

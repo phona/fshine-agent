@@ -346,6 +346,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
    *   · live 投递失败 → 结构化事件（含已送达份数，来自 receipt.parts）+ 用户话术，绝不记 sent；
    *   · live 成功 → 事件记 sent（唯一允许 sent 的分支）。
    * handler 仍只返回 text（四必守 #1）：文件字节经端口单独发出，不进回执文本。
+   *
+   * R7-F3：投递结果一旦成功就**不得被日志写失败改写**——sent 事件写在投递 try 之外自成
+   * 一段；写失败只降级成一条独立的观测事件（file_delivery_log_write_failed，status 仍
+   * sent），绝不改道进投递失败分支、绝不让用户话术出现「未送达/请重试」（否则用户重试
+   * 同一产物 → file_refs 两行）。
    */
   const deliverTurnFiles = async (input: {
     files: readonly TurnFileRef[];
@@ -373,13 +378,12 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       data: readFileSync(fileStoragePathOf(workspaceRoot, input.scope, file.fileId, file.name)),
       filename: file.name,
     }));
+    let receipt: DeliveryReceipt;
     try {
-      const receipt = await deps.fileDelivery.sendToConversation(
+      receipt = await deps.fileDelivery.sendToConversation(
         { channel: input.channel, conversationId: input.conversationId },
         outgoing,
       );
-      log({ event: 'file_delivery', ...base, status: 'sent', parts: receipt.parts.length });
-      return { status: 'sent' };
     } catch (error) {
       // 投递失败事实（v8 §7）：结构化事件 + 用户话术；receipt.parts 里先到的 ACK 只作
       // 「已送达份数」照实记录，不把整批记成 sent。
@@ -394,6 +398,24 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       });
       return { status: 'delivery_failed', note: FILE_DELIVERY_FAILED_NOTE };
     }
+    // 走到这里 = 投递已成功，结果不再有任何改写路径（R7-F3）：日志写失败只降级为独立
+    // 观测事件；观测事件也写不进（logger 持续抛错）时同样到此为止——除吞掉外别无动作，
+    // 用户话术与回合结果已按「sent」定型。
+    try {
+      log({ event: 'file_delivery', ...base, status: 'sent', parts: receipt.parts.length });
+    } catch (logError) {
+      try {
+        log({
+          event: 'file_delivery_log_write_failed',
+          ...base,
+          status: 'sent',
+          message: logError instanceof Error ? logError.message : String(logError),
+        });
+      } catch {
+        // 观测事件写也失败：无第二观测面可用；投递结果已成立，不翻转、不重投、不触达用户。
+      }
+    }
+    return { status: 'sent' };
   };
 
   const handler: ReplyHandler = async (message) => {

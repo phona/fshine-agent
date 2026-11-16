@@ -111,7 +111,12 @@ interface RunRecord {
 interface CallRecord {
   agent: 'main' | 'worker';
   tool: string;
-  args: Record<string, unknown>;
+  /**
+   * 记录面类型（只修类型，断言不变）：通用键值之外显式声明 `inputs`——s6 断言按
+   * `args['inputs']?.[0]` 索引 fileId，通用 `Record<string, unknown>` 下索引到 unknown
+   * 会报 TS7053（索引 {}）。
+   */
+  args: Record<string, unknown> & { inputs?: readonly string[] };
   isError: boolean;
   result?: unknown;
   errorMessage?: string;
@@ -183,13 +188,13 @@ function scriptedMainDriver(behavior: MainBehavior, sink: Sink): TurnDriver {
         exec: async (tool, args, signal) => {
           try {
             const value = await input.exec(tool, args, signal);
-            sink.calls.push({ agent: 'main', tool, args: safeClone(args) as Record<string, unknown>, isError: false, result: safeClone(value) });
+            sink.calls.push({ agent: 'main', tool, args: safeClone(args) as CallRecord['args'], isError: false, result: safeClone(value) });
             return value;
           } catch (error) {
             sink.calls.push({
               agent: 'main',
               tool,
-              args: safeClone(args) as Record<string, unknown>,
+              args: safeClone(args) as CallRecord['args'],
               isError: true,
               errorMessage: error instanceof Error ? error.message : String(error),
             });

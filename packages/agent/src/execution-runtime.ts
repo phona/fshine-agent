@@ -71,6 +71,15 @@ export const RUN_TASK_TOOL = 'run_task';
 export const RUN_TASK_TOOL_DESCRIPTION =
   '把一项平台任务交给执行层 Worker 执行：在 task 里写清要办什么（对象、范围、口径）。'
   + '返回 Worker 的事实汇报与结构化的执行结果。涉及平台数据的请求一律经它办理。';
+/**
+ * CAP-01 修复轮（R2-S2，接口事实声明）：注入交办复制面时 run_task 的工具描述——
+ * 写清 inputFiles 参数的用法与不带的后果（交办复制零发生 → Worker 无文件 → 任务
+ * unexecuted）。只在 `withInputFiles` 的工具面使用；缺省装配（未注入复制面）仍用
+ * `RUN_TASK_TOOL_DESCRIPTION` 逐字节不变。只声明参数事实，不写业务流程话术。
+ */
+export const RUN_TASK_TOOL_DESCRIPTION_WITH_INPUT_FILES =
+  RUN_TASK_TOOL_DESCRIPTION
+  + '要处理的本会话文件，把文件清单里的 fileId 放进 inputFiles；不带 inputFiles 则 Worker 拿不到任何文件。';
 const RUN_TASK_TASK_PROPERTY = {
   type: 'string',
   description: '要交给执行层 Worker 的任务：写清对象、范围与要回答的问题；用自然语言，不要写命令。',
@@ -185,7 +194,10 @@ export const RUN_JS_TOOL = 'run_js';
 export const RUN_JS_TOOL_DESCRIPTION =
   '运行一段受限的 CommonJS 脚本处理文件：输入文件用文件清单里的 fileId 引用（宿主物化到本次运行目录的 in/，按返回的 materializedName 读取），'
   + '要交付的产物写到 out/ 目录（宿主登记后在本回合末作为附件发出），中间文件写 scratch/。'
-  + '超时与资源上限由宿主决定，只能通过把请求调小来适配。';
+  + '超时与资源上限由宿主决定，只能通过把请求调小来适配。'
+  // CAP-01 修复轮（R2-S1，接口事实声明）：声明沙箱的模块面——模型此前首调 require("xlsx")
+  // （未安装）失败后转去 run_task 兜底建 Task。只声明能力边界，不写业务流程话术。
+  + '可用模块只有 exceljs（require("exceljs")，读写 xlsx）；没有 xlsx/xlsx-style/csv-parse 等包。';
 export const RUN_JS_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
@@ -1437,7 +1449,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
 function runTaskTool(withInputFiles: boolean): DiscoveredTool {
   return {
     name: RUN_TASK_TOOL,
-    description: RUN_TASK_TOOL_DESCRIPTION,
+    // CAP-01 修复轮（R2-S2）：描述与 schema 同步——inputFiles 上工具面时，描述才声明
+    // inputFiles 的用法与后果；缺省面仍用原描述（逐字节不变，也不宣传不存在的参数）。
+    description: withInputFiles ? RUN_TASK_TOOL_DESCRIPTION_WITH_INPUT_FILES : RUN_TASK_TOOL_DESCRIPTION,
     inputSchema: withInputFiles ? RUN_TASK_TOOL_SCHEMA_WITH_INPUT_FILES : RUN_TASK_TOOL_SCHEMA,
   };
 }
