@@ -17,6 +17,16 @@
  *
  * 另覆盖输入面：pending / 越权 / 不存在 → 同码 FILE_REF_UNAVAILABLE，且不起子进程。
  *
+ * S1 测试补齐（2026-11-17，缺口来自对 S0 测试面的重读）：
+ *   · 审计字段齐全：runId 形状 / runDir 落点 / scriptSha256 / 输入输出 fileId / exitCode /
+ *     exitSignal / durationMs / 自然退出 killReason 缺席 / audit.outputs 与返回面同形；
+ *   · 产物登记哈希三方一致：同一 fd 流出的字节（跨 64KiB 流式块）= 登记 sha256 =
+ *     存储副本 = out/ 原件（S0 ①只锁了产物内容字符串，没锁哈希）；
+ *   · in/ 物化字节与登记 sha256 一致（执行器路径；入站源侧已由 file-store-inbound ① 锁）；
+ *   · 非零退出不吞输出：stdout/stderr 原样带回，out/ 产物照常登记（S0 ②只锁了 stderr 码）；
+ *   · registerOutputsFromOut 的 out/ 目录不存在分支：outputs/skipped 皆空数组，不报错
+ *     （执行器路径总会预建 out/，该分支只露在文件区层直调时）。
+ *
  * 目录用临时 workspace（mkdtemp）；node_modules 用真实仓内目录（require('exceljs') 的
  * 授权读根）；不触网、不碰真实平台。
  */
@@ -392,5 +402,121 @@ describe('run_js 执行器（CAP-01 S0）', () => {
     for (const run of sessionRuns) {
       expect(existsSync(path.join(runsDir, run, 'run.cjs'))).toBe(false);
     }
+  });
+
+  it('审计面：字段齐全且值机械正确（runId/runDir/scriptSha256/输入输出 fileId/exitCode/耗时）', async () => {
+    const { workspaceRoot, store, fileStore, executor } = makeFixture();
+    const input = fileStore.putFile({
+      scope: SCOPE,
+      name: '输入.txt',
+      bytes: Buffer.from('审计输入', 'utf8'),
+      activatedAt: Date.now(),
+    });
+    const code = "require('node:fs').writeFileSync('out/结果.txt', '审计产物');";
+    const before = Date.now();
+    const result = await executor.runJs({ code, inputs: [input.fileId], scope: SCOPE });
+    const after = Date.now();
+
+    expect(result.audit.runId).toMatch(/^run_[0-9a-f]{32}$/);
+    expect(result.audit.runDir).toBe(runDirOf(workspaceRoot, SCOPE, result.audit.runId));
+    // 脚本哈希 = 实际写盘执行的 run.cjs 字节（不是别的规范化形态）。
+    expect(result.audit.scriptSha256).toBe(createHash('sha256').update(Buffer.from(code, 'utf8')).digest('hex'));
+    expect(result.audit.inputFileIds).toEqual([input.fileId]);
+    expect(result.audit.materializedInputs).toEqual([
+      { fileId: input.fileId, name: '输入.txt', materializedName: `${input.fileId}.txt` },
+    ]);
+    expect(result.audit.exitCode).toBe(0);
+    expect(result.audit.exitSignal).toBeNull(); // 自然退出：非信号终止
+    // audit.outputs 与返回面同形：产物 fileId/name/bytes 齐全。
+    expect(result.audit.outputs).toEqual(result.outputs);
+    expect(result.audit.outputs).toEqual([
+      { fileId: result.outputs[0]!.fileId, name: '结果.txt', bytes: Buffer.byteLength('审计产物', 'utf8') },
+    ]);
+    expect(result.audit.skippedOutputs).toEqual([]);
+    expect(result.audit.killReason).toBeUndefined(); // 自然退出：kill 原因缺席（不是 null）
+    expect(result.audit.durationMs).toBeGreaterThanOrEqual(0);
+    expect(result.audit.durationMs).toBeLessThanOrEqual(after - before);
+    store.close();
+  });
+
+  it('产物登记哈希三方一致：同一 fd 流出的字节 = 登记 sha256 = 存储副本 = out/ 原件（跨流式块）', async () => {
+    const { workspaceRoot, store, executor } = makeFixture();
+    // 280KB（远超 64KiB 登记流式块）：分多次 writeSync 写出——登记侧必须逐块哈希同一 fd，
+    // 任何丢块/换源读在这里红。
+    const unit = 'fshine-产物-'; // utf8 下 14 字节
+    const code = [
+      `const fs = require('node:fs');`,
+      `const fd = fs.openSync('out/payload.bin', 'w');`,
+      `for (let i = 0; i < 400; i++) fs.writeSync(fd, ${JSON.stringify(unit)}.repeat(50));`,
+      `fs.closeSync(fd);`,
+    ].join('\n');
+    const result = await executor.runJs({ code, scope: SCOPE });
+    expect(result.exitCode).toBe(0);
+    expect(result.outputs).toHaveLength(1);
+
+    const expected = Buffer.from(unit.repeat(20_000), 'utf8'); // 400×50 段 = 280_000 字节
+    const row = store.getFileRef(result.outputs[0]!.fileId, SCOPE)!;
+    const outOriginal = readFileSync(path.join(result.audit.runDir, 'out', 'payload.bin'));
+    const storedCopy = readFileSync(fileStoragePathOf(workspaceRoot, SCOPE, row.fileId, 'payload.bin'));
+    const recomputed = createHash('sha256').update(expected).digest('hex');
+    expect(outOriginal).toEqual(expected); // out/ 原件字节完整
+    expect(row.bytes).toBe(expected.length);
+    expect(row.sha256).toBe(recomputed); // 登记哈希 = 独立重算（同 fd 字节没丢块）
+    expect(createHash('sha256').update(storedCopy).digest('hex')).toBe(recomputed); // 存储副本 = 登记哈希
+    store.close();
+  });
+
+  it('in/ 物化字节与登记 sha256 一致：物化名 = fileId + 安全扩展名，审计面照实记录', async () => {
+    const { store, fileStore, executor } = makeFixture();
+    const bytes = Buffer.from('输入物化校验字节', 'utf8');
+    const input = fileStore.putFile({ scope: SCOPE, name: '输入.xlsx', bytes, activatedAt: Date.now() });
+    const result = await executor.runJs({ code: "console.log('ok');", inputs: [input.fileId], scope: SCOPE });
+    expect(result.exitCode).toBe(0);
+
+    const row = store.getFileRef(input.fileId, SCOPE)!;
+    const materialized = readFileSync(path.join(result.audit.runDir, 'in', `${input.fileId}.xlsx`));
+    expect(createHash('sha256').update(materialized).digest('hex')).toBe(row.sha256);
+    expect(materialized.length).toBe(row.bytes);
+    expect(row.bytes).toBe(bytes.length);
+    expect(result.audit.materializedInputs).toEqual([
+      { fileId: input.fileId, name: '输入.xlsx', materializedName: `${input.fileId}.xlsx` },
+    ]);
+    store.close();
+  });
+
+  it('非零退出不吞输出：stdout/stderr 原样带回；out/ 产物照常登记（无论 exitCode 都扫交付箱）', async () => {
+    const { store, executor } = makeFixture();
+    const result = await executor.runJs({
+      code: [
+        `console.log('halfway-stdout');`,
+        `require('node:fs').writeFileSync('out/半程产物.txt', 'before-fail');`,
+        `console.error('halfway-stderr');`,
+        `process.exit(3);`,
+      ].join('\n'),
+      scope: SCOPE,
+    });
+    expect(result.exitCode).toBe(3);
+    expect(result.exitSignal).toBeNull();
+    expect(result.stdout).toContain('halfway-stdout');
+    expect(result.stderr).toContain('halfway-stderr');
+    expect(result.audit.killReason).toBeUndefined(); // 自行退出，不是宿主杀
+    // 失败退出也是交付箱语义：out/ 已写出的产物照常登记且哈希正确。
+    expect(result.outputs.map((file) => file.name)).toEqual(['半程产物.txt']);
+    const row = store.getFileRef(result.outputs[0]!.fileId, SCOPE)!;
+    expect(row?.sha256).toBe(createHash('sha256').update(Buffer.from('before-fail', 'utf8')).digest('hex'));
+    store.close();
+  });
+
+  it('registerOutputsFromOut：out/ 目录不存在 → outputs/skipped 皆空数组，不报错', () => {
+    const { workspaceRoot, store, fileStore } = makeFixture();
+    const runDir = runDirOf(workspaceRoot, SCOPE, 'run_no_out_dir'); // 只派生路径，不建目录
+    const { outputs, skipped } = fileStore.registerOutputsFromOut({
+      runDir,
+      scope: SCOPE,
+      limits: { maxFileBytes: 1024, maxCount: 10 },
+    });
+    expect(outputs).toEqual([]);
+    expect(skipped).toEqual([]);
+    store.close();
   });
 });

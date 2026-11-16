@@ -8,7 +8,9 @@
  *      已激活不动（时间戳不变）；
  *   ③ 读路径同码（v8 §4）：越权 / 不存在 / 过期 → 同为 FILE_REF_UNAVAILABLE（防存在性
  *      oracle；机械 reason 只随异常对象带出，不进用户话术）；
- *   ④ 源不可读（缺失 / 目录 / symlink）→ 确定性拒收，不留行、不留半份。
+ *   ④ 源不可读（缺失 / 目录 / symlink）→ 确定性拒收，不留行、不留半份；
+ *   ⑤ listActiveFiles（S1 清单注入源）：TTL 内已激活才出现，投影只有 fileId/name/bytes；
+ *      pending / TTL 过期 / 他会话行不出现（读方 TTL 谓词，存储层行不动）。
  *
  * 库用 :memory:，workspace 用临时目录；不触网、不碰真实平台。
  */
@@ -202,6 +204,41 @@ describe('入站附件登记与激活（CAP-01 S1）', () => {
     expect(store.listFileRefs(SCOPE).length).toBe(before); // 一次都没登记
     const filesDir = path.join(sessionDirOf(workspaceRoot, SCOPE), 'files');
     if (existsSync(filesDir)) expect(readdirSync(filesDir)).toEqual([]); // 无半成品
+    store.close();
+  });
+
+  it('⑤ listActiveFiles：TTL 内已激活才出现，投影只有 fileId/name/bytes；pending/过期/他会话不出现', () => {
+    const { store, fileStore } = makeFixture();
+    const fresh = fileStore.putFile({
+      scope: SCOPE,
+      name: '活.xlsx',
+      bytes: Buffer.from('a'),
+      activatedAt: Date.now() - 1_000,
+    });
+    fileStore.putFile({ scope: SCOPE, name: '待激活.xlsx', bytes: Buffer.from('p') }); // pending
+    const expiredAt = Date.now() - FILE_REF_TTL_MS - 60_000;
+    store.insertFileRef({
+      fileId: 'file_expired_active',
+      principalId: SCOPE.principalId,
+      sessionId: SCOPE.sessionId,
+      name: '过期.xlsx',
+      sha256: 'sha_e',
+      bytes: 2,
+      activatedAt: expiredAt,
+      createdAt: expiredAt - 1_000,
+    });
+    fileStore.putFile({
+      scope: { principalId: SCOPE.principalId, sessionId: 'other-session' },
+      name: '他会话.xlsx',
+      bytes: Buffer.from('f'),
+      activatedAt: Date.now(),
+    });
+
+    const active = fileStore.listActiveFiles({ scope: SCOPE, now: Date.now() });
+    expect(active.map((file) => file.fileId)).toEqual([fresh.fileId]);
+    // 投影面只有三字段：sha256 / 身份键 / 时间戳不进清单（清单没有行数据，v8 §8）。
+    expect(Object.keys(active[0]!).sort()).toEqual(['bytes', 'fileId', 'name']);
+    expect(active[0]).toEqual({ fileId: fresh.fileId, name: '活.xlsx', bytes: 1 });
     store.close();
   });
 });
