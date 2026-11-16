@@ -55,6 +55,12 @@ export interface ModelCallRecord {
   error: string | null;
   usage: Usage | null;
   requestedMaxTokens: number | null;
+  /**
+   * 线上实际输出上限（provider 请求体 `max_completion_tokens` / `max_tokens`，经 Pi `onPayload`
+   * 观测）。`requestedMaxTokens` 是调用方传入值，经 `clampMaxTokensToContext` 后可能更小；
+   * 本字段记录**真正发给 provider** 的值，未观测到 = null。
+   */
+  wireMaxCompletionTokens: number | null;
 }
 
 export interface ToolCallRecord {
@@ -267,6 +273,7 @@ function wrapRuntime(base: ModelRuntime, sink: SessionSink, meter: BudgetMeter |
       error: null,
       usage: null,
       requestedMaxTokens: typeof options?.maxTokens === 'number' ? options.maxTokens : null,
+      wireMaxCompletionTokens: null,
     };
     sink.modelCalls.push(rec);
     return rec;
@@ -319,12 +326,38 @@ function wrapRuntime(base: ModelRuntime, sink: SessionSink, meter: BudgetMeter |
       },
     }) as never;
   };
+  /** 只读观测：把调用方 options 原样转发，仅串一个 `onPayload` 记录线上实际请求体；不改请求内容。 */
+  const observePayload = (options: unknown, rec: ModelCallRecord): never => {
+    const opts = (options ?? {}) as {
+      onPayload?: (params: unknown, model: unknown) => unknown;
+    };
+    const previous = opts.onPayload;
+    const patched = {
+      ...opts,
+      async onPayload(params: unknown, model: unknown) {
+        const body = params as { max_completion_tokens?: unknown; max_tokens?: unknown } | undefined;
+        const cap = body?.max_completion_tokens ?? body?.max_tokens;
+        rec.wireMaxCompletionTokens = typeof cap === 'number' ? cap : null;
+        return previous === undefined ? params : await previous(params, model);
+      },
+    };
+    return patched as never;
+  };
   return new Proxy(base, {
     get(target, prop) {
       if (prop === 'streamSimple') {
         return (model: never, context: never, options: never) => {
           const rec = record('stream', context, options as { maxTokens?: number } | undefined);
-          const stream = (target.streamSimple as (...args: never[]) => never)(model, context, options);
+          let stream: never;
+          try {
+            stream = (target.streamSimple as (...args: never[]) => never)(model, context, observePayload(options, rec));
+          } catch (error) {
+            // 请求创建阶段（含 provider 立即拒绝）抛错：保留为一条带错误文本的调用记录。
+            rec.ms = Date.now() - rec.startedAt;
+            rec.stopReason = 'error';
+            rec.error = (error instanceof Error ? error.message : String(error)).slice(0, 500);
+            throw error;
+          }
           return wrapStream(stream, rec);
         };
       }
@@ -444,11 +477,25 @@ export interface PreparedGroup {
   meter: BudgetMeter;
 }
 
+/** 评测侧显式模型/压缩配置覆盖（只透传给 Pi；缺省沿用 STAGE_D_CONFIG.groups + 窗口派生）。 */
+export interface StageDSettingsOverride {
+  contextWindow: number;
+  maxTokens: number;
+  /** 显式绝对压缩配置；缺省 = `piCompactionSettings(contextWindow)`。 */
+  compaction?: { enabled: boolean; reserveTokens: number; keepRecentTokens: number };
+}
+
+function resolveSettings(group: GroupId, override: StageDSettingsOverride | undefined): StageDSettingsOverride {
+  const base = STAGE_D_CONFIG.groups[group];
+  return override ?? base;
+}
+
 export async function prepareGroup(input: {
   group: GroupId;
   root: string;
   meter: BudgetMeter;
   envOverride?: NodeJS.ProcessEnv;
+  settings?: StageDSettingsOverride;
 }): Promise<PreparedGroup> {
   const dir = path.join(input.root, input.group);
   mkdirSync(dir, { recursive: true });
@@ -464,7 +511,7 @@ export async function prepareGroup(input: {
   if (profileIds.length !== 1) throw new Error(`需要单一 contextProfile（当前 ${profileIds.length} 个）`);
   const profile = config.contextProfiles[profileIds[0]!]!;
   if (!profile.gateway) throw new Error('profile 缺少 gateway');
-  const settings = STAGE_D_CONFIG.groups[input.group];
+  const settings = resolveSettings(input.group, input.settings);
   const baseRuntime = await createPiModelRuntime(env, STAGE_D_CONFIG.model, {
     contextWindow: settings.contextWindow,
     maxTokens: settings.maxTokens,
@@ -498,11 +545,13 @@ export interface BuildSessionInput {
   dispatchMode?: 'inline' | 'background';
   /** false = 不注入 runner（Main 只有 run_task；A 的纯对话面）。 */
   withRunner?: boolean;
+  /** 评测侧显式模型/压缩配置（与 prepareGroup 保持一致；缺省沿用 STAGE_D_CONFIG）。 */
+  settings?: StageDSettingsOverride;
 }
 
 export async function buildSession(input: BuildSessionInput): Promise<SessionHandle> {
   const { prepared } = input;
-  const settings = STAGE_D_CONFIG.groups[input.group];
+  const settings = resolveSettings(input.group, input.settings);
   const stateDir = path.join(prepared.root, 'state', input.key);
   const sessionDir = path.join(prepared.root, 'sessions', input.key);
   const cwd = path.join(prepared.root, 'cwd', input.key);
@@ -562,7 +611,7 @@ export async function buildSession(input: BuildSessionInput): Promise<SessionHan
       modelRuntime: runtime,
       contextWindow: settings.contextWindow,
       maxTokens: settings.maxTokens,
-      compactionSettings: piCompactionSettings(settings.contextWindow),
+      compactionSettings: settings.compaction ?? piCompactionSettings(settings.contextWindow),
       reuseConversation: true,
       sessionDir,
       workspaceDir: cwd,
@@ -575,7 +624,7 @@ export async function buildSession(input: BuildSessionInput): Promise<SessionHan
       modelRuntime: runtime,
       contextWindow: settings.contextWindow,
       maxTokens: settings.maxTokens,
-      compactionSettings: piCompactionSettings(settings.contextWindow),
+      compactionSettings: settings.compaction ?? piCompactionSettings(settings.contextWindow),
       reuseConversation: false,
       workspaceDir: path.join(prepared.root, 'cwd', `${input.key}-worker`),
     });
