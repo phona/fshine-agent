@@ -41,12 +41,31 @@
 
 ## 2. 三个工具
 
-### 2.1 `excel_read(fileId, {sheet?, range?, page?, sample?})`
+### 2.1 `excel_read(fileId, {sheet?, range?, page?, sample?, columns?})`
 
-- 首屏返回 `{sheets, rowCount, columns, sample[], truncated, lossyItems[], pageSize}`；
-- **默认分页**（页大小常量，不是"整表"）；`sample` 用于探索（前 N 行 / 尾 N 行 / 随机 N 行）；
-- `lossyItems` 来自 **zip 条目扫描**（ExcelJS model 里没有图表/透视对象）：`xl/charts/*`、`xl/pivotTables/*`、`xl/vbaProject.bin`、`xl/externalLinks/*`、条件格式/数据验证节点；
-- 每次返回有**硬上限**（行数/字节），超限截断并在返回里标 `truncated: true`。
+- **首屏**（不填 `range`）返回：`{sheets, rowCount, columnCount, pageSize, approxTokens, lossyItems, truncated, pageSize}`——**模型在决定"读多少"之前就知道代价**；
+- **默认分页**（`PAGE_ROWS`），`sample` 用于探索（前 N / 尾 N / 随机 N），`columns` 只取需要的列；
+- `lossyItems` 来自 **zip 条目扫描**（ExcelJS model 里没有图表/透视对象）：`xl/charts/*`、`xl/pivotTables/*`、`xl/vbaProject.bin`、`xl/externalLinks/*`、条件格式/数据验证节点。
+
+**三层防爆（工具强制，不靠模型自觉）**
+
+| 层 | 规则 |
+|---|---|
+| 调用级 | `range: 'all'` 仅在 `rowCount ≤ FULL_READ_MAX_ROWS` **且** `approxTokens ≤ FULL_READ_MAX_TOKENS` 时允许；否则**拒绝**并给下一步：`{error:'FILE_TOO_LARGE_FOR_FULL_READ', hint:'用 sample 抽样，或直接用 excel_transform 做 dedupe/group_sum'}` |
+| 响应级 | 同时限**行数**与**序列化字节**（`MAX_RESPONSE_BYTES`）；超限 → `truncated: true` + `nextPage`，绝不静默少给 |
+| 策略级 | 清洗由算子完成，模型**很少需要全量**：判断结构用 `sample`、改数据用 `excel_transform`、解释结论只读结果那一小部分 |
+
+**常量（S0 用真实文件实测后写死）**
+
+| 常量 | 建议初值 | 依据 |
+|---|---|---|
+| `PAGE_ROWS` | 100 | 一页够判断趋势 |
+| `SAMPLE_ROWS` | 20 | 探索 |
+| `FULL_READ_MAX_ROWS` | 300 | 300×8 列 ≈ 15–20k tokens |
+| `FULL_READ_MAX_TOKENS` | 20_000 | 与行数**双闸**，两者同时判 |
+| `MAX_RESPONSE_BYTES` | 64 KB | 兜住"12 行但每格 5000 字" |
+
+判据：一次全读不得吃掉窗口 1/3 以上——否则下一次调用就触发压缩，等于拿 Pi 的压缩当缓冲垫。
 
 ### 2.2 `excel_transform(fileId, ops[], {outName?, deliver?})`
 
@@ -108,6 +127,30 @@
 结果：**模型永不见路径；执行层不改代码；跨用户隔离由宿主按任务生成路径保证。**
 
 **这条是 v6 唯一需要执行层配合的改动**：给 args 加一个 `type: "file"` 声明（纯声明，不是机制）。
+
+### 3.1 执行层返回文件（入站桥，与出站对称）
+
+执行层必然会把文件交回来（ERP 导出、报表下载）。**它不得返回文件内容**，只返回结构化句柄：
+
+```jsonc
+// ExecutionOutcome.data 里（约定字段，不改契约）
+{ "status": "completed",
+  "files": [ { "name": "对账单.xlsx", "path": "tmp/task_<id>/对账单.xlsx", "bytes": 20480, "sha256": "…" } ],
+  "summary": "已导出" }
+```
+
+**宿主在适配器出口做三件事**（**唯一翻译点，Main 与 Worker 同样生效**）：
+1. 句柄 → 登记 `file_refs` 新行（`state=active`，`parent_task_id` 指向当前任务）→ 得到 `fileId`；
+2. 把返回给模型的 `files[]` **替换成** `[{fileId, name, bytes}]`——**剥掉 `path`**；
+3. 结果里若出现 base64 / 大字节数组 → **剥离并记 `executor_inline_bytes_stripped`**，不塞进转录。
+
+**规则**
+- 单次结果的文件数上限（常量，超出拒绝而不是截断）；
+- 同一 `path` 在同一个 Task 内重复出现 → 幂等（同 `sha256` → 同 `fileId`），避免重复登记；
+- 文件字节的取用永远经 `excel_read`/`excel_transform`，**模型拿不到内容本身**；
+- Worker 收到的执行层结果同样经过这一步——否则路径会进 Worker 转录。
+
+**为什么放在适配器出口**：`driver-contract.ts:50` 写明「返回 data 原样进入转录」，`pi-driver.ts:321` 是无截断 `JSON.stringify`。**上游不翻译，就一定会进上下文**——这是唯一能机械保证的位置。
 
 ---
 
