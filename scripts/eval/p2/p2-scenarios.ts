@@ -767,7 +767,8 @@ async function runS1(dir: string, trial: number): Promise<P2Observation> {
   return await runP2Sample({
     caseId: S1.id, scenario: 'S1', dir, mode: 'inline',
     principal: mainPrincipal('p2-s1', convOf('s1', trial)),
-    texts: [text], facts: S1.truth.facts, book, client: client.client, allowedOperations: client.allowedOperations,
+    texts: [text], facts: S1.truth.facts, book, client: client.client,
+    allowedOperations: client.allowedOperations, readOnlyOperations: client.readOnlyOperations,
     onServerReady: (handle) => { ref.handle = handle; },
     extras: (handle) => ({ taskSnapshots: readTasks(handle.dbPath) }),
   });
@@ -815,7 +816,8 @@ async function runS2(dir: string, trial: number): Promise<P2Observation> {
   const observation = await runP2Sample({
     caseId: S2.id, scenario: 'S2', dir, mode: 'background', runtime,
     principal: mainPrincipal('p2-s2', convOf('s2', trial)),
-    texts: [t1, t2], facts: S2.truth.facts, book, client: gated, allowedOperations: inner.allowedOperations,
+    texts: [t1, t2], facts: S2.truth.facts, book, client: gated,
+    allowedOperations: inner.allowedOperations, readOnlyOperations: inner.readOnlyOperations,
     onServerReady: (handle) => { ref.handle = handle; },
     afterSend: async (turn) => {
       if (turn !== 2) return;
@@ -859,7 +861,8 @@ async function runS3(dir: string, trial: number): Promise<P2Observation> {
   return await runP2Sample({
     caseId: S3.id, scenario: 'S3', dir, mode: 'background',
     principal: mainPrincipal('p2-s3', convOf('s3', trial)),
-    texts: [t1, t2], facts: S3.truth.facts, book, client: client.client, allowedOperations: client.allowedOperations,
+    texts: [t1, t2], facts: S3.truth.facts, book, client: client.client,
+    allowedOperations: client.allowedOperations, readOnlyOperations: client.readOnlyOperations,
     onServerReady: (handle) => { ref.handle = handle; },
     afterSend: async (turn) => {
       if (turn !== 1) return;
@@ -932,7 +935,8 @@ async function runS4(dir: string, trial: number): Promise<P2Observation> {
   return await runP2Sample({
     caseId: S4.id, scenario: 'S4', dir, mode: 'background', runtime,
     principal: mainPrincipal('p2-s4', convOf('s4', trial)),
-    texts: [t1, t2, t3], facts: S4.truth.facts, book, client: gated, allowedOperations: inner.allowedOperations,
+    texts: [t1, t2, t3], facts: S4.truth.facts, book, client: gated,
+    allowedOperations: inner.allowedOperations, readOnlyOperations: inner.readOnlyOperations,
     onServerReady: (handle) => { ref.handle = handle; },
     afterSend: async (turn) => {
       if (turn !== 2) return;
@@ -971,7 +975,8 @@ async function runS5(dir: string, trial: number): Promise<P2Observation> {
   ]);
   const server1 = await startP2Server({
     dir, principals: [principal], mode: 'background',
-    book: book1, client: inner.client, allowedOperations: inner.allowedOperations,
+    book: book1, client: inner.client,
+    allowedOperations: inner.allowedOperations, readOnlyOperations: inner.readOnlyOperations,
   });
   ref1.handle = server1;
   const reply1 = await deliver(server1.server.handler, incoming(
@@ -994,7 +999,8 @@ async function runS5(dir: string, trial: number): Promise<P2Observation> {
   ], 2);
   const server2 = await startP2Server({
     dir, principals: [principal], mode: 'background',
-    book: book2, client: inner.client, allowedOperations: inner.allowedOperations,
+    book: book2, client: inner.client,
+    allowedOperations: inner.allowedOperations, readOnlyOperations: inner.readOnlyOperations,
   });
   ref2.handle = server2;
   let reply2 = '';
@@ -1219,7 +1225,8 @@ async function runS7a(dir: string, trial: number): Promise<P2Observation> {
   return await runP2Sample({
     caseId: S7A.id, scenario: 'S7a', dir, mode: 'inline',
     principal: mainPrincipal('p2-s7a', convOf('s7a', trial)),
-    texts: [text], facts: [], book, client: client.client, allowedOperations: client.allowedOperations,
+    texts: [text], facts: [], book, client: client.client,
+    allowedOperations: client.allowedOperations, readOnlyOperations: client.readOnlyOperations,
     onServerReady: (handle) => { ref.handle = handle; },
     extras: (handle) => ({ taskSnapshots: readTasks(handle.dbPath) }),
   });
@@ -1245,7 +1252,9 @@ async function runS7b(dir: string, trial: number): Promise<P2Observation> {
     principal: mainPrincipal('p2-s7b', convOf('s7b', trial)),
     texts: [t1, t2], facts: [], book,
     client: createHangingClient(),
-    allowedOperations: ['dummy.query'],
+    // hanging 客户端不来自 resolveExecutionFace（手写注入面）：显式声明它自述的唯一 operation
+    // 是只读的 dummy.query；写操作一个都不在该面里。
+    allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'],
     workerDriverFactory: () => createDeadlineWorkerDriver(book),
     onServerReady: (handle) => { ref.handle = handle; },
     afterSend: async (turn) => {
@@ -1282,7 +1291,8 @@ async function runS7c(dir: string, trial: number): Promise<P2Observation> {
   return await runP2Sample({
     caseId: S7C.id, scenario: 'S7c', dir, mode: 'background',
     principal: mainPrincipal('p2-s7c', convOf('s7c', trial)),
-    texts: [t1, t2], facts: S7C.truth.facts, book, client: client.client, allowedOperations: client.allowedOperations,
+    texts: [t1, t2], facts: S7C.truth.facts, book, client: client.client,
+    allowedOperations: client.allowedOperations, readOnlyOperations: client.readOnlyOperations,
     onServerReady: (handle) => { ref.handle = handle; },
     afterSend: async (turn) => {
       if (turn !== 1) return;

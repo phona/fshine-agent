@@ -31,7 +31,7 @@ import type { NotificationSink } from '../../../packages/agent/src/notifications
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import { createScriptedModelRuntime } from '../../../packages/agent/testing/scripted-model-runtime';
 import { createServer, type Server } from '../../../apps/server/server';
-import { resolveExecutionFace } from '../../ask-runtime';
+import { resolveExecutionFace, type ExecutionFace } from '../../ask-runtime';
 import { accountCalls, type AccountedUsage, type CallKind, type ModelCallRecord } from '../r6/accounting';
 import type { SessionEvidence, SessionJudgement } from '../r6/evidence';
 import { collectEvidence } from '../r6/evidence';
@@ -284,7 +284,11 @@ class RecordingP2Client implements ExecutionClient {
 }
 
 /** 仓内 dummy 执行层（与 server 缺省同源；faulty-one 等种子故障真实可达）。 */
-export async function createDummyP2Client(input: { dir: string; env?: NodeJS.ProcessEnv }): Promise<{ client: ExecutionClient; allowedOperations: readonly string[] }> {
+export async function createDummyP2Client(input: { dir: string; env?: NodeJS.ProcessEnv }): Promise<{
+  client: ExecutionClient;
+  allowedOperations: readonly string[];
+  readOnlyOperations: readonly string[];
+}> {
   // 执行面解析走装配链的唯一入口（`scripts/ask-runtime.ts` 的 `resolveExecutionFace`）：
   // 与 server 缺省同一链（dummy CLI + 从执行层自述的 access 派生只读允许集），
   // 不在评测胶水里自建第二份装配（P0-T03 单一装配点守卫）。
@@ -297,7 +301,11 @@ export async function createDummyP2Client(input: { dir: string; env?: NodeJS.Pro
     stateDir: path.join(input.dir, 'state'),
     emptyOperationsMessage: '执行层没有声明任何只读 operation——P2 样本拒绝以空允许集合运行。',
   });
-  return { client: face.client, allowedOperations: face.allowedOperations };
+  return {
+    client: face.client,
+    allowedOperations: face.allowedOperations,
+    readOnlyOperations: face.readOnlyOperations,
+  };
 }
 
 /** 从不结算的执行客户端（S7b 执行面注入：deadline 必须由 Worker 驱动遵守）。 */
@@ -329,6 +337,8 @@ export interface P2ServerSpec {
   readonly book: P2ScriptBook;
   readonly client: ExecutionClient;
   readonly allowedOperations: readonly string[];
+  /** U3：只读集合（执行层 access=read 派生）；独立于允许集合，写操作不得混入。 */
+  readonly readOnlyOperations: readonly string[];
   readonly notificationSink?: NotificationSink;
   /** 注入 Worker 驱动（S7b 的 deadline-honoring 脚本化驱动；缺省 = 真实 Pi + 脚本 provider）。 */
   readonly workerDriverFactory?: () => import('../../../packages/agent/src/driver-contract').TurnDriver;
@@ -341,6 +351,8 @@ export interface P2ServerHandle {
   readonly dir: string;
   readonly dbPath: string;
   readonly recorder: { readonly records: P2ExecRecord[] };
+  /** 装配时交给 server 的只读集合（与执行面同一份真值；守护测试据此断言写操作不在其中）。 */
+  readonly readOnlyOperations: readonly string[];
   readonly book: P2ScriptBook;
   readonly logs: Array<Record<string, unknown>>;
   close(): Promise<void>;
@@ -392,13 +404,19 @@ export async function startP2Server(spec: P2ServerSpec): Promise<P2ServerHandle>
     };
   };
 
+  // 单一装配入口给出的两套集合各走各的字段：只读集合不得用允许集合冒充（U3）。
+  const face: ExecutionFace = {
+    client: recorder,
+    allowedOperations: spec.allowedOperations,
+    readOnlyOperations: spec.readOnlyOperations,
+  };
   const server = await createServer({
     env,
     config: p2Config(spec),
     dbPath: path.join(spec.dir, 'state.db'),
     stateDir: path.join(spec.dir, 'state'),
     createDrivers,
-    createExecutionFace: async () => ({ client: recorder, allowedOperations: spec.allowedOperations }),
+    createExecutionFace: async () => face,
     ...(spec.notificationSink === undefined ? {} : { notificationSink: spec.notificationSink }),
     logger: (line) => logs.push(line),
   });
@@ -407,6 +425,7 @@ export async function startP2Server(spec: P2ServerSpec): Promise<P2ServerHandle>
     dir: spec.dir,
     dbPath: path.join(spec.dir, 'state.db'),
     recorder,
+    readOnlyOperations: face.readOnlyOperations,
     book: spec.book,
     logs,
     close: () => server.close(),
@@ -512,6 +531,8 @@ export interface P2SampleRunInput {
   readonly book: P2ScriptBook;
   readonly client: ExecutionClient;
   readonly allowedOperations: readonly string[];
+  /** U3：只读集合（与 allowedOperations 独立传递；从装配入口的真值一路带到 server）。 */
+  readonly readOnlyOperations: readonly string[];
   readonly runtime?: RuntimeConfig;
   readonly notificationSink?: NotificationSink;
   readonly mainDriverFactory?: P2ServerSpec['mainDriverFactory'];
@@ -536,6 +557,7 @@ export async function runP2Sample(input: P2SampleRunInput): Promise<P2Observatio
     book: input.book,
     client: input.client,
     allowedOperations: input.allowedOperations,
+    readOnlyOperations: input.readOnlyOperations,
     ...(input.notificationSink === undefined ? {} : { notificationSink: input.notificationSink }),
     ...(input.mainDriverFactory === undefined ? {} : { mainDriverFactory: input.mainDriverFactory }),
     ...(input.workerDriverFactory === undefined ? {} : { workerDriverFactory: input.workerDriverFactory }),
