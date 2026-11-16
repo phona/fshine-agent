@@ -1,0 +1,18 @@
+{
+  "items": [
+    {
+      "id": "rec-001",
+      "name": "alpha-item-1",
+      "value": 1200
+    },
+    {
+      "id": "rec-002",
+      "name": "alpha-item-2",
+      "value": 800
+    }
+  ],
+  "windows": [
+    "W1",
+    "W2"
+  ]
+}

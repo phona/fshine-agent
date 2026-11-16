@@ -1,0 +1,22 @@
+{
+  "items": [
+    {
+      "id": "rec-101",
+      "name": "beta-item-1",
+      "value": 500
+    },
+    {
+      "id": "rec-102",
+      "name": "beta-item-2",
+      "value": 300
+    },
+    {
+      "id": "rec-103",
+      "name": "beta-item-3",
+      "value": 200
+    }
+  ],
+  "windows": [
+    "W1"
+  ]
+}

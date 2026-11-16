@@ -1,0 +1,754 @@
+{
+  "schemaVersion": 1,
+  "platform": "dummy-platform",
+  "scenario": "dummy-finance",
+  "accessSemantics": {
+    "read": {
+      "plan": true,
+      "confirm": false,
+      "mock": true
+    },
+    "scratch": {
+      "plan": false,
+      "confirm": false,
+      "mock": false
+    },
+    "write": {
+      "plan": true,
+      "confirm": true,
+      "mock": true
+    }
+  },
+  "labels": {
+    "dummy.query": "query records",
+    "dummy.scratch": "local computation",
+    "dummy.prepare": "prepare records",
+    "dummy.commit": "commit records",
+    "dummy.proposal": "create proposal",
+    "dummy.proposal-commit": "commit proposal",
+    "ballot.query": "query ballots",
+    "ballot.scratch": "ballot scratch",
+    "ballot.prepare": "prepare ballots",
+    "ballot.commit": "commit ballots",
+    "ballot.proposal": "create ballot proposal",
+    "ballot.proposal-commit": "commit ballot proposal"
+  },
+  "errorCatalog": {
+    "QUERY_REQUIRED": "Provide --collection <name>.",
+    "COLLECTION_NOT_FOUND": "No collection matches that keyword. Check the exact collection name and retry.",
+    "COLLECTION_AMBIGUOUS": "More than one collection matches. Confirm the exact collection name and retry.",
+    "WINDOW_NO_DATA": "That window has no data for this collection. Retry with a window from availableWindows.",
+    "COLLECTION_LOCKED": "That collection is locked. It cannot accept writes in its current state.",
+    "PLAN_UNKNOWN_FIELD": "Plan draft has an undeclared top-level field. Remove it and resubmit.",
+    "PLAN_CALLS_REQUIRED": "Plan draft must contain a non-empty calls array.",
+    "PLAN_UNKNOWN_OPERATION": "Plan call names an unregistered operation.",
+    "PLAN_OPERATION_NOT_READ_ONLY": "Plan calls may only name read-only operations (dummy.query, dummy.scratch).",
+    "PROPOSAL_UNKNOWN_FIELD": "Proposal payload has an undeclared top-level field. Remove it and resubmit.",
+    "PROPOSAL_NOT_PENDING": "Proposal is no longer pending. Do not commit it again.",
+    "PROPOSAL_EXPIRED": "Proposal has expired. Create a new proposal.",
+    "PROPOSAL_TOKEN_UNTRUSTED": "Proposal commit token is missing, malformed, expired or does not match this proposal.",
+    "PROPOSAL_STATE_CORRUPT": "Proposal state is corrupt. Fail closed; do not guess.",
+    "PLAN_ACTIVATION_UNTRUSTED": "Plan activation token is missing, malformed, expired or does not match this plan.",
+    "PLAN_NOT_FOUND": "No such plan.",
+    "PLAN_NOT_PENDING": "Plan is not pending activation.",
+    "COLLECTION_FAULT": "That collection cannot be read in its current state. Report the failure as-is.",
+    "INVALID_ARGUMENT": "Provide a string value for the named argument.",
+    "WHERE_INVALID": "Filter with a single --where <dimension>=<value> pair using one of the collection's declared dimension values."
+  },
+  "reads": {
+    "dummy.query": {
+      "args": [
+        {
+          "name": "--collection",
+          "type": "string"
+        },
+        {
+          "name": "--topic",
+          "type": "string"
+        },
+        {
+          "name": "--window",
+          "type": "string"
+        },
+        {
+          "name": "--round",
+          "type": "string"
+        },
+        {
+          "name": "--where",
+          "type": "string"
+        }
+      ],
+      "requirements": [
+        {
+          "anyOf": [
+            "--collection",
+            "--topic"
+          ],
+          "error": {
+            "code": "QUERY_REQUIRED",
+            "message": "Missing --collection or --topic"
+          }
+        }
+      ],
+      "source": {
+        "keys": [
+          "--collection",
+          "--topic"
+        ],
+        "mode": "exact-or-unique-substring"
+      },
+      "window": {
+        "keys": [
+          "--window",
+          "--round"
+        ]
+      },
+      "invalidArg": {
+        "code": "INVALID_ARGUMENT",
+        "message": "Argument {{arg.name}} must be a {{arg.type}}"
+      },
+      "responses": {
+        "completed": {
+          "status": "completed",
+          "exitCode": 0,
+          "data": {
+            "collection": "{{source.collection}}",
+            "window": "{{window.value}}",
+            "items": "{{items}}",
+            "count": "{{count}}"
+          },
+          "result": {
+            "status": "completed",
+            "collection": "{{source.collection}}",
+            "items": "{{items}}",
+            "count": "{{count}}",
+            "fields": "{{fields}}"
+          }
+        },
+        "ambiguous": {
+          "status": "needs_input",
+          "exitCode": 0,
+          "data": {
+            "query": "{{source.keyword}}",
+            "candidates": "{{source.candidates}}"
+          },
+          "error": {
+            "code": "COLLECTION_AMBIGUOUS",
+            "message": "More than one collection matches \"{{source.keyword}}\""
+          },
+          "result": {
+            "status": "needs_input",
+            "collection": "{{source.keyword}}"
+          }
+        },
+        "not_found": {
+          "status": "not_found",
+          "exitCode": 0,
+          "data": {
+            "query": "{{source.keyword}}",
+            "candidates": "{{source.candidates}}"
+          },
+          "error": {
+            "code": "COLLECTION_NOT_FOUND",
+            "message": "No collection matches that keyword. Check the exact collection name and retry."
+          },
+          "result": {
+            "status": "not_found",
+            "collection": "{{source.keyword}}"
+          }
+        },
+        "window_no_data": {
+          "status": "not_found",
+          "exitCode": 0,
+          "data": {
+            "query": "{{source.keyword}}",
+            "window": "{{window.value}}",
+            "availableWindows": "{{window.available}}"
+          },
+          "error": {
+            "code": "WINDOW_NO_DATA",
+            "message": "Window {{window.value}} has no data for collection {{source.collection}}"
+          },
+          "result": {
+            "status": "not_found",
+            "collection": "{{source.collection}}"
+          }
+        },
+        "read_fault": {
+          "status": "failed",
+          "exitCode": 2,
+          "data": null
+        },
+        "invalid_where": {
+          "status": "failed",
+          "exitCode": 1,
+          "data": null,
+          "error": {
+            "code": "WHERE_INVALID",
+            "message": "Invalid --where for collection {{source.collection}}: {{where.reason}}"
+          }
+        }
+      }
+    },
+    "ballot.query": {
+      "args": [
+        {
+          "name": "--collection",
+          "type": "string"
+        },
+        {
+          "name": "--topic",
+          "type": "string"
+        },
+        {
+          "name": "--window",
+          "type": "string"
+        },
+        {
+          "name": "--round",
+          "type": "string"
+        },
+        {
+          "name": "--where",
+          "type": "string"
+        }
+      ],
+      "requirements": [
+        {
+          "anyOf": [
+            "--topic",
+            "--collection"
+          ],
+          "error": {
+            "code": "QUERY_REQUIRED",
+            "message": "Missing --collection or --topic"
+          }
+        }
+      ],
+      "source": {
+        "keys": [
+          "--collection",
+          "--topic"
+        ],
+        "mode": "exact-or-unique-substring"
+      },
+      "window": {
+        "keys": [
+          "--window",
+          "--round"
+        ]
+      },
+      "invalidArg": {
+        "code": "INVALID_ARGUMENT",
+        "message": "Argument {{arg.name}} must be a {{arg.type}}"
+      },
+      "responses": {
+        "completed": {
+          "status": "completed",
+          "exitCode": 0,
+          "data": {
+            "collection": "{{source.collection}}",
+            "window": "{{window.value}}",
+            "items": "{{items}}",
+            "count": "{{count}}"
+          },
+          "result": {
+            "status": "completed",
+            "collection": "{{source.collection}}",
+            "items": "{{items}}",
+            "count": "{{count}}",
+            "fields": "{{fields}}"
+          }
+        },
+        "ambiguous": {
+          "status": "needs_input",
+          "exitCode": 0,
+          "data": {
+            "query": "{{source.keyword}}",
+            "candidates": "{{source.candidates}}"
+          },
+          "error": {
+            "code": "COLLECTION_AMBIGUOUS",
+            "message": "More than one collection matches \"{{source.keyword}}\""
+          },
+          "result": {
+            "status": "needs_input",
+            "collection": "{{source.keyword}}"
+          }
+        },
+        "not_found": {
+          "status": "not_found",
+          "exitCode": 0,
+          "data": {
+            "query": "{{source.keyword}}",
+            "candidates": "{{source.candidates}}"
+          },
+          "error": {
+            "code": "COLLECTION_NOT_FOUND",
+            "message": "No collection matches that keyword. Check the exact collection name and retry."
+          },
+          "result": {
+            "status": "not_found",
+            "collection": "{{source.keyword}}"
+          }
+        },
+        "window_no_data": {
+          "status": "not_found",
+          "exitCode": 0,
+          "data": {
+            "query": "{{source.keyword}}",
+            "window": "{{window.value}}",
+            "availableWindows": "{{window.available}}"
+          },
+          "error": {
+            "code": "WINDOW_NO_DATA",
+            "message": "Window {{window.value}} has no data for collection {{source.collection}}"
+          },
+          "result": {
+            "status": "not_found",
+            "collection": "{{source.collection}}"
+          }
+        },
+        "read_fault": {
+          "status": "failed",
+          "exitCode": 2,
+          "data": null
+        },
+        "invalid_where": {
+          "status": "failed",
+          "exitCode": 1,
+          "data": null,
+          "error": {
+            "code": "WHERE_INVALID",
+            "message": "Invalid --where for collection {{source.collection}}: {{where.reason}}"
+          }
+        }
+      }
+    }
+  },
+  "operations": [
+    {
+      "name": "dummy.query",
+      "domain": "dummy",
+      "command": "query",
+      "access": "read",
+      "script": "src/dummy/scripts/query.js",
+      "executor": "dummy-script",
+      "est_seconds": 10,
+      "weight": 2,
+      "args": {
+        "positional": [],
+        "flags": [
+          {
+            "flag": "--collection",
+            "required": true,
+            "style": "name",
+            "desc": "collection name or keyword (exact match preferred, substring match may be ambiguous)"
+          },
+          {
+            "flag": "--window",
+            "required": false,
+            "style": "code",
+            "desc": "window code, e.g. W1; must exist for the collection"
+          }
+        ]
+      },
+      "serve": {
+        "query": true,
+        "prepare": true,
+        "commit": true
+      },
+      "protocol": null
+    },
+    {
+      "name": "dummy.scratch",
+      "domain": "dummy",
+      "command": "scratch",
+      "access": "scratch",
+      "script": "src/dummy/scripts/scratch.js",
+      "executor": "dummy-script",
+      "est_seconds": 5,
+      "weight": 1,
+      "args": {
+        "positional": [],
+        "flags": [
+          {
+            "flag": "--input",
+            "required": true,
+            "style": "name",
+            "desc": "input text file path (local computation only)"
+          },
+          {
+            "flag": "--output",
+            "required": false,
+            "style": "name",
+            "desc": "output file path; defaults to <input>.out"
+          }
+        ]
+      },
+      "serve": {
+        "query": true,
+        "prepare": true,
+        "commit": false
+      },
+      "protocol": null
+    },
+    {
+      "name": "dummy.prepare",
+      "domain": "dummy",
+      "command": "prepare",
+      "access": "write",
+      "writeFlag": "--apply",
+      "script": "src/dummy/scripts/prepare.js",
+      "executor": "dummy-script",
+      "est_seconds": 10,
+      "weight": 5,
+      "args": {
+        "positional": [],
+        "flags": [
+          {
+            "flag": "--collection",
+            "required": true,
+            "style": "name",
+            "desc": "collection name (exact)"
+          },
+          {
+            "flag": "--window",
+            "required": false,
+            "style": "code",
+            "desc": "window code"
+          },
+          {
+            "flag": "--count",
+            "required": false,
+            "style": "code",
+            "desc": "record count to prepare"
+          },
+          {
+            "flag": "--apply",
+            "required": false,
+            "style": "code",
+            "desc": "write flag: present means this call WOULD write, prepare must refuse it"
+          }
+        ]
+      },
+      "serve": {
+        "query": false,
+        "prepare": true,
+        "commit": false
+      },
+      "protocol": null
+    },
+    {
+      "name": "dummy.commit",
+      "domain": "dummy",
+      "command": "commit",
+      "access": "write",
+      "script": "src/dummy/scripts/commit.js",
+      "executor": "dummy-script",
+      "est_seconds": 10,
+      "weight": 20,
+      "args": {
+        "positional": [],
+        "flags": [
+          {
+            "flag": "--collection",
+            "required": true,
+            "style": "name",
+            "desc": "collection name (exact)"
+          },
+          {
+            "flag": "--window",
+            "required": false,
+            "style": "code",
+            "desc": "window code"
+          },
+          {
+            "flag": "--count",
+            "required": false,
+            "style": "code",
+            "desc": "record count to add"
+          }
+        ]
+      },
+      "serve": {
+        "query": false,
+        "prepare": false,
+        "commit": true
+      },
+      "protocol": null
+    },
+    {
+      "name": "dummy.proposal",
+      "domain": "dummy",
+      "command": "proposal",
+      "access": "write",
+      "script": "src/dummy/scripts/proposal.js",
+      "executor": "dummy-script",
+      "est_seconds": 10,
+      "weight": 5,
+      "args": {
+        "positional": [
+          {
+            "name": "payload",
+            "required": true,
+            "desc": "proposal payload file (opaque to the host)"
+          }
+        ],
+        "flags": [
+          {
+            "flag": "--batch",
+            "required": false,
+            "style": "code",
+            "desc": "create multiple proposals (not used in v1, accepted for shape compatibility)"
+          }
+        ]
+      },
+      "serve": {
+        "query": false,
+        "prepare": true,
+        "commit": false
+      },
+      "protocol": "proposal.create"
+    },
+    {
+      "name": "dummy.proposal-commit",
+      "domain": "dummy",
+      "command": "proposal-commit",
+      "access": "write",
+      "script": "src/dummy/scripts/proposal-commit.js",
+      "executor": "dummy-script",
+      "est_seconds": 10,
+      "weight": 20,
+      "args": {
+        "positional": [],
+        "flags": [
+          {
+            "flag": "--proposal-id",
+            "required": true,
+            "style": "name",
+            "desc": "proposal id returned by proposal.create"
+          }
+        ]
+      },
+      "serve": {
+        "query": false,
+        "prepare": false,
+        "commit": true
+      },
+      "protocol": "proposal.commit"
+    },
+    {
+      "name": "ballot.query",
+      "domain": "ballot",
+      "command": "query",
+      "access": "read",
+      "script": "src/ballot/scripts/query.js",
+      "executor": "ballot-script",
+      "est_seconds": 10,
+      "weight": 2,
+      "args": {
+        "positional": [],
+        "flags": [
+          {
+            "flag": "--topic",
+            "required": true,
+            "style": "name",
+            "desc": "ballot topic name or keyword"
+          },
+          {
+            "flag": "--round",
+            "required": false,
+            "style": "code",
+            "desc": "round code, e.g. R1"
+          }
+        ]
+      },
+      "serve": {
+        "query": true,
+        "prepare": true,
+        "commit": true
+      },
+      "protocol": null
+    },
+    {
+      "name": "ballot.scratch",
+      "domain": "ballot",
+      "command": "scratch",
+      "access": "scratch",
+      "script": "src/ballot/scripts/scratch.js",
+      "executor": "ballot-script",
+      "est_seconds": 5,
+      "weight": 1,
+      "args": {
+        "positional": [],
+        "flags": [
+          {
+            "flag": "--input",
+            "required": true,
+            "style": "name",
+            "desc": "input text file path (local computation only)"
+          },
+          {
+            "flag": "--output",
+            "required": false,
+            "style": "name",
+            "desc": "output file path; defaults to <input>.out"
+          }
+        ]
+      },
+      "serve": {
+        "query": true,
+        "prepare": true,
+        "commit": false
+      },
+      "protocol": null
+    },
+    {
+      "name": "ballot.prepare",
+      "domain": "ballot",
+      "command": "prepare",
+      "access": "write",
+      "writeFlag": "--apply",
+      "script": "src/ballot/scripts/prepare.js",
+      "executor": "ballot-script",
+      "est_seconds": 10,
+      "weight": 5,
+      "args": {
+        "positional": [],
+        "flags": [
+          {
+            "flag": "--topic",
+            "required": true,
+            "style": "name",
+            "desc": "ballot topic name (exact)"
+          },
+          {
+            "flag": "--round",
+            "required": false,
+            "style": "code",
+            "desc": "round code"
+          },
+          {
+            "flag": "--count",
+            "required": false,
+            "style": "code",
+            "desc": "ballot count to prepare"
+          },
+          {
+            "flag": "--apply",
+            "required": false,
+            "style": "code",
+            "desc": "write flag: present means this call WOULD write, prepare must refuse it"
+          }
+        ]
+      },
+      "serve": {
+        "query": false,
+        "prepare": true,
+        "commit": false
+      },
+      "protocol": null
+    },
+    {
+      "name": "ballot.commit",
+      "domain": "ballot",
+      "command": "commit",
+      "access": "write",
+      "script": "src/ballot/scripts/commit.js",
+      "executor": "ballot-script",
+      "est_seconds": 10,
+      "weight": 20,
+      "args": {
+        "positional": [],
+        "flags": [
+          {
+            "flag": "--topic",
+            "required": true,
+            "style": "name",
+            "desc": "ballot topic name (exact)"
+          },
+          {
+            "flag": "--round",
+            "required": false,
+            "style": "code",
+            "desc": "round code"
+          },
+          {
+            "flag": "--count",
+            "required": false,
+            "style": "code",
+            "desc": "ballot count to add"
+          }
+        ]
+      },
+      "serve": {
+        "query": false,
+        "prepare": false,
+        "commit": true
+      },
+      "protocol": null
+    },
+    {
+      "name": "ballot.proposal",
+      "domain": "ballot",
+      "command": "proposal",
+      "access": "write",
+      "script": "src/ballot/scripts/proposal.js",
+      "executor": "ballot-script",
+      "est_seconds": 10,
+      "weight": 5,
+      "args": {
+        "positional": [
+          {
+            "name": "payload",
+            "required": true,
+            "desc": "proposal payload file (opaque to the host)"
+          }
+        ],
+        "flags": [
+          {
+            "flag": "--batch",
+            "required": false,
+            "style": "code",
+            "desc": "create multiple proposals (not used in v1, accepted for shape compatibility)"
+          }
+        ]
+      },
+      "serve": {
+        "query": false,
+        "prepare": true,
+        "commit": false
+      },
+      "protocol": "proposal.create"
+    },
+    {
+      "name": "ballot.proposal-commit",
+      "domain": "ballot",
+      "command": "proposal-commit",
+      "access": "write",
+      "script": "src/ballot/scripts/proposal-commit.js",
+      "executor": "ballot-script",
+      "est_seconds": 10,
+      "weight": 20,
+      "args": {
+        "positional": [],
+        "flags": [
+          {
+            "flag": "--proposal-id",
+            "required": true,
+            "style": "name",
+            "desc": "proposal id returned by proposal.create"
+          }
+        ]
+      },
+      "serve": {
+        "query": false,
+        "prepare": false,
+        "commit": true
+      },
+      "protocol": "proposal.commit"
+    }
+  ]
+}

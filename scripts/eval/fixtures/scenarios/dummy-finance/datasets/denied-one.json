@@ -1,0 +1,12 @@
+{
+  "items": [
+    {
+      "id": "rec-902",
+      "name": "denied-item-1",
+      "value": 700
+    }
+  ],
+  "windows": [
+    "W1"
+  ]
+}
