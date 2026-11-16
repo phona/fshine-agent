@@ -62,12 +62,72 @@ function bullets(items: readonly string[]): string {
   return items.length === 0 ? '（无）' : items.map((item) => `- ${item}`).join('\n');
 }
 
+/**
+ * markdown 噪声：强调标记（`**` / `__` / `*` / `_`）、行内代码反引号、全角/不换行空格。
+ * 系统回复常写成 `共 **2 条**记录`、`第 **2 条**`——标记夹在数字与量词/序号之间，
+ * 直接对原文做正则匹配会漏判。**所有**正则/包含匹配前都应先走这里（默认路径）。
+ */
+export function stripMarkdownNoise(text: string): string {
+  return (text ?? '').replace(/[*_`\u3000\u00a0]/g, '');
+}
+
+/** 重复意图守卫的窗口：最近 N 条用户消息（预注册冻结为 3）。 */
+export const SIM_REPEAT_GUARD_WINDOW = 3;
+
+/** 意图相似度阈值（字符二元组 Dice）：≥ 该值视为「同一意图的重复表达」的机械代理。 */
+export const SIM_REPEAT_INTENT_SIMILARITY = 0.6;
+
+/** 意图归一化：剥 markdown 噪声、小写，只保留字母/数字/汉字（去标点与空白）。 */
+export function normalizeIntentText(text: string): string {
+  return stripMarkdownNoise(text).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+function charBigrams(text: string): Set<string> {
+  if (text.length <= 1) return new Set([text]);
+  const grams = new Set<string>();
+  for (let index = 0; index + 1 < text.length; index += 1) grams.add(text.slice(index, index + 2));
+  return grams;
+}
+
+/** 两条用户消息是否为「同一意图」：归一化后相等，或字符二元组 Dice ≥ 阈值。 */
+export function isRepeatedIntent(a: string, b: string): boolean {
+  const normalizedA = normalizeIntentText(a);
+  const normalizedB = normalizeIntentText(b);
+  if (normalizedA === '' || normalizedB === '') return false;
+  if (normalizedA === normalizedB) return true;
+  const gramsA = charBigrams(normalizedA);
+  const gramsB = charBigrams(normalizedB);
+  let shared = 0;
+  for (const gram of gramsA) if (gramsB.has(gram)) shared += 1;
+  const dice = (2 * shared) / (gramsA.size + gramsB.size);
+  return dice >= SIM_REPEAT_INTENT_SIMILARITY;
+}
+
+/**
+ * 硬守卫（bounded）：最近 `SIM_REPEAT_GUARD_WINDOW` 条用户消息是否都重复了**此前已问过**的意图。
+ *
+ * 只用于终止「系统已清楚回答、用户仍重复同一意图」的循环（`run.ts` 记 `reason=repeat_guard`）；
+ * **不参与 pass 判定**——Oracle 仍是唯一判据。窗口不足 3 条一律返回 false。
+ */
+export function hasRepeatedUserIntent(userMessages: readonly string[]): boolean {
+  const window = SIM_REPEAT_GUARD_WINDOW;
+  if (userMessages.length < window) return false;
+  const offset = userMessages.length - window;
+  for (let index = 0; index < window; index += 1) {
+    const current = userMessages[offset + index] ?? '';
+    const prior = userMessages.slice(0, offset + index);
+    if (!prior.some((earlier) => isRepeatedIntent(current, earlier))) return false;
+  }
+  return true;
+}
+
 /** 构造模拟用户 prompt。**不得**接收 fixtureId/oracleId/真值——参数类型即边界。 */
 export function buildSimulatorPrompt(view: SimulatorView): SimulatorPrompt {
   const system = [
     '你是一名参与产品评测的模拟业务用户。你只知道下面给出的业务目标、人设和已知信息；',
     '你不知道正确答案，也不掌握系统内部接口、日志或工具返回值。',
     '你的任务：像真实用户一样与系统对话；目标达成后主动收尾，做不到就放弃。',
+    '系统已经清楚回答过的问题不要再问；不要为了确认而重复同一句话；目标达成就立即 finish(satisfied)。',
     '严格按协议输出：只输出一个 JSON 动作，不要输出解释或多余文本。',
   ].join('');
   const authoring = [

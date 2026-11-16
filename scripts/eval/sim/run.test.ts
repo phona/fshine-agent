@@ -659,6 +659,69 @@ describe('机制自检：无限追问也必须被预算停住', () => {
   });
 });
 
+describe('机制自检：重复意图守卫只终止循环，不参与 pass', () => {
+  /** 3 条重复消息之前必须先有 1 条「首次」同文案消息，窗口 3 条才全部是重复。 */
+  const repeatedScript = (): SimModelCompletion[] => [
+    SAY('刚才那个第二条多少钱？'),
+    SAY('刚才那个第二条多少钱？'),
+    SAY('刚才那个第二条多少钱？'),
+    SAY('刚才那个第二条多少钱？'),
+  ];
+
+  const guardCase = () => makeCase({
+    limits: { maxUserTurns: 8, maxWaitTurns: 1, maxWallMs: 60_000, trials: 1 },
+  });
+
+  it('系统答对 + 用户重复 → finish(satisfied) 且 Oracle 判 pass（reason=repeat_guard）', async () => {
+    const system = new FakeSystem({ reply: 'alpha 合计 2000，共 2 条。' });
+    const simulator = new ScriptedSimulator(repeatedScript());
+    const result = await runSimTrial(guardCase(), 1, trialDeps({ outRoot: tmpRoot(), system, simulator, oracle: OK_ORACLE }));
+
+    expect(result.terminal).toBe('satisfied');
+    expect(result.pass).toBe(true);
+    expect(result.exhaustedBy).toBeNull();
+    expect(result.oracle?.verdict.pass).toBe(true);
+    const finish = result.messages.find((message) => message.action === 'finish');
+    expect(finish?.finishKind).toBe('satisfied');
+    expect(finish?.reason).toBe('repeat_guard');
+    // 守卫在询问模拟用户之前触发：4 条重复脚本只消费到能形成 3 条重复窗口为止。
+    expect(simulator.prompts).toHaveLength(4);
+    expect(system.sends).toHaveLength(5);
+    // prompt 层的第一层修复：明确「不要为了确认而重复同一句话」「目标达成就 finish」。
+    expect(simulator.prompts[0]?.system).toContain('不要为了确认而重复同一句话');
+    expect(simulator.prompts[0]?.system).toContain('目标达成就立即 finish(satisfied)');
+  });
+
+  it('系统答错 + 用户重复 → 仍 finish(satisfied)，但 Oracle 判 fail（守卫不刷绿）', async () => {
+    const system = new FakeSystem({ reply: '我不知道。' });
+    const simulator = new ScriptedSimulator(repeatedScript());
+    const result = await runSimTrial(guardCase(), 1, trialDeps({ outRoot: tmpRoot(), system, simulator, oracle: FAIL_ORACLE }));
+
+    expect(result.terminal).toBe('satisfied');
+    expect(result.pass).toBe(false);
+    expect(result.oracle?.verdict.pass).toBe(false);
+    const finish = result.messages.find((message) => message.action === 'finish');
+    expect(finish?.reason).toBe('repeat_guard');
+  });
+
+  it('用户消息各不相同 → 守卫不触发，收尾原因保留模型自己的 reason', async () => {
+    const system = new FakeSystem({ reply: 'alpha 合计 2000，共 2 条。' });
+    const simulator = new ScriptedSimulator([
+      SAY('请把 alpha 的明细再列一下。'),
+      SAY('第二条的金额再确认一下。'),
+      SAY('好的，麻烦把最终结果贴出来。'),
+      FINISH('satisfied', '已经拿到完整结果'),
+    ]);
+    const result = await runSimTrial(guardCase(), 1, trialDeps({ outRoot: tmpRoot(), system, simulator, oracle: OK_ORACLE }));
+
+    expect(result.terminal).toBe('satisfied');
+    expect(result.pass).toBe(true);
+    const finish = result.messages.find((message) => message.action === 'finish');
+    expect(finish?.reason).toBe('已经拿到完整结果');
+    expect(finish?.reason).not.toBe('repeat_guard');
+  });
+});
+
 describe('机制自检：并发 5 · 5 条假会话的目录/DB 不共享', () => {
   /** 无状态模拟用户：所有 trial 共享同一实例也安全（真实模型本就无状态）。 */
   const finishOnce: SimModel = {

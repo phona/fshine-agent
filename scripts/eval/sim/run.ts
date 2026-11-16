@@ -31,7 +31,7 @@ import {
 import { detectContamination, normalizeForMatch, type ContaminationReport } from './contamination';
 import { InjectionTracker, type InjectionDirective, type InjectionReport } from './injection';
 import {
-  buildRepairPrompt, buildSimulatorPrompt, findCaseLeaks, findPromptLeaks,
+  buildRepairPrompt, buildSimulatorPrompt, findCaseLeaks, findPromptLeaks, hasRepeatedUserIntent,
   type SimModel, type SimulatorView,
 } from './simulator';
 import { resolveOracle, type SimExecutionFact, type SimJudgeTools, type SimOracle, type SimOracleVerdict } from './oracle';
@@ -264,7 +264,8 @@ export async function runSimTrial(caseDef: SimCase, trial: number, deps: SimTria
     counts.systemTurn += 1;
     counts.toolCall += turnResult.toolCalls ?? 0;
     counts.event += turnResult.events ?? 0;
-    for (const execution of turnResult.executions ?? []) executions.push(execution);
+    // 机械标注触发该执行的用户消息序号（1 起）：Oracle 只用它划「找回之后」的时间边界。
+    for (const execution of turnResult.executions ?? []) executions.push({ ...execution, turn });
     if (turnResult.calls === undefined) {
       systemAccountingAvailable = false;
     } else {
@@ -298,6 +299,37 @@ export async function runSimTrial(caseDef: SimCase, trial: number, deps: SimTria
   let waitTurns = 0;
   let lastReply = await sendToSystem(1, caseDef.initialMessage);
 
+  /** 收尾（satisfied / repeat_guard 共用同一 Oracle 判定；pass 只由 Oracle 决定）。 */
+  const finishWithOracle = async (): Promise<SimTrialResult> => {
+    const judgeTools: SimJudgeTools = {
+      complete: async (judgePrompt) => {
+        if (deps.judge === undefined) throw new Error('该 Oracle 需要判官模型，但 deps.judge 未提供');
+        const judgeStarted = now();
+        const output = await deps.judge.complete({ system: '你是独立判官，只依据给出的判据核对系统回复。', user: judgePrompt });
+        recordCall('judge', userTurns + 1, output.tokens, output.tokensObserved, now() - judgeStarted);
+        return output;
+      },
+    };
+    const verdict = await deps.oracle.judge(
+      {
+        finalReply: replies[replies.length - 1] ?? '',
+        replies: [...replies],
+        userMessages: messages.filter((m) => m.action === 'say').map((m) => m.text ?? ''),
+        executions: [...executions],
+      },
+      judgeTools,
+    );
+    return build({
+      terminal: 'satisfied',
+      // 只有 satisfied **且** Oracle 判真值通过才算该 trial 通过。
+      pass: verdict.pass === true,
+      exhaustedBy: null,
+      contamination: null,
+      injection: tracker.report(),
+      oracle: { id: deps.oracle.id, verdict },
+    });
+  };
+
   // ② 对话循环：预算先验（每轮询问模拟用户之前检查），不允许无限追问/等待。
   for (;;) {
     if (now() - startedAt >= caseDef.limits.maxWallMs) {
@@ -306,6 +338,15 @@ export async function runSimTrial(caseDef: SimCase, trial: number, deps: SimTria
         injection: tracker.report(), oracle: null,
       });
     }
+
+    // 硬守卫（bounded）：最近 3 条用户消息都在重复此前已问过的意图，且上一轮系统回复非空
+    // → 终止循环（reason=repeat_guard）。它**只终止**，pass 仍由下面的 Oracle 判定。
+    const saidSoFar = messages.filter((m) => m.action === 'say').map((m) => m.text ?? '');
+    if (caseDef.allowedActions.includes('finish') && lastReply.trim() !== '' && hasRepeatedUserIntent(saidSoFar)) {
+      messages.push({ turn: userTurns + 1, action: 'finish', finishKind: 'satisfied', reason: 'repeat_guard' });
+      return finishWithOracle();
+    }
+
     if (userTurns >= caseDef.limits.maxUserTurns) {
       return build({
         terminal: 'budget_exhausted', pass: false, exhaustedBy: 'user_turns', contamination: null,
@@ -383,33 +424,7 @@ export async function runSimTrial(caseDef: SimCase, trial: number, deps: SimTria
           injection: tracker.report(), oracle: null,
         });
       }
-      const judgeTools: SimJudgeTools = {
-        complete: async (judgePrompt) => {
-          if (deps.judge === undefined) throw new Error('该 Oracle 需要判官模型，但 deps.judge 未提供');
-          const judgeStarted = now();
-          const output = await deps.judge.complete({ system: '你是独立判官，只依据给出的判据核对系统回复。', user: judgePrompt });
-          recordCall('judge', userTurns + 1, output.tokens, output.tokensObserved, now() - judgeStarted);
-          return output;
-        },
-      };
-      const verdict = await deps.oracle.judge(
-        {
-          finalReply: replies[replies.length - 1] ?? '',
-          replies: [...replies],
-          userMessages: messages.filter((m) => m.action === 'say').map((m) => m.text ?? ''),
-          executions: [...executions],
-        },
-        judgeTools,
-      );
-      return build({
-        terminal: 'satisfied',
-        // 只有 satisfied **且** Oracle 判真值通过才算该 trial 通过。
-        pass: verdict.pass === true,
-        exhaustedBy: null,
-        contamination: null,
-        injection: tracker.report(),
-        oracle: { id: deps.oracle.id, verdict },
-      });
+      return finishWithOracle();
     }
 
     if (action.kind === 'wait') {

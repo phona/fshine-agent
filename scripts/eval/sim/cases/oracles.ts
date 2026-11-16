@@ -16,6 +16,7 @@
 
 import { parseNumbers } from '../../r6/oracle';
 import type { SimExecutionFact, SimOracle, SimOracleContext, SimOracleVerdict } from '../oracle';
+import { stripMarkdownNoise } from '../simulator';
 
 /**
  * alpha 真值（与 r6 FACT_TRUTH.alpha 一致）：同时作为 contamination 的真值模式。
@@ -65,20 +66,20 @@ const COMPLETION_WORDS: readonly string[] = [
 const TOTALITY_WORDS: readonly string[] = ['都', '全部', '两批', '所有', '均已', '一切', '全都'];
 
 /**
- * markdown 噪声：强调标记（`**` / `__` / `*` / `_`）、行内代码反引号、全角/不换行空格。
- * 系统回复常写成 `共 **2 条**记录`、`合计 **2000**`——标记夹在数字与量词/单位之间，
- * 直接对原文做「数字+量词」匹配会漏判（SIM-05 假阴性 A）。
+ * 统一清洗：本文件所有正则/包含匹配的**默认入口**都先剥 markdown 噪声。
+ * `stripMarkdownNoise` 由 `../simulator` 提供（同一实现，避免多处漂移）。
  */
-function stripMarkdownNoise(text: string): string {
-  return text.replace(/[*_`\u3000\u00a0]/g, '');
+function clean(text: string): string {
+  return stripMarkdownNoise(text);
 }
 
 function normalize(text: string): string {
-  return stripMarkdownNoise(text ?? '').replace(/\s+/g, '');
+  return clean(text).replace(/\s+/g, '');
 }
 
 function hasAny(text: string, signals: readonly string[]): boolean {
-  return signals.some((signal) => text.includes(signal));
+  const cleaned = clean(text);
+  return signals.some((signal) => cleaned.includes(signal));
 }
 
 function hasFailure(text: string): boolean {
@@ -120,7 +121,7 @@ function countTold(text: string, count: number): boolean {
 }
 
 function sumTold(text: string): boolean {
-  return parseNumbers(text).includes(ALPHA_SUM);
+  return parseNumbers(clean(text)).includes(ALPHA_SUM);
 }
 
 function isReadOperation(operation: string): boolean {
@@ -152,15 +153,17 @@ function lastReply(ctx: SimOracleContext): string {
  * 同时避免把同句里其他序号的数值算进来（认错对象仍须能判负）。
  */
 function itemSpans(text: string, item: 1 | 2): string[] {
+  // 先剥 markdown 噪声再匹配：`第 **2 条**` / `第 **2** 条` 都必须认出序号标记。
+  const cleaned = clean(text);
   const marker = new RegExp(`第\\s*(?:${item === 2 ? '2|二' : '1|一'})\\s*条`, 'g');
   const spans: string[] = [];
-  for (let match = marker.exec(text); match !== null; match = marker.exec(text)) {
-    const rest = text.slice(match.index + match[0].length);
+  for (let match = marker.exec(cleaned); match !== null; match = marker.exec(cleaned)) {
+    const rest = cleaned.slice(match.index + match[0].length);
     const nextMarker = rest.search(/第\s*(?:\d+|[一二三四五六七八九十]+)\s*条/);
     const sentenceEnd = rest.search(/[。；;！!？?\n]/);
     const ends = [nextMarker, sentenceEnd].filter((index) => index >= 0);
     const end = ends.length === 0 ? rest.length : Math.min(...ends);
-    spans.push(text.slice(match.index, match.index + match[0].length + end));
+    spans.push(cleaned.slice(match.index, match.index + match[0].length + end));
   }
   return spans;
 }
@@ -174,14 +177,16 @@ const ASK_REFERENCE_PATTERNS: readonly RegExp[] = [
 ];
 
 function refersToArchive(text: string): boolean {
-  return ASK_REFERENCE_PATTERNS.some((pattern) => pattern.test(text));
+  const cleaned = clean(text);
+  return ASK_REFERENCE_PATTERNS.some((pattern) => pattern.test(cleaned));
 }
 
 /** 指代问的是哪条存档记录：第二条 / 第一条 / 合计 / 泛称（刚才那个）。 */
 function referenceTarget(ask: string): 2 | 1 | 'sum' | 'archived' {
-  if (/第\s*(?:2|二)\s*条/.test(ask)) return 2;
-  if (/第\s*(?:1|一)\s*条/.test(ask)) return 1;
-  if (/(?:合计|总共|一共|总计|总和)/.test(ask)) return 'sum';
+  const cleaned = clean(ask);
+  if (/第\s*(?:2|二)\s*条/.test(cleaned)) return 2;
+  if (/第\s*(?:1|一)\s*条/.test(cleaned)) return 1;
+  if (/(?:合计|总共|一共|总计|总和)/.test(cleaned)) return 'sum';
   return 'archived';
 }
 
@@ -191,6 +196,20 @@ function factSummary(facts: ReadFacts): Readonly<Record<string, unknown>> {
     completed: facts.completed.length,
     notCompleted: facts.notCompleted.length,
   };
+}
+
+/**
+ * 「把已给结果原样再发一遍」的找回请求措辞。
+ * 只用于给 `single_retrieval` 划时间边界——找回请求之前的补交查询不算「找回时重查」。
+ */
+const RECALL_REQUEST_PATTERNS: readonly RegExp[] = [
+  /原样/, /再发/, /再给/, /再报/, /再要/, /同一份/, /刚才那份/, /刚才的/,
+  /贴(?:到)?周报/, /发我(?:一遍|一次)?/, /重复(?:一遍|一次)?/,
+];
+
+function isRecallRequest(text: string): boolean {
+  const cleaned = clean(text);
+  return RECALL_REQUEST_PATTERNS.some((pattern) => pattern.test(cleaned));
 }
 
 /**
@@ -258,7 +277,8 @@ export function createPartialFailureHonestOracle(): SimOracle {
  *   ③ 第二次询问的回复（独立于首轮回复的那一条）再次给出同样的条数与合计；
  *      `initial_result_told` 与 `recall_result_told` 分别取自不同回复，不允许同一条回复
  *      同时满足；
- *   ④ 全程只发生一次读取执行 —— 找回不再执行；无多余重复执行/失败读取。
+ *   ④ **用户要求找回之后**不再发生新的读取执行（`single_retrieval`）——补交此前缺失结果
+ *      的查询发生在找回请求之前，不算「找回时重查」；无失败读取。
  */
 export function createArchiveRecallOracle(): SimOracle {
   return {
@@ -271,14 +291,27 @@ export function createArchiveRecallOracle(): SimOracle {
       // 找回的回复只能来自「第二次询问」之后那一条；首轮回复不得顶替。
       const recall = (ctx.replies[1] ?? '').trim();
       const facts = readFacts(ctx.executions);
+      // 找回请求 = 首轮之后第一条「原样/再发/再给」等要求复用已给结果的用户消息。
+      const recallIndex = asks.findIndex((message, index) => index >= 1 && isRecallRequest(message));
+      // 没有显式找回措辞时退回「第二条用户消息」（旧口径）；只用于 single_retrieval 的时间边界。
+      const recallBoundaryIndex = recallIndex >= 0 ? recallIndex : (asks.length >= 2 ? 1 : -1);
+      const turnsObserved = facts.all.length > 0 && facts.all.every((execution) => typeof execution.turn === 'number');
+      const executionsAfterRecall = turnsObserved && recallBoundaryIndex >= 0
+        ? facts.all.filter((execution) => (execution.turn as number) >= recallBoundaryIndex + 1)
+        : [];
+      // 只统计「用户要求找回之后」是否发生新的执行；至少要有一次完成的读取作为结果来源。
+      // 执行事实缺 turn（旧适配器/测试夹具）时退回严格口径，避免把「无法归因」洗成通过。
+      const singleRetrieval = turnsObserved
+        ? facts.completed.length >= 1 && executionsAfterRecall.length === 0
+        : facts.all.length === 1 && facts.completed.length === 1;
       const checks = {
         // ① 第二次询问必须是真实存在的用户消息，而不是靠同一条回复自证。
         second_ask_made: asks.length >= 2 && normalize(secondAsk) !== '',
         initial_result_told: countTold(initial, ALPHA_COUNT) && sumTold(initial),
-        // ② 找回回复与首轮回复是两条不同回复；该回复内容来自已存档结果（读取只发生一次）。
+        // ② 找回回复与首轮回复是两条不同回复；该回复内容来自已存档结果。
         recall_is_separate_reply: ctx.replies.length >= 2 && normalize(recall) !== '',
         recall_result_told: countTold(recall, ALPHA_COUNT) && sumTold(recall),
-        single_retrieval: facts.all.length === 1 && facts.completed.length === 1,
+        single_retrieval: singleRetrieval,
         no_failed_read: facts.notCompleted.length === 0,
       };
       return {
@@ -292,6 +325,14 @@ export function createArchiveRecallOracle(): SimOracle {
           secondAsk,
           firstReply: initial.slice(0, 200),
           recallReply: recall.slice(0, 200),
+          recallAskIndex: recallBoundaryIndex,
+          recallAsk: recallBoundaryIndex >= 0 ? (asks[recallBoundaryIndex] ?? '') : '',
+          executionTurnsObserved: turnsObserved,
+          executionsAfterRecall: executionsAfterRecall.map((execution) => ({
+            operation: execution.operation,
+            status: execution.status,
+            turn: execution.turn,
+          })),
         },
       };
     },

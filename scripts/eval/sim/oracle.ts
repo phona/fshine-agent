@@ -20,6 +20,8 @@ export interface SimExecutionFact {
   readonly operation: string;
   readonly status: string;
   readonly object?: string;
+  /** 触发该执行的用户消息序号（1 起，含 initialMessage）；由 Harness 按回合机械标注。 */
+  readonly turn?: number;
 }
 
 export interface SimOracleContext {

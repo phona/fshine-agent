@@ -40,7 +40,7 @@ function context(input: {
   replies: readonly string[];
   /** 默认只有首条；需要「第二次询问」的用例必须显式给两条。 */
   userMessages?: readonly string[];
-  executions?: readonly { operation: string; status: string; object?: string }[];
+  executions?: readonly { operation: string; status: string; object?: string; turn?: number }[];
 }): SimOracleContext {
   const replies = [...input.replies];
   return {
@@ -417,6 +417,43 @@ describe('SIM-01 oracle：结果找回不重新执行', () => {
     expect(verdict.pass).toBe(false);
     expect(verdict.detail['checks']).toMatchObject({ no_failed_read: false });
   });
+
+  it('补交此前缺失结果的第二次查询发生在找回请求之前 → 不算找回时重查', async () => {
+    const verdict = await oracle.judge(context({
+      replies: [
+        'alpha 共 2 条，合计 2000。',
+        '按默认统计口径再查一次：alpha 共 2 条，合计 2000。',
+        '刚才那份结果：alpha 共 2 条，合计 2000。',
+      ],
+      // 第 2 条是补交合计（会再查一次），第 3 条才是「原样再发」的找回请求。
+      userMessages: [ASK_FIRST, '把 alpha 的合计按默认统计口径查出来给我。', ASK_AGAIN],
+      executions: [
+        { operation: 'dummy.query', status: 'completed', turn: 1 },
+        { operation: 'dummy.query', status: 'completed', turn: 2 },
+      ],
+    }), { complete: async () => { throw new Error('不应调用判官'); } });
+    expect(verdict.detail['checks']).toMatchObject({ single_retrieval: true });
+    expect(verdict.pass).toBe(true);
+  });
+
+  it('找回请求之后又发生一次读取 → fail（只统计找回之后的新执行）', async () => {
+    const verdict = await oracle.judge(context({
+      replies: [
+        'alpha 共 2 条，合计 2000。',
+        '按默认统计口径再查一次：alpha 共 2 条，合计 2000。',
+        '刚才那份结果：alpha 共 2 条，合计 2000。',
+      ],
+      userMessages: [ASK_FIRST, '把 alpha 的合计按默认统计口径查出来给我。', ASK_AGAIN],
+      executions: [
+        { operation: 'dummy.query', status: 'completed', turn: 1 },
+        { operation: 'dummy.query', status: 'completed', turn: 2 },
+        { operation: 'dummy.query', status: 'completed', turn: 3 },
+      ],
+    }), { complete: async () => { throw new Error('不应调用判官'); } });
+    expect(verdict.detail['checks']).toMatchObject({ single_retrieval: false });
+    expect(verdict.pass).toBe(false);
+    expect(verdict.detail['executionsAfterRecall']).toHaveLength(1);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -496,6 +533,58 @@ describe('SIM-02 oracle：自然引用解析', () => {
     }), { complete: async () => { throw new Error('不应调用判官'); } });
     expect(verdict.pass).toBe(false);
     expect(verdict.detail['checks']).toMatchObject({ reference_resolved: false });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIM-02 回归夹具：sim4 批次（2026-11-16T06-13-37-200Z）SIM-02#1 的原始对话
+// 用途：缺陷 A（`第 **2 条**` 的强调标记夹在序号与量词之间）的假阴性回归。
+// 旧 Oracle 下第二个回复的 `itemSpans` 为空 → reference_resolved=false（假阴性）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SIM4_SIM02_INITIAL = '把 alpha 这批的记录给我列一下：几条、每条多少钱。';
+
+/** sim4 SIM-02 trial 1 的原始对话（逐字取自 evidence/trial.json）。 */
+const SIM4_SIM02_TRIAL1 = {
+  userMessages: [
+    SIM4_SIM02_INITIAL,
+    '刚才那个第二条多少钱？',
+  ],
+  replies: [
+    '**查询结果**\n\nalpha 这批记录共有 **2 条**，明细如下：\n\n| 序号 | 记录名称 | 金额（元） |\n|------|----------|-----------|\n| 1    | alpha-item-1 | 1,200 |\n| 2    | alpha-item-2 | 800 |\n\n合计 2 条记录。',
+    '刚才查询结果里，alpha 这批的第 **2 条**（alpha-item-2）是 **800 元**。',
+  ],
+} as const;
+
+describe('SIM-02 oracle：sim4 原始对话回归（markdown 强调标记假阴性）', () => {
+  const oracle = resolveOracle('oracle:archived-reference', SIM_CASE_ORACLES);
+
+  it('SIM-02#1 原始对话：`第 **2 条**` 必须先剥离 markdown 再匹配 → pass', async () => {
+    const verdict = await oracle.judge(context({
+      replies: SIM4_SIM02_TRIAL1.replies,
+      userMessages: SIM4_SIM02_TRIAL1.userMessages,
+      executions: [READ_OK],
+    }), { complete: async () => { throw new Error('确定性 Oracle 不应调用判官'); } });
+    expect(verdict.detail['checks']).toMatchObject({
+      ask_referenced: true,
+      reference_resolved: true,
+      no_misattribution: true,
+      single_retrieval: true,
+      no_failed_read: true,
+    });
+    expect(verdict.pass).toBe(true);
+    // 绊线证据：旧实现这里会是空数组（序号标记被 `**` 夹开）。
+    expect(verdict.detail['secondItemClauses']).not.toHaveLength(0);
+  });
+
+  it('用户指代里的 markdown 强调标记也走同一剥离路径（`第 **2** 条`）', async () => {
+    const verdict = await oracle.judge(context({
+      replies: ['alpha 共 2 条：第一条 1200，第二条 800。', '第 **2 条** 是 800。'],
+      userMessages: [SIM4_SIM02_INITIAL, '刚才那个第 **2** 条呢？'],
+      executions: [READ_OK],
+    }), { complete: async () => { throw new Error('确定性 Oracle 不应调用判官'); } });
+    expect(verdict.detail['checks']).toMatchObject({ ask_referenced: true, reference_resolved: true });
+    expect(verdict.pass).toBe(true);
   });
 });
 
