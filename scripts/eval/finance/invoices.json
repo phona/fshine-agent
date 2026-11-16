@@ -1,0 +1,12 @@
+[
+  { "id": "INV-A-001", "amount": 10000, "customer": "华远贸易", "issuedOn": "2026-05-15", "dueOn": "2026-06-14", "period": "2026-05" },
+  { "id": "INV-A-002", "amount": 6000, "customer": "华远贸易", "issuedOn": "2026-07-01", "dueOn": "2026-07-31", "period": "2026-07" },
+  { "id": "INV-A-003", "amount": 8000, "customer": "华远贸易", "issuedOn": "2026-09-20", "dueOn": "2026-11-19", "period": "2026-09" },
+  { "id": "INV-A-004", "amount": 5000, "customer": "华远贸易", "issuedOn": "2026-11-05", "dueOn": "2026-12-04", "period": "2026-11" },
+  { "id": "INV-B-001", "amount": 12000, "customer": "明达物流", "issuedOn": "2026-08-10", "dueOn": "2026-09-09", "period": "2026-08" },
+  { "id": "INV-B-002", "amount": 9000, "customer": "明达物流", "issuedOn": "2026-10-01", "dueOn": "2026-10-31", "period": "2026-10" },
+  { "id": "INV-B-003", "amount": 4000, "customer": "明达物流", "issuedOn": "2026-10-05", "dueOn": "2026-10-25", "period": "2026-10" },
+  { "id": "INV-C-001", "amount": 3000, "customer": "新程科技", "issuedOn": "2026-04-01", "dueOn": "2026-05-01", "period": "2026-04" },
+  { "id": "INV-C-002", "amount": 7000, "customer": "新程科技", "issuedOn": "2026-06-15", "dueOn": "2026-12-15", "period": "2026-06" },
+  { "id": "INV-C-003", "amount": 1000, "customer": "新程科技", "issuedOn": "2026-10-31", "dueOn": "2026-11-15", "period": "2026-10" }
+]

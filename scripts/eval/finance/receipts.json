@@ -1,0 +1,9 @@
+[
+  { "id": "RCP-001", "amount": 5000, "receivedOn": "2026-06-03" },
+  { "id": "RCP-002", "amount": 6000, "receivedOn": "2026-07-05" },
+  { "id": "RCP-003", "amount": 7000, "receivedOn": "2026-09-15" },
+  { "id": "RCP-004", "amount": 3000, "receivedOn": "2026-04-20" },
+  { "id": "RCP-005", "amount": 7500, "receivedOn": "2026-11-02" },
+  { "id": "RCP-006", "amount": 2000, "receivedOn": "2026-10-10" },
+  { "id": "RCP-007", "amount": 2500, "receivedOn": "2026-09-01" }
+]
