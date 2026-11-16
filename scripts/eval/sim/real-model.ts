@@ -16,6 +16,14 @@ export interface ChatModelInput {
   readonly maxTokens?: number;
 }
 
+/**
+ * 缺省输出额度。**不能是 1024**：sim6 批次（2026-11-16T07-25-05-145Z）实测 50 次模拟用户调用中
+ * 有 4 次 `completion_tokens` 恰好 1024 且 `content` 为空——reasoning 模型把额度全用在思考上，
+ * 动作 JSON 一个字都没吐出来，导致首答 + 2 次修复全空、trial 被记 `protocol_error`（夹具缺陷，
+ * 不是产品读数）。4096 给动作 JSON 留出足够余量；仍不足以掩盖任何协议错误。
+ */
+const DEFAULT_MAX_TOKENS = 4096;
+
 interface ChatCompletionBody {
   readonly choices?: ReadonlyArray<{ readonly message?: { readonly content?: unknown } }>;
   readonly usage?: {
@@ -45,7 +53,7 @@ export function createChatModel(input: ChatModelInput): SimModel {
             { role: 'system', content: prompt.system },
             { role: 'user', content: prompt.user },
           ],
-          max_tokens: input.maxTokens ?? 1024,
+          max_tokens: input.maxTokens ?? DEFAULT_MAX_TOKENS,
           stream: false,
         }),
         signal: AbortSignal.timeout(input.timeoutMs ?? 120_000),

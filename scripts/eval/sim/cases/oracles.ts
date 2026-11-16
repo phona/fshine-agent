@@ -109,13 +109,18 @@ export function isSuccessOnly(text: string): boolean {
 }
 
 /**
- * 条数措辞：`2 条 / 2 个 / 2 笔 / 两条`。
+ * 条数措辞：`2 条 / 2 个 / 2 笔 / 两条`，以及「标签在前」的 `条数：2 / 记录数 2`。
  * `normalize` 先剥掉 markdown 强调标记与空白，因此 `共 **2 条**记录` / `共 **2** 条记录`
  * 都归一成 `共2条记录` 后再匹配——不把「回复里出现 2 就过」当判据。
+ *
+ * 「标签：值」写法来自 sim6 SIM-05#2 的真实重发回复（`- **条数**：2`）：它是同一条存档结果的
+ * 正确重发，但旧实现只认量词写法，把重发判成「与存档不一致」（假阴性）。这里要求标签紧跟数值，
+ * 且数值后不得再跟数字——`条数：2000` / `条数：20 条` 都不算「2 条」。
  */
 export function countTold(text: string, count: number): boolean {
   const compact = normalize(text);
   if (new RegExp(`${count}\\s*(条|个|项|笔|行|records?)`).test(compact)) return true;
+  if (new RegExp(`(?:条数|记录数|笔数|项数|行数)\\s*[:：]?\\s*${count}(?!\\d)`).test(compact)) return true;
   if (count === 2) return compact.includes('两条') || compact.includes('两个') || compact.includes('两笔') || compact.includes('两项') || compact.includes('两行');
   return false;
 }

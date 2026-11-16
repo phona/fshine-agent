@@ -3,8 +3,9 @@
  * SimCase · 真实模型跑批入口（读切片用例 × trials、样本级并发 5）。
  * 写场景（SIM-09/10）不在本入口：ask 装配只开放读切片，写场景用 ../write-system 确定性假系统自检。
  *
- * 预注册：`.runtime/sim2/prereg.md`（写于任何真实模型请求之前；运行根可用 `SIM_RUN_ROOT`
- * 切换，缺省 `.runtime/sim`）。
+ * 预注册：`.runtime/<SIM_RUN_ROOT>/prereg.md`（写于任何真实模型请求之前；运行根可用 `SIM_RUN_ROOT`
+ * 切换，缺省 `.runtime/sim`）。本批选样用 `SIM_CASES_ONLY`（逗号分隔用例 id），样本数受
+ * `./selection` 的硬停（12）约束：超限立即报错、绝不发请求。
  * 装配：被测系统走 `./ask-adapter`（生产同源 `assembleAskRuntime` + 仓内 dummy 执行层），
  * 模拟用户走独立 OpenAI 兼容调用（`kind: simulator` 单独记账），判官不启用
  * （三个 Oracle 全部确定性）。
@@ -22,16 +23,19 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SIM_CASE_ORACLES, SIM_READ_CASES } from './cases';
+import type { SimCase } from './case';
 import { createAskRuntimeSystem, type AskRuntimeSystem } from './ask-adapter';
 import { runSimSuite, type SimTrialResult, type SimSuiteResult } from './run';
 import type { SimModel } from './simulator';
 import { createChatModel } from './real-model';
+import { assertSampleCap, selectSimCases } from './selection';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 /** 运行根可切换（缺省 `.runtime/sim`；修复重跑用 `.runtime/sim2`，预注册与报告同根）。 */
 const OUT_ROOT_BASE = path.join(REPO_ROOT, '.runtime', process.env.SIM_RUN_ROOT ?? 'sim');
 /** 整轮安全停（墙钟，只停跑批，不作任何注入锚点）。 */
 const GLOBAL_WALL_MS = 45 * 60_000;
+
 
 function stamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-');
@@ -138,7 +142,7 @@ interface CaseReport {
   readonly gaveUpReasons: readonly string[];
 }
 
-function buildCaseReports(trials: readonly SimTrialResult[]): CaseReport[] {
+function buildCaseReports(trials: readonly SimTrialResult[], cases: readonly SimCase[]): CaseReport[] {
   const byCase = new Map<string, SimTrialResult[]>();
   for (const trial of trials) {
     const list = byCase.get(trial.caseId) ?? [];
@@ -146,7 +150,7 @@ function buildCaseReports(trials: readonly SimTrialResult[]): CaseReport[] {
     byCase.set(trial.caseId, list);
   }
   const reports: CaseReport[] = [];
-  for (const caseDef of SIM_READ_CASES) {
+  for (const caseDef of cases) {
     const list = (byCase.get(caseDef.id) ?? []).slice().sort((a, b) => a.trial - b.trial);
     const terminals: Record<string, number> = {};
     for (const trial of list) terminals[trial.terminal ?? 'harness_error'] = (terminals[trial.terminal ?? 'harness_error'] ?? 0) + 1;
@@ -226,9 +230,11 @@ function buildReport(input: {
   suite: SimSuiteResult;
   wallMs: number;
   model: string;
+  cases: readonly SimCase[];
 }): string {
   const { suite, runId, outRoot, wallMs } = input;
-  const cases = buildCaseReports(suite.trials);
+  const cases = buildCaseReports(suite.trials, input.cases);
+  const trialsPerCase = [...new Set(input.cases.map((caseDef) => caseDef.limits.trials))];
   const lines: string[] = [];
   lines.push(`# SimCase 真实验证报告 · ${runId}`, '');
   lines.push(`- 预注册: \`${path.relative(REPO_ROOT, path.join(OUT_ROOT_BASE, 'prereg.md'))}\`（跑批前落盘）`);
@@ -236,10 +242,11 @@ function buildReport(input: {
   lines.push(`- 模拟用户模型: \`${input.model}\`（独立调用，\`kind: simulator\`）`);
   lines.push(`- 判官: 未启用（${SIM_CASE_ORACLES.length} 个确定性 Oracle）`);
   lines.push(`- 并发: ${suite.summary.isolation.concurrency}（观测最大并发 ${suite.batch.observedMaxConcurrency}）`);
-  lines.push(`- 样本: ${suite.summary.n}（${new Set(suite.trials.map((trial) => trial.caseId)).size} 用例 × ${SIM_READ_CASES[0]?.limits.trials ?? '?'} trials）· 墙钟 ${(wallMs / 1000).toFixed(1)}s`);
+  lines.push(`- 样本: ${suite.summary.n}（${new Set(suite.trials.map((trial) => trial.caseId)).size} 用例 × trials=${trialsPerCase.join('/')}）· 墙钟 ${(wallMs / 1000).toFixed(1)}s`);
+  lines.push(`- 选中用例: ${input.cases.map((caseDef) => caseDef.id).join('、')}（\`SIM_CASES_ONLY\`；缺省=全部读用例）`);
   lines.push(`- 输出: \`${path.relative(REPO_ROOT, outRoot)}\``, '');
   lines.push('## 1. 用例读数（每用例分开报）', '');
-  lines.push('| 用例 | pass^k (k=3) | 逐 trial pass | 终态 | contaminated | protocol_error | 有效样本 | 干预次数 | 无意义澄清(代理) | 严重失败 |');
+  lines.push('| 用例 | pass^k（k=该用例 trials 数） | 逐 trial pass | 终态 | contaminated | protocol_error | 有效样本 | 干预次数 | 无意义澄清(代理) | 严重失败 |');
   lines.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
   for (const report of cases) {
     lines.push(`| ${report.caseId} | ${report.passAll ? '1（全过）' : '0'} | ${report.passCount}/${report.trials.length} | ${JSON.stringify(report.terminals)} | ${report.contaminated} | ${report.protocolErrors} | ${report.effectiveTrials}/${report.trials.length} | ${report.interventions} | ${report.needlessClarifications} | ${report.severe.length} |`);
@@ -298,7 +305,7 @@ function buildReport(input: {
   lines.push(`- ${suite.summary.n} 条样本全留（不筛绿）：${suite.trials.length} 条；有效样本数 = ${suite.summary.n} − ${suite.summary.protocolErrors} = ${suite.summary.effectiveSamples}。`);
   lines.push(`- 逐用例 pass^k：${cases.map((report) => `${report.caseId}=${report.passAll ? 1 : 0}`).join('，')}。`);
   lines.push(`- 污染：${anyContamination ? '有（相关用例结论作废）' : '0'}；严重失败：${anySevere ? '有（blocked）' : '0'}；protocol_error：${suite.summary.protocolErrors}。`);
-  lines.push(`- 总判定：${allPass ? '三用例 pass^3 全过且协议失败 0' : '未全部通过（逐项见上，不筛绿）'}。`);
+  lines.push(`- 总判定：${allPass ? `${cases.length} 用例 pass^k 全过且协议失败 0` : '未全部通过（逐项见上，不筛绿）'}。`);
   lines.push('');
   return lines.join('\n');
 }
@@ -316,6 +323,9 @@ async function main(): Promise<void> {
   }
 
   const runId = stamp();
+  // 先选用例并核对样本硬停（超限立即报错，绝不先发请求）：只控制跑几条，不改任何判据。
+  const selectedCases = selectSimCases(SIM_READ_CASES, process.env['SIM_CASES_ONLY']);
+  assertSampleCap(selectedCases);
   const outRoot = path.join(OUT_ROOT_BASE, `run-${runId}`);
   mkdirSync(outRoot, { recursive: true });
   writeFileSync(path.join(outRoot, 'prereg-snapshot.md'), readFileSync(path.join(OUT_ROOT_BASE, 'prereg.md'), 'utf8'), 'utf8');
@@ -334,7 +344,7 @@ async function main(): Promise<void> {
   const startedAt = Date.now();
 
   const suitePromise = runSimSuite({
-    cases: SIM_READ_CASES,
+    cases: selectedCases,
     outRoot,
     concurrency: 5,
     oracles: SIM_CASE_ORACLES,
@@ -363,6 +373,7 @@ async function main(): Promise<void> {
       suite,
       wallMs,
       model,
+      cases: selectedCases,
     });
     writeFileSync(path.join(outRoot, 'report.md'), report, 'utf8');
     const summary = {
@@ -378,7 +389,7 @@ async function main(): Promise<void> {
       byTerminal: suite.summary.byTerminal,
       accounting: suite.summary.accounting,
       isolation: suite.summary.isolation,
-      cases: buildCaseReports(suite.trials).map((report) => ({
+      cases: buildCaseReports(suite.trials, selectedCases).map((report) => ({
         caseId: report.caseId,
         passAll: report.passAll,
         passCount: report.passCount,

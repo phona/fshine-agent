@@ -94,3 +94,15 @@ TMPDIR=/tmp/sim-eval-tmp node --import tsx scripts/eval/sim/selftest.ts
 - 入口：`SIM_RUN_ROOT=sim6 node --env-file-if-exists=.env --import tsx scripts/eval/sim/run-real.ts`
 - 模型 `step-3.7-flash`，样本级并发 5，每用例 3 trials，一次采样、失败样本全留、不筛绿。
 - 确定性门：`npm run typecheck` 0；`npx vitest run scripts/eval/sim` 0 失败；`npx vitest run` 全量 0 失败。
+
+### sim6 第二轮（2026-11-16，回归 + 未决失败重跑；预注册 `.runtime/sim6/prereg.md`）
+
+| 项 | 改动 | 证据（改前 → 改后） |
+| --- | --- | --- |
+| 选样与硬停 | `./selection`：`SIM_CASES_ONLY`（逗号分隔 id，缺省全部读用例）+ `SAMPLE_HARD_CAP=12`（超限先报错、不发请求）；`run-real` 报告按实际选中用例与每用例 trials 数打印 k | 只控制跑几条，不改任何判据；`selection.test.ts` 锁死未知 id 拒绝、空串=全跑、12 上限 |
+| Oracle 假阴性（重发内容一致性） | `countTold` 增加「标签：值」写法（`条数：2`），数值后禁止再跟数字（`条数：2000`、`条数：20 条` 不算） | 同一批真实对话 SIM-05#2：改前 `no_old_reply_reuse=false`（pass=false）→ 改后 `true`（pass=true）；其余 10 条样本重判不变；反向绊线两条（末轮换新问题仍判冒充、重发无实质内容仍判负）常红 |
+| 夹具缺陷（不是判据） | `real-model.ts` 缺省 `max_tokens` 1024 → 4096 | 冻结批 50 次模拟用户调用中 4 次 `completion_tokens` 恰 1024 且 content 为空（SIM-05#1 首答+2 次修复全空 → `protocol_error`）；确认批（`.runtime/sim6/confirmation/`）3 条 SIM-05 全部 satisfied、protocol_error=0，最大 output 3439 |
+
+冻结批读数（`.runtime/sim6/run-2026-11-16T07-25-05-145Z/`）：12 条，`contaminated=0`、严重失败 0、
+`protocol_error=1`（SIM-05#1，夹具缺陷）；SIM-01/SIM-02/SIM-08 均 pass^3=1，SIM-05 pass^3=0
+（#1 协议失败、#2 改判后通过、#3 通过）。两条批次的样本全部保留，确认批不并入冻结批。
