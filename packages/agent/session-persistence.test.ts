@@ -1,24 +1,29 @@
 /**
  * B1 会话持久化 独立存储层测试（确定性、零真实模型、零网络）。
  *
- * 复用 Pi 公开持久化（`JsonlSessionRepo` + Pi `NodeExecutionEnv` 文件系统），只验证本层
- * 需要保证的五类不变量：
+ * 底层是 Pi 1.5.2 root 公开的 `SessionManager`；本层只验证自己承担的保证：
  *   ① 原子恢复：崩溃留下的半行/半建状态不留半态，恢复到最后一个完整提交；
- *   ② principal/session 隔离：同名 sessionId 也跨 principal 不通读；
- *   ③ 损坏显式报错：坏行/坏头**拒绝加载**，不静默回落；
- *   ④ 不重放任务：恢复是纯读（文件字节不变、无新写入），且本层无任何执行入口；
- *   ⑤ 不复制任务事实：落盘只有 Pi session entry，无任何任务台账字段。
+ *   ② principal/session 隔离：同名 sessionId 也跨 principal 不通读（物理分目录）；
+ *   ③ (principalId, sessionId) 唯一映射：同一对键只有一个会话文件，非法/冲突 id 显式报错；
+ *   ④ 损坏显式报错：坏行/坏头**拒绝加载**，不静默回落、不静默重建；
+ *   ⑤ 恢复不重放：打开会话不触发任何工具/执行（假执行层计数为 0），且本层无执行入口；
+ *   ⑥ 不复制任务事实：落盘只有 Pi session entry，无任何任务台账字段。
  *
  * 每个用例用独立临时目录（真实文件系统），不依赖外部平台或模型。
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, readdirSync, existsSync, statSync } from 'node:fs';
+import {
+  copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 import type { Usage } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import type { DriverMessage } from './src/driver-contract';
+import { createSession } from './src/execution-runtime';
 import { SessionPersistence, type PersistedSession } from './src/session-persistence';
 
 const ZERO_USAGE: Usage = {
@@ -71,9 +76,27 @@ function toolResult(toolCallId: string, text: string, timestamp = 4): AgentMessa
   };
 }
 
+const MANIFEST: CapabilityManifest = {
+  contractVersion: 1,
+  operations: [{ name: 'dummy.query', label: 'query', args: [] }],
+};
+
+/** 假执行层：只计数，不产生副作用（用于证明打开会话不触发执行）。 */
+class CountingExecutionClient implements ExecutionClient {
+  executions = 0;
+
+  async capabilities(): Promise<CapabilityManifest> {
+    return MANIFEST;
+  }
+
+  async execute(): Promise<ExecutionOutcome> {
+    this.executions += 1;
+    return { status: 'completed', data: {} };
+  }
+}
+
 const roots: string[] = [];
 const layers: SessionPersistence[] = [];
-
 function newRoot(): string {
   const root = mkdtempSync(path.join(os.tmpdir(), 'sessp-'));
   roots.push(root);
@@ -81,7 +104,7 @@ function newRoot(): string {
 }
 
 function layerAt(root: string): SessionPersistence {
-  const layer = new SessionPersistence({ rootDir: root, cwd: '/workspace', now: () => 1_000_000 });
+  const layer = new SessionPersistence({ rootDir: root, cwd: '/workspace' });
   layers.push(layer);
   return layer;
 }
@@ -107,7 +130,7 @@ afterEach(async () => {
   roots.length = 0;
 });
 
-describe('B1 会话持久化（独立存储层；复用 Pi JsonlSessionRepo）', () => {
+describe('B1 会话持久化（独立存储层；底层 Pi SessionManager）', () => {
   describe('① 原子恢复（崩溃安全，不留半态）', () => {
     it('readTranscript 每次现读并返回独立副本，层内不留可变转录缓存（Pi Session 是唯一所有者）', async () => {
       const layer = layerAt(newRoot());
@@ -138,20 +161,20 @@ describe('B1 会话持久化（独立存储层；复用 Pi JsonlSessionRepo）',
       const reopened = await restarted.openOrCreate('alice', 'sess');
       expect(await texts(reopened)).toEqual(['m1', 'm2']); // 未完成的最后一条被丢弃
 
-      // 修复后文件以换行收尾（Pi 已原子重写为完整状态），可继续追加且不重放旧内容。
+      // 修复后文件以换行收尾（本层把 torn 尾行截断到最后一个完整行），可继续追加且不重放旧内容。
       expect(readFileSync(session.filePath, 'utf8').endsWith('\n')).toBe(true);
       await reopened.append(user('m4'));
       expect(await texts(reopened)).toEqual(['m1', 'm2', 'm4']);
     });
 
-    it('崩溃停在「已建文件、未建 branch」之间也能恢复（幂等补齐，无半态）', async () => {
+    it('崩溃停在「已建文件、尚未写入任何 entry」之间也能恢复（不重建、不半态）', async () => {
       const root = newRoot();
       const layer = layerAt(root);
       const session = await layer.openOrCreate('alice', 'sess');
       await session.append(user('m1'));
       await layer.close();
 
-      // 只保留 header 行：模拟文件已建、branch tip 尚未写入的中间态。
+      // 只保留 header 行：模拟 header 已落盘、首条 entry 尚未写入的中间态。
       const headerLine = readFileSync(session.filePath, 'utf8').split('\n')[0];
       writeFileSync(session.filePath, `${headerLine ?? ''}\n`);
 
@@ -162,7 +185,7 @@ describe('B1 会话持久化（独立存储层；复用 Pi JsonlSessionRepo）',
       expect(await texts(reopened)).toEqual(['fresh']);
     });
 
-    it('原子建仓：create 走临时文件 + rename，落盘后不残留 .tmp', async () => {
+    it('建仓只落一个 .jsonl 文件、不残留临时文件', async () => {
       const root = newRoot();
       const layer = layerAt(root);
       const session = await layer.openOrCreate('alice', 'sess');
@@ -205,7 +228,68 @@ describe('B1 会话持久化（独立存储层；复用 Pi JsonlSessionRepo）',
     });
   });
 
-  describe('③ 损坏显式报错（不作静默回落掩盖）', () => {
+  describe('③ (principalId, sessionId) 唯一映射（同一对键只有一个会话；非法/冲突 id 显式报错）', () => {
+    it('同一对键重复打开返回同一句柄与同一文件（不新建第二份）', async () => {
+      const layer = layerAt(newRoot());
+      const first = await layer.openOrCreate('alice', 's');
+      await first.append(user('a'));
+
+      const second = await layer.openOrCreate('alice', 's');
+      expect(second).toBe(first);
+      expect(second.filePath).toBe(first.filePath);
+      expect((await layer.list('alice')).filter((m) => m.id === 's')).toHaveLength(1);
+    });
+
+    it('进程重启后同一对键仍解析到同一文件（不新建第二份）', async () => {
+      const root = newRoot();
+      const layer = layerAt(root);
+      const first = await layer.openOrCreate('alice', 's');
+      await first.append(user('a'));
+      const filePath = first.filePath;
+      await layer.close();
+
+      const restarted = layerAt(root);
+      const reopened = await restarted.openOrCreate('alice', 's');
+      expect(reopened.filePath).toBe(filePath);
+      expect(readdirSync(path.dirname(filePath)).filter((name) => name.endsWith('.jsonl'))).toHaveLength(1);
+      expect(await texts(reopened)).toEqual(['a']);
+    });
+
+    it('同一 id 出现两份会话文件 → 显式冲突报错（不静默挑一个）', async () => {
+      const root = newRoot();
+      const layer = layerAt(root);
+      const session = await layer.openOrCreate('alice', 'dup');
+      await session.append(user('a'));
+      await layer.close();
+
+      const duplicate = path.join(path.dirname(session.filePath), '2000-01-01T00-00-00-000Z_dup.jsonl');
+      copyFileSync(session.filePath, duplicate);
+
+      const restarted = layerAt(root);
+      await expect(restarted.openOrCreate('alice', 'dup')).rejects.toThrow(
+        /Conflicting session files for \(alice, dup\)/,
+      );
+    });
+
+    it('业务 id 含 Pi 不允许的字符（如 wecom:conv-1）仍按对键唯一映射，list 回原 id', async () => {
+      const layer = layerAt(newRoot());
+      const session = await layer.openOrCreate('alice', 'wecom:conv-1');
+      await session.append(user('hi'));
+
+      expect(await texts(session)).toEqual(['hi']);
+      expect((await layer.list('alice')).map((m) => m.id)).toEqual(['wecom:conv-1']);
+      expect(await texts(await layer.openOrCreate('alice', 'wecom:conv-1'))).toEqual(['hi']);
+    });
+
+    it('非法 session id → 显式报错（不落盘、不改名重试）', async () => {
+      const layer = layerAt(newRoot());
+      await expect(layer.openOrCreate('alice', '')).rejects.toThrow(/must be non-empty/);
+      await expect(layer.openOrCreate('alice', 'bad\u0000id')).rejects.toThrow(/must not contain NUL/);
+      expect(await layer.list('alice')).toEqual([]);
+    });
+  });
+
+  describe('④ 损坏显式报错（不作静默回落掩盖）', () => {
     it('完整行但非法 JSON → 拒绝加载并指明行号', async () => {
       const root = newRoot();
       const layer = layerAt(root);
@@ -251,7 +335,7 @@ describe('B1 会话持久化（独立存储层；复用 Pi JsonlSessionRepo）',
     });
   });
 
-  describe('④ 不重放任务（恢复是纯读，且无执行入口）', () => {
+  describe('⑤ 恢复不重放（打开会话不触发工具/执行；本层无执行入口）', () => {
     it('恢复含 toolCall/toolResult 的转录逐字返回，恢复过程零写入，续写从存储 tip 接续', async () => {
       const root = newRoot();
       const layer = layerAt(root);
@@ -284,6 +368,51 @@ describe('B1 会话持久化（独立存储层；复用 Pi JsonlSessionRepo）',
         expect((restarted as unknown as Record<string, unknown>)[name]).toBeUndefined();
       }
     });
+
+    it('用存储句柄装配 runtime：打开/载入不触发假执行层，也不触发模型驱动回合', async () => {
+      const root = newRoot();
+      const layer = layerAt(root);
+      const session = await layer.openOrCreate('p', 'c');
+      await session.append(user('do the thing'));
+      await session.append(assistantToolCall('tc1', 'dummy.query'));
+      await session.append(toolResult('tc1', 'ok'));
+      await layer.close();
+
+      const client = new CountingExecutionClient();
+      const driverRuns: DriverMessage[][] = [];
+      const restarted = layerAt(root);
+      const store = await restarted.openOrCreate('p', 'c');
+      const runtime = await createSession({
+        principalId: 'p',
+        sessionId: 'c',
+        client,
+        allowedOperations: ['dummy.query'],
+        mainDriver: {
+          async run(input) {
+            driverRuns.push([...input.messages]);
+            return { text: '', messages: [...input.messages] };
+          },
+        },
+        workerDriver: {
+          async run() {
+            throw new Error('（测试）worker 不应被调用');
+          },
+        },
+        mainSystemPrompt: '你是测试主 Agent。',
+        transcriptStore: store,
+        onTranscriptError: () => undefined,
+      });
+
+      // 打开 + 载入转录：零执行、零模型回合。
+      expect(client.executions).toBe(0);
+      expect(driverRuns).toHaveLength(0);
+      // 载入的转录就是存储里的三条（toolCall/toolResult 未被重放成执行）。
+      expect(runtime.transcript().map((message) => message.role)).toEqual([
+        'user',
+        'assistant',
+        'toolResult',
+      ]);
+    });
   });
 
   describe('增长特性（复用 Pi 单条 entry 追加日志 = 线性；非被否证的每回合全量快照 O(n²)）', () => {
@@ -310,8 +439,8 @@ describe('B1 会话持久化（独立存储层；复用 Pi JsonlSessionRepo）',
     });
   });
 
-  describe('⑤ 不复制任务事实（任务真相仍在既有 SQLite 账本）', () => {
-    it('落盘仅含 Pi session entry，无任何任务台账字段', async () => {
+  describe('⑥ 不复制任务事实（任务真相仍在既有 SQLite 账本）', () => {
+    it('落盘仅含 Pi session header + message entry，无任何任务台账字段', async () => {
       const root = newRoot();
       const layer = layerAt(root);
       const session = await layer.openOrCreate('p', 'c');
@@ -337,18 +466,24 @@ describe('B1 会话持久化（独立存储层；复用 Pi JsonlSessionRepo）',
         expect(raw).not.toContain(token);
       }
 
-      const lines = raw.trim().split('\n');
-      const header = JSON.parse(lines[0] ?? '{}') as { kind?: string };
-      expect(header.kind).toBe('header');
+      // 1.5.2 落盘形状：首行 Pi session header，其余每行一条 Pi message entry。
+      const lines = raw.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+      const header = lines[0]!;
+      expect(header['type']).toBe('session');
+      // Pi 1.5.2 只接受 [A-Za-z0-9._-] 的会话 id（B1 把业务 id 可逆映射进来）。
+      expect(header['id']).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/);
+      expect(typeof header['cwd']).toBe('string');
 
-      for (const line of lines.slice(1)) {
-        const parsed = JSON.parse(line);
-        const writes = Array.isArray(parsed) ? parsed : [parsed];
-        for (const write of writes as Array<Record<string, unknown>>) {
-          expect(['entry', 'value', 'list', 'usage']).toContain(write.kind);
-          if (write.kind === 'entry') {
-            expect(write.type).toBe('message'); // 只落 Pi message entry，非任务事实
-          }
+      const entries = lines.slice(1);
+      expect(entries).toHaveLength(2); // 用户 + 助手各一条
+      for (const entry of entries) {        expect(entry['type']).toBe('message'); // 只落 Pi message entry，非任务事实
+        expect(typeof entry['id']).toBe('string');
+        expect(typeof entry['timestamp']).toBe('string');
+        const message = entry['message'] as Record<string, unknown>;
+        expect(['user', 'assistant', 'toolResult', 'system']).toContain(message['role']);
+        // 除 Pi entry 自身字段外不夹带任何宿主字段（任务事实无从落盘）。
+        for (const key of Object.keys(entry)) {
+          expect(['type', 'id', 'parentId', 'timestamp', 'message']).toContain(key);
         }
       }
     });

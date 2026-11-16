@@ -160,6 +160,8 @@ export interface MuMainRecord {
   readonly principalId: string;
   readonly userText: string;
   readonly messages: readonly unknown[];
+  /** 宿主事实注入（Pi 原生 custom message；`TurnDriverInput.injections`，独立于 messages）。 */
+  readonly injections: readonly string[];
   readonly calls: readonly MuCallRecord[];
   readonly reply: string | null;
 }
@@ -223,7 +225,7 @@ function makeMainDriver(ctx: MuCtx): TurnDriver {
         }
         ctx.compactions.push({ principalId: principal, before: plan.compact.before, after: plan.compact.after, sawTags: [...sawTags], kind: 'threshold' });
       }
-      ctx.mainRecords.push({ principalId: principal, userText: text, messages: input.messages, calls, reply: plan.reply });
+      ctx.mainRecords.push({ principalId: principal, userText: text, messages: input.messages, injections: input.injections ?? [], calls, reply: plan.reply });
       if (plan.rendezvous === true) {
         ctx.trace.push({ seq: ctx.nextSeq++, principalId: principal, phase: 'exit', text });
       }

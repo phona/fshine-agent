@@ -18,7 +18,7 @@ import path from 'node:path';
 import { stringify as stringifyYaml, parse as parseYaml } from 'yaml';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import type { AppConfig } from '@fshine/contracts';
-import { estimateContextTokens } from '@earendil-works/pi-agent-core';
+import { estimateContextTokens } from '../token-estimate';
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver, TurnDriverInput } from '../../../packages/agent/src/driver-contract';
 import { createResourcePolicy } from '../../../packages/agent/src/resource-policy';
@@ -146,7 +146,6 @@ async function run(): Promise<void> {
         };
         return await inner.run(wrappedInput);
       },
-      ...(inner.compact ? { compact: inner.compact.bind(inner) } : {}),
       ...(inner.synthesizeAssistant ? { synthesizeAssistant: inner.synthesizeAssistant.bind(inner) } : {}),
     };
     return wrapped;

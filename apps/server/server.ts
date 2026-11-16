@@ -37,6 +37,7 @@ import {
   assembleSessionCore,
   attachNotificationOutbox,
   createBackgroundDispatch,
+  type DriverFactory,
   type ExecutionFace,
 } from '../../scripts/ask-runtime';
 
@@ -63,7 +64,7 @@ export interface ServerDeps {
    */
   sessionStoreDir?: string;
   /** 测试注入：Pi 回合驱动工厂；缺省真实 Pi 驱动（读 env）。 */
-  createDrivers?: (env: NodeJS.ProcessEnv) => { mainDriver: TurnDriver; workerDriver: TurnDriver };
+  createDrivers?: DriverFactory;
   /** 测试注入：执行面；缺省仓内 dummy CLI（按 profile root+gateway spawn）。 */
   createExecutionFace?: (profile: ContextProfileConfig, env: NodeJS.ProcessEnv) => Promise<ExecutionFace>;
   /** 测试注入：后台执行回合（dispatchMode=background 时使用）；缺省真实 Worker 回合执行器。 */
@@ -113,9 +114,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   const mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, profile.executorLabel)}${mainSkills.promptBlock}\n\n${MAIN_PROTOCOL_NOTE}`;
   const stateDir = deps.stateDir ?? path.join(REPO_ROOT, '.runtime', 'server', 'state');
 
-  // B1 会话转录持久化：装配层是唯一构造具体存储处（复用 Pi JsonlSessionRepo 的独立存储层）。
-  // cwd 跨重启必须稳定（Pi 的 (cwd, id) 是会话身份的一半；变了会解析到不同身份，见
-  // session-persistence.ts 与 Pi repo 的 header id/cwd 一致性校验）。
+  // B1 会话转录持久化：装配层是唯一构造具体存储处（基于 Pi SessionManager 的独立存储层）。
+  // cwd 跨重启必须稳定（Pi 会话 header 记录 cwd；变了会解析到不同身份，见
+  // session-persistence.ts 的 (principalId, sessionId) 唯一映射）。
   const sessionStoreDir = deps.sessionStoreDir ?? path.join(path.dirname(deps.dbPath), 'sessions');
   const sessionPersistence = new SessionPersistence({ rootDir: sessionStoreDir, cwd: REPO_ROOT });
 
@@ -267,7 +268,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     const pending = enqueueSessionTurn(`${principalId}\u0000${sessionId}`, async () => {
       await drainNotifications();
       const session = await sessionFor(principalId, sessionId);
-      return await session.send(message.text);
+      const turn = await session.send(message.text);
+      // 本回合没有可用正文（溢出恢复失败 / 只有思考没正文且催问后仍空）= 回合失败。
+      // 不得当作成功回执：空串会让渠道一个终帧都不发（用户什么也收不到），也不记
+      // message_done。放在这里抛出 = 走既有的「回合失败」路径（失败不进重投缓存，
+      // 渠道适配器的 handler 异常分支回失败话术），不新造机制、不重试。
+      if (turn.reply.trim() === '') {
+        throw new Error('本回合未产出可用回复（模型侧失败），本回合未完成。');
+      }
+      return turn;
     }).then(
       (turn) => {
         log({

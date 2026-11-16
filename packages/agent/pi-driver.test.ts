@@ -1,21 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { KIMI_THINKING_LEVEL_MAP, createProviderToolNameMap, toAgentTool, plannerMessagesToLlm } from './src/pi-driver';
+import { KIMI_THINKING_LEVEL_MAP, createProviderToolNameMap, toAgentTool } from './src/pi-driver';
 import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type TurnDriverInput } from './src/driver-contract';
 
 describe('Pi driver safety helpers', () => {
-  it('把宿主任務事件和任务清单转换给真实模型，同时保留原生转录中的 custom 来源', () => {
-    const event = { role: 'custom', customType: 'background_task_event', content: '宿主事件：原始请求A与执行结果', timestamp: 1 };
-    const roster = { role: 'custom', customType: 'background_task_roster', content: '正在运行的任务A', timestamp: 2 };
-    const user = { role: 'user', content: '现在做到哪了？', timestamp: 3 };
-    const converted = plannerMessagesToLlm([event, roster, user] as never);
-    expect(converted.map((message) => message.role)).toEqual(['user', 'user', 'user']);
-    expect(JSON.stringify(converted)).toContain('原始请求A与执行结果');
-    expect(JSON.stringify(converted)).toContain('正在运行的任务A');
-    expect(event.role).toBe('custom');
-    expect(converted[2]).toBe(user);
-  });
-
   it('does not opt into unsupported Kimi extended thinking levels', () => {
     expect(KIMI_THINKING_LEVEL_MAP.low).toBe('low');
     expect(KIMI_THINKING_LEVEL_MAP.medium).toBe('medium');

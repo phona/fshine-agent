@@ -21,8 +21,17 @@ export interface TurnDriverInput {
   systemPrompt: string;
   /** host tools/list 发现的工具（含 inputSchema），driver 据此构造原生工具定义。 */
   tools: readonly DiscoveredTool[];
-  /** 完整转录：历史全部消息（不含本条新用户消息，由调用方在调用前 push）。 */
+  /**
+   * 本回合输入快照：最后一条 user 消息 = 本轮输入；其余消息只是**种子历史**——
+   * 仅在驱动尚无 Pi 会话（首回合 / 每回合一次性会话）时导入，会话已存在时**不进入**转录
+   * （转录归 Pi 的 AgentSession 独占）。
+   */
   messages: DriverMessage[];
+  /**
+   * 宿主确定性事实（R5 B 通道）：以 Pi 原生 custom message 注入下一请求（按 user 角色投影），
+   * 不触发单独模型回合。缺省 = 无注入。
+   */
+  injections?: readonly string[];
   /** 阶段进度回调（埋点事实渲染 + 模型意图短语）。 */
   onStep: (text: string) => void;
   /** 执行工具：返回 data（原样进入转录）；失败时抛出面向用户的安全话术。 */
@@ -36,14 +45,36 @@ export interface TurnDriverInput {
 export interface TurnDriverResult {
   /** 最终给用户的回复文本；空字符串表示本次模型调用未产出可用回复。 */
   text: string;
-  /** 更新后的完整转录（含本回合全部消息），由调用方持久化。 */
+  /**
+   * 本回合结束后的转录**只读投影快照**（Pi 原生会话 → 宿主可读形状）。
+   * 宿主不得据此累积可变历史；需要当前转录时用 `TurnDriver.transcript()`。
+   */
   messages: DriverMessage[];
+}
+
+export interface PiSessionInspection {
+  /** Pi 实际对模型使用的系统提示（受控 ResourceLoader + Pi 原生渲染）。 */
+  systemPrompt: string;
+  /** Pi 当前激活的工具名（白名单内；内置 read/bash/edit/write 不应出现）。 */
+  activeToolNames: readonly string[];
+  /** 会话落盘文件（仅显式 sessionDir 时存在）。 */
+  sessionFile: string | undefined;
 }
 
 export interface TurnDriver {
   run(input: TurnDriverInput): Promise<TurnDriverResult>;
-  /** 上下文压缩（Pi 原生 compact 的宿主侧收敛）。超阈值时替换旧消息为摘要 + 保留最近尾巴。 */
-  compact?(messages: DriverMessage[], opts?: { force?: boolean }): Promise<DriverMessage[]>;
+  /**
+   * 只读派生：驱动持有的 Pi 会话当前转录投影（宿主 `Session.transcript()` 直接委托它）。
+   * 无此方法的测试替身由调用方回落到上一回合结果快照。
+   */
+  transcript?(): readonly DriverMessage[];
+  /** 释放驱动持有的 Pi 会话（实例级会话的进程正常退出路径）。 */
+  close?(): void;
+  /**
+   * 只读审计面：当前 Pi 会话的系统提示、激活工具名与落盘文件（不做任何行为）。
+   * 会话尚未创建（或回合级会话已释放）时返回 undefined。
+   */
+  sessionInfo?(): PiSessionInspection | undefined;
   /**
    * 服务端确定性回复合成原生 assistant 消息：必须带完整内部形状
    * （api/provider/model/usage/stopReason），否则该转录进入下一模型回合时结算会报错。

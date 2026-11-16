@@ -15,14 +15,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { MutableModels } from '@earendil-works/pi-ai';
 import type {
   CapabilityManifest,
   ExecutionClient,
   ExecutionOutcome,
   ExecutionRequest,
 } from '@fshine/contracts/execution-contract';
-import { createPiTurnDriver, type PiModelRuntime } from './src/pi-driver';
+import { createPiTurnDriver } from './src/pi-driver';
+import { createScriptedModelRuntime } from './testing/scripted-model-runtime';
 import { createSession } from './src/execution-runtime';
 import { TaskOwnershipError, createTaskRegistry, type TaskRegistry } from './src/task-registry';
 import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
@@ -93,7 +93,10 @@ function toolCallAssistant(name: string, args: Record<string, unknown>, id: stri
     api: 'openai-completions',
     provider: 'llm',
     model: 'test-model',
-    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15 },
+    usage: {
+      input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
     stopReason: 'toolUse',
     timestamp: Date.now(),
   } as unknown as AgentMessage;
@@ -106,55 +109,24 @@ function textAssistant(text: string): AgentMessage {
     api: 'openai-completions',
     provider: 'llm',
     model: 'test-model',
-    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15 },
+    usage: {
+      input: 10, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 15,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
     stopReason: 'stop',
     timestamp: Date.now(),
   } as unknown as AgentMessage;
 }
 
-function streamOf(message: AgentMessage) {
-  return {
-    async *[Symbol.asyncIterator]() {
-      yield { type: 'start', partial: message };
-      yield { type: 'done', reason: (message as { stopReason?: string }).stopReason, message };
-    },
-    result: async () => message,
-  };
+async function driverFor(responses: AgentMessage[]) {
+  const scripted = await createScriptedModelRuntime({
+    contextWindow: 40_000,
+    script: (index) => responses[index],
+  });
+  return createPiTurnDriver({ env: { LLM_MODEL: 'test-model' }, modelRuntime: scripted.runtime });
 }
 
-function fakeRuntime(responses: AgentMessage[]): { runtime: PiModelRuntime; calls: () => number } {
-  let calls = 0;
-  const runtime: PiModelRuntime = {
-    model: {
-      id: 'test-model',
-      name: 'test-model',
-      api: 'openai-completions',
-      provider: 'llm',
-      baseUrl: 'http://127.0.0.1:9',
-      reasoning: true,
-      input: ['text'],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 40_000,
-      maxTokens: 32_000,
-    } as unknown as PiModelRuntime['model'],
-    models: {
-      streamSimple: async () => {
-        calls += 1;
-        const response = responses.shift();
-        if (!response) throw new Error('假模型运行时没有更多响应');
-        return streamOf(response);
-      },
-      completeSimple: async () => textAssistant('【夹具摘要】'),
-    } as unknown as MutableModels,
-  };
-  return { runtime, calls: () => calls };
-}
-
-function driverFor(responses: AgentMessage[]) {
-  return createPiTurnDriver({ env: { LLM_MODEL: 'test-model' }, runtime: fakeRuntime(responses).runtime });
-}
-
-function sessionFor(client: ExecutionClient, options: {
+async function sessionFor(client: ExecutionClient, options: {
   mainResponses: AgentMessage[];
   workerResponses: AgentMessage[];
   allowedOperations?: readonly string[];
@@ -165,8 +137,8 @@ function sessionFor(client: ExecutionClient, options: {
     sessionId: 'sess_1',
     client,
     allowedOperations: options.allowedOperations ?? ['dummy.query'],
-    mainDriver: driverFor(options.mainResponses),
-    workerDriver: driverFor(options.workerResponses),
+    mainDriver: await driverFor(options.mainResponses),
+    workerDriver: await driverFor(options.workerResponses),
     mainSystemPrompt: '你是测试主 Agent。',
     ...(options.taskRegistry ? { taskRegistry: options.taskRegistry } : {}),
   });

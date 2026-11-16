@@ -32,8 +32,10 @@ import { stringify as stringifyYaml, parse as parseYaml } from 'yaml';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import type { AppConfig } from '@fshine/contracts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { MutableModels } from '@earendil-works/pi-ai';
-import { estimateContextTokens } from '@earendil-works/pi-agent-core';
+import { estimateContextTokens } from '../token-estimate';
+import { tmpdir } from 'node:os';
+import { ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver, TurnDriverInput } from '../../../packages/agent/src/driver-contract';
 import { createResourcePolicy } from '../../../packages/agent/src/resource-policy';
@@ -83,6 +85,39 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** 假模型运行时（公开 ModelRuntime + registerProvider；只用于 C/D2 的控制流直测）。 */
+type ProviderModel = NonNullable<Parameters<ModelRuntime['registerProvider']>[1]['models']>[number];
+const FAKE_MODEL: ProviderModel = {
+  id: 'step-3.7-flash', name: 'step-3.7-flash', api: 'openai-completions',
+  baseUrl: 'http://127.0.0.1:9', reasoning: true, input: ['text'],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 8_192, maxTokens: 8_192,
+};
+
+async function fakeRuntime(streamSimple: (model: never, context: never) => never): Promise<ModelRuntime> {
+  const runtime = await ModelRuntime.create({
+    authPath: path.join(tmpdir(), `p3c-auth-${process.pid}.json`),
+    modelsPath: null,
+    refreshOnCreate: false,
+  });
+  runtime.registerProvider('llm', {
+    name: 'LLM', api: 'openai-completions', apiKey: 'p3c-fake', models: [FAKE_MODEL],
+    streamSimple: streamSimple as never,
+  });
+  return runtime;
+}
+
+function streamOfMessage(message: AgentMessage) {
+  const stream = createAssistantMessageEventStream();
+  const stop = (message as { stopReason?: string }).stopReason;
+  queueMicrotask(() => {
+    if (stop === 'error' || stop === 'aborted') stream.push({ type: 'error', reason: stop, message } as never);
+    else stream.push({ type: 'done', reason: 'stop', message } as never);
+    stream.end(message as never);
+  });
+  return stream;
+}
 
 async function run(): Promise<void> {
   const workDir = process.argv[2]!;
@@ -216,29 +251,12 @@ async function run(): Promise<void> {
     stopReason: 'error', errorMessage: 'provider 500 internal server error',
     timestamp: Date.now(),
   } as unknown as AgentMessage;
-  const fakeModelsC = {
-    streamSimple: async () => {
-      fakeModelsHolder.streamCalls += 1;
-      const message = { ...errorAssistant, timestamp: Date.now() };
-      return {
-        async *[Symbol.asyncIterator]() {
-          yield { type: 'start', partial: message };
-          yield { type: 'done', reason: 'error', message };
-        },
-        result: async () => message,
-      };
-    },
-    completeSimple: async () => { throw new Error('假模型：摘要也不可用'); },
-    setProvider: () => {},
-    getModel: () => ({ id: 'step-3.7-flash' }),
-  } as unknown as MutableModels;
-  const fakeModel = {
-    id: 'step-3.7-flash', name: 'step-3.7-flash', api: 'openai-completions', provider: 'llm',
-    baseUrl: 'http://127.0.0.1:9', reasoning: true, input: ['text'],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 8192, maxTokens: 8192,
-  } as never;
-  const driverC = createPiTurnDriver({ env: { ...env, LLM_API_BASE_URL: 'http://127.0.0.1:9' }, ...windowOpts, runtime: { models: fakeModelsC, model: fakeModel } });
+  const runtimeC = await fakeRuntime((() => {
+    fakeModelsHolder.streamCalls += 1;
+    const message = { ...errorAssistant, timestamp: Date.now() };
+    return streamOfMessage(message as unknown as AgentMessage);
+  }) as never);
+  const driverC = createPiTurnDriver({ env: { ...env, LLM_API_BASE_URL: 'http://127.0.0.1:9' }, ...windowOpts, modelRuntime: runtimeC });
   const partC: Record<string, unknown> = {
     constructed: '注入 runtime：streamSimple 恒返 stopReason=error（provider 500）',
   };
@@ -283,21 +301,21 @@ async function run(): Promise<void> {
 
   beginPart('D2_挂起流+800ms_deadline');
   const hangDeadline = { at: 0 };
-  const fakeModelsD = {
-    streamSimple: async () => ({
-      async *[Symbol.asyncIterator]() {
-        yield { type: 'start', partial: { role: 'assistant', content: [] } };
-        while (Date.now() < hangDeadline.at) await sleep(20);
-        const message = { role: 'assistant', content: [], stopReason: 'aborted', timestamp: Date.now() } as unknown as AgentMessage;
-        yield { type: 'done', reason: 'aborted', message };
-      },
-      result: async () => ({ role: 'assistant', content: [], stopReason: 'aborted' }) as unknown as AgentMessage,
-    }),
-    completeSimple: async () => { throw new Error('假模型：摘要不可用'); },
-    setProvider: () => {},
-    getModel: () => ({ id: 'step-3.7-flash' }),
-  } as unknown as MutableModels;
-  const driverD2 = createPiTurnDriver({ env: { ...env, LLM_API_BASE_URL: 'http://127.0.0.1:9' }, ...windowOpts, runtime: { models: fakeModelsD, model: fakeModel } });
+  const runtimeD2 = await fakeRuntime((() => {
+    const stream = createAssistantMessageEventStream();
+    void (async () => {
+      while (Date.now() < hangDeadline.at) await sleep(20);
+      const message = {
+        role: 'assistant', content: [], stopReason: 'aborted', timestamp: Date.now(),
+        api: 'openai-completions', provider: 'llm', model: 'step-3.7-flash',
+        usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 10, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      } as unknown as AgentMessage;
+      stream.push({ type: 'error', reason: 'aborted', message } as never);
+      stream.end(message as never);
+    })();
+    return stream;
+  }) as never);
+  const driverD2 = createPiTurnDriver({ env: { ...env, LLM_API_BASE_URL: 'http://127.0.0.1:9' }, ...windowOpts, modelRuntime: runtimeD2 });
   const partD2: Record<string, unknown> = { constructed: '注入挂起流 + deadline=now+800ms → 驱动 abortTimer 计时' };
   hangDeadline.at = Date.now() + 800;
   try {

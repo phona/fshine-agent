@@ -36,7 +36,7 @@ import type { ContextProfileConfig, RuntimeConfig } from '@fshine/contracts';
 import type { ExecutionClient } from '@fshine/contracts/execution-contract';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import { applyExecutorLabel, loadAgentProfile } from '../packages/agent/src/agent-profile';
-import { createPiTurnDriver, parseContextWindow } from '../packages/agent/src/pi-driver';
+import { createPiTurnDriver, parseContextWindow, type PiTurnDriverOptions } from '../packages/agent/src/pi-driver';
 import { createDummyCliClient, readOnlyOperationNames } from '../packages/agent/src/dummy-cli-client';
 import type { TurnDriver } from '../packages/agent/src/driver-contract';
 import {
@@ -125,8 +125,13 @@ export type ExecutionFaceFactory = (
   env: NodeJS.ProcessEnv,
 ) => Promise<ExecutionFace>;
 
-/** 回合驱动工厂（runner 记录包装器 / server 测试替身注入用；缺省 = 真实 Pi 驱动 ×2）。 */
-export type DriverFactory = (env: NodeJS.ProcessEnv) => { mainDriver: TurnDriver; workerDriver: TurnDriver };
+/**
+ * 回合驱动工厂（runner 记录包装器 / server 测试替身注入用；缺省 = 真实 Pi 驱动 ×2）。
+ * 允许返回 Promise：Pi 1.5.2 的 ModelRuntime 创建是异步的（测试替身按需 await）。
+ */
+export type DriverFactory = (env: NodeJS.ProcessEnv) =>
+  | { mainDriver: TurnDriver; workerDriver: TurnDriver }
+  | Promise<{ mainDriver: TurnDriver; workerDriver: TurnDriver }>;
 
 /**
  * 压缩窗口装配接线（缺口 3）：把配置层写进 env 的 `LLM_CONTEXT_WINDOW`（config.ts:442）经既有
@@ -137,6 +142,32 @@ export type DriverFactory = (env: NodeJS.ProcessEnv) => { mainDriver: TurnDriver
 export function contextWindowFrom(env: Record<string, string | undefined>): { contextWindow?: number } {
   const parsed = parseContextWindow(env.LLM_CONTEXT_WINDOW, 'LLM_CONTEXT_WINDOW');
   return parsed === undefined ? {} : { contextWindow: parsed };
+}
+
+/**
+ * 压缩配置装配接线（配置修正·余量）：把绝对 `reserveTokens`/`keepRecentTokens` 经两个
+ * 环境变量传给驱动的 `PiTurnDriverOptions.compactionSettings`——**纯配置透传**，不含任何
+ * 压缩决策/阈值判定（触发/执行/摘要/尾段仍全归 Pi）。
+ *
+ * · 两个变量都不设置/空串 → 返回 `{}`，驱动走 `piCompactionSettings(window)` 缺省派生，
+ *   行为逐字节不变（`npm run ask` / 既有入口零变化）。
+ * · 只设一个 → 装配期 fail-fast 点名两个变量（半套绝对配置会让 Pi 的 reserve/keepRecent
+ *   组合不可解释，静默补齐等于替调用方发明阈值）。
+ * · 非正整数 → `parseContextWindow` 当场抛中文错误点名变量（不静默回落）。
+ *
+ * 安全值来源见 `scripts/eval/pi-native/safe-config.ts` 与
+ * `docs/product/exp-pi-native-config-headroom.md`（余量不等式 + 摘要输出预算推导）。
+ */
+export function compactionSettingsFrom(
+  env: Record<string, string | undefined>,
+): { compactionSettings?: NonNullable<PiTurnDriverOptions['compactionSettings']> } {
+  const reserveTokens = parseContextWindow(env.LLM_COMPACTION_RESERVE_TOKENS, 'LLM_COMPACTION_RESERVE_TOKENS');
+  const keepRecentTokens = parseContextWindow(env.LLM_COMPACTION_KEEP_RECENT_TOKENS, 'LLM_COMPACTION_KEEP_RECENT_TOKENS');
+  if (reserveTokens === undefined && keepRecentTokens === undefined) return {};
+  if (reserveTokens === undefined || keepRecentTokens === undefined) {
+    throw new Error('LLM_COMPACTION_RESERVE_TOKENS 与 LLM_COMPACTION_KEEP_RECENT_TOKENS 必须同时设置（只设一个时无法解释 Pi 的压缩配置）');
+  }
+  return { compactionSettings: { enabled: true, reserveTokens, keepRecentTokens } };
 }
 
 /**
@@ -306,8 +337,8 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
       ...(input.createExecutionFace === undefined ? {} : { createExecutionFace: input.createExecutionFace }),
     });
     const workerDriver = input.workerDriver ?? (input.createDrivers !== undefined
-      ? input.createDrivers(input.env).workerDriver
-      : createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env) }));
+      ? (await input.createDrivers(input.env)).workerDriver
+      : createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env) }));
     executor = await createTaskExecutor({
       client: face.client,
       allowedOperations: face.allowedOperations,
@@ -476,8 +507,8 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       mainSkillRegistry = delivery.registry;
     }
     const drivers = input.createDrivers !== undefined
-      ? input.createDrivers(input.env)
-      : { mainDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env) }), workerDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env) }) };
+      ? await input.createDrivers(input.env)
+      : { mainDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env), reuseConversation: true }), workerDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env) }) };
 
     // P6：background = 受理/后台路径；runner 进程级共享（server 注入），缺省按本会话执行面构建。
     let runner = input.taskRunner;

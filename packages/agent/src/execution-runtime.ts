@@ -202,7 +202,7 @@ export interface WorkerSkill {
 /**
  * 会话转录端口（依赖注入；runtime 只认接口，**不** import 任何具体存储实现）。
  *
- * 装配层提供实现（如复用 Pi `JsonlSessionRepo` 的 `session-persistence.ts`）。语义：
+ * 装配层提供实现（如基于 Pi `SessionManager` 的 `session-persistence.ts`）。语义：
  *   · `readTranscript()`：打开会话时**现读**该 `(principalId, sessionId)` 的完整转录
  *     （每次调用都从存储读，宿主不留第二份可变副本——Pi entry-log 是唯一转录所有者）；
  *   · `append(message)`：回合结束后向存储**追加一条**本条新增的转录消息（Pi 原生 message 形状）。
@@ -271,8 +271,8 @@ export interface RuntimeOptions {
    */
   workerWorkspaceRoot?: string;
   /**
-   * B1 会话持久化端口（装配层注入具体实现；缺省 undefined = 逐字节现行为：转录仅内存 mainMessages）。
-   * 注入后：打开会话时从存储载入转录、回合结束后把**本回合新增**消息增量持久化。
+   * B1 会话持久化端口（装配层注入具体实现；缺省 undefined = 逐字节现行为：转录仅内存、归 Pi 会话独占）。
+   * 注入后：打开会话时从存储载入转录作为首回合种子、回合结束后把**本回合新增**消息增量持久化。
    * 写失败 fail-open（不回滚回合），读/写错误经 `onTranscriptError` 上报。
    */
   transcriptStore?: TranscriptStore;
@@ -443,14 +443,23 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   }
 
   const transcriptStore = options.transcriptStore;
-  let mainMessages: DriverMessage[] = [];
+  /**
+   * 上一回合 Main 转录的**只读投影**（Pi 会话 → 宿主可读形状）。
+   * 宿主不持有可变对话历史：当前转录由 `mainTranscript()` 直接向驱动索取
+   * （`TurnDriver.transcript()`）；本变量只在驱动尚无会话（首回合）或测试替身没有
+   * 该方法时作**种子/回落快照**，每回合整体覆盖、从不追加改写。
+   */
+  let lastMainProjection: readonly DriverMessage[] = [];
+  const mainTranscript = (): readonly DriverMessage[] =>
+    options.mainDriver.transcript?.() ?? lastMainProjection;
   let persistedCount = 0;
-  // 打开→载入：注入存储时现读完整转录（宿主不留第二份副本；Pi entry-log 是唯一所有者）。
+  // B1 打开→载入：注入存储时现读完整转录，作为**首回合种子历史**（驱动尚无 Pi 会话时导入；
+  // 会话已存在时转录仍归 Pi 独占）。宿主不留第二份可变副本，Pi entry-log 是唯一所有者。
   // 读失败 fail-open：不阻塞会话打开（退化为空转录），错误经 onTranscriptError 上报。
   if (transcriptStore !== undefined) {
     try {
-      mainMessages = [...(await transcriptStore.readTranscript())];
-      persistedCount = mainMessages.length;
+      lastMainProjection = await transcriptStore.readTranscript();
+      persistedCount = lastMainProjection.length;
     } catch (error) {
       options.onTranscriptError?.(error);
     }
@@ -640,11 +649,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const progress: string[] = [];
       const taskIds: string[] = [];
       currentTurnDeadline = Date.now() + mainTurnMs;
+      // 宿主只交「本轮输入」：最后一条 user = 本轮文本；历史种子仅在驱动尚无会话时使用。
       const factsMessage = options.taskFactProvider?.(options.principalId, options.sessionId);
-      if (factsMessage !== undefined && factsMessage.trim() !== '') {
-        mainMessages = [...mainMessages, userMessage(factsMessage)];
-      }
-      mainMessages = [...mainMessages, userMessage(text)];
+      // 历史：驱动已有 Pi 会话时直接读其转录（Pi 独占）；尚无会话（首回合）时回落到
+      // 打开时从 B1 存储载入的投影，作为本回合的种子历史（驱动在无会话时才会导入）。
+      const liveTranscript = mainTranscript();
+      const history = liveTranscript.length > 0 ? liveTranscript : lastMainProjection;
+      const turnMessages = [...history, userMessage(text)];
       const mainResult = await options.mainDriver.run({
         systemPrompt: options.mainSystemPrompt,
         tools: [
@@ -652,7 +663,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           ...(taskRunner === undefined ? [] : [taskStatusTool(), taskResultTool(), taskCancelTool(), taskResumeTool()]),
           ...(options.mainSkillRegistry === undefined ? [] : [readSkillTool()]),
         ],
-        messages: mainMessages,
+        messages: turnMessages,
+        ...(factsMessage !== undefined && factsMessage.trim() !== '' ? { injections: [factsMessage] } : {}),
         onStep: (step) => progress.push(step),
         exec: async (tool, args) => {
           if (tool === RUN_TASK_TOOL) {
@@ -679,14 +691,14 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         },
         deadline: currentTurnDeadline,
       });
-      mainMessages = [...mainResult.messages];
+      lastMainProjection = mainResult.messages;
       // 回合后→持久化：把本回合**新增**消息逐条增量追加到存储（Pi 单条 entry 追加 = 线性，
       // 不重写全文），每追加成功一条推进 persistedCount。写失败 fail-open：已成功的追加保留、
       // 剩余不再尝试、**不回滚本回合**（回复照常返回），错误经 onTranscriptError 上报。
       if (transcriptStore !== undefined) {
-        while (persistedCount < mainMessages.length) {
+        while (persistedCount < mainResult.messages.length) {
           try {
-            await transcriptStore.append(mainMessages[persistedCount]!);
+            await transcriptStore.append(mainResult.messages[persistedCount]!);
           } catch (error) {
             options.onTranscriptError?.(error);
             break;
@@ -711,7 +723,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   return {
     principalId: options.principalId,
     sessionId: options.sessionId,
-    transcript: () => [...mainMessages],
+    transcript: () => mainTranscript(),
     send,
     tasks: () => registry.list(scope),
     getTask: (taskId) => registry.get(taskId, scope),
@@ -794,7 +806,7 @@ function pendingQuestionFrom(outcome: Extract<ExecutionOutcome, { status: 'needs
 
 /**
  * 后台单回合执行器（P6 TaskExecutor 的生产实现；每次派发新建 Worker 回合）：
- *   · 转录隔离结构性满足：只持有本次任务投影（request/answer），不接触 mainMessages；
+ *   · 转录隔离结构性满足：只持有本次任务投影（request/answer），不接触 Main 会话转录；
  *   · 执行经 `execute_operation` 唯一工具 + 宿主生成 requestId，事实写 taskRegistry.noteExecution；
  *   · 逐回合机械判定（不替执行端做 task 级二次判定）：
  *       中止/abort → cancelled；截止未产出 → timed_out；空汇报 → failed；

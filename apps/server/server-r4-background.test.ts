@@ -83,6 +83,8 @@ function unreachableDriver(): TurnDriver {
 
 interface ServerDriverRecord {
   messages: readonly DriverMessage[];
+  /** 宿主事实注入（R5 B 通道）：Pi 原生 custom message 交付，不进 messages 快照。 */
+  injections: readonly string[];
   execResults: unknown[];
 }
 
@@ -104,7 +106,7 @@ function plannedDriver(plans: ReadonlyMap<string, ServerPlan>, records: ServerDr
         if (tool === undefined) throw new Error('（测试）Main 无工具面');
         execResults.push(await input.exec(tool.name, { task: request }));
       }
-      records.push({ messages: input.messages, execResults });
+      records.push({ messages: input.messages, injections: input.injections ?? [], execResults });
       const reply = plan.reply ?? `（测试回复：${text}）`;
       return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
     },
@@ -151,7 +153,7 @@ describe('R4 联合：server 同会话串行化（P5-T02）', () => {
       async run(input) {
         turn += 1;
         const current = turn;
-        records.push({ messages: input.messages, execResults: [] });
+        records.push({ messages: input.messages, injections: input.injections ?? [], execResults: [] });
         if (current === 1) await gate.promise;
         const reply = `回合${current}回复`;
         return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
@@ -310,26 +312,17 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
     try {
       await server.handler(incoming('user-a', 'conv-a', 'msg-1', '查 documents W202611'));
       await server.handler(incoming('user-a', 'conv-a', 'msg-2', '下一步'));
-      // 第二回合的 Main 消息序列：… + 注入的 [任务事实] user 消息 + 本回合用户消息（均为普通 user role）。
-      const second = records[1]!.messages;
-      const injected = second.filter(
-        (message) => (message as { role?: string; content?: unknown }).role === 'user'
-          && typeof (message as { content?: unknown }).content === 'string'
-          && ((message as { content: string }).content.startsWith('[任务事实]')),
-      );
+      // 第二回合的注入面：宿主事实经 `injections` 交给驱动（Pi 原生 custom message 投影成 user），
+      // `messages` 只是只读转录快照 + 本回合用户消息。
+      const injected = records[1]!.injections.filter((text) => text.startsWith('[任务事实]'));
       expect(injected).toHaveLength(1);
-      const injectedText = (injected[0] as { content: string }).content;
-      expect(injectedText).toContain('办完了');
-      expect(injectedText).toContain('查 documents W202611');
-      expect(injectedText).not.toContain('task_status');
+      expect(injected[0]).toContain('办完了');
+      expect(injected[0]).toContain('查 documents W202611');
+      expect(injected[0]).not.toContain('task_status');
       // 幂等：第三回合不再重复注入同一事实。
       await server.handler(incoming('user-a', 'conv-a', 'msg-3', '再一步'));
-      const third = records[2]!.messages;
-      expect(third.filter(
-        (message) => (message as { content?: unknown }).content !== undefined
-          && typeof (message as { content?: unknown }).content === 'string'
-          && (message as { content: string }).content.startsWith('[任务事实]'),
-      )).toHaveLength(1);
+      const third = records[2]!.injections.filter((text) => text.startsWith('[任务事实]'));
+      expect(third).toHaveLength(0);
     } finally {
       server.close();
     }

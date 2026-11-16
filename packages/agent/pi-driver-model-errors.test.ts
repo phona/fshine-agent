@@ -9,34 +9,10 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { isContextOverflowError, shouldNudgeFinalReply } from './src/pi-driver';
+import { shouldNudgeFinalReply } from './src/pi-driver';
 
-describe('T7 上下文溢出错误识别', () => {
-  it.each([
-    'maximum context length exceeded: 48430 + 13107 > 40000',
-    'This model\'s maximum context length is 32768 tokens. However, you requested 40123 tokens.',
-    'context_length_exceeded',
-    'Error code: 400 - {"error":{"message":"prompt is too long: 210000 tokens"}}',
-    'input is too long for the model',
-    'too many tokens in the prompt',
-    'Please reduce the length of the messages.',
-    'the request exceeds the context window of this model',
-  ])('识别溢出话术：%s', (message) => {
-    expect(isContextOverflowError(message)).toBe(true);
-  });
-
-  it.each([
-    'rate limit exceeded, please retry later',
-    '429 Too Many Requests',
-    '502 Bad Gateway',
-    'fetch failed: socket hang up',
-    'insufficient_quota: out of budget',
-    'Provider returned error',
-    '',
-  ])('不把瞬时/非溢出错误当成溢出：%s', (message) => {
-    expect(isContextOverflowError(message)).toBe(false);
-  });
-});
+// 供应商溢出话术的宿主分类器（isContextOverflowError）已随「自研 Overflow Recovery」整体删除：
+// 溢出判定与恢复归 Pi 原生（AgentHarness 的 compaction reason=overflow，见 A 口径）。
 
 /**
  * 空回复的第二种形状（今天实测日志）：`stopReason=stop`、content 只有 thinking 块、

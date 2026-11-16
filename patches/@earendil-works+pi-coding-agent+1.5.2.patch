@@ -1,0 +1,59 @@
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js
+index 9b1a409..97612c3 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js
+@@ -460,6 +460,19 @@ export function getSummarizationFailure(response, label) {
+     }
+     return undefined;
+ }
++/**
++ * fshine patch U2: a `stop` response with an empty or whitespace-only body is not a checkpoint.
++ * Upstream only rejects `error`/`length`, so a blank summary used to be persisted as a compaction
++ * entry and silently dropped the history it was meant to replace. Blankness is decided after
++ * `trim()` so `"  \n\t "` is rejected too.
++ */
++function assertSummarizationText(response, label) {
++    const text = contentText(response.content);
++    if (text.trim().length === 0) {
++        throw new Error(`${label} failed: model returned an empty summary; kept existing history`);
++    }
++    return text;
++}
+ function createSummarizationOptions(model, apiKey, headers, env, signal, thinkingLevel, sessionId) {
+     const options = { signal, apiKey, headers, env, sessionId };
+     if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
+@@ -537,7 +550,7 @@ _reserveTokens, apiKey, headers, signal, customInstructions, previousSummary, th
+     if (response.content.some((block) => block.type === "toolCall")) {
+         throw new Error("Summarization attempted to call a tool");
+     }
+-    const textContent = contentText(response.content);
++    const textContent = assertSummarizationText(response, "Summarization");
+     return { text: textContent, usage: response.usage };
+ }
+ function isProjectedTurnStart(entry) {
+@@ -742,7 +755,7 @@ async function generateTurnPrefixSummary(messages, model, apiKey, headers, env,
+         throw new Error("Turn prefix summarization attempted to call a tool");
+     }
+     return {
+-        text: contentText(response.content),
++        text: assertSummarizationText(response, "Turn prefix summarization"),
+         usage: response.usage,
+     };
+ }
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js
+index 7ee0501..daca92b 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js
+@@ -890,6 +890,12 @@ export class SessionManager {
+     }
+     /** Append a compaction summary as child of current leaf, then advance leaf. Returns entry id. */
+     appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromHook, usage) {
++        // fshine patch U2: the commit boundary for compaction checkpoints. Even if a future
++        // summarization path forgets to validate its text, a blank summary must never replace
++        // existing history with nothing - reject before writing so the old history stays loadable.
++        if (typeof summary !== "string" || summary.trim().length === 0) {
++            throw new Error("Refusing to append a compaction entry with an empty summary");
++        }
+         const timestamp = new Date().toISOString();
+         const systemMessage = getCurrentSystemMessage(this.buildSessionProjection().messages);
+         const id = generateId(this.byId);

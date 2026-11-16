@@ -394,9 +394,15 @@ export async function mu7(rt: RuntimeConfig): Promise<MuCaseResult> {
 
     const bobTurn = ctx.mainRecords.find((record) => record.userText === `${MU_TAGS['mu-bob']} 日常对话`);
     const aliceTurn = ctx.mainRecords.find((record) => record.userText === `${MU_TAGS['mu-alice']} 下一步`);
-    const hasFact = (text: string): boolean => text.includes('[任务事实]');
-    const bobGotFact = bobTurn !== undefined && bobTurn.messages.some((message) => hasFact(String((message as { content?: unknown }).content ?? '')) && String((message as { content?: unknown }).content).includes(aSubmit));
-    const aliceGotFact = aliceTurn !== undefined && aliceTurn.messages.some((message) => hasFact(String((message as { content?: unknown }).content ?? '')) && String((message as { content?: unknown }).content).includes(aSubmit));
+    // 事实注入在 1.5.2 走 Pi 原生 custom message（`TurnDriverInput.injections`），
+    // 与普通 messages 并列；两处任一命中都算该回合拿到了事实。
+    const turnCarriesFact = (turn: typeof aliceTurn): boolean => turn !== undefined
+      && [
+        ...turn.messages.map((message) => String((message as { content?: unknown }).content ?? '')),
+        ...turn.injections,
+      ].some((text) => text.includes('[任务事实]') && text.includes(aSubmit));
+    const bobGotFact = turnCarriesFact(bobTurn);
+    const aliceGotFact = turnCarriesFact(aliceTurn);
     const sinkAllAlice = sink.sent.length > 0 && sink.sent.every((notification) => notification.taskId === taskId);
     const hardZeroHits: MuHardZero[] = [];
     if (bobGotFact) hardZeroHits.push('notification_misdelivery');
