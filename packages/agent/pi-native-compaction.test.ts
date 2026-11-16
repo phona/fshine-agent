@@ -2,7 +2,7 @@
  * Pi 原生 Session/压缩替换 · T1–T12 确定性回归（零真实模型；窗口 8192 / 40000 / 128000）。
  *
  * 架构前提（A 口径，owner 裁决 2026-11-15）：
- *   · Pi 原生 `AgentHarness` + `SessionRepo` 是会话转录与压缩生命周期的唯一所有者；
+ *   · Pi 原生 `AgentSession` + `SessionManager` 是会话转录与压缩生命周期的唯一所有者；
  *   · fshine 只喂 Pi 一个窗口派生的 `CompactionSettings`（配置适配），不实现任何第二套
  *     摘要/裁剪/阈值判定/降级/溢出恢复；
  *   · A 口径：接受「请求 → Overflow Recovery → 有界恢复/失败」——必然超窗请求可被外发，

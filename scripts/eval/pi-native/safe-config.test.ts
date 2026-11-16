@@ -10,7 +10,7 @@
  *   C. 公式不改样：安装的 Pi 源码里触发式与摘要预算式必须仍是本模块转写的两行
  *      （Pi 升级改了公式 → 红，强制重新推导，禁止沿用旧常量）。
  *   D. 接线不空转：安全值经 env → `compactionSettingsFrom` → 驱动
- *      `PiTurnDriverOptions.compactionSettings` → Pi `AgentHarnessOptions.compaction`；
+ *      `PiTurnDriverOptions.compactionSettings` → Pi `CompactionSettings`；
  *      评测脚本静态使用安全常量（把窗口改回 16384 即红）。
  *
  * 本文件只测“传入配置”，不实现任何压缩触发/裁剪/兜底（Pi 仍是唯一所有者）。
