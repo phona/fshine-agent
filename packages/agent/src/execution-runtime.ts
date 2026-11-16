@@ -1169,14 +1169,16 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           onRuntimeEvent: (event) => noteRuntimeEvent(workerWindow, event),
         });
       } catch (error) {
-        if (context.signal.aborted) return { kind: 'cancelled' };
-        // 待核对优先于取消/超时/失败确认：结果未知不是已确认的结局。
+        // 待核对优先于取消/超时/失败确认：结果未知不是已确认的结局。写操作已进入 unknown 后
+        // 同回合被取消，任务仍是「待核对」——取消只停止后续动作，不把未知改写成 cancelled。
         if (unresolved) return { kind: 'result_unknown', reason: RESULT_UNKNOWN_MESSAGE };
+        if (context.signal.aborted) return { kind: 'cancelled' };
         if (isAbortErrorLike(error) && now() >= deadline) return { kind: 'timed_out' };
         return { kind: 'failed', reason: error instanceof Error ? error.message : String(error) };
       }
-      if (context.signal.aborted) return { kind: 'cancelled' };
+      // 同上：正常返回路径也必须先判待核对，再判取消。
       if (unresolved) return { kind: 'result_unknown', reason: RESULT_UNKNOWN_MESSAGE };
+      if (context.signal.aborted) return { kind: 'cancelled' };
       if (workerResult.text.trim() === '') {
         return now() >= deadline
           ? { kind: 'timed_out' }
