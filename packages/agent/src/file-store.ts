@@ -22,7 +22,7 @@
  * 读字节做 copy-on-register（新 fileId + sha256），原件字节不动、sha256 前后不变。
  * open 用 O_NOFOLLOW：走查后路径被换成 symlink → ELOOP，按拒收处理（TOCTOU 收窄到 fd）。
  *
- * 错误面（v8 §4）：输入物化对「越权 / 不存在 / pending / 字节缺失」抛同一
+ * 错误面（v8 §4）：输入物化对「越权 / 不存在 / pending / 过期 / 字节缺失」抛同一
  * FILE_REF_UNAVAILABLE（防存在性 oracle）；机械 reason 随异常携带，只进日志，不进用户话术。
  */
 import { createHash, randomUUID } from 'node:crypto';
@@ -162,10 +162,38 @@ export interface FileStore {
     outputs: RegisteredFile[];
     skipped: SkippedOutput[];
   };
+  /**
+   * 入站登记（CAP-01 S1）：把渠道落盘的附件**流式**登记为 **pending** 行
+   * （activated_at = NULL，等带文字的消息激活）。字节从 sourcePath 流式读、算 sha256、
+   * copy 进 workspace（…/files/<fileId><safeExt>）——不引用原路径，登记后渠道层可清理
+   * 原文件。fileId 本侧生成；源 O_NOFOLLOW 打开 + 只收普通文件（与 out/ 同纪律）。
+   * 源不可读 / 非普通文件 / 超大小兜底 → 抛错（handler 转述为回执失败，不登记半份）。
+   */
+  registerInboundFile(input: { scope: FileScope; name: string; sourcePath: string }): RegisteredFile;
+  /**
+   * 激活（CAP-01 S1）：带文字的消息把 scope 内 TTL 窗口（created_at >= now - FILE_REF_TTL_MS）
+   * 的全部 pending 行置 activated_at = now；过期 pending 保持 pending（不激活、不删除）。
+   * 返回本次激活的行数（观察项，进日志）。
+   */
+  activatePendingInputs(input: { scope: FileScope; now: number }): number;
 }
 
 /** 产物登记的流式拷贝块大小（登记阻塞 ≈ 一次流过；v8 §10-2 的处置就是流式）。 */
 const REGISTER_COPY_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * 文件 TTL（v8 §4：activated_at 非 NULL 即可读，同时是可读性 TTL 起点；pending 的激活
+ * 窗口（created_at → 被带文字的消息激活）沿用同一值——过期 pending 不再激活）。数值
+ * 写死（24h，与既有会话 TTL 同量级）：不是配置键，机械事实不开放调节。
+ */
+export const FILE_REF_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 入站登记的大小兜底（与渠道适配器的 MAX_ATTACHMENT_BYTES——packages/channel-wecom/src/
+ * adapter.ts——对齐：超限附件渠道层直接拒收，到不了这里。这是 handler 直调者的机械防线，
+ * 不是第二套限额；渠道侧调大时此处同步复核）。
+ */
+const INBOUND_MAX_FILE_BYTES = 32 * 1024 * 1024;
 
 function newFileId(): string {
   return `file_${randomUUID().replaceAll('-', '')}`;
@@ -206,8 +234,15 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
     return { candidates, skipped };
   }
 
-  /** copy-on-register：从**同一个 fd** 流式读 → 哈希 + 落到新 fileId 的存储位（原件不动）。 */
-  function registerFromFd(fd: number, input: { scope: FileScope; name: string; limits: ScanLimits }): RegisteredFile {
+  /**
+   * copy-on-register：从**同一个 fd** 流式读 → 哈希 + 落到新 fileId 的存储位（原件不动）。
+   * activatedAt 由调用方决定：out/ 产物 = 登记时刻（产出即可读）；入站附件 = undefined
+   * （pending，等带文字的消息激活）。超过 maxFileBytes 即弃（删半成品，不登记半份）。
+   */
+  function registerFromFd(
+    fd: number,
+    input: { scope: FileScope; name: string; maxFileBytes: number; activatedAt: number | undefined },
+  ): RegisteredFile {
     const fileId = newFileId();
     const destPath = fileStoragePathOf(workspaceRoot, input.scope, fileId, input.name);
     mkdirSync(path.dirname(destPath), { recursive: true });
@@ -220,7 +255,7 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
         const read = readSync(fd, buffer, 0, buffer.length, null);
         if (read === 0) break;
         bytes += read;
-        if (bytes > input.limits.maxFileBytes) {
+        if (bytes > input.maxFileBytes) {
           // fstat 之后仍在生长的写入面：超限即弃（删除半成品，不登记半份产物）。
           throw new RangeError('size_limit');
         }
@@ -244,8 +279,8 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
       name: input.name,
       sha256: hash.digest('hex'),
       bytes,
-      // 产出即交付箱内容：登记时刻即激活（S1 回合末投递与 S2 链式取用都可读）。
-      activatedAt: Date.now(),
+      // 产出即交付箱内容（登记时刻激活）；入站附件传 undefined = pending（NULL）。
+      ...(input.activatedAt === undefined ? {} : { activatedAt: input.activatedAt }),
       createdAt: Date.now(),
     });
     return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256 };
@@ -275,9 +310,11 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
       const materialized: MaterializedInput[] = [];
       for (const fileId of fileIds) {
         const row = store.getFileRef(fileId, scope);
-        // 越权/不存在/pending/字节缺失同码（v8 §4；机械 reason 随异常带出，只进日志）。
+        // 越权/不存在/pending/过期/字节缺失同码（v8 §4；机械 reason 随异常带出，只进日志）。
         if (row === undefined) throw new FileRefUnavailableError(`missing_or_foreign:${fileId}`);
         if (row.activatedAt === undefined) throw new FileRefUnavailableError(`pending:${fileId}`);
+        // activated_at 是可读性 TTL 起点：过期与越权/不存在同码（防存在性 oracle）。
+        if (Date.now() - row.activatedAt > FILE_REF_TTL_MS) throw new FileRefUnavailableError(`expired:${fileId}`);
         const source = fileStoragePathOf(workspaceRoot, scope, fileId, row.name);
         if (!existsSync(source)) throw new FileRefUnavailableError(`bytes_missing:${fileId}`);
         const materializedName = `${fileId}${safeExtensionOf(row.name)}`;
@@ -324,7 +361,7 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
             skipped.push({ name: candidate.relPath, reason: 'size_limit' });
             continue;
           }
-          outputs.push(registerFromFd(fd, { scope, name: candidate.relPath, limits }));
+          outputs.push(registerFromFd(fd, { scope, name: candidate.relPath, maxFileBytes: limits.maxFileBytes, activatedAt: Date.now() }));
         } catch (error) {
           if (error instanceof RangeError && error.message === 'size_limit') {
             skipped.push({ name: candidate.relPath, reason: 'size_limit' });
@@ -336,6 +373,34 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
         }
       }
       return { outputs, skipped };
+    },
+    registerInboundFile({ scope, name, sourcePath }) {
+      // O_NOFOLLOW：源路径被换成 symlink → ELOOP，按拒收处理（与 out/ 扫描同纪律）。
+      let fd: number;
+      try {
+        fd = openSync(sourcePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      } catch (error) {
+        throw new Error(`入站附件不可读：${error instanceof Error ? error.message : String(error)}`);
+      }
+      try {
+        const st = fstatSync(fd);
+        if (!st.isFile()) throw new Error('入站附件不是普通文件，拒收');
+        // 入站源头是渠道适配器落盘（受信写侧，见 contracts IncomingAttachment 义务），不做
+        // out/ 的 nlink/uid 走查；大小兜底见 INBOUND_MAX_FILE_BYTES。登记为 pending。
+        return registerFromFd(fd, { scope, name, maxFileBytes: INBOUND_MAX_FILE_BYTES, activatedAt: undefined });
+      } catch (error) {
+        if (error instanceof RangeError && error.message === 'size_limit') {
+          throw new Error(`入站附件超过大小上限（${INBOUND_MAX_FILE_BYTES} 字节），未登记`);
+        }
+        throw error;
+      } finally {
+        closeSync(fd);
+      }
+    },
+    activatePendingInputs({ scope, now }) {
+      // TTL 窗口（created_at >= now - FILE_REF_TTL_MS）内的全部 pending → activated_at = now；
+      // 过期 pending 保持 pending（孤儿清理归后续 TTL 清扫）。机械事实一条 UPDATE，无状态机。
+      return store.activatePendingFileRefs(scope, { activatedAt: now, createdAfter: now - FILE_REF_TTL_MS });
     },
   };
 }

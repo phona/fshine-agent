@@ -268,6 +268,15 @@ export interface TaskStore {
   getFileRef(fileId: string, scope: { principalId: string; sessionId: string }): FileRefRow | undefined;
   /** CAP-01 S0：按 scope 列出（created_at, file_id 升序；量 = 会话文件数，不做分页）。 */
   listFileRefs(scope: { principalId: string; sessionId: string }): FileRefRow[];
+  /**
+   * CAP-01 S1：激活 scope 内 TTL 窗口（created_at >= createdAfter）的全部 pending 行
+   * （activated_at IS NULL → 置 = activatedAt）；返回激活行数。已激活行与窗口外（过期）
+   * pending 不动——过期 pending 保持 pending（孤儿清理归后续 TTL 清扫，本层不删）。
+   */
+  activatePendingFileRefs(
+    scope: { principalId: string; sessionId: string },
+    input: { activatedAt: number; createdAfter: number },
+  ): number;
   close(): void;
 }
 
@@ -708,6 +717,13 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   const selectFileRefsScoped = hasFileRefs
     ? db.prepare('SELECT * FROM file_refs WHERE principal_id = ? AND session_id = ? ORDER BY created_at, file_id')
     : undefined;
+  const activatePendingFileRefsStmt = hasFileRefs
+    ? db.prepare(`
+        UPDATE file_refs SET activated_at = @activatedAt
+        WHERE principal_id = @principalId AND session_id = @sessionId
+          AND activated_at IS NULL AND created_at >= @createdAfter
+      `)
+    : undefined;
 
   const toFileRef = (row: FileRefDbRow): FileRefRow => ({
     fileId: row.file_id,
@@ -941,6 +957,15 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     listFileRefs(scope) {
       if (selectFileRefsScoped === undefined) return [];
       return (selectFileRefsScoped.all(scope.principalId, scope.sessionId) as FileRefDbRow[]).map(toFileRef);
+    },
+    activatePendingFileRefs(scope, input) {
+      if (activatePendingFileRefsStmt === undefined) throw new Error(missingFileRefsError);
+      return activatePendingFileRefsStmt.run({
+        principalId: scope.principalId,
+        sessionId: scope.sessionId,
+        activatedAt: input.activatedAt,
+        createdAfter: input.createdAfter,
+      }).changes;
     },
     close() {
       db.close();

@@ -2,7 +2,8 @@
  * server 装配（宿主接线）：
  *   渠道消息 → 可信身份（principalId/sessionId 取自渠道事实）→ 回合运行时 → 渠道回复。
  *
- * 本切片不做（后续切片）：计划确认 / 产物回收 / 提案；附件只登记不消费。
+ * 本切片不做（后续切片）：计划确认 / 产物回收 / 提案。CAP-01 S1：入站附件登记为
+ * pending 文件事实（查重先于附件分支），带文字的消息激活本会话 TTL 内 pending。
  * R4（P5/P6/P4）：会话按 promise 链串行化（同会话不并发）；`runtime.dispatchMode='background'`
  * 时启动建进程级 TaskRunner（含重启恢复 pump）与通知 outbox（注入 sink），受理即回执；
  * 缺省 'inline' = 上段现行为。
@@ -19,9 +20,10 @@
  */
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import type { AppConfig, ContextProfileConfig, ReplyHandler } from '@fshine/contracts';
+import type { AppConfig, ContextProfileConfig, IncomingChannelMessage, ReplyHandler } from '@fshine/contracts';
 import type { TurnDriver } from '../../packages/agent/src/driver-contract';
 import { applyExecutorLabel, loadAgentProfile } from '../../packages/agent/src/agent-profile';
+import { createFileStore, type FileScope, type RegisteredFile } from '../../packages/agent/src/file-store';
 import { MAIN_PROTOCOL_NOTE, type Session } from '../../packages/agent/src/execution-runtime';
 import {
   createNotificationOutbox,
@@ -98,6 +100,15 @@ export function resolveSingleProfile(config: AppConfig): { id: string; profile: 
   return { id, profile: config.contextProfiles[id]! };
 }
 
+/**
+ * 文件区 workspace 根（CAP-01 S1）：与会话转录存储同一部署状态根——按 dbPath 派生，
+ * 重启用同一 dbPath 即落在同一 workspace。字节位置按 (principal, session) 哈希派生
+ * （见 packages/agent/src/file-store.ts），不入库、不进转录。
+ */
+export function workspaceRootOf(dbPath: string): string {
+  return path.join(path.dirname(dbPath), 'workspace');
+}
+
 export async function createServer(deps: ServerDeps): Promise<Server> {
   const { id: profileId, profile } = resolveSingleProfile(deps.config);
   if (profile.gateway === undefined && deps.createExecutionFace === undefined) {
@@ -106,6 +117,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
 
   const log = deps.logger ?? ((line: Record<string, unknown>) => console.log(JSON.stringify(line)));
   const taskRegistry = createSqliteTaskRegistry(deps.dbPath);
+  // CAP-01 S1：文件区监管（唯一写侧）建在底账同一引擎连接上（不开第二个库连接）。
+  const fileStore = createFileStore({ store: taskRegistry.store, workspaceRoot: workspaceRootOf(deps.dbPath) });
   // 角色文本与技能面在启动时装载一次：配置坏即启动失败，不静默降级。
   const profileMd = await loadAgentProfile();
   const workerSkills = await loadWorkerSkills(profile.root, profile.skillRoots);
@@ -244,6 +257,19 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     }
   };
 
+  /**
+   * CAP-01 S1 入站附件登记：本条消息携带的每个附件登记为 pending 行（流式 sha256 +
+   * copy 进 workspace，不引用原路径）。WeCom 现实一条文件消息一个附件；契约允许多个，
+   * 逐个登记，任一失败即抛（回执失败，渠道可重投；重复行由 TTL 清孤儿兜底）。
+   */
+  const registerInboundAttachments = (message: IncomingChannelMessage, scope: FileScope): RegisteredFile[] => {
+    const registered: RegisteredFile[] = [];
+    for (const attachment of message.attachments ?? []) {
+      registered.push(fileStore.registerInboundFile({ scope, name: attachment.filename, sourcePath: attachment.path }));
+    }
+    return registered;
+  };
+
   const handler: ReplyHandler = async (message) => {
     const channel = (message.channel ?? 'wecom').trim() || 'wecom';
     // 可信身份取自渠道事实：principal = 发消息的人，session = 聊天窗口（conversationId）。
@@ -254,12 +280,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       log({ event: 'message_refused', principalId, sessionId, messageId: message.messageId, reason: 'principal_not_enabled' });
       return `该账号（${principalId}）未开通使用权限，请联系管理员开通。`;
     }
-    if (message.attachmentOnly === true) {
-      // 本切片不消费附件（登记缺口：附件暂存/注入归后续切片）；空回复让渠道走文件收据窗。
-      log({ event: 'message_attachment_only', principalId, sessionId, messageId: message.messageId });
-      return '';
-    }
     // 渠道重投（同 messageId）命中：幂等重放既有回执（无任何新副作用）。
+    // CAP-01 S1：查重必须先于附件分支——纯附件消息的重投才走缓存，不重复登记。
     const dedupKey = message.messageId.trim() === ''
       ? undefined
       : `${principalId}\u0000${sessionId}\u0000${message.messageId}`;
@@ -268,7 +290,53 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       log({ event: 'message_duplicate_replayed', principalId, sessionId, messageId: message.messageId });
       return await replayed;
     }
-    const pending = enqueueSessionTurn(`${principalId}\u0000${sessionId}`, async () => {
+
+    const scope: FileScope = { principalId, sessionId };
+    const sessionKey = `${principalId}\u0000${sessionId}`;
+
+    if (message.attachmentOnly === true) {
+      // CAP-01 S1 纯附件：登记为 pending 文件——不调模型、不建 Task、不起回合；空回执让
+      // 渠道走既有文件收据窗。登记进会话链（与文字回合串行，保序）。
+      const pendingReply = enqueueSessionTurn(sessionKey, async () => {
+        const registered = registerInboundAttachments(message, scope);
+        log({
+          event: 'message_attachment_only',
+          principalId,
+          sessionId,
+          messageId: message.messageId,
+          fileIds: registered.map((file) => file.fileId),
+        });
+        return '';
+      }).then(
+        (reply) => reply,
+        (error: unknown) => {
+          // 登记失败不缓存：渠道重投可重试（回执不伪造；不标 sent）。
+          if (dedupKey !== undefined) messageReplies.delete(dedupKey);
+          throw error;
+        },
+      );
+      if (dedupKey !== undefined) rememberMessageReply(dedupKey, pendingReply);
+      return await pendingReply;
+    }
+
+    const pending = enqueueSessionTurn(sessionKey, async () => {
+      // CAP-01 S1：本条消息若带附件，先登记为 pending（文字+附件 → 随即被下面的激活收进本回合）。
+      if (message.attachments !== undefined && message.attachments.length > 0) {
+        const registered = registerInboundAttachments(message, scope);
+        log({
+          event: 'inbound_files_registered',
+          principalId,
+          sessionId,
+          messageId: message.messageId,
+          fileIds: registered.map((file) => file.fileId),
+        });
+      }
+      // CAP-01 S1 激活语义（v8 §4）：带文字的消息激活本会话全部 TTL 内 pending——指令消息
+      // 本身不带附件，不按 messageId。先激活再开回合：回合内的清单/物化读激活后的事实。
+      const activated = fileStore.activatePendingInputs({ scope, now: Date.now() });
+      if (activated > 0) {
+        log({ event: 'pending_files_activated', principalId, sessionId, messageId: message.messageId, activated });
+      }
       await drainNotifications();
       const session = await sessionFor(principalId, sessionId);
       const turn = await session.send(message.text);
