@@ -10,14 +10,15 @@
  *      用例以 `withTaskRunner` 在 **inline 模式直接注入 runner**（缺口 1 设计 §3.3 明示的合法装配：
  *      「inline 模式需要治理工具的调用方直接传 input.taskRunner 即可」），维持本批 inline-only。
  *   ② compaction：缺口 3 压缩窗口（小 LLM_CONTEXT_WINDOW）下的长会话上下文恢复。
- *   ③ skill-arm：缺口 2 三臂对照（无 Skill / 正文注入 inline / 目录+按需读取 catalog）。
+ *   ③ skill-arm：Main 技能面两臂对照（无 Skill / 固定目录 catalog + 按需读取）。inline 臂已删除
+ *      （Main 技能只有 catalog 一种形态；实验只能经装配参数 `mainSkillsDir` 指向夹具目录）。
  */
 import type { GrantedScope } from '../judge';
 
 export type ExperimentKind = 'task-surface' | 'compaction' | 'skill-arm';
 
-/** Skill 实验臂（缺口 2）：none=缺省不投递；inline=臂 A 正文注入；catalog=臂 B 目录+按需读取。 */
-export type SkillArm = 'none' | 'inline' | 'catalog';
+/** Skill 实验臂：none=空索引；catalog=固定目录的 name+description 清单 + read_skill 按需读取。 */
+export type SkillArm = 'none' | 'catalog';
 
 /** 确定性预置任务（夹具，不经模型）：用于构造挂起/越权探针状态。 */
 export interface ExpSeed {
@@ -44,10 +45,11 @@ export interface ExpCase {
   dispatchMode?: 'inline' | 'background';
   /** inline 下直接注入 TaskRunner（缺口 1 四工具同源门控；非 background 的合法装配）。 */
   withTaskRunner?: boolean;
-  /** Main 技能根（相对 profile.root）；skill-arm 用。 */
-  mainSkillRoots?: readonly string[];
-  /** Main 技能投递臂；skill-arm 用。 */
-  mainSkillMode?: 'inline' | 'catalog';
+  /**
+   * Main 技能目录（**装配参数**，不是配置键）：skill-arm 的 catalog 臂指向夹具技能目录；
+   * 缺省 = 生产固定目录 `<repo>/.agents/skills`。
+   */
+  mainSkillsDir?: string;
   /** 逐用例环境变量（如 LLM_CONTEXT_WINDOW）；键值进进程 env/物化配置，不入证据。 */
   env?: Readonly<Record<string, string>>;
   /** 确定性预置任务。 */

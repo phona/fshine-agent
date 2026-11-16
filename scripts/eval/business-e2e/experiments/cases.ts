@@ -6,11 +6,23 @@
  *
  * 实验面与探测基线（`../exploration/bizprobe`）分离：新用例不并入冻结的 bizprobe 套件。
  */
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { ExpCase } from './model';
 import { NATURAL_CORPUS, RECOVERY_PROBES } from './natural-corpus';
 
-/** 臂 A/B 共用的 Main 技能根（相对 profile.root = dummy-platform 夹具根）。 */
-const MAIN_SKILL_ROOT = '.agents/skills-main';
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
+
+/**
+ * catalog 臂的 Main 技能目录（**装配参数**，不是配置键）：中性夹具
+ * `scripts/eval/fixtures/dummy-platform/.agents/skills-main`。
+ */
+const MAIN_SKILL_DIR = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform', '.agents', 'skills-main');
+/**
+ * 空索引臂的目录**故意不存在**（`loadMainSkillDelivery` 对缺失目录 = 空索引）：让 none 臂
+ * 与仓库里以后新增的生产技能解耦，臂间比较不被生产内容污染。
+ */
+const MAIN_SKILL_NONE_DIR = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform', '.agents', 'skills-none');
 
 // ── ① 缺口 1 对话面任务工具（inline + 直接注入 TaskRunner；本批 inline-only）──────────
 
@@ -155,43 +167,43 @@ const C04: ExpCase = {
   ],
 };
 
-// ── ③ 缺口 2 Skill 三臂对照（同用例、同判据，逐用例配对）────────────────────────────
-/** 三臂：none（缺省不投递）/ inline（臂 A 正文注入）/ catalog（臂 B 目录+按需读取）。 */
-function digestArm(arm: 'none' | 'inline' | 'catalog'): ExpCase {
+// ── ③ Main 技能两臂对照（同用例、同判据，逐用例配对）────────────────────────────────
+/** 两臂：none（空索引）/ catalog（固定目录的 name+description 清单 + read_skill 按需读取）。 */
+function digestArm(arm: 'none' | 'catalog'): ExpCase {
   return {
     id: `S-digest-${arm}`,
     kind: 'skill-arm',
     title: `记录汇总口径（臂 ${arm}）`,
     trials: 3,
     arm,
-    ...(arm === 'none' ? {} : { mainSkillRoots: [MAIN_SKILL_ROOT], mainSkillMode: arm }),
+    mainSkillsDir: arm === 'none' ? MAIN_SKILL_NONE_DIR : MAIN_SKILL_DIR,
     granted: [{ object: { collection: 'alpha', window: 'W1' }, access: 'read' }],
     turns: ['按我们内部的记录汇总口径，把 alpha 集合 W1 的记录整理成一份摘要。'],
     // 中性标记：口径要求标题「核对摘要」与末尾「合计」行。
     replyMustInclude: ['核对摘要', '合计'],
     criteria: [
       '回复采用中性口径（标题「核对摘要」+ 末尾「合计」行）——臂间配对比较完成率。',
-      '计量臂 B 的 read_skill 命中（技能真正被读取）与臂 A 的常驻提示成本。',
+      '计量 catalog 臂的 read_skill 命中（技能真正被读取）与清单常驻提示成本（catalog 字节）。',
       '不得编造执行层未返回的数字。',
     ],
   };
 }
 
-function noteArm(arm: 'none' | 'inline' | 'catalog'): ExpCase {
+function noteArm(arm: 'none' | 'catalog'): ExpCase {
   return {
     id: `S-note-${arm}`,
     kind: 'skill-arm',
     title: `数值备注口径（臂 ${arm}）`,
     trials: 3,
     arm,
-    ...(arm === 'none' ? {} : { mainSkillRoots: [MAIN_SKILL_ROOT], mainSkillMode: arm }),
+    mainSkillsDir: arm === 'none' ? MAIN_SKILL_NONE_DIR : MAIN_SKILL_DIR,
     granted: [{ object: { collection: 'alpha', window: 'W1' }, access: 'read' }],
     turns: ['给 alpha 集合 W1 里的每条记录写一句数值备注，按我们的备注口径。'],
     // 中性标记：备注以「备注：」开头。
     replyMustInclude: ['备注：'],
     criteria: [
       '回复采用中性备注口径（以「备注：」开头）——臂间配对比较。',
-      '计量臂 B 的 read_skill 命中与臂 A 常驻成本。',
+      '计量 catalog 臂的 read_skill 命中与清单常驻成本（catalog 字节）。',
       '不得编造执行层未返回的数值。',
     ],
   };
@@ -201,8 +213,8 @@ function noteArm(arm: 'none' | 'inline' | 'catalog'): ExpCase {
 export const expCases: readonly ExpCase[] = [
   T01, T02, T03,
   C03, C04,
-  digestArm('none'), digestArm('inline'), digestArm('catalog'),
-  noteArm('none'), noteArm('inline'), noteArm('catalog'),
+  digestArm('none'), digestArm('catalog'),
+  noteArm('none'), noteArm('catalog'),
 ];
 
 /** 按实验类筛选用例。 */

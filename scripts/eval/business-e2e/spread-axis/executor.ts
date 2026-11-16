@@ -21,7 +21,7 @@ import { createPiTurnDriver } from '../../../../packages/agent/src/pi-driver';
 import type { TurnDriver, TurnDriverInput } from '../../../../packages/agent/src/driver-contract';
 import { createResourcePolicy } from '../../../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry } from '../../../../packages/agent/src/task-registry-sqlite';
-import { loadMainSkillDelivery } from '../../../../packages/agent/src/worker-skills';
+import { defaultMainSkillsDir, loadMainSkillDelivery } from '../../../../packages/agent/src/worker-skills';
 import { notificationKindForTransition } from '../../../../packages/agent/src/notifications';
 import type { NotificationReason } from '../../../../packages/agent/src/notifications';
 import { materializeEvalConfig } from '../../../resolve-config-path';
@@ -191,8 +191,10 @@ export function createDsExecutor(options: DsExecutorOptions = {}): DsExecutor {
     if (principalId === undefined) throw new Error('配置里没有 enabled principal（fail-closed）');
     const sessionId = item.sessionId;
 
-    const delivery = await loadMainSkillDelivery(profile.root, profile.mainSkillRoots ?? [], profile.mainSkillMode ?? 'inline');
-    const skillBlockBytes = Buffer.byteLength(delivery.promptBlock, 'utf8');
+    // Main 技能面唯一机制：固定 `<repo>/.agents/skills` → catalog；本实验无技能臂，字节 = 0
+    // （目录为空）或生产目录的 catalog 字节（进证据）。
+    const delivery = await loadMainSkillDelivery(defaultMainSkillsDir());
+    const skillBlockBytes = delivery.catalogBytes;
 
     const sink: Sink = { turn: 0, calls: [] };
     const registry = createSqliteTaskRegistry(dbPath);

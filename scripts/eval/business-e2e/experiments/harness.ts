@@ -194,12 +194,12 @@ export function summarizeExp(report: ExpReport): ExpCaseSummary[] {
   return out;
 }
 
-/** Skill 三臂配对：按 base 用例（去掉臂后缀）× 臂汇总 k/N。 */
+/** Skill 两臂配对：按 base 用例（去掉臂后缀）× 臂汇总 k/N。 */
 export function summarizeSkillArms(report: ExpReport): Array<{ base: string; arm: string; n: number; pass: number; skillReads: number }> {
   const rows: Array<{ base: string; arm: string; n: number; pass: number; skillReads: number }> = [];
   const groups = new Map<string, ExpSampleOutcome[]>();
   for (const s of report.samples) {
-    const base = s.caseId.replace(/-(none|inline|catalog)$/, '');
+    const base = s.caseId.replace(/-(none|catalog)$/, '');
     const key = `${base}|${s.arm ?? 'none'}`;
     const list = groups.get(key) ?? [];
     list.push(s);

@@ -32,7 +32,7 @@ import { createResourcePolicy } from '../../packages/agent/src/resource-policy';
 import { SessionPersistence } from '../../packages/agent/src/session-persistence';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import type { TaskExecutor, TaskRunner } from '../../packages/agent/src/task-runner';
-import { loadMainSkillDelivery, loadWorkerSkills } from '../../packages/agent/src/worker-skills';
+import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../../packages/agent/src/worker-skills';
 import {
   assembleSessionCore,
   attachNotificationOutbox,
@@ -109,8 +109,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   // 角色文本与技能面在启动时装载一次：配置坏即启动失败，不静默降级。
   const profileMd = await loadAgentProfile();
   const workerSkills = await loadWorkerSkills(profile.root, profile.skillRoots);
-  // 缺口 2（实验面，缺省不投递）：Main 专用技能根投递；技能根为空时 promptBlock 空串 → 提示逐字节不变。
-  const mainSkills = await loadMainSkillDelivery(profile.root, profile.mainSkillRoots ?? [], profile.mainSkillMode ?? 'inline');
+  // Main 技能面（唯一机制）：固定 `<repo>/.agents/skills` → catalog；目录为空时 promptBlock
+  // 空串 → 提示逐字节不变；catalog 非空才交出 read_skill 登记表（不读配置键、无模式开关）。
+  const mainSkills = await loadMainSkillDelivery(defaultMainSkillsDir());
+  // catalog 字节数进启动日志（证据面）：0 = 空索引（技能面未启用），不静默。
+  log({ event: 'main_skills_loaded', catalogBytes: mainSkills.catalogBytes });
   const mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, profile.executorLabel)}${mainSkills.promptBlock}\n\n${MAIN_PROTOCOL_NOTE}`;
   const stateDir = deps.stateDir ?? path.join(REPO_ROOT, '.runtime', 'server', 'state');
 

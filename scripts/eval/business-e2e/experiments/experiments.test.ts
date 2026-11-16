@@ -244,10 +244,11 @@ describe('⑥ 串并行一致性（确定性假件）', () => {
 });
 
 describe('⑧ Skill 臂汇总与 infra 门', () => {
-  it('Skill 三臂装配：none 无技能块；inline 注入正文；catalog 注入摘要 + 暴露 read_skill', async () => {
+  it('Skill 两臂装配：none 空索引无技能块/无 read_skill；catalog 注入清单 + 暴露 read_skill', async () => {
     const root = freshRoot();
     const prompts: Record<string, string> = {};
     const toolNames: Record<string, readonly string[]> = {};
+    const catalogBytes: Record<string, number> = {};
     const captureMain = (label: string): TurnDriver => ({
       async run(input) {
         prompts[label] = input.systemPrompt;
@@ -255,34 +256,39 @@ describe('⑧ Skill 臂汇总与 infra 门', () => {
         return { text: 'ok', messages: [...input.messages, { role: 'assistant', content: 'ok' } as never] };
       },
     });
-    for (const arm of ['none', 'inline', 'catalog'] as const) {
+    for (const arm of ['none', 'catalog'] as const) {
       const caseDef = digestArm(arm);
       const exec = createExpExecutor({
         createDrivers: () => ({ mainDriver: captureMain(arm), workerDriver: workerQuerier() }),
         createExecutionFace: async () => fakeFace(),
         env: FAKE_ENV,
       });
-      await exec(itemFor(caseDef), caseDef, path.join(root, arm));
+      const evidence = await exec(itemFor(caseDef), caseDef, path.join(root, arm));
+      catalogBytes[arm] = evidence.skillBlockBytes;
     }
-    expect(prompts.none).not.toContain('【技能：record-digest】');
-    expect(prompts.inline).toContain('【技能：record-digest】');
-    expect(prompts.inline).toContain('核对摘要');
-    expect(prompts.catalog).toContain('record-digest');
-    expect(prompts.catalog).not.toContain('【技能：record-digest】');
+    expect(prompts.none).not.toContain('【可用技能');
+    expect(prompts.none).not.toContain('record-digest');
     expect(toolNames.none).not.toContain('read_skill');
-    expect(toolNames.inline).not.toContain('read_skill');
+    expect(catalogBytes.none).toBe(0);
+    expect(prompts.catalog).toContain('record-digest');
+    expect(prompts.catalog).toContain('value-note');
+    // 清单只含 name+description：正文标记与绝对路径都不得进提示。
+    expect(prompts.catalog).not.toContain('核对摘要');
+    expect(prompts.catalog).not.toContain(FIXTURE_ROOT);
     expect(toolNames.catalog).toContain('read_skill');
+    expect(catalogBytes.catalog).toBeGreaterThan(0);
   });
 
-  it('skill 三臂配对分组 + 逐用例 k/N', async () => {
+  it('skill 两臂配对分组 + 逐用例 k/N', async () => {
     const root = freshRoot();
     const arms = expCases.filter((c) => c.kind === 'skill-arm');
     const items = expandExpItems(arms);
     const report = await runExpBatch({ kind: 'skill-arm', cases: arms, items, executor: fakeExec, outRoot: path.join(root, 'sa'), concurrency: 4 });
     const rows = summarizeSkillArms(report);
-    expect(rows.find((r) => r.base === 'S-digest' && r.arm === 'inline')?.n).toBe(3);
+    expect(rows.find((r) => r.base === 'S-digest' && r.arm === 'none')?.n).toBe(3);
     expect(rows.find((r) => r.base === 'S-note' && r.arm === 'catalog')?.n).toBe(3);
-    expect(summarizeExp(report)).toHaveLength(6);
+    expect(rows.every((r) => r.arm !== 'inline')).toBe(true);
+    expect(summarizeExp(report)).toHaveLength(4);
   });
 
   it('infra 门返回逐项检查与 blocking 布尔（模型钉 step-3.7-flash）', () => {

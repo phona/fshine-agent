@@ -254,8 +254,8 @@ export interface RuntimeOptions {
   /** P6：后台任务运行器（background 模式必需；submit→pump，执行/恢复/取消由它承担）。 */
   taskRunner?: TaskRunner;
   /**
-   * 缺口 2 臂 B（实验面）：Main 技能登记表——注入后 Main 工具面多一个 read_skill，按登记表内的
-   * 技能名读正文（32KiB 上限由 registry 既有钳制）。缺省不注入 = 无该工具（现行工具面逐字节不变）。
+   * Main 技能登记表（catalog 非空时由装配层注入）：Main 工具面多一个 read_skill，按登记表内的
+   * 技能名读正文（32KiB 上限由 registry 既有钳制）。缺省不注入 = 无该工具（工具面逐字节不变）。
    * 摘要在系统提示里由装配层经 renderSkillCatalog 拼入，本选项只管工具面。
    */
   mainSkillRegistry?: SkillRegistry;

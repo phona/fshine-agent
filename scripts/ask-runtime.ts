@@ -59,7 +59,7 @@ import { createResourcePolicy, resolveRuntimeConfig, type ResourcePolicy } from 
 import type { TaskRegistry } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
 import { createTaskRunner, type TaskExecutor, type TaskRunner } from '../packages/agent/src/task-runner';
-import { loadMainSkillDelivery, loadWorkerSkills } from '../packages/agent/src/worker-skills';
+import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../packages/agent/src/worker-skills';
 import type { SkillRegistry } from '../packages/agent/src/skills';
 import { explicitConfigFrom, materializeEvalConfig } from './resolve-config-path';
 import { EvalIsolationRefused, assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
@@ -207,8 +207,13 @@ export interface SessionAssemblyInput {
   taskRegistry?: TaskRegistry;
   /** 预装载 Main 系统提示（server 启动时装载一次）；缺省现装。 */
   mainSystemPrompt?: string;
-  /** 缺口 2 臂 B：预装载 Main 技能登记表；缺省随 Main 提示现装（提示注入时由调用方一并给）。 */
+  /** 预装载 Main 技能登记表（server 启动时装载一次）；缺省随 Main 提示现装（非空 catalog 才有）。 */
   mainSkillRegistry?: SkillRegistry;
+  /**
+   * Main 技能目录覆盖（**仅代码/测试装配参数**，不是配置键）：缺省 = `<repo>/.agents/skills`
+   * （仓库根标记法定位）。用于实验/测试指向夹具目录；生产入口一律不传。
+   */
+  mainSkillsDir?: string;
   /** 预装载 Worker 技能（server 启动时装载一次）；缺省现装。 */
   workerSkills?: readonly WorkerSkill[];
   /** P5：runtime 段（资源强制单一配置入口）；缺省 = 现行为缺省（单并发/无队列/无任务级预算）。 */
@@ -506,13 +511,10 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
     let mainSkillRegistry = input.mainSkillRegistry;
     if (mainSystemPrompt === undefined) {
       const profileMd = await loadAgentProfile();
-      // 缺口 2（实验面，缺省不投递）：Main 专用技能根的投递块拼在角色文本之后、协议之前；
-      // 技能根为空时 promptBlock 为空串 → 提示逐字节不变；臂 B 另交出 read_skill 登记表。
-      const delivery = await loadMainSkillDelivery(
-        input.profile.root,
-        input.profile.mainSkillRoots ?? [],
-        input.profile.mainSkillMode ?? 'inline',
-      );
+      // Main 技能面（唯一机制）：固定目录 → catalog（name+description）拼在角色文本之后、
+      // 协议之前；目录为空/缺失时 promptBlock 为空串 → 提示逐字节不变；catalog 非空才交出
+      // read_skill 登记表。目录来自装配参数或 `<repo>/.agents/skills`，不读配置键。
+      const delivery = await loadMainSkillDelivery(input.mainSkillsDir ?? defaultMainSkillsDir());
       mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, input.profile.executorLabel)}${delivery.promptBlock}\n\n${MAIN_PROTOCOL_NOTE}`;
       mainSkillRegistry = delivery.registry;
     }
