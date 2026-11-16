@@ -152,11 +152,16 @@ describe('② 工具面门控核实（缺口 1 taskRunner 同源门控）', () =
     const exec = executorWith(steps);
 
     const withRunner = await exec(itemFor(T01), T01, path.join(root, 'a'));
-    expect(withRunner.perTurnMainTools[0]).toEqual(['run_task', 'task_status', 'task_result', 'task_cancel', 'task_resume']);
+    // 缺省 Main 技能目录（<repo>/.agents/skills）已有 finance-business-basics → read_skill 常驻；
+    // 它与 taskRunner 门控无关（runner 只决定四件任务工具是否注册）。
+    expect(withRunner.perTurnMainTools[0]).toEqual([
+      'run_task', 'task_status', 'task_result', 'task_cancel', 'task_resume', 'read_skill',
+    ]);
 
     const bare: ExpCase = { ...T01, id: 'T01bare', withTaskRunner: false };
     const without = await exec(itemFor(bare), bare, path.join(root, 'b'));
-    expect(without.perTurnMainTools[0], 'bizprobe/ask inline 路径缺省无 runner → 四工具不注册').toEqual(['run_task']);
+    expect(without.perTurnMainTools[0], 'bizprobe/ask inline 路径缺省无 runner → 四任务工具不注册（read_skill 属技能面，不受 runner 门控）')
+      .toEqual(['run_task', 'read_skill']);
   });
 });
 

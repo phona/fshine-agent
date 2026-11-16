@@ -1,21 +1,27 @@
 /**
- * SimCase · A/B 两臂（Main 技能面开关）跑批接线。
+ * SimCase · A/B 两臂（Main 技能面）跑批接线。
  *
  * 机制边界（对齐 AGENTS.md 与任务书）：
  *   · **不新建跑批器**：每个臂就是一次 `./run` 的 `runSimSuite`（批次/并发池/逐 trial
  *     独立目录/五类终态/Oracle 判定全部复用，零改动）；
- *   · **两臂只差技能**：同用例对象、同模拟用户模型、同 Oracle 注册表、同预算（用例自带
- *     limits）、同并发；差异只在 `createSystem` 物化出的 profile——
- *     A 臂不声明 `mainSkillRoots`（catalog 为空，`read_skill` 不注册），
- *     B 臂声明 `mainSkillRoots + mainSkillMode='catalog'`（`read_skill` 可读）；
+ *   · **两臂只差技能**：同配置副本、同用例对象、同模拟用户模型、同 Oracle 注册表、
+ *     同预算（用例自带 limits）、同并发；差异只在装配参数 `mainSkillsDir`：
+ *     A 臂指向一个**空目录**（catalog 为空，`read_skill` 不注册），
+ *     B 臂指向仓库 `.agents/skills`（catalog 含 `finance-business-basics`）。
+ *
+ *     S0 已删除 `mainSkillRoots` / `mainSkillMode` 配置键（未知键被静默忽略）。旧装置
+ *     用这两个键做 A/B 会得到「两臂完全等价」的假结论——本模块不再读写任何配置技能键，
+ *     差异只能来自装配参数。
  *   · **不得放宽判定**：`pass` 仍只由 `./oracle` 决定，本模块只加 `arm` 标签与装配探针；
  *   · 装配探针（`probeArmAssembly`）在跑任何样本前走**生产同源** `assembleSessionCore`，
- *     机械核对「A 无 catalog / B 有 catalog + read_skill」且两臂系统提示除技能块外逐字一致。
+ *     机械核对「A 空 catalog / 无 read_skill」「B 有 finance-business-basics / 有 read_skill」
+ *     且两臂系统提示除技能块外逐字一致。`assertArmSurface` 是防静默假绿的硬门：
+ *     把 B 臂也指向空目录时它必须抛错（自测里有反向绊线）。
  *
- * 批次策略：**分两批**（每臂一次 `runSimSuite`，串行）。理由见 `run-arm.ts` 报告头：
+ * 批次策略：**分两批**（每臂一次 `runSimSuite`，串行）。理由见 `run-arms.ts` 报告头：
  * 同批混跑必须改 `./run` 的样本展开与汇总口径（把 arm 塞进终态/Oracle 机制），
  * 与「复用现有批次机制、不放宽判定」相冲突；分两批则两臂各自复用同一套批次读数，
- * 每批并发仍 ≤5，输入对象完全相同，差异只有配置。
+ * 每批并发仍 ≤5，输入对象完全相同，差异只有装配参数。
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -23,7 +29,9 @@ import { fileURLToPath } from 'node:url';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import type { ContextProfileConfig } from '@fshine/contracts';
-import { loadMainSkillDelivery, type MainSkillDelivery } from '../../../packages/agent/src/worker-skills';
+import {
+  defaultMainSkillsDir, loadMainSkillDelivery, type MainSkillDelivery,
+} from '../../../packages/agent/src/worker-skills';
 import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
 import { assembleSessionCore } from '../../ask-runtime';
 import { materializeEvalConfig } from '../../resolve-config-path';
@@ -43,41 +51,55 @@ export type SimArm = 'A' | 'B';
 
 export const SIM_ARM_IDS: readonly SimArm[] = Object.freeze(['A', 'B']);
 
-/** 一臂的 Main 技能面声明（其余配置两臂完全一致）。 */
+/** B 臂必须在 catalog 里看到的仓库技能（S3 落位；断言它存在才算 B 臂真的装上了技能）。 */
+export const REQUIRED_B_SKILL = 'finance-business-basics';
+
+/** A 臂空技能目录的目录名（挂在该臂探针/运行目录下；不存在任何 SKILL.md）。 */
+export const EMPTY_SKILLS_DIRNAME = 'empty-main-skills';
+
+/** 一臂的 Main 技能面声明（其余配置/输入两臂完全一致）。 */
 export interface SimArmSpec {
   readonly arm: SimArm;
   /** 人读说明（进报告）。 */
   readonly label: string;
-  /** Main 技能根（相对 profile.root）；空数组 = 不投递。 */
-  readonly mainSkillRoots: readonly string[];
-  /** Main 技能投递臂；`undefined` = 不投递。 */
-  readonly mainSkillMode?: 'inline' | 'catalog';
+  /** 装配参数来源：`empty` = 运行时新建空目录；`repo` = 仓库 `.agents/skills`。 */
+  readonly mainSkillsDirKind: 'empty' | 'repo';
 }
 
 /**
- * 臂定义。
- *
- * B 臂使用仓内 dummy 夹具的 Main 技能根（`.agents/skills-main`）：
- * `record-digest`（记录汇总口径：逐条名称+数值、末行「合计：…」——本套 SIM 用例的
- * 财务核对语义）与 `value-note`（数值档位备注）。这两个文件是 S3 实验既有夹具，
- * 本成员不碰 fixtures 管道（S0/S1 正在改）。
+ * 臂定义。差异只有 `mainSkillsDirKind`——**不是配置键**：配置副本两臂逐字相同。
  */
 export const SIM_ARMS: Readonly<Record<SimArm, SimArmSpec>> = Object.freeze({
   A: {
     arm: 'A',
-    label: 'Main 无技能（未声明 mainSkillRoots：catalog 为空，read_skill 不注册）',
-    mainSkillRoots: [],
+    label: 'Main 无技能（mainSkillsDir 指向空目录：catalog 为空，read_skill 不注册）',
+    mainSkillsDirKind: 'empty',
   },
   B: {
     arm: 'B',
-    label: 'Main 技能目录（.agents/skills-main 的财务核对口径技能；catalog 模式，read_skill 可读）',
-    mainSkillRoots: ['.agents/skills-main'],
-    mainSkillMode: 'catalog',
+    label: 'Main 技能目录（仓库 .agents/skills：catalog 含 finance-business-basics，read_skill 可读）',
+    mainSkillsDirKind: 'repo',
   },
 });
 
+/**
+ * 某臂的 `mainSkillsDir` 装配参数（绝对路径；`loadMainSkillDelivery` 拒绝相对路径）。
+ *
+ * A 臂在 `workRoot` 下建一个空目录（每次都新建，绝不复用可能被写入的旧目录）；
+ * B 臂用生产默认目录发现（标记法定位仓库根 → `<repo>/.agents/skills`）。
+ */
+export function armMainSkillsDir(arm: SimArm, workRoot: string): string {
+  const spec = SIM_ARMS[arm];
+  if (spec.mainSkillsDirKind === 'empty') {
+    const dir = path.join(workRoot, EMPTY_SKILLS_DIRNAME);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+  return defaultMainSkillsDir();
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// 每臂配置物化（唯一差异点）
+// 每臂配置物化（两臂逐字相同；技能差异不在这里）
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface SimArmConfig {
@@ -87,12 +109,12 @@ export interface SimArmConfig {
 }
 
 /**
- * 物化某臂的配置副本：先按既有 `materializeEvalConfig` 把相对 root 解析成绝对路径，
- * 再只改 profile 的 `mainSkillRoots` / `mainSkillMode`（A 臂显式删除，防止夹具里残留）。
- * 其余字段一个不动。
+ * 物化某臂的配置副本：按既有 `materializeEvalConfig` 把相对 root 解析成绝对路径。
+ *
+ * **不改任何技能相关字段**：S0 之后 Main 技能只由装配参数 `mainSkillsDir` 决定，
+ * 配置里写 `mainSkillRoots` / `mainSkillMode` 只会被静默忽略（旧装置的死因）。
  */
 export function materializeArmConfig(arm: SimArm, outPath: string): SimArmConfig {
-  const spec = SIM_ARMS[arm];
   materializeEvalConfig(FIXTURE_CONFIG, outPath);
   const doc = parseYaml(readFileSync(outPath, 'utf8')) as Record<string, unknown>;
   const profiles = doc['contextProfiles'];
@@ -101,14 +123,7 @@ export function materializeArmConfig(arm: SimArm, outPath: string): SimArmConfig
   }
   const keys = Object.keys(profiles as Record<string, unknown>);
   if (keys.length !== 1) throw new Error(`臂 ${arm} 需要单一 contextProfile（当前 ${keys.length} 个）`);
-  const profile = (profiles as Record<string, Record<string, unknown>>)[keys[0]!]!;
-  if (spec.mainSkillRoots.length === 0) {
-    delete profile['mainSkillRoots'];
-    delete profile['mainSkillMode'];
-  } else {
-    profile['mainSkillRoots'] = [...spec.mainSkillRoots];
-    profile['mainSkillMode'] = spec.mainSkillMode ?? 'catalog';
-  }
+  // 逐字重写一次（稳定 YAML），不做字段增删；留作审计副本。
   writeFileSync(outPath, stringifyYaml(doc), 'utf8');
 
   const config = loadConfig({ yamlPath: outPath });
@@ -119,28 +134,30 @@ export function materializeArmConfig(arm: SimArm, outPath: string): SimArmConfig
 
 /** 臂的 Main 技能投递读数（装配期事实；用于报告与「只差技能」核对）。 */
 export interface SimArmDelivery {
-  readonly mainSkillRoots: readonly string[];
-  readonly mainSkillMode: 'inline' | 'catalog' | null;
+  /** 装配参数原样（绝对路径）。 */
+  readonly mainSkillsDir: string;
+  /** 追加到 Main 系统提示的技能块；空串 = 零增长。 */
   readonly promptBlock: string;
   readonly promptBlockBytes: number;
+  /** catalog 原文（name+description 清单）。 */
+  readonly catalog: string;
+  readonly catalogBytes: number;
   readonly catalogSkillNames: readonly string[];
   readonly registryRegistered: boolean;
 }
 
-export async function armDelivery(profile: ContextProfileConfig): Promise<SimArmDelivery> {
-  const delivery: MainSkillDelivery = await loadMainSkillDelivery(
-    profile.root,
-    profile.mainSkillRoots ?? [],
-    profile.mainSkillMode ?? 'inline',
-  );
+/** 按装配参数读取生产同源的 Main 技能投递（只读；不触模）。 */
+export async function armDelivery(mainSkillsDir: string): Promise<SimArmDelivery> {
+  const delivery: MainSkillDelivery = await loadMainSkillDelivery(mainSkillsDir);
   const catalogSkillNames = delivery.registry === undefined
     ? []
     : (await delivery.registry.discover()).map((metadata) => metadata.name).sort();
   return {
-    mainSkillRoots: [...(profile.mainSkillRoots ?? [])],
-    mainSkillMode: profile.mainSkillMode ?? null,
+    mainSkillsDir,
     promptBlock: delivery.promptBlock,
     promptBlockBytes: Buffer.byteLength(delivery.promptBlock, 'utf8'),
+    catalog: delivery.catalog,
+    catalogBytes: delivery.catalogBytes,
     catalogSkillNames,
     registryRegistered: delivery.registry !== undefined,
   };
@@ -160,19 +177,26 @@ export interface SimArmProbe {
   readonly delivery: SimArmDelivery;
 }
 
+export interface ProbeArmOptions {
+  /** 覆盖该臂的 `mainSkillsDir`（自测的反向绊线用：把 B 也指向空目录）。 */
+  readonly mainSkillsDir?: string;
+}
+
 /**
  * 在**不调用任何模型**的前提下走真实装配链（`scripts/ask-runtime.ts` 的
  * `assembleSessionCore`：同样的 `loadConfig` → `loadMainSkillDelivery` → `createSession`），
  * 用一个只记录 `systemPrompt/tools` 的驱动发一条探针消息，返回 Main 实际看到的面。
  *
- * 这是 A/B 两臂「配置差异真的生效」的机械证据：不是靠读配置文件猜，而是看装配产物。
+ * 这是 A/B 两臂「装配参数差异真的生效」的机械证据：不是靠读配置文件猜，而是看装配产物。
  */
 export async function probeArmAssembly(
   arm: SimArm,
   workDir: string,
   env: NodeJS.ProcessEnv,
+  options: ProbeArmOptions = {},
 ): Promise<SimArmProbe> {
   mkdirSync(workDir, { recursive: true });
+  const mainSkillsDir = options.mainSkillsDir ?? armMainSkillsDir(arm, workDir);
   const prepared = materializeArmConfig(arm, path.join(workDir, `arm-${arm}.yaml`));
   const config = loadConfig({ yamlPath: prepared.configPath, env });
   const effectiveEnv = effectiveDeploymentEnv(config, env);
@@ -195,6 +219,7 @@ export async function probeArmAssembly(
     dbPath: path.join(workDir, 'probe.db'),
     stateDir: path.join(workDir, 'probe-state'),
     emptyOperationsMessage: '执行层没有声明任何只读 operation——A/B 探针拒绝以空允许集合装配。',
+    mainSkillsDir,
     createDrivers: () => ({ mainDriver: probeDriver, workerDriver: probeDriver }),
   });
   try {
@@ -205,7 +230,7 @@ export async function probeArmAssembly(
   if (capture.systemPrompt === undefined || capture.tools === undefined) {
     throw new Error(`臂 ${arm} 装配探针未观察到 Main 回合（驱动未被调用）`);
   }
-  const delivery = await armDelivery(prepared.profile);
+  const delivery = await armDelivery(mainSkillsDir);
   const tools = capture.tools;
   return {
     arm,
@@ -217,24 +242,72 @@ export async function probeArmAssembly(
   };
 }
 
+/** 臂面期望：A 必须为空，B 必须含指定技能（由硬门与反向绊线共用）。 */
+export interface ArmSurfaceExpectation {
+  /** B 臂必须出现在 catalog 的技能名（A 臂忽略）。 */
+  readonly requiredNames?: readonly string[];
+}
+
+/**
+ * **防静默假绿的关键断言**（`probeArmPair` 与反向绊线共用）：
+ *   · A：catalog 为空、无 `read_skill` 工具、技能块 0 字节、系统提示无技能标记；
+ *   · B：catalog 含必需技能、`read_skill` 已注册、技能块非空且含该 name。
+ * 任一不满足即抛（不烧样本）。把 B 指向空目录时这里必须抛——自测的反向绊线证明它有效。
+ */
+export function assertArmSurface(
+  probe: SimArmProbe,
+  expectation: ArmSurfaceExpectation = {},
+): void {
+  const problems: string[] = [];
+  const { delivery } = probe;
+  if (probe.arm === 'A') {
+    if (delivery.catalogBytes !== 0) problems.push(`A 臂 catalog 非空（${delivery.catalogBytes}B，应为 0）：${delivery.catalog}`);
+    if (delivery.catalogSkillNames.length !== 0) problems.push(`A 臂 catalog 技能非空：${delivery.catalogSkillNames.join('、')}`);
+    if (delivery.promptBlockBytes !== 0) problems.push(`A 臂技能块非空（${delivery.promptBlockBytes}B，应为 0）`);
+    if (delivery.registryRegistered) problems.push('A 臂登记了 Main 技能表（read_skill 不应注册）');
+    if (probe.readSkillToolRegistered) problems.push('A 臂工具面含 read_skill（不应注册）');
+    if (probe.tools.includes('read_skill')) problems.push('A 臂工具面含 read_skill（重复核对）');
+    if (probe.systemPrompt.includes('【可用技能')) problems.push('A 臂系统提示含技能块标记「【可用技能」');
+    if (problems.length > 0) {
+      throw new Error(`A 臂技能面断言失败（mainSkillsDir=${delivery.mainSkillsDir}）：\n${problems.join('\n')}`);
+    }
+    return;
+  }
+
+  const required = expectation.requiredNames ?? [REQUIRED_B_SKILL];
+  for (const name of required) {
+    if (!delivery.catalogSkillNames.includes(name)) {
+      problems.push(`B 臂 catalog 缺技能 ${name}（当前：${delivery.catalogSkillNames.join('、') || '（空）'}）`);
+    }
+    if (!delivery.promptBlock.includes(name)) problems.push(`B 臂技能块不含 name ${name}（${delivery.promptBlockBytes}B）`);
+  }
+  if (delivery.catalogBytes === 0) problems.push('B 臂 catalog 为空（应有技能清单）');
+  if (delivery.promptBlockBytes === 0) problems.push('B 臂技能块为空（应为非空）');
+  if (!delivery.registryRegistered) problems.push('B 臂未登记 Main 技能表（read_skill 应可读）');
+  if (!probe.readSkillToolRegistered) problems.push('B 臂工具面缺 read_skill');
+  if (problems.length > 0) {
+    throw new Error(`B 臂技能面断言失败（mainSkillsDir=${delivery.mainSkillsDir}）：\n${problems.join('\n')}`);
+  }
+}
+
 /**
  * 两臂装配核对（跑任何样本前的硬门）：
- *   · A：无 catalog、无 read_skill；
- *   · B：catalog 非空、read_skill 已注册；
+ *   · 调 `assertArmSurface`（A 空 / B 有指定技能）；
  *   · 除技能外逐字一致：把 B 的技能块从系统提示里去掉后必须等于 A，工具面只差 read_skill。
- * 任一不满足即抛（不烧样本）。
  */
 export function assertArmPairDiffersOnlyBySkills(a: SimArmProbe, b: SimArmProbe): void {
   const problems: string[] = [];
   if (a.arm !== 'A' || b.arm !== 'B') problems.push(`臂标签错误：A=${a.arm} B=${b.arm}`);
-  if (a.delivery.promptBlockBytes !== 0) problems.push(`A 臂系统提示含技能块（${a.delivery.promptBlockBytes}B，应为 0）`);
-  if (a.delivery.catalogSkillNames.length !== 0) problems.push(`A 臂 catalog 非空：${a.delivery.catalogSkillNames.join('、')}`);
-  if (a.delivery.registryRegistered) problems.push('A 臂登记了 Main 技能表（read_skill 不应注册）');
-  if (a.readSkillToolRegistered) problems.push('A 臂工具面含 read_skill（不应注册）');
-  if (b.delivery.catalogSkillNames.length === 0) problems.push('B 臂 catalog 为空（应含夹具财务口径技能）');
-  if (!b.delivery.registryRegistered) problems.push('B 臂未登记 Main 技能表（read_skill 应可读）');
-  if (!b.readSkillToolRegistered) problems.push('B 臂工具面缺 read_skill');
-  if (b.delivery.promptBlockBytes === 0) problems.push('B 臂系统提示技能块为空');
+  try {
+    assertArmSurface(a);
+  } catch (error) {
+    problems.push(error instanceof Error ? error.message : String(error));
+  }
+  try {
+    assertArmSurface(b, { requiredNames: [REQUIRED_B_SKILL] });
+  } catch (error) {
+    problems.push(error instanceof Error ? error.message : String(error));
+  }
   // 只差技能：B 去掉技能块 == A；工具面只差 read_skill。
   const bWithoutSkills = b.systemPrompt.replace(b.delivery.promptBlock, '');
   if (bWithoutSkills !== a.systemPrompt) problems.push('两臂系统提示除技能块外不一致（基线被改动）');
@@ -269,21 +342,26 @@ export interface SimArmAskRuntimeInput {
   readonly sessionId: string;
   readonly env: NodeJS.ProcessEnv;
   readonly principalId?: string;
+  /** 覆盖该臂的技能目录（缺省按臂物化；跑批必须与装配探针同值）。 */
+  readonly mainSkillsDir?: string;
 }
 
 /**
- * 每 trial 一个被测系统：配置副本由本臂决定，其余走 `createAskRuntimeSystem`
- * （生产同源 `assembleAskRuntime`）。trial 目录互不共享由 `./run` 的隔离断言守。
+ * 每 trial 一个被测系统：配置副本两臂相同，`mainSkillsDir` 由本臂决定，其余走
+ * `createAskRuntimeSystem`（生产同源 `assembleAskRuntime`）。trial 目录互不共享由
+ * `./run` 的隔离断言守。
  */
 export async function createArmAskRuntimeSystem(input: SimArmAskRuntimeInput): Promise<AskRuntimeSystem> {
   mkdirSync(input.runtimeDir, { recursive: true });
   const prepared = materializeArmConfig(input.arm, path.join(input.runtimeDir, 'agent-config.yaml'));
+  const mainSkillsDir = input.mainSkillsDir ?? armMainSkillsDir(input.arm, input.runtimeDir);
   return createAskRuntimeSystem({
     runtimeDir: input.runtimeDir,
     sessionId: input.sessionId,
     env: input.env,
     argv: [`--config=${prepared.configPath}`],
     ...(input.principalId === undefined ? {} : { principalId: input.principalId }),
+    mainSkillsDir,
   });
 }
 
@@ -313,7 +391,7 @@ export interface RunSimArmSuiteInput {
   readonly probeWorkDir?: string;
   /** 装配环境（缺省 process.env）。 */
   readonly env?: NodeJS.ProcessEnv;
-  /** 已由调用方探针核对时的复用（避免重复装配）；缺省现探并核对不了对臂。 */
+  /** 已由调用方探针核对时的复用（避免重复装配）；缺省现探。 */
   readonly probe?: SimArmProbe;
 }
 
@@ -340,7 +418,10 @@ export async function runSimArmSuite(input: RunSimArmSuiteInput): Promise<SimArm
     env,
   );
   if (probe.arm !== input.arm) throw new Error(`装配探针臂标签不符：${probe.arm} != ${input.arm}`);
+  // 未由调用方核对时，单臂也要过自己的面断言（防「探针跑了但没检查」）。
+  assertArmSurface(probe);
 
+  const mainSkillsDir = probe.delivery.mainSkillsDir;
   const suiteInput: SimSuiteInput = {
     cases: input.cases,
     outRoot: input.outRoot,
@@ -352,6 +433,7 @@ export async function runSimArmSuite(input: RunSimArmSuiteInput): Promise<SimArm
       runtimeDir: paths.root,
       sessionId: trialSessionId(input.arm, caseDef, paths.root),
       env,
+      mainSkillsDir,
     })),
     ...(input.judge === undefined ? {} : { judge: input.judge }),
     ...(input.now === undefined ? {} : { now: input.now }),
@@ -364,7 +446,12 @@ export async function runSimArmSuite(input: RunSimArmSuiteInput): Promise<SimArm
   for (const trial of trials) {
     writeFileSync(
       path.join(trial.paths.root, 'arm.json'),
-      JSON.stringify({ arm: input.arm, spec: SIM_ARMS[input.arm], oracleId: trial.oracle?.id ?? null }, null, 2) + '\n',
+      JSON.stringify({
+        arm: input.arm,
+        spec: SIM_ARMS[input.arm],
+        mainSkillsDir,
+        oracleId: trial.oracle?.id ?? null,
+      }, null, 2) + '\n',
       'utf8',
     );
   }
@@ -377,10 +464,11 @@ export async function runSimArmSuite(input: RunSimArmSuiteInput): Promise<SimArm
       tools: probe.tools,
       readSkillToolRegistered: probe.readSkillToolRegistered,
       delivery: {
-        mainSkillRoots: probe.delivery.mainSkillRoots,
-        mainSkillMode: probe.delivery.mainSkillMode,
+        mainSkillsDir: probe.delivery.mainSkillsDir,
         promptBlock: probe.delivery.promptBlock,
         promptBlockBytes: probe.delivery.promptBlockBytes,
+        catalog: probe.delivery.catalog,
+        catalogBytes: probe.delivery.catalogBytes,
         catalogSkillNames: probe.delivery.catalogSkillNames,
         registryRegistered: probe.delivery.registryRegistered,
       },

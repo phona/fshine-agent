@@ -30,6 +30,8 @@ import {
   type SimArm, type SimArmProbe, type SimArmSuiteResult, type SimArmTrialResult,
 } from './arms';
 import type { AskRuntimeSystem } from './ask-adapter';
+import { SIM_ATTRIBUTION_EXPECTATIONS } from './attribution-expectations';
+import { buildArmAttributionTable, renderArmAttributionTable } from './attribution';
 import { createChatModel } from './real-model';
 import { assertSampleCap, selectSimCases } from './selection';
 import type { SimModel } from './simulator';
@@ -98,15 +100,15 @@ function buildReport(input: {
   lines.push(`- 判官: 未启用（${SIM_CASE_ORACLES.length} 个确定性 Oracle；两臂同一注册表）`);
   lines.push(`- 用例: ${cases.map((caseDef) => `${caseDef.id}（trials=${caseDef.limits.trials}）`).join('、')}`);
   lines.push(`- 预算: 用例自带 limits（两臂同一 SimCase 对象）；并发每批 ${CONCURRENCY}`);
-  lines.push(`- 批次策略: **分两批**（逐臂一次 \`runSimSuite\`，串行）。理由见文件头：同批混跑会改 \`./run\` 的样本展开与终态口径；分两批复用同一批次机制，唯一差异是每臂 profile。`);
+  lines.push(`- 批次策略: **分两批**（逐臂一次 \`runSimSuite\`，串行）。理由见文件头：同批混跑会改 \`./run\` 的样本展开与终态口径；分两批复用同一批次机制，唯一差异是每臂装配参数 \`mainSkillsDir\`。`);
   lines.push(`- 输出: \`${path.relative(REPO_ROOT, outRoot)}\``, '');
   lines.push('## 1. 两臂差异（装配探针，零模型）', '');
-  lines.push('| 臂 | mainSkillRoots | mainSkillMode | 技能块字节 | catalog 技能 | read_skill 注册 | Main 工具面 |');
+  lines.push('| 臂 | mainSkillsDir | catalog 字节 | 技能块字节 | catalog 技能 | read_skill 注册 | Main 工具面 |');
   lines.push('| --- | --- | --- | --- | --- | --- | --- |');
   for (const probe of [probes.a, probes.b]) {
-    lines.push(`| ${probe.arm} | ${JSON.stringify(probe.delivery.mainSkillRoots)} | ${probe.delivery.mainSkillMode ?? '（未声明）'} | ${probe.delivery.promptBlockBytes} | ${probe.delivery.catalogSkillNames.join('、') || '（空）'} | ${probe.readSkillToolRegistered ? '是' : '否'} | ${probe.tools.join('、')} |`);
+    lines.push(`| ${probe.arm} | \`${probe.delivery.mainSkillsDir}\` | ${probe.delivery.catalogBytes} | ${probe.delivery.promptBlockBytes} | ${probe.delivery.catalogSkillNames.join('、') || '（空）'} | ${probe.readSkillToolRegistered ? '是' : '否'} | ${probe.tools.join('、')} |`);
   }
-  lines.push('', '装配探针走生产同源 `assembleSessionCore`（配置 → `loadMainSkillDelivery` → `createSession`），并断言：B 的系统提示去掉技能块后逐字等于 A，工具面只差 `read_skill`。', '');
+  lines.push('', '装配探针走生产同源 `assembleSessionCore`（配置 → `loadMainSkillDelivery(mainSkillsDir)` → `createSession`），并断言：A catalog/技能块为空且无 read_skill；B catalog 含 `finance-business-basics` 且 read_skill 注册；B 的系统提示去掉技能块后逐字等于 A，工具面只差 `read_skill`。', '');
   lines.push('## 2. 每臂读数', '');
   lines.push('| 臂 | 样本 | 通过 | 有效样本 | 终态 | 并发 | 实际最大并发 | 墙钟 |');
   lines.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
@@ -116,7 +118,14 @@ function buildReport(input: {
     lines.push(`| ${arm} | ${summary.n} | ${summary.passed} | ${summary.effectiveSamples} | ${JSON.stringify(summary.byTerminal)} | ${CONCURRENCY} | ${run.result.batch.observedMaxConcurrency} | ${(run.wallMs / 1000).toFixed(1)}s |`);
   }
   lines.push('', `**口径**：\`pass\` = 终态 \`satisfied\` **且** Oracle 判真值通过；gave_up / budget_exhausted / contaminated / protocol_error 永不算通过；有效样本 = 总数 − protocol_error。`, '');
-  lines.push('## 3. 逐用例两臂对照（pass^k，k=该用例 trials 数）', '');
+  // 两维失败归因（只解释）：技能链路四项 × 业务链路五项，按臂计数；pass 原样来自 Oracle。
+  const attributionTable = buildArmAttributionTable(
+    SIM_ARM_IDS.map((arm) => ({ arm, trials: runs[arm].result.trials })),
+    SIM_ATTRIBUTION_EXPECTATIONS,
+  );
+  lines.push('## 3. 两维失败归因（按臂计数；只解释，不改 pass）', '');
+  lines.push(renderArmAttributionTable(attributionTable), '');
+  lines.push('## 4. 逐用例两臂对照（pass^k，k=该用例 trials 数）', '');
   lines.push('| 用例 | A pass | A 终态 | B pass | B 终态 |');
   lines.push('| --- | --- | --- | --- | --- |');
   for (const caseDef of cases) {
@@ -126,7 +135,7 @@ function buildReport(input: {
       `${trials.filter((trial) => trial.pass).length}/${trials.length}`;
     lines.push(`| ${caseDef.id} | ${passText(a)} | ${JSON.stringify(terminalsOf(a))} | ${passText(b)} | ${JSON.stringify(terminalsOf(b))} |`);
   }
-  lines.push('', '## 4. 逐 trial 明细（两臂分开）', '');
+  lines.push('', '## 5. 逐 trial 明细（两臂分开）', '');
   for (const arm of SIM_ARM_IDS) {
     lines.push(`### 臂 ${arm} · ${SIM_ARMS[arm].label}`, '');
     for (const caseDef of cases) {
@@ -137,7 +146,7 @@ function buildReport(input: {
       lines.push('');
     }
   }
-  lines.push('## 5. 结论', '');
+  lines.push('## 6. 结论', '');
   for (const arm of SIM_ARM_IDS) {
     const summary = runs[arm].result.summary;
     lines.push(`- 臂 ${arm}：${summary.n} 条全留（不筛绿）；通过 ${summary.passed}；有效样本 ${summary.effectiveSamples}；终态 ${JSON.stringify(summary.byTerminal)}。`);
@@ -166,7 +175,7 @@ async function main(): Promise<void> {
     `- 模型: ${model}`,
     `- 用例: ${selectedCases.map((caseDef) => caseDef.id).join('、')}`,
     `- 臂 A: ${SIM_ARMS.A.label}`,
-    `- 臂 B: ${SIM_ARMS.B.label}（mainSkillRoots=${JSON.stringify(SIM_ARMS.B.mainSkillRoots)}）`,
+    `- 臂 B: ${SIM_ARMS.B.label}（mainSkillsDir = 仓库 .agents/skills）`,
     `- 并发: 每批 ${CONCURRENCY}；批次策略：分两批（逐臂一次 runSimSuite）`,
     `- 预算: 用例 limits（两臂同一对象）`,
     `- 判据: pass 只由 Oracle 决定；失败样本全留，不筛绿`,
@@ -200,6 +209,7 @@ async function main(): Promise<void> {
             runtimeDir: paths.root,
             sessionId: `sim-${arm}-${caseDef.id}-${paths.root.split(path.sep).slice(-2).join('-')}`,
             env: process.env,
+            mainSkillsDir: (arm === 'A' ? probes.a : probes.b).delivery.mainSkillsDir,
           });
           systems.set(`${arm}:${caseDef.id}#${paths.root}`, system);
           return system;
@@ -231,13 +241,17 @@ async function main(): Promise<void> {
     tools: probe.tools,
     readSkillToolRegistered: probe.readSkillToolRegistered,
     delivery: {
-      mainSkillRoots: probe.delivery.mainSkillRoots,
-      mainSkillMode: probe.delivery.mainSkillMode,
+      mainSkillsDir: probe.delivery.mainSkillsDir,
+      catalogBytes: probe.delivery.catalogBytes,
       promptBlockBytes: probe.delivery.promptBlockBytes,
       catalogSkillNames: probe.delivery.catalogSkillNames,
       registryRegistered: probe.delivery.registryRegistered,
     },
   });
+  const attributionTable = buildArmAttributionTable(
+    SIM_ARM_IDS.map((arm) => ({ arm, trials: runs[arm].result.trials })),
+    SIM_ATTRIBUTION_EXPECTATIONS,
+  );
   const summary = {
     runId,
     model,
@@ -245,6 +259,12 @@ async function main(): Promise<void> {
     batchStrategy: 'two-batches-one-per-arm',
     cases: selectedCases.map((caseDef) => caseDef.id),
     probes: { A: probeSummary(probes.a), B: probeSummary(probes.b) },
+    // 两维失败归因：只解释；pass 原样来自各臂 Oracle 判定（passUnchanged 须为 true）。
+    attribution: {
+      rules: attributionTable.rules,
+      passUnchanged: attributionTable.passUnchanged,
+      arms: attributionTable.arms,
+    },
     arms: Object.fromEntries(SIM_ARM_IDS.map((arm) => [arm, {
       spec: runs[arm].result.spec,
       wallMs: runs[arm].wallMs,
@@ -275,9 +295,11 @@ async function main(): Promise<void> {
     }])),
   };
   writeFileSync(path.join(outRoot, 'summary.json'), JSON.stringify(summary, null, 2) + '\n', 'utf8');
+  writeFileSync(path.join(outRoot, 'attribution.json'), JSON.stringify(attributionTable, null, 2) + '\n', 'utf8');
   console.log(report);
   console.log(`\nREPORT ${path.join(outRoot, 'report.md')}`);
   console.log(`SUMMARY ${path.join(outRoot, 'summary.json')}`);
+  console.log(`ATTRIBUTION ${path.join(outRoot, 'attribution.json')}`);
 }
 
 main().catch((error) => {
