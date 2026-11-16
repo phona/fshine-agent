@@ -34,6 +34,10 @@ const ASK_RUNTIME = 'scripts/ask-runtime.ts';
 const STAB_SOAK = 'scripts/stab/soak-harness.ts';
 const STAB_PRESSURE = 'scripts/stab/pressure-harness.ts';
 const STAB_CHAOS = 'scripts/stab/chaos-harness.ts';
+// P2 业务 E2E 胶水（2026-11-16 登记）：与 R4 稳定性 harness 同类——只**构造**场景的
+// RuntimeConfig 输入（S2 两槽并发 / S4 单槽排队 / S7b workerTurnMs=5000 / S6 三并发），
+// 不解析/解释旋钮、不读原始 `config.runtime.*`。
+const P2_SCENARIOS = 'scripts/eval/p2/p2-scenarios.ts';
 
 /** 分诊 #6 删除的 host.* 未消费键（生产代码零引用；旧 YAML 里的残留键由加载层忽略）。 */
 const DELETED_HOST_KEYS = [
@@ -67,11 +71,11 @@ const DELETED_ENV_KEYS = [
  *    leaseMs；不自行解释旋钮、不读原始 `config.runtime.*`（单一配置源不破坏）。
  */
 const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
-  mainConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
-  backgroundConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS],
-  queueCapacity: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS],
+  mainConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, P2_SCENARIOS],
+  backgroundConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS, P2_SCENARIOS],
+  queueCapacity: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS, P2_SCENARIOS],
   mainTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME],
-  workerTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME],
+  workerTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME, P2_SCENARIOS],
   maxDelegationDepth: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   taskBudget: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   waitUserTimeoutMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
