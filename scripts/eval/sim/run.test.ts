@@ -14,6 +14,7 @@ import type { SimCase } from './case';
 import { createReplyOracle, resolveOracle, type SimOracle } from './oracle';
 import type { SimModel, SimModelCompletion, SimulatorPrompt } from './simulator';
 import type { SimSystemCall } from './run';
+import { emptySkillTelemetry } from './skill-telemetry';
 import {
   EndlessSimulator, ScriptedSystem as FakesScriptedSystem, sayCompletion,
 } from './fakes';
@@ -160,6 +161,7 @@ function trialWithPaths(paths: SimTrialResult['paths']): SimTrialResult {
       unobservedKinds: [],
     },
     systemAccountingAvailable: true,
+    skills: emptySkillTelemetry(),
     paths,
   };
 }
@@ -615,6 +617,7 @@ describe('证据落盘', () => {
     expect(manifest.pass).toBe(true);
     expect(manifest.files.map((file) => file.name)).toEqual([
       'trial.json', 'messages.jsonl', 'replies.jsonl', 'accounting.json', 'injection.json', 'oracle.json',
+      'skills.json',
     ]);
     for (const file of manifest.files) expect(file.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(existsSync(path.join(dir, 'trial.json'))).toBe(true);

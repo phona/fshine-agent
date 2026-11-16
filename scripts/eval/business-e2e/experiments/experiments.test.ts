@@ -162,6 +162,31 @@ describe('② 工具面门控核实（缺口 1 taskRunner 同源门控）', () =
     const without = await exec(itemFor(bare), bare, path.join(root, 'b'));
     expect(without.perTurnMainTools[0], 'bizprobe/ask inline 路径缺省无 runner → 四工具不注册').toEqual(['run_task']);
   });
+
+  /**
+   * 回归（S5 合并暴露）：`read_skill` 属**技能面**，只由 catalog 非空决定；taskRunner 门控只管
+   * 四件任务工具。四格矩阵逐格断言，防止再次出现「把空索引臂的执行结果与非隔离期望混在一行」
+   * 的装配/断言错配（`execution-runtime.ts` 的 Main 工具面里两个门控互相独立）。
+   */
+  it('read_skill 只由 catalog 决定：有/无 runner 各有技能面；空目录两者都没有', async () => {
+    const root = freshRoot();
+    const exec = executorWith([async () => {}]);
+    const skillsMain = path.join(FIXTURE_ROOT, '.agents', 'skills-main'); // 夹具 catalog（两技能）
+    const skillsNone = path.join(FIXTURE_ROOT, '.agents', 'skills-none'); // 故意不存在 = 空索引
+    const taskTools = ['task_status', 'task_result', 'task_cancel', 'task_resume'];
+    const cells: ReadonlyArray<{ label: string; withTaskRunner: boolean; mainSkillsDir: string; expected: string[]; catalog: boolean }> = [
+      { label: 'runner＋catalog', withTaskRunner: true, mainSkillsDir: skillsMain, expected: ['run_task', ...taskTools, 'read_skill'], catalog: true },
+      { label: 'runner＋空目录', withTaskRunner: true, mainSkillsDir: skillsNone, expected: ['run_task', ...taskTools], catalog: false },
+      { label: '无 runner＋catalog', withTaskRunner: false, mainSkillsDir: skillsMain, expected: ['run_task', 'read_skill'], catalog: true },
+      { label: '无 runner＋空目录', withTaskRunner: false, mainSkillsDir: skillsNone, expected: ['run_task'], catalog: false },
+    ];
+    for (const cell of cells) {
+      const def: ExpCase = { ...T01, id: `gate-${cell.label}`, withTaskRunner: cell.withTaskRunner, mainSkillsDir: cell.mainSkillsDir };
+      const ev = await exec(itemFor(def), def, path.join(root, cell.label.replace(/[^\w-]/g, '_')));
+      expect(ev.perTurnMainTools[0], `${cell.label}：工具面`).toEqual(cell.expected);
+      expect(ev.skillBlockBytes > 0, `${cell.label}：catalog 字节数为 0 与非空判定一致`).toBe(cell.catalog);
+    }
+  });
 });
 
 describe('③ 四工具全流程（假件）', () => {

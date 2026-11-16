@@ -100,6 +100,11 @@ export interface AskRuntimeInput {
   principalId?: string;
   /** 显式底账路径（redo 传已解析出的同一库；缺省按配置链）。 */
   dbPath?: string;
+  /**
+   * Main 技能目录覆盖（**仅代码/测试装配参数**，不是配置键）：缺省 = `<repo>/.agents/skills`
+   * （`defaultMainSkillsDir()`）。eval/实验用它把某一臂指向夹具/空目录；生产入口不传。
+   */
+  mainSkillsDir?: string;
 }
 
 export interface AskRuntime {
@@ -646,6 +651,7 @@ export async function assembleAskRuntime(input: AskRuntimeInput): Promise<AskRun
     },
     emptyOperationsMessage: '执行层没有声明任何只读 operation——最小切片拒绝以空允许集合运行。',
     emptyOperationsError: (message) => new AssemblyRefusedError(message),
+    ...(input.mainSkillsDir === undefined ? {} : { mainSkillsDir: input.mainSkillsDir }),
   });
   return {
     session: assembled.session,

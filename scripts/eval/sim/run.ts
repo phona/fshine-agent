@@ -31,6 +31,10 @@ import {
 import { detectContamination, normalizeForMatch, type ContaminationReport } from './contamination';
 import { InjectionTracker, type InjectionDirective, type InjectionReport } from './injection';
 import {
+  buildSkillTelemetry, emptySkillTelemetry, unavailableSkillDiscovery,
+  type SimSkillDiscovery, type SimSkillRead, type SimSkillTelemetry,
+} from './skill-telemetry';
+import {
   buildRepairPrompt, buildSimulatorPrompt, findCaseLeaks, findPromptLeaks, hasRepeatedUserIntent,
   type SimModel, type SimulatorView,
 } from './simulator';
@@ -61,10 +65,17 @@ export interface SimSystemTurn {
   readonly injectionReason?: string;
   /** 逐次模型调用上报；undefined = 不暴露。 */
   readonly calls?: readonly SimSystemCall[];
+  /** 本回合 `read_skill` 读取遥测；undefined = 该回合未暴露/未发生读取（按已观测调用计）。 */
+  readonly skillReads?: readonly SimSkillRead[];
 }
 
 export interface SimSystemUnderTest {
   send(text: string, ctx: { readonly injection: InjectionDirective | null }): Promise<SimSystemTurn>;
+  /**
+   * 可选：本 trial 的技能 catalog 发现读数（创建后一次；只读观测，不参与判定）。
+   * 不实现 = 该系统面不暴露技能发现（证据记 available=false）。
+   */
+  skillDiscovery?(): SimSkillDiscovery | Promise<SimSkillDiscovery>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -154,6 +165,8 @@ export interface SimTrialResult {
   readonly accounting: SimAccounting;
   /** 系统面是否暴露逐次调用（false = 只记不可得，不编造 main/summary…）。 */
   readonly systemAccountingAvailable: boolean;
+  /** 技能链路遥测（发现 / 读取 / 隔离）；只解释，不参与 pass。 */
+  readonly skills: SimSkillTelemetry;
   readonly paths: SimTrialPaths;
   /** 协议修复留证；undefined = 全程首答即合法（没有发生过解析失败）。 */
   readonly protocol?: SimProtocolLog;
@@ -195,6 +208,9 @@ export async function runSimTrial(caseDef: SimCase, trial: number, deps: SimTria
     });
   };
 
+  const skillReads: SimSkillRead[] = [];
+  let skillDiscovery: SimSkillDiscovery | undefined;
+
   const build = (input: {
     terminal: SimTerminal | null;
     pass: boolean;
@@ -218,6 +234,7 @@ export async function runSimTrial(caseDef: SimCase, trial: number, deps: SimTria
     calls: records,
     accounting: accountSimCalls(records),
     systemAccountingAvailable,
+    skills: buildSkillTelemetry(skillDiscovery, skillReads),
     paths,
     ...(protocolLog === null ? {} : { protocol: protocolLog }),
     ...(input.error === undefined ? {} : { error: input.error }),
@@ -250,6 +267,16 @@ export async function runSimTrial(caseDef: SimCase, trial: number, deps: SimTria
   }
 
   const system = await deps.createSystem(paths, caseDef);
+  if (system.skillDiscovery !== undefined) {
+    try {
+      skillDiscovery = await system.skillDiscovery();
+    } catch (error) {
+      // 遥测失败不改判定：如实记录「发现失败」，trial 照常跑。
+      skillDiscovery = unavailableSkillDiscovery(
+        `技能发现失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
   const tracker = new InjectionTracker(caseDef.injection);
   const counts = { systemTurn: 0, toolCall: 0, event: 0 };
   const contaminationCheck = (message: string): ContaminationReport =>
@@ -266,6 +293,8 @@ export async function runSimTrial(caseDef: SimCase, trial: number, deps: SimTria
     counts.event += turnResult.events ?? 0;
     // 机械标注触发该执行的用户消息序号（1 起）：Oracle 只用它划「找回之后」的时间边界。
     for (const execution of turnResult.executions ?? []) executions.push({ ...execution, turn });
+    // 技能读取遥测（只记录，不参与任何判定）。
+    for (const read of turnResult.skillReads ?? []) skillReads.push(read);
     if (turnResult.calls === undefined) {
       systemAccountingAvailable = false;
     } else {
@@ -477,6 +506,7 @@ export function writeSimTrialEvidence(result: SimTrialResult): string {
     ['accounting.json', pretty(result.accounting)],
     ['injection.json', pretty(result.injection)],
     ['oracle.json', pretty(result.oracle)],
+    ['skills.json', pretty(result.skills)],
   ];
   for (const [name, content] of files) writeFileSync(path.join(dir, name), content, 'utf8');
   const manifest = {
@@ -650,6 +680,7 @@ export async function runSimSuite(input: SimSuiteInput): Promise<SimSuiteResult>
       calls: [],
       accounting: emptySimAccounting(),
       systemAccountingAvailable: false,
+      skills: emptySkillTelemetry(),
       paths,
       error: outcome.error ?? 'trial 未产出结果',
     };
