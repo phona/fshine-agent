@@ -1,0 +1,12 @@
+{
+  "items": [
+    {
+      "id": "rec-501",
+      "name": "contoso-logistics-item-1",
+      "value": 450
+    }
+  ],
+  "windows": [
+    "W1"
+  ]
+}

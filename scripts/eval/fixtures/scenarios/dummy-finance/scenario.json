@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 1,
+  "scenario": "dummy-finance",
+  "platform": "dummy-platform",
+  "description": "Dummy finance-domain scenario: neutral collection/window/record data bound to the dummy-platform capabilities.",
+  "collections": [
+    {
+      "collection": "alpha",
+      "dataset": "datasets/alpha.json",
+      "locked": false,
+      "records": {
+        "W1": 2,
+        "W2": 1
+      }
+    },
+    {
+      "collection": "beta",
+      "dataset": "datasets/beta.json",
+      "locked": false,
+      "records": {
+        "W1": 3
+      }
+    },
+    {
+      "collection": "alpha-group",
+      "dataset": "datasets/alpha-group.json",
+      "locked": false,
+      "records": {
+        "W1": 1
+      }
+    },
+    {
+      "collection": "documents",
+      "dataset": "datasets/documents.json",
+      "locked": false,
+      "records": {
+        "W202610": 2,
+        "W202611": 3
+      }
+    },
+    {
+      "collection": "locked-one",
+      "dataset": "datasets/locked-one.json",
+      "locked": true,
+      "records": {
+        "W1": 1
+      }
+    },
+    {
+      "collection": "empty-one",
+      "dataset": "datasets/empty-one.json",
+      "locked": false,
+      "records": {
+        "W1": 0
+      }
+    },
+    {
+      "collection": "faulty-one",
+      "dataset": "datasets/faulty-one.json",
+      "locked": false,
+      "records": {
+        "W1": 1
+      }
+    },
+    {
+      "collection": "denied-one",
+      "dataset": "datasets/denied-one.json",
+      "locked": false,
+      "records": {
+        "W1": 1
+      }
+    },
+    {
+      "collection": "contoso-trade",
+      "dataset": "datasets/contoso-trade.json",
+      "locked": false,
+      "records": {
+        "W1": 2,
+        "W2": 1
+      }
+    },
+    {
+      "collection": "contoso-logistics",
+      "dataset": "datasets/contoso-logistics.json",
+      "locked": false,
+      "records": {
+        "W1": 1
+      }
+    },
+    {
+      "collection": "fabrikam-retail",
+      "dataset": "datasets/fabrikam-retail.json",
+      "locked": false,
+      "records": {
+        "W1": 1
+      }
+    },
+    {
+      "collection": "fabrikam-wholesale",
+      "dataset": "datasets/fabrikam-wholesale.json",
+      "locked": false,
+      "records": {
+        "W1": 1
+      }
+    },
+    {
+      "collection": "bankflow-oct",
+      "dataset": "datasets/bankflow-oct.json",
+      "locked": false,
+      "records": {
+        "2025-10": 4
+      }
+    }
+  ],
+  "faults": [
+    {
+      "collection": "faulty-one",
+      "kind": "read_fault",
+      "exitCode": 2,
+      "error": {
+        "code": "COLLECTION_FAULT",
+        "message": "Collection {{source.collection}} cannot be read in its current state"
+      }
+    },
+    {
+      "collection": "denied-one",
+      "kind": "restricted",
+      "exitCode": 3,
+      "stderr": "GATE_REFUSE collection {{source.collection}} is restricted for the current caller",
+      "refused": "collection-restricted"
+    }
+  ]
+}

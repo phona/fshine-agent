@@ -1,0 +1,12 @@
+{
+  "items": [
+    {
+      "id": "rec-601",
+      "name": "fabrikam-retail-item-1",
+      "value": 880
+    }
+  ],
+  "windows": [
+    "W1"
+  ]
+}

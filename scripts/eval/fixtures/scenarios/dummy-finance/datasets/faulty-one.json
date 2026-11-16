@@ -1,0 +1,12 @@
+{
+  "items": [
+    {
+      "id": "rec-901",
+      "name": "faulty-item-1",
+      "value": 100
+    }
+  ],
+  "windows": [
+    "W1"
+  ]
+}
