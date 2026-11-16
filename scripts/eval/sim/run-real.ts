@@ -127,6 +127,9 @@ interface CaseReport {
   readonly passCount: number;
   readonly terminals: Readonly<Record<string, number>>;
   readonly contaminated: number;
+  readonly protocolErrors: number;
+  /** 有效样本 = 该用例 trials − protocol_error（报告显式标注口径）。 */
+  readonly effectiveTrials: number;
   readonly interventions: number;
   readonly needlessClarifications: number;
   readonly severe: readonly SevereFinding[];
@@ -146,6 +149,7 @@ function buildCaseReports(trials: readonly SimTrialResult[]): CaseReport[] {
     const list = (byCase.get(caseDef.id) ?? []).slice().sort((a, b) => a.trial - b.trial);
     const terminals: Record<string, number> = {};
     for (const trial of list) terminals[trial.terminal ?? 'harness_error'] = (terminals[trial.terminal ?? 'harness_error'] ?? 0) + 1;
+    const protocolErrors = list.filter((trial) => trial.terminal === 'protocol_error').length;
     reports.push({
       caseId: caseDef.id,
       trials: list,
@@ -153,6 +157,8 @@ function buildCaseReports(trials: readonly SimTrialResult[]): CaseReport[] {
       passCount: list.filter((trial) => trial.pass).length,
       terminals,
       contaminated: list.filter((trial) => trial.terminal === 'contaminated').length,
+      protocolErrors,
+      effectiveTrials: list.length - protocolErrors,
       interventions: list.reduce((sum, trial) => sum + Math.max(0, interventionsOf(trial)), 0),
       needlessClarifications: list.reduce((sum, trial) => sum + needlessClarificationsOf(trial), 0),
       severe: list.flatMap((trial) => severeFindings(trial)),
@@ -200,8 +206,16 @@ function trialLine(trial: SimTrialResult): string {
     `系统 tokens=${trial.accounting.byKind.main.tokens}`,
   ];
   if (trial.exhaustedBy !== null) parts.push(`耗尽=${trial.exhaustedBy}`);
+  if (trial.protocol !== undefined) parts.push(`协议修复=${trial.protocol.repairs}`);
   if (trial.error !== undefined) parts.push(`error=${trial.error}`);
   if (checksText !== '') parts.push(`checks: ${checksText}`);
+  if (trial.protocol !== undefined && trial.terminal === 'protocol_error') {
+    // 协议终态必须给出每次原始输出，便于判断是模型/网关侧空输出还是解析器缺陷。
+    const raws = trial.protocol.rawOutputs
+      .map((raw, index) => `第${index + 1}次=${JSON.stringify(raw.slice(0, 200))}`)
+      .join('；');
+    parts.push(`原始输出: ${raws}`);
+  }
   return parts.join(' · ');
 }
 
@@ -224,11 +238,17 @@ function buildReport(input: {
   lines.push(`- 样本: ${suite.summary.n}（3 用例 × 3 trials）· 墙钟 ${(wallMs / 1000).toFixed(1)}s`);
   lines.push(`- 输出: \`${path.relative(REPO_ROOT, outRoot)}\``, '');
   lines.push('## 1. 用例读数（每用例分开报）', '');
-  lines.push('| 用例 | pass^k (k=3) | 逐 trial pass | 终态 | contaminated | 干预次数 | 无意义澄清(代理) | 严重失败 |');
-  lines.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
+  lines.push('| 用例 | pass^k (k=3) | 逐 trial pass | 终态 | contaminated | protocol_error | 有效样本 | 干预次数 | 无意义澄清(代理) | 严重失败 |');
+  lines.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
   for (const report of cases) {
-    lines.push(`| ${report.caseId} | ${report.passAll ? '1（全过）' : '0'} | ${report.passCount}/${report.trials.length} | ${JSON.stringify(report.terminals)} | ${report.contaminated} | ${report.interventions} | ${report.needlessClarifications} | ${report.severe.length} |`);
+    lines.push(`| ${report.caseId} | ${report.passAll ? '1（全过）' : '0'} | ${report.passCount}/${report.trials.length} | ${JSON.stringify(report.terminals)} | ${report.contaminated} | ${report.protocolErrors} | ${report.effectiveTrials}/${report.trials.length} | ${report.interventions} | ${report.needlessClarifications} | ${report.severe.length} |`);
   }
+  lines.push(
+    '',
+    `**有效样本口径**：有效样本数 = 总数 − protocol_error = ${suite.summary.n} − ${suite.summary.protocolErrors} = **${suite.summary.effectiveSamples}**。`,
+    '协议失败（模拟用户模型首答 + 2 次修复重问后仍交不出合法动作）单列计数：不计入 gave_up、不计入 satisfied、永远 pass=false；',
+    '它既不算通过，也不被静默丢弃——样本与每次原始输出全部保留在证据里。',
+  );
   lines.push('', '### 逐 trial 明细', '');
   for (const report of cases) {
     lines.push(`#### ${report.caseId}`, '');
@@ -250,11 +270,17 @@ function buildReport(input: {
   const allSevere = cases.flatMap((report) => report.severe.map((finding) => ({ caseId: report.caseId, ...finding })));
   lines.push(`严重失败 = ${allSevere.length}。`);
   for (const finding of allSevere) lines.push(`- ${finding.caseId}: ${finding.kind} — ${finding.detail}`);
-  lines.push('', '## 4. gave_up / budget_exhausted（分开记；gave_up 不算通过）', '');
+  lines.push('', '## 4. gave_up / budget_exhausted / protocol_error（分开记；前两者与协议失败都不算通过）', '');
   const gaveUp = cases.flatMap((report) => report.gaveUpReasons);
-  lines.push(`gave_up = ${gaveUp.length}；budget_exhausted = ${cases.reduce((sum, report) => sum + report.exhausted.length, 0)}。`);
+  lines.push(`gave_up = ${gaveUp.length}；budget_exhausted = ${cases.reduce((sum, report) => sum + report.exhausted.length, 0)}；protocol_error = ${suite.summary.protocolErrors}。`);
   for (const reason of gaveUp) lines.push(`- gave_up ${reason}`);
   for (const reason of cases.flatMap((report) => report.exhausted)) lines.push(`- budget_exhausted ${reason}`);
+  for (const trial of suite.trials.filter((item) => item.terminal === 'protocol_error')) {
+    const raws = (trial.protocol?.rawOutputs ?? []).map((raw, index) => `第${index + 1}次=${JSON.stringify(raw.slice(0, 120))}`).join('；');
+    lines.push(`- protocol_error ${trial.caseId}#${trial.trial}: ${trial.error ?? '（未记录错误）'} · 原始输出：${raws || '（无）'}`);
+  }
+  lines.push('', '> `protocol_error` 是模拟用户侧的协议终态，不是产品行为读数：该 trial 作废但不洗成通过；',
+    '> 有效样本数 = 总数 − protocol_error（见 §1）。protocol_error=0 是跑批验收条件之一。');
   lines.push('', '## 5. 成本（被测系统 / simulator / judge 分开）', '');
   lines.push(...accountingLines(suite.summary.accounting));
   lines.push('', '口径说明：模拟用户逐次调用由 Harness 直接记录（`simulator`）；系统侧 `main` 来自 Pi 转录里');
@@ -266,11 +292,12 @@ function buildReport(input: {
   lines.push('## 7. 结论', '');
   const anyContamination = contaminated.length > 0;
   const anySevere = allSevere.length > 0;
-  const allPass = cases.every((report) => report.passAll) && !anyContamination && !anySevere;
-  lines.push(`- 9 条样本全留（不筛绿）：${suite.trials.length} 条。`);
+  const anyProtocolError = suite.summary.protocolErrors > 0;
+  const allPass = cases.every((report) => report.passAll) && !anyContamination && !anySevere && !anyProtocolError;
+  lines.push(`- ${suite.summary.n} 条样本全留（不筛绿）：${suite.trials.length} 条；有效样本数 = ${suite.summary.n} − ${suite.summary.protocolErrors} = ${suite.summary.effectiveSamples}。`);
   lines.push(`- 逐用例 pass^k：${cases.map((report) => `${report.caseId}=${report.passAll ? 1 : 0}`).join('，')}。`);
-  lines.push(`- 污染：${anyContamination ? '有（相关用例结论作废）' : '0'}；严重失败：${anySevere ? '有（blocked）' : '0'}。`);
-  lines.push(`- 总判定：${allPass ? '三用例 pass^3 全过' : '未全部通过（逐项见上，不筛绿）'}。`);
+  lines.push(`- 污染：${anyContamination ? '有（相关用例结论作废）' : '0'}；严重失败：${anySevere ? '有（blocked）' : '0'}；protocol_error：${suite.summary.protocolErrors}。`);
+  lines.push(`- 总判定：${allPass ? '三用例 pass^3 全过且协议失败 0' : '未全部通过（逐项见上，不筛绿）'}。`);
   lines.push('');
   return lines.join('\n');
 }
@@ -345,6 +372,8 @@ async function main(): Promise<void> {
       wallMs,
       n: suite.summary.n,
       passed: suite.summary.passed,
+      protocolErrors: suite.summary.protocolErrors,
+      effectiveSamples: suite.summary.effectiveSamples,
       byTerminal: suite.summary.byTerminal,
       accounting: suite.summary.accounting,
       isolation: suite.summary.isolation,
@@ -354,6 +383,8 @@ async function main(): Promise<void> {
         passCount: report.passCount,
         terminals: report.terminals,
         contaminated: report.contaminated,
+        protocolErrors: report.protocolErrors,
+        effectiveTrials: report.effectiveTrials,
         interventions: report.interventions,
         needlessClarifications: report.needlessClarifications,
         severe: report.severe,
@@ -366,6 +397,7 @@ async function main(): Promise<void> {
           exhaustedBy: trial.exhaustedBy,
           oracle: trial.oracle,
           error: trial.error ?? null,
+          protocol: trial.protocol ?? null,
           replies: trial.replies,
           actions: trial.messages.map((message) => ({ action: message.action, text: message.text ?? null, reason: message.reason ?? null })),
           accounting: trial.accounting,

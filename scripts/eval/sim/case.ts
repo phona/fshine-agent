@@ -9,9 +9,11 @@
  *     的泄漏守卫）。
  *   · 模拟用户**知道业务目标但不知道正确答案**：`knowledge` = 用户本来就掌握的业务信息，
  *     真值只登记在 oracle（`./oracle`），不得写进 `knowledge`（用例卫生由 `findCaseLeaks` 检查）。
- *   · 终态四类分开记：`satisfied` / `gave_up` / `budget_exhausted` / `contaminated`；
- *     只有 `satisfied` **且** Oracle 判真值通过才算该 trial 通过（`./run` 实施）。
+ *   · 终态分开记：`satisfied` / `gave_up` / `budget_exhausted` / `contaminated` /
+ *     `protocol_error`；只有 `satisfied` **且** Oracle 判真值通过才算该 trial 通过（`./run` 实施）。
  *   · 动作协议 = 每轮只输出 `say(text)` / `wait(reason)` / `finish(kind, reason)` 之一。
+ *     解析失败先做最多 `SIM_PROTOCOL_REPAIRS` 次修复重问（计入 `kind: simulator`），
+ *     仍失败 → 终态 `protocol_error`（`pass=false`，不计入 gave_up / satisfied）。
  */
 
 /** 模拟用户每轮可选动作。 */
@@ -20,8 +22,17 @@ export type SimActionKind = 'say' | 'wait' | 'finish';
 /** 模拟用户决定收尾的两种方式（与 trial 终态区分：finish 的 kind 不是终态本身）。 */
 export type SimFinishKind = 'satisfied' | 'gave_up';
 
-/** trial 终态（四类分开记；`null` 只用于 Harness/协议缺陷，不冒充任何一种终态）。 */
-export type SimTerminal = 'satisfied' | 'gave_up' | 'budget_exhausted' | 'contaminated';
+/**
+ * trial 终态（分开记；`null` 只用于 Harness/协议缺陷，不冒充任何一种终态）。
+ *
+ * `protocol_error` = 模拟用户模型在「首答 + 最多 2 次修复重问」后仍交不出合法动作；
+ * 它是**协议终态**，不是 gave_up、也不是 satisfied，永不算通过（`pass=false`）。
+ * 报告把「有效样本数」定义为 `总数 − protocol_error`（`./run-real` 显式标注）。
+ */
+export type SimTerminal = 'satisfied' | 'gave_up' | 'budget_exhausted' | 'contaminated' | 'protocol_error';
+
+/** 协议修复重问次数上限（预注册冻结；每次重问单独计入 `kind: simulator`）。 */
+export const SIM_PROTOCOL_REPAIRS = 2;
 
 /** 预算耗尽的具体来源（`budget_exhausted` 的归因，不并进终态计数）。 */
 export type SimBudgetReason = 'user_turns' | 'wait_turns' | 'wall_ms';
@@ -165,8 +176,8 @@ function extractJsonObject(raw: string): string | null {
 
 /**
  * 解析模拟用户一轮输出：只接受 `say` / `wait` / `finish`，且必须在 `allowedActions` 内。
- * 任何解析/字段/许可问题都返回 `{ok:false}`——由 Harness 记为协议缺陷（终态 null），
- * 不静默当作 `gave_up` 或 `budget_exhausted`。
+ * 任何解析/字段/许可问题都返回 `{ok:false}`——由 Harness 先做修复重问，仍失败则记
+ * 终态 `protocol_error`，不静默当作 `gave_up` 或 `budget_exhausted`。
  */
 export function parseSimAction(raw: string, allowed: readonly SimActionKind[]): ParseSimActionResult {
   const json = extractJsonObject(raw ?? '');

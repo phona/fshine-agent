@@ -5,9 +5,11 @@
  *   · 首条 `initialMessage` 也算一条用户消息，先过污染检测；
  *   · 每轮模拟用户只看**用户可见回复** + 自己的历史 + goal/persona/knowledge/behaviorRules；
  *   · 动作只有 say / wait / finish；预算 = maxUserTurns / maxWaitTurns / maxWallMs；
- *   · 终态四类分开记：satisfied / gave_up / budget_exhausted / contaminated；
- *     只有 satisfied **且** Oracle 判真值通过才 pass；gave_up 永不算通过；
- *   · 协议缺陷（模型输出不是合法动作 / prompt 泄漏 / oracle 未知）不冒充任何终态：
+ *   · 终态分开记：satisfied / gave_up / budget_exhausted / contaminated / protocol_error；
+ *     只有 satisfied **且** Oracle 判真值通过才 pass；gave_up / protocol_error 永不算通过；
+ *   · 模拟用户输出无法解析成合法动作时，先做最多 `SIM_PROTOCOL_REPAIRS` 次修复重问
+ *     （每次计入 `kind: simulator`，原始输出全部留证）；仍失败 → 终态 `protocol_error`；
+ *   · 其它协议缺陷（prompt 泄漏 / oracle 未知 / 用例卫生）不冒充任何终态：
  *     记 `terminal: null` + `error`，保留全样本。
  *
  * 并发：样本级并发池（缺省 5，见 case.ts `SIM_DEFAULT_CONCURRENCY`），每 trial 独立目录
@@ -23,13 +25,13 @@ import {
   type SimAccounting, type SimCallKind, type SimCallRecord,
 } from './accounting';
 import {
-  SIM_DEFAULT_CONCURRENCY, expandSimTrials, parseSimAction, validateSimCase,
+  SIM_DEFAULT_CONCURRENCY, SIM_PROTOCOL_REPAIRS, expandSimTrials, parseSimAction, validateSimCase,
   type SimCase, type SimBudgetReason, type SimFinishKind, type SimItem, type SimTerminal,
 } from './case';
 import { detectContamination, normalizeForMatch, type ContaminationReport } from './contamination';
 import { InjectionTracker, type InjectionDirective, type InjectionReport } from './injection';
 import {
-  buildSimulatorPrompt, findCaseLeaks, findPromptLeaks,
+  buildRepairPrompt, buildSimulatorPrompt, findCaseLeaks, findPromptLeaks,
   type SimModel, type SimulatorView,
 } from './simulator';
 import { resolveOracle, type SimExecutionFact, type SimJudgeTools, type SimOracle, type SimOracleVerdict } from './oracle';
@@ -115,12 +117,27 @@ export interface SimTrialDeps {
   readonly oracle: SimOracle;
   /** 注入墙钟（**只用于 maxWallMs 预算**，不作注入锚点）。 */
   readonly now?: () => number;
+  /**
+   * 协议修复重问次数上限（缺省 `SIM_PROTOCOL_REPAIRS`=2）。
+   * 只为反向绊线/消融保留可关闭开关；真实跑批不得把它调成 0。
+   */
+  readonly maxProtocolRepairs?: number;
+}
+
+/** 一次 trial 内协议修复的全量留证（恢复成功也保留，便于复核修复成本）。 */
+export interface SimProtocolLog {
+  /** 已执行的修复重问次数（不含首答）。 */
+  readonly repairs: number;
+  /** 首答 + 每次修复重问的原始输出（逐条留证）。 */
+  readonly rawOutputs: readonly string[];
+  /** 每次解析失败的错误描述（与 rawOutputs 同序，长度 = rawOutputs.length）。 */
+  readonly errors: readonly string[];
 }
 
 export interface SimTrialResult {
   readonly caseId: string;
   readonly trial: number;
-  /** 四类终态；`null` = Harness/协议缺陷（不冒充终态，永不 pass）。 */
+  /** 五类终态；`null` = Harness/协议缺陷（不冒充终态，永不 pass）。 */
   readonly terminal: SimTerminal | null;
   readonly pass: boolean;
   readonly exhaustedBy: SimBudgetReason | null;
@@ -138,6 +155,8 @@ export interface SimTrialResult {
   /** 系统面是否暴露逐次调用（false = 只记不可得，不编造 main/summary…）。 */
   readonly systemAccountingAvailable: boolean;
   readonly paths: SimTrialPaths;
+  /** 协议修复留证；undefined = 全程首答即合法（没有发生过解析失败）。 */
+  readonly protocol?: SimProtocolLog;
   readonly error?: string;
 }
 
@@ -158,6 +177,11 @@ export async function runSimTrial(caseDef: SimCase, trial: number, deps: SimTria
   const executions: SimExecutionFact[] = [];
   let seq = 0;
   let systemAccountingAvailable = true;
+  /** 协议修复留证（首次解析失败时建立；恢复成功也保留，跨回合累计）。 */
+  const protocolRawOutputs: string[] = [];
+  const protocolErrors: string[] = [];
+  let protocolRepairs = 0;
+  let protocolLog: SimProtocolLog | null = null;
 
   const recordCall = (kind: SimCallKind, turn: number, tokens?: CallTokens, observed?: boolean, durationMs = 0): void => {
     seq += 1;
@@ -195,6 +219,7 @@ export async function runSimTrial(caseDef: SimCase, trial: number, deps: SimTria
     accounting: accountSimCalls(records),
     systemAccountingAvailable,
     paths,
+    ...(protocolLog === null ? {} : { protocol: protocolLog }),
     ...(input.error === undefined ? {} : { error: input.error }),
   });
 
@@ -314,12 +339,37 @@ export async function runSimTrial(caseDef: SimCase, trial: number, deps: SimTria
     const completion = await deps.simulator.complete(prompt);
     recordCall('simulator', userTurns + 1, completion.tokens, completion.tokensObserved, now() - completionStarted);
 
-    const parsed = parseSimAction(completion.text, caseDef.allowedActions);
+    // 动作解析：首答不合法时最多修复重问 N 次（每次单独计入 simulator 账，原始输出全留证）。
+    const rawOutputs: string[] = [completion.text];
+    const parseErrors: string[] = [];
+    let parsed = parseSimAction(completion.text, caseDef.allowedActions);
     if (!parsed.ok) {
+      parseErrors.push(parsed.error);
+      const maxRepairs = deps.maxProtocolRepairs ?? SIM_PROTOCOL_REPAIRS;
+      for (let attempt = 1; attempt <= maxRepairs && !parsed.ok; attempt += 1) {
+        const repairPrompt = buildRepairPrompt(prompt, parsed.error, attempt, maxRepairs);
+        const repairStarted = now();
+        const repair = await deps.simulator.complete(repairPrompt);
+        recordCall('simulator', userTurns + 1, repair.tokens, repair.tokensObserved, now() - repairStarted);
+        rawOutputs.push(repair.text);
+        parsed = parseSimAction(repair.text, caseDef.allowedActions);
+        if (!parsed.ok) parseErrors.push(parsed.error);
+      }
+      protocolRepairs += rawOutputs.length - 1;
+      protocolRawOutputs.push(...rawOutputs);
+      protocolErrors.push(...parseErrors);
+      protocolLog = {
+        repairs: protocolRepairs,
+        rawOutputs: [...protocolRawOutputs],
+        errors: [...protocolErrors],
+      };
+    }
+    if (!parsed.ok) {
+      // 协议终态：不是 gave_up、不是 satisfied，永不算通过；有效样本 = 总数 − protocol_error。
       return build({
-        terminal: null, pass: false, exhaustedBy: null, contamination: null,
+        terminal: 'protocol_error', pass: false, exhaustedBy: null, contamination: null,
         injection: tracker.report(), oracle: null,
-        error: `模拟用户动作协议错误：${parsed.error}（原文：${completion.text.slice(0, 200)}）`,
+        error: `模拟用户动作协议错误：修复重问 ${rawOutputs.length - 1} 次后仍失败（${parseErrors.join('；')}）`,
       });
     }
     const action = parsed.action;
@@ -481,6 +531,8 @@ export interface SimSuiteInput {
   readonly simulator: SimModel;
   readonly judge?: SimModel;
   readonly now?: () => number;
+  /** 协议修复重问上限（缺省 2；仅为反向绊线提供关闭开关）。 */
+  readonly maxProtocolRepairs?: number;
   /** 套件局部 Oracle 注册（追加在内建注册表之上）。 */
   readonly oracles?: readonly SimOracle[];
 }
@@ -489,6 +541,10 @@ export interface SimSuiteSummary {
   readonly n: number;
   readonly passed: number;
   readonly errored: number;
+  /** 协议终态单列：模拟用户修复重问后仍无法给出合法动作。 */
+  readonly protocolErrors: number;
+  /** 有效样本数 = n − protocolErrors（报告必须显式标注该口径）。 */
+  readonly effectiveSamples: number;
   readonly byTerminal: Readonly<Record<SimTerminal, number>>;
   readonly accounting: SimAccounting;
   readonly isolation: SimIsolationReport;
@@ -545,6 +601,7 @@ export async function runSimSuite(input: SimSuiteInput): Promise<SimSuiteResult>
         oracle,
         ...(input.judge === undefined ? {} : { judge: input.judge }),
         ...(input.now === undefined ? {} : { now: input.now }),
+        ...(input.maxProtocolRepairs === undefined ? {} : { maxProtocolRepairs: input.maxProtocolRepairs }),
       });
       writeSimTrialEvidence(result);
       return result;
@@ -586,7 +643,7 @@ export async function runSimSuite(input: SimSuiteInput): Promise<SimSuiteResult>
   });
 
   const byTerminal: Record<SimTerminal, number> = {
-    satisfied: 0, gave_up: 0, budget_exhausted: 0, contaminated: 0,
+    satisfied: 0, gave_up: 0, budget_exhausted: 0, contaminated: 0, protocol_error: 0,
   };
   for (const trial of trials) if (trial.terminal !== null) byTerminal[trial.terminal] += 1;
   const isolation = assertTrialIsolation(trials, concurrency);
@@ -596,10 +653,14 @@ export async function runSimSuite(input: SimSuiteInput): Promise<SimSuiteResult>
     for (const record of trial.calls) merged.push({ ...record, seq: merged.length + 1 });
   }
 
+  const protocolErrors = byTerminal.protocol_error;
   const summary: SimSuiteSummary = {
     n: trials.length,
     passed: trials.filter((trial) => trial.pass).length,
     errored: trials.filter((trial) => trial.terminal === null).length,
+    protocolErrors,
+    // 有效样本 = 总数 − protocol_error；协议失败不洗成 pass、也不计入其它终态。
+    effectiveSamples: trials.length - protocolErrors,
     byTerminal,
     accounting: accountSimCalls(merged),
     isolation,

@@ -109,6 +109,28 @@ export function buildSimulatorPrompt(view: SimulatorView): SimulatorPrompt {
 }
 
 /**
+ * 修复重问 prompt：同一视图 + 上一轮解析错误 + 强化的「只输出 JSON 动作」指令。
+ *
+ * 只追加协议要求，不把原始输出回灌给模型（避免把它的废话再喂回去扩大上下文）；
+ * `authoring` 原样保留，泄漏守卫仍适用。
+ */
+export function buildRepairPrompt(
+  prompt: SimulatorPrompt,
+  error: string,
+  attempt: number,
+  maxAttempts: number,
+): SimulatorPrompt {
+  const repair = [
+    '',
+    `# 协议修复（第 ${attempt}/${maxAttempts} 次重问）`,
+    `你上一轮输出不符合动作协议：${error}`,
+    '请只输出一个 JSON 动作，不要输出解释、前后缀、思考过程或 markdown 代码围栏。',
+    SIM_ACTION_PROTOCOL,
+  ].join('\n');
+  return { system: prompt.system, user: `${prompt.user}\n${repair}`, authoring: prompt.authoring };
+}
+
+/**
  * 用例卫生检查：真值不得出现在**喂给模拟用户**的字段里。
  * `initialMessage` 不在此列——它作为用户消息由 `detectContamination` 在运行时作废。
  */

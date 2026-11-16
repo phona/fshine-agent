@@ -13,8 +13,9 @@
 | 样本级并发度 | **5**（`SIM_DEFAULT_CONCURRENCY`） | 上限由 `batch.ts` 的 `HARD_LIMIT_REGISTRY.evalBatchConcurrency.max=8` 熔断 |
 | 每 trial 目录 | `<outRoot>/<caseId>/<trial>/{session,state.db,evidence}` | 并发 ≥2 时由 `assertTrialIsolation` 断言互不共享 |
 | 预算缺省 | `maxUserTurns=8` / `maxWaitTurns=2` / `maxWallMs=300000` / `trials=1` | 用例可覆盖；`wait` 超过上限即 `budget_exhausted` |
-| 终态 | `satisfied` / `gave_up` / `budget_exhausted` / `contaminated` | 四类**分开记**；`terminal=null` 只表示 Harness/协议缺陷，永不 pass |
-| 通过判据 | `satisfied` **且** Oracle 判真值通过 | `gave_up` 永不算通过 |
+| 终态 | `satisfied` / `gave_up` / `budget_exhausted` / `contaminated` / `protocol_error` | 五类**分开记**；`terminal=null` 只表示 Harness/用例卫生缺陷，永不 pass |
+| 协议修复 | 首答非法动作 → 最多 **2 次修复重问**（`SIM_PROTOCOL_REPAIRS`，每次计入 `kind: simulator`） | 原始输出逐条留证；仍非法 → `protocol_error`（`pass=false`，不计入 gave_up / satisfied） |
+| 通过判据 | `satisfied` **且** Oracle 判真值通过 | `gave_up` / `protocol_error` 永不算通过 |
 | 污染判据 | 用户消息（含 `initialMessage`）命中 `forbiddenKnowledge` 或 Oracle 真值模式 | 命中 → `contaminated`（作废，不计通过），证据保留原文与命中项 |
 | 注入锚点 | `systemTurn` / `toolCall` / `event` 的第 `at` 个位置 | 只绑确定性计数，**不挂墙钟**；证据记 planned/applied |
 | 记账 | `kind: simulator` / `kind: judge` / 系统 `main|summary|retry|overflow_recovery` | 分类别计数与 token 总计；不可得类别标注 `unobservedKinds`，不补零 |
@@ -26,7 +27,9 @@
    （`findCaseLeaks` 先验 + `findPromptLeaks` 逐轮守卫，命中即拒绝；见 `simulator.ts`）。
    系统**用户可见回复**里出现答案属正常（模拟用户本来就看得见），用户复述真值由运行时污染检测作废。
 2. 模拟用户每轮只能输出 `say(text)` / `wait(reason)` / `finish(finishKind, reason)`；
-   非法动作记协议缺陷（`terminal=null` + `error`），不冒充任何终态。
+   非法动作先做最多 2 次修复重问（明确要求「只输出 JSON 动作，不要解释」），仍非法记
+   `protocol_error`（`pass=false`），不冒充 gave_up / satisfied；`terminal=null` 只留给用例卫生/
+   prompt 泄漏等 Harness 缺陷。
 3. 只有用户可见的上一轮回复进入模拟用户视角；工具结果内部字段、日志、Oracle 一律不可见。
 4. 并发池以样本（case × trial）为单位；每 trial 独立 `sessionDir` / `state.db` / 证据目录。
 5. 429/限流不自动重试掩盖：样本照常记录，失败样本保留（不筛绿）。

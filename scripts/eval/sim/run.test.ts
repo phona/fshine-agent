@@ -130,6 +130,7 @@ function trialDeps(input: {
   oracle: SimOracle;
   judge?: SimModel;
   now?: () => number;
+  maxProtocolRepairs?: number;
 }) {
   return {
     outRoot: input.outRoot,
@@ -138,6 +139,7 @@ function trialDeps(input: {
     oracle: input.oracle,
     ...(input.judge === undefined ? {} : { judge: input.judge }),
     ...(input.now === undefined ? {} : { now: input.now }),
+    ...(input.maxProtocolRepairs === undefined ? {} : { maxProtocolRepairs: input.maxProtocolRepairs }),
   };
 }
 
@@ -404,14 +406,110 @@ describe('独立 Oracle：复用 R6 事实真值（模拟用户自述不参与�
 });
 
 describe('协议缺陷与用例卫生：不冒充终态', () => {
-  it('非法动作 → terminal=null + error（记协议错误）', async () => {
+  it('始终输出垃圾 → 2 次修复重问后落 protocol_error / pass=false（不洗成 gave_up 或 satisfied）', async () => {
     const system = new FakeSystem({ reply: 'x' });
-    const simulator = new ScriptedSimulator([{ text: '我觉得可以结束了', tokensObserved: false }]);
+    const simulator = new ScriptedSimulator([
+      { text: '我觉得可以结束了', tokensObserved: false },
+      { text: '', tokensObserved: false },
+      { text: '还是没有 JSON 对象', tokensObserved: false },
+    ]);
     const result = await runSimTrial(makeCase(), 1, trialDeps({ outRoot: tmpRoot(), system, simulator, oracle: OK_ORACLE }));
-    expect(result.terminal).toBeNull();
+
+    expect(result.terminal).toBe('protocol_error');
     expect(result.pass).toBe(false);
-    expect(result.error).toContain('动作协议错误');
+    expect(result.oracle).toBeNull();
+    expect(result.terminal).not.toBe('gave_up');
+    expect(result.terminal).not.toBe('satisfied');
+    // 首答 + 2 次修复重问，全部计入 simulator 账。
+    expect(result.accounting.byKind.simulator.calls).toBe(3);
+    expect(simulator.prompts).toHaveLength(3);
+    // 每次原始输出（含空输出）逐条留证。
+    expect(result.protocol?.repairs).toBe(2);
+    expect(result.protocol?.rawOutputs).toEqual(['我觉得可以结束了', '', '还是没有 JSON 对象']);
+    expect(result.protocol?.errors).toHaveLength(3);
+    // 只有首条 initialMessage 到达系统：垃圾动作从未被当作 say 发出去。
+    expect(system.sends).toEqual(['帮我看一下 alpha 的合计']);
+    // 修复重问 prompt 明确要求「只输出一个 JSON 动作」，且未把原始输出回灌。
+    const repairPrompt = simulator.prompts[1]?.user ?? '';
+    expect(repairPrompt).toContain('协议修复');
+    expect(repairPrompt).toContain('只输出一个 JSON 动作');
+    expect(repairPrompt).not.toContain('我觉得可以结束了');
+  });
+
+  it('先输出垃圾、再输出合法动作 → 修复后恢复并正常往下走（不落 protocol_error）', async () => {
+    const system = new FakeSystem({ reply: 'alpha 合计 2000，共 2 条' });
+    const simulator = new ScriptedSimulator([
+      { text: '嗯，我先想想要不要追问。', tokensObserved: false },
+      SAY('麻烦再核对一下'),
+      FINISH('satisfied', '拿到合计了'),
+    ]);
+    const result = await runSimTrial(makeCase(), 1, trialDeps({ outRoot: tmpRoot(), system, simulator, oracle: OK_ORACLE }));
+
+    expect(result.terminal).toBe('satisfied');
+    expect(result.pass).toBe(true);
+    // 首答 1 次 + 修复重问 1 次 + 下一轮正常决策 1 次。
+    expect(result.accounting.byKind.simulator.calls).toBe(3);
+    expect(result.protocol?.repairs).toBe(1);
+    expect(result.protocol?.rawOutputs).toEqual(['嗯，我先想想要不要追问。', JSON.stringify({ action: 'say', text: '麻烦再核对一下' })]);
+    // 恢复后的 say 正常到达系统。
+    expect(system.sends).toEqual(['帮我看一下 alpha 的合计', '麻烦再核对一下']);
+  });
+
+  it('反向绊线：关闭修复重问 → 同一「先垃圾后合法」脚本必须落 protocol_error', async () => {
+    const system = new FakeSystem({ reply: 'alpha 合计 2000，共 2 条' });
+    const simulator = new ScriptedSimulator([
+      { text: '嗯，我先想想要不要追问。', tokensObserved: false },
+      SAY('麻烦再核对一下'),
+      FINISH('satisfied', '拿到合计了'),
+    ]);
+    const result = await runSimTrial(
+      makeCase(), 1,
+      trialDeps({ outRoot: tmpRoot(), system, simulator, oracle: OK_ORACLE, maxProtocolRepairs: 0 }),
+    );
+
+    expect(result.terminal).toBe('protocol_error');
+    expect(result.pass).toBe(false);
+    expect(result.protocol?.repairs).toBe(0);
     expect(result.accounting.byKind.simulator.calls).toBe(1);
+    // 绊线证据：修复重问确实是救回该 trial 的唯一原因（关闭后第二个合法动作根本没被调用）。
+    expect(simulator.prompts).toHaveLength(1);
+  });
+
+  it('summary 单列 protocol_error，并给出有效样本数 = 总数 − protocol_error', async () => {
+    const outRoot = tmpRoot();
+    const result = await runSimSuite({
+      cases: [
+        makeCase({ id: 'C-OK', oracleId: 'reply:ok', limits: { maxUserTurns: 4, maxWaitTurns: 1, maxWallMs: 60_000, trials: 1 } }),
+        makeCase({
+          id: 'C-BAD',
+          goal: 'C-BAD 专项：核对 alpha 集合的合计',
+          oracleId: 'reply:ok',
+          limits: { maxUserTurns: 4, maxWaitTurns: 1, maxWallMs: 60_000, trials: 1 },
+        }),
+      ],
+      outRoot,
+      concurrency: 2,
+      createSystem: () => new FakeSystem({ reply: 'alpha 合计 2000' }),
+      simulator: {
+        async complete(prompt): Promise<SimModelCompletion> {
+          // 只按 prompt 内容区分两条 trial（不依赖调用顺序/共享状态）。
+          if (prompt.user.includes('C-BAD 专项')) return { text: '没有动作', tokensObserved: false };
+          return FINISH('satisfied', '完成');
+        },
+      },
+      oracles: [OK_ORACLE],
+    });
+
+    expect(result.summary.n).toBe(2);
+    expect(result.summary.protocolErrors).toBe(1);
+    expect(result.summary.effectiveSamples).toBe(1);
+    expect(result.summary.byTerminal.protocol_error).toBe(1);
+    expect(result.summary.byTerminal.gave_up).toBe(0);
+    expect(result.summary.byTerminal.satisfied).toBe(1);
+    expect(result.summary.passed).toBe(1);
+    const bad = result.trials.find((trial) => trial.caseId === 'C-BAD');
+    expect(bad?.terminal).toBe('protocol_error');
+    expect(bad?.pass).toBe(false);
   });
 
   it('真值出现在 knowledge → 先验拒绝，不烧模型', async () => {
