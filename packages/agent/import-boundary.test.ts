@@ -24,6 +24,8 @@ const ENTRIES = [
   'packages/agent/src/task-registry-sqlite.ts',
   'packages/agent/src/execution-runtime.ts',
   'packages/agent/src/dummy-cli-client.ts',
+  // run_js 的第二个子进程面（CAP-01 S0；spawn 归执行器，runtime 不 spawn）同受边界约束。
+  'packages/agent/src/run-js-executor.ts',
   // ask/server 入口同受边界约束：新增装配不得以值边触及旧治理模块。
   'scripts/ask.ts',
   'apps/server/server.ts',

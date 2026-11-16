@@ -14,7 +14,9 @@
  *
  * 为什么不能只做"继承后删几个键"：白名单是 fail-closed 的（未登记键默认不进），
  * 删键式收口对新出现的宿主机密族默认放行。这里的消费方 = dummy 执行层适配器的
- * spawn（唯一的执行层子进程面）；没有计划门，因此不注入 EXECUTION_REQUIRE_PLAN /
+ * spawn 与 run-js-executor（CAP-01 S0）两个子进程面；后者在本白名单之上把 HOME/TMPDIR
+ * 覆写为 run 目录下的空目录、另加 NODE_PATH=<node_modules>（见 run-js-executor.ts）。
+ * 没有计划门，因此不注入 EXECUTION_REQUIRE_PLAN /
  * EXECUTION_PLAN_ID，也不注入任何凭据类键。
  *
  * 拒绝路径（回归锁，见 worker-env.test.ts）：sentinel 的 LLM/WECOM 前缀族、

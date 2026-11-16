@@ -31,6 +31,14 @@
  *     不改写）；二次打开零差异，旧库形状（tasks/executions 既有列与行）逐字节不变；
  *   · PRAGMA user_version 记录版本（新库直接建 v4）；向前兼容：加列/加表不破坏旧代码 SELECT。
  *
+ * file_refs（CAP-01 S0，docs/product/cap01-main-direct-execution.md §4）：文件事实的
+ * 8 列最小形状，纯新增表走 CREATE TABLE IF NOT EXISTS，**不升 schema 版本**（旧库
+ * 可写打开时由 SCHEMA_BASE 补建；只读旧库读出缺省，不崩溃）。没有 state 枚举——
+ * activated_at IS NULL 即 pending；不存 path——字节位置由 workspace 布局 + file_id
+ * 派生（见 packages/agent/src/file-store.ts），本表没有、也不得有 path 列。
+ * 时间戳用 epoch 毫秒（INTEGER）：本表由机械写入方（fileStore）独占，读取方只做
+ * 比较，不做人类展示——与 tasks 表的 ISO TEXT 有意不同。
+ *
  * 数字编号（P1）：
  *   · 分配 = 计数器行（task_sequences.name='task_no'）在**同一事务**内
  *     `UPDATE task_sequences SET value = value + 1 … RETURNING value` + INSERT：
@@ -161,6 +169,27 @@ export interface OperationStateWrite {
   taskId?: string | null;
 }
 
+/**
+ * 一条文件事实行（CAP-01 S0；存储形状）。
+ *
+ * 8 列最小形状（v8 §4）：没有 state 枚举——activated_at IS NULL 即 pending，非 NULL =
+ * 已激活（可读，同时是 TTL 起点）；不存 path——字节位置按 workspace 布局 +
+ * (principal, session, file_id) 派生；name 只是用户可见名（交付时用），存储/物化文件名
+ * 一律用 file_id + 自 name 派生的安全扩展名，路径不可由 name 拼出。
+ */
+export interface FileRefRow {
+  fileId: string;
+  principalId: string;
+  sessionId: string;
+  /** 用户可见文件名（不进路径；存储/物化命名见 packages/agent/src/file-store.ts）。 */
+  name: string;
+  sha256: string;
+  bytes: number;
+  /** NULL = pending；非 NULL = 已激活（epoch ms；TTL 起点）。 */
+  activatedAt?: number;
+  createdAt: number;
+}
+
 /** 任务 + 其执行记录（读取单位）。 */
 export interface StoredTask {
   task: TaskRow;
@@ -230,6 +259,15 @@ export interface TaskStore {
   applyOperationState(dispatchKey: string, write: OperationStateWrite): boolean;
   /** U3：把「读候选 + 决策 + 写」包进同一 BEGIN IMMEDIATE 写事务。 */
   transaction<T>(fn: () => T): T;
+  /** CAP-01 S0：插入一条文件事实行（无 DB 生成列；file_id 冲突由主键抛出）。 */
+  insertFileRef(row: FileRefRow): FileRefRow;
+  /**
+   * CAP-01 S0：按 scope 读一行文件事实。越权（principal/session 不符）与不存在同为
+   * undefined（防存在性 oracle；机械原因只进日志，见 v8 §4）。
+   */
+  getFileRef(fileId: string, scope: { principalId: string; sessionId: string }): FileRefRow | undefined;
+  /** CAP-01 S0：按 scope 列出（created_at, file_id 升序；量 = 会话文件数，不做分页）。 */
+  listFileRefs(scope: { principalId: string; sessionId: string }): FileRefRow[];
   close(): void;
 }
 
@@ -285,6 +323,17 @@ CREATE TABLE IF NOT EXISTS operations (
   UNIQUE (scope_key, op_seq)
 );
 CREATE INDEX IF NOT EXISTS idx_operations_scope ON operations (scope_key, attempt, operation);
+CREATE TABLE IF NOT EXISTS file_refs (
+  file_id TEXT PRIMARY KEY,
+  principal_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  bytes INTEGER NOT NULL,
+  activated_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_file_refs_scope ON file_refs (principal_id, session_id);
 `;
 
 /** 数字编号唯一索引：部分索引允许历史/缺省行多个 NULL，但已分配编号必须唯一。 */
@@ -345,6 +394,17 @@ interface OperationDbRow {
   settled_at: string | null;
   delivered_at: string | null;
   replay_of: string | null;
+}
+
+interface FileRefDbRow {
+  file_id: string;
+  principal_id: string;
+  session_id: string;
+  name: string;
+  sha256: string;
+  bytes: number;
+  activated_at: number | null;
+  created_at: number;
 }
 
 /**
@@ -634,6 +694,32 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
       })
     : undefined;
 
+  // file_refs（CAP-01 S0）：只读旧库没有该表 = 没有文件事实（读出缺省，不崩溃；写入给确定性拒绝）。
+  const hasFileRefs = tableColumnsOf(db, 'file_refs').size > 0;
+  const insertFileRefStmt = hasFileRefs
+    ? db.prepare(`
+        INSERT INTO file_refs (file_id, principal_id, session_id, name, sha256, bytes, activated_at, created_at)
+        VALUES (@fileId, @principalId, @sessionId, @name, @sha256, @bytes, @activatedAt, @createdAt)
+      `)
+    : undefined;
+  const selectFileRef = hasFileRefs
+    ? db.prepare('SELECT * FROM file_refs WHERE file_id = ? AND principal_id = ? AND session_id = ?')
+    : undefined;
+  const selectFileRefsScoped = hasFileRefs
+    ? db.prepare('SELECT * FROM file_refs WHERE principal_id = ? AND session_id = ? ORDER BY created_at, file_id')
+    : undefined;
+
+  const toFileRef = (row: FileRefDbRow): FileRefRow => ({
+    fileId: row.file_id,
+    principalId: row.principal_id,
+    sessionId: row.session_id,
+    name: row.name,
+    sha256: row.sha256,
+    bytes: row.bytes,
+    ...(row.activated_at === null || row.activated_at === undefined ? {} : { activatedAt: row.activated_at }),
+    createdAt: row.created_at,
+  });
+
   const toTask = (row: TaskDbRow): TaskRow => ({
     taskId: row.task_id,
     principalId: row.principal_id,
@@ -695,6 +781,8 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     '任务底账是旧版 schema（缺 P2a 生命周期列）且以只读打开：不能写任务状态（请先用可写入口完成迁移）。';
   const missingOperationsError =
     '任务底账是旧版 schema（缺 U3 operations 表/executions.dispatch_key）且以只读打开：不能读写逻辑操作账（请先用可写入口完成迁移）。';
+  const missingFileRefsError =
+    '任务底账是旧版 schema（缺 file_refs 表）且以只读打开：不能登记文件事实（请先用可写入口完成迁移）。';
 
   /**
    * U3：把「读候选 + 决策 + 写」包进同一写事务（BEGIN IMMEDIATE）。
@@ -829,6 +917,30 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     },
     transaction(fn) {
       return runTransaction(fn);
+    },
+    insertFileRef(row) {
+      if (insertFileRefStmt === undefined) throw new Error(missingFileRefsError);
+      insertFileRefStmt.run({
+        fileId: row.fileId,
+        principalId: row.principalId,
+        sessionId: row.sessionId,
+        name: row.name,
+        sha256: row.sha256,
+        bytes: row.bytes,
+        activatedAt: row.activatedAt ?? null,
+        createdAt: row.createdAt,
+      });
+      // 无 DB 生成列（file_id/时间戳都来自调用方）：输入行即落库行。
+      return row;
+    },
+    getFileRef(fileId, scope) {
+      if (selectFileRef === undefined) return undefined;
+      const row = selectFileRef.get(fileId, scope.principalId, scope.sessionId) as FileRefDbRow | undefined;
+      return row === undefined ? undefined : toFileRef(row);
+    },
+    listFileRefs(scope) {
+      if (selectFileRefsScoped === undefined) return [];
+      return (selectFileRefsScoped.all(scope.principalId, scope.sessionId) as FileRefDbRow[]).map(toFileRef);
     },
     close() {
       db.close();

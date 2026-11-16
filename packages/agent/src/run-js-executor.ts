@@ -1,0 +1,295 @@
+/**
+ * run_js 执行器（CAP-01 S0；docs/product/cap01-main-direct-execution.md §2/§3/§8）。
+ *
+ * S0 面只到「跑完一次受限脚本并登记产物」：不接 Main、不接渠道、不进 Execution
+ * Contract、不改 execution-runtime 的工具面（接线与端口注入归 S1）。
+ *
+ * 每次 runJs 调用：
+ *   ① 开独立 run 目录（不共享）：<root>/<ph>/<sh>/runs/<runId>/{in,out,scratch,home,tmp}；
+ *      输入先过 scope/激活校验并物化到 in/（fileId 命名，见 file-store.ts）——校验失败
+ *      不起子进程；模型代码（CommonJS）**原样**写进 <runDir>/run.cjs，审计哈希 = 实际执行字节。
+ *   ② 受限子进程（v8 §3 实测有效，不是沙箱）：
+ *        node --permission --allow-fs-read=<runDir> --allow-fs-read=<node_modules>
+ *             --allow-fs-write=<runDir>/out --allow-fs-write=<runDir>/scratch run.cjs
+ *      env 按 worker-env 白名单重建（PATH），再加 NODE_PATH=<node_modules>；HOME/TMPDIR
+ *      指向 run 目录下的空目录——宿主凭据结构上进不了子进程。
+ *   ③ detached:true 建进程组；超时/宿主中止 → kill(-pid,'SIGKILL') 杀**整组**（SIGTERM
+ *      对同步忙循环不可靠、孙进程会逃逸，v8 §3）。stdout/stderr 在 data 回调里逐块计数，
+ *      超限即弃并标 truncated（不先全读再截）。
+ *   ④ 收尾扫 out/ 登记产物（fileStore.registerOutputsFromOut：只收普通文件、拒 symlink/
+ *      hardlink、uid/大小/份数上限；同一 fd 流式 copy-on-register 成新 fileId + sha256，
+ *      原件字节不动）。**无论 exitCode 都扫**——out/ 就是交付箱；交付去留归 S1。
+ *   ⑤ 审计随返回值走（脚本 sha256、输入/输出 fileId、exitCode、耗时、kill 原因）。
+ *      S0 不落审计表（v8 §9 不做 run_code_runs 第二张表）；持久化落点归 S1 接线裁定。
+ *
+ * 超时/内存/份数/字节数值按 v8 §11 owner 裁决由 S0 写死为模块常量（构造参数可覆盖，
+ * 仅供测试收紧；生产装配不得放宽）：
+ *   · 超时 120s（缺省 mainConcurrency=1，一个 60s 脚本期间其它会话已被 queue_full 拒，
+ *     v8 §8——上限取两倍该成本）；· V8 堆 512MB；· stdout/stderr 各 64KiB；
+ *   · 单产物 50MiB；· 产物 20 份。
+ *
+ * 残余风险按 v8 §3 如实登记（owner 裁决：接受）：网络未阻断（脚本可外传它能读到的
+ * 内容）、无 OS 级隔离、提示注入仍可驱动模型写恶意代码（但它读不到宿主凭据，最坏是
+ * 写坏产物）、文件类型检查不是机密性边界。
+ */
+import { spawn } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { workerSubprocessEnv } from './worker-env';
+import type { FileStore, MaterializedInput, RegisteredFile, SkippedOutput } from './file-store';
+import { runDirOf } from './file-store';
+
+/** 超时上限（宿主常量；模型没有 timeoutMs 参数，只能把请求调小，v8 §2）。 */
+export const RUN_JS_TIMEOUT_MS = 120_000;
+/** stdout/stderr 各自的流式截断上限（字节）。 */
+export const RUN_JS_MAX_STREAM_BYTES = 64 * 1024;
+/** 单个产物文件大小上限（字节）。 */
+export const RUN_JS_MAX_OUTPUT_FILE_BYTES = 50 * 1024 * 1024;
+/** 单次 run 产物份数上限。 */
+export const RUN_JS_MAX_OUTPUT_COUNT = 20;
+/** 子进程 V8 堆上限（MB；--max-old-space-size，写进 spawn argv）。 */
+export const RUN_JS_MAX_OLD_SPACE_MB = 512;
+
+export interface RunJsScope {
+  principalId: string;
+  sessionId: string;
+}
+
+export interface RunJsInput {
+  /** CommonJS 代码原样（写进 <runDir>/run.cjs 执行）。 */
+  code: string;
+  /** 输入文件 fileId（本会话 scope 内、已激活）；宿主物化到 <run>/in/。 */
+  inputs?: readonly string[];
+  scope: RunJsScope;
+  /** 宿主中止信号（任务取消等）；触发即对进程组 SIGKILL。超时不是模型参数（宿主常量）。 */
+  signal?: AbortSignal;
+}
+
+export interface RunJsOutputFile {
+  fileId: string;
+  name: string;
+  bytes: number;
+}
+
+export interface RunJsAudit {
+  runId: string;
+  /** run 目录绝对路径（机械审计用；不出现在用户可见话术）。 */
+  runDir: string;
+  /** 实际执行的 run.cjs 字节的 sha256。 */
+  scriptSha256: string;
+  /** 请求的输入 fileId（请求面）。 */
+  inputFileIds: string[];
+  /** 物化结果（fileId → in/ 文件名；审计面）。 */
+  materializedInputs: MaterializedInput[];
+  /** 登记成功的产物（fileId/name/bytes）。 */
+  outputs: Array<{ fileId: string; name: string; bytes: number }>;
+  /** 被拒收的 out/ 条目与机械原因（symlink/hardlink/超限等）。 */
+  skippedOutputs: SkippedOutput[];
+  exitCode: number | null;
+  exitSignal: NodeJS.Signals | null;
+  /** 宿主主动杀进程组的原因；不出现 = 自然退出。 */
+  killReason?: 'timeout' | 'abort';
+  durationMs: number;
+}
+
+export interface RunJsOutput {
+  /** null = 被信号终止（宿主超时/中止杀进程组）。 */
+  exitCode: number | null;
+  exitSignal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+  outputs: RunJsOutputFile[];
+  audit: RunJsAudit;
+}
+
+export interface RunJsExecutor {
+  runJs(input: RunJsInput): Promise<RunJsOutput>;
+}
+
+/**
+ * 杀整组进程（detached spawn 的 pgid = pid）。ESRCH（已退出/已 reap）忽略——
+ * 竞态下的无事可做，不是错误。
+ */
+export function killRunProcessGroup(pid: number): void {
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    // 进程组已不存在：无需处理。
+  }
+}
+
+export interface RunJsExecutorOptions {
+  fileStore: FileStore;
+  /** node_modules 目录：`--allow-fs-read` 与 NODE_PATH 共用（require('exceljs') 的解析根）。 */
+  nodeModulesDir: string;
+  /** node 可执行文件；缺省 process.execPath。 */
+  nodePath?: string;
+  /** 超时上限；缺省 RUN_JS_TIMEOUT_MS。生产装配不得放宽（v8 §11：数值 S0 写死）。 */
+  timeoutMs?: number;
+  maxStreamBytes?: number;
+  maxOutputFileBytes?: number;
+  maxOutputCount?: number;
+}
+
+interface StreamCapture {
+  chunks: Buffer[];
+  bytes: number;
+  truncated: boolean;
+}
+
+/** data 回调里逐块计数截断：超限部分直接丢弃并标 truncated（v8 §3，不先全读再截）。 */
+function onChunk(capture: StreamCapture, chunk: Buffer, maxStreamBytes: number): void {
+  if (capture.bytes >= maxStreamBytes) {
+    capture.truncated = true;
+    return;
+  }
+  const room = maxStreamBytes - capture.bytes;
+  if (chunk.length <= room) {
+    capture.chunks.push(chunk);
+    capture.bytes += chunk.length;
+    return;
+  }
+  capture.chunks.push(chunk.subarray(0, room));
+  capture.bytes = maxStreamBytes;
+  capture.truncated = true;
+}
+
+export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecutor {
+  const timeoutMs = options.timeoutMs ?? RUN_JS_TIMEOUT_MS;
+  const maxStreamBytes = options.maxStreamBytes ?? RUN_JS_MAX_STREAM_BYTES;
+  const maxOutputFileBytes = options.maxOutputFileBytes ?? RUN_JS_MAX_OUTPUT_FILE_BYTES;
+  const maxOutputCount = options.maxOutputCount ?? RUN_JS_MAX_OUTPUT_COUNT;
+  const nodePath = options.nodePath ?? process.execPath;
+
+  return {
+    async runJs(input: RunJsInput): Promise<RunJsOutput> {
+      if (typeof input.code !== 'string' || input.code.length === 0) {
+        throw new Error('run_js 需要 code（非空 CommonJS 字符串）。');
+      }
+      if (!input.scope?.principalId || !input.scope?.sessionId) {
+        throw new Error('run_js 需要 scope（principalId/sessionId）。');
+      }
+      const startedAt = Date.now();
+      const scope = input.scope;
+      const runId = `run_${randomUUID().replaceAll('-', '')}`;
+      const runDir = runDirOf(options.fileStore.workspaceRoot, scope, runId);
+      const outDir = path.join(runDir, 'out');
+      const scratchDir = path.join(runDir, 'scratch');
+      const homeDir = path.join(runDir, 'home');
+      const tmpDir = path.join(runDir, 'tmp');
+
+      // ① 输入面先过（scope/激活校验 + 物化）：失败抛 FILE_REF_UNAVAILABLE，不起子进程。
+      const materializedInputs = options.fileStore.materializeInputs({
+        runDir,
+        scope,
+        fileIds: input.inputs ?? [],
+      });
+
+      for (const dir of [outDir, scratchDir, homeDir, tmpDir]) mkdirSync(dir, { recursive: true });
+
+      // ② 模型代码原样写进 run.cjs（CommonJS）；审计哈希 = 实际执行字节。
+      const scriptBytes = Buffer.from(input.code, 'utf8');
+      const runCjsPath = path.join(runDir, 'run.cjs');
+      writeFileSync(runCjsPath, scriptBytes, { mode: 0o600 });
+      const scriptSha256 = createHash('sha256').update(scriptBytes).digest('hex');
+
+      // ③ 受限子进程（v8 §3 的命令形状 + 内存上限 argv）。
+      const child = spawn(
+        nodePath,
+        [
+          '--permission',
+          `--allow-fs-read=${runDir}`,
+          `--allow-fs-read=${options.nodeModulesDir}`,
+          `--allow-fs-write=${outDir}`,
+          `--allow-fs-write=${scratchDir}`,
+          `--max-old-space-size=${RUN_JS_MAX_OLD_SPACE_MB}`,
+          runCjsPath,
+        ],
+        {
+          cwd: runDir,
+          detached: true, // 独立进程组：kill(-pid) 才能整组带走
+          stdio: ['ignore', 'pipe', 'pipe'],
+          // env 按 worker-env 白名单重建（fail-closed），再叠 run 目录指针：
+          // HOME/TMPDIR 指向 run 目录下的空目录；NODE_PATH 指向授权读的 node_modules。
+          env: {
+            ...workerSubprocessEnv(process.env),
+            HOME: homeDir,
+            TMPDIR: tmpDir,
+            NODE_PATH: options.nodeModulesDir,
+          },
+        },
+      );
+
+      const pid = child.pid;
+      if (pid === undefined) {
+        // spawn 同步失败（pid 只在成功 spawn 后有值）：把异步 'error' 带出来，不做进程组 kill。
+        throw await new Promise<Error>((resolve) => child.once('error', resolve));
+      }
+
+      const stdoutCapture: StreamCapture = { chunks: [], bytes: 0, truncated: false };
+      const stderrCapture: StreamCapture = { chunks: [], bytes: 0, truncated: false };
+      child.stdout.on('data', (chunk: Buffer) => onChunk(stdoutCapture, chunk, maxStreamBytes));
+      child.stderr.on('data', (chunk: Buffer) => onChunk(stderrCapture, chunk, maxStreamBytes));
+
+      let killReason: 'timeout' | 'abort' | undefined;
+      const timer = setTimeout(() => {
+        killReason = 'timeout';
+        killRunProcessGroup(pid);
+      }, timeoutMs);
+      const onAbort = (): void => {
+        killReason = 'abort';
+        killRunProcessGroup(pid);
+      };
+      input.signal?.addEventListener('abort', onAbort, { once: true });
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          child.once('error', reject); // spawn 本身失败（ENOENT 等）
+          child.once('close', () => resolve());
+        });
+      } finally {
+        clearTimeout(timer);
+        input.signal?.removeEventListener('abort', onAbort);
+      }
+
+      const exitCode = child.exitCode;
+      const exitSignal = child.signalCode;
+
+      // ④ 扫 out/ 登记产物（无论 exitCode——out/ 就是交付箱；交付去留归 S1）。
+      const { outputs, skipped } = options.fileStore.registerOutputsFromOut({
+        runDir,
+        scope,
+        limits: { maxFileBytes: maxOutputFileBytes, maxCount: maxOutputCount },
+      });
+
+      const outputFiles = outputs.map(
+        (file: RegisteredFile): RunJsOutputFile => ({ fileId: file.fileId, name: file.name, bytes: file.bytes }),
+      );
+      return {
+        exitCode,
+        exitSignal,
+        stdout: Buffer.concat(stdoutCapture.chunks).toString('utf8'),
+        stderr: Buffer.concat(stderrCapture.chunks).toString('utf8'),
+        stdoutTruncated: stdoutCapture.truncated,
+        stderrTruncated: stderrCapture.truncated,
+        outputs: outputFiles,
+        audit: {
+          runId,
+          runDir,
+          scriptSha256,
+          inputFileIds: [...(input.inputs ?? [])],
+          materializedInputs,
+          outputs: outputFiles,
+          skippedOutputs: skipped,
+          exitCode,
+          exitSignal,
+          ...(killReason === undefined ? {} : { killReason }),
+          durationMs: Date.now() - startedAt,
+        },
+      };
+    },
+  };
+}
