@@ -28,15 +28,27 @@
  * inline 路径维持现冻结语义（judgeReportedTask 不改；complete/fail 仍按既有口径收尾，
  * waiting_user 仅后台任务使用）。
  *
+ * U3 稳定逻辑操作身份（2026-11-16，仅追加，不新建第二套 Registry）：
+ *   · 在**现有**底账上增加一张 operations 账（内存实现用 Map，SQLite 实现用 operations 表），
+ *     行就是身份：dispatch_key 主键 + UNIQUE(scope_key, op_seq)，**没有**任何以
+ *     (operation, args) 为键的唯一约束——参数完全相同的两笔合法操作必须是两行、各执行一次；
+ *   · 铸造点唯一：首次创建逻辑操作时分配 op_seq 并落库；重试/重规划只读回同一行
+ *     （claimOperation 的结构不接受 args，因此「按参数文本去重」没有代码路径）；
+ *   · 认领与写状态都是原子的：读候选 → 纯函数决策 → 写，在 registry 侧一次完成
+ *     （SQLite 实现包在 BEGIN IMMEDIATE 写事务里）；进行中的重复请求返回 in_progress，
+ *     不发起第二次执行；
+ *   · 证明不了新调用属于已有操作 → unresolved（停止副作用，交由调用方落 result_unknown），
+ *     不猜绑定；读操作（装配方声明的只读集合）可安全重发，不被 key 逻辑误挡。
+ *
  * 这里不做的（登记缺口，不在这里预造）：
- *   · 任务级幂等键（dispatchKey）与"同键重复提交返回原任务"：最小入口没有重投/重放面
- *     （无渠道、无后台重投），接入渠道与重投的切片按最小形状补；
+ *   · 通用 Exactly Once：宿主只承诺「同一身份至多一次自动执行 + 结果未知可核对」，
+ *     外部幂等键/状态查询/回读归执行层；
  *   · 事件流/订阅体系：事实钩子只做单回调注入（供 P4/P6），不持久化事件。
  *
  * 拒绝路径（回归锁，见 runtime.test.ts）：换 principal 或换 session 取任务
  * 一律 TaskOwnershipError；取不存在的任务与越权同一错误（不泄漏任务是否存在）。
  */
-import type { ExecutionFailure, ExecutionStatus } from '@fshine/contracts/execution-contract';
+import type { ExecutionFailure, ExecutionOutcome, ExecutionStatus } from '@fshine/contracts/execution-contract';
 
 /** P2a：冻结状态集（顺序即契约登记顺序）。unexecuted = 已汇报零执行（保留）。 */
 export const TASK_STATUSES = [
@@ -113,6 +125,8 @@ export interface ExecutionRecord {
   operation: string;
   status: ExecutionStatus;
   error?: ExecutionFailure;
+  /** U3：这次真实执行所属的稳定逻辑操作身份（回放不写执行行，故回放不产生新记录）。 */
+  dispatchKey?: string;
 }
 
 /** 判定只需要的执行事实投影（内存 ExecutionRecord 与 SQLite 读回行共用）。 */
@@ -380,6 +394,137 @@ export interface TaskFactSeed {
   stateVersion?: string | number;
 }
 
+/**
+ * 逻辑操作账的状态集（U3）。completed/needs_input/failed/refused 与执行结果四态同名；
+ * claimed = 已认领未落定；unknown = 结果未知（待核对，禁止自动重放）。
+ */
+export const OPERATION_STATUSES = ['claimed', 'completed', 'needs_input', 'failed', 'refused', 'unknown'] as const;
+
+export type OperationStatus = (typeof OPERATION_STATUSES)[number];
+
+/** 一条逻辑操作账行（对外只读视图；行就是身份）。 */
+export interface OperationRecord {
+  /** 身份键（首次创建时铸造并落库；此后只读）——格式 `dk_<scopeKey>:<opSeq>`。 */
+  dispatchKey: string;
+  /** 身份作用域：'task:<taskId>'（交办内操作）或 'turn:<sessionId>:<turnNo>'（Main run_task）。 */
+  scopeKey: string;
+  /** 交办内操作的 taskId；turn 作用域在受理回执落定后回填。 */
+  taskId?: string;
+  opSeq: number;
+  operation: string;
+  status: OperationStatus;
+  /** 待核对/中断的机械原因（可空）。 */
+  reason?: string;
+  /** 执行层原始 outcome（completed 时即「已有结果」）。 */
+  outcome?: ExecutionOutcome;
+  /** 认领时所在的运行时回合号（重放窗口判定）。 */
+  attempt: number;
+  claimedAt: string;
+  settledAt?: string;
+  /**
+   * 结果落定并交给 Pi 回合的时刻（settle 时与 settledAt 同刻写入）。
+   * 它**不**证明模型已读取结果；NULL = 尚未落定/未交付（claimed 或 unknown 行）。
+   * 将来 resume 判据只把它当「已有结果可回放」，不把它当「模型已确认」。
+   */
+  deliveredAt?: string;
+  replayOf?: string;
+}
+
+/**
+ * 认领请求：**没有 args 字段**（结构性保证：不存在按参数文本/哈希去重绑定的代码路径）。
+ */
+export interface OperationClaimInput {
+  scopeKey: string;
+  operation: string;
+  /** 本次运行时回合号（由宿主按驱动事件推进；模型不可提供）。 */
+  attempt: number;
+  /** 被运行时丢弃的那次尝试的回合号；给出即「有重放窗口」。 */
+  replayWindow?: number;
+  /** 读操作（装配方声明的只读集合）：只在读路径为 true；重试可安全重发。 */
+  readOnly?: boolean;
+  /** 显式携带已持久化身份（只用于读回同一条记录，不接受现造的新键）。 */
+  dispatchKey?: string;
+  taskId?: string;
+  now?: string;
+}
+
+/** 认领结果（五态互斥；in_progress/unresolved/conflict 都**不产生**任何新副作用）。 */
+export type OperationClaim =
+  | { kind: 'minted'; dispatchKey: string; opSeq: number; reclaimed: boolean }
+  | { kind: 'replayed'; dispatchKey: string; opSeq: number; outcome: ExecutionOutcome }
+  | { kind: 'in_progress'; dispatchKey: string; opSeq: number; claimedAt: string }
+  | { kind: 'unresolved'; reason: 'ambiguous_replay' | 'prior_unknown'; dispatchKey?: string }
+  | { kind: 'conflict'; reason: 'operation_mismatch'; dispatchKey: string };
+
+/** 同一身份对应不同 operation：确定性拒绝（零副作用，行不改；code 供码级判据读取）。 */
+export class DispatchConflictError extends Error {
+  readonly code = 'dispatch_conflict';
+  readonly dispatchKey: string;
+
+  constructor(dispatchKey: string) {
+    super('同一逻辑操作身份对应了不同的 operation：已拒绝本次执行（dispatch_conflict）。');
+    this.name = 'DispatchConflictError';
+    this.dispatchKey = dispatchKey;
+  }
+}
+
+/** 认领决策（纯函数产出；两个实现共用同一语义）。 */
+export type OperationClaimDecision =
+  | { action: 'mint' }
+  | { action: 'reclaim'; row: OperationRecord }
+  | { action: 'replay'; row: OperationRecord }
+  | { action: 'in_progress'; row: OperationRecord }
+  | { action: 'unresolved'; reason: 'ambiguous_replay' | 'prior_unknown'; rows: readonly OperationRecord[] }
+  | { action: 'conflict'; row: OperationRecord };
+
+/**
+ * 重绑定决策（内存/SQLite 共用，只读输入、零 IO）：候选行由调用方按
+ * 「显式 dispatchKey」或「(scope, operation, replayWindow)」读出；本函数不接收 args。
+ *
+ * 规则（R 系列，见 docs/product/pi-152-dispatch-key-design.md §5.3）：
+ *   · 显式键：同 operation 且已落定 → 回放；进行中 → in_progress；未知 → 待核对；
+ *     不同 operation → conflict；键不存在 → 待核对（不按该键铸造）；
+ *   · 无窗口 → 铸造新行（两笔合法同参数操作 = 两行两 key）；
+ *   · 窗口内 0 行 → 铸造；≥2 行 → 无法证明映射（读操作可安全重发 → 铸造新行；
+ *     写操作 → 待核对）；恰 1 行 → 同名同上规则，异名 → conflict。
+ */
+export function decideOperationClaim(
+  input: Pick<OperationClaimInput, 'operation' | 'readOnly' | 'dispatchKey' | 'replayWindow'>,
+  candidates: readonly OperationRecord[],
+): OperationClaimDecision {
+  const readOnly = input.readOnly === true;
+
+  if (input.dispatchKey !== undefined) {
+    const row = candidates[0];
+    if (row === undefined) return { action: 'unresolved', reason: 'prior_unknown', rows: [] };
+    if (row.operation !== input.operation) return { action: 'conflict', row };
+    if (row.status === 'claimed') return { action: 'in_progress', row };
+    if (row.status === 'unknown') return { action: 'unresolved', reason: 'prior_unknown', rows: [row] };
+    return { action: 'replay', row };
+  }
+
+  if (input.replayWindow === undefined) return { action: 'mint' };
+  if (candidates.length === 0) return { action: 'mint' };
+  if (candidates.length > 1) {
+    // 读操作没有副作用，可安全重发（新行新 key，仍不合并、不猜哪条是重放）。
+    return readOnly ? { action: 'mint' } : { action: 'unresolved', reason: 'ambiguous_replay', rows: candidates };
+  }
+
+  const row = candidates[0] as OperationRecord;
+  if (row.operation !== input.operation) return { action: 'conflict', row };
+  if (row.status === 'claimed') return readOnly ? { action: 'reclaim', row } : { action: 'in_progress', row };
+  if (row.status === 'unknown') {
+    return readOnly ? { action: 'reclaim', row } : { action: 'unresolved', reason: 'prior_unknown', rows: [row] };
+  }
+  return readOnly ? { action: 'reclaim', row } : { action: 'replay', row };
+}
+
+/** 执行结果 → 账行状态；外部结果未知（result_unknown）落 unknown，不冒充失败确认。 */
+export function operationStatusOf(outcome: ExecutionOutcome): OperationStatus {
+  if (outcome.status === 'failed' && outcome.error.code === 'result_unknown') return 'unknown';
+  return outcome.status;
+}
+
 export interface TaskRegistry {
   begin(input: {
     taskId: string;
@@ -424,6 +569,25 @@ export interface TaskRegistry {
   expireLeases(now?: string): readonly TaskRecord[];
   /** 单回调事实钩子（供 P4/P6）：注入替换旧回调；拒绝的转换不发事实；钩子异常不回滚事实。 */
   onTaskFact(hook: TaskFactHook | undefined): void;
+  /**
+   * U3：认领一笔逻辑操作（原子；签名不含 args）。
+   *   · minted → 调用方可用该 dispatchKey 发起（唯一铸造点，op_seq 只在此分配一次）；
+   *   · replayed → 直接返回已有结果，**不**再调用执行层；
+   *   · in_progress → 同一身份正在执行，本次不得并发执行；
+   *   · unresolved → 无法证明绑定，调用方必须停止副作用并交还待核对；
+   *   · conflict → 同身份不同 operation，确定性拒绝。
+   */
+  claimOperation(input: OperationClaimInput): OperationClaim;
+  /**
+   * U3：落定认领（status 取 outcome 四态；result_unknown → unknown）。
+   * `deliveredAt` 在落定时写入（= settledAt），表示结果已交给 Pi 回合、可供回放；
+   * 它不表示模型已读取。标记 unknown 的路径不写 deliveredAt（NULL = 未落定/未交付）。
+   */
+  settleOperation(dispatchKey: string, outcome: ExecutionOutcome, options?: { now?: string; taskId?: string }): OperationRecord;
+  /** U3：结果未知（调用中断/外部无回执）→ unknown + reason；禁止自动重放。 */
+  markOperationUnknown(dispatchKey: string, reason: string, options?: { now?: string }): OperationRecord;
+  /** U3：按身份键读回（审计/测试；不存在返回 undefined）。 */
+  getOperation(dispatchKey: string): OperationRecord | undefined;
 }
 
 /** 库内可变形状：对外只读视图由 TaskRecord 承担。 */
@@ -433,9 +597,34 @@ interface MutableTaskRecord extends Omit<TaskRecord, 'executions'> {
 
 export function createTaskRegistry(): TaskRegistry {
   const tasks = new Map<string, MutableTaskRecord>();
+  /** U3 逻辑操作账：行就是身份（内存实现仅用于测试/纯内存嵌入；语义与 SQLite 逐项一致）。 */
+  const operations = new Map<string, OperationRecord>();
   /** 内存实现的编号：与 SQLite 底账同口径（自增、不复用）——测试与纯内存嵌入用。 */
   let nextTaskNo = 0;
   let factHook: TaskFactHook | undefined;
+
+  const operationKeyOf = (scopeKey: string, opSeq: number): string => `dk_${scopeKey}:${opSeq}`;
+
+  /** 作用域内序号分配（唯一铸造点；MAX+1，永不复用）。 */
+  const mintOperationRow = (input: OperationClaimInput, now: string): OperationRecord => {
+    let maxSeq = 0;
+    for (const row of operations.values()) {
+      if (row.scopeKey === input.scopeKey && row.opSeq > maxSeq) maxSeq = row.opSeq;
+    }
+    const opSeq = maxSeq + 1;
+    const row: OperationRecord = {
+      dispatchKey: operationKeyOf(input.scopeKey, opSeq),
+      scopeKey: input.scopeKey,
+      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+      opSeq,
+      operation: input.operation,
+      status: 'claimed',
+      attempt: input.attempt,
+      claimedAt: now,
+    };
+    operations.set(row.dispatchKey, row);
+    return row;
+  };
 
   const require = (taskId: string, scope?: TaskScope): MutableTaskRecord => {
     const task = tasks.get(taskId);
@@ -630,6 +819,107 @@ export function createTaskRegistry(): TaskRegistry {
     },
     onTaskFact(hook) {
       factHook = hook;
+    },
+    claimOperation(input) {
+      const now = input.now ?? new Date().toISOString();
+      let candidates: OperationRecord[] = [];
+      if (input.dispatchKey !== undefined) {
+        const row = operations.get(input.dispatchKey);
+        if (row !== undefined) candidates = [row];
+      } else if (input.replayWindow !== undefined) {
+        candidates = [...operations.values()]
+          .filter((row) => row.scopeKey === input.scopeKey
+            && row.operation === input.operation
+            && row.attempt === input.replayWindow)
+          .sort((left, right) => left.opSeq - right.opSeq);
+      }
+      const decision = decideOperationClaim(input, candidates);
+      switch (decision.action) {
+        case 'mint': {
+          const row = mintOperationRow(input, now);
+          return { kind: 'minted', dispatchKey: row.dispatchKey, opSeq: row.opSeq, reclaimed: false };
+        }
+        case 'reclaim': {
+          const row = decision.row;
+          row.status = 'claimed';
+          delete row.reason;
+          delete row.outcome;
+          delete row.settledAt;
+          delete row.deliveredAt;
+          row.claimedAt = now;
+          // 记下本次绑定到的窗口号（身份不变；只用于后续恢复再次找回同一行）。
+          row.attempt = input.attempt;
+          if (input.taskId !== undefined) row.taskId = input.taskId;
+          return { kind: 'minted', dispatchKey: row.dispatchKey, opSeq: row.opSeq, reclaimed: true };
+        }
+        case 'replay': {
+          const { row } = decision;
+          if (row.outcome === undefined) {
+            row.status = 'unknown';
+            row.reason = 'prior_unknown';
+            row.settledAt = now;
+            return { kind: 'unresolved', reason: 'prior_unknown', dispatchKey: row.dispatchKey };
+          }
+          // 仅推进窗口标记，不新铸身份：下一次恢复仍能找回这一行。
+          row.attempt = input.attempt;
+          return { kind: 'replayed', dispatchKey: row.dispatchKey, opSeq: row.opSeq, outcome: row.outcome };
+        }
+        case 'in_progress':
+          return {
+            kind: 'in_progress',
+            dispatchKey: decision.row.dispatchKey,
+            opSeq: decision.row.opSeq,
+            claimedAt: decision.row.claimedAt,
+          };
+        case 'unresolved': {
+          for (const row of decision.rows) {
+            if (row.status === 'claimed' || row.status === 'unknown') {
+              row.status = 'unknown';
+              row.reason = decision.reason;
+              row.settledAt = now;
+            }
+          }
+          const first = decision.rows[0];
+          return {
+            kind: 'unresolved',
+            reason: decision.reason,
+            ...(first === undefined ? {} : { dispatchKey: first.dispatchKey }),
+          };
+        }
+        case 'conflict':
+          return { kind: 'conflict', reason: 'operation_mismatch', dispatchKey: decision.row.dispatchKey };
+      }
+    },
+    settleOperation(dispatchKey, outcome, options = {}) {
+      const row = operations.get(dispatchKey);
+      if (row === undefined) {
+        throw new Error(`未知的逻辑操作身份：${dispatchKey}（只认已持久化的 key，不接受现造身份）。`);
+      }
+      // 已落定的行不被覆盖（重复落定不改变事实；unknown 不被晚到的结果洗白）。
+      if (row.status !== 'claimed') return row;
+      const now = options.now ?? new Date().toISOString();
+      row.status = operationStatusOf(outcome);
+      if (row.status === 'unknown') row.reason = 'result_unknown';
+      else delete row.reason;
+      row.outcome = outcome;
+      row.settledAt = now;
+      row.deliveredAt = now;
+      if (options.taskId !== undefined) row.taskId = options.taskId;
+      return row;
+    },
+    markOperationUnknown(dispatchKey, reason, options = {}) {
+      const row = operations.get(dispatchKey);
+      if (row === undefined) {
+        throw new Error(`未知的逻辑操作身份：${dispatchKey}（只认已持久化的 key，不接受现造身份）。`);
+      }
+      if (row.status !== 'claimed') return row;
+      row.status = 'unknown';
+      row.reason = reason;
+      row.settledAt = options.now ?? new Date().toISOString();
+      return row;
+    },
+    getOperation(dispatchKey) {
+      return operations.get(dispatchKey);
     },
   };
 }

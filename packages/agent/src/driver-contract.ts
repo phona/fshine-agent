@@ -17,6 +17,19 @@ import type { DiscoveredTool } from '@fshine/contracts';
 /** 转录消息 = pi 原生 AgentMessage（JSON 可序列化，含工具调用与结果）。 */
 export type DriverMessage = AgentMessage;
 
+/**
+ * 运行时回合事实（U3 重放窗口判定的唯一事实来源；不含模型文本与参数）：
+ *   · assistant_end —— 一条正常结束（stopReason 非 error/aborted）的 assistant 响应边界：
+ *     它之后的工具调用属于这次响应（宿主据此推进回合号）；
+ *   · recovery —— 运行时宣布「上一次尝试被丢弃、正在重试」。三个原生事件都归到这里：
+ *     `compaction_end.willRetry`（溢出/阈值压缩后重试）、`auto_retry_start`（瞬时错误自动
+ *     重试）、assistant `message_end` 且 `stopReason='error'`（失败尝试结束）。重试响应
+ *     可能重发上一次响应里的 toolCall，宿主据此开重放窗口；中止（aborted）不是重试，不转述。
+ */
+export type RuntimeTurnEvent =
+  | { kind: 'assistant_end' }
+  | { kind: 'recovery'; reason: 'compaction' | 'auto_retry' };
+
 export interface TurnDriverInput {
   systemPrompt: string;
   /** host tools/list 发现的工具（含 inputSchema），driver 据此构造原生工具定义。 */
@@ -40,6 +53,11 @@ export interface TurnDriverInput {
   deadline: number;
   /** 父级取消信号（隔离复核这类嵌套回合）。 */
   signal?: AbortSignal;
+  /**
+   * 运行时回合事实出口（U3）：只转述驱动已订阅的原生事件，不新建订阅体系。
+   * 缺省 = 不判定重放窗口（每笔调用都按新操作处理）。
+   */
+  onRuntimeEvent?: (event: RuntimeTurnEvent) => void;
 }
 
 export interface TurnDriverResult {

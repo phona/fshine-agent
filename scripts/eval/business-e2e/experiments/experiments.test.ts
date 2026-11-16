@@ -49,7 +49,7 @@ class FaceClient implements ExecutionClient {
   async capabilities(): Promise<CapabilityManifest> { return FACE_MANIFEST; }
   async execute(): Promise<ExecutionOutcome> { return { status: 'completed', data: { collection: 'alpha', window: 'W1', count: 2 } }; }
 }
-function fakeFace() { return { client: new FaceClient(), allowedOperations: ['dummy.query'] }; }
+function fakeFace() { return { client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }; }
 
 type Exec = (tool: string, args: Record<string, unknown>) => Promise<unknown>;
 

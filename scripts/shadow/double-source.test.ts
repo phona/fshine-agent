@@ -265,7 +265,7 @@ describe('Shadow 双源对照 ④：回退开关与装配面 fail-closed', () =>
     const collection = manifest.operations[0]?.args.find((entry) => entry.name === '--collection');
     expect(collection).toMatchObject({ required: true, type: 'name' });
     // 错误信封原样进契约层（四态之一），不被宿主改写
-    await expect(client.execute({ requestId: 'req_test', operation: 'fake.query', args: { '--collection': 'alpha' } }))
+    await expect(client.execute({ requestId: 'req_test', dispatchKey: 'dk_test_req_test', operation: 'fake.query', args: { '--collection': 'alpha' } }))
       .resolves.toEqual({
         status: 'refused',
         error: { code: 'FAKE_REFUSED', message: 'nope', retryable: false },

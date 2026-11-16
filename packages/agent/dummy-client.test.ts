@@ -70,6 +70,11 @@ if (args[0] === 'operation' && args[1] === 'list') {
 } else if (args[0] === 'call') {
   const file = args[args.indexOf('--file') + 1];
   const call = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (mode === 'capture') {
+    fs.writeFileSync(require('node:path').join(__dirname, '..', 'captured-call.json'), JSON.stringify(call));
+    process.stdout.write('RESULT {"status":"completed"}\\n');
+    process.exit(0);
+  }
   if (call.operation === 'stub.slow') { setTimeout(() => process.stdout.write('RESULT {"status":"completed"}'), 5000); }
   else if (call.operation === 'stub.weird') { process.stdout.write('RESULT {"status":"banana"}\\n'); process.exit(0); }
   else if (call.operation === 'stub.noenvelope') { process.stdout.write('no envelope\\n'); process.exit(7); }
@@ -123,7 +128,7 @@ describe('dummy 执行层适配器（Execution Contract 传输面）', () => {
       AGENT_CONFIG_PATH: 'sentinel-config.yaml',
     });
     const outcome = await client.execute({
-      requestId: 'req_test_1',
+      requestId: 'req_test_1', dispatchKey: 'dk_test_req_test_1',
       operation: 'dummy.query',
       args: { '--collection': 'documents', '--window': 'W202611' },
     });
@@ -134,7 +139,7 @@ describe('dummy 执行层适配器（Execution Contract 传输面）', () => {
 
     // 裸名（collection）按执行层声明规范化为 --collection，同样完成。
     const bare = await client.execute({
-      requestId: 'req_test_2',
+      requestId: 'req_test_2', dispatchKey: 'dk_test_req_test_2',
       operation: 'dummy.query',
       args: { collection: 'alpha', window: 'W1' },
     });
@@ -153,13 +158,13 @@ describe('dummy 执行层适配器（Execution Contract 传输面）', () => {
 
   it('拒绝与澄清：未登记 operation → refused；歧义 → needs_input（缺什么非空）', async () => {
     const client = clientWith({ PATH: process.env['PATH'], HOME: process.env['HOME'], TMPDIR: process.env['TMPDIR'] });
-    const refused = await client.execute({ requestId: 'req_test_3', operation: 'dummy.nope', args: {} });
+    const refused = await client.execute({ requestId: 'req_test_3', dispatchKey: 'dk_test_req_test_3', operation: 'dummy.nope', args: {} });
     expect(refused.status).toBe('refused');
     if (refused.status === 'refused') {
       expect(refused.error.code).toBe('CALL_REFUSE');
     }
 
-    const ambiguous = await client.execute({ requestId: 'req_test_4', operation: 'dummy.query', args: { '--collection': 'contoso' } });
+    const ambiguous = await client.execute({ requestId: 'req_test_4', dispatchKey: 'dk_test_req_test_4', operation: 'dummy.query', args: { '--collection': 'contoso' } });
     expect(ambiguous.status).toBe('needs_input');
     if (ambiguous.status === 'needs_input') {
       expect(ambiguous.missing.length).toBeGreaterThan(0);
@@ -176,7 +181,7 @@ describe('dummy 执行层适配器（Execution Contract 传输面）', () => {
     });
     // 适配器路径：EXECUTION_REQUIRE_PLAN 被白名单丢掉，读调用照常完成。
     const outcome = await client.execute({
-      requestId: 'req_test_5',
+      requestId: 'req_test_5', dispatchKey: 'dk_test_req_test_5',
       operation: 'dummy.query',
       args: { '--collection': 'alpha' },
     });
@@ -210,7 +215,7 @@ describe('dummy 执行层适配器（Execution Contract 传输面）', () => {
 
   it('响应：not_found 信封映射为 completed（确定性答案，宿主不改写语义）', async () => {
     const client = clientWith(baseEnv());
-    const outcome = await client.execute({ requestId: 'req_nf', operation: 'dummy.query', args: { '--collection': 'nope' } });
+    const outcome = await client.execute({ requestId: 'req_nf', dispatchKey: 'dk_test_req_nf', operation: 'dummy.query', args: { '--collection': 'nope' } });
     expect(outcome.status).toBe('completed');
     if (outcome.status === 'completed') {
       expect(outcome.data).toMatchObject({ query: 'nope', candidates: [] });
@@ -220,7 +225,7 @@ describe('dummy 执行层适配器（Execution Contract 传输面）', () => {
   it('响应：failed 信封映射为 failed；error 原样透传（含 correctForm details）', async () => {
     const client = clientWith(baseEnv());
     // 缺必填参数 → QUERY_REQUIRED（failed 信封）。
-    const missing = await client.execute({ requestId: 'req_fail_1', operation: 'dummy.query', args: {} });
+    const missing = await client.execute({ requestId: 'req_fail_1', dispatchKey: 'dk_test_req_fail_1', operation: 'dummy.query', args: {} });
     expect(missing.status).toBe('failed');
     if (missing.status === 'failed') {
       expect(missing.error.code).toBe('QUERY_REQUIRED');
@@ -229,7 +234,7 @@ describe('dummy 执行层适配器（Execution Contract 传输面）', () => {
     }
 
     // 锁定集合的写入准备 → COLLECTION_LOCKED（failed 信封 + 非零退出码，信封优先于退出码）。
-    const locked = await client.execute({ requestId: 'req_fail_2', operation: 'dummy.prepare', args: { '--collection': 'locked-one' } });
+    const locked = await client.execute({ requestId: 'req_fail_2', dispatchKey: 'dk_test_req_fail_2', operation: 'dummy.prepare', args: { '--collection': 'locked-one' } });
     expect(locked.status).toBe('failed');
     if (locked.status === 'failed') {
       expect(locked.error.code).toBe('COLLECTION_LOCKED');
@@ -257,19 +262,43 @@ describe('dummy 适配器的失败映射（stub 网关，零网络）', () => {
     await expect(stubClient('list-slow', 300).listOperations()).rejects.toThrow('读取超时');
   });
 
+  it('真实子进程收到的 call.json 请求体携带 dispatchKey（不是只看内存对象）', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'dummy-capture-'));
+    stubRoots.push(root);
+    writeStubGateway(root, 'capture');
+    const client = createDummyCliClient({ root, gateway: 'bin/stub', stateDir, env: baseEnv() });
+
+    const outcome = await client.execute({
+      requestId: 'req_capture',
+      dispatchKey: 'dk_task:t_capture:7',
+      operation: 'stub.needs',
+      args: { '--collection': 'alpha' },
+    });
+    expect(outcome.status).toBe('completed');
+
+    const captured = JSON.parse(readFileSync(path.join(root, 'captured-call.json'), 'utf8')) as {
+      operation?: unknown;
+      dispatchKey?: unknown;
+      args?: unknown;
+    };
+    expect(captured.operation).toBe('stub.needs');
+    expect(captured.dispatchKey).toBe('dk_task:t_capture:7');
+    expect(captured.args).toMatchObject({ '--collection': 'alpha' });
+  });
+
   it('调用超时 / 未知状态 / 无信封 → failed 机械分流；needs_input 缺参走声明分支', async () => {
     const client = stubClient('normal', 300);
 
-    const slow = await client.execute({ requestId: 'req_slow', operation: 'stub.slow', args: {} });
+    const slow = await client.execute({ requestId: 'req_slow', dispatchKey: 'dk_test_req_slow', operation: 'stub.slow', args: {} });
     expect(slow).toMatchObject({ status: 'failed', error: { code: 'EXECUTION_TIMEOUT', retryable: true } });
 
-    const weird = await client.execute({ requestId: 'req_weird', operation: 'stub.weird', args: {} });
+    const weird = await client.execute({ requestId: 'req_weird', dispatchKey: 'dk_test_req_weird', operation: 'stub.weird', args: {} });
     expect(weird).toMatchObject({ status: 'failed', error: { code: 'EXECUTION_UNKNOWN_STATUS' } });
 
-    const noEnvelope = await client.execute({ requestId: 'req_noenv', operation: 'stub.noenvelope', args: {} });
+    const noEnvelope = await client.execute({ requestId: 'req_noenv', dispatchKey: 'dk_test_req_noenv', operation: 'stub.noenvelope', args: {} });
     expect(noEnvelope).toMatchObject({ status: 'failed', error: { code: 'EXECUTION_NO_RESULT' } });
 
-    const needs = await client.execute({ requestId: 'req_needs', operation: 'stub.needs', args: {} });
+    const needs = await client.execute({ requestId: 'req_needs', dispatchKey: 'dk_test_req_needs', operation: 'stub.needs', args: {} });
     expect(needs.status).toBe('needs_input');
     if (needs.status === 'needs_input') {
       expect(needs.missing).toEqual([

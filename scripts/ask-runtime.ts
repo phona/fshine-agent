@@ -112,10 +112,15 @@ export interface AskRuntime {
   close(): void;
 }
 
-/** 执行面：结构化执行客户端 + 本轮允许集合（装配核心的产出面）。 */
+/**
+ * 执行面：结构化执行客户端 + 本轮允许集合 + 只读集合（装配核心的产出面）。
+ * 只读集合必须由执行层 `access=read` 显式派生，独立于允许集合——写操作进入允许集合时
+ * 不得被误当只读（重试会变成二次执行）；缺省注入面也必须显式给出，不允许回落。
+ */
 export interface ExecutionFace {
   client: ExecutionClient;
   allowedOperations: readonly string[];
+  readOnlyOperations: readonly string[];
 }
 
 /** 执行面工厂（server 测试替身注入用；缺省 = 仓内 dummy CLI + 只读允许集非空校验）。 */
@@ -256,11 +261,14 @@ async function defaultExecutionFace(input: {
     env: input.env,
   });
   const operations = await client.listOperations();
-  const allowedOperations = readOnlyOperationNames(operations);
+  // 两条集合各自派生：只读集合只看 access=read；允许集合是当前读路径切片（未来写操作
+  // 进入允许集合时，只读集合不会跟着变大——这正是 P1 要消除的「碰巧成立」）。
+  const readOnlyOperations = readOnlyOperationNames(operations);
+  const allowedOperations = [...readOnlyOperations];
   if (allowedOperations.length === 0) {
     throw input.emptyOperationsError(input.emptyOperationsMessage);
   }
-  return { client, allowedOperations };
+  return { client, allowedOperations, readOnlyOperations };
 }
 
 /** 执行面解析（注入优先，缺省仓内 dummy；后台派发与装配核心共用同一链，不另建装配）。 */
@@ -337,6 +345,8 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
     executor = await createTaskExecutor({
       client: face.client,
       allowedOperations: face.allowedOperations,
+      // U3：只读集合是执行面显式派生的 `access=read` 集合，不是允许集合的影子。
+      readOnlyOperations: face.readOnlyOperations,
       workerDriver,
       ...(input.workerSkills === undefined ? {} : { workerSkills: input.workerSkills }),
       registry: input.registry,
@@ -541,6 +551,8 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       sessionId: input.sessionId,
       client: face.client,
       allowedOperations: face.allowedOperations,
+      // U3：只读集合是执行面显式派生的 `access=read` 集合，不是允许集合的影子。
+      readOnlyOperations: face.readOnlyOperations,
       mainDriver: drivers.mainDriver,
       workerDriver: drivers.workerDriver,
       mainSystemPrompt,

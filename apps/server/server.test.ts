@@ -182,7 +182,7 @@ describe('server（假渠道 + 假执行客户端 + 假模型）', () => {
           textAssistant('已查询 documents W202611：3 条。'),
         ]),
       }),
-      createExecutionFace: async () => ({ client, allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client, allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       logger: (line) => logs.push(line),
     });
 
@@ -233,7 +233,7 @@ describe('server（假渠道 + 假执行客户端 + 假模型）', () => {
         driverCreations += 1;
         return { mainDriver: await driverFor([]), workerDriver: await driverFor([]) };
       },
-      createExecutionFace: async () => ({ client, allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client, allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       logger: (line) => logs.push(line),
     });
 
@@ -283,7 +283,7 @@ describe('server（假渠道 + 假执行客户端 + 假模型）', () => {
         mainDriver: await driverFor([emptyReply(), emptyReply()]),
         workerDriver: await driverFor([]),
       }),
-      createExecutionFace: async () => ({ client, allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client, allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       logger: (line) => logs.push(line),
     });
 

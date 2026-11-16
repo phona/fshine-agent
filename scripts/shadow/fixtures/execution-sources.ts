@@ -243,6 +243,8 @@ export interface ShadowFace {
   client: ExecutionClient;
   /** 只读允许集合（read access 派生；排序后便于跨源对照）。 */
   allowedOperations: readonly string[];
+  /** 只读 operation 集合（与 allowedOperations 同源派生；显式字段，不从允许集合回落）。 */
+  readOnlyOperations: readonly string[];
   /** 只读数据面指纹（读路径前后必须相等）。 */
   dataFingerprint(): string;
   /** 机械证据读数：A=真实 spawn + 执行层审计行；B=进程内调用记录（防单源冒充）。 */
@@ -275,6 +277,7 @@ export function createShadowSource(name: ShadowSourceName, options: ShadowSource
         return {
           client,
           allowedOperations: [...readOnlyOperationNames(operations)].sort(),
+          readOnlyOperations: [...readOnlyOperationNames(operations)].sort(),
           dataFingerprint: () => dataSurfaceFingerprint(stateDir),
           mechanical: () => ({
             spawnedGateway: true,
@@ -294,6 +297,7 @@ export function createShadowSource(name: ShadowSourceName, options: ShadowSource
       return {
         client,
         allowedOperations: [...readOnlyOperationNames(operations)].sort(),
+        readOnlyOperations: [...readOnlyOperationNames(operations)].sort(),
         dataFingerprint: () => client.storeDigest(),
         mechanical: () => ({ spawnedGateway: false, auditLines: 0, calls: client.calls.length }),
       };

@@ -74,7 +74,7 @@ CREATE TABLE operations (
   attempt        INTEGER NOT NULL,          -- 认领时所在运行时回合号（重放窗口判定，见 §5.2）
   claimed_at     TEXT NOT NULL,
   settled_at     TEXT,
-  delivered_at   TEXT,                      -- 结果已交回 Pi 转录的时刻（NULL = 模型没看到）
+  delivered_at   TEXT,                      -- 落定时写入（= settled_at；NULL = 未落定/未交付；不证明模型已读取）
   replay_of      TEXT,                      -- 可空：本行是哪个 dispatch_key 的重放（审计用）
   UNIQUE (scope_key, op_seq)
 );
@@ -110,7 +110,7 @@ claim（INSERT operations, status='claimed'）→ client.execute({requestId, dis
 
 ### 4.3 `settle` 与「同 Key 同操作返回已有结果」
 
-- `settle(dispatchKey, outcome)`：`status` 取 outcome 四态（`execution-contract.ts:65-96`）+ `outcome_json` 原样存 `data`/`error`/`missing`，`delivered_at` 在工具结果交回 Pi 时写。
+- `settle(dispatchKey, outcome)`：`status` 取 outcome 四态（`execution-contract.ts:65-96`）+ `outcome_json` 原样存 `data`/`error`/`missing`；`delivered_at` 在 `settle` 时与 `settled_at` 同刻写入（表示结果已落定并交给 Pi 回合，**不证明模型已读取**；NULL = 未落定/未交付）。
 - 后续同 key 且 `operation` 相同：**直接回放 `outcome_json`**，不调 `client.execute`。
 - 后续同 key 但 `operation` 不同：`dispatch_conflict` 确定性拒绝（零副作用，行不改）。
 
@@ -139,18 +139,21 @@ operations.claim({ scopeKey, operation, attempt, now, replayWindow? })
 | --- | --- | --- |
 | `compaction_end` | `{reason:'manual'|'threshold'|'overflow', result, aborted, willRetry, errorMessage?}` | `node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.d.ts:74-80` |
 | `auto_retry_start` | `{attempt, maxAttempts, delayMs, errorMessage}` | 同上 `:81-86` |
-| `message_end`（assistant，`stopReason='error'|'aborted'`） | 失败尝试的边界 | `pi-driver.ts:471-484`（驱动已在订阅，只写日志） |
+| `message_end`（assistant，`stopReason='error'`） | 可重试失败尝试的边界；`aborted` 不是自动重试，不转述 | `pi-driver.ts` 的订阅分支 |
 | `tool_execution_start/end` | 带 `toolCallId/args`，**本设计不用它做身份** | `pi-agent-core/dist/types.d.ts:483-497` |
 
-产品驱动**已经**订阅了这些事件（`pi-driver.ts:459-485`），当前只用来记 `retryScheduled/runFailure/recovered`。本设计只增加一条转发：`TurnDriverInput` 上新增可选回调 `onRuntimeRecovery?(fact)`，在既有 `subscribe` 里触发，透传到 `createSession`/`createTaskExecutor` 的 `exec` 闭包。这不是新子系统，是已有事件的出口。
+产品驱动**已经**订阅了这些事件（`pi-driver.ts:461-500`），当前只用来记 `retryScheduled/runFailure/recovered`。本设计只增加一条转发：`TurnDriverInput.onRuntimeEvent`（`driver-contract.ts`）在既有 `subscribe` 里触发，透传到 `createSession`/`createTaskExecutor` 的 `exec` 闭包。这不是新子系统，是已有事件的出口。
 
 ### 5.2 重放窗口（`attempt` 号）
 
-- `attempt` 是**每次交办**（run_task 作用域：每个 turn）的单调整数，初值 1；只在两类**互斥**事件上 +1（两类都已在订阅里）：
-  - 正常 assistant 响应结束（`message_end` 且 `stopReason ∉ {error, aborted}`）——新响应边界的起点；
-  - 恢复/重试事件（`compaction_end.willRetry` / `auto_retry_start` / `message_end` 且 `stopReason ∈ {error, aborted}`）——加一，并把**加一前的值**记为本交办的重放窗口 `W`。
-- 顺序：assistant 响应 N 正常结束 → 计数 `A`；该响应的工具调用认领 op 时记 `attempt = A`；下一请求溢出触发恢复事件 → 计数 `A+1`、窗口 `W = A`（进程内变量；需要审计时写回该 op 行的 `replay_of`，但窗口判定只依赖本次进程内的事件序）。
-- 因此「窗口」= 被丢弃的那条 assistant 响应的工具调用所认领的 op；重试中的新调用认领的是 `A+1`，不会把自己也算成候选。
+- `attempt` 是**每次交办**（run_task 作用域：每个 turn）的单调整数，初值 1；只在两类事件上推进：
+  - 正常 assistant 响应结束（`message_end` 且 `stopReason ∉ {error, aborted}`）——新响应边界；
+  - 恢复/重试事件（`compaction_end.willRetry` / `auto_retry_start` / `message_end` 且 `stopReason='error'`）——开窗：把**当前 `attempt` 值**记为窗口 `W`，随后 `attempt += 1`。
+- **生命周期（开/关/清空）**：
+  - **开**：只由上述恢复事件打开。同一次失败会先后产生 `message_end('error')` 与 `auto_retry_start`，重复信号在窗口未被消费前**幂等**（只开一次，不重复推进 `attempt`）。
+  - **关**：被重试的响应结束时先「disarm」——窗口保留给它自己的工具调用（它们在该响应结束后执行）；下一次 `assistant_end`（一轮新的响应边界）关闭窗口。若窗口已被消费后又发生 recovery，先关闭旧窗，再按当前 `attempt` 开新窗（指向新的被丢弃尝试）。
+  - **清空**：关闭即删除 `window` 与相位标记，不留下可被后续响应使用的绑定；`attempt` 只增不复用。窗口状态随 `send` / 单次交办执行结束整体丢弃，不跨 turn、不跨 task。
+- 顺序：assistant 响应 N 正常结束 → `attempt += 1`；该响应的工具调用认领 op 时记 `attempt = A`；下一请求 529/溢出 → 恢复事件开窗 `W = A`、`attempt = A+1`；重试响应里的新调用认领 `A+1`，按 `W` 读回已持久化行，不会把自己也算成候选。
 - 语义与 Pi 的行为对齐：`_omitRecoveryAttempt` 只隐藏**最后一条** assistant 消息及其 toolResults（`pi-152-stage-b.md:99-104`），所以窗口粒度 = 一条 assistant 响应，判据是 `operations.attempt = W`，不比较内容。
 
 ### 5.3 规则表
@@ -158,11 +161,11 @@ operations.claim({ scopeKey, operation, attempt, now, replayWindow? })
 | # | 输入事实 | 规则 | 读取的持久化字段 / 运行时事实 |
 | --- | --- | --- | --- |
 | **R0 铸造** | 没有打开的窗口 | 新 op：分配新 `op_seq`，`INSERT` 一行 `claimed`，再调用。两笔合法相似操作、两笔 args 完全相同的操作都走这里 → **两个不同 key、各执行一次** | `operations(scope_key, op_seq)` 最大值；`tasks.task_id`（交办内作用域）或 `turn:<sessionId>:<turnNo>`（run_task 作用域） |
-| **R1 证明是重放** | 窗口打开，且窗口内**恰有 1 条** op 的 `operation` 与新调用相同 | 绑定该行：`completed/needs_input/failed/refused` → 原样回放 `outcome_json`，**不发起第二次调用**；`claimed/unknown` → R4 | `operations(dispatch_key, operation, status, outcome_json, attempt)`；`operations.delivered_at` |
+| **R1 证明是重放** | 窗口打开，且窗口内**恰有 1 条** op 的 `operation` 与新调用相同 | 绑定该行：`completed/needs_input/failed/refused` → 原样回放 `outcome_json`，**不发起第二次调用**；`claimed/unknown` → R4 | `operations(dispatch_key, operation, status, outcome_json, attempt)` |
 | **R2 窗口内同名单笔但未定论** | 同上但 `status ∈ {claimed, unknown}` | R4（待核对），绝不重放未知结果 | `operations.status` |
 | **R3 窗口内同名 ≥2 笔** | 无法证明是哪一笔（重试可能调换了顺序） | R4（待核对）；整笔交办按结果未知收尾 | `operations(attempt, operation)` 计数 |
 | **R4 待核对** | 任何无法证明的情形 | 停止副作用；op 行留 `unknown`（附 reason）；交办 `running→failed + reason='result_unknown'`（复用 `markResultUnknown`，`task-registry.ts:358-363`、`:601-605`；合法边 `:234`；原因枚举 `:56-63`）；工具结果返回固定「待核对」事实 | `tasks.status/reason/failureReason`（`task-store.ts:356-370` 单语句写状态） |
-| **R5 跨进程/会话恢复** | 新进程、或 Pi 会话 resume（`sessionDir/resumeSessionFile`，`pi-driver.ts:181-185`；当前产品装配未接线） | **不自动重绑**：旧交办租约过期即 `result_unknown`（`task-runner.ts:342-344`、`task-registry.ts:621-629`），用户重发 = 新交办（既有「重复同一句话是新授权」口径）。若将来接上 resume，判据改为：该交办存在 `delivered_at IS NULL` 的 op 且 `operation` 同名 → 绑定并 R4；≥2 条 → R4；0 条 → R0 | `operations(delivered_at, operation)`；`tasks.status/reason` |
+| **R5 跨进程/会话恢复** | 新进程、或 Pi 会话 resume（`sessionDir/resumeSessionFile`，`pi-driver.ts:181-185`；当前产品装配未接线） | **不自动重绑**：旧交办租约过期即 `result_unknown`（`task-runner.ts:342-344`、`task-registry.ts:621-629`），用户重发 = 新交办（既有「重复同一句话是新授权」口径）。若将来接上 resume，判据改为：该交办存在 `status ∈ {claimed, unknown}` 且 `delivered_at IS NULL` 的 op 且 `operation` 同名 → 绑定并 R4；≥2 条 → R4；0 条 → R0（`delivered_at` 非 NULL 只表示已有结果可回放，不表示模型已读） | `operations(delivered_at, operation)`；`tasks.status/reason` |
 
 ### 5.4 三条硬禁令（对应 owner 纠偏）
 
@@ -276,10 +279,10 @@ exactly-once 需要三样：业务操作 ID、外部网关幂等键、回读对�
 | --- | --- | --- |
 | 契约 | `ExecutionRequest` 增 `dispatchKey: string`；`EXECUTION_CONTRACT_VERSION` 1→2（`execution-contract.ts:30`）；注释写明「requestId 追踪 / dispatchKey 身份」 | owner 已批准范围 |
 | 底账 schema | v3→v4（`task-store.ts:61`）：新增 `operations` 表（`scope_key` 见 §3）+ `executions.dispatch_key` 可空列；迁移按既有版本化口径（`:271-303`，备份 `<db>.backup-v4`），旧行 NULL、只读打开读出缺省 | 与 P1/P2a 加列同款 |
-| Registry API | `claimOperation` / `settleOperation` / `markOperationDelivered`；`ExecutionRecord` 增可选 `dispatchKey`（`task-registry.ts:111-116`） | 最小增量 |
+| Registry API | `claimOperation` / `settleOperation`（`delivered_at` 在 settle 写入）；`ExecutionRecord` 增可选 `dispatchKey`（`task-registry.ts:111-116`） | 最小增量 |
 | 执行运行时 | inline `executeOperation`（`:459-481`）与 background `exec`（`:781-803`）改为 claim→execute→settle；`requestId` 仍在 claim 后生成 | 先落库再调用 |
 | 驱动 | `TurnDriverInput` 增 `onRuntimeRecovery?`；在既有 `session.subscribe`（`pi-driver.ts:459-485`）转发 `compaction_end.willRetry` / `auto_retry_start` / assistant `message_end('error')` | 已有事件，不新建订阅体系 |
-| 判定 | **不改** `judgeReportedTask`（`:137-156`）：回放不写 `executions` 行（只写 `operations.delivered_at`），保持「一行 = 一次真实执行」，E05/E06 冻结语义零变化 | 最小影响面 |
+| 判定 | **不改** `judgeReportedTask`（`:137-156`）：回放不写 `executions` 行（只推进 `operations.attempt` 以便后续恢复找回同一行），保持「一行 = 一次真实执行」，E05/E06 冻结语义零变化 | 最小影响面 |
 | 状态机 | **不改**：待核对复用 `markResultUnknown`（`:601-605`）与既有原因枚举 | 不新增状态 |
 
 ---

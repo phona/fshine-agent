@@ -263,11 +263,13 @@ function createFshineResourceLoader(systemPrompt: string): ResourceLoader {
   };
 }
 
-/** 本回合工具执行面（exec/onStep/signal 每回合更新；工具定义本身随会话固定）。 */
+/** 本回合工具执行面（exec/onStep/signal/onRuntimeEvent 每回合更新；工具定义本身随会话固定）。 */
 export interface TurnExecSurface {
   exec: TurnDriverInput['exec'];
   onStep: TurnDriverInput['onStep'];
   signal?: AbortSignal;
+  /** U3：运行时回合事实（assistant_end / compaction willRetry / auto_retry）→ 宿主重放窗口判定。 */
+  onRuntimeEvent?: TurnDriverInput['onRuntimeEvent'];
 }
 
 /** 构造 Pi 原生工具定义（execute 动态读取本回合执行面，不钉死首回合闭包）。 */
@@ -457,8 +459,17 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
 
     const slot: Conversation['slot'] = { current: undefined };
     session.subscribe((event: AgentSessionEvent) => {
+      if (event.type === 'compaction_end') {
+        // U3：溢出/阈值压缩后将继续重试 = 上一次 assistant 尝试被丢弃（Pi 的 _omitRecoveryAttempt
+        // 只隐藏该尝试及其 toolResult，不回滚已发生的副作用）。只转述事实，判定归宿主。
+        if (event.willRetry) input.surfaceRef.current?.onRuntimeEvent?.({ kind: 'recovery', reason: 'compaction' });
+        return;
+      }
       if (event.type === 'auto_retry_start') {
         if (slot.current) slot.current.retryScheduled += 1;
+        // U3：瞬时错误（529 等）的自动重试 = 上一次 assistant 尝试被丢弃；重试响应可能
+        // 重发同一 toolCall。与 message_end('error') 同一失败周期内重复转述，宿主侧幂等开窗。
+        input.surfaceRef.current?.onRuntimeEvent?.({ kind: 'recovery', reason: 'auto_retry' });
         console.warn(JSON.stringify({
           event: 'pi_driver_retry_scheduled',
           attempt: event.attempt,
@@ -476,9 +487,16 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
             message: String(event.message.errorMessage ?? ''),
           };
           slot.current.recovered = false;
+          // U3：失败尝试结束。可重试错误（stopReason=error）随后会由 Pi 自动重试；该尝试
+          // 可能已发出 toolCall，重试响应可能重发 → 打开 attempt 窗口。中止不重试，不转述。
+          if (stopReason === 'error') {
+            input.surfaceRef.current?.onRuntimeEvent?.({ kind: 'recovery', reason: 'auto_retry' });
+          }
         } else {
           // 失败之后又出现正常 assistant 消息 = Pi 原生重试/溢出恢复已经接上。
           slot.current.recovered = true;
+          // U3：正常结束的响应边界（其后的工具调用属于这次响应）。
+          input.surfaceRef.current?.onRuntimeEvent?.({ kind: 'assistant_end' });
         }
       }
     });
@@ -529,7 +547,12 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
 
       const surfaceRef: { current: TurnExecSurface | undefined } = sessionSurface
         ?? { current: undefined };
-      surfaceRef.current = { exec: input.exec, onStep: input.onStep, signal: abort.signal };
+      surfaceRef.current = {
+        exec: input.exec,
+        onStep: input.onStep,
+        signal: abort.signal,
+        ...(input.onRuntimeEvent === undefined ? {} : { onRuntimeEvent: input.onRuntimeEvent }),
+      };
 
       let active: Conversation | undefined;
       const abortSession = () => {
