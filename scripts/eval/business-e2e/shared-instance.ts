@@ -429,7 +429,7 @@ export function createSharedInstanceFixture(
       dbPath,
       stateDir: path.join(root, 'state'),
       createDrivers: buildDrivers,
-      createExecutionFace: async () => ({ client, allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client, allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       taskExecutor: executor,
       logger: (line) => logs.push(line),
     });

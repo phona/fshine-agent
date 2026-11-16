@@ -42,8 +42,8 @@ export class FakeClient implements ExecutionClient {
   }
 }
 
-export function fakeExecutionFace(): { client: ExecutionClient; allowedOperations: readonly string[] } {
-  return { client: new FakeClient(), allowedOperations: ['dummy.query'] };
+export function fakeExecutionFace(): { client: ExecutionClient; allowedOperations: readonly string[]; readOnlyOperations: readonly string[] } {
+  return { client: new FakeClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] };
 }
 
 function textMessage(text: string): AgentMessage {

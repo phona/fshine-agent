@@ -272,7 +272,7 @@ describe('⑧ 真实驱动器装配路径（注入假 driver/假执行面，零�
     };
     const executor = createModelExecutor({
       createDrivers: () => ({ mainDriver, workerDriver }),
-      createExecutionFace: async () => ({ client: faceClient, allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client: faceClient, allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       env: { LLM_API_KEY: 'test-placeholder', LLM_MODEL: 'test-model', LLM_API_BASE_URL: 'http://localhost' },
     });
     const items = expandBizprobeItems([bizCases[0]!]);

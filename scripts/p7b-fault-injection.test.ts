@@ -204,7 +204,7 @@ async function assembleBackground(options: AssembleOptions): Promise<Awaited<Ret
       }),
       workerDriver: unreachableDriver(),
     }),
-    createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+    createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
     runtime: {
       dispatchMode: 'background',
       backgroundConcurrency: options.backgroundConcurrency ?? 1,
@@ -541,7 +541,7 @@ describe('P7-T06 故障注入 · ④ 重复消息（假渠道同 messageId 重�
         mainDriver: fakeMainDriver(plans, records, { numberReceipts: true }),
         workerDriver: unreachableDriver(),
       }),
-      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       taskExecutor: executor,
       notificationSink: new FakeSink(),
       logger: () => {},
@@ -586,7 +586,7 @@ describe('P7-T06 故障注入 · ④ 重复消息（假渠道同 messageId 重�
         mainDriver: fakeMainDriver(plans, records, { numberReceipts: true }),
         workerDriver,
       }),
-      createExecutionFace: async () => ({ client: face, allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client: face, allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       logger: () => {},
     });
     const registry = createSqliteTaskRegistry(dbPath, { readOnly: true });

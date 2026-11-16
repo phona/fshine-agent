@@ -363,7 +363,7 @@ async function runCombinedWithDuplicate(scenario: ChaosScenario): Promise<ChaosR
         mainDriver: createFakeMainDriver((text) => ({ delegates: [text] }), [] as RecordedTurn[]),
         workerDriver: unreachableWorkerDriver(),
       }),
-      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       taskExecutor: serverExecutor.executor,
       notificationSink: serverSink,
       logger: () => {},

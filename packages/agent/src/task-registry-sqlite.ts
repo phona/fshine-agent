@@ -12,16 +12,22 @@
  * 表内不含计划字段（planId / stepIndex / totalSteps / lastProgress / deadline /
  * originMessage 一概没有）：最小切片没有计划门，也不迁移旧 TaskRunRecord。
  */
-import { openTaskStore, type ExecutionRow, type StoredTask, type TaskRow } from '@fshine/core';
-import type { ExecutionFailure, ExecutionStatus } from '@fshine/contracts/execution-contract';
+import { openTaskStore, type ExecutionRow, type OperationRow, type StoredTask, type TaskRow } from '@fshine/core';
+import type { ExecutionFailure, ExecutionOutcome, ExecutionStatus } from '@fshine/contracts/execution-contract';
 import {
   TaskOwnershipError,
   TaskTransitionError,
+  decideOperationClaim,
   deriveTaskName,
   judgeReportedTask,
+  operationStatusOf,
   reduceTaskState,
   type ExecutionRecord,
   type MutationOptions,
+  type OperationClaim,
+  type OperationClaimInput,
+  type OperationRecord,
+  type OperationStatus,
   type PendingQuestion,
   type TaskAction,
   type TaskFact,
@@ -91,6 +97,32 @@ export function createSqliteTaskRegistry(
       createdAt: stored.task.createdAt,
       updatedAt: stored.task.updatedAt,
     };
+  }
+
+  function toOperationRecord(row: OperationRow): OperationRecord {
+    return {
+      dispatchKey: row.dispatchKey,
+      scopeKey: row.scopeKey,
+      ...(row.taskId === undefined ? {} : { taskId: row.taskId }),
+      opSeq: row.opSeq,
+      operation: row.operation,
+      status: row.status as OperationStatus,
+      ...(row.reason === undefined ? {} : { reason: row.reason }),
+      ...(row.outcome === undefined ? {} : { outcome: row.outcome as ExecutionOutcome }),
+      attempt: row.attempt,
+      claimedAt: row.claimedAt,
+      ...(row.settledAt === undefined ? {} : { settledAt: row.settledAt }),
+      ...(row.deliveredAt === undefined ? {} : { deliveredAt: row.deliveredAt }),
+      ...(row.replayOf === undefined ? {} : { replayOf: row.replayOf }),
+    };
+  }
+
+  function requireOperation(dispatchKey: string): OperationRecord {
+    const row = store.getOperation(dispatchKey);
+    if (row === undefined) {
+      throw new Error(`未知的逻辑操作身份：${dispatchKey}（只认已持久化的 key，不接受现造身份）。`);
+    }
+    return toOperationRecord(row);
   }
 
   function require(taskId: string, scope?: TaskScope): StoredTask {
@@ -189,6 +221,7 @@ export function createSqliteTaskRegistry(
         operation: record.operation,
         status: record.status,
         ...(record.error === undefined ? {} : { error: record.error }),
+        ...(record.dispatchKey === undefined ? {} : { dispatchKey: record.dispatchKey }),
       });
       if (!inserted) throw new TaskOwnershipError();
       store.touchTask(taskId, new Date().toISOString());
@@ -280,6 +313,138 @@ export function createSqliteTaskRegistry(
     },
     onTaskFact(hook) {
       factHook = hook;
+    },
+    claimOperation(input: OperationClaimInput): OperationClaim {
+      const now = input.now ?? new Date().toISOString();
+      // 读候选 → 纯函数决策 → 写：全部在同一 BEGIN IMMEDIATE 写事务（跨进程并发不重号、
+      // 第二者看到的是已提交的 claimed 行，因此不会并发执行同一身份）。
+      return store.transaction((): OperationClaim => {
+        let candidates: OperationRecord[] = [];
+        if (input.dispatchKey !== undefined) {
+          const row = store.getOperation(input.dispatchKey);
+          if (row !== undefined) candidates = [toOperationRecord(row)];
+        } else if (input.replayWindow !== undefined) {
+          candidates = store.listOperationCandidates({
+            scopeKey: input.scopeKey,
+            operation: input.operation,
+            attempt: input.replayWindow,
+          }).map(toOperationRecord);
+        }
+        const decision = decideOperationClaim(input, candidates);
+        switch (decision.action) {
+          case 'mint': {
+            const row = store.mintOperation({
+              scopeKey: input.scopeKey,
+              operation: input.operation,
+              attempt: input.attempt,
+              now,
+              ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+            });
+            return { kind: 'minted', dispatchKey: row.dispatchKey, opSeq: row.opSeq, reclaimed: false };
+          }
+          case 'reclaim': {
+            const row = store.reclaimOperation(decision.row.dispatchKey, {
+              attempt: input.attempt,
+              now,
+              ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+            });
+            if (row === undefined) return { kind: 'unresolved', reason: 'prior_unknown' };
+            return { kind: 'minted', dispatchKey: row.dispatchKey, opSeq: row.opSeq, reclaimed: true };
+          }
+          case 'replay': {
+            const { row } = decision;
+            if (row.outcome === undefined) {
+              store.applyOperationState(row.dispatchKey, {
+                expectedStatus: row.status,
+                status: 'unknown',
+                reason: 'prior_unknown',
+                settledAt: now,
+              });
+              return { kind: 'unresolved', reason: 'prior_unknown', dispatchKey: row.dispatchKey };
+            }
+            // 仅推进窗口标记（身份不变），让下一次恢复仍能找回这一行。
+            store.applyOperationState(row.dispatchKey, {
+              expectedStatus: row.status,
+              status: row.status,
+              reason: row.reason ?? null,
+              outcomeJson: JSON.stringify(row.outcome),
+              settledAt: row.settledAt ?? null,
+              deliveredAt: row.deliveredAt ?? null,
+              attempt: input.attempt,
+            });
+            return { kind: 'replayed', dispatchKey: row.dispatchKey, opSeq: row.opSeq, outcome: row.outcome };
+          }
+          case 'in_progress':
+            return {
+              kind: 'in_progress',
+              dispatchKey: decision.row.dispatchKey,
+              opSeq: decision.row.opSeq,
+              claimedAt: decision.row.claimedAt,
+            };
+          case 'unresolved': {
+            for (const row of decision.rows) {
+              if (row.status !== 'claimed' && row.status !== 'unknown') continue;
+              store.applyOperationState(row.dispatchKey, {
+                expectedStatus: row.status,
+                status: 'unknown',
+                reason: decision.reason,
+                settledAt: now,
+              });
+            }
+            const first = decision.rows[0];
+            return {
+              kind: 'unresolved',
+              reason: decision.reason,
+              ...(first === undefined ? {} : { dispatchKey: first.dispatchKey }),
+            };
+          }
+          case 'conflict':
+            return { kind: 'conflict', reason: 'operation_mismatch', dispatchKey: decision.row.dispatchKey };
+        }
+      });
+    },
+    settleOperation(dispatchKey: string, outcome: ExecutionOutcome, options: { now?: string; taskId?: string } = {}) {
+      const now = options.now ?? new Date().toISOString();
+      return store.transaction((): OperationRecord => {
+        const current = store.getOperation(dispatchKey);
+        if (current === undefined) {
+          throw new Error(`未知的逻辑操作身份：${dispatchKey}（只认已持久化的 key，不接受现造身份）。`);
+        }
+        // 已落定的行不被覆盖（重复落定不改变事实；unknown 不被晚到的结果洗白）。
+        if (current.status !== 'claimed') return toOperationRecord(current);
+        const status = operationStatusOf(outcome);
+        store.applyOperationState(dispatchKey, {
+          expectedStatus: 'claimed',
+          status,
+          reason: status === 'unknown' ? 'result_unknown' : null,
+          outcomeJson: JSON.stringify(outcome),
+          settledAt: now,
+          deliveredAt: now,
+          ...(options.taskId === undefined ? {} : { taskId: options.taskId }),
+        });
+        return requireOperation(dispatchKey);
+      });
+    },
+    markOperationUnknown(dispatchKey: string, reason: string, options: { now?: string } = {}) {
+      const now = options.now ?? new Date().toISOString();
+      return store.transaction((): OperationRecord => {
+        const current = store.getOperation(dispatchKey);
+        if (current === undefined) {
+          throw new Error(`未知的逻辑操作身份：${dispatchKey}（只认已持久化的 key，不接受现造身份）。`);
+        }
+        if (current.status !== 'claimed') return toOperationRecord(current);
+        store.applyOperationState(dispatchKey, {
+          expectedStatus: 'claimed',
+          status: 'unknown',
+          reason,
+          settledAt: now,
+        });
+        return requireOperation(dispatchKey);
+      });
+    },
+    getOperation(dispatchKey) {
+      const row = store.getOperation(dispatchKey);
+      return row === undefined ? undefined : toOperationRecord(row);
     },
     close() {
       store.close();

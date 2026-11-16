@@ -2,13 +2,13 @@
  * P2a 底账 v3 版本化迁移（reason / pending_question / waiting_since / lease_owner / lease_until）。
  *
  * 覆盖（r4-joint-interfaces.md §1 v3 迁移列 + 既有 P1 迁移纪律）：
- *   · v2 库（P1 schema）首次可写打开 → 一次版本化迁移：补 5 列、user_version=3、
- *     历史行与旧字段零改动、迁移前自动备份 <db>.backup-v3（内容=迁移前字节）；
+ *   · v2 库（P1 schema）首次可写打开 → 一次版本化迁移：补 5 列、user_version=4、
+ *     历史行与旧字段零改动、迁移前自动备份 <db>.backup-v4（内容=迁移前字节）；
  *   · v1 库（更早 schema）→ 一次打开直接补 8 列（P1+P2），task_no 仍按
  *     (created_at, task_id) 升序连续回填，name/reply_text 保持 NULL（不伪造）；
  *   · 迁移幂等：二次打开零差异、不新增备份、不重写历史；
  *   · 只读打开永不迁移：不加列、不建备份、主库哈希不变；新列读出缺省（不崩溃）；
- *   · 新库直接建 v3（无备份、user_version=3）；
+ *   · 新库直接建 v4（无备份、user_version=4）；
  *   · applyTaskState 单语句写状态/原因/pending_question JSON/等待时间/租约；
  *     expectedStatus 不匹配拒绝写入（乐观并发）。
  *
@@ -225,7 +225,7 @@ const V1_SCHEMA_COLUMNS = [
 const V3_COLUMNS = ['reason', 'pending_question', 'waiting_since', 'lease_owner', 'lease_until'] as const;
 
 describe('P2a v3 迁移（v2 → v3）', () => {
-  it('补 5 列、user_version=3、历史零改动、备份 .backup-v3；二次打开幂等', () => {
+  it('补 5 列、user_version=4、历史零改动、备份 .backup-v4；二次打开幂等', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     seedV2Db(dbPath);
@@ -235,11 +235,11 @@ describe('P2a v3 迁移（v2 → v3）', () => {
     const store = openTaskStore(dbPath);
     expect(columnNames(dbPath)).toEqual(expect.arrayContaining([...V3_COLUMNS]));
     expect(userVersion(dbPath)).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(TASK_STORE_SCHEMA_VERSION).toBe(3);
+    expect(TASK_STORE_SCHEMA_VERSION).toBe(4);
     // 历史行（含 task_no/name/reply_text 与执行记录）逐字节不变。
     expect(priorColumnsSnapshot(dbPath, V2_SCHEMA_COLUMNS)).toEqual(before);
     // 迁移前自动备份：内容 = 迁移前字节；命名跟随迁移目标版本。
-    const backupPath = `${dbPath}.backup-v3`;
+    const backupPath = `${dbPath}.backup-v4`;
     expect(existsSync(backupPath)).toBe(true);
     expect(sha256(backupPath)).toBe(preMigrationSha);
 
@@ -262,7 +262,7 @@ describe('P2a v3 迁移（v2 → v3）', () => {
       .toEqual([['task_a', 1], ['task_b', 2], ['task_new', 3]]);
     second.close();
     expect(priorColumnsSnapshot(dbPath, V2_SCHEMA_COLUMNS, ['task_a', 'task_b'])).toEqual(before);
-    expect(backupFiles(dir)).toEqual(['state.db.backup-v3']);
+    expect(backupFiles(dir)).toEqual(['state.db.backup-v4']);
     expect(sha256(backupPath)).toBe(preMigrationSha);
   });
 
@@ -282,7 +282,7 @@ describe('P2a v3 迁移（v2 → v3）', () => {
 });
 
 describe('P2a v3 迁移（v1 → v3 一次补齐）', () => {
-  it('8 列一次补齐；task_no 回填规则保持；旧字段零改动；单备份 .backup-v3', () => {
+  it('8 列一次补齐；task_no 回填规则保持；旧字段零改动；单备份 .backup-v4', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     seedV1Db(dbPath);
@@ -301,8 +301,8 @@ describe('P2a v3 迁移（v1 → v3 一次补齐）', () => {
     expect(tasks.map((stored) => stored.task.reason)).toEqual([undefined, undefined, undefined]);
 
     expect(priorColumnsSnapshot(dbPath, V1_SCHEMA_COLUMNS)).toEqual(before);
-    expect(backupFiles(dir)).toEqual(['state.db.backup-v3']);
-    expect(sha256(`${dbPath}.backup-v3`)).toBe(preMigrationSha);
+    expect(backupFiles(dir)).toEqual(['state.db.backup-v4']);
+    expect(sha256(`${dbPath}.backup-v4`)).toBe(preMigrationSha);
     store.close();
   });
 });
@@ -326,7 +326,7 @@ describe('P2a 只读打开不迁移（向前兼容）', () => {
 
     expect(sha256(dbPath)).toBe(before);
     expect(columnNames(dbPath)).not.toContain('reason');
-    expect(existsSync(`${dbPath}.backup-v3`)).toBe(false);
+    expect(existsSync(`${dbPath}.backup-v4`)).toBe(false);
   });
 
   it('v1 库只读：不加列、不建备份、哈希不变；新旧列读出缺省', () => {
@@ -343,18 +343,18 @@ describe('P2a 只读打开不迁移（向前兼容）', () => {
 
     expect(sha256(dbPath)).toBe(before);
     expect(columnNames(dbPath)).not.toContain('reason');
-    expect(existsSync(`${dbPath}.backup-v3`)).toBe(false);
+    expect(existsSync(`${dbPath}.backup-v4`)).toBe(false);
   });
 });
 
 describe('P2a 新库与单语句状态写入', () => {
-  it('新库直接建 v3：列齐、无备份、user_version=3', () => {
+  it('新库直接建 v4：列齐、无备份、user_version=4', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'fresh.db');
     const store = openTaskStore(dbPath);
     expect(columnNames(dbPath)).toEqual(expect.arrayContaining([...V3_COLUMNS]));
     store.close();
-    expect(userVersion(dbPath)).toBe(3);
+    expect(userVersion(dbPath)).toBe(4);
     expect(backupFiles(dir)).toEqual([]);
   });
 

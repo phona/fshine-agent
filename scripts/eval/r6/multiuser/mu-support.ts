@@ -354,7 +354,7 @@ export async function createMuServer(input: CreateMuServerInput): Promise<MuServ
     dbPath,
     createDrivers: () => ({ mainDriver: makeMainDriver(ctx), workerDriver: makeWorkerDriver(ctx) }),
     // 每会话一个假执行面（装配链逐会话调用该工厂）；同源共享 ctx 采集，身份由 collection 归属。
-    createExecutionFace: async () => ({ client: new MuFaceClient(ctx, failFor), allowedOperations: ['dummy.query'] }),
+    createExecutionFace: async () => ({ client: new MuFaceClient(ctx, failFor), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
     ...(input.taskExecutor === undefined ? {} : { taskExecutor: input.taskExecutor }),
     ...(input.notificationSink === undefined ? {} : { notificationSink: input.notificationSink }),
     logger: () => {},

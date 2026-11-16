@@ -213,7 +213,12 @@ export type TaskExecutionOutcome =
   | { kind: 'failed'; reason: string }
   | { kind: 'needs_input'; question: PendingQuestion }
   | { kind: 'timed_out' }
-  | { kind: 'cancelled' };
+  | { kind: 'cancelled' }
+  /**
+   * U3：结果未知（无法证明本次调用属于已有操作 / 外部无回执 / 调用中断）——
+   * 不是成功、也不是已确认失败；落 failed + reason=result_unknown，禁止自动重试。
+   */
+  | { kind: 'result_unknown'; reason: string };
 
 export interface TaskExecutor {
   execute(task: TaskExecutionInput, context: TaskExecutionContext): Promise<TaskExecutionOutcome>;
@@ -469,6 +474,10 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       }
       case 'failed':
         registry.fail(taskId, outcome.reason);
+        return;
+      case 'result_unknown':
+        // U3：结果未知 ≠ 已确认失败 ≠ 成功（既有原因枚举，不新增状态）。
+        registry.markResultUnknown(taskId);
         return;
       case 'needs_input':
         registry.waitForUser(taskId, outcome.question);
