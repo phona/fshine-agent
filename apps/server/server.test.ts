@@ -258,4 +258,53 @@ describe('server（假渠道 + 假执行客户端 + 假模型）', () => {
     await channel.stop();
     server.close();
   });
+
+  /**
+   * 缺陷①：模型侧空回复（溢出恢复后正文为空 / 只有思考没正文且催问后仍空）时，宿主只写了
+   * `pi_driver_empty_reply` 日志，渠道侧拿到空串 → 一个终帧都不发，用户什么也收不到。
+   * 修复：`execution-runtime.send` 把空文本显式变成回合失败 → 渠道既有失败转述通道
+   * （handler 抛错 → 兜底失败话术）把明确失败发给用户；失败回合也不记 message_done。
+   */
+  it('模型侧空回复：用户收到明确失败话术，而不是静默无回复', async () => {
+    const dir = tempDir();
+    const logs: Array<Record<string, unknown>> = [];
+    const client = new FakeClient();
+    const frames: Array<{ streamId: string; content: string; finish: boolean }> = [];
+    const emptyReply = () => ({
+      ...textAssistant(''),
+      content: [],
+    });
+    const server = await createServer({
+      env: { LLM_MODEL: 'test-model' },
+      config: testConfig(),
+      dbPath: path.join(dir, 'state.db'),
+      // 两次都空：首答空 → 驱动催问一次（既有机制）→ 仍空 → 本回合失败。
+      createDrivers: async () => ({
+        mainDriver: await driverFor([emptyReply(), emptyReply()]),
+        workerDriver: await driverFor([]),
+      }),
+      createExecutionFace: async () => ({ client, allowedOperations: ['dummy.query'] }),
+      logger: (line) => logs.push(line),
+    });
+
+    const stub = sdkStub(frames);
+    const channel = new WecomBotChannel({
+      env: { WECOM_BOT_ID: 'bot-id', WECOM_BOT_SECRET: 'bot-secret' },
+      clientFactory: () => stub,
+      platformRoot: dir,
+    });
+    await channel.start(server.handler);
+    stub.emit('message.text', textMessageFrame('test-user', '帮我查一下 documents', 'msg-3', 'req-3'));
+
+    await vi.waitFor(() => {
+      expect(frames.filter((frame) => frame.finish)).toHaveLength(1);
+    }, { timeout: 5_000 });
+    const final = frames.filter((frame) => frame.finish)[0]!;
+    expect(final.content, '用户必须看到明确失败面').toBe('处理失败,请稍后再试');
+    expect(logs.some((line) => line['event'] === 'message_done'), '失败回合不得记成功完成事件').toBe(false);
+    expect(client.requests).toHaveLength(0);
+
+    await channel.stop();
+    server.close();
+  });
 });

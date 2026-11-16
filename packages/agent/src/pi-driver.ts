@@ -337,7 +337,13 @@ export function toAgentTool(
 /** 本驱动实例持有的 Pi 会话（reuseConversation 时跨回合复用）。 */
 interface TurnSlot {
   retryScheduled: number;
+  /** 本回合最近一次 assistant 失败（sticky：只用于归因日志）。 */
   runFailure?: { code: string; message: string };
+  /**
+   * 失败之后是否又有正常 assistant 消息（Pi 原生重试/溢出恢复成功）：
+   * `runFailure` 且未 recovered = 本回合仍以失败收尾（不得把尾部 toolResult/旧正文当答复）。
+   */
+  recovered?: boolean;
 }
 
 interface Conversation {
@@ -462,12 +468,18 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         }));
         return;
       }
-      if (event.type === 'message_end' && event.message.role === 'assistant'
-        && event.message.stopReason === 'error' && slot.current) {
-        slot.current.runFailure = {
-          code: 'model_error',
-          message: String(event.message.errorMessage ?? ''),
-        };
+      if (event.type === 'message_end' && event.message.role === 'assistant' && slot.current) {
+        const stopReason = event.message.stopReason;
+        if (stopReason === 'error' || stopReason === 'aborted') {
+          slot.current.runFailure = {
+            code: stopReason === 'error' ? 'model_error' : 'aborted',
+            message: String(event.message.errorMessage ?? ''),
+          };
+          slot.current.recovered = false;
+        } else {
+          // 失败之后又出现正常 assistant 消息 = Pi 原生重试/溢出恢复已经接上。
+          slot.current.recovered = true;
+        }
       }
     });
 
@@ -574,7 +586,10 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
           );
         }
 
-        if (promptText.trim() !== '' && !abort.signal.aborted) {
+        // 本回合是否真的把输入交给了 Pi：已中止 / 无输入时本回合没有任何产出，
+        // 不得把转录里的上一回合答复当本回合回复（宁可空文本 = 失败）。
+        const promptSent = promptText.trim() !== '' && !abort.signal.aborted;
+        if (promptSent) {
           await session.prompt(promptText, { expandPromptTemplates: false });
         }
 
@@ -582,6 +597,15 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         const slot = active.slot.current;
         const runFailure = slot?.runFailure;
         const retryScheduled = slot?.retryScheduled ?? 0;
+
+        // 本回合答复。三条纪律：①本回合没把输入交给 Pi → 空；②Pi 已把本回合判失败
+        // （runFailure 且其后没有正常 assistant 消息）→ 空——失败回合的尾部可能是
+        // toolResult（例如刚委派出去的 run_task 结果 JSON），它是工具事实、不是给用户的
+        // 答复；③否则只取本回合 user 输入之后产生的正文（finalReplyText 按回合切）。
+        const turnReplyText = (): string => (!promptSent
+          || (slot?.runFailure !== undefined && slot.recovered !== true)
+          ? ''
+          : finalReplyText(messages, promptText));
 
         // 供应商错误归因：run 失败 / 错误 assistant 必须可查（不许静默吞成空文本）。
         if (runFailure !== undefined) {
@@ -603,7 +627,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
           }));
         }
 
-        let text = finalReplyText(messages);
+        let text = turnReplyText();
 
         if (!text) {
           // 空回复必须留下可归因的形状。
@@ -623,7 +647,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
 
         // 只思考没正文：催一次最终文本（一轮一次）。催问作为 user 消息进入 Pi 转录——
         // 它是本回合真实发生过的一次宿主请求，不是隐藏改写。
-        if (shouldNudgeFinalReply(messages, text) && Date.now() < deadline && !abort.signal.aborted) {
+        if (promptSent && shouldNudgeFinalReply(messages, text) && Date.now() < deadline && !abort.signal.aborted) {
           console.warn(JSON.stringify({ event: 'pi_driver_final_text_nudge' }));
           try {
             await session.prompt(FINAL_REPLY_NUDGE, { expandPromptTemplates: false });
@@ -634,7 +658,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
             }));
           }
           messages = projectSession(session);
-          text = finalReplyText(messages);
+          text = turnReplyText();
           if (!text) {
             console.warn(JSON.stringify({ event: 'pi_driver_final_text_nudge_empty' }));
           }
@@ -751,11 +775,34 @@ function lastAssistantStop(messages: readonly AgentMessage[]): { stopReason?: st
 }
 
 /**
- * 取终结文本：最后一条 assistant 的正文（stopReason 必须为 stop）；若最后一条是
- * toolResult（工具以确定性话术终结），取其文本。
+ * 取**本回合**的终结文本：只认本回合 user 输入之后产生的消息。
+ *
+ * 为什么必须按回合切：溢出恢复失败时（恢复摘要被 `length` 拒绝），Pi 会丢弃失败回合的
+ * assistant 项，转录末条 assistant 是**上一回合**的答复。旧实现从转录尾部一路回扫，
+ * 会把上一回合答复当成本回合回复返回（确定性证据 `scripts/eval/pi152-stageB/injection.ts`
+ * 的 D-overflow-length：`finalText='历史答复 7。'`）——用户会以为本回合答完了。
+ * 宁可返回空文本（宿主按失败转述），也不返回旧回合答复。
+ *
+ * 切点 = 转录里最后一条 user 消息之后：本回合的 prompt（或它在 Pi 压缩后变成的摘要）
+ * 一定位于上一回合答复之后，因此该切点不会回退到旧回合；prompt 被折进摘要时
+ * （溢出恢复成功），摘要之后的恢复答复仍算本回合。本回合没有 user 输入（`promptText`
+ * 为空）时不认任何 assistant 正文——无法归属就不冒充。末条是 toolResult（工具以
+ * 确定性话术终结）时取其文本。
+ *
+ * 导出只为确定性守卫测试（同 `shouldNudgeFinalReply` 的导出理由；不接线、不改变行为）。
  */
-function finalReplyText(messages: readonly AgentMessage[]): string {
+export function finalReplyText(messages: readonly AgentMessage[], promptText: string): string {
+  if (promptText.trim() === '') return '';
+  let start = -1;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] as { role?: string } | undefined;
+    if (message?.role === 'user') {
+      start = i + 1;
+      break;
+    }
+  }
+  if (start === -1) return '';
+  for (let i = messages.length - 1; i >= start; i -= 1) {
     const message = messages[i] as { role?: string; content?: unknown; stopReason?: string } | undefined;
     if (message?.role === 'assistant') {
       return message.stopReason === 'stop' ? textFromContent(message.content) : '';
