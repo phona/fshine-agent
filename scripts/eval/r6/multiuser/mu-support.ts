@@ -195,7 +195,7 @@ function tagsIn(text: string): string[] {
 }
 
 /** 主回合驱动：按用户原文取计划；执行显式工具调用（错误也采集，不逃逸）。 */
-function makeMainDriver(ctx: MuCtx): TurnDriver {
+export function makeMainDriver(ctx: MuCtx): TurnDriver {
   return {
     async run(input: TurnDriverInput): Promise<TurnDriverResult> {
       const text = lastUserText(input);
@@ -235,7 +235,7 @@ function makeMainDriver(ctx: MuCtx): TurnDriver {
 }
 
 /** Worker 驱动：在委派文本里按任务子串匹配计划，发起一次结构化执行，返回汇报。 */
-function makeWorkerDriver(ctx: MuCtx): TurnDriver {
+export function makeWorkerDriver(ctx: MuCtx): TurnDriver {
   return {
     async run(input: TurnDriverInput): Promise<TurnDriverResult> {
       const text = lastUserText(input);
@@ -323,6 +323,11 @@ export interface CreateMuServerInput {
   readonly failFor?: ReadonlyMap<string, string>;
   readonly taskExecutor?: TaskExecutor;
   readonly notificationSink?: MuRecordingSink;
+  /**
+   * 驱动工厂（P2 胶水复用：MU 计划驱动也可以走「生产同源 + 后台真实 TaskRunner」路径）。
+   * 缺省不注入 = 真实 Pi 驱动（读 env）。
+   */
+  readonly createDrivers?: NonNullable<Parameters<typeof createServer>[0]['createDrivers']>;
 }
 
 /** 仓内 dummy 夹具根（与 server 回归同源；确定性、零网络）。 */
@@ -352,7 +357,9 @@ export async function createMuServer(input: CreateMuServerInput): Promise<MuServ
     env: { LLM_MODEL: 'mu-test-model' },
     config: muConfig(input.mode, input.runtime),
     dbPath,
-    createDrivers: () => ({ mainDriver: makeMainDriver(ctx), workerDriver: makeWorkerDriver(ctx) }),
+    ...(input.createDrivers === undefined
+      ? { createDrivers: () => ({ mainDriver: makeMainDriver(ctx), workerDriver: makeWorkerDriver(ctx) }) }
+      : { createDrivers: input.createDrivers }),
     // 每会话一个假执行面（装配链逐会话调用该工厂）；同源共享 ctx 采集，身份由 collection 归属。
     createExecutionFace: async () => ({ client: new MuFaceClient(ctx, failFor), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
     ...(input.taskExecutor === undefined ? {} : { taskExecutor: input.taskExecutor }),
@@ -397,6 +404,10 @@ export interface MuTaskSnapshot {
   readonly request: string;
   readonly status: string;
   readonly reason: string | undefined;
+  /** failed 的机械原因原文（P2 失败场景如实性核对用；只读投影）。 */
+  readonly failureReason: string | undefined;
+  /** 结果逐字存档（background 走 archiveReply；inline 走 complete 的 resultText）。 */
+  readonly resultText: string | undefined;
   readonly requestIds: readonly string[];
   readonly replyText: string | undefined;
 }
@@ -413,6 +424,8 @@ export function readTasks(dbPath: string): MuTaskSnapshot[] {
       request: task.request,
       status: task.status,
       reason: task.reason,
+      failureReason: task.failureReason,
+      resultText: task.resultText,
       requestIds: task.executions.map((execution) => execution.requestId),
       replyText: task.replyText,
     }));

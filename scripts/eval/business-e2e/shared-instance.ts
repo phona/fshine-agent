@@ -172,8 +172,11 @@ function usageOf(message: unknown): Omit<ModelCallRecord, 'driver'> | undefined 
   return Object.values(picked).some((value) => value !== undefined) ? picked : undefined;
 }
 
-/** 记录包装器：透传 inner 的 run/compact/synthesize，只旁路捕获工具调用与助手用量。 */
-function recordingDriver(inner: TurnDriver, driver: 'main' | 'worker', sink: DriverObservations): TurnDriver {
+/**
+ * 记录包装器：透传 inner 的 run/compact/synthesize，只旁路捕获工具调用与助手用量。
+ * P2 胶水（`scripts/eval/p2/**`）复用本函数记录 Main/Worker 工具调用，不另写第二份。
+ */
+export function recordingDriver(inner: TurnDriver, driver: 'main' | 'worker', sink: DriverObservations): TurnDriver {
   let seq = 0;
   const wrapped: TurnDriver = {
     async run(input) {

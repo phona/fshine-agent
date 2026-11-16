@@ -18,7 +18,12 @@ import type { FactFailureCode, FactVerdict, TaskVerdict } from './oracle';
 import type { AccountedUsage, ModelCallRecord } from './accounting';
 
 export type Wave = 'Wave1' | 'Wave2';
-export type Track = 'LS1' | 'LS2' | 'LS3' | 'LS4' | 'LS5';
+/**
+ * 证据轨标签。`P2` 是 2026-11-16 追加的**标签**（P2 业务 E2E 胶水复用本证据层）；
+ * 纯类型并集扩展，不改任何判定语义（`classifySample` 不看 track）。守卫：
+ * `scripts/eval/p2/p2-oracle.test.ts` 钉住 classifySample 行为不随本行变化。
+ */
+export type Track = 'LS1' | 'LS2' | 'LS3' | 'LS4' | 'LS5' | 'P2';
 
 /** 三态处置（+ 有效）。产品故障**不**作废。 */
 export type SampleDisposition = 'valid' | 'insufficient_coverage' | 'environment_interrupted' | 'product_fault';
