@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "scenario": "dummy-finance",
   "platform": "dummy-platform",
-  "description": "Dummy finance-domain scenario: neutral collection/window/record data bound to the dummy-platform capabilities.",
+  "description": "Dummy finance-domain scenario: neutral collection/window/record data plus S3 应收 fixture collections, all bound to the same dummy-platform capabilities (dummy.query; dimension filtering uses --where). No finance logic lives in the runtime.",
   "collections": [
     {
       "collection": "alpha",
@@ -110,6 +110,42 @@
       "records": {
         "2025-10": 4
       }
+    },
+    {
+      "collection": "finance-invoices",
+      "dataset": "datasets/finance-invoices.json",
+      "locked": false,
+      "records": {
+        "2026-10": 10
+      },
+      "dimension": {
+        "name": "customer",
+        "values": ["华远贸易", "明达物流", "新程科技"]
+      }
+    },
+    {
+      "collection": "finance-receipts",
+      "dataset": "datasets/finance-receipts.json",
+      "locked": false,
+      "records": {
+        "2026-10": 7
+      }
+    },
+    {
+      "collection": "finance-writeoffs",
+      "dataset": "datasets/finance-writeoffs.json",
+      "locked": false,
+      "records": {
+        "2026-10": 7
+      }
+    },
+    {
+      "collection": "finance-mingda-receipts",
+      "dataset": "datasets/finance-mingda-receipts.json",
+      "locked": false,
+      "records": {
+        "2026-10": 0
+      }
     }
   ],
   "faults": [
@@ -128,6 +164,15 @@
       "exitCode": 3,
       "stderr": "GATE_REFUSE collection {{source.collection}} is restricted for the current caller",
       "refused": "collection-restricted"
+    },
+    {
+      "collection": "finance-mingda-receipts",
+      "kind": "read_fault",
+      "exitCode": 2,
+      "error": {
+        "code": "COLLECTION_FAULT",
+        "message": "Collection {{source.collection}} cannot be read in its current state"
+      }
     }
   ]
 }

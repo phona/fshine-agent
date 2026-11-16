@@ -473,11 +473,24 @@ describe('⑥ S2 集合维度：--where 真过滤 / --window 别名 / 无维度�
     expect(() => loadScenario({ fixturesRoot, scenarioId: 'dummy-finance' })).toThrow(/not-declared/);
   });
 
-  it('仓库内旧夹具不声明 dimension（零 diff 的前提）', () => {
+  it('旧夹具不声明 dimension；仅 S3 财务应收集合声明 customer 维度', () => {
     const scenario = JSON.parse(readFileSync(path.join(FIXTURES_ROOT, 'scenarios', 'dummy-finance', 'scenario.json'), 'utf8')) as {
       collections: Array<Record<string, unknown>>;
     };
+    const finance = scenario.collections.filter((collection) => String(collection['collection']).startsWith('finance-'));
+    expect(finance.map((collection) => collection['collection'])).toEqual([
+      'finance-invoices', 'finance-receipts', 'finance-writeoffs', 'finance-mingda-receipts',
+    ]);
+    // S2 既有集合（零 diff 前提）：不得因为 S3 接线被顺手加上维度。
     for (const collection of scenario.collections) {
+      if (finance.includes(collection)) continue;
+      expect(collection, String(collection['collection'])).not.toHaveProperty('dimension');
+    }
+    // S3 财务集合：只有应收声明 customer（场景 3 的 --where 过滤入口）。
+    const invoices = finance.find((collection) => collection['collection'] === 'finance-invoices');
+    expect(invoices?.['dimension']).toEqual({ name: 'customer', values: ['华远贸易', '明达物流', '新程科技'] });
+    for (const collection of finance) {
+      if (collection === invoices) continue;
       expect(collection, String(collection['collection'])).not.toHaveProperty('dimension');
     }
   });

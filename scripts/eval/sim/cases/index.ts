@@ -2,8 +2,8 @@
  * SimCase 用例套件 · 用户级样本（只定义目标与真值，不定义对话路径）。
  *
  * 运行顺序：`SIM-05` 先跑（最确定：夹具数据驱动的已知失败），再 `SIM-01`、`SIM-02`，
- * 随后 `SIM-03/04/06/07/08`（读切片场景）；`SIM-09/10` 是写场景，单列在
- * `SIM_WRITE_CASES`（ask 装配只开放读切片，真实跑批到不了写执行）。
+ * 随后 `SIM-03/04/06/07/08`（读切片场景）与 `SIM-FIN-01..05`（S3 财务应收）；
+ * `SIM-09/10` 是写场景，单列在 `SIM_WRITE_CASES`（ask 装配只开放读切片，真实跑批到不了写执行）。
  * 每个用例只声明「业务目标 / 人设 / 用户本来就掌握的信息 / 行为约束 / 禁知 / Oracle」；
  * 具体怎么问、问几轮由模拟用户按 `goal + behaviorRules` 自行决定，**不写死对话脚本**。
  *
@@ -28,6 +28,8 @@ import {
   createRecallAfterLongOracle, createReceiptLostHonestOracle, createRepeatNoDuplicateEffectOracle,
   createTwoAsksOneChangedOracle,
 } from './scenario-oracles';
+import { FINANCE_AR_CASES } from './finance-cases';
+import { FINANCE_AR_ORACLES } from './finance-oracles';
 
 export {
   ALPHA_TRUTH_PATTERNS,
@@ -38,6 +40,12 @@ export {
   createRecallAfterLongOracle, createReceiptLostHonestOracle, createRepeatNoDuplicateEffectOracle,
   createTwoAsksOneChangedOracle,
 } from './scenario-oracles';
+export { FINANCE_AR_CASES } from './finance-cases';
+export {
+  AR_TRUTH, AR_TRUTH_PATTERNS, FINANCE_AR_ORACLES,
+  createArCustomerFilterOracle, createArMissingDataOracle, createArOutstandingSourceOracle,
+  createArOverdueOracle, createArSummaryOracle,
+} from './finance-oracles';
 export { SIM_FIXTURES, resolveFixtureDeclaration, type SimFixtureDeclaration } from './fixtures';
 
 /** 套件局部 Oracle 注册（`runSimSuite({ oracles: SIM_CASE_ORACLES })`）；全部确定性、零 judge 调用。 */
@@ -52,6 +60,7 @@ export const SIM_CASE_ORACLES: readonly SimOracle[] = Object.freeze([
   createRecallAfterLongOracle(),
   createRepeatNoDuplicateEffectOracle(),
   createReceiptLostHonestOracle(),
+  ...FINANCE_AR_ORACLES,
 ]);
 
 /** alpha 真值同时作为禁知（见本文件头「真值纪律」）；`2条` 覆盖数量真值。 */
@@ -337,8 +346,10 @@ const SIM_10: SimCase = {
  */
 export const SIM_WRITE_CASES: readonly SimCase[] = Object.freeze([SIM_09, SIM_10]);
 
-/** 全部场景（读切片 + 写场景）；跑批入口按装配能力选择，不得混报。 */
-export const SIM_ALL_CASES: readonly SimCase[] = Object.freeze([...SIM_CASES, ...READ_SCENARIO_CASES, ...SIM_WRITE_CASES]);
+/** 读切片场景（真实装配可跑）：原三例 + SIM-03/04/06/07/08 + S3 财务五例。 */
+export const SIM_READ_CASES: readonly SimCase[] = Object.freeze([
+  ...SIM_CASES, ...READ_SCENARIO_CASES, ...FINANCE_AR_CASES,
+]);
 
-/** 读切片场景（真实装配可跑）：原三例 + SIM-03/04/06/07/08。 */
-export const SIM_READ_CASES: readonly SimCase[] = Object.freeze([...SIM_CASES, ...READ_SCENARIO_CASES]);
+/** 全部场景（读切片 + 写场景）；跑批入口按装配能力选择，不得混报。 */
+export const SIM_ALL_CASES: readonly SimCase[] = Object.freeze([...SIM_READ_CASES, ...SIM_WRITE_CASES]);

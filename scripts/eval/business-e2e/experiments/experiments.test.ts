@@ -150,11 +150,15 @@ describe('② 工具面门控核实（缺口 1 taskRunner 同源门控）', () =
     const root = freshRoot();
     const steps = [async (e: Exec) => { await e('run_task', { task: '核对 alpha W1 记录' }); }];
     const exec = executorWith(steps);
+    // 本用例只验 runner 门控。Main 技能 catalog 是正交变量：S3 往 `.agents/skills` 加了
+    // 生产技能后，缺省目录会多出 read_skill——用空索引臂隔离，避免断言随技能内容漂移。
+    const skillsNone = path.join(FIXTURE_ROOT, '.agents', 'skills-none');
+    const isolated: ExpCase = { ...T01, mainSkillsDir: skillsNone };
 
-    const withRunner = await exec(itemFor(T01), T01, path.join(root, 'a'));
+    const withRunner = await exec(itemFor(isolated), isolated, path.join(root, 'a'));
     expect(withRunner.perTurnMainTools[0]).toEqual(['run_task', 'task_status', 'task_result', 'task_cancel', 'task_resume']);
 
-    const bare: ExpCase = { ...T01, id: 'T01bare', withTaskRunner: false };
+    const bare: ExpCase = { ...isolated, id: 'T01bare', withTaskRunner: false };
     const without = await exec(itemFor(bare), bare, path.join(root, 'b'));
     expect(without.perTurnMainTools[0], 'bizprobe/ask inline 路径缺省无 runner → 四工具不注册').toEqual(['run_task']);
   });
