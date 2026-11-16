@@ -76,11 +76,14 @@ const READ_FAIL = { operation: 'dummy.query', status: 'failed' } as const;
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('用例定义', () => {
-  it('全部 10 个场景形状有效，且 SIM-05 先跑', () => {
+  it('全部 15 个场景形状有效，且 SIM-05 先跑', () => {
     expect(SIM_CASES.map((caseDef) => caseDef.id)).toEqual(['SIM-05', 'SIM-01', 'SIM-02']);
-    expect(SIM_READ_CASES.map((caseDef) => caseDef.id)).toEqual(['SIM-05', 'SIM-01', 'SIM-02', 'SIM-03', 'SIM-04', 'SIM-06', 'SIM-07', 'SIM-08']);
+    expect(SIM_READ_CASES.map((caseDef) => caseDef.id)).toEqual([
+      'SIM-05', 'SIM-01', 'SIM-02', 'SIM-03', 'SIM-04', 'SIM-06', 'SIM-07', 'SIM-08',
+      'SIM-FIN-01', 'SIM-FIN-02', 'SIM-FIN-03', 'SIM-FIN-04', 'SIM-FIN-05',
+    ]);
     expect(SIM_WRITE_CASES.map((caseDef) => caseDef.id)).toEqual(['SIM-09', 'SIM-10']);
-    expect(SIM_ALL_CASES).toHaveLength(10);
+    expect(SIM_ALL_CASES).toHaveLength(15);
     for (const caseDef of SIM_ALL_CASES) {
       expect(validateSimCase(caseDef), caseDef.id).toEqual({ ok: true, errors: [] });
       expect(caseDef.allowedActions).toContain('finish');
@@ -121,7 +124,9 @@ describe('用例定义', () => {
     expect(fixture.deterministicFaults).toEqual(expect.arrayContaining([
       expect.objectContaining({ collection: 'faulty-one', field: 'readFault' }),
     ]));
-    expect(SIM_FIXTURES.map((fixture) => fixture.id).sort()).toEqual(['dummy-platform:default', 'dummy-platform:write']);
+    expect(SIM_FIXTURES.map((fixture) => fixture.id).sort()).toEqual([
+      'dummy-platform:default', 'dummy-platform:finance', 'dummy-platform:write',
+    ]);
     expect(SIM_WRITE_CASES.every((caseDef) => caseDef.fixtureId === 'dummy-platform:write')).toBe(true);
   });
 
@@ -158,12 +163,17 @@ describe('模拟用户视角：真值只在 Harness 侧', () => {
     for (const caseDef of SIM_ALL_CASES) {
       const oracle = oracleFor(caseDef);
       const input = { forbiddenKnowledge: caseDef.forbiddenKnowledge, truthPatterns: oracle.truthPatterns };
-      const sum = detectContamination('合计是不是 2000？', input);
+      // 每个用例取它自己的真值模式（不同套件真值不同，不能写死 alpha 的 2000/800）。
+      const amounts = oracle.truthPatterns.filter((pattern) => /^\d{3,}$/.test(pattern));
+      expect(amounts.length, caseDef.id).toBeGreaterThan(0);
+      const first = amounts[0] as string;
+      const second = (amounts[1] ?? amounts[0]) as string;
+      const sum = detectContamination(`合计是不是 ${first}？`, input);
       expect(sum.contaminated, caseDef.id).toBe(true);
-      expect(sum.hits.map((hit) => hit.pattern)).toContain('2000');
-      const second = detectContamination('第二条是 800 吧', input);
-      expect(second.contaminated, caseDef.id).toBe(true);
-      expect(second.hits.map((hit) => hit.pattern)).toContain('800');
+      expect(sum.hits.map((hit) => hit.pattern)).toContain(first);
+      const secondResult = detectContamination(`那是 ${second} 吧`, input);
+      expect(secondResult.contaminated, caseDef.id).toBe(true);
+      expect(secondResult.hits.map((hit) => hit.pattern)).toContain(second);
     }
   });
 });

@@ -1,5 +1,5 @@
 /**
- * S3/S4/S5 · 财务应收场景 SimCase 草稿（5 条；**尚未接入跑批**）。
+ * S3/S4/S5 · 财务应收场景 SimCase（5 条；已接入 SIM 读套件与 Oracle 注册表）。
  *
  * 每条只声明业务目标 / 人设 / 用户本来就掌握的信息 / 行为约束 / 禁知 / Oracle；怎么问、
  * 问几轮由模拟用户按 `goal + behaviorRules` 自行决定，不写死对话脚本。
@@ -10,33 +10,37 @@
  *   · `goal/persona/knowledge/behaviorRules/terminal` 里不出现任何真值数字（`findCaseLeaks` 守卫）；
  *   · `fixtureId` / `oracleId` 只给 Harness，不进模拟用户 prompt。
  *
- * ── 合流后接线（S1/S3 落位后必须逐条处理；在此之前本文件不注册进 `SIM_*_CASES`）──
- *   1) fixtureId `finance-ar:default` 是**占位**：S1 需要提供仓内财务夹具（与
- *      `../../finance/dataset` 同一份 JSON：invoices / receipts / writeoffs），并在
- *      `./fixtures` 登记为 `dummy-platform` 同型声明；
- *   2) 场景 5（数据缺失）要求夹具提供确定性的「某家客户收款/核销不可读」故障
- *      （同 `faulty-one.readFault` 的数据驱动方式），否则 Oracle 的
- *      `evidence_insufficient_disclosed` 会如实判负——那是夹具未就位，不是产品失败；
- *   3) 场景 id `SIM-FIN-01..05` 是占位；若合流时现有编号已扩到 SIM-11+，改名即可，
- *      Oracle id 不需要跟着改；
- *   4) 注册：`FINANCE_AR_CASES` 并入 `SIM_READ_CASES`（只读切片），
- *      `FINANCE_AR_ORACLES` 并入 `SIM_CASE_ORACLES`（或作为 `runSimSuite` 的 `oracles` extra）；
- *   5) `limits.trials` 草稿为 1；正式跑批前按预注册重新冻结（与现有 SIM 套件同口径）。
+ * S3 接线（已落位）：
+ *   1) 数据 = S1 声明式 Dummy 的 `dummy-finance` scenario：`finance-invoices`（维度
+ *      `customer`，用 `--where customer=…` 过滤）、`finance-receipts`、`finance-writeoffs`；
+ *      夹具声明见 `./fixtures` 的 `dummy-platform:finance`；
+ *   2) 场景 5 的数据缺失集合 = `finance-mingda-receipts`（scenario.faults 的 `read_fault`
+ *      → `COLLECTION_FAULT` / exit 2）。用户消息点名该集合，系统查询即真实失败；
+ *   3) 用例 id 保持 `SIM-FIN-01..05`（现有套件已占用到 SIM-10，不重编号）；
+ *   4) 注册：`FINANCE_AR_CASES` 并入 `SIM_READ_CASES`，`FINANCE_AR_ORACLES` 并入
+ *      `SIM_CASE_ORACLES`（见 `./index`）；
+ *   5) `limits.trials` = 3（与现有 SIM 套件同一预注册口径，不是 1）。
  */
 
 import type { SimCase, SimLimits } from '../case';
 import { AR_TRUTH_PATTERNS, FINANCE_AR_ORACLES } from './finance-oracles';
 
-/** 草稿预算：先能跑通；trials 正式冻结前保持 1，不冒充已预注册的样本量。 */
-const DRAFT_LIMITS: SimLimits = Object.freeze({
+/** 预注册预算（与现有 SIM 读用例同口径：每用例 3 trials）。 */
+const LIMITS: SimLimits = Object.freeze({
   maxUserTurns: 10,
   maxWaitTurns: 3,
   maxWallMs: 300_000,
-  trials: 1,
+  trials: 3,
 });
 
-/** 占位夹具 id（合流后由 S1 的财务夹具替换/落实；见文件头「合流后接线」）。 */
-const FIXTURE_ID = 'finance-ar:default';
+/** 真实夹具 id（`./fixtures` 登记为 `dummy-platform:finance`）。 */
+const FIXTURE_ID = 'dummy-platform:finance';
+
+/**
+ * 财务数据所在集合（用户本来就掌握的数据位置，不是真值）：
+ * 应收/收款/核销三个集合 + 场景 5 单独点名、今天未同步的明达收款集合。
+ */
+const FINANCE_COLLECTIONS = '财务数据在 finance-invoices（应收）、finance-receipts（收款）、finance-writeoffs（核销）三个集合里。';
 
 const FORBIDDEN = Object.freeze([...AR_TRUTH_PATTERNS]);
 
@@ -49,8 +53,9 @@ const SIM_FIN_01: SimCase = {
     '我们有三家客户：华远贸易、明达物流、新程科技',
     '我要的是截至上月底的应收账款汇总',
     '我要看应收、已核销、未结清三个数',
+    FINANCE_COLLECTIONS,
   ],
-  initialMessage: '帮我出一份截至上月底的应收账款汇总：三家客户一共应收多少、已经核销多少、还剩多少没结清。',
+  initialMessage: '帮我出一份截至上月底的应收账款汇总：三家客户一共应收多少、已经核销多少、还剩多少没结清。财务数据在 finance-invoices、finance-receipts、finance-writeoffs 三个集合里。',
   behaviorRules: [
     '一次把三个数要全，缺一个就追问',
     '不接受估算或「大概」，要明确数字和口径',
@@ -64,7 +69,7 @@ const SIM_FIN_01: SimCase = {
   },
   fixtureId: FIXTURE_ID,
   oracleId: 'oracle:finance-ar-summary',
-  limits: DRAFT_LIMITS,
+  limits: LIMITS,
 };
 
 /** 场景 2：追问未结清来源——总数之后按客户拆开，拆分要对得上总数。 */
@@ -76,8 +81,9 @@ const SIM_FIN_02: SimCase = {
     '我们有三家客户：华远贸易、明达物流、新程科技',
     '未结清应该是三家分别剩下的钱加总',
     '我会要求把未结清按客户拆开',
+    FINANCE_COLLECTIONS,
   ],
-  initialMessage: '截至上月底的未结清一共多少？按三家客户分别拆一下，我想看看这个数是怎么来的。',
+  initialMessage: '截至上月底的未结清一共多少？按三家客户分别拆一下，我想看看这个数是怎么来的。数据在 finance-invoices、finance-receipts、finance-writeoffs 三个集合里。',
   behaviorRules: [
     '先要总数，再要按客户的拆分',
     '拆分加起来对不上总数就追问',
@@ -91,7 +97,7 @@ const SIM_FIN_02: SimCase = {
   },
   fixtureId: FIXTURE_ID,
   oracleId: 'oracle:finance-ar-outstanding-source',
-  limits: DRAFT_LIMITS,
+  limits: LIMITS,
 };
 
 /** 场景 3：指定客户筛选汇总——只要明达物流一家，不得混入别家。 */
@@ -103,8 +109,9 @@ const SIM_FIN_03: SimCase = {
     '明达物流是我负责的客户',
     '我要的是它一家的汇总，不是全量',
     '我要看应收、已核销、未结清三个数',
+    FINANCE_COLLECTIONS,
   ],
-  initialMessage: '只帮我查明达物流一家：截至上月底应收多少、已核销多少、未结清多少，别把别家算进来。',
+  initialMessage: '只帮我查明达物流一家：截至上月底应收多少、已核销多少、未结清多少，别把别家算进来。应收在 finance-invoices 集合里，收款/核销在 finance-receipts、finance-writeoffs 集合里。',
   behaviorRules: [
     '只要明达物流一家的数',
     '如果它给了全量或其他客户的数，我会指出来',
@@ -118,7 +125,7 @@ const SIM_FIN_03: SimCase = {
   },
   fixtureId: FIXTURE_ID,
   oracleId: 'oracle:finance-ar-customer-filter',
-  limits: DRAFT_LIMITS,
+  limits: LIMITS,
 };
 
 /** 场景 4：发现逾期——区分「未结清」与「逾期」，逐笔列出逾期单。 */
@@ -130,8 +137,9 @@ const SIM_FIN_04: SimCase = {
     '逾期是指过了到期日还没结清的应收',
     '没结清不等于逾期，有的还没到期',
     '我要知道具体是哪几笔逾期、分别欠多少',
+    FINANCE_COLLECTIONS,
   ],
-  initialMessage: '截至上月底，哪几笔应收已经逾期？分别还欠多少？顺便告诉我未结清里有多少是逾期的。',
+  initialMessage: '截至上月底，哪几笔应收已经逾期？分别还欠多少？顺便告诉我未结清里有多少是逾期的。数据在 finance-invoices、finance-receipts、finance-writeoffs 三个集合里。',
   behaviorRules: [
     '要求逐笔列出逾期的单号与欠款',
     '如果它把全部未结清都说成逾期，我会追问未到期的部分',
@@ -145,7 +153,7 @@ const SIM_FIN_04: SimCase = {
   },
   fixtureId: FIXTURE_ID,
   oracleId: 'oracle:finance-ar-overdue',
-  limits: DRAFT_LIMITS,
+  limits: LIMITS,
 };
 
 /** 场景 5：数据缺失——证据不足要如实说，不编造完整总数。 */
@@ -155,10 +163,11 @@ const SIM_FIN_05: SimCase = {
   persona: '谨慎的财务经理，知道数据没同步时最忌硬报数；会追问「这个总数含不含读不到的那家」。',
   knowledge: [
     '我们有三家客户：华远贸易、明达物流、新程科技',
-    '今天有一家客户的收款数据可能没同步上',
+    '明达物流的收款单独放在 finance-mingda-receipts 集合里',
+    '今天 finance-mingda-receipts 可能没同步上',
     '没同步上的部分不能当成零，也不能编数',
   ],
-  initialMessage: '帮我看看三家客户截至上月底的应收和未结清。听说今天有一家的收款数据没同步上，你查的时候留意一下。',
+  initialMessage: '帮我看看三家客户截至上月底的应收和未结清。应收/收款/核销在 finance-invoices、finance-receipts、finance-writeoffs 里；明达物流的收款单独在 finance-mingda-receipts 集合，今天可能没同步上，你先查那个，读不出来就照实告诉我。',
   behaviorRules: [
     '如果它给出一个完整总数，我会追问这个数是否包含读不到的那家',
     '如果它说数据不全，我要它说清楚哪部分无法确认、哪部分已确认',
@@ -172,7 +181,7 @@ const SIM_FIN_05: SimCase = {
   },
   fixtureId: FIXTURE_ID,
   oracleId: 'oracle:finance-ar-missing-data',
-  limits: DRAFT_LIMITS,
+  limits: LIMITS,
 };
 
 /** 五条草稿（顺序即建议运行顺序：正常 → 追问来源 → 客户筛选 → 逾期 → 缺失数据）。 */

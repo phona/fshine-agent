@@ -7,6 +7,13 @@
  * 额外的镜像守卫兜住，属于用机制补本可避免的问题。形状安全由本文件的类型注解 + `tsc`
  * （`resolveJsonModule`）与 `./integrity` 的 8 条校验在 typecheck/test 时保证。
  *
+ * S3 接线：JSON 本体住在 S1 声明式 Dummy 的 scenario 数据目录
+ * （`scripts/eval/fixtures/scenarios/dummy-finance/datasets/finance-*.json`），
+ * 所以「Oracle 真值」和「Dummy 实际读到的数据」是**同一份文件**，不存在第二份镜像。
+ * Dummy 数据集外层形状是 `{ items, windows }`（loader 的 `validateDataset`），本模块只取
+ * `items`；`windows` 只服务 loader 的窗口声明（dimension 集合下过滤入口是 `--where`，
+ * `--window` 仅作同一维度的别名）。
+ *
  * 口径（v5 §2，as-of 快照）：
  *   · 应收纳入 = `issuedOn <= asOfDate`（含当日）；未来应收**整笔排除**；
  *   · 核销纳入 = `effectiveOn <= asOfDate`（含当日）；跨期核销**不计入**；
@@ -19,9 +26,9 @@
  * 金额单位：元，整数（真值必须能手算，避免浮点尾差）。
  * 日期格式：`YYYY-MM-DD`（ISO，可安全字典序比较）；`period`：`YYYY-MM`。
  */
-import invoicesJson from './invoices.json';
-import receiptsJson from './receipts.json';
-import writeoffsJson from './writeoffs.json';
+import invoicesJson from '../fixtures/scenarios/dummy-finance/datasets/finance-invoices.json';
+import receiptsJson from '../fixtures/scenarios/dummy-finance/datasets/finance-receipts.json';
+import writeoffsJson from '../fixtures/scenarios/dummy-finance/datasets/finance-writeoffs.json';
 
 /** 固定快照日（S3/S4/S5 共用；真值口径见文件头）。 */
 export const AS_OF_DATE = '2026-10-31';
@@ -73,9 +80,10 @@ export const CUSTOMERS = ['华远贸易', '明达物流', '新程科技'] as con
 export type Customer = (typeof CUSTOMERS)[number];
 
 // 形状由这里的注解在 typecheck 时兜住（JSON 缺字段/错类型即红）。
-export const INVOICES: readonly Invoice[] = invoicesJson;
-export const RECEIPTS: readonly Receipt[] = receiptsJson;
-export const WRITEOFFS: readonly Writeoff[] = writeoffsJson;
+// `.items` 是 Dummy dataset 的载荷槽位；`windows` 只服务 loader 的窗口声明。
+export const INVOICES: readonly Invoice[] = invoicesJson.items;
+export const RECEIPTS: readonly Receipt[] = receiptsJson.items;
+export const WRITEOFFS: readonly Writeoff[] = writeoffsJson.items;
 
 /** 固定数据集（只读；消费者不得就地改写）。 */
 export const FINANCE_DATASET: FinanceDataset = {

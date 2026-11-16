@@ -28,8 +28,8 @@
  * 与现有机制衔接（最小适配）：
  *   · 每个工厂返回标准 `SimOracle`（`id` / `truthPatterns` / `judge`），
  *     `resolveOracle(case.oracleId, FINANCE_AR_ORACLES)` 即可解析——不需要改 `./oracle`；
- *   · 场景 id / fixtureId 是占位（见 `./finance-cases` 文件头「合流后接线」），
- *     本模块不往 `SIM_CASE_ORACLES` 注册，避免把「待 S1/S3 落位」的样本混进现有 10 条汇报。
+ *   · S3 接线后本模块的 Oracle 已并入 `SIM_CASE_ORACLES`（见 `./index`），五条用例已并入
+ *     `SIM_READ_CASES`；真值仍只在本模块，用例侧只引用 `AR_TRUTH_PATTERNS`。
  */
 
 import { AS_OF_DATE, CUSTOMERS, FINANCE_DATASET } from '../../finance/dataset';

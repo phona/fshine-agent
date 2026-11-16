@@ -1,9 +1,0 @@
-[
-  { "arId": "INV-A-001", "receiptId": "RCP-001", "amount": 4000, "effectiveOn": "2026-06-05" },
-  { "arId": "INV-A-002", "receiptId": "RCP-002", "amount": 6000, "effectiveOn": "2026-07-08" },
-  { "arId": "INV-B-001", "receiptId": "RCP-003", "amount": 7000, "effectiveOn": "2026-09-20" },
-  { "arId": "INV-C-001", "receiptId": "RCP-004", "amount": 3000, "effectiveOn": "2026-04-22" },
-  { "arId": "INV-A-003", "receiptId": "RCP-001", "amount": 1000, "effectiveOn": "2026-09-25" },
-  { "arId": "INV-A-001", "receiptId": "RCP-007", "amount": 2500, "effectiveOn": "2026-09-05" },
-  { "arId": "INV-B-003", "receiptId": "RCP-005", "amount": 4000, "effectiveOn": "2026-11-10" }
-]

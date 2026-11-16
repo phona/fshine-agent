@@ -15,6 +15,8 @@ export interface SimFixtureDeclaration {
   readonly kind: 'dummy-cli-default-seed';
   /** 仓内相对路径（提交信息禁绝对路径；这里只是声明，不参与 prompt）。 */
   readonly fixtureRoot: string;
+  /** 声明式 S1 fixture 的 scenario id（`scenarios/<id>/scenario.json`）；缺省 = 平台固定 scenario。 */
+  readonly scenario?: string;
   readonly collections: readonly string[];
   /** 数据驱动的确定性故障（不是注入接缝）。 */
   readonly deterministicFaults: readonly {
@@ -39,6 +41,26 @@ export const SIM_FIXTURES: readonly SimFixtureDeclaration[] = Object.freeze([
       },
     ],
     note: 'dummy 首次在任何 state-dir 调用时按 seedState() 自建；每 trial 的 state-dir 独立，互不共享。',
+  },
+  {
+    id: 'dummy-platform:finance',
+    kind: 'dummy-cli-default-seed',
+    fixtureRoot: 'scripts/eval/fixtures/dummy-platform',
+    scenario: 'dummy-finance',
+    collections: ['finance-invoices', 'finance-receipts', 'finance-writeoffs', 'finance-mingda-receipts'],
+    deterministicFaults: [
+      {
+        collection: 'finance-mingda-receipts',
+        field: 'scenario.faults[kind=read_fault]',
+        effect: 'dummy.query 返回 failed / COLLECTION_FAULT（exit 2，无载荷），由声明式 loader 按声明短路',
+      },
+    ],
+    note: [
+      '数据 = scripts/eval/fixtures/scenarios/dummy-finance/datasets/finance-*.json；',
+      'finance-invoices 声明 dimension customer（--where customer=<客户> 过滤），',
+      'finance-mingda-receipts 是场景 5 的「未同步」集合（数据驱动故障，不是注入接缝）。',
+      'Oracle 真值（scripts/eval/finance/dataset.ts）与本夹具读同一份 JSON，不存在第二份镜像。',
+    ].join(''),
   },
   {
     id: 'dummy-platform:write',
