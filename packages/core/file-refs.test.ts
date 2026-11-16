@@ -90,8 +90,8 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
   it('④ 关库重开行仍在；旧库可写打开补建 file_refs（纯新增表），旧任务行不动', () => {
     const dbPath = tempDbPath();
     // 造一个 v4 前形状的旧库（只有 tasks 基础列），再以当前版本可写打开。
-    const legacy = new Database(dbPath);
-    legacy.exec(`
+    const oldDb = new Database(dbPath);
+    oldDb.exec(`
       CREATE TABLE tasks (
         task_id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, session_id TEXT NOT NULL,
         request TEXT NOT NULL, status TEXT NOT NULL, result_text TEXT, failure_reason TEXT,
@@ -100,7 +100,7 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
       INSERT INTO tasks (task_id, principal_id, session_id, request, status, created_at, updated_at)
       VALUES ('task_legacy', 'wecom:u1', 'cap01-s0', '旧任务', 'completed', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
     `);
-    legacy.close();
+    oldDb.close();
 
     const first = openTaskStore(dbPath);
     first.insertFileRef(rowOf({ fileId: 'file_after_migration' }));
@@ -116,8 +116,8 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
   it('⑤ 旧库只读打开（无 file_refs 表）：读出缺省不崩溃；写入确定性拒绝', () => {
     const dbPath = tempDbPath();
     // P2a 时代的旧库形状（有 tasks/executions，无 operations/dispatch_key/file_refs）。
-    const legacy = new Database(dbPath);
-    legacy.exec(`
+    const oldDb = new Database(dbPath);
+    oldDb.exec(`
       CREATE TABLE tasks (
         task_id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, session_id TEXT NOT NULL,
         request TEXT NOT NULL, status TEXT NOT NULL, result_text TEXT, failure_reason TEXT,
@@ -128,7 +128,7 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
         operation TEXT NOT NULL, status TEXT NOT NULL, error_json TEXT
       );
     `);
-    legacy.close();
+    oldDb.close();
 
     const store = openTaskStore(dbPath, { readOnly: true });
     expect(store.getFileRef('file_any', SCOPE_A)).toBeUndefined();
