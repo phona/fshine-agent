@@ -8,13 +8,19 @@
  * 每回合链路：
  *   1) 用户文本进 Main 转录，mainDriver 跑一个回合；Main 工具面 = run_task（委派）+（注入 runner
  *      时）task_status/task_result/task_cancel/task_resume（查询/取消/接续，缺口 1）+（注入 Main
- *      技能登记表时）read_skill（缺口 2 臂 B，按需读业务技能正文）；
+ *      技能登记表时）read_skill（缺口 2 臂 B，按需读业务技能正文）+（注入 runJsExecutor 时）
+ *      run_js（CAP-01 S1：受限代码执行，产物登记进文件区、回合末随 TurnResult.files 交投递面）；
  *   2) run_task 触发委派：宿主生成 taskId（绑定 principal/session）→ Worker 回合
  *      （workerDriver + execute_operation 一个工具）；
  *   3) execute_operation：宿主生成 requestId → client.execute(结构化请求) → 结果回给 Worker；
  *   4) Worker 汇报作为工具结果回到 Main，Main 生成给用户的最终回复；
  *   5) 宿主把本回合最终回复逐字写入本回合各任务行（P1/S1：同回合同值；空白/回合失败不落，
  *      缺省=无最终回复存档，显示层不用执行层汇报冒充）。
+ *
+ * CAP-01 S1 出口纪律（v8 §7）：用户可见回复在返回前经 stripServerPaths 剥服务器路径（ask/
+ * server 同链、task_result 转述同汇，一道尺盖两种来源）；剥完为空且有产出文件时以宿主话术
+ * 兜底（FILES_GENERATED_NOTICE）。交付走主动投递（B）：runtime 只在 TurnResult.files 上交
+ * 中性文件事实（不 import 渠道类型），发不发、怎么发归宿主装配面。
  *
  * B 类不变量（最小可信边界，拒绝路径见测试）：
  *   · 读路径边界（本切片作用域）：execute_operation 只放行装配方声明的允许集合；
@@ -30,7 +36,7 @@
  * 深度 +1、不占并发槽）；`dispatchMode='background'` 时委派改为提交注入的 TaskRunner
  * （受理即 queued，执行/恢复/取消归 runner）；缺省 'inline' = 上文现行为逐字不变。
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { DiscoveredTool } from '@fshine/contracts';
 import type {
   CapabilityManifest,
@@ -39,7 +45,10 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, RuntimeTurnEvent, TurnDriver, TurnDriverResult } from './driver-contract';
 import { ToolUserError } from './driver-contract';
+import { FileRefUnavailableError } from './file-store';
+import type { RunJsExecutor, RunJsOutput } from './run-js-executor';
 import { READ_SKILL_TOOL, type SkillRegistry } from './skills';
+import { stripServerPaths } from './server-paths';
 import { createTaskRegistry, deriveTaskName, DispatchConflictError, TaskTransitionError, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
 import {
   taskFailureReasonFor,
@@ -135,6 +144,31 @@ export const READ_SKILL_TOOL_SCHEMA: Record<string, unknown> = {
     name: { type: 'string', description: '技能清单里的技能名。' },
   },
   required: ['name'],
+  additionalProperties: false,
+};
+
+/**
+ * CAP-01 S1（v8 §2）：Main 的受限代码执行工具。**只在装配方注入 `runJsExecutor` 时上工具面**
+ * （缺省零变化：ask/eval 的工具面逐字节不变）；spawn 归执行器，runtime 不 spawn
+ * （import 图守卫钉住），scope/物化/产物登记全归宿主，模型只给 code 与 fileId 引用。
+ * 没有 deliver 参数、没有 timeoutMs——产物写 out/ 即本回合末交付，超时/上限是宿主常量。
+ */
+export const RUN_JS_TOOL = 'run_js';
+export const RUN_JS_TOOL_DESCRIPTION =
+  '运行一段受限的 CommonJS 脚本处理文件：输入文件用文件清单里的 fileId 引用（宿主物化到本次运行目录的 in/，按返回的 materializedName 读取），'
+  + '要交付的产物写到 out/ 目录（宿主登记后在本回合末作为附件发出），中间文件写 scratch/。'
+  + '超时与资源上限由宿主决定，只能通过把请求调小来适配。';
+export const RUN_JS_TOOL_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    code: { type: 'string', description: 'CommonJS 脚本原文（宿主原样执行；产物写 out/，中间文件写 scratch/）。' },
+    inputs: {
+      type: 'array',
+      items: { type: 'string' },
+      description: '输入文件的 fileId 列表（来自文件清单；宿主物化后按 materializedName 读取）。',
+    },
+  },
+  required: ['code'],
   additionalProperties: false,
 };
 
@@ -285,6 +319,23 @@ export interface RuntimeOptions {
    * 缺省 = 空集（保守：一律按可能有副作用处理，重试走回放/待核对，绝不第二次执行）。
    */
   readOnlyOperations?: readonly string[];
+  /**
+   * CAP-01 S1：run_js 执行器端口（装配层构造注入；runtime 不 spawn——import 图守卫钉住）。
+   * 缺省不注入 = Main 工具面没有 run_js（工具面逐字节不变，ask/eval 零变化）。
+   */
+  runJsExecutor?: RunJsExecutor;
+  /**
+   * CAP-01 S1 清单注入（机械事实，与 taskFactProvider 同机制）：装配层提供本会话已激活
+   * （activated_at IS NOT NULL，TTL 内）文件清单——字段只有 fileId/name/bytes（渲染见
+   * renderFileManifest，清单不含内容/路径/sha256）。每回合开始时调用一次；非空时以普通
+   * user-role 消息注入主对话。
+   */
+  fileManifestProvider?: (principalId: string, sessionId: string) => readonly TurnFileRef[];
+  /**
+   * CAP-01 S1：run_js 输入引用被拒（越权/不存在/pending/过期/字节缺失）时的机械 reason
+   * 上报（**只进日志，不进用户话术**——v8 §4 防存在性 oracle；缺省静默，不影响回合）。
+   */
+  onFileRefUnavailable?: (reason: string) => void;
 }
 
 /** 前台回合被资源策略确定性拒绝（queued 排队等晋升后不适用；携带机械 reason）。 */
@@ -298,12 +349,43 @@ export class ForegroundRejectionError extends Error {
   }
 }
 
+/**
+ * 交付面文件引用（v8 §7）：**中性类型，不 import 渠道类型**——渠道形状归渠道适配。
+ * 宿主投递面按 fileId 从文件区读字节发出；runtime 只持有机械事实三字段。
+ */
+export interface TurnFileRef {
+  fileId: string;
+  name: string;
+  bytes: number;
+}
+
+/** 回合末只有文件、正文为空时的宿主话术（v8 §7 出口清理；空文本帧会让渠道一个终帧都不发）。 */
+export const FILES_GENERATED_NOTICE = '文件已生成（见附件）';
+
+/**
+ * 文件清单注入文本（CAP-01 S1，机械事实渲染）：每行只有 fileId/name/bytes 三字段——
+ * **清单没有行数据**（不含文件内容、不含路径、不含 sha256）是清单注入的硬边界（v8 §8 S1）。
+ */
+export function renderFileManifest(files: readonly TurnFileRef[]): string {
+  return [
+    '[本会话文件清单]（机械事实：以下文件已激活可用；处理文件时用 run_js 的 inputs 按 fileId 引用）',
+    ...files.map((file) => `- ${file.name}（fileId: ${file.fileId}，${file.bytes} 字节）`),
+  ].join('\n');
+}
+
 export interface TurnResult {
   reply: string;
   taskIds: readonly string[];
   executions: readonly ExecutionRecord[];
   /** 进度帧（本回合 onStep 产出；当前只收集，不在此投递渠道）。 */
   progress: readonly string[];
+  /**
+   * CAP-01 S1（v8 §7）：本回合产出、已登记交付箱的文件（中性类型）。交付去留归宿主
+   * 投递面（主动投递 B）；工具返回时不可知，回合末才有值。
+   */
+  files?: readonly TurnFileRef[];
+  /** CAP-01 S1：本回合注入的文件清单字节数（观察项；undefined = 本回合无清单注入）。 */
+  fileManifestBytes?: number;
 }
 
 export interface Session {
@@ -605,6 +687,83 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     return runner.resume(resolveTaskId(refFromArgs(args)), { answer, scope });
   }
 
+  /** run_js 输入引用不可用的统一话术（越权/不存在/pending/过期/字节缺失同码同话术——v8 §4）。 */
+  const RUN_JS_INPUT_UNAVAILABLE_MESSAGE =
+    '输入文件不可用：引用的文件不存在、未激活或已过期；请只用文件清单里给出的 fileId 引用输入文件。';
+
+  /** run_js 的 scope（宿主持有的可信身份；模型参数里没有身份字段）。 */
+  const runJsScope = { principalId: options.principalId, sessionId: options.sessionId };
+
+  /** run_js 的模型可见结果（v8 §2 形状；audit/runDir 等机械路径不进转录）。 */
+  function runJsToolResult(output: RunJsOutput): Record<string, unknown> {
+    return {
+      exitCode: output.exitCode,
+      exitSignal: output.exitSignal,
+      stdout: output.stdout,
+      stderr: output.stderr,
+      stdoutTruncated: output.stdoutTruncated,
+      stderrTruncated: output.stderrTruncated,
+      inputs: output.audit.materializedInputs.map((item) => ({
+        fileId: item.fileId,
+        name: item.name,
+        materializedName: item.materializedName,
+      })),
+      outputs: output.outputs,
+    };
+  }
+
+  /**
+   * CAP-01 S1 run_js 回合内执行（v8 §2/§5）：
+   *   · 幂等（v8 §5）：进程内 Map（memo 由 send() 随回合创建、随回合丢弃），key = 本回合号
+   *     + sha256(code) + 排序后的 inputs——**Pi 原生重试不产生新 send()**，重试同键命中不重跑；
+   *     不用 attempt（每次 recovery +1 会换键重跑）；跨重启不保证（重启后渠道重投是新回合）。
+   *   · 输入引用（照 resolveTaskId 的写法）：参数面只收 fileId 数组；权威校验（scope/激活/TTL/
+   *     字节）归执行器侧 fileStore.materializeInputs——这里把「越权/不存在/pending/过期/字节
+   *     缺失」收成**同一句**话术抛回（不泄露存在性），机械 reason 经 onFileRefUnavailable 只进日志。
+   *   · 产物：executor 无论 exitCode 都扫 out/ 登记；登记事实收进 turnFiles（回合末 TurnResult.files，
+   *     交付去留归宿主投递面——工具返回时不可知）。
+   */
+  async function runJsInTurn(
+    args: Record<string, unknown>,
+    memo: Map<string, RunJsOutput>,
+    turnFiles: TurnFileRef[],
+  ): Promise<Record<string, unknown>> {
+    const executor = options.runJsExecutor;
+    if (executor === undefined) throw new Error(`Main 工具面之外的调用：${RUN_JS_TOOL}`);
+    const code = typeof args.code === 'string' ? args.code : '';
+    if (code.trim() === '') throw new Error('run_js 缺少 code（CommonJS 脚本原文）。');
+    const rawInputs = args.inputs;
+    if (rawInputs !== undefined && !Array.isArray(rawInputs)) {
+      throw new Error('run_js 的 inputs 必须是 fileId 数组。');
+    }
+    const inputs = (rawInputs ?? []).map((item) => {
+      const fileId = typeof item === 'string' ? item.trim() : '';
+      if (fileId === '') throw new Error('run_js 的 inputs 含空 fileId（请用文件清单里给出的 fileId）。');
+      return fileId;
+    });
+    const memoKey = `${turnNo}:${createHash('sha256').update(code, 'utf8').digest('hex')}:${[...inputs].sort().join('|')}`;
+    const hit = memo.get(memoKey);
+    if (hit !== undefined) return runJsToolResult(hit);
+    let output: RunJsOutput;
+    try {
+      output = await executor.runJs({
+        code,
+        ...(inputs.length > 0 ? { inputs } : {}),
+        scope: runJsScope,
+      });
+    } catch (error) {
+      if (error instanceof FileRefUnavailableError) {
+        // 机械 reason 只进日志；模型与用户只见统一话术（防存在性 oracle，v8 §4）。
+        options.onFileRefUnavailable?.(error.reason);
+        throw new Error(RUN_JS_INPUT_UNAVAILABLE_MESSAGE);
+      }
+      throw error;
+    }
+    memo.set(memoKey, output);
+    turnFiles.push(...output.outputs.map((file) => ({ fileId: file.fileId, name: file.name, bytes: file.bytes })));
+    return runJsToolResult(output);
+  }
+
   const transcriptStore = options.transcriptStore;
   /**
    * 上一回合 Main 转录的**只读投影**（Pi 会话 → 宿主可读形状）。
@@ -893,6 +1052,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     try {
       const progress: string[] = [];
       const taskIds: string[] = [];
+      // CAP-01 S1：本回合产出文件（run_js 交付箱登记事实；回合末进 TurnResult.files）。
+      const turnFiles: TurnFileRef[] = [];
+      // run_js 幂等（v8 §5）：局部 Map 随本回合创建、随本回合丢弃（进程内、跨重启不保证）。
+      const runJsMemo = new Map<string, RunJsOutput>();
       currentTurnDeadline = Date.now() + mainTurnMs;
       // U3：本回合的 turn 作用域（run_task 逻辑操作身份的作用域）与重放窗口。
       turnNo += 1;
@@ -900,20 +1063,31 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const mainWindow = newAttemptWindow();
       // 宿主只交「本轮输入」：最后一条 user = 本轮文本；历史种子仅在驱动尚无会话时使用。
       const factsMessage = options.taskFactProvider?.(options.principalId, options.sessionId);
+      // CAP-01 S1 清单注入（机械事实）：本会话已激活文件，字段只有 fileId/name/bytes；
+      // 字节数作为观察项随 TurnResult 带出（fileManifestBytes）。
+      const manifestFiles = options.fileManifestProvider?.(options.principalId, options.sessionId) ?? [];
+      const manifestMessage = manifestFiles.length > 0 ? renderFileManifest(manifestFiles) : undefined;
+      const manifestBytes = manifestMessage === undefined ? undefined : Buffer.byteLength(manifestMessage, 'utf8');
       // 历史：驱动已有 Pi 会话时直接读其转录（Pi 独占）；尚无会话（首回合）时回落到
       // 打开时从 B1 存储载入的投影，作为本回合的种子历史（驱动在无会话时才会导入）。
       const liveTranscript = mainTranscript();
       const history = liveTranscript.length > 0 ? liveTranscript : lastMainProjection;
       const turnMessages = [...history, userMessage(text)];
+      const injections = [
+        ...(factsMessage !== undefined && factsMessage.trim() !== '' ? [factsMessage] : []),
+        ...(manifestMessage !== undefined ? [manifestMessage] : []),
+      ];
       const mainResult = await options.mainDriver.run({
         systemPrompt: options.mainSystemPrompt,
         tools: [
           runTaskTool(),
           ...(taskRunner === undefined ? [] : [taskStatusTool(), taskResultTool(), taskCancelTool(), taskResumeTool()]),
           ...(options.mainSkillRegistry === undefined ? [] : [readSkillTool()]),
+          // CAP-01 S1：run_js 只在装配方注入执行器时上工具面（缺省零变化，fail-closed）。
+          ...(options.runJsExecutor === undefined ? [] : [runJsTool()]),
         ],
         messages: turnMessages,
-        ...(factsMessage !== undefined && factsMessage.trim() !== '' ? { injections: [factsMessage] } : {}),
+        ...(injections.length > 0 ? { injections } : {}),
         onStep: (step) => progress.push(step),
         exec: async (tool, args) => {
           if (tool === RUN_TASK_TOOL) {
@@ -953,6 +1127,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
             const skill = await options.mainSkillRegistry.read(name);
             return { name: skill.name, content: skill.content };
           }
+          // CAP-01 S1：run_js 与工具面同源门控（未注入执行器则不受理），fail-closed。
+          if (tool === RUN_JS_TOOL && options.runJsExecutor !== undefined) {
+            return runJsInTurn(args, runJsMemo, turnFiles);
+          }
           throw new Error(`Main 工具面之外的调用：${tool}`);
         },
         deadline: currentTurnDeadline,
@@ -973,15 +1151,29 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           persistedCount += 1;
         }
       }
+      // 出口清理（v8 §7）：用户可见回复在宿主出口剥服务器路径——ask/server 同走这一道链，
+      // task_result 存档被 Main 转述后同样汇到这里，一道尺盖住两种来源（2026-10-19 事故形状）。
+      // 剥完为空且有文件 → 宿主话术兜底（空文本帧会让渠道一个终帧都不发，用户什么都收不到）。
+      const stripped = stripServerPaths(mainResult.text);
+      let reply = stripped.text;
+      if (reply.trim() === '' && turnFiles.length > 0) reply = FILES_GENERATED_NOTICE;
       // P1（S1）：本回合最终回复逐字存档——同回合各任务行同值；空白回复/回合失败不落
-      // （缺省=无最终回复存档，显示层不用执行层汇报冒充）。
+      // （缺省=无最终回复存档，显示层不用执行层汇报冒充）。存档用出口清理后的最终回复
+      // （用户看到什么，task_result 就是什么）。
       // background：受理话术不落任务行（结果由 runner 在确认 completed 后经 archiveReply
       // 逐字存档，避免受理话术覆盖结果）。
-      if (dispatchMode !== 'background' && taskIds.length > 0 && mainResult.text.trim() !== '') {
-        registry.archiveReply(taskIds, mainResult.text);
+      if (dispatchMode !== 'background' && taskIds.length > 0 && reply.trim() !== '') {
+        registry.archiveReply(taskIds, reply);
       }
       const executions = taskIds.flatMap((taskId) => registry.get(taskId, scope).executions);
-      return { reply: mainResult.text, taskIds, executions, progress };
+      return {
+        reply,
+        taskIds,
+        executions,
+        progress,
+        ...(turnFiles.length > 0 ? { files: turnFiles } : {}),
+        ...(manifestBytes === undefined ? {} : { fileManifestBytes: manifestBytes }),
+      };
     } finally {
       releaseForegroundPermit(foregroundPermit);
     }
@@ -1023,6 +1215,10 @@ function taskResumeTool(): DiscoveredTool {
 
 function readSkillTool(): DiscoveredTool {
   return { name: READ_SKILL_TOOL, description: READ_SKILL_TOOL_DESCRIPTION, inputSchema: READ_SKILL_TOOL_SCHEMA };
+}
+
+function runJsTool(): DiscoveredTool {
+  return { name: RUN_JS_TOOL, description: RUN_JS_TOOL_DESCRIPTION, inputSchema: RUN_JS_TOOL_SCHEMA };
 }
 
 function executeOperationTool(): DiscoveredTool {

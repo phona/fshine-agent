@@ -136,6 +136,16 @@ export interface SkippedOutput {
   reason: string;
 }
 
+/**
+ * 已激活文件清单项（CAP-01 S1 清单注入源；机械事实投影）：字段只有 fileId/name/bytes——
+ * 不暴露 sha256、身份键、时间戳（清单没有行数据，v8 §8 S1）。
+ */
+export interface ActiveFileRef {
+  fileId: string;
+  name: string;
+  bytes: number;
+}
+
 export interface ScanLimits {
   /** 单个产物大小上限（字节；fd fstat + 流式累计双重把守）。 */
   maxFileBytes: number;
@@ -176,6 +186,12 @@ export interface FileStore {
    * 返回本次激活的行数（观察项，进日志）。
    */
   activatePendingInputs(input: { scope: FileScope; now: number }): number;
+  /**
+   * 本会话已激活（activated_at IS NOT NULL 且 TTL 内，与 materializeInputs 同一 TTL 谓词）
+   * 的文件清单（CAP-01 S1 清单注入源；机械事实投影，只有 fileId/name/bytes）。
+   * 顺序 = 底账既有排序（created_at, file_id 升序）。
+   */
+  listActiveFiles(input: { scope: FileScope; now: number }): ActiveFileRef[];
 }
 
 /** 产物登记的流式拷贝块大小（登记阻塞 ≈ 一次流过；v8 §10-2 的处置就是流式）。 */
@@ -401,6 +417,14 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
       // TTL 窗口（created_at >= now - FILE_REF_TTL_MS）内的全部 pending → activated_at = now；
       // 过期 pending 保持 pending（孤儿清理归后续 TTL 清扫）。机械事实一条 UPDATE，无状态机。
       return store.activatePendingFileRefs(scope, { activatedAt: now, createdAfter: now - FILE_REF_TTL_MS });
+    },
+    listActiveFiles({ scope, now }) {
+      // 与 materializeInputs 的可读性谓词同源：activated_at 非 NULL 且 (now - activated_at) ≤ TTL。
+      // 只投影三字段（fileId/name/bytes）——sha256/身份键/时间戳不进清单。
+      return store
+        .listFileRefs(scope)
+        .filter((row) => row.activatedAt !== undefined && now - row.activatedAt <= FILE_REF_TTL_MS)
+        .map((row) => ({ fileId: row.fileId, name: row.name, bytes: row.bytes }));
     },
   };
 }

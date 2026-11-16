@@ -45,6 +45,7 @@ import {
   createTaskExecutor,
   type Session,
   type TranscriptStore,
+  type TurnFileRef,
   type WorkerSkill,
 } from '../packages/agent/src/execution-runtime';
 import {
@@ -58,6 +59,7 @@ import { renderNotification } from '../packages/agent/src/notification-render';
 import { createResourcePolicy, resolveRuntimeConfig, type ResourcePolicy } from '../packages/agent/src/resource-policy';
 import type { TaskRegistry } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
+import type { RunJsExecutor } from '../packages/agent/src/run-js-executor';
 import { createTaskRunner, type TaskExecutor, type TaskRunner } from '../packages/agent/src/task-runner';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../packages/agent/src/worker-skills';
 import type { SkillRegistry } from '../packages/agent/src/skills';
@@ -241,6 +243,13 @@ export interface SessionAssemblyInput {
   transcriptStore?: TranscriptStore;
   /** B1：转录读/写失败上报（fail-open 日志；缺省静默）。 */
   onTranscriptError?: (error: unknown) => void;
+  /** CAP-01 S1：run_js 执行器端口（装配层构造注入；缺省不注入 = Main 无 run_js 工具）。 */
+  runJsExecutor?: RunJsExecutor;
+  /**
+   * CAP-01 S1 清单注入（机械事实）：装配层提供本会话已激活（TTL 内）文件清单——
+   * 字段只有 fileId/name/bytes。缺省不注入 = 无清单（回合输入逐字节不变）。
+   */
+  fileManifestProvider?: (principalId: string, sessionId: string) => readonly TurnFileRef[];
   /** P6：runner 覆盖（测试确定性：leaseMs/时钟/属主）。 */
   runnerOptions?: { leaseMs?: number; owner?: string; now?: () => Date };
 }
@@ -577,6 +586,8 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       ...(input.taskFactProvider === undefined ? {} : { taskFactProvider: input.taskFactProvider }),
       ...(input.transcriptStore === undefined ? {} : { transcriptStore: input.transcriptStore }),
       ...(input.onTranscriptError === undefined ? {} : { onTranscriptError: input.onTranscriptError }),
+      ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
+      ...(input.fileManifestProvider === undefined ? {} : { fileManifestProvider: input.fileManifestProvider }),
       mainTurnMs: resolved.mainTurnMs,
       workerTurnMs: resolved.workerTurnMs,
       // 可信工作目录：装配层持有的 profile.root（绝不取模型输出/用户消息）。
