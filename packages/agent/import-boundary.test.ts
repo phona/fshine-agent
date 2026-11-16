@@ -26,6 +26,8 @@ const ENTRIES = [
   'packages/agent/src/dummy-cli-client.ts',
   // run_js 的第二个子进程面（CAP-01 S0；spawn 归执行器，runtime 不 spawn）同受边界约束。
   'packages/agent/src/run-js-executor.ts',
+  // 执行层文件桥（CAP-01 S2 ②③④；装配层构造——runtime 只 type-import 端口形状）同受边界约束。
+  'packages/agent/src/task-file-bridge.ts',
   // ask/server 入口同受边界约束：新增装配不得以值边触及旧治理模块。
   'scripts/ask.ts',
   'apps/server/server.ts',

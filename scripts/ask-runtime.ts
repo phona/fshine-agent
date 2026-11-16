@@ -61,6 +61,7 @@ import type { TaskRegistry } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
 import type { RunJsExecutor } from '../packages/agent/src/run-js-executor';
 import type { TaskInputCopier } from '../packages/agent/src/file-store';
+import { createTaskExecutionBridge, type TaskFileBridgeStore } from '../packages/agent/src/task-file-bridge';
 import { createTaskRunner, type TaskExecutor, type TaskRunner } from '../packages/agent/src/task-runner';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../packages/agent/src/worker-skills';
 import type { SkillRegistry } from '../packages/agent/src/skills';
@@ -251,6 +252,18 @@ export interface SessionAssemblyInput {
    * 缺省不注入 = run_task 工具面不带 inputFiles（逐字节不变），模型传了也 fail-closed 拒绝。
    */
   taskInputCopier?: TaskInputCopier;
+  /**
+   * CAP-01 S2 ②③④：执行层文件桥装配（有值 = 会话执行面经任务文件桥装饰）。store 必须与
+   * taskInputCopier **同一 fileStore 实例**（文件区监管唯一写侧）；dirParams 是部署对该执行
+   * 层「声明目录参数」的认知（如 '--input-dir'），缺省无 = 桥只承担回程登记与任务 out/ 兜底。
+   * 桥在装配核心构造（内层客户端只有这里拿得到：platformRoot=profile.root、scope=本会话身份）。
+   */
+  taskExecutionBridge?: {
+    store: TaskFileBridgeStore;
+    dirParams?: { input?: string; output?: string };
+    limits?: { maxOutputFileBytes?: number; maxOutputCount?: number };
+    onSkip?: (reason: string) => void;
+  };
   /**
    * CAP-01 S1 清单注入（机械事实）：装配层提供本会话已激活（TTL 内）文件清单——
    * 字段只有 fileId/name/bytes。缺省不注入 = 无清单（回合输入逐字节不变）。
@@ -519,6 +532,22 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
     ...(input.createExecutionFace === undefined ? {} : { createExecutionFace: input.createExecutionFace }),
   });
 
+  // CAP-01 S2 ②③④：执行层文件桥在装配核心构造（内层客户端只有这里拿得到）：
+  // platformRoot = profile.root（装配层持有的可信路径），scope = 本会话身份，inner = 本会话
+  // 执行面。翻译（目录参数替换 + 任务文件物化）、回程登记、任务 out/ 兜底都经此桥——
+  // runtime 出口只决定何时调用。未注入 = 零变化缺省（runtime 端口缺省不接）。
+  const taskBridge = input.taskExecutionBridge === undefined
+    ? undefined
+    : createTaskExecutionBridge({
+      platformRoot: input.profile.root,
+      fileStore: input.taskExecutionBridge.store,
+      scope: { principalId: input.principalId, sessionId: input.sessionId },
+      inner: face.client,
+      ...(input.taskExecutionBridge.dirParams === undefined ? {} : { dirParams: input.taskExecutionBridge.dirParams }),
+      ...(input.taskExecutionBridge.limits === undefined ? {} : { limits: input.taskExecutionBridge.limits }),
+      ...(input.taskExecutionBridge.onSkip === undefined ? {} : { onSkip: input.taskExecutionBridge.onSkip }),
+    });
+
   // 底账：注入的归调用方（不在此关）；自建的由本核心关闭（SQLite 需要 close 收尾）。
   const ownedRegistry: SqliteTaskRegistry | undefined = input.taskRegistry === undefined
     ? createSqliteTaskRegistry(input.dbPath)
@@ -594,6 +623,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       ...(input.onTranscriptError === undefined ? {} : { onTranscriptError: input.onTranscriptError }),
       ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
       ...(input.taskInputCopier === undefined ? {} : { taskInputCopier: input.taskInputCopier }),
+      ...(taskBridge === undefined ? {} : { taskExecutionBridge: taskBridge }),
       ...(input.fileManifestProvider === undefined ? {} : { fileManifestProvider: input.fileManifestProvider }),
       mainTurnMs: resolved.mainTurnMs,
       workerTurnMs: resolved.workerTurnMs,

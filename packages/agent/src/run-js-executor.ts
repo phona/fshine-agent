@@ -62,6 +62,12 @@ export interface RunJsInput {
   /** 输入文件 fileId（本会话 scope 内、已激活）；宿主物化到 <run>/in/。 */
   inputs?: readonly string[];
   scope: RunJsScope;
+  /**
+   * 任务作用域（CAP-01 S2 ①，v8 §4）：设置后为 **Worker 面**——输入只解析当前任务的
+   * 绑定行（{side:'worker', taskId}，越权/不存在同码 FILE_REF_UNAVAILABLE），产物登记
+   * 绑定该任务（task_id）；缺省 = Main 面（只解析 task_id IS NULL 的行，产物不绑任务）。
+   */
+  taskId?: string;
   /** 宿主中止信号（任务取消等）；触发即对进程组 SIGKILL。超时不是模型参数（宿主常量）。 */
   signal?: AbortSignal;
 }
@@ -182,12 +188,13 @@ export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecuto
       const tmpDir = path.join(runDir, 'tmp');
 
       // ① 输入面先过（scope/激活校验 + 物化）：失败抛 FILE_REF_UNAVAILABLE，不起子进程。
-      // Main 的 run_js 只解析 Main 侧文件（task_id IS NULL，v8 §4）；Worker 侧解析归 S2 接线。
+      // 解析作用域（CAP-01 S2，v8 §4）：缺省 Main 面（task_id IS NULL）；Worker 面
+      // （taskId 设置）只解析当前任务的绑定行。
       const materializedInputs = options.fileStore.materializeInputs({
         runDir,
         scope,
         fileIds: input.inputs ?? [],
-        resolution: { side: 'main' },
+        resolution: input.taskId === undefined ? { side: 'main' } : { side: 'worker', taskId: input.taskId },
       });
 
       for (const dir of [outDir, scratchDir, homeDir, tmpDir]) mkdirSync(dir, { recursive: true });
@@ -261,10 +268,12 @@ export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecuto
       const exitSignal = child.signalCode;
 
       // ④ 扫 out/ 登记产物（无论 exitCode——out/ 就是交付箱；交付去留归 S1）。
+      // 产物绑定（CAP-01 S2 ①）：Worker 面（taskId 设置）的产物行绑定当前任务。
       const { outputs, skipped } = options.fileStore.registerOutputsFromOut({
         runDir,
         scope,
         limits: { maxFileBytes: maxOutputFileBytes, maxCount: maxOutputCount },
+        ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
       });
 
       const outputFiles = outputs.map(

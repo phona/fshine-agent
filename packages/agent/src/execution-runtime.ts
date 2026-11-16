@@ -11,8 +11,12 @@
  *      技能登记表时）read_skill（缺口 2 臂 B，按需读业务技能正文）+（注入 runJsExecutor 时）
  *      run_js（CAP-01 S1：受限代码执行，产物登记进文件区、回合末随 TurnResult.files 交投递面）；
  *   2) run_task 触发委派：宿主生成 taskId（绑定 principal/session）→ Worker 回合
- *      （workerDriver + execute_operation 一个工具）；
+ *      （workerDriver + execute_operation +（注入 runJsExecutor 时）run_js——任务作用域，
+ *      CAP-01 S2：输入只解析当前任务的绑定行、产物绑定当前任务并随回合交付）；
  *   3) execute_operation：宿主生成 requestId → client.execute(结构化请求) → 结果回给 Worker；
+ *      CAP-01 S2：注入文件桥时出站经桥替换声明的目录参数（物化任务文件），回程 data.files
+ *      在 runtime 出口登记成新 file_id 并剥 path/base64（翻译在 assemble 持有的桥，登记在
+ *      本出口——不在适配器）；任务收尾兜底扫任务 out/（unexecuted/failed 也在内）；
  *   4) Worker 汇报作为工具结果回到 Main，Main 生成给用户的最终回复；
  *   5) 宿主把本回合最终回复逐字写入本回合各任务行（P1/S1：同回合同值；空白/回合失败不落，
  *      缺省=无最终回复存档，显示层不用执行层汇报冒充）。
@@ -45,9 +49,12 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, RuntimeTurnEvent, TurnDriver, TurnDriverResult } from './driver-contract';
 import { ToolUserError } from './driver-contract';
-import { FileRefUnavailableError, type TaskInputCopier } from './file-store';
+import { FileRefUnavailableError, type CopiedTaskInput, type TaskInputCopier } from './file-store';
 export type { TaskInputCopier } from './file-store';
 import type { RunJsExecutor, RunJsOutput } from './run-js-executor';
+// 执行层文件桥（CAP-01 S2 ②③④）：装配层构造注入；runtime 只认端口形状（type-only），
+// 不持平台路径——翻译/物化/登记/兜底的本体都在桥与 fileStore，runtime 只决定何时调用。
+import type { TaskExecutionBridge, TaskExecutionBridgeFactory } from './task-file-bridge';
 import { READ_SKILL_TOOL, type SkillRegistry } from './skills';
 import { stripServerPaths } from './server-paths';
 import { createTaskRegistry, deriveTaskName, DispatchConflictError, TaskTransitionError, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
@@ -365,6 +372,15 @@ export interface RuntimeOptions {
    * inputFiles（逐字节不变），模型传了也 fail-closed 拒绝。
    */
   taskInputCopier?: TaskInputCopier;
+  /**
+   * CAP-01 S2 ②③④（v8 §6/§10-3）：执行层文件桥工厂（装配层构造，持有 platformRoot；
+   * runtime 不持任何平台路径）。按任务构造三件事：出站装饰器替换执行层声明的目录参数并
+   * 物化任务文件；回程 data.files 在 runtime 出口经 registerReturnedFiles 登记并剥
+   * path/base64（不在适配器登记）；任务收尾经 sweepTaskOutputs 兜底扫任务 out/
+   * （unexecuted/failed 也在内，产物不丢）。
+   * 缺省不注入 = 现行为逐字节不变（data 原样透传、无目录翻译、无兜底扫描）。
+   */
+  taskExecutionBridge?: TaskExecutionBridgeFactory;
 }
 
 /** 前台回合被资源策略确定性拒绝（queued 排队等晋升后不适用；携带机械 reason）。 */
@@ -437,11 +453,25 @@ function userMessage(text: string): DriverMessage {
   return { role: 'user', content: text, timestamp: Date.now() } as unknown as DriverMessage;
 }
 
-/** 委派块：任务原文 + 能力快照（只含允许集合）+ 领域技能正文。 */
+/**
+ * Worker 任务文件清单注入文本（CAP-01 S2 ①，机械事实渲染）：每行只有 fileId/name/bytes
+ * 三字段——**清单没有行数据**（不含文件内容、不含路径、不含 sha256，与 Main 清单同一硬
+ * 边界，v8 §8）。Worker 只解析当前任务的绑定行（v8 §4），清单给出的是交办副本/任务文件
+ * 面的引用面——Main 的源 fileId 不进 Worker 转录。
+ */
+export function renderWorkerFileManifest(files: readonly TurnFileRef[]): string {
+  return [
+    '[本任务文件清单]（机械事实：以下文件已随任务交付；处理文件时用 run_js 的 inputs 按 fileId 引用）',
+    ...files.map((file) => `- ${file.name}（fileId: ${file.fileId}，${file.bytes} 字节）`),
+  ].join('\n');
+}
+
+/** 委派块：任务原文 + 能力快照（只含允许集合）+ 任务文件清单（可选）+ 领域技能正文。 */
 export function renderWorkerDelegation(input: {
   task: string;
   manifest: CapabilityManifest;
   skills?: readonly WorkerSkill[];
+  files?: readonly TurnFileRef[];
 }): string {
   const parts = [
     '## 本次任务（宿主委派）',
@@ -452,6 +482,9 @@ export function renderWorkerDelegation(input: {
     JSON.stringify(input.manifest, null, 2),
     '```',
   ];
+  if (input.files !== undefined && input.files.length > 0) {
+    parts.push('', renderWorkerFileManifest(input.files));
+  }
   for (const skill of input.skills ?? []) {
     parts.push('', `## 域技能：${skill.name}`, '', skill.content);
   }
@@ -803,6 +836,97 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     return runJsToolResult(output);
   }
 
+  /** 交付事实按 fileId 去重（回程登记 + 兜底扫描同池去重后，同一产物不重复进交付面）。 */
+  function pushTurnFileOnce(list: TurnFileRef[], file: { fileId: string; name: string; bytes: number }): void {
+    if (list.some((existing) => existing.fileId === file.fileId)) return;
+    list.push({ fileId: file.fileId, name: file.name, bytes: file.bytes });
+  }
+
+  /**
+   * 执行层返回里的 data.files 条目（CAP-01 S2 ③）：completed/needs_input 的 data 为
+   * 普通对象且 files 是数组时才消费——data 对宿主不透明，其余形状一律不动。
+   */
+  function outcomeFileEntriesOf(outcome: ExecutionOutcome): readonly unknown[] | undefined {
+    if (outcome.status !== 'completed' && outcome.status !== 'needs_input') return undefined;
+    const data = outcome.data;
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) return undefined;
+    const files = (data as { files?: unknown }).files;
+    return Array.isArray(files) ? files : undefined;
+  }
+
+  /**
+   * CAP-01 S2 ③ 回程登记（v8 §6）：**runtime 出口**，不在适配器——执行层返回的
+   * data.files[...] 经桥登记成新 file_id（任务产物池 sha256 去重），登记事实替换原条目
+   * （path 与内联 base64 不进转录、不进底账落定）；登记事实并入任务交付收集。
+   * 未注入桥时 outcome 原样（零变化缺省）。
+   */
+  async function registerOutcomeReturnedFiles(
+    outcome: ExecutionOutcome,
+    exchange: TaskExecutionBridge,
+    taskFiles: TurnFileRef[],
+  ): Promise<ExecutionOutcome> {
+    const entries = outcomeFileEntriesOf(outcome);
+    if (entries === undefined) return outcome;
+    const registered = await exchange.registerReturnedFiles(entries);
+    for (const file of registered.files) {
+      pushTurnFileOnce(taskFiles, file);
+    }
+    // 登记事实替换 data.files（path/base64 从 data 里剥掉）；其余字段原样。
+    if (outcome.status === 'completed') {
+      return { status: 'completed', data: { ...(outcome.data as Record<string, unknown>), files: registered.entries } };
+    }
+    if (outcome.status !== 'needs_input') return outcome;
+    return {
+      status: 'needs_input',
+      missing: outcome.missing,
+      data: { ...((outcome.data as Record<string, unknown> | undefined) ?? {}), files: registered.entries },
+      ...(outcome.error === undefined ? {} : { error: outcome.error }),
+    };
+  }
+
+  /**
+   * CAP-01 S2 ① Worker 的 run_js 回合内执行（v8 §2/§4/§5）：与 Main 的 runJsInTurn 同一
+   * 形状，差异只在任务作用域——输入只解析当前任务的绑定行（{side:'worker', taskId}），
+   * 产物登记绑定当前任务并并入本任务交付收集。幂等（v8 §5）用**委派级**进程内 Map
+   * （随 delegate 创建、随 delegate 丢弃；不用 attempt，Pi 原生重试同键命中不重跑）。
+   */
+  async function runJsInWorkerTurn(
+    taskId: string,
+    args: Record<string, unknown>,
+    memo: Map<string, RunJsOutput>,
+    taskFiles: TurnFileRef[],
+  ): Promise<Record<string, unknown>> {
+    const executor = options.runJsExecutor;
+    if (executor === undefined) throw new Error(`Worker 工具面之外的调用：${RUN_JS_TOOL}`);
+    const code = typeof args.code === 'string' ? args.code : '';
+    if (code.trim() === '') throw new Error('run_js 缺少 code（CommonJS 脚本原文）。');
+    const inputs = parseFileIdList(args.inputs, 'run_js', 'inputs');
+    const memoKey = `${createHash('sha256').update(code, 'utf8').digest('hex')}:${[...inputs].sort().join('|')}`;
+    const hit = memo.get(memoKey);
+    if (hit !== undefined) return runJsToolResult(hit);
+    let output: RunJsOutput;
+    try {
+      output = await executor.runJs({
+        code,
+        ...(inputs.length > 0 ? { inputs } : {}),
+        scope: fileScope,
+        taskId,
+      });
+    } catch (error) {
+      if (error instanceof FileRefUnavailableError) {
+        // 机械 reason 只进日志；模型与用户只见统一话术（防存在性 oracle，v8 §4）。
+        options.onFileRefUnavailable?.(error.reason);
+        throw new Error(FILE_INPUT_UNAVAILABLE_MESSAGE);
+      }
+      throw error;
+    }
+    memo.set(memoKey, output);
+    for (const file of output.outputs) {
+      pushTurnFileOnce(taskFiles, file);
+    }
+    return runJsToolResult(output);
+  }
+
   const transcriptStore = options.transcriptStore;
   /**
    * 上一回合 Main 转录的**只读投影**（Pi 会话 → 宿主可读形状）。
@@ -887,6 +1011,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     args: Record<string, unknown>,
     window: RuntimeAttemptWindow,
     onUnresolved: () => void,
+    exchange?: TaskExecutionBridge,
+    taskFiles?: TurnFileRef[],
   ): Promise<ExecutionOutcome> {
     const operation = typeof args.operation === 'string' ? args.operation : '';
     if (operation === '') throw new Error('execute_operation 缺少 operation。');
@@ -898,6 +1024,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
       ? (rawArgs as Record<string, unknown>)
       : {};
+    // CAP-01 S2 ②：注入文件桥时出站走装饰器（声明目录参数替换 + 任务文件物化在桥内）；
+    // 未注入时零变化（原客户端直连）。
+    const client = exchange !== undefined ? exchange.client : options.client;
     const run = await runOperation({
       scopeKey: `task:${taskId}`,
       window,
@@ -906,7 +1035,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       execute: async (dispatchKey) => {
         // requestId 由宿主生成、每次调用换号（只作追踪）；dispatchKey 是操作身份，不换。
         const requestId = `req_${randomUUID()}`;
-        const outcome = await options.client.execute({ requestId, dispatchKey, operation, args: callArgs });
+        let outcome = await client.execute({ requestId, dispatchKey, operation, args: callArgs });
+        // CAP-01 S2 ③：回程登记在 runtime 出口（不在适配器）——登记 data.files、剥
+        // path/base64 后，落定与转录只见登记事实。未注入桥时 outcome 原样（零变化）。
+        if (exchange !== undefined && taskFiles !== undefined) {
+          outcome = await registerOutcomeReturnedFiles(outcome, exchange, taskFiles);
+        }
         const record: ExecutionRecord = {
           requestId,
           operation,
@@ -929,14 +1063,26 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     return run.outcome;
   }
 
+  /**
+   * Worker exec 面（CAP-01 S2 ①）：execute_operation +（注入 runJsExecutor 时）run_js。
+   * run_js 只在工具面开启时受理（fail-closed：未注入执行器的直调被拒）；文件桥与任务交付
+   * 收集随 delegate 传入（缺省装配两者皆缺省——零变化）。
+   */
   function workerExec(
     taskId: string,
     window: RuntimeAttemptWindow,
     onUnresolved: () => void,
+    files?: { exchange?: TaskExecutionBridge; taskFiles?: TurnFileRef[]; runJsMemo?: Map<string, RunJsOutput> },
   ): (tool: string, args: Record<string, unknown>) => Promise<unknown> {
     return async (tool, args) => {
+      if (tool === RUN_JS_TOOL) {
+        if (options.runJsExecutor === undefined || files?.runJsMemo === undefined || files.taskFiles === undefined) {
+          throw new Error(`Worker 工具面之外的调用：${tool}`);
+        }
+        return runJsInWorkerTurn(taskId, args, files.runJsMemo, files.taskFiles);
+      }
       if (tool !== EXECUTE_OPERATION_TOOL) throw new Error(`Worker 工具面之外的调用：${tool}`);
-      return executeOperation(taskId, args, window, onUnresolved);
+      return executeOperation(taskId, args, window, onUnresolved, files?.exchange, files?.taskFiles);
     };
   }
 
@@ -968,7 +1114,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     };
   }
 
-  async function delegate(taskText: string, rawInputFiles: unknown, foregroundPermit: Permit | undefined): Promise<unknown> {
+  async function delegate(
+    taskText: string,
+    rawInputFiles: unknown,
+    foregroundPermit: Permit | undefined,
+    turnFiles: TurnFileRef[],
+  ): Promise<unknown> {
     const request = taskText.trim();
     if (request === '') throw new Error('run_task 缺少 task：请写清要办什么。');
     const taskId = `task_${randomUUID()}`;
@@ -979,12 +1130,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     if (inputFiles.length > 0 && dispatchMode === 'background') {
       throw new Error('run_task 的 inputFiles 暂不支持 background 派发（文件交办当前只做 inline）。');
     }
+    let copiedInputs: CopiedTaskInput[] = [];
     if (inputFiles.length > 0) {
       const copier = options.taskInputCopier;
       // 与 run_js/read_skill 同一门控纪律：未注入复制面不受理，fail-closed。
       if (copier === undefined) throw new Error('run_task 的 inputFiles 未开通（当前装配没有文件复制面）。');
       try {
-        copier.copyInputsForTask({ scope: fileScope, fileIds: inputFiles, taskId });
+        copiedInputs = copier.copyInputsForTask({ scope: fileScope, fileIds: inputFiles, taskId });
       } catch (error) {
         if (error instanceof FileRefUnavailableError) {
           // 机械 reason 只进日志；模型与用户只见统一话术（防存在性 oracle，v8 §4）。
@@ -1031,6 +1183,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       };
     }
 
+    // CAP-01 S2 ①③④：任务作用域的 Worker 工具面（run_js）、执行层文件桥与本任务交付收集。
+    // 全部随本委派创建、随本委派丢弃（未注入执行器/桥 = 零变化缺省）；background 派发
+    // 不经过这里（S2 文件面只做 inline——后台 Worker 工具面与回程登记归后续切片）。
+    const taskFiles: TurnFileRef[] = [];
+    const taskExchange = options.taskExecutionBridge === undefined ? undefined : options.taskExecutionBridge(taskId);
+    const workerRunJsMemo = new Map<string, RunJsOutput>();
+
     registry.begin({ taskId, principalId: options.principalId, sessionId: options.sessionId, request });
     // P5：前台回合内的委派 = 派生后台许可（共享父预算、深度 +1、不占并发槽）；
     // 拒绝确定性落任务原因 resource_limited（§5），并向 Main 抛出（不进入执行）。
@@ -1076,14 +1235,24 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     try {
       const workerResult = await options.workerDriver.run({
         systemPrompt: renderWorkerSystemPrompt(options.workerWorkspaceRoot),
-        tools: [executeOperationTool()],
+        // CAP-01 S2 ①：Worker 工具面 = execute_operation +（注入执行器时）run_js（任务作用域）。
+        tools: [executeOperationTool(), ...(options.runJsExecutor === undefined ? [] : [runJsTool()])],
         messages: [userMessage(renderWorkerDelegation({
           task: request,
           manifest: workerManifest,
           ...(options.workerSkills ? { skills: options.workerSkills } : {}),
+          // CAP-01 S2 ①：交办副本的任务文件清单（机械事实 fileId/name/bytes）——Worker 只解析
+          // 当前任务的绑定行，Main 的源 fileId 不进 Worker 转录（v8 §4）。
+          ...(copiedInputs.length > 0
+            ? { files: copiedInputs.map((copy) => ({ fileId: copy.fileId, name: copy.name, bytes: copy.bytes })) }
+            : {}),
         }))],
         onStep: () => {},
-        exec: workerExec(taskId, workerWindow, () => { taskUnresolved = true; }),
+        exec: workerExec(taskId, workerWindow, () => { taskUnresolved = true; }, {
+          ...(taskExchange === undefined ? {} : { exchange: taskExchange }),
+          taskFiles,
+          runJsMemo: workerRunJsMemo,
+        }),
         deadline: workerDeadline,
         onRuntimeEvent: (event) => noteRuntimeEvent(workerWindow, event),
       });
@@ -1101,6 +1270,19 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       registry.fail(taskId, error instanceof Error ? error.message : String(error));
       throw error;
     } finally {
+      // CAP-01 S2 ④ 产物不丢（v8 §10-3）：任务收尾（completed/failed/unexecuted/待核对
+      // 一律）兜底扫任务 out/ 登记剩余产物——执行层写了文件但 outcome 没带回 data.files
+      // （失败/中止）时不丢；与回程登记同池去重。未注入桥 = 无兜底面（零变化缺省）。
+      if (taskExchange !== undefined) {
+        const swept = taskExchange.sweepTaskOutputs();
+        for (const file of swept.files) {
+          pushTurnFileOnce(taskFiles, file);
+        }
+      }
+      // 本任务产物并入本回合交付事实（交付去留归宿主投递面，工具返回时不可知）。
+      for (const file of taskFiles) {
+        pushTurnFileOnce(turnFiles, file);
+      }
       delegationPermit?.budget.consume({ calls: 1, ms: Date.now() - workerStartedAt });
       if (delegationPermit !== undefined && policy !== undefined) {
         policy.release(delegationPermit);
@@ -1161,7 +1343,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
               window: mainWindow,
               operation: RUN_TASK_TOOL,
               executeThrows: 'propagate',
-              execute: async () => ({ status: 'completed', data: await delegate(task, args.inputFiles, foregroundPermit) }),
+              execute: async () => ({ status: 'completed', data: await delegate(task, args.inputFiles, foregroundPermit, turnFiles) }),
             });
             if (run.unresolved) {
               return {

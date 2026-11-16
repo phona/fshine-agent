@@ -3,7 +3,8 @@
  *
  * 职责：workspace 布局派生 + 文件字节与 file_refs 行的**唯一写侧**（putFile 落新文件 /
  * materializeInputs 物化输入 / registerOutputsFromOut 从交付箱 copy-on-register 登记产物 /
- * copyInputsForTask 交办时复制任务副本）。
+ * copyInputsForTask 交办时复制任务副本 / listTaskFiles 任务文件面 + registerTaskFile·
+ * registerTaskFileFromPath 执行层回程产物登记——任务产物池 sha256 去重，S2）。
  * 表访问只走 @fshine/core 的 TaskStore 行访问器（insertFileRef/getFileRef/listFileRefs），
  * 本模块不建第二套 store、不开第二个端口实现（S0 收口约束）。
  *
@@ -59,7 +60,7 @@ export interface FileScope {
 }
 
 /**
- * 输入不可用（越权/不存在/pending/字节缺失同码，防存在性 oracle；v8 §4）。
+ * 输入不可用（越权/不存在/pending/过期/字节缺失同码，防存在性 oracle；v8 §4）。
  * reason 是机械原因，只进日志，不进用户话术。
  */
 export class FileRefUnavailableError extends Error {
@@ -67,6 +68,18 @@ export class FileRefUnavailableError extends Error {
   constructor(readonly reason: string) {
     super(`文件不可用（FILE_REF_UNAVAILABLE）：${reason}`);
     this.name = 'FileRefUnavailableError';
+  }
+}
+
+/**
+ * 任务回程文件拒收（CAP-01 S2 ③）：执行层返回的文件条目不满足登记纪律（路径越出任务
+ * 暂存目录、非普通文件、symlink/hardlink、超限等）。机械 reason 随异常带出，只进日志
+ * 与 unavailable 标记，不进用户话术；拒收零副作用（无行、无落盘）。
+ */
+export class TaskFileRejectedError extends Error {
+  constructor(readonly reason: string) {
+    super(`任务回程文件拒收（${reason}）`);
+    this.name = 'TaskFileRejectedError';
   }
 }
 
@@ -201,10 +214,53 @@ export interface FileStore {
    */
   copyInputsForTask(input: { scope: FileScope; fileIds: readonly string[]; taskId: string }): CopiedTaskInput[];
   /**
+   * 当前任务的文件面（CAP-01 S2 目录桥物化源）：task_id = taskId、已激活且 TTL 内的行
+   * （与 resolveReadableFile 同一可读性谓词；交办副本与任务产物都是任务文件面）。
+   * 只投影 fileId/name/bytes（机械事实，无行数据）。Main 清单（listActiveFiles）不含这些行，
+   * Worker 清单只归当前任务——作用域规则见 v8 §4。
+   */
+  listTaskFiles(input: { scope: FileScope; taskId: string; now: number }): ActiveFileRef[];
+  /**
+   * 任务回程文件登记（CAP-01 S2 ③，内联字节面）：执行层返回的 base64 字节 → 新 file_id +
+   * task_id 绑定 + 登记即激活。**任务产物池 sha256 去重**：同 (scope, taskId, sha256) 已有行
+   * → 复用旧 fileId、不重复落盘、不新增行（ask ⑤）。超限抛 TaskFileRejectedError('size_limit')。
+   */
+  registerTaskFile(input: {
+    scope: FileScope;
+    taskId: string;
+    name: string;
+    bytes: Buffer;
+    maxFileBytes: number;
+  }): RegisteredFile;
+  /**
+   * 任务回程文件登记（CAP-01 S2 ③，路径源）：执行层返回的 path → 校验 sourcePath 是
+   * allowedRoot 内的绝对路径（任务暂存目录之外一律拒收）→ O_NOFOLLOW 打开 + fd fstat
+   * 纪律（普通文件、nlink=1、同 uid、大小上限，与 out/ 扫描同一套）→ 两遍读取（先哈希
+   * 查重、后落盘）→ 任务产物池 sha256 去重。violation 抛 TaskFileRejectedError（机械
+   * reason：path_not_absolute / path_outside_task_dir / symlink_or_gone / not_regular_file /
+   * linked / foreign_uid / size_limit / source_changed）。
+   */
+  registerTaskFileFromPath(input: {
+    scope: FileScope;
+    taskId: string;
+    sourcePath: string;
+    allowedRoot: string;
+    name: string;
+    maxFileBytes: number;
+  }): RegisteredFile;
+  /**
    * 扫 <runDir>/out/ 登记产物（copy-on-register：新 fileId + sha256；activated_at = 登记时刻，
    * 产出即交付箱内容，S1 回合末投递直接用）。只收普通文件；拒收项进 skipped（审计）。
+   * **taskId 缺省 = Main 交付箱（S1 语义不变：每次登记新 file_id）**；传入 taskId = 任务
+   * out/ 兜底扫描（CAP-01 S2 ④，v8 §10-3）：登记绑定任务并与任务产物池 sha256 去重——
+   * 同字节复用旧 fileId、不重复落盘（回程已登记的产物重扫不重复）。
    */
-  registerOutputsFromOut(input: { runDir: string; scope: FileScope; limits: ScanLimits }): {
+  registerOutputsFromOut(input: {
+    runDir: string;
+    scope: FileScope;
+    limits: ScanLimits;
+    taskId?: string;
+  }): {
     outputs: RegisteredFile[];
     skipped: SkippedOutput[];
   };
@@ -303,10 +359,13 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
     const hash = createHash('sha256');
     const buffer = Buffer.alloc(REGISTER_COPY_CHUNK_BYTES);
     let bytes = 0;
+    let offset = 0;
     try {
       for (;;) {
-        const read = readSync(fd, buffer, 0, buffer.length, null);
+        // 显式偏移读取（fd 上的两遍读取安全：回程登记先哈希后落盘共用同一 fd）。
+        const read = readSync(fd, buffer, 0, buffer.length, offset);
         if (read === 0) break;
+        offset += read;
         bytes += read;
         if (bytes > maxFileBytes) {
           // fstat 之后仍在生长的写入面：超限即弃（删除半成品，不登记半份产物）。
@@ -371,6 +430,81 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
     if (row.activatedAt === undefined) throw new FileRefUnavailableError(`pending:${fileId}`);
     if (now - row.activatedAt > FILE_REF_TTL_MS) throw new FileRefUnavailableError(`expired:${fileId}`);
     return row;
+  }
+
+  /**
+   * 任务产物池去重（CAP-01 S2 ⑤）：同 (scope, taskId, sha256) 已有行 → 复用旧 fileId
+   * （不落盘、不新增行）。池不跨任务、不跨解析侧——Main 侧行与其他任务的行不参与复用。
+   */
+  function findTaskRowBySha(scope: FileScope, taskId: string, sha256: string): FileRefRow | undefined {
+    return store.listFileRefs(scope).find((row) => row.taskId === taskId && row.sha256 === sha256);
+  }
+
+  /** fd 单遍流式哈希（回程登记第一遍：先哈希查重，再决定是否落盘；同一 fd 上两遍读取）。 */
+  function hashFd(fd: number, maxFileBytes: number): { sha256: string; bytes: number } {
+    const hash = createHash('sha256');
+    const buffer = Buffer.alloc(REGISTER_COPY_CHUNK_BYTES);
+    let bytes = 0;
+    let offset = 0;
+    for (;;) {
+      const read = readSync(fd, buffer, 0, buffer.length, offset);
+      if (read === 0) break;
+      offset += read;
+      bytes += read;
+      if (bytes > maxFileBytes) throw new RangeError('size_limit');
+      hash.update(buffer.subarray(0, read));
+    }
+    return { sha256: hash.digest('hex'), bytes };
+  }
+
+  /**
+   * 任务产物登记（fd 源，CAP-01 S2 ③④共用底座）：先流式哈希查重（同 sha 复用旧 fileId、
+   * 不落盘），新产物再从**同一 fd** 第二遍流式落盘（copy-on-register），并核对两遍读取一致
+   * （不一致 = 源在读取间被改写 → 删半成品拒收）。行 task_id 绑定、登记即激活。
+   */
+  function registerTaskFromFd(
+    fd: number,
+    input: { scope: FileScope; taskId: string; name: string; maxFileBytes: number },
+  ): RegisteredFile {
+    let hashed: { sha256: string; bytes: number };
+    try {
+      hashed = hashFd(fd, input.maxFileBytes);
+    } catch (error) {
+      if (error instanceof RangeError && error.message === 'size_limit') throw new TaskFileRejectedError('size_limit');
+      throw error;
+    }
+    const reused = findTaskRowBySha(input.scope, input.taskId, hashed.sha256);
+    if (reused !== undefined) return { fileId: reused.fileId, name: reused.name, bytes: reused.bytes, sha256: reused.sha256 };
+    const fileId = newFileId();
+    const destPath = fileStoragePathOf(workspaceRoot, input.scope, fileId, input.name);
+    mkdirSync(path.dirname(destPath), { recursive: true });
+    let copied: { sha256: string; bytes: number };
+    try {
+      copied = copyFdWithHash(fd, destPath, input.maxFileBytes);
+    } catch (error) {
+      if (error instanceof RangeError && error.message === 'size_limit') throw new TaskFileRejectedError('size_limit');
+      throw error;
+    }
+    if (copied.sha256 !== hashed.sha256 || copied.bytes !== hashed.bytes) {
+      try {
+        rmSync(destPath);
+      } catch {
+        // 半成品清理失败留给 TTL 清孤儿；不掩盖完整性错误。
+      }
+      throw new TaskFileRejectedError('source_changed');
+    }
+    const row = store.insertFileRef({
+      fileId,
+      principalId: input.scope.principalId,
+      sessionId: input.scope.sessionId,
+      taskId: input.taskId,
+      name: input.name,
+      sha256: copied.sha256,
+      bytes: copied.bytes,
+      activatedAt: Date.now(),
+      createdAt: Date.now(),
+    });
+    return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256 };
   }
 
   return {
@@ -455,7 +589,7 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
         }
       });
     },
-    registerOutputsFromOut({ runDir, scope, limits }) {
+    registerOutputsFromOut({ runDir, scope, limits, taskId }) {
       const outDir = path.join(runDir, 'out');
       const outputs: RegisteredFile[] = [];
       const skipped: SkippedOutput[] = [];
@@ -493,10 +627,20 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
             skipped.push({ name: candidate.relPath, reason: 'size_limit' });
             continue;
           }
-          outputs.push(registerFromFd(fd, { scope, name: candidate.relPath, maxFileBytes: limits.maxFileBytes, activatedAt: Date.now() }));
+          outputs.push(
+            taskId === undefined
+              // Main 交付箱（S1 语义不变）：每次登记新 file_id。
+              ? registerFromFd(fd, { scope, name: candidate.relPath, maxFileBytes: limits.maxFileBytes, activatedAt: Date.now() })
+              // 任务 out/ 兜底扫描（CAP-01 S2 ④，v8 §10-3）：绑定任务并与任务产物池去重。
+              : registerTaskFromFd(fd, { scope, taskId, name: candidate.relPath, maxFileBytes: limits.maxFileBytes }),
+          );
         } catch (error) {
           if (error instanceof RangeError && error.message === 'size_limit') {
             skipped.push({ name: candidate.relPath, reason: 'size_limit' });
+            continue;
+          }
+          if (error instanceof TaskFileRejectedError) {
+            skipped.push({ name: candidate.relPath, reason: error.reason });
             continue;
           }
           throw error;
@@ -505,6 +649,64 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
         }
       }
       return { outputs, skipped };
+    },
+    listTaskFiles({ scope, taskId, now }) {
+      // 目录桥物化源：当前任务绑定 + 可读性谓词（activated 非 NULL 且 TTL 内，与
+      // resolveReadableFile 同源）。只投影 fileId/name/bytes（机械事实，无行数据）。
+      return store
+        .listFileRefs(scope)
+        .filter(
+          (row) => row.taskId === taskId && row.activatedAt !== undefined && now - row.activatedAt <= FILE_REF_TTL_MS,
+        )
+        .map((row) => ({ fileId: row.fileId, name: row.name, bytes: row.bytes }));
+    },
+    registerTaskFile({ scope, taskId, name, bytes, maxFileBytes }) {
+      // 内联字节面：超限拒收 → 任务池 sha256 去重（复用旧 fileId、不落盘）→ 新 file_id 落盘登记。
+      if (bytes.length > maxFileBytes) throw new TaskFileRejectedError('size_limit');
+      const sha256 = createHash('sha256').update(bytes).digest('hex');
+      const reused = findTaskRowBySha(scope, taskId, sha256);
+      if (reused !== undefined) return { fileId: reused.fileId, name: reused.name, bytes: reused.bytes, sha256: reused.sha256 };
+      const fileId = newFileId();
+      const storagePath = fileStoragePathOf(workspaceRoot, scope, fileId, name);
+      mkdirSync(path.dirname(storagePath), { recursive: true });
+      writeFileSync(storagePath, bytes, { flag: 'wx', mode: 0o600 });
+      const row = store.insertFileRef({
+        fileId,
+        principalId: scope.principalId,
+        sessionId: scope.sessionId,
+        taskId,
+        name,
+        sha256,
+        bytes: bytes.length,
+        activatedAt: Date.now(),
+        createdAt: Date.now(),
+      });
+      return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256 };
+    },
+    registerTaskFileFromPath({ scope, taskId, sourcePath, allowedRoot, name, maxFileBytes }) {
+      // 路径源：先包含性（任务暂存目录之外的任何路径不开口子），再 fd 纪律，再查重落盘。
+      if (!path.isAbsolute(sourcePath)) throw new TaskFileRejectedError('path_not_absolute');
+      const resolved = path.resolve(sourcePath);
+      const root = path.resolve(allowedRoot);
+      if (resolved === root || !resolved.startsWith(root + path.sep)) {
+        throw new TaskFileRejectedError('path_outside_task_dir');
+      }
+      let fd: number;
+      try {
+        fd = openSync(resolved, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      } catch {
+        throw new TaskFileRejectedError('symlink_or_gone');
+      }
+      try {
+        const st = fstatSync(fd);
+        if (!st.isFile()) throw new TaskFileRejectedError('not_regular_file');
+        if (st.nlink !== 1) throw new TaskFileRejectedError('linked');
+        if (typeof process.getuid === 'function' && st.uid !== process.getuid()) throw new TaskFileRejectedError('foreign_uid');
+        if (st.size > maxFileBytes) throw new TaskFileRejectedError('size_limit');
+        return registerTaskFromFd(fd, { scope, taskId, name, maxFileBytes });
+      } finally {
+        closeSync(fd);
+      }
     },
     registerInboundFile({ scope, name, sourcePath }) {
       // O_NOFOLLOW：源路径被换成 symlink → ELOOP，按拒收处理（与 out/ 扫描同纪律）。

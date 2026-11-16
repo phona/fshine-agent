@@ -262,9 +262,16 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
           ...(notificationAttachment === undefined ? {} : { taskFactProvider: notificationAttachment.taskFactProvider }),
           // CAP-01 S1：run_js 执行器（装配构造）与文件清单注入器（机械事实）同源注入。
-          // CAP-01 S2：交办复制端口同源注入（同一 fileStore 实例——run_task.inputFiles 的宿主侧执行）。
+          // CAP-01 S2：交办复制端口与执行层文件桥同源注入（**同一 fileStore 实例**——文件区
+          // 监管唯一写侧）。桥承担回程登记（data.files → 新 file_id、剥 path/base64）与任务
+          // out/ 兜底扫描（unexecuted/failed 也扫，v8 §10-3）；dirParams 留空 = 当前执行层
+          // 尚未声明目录参数，出站目录翻译随执行层声明开启（部署按其声明认知传入参数名）。
           runJsExecutor,
           taskInputCopier: fileStore,
+          taskExecutionBridge: {
+            store: fileStore,
+            onSkip: (reason) => log({ event: 'task_file_bridge_skip', principalId, sessionId, reason }),
+          },
           fileManifestProvider,
           transcriptStore,
           // fail-open 日志：转录读/写失败不阻塞回合，只上报（错误面由入口按既有归类处理）。
