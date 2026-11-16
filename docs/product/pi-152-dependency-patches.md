@@ -10,7 +10,10 @@
 - 接线：`devDependencies.patch-package` + `scripts.postinstall = "patch-package"`；补丁目录 `patches/`。
 - 已验证：把 `simple-options.js` 还原为上游原件（md5 `ceb6c7bb…`）后 `npm run postinstall` →
   `patch-package 8.0.1 · Applying patches… @earendil-works/pi-ai@1.5.2 ✔` → 文件回到补丁态（md5 `4e26cfb0…`）。
-- 补丁守卫测试：`packages/agent/pi-152-u1-output-floor.test.ts`（无补丁时 4 例红、1 例绿；有补丁 5 例绿）。
+- 补丁守卫测试：`packages/agent/pi-152-u1-output-floor.test.ts`（无补丁时 4 例红、1 例绿；有补丁 5 例绿）；
+  `packages/agent/pi-152-u2-empty-summary.test.ts`（无 U2 补丁时 5 例中 4 例红、1 例正向对照绿；有补丁 5 例绿）。
+- 当前补丁栈（两个包、三个文件）：`@earendil-works+pi-ai+1.5.2.patch`（U1）、
+  `@earendil-works+pi-coding-agent+1.5.2.patch`（U2）。`npm run postinstall` 输出两行 ✔ 即全部就位。
 
 ## P1 · `@earendil-works/pi-ai@1.5.2` — U1 输出预算被夹到 1 token
 
@@ -123,3 +126,140 @@ thinkingLevel=off / 仅 `bridge_exec`）；N=1/场景、一次采样、未重采
 - **摘要请求仍触顶**：摘要请求走同一 clamp，cap 仍由 `model.maxTokens=2048` 决定，A 15 次摘要 12 次
   `length`。属摘要输出预算/空摘要入库（U2 范围），本补丁不涉及。
 
+
+## P2 · `@earendil-works/pi-coding-agent@1.5.2` — U2 空摘要被当成有效压缩检查点
+
+**包/版本**：`@earendil-works/pi-coding-agent@1.5.2`（`node_modules/@earendil-works/pi-coding-agent`，
+顶层仅一份；`dist/bundle/**` 是 cli/rpc-entry 专用打包副本，宿主只 import 包根
+（`package.json` exports `.` → `dist/index.js`），`dist/index.js` 不引用 bundle ⇒ **不改 bundle**）。
+
+**文件（实际被执行）**：
+
+- `dist/core/compaction/compaction.js`（`getSummarizationFailure` 与两个摘要调用点、`compact()`）；
+- `dist/core/session-manager.js`（`SessionManager.appendCompaction`，压缩检查点唯一写库口）。
+
+**来源（原缺陷出处）**：
+
+- `dist/core/compaction/compaction.js:454-462`（补丁前行号）`getSummarizationFailure` **只**看
+  `stopReason === "error"` 与 `"length"`，**不看正文**；`stop` + 空正文返回 `undefined`（=成功）。
+- 普通摘要：`generateSummaryWithUsage` → `:533` 调 `getSummarizationFailure`，通过后
+  `contentText(response.content)` 作为摘要文本返回（`:538-539`）。
+- Turn Prefix Summary：`generateTurnPrefixSummary` → `:737` 同一判定，通过后
+  `contentText(response.content)` 作为分段摘要（`:744-745`），再在 `compact()` `:703` 拼进
+  `${historyText}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult.text}`。
+  空分段摘要拼上固定标题后 **trim 非空** —— 只看「整串非空」的判空会漏掉这一边界。
+- 最终 Compaction Entry 提交：三条路径同一写库口 `SessionManager.appendCompaction`
+  （`dist/core/session-manager.js:892`，补丁前行号）：手工压缩 `agent-session.js:2393`、
+  自动压缩 `agent-session.js:2682`、boundary drafts `agent-session.js:649`；
+  三个调用点**都没有**任何正文判定。
+- 注入证据 `.runtime/pi152-stageB/injection/report4.json`：`T-empty` → `compaction_end(reason=threshold,
+  summaryChars=0, summary="")` + `compactionEntries:[{"summary":"","summaryChars":0}]`，第 10 次主请求
+  `hasFact=false`（事实消失）；`T-ws` → `summary:"  \n\t "`、`summaryChars=5`，同样入库、事实消失。
+
+**修复思路（最小：一处公共判定 + 一个写库边界，不复制三份逻辑）**：
+
+- 在 `compaction.js` 加 `assertSummarizationText(response, label)`：取 `contentText(response.content)`，
+  **按 `trim()` 后长度判空**，空则 `throw`。边界①②共用同一个函数（两个调用点各一行替换）。
+- 在 `session-manager.js` 的 `appendCompaction` 开头按同一口径（`typeof summary !== "string" ||
+  summary.trim().length === 0`）拒绝——**写库前**的最后一道，覆盖上游漏判、extension/hook 提供的摘要、
+  boundary drafts 三条路径。
+- 不改 `getSummarizationFailure` 本身：它还被 `branch-summarization.js:242`（空摘要回落
+  `"No summary generated"` 占位）与 `bug-report.js:281`（已有自己的空判）使用，改它会越出 U2 边界。
+
+**完整 diff**（`patches/@earendil-works+pi-coding-agent+1.5.2.patch`，md5 `fa19b77c…`）：
+
+```diff
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js
+index 9b1a409..97612c3 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js
+@@ -460,6 +460,19 @@ export function getSummarizationFailure(response, label) {
+     }
+     return undefined;
+ }
++/**
++ * fshine patch U2: a `stop` response with an empty or whitespace-only body is not a checkpoint.
++ * Upstream only rejects `error`/`length`, so a blank summary used to be persisted as a compaction
++ * entry and silently dropped the history it was meant to replace. Blankness is decided after
++ * `trim()` so `"  \n\t "` is rejected too.
++ */
++function assertSummarizationText(response, label) {
++    const text = contentText(response.content);
++    if (text.trim().length === 0) {
++        throw new Error(`${label} failed: model returned an empty summary; kept existing history`);
++    }
++    return text;
++}
+ function createSummarizationOptions(model, apiKey, headers, env, signal, thinkingLevel, sessionId) {
+     const options = { signal, apiKey, headers, env, sessionId };
+     if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
+@@ -537,7 +550,7 @@ _reserveTokens, apiKey, headers, signal, customInstructions, previousSummary, th
+     if (response.content.some((block) => block.type === "toolCall")) {
+         throw new Error("Summarization attempted to call a tool");
+     }
+-    const textContent = contentText(response.content);
++    const textContent = assertSummarizationText(response, "Summarization");
+     return { text: textContent, usage: response.usage };
+ }
+ function isProjectedTurnStart(entry) {
+@@ -742,7 +755,7 @@ async function generateTurnPrefixSummary(messages, model, apiKey, headers, env,
+         throw new Error("Turn prefix summarization attempted to call a tool");
+     }
+     return {
+-        text: contentText(response.content),
++        text: assertSummarizationText(response, "Turn prefix summarization"),
+         usage: response.usage,
+     };
+ }
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js
+index 7ee0501..daca92b 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js
+@@ -890,6 +890,12 @@ export class SessionManager {
+     }
+     /** Append a compaction summary as child of current leaf, then advance leaf. Returns entry id. */
+     appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromHook, usage) {
++        // fshine patch U2: the commit boundary for compaction checkpoints. Even if a future
++        // summarization path forgets to validate its text, a blank summary must never replace
++        // existing history with nothing - reject before writing so the old history stays loadable.
++        if (typeof summary !== "string" || summary.trim().length === 0) {
++            throw new Error("Refusing to append a compaction entry with an empty summary");
++        }
+         const timestamp = new Date().toISOString();
+         const systemMessage = getCurrentSystemMessage(this.buildSessionProjection().messages);
+         const id = generateId(this.byId);
+```
+
+**不改的**：`getSummarizationFailure` 本体（其他摘要使用者语义不变）、`branch-summarization.js`、
+`bug-report.js`、`compact()` 的合并/文件操作拼接、`agent-session.js` 的三条提交路径与
+`compaction_end` 事件形状、`dist/bundle/**`；不引入 StepCode 的 Trigger Policy V2/调度/预算门
+（只借它「空摘要不得提交」的判空/提交边界这一点）。
+
+**删除条件**：上游在摘要返回处（普通摘要与 Turn Prefix Summary）**自己**按 trim 判空并抛错，
+或在 `appendCompaction` 写库前拒绝空摘要（任一形式，二者之一即可让 U2 的对应守卫失效）后，
+删除本补丁与 `packages/agent/pi-152-u2-empty-summary.test.ts`。
+
+**验证读数（确定性，零真实模型；`TMPDIR=/home/tao/.tmp`）**：
+
+- 守卫测试 `packages/agent/pi-152-u2-empty-summary.test.ts`（真实 `createAgentSession` +
+  `SessionManager` 落真实会话文件；脚本化 provider 只替换模型响应）：
+  - **无补丁（实测）**：`4 failed | 1 passed (5)`（正向对照无补丁时本就绿：有效摘要能正常入库）；
+    其中 `T-empty` 形状 = `compaction_end` 无 errorMessage、
+    会话文件 `entries` 出现 `compaction`、`summary=""`；`T-ws` = `summary="  \n\t "`、`summaryChars=5`；
+    最后一条主请求 `hasFact=false`（事实消失）。与 `report4.json` 的 T-empty/T-ws 一致。
+  - **有补丁（实测）**：`5 passed (5)`。
+- **反向绊线（实测）**：把三处判空（两个摘要调用点 + `appendCompaction`）同时改回上游写法 →
+  `4 failed | 1 passed (5)`：边界①（空/全空白）、边界②（Turn Prefix）、边界③（写库）各红，
+  正向对照（有效摘要 → 恰一条 `Turn Context (split turn)` 检查点）仍绿 ⇒ 断言不是「什么都拒绝」。
+- **失败语义（实测，边界①用例内断言）**：失败路径 `compaction_end` 带 `errorMessage`
+  （`Auto-compaction failed: Summarization failed: model returned an empty summary; kept existing history`）、
+  会话文件里 `compaction` 条目数 = 0、同会话后续主请求仍带事实；
+  `SessionManager.open(sessionFile)` 重开后投影消息非空且包含事实、无 compaction 条目；
+  再从该文件重开一个会话（关压缩，避免 prompt 前压缩掩盖文件历史）发一轮，
+  请求里仍带事实 ⇒ 原历史可恢复、下次打开能继续。
+- **边界②实测形状**：分段轮次流程 `summaryRequests=2 / turnPrefixRequests=1`；
+  修复前空分段摘要拼成 `"\n\n---\n\n**Turn Context (split turn):**\n\n"`（trim 非空、会被入库）；
+  修复后同一流程整次压缩失败、0 条 compaction。
+- **回归门**：`npm run typecheck` 通过；`npm run test -- --project unit` = `89 passed / 923 passed (923)`。
+- **补丁可撤销（实测）**：`npx patch-package --reverse` → `compaction.js` md5 `20d3c20c…`、
+  `session-manager.js` md5 `4edb7c48…`；`npm run postinstall`（两行 ✔）→ `af49aac9…` / `a6c8bdfa…`。
