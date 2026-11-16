@@ -20,6 +20,25 @@ function isPresent(value) {
   return value !== undefined && value !== '';
 }
 
+/** The single filter flag is `--where`; parsing below accepts nothing else. */
+function readWhere(flags) {
+  for (const key of ['--where', 'where']) {
+    if (isPresent(flags[key])) return flags[key];
+  }
+  return null;
+}
+
+function declaredValues(dimension) {
+  return dimension.values.map((value) => `"${value}"`).join(', ');
+}
+
+function complete(read, items, values, catalog) {
+  values.items = items;
+  values.count = items.length;
+  values.fields = [...new Set(items.flatMap((item) => Object.keys(item)))];
+  return buildResponse(read, 'completed', values, catalog);
+}
+
 /** CLI flags arrive bare (`collection`); the declaration names them `--collection`. */
 function normalizeFlags(read, flags) {
   const out = { ...flags };
@@ -100,18 +119,65 @@ function executeDeclaredRead(input) {
     return buildResponse(read, 'read_fault', values, catalog, { error: fault.error, exitCode: fault.exitCode });
   }
 
+  const dimension = collection.dimension ?? null;
   const window = pick(read.window.keys, flags);
+  const where = readWhere(flags);
   values['window.value'] = window;
   values['window.available'] = collection.windows;
-  if (window !== null && !collection.windows.includes(window)) {
-    return buildResponse(read, 'window_no_data', values, catalog);
+  values['where.reason'] = '';
+
+  if (dimension === null) {
+    // No declared dimension: keep the historical window-membership semantics exactly.
+    if (where !== null) {
+      values['where.reason'] = 'collection declares no dimension; --where is not supported for it';
+      return buildResponse(read, 'invalid_where', values, catalog);
+    }
+    if (window !== null && !collection.windows.includes(window)) {
+      return buildResponse(read, 'window_no_data', values, catalog);
+    }
+    return complete(read, collection.items, values, catalog);
   }
 
-  const items = collection.items;
-  values.items = items;
-  values.count = items.length;
-  values.fields = [...new Set(items.flatMap((item) => Object.keys(item)))];
-  return buildResponse(read, 'completed', values, catalog);
+  // Declared dimension: `--where <name>=<value>` is the filter; `--window` stays as
+  // an alias mapped onto the same dimension. One pair only — no expressions.
+  let filterValue = null;
+  if (where !== null && window !== null) {
+    values['where.reason'] = 'provide only one of --where or --window';
+    return buildResponse(read, 'invalid_where', values, catalog);
+  }
+  if (where !== null) {
+    if (typeof where !== 'string') {
+      values['where.reason'] = 'expected --where <dimension>=<value>';
+      return buildResponse(read, 'invalid_where', values, catalog);
+    }
+    const separator = where.indexOf('=');
+    if (separator <= 0 || separator === where.length - 1) {
+      values['where.reason'] = 'expected a single <dimension>=<value> pair';
+      return buildResponse(read, 'invalid_where', values, catalog);
+    }
+    const filterName = where.slice(0, separator);
+    const candidate = where.slice(separator + 1);
+    if (filterName !== dimension.name) {
+      values['where.reason'] = `unknown dimension "${filterName}" (declared dimension is "${dimension.name}")`;
+      return buildResponse(read, 'invalid_where', values, catalog);
+    }
+    if (!dimension.values.includes(candidate)) {
+      values['where.reason'] = `value "${candidate}" is not one of ${declaredValues(dimension)}`;
+      return buildResponse(read, 'invalid_where', values, catalog);
+    }
+    filterValue = candidate;
+  } else if (window !== null) {
+    if (typeof window !== 'string' || !dimension.values.includes(window)) {
+      values['where.reason'] = `value "${String(window)}" is not one of ${declaredValues(dimension)}`;
+      return buildResponse(read, 'invalid_where', values, catalog);
+    }
+    filterValue = window;
+  }
+
+  const items = filterValue === null
+    ? collection.items
+    : collection.items.filter((item) => item[dimension.name] === filterValue);
+  return complete(read, items, values, catalog);
 }
 
 module.exports = { executeDeclaredRead };

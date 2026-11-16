@@ -52,7 +52,8 @@
     "PLAN_NOT_FOUND": "No such plan.",
     "PLAN_NOT_PENDING": "Plan is not pending activation.",
     "COLLECTION_FAULT": "That collection cannot be read in its current state. Report the failure as-is.",
-    "INVALID_ARGUMENT": "Provide a string value for the named argument."
+    "INVALID_ARGUMENT": "Provide a string value for the named argument.",
+    "WHERE_INVALID": "Filter with a single --where <dimension>=<value> pair using one of the collection's declared dimension values."
   },
   "reads": {
     "dummy.query": {
@@ -71,6 +72,10 @@
         },
         {
           "name": "--round",
+          "type": "string"
+        },
+        {
+          "name": "--where",
           "type": "string"
         }
       ],
@@ -174,6 +179,15 @@
           "status": "failed",
           "exitCode": 2,
           "data": null
+        },
+        "invalid_where": {
+          "status": "failed",
+          "exitCode": 1,
+          "data": null,
+          "error": {
+            "code": "WHERE_INVALID",
+            "message": "Invalid --where for collection {{source.collection}}: {{where.reason}}"
+          }
         }
       }
     },
@@ -193,6 +207,10 @@
         },
         {
           "name": "--round",
+          "type": "string"
+        },
+        {
+          "name": "--where",
           "type": "string"
         }
       ],
@@ -296,6 +314,15 @@
           "status": "failed",
           "exitCode": 2,
           "data": null
+        },
+        "invalid_where": {
+          "status": "failed",
+          "exitCode": 1,
+          "data": null,
+          "error": {
+            "code": "WHERE_INVALID",
+            "message": "Invalid --where for collection {{source.collection}}: {{where.reason}}"
+          }
         }
       }
     }

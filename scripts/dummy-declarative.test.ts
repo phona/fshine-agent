@@ -352,3 +352,133 @@ describe('⑤ 分层纪律：runtime 通用、业务判定不进 runtime', () =>
     for (const name of datasets) expect(name.endsWith('.json'), name).toBe(true);
   });
 });
+
+/**
+ * S2 · 集合维度（dimension）。
+ *
+ * 维度是集合绑定上的一句纯声明 `{ name, values }`，items 自带该字段；查询用
+ * `--where <name>=<value>` 真过滤，`--window` 作为同一维度的兼容别名。仓库内现有
+ * 集合不声明维度，所以全部旧行为（含 operation list 黄金字节）保持零 diff——本组用
+ * 「复制整套 fixtures 再声明维度」验证新能力，不碰仓库里的旧夹具。
+ */
+describe('⑥ S2 集合维度：--where 真过滤 / --window 别名 / 无维度不变 / 非法值可诊断', () => {
+  /** 只改副本：给 alpha 声明 customer 维度，并让它的两条 item 各带一个值。 */
+  function dimensionedFixtures(): { fixturesRoot: string; bin: string } {
+    const { fixturesRoot, bin } = copyFixtures();
+    const scenario = path.join(fixturesRoot, 'scenarios', 'dummy-finance', 'scenario.json');
+    editJson<{ collections: Array<Record<string, unknown>> }>(scenario, (value) => {
+      const alpha = value.collections.find((collection) => collection['collection'] === 'alpha')!;
+      alpha['dimension'] = { name: 'customer', values: ['acme', 'globex'] };
+    });
+    const dataset = path.join(fixturesRoot, 'scenarios', 'dummy-finance', 'datasets', 'alpha.json');
+    editJson<{ items: Array<Record<string, unknown>> }>(dataset, (value) => {
+      value.items[0]!['customer'] = 'acme';
+      value.items[1]!['customer'] = 'globex';
+    });
+    return { fixturesRoot, bin };
+  }
+
+  it('--where 真过滤 items（不是只校验枚举）', () => {
+    const { bin } = dimensionedFixtures();
+    const acme = runDummy(['query', 'dummy.query', '--collection', 'alpha', '--where', 'customer=acme'], { bin });
+    expect(acme.status).toBe(0);
+    expect(acme.envelope).toMatchObject({ status: 'completed', data: { collection: 'alpha', count: 1 } });
+    expect((acme.envelope as { data: { items: Array<{ id: string }> } }).data.items.map((item) => item.id))
+      .toEqual(['rec-001']);
+
+    const globex = runDummy(['query', 'dummy.query', '--collection', 'alpha', '--where', 'customer=globex'], { bin });
+    expect(globex.envelope).toMatchObject({ status: 'completed', data: { collection: 'alpha', count: 1 } });
+    expect((globex.envelope as { data: { items: Array<{ id: string }> } }).data.items.map((item) => item.id))
+      .toEqual(['rec-002']);
+
+    // 不带过滤 -> 返回全部（维度声明不改变默认行为）
+    const all = runDummy(['query', 'dummy.query', '--collection', 'alpha'], { bin });
+    expect(all.envelope).toMatchObject({ status: 'completed', data: { count: 2 } });
+  });
+
+  it('--window 保留为声明维度的兼容别名（--round 同位）', () => {
+    const { bin } = dimensionedFixtures();
+    const alias = runDummy(['query', 'dummy.query', '--collection', 'alpha', '--window', 'acme'], { bin });
+    expect(alias.envelope).toMatchObject({ status: 'completed', data: { collection: 'alpha', window: 'acme', count: 1 } });
+    expect((alias.envelope as { data: { items: Array<{ id: string }> } }).data.items.map((item) => item.id))
+      .toEqual(['rec-001']);
+
+    const round = runDummy(['query', 'dummy.query', '--collection', 'alpha', '--round', 'globex'], { bin });
+    expect(round.envelope).toMatchObject({ status: 'completed', data: { count: 1 } });
+    expect((round.envelope as { data: { items: Array<{ id: string }> } }).data.items.map((item) => item.id))
+      .toEqual(['rec-002']);
+  });
+
+  it('未声明 dimension 的集合行为不变：无过滤返回全部，--window 仍是窗口成员校验', () => {
+    const { bin } = dimensionedFixtures();
+    const all = runDummy(['query', 'dummy.query', '--collection', 'beta'], { bin });
+    expect(all.envelope).toMatchObject({ status: 'completed', data: { collection: 'beta', count: 3 } });
+
+    const knownWindow = runDummy(['query', 'dummy.query', '--collection', 'beta', '--window', 'W1'], { bin });
+    expect(knownWindow.envelope).toMatchObject({ status: 'completed', data: { collection: 'beta', window: 'W1', count: 3 } });
+
+    const unknownWindow = runDummy(['query', 'dummy.query', '--collection', 'beta', '--window', 'W2'], { bin });
+    expect(unknownWindow.envelope).toMatchObject({
+      status: 'not_found',
+      data: { availableWindows: ['W1'] },
+      error: { code: 'WINDOW_NO_DATA' },
+    });
+  });
+
+  it('非法维度值 / 维度名 / 缺维度集合 / 多条件 都是可诊断的 WHERE_INVALID（exit 1）', () => {
+    const { bin } = dimensionedFixtures();
+    const badValue = runDummy(['query', 'dummy.query', '--collection', 'alpha', '--where', 'customer=initech'], { bin });
+    expect(badValue.status).toBe(1);
+    expect(badValue.envelope).toMatchObject({ status: 'failed', data: null, error: { code: 'WHERE_INVALID' } });
+    const badValueMessage = (badValue.envelope?.['error'] as { message: string }).message;
+    expect(badValueMessage).toContain('initech');
+    expect(badValueMessage).toContain('acme');
+    expect(badValue.audit[0]).toMatchObject({ exitCode: 1 });
+
+    const badName = runDummy(['query', 'dummy.query', '--collection', 'alpha', '--where', 'region=acme'], { bin });
+    expect(badName.status).toBe(1);
+    expect((badName.envelope?.['error'] as { message: string }).message).toContain('region');
+
+    const noDimension = runDummy(['query', 'dummy.query', '--collection', 'beta', '--where', 'customer=acme'], { bin });
+    expect(noDimension.status).toBe(1);
+    expect(noDimension.envelope).toMatchObject({ status: 'failed', error: { code: 'WHERE_INVALID' } });
+    expect((noDimension.envelope?.['error'] as { message: string }).message).toContain('no dimension');
+
+    const twoConditions = runDummy(['query', 'dummy.query', '--collection', 'alpha', '--where', 'customer=acme&customer=globex'], { bin });
+    expect(twoConditions.status).toBe(1);
+    expect(twoConditions.envelope).toMatchObject({ status: 'failed', error: { code: 'WHERE_INVALID' } });
+
+    const bothFlags = runDummy(['query', 'dummy.query', '--collection', 'alpha', '--where', 'customer=acme', '--window', 'globex'], { bin });
+    expect(bothFlags.status).toBe(1);
+    expect(bothFlags.envelope).toMatchObject({ status: 'failed', error: { code: 'WHERE_INVALID' } });
+  });
+
+  it('维度声明在加载期 fail-closed：item 缺字段或值未声明即拒绝整个 scenario', () => {
+    const { fixturesRoot } = dimensionedFixtures();
+    const { loadScenario, ConfigError } = requireCjs(path.join(RUNTIME_DIR, 'loader.cjs')) as {
+      loadScenario: (options: { fixturesRoot: string; scenarioId: string }) => unknown;
+      ConfigError: new (message: string) => Error;
+    };
+    expect(() => loadScenario({ fixturesRoot, scenarioId: 'dummy-finance' })).not.toThrow();
+
+    const dataset = path.join(fixturesRoot, 'scenarios', 'dummy-finance', 'datasets', 'alpha.json');
+    editJson<{ items: Array<Record<string, unknown>> }>(dataset, (value) => {
+      delete value.items[1]!['customer'];
+    });
+    expect(() => loadScenario({ fixturesRoot, scenarioId: 'dummy-finance' })).toThrow(ConfigError);
+
+    editJson<{ items: Array<Record<string, unknown>> }>(dataset, (value) => {
+      value.items[1]!['customer'] = 'not-declared';
+    });
+    expect(() => loadScenario({ fixturesRoot, scenarioId: 'dummy-finance' })).toThrow(/not-declared/);
+  });
+
+  it('仓库内旧夹具不声明 dimension（零 diff 的前提）', () => {
+    const scenario = JSON.parse(readFileSync(path.join(FIXTURES_ROOT, 'scenarios', 'dummy-finance', 'scenario.json'), 'utf8')) as {
+      collections: Array<Record<string, unknown>>;
+    };
+    for (const collection of scenario.collections) {
+      expect(collection, String(collection['collection'])).not.toHaveProperty('dimension');
+    }
+  });
+});

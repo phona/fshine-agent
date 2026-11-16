@@ -26,6 +26,7 @@ const ALLOWED_PLACEHOLDERS = Object.freeze([
   'items',
   'count',
   'fields',
+  'where.reason',
   'arg.name',
   'arg.type',
 ]);
@@ -247,11 +248,37 @@ function loadScenario(options) {
     for (const [window, count] of Object.entries(binding.records ?? {})) {
       if (!Number.isInteger(count) || count < 0) fail(`scenario ${file}: collection(${name}).records[${window}] must be a non-negative integer`);
     }
+    // Optional single dimension: `{ name, values }`. It only declares a filterable
+    // field; the runtime never interprets the name or the values (pure data).
+    let dimension = null;
+    if (binding.dimension !== undefined) {
+      const at = `scenario ${file}: collection(${name}).dimension`;
+      if (!isObject(binding.dimension)) fail(`${at} must be an object`);
+      const dimensionName = expectString(binding.dimension.name, `${at}.name`);
+      const dimensionValues = expectArray(binding.dimension.values, `${at}.values`);
+      if (dimensionValues.length === 0) fail(`${at}.values must not be empty`);
+      const declared = new Set();
+      for (const value of dimensionValues) {
+        expectString(value, `${at}.values[]`);
+        if (declared.has(value)) fail(`${at}.values has duplicate "${value}"`);
+        declared.add(value);
+      }
+      for (const item of dataset.items) {
+        if (!Object.prototype.hasOwnProperty.call(item, dimensionName)) {
+          fail(`dataset ${datasetFile}: every item must carry dimension field "${dimensionName}"`);
+        }
+        if (!declared.has(item[dimensionName])) {
+          fail(`dataset ${datasetFile}: "${dimensionName}" value ${JSON.stringify(item[dimensionName])} is not declared in ${at}.values`);
+        }
+      }
+      dimension = { name: dimensionName, values: [...dimensionValues] };
+    }
     const collection = {
       items: dataset.items,
       windows: dataset.windows,
       locked: binding.locked === true,
       records: { ...(binding.records ?? {}) },
+      ...(dimension === null ? {} : { dimension }),
     };
     for (const fault of faults) {
       if (fault.collection !== name) continue;
