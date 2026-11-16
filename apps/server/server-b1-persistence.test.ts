@@ -141,7 +141,7 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
         mainDriver: plannedDriver(new Map([['第一回合', { reply: '回复一' }]]), rec1),
         workerDriver: workerNeverCalled,
       }),
-      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       logger: () => {},
     });
     try {
@@ -160,7 +160,7 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
         mainDriver: plannedDriver(new Map([['第二回合', { reply: '回复二' }]]), rec2),
         workerDriver: workerNeverCalled,
       }),
-      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       logger: () => {},
     });
     try {
@@ -191,7 +191,7 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
         mainDriver: plannedDriver(new Map([['查 documents W202611', { delegates: ['查 documents W202611'], reply: '已受理，稍后通知你。' }]]), rec1),
         workerDriver: workerNeverCalled,
       }),
-      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       taskExecutor: executor1,
       logger: () => {},
     });
@@ -227,7 +227,7 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
         mainDriver: plannedDriver(new Map([['状态如何', { reply: '一切正常。' }]]), rec2),
         workerDriver: workerNeverCalled,
       }),
-      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       taskExecutor: replayExecutor,
       logger: () => {},
     });
@@ -268,7 +268,7 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
         ]), rec1),
         workerDriver: workerNeverCalled,
       }),
-      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       logger: () => {},
     });
     try {
@@ -290,7 +290,7 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
         mainDriver: plannedDriver(new Map([['后续', { reply: '好的' }]]), rec2),
         workerDriver: workerNeverCalled,
       }),
-      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       logger: () => {},
     });
     try {

@@ -649,7 +649,7 @@ export async function buildSession(input: BuildSessionInput): Promise<SessionHan
       registry: prepared.registry,
       policy,
       emptyOperationsMessage,
-      face: { client, allowedOperations },
+      face: { client, allowedOperations, readOnlyOperations: assemblyFace.readOnlyOperations },
       workerDriver: preDrivers.workerDriver,
     })).runner;
   }
@@ -667,7 +667,7 @@ export async function buildSession(input: BuildSessionInput): Promise<SessionHan
     policy,
     dispatchMode,
     ...(runner === undefined ? {} : { taskRunner: runner }),
-    createExecutionFace: async () => ({ client, allowedOperations }),
+    createExecutionFace: async () => ({ client, allowedOperations, readOnlyOperations: assemblyFace.readOnlyOperations }),
     createDrivers: async (driverEnv) => preDrivers ?? makeDrivers(driverEnv),
   });
 

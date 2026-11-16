@@ -219,7 +219,7 @@ export async function runChainOnSource(options: ChainRunOptions): Promise<Shadow
     mainSystemPrompt: '（shadow harness）Main 系统提示',
     workerSkills: [],
     createDrivers: () => ({ mainDriver, workerDriver }),
-    createExecutionFace: async () => ({ client: face.client, allowedOperations: face.allowedOperations }),
+    createExecutionFace: async () => ({ client: face.client, allowedOperations: face.allowedOperations, readOnlyOperations: face.readOnlyOperations }),
     runtime: { dispatchMode: 'background' },
     notificationSink: sink,
   });
@@ -404,8 +404,8 @@ export async function probeReadOnlyStability(options: ReadOnlyProbeOptions): Pro
   });
   const face = await source.createFace(stateDir);
   const before = face.dataFingerprint();
-  const first = await face.client.execute({ requestId: 'shadow_probe_1', operation: options.operation, args: options.args });
-  const second = await face.client.execute({ requestId: 'shadow_probe_2', operation: options.operation, args: options.args });
+  const first = await face.client.execute({ requestId: 'shadow_probe_1', dispatchKey: 'dk_test_shadow_probe_1', operation: options.operation, args: options.args });
+  const second = await face.client.execute({ requestId: 'shadow_probe_2', dispatchKey: 'dk_test_shadow_probe_2', operation: options.operation, args: options.args });
   const after = face.dataFingerprint();
   const readDigests: readonly [string, string] = [canonicalDigest(first), canonicalDigest(second)];
   return {

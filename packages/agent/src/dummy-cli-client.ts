@@ -162,8 +162,11 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
       const scratch = mkdtempSync(path.join(os.tmpdir(), 'dummy-exec-'));
       try {
         const callFile = path.join(scratch, 'call.json');
+        // U3：请求体同时携带逻辑操作身份（dispatchKey）——执行层可据此派生幂等键；
+        // requestId 只作追踪，不承担身份语义。
         writeFileSync(callFile, JSON.stringify({
           operation: request.operation,
+          dispatchKey: request.dispatchKey,
           args: normalizeArgs(operation, request.args),
         }));
         const run = await runGateway(['call', '--file', callFile, '--state-dir', options.stateDir]);

@@ -5,8 +5,11 @@
  */
 export { loadConfig, deploymentEnvOf, effectiveDeploymentEnv } from './config';
 export type { LoadConfigOptions } from './config';
-export { openTaskStore, TASK_STORE_SCHEMA_VERSION } from './task-store';
+export { openTaskStore, operationKeyOf, TASK_STORE_SCHEMA_VERSION } from './task-store';
 export type {
+  OperationClaimRequest,
+  OperationRow,
+  OperationStateWrite,
   TaskRow,
   ExecutionRow,
   StoredTask,

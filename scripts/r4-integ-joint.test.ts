@@ -192,7 +192,7 @@ async function assembleBackground(options: AssembleOptions): Promise<Awaited<Ret
       mainDriver: fakeMainDriver(options.mainPlans, options.records ?? []),
       workerDriver: unreachableDriver(),
     }),
-    createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+    createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
     runtime: {
       dispatchMode: 'background',
       backgroundConcurrency: options.backgroundConcurrency ?? 1,
@@ -499,7 +499,7 @@ describe('R4 联合：P5 前台许可（inline 模式）', () => {
         mainDriver: fakeMainDriver(plans, records),
         workerDriver: unreachableDriver(),
       }),
-      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       runtime: { dispatchMode: 'inline' },
     });
     try {
@@ -535,7 +535,7 @@ describe('R4 联合：P5 前台许可（inline 模式）', () => {
         mainDriver: fakeMainDriver(plans, records),
         workerDriver: unreachableDriver(),
       }),
-      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       runtime: { dispatchMode: 'inline', maxDelegationDepth: 0 },
     });
     try {

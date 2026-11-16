@@ -37,9 +37,10 @@ import type {
   ExecutionClient,
   ExecutionOutcome,
 } from '@fshine/contracts/execution-contract';
-import type { DriverMessage, TurnDriver, TurnDriverResult } from './driver-contract';
+import type { DriverMessage, RuntimeTurnEvent, TurnDriver, TurnDriverResult } from './driver-contract';
+import { ToolUserError } from './driver-contract';
 import { READ_SKILL_TOOL, type SkillRegistry } from './skills';
-import { createTaskRegistry, deriveTaskName, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
+import { createTaskRegistry, deriveTaskName, DispatchConflictError, TaskTransitionError, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
 import {
   taskFailureReasonFor,
   type Permit,
@@ -278,6 +279,12 @@ export interface RuntimeOptions {
   transcriptStore?: TranscriptStore;
   /** B1：转录读/写失败的上报回调（fail-open 日志；缺省静默吞掉，不影响回合）。 */
   onTranscriptError?: (error: unknown) => void;
+  /**
+   * U3：执行层声明为只读的 operation 集合（由装配方从执行层 `access=read` 显式派生，
+   * **独立于** allowedOperations）。只有这些 operation 的重试可以安全重发；
+   * 缺省 = 空集（保守：一律按可能有副作用处理，重试走回放/待核对，绝不第二次执行）。
+   */
+  readOnlyOperations?: readonly string[];
 }
 
 /** 前台回合被资源策略确定性拒绝（queued 排队等晋升后不适用；携带机械 reason）。 */
@@ -340,6 +347,158 @@ export function renderWorkerDelegation(input: {
   return parts.join('\n');
 }
 
+/**
+ * 运行时回合号 / 重放窗口（U3）：只由驱动转述的原生事件推进（模型不可见、不可提供）。
+ *
+ * 生命周期（开 / 关 / 清空）：
+ *   · 开：仅在 recovery（compaction willRetry / auto_retry_start / assistant message_end('error')）
+ *     打开。窗口号 = 当前 attempt（被丢弃尝试所在的回合号）；同一次失败的多个原生事件
+ *     （error message_end 后紧跟 auto_retry_start）只开一次，不重复推进回合号。
+ *   · 关：被重试响应结束（phase=awaiting_retry_response 时收到 assistant_end）先只 disarm，
+ *     窗口保留给它自己的工具调用；下一次 assistant_end（一轮新的响应边界）关闭窗口。
+ *     若窗口已被消费（phase=retry_response_tools）后再次 recovery，先关旧窗再开新窗。
+ *   · 清空：关闭 = 删除 window 与 phase，不留下可被后续响应使用的绑定；attempt 只增不复用。
+ *     窗口状态随 send / 单次任务执行结束整体丢弃，不跨回合、不跨任务。
+ */
+interface RuntimeAttemptWindow {
+  attempt: number;
+  /** 打开窗口时被丢弃尝试的回合号（只读回同一行，不重铸身份）。 */
+  window?: number;
+  /**
+   * 窗口相位（与 window 同生共死）：
+   *   awaiting_retry_response —— recovery 已开窗，等待被重试的响应结束；
+   *   retry_response_tools    —— 被重试的响应已结束，窗口对其工具调用有效。
+   */
+  phase?: 'awaiting_retry_response' | 'retry_response_tools';
+}
+
+function newAttemptWindow(): RuntimeAttemptWindow {
+  return { attempt: 1 };
+}
+
+function closeWindow(state: RuntimeAttemptWindow): void {
+  delete state.window;
+  delete state.phase;
+}
+
+function noteRuntimeEvent(state: RuntimeAttemptWindow, event: RuntimeTurnEvent): void {
+  if (event.kind === 'assistant_end') {
+    if (state.phase === 'awaiting_retry_response') {
+      // 被重试的响应结束：其工具调用在此事件之后执行，窗口须保留给它们。
+      state.phase = 'retry_response_tools';
+      state.attempt += 1;
+      return;
+    }
+    // 一轮新的响应边界：关闭并清空旧窗口（不留给这一响应及之后），推进回合号。
+    closeWindow(state);
+    state.attempt += 1;
+    return;
+  }
+  // recovery：同一次失败尚未等到重试响应结束时，重复的恢复事件不再开窗。
+  if (state.phase === 'awaiting_retry_response') return;
+  // 窗口已被上一轮重试响应消费后再失败：旧窗到此关闭，新窗指向当前回合。
+  closeWindow(state);
+  state.window = state.attempt;
+  state.attempt += 1;
+  state.phase = 'awaiting_retry_response';
+}
+
+/** 待核对固定话术：内部术语不进用户可见文本（通知/汇报另有黑名单）。 */
+const RESULT_UNKNOWN_MESSAGE =
+  '结果待核对：无法确认这次操作是否已经发生，已停止自动重试，需要人工核对后再决定是否重办。';
+const OPERATION_IN_PROGRESS_MESSAGE =
+  '这次操作正在执行中，本次没有重复发起；请以已有执行记录为准，不要并发重试。';
+
+/** 认领结果的机械处置（runtime 内部；不对外暴露身份键细节）。 */
+interface OperationRunResult {
+  outcome: ExecutionOutcome;
+  /** 本次是否真的发起了执行（false = 回放已有结果）。 */
+  executed: boolean;
+  /** 必须是「待核对」：调用方不得当作成功，也不得自动重试。 */
+  unresolved: boolean;
+}
+
+/**
+ * U3：认领 →（仅首次铸造）执行 → 落定。**先落库再调用**：调用执行层之前已有一行
+ * claimed（进程死亡窗口里有记录）；重试/恢复后的调用只按窗口读回已持久化行。
+ * 无法证明绑定（unresolved）时不发起执行，交还待核对。
+ */
+async function claimAndRunOperation(input: {
+  registry: TaskRegistry;
+  readOnlyOperations: ReadonlySet<string>;
+  scopeKey: string;
+  window: RuntimeAttemptWindow;
+  operation: string;
+  taskId?: string;
+  /** 执行回调抛错时的机械处置：unknown = 外部是否生效未知（默认）；propagate = 已知失败，原样抛出。 */
+  executeThrows?: 'unknown' | 'propagate';
+  execute: (dispatchKey: string) => Promise<ExecutionOutcome>;
+}): Promise<OperationRunResult> {
+  const readOnly = input.readOnlyOperations.has(input.operation);
+  const claim = input.registry.claimOperation({
+    scopeKey: input.scopeKey,
+    operation: input.operation,
+    attempt: input.window.attempt,
+    ...(input.window.window === undefined ? {} : { replayWindow: input.window.window }),
+    ...(readOnly ? { readOnly: true } : {}),
+    ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+  });
+  switch (claim.kind) {
+    case 'conflict':
+      throw new DispatchConflictError(claim.dispatchKey);
+    case 'replayed': {
+      // 同 Key 同操作：返回已有结果，零调用、零新执行行。
+      // 已落定的 result_unknown 不会以 replay 出现（账行状态是 unknown），这里仍保守判定。
+      const replayedUnknown = claim.outcome.status === 'failed' && claim.outcome.error.code === 'result_unknown';
+      return { outcome: claim.outcome, executed: false, unresolved: replayedUnknown };
+    }
+    case 'in_progress':
+      return {
+        outcome: { status: 'failed', error: { code: 'in_progress', message: OPERATION_IN_PROGRESS_MESSAGE, retryable: false } },
+        executed: false,
+        unresolved: true,
+      };
+    case 'unresolved':
+      return {
+        outcome: { status: 'failed', error: { code: 'result_unknown', message: RESULT_UNKNOWN_MESSAGE, retryable: false } },
+        executed: false,
+        unresolved: true,
+      };
+    case 'minted': {
+      let outcome: ExecutionOutcome;
+      try {
+        outcome = await input.execute(claim.dispatchKey);
+      } catch (error) {
+        if (input.executeThrows === 'propagate') {
+          // 已知失败（不是「结果未知」）：账行落 failed，原样抛给调用方（既有失败路径不变）。
+          input.registry.settleOperation(claim.dispatchKey, {
+            status: 'failed',
+            error: { code: 'delegation_failed', message: error instanceof Error ? error.message : String(error) },
+          });
+          throw error;
+        }
+        // 调用中断/无回执：外部是否生效未知 → 账行落 unknown，交还待核对（不自动重试）。
+        input.registry.markOperationUnknown(claim.dispatchKey, 'call_interrupted');
+        return {
+          outcome: { status: 'failed', error: { code: 'result_unknown', message: RESULT_UNKNOWN_MESSAGE, retryable: false } },
+          executed: true,
+          unresolved: true,
+        };
+      }
+      input.registry.settleOperation(
+        claim.dispatchKey,
+        outcome,
+        input.taskId === undefined ? {} : { taskId: input.taskId },
+      );
+      return {
+        outcome,
+        executed: true,
+        unresolved: outcome.status === 'failed' && outcome.error.code === 'result_unknown',
+      };
+    }
+  }
+}
+
 export async function createSession(options: RuntimeOptions): Promise<Session> {
   if (options.principalId.trim() === '' || options.sessionId.trim() === '') {
     throw new Error('最小切片需要非空 principalId 与 sessionId（可信身份来自装配层）。');
@@ -361,6 +520,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   };
 
   const registry = options.taskRegistry ?? createTaskRegistry();
+  /** U3：只读 operation 集合（装配方声明；缺省保守为空 = 一律按可能有副作用处理）。 */
+  const readOnlyOperations = new Set(options.readOnlyOperations ?? []);
+  /** 本会话回合号（turn 作用域身份 = session + 序号；进程内单调）。 */
+  let turnNo = 0;
   const mainTurnMs = options.mainTurnMs ?? DEFAULT_MAIN_TURN_MS;
   const workerTurnMs = options.workerTurnMs ?? DEFAULT_WORKER_TURN_MS;
   const policy = options.policy;
@@ -492,7 +655,41 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     policy.release(permit);
   }
 
-  async function executeOperation(taskId: string, args: Record<string, unknown>): Promise<ExecutionOutcome> {
+  /**
+   * U3：本会话的认领/落定入口（只读集合与底账来自装配层；语义见 claimAndRunOperation）。
+   */
+  async function runOperation(input: {
+    scopeKey: string;
+    window: RuntimeAttemptWindow;
+    operation: string;
+    taskId?: string;
+    /** 执行回调抛错时的机械处置：unknown = 外部是否生效未知（默认）；propagate = 已知失败，原样抛出。 */
+    executeThrows?: 'unknown' | 'propagate';
+    execute: (dispatchKey: string) => Promise<ExecutionOutcome>;
+  }): Promise<OperationRunResult> {
+    return claimAndRunOperation({
+      ...input,
+      registry,
+      readOnlyOperations,
+    });
+  }
+
+  /** 待核对落任务：running→failed + reason=result_unknown（复用既有状态机，无新状态）。 */
+  function markTaskResultUnknown(taskId: string): void {
+    try {
+      registry.markResultUnknown(taskId);
+    } catch (error) {
+      // 任务已处于终态：不覆盖既有事实（也不是本机制能改写的事实）。
+      if (!(error instanceof TaskTransitionError)) throw error;
+    }
+  }
+
+  async function executeOperation(
+    taskId: string,
+    args: Record<string, unknown>,
+    window: RuntimeAttemptWindow,
+    onUnresolved: () => void,
+  ): Promise<ExecutionOutcome> {
     const operation = typeof args.operation === 'string' ? args.operation : '';
     if (operation === '') throw new Error('execute_operation 缺少 operation。');
     if (!allowed.has(operation)) {
@@ -503,23 +700,45 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
       ? (rawArgs as Record<string, unknown>)
       : {};
-    // requestId 由宿主生成：模型不能提供调用身份。
-    const requestId = `req_${randomUUID()}`;
-    const outcome = await options.client.execute({ requestId, operation, args: callArgs });
-    const record: ExecutionRecord = {
-      requestId,
+    const run = await runOperation({
+      scopeKey: `task:${taskId}`,
+      window,
       operation,
-      status: outcome.status,
-      ...(outcome.status === 'failed' || outcome.status === 'refused' ? { error: outcome.error } : {}),
-    };
-    registry.noteExecution(taskId, record);
-    return outcome;
+      taskId,
+      execute: async (dispatchKey) => {
+        // requestId 由宿主生成、每次调用换号（只作追踪）；dispatchKey 是操作身份，不换。
+        const requestId = `req_${randomUUID()}`;
+        const outcome = await options.client.execute({ requestId, dispatchKey, operation, args: callArgs });
+        const record: ExecutionRecord = {
+          requestId,
+          operation,
+          status: outcome.status,
+          dispatchKey,
+          ...(outcome.status === 'failed' || outcome.status === 'refused' ? { error: outcome.error } : {}),
+        };
+        // 只有真实执行才写执行行（回放不写：一行 = 一次真实执行）。
+        registry.noteExecution(taskId, record);
+        return outcome;
+      },
+    });
+    if (run.unresolved) {
+      onUnresolved();
+      // 确定性终结本回合：不把待核对当作可重试的普通失败，模型不得自动重办。
+      throw new ToolUserError(
+        run.outcome.status === 'failed' ? run.outcome.error.message : RESULT_UNKNOWN_MESSAGE,
+      );
+    }
+    return run.outcome;
   }
 
-  function workerExec(taskId: string): (tool: string, args: Record<string, unknown>) => Promise<unknown> {
+  function workerExec(
+    taskId: string,
+    window: RuntimeAttemptWindow,
+    onUnresolved: () => void,
+  ): (tool: string, args: Record<string, unknown>) => Promise<unknown> {
     return async (tool, args) => {
       if (tool !== EXECUTE_OPERATION_TOOL) throw new Error(`Worker 工具面之外的调用：${tool}`);
-      return executeOperation(taskId, args);
+      return executeOperation(taskId, args, window, onUnresolved);
     };
   }
 
@@ -606,6 +825,27 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       delegationPermit = acquired;
     }
     const workerDeadline = Math.min(Date.now() + workerTurnMs, currentTurnDeadline - WORKER_DEADLINE_MARGIN_MS);
+    // U3：本交办内的重放窗口（只由 Worker 驱动的原生事件推进；跨交办不继承）。
+    const workerWindow = newAttemptWindow();
+    let taskUnresolved = false;
+    /**
+     * 待核对回执（U3）：不当作成功、也不当作已确认失败；任务落 failed + reason=result_unknown，
+     * 回执只给机械事实，不自动重试。
+     */
+    const unresolvedReceipt = (): Record<string, unknown> => {
+      markTaskResultUnknown(taskId);
+      const task = registry.get(taskId, { principalId: options.principalId, sessionId: options.sessionId });
+      return {
+        taskId,
+        taskNo: task.taskNo ?? null,
+        name: task.name ?? deriveTaskName(task.request),
+        summary: RESULT_UNKNOWN_MESSAGE,
+        executions: task.executions,
+        status: 'failed',
+        reason: 'result_unknown',
+        notice: '这次执行的结果待核对：已停止自动重试，请先核对是否已经发生，再决定是否重办。',
+      };
+    };
     // P5 运行时计量（owner 授权 3a）：每次 Worker 调用完成后按任务累计调用数与时长。
     // 调用前检查在许可边界：派生 acquire 查共享预算 exhausted → budget_exhausted →
     // 任务 reason=resource_limited（见上，未进入 Worker 即拒）；此处 finally 计量
@@ -623,9 +863,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           ...(options.workerSkills ? { skills: options.workerSkills } : {}),
         }))],
         onStep: () => {},
-        exec: workerExec(taskId),
+        exec: workerExec(taskId, workerWindow, () => { taskUnresolved = true; }),
         deadline: workerDeadline,
+        onRuntimeEvent: (event) => noteRuntimeEvent(workerWindow, event),
       });
+      // 出现过「无法证明绑定 / 结果未知」：不判成功、不判确认失败，交还待核对。
+      if (taskUnresolved) return unresolvedReceipt();
       if (workerResult.text.trim() === '') {
         throw new Error('执行层 Worker 未产出有效汇报，本次任务未完成。');
       }
@@ -633,6 +876,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const task = registry.get(taskId, { principalId: options.principalId, sessionId: options.sessionId });
       return { taskId, taskNo: task.taskNo ?? null, summary: workerResult.text, executions: task.executions };
     } catch (error) {
+      // 待核对不是确认失败：不覆盖 result_unknown 事实，也不再自动重试。
+      if (taskUnresolved) return unresolvedReceipt();
       registry.fail(taskId, error instanceof Error ? error.message : String(error));
       throw error;
     } finally {
@@ -649,6 +894,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const progress: string[] = [];
       const taskIds: string[] = [];
       currentTurnDeadline = Date.now() + mainTurnMs;
+      // U3：本回合的 turn 作用域（run_task 逻辑操作身份的作用域）与重放窗口。
+      turnNo += 1;
+      const turnScopeKey = `turn:${options.sessionId}:${turnNo}`;
+      const mainWindow = newAttemptWindow();
       // 宿主只交「本轮输入」：最后一条 user = 本轮文本；历史种子仅在驱动尚无会话时使用。
       const factsMessage = options.taskFactProvider?.(options.principalId, options.sessionId);
       // 历史：驱动已有 Pi 会话时直接读其转录（Pi 独占）；尚无会话（首回合）时回落到
@@ -669,9 +918,26 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         exec: async (tool, args) => {
           if (tool === RUN_TASK_TOOL) {
             const task = typeof args.task === 'string' ? args.task : '';
-            const answer = await delegate(task, foregroundPermit);
+            // U3：run_task 在宿主侧也是一笔有副作用的逻辑操作——先认领落库再委派；
+            // 重放窗口内重复的 run_task 返回已有受理回执，不创建第二个任务。
+            const run = await runOperation({
+              scopeKey: turnScopeKey,
+              window: mainWindow,
+              operation: RUN_TASK_TOOL,
+              executeThrows: 'propagate',
+              execute: async () => ({ status: 'completed', data: await delegate(task, foregroundPermit) }),
+            });
+            if (run.unresolved) {
+              return {
+                status: 'failed',
+                reason: 'result_unknown',
+                error: { code: 'result_unknown', message: RESULT_UNKNOWN_MESSAGE, retryable: false },
+              };
+            }
+            const answer = run.outcome.status === 'completed' ? run.outcome.data : run.outcome;
             const taskId = (answer as { taskId?: unknown }).taskId;
-            if (typeof taskId === 'string') taskIds.push(taskId);
+            // 回放同一回执时任务只算一次（同一 taskId 不重复记账）。
+            if (typeof taskId === 'string' && !taskIds.includes(taskId)) taskIds.push(taskId);
             return answer;
           }
           // 任务查询/治理工具：与工具面同源门控（无 runner 时不暴露、也不受理），fail-closed。
@@ -690,6 +956,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           throw new Error(`Main 工具面之外的调用：${tool}`);
         },
         deadline: currentTurnDeadline,
+        onRuntimeEvent: (event) => noteRuntimeEvent(mainWindow, event),
       });
       lastMainProjection = mainResult.messages;
       // 回合后→持久化：把本回合**新增**消息逐条增量追加到存储（Pi 单条 entry 追加 = 线性，
@@ -785,6 +1052,11 @@ export interface TaskExecutorOptions {
    * 缺省不注入 = Worker 提示与现行常量逐字节相同。
    */
   workerWorkspaceRoot?: string;
+  /**
+   * U3：执行层声明为只读的 operation 集合（`access=read` 显式派生；缺省 = 空集，保守）。
+   * 只有只读 operation 的重试可以安全重发；写操作重试走回放/待核对。
+   */
+  readOnlyOperations?: readonly string[];
 }
 
 function isAbortErrorLike(error: unknown): boolean {
@@ -828,10 +1100,14 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
   };
   const workerTurnMs = options.workerTurnMs ?? DEFAULT_WORKER_TURN_MS;
   const now = options.now ?? Date.now;
+  const readOnlyOperations = new Set(options.readOnlyOperations ?? []);
 
   return {
     async execute(task, context): Promise<TaskExecutionOutcome> {
       const recorded: Array<{ operation: string; outcome: ExecutionOutcome }> = [];
+      // U3：本交办内的重放窗口（只由 Worker 驱动的原生事件推进）。
+      const workerWindow = newAttemptWindow();
+      let unresolved = false;
       const exec = async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
         if (tool !== EXECUTE_OPERATION_TOOL) throw new Error(`Worker 工具面之外的调用：${tool}`);
         const operation = typeof args.operation === 'string' ? args.operation : '';
@@ -843,17 +1119,36 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
           ? (rawArgs as Record<string, unknown>)
           : {};
-        // requestId 由宿主生成：模型不能提供可信身份。
-        const requestId = `req_${randomUUID()}`;
-        const outcome = await options.client.execute({ requestId, operation, args: callArgs });
-        options.registry.noteExecution(task.taskId, {
-          requestId,
+        const run = await claimAndRunOperation({
+          registry: options.registry,
+          readOnlyOperations,
+          scopeKey: `task:${task.taskId}`,
+          window: workerWindow,
           operation,
-          status: outcome.status,
-          ...(outcome.status === 'failed' || outcome.status === 'refused' ? { error: outcome.error } : {}),
+          taskId: task.taskId,
+          execute: async (dispatchKey) => {
+            // requestId 由宿主生成、每次调用换号（只作追踪）；dispatchKey 是操作身份，不换。
+            const requestId = `req_${randomUUID()}`;
+            const outcome = await options.client.execute({ requestId, dispatchKey, operation, args: callArgs });
+            options.registry.noteExecution(task.taskId, {
+              requestId,
+              operation,
+              status: outcome.status,
+              dispatchKey,
+              ...(outcome.status === 'failed' || outcome.status === 'refused' ? { error: outcome.error } : {}),
+            });
+            return outcome;
+          },
         });
-        recorded.push({ operation, outcome });
-        return outcome;
+        if (run.unresolved) {
+          unresolved = true;
+          // 确定性终结本回合：待核对不得被模型当作可重试的普通失败。
+          throw new ToolUserError(
+            run.outcome.status === 'failed' ? run.outcome.error.message : RESULT_UNKNOWN_MESSAGE,
+          );
+        }
+        if (run.executed) recorded.push({ operation, outcome: run.outcome });
+        return run.outcome;
       };
 
       const deadline = now() + workerTurnMs;
@@ -871,12 +1166,18 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           exec,
           deadline,
           signal: context.signal,
+          onRuntimeEvent: (event) => noteRuntimeEvent(workerWindow, event),
         });
       } catch (error) {
+        // 待核对优先于取消/超时/失败确认：结果未知不是已确认的结局。写操作已进入 unknown 后
+        // 同回合被取消，任务仍是「待核对」——取消只停止后续动作，不把未知改写成 cancelled。
+        if (unresolved) return { kind: 'result_unknown', reason: RESULT_UNKNOWN_MESSAGE };
         if (context.signal.aborted) return { kind: 'cancelled' };
         if (isAbortErrorLike(error) && now() >= deadline) return { kind: 'timed_out' };
         return { kind: 'failed', reason: error instanceof Error ? error.message : String(error) };
       }
+      // 同上：正常返回路径也必须先判待核对，再判取消。
+      if (unresolved) return { kind: 'result_unknown', reason: RESULT_UNKNOWN_MESSAGE };
       if (context.signal.aborted) return { kind: 'cancelled' };
       if (workerResult.text.trim() === '') {
         return now() >= deadline

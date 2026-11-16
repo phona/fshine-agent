@@ -10,6 +10,9 @@
  *   · ExecutionRequest   —— 结构化执行请求。**requestId 由宿主生成**：调用身份与去重
  *     语义归宿主，模型既不能生成可信身份，也不能携带确认凭据；副作用安全重试由执行层
  *     保证（宿主只承诺 requestId 的稳定与唯一）。
+ *     **dispatchKey = 稳定逻辑操作身份**（U3，见字段注释）：它在宿主**首次创建这笔逻辑
+ *     操作**时生成并持久化，重试/重新规划时只能读回同一条记录；toolCallId / requestId
+ *     只是本次调用的追踪号，重试会换号。
  *   · ExecutionOutcome   —— 执行状态与失败结果。四态互斥：completed / needs_input /
  *     failed / refused。**refused = 执行层策略拒绝，failed =
  *     执行失败，两者语义不得混用**；needs_input 必须携带「缺什么」的结构化描述
@@ -27,7 +30,7 @@
  */
 
 /** 契约语义版本：跨宿主/执行层的结构化语义集合版本（非某实例的版本，也不是 A2A）。 */
-export const EXECUTION_CONTRACT_VERSION = 1;
+export const EXECUTION_CONTRACT_VERSION = 2;
 
 /**
  * 参数声明：name 是执行层接受的参数名（CLI 形态可带前缀，如 `--collection`），
@@ -57,7 +60,17 @@ export interface CapabilityManifest {
 
 /** 结构化执行请求。args 对宿主不透明：形状归执行层声明与校验。 */
 export interface ExecutionRequest {
+  /** 本次调用的追踪号（宿主生成；重试/重发会换新号，不承载操作身份）。 */
   requestId: string;
+  /**
+   * 稳定逻辑操作身份：**由宿主在执行边界首次创建这笔逻辑操作时生成并持久化**，
+   * 之后由宿主绑定到那条已持久化记录；重试、溢出恢复后的重新调用、重新规划都只能
+   * 读回同一个值，不得重新生成。它随请求在副作用之前送达执行层，执行层可据此派生
+   * 外部幂等键或做状态查询（宿主义务：能用就用，查不出如实回 result_unknown）。
+   * 语义边界：宿主只承诺「同一 dispatchKey 至多一次自动执行 + 结果未知可核对」，
+   * **不是**业务效果 exactly-once——外部幂等键、状态查询与回读归执行层。
+   */
+  dispatchKey: string;
   operation: string;
   args: Readonly<Record<string, unknown>>;
 }

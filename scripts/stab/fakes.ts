@@ -253,7 +253,7 @@ export async function assembleStabSession(options: AssembleStabOptions): Promise
     mainSystemPrompt: '（stab 假件）Main 系统提示',
     workerSkills: [],
     createDrivers: () => ({ mainDriver: options.mainDriver, workerDriver: options.workerDriver }),
-    createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+    createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
     runtime: options.runtime,
     taskExecutor: options.taskExecutor,
     taskRegistry: options.registry,

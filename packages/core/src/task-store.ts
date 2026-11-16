@@ -19,14 +19,17 @@
  *   · lease_owner / lease_until：后台认领租约（仅 running 持有；过期 → result_unknown，不自动重放）。
  *
  * 迁移口径（版本化迁移；登记：本注 + docs/decision-log.md R4 登记节）：
- *   · 触发 = 可写打开且 tasks 表缺列（旧库）；只读打开永不迁移——旧库只读时新列读出
- *     缺省（不崩溃）、主库哈希不变；
+ *   · 触发 = 可写打开且 tasks 表缺列（旧库）或缺 operations 表 / executions.dispatch_key
+ *     （U3 schema v4）；只读打开永不迁移——旧库只读时新列新表读出缺省（不崩溃）、主库哈希不变；
  *   · 迁移前自动备份：wal_checkpoint(FULL) 后整文件复制为 <dbPath>.backup-v<N>
- *     （N = 迁移目标 schema 版本，当前 3；不覆盖、不自动删除；:memory: 与库文件不存在不生成）；
+ *     （N = 迁移目标 schema 版本，当前 4；不覆盖、不自动删除；:memory: 与库文件不存在不生成）；
  *   · 回填 task_no（仅缺该列时）：按 (created_at, task_id) 升序、单条 SQL（ROW_NUMBER）
  *     连续分配，只填 NULL 行（幂等：二次打开零差异）；历史行 name/reply_text/reason 等
  *     保持 NULL（无存档不伪造，显示层标注「该任务无最终回复存档」）；
- *   · PRAGMA user_version 记录版本（新库直接建 v3）；向前兼容：加列不破坏旧代码 SELECT。
+ *   · U3 新增面只做**前向加法**：operations 是 CREATE TABLE IF NOT EXISTS，executions 只
+ *     ADD COLUMN dispatch_key（历史执行行 = NULL，语义仍是「一行 = 一次真实执行」，不补写、
+ *     不改写）；二次打开零差异，旧库形状（tasks/executions 既有列与行）逐字节不变；
+ *   · PRAGMA user_version 记录版本（新库直接建 v4）；向前兼容：加列/加表不破坏旧代码 SELECT。
  *
  * 数字编号（P1）：
  *   · 分配 = 计数器行（task_sequences.name='task_no'）在**同一事务**内
@@ -57,8 +60,8 @@ import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 
-/** 当前 schema 版本（PRAGMA user_version）。2 = P1（数字编号/名称/回复存档）；3 = P2a 契约核心。 */
-export const TASK_STORE_SCHEMA_VERSION = 3;
+/** 当前 schema 版本（PRAGMA user_version）。2 = P1；3 = P2a 契约核心；4 = U3 逻辑操作身份（operations + executions.dispatch_key）。 */
+export const TASK_STORE_SCHEMA_VERSION = 4;
 
 /** 一条最小任务底账行（存储形状；领域收口在 task-registry-sqlite）。 */
 export interface TaskRow {
@@ -98,6 +101,64 @@ export interface ExecutionRow {
   status: string;
   /** ExecutionFailure，JSON 存读；未知形状原样返回给 registry。 */
   error?: unknown;
+  /** U3：本次真实执行所属的稳定逻辑操作身份（历史行缺省 = 无记录，不伪造）。 */
+  dispatchKey?: string;
+}
+
+/**
+ * 一条逻辑操作账行（U3；存储形状）。
+ * 行就是身份：dispatch_key 主键，UNIQUE(scope_key, op_seq) 是唯一约束；
+ * **没有**、也不得有任何以 (operation, args) 为键的唯一约束（参数相同的两笔合法操作
+ * 必须是两行）。
+ */
+export interface OperationRow {
+  dispatchKey: string;
+  /** 身份作用域：'task:<taskId>'（交办内操作）或 'turn:<sessionId>:<turnNo>'（Main run_task）。 */
+  scopeKey: string;
+  /** 交办内操作的 taskId；turn 作用域在受理回执落定后回填。 */
+  taskId?: string;
+  /** 作用域内单调递增序号（首次创建时原子分配，永不复用、不重排）。 */
+  opSeq: number;
+  operation: string;
+  /** claimed | completed | needs_input | failed | refused | unknown。 */
+  status: string;
+  /** 机械原因（待核对/中断等；可空）。 */
+  reason?: string;
+  /** 执行层原始 outcome（JSON 存读；completed 时即「已有结果」）。 */
+  outcome?: unknown;
+  /** 认领时所在的运行时回合号（重放窗口判定）。 */
+  attempt: number;
+  claimedAt: string;
+  settledAt?: string;
+  /**
+   * 结果落定并交给 Pi 回合的时刻（settle 时写入，与 settledAt 同刻）。
+   * NULL = 尚未落定/未交付（claimed/unknown）；它不证明模型已读取。
+   */
+  deliveredAt?: string;
+  /** 本行是哪个 dispatch_key 的重放（审计用；可空）。 */
+  replayOf?: string;
+}
+
+/** 原子认领请求：**不含参数**（禁止按参数文本/哈希绑定；签名形状即结构性保证）。 */
+export interface OperationClaimRequest {
+  scopeKey: string;
+  operation: string;
+  attempt: number;
+  taskId?: string;
+  now: string;
+}
+
+/** 逻辑操作行的状态写入（expectedStatus = 乐观并发期望值）。 */
+export interface OperationStateWrite {
+  expectedStatus: string;
+  status: string;
+  reason?: string | null;
+  outcomeJson?: string | null;
+  claimedAt?: string;
+  settledAt?: string | null;
+  deliveredAt?: string | null;
+  attempt?: number;
+  taskId?: string | null;
 }
 
 /** 任务 + 其执行记录（读取单位）。 */
@@ -148,6 +209,27 @@ export interface TaskStore {
   getTask(taskId: string): StoredTask | undefined;
   /** scope 缺省 = 全部任务；给出时按 principal + session 过滤。 */
   listTasks(scope?: { principalId: string; sessionId: string }): StoredTask[];
+  /**
+   * U3：读重放窗口候选行（同 scope / 同 operation / 同 attempt，按 op_seq 升序）。
+   * 判定由 registry 的纯函数做；本方法只读。
+   */
+  listOperationCandidates(input: { scopeKey: string; operation: string; attempt: number }): OperationRow[];
+  /** U3：按身份键读回一行（重试/重放只读回，不重铸）。 */
+  getOperation(dispatchKey: string): OperationRow | undefined;
+  /**
+   * U3：原子铸造一笔新逻辑操作（op_seq = scope 内 MAX+1 与 INSERT 同一 BEGIN IMMEDIATE
+   * 写事务；主键 + UNIQUE(scope_key, op_seq) 兜底并发）。唯一铸造点。
+   */
+  mintOperation(input: OperationClaimRequest): OperationRow;
+  /**
+   * U3：把已有行重新置 claimed（**同一 dispatchKey**，只用于读操作的可安全重试或
+   * 幂等重入；写操作不得走这里——不重铸、不改变身份）。
+   */
+  reclaimOperation(dispatchKey: string, input: { attempt: number; now: string; taskId?: string }): OperationRow | undefined;
+  /** U3：单语句状态写入（expectedStatus 不匹配返回 false，零写入）。 */
+  applyOperationState(dispatchKey: string, write: OperationStateWrite): boolean;
+  /** U3：把「读候选 + 决策 + 写」包进同一 BEGIN IMMEDIATE 写事务。 */
+  transaction<T>(fn: () => T): T;
   close(): void;
 }
 
@@ -182,9 +264,27 @@ CREATE TABLE IF NOT EXISTS executions (
   task_id TEXT NOT NULL REFERENCES tasks(task_id),
   operation TEXT NOT NULL,
   status TEXT NOT NULL,
-  error_json TEXT
+  error_json TEXT,
+  dispatch_key TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_executions_task ON executions (task_id);
+CREATE TABLE IF NOT EXISTS operations (
+  dispatch_key TEXT PRIMARY KEY,
+  scope_key TEXT NOT NULL,
+  task_id TEXT,
+  op_seq INTEGER NOT NULL,
+  operation TEXT NOT NULL,
+  status TEXT NOT NULL,
+  reason TEXT,
+  outcome_json TEXT,
+  attempt INTEGER NOT NULL,
+  claimed_at TEXT NOT NULL,
+  settled_at TEXT,
+  delivered_at TEXT,
+  replay_of TEXT,
+  UNIQUE (scope_key, op_seq)
+);
+CREATE INDEX IF NOT EXISTS idx_operations_scope ON operations (scope_key, attempt, operation);
 `;
 
 /** 数字编号唯一索引：部分索引允许历史/缺省行多个 NULL，但已分配编号必须唯一。 */
@@ -228,6 +328,31 @@ interface ExecutionDbRow {
   operation: string;
   status: string;
   error_json: string | null;
+  dispatch_key?: string | null;
+}
+
+interface OperationDbRow {
+  dispatch_key: string;
+  scope_key: string;
+  task_id: string | null;
+  op_seq: number;
+  operation: string;
+  status: string;
+  reason: string | null;
+  outcome_json: string | null;
+  attempt: number;
+  claimed_at: string;
+  settled_at: string | null;
+  delivered_at: string | null;
+  replay_of: string | null;
+}
+
+/**
+ * 身份键 = scope + 作用域内序号（持久化字段的纯函数）：重建出来的字符串与铸造时
+ * 按构造相等，消除「恢复后是不是又掷了一个新身份」的歧义。序号只在首次铸造时分配一次。
+ */
+export function operationKeyOf(scopeKey: string, opSeq: number): string {
+  return `dk_${scopeKey}:${opSeq}`;
 }
 
 /** 打开选项（P1 任务查看）：readOnly 只读打开既有库，不写任何字节、不做任何迁移。 */
@@ -239,10 +364,24 @@ export interface OpenTaskStoreOptions {
   readOnly?: boolean;
 }
 
-/** 旧库迁移标记的读取：表不存在 = 全新库（直接建 v3）。 */
-function taskTableColumns(db: Database.Database): Set<string> {
-  const info = db.pragma('table_info(tasks)') as Array<{ name: string }>;
+/** 表列名集合：表不存在 = 空集。 */
+function tableColumnsOf(db: Database.Database, table: string): Set<string> {
+  const info = db.pragma(`table_info(${table})`) as Array<{ name: string }>;
   return new Set(info.map((column) => column.name));
+}
+
+/** 旧库迁移标记的读取：tasks 表不存在 = 全新库（直接建 v4）。 */
+function taskTableColumns(db: Database.Database): Set<string> {
+  return tableColumnsOf(db, 'tasks');
+}
+
+/** U3 加法迁移是否需要执行：operations 表缺失，或 executions 缺 dispatch_key 列。 */
+function operationSchemaMissing(db: Database.Database): boolean {
+  const hasOperations = tableColumnsOf(db, 'operations').size > 0;
+  const executionColumns = tableColumnsOf(db, 'executions');
+  // executions 表不存在（极旧库）= 由 SCHEMA_BASE 直接按新形状建，不需要 ALTER。
+  const missingDispatchColumn = executionColumns.size > 0 && !executionColumns.has('dispatch_key');
+  return !hasOperations || missingDispatchColumn;
 }
 
 /**
@@ -271,11 +410,17 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         const columns = taskTableColumns(writable);
         const tableExists = columns.size > 0;
         const missing = tableExists ? TASK_COLUMNS.filter(([name]) => !columns.has(name)) : [];
-        if (missing.length > 0) {
+        const operationsMissing = tableExists && operationSchemaMissing(writable);
+        if (missing.length > 0 || operationsMissing) {
           // 旧库迁移：先备份（目标版本命名），再加列，再（仅缺 task_no 时）回填编号，
-          // 最后建唯一索引与版本号。
+          // 最后建唯一索引与版本号。U3 的 operations / executions.dispatch_key 与
+          // task 列迁移共用同一次备份（同一目标版本 v4）。
           backupBeforeMigration(writable, dbPath);
           for (const [name, type] of missing) writable.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${type}`);
+          const executionColumns = tableColumnsOf(writable, 'executions');
+          if (executionColumns.size > 0 && !executionColumns.has('dispatch_key')) {
+            writable.exec('ALTER TABLE executions ADD COLUMN dispatch_key TEXT');
+          }
         }
         writable.exec(SCHEMA_BASE);
         if (missing.some(([name]) => name === 'task_no')) {
@@ -379,16 +524,89 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         UPDATE tasks SET reply_text = @replyText, updated_at = @updatedAt WHERE task_id = @taskId
       `)
     : undefined;
-  const insertExecution = db.prepare(`
-    INSERT INTO executions (request_id, task_id, operation, status, error_json)
-    VALUES (@requestId, @taskId, @operation, @status, @errorJson)
-  `);
+  const hasDispatchColumn = (() => {
+    const cols = tableColumnsOf(db, 'executions');
+    return cols.size > 0 && cols.has('dispatch_key');
+  })();
+  const insertExecution = hasDispatchColumn
+    ? db.prepare(`
+        INSERT INTO executions (request_id, task_id, operation, status, error_json, dispatch_key)
+        VALUES (@requestId, @taskId, @operation, @status, @errorJson, @dispatchKey)
+      `)
+    : db.prepare(`
+        INSERT INTO executions (request_id, task_id, operation, status, error_json)
+        VALUES (@requestId, @taskId, @operation, @status, @errorJson)
+      `);
   const selectTask = db.prepare('SELECT * FROM tasks WHERE task_id = ?');
   const selectExecutions = db.prepare('SELECT * FROM executions WHERE task_id = ? ORDER BY rowid');
   const selectTasks = db.prepare('SELECT * FROM tasks ORDER BY created_at, task_id');
   const selectTasksScoped = db.prepare(
     'SELECT * FROM tasks WHERE principal_id = ? AND session_id = ? ORDER BY created_at, task_id',
   );
+
+  const hasOperations = tableColumnsOf(db, 'operations').size > 0;
+  const selectOperation = hasOperations
+    ? db.prepare('SELECT * FROM operations WHERE dispatch_key = ?')
+    : undefined;
+  const selectOperationCandidates = hasOperations
+    ? db.prepare('SELECT * FROM operations WHERE scope_key = @scopeKey AND operation = @operation AND attempt = @attempt ORDER BY op_seq')
+    : undefined;
+  const selectMaxOpSeq = hasOperations
+    ? db.prepare('SELECT COALESCE(MAX(op_seq), 0) AS maxSeq FROM operations WHERE scope_key = ?')
+    : undefined;
+  const insertOperation = hasOperations
+    ? db.prepare(`
+        INSERT INTO operations (
+          dispatch_key, scope_key, task_id, op_seq, operation, status, reason, outcome_json,
+          attempt, claimed_at, settled_at, delivered_at, replay_of
+        )
+        VALUES (
+          @dispatchKey, @scopeKey, @taskId, @opSeq, @operation, 'claimed', NULL, NULL,
+          @attempt, @now, NULL, NULL, NULL
+        )
+      `)
+    : undefined;
+  const reclaimOperationStmt = hasOperations
+    ? db.prepare(`
+        UPDATE operations
+        SET status = 'claimed', reason = NULL, outcome_json = NULL, settled_at = NULL,
+            delivered_at = NULL, claimed_at = @now, attempt = @attempt,
+            task_id = COALESCE(@taskId, task_id)
+        WHERE dispatch_key = @dispatchKey
+      `)
+    : undefined;
+  const applyOperationStateStmt = hasOperations
+    ? db.prepare(`
+        UPDATE operations
+        SET status = @status,
+            reason = @reason,
+            outcome_json = @outcomeJson,
+            claimed_at = COALESCE(@claimedAt, claimed_at),
+            settled_at = @settledAt,
+            delivered_at = @deliveredAt,
+            attempt = COALESCE(@attempt, attempt),
+            task_id = COALESCE(@taskId, task_id)
+        WHERE dispatch_key = @dispatchKey AND status = @expectedStatus
+      `)
+    : undefined;
+  /** 熔铸事务：MAX(op_seq)+1 与 INSERT 同一 BEGIN IMMEDIATE（并发认领不重号）。 */
+  const mintOperationTx = insertOperation === undefined || selectMaxOpSeq === undefined
+    ? undefined
+    : db.transaction((input: OperationClaimRequest) => {
+        const { maxSeq } = selectMaxOpSeq.get(input.scopeKey) as { maxSeq: number };
+        const opSeq = maxSeq + 1;
+        const dispatchKey = operationKeyOf(input.scopeKey, opSeq);
+        insertOperation!.run({
+          dispatchKey,
+          scopeKey: input.scopeKey,
+          taskId: input.taskId ?? null,
+          opSeq,
+          operation: input.operation,
+          attempt: input.attempt,
+          now: input.now,
+        });
+        return selectOperation!.get(dispatchKey) as OperationDbRow;
+      });
 
   /**
    * 认领事务：BEGIN IMMEDIATE 先拿写锁再取行（跨进程并发下读到最新已提交数据）；
@@ -448,6 +666,24 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     status: row.status,
     // JSON 解析失败即抛出（存储损坏必须可见，不静默吞成 undefined）。
     ...(row.error_json === null ? {} : { error: JSON.parse(row.error_json) as unknown }),
+    ...(row.dispatch_key === null || row.dispatch_key === undefined ? {} : { dispatchKey: row.dispatch_key }),
+  });
+
+  const toOperation = (row: OperationDbRow): OperationRow => ({
+    dispatchKey: row.dispatch_key,
+    scopeKey: row.scope_key,
+    ...(row.task_id === null ? {} : { taskId: row.task_id }),
+    opSeq: row.op_seq,
+    operation: row.operation,
+    status: row.status,
+    ...(row.reason === null ? {} : { reason: row.reason }),
+    // JSON 解析失败即抛出（存储损坏必须可见，不静默吞成 undefined）。
+    ...(row.outcome_json === null ? {} : { outcome: JSON.parse(row.outcome_json) as unknown }),
+    attempt: row.attempt,
+    claimedAt: row.claimed_at,
+    ...(row.settled_at === null ? {} : { settledAt: row.settled_at }),
+    ...(row.delivered_at === null ? {} : { deliveredAt: row.delivered_at }),
+    ...(row.replay_of === null ? {} : { replayOf: row.replay_of }),
   });
 
   const storedTask = (row: TaskDbRow): StoredTask => ({
@@ -457,6 +693,15 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
 
   const missingLifecycleError =
     '任务底账是旧版 schema（缺 P2a 生命周期列）且以只读打开：不能写任务状态（请先用可写入口完成迁移）。';
+  const missingOperationsError =
+    '任务底账是旧版 schema（缺 U3 operations 表/executions.dispatch_key）且以只读打开：不能读写逻辑操作账（请先用可写入口完成迁移）。';
+
+  /**
+   * U3：把「读候选 + 决策 + 写」包进同一写事务（BEGIN IMMEDIATE）。
+   * 声明在返回对象之外，保留泛型签名（better-sqlite3 同步事务）。
+   */
+  const runTransaction = <T>(fn: () => T): T =>
+    (db.transaction(fn) as unknown as { immediate: () => T }).immediate();
 
   return {
     insertTask(row) {
@@ -519,13 +764,15 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     },
     insertExecution(row) {
       if (taskExists.get(row.taskId) === undefined) return false;
-      insertExecution.run({
+      const bound = {
         requestId: row.requestId,
         taskId: row.taskId,
         operation: row.operation,
         status: row.status,
         errorJson: row.error === undefined ? null : JSON.stringify(row.error),
-      });
+      };
+      if (hasDispatchColumn) insertExecution.run({ ...bound, dispatchKey: row.dispatchKey ?? null });
+      else insertExecution.run(bound);
       return true;
     },
     getTask(taskId) {
@@ -537,6 +784,51 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         ? selectTasks.all()
         : selectTasksScoped.all(scope.principalId, scope.sessionId)) as TaskDbRow[];
       return rows.map(storedTask);
+    },
+    listOperationCandidates(input) {
+      if (selectOperationCandidates === undefined) throw new Error(missingOperationsError);
+      return (selectOperationCandidates.all(input) as OperationDbRow[]).map(toOperation);
+    },
+    getOperation(dispatchKey) {
+      // 只读旧库没有 operations 表 = 没有账（读出缺省，不崩溃、不伪造）。
+      if (selectOperation === undefined) return undefined;
+      const row = selectOperation.get(dispatchKey) as OperationDbRow | undefined;
+      return row === undefined ? undefined : toOperation(row);
+    },
+    mintOperation(input) {
+      if (mintOperationTx === undefined) throw new Error(missingOperationsError);
+      return toOperation(mintOperationTx.immediate(input));
+    },
+    reclaimOperation(dispatchKey, input) {
+      if (reclaimOperationStmt === undefined || selectOperation === undefined) {
+        throw new Error(missingOperationsError);
+      }
+      reclaimOperationStmt.run({
+        dispatchKey,
+        now: input.now,
+        attempt: input.attempt,
+        taskId: input.taskId ?? null,
+      });
+      const row = selectOperation.get(dispatchKey) as OperationDbRow | undefined;
+      return row === undefined ? undefined : toOperation(row);
+    },
+    applyOperationState(dispatchKey, write) {
+      if (applyOperationStateStmt === undefined) throw new Error(missingOperationsError);
+      return applyOperationStateStmt.run({
+        dispatchKey,
+        expectedStatus: write.expectedStatus,
+        status: write.status,
+        reason: write.reason ?? null,
+        outcomeJson: write.outcomeJson ?? null,
+        claimedAt: write.claimedAt ?? null,
+        settledAt: write.settledAt ?? null,
+        deliveredAt: write.deliveredAt ?? null,
+        attempt: write.attempt ?? null,
+        taskId: write.taskId ?? null,
+      }).changes > 0;
+    },
+    transaction(fn) {
+      return runTransaction(fn);
     },
     close() {
       db.close();

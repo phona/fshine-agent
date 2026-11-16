@@ -3696,6 +3696,99 @@ TMPDIR=/home/tao/.tmp npm test            # exit 0：Test Files 83 passed (83)�
 
 ---
 
+## 九十七、U3 稳定逻辑操作身份 `dispatchKey` 合入（2026-11-16，分支 `arch/u3-merge`，基线 = `arch/integration` @ `1ab097d` + U3 `c89eafc`）状态：**已合入 integration 待推送**
+
+### 1. 结论摘要
+
+Pi 1.5.2 迁移 U3（恢复/重试后同一逻辑写操作被重复执行）以**宿主侧最小身份面**收口：新增一张操作账
+（`operations`）与一个既有事件的可选转发（`TurnDriverInput.onRuntimeEvent`），没有新增 Planner/Router/
+意图分类器/计划门/事件总线/第二套 Task Registry，也没有新任务状态。歧义一律**拒绝并交还待核对**，不猜绑定。
+
+已合入 `arch/integration` 的内容：`c89eafc`（U3 实现 + 设计文档 + 三条守卫测试）；独立复审给出的两条缺口
+（收尾判定顺序 bug、证据 md5 未登记）在本次合并中修复并加守护测试。
+
+### 2. 两层身份（不混用）
+
+| 层 | 标识 | 作用域 | 谁铸造 |
+|---|---|---|---|
+| 交办意图 | `delegationId`（复用既有 `taskId`） | 一次用户交办 / 一个任务行 | 宿主，受理时 |
+| 业务操作 | `dispatchKey = dk_<scopeKey>:<opSeq>` | 交办内单次逻辑操作（`task:<taskId>`）或 Main 回合内单次 `run_task`（`turn:<sessionId>:<turnNo>`） | 宿主，**首次**认领时；此后只读 |
+
+- `opSeq` 是作用域内自增号（MAX+1，永不复用），与 `taskNo` 同口径；`dispatchKey` 是 `(scopeKey, opSeq)` 的纯函数。
+- 身份只在 R0 铸造；重试/恢复路径只 `bind`，不 `mint`（`dispatch-key-tripwire.test.ts` G2：账表两处派生键、无 `randomUUID`）。
+- `ExecutionRequest.dispatchKey` 是唯一新增契约字段（必填字符串）；`requestId` 仍每次换号，只作追踪。
+
+### 3. 原子认领与同 key 异 op 冲突
+
+- `claimOperation` 的输入结构**不接受 args**（`OperationClaimInput` 无 `args` 字段，决策函数不读参数）——「按参数文本去重」没有代码路径（G1）；`operations` 表唯一约束只表达身份（`dispatch_key` 主键 + `(scope_key, op_seq)`），无内容列/哈希列（G3）。
+- **先落库再调用**：调用执行层之前必有一行 `claimed`（进程死亡窗口里有记录）；并发/重入由 registry 侧原子完成（SQLite 在 `BEGIN IMMEDIATE` 写事务里）；进行中的重复请求返回 `in_progress`，不发起第二次执行。
+- **同 key 异 operation → 确定性拒绝**：`DispatchConflictError`（`code=dispatch_conflict`），零副作用、账行不改。
+- 同 key 同 operation 且已落定 → 原样回放 `outcome_json`，**零调用、零新执行行**（一行 = 一次真实执行）。
+
+### 4. 重绑定规则 R0–R5（唯一充分证据 = 运行时自己宣布丢弃并重试）
+
+| # | 输入事实 | 规则 |
+|---|---|---|
+| R0 | 无打开窗口 | 铸新 op、`INSERT claimed`、再调用。两笔合法相似/同参数操作都走这里 → 两个 key、各执行一次 |
+| R1 | 窗口内恰有 1 条同名 op，已落定 | 绑定该行、回放结果，不发起第二次调用 |
+| R2 | 窗口内恰有 1 条同名 op，但 `claimed/unknown` | R4 待核对（绝不重放未知结果） |
+| R3 | 窗口内同名 ≥2 条 | R4 待核对（不赌顺序、不按位置猜） |
+| R4 | 任何无法证明的情形 | 停止副作用；op 行 `unknown` + reason；交办 `running→failed + reason=result_unknown`；工具结果固定「待核对」话术 |
+| R5 | 跨进程 / Pi 会话 resume | **不自动重绑**：旧交办租约过期即 `result_unknown`；用户重发 = 新交办（既有「重复同一句话是新授权」口径） |
+
+硬禁令：① 重试不得另铸身份；② 不得按参数绑定；③ 歧义只由 R4 处理，不得为了消歧新增治理。
+
+### 5. 重放窗口生命周期（`attempt`）
+
+- 初值 1；只在两类原生事件推进：正常 assistant 响应结束（新响应边界）、recovery（`compaction_end.willRetry` / `auto_retry_start` / assistant `message_end` `stopReason='error'`）。
+- **开**：只由 recovery 打开，窗口号 = 当前 `attempt`，随后 `attempt += 1`；同一次失败的多个事件在窗口未消费前幂等（只开一次）。
+- **关**：被重试的响应结束先 disarm（窗口保留给它自己的工具调用），下一次 `assistant_end` 关闭；已消费后再 recovery 先关旧窗再开新窗。
+- **清空**：关闭即删除 `window` 与相位，不留可被后续响应使用的绑定；`attempt` 只增不复用；窗口随 `send`/单次交办结束整体丢弃，不跨回合、不跨任务。
+- 接线：驱动 `pi-driver.ts` 转发三个原生事件，runtime 在 **Main 回合 / inline Worker 回合 / 后台 TaskExecutor 回合**三处都接 `onRuntimeEvent`（G4 源码级守卫断言恰 3 处）。529 自动重试也算窗口信号（`c89eafc` 补）。
+
+### 6. 结果未知 → 待核对（不新增状态）
+
+- 调用中断/无回执 → op 行 `markOperationUnknown`（`unknown` + reason），不自动重试。
+- 任务落 `failed + reason=result_unknown`（既有 `markResultUnknown` 与既有原因枚举）；用户可见固定话术「结果待核对…需要人工核对后再决定是否重办」。
+- `dispatchKey` / `dk_` 是内部术语：通知文案黑名单已扩展（G5），用户只看到「已执行 / 失败 / 结果待核对」。
+- **不是** Exactly Once：宿主只承诺「同一身份至多一次自动执行 + 结果未知可核对」；幂等键/状态查询/回读归执行层。
+
+### 7. 本次合并的两条复审缺口修复
+
+1. **待核对优先于取消（真 bug，`execution-runtime.ts` createTaskExecutor 收尾）**：原实现先判 `context.signal.aborted`（→`cancelled`）再判 `unresolved`，与紧邻注释相反。改为两条返回路径都先判 `unresolved`（→`result_unknown`）再判 abort；与 TaskRunner 落库路径一致（`cancelling + result_unknown` 先回 `running` 再落 `failed/result_unknown`）。
+   守护测试 `packages/agent/result-unknown-cancel.test.ts`（3 例：执行端结局、TaskRunner 真实取消路径、无 unknown 的取消仍为 `cancelled` 反向绊线）。反向验证：把顺序改回 bug 版 → 前两例红（`expected 'cancelled' to be 'result_unknown'`）、第三例绿；恢复后 3 例全绿。
+2. **证据完整性补登**：`docs/product/pi-152-dependency-patches.md` 增加两份不可变证据文件的 git pin（`c61e784`）与 md5（prepatch `346f5ed9…`、postpatch `cecdc56d…`），并写明 pin 为权威、md5 为同 pin 的便利校验。
+
+### 8. 合并面与冲突
+
+- 唯一冲突文件：`packages/agent/src/execution-runtime.ts`（`RuntimeOptions`）：integration 侧 B1 转录端口（`transcriptStore`/`onTranscriptError`）与 U3 侧 `readOnlyOperations` **两个独立字段都保留**。
+- integration 侧独立修复全部保留：B1 转录所有权（打开现读→首回合种子、回合后只追加本回合新增、写失败 fail-open）、B1 持久化/恢复用例、B2 Silent Shadow 用例。
+- U3 侧窗口与认领逻辑整块合入（`execution-runtime` / `pi-driver` / `task-registry*` / `task-store` / `task-runner` / 契约 / 通知黑名单）。
+- 机械适配（仅类型面，不改任何断言）：integration 新增的 `ExecutionFace` 字面量补上 U3 变为必填的 `readOnlyOperations`（语义仍是只读 `dummy.query`）：`apps/server/server.test.ts` B2 用例、`apps/server/server-b1-persistence.test.ts` 六处、`scripts/eval/r6/multiuser/mu-support.ts`。
+
+### 9. 硬门读数（2026-11-16，worktree `~/projects/fshine-agent-u3`，`TMPDIR=/home/tao/.tmp`）
+
+| 门 | 命令 | 退出码 | 读数 |
+|---|---|---|---|
+| 类型 | `npm run typecheck` | **0** | 无输出 |
+| 全量测试 | `npx vitest run` | **0** | **109 文件 / 1103 passed + 1 skipped（1104 例）**；基线 `1ab097d` = 103 文件 / 1057 例，例数 +46、零失败 |
+| 补丁绊线 | `packages/agent/pi-152-patch-applied-tripwire.test.ts`（全量内） | **0** | 5 passed；`grep -c MIN_DERIVED_MAX_TOKENS node_modules/@earendil-works/pi-ai/dist/api/simple-options.js` = **2** |
+| dispatchKey 门 | `npx vitest run packages/agent/dispatch-key-registry.test.ts packages/agent/dispatch-key-tripwire.test.ts` | **0** | 2 文件 / **31 passed**（registry 25 + tripwire 6） |
+
+唯一 skipped 是既有的「旧 B1 记录格式」用例（linked worktree 缺 `pi-agent-core@0.85.x`），非本次引入。
+
+### 10. 残余风险（三条，如实登记）
+
+1. **事件接线是保证的前提**：若某条恢复路径不产生/不转发上述原生事件，重绑定保证就不成立（L1）。当前由 G4 源码级守卫盯住三处接线；新增执行面必须一并接线。
+2. **模型拆单/改写 operation 名**（L3/L6）：同一业务意图被拆成两次调用 → 两个 key、各执行一次，可能重复写入一次。这是**明确接受的失败形态**，兜底在执行层（幂等键/状态查询/回读）；文档不得写成「不会重复」。
+3. **跨进程/Pi 会话 resume 不自动重绑**（L4）：旧交办租约过期即 `result_unknown`，用户重发视为新交办；将来接上 resume 需补 R5 用例。
+
+**指针**：`docs/product/pi-152-dispatch-key-design.md`、`packages/agent/src/task-registry.ts`（`claimOperation`/`decideOperationClaim`/`DispatchConflictError`）、`packages/core/src/task-store.ts`（`operations` 表）、`packages/agent/src/execution-runtime.ts`（`newAttemptWindow`/`noteRuntimeEvent`/`claimAndRunOperation`）、`packages/agent/src/driver-contract.ts`（`RuntimeTurnEvent`）、`packages/agent/dispatch-key-{identity,registry,tripwire}.test.ts`、`packages/agent/result-unknown-cancel.test.ts`；提交 `c89eafc`、`aaf8a3e`、`e59310a`、`c570f1f`。
+
+**状态：已合入 integration 待推送。**（`arch/u3-merge` 已推送即完成；未合 main、未动 tag、未 force；真实 SaaS 未接触。）
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。

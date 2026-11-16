@@ -23,6 +23,9 @@ const BLACKLIST: readonly RegExp[] = [
   /resource_limited/i,
   /requestId/i,
   /request_\d+/i,
+  // U3：逻辑操作身份是内部术语，通知文案不得泄露（键形如 dk_<scope>:<seq>）。
+  /dispatchKey/i,
+  /\bdk_\S+/i,
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
   /(?:^|[\s：:，（(「『])\/[^/\s]+\//,
   /\bW\d+\b/,
