@@ -100,6 +100,8 @@ export async function createAskRuntimeSystem(input: AskRuntimeSystemInput): Prom
           operation: execution.operation,
           status: execution.status,
           object: execution.requestId,
+          // U3：逻辑操作身份逐条透传（写场景的「同一身份不得重复执行」判定靠它）。
+          ...(execution.dispatchKey === undefined ? {} : { dispatchKey: execution.dispatchKey }),
         })),
         // ask 装配未暴露注入接缝：如实回报未应用（不伪造命中）。
         injectionApplied: false,

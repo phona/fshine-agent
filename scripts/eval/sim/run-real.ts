@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * SimCase · 真实模型跑批入口（3 用例 × trials、样本级并发 5）。
+ * SimCase · 真实模型跑批入口（读切片用例 × trials、样本级并发 5）。
+ * 写场景（SIM-09/10）不在本入口：ask 装配只开放读切片，写场景用 ../write-system 确定性假系统自检。
  *
  * 预注册：`.runtime/sim2/prereg.md`（写于任何真实模型请求之前；运行根可用 `SIM_RUN_ROOT`
  * 切换，缺省 `.runtime/sim`）。
@@ -20,7 +21,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SIM_CASE_ORACLES, SIM_CASES } from './cases';
+import { SIM_CASE_ORACLES, SIM_READ_CASES } from './cases';
 import { createAskRuntimeSystem, type AskRuntimeSystem } from './ask-adapter';
 import { runSimSuite, type SimTrialResult, type SimSuiteResult } from './run';
 import type { SimModel } from './simulator';
@@ -145,7 +146,7 @@ function buildCaseReports(trials: readonly SimTrialResult[]): CaseReport[] {
     byCase.set(trial.caseId, list);
   }
   const reports: CaseReport[] = [];
-  for (const caseDef of SIM_CASES) {
+  for (const caseDef of SIM_READ_CASES) {
     const list = (byCase.get(caseDef.id) ?? []).slice().sort((a, b) => a.trial - b.trial);
     const terminals: Record<string, number> = {};
     for (const trial of list) terminals[trial.terminal ?? 'harness_error'] = (terminals[trial.terminal ?? 'harness_error'] ?? 0) + 1;
@@ -233,9 +234,9 @@ function buildReport(input: {
   lines.push(`- 预注册: \`${path.relative(REPO_ROOT, path.join(OUT_ROOT_BASE, 'prereg.md'))}\`（跑批前落盘）`);
   lines.push(`- 被测系统模型: \`${input.model}\`（生产同源装配 + 仓内 dummy 执行层）`);
   lines.push(`- 模拟用户模型: \`${input.model}\`（独立调用，\`kind: simulator\`）`);
-  lines.push(`- 判官: 未启用（三个 Oracle 确定性）`);
+  lines.push(`- 判官: 未启用（${SIM_CASE_ORACLES.length} 个确定性 Oracle）`);
   lines.push(`- 并发: ${suite.summary.isolation.concurrency}（观测最大并发 ${suite.batch.observedMaxConcurrency}）`);
-  lines.push(`- 样本: ${suite.summary.n}（3 用例 × 3 trials）· 墙钟 ${(wallMs / 1000).toFixed(1)}s`);
+  lines.push(`- 样本: ${suite.summary.n}（${new Set(suite.trials.map((trial) => trial.caseId)).size} 用例 × ${SIM_READ_CASES[0]?.limits.trials ?? '?'} trials）· 墙钟 ${(wallMs / 1000).toFixed(1)}s`);
   lines.push(`- 输出: \`${path.relative(REPO_ROOT, outRoot)}\``, '');
   lines.push('## 1. 用例读数（每用例分开报）', '');
   lines.push('| 用例 | pass^k (k=3) | 逐 trial pass | 终态 | contaminated | protocol_error | 有效样本 | 干预次数 | 无意义澄清(代理) | 严重失败 |');
@@ -333,7 +334,7 @@ async function main(): Promise<void> {
   const startedAt = Date.now();
 
   const suitePromise = runSimSuite({
-    cases: SIM_CASES,
+    cases: SIM_READ_CASES,
     outRoot,
     concurrency: 5,
     oracles: SIM_CASE_ORACLES,
