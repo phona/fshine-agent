@@ -12,7 +12,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { shouldNudgeFinalReply } from './src/pi-driver';
 
 // 供应商溢出话术的宿主分类器（isContextOverflowError）已随「自研 Overflow Recovery」整体删除：
-// 溢出判定与恢复归 Pi 原生（AgentHarness 的 compaction reason=overflow，见 A 口径）。
+// 溢出判定与恢复归 Pi 原生（compaction reason=overflow，见 A 口径）。
 
 /**
  * 空回复的第二种形状（今天实测日志）：`stopReason=stop`、content 只有 thinking 块、
