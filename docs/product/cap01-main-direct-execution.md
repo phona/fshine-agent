@@ -1,6 +1,6 @@
 # CAP-01 · Main 直接执行通用工作 + 宿主工作区
 
-> 状态：**设计稿（v2，按 2026-11-16 评审修订）**。本轮只改文档：不实施代码、不改生产配置、不合入 integration。
+> 状态：**设计稿（v3，按 2026-11-16 评审 + 最小接入验证修订）**。本轮只改文档：不实施代码、不改生产配置、不合入 integration。
 > 与财务切片 S0–S5 解耦：两者不共享代码改动。
 
 ---
@@ -62,12 +62,14 @@
 **暴露工具（仅三个）**：`excel_describe_sheets`、`excel_read_sheet`、`excel_write_to_sheet`。
 其余（`excel_create_table`、`excel_screen_capture`）通过 `toolExposure: "hidden"` 关闭——**截图工具不需要，也不该开放**。
 
-**接入三件事（缺一不可）**
-1. `mcp.json`（agentDir）注册 server，`exposure: "direct"`；
-2. `createFshineResourceLoader` 在 **Main 路径**返回 MCP extension（`getExtensions` 里加入 `createMcpExtension()` 的结果），**Worker 路径仍返回空**；
-3. Main 的 `tools` 白名单加入 `mcp__excel__excel_describe_sheets` / `mcp__excel__excel_read_sheet` / `mcp__excel__excel_write_to_sheet`（按 Pi 的 `mcp__` 前缀语义，只有列出的才保留）。
+**接入三件事（缺一不可，均已实测）**
+1. **配置来源不是 `createAgentSession({ agentDir })`**：Pi 的 MCP extension 只从 `getAgentDir()` 读 `mcp.json`，即 `PI_CODING_AGENT_DIR` 或 `~/.pi/agent`（`dist/config.js:495,510-516`；`dist/extensions/mcp/config.js:103-106`；`dist/core/sdk.js:71-74`）。实测反证：session `agentDir` 有配置但 env 目录无 → **不注册**；env 目录有配置但 session `agentDir` 无 → **注册**。
+   - 推荐做法（避免污染同机其它 Pi 进程）：用公开的 `createMcpExtension({ loadConfig })` 注入**宿主自有目录**的 `LoadedMcpConfig`，不设全局 env；把 env 方案作为备选并标注其副作用。
+2. **必须显式 bind extensions**：`createAgentSession` 后要调用 `session.bindExtensions(...)`，否则 MCP 的 `session_start` 不触发、**不会连接**（当前生产 `extensions` 为空，所以从未需要这一步）。
+3. **白名单与曝光**（实测）：`tools` 里的 `mcp__` 条目过滤 MCP 工具（`agent-session.js:1197`）；`exposure: hidden` **压过**白名单，hidden 工具即使被列进 `tools` 也不可调用（`agent-session.js:1242`）；`toolExposure` 精确名优先于 `*` 与 server 级（`mcp-servers.js:75-85`）。
 
-**验收前提**：必须用**锁定版本 Pi SDK 做实际接入验证**（最小脚本：建会话 → 断言工具面恰好含上述三个 `mcp__` 工具 + 原有 `run_task`/`read_skill` → 调用一次 `excel_describe_sheets` 成功）。不接受仅凭 SDK 文档推断。
+**实测工具面**：Main = 7 个业务工具 + 3 个 `mcp__excel__*`（无任何额外 MCP 工具）；Worker = 仅 `execute_operation`，**零 MCP 工具、零 Excel MCP 子进程**。
+Excel MCP 0.12.0 在 Linux 的 `tools/list` 实为 6 个（`excel_copy_sheet`/`create_table`/`describe_sheets`/`format_range`/`read_sheet`/`write_to_sheet`，**无** `screen_capture`）；我们只放 3 个，其余用 `hidden` 关掉。
 
 ---
 
@@ -88,11 +90,9 @@
       ↓
 ③ 用户发送指令 → 宿主把该会话 pending 附件复制进 in/（原件 sha256 记录，原件不动）
       ↓
-④ 宿主把「工作区绝对路径 + in/ 文件名」告诉 Main（Main 只有本会话路径）
+④ 宿主**先**把 `in/<file>` 复制为 `work/<file>`（工作副本），**然后**把 **`in/` 与 `work/` 两个路径一起**告诉 Main（顺序不可换：副本必须先存在，否则 Main 会在不存在的路径上写）
       ↓
-⑤ 宿主把 in/<file> 复制为 work/<file>（工作副本）
-      ↓
-⑥ Main 自主决定：describe/read（in 或 work）→ 计算 → write（只允许 work/）
+⑤ Main 自主决定：describe/read（in 或 work）→ 计算 → write（只允许 work/）
       ↓
 ⑦ 宿主校验 work/ 中的候选产物（可打开、规模、公式注入、业务 Oracle）
       ↓
@@ -222,3 +222,59 @@
 - 本设计**不修** R6 的 40k 窗口空回复（`output` 恰好 1024 = U1 floor）；
 - 本设计**不修** Oracle/污染误报（那是 eval 资产）。
 - 三条都是独立问题，不在 CAP-01 范围内。
+
+---
+
+## 13. 最小接入验证结论（2026-11-16，分支 `arch/cap01-probe`，探针提交 `c64cb3b`）
+
+> 只验机制，不实施 CAP-01。产物只在 `$TMPDIR/cap01-probe/*`；未改 `packages/`、未改生产配置、未合并。
+
+### 13.1 六项验证（全部实测通过）
+
+| # | 验证 | 结果 |
+|---|---|---|
+| 1 | Main 工具面精确 | 7 业务 + `mcp__excel__excel_describe_sheets` / `..._read_sheet` / `..._write_to_sheet`，**无额外 MCP 工具** |
+| 2 | Worker 隔离 | 空 extensions → 仅 `execute_operation`；**零 MCP 工具**；**无 Excel MCP 子进程**（进程内 PID 集合对比：Main 有 launcher + binary，Worker 无） |
+| 3 | 配置读取位置 | 只认 `getAgentDir()`（`PI_CODING_AGENT_DIR` 或 `~/.pi/agent`），**`createAgentSession({ agentDir })` 不生效**（双向反证） |
+| 4 | `hidden` + `toolExposure` | 精确名优先；`hidden` **压过** `tools` 白名单；hidden 工具调用返回 `not found` |
+| 5 | 真实调用 | describe（2 sheet）/ read（A1:D4）/ write（新 sheet `汇总`）均成功；`exceljs` 重开可见新内容；**原件 sha256 前后一致** |
+| 6 | 路径钩子 | `on("tool_call")` **对 MCP 工具真实生效**：读工作区外 / 写 `in/` / 写 `out/` / 符号链接逃逸 → 全部 block；写 `work/` → 放行 |
+
+### 13.2 两个新发现（改变实施计划）
+
+1. **配置注入方式**：不要依赖全局 `PI_CODING_AGENT_DIR`（同机其它 Pi 进程会共享）。改用 `createMcpExtension({ loadConfig })` 注入宿主自有目录的 `LoadedMcpConfig`；env 方案作为备选并注明副作用。
+2. **必须显式 `session.bindExtensions(...)`**：否则 MCP 的 `session_start` 不触发、不会连接。当前生产 `extensions` 为空，从未踩到这一步。
+
+### 13.3 按评审补齐的五条设计
+
+**A. 入站文件回复的交付失败语义**
+- 现有两条出站路径不一致：一条抛 `WecomChannelDeliveryError`（`adapter.ts:381-390`），一条只记 `wecom_file_fail` 并吞掉（`:681-690`）。
+- v3 规定：**文本先发、文件后发**时，文件失败必须产出**用户可见的交付失败**（明确"文件未送达"），并落一条结构化事实（`delivery_failed`）；**禁止**出现"文本宣称已交付、实际未发出"。
+- 落地方式不改动现有 `RichChannelReply.files` 契约，只补失败事实与上层处理。
+
+**B. pending 附件跨重启持久化（复用现有 SQLite）**
+- 复用 Task Registry 同一个库，**新增独立表**（不放任务表）：`pending_attachments(principal_id, session_id, message_id, file_id, filename, sha256, bytes, received_at, state)`。
+- `state`：`pending` → `consumed` / `expired`；TTL 与容量上限为常量，超限拒绝并告知用户。
+- 重启后按 `(principal, session)` 恢复 pending 列表；**不新建文件服务、不新建第二套存储**。
+
+**C. 工作副本先于路径（已改 §5 顺序）**
+- `in/` 落盘 → **宿主先复制出 `work/` 副本** → 再把 **`in/` 与 `work/` 两个路径一起**给 Main。
+- 目的：避免 Main 在副本不存在时写入、并把失败归因搞混。
+
+**D. 机械校验（Runtime）与业务 Oracle（Eval）分开**
+- **Runtime 只做机械校验**：文件能打开、大小/份数上限、`=` 开头未被写成公式、原件 sha256 不变、路径在工作区内。
+- **业务正确性只归 Eval Oracle**：去重后行集合、逐客户汇总金额、原始数据未误删。
+- **红线**：Runtime 不得出现任何"业务规则"（去重口径、金额公式、客户分组）。机械校验失败 → 交付失败事实；业务不符 → 只是 Oracle 判负，不影响交付。
+
+**E. Main / Worker 使用不同 ResourceLoader**
+- 现状共用 `createFshineResourceLoader`（`pi-driver.ts:250-264`，返回空 extensions），靠白名单隐式区分。
+- v3 改为**显式两个**：`createMainResourceLoader()`（含 MCP extension + catalog 技能）与 `createWorkerResourceLoader()`（空 extensions）。
+- **不依赖白名单兜底**：Worker 即使白名单写错也拿不到 MCP 工具，因为 extensions 里没有。
+
+### 13.4 仍未解决（保留）
+
+1. 规模边界（单文件/行数/sheet 数/超时/输出大小）——实施时写成常量并进测试；
+2. 公式注入只覆盖"以 `=` 开头"这一形态，不声称覆盖全部变体；
+3. pending TTL/容量具体值待定；
+4. 旧出站吞错路径（`adapter.ts:681-690`）本轮只登记，不改；
+5. Worker 文件访问（CAP-B）本轮不做。
