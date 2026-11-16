@@ -5,7 +5,7 @@
  * 与探测基线驱动器（`../model-executor`）的差异（本实验面专属）：
  *   · 每用例可选 **inline + 直接注入 TaskRunner**（缺口 1 四工具同源门控；缺口 1 设计 §3.3 的合法装配）
  *     或 background 派发（本批不用）；
- *   · 每用例可选 **Main 技能臂**（缺口 2）：把 mainSkillRoots/mainSkillMode 写进物化配置副本；
+ *   · 每用例可选 **Main 技能臂**：经装配参数 `mainSkillsDir` 指向夹具技能目录（catalog 唯一形态；不写配置键）；
  *   · 每用例可选 **小 LLM_CONTEXT_WINDOW**（缺口 3）：经 env 走 `effectiveDeploymentEnv` → 装配层
  *     `contextWindowFrom` → 驱动 contextWindow；
  *   · 逐回合记录 Main 工具面、逐回合模型调用数（压缩触发点）、read_skill 命中、预置任务编号；
@@ -28,7 +28,7 @@ import { createResourcePolicy } from '../../../../packages/agent/src/resource-po
 import { createSqliteTaskRegistry } from '../../../../packages/agent/src/task-registry-sqlite';
 import type { TaskScope } from '../../../../packages/agent/src/task-registry';
 import type { TaskRunner } from '../../../../packages/agent/src/task-runner';
-import { loadMainSkillDelivery } from '../../../../packages/agent/src/worker-skills';
+import { defaultMainSkillsDir, loadMainSkillDelivery } from '../../../../packages/agent/src/worker-skills';
 import { materializeEvalConfig } from '../../../resolve-config-path';
 import { assembleSessionCore, contextWindowFrom, createBackgroundDispatch, resolveExecutionFace } from '../../../ask-runtime';
 import type { DriverFactory, ExecutionFaceFactory } from '../../../ask-runtime';
@@ -186,20 +186,14 @@ function usageOf(message: unknown): { input?: number; output?: number; cacheRead
   return Object.values(picked).some((v) => v !== undefined) ? picked : undefined;
 }
 
-/** 物化每样本独立配置副本：root 绝对 + store.dbPath 指入本样本 + Main 技能臂（缺口 2）。 */
-function materializeConfig(caseDef: ExpCase, configCopy: string, dbPath: string): void {
+/**
+ * 物化每样本独立配置副本：root 绝对 + store.dbPath 指入本样本。
+ * Main 技能臂不写配置（固定目录是唯一机制；实验经装配参数 `mainSkillsDir` 指夹具目录）。
+ */
+function materializeConfig(configCopy: string, dbPath: string): void {
   materializeEvalConfig(FIXTURE_CONFIG, configCopy);
   const doc = parseYaml(readFileSync(configCopy, 'utf8')) as Record<string, unknown>;
   doc['store'] = { dbPath };
-  if (caseDef.mainSkillRoots !== undefined || caseDef.mainSkillMode !== undefined) {
-    const profiles = doc['contextProfiles'] as Record<string, Record<string, unknown>> | undefined;
-    const key = profiles === undefined ? undefined : Object.keys(profiles)[0];
-    if (profiles !== undefined && key !== undefined) {
-      const profile = profiles[key]!;
-      if (caseDef.mainSkillRoots !== undefined) profile['mainSkillRoots'] = [...caseDef.mainSkillRoots];
-      if (caseDef.mainSkillMode !== undefined) profile['mainSkillMode'] = caseDef.mainSkillMode;
-    }
-  }
   writeFileSync(configCopy, stringifyYaml(doc));
 }
 
@@ -227,7 +221,7 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
     for (const dir of [stateDir, dbDir, configDir]) mkdirSync(dir, { recursive: true });
     const dbPath = path.join(dbDir, 'state.db');
     const configCopy = path.join(configDir, 'agent-config.yaml');
-    materializeConfig(caseDef, configCopy, dbPath);
+    materializeConfig(configCopy, dbPath);
 
     const config: AppConfig = loadConfig({ yamlPath: configCopy });
     const env = effectiveDeploymentEnv(config, { ...process.env, ...(options.env ?? {}), ...(caseDef.env ?? {}) });
@@ -243,9 +237,9 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
     const sessionId = item.sessionId;
     const scope: TaskScope = { principalId, sessionId };
 
-    // 臂 A 常驻技能块字节（装配期事实；缺省臂 = 0）。
-    const delivery = await loadMainSkillDelivery(profile.root, profile.mainSkillRoots ?? [], profile.mainSkillMode ?? 'inline');
-    const skillBlockBytes = Buffer.byteLength(delivery.promptBlock, 'utf8');
+    // catalog 臂常驻提示字节（装配期事实；目录来自装配参数，缺省 = 生产固定目录；none 臂 = 0）。
+    const delivery = await loadMainSkillDelivery(caseDef.mainSkillsDir ?? defaultMainSkillsDir());
+    const skillBlockBytes = delivery.catalogBytes;
 
     const sink: Sink = { turn: 0, calls: [], perTurnMainTools: [] };
     const registry = createSqliteTaskRegistry(dbPath);
@@ -298,6 +292,7 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
         createExecutionFace: async () => face,
         ...(runner === undefined ? {} : { taskRunner: runner }),
         ...(caseDef.dispatchMode === undefined ? {} : { dispatchMode: caseDef.dispatchMode }),
+        ...(caseDef.mainSkillsDir === undefined ? {} : { mainSkillsDir: caseDef.mainSkillsDir }),
       });
 
       // 确定性预置任务（越权/挂起探针）——在会话首回合前写入本会话底账。

@@ -23,7 +23,7 @@ export interface ExpEvidence {
   meta: MetaFile;
   /** 每回合 Main 工具面（工具名列表）。 */
   perTurnMainTools: readonly (readonly string[])[];
-  /** 装配期事实：臂 A 常驻 Main 提示里的技能块字节数（缺省 0）。 */
+  /** 装配期事实：catalog 臂常驻 Main 提示的 catalog 字节数（空索引/none 臂 = 0）。 */
   skillBlockBytes: number;
   /** 逐回合压缩触发点（compacted=true 的轮为首次出现压缩摘要标记的轮）。 */
   compaction: Array<{ turn: number; compacted: boolean; before: number; after: number }>;
