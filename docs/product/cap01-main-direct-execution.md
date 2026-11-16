@@ -196,3 +196,15 @@ export interface TurnFileRef { fileId: string; name: string; bytes: number }
 2. **宿主同步登记会阻塞**（50MB 哈希 30ms）：处置：copy-on-register 走流式 + 异步。
 3. **`unexecuted` 会丢产物**：处置：Host 对 `unexecuted`/`failed` 也扫 `out/`（S2）。
 4. **background 交付链**：处置：S2 若含 background，`TaskExecutionInput/Outcome` + 受理回执一并改；否则 S2 明确只做 inline。
+
+---
+
+## 11. Owner 裁决（2026-11-17）
+
+| 事项 | 裁决 |
+|---|---|
+| **网络未阻断** | **接受**。不做 `fetch`/`net` 的 preload patch（可绕过、属极限防护）；如实写进残余风险即可 |
+| **防护强度** | **有基础防护就够**：Node 权限模型 + 进程组 kill + 输出截断 + 产物类型校验 + 最小 env；不追求 OS 级隔离/网络命名空间 |
+| **`run_js` 开放范围** | 对业务用户开放；残余风险按 §3 登记，不额外降级 |
+| **交付失败事实** | **只留结构化事件 + 用户话术，不建表**；将来需要"哪次没送达"可查时再加 `delivery_facts` |
+| 超时/内存/份数/字节数值 | 由 S0 实测后写死，不再单独裁决 |
