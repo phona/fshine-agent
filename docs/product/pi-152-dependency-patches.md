@@ -12,8 +12,35 @@
   `patch-package 8.0.1 · Applying patches… @earendil-works/pi-ai@1.5.2 ✔` → 文件回到补丁态（md5 `4e26cfb0…`）。
 - 补丁守卫测试：`packages/agent/pi-152-u1-output-floor.test.ts`（无补丁时 4 例红、1 例绿；有补丁 5 例绿）；
   `packages/agent/pi-152-u2-empty-summary.test.ts`（无 U2 补丁时 5 例中 4 例红、1 例正向对照绿；有补丁 5 例绿）。
+- 常驻绊线：`packages/agent/pi-152-patch-applied-tripwire.test.ts`（断言 U1 `derivedFloor` 与 U2 写库拒绝
+  确实存在且生效；实测 `--reverse` 后 `4 failed | 1 passed (5)`，重新打上后 `5 passed (5)`）。
 - 当前补丁栈（两个包、三个文件）：`@earendil-works+pi-ai+1.5.2.patch`（U1）、
   `@earendil-works+pi-coding-agent+1.5.2.patch`（U2）。`npm run postinstall` 输出两行 ✔ 即全部就位。
+
+## 证据更正：`report4.json` 曾被重跑覆盖（2026-11-16）
+
+U2 提交（`b930b34`）当时引用的 `.runtime/pi152-stageB/injection/report4.json` 是**补丁前**读数
+（T-empty → `compaction_end(completed)`、`summary:""` 入库、下一回合 `hasFact=false`）。该文件随后在
+**2026-11-16 10:29:48** 被同一脚本的**补丁后**重跑覆盖，原「修复前」内容已不在该路径上。独立复核据此判
+`passed=false`：引用目标与所声称的补丁状态不一致。
+
+更正方式：**不修改旧证据内容、不改判据**；用 `patch-package --reverse` / `patch-package` 两次受控运行
+重新生成前后对照，并把原始 JSON 的**机械投影**提交为仓库内不可变文件：
+
+| 读数 | 不可变证据文件 | 补丁状态 | 生成命令 |
+|---|---|---|---|
+| **补丁前** | `docs/product/evidence/pi152-u2-injection-prepatch.json` | reverse（node_modules 回到上游 1.5.2 原状） | `TMPDIR=<临时目录> node --import tsx scripts/eval/pi152-stageB/injection.ts` |
+| **补丁后** | `docs/product/evidence/pi152-u2-injection-postpatch.json` | applied（U1+U2 两个补丁就位） | 同上 |
+
+- 两份 JSON 由上述脚本的原始 JSON 输出**机械投影**（未手写数字），只保留判定字段：每用例 `finalText`、
+  `hasFact`（最后一次主请求）、`compactionEnded`、`compaction_end` 的
+  `errorMessage`/`summary`/`summaryChars`、落库 `compactionEntries`。
+- 生成时间：2026-11-16T11:10:40+08:00。撤销/重打均以 grep 验证：reverse 后 `simple-options.js` 无
+  `MIN_DERIVED_MAX_TOKENS`、`session-manager.js` 无 `Refusing to append a compaction entry`；applied 后
+  两者分别出现在 `simple-options.js:15/:41` 与 `session-manager.js:897`。
+- `.runtime/**` 是 gitignored 的原始运行产物，**不得作为引用目标**。本文件凡涉及可复核判据，只引用
+  `docs/product/evidence/` 下这两份文件；其余章节提到的 stageB/stageU1 原始产物同样 gitignored、未入库，
+  其数字只作当次记录，不冒充可复核证据。
 
 ## P1 · `@earendil-works/pi-ai@1.5.2` — U1 输出预算被夹到 1 token
 
@@ -31,9 +58,10 @@
 - `dist/api/simple-options.js:36`：`maxTokens: clampMaxTokensToContext(model, context, options?.maxTokens ?? model.maxTokens)`
   —— 未区分「调用方显式要求」与「取 `model.maxTokens` 缺省」。
 - `dist/api/openai-completions.js:578-585`：有 `maxTokens` 就写 `max_completion_tokens` ⇒ 真实请求
-  `max_completion_tokens: 1`（证据：`.runtime/pi152-stageB/A/http.jsonl` 12 次；B 5 次）。
+  `max_completion_tokens: 1`（证据：stageB 原始运行产物，当次记录 A 12 次 / B 5 次；该产物 gitignored、
+  未入库，见「证据更正」节）。
 - 后果：thinking 模型的唯一 token 落在 thinking 块，正文为空、`stopReason=length`、`usage.reasoning=0`，
-  上层看不出错误（`.runtime/pi152-stageB/trace.md` J3）。
+  上层看不出错误（stageB 轨迹记录 J3，同上未入库）。
 
 **修复思路（最小）**：只给「由 room 推导出来的上限」加下限，且**只在调用方未显式给 `maxTokens` 时**生效；
 显式 `options.maxTokens` 传 `derivedFloor = 1`，仍只受 room 约束（不会被下限抬高）。下限取 **1024**，
@@ -93,11 +121,11 @@ index a119bf9..1c4fd32 100644
 **删除条件**：上游在 `simple-options.js` 里区分「显式请求」与「缺省」并给 room 推导值设可用下限
 （等价于：`options.maxTokens === undefined` 时 `clamp ≥ 某个非退化下限`）后删除本补丁与守卫测试。
 
-## 验证读数（真实模型 `step-3.7-flash`，预注册 `.runtime/pi152-stageU1/prereg.md`）
+## 验证读数（真实模型 `step-3.7-flash`，当次预注册，未入库）
 
 装配与 stageB G3 一致（窗口 16,384 / `model.maxTokens` 2,048 / reserve 4,096 / keepRecent 4,915 /
 thinkingLevel=off / 仅 `bridge_exec`）；N=1/场景、一次采样、未重采样，A/B 各跑一次。
-对照：补丁前 `.runtime/pi152-stageB/{A,B}`；补丁后 `.runtime/pi152-stageU1/{A,B}`。
+对照：补丁前 stageB / 补丁后 stageU1 的原始运行产物（均 gitignored、未入库，仅作当次记录）。
 
 | 场景 | 调用 | tokens | 空回复 | 压缩（start/完成/失败） | 主请求 cap |
 |---|---|---|---|---|---|
@@ -109,7 +137,7 @@ thinkingLevel=off / 仅 `bridge_exec`）；N=1/场景、一次采样、未重采
 - **12 次原有 1-token 回合（A turn 5–16）逐次读数**：补丁后 cap = 1024×11 + 2048×1（turn 7）；
   `stopReason` 11×stop + 1×length（turn 11，1024 打满后由 Pi 溢出恢复重试 2048 成功）；
   `usage.output` 27–1013；**12/12 有正文**（最短 turn 6「背景 A4 已记录。」10 字）。
-  逐次表：`.runtime/pi152-stageU1/compare-A.json`、`compare-B.json`。
+  逐次表：当次 compare-A/compare-B 原始产物（未入库）。
 - **无谓放大证伪**：补丁后每个 cap=1024 的主请求，其上一次主响应 provider `totalTokens` 为
   14,618–27,436（A）、17,522–27,436（B），即 `room = 16384 − est − 4096` 全为负 ⇒ 下限只在原本会被
   压到 1 的位置生效；room≥1024 的请求一字未变（单测 `pi-152-u1-output-floor.test.ts` 钉住 3000 不变）。
@@ -152,9 +180,14 @@ thinkingLevel=off / 仅 `bridge_exec`）；N=1/场景、一次采样、未重采
   （`dist/core/session-manager.js:892`，补丁前行号）：手工压缩 `agent-session.js:2393`、
   自动压缩 `agent-session.js:2682`、boundary drafts `agent-session.js:649`；
   三个调用点**都没有**任何正文判定。
-- 注入证据 `.runtime/pi152-stageB/injection/report4.json`：`T-empty` → `compaction_end(reason=threshold,
-  summaryChars=0, summary="")` + `compactionEntries:[{"summary":"","summaryChars":0}]`，第 10 次主请求
-  `hasFact=false`（事实消失）；`T-ws` → `summary:"  \n\t "`、`summaryChars=5`，同样入库、事实消失。
+- **补丁前**注入证据（不可变）：`docs/product/evidence/pi152-u2-injection-prepatch.json`。
+  `T-empty` → `compaction_end(reason=threshold, errorMessage=null, summaryChars=0, summary="")` +
+  `compactionEntries:[{"summary":"","summaryChars":0}]`，最后一次主请求 `hasFact=false`（事实消失）；
+  `T-ws` → `summary:"  \n\t "`、`summaryChars=5`，同样入库、事实消失。
+- **补丁后**注入证据（不可变）：`docs/product/evidence/pi152-u2-injection-postpatch.json`。
+  同一 `T-empty`/`T-ws` → 三次 `compaction_end` 均带
+  `errorMessage="Auto-compaction failed: Summarization failed: model returned an empty summary; kept existing history"`、
+  `compactionEntries:[]`、最后一次主请求 `hasFact=true`（历史保留）。
 
 **修复思路（最小：一处公共判定 + 一个写库边界，不复制三份逻辑）**：
 
@@ -239,14 +272,15 @@ index 7ee0501..daca92b 100644
 或在 `appendCompaction` 写库前拒绝空摘要（任一形式，二者之一即可让 U2 的对应守卫失效）后，
 删除本补丁与 `packages/agent/pi-152-u2-empty-summary.test.ts`。
 
-**验证读数（确定性，零真实模型；`TMPDIR=/home/tao/.tmp`）**：
+**验证读数（确定性，零真实模型；`TMPDIR=<临时目录>`）**：
 
 - 守卫测试 `packages/agent/pi-152-u2-empty-summary.test.ts`（真实 `createAgentSession` +
   `SessionManager` 落真实会话文件；脚本化 provider 只替换模型响应）：
   - **无补丁（实测）**：`4 failed | 1 passed (5)`（正向对照无补丁时本就绿：有效摘要能正常入库）；
     其中 `T-empty` 形状 = `compaction_end` 无 errorMessage、
     会话文件 `entries` 出现 `compaction`、`summary=""`；`T-ws` = `summary="  \n\t "`、`summaryChars=5`；
-    最后一条主请求 `hasFact=false`（事实消失）。与 `report4.json` 的 T-empty/T-ws 一致。
+    最后一条主请求 `hasFact=false`（事实消失）。与
+    `docs/product/evidence/pi152-u2-injection-prepatch.json` 的 T-empty/T-ws 一致。
   - **有补丁（实测）**：`5 passed (5)`。
 - **反向绊线（实测）**：把三处判空（两个摘要调用点 + `appendCompaction`）同时改回上游写法 →
   `4 failed | 1 passed (5)`：边界①（空/全空白）、边界②（Turn Prefix）、边界③（写库）各红，
