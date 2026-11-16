@@ -21,14 +21,22 @@
  *   ⑩ TTL 过期后存储层查询语义：行仍在、activated_at 原值（TTL 是读方谓词，存储层不删行
  *      不降级——孤儿清理归后续 TTL 清扫，本层无 TTL 概念）。
  *
+ * S2 测试补齐（task_id 列 + 解析侧，v8 §4 作用域规则）：
+ *   ⑪ 带 taskId 行只在 Worker 解析（task_id = 当前任务）可见；无 taskId 行只在 Main 解析
+ *      （task_id IS NULL）可见；越权与不存在在两侧同样 undefined（同码防 oracle）；
+ *   ⑫ S1 时代旧库（file_refs 无 task_id 列）可写打开：ADD COLUMN 补齐（前向加法）、旧行
+ *      全字段不动且归 Main 侧、迁移备份生成、user_version 不升（仍 v4）、二次打开零差异；
+ *   ⑬ 只读旧库（有 file_refs 无 task_id 列）：Main 解析退回旧查询（历史行都是 Main 侧）、
+ *      Worker 解析读出 undefined（不崩溃）、写入确定性拒绝。
+ *
  * 库路径用临时目录（mkdtemp）；不触网、不碰真实平台。
  */
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
-import { openTaskStore, type FileRefRow } from './src/task-store';
+import { TASK_STORE_SCHEMA_VERSION, openTaskStore, type FileRefRow } from './src/task-store';
 
 const dirs: string[] = [];
 
@@ -70,7 +78,7 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
     const pending = store.insertFileRef(rowOf({ fileId: 'file_b', activatedAt: undefined }));
     expect(pending.activatedAt).toBeUndefined(); // pending 的存储形状就是 NULL
 
-    const readBack = store.getFileRef('file_b', SCOPE_A)!;
+    const readBack = store.getFileRef('file_b', SCOPE_A, { side: 'main' })!;
     expect(readBack.fileId).toBe('file_b');
     expect(readBack.activatedAt).toBeUndefined();
     expect(readBack.createdAt).toBe(1699999999000);
@@ -81,10 +89,10 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
   it('② 越权与不存在同形：换 principal / 换 session 与不存在一样是 undefined（防 oracle）', () => {
     const store = openTaskStore(tempDbPath());
     store.insertFileRef(rowOf({ fileId: 'file_a' }));
-    expect(store.getFileRef('file_a', SCOPE_A)).toBeDefined();
-    expect(store.getFileRef('file_a', { principalId: 'wecom:u2', sessionId: 'cap01-s0' })).toBeUndefined();
-    expect(store.getFileRef('file_a', SCOPE_B)).toBeUndefined();
-    expect(store.getFileRef('file_absent', SCOPE_A)).toBeUndefined();
+    expect(store.getFileRef('file_a', SCOPE_A, { side: 'main' })).toBeDefined();
+    expect(store.getFileRef('file_a', { principalId: 'wecom:u2', sessionId: 'cap01-s0' }, { side: 'main' })).toBeUndefined();
+    expect(store.getFileRef('file_a', SCOPE_B, { side: 'main' })).toBeUndefined();
+    expect(store.getFileRef('file_absent', SCOPE_A, { side: 'main' })).toBeUndefined();
     store.close();
   });
 
@@ -118,7 +126,7 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
     first.close();
 
     const second = openTaskStore(dbPath);
-    expect(second.getFileRef('file_after_migration', SCOPE_A)).toBeDefined();
+    expect(second.getFileRef('file_after_migration', SCOPE_A, { side: 'main' })).toBeDefined();
     expect(second.getTask('task_legacy')?.task.status).toBe('completed');
     second.close();
   });
@@ -141,7 +149,7 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
     oldDb.close();
 
     const store = openTaskStore(dbPath, { readOnly: true });
-    expect(store.getFileRef('file_any', SCOPE_A)).toBeUndefined();
+    expect(store.getFileRef('file_any', SCOPE_A, { side: 'main' })).toBeUndefined();
     expect(store.listFileRefs(SCOPE_A)).toEqual([]);
     expect(() => store.insertFileRef(rowOf({ fileId: 'file_new' }))).toThrow(/file_refs/);
     store.close();
@@ -161,13 +169,13 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
       createdAt: 1_759_999_999_000,
     };
     expect(store.insertFileRef(row)).toEqual(row);
-    expect(store.getFileRef('file_roundtrip', scope)).toEqual(row);
+    expect(store.getFileRef('file_roundtrip', scope, { side: 'main' })).toEqual(row);
     expect(store.listFileRefs(scope)).toEqual([row]);
 
     // pending 形状（activated_at NULL）同样全字段往返：读出是 undefined，不是 0/'' 之类改写。
     const pending: FileRefRow = { ...row, fileId: 'file_rt_pending', sha256: 'b'.repeat(64), bytes: 1, activatedAt: undefined };
     expect(store.insertFileRef(pending)).toEqual(pending);
-    expect(store.getFileRef('file_rt_pending', scope)).toEqual(pending);
+    expect(store.getFileRef('file_rt_pending', scope, { side: 'main' })).toEqual(pending);
     store.close();
   });
 
@@ -183,16 +191,16 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
 
     expect(store.activatePendingFileRefs(SCOPE_A, { activatedAt: now, createdAfter: windowStart })).toBe(1);
 
-    const activated = store.getFileRef('file_win', SCOPE_A)!;
+    const activated = store.getFileRef('file_win', SCOPE_A, { side: 'main' })!;
     expect(activated.activatedAt).toBe(now);
     // 激活只是 NULL → 时刻：其余 7 列原样（无第二套状态、无改写）。
     expect(activated).toEqual({ ...inWindow, activatedAt: now });
 
-    expect(store.getFileRef('file_old_pending', SCOPE_A)?.activatedAt).toBeUndefined(); // 过期 pending 保持 pending
-    expect(store.getFileRef('file_already', SCOPE_A)?.activatedAt).toBe(1_700_000_000_000); // 已激活时间戳不变
+    expect(store.getFileRef('file_old_pending', SCOPE_A, { side: 'main' })?.activatedAt).toBeUndefined(); // 过期 pending 保持 pending
+    expect(store.getFileRef('file_already', SCOPE_A, { side: 'main' })?.activatedAt).toBe(1_700_000_000_000); // 已激活时间戳不变
 
     expect(store.activatePendingFileRefs(SCOPE_A, { activatedAt: now + 1, createdAfter: windowStart })).toBe(0);
-    expect(store.getFileRef('file_win', SCOPE_A)?.activatedAt).toBe(now); // 二次激活不重写时间戳
+    expect(store.getFileRef('file_win', SCOPE_A, { side: 'main' })?.activatedAt).toBe(now); // 二次激活不重写时间戳
     store.close();
   });
 
@@ -208,8 +216,8 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
     );
 
     expect(store.activatePendingFileRefs(SCOPE_A, { activatedAt: now, createdAfter: now - 60_000 })).toBe(0);
-    expect(store.getFileRef('file_other_session', SCOPE_B)?.activatedAt).toBeUndefined();
-    expect(store.getFileRef('file_other_principal', PRINCIPAL_B)?.activatedAt).toBeUndefined();
+    expect(store.getFileRef('file_other_session', SCOPE_B, { side: 'main' })?.activatedAt).toBeUndefined();
+    expect(store.getFileRef('file_other_principal', PRINCIPAL_B, { side: 'main' })?.activatedAt).toBeUndefined();
 
     // list 侧另一 principal 补全（getFileRef 双维 S0 ②已锁）：A 的行不串进别人的会话列表。
     store.insertFileRef(rowOf({ fileId: 'file_only_a' }));
@@ -225,7 +233,7 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
       store.insertFileRef(rowOf({ fileId: 'file_dup', name: '冒名.xlsx', sha256: 'sha_second' })),
     ).toThrowError(/UNIQUE constraint failed: file_refs\.file_id/);
     // 主键冲突必须零写入：首行原样（INSERT OR REPLACE / OR IGNORE 之类的写法在这里红）。
-    const kept = store.getFileRef('file_dup', SCOPE_A)!;
+    const kept = store.getFileRef('file_dup', SCOPE_A, { side: 'main' })!;
     expect(kept.name).toBe('首行.xlsx');
     expect(kept.sha256).toBe('sha_first');
     expect(store.listFileRefs(SCOPE_A)).toHaveLength(1);
@@ -238,8 +246,88 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
     store.insertFileRef(
       rowOf({ fileId: 'file_stale', activatedAt: staleActivatedAt, createdAt: staleActivatedAt - 1_000 }),
     );
-    expect(store.getFileRef('file_stale', SCOPE_A)?.activatedAt).toBe(staleActivatedAt);
+    expect(store.getFileRef('file_stale', SCOPE_A, { side: 'main' })?.activatedAt).toBe(staleActivatedAt);
     expect(store.listFileRefs(SCOPE_A).map((row) => row.fileId)).toEqual(['file_stale']);
+    store.close();
+  });
+
+  it('⑪ S2 解析侧：带 taskId 行只在 Worker（task_id=当前任务）可见；无 taskId 行只在 Main 可见；越权/不存在同形', () => {
+    const store = openTaskStore(tempDbPath());
+    const mainOnly = store.insertFileRef(rowOf({ fileId: 'file_main_only' }));
+    const bound = store.insertFileRef(rowOf({ fileId: 'file_bound', taskId: 'task_x' }));
+
+    // Main 侧：只解析 task_id IS NULL。
+    expect(store.getFileRef('file_main_only', SCOPE_A, { side: 'main' })).toEqual(mainOnly);
+    expect(store.getFileRef('file_bound', SCOPE_A, { side: 'main' })).toBeUndefined();
+    // Worker 侧：只解析 task_id = 当前任务；其他任务/缺省行一律不可见。
+    expect(store.getFileRef('file_bound', SCOPE_A, { side: 'worker', taskId: 'task_x' })).toEqual(bound);
+    expect(store.getFileRef('file_bound', SCOPE_A, { side: 'worker', taskId: 'task_y' })).toBeUndefined();
+    expect(store.getFileRef('file_main_only', SCOPE_A, { side: 'worker', taskId: 'task_x' })).toBeUndefined();
+    // 越权与不存在同形（Worker 侧换 principal 也 undefined——不泄露存在性）。
+    expect(
+      store.getFileRef('file_bound', { principalId: 'wecom:u2', sessionId: 'cap01-s0' }, { side: 'worker', taskId: 'task_x' }),
+    ).toBeUndefined();
+    expect(store.getFileRef('file_absent', SCOPE_A, { side: 'worker', taskId: 'task_x' })).toBeUndefined();
+    store.close();
+  });
+
+  it('⑫ S1 时代旧库（file_refs 无 task_id 列）可写打开：ADD COLUMN 补齐、旧行归 Main 不动、备份生成、版本不升', () => {
+    const dbPath = tempDbPath();
+    // 造一个当前形状的库再 DROP COLUMN task_id = 精确复刻 S1 时代的 file_refs（8 列 + 一行旧行）。
+    {
+      const seeded = openTaskStore(dbPath);
+      seeded.insertFileRef(rowOf({ fileId: 'file_legacy', name: '旧表.xlsx', sha256: 'sha_legacy', bytes: 7 }));
+      seeded.close();
+    }
+    {
+      const shrink = new Database(dbPath);
+      shrink.exec('ALTER TABLE file_refs DROP COLUMN task_id');
+      shrink.close();
+    }
+
+    const store = openTaskStore(dbPath); // 可写打开 → 迁移谓词命中 → ADD COLUMN task_id
+    // 旧行全字段不动，读出 taskId undefined（历史行都是 Main 侧会话文件）。
+    const oldRow = store.getFileRef('file_legacy', SCOPE_A, { side: 'main' })!;
+    expect(oldRow).toEqual(
+      rowOf({ fileId: 'file_legacy', name: '旧表.xlsx', sha256: 'sha_legacy', bytes: 7 }),
+    );
+    expect(oldRow.taskId).toBeUndefined();
+    expect(store.getFileRef('file_legacy', SCOPE_A, { side: 'worker', taskId: 'task_new' })).toBeUndefined();
+
+    // 新行可带 taskId（Worker 解析可见）；版本不升（仍 v4——纯前向加法，不改 user_version）。
+    store.insertFileRef(rowOf({ fileId: 'file_new_bound', taskId: 'task_new' }));
+    expect(store.getFileRef('file_new_bound', SCOPE_A, { side: 'worker', taskId: 'task_new' })).toBeDefined();
+    store.close();
+
+    expect(existsSync(`${dbPath}.backup-v${TASK_STORE_SCHEMA_VERSION}`)).toBe(true);
+    expect(TASK_STORE_SCHEMA_VERSION).toBe(4);
+    const probe = new Database(dbPath);
+    expect(probe.pragma('user_version', { simple: true })).toBe(TASK_STORE_SCHEMA_VERSION);
+    probe.close();
+
+    // 幂等：二次打开零差异（列已在，迁移谓词不再命中，行原样）。
+    const second = openTaskStore(dbPath);
+    expect(second.getFileRef('file_legacy', SCOPE_A, { side: 'main' })).toEqual(oldRow);
+    expect(second.getFileRef('file_new_bound', SCOPE_A, { side: 'worker', taskId: 'task_new' })).toBeDefined();
+    second.close();
+  });
+
+  it('⑬ 只读旧库（有 file_refs 无 task_id 列）：Main 解析退回旧查询、Worker 读出 undefined、写入确定性拒绝', () => {
+    const dbPath = tempDbPath();
+    {
+      const seeded = openTaskStore(dbPath);
+      seeded.insertFileRef(rowOf({ fileId: 'file_legacy' }));
+      seeded.close();
+      const shrink = new Database(dbPath);
+      shrink.exec('ALTER TABLE file_refs DROP COLUMN task_id');
+      shrink.close();
+    }
+
+    const store = openTaskStore(dbPath, { readOnly: true });
+    // Main 解析可用（退回旧 3 条件查询：历史行都是 Main 侧）；Worker 解析无行可解析（不崩溃）。
+    expect(store.getFileRef('file_legacy', SCOPE_A, { side: 'main' })).toBeDefined();
+    expect(store.getFileRef('file_legacy', SCOPE_A, { side: 'worker', taskId: 'task_x' })).toBeUndefined();
+    expect(() => store.insertFileRef(rowOf({ fileId: 'file_new' }))).toThrow(/file_refs/);
     store.close();
   });
 });

@@ -218,7 +218,7 @@ describe('CAP-01 S1 入站附件登记（server 级）', () => {
       const rowB1 = ro.listFileRefs(SCOPE).find((row) => row.name === '名册.xlsx');
       expect(rowB1?.activatedAt).toBeUndefined();
       await server.handler(incoming('user-a', 'conv-a', 'm-instr-2', '汇总这份明细'));
-      const rowB2 = ro.getFileRef(rowB1!.fileId, SCOPE);
+      const rowB2 = ro.getFileRef(rowB1!.fileId, SCOPE, { side: 'main' });
       expect(rowB2?.activatedAt).toBeDefined();
       expect(logs.some((line) => line['event'] === 'pending_files_activated')).toBe(true);
     } finally {

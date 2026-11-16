@@ -60,6 +60,7 @@ import { createResourcePolicy, resolveRuntimeConfig, type ResourcePolicy } from 
 import type { TaskRegistry } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
 import type { RunJsExecutor } from '../packages/agent/src/run-js-executor';
+import type { TaskInputCopier } from '../packages/agent/src/file-store';
 import { createTaskRunner, type TaskExecutor, type TaskRunner } from '../packages/agent/src/task-runner';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../packages/agent/src/worker-skills';
 import type { SkillRegistry } from '../packages/agent/src/skills';
@@ -245,6 +246,11 @@ export interface SessionAssemblyInput {
   onTranscriptError?: (error: unknown) => void;
   /** CAP-01 S1：run_js 执行器端口（装配层构造注入；缺省不注入 = Main 无 run_js 工具）。 */
   runJsExecutor?: RunJsExecutor;
+  /**
+   * CAP-01 S2：交办复制端口（run_task.inputFiles 的宿主侧执行；装配层注入 fileStore 本身）。
+   * 缺省不注入 = run_task 工具面不带 inputFiles（逐字节不变），模型传了也 fail-closed 拒绝。
+   */
+  taskInputCopier?: TaskInputCopier;
   /**
    * CAP-01 S1 清单注入（机械事实）：装配层提供本会话已激活（TTL 内）文件清单——
    * 字段只有 fileId/name/bytes。缺省不注入 = 无清单（回合输入逐字节不变）。
@@ -587,6 +593,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       ...(input.transcriptStore === undefined ? {} : { transcriptStore: input.transcriptStore }),
       ...(input.onTranscriptError === undefined ? {} : { onTranscriptError: input.onTranscriptError }),
       ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
+      ...(input.taskInputCopier === undefined ? {} : { taskInputCopier: input.taskInputCopier }),
       ...(input.fileManifestProvider === undefined ? {} : { fileManifestProvider: input.fileManifestProvider }),
       mainTurnMs: resolved.mainTurnMs,
       workerTurnMs: resolved.workerTurnMs,

@@ -2,7 +2,8 @@
  * 文件区监管 fileStore（CAP-01 S0；docs/product/cap01-main-direct-execution.md §1/§2/§3/§4）。
  *
  * 职责：workspace 布局派生 + 文件字节与 file_refs 行的**唯一写侧**（putFile 落新文件 /
- * materializeInputs 物化输入 / registerOutputsFromOut 从交付箱 copy-on-register 登记产物）。
+ * materializeInputs 物化输入 / registerOutputsFromOut 从交付箱 copy-on-register 登记产物 /
+ * copyInputsForTask 交办时复制任务副本）。
  * 表访问只走 @fshine/core 的 TaskStore 行访问器（insertFileRef/getFileRef/listFileRefs），
  * 本模块不建第二套 store、不开第二个端口实现（S0 收口约束）。
  *
@@ -21,6 +22,9 @@
  * fd 上的 fstat 拒 hardlink（nlink!==1）与外来 uid、大小/份数上限；**从同一个 fd** 流式
  * 读字节做 copy-on-register（新 fileId + sha256），原件字节不动、sha256 前后不变。
  * open 用 O_NOFOLLOW：走查后路径被换成 symlink → ELOOP，按拒收处理（TOCTOU 收窄到 fd）。
+ *
+ * 解析作用域（CAP-01 S2，v8 §4）：所有读路径都带解析侧——Main 只解析 task_id IS NULL 的
+ * 行；Worker 只解析 task_id = 当前任务的行（FileRefResolution）。越权/不存在/过期同码。
  *
  * 错误面（v8 §4）：输入物化对「越权 / 不存在 / pending / 过期 / 字节缺失」抛同一
  * FILE_REF_UNAVAILABLE（防存在性 oracle）；机械 reason 随异常携带，只进日志，不进用户话术。
@@ -42,9 +46,13 @@ import {
   writeSync,
 } from 'node:fs';
 import path from 'node:path';
-import type { TaskStore } from '@fshine/core';
+import type { FileRefResolution, FileRefRow, TaskStore } from '@fshine/core';
 
-/** 文件事实归属（S0 形状；S2 追加 task 维度，见 v8 §4 的派生口径）。 */
+/**
+ * 文件事实归属（S0 形状）：principal + session。任务维度（CAP-01 S2）不走这里——
+ * 它在 file_refs.task_id 列 + FileRefResolution 解析侧上（v8 §4：Main 解析 task_id IS NULL，
+ * Worker 解析 task_id = 当前任务；身份仍以 principal/session 为底）。
+ */
 export interface FileScope {
   principalId: string;
   sessionId: string;
@@ -129,6 +137,20 @@ export interface MaterializedInput {
   materializedName: string;
 }
 
+/**
+ * 交办复制结果（CAP-01 S2；机械事实随返回值带走——不进模型转录，交付/清单也不含它）：
+ * 副本是任务私有文件（task_id 绑定），Worker 只解析当前任务的副本，原件不动。
+ */
+export interface CopiedTaskInput {
+  /** 源 fileId（Main 作用域，原件保持 task_id NULL）。 */
+  sourceFileId: string;
+  /** 副本 fileId（新 file_id；task_id = 目标任务）。 */
+  fileId: string;
+  name: string;
+  bytes: number;
+  sha256: string;
+}
+
 export interface SkippedOutput {
   /** out/ 相对路径。 */
   name: string;
@@ -153,7 +175,7 @@ export interface ScanLimits {
   maxCount: number;
 }
 
-/** 文件区监管的唯一写侧（S0 形状；S1 入站登记复用 putFile，S2 接 Task 副本）。 */
+/** 文件区监管的唯一写侧（S0 形状；S1 入站登记复用 putFile，S2 交办复制 + 解析作用域）。 */
 export interface FileStore {
   /** workspace 根（执行器派生 run 目录用；不暴露到契约/转录）。 */
   readonly workspaceRoot: string;
@@ -161,9 +183,23 @@ export interface FileStore {
   putFile(input: PutFileInput): RegisteredFile;
   /**
    * 把 inputs 里每个 fileId 的字节物化到 <runDir>/in/<fileId><safeExt>。
-   * 任一 fileId 越权/不存在/pending/字节缺失 → FileRefUnavailableError（不起子进程）。
+   * 解析侧由 resolution 决定（v8 §4）：Main 只解析 task_id IS NULL；Worker 只解析
+   * task_id = 指定任务。任一 fileId 越权/不存在/pending/过期/字节缺失 →
+   * FileRefUnavailableError（不起子进程）。
    */
-  materializeInputs(input: { runDir: string; scope: FileScope; fileIds: readonly string[] }): MaterializedInput[];
+  materializeInputs(input: {
+    runDir: string;
+    scope: FileScope;
+    fileIds: readonly string[];
+    resolution: FileRefResolution;
+  }): MaterializedInput[];
+  /**
+   * 交办复制（CAP-01 S2，v8 §4/§6）：把 Main 作用域（task_id IS NULL、已激活、TTL 内）
+ * 输入文件复制成绑定 taskId 的新 file_id 行（登记即激活；Worker 只解析当前任务的副本）。
+ * 先全部解析、后复制——任一 fileId 不可用 → FileRefUnavailableError（整次拒绝，零复制、
+ * 零行，不部分执行）；副本 sha256/bytes 与原件行一致，不一致（存储损坏）即删半成品并拒绝。
+   */
+  copyInputsForTask(input: { scope: FileScope; fileIds: readonly string[]; taskId: string }): CopiedTaskInput[];
   /**
    * 扫 <runDir>/out/ 登记产物（copy-on-register：新 fileId + sha256；activated_at = 登记时刻，
    * 产出即交付箱内容，S1 回合末投递直接用）。只收普通文件；拒收项进 skipped（审计）。
@@ -187,12 +223,19 @@ export interface FileStore {
    */
   activatePendingInputs(input: { scope: FileScope; now: number }): number;
   /**
-   * 本会话已激活（activated_at IS NOT NULL 且 TTL 内，与 materializeInputs 同一 TTL 谓词）
-   * 的文件清单（CAP-01 S1 清单注入源；机械事实投影，只有 fileId/name/bytes）。
+   * 本会话已激活（activated_at IS NOT NULL 且 TTL 内，与 materializeInputs 同一 TTL 谓词；
+   * 只含 Main 侧行——task_id IS NULL，任务副本不进 Main 清单）的文件清单（CAP-01 S1
+   * 清单注入源；机械事实投影，只有 fileId/name/bytes）。
    * 顺序 = 底账既有排序（created_at, file_id 升序）。
    */
   listActiveFiles(input: { scope: FileScope; now: number }): ActiveFileRef[];
 }
+
+/**
+ * 交办复制端口（CAP-01 S2）：runtime 只认这一个面（run_task.inputFiles 的宿主侧执行）；
+ * 装配层注入 fileStore 本身（结构满足 Pick）。缺省不注入 = run_task 工具面不带 inputFiles。
+ */
+export type TaskInputCopier = Pick<FileStore, 'copyInputsForTask'>;
 
 /** 产物登记的流式拷贝块大小（登记阻塞 ≈ 一次流过；v8 §10-2 的处置就是流式）。 */
 const REGISTER_COPY_CHUNK_BYTES = 64 * 1024;
@@ -251,17 +294,11 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
   }
 
   /**
-   * copy-on-register：从**同一个 fd** 流式读 → 哈希 + 落到新 fileId 的存储位（原件不动）。
-   * activatedAt 由调用方决定：out/ 产物 = 登记时刻（产出即可读）；入站附件 = undefined
-   * （pending，等带文字的消息激活）。超过 maxFileBytes 即弃（删半成品，不登记半份）。
+   * 从 fd 流式拷贝到 destPath 并哈希（登记阻塞 ≈ 一次流过；v8 §10-2 的处置就是流式）。
+   * 超过 maxFileBytes 即弃（删半成品，不登记半份）。copy-on-register 的共同底座：
+   * registerFromFd（out/ 产物、入站附件）与 copyInputsForTask（交办副本）共用。
    */
-  function registerFromFd(
-    fd: number,
-    input: { scope: FileScope; name: string; maxFileBytes: number; activatedAt: number | undefined },
-  ): RegisteredFile {
-    const fileId = newFileId();
-    const destPath = fileStoragePathOf(workspaceRoot, input.scope, fileId, input.name);
-    mkdirSync(path.dirname(destPath), { recursive: true });
+  function copyFdWithHash(fd: number, destPath: string, maxFileBytes: number): { sha256: string; bytes: number } {
     const destFd = openSync(destPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
     const hash = createHash('sha256');
     const buffer = Buffer.alloc(REGISTER_COPY_CHUNK_BYTES);
@@ -271,7 +308,7 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
         const read = readSync(fd, buffer, 0, buffer.length, null);
         if (read === 0) break;
         bytes += read;
-        if (bytes > input.maxFileBytes) {
+        if (bytes > maxFileBytes) {
           // fstat 之后仍在生长的写入面：超限即弃（删除半成品，不登记半份产物）。
           throw new RangeError('size_limit');
         }
@@ -288,18 +325,52 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
       throw error;
     }
     closeSync(destFd);
+    return { sha256: hash.digest('hex'), bytes };
+  }
+
+  /**
+   * copy-on-register：从**同一个 fd** 流式读 → 哈希 + 落到新 fileId 的存储位（原件不动）。
+   * activatedAt 由调用方决定：out/ 产物 = 登记时刻（产出即可读）；入站附件 = undefined
+   * （pending，等带文字的消息激活）。超过 maxFileBytes 即弃（删半成品，不登记半份）。
+   */
+  function registerFromFd(
+    fd: number,
+    input: { scope: FileScope; name: string; maxFileBytes: number; activatedAt: number | undefined },
+  ): RegisteredFile {
+    const fileId = newFileId();
+    const destPath = fileStoragePathOf(workspaceRoot, input.scope, fileId, input.name);
+    mkdirSync(path.dirname(destPath), { recursive: true });
+    const { sha256, bytes } = copyFdWithHash(fd, destPath, input.maxFileBytes);
     const row = store.insertFileRef({
       fileId,
       principalId: input.scope.principalId,
       sessionId: input.scope.sessionId,
       name: input.name,
-      sha256: hash.digest('hex'),
+      sha256,
       bytes,
       // 产出即交付箱内容（登记时刻激活）；入站附件传 undefined = pending（NULL）。
       ...(input.activatedAt === undefined ? {} : { activatedAt: input.activatedAt }),
       createdAt: Date.now(),
     });
     return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256 };
+  }
+
+  /**
+   * 按解析侧读一行**可读**文件（v8 §4 同码谓词的单一实现）：越权/不存在（missing_or_foreign）、
+   * pending、过期（activated_at 是 TTL 起点）→ FileRefUnavailableError（机械 reason 随异常
+   * 带出，只进日志）。materializeInputs 与 copyInputsForTask 共用。
+   */
+  function resolveReadableFile(
+    fileId: string,
+    scope: FileScope,
+    resolution: FileRefResolution,
+    now: number,
+  ): FileRefRow {
+    const row = store.getFileRef(fileId, scope, resolution);
+    if (row === undefined) throw new FileRefUnavailableError(`missing_or_foreign:${fileId}`);
+    if (row.activatedAt === undefined) throw new FileRefUnavailableError(`pending:${fileId}`);
+    if (now - row.activatedAt > FILE_REF_TTL_MS) throw new FileRefUnavailableError(`expired:${fileId}`);
+    return row;
   }
 
   return {
@@ -320,17 +391,14 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
         createdAt: Date.now(),
       });
     },
-    materializeInputs({ runDir, scope, fileIds }) {
+    materializeInputs({ runDir, scope, fileIds, resolution }) {
       const inDir = path.join(runDir, 'in');
       mkdirSync(inDir, { recursive: true });
       const materialized: MaterializedInput[] = [];
       for (const fileId of fileIds) {
-        const row = store.getFileRef(fileId, scope);
         // 越权/不存在/pending/过期/字节缺失同码（v8 §4；机械 reason 随异常带出，只进日志）。
-        if (row === undefined) throw new FileRefUnavailableError(`missing_or_foreign:${fileId}`);
-        if (row.activatedAt === undefined) throw new FileRefUnavailableError(`pending:${fileId}`);
-        // activated_at 是可读性 TTL 起点：过期与越权/不存在同码（防存在性 oracle）。
-        if (Date.now() - row.activatedAt > FILE_REF_TTL_MS) throw new FileRefUnavailableError(`expired:${fileId}`);
+        // 解析侧由 resolution 决定：Main 只解析 task_id IS NULL；Worker 只解析当前任务的行。
+        const row = resolveReadableFile(fileId, scope, resolution, Date.now());
         const source = fileStoragePathOf(workspaceRoot, scope, fileId, row.name);
         if (!existsSync(source)) throw new FileRefUnavailableError(`bytes_missing:${fileId}`);
         const materializedName = `${fileId}${safeExtensionOf(row.name)}`;
@@ -338,6 +406,54 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
         materialized.push({ fileId, name: row.name, materializedName });
       }
       return materialized;
+    },
+    copyInputsForTask({ scope, fileIds, taskId }) {
+      // 去重保序：同一 fileId 重复引用只复制一份。
+      const uniqueFileIds = [...new Set(fileIds)];
+      // 先全部按 Main 侧解析（任一不可用 → 整次拒绝：零复制、零行，不部分执行）。
+      const now = Date.now();
+      const resolved = uniqueFileIds.map((fileId) => resolveReadableFile(fileId, scope, { side: 'main' }, now));
+      // 全部可用后才复制：新 fileId + task_id 绑定 + 登记即激活（Worker 只解析当前任务的副本）。
+      return resolved.map((row) => {
+        const source = fileStoragePathOf(workspaceRoot, scope, row.fileId, row.name);
+        if (!existsSync(source)) throw new FileRefUnavailableError(`bytes_missing:${row.fileId}`);
+        let fd: number;
+        try {
+          fd = openSync(source, fsConstants.O_RDONLY);
+        } catch {
+          throw new FileRefUnavailableError(`bytes_missing:${row.fileId}`);
+        }
+        try {
+          const fileId = newFileId();
+          const destPath = fileStoragePathOf(workspaceRoot, scope, fileId, row.name);
+          mkdirSync(path.dirname(destPath), { recursive: true });
+          const { sha256, bytes } = copyFdWithHash(fd, destPath, row.bytes);
+          // 完整性（B 类）：副本字节/哈希必须与原件行一致——不一致即源存储损坏，删半成品
+          // 并拒绝交办（不登记一份与底账不符的副本）。
+          if (sha256 !== row.sha256 || bytes !== row.bytes) {
+            try {
+              rmSync(destPath);
+            } catch {
+              // 半成品清理失败留给 TTL 清孤儿；不掩盖完整性错误。
+            }
+            throw new Error(`任务副本与原件不一致（sha256/bytes 不符），未登记副本（源行 ${row.fileId}）`);
+          }
+          store.insertFileRef({
+            fileId,
+            principalId: scope.principalId,
+            sessionId: scope.sessionId,
+            taskId,
+            name: row.name,
+            sha256,
+            bytes,
+            activatedAt: Date.now(),
+            createdAt: Date.now(),
+          });
+          return { sourceFileId: row.fileId, fileId, name: row.name, bytes, sha256 };
+        } finally {
+          closeSync(fd);
+        }
+      });
     },
     registerOutputsFromOut({ runDir, scope, limits }) {
       const outDir = path.join(runDir, 'out');
@@ -420,10 +536,15 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
     },
     listActiveFiles({ scope, now }) {
       // 与 materializeInputs 的可读性谓词同源：activated_at 非 NULL 且 (now - activated_at) ≤ TTL。
+      // 只含 Main 侧行（task_id IS NULL）：任务副本只归当前任务的 Worker 解析，不进 Main 清单
+      // （清单是 Main 的 run_js/inputFiles 引用面——给了也解析不到，且是存在性 oracle，v8 §4）。
       // 只投影三字段（fileId/name/bytes）——sha256/身份键/时间戳不进清单。
       return store
         .listFileRefs(scope)
-        .filter((row) => row.activatedAt !== undefined && now - row.activatedAt <= FILE_REF_TTL_MS)
+        .filter(
+          (row) =>
+            row.taskId === undefined && row.activatedAt !== undefined && now - row.activatedAt <= FILE_REF_TTL_MS,
+        )
         .map((row) => ({ fileId: row.fileId, name: row.name, bytes: row.bytes }));
     },
   };

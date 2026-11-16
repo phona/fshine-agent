@@ -182,10 +182,12 @@ export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecuto
       const tmpDir = path.join(runDir, 'tmp');
 
       // ① 输入面先过（scope/激活校验 + 物化）：失败抛 FILE_REF_UNAVAILABLE，不起子进程。
+      // Main 的 run_js 只解析 Main 侧文件（task_id IS NULL，v8 §4）；Worker 侧解析归 S2 接线。
       const materializedInputs = options.fileStore.materializeInputs({
         runDir,
         scope,
         fileIds: input.inputs ?? [],
+        resolution: { side: 'main' },
       });
 
       for (const dir of [outDir, scratchDir, homeDir, tmpDir]) mkdirSync(dir, { recursive: true });

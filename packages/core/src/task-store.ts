@@ -39,6 +39,13 @@
  * 时间戳用 epoch 毫秒（INTEGER）：本表由机械写入方（fileStore）独占，读取方只做
  * 比较，不做人类展示——与 tasks 表的 ISO TEXT 有意不同。
  *
+ * file_refs.task_id（CAP-01 S2，v8 §4 作用域规则）：纯前向加法第 9 列（TEXT NULL）。
+ * Main 只解析 task_id IS NULL 的行；Worker 只解析 task_id = 当前任务的行——越权/不存在/
+ * 过期在上层同码 FILE_REF_UNAVAILABLE（本层一律 undefined，防存在性 oracle）。旧库可写
+ * 打开时 ADD COLUMN（迁移谓词扩展，与 tasks 列迁移共用同一次 v4 备份；不升 user_version）；
+ * 只读旧库（有 file_refs 无 task_id 列）Main 解析退回旧 3 条件查询（历史行都是 Main 侧）、
+ * Worker 解析读出 undefined、写入确定性拒绝。
+ *
  * 数字编号（P1）：
  *   · 分配 = 计数器行（task_sequences.name='task_no'）在**同一事务**内
  *     `UPDATE task_sequences SET value = value + 1 … RETURNING value` + INSERT：
@@ -170,17 +177,30 @@ export interface OperationStateWrite {
 }
 
 /**
+ * 文件解析侧（CAP-01 S2，v8 §4 作用域规则）：
+ *   · `{ side: 'main' }` —— Main（run_js 输入 / run_task inputFiles 校验 / 清单）只解析
+ *     task_id IS NULL 的行；
+ *   · `{ side: 'worker', taskId }` —— Worker 只解析 task_id = taskId 的行（当前任务的
+ *     副本与产物；跨任务/跨身份一律解析不到）。
+ * 越权（principal/session/task 不符）与不存在在上层同码 FILE_REF_UNAVAILABLE。
+ */
+export type FileRefResolution = { side: 'main' } | { side: 'worker'; taskId: string };
+
+/**
  * 一条文件事实行（CAP-01 S0；存储形状）。
  *
- * 8 列最小形状（v8 §4）：没有 state 枚举——activated_at IS NULL 即 pending，非 NULL =
- * 已激活（可读，同时是 TTL 起点）；不存 path——字节位置按 workspace 布局 +
+ * 9 列（S0 8 列 + S2 task_id，v8 §4）：没有 state 枚举——activated_at IS NULL 即 pending，
+ * 非 NULL = 已激活（可读，同时是 TTL 起点）；不存 path——字节位置按 workspace 布局 +
  * (principal, session, file_id) 派生；name 只是用户可见名（交付时用），存储/物化文件名
  * 一律用 file_id + 自 name 派生的安全扩展名，路径不可由 name 拼出。
+ * taskId 缺省 = Main 侧会话文件（task_id NULL）；交办副本/任务产物绑定所属任务。
  */
 export interface FileRefRow {
   fileId: string;
   principalId: string;
   sessionId: string;
+  /** 所属任务（CAP-01 S2；缺省 undefined = task_id NULL = Main 侧会话文件）。 */
+  taskId?: string;
   /** 用户可见文件名（不进路径；存储/物化命名见 packages/agent/src/file-store.ts）。 */
   name: string;
   sha256: string;
@@ -262,10 +282,15 @@ export interface TaskStore {
   /** CAP-01 S0：插入一条文件事实行（无 DB 生成列；file_id 冲突由主键抛出）。 */
   insertFileRef(row: FileRefRow): FileRefRow;
   /**
-   * CAP-01 S0：按 scope 读一行文件事实。越权（principal/session 不符）与不存在同为
-   * undefined（防存在性 oracle；机械原因只进日志，见 v8 §4）。
+   * CAP-01 S0/S2：按解析侧读一行文件事实。越权（principal/session/task 不符）与不存在
+   * 同为 undefined（防存在性 oracle；机械原因只进日志，见 v8 §4）。
+   * Main 侧只解析 task_id IS NULL；Worker 侧只解析 task_id = 指定任务（v8 §4 作用域规则）。
    */
-  getFileRef(fileId: string, scope: { principalId: string; sessionId: string }): FileRefRow | undefined;
+  getFileRef(
+    fileId: string,
+    scope: { principalId: string; sessionId: string },
+    resolution: FileRefResolution,
+  ): FileRefRow | undefined;
   /** CAP-01 S0：按 scope 列出（created_at, file_id 升序；量 = 会话文件数，不做分页）。 */
   listFileRefs(scope: { principalId: string; sessionId: string }): FileRefRow[];
   /**
@@ -340,7 +365,8 @@ CREATE TABLE IF NOT EXISTS file_refs (
   sha256 TEXT NOT NULL,
   bytes INTEGER NOT NULL,
   activated_at INTEGER,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  task_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_file_refs_scope ON file_refs (principal_id, session_id);
 `;
@@ -414,6 +440,7 @@ interface FileRefDbRow {
   bytes: number;
   activated_at: number | null;
   created_at: number;
+  task_id?: string | null;
 }
 
 /**
@@ -454,6 +481,16 @@ function operationSchemaMissing(db: Database.Database): boolean {
 }
 
 /**
+ * CAP-01 S2 加法迁移谓词：file_refs 表已存在但缺 task_id 列（S0/S1 时代的旧库）。
+ * 表不存在 = 由 SCHEMA_BASE 直接按新形状建，不需要 ALTER。纯前向加法（TEXT NULL），
+ * 不升 user_version；与 tasks 列迁移共用同一次 v4 备份（已有备份保留最早副本）。
+ */
+function fileRefTaskColumnMissing(db: Database.Database): boolean {
+  const fileRefColumns = tableColumnsOf(db, 'file_refs');
+  return fileRefColumns.size > 0 && !fileRefColumns.has('task_id');
+}
+
+/**
  * 迁移前自动备份（只做一次，不覆盖）：先 checkpoint 把 WAL 合入主文件，再整文件复制。
  * 命名 = <dbPath>.backup-v<迁移目标版本>（当前 v3）；`:memory:` 与库文件不存在不生成；
  * 已有同名备份时保留最早副本。
@@ -480,16 +517,19 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         const tableExists = columns.size > 0;
         const missing = tableExists ? TASK_COLUMNS.filter(([name]) => !columns.has(name)) : [];
         const operationsMissing = tableExists && operationSchemaMissing(writable);
-        if (missing.length > 0 || operationsMissing) {
+        // CAP-01 S2：旧 file_refs（有表无 task_id 列）→ ADD COLUMN（前向加法，不升版本）。
+        const fileRefTaskMissing = tableExists && fileRefTaskColumnMissing(writable);
+        if (missing.length > 0 || operationsMissing || fileRefTaskMissing) {
           // 旧库迁移：先备份（目标版本命名），再加列，再（仅缺 task_no 时）回填编号，
-          // 最后建唯一索引与版本号。U3 的 operations / executions.dispatch_key 与
-          // task 列迁移共用同一次备份（同一目标版本 v4）。
+          // 最后建唯一索引与版本号。U3 的 operations / executions.dispatch_key、task 列迁移
+          // 与 file_refs.task_id 共用同一次备份（同一目标版本 v4；已有备份保留最早副本）。
           backupBeforeMigration(writable, dbPath);
           for (const [name, type] of missing) writable.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${type}`);
           const executionColumns = tableColumnsOf(writable, 'executions');
           if (executionColumns.size > 0 && !executionColumns.has('dispatch_key')) {
             writable.exec('ALTER TABLE executions ADD COLUMN dispatch_key TEXT');
           }
+          if (fileRefTaskMissing) writable.exec('ALTER TABLE file_refs ADD COLUMN task_id TEXT');
         }
         writable.exec(SCHEMA_BASE);
         if (missing.some(([name]) => name === 'task_no')) {
@@ -703,16 +743,25 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
       })
     : undefined;
 
-  // file_refs（CAP-01 S0）：只读旧库没有该表 = 没有文件事实（读出缺省，不崩溃；写入给确定性拒绝）。
+  // file_refs（CAP-01 S0/S2）：只读旧库没有该表 = 没有文件事实（读出缺省，不崩溃；写入给
+  // 确定性拒绝）。解析侧按 v8 §4 拆两条查询：Main 只解析 task_id IS NULL；Worker 只解析
+  // task_id = 当前任务。只读旧库（有表无 task_id 列）：Main 退回旧 3 条件查询（历史行都是
+  // Main 侧会话文件），Worker 无行可解析（undefined）。
   const hasFileRefs = tableColumnsOf(db, 'file_refs').size > 0;
-  const insertFileRefStmt = hasFileRefs
+  const hasFileRefTaskColumn = hasFileRefs && tableColumnsOf(db, 'file_refs').has('task_id');
+  const insertFileRefStmt = hasFileRefTaskColumn
     ? db.prepare(`
-        INSERT INTO file_refs (file_id, principal_id, session_id, name, sha256, bytes, activated_at, created_at)
-        VALUES (@fileId, @principalId, @sessionId, @name, @sha256, @bytes, @activatedAt, @createdAt)
+        INSERT INTO file_refs (file_id, principal_id, session_id, task_id, name, sha256, bytes, activated_at, created_at)
+        VALUES (@fileId, @principalId, @sessionId, @taskId, @name, @sha256, @bytes, @activatedAt, @createdAt)
       `)
     : undefined;
-  const selectFileRef = hasFileRefs
-    ? db.prepare('SELECT * FROM file_refs WHERE file_id = ? AND principal_id = ? AND session_id = ?')
+  const selectMainFileRef = hasFileRefTaskColumn
+    ? db.prepare('SELECT * FROM file_refs WHERE file_id = ? AND principal_id = ? AND session_id = ? AND task_id IS NULL')
+    : hasFileRefs
+      ? db.prepare('SELECT * FROM file_refs WHERE file_id = ? AND principal_id = ? AND session_id = ?')
+      : undefined;
+  const selectWorkerFileRef = hasFileRefTaskColumn
+    ? db.prepare('SELECT * FROM file_refs WHERE file_id = ? AND principal_id = ? AND session_id = ? AND task_id = ?')
     : undefined;
   const selectFileRefsScoped = hasFileRefs
     ? db.prepare('SELECT * FROM file_refs WHERE principal_id = ? AND session_id = ? ORDER BY created_at, file_id')
@@ -729,6 +778,7 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     fileId: row.file_id,
     principalId: row.principal_id,
     sessionId: row.session_id,
+    ...(row.task_id === null || row.task_id === undefined ? {} : { taskId: row.task_id }),
     name: row.name,
     sha256: row.sha256,
     bytes: row.bytes,
@@ -799,6 +849,8 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     '任务底账是旧版 schema（缺 U3 operations 表/executions.dispatch_key）且以只读打开：不能读写逻辑操作账（请先用可写入口完成迁移）。';
   const missingFileRefsError =
     '任务底账是旧版 schema（缺 file_refs 表）且以只读打开：不能登记文件事实（请先用可写入口完成迁移）。';
+  const missingFileRefTaskColumnError =
+    '任务底账是旧版 schema（file_refs 缺 task_id 列）且以只读打开：不能登记文件事实（请先用可写入口完成迁移）。';
 
   /**
    * U3：把「读候选 + 决策 + 写」包进同一写事务（BEGIN IMMEDIATE）。
@@ -935,11 +987,14 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
       return runTransaction(fn);
     },
     insertFileRef(row) {
-      if (insertFileRefStmt === undefined) throw new Error(missingFileRefsError);
+      if (insertFileRefStmt === undefined) {
+        throw new Error(hasFileRefs ? missingFileRefTaskColumnError : missingFileRefsError);
+      }
       insertFileRefStmt.run({
         fileId: row.fileId,
         principalId: row.principalId,
         sessionId: row.sessionId,
+        taskId: row.taskId ?? null,
         name: row.name,
         sha256: row.sha256,
         bytes: row.bytes,
@@ -949,9 +1004,14 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
       // 无 DB 生成列（file_id/时间戳都来自调用方）：输入行即落库行。
       return row;
     },
-    getFileRef(fileId, scope) {
-      if (selectFileRef === undefined) return undefined;
-      const row = selectFileRef.get(fileId, scope.principalId, scope.sessionId) as FileRefDbRow | undefined;
+    getFileRef(fileId, scope, resolution) {
+      // 解析侧决定查询（v8 §4）：Main → task_id IS NULL；Worker → task_id = 指定任务。
+      // 只读旧库（无 task_id 列）Worker 无行可解析：undefined（与不存在同形，不崩溃）。
+      const row = (
+        resolution.side === 'main'
+          ? selectMainFileRef?.get(fileId, scope.principalId, scope.sessionId)
+          : selectWorkerFileRef?.get(fileId, scope.principalId, scope.sessionId, resolution.taskId)
+      ) as FileRefDbRow | undefined;
       return row === undefined ? undefined : toFileRef(row);
     },
     listFileRefs(scope) {

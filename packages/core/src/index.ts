@@ -16,4 +16,5 @@ export type {
   StoredTask,
   TaskStore,
   FileRefRow,
+  FileRefResolution,
 } from './task-store';

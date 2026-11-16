@@ -45,7 +45,8 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, RuntimeTurnEvent, TurnDriver, TurnDriverResult } from './driver-contract';
 import { ToolUserError } from './driver-contract';
-import { FileRefUnavailableError } from './file-store';
+import { FileRefUnavailableError, type TaskInputCopier } from './file-store';
+export type { TaskInputCopier } from './file-store';
 import type { RunJsExecutor, RunJsOutput } from './run-js-executor';
 import { READ_SKILL_TOOL, type SkillRegistry } from './skills';
 import { stripServerPaths } from './server-paths';
@@ -63,12 +64,32 @@ export const RUN_TASK_TOOL = 'run_task';
 export const RUN_TASK_TOOL_DESCRIPTION =
   '把一项平台任务交给执行层 Worker 执行：在 task 里写清要办什么（对象、范围、口径）。'
   + '返回 Worker 的事实汇报与结构化的执行结果。涉及平台数据的请求一律经它办理。';
+const RUN_TASK_TASK_PROPERTY = {
+  type: 'string',
+  description: '要交给执行层 Worker 的任务：写清对象、范围与要回答的问题；用自然语言，不要写命令。',
+};
 export const RUN_TASK_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    task: {
-      type: 'string',
-      description: '要交给执行层 Worker 的任务：写清对象、范围与要回答的问题；用自然语言，不要写命令。',
+    task: RUN_TASK_TASK_PROPERTY,
+  },
+  required: ['task'],
+  additionalProperties: false,
+};
+/**
+ * CAP-01 S2（v8 §4）：注入交办复制面（taskInputCopier）时的 run_task 工具 schema——
+ * inputFiles 可选，只收 Main 作用域（文件清单里给出）的 fileId；宿主在交办时复制成
+ * 任务私有副本（新 file_id，Worker 只解析当前任务的副本），原件不动。
+ * 缺省装配（未注入复制面）不带该属性：工具面与既有逐字节相同（S1 的缺省零变化纪律）。
+ */
+export const RUN_TASK_TOOL_SCHEMA_WITH_INPUT_FILES: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    task: RUN_TASK_TASK_PROPERTY,
+    inputFiles: {
+      type: 'array',
+      items: { type: 'string' },
+      description: '随任务交给执行层处理的输入文件 fileId 列表（来自文件清单；宿主复制为任务私有副本，原件不动）。',
     },
   },
   required: ['task'],
@@ -334,8 +355,16 @@ export interface RuntimeOptions {
   /**
    * CAP-01 S1：run_js 输入引用被拒（越权/不存在/pending/过期/字节缺失）时的机械 reason
    * 上报（**只进日志，不进用户话术**——v8 §4 防存在性 oracle；缺省静默，不影响回合）。
+   * S2 起 run_task.inputFiles 的拒绝同走这一回调。
    */
   onFileRefUnavailable?: (reason: string) => void;
+  /**
+   * CAP-01 S2（v8 §4/§6）：交办复制端口（装配层注入 fileStore 本身——结构满足 Pick）。
+   * 注入后 run_task 工具面带 inputFiles；交办时把 Main 作用域输入文件复制成绑定 taskId
+   * 的新 file_id（Worker 只解析当前任务的副本，原件不动）。缺省不注入 = 工具面不带
+   * inputFiles（逐字节不变），模型传了也 fail-closed 拒绝。
+   */
+  taskInputCopier?: TaskInputCopier;
 }
 
 /** 前台回合被资源策略确定性拒绝（queued 排队等晋升后不适用；携带机械 reason）。 */
@@ -687,12 +716,30 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     return runner.resume(resolveTaskId(refFromArgs(args)), { answer, scope });
   }
 
-  /** run_js 输入引用不可用的统一话术（越权/不存在/pending/过期/字节缺失同码同话术——v8 §4）。 */
-  const RUN_JS_INPUT_UNAVAILABLE_MESSAGE =
+  /**
+   * 输入文件引用不可用的统一话术（run_js.inputs 与 run_task.inputFiles 同用）：
+   * 越权/不存在/pending/过期/字节缺失同码同话术——v8 §4 防存在性 oracle。
+   */
+  const FILE_INPUT_UNAVAILABLE_MESSAGE =
     '输入文件不可用：引用的文件不存在、未激活或已过期；请只用文件清单里给出的 fileId 引用输入文件。';
 
-  /** run_js 的 scope（宿主持有的可信身份；模型参数里没有身份字段）。 */
-  const runJsScope = { principalId: options.principalId, sessionId: options.sessionId };
+  /** 文件工具的 scope（宿主持有的可信身份；模型参数里没有身份字段）。 */
+  const fileScope = { principalId: options.principalId, sessionId: options.sessionId };
+
+  /**
+   * fileId 数组参数解析（run_js.inputs 与 run_task.inputFiles 同形状同纪律）：
+   * 非数组 / 空 fileId 确定性拒绝；字符串逐个 trim（空串拒绝，不静默丢弃）。
+   */
+  function parseFileIdList(raw: unknown, tool: string, field: string): string[] {
+    if (raw !== undefined && !Array.isArray(raw)) {
+      throw new Error(`${tool} 的 ${field} 必须是 fileId 数组。`);
+    }
+    return (raw ?? []).map((item) => {
+      const fileId = typeof item === 'string' ? item.trim() : '';
+      if (fileId === '') throw new Error(`${tool} 的 ${field} 含空 fileId（请用文件清单里给出的 fileId）。`);
+      return fileId;
+    });
+  }
 
   /** run_js 的模型可见结果（v8 §2 形状；audit/runDir 等机械路径不进转录）。 */
   function runJsToolResult(output: RunJsOutput): Record<string, unknown> {
@@ -732,15 +779,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     if (executor === undefined) throw new Error(`Main 工具面之外的调用：${RUN_JS_TOOL}`);
     const code = typeof args.code === 'string' ? args.code : '';
     if (code.trim() === '') throw new Error('run_js 缺少 code（CommonJS 脚本原文）。');
-    const rawInputs = args.inputs;
-    if (rawInputs !== undefined && !Array.isArray(rawInputs)) {
-      throw new Error('run_js 的 inputs 必须是 fileId 数组。');
-    }
-    const inputs = (rawInputs ?? []).map((item) => {
-      const fileId = typeof item === 'string' ? item.trim() : '';
-      if (fileId === '') throw new Error('run_js 的 inputs 含空 fileId（请用文件清单里给出的 fileId）。');
-      return fileId;
-    });
+    const inputs = parseFileIdList(args.inputs, 'run_js', 'inputs');
     const memoKey = `${turnNo}:${createHash('sha256').update(code, 'utf8').digest('hex')}:${[...inputs].sort().join('|')}`;
     const hit = memo.get(memoKey);
     if (hit !== undefined) return runJsToolResult(hit);
@@ -749,13 +788,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       output = await executor.runJs({
         code,
         ...(inputs.length > 0 ? { inputs } : {}),
-        scope: runJsScope,
+        scope: fileScope,
       });
     } catch (error) {
       if (error instanceof FileRefUnavailableError) {
         // 机械 reason 只进日志；模型与用户只见统一话术（防存在性 oracle，v8 §4）。
         options.onFileRefUnavailable?.(error.reason);
-        throw new Error(RUN_JS_INPUT_UNAVAILABLE_MESSAGE);
+        throw new Error(FILE_INPUT_UNAVAILABLE_MESSAGE);
       }
       throw error;
     }
@@ -929,10 +968,32 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     };
   }
 
-  async function delegate(taskText: string, foregroundPermit: Permit | undefined): Promise<unknown> {
+  async function delegate(taskText: string, rawInputFiles: unknown, foregroundPermit: Permit | undefined): Promise<unknown> {
     const request = taskText.trim();
     if (request === '') throw new Error('run_task 缺少 task：请写清要办什么。');
     const taskId = `task_${randomUUID()}`;
+    // CAP-01 S2（v8 §4/§6）：inputFiles 的解析与交办复制全部发生在建任务行/进 Worker 之前——
+    // 任一 fileId 不可用 → 整次拒绝（不部分执行、不留任务行、零副本）。
+    const inputFiles = parseFileIdList(rawInputFiles, 'run_task', 'inputFiles');
+    // S2 边界（v8 §8）：交办复制只做 inline——background 派发不静默丢文件，确定性拒绝。
+    if (inputFiles.length > 0 && dispatchMode === 'background') {
+      throw new Error('run_task 的 inputFiles 暂不支持 background 派发（文件交办当前只做 inline）。');
+    }
+    if (inputFiles.length > 0) {
+      const copier = options.taskInputCopier;
+      // 与 run_js/read_skill 同一门控纪律：未注入复制面不受理，fail-closed。
+      if (copier === undefined) throw new Error('run_task 的 inputFiles 未开通（当前装配没有文件复制面）。');
+      try {
+        copier.copyInputsForTask({ scope: fileScope, fileIds: inputFiles, taskId });
+      } catch (error) {
+        if (error instanceof FileRefUnavailableError) {
+          // 机械 reason 只进日志；模型与用户只见统一话术（防存在性 oracle，v8 §4）。
+          options.onFileRefUnavailable?.(error.reason);
+          throw new Error(FILE_INPUT_UNAVAILABLE_MESSAGE);
+        }
+        throw error;
+      }
+    }
 
     // P6 background：受理即底账 queued（Main 不等待）；派发/执行/恢复/取消归 TaskRunner。
     if (dispatchMode === 'background') {
@@ -1080,7 +1141,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const mainResult = await options.mainDriver.run({
         systemPrompt: options.mainSystemPrompt,
         tools: [
-          runTaskTool(),
+          // CAP-01 S2：run_task 的 schema 是否带 inputFiles 取决于交办复制面注入（缺省零变化）。
+          runTaskTool(options.taskInputCopier !== undefined),
           ...(taskRunner === undefined ? [] : [taskStatusTool(), taskResultTool(), taskCancelTool(), taskResumeTool()]),
           ...(options.mainSkillRegistry === undefined ? [] : [readSkillTool()]),
           // CAP-01 S1：run_js 只在装配方注入执行器时上工具面（缺省零变化，fail-closed）。
@@ -1099,7 +1161,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
               window: mainWindow,
               operation: RUN_TASK_TOOL,
               executeThrows: 'propagate',
-              execute: async () => ({ status: 'completed', data: await delegate(task, foregroundPermit) }),
+              execute: async () => ({ status: 'completed', data: await delegate(task, args.inputFiles, foregroundPermit) }),
             });
             if (run.unresolved) {
               return {
@@ -1189,11 +1251,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   };
 }
 
-function runTaskTool(): DiscoveredTool {
+/** CAP-01 S2：inputFiles 属性只在注入交办复制面时出现（缺省工具面逐字节不变）。 */
+function runTaskTool(withInputFiles: boolean): DiscoveredTool {
   return {
     name: RUN_TASK_TOOL,
     description: RUN_TASK_TOOL_DESCRIPTION,
-    inputSchema: RUN_TASK_TOOL_SCHEMA,
+    inputSchema: withInputFiles ? RUN_TASK_TOOL_SCHEMA_WITH_INPUT_FILES : RUN_TASK_TOOL_SCHEMA,
   };
 }
 

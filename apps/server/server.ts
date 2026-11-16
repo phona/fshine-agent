@@ -262,7 +262,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
           ...(notificationAttachment === undefined ? {} : { taskFactProvider: notificationAttachment.taskFactProvider }),
           // CAP-01 S1：run_js 执行器（装配构造）与文件清单注入器（机械事实）同源注入。
+          // CAP-01 S2：交办复制端口同源注入（同一 fileStore 实例——run_task.inputFiles 的宿主侧执行）。
           runJsExecutor,
+          taskInputCopier: fileStore,
           fileManifestProvider,
           transcriptStore,
           // fail-open 日志：转录读/写失败不阻塞回合，只上报（错误面由入口按既有归类处理）。

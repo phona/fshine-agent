@@ -83,7 +83,7 @@ describe('入站附件登记与激活（CAP-01 S1）', () => {
     expect(registered.bytes).toBe(source.bytes.length);
     expect(registered.sha256).toBe(expectedSha);
 
-    const row = store.getFileRef(registered.fileId, SCOPE);
+    const row = store.getFileRef(registered.fileId, SCOPE, { side: 'main' });
     expect(row).toBeDefined();
     expect(row?.activatedAt).toBeUndefined(); // pending：等带文字的消息激活
     expect(row?.bytes).toBe(source.bytes.length);
@@ -96,7 +96,7 @@ describe('入站附件登记与激活（CAP-01 S1）', () => {
 
     const runDir = runDirOf(workspaceRoot, SCOPE, 'run_t1');
     fileStore.activatePendingInputs({ scope: SCOPE, now: Date.now() });
-    const materialized = fileStore.materializeInputs({ runDir, scope: SCOPE, fileIds: [registered.fileId] });
+    const materialized = fileStore.materializeInputs({ runDir, scope: SCOPE, fileIds: [registered.fileId], resolution: { side: 'main' } });
     expect(materialized).toHaveLength(1);
     expect(materialized[0]!.name).toBe('工资表.xlsx');
     expect(readFileSync(path.join(runDir, 'in', materialized[0]!.materializedName))).toEqual(source.bytes);
@@ -126,9 +126,9 @@ describe('入站附件登记与激活（CAP-01 S1）', () => {
 
     expect(fileStore.activatePendingInputs({ scope: SCOPE, now })).toBe(1);
 
-    expect(store.getFileRef(fresh.fileId, SCOPE)?.activatedAt).toBe(now);
-    expect(store.getFileRef('file_stale_pending', SCOPE)?.activatedAt).toBeUndefined(); // TTL 过期不激活
-    expect(store.getFileRef(already.fileId, SCOPE)?.activatedAt).toBe(now - 5_000); // 已激活不动
+    expect(store.getFileRef(fresh.fileId, SCOPE, { side: 'main' })?.activatedAt).toBe(now);
+    expect(store.getFileRef('file_stale_pending', SCOPE, { side: 'main' })?.activatedAt).toBeUndefined(); // TTL 过期不激活
+    expect(store.getFileRef(already.fileId, SCOPE, { side: 'main' })?.activatedAt).toBe(now - 5_000); // 已激活不动
     expect(fileStore.activatePendingInputs({ scope: SCOPE, now: Date.now() })).toBe(0); // 已无 TTL 内 pending
     store.close();
   });
@@ -168,7 +168,7 @@ describe('入站附件登记与激活（CAP-01 S1）', () => {
     for (const [fileId, label] of cases) {
       let caught: unknown;
       try {
-        fileStore.materializeInputs({ runDir, scope: SCOPE, fileIds: [fileId] });
+        fileStore.materializeInputs({ runDir, scope: SCOPE, fileIds: [fileId], resolution: { side: 'main' } });
       } catch (error) {
         caught = error;
       }

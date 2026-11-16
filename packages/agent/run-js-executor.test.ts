@@ -142,7 +142,7 @@ describe('run_js 执行器（CAP-01 S0）', () => {
     const output = result.outputs[0]!;
     expect(output.name).toBe('回执.txt');
     expect(output.fileId).not.toBe(input.fileId);
-    const outputRow = store.getFileRef(output.fileId, SCOPE);
+    const outputRow = store.getFileRef(output.fileId, SCOPE, { side: 'main' });
     expect(outputRow).toBeDefined();
     expect(outputRow?.activatedAt).toBeDefined();
     // 登记的是副本且字节正确（copy-on-register，从存储位读回）
@@ -324,7 +324,7 @@ describe('run_js 执行器（CAP-01 S0）', () => {
     expect(skippedByName.get('hard.txt')).toBe('linked');
     // 只为 real.txt 建了行；被拒者没有行
     expect(store.listFileRefs(SCOPE)).toHaveLength(1);
-    expect(store.getFileRef(outputs[0]!.fileId, SCOPE)!.name).toBe('real.txt');
+    expect(store.getFileRef(outputs[0]!.fileId, SCOPE, { side: 'main' })!.name).toBe('real.txt');
     store.close();
   });
 
@@ -455,7 +455,7 @@ describe('run_js 执行器（CAP-01 S0）', () => {
     expect(result.outputs).toHaveLength(1);
 
     const expected = Buffer.from(unit.repeat(20_000), 'utf8'); // 400×50 段 = 280_000 字节
-    const row = store.getFileRef(result.outputs[0]!.fileId, SCOPE)!;
+    const row = store.getFileRef(result.outputs[0]!.fileId, SCOPE, { side: 'main' })!;
     const outOriginal = readFileSync(path.join(result.audit.runDir, 'out', 'payload.bin'));
     const storedCopy = readFileSync(fileStoragePathOf(workspaceRoot, SCOPE, row.fileId, 'payload.bin'));
     const recomputed = createHash('sha256').update(expected).digest('hex');
@@ -473,7 +473,7 @@ describe('run_js 执行器（CAP-01 S0）', () => {
     const result = await executor.runJs({ code: "console.log('ok');", inputs: [input.fileId], scope: SCOPE });
     expect(result.exitCode).toBe(0);
 
-    const row = store.getFileRef(input.fileId, SCOPE)!;
+    const row = store.getFileRef(input.fileId, SCOPE, { side: 'main' })!;
     const materialized = readFileSync(path.join(result.audit.runDir, 'in', `${input.fileId}.xlsx`));
     expect(createHash('sha256').update(materialized).digest('hex')).toBe(row.sha256);
     expect(materialized.length).toBe(row.bytes);
@@ -502,7 +502,7 @@ describe('run_js 执行器（CAP-01 S0）', () => {
     expect(result.audit.killReason).toBeUndefined(); // 自行退出，不是宿主杀
     // 失败退出也是交付箱语义：out/ 已写出的产物照常登记且哈希正确。
     expect(result.outputs.map((file) => file.name)).toEqual(['半程产物.txt']);
-    const row = store.getFileRef(result.outputs[0]!.fileId, SCOPE)!;
+    const row = store.getFileRef(result.outputs[0]!.fileId, SCOPE, { side: 'main' })!;
     expect(row?.sha256).toBe(createHash('sha256').update(Buffer.from('before-fail', 'utf8')).digest('hex'));
     store.close();
   });
