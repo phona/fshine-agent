@@ -23,12 +23,14 @@ operation 名**——flag（`--collection` 之类）不是 operation 名，它�
 
 | mode | operation | 形态（`<gateway>` = 平台入口，本夹具是 `bin/dummy`） |
 |---|---|---|
-| prepare | `dummy.prepare`（干跑，不落账） | `<gateway> prepare dummy.prepare --collection <name> [--count <code>]` |
+| prepare | `dummy.prepare`（生成待确认提案：返回 handle / summary / expiresAt，不落账） | `<gateway> prepare dummy.prepare --collection <name> [--window <code>] [--count <code>]` |
 | prepare | `dummy.proposal`（建提案，payload 是位置参数） | `<gateway> prepare dummy.proposal <payload-file>` |
-| commit | `dummy.commit`（直提） | `<gateway> commit dummy.commit --collection <name> [--count <code>]` |
+| commit | `dummy.commit`（凭 prepare 句柄提交；句柄一次性、绑定 collection/window/count、15 分钟过期） | `<gateway> commit dummy.commit --collection <name> [--window <code>] [--count <code>] --confirmation <handle>` |
 | commit | `dummy.proposal-commit`（按提案提交） | `<gateway> commit dummy.proposal-commit --proposal-id <id>` |
 
-`prepare` 带 `--apply` 会被门拒（写必须走 commit）。名、参数与可用 mode 的权威是
+`prepare` 带 `--apply` 会被门拒（写必须走 commit）。`dummy.prepare` 返回
+`needs_confirmation` + `confirmation{handle, summary, expiresAt}`；句柄对宿主不透明，
+不存在/过期/已用/绑定不一致由执行层确定性拒绝。名、参数与可用 mode 的权威是
 `<gateway> operation list --json`；同一条注册表的可读形态在 `<gateway> --help` 与
 `<gateway> <mode> --help`。需许可的操作按能力清单声明先申请计划，形态与门禁以平台为准。
 
@@ -76,5 +78,7 @@ operation 名**——flag（`--collection` 之类）不是 operation 名，它�
 **核对口径**：本域「核对」= 读该集合的 items 并检查可机械判定的异常——**同名不同值**
 （`document-2` 出现两次，金额 800 与 900）就是"核对发现的问题"，报出第几条、名称、值即可；
 没有异常就如实说没发现。
-写面（改已保存数据）只能走 `prepare dummy.proposal` → `commit dummy.proposal-commit`，
-且必须先取得用户确认；查询是只读，不要为了"核对"走写面。
+写面（改已保存数据）只能走 `prepare` → 用户确认 → `commit`：直提走
+`dummy.prepare` → `dummy.commit`（句柄由宿主按会话透传，模型不要自行拼句柄），
+提案走 `dummy.proposal` → `dummy.proposal-commit`；都必须先取得用户确认。
+查询是只读，不要为了"核对"走写面。

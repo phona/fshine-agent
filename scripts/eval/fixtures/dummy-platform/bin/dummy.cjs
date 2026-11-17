@@ -26,6 +26,7 @@
  *   <state-dir>/dummy-state.json   (collections + records)
  *   <state-dir>/plans.json         (plans)
  *   <state-dir>/proposals.json     (proposals)
+ *   <state-dir>/confirmations.json (write-confirmation handles: binding + TTL + used)
  *   <state-dir>/audit.jsonl        (JSONL audit, refusals included; only when
  *                                   --state-dir is given, null otherwise)
  * Default root (no flag) = <fixture>/.runtime (manual debug runs).
@@ -132,6 +133,7 @@ function statePaths() {
     stateFile: path.join(dir, 'dummy-state.json'),
     planFile: path.join(dir, 'plans.json'),
     proposalFile: path.join(dir, 'proposals.json'),
+    confirmationFile: path.join(dir, 'confirmations.json'),
     // Audit is evidence for the eval harness: only written when the caller asked
     // for a per-case root. A bare manual run keeps the historical "no audit" default.
     auditFile: stateDirOverride === null ? null : path.join(dir, 'audit.jsonl'),
@@ -155,6 +157,8 @@ function loadPlans() { const s = loadJson(statePaths().planFile, null); return (
 function savePlans(s) { saveJson(statePaths().planFile, s); }
 function loadProposals() { const s = loadJson(statePaths().proposalFile, null); return (s && s.proposals) ? s : { proposals: {} }; }
 function saveProposals(s) { saveJson(statePaths().proposalFile, s); }
+function loadConfirmations() { const s = loadJson(statePaths().confirmationFile, null); return (s && s.confirmations) ? s : { confirmations: {} }; }
+function saveConfirmations(s) { saveJson(statePaths().confirmationFile, s); }
 // 审计写失败要响（2026-11-08）：audit 是执行层证据的唯一来源（评测数 <state-dir>/audit.jsonl
 // 的行数与 refused 判定），写失败还静默继续 = 调用无痕，评测只能得出 INCONCLUSIVE 甚至
 // 假绿。改为失败即抛——外层 main().catch 会把栈打到 stderr 并以非零码退出，这次调用
@@ -165,8 +169,8 @@ function audit(row) {
   fs.mkdirSync(path.dirname(f), { recursive: true });
   fs.appendFileSync(f, JSON.stringify({ ts: new Date().toISOString(), ...row }) + '\n');
 }
-function emit(op, status, data, error) {
-  const envelope = { v: 1, op, status, data: data ?? null, error: error ? { code: error.code, message: error.message, ...(error.correctForm ? { correctForm: error.correctForm } : {}), ...(error.retryable !== undefined ? { retryable: error.retryable } : {}) } : null };
+function emit(op, status, data, error, extra) {
+  const envelope = { v: 1, op, status, data: data ?? null, error: error ? { code: error.code, message: error.message, ...(error.correctForm ? { correctForm: error.correctForm } : {}), ...(error.retryable !== undefined ? { retryable: error.retryable } : {}) } : null, ...(extra ?? {}) };
   process.stdout.write('RESULT ' + JSON.stringify(envelope) + '\n');
   return envelope;
 }
@@ -251,6 +255,16 @@ function decide(mode, op, args) {
   }
   return { allowed: true };
 }
+/**
+ * 结构化 call 没有 mode 字段：由 operation 自己的 serve 矩阵派生唯一开放 mode。
+ * 读/scratch 保持历史 query 优先；写 operation 必须唯一开放（prepare 或 commit），
+ * 多个/零个开放 = 不猜，按未登记形态拒绝。这样 dummy.commit 不再被当成 prepare 拒掉。
+ */
+function structuredModeOf(op) {
+  const open = ['query', 'prepare', 'commit'].filter((mode) => op.serve?.[mode] === true);
+  if (op.access === 'read' || op.access === 'scratch') return open.includes('query') ? 'query' : (open[0] ?? null);
+  return open.length === 1 ? open[0] : null;
+}
 // 返回 { code, result }（2026-11-09 audited 申报模式）：result 在 completed / needs_input /
 // not_found 三种确定性答案上都带**该次 query 的实际结果状态**（result.status），completed
 // 另带该次返回的 items/count/fields，由调用方写进审计行的 result 字段——audited 申报模式交叉核的
@@ -296,31 +310,168 @@ function doScratch(opName, args) {
   emit(opName, 'completed', { input: flags.input, output: out, ...result }, null);
   return 0;
 }
+// ── 写确认回环（2026-11-17）──────────────────────────────────────────────────
+// 形态：prepare 冻结一次待确认操作并持久化 → 宿主把句柄/摘要交回用户 → 用户表态后
+// commit 凭句柄提交 → 读回验证。句柄、绑定、有效期、一次性与业务校验全在执行层：
+//   <state-dir>/confirmations.json
+//     { confirmations: { [handle]: { handle, operation, collection, window, count,
+//       createdAt, expiresAt, usedAt } } }
+// 默认有效期 15 分钟；commit 先原子标记已用再执行（崩溃只会少写，不会重复写）。
+// 测试面（落在状态根、不经 env：宿主 spawn 白名单只放 PATH/HOME/TMPDIR）：
+//   <state-dir>/confirmation-config.json
+//     { "ttlSeconds": <number>, "readbackShort": <boolean> }
+//   ttlSeconds <= 0 = 生成已过期提案；readbackShort = 模拟读回短缺（如实 failed）。
+function confirmationConfigFile() { return path.join(path.dirname(statePaths().stateFile), 'confirmation-config.json'); }
+function confirmationPolicy() {
+  const cfg = loadJson(confirmationConfigFile(), null);
+  const rawFileTtl = cfg && typeof cfg === 'object' ? cfg.ttlSeconds : undefined;
+  const fileTtl = typeof rawFileTtl === 'number' ? rawFileTtl : Number.NaN;
+  const rawEnvTtl = env('DUMMY_CONFIRMATION_TTL_SECONDS', '');
+  const envTtl = rawEnvTtl === '' ? Number.NaN : Number(rawEnvTtl);
+  const ttlSeconds = Number.isFinite(fileTtl) ? fileTtl : Number.isFinite(envTtl) ? envTtl : 15 * 60;
+  return {
+    ttlMs: ttlSeconds * 1000,
+    readbackShort: cfg !== null && typeof cfg === 'object' && cfg.readbackShort === true,
+  };
+}
+function normalizeWriteArgs(flags) {
+  const collection = flags.collection || flags.topic;
+  const window = flags.window || flags.round || 'W1';
+  const rawCount = flags.count !== undefined ? Number(flags.count) : 1;
+  return {
+    collection: typeof collection === 'string' && collection !== '' ? collection : null,
+    window: String(window),
+    count: Number.isFinite(rawCount) ? Math.max(0, Math.trunc(rawCount)) : 1,
+  };
+}
+function confirmationLockFile(handle) {
+  const digest = crypto.createHash('sha256').update(String(handle)).digest('hex').slice(0, 16);
+  return path.join(path.dirname(statePaths().confirmationFile), `confirmation-${digest}.lock`);
+}
+/** 跨进程排他创建（'wx'）；陈旧锁（>60s，进程崩溃遗留）清掉重试一次。 */
+function withConfirmationLock(handle, fn) {
+  const file = confirmationLockFile(handle);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  let fd;
+  try { fd = fs.openSync(file, 'wx'); }
+  catch (error) {
+    if (!error || error.code !== 'EEXIST') throw error;
+    let stale = false;
+    try { stale = Date.now() - fs.statSync(file).mtimeMs > 60_000; } catch { stale = false; }
+    if (!stale) return { locked: true };
+    try { fs.rmSync(file, { force: true }); } catch { /* best effort */ }
+    try { fd = fs.openSync(file, 'wx'); } catch { return { locked: true }; }
+  }
+  try { return { locked: false, value: fn() }; }
+  finally {
+    try { fs.closeSync(fd); } catch { /* already closed */ }
+    try { fs.rmSync(file, { force: true }); } catch { /* best effort */ }
+  }
+}
+/** 在锁内完成「读 → 校验 → 标记已用 → 落盘」；绑定不符不消耗句柄。 */
+function claimConfirmation(opName, handle, binding) {
+  return withConfirmationLock(handle, () => {
+    const store = loadConfirmations();
+    const rec = store.confirmations[handle];
+    if (!rec || typeof rec !== 'object' || rec.handle !== handle) {
+      return { ok: false, code: 'CONFIRMATION_NOT_FOUND', message: 'Confirmation handle not found.' };
+    }
+    const expectedCommit = typeof rec.operation === 'string' ? rec.operation.replace(/\.prepare$/, '.commit') : '';
+    if (expectedCommit !== opName) {
+      return { ok: false, code: 'CONFIRMATION_BINDING_MISMATCH', message: `Confirmation was prepared by ${String(rec.operation)}; use ${expectedCommit || 'its matching commit operation'}.` };
+    }
+    if (typeof rec.usedAt === 'string' && rec.usedAt !== '') {
+      return { ok: false, code: 'CONFIRMATION_USED', message: 'Confirmation handle already used.' };
+    }
+    if (typeof rec.expiresAt !== 'string' || new Date(rec.expiresAt).getTime() <= Date.now()) {
+      return { ok: false, code: 'CONFIRMATION_EXPIRED', message: `Confirmation handle expired at ${String(rec.expiresAt)}.` };
+    }
+    if (rec.collection !== binding.collection || rec.window !== binding.window || rec.count !== binding.count) {
+      return { ok: false, code: 'CONFIRMATION_BINDING_MISMATCH', message: `Confirmation binding mismatch: prepared collection=${String(rec.collection)} window=${String(rec.window)} count=${String(rec.count)}; got collection=${String(binding.collection)} window=${String(binding.window)} count=${String(binding.count)}.` };
+    }
+    rec.usedAt = new Date().toISOString();
+    rec.usedBy = opName;
+    saveConfirmations(store);
+    return { ok: true, record: rec };
+  });
+}
+/** 确认拒绝：stderr 首 token 是机械 code（适配器按它分流 refused），并落审计证据。 */
+function refuseConfirmation(opName, args, via, code, message) {
+  process.stderr.write(`${code} ${message}\n`);
+  audit({ mode: 'commit', ...(via ? { via } : {}), script: opName, args, serve: orchestrated(), refused: code });
+  return 3;
+}
 function doPrepare(opName, args) {
   const { flags } = parseFlags(args);
   const state = loadState();
-  const collection = flags.collection || flags.topic;
+  const { collection, window, count } = normalizeWriteArgs(flags);
   if (!collection) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection or --topic')); return 1; }
   if (!Object.prototype.hasOwnProperty.call(state.collections, collection)) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${collection}"`)); return 0; }
   const col = state.collections[collection];
   if (col.locked) { emit(opName, 'failed', null, errObj('COLLECTION_LOCKED', `Collection ${collection} is locked`)); return 2; }
-  const count = flags.count !== undefined ? Number(flags.count) : 1;
-  emit(opName, 'completed', { collection, window: flags.window || flags.round || null, preparedCount: Number.isFinite(count) ? count : 1, dryRun: true }, null);
+  const policy = confirmationPolicy();
+  const now = Date.now();
+  const expiresAt = new Date(now + policy.ttlMs).toISOString();
+  const handle = `cf_${crypto.randomUUID()}`;
+  const confirmations = loadConfirmations();
+  confirmations.confirmations[handle] = {
+    handle,
+    operation: opName,
+    collection,
+    window,
+    count,
+    createdAt: new Date(now).toISOString(),
+    expiresAt,
+    usedAt: null,
+  };
+  saveConfirmations(confirmations);
+  const summary = `Prepare to add ${count} record(s) to collection "${collection}" window ${window}; this operation cannot be undone. Confirmation expires at ${expiresAt}.`;
+  emit(opName, 'needs_confirmation', { collection, window, count, expiresAt, status: 'pending' }, null, {
+    confirmation: { handle, summary, expiresAt },
+  });
   return 0;
 }
-function doCommit(opName, args) {
+function doCommit(opName, args, confirmation, via) {
   const { flags } = parseFlags(args);
+  // 集合级策略先于句柄校验：锁定集合的写路径仍以 COLLECTION_LOCKED 拒绝（旧契约保持）。
   const state = loadState();
-  const collection = flags.collection || flags.topic;
+  const { collection, window, count } = normalizeWriteArgs(flags);
   if (!collection) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection or --topic')); return 1; }
   if (!Object.prototype.hasOwnProperty.call(state.collections, collection)) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${collection}"`)); return 0; }
-  const col = state.collections[collection];
-  if (col.locked) { emit(opName, 'failed', null, errObj('COLLECTION_LOCKED', `Collection ${collection} is locked`)); return 2; }
-  const count = flags.count !== undefined ? Number(flags.count) : 1;
-  const window = flags.window || flags.round || 'W1';
-  col.records[window] = (col.records[window] ?? 0) + (Number.isFinite(count) ? count : 1);
-  saveState(state);
-  emit(opName, 'completed', { collection, window, added: count, total: col.records[window] }, null);
+  if (state.collections[collection].locked) { emit(opName, 'failed', null, errObj('COLLECTION_LOCKED', `Collection ${collection} is locked`)); return 2; }
+  const handle = confirmation && typeof confirmation === 'object' && typeof confirmation.handle === 'string' && confirmation.handle !== ''
+    ? confirmation.handle
+    : (typeof flags.confirmation === 'string' && flags.confirmation !== '' ? flags.confirmation : null);
+  if (!handle) return refuseConfirmation(opName, args, via, 'CONFIRMATION_REQUIRED', 'commit requires a confirmation handle (--confirmation <handle>)');
+  const claim = claimConfirmation(opName, handle, { collection, window, count });
+  if (claim.locked === true) return refuseConfirmation(opName, args, via, 'CONFIRMATION_IN_PROGRESS', 'confirmation handle is being consumed by another call');
+  if (!claim.value.ok) return refuseConfirmation(opName, args, via, claim.value.code, claim.value.message);
+  // 已原子标记已用：从这里开始的任何失败都不允许第二次提交。
+  const record = claim.value.record;
+  const applyState = loadState();
+  const applyCol = applyState.collections[record.collection];
+  if (!applyCol) { emit(opName, 'failed', null, errObj('COLLECTION_NOT_FOUND', `No collection matches "${record.collection}"`)); return 1; }
+  const before = applyCol.records[record.window] ?? 0;
+  const required = record.count;
+  const applied = confirmationPolicy().readbackShort ? Math.max(0, required - 1) : required;
+  applyCol.records[record.window] = before + applied;
+  const stamp = String(handle).slice(-8).replace(/[^A-Za-z0-9]/g, '') || 'confirmed';
+  for (let i = 0; i < applied; i += 1) {
+    applyCol.items.push({ id: `rec-${stamp}-${i}`, name: `${record.collection}-record-${stamp}-${i}`, value: 0 });
+  }
+  saveState(applyState);
+  // 读回验证：从持久化状态重新读，不把「内存里改了」当业务生效。
+  const readBackState = loadState();
+  const readBackCol = readBackState.collections[record.collection];
+  const after = readBackCol && typeof readBackCol.records[record.window] === 'number' ? readBackCol.records[record.window] : 0;
+  const delta = after - before;
+  const readBack = { before, after, delta, required };
+  if (delta !== required) {
+    emit(opName, 'failed', { ok: false, verified: false, collection: record.collection, window: record.window, count: required, added: applied, readBack }, { code: 'CONFIRMATION_READBACK_SHORT', message: `Readback short: applied ${applied} of ${required} record(s).` });
+    return 1;
+  }
+  const summaryText = `Confirmed write applied: collection "${record.collection}" window ${record.window}, ${required} record(s); readback delta ${delta}.`;
+  emit(opName, 'completed', { ok: true, verified: true, summaryText, collection: record.collection, window: record.window, count: required, added: applied, total: after, readBack }, null);
   return 0;
 }
 function b64url(obj) { return Buffer.from(JSON.stringify(obj)).toString('base64url'); }
@@ -685,6 +836,16 @@ async function main() {
     let call;
     try { call = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { process.stderr.write(`CALL_REFUSE payload unreadable: ${e.message}\n`); return 3; }
     if (!call.operation) { process.stderr.write('CALL_REFUSE payload must be { operation: string, args: ... }\n'); return 3; }
+    // 确认引用（契约顶层字段）：句柄 + 用户原话。适配器原样转发，执行层只做形状校验；
+    // 句柄是否有效/匹配/未过期/未用由 commit 的校验决定——执行层不解释用户原话。
+    let confirmation;
+    if (call.confirmation !== undefined) {
+      if (call.confirmation === null || typeof call.confirmation !== 'object' || Array.isArray(call.confirmation)) { process.stderr.write('CALL_REFUSE confirmation must be an object\n'); return 3; }
+      const handle = call.confirmation.handle;
+      if (typeof handle !== 'string' || handle === '') { process.stderr.write('CALL_REFUSE confirmation.handle must be a non-empty string\n'); return 3; }
+      if (call.confirmation.userText !== undefined && typeof call.confirmation.userText !== 'string') { process.stderr.write('CALL_REFUSE confirmation.userText must be a string\n'); return 3; }
+      confirmation = { handle, ...(call.confirmation.userText === undefined ? {} : { userText: call.confirmation.userText }) };
+    }
     // Accept both legacy array format and current protocol object format.
     if (Array.isArray(call.args)) {
       // legacy path: args is string[] (flat flag array) — no shape change.
@@ -738,8 +899,9 @@ async function main() {
       audit({ callId, phase: 'result', mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: orchestrated(), protocol: op.protocol, proposalId: innerFlags['proposal-id'], exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
       return code;
     }
-    // Determine mode from operation access.
-    const accessMode = op.access === 'read' || op.access === 'scratch' ? 'query' : 'prepare';
+    // 结构化 call 无 mode 字段：按 operation 自己的 serve 矩阵派生（写 op 必须唯一开放）。
+    const accessMode = structuredModeOf(op);
+    if (accessMode === null) { process.stderr.write(`GATE_REFUSE no unambiguous mode for ${op.name}: serve matrix must open exactly one of prepare/commit for a write operation\n`); audit({ mode: 'call', script: op.name, args: call.args, serve: orchestrated(), refused: 'mode-ambiguous' }); return 3; }
     const verdict = decide(accessMode, op, call.args);
     if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: 'call', script: op.name, args: call.args, serve: orchestrated(), refused: verdict.reason }); return 3; }
     const planId = env2('EXECUTION_PLAN_ID', 'DUMMY_PLAN_ID', '');
@@ -766,7 +928,7 @@ async function main() {
         } catch { ok = false; }
         if (!ok) { process.stderr.write('GATE_REFUSE commit token verification failed\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: orchestrated(), refused: 'commit-token' }); return 3; }
       }
-      code = doCommit(op.name, call.args);
+      code = doCommit(op.name, call.args, confirmation, 'structured');
     } else { process.stderr.write('GATE_REFUSE no handler for ' + op.name + '\n'); return 3; }
     // mode 记**按 access 分级**的值（2026-11-09 九审 major）：旧写法这里无脑记 'call'，
     // 而 bash 路径按 access 算 query/prepare——于是同一次 dummy.query，走 bash 落
@@ -853,7 +1015,7 @@ async function main() {
         } catch { ok = false; }
         if (!ok) { process.stderr.write('GATE_REFUSE commit token verification failed\n'); audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), refused: 'commit-token' }); return 3; }
       }
-      code = doCommit(op.name, rest);
+      code = doCommit(op.name, rest, undefined, null);
     } else { process.stderr.write(`GATE_REFUSE no handler for ${op.name}\n`); return 3; }
     // query 的 completed/needs_input/not_found 行把该次实际结果状态写进审计行 result
     // （audited 申报模式交叉核的事实基准：结果状态与 items 都可供独立核对）；被拒/失败的

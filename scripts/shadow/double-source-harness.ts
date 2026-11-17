@@ -130,11 +130,13 @@ function toAcceptance(value: unknown): ShadowAcceptance {
   };
 }
 
-/** Worker 汇报的规范化合成：只依赖 operation 与执行层四态（两源可比；失败/拒绝不会被存档）。 */
+/** Worker 汇报的规范化合成：只依赖 operation 与执行层状态（两源可比；失败/拒绝不会被存档）。 */
 function summariseOutcome(operation: string, outcome: ExecutionOutcome): string {
   switch (outcome.status) {
     case 'completed':
       return `已完成：${operation}。`;
+    case 'needs_confirmation':
+      return `等待用户确认：${operation}。`;
     case 'needs_input':
       return `需要补充信息：${operation}。`;
     case 'failed':

@@ -12,8 +12,12 @@
  *      因此这三条只能先以 todo 形式登记（见文件末尾的 it.todo 与注释），不硬凑假确认。
  *
  * 现状证据（读代码 + 本用例实跑）：
- *   · 契约只声明 capabilities/execute，确认接口是**后续写切片**的注释方向
- *     （packages/contracts/src/execution-contract.ts:22-29、112-116）；
+ *   · 契约已落最小增量：needs_confirmation + ExecutionRequest.confirmation（句柄对宿主
+ *     不透明、用户原话原样透传；绑定/有效期/一次性归执行层）；本文件场景 4 仍按
+ *     **宿主装配未接线**的现状断言默认允许集合只含 access=read；
+ *   · dummy 执行层已支持 prepare 提案 → commit 凭句柄提交 → query 读回
+ *     （scripts/eval/fixtures/dummy-platform/bin/dummy.cjs；业务用例见
+ *     packages/agent/write-confirmation.test.ts）；
  *   · 最小切片明确「本切片不做：写 / 确认 / 产物回收」
  *     （packages/agent/src/execution-runtime.ts:49）；
  *   · Session 只有 send/tasks/getTask，没有确认/接续确认事件的方法
@@ -266,18 +270,15 @@ describe('执行面派生（装配事实）：允许集合只含 access=read，�
 
 /**
  * 场景 1–3 的真实业务用例当前**无法写**（红，不是跳过）：装配里没有「向用户要确认再继续
- * 同一任务」的通路。等写确认切片落地后，把下面的 todo 换成实际用例：
+ * 同一任务」的通路。等宿主接线落地后，把下面的 todo 换成实际用例：
  *
- *   · 需要的契约面（契约头注释已给方向）：独立 confirm(requestId, confirmationId, decision)：
- *     执行层冻结待确认操作并验可信身份 / 操作绑定 / 有效期 / 防重放；宿主只采集并传递
- *     用户决策，不是携 token 重发 execute（execution-contract.ts:22-29）。
- *   · 需要宿主状态：任务在 prepare 后进入「待确认」（可复用 waiting_user/pendingQuestion，
- *     但须有机械的 kind 区分），确认事件到达后**宿主**发起 commit，而不是模型看到「确认」
- *     两个字就自己决定调 commit。
- *   · 需要执行层通路：仓内夹具的 prepare/commit/proposal 需在 structured call 下可达
- *     （写 operation 的 mode 裁决、proposal 位置参数、commit 绑定令牌），且 commit 后
- *     读回能看见新记录（dummy.commit 现在只加 records 计数、不追加 query items；
- *     proposal-commit 才追加 items 并返回 readBack{before,after,delta,required}）。
+ *   · 契约面已就绪：needs_confirmation + ExecutionRequest.confirmation（同一次 execute，
+ *     不是第二套协议；句柄/绑定/有效期/一次性归执行层）。
+ *   · 执行层通路已就绪：dummy.prepare/commit 在 structured call 下可达，commit 凭句柄
+ *     一次性提交并把新记录追加进 query 可见数据（packages/agent/write-confirmation.test.ts）。
+ *   · 仍缺宿主状态：收到 needs_confirmation 后按 (principalId, sessionId) 存句柄/摘要，
+ *     下一回合把句柄与用户原话原样透传；宿主**不判断**用户是不是在确认，也不拦截工具
+ *     调用等批准。
  */
 describe('场景 1–3：写确认回环（当前装配无通路 → todo 登记）', () => {
   it.todo('场景 1：写请求 → prepare 被调用且不带 --apply（dry-run）；回复里能看出「准备写什么」');

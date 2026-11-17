@@ -13,24 +13,28 @@
  *     **dispatchKey = 稳定逻辑操作身份**（U3，见字段注释）：它在宿主**首次创建这笔逻辑
  *     操作**时生成并持久化，重试/重新规划时只能读回同一条记录；toolCallId / requestId
  *     只是本次调用的追踪号，重试会换号。
- *   · ExecutionOutcome   —— 执行状态与失败结果。四态互斥：completed / needs_input /
- *     failed / refused。**refused = 执行层策略拒绝，failed =
+ *   · ExecutionOutcome   —— 执行状态与失败结果。五态互斥：completed / needs_confirmation /
+ *     needs_input / failed / refused。**refused = 执行层策略拒绝，failed =
  *     执行失败，两者语义不得混用**；needs_input 必须携带「缺什么」的结构化描述
- *     （missing 非空）。
+ *     （missing 非空）；needs_confirmation 必须携带执行层发放的确认提示（handle 非空、
+ *     summary 非空）。
  *   · ExecutionClient    —— 能力快照 / 执行两个操作。
  *
  * 刻意不在这里的东西（后续切片再定，不在这里预造执行面）：
  *   · readback（副作用验证状态）：写切片再定——不得把「执行完成」当「业务生效」；
- *   · 确认接口：写切片采用独立 confirm(requestId, confirmationId, decision)：执行层
- *     冻结待确认操作，验可信身份 / 操作绑定 / 有效期 / 防重放；宿主只采集并传递用户
- *     决策，不是携 token 重发 execute；
+ *   · 确认面**不是第二套协议**：写切片只在同一次 execute 上做最小增量——
+ *     ① 执行层预演后返回 needs_confirmation + confirmation{handle, summary, expiresAt?}；
+ *     ② 下一回合宿主把该 handle 与本回合**用户原话**原样放进 ExecutionRequest.confirmation，
+ *        仍走同一次 execute。handle 对宿主不透明；冻结、操作绑定、有效期、一次性/防重放
+ *        与业务校验全部归执行层。宿主只做身份、确认事件传递与用户交互，**不判断用户是不是
+ *        在确认**、不拦截工具调用等批准、不排队、不裁决。
  *   · effects / requiresConfirmation / 计划治理策略 / 授权策略 / 业务字段：契约不携带
  *     治理与业务语义，它们归执行层声明各自持有；计划门与预算梯子归执行层，不在这里
  *     开第二份裁决面。
  */
 
 /** 契约语义版本：跨宿主/执行层的结构化语义集合版本（非某实例的版本，也不是 A2A）。 */
-export const EXECUTION_CONTRACT_VERSION = 2;
+export const EXECUTION_CONTRACT_VERSION = 3;
 
 /**
  * 参数声明：name 是执行层接受的参数名（CLI 形态可带前缀，如 `--collection`），
@@ -73,10 +77,30 @@ export interface ExecutionRequest {
   dispatchKey: string;
   operation: string;
   args: Readonly<Record<string, unknown>>;
+  /**
+   * 确认引用（可选）：只在执行层先返回 needs_confirmation 之后，由宿主在**下一回合**
+   * 原样带回。`handle` 是执行层发放的不透明句柄——宿主不解析、不比较、不生成；
+   * `userText` 是本回合用户原话——宿主原样透传，不改写、不判定「这是不是在确认」。
+   * 它不是第二套协议：仍是同一次 execute；句柄绑定、有效期与一次性由执行层校验。
+   */
+  confirmation?: { handle: string; userText?: string };
 }
 
-/** 执行结果四态（互斥）。 */
-export type ExecutionStatus = 'completed' | 'needs_input' | 'failed' | 'refused';
+/** 执行结果五态（互斥）。 */
+export type ExecutionStatus = 'completed' | 'needs_confirmation' | 'needs_input' | 'failed' | 'refused';
+
+/**
+ * 执行层返回的确认提示（needs_confirmation 必带）。
+ *   · handle —— 执行层发放的不透明句柄（宿主只存与透传）；
+ *   · summary —— 人可读的**机械事实**（对象/窗口/影响条数/不可撤销等），宿主原样转述；
+ *   · expiresAt —— 执行层给出的有效期（ISO 时间；缺省 = 执行层不声明）。
+ * 这些字段只作传递：宿主不据此裁决操作能否做、也不自行构造确认语义。
+ */
+export interface ConfirmationPrompt {
+  handle: string;
+  summary: string;
+  expiresAt?: string;
+}
 
 /**
  * 「缺什么」的条目：needs_input 必须至少带一条。name 是执行层声明的输入名（若有），
@@ -98,12 +122,15 @@ export interface ExecutionFailure {
 /**
  * 执行结果。
  *   · completed——执行完成（不代表业务副作用已验证生效：readback 归写切片）。
+ *   · needs_confirmation——执行层已冻结一次待确认操作，confirmation 给出句柄与机械摘要；
+ *     这不是「缺输入」，也不是宿主计划门：是否继续由用户在下一回合表态，执行层校验句柄。
  *   · needs_input——执行层要求补充输入，missing 非空。
  *   · failed——执行失败。
- *   · refused——执行层策略拒绝（含门拒、请求形状拒绝）。
+ *   · refused——执行层策略拒绝（含门拒、请求形状拒绝、确认句柄无效/过期/已用/绑定不符）。
  */
 export type ExecutionOutcome =
   | { status: 'completed'; data?: unknown }
+  | { status: 'needs_confirmation'; confirmation: ConfirmationPrompt; data?: unknown }
   | { status: 'needs_input'; missing: readonly MissingInput[]; data?: unknown; error?: ExecutionFailure }
   | { status: 'failed'; error: ExecutionFailure }
   | { status: 'refused'; error: ExecutionFailure };

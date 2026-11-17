@@ -1,5 +1,5 @@
 /**
- * S1 · 声明式只读 Dummy：三层分离、只读声明驱动、写路径零改动、黄金字节兼容。
+ * S1 · 声明式 Dummy：三层分离、只读声明驱动、写路径确认回环、黄金字节兼容。
  *
  * 三层（fixtures 根 = scripts/eval/fixtures）：
  *   · dummy-platform/runtime/            通用加载器/校验/解析/模板/故障/错误（不懂业务）
@@ -286,18 +286,39 @@ describe('③ 声明驱动可验证：改声明/数据/故障，行为随之改�
   });
 });
 
-describe('④ 写路径零改动：prepare / commit / proposal 原样可用', () => {
-  it('prepare dryRun 与 commit 计数读回保持原行为', () => {
+describe('④ 写路径：prepare 冻结提案 → commit 凭句柄提交并读回', () => {
+  it('prepare 返回 needs_confirmation 且不写；commit 凭句柄提交后 query 读回新记录', () => {
     const stateDir = freshDir('s1-write-state-');
-    const prepare = runDummy(['prepare', 'dummy.prepare', '--collection', 'alpha'], { stateDir });
+    const prepare = runDummy(['prepare', 'dummy.prepare', '--collection', 'alpha', '--window', 'W1', '--count', '2'], { stateDir });
     expect(prepare.status).toBe(0);
     expect(prepare.envelope).toMatchObject({
-      status: 'completed',
-      data: { collection: 'alpha', window: null, preparedCount: 1, dryRun: true },
+      status: 'needs_confirmation',
+      confirmation: {
+        handle: expect.stringMatching(/^cf_/),
+        summary: expect.stringContaining('alpha'),
+      },
+      data: { collection: 'alpha', window: 'W1', count: 2, status: 'pending' },
     });
-    const commit = runDummy(['commit', 'dummy.commit', '--collection', 'alpha', '--count', '2'], { stateDir });
+    const handle = (prepare.envelope?.['confirmation'] as { handle: string }).handle;
+
+    // 预演不是写：用户确认之前数据原样。
+    const before = runDummy(['query', 'dummy.query', '--collection', 'alpha'], { stateDir });
+    expect(before.envelope).toMatchObject({ status: 'completed', data: { count: 2 } });
+
+    // 没有句柄的 commit 是确定性拒绝（执行层自己的门）。
+    const noHandle = runDummy(['commit', 'dummy.commit', '--collection', 'alpha', '--count', '2'], { stateDir });
+    expect(noHandle.status).toBe(3);
+    expect(noHandle.stderr).toContain('CONFIRMATION_REQUIRED');
+
+    const commit = runDummy(['commit', 'dummy.commit', '--collection', 'alpha', '--window', 'W1', '--count', '2', '--confirmation', handle], { stateDir });
     expect(commit.status).toBe(0);
-    expect(commit.envelope).toMatchObject({ status: 'completed', data: { collection: 'alpha', window: 'W1', added: 2, total: 4 } });
+    expect(commit.envelope).toMatchObject({
+      status: 'completed',
+      data: { collection: 'alpha', window: 'W1', added: 2, total: 4, verified: true },
+    });
+
+    const after = runDummy(['query', 'dummy.query', '--collection', 'alpha'], { stateDir });
+    expect(after.envelope).toMatchObject({ status: 'completed', data: { count: 4 } });
   });
 
   it('proposal create → commit 全链读回，且后续 query 看得到提交的条目', () => {
