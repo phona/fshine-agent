@@ -182,6 +182,53 @@ contextProfiles:
     expect(() => loadConfig({ yamlPath: writeFixture(tooLong), env: PUBLIC_URL_ENV })).toThrowError(/toolName/);
   });
 
+  it('context profile 解析执行层单文件参数声明 fileParams（键缺失 = 不启用）', () => {
+    const yaml = `${VALID_YAML}
+contextProfiles:
+  example-gateway:
+    root: /opt/fictional-execution-layer
+    skillRoots: [".agents/skills"]
+    fileParams:
+      input: --input
+      output: exec-output
+`;
+    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
+    expect(config.contextProfiles['example-gateway']?.fileParams).toEqual({ input: '--input', output: 'exec-output' });
+
+    // 键不存在 = 宿主不启用单文件参数翻译（部署未声明执行层参数名）。
+    const absent = `${VALID_YAML}
+contextProfiles:
+  example-gateway:
+    root: /opt/fictional-execution-layer
+    skillRoots: [".agents/skills"]
+`;
+    const without = loadConfig({ yamlPath: writeFixture(absent), env: PUBLIC_URL_ENV });
+    expect(without.contextProfiles['example-gateway']?.fileParams).toBeUndefined();
+  });
+
+  it('context profile 拒绝畸形的 fileParams（非映射/非字符串/空串/未知键）', () => {
+    // 部署声明写错时 fail-fast：静默忽略会让附件再次到不了执行层。
+    for (const raw of [
+      '"--input"', // 非映射
+      'input: [--input]', // 非字符串
+      'input: 42', // 非字符串
+      'input: "   "', // trim 后为空
+      'input: "--in put"', // 参数名含空白
+      'input-file: --input', // 未知键（拼错的参数名）
+    ]) {
+      const yaml = `${VALID_YAML}
+contextProfiles:
+  example-gateway:
+    root: /opt/fictional-execution-layer
+    skillRoots: [".agents/skills"]
+    fileParams:
+      ${raw}
+`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV }), raw)
+        .toThrowError(/fileParams/);
+    }
+  });
+
   it('context profile 拒绝非正 Worker 预算', () => {
     const yaml = `${VALID_YAML}
 contextProfiles:
