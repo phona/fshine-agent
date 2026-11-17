@@ -928,6 +928,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     memo: Map<string, RunJsOutput>,
     turnFiles: TurnFileRef[],
     setMemoryWall: (hit: boolean) => void,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     const executor = options.runJsExecutor;
     if (executor === undefined) throw new Error(`Main 工具面之外的调用：${RUN_JS_TOOL}`);
@@ -947,6 +948,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         code,
         ...(inputs.length > 0 ? { inputs } : {}),
         scope: fileScope,
+        // 取消信号必须贯穿到执行器：否则任务取消/宿主中止后脚本仍跑到自然结束或 120s 超时。
+        ...(signal === undefined ? {} : { signal }),
       });
     } catch (error) {
       if (error instanceof FileRefUnavailableError) {
@@ -1028,6 +1031,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     args: Record<string, unknown>,
     memo: Map<string, RunJsOutput>,
     taskFiles: TurnFileRef[],
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     const executor = options.runJsExecutor;
     if (executor === undefined) throw new Error(`Worker 工具面之外的调用：${RUN_JS_TOOL}`);
@@ -1044,6 +1048,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         ...(inputs.length > 0 ? { inputs } : {}),
         scope: fileScope,
         taskId,
+        ...(signal === undefined ? {} : { signal }),
       });
     } catch (error) {
       if (error instanceof FileRefUnavailableError) {
@@ -1213,13 +1218,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     window: RuntimeAttemptWindow,
     onUnresolved: () => void,
     files?: { exchange?: TaskExecutionBridge; taskFiles?: TurnFileRef[]; runJsMemo?: Map<string, RunJsOutput> },
-  ): (tool: string, args: Record<string, unknown>) => Promise<unknown> {
-    return async (tool, args) => {
+  ): (tool: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown> {
+    return async (tool, args, signal) => {
       if (tool === RUN_JS_TOOL) {
         if (options.runJsExecutor === undefined || files?.runJsMemo === undefined || files.taskFiles === undefined) {
           throw new Error(`Worker 工具面之外的调用：${tool}`);
         }
-        return runJsInWorkerTurn(taskId, args, files.runJsMemo, files.taskFiles);
+        return runJsInWorkerTurn(taskId, args, files.runJsMemo, files.taskFiles, signal);
       }
       if (tool !== EXECUTE_OPERATION_TOOL) throw new Error(`Worker 工具面之外的调用：${tool}`);
       return executeOperation(taskId, args, window, onUnresolved, files?.exchange, files?.taskFiles);
@@ -1492,7 +1497,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         messages: turnMessages,
         ...(injections.length > 0 ? { injections } : {}),
         onStep: (step) => progress.push(step),
-        exec: async (tool, args) => {
+        exec: async (tool, args, signal) => {
           if (tool === TASK_RUN_TOOL) {
             const task = typeof args.task === 'string' ? args.task : '';
             // U3：task_run 在宿主侧也是一笔有副作用的逻辑操作——先认领落库再委派；
@@ -1535,7 +1540,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           if (tool === RUN_JS_TOOL && options.runJsExecutor !== undefined) {
             return runJsInTurn(args, runJsMemo, turnFiles, (hit) => {
               lastMemoryWall = hit;
-            });
+            }, signal);
           }
           throw new Error(`Main 工具面之外的调用：${tool}`);
         },

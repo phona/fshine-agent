@@ -74,6 +74,8 @@ const workerNeverCalled: TurnDriver = {
 
 interface DriverStep {
   execCalls?: ReadonlyArray<{ tool: string; args: Record<string, unknown> }>;
+  /** 本步执行工具时传给 exec 的取消信号（真实驱动由 Pi 回合持有；这里用于验证贯穿）。 */
+  signal?: AbortSignal;
   text: string;
 }
 
@@ -97,7 +99,7 @@ function queueDriver(capture: DriverCapture): { driver: TurnDriver; push(step: D
       if (step === undefined) throw new Error('（测试）没有更多驱动步骤');
       for (const call of step.execCalls ?? []) {
         try {
-          capture.results.push(await input.exec(call.tool, call.args));
+          capture.results.push(await input.exec(call.tool, call.args, step.signal));
         } catch (error) {
           capture.toolErrors.push(error instanceof Error ? error.message : String(error));
           capture.toolErrorObjects.push(error);
@@ -118,6 +120,7 @@ interface Fixture {
   ro: ReturnType<typeof openTaskStore>;
   reasons: string[];
   executorCalls(): number;
+  lastRunJsSignal(): AbortSignal | undefined;
   close(): void;
 }
 
@@ -135,9 +138,11 @@ async function makeFixture(input: {
   const fileStore = createFileStore({ store: registry.store, workspaceRoot: path.join(dir, 'workspace') });
   const realExecutor = createRunJsExecutor({ fileStore, nodeModulesDir: NODE_MODULES });
   let executorCalls = 0;
+  let lastRunJsSignal: AbortSignal | undefined;
   const countingExecutor: RunJsExecutor = {
     async runJs(runInput) {
       executorCalls += 1;
+      lastRunJsSignal = runInput.signal;
       return realExecutor.runJs(runInput);
     },
   };
@@ -168,6 +173,7 @@ async function makeFixture(input: {
     ro: openTaskStore(dbPath, { readOnly: true }),
     reasons,
     executorCalls: () => executorCalls,
+    lastRunJsSignal: () => lastRunJsSignal,
     close: () => {
       registry.close();
     },
@@ -178,6 +184,24 @@ async function makeFixture(input: {
 const WRITE_ONE_OUTPUT = "require('node:fs').writeFileSync('out/汇总.txt', 'summary-bytes');";
 
 describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', () => {
+  it('回合取消信号贯穿到执行器：run_js 收到调用方传下来的 AbortSignal', async () => {
+    const f = await makeFixture();
+    const controller = new AbortController();
+    f.push({
+      execCalls: [{ tool: 'run_js', args: { code: "console.log('x');" } }],
+      signal: controller.signal,
+      text: '完成',
+    });
+    await f.session.send('跑个脚本');
+
+    // 执行器必须拿到**同一个** signal 对象——否则任务取消/宿主中止后脚本会跑到自然结束或超时。
+    expect(f.lastRunJsSignal()).toBe(controller.signal);
+    // 取消后该 signal 处于 aborted，执行器的 abort 监听会据此杀进程组。
+    controller.abort();
+    expect(f.lastRunJsSignal()?.aborted).toBe(true);
+    f.close();
+  });
+
   it('⑤ 未注入 runJsExecutor：run_js 不注册，exec 调用 fail-closed 拒绝', async () => {
     const fx = await makeFixture({ withExecutor: false });
     try {
