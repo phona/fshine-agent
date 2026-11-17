@@ -94,8 +94,10 @@ import { E09 } from './cases/E09';
 import { E10 } from './cases/E10';
 import { E11 } from './cases/E11';
 import { E12 } from './cases/E12';
+import { E13 } from './cases/E13';
+import { E14 } from './cases/E14';
 
-export const ALL_CASES: readonly UserCase[] = [E01, E02, E03, E04, E05, E06, E07, E08, E09, E10, E11, E12];
+export const ALL_CASES: readonly UserCase[] = [E01, E02, E03, E04, E05, E06, E07, E08, E09, E10, E11, E12, E13, E14];
 
 /** 规范化用例 id：接受 C01/E01/e01 形态；'all' 返回全部。 */
 export function normalizeCaseId(raw: string): string[] {
@@ -104,7 +106,7 @@ export function normalizeCaseId(raw: string): string[] {
   return value.split(',').map((part) => {
     const token = part.trim().toUpperCase();
     const match = /^([CE])(\d{1,2})$/.exec(token);
-    if (!match) throw new Error(`无法识别的用例 id：${part.trim()}（用 E01–E12 或 all）`);
+    if (!match) throw new Error(`无法识别的用例 id：${part.trim()}（用 E01–E14 或 all）`);
     return `E${match[2]!.padStart(2, '0')}`;
   });
 }
