@@ -27,6 +27,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -337,6 +338,8 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
       // sheet 参数**只缩 CSV 展示与返回 valueDiffs 呈现**，绝不缩验证范围。
       const allSheets = srcWb.worksheets.map((ws) => ws.name);
       const sheetFilter = input.sheet;
+      // Codex 三复审 P2：sheet 指向不存在的表不能静默产出空 CSV 并 pass。
+      if (sheetFilter !== undefined && !allSheets.includes(sheetFilter)) return errorResult('not_found');
 
       for (const sheetName of allSheets) {
         const srcSheet = srcWb.getWorksheet(sheetName);
@@ -518,52 +521,59 @@ export function createSofficeRecalcEngine(options: SofficeEngineOptions = {}): R
       // Codex 复审 P2：已在读源工作簿阶段 abort 的信号不能靠 addEventListener 重放——spawn 前先查。
       if (signal.aborted) throw new Error('soffice aborted before spawn');
       const profile = path.join(profileRoot, `profile_${randomUUID().replaceAll('-', '')}`);
-      const userDir = path.join(profile, 'user');
-      mkdirSync(userDir, { recursive: true });
-      writeFileSync(path.join(userDir, 'registrymodifications.xcu'), RECALC_PROFILE_XCU, 'utf8');
-
-      const child = spawnProcess(
-        sofficePath,
-        [
-          '--headless',
-          `-env:UserInstallation=file://${profile}`,
-          '--norestore',
-          '--convert-to',
-          'xlsx:Calc MS Excel 2007 XML',
-          '--outdir',
-          outDir,
-          sourcePath,
-        ],
-        {
-          detached: true,
-          stdio: 'ignore',
-          env: workerSubprocessEnv(process.env),
-        },
-      );
-      // Codex 复审 P2：error handler 必须在任何可能抛错的检查之前装好——否则 spawn 失败时
-      // Node 发出未处理的 'error' 事件会直接终止整个 server（即便上层 catch 了 convert 的 rejection）。
-      const processOutcome = new Promise<void>((resolve, reject) => {
-        child.once('error', reject);
-        child.once('close', () => resolve());
-      });
-      const pid = child.pid;
-      if (pid === undefined) {
-        // 有 handler 兜底后，抛错不会再变成 unhandled 'error'；等一拍让事件循环派发已挂的 error。
-        throw new Error('soffice spawn 失败（无 pid）');
-      }
-      const onAbort = (): void => killSofficeProcessGroup(pid);
-      signal.addEventListener('abort', onAbort, { once: true });
-      if (signal.aborted) onAbort(); // 竞态：addEventListener 之后又 abort 了一次
       try {
-        await processOutcome;
+        const userDir = path.join(profile, 'user');
+        mkdirSync(userDir, { recursive: true });
+        writeFileSync(path.join(userDir, 'registrymodifications.xcu'), RECALC_PROFILE_XCU, 'utf8');
+
+        const child = spawnProcess(
+          sofficePath,
+          [
+            '--headless',
+            `-env:UserInstallation=file://${profile}`,
+            '--norestore',
+            '--convert-to',
+            'xlsx:Calc MS Excel 2007 XML',
+            '--outdir',
+            outDir,
+            sourcePath,
+          ],
+          {
+            detached: true,
+            stdio: 'ignore',
+            env: workerSubprocessEnv(process.env),
+          },
+        );
+        // Codex 复审 P2：error handler 必须在任何可能抛错的检查之前装好——否则 spawn 失败时
+        // Node 发出未处理的 'error' 事件会直接终止整个 server（即便上层 catch 了 convert 的 rejection）。
+        const processOutcome = new Promise<void>((resolve, reject) => {
+          child.once('error', reject);
+          child.once('close', () => resolve());
+        });
+        // 兜底：pid 失败分支直接 throw 时不会再 await processOutcome；给已挂的 promise 一个
+        // no-op rejection handler，避免随后到达的 child 'error' 变成 unhandled rejection 杀掉 Node。
+        void processOutcome.catch(() => undefined);
+        const pid = child.pid;
+        if (pid === undefined) {
+          throw new Error('soffice spawn 失败（无 pid）');
+        }
+        const onAbort = (): void => killSofficeProcessGroup(pid);
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort(); // 竞态：addEventListener 之后又 abort 了一次
+        try {
+          await processOutcome;
+        } finally {
+          signal.removeEventListener('abort', onAbort);
+        }
+        if (signal.aborted) throw new Error('soffice aborted');
+        const outputPath = path.join(outDir, path.basename(sourcePath));
+        // 输出不存在 = 转换失败（由上层归 engine_failed）。
+        statSync(outputPath);
+        return { outputPath };
       } finally {
-        signal.removeEventListener('abort', onAbort);
+        // Codex 三复审 P2：每次转换的独立 profile 在任意结束路径上清理，避免 /tmp 无界累积。
+        try { rmSync(profile, { recursive: true, force: true }); } catch { /* 清理失败不影响结果 */ }
       }
-      if (signal.aborted) throw new Error('soffice aborted');
-      const outputPath = path.join(outDir, path.basename(sourcePath));
-      // 输出不存在 = 转换失败（由上层归 engine_failed）。
-      statSync(outputPath);
-      return { outputPath };
     },
   };
 }

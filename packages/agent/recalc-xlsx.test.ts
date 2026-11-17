@@ -793,20 +793,24 @@ describe('recalc_xlsx Codex 二轮复审 P2 回归', () => {
   });
 
   // 假 child：once('error') 注册即记录；emit('error') 触发 rejection；pid 可控。
-  function fakeChild(opts: { pid?: number; emitError?: Error; close?: boolean }): SofficeChild & { fireError(): void; readonly errorRegistered: boolean } {
+  function fakeChild(opts: { pid?: number; emitError?: Error; close?: boolean; autoClose?: boolean }): SofficeChild & { fireError(): void; readonly errorRegistered: boolean; readonly closeRegistered: boolean } {
     let onError: ((e: Error) => void) | undefined;
     let onClose: (() => void) | undefined;
     return {
       pid: opts.pid,
       once(event, listener) {
         if (event === 'error') onError = listener as (e: Error) => void;
-        else onClose = listener as () => void;
+        else {
+          onClose = listener as () => void;
+          if (opts.autoClose) queueMicrotask(() => onClose?.());
+        }
         return this;
       },
       get errorRegistered() { return onError !== undefined; },
+      get closeRegistered() { return onClose !== undefined; },
       fireError() { onError?.(opts.emitError ?? new Error('spawn ENOENT')); },
       fireClose() { onClose?.(); },
-    } as SofficeChild & { fireError(): void; readonly errorRegistered: boolean };
+    } as SofficeChild & { fireError(): void; readonly errorRegistered: boolean; readonly closeRegistered: boolean };
   }
 
   it('spawn 失败：error handler 先于 pid 检查注册，不产生 unhandled error（Codex R2-P2-3）', async () => {
@@ -826,9 +830,12 @@ describe('recalc_xlsx Codex 二轮复审 P2 回归', () => {
       await engine.convert({ sourcePath: '/tmp/x.xlsx', outDir: h.fixtureRoot, signal: new AbortController().signal });
     } catch {
       // 期望抛错（spawn 失败）
-    } finally {
-      process.removeListener('unhandledRejection', onUnhandled);
     }
+    // 关键：convert 抛错后再真的触发 child 的 error 事件——被遗弃的 processOutcome
+    // 必须已有 no-op rejection handler，否则这里会产生 unhandledRejection 终止 Node。
+    child.fireError();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    process.removeListener('unhandledRejection', onUnhandled);
     expect(registered).toBe(true);
     // 核心不变量：pid 检查抛错时，error handler 必须已经挂上（否则 Node 未处理 error 会杀 server）。
     expect(child.errorRegistered).toBe(true);
@@ -846,5 +853,30 @@ describe('recalc_xlsx Codex 二轮复审 P2 回归', () => {
     ctrl.abort();
     await expect(engine.convert({ sourcePath: '/tmp/x.xlsx', outDir: h.fixtureRoot, signal: ctrl.signal })).rejects.toThrow(/aborted/);
     expect(spawned).toBe(0);
+  });
+
+  it('sheet 指向不存在的表 → error not_found，不产出空 CSV（Codex R3-P2）', async () => {
+    const h = makeHarness();
+    const src = await workbookBuffer('Actual', { A1: 42 });
+    const computed = await workbookBuffer('Actual', { A1: 42 });
+    const file = h.putInput('sheet.xlsx', src);
+    const ex = makeExecutor(h, computedEngine(computed));
+    const r = await ex.recalc({ file, sheet: 'Missing', export: 'csv', scope: SCOPE });
+    expect(r.status).toBe('error');
+    expect(r.error).toBe('not_found');
+    expect(r.artifacts.values).toBeUndefined();
+  });
+
+  it('convert 结束（成功/失败）后独立 profile 被清理（Codex R3-P2）', async () => {
+    const h = makeHarness();
+    const profileRoot = path.join(h.fixtureRoot, 'profiles-r3');
+    const engine = createSofficeRecalcEngine({
+      profileRoot,
+      spawnProcess: () => fakeChild({ pid: 12345, autoClose: true }),
+    });
+    writeFileSync(path.join(h.fixtureRoot, 'x.xlsx'), 'stub');
+    try { await engine.convert({ sourcePath: path.join(h.fixtureRoot, 'x.xlsx'), outDir: h.fixtureRoot, signal: new AbortController().signal }); } catch { /* 输出缺失 → engine_failed，不影响清理断言 */ }
+    expect(existsSync(profileRoot)).toBe(true);
+    expect(require('node:fs').readdirSync(profileRoot)).toHaveLength(0);
   });
 });
