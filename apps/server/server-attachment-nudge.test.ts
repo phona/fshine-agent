@@ -485,4 +485,17 @@ describe('目标 B：30 秒主动追问', () => {
       await fx.server.close();
     }
   });
+
+  it('停机（server.close）→ 清定时器；之后推进时钟不再发追问', async () => {
+    const fx = await makeFixture();
+    await fx.server.handler(attachmentMessage({ dir: fx.dir, messageId: 'm-file-1', filename: '名册.xlsx' }));
+    expect(fx.clock.pending()).toBe(1);
+
+    await fx.server.close();
+    expect(fx.clock.pending()).toBe(0);
+
+    await fx.clock.advance(60_000);
+    expect(fx.texts).toHaveLength(0);
+    expect(fx.logs.some((line) => line['event'] === 'attachment_nudge_sent')).toBe(false);
+  });
 });
