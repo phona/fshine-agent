@@ -27,6 +27,7 @@ import {
   applyRecalcDeliveryGate,
   collectRecalcReports,
   decideRecalcDelivery,
+  scanFormulas,
   xlsxHasFormulas,
   type RecalcReportBinding,
 } from './src/recalc-xlsx-executor';
@@ -96,6 +97,19 @@ describe('recalc_delivery_gate 判定核心', () => {
     const decision = await decideRecalcDelivery({ bytes: stripped, name: 'shared.xlsx', reports: [] });
     expect(decision.deliver).toBe(false);
     expect(decision.reason).toBe(RECALC_DELIVERY_GATE_STATUS.UNVERIFIABLE);
+  });
+
+  it('数组公式锚点（formula+ref）→ scan 判 uncertain，不能被「认公式」的 early return 遮蔽（Codex R5-P1）', async () => {
+    // exceljs 写回会丢 ref，必须手工在 OOXML 的 <f> 上注入 t="array" ref="A1:A2"。
+    const base = await xlsxBuffer({ C1: 1, D1: 2, A1: { formula: 'TRANSPOSE(C1:D1)', result: 1 }, A2: 2 });
+    const zip = await JSZip.loadAsync(base);
+    const sheetName = Object.keys(zip.files).find((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n))!;
+    let xml = await zip.file(sheetName)!.async('string');
+    xml = xml.replace(/<f>(TRANSPOSE\(C1:D1\))<\/f>/, '<f t="array" ref="A1:A2">$1</f>');
+    zip.file(sheetName, xml);
+    const bytes = Buffer.from(await zip.generateAsync({ type: 'nodebuffer' }));
+    const scan = await scanFormulas(bytes);
+    expect(scan).toEqual({ uncertain: true });
   });
 
   it('数组公式 follower 形态认不出 → unverifiable，不因「认不出」而放行（Codex R4-P1 收敛）', async () => {

@@ -760,6 +760,22 @@ describe('recalc_xlsx 重算开销入 R4 账（独立复核 Gap1）', () => {
 
 // ───────────────────────── Codex 二轮复审 4×P2 回归 ─────────────────────────
 describe('recalc_xlsx Codex 二轮复审 P2 回归', () => {
+  it('falsy result（0/false）：公式结果 0 能被读回，一致→pass、CSV 出 0（Codex R5-P1）', async () => {
+    const h = makeHarness();
+    // ExcelJS 写回后 cell.value 会省略 result=0，但 cell.result 保留——必须读 cell.result。
+    const src = await workbookBuffer('S', { A1: { formula: '1-1', result: 0 }, A2: { formula: '1=1', result: false } });
+    const computed = await workbookBuffer('S', { A1: { formula: '1-1', result: 0 }, A2: { formula: '1=1', result: false } });
+    const file = h.putInput('falsy.xlsx', src);
+    const ex = makeExecutor(h, computedEngine(computed));
+    const r = await ex.recalc({ file, export: 'csv', scope: SCOPE });
+    expect(r.status).toBe('pass');
+    expect(r.valueDiffs).toHaveLength(0);
+    const runDir = latestRunDir(h);
+    const csv = readFileSync(path.join(runDir, 'out', path.basename(r.artifacts.values!)), 'utf8');
+    expect(csv).toContain('S,A1,0');
+    expect(csv).not.toContain('[object Object]');
+  });
+
   it('日期公式：cached/computed 为不同 Date 对象但时间戳相同 → pass（Codex R2-P2-1）', async () => {
     const h = makeHarness();
     const d = new Date('2026-01-01T00:00:00.000Z');

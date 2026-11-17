@@ -157,11 +157,22 @@ export interface RecalcXlsxExecutorOptions {
   }) => void;
 }
 
-/** 单元格的「值」：公式格取计算/缓存 result；错误格保留 {error}。 */
-function cellValueOf(value: ExcelJS.CellValue | undefined): ExcelJS.CellValue {
-  if (value && typeof value === 'object' && !Array.isArray(value) && 'result' in value) {
-    return (value as { result: ExcelJS.CellValue }).result ?? null;
+/**
+ * 单元格的「值」：公式格取计算/缓存 result；错误格保留 {error}。
+ *
+ * Codex R5-P1：exceljs 4.4.0 对 result=0/false/'' 的公式，读回的 cell.value 会**省略** result，
+ * 只有 cell.result 保留。因此必须读 cell.result（cell 是 ExcelJS.Cell，非裸 value）。
+ */
+function cellValueOf(cell: ExcelJS.Cell): ExcelJS.CellValue {
+  const value = cell.value;
+  if (value && typeof value === 'object' && !Array.isArray(value)
+      && ('formula' in value || 'sharedFormula' in value)) {
+    // 先取 cell.result（falsy 也在），再退回 value.result，最后 null。
+    const result = (cell as unknown as { result?: ExcelJS.CellValue }).result;
+    if (result !== undefined) return result;
+    return 'result' in value ? (value as { result?: ExcelJS.CellValue }).result ?? null : null;
   }
+  if (value && typeof value === 'object' && !Array.isArray(value) && 'error' in value) return value;
   return value ?? null;
 }
 
@@ -349,8 +360,8 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
           row.eachCell({ includeEmpty: false }, (cell, colNumber) => {
             const address = cell.address;
             const cachedCell = cell.value;
-            const computedCell = outSheet?.getCell(rowNumber, colNumber).value;
-            const computedValue = cellValueOf(computedCell);
+            const computedCellObj = outSheet?.getCell(rowNumber, colNumber);
+            const computedValue = computedCellObj === undefined ? null : cellValueOf(computedCellObj);
             const err = errorCodeOf(computedValue);
             if (err !== null) {
               errorCells.push({ sheet: sheetName, ref: address, code: err });
@@ -360,7 +371,7 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
             const isFormula = !!cachedCell && typeof cachedCell === 'object' && !Array.isArray(cachedCell)
               && ('formula' in cachedCell || 'sharedFormula' in cachedCell);
             if (isFormula) {
-              const cachedValue = cellValueOf(cachedCell);
+              const cachedValue = cellValueOf(cell);
               if (!valuesEqual(cachedValue, computedValue)) {
                 allDiffs.push({ sheet: sheetName, ref: address, cached: cachedValue, computed: computedValue });
               }
@@ -645,11 +656,12 @@ export function scanWorkbookFormulas(wb: ExcelJS.Workbook): FormulaScan {
         const v = cell.value;
         if (v && typeof v === 'object' && !Array.isArray(v)) {
           const obj = v as unknown as Record<string, unknown>;
+          // 公式锚点带 ref（数组公式）→ follower 被 exceljs 读成普通值、无法可靠识别 → 认不准，拒绝。
+          // 必须在「认公式」之前判，否则 early return 会让这条不可达（Codex R5-P1）。
+          if ('formula' in obj && ('ref' in obj || 'shareType' in obj)) { uncertain = true; return; }
           if ('formula' in obj || 'sharedFormula' in obj) { found = true; return; }
           // {result:...} 单独出现（数组公式 follower 的典型形态）→ 认不准，拒绝。
           if ('result' in obj && !('text' in obj) && !('richText' in obj)) uncertain = true;
-          // 公式锚点带 ref（数组公式）→ 其覆盖范围的 follower 无法可靠识别 → 拒绝。
-          if ('formula' in obj && 'ref' in obj) uncertain = true;
           return;
         }
         // 字符串化的 JSON 对象（exceljs 对某些 array follower 的读回形态）→ 拒绝。
