@@ -18,6 +18,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
 import { afterEach, describe, expect, it } from 'vitest';
 import { openTaskStore } from '@fshine/core';
 import { createFileStore, sessionDirOf } from './src/file-store';
@@ -61,6 +62,40 @@ describe('recalc_delivery_gate 判定核心', () => {
     expect(await xlsxHasFormulas(withFormula)).toBe(true);
     expect(await xlsxHasFormulas(noFormula)).toBe(false);
     expect(await xlsxHasFormulas(Buffer.from('a,b,c\n1,2,3\n', 'utf8'))).toBe(false);
+  });
+
+  it('xlsxHasFormulas 识别 shared 从属格：master 的 <f> 文本被剥离后仍须判含公式（Codex P1-3 门控侧）', async () => {
+    // 真实共享公式工作簿：A2 master（formula），A3 follower（sharedFormula:'A2'，缓存投毒 999）。
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('S');
+    ws.getCell('A1').value = 2;
+    ws.getCell('B1').value = 3;
+    ws.getCell('A2').value = { formula: 'A1+B1', result: 5 };
+    ws.getCell('A3').value = { sharedFormula: 'A2', result: 999 } as unknown as ExcelJS.CellValue;
+    const orig = Buffer.from(await wb.xlsx.writeBuffer());
+
+    // 手工清空 master 的 <f> 文本（保留 t=shared/ref/si），使 ExcelJS 读回 A2 无 formula 属性、
+    // A3 仍为 {sharedFormula:'A2'}——即只有从属格能证明「这是公式表」。
+    const zip = await JSZip.loadAsync(orig);
+    const sheetName = Object.keys(zip.files).find((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n))!;
+    let sheetXml = await zip.file(sheetName)!.async('string');
+    sheetXml = sheetXml.replace(/(<f\b[^>]*>)[^<]+(<\/f>)/, '$1$2');
+    zip.file(sheetName, sheetXml);
+    const stripped = Buffer.from(await zip.generateAsync({ type: 'nodebuffer' }));
+
+    // ExcelJS 读回形状确认（A2 无 formula、A3 有 sharedFormula）。
+    const probe = new ExcelJS.Workbook();
+    await probe.xlsx.load(stripped as unknown as ExcelJS.Buffer);
+    const a2 = probe.getWorksheet('S')!.getCell('A2').value;
+    const a3 = probe.getWorksheet('S')!.getCell('A3').value;
+    expect(a2 && typeof a2 === 'object' && 'formula' in a2).toBe(false);
+    expect(a3 && typeof a3 === 'object' && 'sharedFormula' in a3).toBe(true);
+
+    // 核心：仍须判为含公式；无报告时不投递（否则投毒缓存 999 被静默放行）。
+    expect(await xlsxHasFormulas(stripped)).toBe(true);
+    const decision = await decideRecalcDelivery({ bytes: stripped, name: 'shared.xlsx', reports: [] });
+    expect(decision.deliver).toBe(false);
+    expect(decision.reason).toBe(RECALC_DELIVERY_GATE_STATUS.REPORT_MISSING);
   });
 
   it('带公式 xlsx 无报告 → 不投递（reason=report_missing）', async () => {

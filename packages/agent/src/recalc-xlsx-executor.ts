@@ -577,7 +577,10 @@ export async function xlsxHasFormulas(bytes: Buffer): Promise<boolean> {
         if (found) return;
         row.eachCell({ includeEmpty: false }, (cell) => {
           const v = cell.value;
-          if (v && typeof v === 'object' && !Array.isArray(v) && 'formula' in v) found = true;
+          // Codex P1-3（门控侧）：与执行器比对点同一正解——共享公式从属格读回是
+          // {sharedFormula,result}（无 formula 属性），也必须算公式格，否则剥离 master 的
+          // <f> 文本后，仅含从属格的投毒缓存表会被判「无公式」绕过投递闸。
+          if (v && typeof v === 'object' && !Array.isArray(v) && ('formula' in v || 'sharedFormula' in v)) found = true;
         });
       });
     });
