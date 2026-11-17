@@ -439,6 +439,30 @@ describe('run_js 执行器（CAP-01 S0）', () => {
     store.close();
   });
 
+  it('CAP-01 堆上限：spawn argv 是 --max-old-space-size=1024（给 20MB 附件留余量）；audit.inputBytes = 脚本+物化输入', async () => {
+    const { fixtureRoot, store, fileStore } = makeFixture();
+    // 记录 argv 的「假 node」：走真实 spawn 面（nodePath 是执行器的测试注入点），
+    // 逐字打印收到的参数——断言的是 spawn argv，不是模块常量。
+    const recorder = path.join(fixtureRoot, 'record-node.sh');
+    writeFileSync(recorder, '#!/bin/sh\nprintf \'%s\\n\' "$@"\n', { mode: 0o755 });
+    const executor = createRunJsExecutor({ fileStore, nodeModulesDir: NODE_MODULES, nodePath: recorder });
+    const input = fileStore.putFile({
+      scope: SCOPE,
+      name: '输入.txt',
+      bytes: Buffer.from('abc', 'utf8'),
+      activatedAt: Date.now(),
+    });
+    const code = 'console.log(1);';
+    const result = await executor.runJs({ code, inputs: [input.fileId], scope: SCOPE });
+
+    const argv = result.stdout.split('\n');
+    expect(argv).toContain('--max-old-space-size=1024');
+    expect(argv).not.toContain('--max-old-space-size=512');
+    // 输入总字节：脚本字节 + in/ 物化输入实际字节（内存墙事件「多大」的来源）。
+    expect(result.audit.inputBytes).toBe(Buffer.byteLength(code, 'utf8') + 3);
+    store.close();
+  });
+
   it('产物登记哈希三方一致：同一 fd 流出的字节 = 登记 sha256 = 存储副本 = out/ 原件（跨流式块）', async () => {
     const { workspaceRoot, store, executor } = makeFixture();
     // 280KB（远超 64KiB 登记流式块）：分多次 writeSync 写出——登记侧必须逐块哈希同一 fd，

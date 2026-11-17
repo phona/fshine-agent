@@ -42,12 +42,12 @@ function refused(result: Permit | Rejection): Rejection {
   return result;
 }
 
-describe('resolveRuntimeConfig：缺省 = 现行为，非法 fail-fast（不静默回落）', () => {
-  it('缺省：单并发 / 无队列 / 无任务级预算 / 回合时限沿用执行侧现缺省', () => {
+describe('resolveRuntimeConfig：缺省 = 单并发 + 排队 16，非法 fail-fast（不静默回落）', () => {
+  it('缺省：单并发 / 排队容量 16 / 无任务级预算 / 回合时限沿用执行侧现缺省', () => {
     expect(resolveRuntimeConfig()).toEqual({
       mainConcurrency: 1,
       backgroundConcurrency: 1,
-      queueCapacity: 0,
+      queueCapacity: 16,
       mainTurnMs: 300_000,
       workerTurnMs: 180_000,
       maxDelegationDepth: 1,
@@ -109,7 +109,7 @@ describe('resolveRuntimeConfig：缺省 = 现行为，非法 fail-fast（不静�
 
 describe('许可/释放/拒绝矩阵', () => {
   it('前台单并发：第一个 active（深度 0、截止 = now + mainTurnMs），队列容量 0 时第二个 queue_full 确定性拒绝', () => {
-    const policy = makePolicy();
+    const policy = makePolicy({ queueCapacity: 0 });
     const first = admit(policy.acquire('foreground', { taskId: 'turn-1' }));
     expect(first.state).toBe('active');
     expect(first.kind).toBe('foreground');
@@ -145,7 +145,7 @@ describe('许可/释放/拒绝矩阵', () => {
   });
 
   it('并发上限 >1 时逐个占满，满后 queue_full（不进入执行）', () => {
-    const policy = makePolicy({ mainConcurrency: 2 });
+    const policy = makePolicy({ mainConcurrency: 2, queueCapacity: 0 });
     const a = admit(policy.acquire('foreground', { taskId: 't-a' }));
     const b = admit(policy.acquire('foreground', { taskId: 't-b' }));
     expect(policy.snapshot().foreground.active).toBe(2);
@@ -226,6 +226,24 @@ describe('队列容量与 FIFO 晋升（有界等待）', () => {
     const snap = policy.snapshot();
     expect(snap.background).toMatchObject({ limit: 1, active: 1, queued: 2 });
     expect(snap.background.queuedTaskIds).toEqual(['bg-2', 'bg-3']);
+  });
+
+  it('缺省排队容量 16（CAP-01）：并发 1 时第 2..17 个排队、第 18 个 queue_full；显式 0 仍关闭排队', () => {
+    // 缺省（未配置 runtime 段）：mainConcurrency=1 + queueCapacity=16。
+    const policy = makePolicy();
+    const active = admit(policy.acquire('foreground', { taskId: 't-1' }));
+    expect(active.state).toBe('active');
+    for (let i = 2; i <= 17; i++) {
+      expect(admit(policy.acquire('foreground', { taskId: `t-${i}` })).state, `t-${i}`).toBe('queued');
+    }
+    expect(policy.snapshot().foreground).toMatchObject({ active: 1, queued: 16 });
+    expect(refused(policy.acquire('foreground', { taskId: 't-18' })).reason).toBe('queue_full');
+
+    // 显式 0 = 关闭排队（既有语义不变）：并发满即确定性拒绝，一个队部位都不留。
+    const explicitZero = makePolicy({ queueCapacity: 0 });
+    admit(explicitZero.acquire('foreground', { taskId: 'z-1' }));
+    expect(refused(explicitZero.acquire('foreground', { taskId: 'z-2' })).reason).toBe('queue_full');
+    expect(explicitZero.snapshot().foreground.queued).toBe(0);
   });
 
   it('release 触发 FIFO 晋升：队首批次 active 并取新截止（等待时间不计入回合时限）', () => {
@@ -387,7 +405,7 @@ describe('委派深度（确定性护栏，不产生半成品）', () => {
   });
 
   it('派生许可不占新并发槽：父槽保持唯一占用，后台配额不被放大', () => {
-    const policy = makePolicy({ backgroundConcurrency: 1, maxDelegationDepth: 2 });
+    const policy = makePolicy({ backgroundConcurrency: 1, maxDelegationDepth: 2, queueCapacity: 0 });
     const bg = admit(policy.acquire('background', { taskId: 'bg-task' }));
     const child = admit(policy.acquire('background', { taskId: 'bg-worker', parentPermit: bg }));
     expect(child.state).toBe('active');
@@ -465,7 +483,7 @@ describe('snapshot：资源快照（P8 ops / P6 调度读面）', () => {
   it('缺省快照：限额、计数、队列容量与解析后配置齐备', () => {
     const policy = makePolicy();
     const snap = policy.snapshot();
-    expect(snap.queueCapacity).toBe(0);
+    expect(snap.queueCapacity).toBe(16);
     expect(snap.foreground).toMatchObject({ limit: 1, active: 0, queued: 0 });
     expect(snap.background).toMatchObject({ limit: 1, active: 0, queued: 0 });
     expect(snap.derived).toEqual({ active: 0, taskIds: [] });
@@ -488,7 +506,7 @@ describe('拒绝 reason → 任务原因映射（联合接口约定 §5：resour
     budgetPolicy.budgetFor('budget-root').consume({ calls: 1 });
     const budget = refused(budgetPolicy.acquire('background', { taskId: 'b', parentPermit: budgetRoot }));
 
-    const queuePolicy = makePolicy();
+    const queuePolicy = makePolicy({ queueCapacity: 0 });
     admit(queuePolicy.acquire('foreground', { taskId: 'queue-a' }));
     const queue = refused(queuePolicy.acquire('foreground', { taskId: 'queue-b' }));
 

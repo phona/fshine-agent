@@ -47,6 +47,7 @@ import {
   type TranscriptStore,
   type TurnFileRef,
   type WorkerSkill,
+  type RunJsMemoryExitEvent,
 } from '../packages/agent/src/execution-runtime';
 import {
   createNotificationOutbox,
@@ -247,6 +248,8 @@ export interface SessionAssemblyInput {
   onTranscriptError?: (error: unknown) => void;
   /** CAP-01 S1：run_js 执行器端口（装配层构造注入；缺省不注入 = Main 无 run_js 工具）。 */
   runJsExecutor?: RunJsExecutor;
+  /** CAP-01 ④：run_js 内存墙结构化事件上报（装配层接日志；缺省静默）。 */
+  onRunJsMemoryExit?: (event: RunJsMemoryExitEvent) => void;
   /**
    * CAP-01 S2：交办复制端口（run_task.inputFiles 的宿主侧执行；装配层注入 fileStore 本身）。
    * 缺省不注入 = run_task 工具面不带 inputFiles（逐字节不变），模型传了也 fail-closed 拒绝。
@@ -622,6 +625,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       ...(input.transcriptStore === undefined ? {} : { transcriptStore: input.transcriptStore }),
       ...(input.onTranscriptError === undefined ? {} : { onTranscriptError: input.onTranscriptError }),
       ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
+      ...(input.onRunJsMemoryExit === undefined ? {} : { onRunJsMemoryExit: input.onRunJsMemoryExit }),
       ...(input.taskInputCopier === undefined ? {} : { taskInputCopier: input.taskInputCopier }),
       ...(taskBridge === undefined ? {} : { taskExecutionBridge: taskBridge }),
       ...(input.fileManifestProvider === undefined ? {} : { fileManifestProvider: input.fileManifestProvider }),

@@ -18,7 +18,7 @@
 | 用例 | 层级 | 覆盖方式（测试/证据） | 状态 |
 |---|---|---|---|
 | P5-T01 单一配置 | 确定性 | `packages/core/config.test.ts`：runtime 合法解析、非法值 fail-fast 点名 `runtime.<key>`（0/负数/小数/非数）、未知键拒绝（拼错旋钮不得被缺省吞掉）、taskBudget 子键 ms/calls 必填与 tokens 校验、缺段/空段=未配置、旧 host 死键残留被忽略且不再派生 env；`packages/agent/resource-policy-single-source.test.ts` grep 守卫：六死键 + `FSHINE_*` 覆盖口生产代码零引用，资源旋钮只允许登记所有者（contracts 类型 / core 解析 / resource-policy / execution-runtime 回合时限入参）解释，所有者表双向闭合 | 已实现/已测试（绿）；端到端「配置加载输出」留集成 Run 复跑 |
-| P5-T02 同会话串行 | 确定性 | 本轨提供原语：前台单并发准入 + 有界队列 + FIFO 晋升（`resource-policy.test.ts` 矩阵，含 release 幂等与晋升截止重算）；缺省 `mainConcurrency=1` / `queueCapacity=0`。**「两回合顺序处理 + transcript 无覆盖」的断言依赖 server 接线后的串行化调用序** | 原语已测试（绿）；用例本体 blocked-by-集成 |
+| P5-T02 同会话串行 | 确定性 | 本轨提供原语：前台单并发准入 + 有界队列 + FIFO 晋升（`resource-policy.test.ts` 矩阵，含 release 幂等与晋升截止重算）；缺省 `mainConcurrency=1` / `queueCapacity=16`（显式 0 = 关闭排队）。**「两回合顺序处理 + transcript 无覆盖」的断言依赖 server 接线后的串行化调用序** | 原语已测试（绿）；用例本体 blocked-by-集成 |
 | P5-T03 队列与配额 | 确定性 | 满=确定性 `queue_full`（不进入执行）；前后台配额与队列各自独立（后台队列满不阻塞前台；前台满载不占后台槽）；有界（容量+队列，拒绝而非无限积压）；`cancelQueued` 出队、释放排队=放弃等待 | 已实现/已测试（绿） |
 | P5-T04 委派深度 | 确定性 | `depth_exceeded` 确定性拒绝、不产生半成品（无许可、无预算——`budgetFor` 对未准入任务抛错）；depth 0/1/2 三档与「父许可非 active 拒绝派生」 | 已实现/已测试（绿） |
 | P5-T05 父预算共享 | 确定性 | 子许可 `budgetFor(child) === budgetFor(parent)`（同一对象，不复制/不放大）；子消费父可见；耗尽→`budget_exhausted`（子委派拒绝、等待恢复拒绝）；ms / calls / tokens 三口径 | 已实现/已测试（绿） |

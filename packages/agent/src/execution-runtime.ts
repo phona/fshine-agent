@@ -218,6 +218,45 @@ export const RUN_JS_TOOL_SCHEMA: Record<string, unknown> = {
   additionalProperties: false,
 };
 
+/**
+ * 内存墙话术（CAP-01 ④，owner 裁决）：run_js 子进程因内存退出时，**工具结果与用户可见
+ * 话术用同一句**——模型与用户都拿到可执行的下一步（拆分/压缩），不是黑箱的 exit 134。
+ * 机械事实（bytes / exitCode / exitSignal / stderrTail）只进结构化事件，不进话术。
+ */
+export const RUN_JS_MEMORY_EXIT_MESSAGE = '文件太大，处理时内存不足，请拆分或压缩后重试';
+/** 事件里 stderr 尾窗的字符数：够看出死法（FATAL ERROR / Allocation failed），不灌满日志。 */
+export const RUN_JS_MEMORY_STDERR_TAIL_CHARS = 400;
+/** V8/分配器内存墙文案（大小写不敏感；Node 两种死法都覆盖）。 */
+const RUN_JS_MEMORY_OOM_PATTERN = /heap out of memory|Allocation failed/i;
+
+/** 内存墙出口的机械事实（结构化事件面；bytes = 输入总字节，见 RunJsAudit.inputBytes）。 */
+export interface RunJsMemoryExitEvent {
+  readonly runId: string;
+  readonly side: 'main' | 'worker';
+  /** Worker 面才有任务归属。 */
+  readonly taskId?: string;
+  readonly bytes: number;
+  readonly exitCode: number | null;
+  readonly exitSignal: NodeJS.Signals | null;
+  readonly stderrTail: string;
+}
+
+/**
+ * 内存墙判据（CAP-01 ④）：宿主主动杀（超时/中止 → killReason 非空）**不算**内存墙——
+ * 那是宿主策略出口，话术必须走超时/取消而不是「内存不足」。其余情况按 owner 裁决的
+ * 形状：`exitSignal` 非空（如 SIGABRT）或 stderr 含 `heap out of memory` / `Allocation failed`。
+ */
+export function runJsMemoryExitOf(output: RunJsOutput): Omit<RunJsMemoryExitEvent, 'runId' | 'side' | 'taskId'> | null {
+  if (output.audit.killReason !== undefined) return null;
+  if (output.exitSignal === null && !RUN_JS_MEMORY_OOM_PATTERN.test(output.stderr)) return null;
+  return {
+    bytes: output.audit.inputBytes,
+    exitCode: output.exitCode,
+    exitSignal: output.exitSignal,
+    stderrTail: output.stderr.slice(-RUN_JS_MEMORY_STDERR_TAIL_CHARS),
+  };
+}
+
 /** Worker 唯一工具名：结构化执行入口（宿主生成 requestId，模型只给 operation + args）。 */
 export const EXECUTE_OPERATION_TOOL = 'execute_operation';
 export const EXECUTE_OPERATION_TOOL_DESCRIPTION =
@@ -370,6 +409,12 @@ export interface RuntimeOptions {
    * 缺省不注入 = Main 工具面没有 run_js（工具面逐字节不变，ask/eval 零变化）。
    */
   runJsExecutor?: RunJsExecutor;
+  /**
+   * CAP-01 ④：run_js 子进程撞内存墙的结构化事件（**只进日志**，不进用户话术）。
+   * bytes = 输入总字节；exitCode/exitSignal/stderrTail = 退出形状；runId/side/taskId 定位
+   * 「是哪次」。缺省静默（不影响回合；用户话术与工具结果仍按判据统一）。
+   */
+  onRunJsMemoryExit?: (event: RunJsMemoryExitEvent) => void;
   /**
    * CAP-01 S1 清单注入（机械事实，与 taskFactProvider 同机制）：装配层提供本会话已激活
    * （activated_at IS NOT NULL，TTL 内）文件清单——字段只有 fileId/name/bytes（渲染见
@@ -809,7 +854,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
 
   /** run_js 的模型可见结果（v8 §2 形状；audit/runDir 等机械路径不进转录）。 */
   function runJsToolResult(output: RunJsOutput): Record<string, unknown> {
-    return {
+    const result = {
       exitCode: output.exitCode,
       exitSignal: output.exitSignal,
       stdout: output.stdout,
@@ -823,6 +868,21 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       })),
       outputs: output.outputs,
     };
+    // CAP-01 ④：内存墙时工具结果也带同一句话术——模型不必猜 exit 134 的含义，且不会把
+    // 「处理完成」写进用户回复（用户可见层在 send() 出口同句覆盖，见 lastMemoryWall）。
+    return runJsMemoryExitOf(output) === null ? result : { ...result, error: RUN_JS_MEMORY_EXIT_MESSAGE };
+  }
+
+  /** 内存墙结构化事件（真实运行一次报一次；memo 命中不重复上报）。 */
+  function noteRunJsMemoryExit(output: RunJsOutput, side: 'main' | 'worker', taskId?: string): void {
+    const exit = runJsMemoryExitOf(output);
+    if (exit === null) return;
+    options.onRunJsMemoryExit?.({
+      runId: output.audit.runId,
+      side,
+      ...(taskId === undefined ? {} : { taskId }),
+      ...exit,
+    });
   }
 
   /**
@@ -840,6 +900,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     args: Record<string, unknown>,
     memo: Map<string, RunJsOutput>,
     turnFiles: TurnFileRef[],
+    setMemoryWall: (hit: boolean) => void,
   ): Promise<Record<string, unknown>> {
     const executor = options.runJsExecutor;
     if (executor === undefined) throw new Error(`Main 工具面之外的调用：${RUN_JS_TOOL}`);
@@ -848,7 +909,11 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     const inputs = parseFileIdList(args.inputs, 'run_js', 'inputs');
     const memoKey = `${turnNo}:${createHash('sha256').update(code, 'utf8').digest('hex')}:${[...inputs].sort().join('|')}`;
     const hit = memo.get(memoKey);
-    if (hit !== undefined) return runJsToolResult(hit);
+    if (hit !== undefined) {
+      // memo 命中：结果原样回放；用户可见话术取本回合最后一次 run_js 的出口事实。
+      setMemoryWall(runJsMemoryExitOf(hit) !== null);
+      return runJsToolResult(hit);
+    }
     let output: RunJsOutput;
     try {
       output = await executor.runJs({
@@ -865,6 +930,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       throw error;
     }
     memo.set(memoKey, output);
+    noteRunJsMemoryExit(output, 'main');
+    setMemoryWall(runJsMemoryExitOf(output) !== null);
     turnFiles.push(...output.outputs.map((file) => ({ fileId: file.fileId, name: file.name, bytes: file.bytes })));
     return runJsToolResult(output);
   }
@@ -954,6 +1021,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       throw error;
     }
     memo.set(memoKey, output);
+    // 内存墙事件：Worker 面没有用户可见回复（汇报经 Main 转述），但机械事实必须可查。
+    noteRunJsMemoryExit(output, 'worker', taskId);
     for (const file of output.outputs) {
       pushTurnFileOnce(taskFiles, file);
     }
@@ -1332,6 +1401,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const turnFiles: TurnFileRef[] = [];
       // run_js 幂等（v8 §5）：局部 Map 随本回合创建、随本回合丢弃（进程内、跨重启不保证）。
       const runJsMemo = new Map<string, RunJsOutput>();
+      // CAP-01 ④：本回合**最后一次** run_js 是否撞内存墙——是则用户可见回复在出口统一覆盖成
+      // 内存墙话术（模型文本不得把 OOM 讲成「处理完成」；最后一次成功重试则按成功交付）。
+      let lastMemoryWall = false;
       currentTurnDeadline = Date.now() + mainTurnMs;
       // U3：本回合的 turn 作用域（run_task 逻辑操作身份的作用域）与重放窗口。
       turnNo += 1;
@@ -1406,7 +1478,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           }
           // CAP-01 S1：run_js 与工具面同源门控（未注入执行器则不受理），fail-closed。
           if (tool === RUN_JS_TOOL && options.runJsExecutor !== undefined) {
-            return runJsInTurn(args, runJsMemo, turnFiles);
+            return runJsInTurn(args, runJsMemo, turnFiles, (hit) => {
+              lastMemoryWall = hit;
+            });
           }
           throw new Error(`Main 工具面之外的调用：${tool}`);
         },
@@ -1433,7 +1507,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // 剥完为空且有文件 → 宿主话术兜底（空文本帧会让渠道一个终帧都不发，用户什么都收不到）。
       const stripped = stripServerPaths(mainResult.text);
       let reply = stripped.text;
-      if (reply.trim() === '' && turnFiles.length > 0) reply = FILES_GENERATED_NOTICE;
+      // CAP-01 ④：内存墙是宿主可确定的失败事实——用户可见话术与工具返回同一句，不让模型
+      // 的自由文本掩盖（其余出口清理与兜底逻辑不变）。
+      if (lastMemoryWall) reply = RUN_JS_MEMORY_EXIT_MESSAGE;
+      else if (reply.trim() === '' && turnFiles.length > 0) reply = FILES_GENERATED_NOTICE;
       // P1（S1）：本回合最终回复逐字存档——同回合各任务行同值；空白回复/回合失败不落
       // （缺省=无最终回复存档，显示层不用执行层汇报冒充）。存档用出口清理后的最终回复
       // （用户看到什么，task_result 就是什么）。
