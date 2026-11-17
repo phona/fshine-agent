@@ -91,11 +91,23 @@ describe('recalc_delivery_gate 判定核心', () => {
     expect(a2 && typeof a2 === 'object' && 'formula' in a2).toBe(false);
     expect(a3 && typeof a3 === 'object' && 'sharedFormula' in a3).toBe(true);
 
-    // 核心：仍须判为含公式；无报告时不投递（否则投毒缓存 999 被静默放行）。
-    expect(await xlsxHasFormulas(stripped)).toBe(true);
+    // 核心：master 文本被剥离后无法可靠还原公式语义 → 保守判 unverifiable、不投递，
+    // 不降级为 no_formulas（后者会让投毒缓存 999 被静默放行）。
     const decision = await decideRecalcDelivery({ bytes: stripped, name: 'shared.xlsx', reports: [] });
     expect(decision.deliver).toBe(false);
-    expect(decision.reason).toBe(RECALC_DELIVERY_GATE_STATUS.REPORT_MISSING);
+    expect(decision.reason).toBe(RECALC_DELIVERY_GATE_STATUS.UNVERIFIABLE);
+  });
+
+  it('数组公式 follower 形态认不出 → unverifiable，不因「认不出」而放行（Codex R4-P1 收敛）', async () => {
+    // TRANSPOSE 数组公式：anchor 带 ref，follower 是 {result}（exceljs 读回不稳定）。
+    const bytes = await xlsxBuffer({
+      C1: 1, D1: 2,
+      A1: { formula: 'TRANSPOSE(C1:D1)', result: 1, ref: 'A1:A2' } as unknown as ExcelJS.CellValue,
+      A2: { result: 999 } as unknown as ExcelJS.CellValue,
+    });
+    const decision = await decideRecalcDelivery({ bytes, name: 'array.xlsx', reports: [] });
+    expect(decision.deliver).toBe(false);
+    expect(decision.reason).toBe(RECALC_DELIVERY_GATE_STATUS.UNVERIFIABLE);
   });
 
   it('带公式 xlsx 无报告 → 不投递（reason=report_missing）', async () => {

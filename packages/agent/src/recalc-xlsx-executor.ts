@@ -594,6 +594,8 @@ export const RECALC_DELIVERY_GATE_STATUS = {
   REPORT_MISSING: 'report_missing',
   REPORT_FAIL: 'report_fail',
   REPORT_MISMATCH: 'report_mismatch',
+  /** 无法可靠判断（公式形态认不出 / 解析异常）——不静默放行，停下交用户确认。 */
+  UNVERIFIABLE: 'unverifiable',
 } as const;
 export type RecalcDeliveryGateReason =
   (typeof RECALC_DELIVERY_GATE_STATUS)[keyof typeof RECALC_DELIVERY_GATE_STATUS];
@@ -611,29 +613,58 @@ export interface RecalcDeliveryDecision {
   reason: RecalcDeliveryGateReason;
 }
 
-/** xlsx 是否含公式（exceljs 读 buffer；读不动 = 非 xlsx，按 false 处理不误伤）。 */
-export async function xlsxHasFormulas(bytes: Buffer): Promise<boolean> {
+/**
+ * 工作簿公式识别（三态，fail-closed）。
+ *
+ * 关键纪律：**「认不出」不等于「没有」**。旧版返回 boolean，任何 exceljs 不认识的形态
+ * （数组公式 follower 被读成字符串/`{result}`/null、解析异常）都被当成「无公式」放行——
+ * 这就是投毒缓存绕门的根因。现在认不出就返回 uncertain，投递门据此拒绝并给可读反馈。
+ * 共享公式从属格 LO 归一化后会展开成普通公式，这里两种形态都识别（兼容未归一化的输入）。
+ */
+export type FormulaScan = { hasFormulas: boolean } | { uncertain: true };
+
+export async function scanFormulas(bytes: Buffer): Promise<FormulaScan> {
+  let wb: ExcelJS.Workbook;
   try {
-    const wb = new ExcelJS.Workbook();
+    wb = new ExcelJS.Workbook();
     await wb.xlsx.load(bytes as unknown as ExcelJS.Buffer);
-    let found = false;
-    wb.eachSheet((ws) => {
-      if (found) return;
-      ws.eachRow((row) => {
-        if (found) return;
-        row.eachCell({ includeEmpty: false }, (cell) => {
-          const v = cell.value;
-          // Codex P1-3（门控侧）：与执行器比对点同一正解——共享公式从属格读回是
-          // {sharedFormula,result}（无 formula 属性），也必须算公式格，否则剥离 master 的
-          // <f> 文本后，仅含从属格的投毒缓存表会被判「无公式」绕过投递闸。
-          if (v && typeof v === 'object' && !Array.isArray(v) && ('formula' in v || 'sharedFormula' in v)) found = true;
-        });
+  } catch {
+    return { uncertain: true };
+  }
+  return scanWorkbookFormulas(wb);
+}
+
+/** 同步版：调用方已 load 好 workbook 时用（执行器侧复用）。 */
+export function scanWorkbookFormulas(wb: ExcelJS.Workbook): FormulaScan {
+  let found = false;
+  let uncertain = false;
+  wb.eachSheet((ws) => {
+    ws.eachRow((row) => {
+      row.eachCell({ includeEmpty: false }, (cell) => {
+        if (uncertain) return;
+        const v = cell.value;
+        if (v && typeof v === 'object' && !Array.isArray(v)) {
+          const obj = v as unknown as Record<string, unknown>;
+          if ('formula' in obj || 'sharedFormula' in obj) { found = true; return; }
+          // {result:...} 单独出现（数组公式 follower 的典型形态）→ 认不准，拒绝。
+          if ('result' in obj && !('text' in obj) && !('richText' in obj)) uncertain = true;
+          // 公式锚点带 ref（数组公式）→ 其覆盖范围的 follower 无法可靠识别 → 拒绝。
+          if ('formula' in obj && 'ref' in obj) uncertain = true;
+          return;
+        }
+        // 字符串化的 JSON 对象（exceljs 对某些 array follower 的读回形态）→ 拒绝。
+        if (typeof v === 'string' && /^\s*\{.*\}\s*$/.test(v) && v.includes('result')) uncertain = true;
       });
     });
-    return found;
-  } catch {
-    return false; // 损坏/非 xlsx：不是「含公式表格」，闸门不介入（逐字节不变）
-  }
+  });
+  if (uncertain) return { uncertain: true };
+  return { hasFormulas: found };
+}
+
+/** 兼容旧调用（返回 boolean）：仅用于非判定场景；判定请用 scanFormulas 的三态。 */
+export async function xlsxHasFormulas(bytes: Buffer): Promise<boolean> {
+  const scan = await scanFormulas(bytes);
+  return 'hasFormulas' in scan ? scan.hasFormulas : false; // 兼容旧语义：读不动=无公式
 }
 
 function looksLikeXlsx(name: string, bytes: Buffer): boolean {
@@ -693,7 +724,12 @@ export async function decideRecalcDelivery(input: {
       ? RECALC_DELIVERY_GATE_STATUS.CSV_DATA
       : RECALC_DELIVERY_GATE_STATUS.NOT_XLSX };
   }
-  if (!await xlsxHasFormulas(input.bytes)) {
+  const scan = await scanFormulas(input.bytes);
+  if ('uncertain' in scan) {
+    // 认不出 = 无法核验：不静默降级为「无公式」，停下交用户确认（B 类如实交付）。
+    return { deliver: false, reason: RECALC_DELIVERY_GATE_STATUS.UNVERIFIABLE };
+  }
+  if (!scan.hasFormulas) {
     return { deliver: true, reason: RECALC_DELIVERY_GATE_STATUS.NO_FORMULAS };
   }
   const digest = createHash('sha256').update(input.bytes).digest('hex');
