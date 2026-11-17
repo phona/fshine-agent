@@ -49,16 +49,16 @@
 
 | 项 | 位置/读数 |
 |---|---|
-| `message_done` 日志写失败会翻转回合结果 | `server.ts:529-545`，与已修的 #1 同类，**待 owner 裁定** |
-| 并发：`mainConcurrency=1` 全局串行 | 5 会话 → 4 个 `queue_full`（配额前）；排队 16 后改为等待 |
-| 磁盘只增不减 | 100 次连跑 ≈4.1KB/次；`runs/`、`files/`、`file_refs` 永不删除 |
-| Main 交付箱同 sha 不去重 | 同内容 100 次 = 100 个 fileId、100 份副本（任务产物池有去重） |
-| 权限模型 symlink 盲区 | 预植 `out/→/etc` 可读 `/etc/passwd` 并当产物交付；子进程无法自建软链 |
+| ~~`message_done` 日志写失败会翻转回合结果~~ | **已修**（`be56225`）：写失败只降级为观测事件 `message_done_log_write_failed`，`return result.reply` 始终执行 |
+| ~~并发：`mainConcurrency=1` 全局串行~~ | **已改**：缺省前台并发 4、排队 16（`bcdf316`）；8 档另有实测（§11） |
+| ~~磁盘只增不减~~ | **已补**：`runtime.fileRetentionDays` 缺省 30 天 + 显式执行器 `npm run cleanup:runs`（`b250d3f`）；只删 run 目录、不碰 `file_refs` |
+| ~~Main 交付箱同 sha 不去重~~ | **已修**（`c89e689`）：投递层按 `(sha256, 文件名)` 去重，同名不同字节照常各发 |
+| ~~权限模型 symlink 盲区~~ | **已收窄**（`1d0bc3b`）：spawn 前 `lstat` 六个布局目录、软链即拒跑；产物收集按 realpath 包含校验 |
 | 网络未阻断 | 脚本可 `fetch` 外传 runDir / node_modules / 注入输入 |
 | 内存 | 2GB Buffer 脚本 RSS 2116MB（`--max-old-space-size` 对 Buffer 无效）；10 万行 xlsx 峰值 396MB |
 | 幂等只在进程内 | 跨重启不保证；渠道重投 = 新回合 = 再执行 |
 | R7 f4 抖动 | burst 子进程未捕获 `SQLITE_BUSY`；f4 单独重跑 7/7 过 |
-| 后台队列不受 16 约束 | `task-runner` submit 无上界（`decision-log.md:1396` 已登记） |
+| ~~后台队列不受 16 约束~~ | **已补**（`9c21af9`）：底账 queued 行 < `queueCapacity` 才受理，满即确定性拒绝 |
 
 ## 6. 未验证
 
@@ -138,3 +138,17 @@ Worker 面命中数不丢弃，写进该检查的 detail 作信息（形如「wo
 | `mainConcurrency` **保持 4** | 不改默认值 | R6 的 9 个真实并发会话在同一进程内峰值 **632MB**（中位 457MB，CPU 均值 14%/峰值 25%）；但产品模型是 step-3.7-flash，其账号**并发上限 8**——8 个 Main 回合叠 Worker 会直接撞上限（实测 6 会话就出现过 `current: 9, limit: 8`）。4 = 上限的一半，留出 Worker 与重试余量 |
 
 **并发上限**是当前真正约束用户等待的外部条件：`step_plan` 账号限制 8 并发，宿主开再多也只是把排队从进程内换到供应商侧。要再提并发，得先解决供应商配额。
+
+## 12. 上线前补漏（2026-11-17，四条已合入 `f25dc49`）
+
+| 分支 | 提交 | 改了什么 | 合后门 |
+|---|---|---|---|
+| `fix-diskexec` | `b250d3f` | run 目录保留期执行器：只处理仓内 `runs/run_<32hex>` 布局；逐层 `lstat` 不解软链（链接整目录跳过）；删除前复核 + 根内包含判定（带分隔符前缀防前缀碰撞）；dryRun 零删除；**不碰 `file_refs`**；入口是显式 `npm run cleanup:runs`，**不接 server 启动路径** | 1615 绿 |
+| `fix-bqueue` | `9c21af9` | 后台受理上界：底账 queued 行 < `queueCapacity` 才受理，满即确定性拒绝（不改成阻塞排队） | 1619 绿 |
+| `fix-chanmode` | `4dc42d5` | 渠道装配三档：`offline`（缺省，**不建立 WS 连接**）/ `shadow`（连但出站全 suppressed）/ `live`（现状）；档位来自 `channel.mode`，值域 fail-fast | 1632 绿 |
+| `fix-symlink` | `1d0bc3b` | `run_js` 收窄：spawn 前对 `runDir`/`in`/`out`/`scratch`/`home`/`tmp` 逐个 `lstat`，软链或非目录 → fail closed（`run_js_layout_unsafe`，不执行）；产物收集跳过软链并做 realpath 包含校验 | 1640 绿 |
+
+**守卫抓到的两个真问题**（都是新代码里的过渡词标识符，改的是数据不是守卫）：
+`legacyDir`（`run-dir-cleanup.test.ts`）→ `oldDir`；`legacyLiteralLive` / `legacy`（`channel-mode.test.ts`）→ `previousAssembly` / `beforeChange`。
+
+**合后复跑**：`npm run eval:cap01` 七面 **7/7**（`.runtime/eval-cap01-all/2026-11-17T05-41-11-641Z/`）；全量单测 1640 passed / 1 skipped；tsc=0。
