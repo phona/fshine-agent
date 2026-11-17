@@ -147,6 +147,7 @@ const RUNTIME_KEYS = [
   'taskBudget',
   'waitUserTimeoutMs',
   'fileRetentionDays',
+  'fileRetentionSweepOnStart',
   'dispatchMode',
 ] as const;
 
@@ -158,6 +159,15 @@ function runtimeInteger(raw: unknown, key: string, min: number): number | undefi
     throw new Error(`配置项 runtime.${key} 必须是 ≥${min} 的整数（当前: ${String(raw)}）`);
   }
   return parsed;
+}
+
+/** runtime 段布尔值：只认 YAML 布尔；字符串/数字等显式写错同样 fail-fast。 */
+function runtimeBoolean(raw: unknown, key: string): boolean | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'boolean') {
+    throw new Error(`配置项 runtime.${key} 必须是布尔值（当前: ${String(raw)}）`);
+  }
+  return raw;
 }
 
 /**
@@ -174,7 +184,7 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     }
   }
   const config: RuntimeConfig = {};
-  type RuntimeIntegerKey = Exclude<keyof RuntimeConfig, 'taskBudget' | 'dispatchMode'>;
+  type RuntimeIntegerKey = Exclude<keyof RuntimeConfig, 'taskBudget' | 'dispatchMode' | 'fileRetentionSweepOnStart'>;
   const integers: ReadonlyArray<[RuntimeIntegerKey, number]> = [
     ['mainConcurrency', 1],
     ['backgroundConcurrency', 0],
@@ -190,6 +200,8 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     const value = runtimeInteger(raw[key], key, min);
     if (value !== undefined) config[key] = value;
   }
+  const sweepOnStart = runtimeBoolean(raw['fileRetentionSweepOnStart'], 'fileRetentionSweepOnStart');
+  if (sweepOnStart !== undefined) config.fileRetentionSweepOnStart = sweepOnStart;
   const taskBudgetRaw = raw['taskBudget'];
   if (taskBudgetRaw !== undefined && taskBudgetRaw !== null) {
     const budget = asRecord(taskBudgetRaw, 'runtime.taskBudget');

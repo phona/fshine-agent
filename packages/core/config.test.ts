@@ -486,6 +486,31 @@ host:
     }
   });
 
+  it('runtime.fileRetentionSweepOnStart：布尔 true/false 解析；非布尔 fail-fast；缺省不造键', () => {
+    // 缺省 = 加载层不造键；缺省 false（不在启动时清扫）由 resolveRuntimeConfig 补齐。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+
+    const on = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  fileRetentionSweepOnStart: true\n`),
+      env: {},
+    });
+    expect(on.runtime).toEqual({ fileRetentionSweepOnStart: true });
+
+    // 显式 false 是合法值（与缺省同义，但不得被「未配置」吞掉而无法区分）。
+    const off = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  fileRetentionSweepOnStart: false\n`),
+      env: {},
+    });
+    expect(off.runtime).toEqual({ fileRetentionSweepOnStart: false });
+
+    for (const bad of ['yes', '1', '"true"', 'nope']) {
+      const yaml = `${VALID_YAML}runtime:\n  fileRetentionSweepOnStart: ${bad}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(
+        /runtime\.fileRetentionSweepOnStart/,
+      );
+    }
+  });
+
   it('runtime.taskBudget 子键：ms/calls 必填、非法值点名、未知子键拒绝', () => {
     const cases: ReadonlyArray<[string, RegExp]> = [
       ['taskBudget:\n    ms: 60000\n', /runtime\.taskBudget\.calls/],

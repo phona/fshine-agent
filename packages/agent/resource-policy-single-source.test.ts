@@ -42,6 +42,10 @@ const P2_SCENARIOS = 'scripts/eval/p2/p2-scenarios.ts';
 // RuntimeConfig 输入（显式 `queueCapacity: 16` 压队列上限），不解析/解释旋钮、不读原始
 // `config.runtime.*`；缺省值那条走「不给 runtime 段」，不在此文件里重复定义缺省。
 const R8_CONCURRENCY = 'scripts/eval/cap01/r8-concurrency.ts';
+// server 启动保留期清扫（2026-11-17 登记）：**装配点开关的唯一读者**——只读
+// `resolveRuntimeConfig` 的解析值 `config.fileRetentionSweepOnStart`，不解析原始
+// `config.runtime.*`、不重定义缺省（单一配置源不破坏）。
+const STARTUP_SWEEP = 'apps/server/startup-sweep.ts';
 
 /** 分诊 #6 删除的 host.* 未消费键（生产代码零引用；旧 YAML 里的残留键由加载层忽略）。 */
 const DELETED_HOST_KEYS = [
@@ -87,6 +91,7 @@ const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   taskBudget: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   waitUserTimeoutMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   fileRetentionDays: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
+  fileRetentionSweepOnStart: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STARTUP_SWEEP],
 };
 
 interface SourceFacts {

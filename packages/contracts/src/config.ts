@@ -164,9 +164,16 @@ export interface RuntimeConfig {
   /**
    * run 目录 / 任务产物的保留期（天）。缺省 30（2026-11-17 owner 定）；0 = 不清理；
    * 正整数 = 超过该天数的目录/产物具备清理资格。本旋钮只提供判定（策略层），实际删除
-   * 执行器不在当前切片——接线前不删任何文件。
+   * 由 `fileRetentionSweepOnStart` 或显式 `npm run cleanup:runs` 触发。
    */
   fileRetentionDays?: number;
+  /**
+   * server 启动装配完成后、开始接消息之前，是否按 `fileRetentionDays` 扫一遍 run 目录。
+   * 缺省 false = 零行为变化（不新建目录、不删任何文件、不打清理日志）；true = 启动时
+   * 执行一次 `cleanupExpiredRunDirs`（dryRun=false），结果写入启动日志。
+   * 只扫一次，不引入定时器；周期调度归部署侧。
+   */
+  fileRetentionSweepOnStart?: boolean;
   /**
    * 派发模式（R4 P6 接线；缺省 = 'inline' = 现行为）。
    *   · 'inline'：委派同步执行、Main 等待 Worker 回合（现行路径，逐字不变）；
