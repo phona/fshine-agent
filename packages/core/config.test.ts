@@ -536,6 +536,54 @@ host:
     expect(effective['UNMODELED_FLAG']).toBe('kept');
   });
 
+  it('channel.mode：yaml 三档原样解析；缺省不写入 AppConfig（缺省 offline 住装配层）', () => {
+    const absent = loadConfig({ yamlPath: writeFixture(`${VALID_YAML}channel:\n  port: 3100\n`), env: {} });
+    expect(absent.channel).toEqual({ port: 3100, publicUrl: '', callbackPath: '/wecom/callback' });
+    expect(absent.channel.mode).toBeUndefined(); // 缺省值只有一处：DEFAULT_CHANNEL_MODE='offline'
+
+    for (const mode of ['offline', 'shadow', 'live'] as const) {
+      const config = loadConfig({
+        yamlPath: writeFixture(`channel:\n  mode: ${mode}\n${VALID_YAML}`),
+        env: {},
+      });
+      expect(config.channel.mode, mode).toBe(mode);
+    }
+  });
+
+  it('channel.mode：值域之外一律 fail-fast（含空串/大写/尾随空格/非字符串），绝不静默回落', () => {
+    const cases: ReadonlyArray<[string, RegExp]> = [
+      ['mode: online', /channel\.mode/],
+      ['mode: LIVE', /channel\.mode/],
+      ['mode: "live "', /channel\.mode/],
+      ['mode: ""', /channel\.mode/],
+      // 键存在但无值（YAML null）按配置错误拒绝——不把「写了但没填」吞成缺省。
+      ['mode:', /channel\.mode/],
+      ['mode: 1', /channel\.mode/],
+      ['mode: true', /channel\.mode/],
+      ['mode: [live]', /channel\.mode/],
+    ];
+    for (const [line, expected] of cases) {
+      const yaml = `channel:\n  ${line}\n${VALID_YAML}`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), line).toThrowError(expected);
+    }
+  });
+
+  it('channel.mode：没有 FSHINE_* 环境变量覆盖口（三档只认 yaml）', () => {
+    const explicit = loadConfig({
+      yamlPath: writeFixture(`channel:\n  mode: offline\n${VALID_YAML}`),
+      env: { FSHINE_CHANNEL_MODE: 'live', APP_CHANNEL_MODE: 'live' },
+    });
+    expect(explicit.channel.mode).toBe('offline');
+    expect(deploymentEnvOf(explicit)['FSHINE_CHANNEL_MODE']).toBeUndefined();
+
+    // 未声明时环境变量也不能把它变成 live（缺省仍由装配层取 offline）。
+    const absent = loadConfig({
+      yamlPath: writeFixture(VALID_YAML),
+      env: { FSHINE_CHANNEL_MODE: 'live' },
+    });
+    expect(absent.channel.mode).toBeUndefined();
+  });
+
   it('fresh clone：config/agent.example.yaml 复制到临时路径后可直接加载', () => {
     const templatePath = fileURLToPath(new URL('../../config/agent.example.yaml', import.meta.url));
     const copied = join(dir, 'copied-agent.yaml');
