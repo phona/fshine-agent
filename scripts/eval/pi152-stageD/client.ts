@@ -118,4 +118,3 @@ export function createStageDClient(options: StageDClientOptions): StageDClient {
     createCounts: () => Object.fromEntries(createCounts),
   };
 }
-
