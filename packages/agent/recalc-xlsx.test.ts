@@ -333,6 +333,16 @@ describe('recalc_xlsx 读回比对', () => {
     ]);
   });
 
+  it('跨分位边界：100000000.004 vs .006 分位取整后差一分，须报差异（Codex R9-P2）', async () => {
+    const h = makeHarness();
+    const src = await workbookBuffer('汇总', { A1: { formula: 'x', result: 100000000.004 } });
+    const computed = await workbookBuffer('汇总', { A1: { formula: 'x', result: 100000000.006 } });
+    const rel = h.putInput('src.xlsx', src);
+    const res = await makeExecutor(h, computedEngine(computed)).recalc({ file: rel, export: 'none', scope: SCOPE });
+    expect(res.status).toBe('fail');
+    expect(res.valueDiffs).toHaveLength(1);
+  });
+
   it('错误格 #REF!/#VALUE!/#DIV/0! → status=fail,errorCells 逐格上报', async () => {
     const h = makeHarness();
     const src = await workbookBuffer('S', {
@@ -548,6 +558,15 @@ describe('recalc_xlsx 引擎边界（fail-closed）', () => {
     const res = await executor.recalc({ file: rel, export: 'none', scope: SCOPE });
     expect(res.status).toBe('error');
     expect(res.error).toBe('engine_failed');
+    // Codex R9-P1：失败也须落 fail 报告，投递门才能拦住已排队的文件。
+    const { collectRecalcReports } = await import('./src/recalc-xlsx-executor');
+    const reports = collectRecalcReports(h.workspaceRoot, SCOPE);
+    expect(reports.length).toBe(1);
+    expect(reports[0]).toMatchObject({ name: 'src.xlsx', status: 'fail' });
+    const { decideRecalcDelivery, RECALC_DELIVERY_GATE_STATUS } = await import('./src/recalc-xlsx-executor');
+    const decision = decideRecalcDelivery({ bytes: src, name: 'src.xlsx', reports });
+    expect(decision.deliver).toBe(false);
+    expect(decision.reason).toBe(RECALC_DELIVERY_GATE_STATUS.REPORT_FAIL);
   });
 
   it('超时（引擎不响应 abort，执行器超时哨兵）→ timeout', async () => {

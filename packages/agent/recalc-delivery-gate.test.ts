@@ -72,6 +72,21 @@ describe('recalc_delivery_gate 判定核心（报告驱动，不解析内容）'
     }
   });
 
+  it('同 sha 多份报告：只认最新一份，旧 pass 不覆盖新 fail（Codex R9-P2）', async () => {
+    const f = await xlsxBuffer({ A1: 1 });
+    const oldPass = { ...reportFor(f, '汇总.xlsx', 'pass'), createdAt: 1000 };
+    const newFail = { ...reportFor(f, '汇总.xlsx', 'fail'), createdAt: 2000 };
+    const d = decideRecalcDelivery({ bytes: f, name: '汇总.xlsx', reports: [oldPass, newFail] });
+    expect(d.deliver).toBe(false);
+    expect(d.reason).toBe(RECALC_DELIVERY_GATE_STATUS.REPORT_FAIL);
+    // 反过来：旧的 fail 不压新的 pass。
+    const d2 = decideRecalcDelivery({
+      bytes: f, name: '汇总.xlsx',
+      reports: [{ ...newFail, createdAt: 1000 }, { ...oldPass, createdAt: 2000 }],
+    });
+    expect(d2.deliver).toBe(true);
+  });
+
   it('有匹配 fail 报告 → 不投递（reason=report_fail）', async () => {
     const f = await xlsxBuffer({ A1: 1, C1: FORMULA_CELL });
     const decision = decideRecalcDelivery({ bytes: f, name: '汇总.xlsx', reports: [reportFor(f, '汇总.xlsx', 'fail')] });

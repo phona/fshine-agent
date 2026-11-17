@@ -196,7 +196,10 @@ function valuesEqual(a: ExcelJS.CellValue, b: ExcelJS.CellValue): boolean {
     // 重算尾差，但绝对上限锁死在半分，1e8 量级的 0.05 分级差异不再被相对容差吞掉。
     const floatNoise = VALUE_COMPARE_FLOAT_REL * Math.max(1, Math.abs(a), Math.abs(b));
     const tol = Math.min(VALUE_COMPARE_HALF_CENT, floatNoise);
-    return Math.abs(a - b) <= tol;
+    if (Math.abs(a - b) > tol) return false;
+    // Codex R9-P2：即便差值在容差内，若两数分位取整后不同（如 100000000.004 vs .006），
+    // 仍是可见的一分钱差异，不能当相等。金额精确到分。
+    return Math.round(a * 100) === Math.round(b * 100);
   }
   return false;
 }
@@ -344,14 +347,16 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
       try {
         srcWb = await readWorkbook(sourcePath);
       } catch (error) {
-        if (error instanceof Error && error.message === 'workbook_expanded_too_large') return errorResult('too_large');
-        return errorResult('corrupt');
+        const code = error instanceof Error && error.message === 'workbook_expanded_too_large' ? 'too_large' : 'corrupt';
+        writeFailReport(runDir, materialized.name, sourcePath, code, startedAt);
+        return errorResult(code);
       }
 
       // Codex R7-P2：执行器必须与投递门共用「认不出即拒收」的判定——源工作簿含无法可靠
       // 识别的公式形态（数组公式等）时，绝不盖 pass 章，否则投递门虽会挡，report 却自相矛盾。
       const sourceScan = scanWorkbookFormulas(srcWb);
       if ('uncertain' in sourceScan) {
+        writeFailReport(runDir, materialized.name, sourcePath, 'unsupported_formula', startedAt);
         return errorResult('unsupported_formula');
       }
 
@@ -369,8 +374,9 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
         );
         outputPath = converted.outputPath;
       } catch (error) {
-        if (isTimeout(error)) return errorResult('timeout');
-        return errorResult('engine_failed');
+        const code = isTimeout(error) ? 'timeout' : 'engine_failed';
+        writeFailReport(runDir, materialized.name, sourcePath, code, startedAt);
+        return errorResult(code);
       } finally {
         input.signal?.removeEventListener('abort', onAbort);
       }
@@ -380,6 +386,7 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
       try {
         outWb = await readWorkbook(outputPath);
       } catch {
+        writeFailReport(runDir, materialized.name, sourcePath, 'corrupt', startedAt);
         return errorResult('corrupt');
       }
 
@@ -437,6 +444,7 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
         reportPath,
         JSON.stringify({
           status: reportStatus,
+          createdAt: startedAt,
           name: materialized.name,
           sha256: createHash('sha256').update(readFileSync(sourcePath)).digest('hex'),
           file: input.file,
@@ -484,6 +492,29 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
       };
     },
   };
+}
+
+/**
+ * recalc 失败时也落一份 fail 报告（宿主独占 runDir 根），让投递门能拦住「已排队但重算失败」的
+ * 工作簿（Codex R9-P1）：失败不留报告 → 门按 no_report 放行 → 已算坏的表被投递。
+ */
+function writeFailReport(runDir: string, name: string, sourcePath: string, error: RecalcErrorCode, createdAt: number): void {
+  try {
+    writeFileSync(
+      path.join(runDir, '.recalc-report.json'),
+      JSON.stringify({
+        status: 'fail',
+        name,
+        sha256: createHash('sha256').update(readFileSync(sourcePath)).digest('hex'),
+        error,
+        createdAt,
+        counts: { errorCells: 0, valueDiffs: 0 },
+      }),
+      'utf8',
+    );
+  } catch {
+    // 报告写失败不改变 error 结果本身；门可能因无报告放行，但该输入本就未产出可信新值。
+  }
 }
 
 function errorResult(error: RecalcErrorCode): RecalcXlsxResult {
@@ -657,6 +688,8 @@ export interface RecalcReportBinding {
   sha256: string;
   status: 'pass' | 'fail';
   file?: string;
+  /** 报告写出时刻（ms）；同 sha 多份报告时只认最新一份，防旧 pass 覆盖新 fail。 */
+  createdAt?: number;
 }
 
 export interface RecalcDeliveryDecision {
@@ -733,6 +766,7 @@ export function collectRecalcReports(workspaceRoot: string, scope: FileScope): R
         sha256: digest,
         status,
         ...(typeof parsed['file'] === 'string' ? { file: parsed['file'] } : {}),
+        ...(typeof parsed['createdAt'] === 'number' ? { createdAt: parsed['createdAt'] } : {}),
       });
     } catch {
       continue; // 坏 JSON：跳过，不影响其它报告
@@ -763,7 +797,9 @@ export function decideRecalcDelivery(input: {
     // 无报告 = 执行层交付的数据文件（边界内信任），照常投递。
     return { deliver: true, reason: RECALC_DELIVERY_GATE_STATUS.NO_REPORT };
   }
-  if (!matching.some((r) => r.status === 'pass')) {
+  // 同 sha 多份报告（重算多次）：只认最新一份，防旧 pass 覆盖新 fail（Codex R9-P2）。
+  const latest = matching.reduce((a, b) => (a.createdAt ?? 0) >= (b.createdAt ?? 0) ? a : b);
+  if (latest.status !== 'pass') {
     return { deliver: false, reason: RECALC_DELIVERY_GATE_STATUS.REPORT_FAIL };
   }
   return { deliver: true, reason: RECALC_DELIVERY_GATE_STATUS.PASS };
