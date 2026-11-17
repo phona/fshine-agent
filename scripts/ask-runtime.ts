@@ -49,6 +49,7 @@ import {
   type WorkerSkill,
   type RunJsMemoryExitEvent,
   type RunJsLayoutUnsafeReport,
+  type TaskOutputSweepSkippedEvent,
 } from '../packages/agent/src/execution-runtime';
 import {
   createNotificationOutbox,
@@ -253,6 +254,17 @@ export interface SessionAssemblyInput {
   onRunJsMemoryExit?: (event: RunJsMemoryExitEvent) => void;
   /** CAP-01 symlink 收窄：run_js 运行目录布局不安全的结构化事件上报（装配层接日志；缺省静默）。 */
   onRunJsLayoutUnsafe?: (event: RunJsLayoutUnsafeReport) => void;
+  /**
+   * 文件引用被拒（run_js.inputs / task_run.inputFiles：越权/不存在/pending/过期/字节缺失）
+   * 的机械 reason 上报（**只进日志，不进用户话术**——防存在性 oracle；缺省静默）。
+   * 装配层接结构化事件（如 server 的 `file_ref_unavailable`）。
+   */
+  onFileRefUnavailable?: (reason: string) => void;
+  /**
+   * 任务 out/ 兜底扫描的逐项拒收上报（taskId + 数量 + reason 分布；只进日志，缺省静默）。
+   * 装配层接结构化事件（如 server 的 `task_output_sweep_skipped`）。
+   */
+  onTaskOutputSweepSkipped?: (event: TaskOutputSweepSkippedEvent) => void;
   /**
    * CAP-01 S2：交办复制端口（task_run.inputFiles 的宿主侧执行；装配层注入 fileStore 本身）。
    * 缺省不注入 = task_run 工具面不带 inputFiles（逐字节不变），模型传了也 fail-closed 拒绝。
@@ -633,6 +645,8 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
       ...(input.onRunJsMemoryExit === undefined ? {} : { onRunJsMemoryExit: input.onRunJsMemoryExit }),
       ...(input.onRunJsLayoutUnsafe === undefined ? {} : { onRunJsLayoutUnsafe: input.onRunJsLayoutUnsafe }),
+      ...(input.onFileRefUnavailable === undefined ? {} : { onFileRefUnavailable: input.onFileRefUnavailable }),
+      ...(input.onTaskOutputSweepSkipped === undefined ? {} : { onTaskOutputSweepSkipped: input.onTaskOutputSweepSkipped }),
       ...(input.taskInputCopier === undefined ? {} : { taskInputCopier: input.taskInputCopier }),
       ...(taskBridge === undefined ? {} : { taskExecutionBridge: taskBridge }),
       ...(input.fileManifestProvider === undefined ? {} : { fileManifestProvider: input.fileManifestProvider }),
