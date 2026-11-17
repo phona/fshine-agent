@@ -58,6 +58,8 @@ interface CliArgs {
   cases: string[];
   trial?: number;
   trials: number;
+  /** 并发跑的 trial 数（缺省 1 = 串行；每个 trial 自带 state/db/config 目录，互不干扰）。 */
+  concurrency: number;
   outDir?: string;
   suite?: string;
   judgeExisting?: string;
@@ -65,7 +67,7 @@ interface CliArgs {
 }
 
 function parseArgs(argv: readonly string[]): CliArgs | { usageError: string } {
-  const args: CliArgs = { cases: [], trials: 1, judgeSelftest: false };
+  const args: CliArgs = { cases: [], trials: 1, concurrency: 1, judgeSelftest: false };
   const readValue = (index: number, flag: string): string | { error: string } => {
     const value = argv[index + 1];
     if (value === undefined || value.startsWith('--')) return { error: `${flag} 需要一个值` };
@@ -96,6 +98,13 @@ function parseArgs(argv: readonly string[]): CliArgs | { usageError: string } {
       const parsed = Number.parseInt(got, 10);
       if (!Number.isSafeInteger(parsed) || parsed < 1) return { usageError: `--trials 必须是正整数：${got}` };
       args.trials = parsed;
+    } else if (flag === '--concurrency') {
+      const got = value();
+      if (typeof got !== 'string') return { usageError: got.error };
+      if (inline === undefined) index += 1;
+      const parsed = Number.parseInt(got, 10);
+      if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 16) return { usageError: `--concurrency 必须是 1–16 的整数：${got}` };
+      args.concurrency = parsed;
     } else if (flag === '--out-dir' || flag === '--out') {
       const got = value();
       if (typeof got !== 'string') return { usageError: got.error };
@@ -637,14 +646,23 @@ async function main(): Promise<void> {
   writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 
   const results: RunTrialResult[] = [];
-  for (const caseDef of selected) {
-    for (const trial of trials) {
+  // 有界并发（2026-11-17）：每个 trial 自带 state/db/config 目录，互不干扰；缺省 1 = 原样串行。
+  const jobs = selected.flatMap((caseDef) => trials.map((trial) => ({ caseDef, trial })));
+  const slots: Array<RunTrialResult | undefined> = new Array(jobs.length);
+  let nextJob = 0;
+  const runOneJob = async (): Promise<void> => {
+    for (;;) {
+      const index = nextJob;
+      nextJob += 1;
+      const job = jobs[index];
+      if (job === undefined) return;
+      const { caseDef, trial } = job;
       const trialDir = trialDirOf(outDir, caseDef.id, trial);
       console.log(`[run] ${caseDef.id} trial-${trial} → ${path.relative(REPO_ROOT, trialDir)}`);
       try {
         await runTrial({ caseDef, trial, trialDir, runId, frozen });
         const judgment = JSON.parse(readFileSync(path.join(trialDir, 'judgment.json'), 'utf8')) as Judgment;
-        results.push({ caseId: caseDef.id, trial, judgment });
+        slots[index] = { caseId: caseDef.id, trial, judgment };
         console.log(`[judge] ${caseDef.id} trial-${trial}: ${judgment.deterministic.verdict}${judgment.deterministic.failureCodes.length > 0 ? ` (${judgment.deterministic.failureCodes.join(', ')})` : ''}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -662,10 +680,13 @@ async function main(): Promise<void> {
             writeFileSync(path.join(trialDir, 'judgment.json'), JSON.stringify(judgment, null, 2) + '\n');
           } catch { /* 证据目录不可写时仍按 infra 失败上报 */ }
         }
-        results.push({ caseId: caseDef.id, trial, judgment, infraError: message });
+        slots[index] = { caseId: caseDef.id, trial, judgment, infraError: message };
       }
     }
-  }
+  };
+  const workers = Array.from({ length: Math.max(1, Math.min(args.concurrency, jobs.length)) }, () => runOneJob());
+  await Promise.all(workers);
+  for (const slot of slots) if (slot !== undefined) results.push(slot);
 
   manifest.finishedAt = new Date().toISOString();
   writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
