@@ -42,6 +42,10 @@ const P2_SCENARIOS = 'scripts/eval/p2/p2-scenarios.ts';
 // RuntimeConfig 输入（显式 `queueCapacity: 16` 压队列上限），不解析/解释旋钮、不读原始
 // `config.runtime.*`；缺省值那条走「不给 runtime 段」，不在此文件里重复定义缺省。
 const R8_CONCURRENCY = 'scripts/eval/cap01/r8-concurrency.ts';
+// 企微×dummy 联调自动用例 harness（2026-11-18 登记）：与上面三族同类——只**构造**测试场景
+// 的 RuntimeConfig 输入（把附件追问窗口压到 30ms，好让注入时钟推进），不解析/解释旋钮、
+// 不读原始 `config.runtime.*`；缺省仍住 resource-policy（30s）。
+const SIM_HARNESS = 'scripts/eval/wecom-sim/harness.ts';
 // server 启动保留期清扫（2026-11-17 登记）：**装配点开关的唯一读者**——只读
 // `resolveRuntimeConfig` 的解析值 `config.fileRetentionSweepOnStart`，不解析原始
 // `config.runtime.*`、不重定义缺省（单一配置源不破坏）。
@@ -101,7 +105,7 @@ const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   waitUserTimeoutMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   fileRetentionDays: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   fileRetentionSweepOnStart: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STARTUP_SWEEP],
-  attachmentNudgeAfterMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, SERVER],
+  attachmentNudgeAfterMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, SERVER, SIM_HARNESS],
 };
 
 interface SourceFacts {
