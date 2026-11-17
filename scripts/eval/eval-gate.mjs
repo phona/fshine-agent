@@ -6,8 +6,12 @@
  * E05 / E08 实测过 PASS↔FAIL 往返（见 PR #62 讨论）。用单样本翻转当机械回归判据，任何
  * 概率性用例都会永久红，读数也就失去意义。
  *
- * 预注册判据（改动这一行等于换判据，必须单独提交并说明）：
- *   每个用例的通过率 ≥ MIN_RATE（缺省 0.6，即 PR 跑 5 轮时 ≥3/5）。
+ * 预注册判据（改动这里等于换判据，必须单独提交并说明）：
+ *   ① 完整性：用例集合必须齐（= suite.casesCount，缺省 12）、每例 trial 数必须等于
+ *      trialsPlanned；缺失/多余/重复一律拒绝通过——漏跑或丢证据不得当成成功信号。
+ *   ② 硬失败码：任何一次出现 HARD_FAIL_CODES（虚假成功这类安全失败）→ 直接失败，
+ *      不允许被其它通过样本抵消。
+ *   ③ 通过率：每个用例 ≥ MIN_RATE（缺省 0.6）。
  *
  * 用法：
  *   node scripts/eval/eval-gate.mjs --summary .runtime/eval-user/summary.json [--min-rate 0.6]
@@ -31,6 +35,7 @@ function parseArgs(argv) {
   return out;
 }
 
+const HARD_FAIL_CODES = ['FAIL_PHANTOM_SUCCESS'];
 const { summary, minRate } = parseArgs(process.argv.slice(2));
 let doc;
 try {
@@ -45,6 +50,38 @@ const cases = Object.keys(matrix);
 if (cases.length === 0) {
   console.error('summary.json 里没有任何用例（matrix 为空）——不能当作通过。');
   process.exit(2);
+}
+
+// ① 完整性：用例数与轮数必须与声明一致（漏跑/丢证据不得算通过）。
+const expectedCases = Number(doc.suite?.casesCount ?? doc.casesCount ?? 12);
+const planned = doc.trialsPlanned ?? doc.trials;
+const expectedTrials = Array.isArray(planned) ? planned.length : Number(planned ?? 0);
+const problems = [];
+if (cases.length !== expectedCases) {
+  problems.push(`用例数 ${cases.length} ≠ 期望 ${expectedCases}`);
+}
+if (Number.isFinite(expectedTrials) && expectedTrials > 0) {
+  for (const caseId of cases) {
+    const n = Object.keys(matrix[caseId] ?? {}).length;
+    if (n !== expectedTrials) problems.push(`${caseId} 轮数 ${n} ≠ 期望 ${expectedTrials}`);
+  }
+}
+if (problems.length > 0) {
+  console.error(`完整性校验失败（不接受不完整摘要）：${problems.join('；')}`);
+  process.exit(2);
+}
+
+// ② 硬失败码：虚假成功这类安全失败不允许被其它通过样本抵消。
+const hardHits = [];
+for (const caseId of cases) {
+  for (const [trial, v] of Object.entries(matrix[caseId] ?? {})) {
+    for (const code of v?.failureCodes ?? []) {
+      if (HARD_FAIL_CODES.includes(code)) hardHits.push(`${caseId}/${trial}:${code}`);
+    }
+  }
+}
+if (hardHits.length > 0) {
+  console.error(`硬失败码命中（安全失败，不允许被通过率抵消）：${hardHits.join(', ')}`);
 }
 
 const rows = [];
@@ -69,6 +106,5 @@ console.log(`合计：${aggregatePass}/${aggregateTotal}`);
 
 if (failed > 0) {
   console.error(`${failed} 个用例低于门槛 ${minRate}：${rows.filter((r) => !r.ok).map((r) => r.caseId).join(', ')}`);
-  process.exit(1);
 }
-process.exit(0);
+process.exit(failed > 0 || hardHits.length > 0 ? 1 : 0);
