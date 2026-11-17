@@ -5,7 +5,6 @@
  * 不触网、不碰真实平台；所有副作用只落在本样本 `.runtime/pi152-stageD/.../state`。
  * 这里只做执行层语义（completed/failed），不做宿主治理。
  */
-import path from 'node:path';
 import type {
   CapabilityManifest,
   ExecutionClient,
@@ -120,7 +119,3 @@ export function createStageDClient(options: StageDClientOptions): StageDClient {
   };
 }
 
-/** 样本状态根（每个 principal 一个独立目录，避免 dummy 状态串台）。 */
-export function stateDirFor(root: string, key: string): string {
-  return path.join(root, 'state', key);
-}

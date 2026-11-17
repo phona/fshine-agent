@@ -217,9 +217,4 @@ export const expCases: readonly ExpCase[] = [
   noteArm('none'), noteArm('catalog'),
 ];
 
-/** 按实验类筛选用例。 */
-export function casesOfKind(kind: ExpCase['kind']): ExpCase[] {
-  return expCases.filter((c) => c.kind === kind);
-}
-
 export { T01, T02, T03, C03, C04, digestArm, noteArm };

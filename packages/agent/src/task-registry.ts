@@ -255,9 +255,6 @@ const LEGAL_TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
   unexecuted: [],
 };
 
-/** 终态：不再有任何出边（历史与原因保留）。 */
-const TERMINAL_STATUSES: ReadonlySet<TaskStatus> = new Set(['cancelled', 'completed', 'failed', 'timed_out', 'unexecuted']);
-
 /** 任务状态机的可持久化投影（内存与 SQLite 实现共用同一 reducer）。 */
 export interface TaskStateSnapshot {
   status: TaskStatus;

@@ -59,14 +59,6 @@ export interface SimLimits {
   readonly trials: number;
 }
 
-/** 预算缺省值（预注册口径见同目录 `PRE-REGISTRATION.md`）。 */
-export const SIM_DEFAULT_LIMITS: SimLimits = Object.freeze({
-  maxUserTurns: 8,
-  maxWaitTurns: 2,
-  maxWallMs: 300_000,
-  trials: 1,
-});
-
 /** 样本级并发池并发度缺省值（预注册冻结：5）。 */
 export const SIM_DEFAULT_CONCURRENCY = 5;
 

@@ -43,7 +43,6 @@ import type { AskRuntimeInput } from './ask-runtime';
 import { explicitConfigFrom } from './resolve-config-path';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULT_DB_PATH = path.join(REPO_ROOT, '.runtime', 'state.db');
 const REDO_ROOT = path.join(REPO_ROOT, '.runtime', 'redo');
 const TASK_LIST_LIMIT = 20;
 const SUMMARY_MAX = 60;
