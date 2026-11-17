@@ -95,7 +95,7 @@ grep -rn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=.runtime '<
 | `compareExpSerialParallel` | `scripts/eval/business-e2e/experiments/harness.ts:140` | `experiments.test.ts` | 保留（评测对账） |
 | `outcomeBehavior` | `scripts/eval/business-e2e/shared-instance.ts:269` | `shared-instance.test.ts` | 保留（评测断言 helper） |
 | `pendingCancelableBehavior` | `scripts/eval/business-e2e/shared-instance.ts:274` | `shared-instance.test.ts` | 保留（评测断言 helper） |
-| `computeTruth` | `scripts/eval/finance/truth.ts:97` | `main-skill-scan.test.ts`、`truth.test.ts`、`sim/cases/finance.test.ts` | 保留（真值计算，测试与评测共用） |
+| `computeTruth` | `scripts/eval/finance/truth.ts:97` | `main-skill-scan.test.ts`、`truth.test.ts`、`sim/cases/finance.test.ts` | 保留（真值计算，被多个测试引用） |
 | `runP2Scenario` | `scripts/eval/p2/p2-scenarios.ts:674` | `p2-scenarios.test.ts` | 保留（评测入口） |
 | `UNSAFE_STATUS_QUO_CONFIG` | `scripts/eval/pi-native/safe-config.ts:72` | `safe-config.test.ts` | 保留（对照配置） |
 | `assessCompactionConfig` | `scripts/eval/pi-native/safe-config.ts:136` | `safe-config.test.ts` | 保留（压缩配置判定） |
