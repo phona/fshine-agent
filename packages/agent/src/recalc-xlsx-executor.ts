@@ -19,12 +19,27 @@
  * 进程 spawn 只在本模块（runtime 经 type-only import 端口，import 图守卫钉住）。
  */
 import { spawn, execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { lstatSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import ExcelJS from 'exceljs';
-import { FileRefUnavailableError, runDirOf, type FileStore, type FileScope } from './file-store';
+import {
+  FileRefUnavailableError,
+  runDirOf,
+  sessionDirOf,
+  type FileStore,
+  type FileScope,
+} from './file-store';
 import { workerSubprocessEnv } from './worker-env';
 
 /** 固定版本（Q1①）：低于/不等于此前缀一律不上工具面。 */
@@ -319,11 +334,16 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
       }
 
       // 报告：全量机械事实落盘（进上下文的 valueDiffs 才封顶）。
+      // 投递闸绑定字段（步骤 ③）：name = 输入文件用户可见名、sha256 = 源字节哈希——
+      // 投递面据此确认「这份报告是对那个待投递文件做的实算」（不匹配 = 不投递）。
+      const reportStatus = errorCells.length > 0 || allDiffs.length > 0 ? 'fail' : 'pass';
       const reportPath = path.join(outDir, '.recalc-report.json');
       writeFileSync(
         reportPath,
         JSON.stringify({
-          status: errorCells.length > 0 || allDiffs.length > 0 ? 'fail' : 'pass',
+          status: reportStatus,
+          name: materialized.name,
+          sha256: createHash('sha256').update(readFileSync(sourcePath)).digest('hex'),
           file: input.file,
           sheet: input.sheet ?? null,
           engine: options.engine.probe(),
@@ -475,4 +495,162 @@ export function createSofficeRecalcEngine(options: SofficeEngineOptions = {}): R
       return { outputPath };
     },
   };
+}
+
+// ───────────────────────────── 投递前机械闸（步骤 ③） ─────────────────────────────
+//
+// 判定（owner 裁定）：待投递项若是含公式的 xlsx，必须有对应 pass 的实算报告（按文件名 +
+// sha256 绑定）；报告缺失/fail/不匹配 = 不投递 + 结构化事件说明原因。无公式表格与纯数据
+// CSV 行为逐字节不变。挂点在 server.deliverTurnFiles 读字节处（recalc 报告在独立 runDir、
+// 可能晚于 run-js out/ 扫描产生，见 decision-log §九十九）；缺省未注入 recalc 执行器 = 不启用。
+
+/** 闸门判定原因（结构化事件 reason；不得改名）。 */
+export const RECALC_DELIVERY_GATE_STATUS = {
+  PASS: 'pass',
+  NO_FORMULAS: 'no_formulas',
+  CSV_DATA: 'csv_data',
+  NOT_XLSX: 'not_xlsx',
+  REPORT_MISSING: 'report_missing',
+  REPORT_FAIL: 'report_fail',
+  REPORT_MISMATCH: 'report_mismatch',
+} as const;
+export type RecalcDeliveryGateReason =
+  (typeof RECALC_DELIVERY_GATE_STATUS)[keyof typeof RECALC_DELIVERY_GATE_STATUS];
+
+/** 报告绑定（从 .recalc-report.json 投影的机械事实；不含公式明细/内容）。 */
+export interface RecalcReportBinding {
+  name: string;
+  sha256: string;
+  status: 'pass' | 'fail';
+  file?: string;
+}
+
+export interface RecalcDeliveryDecision {
+  deliver: boolean;
+  reason: RecalcDeliveryGateReason;
+}
+
+/** xlsx 是否含公式（exceljs 读 buffer；读不动 = 非 xlsx，按 false 处理不误伤）。 */
+export async function xlsxHasFormulas(bytes: Buffer): Promise<boolean> {
+  try {
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(bytes as unknown as ExcelJS.Buffer);
+    let found = false;
+    wb.eachSheet((ws) => {
+      if (found) return;
+      ws.eachRow((row) => {
+        if (found) return;
+        row.eachCell({ includeEmpty: false }, (cell) => {
+          const v = cell.value;
+          if (v && typeof v === 'object' && !Array.isArray(v) && 'formula' in v) found = true;
+        });
+      });
+    });
+    return found;
+  } catch {
+    return false; // 损坏/非 xlsx：不是「含公式表格」，闸门不介入（逐字节不变）
+  }
+}
+
+function looksLikeXlsx(name: string, bytes: Buffer): boolean {
+  // 扩展名 + ZIP 魔数（PK\x03\x04）双判据；避免把 CSV/文本误当 xlsx 读。
+  return name.toLowerCase().endsWith('.xlsx') && bytes.length >= 4
+    && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
+}
+
+/** 从会话 runs 目录收集所有实算报告绑定（坏报告跳过；不递归越界、不读成分）。 */
+export function collectRecalcReports(workspaceRoot: string, scope: FileScope): RecalcReportBinding[] {
+  const runsDir = path.join(sessionDirOf(workspaceRoot, scope), 'runs');
+  if (!existsSync(runsDir)) return [];
+  const out: RecalcReportBinding[] = [];
+  let runIds: string[];
+  try {
+    runIds = readdirSync(runsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+  for (const runId of runIds) {
+    const reportPath = path.join(runsDir, runId, 'out', '.recalc-report.json');
+    if (!existsSync(reportPath)) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(reportPath, 'utf8')) as Record<string, unknown>;
+      const name = parsed['name'];
+      const digest = parsed['sha256'];
+      const status = parsed['status'];
+      if (typeof name !== 'string' || typeof digest !== 'string') continue;
+      if (status !== 'pass' && status !== 'fail') continue;
+      out.push({
+        name,
+        sha256: digest,
+        status,
+        ...(typeof parsed['file'] === 'string' ? { file: parsed['file'] } : {}),
+      });
+    } catch {
+      continue; // 坏 JSON：跳过，不影响其它报告
+    }
+  }
+  return out;
+}
+
+/**
+ * 单个待投递项判定。reports 里须有 name + sha256 双匹配且 status=pass 的报告才放行。
+ */
+export async function decideRecalcDelivery(input: {
+  bytes: Buffer;
+  name: string;
+  reports: readonly RecalcReportBinding[];
+}): Promise<RecalcDeliveryDecision> {
+  if (!looksLikeXlsx(input.name, input.bytes)) {
+    return { deliver: true, reason: input.name.toLowerCase().endsWith('.csv')
+      ? RECALC_DELIVERY_GATE_STATUS.CSV_DATA
+      : RECALC_DELIVERY_GATE_STATUS.NOT_XLSX };
+  }
+  if (!await xlsxHasFormulas(input.bytes)) {
+    return { deliver: true, reason: RECALC_DELIVERY_GATE_STATUS.NO_FORMULAS };
+  }
+  const digest = createHash('sha256').update(input.bytes).digest('hex');
+  const matching = input.reports.filter((r) => r.name === input.name && r.sha256 === digest);
+  if (matching.length === 0) {
+    // 区分「同名但 sha 不同」（mismatch）与「完全没有该文件的报告」（missing）。
+    const sameName = input.reports.some((r) => r.name === input.name);
+    return {
+      deliver: false,
+      reason: sameName ? RECALC_DELIVERY_GATE_STATUS.REPORT_MISMATCH : RECALC_DELIVERY_GATE_STATUS.REPORT_MISSING,
+    };
+  }
+  if (!matching.some((r) => r.status === 'pass')) {
+    return { deliver: false, reason: RECALC_DELIVERY_GATE_STATUS.REPORT_FAIL };
+  }
+  return { deliver: true, reason: RECALC_DELIVERY_GATE_STATUS.PASS };
+}
+
+/** 对投递清单应用闸门。enabled=false（未注入 recalc 执行器）时逐字节原样返回。 */
+export async function applyRecalcDeliveryGate(input: {
+  files: ReadonlyArray<{ name: string; bytes: Buffer }>;
+  reports: readonly RecalcReportBinding[];
+  enabled: boolean;
+}): Promise<{
+  outgoing: Array<{ name: string; bytes: Buffer }>;
+  gated: Array<{ name: string; sha256: string; reason: RecalcDeliveryGateReason }>;
+}> {
+  if (!input.enabled) {
+    return { outgoing: [...input.files], gated: [] };
+  }
+  const outgoing: Array<{ name: string; bytes: Buffer }> = [];
+  const gated: Array<{ name: string; sha256: string; reason: RecalcDeliveryGateReason }> = [];
+  for (const file of input.files) {
+    const decision = await decideRecalcDelivery({ bytes: file.bytes, name: file.name, reports: input.reports });
+    if (decision.deliver) {
+      outgoing.push(file); // 同一 Buffer 引用：逐字节不变
+    } else {
+      gated.push({
+        name: file.name,
+        sha256: createHash('sha256').update(file.bytes).digest('hex'),
+        reason: decision.reason,
+      });
+    }
+  }
+  return { outgoing, gated };
 }

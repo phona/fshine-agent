@@ -3825,7 +3825,9 @@ Pi 1.5.2 迁移 U3（恢复/重试后同一逻辑写操作被重复执行）以*
 
 - **LO 版本与资源账**：LibreOffice 固定 **26.8.3**，部署期安装、PATH 可见才注册工具，缺失 fail-closed；LO 重算开销计入 R4 资源账，以结构化事件上报（`packages/agent/src/execution-runtime.ts` 的 `onRuntimeEvent`/资源事件面），不静默消耗预算。
 
-**指针**：本节；`packages/agent/src/recalc-xlsx-executor.ts`（待 ② 产出）、`packages/agent/recalc-xlsx.test.ts`（待 ② 产出）、`.agents/skills/table-verification/SKILL.md`（待 ① 产出）、`packages/agent/recalc-delivery-gate.test.ts`（待 ③ 产出）。状态：**实现中·待独立复核**。
+- **③ 投递前机械闸 · 挂点补记（2026-11-17 实施裁定，时序决定不算扩范围）**：recalc 实算报告写在**独立 runDir**（`<sessionDir>/runs/<recalcRunId>/out/.recalc-report.json`），且 `recalc_xlsx` 与 `run_js` 先后调用、各自 runDir——`run-js-executor.ts:416-423` 扫 out/ 处看不到后产出的报告。故**最终判定放在 `apps/server/server.ts` 的 `deliverTurnFiles` 读字节处**（闸门逻辑在 `packages/agent/src/recalc-xlsx-executor.ts`：`xlsxHasFormulas`/`collectRecalcReports`/`decideRecalcDelivery`/`applyRecalcDeliveryGate`），run-js 侧不做标注（本切片无需）。判定：待投递项含公式 xlsx 必须有按**文件名 + sha256 绑定**的 `status=pass` 报告；缺失/fail/不匹配一律不投递，出 `recalc_delivery_gated` 结构化事件（带 items: name/sha256/reason）；无公式表格与纯数据 CSV 逐字节放行。**缺省行为**：部署有 26.8.3 时 server 自动构造执行器 → 闸门默认启用；「缺省未注入不改变交付行为」由显式 `createRecalcXlsxExecutor: () => undefined` 关闭路径保证（既有交付测试即走此路径，逐字节不变）。**不把 exceljs 引入 file-store.ts**（import-boundary 守卫钉住）。
+
+**指针**：本节；`packages/agent/src/recalc-xlsx-executor.ts`（② 工具 + ③ 闸逻辑，已产出）、`packages/agent/recalc-xlsx.test.ts`（② 产出，21 用例）、`packages/agent/recalc-delivery-gate.test.ts`（③ 产出，15 用例）、`apps/server/server.ts`（②③ 接线）、`scripts/ask-runtime.ts`（② 注入透传）；`.agents/skills/table-verification/SKILL.md`（① 待产出）。状态：**②③④ 已实现待独立复核·① 待产出**。
 
 ---
 

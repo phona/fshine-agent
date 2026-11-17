@@ -46,6 +46,8 @@ import {
 } from '../../packages/agent/src/file-store';
 import { createRunJsExecutor, type RunJsExecutor } from '../../packages/agent/src/run-js-executor';
 import {
+  applyRecalcDeliveryGate,
+  collectRecalcReports,
   createRecalcXlsxExecutor,
   createSofficeRecalcEngine,
   type RecalcXlsxExecutor,
@@ -144,6 +146,8 @@ export interface FileDeliveryPort {
 const FILE_DELIVERY_UNAVAILABLE_NOTE = '文件未送达（当前渠道不支持文件投递）';
 /** live 投递失败时给用户的如实话术（v8 §7 失败必须可见；事件另记 delivery_failed，不记 sent）。 */
 const FILE_DELIVERY_FAILED_NOTE = '文件未送达（投递失败，请重试或联系管理员）';
+/** recalc 投递闸拦下含公式但无 pass 实算报告的表格时给用户的如实话术（事件另记 recalc_delivery_gated）。 */
+const RECALC_DELIVERY_GATED_NOTE = '部分表格未通过公式实算校验，未予发送（请确认表格已重算校验后再试）';
 
 /**
  * 入站附件上限（20MB，2026-11-17 CAP-01 owner 裁决：100MB 必 OOM，实测 1.1MB 文件处理
@@ -411,7 +415,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     conversationId: string;
     principalId: string;
     sessionId: string;
-  }): Promise<{ status: 'sent' | 'suppressed' | 'delivery_unavailable' | 'delivery_failed'; files: number; note?: string }> => {
+  }): Promise<{ status: 'sent' | 'suppressed' | 'delivery_unavailable' | 'delivery_failed' | 'recalc_gated'; files: number; note?: string }> => {
     const base = {
       principalId: input.principalId,
       sessionId: input.sessionId,
@@ -433,15 +437,39 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     // 字节从文件区派生布局现读（产物在登记时已 copy 进 workspace，原件路径从不进话术）。
     // 同一回合的重复交付（同 sha256 + 同名）在投递层收成一份；顺序保序（先到者投递）。
     const seen = new Set<string>();
-    const outgoing: OutgoingFileReply[] = [];
+    const readFiles: Array<{ name: string; bytes: Buffer }> = [];
     for (const file of input.files) {
       const data = readFileSync(fileStoragePathOf(workspaceRoot, input.scope, file.fileId, file.name));
       const key = `${createHash('sha256').update(data).digest('hex')}\u0000${file.name}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      outgoing.push({ data, filename: file.name });
+      readFiles.push({ name: file.name, bytes: data });
     }
+    // recalc 投递闸（步骤 ③；时序决定终判落在这里：recalc 报告在独立 runDir、可能晚于
+    // run-js out/ 扫描才产生）。缺省未注入 recalc 执行器 = enabled=false，逐字节不变。
+    const gateEnabled = recalcXlsxExecutor !== undefined;
+    const gate = gateEnabled
+      ? await applyRecalcDeliveryGate({
+          files: readFiles,
+          reports: collectRecalcReports(workspaceRoot, input.scope),
+          enabled: true,
+        })
+      : { outgoing: readFiles, gated: [] as Array<{ name: string; sha256: string; reason: string }> };
+    if (gate.gated.length > 0) {
+      log({
+        event: 'recalc_delivery_gated',
+        ...base,
+        files: gate.gated.length,
+        items: gate.gated,
+      });
+    }
+    const outgoing: OutgoingFileReply[] = gate.outgoing.map((f) => ({ data: f.bytes, filename: f.name }));
     const files = outgoing.length;
+    // 所有待投递项都被闸拦下：不发空批、如实告知（fail-closed；非渠道投递失败，不记 sent）。
+    if (files === 0 && gate.gated.length > 0) {
+      log({ event: 'file_delivery', ...base, files: 0, status: 'recalc_gated' });
+      return { status: 'recalc_gated', files: 0, note: RECALC_DELIVERY_GATED_NOTE };
+    }
     let receipt: DeliveryReceipt;
     try {
       receipt = await deps.fileDelivery.sendToConversation(
