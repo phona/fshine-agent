@@ -7,8 +7,9 @@
 #   .env / .env.example 只保留为兼容旧部署的覆盖入口，不再是新部署的秘密源。
 #
 # 本模板只列最小切片消费的字段：principals / contextProfiles（root + gateway + skillRoots）
-# / llm / wecom / store。旧 hub 的 channel、host、execution、sessionTtlMs 等部署面不在此列；
-# 加载层仍兼容旧键（原样解析、最小切片不消费），新部署不要再写它们。
+# / channel.mode / llm / wecom / store。旧 hub 的 channel 其余键、host、execution、
+# sessionTtlMs 等部署面不在此列；加载层仍兼容旧键（原样解析、最小切片不消费），
+# 新部署不要再写它们。
 # ============================================================
 
 # ---- 授权名单:key = <渠道>:<用户ID>；只有 enabled: true 的用户可用 ----
@@ -34,6 +35,14 @@ contextProfiles:
     # 执行层称谓(可选,≤32 字符):进 Main 角色文本的 {{executorLabel}} 占位;
     # 缺省 = 宿主中性缺省「执行层子 Agent」。
     # executorLabel: <实例称谓>
+
+# ---- 渠道装配档位(可选;yaml 键、无 env 覆盖口;缺省 offline) ----
+#   offline:不建立企微长连接、出站一律 silent(不触达真实平台)
+#   shadow :建立长连接(入站照收、回合照跑),但出站全部抑制(影子干跑)
+#   live   :真实投递(生产语义)
+# 写在 channel.mode;取值只认 offline/shadow/live,其它值启动即失败。
+# channel:
+#   mode: offline
 
 # ---- 渠道:企微智能机器人凭据(管理台:智能机器人 → 长连接 API) ----
 wecom:

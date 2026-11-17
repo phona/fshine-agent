@@ -198,11 +198,27 @@ export interface ExecutionConfig {
   planActivationSecret?: string;
 }
 
+/**
+ * 渠道装配档位（yaml `channel.mode`；缺省 `offline`）：
+ *   · `offline`：不建立渠道长连接（不调用 channel.start），出站视为 silent；
+ *   · `shadow`：建立长连接（入站照收、回合照跑），出站全部抑制（silent 闸门）；
+ *   · `live`：真实投递（改动前的生产语义）。
+ *
+ * 只由部署配置声明——不提供 `FSHINE_*` 环境变量覆盖口（档位只认 yaml）。
+ * 缺省值只有一处：`DEFAULT_CHANNEL_MODE`，装配层消费。
+ */
+export type ChannelMode = 'offline' | 'shadow' | 'live';
+
+/** 渠道装配缺省档位：offline（不连生产、不出站）。 */
+export const DEFAULT_CHANNEL_MODE: ChannelMode = 'offline';
+
 export interface AppConfig {
   principals: Record<string, PrincipalConfig>;
   /** Trusted platform subagent context profiles. */
   contextProfiles: Record<string, ContextProfileConfig>;
   channel: {
+    /** 渠道装配档位；缺键 = 未配置（装配层按 DEFAULT_CHANNEL_MODE 处理）。 */
+    mode?: ChannelMode;
     port: number;
     publicUrl: string;
     callbackPath: string;

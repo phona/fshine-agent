@@ -13,6 +13,7 @@ import path from 'node:path';
 import type {
   AccountSetScope,
   AppConfig,
+  ChannelMode,
   ContextProfileConfig,
   ExecutionConfig,
   HostConfig,
@@ -225,6 +226,25 @@ function parseStore(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): Store
   return dbPath === undefined ? undefined : { dbPath };
 }
 
+const CHANNEL_MODES: readonly ChannelMode[] = ['offline', 'shadow', 'live'];
+
+/**
+ * 渠道装配档位（yaml `channel.mode`）：**值域之外一律 fail-fast**，不按「非法 = 未配置」
+ * 回落——档位决定是否连真实平台，静默回落会把部署意图吞掉（offline 掉成 live 是事故，
+ * live 掉成 offline 是无声停服）。只认 yaml：无 FSHINE_* 环境变量覆盖口。
+ *
+ * 缺键 = 未配置（装配层取 DEFAULT_CHANNEL_MODE='offline'）；键存在但无值（YAML null）、
+ * 空串、大小写偏差、尾随空格、非字符串都算配置错误。
+ */
+function parseChannelMode(raw: Record<string, unknown>): ChannelMode | undefined {
+  if (!('mode' in raw)) return undefined;
+  const value = raw['mode'];
+  if (typeof value !== 'string' || !CHANNEL_MODES.includes(value as ChannelMode)) {
+    throw new Error(`配置项 channel.mode 必须是 offline、shadow 或 live（当前: ${JSON.stringify(value)}）`);
+  }
+  return value as ChannelMode;
+}
+
 const CAPABILITIES: readonly PrincipalCapability[] = ['read', 'validate', 'write'];
 const ACCOUNT_SET_SCOPES: readonly AccountSetScope[] = ['all', 'allowlist'];
 
@@ -376,6 +396,8 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   const contextProfiles = parseContextProfiles(root['contextProfiles']);
 
   const channelRaw: Record<string, unknown> = isRecord(root['channel']) ? root['channel'] : {};
+  // 渠道装配档位：值域 fail-fast、只认 yaml（无 env 覆盖口）；缺键 = 未配置，缺省住装配层。
+  const channelMode = parseChannelMode(channelRaw);
 
   // 空串 env 不算覆盖：`--env-file` 会把未填的 APP_PORT= 设成空串，此时仍应落到 yaml。
   const portRaw = envValue(env, 'APP_PORT') ?? channelRaw['port'];
@@ -410,7 +432,12 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   return {
     principals,
     contextProfiles,
-    channel: { port, publicUrl, callbackPath },
+    channel: {
+      ...(channelMode === undefined ? {} : { mode: channelMode }),
+      port,
+      publicUrl,
+      callbackPath,
+    },
     sessionTtlMs,
     ...(llm ? { llm } : {}),
     ...(wecom ? { wecom } : {}),
