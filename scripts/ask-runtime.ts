@@ -49,6 +49,8 @@ import {
   type WorkerSkill,
   type RunJsMemoryExitEvent,
   type RunJsLayoutUnsafeReport,
+  type RecalcXlsxExecutor,
+  type RecalcCostEvent,
   type TaskOutputSweepSkippedEvent,
 } from '../packages/agent/src/execution-runtime';
 import {
@@ -259,6 +261,10 @@ export interface SessionAssemblyInput {
   systemNoteProvider?: (principalId: string, sessionId: string) => string | undefined;
   /** CAP-01 S1：run_js 执行器端口（装配层构造注入；缺省不注入 = Main 无 run_js 工具）。 */
   runJsExecutor?: RunJsExecutor;
+  /** recalc_xlsx 执行器端口（Main 宿主面；缺省不注入或引擎不可用 = 无该工具）。 */
+  recalcXlsxExecutor?: RecalcXlsxExecutor;
+  /** recalc 重算开销结构化事件（R4 资源账；缺省静默）。 */
+  onRecalcCost?: (event: RecalcCostEvent & { principalId: string; sessionId: string }) => void;
   /** CAP-01 ④：run_js 内存墙结构化事件上报（装配层接日志；缺省静默）。 */
   onRunJsMemoryExit?: (event: RunJsMemoryExitEvent) => void;
   /** CAP-01 symlink 收窄：run_js 运行目录布局不安全的结构化事件上报（装配层接日志；缺省静默）。 */
@@ -670,6 +676,8 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       ...(input.transcriptStore === undefined ? {} : { transcriptStore: input.transcriptStore }),
       ...(input.onTranscriptError === undefined ? {} : { onTranscriptError: input.onTranscriptError }),
       ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
+      ...(input.recalcXlsxExecutor === undefined ? {} : { recalcXlsxExecutor: input.recalcXlsxExecutor }),
+      ...(input.onRecalcCost === undefined ? {} : { onRecalcCost: input.onRecalcCost }),
       ...(input.onRunJsMemoryExit === undefined ? {} : { onRunJsMemoryExit: input.onRunJsMemoryExit }),
       ...(input.onRunJsLayoutUnsafe === undefined ? {} : { onRunJsLayoutUnsafe: input.onRunJsLayoutUnsafe }),
       ...(input.onFileRefUnavailable === undefined ? {} : { onFileRefUnavailable: input.onFileRefUnavailable }),
