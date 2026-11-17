@@ -2,7 +2,11 @@
  * server 装配（宿主接线）：
  *   渠道消息 → 可信身份（principalId/sessionId 取自渠道事实）→ 回合运行时 → 渠道回复。
  *
- * 本切片不做（后续切片）：计划确认 / 产物回收 / 提案；附件只登记不消费。
+ * 本切片不做（后续切片）：计划确认 / 产物回收 / 提案。CAP-01 S1：入站附件登记为
+ * pending 文件事实（查重先于附件分支），带文字的消息激活本会话 TTL 内 pending；run_js
+ * 执行器与文件清单注入由本装配构造注入（runtime 不 spawn）；回合产出文件走主动投递（B）——
+ * handler 只返回 text，文件经注入的 fileDelivery.sendToConversation 发出（无端口 fail-closed，
+ * 非 live 记 suppressed 不记 sent，投递失败用户可见「未送达」）。
  * R4（P5/P6/P4）：会话按 promise 链串行化（同会话不并发）；`runtime.dispatchMode='background'`
  * 时启动建进程级 TaskRunner（含重启恢复 pump）与通知 outbox（注入 sink），受理即回执；
  * 缺省 'inline' = 上段现行为。
@@ -17,12 +21,29 @@
  * 测试注入点（假渠道回归用，见 server.test.ts）：createDrivers / createExecutionFace；
  * 缺省实现走真实 Pi 驱动与仓内 dummy 客户端——测试替身不触碰任何真实平台。
  */
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import type { AppConfig, ContextProfileConfig, ReplyHandler } from '@fshine/contracts';
+import type {
+  AppConfig,
+  ChannelRoute,
+  ContextProfileConfig,
+  DeliveryReceipt,
+  IncomingChannelMessage,
+  OutgoingFileReply,
+  ReplyHandler,
+} from '@fshine/contracts';
 import type { TurnDriver } from '../../packages/agent/src/driver-contract';
 import { applyExecutorLabel, loadAgentProfile } from '../../packages/agent/src/agent-profile';
-import { MAIN_PROTOCOL_NOTE, type Session } from '../../packages/agent/src/execution-runtime';
+import {
+  createFileStore,
+  fileStoragePathOf,
+  type FileScope,
+  type FileStore,
+  type RegisteredFile,
+} from '../../packages/agent/src/file-store';
+import { createRunJsExecutor, type RunJsExecutor } from '../../packages/agent/src/run-js-executor';
+import { FILES_GENERATED_NOTICE, MAIN_PROTOCOL_NOTE, type Session, type TurnFileRef } from '../../packages/agent/src/execution-runtime';
 import {
   createNotificationOutbox,
   type NotificationOutbox,
@@ -71,6 +92,17 @@ export interface ServerDeps {
   taskExecutor?: TaskExecutor;
   /** 测试注入 / 部署注入：通知投递 sink（background 时建 outbox；真实 WeCom 适配面归后续切片）。 */
   notificationSink?: NotificationSink;
+  /**
+   * CAP-01 S1 交付端口（v8 §7 主动投递 B）：装配层注入渠道的 sendToConversation 面与生效
+   * 模式。缺省 undefined = 无投递端口：有文件的回合 fail-closed（用户可见
+   * 「文件未送达（当前渠道不支持文件投递）」+ 事件 delivery_unavailable）。
+   */
+  fileDelivery?: FileDeliveryPort;
+  /**
+   * 测试注入：run_js 执行器工厂（装配构造、按 fileStore 闭包）；缺省 = 真实受限执行器
+   * （Node 权限模型，见 run-js-executor.ts——runtime 不 spawn，spawn 归执行器）。
+   */
+  createRunJsExecutor?: (fileStore: FileStore) => RunJsExecutor;
   logger?: (line: Record<string, unknown>) => void;
 }
 
@@ -86,6 +118,22 @@ export interface Server {
 }
 
 /**
+ * 文件投递端口（CAP-01 S1，v8 §7 主动投递 B）：装配层注入渠道的主动投递面——server 只传
+ * **文件**（正文走 handler 回执文本；四必守 #1：两边只发各自的东西，否则文本发两遍）。
+ * deliveryMode 来自渠道装配事实：非 'live' 的部署一律记 `suppressed`，**不许记 `sent`**——
+ * silent 闸会让 sendToConversation 返回带 sent 的回执但用户看不到任何东西（不得采信）。
+ */
+export interface FileDeliveryPort {
+  readonly deliveryMode: 'live' | 'silent';
+  sendToConversation(route: ChannelRoute, files: readonly OutgoingFileReply[]): Promise<DeliveryReceipt>;
+}
+
+/** 无投递端口 / 非 live 部署时给用户的兜底话术（v8 §7 四必守 #4 fail-closed；事件另记 delivery_unavailable）。 */
+const FILE_DELIVERY_UNAVAILABLE_NOTE = '文件未送达（当前渠道不支持文件投递）';
+/** live 投递失败时给用户的如实话术（v8 §7 失败必须可见；事件另记 delivery_failed，不记 sent）。 */
+const FILE_DELIVERY_FAILED_NOTE = '文件未送达（投递失败，请重试或联系管理员）';
+
+/**
  * 单一 profile 解析（fail-closed）：未指定时 0 个或多个 profile 都拒绝启动，
  * 最小切片不做多 profile 选择，也不静默挑一个。
  */
@@ -98,6 +146,15 @@ export function resolveSingleProfile(config: AppConfig): { id: string; profile: 
   return { id, profile: config.contextProfiles[id]! };
 }
 
+/**
+ * 文件区 workspace 根（CAP-01 S1）：与会话转录存储同一部署状态根——按 dbPath 派生，
+ * 重启用同一 dbPath 即落在同一 workspace。字节位置按 (principal, session) 哈希派生
+ * （见 packages/agent/src/file-store.ts），不入库、不进转录。
+ */
+export function workspaceRootOf(dbPath: string): string {
+  return path.join(path.dirname(dbPath), 'workspace');
+}
+
 export async function createServer(deps: ServerDeps): Promise<Server> {
   const { id: profileId, profile } = resolveSingleProfile(deps.config);
   if (profile.gateway === undefined && deps.createExecutionFace === undefined) {
@@ -106,6 +163,18 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
 
   const log = deps.logger ?? ((line: Record<string, unknown>) => console.log(JSON.stringify(line)));
   const taskRegistry = createSqliteTaskRegistry(deps.dbPath);
+  // CAP-01 S1：文件区监管（唯一写侧）建在底账同一引擎连接上（不开第二个库连接）。
+  const workspaceRoot = workspaceRootOf(deps.dbPath);
+  const fileStore = createFileStore({ store: taskRegistry.store, workspaceRoot });
+  // CAP-01 S1：run_js 执行器（装配构造；Node 权限模型的受限子进程，runtime 不 spawn）。
+  const runJsExecutor = (deps.createRunJsExecutor ?? ((fileStoreRef: FileStore) =>
+    createRunJsExecutor({ fileStore: fileStoreRef, nodeModulesDir: path.join(REPO_ROOT, 'node_modules') })))(fileStore);
+  /**
+   * CAP-01 S1 清单注入（机械事实）：每回合开始由 runtime 取走本会话已激活（TTL 内）文件。
+   * 只投影 fileId/name/bytes（listActiveFiles），不含内容/路径/sha256。
+   */
+  const fileManifestProvider = (principalId: string, sessionId: string): readonly TurnFileRef[] =>
+    fileStore.listActiveFiles({ scope: { principalId, sessionId }, now: Date.now() });
   // 角色文本与技能面在启动时装载一次：配置坏即启动失败，不静默降级。
   const profileMd = await loadAgentProfile();
   const workerSkills = await loadWorkerSkills(profile.root, profile.skillRoots);
@@ -192,6 +261,18 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           ...(deps.createDrivers !== undefined ? { createDrivers: deps.createDrivers } : {}),
           ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
           ...(notificationAttachment === undefined ? {} : { taskFactProvider: notificationAttachment.taskFactProvider }),
+          // CAP-01 S1：run_js 执行器（装配构造）与文件清单注入器（机械事实）同源注入。
+          // CAP-01 S2：交办复制端口与执行层文件桥同源注入（**同一 fileStore 实例**——文件区
+          // 监管唯一写侧）。桥承担回程登记（data.files → 新 file_id、剥 path/base64）与任务
+          // out/ 兜底扫描（unexecuted/failed 也扫，v8 §10-3）；dirParams 留空 = 当前执行层
+          // 尚未声明目录参数，出站目录翻译随执行层声明开启（部署按其声明认知传入参数名）。
+          runJsExecutor,
+          taskInputCopier: fileStore,
+          taskExecutionBridge: {
+            store: fileStore,
+            onSkip: (reason) => log({ event: 'task_file_bridge_skip', principalId, sessionId, reason }),
+          },
+          fileManifestProvider,
           transcriptStore,
           // fail-open 日志：转录读/写失败不阻塞回合，只上报（错误面由入口按既有归类处理）。
           onTranscriptError: (error) =>
@@ -244,6 +325,99 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     }
   };
 
+  /**
+   * CAP-01 S1 入站附件登记：本条消息携带的每个附件登记为 pending 行（流式 sha256 +
+   * copy 进 workspace，不引用原路径）。WeCom 现实一条文件消息一个附件；契约允许多个，
+   * 逐个登记，任一失败即抛（回执失败，渠道可重投；重复行由 TTL 清孤儿兜底）。
+   */
+  const registerInboundAttachments = (message: IncomingChannelMessage, scope: FileScope): RegisteredFile[] => {
+    const registered: RegisteredFile[] = [];
+    for (const attachment of message.attachments ?? []) {
+      registered.push(fileStore.registerInboundFile({ scope, name: attachment.filename, sourcePath: attachment.path }));
+    }
+    return registered;
+  };
+
+  /**
+   * CAP-01 S1 交付（v8 §7 主动投递 B；失败必须可见）：
+   *   · 无端口 → fail-closed：用户可见「未送达」话术 + 事件 delivery_unavailable（四必守 #4）；
+   *   · deliveryMode 非 live → 不发起投递，记 `suppressed`（**不许记 sent**——silent 闸的
+   *     回执会假报 sent 而用户什么都看不到，宿主不得采信，四必守 #3）；
+   *   · live 投递失败 → 结构化事件（含已送达份数，来自 receipt.parts）+ 用户话术，绝不记 sent；
+   *   · live 成功 → 事件记 sent（唯一允许 sent 的分支）。
+   * handler 仍只返回 text（四必守 #1）：文件字节经端口单独发出，不进回执文本。
+   *
+   * R7-F3：投递结果一旦成功就**不得被日志写失败改写**——sent 事件写在投递 try 之外自成
+   * 一段；写失败只降级成一条独立的观测事件（file_delivery_log_write_failed，status 仍
+   * sent），绝不改道进投递失败分支、绝不让用户话术出现「未送达/请重试」（否则用户重试
+   * 同一产物 → file_refs 两行）。
+   */
+  const deliverTurnFiles = async (input: {
+    files: readonly TurnFileRef[];
+    scope: FileScope;
+    channel: string;
+    conversationId: string;
+    principalId: string;
+    sessionId: string;
+  }): Promise<{ status: 'sent' | 'suppressed' | 'delivery_unavailable' | 'delivery_failed'; note?: string }> => {
+    const base = {
+      principalId: input.principalId,
+      sessionId: input.sessionId,
+      files: input.files.length,
+    };
+    if (deps.fileDelivery === undefined) {
+      log({ event: 'file_delivery', ...base, status: 'delivery_unavailable' });
+      return { status: 'delivery_unavailable', note: FILE_DELIVERY_UNAVAILABLE_NOTE };
+    }
+    if (deps.fileDelivery.deliveryMode !== 'live') {
+      log({ event: 'file_delivery', ...base, status: 'suppressed', deliveryMode: deps.fileDelivery.deliveryMode });
+      return { status: 'suppressed' };
+    }
+    // 字节从文件区派生布局现读（产物在登记时已 copy 进 workspace，原件路径从不进话术）。
+    const outgoing: OutgoingFileReply[] = input.files.map((file) => ({
+      data: readFileSync(fileStoragePathOf(workspaceRoot, input.scope, file.fileId, file.name)),
+      filename: file.name,
+    }));
+    let receipt: DeliveryReceipt;
+    try {
+      receipt = await deps.fileDelivery.sendToConversation(
+        { channel: input.channel, conversationId: input.conversationId },
+        outgoing,
+      );
+    } catch (error) {
+      // 投递失败事实（v8 §7）：结构化事件 + 用户话术；receipt.parts 里先到的 ACK 只作
+      // 「已送达份数」照实记录，不把整批记成 sent。
+      const parts = (error as { receipt?: { parts?: readonly { kind: string }[] } }).receipt?.parts ?? [];
+      const delivered = parts.filter((part) => part.kind === 'file').length;
+      log({
+        event: 'file_delivery',
+        ...base,
+        status: 'delivery_failed',
+        delivered,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return { status: 'delivery_failed', note: FILE_DELIVERY_FAILED_NOTE };
+    }
+    // 走到这里 = 投递已成功，结果不再有任何改写路径（R7-F3）：日志写失败只降级为独立
+    // 观测事件；观测事件也写不进（logger 持续抛错）时同样到此为止——除吞掉外别无动作，
+    // 用户话术与回合结果已按「sent」定型。
+    try {
+      log({ event: 'file_delivery', ...base, status: 'sent', parts: receipt.parts.length });
+    } catch (logError) {
+      try {
+        log({
+          event: 'file_delivery_log_write_failed',
+          ...base,
+          status: 'sent',
+          message: logError instanceof Error ? logError.message : String(logError),
+        });
+      } catch {
+        // 观测事件写也失败：无第二观测面可用；投递结果已成立，不翻转、不重投、不触达用户。
+      }
+    }
+    return { status: 'sent' };
+  };
+
   const handler: ReplyHandler = async (message) => {
     const channel = (message.channel ?? 'wecom').trim() || 'wecom';
     // 可信身份取自渠道事实：principal = 发消息的人，session = 聊天窗口（conversationId）。
@@ -254,12 +428,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       log({ event: 'message_refused', principalId, sessionId, messageId: message.messageId, reason: 'principal_not_enabled' });
       return `该账号（${principalId}）未开通使用权限，请联系管理员开通。`;
     }
-    if (message.attachmentOnly === true) {
-      // 本切片不消费附件（登记缺口：附件暂存/注入归后续切片）；空回复让渠道走文件收据窗。
-      log({ event: 'message_attachment_only', principalId, sessionId, messageId: message.messageId });
-      return '';
-    }
     // 渠道重投（同 messageId）命中：幂等重放既有回执（无任何新副作用）。
+    // CAP-01 S1：查重必须先于附件分支——纯附件消息的重投才走缓存，不重复登记。
     const dedupKey = message.messageId.trim() === ''
       ? undefined
       : `${principalId}\u0000${sessionId}\u0000${message.messageId}`;
@@ -268,33 +438,111 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       log({ event: 'message_duplicate_replayed', principalId, sessionId, messageId: message.messageId });
       return await replayed;
     }
-    const pending = enqueueSessionTurn(`${principalId}\u0000${sessionId}`, async () => {
+
+    const scope: FileScope = { principalId, sessionId };
+    const sessionKey = `${principalId}\u0000${sessionId}`;
+
+    if (message.attachmentOnly === true) {
+      // CAP-01 S1 纯附件：登记为 pending 文件——不调模型、不建 Task、不起回合；空回执让
+      // 渠道走既有文件收据窗。登记进会话链（与文字回合串行，保序）。
+      const pendingReply = enqueueSessionTurn(sessionKey, async () => {
+        const registered = registerInboundAttachments(message, scope);
+        log({
+          event: 'message_attachment_only',
+          principalId,
+          sessionId,
+          messageId: message.messageId,
+          fileIds: registered.map((file) => file.fileId),
+        });
+        return '';
+      }).then(
+        (reply) => reply,
+        (error: unknown) => {
+          // 登记失败不缓存：渠道重投可重试（回执不伪造；不标 sent）。
+          if (dedupKey !== undefined) messageReplies.delete(dedupKey);
+          throw error;
+        },
+      );
+      if (dedupKey !== undefined) rememberMessageReply(dedupKey, pendingReply);
+      return await pendingReply;
+    }
+
+    const pending = enqueueSessionTurn(sessionKey, async () => {
+      // CAP-01 S1：本条消息若带附件，先登记为 pending（文字+附件 → 随即被下面的激活收进本回合）。
+      if (message.attachments !== undefined && message.attachments.length > 0) {
+        const registered = registerInboundAttachments(message, scope);
+        log({
+          event: 'inbound_files_registered',
+          principalId,
+          sessionId,
+          messageId: message.messageId,
+          fileIds: registered.map((file) => file.fileId),
+        });
+      }
+      // CAP-01 S1 激活语义（v8 §4）：带文字的消息激活本会话全部 TTL 内 pending——指令消息
+      // 本身不带附件，不按 messageId。先激活再开回合：回合内的清单/物化读激活后的事实。
+      const activated = fileStore.activatePendingInputs({ scope, now: Date.now() });
+      if (activated > 0) {
+        log({ event: 'pending_files_activated', principalId, sessionId, messageId: message.messageId, activated });
+      }
       await drainNotifications();
       const session = await sessionFor(principalId, sessionId);
       const turn = await session.send(message.text);
+      // CAP-01 S1 交付 B（v8 §7）：handler 只返回 text；文件经装配注入的端口在回合末主动投递。
+      // 投递失败/无端口时以话术如实纠正正文，但不判回合失败（文件未送达 ≠ 回报失败）。
+      let reply = turn.reply;
+      const files = turn.files ?? [];
+      let delivery: { status: string; files: number } | undefined;
+      if (files.length > 0) {
+        const outcome = await deliverTurnFiles({
+          files,
+          scope,
+          channel,
+          conversationId: message.conversationId,
+          principalId,
+          sessionId,
+        });
+        delivery = { status: outcome.status, files: files.length };
+        if (outcome.note !== undefined) {
+          // 正文若只是宿主兜底话术（「文件已生成（见附件）」）则整体替换成未送达话术，
+          // 否则追加（不覆盖模型正文）。suppressed 不带话术（静默部署本就无真实收件人）。
+          reply = reply === FILES_GENERATED_NOTICE || reply.trim() === ''
+            ? outcome.note
+            : `${reply}\n${outcome.note}`;
+        }
+      }
       // 本回合没有可用正文（溢出恢复失败 / 只有思考没正文且催问后仍空）= 回合失败。
       // 不得当作成功回执：空串会让渠道一个终帧都不发（用户什么也收不到），也不记
-      // message_done。放在这里抛出 = 走既有的「回合失败」路径（失败不进重投缓存，
-      // 渠道适配器的 handler 异常分支回失败话术），不新造机制、不重试。
-      if (turn.reply.trim() === '') {
+      // message_done。**「只有文件、正文为空」不判失败**（v8 §7 四必守 #2）：文件走投递面，
+      // 正文空帧由投递事实话术/宿主兜底话术补足——判失败就走不到投递了。放在这里抛出 =
+      // 走既有的「回合失败」路径（失败不进重投缓存，渠道适配器的 handler 异常分支回失败
+      // 话术），不新造机制、不重试。
+      if (reply.trim() === '' && files.length === 0) {
         throw new Error('本回合未产出可用回复（模型侧失败），本回合未完成。');
       }
-      return turn;
+      return {
+        reply,
+        turn,
+        ...(delivery === undefined ? {} : { delivery }),
+        ...(turn.fileManifestBytes === undefined ? {} : { manifestBytes: turn.fileManifestBytes }),
+      };
     }).then(
-      (turn) => {
+      (result) => {
         log({
           event: 'message_done',
           principalId,
           sessionId,
           messageId: message.messageId,
-          taskIds: [...turn.taskIds],
-          executions: turn.executions.map((execution) => ({
+          taskIds: [...result.turn.taskIds],
+          executions: result.turn.executions.map((execution) => ({
             requestId: execution.requestId,
             operation: execution.operation,
             status: execution.status,
           })),
+          ...(result.delivery !== undefined ? { fileDelivery: result.delivery } : {}),
+          ...(result.manifestBytes === undefined ? {} : { fileManifestBytes: result.manifestBytes }),
         });
-        return turn.reply;
+        return result.reply;
       },
       (error: unknown) => {
         // 处理失败不缓存：渠道重投可重试（回执不伪造）。

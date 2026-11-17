@@ -12,7 +12,7 @@
  * 表内不含计划字段（planId / stepIndex / totalSteps / lastProgress / deadline /
  * originMessage 一概没有）：最小切片没有计划门，也不迁移旧 TaskRunRecord。
  */
-import { openTaskStore, type ExecutionRow, type OperationRow, type StoredTask, type TaskRow } from '@fshine/core';
+import { openTaskStore, type ExecutionRow, type OperationRow, type StoredTask, type TaskRow, type TaskStore } from '@fshine/core';
 import type { ExecutionFailure, ExecutionOutcome, ExecutionStatus } from '@fshine/contracts/execution-contract';
 import {
   TaskOwnershipError,
@@ -45,6 +45,11 @@ import {
 /** 带关闭口的底账：进程/入口负责关库（ask、server 的收尾路径）。 */
 export interface SqliteTaskRegistry extends TaskRegistry {
   close(): void;
+  /**
+   * CAP-01 S1：底层 SQLite 引擎句柄——fileStore 建在其上（装配层是唯一构造 fileStore 处；
+   * 同一连接，不开第二个库连接）。行访问器面 = @fshine/core 的 TaskStore。
+   */
+  readonly store: TaskStore;
 }
 
 /** 打开选项（P1 任务查看）：readOnly 只读打开既有库；写方法调用由 SQLite 拒绝。 */
@@ -446,6 +451,7 @@ export function createSqliteTaskRegistry(
       const row = store.getOperation(dispatchKey);
       return row === undefined ? undefined : toOperationRecord(row);
     },
+    store,
     close() {
       store.close();
     },
