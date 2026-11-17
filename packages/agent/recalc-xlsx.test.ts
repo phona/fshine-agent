@@ -568,3 +568,76 @@ describe('recalc_xlsx 接线（fail-closed + Worker 不上）', () => {
     expect(RECALC_XLSX_TOOL_DESCRIPTION).toContain('csv');
   });
 });
+
+// ───────────────────────────── 独立复核 Gap1：LO 重算耗时进 R4 资源账 + 结构化事件 ─────────────────────────────
+import { createResourcePolicy } from './src/resource-policy';
+
+describe('recalc_xlsx 重算开销入 R4 账（独立复核 Gap1）', () => {
+  /** 注入执行器：recalc 结果带 durationMs，供 runtime 计量与结构化事件。 */
+  const costExecutor = (durationMs: number): RecalcXlsxExecutor => ({
+    available: true,
+    engineFacts: null,
+    async recalc(input): Promise<RecalcXlsxResult> {
+      void input;
+      return {
+        status: 'pass', errorCells: [], valueDiffs: [],
+        artifacts: { report: 'out/.recalc-report.json' },
+        durationMs,
+      };
+    },
+  });
+
+  it('一次 recalc 调用：前台预算 calls+1 且 ms 累计 ≈ durationMs；onRecalcCost 报耗时事件', async () => {
+    const h = makeHarness();
+    const policy = createResourcePolicy({ taskBudget: { ms: 100_000, calls: 10 } });
+    const events: Array<Record<string, unknown>> = [];
+    const session = await createSession({
+      principalId: SCOPE.principalId,
+      sessionId: SCOPE.sessionId,
+      client: new FaceClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver: {
+        async run(runInput) {
+          await runInput.exec(RECALC_XLSX_TOOL, { file: 'in/file_x.xlsx', export: 'none' });
+          return { text: 'ok', messages: [] as unknown as DriverMessage[] };
+        },
+      },
+      workerDriver: noopWorker,
+      mainSystemPrompt: 'test',
+      taskRegistry: h.store as never,
+      recalcXlsxExecutor: costExecutor(137),
+      policy,
+      onRecalcCost: (event) => events.push(event as never),
+    });
+    await session.send('recalc');
+    const budget = policy.budgetFor(`session:${SCOPE.principalId}:${SCOPE.sessionId}`);
+    expect(budget.used.calls).toBe(1);
+    expect(budget.used.ms).toBeGreaterThanOrEqual(137);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.engineMs).toBe(137);
+    expect(events[0]!.status).toBe('pass');
+    expect(events[0]!.principalId).toBe(SCOPE.principalId);
+  });
+
+  it('无 policy（缺省）→ recalc 仍可用，无预算对象可入账但不报错', async () => {
+    const h = makeHarness();
+    const session = await createSession({
+      principalId: SCOPE.principalId,
+      sessionId: SCOPE.sessionId,
+      client: new FaceClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver: {
+        async run(runInput) {
+          const r = await runInput.exec(RECALC_XLSX_TOOL, { file: 'in/file_x.xlsx', export: 'none' });
+          expect((r as RecalcXlsxResult).status).toBe('pass');
+          return { text: 'ok', messages: [] as unknown as DriverMessage[] };
+        },
+      },
+      workerDriver: noopWorker,
+      mainSystemPrompt: 'test',
+      taskRegistry: h.store as never,
+      recalcXlsxExecutor: costExecutor(5),
+    });
+    await expect(session.send('recalc')).resolves.toBeDefined();
+  });
+});

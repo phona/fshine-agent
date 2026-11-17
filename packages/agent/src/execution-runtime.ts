@@ -53,12 +53,13 @@ import { ToolUserError } from './driver-contract';
 import { FileRefUnavailableError, safeExtensionOf, type CopiedTaskInput, type TaskInputCopier } from './file-store';
 export type { TaskInputCopier } from './file-store';
 import type { RunJsExecutor, RunJsOutput } from './run-js-executor';
-import type { RecalcXlsxExecutor } from './recalc-xlsx-executor';
+import type { RecalcXlsxExecutor, RecalcCostEvent } from './recalc-xlsx-executor';
 export type {
   RecalcXlsxExecutor,
   RecalcXlsxResult,
   RecalcXlsxInput,
   RecalcErrorCode,
+  RecalcCostEvent,
 } from './recalc-xlsx-executor';
 // 布局收窄的确定性失败面：零 import 模块（runtime 不触 spawn——import 图守卫钉住）。
 import {
@@ -465,6 +466,11 @@ export interface RuntimeOptions {
    * 引擎不可用时执行器 available=false，装配方据此不上工具面（fail-closed）。
    */
   recalcXlsxExecutor?: RecalcXlsxExecutor;
+  /**
+   * recalc_xlsx 单次重算开销的结构化事件（**只进日志/资源账**，不进用户话术）。
+   * engineMs = 引擎耗时；status = 结果状态。缺省静默（不影响回合）。
+   */
+  onRecalcCost?: (event: RecalcCostEvent & { principalId: string; sessionId: string }) => void;
   /**
    * CAP-01 ④：run_js 子进程撞内存墙的结构化事件（**只进日志**，不进用户话术）。
    * bytes = 输入总字节；exitCode/exitSignal/stderrTail = 退出形状；runId/side/taskId 定位
@@ -1617,13 +1623,24 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
             }
             // 结果原样交回模型（status/errorCells/valueDiffs/artifacts）；CSV 等产物由
             // 执行器落本回合 runDir/out/，交付去留归宿主投递面（与 run_js 同一纪律）。
-            return executor.recalc({
+            // R4 资源账（Gap1）：LO 重算耗时入前台预算 + 结构化事件，不静默消耗预算。
+            const recalcStartedAt = Date.now();
+            const result = await executor.recalc({
               file,
               ...(sheet === undefined ? {} : { sheet }),
               export: exportMode,
               scope: fileScope,
               ...(signal === undefined ? {} : { signal }),
             });
+            const engineMs = result.durationMs ?? (Date.now() - recalcStartedAt);
+            foregroundPermit?.budget.consume({ calls: 1, ms: engineMs });
+            options.onRecalcCost?.({
+              engineMs,
+              status: result.status,
+              principalId: options.principalId,
+              sessionId: options.sessionId,
+            });
+            return result;
           }
           throw new Error(`Main 工具面之外的调用：${tool}`);
         },

@@ -148,6 +148,8 @@ const FILE_DELIVERY_UNAVAILABLE_NOTE = '文件未送达（当前渠道不支持�
 const FILE_DELIVERY_FAILED_NOTE = '文件未送达（投递失败，请重试或联系管理员）';
 /** recalc 投递闸拦下含公式但无 pass 实算报告的表格时给用户的如实话术（事件另记 recalc_delivery_gated）。 */
 const RECALC_DELIVERY_GATED_NOTE = '部分表格未通过公式实算校验，未予发送（请确认表格已重算校验后再试）';
+/** 混合批次（部分投递成功、部分被闸拦）时的如实话术：不让用户误以为全部送达。 */
+const RECALC_DELIVERY_PARTIAL_NOTE = '部分表格未通过公式实算校验，未予发送；其余文件已发送';
 
 /**
  * 入站附件上限（20MB，2026-11-17 CAP-01 owner 裁决：100MB 必 OOM，实测 1.1MB 文件处理
@@ -312,6 +314,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           runJsExecutor,
           // recalc_xlsx：仅 Main 宿主面（Worker 面由 runtime 恒定不上）；引擎不可用则不注入。
           ...(recalcXlsxExecutor === undefined ? {} : { recalcXlsxExecutor }),
+          // recalc 重算开销（R4 资源账）：耗时结构化事件进日志，不进用户话术。
+          onRecalcCost: (event) => log({ event: 'recalc_cost', ...event }),
           // CAP-01 ④：内存墙结构化事件（runId/side/bytes/exitCode/exitSignal/stderr 尾窗）——
           // 日志能查到是哪次、多大、怎么死的；用户话术同句由 runtime 出口统一。
           onRunJsMemoryExit: (event) => log({ event: 'run_js_memory_exit', principalId, sessionId, ...event }),
@@ -509,7 +513,13 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         // 观测事件写也失败：无第二观测面可用；投递结果已成立，不翻转、不重投、不触达用户。
       }
     }
-    return { status: 'sent', files };
+    // 混合批次（有被闸拦的文件、也有成功投递的）：如实附「部分未投递」话术——
+    // 不让用户正文停留在「汇总完成。」而误以为全部表格送达（如实交付 B 类责任）。
+    return {
+      status: 'sent',
+      files,
+      ...(gate.gated.length > 0 ? { note: RECALC_DELIVERY_PARTIAL_NOTE } : {}),
+    };
   };
 
   const handler: ReplyHandler = async (message) => {

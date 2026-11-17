@@ -247,6 +247,8 @@ interface ServerGateFixture {
 
 async function makeServerGateFixture(input: {
   formulaXlsx: Buffer;
+  /** 额外写入 out/ 的非公式文件（用于混合批次；名字以 .csv 结尾）。 */
+  extraPlainFile?: { name: string; bytes: Buffer };
   /** 'gate' = 注入启用的执行器；'disabled' = 显式注入 undefined（禁用闸）；'default' = 不注入工厂。 */
   recalcMode: 'gate' | 'disabled' | 'default';
 }): Promise<ServerGateFixture> {
@@ -269,6 +271,9 @@ async function makeServerGateFixture(input: {
       const out = path.join(runDir, 'out');
       mkdirSync(out, { recursive: true });
       writeFileSync(path.join(out, '汇总.xlsx'), input.formulaXlsx);
+      if (input.extraPlainFile !== undefined) {
+        writeFileSync(path.join(out, input.extraPlainFile.name), input.extraPlainFile.bytes);
+      }
       const { outputs } = fs.registerOutputsFromOut({
         runDir, scope, limits: { maxFileBytes: 20 * 1024 * 1024, maxCount: 20 },
       });
@@ -368,6 +373,35 @@ describe('server 投递闸挂点（终判在 deliverTurnFiles）', () => {
       expect(calls).toHaveLength(1);
       expect(calls[0]!.files[0]!.filename).toBe('汇总.xlsx');
       expect(logs.some((l) => l['event'] === 'recalc_delivery_gated')).toBe(false);
+      const done = logs.find((l) => l['event'] === 'message_done');
+      expect(done?.['fileDelivery']).toEqual({ status: 'sent', files: 1 });
+    } finally {
+      await server.close();
+    }
+  });
+});
+
+describe('server 投递闸 · 混合批次（独立复核 Gap5）', () => {
+  it('批次含被拦公式表 + 正常 CSV → 只投 CSV，用户可见「部分未投递」话术，不谎称全部送达', async () => {
+    const f = await xlsxBuffer({ A1: 1, C1: FORMULA_CELL });
+    const csv = Buffer.from('名称,金额\n甲,6\n', 'utf8');
+    const { server, logs, calls } = await makeServerGateFixture({
+      formulaXlsx: f,
+      extraPlainFile: { name: '明细.values.csv', bytes: csv },
+      recalcMode: 'gate',
+    });
+    try {
+      const reply = await server.handler(serverIncoming());
+      // 端口只收到 CSV（被拦的公式表不投）
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.files.map((x) => x.filename)).toEqual(['明细.values.csv']);
+      // 用户正文必须如实说明「部分未投递」——不能只留「汇总完成。」让用户误以为全送达。
+      expect(reply).toContain('部分');
+      expect(reply).toMatch(/未投递|未发送|未通过/);
+      // 事件面：recalc_delivery_gated 记被拦项；file_delivery 记 sent（仅 1 份）。
+      expect(logs.some((l) => l['event'] === 'recalc_delivery_gated')).toBe(true);
+      const sent = logs.find((l) => l['event'] === 'file_delivery' && l['status'] === 'sent');
+      expect(sent?.['files']).toBe(1);
       const done = logs.find((l) => l['event'] === 'message_done');
       expect(done?.['fileDelivery']).toEqual({ status: 'sent', files: 1 });
     } finally {

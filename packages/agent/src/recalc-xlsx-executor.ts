@@ -111,6 +111,14 @@ export interface RecalcXlsxResult {
   errorCells: RecalcErrorCell[];
   valueDiffs: RecalcValueDiff[];
   artifacts: RecalcArtifacts;
+  /** 引擎重算墙钟耗时（ms）；R4 资源账与结构化事件用。缺省装配的执行器必填，注入替身可省。 */
+  durationMs?: number;
+}
+
+/** 单次 recalc 的开销事件（结构化事件，只进日志/资源账，不进用户话术）。 */
+export interface RecalcCostEvent {
+  readonly engineMs: number;
+  readonly status: RecalcXlsxResult['status'];
 }
 
 export interface RecalcXlsxInput {
@@ -206,6 +214,7 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
     available,
     engineFacts: facts,
     async recalc(input: RecalcXlsxInput): Promise<RecalcXlsxResult> {
+      const startedAt = Date.now();
       const parsed = parseRecalcFilePath(input.file);
       if (parsed === null) return errorResult('path_escape');
       if (!available) return errorResult('engine_failed');
@@ -370,6 +379,7 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
           report: relativeArtifact(runDir, reportPath),
           ...(valuesArtifact === undefined ? {} : { values: valuesArtifact }),
         },
+        durationMs: Date.now() - startedAt,
       };
     },
   };
