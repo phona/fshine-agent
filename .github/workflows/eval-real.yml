@@ -78,9 +78,31 @@ jobs:
         with:
           script: |
             const fs = require('fs');
+            // 完整逐样本表（2026-11-17 修）：此前只贴日志尾部 60 行，E01–E05 被截掉，
+            // 审查者无法核对「通过转失败」。现在从 summary.json 生成整张表，一个用例都不省。
+            const summaryJsonPath = '.runtime/eval-user/summary.json';
+            let table = '_(summary.json 缺失：本次没有逐样本结果，不能据此判断回归)_';
+            let counts = '';
+            if (fs.existsSync(summaryJsonPath)) {
+              const d = JSON.parse(fs.readFileSync(summaryJsonPath, 'utf8'));
+              const cases = Object.keys(d.matrix ?? {});
+              const trials = Math.max(0, ...cases.map((c) => Object.keys(d.matrix[c]).length));
+              const header = ['case', ...Array.from({ length: trials }, (_, i) => `trial-${i + 1}`)];
+              const rows = cases.map((c) => {
+                const cells = Array.from({ length: trials }, (_, i) => {
+                  const v = d.matrix[c][`trial-${i + 1}`];
+                  if (v === undefined) return '—';
+                  const codes = (v.failureCodes ?? []).join(',');
+                  return codes === '' ? v.verdict : `${v.verdict} (${codes})`;
+                });
+                return `| ${c} | ${cells.join(' | ')} |`;
+              });
+              table = [`| ${header.join(' | ')} |`, `|${header.map(() => '---').join('|')}|`, ...rows].join('\n');
+              counts = `counts: ${JSON.stringify(d.counts)}`;
+            }
             const summaryPath = '.runtime/eval-user/summary.txt';
             const summary = fs.existsSync(summaryPath) ? fs.readFileSync(summaryPath, 'utf8') : '(no summary)';
-            const tail = summary.split('\n').slice(-60).join('\n') || '(empty)';
+            const tail = summary.split('\n').slice(-40).join('\n') || '(empty)';
             // 版本绑定：评论必须说清结果属于哪个 head、哪次 run——否则审查者无法
             // 在多次推送间区分「最新评论」与「当前 head 的结果」，always() 步骤在
             // 取消的 run 上也可能追加评论（codex review major，PR #4）。
@@ -93,7 +115,13 @@ jobs:
               '',
               'Boundary: this workflow is NOT a required check yet. Judge conclusions are advisory only.',
               '',
-              '### Key output tail',
+              '### 逐样本结果（来自 summary.json，完整不截断）',
+              '',
+              counts,
+              '',
+              table,
+              '',
+              '### 日志尾部（附录，完整结果以上表为准）',
               '```',
               tail,
               '```',
