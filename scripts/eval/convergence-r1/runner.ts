@@ -684,7 +684,7 @@ async function main(): Promise<void> {
       }
     }
   };
-  const workers = Array.from({ length: Math.max(1, Math.min(args.concurrency, jobs.length)) }, () => runOneJob());
+  const workers = Array.from({ length: Math.max(1, Math.min(parsed.concurrency, jobs.length)) }, () => runOneJob());
   await Promise.all(workers);
   for (const slot of slots) if (slot !== undefined) results.push(slot);
 
