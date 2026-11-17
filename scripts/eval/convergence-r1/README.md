@@ -80,4 +80,5 @@ npm run eval:user -- [--case C01] [--trial 1] [--trials 1] [--out-dir <dir>] [--
 
 - `eval-real.yml`（per-push，advisory 非阻断）：`npm run eval:user -- --trials 1`；
 - `eval-nightly.yml`（schedule）：`npm run eval:user -- --trials 3`；
+- PR 评论正文由 `scripts/eval/user-eval-comment.ts` 从 `summary.json` 全量生成：逐用例表（用例 × 每次 trial 的 verdict + failureCodes）不截断，日志尾部固定 60 行仅作附录（并标注「完整结果以上表为准」），失败/未决样本逐条列出 `runs/<case>/trial-N` 证据路径；本地验证：`node --import tsx scripts/eval/user-eval-comment.verify.ts`；
 - 真实模型密钥走 `LLM_API_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`（本地 `.env`，CI secrets）；不消费 `LLM_JUDGE_MODEL`。
