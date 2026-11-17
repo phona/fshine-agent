@@ -64,6 +64,8 @@ async function main(): Promise<void> {
     fileDelivery: {
       deliveryMode: channel.deliveryMode,
       sendToConversation: (route, files) => channel.sendToConversation(route, { files }),
+      // 纯附件后主动追问：文字走既有主动投递面（silent 由 server 先行抑制，不靠闸门假回执）。
+      sendText: (route, text) => channel.sendToConversation(route, { text }),
     },
   });
   // 保留期启动清扫（runtime.fileRetentionSweepOnStart；缺省 false = 零行为变化）：

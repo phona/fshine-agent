@@ -441,6 +441,19 @@ export interface RuntimeOptions {
    */
   taskFactProvider?: (principalId: string, sessionId: string) => string | undefined;
   /**
+   * 纯附件机械事实注入器（与 taskFactProvider 同一 injections 机制）：装配层在纯附件
+   * 登记成功后按 (principal, session) 排队；回合开始时取走并以 Pi 原生 custom message
+   * （display=false、不触发单独回合）注入主对话。注入器自身保证同 fileId 只出队一次。
+   * 事实只含文件名/fileId/字节数/时间，不含路径与内容。缺省不注入 = 无附件事实。
+   */
+  attachmentFactProvider?: (principalId: string, sessionId: string) => string | undefined;
+  /**
+   * 宿主主动追问的系统注记注入器（同一 injections 机制）：追问真实送达后入队，下一次
+   * 回合注入（模型可见/用户不可见/不触发回合），让模型能把用户的数字回复对应到选项。
+   * 缺省不注入 = 无系统注记。
+   */
+  systemNoteProvider?: (principalId: string, sessionId: string) => string | undefined;
+  /**
    * Worker 可信工作目录（渲染进 Worker 系统提示的工作目录约束块）。
    * 来源必须是装配层持有的可信路径（如 profile.root）；不得取模型输出或用户消息。
    * 缺省不注入 = Worker 提示与现行常量逐字节相同。
@@ -1720,6 +1733,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const mainWindow = newAttemptWindow();
       // 宿主只交「本轮输入」：最后一条 user = 本轮文本；历史种子仅在驱动尚无会话时使用。
       const factsMessage = options.taskFactProvider?.(options.principalId, options.sessionId);
+      // 纯附件机械事实（文件名/fileId/字节数/时间，不含路径）与主动追问的系统注记
+      // （模型可见/用户不可见）走同一 injections 机制；take 即出队（同 fileId 只注入一次）。
+      const attachmentFactsMessage = options.attachmentFactProvider?.(options.principalId, options.sessionId);
+      const systemNoteMessage = options.systemNoteProvider?.(options.principalId, options.sessionId);
       // CAP-01 S1 清单注入（机械事实）：本会话已激活文件，字段只有 fileId/name/bytes；
       // 字节数作为观察项随 TurnResult 带出（fileManifestBytes）。
       const manifestFiles = options.fileManifestProvider?.(options.principalId, options.sessionId) ?? [];
@@ -1732,7 +1749,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const turnMessages = [...history, userMessage(text)];
       const injections = [
         ...(factsMessage !== undefined && factsMessage.trim() !== '' ? [factsMessage] : []),
+        ...(attachmentFactsMessage !== undefined && attachmentFactsMessage.trim() !== '' ? [attachmentFactsMessage] : []),
         ...(manifestMessage !== undefined ? [manifestMessage] : []),
+        ...(systemNoteMessage !== undefined && systemNoteMessage.trim() !== '' ? [systemNoteMessage] : []),
       ];
       const mainResult = await options.mainDriver.run({
         systemPrompt: options.mainSystemPrompt,

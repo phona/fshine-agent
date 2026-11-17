@@ -46,6 +46,10 @@ const R8_CONCURRENCY = 'scripts/eval/cap01/r8-concurrency.ts';
 // `resolveRuntimeConfig` 的解析值 `config.fileRetentionSweepOnStart`，不解析原始
 // `config.runtime.*`、不重定义缺省（单一配置源不破坏）。
 const STARTUP_SWEEP = 'apps/server/startup-sweep.ts';
+// 附件主动追问（2026-11-17 登记）：server 装配点**只读** `resolveRuntimeConfig` 的解析值
+// `attachmentNudgeAfterMs` 并注入 AttachmentNudge；不解析原始 `config.runtime.*`、
+// 不重定义缺省（缺省 30000 住 resource-policy）。
+const SERVER = 'apps/server/server.ts';
 
 /** 分诊 #6 删除的 host.* 未消费键（生产代码零引用；旧 YAML 里的残留键由加载层忽略）。 */
 const DELETED_HOST_KEYS = [
@@ -92,6 +96,7 @@ const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   waitUserTimeoutMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   fileRetentionDays: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   fileRetentionSweepOnStart: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STARTUP_SWEEP],
+  attachmentNudgeAfterMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, SERVER],
 };
 
 interface SourceFacts {

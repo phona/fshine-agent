@@ -77,6 +77,10 @@ llm:
 #   # 写面开关(缺省 false=只读):true 时把执行层自述 access=write 的 operation 放进允许集合;
 #   # 确认句柄/绑定/有效期/一次性/业务校验仍归执行层(宿主只透传,不做计划门)。
 #   allowWriteOperations: false
+#   # 纯附件后主动追问(缺省 30000=30 秒;0=关闭):单聊里只发了文件、此后该会话没有
+#   # 新消息/回合时,发一句业务化选项的追问并把同一份选项作为系统注记注入下一回合。
+#   # 同一会话冷却 10 分钟;非 live 投递只记 suppressed,不冒充 sent。
+#   attachmentNudgeAfterMs: 30000
 #   # taskBudget: { ms: 600000, calls: 50 }  # 任务级共享预算(ms/calls 必填;tokens 可选)
 
 # ---- 任务底账(可选):SQLite 路径;相对路径按进程 cwd 解析 ----

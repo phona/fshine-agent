@@ -196,6 +196,12 @@ export interface RuntimeConfig {
    * 操作授权、确认句柄绑定、有效期、防重放与业务校验仍归执行层——宿主不因此获得裁决权。
    */
   allowWriteOperations?: boolean;
+  /**
+   * 纯附件登记后、用户迟迟没有给指令时的主动追问延迟（ms；2026-11-17 附件追问切片）。
+   * 缺省 30000（30 秒）；0 = 关闭（零行为变化）。同一会话冷却 10 分钟。
+   * 只影响宿主主动追问与系统注记，不改变附件登记/事实注入。
+   */
+  attachmentNudgeAfterMs?: number;
 }
 
 /**

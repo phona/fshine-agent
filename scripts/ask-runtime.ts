@@ -253,6 +253,10 @@ export interface SessionAssemblyInput {
   transcriptStore?: TranscriptStore;
   /** B1：转录读/写失败上报（fail-open 日志；缺省静默）。 */
   onTranscriptError?: (error: unknown) => void;
+  /** 纯附件机械事实注入器（与 taskFactProvider 同一 injections 机制；缺省不注入）。 */
+  attachmentFactProvider?: (principalId: string, sessionId: string) => string | undefined;
+  /** 主动追问系统注记注入器（模型可见/用户不可见；缺省不注入）。 */
+  systemNoteProvider?: (principalId: string, sessionId: string) => string | undefined;
   /** CAP-01 S1：run_js 执行器端口（装配层构造注入；缺省不注入 = Main 无 run_js 工具）。 */
   runJsExecutor?: RunJsExecutor;
   /** CAP-01 ④：run_js 内存墙结构化事件上报（装配层接日志；缺省静默）。 */
@@ -661,6 +665,8 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       ...(runner === undefined ? {} : { taskRunner: runner }),
       ...(mainSkillRegistry === undefined ? {} : { mainSkillRegistry }),
       ...(input.taskFactProvider === undefined ? {} : { taskFactProvider: input.taskFactProvider }),
+      ...(input.attachmentFactProvider === undefined ? {} : { attachmentFactProvider: input.attachmentFactProvider }),
+      ...(input.systemNoteProvider === undefined ? {} : { systemNoteProvider: input.systemNoteProvider }),
       ...(input.transcriptStore === undefined ? {} : { transcriptStore: input.transcriptStore }),
       ...(input.onTranscriptError === undefined ? {} : { onTranscriptError: input.onTranscriptError }),
       ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),

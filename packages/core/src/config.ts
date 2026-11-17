@@ -150,6 +150,7 @@ const RUNTIME_KEYS = [
   'fileRetentionSweepOnStart',
   'dispatchMode',
   'allowWriteOperations',
+  'attachmentNudgeAfterMs',
 ] as const;
 
 /** runtime 段整数值：显式写错即 fail-fast（与 host.* 的「非法 = 未配置」刻意不同）。 */
@@ -196,6 +197,8 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     ['waitUserTimeoutMs', 1],
     // 0 = 不清理（缺省值 30 由策略层提供）；负数 = 配置错误，不按「非法 = 未配置」回落。
     ['fileRetentionDays', 0],
+    // 0 = 关闭主动追问（缺省 30000 由策略层提供）；负数/小数 = 配置错误。
+    ['attachmentNudgeAfterMs', 0],
   ];
   for (const [key, min] of integers) {
     const value = runtimeInteger(raw[key], key, min);
