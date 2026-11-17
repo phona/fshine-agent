@@ -35,7 +35,7 @@ describe('① #4 端到端：限流经 state-dir 触发 RATE_LIMITED（真 dummy
 
     const mainDriver: TurnDriver = {
       async run(input) {
-        const tool = input.tools.find((t) => t.name === 'run_task') ?? input.tools[0]!;
+        const tool = input.tools.find((t) => t.name === 'task_run') ?? input.tools[0]!;
         await input.exec(tool.name, { task: '把 alpha(W1)、beta(W1)、documents(W202611) 三个集合都核对一遍。' });
         const reply = 'alpha 与 beta 已核对；documents 命中限流失败，未能完成。';
         return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };

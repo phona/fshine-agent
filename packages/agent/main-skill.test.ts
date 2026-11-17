@@ -10,7 +10,7 @@
  *   · 仓库根定位：源码（tsx）运行、构建产物布局、不同 cwd 三态结果一致；找不到 fail-closed；
  *   · catalog：name 升序稳定排序、重名 fail-closed、字节数可读、空目录 → 空索引；
  *   · read_skill：仅 catalog 非空才注册；读取只允许目录内；`../`/绝对路径/符号链接逃逸被拒；
- *   · 删除面：旧配置键被忽略且不再出现在 profile 上；工具面缺省仍为 [run_task]。
+ *   · 删除面：旧配置键被忽略且不再出现在 profile 上；工具面缺省仍为 [task_run]。
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -329,10 +329,10 @@ describe('装配接线（mainSkillsDir 只作为装配参数；无配置键）',
     if (!rejected.ok) expect(String((rejected.error as Error).message)).toContain('Main 工具面之外的调用');
   });
 
-  it('缺省工具面：无登记表的 createSession = [run_task]（逐字节不变）', async () => {
+  it('缺省工具面：无登记表的 createSession = [task_run]（逐字节不变）', async () => {
     const { session, recorded } = await buildSession({});
     await session.send('随便说一句');
-    expect(recorded[0]!.tools.map((tool) => tool.name)).toEqual(['run_task']);
+    expect(recorded[0]!.tools.map((tool) => tool.name)).toEqual(['task_run']);
   });
 
   it('未知技能名 → 报错（不静默、不拼路径）', async () => {

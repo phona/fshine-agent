@@ -225,23 +225,23 @@ describe('② 溢出恢复失败：不得返回上一回合答复', () => {
     }
   });
 
-  it('失败回合末尾的工具结果（run_task 回执 JSON）不得冒充答复', async () => {
+  it('失败回合末尾的工具结果（task_run 回执 JSON）不得冒充答复', async () => {
     const originalWarn = console.warn;
     console.warn = () => {};
     try {
       const { final } = await runOverflowTurn(lengthSummary, (call) => {
         if (call < HISTORY_TURNS) return textReply(previousReply(call));
-        if (call === HISTORY_TURNS) return toolCall('run_task', { task: '查 documents W202611 并汇报' }, 'call_main_1');
+        if (call === HISTORY_TURNS) return toolCall('task_run', { task: '查 documents W202611 并汇报' }, 'call_main_1');
         return overflow();
       }, {
         tools: [{
-          name: 'run_task',
+          name: 'task_run',
           description: '委派任务',
           inputSchema: { type: 'object', properties: { task: { type: 'string' } } },
         }],
         exec: async () => ({ taskId: 'task_x', summary: 'documents W202611：3 条。' }),
       });
-      // 失败回合的 assistant 项被 Pi 丢弃后，转录尾部是 run_task 的工具结果；
+      // 失败回合的 assistant 项被 Pi 丢弃后，转录尾部是 task_run 的工具结果；
       // 它是工具事实、不是给用户的答复——不得作为本回合回复返回。
       expect(final.text).toBe('');
     } finally {
@@ -278,7 +278,7 @@ describe('③ 失败回合不得进入业务成功归档', () => {
         const call = mainCount;
         mainCount += 1;
         if (call < HISTORY_TURNS) return textReply(previousReply(call));
-        if (call === HISTORY_TURNS) return toolCall('run_task', { task: '查 documents W202611 并汇报' }, 'call_main_1');
+        if (call === HISTORY_TURNS) return toolCall('task_run', { task: '查 documents W202611 并汇报' }, 'call_main_1');
         return overflow();
       },
     });

@@ -36,7 +36,7 @@ const DUMMY_BIN = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-pla
 
 /**
  * 平台面固有标识：命令语法（gateway / bin / operation / flag / mode）、目录约定
- * （bin/、serve）、宿主 Main 工具名（read_skill / run_task）、查询过滤词（where）。
+ * （bin/、serve）、宿主 Main 工具名（read_skill / task_run）、查询过滤词（where）。
  * 只收标识，不收业务术语。
  */
 const PLATFORM_SURFACE_TOKENS = [
@@ -49,7 +49,7 @@ const PLATFORM_SURFACE_TOKENS = [
   'schema',
   'where',
   'read_skill',
-  'run_task',
+  'task_run',
 ] as const;
 
 interface DummyOperation {

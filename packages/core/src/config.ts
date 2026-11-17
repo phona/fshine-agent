@@ -333,7 +333,7 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
     }
     // 委派工具名（C3）：工具名是模型可见协议面（进工具 schema 与调用分发），形状必须
     // 是合法标识符（小写字母开头，仅小写字母/数字/下划线）且 ≤48 字符。缺省 = 宿主
-    // 中性缺省（run_task），实例已发布协议名由该实例 profile 声明保持连续。
+    // 中性缺省（task_run），实例已发布协议名由该实例 profile 声明保持连续。
     const toolNameRaw = item['toolName'];
     const toolName = toolNameRaw === undefined ? undefined : String(toolNameRaw).trim();
     if (toolName !== undefined) {

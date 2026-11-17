@@ -65,11 +65,11 @@ function capturingDriver(): { driver: TurnDriver; prompts: () => string[] } {
   return { driver, prompts: () => prompts };
 }
 
-/** 一次性 Main 驱动：经 exec 委派一个 run_task 后收汇报（不调模型）。 */
+/** 一次性 Main 驱动：经 exec 委派一个 task_run 后收汇报（不调模型）。 */
 function delegatingMainDriver(): TurnDriver {
   return {
     async run(input): Promise<TurnDriverResult> {
-      await input.exec('run_task', { task: '查询 dummy 数据' });
+      await input.exec('task_run', { task: '查询 dummy 数据' });
       const text = '已委派并收到汇报。';
       const message = {
         role: 'assistant',

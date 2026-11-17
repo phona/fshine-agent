@@ -149,9 +149,9 @@ describe('运行时链路（假客户端 + 假模型）', () => {
     const client = new FakeClient();
     const session = await sessionFor(client, {
       mainResponses: [
-        toolCallAssistant('run_task', { task: '查询 documents 窗口 W202611' }, 'call_main_1'),
+        toolCallAssistant('task_run', { task: '查询 documents 窗口 W202611' }, 'call_main_1'),
         textAssistant('documents 窗口 W202611 共 3 条。'),
-        toolCallAssistant('run_task', { task: '查询 documents 窗口 W202610' }, 'call_main_2'),
+        toolCallAssistant('task_run', { task: '查询 documents 窗口 W202610' }, 'call_main_2'),
         textAssistant('documents 窗口 W202610 已查询。'),
       ],
       workerResponses: [
@@ -200,7 +200,7 @@ describe('运行时链路（假客户端 + 假模型）', () => {
     const client = new FakeClient();
     const session = await sessionFor(client, {
       mainResponses: [
-        toolCallAssistant('run_task', { task: '写入一条数据' }, 'call_main_1'),
+        toolCallAssistant('task_run', { task: '写入一条数据' }, 'call_main_1'),
         textAssistant('本轮未执行写入。'),
       ],
       workerResponses: [
@@ -239,7 +239,7 @@ describe('运行时链路（假客户端 + 假模型）', () => {
     const client = new FakeClient();
     const session = await sessionFor(client, {
       mainResponses: [
-        toolCallAssistant('run_task', { task: '查询 documents' }, 'call_main_1'),
+        toolCallAssistant('task_run', { task: '查询 documents' }, 'call_main_1'),
         textAssistant('已查询。'),
       ],
       workerResponses: [
@@ -268,7 +268,7 @@ describe('运行时链路（假客户端 + 假模型）', () => {
     const registry = createSqliteTaskRegistry(dbPath);
     const session = await sessionFor(client, {
       mainResponses: [
-        toolCallAssistant('run_task', { task: '查询 documents' }, 'call_main_1'),
+        toolCallAssistant('task_run', { task: '查询 documents' }, 'call_main_1'),
         textAssistant('documents 共 3 条。'),
       ],
       workerResponses: [
@@ -301,7 +301,7 @@ describe('运行时链路（假客户端 + 假模型）', () => {
 
 describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
   const mainTurn = (reply: string): AgentMessage[] => [
-    toolCallAssistant('run_task', { task: '查询 documents' }, 'call_main_1'),
+    toolCallAssistant('task_run', { task: '查询 documents' }, 'call_main_1'),
     textAssistant(reply),
   ];
   const queryCall = (id = 'call_worker_1'): AgentMessage =>

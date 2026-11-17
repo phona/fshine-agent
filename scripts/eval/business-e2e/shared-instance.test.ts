@@ -45,7 +45,7 @@ describe('共享实例：跨 principal 查询与编号解析', () => {
 
     // A 建后台任务 #1；执行端脚本给出含敏感标记的完成结果。
     fx.scriptMain(
-      toolCallAssistant('run_task', { task: '查询 documents 窗口 W202611' }),
+      toolCallAssistant('task_run', { task: '查询 documents 窗口 W202611' }),
       textAssistant('已受理，稍后给你结果。'),
     );
     fx.executor.behaviors.push(outcomeBehavior({ kind: 'completed', resultText: `${secret} documents W202611 共 3 条` }));
@@ -98,7 +98,7 @@ describe('共享实例：跨 principal 查询与编号解析', () => {
   it('编号全局唯一：B 建任务拿到下一编号，B 的编号对 A 同样拒绝', async () => {
     const fx = newFixture();
     fx.scriptMain(
-      toolCallAssistant('run_task', { task: '查询 documents 窗口 W202611' }),
+      toolCallAssistant('task_run', { task: '查询 documents 窗口 W202611' }),
       textAssistant('已受理。'),
     );
     fx.executor.behaviors.push(outcomeBehavior({ kind: 'completed', resultText: 'SECRET-A-result' }));
@@ -106,7 +106,7 @@ describe('共享实例：跨 principal 查询与编号解析', () => {
     await fx.settleRounds();
 
     fx.scriptMain(
-      toolCallAssistant('run_task', { task: '查询 meetings 列表' }),
+      toolCallAssistant('task_run', { task: '查询 meetings 列表' }),
       textAssistant('已受理。'),
     );
     fx.executor.behaviors.push(outcomeBehavior({ kind: 'completed', resultText: 'SECRET-B-result meetings 5 条' }));
@@ -140,7 +140,7 @@ describe('共享实例：跨 principal 取消', () => {
     const fx = newFixture();
     // A 建后台任务 #1；执行端挂起直到 abort（模拟长任务）。
     fx.scriptMain(
-      toolCallAssistant('run_task', { task: '导出全量报表' }),
+      toolCallAssistant('task_run', { task: '导出全量报表' }),
       textAssistant('已受理。'),
     );
     fx.executor.behaviors.push(pendingCancelableBehavior());
@@ -193,7 +193,7 @@ describe('共享实例：跨 principal 接续', () => {
     const fx = newFixture();
     // A 建任务 #1 → 执行端要补充信息（waiting_user）。
     fx.scriptMain(
-      toolCallAssistant('run_task', { task: '整理周报' }),
+      toolCallAssistant('task_run', { task: '整理周报' }),
       textAssistant('已受理。'),
     );
     fx.executor.behaviors.push(outcomeBehavior({ kind: 'needs_input', question: { missing: ['窗口'] } }));
@@ -251,7 +251,7 @@ describe('共享实例：真实模型接线面（零模型）', () => {
     });
     fixtures.push(fx);
     fx.scriptMain(
-      toolCallAssistant('run_task', { task: '查询 documents' }),
+      toolCallAssistant('task_run', { task: '查询 documents' }),
       textAssistant('已受理。'),
     );
     await fx.send('alice', '帮我查 documents');
@@ -332,7 +332,7 @@ describe('共享实例：D7 预注册守卫应用（零模型，归档友好裁�
   });
 
   /**
-   * D7-3 形态：越权回合模型同时自建了**本会话新任务**（run_task，非 TASK_TOOLS）→ message_done.taskIds 非空。
+   * D7-3 形态：越权回合模型同时自建了**本会话新任务**（task_run，非 TASK_TOOLS）→ message_done.taskIds 非空。
    * prereg §6 要求越权回合 taskIds/executions 必须为空 → 守卫必须 false（偏差可捕获），不得静默通过。
    * 该 taskId 是 alice 自己的，reply 不含他人详情——非跨 principal 泄露，但预注册守卫口径不满足，须登记。
    */

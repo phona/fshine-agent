@@ -288,8 +288,8 @@ export interface FileStore {
 }
 
 /**
- * 交办复制端口（CAP-01 S2）：runtime 只认这一个面（run_task.inputFiles 的宿主侧执行）；
- * 装配层注入 fileStore 本身（结构满足 Pick）。缺省不注入 = run_task 工具面不带 inputFiles。
+ * 交办复制端口（CAP-01 S2）：runtime 只认这一个面（task_run.inputFiles 的宿主侧执行）；
+ * 装配层注入 fileStore 本身（结构满足 Pick）。缺省不注入 = task_run 工具面不带 inputFiles。
  */
 export type TaskInputCopier = Pick<FileStore, 'copyInputsForTask'>;
 

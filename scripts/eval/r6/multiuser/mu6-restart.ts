@@ -3,7 +3,7 @@
  *
  * 场景形状（对齐任务书与 `server-b1-persistence.test.ts` 的重启口径）：
  *   · ≥3 principal（`MU_PRINCIPALS`）各**一个独立会话**（会话 id 形如 `conv-<user>`）；
- *   · 每个 principal 首回合走**真实交互路径**交办一次后台任务（`run_task` → 后台 TaskRunner）；
+ *   · 每个 principal 首回合走**真实交互路径**交办一次后台任务（`task_run` → 后台 TaskRunner）；
  *   · **关闭 server**（`await server.close()` 释放底账 + B1 会话存储句柄）→ **同一 `dbPath` 重建 server**；
  *   · 每个 principal 再发一次普通回合（追问）；断言四类：
  *       ① **各自转录恢复**：第二回合上下文含**本人**首回合历史（用户原文 + assistant 回复）；

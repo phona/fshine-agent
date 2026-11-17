@@ -276,7 +276,7 @@ describe('CAP-01 S2 ③ 回程登记（runtime 出口）', () => {
         }],
         text: '执行层已完成聚合。',
       });
-      fx.mainPush({ execCalls: [{ tool: 'run_task', args: { task: '聚合', inputFiles: [source.fileId] } }], text: '聚合完成。' });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '聚合', inputFiles: [source.fileId] } }], text: '聚合完成。' });
       const turn = await fx.session.send('交办聚合任务');
 
       const task = fx.session.getTask(turn.taskIds[0]!);
@@ -329,7 +329,7 @@ describe('CAP-01 S2 ③ 回程登记（runtime 出口）', () => {
         ],
         text: '两次聚合完成（产物相同）。',
       });
-      fx.mainPush({ execCalls: [{ tool: 'run_task', args: { task: '两次聚合' } }], text: '完成。' });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '两次聚合' } }], text: '完成。' });
       const turn = await fx.session.send('交办两次聚合');
 
       const task = fx.session.getTask(turn.taskIds[0]!);
@@ -364,7 +364,7 @@ describe('CAP-01 S2 ④ 产物不丢（unexecuted / failed）', () => {
         }],
         text: '已用本地文件生成汇总（未发起执行层调用）。',
       });
-      fx.mainPush({ execCalls: [{ tool: 'run_task', args: { task: '本地汇总', inputFiles: [source.fileId] } }], text: '收到。' });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '本地汇总', inputFiles: [source.fileId] } }], text: '收到。' });
       const turn = await fx.session.send('交办本地汇总');
 
       // 零执行 → 任务 unexecuted（既有判定），但 run_js 产物已登记并进交付事实。
@@ -389,7 +389,7 @@ describe('CAP-01 S2 ④ 产物不丢（unexecuted / failed）', () => {
         execCalls: [{ tool: 'execute_operation', args: { operation: 'demo.aggregate', args: { '--output-dir': '占位' } } }],
         text: '执行层失败了。',
       });
-      fx.mainPush({ execCalls: [{ tool: 'run_task', args: { task: '会失败的任务' } }], text: '如实转述：执行层失败。' });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '会失败的任务' } }], text: '如实转述：执行层失败。' });
       const turn = await fx.session.send('交办会失败的任务');
 
       const task = fx.session.getTask(turn.taskIds[0]!);
@@ -423,7 +423,7 @@ describe('零变化缺省：未注入文件桥时 data 原样透传', () => {
         execCalls: [{ tool: 'execute_operation', args: { operation: 'demo.aggregate', args: {} } }],
         text: '完成。',
       });
-      fx.mainPush({ execCalls: [{ tool: 'run_task', args: { task: '透传对照' } }], text: '完成。' });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '透传对照' } }], text: '完成。' });
       await fx.session.send('交办透传对照');
 
       const result = fx.worker.results[0] as { data?: { files?: unknown } };

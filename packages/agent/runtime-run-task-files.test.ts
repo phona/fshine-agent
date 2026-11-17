@@ -1,15 +1,15 @@
 /**
- * CAP-01 S2 runtime 接线（run_task.inputFiles → 交办复制 → 作用域拒绝）· 确定性验证。
+ * CAP-01 S2 runtime 接线（task_run.inputFiles → 交办复制 → 作用域拒绝）· 确定性验证。
  *
  * 零网络：假客户端 + 脚本化主驱动（按步骤调 exec 的假 TurnDriver）；复制走真实
  * fileStore（:memory: 库 + 临时 workspace），Worker 驱动可脚本化（正路径）或钉死不调用。
  *
  * 覆盖（对应 ask ④⑤ 的 runtime 侧断言）：
- *   ④ inputFiles 混入他人 fileId → **整次 run_task 被拒**：统一话术回模型、机械 reason 只进
+ *   ④ inputFiles 混入他人 fileId → **整次 task_run 被拒**：统一话术回模型、机械 reason 只进
  *      onFileRefUnavailable、不建任务行、不进 Worker、零副本（不部分执行）；
  *   · 正路径：全部可用 → 交办时复制成任务私有副本（新 file_id、task_id 绑定、sha256 同原件、
  *     原件不动），任务照常受理与完成；inputFiles 不进 Worker 转录；
- *   ⑤ 不带 inputFiles 的 run_task 与改造前完全一致：未注入复制面时工具 schema 不含该属性
+ *   ⑤ 不带 inputFiles 的 task_run 与改造前完全一致：未注入复制面时工具 schema 不含该属性
  *     （工具面逐字节不变）、任务照常；注入复制面后不带 inputFiles 也零副本、行为一致；
  *   · fail-closed：未注入复制面时模型传 inputFiles → 确定性拒绝；background 派发 + inputFiles
  *     → 确定性拒绝（本切片只做 inline）；Worker 的任务绑定 fileId 被 Main 引用 → 整次拒绝。
@@ -182,8 +182,8 @@ function putActiveSource(fx: Fixture, name: string, bytes: Buffer) {
   return fx.fileStore.putFile({ scope: SCOPE, name, bytes, activatedAt: Date.now() - 1_000 });
 }
 
-describe('CAP-01 S2 runtime 接线（run_task.inputFiles / 交办复制）', () => {
-  it('④ inputFiles 混入他人 fileId → 整次 run_task 被拒：统一话术、零任务行、不进 Worker、零副本', async () => {
+describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () => {
+  it('④ inputFiles 混入他人 fileId → 整次 task_run 被拒：统一话术、零任务行、不进 Worker、零副本', async () => {
     const fx = await makeFixture();
     try {
       const good = putActiveSource(fx, '好.csv', Buffer.from('good'));
@@ -196,7 +196,7 @@ describe('CAP-01 S2 runtime 接线（run_task.inputFiles / 交办复制）', () 
         })
         .fileId;
 
-      fx.push({ execCalls: [{ tool: 'run_task', args: { task: '处理这份名单', inputFiles: [good.fileId, foreign] } }], text: '收到' });
+      fx.push({ execCalls: [{ tool: 'task_run', args: { task: '处理这份名单', inputFiles: [good.fileId, foreign] } }], text: '收到' });
       await fx.session.send('交办一个带名单的任务');
 
       // 统一话术（与 run_js 输入不可用同码同形；不泄露存在性/状态差异，不含 fileId/reason）。
@@ -228,7 +228,7 @@ describe('CAP-01 S2 runtime 接线（run_task.inputFiles / 交办复制）', () 
       const source = putActiveSource(fx, '名册.csv', sourceBytes);
       const sourceRowBefore = fx.store.getFileRef(source.fileId, SCOPE, { side: 'main' })!;
 
-      fx.push({ execCalls: [{ tool: 'run_task', args: { task: '按名册核对', inputFiles: [source.fileId] } }], text: '核对完成。' });
+      fx.push({ execCalls: [{ tool: 'task_run', args: { task: '按名册核对', inputFiles: [source.fileId] } }], text: '核对完成。' });
       const turn = await fx.session.send('交办核对任务');
 
       expect(turn.taskIds).toHaveLength(1);
@@ -256,13 +256,13 @@ describe('CAP-01 S2 runtime 接线（run_task.inputFiles / 交办复制）', () 
     }
   });
 
-  it('⑤ 不带 inputFiles 的 run_task 与改造前完全一致：未注入复制面时 schema 不含该属性；注入后也不产生副本', async () => {
-    // 未注入复制面：run_task 的 schema 与既有逐字节语义相同（无 inputFiles 属性）。
+  it('⑤ 不带 inputFiles 的 task_run 与改造前完全一致：未注入复制面时 schema 不含该属性；注入后也不产生副本', async () => {
+    // 未注入复制面：task_run 的 schema 与既有逐字节语义相同（无 inputFiles 属性）。
     const bare = await makeFixture({ withCopier: false, worker: workerExecutesOnce });
     try {
-      bare.push({ execCalls: [{ tool: 'run_task', args: { task: '查询 documents W202611' } }], text: '查询完成。' });
+      bare.push({ execCalls: [{ tool: 'task_run', args: { task: '查询 documents W202611' } }], text: '查询完成。' });
       const turn = await bare.session.send('交办查询任务');
-      expect(bare.capture.toolSchemas[0]!['run_task']).toEqual({
+      expect(bare.capture.toolSchemas[0]!['task_run']).toEqual({
         type: 'object',
         properties: {
           task: {
@@ -285,10 +285,10 @@ describe('CAP-01 S2 runtime 接线（run_task.inputFiles / 交办复制）', () 
     // 调用零副本、任务照常（与改造前行为一致）。
     const withCopier = await makeFixture({ worker: workerExecutesOnce });
     try {
-      withCopier.push({ execCalls: [{ tool: 'run_task', args: { task: '查询 documents W202611' } }], text: '查询完成。' });
+      withCopier.push({ execCalls: [{ tool: 'task_run', args: { task: '查询 documents W202611' } }], text: '查询完成。' });
       const turn = await withCopier.session.send('交办查询任务（不带文件）');
 
-      const schema = withCopier.capture.toolSchemas[0]!['run_task'] as Record<string, unknown>;
+      const schema = withCopier.capture.toolSchemas[0]!['task_run'] as Record<string, unknown>;
       expect(schema['additionalProperties']).toBe(false);
       expect(schema['required']).toEqual(['task']);
       expect(Object.keys(schema['properties'] as Record<string, unknown>)).toEqual(['task', 'inputFiles']);
@@ -310,7 +310,7 @@ describe('CAP-01 S2 runtime 接线（run_task.inputFiles / 交办复制）', () 
   it('fail-closed：未注入复制面时模型传 inputFiles → 确定性拒绝（无任务行、不进 Worker）', async () => {
     const fx = await makeFixture({ withCopier: false });
     try {
-      fx.push({ execCalls: [{ tool: 'run_task', args: { task: '处理名单', inputFiles: ['file_any'] } }], text: '收到' });
+      fx.push({ execCalls: [{ tool: 'task_run', args: { task: '处理名单', inputFiles: ['file_any'] } }], text: '收到' });
       await fx.session.send('交办带文件的任务');
       expect(fx.capture.toolErrors).toHaveLength(1);
       expect(fx.capture.toolErrors[0]).toContain('inputFiles 未开通');
@@ -326,7 +326,7 @@ describe('CAP-01 S2 runtime 接线（run_task.inputFiles / 交办复制）', () 
     try {
       const source = putActiveSource(fx, '后台.csv', Buffer.from('bg'));
       fx.push({
-        execCalls: [{ tool: 'run_task', args: { task: '后台处理', inputFiles: [source.fileId] } }],
+        execCalls: [{ tool: 'task_run', args: { task: '后台处理', inputFiles: [source.fileId] } }],
         text: '收到',
       });
       await fx.session.send('后台交办带文件的任务');
@@ -340,7 +340,7 @@ describe('CAP-01 S2 runtime 接线（run_task.inputFiles / 交办复制）', () 
     }
   });
 
-  it('② Worker 的 fileId（任务绑定行）被 Main 引用 → 整次 run_task 拒绝（同码话术，机械 reason 只进日志）', async () => {
+  it('② Worker 的 fileId（任务绑定行）被 Main 引用 → 整次 task_run 拒绝（同码话术，机械 reason 只进日志）', async () => {
     const fx = await makeFixture();
     try {
       // 直接播种一条任务绑定行（Worker 侧文件事实的形状；Worker 接 run_js 归后续切片）。
@@ -356,7 +356,7 @@ describe('CAP-01 S2 runtime 接线（run_task.inputFiles / 交办复制）', () 
         createdAt: Date.now(),
       });
 
-      fx.push({ execCalls: [{ tool: 'run_task', args: { task: '处理任务产物', inputFiles: ['file_taskbound'] } }], text: '收到' });
+      fx.push({ execCalls: [{ tool: 'task_run', args: { task: '处理任务产物', inputFiles: ['file_taskbound'] } }], text: '收到' });
       await fx.session.send('交办引用任务绑定文件');
 
       expect(fx.capture.toolErrors).toHaveLength(1);
@@ -375,15 +375,15 @@ describe('CAP-01 S2 runtime 接线（run_task.inputFiles / 交办复制）', () 
     try {
       fx.push({
         execCalls: [
-          { tool: 'run_task', args: { task: 'a', inputFiles: 'file_x' } },
-          { tool: 'run_task', args: { task: 'b', inputFiles: [''] } },
+          { tool: 'task_run', args: { task: 'a', inputFiles: 'file_x' } },
+          { tool: 'task_run', args: { task: 'b', inputFiles: [''] } },
         ],
         text: '收到',
       });
       await fx.session.send('交办形状错误的任务');
       expect(fx.capture.toolErrors).toHaveLength(2);
-      expect(fx.capture.toolErrors[0]).toBe('run_task 的 inputFiles 必须是 fileId 数组。');
-      expect(fx.capture.toolErrors[1]).toBe('run_task 的 inputFiles 含空 fileId（请用文件清单里给出的 fileId）。');
+      expect(fx.capture.toolErrors[0]).toBe('task_run 的 inputFiles 必须是 fileId 数组。');
+      expect(fx.capture.toolErrors[1]).toBe('task_run 的 inputFiles 含空 fileId（请用文件清单里给出的 fileId）。');
       expect(fx.session.tasks()).toHaveLength(0);
     } finally {
       fx.ro.close();

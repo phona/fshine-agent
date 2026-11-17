@@ -44,7 +44,7 @@ export function clampProgressPhrase(phrase: string): string {
 
 /**
  * 默认进度帧（L6 沉积清理 + 申报层删除后）：主 Agent 工具面只剩委派工具（缺省
- * run_task，实例名经 profile.toolName 声明）、read_skill 与任务治理工具
+ * task_run，实例名经 profile.toolName 声明）、read_skill 与任务治理工具
  * （task_status / task_result / task_cancel / task_resume）——直接平台工具已退役，
  * 其具名帧随之删除。剩余工具一律回退到通用工具名模板。
  */

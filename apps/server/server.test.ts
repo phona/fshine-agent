@@ -171,7 +171,7 @@ describe('server（假渠道 + 假执行客户端 + 假模型）', () => {
       dbPath: path.join(dir, 'state.db'),
       createDrivers: async () => ({
         mainDriver: await driverFor([
-          toolCallAssistant('run_task', { task: '查询 documents 窗口 W202611' }, 'call_main_1'),
+          toolCallAssistant('task_run', { task: '查询 documents 窗口 W202611' }, 'call_main_1'),
           textAssistant('documents 窗口 W202611 共 3 条。'),
         ]),
         workerDriver: await driverFor([

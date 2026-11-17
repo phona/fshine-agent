@@ -6,10 +6,10 @@
  * （`docs/product/gap-task-surface.md`）。
  *
  * 三条独立的机械事实（全部零真实模型；执行层为仓内 dummy 夹具或纯内存假 executor）：
- *   A. 对话面缺席：Main 回合工具面仅 `run_task`（execution-runtime.ts:426）；
+ *   A. 对话面缺席：Main 回合工具面仅 `task_run`（execution-runtime.ts:426）；
  *      对 task_status/task_result/task_cancel/task_resume 的 Main 调用一律
  *      `Main 工具面之外的调用`（execution-runtime.ts:430）。
- *   B. 终态事实与执行层留痕：经 run_task 推进到终态的任务，registry 落终态、
+ *   B. 终态事实与执行层留痕：经 task_run 推进到终态的任务，registry 落终态、
  *      执行层 <state-dir>/audit.jsonl 落实际执行行（含 result）。
  *   C. 能力已在宿主侧存在：registry.get/list（scope 化）、runner.cancel（requested≠cancelled）、
  *      runner.resume（waiting_user 接续）、resultText 逐字存档——能力齐全但**无对话入口**。
@@ -52,7 +52,7 @@ async function probeConversationFace(): Promise<Record<string, unknown>> {
     async run(input) {
       tools.length = 0;
       for (const t of input.tools) tools.push(t.name);
-      runTaskResult = await input.exec('run_task', { task: '核对 alpha 的 W1 记录' });
+      runTaskResult = await input.exec('task_run', { task: '核对 alpha 的 W1 记录' });
       for (const tool of ['task_status', 'task_result', 'task_cancel', 'task_resume']) {
         try {
           await input.exec(tool, { ref: '1' });
@@ -113,7 +113,7 @@ async function probeConversationFace(): Promise<Record<string, unknown>> {
     resultRetrieval,
     auditRowCount: auditRows.length,
     auditRows,
-    note: '对话面缺席的机械证据：Main 工具面只给 run_task；task_status/task_result/task_cancel/task_resume 无入口。',
+    note: '对话面缺席的机械证据：Main 工具面只给 task_run；task_status/task_result/task_cancel/task_resume 无入口。',
   };
 }
 
@@ -155,7 +155,7 @@ async function probeCapabilityApi(): Promise<Record<string, unknown>> {
       const last = input.messages[input.messages.length - 1] as { content?: unknown } | undefined;
       const text = typeof last?.content === 'string' ? last.content : '';
       const plan = mainPlan.get(text);
-      const tool = input.tools.find((t) => t.name === 'run_task') ?? input.tools[0]!;
+      const tool = input.tools.find((t) => t.name === 'task_run') ?? input.tools[0]!;
       const execResults: unknown[] = [];
       if (plan !== undefined) execResults.push(await input.exec(tool.name, { task: plan.task }));
       const reply = plan === undefined ? '（探针）无计划回合' : '已受理。';
@@ -241,7 +241,7 @@ async function main(): Promise<void> {
       capabilityObservations: capability['observations'],
     },
     designCrossReference: [
-      { designClaim: '#1 Main 工具面仅 run_task（execution-runtime.ts:426-430）', observed: `mainToolNames=${JSON.stringify(mainTools)}；四个治理/查询工具全部 blocked` },
+      { designClaim: '#1 Main 工具面仅 task_run（execution-runtime.ts:426-430）', observed: `mainToolNames=${JSON.stringify(mainTools)}；四个治理/查询工具全部 blocked` },
       { designClaim: '#4/#5 registry.get/list 带 scope；取消/接续均收 scope（task-registry-sqlite.ts:96-100,218-222；task-runner.ts:275,277）', observed: 'registry.list(本会话)=2 任务、list(他会话)=[]；get(他会话)=TaskOwnershipError；runner.cancel/resume 均收 scope' },
       { designClaim: '#6 取消语义=requestCancel→cancelling，确认才 cancelled（task-runner.ts:32-34,407-418）', observed: 'running→cancel=requested→cancelling→执行端确认→cancelled(cancelled_by_user)；重复 cancel=terminal' },
       { designClaim: 'waiting_user 接续入口=registry answerResumes（经 runner.resume）', observed: 'needs_input→waiting_user；resume=started→completed；executor 收到 answer' },

@@ -16,7 +16,7 @@ import type {
   ExecutionRequest,
 } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, RuntimeTurnEvent, TurnDriver, TurnDriverInput, TurnDriverResult } from './src/driver-contract';
-import { createSession, EXECUTE_OPERATION_TOOL, RUN_TASK_TOOL, type Session } from './src/execution-runtime';
+import { createSession, EXECUTE_OPERATION_TOOL, TASK_RUN_TOOL, type Session } from './src/execution-runtime';
 import { createTaskRegistry, type TaskRegistry } from './src/task-registry';
 
 const MANIFEST: CapabilityManifest = {
@@ -122,7 +122,7 @@ describe('U3 宿主绑定（恢复后重绑定 / 同参数不合并 / 只读重�
       worker: [END, queryTool(), RETRY, END, queryTool(), { kind: 'text', text: '已查询 docs：3 条。' }],
       main: [
         END,
-        { kind: 'tool', tool: RUN_TASK_TOOL, args: { task: '查询 docs' } },
+        { kind: 'tool', tool: TASK_RUN_TOOL, args: { task: '查询 docs' } },
         { kind: 'text', text: 'docs 共 3 条。' },
       ],
       client,
@@ -146,7 +146,7 @@ describe('U3 宿主绑定（恢复后重绑定 / 同参数不合并 / 只读重�
       worker: [END, queryTool(), END, queryTool(), { kind: 'text', text: '查询完成。' }],
       main: [
         END,
-        { kind: 'tool', tool: RUN_TASK_TOOL, args: { task: '查两次 docs' } },
+        { kind: 'tool', tool: TASK_RUN_TOOL, args: { task: '查两次 docs' } },
         { kind: 'text', text: '已查询。' },
       ],
       client,
@@ -175,7 +175,7 @@ describe('U3 宿主绑定（恢复后重绑定 / 同参数不合并 / 只读重�
       worker: [END, queryTool(), RETRY, END, queryTool(), { kind: 'text', text: '已重新查询。' }],
       main: [
         END,
-        { kind: 'tool', tool: RUN_TASK_TOOL, args: { task: '查 docs' } },
+        { kind: 'tool', tool: TASK_RUN_TOOL, args: { task: '查 docs' } },
         { kind: 'text', text: '已查询。' },
       ],
       client,
@@ -203,7 +203,7 @@ describe('U3 宿主绑定（恢复后重绑定 / 同参数不合并 / 只读重�
       worker: [END, { kind: 'tool', tool: EXECUTE_OPERATION_TOOL, args: { operation: 'dummy.commit', args: { '--collection': 'docs' } } }],
       main: [
         END,
-        { kind: 'tool', tool: RUN_TASK_TOOL, args: { task: '提交 docs' } },
+        { kind: 'tool', tool: TASK_RUN_TOOL, args: { task: '提交 docs' } },
         { kind: 'text', text: '这次结果不确定，需要再确认。' },
       ],
       client,
@@ -220,17 +220,17 @@ describe('U3 宿主绑定（恢复后重绑定 / 同参数不合并 / 只读重�
     expect(registry.getOperation(client.requests[0]!.dispatchKey)?.reason).toBe('result_unknown');
   });
 
-  it('Main 的 run_task 在恢复窗口内重复：只创建一个任务，回执回放（不重复委派）', async () => {
+  it('Main 的 task_run 在恢复窗口内重复：只创建一个任务，回执回放（不重复委派）', async () => {
     const client = new RecordingClient();
     const registry = createTaskRegistry();
     const { session, worker } = await sessionFor({
       main: [
         END,
-        { kind: 'tool', tool: RUN_TASK_TOOL, args: { task: '查询 docs' } },
+        { kind: 'tool', tool: TASK_RUN_TOOL, args: { task: '查询 docs' } },
         RETRY,
         END,
         // 重试的响应措辞不同，但仍是同一次交办。
-        { kind: 'tool', tool: RUN_TASK_TOOL, args: { task: '帮我查询 docs 的数据' } },
+        { kind: 'tool', tool: TASK_RUN_TOOL, args: { task: '帮我查询 docs 的数据' } },
         { kind: 'text', text: 'docs 共 3 条。' },
       ],
       worker: [END, queryTool(), { kind: 'text', text: 'docs 共 3 条。' }],
@@ -254,7 +254,7 @@ describe('U3 宿主绑定（恢复后重绑定 / 同参数不合并 / 只读重�
       worker: [END, queryTool(), END, queryTool(), { kind: 'text', text: '完成。' }],
       main: [
         END,
-        { kind: 'tool', tool: RUN_TASK_TOOL, args: { task: '查询' } },
+        { kind: 'tool', tool: TASK_RUN_TOOL, args: { task: '查询' } },
         { kind: 'text', text: '完成。' },
       ],
       client,

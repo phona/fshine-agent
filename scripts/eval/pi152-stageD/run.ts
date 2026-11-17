@@ -280,7 +280,7 @@ function fakeMain(): TurnDriver {
   return {
     async run(input) {
       turn += 1;
-      if (turn === 1) await input.exec('run_task', { task: '核对 alpha 集合 W1 的记录' });
+      if (turn === 1) await input.exec('task_run', { task: '核对 alpha 集合 W1 的记录' });
       if (turn === 2) await input.exec('task_status', {});
       const text = turn === 1 ? '已交办。' : '任务在办。';
       return { text, messages: [...input.messages, { role: 'assistant', content: text } as never] };
@@ -334,7 +334,7 @@ async function runSelftest(out: string): Promise<number> {
     const tools = handle.sink.toolCalls.map((call) => `${call.agent}:${call.tool}`);
     const assertions = [
       ['reply non-empty', first.reply.trim() !== '' && second.reply.trim() !== ''],
-      ['run_task called', tools.includes('main:run_task')],
+      ['task_run called', tools.includes('main:task_run')],
       ['execute_operation called', tools.includes('worker:execute_operation')],
       ['task_status called', tools.includes('main:task_status')],
       ['exactly 1 task', tasks.length === 1],
@@ -416,7 +416,7 @@ async function runDSelftest(out: string): Promise<number> {
   });
   const mainFor = (mode: 'run' | 'status'): TurnDriver => ({
     async run(input) {
-      if (mode === 'run') await input.exec('run_task', { task: '核对 beta 集合 W1 的记录' });
+      if (mode === 'run') await input.exec('task_run', { task: '核对 beta 集合 W1 的记录' });
       else await input.exec('task_status', { ref: '#1' });
       const text = mode === 'run' ? '已交办。' : '查不到该任务。';
       return { text, messages: [...input.messages, { role: 'assistant', content: text } as never] };

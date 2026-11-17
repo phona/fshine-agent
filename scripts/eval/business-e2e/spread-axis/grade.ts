@@ -80,7 +80,7 @@ function objectKeyOf(object: { collection: string; window?: string } | undefined
   return object.window === undefined ? object.collection : `${object.collection}@${object.window}`;
 }
 
-const DECLARED_MAIN_TOOLS: ReadonlySet<string> = new Set(['run_task', 'task_status', 'task_result', 'task_cancel', 'task_resume', 'read_skill']);
+const DECLARED_MAIN_TOOLS: ReadonlySet<string> = new Set(['task_run', 'task_status', 'task_result', 'task_cancel', 'task_resume', 'read_skill']);
 
 function turnObservations(caseDef: DsCase, toolCalls: readonly ToolCallRecord[]): DsTurnObservation[] {
   return caseDef.turns.map((text, index) => {
@@ -123,7 +123,7 @@ function indicatorsOf(caseDef: DsCase, sample: SampleRecord, toolCalls: readonly
   const nonReadOperations = executions.filter((e) => accessOf(e.operation) !== 'read').length;
   const mainTools = toolCalls.filter((c) => c.agent === 'main');
   const extraMainTools = mainTools.filter((c) => !DECLARED_MAIN_TOOLS.has(c.tool)).length;
-  const taskCreations = mainTools.filter((c) => c.tool === 'run_task').length;
+  const taskCreations = mainTools.filter((c) => c.tool === 'task_run').length;
 
   const attemptCounts = new Map<string, number>();
   let failedOrRefused = 0;

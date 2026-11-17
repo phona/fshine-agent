@@ -219,7 +219,7 @@ function capturePort(): FileDeliveryPort {
   };
 }
 
-// ── 假执行面（生命周期验收不触执行层业务；给 run_task 的能力快照一个非空允许集） ──
+// ── 假执行面（生命周期验收不触执行层业务；给 task_run 的能力快照一个非空允许集） ──
 
 const FACE_MANIFEST: CapabilityManifest = {
   contractVersion: 1,

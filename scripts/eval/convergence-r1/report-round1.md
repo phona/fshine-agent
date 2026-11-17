@@ -200,7 +200,7 @@ npm run eval:user -- --case E04 --trial 1 --out-dir .runtime/eval-r1/e04-repro
 **E05/trial-1..3 — 未委派、零执行、先澄清**
 - 最小证据：3/3 `toolcalls.jsonl` 空、trial `taskIds=[]`、`audit.jsonl` 0 行（零结构化执行）、T1 tasks=[]；判负 FAIL_NO_DELEGATION、FAIL_WRONG_OBJECT、FAIL_ZERO_EXECUTION（②执行真实性、③数据正确性 fail）。
 - trial-1 思考逐字：「…但也可以直接交给 Worker 尝试查找 contoso 相关的数据。不过平台上的对象类型很多，不明确范围的话 Worker 也难以执行。我选择先澄清，问用户具体想查什么。」；trial-2/3 思考同型（均表示先澄清、不直接委派）。
-- 归因：Pi 主 Agent 决策；所需行为已被现存协议/技能覆盖——`packages/agent/src/execution-runtime.ts:68`（涉及平台数据的请求，用 run_task 工具交给执行层 Worker）与夹具技能 `scripts/eval/fixtures/dummy-platform/.agents/skills-serve/dummy-routing/SKILL.md:66`（「contoso」前缀→歧义）、`:73`（候选作为一次澄清交给用户）；未见运行时/工具/声明缺陷。
+- 归因：Pi 主 Agent 决策；所需行为已被现存协议/技能覆盖——`packages/agent/src/execution-runtime.ts:68`（涉及平台数据的请求，用 task_run 工具交给执行层 Worker）与夹具技能 `scripts/eval/fixtures/dummy-platform/.agents/skills-serve/dummy-routing/SKILL.md:66`（「contoso」前缀→歧义）、`:73`（候选作为一次澄清交给用户）；未见运行时/工具/声明缺陷。
 
 **E07/trial-3 — 无执行支撑的具体数据交付**
 - 最小证据：唯一执行 `dummy.query alpha W9 → not_found`、无 items；reply turn-1 却称「alpha 集合…目前包含两个条目：alpha-item-1（值 1200）、alpha-item-2（值 800）」→ FAIL_FABRICATED_DATA（③数据正确性 fail）。

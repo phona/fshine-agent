@@ -3,9 +3,9 @@
  *
  * 覆盖：
  *   ① 用例展开与硬上限（缺一不跑）；
- *   ② **工具面门控核实**（缺口 1）：withTaskRunner 注入 runner → 四工具注册；否则仅 run_task
+ *   ② **工具面门控核实**（缺口 1）：withTaskRunner 注入 runner → 四工具注册；否则仅 task_run
  *      （bizprobe/ask 的 inline 装配路径缺省无 runner → 四工具**不注册**，如实登记）；
- *   ③ 四工具全流程（假件）：run_task/task_status/task_result/task_cancel 各发生一次；取消如实；
+ *   ③ 四工具全流程（假件）：task_run/task_status/task_result/task_cancel 各发生一次；取消如实；
  *   ④ 越权=找不到（T03，预置他会话任务）；挂起→接着办（T02，预置 waiting 任务 + resume）；
  *   ⑤ 跑批装配：逐样本工作目录 + 证据落盘 + 判定汇总；
  *   ⑥ 串并行一致性（确定性假件同集两跑）；
@@ -99,7 +99,7 @@ function itemFor(caseDef: ExpCase, trial = 1): ExpItem {
 function satisfyingEvidence(caseDef: ExpCase, item: ExpItem): ExpEvidence {
   const calls: ToolCallRecord[] = (caseDef.toolsMustBeCalled ?? []).map((tool, i) => ({
     turn: 1, agent: 'main', seq: i + 1, tool,
-    args: tool === 'run_task' ? { task: 'x' } : tool === 'task_resume' ? { ref: '#1', answer: 'y' } : { ref: '#1' },
+    args: tool === 'task_run' ? { task: 'x' } : tool === 'task_resume' ? { ref: '#1', answer: 'y' } : { ref: '#1' },
     result: { ok: true }, resultSummary: '', startedAt: '2026-01-01T00:00:00Z', elapsedMs: 1,
   }));
   const replies: ReplyLine[] = [{ turn: 1, text: (caseDef.replyMustInclude ?? []).join(' ') || 'ok', sha256: '' }];
@@ -146,9 +146,9 @@ describe('① 用例展开与硬上限（缺一不跑）', () => {
 });
 
 describe('② 工具面门控核实（缺口 1 taskRunner 同源门控）', () => {
-  it('withTaskRunner 注入 runner → 四工具注册；无 runner → 仅 run_task', async () => {
+  it('withTaskRunner 注入 runner → 四工具注册；无 runner → 仅 task_run', async () => {
     const root = freshRoot();
-    const steps = [async (e: Exec) => { await e('run_task', { task: '核对 alpha W1 记录' }); }];
+    const steps = [async (e: Exec) => { await e('task_run', { task: '核对 alpha W1 记录' }); }];
     const exec = executorWith(steps);
     // 本用例只验 runner 门控。Main 技能 catalog 是正交变量：S3 往 `.agents/skills` 加了
     // 生产技能后，缺省目录会多出 read_skill——用空索引臂隔离，避免断言随技能内容漂移。
@@ -156,11 +156,11 @@ describe('② 工具面门控核实（缺口 1 taskRunner 同源门控）', () =
     const isolated: ExpCase = { ...T01, mainSkillsDir: skillsNone };
 
     const withRunner = await exec(itemFor(isolated), isolated, path.join(root, 'a'));
-    expect(withRunner.perTurnMainTools[0]).toEqual(['run_task', 'task_status', 'task_result', 'task_cancel', 'task_resume']);
+    expect(withRunner.perTurnMainTools[0]).toEqual(['task_run', 'task_status', 'task_result', 'task_cancel', 'task_resume']);
 
     const bare: ExpCase = { ...isolated, id: 'T01bare', withTaskRunner: false };
     const without = await exec(itemFor(bare), bare, path.join(root, 'b'));
-    expect(without.perTurnMainTools[0], 'bizprobe/ask inline 路径缺省无 runner → 四工具不注册').toEqual(['run_task']);
+    expect(without.perTurnMainTools[0], 'bizprobe/ask inline 路径缺省无 runner → 四工具不注册').toEqual(['task_run']);
   });
 
   /**
@@ -175,10 +175,10 @@ describe('② 工具面门控核实（缺口 1 taskRunner 同源门控）', () =
     const skillsNone = path.join(FIXTURE_ROOT, '.agents', 'skills-none'); // 故意不存在 = 空索引
     const taskTools = ['task_status', 'task_result', 'task_cancel', 'task_resume'];
     const cells: ReadonlyArray<{ label: string; withTaskRunner: boolean; mainSkillsDir: string; expected: string[]; catalog: boolean }> = [
-      { label: 'runner＋catalog', withTaskRunner: true, mainSkillsDir: skillsMain, expected: ['run_task', ...taskTools, 'read_skill'], catalog: true },
-      { label: 'runner＋空目录', withTaskRunner: true, mainSkillsDir: skillsNone, expected: ['run_task', ...taskTools], catalog: false },
-      { label: '无 runner＋catalog', withTaskRunner: false, mainSkillsDir: skillsMain, expected: ['run_task', 'read_skill'], catalog: true },
-      { label: '无 runner＋空目录', withTaskRunner: false, mainSkillsDir: skillsNone, expected: ['run_task'], catalog: false },
+      { label: 'runner＋catalog', withTaskRunner: true, mainSkillsDir: skillsMain, expected: ['task_run', ...taskTools, 'read_skill'], catalog: true },
+      { label: 'runner＋空目录', withTaskRunner: true, mainSkillsDir: skillsNone, expected: ['task_run', ...taskTools], catalog: false },
+      { label: '无 runner＋catalog', withTaskRunner: false, mainSkillsDir: skillsMain, expected: ['task_run', 'read_skill'], catalog: true },
+      { label: '无 runner＋空目录', withTaskRunner: false, mainSkillsDir: skillsNone, expected: ['task_run'], catalog: false },
     ];
     for (const cell of cells) {
       const def: ExpCase = { ...T01, id: `gate-${cell.label}`, withTaskRunner: cell.withTaskRunner, mainSkillsDir: cell.mainSkillsDir };
@@ -190,10 +190,10 @@ describe('② 工具面门控核实（缺口 1 taskRunner 同源门控）', () =
 });
 
 describe('③ 四工具全流程（假件）', () => {
-  it('T01：run_task/task_status/task_result/task_cancel 各发生一次；取消如实（completed→terminal）；判定通过', async () => {
+  it('T01：task_run/task_status/task_result/task_cancel 各发生一次；取消如实（completed→terminal）；判定通过', async () => {
     const root = freshRoot();
     const exec = executorWith([
-      async (e) => { await e('run_task', { task: '核对 alpha 集合 W1 的记录' }); },
+      async (e) => { await e('task_run', { task: '核对 alpha 集合 W1 的记录' }); },
       async (e) => { await e('task_status', { ref: '#1' }); },
       async (e) => { await e('task_result', { ref: '#1' }); },
       async (e) => { await e('task_cancel', { ref: '#1' }); },
@@ -212,7 +212,7 @@ describe('④ 越权=找不到 与 挂起→接着办（预置任务）', () => 
   it('T03：他会话 #1 不可见 → task_status 抛错（不泄露存在性）；判定通过', async () => {
     const root = freshRoot();
     const exec = executorWith([
-      async (e) => { await e('run_task', { task: '核对 beta 集合 W1 的记录' }); },
+      async (e) => { await e('task_run', { task: '核对 beta 集合 W1 的记录' }); },
       async (e) => { await e('task_status', { ref: '#1' }); },
     ], undefined, () => workerQuerier('beta', 'W1'));
     const ev = await exec(itemFor(T03), T03, path.join(root, 't03'));
@@ -241,7 +241,7 @@ describe('⑤ 跑批装配（batch + collect + judge，假件）', () => {
     const root = freshRoot();
     const outRoot = path.join(root, 'out');
     const exec = executorWith([
-      async (e) => { await e('run_task', { task: '核对 alpha 集合 W1 的记录' }); },
+      async (e) => { await e('task_run', { task: '核对 alpha 集合 W1 的记录' }); },
       async (e) => { await e('task_status', { ref: '#1' }); },
       async (e) => { await e('task_result', { ref: '#1' }); },
       async (e) => { await e('task_cancel', { ref: '#1' }); },

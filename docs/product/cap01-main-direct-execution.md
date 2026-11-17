@@ -17,7 +17,7 @@
 | 实名 | 落点 | 只负责 |
 |---|---|---|
 | **装配层** assemble | `scripts/ask-runtime.ts`、`apps/server/server.ts`、`apps/server/main.ts` | 构造 fileStore 与 `runJsExecutor` 并注入；持有投递端口；不写业务 |
-| **会话运行时** runtime | `packages/agent/src/execution-runtime.ts` | exec 闭包、`fileId` 解析、`run_task`/任务工具；不 import 渠道类型、不直接 spawn |
+| **会话运行时** runtime | `packages/agent/src/execution-runtime.ts` | exec 闭包、`fileId` 解析、`task_run`/任务工具；不 import 渠道类型、不直接 spawn |
 | **文件区监管** fileStore | `file_refs` + workspace 布局 + 物化/登记/清理 | **唯一**写文件事实的地方 |
 | **渠道适配** channel | `packages/channel-wecom/src/adapter.ts` | 只收发字节与回执；不做裁决 |
 
@@ -177,7 +177,7 @@ export interface TurnFileRef { fileId: string; name: string; bytes: number }
 |---|---|---|
 | **S0** | `exceljs` 依赖；`file_refs` 一表；workspace/run 目录；`run-js-executor`（权限模型 + 进程组 kill + 输出截断 + 产物扫描 + 审计）；**不接 Main、不接渠道** | 直接插一行 `file_refs` → 脚本读 `in/`、写 `out/` → 产物登记成新 `fileId`、**原件 sha256 不变**；读 `.env` 被拒；`child_process` 被拒；超时被进程组 kill |
 | **S1** | Main 接 `run_js`；入站登记（**修 `attachmentOnly` 早退在查重之前**）；清单注入；交付（B）+ 失败可观测 | 用户传 12 行 Excel + 一句话 → **不建 Task** → 收到文件且内容正确（Oracle 重解析）；**故意让投递失败 → 用户看到"未送达"、系统记失败、不记 sent** |
-| **S2** | `run_task.inputFiles`；Task 副本（新 `file_id`）；Worker 接 `run_js`；执行层目录参数桥；回程登记 | Worker 处理 → **数据不进任何模型上下文**（工具参数里无行数据）→ 产物回 Main → 交付 |
+| **S2** | `task_run.inputFiles`；Task 副本（新 `file_id`）；Worker 接 `run_js`；执行层目录参数桥；回程登记 | Worker 处理 → **数据不进任何模型上下文**（工具参数里无行数据）→ 产物回 Main → 交付 |
 
 **S0 的"Worker 越权被拒"挪到 S2**（v7 写错了：Worker 工具面到 S2 才加）。
 **并发**：缺省 `mainConcurrency=1`/`queueCapacity=0`，一个 60s 脚本期间其它会话会被 `queue_full` 拒；`timeoutMs` 按这个成本定（S3 再谈并发）。

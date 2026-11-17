@@ -1,5 +1,5 @@
 /**
- * 阶段 C 异常退出夹具（子进程）：业务会话跑一回合（含一次 run_task 委派）→ 写计数/marker → SIGKILL。
+ * 阶段 C 异常退出夹具（子进程）：业务会话跑一回合（含一次 task_run 委派）→ 写计数/marker → SIGKILL。
  *
  * 用法：node --import tsx .../stage-c-crash.ts <sessionDir> <counterFile> <markerFile>
  * 父进程随后用 SessionManager / 驱动恢复同一会话，核验「假执行层计数不增加」。
@@ -7,7 +7,7 @@
 import { appendFileSync, writeFileSync } from 'node:fs';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { DiscoveredTool } from '@fshine/contracts';
-import { RUN_TASK_TOOL, RUN_TASK_TOOL_DESCRIPTION, RUN_TASK_TOOL_SCHEMA } from '../../../../packages/agent/src/execution-runtime';
+import { TASK_RUN_TOOL, TASK_RUN_TOOL_DESCRIPTION, TASK_RUN_TOOL_SCHEMA } from '../../../../packages/agent/src/execution-runtime';
 import { createPiTurnDriver } from '../../../../packages/agent/src/pi-driver';
 import { createScriptedModelRuntime } from '../../../../packages/agent/testing/scripted-model-runtime';
 
@@ -25,12 +25,12 @@ function asst(content: unknown[], stopReason = 'stop'): AgentMessage {
 }
 const user = (text: string): AgentMessage => ({ role: 'user', content: text, timestamp: 1 } as unknown as AgentMessage);
 const toolCall = (id: string, args: Record<string, unknown>): AgentMessage =>
-  asst([{ type: 'toolCall', id, name: RUN_TASK_TOOL, arguments: args }], 'toolUse');
+  asst([{ type: 'toolCall', id, name: TASK_RUN_TOOL, arguments: args }], 'toolUse');
 
 const runTask: DiscoveredTool = {
-  name: RUN_TASK_TOOL,
-  description: RUN_TASK_TOOL_DESCRIPTION,
-  inputSchema: RUN_TASK_TOOL_SCHEMA,
+  name: TASK_RUN_TOOL,
+  description: TASK_RUN_TOOL_DESCRIPTION,
+  inputSchema: TASK_RUN_TOOL_SCHEMA,
 };
 
 const scripted = await createScriptedModelRuntime({
