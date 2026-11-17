@@ -103,6 +103,9 @@
 
 ## 八、覆盖盲区（业务级无用例；附查证依据）
 
+> 真企微 × dummy 的**人工联调用例**（32 条，分 P0/P1，含期望值速查与陷阱）另见
+> `docs/product/wecom-live-dummy-cases.md`。
+
 | # | 盲区 | 依据 |
 |---|---|---|
 | 1 | ~~**附件交给执行层处理**~~ | **2026-11-17 已补**：`fileParams` 单文件参数翻译 + `packages/agent/task-file-bridge-dummy.test.ts`（真 dummy 读到附件字节、写出的文件被登记成产物）。 |

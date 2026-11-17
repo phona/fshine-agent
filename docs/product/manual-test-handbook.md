@@ -55,6 +55,10 @@ TMPDIR=~/.tmp npx tsx .runtime/stab/probe-readings.ts
 
 ## 5. 真机功能走查清单（人工执行）
 
+> 真企微（live）× dummy 执行层的**具体联调用例**见 `docs/product/wecom-live-dummy-cases.md`
+> （2026-11-17，32 条 P0/P1，含 dummy 期望值速查、附件时序与踩过的陷阱）。本节是通用清单，
+> 不重复其中的号码级用例。
+
 按顺序走一遍主链，每步记录「实际现象 + 是否可读 + 是否省心」：
 
 1. **启动**：`npm start`（渠道面）或 `npm run ask -- "帮我查一下 documents 集合在 W202611 窗口的数据。"` 能起来、无异常退出。
