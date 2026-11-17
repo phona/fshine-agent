@@ -253,7 +253,7 @@ describe('回程：data.files 登记与剥除（③）', () => {
     }
   });
 
-  it('同 sha256 两次返回（一次 path、一次 base64）→ 复用同一 fileId（ask ⑤ 经桥面）', async () => {
+  it('同 sha256 **同名**两次返回（一次 path、一次 base64）→ 复用同一 fileId（ask ⑤ 经桥面）', async () => {
     const fx = makeFixture({});
     try {
       const bytes = Buffer.from('同一份产物');
@@ -263,7 +263,7 @@ describe('回程：data.files 登记与剥除（③）', () => {
       writeFileSync(onDisk, bytes);
 
       const first = await fx.bridge.registerReturnedFiles([{ name: 'product.bin', path: onDisk }]);
-      const second = await fx.bridge.registerReturnedFiles([{ name: 'product-again.bin', content: bytes.toString('base64') }]);
+      const second = await fx.bridge.registerReturnedFiles([{ name: 'product.bin', content: bytes.toString('base64') }]);
       expect(second.files[0]!.fileId).toBe(first.files[0]!.fileId);
       expect(fx.store.listFileRefs(SCOPE).filter((row) => row.taskId === TASK_A)).toHaveLength(1);
     } finally {

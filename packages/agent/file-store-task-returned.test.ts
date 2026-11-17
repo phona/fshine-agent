@@ -73,7 +73,7 @@ function catchRejected(fn: () => unknown): TaskFileRejectedError {
 }
 
 describe('registerTaskFile：任务回程内联字节登记 + sha256 去重（ask ⑤）', () => {
-  it('⑤ 同 sha256 两次登记 → 复用同一 fileId、不重复落盘、不新增行', () => {
+  it('⑤ 同 sha256 **同名**两次登记 → 复用同一 fileId；同字节不同名各自成行（2026-11-17 修）', () => {
     const { workspaceRoot, store, fileStore } = makeFixture();
     const bytes = Buffer.from('季度汇总,v1\n合计,42\n');
     const first = fileStore.registerTaskFile({ scope: SCOPE, taskId: TASK_A, name: '汇总.xlsx', bytes, maxFileBytes: 1024 });
@@ -81,13 +81,17 @@ describe('registerTaskFile：任务回程内联字节登记 + sha256 去重（as
     expect(first.sha256).toBe(createHash('sha256').update(bytes).digest('hex'));
     expect(first.bytes).toBe(bytes.length);
 
-    // 第二次登记（同任务、同字节、不同 name）→ 复用旧 fileId；行数与落盘份数都不变。
-    const second = fileStore.registerTaskFile({ scope: SCOPE, taskId: TASK_A, name: '汇总副本.csv', bytes, maxFileBytes: 1024 });
-    expect(second.fileId).toBe(first.fileId);
-    expect(second.name).toBe('汇总.xlsx'); // 复用旧行的机械事实，不用新 name 另立行
-    const rows = store.listFileRefs(SCOPE).filter((row) => row.taskId === TASK_A);
-    expect(rows).toHaveLength(1);
+    // 同名同字节 → 复用旧 fileId（去重仍然生效）。
+    const again = fileStore.registerTaskFile({ scope: SCOPE, taskId: TASK_A, name: '汇总.xlsx', bytes, maxFileBytes: 1024 });
+    expect(again.fileId).toBe(first.fileId);
     expect(storedFileCount(workspaceRoot)).toBe(1);
+
+    // 同字节**不同名** → 不复用：名字是交付面的用户可见事实，不能被旧行吞掉。
+    const renamed = fileStore.registerTaskFile({ scope: SCOPE, taskId: TASK_A, name: '汇总副本.csv', bytes, maxFileBytes: 1024 });
+    expect(renamed.fileId).not.toBe(first.fileId);
+    expect(renamed.name).toBe('汇总副本.csv');
+    const rows = store.listFileRefs(SCOPE).filter((row) => row.taskId === TASK_A);
+    expect(rows.map((row) => row.name).sort()).toEqual(['汇总.xlsx', '汇总副本.csv']);
     store.close();
   });
 

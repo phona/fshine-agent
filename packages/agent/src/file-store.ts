@@ -465,8 +465,10 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
    * 任务产物池去重（CAP-01 S2 ⑤）：同 (scope, taskId, sha256) 已有行 → 复用旧 fileId
    * （不落盘、不新增行）。池不跨任务、不跨解析侧——Main 侧行与其他任务的行不参与复用。
    */
-  function findTaskRowBySha(scope: FileScope, taskId: string, sha256: string): FileRefRow | undefined {
-    return store.listFileRefs(scope).find((row) => row.taskId === taskId && row.sha256 === sha256);
+  function findTaskRowBySha(scope: FileScope, taskId: string, sha256: string, name: string): FileRefRow | undefined {
+    // 2026-11-17 修：复用键必须含文件名——只按 sha 复用会把「同字节不同名」的乙.csv 换成
+    // 甲.csv，投递层的 (sha256, 文件名) 去重无法把名字还原，用户就少收一份文件。
+    return store.listFileRefs(scope).find((row) => row.taskId === taskId && row.sha256 === sha256 && row.name === name);
   }
 
   /** fd 单遍流式哈希（回程登记第一遍：先哈希查重，再决定是否落盘；同一 fd 上两遍读取）。 */
@@ -502,7 +504,7 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
       if (error instanceof RangeError && error.message === 'size_limit') throw new TaskFileRejectedError('size_limit');
       throw error;
     }
-    const reused = findTaskRowBySha(input.scope, input.taskId, hashed.sha256);
+    const reused = findTaskRowBySha(input.scope, input.taskId, hashed.sha256, input.name);
     if (reused !== undefined) return { fileId: reused.fileId, name: reused.name, bytes: reused.bytes, sha256: reused.sha256 };
     const fileId = newFileId();
     const destPath = fileStoragePathOf(workspaceRoot, input.scope, fileId, input.name);
@@ -701,7 +703,7 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
       // 内联字节面：超限拒收 → 任务池 sha256 去重（复用旧 fileId、不落盘）→ 新 file_id 落盘登记。
       if (bytes.length > maxFileBytes) throw new TaskFileRejectedError('size_limit');
       const sha256 = createHash('sha256').update(bytes).digest('hex');
-      const reused = findTaskRowBySha(scope, taskId, sha256);
+      const reused = findTaskRowBySha(scope, taskId, sha256, name);
       if (reused !== undefined) return { fileId: reused.fileId, name: reused.name, bytes: reused.bytes, sha256: reused.sha256 };
       const fileId = newFileId();
       const storagePath = fileStoragePathOf(workspaceRoot, scope, fileId, name);

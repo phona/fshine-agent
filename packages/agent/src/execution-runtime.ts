@@ -1064,6 +1064,27 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       throw error;
     }
     memo.set(memoKey, output);
+    // 执行事实入账（2026-11-17 修）：Worker 的 run_js 是**真实执行**，必须进底账——完成判定
+    // （judgeReportedTask）只看执行事实，不进账会出现两种假象：①查询成功 + 脚本失败仍判
+    // completed；②只靠脚本完成的任务被判 unexecuted。取消/超时杀掉的运行不写（留给取消路径定性）。
+    if (output.audit.killReason === undefined) {
+      const scriptOk = output.exitCode === 0;
+      registry.noteExecution(taskId, {
+        requestId: `runjs_${output.audit.runId}`,
+        operation: RUN_JS_TOOL,
+        status: scriptOk ? 'completed' : 'failed',
+        dispatchKey: `runjs:${output.audit.runId}`,
+        ...(scriptOk
+          ? {}
+          : {
+              error: {
+                code: 'run_js_failed',
+                message: `run_js 脚本以非零退出码结束（exit=${String(output.exitCode)}）`,
+                retryable: false,
+              },
+            }),
+      });
+    }
     // 内存墙事件：Worker 面没有用户可见回复（汇报经 Main 转述），但机械事实必须可查。
     noteRunJsMemoryExit(output, 'worker', taskId);
     for (const file of output.outputs) {

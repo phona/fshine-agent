@@ -295,6 +295,72 @@ describe('CAP-01 S2 ① Worker 接 run_js（任务作用域）', () => {
     }
   });
 
+  it('只靠脚本完成的任务不再被判 unexecuted（run_js 进执行事实）', async () => {
+    const fx = await makeFixture();
+    try {
+      fx.workerPush({
+        execCalls: [{ tool: 'run_js', args: { code: "require('node:fs').writeFileSync('out/纯脚本.txt', 'ok');" } }],
+        text: '已用脚本处理完成。',
+      });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '只用脚本办一件事' } }], text: '办完了。' });
+      const turn = await fx.session.send('交办');
+      const task = fx.session.getTask(turn.taskIds[0]!);
+      // 修复前：底账里没有执行事实 → unexecuted；修复后脚本执行也算真实执行。
+      expect(task.status).toBe('completed');
+    } finally {
+      fx.ro.close();
+      fx.close();
+    }
+  });
+
+  it('查询成功但脚本失败 → 任务判 failed（不再假绿）', async () => {
+    const fx = await makeFixture();
+    try {
+      fx.workerPush({
+        execCalls: [
+          { tool: 'execute_operation', args: { operation: 'dummy.query', args: { '--collection': 'documents' } } },
+          { tool: 'run_js', args: { code: 'process.exit(3);' } },
+        ],
+        text: '查询完成，脚本也跑过了。',
+      });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '查完再算' } }], text: '完成。' });
+      const turn = await fx.session.send('交办');
+      const task = fx.session.getTask(turn.taskIds[0]!);
+      expect(task.status).toBe('failed');
+      expect(task.reason ?? '').not.toBe('');
+    } finally {
+      fx.ro.close();
+      fx.close();
+    }
+  });
+
+  it('同字节不同名的两份任务产物都保留、都交付（复用键含文件名）', async () => {
+    const fx = await makeFixture();
+    try {
+      fx.workerPush({
+        execCalls: [{
+          tool: 'run_js',
+          args: {
+            code: [
+              "const fs = require('node:fs');",
+              "fs.writeFileSync('out/甲.csv', 'same-bytes');",
+              "fs.writeFileSync('out/乙.csv', 'same-bytes');",
+            ].join('\n'),
+          },
+        }],
+        text: '两份表都生成了。',
+      });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '生成两份同内容表' } }], text: '好了。' });
+      const turn = await fx.session.send('交办');
+      const names = (turn.files ?? []).map((file) => file.name).sort();
+      // 修复前：乙.csv 会复用甲.csv 的 fileId 与名字 → 只剩一份。
+      expect(names).toEqual(['乙.csv', '甲.csv']);
+    } finally {
+      fx.ro.close();
+      fx.close();
+    }
+  });
+
   it('② 转录与工具参数里 grep 不到任何单元格数值（正对照：机械事实在捕获里出现）', async () => {
     const fx = await makeFixture();
     try {

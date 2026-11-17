@@ -350,7 +350,7 @@ describe('CAP-01 S2 ③ 回程登记（runtime 出口）', () => {
 });
 
 describe('CAP-01 S2 ④ 产物不丢（unexecuted / failed）', () => {
-  it('④ unexecuted：Worker 只 run_js、零执行调用 → 产物仍被登记并进交付事实', async () => {
+  it('④ 只跑脚本的任务判 completed（run_js 进执行事实）；产物仍被登记并进交付事实', async () => {
     const fx = await makeFixture();
     try {
       const source = fx.fileStore.putFile({ scope: SCOPE, name: '名单.csv', bytes: Buffer.from('a,b\n1,2\n'), activatedAt: Date.now() });
@@ -367,12 +367,25 @@ describe('CAP-01 S2 ④ 产物不丢（unexecuted / failed）', () => {
       fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '本地汇总', inputFiles: [source.fileId] } }], text: '收到。' });
       const turn = await fx.session.send('交办本地汇总');
 
-      // 零执行 → 任务 unexecuted（既有判定），但 run_js 产物已登记并进交付事实。
-      expect(fx.session.getTask(turn.taskIds[0]!).status).toBe('unexecuted');
+      // 2026-11-17 口径修正：run_js 是真实执行，进底账后任务判 completed（原先判 unexecuted）。
+      expect(fx.session.getTask(turn.taskIds[0]!).status).toBe('completed');
       const task = fx.session.getTask(turn.taskIds[0]!);
       const productRows = fx.ro.listFileRefs(SCOPE).filter((row) => row.taskId === task.taskId && row.name === '汇总.csv');
       expect(productRows).toHaveLength(1);
       expect(turn.files).toEqual([{ fileId: productRows[0]!.fileId, name: '汇总.csv', bytes: productRows[0]!.bytes }]);
+    } finally {
+      fx.ro.close();
+      fx.close();
+    }
+  });
+
+  it('④ 真正零动作（不调 run_js 也不调 execute_operation）→ 任务仍判 unexecuted', async () => {
+    const fx = await makeFixture();
+    try {
+      fx.workerPush({ text: '我什么都没做。' });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '什么都不做' } }], text: '好。' });
+      const turn = await fx.session.send('交办');
+      expect(fx.session.getTask(turn.taskIds[0]!).status).toBe('unexecuted');
     } finally {
       fx.ro.close();
       fx.close();
