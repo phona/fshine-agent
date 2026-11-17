@@ -385,14 +385,14 @@ interface FileTurnRun {
 
 /**
  * 同一输入（一条消息 → run_js 产出 out/汇总.txt → 回合末主动投递）跑一遍 server。
- * legacyLiteralLive=true 复现"改动前"的装配：直接 `new WecomBotChannel({deliveryMode:'live'})`
+ * previousAssembly=true 复现"改动前"的装配：直接 `new WecomBotChannel({deliveryMode:'live'})`
  * + 直接 `channel.start(...)`，不经档位装配；用于 live 的逐字对比。
  */
-async function runFileTurn(options: { mode: ChannelMode; legacyLiteralLive?: boolean }): Promise<FileTurnRun> {
+async function runFileTurn(options: { mode: ChannelMode; previousAssembly?: boolean }): Promise<FileTurnRun> {
   const root = tempDir();
   const sdk = new RecordingSdk();
   let clientFactoryCalls = 0;
-  const channel = options.legacyLiteralLive === true
+  const channel = options.previousAssembly === true
     ? new WecomBotChannel({
         env: ENV,
         clientFactory: () => { clientFactoryCalls += 1; return sdk; },
@@ -427,12 +427,12 @@ async function runFileTurn(options: { mode: ChannelMode; legacyLiteralLive?: boo
   });
   try {
     // 与 main.ts 同形：createServer 之后才把 server.handler 交给渠道/档位。
-    const starting = options.legacyLiteralLive === true
+    const starting = options.previousAssembly === true
       ? channel.start(server.handler)
       : startChannelForMode(options.mode, channel, server.handler);
     sdk.emit('authenticated'); // offline 下无监听者（start 未调用），no-op
     await starting;
-    const reply = await server.handler(incoming(options.legacyLiteralLive === true ? 'm-legacy' : `m-${options.mode}`));
+    const reply = await server.handler(incoming(options.previousAssembly === true ? 'm-beforeChange' : `m-${options.mode}`));
     return { logs, sdk, clientFactoryCalls, reply };
   } finally {
     await channel.stop();
@@ -515,7 +515,7 @@ describe('live：与改动前逐字节同序（同一输入同一事件序列）
       }));
       return { channel, sdk };
     });
-    const legacy = await runWithFactory((sdk) => {
+    const beforeChange = await runWithFactory((sdk) => {
       const root = tempDir();
       const channel = new WecomBotChannel({
         env: ENV,
@@ -528,7 +528,7 @@ describe('live：与改动前逐字节同序（同一输入同一事件序列）
     });
 
     // 核心判据：改动前硬编码 live 与档位装配 live 的同一输入 → 完全相同的调用序列。
-    expect(assembled).toEqual(legacy);
+    expect(assembled).toEqual(beforeChange);
     // 再钉死"同序"的具体内容（不是两个坏实现碰巧一致）。
     expect(assembled).toEqual([
       { method: 'on', detail: 'authenticated' },
@@ -553,7 +553,7 @@ describe('live：与改动前逐字节同序（同一输入同一事件序列）
 
   it('server 侧同一输入：装配后的 live 与改动前硬编码 live 的 file_delivery/message_done 事实逐字相同', async () => {
     const assembled = await runFileTurn({ mode: 'live' });
-    const legacy = await runFileTurn({ mode: 'live', legacyLiteralLive: true });
+    const beforeChange = await runFileTurn({ mode: 'live', previousAssembly: true });
 
     const facts = (run: FileTurnRun) => ({
       delivery: run.logs.filter((line) => line['event'] === 'file_delivery'),
@@ -561,7 +561,7 @@ describe('live：与改动前逐字节同序（同一输入同一事件序列）
         .filter((line) => line['event'] === 'message_done')
         .map((line) => line['fileDelivery']),
     });
-    expect(facts(assembled)).toEqual(facts(legacy));
+    expect(facts(assembled)).toEqual(facts(beforeChange));
     expect(facts(assembled).delivery).toEqual([{
       event: 'file_delivery',
       principalId: 'wecom:user-a',
