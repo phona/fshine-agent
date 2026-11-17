@@ -24,8 +24,9 @@
  *
  * 超时/内存/份数/字节数值按 v8 §11 owner 裁决由 S0 写死为模块常量（构造参数可覆盖，
  * 仅供测试收紧；生产装配不得放宽）：
- *   · 超时 120s（缺省 mainConcurrency=1，一个 60s 脚本期间其它会话已被 queue_full 拒，
- *     v8 §8——上限取两倍该成本）；· V8 堆 512MB；· stdout/stderr 各 64KiB；
+ *   · 超时 120s（缺省 mainConcurrency=1，一个 60s 脚本期间其它会话已排队等待，
+ *     v8 §8——上限取两倍该成本）；· V8 堆 1024MB（CAP-01 owner 裁决：入站附件上限
+ *     20MB 的实处理峰值远超 512MB，给 20MB 留余量）；· stdout/stderr 各 64KiB；
  *   · 单产物 50MiB；· 产物 20 份。
  *
  * 残余风险按 v8 §3 如实登记（owner 裁决：接受）：网络未阻断（脚本可外传它能读到的
@@ -34,7 +35,7 @@
  */
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { workerSubprocessEnv } from './worker-env';
 import type { FileStore, MaterializedInput, RegisteredFile, SkippedOutput } from './file-store';
@@ -48,8 +49,8 @@ export const RUN_JS_MAX_STREAM_BYTES = 64 * 1024;
 export const RUN_JS_MAX_OUTPUT_FILE_BYTES = 50 * 1024 * 1024;
 /** 单次 run 产物份数上限。 */
 export const RUN_JS_MAX_OUTPUT_COUNT = 20;
-/** 子进程 V8 堆上限（MB；--max-old-space-size，写进 spawn argv）。 */
-export const RUN_JS_MAX_OLD_SPACE_MB = 512;
+/** 子进程 V8 堆上限（MB；--max-old-space-size，写进 spawn argv；CAP-01：1024 给 20MB 附件留余量）。 */
+export const RUN_JS_MAX_OLD_SPACE_MB = 1024;
 
 export interface RunJsScope {
   principalId: string;
@@ -88,6 +89,11 @@ export interface RunJsAudit {
   inputFileIds: string[];
   /** 物化结果（fileId → in/ 文件名；审计面）。 */
   materializedInputs: MaterializedInput[];
+  /**
+   * 本次运行的输入总字节 = 脚本字节 + in/ 物化输入文件字节和（CAP-01 内存墙事件用：
+   * 「多大」要可追溯；稀疏/外部改动的 in/ 文件按实际字节计）。
+   */
+  inputBytes: number;
   /** 登记成功的产物（fileId/name/bytes）。 */
   outputs: Array<{ fileId: string; name: string; bytes: number }>;
   /** 被拒收的 out/ 条目与机械原因（symlink/hardlink/超限等）。 */
@@ -205,6 +211,17 @@ export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecuto
       writeFileSync(runCjsPath, scriptBytes, { mode: 0o600 });
       const scriptSha256 = createHash('sha256').update(scriptBytes).digest('hex');
 
+      // 输入总字节（CAP-01 内存墙事件「多大」的机械事实）：脚本字节 + in/ 物化输入实际字节。
+      // stat 失败（物化后被外部删除等）只影响记账，不拦运行——子进程读不到会自己非零退出。
+      let inputBytes = scriptBytes.length;
+      for (const materialized of materializedInputs) {
+        try {
+          inputBytes += statSync(path.join(runDir, 'in', materialized.materializedName)).size;
+        } catch {
+          // 该份不计入；运行与失败面仍由子进程如实带回。
+        }
+      }
+
       // ③ 受限子进程（v8 §3 的命令形状 + 内存上限 argv）。
       const child = spawn(
         nodePath,
@@ -293,6 +310,7 @@ export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecuto
           scriptSha256,
           inputFileIds: [...(input.inputs ?? [])],
           materializedInputs,
+          inputBytes,
           outputs: outputFiles,
           skippedOutputs: skipped,
           exitCode,

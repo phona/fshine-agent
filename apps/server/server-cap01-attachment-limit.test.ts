@@ -1,12 +1,12 @@
 /**
- * CAP-01 入站附件上限（100MB）· server 级确定性验证（假渠道事实 + 假执行面 + 假模型驱动；零网络）：
- *   ① 99MB 通过并登记（pending）；
- *   ② 101MB 被拒：不登记、无模型回合、结构化事件含 bytes 与上限、用户话术含「100MB」；
- *   ③ 恰好 100MB：放行（判据是 `> 上限`，「上限 100MB」= 最多可发 100MB）。
+ * CAP-01 入站附件上限（20MB）· server 级确定性验证（假渠道事实 + 假执行面 + 假模型驱动；零网络）：
+ *   ① 19MB 通过并登记（pending）；
+ *   ② 21MB 被拒：不登记、无模型回合、结构化事件含 bytes 与上限、用户话术含「20MB」；
+ *   ③ 恰好 20MB：放行（判据是 `> 上限`，「上限 20MB」= 最多可发 20MB）。
  * 另覆盖：文字+附件超限整条消息拒绝（不得静默丢掉附件继续回合）。
  *
  * 大文件用稀疏文件（truncate）构造：字节数真实、源侧不占盘；登记时会真实复制进
- * workspace（99/100MB 各一份），仅用于证明「通过并登记」。
+ * workspace（19/20MB 各一份），仅用于证明「通过并登记」。
  */
 import { mkdirSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -20,7 +20,7 @@ import { createServer } from './server';
 
 const FIXTURE_ROOT = path.resolve(__dirname, '..', '..', 'scripts', 'eval', 'fixtures', 'dummy-platform');
 const MB = 1024 * 1024;
-const LIMIT_BYTES = 100 * MB;
+const LIMIT_BYTES = 20 * MB;
 
 const SCOPE = { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' };
 
@@ -150,19 +150,19 @@ function tooLargeLogs(logs: Array<Record<string, unknown>>): Array<Record<string
   return logs.filter((line) => line['event'] === 'inbound_attachment_too_large');
 }
 
-describe('CAP-01 入站附件 100MB 上限（server 级）', () => {
-  it('① 99MB 通过并登记为 pending', async () => {
+describe('CAP-01 入站附件 20MB 上限（server 级）', () => {
+  it('① 19MB 通过并登记为 pending', async () => {
     const { dbPath, server, ro, logs } = await makeFixture();
     try {
-      const message = incoming('m-99', '', [
-        stagedSparseAttachment(path.dirname(dbPath), '大表-99.xlsx', 99 * MB),
+      const message = incoming('m-19', '', [
+        stagedSparseAttachment(path.dirname(dbPath), '大表-19.xlsx', 19 * MB),
       ]);
       expect(await server.handler(message)).toBe(''); // 纯附件：空回执（渠道走文件收据窗）
 
       const rows = ro.listFileRefs(SCOPE);
       expect(rows).toHaveLength(1);
-      expect(rows[0]!.name).toBe('大表-99.xlsx');
-      expect(rows[0]!.bytes).toBe(99 * MB);
+      expect(rows[0]!.name).toBe('大表-19.xlsx');
+      expect(rows[0]!.bytes).toBe(19 * MB);
       expect(rows[0]!.activatedAt).toBeUndefined(); // pending
       expect(logs.some((line) => line['event'] === 'message_attachment_only')).toBe(true);
       expect(tooLargeLogs(logs)).toEqual([]);
@@ -172,16 +172,16 @@ describe('CAP-01 入站附件 100MB 上限（server 级）', () => {
     }
   }, 60_000);
 
-  it('② 101MB 被拒：不登记、无模型回合、事件含 bytes 与上限、话术含「100MB」', async () => {
+  it('② 21MB 被拒：不登记、无模型回合、事件含 bytes 与上限、话术含「20MB」', async () => {
     const { dbPath, server, ro, logs, count } = await makeFixture();
     try {
-      const message = incoming('m-101', '', [
-        stagedSparseAttachment(path.dirname(dbPath), '超大表-101.xlsx', 101 * MB),
+      const message = incoming('m-21', '', [
+        stagedSparseAttachment(path.dirname(dbPath), '超大表-21.xlsx', 21 * MB),
       ]);
       const reply = await server.handler(message);
 
       // 用户话术明确（不静默丢弃）。
-      expect(reply).toContain('100MB');
+      expect(reply).toContain('20MB');
       expect(reply).toContain('压缩或拆分');
       // 不登记（底账零行）且不起模型回合（驱动零创建/零调用）。
       expect(ro.listFileRefs(SCOPE)).toEqual([]);
@@ -193,9 +193,9 @@ describe('CAP-01 入站附件 100MB 上限（server 级）', () => {
       expect(events[0]).toMatchObject({
         principalId: SCOPE.principalId,
         sessionId: SCOPE.sessionId,
-        messageId: 'm-101',
-        name: '超大表-101.xlsx',
-        bytes: 101 * MB,
+        messageId: 'm-21',
+        name: '超大表-21.xlsx',
+        bytes: 21 * MB,
         limitBytes: LIMIT_BYTES,
       });
       expect(logs.some((line) => line['event'] === 'message_attachment_only')).toBe(false);
@@ -205,11 +205,11 @@ describe('CAP-01 入站附件 100MB 上限（server 级）', () => {
     }
   }, 60_000);
 
-  it('③ 恰好 100MB：放行并登记（上限 = 最多可发 100MB，判据 `> 上限` 才拒）', async () => {
+  it('③ 恰好 20MB：放行并登记（上限 = 最多可发 20MB，判据 `> 上限` 才拒）', async () => {
     const { dbPath, server, ro, logs } = await makeFixture();
     try {
-      const message = incoming('m-100', '', [
-        stagedSparseAttachment(path.dirname(dbPath), '正好-100.xlsx', LIMIT_BYTES),
+      const message = incoming('m-20', '', [
+        stagedSparseAttachment(path.dirname(dbPath), '正好-20.xlsx', LIMIT_BYTES),
       ]);
       expect(await server.handler(message)).toBe('');
 
@@ -227,12 +227,12 @@ describe('CAP-01 入站附件 100MB 上限（server 级）', () => {
     const { dbPath, server, ro, logs, count } = await makeFixture(new Map([['汇总这份明细', '已汇总']]));
     try {
       const reply = await server.handler(
-        incoming('m-text-101', '汇总这份明细', [
-          stagedSparseAttachment(path.dirname(dbPath), '超大明细.xlsx', 101 * MB),
+        incoming('m-text-21', '汇总这份明细', [
+          stagedSparseAttachment(path.dirname(dbPath), '超大明细.xlsx', 21 * MB),
         ]),
       );
 
-      expect(reply).toContain('100MB');
+      expect(reply).toContain('20MB');
       expect(ro.listFileRefs(SCOPE)).toEqual([]); // 一个附件都没登记
       expect(ro.listTasks(SCOPE)).toEqual([]);
       expect(count.creations).toBe(0); // 没有开回合、没有调模型

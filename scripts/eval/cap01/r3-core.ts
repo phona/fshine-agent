@@ -53,7 +53,8 @@
  *
  * 并发小矩阵（**记录不判红**，S3 才谈并发）：
  *   conc2 / conc5：2 与 5 个会话同时各跑 3 秒 busy-wait 脚本（生产缺省 runtime 策略
- *   mainConcurrency=1/queueCapacity=0，server.ts:197）。记录 queue_full 拒绝数/拒绝率、
+ *   mainConcurrency=1/queueCapacity=16——CAP-01 排队缺省 16；显式 0 才关闭排队，server.ts:197）。
+ *   记录 queue_full 拒绝数/拒绝率、
  *   成功数、总墙钟；拒绝语义 = ForegroundRejectionError reason=queue_full
  *   （execution-runtime.ts:960-973）。
  *
@@ -1258,7 +1259,7 @@ async function runConcMatrix(sessionCount: number, label: string): Promise<ConcO
       `并发小矩阵：${sessionCount} 会话同时跑 3 秒脚本（记录不判红，S3 才谈并发）`,
       `成功=${successes}/${sessionCount}；queue_full 拒绝=${queueFullRejections}/${sessionCount}（拒绝率=${(queueFullRejections / sessionCount).toFixed(2)}）；` +
         `其它错误=${otherErrors.length}${otherErrors.length > 0 ? `（${otherErrors.map((entry) => `#${entry.index}: ${entry.message.slice(0, 80)}`).join(' | ')}）` : ''}；` +
-        `总墙钟=${wallMs}ms；登记产物=${rows.length}（缺省 runtime 策略 mainConcurrency=1/queueCapacity=0）`,
+        `总墙钟=${wallMs}ms；登记产物=${rows.length}（缺省 runtime 策略 mainConcurrency=1/queueCapacity=16）`,
     );
     return outcome;
   } finally {

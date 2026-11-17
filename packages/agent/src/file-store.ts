@@ -304,13 +304,13 @@ const REGISTER_COPY_CHUNK_BYTES = 64 * 1024;
 export const FILE_REF_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
- * 入站登记的大小上限（100MB，2026-11-17 CAP-01 调整）：与 server 入站登记前的准入
- * 校验（`apps/server/server.ts` 同一常量）同值——server 按契约 `IncomingAttachment.bytes`
- * 先拒、这里按流式实际字节兜底，判据都是「> 上限才拒」（恰好 100MB 放行）。渠道适配器
- * 侧另有自己的渠道限额（WeCom 32MB）先行拒收；到不了这里。这是 handler 直调者的机械
- * 防线，不是第二套限额。
+ * 入站登记的大小上限（20MB，2026-11-17 CAP-01 owner 裁决：100MB 必 OOM——实测 1.1MB
+ * 文件处理峰值 396MB）：与 server 入站登记前的准入校验（`apps/server/server.ts` 同一
+ * 常量）同值——server 按契约 `IncomingAttachment.bytes` 先拒、这里按流式实际字节兜底，
+ * 判据都是「> 上限才拒」（恰好 20MB 放行）。渠道适配器侧另有自己的渠道限额（WeCom
+ * 32MB）先行拒收；到不了这里。这是 handler 直调者的机械防线，不是第二套限额。
  */
-export const INBOUND_MAX_FILE_BYTES = 100 * 1024 * 1024;
+export const INBOUND_MAX_FILE_BYTES = 20 * 1024 * 1024;
 
 function newFileId(): string {
   return `file_${randomUUID().replaceAll('-', '')}`;

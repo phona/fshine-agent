@@ -135,13 +135,13 @@ const FILE_DELIVERY_UNAVAILABLE_NOTE = '文件未送达（当前渠道不支持�
 const FILE_DELIVERY_FAILED_NOTE = '文件未送达（投递失败，请重试或联系管理员）';
 
 /**
- * 入站附件上限（100MB，2026-11-17 CAP-01）：与 file-store 的流式兜底
- * `INBOUND_MAX_FILE_BYTES` 同值单源。**登记前**按契约 `IncomingAttachment.bytes`
- * 校验：超限整条消息拒绝——一个附件都不登记、不起模型回合（不静默丢弃、不带超限
- * 附件开回合），记一条结构化事件（含 bytes 与上限），回执给用户明确话术。
- * 判据是 `> 上限`：恰好 100MB 放行（「上限 100MB」= 最多可发 100MB，与 file-store
- * 既有扫描/入站纪律的 `> max` 判据一致）。渠道适配器仍按渠道侧限额先行拒收；
- * 这里是 handler 直调路径（假渠道/测试/未来渠道）的确定性防线。
+ * 入站附件上限（20MB，2026-11-17 CAP-01 owner 裁决：100MB 必 OOM，实测 1.1MB 文件处理
+ * 峰值 396MB）：与 file-store 的流式兜底 `INBOUND_MAX_FILE_BYTES` 同值单源。**登记前**
+ * 按契约 `IncomingAttachment.bytes` 校验：超限整条消息拒绝——一个附件都不登记、不起
+ * 模型回合（不静默丢弃、不带超限附件开回合），记一条结构化事件（含 bytes 与上限），
+ * 回执给用户明确话术。判据是 `> 上限`：恰好 20MB 放行（「上限 20MB」= 最多可发 20MB，
+ * 与 file-store 既有扫描/入站纪律的 `> max` 判据一致）。渠道适配器仍按渠道侧限额先行
+ * 拒收；这里是 handler 直调路径（假渠道/测试/未来渠道）的确定性防线。
  */
 const INBOUND_ATTACHMENT_LIMIT_BYTES = INBOUND_MAX_FILE_BYTES;
 /** 超限话术（用户可见；机械事实 bytes/limit 只进结构化事件，不进话术）。 */
@@ -282,6 +282,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           // out/ 兜底扫描（unexecuted/failed 也扫，v8 §10-3）；dirParams 留空 = 当前执行层
           // 尚未声明目录参数，出站目录翻译随执行层声明开启（部署按其声明认知传入参数名）。
           runJsExecutor,
+          // CAP-01 ④：内存墙结构化事件（runId/side/bytes/exitCode/exitSignal/stderr 尾窗）——
+          // 日志能查到是哪次、多大、怎么死的；用户话术同句由 runtime 出口统一。
+          onRunJsMemoryExit: (event) => log({ event: 'run_js_memory_exit', principalId, sessionId, ...event }),
           taskInputCopier: fileStore,
           taskExecutionBridge: {
             store: fileStore,
@@ -457,7 +460,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     const scope: FileScope = { principalId, sessionId };
     const sessionKey = `${principalId}\u0000${sessionId}`;
 
-    // CAP-01 入站附件上限（100MB）：登记前按契约字节数校验。超限 = 整条消息拒绝——
+    // CAP-01 入站附件上限（20MB）：登记前按契约字节数校验。超限 = 整条消息拒绝——
     // 一个附件都不登记、不起模型回合（纯附件与文字+附件同一判据；文字+附件也不得
     // 静默丢掉附件继续回合），事件含 bytes 与上限，回执给用户明确话术。
     const oversizedAttachment = (message.attachments ?? []).find(
