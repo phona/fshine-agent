@@ -52,7 +52,9 @@ const TASK_STORE_MODULE_URL = new URL('../../../packages/core/src/task-store.ts'
 
 const PRINCIPAL_ID = 'wecom:user-a';
 const PRINCIPAL_USER = 'user-a';
-const SESSION_COUNT = 5;
+/** 缺省前台并发（与 resource-policy DEFAULT_RUNTIME_CONFIG 一致）；`--main-concurrency` 可改。 */
+const DEFAULT_MAIN_CONCURRENCY = 4;
+let mainConcurrency = DEFAULT_MAIN_CONCURRENCY;
 const SQLITE_WRITES = 20;
 const DEFAULT_HOLD_MS = 2_000;
 const RSS_SAMPLE_INTERVAL_MS = 10;
@@ -61,10 +63,14 @@ interface SessionSpec {
   readonly conversationId: string;
   readonly sentinel: string;
 }
-const SESSION_SPECS: readonly SessionSpec[] = Array.from({ length: SESSION_COUNT }, (_, index) => ({
-  conversationId: `conv-${index + 1}`,
-  sentinel: `CAP01-R8-SENTINEL-CONV-${index + 1}`,
-}));
+function buildSessionSpecs(count: number): readonly SessionSpec[] {
+  return Array.from({ length: count }, (_, index) => ({
+    conversationId: `conv-${index + 1}`,
+    sentinel: `CAP01-R8-SENTINEL-CONV-${index + 1}`,
+  }));
+}
+/** 并发 n 时报 n+1 个会话：多出来的那个必须排队，用来证明上限真的生效。 */
+let SESSION_SPECS: readonly SessionSpec[] = buildSessionSpecs(DEFAULT_MAIN_CONCURRENCY + 1);
 
 function sessionIdOf(spec: SessionSpec): string {
   return `wecom:${spec.conversationId}`;
@@ -222,7 +228,8 @@ function testConfig(): AppConfig {
     },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
-    // 刻意不给 runtime 段：走 DEFAULT_RUNTIME_CONFIG（mainConcurrency=4 / queueCapacity=16）。
+    // runtime 段显式给并发档位（缺省 4 = DEFAULT_RUNTIME_CONFIG 同值；8 档用于对比读数）。
+    runtime: { mainConcurrency, queueCapacity: 16 },
   };
 }
 
@@ -450,9 +457,9 @@ async function runConcurrencyScenario(
 
   pushCheck(
     checks,
-    'active/max-active-is-4',
-    maxActive === 4,
-    `maxOverlap=${maxActive}（期望缺省 mainConcurrency=4）`,
+    `active/max-active-is-${mainConcurrency}`,
+    maxActive === mainConcurrency,
+    `maxOverlap=${maxActive}（期望 mainConcurrency=${mainConcurrency}）`,
   );
   pushCheck(
     checks,
@@ -545,8 +552,8 @@ async function runConcurrencyScenario(
     afterWarmupBytes: rssAfterWarmup,
     peakBurstBytes: rssPeakBurst,
     endBurstBytes: rssEndBurst,
-    perSessionFromWarmupBytes: round((rssPeakBurst - rssAfterWarmup) / SESSION_COUNT),
-    perSessionFromBaselineBytes: round((rssPeakBurst - rssBaseline) / SESSION_COUNT),
+    perSessionFromWarmupBytes: round((rssPeakBurst - rssAfterWarmup) / SESSION_SPECS.length),
+    perSessionFromBaselineBytes: round((rssPeakBurst - rssBaseline) / SESSION_SPECS.length),
     samplesDuringBurst: rssSamplesInBurst,
   };
   pushCheck(
@@ -559,7 +566,7 @@ async function runConcurrencyScenario(
   return {
     active: {
       maxActive,
-      expectedMaxActive: 4,
+      expectedMaxActive: mainConcurrency,
       queuedSessions,
       fifthWaitMs,
       burstWallMs: round(burstMonoEnd - burstMonoStart),
@@ -885,10 +892,12 @@ function sqliteChecks(track: SqliteTrack, checks: Check[]): void {
 interface CliOptions {
   outDir?: string;
   holdMs: number;
+  /** 前台并发档位（缺省 4；用于对比 4 vs 8 的 active 上限与每会话内存增量）。 */
+  mainConcurrency: number;
 }
 
 function parseCli(argv: readonly string[]): CliOptions {
-  const options: CliOptions = { holdMs: DEFAULT_HOLD_MS };
+  const options: CliOptions = { holdMs: DEFAULT_HOLD_MS, mainConcurrency: DEFAULT_MAIN_CONCURRENCY };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--out-dir') {
@@ -903,8 +912,16 @@ function parseCli(argv: readonly string[]): CliOptions {
       }
       options.holdMs = Number(value);
       index += 1;
+    } else if (arg === '--main-concurrency') {
+      const value = argv[index + 1];
+      const parsed = Number(value);
+      if (value === undefined || !Number.isSafeInteger(parsed) || parsed < 1 || parsed > 32) {
+        throw new Error('--main-concurrency 需要 1–32 的整数');
+      }
+      options.mainConcurrency = parsed;
+      index += 1;
     } else {
-      throw new Error(`未知参数：${arg}（支持 --out-dir / --hold-ms）`);
+      throw new Error(`未知参数：${arg}（支持 --out-dir / --hold-ms / --main-concurrency）`);
     }
   }
   return options;
@@ -916,6 +933,8 @@ function timestamp(): string {
 
 async function main(): Promise<void> {
   const cli = parseCli(process.argv.slice(2));
+  mainConcurrency = cli.mainConcurrency;
+  SESSION_SPECS = buildSessionSpecs(mainConcurrency + 1);
   const outDir = cli.outDir ?? path.join(REPO_ROOT, '.runtime', 'eval-cap01-r8-concurrency', timestamp());
   mkdirSync(outDir, { recursive: true });
   const workDir = mkdtempSync(path.join(os.tmpdir(), 'cap01-r8-concurrency-'));
@@ -926,7 +945,7 @@ async function main(): Promise<void> {
   }, 50);
   overallSampler.unref();
 
-  console.log(`[cap01-r8] mode=scripted（零真模型）sessions=${SESSION_COUNT} holdMs=${cli.holdMs} sqliteWrites=${SQLITE_WRITES}`);
+  console.log(`[cap01-r8] mode=scripted（零真模型）sessions=${SESSION_SPECS.length} holdMs=${cli.holdMs} sqliteWrites=${SQLITE_WRITES}`);
   console.log(`[cap01-r8] workDir=${workDir} outDir=${outDir}`);
 
   let active: ActiveReport | undefined;
@@ -974,10 +993,10 @@ async function main(): Promise<void> {
     model: 'scripted（零真模型调用）',
     generatedAt: new Date().toISOString(),
     config: {
-      sessions: SESSION_COUNT,
+      sessions: SESSION_SPECS.length,
       holdMs: cli.holdMs,
       sqliteWrites: SQLITE_WRITES,
-      expectedMaxActive: 4,
+      expectedMaxActive: mainConcurrency,
       queueCapacity: 16,
     },
     active,
