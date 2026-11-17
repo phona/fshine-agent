@@ -46,6 +46,7 @@ import {
 } from './src/file-store';
 import {
   createRecalcXlsxExecutor,
+  createSofficeRecalcEngine,
   parseRecalcFilePath,
   RECALC_XLSX_DEFAULT_MAX_VALUE_DIFFS,
   RECALC_XLSX_REQUIRED_VERSION,
@@ -53,6 +54,7 @@ import {
   type RecalcEngineFacts,
   type RecalcXlsxExecutor,
   type RecalcXlsxResult,
+  type SofficeChild,
 } from './src/recalc-xlsx-executor';
 import {
   RECALC_XLSX_TOOL,
@@ -753,5 +755,96 @@ describe('recalc_xlsx 重算开销入 R4 账（独立复核 Gap1）', () => {
       recalcXlsxExecutor: costExecutor(5),
     });
     await expect(session.send('recalc')).resolves.toBeDefined();
+  });
+});
+
+// ───────────────────────── Codex 二轮复审 4×P2 回归 ─────────────────────────
+describe('recalc_xlsx Codex 二轮复审 P2 回归', () => {
+  it('日期公式：cached/computed 为不同 Date 对象但时间戳相同 → pass（Codex R2-P2-1）', async () => {
+    const h = makeHarness();
+    const d = new Date('2026-01-01T00:00:00.000Z');
+    const src = await workbookBuffer('S', { A1: { formula: 'DATE(2026,1,1)', result: new Date(d.getTime()) } });
+    const computed = await workbookBuffer('S', { A1: { formula: 'DATE(2026,1,1)', result: new Date(d.getTime()) } });
+    const file = h.putInput('date.xlsx', src);
+    const ex = makeExecutor(h, computedEngine(computed));
+    const r = await ex.recalc({ file, export: 'none', scope: SCOPE });
+    expect(r.status).toBe('pass');
+    expect(r.valueDiffs).toHaveLength(0);
+  });
+
+  it('CSV：超链接/富文本格导出其 text，不出 [object Object]（Codex R2-P2-2）', async () => {
+    const h = makeHarness();
+    const src = await workbookBuffer('S', { A1: 'plain', A2: 'placeholder' });
+    // 计算后 workbook 含超链接与富文本结构化 cell。
+    const outWb = new ExcelJS.Workbook();
+    const ws = outWb.addWorksheet('S');
+    ws.getCell('A1').value = { text: 'Example', hyperlink: 'https://example.com' } as ExcelJS.CellHyperlinkValue;
+    ws.getCell('A2').value = { richText: [{ text: 'Hello ' }, { text: 'World' }] } as ExcelJS.CellRichTextValue;
+    const computed = Buffer.from(await outWb.xlsx.writeBuffer());
+    const file = h.putInput('rich.xlsx', src);
+    const ex = makeExecutor(h, computedEngine(computed));
+    const r = await ex.recalc({ file, export: 'csv', scope: SCOPE });
+    expect(r.status).toBe('pass');
+    const runDir = latestRunDir(h);
+    const csv = readFileSync(path.join(runDir, 'out', path.basename(r.artifacts.values!)), 'utf8');
+    expect(csv).toContain('Example');
+    expect(csv).toContain('Hello World');
+    expect(csv).not.toContain('[object Object]');
+  });
+
+  // 假 child：once('error') 注册即记录；emit('error') 触发 rejection；pid 可控。
+  function fakeChild(opts: { pid?: number; emitError?: Error; close?: boolean }): SofficeChild & { fireError(): void; readonly errorRegistered: boolean } {
+    let onError: ((e: Error) => void) | undefined;
+    let onClose: (() => void) | undefined;
+    return {
+      pid: opts.pid,
+      once(event, listener) {
+        if (event === 'error') onError = listener as (e: Error) => void;
+        else onClose = listener as () => void;
+        return this;
+      },
+      get errorRegistered() { return onError !== undefined; },
+      fireError() { onError?.(opts.emitError ?? new Error('spawn ENOENT')); },
+      fireClose() { onClose?.(); },
+    } as SofficeChild & { fireError(): void; readonly errorRegistered: boolean };
+  }
+
+  it('spawn 失败：error handler 先于 pid 检查注册，不产生 unhandled error（Codex R2-P2-3）', async () => {
+    const h = makeHarness();
+    const child = fakeChild({ pid: undefined, emitError: new Error('spawn ENOENT') });
+    let registered = false;
+    const engine = createSofficeRecalcEngine({
+      profileRoot: path.join(h.fixtureRoot, 'profiles'),
+      spawnProcess: () => { registered = true; return child; },
+    });
+    // 关键：在 pid===undefined 抛错前，error handler 必须已挂（fakeChild.once 被调用）。
+    // 用 process.on('unhandledRejection') 监听，确保没有裸 error 事件逃逸。
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown): void => { unhandled.push(e); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await engine.convert({ sourcePath: '/tmp/x.xlsx', outDir: h.fixtureRoot, signal: new AbortController().signal });
+    } catch {
+      // 期望抛错（spawn 失败）
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
+    expect(registered).toBe(true);
+    // 核心不变量：pid 检查抛错时，error handler 必须已经挂上（否则 Node 未处理 error 会杀 server）。
+    expect(child.errorRegistered).toBe(true);
+    expect(unhandled).toHaveLength(0);
+  });
+
+  it('pre-aborted signal：spawn 前即拒，绝不启动 soffice（Codex R2-P2-4）', async () => {
+    const h = makeHarness();
+    let spawned = 0;
+    const engine = createSofficeRecalcEngine({
+      profileRoot: path.join(h.fixtureRoot, 'profiles'),
+      spawnProcess: () => { spawned += 1; return fakeChild({ pid: 12345, close: true }); },
+    });
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(engine.convert({ sourcePath: '/tmp/x.xlsx', outDir: h.fixtureRoot, signal: ctrl.signal })).rejects.toThrow(/aborted/);
+    expect(spawned).toBe(0);
   });
 });

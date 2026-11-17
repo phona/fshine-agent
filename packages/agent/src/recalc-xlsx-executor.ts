@@ -174,6 +174,8 @@ function errorCodeOf(value: ExcelJS.CellValue): string | null {
 
 function valuesEqual(a: ExcelJS.CellValue, b: ExcelJS.CellValue): boolean {
   if (a === b) return true;
+  // Codex 复审 P2：日期公式（如 DATE(2026,1,1)）读回的是两个不同 Date 对象，按时间戳比。
+  if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
   if (typeof a === 'number' && typeof b === 'number') {
     if (Number.isNaN(a) && Number.isNaN(b)) return true;
     // Codex P2-5：容差取「浮点尾数噪声」与「半分」的较小者——浮点噪声只吸收 ULP 级
@@ -185,9 +187,26 @@ function valuesEqual(a: ExcelJS.CellValue, b: ExcelJS.CellValue): boolean {
   return false;
 }
 
+/** 结构化 cell → 纯文本（Codex 复审 P2：超链接/富文本格 String(value) 会变成 [object Object]）。 */
+function cellTextOf(value: ExcelJS.CellValue): string {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    const obj = value as unknown as Record<string, unknown>;
+    if (typeof obj['text'] === 'string') return obj['text'] as string;
+    if (Array.isArray(obj['richText'])) {
+      return (obj['richText'] as Array<{ text?: string }>).map((run) => run.text ?? '').join('');
+    }
+    if ('result' in obj) return cellTextOf(obj['result'] as ExcelJS.CellValue);
+    if ('error' in obj) return String(obj['error']);
+    if ('hyperlink' in obj && typeof obj['hyperlink'] === 'string') return obj['hyperlink'] as string;
+  }
+  return String(value);
+}
+
 /** CSV 单元格转义（逗号/引号/换行包引号，内部引号翻倍）。 */
 function csvCell(value: ExcelJS.CellValue): string {
-  const text = value === null || value === undefined ? '' : String(value);
+  const text = cellTextOf(value);
   return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
@@ -447,6 +466,15 @@ export interface SofficeEngineOptions {
   sofficePath?: string;
   /** profile 根目录；缺省系统临时目录（每次 convert 新建独立子目录）。 */
   profileRoot?: string;
+  /** spawn 接缝：仅测试注入假子进程验证 error/abort 边界；生产缺省为 node child_process.spawn。 */
+  spawnProcess?: (cmd: string, args: readonly string[], opts: Record<string, unknown>) => SofficeChild;
+}
+
+/** convert 用到的 child 最小面（测试可注入假实现）。 */
+export interface SofficeChild {
+  readonly pid?: number;
+  once(event: 'error', listener: (error: Error) => void): unknown;
+  once(event: 'close', listener: (code: number | null) => void): unknown;
 }
 
 /** profile 配置：OOXMLRecalcMode=xs:int(0) 强制重算（实测值 1 会沿用缓存）。 */
@@ -469,6 +497,7 @@ export function killSofficeProcessGroup(pid: number): void {
 export function createSofficeRecalcEngine(options: SofficeEngineOptions = {}): RecalcEngine {
   const sofficePath = options.sofficePath ?? 'soffice';
   const profileRoot = options.profileRoot ?? path.join(os.tmpdir(), 'fshine-recalc-profiles');
+  const spawnProcess = options.spawnProcess ?? ((cmd, args, opts) => spawn(cmd, args, opts) as unknown as SofficeChild);
 
   return {
     probe(): RecalcEngineFacts | null {
@@ -486,12 +515,14 @@ export function createSofficeRecalcEngine(options: SofficeEngineOptions = {}): R
       };
     },
     async convert({ sourcePath, outDir, signal }): Promise<{ outputPath: string }> {
+      // Codex 复审 P2：已在读源工作簿阶段 abort 的信号不能靠 addEventListener 重放——spawn 前先查。
+      if (signal.aborted) throw new Error('soffice aborted before spawn');
       const profile = path.join(profileRoot, `profile_${randomUUID().replaceAll('-', '')}`);
       const userDir = path.join(profile, 'user');
       mkdirSync(userDir, { recursive: true });
       writeFileSync(path.join(userDir, 'registrymodifications.xcu'), RECALC_PROFILE_XCU, 'utf8');
 
-      const child = spawn(
+      const child = spawnProcess(
         sofficePath,
         [
           '--headless',
@@ -509,17 +540,22 @@ export function createSofficeRecalcEngine(options: SofficeEngineOptions = {}): R
           env: workerSubprocessEnv(process.env),
         },
       );
+      // Codex 复审 P2：error handler 必须在任何可能抛错的检查之前装好——否则 spawn 失败时
+      // Node 发出未处理的 'error' 事件会直接终止整个 server（即便上层 catch 了 convert 的 rejection）。
+      const processOutcome = new Promise<void>((resolve, reject) => {
+        child.once('error', reject);
+        child.once('close', () => resolve());
+      });
       const pid = child.pid;
       if (pid === undefined) {
+        // 有 handler 兜底后，抛错不会再变成 unhandled 'error'；等一拍让事件循环派发已挂的 error。
         throw new Error('soffice spawn 失败（无 pid）');
       }
       const onAbort = (): void => killSofficeProcessGroup(pid);
       signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort(); // 竞态：addEventListener 之后又 abort 了一次
       try {
-        await new Promise<void>((resolve, reject) => {
-          child.once('error', reject);
-          child.once('close', () => resolve());
-        });
+        await processOutcome;
       } finally {
         signal.removeEventListener('abort', onAbort);
       }
