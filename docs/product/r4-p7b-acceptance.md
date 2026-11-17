@@ -10,9 +10,9 @@
 
 | 门 | 命令 | 读数 | 证据 |
 |---|---|---|---|
-| typecheck | `TMPDIR=/home/tao/.tmp npx tsc --noEmit` | exit 0 | `.runtime/p7b/final-report-tsc.txt` |
-| 全量 unit（只增不减） | `TMPDIR=/home/tao/.tmp npm test` | **55 files / 594 tests 全绿**（基线 54/584 → +1 文件/+10 例；先红期 3 red 未删任何既有断言） | `.runtime/p7b/final-report-full.txt` |
-| 故障套件 | `TMPDIR=/home/tao/.tmp npx vitest run scripts/p7b-fault-injection.test.ts` | **10/10 passed** | `.runtime/p7b/final-report-fault.txt` |
+| typecheck | `TMPDIR=~/.tmp npx tsc --noEmit` | exit 0 | `.runtime/p7b/final-report-tsc.txt` |
+| 全量 unit（只增不减） | `TMPDIR=~/.tmp npm test` | **55 files / 594 tests 全绿**（基线 54/584 → +1 文件/+10 例；先红期 3 red 未删任何既有断言） | `.runtime/p7b/final-report-full.txt` |
+| 故障套件 | `TMPDIR=~/.tmp npx vitest run scripts/p7b-fault-injection.test.ts` | **10/10 passed** | `.runtime/p7b/final-report-fault.txt` |
 
 ## 二、P7-T06 故障注入（确定性；假 driver / 假 sink / 假渠道 / 假 executor）
 

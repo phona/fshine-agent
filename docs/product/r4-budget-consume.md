@@ -55,7 +55,7 @@
 
 ## 八、本片实跑读数
 
-| 检查 | 命令（worktree 内，TMPDIR=/home/tao/.tmp） | 读数 | 日志 |
+| 检查 | 命令（worktree 内，TMPDIR=~/.tmp） | 读数 | 日志 |
 |---|---|---|---|
 | 类型 | `npx tsc --noEmit` | exit 0 | `.runtime/budget/final-tsc.txt` |
 | 目标批次 | `npx vitest run packages/agent/budget-metering.test.ts` | 8 passed (8)（RED 时为 8 failed） | green-metering.txt / red-metering.txt |

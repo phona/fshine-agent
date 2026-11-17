@@ -37,7 +37,7 @@ A 之下，**每次超窗事件须同时满足**（这就是本口径的合格�
 
 ```
 cd ~/projects/fshine-agent-exp-pi-session
-TMPDIR=/home/tao/.tmp node scripts/eval/pi-native/a-metrics.mjs   # exit 0，failures=0，33 [PASS] / 0 [FAIL]
+TMPDIR=~/.tmp node scripts/eval/pi-native/a-metrics.mjs   # exit 0，failures=0，33 [PASS] / 0 [FAIL]
 ```
 
 四组场景 × 三窗口（8192 / 40000 / 128000）读数（与本会话实跑输出、与归档 `scripts/eval/pi-native/OUTPUT-a-metrics.txt` 一致）：

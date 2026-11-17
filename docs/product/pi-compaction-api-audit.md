@@ -5,7 +5,7 @@
 
 ## 0. 版本基线（已亲验）
 
-- worktree 核验（本会话）：`pwd`/`git rev-parse --show-toplevel` = `/home/tao/projects/fshine-agent-r5-piopt`；`git rev-parse --abbrev-ref HEAD` = `arch/r5-piopt`；`git worktree list` 显示 `fshine-agent-r5-piopt  e9ede79 [arch/r5-piopt]`。toplevel == worktree、分支正确，非主仓。
+- worktree 核验（本会话）：`pwd`/`git rev-parse --show-toplevel` = `~/projects/fshine-agent-r5-piopt`；`git rev-parse --abbrev-ref HEAD` = `arch/r5-piopt`；`git worktree list` 显示 `fshine-agent-r5-piopt  e9ede79 [arch/r5-piopt]`。toplevel == worktree、分支正确，非主仓。
 - **锁版本**（`package-lock.json`）：`@earendil-works/pi-agent-core` = **0.85.1**（`package-lock.json:959-975`，resolved tarball 0.85.1）；`@earendil-works/pi-ai` = **0.85.1**（`package-lock.json:992-1013`）。`package.json:11-12` 声明 `^0.85.1`。
 - 本 worktree 已安装 `node_modules/@earendil-works/*`，实测 `pi-agent-core` 版本 = **0.85.1**（`node -e "require(...).version"` → `0.85.1`），与 lockfile 一致。跨全部 worktree 扫描仅存在 0.85.1 单一版本，**无版本混谈风险**。
 - 下列行号均为 0.85.1 分发物 `dist/**`（构建自 `src/**`，行号可通过 `.map` 对应）。

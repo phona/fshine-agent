@@ -46,8 +46,8 @@
 
 **确定性门（HEAD `e96ec5b`）**——`.runtime/p5/report-full.txt`：
 
-- `TMPDIR=/home/tao/.tmp npx tsc --noEmit` → **exit 0**。
-- `TMPDIR=/home/tao/.tmp npm test` → **exit 0**；`Test Files 47 passed (47)`；`Tests 465 passed (465)`。
+- `TMPDIR=~/.tmp npx tsc --noEmit` → **exit 0**。
+- `TMPDIR=~/.tmp npm test` → **exit 0**；`Test Files 47 passed (47)`；`Tests 465 passed (465)`。
 - 基线对照（同命令、临时 worktree @ 基线 `9ae895d`，跑完即移除）→ `Test Files 45 passed (45)`；`Tests 425 passed (425)`；**只增不减：+2 文件 / +40 例**（`.runtime/p5/baseline-full.txt`）。
 - 目标批次：`npx vitest run packages/agent/resource-policy.test.ts packages/agent/resource-policy-single-source.test.ts packages/core/config.test.ts` → `3 passed (3)` / `63 passed (63)`。
 

@@ -48,7 +48,7 @@
 | 5 | 压缩产物 | `packages/agent/compaction-product.test.ts` | 产物含【此前会话摘要】且 tokens 下降 |
 | 6 | 窗口缩放 | `packages/agent/compaction-window.test.ts` + 断言 | `target==W−reserveTokens`、`limit==W−Δ−MIN_OUTPUT`；W=8192 下 `target==limit==2512` |
 | 7 | **反向绊线** | `scripts/eval/piopt/piopt-phase3.test.ts`（③a/③b/④/⑤） | ③b 仍 `streamCalls()==0` 且有界失败事件；④ toolCall/toolResult 配对不拆 |
-| 8 | PoC 全场景 | `TMPDIR=/home/tao/.tmp npx vitest run scripts/eval/piopt/piopt-phase3.test.ts` | 11 passed（当前基线），无新增红 |
+| 8 | PoC 全场景 | `TMPDIR=~/.tmp npx vitest run scripts/eval/piopt/piopt-phase3.test.ts` | 11 passed（当前基线），无新增红 |
 
 **反向绊线特别说明**：D1 卡点在于“删除重复闸后，不可救→有界失败、可救→首请求 ≤ W−MIN_OUTPUT”两向均须被用例固定（decision-log §六十九「条件」）。3 号/4 号 + 7 号 ③b 共同承担。
 

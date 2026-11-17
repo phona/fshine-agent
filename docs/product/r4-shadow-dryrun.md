@@ -19,9 +19,9 @@
 
 | 门 | 命令 | 读数 | 证据 |
 |---|---|---|---|
-| typecheck | `TMPDIR=/home/tao/.tmp npx tsc --noEmit` | exit 0 | `gates-tsc.txt` |
-| 全量 unit（只增不减） | `TMPDIR=/home/tao/.tmp npx vitest run` | **56 files / 606 tests passed**，exit 0 | `gates-full.txt` |
-| 双源目标套件 | `TMPDIR=/home/tao/.tmp npx vitest run scripts/shadow/double-source.test.ts` | **12/12 passed**，exit 0 | `gates-target.txt` |
+| typecheck | `TMPDIR=~/.tmp npx tsc --noEmit` | exit 0 | `gates-tsc.txt` |
+| 全量 unit（只增不减） | `TMPDIR=~/.tmp npx vitest run` | **56 files / 606 tests passed**，exit 0 | `gates-full.txt` |
+| 双源目标套件 | `TMPDIR=~/.tmp npx vitest run scripts/shadow/double-source.test.ts` | **12/12 passed**，exit 0 | `gates-target.txt` |
 
 基线对照：先红期全量为 `1 failed（仅新文件）| 55 passed；594 tests passed`（`red-full.txt`）；本次 `+1 文件 / +12 例`，
 零删除（`git diff 885ac63..HEAD --stat -- '*.test.ts'` 仅新增 365 行）。
@@ -29,7 +29,7 @@
 
 ## 3. 双源对照复跑读数（四态，证据持久化）
 
-命令（一次性 scratch，gitignored）：`TMPDIR=/home/tao/.tmp node --import tsx .runtime/shadow/rerun-four-states.ts`
+命令（一次性 scratch，gitignored）：`TMPDIR=~/.tmp node --import tsx .runtime/shadow/rerun-four-states.ts`
 → 逐场景写 `.runtime/shadow/evidence/<label>/{summary,dummy,fake-real}.json`；输出 `rerun-four-states.txt`，exit 0。
 
 | 场景 | digest(sha256 前 16) | 语义等价 | 只读稳定(A/B) | 终态（两源同形） | 通知意图 | 机械事实 |

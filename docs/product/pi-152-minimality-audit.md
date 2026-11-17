@@ -10,8 +10,8 @@
 |---|---|---|
 | 1 | `git -C ~/projects/fshine-agent-pi-upgrade diff badbf32..HEAD --stat` | 43 files, +4261 −1861 |
 | 2 | `git diff --numstat badbf32..HEAD` / `--shortstat` | 逐文件读数见 §8；总计 +4261 −1861（净 +2400） |
-| 3 | `export TMPDIR=/home/tao/.tmp && npx vitest run scripts/eval/pi152-stageC/stage-c.test.ts` | **15 tests passed**（阶段 C 判据读数见 §6） |
-| 4 | `export TMPDIR=/home/tao/.tmp && npm run typecheck` | **33 errors，全部在未跟踪的 `scripts/eval/pi152-stageB/*`（16）与 `pi152-stageC/stage-c.test.ts`（17）**；已跟踪文件（含全部产品码与 HEAD 内容）0 错误 |
+| 3 | `export TMPDIR=~/.tmp && npx vitest run scripts/eval/pi152-stageC/stage-c.test.ts` | **15 tests passed**（阶段 C 判据读数见 §6） |
+| 4 | `export TMPDIR=~/.tmp && npm run typecheck` | **33 errors，全部在未跟踪的 `scripts/eval/pi152-stageB/*`（16）与 `pi152-stageC/stage-c.test.ts`（17）**；已跟踪文件（含全部产品码与 HEAD 内容）0 错误 |
 | 5 | `grep -rn "shouldCompact\|generateSummary\|serializeConversation\|estimateContextTokens\|isRetryableAssistantError\|trimToBudget\|degradeByDropping\|compactTranscriptWithPi\|CONTEXT_OVERFLOW" packages apps scripts` | 产品码 0 命中（仅 `pi-driver.ts:79` 注释提到 Pi 的 `shouldCompact`、`tripwire` 测试的反向名单、eval 的 `token-estimate.ts`） |
 | 6 | `grep -rn "@earendil-works" packages/agent/src/*.ts` | 只有 `pi-driver.ts`（运行时）与 `driver-contract.ts`（仅 type） |
 | 7 | `git diff --stat badbf32..HEAD -- packages/contracts packages/agent/src/task-registry*.ts packages/agent/src/task-runner.ts` | 空（执行契约与任务底账零改动） |

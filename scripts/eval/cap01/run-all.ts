@@ -13,6 +13,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -75,7 +76,7 @@ for (const face of selected) {
   const run = spawnSync(
     process.execPath,
     ['--env-file-if-exists=.env', '--import', 'tsx', path.join(REPO_ROOT, face.script), ...face.args],
-    { cwd: REPO_ROOT, encoding: 'utf8', env: { ...process.env, TMPDIR: process.env['TMPDIR'] ?? '/home/tao/.tmp' } },
+    { cwd: REPO_ROOT, encoding: 'utf8', env: { ...process.env, TMPDIR: process.env['TMPDIR'] ?? os.tmpdir() } },
   );
   const durationMs = Date.now() - startedAt;
   const log = `${run.stdout ?? ''}${run.stderr ?? ''}`;

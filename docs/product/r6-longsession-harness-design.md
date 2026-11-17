@@ -183,7 +183,7 @@
 ## 十、边界与提交纪律（复述）
 
 - 本文件与预注册均为设计文档；观测/负载代码一律**只采集事实、不改触发/门控**；不借测试名义增 Runtime 机制；不动 Worker 提示/任务账本/权限；不接真实平台；会话持久化问题不混入；`.runtime` 不得 git add；不改 `docs/decision-log.md`；不 push/不合并/不碰 main/tag。
-- 提交身份 `Tao <34084876+phona@users.noreply.github.com>`；commit message 禁绝对路径；`TMPDIR=/home/tao/.tmp`。
+- 提交身份 `Tao <34084876+phona@users.noreply.github.com>`；commit message 禁绝对路径；`TMPDIR=~/.tmp`。
 
 ## 十一、测试基建说明与运行方式（本轮交付）
 

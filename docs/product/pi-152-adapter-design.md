@@ -139,7 +139,7 @@ Channel / ask ──► execution-runtime（宿主最小面：身份 · 确认�
 
 | 检查 | 命令 | 结果 |
 |---|---|---|
-| typecheck | `cd ~/projects/fshine-agent-pi-upgrade && export TMPDIR=/home/tao/.tmp && npm run typecheck` | exit 0（迁移前 24 个 TS 错误） |
+| typecheck | `cd ~/projects/fshine-agent-pi-upgrade && export TMPDIR=~/.tmp && npm run typecheck` | exit 0（迁移前 24 个 TS 错误） |
 | 全量单测 | `npx vitest run` | 86 文件 / 898 例全绿（迁移前基线：636 例 / 597 通过 / 39 失败；多数失败是旧 API import 导致整文件 collect 失败） |
 | 真实模型接线（不联网） | 读取主仓 `.env`（worktree 无 `.env`）→ `createPiModelRuntime` | `step-3.7-flash` / `openai-completions` / 128k / 32k / auth configured；**未发起任何真实模型请求** |
 | A1 异常退出 | A 验收测试子进程 SIGKILL | 恢复同一 Session 并继续（`pi-agent-session.test.ts`） |

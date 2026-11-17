@@ -1232,7 +1232,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
   3. `57ac5ee` 缺口 2 · Main 业务 Skill 投递：7 文件 +191/−7（含**§四十五 加回决定**）+ 新测试 `packages/agent/main-skill.test.ts` +179。新增配置键 `mainSkillRoots`/`mainSkillMode`（类型+校验）；`loadMainSkillDelivery` 复用 `loadWorkerSkills`（臂 A）/`listSkills`+`renderSkillCatalog`+`READ_SKILL_TOOL`（臂 B）；两装配点同源；**缺省（无该配置）逐字节不变**。
 - **「新造清单」**：三缺口合计 **0 个新机制**——缺口 3 复用 `parseContextWindow`；缺口 1 复用 `registry.list/get` + `runner.cancel/resume`（仅新增工具声明与处理器，未新建生命周期/权限/治理）；缺口 2 复用 `loadWorkerSkills` / `READ_SKILL_TOOL` / `renderSkillCatalog` / `listSkills`（新增 2 个可选配置键 + 1 个装配期薄封装 + 1 个 ~25 行多根 registry 内部适配）。无 Planner / Router / 规则引擎 / 事件总线 / 通用 Workflow Engine / 新任务状态框架 / 第二套协议 / 沙箱；无新模块文件。
 - **哲学合规结论**：**Pi First**——三缺口均接既有 Pi 原生面（压缩参数、工具面、技能库），未建语义层/记忆/检索；**Skills First**——业务知识经 SKILL.md，`agent.md` 未改；**Runtime Minimal**——缺口 1 未新建治理、缺口 3 单点解析、缺口 2 缺省零变化；**Eval Driven**——三缺口均待用户级 Eval，缺口 2 明确「进缺省需 Eval 改善」门槛；**Zero Trust**——缺口 1 scope 由宿主服务端注入、参数不收 `principalId/sessionId`（越权=找不到，不泄露存在性）；缺口 2 缺省不改。
-- **自测与绊线读数**（命令见各提交 message；均在 worktree `TMPDIR=/home/tao/.tmp` 下运行）：
+- **自测与绊线读数**（命令见各提交 message；均在 worktree `TMPDIR=~/.tmp` 下运行）：
   - `node_modules/.bin/tsc --noEmit`：三缺口各自及合并后均 **退出码 0**。
   - 定向：缺口 3 新守卫 + `pi-model-capability` = 8 passing；缺口 1 `task-surface` = 9 passing，加定向回归共 103 passing；缺口 2 `main-skill` = 6 passing，加定向回归（含 `import-boundary`）= 80 passing。
   - 全量 `node_modules/.bin/vitest run`：基线 **65 文件/674 例** → gap3 **66/679** → gap1 **67/688** → gap2 **68/694**（只增不减，全绿）。
@@ -1261,7 +1261,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
   - **①#5**：T01 2/3[0.208,0.939]、T02 2/3[0.208,0.939]、T03 3/3[0.438,1.000]（`sessions:9, modelCallsTotal:61, wallMs:42318`）。机械不变量：越权=找不到（`unauthorized=0`，T03 3/3）、取消如实（0 虚假「已取消」）、无虚假完成、无重复执行。失败（2/9）主导根因为**产品接口缺陷——`ref` 编号格式**：工具描述示例为裸数字（`execution-runtime.ts:77-84` 等），`resolveTaskId` 只认字面 `#N`/完整 `taskId`（`:329`），inline 受理回执不含 `taskNo`（`:559`；仅 background 回 `#N`，`:516`）→ 14/14 定向 `ref` 用裸 `"1"` 全部失败、模型从未发出 `"#1"`。**登记产品缺陷（不修）**。
   - **②#7**：**预注册读数未取得**——两次完整尝试（run2/run3）均活锁、0 会话完成。机制确认：修好执行器接线后 `context_emergency_compact` 按配置窗口触发（run2 日志 `tokens:13751 contextWindow:12000 messages:11` / `21043@20000`）；病态：近窗口长会话出现 thinking-only 空回复（`pi_driver_empty_reply, stopReason:length`）+ 反复紧急压缩不降反升 → 事件循环阻塞式活锁（加墙钟兜底仍挂），手工 kill；run1 因执行器绕过窗口接线而**无效**（保留为 `compaction-run1-invalid`）。
   - **③#3**：none 0/6、inline 6/6、catalog 3/6（`sessions:18, modelCallsTotal:39, wallMs:68957`）；`read_skill` 命中 digest 3/3、note 0/3；臂 A 常驻提示 1312B vs 臂 B catalog 274B。配对：none→inline 改善；inline→catalog digest 经验证无实质变化、note 退化；none→catalog 依 base 分化。CI 重叠 ⇒ 方向一致但**统计证据不足**（N=3）。
-- **自测与自检（零真实模型，`TMPDIR=/home/tao/.tmp`）**：`node_modules/.bin/tsc --noEmit` = **退出码 0**；全量 `vitest run` = **74 文件/725 例全绿**（基线 `arch/integration` 同 commit = 72 文件/711 例 → 纯新增 2 文件/14 测试，只增不减）；新增自测 `experiments/{fixtures,experiments}.test.ts` = 15 例全绿（含工具面门控、四工具全流程、越权=找不到、三臂装配、#7 小窗口确定性触发压缩、串并行一致性）；infra 门 `LLM_MODEL=step-3.7-flash` `--infra-gate` = **exit 0**（缺 `LLM_API_KEY` 时 `blocking=true`，不烧样本）。
+- **自测与自检（零真实模型，`TMPDIR=~/.tmp`）**：`node_modules/.bin/tsc --noEmit` = **退出码 0**；全量 `vitest run` = **74 文件/725 例全绿**（基线 `arch/integration` 同 commit = 72 文件/711 例 → 纯新增 2 文件/14 测试，只增不减）；新增自测 `experiments/{fixtures,experiments}.test.ts` = 15 例全绿（含工具面门控、四工具全流程、越权=找不到、三臂装配、#7 小窗口确定性触发压缩、串并行一致性）；infra 门 `LLM_MODEL=step-3.7-flash` `--infra-gate` = **exit 0**（缺 `LLM_API_KEY` 时 `blocking=true`，不烧样本）。
 - **独立复核**：未单独发起第三方复核；关键结论均以**已落盘证据**（`.runtime/bizbatch2/…`）+ 复跑命令自证（见报告 §十二）。
 - **预算消耗**：本批真实模型会话 = #5 9 + #7（run1 6 无效 + run2/run3 各发起 4）≈14 + #3 18 ≈ **41**；累计 **95/150**（父 54 + 41），未超、未扩容。硬上限 `maxSessions=90 / maxModelCalls{72,240,108} / concurrency=4 ≤ 8 / maxWallMs=1.8e6` 均未超。
 - **边界**：`packages/`、`apps/` 产品代码**零改动**（`git diff 7009ed0 HEAD --name-only | grep -cE '^(packages|apps)/'` = **0**）；不改冻结面与既有轮次读数（`business-e2e-probe-report.md` §一–§十一 原样保留，只**追加** §十二）；未接真实平台；`.env` 只读、不入证据/不提交；证据 `.runtime/bizbatch2/`（gitignored）。
@@ -1286,7 +1286,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
   - **①#7 重设计：未取得压缩读数**（**§6.2 预注册目标未达成**；检定项「**#7 压缩确触发**」**不成立**→ 本批**不能就 #7 判 passed**；已在报告/本节**如实登记、未掩盖、未筛绿**，故非 integrityViolation）。C03(12k) **0/3** [0.000,0.562] severe 2（modelCallsTotal 143 / wallMs 137357）；C04(6k) **0/3** [0.000,0.562] severe 0（132 / 27356）。两 case `compactTriggerEvents=0` / `compactionRounds=0` / `taskToolCalls=0`（探针未被调用→恢复断言无从检验）。**非活锁**（均墙钟内收敛，无手工 kill），但回复自中段起全空（`pi_driver_empty_reply, stopReason:length, contentBlocks:["thinking"]`；C03#1 自 turn24 起 20/43 空，C04#1 43/43 空）。**根因（代码）**：输出钳零线早于压缩阈值触发——钳零线按**全请求** `available = contextWindow − context − CONTEXT_SAFETY_TOKENS(4096)`（`pi-ai/dist/api/simple-options.js:3,:5-8`）；压缩阈值按**转录** `contextTokens > contextWindow − reserveTokens`（`pi-coding-agent/dist/core/compaction/compaction.js:160-164`，应用点 `agent-session.js:279/:1724` 与 `pi-driver.ts:490-492/:594-602`；reserve 缩放见 `pi-driver.ts:279-296`，W<36384 时 reserve=0.25W）；当 **W<16384**（reserve<4096）钳零线先到 → 回答预算先归零、压缩永不触发。**登记为强产品证据（不修）**。另有**语料诱导对象漂移 confound**（C03 执行 `contoso`/`fabrikam`/`contoso-logistics`/`contoso-trade@W99` → 2/3 severe），与压缩无关。
   - **②#6 深探（B06 × N=6）**：**4/6** [0.300,0.903]，机械判负 2、severe 0（modelCallsTotal 22 / wallMs 60205）。**`alpha→alpha-group` 近似集合名 severe 漂移 0/6 复现**；失败为**丢 window 的整集合查询**（B06#5、#6）+ 1 次重复执行（B06#6）。逐轮失败率均 ≈1/3，但失败类型每轮不同。
   - **③重复轮（第 4 轮 6 场景 × N=3）**：**18/18**（每场景 3/3 [0.438,1.000]）；机械不变量全 0、severe 0；`observedMaxConcurrency=4`、wallMs 44285、throughput 0.406/s。跨轮：轮2 17/18 → 轮3 15/18 → 轮4 18/18（N=3 仅探索，不读作稳定）。
-- **自测与自检（零真实模型，`TMPDIR=/home/tao/.tmp`）**：`./node_modules/.bin/tsc --noEmit` = **0**；全量 `vitest run` = **731/731（74 文件）** ↔ 基线同 commit `a88f623` = **726/726（74 文件）**（纯新增 5 测试，**只增不减**）；新增/扩展自测覆盖**自然语料体量下界**、**压缩触发机械捕获**（合成 + 真实 `compact()` 日志）、**并发归属（ALS 不串台）**、infra 门两态；infra 门实跑：`experiments --infra-gate` = exit 0（缺 key = blocking exit 2）、`business-e2e --infra-gate`（B06×6 / 6×3）= exit 0、`verifyLock` 一致。
+- **自测与自检（零真实模型，`TMPDIR=~/.tmp`）**：`./node_modules/.bin/tsc --noEmit` = **0**；全量 `vitest run` = **731/731（74 文件）** ↔ 基线同 commit `a88f623` = **726/726（74 文件）**（纯新增 5 测试，**只增不减**）；新增/扩展自测覆盖**自然语料体量下界**、**压缩触发机械捕获**（合成 + 真实 `compact()` 日志）、**并发归属（ALS 不串台）**、infra 门两态；infra 门实跑：`experiments --infra-gate` = exit 0（缺 key = blocking exit 2）、`business-e2e --infra-gate`（B06×6 / 6×3）= exit 0、`verifyLock` 一致。
 - **独立复核**：经一轮复核（gaps 见下），**不重跑样本**（重跑须整批新预注册、不重采样单点）。复核 4 项 gaps 逐条处置：①**#7 未达预注册目标**（6 样本 0 触发、`taskToolCalls=0`）——已在报告 §13.1/本节如实登记为强产品证据，并在报告 §13.1 明写**检定项不成立、不能判 passed**（不改判据、不改读数）；②**阈值引用精度**——已把阈值公式改引至 `pi-coding-agent/dist/core/compaction/compaction.js:160-164`（应用点 `agent-session.js:279/:1724`、`pi-driver.ts:490-492/:594-602`），`pi-driver.ts:279-296` 仅作 reserve 缩放；③**证据完整性**——`work/C04#1/state/audit.jsonl` 缺失与其「无执行查询」一致（runDir 证据齐备、`tool-calls.json` 全在），已在报告 §13.6 登记；④**账本**——「已耗 ≈95」沿用 §12.6 表、未逐步独立复算，已在报告 §13.5 登记口径。关键结论均以**已落盘证据**（`.runtime/bizbatch3/…`）+ 复跑命令自证（见报告 §十三）。
 - **预算消耗**：本批真实模型会话 = #7 6 + #6 6 + 重复轮 18 = **30**（≤45）；累计 ≈95+30 = **125/150**，未超、未扩容。硬上限均未超（`experiments`：maxSessions 45 / maxModelCalls compaction 600（实 143+132）/ wall 1.8e6 / concurrency 4；`bizprobe`：maxSessions 20 / maxModelCalls 150（实 22/40））。
 - **边界**：`packages/`、`apps/` 产品代码**零改动**（`git diff --name-only -- packages apps` = 0）；不改冻结面与既有轮次读数（报告 §一–§十二 原样保留，只**追加** §十三）；未接真实平台；`.env` 只读复制、不入证据/不提交；证据 `.runtime/bizbatch3/`（gitignored：`compaction-c03`/`compaction-c04`/`drift-b06`/`repeat-r4`）。
@@ -1598,7 +1598,7 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 
 - 新增 `packages/agent/worker-prompt.test.ts`（7 例）：①渲染结果含实际路径与全部约束语义关键句；②缺省渲染与 `WORKER_SYSTEM_PROMPT` 逐字节相等 + 内联锚防漂移；③`createSession` 注入后假 workerDriver 捕获的 systemPrompt 含路径；④生产装配链（`scripts/ask-runtime.ts` 两处）传参结构断言；⑤既有 worker 提示相关测试不弱化（缺省逐字节相等即钉住）。
 - **反向绊线（本条登记时实测）**：把两个消费点的注入改回 `WORKER_SYSTEM_PROMPT` → `npx vitest run packages/agent/worker-prompt.test.ts` = **1 failed | 6 passed（红）**；恢复后 = **7 passed（绿）**。
-- 自检（`TMPDIR=/home/tao/.tmp`，零真实模型）：`./node_modules/.bin/tsc --noEmit` = **退出码 0**；全量 `npx vitest run` = **809 例中 808 绿、1 红**（基线 `b24cd75` 全量 = 802 例中 801 绿、同 1 红）——唯一红为 §五十六/五十七 D 轴脚手架 `spread-axis.test.ts` DS-3「取消后残留」断言的**既有毫秒级竞态**（该测试自身在取消时间戳后跑 turn-3 `task_status`，`d6-metrics.ts:243` 按严格 `>` 计入即为残留；单文件重跑基线 8 次中 5 红才 3 绿），**先于本改动存在、与本改动无关**，如实登记不顺绿、不在本条修（属 D 轴脚手架归属）。
+- 自检（`TMPDIR=~/.tmp`，零真实模型）：`./node_modules/.bin/tsc --noEmit` = **退出码 0**；全量 `npx vitest run` = **809 例中 808 绿、1 红**（基线 `b24cd75` 全量 = 802 例中 801 绿、同 1 红）——唯一红为 §五十六/五十七 D 轴脚手架 `spread-axis.test.ts` DS-3「取消后残留」断言的**既有毫秒级竞态**（该测试自身在取消时间戳后跑 turn-3 `task_status`，`d6-metrics.ts:243` 按严格 `>` 计入即为残留；单文件重跑基线 8 次中 5 红才 3 绿），**先于本改动存在、与本改动无关**，如实登记不顺绿、不在本条修（属 D 轴脚手架归属）。
 
 ### ⑥ 回退
 
@@ -1780,7 +1780,7 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 
 ### ② lockfile 处置
 
-- `TMPDIR=/home/tao/.tmp npm install --package-lock-only --offline` 离线完成，`package-lock.json` 随依赖删除再生成（净删 2967 行，主要为 pi-coding-agent 传递依赖子树）；未手改 lockfile，无待更新登记。
+- `TMPDIR=~/.tmp npm install --package-lock-only --offline` 离线完成，`package-lock.json` 随依赖删除再生成（净删 2967 行，主要为 pi-coding-agent 传递依赖子树）；未手改 lockfile，无待更新登记。
 
 ### ③ 零行为变化依据
 
@@ -2304,7 +2304,7 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 
 ### 4. PoC 已测 / 未验证
 
-**已测（本会话亲跑 `TMPDIR=/home/tao/.tmp npx vitest run scripts/eval/piopt/piopt-phase3.test.ts` → `Test Files 1 passed (1)`；`Tests 11 passed | 3 todo (14)`；`722ms`）**，对生产函数 `compactTranscriptWithPi`（`pi-driver.ts:532-618`）与 `createPiTurnDriver().run()` 的机械行为，确定性假模型驱动：
+**已测（本会话亲跑 `TMPDIR=~/.tmp npx vitest run scripts/eval/piopt/piopt-phase3.test.ts` → `Test Files 1 passed (1)`；`Tests 11 passed | 3 todo (14)`；`722ms`）**，对生产函数 `compactTranscriptWithPi`（`pi-driver.ts:532-618`）与 `createPiTurnDriver().run()` 的机械行为，确定性假模型驱动：
 - ① 有效压缩：`29649→20460`，首条原生摘要、严格下降并回落阈值下、当前回合保留。
 - ②a 未越阈值：`summaryRequests.length==0`，原样返回。
 - ②b/⑥ **零收益调用复现**：`5011→5042`、`5042→5042`，每轮 `summaryChunks≥1`（缺陷真实，§七十 precheck 未实施故未被避免）。
@@ -2490,7 +2490,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ### 4. 确定性测试读数（**本会话实跑**）
 
-- 命令：`npx vitest run scripts/eval/r6`（cwd = R6 worktree，`TMPDIR=/home/tao/.tmp`，零网零 key、假模型）。
+- 命令：`npx vitest run scripts/eval/r6`（cwd = R6 worktree，`TMPDIR=~/.tmp`，零网零 key、假模型）。
 - 结果：**Test Files 6 passed（6）；Tests 51 passed（51）**。覆盖：事实 Oracle（exact/unanswerable/clarify/session_value + 会话聚合）、任务 Oracle（H3/H4/H5/E-G/五态）、压缩生命周期（有效数/零收益连串/H6.a/H6.b/覆盖不足/证据缺口）、负载生成器（逐轨计划/推进器确定性）、三态处置优先序与证据 schema、端到端管线（假会话）、G3 确定性四项。
 
 ### 5. G3 就绪核查（确定性可验部分；`scripts/eval/r6/g3-readiness.ts` + `.test.ts`）
@@ -2551,7 +2551,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ### 4. 五类硬要求证据（确定性、零真实模型、零网络）
 
-文件 `packages/agent/session-persistence.test.ts`（+356 行）。**本会话实跑**：`TMPDIR=/home/tao/.tmp npx vitest run packages/agent/session-persistence.test.ts` → **Test Files 1 passed（1）；Tests 12 passed（12）**。
+文件 `packages/agent/session-persistence.test.ts`（+356 行）。**本会话实跑**：`TMPDIR=~/.tmp npx vitest run packages/agent/session-persistence.test.ts` → **Test Files 1 passed（1）；Tests 12 passed（12）**。
 
 | 类 | 测试要点 |
 | --- | --- |
@@ -2613,7 +2613,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ### 5. 测试证据（本会话实跑）
 
-- 命令：`npx vitest run scripts/eval/r6`（cwd = R6 worktree，`TMPDIR=/home/tao/.tmp`，零网零 key、假会话）。
+- 命令：`npx vitest run scripts/eval/r6`（cwd = R6 worktree，`TMPDIR=~/.tmp`，零网零 key、假会话）。
 - 结果：**Test Files 7 passed（7）；Tests 66 passed（66）**。覆盖：三类记账齐 + 会话/回合关联 + `model-calls.jsonl` 落盘；`calls` / `tokens`（**含摘要调用**）/ `wallMs` 超限**拒发**、判定顺序 `ms`；反向绊线（去 `summary` 计数 → 7 例红；`precheck` 不复用 → 4 例红，均已回滚）。
 
 ### 6. 边界 / 前置条件
@@ -2667,7 +2667,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 每条用例落 `records[]`：`principalId / sessionId / taskId / request / deliveredTo`（`deliveredTo` = 实际投递对象：回复/事实/通知到达的 `(principal, session)`）。原始证据逐用例落 `.runtime/r6/multiuser/<case>/evidence.json`（**gitignored，不 `git add`**），汇总 `.runtime/r6/multiuser/summary.json`。样例：`{principalId:"wecom:mu-alice", sessionId:"wecom:conv-mu-alice", taskId:"task_3b69d0c0-…", request:"TAG-ALICE 交办：清点本用户账套", deliveredTo:"wecom:conv-mu-alice"}`。
 
-### 6. 测试读数（**本会话实跑**；cwd = R6 worktree，`TMPDIR=/home/tao/.tmp`，零网零 key）
+### 6. 测试读数（**本会话实跑**；cwd = R6 worktree，`TMPDIR=~/.tmp`，零网零 key）
 
 - 定向：`npx vitest run scripts/eval/r6/multiuser/mu.test.ts` → **12 passed（12）**。
 - 类型：`npm run typecheck`（`tsc --noEmit`）→ **0 错误**。
@@ -2734,7 +2734,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ### 5. 本轮实跑读数（本会话核验）
 
-- `npx vitest run packages/channel-wecom/adapter.silent-shadow.test.ts apps/server/server.test.ts`（cwd = 本 worktree，`TMPDIR=/home/tao/.tmp`）→ **Test Files 2 passed（2）；Tests 16 passed（16）**（13 + 3）。
+- `npx vitest run packages/channel-wecom/adapter.silent-shadow.test.ts apps/server/server.test.ts`（cwd = 本 worktree，`TMPDIR=~/.tmp`）→ **Test Files 2 passed（2）；Tests 16 passed（16）**（13 + 3）。
 - `npm test`（全量）→ **Test Files 93 passed（93）；Tests 936 passed | 3 todo（939）**。（首跑曾出现 3 例 `[vitest-worker]: Timeout calling "onTaskUpdate"` 的 worker RPC 超时假红；原样重跑即 93/93 全绿——属并行负载下的基础设施抖动，非本轮代码。）
 - `npm run typecheck`（`tsc --noEmit`）→ **exit 0**。
 
@@ -2781,7 +2781,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ### 3. 验收（本会话实跑读数）
 
-- `npx vitest run packages/channel-wecom/adapter.silent-shadow.test.ts apps/server/server.test.ts`（cwd = 本 worktree，`TMPDIR=/home/tao/.tmp`）→ **Test Files 2 passed（2）；Tests 22 passed（22）**（19 + 3）。
+- `npx vitest run packages/channel-wecom/adapter.silent-shadow.test.ts apps/server/server.test.ts`（cwd = 本 worktree，`TMPDIR=~/.tmp`）→ **Test Files 2 passed（2）；Tests 22 passed（22）**（19 + 3）。
 - `npm test`（全量）→ **Test Files 93 passed（93）；Tests 942 passed | 3 todo（945）**（基线 §八十 = 936 passed + 3 todo；**+6，例数不减**）。
 - `npm run typecheck`（`tsc --noEmit`）→ **exit 0**。
 
@@ -2863,7 +2863,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 - **不重实现** Pi 会话管理与压缩（Pi Session 唯一转录所有者，`readTranscript()` 每次**现读**存储、宿主不留第二份可变副本）；无第二套 session / compaction；不改 Worker 提示 / 任务账本语义 / 执行契约；`.runtime` 未 `git add`。
 - **不重放**：接线只在对话上下文层载入/追加转录；任务侧仍走既有 runner（`task_cancel`/`task_resume`/`background` 的 pump），本层**无**任何执行/重放入口，也不感知 compaction。
 
-### 6. 测试读数（**本会话实跑**；cwd = B1 worktree，`TMPDIR=/home/tao/.tmp`，零网零 key）
+### 6. 测试读数（**本会话实跑**；cwd = B1 worktree，`TMPDIR=~/.tmp`，零网零 key）
 
 - 定向：`npx vitest run packages/agent/session-persistence-wiring.test.ts apps/server/server-b1-persistence.test.ts` → **2 文件 / 7 passed**。
 - 类型：`npm run typecheck`（`tsc --noEmit`）→ **0 错误**。
@@ -2911,7 +2911,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 **硬零映射**：继承私聊历史 / 跨会话内容泄漏 → `cross_principal_leak`；越权取私聊任务或内容 → `unauthorized_execution`；任务或投递串线 → `task_crossover`。
 
-### 4. 证据（本会话实跑；`TMPDIR=/home/tao/.tmp`，零网零 key）
+### 4. 证据（本会话实跑；`TMPDIR=~/.tmp`，零网零 key）
 
 命令：`npx vitest run scripts/eval/r6/multiuser/mu.test.ts`（cwd = 本 worktree）；证据落 `.runtime/r6/multiuser/MU-8/evidence.json`（**gitignored，不 `git add`**）。本次读数：
 
@@ -3003,7 +3003,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 **「不改既有 MU 判据」口径**：MU-1～5、7～10 的用例实现与断言**逐字未改**；MU-8 仍 `BLOCKED`。MU-6 本身即本任务落地对象（旧版是 `BLOCKED` 占位，**非既有判据**），故 `mu-cases.ts` 的 `mu6` 与 `mu.test.ts` 的 MU-6 断言由占位改为真实判据；`mu.test.ts` 汇总用例的 `BLOCKED` 期望由 `['MU-6','MU-8']` 收窄为 `['MU-8']`。
 
-### 5. 证据（**本会话实跑**；cwd = MU-6 worktree `arch/r6-mu6`，`TMPDIR=/home/tao/.tmp`，零网零 key）
+### 5. 证据（**本会话实跑**；cwd = MU-6 worktree `arch/r6-mu6`，`TMPDIR=~/.tmp`，零网零 key）
 
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
@@ -3113,7 +3113,7 @@ MU-6 在本基线（含 B1 接线）上 **PASS**：三 principal 同 `dbPath` �
 
 ### 1. 工作区核验（本会话实跑）
 
-- `pwd` / `git rev-parse --show-toplevel` = `.../fshine-agent-exp-pi-session`（**≠ 主仓** `/home/tao/projects/fshine-agent`）；`git rev-parse --abbrev-ref HEAD` = `exp/pi-native-session-compaction`；HEAD `bf94b92`；`git merge-base HEAD arch/integration` = **`84a22fa`**（基线一致）。**通过。**
+- `pwd` / `git rev-parse --show-toplevel` = `.../fshine-agent-exp-pi-session`（**≠ 主仓** `~/projects/fshine-agent`）；`git rev-parse --abbrev-ref HEAD` = `exp/pi-native-session-compaction`；HEAD `bf94b92`；`git merge-base HEAD arch/integration` = **`84a22fa`**（基线一致）。**通过。**
 
 ### 2. 五项链能力（有·无）
 
@@ -3162,7 +3162,7 @@ S1 跨回合转录连续 · S2 threshold 自动压缩 · S3 overflow 恢复（�
 
 ### 1. 工作区核验（本会话实跑）
 
-- `pwd` / `git rev-parse --show-toplevel` = `.../fshine-agent-exp-pi-session`（**≠ 主仓** `/home/tao/projects/fshine-agent`）；`git rev-parse --abbrev-ref HEAD` = `exp/pi-native-session-compaction`；原型提交 `8aae96b`（parent `206cb19`）；`git merge-base HEAD arch/integration` = `84a22fa`（与 §八十九 基线一致）。**通过。**
+- `pwd` / `git rev-parse --show-toplevel` = `.../fshine-agent-exp-pi-session`（**≠ 主仓** `~/projects/fshine-agent`）；`git rev-parse --abbrev-ref HEAD` = `exp/pi-native-session-compaction`；原型提交 `8aae96b`（parent `206cb19`）；`git merge-base HEAD arch/integration` = `84a22fa`（与 §八十九 基线一致）。**通过。**
 
 ### 2. 接入路径实测（关闭阶段一「装配可行性未实测」条件）
 
@@ -3299,8 +3299,8 @@ node scripts/eval/pi-native/tripwire-d1-tao.mjs      # exit 0
 ### 5. D1 绊线重跑（本会话实跑）
 
 ```
-TMPDIR=/home/tao/.tmp node scripts/eval/pi-native/verify-pi-harness.mjs                 # failures=0 exit 0
-FSHINE_B_REVERSE=1 TMPDIR=/home/tao/.tmp node scripts/eval/pi-native/verify-pi-harness.mjs  # failures=9 exit 1
+TMPDIR=~/.tmp node scripts/eval/pi-native/verify-pi-harness.mjs                 # failures=0 exit 0
+FSHINE_B_REVERSE=1 TMPDIR=~/.tmp node scripts/eval/pi-native/verify-pi-harness.mjs  # failures=9 exit 1
 ```
 
 - **正常态**（`failures=0`、`exit 0`，与 `OUTPUT-pi-harness.txt` 逐行一致，仅 ULID 归一）：各窗首条不可救超窗请求（单条巨型消息，无可切分）被 `PreRequestBudgetRefusal` **有界拒绝**——`override` 前 `provider stream calls = 0 (over-window = 0)`、`run_end = []`；W=8192 `refused: pre-request budget exceeded: 8192 > 3066`、W=40000 `40000 > 34874`、W=128000 `128000 > 122874`。
@@ -3344,8 +3344,8 @@ FSHINE_B_REVERSE=1 TMPDIR=/home/tao/.tmp node scripts/eval/pi-native/verify-pi-h
 
 ### 10. 验收/回归（本会话实跑）
 
-- `TMPDIR=/home/tao/.tmp npm run typecheck` → **exit 0**（`tsc --noEmit`，无输出）。
-- `TMPDIR=/home/tao/.tmp npm test`（全量 vitest）→ `Test Files 3 failed | 83 passed (86)`、`Tests 3 failed | 868 passed | 3 todo (874)`。3 个失败文件为 `scripts/ask-replay.test.ts`、`scripts/ask-trace.test.ts`、`scripts/tasks.test.ts`，**与本 run 改动路径无关**（本 run 未改任何产品码/测试码），且**隔离复跑全绿**：`npx vitest run scripts/ask-replay.test.ts scripts/ask-trace.test.ts scripts/tasks.test.ts` → `Test Files 3 passed (3)`、`Tests 71 passed (71)`，`exit 0`——系全量并行下的 vitest-worker 超时 flaky（伴随 2 条 `Timeout calling "onTaskUpdate"`），非本 run 引入。**例数不减**：本 run 自 merge-base 未改任何测试文件。
+- `TMPDIR=~/.tmp npm run typecheck` → **exit 0**（`tsc --noEmit`，无输出）。
+- `TMPDIR=~/.tmp npm test`（全量 vitest）→ `Test Files 3 failed | 83 passed (86)`、`Tests 3 failed | 868 passed | 3 todo (874)`。3 个失败文件为 `scripts/ask-replay.test.ts`、`scripts/ask-trace.test.ts`、`scripts/tasks.test.ts`，**与本 run 改动路径无关**（本 run 未改任何产品码/测试码），且**隔离复跑全绿**：`npx vitest run scripts/ask-replay.test.ts scripts/ask-trace.test.ts scripts/tasks.test.ts` → `Test Files 3 passed (3)`、`Tests 71 passed (71)`，`exit 0`——系全量并行下的 vitest-worker 超时 flaky（伴随 2 条 `Timeout calling "onTaskUpdate"`），非本 run 引入。**例数不减**：本 run 自 merge-base 未改任何测试文件。
 
 **指针**：`scripts/eval/pi-native/pi-harness-driver.mjs`、`verify-pi-harness.mjs`、`OUTPUT-pi-harness.txt`（夹具/输出）；`node_modules/@earendil-works/pi-agent-core/dist/harness/agent-harness.d.ts:485-604`、`dist/harness/hooks.js:108-184`、`dist/harness/runtime/drive/generation.js:54-147`（0.85.1 公开面）；`packages/agent/src/pi-driver.ts:260-965`（待删编排/D1 臂）；关联 §六十九、§七十、§七十七、§八十九、§九十、§九十一。
 
@@ -3463,7 +3463,7 @@ FSHINE_B_REVERSE=1 TMPDIR=/home/tao/.tmp node scripts/eval/pi-native/verify-pi-h
 
 ```
 cd ~/projects/fshine-agent-exp-pi-session
-TMPDIR=/home/tao/.tmp node scripts/eval/pi-native/a-metrics.mjs   # exit 0，33 [PASS] / 0 [FAIL]，failures=0
+TMPDIR=~/.tmp node scripts/eval/pi-native/a-metrics.mjs   # exit 0，33 [PASS] / 0 [FAIL]，failures=0
 ```
 
 - **确定性**：两次连跑（`EXIT1=0`、`EXIT2=0`）输出 `diff` **逐字相同**；与已提交 `scripts/eval/pi-native/OUTPUT-a-metrics.txt` `diff` **零差异**。
@@ -3517,8 +3517,8 @@ TMPDIR=/home/tao/.tmp node scripts/eval/pi-native/a-metrics.mjs   # exit 0，33 
 
 ```
 cd ~/projects/fshine-agent-exp-pi-session
-TMPDIR=/home/tao/.tmp npm run typecheck   # exit 0（tsc --noEmit，无输出）
-TMPDIR=/home/tao/.tmp npm test            # exit 0：Test Files 83 passed (83)；Tests 874 passed (874)
+TMPDIR=~/.tmp npm run typecheck   # exit 0（tsc --noEmit，无输出）
+TMPDIR=~/.tmp npm test            # exit 0：Test Files 83 passed (83)；Tests 874 passed (874)
 ```
 
 - typecheck **exit 0**；全量 vitest **83 文件 / 874 用例全绿、0 失败**（较 §九十二 874 总例数**不减**；组成变化＝退役仅验证已删机制的用例、新增 T1–T12 与反向绊线）。
@@ -3766,7 +3766,7 @@ Pi 1.5.2 迁移 U3（恢复/重试后同一逻辑写操作被重复执行）以*
 - U3 侧窗口与认领逻辑整块合入（`execution-runtime` / `pi-driver` / `task-registry*` / `task-store` / `task-runner` / 契约 / 通知黑名单）。
 - 机械适配（仅类型面，不改任何断言）：integration 新增的 `ExecutionFace` 字面量补上 U3 变为必填的 `readOnlyOperations`（语义仍是只读 `dummy.query`）：`apps/server/server.test.ts` B2 用例、`apps/server/server-b1-persistence.test.ts` 六处、`scripts/eval/r6/multiuser/mu-support.ts`。
 
-### 9. 硬门读数（2026-11-16，worktree `~/projects/fshine-agent-u3`，`TMPDIR=/home/tao/.tmp`）
+### 9. 硬门读数（2026-11-16，worktree `~/projects/fshine-agent-u3`，`TMPDIR=~/.tmp`）
 
 | 门 | 命令 | 退出码 | 读数 |
 |---|---|---|---|

@@ -58,4 +58,4 @@
 
 ## 五、边界
 
-零产品代码改动；不改冻结面（criteria.lock 一致性已验）与历史证据；不接真实平台（执行层一律仓内 dummy 夹具）；不 push/不合并/不碰 main/tag。提交身份 `Tao <34084876+phona@users.noreply.github.com>`，message 禁 /home/ 绝对路径；TMPDIR=/home/tao/.tmp。
+零产品代码改动；不改冻结面（criteria.lock 一致性已验）与历史证据；不接真实平台（执行层一律仓内 dummy 夹具）；不 push/不合并/不碰 main/tag。提交身份 `Tao <34084876+phona@users.noreply.github.com>`，message 禁 /home/ 绝对路径；TMPDIR=~/.tmp。

@@ -2,7 +2,7 @@
 
 - 性质：确定性实验，零真实模型、零网络；只用 `@earendil-works/pi-coding-agent` root 公开导出。
 - 预注册：`scripts/eval/pi152-stageC/PREREG.md`（8 项判据写于首次实跑之前；失败样本全留，不放宽判据）。
-- 命令（预注册，原样）：`export TMPDIR=/home/tao/.tmp && npx vitest run scripts/eval/pi152-stageC/stage-c.test.ts`
+- 命令（预注册，原样）：`export TMPDIR=~/.tmp && npx vitest run scripts/eval/pi152-stageC/stage-c.test.ts`
 - 本轮结果：`Test Files 1 passed (1)`、`Tests 15 passed (15)`（8 项检查由 15 个用例承载；用例通过只代表实验执行成功，判据按读数逐条判定）。
 - 原始证据：`.runtime/`（不提交）+ 测试内 `console.log` 的 `STAGE-C-*` 读数；本文逐条复述。
 

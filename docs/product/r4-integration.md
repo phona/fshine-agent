@@ -35,7 +35,7 @@ Main 快速受理、后台受资源约束执行、等待可释放并接续、通
 ### 3.1 联合测试（假 driver/executor/sink/渠道事实，零网络）
 
 `scripts/r4-integ-joint.test.ts`（15 例）+ `apps/server/server-r4-background.test.ts`（2 例）：
-`TMPDIR=/home/tao/.tmp npx vitest run scripts/r4-integ-joint.test.ts apps/server/server-r4-background.test.ts`
+`TMPDIR=~/.tmp npx vitest run scripts/r4-integ-joint.test.ts apps/server/server-r4-background.test.ts`
 → **2 files / 17 passed**（`.runtime/integ/green-target-head2.txt`）。7 焦点逐条：
 
 1. **受理快速返回**：executor 挂起时 `send` 已返回；`run_task` 返回 `{taskNo,name,status:'queued',accepted,notice}`；受理后 pump 使行 running。
@@ -70,8 +70,8 @@ unknown 自动重放→⑤红（`[task_running,task_queued] ≠ [task_queued]`�
 
 ### 3.4 回归（本会话实跑）
 
-- `TMPDIR=/home/tao/.tmp npx tsc --noEmit` → exit=0（`.runtime/integ/final-tsc.txt`）。
-- `TMPDIR=/home/tao/.tmp npm test` → **54 files / 584 passed**，exit=0（`.runtime/integ/final-suite.txt`）；
+- `TMPDIR=~/.tmp npx tsc --noEmit` → exit=0（`.runtime/integ/final-tsc.txt`）。
+- `TMPDIR=~/.tmp npm test` → **54 files / 584 passed**，exit=0（`.runtime/integ/final-suite.txt`）；
   基线 567（只增不减：+17 联合例；`git diff 3b41945..HEAD -- '*.test.ts'` 删除 it/describe 命中 0）。
 - inline 金样逐字：ask-runtime/ask-interactive/ask-replay/p0-gates-cli/p0-assembly-single-point/p0-runner-lock/
   tasks/ops/p7a-*/reply-archive/runtime/task-registry-contract 等全绿（全量 54 文件）。

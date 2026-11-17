@@ -10,7 +10,7 @@
 - **边界（硬）**：产品代码 0 修改；不升级 Pi；不读 `.env`；不烧付费额度；仅新增 `scripts/eval/piopt/piopt-phase3.test.ts`（`scripts/**` 纳入 vitest unit）。
 - **复跑命令**（本会话执行）：
   ```
-  TMPDIR=/home/tao/.tmp npx vitest run scripts/eval/piopt/piopt-phase3.test.ts
+  TMPDIR=~/.tmp npx vitest run scripts/eval/piopt/piopt-phase3.test.ts
   ```
   **输出**：`Test Files 1 passed (1)`；`Tests 11 passed | 3 todo (14)`；`Duration 689ms`。
 

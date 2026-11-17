@@ -54,7 +54,7 @@
 `packages/agent/session-persistence-wiring.test.ts`（端口/失败注入）。运行：
 
 ```
-$ TMPDIR=/home/tao/.tmp npx vitest run packages/agent/session-persistence-wiring.test.ts apps/server/server-b1-persistence.test.ts
+$ TMPDIR=~/.tmp npx vitest run packages/agent/session-persistence-wiring.test.ts apps/server/server-b1-persistence.test.ts
  ✓ packages/agent/session-persistence-wiring.test.ts (4 tests)
  ✓ apps/server/server-b1-persistence.test.ts (3 tests)
  Test Files  2 passed (2)

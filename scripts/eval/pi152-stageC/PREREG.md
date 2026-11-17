@@ -37,7 +37,7 @@
 ## 命令（预注册）
 
 ```
-cd ~/projects/fshine-agent-pi-upgrade && export TMPDIR=/home/tao/.tmp \
+cd ~/projects/fshine-agent-pi-upgrade && export TMPDIR=~/.tmp \
   && npx vitest run scripts/eval/pi152-stageC/stage-c.test.ts
 ```
 

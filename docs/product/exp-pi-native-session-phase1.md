@@ -11,8 +11,8 @@
 |---|---|---|
 | 基线 SHA | `git rev-parse arch/integration`（主仓） | `84a22fa6a1dfcb40d73a172b3248766e0ac41a3b` |
 | 建 worktree | `git worktree add -b exp/pi-native-session-compaction ~/projects/fshine-agent-exp-pi-session <SHA>` | `Preparing worktree (new branch ...)` / `HEAD is now at 84a22fa` |
-| pwd | `pwd` | `/home/tao/projects/fshine-agent-exp-pi-session` |
-| toplevel | `git rev-parse --show-toplevel` | `/home/tao/projects/fshine-agent-exp-pi-session` |
+| pwd | `pwd` | `~/projects/fshine-agent-exp-pi-session` |
+| toplevel | `git rev-parse --show-toplevel` | `~/projects/fshine-agent-exp-pi-session` |
 | 分支 | `git rev-parse --abbrev-ref HEAD` | `exp/pi-native-session-compaction` |
 | worktree list | `git worktree list` | `...exp-pi-session  84a22fa [exp/pi-native-session-compaction]` |
 

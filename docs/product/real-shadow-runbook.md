@@ -35,12 +35,12 @@
 
 ```sh
 # 目标套件：源 A（仓内 dummy fixture，真实 spawn/审计）× 源 B（进程内 fake-real）
-TMPDIR=/home/tao/.tmp npx vitest run scripts/shadow/double-source.test.ts
+TMPDIR=~/.tmp npx vitest run scripts/shadow/double-source.test.ts
 # 期望：Test Files 1 passed；Tests 12 passed（含四态等价、只读哈希、fail-closed、回退开关、证据复跑、3 类绊线）
 ```
 
-- **全量回归**：`TMPDIR=/home/tao/.tmp npx tsc --noEmit` → exit 0；
-  `TMPDIR=/home/tao/.tmp npx vitest run` → 56 files / 606 tests passed（只增不减）。
+- **全量回归**：`TMPDIR=~/.tmp npx tsc --noEmit` → exit 0；
+  `TMPDIR=~/.tmp npx vitest run` → 56 files / 606 tests passed（只增不减）。
 - **证据落盘**：`runShadowComparison({ label, scenario, evidenceDir, fakeReal })` 写
   `evidenceDir/<label>/{summary,dummy,fake-real}.json`；`summary.digest` 不含时间戳/随机 id，
   同场景复跑必须同 digest；`summary.realConnection=false` 明示未接真实。Runbook 约定目录 = `.runtime/shadow/`（gitignored）。

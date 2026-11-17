@@ -41,7 +41,7 @@
 
 ## 四、执行证据（本次复跑读数；日志均在 `.runtime/p4/`）
 
-**RED（先红）**：`TMPDIR=/home/tao/.tmp node_modules/.bin/vitest run packages/agent/notifications.test.ts` → `Cannot find module './src/notifications' imported from ... notifications.test.ts:21`，`Test Files 1 failed`，exit=1（`red-notifications.log`）。
+**RED（先红）**：`TMPDIR=~/.tmp node_modules/.bin/vitest run packages/agent/notifications.test.ts` → `Cannot find module './src/notifications' imported from ... notifications.test.ts:21`，`Test Files 1 failed`，exit=1（`red-notifications.log`）。
 
 **反向绊线（≥2 类；破坏不提交、随即 `git checkout` 还原）**：
 

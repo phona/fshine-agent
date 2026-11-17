@@ -328,7 +328,7 @@
 ## 十二、证据与提交纪律
 
 - 证据根：`.runtime/r6/`（gitignored，**不得 git add**）；逐会话原始留档（schema 见 harness 设计 §五）。
-- 提交：本文件、harness 设计文件两份 docs，及 `scripts/eval/r6/**` 测试基建与确定性测试；提交身份 `Tao <34084876+phona@users.noreply.github.com>`；commit message 禁绝对路径；`TMPDIR=/home/tao/.tmp`；不 push/不合并/不碰 main/tag。
+- 提交：本文件、harness 设计文件两份 docs，及 `scripts/eval/r6/**` 测试基建与确定性测试；提交身份 `Tao <34084876+phona@users.noreply.github.com>`；commit message 禁绝对路径；`TMPDIR=~/.tmp`；不 push/不合并/不碰 main/tag。
 - **不写 `docs/decision-log.md`**（集成 Agent 单点写）。
 
 ## 十三、**Wave1 冻结口径块**（逐轨 2×40k + 1×128k；失败分类冻结；单实验硬停；停止条件）

@@ -61,7 +61,7 @@
 文件：`packages/agent/session-persistence.test.ts`。运行命令与结果：
 
 ```
-$ TMPDIR=/home/tao/.tmp npx vitest run packages/agent/session-persistence.test.ts
+$ TMPDIR=~/.tmp npx vitest run packages/agent/session-persistence.test.ts
  ✓ packages/agent/session-persistence.test.ts (12 tests) 135ms
  Test Files  1 passed (1)
       Tests  12 passed (12)

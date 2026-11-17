@@ -5,7 +5,7 @@
 > 角色：**只度量 A**（按 owner 步骤 7）。本文件**不做修复决定、不放宽 D1 判据**，只给四组场景的确定性读数与四项 A 指标，并提供 **A/C 对照表与「我的建议」**（建议明确标注、由 owner 裁定）。
 > **零真实模型**：仅假 `Models` / 假 `streamFn`，`baseUrl=http://localhost`，`streamDeferred`/`fetchDeferred` 均 `throw 'n/a'`。
 > 度量夹具：`scripts/eval/pi-native/a-metrics.mjs`（本 run 新增，独立于既有 `verify-pi-harness.mjs`）；原始输出：`scripts/eval/pi-native/OUTPUT-a-metrics.txt`。
-> 复跑：`TMPDIR=/home/tao/.tmp node scripts/eval/pi-native/a-metrics.mjs`（退出码 0 = 全部有界性断言成立；两次连跑输出逐字相同，确定性）。
+> 复跑：`TMPDIR=~/.tmp node scripts/eval/pi-native/a-metrics.mjs`（退出码 0 = 全部有界性断言成立；两次连跑输出逐字相同，确定性）。
 
 ## 0. A 是什么（本 run 度量的对象）
 

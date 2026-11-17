@@ -168,7 +168,7 @@
 
 ## 附：本报告核验记录（本次实做，非转述）
 
-- `git rev-parse --show-toplevel` = `/home/tao/projects/fshine-agent-r5-fouraxis`；`git rev-parse --abbrev-ref HEAD` = `arch/r5-fouraxis`（worktree 指向本分支，HEAD 为本报告的提交）。
+- `git rev-parse --show-toplevel` = `~/projects/fshine-agent-r5-fouraxis`；`git rev-parse --abbrev-ref HEAD` = `arch/r5-fouraxis`（worktree 指向本分支，HEAD 为本报告的提交）。
 - `git merge-base --is-ancestor 7a769a7 arch/integration` = 真（压缩审计文档在 integration）；`1a21969` = 真（D7 共享夹具在 integration）。`arch/r5-d7` 真实模型 D7（`7fc150d`/`19a5d48`/`a60e06c`）：**成稿时对 `arch/integration`@`b0606db` 实测=假（未合入）；本次复核对 `arch/integration`@`2967646` 实测=真（已合入，§七十二）**。`e34a1a4`（D7 文档）现亦在 integration=真。
 - 本次复核另跑：`git rev-parse --short arch/integration` = `2967646`；`git log --oneline -1 arch/r5-d7` = `e34a1a4`；`git show arch/integration:docs/decision-log.md` 确认 D7 段在 integration 编号为 §七十二（§七十一 = R5-C 压缩计量）。**未重跑任何测试/eval，零真实模型调用。**
 - 逐文件读过：`docs/decision-log.md` §五十/§五十四/§五十五/§五十七/§六十一/§六十五/§六十六/§六十八/§六十九/§七十；`docs/product/r5-compaction-audit.md`、`docs/product/r5-phase3-longrun-report.md`、`docs/product/r5-phase4-audit.md`、`docs/product/business-e2e-final-report.md`、`docs/product/real-read-readiness.md`、`docs/product/real-shadow-runbook.md`。

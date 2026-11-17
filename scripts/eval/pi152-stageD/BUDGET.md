@@ -66,7 +66,7 @@
 
 ```bash
 cd ~/projects/fshine-agent-pi-upgrade
-export TMPDIR=/home/tao/.tmp
+export TMPDIR=~/.tmp
 # 装配自检（零模型）
 node --import tsx scripts/eval/pi152-stageD/run.ts --selftest
 node --import tsx scripts/eval/pi152-stageD/run.ts --selftest-restart
