@@ -16,7 +16,7 @@
  *
  * 退出码：0=全部 trial 判定完成且无 FAIL；1=存在 FAIL；2=infra/INCONCLUSIVE（证据缺失、哈希不符、隔离违反）。
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, cpSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
