@@ -13,6 +13,8 @@
  *      附：正文空且无文件仍按既有「回合失败」处理（分支两侧都钉住）；
  *   ⑥ server 级清单注入：下一回合的机械事实只有 fileId/name/bytes（无文件内容/sha256），
  *      message_done 记 fileManifestBytes 观察项。
+ *   ⑤ 同回合重复交付（sha256 + 文件名相同）→ 只投递一份；去重键是 (sha256, 文件名)：
+ *      同名不同字节、同字节不同名都照常各投一份（不按名字或字节单维去重）。
  *
  * CAP-01 修复轮（R7-F3）：①b 投递成功后事件写失败 → 结果不得被日志写失败改写——回合
  * 结果仍是 sent、用户话术无「未送达」、不产生「请重试」诱导；失败的写只降级成一条独立
@@ -306,6 +308,83 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     try {
       await expect(server.handler(incoming('m-blank', '说点什么'))).rejects.toThrow('本回合未产出可用回复');
       expect(logs.some((line) => line['event'] === 'message_done')).toBe(false);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('⑤ 同回合重复交付（同 sha256 + 同名）→ 只投递一份，去重项不产生额外事件/错误', async () => {
+    const { port, calls } = livePort();
+    const { server, logs } = await makeFixture({
+      // 两次 run_js 代码不同（memo 不命中，各自登记新 fileId），但产出同名同字节。
+      steps: [
+        {
+          execCalls: [
+            RUN_JS_CALL,
+            {
+              tool: 'run_js',
+              args: {
+                code:
+                  "const fs = require('node:fs'); fs.writeFileSync('out/汇总.txt', 'summary-' + 'bytes'); // 同字节同名产物（第二次登记）",
+              },
+            },
+          ],
+          text: '汇总完成。',
+        },
+      ],
+      port,
+    });
+    try {
+      const reply = await server.handler(incoming('m-dedupe', '帮我汇总两次'));
+      expect(reply).toBe('汇总完成。');
+      // 投递面：一次调用、一份文件（同 sha256 + 同文件名只投第一份）。
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.files).toHaveLength(1);
+      expect(calls[0]!.files[0]!.filename).toBe('汇总.txt');
+      expect(calls[0]!.files[0]!.data.toString()).toBe('summary-bytes');
+      // 事件面：只有一条 sent 事实、计数按实际投递份数；去重项不产生额外事件或错误日志。
+      const deliveryLogs = logs.filter((line) => line['event'] === 'file_delivery');
+      expect(deliveryLogs).toHaveLength(1);
+      expect(deliveryLogs[0]!['status']).toBe('sent');
+      expect(deliveryLogs[0]!['files']).toBe(1);
+      expect(logs.some((line) => line['status'] === 'delivery_failed')).toBe(false);
+      expect(logs.some((line) => line['event'] === 'file_delivery_log_write_failed')).toBe(false);
+      const done = logs.find((line) => line['event'] === 'message_done');
+      expect(done?.['fileDelivery']).toEqual({ status: 'sent', files: 1 });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('⑤b 去重键是 (sha256, 文件名)：同名不同字节、同字节不同名都各投一份', async () => {
+    const { port, calls } = livePort();
+    const { server, logs } = await makeFixture({
+      steps: [
+        {
+          execCalls: [
+            { tool: 'run_js', args: { code: "require('node:fs').writeFileSync('out/同名.txt', 'A');" } },
+            { tool: 'run_js', args: { code: "require('node:fs').writeFileSync('out/同名.txt', 'B');" } },
+            { tool: 'run_js', args: { code: "require('node:fs').writeFileSync('out/异名-1.txt', 'C');" } },
+            { tool: 'run_js', args: { code: "require('node:fs').writeFileSync('out/异名-2.txt', 'C');" } },
+          ],
+          text: '产物如下。',
+        },
+      ],
+      port,
+    });
+    try {
+      await server.handler(incoming('m-dedupe-key', '发四份'));
+      expect(calls).toHaveLength(1);
+      // 四份两两不同（键 = sha256 + 文件名）→ 一份都不吞。
+      expect(calls[0]!.files.map((file) => `${file.filename}:${file.data.toString()}`)).toEqual([
+        '同名.txt:A',
+        '同名.txt:B',
+        '异名-1.txt:C',
+        '异名-2.txt:C',
+      ]);
+      const deliveryLogs = logs.filter((line) => line['event'] === 'file_delivery');
+      expect(deliveryLogs).toHaveLength(1);
+      expect(deliveryLogs[0]!['files']).toBe(4);
     } finally {
       await server.close();
     }

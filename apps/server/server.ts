@@ -21,6 +21,7 @@
  * 测试注入点（假渠道回归用，见 server.test.ts）：createDrivers / createExecutionFace；
  * 缺省实现走真实 Pi 驱动与仓内 dummy 客户端——测试替身不触碰任何真实平台。
  */
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -365,6 +366,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
    *   · live 成功 → 事件记 sent（唯一允许 sent 的分支）。
    * handler 仍只返回 text（四必守 #1）：文件字节经端口单独发出，不进回执文本。
    *
+   * 投递去重（用户级不变量）：同一回合里 **(sha256, 文件名)** 相同的交付项只发第一份。
+   * 判据是实际交付字节的 sha256（登记时已 copy 进 workspace，与 file_refs 行同源）——
+   * 不按路径/时间/内容相似度猜；文件名原值参与键（同名不同字节、同字节不同名照常各发）。
+   * 被去重的项不产生任何额外事件（事件里的 files = 实际投递份数）。
+   *
    * R7-F3：投递结果一旦成功就**不得被日志写失败改写**——sent 事件写在投递 try 之外自成
    * 一段；写失败只降级成一条独立的观测事件（file_delivery_log_write_failed，status 仍
    * sent），绝不改道进投递失败分支、绝不让用户话术出现「未送达/请重试」（否则用户重试
@@ -377,25 +383,37 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     conversationId: string;
     principalId: string;
     sessionId: string;
-  }): Promise<{ status: 'sent' | 'suppressed' | 'delivery_unavailable' | 'delivery_failed'; note?: string }> => {
+  }): Promise<{ status: 'sent' | 'suppressed' | 'delivery_unavailable' | 'delivery_failed'; files: number; note?: string }> => {
     const base = {
       principalId: input.principalId,
       sessionId: input.sessionId,
-      files: input.files.length,
     };
     if (deps.fileDelivery === undefined) {
-      log({ event: 'file_delivery', ...base, status: 'delivery_unavailable' });
-      return { status: 'delivery_unavailable', note: FILE_DELIVERY_UNAVAILABLE_NOTE };
+      log({ event: 'file_delivery', ...base, files: input.files.length, status: 'delivery_unavailable' });
+      return { status: 'delivery_unavailable', files: input.files.length, note: FILE_DELIVERY_UNAVAILABLE_NOTE };
     }
     if (deps.fileDelivery.deliveryMode !== 'live') {
-      log({ event: 'file_delivery', ...base, status: 'suppressed', deliveryMode: deps.fileDelivery.deliveryMode });
-      return { status: 'suppressed' };
+      log({
+        event: 'file_delivery',
+        ...base,
+        files: input.files.length,
+        status: 'suppressed',
+        deliveryMode: deps.fileDelivery.deliveryMode,
+      });
+      return { status: 'suppressed', files: input.files.length };
     }
     // 字节从文件区派生布局现读（产物在登记时已 copy 进 workspace，原件路径从不进话术）。
-    const outgoing: OutgoingFileReply[] = input.files.map((file) => ({
-      data: readFileSync(fileStoragePathOf(workspaceRoot, input.scope, file.fileId, file.name)),
-      filename: file.name,
-    }));
+    // 同一回合的重复交付（同 sha256 + 同名）在投递层收成一份；顺序保序（先到者投递）。
+    const seen = new Set<string>();
+    const outgoing: OutgoingFileReply[] = [];
+    for (const file of input.files) {
+      const data = readFileSync(fileStoragePathOf(workspaceRoot, input.scope, file.fileId, file.name));
+      const key = `${createHash('sha256').update(data).digest('hex')}\u0000${file.name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      outgoing.push({ data, filename: file.name });
+    }
+    const files = outgoing.length;
     let receipt: DeliveryReceipt;
     try {
       receipt = await deps.fileDelivery.sendToConversation(
@@ -410,22 +428,24 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       log({
         event: 'file_delivery',
         ...base,
+        files,
         status: 'delivery_failed',
         delivered,
         message: error instanceof Error ? error.message : String(error),
       });
-      return { status: 'delivery_failed', note: FILE_DELIVERY_FAILED_NOTE };
+      return { status: 'delivery_failed', files, note: FILE_DELIVERY_FAILED_NOTE };
     }
     // 走到这里 = 投递已成功，结果不再有任何改写路径（R7-F3）：日志写失败只降级为独立
     // 观测事件；观测事件也写不进（logger 持续抛错）时同样到此为止——除吞掉外别无动作，
     // 用户话术与回合结果已按「sent」定型。
     try {
-      log({ event: 'file_delivery', ...base, status: 'sent', parts: receipt.parts.length });
+      log({ event: 'file_delivery', ...base, files, status: 'sent', parts: receipt.parts.length });
     } catch (logError) {
       try {
         log({
           event: 'file_delivery_log_write_failed',
           ...base,
+          files,
           status: 'sent',
           message: logError instanceof Error ? logError.message : String(logError),
         });
@@ -433,7 +453,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         // 观测事件写也失败：无第二观测面可用；投递结果已成立，不翻转、不重投、不触达用户。
       }
     }
-    return { status: 'sent' };
+    return { status: 'sent', files };
   };
 
   const handler: ReplyHandler = async (message) => {
@@ -539,7 +559,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           principalId,
           sessionId,
         });
-        delivery = { status: outcome.status, files: files.length };
+        // files = 实际投递份数（交付层按 (sha256, 文件名) 去重后的事实，不报回合登记数）。
+        delivery = { status: outcome.status, files: outcome.files };
         if (outcome.note !== undefined) {
           // 正文若只是宿主兜底话术（「文件已生成（见附件）」）则整体替换成未送达话术，
           // 否则追加（不覆盖模型正文）。suppressed 不带话术（静默部署本就无真实收件人）。
