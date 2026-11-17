@@ -24,12 +24,26 @@
  *   F3 交付成功但事件写失败 → 是否会导致重复交付。
  *      注入方式：deps.logger（装配既有注入点）在 file_delivery 事件上抛错 = 事件写失败；
  *      交付端口照常成功（用户已收到字节）。两个真实重投驱动各验一条：
- *        f3a 只在 status=sent 时抛（只丢成功事实）→ 现状：sendToConversation 已成功却被
- *            catch 误报 delivery_failed、用户话术「未送达（请重试…）」→ 用户按话术重试
- *            → 重复交付；
- *        f3b 整个 file_delivery 事件面抛 → 回合失败 → 渠道重投（同 messageId；server 对
- *            失败回合「不缓存、渠道可重试」是既定语义）→ 重复交付。
- *      重复交付 = 端口第二次收到同一 sha256 的产物字节 = 红。设计稿对「事件写失败」的预期
+ *        f3a 只在 status=sent 时抛（只丢成功事实）。
+ *          两条红的来由（修复 0d5bbd7 之前）：sendToConversation 已成功却被 catch 误报
+ *            delivery_failed、用户话术「未送达（请重试…）」——①成功被误报为失败（判据
+ *            保留判红）；②用户按话术重试同一产物 → file_refs 两行 = 重复交付红（原第
+ *            二条判据的红依赖①的误报诱导）。
+ *          修复后（0d5bbd7，server.ts:401-418）：sent 定型后事件写失败只降级为独立观测
+ *            事件（file_delivery_log_write_failed），不翻转结果 → ①误报消失、判据 PASS；
+ *            ②降为记录项 REC——原红依赖的误报已修，用户说「没收到，请重试」是用户主动
+ *            要求，再交付一份是正确行为，本条只记录「用户主动重试会再交付一份、file_refs
+ *            多一行」，不判红（保留检查项，不标 PASS/FAIL）。
+ *        f3b 整个 file_delivery 事件面抛 → 回合结果是否被翻转 → 渠道重投（同 messageId；
+ *            server 对失败回合「不缓存、渠道可重试」是既定语义）。
+ *          红之来由（修复 0d5bbd7 之前）：事件写失败穿出 catch 翻转回合结果 → dedup 缓存
+ *            清除 → 同 messageId 重投整回合重跑 → 重复交付红。
+ *          修复后：事件面写失败同样不翻转回合结果（server.ts:381-418）→「交付已发生且
+ *            回合失败」前置不可达 → 前置判据改条件式：首回合失败（回归形态）才照原样
+ *            判 dedup 断言；当前不可达记 SKIP（不标 PASS）并引用 server.ts:381-418。
+ *            渠道重投判据本身保留判红：当前态重投命中 dedup 缓存重放、零新副作用；
+ *            若回归（回合失败不缓存）重投整回合重跑 → 重复交付即红。
+ *      重复交付 = 端口第二次收到同一 sha256 的产物字节。设计稿对「事件写失败」的预期
  *      行为没有规定（v8 §7 只定义交付失败事实=事件+话术）→ 现状如实记录 + UNDEFINED 标注。
  *
  *   F4 两进程同时写同一 SQLite → 行为（锁/重试/报错）如实记录。
@@ -45,7 +59,7 @@
  *   node --import tsx scripts/eval/cap01/r7-faults.ts [--only f1,f2,f3,f4] [--out-dir <dir>]
  *        [--kill-fractions 0.1,0.5,...]（绊线复验用）
  * 缺省 out-dir = .runtime/eval-cap01-r7-faults/<时间戳>（.runtime 不进 git）。
- * 退出码：0 = 全部红判据通过；1 = 任一红判据 FAIL。
+ * 退出码：0 = 全部红判据通过（REC 记录项 / SKIP 前置不可达不计红）；1 = 任一红判据 FAIL。
  */
 import { spawn } from 'node:child_process';
 import {
@@ -94,7 +108,8 @@ type CheckKind = 'criterion' | 'observation';
 interface CheckResult {
   name: string;
   kind: CheckKind;
-  status: 'PASS' | 'FAIL';
+  /** REC = 记录项（不判红）；SKIP = 前置不可达（如实登记原因，不标 PASS）。 */
+  status: 'PASS' | 'FAIL' | 'REC' | 'SKIP';
   detail: string;
 }
 
@@ -111,6 +126,16 @@ interface FaultOutcome {
 
 function check(name: string, kind: CheckKind, pass: boolean, detail: string): CheckResult {
   return { name, kind, status: pass ? 'PASS' : 'FAIL', detail };
+}
+
+/** 记录项（REC）：如实记录现状、不判红（r3-core.ts 同款口径：pass=null 记录项）。 */
+function record(name: string, detail: string): CheckResult {
+  return { name, kind: 'observation', status: 'REC', detail };
+}
+
+/** 前置不可达（SKIP）：保留检查项、如实登记不可达原因；不许直接标 PASS。 */
+function skipped(name: string, detail: string): CheckResult {
+  return { name, kind: 'observation', status: 'SKIP', detail };
 }
 
 function finalize(outcome: FaultOutcome): FaultOutcome {
@@ -735,26 +760,32 @@ async function fault3(): Promise<FaultOutcome> {
         !(deliveredFirst && misreported),
         deliveredFirst && misreported
           ? '字节已送达端口（sha256 与产物一致）但回复含「未送达（投递失败，请重试或联系管理员）」——成功被误报为失败。'
-          : `现状：端口 ${fixture.calls.length} 次调用、reply=「${firstReply.slice(0, 120)}」。`,
+          : `现状：端口 ${fixture.calls.length} 次调用、reply=「${firstReply.slice(0, 120)}」（修复 0d5bbd7 后 sent 定型，事件写失败不再改写话术）。`,
       ));
-      // 用户按话术重试（话术明言「请重试或联系管理员」）→ 新消息新回合。
+      // 用户主动重试（新消息 m-f3a-2）→ 新回合重新执行 → 再交付一份。
       const secondReply = replyText(await fixture.server.handler(incoming('m-f3a-2', '未收到，请重试')));
       const rows = fixture.store.listFileRefs(TURN_SCOPE);
       const duplicateDelivered = fixture.calls.length >= 2
         && fixture.calls[1]!.files[0]!.sha256 === REPORT_SHA;
-      checks.push(check(
-        'f3a.用户按话术重试 → 同一内容重复交付（红判据）',
-        'criterion',
-        !duplicateDelivered,
-        duplicateDelivered
-          ? `重试后端口第 2 次收到同一 sha256（${REPORT_SHA.slice(0, 16)}…）的产物——用户收到两份；file_refs ${rows.length} 行重复登记。`
-          : `重试后端口共 ${fixture.calls.length} 次调用、reply=「${secondReply.slice(0, 60)}」。`,
+      // 原红判据（来由见文件头 F3）：修复前首回合误报「未送达（请重试…）」，用户按话术
+      // 重试是被诱导的重试，重复交付 = 红。该误报已修（本文件 f3a 第一条判据 PASS 断言、
+      // server.ts:401-418）——现在用户说「没收到，请重试」是用户主动要求，再交付一份是
+      // 正确行为。故降为记录项（REC）：保留检查项，如实记录「用户主动重试会再交付一份、
+      // file_refs 多一行」；不判红、不标 PASS/FAIL。
+      checks.push(record(
+        'f3a.用户按话术重试 → 同一内容重复交付（记录项）',
+        `用户主动重试（新消息）后端口共 ${fixture.calls.length} 次调用`
+        + (duplicateDelivered
+          ? `，第 2 份同 sha256（${REPORT_SHA.slice(0, 16)}…）产物——记录：用户主动重试会再交付一份；file_refs ${rows.length} 行（每回合各登记一行，多一行）。`
+          : `（未再交付）；file_refs ${rows.length} 行。`)
+        + ` 原红依赖的「首回合误报未送达」已修（f3a 第一条判据 PASS）——本条不再判红，只记录重试行为。`,
       ));
       notes.push(
-        `f3a 现状链路：sent 事件写失败 → server.ts deliverTurnFiles 的 catch 把「事件写失败」并入「投递失败」→ `
-        + `用户话术未送达 + message_done 记 delivery_failed → 重试后重复登记（${rows.length} 行、同 sha256）。`,
+        `f3a 现状链路（修复 0d5bbd7 后）：sent 事件写失败 → server.ts:401-418 降级为独立观测事件`
+        + `（file_delivery_log_write_failed，status 仍 sent），结果保持 sent、话术不出现「未送达」`
+        + `→ 用户主动重试（新消息）= 新回合重新执行 → 再交付一份、file_refs 多一行（记录项，见上）。`,
       );
-      notes.push('UNDEFINED：v8 §7 对「交付事件本身写失败」的预期行为无规定（只定义交付失败事实=事件+话术，无重发消费者）。');
+      notes.push('UNDEFINED（设计面）：v8 §7 对「交付事件本身写失败」的预期行为仍无明文（只定义交付失败事实=事件+话术，无重发消费者）；现行实现取「sent 定型后写失败降级为观测事件、不翻转不重投」（0d5bbd7，server.ts:401-418），在此如实记录。');
       evidence.push({
         step: 'f3a',
         injectedThrown: injected,
@@ -766,7 +797,8 @@ async function fault3(): Promise<FaultOutcome> {
       });
       await fixture.close();
     }
-    // f3b：整个 file_delivery 事件面写失败 → 回合失败 → 渠道重投（同 messageId）。
+    // f3b：整个 file_delivery 事件面写失败 → 回合结果是否被翻转 → 渠道重投（同 messageId）。
+    // 前置「交付已发生且回合失败」修复后不可达（见下方条件式判据与文件头 F3）。
     {
       const dir = path.join(tmpRoot, 'b');
       mkdirSync(dir, { recursive: true });
@@ -791,6 +823,35 @@ async function fault3(): Promise<FaultOutcome> {
         firstError = error;
       }
       const deliveredBeforeFailure = fixture.calls.length === 1;
+      // 前置判据（条件式；原红判据之二，来由见文件头 F3）：「交付已发生且回合失败」。
+      // 修复前该前置可达：事件写失败穿出 catch 翻转回合结果。修复（0d5bbd7）后 sent 路径
+      // 不再有任何改写/翻转（server.ts:381-418：投递成功即定型 sent，日志写失败只降级为
+      // 独立观测事件），该前置在当前实现下不可达——不许直接标 PASS，改为条件式：
+      // 首回合失败（回归形态）才照原样判；当前不可达记 SKIP 并写明原因。
+      if (firstError !== undefined) {
+        if (deliveredBeforeFailure) {
+          // 回归形态可达：前置成立 = 故障路径触发；dedup 断言（下一条判据）随之生效。
+          checks.push(check(
+            'f3b.前置：交付已发生（端口收到正确字节）且回合失败',
+            'criterion',
+            true,
+            `首回合失败可见（${errMessage(firstError).slice(0, 140)}）且端口已收到正确字节——前置可达（回归形态），dedup 断言按下一条判据生效。`,
+          ));
+        } else {
+          // 注入形态破损：回合失败但交付未发生——dedup 场景未被执行，既不能 SKIP 也不能 PASS。
+          checks.push(check(
+            'f3b.前置：交付已发生（端口收到正确字节）且回合失败',
+            'criterion',
+            false,
+            `首回合抛「${errMessage(firstError).slice(0, 140)}」但端口 ${fixture.calls.length} 次调用（交付未发生）——dedup 场景未触发，注入路径破损（红）。`,
+          ));
+        }
+      } else {
+        checks.push(skipped(
+          'f3b.前置：交付已发生（端口收到正确字节）且回合失败',
+          `SKIP：当前不可达——修复（0d5bbd7）后「事件写失败不再翻转回合结果」（server.ts:381-418：投递成功即定型 sent，日志写失败只降级为独立观测事件），首回合未抛、端口 ${fixture.calls.length} 次调用已收到正确字节。若首回合失败（回归形态）则断言 dedup 生效（下一条判据）。`,
+        ));
+      }
       let redeliveryError: unknown;
       try {
         await fixture.server.handler(incoming('m-f3b', '帮我汇总')); // 同 messageId = 渠道重投
@@ -801,28 +862,31 @@ async function fault3(): Promise<FaultOutcome> {
       const duplicateDelivered = fixture.calls.length >= 2
         && fixture.calls[0]!.files[0]!.sha256 === REPORT_SHA
         && fixture.calls[1]!.files[0]!.sha256 === REPORT_SHA;
-      checks.push(check(
-        'f3b.前置：交付已发生（端口收到正确字节）且回合失败',
-        'criterion',
-        deliveredBeforeFailure && firstError !== undefined,
-        `端口 ${fixture.calls.length} 次调用、首回合 ${firstError === undefined ? '未抛' : `抛「${errMessage(firstError).slice(0, 140)}」`}。`,
-      ));
+      const replayed = fixture.logs.some((line) => line['event'] === 'message_duplicate_replayed');
       checks.push(check(
         'f3b.渠道重投（同 messageId）→ 同一内容重复交付（红判据）',
         'criterion',
         !duplicateDelivered,
         duplicateDelivered
           ? `重投触发整回合重跑并第 2 次交付同一 sha256 产物——用户收到两份；file_refs ${rows.length} 行重复登记。`
-          : `重投后端口共 ${fixture.calls.length} 次调用。`,
+          : `重投后端口共 ${fixture.calls.length} 次调用${replayed ? '、命中 dedup 缓存重放既有回执（message_duplicate_replayed，零新副作用）' : ''}；file_refs ${rows.length} 行。`,
       ));
       const doneLogged = fixture.logs.some((line) => line['event'] === 'message_done');
       notes.push(
-        `f3b 现状链路：事件写失败穿出 catch → 回合失败 → dedup 缓存清除（server.ts「处理失败不缓存：渠道重投可重试」）→ `
-        + `同 messageId 重投整回合重跑（驱动 run 序列 ${JSON.stringify(fixture.driverRuns)}）→ 重复登记 ${rows.length} 行。`,
+        `f3b 现状链路（修复 0d5bbd7 后）：事件面写失败同样不翻转回合结果（server.ts:381-418）→ 回合按成功收口`
+        + `→ 同 messageId 重投命中 dedup 缓存重放（驱动 run 序列 ${JSON.stringify(fixture.driverRuns)}，零新副作用）`
+        + `；若修复回归（file_delivery 事件写失败重新从 deliverTurnFiles 内部穿出 → 源回合 promise 拒绝 →`
+        + ` server.ts:549「处理失败不缓存」清缓存）→ 重投整回合重跑 → 重复交付 = 前置可达时的红判据面。`,
+      );
+      notes.push(
+        '绊线观察（不判红，本脚本常规注入不触发）：回合收口段（server.ts:529-545 message_done 落在 .then 成功分支）'
+        + '的日志写失败不在 deliverTurnFiles 保护面内——实测注入该点抛错会翻转回合结果（首回合抛错、message_done 行已记录），'
+        + '但缓存不清（server.ts:549 的删除只挂源 promise 拒绝分支，不接成功分支抛错）→ 重投重放既有（已拒绝的）回执 promise，'
+        + '无第二份交付。该点在 R7-F3 修复面之外，如实登记待 owner 裁定；证据见本次提交信息。',
       );
       notes.push(doneLogged
-        ? 'message_done 落了（与本链路预期不符，需人工核对）。'
-        : 'message_done 未落（回合按失败处理，与链路一致）。');
+        ? 'message_done 落了（回合按成功收口——与修复后链路一致；修复前此处会缺失并触发重投重跑）。'
+        : 'message_done 未落（回合按失败处理——若非注入预期，需人工核对）。');
       evidence.push({
         step: 'f3b',
         injectedThrown: injected,
