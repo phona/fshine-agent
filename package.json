@@ -12,6 +12,7 @@
     "tasks": "node --env-file-if-exists=.env --import tsx scripts/tasks.ts",
     "ops": "node --env-file-if-exists=.env --import tsx scripts/ops.ts",
     "eval:user": "node --env-file-if-exists=.env --import tsx scripts/eval/convergence-r1/runner.ts",
+    "eval:cap01": "node --import tsx scripts/eval/cap01/run-all.ts",
     "eval:bizprobe": "node --env-file-if-exists=.env --import tsx scripts/eval/business-e2e/run.ts",
     "eval:bizbatch2": "node --env-file-if-exists=.env --import tsx scripts/eval/business-e2e/experiments/run.ts",
     "eval:bizbatch3": "node --env-file-if-exists=.env --import tsx scripts/eval/business-e2e/experiments/run.ts",
