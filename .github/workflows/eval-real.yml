@@ -59,8 +59,9 @@ jobs:
         id: trials
         run: |
           echo "n=${{ github.event_name == 'pull_request' && 5 || 1 }}" >> "$GITHUB_OUTPUT"
-          # 并发 5（owner 定）：每个 trial 自带 state/db/config 目录，互不干扰；供应商上限 8。
-          echo "c=5" >> "$GITHUB_OUTPUT"
+          # 并发 4：CI 跑的是 step 账号（模型级并发上限 5），5 并发再叠 worker 会顶上限；4 留余量。
+          # 本地用 workbuddy 端点时可以更高（缺省 5）。
+          echo "c=4" >> "$GITHUB_OUTPUT"
 
       - name: Run user-level eval (12 cases × ${{ steps.trials.outputs.n }} trial(s), evidence kept)
         run: |
