@@ -38,6 +38,10 @@ const STAB_CHAOS = 'scripts/stab/chaos-harness.ts';
 // RuntimeConfig 输入（S2 两槽并发 / S4 单槽排队 / S7b workerTurnMs=5000 / S6 三并发），
 // 不解析/解释旋钮、不读原始 `config.runtime.*`。
 const P2_SCENARIOS = 'scripts/eval/p2/p2-scenarios.ts';
+// CAP-01 R8 并发与隔离验评（2026-11-17 登记）：与上面两族同类——只**构造**场景的
+// RuntimeConfig 输入（显式 `queueCapacity: 16` 压队列上限），不解析/解释旋钮、不读原始
+// `config.runtime.*`；缺省值那条走「不给 runtime 段」，不在此文件里重复定义缺省。
+const R8_CONCURRENCY = 'scripts/eval/cap01/r8-concurrency.ts';
 
 /** 分诊 #6 删除的 host.* 未消费键（生产代码零引用；旧 YAML 里的残留键由加载层忽略）。 */
 const DELETED_HOST_KEYS = [
@@ -73,7 +77,7 @@ const DELETED_ENV_KEYS = [
 const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   mainConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, P2_SCENARIOS],
   backgroundConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS, P2_SCENARIOS],
-  queueCapacity: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS, P2_SCENARIOS],
+  queueCapacity: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS, P2_SCENARIOS, R8_CONCURRENCY],
   mainTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME],
   workerTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME, P2_SCENARIOS],
   maxDelegationDepth: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
