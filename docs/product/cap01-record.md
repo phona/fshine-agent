@@ -152,3 +152,24 @@ Worker 面命中数不丢弃，写进该检查的 detail 作信息（形如「wo
 `legacyDir`（`run-dir-cleanup.test.ts`）→ `oldDir`；`legacyLiteralLive` / `legacy`（`channel-mode.test.ts`）→ `previousAssembly` / `beforeChange`。
 
 **合后复跑**：`npm run eval:cap01` 七面 **7/7**（`.runtime/eval-cap01-all/2026-11-17T05-41-11-641Z/`）；全量单测 1640 passed / 1 skipped；tsc=0。
+
+### 12.1 复核员提示的第二个缺口（已复现并修复）
+
+复核员对 `fix-symlink` 判 `safetyGap=有`，指向「树内条目软链」。我独立复现：
+
+- 预植 `in/evil.txt → /etc/passwd`（布局项 `in/`、`out/` 等**都是真目录**，原校验通过），
+  脚本 `readFileSync('in/evil.txt')` → **`READ_OK:1275`**，即 `--allow-fs-read=<runDir>`
+  放行整个 run 目录，树内软链被跟随。
+- 修复：布局项校验之后再扫整棵树（`readdirSync(withFileTypes)`，深度 ≤8、条目 ≤2000，
+  超限同样拒跑），发现任何软链即 `RunJsLayoutUnsafeError{item:'nested',kind:'symlink'}`。
+- **口径随之变化**：原用例「`out/x.xlsx` 软链 → 跳过收集、其余照常交付」被更强的
+  **整轮 fail closed** 取代——因为「跳过收集」只挡交付，挡不住脚本把外部文件读进
+  stdout/转录。原用例已改写为断言 fail closed（不是删用例、不是放宽）。
+- 新增长期守卫：`packages/agent/run-js-layout-symlink.test.ts`（文件级软链、嵌套软链、
+  正常目录回归三例）。
+
+另一条 `fix-chanmode` 的 `safetyGap` 我逐条核查后**未能复现**：`offline` 下
+`startChannelForMode` 直接返回且不调用 `channel.start`（`apps/server/channel-mode.ts:52-57`），
+`main.ts` 自身不起 HTTP 监听（`channel.start` 是唯一连接入口），出站由适配器
+`SilentShadowGate`（`packages/channel-wecom/src/adapter.ts:220`）统一收口。复核员当时判红的
+另一半原因是全量测试红，而那是新用例里的过渡词标识符（已改名）。

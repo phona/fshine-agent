@@ -8,6 +8,10 @@
  * 判据（最小可信边界，不依赖模型/提示词）：运行目录布局项**存在**时必须仍是真目录；
  * 是软链、普通文件或其它类型 → 拒跑（fail closed）。「不存在」是正常状态（随后由宿主创建）。
  *
+ * 2026-11-17 补：`--allow-fs-read=<runDir>` 放行整个 run 目录，树内**任意条目**是软链都会
+ * 被跟随（实测 `in/evil.txt → /etc/passwd` 可读）。因此布局项本身校验之后还要扫整棵树，
+ * 发现软链即拒跑（`item: 'nested'`），条目数/深度超限同样拒跑。
+ *
  * 本模块零 import：执行器（含 node:child_process）与 execution-runtime 都能安全以值边引用它——
  * import 图守卫要求通用运行时的值闭包不触及 spawn（见 import-boundary.test.ts）。
  */
@@ -20,7 +24,7 @@ export const RUN_JS_LAYOUT_UNSAFE_MESSAGE =
 export const RUN_JS_LAYOUT_UNSAFE_CODE = 'RUN_JS_LAYOUT_UNSAFE';
 
 /** 逐个校验的布局项：run 目录本身与子进程的读/写/HOME/TMP 面。 */
-export type RunJsLayoutItem = 'runDir' | 'in' | 'out' | 'scratch' | 'home' | 'tmp';
+export type RunJsLayoutItem = 'runDir' | 'in' | 'out' | 'scratch' | 'home' | 'tmp' | 'nested';
 
 /** lstat 观测到的实际类型（真目录以外的任何东西都拒跑）。 */
 export type RunJsLayoutUnsafeKind = 'symlink' | 'file' | 'other';

@@ -665,8 +665,8 @@ describe('run_js 运行目录布局收窄（预植软链；symlink 收窄）', (
     store.close();
   });
 
-  it('② out/x.xlsx → /etc/passwd 的预植软链：跳过、不交付、不登记 file_refs；普通产物照常', async () => {
-    const { workspaceRoot, store, fileStore } = makeFixture();
+  it('② out/x.xlsx → /etc/passwd 的预植软链：整轮拒跑（2026-11-17 起 fail closed，取代原先的「跳过并继续」）', async () => {
+    const { store, fileStore } = makeFixture();
     const executor = createRunJsExecutor({
       fileStore: plantingFileStore(fileStore, (runDir) => {
         mkdirSync(path.join(runDir, 'out'), { recursive: true });
@@ -675,19 +675,19 @@ describe('run_js 运行目录布局收窄（预植软链；symlink 收窄）', (
       nodeModulesDir: NODE_MODULES,
     });
 
-    const result = await executor.runJs({
+    // 口径变更（2026-11-17）：`--allow-fs-read=<runDir>` 放行整个 run 目录，树内软链会被
+    // **跟随**——脚本只要 `readFileSync('out/x.xlsx')` 就能把 /etc/passwd 读进 stdout/转录。
+    // 因此「跳过收集」不足以收窄，改为整轮拒跑（脚本零执行、零产物、零登记）。
+    const error = await executor.runJs({
       code: "require('node:fs').writeFileSync('out/ok.txt', 'normal-bytes');",
       scope: SCOPE,
-    });
-
-    expect(result.exitCode).toBe(0);
-    expect(result.outputs.map((file) => file.name)).toEqual(['ok.txt']);
-    expect(result.audit.skippedOutputs).toEqual([{ name: 'x.xlsx', reason: 'symlink' }]);
-    expect(store.listFileRefs(SCOPE).map((row) => row.name)).toEqual(['ok.txt']);
-    // 交付字节是普通产物，不是被跟随的 /etc/passwd。
-    const row = store.getFileRef(result.outputs[0]!.fileId, SCOPE, { side: 'main' })!;
-    expect(readFileSync(fileStoragePathOf(workspaceRoot, SCOPE, row.fileId, row.name), 'utf8')).toBe('normal-bytes');
-    expect(row.sha256).toBe(createHash('sha256').update(Buffer.from('normal-bytes', 'utf8')).digest('hex'));
+    }).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+    expect(error).toBeInstanceOf(RunJsLayoutUnsafeError);
+    expect((error as RunJsLayoutUnsafeError).event).toMatchObject({ item: 'nested', kind: 'symlink' });
+    expect(store.listFileRefs(SCOPE)).toEqual([]);
     store.close();
   });
 

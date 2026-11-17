@@ -39,7 +39,7 @@
  */
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { lstatSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readdirSync, statSync, writeFileSync, type Dirent } from 'node:fs';
 import path from 'node:path';
 import { workerSubprocessEnv } from './worker-env';
 import type { FileStore, MaterializedInput, RegisteredFile, SkippedOutput } from './file-store';
@@ -158,6 +158,10 @@ export function killRunProcessGroup(pid: number): void {
  * 换成软链）、spawn 前（此刻的布局项就是子进程的读/写面）。任一失败都在写 run.cjs/spawn
  * 之前抛出——脚本零执行、零产物。
  */
+/** 目录树软链扫描上限（防御病态目录，超限即判不安全）。 */
+const RUN_LAYOUT_SCAN_MAX_ENTRIES = 2000;
+const RUN_LAYOUT_SCAN_MAX_DEPTH = 8;
+
 function assertRunLayoutSafe(runId: string, runDir: string): void {
   const items: ReadonlyArray<{ item: RunJsLayoutItem; itemPath: string }> = [
     { item: 'runDir', itemPath: runDir },
@@ -179,6 +183,42 @@ function assertRunLayoutSafe(runId: string, runDir: string): void {
     const kind: RunJsLayoutUnsafeKind = st.isSymbolicLink() ? 'symlink' : st.isFile() ? 'file' : 'other';
     throw new RunJsLayoutUnsafeError({ runId, item, kind });
   }
+  assertNoSymlinkInside(runId, runDir);
+}
+
+/**
+ * 目录树内软链扫描（2026-11-17 补）：只校验六个布局项**本身**不够——`--allow-fs-read=<runDir>`
+ * 放行的是整个 run 目录，树内任一软链（例如预植的 `in/evil.txt → /etc/passwd`）都会被跟随。
+ * 实测：布局项都是真目录时，脚本仍能 readFileSync('in/evil.txt') 读到 run 目录之外。
+ *
+ * 判据：run 目录树下**不允许存在任何软链**；发现即拒跑。上限（条目数/深度）超限同样拒跑——
+ * 病态目录不"尽力而为"。
+ */
+function assertNoSymlinkInside(runId: string, runDir: string): void {
+  let seen = 0;
+  const walk = (dir: string, depth: number): void => {
+    if (depth > RUN_LAYOUT_SCAN_MAX_DEPTH) {
+      throw new RunJsLayoutUnsafeError({ runId, item: 'nested', kind: 'other' });
+    }
+    let entries: readonly Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return;
+      throw error;
+    }
+    for (const entry of entries) {
+      seen += 1;
+      if (seen > RUN_LAYOUT_SCAN_MAX_ENTRIES) {
+        throw new RunJsLayoutUnsafeError({ runId, item: 'nested', kind: 'other' });
+      }
+      if (entry.isSymbolicLink()) {
+        throw new RunJsLayoutUnsafeError({ runId, item: 'nested', kind: 'symlink' });
+      }
+      if (entry.isDirectory()) walk(path.join(dir, entry.name), depth + 1);
+    }
+  };
+  walk(runDir, 0);
 }
 
 export interface RunJsExecutorOptions {
