@@ -354,6 +354,19 @@ export interface TranscriptStore {
   append(message: DriverMessage): Promise<void>;
 }
 
+/**
+ * 任务 out/ 兜底扫描的逐项拒收（机械事实，只进日志）：收尾扫描登记产物时被拒的条目
+ * 按机械 reason 汇总（symlink / size_limit / count_limit / outside_run_dir 等）——
+ * 拒收原因与数量可查，不进用户话术。
+ */
+export interface TaskOutputSweepSkippedEvent {
+  taskId: string;
+  /** 拒收项总数（skipped 明细条数）。 */
+  skipped: number;
+  /** reason → 数量（同 reason 合并；reason 来自 file-store 的 SkippedOutput.reason）。 */
+  reasons: Record<string, number>;
+}
+
 export interface RuntimeOptions {
   /** 可信身份：来自装配/渠道事实，绝不来自模型输入。 */
   principalId: string;
@@ -472,6 +485,12 @@ export interface RuntimeOptions {
    * 缺省不注入 = 现行为逐字节不变（data 原样透传、无目录翻译、无兜底扫描）。
    */
   taskExecutionBridge?: TaskExecutionBridgeFactory;
+  /**
+   * CAP-01 S2 ④：任务收尾兜底扫描的逐项拒收上报（**只进日志**，不进用户话术）。
+   * 扫描成功但有条目被拒时发一次（taskId + 拒收总数 + reason 分布）；缺省静默。
+   * 整轮扫描抛错仍走 taskExecutionBridge.onSkip('scan_failed:…')，两者不重复。
+   */
+  onTaskOutputSweepSkipped?: (event: TaskOutputSweepSkippedEvent) => void;
 }
 
 /** 前台回合被资源策略确定性拒绝（queued 排队等晋升后不适用；携带机械 reason）。 */
@@ -1471,6 +1490,15 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // （失败/中止）时不丢；与回程登记同池去重。未注入桥 = 无兜底面（零变化缺省）。
       if (taskExchange !== undefined) {
         const swept = taskExchange.sweepTaskOutputs();
+        // 拒收明细此前被丢弃（只有整轮扫描失败才经 onSkip 上报）：按 reason 汇总成
+        // 结构化事件——数量与原因可查；只进日志，不进用户话术。
+        if (swept.skipped.length > 0) {
+          const reasons: Record<string, number> = {};
+          for (const item of swept.skipped) {
+            reasons[item.reason] = (reasons[item.reason] ?? 0) + 1;
+          }
+          options.onTaskOutputSweepSkipped?.({ taskId, skipped: swept.skipped.length, reasons });
+        }
         for (const file of swept.files) {
           pushTurnFileOnce(taskFiles, file);
         }

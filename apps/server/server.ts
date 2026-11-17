@@ -289,12 +289,17 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           // CAP-01 symlink 收窄：运行目录布局不安全（预植软链/非真目录）→ 拒跑的结构化事件
           // （runId/哪一项/实际类型/side/taskId）——日志可查；用户只见统一失败话术。
           onRunJsLayoutUnsafe: (event) => log({ event: 'run_js_layout_unsafe', principalId, sessionId, ...event }),
+          // 文件引用被拒的机械 reason（missing/foreign/expired/pending/bytes_missing）：
+          // 此前从未注入、生产无任何日志事实。只进日志；用户/模型只见统一话术（防存在性 oracle）。
+          onFileRefUnavailable: (reason) => log({ event: 'file_ref_unavailable', principalId, sessionId, reason }),
           taskInputCopier: fileStore,
           taskExecutionBridge: {
             store: fileStore,
             ...(profile.fileParams === undefined ? {} : { fileParams: profile.fileParams }),
             onSkip: (reason) => log({ event: 'task_file_bridge_skip', principalId, sessionId, reason }),
           },
+          // 任务 out/ 兜底扫描的逐项拒收（此前只取 files，skipped 被丢弃）：数量 + reason 分布。
+          onTaskOutputSweepSkipped: (event) => log({ event: 'task_output_sweep_skipped', principalId, sessionId, ...event }),
           fileManifestProvider,
           transcriptStore,
           // fail-open 日志：转录读/写失败不阻塞回合，只上报（错误面由入口按既有归类处理）。
@@ -510,6 +515,16 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         const registered = registerInboundAttachments(message, scope);
         log({
           event: 'message_attachment_only',
+          principalId,
+          sessionId,
+          messageId: message.messageId,
+          fileIds: registered.map((file) => file.fileId),
+        });
+        // 「附件已登记」在纯附件路径同样可查：补发与「文字+附件」路径同名的事件
+        // （不改名、不丢 message_attachment_only，历史口径不断档；消费方按本事件
+        // 即可覆盖两条入站路径）。
+        log({
+          event: 'inbound_files_registered',
           principalId,
           sessionId,
           messageId: message.messageId,

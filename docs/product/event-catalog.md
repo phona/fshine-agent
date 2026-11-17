@@ -1,7 +1,10 @@
-# 结构化事件观测字典（27 个）
+# 结构化事件观测字典（29 个）
 
 > 核对基线：`23ae585`（`arch/doc-events`，2026-11-17）。本文**只读代码**整理，不改产品代码。
-> 范围 = 仓内产品代码里以 `{ event: "<name>", ... }` 形式发出的 27 个结构化事件；`packages/channel-wecom/src/adapter.ts`
+> 2026-11-17 观测面补口（`arch/obs-wiring`）新增 2 个事件（`file_ref_unavailable`、
+> `task_output_sweep_skipped`）并扩展 `inbound_files_registered` 覆盖纯附件路径——见 §一 标注
+> 「补口」的行；原有 27 个事件的名字与字段均未改名/删字段。
+> 范围 = 仓内产品代码里以 `{ event: "<name>", ... }` 形式发出的 29 个结构化事件；`packages/channel-wecom/src/adapter.ts`
 > 与 `apps/server` 的 `wecom_*` 系列（12 个，`grep` 核实）不在本清单内，另行登记。
 
 ## 口径
@@ -11,16 +14,17 @@
   是普遍下游，**不**单独计为消费方（否则「发了没人用」恒为空）；仅当仓内有具体读取者才写文件名:行。
 - **测试断言**：测试里按事件名（`line['event'] === '<name>'`）或按 runtime 回调对象断言。只断言用户话术/底账行、
   不读事件本身的，记为「否」。
-- 行号均为上述基线下的行号；多发出点事件列全部关键点。
+- 行号均为上述基线下的行号；多发出点事件列全部关键点。补口新增行按补口后（`arch/obs-wiring`）行号标注。
 
-## 一、宿主回合事件（`apps/server/server.ts`，13 个）
+## 一、宿主回合事件（`apps/server/server.ts`，15 个）
 
 | 事件 | 发出点（文件:行） | 触发条件 | 消费方（文件:行） | 测试断言 | 备注 |
 |---|---|---|---|---|---|
 | `file_delivery` | `apps/server/server.ts:395`（`status=delivery_unavailable`）、`:400`（`suppressed`）、`:432`（`delivery_failed`）、`:445`（`sent`） | 回合产出文件后走投递：无投递端口 / 端口非 live / `sendToConversation` 抛错 / 投递成功，各记一条 | 测试：`apps/server/server-cap01-delivery.test.ts:195-205`、`:253-257`、`:297-299`、`:346-352`；`apps/server/channel-mode.test.ts:443-458`。评测：`scripts/eval/cap01/r2c-artifacts.ts:793-798`、`scripts/eval/cap01/r2-functional.ts:726-732`、`scripts/eval/cap01/r7-faults.ts:677-678`、`:746`、`:813` | 是 | 一个事件名承载 4 种 `status`；`files` 是 `(sha256,文件名)` 去重后的**实际**份数（去重项不另发事件）。`server.ts:133` 注释把 status 值 `delivery_unavailable` 写成了「事件」，措辞易误读。 |
 | `file_delivery_log_write_failed` | `apps/server/server.ts:449` | 投递已成功、写 `file_delivery status=sent` 时 logger 抛错（R7-F3 降级） | 测试：`apps/server/server-cap01-delivery.test.ts:228-230` | 是 | 降级事件本身也写不进时 `:455-457` 静默吞掉（无第二观测面，设计如此）；仓内无评测解析此事件（`r7-faults.ts:785,883` 只是报告文案）。 |
+| `file_ref_unavailable` | `apps/server/server.ts:294`（装配注入）← `packages/agent/src/execution-runtime.ts:471`（回调定义）；调用点 `:984`（Main `run_js`）、`:1083`（Worker `run_js`）、`:1346`（`task_run.inputFiles`） | `run_js.inputs` / `task_run.inputFiles` 引用的 fileId 不可用：`missing_or_foreign` / `pending` / `expired` / `bytes_missing`（同码同话术） | 测试：`apps/server/server-obs-wiring.test.ts`（事件名 + reason 原值）；runtime 回调层既有断言 `packages/agent/runtime-run-js.test.ts`（断言回调收到 reason，不是事件）。其余仅 stdout | 是 | **补口**：此前装配层从未注入 `onFileRefUnavailable`，「文件不可用」的机械 reason 不进任何日志。`reason` 形如 `missing_or_foreign:<fileId>` / `pending:<fileId>` / `expired:<fileId>`；只进日志，用户/模型只见统一话术（防存在性 oracle）。 |
 | `inbound_attachment_too_large` | `apps/server/server.ts:494` | 任一附件 `bytes > 20MB`（`INBOUND_MAX_FILE_BYTES`，`packages/agent/src/file-store.ts:318`）→ 整条消息拒绝、零登记、零模型回合 | 测试：`apps/server/server-cap01-attachment-limit.test.ts:150`（helper）、`:190-201` | 是 | 判据是 `>`（恰好 20MB 放行）；事件带 `name/bytes/limitBytes`，话术不含机械事实。 |
-| `inbound_files_registered` | `apps/server/server.ts:535` | **带文字且带附件**（非 `attachmentOnly`）的消息完成入站登记 | 评测：`scripts/eval/cap01/r2-functional.ts:773`、`scripts/eval/cap01/r2c-artifacts.ts:599`、`scripts/eval/cap01/r3-core.ts:765`、`scripts/eval/cap01/r6-lifecycle.ts:335`、`:708` | 否（按事件名；`apps/server/server-cap01-inbound.test.ts:207-210` 只断言底账行） | 纯附件分支记 `message_attachment_only`，本事件**不覆盖纯附件**——名字像「所有入站附件登记」，实际只覆盖文字+附件。日志写失败未隔离（`:534-541`，logger 抛错会拒绝本回合）。 |
+| `inbound_files_registered` | `apps/server/server.ts:535`（文字+附件）、`:527`（纯附件补发，**补口**） | **任一**入站消息完成附件登记：文字+附件（非 `attachmentOnly`）或纯附件（`attachmentOnly`，与 `message_attachment_only` 并存） | 评测：`scripts/eval/cap01/r2-functional.ts:773`、`scripts/eval/cap01/r2c-artifacts.ts:599`、`scripts/eval/cap01/r3-core.ts:765`、`scripts/eval/cap01/r6-lifecycle.ts:335`、`:708`；测试：`apps/server/server-obs-wiring.test.ts`（纯附件路径） | 是（补口用例按事件名断言；`apps/server/server-cap01-inbound.test.ts:207-210` 只断言底账行） | **补口前只覆盖文字+附件**；现纯附件路径先发 `message_attachment_only`、再补发本事件（名字与字段不变，历史口径不断档）。按 fileId 集合消费的聚合方若同时读两个事件需按 fileId 去重（仓内当前无按长度消费两者的用例）。日志写失败未隔离（`:534-541`，logger 抛错会拒绝本回合）。 |
 | `main_skills_loaded` | `apps/server/server.ts:201` | server 启动装载 Main 技能目录后（空索引也发） | 仅 stdout；仓内无读取者 | 否 | 设计用途是「启动证据面」（注释 `:200`）；见「发了没人用」。 |
 | `message_attachment_only` | `apps/server/server.ts:511` | `attachmentOnly === true` 的纯附件消息登记完成（不调模型、不建 Task、空回执） | 测试：`apps/server/server-cap01-inbound.test.ts:172`、`apps/server/server-cap01-attachment-limit.test.ts:167`、`:201`。评测：`scripts/eval/cap01/r3-core.ts:906` | 是 | 与 `inbound_files_registered` 互补（见上）；日志写失败未隔离（`:510-517`）。 |
 | `message_done` | `apps/server/server.ts:596` | 回合成功收口（回复定型）后 | 测试：`apps/server/server.test.ts:213-217`、`:281`、`:413`；`apps/server/channel-mode.test.ts:458-459`；`apps/server/server-cap01-delivery.test.ts:201-205`、`:224`、`:352`。评测：`scripts/eval/cap01/r2-functional.ts:637`、`scripts/eval/cap01/r2c-artifacts.ts:722`、`:794`、`:963`、`scripts/eval/cap01/r6-lifecycle.ts:881`、`scripts/eval/cap01/r7-faults.ts:678`、`:874`、`scripts/eval/p2/p2-harness.ts:486`、`scripts/eval/business-e2e/shared-instance.ts:456` | 是 | 只有成功路径；**失败回合没有对应事件**（见「该发没发」1）。带 `taskIds/executions/fileDelivery/fileManifestBytes`。 |
@@ -28,7 +32,8 @@
 | `message_duplicate_replayed` | `apps/server/server.ts:479` | 同 `(principalId, sessionId, messageId)` 重投命中回执缓存 | 测试：`apps/server/server-cap01-inbound.test.ts:171`。评测：`scripts/eval/cap01/r3-core.ts:907`、`scripts/eval/cap01/r7-faults.ts:865` | 是 | 查重先于附件/超限分支（`server.ts:472-481`）；缓存有界 1024（`:70`）。 |
 | `message_refused` | `apps/server/server.ts:469` | principal 未配置或 `enabled !== true` | 测试：`apps/server/server.test.ts:321-322`、`:354`。文档：`docs/decision-log.md:2712` | 是 | `reason` 目前唯一值 `principal_not_enabled`；日志写失败未隔离（拒绝路径会变成 handler 异常）。 |
 | `pending_files_activated` | `apps/server/server.ts:546` | 有文字的消息激活本会话 TTL 内 pending 文件（`activated > 0` 才发） | 测试：`apps/server/server-cap01-inbound.test.ts:223`、`:257-258` | 是 | 与 `inbound_files_registered` 同一回合常先后各一条（登记→激活），**不是重复**；`activated` 只计 TTL 内行。 |
-| `task_file_bridge_skip` | `apps/server/server.ts:295`（回调）← `packages/agent/src/task-file-bridge.ts:146`；调用点 `:221`（`count_limit`）、`:227`（`missing_name`）、`:253`（登记拒收 `reason`）、`:270`（`scan_failed`） | 执行层文件桥拒收单项产物或整轮扫描失败 | 仅 stdout；仓内无读取者 | 否 | `reason` 拼进文件名（`:221`、`:253`）；任务收尾扫描的逐项 `skipped` **不经过**本回调（见「该发没发」6）。见「发了没人用」。 |
+| `task_file_bridge_skip` | `apps/server/server.ts:295`（回调）← `packages/agent/src/task-file-bridge.ts:146`；调用点 `:221`（`count_limit`）、`:227`（`missing_name`）、`:253`（登记拒收 `reason`）、`:270`（`scan_failed`） | 执行层文件桥拒收单项产物或整轮扫描失败 | 仅 stdout；仓内无读取者 | 否 | `reason` 拼进文件名（`:221`、`:253`）；任务收尾扫描的逐项 `skipped` 走 `task_output_sweep_skipped`（补口），整轮扫描失败仍走本回调的 `scan_failed:…`。见「发了没人用」。 |
+| `task_output_sweep_skipped` | `apps/server/server.ts:302`（装配注入）← `packages/agent/src/execution-runtime.ts:493`（回调定义）/`:1500`（delegate `finally` 发出） | 任务收尾 `sweepTaskOutputs()` 成功返回但 `skipped` 非空（`symlink` / `size_limit` / `count_limit` / `outside_run_dir` 等） | 测试：`apps/server/server-obs-wiring.test.ts`（数量 + reason 分布）。其余仅 stdout | 是 | **补口**：此前只取 `swept.files`，拒收明细被丢弃。事件带 `taskId`、`skipped`（总数）、`reasons`（reason→数量）；只进日志，不进用户话术。 |
 | `transcript_store_error` | `apps/server/server.ts:302` ← `packages/agent/src/execution-runtime.ts:1115`（读失败）、`:1580`（写失败） | 会话转录读取或回合后增量追加失败（fail-open，不阻塞回合） | 文档：`docs/decision-log.md`、`docs/product/b1-wiring.md`；仓内无代码读取者 | 否（`packages/agent/session-persistence-wiring.test.ts:100` 断言的是 runtime 回调收到 error，不是事件） | 不区分读/写（无 phase 字段），排障信息只有 `message`。见「发了没人用」。 |
 
 ## 二、Pi 驱动事件（`packages/agent/src/pi-driver.ts`，9 个）
@@ -84,15 +89,18 @@
 
 ## 六、该发没发
 
-以下为阅读代码时发现的「有失败/异常路径，但没有留结构化事件」的位置（按严重度排序；均未改代码）。
+以下为阅读代码时发现的「有失败/异常路径，但没有留结构化事件」的位置（按严重度排序）。
+2026-11-17 观测面补口（`arch/obs-wiring`）已修复第 2、6 项（见 §一 `file_ref_unavailable` /
+`task_output_sweep_skipped`）；其余项未改代码。
 
 1. **回合失败没有宿主事件** — `apps/server/server.ts:581-583`（空回复抛错）与 `:624-628`（handler 失败拒绝分支）
    都不写结构化事件。唯一间接证据是渠道适配器的 `wecom_handler_error`（`packages/channel-wecom/src/adapter.ts:642-646`）；
    假渠道/直调 `handler` 的路径连这条也没有。`message_done` 只覆盖成功。
-2. **文件引用被拒的机械 reason 全丢** — `packages/agent/src/execution-runtime.ts:458` 定义了可选回调
-   `onFileRefUnavailable`，调用点 `:957`、`:1056`、`:1309`，注释写明「只进日志」；但装配层
-   `apps/server/server.ts:262-307`（以及 `scripts/ask-runtime.ts`）**都没有注入它**。生产里越权/过期/不存在的
-   fileId 被拒时，宿主既无话术差异（防 oracle 合理），也无任何日志事实。
+2. ~~**文件引用被拒的机械 reason 全丢**~~ **【已补口 2026-11-17】** — `packages/agent/src/execution-runtime.ts:471`
+   定义可选回调 `onFileRefUnavailable`，调用点 `:984`、`:1083`、`:1346`，注释写明「只进日志」；此前装配层
+   `apps/server/server.ts`（以及 `scripts/ask-runtime.ts`）**都没有注入它**，生产里越权/过期/不存在的 fileId
+   被拒时既无话术差异（防 oracle 合理），也无任何日志事实。现 `scripts/ask-runtime.ts` 的 `SessionAssemblyInput`
+   透传该回调（`:262`、`:648`），server 注入并发出 `file_ref_unavailable`（`server.ts:294`）。
 3. **入站附件登记失败无事件** — `apps/server/server.ts:358` 的 `registerInboundFile` 抛错（源不可读、
    `O_NOFOLLOW` 命中、超 file-store 兜底上限）会拒绝整条消息；事件面只有成功后的
    `inbound_files_registered`/`message_attachment_only`（`:510`、`:535`），失败没有对应事件。
@@ -100,10 +108,11 @@
    不可读会直接拒绝回合，`file_delivery` 事件只覆盖 `sendToConversation` 的成败（`:421-440`），失败无文件归因。
 5. **会话建立/转录打开失败无事件** — `apps/server/server.ts:259`（`openOrCreate`）与 `:262-307`（装配）；
    失败只经 `:312` 的 `pending.catch(() => sessions.delete(key))` 静默清缓存，无结构化事件。
-6. **任务收尾 out/ 兜底扫描的逐项拒收被丢弃** — `packages/agent/src/task-file-bridge.ts:259-267` 的
-   `sweepTaskOutputs()` 返回 `{ files, skipped }`，但 `packages/agent/src/execution-runtime.ts:1455-1457` 只消费
-   `swept.files`；只有整轮扫描抛错才走 `task-file-bridge.ts:270` 的 `task_file_bridge_skip`。单个产物因
-   `size_limit`/`symlink_or_gone`/`count_limit` 等被拒在任务收尾路径上无任何记录（回程登记路径 `:221-256` 有）。
+6. ~~**任务收尾 out/ 兜底扫描的逐项拒收被丢弃**~~ **【已补口 2026-11-17】** — `packages/agent/src/task-file-bridge.ts:259-267`
+   的 `sweepTaskOutputs()` 返回 `{ files, skipped }`，此前 `packages/agent/src/execution-runtime.ts:1455-1457` 只消费
+   `swept.files`；只有整轮扫描抛错才走 `task-file-bridge.ts:270` 的 `task_file_bridge_skip`。现 runtime 把
+   `skipped` 汇总成 `task_output_sweep_skipped`（`taskId` + 数量 + reason 分布，`execution-runtime.ts:1500`），
+   server 装配注入（`server.ts:302`）。整轮扫描失败仍走 `scan_failed:…`，两者不重复。
 7. **run_js 产物拒收项无事件** — `packages/agent/src/run-js-executor.ts:444` 把拒收项放进 `audit.skippedOutputs`；
    运行时工具结果 `packages/agent/src/execution-runtime.ts:883-901` 不含 `audit`，也没有事件。run 时被拒的产物
    （软链/超限/句柄异常）只存在于内存 `RunJsOutput.audit`，回合结束即丢（评测直接调执行器时才能读到：
