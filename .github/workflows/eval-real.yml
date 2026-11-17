@@ -52,24 +52,29 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # 单样本抖动：概率性用例在 1 轮里会误红（同一 head 上 E05/E08 实测过 PASS↔FAIL 往返）。
-      # PR：每例 5 轮 + 通过率门（见 scripts/eval/eval-gate.mjs，预注册 min-rate 0.5）；
+      # 2026-11-17 owner 裁定：CI 跑的是 step 账号（模型级并发上限 5），多轮会顶爆并产生假红；
+      # 真实评测信号改由本地 workbuddy 端点跑（--concurrency 5，快得多）。
+      # 因此 CI 固定 **1 轮**、只作信息面（不设通过率门）。
       # push 到 main：1 轮，只作信息面，不设门槛。
-      - name: Choose trial count
+      - name: Choose trial count and concurrency
         id: trials
-        run: echo "n=${{ github.event_name == 'pull_request' && 5 || 1 }}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "n=1" >> "$GITHUB_OUTPUT"
+          # 并发先回到 1：并发需要「每个 trial 一份平台 root 副本」，否则共用 fixture 的 tmp 目录会互相干扰。
+          echo "c=1" >> "$GITHUB_OUTPUT"
 
       - name: Run user-level eval (12 cases × ${{ steps.trials.outputs.n }} trial(s), evidence kept)
         run: |
           set -o pipefail
           mkdir -p .runtime/eval-user
           # 逐样本退出码不直接定生死：判决交给下一步的通过率门（否则任何一次抖动都会红）。
-          npm run eval:user -- --trials ${{ steps.trials.outputs.n }} --out-dir .runtime/eval-user 2>&1 | tee .runtime/eval-user/run.log || true
+          npm run eval:user -- --trials ${{ steps.trials.outputs.n }} --concurrency ${{ steps.trials.outputs.c }} --out-dir .runtime/eval-user 2>&1 | tee .runtime/eval-user/run.log || true
 
       # 预注册判据（2026-11-17，PR #62）：**不以单样本翻转判回归**，用每例通过率。
       # 门槛写在 scripts/eval/eval-gate.mjs 顶部；改门槛 = 改判据，必须单独提交并说明。
-      - name: Gate on per-case pass rate (PR only)
-        if: github.event_name == 'pull_request'
+      # 单轮不设通过率门（1 轮没有通过率可言）；多轮时才有意义。
+      - name: Gate on per-case pass rate (multi-trial only)
+        if: github.event_name == 'pull_request' && steps.trials.outputs.n != '1'
         run: node scripts/eval/eval-gate.mjs --summary .runtime/eval-user/summary.json --expect-cases E01,E02,E03,E04,E05,E06,E07,E08,E09,E10,E11,E12 --expect-trials ${{ steps.trials.outputs.n }} --min-rate 0.5
 
       # 评论正文从 summary.json 全量生成逐用例表（不是日志尾部截断）；摘要缺失时脚本

@@ -533,6 +533,31 @@ host:
     }
   });
 
+  it('runtime.attachmentNudgeAfterMs：正数 / 0 解析；非法值 fail-fast；缺省不造键', () => {
+    // 缺省 = 加载层不造键；缺省 30000（30 秒）由 resolveRuntimeConfig 补齐。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+
+    const positive = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  attachmentNudgeAfterMs: 30000\n`),
+      env: {},
+    });
+    expect(positive.runtime).toEqual({ attachmentNudgeAfterMs: 30000 });
+
+    // 显式 0 = 关闭主动追问，是合法值（不得被「未配置」吞掉）。
+    const zero = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  attachmentNudgeAfterMs: 0\n`),
+      env: {},
+    });
+    expect(zero.runtime).toEqual({ attachmentNudgeAfterMs: 0 });
+
+    for (const bad of ['-1', '1.5', 'nope']) {
+      const yaml = `${VALID_YAML}runtime:\n  attachmentNudgeAfterMs: ${bad}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(
+        /runtime\.attachmentNudgeAfterMs/,
+      );
+    }
+  });
+
   it('runtime.fileRetentionSweepOnStart：布尔 true/false 解析；非布尔 fail-fast；缺省不造键', () => {
     // 缺省 = 加载层不造键；缺省 false（不在启动时清扫）由 resolveRuntimeConfig 补齐。
     expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
@@ -554,6 +579,30 @@ host:
       const yaml = `${VALID_YAML}runtime:\n  fileRetentionSweepOnStart: ${bad}\n`;
       expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(
         /runtime\.fileRetentionSweepOnStart/,
+      );
+    }
+  });
+
+  it('runtime.allowWriteOperations：布尔 true/false 解析；非布尔 fail-fast；缺省不造键', () => {
+    // 缺省不造键；装配层按 false（只读）处理，零行为变化。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+
+    const on = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  allowWriteOperations: true\n`),
+      env: {},
+    });
+    expect(on.runtime).toEqual({ allowWriteOperations: true });
+
+    const off = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  allowWriteOperations: false\n`),
+      env: {},
+    });
+    expect(off.runtime).toEqual({ allowWriteOperations: false });
+
+    for (const bad of ['yes', '1', '"true"', 'nope']) {
+      const yaml = `${VALID_YAML}runtime:\n  allowWriteOperations: ${bad}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(
+        /runtime\.allowWriteOperations/,
       );
     }
   });

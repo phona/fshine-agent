@@ -37,12 +37,12 @@ import type { ExecutionClient } from '@fshine/contracts/execution-contract';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import { applyExecutorLabel, loadAgentProfile } from '../packages/agent/src/agent-profile';
 import { createPiTurnDriver, parseContextWindow, type PiTurnDriverOptions } from '../packages/agent/src/pi-driver';
-import { createDummyCliClient, readOnlyOperationNames } from '../packages/agent/src/dummy-cli-client';
+import { createDummyCliClient, readOnlyOperationNames, writeOperationNames } from '../packages/agent/src/dummy-cli-client';
 import type { TurnDriver } from '../packages/agent/src/driver-contract';
 import {
-  MAIN_PROTOCOL_NOTE,
   createSession,
   createTaskExecutor,
+  mainProtocolNoteFor,
   type Session,
   type TranscriptStore,
   type TurnFileRef,
@@ -213,6 +213,11 @@ export interface SessionAssemblyInput {
   emptyOperationsMessage: string;
   /** 空集合抛出的错误构造（ask 传 AssemblyRefusedError；缺省普通 Error = server/runner 现行为）。 */
   emptyOperationsError?: (message: string) => Error;
+  /**
+   * 写面开关（`runtime.allowWriteOperations` 的装配投影；缺省 false = 只读）。
+   * true 时允许集合 = access=read + access=write；只读集合仍只含 access=read。
+   */
+  allowWriteOperations?: boolean;
   createDrivers?: DriverFactory;
   createExecutionFace?: ExecutionFaceFactory;
   /** 预装载底账（server 共享库）；缺省自建并由 close 关闭（注入的归调用方）。 */
@@ -248,6 +253,10 @@ export interface SessionAssemblyInput {
   transcriptStore?: TranscriptStore;
   /** B1：转录读/写失败上报（fail-open 日志；缺省静默）。 */
   onTranscriptError?: (error: unknown) => void;
+  /** 纯附件机械事实注入器（与 taskFactProvider 同一 injections 机制；缺省不注入）。 */
+  attachmentFactProvider?: (principalId: string, sessionId: string) => string | undefined;
+  /** 主动追问系统注记注入器（模型可见/用户不可见；缺省不注入）。 */
+  systemNoteProvider?: (principalId: string, sessionId: string) => string | undefined;
   /** CAP-01 S1：run_js 执行器端口（装配层构造注入；缺省不注入 = Main 无 run_js 工具）。 */
   runJsExecutor?: RunJsExecutor;
   /** CAP-01 ④：run_js 内存墙结构化事件上报（装配层接日志；缺省静默）。 */
@@ -309,13 +318,15 @@ export interface AssembledSession {
   close(): void;
 }
 
-/** 缺省执行面：仓内 dummy CLI + 从执行层自述派生的只读允许集（空集合按注入话术拒绝）。 */
+/** 缺省执行面：仓内 dummy CLI + 从执行层自述派生的允许集（空集合按注入话术拒绝）。 */
 async function defaultExecutionFace(input: {
   profile: ContextProfileConfig;
   env: NodeJS.ProcessEnv;
   stateDir: string;
   emptyOperationsMessage: string;
   emptyOperationsError: (message: string) => Error;
+  /** true = 允许集合追加 access=write 的写面（缺省 false = 只读，零行为变化）。 */
+  allowWriteOperations?: boolean;
 }): Promise<ExecutionFace> {
   const client = createDummyCliClient({
     root: input.profile.root,
@@ -324,10 +335,13 @@ async function defaultExecutionFace(input: {
     env: input.env,
   });
   const operations = await client.listOperations();
-  // 两条集合各自派生：只读集合只看 access=read；允许集合是当前读路径切片（未来写操作
-  // 进入允许集合时，只读集合不会跟着变大——这正是 P1 要消除的「碰巧成立」）。
+  // 两条集合各自派生：只读集合只看 access=read；写集合只看 access=write。写操作进入
+  // 允许集合（开关打开）时，只读集合不会跟着变大——重试语义不随写面开关变化。
   const readOnlyOperations = readOnlyOperationNames(operations);
-  const allowedOperations = [...readOnlyOperations];
+  const writeOperations = writeOperationNames(operations);
+  const allowedOperations = input.allowWriteOperations === true
+    ? [...readOnlyOperations, ...writeOperations]
+    : [...readOnlyOperations];
   if (allowedOperations.length === 0) {
     throw input.emptyOperationsError(input.emptyOperationsMessage);
   }
@@ -341,6 +355,8 @@ export interface ExecutionFaceResolverInput {
   stateDir: string;
   emptyOperationsMessage: string;
   emptyOperationsError?: (message: string) => Error;
+  /** true = 允许集合追加执行层自述 access=write 的写面（缺省 false = 只读）。 */
+  allowWriteOperations?: boolean;
   createExecutionFace?: ExecutionFaceFactory;
 }
 
@@ -354,6 +370,7 @@ export async function resolveExecutionFace(input: ExecutionFaceResolverInput): P
     stateDir: input.stateDir,
     emptyOperationsMessage: input.emptyOperationsMessage,
     emptyOperationsError: input.emptyOperationsError ?? ((message) => new Error(message)),
+    ...(input.allowWriteOperations === undefined ? {} : { allowWriteOperations: input.allowWriteOperations }),
   });
 }
 
@@ -373,6 +390,8 @@ export interface BackgroundDispatchInput {
   policy: ResourcePolicy;
   workerSkills?: readonly WorkerSkill[];
   runtime?: RuntimeConfig;
+  /** `runtime.allowWriteOperations` 的显式投影（缺省取 runtime 值；false = 只读）。 */
+  allowWriteOperations?: boolean;
   emptyOperationsMessage: string;
   emptyOperationsError?: (message: string) => Error;
   createDrivers?: DriverFactory;
@@ -392,6 +411,7 @@ export interface BackgroundDispatch {
 
 export async function createBackgroundDispatch(input: BackgroundDispatchInput): Promise<BackgroundDispatch> {
   const resolved = resolveRuntimeConfig(input.runtime);
+  const allowWriteOperations = input.allowWriteOperations ?? input.runtime?.allowWriteOperations === true;
   let executor = input.taskExecutor;
   if (executor === undefined) {
     const face = input.face ?? await resolveExecutionFace({
@@ -399,6 +419,7 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
       env: input.env,
       stateDir: input.stateDir,
       emptyOperationsMessage: input.emptyOperationsMessage,
+      allowWriteOperations,
       ...(input.emptyOperationsError === undefined ? {} : { emptyOperationsError: input.emptyOperationsError }),
       ...(input.createExecutionFace === undefined ? {} : { createExecutionFace: input.createExecutionFace }),
     });
@@ -535,6 +556,8 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
   const dispatchMode: 'inline' | 'background' = input.dispatchMode ?? input.runtime?.dispatchMode ?? 'inline';
   const resolved = resolveRuntimeConfig(input.runtime);
   const policy = input.policy ?? createResourcePolicy(input.runtime);
+  // 写面开关：显式投影优先，其次 runtime 段；缺省 false = 只读（零行为变化）。
+  const allowWriteOperations = input.allowWriteOperations ?? input.runtime?.allowWriteOperations === true;
 
   const auditPath = path.join(input.stateDir, 'audit.jsonl');
   if (input.setAuditPath === true) {
@@ -548,6 +571,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
     env: input.env,
     stateDir: input.stateDir,
     emptyOperationsMessage: input.emptyOperationsMessage,
+    allowWriteOperations,
     ...(input.emptyOperationsError === undefined ? {} : { emptyOperationsError: input.emptyOperationsError }),
     ...(input.createExecutionFace === undefined ? {} : { createExecutionFace: input.createExecutionFace }),
   });
@@ -585,7 +609,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       // 协议之前；目录为空/缺失时 promptBlock 为空串 → 提示逐字节不变；catalog 非空才交出
       // read_skill 登记表。目录来自装配参数或 `<repo>/.agents/skills`，不读配置键。
       const delivery = await loadMainSkillDelivery(input.mainSkillsDir ?? defaultMainSkillsDir());
-      mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, input.profile.executorLabel)}${delivery.promptBlock}\n\n${MAIN_PROTOCOL_NOTE}`;
+      mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, input.profile.executorLabel)}${delivery.promptBlock}\n\n${mainProtocolNoteFor(allowWriteOperations)}`;
       mainSkillRegistry = delivery.registry;
     }
     const drivers = input.createDrivers !== undefined
@@ -603,6 +627,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
         policy,
         workerSkills,
         ...(input.runtime === undefined ? {} : { runtime: input.runtime }),
+        allowWriteOperations,
         emptyOperationsMessage: input.emptyOperationsMessage,
         ...(input.emptyOperationsError === undefined ? {} : { emptyOperationsError: input.emptyOperationsError }),
         ...(input.createDrivers === undefined ? {} : { createDrivers: input.createDrivers }),
@@ -640,6 +665,8 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       ...(runner === undefined ? {} : { taskRunner: runner }),
       ...(mainSkillRegistry === undefined ? {} : { mainSkillRegistry }),
       ...(input.taskFactProvider === undefined ? {} : { taskFactProvider: input.taskFactProvider }),
+      ...(input.attachmentFactProvider === undefined ? {} : { attachmentFactProvider: input.attachmentFactProvider }),
+      ...(input.systemNoteProvider === undefined ? {} : { systemNoteProvider: input.systemNoteProvider }),
       ...(input.transcriptStore === undefined ? {} : { transcriptStore: input.transcriptStore }),
       ...(input.onTranscriptError === undefined ? {} : { onTranscriptError: input.onTranscriptError }),
       ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
@@ -724,6 +751,8 @@ export async function assembleAskRuntime(input: AskRuntimeInput): Promise<AskRun
     },
     emptyOperationsMessage: '执行层没有声明任何只读 operation——最小切片拒绝以空允许集合运行。',
     emptyOperationsError: (message) => new AssemblyRefusedError(message),
+    // 写面开关：语义部署键 runtime.allowWriteOperations（缺省 false = 只读，ask 零行为变化）。
+    allowWriteOperations: config.runtime?.allowWriteOperations === true,
     ...(input.mainSkillsDir === undefined ? {} : { mainSkillsDir: input.mainSkillsDir }),
   });
   return {

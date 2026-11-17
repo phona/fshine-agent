@@ -33,7 +33,9 @@
  *   · requestId 由宿主生成，模型不能提供可信身份；
  *   · 任务归属：任务底账绑定 principal/session，越权读取被拒（task-registry.ts）。
  *
- * 本切片不做（不预造接口）：写 / 确认 / 产物回收；计划门与预算梯子归执行层；
+ * 本切片不做（不预造接口）：计划门、预算梯子、确认裁决；写确认回环的宿主侧只做三件事——
+ * 允许集按装配开关（`runtime.allowWriteOperations`）派生、会话级小表记执行层发放的确认提示、
+ * 下一回合把句柄与本回合用户原话原样透传（是否确认由用户表态、执行层校验句柄）。
  * 取消/接续经 task_cancel/task_resume 复用 runner 既有生命周期（不在此新建治理）；
  * 上下文与压缩归 Pi 原生（mainDriver 自带）；这里不另建记忆、检索或投影。
  *
@@ -303,6 +305,26 @@ export const MAIN_PROTOCOL_NOTE = [
   '- 本轮执行面只开放查询（只读）操作；用户要求写入或变更时，如实说明该能力尚未开通。',
 ].join('\n');
 
+/**
+ * 写面开放时的工具协议义务（仅 `runtime.allowWriteOperations=true` 的装配使用；
+ * 缺省仍用 MAIN_PROTOCOL_NOTE，逐字节不变）。只声明接口事实：写操作已上工具面；
+ * 执行层返回待确认时把机械摘要转给用户。**不是**计划门或确认裁决——继续与否由用户
+ * 表态、执行层校验句柄，宿主不判断用户是否在确认。
+ */
+export const MAIN_PROTOCOL_NOTE_WITH_WRITES = [
+  '【本轮工具协议】',
+  '- 涉及平台数据的请求，用 task_run 工具交给执行层 Worker；不得自行编造或猜测平台数据。',
+  '- 收到 Worker 汇报后，用用户能懂的话给出结论与数据；平台没有给出的内容不要补全，也不要声称已验证。',
+  '- 本轮执行面开放查询与写入操作。执行层返回待确认时，把执行层给出的确认摘要原样转给用户；'
+    + '用户表态后的下一回合再继续，不要替用户假定已确认。',
+  '- 写入是否生效以执行层返回的读回验证为准；执行层返回失败或读回不一致时，如实转述，不得说成成功。',
+].join('\n');
+
+/** 按装配的写面开关选工具协议文本（缺省 = 只读原文，零行为变化）。 */
+export function mainProtocolNoteFor(allowWriteOperations: boolean): string {
+  return allowWriteOperations ? MAIN_PROTOCOL_NOTE_WITH_WRITES : MAIN_PROTOCOL_NOTE;
+}
+
 /** Worker 的静态系统提示：协议义务、机械边界与输出纪律；零执行层实例名。 */
 export const WORKER_SYSTEM_PROMPT = [
   '你是 fshine 的执行层 Worker：宿主把一项平台任务委派给你，你在一个受信工作区里工作。',
@@ -374,14 +396,15 @@ export interface RuntimeOptions {
   /** 执行层客户端（依赖注入：通用运行时只认接口）。 */
   client: ExecutionClient;
   /**
-   * 本切片允许发起的 operation 集合（读路径作用域，装配方从执行层自述的声明派生）。
-   * 必须非空，且全部出现在能力快照里——否则构造即失败（fail-closed）。
+   * 本轮允许发起的 operation 集合（装配方从执行层自述的声明派生：`access=read` 恒在；
+   * `runtime.allowWriteOperations=true` 时追加 `access=write`）。必须非空且全部出现在
+   * 能力快照里——否则构造即失败（fail-closed）。
    */
   allowedOperations: readonly string[];
   /** Main 与 Worker 的 Pi 回合驱动（真实实现或测试替身都由装配方注入）。 */
   mainDriver: TurnDriver;
   workerDriver: TurnDriver;
-  /** Main 系统提示（角色文本 + MAIN_PROTOCOL_NOTE，由装配方组装）。 */
+  /** Main 系统提示（角色文本 + 工具协议，由装配方组装；写面开关决定协议文本变体）。 */
   mainSystemPrompt: string;
   /** Worker 需嵌入本轮提示的领域技能正文（可选）。 */
   workerSkills?: readonly WorkerSkill[];
@@ -417,6 +440,19 @@ export interface RuntimeOptions {
    * message type、不改 Pi 消息流不变量）。注入器自身保证幂等与有界。
    */
   taskFactProvider?: (principalId: string, sessionId: string) => string | undefined;
+  /**
+   * 纯附件机械事实注入器（与 taskFactProvider 同一 injections 机制）：装配层在纯附件
+   * 登记成功后按 (principal, session) 排队；回合开始时取走并以 Pi 原生 custom message
+   * （display=false、不触发单独回合）注入主对话。注入器自身保证同 fileId 只出队一次。
+   * 事实只含文件名/fileId/字节数/时间，不含路径与内容。缺省不注入 = 无附件事实。
+   */
+  attachmentFactProvider?: (principalId: string, sessionId: string) => string | undefined;
+  /**
+   * 宿主主动追问的系统注记注入器（同一 injections 机制）：追问真实送达后入队，下一次
+   * 回合注入（模型可见/用户不可见/不触发回合），让模型能把用户的数字回复对应到选项。
+   * 缺省不注入 = 无系统注记。
+   */
+  systemNoteProvider?: (principalId: string, sessionId: string) => string | undefined;
   /**
    * Worker 可信工作目录（渲染进 Worker 系统提示的工作目录约束块）。
    * 来源必须是装配层持有的可信路径（如 profile.root）；不得取模型输出或用户消息。
@@ -889,6 +925,18 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   const readOnlyOperations = new Set(options.readOnlyOperations ?? []);
   /** 本会话回合号（turn 作用域身份 = session + 序号；进程内单调）。 */
   let turnNo = 0;
+  /** 本回合用户原话（`send(text)` 原文；只作确认请求的 userText 透传，宿主不改写）。 */
+  let currentUserText = '';
+  /**
+   * 会话级待确认句柄（最小状态；不是语义层、不做历史检索）：
+   *   · 收到 needs_confirmation 时记 { handle, summary, expiresAt, issuedTurn }；
+   *   · **下一回合**的 execute_operation 才把句柄与本回合用户原话原样透传给执行层；
+   *   · 执行层返回后清除（不判断回执是不是「接受」——那是执行层的语义）。
+   * 键 = 会话自身身份 (principalId, sessionId)：一个 createSession 一张表，不跨会话共享。
+   */
+  let pendingConfirmation:
+    | { handle: string; summary: string; expiresAt?: string; issuedTurn: number }
+    | undefined;
   const mainTurnMs = options.mainTurnMs ?? DEFAULT_MAIN_TURN_MS;
   const workerTurnMs = options.workerTurnMs ?? DEFAULT_WORKER_TURN_MS;
   const policy = options.policy;
@@ -1300,6 +1348,34 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     }
   }
 
+  /**
+   * 本回合要透传的确认引用（宿主只做传递，不解释句柄、不判断用户是否在确认）：
+   *   · 只在**下一回合**透传——同一回合 prepare 后立刻 commit 不算用户表态；
+   *   · 只读 operation 不消耗用户的确认（执行层不会把确认用于读调用）；
+   *   · userText = 本回合用户原话（原样，不改写）。
+   */
+  function confirmationForOperation(operation: string): { handle: string; userText: string } | undefined {
+    if (pendingConfirmation === undefined) return undefined;
+    if (pendingConfirmation.issuedTurn >= turnNo) return undefined;
+    if (readOnlyOperations.has(operation)) return undefined;
+    return { handle: pendingConfirmation.handle, userText: currentUserText };
+  }
+
+  /**
+   * 模型可见的执行结果：needs_confirmation 只给机械摘要（summary/expiresAt）与 data——
+   * 句柄是宿主持有的确认凭据，不进模型转录；模型无法伪造/转交句柄，透传只发生在
+   * 下一回合的宿主请求里。其余状态原样交回模型。
+   */
+  function modelVisibleOutcome(outcome: ExecutionOutcome): Record<string, unknown> {
+    if (outcome.status !== 'needs_confirmation') return outcome as unknown as Record<string, unknown>;
+    return {
+      status: 'needs_confirmation',
+      summary: outcome.confirmation.summary,
+      ...(outcome.confirmation.expiresAt === undefined ? {} : { expiresAt: outcome.confirmation.expiresAt }),
+      ...(outcome.data === undefined ? {} : { data: outcome.data }),
+    };
+  }
+
   async function executeOperation(
     taskId: string,
     args: Record<string, unknown>,
@@ -1308,12 +1384,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     exchange?: TaskExecutionBridge,
     taskFiles?: TurnFileRef[],
     signal?: AbortSignal,
-  ): Promise<ExecutionOutcome> {
+  ): Promise<Record<string, unknown>> {
     const operation = typeof args.operation === 'string' ? args.operation : '';
     if (operation === '') throw new Error('execute_operation 缺少 operation。');
     if (!allowed.has(operation)) {
-      // 读路径边界：集合外的 operation 在发起执行前被拒——不依赖模型遵守提示词。
-      throw new Error(`本轮只开放只读操作：「${operation}」不在允许集合内，未发起执行。`);
+      // 允许集合边界：集合外的 operation 在发起执行前被拒——不依赖模型遵守提示词。
+      throw new Error(`「${operation}」不在本轮允许集合内，未发起执行。`);
     }
     const rawArgs = args.args;
     const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
@@ -1331,10 +1407,21 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       execute: async (dispatchKey) => {
         // requestId 由宿主生成、每次调用换号（只作追踪）；dispatchKey 是操作身份，不换。
         const requestId = `req_${randomUUID()}`;
+        // 写确认回环：存在未消费的会话级句柄时，把它与本回合用户原话原样放进同一次 execute。
+        const confirmation = confirmationForOperation(operation);
         let outcome = await client.execute(
-          { requestId, dispatchKey, operation, args: callArgs },
+          {
+            requestId,
+            dispatchKey,
+            operation,
+            args: callArgs,
+            ...(confirmation === undefined ? {} : { confirmation }),
+          },
           signal === undefined ? undefined : { signal },
         );
+        // 执行层已返回：本次透传结束，宿主侧句柄清除（是否真的被接受由执行层回执说明；
+        // 宿主不判断确认语义）。
+        if (confirmation !== undefined) pendingConfirmation = undefined;
         // 取消后到达的回执不落执行事实：任务已按取消处置，迟到的成功不得冒充本回合结果。
         if (signal?.aborted === true) throw abortError();
         // CAP-01 S2 ③：回程登记在 runtime 出口（不在适配器）——登记 data.files、剥
@@ -1363,7 +1450,18 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     }
     // 取消胜出：不再把（可能迟到的）执行结果交回 Worker；让回合按 abort 收尾。
     if (signal?.aborted === true) throw abortError();
-    return run.outcome;
+    // 执行层发来新的确认提示：记进会话级小表（替换旧句柄），模型只拿 summary。
+    if (run.outcome.status === 'needs_confirmation') {
+      pendingConfirmation = {
+        handle: run.outcome.confirmation.handle,
+        summary: run.outcome.confirmation.summary,
+        ...(run.outcome.confirmation.expiresAt === undefined
+          ? {}
+          : { expiresAt: run.outcome.confirmation.expiresAt }),
+        issuedTurn: turnNo,
+      };
+    }
+    return modelVisibleOutcome(run.outcome);
   }
 
   /**
@@ -1617,6 +1715,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   async function send(text: string): Promise<TurnResult> {
     const foregroundPermit = await acquireForegroundPermit();
     try {
+      // 本回合用户原话：确认请求的 userText 原样取自这里（不改写、不解释）。
+      currentUserText = text;
       const progress: string[] = [];
       const taskIds: string[] = [];
       // CAP-01 S1：本回合产出文件（run_js 交付箱登记事实；回合末进 TurnResult.files）。
@@ -1633,6 +1733,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const mainWindow = newAttemptWindow();
       // 宿主只交「本轮输入」：最后一条 user = 本轮文本；历史种子仅在驱动尚无会话时使用。
       const factsMessage = options.taskFactProvider?.(options.principalId, options.sessionId);
+      // 纯附件机械事实（文件名/fileId/字节数/时间，不含路径）与主动追问的系统注记
+      // （模型可见/用户不可见）走同一 injections 机制；take 即出队（同 fileId 只注入一次）。
+      const attachmentFactsMessage = options.attachmentFactProvider?.(options.principalId, options.sessionId);
+      const systemNoteMessage = options.systemNoteProvider?.(options.principalId, options.sessionId);
       // CAP-01 S1 清单注入（机械事实）：本会话已激活文件，字段只有 fileId/name/bytes；
       // 字节数作为观察项随 TurnResult 带出（fileManifestBytes）。
       const manifestFiles = options.fileManifestProvider?.(options.principalId, options.sessionId) ?? [];
@@ -1645,7 +1749,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const turnMessages = [...history, userMessage(text)];
       const injections = [
         ...(factsMessage !== undefined && factsMessage.trim() !== '' ? [factsMessage] : []),
+        ...(attachmentFactsMessage !== undefined && attachmentFactsMessage.trim() !== '' ? [attachmentFactsMessage] : []),
         ...(manifestMessage !== undefined ? [manifestMessage] : []),
+        ...(systemNoteMessage !== undefined && systemNoteMessage.trim() !== '' ? [systemNoteMessage] : []),
       ];
       const mainResult = await options.mainDriver.run({
         systemPrompt: options.mainSystemPrompt,
@@ -1865,6 +1971,11 @@ function pendingQuestionFrom(outcome: Extract<ExecutionOutcome, { status: 'needs
  *       执行层 needs_input → needs_input（missing 原样转述）；
  *       零执行 → failed（不得报 completed）；任一非 completed → failed（原因机械合成）；
  *       全部 completed → completed{resultText}（结果存档由 runner settle 经 archiveReply 承接）。
+ *
+ * 写确认边界：needs_confirmation 的会话级句柄表与下一回合原话透传只接在**前台会话**
+ * （createSession 的 send 回合）上——后台单回合执行器没有「下一回合」概念，也不持有
+ * 用户原话。后台模式打开写面时，需要确认的写操作会确定性落 failed（不谎报 completed）；
+ * 写确认的产品链路当前由 inline 派发承接（登记见本切片说明，不在此预造后台确认状态机）。
  */
 export async function createTaskExecutor(options: TaskExecutorOptions): Promise<TaskExecutor> {
   const manifest = await options.client.capabilities();
@@ -1899,7 +2010,7 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         const operation = typeof args.operation === 'string' ? args.operation : '';
         if (operation === '') throw new Error('execute_operation 缺少 operation。');
         if (!allowed.has(operation)) {
-          throw new Error(`本轮只开放只读操作：「${operation}」不在允许集合内，未发起执行。`);
+          throw new Error(`「${operation}」不在本轮允许集合内，未发起执行。`);
         }
         const rawArgs = args.args;
         const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)

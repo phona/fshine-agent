@@ -160,12 +160,16 @@ describe('④ 写面必被拒：--apply 写旗标（模型路径若发生写尝�
     expect(audit.some((row) => typeof row.refused === 'string' && row.refused.includes('--apply'))).toBe(true);
   });
 
-  it('F1 对照（防过测）：prepare dummy.prepare 不带 --apply（dryRun 只读预习）→ 正常完成', () => {
+  it('F1 对照（防过测）：prepare dummy.prepare 不带 --apply → 正常生成待确认提案（不是写）', () => {
     const dir = freshStateDir();
     const r = runDummy(['prepare', 'dummy.prepare', '--collection', 'alpha'], {}, dir);
     expect(r.status).toBe(0);
-    expect(r.envelope?.status).toBe('completed');
-    expect(r.envelope?.data?.dryRun).toBe(true);
+    expect(r.envelope?.status).toBe('needs_confirmation');
+    expect(r.envelope?.confirmation?.handle).toMatch(/^cf_/);
+    // 预演不是写：用户确认之前数据原样。
+    const before = runDummy(['query', 'dummy.query', '--collection', 'alpha'], {}, dir);
+    expect(before.envelope?.status).toBe('completed');
+    expect(before.envelope?.data?.count).toBe(2);
   });
 });
 

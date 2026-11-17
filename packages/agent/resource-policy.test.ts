@@ -55,7 +55,21 @@ describe('resolveRuntimeConfig：缺省 = 前台并发 4 + 排队 16，非法 fa
       waitUserTimeoutMs: 86_400_000,
       fileRetentionDays: 30,
       fileRetentionSweepOnStart: false,
+      attachmentNudgeAfterMs: 30_000,
     });
+  });
+
+  it('attachmentNudgeAfterMs：缺省 30000；0 = 关闭；负数/非整数 fail-fast', () => {
+    expect(resolveRuntimeConfig().attachmentNudgeAfterMs).toBe(30_000);
+    expect(resolveRuntimeConfig({ attachmentNudgeAfterMs: 0 }).attachmentNudgeAfterMs).toBe(0);
+    expect(resolveRuntimeConfig({ attachmentNudgeAfterMs: 5_000 }).attachmentNudgeAfterMs).toBe(5_000);
+
+    for (const bad of [-1, 1.5, '30000']) {
+      expect(
+        () => resolveRuntimeConfig({ attachmentNudgeAfterMs: bad } as unknown as RuntimeConfig),
+        `attachmentNudgeAfterMs=${String(bad)}`,
+      ).toThrowError(/runtime\.attachmentNudgeAfterMs/);
+    }
   });
 
   it('fileRetentionSweepOnStart：缺省 false（零行为）；显式 true/false 保留；非布尔 fail-fast', () => {

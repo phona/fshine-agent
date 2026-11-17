@@ -392,10 +392,11 @@ export interface TaskFactSeed {
 }
 
 /**
- * 逻辑操作账的状态集（U3）。completed/needs_input/failed/refused 与执行结果四态同名；
- * claimed = 已认领未落定；unknown = 结果未知（待核对，禁止自动重放）。
+ * 逻辑操作账的状态集（U3）。completed/needs_confirmation/needs_input/failed/refused
+ * 与执行结果五态同名；claimed = 已认领未落定；unknown = 结果未知（待核对，禁止自动重放）。
+ * needs_confirmation 只是执行层返回的机械事实：宿主把它记进账行，不代表宿主裁决确认。
  */
-export const OPERATION_STATUSES = ['claimed', 'completed', 'needs_input', 'failed', 'refused', 'unknown'] as const;
+export const OPERATION_STATUSES = ['claimed', 'completed', 'needs_confirmation', 'needs_input', 'failed', 'refused', 'unknown'] as const;
 
 export type OperationStatus = (typeof OPERATION_STATUSES)[number];
 

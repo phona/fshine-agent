@@ -149,6 +149,8 @@ export interface ResolvedRuntimeConfig {
   readonly fileRetentionDays: number;
   /** server 启动时是否扫一遍到期 run 目录；缺省 false（零行为变化）。 */
   readonly fileRetentionSweepOnStart: boolean;
+  /** 纯附件后主动追问延迟（ms）；0 = 关闭，缺省 30000（同一会话冷却 10 分钟）。 */
+  readonly attachmentNudgeAfterMs: number;
 }
 
 /**
@@ -172,6 +174,8 @@ export const DEFAULT_RUNTIME_CONFIG: ResolvedRuntimeConfig = Object.freeze({
   fileRetentionDays: 30,
   // 缺省关闭：server 启动路径零行为变化（不调用清理执行器、不建目录、不删文件）。
   fileRetentionSweepOnStart: false,
+  // 纯附件后 30 秒无指令 → 宿主主动追问；0 = 关闭（显式值不被缺省吞掉）。
+  attachmentNudgeAfterMs: 30_000,
 });
 
 function assertRuntimeInteger(value: unknown, label: string, min: number): number {
@@ -293,6 +297,10 @@ export function resolveRuntimeConfig(config: RuntimeConfig = {}): ResolvedRuntim
     fileRetentionSweepOnStart: config.fileRetentionSweepOnStart === undefined
       ? DEFAULT_RUNTIME_CONFIG.fileRetentionSweepOnStart
       : assertRuntimeBoolean(config.fileRetentionSweepOnStart, 'runtime.fileRetentionSweepOnStart'),
+    // 0 = 关闭主动追问（显式值合法）；负数/非整数 fail-fast。
+    attachmentNudgeAfterMs: config.attachmentNudgeAfterMs === undefined
+      ? DEFAULT_RUNTIME_CONFIG.attachmentNudgeAfterMs
+      : assertRuntimeInteger(config.attachmentNudgeAfterMs, 'runtime.attachmentNudgeAfterMs', 0),
   });
 }
 

@@ -69,6 +69,26 @@ const MAX_PROGRESS_FRAMES = 4;
 /** 文件收据的并窗（毫秒）。导出是为了让这个调参值有测试守着——改大先核上面的上界理由。 */
 export const RECEIPT_COALESCE_MS = 2_000;
 
+/**
+ * 附件-指令合并窗口（毫秒）：纯附件消息不立刻交给 handler，先在这个窗口里等同会话文字。
+ *
+ * 为什么需要（2026-11-17）：企微把文件与文字拆成 N+1 条独立入站消息。用户的自然形态是
+ * "几个文件 + 一条指令"，而适配器此前收到第一条文件就交付附件-only 回合、文字到达后再起
+ * 第二个回合——同一件事被拆成两次 handler 调用。窗口把"最后一个文件 → 指令"的间隔吸收掉：
+ * 窗口内到达的文字与全部待合并附件合成**一次** handler 调用（宿主仍只看到一条完整消息，
+ * 窗口只是渠道适配层的入站整形，不是宿主机制）。
+ *
+ * 取值：3 秒盖住人打完一句指令的时间；窗口内每来一个新附件就续期，但总上限 5 秒——
+ * 否则持续发文件会让指令永远等不到交付（"再等最后一个"没有终点）。
+ */
+export const ATTACHMENT_MERGE_WINDOW_MS = 3_000;
+/** 合并窗口的总上限（毫秒）：续期不得越过起点 + 该值。 */
+export const ATTACHMENT_MERGE_WINDOW_MAX_MS = 5_000;
+/** 待合并附件个数上限：超过立即 flush，不再等窗口。 */
+export const ATTACHMENT_MERGE_MAX_FILES = 5;
+/** 待合并附件合计字节上限：超过立即 flush，不再等窗口。 */
+export const ATTACHMENT_MERGE_MAX_BYTES = 25 * 1024 * 1024;
+
 /** 附件大小上限：企微 file 消息的合理体量。超限直接拒收，不落盘、不进上下文 */
 const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 /** 单个附件名长度上限：防超长名把落盘路径撑爆（也防日志刷屏） */
@@ -146,6 +166,13 @@ export interface WecomBotChannelOptions {
    * 并留 `wecom_delivery_mode_undeclared` 日志。
    */
   deliveryMode?: DeliveryMode;
+  /**
+   * 附件-指令合并窗口（毫秒）。缺省 {@link ATTACHMENT_MERGE_WINDOW_MS}（3 秒）；
+   * 传 0 = 立即 flush（退化为逐条交付），测试与特殊部署可收紧。
+   */
+  mergeWindowMs?: number;
+  /** 合并窗口总上限（毫秒）。缺省 {@link ATTACHMENT_MERGE_WINDOW_MAX_MS}（5 秒）。 */
+  mergeWindowMaxMs?: number;
 }
 
 /** 终帧拒收降级的上下文：会话地址 + 本次回复的防重 latch（一次派发最多降级一条）。 */
@@ -176,6 +203,32 @@ interface PendingReceipt {
   timer: ReturnType<typeof setTimeout>;
 }
 
+/**
+ * 合并窗口里的一条纯附件消息：已下载落盘的附件 + 它自己的投递面（frame/streamId）。
+ *
+ * 为什么每条都留着 frame：窗口到期按纯附件回合交付时，收据/终帧仍挂在**最后到达**的
+ * 那条文件消息上（与既有并窗纪律一致：时间上最接近用户所见）。
+ */
+interface PendingMergeFile {
+  conversationId: string;
+  frame: SdkFrame;
+  streamId: string;
+  msgid: string;
+  userid: string;
+  chatType: 'single' | 'group';
+  saved: IncomingAttachment[];
+  failed: string[];
+  bytes: number;
+}
+
+interface PendingMerge {
+  files: PendingMergeFile[];
+  totalBytes: number;
+  /** 起点 + ATTACHMENT_MERGE_WINDOW_MAX_MS：续期不得越过它。 */
+  deadline: number;
+  timer: ReturnType<typeof setTimeout> | undefined;
+}
+
 export class WecomBotChannel implements ChannelAdapter {
   private readonly env: Record<string, string | undefined>;
   private readonly clientFactory: () => SdkClientLike;
@@ -185,11 +238,18 @@ export class WecomBotChannel implements ChannelAdapter {
   private readonly gate: SilentShadowGate;
   /** 生效投递模式（live 须显式声明；缺失/非法/显式 silent|shadow = silent）——部署与测试可读。 */
   readonly deliveryMode: EffectiveDeliveryMode;
+  /** 合并窗口长度 / 总上限（构造参数可覆盖，缺省见 ATTACHMENT_MERGE_WINDOW_*）。 */
+  private readonly mergeWindowMs: number;
+  private readonly mergeWindowMaxMs: number;
   private started = false;
   private handler: ReplyHandler | null = null;
   private client: SdkClientLike | null = null;
   /** 按会话（conversationId）记挂起的文件收据；stop() 时整体清掉。 */
   private readonly pendingReceipts = new Map<string, PendingReceipt>();
+  /** 按会话记待合并的纯附件消息；窗口内来文字时整体吸收，stop() 时整体撤。 */
+  private readonly pendingMerges = new Map<string, PendingMerge>();
+  /** 按会话记正在等待在途附件的正文回合数：>0 时纯附件走旧的逐条交付（文字先到语义）。 */
+  private readonly attachmentWaiters = new Map<string, number>();
   /**
    * 按会话记仍在处理的附件。企微把文件与正文拆成两条事件，正文必须等文件完成下载并
    * 交给 handler 暂存后再继续，否则会话回合会拿不到本应属于同一批输入的附件。
@@ -219,6 +279,8 @@ export class WecomBotChannel implements ChannelAdapter {
     }
     this.gate = new SilentShadowGate({ mode: this.deliveryMode });
     this.clientFactory = () => this.gate.wrap(baseFactory());
+    this.mergeWindowMs = normalizeWindowMs(options.mergeWindowMs, ATTACHMENT_MERGE_WINDOW_MS);
+    this.mergeWindowMaxMs = normalizeWindowMs(options.mergeWindowMaxMs, ATTACHMENT_MERGE_WINDOW_MAX_MS);
     const platformRoot = path.resolve(options.platformRoot ?? process.cwd());
     const fallback = path.join(platformRoot, 'tmp', 'attachments');
     const configured = (options.attachmentDir ?? (this.env['FSHINE_ATTACHMENT_DIR'] ?? '').trim()).trim();
@@ -301,7 +363,9 @@ export class WecomBotChannel implements ChannelAdapter {
     // 收尾/进程退出拖住），也不该再往一个已断开的连接发东西。没收过的文件仍在暂存池里，
     // 下一条指令进来时由宿主的披露帧告知用户，信息不会丢。
     for (const key of [...this.pendingReceipts.keys()]) this.dropPendingReceipt(key);
+    for (const key of [...this.pendingMerges.keys()]) this.dropPendingMerge(key);
     this.pendingAttachmentProcessing.clear();
+    this.attachmentWaiters.clear();
     this.resolveAttachmentWaitInterrupt();
     this.resetAttachmentWaitInterrupt();
   }
@@ -528,6 +592,31 @@ export class WecomBotChannel implements ChannelAdapter {
         finishAttachmentProcessing();
         throw error;
       }
+      // stop() 或重启期间完成的旧事件不能再入窗、更不能交给旧 handler。
+      if (!this.started || this.handler !== handler || this.client !== client) {
+        finishAttachmentProcessing();
+        return;
+      }
+      // 文字先到（同会话已有正文在等这批在途附件）时保持旧路径：附件逐条交给 handler，
+      // 正文的 8 秒等待与它看到的消息顺序不变（ATTACHMENT_WAIT_TIMEOUT_MS 语义）。
+      // 否则先入合并窗口——窗口内来的文字会与本条附件合成同一个回合。
+      const textWaiting = (this.attachmentWaiters.get(conversationId) ?? 0) > 0;
+      if (!textWaiting || this.pendingMerges.has(conversationId)) {
+        const flushNow = this.bufferMergeFile({
+          conversationId,
+          frame,
+          streamId,
+          msgid,
+          userid,
+          chatType,
+          saved: attachments.saved,
+          failed: attachments.failed,
+          bytes: attachments.saved.reduce((sum, file) => sum + file.bytes, 0),
+        });
+        finishAttachmentProcessing();
+        if (flushNow) void this.flushMergeWindow(conversationId);
+        return;
+      }
     } else {
       const waitResult = await this.waitForAttachmentProcessing(conversationId);
       if (waitResult !== 'ready') {
@@ -550,6 +639,17 @@ export class WecomBotChannel implements ChannelAdapter {
     if (!this.started || this.handler !== handler || this.client !== client) {
       finishAttachmentProcessing?.();
       return;
+    }
+    // 窗口内来的文字把待合并附件一并吸收进本回合：一次 handler 调用，载荷 = 文字 + 全部
+    // 附件。附件-only（mixed 无文字）不吸收——没有指令，窗口继续按自己的时钟走。
+    if (msgtype !== 'file' && !attachmentOnly) {
+      const merge = this.takePendingMerge(conversationId);
+      if (merge !== undefined) {
+        for (const file of merge.files) {
+          attachments.saved.push(...file.saved);
+          attachments.failed.push(...file.failed);
+        }
+      }
     }
     // 等待在途附件完成后再撤收据；否则文件 dispatch 可能随后才把收据排进并窗，造成重复。
     if (!attachmentOnly) this.dropPendingReceipt(conversationId);
@@ -583,6 +683,39 @@ export class WecomBotChannel implements ChannelAdapter {
       receivedAt: new Date().toISOString(),
     };
 
+    await this.runTurn({
+      frame,
+      reqId,
+      streamId,
+      conversationId,
+      message,
+      handler,
+      client,
+      // 让正文等待到附件已经进入宿主暂存池/收据队列，再撤掉挂起收据并进入自己的 handler。
+      // 回调点与旧路径一致：收据排队之后、回复文件/图片上传之前。
+      afterHandler: finishAttachmentProcessing,
+    });
+  }
+
+  /**
+   * 跑一个回合：调用 handler，按结果发终帧/文件/图片；附件-only 无话可说时排收据。
+   *
+   * 正常消息路径与合并窗口 flush 共用同一份出站纪律（截断、降级 latch、进度预算、
+   * 收据并窗），避免两条入口各自漂移。
+   */
+  private async runTurn(turn: {
+    frame: SdkFrame;
+    reqId: string;
+    streamId: string;
+    conversationId: string;
+    message: IncomingChannelMessage;
+    handler: ReplyHandler;
+    client: SdkClientLike;
+    /** 回复已定型（终帧/收据已排队）时回调：供正文等待在途附件的旧路径撤 pending。 */
+    afterHandler?: () => void;
+  }): Promise<void> {
+    const { frame, reqId, streamId, conversationId, message, handler, client } = turn;
+    const msgid = message.messageId;
     // 降级防重（"失败必达"路径 2）：同一次回复最多降级一次——终帧被拒后改走
     // sendMessage 全新消息通道。latch 按消息派发（每条用户消息一次），同一终稿不会
     // 因多次失败被重复轰炸。
@@ -672,8 +805,8 @@ export class WecomBotChannel implements ChannelAdapter {
       // 当即告知——那两条是用户必须知道的事，不能等窗口。
       this.queuePendingReceipt(conversationId, frame, streamId, message.attachments);
     }
-    // 让正文等待到附件已经进入宿主暂存池/收据队列，再撤掉挂起收据并进入自己的 handler。
-    finishAttachmentProcessing?.();
+    // 旧路径的时机锚点：收据已排队、回复内容已定型；文件/图片回传不阻塞正文等待。
+    turn.afterHandler?.();
     // 文件回传（2026-10-08 单数 → 2026-10-20 W3 数组）：worker 在平台 tmp/ 下产出的
     // xlsx 等，经临时素材上传回传。一次任务多个交付物是常态（如工资表 + 个税申报表），
     // 逐条发送、每条独立消息。单个文件失败只记事件不外抛——文本已经发出去了，不该因为
@@ -725,31 +858,136 @@ export class WecomBotChannel implements ChannelAdapter {
   }
 
   private async waitForAttachmentProcessing(conversationId: string): Promise<'ready' | 'timeout' | 'stopped'> {
-    // 总上界从正文首次等待开始计算；新文件在上一批将结束时登记，也不能续钟。
-    const deadline = Date.now() + ATTACHMENT_WAIT_TIMEOUT_MS;
-    while (true) {
-      const downloads = this.pendingAttachmentProcessing.get(conversationId);
-      if (!downloads || downloads.size === 0) return 'ready';
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) return 'timeout';
-      const interrupt = this.attachmentWaitInterrupt;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<'timeout'>((resolve) => {
-        timer = setTimeout(() => resolve('timeout'), remaining);
-      });
-      const result = await Promise.race([
-        Promise.all([...downloads]).then(() => 'ready' as const),
-        timeout,
-        interrupt.then(() => 'stopped' as const),
-      ]);
-      if (timer !== undefined) clearTimeout(timer);
-      if (result !== 'ready') return result;
+    // 记在途等待者：纯附件消息据此判断"文字先到"还是"文件先到"——文字先到时沿用旧的
+    // 逐条交付（8 秒等待语义不变），否则才进合并窗口。
+    this.attachmentWaiters.set(conversationId, (this.attachmentWaiters.get(conversationId) ?? 0) + 1);
+    try {
+      // 总上界从正文首次等待开始计算；新文件在上一批将结束时登记，也不能续钟。
+      const deadline = Date.now() + ATTACHMENT_WAIT_TIMEOUT_MS;
+      while (true) {
+        const downloads = this.pendingAttachmentProcessing.get(conversationId);
+        if (!downloads || downloads.size === 0) return 'ready';
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return 'timeout';
+        const interrupt = this.attachmentWaitInterrupt;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<'timeout'>((resolve) => {
+          timer = setTimeout(() => resolve('timeout'), remaining);
+        });
+        const result = await Promise.race([
+          Promise.all([...downloads]).then(() => 'ready' as const),
+          timeout,
+          interrupt.then(() => 'stopped' as const),
+        ]);
+        if (timer !== undefined) clearTimeout(timer);
+        if (result !== 'ready') return result;
+      }
+    } finally {
+      const remaining = (this.attachmentWaiters.get(conversationId) ?? 1) - 1;
+      if (remaining > 0) this.attachmentWaiters.set(conversationId, remaining);
+      else this.attachmentWaiters.delete(conversationId);
     }
   }
 
   private resetAttachmentWaitInterrupt(): void {
     this.attachmentWaitInterrupt = new Promise<void>((resolve) => {
       this.resolveAttachmentWaitInterrupt = resolve;
+    });
+  }
+
+  /**
+   * 把一条已下载完的纯附件消息放进本会话的合并窗口；返回是否**立即** flush
+   * （到界/零窗口，不再等定时器）。
+   *
+   * 续期纪律：每来一个新附件就把定时器重排到 min(now + 窗口, 起点 + 总上限)——窗口
+   * 跟着"最后一个文件"走，但不会无限后移。返回 true 时由调用方立刻 flush，此时窗口状态
+   * 仍在本表里（take 时会撤掉旧定时器）。
+   */
+  private bufferMergeFile(file: PendingMergeFile): boolean {
+    const now = Date.now();
+    const conversationId = file.conversationId;
+    let merge = this.pendingMerges.get(conversationId);
+    if (merge === undefined) {
+      merge = {
+        files: [],
+        totalBytes: 0,
+        deadline: now + this.mergeWindowMaxMs,
+        timer: undefined,
+      };
+      this.pendingMerges.set(conversationId, merge);
+    }
+    merge.files.push(file);
+    merge.totalBytes += file.bytes;
+    const bounded = merge.files.length > ATTACHMENT_MERGE_MAX_FILES
+      || merge.totalBytes > ATTACHMENT_MERGE_MAX_BYTES;
+    const due = Math.min(now + this.mergeWindowMs, merge.deadline);
+    if (bounded || due <= now) return true;
+    if (merge.timer !== undefined) clearTimeout(merge.timer);
+    merge.timer = setTimeout(() => { void this.flushMergeWindow(conversationId); }, due - now);
+    return false;
+  }
+
+  /** 取走并撤掉本会话的合并窗口（定时器一并清掉）。 */
+  private takePendingMerge(conversationId: string): PendingMerge | undefined {
+    const merge = this.pendingMerges.get(conversationId);
+    if (merge === undefined) return undefined;
+    this.pendingMerges.delete(conversationId);
+    if (merge.timer !== undefined) clearTimeout(merge.timer);
+    return merge;
+  }
+
+  /** 撤掉合并窗口（停机）：不发帧、只清状态与定时器。 */
+  private dropPendingMerge(conversationId: string): void {
+    this.takePendingMerge(conversationId);
+  }
+
+  /**
+   * 窗口到点仍无文字：把窗口里累积的附件按**一次**纯附件回合交付（与逐条交付的既有
+   * 形态一致：宿主只暂存、不启模型回合；无话可说时由收据并窗补一条）。
+   *
+   * 通道挂在最后到达的文件消息上：时间上最接近用户所见，且这些消息都没起过流。
+   */
+  private async flushMergeWindow(conversationId: string): Promise<void> {
+    const merge = this.takePendingMerge(conversationId);
+    if (merge === undefined) return;
+    const handler = this.handler;
+    const client = this.client;
+    if (!this.started || handler === null || client === null) return;
+    const last = merge.files[merge.files.length - 1];
+    if (last === undefined) return;
+
+    const saved: IncomingAttachment[] = [];
+    const failed: string[] = [];
+    for (const file of merge.files) {
+      saved.push(...file.saved);
+      failed.push(...file.failed);
+    }
+    const parts: string[] = [];
+    for (const name of failed) parts.push(`[附件下载失败:${name}]`);
+    for (const file of saved) parts.push(`[附件:${file.filename}]`);
+    if (parts.length === 0) return;
+
+    const message: IncomingChannelMessage = {
+      wecomUserId: last.userid,
+      channel: 'wecom',
+      conversationId,
+      messageId: last.msgid,
+      chatType: last.chatType,
+      text: last.chatType === 'group' ? stripMentionPrefix(parts.join('\n')) : parts.join('\n'),
+      ...(saved.length > 0 ? { attachments: saved } : {}),
+      // 窗口里没有用户正文（有文字就已被文字回合吸收了）：与逐条附件消息同一语义。
+      attachmentOnly: true,
+      receivedAt: new Date().toISOString(),
+    };
+
+    await this.runTurn({
+      frame: last.frame,
+      reqId: typeof last.frame.headers?.req_id === 'string' ? last.frame.headers.req_id : '',
+      streamId: last.streamId,
+      conversationId,
+      message,
+      handler,
+      client,
     });
   }
 
@@ -878,6 +1116,12 @@ export class WecomBotChannel implements ChannelAdapter {
         }));
       });
   }
+}
+
+/** 窗口参数归一：合法非负数原样用（0 = 立即 flush），非法/缺失回落缺省。 */
+function normalizeWindowMs(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value) || value < 0) return fallback;
+  return value;
 }
 
 function defaultClientFactory(env: Record<string, string | undefined>): () => SdkClientLike {

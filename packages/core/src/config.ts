@@ -149,6 +149,8 @@ const RUNTIME_KEYS = [
   'fileRetentionDays',
   'fileRetentionSweepOnStart',
   'dispatchMode',
+  'allowWriteOperations',
+  'attachmentNudgeAfterMs',
 ] as const;
 
 /** runtime 段整数值：显式写错即 fail-fast（与 host.* 的「非法 = 未配置」刻意不同）。 */
@@ -184,7 +186,7 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     }
   }
   const config: RuntimeConfig = {};
-  type RuntimeIntegerKey = Exclude<keyof RuntimeConfig, 'taskBudget' | 'dispatchMode' | 'fileRetentionSweepOnStart'>;
+  type RuntimeIntegerKey = Exclude<keyof RuntimeConfig, 'taskBudget' | 'dispatchMode' | 'fileRetentionSweepOnStart' | 'allowWriteOperations'>;
   const integers: ReadonlyArray<[RuntimeIntegerKey, number]> = [
     ['mainConcurrency', 1],
     ['backgroundConcurrency', 0],
@@ -195,6 +197,8 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     ['waitUserTimeoutMs', 1],
     // 0 = 不清理（缺省值 30 由策略层提供）；负数 = 配置错误，不按「非法 = 未配置」回落。
     ['fileRetentionDays', 0],
+    // 0 = 关闭主动追问（缺省 30000 由策略层提供）；负数/小数 = 配置错误。
+    ['attachmentNudgeAfterMs', 0],
   ];
   for (const [key, min] of integers) {
     const value = runtimeInteger(raw[key], key, min);
@@ -202,6 +206,9 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
   }
   const sweepOnStart = runtimeBoolean(raw['fileRetentionSweepOnStart'], 'fileRetentionSweepOnStart');
   if (sweepOnStart !== undefined) config.fileRetentionSweepOnStart = sweepOnStart;
+  // 写面开关（缺省 false 住装配层）：显式写错 fail-fast，拼错的旋钮不被缺省吞掉。
+  const allowWriteOperations = runtimeBoolean(raw['allowWriteOperations'], 'allowWriteOperations');
+  if (allowWriteOperations !== undefined) config.allowWriteOperations = allowWriteOperations;
   const taskBudgetRaw = raw['taskBudget'];
   if (taskBudgetRaw !== undefined && taskBudgetRaw !== null) {
     const budget = asRecord(taskBudgetRaw, 'runtime.taskBudget');
