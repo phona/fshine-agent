@@ -48,6 +48,14 @@ export interface ContextProfileConfig {
    * already-published tool protocol name keeps working by declaring it here.
    */
   toolName?: string;
+  /**
+   * 执行层声明的**单文件**参数名（CAP-01：宿主把任务文件的物化路径填进去）：
+   *   · input：宿主把任务唯一的输入文件物化后，用该参数把路径交给执行层；
+   *   · output：宿主在任务 out/ 下分配确定路径，执行层写到那里，收尾扫描登记成产物。
+   * 只认部署对执行层的声明（参数名不来自 args 形状猜测，也不来自模型）；键不存在 =
+   * 未声明 = 不启用（零行为变化）。声明来自执行层的 `operation list` 认知。
+   */
+  fileParams?: { input?: string; output?: string };
   /** Maximum wall-clock budget for one Worker turn. Defaults to 10 minutes. */
   workerTimeoutMs?: number;
   /** 平台仓知识面（worker read/ls 白名单）；缺省 = .md/.schema.json/.agents//docs/ */

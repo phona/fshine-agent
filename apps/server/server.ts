@@ -280,8 +280,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           // CAP-01 S1：run_js 执行器（装配构造）与文件清单注入器（机械事实）同源注入。
           // CAP-01 S2：交办复制端口与执行层文件桥同源注入（**同一 fileStore 实例**——文件区
           // 监管唯一写侧）。桥承担回程登记（data.files → 新 file_id、剥 path/base64）与任务
-          // out/ 兜底扫描（unexecuted/failed 也扫，v8 §10-3）；dirParams 留空 = 当前执行层
-          // 尚未声明目录参数，出站目录翻译随执行层声明开启（部署按其声明认知传入参数名）。
+          // out/ 兜底扫描（unexecuted/failed 也扫，v8 §10-3）。出站参数翻译只认部署声明：
+          // `fileParams` 来自 profile（键缺失 = 未声明 = 不翻译）；dirParams 当前无部署键，
+          // 保持不传（执行层声明目录参数时再走同一条装配路径）。
           runJsExecutor,
           // CAP-01 ④：内存墙结构化事件（runId/side/bytes/exitCode/exitSignal/stderr 尾窗）——
           // 日志能查到是哪次、多大、怎么死的；用户话术同句由 runtime 出口统一。
@@ -292,6 +293,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           taskInputCopier: fileStore,
           taskExecutionBridge: {
             store: fileStore,
+            ...(profile.fileParams === undefined ? {} : { fileParams: profile.fileParams }),
             onSkip: (reason) => log({ event: 'task_file_bridge_skip', principalId, sessionId, reason }),
           },
           fileManifestProvider,
