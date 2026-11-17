@@ -44,19 +44,26 @@ function makeRunDir(runId: string, ageDays: number): string {
   return runDir;
 }
 
-describe('runtime.fileRetentionDays：缺省 0 = 不清理（零行为变化）', () => {
-  it('缺省解析值 = 0；任意老旧的 run 目录都判 keep，文件原样保留', () => {
+describe('runtime.fileRetentionDays：缺省 30 天（2026-11-17 owner 定）', () => {
+  it('缺省解析值 = 30；超过 30 天的 run 目录判 eligible_for_cleanup，但判定本身不删文件', () => {
     const resolved = resolveRuntimeConfig();
-    expect(resolved.fileRetentionDays).toBe(0);
+    expect(resolved.fileRetentionDays).toBe(30);
 
     const runDir = makeRunDir('run_default', 3650);
     const decision = fileRetentionDecision(resolved, {
       createdAtMs: NOW - 3650 * FILE_RETENTION_DAY_MS,
       nowMs: NOW,
     });
-    expect(decision).toMatchObject({ verdict: 'keep', retentionDays: 0, cutoffAt: null });
-    // 判定不产生副作用：缺省下不删任何文件（清理执行器不在本切片）。
+    expect(decision).toMatchObject({ verdict: 'eligible_for_cleanup', retentionDays: 30 });
+    // 判定纯逻辑：没有执行器、判定不产生副作用，文件仍在（清理执行器在后续切片）。
     expect(existsSync(path.join(runDir, 'out', '产物.txt'))).toBe(true);
+  });
+
+  it('缺省 30 天内的目录判 keep（不到期不清理）', () => {
+    const resolved = resolveRuntimeConfig();
+    expect(
+      fileRetentionDecision(resolved, { createdAtMs: NOW - 29 * FILE_RETENTION_DAY_MS, nowMs: NOW }).verdict,
+    ).toBe('keep');
   });
 
   it('显式 fileRetentionDays: 0 与缺省同义（显式值不被缺省吞掉）', () => {

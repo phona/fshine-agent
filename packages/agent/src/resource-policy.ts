@@ -145,7 +145,7 @@ export interface ResolvedRuntimeConfig {
   readonly maxDelegationDepth: number;
   readonly taskBudget: TaskBudgetLimits | null;
   readonly waitUserTimeoutMs: number;
-  /** run 目录/任务产物保留期（天）；0 = 不清理（缺省，零行为变化）。 */
+  /** run 目录/任务产物保留期（天）；0 = 不清理，缺省 30（2026-11-17 owner 定）。 */
   readonly fileRetentionDays: number;
 }
 
@@ -165,8 +165,9 @@ export const DEFAULT_RUNTIME_CONFIG: ResolvedRuntimeConfig = Object.freeze({
   maxDelegationDepth: 1,
   taskBudget: null,
   waitUserTimeoutMs: 86_400_000,
-  // run 目录/任务产物：缺省 0 = 不清理（零行为变化）；>0 才具备清理资格。
-  fileRetentionDays: 0,
+  // run 目录/任务产物：缺省 30 天（2026-11-17 owner 定）；显式 0 = 不清理。
+  // 本旋钮当前只提供判定，删除执行器在后续切片——接线前不删任何文件。
+  fileRetentionDays: 30,
 });
 
 function assertRuntimeInteger(value: unknown, label: string, min: number): number {
@@ -197,7 +198,7 @@ export interface FileRetentionDecision {
 /**
  * 文件保留判定（纯逻辑：无 IO、不删除、不做定时器）。
  *
- * 判据：`runtime.fileRetentionDays = 0`（缺省）= 永远 `keep`，与接线前的现行为一致；
+ * 判据：`runtime.fileRetentionDays = 0` = 永远 `keep`；缺省 30 天（2026-11-17 owner 定）；
  * `> 0` 时严格超过保留期（`createdAtMs < nowMs − days×24h`）才返回
  * `eligible_for_cleanup`，恰好落在截止点仍为 `keep`。消费方（后续批次的清理执行器）
  * 只能把 `eligible_for_cleanup` 当作「可以删」的输入，删除动作与任务归属审计归它自己。

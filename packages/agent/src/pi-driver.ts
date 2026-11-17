@@ -41,14 +41,18 @@ const MAIN_MODEL_RETRY_SETTINGS = { enabled: true, maxRetries: 2, baseDelayMs: 1
 const LLM_PROVIDER_ID = 'llm';
 
 /**
- * 空回复的第二种形状：模型以 `stopReason=stop` 收尾，但 content 只有 thinking 块、
- * 没有 text。这不是供应商错误也不是窗口爆了，催一次「给出最终文本」通常就能收尾；
- * 有正文/toolResult 终结/error/aborted 都不催。
+ * 空回复有两种形状，都要催一次「给出最终文本」：
+ *   ① 模型以 `stopReason=stop` 收尾，但 content 只有 thinking 块、没有 text；
+ *   ② 回合以**工具结果 / 用户消息**收尾、始终没有最终文本（模型调完工具就停了）。
+ * 形状②原先不催（条件只认 assistant+stop），R6 实测 61 次空回复里 59 次是这种形状，
+ * 用户会直接看到空回复。有正文 / error / aborted 仍然不催——那不是「只思考没正文」。
  */
 export function shouldNudgeFinalReply(messages: readonly AgentMessage[], text: string): boolean {
   if (text.trim()) return false;
   const last = messages[messages.length - 1] as { role?: string; stopReason?: string } | undefined;
-  return last?.role === 'assistant' && last.stopReason === 'stop';
+  if (last === undefined) return false;
+  if (last.role === 'assistant') return last.stopReason === 'stop';
+  return last.role === 'toolResult' || last.role === 'user';
 }
 
 /** 只输出思考没正文时的收尾催问（一轮一次；不影响正常回复）。 */

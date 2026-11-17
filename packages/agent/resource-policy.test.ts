@@ -53,7 +53,7 @@ describe('resolveRuntimeConfig：缺省 = 前台并发 4 + 排队 16，非法 fa
       maxDelegationDepth: 1,
       taskBudget: null,
       waitUserTimeoutMs: 86_400_000,
-      fileRetentionDays: 0,
+      fileRetentionDays: 30,
     });
   });
 

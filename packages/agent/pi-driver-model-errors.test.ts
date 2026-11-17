@@ -37,8 +37,14 @@ describe('T7 只输出思考没有正文时的收尾催问', () => {
     expect(shouldNudgeFinalReply([assistant([{ type: 'text', text: '已查到 900' }])], '已查到 900')).toBe(false);
   });
 
-  it('toolResult 终结 / 错误或中止的 assistant：不催（不是"只思考没正文"）', () => {
-    expect(shouldNudgeFinalReply([{ role: 'toolResult', content: '终稿' } as unknown as AgentMessage], '')).toBe(false);
+  it('回合以工具结果/用户消息收尾且无正文：要催（2026-11-17 扩条件）', () => {
+    // 原来的口径只认「assistant + stopReason=stop」，导致「模型调完工具就收尾、没给最终文本」
+    // 这类空回复一次都不催（R6 实测 61 次空回复里 59 次是这个形状），用户直接看到空回复。
+    expect(shouldNudgeFinalReply([{ role: 'toolResult', content: '终稿' } as unknown as AgentMessage], '')).toBe(true);
+    expect(shouldNudgeFinalReply([{ role: 'user', content: '把结果发我' } as unknown as AgentMessage], '')).toBe(true);
+  });
+
+  it('错误或中止的 assistant：不催（那不是"只思考没正文"）', () => {
     expect(shouldNudgeFinalReply([assistant([{ type: 'thinking', thinking: 'x' }], 'error')], '')).toBe(false);
     expect(shouldNudgeFinalReply([assistant([{ type: 'thinking', thinking: 'x' }], 'aborted')], '')).toBe(false);
   });

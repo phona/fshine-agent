@@ -127,3 +127,14 @@ Worker 面命中数不丢弃，写进该检查的 detail 作信息（形如「wo
 结论：**该模型不适合作为 R6 类长会话的产品模型**——单回合调用数与空回复率都显著高于 step
 基线；宿主侧的跨 principal 隔离不受影响。历史 step 基线的原始 artifact 在仓内未找到，
 上表两列只并列、不混算。
+
+## 11. owner 裁定落地（2026-11-17，按建议值执行）
+
+| 裁定 | 落地 | 证据 |
+|---|---|---|
+| S3 端到端 2/5 接受为**模型能力包络**，不建宿主强制 | 不改代码；§8 口径保持（只判 Main 面） | §9 表：run2/3/4 是 Main 自己 `run_js` 读行数据 |
+| 空回复催问条件**扩展**到「回合以工具结果/用户消息收尾」 | `packages/agent/src/pi-driver.ts` `shouldNudgeFinalReply`：assistant+stop 之外，末条是 `toolResult`/`user` 且无正文也催一次；`pi-driver-model-errors.test.ts` 用例同步（原「toolResult 不催」改为「催」） | R6 实测 61 次空回复里 59 次末条是 tool result/用户消息，旧条件一次都没催 |
+| 磁盘保留期 **30 天** | `DEFAULT_RUNTIME_CONFIG.fileRetentionDays` 0 → 30；契约注释与判定层文档同步；`file-retention-policy.test.ts` 增加「29 天 keep / 超期 eligible」用例 | 判定层仍无执行器：`fileRetentionDecision` 纯逻辑、不删文件 |
+| `mainConcurrency` **保持 4** | 不改默认值 | R6 的 9 个真实并发会话在同一进程内峰值 **632MB**（中位 457MB，CPU 均值 14%/峰值 25%）；但产品模型是 step-3.7-flash，其账号**并发上限 8**——8 个 Main 回合叠 Worker 会直接撞上限（实测 6 会话就出现过 `current: 9, limit: 8`）。4 = 上限的一半，留出 Worker 与重试余量 |
+
+**并发上限**是当前真正约束用户等待的外部条件：`step_plan` 账号限制 8 并发，宿主开再多也只是把排队从进程内换到供应商侧。要再提并发，得先解决供应商配额。
