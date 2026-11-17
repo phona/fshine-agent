@@ -461,6 +461,31 @@ host:
     expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} })).toThrowError(/runtime\.mainConcurency/);
   });
 
+  it('runtime.fileRetentionDays：正数 / 0 解析，非法值 fail-fast（缺省 0 住策略层）', () => {
+    // 缺省 = 加载层不造键，缺省 0（不清理）由 resource-policy 的 resolveRuntimeConfig 补齐。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+
+    const positive = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  fileRetentionDays: 30\n`),
+      env: {},
+    });
+    expect(positive.runtime).toEqual({ fileRetentionDays: 30 });
+
+    // 显式 0 = 不清理，是合法值（不得被「未配置」吞掉）。
+    const zero = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  fileRetentionDays: 0\n`),
+      env: {},
+    });
+    expect(zero.runtime).toEqual({ fileRetentionDays: 0 });
+
+    for (const bad of ['-1', '1.5', 'nope']) {
+      const yaml = `${VALID_YAML}runtime:\n  fileRetentionDays: ${bad}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(
+        /runtime\.fileRetentionDays/,
+      );
+    }
+  });
+
   it('runtime.taskBudget 子键：ms/calls 必填、非法值点名、未知子键拒绝', () => {
     const cases: ReadonlyArray<[string, RegExp]> = [
       ['taskBudget:\n    ms: 60000\n', /runtime\.taskBudget\.calls/],

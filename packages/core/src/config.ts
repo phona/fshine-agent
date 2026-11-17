@@ -145,6 +145,7 @@ const RUNTIME_KEYS = [
   'maxDelegationDepth',
   'taskBudget',
   'waitUserTimeoutMs',
+  'fileRetentionDays',
   'dispatchMode',
 ] as const;
 
@@ -181,6 +182,8 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     ['workerTurnMs', 1],
     ['maxDelegationDepth', 0],
     ['waitUserTimeoutMs', 1],
+    // 0 = 不清理（缺省，零行为变化）；负数 = 配置错误，不按「非法 = 未配置」回落。
+    ['fileRetentionDays', 0],
   ];
   for (const [key, min] of integers) {
     const value = runtimeInteger(raw[key], key, min);

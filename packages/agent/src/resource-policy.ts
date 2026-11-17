@@ -22,8 +22,11 @@
  *   · token 上限仅在部署显式声明 `taskBudget.tokens` 时 `enforced`；未声明 = `unavailable`,
  *     观测用量照实记录但不作为强制上限——不得伪造硬上限（分诊 #10）。
  *   · 缺省（未配置 `runtime` 段）：前台并发 4、排队容量 16、无任务级预算、回合时限沿用
- *     执行侧现行缺省（main 300s / worker 180s）、委派深度 1；显式 `queueCapacity: 0`
- *     仍关闭排队，显式 `mainConcurrency: 1` 仍回到单并发（显式值不被缺省吞掉）。
+ *     执行侧现行缺省（main 300s / worker 180s）、委派深度 1、文件保留期 0（不清理 run
+ *     目录/任务产物——零行为变化）；显式 `queueCapacity: 0` 仍关闭排队，显式
+ *     `mainConcurrency: 1` 仍回到单并发（显式值不被缺省吞掉）。
+ *   · 文件保留期只做纯判定（`fileRetentionDecision`）：`> 0` 才返回「应清理」，
+ *     判定本身不删除任何文件；删除执行器归后续批次。
  *
  * 接线边界：本模块不改 execution-runtime / server / ask-runtime——强制点接线由集成 Run
  * 承接（联合接口约定 §6）。消费方不得绕过本模块另读 `runtime` 配置（守卫见
@@ -142,6 +145,8 @@ export interface ResolvedRuntimeConfig {
   readonly maxDelegationDepth: number;
   readonly taskBudget: TaskBudgetLimits | null;
   readonly waitUserTimeoutMs: number;
+  /** run 目录/任务产物保留期（天）；0 = 不清理（缺省，零行为变化）。 */
+  readonly fileRetentionDays: number;
 }
 
 /**
@@ -160,6 +165,8 @@ export const DEFAULT_RUNTIME_CONFIG: ResolvedRuntimeConfig = Object.freeze({
   maxDelegationDepth: 1,
   taskBudget: null,
   waitUserTimeoutMs: 86_400_000,
+  // run 目录/任务产物：缺省 0 = 不清理（零行为变化）；>0 才具备清理资格。
+  fileRetentionDays: 0,
 });
 
 function assertRuntimeInteger(value: unknown, label: string, min: number): number {
@@ -167,6 +174,50 @@ function assertRuntimeInteger(value: unknown, label: string, min: number): numbe
     throw new Error(`配置项 ${label} 必须是 ≥${min} 的整数（当前: ${String(value)}）`);
   }
   return value;
+}
+
+/** 一天的毫秒数（保留期换算的唯一常量；旋钮本身是整数天）。 */
+export const FILE_RETENTION_DAY_MS = 24 * 60 * 60 * 1000;
+
+export type FileRetentionVerdict = 'keep' | 'eligible_for_cleanup';
+
+/**
+ * run 目录/任务产物的保留判定结果。`eligible_for_cleanup` 只是「已超过保留期、可交给
+ * 清理执行器」的机械判定——判定本身不删除任何文件。
+ */
+export interface FileRetentionDecision {
+  readonly verdict: FileRetentionVerdict;
+  readonly retentionDays: number;
+  /** 保留期截止时刻（ms）；`retentionDays = 0`（不清理）时为 null。 */
+  readonly cutoffAt: number | null;
+  /** 目录/产物的年龄（ms；`nowMs - createdAtMs`，未来时刻按 0 计）。 */
+  readonly ageMs: number;
+}
+
+/**
+ * 文件保留判定（纯逻辑：无 IO、不删除、不做定时器）。
+ *
+ * 判据：`runtime.fileRetentionDays = 0`（缺省）= 永远 `keep`，与接线前的现行为一致；
+ * `> 0` 时严格超过保留期（`createdAtMs < nowMs − days×24h`）才返回
+ * `eligible_for_cleanup`，恰好落在截止点仍为 `keep`。消费方（后续批次的清理执行器）
+ * 只能把 `eligible_for_cleanup` 当作「可以删」的输入，删除动作与任务归属审计归它自己。
+ */
+export function fileRetentionDecision(
+  config: Pick<ResolvedRuntimeConfig, 'fileRetentionDays'>,
+  input: { readonly createdAtMs: number; readonly nowMs: number },
+): FileRetentionDecision {
+  const retentionDays = assertRuntimeInteger(config.fileRetentionDays, 'runtime.fileRetentionDays', 0);
+  const ageMs = Math.max(0, input.nowMs - input.createdAtMs);
+  if (retentionDays === 0) {
+    return { verdict: 'keep', retentionDays, cutoffAt: null, ageMs };
+  }
+  const cutoffAt = input.nowMs - retentionDays * FILE_RETENTION_DAY_MS;
+  return {
+    verdict: input.createdAtMs < cutoffAt ? 'eligible_for_cleanup' : 'keep',
+    retentionDays,
+    cutoffAt,
+    ageMs,
+  };
 }
 
 function assertUsageNumber(value: unknown, label: string): number {
@@ -222,6 +273,10 @@ export function resolveRuntimeConfig(config: RuntimeConfig = {}): ResolvedRuntim
     waitUserTimeoutMs: config.waitUserTimeoutMs === undefined
       ? DEFAULT_RUNTIME_CONFIG.waitUserTimeoutMs
       : assertRuntimeInteger(config.waitUserTimeoutMs, 'runtime.waitUserTimeoutMs', 1),
+    // 0 = 不清理（缺省）；负数/非整数 fail-fast，不静默回落成「不清理」。
+    fileRetentionDays: config.fileRetentionDays === undefined
+      ? DEFAULT_RUNTIME_CONFIG.fileRetentionDays
+      : assertRuntimeInteger(config.fileRetentionDays, 'runtime.fileRetentionDays', 0),
   });
 }
 

@@ -142,7 +142,7 @@ export interface TaskBudgetConfig {
  * 未知键拒绝——资源限额静默失效比缺省危险，拼错的旋钮不允许被默认值吞掉。
  * 缺省值不住加载层：由 `packages/agent/src/resource-policy.ts` 的
  * `resolveRuntimeConfig` 补齐（前台并发 4 / 排队容量 16 / 无任务级预算 /
- * 回合时限沿用执行侧现缺省）。
+ * 回合时限沿用执行侧现缺省 / 文件保留期 0 = 不清理）。
  */
 export interface RuntimeConfig {
   /** 前台（Main 交互回合）并发准入上限。缺省 4；显式 1 仍为单并发。 */
@@ -161,6 +161,12 @@ export interface RuntimeConfig {
   taskBudget?: TaskBudgetConfig;
   /** waiting_user 等待答复的上限（ms）。缺省 86400000（24h，与 sessionTtl 同量级）。 */
   waitUserTimeoutMs?: number;
+  /**
+   * run 目录 / 任务产物的保留期（天）。0 = 不清理（缺省，零行为变化）；正整数 = 超过
+   * 该天数的目录/产物具备清理资格。本旋钮只提供判定（策略层），实际删除执行器不在
+   * 当前切片——缺省 0 保证接线前不删任何文件。
+   */
+  fileRetentionDays?: number;
   /**
    * 派发模式（R4 P6 接线；缺省 = 'inline' = 现行为）。
    *   · 'inline'：委派同步执行、Main 等待 Worker 回合（现行路径，逐字不变）；
