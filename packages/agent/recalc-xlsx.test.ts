@@ -411,6 +411,19 @@ describe('recalc_xlsx CSV 导出（契约显式部分）', () => {
     expect(csv).not.toContain('999');
   });
 
+  it('export=csv 但 status=fail（含错误格/差异）→ CSV 不登记为可交付 outputs（Codex R7-P2）', async () => {
+    const h = makeHarness();
+    const src = await workbookBuffer('S', { A1: { formula: '1/0', result: 999 } });
+    const computed = await workbookBuffer('S', { A1: { formula: '1/0', result: '#DIV/0!' } });
+    const file = h.putInput('err.xlsx', src);
+    const ex = makeExecutor(h, computedEngine(computed));
+    const r = await ex.recalc({ file, export: 'csv', scope: SCOPE });
+    expect(r.status).toBe('fail');
+    expect(r.outputs).toBeUndefined();
+    // 即便 fail，artifacts.values 仍给出 CSV 路径供排查（只是不进交付链）。
+    expect(r.artifacts.values).toMatch(/^out\/.*\.values\.csv$/);
+  });
+
   it('export=csv：CSV 产物登记进 fileStore 并随结果返回 outputs（Codex P2-4）', async () => {
     const h = makeHarness();
     const src = await workbookBuffer('汇总', { A1: '名称', B1: { formula: '2*3', result: 6 } });
@@ -761,6 +774,35 @@ describe('recalc_xlsx 重算开销入 R4 账（独立复核 Gap1）', () => {
 
 // ───────────────────────── Codex 二轮复审 4×P2 回归 ─────────────────────────
 describe('recalc_xlsx Codex 二轮复审 P2 回归', () => {
+  it('执行器对不支持的公式形态返回 unsupported_formula，不盖 pass 章（Codex R7-P2）', async () => {
+    const h = makeHarness();
+    // 构造真·数组公式源文件（exceljs 写回会丢 ref，手工在 OOXML 注入 t=array ref）。
+    const base = await workbookBuffer('S', { A1: { formula: 'TRANSPOSE(C1:D1)', result: 1 }, C1: 1, D1: 2 });
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(base);
+    const sheetName = Object.keys(zip.files).find((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n))!;
+    let xml = await zip.file(sheetName)!.async('string');
+    xml = xml.replace(/<f>(TRANSPOSE\(C1:D1\))<\/f>/, '<f t="array" ref="A1:A2">$1</f>');
+    zip.file(sheetName, xml);
+    const file = h.putInput('array.xlsx', Buffer.from(await zip.generateAsync({ type: 'nodebuffer' })));
+    const ex = makeExecutor(h, computedEngine(base));
+    const r = await ex.recalc({ file, export: 'none', scope: SCOPE });
+    expect(r.status).toBe('error');
+    expect(r.error).toBe('unsupported_formula');
+  });
+
+  it('CSV 注入（控制字符前缀）：\\t=1+1 也被中和（Codex R7-P2）', async () => {
+    const h = makeHarness();
+    const src = await workbookBuffer('S', { A1: '\t=1+1' });
+    const computed = await workbookBuffer('S', { A1: '\t=1+1' });
+    const file = h.putInput('ctrl.xlsx', src);
+    const ex = makeExecutor(h, computedEngine(computed));
+    const r = await ex.recalc({ file, export: 'csv', scope: SCOPE });
+    expect(r.status).toBe('pass');
+    const csv = readFileSync(path.join(latestRunDir(h), 'out', path.basename(r.artifacts.values!)), 'utf8');
+    expect(csv).not.toMatch(/S,A1,\t?=1\+1/);
+  });
+
   it('CSV 注入：以 = 开头的文本被中和为纯数据，数字保持（Codex R6-P2）', async () => {
     const h = makeHarness();
     const src = await workbookBuffer('S', { A1: '=1+1', B1: -12.5, C1: '@SUM' });

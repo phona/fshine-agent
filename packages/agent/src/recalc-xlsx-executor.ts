@@ -57,7 +57,9 @@ const VALUE_COMPARE_HALF_CENT = 0.005;
 const VALUE_COMPARE_FLOAT_REL = 1e-9;
 /** 错误码集合（契约；不得改名）。 */
 export type RecalcErrorCode =
-  | 'path_escape' | 'not_found' | 'corrupt' | 'too_large' | 'timeout' | 'engine_failed';
+  | 'path_escape' | 'not_found' | 'corrupt' | 'too_large' | 'timeout' | 'engine_failed'
+  /** 公式形态无法可靠识别（数组公式等）：不盖 pass 章、不导出，交用户确认（Codex R7）。 */
+  | 'unsupported_formula';
 
 /** file 参数解析结果；非规范形式返回 null。 */
 export interface RecalcFilePath {
@@ -221,7 +223,8 @@ function csvCell(value: ExcelJS.CellValue, isNumeric = false): string {
   let text = cellTextOf(value);
   // Codex R6-P2：纯数据 CSV 里以 = + - @ 开头的**文本**会在表格软件里被当公式执行。
   // 前置单引号中和（skill 同款口径）；数字类型（含负数）不加，保持数据可用。
-  if (!isNumeric && /^[=+\-@]/.test(text)) text = `'${text}`;
+  // 表格软件会忽略前导控制字符（\t \n \r 等）再解释公式——先跳过它们再判 = + - @。
+  if (!isNumeric && /^[\x00-\x20]*[=+\-@]/.test(text)) text = `'${text}`;
   return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
@@ -345,6 +348,13 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
         return errorResult('corrupt');
       }
 
+      // Codex R7-P2：执行器必须与投递门共用「认不出即拒收」的判定——源工作簿含无法可靠
+      // 识别的公式形态（数组公式等）时，绝不盖 pass 章，否则投递门虽会挡，report 却自相矛盾。
+      const sourceScan = scanWorkbookFormulas(srcWb);
+      if ('uncertain' in sourceScan) {
+        return errorResult('unsupported_formula');
+      }
+
       // 引擎转换（强制重算）；带超时哨兵 + abort（不依赖引擎配合）。
       const controller = new AbortController();
       const onAbort = (): void => controller.abort();
@@ -447,12 +457,14 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
         const csvBytes = Buffer.from(`${csvRows.join('\n')}\n`, 'utf8');
         writeFileSync(csvPath, csvBytes);
         valuesArtifact = relativeArtifact(runDir, csvPath);
-        // Codex P2-4：CSV 登记进 fileStore（产出即交付箱），随结果交回宿主收进 turnFiles，
-        // 与 run_js 同一交付纪律——否则产物留在私有 runDir、server 投不出去。
-        const registered = options.fileStore.putFile({
-          scope, name, bytes: csvBytes, activatedAt: Date.now(),
-        });
-        registeredOutputs = [{ fileId: registered.fileId, name: registered.name, bytes: registered.bytes }];
+        // Codex R7-P2：含错误格/差异的 fail 工作簿仍写出 CSV 供排查（报告可见），
+        // 但**不登记为可交付产物**——否则含 #DIV/0! 的 CSV 会被无条件投递。
+        if (reportStatus === 'pass') {
+          const registered = options.fileStore.putFile({
+            scope, name, bytes: csvBytes, activatedAt: Date.now(),
+          });
+          registeredOutputs = [{ fileId: registered.fileId, name: registered.name, bytes: registered.bytes }];
+        }
       }
 
       // 进上下文的 valueDiffs 按 sheet 收窄呈现（P1-2），但 report 上方已保留全量。
