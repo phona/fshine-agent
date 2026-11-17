@@ -9,7 +9,7 @@
  * 验证：headless AgentSession 构建、customTools 桥接工具可调、多轮 + subscribe、
  * dispose 后经 SessionManager 恢复上下文、不同 sessionDir 隔离、RSS 粗测。
  *
- * 运行：TMPDIR=/home/tao/.tmp node scripts/eval/pi-runtime-probe/probe.mjs
+ * 运行：TMPDIR=~/.tmp node scripts/eval/pi-runtime-probe/probe.mjs
  */
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';

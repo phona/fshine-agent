@@ -281,6 +281,36 @@ export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecuto
       const homeDir = path.join(runDir, 'home');
       const tmpDir = path.join(runDir, 'tmp');
 
+      // 预取消（2026-11-17）：信号在调用前就已经 aborted 时，后面只注册 abort 监听不会触发
+      // （事件早已发生），执行器仍会 spawn 并跑到自然结束或超时。这里直接拒跑：
+      // 不建目录、不物化输入、不写 run.cjs、不 spawn、零产物、零 file_refs。
+      if (input.signal?.aborted === true) {
+        const scriptBytesForAudit = Buffer.from(input.code, 'utf8');
+        return {
+          exitCode: null,
+          exitSignal: null,
+          stdout: '',
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          outputs: [],
+          audit: {
+            runId,
+            runDir,
+            scriptSha256: createHash('sha256').update(scriptBytesForAudit).digest('hex'),
+            inputFileIds: [...(input.inputs ?? [])],
+            materializedInputs: [],
+            inputBytes: scriptBytesForAudit.length,
+            outputs: [],
+            skippedOutputs: [],
+            exitCode: null,
+            exitSignal: null,
+            killReason: 'abort',
+            durationMs: Date.now() - startedAt,
+          },
+        };
+      }
+
       // 布局收窄 ①：先于输入物化。in/ 是宿主写侧（copyFileSync）——若它是预植软链，
       // 物化会把输入写进 run 目录之外；物化前先确认所有布局项要么不存在、要么是真目录。
       assertRunLayoutSafe(runId, runDir);

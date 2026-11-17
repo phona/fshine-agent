@@ -90,6 +90,20 @@ describe('run_js 树内软链收窄', () => {
     expect(store.listFileRefs(SCOPE)).toEqual([]);
   }, 60_000);
 
+  it('预先取消的信号：不 spawn、不建目录、零产物（killReason=abort）', async () => {
+    const { fixtureRoot, store, executor } = makeFixture(() => {});
+    const controller = new AbortController();
+    controller.abort();
+    const result = await executor.runJs({ code: READ_EVIL, inputs: [], scope: SCOPE, signal: controller.signal });
+    expect(result.exitCode).toBeNull();
+    expect(result.audit.killReason).toBe('abort');
+    expect(result.outputs).toEqual([]);
+    expect(store.listFileRefs(SCOPE)).toEqual([]);
+    // 连 run 目录都没建：runs/ 下不应有该 runId（拒跑在 derive 目录之前）。
+    const runsDir = path.join(fixtureRoot, 'workspace');
+    expect(existsSync(path.join(runsDir, 'unknown'))).toBe(false);
+  }, 60_000);
+
   it('回归：正常 run 目录（无软链）照常执行并产出', async () => {
     const { executor } = makeFixture((runDir) => {
       mkdirSync(path.join(runDir, 'in'), { recursive: true });
