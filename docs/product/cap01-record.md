@@ -83,10 +83,47 @@
 - `call.agent === 'main'` 的工具调用参数与结果；
 - `run.agent === 'main'` 的驱动输入（systemPrompt/messages/injections）与输出转录。
 
-Worker 面命中数不丢弃，写进该检查的 detail 作信息（形如「worker 面命中 N 处，按设计不计入」），供人看、不判红。**Main 面覆盖下限 `>= 4` 保留**：Main 面过少 = 证据面缺失，检查判红，不许收窄成空扫描假绿。同一入口（`scripts/eval/cap01/r2-functional.ts --scenario s3`）重跑：**S3 端到端 3/5**。
+Worker 面命中数不丢弃，写进该检查的 detail 作信息（形如「worker 面命中 N 处，按设计不计入」），供人看、不判红。**Main 面覆盖下限 `>= 4` 保留**：Main 面过少 = 证据面缺失，检查判红，不许收窄成空扫描假绿。同一入口（`scripts/eval/cap01/r2-functional.ts --scenario s3`）在合并后的 integration 上
+并行重跑 5 次（各自 `--out-dir`，模型 `workbuddy/deepseek-v4.1-flash`）：**S3 端到端 2/5**
+（run1、run5 通过；run2/3/4 红在同一检查）。
 
 **读数来历**：两次读数来自同一 S3 场景与同一 Oracle，差异仅在泄漏扫描面。旧口径 0/5 是「Worker 正常读数据被判成泄漏」的机械结果；新口径 3/5 是同一 S3 场景只按 Main 面判泄漏后的结果（5 次样本中 3 次 Main 面零泄漏）。
 
 **旧读数保留不改写**：§3 的 S3 早期读数（2 次通过、1 次红，Main 未带 `inputFiles`）是旧工具名与旧口径时期的记录，原样保留；本节只追加口径变更后的读数与依据。
 
 **本仓可重复验证**（零真实模型）：`scripts/eval/cap01/row-data-scan.test.ts` 覆盖「Worker 面命中不判红」「Main 面工具参数/转录命中仍判红」「只有 Worker 面时覆盖不足判红」；脚本化 S3 直跑 detail 实测为「已扫 4 个 Main 面（工具参数/结果 + 驱动输入/转录），24 个销售额原值零命中；worker 面命中 0 处，按设计不计入」。
+
+
+## 9. 评测收口读数（2026-11-17）
+
+被测模型除 R6 外均为 `workbuddy/deepseek-v4.1-flash`（本地端点）；R6 见 §10。判据未改，除 §8 记载的口径收窄。
+
+| 面 | 读数 | 口径/来源 |
+|---|---|---|
+| S1 稳定性 N=6 | **6/6** | 6 次并行、各自 out-dir；`.runtime/eval-cap01-r2/s1n6-run1..6` |
+| S2 交付失败面 N=5 | **5/5** | 四条断言全绿；`.runtime/eval-cap01-r2/s2n5-run1..5` |
+| S3 端到端 N=5 | **2/5** | 新口径（只判 Main 面）；run2/3/4 是 Main 自己 `run_js` 读行数据 |
+| R8 并发 4 档 | maxActive=4、queued=1、峰值 RSS 812MB | 脚本化，零模型 |
+| R8 并发 8 档 | maxActive=8、queued=1、峰值 RSS 794MB | `--main-concurrency 8` |
+| 全量门 | tsc=0；1595 passed / 1 skipped | `arch/integration` @ `4ba05c6` |
+
+**S3 的 2/5 是模型行为，不是宿主缺陷**：三次红都是 `tool-result(main#N:run_js)` 与
+`driver-run-transcript(main)` 命中销售额原值——Main 没有委派，而是自己跑 `run_js` 把明细
+读进了自己的上下文。宿主此时没有强制手段阻止（`run_js` 对 Main 开放是 CAP-01 的设计），
+所以「行数据不进 Main 上下文」目前是**模型自觉**，不是**宿主不变量**。
+
+## 10. R6 Wave1 重跑（workbuddy/deepseek-v4.1-flash，并发 9）
+
+`run6`：15 个会话全部跑完、**0 次重试/0 次服务端错误**（并发无关污染）。
+
+| 指标 | 历史 step-3.7-flash | 本批 workbuddy |
+|---|---|---|
+| disposition | — | **13 `product_fault` / 2 `valid`** |
+| 单回合模型调用超 4 次（H6.b 硬零） | 未报该形态 | **12/15 会话** |
+| 空回复 | 6 次 | **60 个回合（8 会话）/ 61 条驱动事件** |
+| 触 3M token 硬停 | — | **9/15 会话**（3.01–3.90M） |
+| 跨 principal 隔离（H1） | 干净 | **干净**（1 次按预期拒绝、0 泄漏事实） |
+
+结论：**该模型不适合作为 R6 类长会话的产品模型**——单回合调用数与空回复率都显著高于 step
+基线；宿主侧的跨 principal 隔离不受影响。历史 step 基线的原始 artifact 在仓内未找到，
+上表两列只并列、不混算。
