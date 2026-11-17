@@ -38,6 +38,7 @@ import { applyExecutorLabel, loadAgentProfile } from '../../packages/agent/src/a
 import {
   createFileStore,
   fileStoragePathOf,
+  INBOUND_MAX_FILE_BYTES,
   type FileScope,
   type FileStore,
   type RegisteredFile,
@@ -132,6 +133,20 @@ export interface FileDeliveryPort {
 const FILE_DELIVERY_UNAVAILABLE_NOTE = '文件未送达（当前渠道不支持文件投递）';
 /** live 投递失败时给用户的如实话术（v8 §7 失败必须可见；事件另记 delivery_failed，不记 sent）。 */
 const FILE_DELIVERY_FAILED_NOTE = '文件未送达（投递失败，请重试或联系管理员）';
+
+/**
+ * 入站附件上限（100MB，2026-11-17 CAP-01）：与 file-store 的流式兜底
+ * `INBOUND_MAX_FILE_BYTES` 同值单源。**登记前**按契约 `IncomingAttachment.bytes`
+ * 校验：超限整条消息拒绝——一个附件都不登记、不起模型回合（不静默丢弃、不带超限
+ * 附件开回合），记一条结构化事件（含 bytes 与上限），回执给用户明确话术。
+ * 判据是 `> 上限`：恰好 100MB 放行（「上限 100MB」= 最多可发 100MB，与 file-store
+ * 既有扫描/入站纪律的 `> max` 判据一致）。渠道适配器仍按渠道侧限额先行拒收；
+ * 这里是 handler 直调路径（假渠道/测试/未来渠道）的确定性防线。
+ */
+const INBOUND_ATTACHMENT_LIMIT_BYTES = INBOUND_MAX_FILE_BYTES;
+/** 超限话术（用户可见；机械事实 bytes/limit 只进结构化事件，不进话术）。 */
+const ATTACHMENT_TOO_LARGE_NOTE =
+  `附件超过 ${Math.floor(INBOUND_ATTACHMENT_LIMIT_BYTES / 1024 / 1024)}MB 上限，请压缩或拆分后再发`;
 
 /**
  * 单一 profile 解析（fail-closed）：未指定时 0 个或多个 profile 都拒绝启动，
@@ -441,6 +456,25 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
 
     const scope: FileScope = { principalId, sessionId };
     const sessionKey = `${principalId}\u0000${sessionId}`;
+
+    // CAP-01 入站附件上限（100MB）：登记前按契约字节数校验。超限 = 整条消息拒绝——
+    // 一个附件都不登记、不起模型回合（纯附件与文字+附件同一判据；文字+附件也不得
+    // 静默丢掉附件继续回合），事件含 bytes 与上限，回执给用户明确话术。
+    const oversizedAttachment = (message.attachments ?? []).find(
+      (attachment) => attachment.bytes > INBOUND_ATTACHMENT_LIMIT_BYTES,
+    );
+    if (oversizedAttachment !== undefined) {
+      log({
+        event: 'inbound_attachment_too_large',
+        principalId,
+        sessionId,
+        messageId: message.messageId,
+        name: oversizedAttachment.filename,
+        bytes: oversizedAttachment.bytes,
+        limitBytes: INBOUND_ATTACHMENT_LIMIT_BYTES,
+      });
+      return ATTACHMENT_TOO_LARGE_NOTE;
+    }
 
     if (message.attachmentOnly === true) {
       // CAP-01 S1 纯附件：登记为 pending 文件——不调模型、不建 Task、不起回合；空回执让
