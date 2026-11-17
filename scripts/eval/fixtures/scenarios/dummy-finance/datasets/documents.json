@@ -1,0 +1,23 @@
+{
+  "items": [
+    {
+      "id": "doc-001",
+      "name": "document-1",
+      "value": 1200
+    },
+    {
+      "id": "doc-002",
+      "name": "document-2",
+      "value": 800
+    },
+    {
+      "id": "doc-003",
+      "name": "document-2",
+      "value": 900
+    }
+  ],
+  "windows": [
+    "W202610",
+    "W202611"
+  ]
+}

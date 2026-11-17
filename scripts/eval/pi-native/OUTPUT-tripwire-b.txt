@@ -1,0 +1,45 @@
+
+==============================================================================
+B1  pre-run budget check covers the FIRST request
+==============================================================================
+fshine pre-check: tokens=20000 budget=7168 over=true
+  -> fshine REFUSES before harness.run(); zero provider calls
+stream calls WITH fshine pre-check = 0
+  [PASS] fshine pre-check flags the input as over-window  -> over=true
+  [PASS] (Q1) with the check: zero requests sent  -> calls=0
+stream calls WITHOUT fshine pre-check = 1  (over-window = 1)
+  [PASS] control: without the check the over-window request IS sent  -> overWindow=1
+
+==============================================================================
+B2  continuation after a tool result is NOT coverable by any public seam
+==============================================================================
+fshine pre-check on first request: tokens=1 over=false
+  [PASS] first request passes the pre-run check  -> over=false
+lane.prompt ok=true  stream calls=2  over-window=1
+run_end = [{"status":"failed","error":"assistant_error"}]
+stream sizes = [21,20196]
+  [PASS] (Q2) continuation over-window request WAS sent despite hooks  -> overWindow=1
+  [PASS] (Q2) throwing public hooks did NOT veto the send  -> calls=2
+tool executions = 1
+  [PASS] task executed exactly once (no duplicate run after overflow)  -> executions=1
+
+==============================================================================
+B3  public hook contracts (from shipped d.ts) — none can abort a send
+==============================================================================
+file: node_modules/@earendil-works/pi-agent-core/dist/harness/agent-harness.d.ts
+  transform_context  :510  event{messages,systemPrompt}  result{messages?,systemPrompt?}  -> transform only, NO abort/block
+  before_request     :520  event{model,step,attempt,streamOptions}  result{streamOptions?}  -> no messages/payload/window
+  before_payload     :531  event{model,payload}  result{payload}  -> replace payload only, NO abort/block
+  before_tool        :550  result{args?,block?}  -> can block a TOOL, not a model request
+  before_run         :486  result{messages?}  -> pre-run rewrite only, no size gate
+  before_compaction  :582  result{decline?,compaction?}  -> can decline COMPACTION, not a send
+invocation sites (dist js):
+  runtime/drive/generation.js:120 transform_context -> {messages: result?.messages ?? ctx.messages}
+  runtime/drive/generation.js:128 before_payload    -> result?.payload
+  overflow recovery is POST-response: runtime/drive/response.js:111
+  threshold compaction is at checkpoint: runtime/drive/structural.js:863 (shouldCompact)
+
+DETERMINATION:
+  Q1 first request covered by fshine single pre-run budget check ... YES (refuse)
+  Q2 tool-result continuation covered by any public seam ......... NO (sent; hooks cannot veto)
+==== B TRIPWIRE: FACTS OBSERVED (B does NOT cover continuation) ====

@@ -28,26 +28,33 @@
 
 | 变量（env 覆盖口） | yaml 键（源） | 默认值 / 缺失行为 |
 | --- | --- | --- |
-| `FSHINE_PLATFORM_QUEUE_CAPACITY` | `host.platformQueueCapacity` | 缺省 / 非法 = 100；宿主同时在办的平台作业上限（宿主待办深度，不限制平台并发；0 按 1 处理） |
-| `FSHINE_WORKER_DISPATCH_MODE` | `host.workerDispatchMode` | 缺省 `inline`；`background` 才启用后台委派 |
-| `FSHINE_SHUTDOWN_DRAIN_MS` | `host.shutdownDrainMs` | 缺省 / 非法 = 30000 |
-| `FSHINE_INBOUND_DEBOUNCE_MS` | `host.inboundDebounceMs` | 缺省 = 2000（0 = 关闭） |
-| `FSHINE_ATTACHMENT_DIR` | `host.attachmentDir` | 缺省 = `<平台根>/tmp/attachments` |
-| `FSHINE_PI_AGENT_DIR` | `host.piAgentDir` | 缺省 = `<cwd>/data/pi-agent` |
-| `FSHINE_WORKER_STEP_CAP` | `host.workerStepCap` | 缺省 / 非法 = 50，第 51 次放行送 wind-down |
+| `FSHINE_ATTACHMENT_DIR` | `host.attachmentDir` | 缺省 = `<平台根>/tmp/attachments`（渠道适配器读取） |
 | `APP_PORT` / `APP_PUBLIC_URL` / `APP_CALLBACK_PATH` | `channel.port` / `channel.publicUrl` / `channel.callbackPath` | 端口非法即启动失败；URL / 回调路径缺省为空 / 默认回调路径 |
-| `BUSINESS_SKILL_PATH` | `businessSkillPath` | 优先级：本变量 > yaml `businessSkillPath` > 默认 skill 文件 |
-| `DB_PATH` | `store.dbPath` | 缺省 = 仓库根 `data/agent.db`；相对路径按进程 cwd 解析（daily-summary 同名覆盖口，缺省 `data/agent.db`） |
+| `DB_PATH` | `store.dbPath` | 缺省 = 仓库根 `data/agent.db`；相对路径按进程 cwd 解析 |
+
+> **2026-11-14 P5（分诊 #6）退役批次**：`host.platformQueueCapacity` /
+> `host.workerDispatchMode` / `host.shutdownDrainMs` / `host.inboundDebounceMs` /
+> `host.piAgentDir` / `host.workerStepCap` 及其同名 `FSHINE_*` 覆盖口（含 M4 已无读者的
+> step cap）**删除**——零生产读取点的「写着不生效」假配置；旧 YAML 里的残留键由加载层
+> 忽略。资源旋钮的唯一入口改为 `runtime` 段（yaml 键、**无 env 覆盖口**）：非法值
+> fail-fast、未知键拒绝，缺省由 `packages/agent/src/resource-policy.ts` 按「缺省=现行为」
+> 补齐；登记见 `docs/decision-log.md` §三十二，静态守卫见
+> `packages/agent/resource-policy-single-source.test.ts`。
+> `runtime` 段另含 `dispatchMode: inline | background`（R4 集成接线，2026-11-14；缺省
+> `inline` = 现行为：委派同步执行；`background` = 受理即回执、后台 TaskRunner 执行——
+> 仅 server 渠道面承接，ask/redo 入口对 background 显式拒绝；模板见 `config/agent.example.yaml`）。
+> `runtime.fileRetentionSweepOnStart`（2026-11-17；缺省 `false`）：server 启动装配完成后、
+> 渠道开始接消息之前，按 `fileRetentionDays` **扫一次**到期 run 目录（`dryRun=false`，
+> 结果进启动日志）；缺省关闭 = 零行为变化，只扫一次、无定时器（周期调度归部署侧）。
 
 下表仍只从 env 读（不是部署配置）：
 
 | 变量 | 生产者 / 消费者 | 默认值 / 缺失行为 |
 | --- | --- | --- |
-| `AGENT_CONFIG_PATH` | 部署 / `loadConfig`、business-skill 解析 | 缺省 = `config/agent.yaml`；自指配置路径，永远不进 yaml |
+| `AGENT_CONFIG_PATH` | 部署 / `loadConfig` | 缺省 = `config/agent.yaml`；自指配置路径，永远不进 yaml |
 
-验收脚本的私有旋钮走命令行，不设环境变量：`scripts/acceptance.ts --keep-mock-state`
-（mock 运行后保留状态文件）、`scripts/acceptance-22-supplement.ts --db <path>`
-（复用主流程验收库时的库路径）。
+旧验收脚本（`scripts/acceptance.ts` / `scripts/acceptance-22-supplement.ts`）及其私有旋钮
+已于 2026-11-13 随旧域评测脚手架删除（Minimal M2 波次 1）；不再有走命令行的验收专属开关。
 
 ## 2. 共享接口（宿主写或继承，执行层读）
 
@@ -87,6 +94,14 @@
 
 ## 4. 通用夹具（fshine generic-mock，隔离语义）
 
+> **2026-11-13 M4 状态（§4–§9 读取面盘点）**：`scripts/eval/generic-mock.ts`、
+> `fixture-aux-state.ts`、`second-layer.ts`、`plan-policy.test.ts`、
+> `generic-model-eval.py` 与 stock 夹具（§4b/§9.2）均已随 M2/M4 退役
+> （decision-log §十三），下文凡以它们为「现用读者」的表述一律按历史盘点阅读。
+> 现行产品面只余 `npm run ask` 的 dummy 夹具：§4 三个令牌面与 §4a `--state-dir`
+> 测试面是仍存活的机制（凭据隔离白名单见 `packages/agent/src/worker-env.ts` +
+> `worker-env.test.ts`；隔离门见 `scripts/eval/safety-gate.ts`）。
+
 **命名族裁定（2026-11-10 续篇，issue #20 消费端边界收敛）**：`EXECUTION_*` 仍是跨层
 令牌面与真平台状态契约的唯一规范族，`DUMMY_*` 降级为**调试入口**（手工跑夹具时可用）。
 但**四个状态路径**（`EXECUTION_MOCK_STATE` / `EXECUTION_PLAN_STATE` /
@@ -125,16 +140,21 @@ per-run 隔离是 fshine 测试基础设施对自己 dummy 夹具的事务，走
 | `EXECUTION_PROPOSAL_STATE` | 真平台部署契约行保留（§3）；夹具读取已退役 |
 | `EXECUTION_AUDIT_PATH` | 真平台部署契约行保留（§2）；夹具读取已退役 |
 
-> 探针的传导桥：宿主 spawn 网关是固定 argv（没有附加参数通道），探针
+> 探针的传导桥（历史记录）：宿主 spawn 网关是固定 argv（没有附加参数通道），探针
 > `isolatePlatformState` 无法直接把 flag 传进夹具；它改为把 per-case 根写进
-> `FSHINE_EVAL_FIXTURE_STATE_DIR`，由夹具的 shell 入口（`bin/dummy` / `bin/generic` /
-> `bin/stock`）翻译成 `--state-dir`。2026-11-10 起该写入只发生在探针的 per-case
-> 子进程里（父进程不改 `process.env`）；通道只剩子进程 → 夹具 shell 入口。
-> acceptance 仍在自己的进程里设置同一变量，与探针的槽无关。该变量是 fshine 评测
-> 基础设施私有（`platform-leak-lint` 在册的「测试专用变量，非两仓契约」），宿主生产
-> 路径与真平台零读取；generic-mock / second-layer / plan-policy / generic-model-eval
-> 直接传 flag，不经 env。
-> 退役条件与时间锚点见 debt-ledger D-209：a2a 信封携带 per-run 参数（跨仓）时本桥退役；2027-02-10 必须复核，不许无限期续期。
+> `FSHINE_EVAL_FIXTURE_STATE_DIR`，由夹具的 shell 入口（`bin/dummy`）翻译成
+> `--state-dir`。2026-11-10 起该写入只发生在探针的 per-case 子进程里（父进程不改
+> `process.env`）。该变量是 fshine 评测基础设施私有；宿主生产路径与真平台零读取。
+>
+> **2026-11-13 M4 指针校正（复核 findings；只改指针不改口径）**：上文所引探针
+> `isolatePlatformState` / `acceptance` / `platform-leak-lint` 登记 /
+> `packages/agent/src/child-env.ts`（键名放行白名单）/ 旧 `bin/stock` / `bin/generic`
+> 入口 / `generic-model-eval` 在当前树均不存在（随 `0b97227` 或 M4 清扫退役）。现行实现
+> 的边界断言 = `packages/agent/src/worker-env.ts` 的 worker env 精确键白名单
+> （`PATH`/`HOME`/`TMPDIR`）+ `worker-env.test.ts`「测试桥键不进白名单」（2026-11-13
+> 实跑通过）——桥键**不在**该白名单，worker 发起的夹具调用不经它传导（ask 路径经
+> `--state-dir` argv，见 `packages/agent/src/dummy-cli-client.ts`）。桥的退役条件与时间
+> 锚点见 debt-ledger D-209（含 2026-11-13 M4 指针校正与 owner 待裁定项）。
 
 夹具令牌是**测试夹具值**，不是生产配置：dummy / stock 两族的令牌面
 由评测代码注入**规范名**（`generic-mock.ts` / `second-layer.ts` / `second-layer.test.ts` /
@@ -191,11 +211,15 @@ generic-mock / second-layer / generic-model-eval.py 同批；探针在
 ## 5. 外部服务商凭据（只盘点，不删、不改）
 
 `LLM_API_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` / `LLM_MAIN_MODEL` /
-`LLM_THINKING_LEVEL` / `LLM_MAIN_THINKING_LEVEL` / `LLM_JUDGE_MODEL`（模型侧）、
+`LLM_THINKING_LEVEL` / `LLM_MAIN_THINKING_LEVEL` / `LLM_CONTEXT_WINDOW` /
+`LLM_JUDGE_MODEL`（模型侧）、
 `WECOM_BOT_ID` / `WECOM_BOT_SECRET`（渠道侧）。缺失时：模型侧无 LLM 即无法跑
 真模型评价与生产对话（确定性测试不受影响）；渠道侧缺失即渠道拒绝启动。
+`LLM_CONTEXT_WINDOW` 是 Main 模型的上下文窗口（token）能力声明：压缩阈值 =
+contextWindow − 摘要预留，未声明时沿用驱动缺省 128k；显式值非法即启动失败
+（窗口声明错误会让压缩在真实窗口之外才触发，是 T7 贴边空回复的源头）。
 
-承载（issue #20 切片 C+D）：模型侧前 6 个键与渠道侧 2 个键的**源**是
+承载（issue #20 切片 C+D）：模型侧前 7 个键与渠道侧 2 个键的**源**是
 `config/agent.yaml` 的 `llm.*` / `wecom.*`（gitignored；模板只留键名与获取方式，
 不填真值）；同名环境变量只作非空值覆盖口。`LLM_JUDGE_MODEL` 例外：它只被 eval
 评分脚本（`scripts/eval/score.ts --judge` 的 judge 链路）直读，不经过装配，属
@@ -266,9 +290,10 @@ generic-mock / second-layer / generic-model-eval.py 同批；探针在
   ambient C 类同名键**：未在 `fixture.env` / `fixture.planPolicy` 声明的键，评测进程仍会
   继承 shell 里的值。探针的 ambient 清场只覆盖 §4 的三个令牌面调试专名；状态根由
   `FSHINE_EVAL_FIXTURE_STATE_DIR` 测试桥按用例覆盖（§4a），四个状态路径的规范名不再注入。
-  因此评测进程**不得 export** 本节变量（实测：`DUMMY_READBACK_SHORT=1 npm run eval:generic-mock`
+  因此评测进程**不得 export** 本节变量（历史实测：`DUMMY_READBACK_SHORT=1 npm run eval:generic-mock`
   会让 smoke-prepare-commit / g-state-isolation / g-ballot-second-domain 三例红；
-  `STOCK_PLAN_HARD_CALLS=1` 会让 second-layer 计划门用例从 confirm 变 stop）。
+  `STOCK_PLAN_HARD_CALLS=1` 会让 second-layer 计划门用例从 confirm 变 stop；两 harness
+  均已退役，禁令按历史记录阅读）。
 - `scripts/eval/cases.yaml` 的 `fixture.env`：逐用例平铺标量，`loadProbeCases`
   包装器在用例前后注入/还原（`scripts/probe-real-agent.ts`）。
 - `scripts/eval/cases.yaml` 的 `fixture.planPolicy`：**仅 `stock-platform` 夹具**，
@@ -277,9 +302,9 @@ generic-mock / second-layer / generic-model-eval.py 同批；探针在
   `PLAN_POLICY_ENV_KEYS` 拍平成 `STOCK_PLAN_*` env 键。未声明的档/线**不注入**，
   由夹具自己的缺省补足（缺省只保留一份，在夹具源码里）；夹具读取点
   `stock.cjs planPolicy()` 不动。
-- 确定性 harness（`scripts/eval/generic-mock.ts`、`scripts/eval/second-layer.test.ts`）
-  把旋钮声明在各自用例的 env 构造里，不在用例体里按单次调用临时塞 env；它们同样
-  先摊开 `process.env`，所以上面的 ambient 禁令同样适用。
+- 确定性 harness（`scripts/eval/generic-mock.ts`、`scripts/eval/second-layer.test.ts`，
+  均已随 M4 退役）把旋钮声明在各自用例的 env 构造里，不在用例体里按单次调用临时塞 env；
+  它们同样先摊开 `process.env`，所以上面的 ambient 禁令同样适用（按历史纪律保留）。
 
 ### 9.1 dummy 夹具（`scripts/eval/fixtures/dummy-platform/bin/dummy.cjs`，16 个）
 

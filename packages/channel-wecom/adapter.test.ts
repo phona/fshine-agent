@@ -166,6 +166,9 @@ async function startChannel(handler: ReplyHandler, root?: string) {
     clientFactory: () => fake,
     platformRoot,
     attachmentDir: path.join(platformRoot, 'tmp', 'attachments'),
+    // 本套用例测适配器机械行为（真实投递须落到底层替身上），显式开启 live；
+    // 缺省静默（Silent Shadow 闸门）由 adapter.silent-shadow.test.ts 专项覆盖。
+    deliveryMode: 'live',
   };
   const channel = new WecomBotChannel(options);
   const started = channel.start(handler);

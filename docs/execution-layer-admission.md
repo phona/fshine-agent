@@ -14,6 +14,8 @@
 > 环境名前缀。通用夹具（dummy / stock）也不是实例，不得以实例名
 > 命名；实例名只属于该实例自己的 profile。
 
+> **2026-11-13 M4 注（历史准入清单）**：文中 `generic-mock.ts` 用例证据与 stock 夹具已随 M4 死代码清扫退役（[`decision-log.md`](decision-log.md) §十三）；A5–A7 的读回/未验证语义现以完成状态判定（`completed`/`failed`/`unexecuted`）承接最小面。下文按历史清单阅读。
+
 ## 准入表（缺一不可）
 
 | # | 项 | 交出什么 | 验收方式（确定性，不靠模型说好） |

@@ -27,20 +27,24 @@ describe('Pi driver 认证链接线（options.env 是部署配置的生效环境
     // 基线自证：默认认证上下文读的就是 process.env，这里没有 key。
     expect(process.env.LLM_API_KEY).toBeUndefined();
 
-    const { models } = createPiModelRuntime(BASE_ENV, 'kimi-for-coding');
-    const auth = await models.getAuth('llm');
+    const runtime = await createPiModelRuntime(BASE_ENV, 'kimi-for-coding');
+    const auth = await runtime.getAuth('llm');
 
     expect(auth?.auth.apiKey).toBe(ENV_KEY);
-    expect(auth?.source).toBe('LLM_API_KEY');
+    // 1.5.2 公开 ModelRuntime 的凭据来源标签：注册 provider 的显式 apiKey → "configured API key"
+    //（旧 pi-ai Models 报 env 变量名；断言意图不变：生效环境的 key 被采用）。
+    expect(auth?.source).toBe('configured API key');
   });
 
   it('process.env 与 options.env 都有 key 时，options.env（生效环境）优先', async () => {
     process.env.LLM_API_KEY = 'ambient-process-env-key';
 
-    const { models } = createPiModelRuntime(BASE_ENV, 'kimi-for-coding');
-    const auth = await models.getAuth('llm');
+    const runtime = await createPiModelRuntime(BASE_ENV, 'kimi-for-coding');
+    const auth = await runtime.getAuth('llm');
 
     expect(auth?.auth.apiKey).toBe(ENV_KEY);
-    expect(auth?.source).toBe('LLM_API_KEY');
+    // 1.5.2 公开 ModelRuntime 的凭据来源标签：注册 provider 的显式 apiKey → "configured API key"
+    //（旧 pi-ai Models 报 env 变量名；断言意图不变：生效环境的 key 被采用）。
+    expect(auth?.source).toBe('configured API key');
   });
 });

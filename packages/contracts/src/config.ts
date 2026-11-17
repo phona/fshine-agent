@@ -33,7 +33,8 @@ export interface ContextProfileConfig {
   gateway?: string;
   /**
    * Operator-declared display name for this execution layer's subagent,
-   * injected into the host Main Agent system prompt via `buildSystemPrompt`.
+   * injected into the host Main Agent role text by replacing the
+   * `{{executorLabel}}` placeholder in `.agents/agents/fshine-main/agent.md`.
    * Never supplied by the model. Omitted profiles fall back to the neutral
    * host default (`DEFAULT_EXECUTOR_LABEL`) — the host never silently adopts
    * an instance name as its default.
@@ -43,10 +44,18 @@ export interface ContextProfileConfig {
    * Operator-declared delegation tool name for this profile — the
    * model-visible protocol name published for this deployment. Never
    * supplied by the model. Omitted profiles fall back to the neutral host
-   * default (`RUN_EXECUTION_TASK_TOOL` = `run_task`); an instance's
+   * default (`TASK_RUN_TOOL` = `task_run`); an instance's
    * already-published tool protocol name keeps working by declaring it here.
    */
   toolName?: string;
+  /**
+   * 执行层声明的**单文件**参数名（CAP-01：宿主把任务文件的物化路径填进去）：
+   *   · input：宿主把任务唯一的输入文件物化后，用该参数把路径交给执行层；
+   *   · output：宿主在任务 out/ 下分配确定路径，执行层写到那里，收尾扫描登记成产物。
+   * 只认部署对执行层的声明（参数名不来自 args 形状猜测，也不来自模型）；键不存在 =
+   * 未声明 = 不启用（零行为变化）。声明来自执行层的 `operation list` 认知。
+   */
+  fileParams?: { input?: string; output?: string };
   /** Maximum wall-clock budget for one Worker turn. Defaults to 10 minutes. */
   workerTimeoutMs?: number;
   /** 平台仓知识面（worker read/ls 白名单）；缺省 = .md/.schema.json/.agents//docs/ */
@@ -75,23 +84,6 @@ export function turnBudgetMsFor(profile?: Pick<ContextProfileConfig, 'workerTime
 }
 
 /**
- * Active profile ID 的解析（C5）：宿主不把任何执行层实例名当缺省。
- *
- * 判定规则：显式指定优先；未指定且恰有一个 profile → 该键（单执行层部署零配置可用）；
- * 未指定且 0 个或多个 profile → undefined——由消费方 fail-closed（如
- * resolveContextProfile 拒绝启动回合），绝不静默挑一个或回退实例名。
- * 纯函数：装配派生（assembly）与 runner 缺省（context.ts）共用同一份判定，不新增 env。
- */
-export function resolveActiveProfileId(
-  profiles: Record<string, ContextProfileConfig>,
-  explicit?: string,
-): string | undefined {
-  if (explicit !== undefined && explicit.trim() !== '') return explicit;
-  const keys = Object.keys(profiles);
-  return keys.length === 1 ? keys[0] : undefined;
-}
-
-/**
  * LLM 连接与模型选择（部署配置，issue #20 切片 C+D）。
  *
  * 源 = config/agent.yaml 的 `llm` 段（gitignored）；同名环境变量（LLM_*）只作
@@ -104,6 +96,12 @@ export interface LlmConfig {
   mainModel?: string;
   thinkingLevel?: string;
   mainThinkingLevel?: string;
+  /**
+   * Main 模型的上下文窗口（token，部署层能力声明）。
+   * 压缩阈值 = contextWindow − 摘要预留：窗口声明错了，压缩要么永远不触发、要么过早触发；
+   * 缺省（未声明）= 驱动内的 128k 缺省，行为与接线前一致。
+   */
+  contextWindow?: number;
 }
 
 /** 企微智能机器人凭据（部署配置；同名环境变量 WECOM_* 只作非空值覆盖口）。 */
@@ -112,23 +110,85 @@ export interface WecomConfig {
   botSecret?: string;
 }
 
-/** 委派调度模式：inline = 回合内同步；background = 后台 Worker 主动交付。 */
-export type WorkerDispatchMode = 'inline' | 'background';
-
 /**
  * 宿主运行参数（原 FSHINE_* 部署面，issue #20 切片 C）。
  *
  * 源 = config/agent.yaml 的 `host` 段；同名 FSHINE_* 环境变量只作非空值覆盖口。
- * 数值项缺省 / 非法 = 不收进本结构，由各消费点的既有缺省兜底（不在这里复制缺省值）。
+ *
+ * 2026-11-14 P5（分诊 #6「删除未消费键；随 P5 建最小 runtime 段」）：旧
+ * platformQueueCapacity / shutdownDrainMs / workerDispatchMode / workerStepCap /
+ * inboundDebounceMs / piAgentDir 键**删除**——它们被解析并派生 env 却零生产读取点，
+ * 属「写着不生效」的假配置；资源旋钮的唯一入口改为 `runtime` 段（RuntimeConfig）。
+ * 仅保留有真实读取点的 attachmentDir（渠道适配器经 FSHINE_ATTACHMENT_DIR 消费，
+ * packages/channel-wecom/src/adapter.ts）。旧 YAML 里的已删键由加载层原样忽略。
  */
 export interface HostConfig {
-  platformQueueCapacity?: number;
-  shutdownDrainMs?: number;
-  workerDispatchMode?: WorkerDispatchMode;
-  workerStepCap?: number;
-  inboundDebounceMs?: number;
   attachmentDir?: string;
-  piAgentDir?: string;
+}
+
+/**
+ * 任务级预算（分诊 #10：时长 + 调用数先落地；token 采集为增强项）。
+ * 父任务 → 子 Worker 共享同一份（不复制、不放大）。
+ */
+export interface TaskBudgetConfig {
+  /** 任务总墙钟预算（ms）：跨该任务的全部 Worker 回合与子委派累计。 */
+  ms: number;
+  /** 任务总执行层调用次数预算。 */
+  calls: number;
+  /**
+   * 任务总 token 预算。仅当 Pi `assistant.usage` 可验证时才配置——否则不设硬上限，
+   * 消费方按 `tokens: unavailable` 如实登记，不得伪造限额。
+   */
+  tokens?: number;
+}
+
+/**
+ * 资源强制配置段（P5；联合接口约定 §2 冻结的最小字段；P0 注记承接）。
+ *
+ * 单一配置入口：config/agent.yaml 的 `runtime` 段，**无同名 env 覆盖口**。
+ * 与其它部署段的判据刻意不同：非法值 fail-fast（不按「非法 = 未配置」回落）、
+ * 未知键拒绝——资源限额静默失效比缺省危险，拼错的旋钮不允许被默认值吞掉。
+ * 缺省值不住加载层：由 `packages/agent/src/resource-policy.ts` 的
+ * `resolveRuntimeConfig` 补齐（前台并发 4 / 排队容量 16 / 无任务级预算 /
+ * 回合时限沿用执行侧现缺省 / 文件保留期 0 = 不清理）。
+ */
+export interface RuntimeConfig {
+  /** 前台（Main 交互回合）并发准入上限。缺省 4；显式 1 仍为单并发。 */
+  mainConcurrency?: number;
+  /** 后台（委派 Worker / 后台任务）并发准入上限；0 = 关闭后台准入（确定性拒绝）。缺省 1。 */
+  backgroundConcurrency?: number;
+  /** 前台/后台各自的等待队列容量（独立队列）。缺省 16；显式 0 = 关闭排队（满即拒绝）。 */
+  queueCapacity?: number;
+  /** Main 回合墙钟上限（ms）。缺省 300000（与执行侧现行缺省一致）。 */
+  mainTurnMs?: number;
+  /** Worker 回合墙钟上限（ms）。缺省 180000（与执行侧现行缺省一致）。 */
+  workerTurnMs?: number;
+  /** 委派深度上限；0 = 不允许委派。缺省 1（Main → Worker 一层）。 */
+  maxDelegationDepth?: number;
+  /** 任务级共享预算；缺省未配置 = 无任务级预算（现行为）。 */
+  taskBudget?: TaskBudgetConfig;
+  /** waiting_user 等待答复的上限（ms）。缺省 86400000（24h，与 sessionTtl 同量级）。 */
+  waitUserTimeoutMs?: number;
+  /**
+   * run 目录 / 任务产物的保留期（天）。缺省 30（2026-11-17 owner 定）；0 = 不清理；
+   * 正整数 = 超过该天数的目录/产物具备清理资格。本旋钮只提供判定（策略层），实际删除
+   * 由 `fileRetentionSweepOnStart` 或显式 `npm run cleanup:runs` 触发。
+   */
+  fileRetentionDays?: number;
+  /**
+   * server 启动装配完成后、开始接消息之前，是否按 `fileRetentionDays` 扫一遍 run 目录。
+   * 缺省 false = 零行为变化（不新建目录、不删任何文件、不打清理日志）；true = 启动时
+   * 执行一次 `cleanupExpiredRunDirs`（dryRun=false），结果写入启动日志。
+   * 只扫一次，不引入定时器；周期调度归部署侧。
+   */
+  fileRetentionSweepOnStart?: boolean;
+  /**
+   * 派发模式（R4 P6 接线；缺省 = 'inline' = 现行为）。
+   *   · 'inline'：委派同步执行、Main 等待 Worker 回合（现行路径，逐字不变）；
+   *   · 'background'：受理即底账 queued，执行交 TaskRunner 后台推进；Main 快速受理并
+   *     回「已受理 #编号 名称」。仅 server 渠道面支持 background；ask/redo 入口显式拒绝。
+   */
+  dispatchMode?: 'inline' | 'background';
 }
 
 /**
@@ -153,11 +213,27 @@ export interface ExecutionConfig {
   planActivationSecret?: string;
 }
 
+/**
+ * 渠道装配档位（yaml `channel.mode`；缺省 `offline`）：
+ *   · `offline`：不建立渠道长连接（不调用 channel.start），出站视为 silent；
+ *   · `shadow`：建立长连接（入站照收、回合照跑），出站全部抑制（silent 闸门）；
+ *   · `live`：真实投递（改动前的生产语义）。
+ *
+ * 只由部署配置声明——不提供 `FSHINE_*` 环境变量覆盖口（档位只认 yaml）。
+ * 缺省值只有一处：`DEFAULT_CHANNEL_MODE`，装配层消费。
+ */
+export type ChannelMode = 'offline' | 'shadow' | 'live';
+
+/** 渠道装配缺省档位：offline（不连生产、不出站）。 */
+export const DEFAULT_CHANNEL_MODE: ChannelMode = 'offline';
+
 export interface AppConfig {
   principals: Record<string, PrincipalConfig>;
   /** Trusted platform subagent context profiles. */
   contextProfiles: Record<string, ContextProfileConfig>;
   channel: {
+    /** 渠道装配档位；缺键 = 未配置（装配层按 DEFAULT_CHANNEL_MODE 处理）。 */
+    mode?: ChannelMode;
     port: number;
     publicUrl: string;
     callbackPath: string;
@@ -170,10 +246,10 @@ export interface AppConfig {
   wecom?: WecomConfig;
   /** 宿主运行参数（yaml `host` 段；env 非空值覆盖）。 */
   host?: HostConfig;
+  /** 资源强制配置（yaml `runtime` 段；单一入口，无 env 覆盖口，非法值 fail-fast）。 */
+  runtime?: RuntimeConfig;
   /** 宿主存储配置（yaml `store` 段；env 非空值覆盖）。 */
   store?: StoreConfig;
   /** 执行层交接配置（yaml `execution` 段；env 非空值覆盖）。 */
   execution?: ExecutionConfig;
-  /** 编排层业务 skill 的文件路径（相对仓库根或绝对路径；env 非空值覆盖）。 */
-  businessSkillPath?: string;
 }

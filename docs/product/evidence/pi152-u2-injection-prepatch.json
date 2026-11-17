@@ -1,0 +1,204 @@
+{
+  "meta": {
+    "generatedAt": "2026-11-16T11:10:40+08:00",
+    "script": "scripts/eval/pi152-stageB/injection.ts",
+    "generationCommand": "TMPDIR=<临时目录> node --import tsx scripts/eval/pi152-stageB/injection.ts",
+    "rawReport": "gitignored .runtime/pi152-stageB/injection/<state>/report.json；本文件是由其机械投影（未手写数字）",
+    "projection": "只保留判定所需字段：每用例 finalText / hasFact（最后一次主请求）/ compactionEnded / compaction_end 的 errorMessage·summary·summaryChars / 落库 compaction 条目",
+    "title": "Pi 1.5.2 U2 空摘要入库 · 补丁前（patches reverted）注入读数",
+    "patchState": "reverse（npx patch-package --reverse；node_modules 为上游 1.5.2 原状）",
+    "patchVerification": "simple-options.js 无 MIN_DERIVED_MAX_TOKENS；session-manager.js 无 Refusing to append a compaction entry；md5 simple-options=ceb6c7bbcf6aa59e957b0626c0e9a893, session-manager=4edb7c482f14f8ca2e533868db52bd76"
+  },
+  "cases": [
+    {
+      "name": "T-length",
+      "finalText": "本轮答复。",
+      "hasFact": true,
+      "hasFactCall": 9,
+      "compactionEnded": true,
+      "compactionEndCount": 3,
+      "compactionEvents": [
+        {
+          "reason": "threshold",
+          "errorMessage": "Auto-compaction failed: Summarization failed: generation hit the token cap and the summary is incomplete",
+          "summary": null,
+          "summaryChars": null
+        },
+        {
+          "reason": "threshold",
+          "errorMessage": "Auto-compaction failed: Summarization failed: generation hit the token cap and the summary is incomplete",
+          "summary": null,
+          "summaryChars": null
+        },
+        {
+          "reason": "threshold",
+          "errorMessage": "Auto-compaction failed: Summarization failed: generation hit the token cap and the summary is incomplete",
+          "summary": null,
+          "summaryChars": null
+        }
+      ],
+      "compactionEntries": []
+    },
+    {
+      "name": "T-empty",
+      "finalText": "本轮答复。",
+      "hasFact": false,
+      "hasFactCall": 9,
+      "compactionEnded": true,
+      "compactionEndCount": 1,
+      "compactionEvents": [
+        {
+          "reason": "threshold",
+          "errorMessage": null,
+          "summary": "",
+          "summaryChars": 0
+        }
+      ],
+      "compactionEntries": [
+        {
+          "summary": "",
+          "summaryChars": 0
+        }
+      ]
+    },
+    {
+      "name": "T-ws",
+      "finalText": "本轮答复。",
+      "hasFact": false,
+      "hasFactCall": 9,
+      "compactionEnded": true,
+      "compactionEndCount": 1,
+      "compactionEvents": [
+        {
+          "reason": "threshold",
+          "errorMessage": null,
+          "summary": "  \n\t ",
+          "summaryChars": 5
+        }
+      ],
+      "compactionEntries": [
+        {
+          "summary": "  \n\t ",
+          "summaryChars": 5
+        }
+      ]
+    },
+    {
+      "name": "O-length",
+      "finalText": "历史答复 7。",
+      "hasFact": true,
+      "hasFactCall": 9,
+      "compactionEnded": true,
+      "compactionEndCount": 2,
+      "compactionEvents": [
+        {
+          "reason": "overflow",
+          "errorMessage": "Context overflow recovery failed: Summarization failed: generation hit the token cap and the summary is incomplete",
+          "summary": null,
+          "summaryChars": null
+        },
+        {
+          "reason": "overflow",
+          "errorMessage": "Context overflow recovery failed: Summarization failed: generation hit the token cap and the summary is incomplete",
+          "summary": null,
+          "summaryChars": null
+        }
+      ],
+      "compactionEntries": []
+    },
+    {
+      "name": "O-empty",
+      "finalText": "",
+      "hasFact": false,
+      "hasFactCall": 10,
+      "compactionEnded": true,
+      "compactionEndCount": 3,
+      "compactionEvents": [
+        {
+          "reason": "overflow",
+          "errorMessage": null,
+          "summary": "",
+          "summaryChars": 0
+        },
+        {
+          "reason": "overflow",
+          "errorMessage": "Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
+          "summary": null,
+          "summaryChars": null
+        },
+        {
+          "reason": "overflow",
+          "errorMessage": "Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
+          "summary": null,
+          "summaryChars": null
+        }
+      ],
+      "compactionEntries": [
+        {
+          "summary": "",
+          "summaryChars": 0
+        }
+      ]
+    },
+    {
+      "name": "D-ok",
+      "finalText": "本轮答复。",
+      "hasFact": true,
+      "hasFactCall": 9,
+      "compactionEnded": false,
+      "compactionEndCount": 0,
+      "compactionEvents": [],
+      "compactionEntries": []
+    },
+    {
+      "name": "D-threshold-length",
+      "finalText": "本轮答复。",
+      "hasFact": true,
+      "hasFactCall": 9,
+      "compactionEnded": false,
+      "compactionEndCount": 0,
+      "compactionEvents": [],
+      "compactionEntries": []
+    },
+    {
+      "name": "D-overflow-length",
+      "finalText": "",
+      "hasFact": true,
+      "hasFactCall": 9,
+      "compactionEnded": false,
+      "compactionEndCount": 0,
+      "compactionEvents": [],
+      "compactionEntries": []
+    },
+    {
+      "name": "D-overflow-empty",
+      "finalText": "",
+      "hasFact": false,
+      "hasFactCall": 10,
+      "compactionEnded": false,
+      "compactionEndCount": 0,
+      "compactionEvents": [],
+      "compactionEntries": [
+        {
+          "summary": "",
+          "summaryChars": 0
+        }
+      ]
+    },
+    {
+      "name": "D-duplicate",
+      "finalText": "已完成。",
+      "hasFact": false,
+      "hasFactCall": 12,
+      "compactionEnded": false,
+      "compactionEndCount": 0,
+      "compactionEvents": [],
+      "compactionEntries": [
+        {
+          "summary": "摘要：用户要求记住项目代号「蓝鲸-42」。",
+          "summaryChars": 21
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,324 @@
+### NORMAL MODE (guard ON) - exit 0 expected
+
+==============================================================================
+Q1 / D1 rerun  unfixable over-window FIRST request  @ W=8192
+==============================================================================
+budget = 3066 (window 8192)
+  refused: PreRequestBudgetRefusal: pre-request budget exceeded: 8192 > 3066 (window=8192)
+provider stream calls = 0 (over-window = 0)  refused=true
+run_end = []
+  [PASS] W=8192: single check bounded-refuses the unfixable input  (reverse=false)
+  [PASS] W=8192: knowably over-window requests sent == 0  (reverse=false)  -> sent=0 over=0
+  [PASS] W=8192: zero provider stream calls  (reverse=false)  -> calls=0
+
+==============================================================================
+Q1 control  bypass the single check -> over-window request IS sent  @ W=8192
+==============================================================================
+provider stream calls = 1 (over-window = 1)
+  [PASS] W=8192: bypassing the check sends a knowably over-window request  -> over=1
+
+==============================================================================
+Q1 / D1 rerun  unfixable over-window FIRST request  @ W=40000
+==============================================================================
+budget = 34874 (window 40000)
+  refused: PreRequestBudgetRefusal: pre-request budget exceeded: 40000 > 34874 (window=40000)
+provider stream calls = 0 (over-window = 0)  refused=true
+run_end = []
+  [PASS] W=40000: single check bounded-refuses the unfixable input  (reverse=false)
+  [PASS] W=40000: knowably over-window requests sent == 0  (reverse=false)  -> sent=0 over=0
+  [PASS] W=40000: zero provider stream calls  (reverse=false)  -> calls=0
+
+==============================================================================
+Q1 control  bypass the single check -> over-window request IS sent  @ W=40000
+==============================================================================
+provider stream calls = 1 (over-window = 1)
+  [PASS] W=40000: bypassing the check sends a knowably over-window request  -> over=1
+
+==============================================================================
+Q1 / D1 rerun  unfixable over-window FIRST request  @ W=128000
+==============================================================================
+budget = 122874 (window 128000)
+  refused: PreRequestBudgetRefusal: pre-request budget exceeded: 128000 > 122874 (window=128000)
+provider stream calls = 0 (over-window = 0)  refused=true
+run_end = []
+  [PASS] W=128000: single check bounded-refuses the unfixable input  (reverse=false)
+  [PASS] W=128000: knowably over-window requests sent == 0  (reverse=false)  -> sent=0 over=0
+  [PASS] W=128000: zero provider stream calls  (reverse=false)  -> calls=0
+
+==============================================================================
+Q1 control  bypass the single check -> over-window request IS sent  @ W=128000
+==============================================================================
+provider stream calls = 1 (over-window = 1)
+  [PASS] W=128000: bypassing the check sends a knowably over-window request  -> over=1
+
+==============================================================================
+Q2  tool-result continuation overflows window  @ W=8192
+==============================================================================
+run threw = no  stream calls = 2  over-window = 1
+tool executions = 1
+run_end = [{"status":"completed"}]
+  [PASS] W=8192: first request passed the check (small)
+  [PASS] W=8192: a continuation request was emitted after the tool result  -> calls=2
+  [PASS] W=8192: over-window continuation WAS sent (Q2 = NO)  -> over=1
+  [PASS] W=8192: task executed exactly once (no duplicate run)  -> executions=1
+
+==============================================================================
+Q2  tool-result continuation overflows window  @ W=40000  (with veto-attempt hooks)
+==============================================================================
+run threw = no  stream calls = 2  over-window = 1
+tool executions = 1
+run_end = [{"status":"completed"}]
+  [PASS] W=40000: first request passed the check (small)
+  [PASS] W=40000: a continuation request was emitted after the tool result  -> calls=2
+  [PASS] W=40000: over-window continuation WAS sent (Q2 = NO)  -> over=1
+  [PASS] W=40000: task executed exactly once (no duplicate run)  -> executions=1
+
+==============================================================================
+compactible  threshold compaction by Pi owns the shrink  @ W=8192
+==============================================================================
+budget≈3066 perTurn=1226 reserve=6353 threshold=1839
+turns sent = 4  threw = no
+compaction_end = [{"status":"completed","reason":"threshold"},{"status":"completed","reason":"threshold"},{"status":"completed","reason":"threshold"}]
+stream calls = 4  over-window = 0
+  [PASS] W=8192: Pi performed a completed compaction (no host code)  -> ["completed","completed","completed"]
+  [PASS] W=8192: no knowably over-window request was sent  -> over=0
+  [PASS] W=8192: the run kept going after compaction enough turns  -> turns=4
+
+==============================================================================
+compactible  threshold compaction by Pi owns the shrink  @ W=40000
+==============================================================================
+budget≈34874 perTurn=13949 reserve=19077 threshold=20923
+turns sent = 4  threw = no
+compaction_end = [{"status":"completed","reason":"threshold"},{"status":"completed","reason":"threshold"},{"status":"completed","reason":"threshold"}]
+stream calls = 4  over-window = 0
+  [PASS] W=40000: Pi performed a completed compaction (no host code)  -> ["completed","completed","completed"]
+  [PASS] W=40000: no knowably over-window request was sent  -> over=0
+  [PASS] W=40000: the run kept going after compaction enough turns  -> turns=4
+
+==============================================================================
+compactible  threshold compaction by Pi owns the shrink  @ W=128000
+==============================================================================
+budget≈122874 perTurn=49149 reserve=54277 threshold=73723
+turns sent = 4  threw = no
+compaction_end = [{"status":"completed","reason":"threshold"},{"status":"completed","reason":"threshold"},{"status":"completed","reason":"threshold"}]
+stream calls = 4  over-window = 0
+  [PASS] W=128000: Pi performed a completed compaction (no host code)  -> ["completed","completed","completed"]
+  [PASS] W=128000: no knowably over-window request was sent  -> over=0
+  [PASS] W=128000: the run kept going after compaction enough turns  -> turns=4
+
+==============================================================================
+summary failure  bounded (no unbounded retry)  @ W=8192
+==============================================================================
+completeSimple calls = 3
+retry_scheduled = [{"step":"01a1df3c-9e93-7255-9486-fdb9c3cf82c0","attempt":2,"max":3},{"step":"01a1df3c-9e93-7255-9486-fdb9c3cf82c0","attempt":3,"max":3}]
+compaction_end = [{"status":"failed"}]
+  [PASS] W=8192: summary attempts bounded to maxAttempts (=3)  -> calls=3
+  [PASS] W=8192: compaction_end reports failed
+  [PASS] W=8192: no unwindowed over-window request was sent
+
+==============================================================================
+bounded recovery  overflow error -> one native recovery -> success  @ W=8192
+==============================================================================
+compaction_start reasons = ["overflow"]
+run_end = [{"status":"completed"}]
+stream calls = 2  threw = no
+  [PASS] W=8192: exactly one overflow recovery
+  [PASS] W=8192: run_end completed after recovery  -> completed
+  [PASS] W=8192: assistant stream calls bounded (<=2)  -> calls=2
+
+==============================================================================
+bounded recovery  overflow error -> one native recovery -> success  @ W=40000
+==============================================================================
+compaction_start reasons = ["overflow"]
+run_end = [{"status":"completed"}]
+stream calls = 2  threw = no
+  [PASS] W=40000: exactly one overflow recovery
+  [PASS] W=40000: run_end completed after recovery  -> completed
+  [PASS] W=40000: assistant stream calls bounded (<=2)  -> calls=2
+
+==============================================================================
+bounded recovery  overflow error -> one native recovery -> success  @ W=128000
+==============================================================================
+compaction_start reasons = ["overflow"]
+run_end = [{"status":"completed"}]
+stream calls = 2  threw = no
+  [PASS] W=128000: exactly one overflow recovery
+  [PASS] W=128000: run_end completed after recovery  -> completed
+  [PASS] W=128000: assistant stream calls bounded (<=2)  -> calls=2
+
+==============================================================================
+B3  public hook contracts (0.85.1) — none can abort a model request
+==============================================================================
+file: node_modules/@earendil-works/pi-agent-core/dist/harness/agent-harness.d.ts
+  transform_context :510 event{messages,systemPrompt} result{messages?,systemPrompt?}  transform only
+  before_request    :520 event{model,step,attempt,streamOptions} result{streamOptions?}  no messages/window
+  before_payload    :531 event{model,payload} result{payload}  replace only, no abort
+  before_tool       :550 result{args?,block?}  blocks a TOOL, not a request
+  before_compaction :582 result{decline?,compaction?}  declines COMPACTION, not a send
+
+Q1 (first request covered by single check) = YES
+Q2 (tool-result continuation covered by any public seam) = NO
+reverse-tripwire mode = false
+==== failures=0 ====
+exit=0
+
+### REVERSE TRIPWIRE (single check bypassed) - exit non-zero expected
+
+==============================================================================
+Q1 / D1 rerun  unfixable over-window FIRST request  @ W=8192
+==============================================================================
+budget = 3066 (window 8192)
+provider stream calls = 1 (over-window = 1)  refused=false
+run_end = ["completed"]
+  [FAIL] W=8192: single check bounded-refuses the unfixable input  (reverse=true)
+  [FAIL] W=8192: knowably over-window requests sent == 0  (reverse=true)  -> sent=1 over=1
+  [FAIL] W=8192: zero provider stream calls  (reverse=true)  -> calls=1
+
+==============================================================================
+Q1 control  bypass the single check -> over-window request IS sent  @ W=8192
+==============================================================================
+provider stream calls = 1 (over-window = 1)
+  [PASS] W=8192: bypassing the check sends a knowably over-window request  -> over=1
+
+==============================================================================
+Q1 / D1 rerun  unfixable over-window FIRST request  @ W=40000
+==============================================================================
+budget = 34874 (window 40000)
+provider stream calls = 1 (over-window = 1)  refused=false
+run_end = ["completed"]
+  [FAIL] W=40000: single check bounded-refuses the unfixable input  (reverse=true)
+  [FAIL] W=40000: knowably over-window requests sent == 0  (reverse=true)  -> sent=1 over=1
+  [FAIL] W=40000: zero provider stream calls  (reverse=true)  -> calls=1
+
+==============================================================================
+Q1 control  bypass the single check -> over-window request IS sent  @ W=40000
+==============================================================================
+provider stream calls = 1 (over-window = 1)
+  [PASS] W=40000: bypassing the check sends a knowably over-window request  -> over=1
+
+==============================================================================
+Q1 / D1 rerun  unfixable over-window FIRST request  @ W=128000
+==============================================================================
+budget = 122874 (window 128000)
+provider stream calls = 1 (over-window = 1)  refused=false
+run_end = ["completed"]
+  [FAIL] W=128000: single check bounded-refuses the unfixable input  (reverse=true)
+  [FAIL] W=128000: knowably over-window requests sent == 0  (reverse=true)  -> sent=1 over=1
+  [FAIL] W=128000: zero provider stream calls  (reverse=true)  -> calls=1
+
+==============================================================================
+Q1 control  bypass the single check -> over-window request IS sent  @ W=128000
+==============================================================================
+provider stream calls = 1 (over-window = 1)
+  [PASS] W=128000: bypassing the check sends a knowably over-window request  -> over=1
+
+==============================================================================
+Q2  tool-result continuation overflows window  @ W=8192
+==============================================================================
+run threw = no  stream calls = 2  over-window = 1
+tool executions = 1
+run_end = [{"status":"completed"}]
+  [PASS] W=8192: first request passed the check (small)
+  [PASS] W=8192: a continuation request was emitted after the tool result  -> calls=2
+  [PASS] W=8192: over-window continuation WAS sent (Q2 = NO)  -> over=1
+  [PASS] W=8192: task executed exactly once (no duplicate run)  -> executions=1
+
+==============================================================================
+Q2  tool-result continuation overflows window  @ W=40000  (with veto-attempt hooks)
+==============================================================================
+run threw = no  stream calls = 2  over-window = 1
+tool executions = 1
+run_end = [{"status":"completed"}]
+  [PASS] W=40000: first request passed the check (small)
+  [PASS] W=40000: a continuation request was emitted after the tool result  -> calls=2
+  [PASS] W=40000: over-window continuation WAS sent (Q2 = NO)  -> over=1
+  [PASS] W=40000: task executed exactly once (no duplicate run)  -> executions=1
+
+==============================================================================
+compactible  threshold compaction by Pi owns the shrink  @ W=8192
+==============================================================================
+budget≈3066 perTurn=1226 reserve=6353 threshold=1839
+turns sent = 4  threw = no
+compaction_end = [{"status":"completed","reason":"threshold"},{"status":"completed","reason":"threshold"},{"status":"completed","reason":"threshold"}]
+stream calls = 4  over-window = 0
+  [PASS] W=8192: Pi performed a completed compaction (no host code)  -> ["completed","completed","completed"]
+  [PASS] W=8192: no knowably over-window request was sent  -> over=0
+  [PASS] W=8192: the run kept going after compaction enough turns  -> turns=4
+
+==============================================================================
+compactible  threshold compaction by Pi owns the shrink  @ W=40000
+==============================================================================
+budget≈34874 perTurn=13949 reserve=19077 threshold=20923
+turns sent = 4  threw = no
+compaction_end = [{"status":"completed","reason":"threshold"},{"status":"completed","reason":"threshold"},{"status":"completed","reason":"threshold"}]
+stream calls = 4  over-window = 0
+  [PASS] W=40000: Pi performed a completed compaction (no host code)  -> ["completed","completed","completed"]
+  [PASS] W=40000: no knowably over-window request was sent  -> over=0
+  [PASS] W=40000: the run kept going after compaction enough turns  -> turns=4
+
+==============================================================================
+compactible  threshold compaction by Pi owns the shrink  @ W=128000
+==============================================================================
+budget≈122874 perTurn=49149 reserve=54277 threshold=73723
+turns sent = 4  threw = no
+compaction_end = [{"status":"completed","reason":"threshold"},{"status":"completed","reason":"threshold"},{"status":"completed","reason":"threshold"}]
+stream calls = 4  over-window = 0
+  [PASS] W=128000: Pi performed a completed compaction (no host code)  -> ["completed","completed","completed"]
+  [PASS] W=128000: no knowably over-window request was sent  -> over=0
+  [PASS] W=128000: the run kept going after compaction enough turns  -> turns=4
+
+==============================================================================
+summary failure  bounded (no unbounded retry)  @ W=8192
+==============================================================================
+completeSimple calls = 3
+retry_scheduled = [{"step":"01a1df3c-a137-73e1-8792-ff950c921c54","attempt":2,"max":3},{"step":"01a1df3c-a137-73e1-8792-ff950c921c54","attempt":3,"max":3}]
+compaction_end = [{"status":"failed"}]
+  [PASS] W=8192: summary attempts bounded to maxAttempts (=3)  -> calls=3
+  [PASS] W=8192: compaction_end reports failed
+  [PASS] W=8192: no unwindowed over-window request was sent
+
+==============================================================================
+bounded recovery  overflow error -> one native recovery -> success  @ W=8192
+==============================================================================
+compaction_start reasons = ["overflow"]
+run_end = [{"status":"completed"}]
+stream calls = 2  threw = no
+  [PASS] W=8192: exactly one overflow recovery
+  [PASS] W=8192: run_end completed after recovery  -> completed
+  [PASS] W=8192: assistant stream calls bounded (<=2)  -> calls=2
+
+==============================================================================
+bounded recovery  overflow error -> one native recovery -> success  @ W=40000
+==============================================================================
+compaction_start reasons = ["overflow"]
+run_end = [{"status":"completed"}]
+stream calls = 2  threw = no
+  [PASS] W=40000: exactly one overflow recovery
+  [PASS] W=40000: run_end completed after recovery  -> completed
+  [PASS] W=40000: assistant stream calls bounded (<=2)  -> calls=2
+
+==============================================================================
+bounded recovery  overflow error -> one native recovery -> success  @ W=128000
+==============================================================================
+compaction_start reasons = ["overflow"]
+run_end = [{"status":"completed"}]
+stream calls = 2  threw = no
+  [PASS] W=128000: exactly one overflow recovery
+  [PASS] W=128000: run_end completed after recovery  -> completed
+  [PASS] W=128000: assistant stream calls bounded (<=2)  -> calls=2
+
+==============================================================================
+B3  public hook contracts (0.85.1) — none can abort a model request
+==============================================================================
+file: node_modules/@earendil-works/pi-agent-core/dist/harness/agent-harness.d.ts
+  transform_context :510 event{messages,systemPrompt} result{messages?,systemPrompt?}  transform only
+  before_request    :520 event{model,step,attempt,streamOptions} result{streamOptions?}  no messages/window
+  before_payload    :531 event{model,payload} result{payload}  replace only, no abort
+  before_tool       :550 result{args?,block?}  blocks a TOOL, not a request
+  before_compaction :582 result{decline?,compaction?}  declines COMPACTION, not a send
+
+Q1 (first request covered by single check) = YES
+Q2 (tool-result continuation covered by any public seam) = NO
+reverse-tripwire mode = true
+==== failures=9 ====
+exit=1

@@ -7,8 +7,7 @@
 以下文档描述 fshine-agent 的终局架构与功能规格；`v0-architecture.md` 因含架构迁移史叙述仍有执行层实例痕迹（5 处，Tier B 在册、带闭环判据与限期），不代表终局规范已被中性化，阅读时把实例叙述当作"改造史档案"。
 
 - `docs/v0-architecture.md`——架构总览与分层判据
-- `docs/v0-functional-spec.md`——功能规格与能力表
-- `docs/a2a-protocol.md`——结构化调用协议蓝图（参与方、六阶段、失败分类、声明原则）
+- `docs/v0-functional-spec.md`——功能规格与能力表（文首 2026-11-15 注记：§4.1 申报/计划门等为已删机制的历史描述；现行口径以 `AGENTS.md` 现状节 + decision-log §十一/§十三 为准）
 
 ## ② 协议与准入
 
@@ -23,6 +22,7 @@
 以下文档记录迁移过程中的裁定、债务、风险与波次记录，包含执行层实例叙述。属档案例外，不要求中性化；阅读前提是已了解终局规格。
 
 - `docs/debt-ledger.md`——债务登记台账（D-153 起，每条含归属标签 + 闭环判据 + 限期）
+- `docs/a2a-protocol.md`——结构化调用协议历史蓝图（A2A 为历史别名；文件所述宿主侧契约类型 `packages/contracts/src/a2a-protocol.ts` 已随 M4 死代码清扫删除，现行契约语义面见 `packages/contracts/src/execution-contract.ts` 与 decision-log §十三）
 - `docs/change-safety.md`——波次记录与防线表（§25 起含 F3 变异留档）
 - `docs/env-naming-ruling-20261110.md`——隔离环境变量命名族裁定（2026-11-10，`EXECUTION_*` 唯一规范族；含失效条件与闭环判据）
 - `AGENTS.md`——项目约定与横切纪律（迁移期适配现状、授信期门语义、长期目标）
@@ -41,7 +41,13 @@
 - `docs/rule-landing.md`——规则落点索引
 - `docs/eval-mechanism-registry.md`——eval harness 机制登记表（每个机制防什么、拆了会怎样、成本；含审计结论逐条核对记录）
 - `docs/roadmap.md`——路线图
-- `docs/artifacts.md`——产物清单
+- `docs/artifacts.md`——产物清单（**历史**：2026-11-15 注记，其 artifacts/cancel 契约面已被取代；现行契约四态见 `packages/contracts/src/execution-contract.ts:66`）
 - `docs/interactive-session-plan.md`——会话交互方案
 - `docs/v0-implementation-decisions.md`——V0 实施决策记录
 - `docs/business-skill.md`——业务 skill（已中性化，执行默认值与业务路由例子已移出）
+- `docs/product/docs-cleanup-candidates.md`——R5 docs 只读审计候选清单（全量 70 篇分类与依据）
+- `docs/product/docs-cleanup-report.md`——R5 docs 清理实施记录（本次处置、待裁决定论、计数对账）
+
+## ⑤ R5 Phase 3 报告登记处（预留）
+
+`docs/product/r5-phase3-*.md`（Phase 3 报告落盘后在本节登记文件名与一句话状态；当前未落盘，本节为预留位置）。

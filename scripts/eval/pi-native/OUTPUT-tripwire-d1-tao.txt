@@ -1,0 +1,43 @@
+
+==============================================================================
+1  unfixable over-window input, compaction DISABLED
+==============================================================================
+prompt.ok=true  streamCalls=2  overWindowSent=2
+first: promptTokens=20021 budget=7168  nMessages=1
+compaction_start=["overflow"]  run_end=[{"status":"failed","code":"assistant_error"}]  retry_scheduled=0
+(compaction OFF => one overflow-recovery re-send, both over-window, still bounded)
+  [PASS] refused before dispatch? NO (a request WAS sent)  -> streamCalls=2
+  [PASS] knowably over-window requests sent >= 1 (never refused)  -> overWindow=2
+  [PASS] bounded: stream calls <= 2  -> calls=2
+  [PASS] bounded: no retry_scheduled loop  -> retries=0
+  [PASS] end state failed  -> failed
+
+==============================================================================
+2  same input, compaction ENABLED
+==============================================================================
+prompt.ok=true  streamCalls=1  overWindowSent=1  compEnd=["completed"]
+  [PASS] still sent (compaction does NOT pre-send-refuse)  -> streamCalls=1
+  [PASS] over-window sent == 1  -> overWindow=1
+
+==============================================================================
+3  throwing before_request handler + transform_context cannot veto
+==============================================================================
+streamCalls=1  overWindowSent=1
+  [PASS] request STILL sent though before_request threw  -> calls=1 overWindow=1
+
+==============================================================================
+4  public estimation helpers vs wired pre-send guard
+==============================================================================
+estimateContextTokens([giant]).tokens = 20000
+shouldCompact(20000, 8192, {...}) = true
+  [PASS] helpers are public functions
+  [PASS] helper agrees the input would overflow/compact  -> shouldCompact=true
+  [PASS] helpers did NOT prevent the send (see scenarios 1-3)
+
+DETERMINATION:
+  ① refused before dispatch ................ NO
+  ② over-window requests sent ............... compact OFF=2  ON=1 (>=1 always; bounded)
+  ③ bounded failure ......................... yes
+  ④ public pre-send size guard .............. none (only unwired estimateContextTokens/shouldCompact)
+==== INDEPENDENT TRIPWIRE: FACTS OBSERVED (D1 NOT deletable) ====
+run_exit=0

@@ -60,7 +60,7 @@ class DegradeSdkClient implements SdkClientLike {
 }
 
 async function startChannel(client: DegradeSdkClient, handler: ReplyHandler) {
-  const channel = new WecomBotChannel({ env: ENV, clientFactory: () => client, platformRoot: '/tmp' });
+  const channel = new WecomBotChannel({ env: ENV, clientFactory: () => client, platformRoot: '/tmp', deliveryMode: 'live' });
   const starting = channel.start(handler);
   client.emit('authenticated');
   await starting;

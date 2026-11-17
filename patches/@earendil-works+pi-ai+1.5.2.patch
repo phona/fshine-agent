@@ -1,0 +1,40 @@
+diff --git a/node_modules/@earendil-works/pi-ai/dist/api/simple-options.js b/node_modules/@earendil-works/pi-ai/dist/api/simple-options.js
+index a119bf9..1c4fd32 100644
+--- a/node_modules/@earendil-works/pi-ai/dist/api/simple-options.js
++++ b/node_modules/@earendil-works/pi-ai/dist/api/simple-options.js
+@@ -9,8 +9,12 @@ const CONTEXT_SAFETY_RATIO = 0.15;
+ // output is capped at this size so an OpenRouter overcount still fits for a while before compaction.
+ const MIN_OUTPUT_WITH_RATIO_MARGIN = 32768;
+ const MIN_MAX_TOKENS = 1;
++// fshine patch U1: floor for a context-derived clamp when the caller requested no size (same value as
++// MIN_ANSWER_TOKENS below). Without it a nearly full window collapses the request cap to 1 token and a
++// thinking model spends it on a thinking block, answering with empty text.
++const MIN_DERIVED_MAX_TOKENS = 1024;
+ /** Fit maxTokens into the context window, leaving room for the input being counted higher than estimated. */
+-export function clampMaxTokensToContext(model, context, maxTokens) {
++export function clampMaxTokensToContext(model, context, maxTokens, derivedFloor = MIN_MAX_TOKENS) {
+     if (model.contextWindow <= 0)
+         return Math.max(MIN_MAX_TOKENS, maxTokens);
+     const input = estimateContextTokens(context).tokens;
+@@ -19,7 +23,7 @@ export function clampMaxTokensToContext(model, context, maxTokens) {
+     if (room < MIN_OUTPUT_WITH_RATIO_MARGIN) {
+         room = Math.min(MIN_OUTPUT_WITH_RATIO_MARGIN, model.contextWindow - input - CONTEXT_SAFETY_TOKENS);
+     }
+-    return Math.min(maxTokens, Math.max(MIN_MAX_TOKENS, room));
++    return Math.min(maxTokens, Math.max(derivedFloor, room));
+ }
+ export function resolveSamplingParams(model, thinkingLevel, requestParams) {
+     const effectiveThinkingLevel = clampThinkingLevel(model, thinkingLevel);
+@@ -30,10 +34,11 @@ export function resolveSamplingParams(model, thinkingLevel, requestParams) {
+ }
+ export function buildBaseOptions(model, context, options, apiKey) {
+     const samplingParams = resolveSamplingParams(model, options?.reasoning ?? "off", options?.samplingParams);
++    const requestedMaxTokens = options?.maxTokens;
+     return {
+         temperature: options?.temperature,
+         samplingParams,
+-        maxTokens: clampMaxTokensToContext(model, context, options?.maxTokens ?? model.maxTokens),
++        maxTokens: clampMaxTokensToContext(model, context, requestedMaxTokens ?? model.maxTokens, requestedMaxTokens === undefined ? MIN_DERIVED_MAX_TOKENS : MIN_MAX_TOKENS),
+         signal: options?.signal,
+         telemetry: options?.telemetry,
+         apiKey: apiKey || options?.apiKey,

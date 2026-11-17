@@ -1,5 +1,7 @@
 # 会话级产物库与引用迁移（2026-10-20）
 
+> **状态（2026-11-15 注记）：本文为历史设计账，其契约面表述已被取代。** 现行执行契约只定义四态（`completed` / `needs_input` / `failed` / `refused`，`packages/contracts/src/execution-contract.ts:66`），无 `artifacts` / `cancel`（`grep -icE 'artifact|cancel' packages/contracts/src/execution-contract.ts` 零命中）；现行口径见 `docs/decision-log.md` §十三（:683 登记「四态，无 cancel/artifacts」）。下文 W0–W7 记录按当时读数阅读，不因此改写。
+
 > 状态：**已落地**（W0–W7 七波，`npm test` 1494 → 1538 全绿 / 115 → 117 文件 + typecheck 0 错误）。
 > 执行记录见 `change-safety.md` §16；根因登记见 `debt-ledger.md` D-114。
 > 本文是设计账：问题、决策、生命周期、边界。代码是权威，本文解释"为什么这样建"。

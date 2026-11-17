@@ -118,7 +118,7 @@ export function assessEvalIsolation(input: {
   // ① 隔离 mock：root 必须在仓内夹具目录之下（**真实路径**）。root 未配同样拒——"没有平台根"
   // 对评测不是安全态，是跑不出证据的假跑。
   if (platformRoot === undefined) {
-    problems.push('活跃 contextProfile 没有声明 root——未指定隔离 mock（评测脚本走 scripts/eval/eval.agent.yaml，或显式 --config= 指向夹具配置）');
+    problems.push('活跃 contextProfile 没有声明 root——未指定隔离 mock（用显式 --config= 指向仓内夹具配置，例如 config/agent.fixture.yaml）');
   } else if (platformRootReal === null) {
     problems.push(`活跃 profile.root（${platformRoot}）解析不出真实路径（不存在或符号链接断裂）——无法证明它在仓内夹具目录之下，按拒跑处理`);
   } else if (!fixtureWithinRepo) {

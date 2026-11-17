@@ -2,11 +2,10 @@ import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 
 /**
- * 两类 project（unit / e2e）共享的测试面配置。
+ * 测试面配置（现为单 project：unit；原 e2e project 已随旧套件于 2026-11-13 删除）。
  *
  * 注意：vitest 3 的 projects **不继承**根级 test 选项（实测：setupFiles 放根下，
- * 两个 project 都收不到），共享项必须逐项展开进每个 project——这里收敛成单一
- * 来源，避免两处漂移。
+ * project 内收不到），共享项必须逐项展开进 project——这里收敛成单一来源，避免漂移。
  *
  * ⚠️ 但有两个例外，**根级设置是生效的**（实测，别被上面这句话误导成"根级都没用"）：
  *   1) `maxWorkers` —— 根级生效，project 内不生效（见下方并发边界段）。
@@ -16,6 +15,12 @@ import { defineConfig } from 'vitest/config';
  *      展开后会装两遍守卫（幂等，但日志会重复）。
  */
 const ALIAS = [
+  // Execution Contract 的子路径入口：barrel（packages/contracts/src/index.ts）不导出
+  // execution-contract 语义面，运行时/适配器按子路径导入，测试解析需单独映射。
+  {
+    find: '@fshine/contracts/execution-contract',
+    replacement: fileURLToPath(new URL('./packages/contracts/src/execution-contract.ts', import.meta.url)),
+  },
   {
     find: /^@fshine\/([\w-]+)$/,
     replacement: fileURLToPath(new URL('./packages', import.meta.url)) + '/$1/src/index.ts',
@@ -28,15 +33,16 @@ const SHARED = {
   setupFiles: ['tests/vitest.setup.ts'],
   environment: 'node' as const,
   pool: 'forks' as const,
-  // e2e 全链用例要真 spawn CLI 进程（mock 网关/计划 CLI），单例 0.8-2.6s 是正常速度；
-  // 共享机器高负载时劣化 3-4 倍（实测 7.9s），默认 5s 超时会把负载抖动变成假失败
-  // （2026-09-27 复现：计划门确认路径两例在 load 10+ 时间歇性红，低负载三连全绿）。
+  // 原 e2e 全链用例要真 spawn CLI 进程（mock 网关/计划 CLI；套件已删除，值保留），
+  // 单例 0.8-2.6s 是正常速度；共享机器高负载时劣化 3-4 倍（实测 7.9s），默认 5s
+  // 超时会把负载抖动变成假失败（2026-09-27 复现：计划门确认路径两例在 load 10+
+  // 时间歇性红，低负载三连全绿）。
   testTimeout: 30_000,
   // 收尾预算：afterAll/afterEach（rmSync 临时目录、关 SQLite、关装配）超时即爆，
   // 不让一个坏钩子把整个 worker 吊死（事故夜 27 分钟不退出的直接放大器）。
   teardownTimeout: 10_000,
-  // beforeAll/afterEach 的单钩子预算：e2e beforeAll 要 spawn 平台 CLI 派生 label 表
-  // （正常 1-3s），20s 足够覆盖高负载劣化又不至于无限等。
+  // beforeAll/afterEach 的单钩子预算：原 e2e beforeAll 要 spawn 平台 CLI 派生 label 表
+  // （正常 1-3s；套件已删除，值保留），20s 足够覆盖高负载劣化又不至于无限等。
   hookTimeout: 20_000,
 } as const;
 
@@ -59,8 +65,8 @@ export default defineConfig({
      *
      * 原设计是"unit 3 / e2e 2 分类给"，**没有实现**：vitest 3.2.7 不读 project 内的
      * maxWorkers（实测单跑 --project unit 仍开 7 个 worker），根级 maxWorkers 才对
-     * unit/e2e 一视同仁。要分类得拆成两条 vitest run 命令或 workspace 配置，
-     * 仍未做——下面两个 project 里那两行已删，不再留"写着但不生效"的假配置。
+     * 各 project 一视同仁。要分类得拆成两条 vitest run 命令或 workspace 配置，
+     * 仍未做——project 里那行已删，不再留"写着但不生效"的假配置。
      *
      * 为什么取 3（实测，全量 78 文件 / 987 测试 / exit=0）：
      *   并发        全量墙钟    峰值 RSS(worker 合计)    孤儿最坏内存
@@ -90,18 +96,11 @@ export default defineConfig({
         resolve: { alias: ALIAS },
         test: {
           name: 'unit',
-          // `scripts/**` 是 D-087 补的：验收夹具与运维脚本自此进测试覆盖面。此前这里只有
-          // packages/apps，而 leak-lint 反而扫 scripts/——两边覆盖不对称（D-084 残留 b
-          // 的一半；tsconfig 的 include 仍不含 scripts/，那另一半不混在本波里）。
+          // `scripts/**` 纳入：脚本层测试（resolve-config-path 等）与包内测试同一基线跑。
+          // 历史：D-087 为对齐当时 leak-lint 的覆盖面而补（D-084 残留 b）；leak-lint 守卫
+          // 已随 M2 波次 1 删除（当前树无该文件），本 include 独立成立；tsconfig 的
+          // include 仍不含 scripts/，两个覆盖面各管各的。
           include: ['packages/**/*.test.ts', 'apps/**/*.test.ts', 'scripts/**/*.test.ts'],
-          ...SHARED,
-        },
-      },
-      {
-        resolve: { alias: ALIAS },
-        test: {
-          name: 'e2e',
-          include: ['tests/e2e/**/*.test.ts'],
           ...SHARED,
         },
       },

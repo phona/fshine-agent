@@ -1,49 +1,119 @@
 /**
- * PiTurnDriver:基于 pi.dev 生态(@earendil-works/pi-agent-core + pi-ai)的回合驱动。
- * 模型走原生 function calling(无自定义 JSON 协议);流式响应;空闲超时。
- * 事实类进度(重试等)由 host 钩子负责;工具级进度在本驱动的 execute 内渲染。
+ * PiTurnDriver：基于 `@earendil-works/pi-coding-agent@1.5.2` 公开 `AgentSession` 的回合驱动。
+ *
+ * 转录所有权（设计见 `docs/product/pi-152-adapter-design.md`）：
+ *   · `AgentSession` + `SessionManager` 是会话转录、agent loop、压缩与原生重试的**唯一所有者**；
+ *   · 宿主不再持有第二份可变转录：本驱动只把「本轮新增输入」交给 Pi，并把 Pi 会话
+ *     投影成**只读** AgentMessage 快照交回（`TurnDriver.transcript()` 同样只读）；
+ *   · 压缩的触发 / 执行（摘要）/ 尾段保留 / 溢出恢复全部归 Pi；fshine 只传绝对
+ *     `CompactionSettings`（Pi 配置适配，见 piCompactionSettings —— 不是压缩机制）。
+ *
+ * 工具面 = `customTools` + 显式白名单 `tools`（Pi 内置 read/bash/edit/write 不激活）；
+ * 模型走原生 function calling；模型能力/凭据只来自调用方传入的 env / ModelRuntime。
  */
-import { Agent, type AgentTool, DEFAULT_COMPACTION_SETTINGS, estimateContextTokens, estimateTokens, generateSummary, shouldCompact, type AgentMessage } from '@earendil-works/pi-agent-core';
-import { BACKGROUND_CONTEXT } from '@earendil-works/pi-agent-core/harness/context';
+import { mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import {
-  createModels,
-  createProvider,
-  defaultProviderAuthContext,
-  envApiKeyAuth,
-  type Api,
-  type AuthContext,
-  type Message,
-  type Model,
-  type MutableModels,
-} from '@earendil-works/pi-ai';
-import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
+  createAgentSession,
+  createExtensionRuntime,
+  DEFAULT_COMPACTION_SETTINGS,
+  ModelRuntime,
+  SessionManager,
+  SettingsManager,
+  type AgentSession,
+  type AgentSessionEvent,
+  type CompactionSettings,
+  type ResourceLoader,
+  type ToolDefinition,
+} from '@earendil-works/pi-coding-agent';
+import type { AgentMessage, AgentToolResult } from '@earendil-works/pi-agent-core';
+import type { Model } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import type { DiscoveredTool } from '@fshine/contracts';
-import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
+import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver-contract';
 import { renderToolStepText } from './step-text';
-import {
-  buildCompactionContextSidecar,
-  COMPACTION_CONTEXT_MESSAGE_TYPE,
-  compactedTranscriptWithContext,
-  subtractRetainedRequestCounts,
-} from './compaction-context';
-import { buildRequestKey, collectDelegatedRequestCounts } from './repeat-request';
 
-const IDLE_TIMEOUT_MS = 90_000; // 流式空闲超时:每收到一个 chunk(含 reasoning 增量)即重置
-const OVERALL_TIMEOUT_MS = 300_000; // 单次模型调用总上限(兜底,正常由回合预算约束)
+/** 主模型瞬时失败的有界重试策略（交给 Pi 原生 RetrySettings 执行；沿用旧 [1000,2000] 两次延迟）。 */
+const MAIN_MODEL_RETRY_SETTINGS = { enabled: true, maxRetries: 2, baseDelayMs: 1_000 } as const;
+
+/** 模型 provider id（与 createPiModelRuntime 注册的一致；不取模型输出）。 */
+const LLM_PROVIDER_ID = 'llm';
+
+/**
+ * 空回复有两种形状，都要催一次「给出最终文本」：
+ *   ① 模型以 `stopReason=stop` 收尾，但 content 只有 thinking 块、没有 text；
+ *   ② 回合以**工具结果 / 用户消息**收尾、始终没有最终文本（模型调完工具就停了）。
+ * 形状②原先不催（条件只认 assistant+stop），R6 实测 61 次空回复里 59 次是这种形状，
+ * 用户会直接看到空回复。有正文 / error / aborted 仍然不催——那不是「只思考没正文」。
+ */
+export function shouldNudgeFinalReply(messages: readonly AgentMessage[], text: string): boolean {
+  if (text.trim()) return false;
+  const last = messages[messages.length - 1] as { role?: string; stopReason?: string } | undefined;
+  if (last === undefined) return false;
+  if (last.role === 'assistant') return last.stopReason === 'stop';
+  return last.role === 'toolResult' || last.role === 'user';
+}
+
+/** 只输出思考没正文时的收尾催问（一轮一次；不影响正常回复）。 */
+const FINAL_REPLY_NUDGE = '请直接给出面向用户的最终回复文本，不要只输出思考过程。';
 const PROVIDER_TOOL_NAME_MAX_LENGTH = 64;
 const PROVIDER_TOOL_NAME_RE = /^[A-Za-z0-9_-]+$/;
 
-/** Core Agent drops custom messages by default; explicitly project only our host task context. */
-export function plannerMessagesToLlm(messages: readonly AgentMessage[]): Message[] {
-  return messages.flatMap((message): Message[] => {
-    if (message.role === 'user' || message.role === 'assistant' || message.role === 'toolResult') return [message];
-    const custom = message as unknown as { role?: string; customType?: string; content?: unknown; timestamp?: number };
-    if (custom.role !== 'custom' || !['background_task_event', 'background_task_roster', COMPACTION_CONTEXT_MESSAGE_TYPE].includes(custom.customType ?? '')
-      || typeof custom.content !== 'string' || !custom.content.trim()) return [];
-    return [{ role: 'user', content: [{ type: 'text', text: custom.content }], timestamp: custom.timestamp ?? 0 }];
-  });
+/**
+ * 模型的上下文窗口缺省值（token）。**这是缺省，不是能力声明本身**：真实部署的窗口由
+ * 模型能力提供（createPiModelRuntime 的 capabilities / PiTurnDriverOptions.contextWindow，
+ * 装配层持有配置、驱动只收参数）。未提供能力时沿用本缺省值。
+ */
+export const DEFAULT_CONTEXT_WINDOW = 128_000;
+/** 单次输出上限的缺省值（token）：同 DEFAULT_CONTEXT_WINDOW，属能力声明的一部分。 */
+export const DEFAULT_MAX_TOKENS = 32_000;
+
+/** 模型能力声明（部署层提供；驱动只收参数，不猜、不按名字查表）。 */
+export interface PiModelCapabilities {
+  /** 上下文窗口（token）。 */
+  contextWindow?: number;
+  /** 单次输出上限（token）。 */
+  maxTokens?: number;
 }
+
+/**
+ * **Pi 配置适配（Integration），非压缩机制。**
+ *
+ * Pi 的 `shouldCompact(tokens, W, settings)` 要求调用方提供**绝对** `CompactionSettings`
+ * （只有 `enabled/reserveTokens/keepRecentTokens` 三个绝对字段，无窗口相对字段、无缩放助手）。
+ * Pi 缺省值按 128k 窗口设计（reserve=16384、keepRecent=20000）：小窗口下 reserve 会
+ * 超过窗口本身，不缩放则 Pi 自身行为已失效（短回合被压、零收益循环）。
+ *
+ * 因此本函数只做一件纯配置的事：**窗口装得下 Pi 缺省就沿用缺省，否则按比例缩放**——
+ * 这是履行 Pi 契约的入参，**不含任何 fshine 的压缩决策/安全闸 math**。触发/执行/摘要/
+ * 尾段/溢出恢复全归 Pi。
+ *
+ * 纯函数、无副作用、无外部依赖。
+ */
+/** 传给 Pi 的绝对压缩配置（三字段必填；Pi 的 CompactionSettings 字段可选，此处给出确定值）。 */
+export interface PiCompactionConfig {
+  enabled: boolean;
+  reserveTokens: number;
+  keepRecentTokens: number;
+}
+
+export function piCompactionSettings(contextWindow: number): PiCompactionConfig {
+  const defaults = DEFAULT_COMPACTION_SETTINGS;
+  // Pi 缺省值在运行期必然存在（DEFAULT_COMPACTION_SETTINGS 常量）；`??` 只为类型收敛，
+  // 数值不另造：仍是 Pi 的 16384 / 20000。
+  const reserveTokens = defaults.reserveTokens ?? 16_384;
+  const keepRecentTokens = defaults.keepRecentTokens ?? 20_000;
+  if (!Number.isFinite(contextWindow) || contextWindow >= reserveTokens + keepRecentTokens) {
+    return { enabled: defaults.enabled ?? true, reserveTokens, keepRecentTokens };
+  }
+  return {
+    enabled: true,
+    reserveTokens: Math.max(1, Math.min(reserveTokens, Math.floor(contextWindow * 0.25))),
+    keepRecentTokens: Math.max(1, Math.min(keepRecentTokens, Math.floor(contextWindow * 0.3))),
+  };
+}
+
 /** Kimi coding/OpenAI-compatible endpoint's supported reasoning controls. */
 export const KIMI_THINKING_LEVEL_MAP = {
   off: null,
@@ -61,8 +131,6 @@ export type PiThinkingLevel = (typeof PI_THINKING_LEVELS)[number];
 
 /**
  * 校验思考深度原始值:合法原样返回,空串归一为 undefined(= 不带思考参数),非法抛中文错误。
- * `envVarName` 只进错误信息:同一份词表被 LLM_THINKING_LEVEL 与 LLM_MAIN_THINKING_LEVEL
- * 两个入口共用(词表只有这一个权威位置),报错必须指向真正配错的那一个变量。
  */
 export function parsePiThinkingLevel(rawValue: string | undefined, envVarName: string): PiThinkingLevel | undefined {
   const value = rawValue ?? '';
@@ -73,60 +141,70 @@ export function parsePiThinkingLevel(rawValue: string | undefined, envVarName: s
   return value as PiThinkingLevel;
 }
 
+/**
+ * 校验上下文窗口的原始声明（token）：空串/未设置归一为 undefined（回落 128k 缺省），
+ * 非法值抛中文错误。
+ */
+export function parseContextWindow(rawValue: string | number | undefined, envVarName: string): number | undefined {
+  if (rawValue === undefined) return undefined;
+  const text = String(rawValue).trim();
+  if (text === '') return undefined;
+  const value = Number(text);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`环境变量 ${envVarName} 必须是正整数（当前: ${text}）`);
+  }
+  return value;
+}
+
 export interface PiTurnDriverOptions {
   env: Record<string, string | undefined>;
-  /**
-   * 显式模型 id(分层模型接缝):装配层持有配置,按 LLM_MAIN_MODEL(缺省回落 LLM_MODEL)
-   * 解析后传入,驱动不自行读取 Main 专用 env。缺省(不传)回落 env.LLM_MODEL——
-   * 直连调用方(scripts/ask.ts 等手工入口)与历史行为逐字段一致。
-   */
+  /** 显式模型 id(分层模型接缝)。缺省(不传)回落 env.LLM_MODEL。 */
   modelId?: string;
-  /**
-   * 显式思考深度:装配层按 LLM_MAIN_THINKING_LEVEL(缺省回落 LLM_THINKING_LEVEL)校验后
-   * 传入。缺省(不传)回落 env.LLM_THINKING_LEVEL(此处校验,报错指向该变量)。
-   */
+  /** 显式思考深度。缺省(不传)回落 env.LLM_THINKING_LEVEL。 */
   thinkingLevel?: PiThinkingLevel;
-}
-
-export interface PiModelRuntime {
-  models: MutableModels;
-  model: Model<Api>;
+  /** 显式模型能力(上下文窗口，token)。缺省 = DEFAULT_CONTEXT_WINDOW。 */
+  contextWindow?: number;
+  /** 显式单次输出上限（token）。缺省 = DEFAULT_MAX_TOKENS。 */
+  maxTokens?: number;
+  /** 注入的模型运行时（测试/嵌入用；必须已注册 LLM_PROVIDER_ID 的 provider）。 */
+  modelRuntime?: ModelRuntime;
+  /**
+   * 显式 Pi 压缩配置（绝对 `reserveTokens`/`keepRecentTokens`）。缺省 = 由窗口派生的
+   * `piCompactionSettings(model.contextWindow)`（行为逐字节不变）。装配/评测需要按
+   * 「窗口 − 输出预算 − 余量」给出安全值时，经此参数传入；驱动仍只做透传，
+   * 触发/执行/摘要/尾段全归 Pi（不含任何 fshine 压缩决策）。
+   */
+  compactionSettings?: CompactionSettings;
+  /**
+   * 会话生命周期：true = 本驱动实例持有**一个** AgentSession（首次 run 创建，跨回合复用；
+   * 生产装配在业务会话级 Main 上传 true）；false/缺省 = 每回合一次性会话（Worker/直测）。
+   */
+  reuseConversation?: boolean;
+  /**
+   * 会话落盘目录（仅实例级会话；缺省 = 进程内 SessionManager.inMemory，不写盘）。
+   * 阶段 C 的持久化装配点：显式给出即落盘，可被 resumeSessionFile 重开。
+   */
+  sessionDir?: string;
+  /** 从已落盘的 Pi 会话文件继续同一 Session（只消费一次；缺省 = 新会话）。 */
+  resumeSessionFile?: string;
+  /**
+   * Pi 的 cwd（渲染进系统提示 <cwd> 段的工作目录）。必须是与宿主项目隔离的空目录；
+   * 缺省 = 进程临时目录下的 `fshine-pi-<pid>`（不指向仓库根/用户主目录）。
+   */
+  workspaceDir?: string;
+  /** Pi 的 agentDir（配置/凭据发现面）。缺省 = workspaceDir/.pi-agent，不读宿主 ~/.pi。 */
+  agentDir?: string;
 }
 
 /**
- * 环境范围认证上下文：先查驱动收到的 env（装配下传的 effectiveEnv / 直连调用方
- * 传入的 env），缺失才回落库默认上下文（process.env + node:fs）。
- *
- * 为什么必须显式织入（issue #20 切片 C+D 回归 / Codex blocking）：pi-ai 默认认证
- * 上下文只读 process.env（库 auth/context.js 头注："Default auth context: env vars
- * from process.env"），而部署配置把 LLM_API_KEY 派生进 effectiveEnv——只把它当
- * options.env 传进来，认证解析看不到它，首次模型请求必然失败。密钥不写回
- * process.env：装配层设计注释已明令，进程级注入会让模型经工具面拿到密钥。
+ * 从 env 构建 kimi 兼容的 Pi `ModelRuntime`（公开 API：ModelRuntime.create + registerProvider）。
+ * env 缺失在创建时即抛中文错误。认证只认 `options.env` 的 LLM_API_KEY（不读 process.env）。
  */
-function envScopedAuthContext(
-  env: Record<string, string | undefined>,
-  fallback: AuthContext,
-): AuthContext {
-  return {
-    async env(name: string): Promise<string | undefined> {
-      const value = env[name];
-      if (typeof value === 'string' && value.trim() !== '') return value;
-      return fallback.env(name);
-    },
-    fileExists: (path: string) => fallback.fileExists(path),
-  };
-}
-
-/**
- * 从 env 构建 kimi 兼容的 pi 模型集合与认证上下文;env 缺失在创建时即抛中文错误。
- *
- * 导出给认证链接线测试用（`pi-driver-auth.test.ts` 走库的 `Models.getAuth` 解析面，
- * 不起网络）。生产入口仍是 `createPiTurnDriver`。
- */
-export function createPiModelRuntime(
+export async function createPiModelRuntime(
   env: Record<string, string | undefined>,
   modelId: string,
-): PiModelRuntime {
+  capabilities: PiModelCapabilities = {},
+): Promise<ModelRuntime> {
   const baseUrl = (env.LLM_API_BASE_URL ?? '').replace(/\/+$/, '');
   const apiKey = env.LLM_API_KEY;
   if (!baseUrl || !apiKey || !modelId) {
@@ -140,168 +218,641 @@ export function createPiModelRuntime(
     throw new Error(`缺少环境变量 ${missing.join('、')},无法初始化 LLM 客户端`);
   }
 
-  // kimi coding 端点不接受 developer 角色(pi 对 reasoning 模型的默认行为),
-  // 按 pi-ai 文档用 compat.supportsDeveloperRole=false 显式声明,模型推理能力不受影响
-  const kimiModel: Model<'openai-completions'> = {
-    id: modelId,
-    name: modelId,
-    api: 'openai-completions',
-    provider: 'llm',
-    baseUrl,
-    reasoning: true,
-    // Kimi accepts reasoning_effort, but only the ordinary low/medium/high
-    // values are meaningful. Explicitly reject Pi's opt-in xhigh/max levels.
-    compat: { supportsDeveloperRole: false, supportsReasoningEffort: true },
-    thinkingLevelMap: KIMI_THINKING_LEVEL_MAP,
-    input: ['text'],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128_000,
-    maxTokens: 32_000,
-  };
-  const provider = createProvider({
-    id: 'llm',
+  const runtime = await ModelRuntime.create({
+    // 隔离认证存储：不读宿主 ~/.pi/agent/auth.json；凭据只来自本函数的 apiKey。
+    authPath: path.join(tmpdir(), `fshine-pi-auth-${process.pid}.json`),
+    modelsPath: null,
+    refreshOnCreate: false,
+  });
+  runtime.registerProvider(LLM_PROVIDER_ID, {
     name: 'LLM',
-    baseUrl,
-    auth: { apiKey: envApiKeyAuth('LLM API key', ['LLM_API_KEY']) },
-    models: [kimiModel],
-    api: openAICompletionsApi(),
+    api: 'openai-completions',
+    apiKey,
+    models: [{
+      id: modelId,
+      name: modelId,
+      api: 'openai-completions',
+      baseUrl,
+      reasoning: true,
+      compat: { supportsDeveloperRole: false, supportsReasoningEffort: true },
+      input: ['text'],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: parseContextWindow(capabilities.contextWindow, 'contextWindow') ?? DEFAULT_CONTEXT_WINDOW,
+      maxTokens: capabilities.maxTokens ?? DEFAULT_MAX_TOKENS,
+    }],
   });
-  const models = createModels({
-    authContext: envScopedAuthContext(env, defaultProviderAuthContext()),
-  });
-  models.setProvider(provider);
-  const model = models.getModel('llm', modelId);
-  if (!model) throw new Error(`LLM 模型 ${modelId} 注册失败`);
-  return { models, model };
+  if (!runtime.getModel(LLM_PROVIDER_ID, modelId)) throw new Error(`LLM 模型 ${modelId} 注册失败`);
+  return runtime;
 }
 
-/** 从 env 构建 kimi 兼容的 pi 驱动;env 缺失在创建时即抛中文错误。 */
+/**
+ * 受控 ResourceLoader（公开接口实现，不是 Pi 源码副本）：
+ *   · 系统提示 = 装配层给的 fshine 提示（Pi 用它替换默认 coding-assistant preamble）；
+ *   · 不加载项目文件（AGENTS.md 等）、扩展、提示模板、主题 → 不自动授予文件系统/终端/MCP；
+ *   · 不启用 Pi 的技能读取段（我们只暴露业务工具白名单，不含 read/bash）。
+ */
+function createFshineResourceLoader(systemPrompt: string): ResourceLoader {
+  return {
+    getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
+    getSkills: () => ({ skills: [], diagnostics: [] }),
+    getPrompts: () => ({ prompts: [], diagnostics: [] }),
+    getThemes: () => ({ themes: [], diagnostics: [] }),
+    getAgentsFiles: () => ({ agentsFiles: [] }),
+    getSystemPrompt: () => systemPrompt,
+    getSystemPromptSource: () => undefined,
+    getAppendSystemPrompt: () => [],
+    getAppendSystemPromptSources: () => [],
+    extendResources: () => {},
+    reload: async () => {},
+  };
+}
+
+/** 本回合工具执行面（exec/onStep/signal/onRuntimeEvent 每回合更新；工具定义本身随会话固定）。 */
+export interface TurnExecSurface {
+  exec: TurnDriverInput['exec'];
+  onStep: TurnDriverInput['onStep'];
+  signal?: AbortSignal;
+  /** U3：运行时回合事实（assistant_end / compaction willRetry / auto_retry）→ 宿主重放窗口判定。 */
+  onRuntimeEvent?: TurnDriverInput['onRuntimeEvent'];
+}
+
+/** 构造 Pi 原生工具定义（execute 动态读取本回合执行面，不钉死首回合闭包）。 */
+export interface PiAgentTool {
+  name: string;
+  label: string;
+  description: string;
+  parameters: ReturnType<typeof Type.Unsafe>;
+  execute(
+    toolCallId: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<AgentToolResult<unknown>>;
+}
+
+export function toAgentTool(
+  tool: DiscoveredTool,
+  surface: TurnExecSurface,
+  providerName = tool.name,
+): PiAgentTool {
+  return {
+    name: providerName,
+    label: tool.name,
+    description: tool.description,
+    parameters: Type.Unsafe({
+      ...tool.inputSchema,
+      properties: {
+        ...typeof tool.inputSchema === 'object' && tool.inputSchema !== null
+          ? (tool.inputSchema as { properties?: Record<string, unknown> }).properties
+          : {},
+        progress: {
+          type: 'string',
+          description:
+            '一句话说明你即将做什么(≤50 字),作为给用户看的进度提示;只许描述即将进行的动作,严禁包含任何结果数字、编号或协议字段',
+        },
+      },
+    }),
+    execute: async (
+      _toolCallId: string,
+      params: Record<string, unknown>,
+    ): Promise<AgentToolResult<unknown>> => {
+      const { progress, ...args } = params as Record<string, unknown> & { progress?: unknown };
+      const phrase = typeof progress === 'string' ? progress : '';
+      const step = renderToolStepText(tool.name, phrase);
+      if (step) surface.onStep(step);
+      try {
+        const data = await surface.exec(tool.name, args, surface.signal);
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(data) }],
+          details: {},
+        };
+      } catch (error) {
+        if (error instanceof ToolUserError) {
+          // 确定性失败话术直接终结回合,不经模型复述
+          return {
+            content: [{ type: 'text' as const, text: error.message }],
+            details: {},
+            terminate: true,
+          };
+        }
+        throw error;
+      }
+    },
+  };
+}
+
+/** 本驱动实例持有的 Pi 会话（reuseConversation 时跨回合复用）。 */
+interface TurnSlot {
+  retryScheduled: number;
+  /**
+   * 本失败周期内**实际发生**的模型尝试数（1 起）。重试由 Pi 原生 AgentSession 执行，
+   * 驱动只能从 assistant `message_end` 事件看到真实尝试；正常 assistant 收尾即周期结束、
+   * 归零（下个失败周期重新从 1 计）。重试在退避中被取消不会产生新的 message_end，
+   * 因此不会虚报尝试次数。
+   */
+  attempt: number;
+  /** 本回合最近一次 assistant 失败（sticky：只用于归因日志）。 */
+  runFailure?: { code: string; message: string; attempt: number };
+  /**
+   * 失败之后是否又有正常 assistant 消息（Pi 原生重试/溢出恢复成功）：
+   * `runFailure` 且未 recovered = 本回合仍以失败收尾（不得把尾部 toolResult/旧正文当答复）。
+   */
+  recovered?: boolean;
+}
+
+interface Conversation {
+  session: AgentSession;
+  sessionManager: SessionManager;
+  systemPrompt: string;
+  toolNames: string;
+  contextWindow: number;
+  /** 回合归因槽：事件 listener 只随会话注册一次，每回合指向本回合的计数/失败。 */
+  slot: { current: TurnSlot | undefined };
+  lastProjection: AgentMessage[];
+}
+
+/** 会话创建参数（工具定义与执行面分离：工具随会话固定，执行面每回合换）。 */
+interface BuildConversationInput {
+  tools: readonly DiscoveredTool[];
+  providerNames: Map<string, string>;
+  systemPrompt: string;
+  surfaceRef: { current: TurnExecSurface | undefined };
+  seed: readonly AgentMessage[];
+}
+
+/** 从 env 构建 Pi 回合驱动。env 缺失在首次会话创建时抛中文错误。 */
 export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
   const modelId = options.modelId ?? options.env.LLM_MODEL ?? '';
-  const { models, model } = createPiModelRuntime(options.env, modelId);
-
-  // 思考深度(pi 统一抽象):off/minimal/low/medium/high/xhigh/max。
-  // 是否生效取决于模型/端点是否支持思考参数;不支持的供应商 pi-ai 静默忽略。
-  // 词表与校验在 parsePiThinkingLevel(模块级唯一定义);装配层显式传入时已校验过,
-  // 走到 env 回落才在这里报错,错误信息仍指向 LLM_THINKING_LEVEL。
   const thinkingLevel = options.thinkingLevel
     ?? parsePiThinkingLevel(options.env.LLM_THINKING_LEVEL, 'LLM_THINKING_LEVEL');
+
+  let runtimePromise: Promise<ModelRuntime> | undefined;
+  const getRuntime = (): Promise<ModelRuntime> => {
+    if (runtimePromise === undefined) {
+      runtimePromise = options.modelRuntime !== undefined
+        ? Promise.resolve(options.modelRuntime)
+        : createPiModelRuntime(options.env, modelId, {
+          ...(options.contextWindow !== undefined ? { contextWindow: options.contextWindow } : {}),
+          ...(options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
+        });
+      runtimePromise.catch(() => { runtimePromise = undefined; });
+    }
+    return runtimePromise;
+  };
+
+  const reuseConversation = options.reuseConversation === true;
+  let conversation: Promise<Conversation> | undefined;
+  /** 已就绪的实例级会话（transcript 的同步读面；Promise 兑现时同步写入）。 */
+  let resolvedConversation: Conversation | undefined;
+  let pendingResumeFile = options.resumeSessionFile;
+  let lastTurnProjection: readonly AgentMessage[] = [];
+  /**
+   * 实例级会话的工具执行面引用（跨回合同一个对象）：工具定义在会话创建时固定，
+   * 每次 run 只替换 `current`，因此 exec/onStep 始终是本回合闭包。
+   */
+  const sessionSurface: { current: TurnExecSurface | undefined } | undefined = reuseConversation
+    ? { current: undefined }
+    : undefined;
+
+  const workspaceDir = options.workspaceDir ?? path.join(tmpdir(), `fshine-pi-${process.pid}`);
+  const agentDir = options.agentDir ?? path.join(workspaceDir, '.pi-agent');
+
+  const buildConversation = async (input: BuildConversationInput): Promise<Conversation> => {
+    const runtime = await getRuntime();
+    const model = runtime.getModel(LLM_PROVIDER_ID, modelId) as Model<'openai-completions'> | undefined;
+    if (!model) throw new Error(`LLM 模型 ${modelId} 未在 ModelRuntime 注册`);
+
+    mkdirSync(workspaceDir, { recursive: true });
+    mkdirSync(agentDir, { recursive: true });
+    if (options.sessionDir !== undefined) mkdirSync(options.sessionDir, { recursive: true });
+
+    const settingsManager = SettingsManager.inMemory({
+      compaction: options.compactionSettings ?? piCompactionSettings(model.contextWindow),
+      retry: { ...MAIN_MODEL_RETRY_SETTINGS },
+    });
+
+    const resumeFile = pendingResumeFile;
+    pendingResumeFile = undefined;
+    const sessionManager = resumeFile !== undefined
+      ? SessionManager.open(resumeFile, options.sessionDir, workspaceDir)
+      : options.sessionDir !== undefined
+        ? SessionManager.create(workspaceDir, options.sessionDir)
+        : SessionManager.inMemory(workspaceDir);
+    // 首回合/一次性回合的种子历史只进新会话；恢复会话不重灌（转录归 Pi）。
+    if (resumeFile === undefined) {
+      for (const message of input.seed) sessionManager.appendMessage(toSessionMessage(message));
+    }
+
+    const toolDefinitions = input.tools.map((tool) => toAgentTool(
+      tool,
+      {
+        exec: (name, args, signal) => input.surfaceRef.current === undefined
+          ? Promise.reject(new Error('本回合工具执行面尚未就绪'))
+          : input.surfaceRef.current.exec(name, args, signal),
+        onStep: (text) => input.surfaceRef.current?.onStep(text),
+        get signal() { return input.surfaceRef.current?.signal; },
+      },
+      input.providerNames.get(tool.name) ?? tool.name,
+    ));
+
+    const { session } = await createAgentSession({
+      cwd: workspaceDir,
+      agentDir,
+      model,
+      modelRuntime: runtime,
+      ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
+      sessionManager,
+      settingsManager,
+      resourceLoader: createFshineResourceLoader(input.systemPrompt),
+      customTools: toolDefinitions as ToolDefinition[],
+      // 显式白名单：只激活业务工具。probe 实测 noTools:'all' 会把 customTools 一并关掉。
+      tools: toolDefinitions.map((tool) => tool.name),
+    });
+
+    const slot: Conversation['slot'] = { current: undefined };
+    session.subscribe((event: AgentSessionEvent) => {
+      if (event.type === 'compaction_end') {
+        // U3：溢出/阈值压缩后将继续重试 = 上一次 assistant 尝试被丢弃（Pi 的 _omitRecoveryAttempt
+        // 只隐藏该尝试及其 toolResult，不回滚已发生的副作用）。只转述事实，判定归宿主。
+        if (event.willRetry) input.surfaceRef.current?.onRuntimeEvent?.({ kind: 'recovery', reason: 'compaction' });
+        return;
+      }
+      if (event.type === 'auto_retry_start') {
+        if (slot.current) slot.current.retryScheduled += 1;
+        // U3：瞬时错误（529 等）的自动重试 = 上一次 assistant 尝试被丢弃；重试响应可能
+        // 重发同一 toolCall。与 message_end('error') 同一失败周期内重复转述，宿主侧幂等开窗。
+        input.surfaceRef.current?.onRuntimeEvent?.({ kind: 'recovery', reason: 'auto_retry' });
+        console.warn(JSON.stringify({
+          event: 'pi_driver_retry_scheduled',
+          attempt: event.attempt,
+          maxAttempts: event.maxAttempts,
+          delayMs: event.delayMs,
+          errorMessage: String(event.errorMessage).slice(0, 500),
+        }));
+        return;
+      }
+      if (event.type === 'message_end' && event.message.role === 'assistant' && slot.current) {
+        const stopReason = event.message.stopReason;
+        if (stopReason === 'error' || stopReason === 'aborted') {
+          // 每次失败的 assistant 消息 = 一次真实模型尝试（含 Pi 自动重试后的尝试）。
+          slot.current.attempt += 1;
+          slot.current.runFailure = {
+            code: stopReason === 'error' ? 'model_error' : 'aborted',
+            message: String(event.message.errorMessage ?? ''),
+            attempt: slot.current.attempt,
+          };
+          slot.current.recovered = false;
+          // U3：失败尝试结束。可重试错误（stopReason=error）随后会由 Pi 自动重试；该尝试
+          // 可能已发出 toolCall，重试响应可能重发 → 打开 attempt 窗口。中止不重试，不转述。
+          if (stopReason === 'error') {
+            input.surfaceRef.current?.onRuntimeEvent?.({ kind: 'recovery', reason: 'auto_retry' });
+          }
+        } else {
+          // 失败之后又出现正常 assistant 消息 = Pi 原生重试/溢出恢复已经接上。
+          slot.current.recovered = true;
+          slot.current.attempt = 0;
+          // U3：正常结束的响应边界（其后的工具调用属于这次响应）。
+          input.surfaceRef.current?.onRuntimeEvent?.({ kind: 'assistant_end' });
+        }
+      }
+    });
+
+    const built: Conversation = {
+      session,
+      sessionManager,
+      systemPrompt: input.systemPrompt,
+      toolNames: toolDefinitions.map((tool) => tool.name).join(','),
+      contextWindow: model.contextWindow,
+      slot,
+      lastProjection: projectSession(session),
+    };
+    if (reuseConversation) resolvedConversation = built;
+    return built;
+  };
+
+  const discardConversation = async (): Promise<void> => {
+    const previous = conversation;
+    conversation = undefined;
+    if (previous === undefined) return;
+    const closed = await previous.catch(() => undefined);
+    if (closed === undefined) return;
+    if (resolvedConversation === closed) resolvedConversation = undefined;
+    closed.session.dispose();
+  };
 
   return {
     async run(input: TurnDriverInput): Promise<TurnDriverResult> {
       const providerToolNames = createProviderToolNameMap(input.tools);
-      const tools = input.tools.map((tool) => toAgentTool(
-        tool,
-        input,
-        providerToolNames.get(tool.name)!,
-      )) as unknown as AgentTool<any, any>[];
-      // 转录即状态:messages 是上一轮持久化的 pi 原生转录(含工具调用与结果),直接续用
-      const initialMessages = input.messages;
+      const deadline = input.deadline;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return { text: '', messages: [...input.messages] };
 
-      const agent = new Agent({
-        initialState: {
-          systemPrompt: input.systemPrompt,
-          model,
-          tools,
-          messages: initialMessages,
-          ...(thinkingLevel ? { thinkingLevel } : {}),
-        },
-        streamFn: models.streamSimple.bind(models),
-        convertToLlm: plannerMessagesToLlm,
-      });
+      const last = input.messages[input.messages.length - 1] as { role?: string; content?: unknown } | undefined;
+      const lastIsUser = last !== undefined && last.role === 'user';
+      const promptText = lastIsUser ? textFromContent(last?.content) : '';
+      const seed = lastIsUser ? input.messages.slice(0, -1) : input.messages;
 
-      const remaining = input.deadline - Date.now();
-      if (remaining <= 0) return { text: '', messages: agent.state.messages };
-      let timedOut = false;
-      const abortTimer = setTimeout(() => {
-        timedOut = true;
-        agent.abort();
-      }, Math.max(1, remaining));
+      // 取消/截止：父级取消信号 + 回合截止 → 合成 abort，交给 Pi 原生 abort()。
+      const abort = new AbortController();
+      const onParentAbort = () => abort.abort();
+      if (input.signal) {
+        if (input.signal.aborted) abort.abort();
+        else input.signal.addEventListener('abort', onParentAbort, { once: true });
+      }
+      const timer = setTimeout(() => abort.abort(), Math.max(1, remaining));
+
+      const surfaceRef: { current: TurnExecSurface | undefined } = sessionSurface
+        ?? { current: undefined };
+      surfaceRef.current = {
+        exec: input.exec,
+        onStep: input.onStep,
+        signal: abort.signal,
+        ...(input.onRuntimeEvent === undefined ? {} : { onRuntimeEvent: input.onRuntimeEvent }),
+      };
+
+      let active: Conversation | undefined;
+      const abortSession = () => {
+        if (active !== undefined && abort.signal.aborted) void active.session.abort().catch(() => undefined);
+      };
+      abort.signal.addEventListener('abort', abortSession, { once: true });
 
       try {
-        await agent.continue();
+        let conversationForRun = reuseConversation ? conversation : undefined;
+        if (conversationForRun === undefined) {
+          conversationForRun = buildConversation({
+            tools: input.tools,
+            providerNames: providerToolNames,
+            systemPrompt: input.systemPrompt,
+            surfaceRef,
+            seed,
+          });
+          if (reuseConversation) {
+            conversation = conversationForRun;
+            conversationForRun.catch(() => { conversation = undefined; });
+          }
+        }
+        active = await conversationForRun;
+
+        // 系统提示/工具名集合在会话内必须稳定；变化时按新配置重建（生产 Main 恒定，不触发）。
+        if (reuseConversation && (active.systemPrompt !== input.systemPrompt
+          || active.toolNames !== input.tools.map((tool) => providerToolNames.get(tool.name) ?? tool.name).join(','))) {
+          if (active.systemPrompt !== input.systemPrompt) {
+            console.warn(JSON.stringify({ event: 'pi_driver_prompt_changed_session_rebuild' }));
+          }
+          await discardConversation();
+          conversationForRun = buildConversation({
+            tools: input.tools,
+            providerNames: providerToolNames,
+            systemPrompt: input.systemPrompt,
+            surfaceRef,
+            seed: [],
+          });
+          conversation = conversationForRun;
+          conversationForRun.catch(() => { conversation = undefined; });
+          active = await conversationForRun;
+        }
+
+        const session = active.session;
+        active.slot.current = { retryScheduled: 0, attempt: 0 };
+        active.lastProjection = projectSession(session);
+
+        // 宿主事实注入：Pi 原生 custom message（下次请求按 user 角色投影），不触发单独回合。
+        for (const injection of abort.signal.aborted ? [] : input.injections ?? []) {
+          if (injection.trim() === '') continue;
+          await session.sendCustomMessage(
+            { customType: 'fshine_task_fact', content: injection, display: false },
+            { triggerTurn: false },
+          );
+        }
+
+        // 本回合是否真的把输入交给了 Pi：已中止 / 无输入时本回合没有任何产出，
+        // 不得把转录里的上一回合答复当本回合回复（宁可空文本 = 失败）。
+        const promptSent = promptText.trim() !== '' && !abort.signal.aborted;
+        if (promptSent) {
+          await session.prompt(promptText, { expandPromptTemplates: false });
+        }
+
+        let messages = projectSession(session);
+        const slot = active.slot.current;
+        const runFailure = slot?.runFailure;
+        const retryScheduled = slot?.retryScheduled ?? 0;
+
+        // 本回合答复。三条纪律：①本回合没把输入交给 Pi → 空；②Pi 已把本回合判失败
+        // （runFailure 且其后没有正常 assistant 消息）→ 空——失败回合的尾部可能是
+        // toolResult（例如刚委派出去的 task_run 结果 JSON），它是工具事实、不是给用户的
+        // 答复；③否则只取本回合 user 输入之后产生的正文（finalReplyText 按回合切）。
+        const turnReplyText = (): string => (!promptSent
+          || (slot?.runFailure !== undefined && slot.recovered !== true)
+          ? ''
+          : finalReplyText(messages, promptText));
+
+        // 供应商错误归因：run 失败 / 错误 assistant 必须可查（不许静默吞成空文本）。
+        if (runFailure !== undefined) {
+          console.error(JSON.stringify({
+            event: 'pi_driver_model_error',
+            attempt: runFailure.attempt,
+            errorCode: runFailure.code,
+            errorMessage: runFailure.message.slice(0, 500),
+            retryScheduled,
+            contextWindow: active.contextWindow,
+          }));
+        }
+        const failedAssistant = lastAssistantStop(messages);
+        if (failedAssistant?.stopReason === 'error' || failedAssistant?.stopReason === 'aborted') {
+          console.error(JSON.stringify({
+            event: 'pi_driver_failed_assistant',
+            stopReason: failedAssistant.stopReason,
+            errorMessage: failedAssistant.errorMessage?.slice(0, 500),
+          }));
+        }
+
+        let text = turnReplyText();
+
+        if (!text) {
+          // 空回复必须留下可归因的形状。
+          const lastMessage = messages[messages.length - 1] as {
+            role?: string; stopReason?: string; errorMessage?: string; content?: unknown;
+          } | undefined;
+          console.warn(JSON.stringify({
+            event: 'pi_driver_empty_reply',
+            role: lastMessage?.role,
+            stopReason: lastMessage?.stopReason,
+            errorMessage: lastMessage?.errorMessage?.slice(0, 300),
+            contentBlocks: Array.isArray(lastMessage?.content)
+              ? lastMessage.content.map((block) => (block as { type?: string }).type ?? 'unknown')
+              : typeof lastMessage?.content,
+          }));
+        }
+
+        // 只思考没正文：催一次最终文本（一轮一次）。催问作为 user 消息进入 Pi 转录——
+        // 它是本回合真实发生过的一次宿主请求，不是隐藏改写。
+        if (promptSent && shouldNudgeFinalReply(messages, text) && Date.now() < deadline && !abort.signal.aborted) {
+          console.warn(JSON.stringify({ event: 'pi_driver_final_text_nudge' }));
+          try {
+            await session.prompt(FINAL_REPLY_NUDGE, { expandPromptTemplates: false });
+          } catch (error) {
+            console.error(JSON.stringify({
+              event: 'pi_driver_final_text_nudge_failed',
+              errorType: error instanceof Error ? error.name : 'UnknownError',
+            }));
+          }
+          messages = projectSession(session);
+          text = turnReplyText();
+          if (!text) {
+            console.warn(JSON.stringify({ event: 'pi_driver_final_text_nudge_empty' }));
+          }
+        }
+
+        active.lastProjection = messages;
+        lastTurnProjection = messages;
+        return { text, messages };
       } catch (error) {
         console.error(JSON.stringify({
           event: 'pi_driver_error',
           errorType: error instanceof Error ? error.name : 'UnknownError',
+          message: error instanceof Error ? error.message.slice(0, 300) : String(error),
         }));
-        return { text: '', messages: agent.state.messages };
+        // 异常后会话中可能有半程条目：实例级会话丢弃、下一回合重建（不硬续坏状态）。
+        if (reuseConversation) await discardConversation();
+        return { text: '', messages: [...input.messages] };
       } finally {
-        clearTimeout(abortTimer);
+        clearTimeout(timer);
+        if (input.signal) input.signal.removeEventListener('abort', onParentAbort);
+        abort.signal.removeEventListener('abort', abortSession);
+        // 回合级会话随回合释放；实例级会话随驱动实例（=业务会话）存活。
+        if (!reuseConversation && active !== undefined) active.session.dispose();
       }
-
-      // Aborted/error assistant messages may contain a partial streamed answer.
-      // Never expose that as a successful response.
-      if (timedOut || hasFailedAssistantMessage(agent.state.messages)) {
-        return { text: '', messages: agent.state.messages };
-      }
-
-      // 取终结文本:最后一条 assistant 的正文;若工具以确定性话术终结(terminate),
-      // 最后一条是 toolResult,取其文本
-      let text = '';
-      for (let i = agent.state.messages.length - 1; i >= 0; i -= 1) {
-        const message = agent.state.messages[i] as {
-          role?: string;
-          content?: unknown;
-          stopReason?: string;
-        } | undefined;
-        if (message?.role === 'assistant') {
-          text = textFromContent(message.content);
-          if (message.stopReason !== 'stop') text = '';
-          break;
-        }
-        if (message?.role === 'toolResult') {
-          text = textFromContent(message.content);
-          break;
-        }
-      }
-      // 转录交还 runtime 持久化:包含本回合全部用户消息/工具调用/结果
-      return { text, messages: agent.state.messages };
     },
 
-    /** 上下文压缩(pi 原生 compact):超阈值时摘要替换旧消息,保留最近尾巴。失败不阻塞回合。
-     *  force:true 跳过阈值判断强制压缩(会话过期软着陆,旧转录压成摘要种子)。 */
-    async compact(messages: AgentMessage[], opts?: { force?: boolean }): Promise<AgentMessage[]> {
-      const est = estimateContextTokens(messages);
-      if (!opts?.force && !shouldCompact(est.tokens, model.contextWindow, DEFAULT_COMPACTION_SETTINGS)) return messages;
-      const summary = await generateSummary(
-        plannerMessagesToLlm(messages), models, model,
-        DEFAULT_COMPACTION_SETTINGS.reserveTokens,
-        '这是助手会话的压缩。摘要必须保留:1)当前正在处理的对象标识与名称;2)当前的处理范围;3)最近一次工具结果里的分页游标原值(用户要靠它翻页);4)用户的关键意图与未决问题;5)已得出的中间结论与未完成的步骤(长任务靠它续跑)。如果输入包含宿主标明的历史引用,必须保留其来源是“用户消息附带的引用”;引用是转述数据,不得总结成用户本人直接陈述、选择、确认或授权。宿主会另外保留有界的引用出处索引,较早引用可通过历史检索读取。',
-        undefined, undefined, undefined, undefined, BACKGROUND_CONTEXT,
-      );
-      if (!summary.ok) {
-        console.warn(JSON.stringify({ event: 'context_compact_failed', error: String(summary.error).slice(0, 200) }));
-        return messages;
-      }
-      const kept: AgentMessage[] = [];
-      let keptTokens = 0;
-      let keptFrom = messages.length;
-      for (let i = messages.length - 1; i >= 0 && keptTokens < DEFAULT_COMPACTION_SETTINGS.keepRecentTokens; i -= 1) {
-        kept.unshift(messages[i]!);
-        keptFrom = i;
-        keptTokens += estimateTokens(messages[i]!);
-      }
-      console.log(JSON.stringify({ event: 'context_compacted', tokensBefore: est.tokens, keptMessages: kept.length }));
-      const allDispatches = collectDelegatedRequestCounts(messages);
-      const keptDispatches = collectDelegatedRequestCounts(kept);
-      const summarizedDispatches = subtractRetainedRequestCounts(allDispatches, keptDispatches);
-      const contextSidecar = buildCompactionContextSidecar(
-        messages.slice(0, keptFrom),
-        summarizedDispatches,
-        (body, messageReference) => buildRequestKey(body, messageReference ? { messageReference } : undefined),
-      );
-      const summaryMessage = { role: 'user', content: `【此前会话摘要】\n${summary.value}\n(以上为此前对话的压缩摘要;具体数据请以重新调用工具的结果为准)`, timestamp: Date.now() } as unknown as AgentMessage;
-      return compactedTranscriptWithContext(summaryMessage, kept, contextSidecar);
+    /** 只读派生：Pi 会话当前转录（宿主不得据此累积可变历史）。 */
+    transcript(): readonly AgentMessage[] {
+      // 同步读：实例级会话已就绪时直接读 Pi 的 session.messages（每次重新投影，不缓存历史）。
+      return resolvedConversation === undefined ? lastTurnProjection : projectSession(resolvedConversation.session);
     },
-    // 服务端确定性回复(确认码直执)合成原生形状 assistant 消息,防止毒化下一模型回合
+
+    /** 只读审计面（A2/A3 验证与运行期排障用；不做任何行为）。 */
+    sessionInfo() {
+      if (resolvedConversation === undefined) return undefined;
+      return {
+        systemPrompt: resolvedConversation.session.systemPrompt,
+        activeToolNames: resolvedConversation.session.getActiveToolNames(),
+        sessionFile: resolvedConversation.session.sessionFile,
+      };
+    },
+
+    /** 释放实例级会话（进程正常退出路径）。 */
+    close(): void {
+      lastTurnProjection = resolvedConversation === undefined
+        ? lastTurnProjection
+        : projectSession(resolvedConversation.session);
+      resolvedConversation = undefined;
+      void discardConversation();
+    },
+
+    // 服务端确定性回复（确认码直执）合成原生 assistant 消息，防止毒化下一模型回合
     synthesizeAssistant: (text: string): AgentMessage =>
       toPiMessage({ role: 'assistant', content: text }, modelId),
   };
 }
 
-/** 有界历史/当前消息 → pi 的 AgentMessage。assistant 必须带完整内部形状
- *  (api/provider/model/usage),否则 pi-ai 结算 usage 时会崩溃(2026-09-16 实测)。 */
+/** 会话投影（只读）：过滤 system，Pi 压缩摘要/宿主 custom 消息渲染成宿主可读的 user 消息。 */
+function projectSession(session: AgentSession): AgentMessage[] {
+  const messages: AgentMessage[] = [];
+  for (const message of session.messages) {
+    const record = message as unknown as {
+      role?: string; summary?: string; content?: unknown; timestamp?: number;
+    };
+    if (record.role === 'system') continue;
+    if (record.role === 'compactionSummary') {
+      messages.push(summaryToMessage(String(record.summary ?? ''), record.timestamp ?? Date.now()));
+      continue;
+    }
+    if (record.role === 'custom') {
+      messages.push({
+        role: 'user',
+        content: textFromContent(record.content),
+        timestamp: record.timestamp ?? Date.now(),
+      } as unknown as AgentMessage);
+      continue;
+    }
+    messages.push(message);
+  }
+  return messages;
+}
+
+/** Pi 压缩摘要 → 宿主转录里的一条用户消息（包装文案固定，不承载压缩决策）。 */
+function summaryToMessage(summary: string, timestamp: number): AgentMessage {
+  return {
+    role: 'user',
+    content: `【此前会话摘要】\n${summary}`,
+    timestamp,
+  } as unknown as AgentMessage;
+}
+
+type SessionMessage = Parameters<SessionManager['appendMessage']>[0];
+
+/** 种子消息 → SessionManager 可持久化的 Message（custom 渲染成 user）。 */
+function toSessionMessage(message: AgentMessage): SessionMessage {
+  const record = message as unknown as { role?: string; content?: unknown; timestamp?: number };
+  if (record.role === 'custom') {
+    return {
+      role: 'user',
+      content: textFromContent(record.content),
+      timestamp: record.timestamp ?? Date.now(),
+    } as unknown as SessionMessage;
+  }
+  return message as unknown as SessionMessage;
+}
+
+/** 最后一条 assistant 的 stopReason/errorMessage（无则 undefined）。 */
+function lastAssistantStop(messages: readonly AgentMessage[]): { stopReason?: string; errorMessage?: string } | undefined {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] as { role?: string; stopReason?: string; errorMessage?: string } | undefined;
+    if (message?.role === 'assistant') return { stopReason: message.stopReason, errorMessage: message.errorMessage };
+  }
+  return undefined;
+}
+
+/**
+ * 取**本回合**的终结文本：只认本回合 user 输入之后产生的消息。
+ *
+ * 为什么必须按回合切：溢出恢复失败时（恢复摘要被 `length` 拒绝），Pi 会丢弃失败回合的
+ * assistant 项，转录末条 assistant 是**上一回合**的答复。旧实现从转录尾部一路回扫，
+ * 会把上一回合答复当成本回合回复返回（确定性证据 `scripts/eval/pi152-stageB/injection.ts`
+ * 的 D-overflow-length：`finalText='历史答复 7。'`）——用户会以为本回合答完了。
+ * 宁可返回空文本（宿主按失败转述），也不返回旧回合答复。
+ *
+ * 切点 = 转录里最后一条 user 消息之后：本回合的 prompt（或它在 Pi 压缩后变成的摘要）
+ * 一定位于上一回合答复之后，因此该切点不会回退到旧回合；prompt 被折进摘要时
+ * （溢出恢复成功），摘要之后的恢复答复仍算本回合。本回合没有 user 输入（`promptText`
+ * 为空）时不认任何 assistant 正文——无法归属就不冒充。末条是 toolResult（工具以
+ * 确定性话术终结）时取其文本。
+ *
+ * 导出只为确定性守卫测试（同 `shouldNudgeFinalReply` 的导出理由；不接线、不改变行为）。
+ */
+export function finalReplyText(messages: readonly AgentMessage[], promptText: string): string {
+  if (promptText.trim() === '') return '';
+  let start = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] as { role?: string } | undefined;
+    if (message?.role === 'user') {
+      start = i + 1;
+      break;
+    }
+  }
+  if (start === -1) return '';
+  for (let i = messages.length - 1; i >= start; i -= 1) {
+    const message = messages[i] as { role?: string; content?: unknown; stopReason?: string } | undefined;
+    if (message?.role === 'assistant') {
+      return message.stopReason === 'stop' ? textFromContent(message.content) : '';
+    }
+    if (message?.role === 'toolResult') {
+      return textFromContent(message.content);
+    }
+  }
+  return '';
+}
+
+/** 有界历史/当前消息 → pi 的 AgentMessage。assistant 必须带完整内部形状，否则结算会崩溃。 */
 function toPiMessage(
   message: { role: string; content: string },
   modelId: string,
@@ -311,7 +862,7 @@ function toPiMessage(
       role: 'assistant',
       content: [{ type: 'text', text: message.content }],
       api: 'openai-completions',
-      provider: 'llm',
+      provider: LLM_PROVIDER_ID,
       model: modelId,
       usage: {
         input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0,
@@ -326,20 +877,11 @@ function toPiMessage(
 
 /**
  * Build provider-facing names independently from domain tool names.
- *
- * Domain tools may use names such as `workflow.start`, while OpenAI-compatible
- * function calling only accepts `[A-Za-z0-9_-]{1,64}`.  Keep ordinary names
- * unchanged for backwards-compatible transcripts, and only rewrite names
- * that the provider cannot accept.  The returned map is deliberately one-way:
- * execution always closes over the original discovered tool name.
  */
 export function createProviderToolNameMap(tools: readonly DiscoveredTool[]): Map<string, string> {
   const result = new Map<string, string>();
   const used = new Set<string>();
 
-  // Reserve names that can be sent unchanged first. This prevents an
-  // invalid name such as `workflow.start` from stealing an existing
-  // `workflow_start` function name.
   for (const tool of tools) {
     if (isProviderToolName(tool.name)) {
       result.set(tool.name, tool.name);
@@ -379,79 +921,12 @@ function fitProviderToolName(base: string, original: string): string {
 }
 
 function stableNameHash(value: string): string {
-  // Small deterministic FNV-1a hash; this is only a collision suffix, not a
-  // security boundary or identifier exposed to the domain implementation.
   let hash = 0x811c9dc5;
   for (let i = 0; i < value.length; i += 1) {
     hash ^= value.charCodeAt(i);
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16).padStart(8, '0');
-}
-
-export function toAgentTool(
-  tool: DiscoveredTool,
-  input: TurnDriverInput,
-  providerName = tool.name,
-) {
-  return {
-    name: providerName,
-    label: tool.name,
-    description: tool.description,
-    // host tools/list 的 inputSchema 是标准 JSON Schema,typebox 兼容该子集;
-    // 注入可选 progress 参数:模型可提供一句话意图短语,仅用于进度帧
-    parameters: Type.Unsafe({
-      ...tool.inputSchema,
-      properties: {
-        ...typeof tool.inputSchema === 'object' && tool.inputSchema !== null
-          ? (tool.inputSchema as { properties?: Record<string, unknown> }).properties
-          : {},
-        progress: {
-          type: 'string',
-          description:
-            '一句话说明你即将做什么(≤50 字),作为给用户看的进度提示;只许描述即将进行的动作,严禁包含任何结果数字、编号或协议字段',
-        },
-      },
-    }),
-    execute: async (_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) => {
-      // progress 是给进度帧的意图短语,不进工具参数
-      const { progress, ...args } = params as Record<string, unknown> & { progress?: unknown };
-      const phrase = typeof progress === 'string' ? progress : '';
-      // 帧文本由 renderToolStepText 一处合成：内部工具与协议材料复读都不出帧；
-      // 返回 null 时静默跳过——空串会在渠道上投出一条空进度帧,比不发帧更糟。
-      const step = renderToolStepText(tool.name, phrase);
-      if (step) input.onStep(step);
-      try {
-        const data = await input.exec(tool.name, args, signal);
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify(data) }],
-          details: {},
-        };
-      } catch (error) {
-        if (error instanceof ToolUserError) {
-          // 确定性失败话术直接终结回合,不经模型复述
-          return {
-            content: [{ type: 'text' as const, text: error.message }],
-            terminate: true,
-            details: {
-              routeReceipt: error.routeReceipt ?? (error.delegationCompleted ? 'delegate' : 'precondition'),
-            },
-          };
-        }
-        throw error;
-      }
-    },
-  };
-}
-
-function hasFailedAssistantMessage(messages: readonly unknown[]): boolean {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i] as { role?: unknown; stopReason?: unknown } | undefined;
-    if (message?.role === 'assistant') {
-      return message.stopReason === 'aborted' || message.stopReason === 'error';
-    }
-  }
-  return false;
 }
 
 function textFromContent(content: unknown): string {

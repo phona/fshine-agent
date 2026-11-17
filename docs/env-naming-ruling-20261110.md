@@ -7,6 +7,10 @@
 > `FSHINE_EVAL_FIXTURE_STATE_DIR` 桥），夹具对这些名字的 `env2` 读取（含调试回退）已删。
 > 本文其余部分（令牌面命名族、专名降级、C 类旋钮归属）仍生效；现行对账见
 > `docs/environment-variables.md` §4/§4a/§4b。
+>
+> **2026-11-13 M4 注**：文中读者（`generic-mock` / `second-layer` / `plan-policy` /
+> 探针 / stock 夹具）已随 M2/M4 退役；裁定条款与失效条件仍按原文，现行面见
+> `docs/environment-variables.md` §4 横幅与 [`decision-log.md`](decision-log.md) §十三。
 
 状态：**生效**。本裁定推翻 `docs/environment-variables.md` §4 于 2026-11-05 写下的
 「夹具专名不是重复别名，保留双名，不作合并」裁定。§4/§4b 已按本文重写；历史文本

@@ -7,41 +7,37 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:e2e": "vitest run tests/e2e",
     "start": "node --env-file-if-exists=.env --import tsx apps/server/main.ts",
-    "acceptance": "node --env-file-if-exists=.env --import tsx scripts/acceptance.ts",
     "ask": "node --env-file-if-exists=.env --import tsx scripts/ask.ts",
-    "smoke:wecom": "node --env-file-if-exists=.env --import tsx scripts/smoke-wecom.ts",
-    "smoke:commit:mock": "node --env-file-if-exists=.env --import tsx scripts/mock-commit-smoke.ts",
-    "eval:probe": "node --env-file-if-exists=.env --import tsx scripts/probe-real-agent.ts",
-    "eval:acceptance": "node --env-file-if-exists=.env --import tsx scripts/acceptance.ts --only=5.1,5.1b,5.2,5.3",
-    "eval:score": "node --env-file-if-exists=.env --import tsx scripts/eval/score.ts",
-    "eval:score:judge": "node --env-file-if-exists=.env --import tsx scripts/eval/score.ts --judge",
-    "eval:baseline": "node --env-file-if-exists=.env --import tsx scripts/eval/score.ts --judge --write-baseline",
-    "eval": "npm run eval:probe && npm run eval:acceptance && npm run eval:score:judge",
-    "perf:suite": "node --import tsx scripts/perf/run-suite.ts 3",
-    "perf:report": "node --import tsx scripts/perf/analyze.ts",
-    "eval:generic-mock": "node --import tsx scripts/eval/generic-mock.ts",
-    "ci": "sh scripts/ci.sh"
+    "tasks": "node --env-file-if-exists=.env --import tsx scripts/tasks.ts",
+    "ops": "node --env-file-if-exists=.env --import tsx scripts/ops.ts",
+    "cleanup:runs": "node --env-file-if-exists=.env --import tsx scripts/cleanup-runs.ts",
+    "eval:user": "node --env-file-if-exists=.env --import tsx scripts/eval/convergence-r1/runner.ts",
+    "eval:cap01": "node --import tsx scripts/eval/cap01/run-all.ts",
+    "eval:bizprobe": "node --env-file-if-exists=.env --import tsx scripts/eval/business-e2e/run.ts",
+    "eval:bizbatch2": "node --env-file-if-exists=.env --import tsx scripts/eval/business-e2e/experiments/run.ts",
+    "eval:bizbatch3": "node --env-file-if-exists=.env --import tsx scripts/eval/business-e2e/experiments/run.ts",
+    "ci": "sh scripts/ci.sh",
+    "postinstall": "patch-package"
   },
   "engines": {
     "node": ">=24"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
-    "@types/express": "^4.17.21",
     "@types/node": "^24.0.0",
+    "patch-package": "^8.0.1",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^3.0.0"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "^0.85.1",
-    "@earendil-works/pi-ai": "^0.85.1",
-    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@earendil-works/pi-agent-core": "^1.5.2",
+    "@earendil-works/pi-ai": "^1.5.2",
+    "@earendil-works/pi-coding-agent": "^1.5.2",
     "@wecom/aibot-node-sdk": "^1.0.7",
     "better-sqlite3": "^12.0.0",
-    "express": "^4.21.2",
+    "exceljs": "4.4.0",
     "yaml": "^2.4.0"
   },
   "allowScripts": {

@@ -2,71 +2,124 @@
 
 [![CI](https://gitee.com/phona/fshine-agent/actions/workflow/ci.yml/badge.svg)](https://gitee.com/phona/fshine-agent/actions/workflow/ci.yml)
 
-通用编排层：负责可信身份、渠道与会话、上下文、委派、预算与计划门、确认、审计、进度与结果呈现。执行层经声明面接入，通用层代码零改动。
+面向业务人员的编排层：把一条交办经**结构化执行契约**送到执行层，把执行结果如实带回用户。
+宿主只保留不可转交的确定性责任（可信身份、任务归属、凭据隔离、如实交付）；执行方法的选择归模型，
+业务口径与执行治理归执行层。
 
 ```text
-WeCom
-  -> Main Agent (编排层)
-  -> 委派工具（声明面接入）
-  -> 执行层子 Agent（工作目录由 profile.root 声明）
-  -> 执行层 Skills / 领域脚本
-  -> 结构化结果 / 自然语言回复
-  -> Main Agent reply / follow-up / resume
+渠道消息（企微）/ 命令行消息
+  -> Main Agent（理解、委派、汇总）
+  -> 委派任务（Worker + 本轮能力快照）
+  -> Execution Contract（结构化请求）
+  -> 执行层（root + gateway，由 profile 声明）
+  -> 结构化结果 / Worker 汇报
+  -> Main 回复（渠道或命令行）
 ```
 
 ## 目录
 
 | 目录 | 内容 |
 |---|---|
-| `packages/agent` | Main Agent、委派工具和执行层子 Agent adapter |
-| `packages/contracts` | 主流程、会话、任务和渠道接口 |
-| `packages/core` | 配置加载与 SQLite 审计/任务存储 |
+| `packages/agent` | 回合运行时、Pi 驱动、任务归属底账、技能装载与 dummy 执行层适配器 |
+| `packages/contracts` | 执行契约（Execution Contract）与渠道/配置接口 |
+| `packages/core` | 配置加载与任务底账 SQLite 引擎 |
 | `packages/channel-wecom` | 企微机器人 WebSocket 长连接与回复 |
-| `apps/server` | 服务装配入口 |
-| `config` | 部署配置模板 |
-| `scripts` | 验收、探针与 eval 脚本 |
-| `tests` | 单测与 e2e 夹具 |
-| [`docs`](docs/index.md) | 文档索引 |
-| [`docs/execution-layer-interface.md`](docs/execution-layer-interface.md) | 执行层声明面接口规格 |
-| [`docs/execution-layer-admission.md`](docs/execution-layer-admission.md) | 执行层接入准入门槛 |
+| `apps/server` | 服务入口（`main.ts`）与装配（`server.ts`） |
+| `config` | 部署模板（`agent.example.yaml`）与仓内 dummy 面配置（`agent.fixture.yaml`） |
+| `scripts` | `ask` 入口、eval 与仓库守卫脚本 |
+| `tests` | 测试装置（vitest setup） |
+| [`docs`](docs/index.md) | 文档索引（权威决定见 [decision-log](docs/decision-log.md)） |
 
 ## 命令
 
 ```bash
 npm install
-npm run ci                           # typecheck + unit + generic-mock（单 checkout 自足）
-npm run typecheck
-npm run test
+npm run ci                           # typecheck + unit（单 checkout 自足）
+npm run typecheck                    # tsc --noEmit
+npm run test                         # vitest（unit project）
 
-npm start                            # 启动企微长连接服务
-AGENT_CONFIG_PATH=xxx npm start     # 覆盖配置文件路径
-npm run smoke:wecom                  # 企微长连接冒烟测试
-npm run smoke:commit:mock            # mock 保护下两步写链路冒烟（非 mock 拒跑）
+npm run ask -- "帮我查一下 ..."        # 一条消息 → 回复 + 机械证据（真实模型 + 仓内 dummy 执行层）
+npm run tasks                        # 最近任务列表（只读；缺省读 .runtime/state.db）
+npm run tasks -- <taskId>            # 单任务详情：状态 / 原因 / 执行步骤 / 任务结果
+npm run tasks -- <taskId> --out <path>  # 导出任务交付件（Markdown；拒绝覆盖既有文件）
+npm run tasks -- <taskId> --redo     # 以该任务存储的交办原文逐字重新交办一个新任务（仅终态）
+npm run ops                          # 生成运营快照（本地只读 HTML；缺省 .runtime/ops/index.html）
+npm start                            # 企微长连接 server（需 config/agent.yaml + 企微凭据）
+npm run eval:user -- --trials 1      # 用户级黑盒评测（12 用例，真实模型 + 仓内 dummy 夹具）
 ```
 
-## 引用消息与后台任务
+## 运行（产品面）
 
-企微原生引用会与本次正文一起交给 Planner，正文确认与引用内容分别处理。
-`FSHINE_WORKER_DISPATCH_MODE` 默认 `inline`；设为 `background` 后，Worker 执行期间用户可以继续提问、查询或取消任务，结果和文件独立主动推送。同一会话的 Planner 回合仍串行；**平台并发不由宿主限制**——并发容忍与健康/退避归执行层自己的限流与熔断（宿主准入闸只做 `maxQueue` 待办深度背压，见 [执行层准入清单](docs/execution-layer-admission.md)）。
+### `npm run ask`：一条消息 → 回复 + 机械证据
 
-首版尚未生产验收；不支持运行中 steer、暂停恢复或重启后自动重跑。配置和回滚见 [会话交互方案](docs/interactive-session-plan.md#9-首版实现对账2026-10-24)。
-
-## mock 联调（执行层侧 fake 保护）
-
-`.env` 设 `EXECUTION_EXECUTOR=mock`（默认已设；**执行层治理变量权威名以该执行层声明为准**，现行平台已改回 `EXECUTION_*` 前缀，旧 `DZ_*` 别名已移除）后，执行层网关把执行器替换为 mock 应答器：不开浏览器、不触网，gate 矩阵 / commit 令牌 / 审计照真生效，落账写进 mock 状态文件（默认 `<profile.root>/.runtime/mock-state.json`，删文件即重置）。该开关由**执行层自己读取**：编排层不读它，也不据此判"这个部署允不允许写"——写能不能真落地（含真平台落账的授权 / dryrun 提示）由执行层自己的门裁决并给出拒绝或 warning，宿主只如实转述。
+真实模型 + 仓内 dummy 执行层（`scripts/eval/fixtures/dummy-platform`，真实子进程调用、不触网、不接真实 SaaS）：
 
 ```bash
-npm run acceptance                  # mock 保护下全量验收（含写链路、污染用例）
-EXECUTION_EXECUTOR=mock npm run acceptance  # mock 模式（真执行层变量优先于 .env，设为 mock 显式覆盖）
+# 凭据放 .env（LLM_API_KEY）；接口地址与模型名缺省取所加载配置的 llm.*
+npm run ask -- "帮我查一下 documents 集合、窗口 W202611 的数据"
 ```
 
-本项目不包含 MCP 主链路；本地测试使用脚本化 Pi driver，不代表生产模型调用。
+- 缺省加载 `config/agent.fixture.yaml`（仓内 dummy 面，只开放执行层自述为只读的 operation）；
+  也可用 `--config=<path>` / `AGENT_CONFIG_PATH` 指向自己的配置（同 `npm start` 的显式入口）。
+- 输出：回复 + 机械证据（taskId / requestId / operation / status + dummy 执行层审计行）。
+- 任务底账落 SQLite（缺省 `.runtime/state.db`），进程结束后仍在；隔离门 fail-closed，
+  profile.root 必须在仓内夹具目录之下。
+
+### `npm run tasks`：查看交办过的任务与重新推进
+
+列表 / 详情 / 导出不读日志、不跑模型、不触网：直接从任务底账（SQLite）读最近任务与单任务详情；
+`--redo` 重新推进终态任务时按需经与 `npm run ask` 同源的装配重新交办（真实模型 + 仓内 dummy 执行层）。
+
+```bash
+npm run tasks                 # 最近任务列表：时间 / 状态 / 摘要 / id（最多 20 条）
+npm run tasks -- <taskId>     # 单任务详情：状态 / 失败原因 / 执行步骤 / 任务结果
+npm run tasks -- <taskId> --out <path>   # 导出任务交付件（Markdown；可保存/转发）
+npm run tasks -- <taskId> --redo         # 以该任务存储的交办原文逐字重新交办一个新任务
+```
+
+- 状态与失败原因与底账写入时的 `judgeReportedTask` 同语义（已完成 / 失败 / 未执行；
+  进行中 = 尚未收尾），查看侧不重算、不新造状态。
+- 只读（列表 / 详情 / 导出）：以 SQLite readonly 打开既有库（不写、不锁写）；库不存在时给空态
+  且不创建文件；导出只写用户指定的那一个文件（不写库、不建目录）。
+- 导出（P2）：交付件与详情同源逐行一致（任务信息 / 状态 / 执行步骤 / 任务结果 / 限制说明）；
+  目标已存在拒绝覆盖（原文件不动）、父目录不存在不自动创建；相对路径按敲命令的目录解析
+  （npm 的 INIT_CWD）。退出码：0 成功 / 2 用法与前置错误 / 1 环境与 IO 失败。
+- 重新推进（P3，`--redo`，唯一写路径）：仅终态任务（已完成 / 失败 / 未执行）可重推，`进行中`
+  拒绝；输入=该任务存储的**委派原文逐字**（不拼接原任务的回复 / 执行台账 / 摘要——等价于用户
+  重新输入），经与 `npm run ask` 同源的装配重新交办为一个**新任务**并打印
+  `原任务 <oldId> → 新任务 <newId>（状态：…）`；原任务记录零改动，新旧关联只由这条输出表达
+  （schema 冻结，无关联列）。若原失败由请求文本本身引起，逐字重推会复现同一失败——这是
+  「逐字」语义的预期，非缺陷。**语义边界（owner 裁定）**：`--redo` 是「重新交办」，不是
+  人工接管、也不是会话续跑；真续跑需 Pi 原生会话恢复（当前生产未落盘，已登记缺口，
+  见 `docs/product/r3-open-decisions.md`）。
+- 缺省读 `.runtime/state.db`；`--config=<path>` / `AGENT_CONFIG_PATH` 与 `npm run ask` 同源，
+  非空 `DB_PATH` 环境变量同 ask 一样覆盖底账路径。
+- 执行步骤按落账顺序列出（底账未存每步时间戳）；「任务结果」为底账持久化的执行层汇报原文
+  （Main 给用户的最终回复当前不落库）。
+
+### `npm start`：企微长连接 → 渠道回复
+
+需要 `config/agent.yaml`（复制 `config/agent.example.yaml` 填写）与真实企微凭据（BotID / Secret）。
+仓内未连真实企微验证；渠道回归用**假渠道**（`SdkClientLike` stub）+ 假执行客户端 + 假模型驱动跑
+（`apps/server/server.test.ts`，零网络）。
+
+## 测试与评测
+
+- 测试入口：`npm run test`（vitest，unit project；含渠道假体、运行时拒绝路径、重启连续性、
+  过渡命名收敛守卫）。
+- 评测入口：`npm run eval:user`（用户级黑盒评测，12 用例；真实模型 + 仓内 dummy 夹具，与
+  `npm run ask` 同源装配；逐样本证据与判据见 `scripts/eval/convergence-r1/README.md`）。
+  真实模型 workflow 面：`eval-real.yml`（per-push 1 轮，advisory）与 `eval-nightly.yml`（12×3）——
+  **配置就绪 ≠ 持续运行已启用**：两者分别触发于 `main` 的 push/PR 与每日 cron；当前工作线未合入
+  `main`、远端 Secrets（`LLM_API_*`）未经本仓验证，故在合入并留档首次真实运行之前，不构成持续保障
+  （口径见 `docs/decision-log.md` §十七.4）。
+- 测试与评测只依赖仓内 dummy/假件；真实 SaaS / 真实企微渠道未验证，不作前置条件。
 
 ## 上线前必填
 
 | 位置 | 内容 |
 |---|---|
-| `config/agent.yaml`（复制 `config/agent.example.yaml`；gitignored） | 企微 principal；`llm.*`（接口地址 / key / model）与 `wecom.*`（BotID / Secret）；按接入的执行层声明填写 `contextProfiles.<profileId>.root`、`gateway` 与 `skillRoots`；可选 `host.*` 宿主运行参数 |
-| `.env`（可选，兼容旧部署） | 同名环境变量非空值覆盖 `config/agent.yaml`；`AGENT_CONFIG_PATH` 与 eval 工具面变量（`LLM_JUDGE_MODEL`）仍只从 env 读 |
+| `config/agent.yaml`（复制 `config/agent.example.yaml`；gitignored） | 企微 principal；`llm.*`（接口地址 / key / model）与 `wecom.*`（BotID / Secret）；按接入的执行层声明填写 `contextProfiles.<profileId>.root`、`gateway` 与 `skillRoots`；可选 `store.dbPath`（任务底账，缺省 `.runtime/state.db`） |
+| `.env`（可选，兼容旧部署） | 同名环境变量非空值覆盖 `config/agent.yaml`；`AGENT_CONFIG_PATH` 仍只从 env 读 |
 
-`contextProfiles.<profileId>.root` 是受信的执行层工作目录，不由用户输入或模型生成。执行层子 Agent 的会话通过任务 ID 恢复，并绑定到发起它的企微用户和 Main Agent 会话。
+`contextProfiles.<profileId>.root` 是受信的执行层工作目录，不由用户输入或模型生成。

@@ -41,11 +41,14 @@
  * (DUMMY_* only as a debug fallback). It does NOT read LLM keys, WeCom
  * secrets or any other host secret.
  *
- * Deliberately NOT implemented in v1 (see GENERIC_MOCK_NOTES.md):
+ * Deliberately NOT implemented in v1:
  * memory / breaker / cache auxiliary groups, grind/variant plan guards,
- * rate-limit token bucket, browser/platform execution. Those are
- * execution-layer-instance specifics, not protocol. The eval script tests what is implemented and
- * lists the rest as TODO, it does not fake them.
+ * browser/platform execution. Those are
+ * execution-layer-instance specifics, not protocol; no in-repo harness scores them
+ * (the retired generic-mock eval did; registration in docs/decision-log.md §十三),
+ * and they are not faked.
+ * (A per-state-dir rate-limit window WAS added later — 2026-11-14 business E2E #4 —
+ *  driven by <state-dir>/rate-limit-config.json or DUMMY_RATE_LIMIT_MAX; see below.)
  */
 'use strict';
 const fs = require('node:fs');
@@ -53,103 +56,17 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 
+const runtime = require('../runtime/index.cjs');
 const FIXTURE_ROOT = path.resolve(__dirname, '..');
-const OPERATIONS = [
-  { name: 'dummy.query', domain: 'dummy', command: 'query', access: 'read',
-    script: 'src/dummy/scripts/query.js', executor: 'dummy-script', est_seconds: 10, weight: 2,
-    args: { positional: [], flags: [
-      { flag: '--collection', required: true, style: 'name', desc: 'collection name or keyword (exact match preferred, substring match may be ambiguous)' },
-      { flag: '--window', required: false, style: 'code', desc: 'window code, e.g. W1; must exist for the collection' },
-    ] },
-    serve: { query: true, prepare: true, commit: true }, protocol: null },
-  { name: 'dummy.scratch', domain: 'dummy', command: 'scratch', access: 'scratch',
-    script: 'src/dummy/scripts/scratch.js', executor: 'dummy-script', est_seconds: 5, weight: 1,
-    args: { positional: [], flags: [
-      { flag: '--input', required: true, style: 'name', desc: 'input text file path (local computation only)' },
-      { flag: '--output', required: false, style: 'name', desc: 'output file path; defaults to <input>.out' },
-    ] },
-    serve: { query: true, prepare: true, commit: false }, protocol: null },
-  { name: 'dummy.prepare', domain: 'dummy', command: 'prepare', access: 'write', writeFlag: '--apply',
-    script: 'src/dummy/scripts/prepare.js', executor: 'dummy-script', est_seconds: 10, weight: 5,
-    args: { positional: [], flags: [
-      { flag: '--collection', required: true, style: 'name', desc: 'collection name (exact)' },
-      { flag: '--window', required: false, style: 'code', desc: 'window code' },
-      { flag: '--count', required: false, style: 'code', desc: 'record count to prepare' },
-      { flag: '--apply', required: false, style: 'code', desc: 'write flag: present means this call WOULD write, prepare must refuse it' },
-    ] },
-    serve: { query: false, prepare: true, commit: false }, protocol: null },
-  { name: 'dummy.commit', domain: 'dummy', command: 'commit', access: 'write',
-    script: 'src/dummy/scripts/commit.js', executor: 'dummy-script', est_seconds: 10, weight: 20,
-    args: { positional: [], flags: [
-      { flag: '--collection', required: true, style: 'name', desc: 'collection name (exact)' },
-      { flag: '--window', required: false, style: 'code', desc: 'window code' },
-      { flag: '--count', required: false, style: 'code', desc: 'record count to add' },
-    ] },
-    serve: { query: false, prepare: false, commit: true }, protocol: null },
-  { name: 'dummy.proposal', domain: 'dummy', command: 'proposal', access: 'write',
-    script: 'src/dummy/scripts/proposal.js', executor: 'dummy-script', est_seconds: 10, weight: 5,
-    args: { positional: [{ name: 'payload', required: true, desc: 'proposal payload file (opaque to the host)' }], flags: [
-      { flag: '--batch', required: false, style: 'code', desc: 'create multiple proposals (not used in v1, accepted for shape compatibility)' },
-    ] },
-    serve: { query: false, prepare: true, commit: false }, protocol: 'proposal.create' },
-  { name: 'dummy.proposal-commit', domain: 'dummy', command: 'proposal-commit', access: 'write',
-    script: 'src/dummy/scripts/proposal-commit.js', executor: 'dummy-script', est_seconds: 10, weight: 20,
-    args: { positional: [], flags: [
-      { flag: '--proposal-id', required: true, style: 'name', desc: 'proposal id returned by proposal.create' },
-    ] },
-    serve: { query: false, prepare: false, commit: true }, protocol: 'proposal.commit' },
-  // ── ballot-platform (second non-finance write domain, C10 L4 closure) ──────────
-  { name: 'ballot.query', domain: 'ballot', command: 'query', access: 'read',
-    script: 'src/ballot/scripts/query.js', executor: 'ballot-script', est_seconds: 10, weight: 2,
-    args: { positional: [], flags: [
-      { flag: '--topic', required: true, style: 'name', desc: 'ballot topic name or keyword' },
-      { flag: '--round', required: false, style: 'code', desc: 'round code, e.g. R1' },
-    ] },
-    serve: { query: true, prepare: true, commit: true }, protocol: null },
-  { name: 'ballot.scratch', domain: 'ballot', command: 'scratch', access: 'scratch',
-    script: 'src/ballot/scripts/scratch.js', executor: 'ballot-script', est_seconds: 5, weight: 1,
-    args: { positional: [], flags: [
-      { flag: '--input', required: true, style: 'name', desc: 'input text file path (local computation only)' },
-      { flag: '--output', required: false, style: 'name', desc: 'output file path; defaults to <input>.out' },
-    ] },
-    serve: { query: true, prepare: true, commit: false }, protocol: null },
-  { name: 'ballot.prepare', domain: 'ballot', command: 'prepare', access: 'write', writeFlag: '--apply',
-    script: 'src/ballot/scripts/prepare.js', executor: 'ballot-script', est_seconds: 10, weight: 5,
-    args: { positional: [], flags: [
-      { flag: '--topic', required: true, style: 'name', desc: 'ballot topic name (exact)' },
-      { flag: '--round', required: false, style: 'code', desc: 'round code' },
-      { flag: '--count', required: false, style: 'code', desc: 'ballot count to prepare' },
-      { flag: '--apply', required: false, style: 'code', desc: 'write flag: present means this call WOULD write, prepare must refuse it' },
-    ] },
-    serve: { query: false, prepare: true, commit: false }, protocol: null },
-  { name: 'ballot.commit', domain: 'ballot', command: 'commit', access: 'write',
-    script: 'src/ballot/scripts/commit.js', executor: 'ballot-script', est_seconds: 10, weight: 20,
-    args: { positional: [], flags: [
-      { flag: '--topic', required: true, style: 'name', desc: 'ballot topic name (exact)' },
-      { flag: '--round', required: false, style: 'code', desc: 'round code' },
-      { flag: '--count', required: false, style: 'code', desc: 'ballot count to add' },
-    ] },
-    serve: { query: false, prepare: false, commit: true }, protocol: null },
-  { name: 'ballot.proposal', domain: 'ballot', command: 'proposal', access: 'write',
-    script: 'src/ballot/scripts/proposal.js', executor: 'ballot-script', est_seconds: 10, weight: 5,
-    args: { positional: [{ name: 'payload', required: true, desc: 'proposal payload file (opaque to the host)' }], flags: [
-      { flag: '--batch', required: false, style: 'code', desc: 'create multiple proposals (not used in v1, accepted for shape compatibility)' },
-    ] },
-    serve: { query: false, prepare: true, commit: false }, protocol: 'proposal.create' },
-  { name: 'ballot.proposal-commit', domain: 'ballot', command: 'proposal-commit', access: 'write',
-    script: 'src/ballot/scripts/proposal-commit.js', executor: 'ballot-script', est_seconds: 10, weight: 20,
-    args: { positional: [], flags: [
-      { flag: '--proposal-id', required: true, style: 'name', desc: 'proposal id returned by proposal.create' },
-    ] },
-    serve: { query: false, prepare: false, commit: true }, protocol: 'proposal.commit' },
-];
-const LABELS = { 'dummy.query': 'query records', 'dummy.scratch': 'local computation', 'dummy.prepare': 'prepare records', 'dummy.commit': 'commit records', 'dummy.proposal': 'create proposal', 'dummy.proposal-commit': 'commit proposal',
-  'ballot.query': 'query ballots', 'ballot.scratch': 'ballot scratch', 'ballot.prepare': 'prepare ballots', 'ballot.commit': 'commit ballots', 'ballot.proposal': 'create ballot proposal', 'ballot.proposal-commit': 'commit ballot proposal' };
-const ACCESS_SEMANTICS = Object.freeze({
-  read: Object.freeze({ plan: true, confirm: false, mock: true }),
-  scratch: Object.freeze({ plan: false, confirm: false, mock: false }),
-  write: Object.freeze({ plan: true, confirm: true, mock: true }),
-});
+const FIXTURES_ROOT = path.resolve(FIXTURE_ROOT, '..');
+// 三层分离：能力定义（platforms/…/capabilities.json）、数据/绑定/故障（scenarios/…）、
+// 通用加载器（runtime/，不懂业务）。配置是纯数据，加载器不执行任何配置脚本。
+const PLATFORM = runtime.loadPlatform({ fixturesRoot: FIXTURES_ROOT, platformId: 'dummy-platform' });
+const SCENARIO = runtime.loadScenario({ fixturesRoot: FIXTURES_ROOT, scenarioId: PLATFORM.scenarioId });
+const OPERATIONS = PLATFORM.operations;
+const LABELS = PLATFORM.labels;
+const ACCESS_SEMANTICS = Object.freeze(PLATFORM.accessSemantics);
+const READ_DECLARATIONS = PLATFORM.reads;
 const PLAN_SCHEMA = {
   $schema: 'http://json-schema.org/draft-07/schema#', $id: 'PlanDraft', title: 'PlanDraft',
   description: 'Plan draft shape (host -> platform bin/dummy plan evaluate --stdin). calls is required; requestId/goal are declared optional metadata. additionalProperties is false: an undeclared top-level field is refused loudly, never silently ignored.',
@@ -170,25 +87,7 @@ const PROPOSAL_SCHEMA = {
     records: { type: 'array', maxItems: 50, items: { type: 'object', required: ['name', 'value'], additionalProperties: false, properties: { name: { type: 'string', minLength: 1 }, value: { type: 'number' } } } },
   },
 };
-const CORRECT_FORM = {
-  QUERY_REQUIRED: 'Provide --collection <name>.',
-  COLLECTION_NOT_FOUND: 'No collection matches that keyword. Check the exact collection name and retry.',
-  COLLECTION_AMBIGUOUS: 'More than one collection matches. Confirm the exact collection name and retry.',
-  WINDOW_NO_DATA: 'That window has no data for this collection. Retry with a window from availableWindows.',
-  COLLECTION_LOCKED: 'That collection is locked. It cannot accept writes in its current state.',
-  PLAN_UNKNOWN_FIELD: 'Plan draft has an undeclared top-level field. Remove it and resubmit.',
-  PLAN_CALLS_REQUIRED: 'Plan draft must contain a non-empty calls array.',
-  PLAN_UNKNOWN_OPERATION: 'Plan call names an unregistered operation.',
-  PLAN_OPERATION_NOT_READ_ONLY: 'Plan calls may only name read-only operations (dummy.query, dummy.scratch).',
-  PROPOSAL_UNKNOWN_FIELD: 'Proposal payload has an undeclared top-level field. Remove it and resubmit.',
-  PROPOSAL_NOT_PENDING: 'Proposal is no longer pending. Do not commit it again.',
-  PROPOSAL_EXPIRED: 'Proposal has expired. Create a new proposal.',
-  PROPOSAL_TOKEN_UNTRUSTED: 'Proposal commit token is missing, malformed, expired or does not match this proposal.',
-  PROPOSAL_STATE_CORRUPT: 'Proposal state is corrupt. Fail closed; do not guess.',
-  PLAN_ACTIVATION_UNTRUSTED: 'Plan activation token is missing, malformed, expired or does not match this plan.',
-  PLAN_NOT_FOUND: 'No such plan.',
-  PLAN_NOT_PENDING: 'Plan is not pending activation.',
-};
+const CORRECT_FORM = PLATFORM.errorCatalog;
 function env(name, fallback) { const v = process.env[name]; return v === undefined || v === '' ? fallback : v; }
 /** Canonical-first lookup for the remaining env surface (tokens + C-class knobs):
  *  EXECUTION_* wins, the fixture-specific name is a debug entry (manual runs),
@@ -238,28 +137,8 @@ function statePaths() {
     auditFile: stateDirOverride === null ? null : path.join(dir, 'audit.jsonl'),
   };
 }
-function seedState() {
-  return {
-    collections: {
-      alpha: { items: [{ id: 'rec-001', name: 'alpha-item-1', value: 1200 }, { id: 'rec-002', name: 'alpha-item-2', value: 800 }], windows: ['W1', 'W2'], locked: false, records: { W1: 2, W2: 1 } },
-      beta: { items: [{ id: 'rec-101', name: 'beta-item-1', value: 500 }, { id: 'rec-102', name: 'beta-item-2', value: 300 }, { id: 'rec-103', name: 'beta-item-3', value: 200 }], windows: ['W1'], locked: false, records: { W1: 3 } },
-      'alpha-group': { items: [{ id: 'rec-201', name: 'alpha-group-item-1', value: 700 }], windows: ['W1'], locked: false, records: { W1: 1 } },
-      'locked-one': { items: [{ id: 'rec-301', name: 'locked-item-1', value: 900 }], windows: ['W1'], locked: true, records: { W1: 1 } },
-      'empty-one': { items: [], windows: ['W1'], locked: false, records: { W1: 0 } },
-      // 自然名歧义对 1（探针 A3 / C2 第一次澄清 / X1）：查询 "contoso" 不是精确键，
-      // 子串命中下面两个 → COLLECTION_AMBIGUOUS。trade 双 window（W1 有数据）供 C2 选择后
-      // 续查；logistics 只有 W1——X1 的 window 切换轮（选 "the second one" 后问 W2）因此
-      // 落在无数据窗口上，考"该window无数据"的合法回复形态。
-      'contoso-trade': { items: [{ id: 'rec-401', name: 'contoso-trade-item-1', value: 1500 }, { id: 'rec-402', name: 'contoso-trade-item-2', value: 600 }], windows: ['W1', 'W2'], locked: false, records: { W1: 2, W2: 1 } },
-      'contoso-logistics': { items: [{ id: 'rec-501', name: 'contoso-logistics-item-1', value: 450 }], windows: ['W1'], locked: false, records: { W1: 1 } },
-      // 自然名歧义对 2（C2 第二次澄清）：查询 "fabrikam" → 子串命中两个 → 歧义。
-      // 与 contoso 对分开，避免同一歧义样本反复考同一条路径（移植前中文财税域语料的
-      // 两对公司名歧义对同款设计）。
-      'fabrikam-retail': { items: [{ id: 'rec-601', name: 'fabrikam-retail-item-1', value: 880 }], windows: ['W1'], locked: false, records: { W1: 1 } },
-      'fabrikam-wholesale': { items: [{ id: 'rec-701', name: 'fabrikam-wholesale-item-1', value: 1320 }], windows: ['W1'], locked: false, records: { W1: 1 } },
-    },
-  };
-}
+function seedState() { return runtime.buildSeedState(SCENARIO); }
+
 function loadJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
 }
@@ -287,11 +166,56 @@ function audit(row) {
   fs.appendFileSync(f, JSON.stringify({ ts: new Date().toISOString(), ...row }) + '\n');
 }
 function emit(op, status, data, error) {
-  const envelope = { v: 1, op, status, data: data ?? null, error: error ? { code: error.code, message: error.message, ...(error.correctForm ? { correctForm: error.correctForm } : {}) } : null };
+  const envelope = { v: 1, op, status, data: data ?? null, error: error ? { code: error.code, message: error.message, ...(error.correctForm ? { correctForm: error.correctForm } : {}), ...(error.retryable !== undefined ? { retryable: error.retryable } : {}) } : null };
   process.stdout.write('RESULT ' + JSON.stringify(envelope) + '\n');
   return envelope;
 }
-function errObj(code, message) { return { code, message, correctForm: CORRECT_FORM[code] }; }
+function errObj(code, message) { return runtime.makeError(CORRECT_FORM, code, message); }
+// ── 限流（业务 E2E 阶段 1 增项，2026-11-14；阶段 2·R2 改为状态根驱动）─────────────
+// 每 state-dir 计数窗口：该 state-dir 在一个窗口内最多 N 次实际执行的 operation
+// （门拒/计划查询等不计）。超限返回 failed 信封 +
+// ExecutionFailure{code:'RATE_LIMITED', message, retryable:true}，经现有 CLI
+// 退出码（1=域失败）与 RESULT 信封表达，不新增协议面。计数落
+// <state-dir>/rate-limit.json；不设旋钮时完全关闭（行为不变）。
+//
+// 旋钮来源（2026-11-14 R2：宿主 worker env 白名单 worker-env.ts 只放行 PATH/HOME/TMPDIR，
+// DUMMY_* 经宿主路径不可达 → 限流从未触发、R1 #4 空洞）：
+//   ① 主入口 = <state-dir>/rate-limit-config.json（经 --state-dir 传入，宿主可复现）：
+//      { "max": <int>, "windowSeconds"?: <int> }。该文件落在 state 根，与 env 无关，
+//      宿主按用例落到 state 根即可驱动，不依赖会被白名单丢弃的环境变量。
+//   ② 兼容入口 = DUMMY_RATE_LIMIT_MAX / DUMMY_RATE_LIMIT_WINDOW_SECONDS（手工调试用，
+//      不再是唯一入口）。文件存在且 max>0 时文件优先；否则回落 env。
+function rateLimitConfigFile() {
+  return path.join(path.dirname(statePaths().stateFile), 'rate-limit-config.json');
+}
+function rateLimitPolicy() {
+  const cfg = loadJson(rateLimitConfigFile(), null);
+  const fileMax = cfg && typeof cfg === 'object' ? Number(cfg.max) : Number.NaN;
+  const fileWindow = cfg && typeof cfg === 'object' ? Number(cfg.windowSeconds) : Number.NaN;
+  const max = Number.isInteger(fileMax) && fileMax > 0 ? fileMax : Number(env('DUMMY_RATE_LIMIT_MAX', ''));
+  const windowRaw = Number.isInteger(fileWindow) && fileWindow > 0 ? fileWindow : Number(env('DUMMY_RATE_LIMIT_WINDOW_SECONDS', ''));
+  if (!Number.isInteger(max) || max <= 0) return null;
+  return { max, windowSeconds: Number.isInteger(windowRaw) && windowRaw > 0 ? windowRaw : 3600 };
+}
+/** 取一个执行名额；超限返回策略（不写审计——调用方落带 exitCode 的审计行）。 */
+function rateLimitTake() {
+  const p = rateLimitPolicy();
+  if (!p) return null;
+  const file = path.join(path.dirname(statePaths().stateFile), 'rate-limit.json');
+  const window = Math.floor(Date.now() / (p.windowSeconds * 1000));
+  const cur = loadJson(file, null);
+  const count = cur && cur.window === window ? cur.count : 0;
+  if (count >= p.max) return p;
+  saveJson(file, { window, count: count + 1 });
+  return null;
+}
+function rateLimitRefused(opName, mode, via, args) {
+  const p = rateLimitTake();
+  if (!p) return false;
+  emit(opName, 'failed', null, { code: 'RATE_LIMITED', message: `Rate limit reached: max ${p.max} executed operation(s) per ${p.windowSeconds}s window for this state dir; retry after the window`, retryable: true });
+  audit({ mode, ...(via ? { via } : {}), script: opName, args, serve: orchestrated(), exitCode: 1 });
+  return true;
+}
 function parseFlags(argv) {
   const flags = {}; const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -327,13 +251,6 @@ function decide(mode, op, args) {
   }
   return { allowed: true };
 }
-function findCollection(state, keyword) {
-  if (Object.prototype.hasOwnProperty.call(state.collections, keyword)) return { exact: state.collections[keyword], name: keyword };
-  const matches = Object.keys(state.collections).filter((n) => n.includes(keyword));
-  if (matches.length === 1) return { exact: state.collections[matches[0]], name: matches[0] };
-  if (matches.length > 1) return { ambiguous: matches };
-  return { none: true };
-}
 // 返回 { code, result }（2026-11-09 audited 申报模式）：result 在 completed / needs_input /
 // not_found 三种确定性答案上都带**该次 query 的实际结果状态**（result.status），completed
 // 另带该次返回的 items/count/fields，由调用方写进审计行的 result 字段——audited 申报模式交叉核的
@@ -348,23 +265,25 @@ function findCollection(state, keyword) {
 // 命题 ⇒ 交叉核 fail-closed，不会把证据挂到错的对象上。
 function doQuery(opName, args) {
   const { flags } = parseFlags(args);
-  const state = loadState();
-  if (!flags.collection && !flags.topic) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection or --topic')); return { code: 1 }; }
-  const collection = flags.collection || flags.topic;
-  const found = findCollection(state, collection);
-  if (found.ambiguous) { emit(opName, 'needs_input', { query: collection, candidates: found.ambiguous.map((name) => ({ name })) }, errObj('COLLECTION_AMBIGUOUS', `More than one collection matches "${collection}"`)); return { code: 0, result: { status: 'needs_input', collection } }; }
-  if (found.none) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches that keyword. Check the exact collection name and retry.`)); return { code: 0, result: { status: 'not_found', collection } }; }
-  const col = found.exact;
-  const window = flags.window || flags.round;
-  if (window && !col.windows.includes(window)) {
-    emit(opName, 'not_found', { query: collection, window, availableWindows: col.windows }, errObj('WINDOW_NO_DATA', `Window ${window} has no data for collection ${found.name}`));
-    return { code: 0, result: { status: 'not_found', collection: found.name } };
+  const read = READ_DECLARATIONS[opName];
+  if (!read) {
+    emit(opName, 'failed', null, errObj('QUERY_REQUIRED', `No declarative read contract for ${opName}`));
+    return { code: 1 };
   }
-  const items = col.items;
-  emit(opName, 'completed', { collection: found.name, window: window ?? null, items, count: items.length }, null);
-  // fields = 平台原始 items 的字段名（nocaliber 命题的事实基准）：items 本身按 value 核对
-  // 契约落账，字段名单独保留，避免"投影后的形状"冒充平台原始数据模型。
-  return { code: 0, result: { status: 'completed', collection: found.name, items, count: items.length, fields: [...new Set(items.flatMap((item) => Object.keys(item)))] } };
+  const outcome = runtime.executeDeclaredRead({
+    read,
+    flags,
+    collections: loadState().collections,
+    faults: SCENARIO.faults,
+    catalog: CORRECT_FORM,
+  });
+  if (outcome.stderr !== undefined) process.stderr.write(outcome.stderr);
+  if (outcome.envelope !== null) emit(opName, outcome.envelope.status, outcome.envelope.data, outcome.envelope.error);
+  return {
+    code: outcome.exitCode,
+    ...(outcome.result === undefined ? {} : { result: outcome.result }),
+    ...(outcome.refused === undefined ? {} : { refused: outcome.refused }),
+  };
 }
 function doScratch(opName, args) {
   const { flags } = parseFlags(args);
@@ -623,21 +542,104 @@ async function planActivate(argv) {
   process.stdout.write(JSON.stringify({ planId, version: plan.version, status: 'active' }) + '\n');
   return 0;
 }
+// ── 调用形态自述（2026-11-12，U1 写面可达性） ────────────────────────────────────
+// 为什么要有这一段：模型实测的通行形态是 `bin/dummy query --collection X`——把 flag 填在
+// operation 名那一格，落审计行 {script:"--collection", refused:"unregistered"}，写面四个
+// operation（prepare/commit/proposal/proposal-commit）连名字都没进过它的手。宿主的拒绝文案
+// 又指点 worker「调用形态以运行态技能文档「serve 运行态的调用形态」一节为准」
+// （packages/agent/src/error-codes.ts:497/509/516），而本夹具的技能文档此前没有那一节。
+// 因此形态必须由夹具**自己**说清：`operation list --json` 是机器可读权威，`--help` /
+// `<mode> --help` 是同一份注册表的可读投影，未登记目标的拒绝里再带一次正确形态。
+// 三处都从 OPERATIONS 派生，不手抄名单（改注册表即三处同步）。
+/** 显示名：本夹具的入口名（bin/dummy；`bin/generic` 是同一实现的别名软链）。 */
+function gatewayDisplay() {
+  const entry = path.basename(process.argv[1] ?? 'dummy').replace(/\.cjs$/i, '');
+  return `bin/${entry || 'dummy'}`;
+}
+/** 一个 operation 在该 mode 下的调用形态（参数按声明派生：位置参数 + flag；取值的样式照抄平台声明）。 */
+function invocationOf(op, mode) {
+  const parts = [mode, op.name];
+  for (const p of op.args?.positional ?? []) parts.push(p.required ? `<${p.name}>` : `[<${p.name}>]`);
+  for (const f of op.args?.flags ?? []) {
+    // 写旗标不进形态：prepare 带它会被 decide() 当场拒（写必须走 commit），教它等于教一条死路。
+    if (op.writeFlag && f.flag === op.writeFlag) continue;
+    const value = f.style === 'name' ? '<name>' : f.style === 'code' ? '<code>' : '<value>';
+    parts.push(f.required ? `${f.flag} ${value}` : `[${f.flag} ${value}]`);
+  }
+  return `${gatewayDisplay()} ${parts.join(' ')}`;
+}
+/** 该 operation 能在哪些 mode 下真的调到（serve 矩阵，注册表原值）。 */
+function modesOf(op) { return ['query', 'prepare', 'commit'].filter((mode) => op.serve?.[mode] === true); }
+/** 某个 mode 下登记的 operation（未登记目标的拒绝与 mode help 共用）。 */
+function operationsInMode(mode) { return OPERATIONS.filter((op) => op.serve?.[mode] === true); }
+/** 未登记目标的教学拒绝行（拒绝事实不变，另教正确形态；stderr 可见，与 GATE_REFUSE 同路）。 */
+function unregisteredNotice(mode, target) {
+  const available = operationsInMode(mode);
+  return [
+    `GATE_REFUSE script not registered: ${target}`,
+    `correctForm: ${mode} 之后第一个位置参数是登记的 operation 名；flag（--xxx）不是 operation 名，填在它后面的参数位。`,
+    `available in ${mode}（可直接照抄的形态）：`,
+    ...available.map((op) => `  ${invocationOf(op, mode)}${op.access === 'write' ? '   # write' : ''}`),
+    `hint: ${gatewayDisplay()} ${mode} --help 给出同一份形态；${gatewayDisplay()} operation list --json 是机器可读清单。`,
+  ].join('\n') + '\n';
+}
+/** 结构化调用路径的同族教学（形态是 {operation, args}，没有 mode 那一格）。 */
+function unregisteredCallNotice(operation) {
+  return [
+    `correctForm: call 的 operation 必须是登记名（见 operation list --json）——` +
+      `${JSON.stringify(operation)} 不是；结构化调用形态是 {operation, args}，args 的键是声明里的位置参数名与 flag。`,
+    `available: ${OPERATIONS.map((op) => op.name).join(', ')}`,
+    `hint: ${gatewayDisplay()} --help 给出每条 operation 的可读调用形态。`,
+  ].join('\n') + '\n';
+}
+/** 注册表的可读投影（`--help` 与 `<mode> --help` 共用同一段渲染）。 */
+function operationTable(mode) {
+  const ops = mode ? operationsInMode(mode) : OPERATIONS;
+  return ops.flatMap((op) => {
+    const modes = mode ? [mode] : modesOf(op);
+    return modes.map((m) => `  ${invocationOf(op, m)}${m === modes[0] ? `   # ${op.access} · ${LABELS[op.name] ?? ''}` : ''}`);
+  }).join('\n');
+}
 function usage() {
   return [
-    'Usage: dummy [--state-dir <path>] <plan evaluate|current|activate|memory|breaker|cache|proposal status|operation list|query|prepare|commit|local|call> [args...]',
+    'Generic mock execution layer (test fixture; record / collection / window vocabulary).',
+    '',
+    `Usage: ${gatewayDisplay()} [--state-dir <path>] <command> [args...]`,
     '  --state-dir <path>  test-only state root (dummy test surface, not a consumption protocol); default <fixture>/.runtime',
-    'Examples:',
-    '  dummy plan evaluate --task-id task-1 --stdin',
-    '  dummy plan current --task-id task-1',
-    '  dummy plan activate --stdin  # host provides planId/evidence/token as JSON on stdin',
-    '  dummy plan --schema          # print plan draft shape',
-    '  dummy proposal status --proposal-id prop_1234',
-    '  dummy operation list --json',
-    '  dummy query dummy.query --collection alpha --window W1',
-    '  dummy prepare dummy.proposal <payload-file>  # proposal.create, by operation name',
-    '  dummy commit dummy.proposal-commit --proposal-id prop_1234',
-    '  dummy call --file <structured-call.json>  # structured call protocol',
+    '',
+    '调用形态：query|prepare|commit 之后**第一个位置参数是登记的 operation 名**，不是 flag。',
+    '把 flag 填在那一格（如 `query --collection alpha`）会被拒（script not registered）。',
+    '下面的形态可直接照抄；`operation list --json` 是同一份注册表的机器可读面。',
+    '',
+    'Registered operations:',
+    operationTable(),
+    '',
+    '写面（write access）：写只能沿 prepare → commit 两条路走；prepare 带 --apply 会被门拒。',
+    `  ${operationsInMode('prepare').filter((op) => op.access === 'write').map((op) => invocationOf(op, 'prepare')).join('\n  ')}`,
+    `  ${operationsInMode('commit').filter((op) => op.access === 'write').map((op) => invocationOf(op, 'commit')).join('\n  ')}`,
+    `  ${gatewayDisplay()} <query|prepare|commit> --help   该 mode 的 operation 表与形态`,
+    '',
+    '辅助出口：',
+    `  ${gatewayDisplay()} operation list [--json]      登记表（name/access/args/serve/protocol）`,
+    `  ${gatewayDisplay()} plan --schema               plan draft 形状`,
+    `  ${gatewayDisplay()} plan evaluate --task-id <id> --stdin`,
+    `  ${gatewayDisplay()} plan current --task-id <id>`,
+    `  ${gatewayDisplay()} plan activate --stdin       host provides planId/evidence/token as JSON on stdin`,
+    `  ${gatewayDisplay()} proposal status --proposal-id <id>`,
+    `  ${gatewayDisplay()} local <script> [args...]    纯本地计算（只放行 <fixture>/tmp/ 下的脚本）`,
+    `  ${gatewayDisplay()} call --file <structured-call.json>  结构化调用协议`,
+    '',
+    `不带 --state-dir 时状态落 <fixture>/.runtime（手工调试用）；评测按用例传 --state-dir。`,
+  ].join('\n') + '\n';
+}
+function modeUsage(mode) {
+  const ops = operationsInMode(mode);
+  return [
+    `${mode} mode — 可用 operation ${ops.length} 个（形态可直接照抄；${gatewayDisplay()} operation list --json 是机器可读面）：`,
+    operationTable(mode),
+    '',
+    `调用形态：${mode} 之后第一个位置参数必须是上面登记的 operation 名；flag（--xxx）不是 operation 名。`,
+    `把 flag 填在那一格会被拒并给出正确形态；写面（access=write）见 ${gatewayDisplay()} --help 的「写面」段。`,
   ].join('\n') + '\n';
 }
 async function main() {
@@ -646,7 +648,14 @@ async function main() {
   if (stateDirFlag.error) { process.stderr.write(`${stateDirFlag.error}\n`); return 2; }
   argv = stateDirFlag.rest;
   if (argv.length === 0 || argv[0] === '--help') { process.stdout.write(usage()); return argv.length ? 0 : 2; }
+  if (argv[0] === '-h' || argv[0] === 'help') { process.stdout.write(usage()); return 0; }
   const [cmd, sub] = argv;
+  // <mode> --help：形态自述的可读面（计划门把 <mode> <flag> 当执行调用按范围拒收，
+  // 所以它不能是唯一发现面——但它对直跑与拿到激活计划的调用仍然是正确的问答）。
+  if (['query', 'prepare', 'commit', 'local', 'call'].includes(cmd) && ['--help', '-h', 'help'].includes(sub ?? '')) {
+    process.stdout.write(modeUsage(cmd === 'call' ? 'call' : cmd));
+    return 0;
+  }
   if (cmd === 'operation' && sub === 'list') {
     if (argv.includes('--json')) {
       process.stdout.write(JSON.stringify({ operations: OPERATIONS.map((o) => ({ name: o.name, domain: o.domain, command: o.command, access: o.access, script: o.script, sharedLocalWrite: false, effects: o.access === 'read' ? ['read'] : o.access === 'scratch' ? ['local'] : ['write'], executor: o.executor, est_seconds: o.est_seconds, weight: o.weight, args: o.args, serve: o.serve, protocol: o.protocol, label: LABELS[o.name] ?? '', proposalSchema: o.protocol === 'proposal.create' ? PROPOSAL_SCHEMA : null })), accessSemantics: ACCESS_SEMANTICS }) + '\n');
@@ -655,6 +664,7 @@ async function main() {
     for (const o of OPERATIONS) process.stdout.write(`${o.name}\t${o.command}\t${o.access}\t${o.executor}\t${LABELS[o.name] ?? ''}\n`);
     return 0;
   }
+  if (cmd === 'operation' && ['--help', '-h', 'help'].includes(sub ?? '')) { process.stdout.write(usage()); return 0; }
   if (cmd === 'plan') {
     if (sub === '--schema') { process.stdout.write(JSON.stringify(PLAN_SCHEMA, null, 2) + '\n'); return 0; }
     if (sub === 'evaluate') { const { flags } = parseFlags(argv.slice(2)); if (!flags['task-id']) { process.stderr.write('plan evaluate requires --task-id\n'); return 2; } return planEvaluate(flags['task-id'], argv.slice(2)); }
@@ -702,7 +712,7 @@ async function main() {
       process.stderr.write('CALL_REFUSE payload args must be string[] or Record<string, unknown>\n'); return 3;
     }
     const op = resolveOperation(call.operation);
-    if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n'); audit({ mode: 'call', script: call.operation, args: call.args, serve: orchestrated(), refused: 'unregistered' }); return 3; }
+    if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n' + unregisteredCallNotice(call.operation)); audit({ mode: 'call', script: call.operation, args: call.args, serve: orchestrated(), refused: 'unregistered' }); return 3; }
     // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
     // 两条路都**先记一行调用事实、再补一行最终结果**（2026-11-09 十审 major）：旧写法只在
     // 调用前记一行、没有 exitCode，于是评测的 classifyExecutionCall 永远拿不到 exitCode=0，
@@ -735,9 +745,11 @@ async function main() {
     const planId = env2('EXECUTION_PLAN_ID', 'DUMMY_PLAN_ID', '');
     const requirePlan = env2('EXECUTION_REQUIRE_PLAN', 'DUMMY_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: orchestrated(), refused: 'PLAN_REQUIRED' }); return 3; }
+    if (rateLimitRefused(op.name, accessMode, 'structured', call.args)) return 1;
     let code;
     let queryResult;
-    if (op.name === 'dummy.query' || op.name === 'ballot.query') { const q = doQuery(op.name, call.args); code = q.code; queryResult = q.result; }
+    let queryRefused;
+    if (op.name === 'dummy.query' || op.name === 'ballot.query') { const q = doQuery(op.name, call.args); code = q.code; queryResult = q.result; queryRefused = q.refused; }
     else if (op.name === 'dummy.scratch' || op.name === 'ballot.scratch') code = doScratch(op.name, call.args);
     else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, call.args);
     else if (op.name === 'dummy.commit' || op.name === 'ballot.commit') {
@@ -764,7 +776,7 @@ async function main() {
     // query 的 completed/needs_input/not_found 行把该次实际结果状态写进审计行 result
     // （audited 申报模式交叉核的事实基准：结果状态与 items 都可供独立核对）；被拒/失败的
     // 行没有 queryResult，不带 result。
-    audit({ mode: accessMode, via: 'structured', script: op.name, args: call.args, serve: orchestrated(), exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}) });
+    audit({ mode: accessMode, via: 'structured', script: op.name, args: call.args, serve: orchestrated(), exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}), ...(queryRefused ? { refused: queryRefused } : {}) });
     if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {
       try {
         const plans = loadPlans();
@@ -789,7 +801,9 @@ async function main() {
     }
     if (!target) { process.stderr.write(`usage: dummy ${cmd} <operation-or-script> [args...]\n`); return 2; }
     const op = resolveOperation(target);
-    if (!op) { process.stderr.write(`GATE_REFUSE script not registered: ${target}\n`); audit({ mode: cmd, script: target, args: rest, serve: orchestrated(), refused: 'unregistered' }); return 3; }
+    // 拒绝事实不变（审计行照旧落 refused='unregistered'，那是评测的「畸形调用」信号）；
+    // 另附正确形态，让下一跳能拼对（教学，不是放行）。
+    if (!op) { process.stderr.write(unregisteredNotice(cmd, target)); audit({ mode: cmd, script: target, args: rest, serve: orchestrated(), refused: 'unregistered' }); return 3; }
     // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
     // 起止两行 + 同一 callId（2026-11-09 十二审 major）：bash 侧这条路径与结构化侧同规，
     // 都要补结果行——否则 classifyExecutionCall 拿不到 exitCode=0，正常完成并读回的 bash
@@ -816,9 +830,11 @@ async function main() {
     const planId = env2('EXECUTION_PLAN_ID', 'DUMMY_PLAN_ID', '');
     const requirePlan = env2('EXECUTION_REQUIRE_PLAN', 'DUMMY_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), refused: 'PLAN_REQUIRED' }); return 3; }
+    if (rateLimitRefused(op.name, cmd, null, rest)) return 1;
     let code;
     let queryResult;
-    if (op.name === 'dummy.query' || op.name === 'ballot.query') { const q = doQuery(op.name, rest); code = q.code; queryResult = q.result; }
+    let queryRefused;
+    if (op.name === 'dummy.query' || op.name === 'ballot.query') { const q = doQuery(op.name, rest); code = q.code; queryResult = q.result; queryRefused = q.refused; }
     else if (op.name === 'dummy.scratch' || op.name === 'ballot.scratch') code = doScratch(op.name, rest);
     else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, rest);
     else if (op.name === 'dummy.commit' || op.name === 'ballot.commit') {
@@ -842,7 +858,7 @@ async function main() {
     // query 的 completed/needs_input/not_found 行把该次实际结果状态写进审计行 result
     // （audited 申报模式交叉核的事实基准：结果状态与 items 都可供独立核对）；被拒/失败的
     // 行没有 queryResult，不带 result。
-    audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}) });
+    audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}), ...(queryRefused ? { refused: queryRefused } : {}) });
     // Plan accounting: a successful plannable call under a plan id counts toward it.
     if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {
       try {

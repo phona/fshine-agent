@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
-import { deploymentEnvOf, effectiveDeploymentEnv, loadConfig, principalScopeRecords, firstEnabledPrincipalId } from './src/index';
+import { deploymentEnvOf, effectiveDeploymentEnv, loadConfig } from './src/index';
 
 const PUBLIC_URL_ENV = { APP_PUBLIC_URL: 'https://tax.example.com' };
 
@@ -161,7 +161,7 @@ contextProfiles:
     expect(config.contextProfiles['example-gateway']).toMatchObject({ toolName: 'run_example_gateway_task' });
 
     // 大写/连字符/数字开头都不是合法工具名（模型可见协议面，形状必须像标识符）
-    for (const bad of ['Run_Task', 'run-task', '1run_task', 'run task']) {
+    for (const bad of ['Task_Run', 'task-run', '1task_run', 'task run']) {
       const badYaml = `${VALID_YAML}
 contextProfiles:
   example-gateway:
@@ -182,6 +182,53 @@ contextProfiles:
     expect(() => loadConfig({ yamlPath: writeFixture(tooLong), env: PUBLIC_URL_ENV })).toThrowError(/toolName/);
   });
 
+  it('context profile 解析执行层单文件参数声明 fileParams（键缺失 = 不启用）', () => {
+    const yaml = `${VALID_YAML}
+contextProfiles:
+  example-gateway:
+    root: /opt/fictional-execution-layer
+    skillRoots: [".agents/skills"]
+    fileParams:
+      input: --input
+      output: exec-output
+`;
+    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
+    expect(config.contextProfiles['example-gateway']?.fileParams).toEqual({ input: '--input', output: 'exec-output' });
+
+    // 键不存在 = 宿主不启用单文件参数翻译（部署未声明执行层参数名）。
+    const absent = `${VALID_YAML}
+contextProfiles:
+  example-gateway:
+    root: /opt/fictional-execution-layer
+    skillRoots: [".agents/skills"]
+`;
+    const without = loadConfig({ yamlPath: writeFixture(absent), env: PUBLIC_URL_ENV });
+    expect(without.contextProfiles['example-gateway']?.fileParams).toBeUndefined();
+  });
+
+  it('context profile 拒绝畸形的 fileParams（非映射/非字符串/空串/未知键）', () => {
+    // 部署声明写错时 fail-fast：静默忽略会让附件再次到不了执行层。
+    for (const raw of [
+      '"--input"', // 非映射
+      'input: [--input]', // 非字符串
+      'input: 42', // 非字符串
+      'input: "   "', // trim 后为空
+      'input: "--in put"', // 参数名含空白
+      'input-file: --input', // 未知键（拼错的参数名）
+    ]) {
+      const yaml = `${VALID_YAML}
+contextProfiles:
+  example-gateway:
+    root: /opt/fictional-execution-layer
+    skillRoots: [".agents/skills"]
+    fileParams:
+      ${raw}
+`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV }), raw)
+        .toThrowError(/fileParams/);
+    }
+  });
+
   it('context profile 拒绝非正 Worker 预算', () => {
     const yaml = `${VALID_YAML}
 contextProfiles:
@@ -191,38 +238,6 @@ contextProfiles:
     workerTimeoutMs: 0
 `;
     expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV })).toThrowError(/workerTimeoutMs/);
-  });
-
-  it('principalScopeRecords:去掉 wecom: 前缀映射为授权记录（账套列保留不读，写空）', () => {
-    const config = loadConfig({ yamlPath: writeFixture(VALID_YAML), env: PUBLIC_URL_ENV });
-    const records = principalScopeRecords(config);
-
-    expect(records).toHaveLength(2);
-    expect(records[0]).toEqual({
-      wecomUserId: 'user_a',
-      accountSetIds: [],
-      enabled: true,
-      capabilities: ['read'],
-    });
-    const disabled = records.find((record) => record.wecomUserId === 'user_b');
-    expect(disabled?.enabled).toBe(false);
-    expect(disabled?.capabilities).toEqual(['read']);
-  });
-
-  it('principalScopeRecords:键的前缀段是渠道身份，不写死 wecom（第二个客户端接入不改判据）', () => {
-    // 2026-10-20 前这里写死 startsWith('wecom:')：web/小程序客户端接入时，它的授权键会被
-    // 这个判据拒掉，而前缀本来就从消息上来（适配器报"哪个渠道 + 渠道里的谁"）。
-    const yaml = VALID_YAML + `  "web:user_c":\n    accountSetIds: []\n    enabled: true\n`;
-    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
-    const records = principalScopeRecords(config);
-
-    expect(records.find((r) => r.wecomUserId === 'user_c')?.enabled).toBe(true);
-    // 没有冒号的键整体当 userid（存量配置不破）
-    const bare = loadConfig({
-      yamlPath: writeFixture(`principals:\n  "user_d":\n    enabled: true\n`),
-      env: PUBLIC_URL_ENV,
-    });
-    expect(principalScopeRecords(bare)[0]?.wecomUserId).toBe('user_d');
   });
 
   it('V1 capabilities:解析 read/validate/write 并默认旧 principal 为 read', () => {
@@ -259,52 +274,6 @@ contextProfiles:
     const yaml = VALID_YAML.replace('wecom:user_a', 'wecom:REPLACE_WITH_USERID');
     expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV }))
       .toThrowError(/REPLACE_WITH/);
-  });
-
-  // ── firstEnabledPrincipalId：验收/探针脚本的授权用户派生（UserID 不落代码） ──
-  //
-  // 6 个 scripts/ 验收与探针脚本曾把真实企微 UserID 写死在常量里。principal 的既定家在
-  // config/agent.yaml（gitignore），脚本改为消费本助手；scripts/ 不在 typecheck 与 unit
-  // 覆盖内，所以派生判据（含 fail-closed 的 null 分支）必须在这里先有表征。
-  it('firstEnabledPrincipalId:取首个 enabled principal 的裸 userid（剥渠道前缀）', () => {
-    const config = loadConfig({ yamlPath: writeFixture(VALID_YAML), env: PUBLIC_URL_ENV });
-    expect(firstEnabledPrincipalId(config)).toBe('user_a');
-  });
-
-  it('firstEnabledPrincipalId:enabled=false 的 principal 被跳过', () => {
-    const yaml = `principals:\n  "wecom:user_off":\n    enabled: false\n  "wecom:user_on":\n    enabled: true\n`;
-    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
-    expect(firstEnabledPrincipalId(config)).toBe('user_on');
-  });
-
-  it('firstEnabledPrincipalId: principals 全 disabled / 空表 → null（调用方 fail-closed）', () => {
-    const allOff = loadConfig({
-      yamlPath: writeFixture(`principals:\n  "wecom:user_a":\n    enabled: false\n`),
-      env: PUBLIC_URL_ENV,
-    });
-    expect(firstEnabledPrincipalId(allOff)).toBeNull();
-    const empty = loadConfig({ yamlPath: writeFixture(`principals: {}\n`), env: PUBLIC_URL_ENV });
-    expect(firstEnabledPrincipalId(empty)).toBeNull();
-  });
-
-  it('firstEnabledPrincipalId:无冒号的旧键整体当 userid（与 principalScopeRecords 同取舍）', () => {
-    const config = loadConfig({
-      yamlPath: writeFixture(`principals:\n  "user_d":\n    enabled: true\n`),
-      env: PUBLIC_URL_ENV,
-    });
-    expect(firstEnabledPrincipalId(config)).toBe('user_d');
-  });
-
-  it('firstEnabledPrincipalId:第二个客户端前缀同样只剥第一段（不写死 wecom）', () => {
-    const yaml = VALID_YAML + `  "web:user_c":\n    accountSetIds: []\n    enabled: true\n`;
-    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
-    // VALID_YAML 里 user_a 已 enabled——首个即它；web: 前缀的判据由下一行单独钉。
-    expect(firstEnabledPrincipalId(config)).toBe('user_a');
-    const webOnly = loadConfig({
-      yamlPath: writeFixture(`principals:\n  "web:user_c":\n    enabled: true\n`),
-      env: PUBLIC_URL_ENV,
-    });
-    expect(firstEnabledPrincipalId(webOnly)).toBe('user_c');
   });
 
   // ── D-055：配置模板不许指向会"静默失效"的技能面 ──────────────────────────
@@ -355,19 +324,24 @@ wecom:
   botId: yaml-bot-id
   botSecret: yaml-bot-secret
 host:
-  platformQueueCapacity: 7
-  shutdownDrainMs: 0
-  workerDispatchMode: background
-  workerStepCap: 12
-  inboundDebounceMs: 0
   attachmentDir: /srv/attachments
-  piAgentDir: /srv/pi-agent
 execution:
   planActivationSecret: yaml-plan-secret
-businessSkillPath: docs/other-business-skill.md
+runtime:
+  mainConcurrency: 2
+  backgroundConcurrency: 1
+  queueCapacity: 4
+  mainTurnMs: 300000
+  workerTurnMs: 180000
+  maxDelegationDepth: 1
+  waitUserTimeoutMs: 86400000
+  taskBudget:
+    ms: 60000
+    calls: 5
+    tokens: 2000
 `;
 
-  it('yaml 段解析：llm / wecom / host / execution / businessSkillPath', () => {
+  it('yaml 段解析：llm / wecom / host / execution / runtime', () => {
     const config = loadConfig({ yamlPath: writeFixture(DEPLOYMENT_YAML), env: {} });
 
     expect(config.llm).toEqual({
@@ -379,17 +353,18 @@ businessSkillPath: docs/other-business-skill.md
       mainThinkingLevel: 'low',
     });
     expect(config.wecom).toEqual({ botId: 'yaml-bot-id', botSecret: 'yaml-bot-secret' });
-    expect(config.host).toEqual({
-      platformQueueCapacity: 7,
-      shutdownDrainMs: 0,
-      workerDispatchMode: 'background',
-      workerStepCap: 12,
-      inboundDebounceMs: 0,
-      attachmentDir: '/srv/attachments',
-      piAgentDir: '/srv/pi-agent',
-    });
+    expect(config.host).toEqual({ attachmentDir: '/srv/attachments' });
     expect(config.execution).toEqual({ planActivationSecret: 'yaml-plan-secret' });
-    expect(config.businessSkillPath).toBe('docs/other-business-skill.md');
+    expect(config.runtime).toEqual({
+      mainConcurrency: 2,
+      backgroundConcurrency: 1,
+      queueCapacity: 4,
+      mainTurnMs: 300000,
+      workerTurnMs: 180000,
+      maxDelegationDepth: 1,
+      waitUserTimeoutMs: 86400000,
+      taskBudget: { ms: 60000, calls: 5, tokens: 2000 },
+    });
   });
 
   it('非空 env 覆盖 yaml；空串 env 不覆盖（--env-file 的 KEY= 形态）', () => {
@@ -398,8 +373,7 @@ businessSkillPath: docs/other-business-skill.md
       env: {
         LLM_MODEL: 'env-model',
         WECOM_BOT_ID: 'env-bot-id',
-        FSHINE_PLATFORM_QUEUE_CAPACITY: '9',
-        BUSINESS_SKILL_PATH: '/srv/env-skill.md',
+        FSHINE_ATTACHMENT_DIR: '/srv/env-attachments',
         EXECUTION_PLAN_ACTIVATION_SECRET: 'env-plan-secret',
         APP_PORT: '8080',
       },
@@ -407,8 +381,7 @@ businessSkillPath: docs/other-business-skill.md
     expect(overridden.llm?.model).toBe('env-model');
     expect(overridden.llm?.apiKey).toBe('yaml-key');
     expect(overridden.wecom?.botId).toBe('env-bot-id');
-    expect(overridden.host?.platformQueueCapacity).toBe(9);
-    expect(overridden.businessSkillPath).toBe('/srv/env-skill.md');
+    expect(overridden.host?.attachmentDir).toBe('/srv/env-attachments');
     expect(overridden.execution?.planActivationSecret).toBe('env-plan-secret');
     expect(overridden.channel.port).toBe(8080);
 
@@ -417,16 +390,14 @@ businessSkillPath: docs/other-business-skill.md
       env: {
         LLM_MODEL: '',
         WECOM_BOT_ID: '',
-        FSHINE_PLATFORM_QUEUE_CAPACITY: '   ',
-        BUSINESS_SKILL_PATH: '',
+        FSHINE_ATTACHMENT_DIR: '   ',
         EXECUTION_PLAN_ACTIVATION_SECRET: '',
         APP_PORT: '',
       },
     });
     expect(blank.llm?.model).toBe('yaml-model');
     expect(blank.wecom?.botId).toBe('yaml-bot-id');
-    expect(blank.host?.platformQueueCapacity).toBe(7);
-    expect(blank.businessSkillPath).toBe('docs/other-business-skill.md');
+    expect(blank.host?.attachmentDir).toBe('/srv/attachments');
     expect(blank.execution?.planActivationSecret).toBe('yaml-plan-secret');
     // 空串 APP_PORT 也回落到 yaml 的 channel.port（旧行为会退回默认 3000）。
     expect(blank.channel.port).toBe(3100);
@@ -468,6 +439,7 @@ businessSkillPath: docs/other-business-skill.md
         'wecom:',
         'host:',
         'execution:',
+        'runtime:',
       ].join('\n')),
       env: {},
     });
@@ -475,31 +447,130 @@ businessSkillPath: docs/other-business-skill.md
     expect(config.wecom).toBeUndefined();
     expect(config.host).toBeUndefined();
     expect(config.execution).toBeUndefined();
-    expect(config.businessSkillPath).toBeUndefined();
+    expect(config.runtime).toBeUndefined();
     expect(deploymentEnvOf(config)).toEqual({});
   });
 
-  it('非法数值 / 非法派发模式：数值按未配置回缺省，派发模式 fail-fast 点名键', () => {
-    const invalidNumbers = `principals:
+  it('已删 host.* 死键（分诊 #6）：旧 YAML 残留被忽略，不再进 AppConfig、不再派生覆盖口', () => {
+    const staleHostYaml = `principals:
   "wecom:user_a":
     enabled: true
 host:
-  platformQueueCapacity: -1
-  workerStepCap: nope
-  inboundDebounceMs: -5
+  platformQueueCapacity: 7
+  shutdownDrainMs: 0
+  workerDispatchMode: background
+  workerStepCap: 12
+  inboundDebounceMs: 0
+  piAgentDir: /srv/pi-agent
 `;
-    const config = loadConfig({ yamlPath: writeFixture(invalidNumbers), env: {} });
-    // 非法值不落进 AppConfig（缺省住各消费点，加载层不复制第二份）。
+    const config = loadConfig({ yamlPath: writeFixture(staleHostYaml), env: {} });
+    // 旧 YAML 照常加载（不拒启），但未消费键不再进 AppConfig——不再有「写着不生效」的假配置。
     expect(config.host).toBeUndefined();
+    for (const env of [
+      'FSHINE_PLATFORM_QUEUE_CAPACITY',
+      'FSHINE_SHUTDOWN_DRAIN_MS',
+      'FSHINE_WORKER_DISPATCH_MODE',
+      'FSHINE_WORKER_STEP_CAP',
+      'FSHINE_INBOUND_DEBOUNCE_MS',
+      'FSHINE_PI_AGENT_DIR',
+    ]) {
+      expect(deploymentEnvOf(config)[env], `${env} 不应再派生`).toBeUndefined();
+    }
+  });
 
-    expect(() => loadConfig({
-      yamlPath: writeFixture(DEPLOYMENT_YAML.replace('workerDispatchMode: background', 'workerDispatchMode: yolo')),
+  it('runtime 段：缺段 / 空段 = 未配置（缺省住策略模块，加载层不复制）；非映射拒启', () => {
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+    expect(loadConfig({ yamlPath: writeFixture(`${VALID_YAML}runtime:\n# 只有注释 → null\n`), env: {} }).runtime).toBeUndefined();
+    expect(() => loadConfig({ yamlPath: writeFixture(`${VALID_YAML}runtime: 3\n`), env: {} })).toThrowError(/runtime/);
+  });
+
+  it('runtime 段：非法值 fail-fast 点名 runtime.<key>（资源限额静默回落 = 限额失效，必须拒绝）', () => {
+    const cases: ReadonlyArray<[string, RegExp]> = [
+      ['mainConcurrency: 0', /runtime\.mainConcurrency/],
+      ['mainConcurrency: -2', /runtime\.mainConcurrency/],
+      ['mainConcurrency: 1.5', /runtime\.mainConcurrency/],
+      ['backgroundConcurrency: -1', /runtime\.backgroundConcurrency/],
+      ['queueCapacity: -1', /runtime\.queueCapacity/],
+      ['mainTurnMs: 0', /runtime\.mainTurnMs/],
+      ['workerTurnMs: 0', /runtime\.workerTurnMs/],
+      ['maxDelegationDepth: -1', /runtime\.maxDelegationDepth/],
+      ['waitUserTimeoutMs: 0', /runtime\.waitUserTimeoutMs/],
+      ['mainTurnMs: nope', /runtime\.mainTurnMs/],
+    ];
+    for (const [line, expected] of cases) {
+      const yaml = `${VALID_YAML}runtime:\n  ${line}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), line).toThrowError(expected);
+    }
+  });
+
+  it('runtime 段：未知键拒绝（拼错的旋钮不得被缺省静默吞掉）', () => {
+    const yaml = `${VALID_YAML}runtime:\n  mainConcurency: 2\n`;
+    expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} })).toThrowError(/runtime\.mainConcurency/);
+  });
+
+  it('runtime.fileRetentionDays：正数 / 0 解析，非法值 fail-fast（缺省 0 住策略层）', () => {
+    // 缺省 = 加载层不造键，缺省 0（不清理）由 resource-policy 的 resolveRuntimeConfig 补齐。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+
+    const positive = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  fileRetentionDays: 30\n`),
       env: {},
-    })).toThrowError(/FSHINE_WORKER_DISPATCH_MODE/);
-    expect(() => loadConfig({
-      yamlPath: writeFixture(DEPLOYMENT_YAML),
-      env: { FSHINE_WORKER_DISPATCH_MODE: 'yolo' },
-    })).toThrowError(/FSHINE_WORKER_DISPATCH_MODE/);
+    });
+    expect(positive.runtime).toEqual({ fileRetentionDays: 30 });
+
+    // 显式 0 = 不清理，是合法值（不得被「未配置」吞掉）。
+    const zero = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  fileRetentionDays: 0\n`),
+      env: {},
+    });
+    expect(zero.runtime).toEqual({ fileRetentionDays: 0 });
+
+    for (const bad of ['-1', '1.5', 'nope']) {
+      const yaml = `${VALID_YAML}runtime:\n  fileRetentionDays: ${bad}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(
+        /runtime\.fileRetentionDays/,
+      );
+    }
+  });
+
+  it('runtime.fileRetentionSweepOnStart：布尔 true/false 解析；非布尔 fail-fast；缺省不造键', () => {
+    // 缺省 = 加载层不造键；缺省 false（不在启动时清扫）由 resolveRuntimeConfig 补齐。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+
+    const on = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  fileRetentionSweepOnStart: true\n`),
+      env: {},
+    });
+    expect(on.runtime).toEqual({ fileRetentionSweepOnStart: true });
+
+    // 显式 false 是合法值（与缺省同义，但不得被「未配置」吞掉而无法区分）。
+    const off = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  fileRetentionSweepOnStart: false\n`),
+      env: {},
+    });
+    expect(off.runtime).toEqual({ fileRetentionSweepOnStart: false });
+
+    for (const bad of ['yes', '1', '"true"', 'nope']) {
+      const yaml = `${VALID_YAML}runtime:\n  fileRetentionSweepOnStart: ${bad}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(
+        /runtime\.fileRetentionSweepOnStart/,
+      );
+    }
+  });
+
+  it('runtime.taskBudget 子键：ms/calls 必填、非法值点名、未知子键拒绝', () => {
+    const cases: ReadonlyArray<[string, RegExp]> = [
+      ['taskBudget:\n    ms: 60000\n', /runtime\.taskBudget\.calls/],
+      ['taskBudget:\n    calls: 5\n', /runtime\.taskBudget\.ms/],
+      ['taskBudget:\n    ms: 0\n    calls: 5\n', /runtime\.taskBudget\.ms/],
+      ['taskBudget:\n    ms: 60000\n    calls: 0\n', /runtime\.taskBudget\.calls/],
+      ['taskBudget:\n    ms: 60000\n    calls: 5\n    tokens: -1\n', /runtime\.taskBudget\.tokens/],
+      ['taskBudget:\n    ms: 60000\n    calls: 5\n    tps: 1\n', /runtime\.taskBudget\.tps/],
+    ];
+    for (const [block, expected] of cases) {
+      const yaml = `${VALID_YAML}runtime:\n  ${block}`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), block).toThrowError(expected);
+    }
   });
 
   it('deploymentEnvOf：只映射已配置值，env 覆盖后的生效值进入映射', () => {
@@ -516,14 +587,7 @@ host:
       LLM_MAIN_THINKING_LEVEL: 'low',
       WECOM_BOT_ID: 'yaml-bot-id',
       WECOM_BOT_SECRET: 'yaml-bot-secret',
-      FSHINE_PLATFORM_QUEUE_CAPACITY: '7',
-      FSHINE_SHUTDOWN_DRAIN_MS: '0',
-      FSHINE_WORKER_DISPATCH_MODE: 'background',
-      FSHINE_WORKER_STEP_CAP: '12',
-      FSHINE_INBOUND_DEBOUNCE_MS: '0',
       FSHINE_ATTACHMENT_DIR: '/srv/attachments',
-      FSHINE_PI_AGENT_DIR: '/srv/pi-agent',
-      BUSINESS_SKILL_PATH: 'docs/other-business-skill.md',
       EXECUTION_PLAN_ACTIVATION_SECRET: 'yaml-plan-secret',
     });
   });
@@ -544,6 +608,54 @@ host:
     expect(effective['UNMODELED_FLAG']).toBe('kept');
   });
 
+  it('channel.mode：yaml 三档原样解析；缺省不写入 AppConfig（缺省 offline 住装配层）', () => {
+    const absent = loadConfig({ yamlPath: writeFixture(`${VALID_YAML}channel:\n  port: 3100\n`), env: {} });
+    expect(absent.channel).toEqual({ port: 3100, publicUrl: '', callbackPath: '/wecom/callback' });
+    expect(absent.channel.mode).toBeUndefined(); // 缺省值只有一处：DEFAULT_CHANNEL_MODE='offline'
+
+    for (const mode of ['offline', 'shadow', 'live'] as const) {
+      const config = loadConfig({
+        yamlPath: writeFixture(`channel:\n  mode: ${mode}\n${VALID_YAML}`),
+        env: {},
+      });
+      expect(config.channel.mode, mode).toBe(mode);
+    }
+  });
+
+  it('channel.mode：值域之外一律 fail-fast（含空串/大写/尾随空格/非字符串），绝不静默回落', () => {
+    const cases: ReadonlyArray<[string, RegExp]> = [
+      ['mode: online', /channel\.mode/],
+      ['mode: LIVE', /channel\.mode/],
+      ['mode: "live "', /channel\.mode/],
+      ['mode: ""', /channel\.mode/],
+      // 键存在但无值（YAML null）按配置错误拒绝——不把「写了但没填」吞成缺省。
+      ['mode:', /channel\.mode/],
+      ['mode: 1', /channel\.mode/],
+      ['mode: true', /channel\.mode/],
+      ['mode: [live]', /channel\.mode/],
+    ];
+    for (const [line, expected] of cases) {
+      const yaml = `channel:\n  ${line}\n${VALID_YAML}`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), line).toThrowError(expected);
+    }
+  });
+
+  it('channel.mode：没有 FSHINE_* 环境变量覆盖口（三档只认 yaml）', () => {
+    const explicit = loadConfig({
+      yamlPath: writeFixture(`channel:\n  mode: offline\n${VALID_YAML}`),
+      env: { FSHINE_CHANNEL_MODE: 'live', APP_CHANNEL_MODE: 'live' },
+    });
+    expect(explicit.channel.mode).toBe('offline');
+    expect(deploymentEnvOf(explicit)['FSHINE_CHANNEL_MODE']).toBeUndefined();
+
+    // 未声明时环境变量也不能把它变成 live（缺省仍由装配层取 offline）。
+    const absent = loadConfig({
+      yamlPath: writeFixture(VALID_YAML),
+      env: { FSHINE_CHANNEL_MODE: 'live' },
+    });
+    expect(absent.channel.mode).toBeUndefined();
+  });
+
   it('fresh clone：config/agent.example.yaml 复制到临时路径后可直接加载', () => {
     const templatePath = fileURLToPath(new URL('../../config/agent.example.yaml', import.meta.url));
     const copied = join(dir, 'copied-agent.yaml');
@@ -554,7 +666,7 @@ host:
     expect(config.contextProfiles['<profileId>']?.root).toBe('/path/to/execution-layer');
     expect(config.contextProfiles['<profileId>']?.gateway).toBe('bin/your-gateway');
     expect(config.contextProfiles['<profileId>']?.skillRoots).toEqual(['.agents/skills-serve']);
-    expect(config.llm?.model).toBe('kimi-for-coding');
+    expect(config.llm?.model).toBe('your-model');
     // 模板不填真值：空 secret 不进入 AppConfig，也不伪造 env。
     expect(config.wecom).toBeUndefined();
     expect(deploymentEnvOf(config)['WECOM_BOT_SECRET']).toBeUndefined();

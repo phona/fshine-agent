@@ -13,17 +13,17 @@ import path from 'node:path';
 import type {
   AccountSetScope,
   AppConfig,
+  ChannelMode,
   ContextProfileConfig,
   ExecutionConfig,
   HostConfig,
   LlmConfig,
   PrincipalCapability,
   PrincipalConfig,
+  RuntimeConfig,
   StoreConfig,
   WecomConfig,
-  WorkerDispatchMode,
 } from '@fshine/contracts';
-import type { PrincipalScopeRecord } from '@fshine/contracts';
 
 export interface LoadConfigOptions {
   yamlPath?: string;
@@ -76,19 +76,6 @@ function pickString(env: NodeJS.ProcessEnv, name: string, yamlValue: unknown): s
   return envValue(env, name) ?? yamlString(yamlValue);
 }
 
-/**
- * 数值项：env 非空值优先，非法 = 未配置（不回退 yaml——覆盖口写错不该被 yaml 静默
- * 掩盖）；yaml 值缺省 / 非法同样按未配置处理。缺省值住各消费点，加载层不复制第二份。
- */
-function pickInteger(env: NodeJS.ProcessEnv, name: string, yamlValue: unknown, min: number): number | undefined {
-  const fromEnv = envValue(env, name);
-  const raw: unknown = fromEnv !== undefined ? fromEnv : yamlValue;
-  if (raw === undefined || raw === null || raw === '') return undefined;
-  const parsed = typeof raw === 'number' ? raw : Number.parseInt(String(raw).trim(), 10);
-  if (!Number.isSafeInteger(parsed) || parsed < min) return undefined;
-  return parsed;
-}
-
 /** 可选映射段：缺段 / 空段（`llm:` 后全是注释 → null）= 空映射，不拒启；非映射 = 配置错误。 */
 function optionalSection(root: Record<string, unknown>, key: string): Record<string, unknown> {
   const raw = root[key];
@@ -96,18 +83,10 @@ function optionalSection(root: Record<string, unknown>, key: string): Record<str
   return asRecord(raw, key);
 }
 
-function parseWorkerDispatchMode(
-  value: string | undefined,
-  label: string,
-): WorkerDispatchMode | undefined {
-  if (value === undefined) return undefined;
-  if (value === 'inline' || value === 'background') return value;
-  throw new Error(`配置项 ${label} 必须是 inline 或 background（当前: ${value}）`);
-}
-
 function parseLlm(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): LlmConfig | undefined {
   const config: LlmConfig = {};
-  const fields: ReadonlyArray<[keyof LlmConfig, string]> = [
+  type StringLlmKey = Exclude<keyof LlmConfig, 'contextWindow'>;
+  const fields: ReadonlyArray<[StringLlmKey, string]> = [
     ['apiBaseUrl', 'LLM_API_BASE_URL'],
     ['apiKey', 'LLM_API_KEY'],
     ['model', 'LLM_MODEL'],
@@ -118,6 +97,18 @@ function parseLlm(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): LlmConf
   for (const [key, envName] of fields) {
     const value = pickString(env, envName, raw[key]);
     if (value !== undefined) config[key] = value;
+  }
+  // 窗口是数值能力声明（token）：显式写错即 fail-fast，不按「非法 = 未配置」回落。
+  // 理由：窗口决定压缩阈值，静默回落 128k 会让压缩在真实窗口之外才触发（T7 的原形）；
+  // 这与数值项的一般口径（host.* 非法按未配置）刻意不同，报错点名 llm.contextWindow。
+  // env 覆盖口（LLM_CONTEXT_WINDOW）由装配点 parseContextWindow 校验，报错点名环境变量。
+  const rawContextWindow = raw['contextWindow'];
+  if (rawContextWindow !== undefined && rawContextWindow !== null && String(rawContextWindow).trim() !== '') {
+    const parsed = Number(rawContextWindow);
+    if (!Number.isSafeInteger(parsed) || parsed < 1) {
+      throw new Error(`配置项 llm.contextWindow 必须是正整数（当前: ${String(rawContextWindow)}）`);
+    }
+    config.contextWindow = parsed;
   }
   return Object.keys(config).length === 0 ? undefined : config;
 }
@@ -131,33 +122,108 @@ function parseWecom(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): Wecom
   return Object.keys(config).length === 0 ? undefined : config;
 }
 
-type NumericHostKey =
-  | 'platformQueueCapacity'
-  | 'shutdownDrainMs'
-  | 'workerStepCap'
-  | 'inboundDebounceMs';
-
+/**
+ * 宿主运行参数（yaml `host` 段）。
+ *
+ * 2026-11-14 P5（分诊 #6）：未消费键（platformQueueCapacity / shutdownDrainMs /
+ * workerDispatchMode / workerStepCap / inboundDebounceMs / piAgentDir）删除后，仅
+ * attachmentDir 仍有真实读取点（渠道适配器经 FSHINE_ATTACHMENT_DIR 消费）。旧 YAML
+ * 里的已删键由本函数忽略（不拒启、不再派生 env）。
+ */
 function parseHost(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): HostConfig | undefined {
   const config: HostConfig = {};
-  const integers: ReadonlyArray<[NumericHostKey, string, number]> = [
-    ['platformQueueCapacity', 'FSHINE_PLATFORM_QUEUE_CAPACITY', 0],
-    ['shutdownDrainMs', 'FSHINE_SHUTDOWN_DRAIN_MS', 0],
-    ['workerStepCap', 'FSHINE_WORKER_STEP_CAP', 1],
-    ['inboundDebounceMs', 'FSHINE_INBOUND_DEBOUNCE_MS', 0],
-  ];
-  for (const [key, envName, min] of integers) {
-    const value = pickInteger(env, envName, raw[key], min);
-    if (value !== undefined) config[key] = value;
-  }
-  const dispatchMode = parseWorkerDispatchMode(
-    pickString(env, 'FSHINE_WORKER_DISPATCH_MODE', raw['workerDispatchMode']),
-    'host.workerDispatchMode（环境变量 FSHINE_WORKER_DISPATCH_MODE）',
-  );
-  if (dispatchMode !== undefined) config.workerDispatchMode = dispatchMode;
   const attachmentDir = pickString(env, 'FSHINE_ATTACHMENT_DIR', raw['attachmentDir']);
   if (attachmentDir !== undefined) config.attachmentDir = attachmentDir;
-  const piAgentDir = pickString(env, 'FSHINE_PI_AGENT_DIR', raw['piAgentDir']);
-  if (piAgentDir !== undefined) config.piAgentDir = piAgentDir;
+  return Object.keys(config).length === 0 ? undefined : config;
+}
+
+const RUNTIME_KEYS = [
+  'mainConcurrency',
+  'backgroundConcurrency',
+  'queueCapacity',
+  'mainTurnMs',
+  'workerTurnMs',
+  'maxDelegationDepth',
+  'taskBudget',
+  'waitUserTimeoutMs',
+  'fileRetentionDays',
+  'fileRetentionSweepOnStart',
+  'dispatchMode',
+] as const;
+
+/** runtime 段整数值：显式写错即 fail-fast（与 host.* 的「非法 = 未配置」刻意不同）。 */
+function runtimeInteger(raw: unknown, key: string, min: number): number | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const parsed = typeof raw === 'number' ? raw : Number.parseInt(String(raw).trim(), 10);
+  if (!Number.isSafeInteger(parsed) || parsed < min) {
+    throw new Error(`配置项 runtime.${key} 必须是 ≥${min} 的整数（当前: ${String(raw)}）`);
+  }
+  return parsed;
+}
+
+/** runtime 段布尔值：只认 YAML 布尔；字符串/数字等显式写错同样 fail-fast。 */
+function runtimeBoolean(raw: unknown, key: string): boolean | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'boolean') {
+    throw new Error(`配置项 runtime.${key} 必须是布尔值（当前: ${String(raw)}）`);
+  }
+  return raw;
+}
+
+/**
+ * 资源强制配置（yaml `runtime` 段；P5 单一配置入口，联合接口约定 §2）。
+ *
+ * 判据刻意严于其它部署段：非法值 fail-fast、未知键拒绝——资源限额静默回落等于限额
+ * 失效（P5-T01 的失败判据「静默回落/双源」），拼错的旋钮不允许被默认值吞掉。
+ * 缺省值不住这里：由 `packages/agent/src/resource-policy.ts` 按「缺省 = 现行为」补齐。
+ */
+function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
+  for (const key of Object.keys(raw)) {
+    if (!(RUNTIME_KEYS as readonly string[]).includes(key)) {
+      throw new Error(`配置项 runtime.${key} 不是已知字段（可选: ${RUNTIME_KEYS.join(', ')}）`);
+    }
+  }
+  const config: RuntimeConfig = {};
+  type RuntimeIntegerKey = Exclude<keyof RuntimeConfig, 'taskBudget' | 'dispatchMode' | 'fileRetentionSweepOnStart'>;
+  const integers: ReadonlyArray<[RuntimeIntegerKey, number]> = [
+    ['mainConcurrency', 1],
+    ['backgroundConcurrency', 0],
+    ['queueCapacity', 0],
+    ['mainTurnMs', 1],
+    ['workerTurnMs', 1],
+    ['maxDelegationDepth', 0],
+    ['waitUserTimeoutMs', 1],
+    // 0 = 不清理（缺省值 30 由策略层提供）；负数 = 配置错误，不按「非法 = 未配置」回落。
+    ['fileRetentionDays', 0],
+  ];
+  for (const [key, min] of integers) {
+    const value = runtimeInteger(raw[key], key, min);
+    if (value !== undefined) config[key] = value;
+  }
+  const sweepOnStart = runtimeBoolean(raw['fileRetentionSweepOnStart'], 'fileRetentionSweepOnStart');
+  if (sweepOnStart !== undefined) config.fileRetentionSweepOnStart = sweepOnStart;
+  const taskBudgetRaw = raw['taskBudget'];
+  if (taskBudgetRaw !== undefined && taskBudgetRaw !== null) {
+    const budget = asRecord(taskBudgetRaw, 'runtime.taskBudget');
+    for (const key of Object.keys(budget)) {
+      if (key !== 'ms' && key !== 'calls' && key !== 'tokens') {
+        throw new Error(`配置项 runtime.taskBudget.${key} 不是已知字段（可选: ms, calls, tokens）`);
+      }
+    }
+    const ms = runtimeInteger(budget['ms'], 'taskBudget.ms', 1);
+    if (ms === undefined) throw new Error('配置项 runtime.taskBudget.ms 必填（taskBudget 必须同时声明 ms 与 calls）');
+    const calls = runtimeInteger(budget['calls'], 'taskBudget.calls', 1);
+    if (calls === undefined) throw new Error('配置项 runtime.taskBudget.calls 必填（taskBudget 必须同时声明 ms 与 calls）');
+    const tokens = runtimeInteger(budget['tokens'], 'taskBudget.tokens', 1);
+    config.taskBudget = { ms, calls, ...(tokens === undefined ? {} : { tokens }) };
+  }
+  const dispatchMode = raw['dispatchMode'];
+  if (dispatchMode !== undefined && dispatchMode !== null && dispatchMode !== '') {
+    if (dispatchMode !== 'inline' && dispatchMode !== 'background') {
+      throw new Error(`配置项 runtime.dispatchMode 必须是 inline 或 background（当前: ${String(dispatchMode)}）`);
+    }
+    config.dispatchMode = dispatchMode;
+  }
   return Object.keys(config).length === 0 ? undefined : config;
 }
 
@@ -170,6 +236,25 @@ function parseExecution(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): E
 function parseStore(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): StoreConfig | undefined {
   const dbPath = pickString(env, 'DB_PATH', raw['dbPath']);
   return dbPath === undefined ? undefined : { dbPath };
+}
+
+const CHANNEL_MODES: readonly ChannelMode[] = ['offline', 'shadow', 'live'];
+
+/**
+ * 渠道装配档位（yaml `channel.mode`）：**值域之外一律 fail-fast**，不按「非法 = 未配置」
+ * 回落——档位决定是否连真实平台，静默回落会把部署意图吞掉（offline 掉成 live 是事故，
+ * live 掉成 offline 是无声停服）。只认 yaml：无 FSHINE_* 环境变量覆盖口。
+ *
+ * 缺键 = 未配置（装配层取 DEFAULT_CHANNEL_MODE='offline'）；键存在但无值（YAML null）、
+ * 空串、大小写偏差、尾随空格、非字符串都算配置错误。
+ */
+function parseChannelMode(raw: Record<string, unknown>): ChannelMode | undefined {
+  if (!('mode' in raw)) return undefined;
+  const value = raw['mode'];
+  if (typeof value !== 'string' || !CHANNEL_MODES.includes(value as ChannelMode)) {
+    throw new Error(`配置项 channel.mode 必须是 offline、shadow 或 live（当前: ${JSON.stringify(value)}）`);
+  }
+  return value as ChannelMode;
 }
 
 const CAPABILITIES: readonly PrincipalCapability[] = ['read', 'validate', 'write'];
@@ -238,6 +323,32 @@ function parsePrincipals(raw: unknown): Record<string, PrincipalConfig> {
   return principals;
 }
 
+/**
+ * 执行层单文件参数声明（`contextProfiles.*.fileParams`）：键不存在 = 不启用；出现即
+ * 必须是映射，input/output 若出现必须是非空、无空白的字符串参数名。未知键拒绝——
+ * 拼错的参数名若被静默忽略，附件会再次到不了执行层（正是本次缺陷的故障类）。
+ */
+function parseFileParams(value: unknown, label: string): { input?: string; output?: string } | undefined {
+  if (value === undefined) return undefined;
+  const item = asRecord(value, label);
+  for (const key of Object.keys(item)) {
+    if (key !== 'input' && key !== 'output') {
+      throw new Error(`配置项 ${label}.${key} 不是支持的参数位（只接受 input / output）`);
+    }
+  }
+  const parsed: { input?: string; output?: string } = {};
+  for (const key of ['input', 'output'] as const) {
+    const raw = item[key];
+    if (raw === undefined) continue;
+    const param = typeof raw === 'string' ? raw.trim() : '';
+    if (!param || /[\s\u0000-\u001f\u007f]/.test(param)) {
+      throw new Error(`配置项 ${label}.${key} 必须是非空参数名字符串`);
+    }
+    parsed[key] = param;
+  }
+  return parsed;
+}
+
 function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig> {
   if (raw === undefined) return {};
   const entries = asRecord(raw, 'contextProfiles');
@@ -253,12 +364,16 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
     }
     const skillRoots = skillRootsRaw.map(String).map((entry) => entry.trim()).filter(Boolean);
     if (skillRoots.length !== skillRootsRaw.length) throw new Error(`配置项 contextProfiles.${name}.skillRoots 不能包含空值`);
+    // Main 技能面不是部署配置：固定从 <repo>/.agents/skills 发现（无配置键、无模式开关）。
+    // 旧 YAML 里的实验键（Main 技能根/投递臂）由加载层原样忽略：不解析、不校验、不进 profile。
     const workerTimeoutMs = item['workerTimeoutMs'] === undefined ? undefined : Number(item['workerTimeoutMs']);
     if (workerTimeoutMs !== undefined && (!Number.isFinite(workerTimeoutMs) || workerTimeoutMs <= 0)) {
       throw new Error(`配置项 contextProfiles.${name}.workerTimeoutMs 必须大于 0`);
     }
     const knowledgePaths = parseStringArray(item['knowledgePaths']);
     const sensitivePaths = parseStringArray(item['sensitivePaths']);
+    // 执行层声明的单文件参数名（CAP-01）：缺键 = 未声明 = 不启用单文件翻译。
+    const fileParams = parseFileParams(item['fileParams'], `contextProfiles.${name}.fileParams`);
     const gatewayRaw = item['gateway'];
     const gateway = gatewayRaw === undefined ? undefined : String(gatewayRaw).trim();
     if (gateway !== undefined) {
@@ -281,7 +396,7 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
     }
     // 委派工具名（C3）：工具名是模型可见协议面（进工具 schema 与调用分发），形状必须
     // 是合法标识符（小写字母开头，仅小写字母/数字/下划线）且 ≤48 字符。缺省 = 宿主
-    // 中性缺省（run_task），实例已发布协议名由该实例 profile 声明保持连续。
+    // 中性缺省（task_run），实例已发布协议名由该实例 profile 声明保持连续。
     const toolNameRaw = item['toolName'];
     const toolName = toolNameRaw === undefined ? undefined : String(toolNameRaw).trim();
     if (toolName !== undefined) {
@@ -298,6 +413,7 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
       ...(gateway === undefined ? {} : { gateway }),
       ...(executorLabel === undefined ? {} : { executorLabel }),
       ...(toolName === undefined ? {} : { toolName }),
+      ...(fileParams === undefined ? {} : { fileParams }),
     };
   }
   return profiles;
@@ -321,6 +437,8 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   const contextProfiles = parseContextProfiles(root['contextProfiles']);
 
   const channelRaw: Record<string, unknown> = isRecord(root['channel']) ? root['channel'] : {};
+  // 渠道装配档位：值域 fail-fast、只认 yaml（无 env 覆盖口）；缺键 = 未配置，缺省住装配层。
+  const channelMode = parseChannelMode(channelRaw);
 
   // 空串 env 不算覆盖：`--env-file` 会把未填的 APP_PORT= 设成空串，此时仍应落到 yaml。
   const portRaw = envValue(env, 'APP_PORT') ?? channelRaw['port'];
@@ -349,19 +467,25 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   const host = parseHost(optionalSection(root, 'host'), env);
   const execution = parseExecution(optionalSection(root, 'execution'), env);
   const store = parseStore(optionalSection(root, 'store'), env);
-  const businessSkillPath = pickString(env, 'BUSINESS_SKILL_PATH', root['businessSkillPath']);
+  // P5 资源段：唯一入口、无 env 覆盖口；非法值 / 未知键在这里 fail-fast。
+  const runtime = parseRuntime(optionalSection(root, 'runtime'));
 
   return {
     principals,
     contextProfiles,
-    channel: { port, publicUrl, callbackPath },
+    channel: {
+      ...(channelMode === undefined ? {} : { mode: channelMode }),
+      port,
+      publicUrl,
+      callbackPath,
+    },
     sessionTtlMs,
     ...(llm ? { llm } : {}),
     ...(wecom ? { wecom } : {}),
     ...(host ? { host } : {}),
+    ...(runtime ? { runtime } : {}),
     ...(execution ? { execution } : {}),
     ...(store ? { store } : {}),
-    ...(businessSkillPath === undefined ? {} : { businessSkillPath }),
   };
 }
 
@@ -388,17 +512,13 @@ export function deploymentEnvOf(config: AppConfig): NodeJS.ProcessEnv {
   put('LLM_MAIN_MODEL', config.llm?.mainModel);
   put('LLM_THINKING_LEVEL', config.llm?.thinkingLevel);
   put('LLM_MAIN_THINKING_LEVEL', config.llm?.mainThinkingLevel);
+  put('LLM_CONTEXT_WINDOW', config.llm?.contextWindow);
   put('WECOM_BOT_ID', config.wecom?.botId);
   put('WECOM_BOT_SECRET', config.wecom?.botSecret);
-  put('FSHINE_PLATFORM_QUEUE_CAPACITY', config.host?.platformQueueCapacity);
-  put('FSHINE_SHUTDOWN_DRAIN_MS', config.host?.shutdownDrainMs);
-  put('FSHINE_WORKER_DISPATCH_MODE', config.host?.workerDispatchMode);
-  put('FSHINE_WORKER_STEP_CAP', config.host?.workerStepCap);
-  put('FSHINE_INBOUND_DEBOUNCE_MS', config.host?.inboundDebounceMs);
+  // host 段仅剩有真实读取点的 attachmentDir（渠道适配器读 FSHINE_ATTACHMENT_DIR）；
+  // runtime 段无 env 消费方，不进本映射（消费方直接读 AppConfig.runtime）。
   put('FSHINE_ATTACHMENT_DIR', config.host?.attachmentDir);
-  put('FSHINE_PI_AGENT_DIR', config.host?.piAgentDir);
   put('DB_PATH', config.store?.dbPath);
-  put('BUSINESS_SKILL_PATH', config.businessSkillPath);
   put('EXECUTION_PLAN_ACTIVATION_SECRET', config.execution?.planActivationSecret);
   return env;
 }
@@ -420,47 +540,6 @@ export function effectiveDeploymentEnv(
     if ((effective[name] ?? '').trim() === '') effective[name] = value;
   }
   return effective;
-}
-
-/**
- * principals(`<channel>:<userid>` 键)→ 旧版 `wecomUserId` 授权记录。
- *
- * 取第一个冒号之后的部分写入 legacy `wecom_user_id` 列；无冒号的旧键整体当 userid。
- * 这只让配置解析接受其他前缀，**不会**形成渠道隔离：`web:abc` 与 `wecom:abc` 仍落到
- * 同一存储键。第二渠道接入前须迁移授权主键并补 handler 会话/附件态隔离（D-112）。
- */
-export function principalScopeRecords(config: AppConfig): PrincipalScopeRecord[] {
-  return Object.entries(config.principals).map(([key, principal]) => {
-    const colon = key.indexOf(':');
-    return {
-      wecomUserId: colon === -1 ? key : key.slice(colon + 1),
-      // 实体授权归执行层：宿主不再持账套名单，列保留不读（写空串形式的历史兼容值）。
-      accountSetIds: [],
-      ...(principal.accountSetScope === 'all' ? { accountSetScope: 'all' as const } : {}),
-      enabled: principal.enabled,
-      capabilities: [...(principal.capabilities ?? ['read'])],
-    };
-  });
-}
-
-/**
- * 首个 enabled principal 的**裸 userid**（`<channel>:<userid>` 键剥掉渠道前缀；
- * 无冒号的旧键整体当 userid，与 principalScopeRecords 同一取舍）。
- *
- * 用途：验收/探针脚本派生"授权用户"。UserID 是身份暴露，不落代码——principal 的
- * 既定家在 config/agent.yaml（gitignore），脚本从这里取。无 enabled principal →
- * 返回 null，调用方必须 fail-closed 报错退出，**不回落任何写死的值**。
- *
- * 只取首个：这些脚本本就只用一个授权用户跑单会话，多 principal 的选取是部署决策，
- * 不是脚本该发明的第二套判据。
- */
-export function firstEnabledPrincipalId(config: AppConfig): string | null {
-  for (const [key, principal] of Object.entries(config.principals)) {
-    if (principal.enabled !== true) continue;
-    const colon = key.indexOf(':');
-    return colon === -1 ? key : key.slice(colon + 1);
-  }
-  return null;
 }
 
 function parseStringArray(value: unknown): string[] | undefined {

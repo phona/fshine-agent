@@ -1,0 +1,392 @@
+
+==============================================================================
+G1  first-request over-window, BARE Pi-Harness (no fshine check)  @ W=8192
+==============================================================================
+  sends=1 over=1 completeCalls=1 wastedOverTokens=12359 totalPromptTokens=12359
+  threw=null runEnd=failed(assistant_error)
+  compactionStarts=["threshold"] compactionEnds=["completed"]
+  retry_scheduled=0 []
+  [PASS] W=8192: bare path DID emit an over-window request (no fshine check)  -> over=1
+  [PASS] W=8192: bounded (no unbounded retry; retry_scheduled=0)
+  [PASS] W=8192: run terminated (run_end present)
+
+==============================================================================
+G1  first-request over-window, BARE Pi-Harness (no fshine check)  @ W=40000
+==============================================================================
+  sends=1 over=1 completeCalls=1 wastedOverTokens=60071 totalPromptTokens=60071
+  threw=null runEnd=failed(assistant_error)
+  compactionStarts=["threshold"] compactionEnds=["completed"]
+  retry_scheduled=0 []
+  [PASS] W=40000: bare path DID emit an over-window request (no fshine check)  -> over=1
+  [PASS] W=40000: bounded (no unbounded retry; retry_scheduled=0)
+  [PASS] W=40000: run terminated (run_end present)
+
+==============================================================================
+G1  first-request over-window, BARE Pi-Harness (no fshine check)  @ W=128000
+==============================================================================
+  sends=1 over=1 completeCalls=1 wastedOverTokens=192071 totalPromptTokens=192071
+  threw=null runEnd=failed(assistant_error)
+  compactionStarts=["threshold"] compactionEnds=["completed"]
+  retry_scheduled=0 []
+  [PASS] W=128000: bare path DID emit an over-window request (no fshine check)  -> over=1
+  [PASS] W=128000: bounded (no unbounded retry; retry_scheduled=0)
+  [PASS] W=128000: run terminated (run_end present)
+
+==============================================================================
+G2  tool-result continuation over-window  @ W=8192
+==============================================================================
+  sends=2 over=1 completeCalls=1 wastedOverTokens=16581 totalPromptTokens=16602
+  threw=null runEnd=failed(assistant_error)
+  compactionStarts=["threshold"] compactionEnds=["completed"]
+  retry_scheduled=0 []
+  [PASS] W=8192: continuation over-window request WAS emitted  -> over=1
+  [PASS] W=8192: task executed exactly once (no duplicate)  -> executions=1
+  [PASS] W=8192: bounded (no unbounded retry; retry_scheduled=0)
+
+==============================================================================
+G2  tool-result continuation over-window  @ W=40000
+==============================================================================
+  sends=2 over=1 completeCalls=1 wastedOverTokens=80197 totalPromptTokens=80218
+  threw=null runEnd=failed(assistant_error)
+  compactionStarts=["threshold"] compactionEnds=["completed"]
+  retry_scheduled=0 []
+  [PASS] W=40000: continuation over-window request WAS emitted  -> over=1
+  [PASS] W=40000: task executed exactly once (no duplicate)  -> executions=1
+  [PASS] W=40000: bounded (no unbounded retry; retry_scheduled=0)
+
+==============================================================================
+G2  tool-result continuation over-window  @ W=128000
+==============================================================================
+  sends=2 over=1 completeCalls=1 wastedOverTokens=256197 totalPromptTokens=256218
+  threw=null runEnd=failed(assistant_error)
+  compactionStarts=["threshold"] compactionEnds=["completed"]
+  retry_scheduled=0 []
+  [PASS] W=128000: continuation over-window request WAS emitted  -> over=1
+  [PASS] W=128000: task executed exactly once (no duplicate)  -> executions=1
+  [PASS] W=128000: bounded (no unbounded retry; retry_scheduled=0)
+
+==============================================================================
+G3  recoverable overflow (compaction makes it fit -> success)  @ W=8192
+==============================================================================
+  sends=2 over=0 completeCalls=1 wastedOverTokens=0 totalPromptTokens=99
+  threw=null runEnd=completed(null)
+  compactionStarts=["overflow"] compactionEnds=["completed"]
+  retry_scheduled=0 []
+  [PASS] W=8192: recovered (run_end completed)  -> completed
+  [PASS] W=8192: bounded (no unbounded retry; retry_scheduled=0)
+
+==============================================================================
+G3  recoverable overflow (compaction makes it fit -> success)  @ W=40000
+==============================================================================
+  sends=2 over=0 completeCalls=1 wastedOverTokens=0 totalPromptTokens=99
+  threw=null runEnd=completed(null)
+  compactionStarts=["overflow"] compactionEnds=["completed"]
+  retry_scheduled=0 []
+  [PASS] W=40000: recovered (run_end completed)  -> completed
+  [PASS] W=40000: bounded (no unbounded retry; retry_scheduled=0)
+
+==============================================================================
+G3  recoverable overflow (compaction makes it fit -> success)  @ W=128000
+==============================================================================
+  sends=2 over=0 completeCalls=1 wastedOverTokens=0 totalPromptTokens=99
+  threw=null runEnd=completed(null)
+  compactionStarts=["overflow"] compactionEnds=["completed"]
+  retry_scheduled=0 []
+  [PASS] W=128000: recovered (run_end completed)  -> completed
+  [PASS] W=128000: bounded (no unbounded retry; retry_scheduled=0)
+
+==============================================================================
+G4  unrecoverable overflow (never fits -> must bound-fail)  @ W=8192
+==============================================================================
+  sends=2 over=0 completeCalls=1 wastedOverTokens=0 totalPromptTokens=8284
+  threw=null runEnd=failed(assistant_error)
+  compactionStarts=["overflow"] compactionEnds=["completed"]
+  retry_scheduled=0 []
+  [PASS] W=8192: ended in bounded failure (run_end failed, not hanging)  -> failed
+  [PASS] W=8192: sends bounded (<=6, no unbounded loop)  -> sends=2
+  [PASS] W=8192: summary calls bounded (<=3)  -> completeCalls=1
+
+==============================================================================
+G4  unrecoverable overflow (never fits -> must bound-fail)  @ W=40000
+==============================================================================
+  sends=2 over=0 completeCalls=1 wastedOverTokens=0 totalPromptTokens=40092
+  threw=null runEnd=failed(assistant_error)
+  compactionStarts=["overflow"] compactionEnds=["completed"]
+  retry_scheduled=0 []
+  [PASS] W=40000: ended in bounded failure (run_end failed, not hanging)  -> failed
+  [PASS] W=40000: sends bounded (<=6, no unbounded loop)  -> sends=2
+  [PASS] W=40000: summary calls bounded (<=3)  -> completeCalls=1
+
+==============================================================================
+G4  unrecoverable overflow (never fits -> must bound-fail)  @ W=128000
+==============================================================================
+  sends=2 over=0 completeCalls=1 wastedOverTokens=0 totalPromptTokens=128092
+  threw=null runEnd=failed(assistant_error)
+  compactionStarts=["overflow"] compactionEnds=["completed"]
+  retry_scheduled=0 []
+  [PASS] W=128000: ended in bounded failure (run_end failed, not hanging)  -> failed
+  [PASS] W=128000: sends bounded (<=6, no unbounded loop)  -> sends=2
+  [PASS] W=128000: summary calls bounded (<=3)  -> completeCalls=1
+
+==============================================================================
+RESULTS (machine-readable)
+==============================================================================
+[
+  {
+    "label": "G1@8192",
+    "W": 8192,
+    "sends": 1,
+    "overs": 1,
+    "completeCalls": 1,
+    "wastedOverTokens": 12359,
+    "totalPromptTokens": 12359,
+    "refused": false,
+    "threw": null,
+    "runEndStatus": "failed",
+    "runEndError": "assistant_error",
+    "compactionStarts": [
+      "threshold"
+    ],
+    "compactionEnds": [
+      "completed"
+    ],
+    "retryScheduled": 0,
+    "retryDetail": []
+  },
+  {
+    "label": "G1@40000",
+    "W": 40000,
+    "sends": 1,
+    "overs": 1,
+    "completeCalls": 1,
+    "wastedOverTokens": 60071,
+    "totalPromptTokens": 60071,
+    "refused": false,
+    "threw": null,
+    "runEndStatus": "failed",
+    "runEndError": "assistant_error",
+    "compactionStarts": [
+      "threshold"
+    ],
+    "compactionEnds": [
+      "completed"
+    ],
+    "retryScheduled": 0,
+    "retryDetail": []
+  },
+  {
+    "label": "G1@128000",
+    "W": 128000,
+    "sends": 1,
+    "overs": 1,
+    "completeCalls": 1,
+    "wastedOverTokens": 192071,
+    "totalPromptTokens": 192071,
+    "refused": false,
+    "threw": null,
+    "runEndStatus": "failed",
+    "runEndError": "assistant_error",
+    "compactionStarts": [
+      "threshold"
+    ],
+    "compactionEnds": [
+      "completed"
+    ],
+    "retryScheduled": 0,
+    "retryDetail": []
+  },
+  {
+    "label": "G2@8192",
+    "W": 8192,
+    "sends": 2,
+    "overs": 1,
+    "completeCalls": 1,
+    "wastedOverTokens": 16581,
+    "totalPromptTokens": 16602,
+    "refused": false,
+    "threw": null,
+    "runEndStatus": "failed",
+    "runEndError": "assistant_error",
+    "compactionStarts": [
+      "threshold"
+    ],
+    "compactionEnds": [
+      "completed"
+    ],
+    "retryScheduled": 0,
+    "retryDetail": [],
+    "toolExecutions": 1
+  },
+  {
+    "label": "G2@40000",
+    "W": 40000,
+    "sends": 2,
+    "overs": 1,
+    "completeCalls": 1,
+    "wastedOverTokens": 80197,
+    "totalPromptTokens": 80218,
+    "refused": false,
+    "threw": null,
+    "runEndStatus": "failed",
+    "runEndError": "assistant_error",
+    "compactionStarts": [
+      "threshold"
+    ],
+    "compactionEnds": [
+      "completed"
+    ],
+    "retryScheduled": 0,
+    "retryDetail": [],
+    "toolExecutions": 1
+  },
+  {
+    "label": "G2@128000",
+    "W": 128000,
+    "sends": 2,
+    "overs": 1,
+    "completeCalls": 1,
+    "wastedOverTokens": 256197,
+    "totalPromptTokens": 256218,
+    "refused": false,
+    "threw": null,
+    "runEndStatus": "failed",
+    "runEndError": "assistant_error",
+    "compactionStarts": [
+      "threshold"
+    ],
+    "compactionEnds": [
+      "completed"
+    ],
+    "retryScheduled": 0,
+    "retryDetail": [],
+    "toolExecutions": 1
+  },
+  {
+    "label": "G3@8192",
+    "W": 8192,
+    "sends": 2,
+    "overs": 0,
+    "completeCalls": 1,
+    "wastedOverTokens": 0,
+    "totalPromptTokens": 99,
+    "refused": false,
+    "threw": null,
+    "runEndStatus": "completed",
+    "runEndError": null,
+    "compactionStarts": [
+      "overflow"
+    ],
+    "compactionEnds": [
+      "completed"
+    ],
+    "retryScheduled": 0,
+    "retryDetail": []
+  },
+  {
+    "label": "G3@40000",
+    "W": 40000,
+    "sends": 2,
+    "overs": 0,
+    "completeCalls": 1,
+    "wastedOverTokens": 0,
+    "totalPromptTokens": 99,
+    "refused": false,
+    "threw": null,
+    "runEndStatus": "completed",
+    "runEndError": null,
+    "compactionStarts": [
+      "overflow"
+    ],
+    "compactionEnds": [
+      "completed"
+    ],
+    "retryScheduled": 0,
+    "retryDetail": []
+  },
+  {
+    "label": "G3@128000",
+    "W": 128000,
+    "sends": 2,
+    "overs": 0,
+    "completeCalls": 1,
+    "wastedOverTokens": 0,
+    "totalPromptTokens": 99,
+    "refused": false,
+    "threw": null,
+    "runEndStatus": "completed",
+    "runEndError": null,
+    "compactionStarts": [
+      "overflow"
+    ],
+    "compactionEnds": [
+      "completed"
+    ],
+    "retryScheduled": 0,
+    "retryDetail": []
+  },
+  {
+    "label": "G4@8192",
+    "W": 8192,
+    "sends": 2,
+    "overs": 0,
+    "completeCalls": 1,
+    "wastedOverTokens": 0,
+    "totalPromptTokens": 8284,
+    "refused": false,
+    "threw": null,
+    "runEndStatus": "failed",
+    "runEndError": "assistant_error",
+    "compactionStarts": [
+      "overflow"
+    ],
+    "compactionEnds": [
+      "completed"
+    ],
+    "retryScheduled": 0,
+    "retryDetail": []
+  },
+  {
+    "label": "G4@40000",
+    "W": 40000,
+    "sends": 2,
+    "overs": 0,
+    "completeCalls": 1,
+    "wastedOverTokens": 0,
+    "totalPromptTokens": 40092,
+    "refused": false,
+    "threw": null,
+    "runEndStatus": "failed",
+    "runEndError": "assistant_error",
+    "compactionStarts": [
+      "overflow"
+    ],
+    "compactionEnds": [
+      "completed"
+    ],
+    "retryScheduled": 0,
+    "retryDetail": []
+  },
+  {
+    "label": "G4@128000",
+    "W": 128000,
+    "sends": 2,
+    "overs": 0,
+    "completeCalls": 1,
+    "wastedOverTokens": 0,
+    "totalPromptTokens": 128092,
+    "refused": false,
+    "threw": null,
+    "runEndStatus": "failed",
+    "runEndError": "assistant_error",
+    "compactionStarts": [
+      "overflow"
+    ],
+    "compactionEnds": [
+      "completed"
+    ],
+    "retryScheduled": 0,
+    "retryDetail": []
+  }
+]
+
+==== failures=0 ====

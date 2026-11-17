@@ -15,6 +15,7 @@
     "baseUrl": ".",
     "paths": {
       "@fshine/contracts": ["packages/contracts/src/index.ts"],
+      "@fshine/contracts/execution-contract": ["packages/contracts/src/execution-contract.ts"],
       "@fshine/core": ["packages/core/src/index.ts"],
       "@fshine/agent": ["packages/agent/src/index.ts"],
       "@fshine/channel-wecom": ["packages/channel-wecom/src/index.ts"]

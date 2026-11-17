@@ -1,18 +1,17 @@
-# GitHub Actions workflow: real-model eval (generic domain, per-push).
+# GitHub Actions workflow: real-model eval (per-push information surface).
 #
 # Boundary:
 #   - This workflow is the per-push information surface for real-model eval.
-#     It is NOT a required check yet (本轮先只呈不拦).
-#   - Judge conclusions are advisory only and never blocking.
-#   - The mechanical score exit code IS the job exit code (so a future
-#     required-check conversion is a one-line change).
-#   - 全 worker 真实 eval（probe-real-agent / acceptance / score.ts）走仓内 dummy
-#     夹具（scripts/eval/eval.agent.yaml，Wave 6 域端口后不依赖外部执行层），
-#     因需真实 LLM 额度仍留在 Tier B 手动运行。
-#     CI 的真实模型面 = generic-model-eval.py 最小工具环 harness（不经过全 worker），
-#     走仓内 stock fixture（bin/stock），零平台路径依赖——两套面各自的夹具口径以
-#     scripts/eval/eval.agent.yaml 头注「域边界」段为准。
-name: Eval Real (generic domain)
+#     It is NOT a required check (本轮只呈不拦)。
+#   - Judge conclusions are advisory only and never blocking（本轮判据无 judge 面：
+#     裁决只认执行层审计与执行事实；LLM Judge 不在入口内消费）。
+#   - The mechanical exit code IS the job exit code (so a future required-check
+#     conversion is a one-line change).
+#   - 旧 generic-model-eval.py 工具环 harness 已随 Minimal Reset（0b97227）删除且不恢复。
+#     本 workflow 跑**用户级黑盒入口** `npm run eval:user`（与 `npm run ask` 同源装配：
+#     createSession + createDummyCliClient + 仓内 dummy 夹具；逐样本证据 + summary 落
+#     .runtime/eval-user/），非 required check，机械退出码承载 job 状态。
+name: Eval Real (user-level)
 
 on:
   push:
@@ -22,11 +21,6 @@ on:
   # 手动触发（2026-11-09 owner 裁定）：nightly surfacing 暂不做（另挂 issue），
   # 真模型 eval 按需手动跑。per-push 那条保持只呈不拦。
   workflow_dispatch:
-    inputs:
-      cases:
-        description: '要跑的用例（逗号分隔；留空 = 默认 7 例集）'
-        required: false
-        default: ''
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -39,13 +33,11 @@ permissions:
 jobs:
   eval-real:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     env:
-      CASES_INPUT: ${{ inputs.cases }}
       LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_MODEL: ${{ secrets.LLM_MODEL }}
-      LLM_JUDGE_MODEL: ${{ secrets.LLM_JUDGE_MODEL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -60,22 +52,49 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run generic-model eval probe (quick, no judge)
+      # 单样本抖动：概率性用例在 1 轮里会误红（同一 head 上 E05/E08 实测过 PASS↔FAIL 往返）。
+      # PR：每例 5 轮 + 通过率门（见 scripts/eval/eval-gate.mjs，预注册 min-rate 0.5）；
+      # push 到 main：1 轮，只作信息面，不设门槛。
+      - name: Choose trial count
+        id: trials
+        run: echo "n=${{ github.event_name == 'pull_request' && 5 || 1 }}" >> "$GITHUB_OUTPUT"
+
+      - name: Run user-level eval (12 cases × ${{ steps.trials.outputs.n }} trial(s), evidence kept)
         run: |
           set -o pipefail
-          mkdir -p .runtime
-          # cases 输入非空时覆盖默认 7 例集（手动触发可按需缩范围）。
-          ONLY="${CASES_INPUT:-G-A1,G-A2,G-A3,G-A4,G-A5,G-B1,G-Y2}"
-          python3 scripts/eval/generic-model-eval.py --no-judge --rounds 1 --only "$ONLY" --out .runtime/probe-generic.json 2>&1 | tee .runtime/eval-probe-summary.txt
+          mkdir -p .runtime/eval-user
+          # 逐样本退出码不直接定生死：判决交给下一步的通过率门（否则任何一次抖动都会红）。
+          npm run eval:user -- --trials ${{ steps.trials.outputs.n }} --out-dir .runtime/eval-user 2>&1 | tee .runtime/eval-user/run.log || true
 
+      # 预注册判据（2026-11-17，PR #62）：**不以单样本翻转判回归**，用每例通过率。
+      # 门槛写在 scripts/eval/eval-gate.mjs 顶部；改门槛 = 改判据，必须单独提交并说明。
+      - name: Gate on per-case pass rate (PR only)
+        if: github.event_name == 'pull_request'
+        run: node scripts/eval/eval-gate.mjs --summary .runtime/eval-user/summary.json --expect-cases E01,E02,E03,E04,E05,E06,E07,E08,E09,E10,E11,E12 --expect-trials ${{ steps.trials.outputs.n }} --min-rate 0.5
+
+      # 评论正文从 summary.json 全量生成逐用例表（不是日志尾部截断）；摘要缺失时脚本
+      # 如实写「无法生成逐用例表」并退出 1，避免用日志推断结果。always()：eval 失败也要发。
+      - name: Generate PR eval comment from summary.json (full per-case table)
+        if: always()
+        run: |
+          node --import tsx scripts/eval/user-eval-comment.ts \
+            --summary .runtime/eval-user/summary.json \
+            --log .runtime/eval-user/run.log \
+            --out .runtime/eval-user/comment.md \
+            --evidence-root .runtime/eval-user \
+            --artifact user-eval-report \
+            --commit "${GITHUB_SHA}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --event "${GITHUB_EVENT_NAME}"
+
+      # 先让 comment.md 落到 .runtime/eval-user/，再上传，artifact 才包含评论正文
+      # （逐样本证据 runs/<case>/trial-N 本来就在该目录下）。
       - name: Upload eval report artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: generic-eval-report
-          path: |
-            .runtime/probe-generic.json
-            .runtime/eval-probe-summary.txt
+          name: user-eval-report
+          path: .runtime/eval-user/
           retention-days: 14
 
       - name: Comment PR with eval report
@@ -84,65 +103,26 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const path = require('path');
-            const summaryPath = '.runtime/eval-probe-summary.txt';
-            const summary = fs.existsSync(summaryPath) ? fs.readFileSync(summaryPath, 'utf8') : '(no summary)';
-            // Find latest probe report
-            const runtimeDir = '.runtime';
-            let probePath = null;
-            if (fs.existsSync(runtimeDir)) {
-              const files = fs.readdirSync(runtimeDir).filter(f => f.startsWith('probe-') && f.endsWith('.json'));
-              if (files.length > 0) {
-                files.sort();
-                probePath = path.join(runtimeDir, files[files.length - 1]);
-              }
-            }
-            let probeSection = '(no probe report)';
-            if (probePath) {
-              try {
-                const data = JSON.parse(fs.readFileSync(probePath, 'utf8'));
-                const lines = [];
-                for (const result of (data.results || [])) {
-                  const status = result.mechanical_pass ? 'pass' : 'fail';
-                  const detail = result.mechanical_pass
-                    ? `calls=${result.calls}`
-                    : `calls=${result.calls} final=${(result.final_text || '').slice(0, 120).replace(/\|/g, '\\|').replace(/\n/g, ' ')}`;
-                  lines.push(`| ${result.id} | ${status} | ${detail} |`);
-                }
-                probeSection = [
-                  '### Probe results (quick)',
-                  '',
-                  '| Case | Status | Detail |',
-                  '| --- | --- | --- |',
-                  ...lines,
-                ].join('\n');
-              } catch (e) {
-                probeSection = `_(probe report parse error: ${e.message})_`;
-              }
-            }
-            const tail = summary.split('\n').slice(-60).join('\n') || '(empty)';
             // 版本绑定：评论必须说清结果属于哪个 head、哪次 run——否则审查者无法
             // 在多次推送间区分「最新评论」与「当前 head 的结果」，always() 步骤在
             // 取消的 run 上也可能追加评论（codex review major，PR #4）。
-            const report = [
-              '## Real-model eval (generic domain, mechanical gate)',
-              '',
-              `- Commit: \`${context.sha}\` (PR head at run time)`,
-              `- Run: ${context.payload.repository.html_url}/actions/runs/${context.runId}`,
-              `- Event: ${context.eventName}`,
-              '',
-              'Boundary: this workflow is NOT a required check yet. Judge conclusions are advisory only.',
-              '',
-              probeSection,
-              '',
-              '### Key output tail',
-              '```',
-              tail,
-              '```',
-            ].join('\n');
+            // 正文由 scripts/eval/user-eval-comment.ts 从 summary.json 生成；这里只负责发布。
+            const commentPath = '.runtime/eval-user/comment.md';
+            const body = fs.existsSync(commentPath)
+              ? fs.readFileSync(commentPath, 'utf8')
+              : [
+                  '## Real-model eval (user-level, mechanical exit code)',
+                  '',
+                  `- Commit: \`${context.sha}\` (PR head at run time)`,
+                  `- Run: ${context.payload.repository.html_url}/actions/runs/${context.runId}`,
+                  `- Event: ${context.eventName}`,
+                  '',
+                  '⚠️ 评论生成失败：`.runtime/eval-user/comment.md` 不存在（summary.json 缺失或生成脚本报错）。',
+                  '不要用日志尾部推断逐用例结果；请查看 workflow 日志与 `user-eval-report` artifact。',
+                ].join('\n');
             github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: report,
+              body,
             });

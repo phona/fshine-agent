@@ -1,0 +1,25 @@
+---LOG---
+ad25760 fix(eval): 独立评审 9 条收口——零值实体不污染池、探针 import 守卫、-1 不作调用证据、日期年份不进覆盖、占位/崩溃用例报告口径、未登记显式归属补维
+6ce9160 fix(eval): 申报模式第四轮收口——11 项修复按四轨落地（D-207）
+d0b36d9 fix(eval): 评审 10 条收口——张冠李戴硬失败、命题行可达、验算/复用收紧、申报计数全 runner（PR #26）
+---SHOW---
+ad25760 fix(eval): 独立评审 9 条收口——零值实体不污染池、探针 import 守卫、-1 不作调用证据、日期年份不进覆盖、占位/崩溃用例报告口径、未登记显式归属补维
+ docs/debt-ledger.md                    |  32 ++-
+ docs/eval-mechanism-registry.md        |   4 +-
+ scripts/eval/amount-criteria.test.ts   | 192 +++++++++++----
+ scripts/eval/amount-criteria.ts        | 434 ++++++++++++++++++++-------------
+ scripts/eval/audit-declaration.test.ts | 200 ++++++++++++++-
+ scripts/eval/audit-declaration.ts      | 276 ++++++++++++++-------
+ scripts/eval/audit-instruction.ts      |  40 +++
+ scripts/eval/cases.ts                  |  24 +-
+ scripts/eval/dummy-fixture.ts          |  36 ++-
+ scripts/eval/expectations.test.ts      |  92 +++++--
+ scripts/eval/expectations.ts           |  66 +++--
+ scripts/eval/mock-core-set.test.ts     | 230 ++++++++++++++++-
+ scripts/eval/report.test.ts            |  12 +-
+ scripts/eval/report.ts                 |  31 ++-
+ scripts/eval/score.test.ts             |  13 +-
+ scripts/eval/score.ts                  |  16 +-
+ scripts/probe-real-agent.test.ts       |  49 +++-
+ scripts/probe-real-agent.ts            |  86 ++++---
+ 18 files changed, 1405 insertions(+), 428 deletions(-)
