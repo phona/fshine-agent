@@ -61,6 +61,14 @@ export interface TaskExecutionBridgeOptions {
    * 参数名来自部署对该执行层的声明认知（如 '--input-dir'），不来自对 args 的形状猜测。
    */
   dirParams?: { input?: string; output?: string };
+  /**
+   * 执行层声明的**单文件**参数名（2026-11-17 补）：宿主把任务文件的物化路径填进去。
+   *   · input：任务必须**恰好一个**文件（多或少都不猜，fail-closed 抛错）；
+   *   · output：宿主在任务 out/ 下分配一个确定路径（`exec-output.json`），执行层写到那里，
+   *     随后由兜底扫描登记成任务产物并进入交付。
+   * 与 dirParams 同源：只认装配方声明的参数名，不按 args 形状猜测。
+   */
+  fileParams?: { input?: string; output?: string };
   /** 产物上限（缺省 TASK_FILE_*）。 */
   maxOutputFileBytes?: number;
   maxOutputCount?: number;
@@ -133,6 +141,8 @@ export function createTaskExecutionBridge(options: TaskExecutionBridgeOptions): 
   const maxOutputCount = options.maxOutputCount ?? TASK_FILE_MAX_OUTPUT_COUNT;
   const inputParam = options.dirParams?.input;
   const outputParam = options.dirParams?.output;
+  const inputFileParam = options.fileParams?.input;
+  const outputFileParam = options.fileParams?.output;
   const skip = (reason: string): void => options.onSkip?.(reason);
 
   return (taskId: string) => {
@@ -169,6 +179,27 @@ export function createTaskExecutionBridge(options: TaskExecutionBridgeOptions): 
         if (outputParam !== undefined && dirParamKeyOf(nextArgs, outputParam) !== undefined) {
           mkdirSync(outDir, { recursive: true });
           nextArgs = replaceDeclaredDir(nextArgs, outputParam, outDir);
+        }
+        if (inputFileParam !== undefined && dirParamKeyOf(nextArgs, inputFileParam) !== undefined) {
+          // 单文件输入：任务必须恰好一个文件——数量不符就 fail-closed（不替调用方挑文件）。
+          const taskFiles = options.fileStore.listTaskFiles({ scope: options.scope, taskId, now: Date.now() });
+          if (taskFiles.length !== 1) {
+            throw new Error(
+              `单文件参数 ${inputFileParam} 需要恰好 1 个任务文件（当前 ${taskFiles.length} 个），拒绝猜测`,
+            );
+          }
+          const materialized = options.fileStore.materializeInputs({
+            runDir: taskDir,
+            scope: options.scope,
+            fileIds: [taskFiles[0]!.fileId],
+            resolution: { side: 'worker', taskId },
+          });
+          nextArgs = replaceDeclaredDir(nextArgs, inputFileParam, path.join(inDir, materialized[0]!.materializedName));
+        }
+        if (outputFileParam !== undefined && dirParamKeyOf(nextArgs, outputFileParam) !== undefined) {
+          // 单文件输出：宿主分配任务 out/ 下的确定路径；写进去后由兜底扫描登记成产物。
+          mkdirSync(outDir, { recursive: true });
+          nextArgs = replaceDeclaredDir(nextArgs, outputFileParam, path.join(outDir, 'exec-output.json'));
         }
         if (nextArgs === request.args) return options.inner.execute(request);
         return options.inner.execute({ ...request, args: nextArgs });

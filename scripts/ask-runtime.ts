@@ -267,6 +267,8 @@ export interface SessionAssemblyInput {
   taskExecutionBridge?: {
     store: TaskFileBridgeStore;
     dirParams?: { input?: string; output?: string };
+    /** 单文件参数（执行层吃一个文件 / 写一个文件）：宿主填物化路径，不猜。 */
+    fileParams?: { input?: string; output?: string };
     limits?: { maxOutputFileBytes?: number; maxOutputCount?: number };
     onSkip?: (reason: string) => void;
   };
@@ -550,6 +552,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       scope: { principalId: input.principalId, sessionId: input.sessionId },
       inner: face.client,
       ...(input.taskExecutionBridge.dirParams === undefined ? {} : { dirParams: input.taskExecutionBridge.dirParams }),
+      ...(input.taskExecutionBridge.fileParams === undefined ? {} : { fileParams: input.taskExecutionBridge.fileParams }),
       ...(input.taskExecutionBridge.limits === undefined ? {} : { limits: input.taskExecutionBridge.limits }),
       ...(input.taskExecutionBridge.onSkip === undefined ? {} : { onSkip: input.taskExecutionBridge.onSkip }),
     });
