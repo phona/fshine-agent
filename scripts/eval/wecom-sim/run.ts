@@ -49,7 +49,7 @@ function main(): number {
   const reportPath = path.join(workDir, 'wecom-sim-report.json');
   try {
     console.log('== 企微 × dummy 自动联调（真 createServer 装配 + 仓内 dummy 执行层 + 假企微 SDK；零网络零真实凭据）');
-    console.log('== 用例面：W-01～W-04b / W-05～W-07 / W-08～W-12 / W-13～W-18 / W-19～W-21；F（写确认）与 G（任务面）BLOCKED，见 docs/product/wecom-live-dummy-cases.md');
+    console.log('== 用例面：W-01～W-04b / W-05～W-07 / W-08～W-12 / W-13～W-18 / W-19～W-21 / W-22～W-25（写确认） / W-26～W-28（任务面）；判据见 docs/product/wecom-live-dummy-cases.md');
     const vitestEntry = path.join(REPO_ROOT, 'node_modules', 'vitest', 'vitest.mjs');
     const run = spawnSync(
       process.execPath,

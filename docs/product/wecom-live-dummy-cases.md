@@ -15,7 +15,7 @@
 - **自动**（`scripts/eval/wecom-sim/`，入口 `node --import tsx scripts/eval/wecom-sim/run.ts`；
   同一批用例进全量门 `vitest run scripts/eval/wecom-sim`）：真 `createServer` 装配 + 仓内 dummy
   执行层（真实子进程）+ 假企微 SDK，脚本驱动入站帧，**只断言用户可见结果**（气泡文本、投递
-  receipt、message_done 执行事实）。A～E 组的机械判据全部下沉到这里（逐条标记见 §4）。
+  receipt、message_done 执行事实）。A～G 组的机械判据全部下沉到这里（逐条标记见 §4）。
 - **人工**（企微 live）：只测**观感与措辞**（像不像同事说话）、**真网络时序**（真 WS/真素材上传
   下载、真转圈时长）与**真实文件上传下载**这几类自动化替代不了的面。人不再逐格核对数字——
   数字对不对由自动用例兜。
@@ -48,7 +48,7 @@ TMPDIR=/home/tao/.tmp node scripts/eval/fixtures/make-sales-sample.mjs /home/tao
 | 面 | 命令 | 说明 |
 | --- | --- | --- |
 | 确定性全量门 | `TMPDIR=~/.tmp npm test` | 状态机、取消、故障注入、投递记账等 |
-| **企微 × dummy 自动联调（A～E 组）** | `TMPDIR=~/.tmp node --import tsx scripts/eval/wecom-sim/run.ts`（或 `vitest run scripts/eval/wecom-sim`） | 真 createServer 装配 + 仓内 dummy 执行层 + 假企微 SDK；22 条自动用例（见 §10） |
+| **企微 × dummy 自动联调（A～G 组）** | `TMPDIR=~/.tmp node --import tsx scripts/eval/wecom-sim/run.ts`（或 `vitest run scripts/eval/wecom-sim`） | 真 createServer 装配 + 仓内 dummy 执行层 + 假企微 SDK；26 条自动用例（见 §10） |
 | 文件面/能力面 | `TMPDIR=~/.tmp npm run eval:cap01` | 七个确定性面串行，约 60s；**不要并发跑** |
 | 用户级黑盒 | `TMPDIR=~/.tmp npm run eval:user -- --trials 1` | 真模型 + dummy；消耗 token |
 | 长会话 | R6 Wave1（见 `scripts/eval/r6/`） | 不在人工范围 |
@@ -126,25 +126,30 @@ TMPDIR=/home/tao/.tmp node scripts/eval/fixtures/make-sales-sample.mjs /home/tao
 | W-20〔自动〕| P0 | 同上但说 `只回给我数字，不要生成文件` | 只回文字数字；**不投递任何文件** | 是否照办 | `file_delivery` 无 file part |
 | W-21〔自动〕| P1 | 发 `销售明细.xlsx` + `把里面的数据存进 documents 集合` | 明确说明**当前没有写权限/不能写**，零写入，不宣称成功 | 话术是否给出替代路径 | 无 write 执行事实；执行层零写入 |
 
-### F. 写确认回环（4，需临时开 `runtime.allowWriteOperations: true`，跑完改回 false）——**全部 BLOCKED（等后台交互改造合入）：后台交互形态正在另一条轨改造，本组不写假用例充数，改造合入后再立**
+### F. 写确认回环（4，W-22～W-25）
 
-> 前提：`config/agent.yaml` 加 `runtime:\n  allowWriteOperations: true`，**重启并重新清一次会话**（改配置=换语境）。
+> 前提：自动用例用独立装配 `runtime.allowWriteOperations: true`（W-25 用缺省只读装配对照），
+> 不改仓内配置、不需要重启；**每个用例自己的临时状态根**保证互不影响。
 > 注意：`principals.*.capabilities` 当前是 V1 占位、**不参与放行**；写面只看 `allowWriteOperations`。
 
 | # | 优先级 | 发 | 预期（硬） | 观察 | 证据 |
 | --- | --- | --- | --- | --- | --- |
-| W-22〔BLOCKED〕| P0 | `给 alpha 集合 W1 追加 2 条记录` | 先给**提案**：集合 alpha / 窗口 W1 / 2 条 / 不可撤销 / 有效期；**等确认，不直接写** | 提案是否说人话 | 执行层 `needs_confirmation` + 句柄；DB 无新增 |
-| W-23〔BLOCKED〕| P0 | 接 W-22 回 `确认` | 写入成功并可读回（alpha W1 由 2 条变 4 条）；回复如实说已写入 | 是否告知怎么核对 | `dummy.commit` completed；`query` 读回 4 条 |
-| W-24〔BLOCKED〕| P1 | 再回一次 `确认` | **只执行一次**（仍 4 条，不变成 6 条），第二次确定性拒绝 | 拒绝话术 | 执行层审计 only once |
-| W-25〔BLOCKED〕| P0 | 改回 `allowWriteOperations: false` 重启后：`给 alpha 集合 W1 追加 1 条记录` | 明确拒绝、零写入、不宣称成功 | 是否说明这是配置能力而非故障 | 无 write 执行事实 |
+| W-22〔自动〕| P0 | `给 alpha 集合 W1 追加 2 条记录` | 先给**提案**：集合 alpha / 窗口 W1 / 2 条 / 不可撤销 / 有效期；**等确认，不直接写** | 提案是否说人话 | 执行层 `needs_confirmation` + 句柄；审计无 commit 成功行；alpha W1 仍 2 条 |
+| W-23〔自动〕| P0 | 接 W-22 回 `确认` | 写入成功并可读回（alpha W1 由 2 条变 4 条）；回复如实说已写入 | 是否告知怎么核对 | `dummy.commit` completed；`query` 读回 4 条 |
+| W-24〔自动〕| P1 | 再回一次 `确认` | **只执行一次**（仍 4 条，不变成 6 条），第二次确定性拒绝 | 拒绝话术 | 执行层审计 commit 成功行仍为 1；读回仍 4 条 |
+| W-25〔自动〕| P0 | 改回 `allowWriteOperations: false` 装配后：`给 alpha 集合 W1 追加 1 条记录` | 明确拒绝、零写入、不宣称成功 | 是否说明这是配置能力而非故障 | 无 write 执行事实；审计无 prepare/commit 行 |
 
-### G. 任务面 / 异步（3，观察为主——是否建任务由 Main 决定，不硬判）——**全部 BLOCKED（等后台交互改造合入）：同 F 组**
+### G. 任务面 / 异步（3，W-26～W-28）
+
+> 前提：自动用例用 `runtime.dispatchMode: 'background'` 装配（受理即回执、后台 TaskRunner
+> 执行、完成后主动投递），并用 `runtime.taskRunWaitMs` 控制短等待窗口：W-26 用 1ms
+> 确定性超窗，W-28 用缺省 1500ms 验证窗口内完成。inline 装配不产生受理回执。
 
 | # | 优先级 | 发 | 预期 | 观察 | 证据 |
 | --- | --- | --- | --- | --- | --- |
-| W-26〔BLOCKED〕| P1 | `帮我把 2025 年 12 个月的销售明细按客户汇总，做成表，做完发我` | 若受理成任务：给出**数字编号**与业务名；进展可见 | 受理回执是否即时、是否像话 | `message_done` 的 `taskIds`；`npm run tasks -- "#N"` |
-| W-27〔BLOCKED〕| P1 | 接 W-26：`刚才那个跑完了吗？` | 能按上文找回同一任务状态（或如实说明没有这个任务） | 是否需要用户重复编号 | `npm run tasks` |
-| W-28〔BLOCKED〕| P1 | 对运行中的任务说 `别做了，停` | 最终为**已取消**（不停在「取消中」）；若已完成则如实说已完成 | 话术 | DB 状态 `cancelled`/`completed` |
+| W-26〔自动〕| P1 | `帮我把销售明细按客户汇总，做成表，做完发我`（明显超窗） | 受理回执**不含 `#`、不含编号数字**；任务在后台推进并最终 completed；完成后结果主动投递一次 | 受理回执是否即时、是否像话 | `message_done` 的 `taskIds`；底账状态 `completed`；`task_result_delivery_sent` |
+| W-27〔自动〕| P1 | 接 W-26：`刚才那个跑完了吗？` | 纯查询（task_status）按上文找回同一任务状态，**不发起新的 execution** | 是否需要用户重复编号 | 该回合 `executions: []` |
+| W-28〔自动〕| P1 | 窗口内能完成的任务（快活） | 同回合直接给结果、**零受理回执**、零主动投递（B 轨短等待窗口的回归钉子） | 结果是否当场给出 | 无 `task_result_delivery_sent`；回复无「已受理/后台办理」 |
 
 ### H. 稳定性与多人（4）
 
@@ -285,7 +290,7 @@ TMPDIR=/home/tao/.tmp node scripts/eval/fixtures/make-sales-sample.mjs /home/tao
 
 ## 10. 自动联调登记（2026-11-18，本轨产出的机械底座）
 
-**位置**：`scripts/eval/wecom-sim/`——`harness.ts`（夹具）+ `cases-{a,b,c,d,e}-*.test.ts`（22 条）
+**位置**：`scripts/eval/wecom-sim/`——`harness.ts`（夹具）+ `cases-{a,b,c,d,e,f,g}-*.test.ts`（26 条）
 + `run.ts`（一条命令入口）。命令：`TMPDIR=~/.tmp node --import tsx scripts/eval/wecom-sim/run.ts`
 （输出逐条 PASS/FAIL 与 summary，失败退出码非 0）；同一批用例进全量门
 `TMPDIR=~/.tmp vitest run scripts/eval/wecom-sim`。
@@ -328,5 +333,8 @@ W-13 的「文件先到、指令在窗内到达」用一次 `settleDispatch`（�
 - W-21 的拒绝话术由脚本转述宿主允许集合的真实拒绝（「不在本轮允许集合内」有断言钉住）。
 - exceljs 由 `node_modules` 提供（`exceljs@4.4.0` 是仓内既有依赖；本 worktree 曾缺装，
   已补装——未改 package.json/lockfile）。
-- F（W-22～W-25）与 G（W-26～W-28）**BLOCKED（等后台交互改造合入）**：后台交互形态正在
-  另一条轨改造，本轨不写假用例充数；改造合入后按同一装配链补自动用例。
+- F（W-22～W-25）与 G（W-26～W-28）已按同一装配链补成自动用例（2026-11-18）：F 用
+  `runtime.allowWriteOperations: true` 装配走完整写确认回环（提案 → 确认 → commit 读回 →
+  重复确认确定性拒绝），W-25 用缺省只读装配对照；G 用 `runtime.dispatchMode: 'background'`
+  + `runtime.taskRunWaitMs` 覆盖超窗受理、完成后追问与窗口内快活。harness 的测试面因此新增
+  `dispatchMode` / `taskRunWaitMs` 覆盖与只读 `dbPath`（产品码未改）。
