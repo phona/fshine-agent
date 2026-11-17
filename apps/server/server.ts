@@ -44,6 +44,13 @@ import {
   type RegisteredFile,
 } from '../../packages/agent/src/file-store';
 import { createRunJsExecutor, type RunJsExecutor } from '../../packages/agent/src/run-js-executor';
+import {
+  applyRecalcDeliveryGate,
+  collectRecalcReports,
+  createRecalcXlsxExecutor,
+  createSofficeRecalcEngine,
+  type RecalcXlsxExecutor,
+} from '../../packages/agent/src/recalc-xlsx-executor';
 import { FILES_GENERATED_NOTICE, mainProtocolNoteFor, type Session, type TurnFileRef } from '../../packages/agent/src/execution-runtime';
 import {
   createNotificationOutbox,
@@ -108,6 +115,12 @@ export interface ServerDeps {
    */
   createRunJsExecutor?: (fileStore: FileStore) => RunJsExecutor;
   /**
+  /**
+   * 测试注入：recalc_xlsx 执行器工厂（装配构造、按 fileStore 闭包）；缺省 = 真实 soffice
+   * 引擎（PATH 可见且版本 26.8.3 才上工具面；缺失/版本不符 = fail-closed 不上工具）。
+   */
+  createRecalcXlsxExecutor?: (fileStore: FileStore) => RecalcXlsxExecutor | undefined;
+  /**
    * 测试注入：主动追问的时钟/调度器（缺省真实 setTimeout；注入后测试用手动时钟推进，
    * 不真 sleep 30 秒）。只作用于附件追问定时器，不影响其它回合逻辑。
    */
@@ -146,6 +159,10 @@ export interface FileDeliveryPort {
 const FILE_DELIVERY_UNAVAILABLE_NOTE = '文件未送达（当前渠道不支持文件投递）';
 /** live 投递失败时给用户的如实话术（v8 §7 失败必须可见；事件另记 delivery_failed，不记 sent）。 */
 const FILE_DELIVERY_FAILED_NOTE = '文件未送达（投递失败，请重试或联系管理员）';
+/** recalc 投递闸拦下含公式但无 pass 实算报告的表格时给用户的如实话术（事件另记 recalc_delivery_gated）。 */
+const RECALC_DELIVERY_GATED_NOTE = '部分表格未通过公式实算校验，未予发送（请确认表格已重算校验后再试）';
+/** 混合批次（部分投递成功、部分被闸拦）时的如实话术：不让用户误以为全部送达。 */
+const RECALC_DELIVERY_PARTIAL_NOTE = '部分表格未通过公式实算校验，未予发送；其余文件已发送';
 
 /**
  * 入站附件上限（20MB，2026-11-17 CAP-01 owner 裁决：100MB 必 OOM，实测 1.1MB 文件处理
@@ -197,6 +214,19 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   // CAP-01 S1：run_js 执行器（装配构造；Node 权限模型的受限子进程，runtime 不 spawn）。
   const runJsExecutor = (deps.createRunJsExecutor ?? ((fileStoreRef: FileStore) =>
     createRunJsExecutor({ fileStore: fileStoreRef, nodeModulesDir: path.join(REPO_ROOT, 'node_modules') })))(fileStore);
+  // recalc_xlsx（Main 宿主面）：引擎 unavailable（无 soffice / 版本不符）即不构造执行器 →
+  // 工具面无 recalc_xlsx（fail-closed）；探测事实进结构化日志，不进用户话术。
+  const recalcXlsxExecutor = deps.createRecalcXlsxExecutor
+    ? deps.createRecalcXlsxExecutor(fileStore)
+    : (() => {
+        const engine = createSofficeRecalcEngine();
+        const executor = createRecalcXlsxExecutor({
+          fileStore,
+          engine,
+          onEngineEvent: (event) => log({ event: 'recalc_engine_probe', ...event }),
+        });
+        return executor.available ? executor : undefined;
+      })();
   /**
    * CAP-01 S1 清单注入（机械事实）：每回合开始由 runtime 取走本会话已激活（TTL 内）文件。
    * 只投影 fileId/name/bytes（listActiveFiles），不含内容/路径/sha256。
@@ -362,6 +392,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           // `fileParams` 来自 profile（键缺失 = 未声明 = 不翻译）；dirParams 当前无部署键，
           // 保持不传（执行层声明目录参数时再走同一条装配路径）。
           runJsExecutor,
+          // recalc_xlsx：仅 Main 宿主面（Worker 面由 runtime 恒定不上）；引擎不可用则不注入。
+          ...(recalcXlsxExecutor === undefined ? {} : { recalcXlsxExecutor }),
+          // recalc 重算开销（R4 资源账）：耗时结构化事件进日志，不进用户话术。
+          onRecalcCost: (event) => log({ event: 'recalc_cost', ...event }),
           // CAP-01 ④：内存墙结构化事件（runId/side/bytes/exitCode/exitSignal/stderr 尾窗）——
           // 日志能查到是哪次、多大、怎么死的；用户话术同句由 runtime 出口统一。
           onRunJsMemoryExit: (event) => log({ event: 'run_js_memory_exit', principalId, sessionId, ...event }),
@@ -471,7 +505,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     conversationId: string;
     principalId: string;
     sessionId: string;
-  }): Promise<{ status: 'sent' | 'suppressed' | 'delivery_unavailable' | 'delivery_failed'; files: number; note?: string }> => {
+  }): Promise<{ status: 'sent' | 'suppressed' | 'delivery_unavailable' | 'delivery_failed' | 'recalc_gated'; files: number; note?: string }> => {
     const base = {
       principalId: input.principalId,
       sessionId: input.sessionId,
@@ -493,15 +527,39 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     // 字节从文件区派生布局现读（产物在登记时已 copy 进 workspace，原件路径从不进话术）。
     // 同一回合的重复交付（同 sha256 + 同名）在投递层收成一份；顺序保序（先到者投递）。
     const seen = new Set<string>();
-    const outgoing: OutgoingFileReply[] = [];
+    const readFiles: Array<{ name: string; bytes: Buffer }> = [];
     for (const file of input.files) {
       const data = readFileSync(fileStoragePathOf(workspaceRoot, input.scope, file.fileId, file.name));
       const key = `${createHash('sha256').update(data).digest('hex')}\u0000${file.name}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      outgoing.push({ data, filename: file.name });
+      readFiles.push({ name: file.name, bytes: data });
     }
+    // recalc 投递闸（步骤 ③；时序决定终判落在这里：recalc 报告在独立 runDir、可能晚于
+    // run-js out/ 扫描才产生）。缺省未注入 recalc 执行器 = enabled=false，逐字节不变。
+    const gateEnabled = recalcXlsxExecutor !== undefined;
+    const gate = gateEnabled
+      ? await applyRecalcDeliveryGate({
+          files: readFiles,
+          reports: collectRecalcReports(workspaceRoot, input.scope),
+          enabled: true,
+        })
+      : { outgoing: readFiles, gated: [] as Array<{ name: string; sha256: string; reason: string }> };
+    if (gate.gated.length > 0) {
+      log({
+        event: 'recalc_delivery_gated',
+        ...base,
+        files: gate.gated.length,
+        items: gate.gated,
+      });
+    }
+    const outgoing: OutgoingFileReply[] = gate.outgoing.map((f) => ({ data: f.bytes, filename: f.name }));
     const files = outgoing.length;
+    // 所有待投递项都被闸拦下：不发空批、如实告知（fail-closed；非渠道投递失败，不记 sent）。
+    if (files === 0 && gate.gated.length > 0) {
+      log({ event: 'file_delivery', ...base, files: 0, status: 'recalc_gated' });
+      return { status: 'recalc_gated', files: 0, note: RECALC_DELIVERY_GATED_NOTE };
+    }
     let receipt: DeliveryReceipt;
     try {
       receipt = await deps.fileDelivery.sendToConversation(
@@ -541,7 +599,13 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         // 观测事件写也失败：无第二观测面可用；投递结果已成立，不翻转、不重投、不触达用户。
       }
     }
-    return { status: 'sent', files };
+    // 混合批次（有被闸拦的文件、也有成功投递的）：如实附「部分未投递」话术——
+    // 不让用户正文停留在「汇总完成。」而误以为全部表格送达（如实交付 B 类责任）。
+    return {
+      status: 'sent',
+      files,
+      ...(gate.gated.length > 0 ? { note: RECALC_DELIVERY_PARTIAL_NOTE } : {}),
+    };
   };
 
   const handler: ReplyHandler = async (message) => {

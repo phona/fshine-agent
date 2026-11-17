@@ -6,7 +6,9 @@
  *   ① 值闭包不触及旧 Runtime 治理模块清单里的任何文件；
  *   ② 执行契约模块零 import（无传输实现）；
  *   ③ 通用运行时（execution-runtime）的值闭包不含 CLI 适配器（依赖方向：适配器单向依赖契约）；
- *   ④ 装配入口同时到达通用运行时与适配器（接线完整性 sanity）。
+ *   ④ 装配入口同时到达通用运行时与适配器（接线完整性 sanity）；
+ *   ⑤ file-store.ts 不引入 exceljs（recalc 投递闸边界；decision-log §九十九）——
+ *      exceljs 只在 recalc-xlsx-executor.ts，fileStore 保持纯文件布局职责。
  *
  * 闭包以 JSON 单行打印，作为评审时的静态证据。
  */
@@ -37,6 +39,7 @@ const CONTRACT = 'packages/contracts/src/execution-contract.ts';
 const RUNTIME = 'packages/agent/src/execution-runtime.ts';
 const ADAPTER = 'packages/agent/src/dummy-cli-client.ts';
 const ENTRY_SCRIPT = 'scripts/ask.ts';
+const FILE_STORE = 'packages/agent/src/file-store.ts';
 
 /** 旧 Runtime 治理模块清单（运行时路径不得以值边触及）。
  *  注意：名单收录历史模块名（含已随 Minimal Reset 删除的文件）作为退役登记——
@@ -200,5 +203,16 @@ describe('import 图边界', () => {
     // type-only 边全部落在标注列表内（打印供评审，不断言具体成员）。
     const typeOnlyTargets = [...new Set(edges.filter((edge) => edge.typeOnly).map((edge) => edge.to ?? edge.specifier))].sort();
     console.log(JSON.stringify({ event: 'type_only_edges', targets: typeOnlyTargets }));
+  });
+
+  it('file-store.ts 不引入 exceljs（recalc 投递闸边界，decision-log §九十九）', () => {
+    // exceljs 只在 recalc-xlsx-executor.ts；fileStore 保持纯文件布局职责。
+    // 值边/type-only 边都不允许——用 importsOf 解析全部 import 声明。
+    const fileStoreImports = importsOf(path.join(REPO_ROOT, FILE_STORE));
+    const exceljsEdges = fileStoreImports.filter((entry) => entry.specifier === 'exceljs');
+    expect(exceljsEdges, `file-store.ts 不得引入 exceljs，实际 import：${JSON.stringify(exceljsEdges)}`).toEqual([]);
+    // 静态文本双保险：挡住 require('exceljs') / 动态 import 等非 import 声明写法。
+    const fileStoreText = readFileSync(path.join(REPO_ROOT, FILE_STORE), 'utf8');
+    expect(fileStoreText).not.toMatch(/exceljs/i);
   });
 });
