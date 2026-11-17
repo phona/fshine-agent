@@ -1,11 +1,11 @@
 {
   "generatedBy": "node --import tsx scripts/eval/convergence-r1/freeze.ts",
-  "frozenAt": "2026-11-14T01:20:37.811Z",
+  "frozenAt": "2026-11-17T16:56:48.810Z",
   "criteriaSha256": "9d4b0824a429658e7f633ff8af928fd3ad94b633f02c95f151866679bb8d6cd4",
-  "casesSha256": "6d55a42ad0ff575cfe11fb4695861c6a7c28d46654c6e94de29170161e4d1a78",
+  "casesSha256": "57c7c5193fbe78905e45d0ff1fb2f784c224723d46515f33fc0f7b82ba1dad1c",
   "files": {
     "scripts/eval/convergence-r1/criteria.ts": "f5daa2a2d8377d7250150b6d907126dea26e652dcb8493f32801a5ddf1d68025",
-    "scripts/eval/convergence-r1/cases.ts": "e9bf5c79e07d2b5149eca3eb81741f7f105e5abcec0760fb7a6187c462a69a63",
+    "scripts/eval/convergence-r1/cases.ts": "79d3a82f8bd8298c4fbd49707b3413f887e5bcefc64c48df53111ec766cd8cb1",
     "scripts/eval/convergence-r1/judge.ts": "d16871e63a2d62eeb8d52aff6964fc7dbe4ad83abc90407dfe4ed9e38b5398c8",
     "scripts/eval/convergence-r1/hash.ts": "e03bdcacc362515796cf6d248f2244a2b31b3e19ceddaee32cd7ec6795376637",
     "scripts/eval/convergence-r1/evidence.ts": "4003a8b78ef15a46649a83232cf0db0506c1d932d497e369e06a8289a6689418",
@@ -21,7 +21,9 @@
     "scripts/eval/convergence-r1/cases/E09.ts": "a5b2ab2370476c195fae527d9e2445884cf9658baeb35b446093b3ab39d2dd12",
     "scripts/eval/convergence-r1/cases/E10.ts": "ad9574226afd2576baa6a92df7edc9861262b9b5c8d6e485441dbeee860a7689",
     "scripts/eval/convergence-r1/cases/E11.ts": "4973a48ab260d00ae34afc6047519cd149298d73f41b1a08d52855deb130a968",
-    "scripts/eval/convergence-r1/cases/E12.ts": "66622b8afb95311c5b24d078684c17612451c0559718846ec2a5e8cf303fc07e"
+    "scripts/eval/convergence-r1/cases/E12.ts": "66622b8afb95311c5b24d078684c17612451c0559718846ec2a5e8cf303fc07e",
+    "scripts/eval/convergence-r1/cases/E13.ts": "a6b83d3a38190b9fcb3137701140d4b222bebd449a916067c9e9271f2b237f99",
+    "scripts/eval/convergence-r1/cases/E14.ts": "57cafc09931d42b6c5b5e763a4621e6b170e404e45cf26283605ea5f498a5e81"
   },
   "note": "冻结后不得修改 criteria/用例/判定器；runner 校验 criteriaSha256/casesSha256，不一致即拒绝运行（fail-closed）。"
 }
