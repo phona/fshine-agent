@@ -147,7 +147,10 @@ const RUNTIME_KEYS = [
   'taskBudget',
   'waitUserTimeoutMs',
   'fileRetentionDays',
+  'fileRetentionSweepOnStart',
   'dispatchMode',
+  'allowWriteOperations',
+  'attachmentNudgeAfterMs',
 ] as const;
 
 /** runtime 段整数值：显式写错即 fail-fast（与 host.* 的「非法 = 未配置」刻意不同）。 */
@@ -158,6 +161,15 @@ function runtimeInteger(raw: unknown, key: string, min: number): number | undefi
     throw new Error(`配置项 runtime.${key} 必须是 ≥${min} 的整数（当前: ${String(raw)}）`);
   }
   return parsed;
+}
+
+/** runtime 段布尔值：只认 YAML 布尔；字符串/数字等显式写错同样 fail-fast。 */
+function runtimeBoolean(raw: unknown, key: string): boolean | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'boolean') {
+    throw new Error(`配置项 runtime.${key} 必须是布尔值（当前: ${String(raw)}）`);
+  }
+  return raw;
 }
 
 /**
@@ -174,7 +186,7 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     }
   }
   const config: RuntimeConfig = {};
-  type RuntimeIntegerKey = Exclude<keyof RuntimeConfig, 'taskBudget' | 'dispatchMode'>;
+  type RuntimeIntegerKey = Exclude<keyof RuntimeConfig, 'taskBudget' | 'dispatchMode' | 'fileRetentionSweepOnStart' | 'allowWriteOperations'>;
   const integers: ReadonlyArray<[RuntimeIntegerKey, number]> = [
     ['mainConcurrency', 1],
     ['backgroundConcurrency', 0],
@@ -183,13 +195,20 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     ['workerTurnMs', 1],
     ['maxDelegationDepth', 0],
     ['waitUserTimeoutMs', 1],
-    // 0 = 不清理（缺省，零行为变化）；负数 = 配置错误，不按「非法 = 未配置」回落。
+    // 0 = 不清理（缺省值 30 由策略层提供）；负数 = 配置错误，不按「非法 = 未配置」回落。
     ['fileRetentionDays', 0],
+    // 0 = 关闭主动追问（缺省 30000 由策略层提供）；负数/小数 = 配置错误。
+    ['attachmentNudgeAfterMs', 0],
   ];
   for (const [key, min] of integers) {
     const value = runtimeInteger(raw[key], key, min);
     if (value !== undefined) config[key] = value;
   }
+  const sweepOnStart = runtimeBoolean(raw['fileRetentionSweepOnStart'], 'fileRetentionSweepOnStart');
+  if (sweepOnStart !== undefined) config.fileRetentionSweepOnStart = sweepOnStart;
+  // 写面开关（缺省 false 住装配层）：显式写错 fail-fast，拼错的旋钮不被缺省吞掉。
+  const allowWriteOperations = runtimeBoolean(raw['allowWriteOperations'], 'allowWriteOperations');
+  if (allowWriteOperations !== undefined) config.allowWriteOperations = allowWriteOperations;
   const taskBudgetRaw = raw['taskBudget'];
   if (taskBudgetRaw !== undefined && taskBudgetRaw !== null) {
     const budget = asRecord(taskBudgetRaw, 'runtime.taskBudget');
@@ -311,6 +330,32 @@ function parsePrincipals(raw: unknown): Record<string, PrincipalConfig> {
   return principals;
 }
 
+/**
+ * 执行层单文件参数声明（`contextProfiles.*.fileParams`）：键不存在 = 不启用；出现即
+ * 必须是映射，input/output 若出现必须是非空、无空白的字符串参数名。未知键拒绝——
+ * 拼错的参数名若被静默忽略，附件会再次到不了执行层（正是本次缺陷的故障类）。
+ */
+function parseFileParams(value: unknown, label: string): { input?: string; output?: string } | undefined {
+  if (value === undefined) return undefined;
+  const item = asRecord(value, label);
+  for (const key of Object.keys(item)) {
+    if (key !== 'input' && key !== 'output') {
+      throw new Error(`配置项 ${label}.${key} 不是支持的参数位（只接受 input / output）`);
+    }
+  }
+  const parsed: { input?: string; output?: string } = {};
+  for (const key of ['input', 'output'] as const) {
+    const raw = item[key];
+    if (raw === undefined) continue;
+    const param = typeof raw === 'string' ? raw.trim() : '';
+    if (!param || /[\s\u0000-\u001f\u007f]/.test(param)) {
+      throw new Error(`配置项 ${label}.${key} 必须是非空参数名字符串`);
+    }
+    parsed[key] = param;
+  }
+  return parsed;
+}
+
 function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig> {
   if (raw === undefined) return {};
   const entries = asRecord(raw, 'contextProfiles');
@@ -334,6 +379,8 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
     }
     const knowledgePaths = parseStringArray(item['knowledgePaths']);
     const sensitivePaths = parseStringArray(item['sensitivePaths']);
+    // 执行层声明的单文件参数名（CAP-01）：缺键 = 未声明 = 不启用单文件翻译。
+    const fileParams = parseFileParams(item['fileParams'], `contextProfiles.${name}.fileParams`);
     const gatewayRaw = item['gateway'];
     const gateway = gatewayRaw === undefined ? undefined : String(gatewayRaw).trim();
     if (gateway !== undefined) {
@@ -373,6 +420,7 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
       ...(gateway === undefined ? {} : { gateway }),
       ...(executorLabel === undefined ? {} : { executorLabel }),
       ...(toolName === undefined ? {} : { toolName }),
+      ...(fileParams === undefined ? {} : { fileParams }),
     };
   }
   return profiles;

@@ -157,8 +157,16 @@ class FakeSdkClient {
  * 启动渠道。root 同时充当平台工作区，附件目录按生产布局落在 root/tmp/attachments——
  * 附件必须在平台工作区内，否则 worker 的路径守卫会把每个附件判成"工作区外"
  * （2026-10-07 实测的 bug）。顺带让启动自检在这批用例里也生效。
+ *
+ * overrides 用于少数"纯附件立即交付"的机械用例：合并窗口是入站整形（2026-11-17），
+ * 窗口本身由 adapter.merge-window.test.ts 用假时钟专项覆盖；这里传 0 保持逐条交付的
+ * 原语义，不让 3 秒窗口把落盘/纪律类断言拖成定时器测试。
  */
-async function startChannel(handler: ReplyHandler, root?: string) {
+async function startChannel(
+  handler: ReplyHandler,
+  root?: string,
+  overrides: Pick<WecomBotChannelOptions, 'mergeWindowMs' | 'mergeWindowMaxMs'> = {},
+) {
   const fake = new FakeSdkClient();
   const platformRoot = root ?? mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
   const options: WecomBotChannelOptions = {
@@ -169,6 +177,7 @@ async function startChannel(handler: ReplyHandler, root?: string) {
     // 本套用例测适配器机械行为（真实投递须落到底层替身上），显式开启 live；
     // 缺省静默（Silent Shadow 闸门）由 adapter.silent-shadow.test.ts 专项覆盖。
     deliveryMode: 'live',
+    ...overrides,
   };
   const channel = new WecomBotChannel(options);
   const started = channel.start(handler);
@@ -176,6 +185,9 @@ async function startChannel(handler: ReplyHandler, root?: string) {
   await started;
   return { channel, fake };
 }
+
+/** 窗口 0 = 立即 flush（逐条交付），供"纯附件立即交付"的既有机械用例使用。 */
+const NO_MERGE_WINDOW = { mergeWindowMs: 0, mergeWindowMaxMs: 0 } as const;
 
 function textFrame(reqId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -901,7 +913,7 @@ describe('WecomBotChannel 附件(file 消息)', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
     const dir = path.join(root, 'tmp', 'attachments');
     const handler = vi.fn(async () => 'ok');
-    const { fake } = await startChannel(handler, root);
+    const { fake } = await startChannel(handler, root, NO_MERGE_WINDOW);
     fake.downloadResult = { buffer: Buffer.from('PK\u0003fake-xlsx'), filename: '2026年8月工资（幻骥达）.xlsx' };
     fake.emit('message.file', fileFrame('req-file-1'));
     await vi.waitFor(() => expect(handler).toHaveBeenCalled());
@@ -923,7 +935,7 @@ describe('WecomBotChannel 附件(file 消息)', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
     const dir = path.join(root, 'tmp', 'attachments');
     const handler = vi.fn(async () => 'ok');
-    const { fake } = await startChannel(handler, root);
+    const { fake } = await startChannel(handler, root, NO_MERGE_WINDOW);
     for (const evil of ['../../../../etc/passwd', '/etc/passwd', '..']) {
       handler.mockClear();
       fake.downloadResult = { buffer: Buffer.from('x'), filename: evil };
@@ -940,7 +952,7 @@ describe('WecomBotChannel 附件(file 消息)', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
     const dir = path.join(root, 'tmp', 'attachments');
     const handler = vi.fn(async () => 'ok');
-    const { fake } = await startChannel(handler, root);
+    const { fake } = await startChannel(handler, root, NO_MERGE_WINDOW);
     fake.downloadResult = { buffer: Buffer.alloc(33 * 1024 * 1024), filename: 'big.xlsx' };
     fake.emit('message.file', fileFrame('req-big'));
     await vi.waitFor(() => expect(handler).toHaveBeenCalled());
@@ -955,7 +967,7 @@ describe('WecomBotChannel 附件(file 消息)', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
     const dir = path.join(root, 'tmp', 'attachments');
     const handler = vi.fn(async () => 'ok');
-    const { fake } = await startChannel(handler, root);
+    const { fake } = await startChannel(handler, root, NO_MERGE_WINDOW);
     fake.downloadResult = new Error('url expired');
     fake.emit('message.file', fileFrame('req-err'));
     await vi.waitFor(() => expect(handler).toHaveBeenCalled());
@@ -998,7 +1010,10 @@ describe('WecomBotChannel 附件(file 消息)', () => {
     const handler = vi.fn(async () => 'ok');
     // 必须裸构造且**不传** attachmentDir——经 startChannel 就走不到默认值那条路
     // （变异验证实测：传了目录，把默认改回宿主 data/ 也静默通过）。
-    const channel = new WecomBotChannel({ env: ENV, clientFactory: () => fake, platformRoot: root });
+    const channel = new WecomBotChannel({
+      env: ENV, clientFactory: () => fake, platformRoot: root,
+      mergeWindowMs: 0, mergeWindowMaxMs: 0,
+    });
     const started = channel.start(handler);
     fake.emit('authenticated');
     await started;
@@ -1061,7 +1076,7 @@ describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)'
   it('附件-only 消息零帧：连秒回 ack 都不发', async () => {
     const root = freshRoot();
     const handler = vi.fn(quiet());
-    const { fake } = await startChannel(handler, root);
+    const { fake } = await startChannel(handler, root, NO_MERGE_WINDOW);
     await sendFile(fake, 'req-quiet', 'a.xlsx');
     expect(handler).toHaveBeenCalled();
     // "收到,正在处理…"对一条只暂存、不处理的消息是假承诺，且正常路径下没有终帧来改写
@@ -1071,7 +1086,7 @@ describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)'
 
   it('孤儿文件：并窗到点补一条收据，首帧即终帧', async () => {
     const root = freshRoot();
-    const { fake } = await startChannel(quiet(), root);
+    const { fake } = await startChannel(quiet(), root, NO_MERGE_WINDOW);
     await sendFile(fake, 'req-orphan', 'a.xlsx');
     expect(fake.replies).toEqual([]);                       // 窗口内不起流
     await vi.advanceTimersByTimeAsync(2_000);
@@ -1083,7 +1098,7 @@ describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)'
 
   it('并窗：窗内两条文件消息合成一条收据，不是两条气泡', async () => {
     const root = freshRoot();
-    const { fake } = await startChannel(quiet(), root);
+    const { fake } = await startChannel(quiet(), root, NO_MERGE_WINDOW);
     await sendFile(fake, 'req-f1', 'a.xlsx');
     await sendFile(fake, 'req-f2', 'b.xls');
     await vi.advanceTimersByTimeAsync(2_000);
@@ -1099,7 +1114,7 @@ describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)'
     const root = freshRoot();
     // 宿主正常路径对附件-only 无话可说；带正文的回合照常出终帧
     const handler = vi.fn(async (msg: IncomingChannelMessage): Promise<string> => (msg.attachmentOnly ? '' : '做完了'));
-    const { fake } = await startChannel(handler, root);
+    const { fake } = await startChannel(handler, root, NO_MERGE_WINDOW);
     await sendFile(fake, 'req-f1', 'a.xlsx');
     expect(fake.replies).toEqual([]);                       // 附件-only：零帧
     fake.emit('message.text', textFrame('req-t1'));
@@ -1113,7 +1128,7 @@ describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)'
     const root = freshRoot();
     // 宿主返回非空 = 用户必须立刻知道的事（超出暂存上限），不能等窗口
     const handler = vi.fn(async (): Promise<string> => '另有 2 个超出暂存上限未收');
-    const { fake } = await startChannel(handler, root);
+    const { fake } = await startChannel(handler, root, NO_MERGE_WINDOW);
     fake.downloadResult = { buffer: Buffer.from('x'), filename: 'a.xlsx' };
     fake.emit('message.file', fileFrame('req-over'));
     await vi.advanceTimersByTimeAsync(0);
@@ -1126,7 +1141,7 @@ describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)'
   // 表现是文件消息底下一个转不停的 spinner（历史事故 errcode 846608 的同一形态）。
   it('孤儿收据的首帧被拒收：降级成新消息送达，不留转圈的流', async () => {
     const root = freshRoot();
-    const { fake } = await startChannel(quiet(), root);
+    const { fake } = await startChannel(quiet(), root, NO_MERGE_WINDOW);
     await sendFile(fake, 'req-degrade', 'a.xlsx');
     fake.failNextReply();                                    // 并窗到点那一帧发不出去
     await vi.advanceTimersByTimeAsync(2_000);

@@ -147,6 +147,10 @@ export interface ResolvedRuntimeConfig {
   readonly waitUserTimeoutMs: number;
   /** run 目录/任务产物保留期（天）；0 = 不清理，缺省 30（2026-11-17 owner 定）。 */
   readonly fileRetentionDays: number;
+  /** server 启动时是否扫一遍到期 run 目录；缺省 false（零行为变化）。 */
+  readonly fileRetentionSweepOnStart: boolean;
+  /** 纯附件后主动追问延迟（ms）；0 = 关闭，缺省 30000（同一会话冷却 10 分钟）。 */
+  readonly attachmentNudgeAfterMs: number;
 }
 
 /**
@@ -166,13 +170,24 @@ export const DEFAULT_RUNTIME_CONFIG: ResolvedRuntimeConfig = Object.freeze({
   taskBudget: null,
   waitUserTimeoutMs: 86_400_000,
   // run 目录/任务产物：缺省 30 天（2026-11-17 owner 定）；显式 0 = 不清理。
-  // 本旋钮当前只提供判定，删除执行器在后续切片——接线前不删任何文件。
+  // 删除执行器只在显式 ops 入口或 server 启动开关下运行（下项缺省关闭）。
   fileRetentionDays: 30,
+  // 缺省关闭：server 启动路径零行为变化（不调用清理执行器、不建目录、不删文件）。
+  fileRetentionSweepOnStart: false,
+  // 纯附件后 30 秒无指令 → 宿主主动追问；0 = 关闭（显式值不被缺省吞掉）。
+  attachmentNudgeAfterMs: 30_000,
 });
 
 function assertRuntimeInteger(value: unknown, label: string, min: number): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min) {
     throw new Error(`配置项 ${label} 必须是 ≥${min} 的整数（当前: ${String(value)}）`);
+  }
+  return value;
+}
+
+function assertRuntimeBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== 'boolean') {
+    throw new Error(`配置项 ${label} 必须是布尔值（当前: ${String(value)}）`);
   }
   return value;
 }
@@ -278,6 +293,14 @@ export function resolveRuntimeConfig(config: RuntimeConfig = {}): ResolvedRuntim
     fileRetentionDays: config.fileRetentionDays === undefined
       ? DEFAULT_RUNTIME_CONFIG.fileRetentionDays
       : assertRuntimeInteger(config.fileRetentionDays, 'runtime.fileRetentionDays', 0),
+    // 缺省 false = 启动时不做任何清理；显式值只接受布尔（配置错误 fail-fast）。
+    fileRetentionSweepOnStart: config.fileRetentionSweepOnStart === undefined
+      ? DEFAULT_RUNTIME_CONFIG.fileRetentionSweepOnStart
+      : assertRuntimeBoolean(config.fileRetentionSweepOnStart, 'runtime.fileRetentionSweepOnStart'),
+    // 0 = 关闭主动追问（显式值合法）；负数/非整数 fail-fast。
+    attachmentNudgeAfterMs: config.attachmentNudgeAfterMs === undefined
+      ? DEFAULT_RUNTIME_CONFIG.attachmentNudgeAfterMs
+      : assertRuntimeInteger(config.attachmentNudgeAfterMs, 'runtime.attachmentNudgeAfterMs', 0),
   });
 }
 

@@ -43,7 +43,6 @@ import type { AskRuntimeInput } from './ask-runtime';
 import { explicitConfigFrom } from './resolve-config-path';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULT_DB_PATH = path.join(REPO_ROOT, '.runtime', 'state.db');
 const REDO_ROOT = path.join(REPO_ROOT, '.runtime', 'redo');
 const TASK_LIST_LIMIT = 20;
 const SUMMARY_MAX = 60;
@@ -169,9 +168,10 @@ export const TASK_REASON_WORDS: Record<TaskReason, string> = {
   resource_limited: '资源受限',
 };
 
-/** 执行步骤状态 → 用户词（契约四态，原值不动只做呈现）。 */
+/** 执行步骤状态 → 用户词（契约状态，原值不动只做呈现）。 */
 export const EXECUTION_STATUS_WORDS: Record<ExecutionStatus, string> = {
   completed: '完成',
+  needs_confirmation: '待确认',
   failed: '失败',
   refused: '已拒绝',
   needs_input: '待补充信息',

@@ -26,7 +26,6 @@ export const RUNNER_CLASSES = [
   'inputs', 'model', 'toolcalls', 'transcript_main', 'transcript_worker',
   'audit', 'audit_index', 'executions', 'reply', 'meta', 'judgment',
 ] as const;
-export type RunnerClass = (typeof RUNNER_CLASSES)[number];
 
 /** 类别 → 文件名（assertions 为 P7a 追加的证据件，数组外）。 */
 const CLASS_FILE: Readonly<Record<string, string>> = {

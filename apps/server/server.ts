@@ -34,7 +34,6 @@ import type {
   OutgoingFileReply,
   ReplyHandler,
 } from '@fshine/contracts';
-import type { TurnDriver } from '../../packages/agent/src/driver-contract';
 import { applyExecutorLabel, loadAgentProfile } from '../../packages/agent/src/agent-profile';
 import {
   createFileStore,
@@ -52,13 +51,13 @@ import {
   createSofficeRecalcEngine,
   type RecalcXlsxExecutor,
 } from '../../packages/agent/src/recalc-xlsx-executor';
-import { FILES_GENERATED_NOTICE, MAIN_PROTOCOL_NOTE, type Session, type TurnFileRef } from '../../packages/agent/src/execution-runtime';
+import { FILES_GENERATED_NOTICE, mainProtocolNoteFor, type Session, type TurnFileRef } from '../../packages/agent/src/execution-runtime';
 import {
   createNotificationOutbox,
   type NotificationOutbox,
   type NotificationSink,
 } from '../../packages/agent/src/notifications';
-import { createResourcePolicy } from '../../packages/agent/src/resource-policy';
+import { createResourcePolicy, resolveRuntimeConfig } from '../../packages/agent/src/resource-policy';
 import { SessionPersistence } from '../../packages/agent/src/session-persistence';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import type { TaskExecutor, TaskRunner } from '../../packages/agent/src/task-runner';
@@ -70,6 +69,8 @@ import {
   type DriverFactory,
   type ExecutionFace,
 } from '../../scripts/ask-runtime';
+import { createAttachmentFactQueue, createScopedNoteQueue } from './attachment-facts';
+import { AttachmentNudge, type NudgeClock } from './attachment-nudge';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -113,10 +114,16 @@ export interface ServerDeps {
    */
   createRunJsExecutor?: (fileStore: FileStore) => RunJsExecutor;
   /**
+  /**
    * 测试注入：recalc_xlsx 执行器工厂（装配构造、按 fileStore 闭包）；缺省 = 真实 soffice
    * 引擎（PATH 可见且版本 26.8.3 才上工具面；缺失/版本不符 = fail-closed 不上工具）。
    */
   createRecalcXlsxExecutor?: (fileStore: FileStore) => RecalcXlsxExecutor | undefined;
+  /**
+   * 测试注入：主动追问的时钟/调度器（缺省真实 setTimeout；注入后测试用手动时钟推进，
+   * 不真 sleep 30 秒）。只作用于附件追问定时器，不影响其它回合逻辑。
+   */
+  attachmentNudgeClock?: NudgeClock;
   logger?: (line: Record<string, unknown>) => void;
 }
 
@@ -140,6 +147,11 @@ export interface Server {
 export interface FileDeliveryPort {
   readonly deliveryMode: 'live' | 'silent';
   sendToConversation(route: ChannelRoute, files: readonly OutgoingFileReply[]): Promise<DeliveryReceipt>;
+  /**
+   * 主动投递一条**文字**（纯附件后追问等宿主主动消息）。缺省 = 该部署面不支持文字主动
+   * 投递（追问按 suppressed 记账，不冒充 sent）。非 live 部署由调用方先行抑制，不调用它。
+   */
+  sendText?(route: ChannelRoute, text: string): Promise<DeliveryReceipt>;
 }
 
 /** 无投递端口 / 非 live 部署时给用户的兜底话术（v8 §7 四必守 #4 fail-closed；事件另记 delivery_unavailable）。 */
@@ -228,7 +240,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   const mainSkills = await loadMainSkillDelivery(defaultMainSkillsDir());
   // catalog 字节数进启动日志（证据面）：0 = 空索引（技能面未启用），不静默。
   log({ event: 'main_skills_loaded', catalogBytes: mainSkills.catalogBytes });
-  const mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, profile.executorLabel)}${mainSkills.promptBlock}\n\n${MAIN_PROTOCOL_NOTE}`;
+  // 写面开关（runtime.allowWriteOperations；缺省 false = 只读）：协议文本与装配允许集同源。
+  const allowWriteOperations = deps.config.runtime?.allowWriteOperations === true;
+  const mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, profile.executorLabel)}${mainSkills.promptBlock}\n\n${mainProtocolNoteFor(allowWriteOperations)}`;
   const stateDir = deps.stateDir ?? path.join(REPO_ROOT, '.runtime', 'server', 'state');
 
   // B1 会话转录持久化：装配层是唯一构造具体存储处（基于 Pi SessionManager 的独立存储层）。
@@ -240,6 +254,19 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   // P5：资源策略进程级一份（跨会话共享账本）；缺省 runtime 段 = 现行为缺省（前台并发 4 / 排队 16）。
   const dispatchMode = deps.config.runtime?.dispatchMode ?? 'inline';
   const policy = createResourcePolicy(deps.config.runtime);
+  // 附件事实/系统注记队列与主动追问（进程内，按 (principal, session) 收口）。
+  // 事实出队即在下一回合注入；追问定时器注入时钟（测试不真 sleep），close() 全清。
+  const resolvedRuntime = resolveRuntimeConfig(deps.config.runtime);
+  const attachmentFacts = createAttachmentFactQueue();
+  const systemNotes = createScopedNoteQueue();
+  const attachmentNudge = new AttachmentNudge({
+    afterMs: resolvedRuntime.attachmentNudgeAfterMs,
+    allowWriteOperations,
+    ...(deps.attachmentNudgeClock === undefined ? {} : { clock: deps.attachmentNudgeClock }),
+    ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
+    enqueueSystemNote: (principalId, sessionId, note) => systemNotes.enqueue(principalId, sessionId, note),
+    log,
+  });
   // P6/P4：background 才启用新受理/后台/通知路径；缺省 inline 零新增路径。
   let runner: TaskRunner | undefined;
   let outbox: NotificationOutbox | undefined;
@@ -253,6 +280,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       policy,
       workerSkills,
       ...(deps.config.runtime === undefined ? {} : { runtime: deps.config.runtime }),
+      allowWriteOperations,
       emptyOperationsMessage: '执行层没有声明任何只读 operation——server 拒绝以空允许集合运行。',
       ...(deps.createDrivers !== undefined ? { createDrivers: deps.createDrivers } : {}),
       ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
@@ -295,6 +323,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           sessionId,
           dbPath: deps.dbPath,
           stateDir,
+          allowWriteOperations,
           emptyOperationsMessage: '执行层没有声明任何只读 operation——server 拒绝以空允许集合运行。',
           taskRegistry,
           mainSystemPrompt,
@@ -306,11 +335,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           ...(deps.createDrivers !== undefined ? { createDrivers: deps.createDrivers } : {}),
           ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
           ...(notificationAttachment === undefined ? {} : { taskFactProvider: notificationAttachment.taskFactProvider }),
+          // 目标 A/B：纯附件机械事实与主动追问的系统注记走同一 injections 机制（take 即出队）。
+          attachmentFactProvider: attachmentFacts.take,
+          systemNoteProvider: systemNotes.take,
           // CAP-01 S1：run_js 执行器（装配构造）与文件清单注入器（机械事实）同源注入。
           // CAP-01 S2：交办复制端口与执行层文件桥同源注入（**同一 fileStore 实例**——文件区
           // 监管唯一写侧）。桥承担回程登记（data.files → 新 file_id、剥 path/base64）与任务
-          // out/ 兜底扫描（unexecuted/failed 也扫，v8 §10-3）；dirParams 留空 = 当前执行层
-          // 尚未声明目录参数，出站目录翻译随执行层声明开启（部署按其声明认知传入参数名）。
+          // out/ 兜底扫描（unexecuted/failed 也扫，v8 §10-3）。出站参数翻译只认部署声明：
+          // `fileParams` 来自 profile（键缺失 = 未声明 = 不翻译）；dirParams 当前无部署键，
+          // 保持不传（执行层声明目录参数时再走同一条装配路径）。
           runJsExecutor,
           // recalc_xlsx：仅 Main 宿主面（Worker 面由 runtime 恒定不上）；引擎不可用则不注入。
           ...(recalcXlsxExecutor === undefined ? {} : { recalcXlsxExecutor }),
@@ -322,11 +355,17 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           // CAP-01 symlink 收窄：运行目录布局不安全（预植软链/非真目录）→ 拒跑的结构化事件
           // （runId/哪一项/实际类型/side/taskId）——日志可查；用户只见统一失败话术。
           onRunJsLayoutUnsafe: (event) => log({ event: 'run_js_layout_unsafe', principalId, sessionId, ...event }),
+          // 文件引用被拒的机械 reason（missing/foreign/expired/pending/bytes_missing）：
+          // 此前从未注入、生产无任何日志事实。只进日志；用户/模型只见统一话术（防存在性 oracle）。
+          onFileRefUnavailable: (reason) => log({ event: 'file_ref_unavailable', principalId, sessionId, reason }),
           taskInputCopier: fileStore,
           taskExecutionBridge: {
             store: fileStore,
+            ...(profile.fileParams === undefined ? {} : { fileParams: profile.fileParams }),
             onSkip: (reason) => log({ event: 'task_file_bridge_skip', principalId, sessionId, reason }),
           },
+          // 任务 out/ 兜底扫描的逐项拒收（此前只取 files，skipped 被丢弃）：数量 + reason 分布。
+          onTaskOutputSweepSkipped: (event) => log({ event: 'task_output_sweep_skipped', principalId, sessionId, ...event }),
           fileManifestProvider,
           transcriptStore,
           // fail-open 日志：转录读/写失败不阻塞回合，只上报（错误面由入口按既有归类处理）。
@@ -546,6 +585,16 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     const scope: FileScope = { principalId, sessionId };
     const sessionKey = `${principalId}\u0000${sessionId}`;
 
+    // 条件③“此后没有任何新消息/回合”：任何新入站消息都取消待发追问；非纯附件消息
+    // 同时丢弃本批（用户已经给出指令，这批不再需要追问）。纯附件消息保留已累积批次，
+    // 由登记成功后的 onAttachments 并入新文件并重新计时。活动令牌随登记传入：附件
+    // 登记是异步的，若登记完成前已有更新的消息到达，这次登记不得再补排追问。
+    const nudgeActivity = attachmentNudge.onInboundMessage({
+      principalId,
+      sessionId,
+      attachmentOnly: message.attachmentOnly === true,
+    });
+
     // CAP-01 入站附件上限（20MB）：登记前按契约字节数校验。超限 = 整条消息拒绝——
     // 一个附件都不登记、不起模型回合（纯附件与文字+附件同一判据；文字+附件也不得
     // 静默丢掉附件继续回合），事件含 bytes 与上限，回执给用户明确话术。
@@ -562,6 +611,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         bytes: oversizedAttachment.bytes,
         limitBytes: INBOUND_ATTACHMENT_LIMIT_BYTES,
       });
+      // 拒收也是“新消息”：本批不再有询问的时机，丢弃累积批次（不留下无定时器的孤儿）。
+      if (message.attachmentOnly === true) {
+        attachmentNudge.onInboundMessage({ principalId, sessionId, attachmentOnly: false });
+      }
       return ATTACHMENT_TOO_LARGE_NOTE;
     }
 
@@ -569,7 +622,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // CAP-01 S1 纯附件：登记为 pending 文件——不调模型、不建 Task、不起回合；空回执让
       // 渠道走既有文件收据窗。登记进会话链（与文字回合串行，保序）。
       const pendingReply = enqueueSessionTurn(sessionKey, async () => {
-        const registered = registerInboundAttachments(message, scope);
+        let registered: RegisteredFile[];
+        try {
+          registered = registerInboundAttachments(message, scope);
+        } catch (error) {
+          // 登记失败：本批没有可追问的文件；这条消息已打断“无新消息”条件，丢弃累积批次
+          // （不留无定时器的孤儿状态），失败照常上抛（渠道可重投）。
+          attachmentNudge.onInboundMessage({ principalId, sessionId, attachmentOnly: false });
+          throw error;
+        }
         log({
           event: 'message_attachment_only',
           principalId,
@@ -577,6 +638,39 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           messageId: message.messageId,
           fileIds: registered.map((file) => file.fileId),
         });
+        // 「附件已登记」在纯附件路径同样可查：补发与「文字+附件」路径同名的事件
+        // （不改名、不丢 message_attachment_only，历史口径不断档；消费方按本事件
+        // 即可覆盖两条入站路径）。
+        log({
+          event: 'inbound_files_registered',
+          principalId,
+          sessionId,
+          messageId: message.messageId,
+          fileIds: registered.map((file) => file.fileId),
+        });
+        // 目标 A：登记成功 → 机械事实（名/fileId/字节数/时间，**不含路径**）排队，
+        // 下一回合随既有 injections 注入一次。
+        // 目标 B：纯附件 → 30s 内无新消息则主动追问（非单聊/关闭/冷却时由组件自行忽略）。
+        if (registered.length > 0) {
+          const facts = registered.map((file) => ({
+            fileId: file.fileId,
+            name: file.name,
+            bytes: file.bytes,
+            receivedAt: message.receivedAt,
+          }));
+          attachmentFacts.enqueue({ principalId, sessionId, files: facts });
+          attachmentNudge.onAttachments({
+            principalId,
+            sessionId,
+            ...(message.chatType === undefined ? {} : { chatType: message.chatType }),
+            route: { channel, conversationId: message.conversationId },
+            files: facts,
+            activity: nudgeActivity,
+          });
+        } else {
+          // 全部附件下载/登记失败：本批无文件可问，丢弃累积批次（消息本身已打断计时）。
+          attachmentNudge.onInboundMessage({ principalId, sessionId, attachmentOnly: false });
+        }
         return '';
       }).then(
         (reply) => reply,
@@ -700,6 +794,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       await drainNotifications();
     },
     async close() {
+      // 停机：撤掉主动追问定时器与批次、清空进程内附件事实/系统注记（重启不补发）。
+      attachmentNudge.close();
+      attachmentFacts.clear();
+      systemNotes.clear();
       sessions.clear();
       outbox?.close();
       taskRegistry.close();

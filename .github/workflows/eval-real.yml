@@ -33,7 +33,7 @@ permissions:
 jobs:
   eval-real:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     env:
       LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
@@ -52,18 +52,48 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # 单样本抖动：E05 这类用例在 1 轮里约 1/3 概率误红（本地 N=3 稳定通过）。
-      # PR 是要人看的场合 → 3 轮；push 到 main 保持 1 轮（便宜，只作信息面）。
-      - name: Choose trial count
+      # 2026-11-17 owner 裁定：CI 跑的是 step 账号（模型级并发上限 5），多轮会顶爆并产生假红；
+      # 真实评测信号改由本地 workbuddy 端点跑（--concurrency 5，快得多）。
+      # 因此 CI 固定 **1 轮**、只作信息面（不设通过率门）。
+      # push 到 main：1 轮，只作信息面，不设门槛。
+      - name: Choose trial count and concurrency
         id: trials
-        run: echo "n=${{ github.event_name == 'pull_request' && 3 || 1 }}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "n=1" >> "$GITHUB_OUTPUT"
+          # 并发先回到 1：并发需要「每个 trial 一份平台 root 副本」，否则共用 fixture 的 tmp 目录会互相干扰。
+          echo "c=1" >> "$GITHUB_OUTPUT"
 
       - name: Run user-level eval (12 cases × ${{ steps.trials.outputs.n }} trial(s), evidence kept)
         run: |
           set -o pipefail
           mkdir -p .runtime/eval-user
-          npm run eval:user -- --trials ${{ steps.trials.outputs.n }} --out-dir .runtime/eval-user 2>&1 | tee .runtime/eval-user/summary.txt
+          # 逐样本退出码不直接定生死：判决交给下一步的通过率门（否则任何一次抖动都会红）。
+          npm run eval:user -- --trials ${{ steps.trials.outputs.n }} --concurrency ${{ steps.trials.outputs.c }} --out-dir .runtime/eval-user 2>&1 | tee .runtime/eval-user/run.log || true
 
+      # 预注册判据（2026-11-17，PR #62）：**不以单样本翻转判回归**，用每例通过率。
+      # 门槛写在 scripts/eval/eval-gate.mjs 顶部；改门槛 = 改判据，必须单独提交并说明。
+      # 单轮不设通过率门（1 轮没有通过率可言）；多轮时才有意义。
+      - name: Gate on per-case pass rate (multi-trial only)
+        if: github.event_name == 'pull_request' && steps.trials.outputs.n != '1'
+        run: node scripts/eval/eval-gate.mjs --summary .runtime/eval-user/summary.json --expect-cases E01,E02,E03,E04,E05,E06,E07,E08,E09,E10,E11,E12 --expect-trials ${{ steps.trials.outputs.n }} --min-rate 0.5
+
+      # 评论正文从 summary.json 全量生成逐用例表（不是日志尾部截断）；摘要缺失时脚本
+      # 如实写「无法生成逐用例表」并退出 1，避免用日志推断结果。always()：eval 失败也要发。
+      - name: Generate PR eval comment from summary.json (full per-case table)
+        if: always()
+        run: |
+          node --import tsx scripts/eval/user-eval-comment.ts \
+            --summary .runtime/eval-user/summary.json \
+            --log .runtime/eval-user/run.log \
+            --out .runtime/eval-user/comment.md \
+            --evidence-root .runtime/eval-user \
+            --artifact user-eval-report \
+            --commit "${GITHUB_SHA}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --event "${GITHUB_EVENT_NAME}"
+
+      # 先让 comment.md 落到 .runtime/eval-user/，再上传，artifact 才包含评论正文
+      # （逐样本证据 runs/<case>/trial-N 本来就在该目录下）。
       - name: Upload eval report artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -78,29 +108,26 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const summaryPath = '.runtime/eval-user/summary.txt';
-            const summary = fs.existsSync(summaryPath) ? fs.readFileSync(summaryPath, 'utf8') : '(no summary)';
-            const tail = summary.split('\n').slice(-60).join('\n') || '(empty)';
             // 版本绑定：评论必须说清结果属于哪个 head、哪次 run——否则审查者无法
             // 在多次推送间区分「最新评论」与「当前 head 的结果」，always() 步骤在
             // 取消的 run 上也可能追加评论（codex review major，PR #4）。
-            const report = [
-              '## Real-model eval (user-level, mechanical exit code)',
-              '',
-              `- Commit: \`${context.sha}\` (PR head at run time)`,
-              `- Run: ${context.payload.repository.html_url}/actions/runs/${context.runId}`,
-              `- Event: ${context.eventName}`,
-              '',
-              'Boundary: this workflow is NOT a required check yet. Judge conclusions are advisory only.',
-              '',
-              '### Key output tail',
-              '```',
-              tail,
-              '```',
-            ].join('\n');
+            // 正文由 scripts/eval/user-eval-comment.ts 从 summary.json 生成；这里只负责发布。
+            const commentPath = '.runtime/eval-user/comment.md';
+            const body = fs.existsSync(commentPath)
+              ? fs.readFileSync(commentPath, 'utf8')
+              : [
+                  '## Real-model eval (user-level, mechanical exit code)',
+                  '',
+                  `- Commit: \`${context.sha}\` (PR head at run time)`,
+                  `- Run: ${context.payload.repository.html_url}/actions/runs/${context.runId}`,
+                  `- Event: ${context.eventName}`,
+                  '',
+                  '⚠️ 评论生成失败：`.runtime/eval-user/comment.md` 不存在（summary.json 缺失或生成脚本报错）。',
+                  '不要用日志尾部推断逐用例结果；请查看 workflow 日志与 `user-eval-report` artifact。',
+                ].join('\n');
             github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: report,
+              body,
             });

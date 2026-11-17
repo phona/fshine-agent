@@ -4,8 +4,9 @@
  * 钉住三件事：
  *   · 参数面：缺省 = 实际清理；`--dry-run` 才空跑；`--config=` 透传、未知/位置参数拒绝；
  *   · import 无副作用（`import.meta.main` 守卫）：被 import 时不执行任何清理；
- *   · 接线边界：server/ask 等产品启动路径不引用清理执行器（默认行为零变化，
- *     删除只能由运维显式触发）。
+ *   · 接线边界：清理执行器的产品接线只有 server 启动开关（`runtime.fileRetentionSweepOnStart`，
+ *     缺省 false）——main 经 startup-sweep 间接引用，ask/ops 等入口零引用；
+ *     server 未开启开关时默认行为零变化，删除只能由运维显式触发。
  */
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -45,8 +46,8 @@ describe('cleanup-runs：import 无副作用', () => {
   });
 });
 
-describe('接线边界：产品启动路径不自动删除', () => {
-  it('server / ask 装配不引用清理执行器（只有 scripts/cleanup-runs.ts 这个显式入口）', () => {
+describe('接线边界：清理执行器只经 server 启动开关接入', () => {
+  it('server / ask 装配链不直接引用执行器；唯一的产品接线模块是 startup-sweep', () => {
     const productionEntries = [
       'apps/server/main.ts',
       'apps/server/server.ts',
@@ -56,7 +57,20 @@ describe('接线边界：产品启动路径不自动删除', () => {
     ];
     for (const relative of productionEntries) {
       const source = readFileSync(path.join(REPO_ROOT, relative), 'utf8');
-      expect(source, `${relative} 不得引用 run-dir-cleanup`).not.toContain('run-dir-cleanup');
+      expect(source, `${relative} 不得直接引用 run-dir-cleanup`).not.toContain('run-dir-cleanup');
     }
+    const startupSweep = readFileSync(path.join(REPO_ROOT, 'apps/server/startup-sweep.ts'), 'utf8');
+    expect(startupSweep, 'server 启动开关必须复用同一清理执行器').toContain(
+      "packages/agent/src/run-dir-cleanup",
+    );
+  });
+
+  it('main 在启动装配完成后、开始接消息（startChannelForMode）之前调用启动清扫', () => {
+    const source = readFileSync(path.join(REPO_ROOT, 'apps/server/main.ts'), 'utf8');
+    const sweepAt = source.indexOf('sweepExpiredRunDirsOnStart(');
+    const startChannelAt = source.indexOf('await startChannelForMode(');
+    expect(sweepAt, 'main.ts 必须调用启动清扫').toBeGreaterThan(-1);
+    expect(startChannelAt, 'main.ts 必须仍启动渠道').toBeGreaterThan(-1);
+    expect(sweepAt, '启动清扫必须在渠道开始接消息之前').toBeLessThan(startChannelAt);
   });
 });

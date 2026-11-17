@@ -135,10 +135,15 @@ export class MuPlans {
   /** 登记一次「交办」：主回合 task_run + worker execute_operation，worker 用同一原文匹配。 */
   delegate(owner: MuPrincipal, text: string, opts: {
     reply: string; operation: string; args: Readonly<Record<string, unknown>>; summary: string;
+    /** 交办输入文件（CAP-01 S2 task_run.inputFiles；fileId 需在本会话清单内）。 */
+    inputFiles?: readonly string[];
     rendezvous?: boolean; compact?: { before: number; after: number };
   }): this {
     this.main.set(text, {
-      calls: [{ tool: 'task_run', args: { task: text } }],
+      calls: [{
+        tool: 'task_run',
+        args: { task: text, ...(opts.inputFiles === undefined ? {} : { inputFiles: opts.inputFiles }) },
+      }],
       reply: opts.reply,
       ...(opts.rendezvous === undefined ? {} : { rendezvous: opts.rendezvous }),
       ...(opts.compact === undefined ? {} : { compact: opts.compact }),
@@ -517,7 +522,8 @@ export function makeCtx(plans: MuPlanTable, rendezvous: Rendezvous | null = null
  * 零真实平台：本替身不触网，只 Promise.resolve 合成返回值。
  */
 export class MuSdkRecorder implements SdkClientLike {
-  readonly replyStreams: Array<{ content: string; finish: boolean }> = [];
+  /** 出站流式帧：`chatid` = 帧体里的群 id（单聊为 null）——MU-13 用它断言投递目标。 */
+  readonly replyStreams: Array<{ content: string; finish: boolean; chatid: string | null }> = [];
   readonly sentMessages: Array<{ chatid: string; content: string }> = [];
   readonly activeMedia: Array<{ chatid: string; mediaId: string }> = [];
   readonly mediaReplies: Array<{ mediaType: string; mediaId: string }> = [];
@@ -538,8 +544,10 @@ export class MuSdkRecorder implements SdkClientLike {
   }
   connect(): unknown { this.connected += 1; return this; }
   disconnect(): void { this.disconnected += 1; }
-  replyStream(_frame: unknown, _streamId: string, content: string, finish: boolean): Promise<unknown> {
-    this.replyStreams.push({ content, finish });
+  replyStream(frame: unknown, _streamId: string, content: string, finish: boolean): Promise<unknown> {
+    const body = (frame as { body?: Record<string, unknown> } | undefined)?.body;
+    const chatid = typeof body?.['chatid'] === 'string' && body['chatid'] !== '' ? body['chatid'] : null;
+    this.replyStreams.push({ content, finish, chatid });
     return Promise.resolve({});
   }
   uploadMedia(_data: Buffer, options: { type: 'image' | 'file'; filename: string }): Promise<{ media_id: string }> {
@@ -589,13 +597,30 @@ export interface MuWecomChannelHandle {
  * 静默模式下所有用户可见出站被闸门抑制并留 `shadowEvidence`——判据"实际用户可见投递 = 0"。
  */
 export async function startSilentWecomChannel(handler: ReplyHandler, root: string): Promise<MuWecomChannelHandle> {
+  return startWecomChannel(handler, root, 'silent');
+}
+
+/**
+ * 以**显式 live** 启动 WecomBotChannel（MU-13 群投递目标判定用）：收件端仍是记录型假 SDK，
+ * 零真实平台；`replyStreams` 记录每帧的 chatid，用来断言「结果投回了同一个群」。
+ * live 只在本文件由测试显式选择——产品缺省仍 fail-safe 到 silent（见 silent-shadow-gate）。
+ */
+export async function startLiveWecomChannel(handler: ReplyHandler, root: string): Promise<MuWecomChannelHandle> {
+  return startWecomChannel(handler, root, 'live');
+}
+
+async function startWecomChannel(
+  handler: ReplyHandler,
+  root: string,
+  deliveryMode: 'silent' | 'live',
+): Promise<MuWecomChannelHandle> {
   const sdk = new MuSdkRecorder();
   const channel = new WecomBotChannel({
     env: MU_WECOM_ENV,
     clientFactory: () => sdk,
     platformRoot: root,
     attachmentDir: path.join(root, 'tmp', 'attachments'),
-    deliveryMode: 'silent',
+    deliveryMode,
   });
   const starting = channel.start(handler);
   sdk.emit('authenticated');

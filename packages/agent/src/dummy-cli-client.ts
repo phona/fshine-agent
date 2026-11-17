@@ -8,12 +8,15 @@
  *   · 能力快照 = 执行层 `operation list --json` 的投影（一次取回，进程内复用）；
  *   · 结构化请求 = `call --file <json>`（CLI 只认带前缀的参数键：适配器按执行层声明
  *     把裸参数名规范化成声明里的形态，其余原样透传，由执行层校验并拒绝）；
- *   · 结果 = stdout 末行 RESULT 信封 → ExecutionOutcome 四态；
+ *     `confirmation`（句柄 + 用户原话）按契约放在请求体顶层，适配器**原样转发**，
+ *     不解析句柄、不判断用户是不是在确认；
+ *   · 结果 = stdout 末行 RESULT 信封 → ExecutionOutcome 五态（含 needs_confirmation）；
  *     非零退出且无信封 = 执行层拒绝或失败，按退出码与 stderr 机械分流，不嗅探文案。
  *
  * 读路径切片的作用域不在这里：本适配器按契约忠实执行被请求的 operation；
- * 「本轮只开放只读」由装配方从执行层自述的 access 声明派生（readOnlyOperationNames）
- * 并由通用运行时的允许集合在发起执行前拒收。本文件不持治理策略。
+ * 「本轮开放哪些 operation」由装配方从执行层自述的 access 声明派生（只读集合 +
+ * `runtime.allowWriteOperations` 打开时的写集合）并由通用运行时的允许集合在发起执行前
+ * 拒收集合外调用。本文件不持治理策略。
  *
  * 子进程 env 走 worker 白名单（worker-env.ts，B 类凭据隔离）；状态根只经
  * 测试专用 `--state-dir` 传入（不依赖任何环境变量改道）。
@@ -25,7 +28,9 @@ import path from 'node:path';
 import {
   EXECUTION_CONTRACT_VERSION,
   type CapabilityManifest,
+  type ConfirmationPrompt,
   type ExecutionArgDeclaration,
+  type ExecutionCallOptions,
   type ExecutionClient,
   type ExecutionFailure,
   type ExecutionOutcome,
@@ -68,18 +73,29 @@ export function readOnlyOperationNames(operations: readonly RawGatewayOperation[
   return operations.filter((operation) => operation.access === 'read').map((operation) => operation.name);
 }
 
+/**
+ * 从执行层自述的 access 声明派生写 operation 集合（装配开关打开时才进入允许集合）。
+ * 与只读集合各自独立派生：写操作**永不**混进只读集合（否则重试会把写当读安全重发）。
+ */
+export function writeOperationNames(operations: readonly RawGatewayOperation[]): string[] {
+  return operations.filter((operation) => operation.access === 'write').map((operation) => operation.name);
+}
+
 interface GatewayRun {
   code: number | null;
   stdout: string;
   stderr: string;
   timedOut?: boolean;
   spawnFailed?: boolean;
+  /** 宿主取消信号触发：网关子进程已被终止，本次调用没有可用回执。 */
+  aborted?: boolean;
 }
 
 interface ResultEnvelope {
   status?: unknown;
   data?: unknown;
   error?: unknown;
+  confirmation?: unknown;
 }
 
 export function createDummyCliClient(options: DummyCliClientOptions): DummyCliClient {
@@ -87,7 +103,11 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
   const gatewayPath = path.join(options.root, options.gateway);
   let listing: Promise<readonly RawGatewayOperation[]> | undefined;
 
-  function runGateway(args: string[]): Promise<GatewayRun> {
+  function runGateway(args: string[], signal?: AbortSignal): Promise<GatewayRun> {
+    // 预取消：不 spawn、不产生任何网关副作用（与 run_js 执行器的预取消同口径）。
+    if (signal?.aborted === true) {
+      return Promise.resolve({ code: null, stdout: '', stderr: '', aborted: true });
+    }
     return new Promise((resolve) => {
       let settled = false;
       let timer: NodeJS.Timeout | undefined;
@@ -95,7 +115,13 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
         if (settled) return;
         settled = true;
         if (timer !== undefined) clearTimeout(timer);
+        if (signal !== undefined) signal.removeEventListener('abort', onAbort);
         resolve(run);
+      };
+      // 取消在飞调用：杀网关子进程并如实返回「无回执」，由调用方按取消语义处置。
+      const onAbort = (): void => {
+        child.kill('SIGKILL');
+        settle({ code: null, stdout: '', stderr: '', aborted: true });
       };
       const child = spawn(gatewayPath, args, {
         cwd: options.root,
@@ -117,6 +143,7 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
         child.kill('SIGTERM');
         settle({ code: null, stdout: '', stderr: '', timedOut: true });
       }, timeoutMs);
+      if (signal !== undefined) signal.addEventListener('abort', onAbort, { once: true });
     });
   }
 
@@ -156,7 +183,10 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
         })),
       };
     },
-    async execute(request: ExecutionRequest): Promise<ExecutionOutcome> {
+    async execute(
+      request: ExecutionRequest,
+      callOptions?: ExecutionCallOptions,
+    ): Promise<ExecutionOutcome> {
       const operations = await listOperations();
       const operation = operations.find((entry) => entry.name === request.operation);
       const scratch = mkdtempSync(path.join(os.tmpdir(), 'dummy-exec-'));
@@ -168,8 +198,16 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
           operation: request.operation,
           dispatchKey: request.dispatchKey,
           args: normalizeArgs(operation, request.args),
+          // 确认引用按契约原样转发：适配器不解释句柄、不改写用户原话。
+          ...(request.confirmation === undefined ? {} : { confirmation: request.confirmation }),
         }));
-        const run = await runGateway(['call', '--file', callFile, '--state-dir', options.stateDir]);
+        const run = await runGateway(['call', '--file', callFile, '--state-dir', options.stateDir], callOptions?.signal);
+        // 取消是「调用被中止」，不是执行层返回的失败：只抛中止，由运行时按取消语义处置。
+        if (run.aborted === true) {
+          const error = new Error('执行层调用已被取消。');
+          error.name = 'AbortError';
+          throw error;
+        }
         return outcomeOf(run, request, operations, timeoutMs);
       } finally {
         rmSync(scratch, { recursive: true, force: true });
@@ -268,6 +306,24 @@ function missingInputsOf(
   return [{ description: failure.message }];
 }
 
+/**
+ * needs_confirmation 的确认提示：只做形状校验（handle/summary 非空字符串，
+ * expiresAt 可选字符串）。形状不合法 = 执行层回执不可用，按 failed 机械分流，
+ * 绝不把半截提示交给宿主当成「可确认」。
+ */
+function confirmationOf(value: unknown): ConfirmationPrompt | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const candidate = value as { handle?: unknown; summary?: unknown; expiresAt?: unknown };
+  if (typeof candidate.handle !== 'string' || candidate.handle === '') return undefined;
+  if (typeof candidate.summary !== 'string' || candidate.summary === '') return undefined;
+  if (candidate.expiresAt !== undefined && typeof candidate.expiresAt !== 'string') return undefined;
+  return {
+    handle: candidate.handle,
+    summary: candidate.summary,
+    ...(candidate.expiresAt === undefined ? {} : { expiresAt: candidate.expiresAt }),
+  };
+}
+
 function outcomeOf(
   run: GatewayRun,
   request: ExecutionRequest,
@@ -291,6 +347,19 @@ function outcomeOf(
     const status = envelope.status;
     if (status === 'completed') {
       return { status: 'completed', data: envelope.data ?? undefined };
+    }
+    if (status === 'needs_confirmation') {
+      const confirmation = confirmationOf(envelope.confirmation);
+      if (confirmation === undefined) {
+        return {
+          status: 'failed',
+          error: {
+            code: 'EXECUTION_BAD_CONFIRMATION',
+            message: '执行层返回的 needs_confirmation 缺少有效的 confirmation（handle/summary）。',
+          },
+        };
+      }
+      return { status: 'needs_confirmation', confirmation, data: envelope.data ?? undefined };
     }
     if (status === 'needs_input') {
       const operation = operations.find((entry) => entry.name === request.operation);

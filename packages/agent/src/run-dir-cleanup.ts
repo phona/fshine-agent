@@ -22,8 +22,9 @@
  * `fileRetentionDecision` 决定（`runtime` 段 -> `resolveRuntimeConfig` 的解析值透传，
  * 不在本模块另读配置——单一配置源守卫 `resource-policy-single-source.test.ts` 覆盖）。
  *
- * 接线边界：只有 `scripts/cleanup-runs.ts`（`npm run cleanup:runs`）显式调用；server/ask
- * 启动路径不引用本模块（默认产品行为零变化，守卫见 `scripts/cleanup-runs.test.ts`）。
+ * 接线边界：`scripts/cleanup-runs.ts`（`npm run cleanup:runs`）显式调用；server 启动路径
+ * 只在 `runtime.fileRetentionSweepOnStart=true` 时经 `apps/server/startup-sweep.ts` 调用一次
+ * （开关缺省 false = 默认产品行为零变化，守卫见 `scripts/cleanup-runs.test.ts`）。
  */
 import { lstatSync, readdirSync, rmSync, type Stats } from 'node:fs';
 import path from 'node:path';

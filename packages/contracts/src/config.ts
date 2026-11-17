@@ -48,6 +48,14 @@ export interface ContextProfileConfig {
    * already-published tool protocol name keeps working by declaring it here.
    */
   toolName?: string;
+  /**
+   * 执行层声明的**单文件**参数名（CAP-01：宿主把任务文件的物化路径填进去）：
+   *   · input：宿主把任务唯一的输入文件物化后，用该参数把路径交给执行层；
+   *   · output：宿主在任务 out/ 下分配确定路径，执行层写到那里，收尾扫描登记成产物。
+   * 只认部署对执行层的声明（参数名不来自 args 形状猜测，也不来自模型）；键不存在 =
+   * 未声明 = 不启用（零行为变化）。声明来自执行层的 `operation list` 认知。
+   */
+  fileParams?: { input?: string; output?: string };
   /** Maximum wall-clock budget for one Worker turn. Defaults to 10 minutes. */
   workerTimeoutMs?: number;
   /** 平台仓知识面（worker read/ls 白名单）；缺省 = .md/.schema.json/.agents//docs/ */
@@ -164,9 +172,16 @@ export interface RuntimeConfig {
   /**
    * run 目录 / 任务产物的保留期（天）。缺省 30（2026-11-17 owner 定）；0 = 不清理；
    * 正整数 = 超过该天数的目录/产物具备清理资格。本旋钮只提供判定（策略层），实际删除
-   * 执行器不在当前切片——接线前不删任何文件。
+   * 由 `fileRetentionSweepOnStart` 或显式 `npm run cleanup:runs` 触发。
    */
   fileRetentionDays?: number;
+  /**
+   * server 启动装配完成后、开始接消息之前，是否按 `fileRetentionDays` 扫一遍 run 目录。
+   * 缺省 false = 零行为变化（不新建目录、不删任何文件、不打清理日志）；true = 启动时
+   * 执行一次 `cleanupExpiredRunDirs`（dryRun=false），结果写入启动日志。
+   * 只扫一次，不引入定时器；周期调度归部署侧。
+   */
+  fileRetentionSweepOnStart?: boolean;
   /**
    * 派发模式（R4 P6 接线；缺省 = 'inline' = 现行为）。
    *   · 'inline'：委派同步执行、Main 等待 Worker 回合（现行路径，逐字不变）；
@@ -174,6 +189,19 @@ export interface RuntimeConfig {
    *     回「已受理 #编号 名称」。仅 server 渠道面支持 background；ask/redo 入口显式拒绝。
    */
   dispatchMode?: 'inline' | 'background';
+  /**
+   * 写面开关（2026-11-17 写确认切片；缺省 false = 零行为变化）。
+   * true 时装配层把执行层自述 `access=write` 的 operation 一并放进 allowedOperations；
+   * 只读集合仍只由 `access=read` 派生（重试语义不随开关变化）。开关只决定「能不能发起」，
+   * 操作授权、确认句柄绑定、有效期、防重放与业务校验仍归执行层——宿主不因此获得裁决权。
+   */
+  allowWriteOperations?: boolean;
+  /**
+   * 纯附件登记后、用户迟迟没有给指令时的主动追问延迟（ms；2026-11-17 附件追问切片）。
+   * 缺省 30000（30 秒）；0 = 关闭（零行为变化）。同一会话冷却 10 分钟。
+   * 只影响宿主主动追问与系统注记，不改变附件登记/事实注入。
+   */
+  attachmentNudgeAfterMs?: number;
 }
 
 /**

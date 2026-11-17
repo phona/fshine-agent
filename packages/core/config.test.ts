@@ -182,6 +182,53 @@ contextProfiles:
     expect(() => loadConfig({ yamlPath: writeFixture(tooLong), env: PUBLIC_URL_ENV })).toThrowError(/toolName/);
   });
 
+  it('context profile 解析执行层单文件参数声明 fileParams（键缺失 = 不启用）', () => {
+    const yaml = `${VALID_YAML}
+contextProfiles:
+  example-gateway:
+    root: /opt/fictional-execution-layer
+    skillRoots: [".agents/skills"]
+    fileParams:
+      input: --input
+      output: exec-output
+`;
+    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
+    expect(config.contextProfiles['example-gateway']?.fileParams).toEqual({ input: '--input', output: 'exec-output' });
+
+    // 键不存在 = 宿主不启用单文件参数翻译（部署未声明执行层参数名）。
+    const absent = `${VALID_YAML}
+contextProfiles:
+  example-gateway:
+    root: /opt/fictional-execution-layer
+    skillRoots: [".agents/skills"]
+`;
+    const without = loadConfig({ yamlPath: writeFixture(absent), env: PUBLIC_URL_ENV });
+    expect(without.contextProfiles['example-gateway']?.fileParams).toBeUndefined();
+  });
+
+  it('context profile 拒绝畸形的 fileParams（非映射/非字符串/空串/未知键）', () => {
+    // 部署声明写错时 fail-fast：静默忽略会让附件再次到不了执行层。
+    for (const raw of [
+      '"--input"', // 非映射
+      'input: [--input]', // 非字符串
+      'input: 42', // 非字符串
+      'input: "   "', // trim 后为空
+      'input: "--in put"', // 参数名含空白
+      'input-file: --input', // 未知键（拼错的参数名）
+    ]) {
+      const yaml = `${VALID_YAML}
+contextProfiles:
+  example-gateway:
+    root: /opt/fictional-execution-layer
+    skillRoots: [".agents/skills"]
+    fileParams:
+      ${raw}
+`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV }), raw)
+        .toThrowError(/fileParams/);
+    }
+  });
+
   it('context profile 拒绝非正 Worker 预算', () => {
     const yaml = `${VALID_YAML}
 contextProfiles:
@@ -482,6 +529,80 @@ host:
       const yaml = `${VALID_YAML}runtime:\n  fileRetentionDays: ${bad}\n`;
       expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(
         /runtime\.fileRetentionDays/,
+      );
+    }
+  });
+
+  it('runtime.attachmentNudgeAfterMs：正数 / 0 解析；非法值 fail-fast；缺省不造键', () => {
+    // 缺省 = 加载层不造键；缺省 30000（30 秒）由 resolveRuntimeConfig 补齐。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+
+    const positive = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  attachmentNudgeAfterMs: 30000\n`),
+      env: {},
+    });
+    expect(positive.runtime).toEqual({ attachmentNudgeAfterMs: 30000 });
+
+    // 显式 0 = 关闭主动追问，是合法值（不得被「未配置」吞掉）。
+    const zero = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  attachmentNudgeAfterMs: 0\n`),
+      env: {},
+    });
+    expect(zero.runtime).toEqual({ attachmentNudgeAfterMs: 0 });
+
+    for (const bad of ['-1', '1.5', 'nope']) {
+      const yaml = `${VALID_YAML}runtime:\n  attachmentNudgeAfterMs: ${bad}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(
+        /runtime\.attachmentNudgeAfterMs/,
+      );
+    }
+  });
+
+  it('runtime.fileRetentionSweepOnStart：布尔 true/false 解析；非布尔 fail-fast；缺省不造键', () => {
+    // 缺省 = 加载层不造键；缺省 false（不在启动时清扫）由 resolveRuntimeConfig 补齐。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+
+    const on = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  fileRetentionSweepOnStart: true\n`),
+      env: {},
+    });
+    expect(on.runtime).toEqual({ fileRetentionSweepOnStart: true });
+
+    // 显式 false 是合法值（与缺省同义，但不得被「未配置」吞掉而无法区分）。
+    const off = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  fileRetentionSweepOnStart: false\n`),
+      env: {},
+    });
+    expect(off.runtime).toEqual({ fileRetentionSweepOnStart: false });
+
+    for (const bad of ['yes', '1', '"true"', 'nope']) {
+      const yaml = `${VALID_YAML}runtime:\n  fileRetentionSweepOnStart: ${bad}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(
+        /runtime\.fileRetentionSweepOnStart/,
+      );
+    }
+  });
+
+  it('runtime.allowWriteOperations：布尔 true/false 解析；非布尔 fail-fast；缺省不造键', () => {
+    // 缺省不造键；装配层按 false（只读）处理，零行为变化。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+
+    const on = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  allowWriteOperations: true\n`),
+      env: {},
+    });
+    expect(on.runtime).toEqual({ allowWriteOperations: true });
+
+    const off = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  allowWriteOperations: false\n`),
+      env: {},
+    });
+    expect(off.runtime).toEqual({ allowWriteOperations: false });
+
+    for (const bad of ['yes', '1', '"true"', 'nope']) {
+      const yaml = `${VALID_YAML}runtime:\n  allowWriteOperations: ${bad}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(
+        /runtime\.allowWriteOperations/,
       );
     }
   });

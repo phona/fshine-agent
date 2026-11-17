@@ -26,7 +26,7 @@ import { mu6Restart } from './mu6-restart';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..', '..', '..');
-const EVIDENCE_ROOT = path.join(REPO_ROOT, '.runtime', 'r6', 'multiuser');
+export const EVIDENCE_ROOT = path.join(REPO_ROOT, '.runtime', 'r6', 'multiuser');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 通用判定辅助
@@ -38,7 +38,7 @@ function ownerOf(plans: MuPlanTable, text: string): string | null {
 }
 
 /** 归属校验：任务行的 (principalId) 必须等于其请求原文的 owner；不等 = 串线/泄漏。 */
-function scopeViolations(plans: MuPlanTable, tasks: readonly MuTaskSnapshot[]): string[] {
+export function scopeViolations(plans: MuPlanTable, tasks: readonly MuTaskSnapshot[]): string[] {
   const bad: string[] = [];
   for (const task of tasks) {
     const owner = ownerOf(plans, task.request);
@@ -70,7 +70,7 @@ function transcriptViolations(plans: MuPlanTable, records: readonly { principalI
 }
 
 /** 机械任务 Oracle（`../oracle` H3/H4/H5/E-G）→ 串线硬零。 */
-function crossoverHits(tasks: readonly MuTaskSnapshot[]): { hits: MuHardZero[]; verdict: string[] } {
+export function crossoverHits(tasks: readonly MuTaskSnapshot[]): { hits: MuHardZero[]; verdict: string[] } {
   const verdict = judgeMuTasks(tasks);
   const hits: MuHardZero[] = [];
   if (verdict.codes.length > 0) hits.push('task_crossover');
@@ -81,14 +81,14 @@ function scoped(tasks: readonly MuTaskSnapshot[], userId: (typeof MU_PRINCIPALS)
   return tasks.filter((task) => task.principalId === principalIdOf(userId) && task.sessionId === sessionIdOf(conversationId));
 }
 
-function makeRecords(
+export function makeRecords(
   caseId: string,
   entries: readonly { principalId: string; sessionId: string; taskId: string | null; request: string; deliveredTo: string; kind: MuDeliveryRecord['kind'] }[],
 ): MuDeliveryRecord[] {
   return entries.map((entry) => ({ caseId, ...entry }));
 }
 
-function finalize(
+export function finalize(
   id: string,
   title: string,
   hardZeroHits: readonly MuHardZero[],
@@ -110,7 +110,7 @@ function blocked(id: string, title: string, notes: string, evidence: Record<stri
   return result;
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 3000): Promise<boolean> {
+export async function waitUntil(predicate: () => boolean, timeoutMs = 3000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return true;
@@ -428,7 +428,7 @@ const MU8_PRIV_TAG = 'PRIV-TAG';
 const MU8_GROUP_TAG = 'GROUP-TAG';
 
 /** 任务引用确定性拒绝文案（与 `TaskOwnershipError` / MU-5 同源，不泄漏存在性）。 */
-const TASK_NOT_IN_SESSION = '任务不存在或不属于当前会话';
+export const TASK_NOT_IN_SESSION = '任务不存在或不属于当前会话';
 
 /** 从 task_status 结果里取 taskId（命中本会话 #1 时非空）。 */
 function callTaskId(call: { result: unknown } | undefined): string | null {

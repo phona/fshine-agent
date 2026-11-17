@@ -42,6 +42,7 @@ import {
   openSync,
   readSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -319,6 +320,21 @@ export const INBOUND_MAX_FILE_BYTES = 20 * 1024 * 1024;
 
 function newFileId(): string {
   return `file_${randomUUID().replaceAll('-', '')}`;
+}
+
+/** 打开句柄的真实路径（Linux 走 /proc/self/fd；失败回落到 realpath(resolved)）。 */
+function realpathOfOpenFd(fd: number, resolved: string): string | undefined {
+  try {
+    const link = readlinkSync(`/proc/self/fd/${fd}`);
+    // 已删除文件带 " (deleted)" 后缀，去掉后再比较。
+    return link.replace(/ \(deleted\)$/, '');
+  } catch {
+    try {
+      return realpathSync(resolved);
+    } catch {
+      return undefined;
+    }
+  }
 }
 
 export function createFileStore(options: { store: TaskStore; workspaceRoot: string }): FileStore {
@@ -730,6 +746,8 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
       if (resolved === root || !resolved.startsWith(root + path.sep)) {
         throw new TaskFileRejectedError('path_outside_task_dir');
       }
+      // 真实根：allowedRoot 自身可能是软链；边界按 realpath 判定（2026-11-17 Codex blocking）。
+      const realRoot = realpathSync(root);
       let fd: number;
       try {
         fd = openSync(resolved, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
@@ -737,6 +755,12 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
         throw new TaskFileRejectedError('symlink_or_gone');
       }
       try {
+        // 父目录软链：O_NOFOLLOW 只拒绝末级组件，`taskA/link -> taskB` 这种会被跟随。
+        // 判定以**实际打开的文件**为准（/proc/self/fd 指向真实路径），而不是入参字符串。
+        const actualPath = realpathOfOpenFd(fd, resolved);
+        if (actualPath === undefined || actualPath === realRoot || !actualPath.startsWith(realRoot + path.sep)) {
+          throw new TaskFileRejectedError('path_outside_task_dir');
+        }
         const st = fstatSync(fd);
         if (!st.isFile()) throw new TaskFileRejectedError('not_regular_file');
         if (st.nlink !== 1) throw new TaskFileRejectedError('linked');

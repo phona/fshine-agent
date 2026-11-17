@@ -26,6 +26,7 @@ import {
   accountCalls, CallAccountingGuard, resolveLimits, R6HardStopError,
   type ModelCallRecord,
 } from './accounting';
+import { scanStructureLeak, type StructureLeakBounds, type StructureLeakReport } from './structure-leak';
 
 /** 会话面（真实 = 生产同源装配适配；测试 = 假会话）。只暴露只读事实。 */
 export interface HarnessSession {
@@ -45,6 +46,13 @@ export interface HarnessSession {
   compactionAttempts(): readonly CompactionAttempt[];
   /** 刚结束的一轮机械上是否调用了 task_cancel（H5 判据）。 */
   cancelCalledLastTurn(): boolean;
+  /**
+   * 本回合**被测会话 Pi 面**的模型调用数（含摘要/重试；用于 H6.b 单回合上限）。
+   * 缺省 = 按 `budget().calls` 的回合差分（全部模型调用，含 Worker）。真实装配下
+   * Worker 是每次委派独立的一次性 Pi 会话，其调用计入全量预算，但不算被测长会话的
+   * 「回合」——不区分会把 Worker 调用误算进 H6.b。
+   */
+  mainModelCallsLastTurn?(): number;
 }
 
 export interface HarnessRunInput {
@@ -64,6 +72,8 @@ export interface HarnessRunInput {
   readonly infraSignals?: readonly string[];
   readonly productFaultSignals?: readonly string[];
   readonly bounds?: CompactionBounds;
+  /** 结构泄漏判据的阈值覆盖（缺省 `R6_STRUCTURE_LEAK_BOUNDS`；只影响读数）。 */
+  readonly structureLeakBounds?: StructureLeakBounds;
 }
 
 export interface HarnessRunResult {
@@ -71,6 +81,8 @@ export interface HarnessRunResult {
   readonly judgement: SessionJudgement;
   readonly disposition: SampleDisposition;
   readonly summary: Readonly<Record<string, unknown>>;
+  /** 结构泄漏读数（不参与 disposition；见 `structure-leak.ts`）。 */
+  readonly structureLeak: StructureLeakReport;
 }
 
 const DEFAULT_AT = (turn: number): string => new Date(Date.UTC(2026, 0, 1, 0, 0, turn)).toISOString();
@@ -115,7 +127,9 @@ export async function runHarnessSession(input: HarnessRunInput): Promise<Harness
     const result = await session.send(spec.text);
     const reply = result.reply ?? '';
     replies.push({ index: spec.index, text: reply, replyChars: reply.length, durationMs: 0 });
-    const callsDelta = session.budget().calls - callsBefore;
+    const callsDelta = session.mainModelCallsLastTurn !== undefined
+      ? session.mainModelCallsLastTurn()
+      : session.budget().calls - callsBefore;
     // ② 回填累计逐次调用记录（摘要独立于 budget hook 计数）。
     if (hasLedger) {
       guard.replace((session.modelCallLedger?.() ?? []).map((r) => ({ ...r, sessionId: input.sessionId })));
@@ -171,9 +185,15 @@ export async function runHarnessSession(input: HarnessRunInput): Promise<Harness
     factVerdicts, sessionFactsPass: sessionFacts.pass, factFailures: sessionFacts.failures,
     taskVerdict, compactionVerdict,
   };
+  // 结构泄漏 = 只读读数：扫描已记录的回复与工具调用，不新增模型调用、不参与处置。
+  const structureLeak = scanStructureLeak(
+    { replies: evidence.replies, toolCalls: evidence.toolCalls },
+    input.structureLeakBounds,
+  );
   return {
     evidence, judgement,
     disposition: classifySample(evidence, judgement),
-    summary: buildEvidenceSummary(evidence, judgement),
+    summary: buildEvidenceSummary(evidence, judgement, structureLeak),
+    structureLeak,
   };
 }

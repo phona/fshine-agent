@@ -43,6 +43,19 @@
 > `runtime` 段另含 `dispatchMode: inline | background`（R4 集成接线，2026-11-14；缺省
 > `inline` = 现行为：委派同步执行；`background` = 受理即回执、后台 TaskRunner 执行——
 > 仅 server 渠道面承接，ask/redo 入口对 background 显式拒绝；模板见 `config/agent.example.yaml`）。
+> `runtime.fileRetentionSweepOnStart`（2026-11-17；缺省 `false`）：server 启动装配完成后、
+> 渠道开始接消息之前，按 `fileRetentionDays` **扫一次**到期 run 目录（`dryRun=false`，
+> 结果进启动日志）；缺省关闭 = 零行为变化，只扫一次、无定时器（周期调度归部署侧）。
+> `runtime.allowWriteOperations`（2026-11-17 写确认切片；缺省 `false`）：`true` 时装配层
+> 把执行层自述 `access=write` 的 operation 一并放进允许集合（只读集合仍只由 `access=read`
+> 派生）。开关只决定「能不能发起」；操作授权、确认句柄绑定/有效期/一次性与业务校验仍归
+> 执行层，宿主只透传句柄与用户原话（不是计划门）。
+> `runtime.attachmentNudgeAfterMs`（2026-11-17 附件追问切片；缺省 `30000` = 30 秒，
+> `0` = 关闭）：单聊里纯附件登记成功、此后该会话没有任何新消息/回合时，宿主主动发一条
+> 带 2~4 个业务化选项的追问，并把同一份选项作为系统注记注入下一回合（模型可见、用户
+> 不可见、不触发回合）；同一会话冷却 10 分钟。投递走既有主动投递面：非 `live` 只记
+> `attachment_nudge_suppressed`，绝不记 `sent`。附件机械事实（名/fileId/字节数/时间）
+> 的下一回合注入不随此开关变化。
 
 下表仍只从 env 读（不是部署配置）：
 

@@ -99,4 +99,23 @@ describe('端到端管线（假会话）', () => {
     expect(r.disposition).toBe('environment_interrupted');
     expect(r.judgement.taskVerdict.hardZeroHits).toEqual([]);
   });
+
+  it('结构泄漏读数：命中只增读数，不改 disposition', async () => {
+    const taskId = 'task_e6296844-5e6a-4ed2-95c4-d0b24efc00c0';
+    const reqId = 'req_c6c800b7-17fe-4760-80c5-b98460164d25';
+    const clean = await run(LS1, ls1Script());
+    const leaky = await run(LS1, ls1Script({ 1: `{"taskId":"${taskId}","status":"completed","requestIds":["${reqId}"]}` }));
+
+    // 同一计划/同一 Oracle 面：disposition 与硬零不受该读数影响。
+    expect(clean.disposition).toBe('valid');
+    expect(leaky.disposition).toBe(clean.disposition);
+    expect(leaky.judgement.taskVerdict.hardZeroHits).toEqual(clean.judgement.taskVerdict.hardZeroHits);
+
+    const cleanField = clean.summary['structureLeak'] as Record<string, unknown>;
+    const leakyField = leaky.summary['structureLeak'] as Record<string, unknown>;
+    expect(cleanField['totalHits']).toBe(0);
+    expect(Number(leakyField['totalHits'])).toBeGreaterThan(0);
+    expect(leakyField['affectsDisposition']).toBe(false);
+    expect(leaky.structureLeak.hitTurns).toBe(1);
+  });
 });

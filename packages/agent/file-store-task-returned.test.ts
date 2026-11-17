@@ -122,6 +122,55 @@ describe('registerTaskFile：任务回程内联字节登记 + sha256 去重（as
 });
 
 describe('registerTaskFileFromPath：路径源登记（allowedRoot 包含性 + fd 纪律 + 去重）', () => {
+  it('父目录软链（taskA/link → taskB）不得跨任务读文件（2026-11-17 Codex blocking）', () => {
+    const { root, store, fileStore } = makeFixture();
+    const taskA = path.join(root, 'taskA');
+    const taskB = path.join(root, 'taskB');
+    mkdirSync(taskA, { recursive: true });
+    mkdirSync(taskB, { recursive: true });
+    writeFileSync(path.join(taskB, 'secret.csv'), 'other-task-bytes');
+    symlinkSync(taskB, path.join(taskA, 'link'));
+
+    // 字符串前缀看起来在 taskA 里；真实路径其实是 taskB —— 必须拒收。
+    const rejected = catchRejected(() =>
+      fileStore.registerTaskFileFromPath({
+        scope: SCOPE,
+        taskId: TASK_A,
+        sourcePath: path.join(taskA, 'link', 'secret.csv'),
+        allowedRoot: taskA,
+        name: 'secret.csv',
+        maxFileBytes: 4096,
+      }),
+    );
+    expect(['path_outside_task_dir', 'symlink_or_gone']).toContain(rejected.reason);
+    // 零登记：另一个任务的文件不得进入本任务池。
+    expect(store.listFileRefs(SCOPE).filter((row) => row.taskId === TASK_A)).toHaveLength(0);
+    store.close();
+  });
+
+  it('父目录本身是软链（allowedRoot 经软链给出）仍以**真实根**为边界', () => {
+    const { root, store, fileStore } = makeFixture();
+    const realRoot = path.join(root, 'real');
+    const outside = path.join(root, 'outside');
+    mkdirSync(realRoot, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(path.join(outside, 'x.csv'), 'outside-bytes');
+    symlinkSync(realRoot, path.join(root, 'alias-root'));
+
+    const rejected = catchRejected(() =>
+      fileStore.registerTaskFileFromPath({
+        scope: SCOPE,
+        taskId: TASK_A,
+        sourcePath: path.join(outside, 'x.csv'),
+        allowedRoot: path.join(root, 'alias-root'),
+        name: 'x.csv',
+        maxFileBytes: 4096,
+      }),
+    );
+    expect(['path_outside_task_dir', 'symlink_or_gone']).toContain(rejected.reason);
+    store.close();
+  });
+
   it('任务目录内的文件登记成新 file_id（task 绑定、字节一致）；同 sha 复用旧 fileId', () => {
     const { root, workspaceRoot, store, fileStore } = makeFixture();
     const taskDir = path.join(root, 'tmp', `task_${TASK_A}`);

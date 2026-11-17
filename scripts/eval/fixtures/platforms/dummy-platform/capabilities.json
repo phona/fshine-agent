@@ -469,6 +469,12 @@
             "required": false,
             "style": "code",
             "desc": "record count to add"
+          },
+          {
+            "flag": "--confirmation",
+            "required": false,
+            "style": "code",
+            "desc": "confirmation handle returned by prepare; one-shot, bound to collection/window/count, expires in 15 minutes"
           }
         ]
       },
@@ -680,6 +686,12 @@
             "required": false,
             "style": "code",
             "desc": "ballot count to add"
+          },
+          {
+            "flag": "--confirmation",
+            "required": false,
+            "style": "code",
+            "desc": "confirmation handle returned by prepare; one-shot, bound to topic/round/count, expires in 15 minutes"
           }
         ]
       },

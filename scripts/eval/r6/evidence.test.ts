@@ -65,12 +65,15 @@ describe('证据采集器 · schema 落盘', () => {
       const evidence = mkEvidence();
       const judgement = mkJudgement({ effective: 3 });
       const { dir, summary } = collectEvidence(tmp, evidence, judgement);
-      const expected = ['manifest.json', 'turns.jsonl', 'replies.jsonl', 'compaction-events.jsonl', 'token-curve.jsonl', 'model-calls.jsonl', 'tool-calls.jsonl', 'tasks-snapshots.jsonl', 'tasks-final.json', 'resource-samples.jsonl', 'evidence.json'];
+      const expected = ['manifest.json', 'turns.jsonl', 'replies.jsonl', 'compaction-events.jsonl', 'token-curve.jsonl', 'model-calls.jsonl', 'tool-calls.jsonl', 'tasks-snapshots.jsonl', 'tasks-final.json', 'resource-samples.jsonl', 'structure-leak.jsonl', 'evidence.json'];
       const present = readdirSync(dir);
       for (const f of expected) expect(present).toContain(f);
       expect(summary['disposition']).toBe('valid');
       expect(summary['effectiveCompactions']).toBe(3);
       expect(buildEvidenceSummary(evidence, judgement)['hardZeroHits']).toEqual([]);
+      const structureLeak = summary['structureLeak'] as Record<string, unknown>;
+      expect(structureLeak['affectsDisposition']).toBe(false);
+      expect(structureLeak['totalHits']).toBe(0);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
