@@ -121,7 +121,7 @@ async function makeFixture(input: {
   worker?: TurnDriver;
   dispatchMode?: 'inline' | 'background';
 } = {}): Promise<Fixture> {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'runtime-run-task-files-'));
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'runtime-task-run-files-'));
   tempDirs.push(dir);
   const dbPath = path.join(dir, 'state.db');
   const registry = createSqliteTaskRegistry(dbPath);

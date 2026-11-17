@@ -3,6 +3,8 @@
 > 本文件把 CAP-01 从设计到落地的全部提交、读数、失败与遗留项放在一处，便于对照。
 > 设计稿正文在 [`cap01-main-direct-execution.md`](cap01-main-direct-execution.md)（v8）。
 > 记录原则：**只写脚本直跑或独立复核得到的读数**；实施员自述不作为通过依据。
+> 命名说明：本记录如实保留当时的工具名 `run_task`；该工具其后改名为 `task_run`（工具族
+> 统一为 `task_run`/`task_status`/`task_result`/`task_cancel`/`task_resume`），历史读数不改写。
 
 ## 1. 提交链
 
