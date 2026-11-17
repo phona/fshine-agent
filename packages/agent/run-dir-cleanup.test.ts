@@ -109,10 +109,10 @@ describe('仓库 run 目录布局匹配（只删自己拥有的目录）', () =>
 
   it('不在仓库布局里的旧目录一律不碰（不按名字/前缀猜测）', () => {
     // runs/ 下的非仓库形状（历史/夹具命名）。
-    const legacyDir = path.join(workspace, PRINCIPAL, SESSION, 'runs', 'run_w1_legacy');
-    mkdirSync(legacyDir, { recursive: true });
+    const oldDir = path.join(workspace, PRINCIPAL, SESSION, 'runs', 'run_w1_legacy');
+    mkdirSync(oldDir, { recursive: true });
     const stamp = new Date(NOW - 365 * DAY);
-    utimesSync(legacyDir, stamp, stamp);
+    utimesSync(oldDir, stamp, stamp);
     // principal 层目录名不是 16 hex —— 整棵子树不遍历。
     const foreignDir = path.join(workspace, 'not-a-hash-dir', SESSION, 'runs', RUN_OLD);
     mkdirSync(foreignDir, { recursive: true });
@@ -120,9 +120,9 @@ describe('仓库 run 目录布局匹配（只删自己拥有的目录）', () =>
 
     const result = cleanupExpiredRunDirs({ workspaceRoot: workspace, config: config30, nowMs: NOW });
 
-    expect(existsSync(legacyDir)).toBe(true);
+    expect(existsSync(oldDir)).toBe(true);
     expect(existsSync(foreignDir)).toBe(true);
-    expect(byPath(result.events, legacyDir)).toMatchObject({ action: 'skipped_unexpected_name' });
+    expect(byPath(result.events, oldDir)).toMatchObject({ action: 'skipped_unexpected_name' });
     // 非布局子树既不删也不出现在事件里（不是 run 目录候选）。
     expect(byPath(result.events, foreignDir)).toBeUndefined();
     expect(result.summary.deleted).toBe(0);
