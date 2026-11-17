@@ -239,15 +239,19 @@ const WORKBOOK_EXPANDED_BYTES_LIMIT = 128 * 1024 * 1024;
  * Codex R6-P1：3MB 压缩文件可展开成百万格，在 128MB 堆里直接杀掉整个 server。
  */
 export function assertWorkbookExpandedSize(bytes: Buffer): void {
-  if (bytes.length < 22 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) return; // 非 zip：交给后续解析判定
-  // 从尾部找 EOCD（PK\x05\x06），拿 central directory 偏移与条目数，只遍历条目区（O(entries)）。
+  // 不检查开头魔数：合法 ZIP 允许前导字节（Codex R11-P1 —— 前导字节曾绕过大写检查后
+  // 仍被 ExcelJS 解压）。全尾部找 EOCD，找不到或结构不合法即 fail-closed 拒绝。
   let eocd = -1;
   for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 66 * 1024); i--) {
     if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === 0x05 && bytes[i + 3] === 0x06) { eocd = i; break; }
   }
-  if (eocd < 0) return; // 找不到：交给解析（损坏会在 readWorkbook 处报错）
+  if (eocd < 0) throw new Error('workbook_zip_invalid'); // 找不到 ZIP 结构：拒，不交给解析器冒 OOM 风险
   const count = bytes.readUInt16LE(eocd + 10);
-  let p = bytes.readUInt32LE(eocd + 16);
+  const cdSize = bytes.readUInt32LE(eocd + 12);
+  let p = bytes.readUInt32LE(eocd + 16); // central directory 偏移（相对 ZIP 起点）
+  // 前导字节 N 让 CD 实际位置 = N + 记录偏移；N = EOCD 实际位置 - CD 记录偏移 - CD 大小。
+  const preamble = eocd - p - cdSize;
+  if (preamble > 0) p += preamble;
   let total = 0;
   for (let n = 0; n < count; n++) {
     if (p + 46 > bytes.length || bytes[p] !== 0x50 || bytes[p + 1] !== 0x4b || bytes[p + 2] !== 0x01) break;

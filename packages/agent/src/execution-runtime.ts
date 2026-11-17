@@ -1621,6 +1621,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
             if (file === '' || exportMode === undefined) {
               throw new Error('recalc_xlsx 需要 file 与 export（csv|none）。');
             }
+            // Codex R11-P2：调用前预检共享预算——foregroundPermit 只取一次，consume 不拒绝，
+            // 不预检则同一回合可无限次重算、绕过 taskBudget。耗尽即拒跑（fail-closed）。
+            const exhausted = foregroundPermit?.budget.exhausted();
+            if (exhausted !== undefined && exhausted !== null) {
+              throw new Error(`超出本次任务资源预算（${exhausted.reason}），recalc_xlsx 未执行。`);
+            }
             // 结果原样交回模型（status/errorCells/valueDiffs/artifacts）；CSV 等产物由
             // 执行器登记进 fileStore 并随 result.outputs 交回（Codex P2-4，与 run_js 同一
             // 交付纪律）——handler 在此把产物收进 turnFiles，交付去留归宿主投递面。

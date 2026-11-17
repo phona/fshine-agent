@@ -768,6 +768,40 @@ describe('recalc_xlsx 重算开销入 R4 账（独立复核 Gap1）', () => {
     expect(events[0]!.principalId).toBe(SCOPE.principalId);
   });
 
+  it('预算耗尽（calls=1）：第二次 recalc 被预检拒绝，不执行（Codex R11-P2）', async () => {
+    const h = makeHarness();
+    const policy = createResourcePolicy({ taskBudget: { ms: 100_000, calls: 1 } });
+    let executed = 0;
+    const executor: RecalcXlsxExecutor = {
+      available: true, engineFacts: null,
+      async recalc() { executed += 1; return { status: 'pass', errorCells: [], valueDiffs: [], artifacts: { report: 'out/.recalc-report.json' }, durationMs: 5 }; },
+    };
+    const results: string[] = [];
+    const session = await createSession({
+      principalId: SCOPE.principalId,
+      sessionId: SCOPE.sessionId,
+      client: new FaceClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver: {
+        async run(runInput) {
+          for (let i = 0; i < 2; i++) {
+            try { await runInput.exec(RECALC_XLSX_TOOL, { file: 'in/file_x.xlsx', export: 'none' }); results.push('ok'); }
+            catch { results.push('rejected'); }
+          }
+          return { text: 'ok', messages: [] as unknown as DriverMessage[] };
+        },
+      },
+      workerDriver: noopWorker,
+      mainSystemPrompt: 'test',
+      taskRegistry: h.store as never,
+      recalcXlsxExecutor: executor,
+      policy,
+    });
+    await session.send('recalc');
+    expect(results).toEqual(['ok', 'rejected']);
+    expect(executed).toBe(1);
+  });
+
   it('无 policy（缺省）→ recalc 仍可用，无预算对象可入账但不报错', async () => {
     const h = makeHarness();
     const session = await createSession({
@@ -850,6 +884,22 @@ describe('recalc_xlsx Codex 二轮复审 P2 回归', () => {
     const p = bytes.readUInt32LE(eocd + 16);
     bytes.writeUInt32LE(200 * 1024 * 1024, p + 24);
     expect(() => assertWorkbookExpandedSize(bytes)).toThrow(/too_large/);
+  });
+
+  it('前导字节 ZIP 的压缩炸弹仍被识别并拒收（Codex R11-P1）', async () => {
+    const src = await workbookBuffer('S', { A1: 1 });
+    // 给整个 ZIP 加 16 字节前导，再把 central directory 的 uncompressed size 改成 200MB。
+    const withPreamble = Buffer.concat([Buffer.alloc(16, 0x41), Buffer.from(src)]);
+    let eocd = -1;
+    for (let i = withPreamble.length - 22; i >= 0; i--) {
+      if (withPreamble[i] === 0x50 && withPreamble[i + 1] === 0x4b && withPreamble[i + 2] === 0x05 && withPreamble[i + 3] === 0x06) { eocd = i; break; }
+    }
+    expect(eocd).toBeGreaterThan(16);
+    const cdSize = withPreamble.readUInt32LE(eocd + 12);
+    const cdOffset = withPreamble.readUInt32LE(eocd + 16);
+    const p = cdOffset + (eocd - cdOffset - cdSize); // 校正前导字节后的实际 CD 位置
+    withPreamble.writeUInt32LE(200 * 1024 * 1024, p + 24);
+    expect(() => assertWorkbookExpandedSize(withPreamble)).toThrow(/too_large/);
   });
 
   it('falsy result（0/false）：公式结果 0 能被读回，一致→pass、CSV 出 0（Codex R5-P1）', async () => {
