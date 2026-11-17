@@ -112,5 +112,5 @@
 | 5 | **群聊里多人交办** | MU-8 只覆盖同 principal 的群/私隔离。 |
 | 6 | **真实写操作成功 + 确认回环** | E11 是拒绝写；SIM-09/10 用假写系统；所有业务用例的 granted 都是 read。 |
 | 7 | **PDF/图片业务识别** | `r6-lifecycle` S5 只登记 `.pdf/.zip` 的机械生命周期（UNDEFINED），不调模型。 |
-| 8 | **执行层 needs_input → 用户补答 → 同一任务完成** | E05 只到澄清即止；T02 是预置挂起任务接续。 |
+| 8 | ~~**执行层 needs_input → 用户补答 → 同一任务完成**~~ | **2026-11-17 已补**：`scripts/needs-input-resume.test.ts`（生产装配链 + 假执行层/假驱动：受理 #编号 → waiting_user 问题与原编号一致 → task_resume 同一 taskId 续跑完成、两条执行事实；不补答则停在 waiting_user 不重复执行）。修复：后台续跑回合把用户补答随委派交给 Worker（此前新 Worker 拿不到补答，只能再次 needs_input/失败）。 |
 | 9 | **指定接收人/转发结果** | 所有投递断言都是「回到发起会话」。 |
