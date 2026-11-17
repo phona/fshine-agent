@@ -343,8 +343,15 @@ export function toAgentTool(
 /** 本驱动实例持有的 Pi 会话（reuseConversation 时跨回合复用）。 */
 interface TurnSlot {
   retryScheduled: number;
+  /**
+   * 本失败周期内**实际发生**的模型尝试数（1 起）。重试由 Pi 原生 AgentSession 执行，
+   * 驱动只能从 assistant `message_end` 事件看到真实尝试；正常 assistant 收尾即周期结束、
+   * 归零（下个失败周期重新从 1 计）。重试在退避中被取消不会产生新的 message_end，
+   * 因此不会虚报尝试次数。
+   */
+  attempt: number;
   /** 本回合最近一次 assistant 失败（sticky：只用于归因日志）。 */
-  runFailure?: { code: string; message: string };
+  runFailure?: { code: string; message: string; attempt: number };
   /**
    * 失败之后是否又有正常 assistant 消息（Pi 原生重试/溢出恢复成功）：
    * `runFailure` 且未 recovered = 本回合仍以失败收尾（不得把尾部 toolResult/旧正文当答复）。
@@ -486,9 +493,12 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
       if (event.type === 'message_end' && event.message.role === 'assistant' && slot.current) {
         const stopReason = event.message.stopReason;
         if (stopReason === 'error' || stopReason === 'aborted') {
+          // 每次失败的 assistant 消息 = 一次真实模型尝试（含 Pi 自动重试后的尝试）。
+          slot.current.attempt += 1;
           slot.current.runFailure = {
             code: stopReason === 'error' ? 'model_error' : 'aborted',
             message: String(event.message.errorMessage ?? ''),
+            attempt: slot.current.attempt,
           };
           slot.current.recovered = false;
           // U3：失败尝试结束。可重试错误（stopReason=error）随后会由 Pi 自动重试；该尝试
@@ -499,6 +509,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         } else {
           // 失败之后又出现正常 assistant 消息 = Pi 原生重试/溢出恢复已经接上。
           slot.current.recovered = true;
+          slot.current.attempt = 0;
           // U3：正常结束的响应边界（其后的工具调用属于这次响应）。
           input.surfaceRef.current?.onRuntimeEvent?.({ kind: 'assistant_end' });
         }
@@ -601,7 +612,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         }
 
         const session = active.session;
-        active.slot.current = { retryScheduled: 0 };
+        active.slot.current = { retryScheduled: 0, attempt: 0 };
         active.lastProjection = projectSession(session);
 
         // 宿主事实注入：Pi 原生 custom message（下次请求按 user 角色投影），不触发单独回合。
@@ -638,7 +649,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         if (runFailure !== undefined) {
           console.error(JSON.stringify({
             event: 'pi_driver_model_error',
-            attempt: 1,
+            attempt: runFailure.attempt,
             errorCode: runFailure.code,
             errorMessage: runFailure.message.slice(0, 500),
             retryScheduled,
