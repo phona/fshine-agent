@@ -3806,6 +3806,56 @@ Pi 1.5.2 迁移 U3（恢复/重试后同一逻辑写操作被重复执行）以*
 
 ---
 
+## 九十九、CAP-01 收口裁定：S3 能力包络 / 保留期与清理 / 并发 4 / 催问扩展 / 渠道三档 / 软链 fail-closed / fileParams / 跨会话不做（2026-11-17，分支 `arch/integration` @ `23ae585`）状态：**已裁定·主面已合入 integration；Codex 第 4 批两项修复在分支待合**
+
+**日期**：2026-11-17（裁定日）。**对象**：CAP-01 收口的九项裁定与落地。**边界**：本条目只追加，不改历史条目；判据口径与读数明细仍以 `docs/product/cap01-record.md` §8–§12.1 为准，本节负责把「裁定了什么、依据在哪、落在哪个提交、影响谁、还差什么」集中成可检索条目。
+
+### 1. 裁定总表
+
+| # | 裁定 | 依据 | 落地提交 | 影响面 | 未覆盖 |
+|---|---|---|---|---|---|
+| 1 | S3 端到端 **2/5** 接受为**模型能力包络**，不建宿主强制；判据只判 Main 面；旧口径 0/5 保留 | `docs/product/cap01-record.md:79-88,105,110-113,135`；`scripts/eval/cap01/row-data-scan.ts:2-10,46,83-91`；`scripts/eval/cap01/r2-functional.ts:861-863` | `844fb3c`（判据收窄）、`267cfd0`（读数更正）；裁定记录于 `7806428`（cap01-record §11） | 评测口径变化，产品行为零改动；Main 面泄漏仍是模型自觉，不是宿主不变量 | `cap01-record.md:90` 仍留早期「新口径 3/5」字样，与同节 `:86-88` 及 §9 `:105` 的 2/5 不一致（历史条目，不改） |
+| 2 | 磁盘保留期缺省 **30 天**；显式执行器 `npm run cleanup:runs`；只删 run 目录、不碰 `file_refs`；`--dry-run` 零删除 | `packages/agent/src/resource-policy.ts:148,170,201-211`；`package.json:14`；`scripts/cleanup-runs.ts:12-18`；`packages/agent/src/run-dir-cleanup.ts:8,11,17-18,25-26,143-167,238-305`；`packages/agent/run-dir-cleanup.test.ts:132-156,295-308`；`scripts/cleanup-runs.test.ts:19-33,48-66` | `7806428`（30 天）、`b250d3f`（执行器）、`ce08070`（合并）、`05b1926`（记录） | 缺省从「永不清理」变为「超 30 天具备清理资格」；删除只由 ops 显式触发，server/ask 启动路径不接；`file_refs` 行不删，孤儿行一致性留后续 | 执行器与底账行的一致性未做；启动自动清扫未纳入本轮（integration 未接；分支 `fcd949a` 缺省关、未合入） |
+| 3 | `mainConcurrency` **保持 4** | `docs/product/cap01-record.md:138`（R6 9 个真实并发会话同进程峰值 **632MB**、中位 457MB；产品模型 step-3.7-flash 账号并发上限 **8**，实测 6 会话已见 `current: 9, limit: 8`）；`packages/agent/src/resource-policy.ts:160`；`scripts/eval/cap01/r8-concurrency.ts:55-57`；4/8 档读数 `cap01-record.md:106-107` | `bcdf316`（缺省 1→4）、`2651618`（合并）、`4ba05c6`（R8 4/8 档对比） | 前台并发 4、排队 16；再提并发先解决供应商配额 | 632MB 原始 artifact 未随文档入库；本条只引用 `cap01-record.md:138` 的记录值 |
+| 4 | 空回复催问条件扩到「回合以工具结果/用户消息收尾」 | `packages/agent/src/pi-driver.ts:50-56,677`；`packages/agent/pi-driver-model-errors.test.ts:41-46`；`7806428` 提交正文（R6 61 次空回复中 59 次此形状，旧条件一次未催） | `7806428` | 该形状每回合最多催一次；有正文/error/aborted 不催；正常回复不被改写 | `packages/agent/pi-driver-model-errors.test.ts:20` 头注释仍写「toolResult 终结不催」，与用例相反（历史注释漂移） |
+| 5 | 部署档位 `channel.mode = offline / shadow / live`，缺省 **offline** | `packages/contracts/src/config.ts:202-213`；`apps/server/channel-mode.ts:2-12,30-37,49-58`；`apps/server/main.ts:44-68`；`packages/core/src/config.ts:229-245`；`config/agent.example.yaml:42-45`；`apps/server/channel-mode.test.ts:164-231` | `4dc42d5`、`6181985` | 缺省 `npm start` 不建 WS 连接、出站 silent；`shadow` 连但出站全抑制；`live` 保持改动前语义；档位只认 yaml，无 env 覆盖 | 真实企微未跑（`cap01-record.md` §6）；`offline` 的复核 `safetyGap` 未能复现（`cap01-record.md:171-175`） |
+| 6 | `run_js` 树内软链整轮 fail-closed（含 `in/evil.txt → /etc/passwd` 实测） | `packages/agent/run-js-layout-symlink.test.ts:6,57-90`（修复前 `READ_OK:1275`）；`packages/agent/src/run-js-executor.ts:152-220`（整树扫描，深度 ≤8、条目 ≤2000）；`packages/agent/src/run-js-layout.ts:8-13,27`；`cap01-record.md:156-169` | `1d0bc3b`（布局项 lstat + 产物 realpath）、`85a3b5b`（树内扫描）、`f25dc49`（合并） | 发现任何软链即拒跑（不建 run.cjs、不 spawn、零产物）；原「out 软链跳过收集」改为更强的 fail-closed | 网络外传仍未阻断；硬链/其他逃逸面不在本条 |
+| 7 | 附件交给执行层：`fileParams` 单文件参数；输入恰好一个文件，输出由宿主分配 `out/` 路径 | `packages/agent/src/task-file-bridge.ts:65-71,144-145,183-203`；`packages/agent/task-file-bridge-dummy.test.ts:48-104,106-124`；`scripts/ask-runtime.ts:269-271,554-555`；`docs/product/business-coverage.md:108` | `fab9e86`（桥 + ask 装配 + 真 dummy 端到端）；server 默认装配接线 `af01a20`（分支 `arch/fix-fileparamswire`，**未合入** `23ae585`） | ask 装配可按声明启用；默认 server 需 `contextProfiles.*.fileParams`（`af01a20` 才接）；未声明 = 零翻译 | server 接线未合入；真实执行层未验（dummy only）；目录参数仍无部署键 |
+| 8 | **跨会话续办：不做**（owner 裁定） | `docs/product/business-coverage.md:111`；任务 scope `packages/agent/src/execution-runtime.ts:786`；`packages/agent/src/task-registry.ts:545,633`（principalId 与 sessionId 都必须一致）；`packages/core/src/task-store.ts:260` | `23ae585`（只改文档） | 保持 `(principalId, sessionId)` 隔离；不新增跨会话授权面；MU-3/MU-8 语义不动 | 无（明确不做；无代码改动） |
+| 9 | Codex PR 复核缺陷按四轮/四批修复（PR #62） | 见 §2 逐条；PR #62 | `d2efdb1`（路径归一化）、`b58a1ce`（取消信号贯穿）、`1e98382`（预取消拒跑 + 残留路径 + eval-real 3 轮）、`7458c76`（Worker run_js 进执行事实 + 产物复用键含文件名）；`fb3bb4b`（超时进执行事实，分支待合）、`af01a20`（fileParams 接线，分支待合） | 前三批已合入 integration；第 4 批未合入：HEAD `execution-runtime.ts:1070` 仍是旧条件，`apps/server/server.ts:293-296` 的桥装配仍未传 `fileParams` | PR #62 仍 OPEN；超时假绿与默认 server 附件接线在 integration 尚未修复；修复后未复审 |
+
+### 2. Codex PR 复核四轮（缺陷与修法明细）
+
+PR #62（`CAP-01 收口：文件处理与交付能力 + 并发/保留期/部署档位/软链收窄`）的 Codex 复核按**四轮新发现**归档；后两轮复审重复同一超时阻断项，不另计轮次。
+
+| 轮次 | 缺陷（复核判定） | 修法 | 提交 / 状态 |
+|---|---|---|---|
+| 1 | 新增文档写入开发者主目录绝对路径（blocking） | 文档中的开发者主目录绝对路径统一改为 `~`；验收聚合脚本的 TMPDIR 缺省改用 `os.tmpdir()` | `d2efdb1` 已合入 |
+| 2 | `run_js` 取消信号未贯穿；预先取消的信号不会终止脚本 | main/worker 两处 `runJs` 把 Pi 回合 `AbortSignal` 传到执行器；调用前已 aborted → 直接 `killReason=abort`（不建目录、不物化、不写 run.cjs、不 spawn、零产物） | `b58a1ce`、`1e98382` 已合入 |
+| 3 | Worker 的 `run_js` 未进执行事实（查询成功 + 脚本失败仍判 completed）；任务产物复用键只看 sha256（同字节不同名丢文件名） | Worker `run_js` 按退出码 `noteExecution`；复用键改为 `(scope, taskId, sha256, name)` | `7458c76` 已合入 |
+| 4 | 脚本超时仍不写失败执行事实（查询成功 + 脚本超时假绿）；`fileParams` 未接入默认服务装配 | 超时 `killReason=timeout` 写 `run_js_timeout` 失败事实（`abort` 仍不写）；`contextProfiles.*.fileParams` 解析/校验并透传到 `taskExecutionBridge`，新增 `createServer` 端到端用例 | `fb3bb4b`、`af01a20` **分支待合**（`arch/fix-timeoutfact`、`arch/fix-fileparamswire`，未合入 `23ae585`） |
+
+### 3. 未覆盖与已知漂移
+
+- **Codex 第 4 批未合入**：`fb3bb4b`、`af01a20` 只在各自分支；截至 `23ae585`，`packages/agent/src/execution-runtime.ts:1070` 仍是「`killReason === undefined` 才写执行事实」的旧条件，`apps/server/server.ts:293-296` 的桥装配仍未传 `fileParams`。因此「查询成功 + 脚本超时」在 integration 上仍可能被判 completed；默认 server 的附件单文件参数仍未接线。PR #62 仍 OPEN，未做修复后的复审。
+- **启动自动清扫不在本轮**：integration 未把 `run-dir-cleanup` 接到 server/ask 启动路径（`scripts/cleanup-runs.test.ts:48-66` 守卫）；分支 `fcd949a`（`runtime.fileRetentionSweepOnStart`，缺省关）未合入，不属于本裁定。
+- **历史条目/注释漂移（只登记，不改历史条目）**：
+  - `docs/product/cap01-record.md:90` 仍写「新口径 3/5」，与同节 `:86-88` 及 §9 `:105` 的 2/5 不一致；按 2/5 裁定，该句是早期读数残留。
+  - `docs/product/cap01-record.md:137` 的「判定层仍无执行器」是 §11 当时状态；§12 的 `b250d3f` 已补显式执行器。
+  - `packages/contracts/src/config.ts:145` 仍写「文件保留期 0 = 不清理」、`:166-167` 仍写「实际删除执行器不在当前切片」；与缺省 30 天 + 执行器已落地不一致。
+  - `packages/core/src/config.ts:186` 仍写「0 = 不清理（缺省…）」；缺省值实际由 `packages/agent/src/resource-policy.ts:170` 提供为 30。
+  - `config/agent.example.yaml:62,75` 仍写「文件保留期 0(不清理)」「>0 仅提供判定」；示例未随 30 天缺省与执行器更新。
+  - `packages/agent/pi-driver-model-errors.test.ts:20` 头注释仍写「toolResult 终结不催」，与 `:41-46` 的用例相反。
+- **真实环境未验**：真实企业微信、真实执行层（`operation list`/限流/retry-after/结果映射）仍未跑（`docs/product/cap01-record.md` §6）；`fileParams` 的 server 接线即使合入，也只在仓内 dummy 上验过。
+
+### 4. 指针
+
+**指针**：`docs/product/cap01-record.md` §8（S3 口径）、§9（收口读数）、§10（R6 重跑）、§11（owner 裁定）、§12/§12.1（上线前补漏）；`docs/product/business-coverage.md` §八（盲区）；`packages/agent/src/resource-policy.ts`（保留期/并发缺省）、`packages/agent/src/run-dir-cleanup.ts` 与 `scripts/cleanup-runs.ts`（清理执行器）、`packages/agent/src/pi-driver.ts`（催问）、`apps/server/channel-mode.ts`（档位）、`packages/agent/src/run-js-executor.ts`/`run-js-layout.ts`（软链）、`packages/agent/src/task-file-bridge.ts`（fileParams）、`packages/agent/src/execution-runtime.ts`/`task-registry.ts`（任务 scope）；提交 `844fb3c`、`267cfd0`、`7806428`、`b250d3f`、`ce08070`、`bcdf316`、`4ba05c6`、`4dc42d5`、`6181985`、`1d0bc3b`、`85a3b5b`、`f25dc49`、`fab9e86`、`23ae585`、`d2efdb1`、`b58a1ce`、`1e98382`、`7458c76`；待合 `fb3bb4b`、`af01a20`。
+
+**状态：主面已裁定并合入 integration @ `23ae585`；Codex 第 4 批两项修复在分支待合（`fb3bb4b` / `af01a20`），PR #62 仍 OPEN。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。

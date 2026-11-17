@@ -173,3 +173,19 @@ Worker 面命中数不丢弃，写进该检查的 detail 作信息（形如「wo
 `main.ts` 自身不起 HTTP 监听（`channel.start` 是唯一连接入口），出站由适配器
 `SilentShadowGate`（`packages/channel-wecom/src/adapter.ts:220`）统一收口。复核员当时判红的
 另一半原因是全量测试红，而那是新用例里的过渡词标识符（已改名）。
+
+## 13. 决策索引（2026-11-17）
+
+> 本表只做索引，不重复裁定正文；逐项依据、影响面与未覆盖见 `docs/decision-log.md` §九十九。
+
+| # | 条目 | 一句话裁定 | 本记录对应读数/证据 | decision-log |
+|---|---|---|---|---|
+| 1 | S3 端到端 2/5 | 接受为模型能力包络；判据只判 Main 面；旧 0/5 保留 | §8（口径）、§9（读数）、§11（裁定） | §九十九 表 #1 |
+| 2 | 磁盘保留期与清理 | 缺省 30 天；`npm run cleanup:runs` 只删 run 目录、不碰 `file_refs`、`--dry-run` 零删除 | §11、§12（`b250d3f`） | §九十九 表 #2 |
+| 3 | `mainConcurrency` | 保持 4；9 并发峰值 632MB、供应商并发上限 8 | §11 | §九十九 表 #3 |
+| 4 | 空回复催问 | 扩到「工具结果/用户消息收尾」 | §11；`7806428` | §九十九 表 #4 |
+| 5 | 渠道档位 | `offline` / `shadow` / `live`，缺省 `offline` | §12（`4dc42d5`） | §九十九 表 #5 |
+| 6 | `run_js` 树内软链 | 整轮 fail-closed（含 `in/evil.txt → /etc/passwd` 实测） | §12、§12.1（`85a3b5b`） | §九十九 表 #6 |
+| 7 | 附件交给执行层 | `fileParams` 单文件参数；输入恰好一个，输出宿主分配 `out/` | `docs/product/business-coverage.md:108`；`fab9e86` | §九十九 表 #7 |
+| 8 | 跨会话续办 | 不做；保持 `(principalId, sessionId)` 隔离 | `docs/product/business-coverage.md:111`；`23ae585` | §九十九 表 #8 |
+| 9 | Codex PR 复核 | 四轮缺陷：路径/取消/执行事实/超时+接线；第 4 批待合 | §12/§12.1；`d2efdb1`…`af01a20` | §九十九 §2 |
