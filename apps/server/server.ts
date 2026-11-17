@@ -565,20 +565,36 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       };
     }).then(
       (result) => {
-        log({
-          event: 'message_done',
-          principalId,
-          sessionId,
-          messageId: message.messageId,
-          taskIds: [...result.turn.taskIds],
-          executions: result.turn.executions.map((execution) => ({
-            requestId: execution.requestId,
-            operation: execution.operation,
-            status: execution.status,
-          })),
-          ...(result.delivery !== undefined ? { fileDelivery: result.delivery } : {}),
-          ...(result.manifestBytes === undefined ? {} : { fileManifestBytes: result.manifestBytes }),
-        });
+        // 回合已成功（回复定型）：message_done 写失败不得翻转结果——只降级为一条独立观测
+        // 事件；观测事件也写不进（logger 持续抛错）时同样到此为止，回复照常返回。
+        try {
+          log({
+            event: 'message_done',
+            principalId,
+            sessionId,
+            messageId: message.messageId,
+            taskIds: [...result.turn.taskIds],
+            executions: result.turn.executions.map((execution) => ({
+              requestId: execution.requestId,
+              operation: execution.operation,
+              status: execution.status,
+            })),
+            ...(result.delivery !== undefined ? { fileDelivery: result.delivery } : {}),
+            ...(result.manifestBytes === undefined ? {} : { fileManifestBytes: result.manifestBytes }),
+          });
+        } catch (logError) {
+          try {
+            log({
+              event: 'message_done_log_write_failed',
+              principalId,
+              sessionId,
+              messageId: message.messageId,
+              message: logError instanceof Error ? logError.message : String(logError),
+            });
+          } catch {
+            // 观测事件写也失败：无第二观测面可用；回合结果已成立，不翻转、不改写话术。
+          }
+        }
         return result.reply;
       },
       (error: unknown) => {
