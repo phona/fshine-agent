@@ -150,13 +150,6 @@ const FILE_DELIVERY_FAILED_NOTE = '文件未送达（投递失败，请重试或
 const RECALC_DELIVERY_GATED_NOTE = '部分表格未通过公式实算校验，未予发送（请确认表格已重算校验后再试）';
 /** 混合批次（部分投递成功、部分被闸拦）时的如实话术：不让用户误以为全部送达。 */
 const RECALC_DELIVERY_PARTIAL_NOTE = '部分表格未通过公式实算校验，未予发送；其余文件已发送';
-/** 无法可靠判断（公式形态认不出/解析异常）时给用户的可读反馈。 */
-const RECALC_UNVERIFIABLE_NOTE = '这份表里有部分内容目前无法可靠校验，为避免给你错数据，这次先不发送。建议用 Excel 打开确认后重试，或让执行层交付不含复杂公式的纯数据表。';
-
-/** 按闸门 reason 选用户看得懂的话术（不暴露内部枚举/形态术语）。 */
-function recalcGateNote(gated: ReadonlyArray<{ reason: string }>, fallback: string): string {
-  return gated.some((g) => g.reason === 'unverifiable') ? RECALC_UNVERIFIABLE_NOTE : fallback;
-}
 
 /**
  * 入站附件上限（20MB，2026-11-17 CAP-01 owner 裁决：100MB 必 OOM，实测 1.1MB 文件处理
@@ -479,7 +472,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     // 所有待投递项都被闸拦下：不发空批、如实告知（fail-closed；非渠道投递失败，不记 sent）。
     if (files === 0 && gate.gated.length > 0) {
       log({ event: 'file_delivery', ...base, files: 0, status: 'recalc_gated' });
-      return { status: 'recalc_gated', files: 0, note: recalcGateNote(gate.gated, RECALC_DELIVERY_GATED_NOTE) };
+      return { status: 'recalc_gated', files: 0, note: RECALC_DELIVERY_GATED_NOTE };
     }
     let receipt: DeliveryReceipt;
     try {
@@ -525,7 +518,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     return {
       status: 'sent',
       files,
-      ...(gate.gated.length > 0 ? { note: recalcGateNote(gate.gated, RECALC_DELIVERY_PARTIAL_NOTE) } : {}),
+      ...(gate.gated.length > 0 ? { note: RECALC_DELIVERY_PARTIAL_NOTE } : {}),
     };
   };
 

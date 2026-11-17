@@ -639,17 +639,14 @@ export function createSofficeRecalcEngine(options: SofficeEngineOptions = {}): R
 // CSV 行为逐字节不变。挂点在 server.deliverTurnFiles 读字节处（recalc 报告在独立 runDir、
 // 可能晚于 run-js out/ 扫描产生，见 decision-log §九十九）；缺省未注入 recalc 执行器 = 不启用。
 
-/** 闸门判定原因（结构化事件 reason；不得改名）。 */
+/**
+ * 闸门判定原因（结构化事件 reason）。
+ * 报告驱动后只有三种结果：pass 放行 / fail 拦截 / 无报告（执行层数据）放行。
+ */
 export const RECALC_DELIVERY_GATE_STATUS = {
   PASS: 'pass',
-  NO_FORMULAS: 'no_formulas',
-  CSV_DATA: 'csv_data',
-  NOT_XLSX: 'not_xlsx',
-  REPORT_MISSING: 'report_missing',
   REPORT_FAIL: 'report_fail',
-  REPORT_MISMATCH: 'report_mismatch',
-  /** 无法可靠判断（公式形态认不出 / 解析异常）——不静默放行，停下交用户确认。 */
-  UNVERIFIABLE: 'unverifiable',
+  NO_REPORT: 'no_report',
 } as const;
 export type RecalcDeliveryGateReason =
   (typeof RECALC_DELIVERY_GATE_STATUS)[keyof typeof RECALC_DELIVERY_GATE_STATUS];
@@ -668,28 +665,14 @@ export interface RecalcDeliveryDecision {
 }
 
 /**
- * 工作簿公式识别（三态，fail-closed）。
+ * 工作簿公式形态识别 —— **仅执行器内部使用**（recalc 时判断源表有没有它无法可靠处理的形态）。
  *
- * 关键纪律：**「认不出」不等于「没有」**。旧版返回 boolean，任何 exceljs 不认识的形态
- * （数组公式 follower 被读成字符串/`{result}`/null、解析异常）都被当成「无公式」放行——
- * 这就是投毒缓存绕门的根因。现在认不出就返回 uncertain，投递门据此拒绝并给可读反馈。
- * 共享公式从属格 LO 归一化后会展开成普通公式，这里两种形态都识别（兼容未归一化的输入）。
+ * 投递门不调用本函数：门按「来源 + 可信报告」判定（owner 职责边界裁定），不打开任意 xlsx
+ * 去猜内容。认不出就返回 uncertain，执行器据此拒绝盖章（unsupported_formula）。
  */
 export type FormulaScan = { hasFormulas: boolean } | { uncertain: true };
 
-export async function scanFormulas(bytes: Buffer): Promise<FormulaScan> {
-  let wb: ExcelJS.Workbook;
-  try {
-    assertWorkbookExpandedSize(bytes);
-    wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(bytes as unknown as ExcelJS.Buffer);
-  } catch {
-    return { uncertain: true };
-  }
-  return scanWorkbookFormulas(wb);
-}
-
-/** 同步版：调用方已 load 好 workbook 时用（执行器侧复用）。 */
+/** 调用方已 load 好 workbook 时用（执行器侧复用）。 */
 export function scanWorkbookFormulas(wb: ExcelJS.Workbook): FormulaScan {
   let found = false;
   let uncertain = false;
@@ -719,17 +702,6 @@ export function scanWorkbookFormulas(wb: ExcelJS.Workbook): FormulaScan {
   return { hasFormulas: found };
 }
 
-/** 兼容旧调用（返回 boolean）：仅用于非判定场景；判定请用 scanFormulas 的三态。 */
-export async function xlsxHasFormulas(bytes: Buffer): Promise<boolean> {
-  const scan = await scanFormulas(bytes);
-  return 'hasFormulas' in scan ? scan.hasFormulas : false; // 兼容旧语义：读不动=无公式
-}
-
-function looksLikeXlsx(name: string, bytes: Buffer): boolean {
-  // 扩展名 + ZIP 魔数（PK\x03\x04）双判据；避免把 CSV/文本误当 xlsx 读。
-  return name.toLowerCase().endsWith('.xlsx') && bytes.length >= 4
-    && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
-}
 
 /** 从会话 runs 目录收集所有实算报告绑定（坏报告跳过；不递归越界、不读成分）。 */
 export function collectRecalcReports(workspaceRoot: string, scope: FileScope): RecalcReportBinding[] {
@@ -770,35 +742,26 @@ export function collectRecalcReports(workspaceRoot: string, scope: FileScope): R
 }
 
 /**
- * 单个待投递项判定。reports 里须有 name + sha256 双匹配且 status=pass 的报告才放行。
+ * 投递判定（完全报告驱动，不解析文件内容）。
+ *
+ * owner 职责边界：执行层交付无公式数据、公式工程只归 Main 的 recalc_xlsx。
+ * 因此这里只问一个问题：**这份文件有没有本流程可信的实算报告？**
+ *   · 有报告（name + sha256 双匹配）→ 按 pass / fail 决定投递；
+ *   · 无报告 → 放行（执行层交付的无公式数据，按边界信任）。
+ *
+ * 绝不打开 xlsx 去猜「它含不含公式」——那是打地鼠根源，且把一个生产者自检工具误用成了
+ * 任意外部文件的安全门。Builder 自检由执行器内部的 scanWorkbookFormulas 负责，不在此处。
  */
-export async function decideRecalcDelivery(input: {
+export function decideRecalcDelivery(input: {
   bytes: Buffer;
   name: string;
   reports: readonly RecalcReportBinding[];
-}): Promise<RecalcDeliveryDecision> {
-  if (!looksLikeXlsx(input.name, input.bytes)) {
-    return { deliver: true, reason: input.name.toLowerCase().endsWith('.csv')
-      ? RECALC_DELIVERY_GATE_STATUS.CSV_DATA
-      : RECALC_DELIVERY_GATE_STATUS.NOT_XLSX };
-  }
-  const scan = await scanFormulas(input.bytes);
-  if ('uncertain' in scan) {
-    // 认不出 = 无法核验：不静默降级为「无公式」，停下交用户确认（B 类如实交付）。
-    return { deliver: false, reason: RECALC_DELIVERY_GATE_STATUS.UNVERIFIABLE };
-  }
-  if (!scan.hasFormulas) {
-    return { deliver: true, reason: RECALC_DELIVERY_GATE_STATUS.NO_FORMULAS };
-  }
+}): RecalcDeliveryDecision {
   const digest = createHash('sha256').update(input.bytes).digest('hex');
   const matching = input.reports.filter((r) => r.name === input.name && r.sha256 === digest);
   if (matching.length === 0) {
-    // 区分「同名但 sha 不同」（mismatch）与「完全没有该文件的报告」（missing）。
-    const sameName = input.reports.some((r) => r.name === input.name);
-    return {
-      deliver: false,
-      reason: sameName ? RECALC_DELIVERY_GATE_STATUS.REPORT_MISMATCH : RECALC_DELIVERY_GATE_STATUS.REPORT_MISSING,
-    };
+    // 无报告 = 执行层交付的数据文件（边界内信任），照常投递。
+    return { deliver: true, reason: RECALC_DELIVERY_GATE_STATUS.NO_REPORT };
   }
   if (!matching.some((r) => r.status === 'pass')) {
     return { deliver: false, reason: RECALC_DELIVERY_GATE_STATUS.REPORT_FAIL };
@@ -821,7 +784,7 @@ export async function applyRecalcDeliveryGate(input: {
   const outgoing: Array<{ name: string; bytes: Buffer }> = [];
   const gated: Array<{ name: string; sha256: string; reason: RecalcDeliveryGateReason }> = [];
   for (const file of input.files) {
-    const decision = await decideRecalcDelivery({ bytes: file.bytes, name: file.name, reports: input.reports });
+    const decision = decideRecalcDelivery({ bytes: file.bytes, name: file.name, reports: input.reports });
     if (decision.deliver) {
       outgoing.push(file); // 同一 Buffer 引用：逐字节不变
     } else {
