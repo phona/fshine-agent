@@ -28,11 +28,14 @@
  *        ② 产物回 Main：主动投递端口收到产物；按 sha256 对回 file_refs 行——该行是新
  *          fileId（≠ 入站 fileId、≠ 交办副本 fileId）、task_id 绑定（Worker 产物面）；
  *        ③ 产物内容与预期逐格一致（同 S1 的 Oracle 重解析）；
- *        ④ 行数据不出现在任何工具参数与转录里 —— 对 24 个销售额原值逐个做「词边界」grep：
- *          覆盖 Main/Worker 全部工具调用参数与结果、Main/Worker 驱动回合输入（含清单注入/
- *          委派文本）与输出转录、Main 最终转录。金额是 6 位数字，为排除 fileId/runId/时间戳
- *          等机械十六进制或连续数字的子串误报，grep 带 alnum 边界（前后不得是字母数字）——
- *          真实泄漏（自然文本/JSON 值/代码字面量）一定带边界，ID 碰撞一定不带。
+ *        ④ 行数据不出现在 **Main** 的工具参数与转录里（2026-11-17 口径收窄：设计约束是
+ *          行数据不进 Main 上下文；Worker 经 run_js 读行数据是设计行为，不计入红）——
+ *          对 24 个销售额原值逐个做「词边界」grep：覆盖 Main 全部工具调用参数与结果、
+ *          Main 驱动回合输入（含清单注入/委派文本）与输出转录。Worker 面的命中数写进
+ *          detail 作信息（「worker 面命中 N 处，按设计不计入」），供人看、不判红。金额是
+ *          6 位数字，为排除 fileId/runId/时间戳等机械十六进制或连续数字的子串误报，grep
+ *          带 alnum 边界（前后不得是字母数字）——真实泄漏（自然文本/JSON 值/代码字面量）
+ *          一定带边界，ID 碰撞一定不带。Main 面覆盖下限 >= 4 保留（空扫描不许假绿）。
  *
  * 模型口径：产品侧（Main/Worker Pi 驱动）用真实模型 step-3.7-flash（与历史批次同源：
  * config/agent.fixture.yaml + .env 的 LLM_*；记录 env 请求名与转录 assistant.model 实际名）。
@@ -72,6 +75,7 @@ import { contextWindowFrom, compactionSettingsFrom } from '../../ask-runtime';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import { createServer, type FileDeliveryPort } from '../../../apps/server/server';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
+import { rowDataLeakDetail, scanRowDataLeakage } from './row-data-scan';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
@@ -570,24 +574,6 @@ function textOf(reply: ChannelReply): string {
   return typeof reply === 'string' ? reply : reply.text ?? '';
 }
 
-/** 行数据泄漏 grep（S3 ④）：alnum 边界包裹的值才算命中——ID/时间戳的子串碰撞不算。 */
-export function findDataLeaks(values: readonly string[], surfaces: ReadonlyArray<{ name: string; text: string }>): string[] {
-  const hits: string[] = [];
-  for (const value of values) {
-    const pattern = new RegExp(`(?<![0-9A-Za-z])${value}(?![0-9A-Za-z])`);
-    for (const surface of surfaces) {
-      if (pattern.test(surface.text)) {
-        hits.push(`${surface.name} 含原值 ${value}`);
-      }
-    }
-  }
-  return hits;
-}
-
-function serializeSurface(value: unknown): string {
-  return JSON.stringify(value);
-}
-
 // ── 三场景 ──────────────────────────────────────────────────────────────────
 
 const S1_INSTRUCTION =
@@ -870,19 +856,11 @@ async function runScenarioS3(scripted: boolean): Promise<ScenarioOutcome> {
     checks.check('s3-artifact-cell-by-cell', false, handlerError !== undefined ? `回合失败无产物：${handlerError}` : '交付面没有任何文件可解析');
   }
 
-  // ④ 行数据不出现在任何工具参数与转录里。
-  const surfaces: Array<{ name: string; text: string }> = [];
-  for (const call of harness.sink.calls) {
-    surfaces.push({ name: `tool-args(${call.agent}#${call.seq}:${call.tool})`, text: serializeSurface(call.args) });
-    surfaces.push({ name: `tool-result(${call.agent}#${call.seq}:${call.tool})`, text: serializeSurface(call.result) });
-  }
-  for (const run of harness.sink.runs) {
-    surfaces.push({ name: `driver-run-input(${run.agent})`, text: serializeSurface({ systemPrompt: run.systemPrompt, messages: run.messages, injections: run.injections }) });
-    surfaces.push({ name: `driver-run-transcript(${run.agent})`, text: serializeSurface(run.resultMessages) });
-  }
-  const leaks = findDataLeaks(RAW_VALUE_STRINGS, surfaces);
-  // 覆盖硬性要求：0 个面 = 证据面缺失，检查本身不可信（不许以「没扫到」冒充通过）。
-  checks.check('s3-no-row-data-in-params-or-transcript', leaks.length === 0 && surfaces.length >= 4, leaks.length > 0 ? leaks.slice(0, 10).join('；') : `已扫 ${surfaces.length} 个面（工具参数/结果 + 驱动输入/转录），24 个销售额原值零命中`);
+  // ④ 行数据不出现在 Main 的工具参数与转录里（口径 2026-11-17：只判 Main 面）。
+  // Worker 经 run_js 读行数据是设计行为：Worker 面命中数只作信息写进 detail，不判红；
+  // Main 面覆盖下限 >= 4 保留（收窄后不许变成空扫描假绿）。
+  const leakScan = scanRowDataLeakage(harness.sink.calls, harness.sink.runs, RAW_VALUE_STRINGS);
+  checks.check('s3-no-row-data-in-params-or-transcript', leakScan.pass, rowDataLeakDetail(leakScan, RAW_VALUE_STRINGS.length));
 
   const calls = harness.sink.runs.reduce((sum, run) => sum + assistantCount(run.resultMessages), 0);
   if (handlerError !== undefined) notes.push(`handler 抛错：${handlerError}`);
@@ -903,7 +881,8 @@ async function runScenarioS3(scripted: boolean): Promise<ScenarioOutcome> {
       fileRefs: fileRows,
       taskRows,
       parsedArtifacts: parsedList,
-      leakScanSurfaces: surfaces.length,
+      leakScanSurfaces: leakScan.mainSurfaceCount,
+      leakScanWorkerHits: leakScan.workerHits.length,
       expectedGrid: EXPECTED_GRID,
     },
   };
