@@ -571,12 +571,17 @@ export function renderWorkerFileManifest(files: readonly TurnFileRef[]): string 
   ].join('\n');
 }
 
-/** 委派块：任务原文 + 能力快照（只含允许集合）+ 任务文件清单（可选）+ 领域技能正文。 */
+/**
+ * 委派块：任务原文 + 能力快照（只含允许集合）+ 任务文件清单（可选）+ 领域技能正文；
+ * `answer` = 用户对上一次待办问题的补答（waiting_user 续跑回合），原文交给 Worker——
+ * 每个后台回合都是新 Worker（不带上一回合转录），补答不随委派交给执行端就等于丢失。
+ */
 export function renderWorkerDelegation(input: {
   task: string;
   manifest: CapabilityManifest;
   skills?: readonly WorkerSkill[];
   files?: readonly TurnFileRef[];
+  answer?: string;
 }): string {
   const parts = [
     '## 本次任务（宿主委派）',
@@ -587,6 +592,9 @@ export function renderWorkerDelegation(input: {
     JSON.stringify(input.manifest, null, 2),
     '```',
   ];
+  if (input.answer !== undefined && input.answer.trim() !== '') {
+    parts.push('', '## 用户补充（对上一次待办问题的答复）', input.answer);
+  }
   if (input.files !== undefined && input.files.length > 0) {
     parts.push('', renderWorkerFileManifest(input.files));
   }
@@ -1805,6 +1813,8 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
             task: task.request,
             manifest: workerManifest,
             ...(options.workerSkills === undefined ? {} : { skills: options.workerSkills }),
+            // waiting_user 续跑回合：用户补答必须随委派交给执行端（新 Worker 没有上一回合转录）。
+            ...(task.answer === undefined ? {} : { answer: task.answer }),
           }))],
           onStep: () => {},
           exec,
