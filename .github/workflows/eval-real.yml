@@ -59,8 +59,8 @@ jobs:
         id: trials
         run: |
           echo "n=${{ github.event_name == 'pull_request' && 5 || 1 }}" >> "$GITHUB_OUTPUT"
-          # 并发 3：每个 trial 自带 state/db/config 目录，互不干扰；供应商账号并发上限 8，留余量。
-          echo "c=${{ github.event_name == 'pull_request' && 3 || 1 }}" >> "$GITHUB_OUTPUT"
+          # 并发 5（owner 定）：每个 trial 自带 state/db/config 目录，互不干扰；供应商上限 8。
+          echo "c=5" >> "$GITHUB_OUTPUT"
 
       - name: Run user-level eval (12 cases × ${{ steps.trials.outputs.n }} trial(s), evidence kept)
         run: |

@@ -58,7 +58,7 @@ interface CliArgs {
   cases: string[];
   trial?: number;
   trials: number;
-  /** 并发跑的 trial 数（缺省 1 = 串行；每个 trial 自带 state/db/config 目录，互不干扰）。 */
+  /** 并发跑的 trial 数（缺省 5；每个 trial 自带 state/db/config 目录，互不干扰）。 */
   concurrency: number;
   outDir?: string;
   suite?: string;
@@ -67,7 +67,7 @@ interface CliArgs {
 }
 
 function parseArgs(argv: readonly string[]): CliArgs | { usageError: string } {
-  const args: CliArgs = { cases: [], trials: 1, concurrency: 1, judgeSelftest: false };
+  const args: CliArgs = { cases: [], trials: 1, concurrency: 5, judgeSelftest: false };
   const readValue = (index: number, flag: string): string | { error: string } => {
     const value = argv[index + 1];
     if (value === undefined || value.startsWith('--')) return { error: `${flag} 需要一个值` };
@@ -646,7 +646,7 @@ async function main(): Promise<void> {
   writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 
   const results: RunTrialResult[] = [];
-  // 有界并发（2026-11-17）：每个 trial 自带 state/db/config 目录，互不干扰；缺省 1 = 原样串行。
+  // 有界并发（2026-11-17）：每个 trial 自带 state/db/config 目录，互不干扰；缺省 5（owner 定），传 --concurrency 1 回到串行。
   const jobs = selected.flatMap((caseDef) => trials.map((trial) => ({ caseDef, trial })));
   const slots: Array<RunTrialResult | undefined> = new Array(jobs.length);
   let nextJob = 0;
