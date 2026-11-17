@@ -53,6 +53,12 @@ import { ToolUserError } from './driver-contract';
 import { FileRefUnavailableError, safeExtensionOf, type CopiedTaskInput, type TaskInputCopier } from './file-store';
 export type { TaskInputCopier } from './file-store';
 import type { RunJsExecutor, RunJsOutput } from './run-js-executor';
+// 布局收窄的确定性失败面：零 import 模块（runtime 不触 spawn——import 图守卫钉住）。
+import {
+  RUN_JS_LAYOUT_UNSAFE_MESSAGE,
+  RunJsLayoutUnsafeError,
+  type RunJsLayoutUnsafeEvent,
+} from './run-js-layout';
 // 执行层文件桥（CAP-01 S2 ②③④）：装配层构造注入；runtime 只认端口形状（type-only），
 // 不持平台路径——翻译/物化/登记/兜底的本体都在桥与 fileStore，runtime 只决定何时调用。
 import type { TaskExecutionBridge, TaskExecutionBridgeFactory } from './task-file-bridge';
@@ -260,6 +266,17 @@ export function runJsMemoryExitOf(output: RunJsOutput): Omit<RunJsMemoryExitEven
   };
 }
 
+/**
+ * 布局不安全的结构化事件（symlink 收窄；**只进日志**，不进用户话术）：runId + 哪一项 +
+ * 实际类型（executor 机械事实）+ side/taskId（运行时定位）。用户话术统一为
+ * RUN_JS_LAYOUT_UNSAFE_MESSAGE（确定性失败，零产物）。
+ */
+export interface RunJsLayoutUnsafeReport extends RunJsLayoutUnsafeEvent {
+  readonly side: 'main' | 'worker';
+  /** Worker 面才有任务归属。 */
+  readonly taskId?: string;
+}
+
 /** Worker 唯一工具名：结构化执行入口（宿主生成 requestId，模型只给 operation + args）。 */
 export const EXECUTE_OPERATION_TOOL = 'execute_operation';
 export const EXECUTE_OPERATION_TOOL_DESCRIPTION =
@@ -418,6 +435,13 @@ export interface RuntimeOptions {
    * 「是哪次」。缺省静默（不影响回合；用户话术与工具结果仍按判据统一）。
    */
   onRunJsMemoryExit?: (event: RunJsMemoryExitEvent) => void;
+  /**
+   * CAP-01 symlink 收窄：run_js 运行目录布局不安全的结构化事件（**只进日志**，不进用户话术）。
+   * 执行器检测到 runDir/in/out/scratch/home/tmp 任一存在但不是真目录（软链/普通文件等）
+   * 即拒跑——脚本零执行、run.cjs 不写、零产物；用户话术统一为
+   * RUN_JS_LAYOUT_UNSAFE_MESSAGE（本回合失败），由 ToolUserError 直接终结，不经模型改写。
+   */
+  onRunJsLayoutUnsafe?: (event: RunJsLayoutUnsafeReport) => void;
   /**
    * CAP-01 S1 清单注入（机械事实，与 taskFactProvider 同机制）：装配层提供本会话已激活
    * （activated_at IS NOT NULL，TTL 内）文件清单——字段只有 fileId/name/bytes（渲染见
@@ -930,6 +954,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         options.onFileRefUnavailable?.(error.reason);
         throw new Error(FILE_INPUT_UNAVAILABLE_MESSAGE);
       }
+      if (error instanceof RunJsLayoutUnsafeError) {
+        // 布局收窄（symlink）：机械事实（哪一项/类型/runId）进结构化事件；用户只见确定性
+        // 失败话术——ToolUserError 由 driver 直接作为最终回复（本回合失败，零产物）。
+        options.onRunJsLayoutUnsafe?.({ ...error.event, side: 'main' });
+        throw new ToolUserError(RUN_JS_LAYOUT_UNSAFE_MESSAGE);
+      }
       throw error;
     }
     memo.set(memoKey, output);
@@ -1020,6 +1050,11 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         // 机械 reason 只进日志；模型与用户只见统一话术（防存在性 oracle，v8 §4）。
         options.onFileRefUnavailable?.(error.reason);
         throw new Error(FILE_INPUT_UNAVAILABLE_MESSAGE);
+      }
+      if (error instanceof RunJsLayoutUnsafeError) {
+        // 布局收窄（symlink）：与 Main 同一确定性失败话术；Worker 面附任务归属进日志。
+        options.onRunJsLayoutUnsafe?.({ ...error.event, side: 'worker', taskId });
+        throw new ToolUserError(RUN_JS_LAYOUT_UNSAFE_MESSAGE);
       }
       throw error;
     }

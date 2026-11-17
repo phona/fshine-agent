@@ -19,9 +19,10 @@
  * file_id + 安全扩展名机械拼出；用户可见 name 只活在 file_refs 行里——路径不可由
  * name 拼出，name 里的 `..`/`/` 注入路径在结构上不可能。
  *
- * 登记纪律（v8 §3）：扫 out/ 只收普通文件——lstat 拒 symlink（含 symlink 目录，不递归）、
- * fd 上的 fstat 拒 hardlink（nlink!==1）与外来 uid、大小/份数上限；**从同一个 fd** 流式
- * 读字节做 copy-on-register（新 fileId + sha256），原件字节不动、sha256 前后不变。
+ * 登记纪律（v8 §3）：扫 out/ 只收普通文件——dirent 拒 symlink（含 symlink 目录，不递归）、
+ * 候选再按 realpath 包含校验（真实路径不在 runDir 内即跳过，不交付/不登记）；fd 上的 fstat
+ * 拒 hardlink（nlink!==1）与外来 uid、大小/份数上限；**从同一个 fd** 流式读字节做
+ * copy-on-register（新 fileId + sha256），原件字节不动、sha256 前后不变。
  * open 用 O_NOFOLLOW：走查后路径被换成 symlink → ELOOP，按拒收处理（TOCTOU 收窄到 fd）。
  *
  * 解析作用域（CAP-01 S2，v8 §4）：所有读路径都带解析侧——Main 只解析 task_id IS NULL 的
@@ -37,11 +38,11 @@ import {
   copyFileSync,
   existsSync,
   fstatSync,
-  lstatSync,
   mkdirSync,
   openSync,
   readSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
   writeSync,
@@ -167,7 +168,11 @@ export interface CopiedTaskInput {
 export interface SkippedOutput {
   /** out/ 相对路径。 */
   name: string;
-  /** 机械拒收原因（symlink/linked/foreign_uid/size_limit/count_limit/not_regular_file/symlink_or_gone）。 */
+  /**
+   * 机械拒收原因：
+   * symlink / linked / foreign_uid / size_limit / count_limit / not_regular_file /
+   * symlink_or_gone / outside_run_dir（realpath 不在 runDir 内——目录项被换成软链等）。
+   */
   reason: string;
 }
 
@@ -319,31 +324,53 @@ function newFileId(): string {
 export function createFileStore(options: { store: TaskStore; workspaceRoot: string }): FileStore {
   const { store, workspaceRoot } = options;
 
+  /** 严格包含判定（realpath 之后用；与 skills.ts 的 isInside 同语义）。 */
+  function isInside(root: string, candidate: string): boolean {
+    const relative = path.relative(root, candidate);
+    return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  }
+
   /**
-   * 走查 out/：lstat 不跟随——symlink 文件与 symlink 目录都直接不收、不递归（v8 §3）；
-   * 只收普通文件候选。候选按 relPath 全排序（跨目录确定性），count_limit 截尾因此可复现。
+   * 走查 out/：**dirent 类型位**不跟随——symlink 文件与 symlink 目录都直接不收、不递归；
+   * 只收普通文件候选。目录项被换成软链等竞态下，dirent 可能仍报普通文件——每个候选再按
+   * `realpathSync` 做包含校验：真实路径必须严格位于 `realpathSync(runDir)` 之内，否则跳过
+   * 并记 `outside_run_dir`（不交付、不登记）。候选按 relPath 全排序（跨目录确定性），
+   * count_limit 截尾因此可复现。
    */
-  function collectCandidates(outDir: string): {
+  function collectCandidates(outDir: string, realRunDir: string): {
     candidates: Array<{ relPath: string; absPath: string }>;
     skipped: SkippedOutput[];
   } {
     const candidates: Array<{ relPath: string; absPath: string }> = [];
     const skipped: SkippedOutput[] = [];
     const walk = (dir: string, rel: string): void => {
-      for (const entry of readdirSync(dir)) {
-        const absPath = path.join(dir, entry);
-        const relPath = rel === '' ? entry : `${rel}/${entry}`;
-        const st = lstatSync(absPath);
-        if (st.isSymbolicLink()) {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const absPath = path.join(dir, entry.name);
+        const relPath = rel === '' ? entry.name : `${rel}/${entry.name}`;
+        if (entry.isSymbolicLink()) {
           skipped.push({ name: relPath, reason: 'symlink' }); // 不收、不递归
           continue;
         }
-        if (st.isDirectory()) {
+        if (entry.isDirectory()) {
           walk(absPath, relPath);
           continue;
         }
-        if (st.isFile()) candidates.push({ relPath, absPath });
-        // 其它（fifo/socket/device）一律不收
+        if (!entry.isFile()) continue; // fifo/socket/device/未知类型：一律不收
+        // realpath 包含校验（防御纵深）：候选的真实路径必须仍在 runDir 的真实路径之内。
+        // runDir 自身也可能经过软链（如 /tmp → /private/tmp）——两边都取 realpath 再比，
+        // 不做字符串前缀比较（'..' 与符号链接都不会被误放行）。
+        let realCandidate: string;
+        try {
+          realCandidate = realpathSync(absPath);
+        } catch {
+          skipped.push({ name: relPath, reason: 'symlink_or_gone' });
+          continue;
+        }
+        if (!isInside(realRunDir, realCandidate)) {
+          skipped.push({ name: relPath, reason: 'outside_run_dir' });
+          continue;
+        }
+        candidates.push({ relPath, absPath });
       }
     };
     walk(outDir, '');
@@ -596,7 +623,15 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
       const outputs: RegisteredFile[] = [];
       const skipped: SkippedOutput[] = [];
       if (!existsSync(outDir)) return { outputs, skipped };
-      const { candidates, skipped: walkSkipped } = collectCandidates(outDir);
+      // 包含校验的基准 = runDir 的真实路径；取不到（异常布局/权限）即 fail closed：
+      // 不枚举、不登记、不交付。
+      let realRunDir: string;
+      try {
+        realRunDir = realpathSync(runDir);
+      } catch {
+        return { outputs, skipped };
+      }
+      const { candidates, skipped: walkSkipped } = collectCandidates(outDir, realRunDir);
       skipped.push(...walkSkipped);
       for (const candidate of candidates) {
         if (outputs.length >= limits.maxCount) {

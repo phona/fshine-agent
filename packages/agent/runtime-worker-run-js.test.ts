@@ -31,10 +31,16 @@ import {
   createSession,
   type Session,
   type TaskInputCopier,
+  type RunJsLayoutUnsafeReport,
 } from './src/execution-runtime';
-import { createRunJsExecutor, type RunJsExecutor } from './src/run-js-executor';
+import {
+  createRunJsExecutor,
+  RUN_JS_LAYOUT_UNSAFE_MESSAGE,
+  RunJsLayoutUnsafeError,
+  type RunJsExecutor,
+} from './src/run-js-executor';
 import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
-import type { DriverMessage, TurnDriver, TurnDriverResult } from './src/driver-contract';
+import { ToolUserError, type DriverMessage, type TurnDriver, type TurnDriverResult } from './src/driver-contract';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const NODE_MODULES = path.join(REPO_ROOT, 'node_modules');
@@ -110,6 +116,8 @@ interface WorkerCapture {
   delegationTexts: string[];
   results: unknown[];
   toolErrors: string[];
+  /** 原始异常对象（判 ToolUserError 等类型的确定性面）。 */
+  toolErrorObjects: unknown[];
 }
 
 /**
@@ -134,6 +142,7 @@ function scriptedWorkerDriver(capture: WorkerCapture): { driver: TurnDriver; pus
           capture.results.push(await input.exec(call.tool, args));
         } catch (error) {
           capture.toolErrors.push(error instanceof Error ? error.message : String(error));
+          capture.toolErrorObjects.push(error);
         }
       }
       const message = {
@@ -166,18 +175,31 @@ interface Fixture {
   close(): void;
 }
 
-async function makeFixture(input: { withRunJsExecutor?: boolean } = {}): Promise<Fixture> {
+async function makeFixture(input: {
+  withRunJsExecutor?: boolean;
+  /** 测试替身执行器（布局不安全用例；缺省 = 真实受限执行器）。 */
+  executor?: RunJsExecutor;
+  onRunJsLayoutUnsafe?: (event: RunJsLayoutUnsafeReport) => void;
+} = {}): Promise<Fixture> {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'runtime-worker-run-js-'));
   tempDirs.push(dir);
   const dbPath = path.join(dir, 'state.db');
   const registry = createSqliteTaskRegistry(dbPath);
   const fileStore = createFileStore({ store: registry.store, workspaceRoot: path.join(dir, 'workspace') });
-  const runJsExecutor: RunJsExecutor | undefined = input.withRunJsExecutor === false
-    ? undefined
-    : createRunJsExecutor({ fileStore, nodeModulesDir: NODE_MODULES, timeoutMs: 30_000 });
+  const runJsExecutor: RunJsExecutor | undefined = input.executor
+    ?? (input.withRunJsExecutor === false
+      ? undefined
+      : createRunJsExecutor({ fileStore, nodeModulesDir: NODE_MODULES, timeoutMs: 30_000 }));
   const mainCapture: MainCapture = { toolNames: [], results: [], toolErrors: [] };
   const main = queueMainDriver(mainCapture);
-  const workerCapture: WorkerCapture = { toolNames: [], prompts: [], delegationTexts: [], results: [], toolErrors: [] };
+  const workerCapture: WorkerCapture = {
+    toolNames: [],
+    prompts: [],
+    delegationTexts: [],
+    results: [],
+    toolErrors: [],
+    toolErrorObjects: [],
+  };
   const worker = scriptedWorkerDriver(workerCapture);
   const reasons: string[] = [];
   const copier: TaskInputCopier = fileStore;
@@ -192,6 +214,7 @@ async function makeFixture(input: { withRunJsExecutor?: boolean } = {}): Promise
     taskRegistry: registry,
     taskInputCopier: copier,
     ...(runJsExecutor === undefined ? {} : { runJsExecutor }),
+    ...(input.onRunJsLayoutUnsafe === undefined ? {} : { onRunJsLayoutUnsafe: input.onRunJsLayoutUnsafe }),
     onFileRefUnavailable: (reason) => reasons.push(reason),
   });
   return {
@@ -430,6 +453,36 @@ describe('CAP-01 S2 ⑥ Worker 工具面门控', () => {
       fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '纯查询' } }], text: '完成。' });
       await fx.session.send('交办查询');
       expect(fx.worker.delegationTexts[0]).not.toContain('[本任务文件清单]');
+    } finally {
+      fx.ro.close();
+      fx.close();
+    }
+  });
+
+  it('布局不安全（Worker）：执行器拒跑 → ToolUserError 用户话术 + 事件 side=worker/taskId；零产物', async () => {
+    const events: RunJsLayoutUnsafeReport[] = [];
+    const failingExecutor: RunJsExecutor = {
+      async runJs() {
+        throw new RunJsLayoutUnsafeError({ runId: 'run_fedcba9876543210fedcba9876543210', item: 'scratch', kind: 'symlink' });
+      },
+    };
+    const fx = await makeFixture({
+      executor: failingExecutor,
+      onRunJsLayoutUnsafe: (event) => events.push(event),
+    });
+    try {
+      fx.workerPush({ execCalls: [{ tool: 'run_js', args: { code: 'console.log(1)' } }], text: '未能执行。' });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '跑一次代码' } }], text: '任务未执行。' });
+      const turn = await fx.session.send('交办');
+
+      const taskId = turn.taskIds[0]!;
+      expect(fx.worker.toolErrorObjects.at(-1)).toBeInstanceOf(ToolUserError);
+      expect(fx.worker.toolErrors.at(-1)).toBe(RUN_JS_LAYOUT_UNSAFE_MESSAGE);
+      expect(events).toEqual([
+        { runId: 'run_fedcba9876543210fedcba9876543210', item: 'scratch', kind: 'symlink', side: 'worker', taskId },
+      ]);
+      // 零产物：本任务没有任何 file_refs 行。
+      expect(fx.ro.listFileRefs(SCOPE).filter((row) => row.taskId === taskId)).toEqual([]);
     } finally {
       fx.ro.close();
       fx.close();
