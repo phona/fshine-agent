@@ -45,6 +45,11 @@ import {
   type RegisteredFile,
 } from '../../packages/agent/src/file-store';
 import { createRunJsExecutor, type RunJsExecutor } from '../../packages/agent/src/run-js-executor';
+import {
+  createRecalcXlsxExecutor,
+  createSofficeRecalcEngine,
+  type RecalcXlsxExecutor,
+} from '../../packages/agent/src/recalc-xlsx-executor';
 import { FILES_GENERATED_NOTICE, MAIN_PROTOCOL_NOTE, type Session, type TurnFileRef } from '../../packages/agent/src/execution-runtime';
 import {
   createNotificationOutbox,
@@ -105,6 +110,11 @@ export interface ServerDeps {
    * （Node 权限模型，见 run-js-executor.ts——runtime 不 spawn，spawn 归执行器）。
    */
   createRunJsExecutor?: (fileStore: FileStore) => RunJsExecutor;
+  /**
+   * 测试注入：recalc_xlsx 执行器工厂（装配构造、按 fileStore 闭包）；缺省 = 真实 soffice
+   * 引擎（PATH 可见且版本 26.8.3 才上工具面；缺失/版本不符 = fail-closed 不上工具）。
+   */
+  createRecalcXlsxExecutor?: (fileStore: FileStore) => RecalcXlsxExecutor | undefined;
   logger?: (line: Record<string, unknown>) => void;
 }
 
@@ -185,6 +195,19 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   // CAP-01 S1：run_js 执行器（装配构造；Node 权限模型的受限子进程，runtime 不 spawn）。
   const runJsExecutor = (deps.createRunJsExecutor ?? ((fileStoreRef: FileStore) =>
     createRunJsExecutor({ fileStore: fileStoreRef, nodeModulesDir: path.join(REPO_ROOT, 'node_modules') })))(fileStore);
+  // recalc_xlsx（Main 宿主面）：引擎 unavailable（无 soffice / 版本不符）即不构造执行器 →
+  // 工具面无 recalc_xlsx（fail-closed）；探测事实进结构化日志，不进用户话术。
+  const recalcXlsxExecutor = deps.createRecalcXlsxExecutor
+    ? deps.createRecalcXlsxExecutor(fileStore)
+    : (() => {
+        const engine = createSofficeRecalcEngine();
+        const executor = createRecalcXlsxExecutor({
+          fileStore,
+          engine,
+          onEngineEvent: (event) => log({ event: 'recalc_engine_probe', ...event }),
+        });
+        return executor.available ? executor : undefined;
+      })();
   /**
    * CAP-01 S1 清单注入（机械事实）：每回合开始由 runtime 取走本会话已激活（TTL 内）文件。
    * 只投影 fileId/name/bytes（listActiveFiles），不含内容/路径/sha256。
@@ -283,6 +306,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           // out/ 兜底扫描（unexecuted/failed 也扫，v8 §10-3）；dirParams 留空 = 当前执行层
           // 尚未声明目录参数，出站目录翻译随执行层声明开启（部署按其声明认知传入参数名）。
           runJsExecutor,
+          // recalc_xlsx：仅 Main 宿主面（Worker 面由 runtime 恒定不上）；引擎不可用则不注入。
+          ...(recalcXlsxExecutor === undefined ? {} : { recalcXlsxExecutor }),
           // CAP-01 ④：内存墙结构化事件（runId/side/bytes/exitCode/exitSignal/stderr 尾窗）——
           // 日志能查到是哪次、多大、怎么死的；用户话术同句由 runtime 出口统一。
           onRunJsMemoryExit: (event) => log({ event: 'run_js_memory_exit', principalId, sessionId, ...event }),

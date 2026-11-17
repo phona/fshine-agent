@@ -53,6 +53,13 @@ import { ToolUserError } from './driver-contract';
 import { FileRefUnavailableError, safeExtensionOf, type CopiedTaskInput, type TaskInputCopier } from './file-store';
 export type { TaskInputCopier } from './file-store';
 import type { RunJsExecutor, RunJsOutput } from './run-js-executor';
+import type { RecalcXlsxExecutor } from './recalc-xlsx-executor';
+export type {
+  RecalcXlsxExecutor,
+  RecalcXlsxResult,
+  RecalcXlsxInput,
+  RecalcErrorCode,
+} from './recalc-xlsx-executor';
 // 布局收窄的确定性失败面：零 import 模块（runtime 不触 spawn——import 图守卫钉住）。
 import {
   RUN_JS_LAYOUT_UNSAFE_MESSAGE,
@@ -224,6 +231,29 @@ export const RUN_JS_TOOL_SCHEMA: Record<string, unknown> = {
     },
   },
   required: ['code'],
+  additionalProperties: false,
+};
+
+/**
+ * recalc_xlsx（docs/decision-log.md §九十九；owner 裁定 R1–R7 / Q1–Q4）：Main 宿主面的
+ * 表格重算读回工具，与 run_js 并列。**Worker 面不上**（裁定 ②/⑥，Q1②）。只在装配方注入
+ * `recalcXlsxExecutor` 时上工具面（fail-closed，缺省零变化）；引擎不可用即不上工具面。
+ * 描述只声明已实现的参数与后果，不写业务流程话术（tool-description-facts 纪律）。
+ */
+export const RECALC_XLSX_TOOL = 'recalc_xlsx';
+export const RECALC_XLSX_TOOL_DESCRIPTION =
+  '对文件清单里的 xlsx 用 LibreOffice 强制重算后读回，报告公式缓存值与计算值不一致（valueDiffs）和错误格（errorCells），'
+  + '并可按 export=csv 导出纯数据 CSV。file 只接受本回合运行目录的规范相对路径 in/<fileId><安全扩展名>（文件清单每条已给出脚本内路径）；'
+  + '绝对路径、..、多级路径与非规范形式一律拒绝。export=csv 时产物为 out/<name>.values.csv，报告在 out/.recalc-report.json。'
+  + '引擎需部署期安装的 LibreOffice 26.8.3（PATH 可见才提供本工具，缺失则本工具不可用）。';
+export const RECALC_XLSX_TOOL_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    file: { type: 'string', description: '本回合运行目录的规范相对路径 in/<fileId><安全扩展名>（来自文件清单的脚本内路径）。' },
+    sheet: { type: 'string', description: '可选：只重算并导出指定工作表名；缺省处理全部工作表。' },
+    export: { type: 'string', enum: ['csv', 'none'], description: 'csv=导出纯数据 CSV（公式格取计算值）；none=只报告不导出 CSV。' },
+  },
+  required: ['file', 'export'],
   additionalProperties: false,
 };
 
@@ -429,6 +459,12 @@ export interface RuntimeOptions {
    * 缺省不注入 = Main 工具面没有 run_js（工具面逐字节不变，ask/eval 零变化）。
    */
   runJsExecutor?: RunJsExecutor;
+  /**
+   * recalc_xlsx 执行器端口（装配层构造注入；缺省不注入 = Main 工具面没有 recalc_xlsx）。
+   * 与 run_js 并列的宿主 agent 工具；**Worker 面永不注入**（裁定 R1–R7 / Q1②）。
+   * 引擎不可用时执行器 available=false，装配方据此不上工具面（fail-closed）。
+   */
+  recalcXlsxExecutor?: RecalcXlsxExecutor;
   /**
    * CAP-01 ④：run_js 子进程撞内存墙的结构化事件（**只进日志**，不进用户话术）。
    * bytes = 输入总字节；exitCode/exitSignal/stderrTail = 退出形状；runId/side/taskId 定位
@@ -1514,6 +1550,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           ...(options.mainSkillRegistry === undefined ? [] : [readSkillTool()]),
           // CAP-01 S1：run_js 只在装配方注入执行器时上工具面（缺省零变化，fail-closed）。
           ...(options.runJsExecutor === undefined ? [] : [runJsTool()]),
+          // recalc_xlsx：仅 Main 宿主面、仅引擎可用时上工具面（Worker 面永不注入）。
+          ...(options.recalcXlsxExecutor === undefined || !options.recalcXlsxExecutor.available
+            ? []
+            : [recalcXlsxTool()]),
         ],
         messages: turnMessages,
         ...(injections.length > 0 ? { injections } : {}),
@@ -1562,6 +1602,28 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
             return runJsInTurn(args, runJsMemo, turnFiles, (hit) => {
               lastMemoryWall = hit;
             }, signal);
+          }
+          // recalc_xlsx 与工具面同源门控（未注入或引擎不可用则不受理），fail-closed。
+          if (tool === RECALC_XLSX_TOOL) {
+            const executor = options.recalcXlsxExecutor;
+            if (executor === undefined || !executor.available) {
+              throw new Error(`Main 工具面之外的调用：${tool}`);
+            }
+            const file = typeof args.file === 'string' ? args.file : '';
+            const sheet = typeof args.sheet === 'string' ? args.sheet : undefined;
+            const exportMode = args.export === 'csv' ? 'csv' : args.export === 'none' ? 'none' : undefined;
+            if (file === '' || exportMode === undefined) {
+              throw new Error('recalc_xlsx 需要 file 与 export（csv|none）。');
+            }
+            // 结果原样交回模型（status/errorCells/valueDiffs/artifacts）；CSV 等产物由
+            // 执行器落本回合 runDir/out/，交付去留归宿主投递面（与 run_js 同一纪律）。
+            return executor.recalc({
+              file,
+              ...(sheet === undefined ? {} : { sheet }),
+              export: exportMode,
+              scope: fileScope,
+              ...(signal === undefined ? {} : { signal }),
+            });
           }
           throw new Error(`Main 工具面之外的调用：${tool}`);
         },
@@ -1657,6 +1719,14 @@ function readSkillTool(): DiscoveredTool {
 
 function runJsTool(): DiscoveredTool {
   return { name: RUN_JS_TOOL, description: RUN_JS_TOOL_DESCRIPTION, inputSchema: RUN_JS_TOOL_SCHEMA };
+}
+
+function recalcXlsxTool(): DiscoveredTool {
+  return {
+    name: RECALC_XLSX_TOOL,
+    description: RECALC_XLSX_TOOL_DESCRIPTION,
+    inputSchema: RECALC_XLSX_TOOL_SCHEMA,
+  };
 }
 
 function executeOperationTool(): DiscoveredTool {
