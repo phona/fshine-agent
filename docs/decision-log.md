@@ -3806,15 +3806,15 @@ Pi 1.5.2 迁移 U3（恢复/重试后同一逻辑写操作被重复执行）以*
 
 ---
 
-## 九十九、recalc_xlsx 集成 · 决定登记与准入证据指针（2026-11-17，分支 `arch/recalc-xlsx`，基线 = `arch/integration` @ `5428723`）状态：**实现中·待独立复核**
+## 九十九、recalc_xlsx 集成 · 决定登记与准入证据指针（2026-11-17，分支 `arch/recalc-xlsx`，基线 = `arch/integration` @ `5428723`）状态：**已实现·待最终独立复核**（与本节末状态行一致）
 
 > 授权与边界：owner 2026-11-17 认可方案 v2 + R1–R7 裁定，指定「编排 workflow，拉 worktree，丢给 deepseek-v4.1-flash@high 执行」。本节只做决定登记与准入证据指针，不代表实现已通过；产品改动限定在钉死产出（`docs/decision-log.md`、`packages/agent/src/recalc-xlsx-executor.ts`、`packages/agent/recalc-xlsx.test.ts`、`packages/agent/recalc-delivery-gate.test.ts`、`.agents/skills/table-verification/SKILL.md`）。不 push、不合并、不动 main/tag。
 
 - **owner 边界裁定 R1–R7（不得重新讨论）**：① LibreOffice 仅部署时安装，用户机器零依赖；② 表格公式/模型工程归 Main 文档工程面；③ 执行层交付无公式表格（数据非活模型）；④ 带公式产物由 Main 侧验收（数据级 oracle / 公式级 LO 两档）；⑤ 不为 Excel 派生执行层；⑥ `recalc_xlsx` 是宿主 agent 工具（Option 1，与 `run_js` 并列）；⑦ skill 只验不建/改，CSV 纯数据导出是工具契约显式部分。
 
-- **Q1–Q4 收口（按推荐）**：① LibreOffice 固定 **26.8.3**，仅部署时安装、PATH 可见才上工具面，缺失即 **fail-closed 不上工具**；② Worker 面不上 `recalc_xlsx`（仅 Main 宿主面）；③ LO 开销进 **R4 资源账**（结构化事件）；④ 实施顺序 **④ decision-log → ② recalc_xlsx 工具（TDD）→ ① table-verification skill → ③ 投递门**。确定性门在 commit 后由脚本跑；全量 `npm test` 本机有 vitest-worker 超时抖动，失败如实上报不掩盖。
+- **Q1–Q4 收口（按推荐）**：① LibreOffice 固定 **26.8.3**，仅部署时安装、PATH 可见才上工具面，缺失即 **fail-closed 不上工具**；② Worker 面不上 `recalc_xlsx`（仅 Main 宿主面）；③ LO 开销进 **R4 资源账**（结构化事件）；④ 实施顺序（owner 认可的**计划顺序**）**④ decision-log → ② recalc_xlsx 工具（TDD）→ ① table-verification skill → ③ 投递门**；**实际提交顺序为 ④（`ba0bf8d`）→ ②（`70d03ff`）→ ③（`88a41d0`）→ ①（`9988ddc`）**，① 与 ③ 实操对调（内容齐全、功能无碍；独立复核登记，不重写 owner 计划）。确定性门在 commit 后由脚本跑；全量 `npm test` 本机有 vitest-worker 超时抖动，失败如实上报不掩盖。
 
-- **四项产出与顺序**：④ `docs/decision-log.md`（§九十九，本节）→ ② `packages/agent/src/recalc-xlsx-executor.ts` + `packages/agent/recalc-xlsx.test.ts`（TDD）→ ① `.agents/skills/table-verification/SKILL.md`（只验不建/改）→ ③ `packages/agent/recalc-delivery-gate.test.ts`（投递门）。新增 skill 若需更新测试金样，单独在 deviations 说明。
+- **四项产出与顺序**：计划顺序 ④ `docs/decision-log.md`（§九十九，本节）→ ② `packages/agent/src/recalc-xlsx-executor.ts` + `packages/agent/recalc-xlsx.test.ts`（TDD）→ ① `.agents/skills/table-verification/SKILL.md`（只验不建/改）→ ③ `packages/agent/recalc-delivery-gate.test.ts`（投递门）；**实际提交顺序 ④→②→③→①**（见上条事实注记）。新增 skill 若需更新测试金样，单独在 deviations 说明。
 
 - **新增机制准入五条 · 逐项证据指针**（按 AGENTS.md「新增机制准入」）：
   1. **最小可复现失败**：汇总表共享公式与静态值混排时，读回走缓存导致值陈旧——`recalc_xlsx` 必须强制重新计算后读回，否则交付陈旧值。该失败场景在 `packages/agent/recalc-xlsx.test.ts` 以最小用例钉住（实现步 ② 产出）。
@@ -3826,10 +3826,19 @@ Pi 1.5.2 迁移 U3（恢复/重试后同一逻辑写操作被重复执行）以*
 - **LO 版本与资源账 · 已实现（2026-11-17 独立复核补）**：LibreOffice 固定 **26.8.3**，部署期安装、PATH 可见才注册工具，缺失 fail-closed。LO 重算开销计入 R4 资源账：每次 `recalc_xlsx` 调用后把引擎耗时（`RecalcXlsxResult.durationMs`，缺省执行器必填）经 `foregroundPermit.budget.consume({calls:1, ms:engineMs})` 入前台预算，并经 `onRecalcCost` 结构化事件（`recalc_cost`：engineMs/status/principalId/sessionId，只进日志不进话术）上报——接线在 `execution-runtime.ts` 的 recalc exec 分发处、`scripts/ask-runtime.ts` 透传、`apps/server/server.ts` 日志钩；无 policy 时零预算对象也不报错。非 `onRuntimeEvent`（那是 Pi 回合窗口信号，不是资源账）：本切片用专用 cost 事件，明确、可查、不静默消耗预算。
 - **版本校验口径（Gap7 备查）**：可用性判定用 `version.startsWith('26.8.3')`（`RECALC_XLSX_REQUIRED_VERSION`），真实 `26.8.3.1` 属有意纳入；副作用是 `26.8.30`/`26.8.3rc` 也会通过前缀匹配。当前部署版本锁定 26.8.3.x，记录备查、不在本轮改判据（不扩范围）。
 
-- **③ 投递前机械闸 · 挂点补记（2026-11-17 实施裁定，时序决定不算扩范围）**：recalc 实算报告写在**独立 runDir**（`<sessionDir>/runs/<recalcRunId>/out/.recalc-report.json`），且 `recalc_xlsx` 与 `run_js` 先后调用、各自 runDir——`run-js-executor.ts:416-423` 扫 out/ 处看不到后产出的报告。故**最终判定放在 `apps/server/server.ts` 的 `deliverTurnFiles` 读字节处**（闸门逻辑在 `packages/agent/src/recalc-xlsx-executor.ts`：`xlsxHasFormulas`/`collectRecalcReports`/`decideRecalcDelivery`/`applyRecalcDeliveryGate`），run-js 侧不做标注（本切片无需）。判定：待投递项含公式 xlsx 必须有按**文件名 + sha256 绑定**的 `status=pass` 报告；缺失/fail/不匹配一律不投递，出 `recalc_delivery_gated` 结构化事件（带 items: name/sha256/reason）；无公式表格与纯数据 CSV 逐字节放行。**混合批次（部分被拦、部分照投，Gap5 补）**：全拦时给 `recalc_gated` + 未投递话术；部分拦时照投通过项但必须附「部分表格未通过公式实算校验、未予发送；其余已发送」话术（`RECALC_DELIVERY_PARTIAL_NOTE`），不让用户误以为全部送达——如实交付 B 类责任。**缺省行为**：部署有 26.8.3 时 server 自动构造执行器 → 闸门默认启用；「缺省未注入不改变交付行为」由显式 `createRecalcXlsxExecutor: () => undefined` 关闭路径保证（既有交付测试即走此路径，逐字节不变）。**不把 exceljs 引入 file-store.ts**（import-boundary 守卫钉住）。
+- **③ 投递前机械闸 · 挂点补记（2026-11-17 实施裁定，时序决定不算扩范围）**：recalc 实算报告写在**独立 runDir**（`<sessionDir>/runs/<recalcRunId>/out/.recalc-report.json`），且 `recalc_xlsx` 与 `run_js` 先后调用、各自 runDir——`run-js-executor.ts:416-423` 扫 out/ 处看不到后产出的报告。故**最终判定放在 `apps/server/server.ts` 的 `deliverTurnFiles` 读字节处**（闸门逻辑在 `packages/agent/src/recalc-xlsx-executor.ts`：`xlsxHasFormulas`/`collectRecalcReports`/`decideRecalcDelivery`/`applyRecalcDeliveryGate`），run-js 侧不做标注（本切片无需）。判定：待投递项含公式 xlsx 必须有按**文件名 + sha256 绑定**的 `status=pass` 报告；缺失/fail/不匹配一律不投递，出 `recalc_delivery_gated` 结构化事件（带 items: name/sha256/reason）；无公式表格与纯数据 CSV 逐字节放行。**混合批次（部分被拦、部分照投，Gap5 补）**：全拦时给 `recalc_gated` + 未投递话术；部分拦时照投通过项但必须附「部分表格未通过公式实算校验、未予发送；其余已发送」话术（`RECALC_DELIVERY_PARTIAL_NOTE`），不让用户误以为全部送达——如实交付 B 类责任。**缺省行为**：部署有 26.8.3 时 server 自动构造执行器 → 闸门默认启用；「缺省未注入不改变交付行为」由显式 `createRecalcXlsxExecutor: () => undefined` 关闭路径保证（既有交付测试即走此路径，逐字节不变）。**不把 exceljs 引入 file-store.ts**（`packages/agent/import-boundary.test.ts` 的 file-store/exceljs 静态断言钉住——独立复核 gap1 补：原守卫缺失，现以 import 边 + 静态文本双断言钉死）。
 
-**指针**：本节；`packages/agent/src/recalc-xlsx-executor.ts`（② 工具 + ③ 闸逻辑 + Gap1 耗时）、`packages/agent/recalc-xlsx.test.ts`（② 23 用例）、`packages/agent/recalc-delivery-gate.test.ts`（③ 16 用例）、`scripts/eval/recalc/formula-level.ts`（准入⑤ Eval，前后读数）、`apps/server/server.ts`（②③ 接线 + Gap5 混合批次话术 + recalc_cost 日志）、`scripts/ask-runtime.ts`（② 注入透传 + Gap1 事件透传）；`.agents/skills/table-verification/SKILL.md`（① 已产出）。**资源账事件指针用符号名**（行号会漂移）：`execution-runtime.ts` 的 `recalc exec` 分发处（`onRecalcCost?.(...)` 与 `foregroundPermit?.budget.consume(...)`）、`onRecalcCost` 端口、`RecalcCostEvent` 类型——非早期自报的 `:226/:437/:633`（那些是错误指针，已废弃）。
+**指针**：本节；`packages/agent/src/recalc-xlsx-executor.ts`（② 工具 + ③ 闸逻辑 + Gap1 耗时）、`packages/agent/recalc-xlsx.test.ts`（② 23 用例）、`packages/agent/recalc-delivery-gate.test.ts`（③ 17 用例，含独立复核 gap4 正向链路）、`scripts/eval/recalc/formula-level.ts`（准入⑤ Eval，前后读数）、`apps/server/server.ts`（②③ 接线 + Gap5 混合批次话术 + recalc_cost 日志）、`scripts/ask-runtime.ts`（② 注入透传 + Gap1 事件透传）；`.agents/skills/table-verification/SKILL.md`（① 已产出）。**资源账事件指针用符号名**（行号会漂移）：`execution-runtime.ts` 的 `recalc exec` 分发处（`onRecalcCost?.(...)` 与 `foregroundPermit?.budget.consume(...)`）、`onRecalcCost` 端口、`RecalcCostEvent` 类型——非早期自报的 `:226/:437/:633`（那些是错误指针，已废弃）。
 **独立复核 7 项 gaps 修复（2026-11-17）**：① LO 开销入 R4 账（`durationMs`+`recalc_cost` 事件+预算 consume）；② 状态陈旧（本节指针更新为①已产出）；③ 证据指针错误（改符号名引用）；④ 公式级 Eval 前后读数补齐；⑤ 混合批次部分未投递用户话术+测试；⑥ 反向绊线由复核独立执行（见交付 evidence）；⑦ 版本前缀校验记录备查（不改判据）。状态：**①②③④ 已实现·7 项 gaps 已修复·待最终独立复核**。
+
+**独立复核第二轮 6 项 gaps 修复（2026-11-17）**：
+- **gap1（实质·守卫缺失）**：原声明「不把 exceljs 引入 file-store.ts（import-boundary 守卫钉住）」不成立——`import-boundary.test.ts` 原文仅 1 个 it，无任何 file-store/exceljs 断言。已补独立静态断言（import 边 `importsOf(file-store.ts)` 无 `exceljs` + 静态文本 `/exceljs/i` 双保险），并同步本条与 `recalc-delivery-gate.test.ts` 头注释的措辞指向真实守卫位置。绊线实测：临时往 `file-store.ts` 塞 `import ExcelJS from 'exceljs'` → 该断言红（1 failed|1 passed），复原后 2 passed。不变式本就成立（靠无人加），此补是把它钉成回归防线，非改判据。
+- **gap2（记录与历史不一致）**：owner 认可的 ④②①③ 是**计划顺序**（不重写、不重新讨论），在本节 Q1④ 与「四项产出」两处显式标为计划顺序，并追加实际提交顺序事实注记 ④（`ba0bf8d`）→②（`70d03ff`）→③（`88a41d0`）→①（`9988ddc`），①与③实操对调、内容齐全功能无碍。
+- **gap3（状态行陈旧）**：标题状态由「实现中·待独立复核」统一为「已实现·待最终独立复核」，与本节末状态行一致。
+- **gap4（server 正向链路缺覆盖）**：`recalc-delivery-gate.test.ts` 补 server 级正向集成用例——预置与投递字节 name+sha256 双匹配的 pass 报告（`sessionDir/runs/<recalcRunId>/out/.recalc-report.json`），验含公式 xlsx 经 `server.handler` 真实投递、逐字节一致、零 gated 事件。该用例锁住「报告绑定 recalc 输入字节、投递 run_js 注册产物须同一文件才匹配」的端到端假设。绊线实测：报告 sha 改错 → 该用例红（1 failed|16 passed），复原 17 passed。
+- **gap5（版本前缀宽松·已披露）**：维持原裁定不改判据（`startsWith('26.8.3')` 有意纳入 26.8.3.1，副作用放进 26.8.30/26.8.3rc），复核无异议。
+- **gap6（历史红态不可独立复现）**：复核员只读、不得改文件，故实施员自报的「现场反向绊线红态」无法从当前树/git 独立复现，标 unconfirmed 属预期（破坏态不入库）。本轮已把 gap1/gap4 两条新断言各自做了「注入破坏→转红→复原绿」的现场可复核绊线；源码内既有绊线式断言（Worker 面无 recalc、描述无流程话术、enabled=false 逐字节不变、report mismatch fail-closed）保持。
+状态：**6 项 gaps 全部处理（gap1/2/3/4 实修 + 绑定的现场绊线，gap5 登记无异议不改判据，gap6 登记为只读不可复现的预期限制）·待最终独立复核**。
 
 ---
 

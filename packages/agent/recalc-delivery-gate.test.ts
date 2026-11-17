@@ -11,7 +11,7 @@
  * 无需标注，闸门纯在投递面）。两条路都 fail-closed；缺省未注入 recalc 执行器时行为逐字节不变。
  *
  * exceljs 只在 recalc-xlsx-executor.ts（本测试通过它间接使用），**不进 file-store.ts**
- * （import-boundary 守卫钉住）。
+ * （import-boundary.test.ts 的 file-store/exceljs 静态断言钉住，独立复核 gap1 补）。
  */
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -251,6 +251,12 @@ async function makeServerGateFixture(input: {
   extraPlainFile?: { name: string; bytes: Buffer };
   /** 'gate' = 注入启用的执行器；'disabled' = 显式注入 undefined（禁用闸）；'default' = 不注入工厂。 */
   recalcMode: 'gate' | 'disabled' | 'default';
+  /**
+   * 预置一份与投递字节匹配的 pass 实算报告（正向链路：pass 报告 → 含公式 xlsx 实际投递）。
+   * 报告写在独立 recalc runDir 的 out/.recalc-report.json，绑定 name + sha256；
+   * 模拟「recalc_xlsx 已对该文件实算通过」，验证 server 闸放行端到端假设。
+   */
+  withMatchingPassReport?: boolean;
 }): Promise<ServerGateFixture> {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'recalc-gate-server-'));
   dirs.push(dir);
@@ -273,6 +279,21 @@ async function makeServerGateFixture(input: {
       writeFileSync(path.join(out, '汇总.xlsx'), input.formulaXlsx);
       if (input.extraPlainFile !== undefined) {
         writeFileSync(path.join(out, input.extraPlainFile.name), input.extraPlainFile.bytes);
+      }
+      if (input.withMatchingPassReport === true) {
+        // 正向链路：recalc_xlsx 已对该字节实算通过 → 报告在独立 runDir，绑定 name+sha256。
+        // 报告 sha 必须是「被投递文件」的字节哈希，与 server 读回投递字节一致才匹配。
+        const recalcRunDir = runDirOf(workspaceRoot, scope, 'run_gate_recalc_00000000000000000001');
+        const recalcOut = path.join(recalcRunDir, 'out');
+        mkdirSync(recalcOut, { recursive: true });
+        writeFileSync(
+          path.join(recalcOut, '.recalc-report.json'),
+          JSON.stringify({
+            status: 'pass', name: '汇总.xlsx', sha256: sha256(input.formulaXlsx),
+            file: 'in/file_x.xlsx', errorCells: [], valueDiffs: [],
+          }),
+          'utf8',
+        );
       }
       const { outputs } = fs.registerOutputsFromOut({
         runDir, scope, limits: { maxFileBytes: 20 * 1024 * 1024, maxCount: 20 },
@@ -373,6 +394,26 @@ describe('server 投递闸挂点（终判在 deliverTurnFiles）', () => {
       expect(calls).toHaveLength(1);
       expect(calls[0]!.files[0]!.filename).toBe('汇总.xlsx');
       expect(logs.some((l) => l['event'] === 'recalc_delivery_gated')).toBe(false);
+      const done = logs.find((l) => l['event'] === 'message_done');
+      expect(done?.['fileDelivery']).toEqual({ status: 'sent', files: 1 });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('注入 recalc 执行器 + 匹配 pass 报告 → 含公式 xlsx 经 server 实际投递（正向链路，独立复核 gap4）', async () => {
+    const f = await xlsxBuffer({ A1: 1, C1: FORMULA_CELL });
+    const { server, logs, calls } = await makeServerGateFixture({
+      formulaXlsx: f, recalcMode: 'gate', withMatchingPassReport: true,
+    });
+    try {
+      const reply = await server.handler(serverIncoming());
+      // 端到端假设：报告绑定的 name+sha 与被投递（run_js 注册）的字节同一 → 闸放行、实际投递。
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.files[0]!.filename).toBe('汇总.xlsx');
+      expect(calls[0]!.files[0]!.data).toEqual(f); // 逐字节一致
+      expect(logs.some((l) => l['event'] === 'recalc_delivery_gated')).toBe(false);
+      expect(reply).not.toContain('公式实算校验');
       const done = logs.find((l) => l['event'] === 'message_done');
       expect(done?.['fileDelivery']).toEqual({ status: 'sent', files: 1 });
     } finally {
