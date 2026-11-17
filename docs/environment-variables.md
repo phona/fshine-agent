@@ -46,6 +46,10 @@
 > `runtime.fileRetentionSweepOnStart`（2026-11-17；缺省 `false`）：server 启动装配完成后、
 > 渠道开始接消息之前，按 `fileRetentionDays` **扫一次**到期 run 目录（`dryRun=false`，
 > 结果进启动日志）；缺省关闭 = 零行为变化，只扫一次、无定时器（周期调度归部署侧）。
+> `runtime.allowWriteOperations`（2026-11-17 写确认切片；缺省 `false`）：`true` 时装配层
+> 把执行层自述 `access=write` 的 operation 一并放进允许集合（只读集合仍只由 `access=read`
+> 派生）。开关只决定「能不能发起」；操作授权、确认句柄绑定/有效期/一次性与业务校验仍归
+> 执行层，宿主只透传句柄与用户原话（不是计划门）。
 
 下表仍只从 env 读（不是部署配置）：
 

@@ -189,6 +189,13 @@ export interface RuntimeConfig {
    *     回「已受理 #编号 名称」。仅 server 渠道面支持 background；ask/redo 入口显式拒绝。
    */
   dispatchMode?: 'inline' | 'background';
+  /**
+   * 写面开关（2026-11-17 写确认切片；缺省 false = 零行为变化）。
+   * true 时装配层把执行层自述 `access=write` 的 operation 一并放进 allowedOperations；
+   * 只读集合仍只由 `access=read` 派生（重试语义不随开关变化）。开关只决定「能不能发起」，
+   * 操作授权、确认句柄绑定、有效期、防重放与业务校验仍归执行层——宿主不因此获得裁决权。
+   */
+  allowWriteOperations?: boolean;
 }
 
 /**

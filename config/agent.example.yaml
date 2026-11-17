@@ -74,6 +74,9 @@ llm:
 #   waitUserTimeoutMs: 86400000  # waiting_user 等待上限(24h)
 #   fileRetentionDays: 30     # run 目录/任务产物保留期(天;0=不清理;缺省 30)
 #   fileRetentionSweepOnStart: false  # server 启动装配完成后扫一次到期 run 目录(缺省 false=零行为)
+#   # 写面开关(缺省 false=只读):true 时把执行层自述 access=write 的 operation 放进允许集合;
+#   # 确认句柄/绑定/有效期/一次性/业务校验仍归执行层(宿主只透传,不做计划门)。
+#   allowWriteOperations: false
 #   # taskBudget: { ms: 600000, calls: 50 }  # 任务级共享预算(ms/calls 必填;tokens 可选)
 
 # ---- 任务底账(可选):SQLite 路径;相对路径按进程 cwd 解析 ----

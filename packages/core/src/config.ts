@@ -149,6 +149,7 @@ const RUNTIME_KEYS = [
   'fileRetentionDays',
   'fileRetentionSweepOnStart',
   'dispatchMode',
+  'allowWriteOperations',
 ] as const;
 
 /** runtime 段整数值：显式写错即 fail-fast（与 host.* 的「非法 = 未配置」刻意不同）。 */
@@ -184,7 +185,7 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     }
   }
   const config: RuntimeConfig = {};
-  type RuntimeIntegerKey = Exclude<keyof RuntimeConfig, 'taskBudget' | 'dispatchMode' | 'fileRetentionSweepOnStart'>;
+  type RuntimeIntegerKey = Exclude<keyof RuntimeConfig, 'taskBudget' | 'dispatchMode' | 'fileRetentionSweepOnStart' | 'allowWriteOperations'>;
   const integers: ReadonlyArray<[RuntimeIntegerKey, number]> = [
     ['mainConcurrency', 1],
     ['backgroundConcurrency', 0],
@@ -202,6 +203,9 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
   }
   const sweepOnStart = runtimeBoolean(raw['fileRetentionSweepOnStart'], 'fileRetentionSweepOnStart');
   if (sweepOnStart !== undefined) config.fileRetentionSweepOnStart = sweepOnStart;
+  // 写面开关（缺省 false 住装配层）：显式写错 fail-fast，拼错的旋钮不被缺省吞掉。
+  const allowWriteOperations = runtimeBoolean(raw['allowWriteOperations'], 'allowWriteOperations');
+  if (allowWriteOperations !== undefined) config.allowWriteOperations = allowWriteOperations;
   const taskBudgetRaw = raw['taskBudget'];
   if (taskBudgetRaw !== undefined && taskBudgetRaw !== null) {
     const budget = asRecord(taskBudgetRaw, 'runtime.taskBudget');

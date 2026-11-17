@@ -1,37 +1,18 @@
 /**
- * 写确认回环——业务级盲区用例（2026-11-17）。
+ * 写确认回环——缺省只读门的业务级用例（2026-11-17；宿主接线后仍成立的回归锁）。
  *
- * 业务场景：用户要求写入（新增记录）→ 执行层 prepare（dry-run，不带 --apply）→
- * 系统向用户交代「打算写什么」→ 用户确认 → commit → 读回验证写进去了 → 如实回报。
+ * 业务场景：用户要求写入（新增记录）→ 缺省装配（runtime.allowWriteOperations 未开）下
+ * 写 operation 不在允许集合 → 系统在发起执行前确定性拒绝 → 零写入、如实告知未执行。
  *
- * 本文件做两件事：
- *   ① **已可断言的部分**（场景 4）：默认只读 principal 与写链路专用 principal 的写请求
- *      都在宿主发起执行前被确定性拒绝——零执行、零审计写行、数据原样。拒绝来自宿主
- *      允许集合（`本轮只开放只读操作`），不是模型自觉。
- *   ② **缺口登记**（场景 1–3）：当前装配没有「向用户要确认再继续同一任务」的通路，
- *      因此这三条只能先以 todo 形式登记（见文件末尾的 it.todo 与注释），不硬凑假确认。
+ * 本文件钉住「缺省 = 零行为变化」：
+ *   · 默认只读 principal 与写链路专用 principal 的写请求都在宿主发起执行前被确定性拒绝
+ *     ——零执行、零审计写行、数据原样。拒绝来自宿主允许集合（`不在本轮允许集合内`），
+ *     不是模型自觉；
+ *   · 缺省执行面的允许集合 = 执行层自述 access=read；写 operation 一个都不在。
  *
- * 现状证据（读代码 + 本用例实跑）：
- *   · 契约已落最小增量：needs_confirmation + ExecutionRequest.confirmation（句柄对宿主
- *     不透明、用户原话原样透传；绑定/有效期/一次性归执行层）；本文件场景 4 仍按
- *     **宿主装配未接线**的现状断言默认允许集合只含 access=read；
- *   · dummy 执行层已支持 prepare 提案 → commit 凭句柄提交 → query 读回
- *     （scripts/eval/fixtures/dummy-platform/bin/dummy.cjs；业务用例见
- *     packages/agent/write-confirmation.test.ts）；
- *   · 最小切片明确「本切片不做：写 / 确认 / 产物回收」
- *     （packages/agent/src/execution-runtime.ts:49）；
- *   · Session 只有 send/tasks/getTask，没有确认/接续确认事件的方法
- *     （packages/agent/src/execution-runtime.ts:540-550）；
- *   · 装配的允许集合 = 执行层自述 access=read 的 operation
- *     （scripts/ask-runtime.ts:316-320）；principal 的 capabilities 是遗留数据位，
- *     运行时不消费（packages/contracts/src/config.ts:6-13）；
- *   · 仓内 dummy 夹具的状态化写面（prepare/commit/proposal/proposal-commit）在
- *     structured `call` 路由下也不可达：写 operation 一律按 prepare 模式裁决，
- *     dummy.commit 的 serve.prepare=false 被门拒；dummy.proposal 的位置参数在
- *     object→flat 转换时被拼成 `["payload", <path>]`，payload 被当成字面量 "payload"；
- *     proposal-commit 又需要宿主侧 gate secret/token，而适配器 spawn 只带
- *     PATH/HOME/TMPDIR 白名单（packages/agent/src/dummy-cli-client.ts:100-104、
- *     scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:681-745）。
+ * 写确认回环的真实业务用例（prepare → 用户确认 → commit → 读回）见
+ * scripts/host-write-confirmation.test.ts（显式打开 runtime.allowWriteOperations）。
+ * 执行层与契约层用例见 packages/agent/write-confirmation.test.ts。
  *
  * 边界：本文件只驱动仓内 dummy 夹具与假模型，不触真实 SaaS / 企微；写确认回环的
  * 操作授权、绑定、有效期与防重放仍必须归执行层（AGENTS.md「写确认回环 ≠ 宿主计划门」）。
@@ -53,10 +34,19 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
 const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform');
 
-/** 宿主允许集合的确定性拒绝话术（execution-runtime.ts:1185；不依赖模型自觉）。 */
-const WRITE_NOT_ALLOWED_MESSAGE = '本轮只开放只读操作';
-/** 夹具声明的写 operation（当前最小切片一个都不放进允许集合）。 */
-const WRITE_OPERATIONS = ['dummy.prepare', 'dummy.commit', 'dummy.proposal', 'dummy.proposal-commit'] as const;
+/** 宿主允许集合的确定性拒绝话术（execution-runtime.ts；不依赖模型自觉）。 */
+const WRITE_NOT_ALLOWED_MESSAGE = '不在本轮允许集合内';
+/** 夹具声明的写 operation（access=write；缺省开关下一个都不进允许集合）。 */
+const WRITE_OPERATIONS = [
+  'dummy.prepare',
+  'dummy.commit',
+  'dummy.proposal',
+  'dummy.proposal-commit',
+  'ballot.prepare',
+  'ballot.commit',
+  'ballot.proposal',
+  'ballot.proposal-commit',
+] as const;
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -227,19 +217,20 @@ describe('场景 4：没有写权限的 principal → 确定性拒绝、零写�
     });
   });
 
-  it('写链路专用 principal（wecom:fixture-writer）：capabilities 有 write 也仍被只读允许集拒绝（缺口钉住）', async () => {
+  it('写链路专用 principal（wecom:fixture-writer）：缺省开关下 capabilities 有 write 也仍被只读允许集拒绝', async () => {
     const dir = tempDir();
     const config = materializedConfig(dir);
 
-    // 配置事实：默认身份仍是只读；writer 身份声明了 write。
+    // 配置事实：默认身份仍是只读；writer 身份声明了 write（遗留数据位，不授权运行时写面）。
     expect(config.principals['wecom:fixture-user']?.capabilities).toEqual(['read']);
     expect(config.principals['wecom:fixture-writer']?.capabilities).toEqual(['read', 'write']);
     // 默认 principal 选择不变（第一个 enabled）。
     expect(Object.entries(config.principals).find(([, principal]) => principal.enabled)?.[0]).toBe('wecom:fixture-user');
 
     const result = await runWriteAttempt('wecom:fixture-writer', dir);
-    // 缺口钉住：写确认切片未落地前，writer 身份的写请求同样在发起执行前被拒。
-    // 这不是期望的产品行为——写确认环落地后，本用例必须由场景 1–3 的真实业务用例取代。
+    // 缺省 = 零行为变化：写面开关（runtime.allowWriteOperations）未开，writer 身份的写请求
+    // 同样在发起执行前被拒。显式打开开关后的真实业务链路见
+    // scripts/host-write-confirmation.test.ts。
     expect(result.executionCount).toBe(0);
     expect(result.taskStatus).toBe('unexecuted');
     expect(result.workerSawRefusal).toBe(true);
@@ -248,8 +239,8 @@ describe('场景 4：没有写权限的 principal → 确定性拒绝、零写�
   });
 });
 
-describe('执行面派生（装配事实）：允许集合只含 access=read，写 operation 一个都不在', () => {
-  it('resolveExecutionFace：allowedOperations === readOnlyOperations，且不含四个写 operation', async () => {
+describe('执行面派生（装配事实·缺省）：允许集合只含 access=read，写 operation 一个都不在', () => {
+  it('resolveExecutionFace（不开开关）：allowedOperations === readOnlyOperations，且不含写 operation', async () => {
     const dir = tempDir();
     const config = materializedConfig(dir);
     const profile = config.contextProfiles['dummy'];
@@ -268,20 +259,7 @@ describe('执行面派生（装配事实）：允许集合只含 access=read，�
   });
 });
 
-/**
- * 场景 1–3 的真实业务用例当前**无法写**（红，不是跳过）：装配里没有「向用户要确认再继续
- * 同一任务」的通路。等宿主接线落地后，把下面的 todo 换成实际用例：
- *
- *   · 契约面已就绪：needs_confirmation + ExecutionRequest.confirmation（同一次 execute，
- *     不是第二套协议；句柄/绑定/有效期/一次性归执行层）。
- *   · 执行层通路已就绪：dummy.prepare/commit 在 structured call 下可达，commit 凭句柄
- *     一次性提交并把新记录追加进 query 可见数据（packages/agent/write-confirmation.test.ts）。
- *   · 仍缺宿主状态：收到 needs_confirmation 后按 (principalId, sessionId) 存句柄/摘要，
- *     下一回合把句柄与用户原话原样透传；宿主**不判断**用户是不是在确认，也不拦截工具
- *     调用等批准。
- */
-describe('场景 1–3：写确认回环（当前装配无通路 → todo 登记）', () => {
-  it.todo('场景 1：写请求 → prepare 被调用且不带 --apply（dry-run）；回复里能看出「准备写什么」');
-  it.todo('场景 2：用户确认 → commit 恰好一次、读回查询能看到新记录、如实回报');
-  it.todo('场景 3：用户不确认/改主意 → commit 零调用、数据不变');
-});
+// 场景 1–3 的真实业务用例（prepare → 用户确认 → commit → 读回；不确认/重复确认）已由
+// scripts/host-write-confirmation.test.ts 承接——显式打开 runtime.allowWriteOperations，
+// 仍走同一共享装配（assembleSessionCore）与仓内 dummy 夹具。这里不再保留 todo：缺口的
+// 后继守卫已落地。

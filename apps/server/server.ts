@@ -44,7 +44,7 @@ import {
   type RegisteredFile,
 } from '../../packages/agent/src/file-store';
 import { createRunJsExecutor, type RunJsExecutor } from '../../packages/agent/src/run-js-executor';
-import { FILES_GENERATED_NOTICE, MAIN_PROTOCOL_NOTE, type Session, type TurnFileRef } from '../../packages/agent/src/execution-runtime';
+import { FILES_GENERATED_NOTICE, mainProtocolNoteFor, type Session, type TurnFileRef } from '../../packages/agent/src/execution-runtime';
 import {
   createNotificationOutbox,
   type NotificationOutbox,
@@ -198,7 +198,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   const mainSkills = await loadMainSkillDelivery(defaultMainSkillsDir());
   // catalog 字节数进启动日志（证据面）：0 = 空索引（技能面未启用），不静默。
   log({ event: 'main_skills_loaded', catalogBytes: mainSkills.catalogBytes });
-  const mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, profile.executorLabel)}${mainSkills.promptBlock}\n\n${MAIN_PROTOCOL_NOTE}`;
+  // 写面开关（runtime.allowWriteOperations；缺省 false = 只读）：协议文本与装配允许集同源。
+  const allowWriteOperations = deps.config.runtime?.allowWriteOperations === true;
+  const mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, profile.executorLabel)}${mainSkills.promptBlock}\n\n${mainProtocolNoteFor(allowWriteOperations)}`;
   const stateDir = deps.stateDir ?? path.join(REPO_ROOT, '.runtime', 'server', 'state');
 
   // B1 会话转录持久化：装配层是唯一构造具体存储处（基于 Pi SessionManager 的独立存储层）。
@@ -223,6 +225,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       policy,
       workerSkills,
       ...(deps.config.runtime === undefined ? {} : { runtime: deps.config.runtime }),
+      allowWriteOperations,
       emptyOperationsMessage: '执行层没有声明任何只读 operation——server 拒绝以空允许集合运行。',
       ...(deps.createDrivers !== undefined ? { createDrivers: deps.createDrivers } : {}),
       ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
@@ -265,6 +268,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           sessionId,
           dbPath: deps.dbPath,
           stateDir,
+          allowWriteOperations,
           emptyOperationsMessage: '执行层没有声明任何只读 operation——server 拒绝以空允许集合运行。',
           taskRegistry,
           mainSystemPrompt,

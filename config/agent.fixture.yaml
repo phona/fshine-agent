@@ -24,13 +24,15 @@ principals:
   "wecom:fixture-user":
     accountSetScope: all
     enabled: true
-    # 本面只走查询（读类）；写链路要用户确认与执行层写门，不在本路径内。
+    # 本面缺省只走查询（读类）；写链路要 runtime.allowWriteOperations=true 才把执行层的
+    # access=write operation 放进允许集合，且提交必须带执行层发放的确认句柄。
     capabilities: ["read"]
   # 写链路专用身份（2026-11-17 登记）：给写确认切片一个稳定的虚构主体。
-  # 注意 capabilities 是遗留数据位——最小切片的开放面由执行层自述的 access 派生
-  # （scripts/ask-runtime.ts 的 defaultExecutionFace 只把 access=read 放进允许集合），
-  # 本项本身不授权写入；写确认回环无宿主通路时，该身份的写请求仍被确定性拒绝（见
-  # scripts/write-confirm-loop.test.ts 的缺口钉住用例）。不要把它读成“写已开放”。
+  # 注意 capabilities 是遗留数据位——装配的开放面由执行层自述的 access 派生 + 部署开关
+  # runtime.allowWriteOperations（缺省 false）决定（scripts/ask-runtime.ts 的
+  # defaultExecutionFace），本项本身不授权写入。缺省只读时该身份的写请求仍被确定性拒绝
+  # （scripts/write-confirm-loop.test.ts）；显式打开开关后走 prepare→确认→commit 回环
+  # （scripts/host-write-confirmation.test.ts）。
   "wecom:fixture-writer":
     accountSetScope: all
     enabled: true

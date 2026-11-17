@@ -558,6 +558,30 @@ host:
     }
   });
 
+  it('runtime.allowWriteOperations：布尔 true/false 解析；非布尔 fail-fast；缺省不造键', () => {
+    // 缺省不造键；装配层按 false（只读）处理，零行为变化。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+
+    const on = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  allowWriteOperations: true\n`),
+      env: {},
+    });
+    expect(on.runtime).toEqual({ allowWriteOperations: true });
+
+    const off = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  allowWriteOperations: false\n`),
+      env: {},
+    });
+    expect(off.runtime).toEqual({ allowWriteOperations: false });
+
+    for (const bad of ['yes', '1', '"true"', 'nope']) {
+      const yaml = `${VALID_YAML}runtime:\n  allowWriteOperations: ${bad}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(
+        /runtime\.allowWriteOperations/,
+      );
+    }
+  });
+
   it('runtime.taskBudget 子键：ms/calls 必填、非法值点名、未知子键拒绝', () => {
     const cases: ReadonlyArray<[string, RegExp]> = [
       ['taskBudget:\n    ms: 60000\n', /runtime\.taskBudget\.calls/],

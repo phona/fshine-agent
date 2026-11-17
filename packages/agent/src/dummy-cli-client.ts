@@ -14,8 +14,9 @@
  *     非零退出且无信封 = 执行层拒绝或失败，按退出码与 stderr 机械分流，不嗅探文案。
  *
  * 读路径切片的作用域不在这里：本适配器按契约忠实执行被请求的 operation；
- * 「本轮只开放只读」由装配方从执行层自述的 access 声明派生（readOnlyOperationNames）
- * 并由通用运行时的允许集合在发起执行前拒收。本文件不持治理策略。
+ * 「本轮开放哪些 operation」由装配方从执行层自述的 access 声明派生（只读集合 +
+ * `runtime.allowWriteOperations` 打开时的写集合）并由通用运行时的允许集合在发起执行前
+ * 拒收集合外调用。本文件不持治理策略。
  *
  * 子进程 env 走 worker 白名单（worker-env.ts，B 类凭据隔离）；状态根只经
  * 测试专用 `--state-dir` 传入（不依赖任何环境变量改道）。
@@ -70,6 +71,14 @@ export interface DummyCliClient extends ExecutionClient {
 /** 从执行层自述的 access 声明派生只读 operation 集合（读路径作用域；不是契约语义）。 */
 export function readOnlyOperationNames(operations: readonly RawGatewayOperation[]): string[] {
   return operations.filter((operation) => operation.access === 'read').map((operation) => operation.name);
+}
+
+/**
+ * 从执行层自述的 access 声明派生写 operation 集合（装配开关打开时才进入允许集合）。
+ * 与只读集合各自独立派生：写操作**永不**混进只读集合（否则重试会把写当读安全重发）。
+ */
+export function writeOperationNames(operations: readonly RawGatewayOperation[]): string[] {
+  return operations.filter((operation) => operation.access === 'write').map((operation) => operation.name);
 }
 
 interface GatewayRun {
