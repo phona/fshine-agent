@@ -106,7 +106,7 @@ function queueMainDriver(capture: MainCapture): { driver: TurnDriver; push(step:
 type WorkerArgSpec = Record<string, unknown> | ((delegation: string) => Record<string, unknown>);
 
 interface WorkerStep {
-  execCalls?: ReadonlyArray<{ tool: string; args: WorkerArgSpec }>;
+  execCalls?: ReadonlyArray<{ tool: string; args: WorkerArgSpec; signal?: AbortSignal }>;
   text: string;
 }
 
@@ -139,7 +139,7 @@ function scriptedWorkerDriver(capture: WorkerCapture): { driver: TurnDriver; pus
       for (const call of step.execCalls ?? []) {
         const args = typeof call.args === 'function' ? call.args(delegationText) : call.args;
         try {
-          capture.results.push(await input.exec(call.tool, args));
+          capture.results.push(await input.exec(call.tool, args, call.signal));
         } catch (error) {
           capture.toolErrors.push(error instanceof Error ? error.message : String(error));
           capture.toolErrorObjects.push(error);
@@ -179,6 +179,8 @@ async function makeFixture(input: {
   withRunJsExecutor?: boolean;
   /** 测试替身执行器（布局不安全用例；缺省 = 真实受限执行器）。 */
   executor?: RunJsExecutor;
+  /** 真实执行器的宿主超时（缺省 30s；超时用例用极短值注入真实时间墙）。 */
+  runJsTimeoutMs?: number;
   onRunJsLayoutUnsafe?: (event: RunJsLayoutUnsafeReport) => void;
 } = {}): Promise<Fixture> {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'runtime-worker-run-js-'));
@@ -189,7 +191,7 @@ async function makeFixture(input: {
   const runJsExecutor: RunJsExecutor | undefined = input.executor
     ?? (input.withRunJsExecutor === false
       ? undefined
-      : createRunJsExecutor({ fileStore, nodeModulesDir: NODE_MODULES, timeoutMs: 30_000 }));
+      : createRunJsExecutor({ fileStore, nodeModulesDir: NODE_MODULES, timeoutMs: input.runJsTimeoutMs ?? 30_000 }));
   const mainCapture: MainCapture = { toolNames: [], results: [], toolErrors: [] };
   const main = queueMainDriver(mainCapture);
   const workerCapture: WorkerCapture = {
@@ -328,6 +330,58 @@ describe('CAP-01 S2 ① Worker 接 run_js（任务作用域）', () => {
       const task = fx.session.getTask(turn.taskIds[0]!);
       expect(task.status).toBe('failed');
       expect(task.reason ?? '').not.toBe('');
+    } finally {
+      fx.ro.close();
+      fx.close();
+    }
+  });
+
+  it('查询成功但脚本超时 → 任务判 failed（超时写失败执行事实，不再假绿）', async () => {
+    // 宿主时间墙用极短值注入（真实受限执行器）：死循环脚本被进程组 SIGKILL。
+    // 超时只杀脚本、Worker 仍有预算 → Worker 正常汇报；底账若不写超时事实，
+    // 「查询成功」会单独把任务判 completed——正是本用例要钉死的假绿。
+    const fx = await makeFixture({ runJsTimeoutMs: 100 });
+    try {
+      fx.workerPush({
+        execCalls: [
+          { tool: 'execute_operation', args: { operation: 'dummy.query', args: { '--collection': 'documents' } } },
+          { tool: 'run_js', args: { code: 'while (true) {}' } },
+        ],
+        text: '查询完成，脚本跑过了。',
+      });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '查完再算' } }], text: '完成。' });
+      const turn = await fx.session.send('交办');
+      const task = fx.session.getTask(turn.taskIds[0]!);
+      expect(task.status).toBe('failed');
+      // 原因可读：机械合成里带 run_js 与超时事实，不是空话术。
+      expect(task.failureReason ?? '').toContain('run_js');
+      expect(task.failureReason ?? '').toContain('超时');
+    } finally {
+      fx.ro.close();
+      fx.close();
+    }
+  });
+
+  it('宿主中止（killReason=abort）不写失败执行事实（取消归取消路径定性）', async () => {
+    const fx = await makeFixture();
+    try {
+      const aborted = new AbortController();
+      aborted.abort();
+      fx.workerPush({
+        execCalls: [
+          { tool: 'execute_operation', args: { operation: 'dummy.query', args: { '--collection': 'documents' } } },
+          // 预先取消信号 → 真实执行器不 spawn、返回 killReason=abort。
+          { tool: 'run_js', args: { code: 'while (true) {}' }, signal: aborted.signal },
+        ],
+        text: '查询完成。',
+      });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '查完再算' } }], text: '完成。' });
+      const turn = await fx.session.send('交办');
+      const task = fx.session.getTask(turn.taskIds[0]!);
+      // abort 不进底账：只有查询这一条执行事实，不把取消伪装成 run_js 失败。
+      expect(task.executions.map((execution) => [execution.operation, execution.status]))
+        .toEqual([['dummy.query', 'completed']]);
+      expect(task.status).toBe('completed');
     } finally {
       fx.ro.close();
       fx.close();
