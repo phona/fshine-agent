@@ -163,6 +163,11 @@ export interface RuntimeConfig {
   mainTurnMs?: number;
   /** Worker 回合墙钟上限（ms）。缺省 180000（与执行侧现行缺省一致）。 */
   workerTurnMs?: number;
+  /**
+   * 单回合内允许发起的执行 operation 上限（同一回合全部委派合计计数；缺省 5）。
+   * 资源边界，不是计划门：超限在**发起前**确定性拒绝并如实告知，不判断业务。
+   */
+  maxOperationsPerTurn?: number;
   /** 委派深度上限；0 = 不允许委派。缺省 1（Main → Worker 一层）。 */
   maxDelegationDepth?: number;
   /** 任务级共享预算；缺省未配置 = 无任务级预算（现行为）。 */

@@ -533,6 +533,24 @@ host:
     }
   });
 
+  it('runtime.maxOperationsPerTurn：正整数解析；非法值 fail-fast；缺省不造键', () => {
+    // 缺省 = 加载层不造键；缺省 5 由 resolveRuntimeConfig 补齐（A2 单回合执行上界）。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+
+    const explicit = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  maxOperationsPerTurn: 8\n`),
+      env: {},
+    });
+    expect(explicit.runtime).toEqual({ maxOperationsPerTurn: 8 });
+
+    for (const bad of ['0', '-1', '1.5', 'nope']) {
+      const yaml = `${VALID_YAML}runtime:\n  maxOperationsPerTurn: ${bad}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(
+        /runtime\.maxOperationsPerTurn/,
+      );
+    }
+  });
+
   it('runtime.attachmentNudgeAfterMs：正数 / 0 解析；非法值 fail-fast；缺省不造键', () => {
     // 缺省 = 加载层不造键；缺省 30000（30 秒）由 resolveRuntimeConfig 补齐。
     expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();

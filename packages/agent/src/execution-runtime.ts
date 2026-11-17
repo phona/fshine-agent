@@ -605,6 +605,12 @@ export interface Session {
 
 const DEFAULT_MAIN_TURN_MS = 300_000;
 const DEFAULT_WORKER_TURN_MS = 180_000;
+/**
+ * A2（2026-11-18）：单回合执行 operation 上限的执行侧缺省（与 resource-policy 缺省 5
+ * 同值）。注入策略时读策略解析值（单一配置源：runtime 配置的缺省与解释归 resource-policy）；
+ * 未注入策略的纯内存会话（测试/嵌入）用本缺省——上界照常生效，不依赖策略注入。
+ */
+const DEFAULT_MAX_OPERATIONS_PER_TURN = 5;
 /** Worker 必须在 Main 截止前留出的收尾余量（Main 还要拿汇报生成用户回复）。 */
 const WORKER_DEADLINE_MARGIN_MS = 30_000;
 
@@ -631,6 +637,14 @@ export function renderWorkerFileManifest(files: readonly TurnFileRef[]): string 
  * `answer` = 用户对上一次待办问题的补答（waiting_user 续跑回合），原文交给 Worker——
  * 每个后台回合都是新 Worker（不带上一回合转录），补答不随委派交给执行端就等于丢失。
  */
+/**
+ * 能力快照标题下的中性事实（A1，2026-11-18）：让模型看见「执行的重量」——成本陈述，
+ * **不是阈值规则**：宿主不设阈值、不裁决、不拦截；每个 operation 是否标注估时/重量
+ * 由执行层自述（缺省不出现）。只陈述 N 次执行与 N 倍等待/失败面的机械关系。
+ */
+export const WORKER_SNAPSHOT_COST_NOTE =
+  '每个 operation 标注单次估时与重量；一次任务发起 N 次执行，等待与失败面按 N 倍增长。';
+
 export function renderWorkerDelegation(input: {
   task: string;
   manifest: CapabilityManifest;
@@ -643,6 +657,7 @@ export function renderWorkerDelegation(input: {
     input.task,
     '',
     '## 能力快照（本轮唯一可执行面：只能调用这里登记的 operation）',
+    WORKER_SNAPSHOT_COST_NOTE,
     '```json',
     JSON.stringify(input.manifest, null, 2),
     '```',
@@ -720,6 +735,23 @@ const RESULT_UNKNOWN_MESSAGE =
   '结果待核对：无法确认这次操作是否已经发生，已停止自动重试，需要人工核对后再决定是否重办。';
 const OPERATION_IN_PROGRESS_MESSAGE =
   '这次操作正在执行中，本次没有重复发起；请以已有执行记录为准，不要并发重试。';
+
+/**
+ * A2 同回合拒话术（2026-11-18）：存在本回合发放、尚未消费的待确认提案时，同一回合内
+ * 再发起非只读 operation 一律在**发起前**拒绝。旧纪律只挡句柄透传（同回合 commit 仍会
+ * 打到执行层的 CONFIRMATION_NOT_FOUND）；现在以工具错误如实告知模型等用户下一回合表态
+ * ——不发起执行、不落执行事实，宿主不判断用户是否在确认。
+ */
+export const SAME_TURN_CONFIRMATION_PENDING_MESSAGE =
+  '待确认提案已生成：需要用户在下一回合确认后才能提交；本回合不再发起新的执行。';
+
+/**
+ * A2 单回合 operation 上限话术：如实报数（已发起 N 次 / 上限 M），不是静默失败。
+ * 这是资源边界，不是计划门：不判断业务，只数本回合已发起的执行次数。
+ */
+export function turnOperationLimitMessage(limit: number, used: number): string {
+  return `本回合已发起 ${used} 次执行，达到单回合上限 ${limit}：本回合不再发起新的执行；如有需要，请等用户下一回合再继续。`;
+}
 
 /** 认领结果的机械处置（runtime 内部；不对外暴露身份键细节）。 */
 interface OperationRunResult {
@@ -940,6 +972,15 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   const mainTurnMs = options.mainTurnMs ?? DEFAULT_MAIN_TURN_MS;
   const workerTurnMs = options.workerTurnMs ?? DEFAULT_WORKER_TURN_MS;
   const policy = options.policy;
+  /**
+   * A2：单回合执行 operation 上限。注入策略时读策略解析值（缺省与解释归 resource-policy，
+   * 不在运行时重读 runtime 配置）；未注入策略时用执行侧同值缺省——上界照常生效。
+   */
+  const maxOperationsPerTurn = policy !== undefined
+    ? policy.snapshot().config.maxOperationsPerTurn
+    : DEFAULT_MAX_OPERATIONS_PER_TURN;
+  /** A2：本回合已发起的执行次数（send 时清零；跨本回合全部委派合计）。 */
+  let operationsThisTurn = 0;
   const dispatchMode: 'inline' | 'background' = options.dispatchMode ?? 'inline';
   const taskRunner = options.taskRunner;
   if (dispatchMode === 'background' && taskRunner === undefined) {
@@ -1391,6 +1432,24 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // 允许集合边界：集合外的 operation 在发起执行前被拒——不依赖模型遵守提示词。
       throw new Error(`「${operation}」不在本轮允许集合内，未发起执行。`);
     }
+    // A2 同回合拒（2026-11-18）：存在**本回合**发放、尚未消费的待确认提案时，同一回合内
+    // 再发起非只读 operation 一律不执行——同回合 commit 不是用户表态（旧纪律只挡住了句柄
+    // 透传，模型仍会反复 commit 打到执行层的 CONFIRMATION_NOT_FOUND）。以工具错误如实
+    // 告知模型等用户下一回合表态；不发起执行、不落执行事实。只读 operation 不受影响。
+    if (
+      pendingConfirmation !== undefined
+      && pendingConfirmation.issuedTurn >= turnNo
+      && !readOnlyOperations.has(operation)
+    ) {
+      throw new Error(SAME_TURN_CONFIRMATION_PENDING_MESSAGE);
+    }
+    // A2 单回合上界（资源边界，不是计划门）：本回合已发起次数达到上限时，后续调用在
+    // 发起前被拒并如实告知；不判断业务。计数在发起前同步推进（含随后的每次真实发起，
+    // 被拒/回放的调用不计——它们没有走到这里）。
+    if (operationsThisTurn >= maxOperationsPerTurn) {
+      throw new Error(turnOperationLimitMessage(maxOperationsPerTurn, operationsThisTurn));
+    }
+    operationsThisTurn += 1;
     const rawArgs = args.args;
     const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
       ? (rawArgs as Record<string, unknown>)
@@ -1729,6 +1788,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       currentTurnDeadline = Date.now() + mainTurnMs;
       // U3：本回合的 turn 作用域（task_run 逻辑操作身份的作用域）与重放窗口。
       turnNo += 1;
+      // A2：单回合执行计数随回合清零（上界按回合计，不跨回合累计）。
+      operationsThisTurn = 0;
       const turnScopeKey = `turn:${options.sessionId}:${turnNo}`;
       const mainWindow = newAttemptWindow();
       // 宿主只交「本轮输入」：最后一条 user = 本轮文本；历史种子仅在驱动尚无会话时使用。

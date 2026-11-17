@@ -51,6 +51,7 @@ describe('resolveRuntimeConfig：缺省 = 前台并发 4 + 排队 16，非法 fa
       mainTurnMs: 300_000,
       workerTurnMs: 180_000,
       maxDelegationDepth: 1,
+      maxOperationsPerTurn: 5,
       taskBudget: null,
       waitUserTimeoutMs: 86_400_000,
       fileRetentionDays: 30,
@@ -69,6 +70,18 @@ describe('resolveRuntimeConfig：缺省 = 前台并发 4 + 排队 16，非法 fa
         () => resolveRuntimeConfig({ attachmentNudgeAfterMs: bad } as unknown as RuntimeConfig),
         `attachmentNudgeAfterMs=${String(bad)}`,
       ).toThrowError(/runtime\.attachmentNudgeAfterMs/);
+    }
+  });
+
+  it('maxOperationsPerTurn：缺省 5；显式值保留；非正整数 fail-fast（A2 单回合执行上界）', () => {
+    expect(resolveRuntimeConfig().maxOperationsPerTurn).toBe(5);
+    expect(resolveRuntimeConfig({ maxOperationsPerTurn: 8 }).maxOperationsPerTurn).toBe(8);
+
+    for (const bad of [0, -1, 1.5, '5']) {
+      expect(
+        () => resolveRuntimeConfig({ maxOperationsPerTurn: bad } as unknown as RuntimeConfig),
+        `maxOperationsPerTurn=${String(bad)}`,
+      ).toThrowError(/runtime\.maxOperationsPerTurn/);
     }
   });
 

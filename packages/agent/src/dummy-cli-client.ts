@@ -44,6 +44,9 @@ export interface RawGatewayOperation {
   name: string;
   label?: string;
   access?: string;
+  /** 执行层自述的成本提示（A1）：形状校验后投影为契约的 weight/estimatedSeconds。 */
+  weight?: unknown;
+  est_seconds?: unknown;
   args?: {
     positional?: Array<{ name?: string; required?: boolean }>;
     flags?: Array<{ flag?: string; required?: boolean; style?: string }>;
@@ -176,11 +179,19 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
       const operations = await listOperations();
       return {
         contractVersion: EXECUTION_CONTRACT_VERSION,
-        operations: operations.map((operation) => ({
-          name: operation.name,
-          ...(typeof operation.label === 'string' && operation.label !== '' ? { label: operation.label } : {}),
-          args: declaredArgsOf(operation),
-        })),
+        operations: operations.map((operation) => {
+          // A1 成本提示投影：执行层自述的 weight/est_seconds 原样进声明（缺省/形状不对
+          // = 字段不出现，零行为变化）；宿主只转述，不解释、不裁决、不做阈值判定。
+          const weight = declaredCostOf(operation.weight);
+          const estimatedSeconds = declaredCostOf(operation.est_seconds);
+          return {
+            name: operation.name,
+            ...(typeof operation.label === 'string' && operation.label !== '' ? { label: operation.label } : {}),
+            ...(weight === undefined ? {} : { weight }),
+            ...(estimatedSeconds === undefined ? {} : { estimatedSeconds }),
+            args: declaredArgsOf(operation),
+          };
+        }),
       };
     },
     async execute(
@@ -214,6 +225,11 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
       }
     },
   };
+}
+
+/** 成本提示的形状校验：有限数值才投影；缺省/非数值 = 字段不出现（不解释、不裁决）。 */
+function declaredCostOf(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 /** 参数声明投影：位置参数在前、flag 在后；空名条目丢弃。 */

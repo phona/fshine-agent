@@ -142,6 +142,12 @@ export interface ResolvedRuntimeConfig {
   readonly queueCapacity: number;
   readonly mainTurnMs: number;
   readonly workerTurnMs: number;
+  /**
+   * 单回合执行 operation 上限（A2，2026-11-18）：同一回合全部委派合计计数，超限在
+   * 发起前确定性拒绝。资源边界，不是计划门——不判断业务；消费点在 execution-runtime
+   * （每回合计数；策略缺省 5，执行侧无策略时用同值缺省）。
+   */
+  readonly maxOperationsPerTurn: number;
   readonly maxDelegationDepth: number;
   readonly taskBudget: TaskBudgetLimits | null;
   readonly waitUserTimeoutMs: number;
@@ -166,6 +172,9 @@ export const DEFAULT_RUNTIME_CONFIG: ResolvedRuntimeConfig = Object.freeze({
   queueCapacity: 16,
   mainTurnMs: 300_000,
   workerTurnMs: 180_000,
+  // A2（2026-11-18 owner 定）：单回合执行 operation 上限缺省 5——live 实测单任务 15 次
+  // operation、用户转 90 秒的资源边界；不是计划门，超限只在发起前确定性拒绝。
+  maxOperationsPerTurn: 5,
   maxDelegationDepth: 1,
   taskBudget: null,
   waitUserTimeoutMs: 86_400_000,
@@ -282,6 +291,9 @@ export function resolveRuntimeConfig(config: RuntimeConfig = {}): ResolvedRuntim
     workerTurnMs: config.workerTurnMs === undefined
       ? DEFAULT_RUNTIME_CONFIG.workerTurnMs
       : assertRuntimeInteger(config.workerTurnMs, 'runtime.workerTurnMs', 1),
+    maxOperationsPerTurn: config.maxOperationsPerTurn === undefined
+      ? DEFAULT_RUNTIME_CONFIG.maxOperationsPerTurn
+      : assertRuntimeInteger(config.maxOperationsPerTurn, 'runtime.maxOperationsPerTurn', 1),
     maxDelegationDepth: config.maxDelegationDepth === undefined
       ? DEFAULT_RUNTIME_CONFIG.maxDelegationDepth
       : assertRuntimeInteger(config.maxDelegationDepth, 'runtime.maxDelegationDepth', 0),

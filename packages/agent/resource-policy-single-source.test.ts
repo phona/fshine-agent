@@ -81,6 +81,8 @@ const DELETED_ENV_KEYS = [
  *    2026-11-17 起另**只读** policy 快照的解析值（`snapshot().queueCapacity`）做后台
  *    受理上界判定（底账 queued 行 < 容量才受理）——不解析/不重定义缺省、不读原始
  *    `config.runtime.*`（单一配置源不破坏）；
+ *    2026-11-18 起同样**只读** policy 快照解析值 `snapshot().config.maxOperationsPerTurn`
+ *    做单回合执行上界（A2；未注入策略时用执行侧同值缺省 5，不读原始配置）；
  *  - scripts/ask-runtime.ts（R4 集成登记，2026-11-14）：**装配点的解析值透传**——把
  *    `resolveRuntimeConfig` 的 mainTurnMs/workerTurnMs 注入执行侧消费点与后台 runner
  *    leaseMs；不自行解释旋钮、不读原始 `config.runtime.*`（单一配置源不破坏）。
@@ -91,6 +93,9 @@ const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   queueCapacity: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS, P2_SCENARIOS, R8_CONCURRENCY, EXECUTION_RUNTIME],
   mainTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME],
   workerTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME, P2_SCENARIOS],
+  // A2（2026-11-18）：单回合执行 operation 上限——缺省与解释归策略；execution-runtime
+  // 只读策略解析值消费（未注入策略时用执行侧同值缺省 5），不读原始 runtime 配置。
+  maxOperationsPerTurn: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME],
   maxDelegationDepth: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   taskBudget: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   waitUserTimeoutMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],

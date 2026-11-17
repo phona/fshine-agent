@@ -688,10 +688,13 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
     }
   });
 
-  it('边界：同一回合内 prepare 后立刻 commit 不算用户确认（句柄只在下一回合透传）', async () => {
+  it('边界：同一回合内 prepare 后立刻 commit 不执行（提案等用户下一回合表态；A2 同回合拒）', async () => {
     const fx = await createHostFixture({ dir: tempDir('host-wc-same-turn-'), allowWrite: true, captureRequests: true });
     try {
       // 一个回合里连续两次执行调用：prepare 发了句柄，紧接着 commit——宿主不得在同回合透传。
+      // 2026-11-18 A2 收紧：旧纪律只挡句柄透传（同回合 commit 仍打到执行层的
+      // CONFIRMATION_NOT_FOUND，live 实测单任务 15 次 operation）；现在同一回合内再发起
+      // 非只读 operation 一律在**发起前**拒绝——不发起执行、不落执行事实。
       fx.worker.push({
         calls: [
           { tool: EXECUTE_OPERATION_TOOL, args: { operation: 'dummy.prepare', args: PREPARE_ARGS } },
@@ -701,12 +704,15 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
       });
       fx.main.push({ calls: [{ tool: TASK_RUN_TOOL, args: { task: '在 alpha 集合新增两条记录' } }], text: mainRelay });
       const turn = await fx.session.send('帮我在 alpha 集合里新增两条记录');
-      // 两次调用都到了执行层；第二次没有确认引用 → 执行层确定性拒绝，零写入。
-      expect(fx.requests).toHaveLength(2);
+      // 只有 prepare 到达执行层；同回合 commit 被宿主在发起前拒收（零执行、零执行事实）。
+      expect(fx.requests).toHaveLength(1);
       expect(fx.requests[0]!.operation).toBe('dummy.prepare');
-      expect(fx.requests[1]!.operation).toBe('dummy.commit');
-      expect(fx.requests[1]!.confirmation).toBeUndefined();
-      expect(turn.executions.map((execution) => execution.status)).toEqual(['needs_confirmation', 'refused']);
+      expect(fx.requests[0]!.confirmation).toBeUndefined();
+      // 工具错误如实告知模型：提案已生成，等用户下一回合表态。
+      expect(fx.worker.toolErrors).toHaveLength(1);
+      expect(fx.worker.toolErrors[0]).toContain('提案');
+      expect(fx.worker.toolErrors[0]).toContain('下一回合');
+      expect(turn.executions.map((execution) => execution.status)).toEqual(['needs_confirmation']);
       expect((await queryData(fx.stateDir)).count).toBe(2);
     } finally {
       fx.close();
