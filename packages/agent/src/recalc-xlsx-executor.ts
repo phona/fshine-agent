@@ -337,8 +337,12 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
       }
 
       try {
-        if (statSync(sourcePath).size > maxInputBytes) return errorResult('too_large');
+        if (statSync(sourcePath).size > maxInputBytes) {
+          writeFailReport(runDir, materialized.name, sourcePath, 'too_large', startedAt);
+          return errorResult('too_large');
+        }
       } catch {
+        writeFailReport(runDir, materialized.name, sourcePath, 'not_found', startedAt);
         return errorResult('not_found');
       }
 
@@ -398,7 +402,10 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
       const allSheets = srcWb.worksheets.map((ws) => ws.name);
       const sheetFilter = input.sheet;
       // Codex 三复审 P2：sheet 指向不存在的表不能静默产出空 CSV 并 pass。
-      if (sheetFilter !== undefined && !allSheets.includes(sheetFilter)) return errorResult('not_found');
+      if (sheetFilter !== undefined && !allSheets.includes(sheetFilter)) {
+        writeFailReport(runDir, materialized.name, sourcePath, 'not_found', startedAt);
+        return errorResult('not_found');
+      }
 
       for (const sheetName of allSheets) {
         const srcSheet = srcWb.getWorksheet(sheetName);
