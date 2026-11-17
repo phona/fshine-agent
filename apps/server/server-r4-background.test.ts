@@ -43,7 +43,10 @@ function testConfig(mode: 'inline' | 'background'): AppConfig {
     },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
-    ...(mode === 'background' ? { runtime: { dispatchMode: 'background' as const, backgroundConcurrency: 1 } } : {}),
+    ...(mode === 'background'
+      // B 切片：钉 0 窗口（受理→后台→通知链路的机械断言；窗口行为由专测覆盖）。
+      ? { runtime: { dispatchMode: 'background' as const, backgroundConcurrency: 1, taskRunWaitMs: 0 } }
+      : {}),
   };
 }
 
@@ -214,10 +217,13 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
     try {
       const reply = await server.handler(incoming('user-a', 'conv-a', 'msg-1', '查 documents W202611'));
       expect(reply).toBe('已受理，稍后通知你。');
-      // 受理事实（task_run 返回）带数字编号/业务名/queued
+      // 受理事实（task_run 返回）：业务名 + 机械事实话术；B 切片回执去编号（不含 #）
       const accepted = records[0]!.execResults[0] as Record<string, unknown>;
-      expect(accepted).toMatchObject({ status: 'queued', accepted: true, taskNo: 1 });
-      expect(String(accepted['notice'])).toContain('#1');
+      expect(accepted).toMatchObject({ accepted: true });
+      expect(accepted).not.toHaveProperty('taskNo');
+      const notice = String(accepted['notice']);
+      expect(notice).toContain('已受理');
+      expect(notice).not.toContain('#');
       const taskId = String(accepted['taskId']);
       const taskScope = { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' };
       // 后台完成 + 结果经 archiveReply 取回

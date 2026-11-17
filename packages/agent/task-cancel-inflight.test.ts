@@ -297,11 +297,15 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       policy,
       dispatchMode: 'background',
       taskRunner: runner,
+      // B 切片：钉 0 窗口（本套件测取消在飞机制；窗口行为由专测覆盖）。
+      taskRunWaitMs: 0,
     });
     try {
       await session.send('帮我查 alpha 集合，跑起来别等');
-      const receipt = results[0] as { taskId: string; taskNo: number; accepted: boolean };
-      expect(receipt).toMatchObject({ taskNo: 1, accepted: true });
+      const receipt = results[0] as { taskId: string; accepted: boolean };
+      // B 切片回执去编号：受理回执不带 taskNo（编号只在详情面）。
+      expect(receipt).toMatchObject({ accepted: true });
+      expect(receipt).not.toHaveProperty('taskNo');
 
       // 在飞：执行层调用已发起、gate 未回。
       await vi.waitFor(() => {

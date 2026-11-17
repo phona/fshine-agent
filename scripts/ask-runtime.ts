@@ -382,6 +382,16 @@ const LEASE_MARGIN_MS = 60_000;
  * （可注入假件）→ TaskRunner。runner 为**进程级**对象，由入口（server）或装配核心构建后
  * 注入会话；本函数不 pump（触发点由调用方掌握：受理后/落定后/启动恢复）。
  */
+/** 一次后台执行回合的机械结局里，宿主完成投递面需要的事实（B 切片完成回调接缝）。 */
+export interface BackgroundTaskCompletion {
+  taskId: string;
+  principalId: string;
+  sessionId: string;
+  request: string;
+  /** 执行端确认的结果原文（仅 completed 且非空时回调；逐字，未过出口清理）。 */
+  resultText: string;
+}
+
 export interface BackgroundDispatchInput {
   env: NodeJS.ProcessEnv;
   profile: ContextProfileConfig;
@@ -398,6 +408,12 @@ export interface BackgroundDispatchInput {
   createExecutionFace?: ExecutionFaceFactory;
   /** 测试注入：假后台执行器（缺省 = 真实 Worker 回合执行器）。 */
   taskExecutor?: TaskExecutor;
+  /**
+   * B 切片（工单回执收敛）：后台任务完成回调——执行端确认 completed 的回合结局
+   * （每任务恰好一次；runner 不重跑终态）。回调在 runner 收尾前同步触发，回调自身负责
+   * 异步化（fire-and-forget：不得阻塞收尾、不得改变任务事实）。缺省不接 = 零行为变化。
+   */
+  onTaskCompleted?: (completion: BackgroundTaskCompletion) => void;
   /** 预构建执行面/worker 驱动（装配核心复用；已给 taskExecutor 时不需要）。 */
   face?: ExecutionFace;
   workerDriver?: TurnDriver;
@@ -438,6 +454,27 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
       // 可信工作目录：装配层持有的 profile.root（绝不取模型输出/用户消息）。
       workerWorkspaceRoot: input.profile.root,
     });
+  }
+  // B 切片：完成回调接缝——包装实际使用的执行器（注入的或默认构建的同一道包装）。
+  // 回调在 runner 收尾前同步触发；快活（结果已同回合交给模型）的抑制由装配调用方处置。
+  if (input.onTaskCompleted !== undefined) {
+    const inner = executor;
+    const onTaskCompleted = input.onTaskCompleted;
+    executor = {
+      async execute(task, context) {
+        const outcome = await inner.execute(task, context);
+        if (outcome.kind === 'completed' && outcome.resultText.trim() !== '') {
+          onTaskCompleted({
+            taskId: task.taskId,
+            principalId: task.principalId,
+            sessionId: task.sessionId,
+            request: task.request,
+            resultText: outcome.resultText,
+          });
+        }
+        return outcome;
+      },
+    };
   }
   const runner = createTaskRunner({
     registry: input.registry,
@@ -679,6 +716,8 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       ...(input.fileManifestProvider === undefined ? {} : { fileManifestProvider: input.fileManifestProvider }),
       mainTurnMs: resolved.mainTurnMs,
       workerTurnMs: resolved.workerTurnMs,
+      // B 切片（工单回执收敛）：task_run 短等待窗口（单一配置源 = runtime 解析值）。
+      taskRunWaitMs: resolved.taskRunWaitMs,
       // 可信工作目录：装配层持有的 profile.root（绝不取模型输出/用户消息）。
       workerWorkspaceRoot: input.profile.root,
     });

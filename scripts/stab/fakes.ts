@@ -254,7 +254,9 @@ export async function assembleStabSession(options: AssembleStabOptions): Promise
     workerSkills: [],
     createDrivers: () => ({ mainDriver: options.mainDriver, workerDriver: options.workerDriver }),
     createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
-    runtime: options.runtime,
+    // B 切片：稳定性套件钉在异步受理语义（受理/背压/排空的机械读数）；短等待窗口的
+    // 默认行为由 runtime-task-wait-window / server-task-wait-window 专测覆盖。
+    runtime: { taskRunWaitMs: 0, ...options.runtime },
     taskExecutor: options.taskExecutor,
     taskRegistry: options.registry,
     ...(options.runnerOptions === undefined ? {} : { runnerOptions: options.runnerOptions }),

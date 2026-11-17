@@ -196,6 +196,9 @@ async function assembleBackground(options: AssembleOptions): Promise<Awaited<Ret
     runtime: {
       dispatchMode: 'background',
       backgroundConcurrency: options.backgroundConcurrency ?? 1,
+      // B 切片：本套件钉在异步受理语义（受理与执行解耦的机械事实断言）；短等待窗口的
+      // 默认行为由 runtime-task-wait-window / server-task-wait-window 专测覆盖。
+      taskRunWaitMs: 0,
       ...(options.queueCapacity === undefined ? {} : { queueCapacity: options.queueCapacity }),
     },
     ...(options.taskExecutor === undefined ? {} : { taskExecutor: options.taskExecutor }),
@@ -215,7 +218,7 @@ async function settleQuietly(assembled: Awaited<ReturnType<typeof assembleSessio
 }
 
 describe('R4 联合：P6 后台受理与执行（background 模式，假 executor）', () => {
-  it('① 受理快速返回：Main 拿到 queued 受理事实，不等待后台执行', async () => {
+  it('① 受理快速返回：Main 拿到受理事实，不等待后台执行', async () => {
     const dbPath = path.join(tempDir(), 'state.db');
     const gate = deferred<TaskExecutionOutcome>();
     const executor = new FakeExecutor([async () => await gate.promise]);
@@ -231,10 +234,13 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
       expect(turn.taskIds).toHaveLength(1);
       const taskId = turn.taskIds[0]!;
       const accepted = records[0]!.execResults[0] as Record<string, unknown>;
-      expect(accepted).toMatchObject({ taskId, status: 'queued', accepted: true });
-      expect(accepted['taskNo']).toBe(1);
+      // B 切片回执去编号：机械事实（已受理、在后台办理中）不带工单编号；status = 受理后实时事实
+      expect(accepted).toMatchObject({ taskId, status: 'running', accepted: true });
+      expect(accepted).not.toHaveProperty('taskNo');
       expect(String(accepted['name']).length).toBeGreaterThan(0);
-      expect(String(accepted['notice'])).toContain('#1');
+      const notice = String(accepted['notice']);
+      expect(notice).toContain('已受理');
+      expect(notice).not.toContain('#');
       // 受理后已触发派发：行进入 running，尚未终态
       expect(assembled.taskRegistry.get(taskId, SCOPE_A).status).toBe('running');
       // 放行后台回合 → 收尾 completed

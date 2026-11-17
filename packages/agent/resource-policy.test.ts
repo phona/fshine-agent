@@ -57,7 +57,20 @@ describe('resolveRuntimeConfig：缺省 = 前台并发 4 + 排队 16，非法 fa
       fileRetentionDays: 30,
       fileRetentionSweepOnStart: false,
       attachmentNudgeAfterMs: 30_000,
+      // B 切片：task_run 短等待窗口缺省 1500ms（0 = 不等直接后台）。
+      taskRunWaitMs: 1_500,
     });
+  });
+
+  it('taskRunWaitMs：缺省 1500；0 = 不等直接后台；负数/非整数 fail-fast', () => {
+    expect(resolveRuntimeConfig().taskRunWaitMs).toBe(1_500);
+    expect(resolveRuntimeConfig({ taskRunWaitMs: 0 }).taskRunWaitMs).toBe(0);
+    expect(resolveRuntimeConfig({ taskRunWaitMs: 5_000 }).taskRunWaitMs).toBe(5_000);
+    for (const bad of [-1, 1.5, '1500']) {
+      expect(
+        () => resolveRuntimeConfig({ taskRunWaitMs: bad } as unknown as RuntimeConfig),
+      ).toThrowError(/runtime.taskRunWaitMs/);
+    }
   });
 
   it('attachmentNudgeAfterMs：缺省 30000；0 = 关闭；负数/非整数 fail-fast', () => {
