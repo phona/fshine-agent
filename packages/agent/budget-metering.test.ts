@@ -59,7 +59,7 @@ interface MainTurnRecord {
   readonly execErrors: readonly unknown[];
 }
 
-/** 假 Main driver：按用户文本取计划，逐条委派 run_task；委派错误记下后继续（回合不炸）。 */
+/** 假 Main driver：按用户文本取计划，逐条委派 task_run；委派错误记下后继续（回合不炸）。 */
 function fakeMain(
   plans: ReadonlyMap<string, MainPlan>,
 ): { driver: TurnDriver; records: MainTurnRecord[] } {

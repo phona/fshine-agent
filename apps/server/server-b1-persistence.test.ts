@@ -93,7 +93,7 @@ interface Plan {
   reply?: string;
 }
 
-/** 记录每回合输入转录的假主驱动：按最后一条 user 文本查计划，可委派（run_task）、给回复。 */
+/** 记录每回合输入转录的假主驱动：按最后一条 user 文本查计划，可委派（task_run）、给回复。 */
 function plannedDriver(plans: ReadonlyMap<string, Plan>, records: DriverMessage[][]): TurnDriver {
   return {
     async run(input) {

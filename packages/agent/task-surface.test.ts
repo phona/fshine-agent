@@ -1,7 +1,7 @@
 /**
  * 缺口 1 · 对话面任务工具（task_status / task_result / task_cancel / task_resume）。
  *
- * 缺口本体：Main 工具面只有 run_task，用户在对话里问「那个任务怎么样了 / 取消它 / 接着办 /
+ * 缺口本体：Main 工具面只有 task_run，用户在对话里问「那个任务怎么样了 / 取消它 / 接着办 /
  * 结果再发一遍」时模型无工具可查可动。本切片把既有 registry/runner 能力以**服务端身份授权**
  * 接到 Main 工具面——工具参数只收任务引用，scope 由宿主在 send() 闭包用运行时 principal/session
  * 构造、编号解析在 scope 内做（越权=找不到）；取消/接续如实转述。
@@ -9,8 +9,7 @@
  * 判据（TDD：实现前红 → 接线后绿；全部假件，零网络/零模型）：
  *   · 工具面：有 runner 时暴露四工具；无 runner 时只读查询（task_status/task_result）仍暴露、
  *     治理工具（task_cancel/task_resume）不上面；Worker 工具面不含这四个工具；
- *   · task_status：空 ref 列本会话任务；#编号 查单个；无任务时返回空列表而非报错；
- *   · 越权=找不到：跨会话同编号不可见（同一底账内按 scope 隔离，不泄露存在性）；
+ *   · task_status：空 ref 列本会话任务；#编号 查单个；无任务时返回空列表而非报错； *   · 越权=找不到：跨会话同编号不可见（同一底账内按 scope 隔离，不泄露存在性）；
  *     跨 principal 的列表查询返回空列表；
  *   · 身份注入绊线：参数里塞 principalId/sessionId 被忽略，scope 恒取宿主；
  *   · task_result：completed 返回逐字存档；非终态返回状态本身、不编造结果；
@@ -123,16 +122,15 @@ function value<T = Record<string, unknown>>(result: ExecResult): T {
 }
 
 describe('缺口 1 · 对话面任务工具', () => {
-  it('工具面：有 runner 暴露 run_task + 四工具；无 runner 时只读查询仍注册、治理工具不注册', async () => {
-    const withRunner = await build([], { withRunner: true });
+  it('工具面：有 runner 暴露 task_run + 四工具；无 runner 时只读查询仍注册、治理工具不注册', async () => {    const withRunner = await build([], { withRunner: true });
     await withRunner.session.send('随便说一句');
     const names = withRunner.turns[0]!.tools.map((tool) => tool.name);
-    expect(names).toEqual(['run_task', 'task_status', 'task_result', 'task_cancel', 'task_resume']);
+    expect(names).toEqual(['task_run', 'task_status', 'task_result', 'task_cancel', 'task_resume']);
 
     const withoutRunner = await build([], { withRunner: false });
     await withoutRunner.session.send('随便说一句');
     expect(withoutRunner.turns[0]!.tools.map((tool) => tool.name))
-      .toEqual(['run_task', 'task_status', 'task_result']);
+      .toEqual(['task_run', 'task_status', 'task_result']);
   });
 
   it('无 runner 且无任务：task_status 空 ref 返回空列表而不是报错（只读查询不依赖 runner）', async () => {
@@ -148,8 +146,7 @@ describe('缺口 1 · 对话面任务工具', () => {
     const b = await build([{ tool: 'task_status', args: {} }], { scope: SCOPE_B, registry, withRunner: false });
     await b.session.send('B 有哪些任务');
     const listed = value<{ tasks: unknown[] }>(b.turns[0]!.results[0]!);
-    expect(listed.tasks).toEqual([]);
-  });
+    expect(listed.tasks).toEqual([]);  });
 
   it('task_status：空 ref 列本会话任务；#编号 返回状态与 pendingQuestion', async () => {
     const registry = createTaskRegistry();
@@ -307,9 +304,9 @@ describe('缺口 1 · 对话面任务工具', () => {
   });
 
   it('P0-A：inline 受理回执含可引用 taskNo（与 background 回执格式一致）', async () => {
-    // inline 模式（无 runner）下 run_task 直接走 delegate：回执必须带 taskNo，否则用户无编号可引用。
+    // inline 模式（无 runner）下 task_run 直接走 delegate：回执必须带 taskNo，否则用户无编号可引用。
     const registry = createTaskRegistry();
-    // 复用 toolingMain：调用 run_task，workerDriver 由宿主使用——用最简假件驱动 worker 汇报。
+    // 复用 toolingMain：调用 task_run，workerDriver 由宿主使用——用最简假件驱动 worker 汇报。
     // 这里只验证回执字段：让 workerDriver 返回一段非空文本即可（CompleteExecutor 不适用 inline）。
     const turns: RecordedTurn[] = [];
     const session = await createSession({
@@ -317,7 +314,7 @@ describe('缺口 1 · 对话面任务工具', () => {
       sessionId: SCOPE_A.sessionId,
       client: new FaceClient(),
       allowedOperations: ['dummy.query'],
-      mainDriver: toolingMain([{ tool: 'run_task', args: { task: '查 documents 窗口 W202611' } }], turns),
+      mainDriver: toolingMain([{ tool: 'task_run', args: { task: '查 documents 窗口 W202611' } }], turns),
       workerDriver: {
         async run() {
           return { text: '（测试 Worker 汇报）', messages: [] } as never;
@@ -361,7 +358,7 @@ describe('缺口 1 · 对话面任务工具', () => {
     await session.send('取消并接续');
 
     // 工具面快照：治理工具（需要 runner）不注册；只读查询仍在。
-    expect(turns[0]!.tools.map((tool) => tool.name)).toEqual(['run_task', 'task_status', 'task_result']);
+    expect(turns[0]!.tools.map((tool) => tool.name)).toEqual(['task_run', 'task_status', 'task_result']);
     for (const [index, name] of ['task_cancel', 'task_resume'].entries()) {
       const result = turns[0]!.results[index]!;
       expect(result.ok, `${name} 无 runner 必须 fail-closed`).toBe(false);
@@ -378,7 +375,7 @@ describe('缺口 1 · 对话面任务工具', () => {
       sessionId: SCOPE_A.sessionId,
       client: new FaceClient(),
       allowedOperations: ['dummy.query'],
-      mainDriver: toolingMain([{ tool: 'run_task', args: { task: '查 documents 窗口 W202611' } }], turns),
+      mainDriver: toolingMain([{ tool: 'task_run', args: { task: '查 documents 窗口 W202611' } }], turns),
       workerDriver: {
         async run(input) {
           workerTools.push(input.tools.map((tool) => tool.name));

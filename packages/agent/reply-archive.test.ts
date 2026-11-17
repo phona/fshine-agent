@@ -75,7 +75,7 @@ function scriptedMain(script: ReadonlyArray<{ tasks?: readonly string[]; text?: 
       const step = script[index];
       index += 1;
       if (step === undefined) throw new Error('scriptedMain 没有更多回合脚本');
-      for (const task of step.tasks ?? []) await input.exec('run_task', { task });
+      for (const task of step.tasks ?? []) await input.exec('task_run', { task });
       return { text: step.text ?? '', messages: [...input.messages] };
     },
   };
@@ -85,7 +85,7 @@ function scriptedMain(script: ReadonlyArray<{ tasks?: readonly string[]; text?: 
 function failingMain(task: string): TurnDriver {
   return {
     async run(input) {
-      await input.exec('run_task', { task });
+      await input.exec('task_run', { task });
       throw new Error('模型回合爆炸（测试注入）');
     },
   };

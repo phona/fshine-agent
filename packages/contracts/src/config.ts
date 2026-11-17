@@ -44,7 +44,7 @@ export interface ContextProfileConfig {
    * Operator-declared delegation tool name for this profile — the
    * model-visible protocol name published for this deployment. Never
    * supplied by the model. Omitted profiles fall back to the neutral host
-   * default (`RUN_EXECUTION_TASK_TOOL` = `run_task`); an instance's
+   * default (`TASK_RUN_TOOL` = `task_run`); an instance's
    * already-published tool protocol name keeps working by declaring it here.
    */
   toolName?: string;

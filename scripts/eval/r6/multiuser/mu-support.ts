@@ -104,7 +104,7 @@ export interface MuCall { readonly tool: string; readonly args: Readonly<Record<
 export interface MuWorkerPlan { readonly operation: string; readonly args: Readonly<Record<string, unknown>>; readonly summary: string; }
 
 export interface MuMainPlan {
-  /** 本回合显式工具调用（顺序）；run_task 也走这里（args.task）。 */
+  /** 本回合显式工具调用（顺序）；task_run 也走这里（args.task）。 */
   readonly calls?: readonly MuCall[];
   readonly reply: string;
   /** true = 本回合在**执行前**会合同步栅（真并发见证）。 */
@@ -132,13 +132,13 @@ export class MuPlans {
     return this;
   }
 
-  /** 登记一次「交办」：主回合 run_task + worker execute_operation，worker 用同一原文匹配。 */
+  /** 登记一次「交办」：主回合 task_run + worker execute_operation，worker 用同一原文匹配。 */
   delegate(owner: MuPrincipal, text: string, opts: {
     reply: string; operation: string; args: Readonly<Record<string, unknown>>; summary: string;
     rendezvous?: boolean; compact?: { before: number; after: number };
   }): this {
     this.main.set(text, {
-      calls: [{ tool: 'run_task', args: { task: text } }],
+      calls: [{ tool: 'task_run', args: { task: text } }],
       reply: opts.reply,
       ...(opts.rendezvous === undefined ? {} : { rendezvous: opts.rendezvous }),
       ...(opts.compact === undefined ? {} : { compact: opts.compact }),

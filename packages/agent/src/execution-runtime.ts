@@ -6,12 +6,12 @@
  * import-boundary.test.ts 静态检查）。执行层客户端由装配方注入。
  *
  * 每回合链路：
- *   1) 用户文本进 Main 转录，mainDriver 跑一个回合；Main 工具面 = run_task（委派）+ 始终可见的
+ *   1) 用户文本进 Main 转录，mainDriver 跑一个回合；Main 工具面 = task_run（委派）+ 始终可见的
  *      task_status/task_result（只读查询，缺口 1）+（注入 runner 时）task_cancel/task_resume
  *      （取消/接续，缺口 1）+（注入 Main
  *      技能登记表时）read_skill（缺口 2 臂 B，按需读业务技能正文）+（注入 runJsExecutor 时）
  *      run_js（CAP-01 S1：受限代码执行，产物登记进文件区、回合末随 TurnResult.files 交投递面）；
- *   2) run_task 触发委派：宿主生成 taskId（绑定 principal/session）→ Worker 回合
+ *   2) task_run 触发委派：宿主生成 taskId（绑定 principal/session）→ Worker 回合
  *      （workerDriver + execute_operation +（注入 runJsExecutor 时）run_js——任务作用域，
  *      CAP-01 S2：输入只解析当前任务的绑定行、产物绑定当前任务并随回合交付）；
  *   3) execute_operation：宿主生成 requestId → client.execute(结构化请求) → 结果回给 Worker；
@@ -68,41 +68,41 @@ import {
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor, TaskRunner } from './task-runner';
 
 /** Main 委派工具名（实例名可经部署声明替换的演进留在后续切片；当前用中性名）。 */
-export const RUN_TASK_TOOL = 'run_task';
-export const RUN_TASK_TOOL_DESCRIPTION =
+export const TASK_RUN_TOOL = 'task_run';
+export const TASK_RUN_TOOL_DESCRIPTION =
   '把一项平台任务交给执行层 Worker 执行：在 task 里写清要办什么（对象、范围、口径）。'
   + '返回 Worker 的事实汇报与结构化的执行结果。涉及平台数据的请求一律经它办理。';
 /**
- * CAP-01 修复轮（R2-S2，接口事实声明）：注入交办复制面时 run_task 的工具描述——
+ * CAP-01 修复轮（R2-S2，接口事实声明）：注入交办复制面时 task_run 的工具描述——
  * 写清 inputFiles 参数的用法与不带的后果（交办复制零发生 → Worker 无文件 → 任务
  * unexecuted）。只在 `withInputFiles` 的工具面使用；缺省装配（未注入复制面）仍用
- * `RUN_TASK_TOOL_DESCRIPTION` 逐字节不变。只声明参数事实，不写业务流程话术。
+ * `TASK_RUN_TOOL_DESCRIPTION` 逐字节不变。只声明参数事实，不写业务流程话术。
  */
-export const RUN_TASK_TOOL_DESCRIPTION_WITH_INPUT_FILES =
-  RUN_TASK_TOOL_DESCRIPTION
+export const TASK_RUN_TOOL_DESCRIPTION_WITH_INPUT_FILES =
+  TASK_RUN_TOOL_DESCRIPTION
   + '要处理的本会话文件，把文件清单里的 fileId 放进 inputFiles；不带 inputFiles 则 Worker 拿不到任何文件。';
-const RUN_TASK_TASK_PROPERTY = {
+const TASK_RUN_TASK_PROPERTY = {
   type: 'string',
   description: '要交给执行层 Worker 的任务：写清对象、范围与要回答的问题；用自然语言，不要写命令。',
 };
-export const RUN_TASK_TOOL_SCHEMA: Record<string, unknown> = {
+export const TASK_RUN_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    task: RUN_TASK_TASK_PROPERTY,
+    task: TASK_RUN_TASK_PROPERTY,
   },
   required: ['task'],
   additionalProperties: false,
 };
 /**
- * CAP-01 S2（v8 §4）：注入交办复制面（taskInputCopier）时的 run_task 工具 schema——
+ * CAP-01 S2（v8 §4）：注入交办复制面（taskInputCopier）时的 task_run 工具 schema——
  * inputFiles 可选，只收 Main 作用域（文件清单里给出）的 fileId；宿主在交办时复制成
  * 任务私有副本（新 file_id，Worker 只解析当前任务的副本），原件不动。
  * 缺省装配（未注入复制面）不带该属性：工具面与既有逐字节相同（S1 的缺省零变化纪律）。
  */
-export const RUN_TASK_TOOL_SCHEMA_WITH_INPUT_FILES: Record<string, unknown> = {
+export const TASK_RUN_TOOL_SCHEMA_WITH_INPUT_FILES: Record<string, unknown> = {
   type: 'object',
   properties: {
-    task: RUN_TASK_TASK_PROPERTY,
+    task: TASK_RUN_TASK_PROPERTY,
     inputFiles: {
       type: 'array',
       items: { type: 'string' },
@@ -199,7 +199,7 @@ export const RUN_JS_TOOL_DESCRIPTION =
   + '要交付的产物写到 out/ 目录（宿主登记后在本回合末作为附件发出），中间文件写 scratch/。'
   + '超时与资源上限由宿主决定，只能通过把请求调小来适配。'
   // CAP-01 修复轮（R2-S1，接口事实声明）：声明沙箱的模块面——模型此前首调 require("xlsx")
-  // （未安装）失败后转去 run_task 兜底建 Task。只声明能力边界，不写业务流程话术。
+  // （未安装）失败后转去 task_run 兜底建 Task。只声明能力边界，不写业务流程话术。
   + '可用模块只有 exceljs（require("exceljs")，读写 xlsx）；没有 xlsx/xlsx-style/csv-parse 等包。'
   // CAP-01 修复轮（⑤，接口事实声明）：声明输入文件在脚本内的路径约定——清单每条已给出
   // 「脚本内路径」（in/<fileId><安全扩展名>，与宿主物化的 materializedName 同一公式）；
@@ -281,7 +281,7 @@ export const EXECUTE_OPERATION_TOOL_SCHEMA: Record<string, unknown> = {
  */
 export const MAIN_PROTOCOL_NOTE = [
   '【本轮工具协议】',
-  '- 涉及平台数据的请求，用 run_task 工具交给执行层 Worker；不得自行编造或猜测平台数据。',
+  '- 涉及平台数据的请求，用 task_run 工具交给执行层 Worker；不得自行编造或猜测平台数据。',
   '- 收到 Worker 汇报后，用用户能懂的话给出结论与数据；平台没有给出的内容不要补全，也不要声称已验证。',
   '- 本轮执行面只开放查询（只读）操作；用户要求写入或变更时，如实说明该能力尚未开通。',
 ].join('\n');
@@ -429,12 +429,12 @@ export interface RuntimeOptions {
   /**
    * CAP-01 S1：run_js 输入引用被拒（越权/不存在/pending/过期/字节缺失）时的机械 reason
    * 上报（**只进日志，不进用户话术**——v8 §4 防存在性 oracle；缺省静默，不影响回合）。
-   * S2 起 run_task.inputFiles 的拒绝同走这一回调。
+   * S2 起 task_run.inputFiles 的拒绝同走这一回调。
    */
   onFileRefUnavailable?: (reason: string) => void;
   /**
    * CAP-01 S2（v8 §4/§6）：交办复制端口（装配层注入 fileStore 本身——结构满足 Pick）。
-   * 注入后 run_task 工具面带 inputFiles；交办时把 Main 作用域输入文件复制成绑定 taskId
+   * 注入后 task_run 工具面带 inputFiles；交办时把 Main 作用域输入文件复制成绑定 taskId
    * 的新 file_id（Worker 只解析当前任务的副本，原件不动）。缺省不注入 = 工具面不带
    * inputFiles（逐字节不变），模型传了也 fail-closed 拒绝。
    */
@@ -831,7 +831,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   }
 
   /**
-   * 输入文件引用不可用的统一话术（run_js.inputs 与 run_task.inputFiles 同用）：
+   * 输入文件引用不可用的统一话术（run_js.inputs 与 task_run.inputFiles 同用）：
    * 越权/不存在/pending/过期/字节缺失同码同话术——v8 §4 防存在性 oracle。
    */
   const FILE_INPUT_UNAVAILABLE_MESSAGE =
@@ -841,7 +841,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   const fileScope = { principalId: options.principalId, sessionId: options.sessionId };
 
   /**
-   * fileId 数组参数解析（run_js.inputs 与 run_task.inputFiles 同形状同纪律）：
+   * fileId 数组参数解析（run_js.inputs 与 task_run.inputFiles 同形状同纪律）：
    * 非数组 / 空 fileId 确定性拒绝；字符串逐个 trim（空串拒绝，不静默丢弃）。
    */
   function parseFileIdList(raw: unknown, tool: string, field: string): string[] {
@@ -1226,20 +1226,20 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     turnFiles: TurnFileRef[],
   ): Promise<unknown> {
     const request = taskText.trim();
-    if (request === '') throw new Error('run_task 缺少 task：请写清要办什么。');
+    if (request === '') throw new Error('task_run 缺少 task：请写清要办什么。');
     const taskId = `task_${randomUUID()}`;
     // CAP-01 S2（v8 §4/§6）：inputFiles 的解析与交办复制全部发生在建任务行/进 Worker 之前——
     // 任一 fileId 不可用 → 整次拒绝（不部分执行、不留任务行、零副本）。
-    const inputFiles = parseFileIdList(rawInputFiles, 'run_task', 'inputFiles');
+    const inputFiles = parseFileIdList(rawInputFiles, 'task_run', 'inputFiles');
     // S2 边界（v8 §8）：交办复制只做 inline——background 派发不静默丢文件，确定性拒绝。
     if (inputFiles.length > 0 && dispatchMode === 'background') {
-      throw new Error('run_task 的 inputFiles 暂不支持 background 派发（文件交办当前只做 inline）。');
+      throw new Error('task_run 的 inputFiles 暂不支持 background 派发（文件交办当前只做 inline）。');
     }
     let copiedInputs: CopiedTaskInput[] = [];
     if (inputFiles.length > 0) {
       const copier = options.taskInputCopier;
       // 与 run_js/read_skill 同一门控纪律：未注入复制面不受理，fail-closed。
-      if (copier === undefined) throw new Error('run_task 的 inputFiles 未开通（当前装配没有文件复制面）。');
+      if (copier === undefined) throw new Error('task_run 的 inputFiles 未开通（当前装配没有文件复制面）。');
       try {
         copiedInputs = copier.copyInputsForTask({ scope: fileScope, fileIds: inputFiles, taskId });
       } catch (error) {
@@ -1408,7 +1408,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // 内存墙话术（模型文本不得把 OOM 讲成「处理完成」；最后一次成功重试则按成功交付）。
       let lastMemoryWall = false;
       currentTurnDeadline = Date.now() + mainTurnMs;
-      // U3：本回合的 turn 作用域（run_task 逻辑操作身份的作用域）与重放窗口。
+      // U3：本回合的 turn 作用域（task_run 逻辑操作身份的作用域）与重放窗口。
       turnNo += 1;
       const turnScopeKey = `turn:${options.sessionId}:${turnNo}`;
       const mainWindow = newAttemptWindow();
@@ -1431,8 +1431,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const mainResult = await options.mainDriver.run({
         systemPrompt: options.mainSystemPrompt,
         tools: [
-          // CAP-01 S2：run_task 的 schema 是否带 inputFiles 取决于交办复制面注入（缺省零变化）。
-          runTaskTool(options.taskInputCopier !== undefined),
+          // CAP-01 S2：task_run 的 schema 是否带 inputFiles 取决于交办复制面注入（缺省零变化）。
+          taskRunTool(options.taskInputCopier !== undefined),
           // 只读查询只依赖 registry/scope——始终可见（无 runner 的 inline/ask 也能查任务）。
           taskStatusTool(),
           taskResultTool(),
@@ -1446,14 +1446,14 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         ...(injections.length > 0 ? { injections } : {}),
         onStep: (step) => progress.push(step),
         exec: async (tool, args) => {
-          if (tool === RUN_TASK_TOOL) {
+          if (tool === TASK_RUN_TOOL) {
             const task = typeof args.task === 'string' ? args.task : '';
-            // U3：run_task 在宿主侧也是一笔有副作用的逻辑操作——先认领落库再委派；
-            // 重放窗口内重复的 run_task 返回已有受理回执，不创建第二个任务。
+            // U3：task_run 在宿主侧也是一笔有副作用的逻辑操作——先认领落库再委派；
+            // 重放窗口内重复的 task_run 返回已有受理回执，不创建第二个任务。
             const run = await runOperation({
               scopeKey: turnScopeKey,
               window: mainWindow,
-              operation: RUN_TASK_TOOL,
+              operation: TASK_RUN_TOOL,
               executeThrows: 'propagate',
               execute: async () => ({ status: 'completed', data: await delegate(task, args.inputFiles, foregroundPermit, turnFiles) }),
             });
@@ -1552,13 +1552,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
 }
 
 /** CAP-01 S2：inputFiles 属性只在注入交办复制面时出现（缺省工具面逐字节不变）。 */
-function runTaskTool(withInputFiles: boolean): DiscoveredTool {
+function taskRunTool(withInputFiles: boolean): DiscoveredTool {
   return {
-    name: RUN_TASK_TOOL,
+    name: TASK_RUN_TOOL,
     // CAP-01 修复轮（R2-S2）：描述与 schema 同步——inputFiles 上工具面时，描述才声明
     // inputFiles 的用法与后果；缺省面仍用原描述（逐字节不变，也不宣传不存在的参数）。
-    description: withInputFiles ? RUN_TASK_TOOL_DESCRIPTION_WITH_INPUT_FILES : RUN_TASK_TOOL_DESCRIPTION,
-    inputSchema: withInputFiles ? RUN_TASK_TOOL_SCHEMA_WITH_INPUT_FILES : RUN_TASK_TOOL_SCHEMA,
+    description: withInputFiles ? TASK_RUN_TOOL_DESCRIPTION_WITH_INPUT_FILES : TASK_RUN_TOOL_DESCRIPTION,
+    inputSchema: withInputFiles ? TASK_RUN_TOOL_SCHEMA_WITH_INPUT_FILES : TASK_RUN_TOOL_SCHEMA,
   };
 }
 

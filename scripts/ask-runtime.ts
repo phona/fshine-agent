@@ -251,8 +251,8 @@ export interface SessionAssemblyInput {
   /** CAP-01 ④：run_js 内存墙结构化事件上报（装配层接日志；缺省静默）。 */
   onRunJsMemoryExit?: (event: RunJsMemoryExitEvent) => void;
   /**
-   * CAP-01 S2：交办复制端口（run_task.inputFiles 的宿主侧执行；装配层注入 fileStore 本身）。
-   * 缺省不注入 = run_task 工具面不带 inputFiles（逐字节不变），模型传了也 fail-closed 拒绝。
+   * CAP-01 S2：交办复制端口（task_run.inputFiles 的宿主侧执行；装配层注入 fileStore 本身）。
+   * 缺省不注入 = task_run 工具面不带 inputFiles（逐字节不变），模型传了也 fail-closed 拒绝。
    */
   taskInputCopier?: TaskInputCopier;
   /**

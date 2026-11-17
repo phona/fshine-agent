@@ -86,7 +86,7 @@ interface MainDriverRecord {
   execResults: unknown[];
 }
 
-/** 假 Main driver：按用户文本查计划，逐一委派并记录 run_task 的返回（即受理事实）。 */
+/** 假 Main driver：按用户文本查计划，逐一委派并记录 task_run 的返回（即受理事实）。 */
 function fakeMainDriver(plans: ReadonlyMap<string, MainPlan>, records: MainDriverRecord[]): TurnDriver {
   return {
     async run(input) {

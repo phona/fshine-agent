@@ -18,9 +18,9 @@ import type { DiscoveredTool } from '@fshine/contracts';
 import {
   READ_SKILL_TOOL_DESCRIPTION,
   READ_SKILL_TOOL_SCHEMA,
-  RUN_TASK_TOOL,
-  RUN_TASK_TOOL_DESCRIPTION,
-  RUN_TASK_TOOL_SCHEMA,
+  TASK_RUN_TOOL,
+  TASK_RUN_TOOL_DESCRIPTION,
+  TASK_RUN_TOOL_SCHEMA,
   TASK_CANCEL_TOOL,
   TASK_CANCEL_TOOL_DESCRIPTION,
   TASK_CANCEL_TOOL_SCHEMA,
@@ -53,7 +53,7 @@ afterEach(() => {
 
 /** 真实 fshine 工具契约（描述/schema 取自 execution-runtime / skills 的同一常量）。 */
 const BUSINESS_TOOLS: Record<string, DiscoveredTool> = {
-  [RUN_TASK_TOOL]: { name: RUN_TASK_TOOL, description: RUN_TASK_TOOL_DESCRIPTION, inputSchema: RUN_TASK_TOOL_SCHEMA },
+  [TASK_RUN_TOOL]: { name: TASK_RUN_TOOL, description: TASK_RUN_TOOL_DESCRIPTION, inputSchema: TASK_RUN_TOOL_SCHEMA },
   [TASK_STATUS_TOOL]: { name: TASK_STATUS_TOOL, description: TASK_STATUS_TOOL_DESCRIPTION, inputSchema: TASK_STATUS_TOOL_SCHEMA },
   [TASK_RESULT_TOOL]: { name: TASK_RESULT_TOOL, description: TASK_RESULT_TOOL_DESCRIPTION, inputSchema: TASK_RESULT_TOOL_SCHEMA },
   [TASK_CANCEL_TOOL]: { name: TASK_CANCEL_TOOL, description: TASK_CANCEL_TOOL_DESCRIPTION, inputSchema: TASK_CANCEL_TOOL_SCHEMA },
@@ -105,7 +105,7 @@ describe('A1 · 最小 AgentSession（多轮 / dispose 重开 / 异常退出恢�
     const scripted = await createScriptedModelRuntime({
       contextWindow: 40_000,
       script: (index) => {
-        if (index === 0) return toolCall('call_task_1', RUN_TASK_TOOL, { task: '查询 W1 账套', progress: '交办查询' });
+        if (index === 0) return toolCall('call_task_1', TASK_RUN_TOOL, { task: '查询 W1 账套', progress: '交办查询' });
         if (index === 1) return textReply('已交办 #1，后台执行中。');
         return textReply('W1 账套共 3 条记录。');
       },
@@ -120,12 +120,12 @@ describe('A1 · 最小 AgentSession（多轮 / dispose 重开 / 异常退出恢�
       execCalls.push({ tool, args });
       return { taskId: 'task_1', taskNo: 1, accepted: true, notice: '已受理 #1' };
     };
-    const tools = toolsOf(RUN_TASK_TOOL, TASK_STATUS_TOOL, TASK_RESULT_TOOL, TASK_CANCEL_TOOL, TASK_RESUME_TOOL, READ_SKILL_TOOL);
+    const tools = toolsOf(TASK_RUN_TOOL, TASK_STATUS_TOOL, TASK_RESULT_TOOL, TASK_CANCEL_TOOL, TASK_RESUME_TOOL, READ_SKILL_TOOL);
 
     const turn1 = await driver.run(runInput([user('帮我查 W1 账套')], tools, exec));
     expect(turn1.text).toContain('已交办');
     expect(execCalls, 'Dummy 工具委派必须真实经过 customTools 桥接').toEqual([
-      { tool: RUN_TASK_TOOL, args: { task: '查询 W1 账套' } },
+      { tool: TASK_RUN_TOOL, args: { task: '查询 W1 账套' } },
     ]);
 
     const turn2 = await driver.run(runInput([user('W1 有多少条？')], tools, exec));
@@ -231,14 +231,14 @@ describe('A2 · 业务工具桥接（customTools + 显式白名单）', () => {
       reuseConversation: true,
     });
     const execCalls: string[] = [];
-    const tools = toolsOf(RUN_TASK_TOOL, READ_SKILL_TOOL);
+    const tools = toolsOf(TASK_RUN_TOOL, READ_SKILL_TOOL);
     const result = await driver.run(runInput([user('列出当前目录')], tools, async (tool) => {
       execCalls.push(tool);
       return { ok: true };
     }));
 
     const info = driver.sessionInfo!();
-    expect(info?.activeToolNames, '激活集合 = 白名单本身').toEqual([RUN_TASK_TOOL, READ_SKILL_TOOL]);
+    expect(info?.activeToolNames, '激活集合 = 白名单本身').toEqual([TASK_RUN_TOOL, READ_SKILL_TOOL]);
     for (const builtin of ['read', 'bash', 'edit', 'write']) {
       expect(info?.activeToolNames, `内置工具 ${builtin} 不得激活`).not.toContain(builtin);
     }
@@ -251,11 +251,11 @@ describe('A2 · 业务工具桥接（customTools + 显式白名单）', () => {
     driver.close?.();
   });
 
-  it('工具出现服从原装配条件（run_task 恒有；task_* 需 runner；read_skill 需登记表）', async () => {
+  it('工具出现服从原装配条件（task_run 恒有；task_* 需 runner；read_skill 需登记表）', async () => {
     const cases: Array<{ tools: string[]; expected: string[] }> = [
-      { tools: [RUN_TASK_TOOL], expected: [RUN_TASK_TOOL] },
-      { tools: [RUN_TASK_TOOL, TASK_STATUS_TOOL, TASK_RESULT_TOOL, TASK_CANCEL_TOOL, TASK_RESUME_TOOL], expected: [RUN_TASK_TOOL, TASK_STATUS_TOOL, TASK_RESULT_TOOL, TASK_CANCEL_TOOL, TASK_RESUME_TOOL] },
-      { tools: [RUN_TASK_TOOL, READ_SKILL_TOOL], expected: [RUN_TASK_TOOL, READ_SKILL_TOOL] },
+      { tools: [TASK_RUN_TOOL], expected: [TASK_RUN_TOOL] },
+      { tools: [TASK_RUN_TOOL, TASK_STATUS_TOOL, TASK_RESULT_TOOL, TASK_CANCEL_TOOL, TASK_RESUME_TOOL], expected: [TASK_RUN_TOOL, TASK_STATUS_TOOL, TASK_RESULT_TOOL, TASK_CANCEL_TOOL, TASK_RESUME_TOOL] },
+      { tools: [TASK_RUN_TOOL, READ_SKILL_TOOL], expected: [TASK_RUN_TOOL, READ_SKILL_TOOL] },
     ];
     for (const testCase of cases) {
       const scripted = await createScriptedModelRuntime({ contextWindow: 40_000, script: () => textReply('ok') });
@@ -282,7 +282,7 @@ describe('A3 · 系统提示词与 Skills（受控 ResourceLoader）', () => {
     const fshinePrompt = '你是 fshine 业务助手：把业务请求转成任务，按事实如实回复。';
     await driver.run({
       systemPrompt: fshinePrompt,
-      tools: toolsOf(RUN_TASK_TOOL),
+      tools: toolsOf(TASK_RUN_TOOL),
       messages: [user('你好')],
       onStep: () => {},
       exec: async () => undefined,

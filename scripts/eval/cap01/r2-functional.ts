@@ -23,7 +23,7 @@
  *        ③ 全部日志里没有任何 sent 记录（file_delivery 与 message_done.fileDelivery 两处）。
  *      前提检查：回合确实产出了文件（端口收到字节）；没产出 = 该路径未触发 = 判 FAIL 并写明。
  *
- *   S3 Worker 链路：同数据经 run_task.inputFiles 交给 Worker。断言：
+ *   S3 Worker 链路：同数据经 task_run.inputFiles 交给 Worker。断言：
  *        ① Main 确实交办且带了 inputFiles（工具参数里有入站 fileId）；
  *        ② 产物回 Main：主动投递端口收到产物；按 sha256 对回 file_refs 行——该行是新
  *          fileId（≠ 入站 fileId、≠ 交办副本 fileId）、task_id 绑定（Worker 产物面）；
@@ -494,7 +494,7 @@ function scriptedMainDriver(script: 'main-direct' | 'delegate-and-aggregate'): T
         await input.exec('run_js', { code: AGGREGATE_RUN_JS_CODE, ...(fileId === undefined ? {} : { inputs: [fileId] }) });
         return { text: '已按月汇总完成，见附件。', messages: [scriptedAssistant('已按月汇总完成，见附件。')] };
       }
-      await input.exec('run_task', {
+      await input.exec('task_run', {
         task: '把附件里每个月的销售额合计成每月一行，生成汇总 Excel。',
         ...(fileId === undefined ? {} : { inputFiles: [fileId] }),
       });
@@ -810,7 +810,7 @@ async function runScenarioS3(scripted: boolean): Promise<ScenarioOutcome> {
   }
 
   // ① Main 确实交办且带了 inputFiles（工具参数面）。
-  const runTaskCalls = harness.sink.calls.filter((call) => call.agent === 'main' && call.tool === 'run_task');
+  const runTaskCalls = harness.sink.calls.filter((call) => call.agent === 'main' && call.tool === 'task_run');
   const inputFilesArg = runTaskCalls.flatMap((call) => {
     const args = call.args as { inputFiles?: unknown } | undefined;
     return Array.isArray(args?.inputFiles) ? (args?.inputFiles as string[]) : [];
@@ -818,7 +818,7 @@ async function runScenarioS3(scripted: boolean): Promise<ScenarioOutcome> {
   checks.check(
     's3-delegated-with-input-files',
     runTaskCalls.length >= 1 && taskRows.length >= 1 && inboundFileId !== undefined && inputFilesArg.includes(inboundFileId),
-    `run_task 调用=${runTaskCalls.length}；task 行=${taskRows.length}；入站 fileId=${inboundFileId ?? '（日志缺失）'}；inputFiles 参数=${JSON.stringify(inputFilesArg)}`,
+    `task_run 调用=${runTaskCalls.length}；task 行=${taskRows.length}；入站 fileId=${inboundFileId ?? '（日志缺失）'}；inputFiles 参数=${JSON.stringify(inputFilesArg)}`,
   );
 
   // Worker 确实跑了 run_js（S2 切片的任务作用域工具面）。

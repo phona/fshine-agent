@@ -109,7 +109,7 @@ function recordingMain(recorder: Recorder, mode: 'delegate' | 'chat'): TurnDrive
     async run(input) {
       recorder.mainInputs.push(input);
       if (mode === 'chat') return { text: '本轮没有交办。', messages: [...input.messages] };
-      await input.exec('run_task', { task: '（模型复述的任务文本）' });
+      await input.exec('task_run', { task: '（模型复述的任务文本）' });
       return { text: '已重新交办并收到汇报。', messages: [...input.messages] };
     },
   };

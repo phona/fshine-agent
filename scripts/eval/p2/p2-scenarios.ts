@@ -175,7 +175,7 @@ const S2: P2CaseDefinition = {
   ],
   truth: { facts: [{ turn: 2, expectation: { kind: 'exact', collection: 'beta', count: 3, sum: 1000 } }] },
   preregConflict:
-    'S2 强制 dispatchMode=background（§一 S2），而 background 的 run_task 只返回受理回执（execution-runtime.ts:591），'
+    'S2 强制 dispatchMode=background（§一 S2），而 background 的 task_run 只返回受理回执（execution-runtime.ts:591），'
     + 'Main 同回合无法取得 beta 数据；§一 S2 Oracle 却要求 T2 回复含 beta 条数/总额（count=3, sum=1000）。'
     + '合规产品的 T2 回复只能是受理回执 → 该事实判据在强制装配下不可满足。待 owner 裁定：'
     + '（a）把 beta 事实判据下移到结果取回轮，或（b）允许 beta 走 inline 子路径。本实现按预注册字面保留判据并登记冲突（不擅自改口径）。',
@@ -751,7 +751,7 @@ async function runS1(dir: string, trial: number): Promise<P2Observation> {
   const client = await createDummyP2Client({ dir });
   const text = S1.turns[0]!;
   book.mainTurn(text, [
-    toolCallAssistant('run_task', { task: text }),
+    toolCallAssistant('task_run', { task: text }),
     () => {
       const record = lastRecordOf(ref, 'alpha');
       return textAssistant(`${record === undefined ? 'alpha 读取完成。' : describeCompleted(record)}任务编号 #${taskNoOf(ref)}。`);
@@ -797,8 +797,8 @@ async function runS2(dir: string, trial: number): Promise<P2Observation> {
   const t1 = S2.turns[0]!;
   const t2 = S2.turns[1]!;
   const receipt = (): string => `已受理 #${taskNoOf(ref)}，将在后台执行，结果出来直接告诉你。`;
-  book.mainTurn(t1, [toolCallAssistant('run_task', { task: t1 }), () => textAssistant(receipt())], 1);
-  book.mainTurn(t2, [toolCallAssistant('run_task', { task: '查询 beta 集合 W1 的条数与总额' }), () => textAssistant(receipt())], 2);
+  book.mainTurn(t1, [toolCallAssistant('task_run', { task: t1 }), () => textAssistant(receipt())], 1);
+  book.mainTurn(t2, [toolCallAssistant('task_run', { task: '查询 beta 集合 W1 的条数与总额' }), () => textAssistant(receipt())], 2);
   book.workerTask(t1, [
     toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'alpha', '--window': 'W1' } }),
     () => {
@@ -846,7 +846,7 @@ async function runS3(dir: string, trial: number): Promise<P2Observation> {
   const client = await createDummyP2Client({ dir });
   const t1 = S3.turns[0]!;
   const t2 = S3.turns[1]!;
-  book.mainTurn(t1, [toolCallAssistant('run_task', { task: t1 }), () => textAssistant(`已受理 #${taskNoOf(ref)}，完成后把结果告诉你。`)], 1);
+  book.mainTurn(t1, [toolCallAssistant('task_run', { task: t1 }), () => textAssistant(`已受理 #${taskNoOf(ref)}，完成后把结果告诉你。`)], 1);
   book.mainTurn(t2, [
     () => toolCallAssistant('task_result', { ref: `#${taskOfAny(ref)?.taskNo ?? 1}` }),
     () => textAssistant(taskOfAny(ref)?.replyText ?? '还没有结果。'),
@@ -899,8 +899,8 @@ async function runS4(dir: string, trial: number): Promise<P2Observation> {
   const betaCheck = '核对 beta 集合 W1 的记录';
   const betaOnly = '只查 beta 集合 W1 的记录';
   book.mainTurn(t1, [
-    toolCallAssistant('run_task', { task: alphaCheck }),
-    toolCallAssistant('run_task', { task: betaCheck }),
+    toolCallAssistant('task_run', { task: alphaCheck }),
+    toolCallAssistant('task_run', { task: betaCheck }),
     () => textAssistant('两个核对都已受理：alpha 先跑，beta 排队。'),
   ], 1);
   book.mainTurn(t2, [
@@ -908,7 +908,7 @@ async function runS4(dir: string, trial: number): Promise<P2Observation> {
     () => textAssistant(`已取消 #${findTaskNo(ref, 'beta')}，beta 那边不会再执行。`),
   ], 2);
   book.mainTurn(t3, [
-    toolCallAssistant('run_task', { task: betaOnly }),
+    toolCallAssistant('task_run', { task: betaOnly }),
     () => textAssistant(`已按新要求重新交办 #${taskNoOf(ref)}（只查 beta）。`),
   ], 3);
   book.workerTask(alphaCheck, [
@@ -965,7 +965,7 @@ async function runS5(dir: string, trial: number): Promise<P2Observation> {
   // ── 第一个 server：交办 → 等 completed → 关停 ────────────────────────────────
   const book1 = new P2ScriptBook();
   const ref1: ExecRef = {};
-  book1.mainTurn(t1, [toolCallAssistant('run_task', { task: t1 }), () => textAssistant(`已受理 #${taskNoOf(ref1)}，完成后把结果告诉你。`)], 1);
+  book1.mainTurn(t1, [toolCallAssistant('task_run', { task: t1 }), () => textAssistant(`已受理 #${taskNoOf(ref1)}，完成后把结果告诉你。`)], 1);
   book1.workerTask(t1, [
     toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'bankflow-oct', '--window': '2025-10' } }),
     () => {
@@ -1209,7 +1209,7 @@ async function runS7a(dir: string, trial: number): Promise<P2Observation> {
   const client = await createDummyP2Client({ dir });
   const text = S7A.turns[0]!;
   book.mainTurn(text, [
-    toolCallAssistant('run_task', { task: text }),
+    toolCallAssistant('task_run', { task: text }),
     () => {
       const record = recordsOf(ref).find((candidate) => candidate.collection === 'faulty-one');
       return textAssistant(record === undefined ? '读取失败：本次没有取得任何记录。' : describeFailure(record));
@@ -1238,7 +1238,7 @@ async function runS7b(dir: string, trial: number): Promise<P2Observation> {
   const ref: ExecRef = {};
   const t1 = S7B.turns[0]!;
   const t2 = S7B.turns[1]!;
-  book.mainTurn(t1, [toolCallAssistant('run_task', { task: t1 }), () => textAssistant(`已受理 #${taskNoOf(ref)}，将在后台执行。`)], 1);
+  book.mainTurn(t1, [toolCallAssistant('task_run', { task: t1 }), () => textAssistant(`已受理 #${taskNoOf(ref)}，将在后台执行。`)], 1);
   book.mainTurn(t2, [
     () => toolCallAssistant('task_status', { ref: `#${findTaskNo(ref, 'alpha')}` }),
     () => textAssistant(`任务 #${findTaskNo(ref, 'alpha')} 已超时未完成：执行端在时限内没有返回结果，没有条数或金额可以给你。`),
@@ -1276,7 +1276,7 @@ async function runS7c(dir: string, trial: number): Promise<P2Observation> {
     const record = lastRecordOf(ref, collection);
     return record === undefined ? `${collection} 未执行。` : describeCompleted(record);
   }).join('');
-  book.mainTurn(t1, [toolCallAssistant('run_task', { task: t1 }), () => textAssistant(`已受理 #${taskNoOf(ref)}，四组核对在后台执行，完成后汇总给你。`)], 1);
+  book.mainTurn(t1, [toolCallAssistant('task_run', { task: t1 }), () => textAssistant(`已受理 #${taskNoOf(ref)}，四组核对在后台执行，完成后汇总给你。`)], 1);
   book.mainTurn(t2, [
     () => toolCallAssistant('task_result', { ref: `#${findTaskNo(ref, 'alpha')}` }),
     () => textAssistant(taskOfAny(ref)?.replyText ?? '还没有结果。'),

@@ -8,7 +8,7 @@
  * P1 底账演化（最小增量，豁免零新增机制——数字 ID/名称/回复存档是任务书点名的确定性责任）：
  *   · taskNo：数字任务编号（由 SQLite 底账单条 SQL 原子分配；内存实现同口径自增）；
  *   · name：业务名称 v1 = 机械回落 deriveTaskName(request)（零模型；来源=任务交办原文，
- *     与迁移回填/显示回落同规则；#4-a 模型命名递延，不改 run_task 工具 schema）；
+ *     与迁移回填/显示回落同规则；#4-a 模型命名递延，不改 task_run 工具 schema）；
  *   · replyText：Main 本回合最终回复（send 收尾后 archiveReply 同值写本回合各任务行）。
  *
  * P2a 契约核心（2026-11-14；来源 docs/product/r4-joint-interfaces.md §1 v1 冻结）：
@@ -406,7 +406,7 @@ export type OperationStatus = (typeof OPERATION_STATUSES)[number];
 export interface OperationRecord {
   /** 身份键（首次创建时铸造并落库；此后只读）——格式 `dk_<scopeKey>:<opSeq>`。 */
   dispatchKey: string;
-  /** 身份作用域：'task:<taskId>'（交办内操作）或 'turn:<sessionId>:<turnNo>'（Main run_task）。 */
+  /** 身份作用域：'task:<taskId>'（交办内操作）或 'turn:<sessionId>:<turnNo>'（Main task_run）。 */
   scopeKey: string;
   /** 交办内操作的 taskId；turn 作用域在受理回执落定后回填。 */
   taskId?: string;

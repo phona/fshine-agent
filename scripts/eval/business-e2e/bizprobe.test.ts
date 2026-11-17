@@ -252,7 +252,7 @@ describe('⑧ 真实驱动器装配路径（注入假 driver/假执行面，零�
     // 假 Main：委派一个任务；假 Worker：一次结构化只读查询；假执行面：deterministic completed。
     const mainDriver: TurnDriver = {
       async run(input) {
-        const tool = input.tools.find((t) => t.name === 'run_task') ?? input.tools[0]!;
+        const tool = input.tools.find((t) => t.name === 'task_run') ?? input.tools[0]!;
         await input.exec(tool.name, { task: '核对 alpha 的 W1 记录' });
         const reply = '已核对 alpha 的 W1：共 2 条记录（rec-001/rec-002）。';
         return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };

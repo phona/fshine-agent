@@ -25,7 +25,7 @@ import type {
   TurnDriverInput,
   TurnDriverResult,
 } from '../packages/agent/src/driver-contract';
-import { EXECUTE_OPERATION_TOOL, RUN_TASK_TOOL } from '../packages/agent/src/execution-runtime';
+import { EXECUTE_OPERATION_TOOL, TASK_RUN_TOOL } from '../packages/agent/src/execution-runtime';
 import { createTaskRegistry } from '../packages/agent/src/task-registry';
 import { assembleSessionCore, resolveExecutionFace } from './ask-runtime';
 
@@ -105,7 +105,7 @@ describe('P1 只读集合显式派生（不是 allowedOperations 的影子）', 
     const registry = createTaskRegistry();
     const main = new ScriptedDriver([
       END,
-      { kind: 'tool', tool: RUN_TASK_TOOL, args: { task: '提交 docs' } },
+      { kind: 'tool', tool: TASK_RUN_TOOL, args: { task: '提交 docs' } },
       { kind: 'text', text: '已提交。' },
     ]);
     const worker = new ScriptedDriver([

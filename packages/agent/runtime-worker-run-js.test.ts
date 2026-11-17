@@ -2,7 +2,7 @@
  * CAP-01 S2 ①⑥：Worker 工具面接 run_js（任务作用域）· 确定性验证。
  *
  * 覆盖（ask ①②⑥ 对应的 runtime 侧断言）：
- *   ① Worker 处理链：run_task.inputFiles 交办复制 → Worker run_js 读 in/ 写 out/ →
+ *   ① Worker 处理链：task_run.inputFiles 交办复制 → Worker run_js 读 in/ 写 out/ →
  *      产物登记成**新 fileId**（task_id 绑定本任务）、**原件（Main 源与交办副本）字节与
  *      行原样不动**；产物事实随本回合 TurnResult.files 带出（交付面）；
  *   ⑥ 工具面门控：注入 runJsExecutor 时 Worker 工具面才有 run_js；未注入时工具面只有
@@ -240,7 +240,7 @@ describe('CAP-01 S2 ① Worker 接 run_js（任务作用域）', () => {
         ],
         text: '已按名册完成核对。',
       });
-      fx.mainPush({ execCalls: [{ tool: 'run_task', args: { task: '按名册核对', inputFiles: [source.fileId] } }], text: '核对完成。' });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '按名册核对', inputFiles: [source.fileId] } }], text: '核对完成。' });
       const turn = await fx.session.send('交办核对任务');
 
       const task = fx.session.getTask(turn.taskIds[0]!);
@@ -284,7 +284,7 @@ describe('CAP-01 S2 ① Worker 接 run_js（任务作用域）', () => {
         ],
         text: '订单共 2 行，汇总已生成。',
       });
-      fx.mainPush({ execCalls: [{ tool: 'run_task', args: { task: '统计订单行数', inputFiles: [source.fileId] } }], text: '统计完成：共 2 行。' });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '统计订单行数', inputFiles: [source.fileId] } }], text: '统计完成：共 2 行。' });
       const turn = await fx.session.send('统计这份订单的行数');
       expect(turn.taskIds).toHaveLength(1);
 
@@ -326,7 +326,7 @@ describe('CAP-01 S2 ① Worker 接 run_js（任务作用域）', () => {
         ],
         text: '已生成（第二次命中重放）。',
       });
-      fx.mainPush({ execCalls: [{ tool: 'run_task', args: { task: '生成汇总', inputFiles: [source.fileId] } }], text: '完成。' });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '生成汇总', inputFiles: [source.fileId] } }], text: '完成。' });
       const turn = await fx.session.send('交办幂等任务');
 
       // 两次 run_js 工具返回完全一致（同 outputs = 命中 memo）；产物行只有一条。
@@ -349,7 +349,7 @@ describe('CAP-01 S2 ① Worker 接 run_js（任务作用域）', () => {
         execCalls: [{ tool: 'run_js', args: { code: WORKER_SCRIPT_WITHOUT_LEAK, inputs: [mainFile.fileId] } }],
         text: 'noop',
       });
-      fx.mainPush({ execCalls: [{ tool: 'run_task', args: { task: '越权引用', inputFiles: [mainFile.fileId] } }], text: '完成。' });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '越权引用', inputFiles: [mainFile.fileId] } }], text: '完成。' });
       await fx.session.send('交办越权引用');
 
       expect(fx.worker.toolErrors[0]).toContain('输入文件不可用');
@@ -368,7 +368,7 @@ describe('CAP-01 S2 ⑥ Worker 工具面门控', () => {
     try {
       const source = putActiveSource(withExecutor, 'g.csv', Buffer.from('g'));
       withExecutor.workerPush({ execCalls: [], text: 'noop' });
-      withExecutor.mainPush({ execCalls: [{ tool: 'run_task', args: { task: '触发委派', inputFiles: [source.fileId] } }], text: '完成。' });
+      withExecutor.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '触发委派', inputFiles: [source.fileId] } }], text: '完成。' });
       await withExecutor.session.send('触发');
       expect(withExecutor.worker.toolNames[0]).toEqual(['execute_operation', 'run_js']);
     } finally {
@@ -379,7 +379,7 @@ describe('CAP-01 S2 ⑥ Worker 工具面门控', () => {
     const withoutExecutor = await makeFixture({ withRunJsExecutor: false });
     try {
       withoutExecutor.workerPush({ execCalls: [], text: 'noop' });
-      withoutExecutor.mainPush({ execCalls: [{ tool: 'run_task', args: { task: '触发委派' } }], text: '完成。' });
+      withoutExecutor.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '触发委派' } }], text: '完成。' });
       await withoutExecutor.session.send('触发');
       expect(withoutExecutor.worker.toolNames[0]).toEqual(['execute_operation']);
     } finally {
@@ -391,7 +391,7 @@ describe('CAP-01 S2 ⑥ Worker 工具面门控', () => {
     const probed = await makeFixture({ withRunJsExecutor: false });
     try {
       probed.workerPush({ execCalls: [{ tool: 'run_js', args: { code: 'console.log(1)' } }], text: 'noop' });
-      probed.mainPush({ execCalls: [{ tool: 'run_task', args: { task: '触发委派' } }], text: '完成。' });
+      probed.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '触发委派' } }], text: '完成。' });
       await probed.session.send('触发');
       expect(probed.worker.toolErrors[0]).toBe('Worker 工具面之外的调用：run_js');
       expect(probed.session.tasks()[0]!.status).toBe('unexecuted');
@@ -406,7 +406,7 @@ describe('CAP-01 S2 ⑥ Worker 工具面门控', () => {
     try {
       const source = putActiveSource(fx, '清单.csv', Buffer.from('清单内容'));
       fx.workerPush({ execCalls: [], text: 'noop' });
-      fx.mainPush({ execCalls: [{ tool: 'run_task', args: { task: '带文件委派', inputFiles: [source.fileId] } }], text: '完成。' });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '带文件委派', inputFiles: [source.fileId] } }], text: '完成。' });
       await fx.session.send('交办');
 
       const delegation = fx.worker.delegationTexts[0]!;
@@ -427,7 +427,7 @@ describe('CAP-01 S2 ⑥ Worker 工具面门控', () => {
     const fx = await makeFixture();
     try {
       fx.workerPush({ execCalls: [{ tool: 'execute_operation', args: { operation: 'dummy.query', args: {} } }], text: '已查询。' });
-      fx.mainPush({ execCalls: [{ tool: 'run_task', args: { task: '纯查询' } }], text: '完成。' });
+      fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '纯查询' } }], text: '完成。' });
       await fx.session.send('交办查询');
       expect(fx.worker.delegationTexts[0]).not.toContain('[本任务文件清单]');
     } finally {

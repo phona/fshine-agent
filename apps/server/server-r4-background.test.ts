@@ -214,7 +214,7 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
     try {
       const reply = await server.handler(incoming('user-a', 'conv-a', 'msg-1', '查 documents W202611'));
       expect(reply).toBe('已受理，稍后通知你。');
-      // 受理事实（run_task 返回）带数字编号/业务名/queued
+      // 受理事实（task_run 返回）带数字编号/业务名/queued
       const accepted = records[0]!.execResults[0] as Record<string, unknown>;
       expect(accepted).toMatchObject({ status: 'queued', accepted: true, taskNo: 1 });
       expect(String(accepted['notice'])).toContain('#1');

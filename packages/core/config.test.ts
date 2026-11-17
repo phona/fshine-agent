@@ -161,7 +161,7 @@ contextProfiles:
     expect(config.contextProfiles['example-gateway']).toMatchObject({ toolName: 'run_example_gateway_task' });
 
     // 大写/连字符/数字开头都不是合法工具名（模型可见协议面，形状必须像标识符）
-    for (const bad of ['Run_Task', 'run-task', '1run_task', 'run task']) {
+    for (const bad of ['Task_Run', 'task-run', '1task_run', 'task run']) {
       const badYaml = `${VALID_YAML}
 contextProfiles:
   example-gateway:

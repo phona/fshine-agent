@@ -543,7 +543,7 @@ export interface BuildSessionInput {
   driverFactory?: (options: { resumeFile?: string }) => { mainDriver: TurnDriver; workerDriver: TurnDriver };
   /** 派发模式：B/C 用 inline+注入 runner（同回合 Main 回复归档）；D 用 background；A 不需要 runner。 */
   dispatchMode?: 'inline' | 'background';
-  /** false = 不注入 runner（Main 只有 run_task；A 的纯对话面）。 */
+  /** false = 不注入 runner（Main 只有 task_run；A 的纯对话面）。 */
   withRunner?: boolean;
   /** 评测侧显式模型/压缩配置（与 prepareGroup 保持一致；缺省沿用 STAGE_D_CONFIG）。 */
   settings?: StageDSettingsOverride;

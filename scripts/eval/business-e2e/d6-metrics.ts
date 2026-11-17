@@ -246,7 +246,7 @@ export function extractD6(runDir: string): D6Metrics {
       return undefined;
     };
     // 残留=被取消任务自身在取消之后的执行活动，不是「取消之后任意调用」：
-    // main 面控制调用（task_status / task_result / 其他任务的 run_task）与被取消任务无关，
+    // main 面控制调用（task_status / task_result / 其他任务的 task_run）与被取消任务无关，
     // 毫秒粒度下会把合法后续轮误计成残留（测量面缺陷，非产品竞态）。判据：
     //   tool-calls —— 归属到被取消任务，或未归属到其他任务的 worker 执行回合；
     //   executions —— 仅被取消任务自身（updatedAt>cut 为新增近似）；

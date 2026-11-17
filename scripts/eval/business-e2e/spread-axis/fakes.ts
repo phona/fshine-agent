@@ -78,9 +78,9 @@ export function createSmokeExecutor(caseDef: DsCase): DsExecutor {
       };
       if (caseDef.id === 'DS-3') {
         if (turn === 1) {
-          await exec('run_task', { task: '核对 alpha W1' });
-          await exec('run_task', { task: '核对 beta W1' });
-          await exec('run_task', { task: '整理 contoso 的窗口' });
+          await exec('task_run', { task: '核对 alpha W1' });
+          await exec('task_run', { task: '核对 beta W1' });
+          await exec('task_run', { task: '整理 contoso 的窗口' });
         } else if (turn === 2) {
           await exec('task_status', {});
           await exec('task_cancel', { ref: '#3' });
@@ -93,15 +93,15 @@ export function createSmokeExecutor(caseDef: DsCase): DsExecutor {
       }
       if (caseDef.id === 'DS-2') {
         if (turn === 1) {
-          await exec('run_task', { task: '核对 alpha W1' });
-          await exec('run_task', { task: '核对 faulty-one W1' });
+          await exec('task_run', { task: '核对 alpha W1' });
+          await exec('task_run', { task: '核对 faulty-one W1' });
         } else if (turn === 2) {
-          await exec('run_task', { task: '看 documents 上个月' });
+          await exec('task_run', { task: '看 documents 上个月' });
         }
         return { text: '已按你说的办了。', messages: [...input.messages, textMessage('已按你说的办了。')] };
       }
-      if (turn === 1) await exec('run_task', { task: '核对 alpha W1' });
-      if (turn === 2) await exec('run_task', { task: '核对 beta W1' });
+      if (turn === 1) await exec('task_run', { task: '核对 alpha W1' });
+      if (turn === 2) await exec('task_run', { task: '核对 beta W1' });
       return { text: '核对结论已整理。', messages: [...input.messages, textMessage('核对结论已整理。')] };
     },
   };

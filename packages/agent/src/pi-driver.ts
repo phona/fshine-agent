@@ -623,7 +623,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
 
         // 本回合答复。三条纪律：①本回合没把输入交给 Pi → 空；②Pi 已把本回合判失败
         // （runFailure 且其后没有正常 assistant 消息）→ 空——失败回合的尾部可能是
-        // toolResult（例如刚委派出去的 run_task 结果 JSON），它是工具事实、不是给用户的
+        // toolResult（例如刚委派出去的 task_run 结果 JSON），它是工具事实、不是给用户的
         // 答复；③否则只取本回合 user 输入之后产生的正文（finalReplyText 按回合切）。
         const turnReplyText = (): string => (!promptSent
           || (slot?.runFailure !== undefined && slot.recovered !== true)

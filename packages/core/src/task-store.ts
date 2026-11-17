@@ -9,7 +9,7 @@
  *   · executions：request_id / task_id / operation / status / error_json。
  *
  * 为什么加 P1 三列（2026-11-14）：数字 ID 稳定简短（任务书 §3，不得回退面向业务的
- * UUID）；业务名称 v1 机械回落（决策问题 #4 v1，零模型、不改 run_task 工具 schema）；
+ * UUID）；业务名称 v1 机械回落（决策问题 #4 v1，零模型、不改 task_run 工具 schema）；
  * Main 最终回复存档（S1，决策问题 #12：同回合各任务行同值，不建 turns 表）。
  *
  * 为什么加 P2a 五列（2026-11-14，docs/product/r4-joint-interfaces.md §1）：
@@ -128,7 +128,7 @@ export interface ExecutionRow {
  */
 export interface OperationRow {
   dispatchKey: string;
-  /** 身份作用域：'task:<taskId>'（交办内操作）或 'turn:<sessionId>:<turnNo>'（Main run_task）。 */
+  /** 身份作用域：'task:<taskId>'（交办内操作）或 'turn:<sessionId>:<turnNo>'（Main task_run）。 */
   scopeKey: string;
   /** 交办内操作的 taskId；turn 作用域在受理回执落定后回填。 */
   taskId?: string;
@@ -178,7 +178,7 @@ export interface OperationStateWrite {
 
 /**
  * 文件解析侧（CAP-01 S2，v8 §4 作用域规则）：
- *   · `{ side: 'main' }` —— Main（run_js 输入 / run_task inputFiles 校验 / 清单）只解析
+ *   · `{ side: 'main' }` —— Main（run_js 输入 / task_run inputFiles 校验 / 清单）只解析
  *     task_id IS NULL 的行；
  *   · `{ side: 'worker', taskId }` —— Worker 只解析 task_id = taskId 的行（当前任务的
  *     副本与产物；跨任务/跨身份一律解析不到）。

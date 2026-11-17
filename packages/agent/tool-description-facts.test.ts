@@ -3,15 +3,15 @@
  *
  * 背景（验收查出的两个真模型红）：
  *   · R2-S1：run_js 描述没写可用模块 → 模型首调 require("xlsx")（该包未安装）→ 首调失败
- *     → 模型转去 run_task 兜底并建了 Task。修法 = 描述声明模块面：**可用模块只有
+ *     → 模型转去 task_run 兜底并建了 Task。修法 = 描述声明模块面：**可用模块只有
  *     exceljs（require("exceljs") 读写 xlsx）；没有 xlsx/xlsx-style/csv-parse 等包**。
- *   · R2-S2：run_task 描述没写 inputFiles → 模型交办不带 inputFiles → 交办复制零发生
+ *   · R2-S2：task_run 描述没写 inputFiles → 模型交办不带 inputFiles → 交办复制零发生
  *     → Worker 无文件 → 任务 unexecuted → Main 自己兜底。修法 = 注入复制面时描述声明：
  *     **把要处理的本会话 fileId 放进 inputFiles；不带则 Worker 拿不到任何文件**。
  *
  * 纪律：这是**接口事实声明**（能力边界与参数后果），不是提示词补丁——描述里不得出现
- * 业务流程话术（负例断言钉住）；不做跨工具流程诱导（run_js 描述不提 run_task，反之亦然）。
- * 缺省装配（未注入复制面）的 run_task 描述逐字节不变，也不宣传不存在的 inputFiles 参数。
+ * 业务流程话术（负例断言钉住）；不做跨工具流程诱导（run_js 描述不提 task_run，反之亦然）。
+ * 缺省装配（未注入复制面）的 task_run 描述逐字节不变，也不宣传不存在的 inputFiles 参数。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -29,9 +29,9 @@ import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
 import {
   RUN_JS_TOOL,
   RUN_JS_TOOL_DESCRIPTION,
-  RUN_TASK_TOOL,
-  RUN_TASK_TOOL_DESCRIPTION,
-  RUN_TASK_TOOL_DESCRIPTION_WITH_INPUT_FILES,
+  TASK_RUN_TOOL,
+  TASK_RUN_TOOL_DESCRIPTION,
+  TASK_RUN_TOOL_DESCRIPTION_WITH_INPUT_FILES,
   createSession,
   type Session,
 } from './src/execution-runtime';
@@ -75,7 +75,7 @@ interface ToolFace {
 
 /**
  * 真实工具面夹具：开一个真会话跑一回合，按模型实际收到的样子捕获工具面（name/description）。
- * withCopier=false 时模拟缺省装配（无交办复制面 → run_task 不带 inputFiles 属性）。
+ * withCopier=false 时模拟缺省装配（无交办复制面 → task_run 不带 inputFiles 属性）。
  */
 async function captureToolFaces(input: { withCopier?: boolean } = {}): Promise<ToolFace[]> {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'tool-description-facts-'));
@@ -133,11 +133,11 @@ describe('run_js 描述：模块面接口事实（R2-S1）', () => {
     expect(RUN_JS_TOOL_DESCRIPTION).toContain('可用模块');
   });
 
-  it('负例：不含业务流程话术，也不做跨工具流程诱导（不提 run_task）', () => {
+  it('负例：不含业务流程话术，也不做跨工具流程诱导（不提 task_run）', () => {
     for (const phrase of BUSINESS_FLOW_NEGATIVES) {
       expect(RUN_JS_TOOL_DESCRIPTION).not.toContain(phrase);
     }
-    expect(RUN_JS_TOOL_DESCRIPTION).not.toContain('run_task');
+    expect(RUN_JS_TOOL_DESCRIPTION).not.toContain('task_run');
   });
 
   it('真实工具面：模型收到的 run_js description 就是该常量（逐字节一致）', async () => {
@@ -164,30 +164,30 @@ describe('run_js 描述：脚本内路径约定（修复轮 ⑤）', () => {
   });
 });
 
-describe('run_task 描述：inputFiles 接口事实（R2-S2）', () => {
+describe('task_run 描述：inputFiles 接口事实（R2-S2）', () => {
   it('注入复制面时：描述写清「把要处理的本会话 fileId 放进 inputFiles；不带则 Worker 拿不到任何文件」', async () => {
-    expect(RUN_TASK_TOOL_DESCRIPTION_WITH_INPUT_FILES).toContain('inputFiles');
-    expect(RUN_TASK_TOOL_DESCRIPTION_WITH_INPUT_FILES).toContain('fileId');
-    expect(RUN_TASK_TOOL_DESCRIPTION_WITH_INPUT_FILES).toContain('Worker 拿不到任何文件');
+    expect(TASK_RUN_TOOL_DESCRIPTION_WITH_INPUT_FILES).toContain('inputFiles');
+    expect(TASK_RUN_TOOL_DESCRIPTION_WITH_INPUT_FILES).toContain('fileId');
+    expect(TASK_RUN_TOOL_DESCRIPTION_WITH_INPUT_FILES).toContain('Worker 拿不到任何文件');
     // 真实工具面（注入复制面 = server 同款装配）：模型收到的就是带 inputFiles 事实的描述。
     const faces = await captureToolFaces();
-    const face = faces.find((tool) => tool.name === RUN_TASK_TOOL);
+    const face = faces.find((tool) => tool.name === TASK_RUN_TOOL);
     expect(face).toBeDefined();
-    expect(face!.description).toBe(RUN_TASK_TOOL_DESCRIPTION_WITH_INPUT_FILES);
+    expect(face!.description).toBe(TASK_RUN_TOOL_DESCRIPTION_WITH_INPUT_FILES);
   });
 
   it('缺省装配（未注入复制面）：描述逐字节不变，且不宣传不存在的 inputFiles 参数', async () => {
     const faces = await captureToolFaces({ withCopier: false });
-    const face = faces.find((tool) => tool.name === RUN_TASK_TOOL);
+    const face = faces.find((tool) => tool.name === TASK_RUN_TOOL);
     expect(face).toBeDefined();
-    expect(face!.description).toBe(RUN_TASK_TOOL_DESCRIPTION);
-    expect(RUN_TASK_TOOL_DESCRIPTION).not.toContain('inputFiles');
+    expect(face!.description).toBe(TASK_RUN_TOOL_DESCRIPTION);
+    expect(TASK_RUN_TOOL_DESCRIPTION).not.toContain('inputFiles');
   });
 
   it('负例：不含业务流程话术，也不做跨工具流程诱导（不提 run_js）', () => {
     for (const phrase of BUSINESS_FLOW_NEGATIVES) {
-      expect(RUN_TASK_TOOL_DESCRIPTION_WITH_INPUT_FILES).not.toContain(phrase);
+      expect(TASK_RUN_TOOL_DESCRIPTION_WITH_INPUT_FILES).not.toContain(phrase);
     }
-    expect(RUN_TASK_TOOL_DESCRIPTION_WITH_INPUT_FILES).not.toContain('run_js');
+    expect(TASK_RUN_TOOL_DESCRIPTION_WITH_INPUT_FILES).not.toContain('run_js');
   });
 });
