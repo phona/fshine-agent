@@ -871,35 +871,32 @@ describe('recalc_xlsx Codex 二轮复审 P2 回归', () => {
     expect(csv).not.toMatch(/S,A1,=1\+1/);
   });
 
-  it('压缩炸弹：声明超大解压尺寸的 xlsx 在解析前被拒（Codex R6-P1）', async () => {
-    const h = makeHarness();
-    const src = await workbookBuffer('S', { A1: 1 });
-    const bytes = Buffer.from(src);
-    // 找 EOCD 的 central directory 首个条目，把 uncompressed size 改成 > 128MB。
+  it('压缩炸弹：实际解压字节超限被流式截断拒绝，不看 CD 声明（Codex R6/R12-P1）', async () => {
+    // 构造真实 >128MB 解压内容（全 0 高度压缩，ZIP 本体很小）。关键：即便把 CD 声明
+    // 改成 1KB 伪造，流式解压计数仍能发现真实大小并中断——这正是结构性修法的证据。
+    const JSZipLib = (await import('jszip')).default;
+    const zip = new JSZipLib();
+    const chunk = '0'.repeat(1024 * 1024);
+    zip.file('bomb.xml', chunk.repeat(129)); // 129MB 解压内容
+    const bytes = Buffer.from(await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
+    // 伪造 CD 声明尺寸为 512（攻击者手法）——新校验不应被它影响。
     let eocd = -1;
     for (let i = bytes.length - 22; i >= 0; i--) {
       if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === 0x05 && bytes[i + 3] === 0x06) { eocd = i; break; }
     }
-    expect(eocd).toBeGreaterThan(0);
-    const p = bytes.readUInt32LE(eocd + 16);
-    bytes.writeUInt32LE(200 * 1024 * 1024, p + 24);
-    expect(() => assertWorkbookExpandedSize(bytes)).toThrow(/too_large/);
+    let p = bytes.readUInt32LE(eocd + 16);
+    bytes.writeUInt32LE(512, p + 24);
+    await expect(assertWorkbookExpandedSize(bytes)).rejects.toThrow(/too_large/);
   });
 
-  it('前导字节 ZIP 的压缩炸弹仍被识别并拒收（Codex R11-P1）', async () => {
-    const src = await workbookBuffer('S', { A1: 1 });
-    // 给整个 ZIP 加 16 字节前导，再把 central directory 的 uncompressed size 改成 200MB。
-    const withPreamble = Buffer.concat([Buffer.alloc(16, 0x41), Buffer.from(src)]);
-    let eocd = -1;
-    for (let i = withPreamble.length - 22; i >= 0; i--) {
-      if (withPreamble[i] === 0x50 && withPreamble[i + 1] === 0x4b && withPreamble[i + 2] === 0x05 && withPreamble[i + 3] === 0x06) { eocd = i; break; }
-    }
-    expect(eocd).toBeGreaterThan(16);
-    const cdSize = withPreamble.readUInt32LE(eocd + 12);
-    const cdOffset = withPreamble.readUInt32LE(eocd + 16);
-    const p = cdOffset + (eocd - cdOffset - cdSize); // 校正前导字节后的实际 CD 位置
-    withPreamble.writeUInt32LE(200 * 1024 * 1024, p + 24);
-    expect(() => assertWorkbookExpandedSize(withPreamble)).toThrow(/too_large/);
+  it('前导字节 ZIP 的压缩炸弹仍被拒（JSZip 能解析前导字节，实际解压计数不依赖 CD 偏移）', async () => {
+    const JSZipLib = (await import('jszip')).default;
+    const zip = new JSZipLib();
+    const chunk = '0'.repeat(1024 * 1024);
+    zip.file('bomb.xml', chunk.repeat(129));
+    const body = Buffer.from(await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
+    const withPreamble = Buffer.concat([Buffer.alloc(16, 0x41), body]);
+    await expect(assertWorkbookExpandedSize(withPreamble)).rejects.toThrow(/too_large/);
   });
 
   it('falsy result（0/false）：公式结果 0 能被读回，一致→pass、CSV 出 0（Codex R5-P1）', async () => {

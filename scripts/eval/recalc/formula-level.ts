@@ -73,7 +73,7 @@ async function cachedValueOf(bytes: Buffer, ref: string): Promise<ExcelJS.CellVa
 }
 
 export interface FormulaLevelReading {
-  readonly arm: 'before_data_level' | 'after_formula_level';
+  readonly arm: 'before_data_level' | 'after_formula_level' | 'after_renamed_still_blocked';
   readonly engine: string;
   readonly cached: ExcelJS.CellValue;
   readonly computed: ExcelJS.CellValue | null;
@@ -140,9 +140,25 @@ export async function runFormulaLevelEval(): Promise<{
     reason: afterGate.gated[0]?.reason ?? RECALC_DELIVERY_GATE_STATUS.PASS,
   };
 
-  const readings = [before, after];
+  // ── 负向臂（Codex R13-minor）：同字节改名投递仍须命中 fail 报告被拦——证明闸门按 sha
+  // 绑定、不被可变文件名绕过；否则准入证据只在「名字恰好一致」时虚绿。
+  const renamedGate = await applyRecalcDeliveryGate({
+    files: [{ name: 'renamed-clean.csv', bytes: src }], reports, enabled: true,
+  });
+  const renamed: FormulaLevelReading = {
+    arm: 'after_renamed_still_blocked',
+    engine: after.engine,
+    cached,
+    computed: after.computed,
+    verdict: renamedGate.outgoing.length > 0 ? 'pass（改名绕过了 fail 报告）' : 'fail',
+    delivered: renamedGate.outgoing.length > 0,
+    reason: renamedGate.gated[0]?.reason ?? RECALC_DELIVERY_GATE_STATUS.PASS,
+  };
+
+  const readings = [before, after, renamed];
   const pass = before.delivered === true
     && after.delivered === false
+    && renamed.delivered === false // 改名也必须被拦
     && after.computed === EXPECTED_COMPUTED
     && diff !== undefined
     && diff.cached === 999;

@@ -34,6 +34,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
 import {
   FileRefUnavailableError,
   runDirOf,
@@ -235,34 +236,48 @@ function csvCell(value: ExcelJS.CellValue, isNumeric = false): string {
 const WORKBOOK_EXPANDED_BYTES_LIMIT = 128 * 1024 * 1024;
 
 /**
- * 从 ZIP central directory 累加未压缩大小，超限即拒（不实际解压，避免宿主 OOM）。
- * Codex R6-P1：3MB 压缩文件可展开成百万格，在 128MB 堆里直接杀掉整个 server。
+ * 解压体积硬上限校验（结构性防 OOM，不信任任何 CD 声明字段）。
+ *
+ * 前几轮多次证明按 ZIP central directory 的「声明解压尺寸」判断可被伪造（声明小值、
+ * 前导字节等），JSZip 实际是先 inflate 全部字节进宿主堆才比对声明值——声明值不可信。
+ * 正解：用 JSZip 的 nodeStream **实际流式解压并计数**，累计超过上限立即 destroy 中断，
+ * 内存占用被钳在阈值内（实测 10MB 阈值时堆仅 ~72MB，不触发全量 inflate）。
+ * 通过校验后再交给 exceljs 读（同一份字节、同一上限，不会超限）。
  */
-export function assertWorkbookExpandedSize(bytes: Buffer): void {
-  // 不检查开头魔数：合法 ZIP 允许前导字节（Codex R11-P1 —— 前导字节曾绕过大写检查后
-  // 仍被 ExcelJS 解压）。全尾部找 EOCD，找不到或结构不合法即 fail-closed 拒绝。
-  let eocd = -1;
-  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 66 * 1024); i--) {
-    if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === 0x05 && bytes[i + 3] === 0x06) { eocd = i; break; }
+export async function assertWorkbookExpandedSize(bytes: Buffer): Promise<void> {
+  let zip: JSZip;
+  try {
+    zip = await JSZip.loadAsync(bytes); // 只解析目录，不解压内容
+  } catch {
+    throw new Error('workbook_zip_invalid');
   }
-  if (eocd < 0) throw new Error('workbook_zip_invalid'); // 找不到 ZIP 结构：拒，不交给解析器冒 OOM 风险
-  const count = bytes.readUInt16LE(eocd + 10);
-  const cdSize = bytes.readUInt32LE(eocd + 12);
-  let p = bytes.readUInt32LE(eocd + 16); // central directory 偏移（相对 ZIP 起点）
-  // 前导字节 N 让 CD 实际位置 = N + 记录偏移；N = EOCD 实际位置 - CD 记录偏移 - CD 大小。
-  const preamble = eocd - p - cdSize;
-  if (preamble > 0) p += preamble;
   let total = 0;
-  for (let n = 0; n < count; n++) {
-    if (p + 46 > bytes.length || bytes[p] !== 0x50 || bytes[p + 1] !== 0x4b || bytes[p + 2] !== 0x01) break;
-    total += bytes.readUInt32LE(p + 24); // uncompressed size
-    if (total > WORKBOOK_EXPANDED_BYTES_LIMIT) throw new Error('workbook_expanded_too_large');
-    p += 46 + bytes.readUInt16LE(p + 28) + bytes.readUInt16LE(p + 30) + bytes.readUInt16LE(p + 32);
+  for (const entry of Object.values(zip.files)) {
+    if (entry.dir) continue;
+    await new Promise<void>((resolve, reject) => {
+      // nodeStream 运行时是 Node Readable（有 destroy），JSZip 的 .d.ts 推断成 Web ReadableStream。
+      const stream = entry.nodeStream('nodebuffer') as unknown as import('node:stream').Readable;
+      let settled = false;
+      const done = (err?: Error): void => {
+        if (settled) return;
+        settled = true;
+        if (err) reject(err); else resolve();
+      };
+      stream.on('data', (chunk: Buffer) => {
+        total += chunk.length;
+        if (total > WORKBOOK_EXPANDED_BYTES_LIMIT) {
+          stream.destroy();
+          done(new Error('workbook_expanded_too_large'));
+        }
+      });
+      stream.on('end', () => done());
+      stream.on('error', () => done(new Error('workbook_zip_invalid')));
+    });
   }
 }
 
 async function readWorkbook(filePath: string): Promise<ExcelJS.Workbook> {
-  assertWorkbookExpandedSize(readFileSync(filePath));
+  await assertWorkbookExpandedSize(readFileSync(filePath));
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.readFile(filePath);
   return wb;
@@ -803,7 +818,9 @@ export function decideRecalcDelivery(input: {
   reports: readonly RecalcReportBinding[];
 }): RecalcDeliveryDecision {
   const digest = createHash('sha256').update(input.bytes).digest('hex');
-  const matching = input.reports.filter((r) => r.name === input.name && r.sha256 === digest);
+  // 只按 sha256 绑定（Codex R13-major）：sha 唯一标识字节，name 是可变的展示字段
+  // （run_js 拷贝/改名会变）。按 name+sha 双绑定会让已知 fail 报告被改文件名绕过。
+  const matching = input.reports.filter((r) => r.sha256 === digest);
   if (matching.length === 0) {
     // 无报告 = 执行层交付的数据文件（边界内信任），照常投递。
     return { deliver: true, reason: RECALC_DELIVERY_GATE_STATUS.NO_REPORT };

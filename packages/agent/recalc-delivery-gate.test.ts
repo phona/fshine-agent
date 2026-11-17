@@ -72,6 +72,15 @@ describe('recalc_delivery_gate 判定核心（报告驱动，不解析内容）'
     }
   });
 
+  it('同 sha 改名不改判定：fail 报告按 sha 绑定，改文件名也拦（Codex R13-major）', async () => {
+    const f = await xlsxBuffer({ A1: 1 });
+    const failReport = reportFor(f, 'bad.xlsx', 'fail');
+    // 同字节、改名投递——仍须按 sha 命中 fail 报告并拦截。
+    const d = decideRecalcDelivery({ bytes: f, name: 'renamed-clean.csv', reports: [failReport] });
+    expect(d.deliver).toBe(false);
+    expect(d.reason).toBe(RECALC_DELIVERY_GATE_STATUS.REPORT_FAIL);
+  });
+
   it('同 sha 多份报告：只认最新一份，旧 pass 不覆盖新 fail（Codex R9-P2）', async () => {
     const f = await xlsxBuffer({ A1: 1 });
     const oldPass = { ...reportFor(f, '汇总.xlsx', 'pass'), createdAt: 1000 };

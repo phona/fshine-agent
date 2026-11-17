@@ -245,7 +245,7 @@ export const RECALC_XLSX_TOOL = 'recalc_xlsx';
 export const RECALC_XLSX_TOOL_DESCRIPTION =
   '对文件清单里的 xlsx 用 LibreOffice 强制重算后读回，报告公式缓存值与计算值不一致（valueDiffs）和错误格（errorCells），'
   + '并可按 export=csv 导出纯数据 CSV。file 只接受本回合运行目录的规范相对路径 in/<fileId><安全扩展名>（文件清单每条已给出脚本内路径）；'
-  + '绝对路径、..、多级路径与非规范形式一律拒绝。export=csv 时产物为 out/<name>.values.csv，报告在 out/.recalc-report.json。'
+  + '绝对路径、..、多级路径与非规范形式一律拒绝。export=csv 时产物为 out/<name>.values.csv，实算报告在本回合运行目录根 .recalc-report.json（宿主独占，不写 out/）。'
   + '引擎需部署期安装的 LibreOffice 26.8.3（PATH 可见才提供本工具，缺失则本工具不可用）。';
 export const RECALC_XLSX_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
