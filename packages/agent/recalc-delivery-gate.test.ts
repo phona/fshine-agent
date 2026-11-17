@@ -99,6 +99,16 @@ describe('recalc_delivery_gate 判定核心', () => {
     expect(decision.reason).toBe(RECALC_DELIVERY_GATE_STATUS.UNVERIFIABLE);
   });
 
+  it('合法共享公式锚点（shareType=shared + ref）不被误判 uncertain（Codex R6-P2）', async () => {
+    const bytes = await xlsxBuffer({
+      A1: { formula: '1+1', result: 2, shareType: 'shared', ref: 'A1:A2' } as unknown as ExcelJS.CellValue,
+      A2: { sharedFormula: 'A1', result: 2 } as unknown as ExcelJS.CellValue,
+    });
+    const scan = await scanFormulas(bytes);
+    // exceljs 写回可能丢 ref；重点是不因 shareType 被判 uncertain。
+    expect('uncertain' in scan ? scan.uncertain : false).toBe(false);
+  });
+
   it('数组公式锚点（formula+ref）→ scan 判 uncertain，不能被「认公式」的 early return 遮蔽（Codex R5-P1）', async () => {
     // exceljs 写回会丢 ref，必须手工在 OOXML 的 <f> 上注入 t="array" ref="A1:A2"。
     const base = await xlsxBuffer({ C1: 1, D1: 2, A1: { formula: 'TRANSPOSE(C1:D1)', result: 1 }, A2: 2 });

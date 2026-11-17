@@ -217,12 +217,42 @@ function cellTextOf(value: ExcelJS.CellValue): string {
 }
 
 /** CSV 单元格转义（逗号/引号/换行包引号，内部引号翻倍）。 */
-function csvCell(value: ExcelJS.CellValue): string {
-  const text = cellTextOf(value);
+function csvCell(value: ExcelJS.CellValue, isNumeric = false): string {
+  let text = cellTextOf(value);
+  // Codex R6-P2：纯数据 CSV 里以 = + - @ 开头的**文本**会在表格软件里被当公式执行。
+  // 前置单引号中和（skill 同款口径）；数字类型（含负数）不加，保持数据可用。
+  if (!isNumeric && /^[=+\-@]/.test(text)) text = `'${text}`;
   return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
+/** 解压后工作簿数据硬上限（防压缩炸弹在宿主堆里展开成百万格 OOM）。 */
+const WORKBOOK_EXPANDED_BYTES_LIMIT = 128 * 1024 * 1024;
+
+/**
+ * 从 ZIP central directory 累加未压缩大小，超限即拒（不实际解压，避免宿主 OOM）。
+ * Codex R6-P1：3MB 压缩文件可展开成百万格，在 128MB 堆里直接杀掉整个 server。
+ */
+export function assertWorkbookExpandedSize(bytes: Buffer): void {
+  if (bytes.length < 22 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) return; // 非 zip：交给后续解析判定
+  // 从尾部找 EOCD（PK\x05\x06），拿 central directory 偏移与条目数，只遍历条目区（O(entries)）。
+  let eocd = -1;
+  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 66 * 1024); i--) {
+    if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === 0x05 && bytes[i + 3] === 0x06) { eocd = i; break; }
+  }
+  if (eocd < 0) return; // 找不到：交给解析（损坏会在 readWorkbook 处报错）
+  const count = bytes.readUInt16LE(eocd + 10);
+  let p = bytes.readUInt32LE(eocd + 16);
+  let total = 0;
+  for (let n = 0; n < count; n++) {
+    if (p + 46 > bytes.length || bytes[p] !== 0x50 || bytes[p + 1] !== 0x4b || bytes[p + 2] !== 0x01) break;
+    total += bytes.readUInt32LE(p + 24); // uncompressed size
+    if (total > WORKBOOK_EXPANDED_BYTES_LIMIT) throw new Error('workbook_expanded_too_large');
+    p += 46 + bytes.readUInt16LE(p + 28) + bytes.readUInt16LE(p + 30) + bytes.readUInt16LE(p + 32);
+  }
+}
+
 async function readWorkbook(filePath: string): Promise<ExcelJS.Workbook> {
+  assertWorkbookExpandedSize(readFileSync(filePath));
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.readFile(filePath);
   return wb;
@@ -310,7 +340,8 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
       let srcWb: ExcelJS.Workbook;
       try {
         srcWb = await readWorkbook(sourcePath);
-      } catch {
+      } catch (error) {
+        if (error instanceof Error && error.message === 'workbook_expanded_too_large') return errorResult('too_large');
         return errorResult('corrupt');
       }
 
@@ -379,7 +410,7 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
             // sheet 只收窄 CSV 展示（P1-2）：验证已对全本完成，这里仅决定导出哪些行。
             if (input.export === 'csv' && computedValue !== null
               && (sheetFilter === undefined || sheetName === sheetFilter)) {
-              csvRows.push(`${csvCell(sheetName)},${csvCell(address)},${csvCell(computedValue)}`);
+              csvRows.push(`${csvCell(sheetName)},${csvCell(address)},${csvCell(computedValue, typeof computedValue === 'number' || computedValue instanceof Date)}`);
             }
           });
         });
@@ -637,6 +668,7 @@ export type FormulaScan = { hasFormulas: boolean } | { uncertain: true };
 export async function scanFormulas(bytes: Buffer): Promise<FormulaScan> {
   let wb: ExcelJS.Workbook;
   try {
+    assertWorkbookExpandedSize(bytes);
     wb = new ExcelJS.Workbook();
     await wb.xlsx.load(bytes as unknown as ExcelJS.Buffer);
   } catch {
@@ -656,9 +688,11 @@ export function scanWorkbookFormulas(wb: ExcelJS.Workbook): FormulaScan {
         const v = cell.value;
         if (v && typeof v === 'object' && !Array.isArray(v)) {
           const obj = v as unknown as Record<string, unknown>;
-          // 公式锚点带 ref（数组公式）→ follower 被 exceljs 读成普通值、无法可靠识别 → 认不准，拒绝。
-          // 必须在「认公式」之前判，否则 early return 会让这条不可达（Codex R5-P1）。
-          if ('formula' in obj && ('ref' in obj || 'shareType' in obj)) { uncertain = true; return; }
+          // 数组公式锚点带 ref 且 **不是** 合法共享公式（sharedFormula 的 shareType='shared'）→
+          // follower 被 exceljs 读成普通值、无法可靠识别 → 认不准，拒绝（Codex R5/R6）。
+          // 必须在「认公式」之前判，否则 early return 会让这条不可达。
+          const isSharedAnchor = obj['shareType'] === 'shared';
+          if ('formula' in obj && 'ref' in obj && !isSharedAnchor) { uncertain = true; return; }
           if ('formula' in obj || 'sharedFormula' in obj) { found = true; return; }
           // {result:...} 单独出现（数组公式 follower 的典型形态）→ 认不准，拒绝。
           if ('result' in obj && !('text' in obj) && !('richText' in obj)) uncertain = true;

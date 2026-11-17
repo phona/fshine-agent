@@ -45,6 +45,7 @@ import {
   type FileStore,
 } from './src/file-store';
 import {
+  assertWorkbookExpandedSize,
   createRecalcXlsxExecutor,
   createSofficeRecalcEngine,
   parseRecalcFilePath,
@@ -760,6 +761,36 @@ describe('recalc_xlsx 重算开销入 R4 账（独立复核 Gap1）', () => {
 
 // ───────────────────────── Codex 二轮复审 4×P2 回归 ─────────────────────────
 describe('recalc_xlsx Codex 二轮复审 P2 回归', () => {
+  it('CSV 注入：以 = 开头的文本被中和为纯数据，数字保持（Codex R6-P2）', async () => {
+    const h = makeHarness();
+    const src = await workbookBuffer('S', { A1: '=1+1', B1: -12.5, C1: '@SUM' });
+    const computed = await workbookBuffer('S', { A1: '=1+1', B1: -12.5, C1: '@SUM' });
+    const file = h.putInput('inject.xlsx', src);
+    const ex = makeExecutor(h, computedEngine(computed));
+    const r = await ex.recalc({ file, export: 'csv', scope: SCOPE });
+    expect(r.status).toBe('pass');
+    const csv = readFileSync(path.join(latestRunDir(h), 'out', path.basename(r.artifacts.values!)), 'utf8');
+    expect(csv).toContain("'=1+1");
+    expect(csv).toContain("'@SUM");
+    expect(csv).toContain('-12.5');
+    expect(csv).not.toMatch(/S,A1,=1\+1/);
+  });
+
+  it('压缩炸弹：声明超大解压尺寸的 xlsx 在解析前被拒（Codex R6-P1）', async () => {
+    const h = makeHarness();
+    const src = await workbookBuffer('S', { A1: 1 });
+    const bytes = Buffer.from(src);
+    // 找 EOCD 的 central directory 首个条目，把 uncompressed size 改成 > 128MB。
+    let eocd = -1;
+    for (let i = bytes.length - 22; i >= 0; i--) {
+      if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === 0x05 && bytes[i + 3] === 0x06) { eocd = i; break; }
+    }
+    expect(eocd).toBeGreaterThan(0);
+    const p = bytes.readUInt32LE(eocd + 16);
+    bytes.writeUInt32LE(200 * 1024 * 1024, p + 24);
+    expect(() => assertWorkbookExpandedSize(bytes)).toThrow(/too_large/);
+  });
+
   it('falsy result（0/false）：公式结果 0 能被读回，一致→pass、CSV 出 0（Codex R5-P1）', async () => {
     const h = makeHarness();
     // ExcelJS 写回后 cell.value 会省略 result=0，但 cell.result 保留——必须读 cell.result。
