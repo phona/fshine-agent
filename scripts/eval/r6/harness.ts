@@ -46,6 +46,13 @@ export interface HarnessSession {
   compactionAttempts(): readonly CompactionAttempt[];
   /** 刚结束的一轮机械上是否调用了 task_cancel（H5 判据）。 */
   cancelCalledLastTurn(): boolean;
+  /**
+   * 本回合**被测会话 Pi 面**的模型调用数（含摘要/重试；用于 H6.b 单回合上限）。
+   * 缺省 = 按 `budget().calls` 的回合差分（全部模型调用，含 Worker）。真实装配下
+   * Worker 是每次委派独立的一次性 Pi 会话，其调用计入全量预算，但不算被测长会话的
+   * 「回合」——不区分会把 Worker 调用误算进 H6.b。
+   */
+  mainModelCallsLastTurn?(): number;
 }
 
 export interface HarnessRunInput {
@@ -120,7 +127,9 @@ export async function runHarnessSession(input: HarnessRunInput): Promise<Harness
     const result = await session.send(spec.text);
     const reply = result.reply ?? '';
     replies.push({ index: spec.index, text: reply, replyChars: reply.length, durationMs: 0 });
-    const callsDelta = session.budget().calls - callsBefore;
+    const callsDelta = session.mainModelCallsLastTurn !== undefined
+      ? session.mainModelCallsLastTurn()
+      : session.budget().calls - callsBefore;
     // ② 回填累计逐次调用记录（摘要独立于 budget hook 计数）。
     if (hasLedger) {
       guard.replace((session.modelCallLedger?.() ?? []).map((r) => ({ ...r, sessionId: input.sessionId })));
