@@ -286,6 +286,21 @@ describe('dummy 适配器的失败映射（stub 网关，零网络）', () => {
     expect(captured.args).toMatchObject({ '--collection': 'alpha' });
   });
 
+  it('宿主取消信号：杀网关子进程并抛 AbortError（不再等慢调用自然结束）', async () => {
+    const client = stubClient('normal');
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    setTimeout(() => controller.abort(), 100);
+    await expect(
+      client.execute(
+        { requestId: 'req_cancel', dispatchKey: 'dk_test_req_cancel', operation: 'stub.slow', args: {} },
+        { signal: controller.signal },
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    // 慢调用自然结束要 5s；取消路径必须在网关子进程被杀后立即返回。
+    expect(Date.now() - startedAt).toBeLessThan(3000);
+  });
+
   it('调用超时 / 未知状态 / 无信封 → failed 机械分流；needs_input 缺参走声明分支', async () => {
     const client = stubClient('normal', 300);
 

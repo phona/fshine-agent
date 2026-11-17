@@ -667,10 +667,50 @@ interface OperationRunResult {
   unresolved: boolean;
 }
 
+/** 宿主取消（abort）引起的调用终止：不是「结果未知」的另一种写法。 */
+function abortError(): Error {
+  const error = new Error('执行调用已被取消。');
+  error.name = 'AbortError';
+  return error;
+}
+
+/** 取消在飞调用时的机械结果（读路径可安全放弃；写路径仍走 result_unknown）。 */
+function abortedOutcome(message: string): ExecutionOutcome {
+  return { status: 'failed', error: { code: 'aborted', message, retryable: true } };
+}
+
+/** 取消信号是否已中止（helper 形式：避免 TS 把 await 前的未中止窄化带进 await 之后）。 */
+function isAborted(signal?: AbortSignal): boolean {
+  return signal?.aborted === true;
+}
+
+/**
+ * 把一次在飞调用与取消信号竞速：signal 中止即拒绝，调用方不必等执行层回执。
+ * 被竞速的 promise 仍可能稍后落定——调用方须自行挂 catch（这里不改写它的结果）。
+ */
+async function raceWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return promise;
+  if (signal.aborted) throw abortError();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(abortError());
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    if (onAbort !== undefined) signal.removeEventListener('abort', onAbort);
+  }
+}
+
 /**
  * U3：认领 →（仅首次铸造）执行 → 落定。**先落库再调用**：调用执行层之前已有一行
  * claimed（进程死亡窗口里有记录）；重试/恢复后的调用只按窗口读回已持久化行。
  * 无法证明绑定（unresolved）时不发起执行，交还待核对。
+ *
+ * 取消面（signal）：本行是有副作用/读操作的唯一发起点。信号中止时不再等执行层回执；
+ * 读路径落 `failed/aborted`（无副作用可核对），写路径仍落 `unknown`（结果未知优先于取消，
+ * 不得把「可能已发生」改写成「已取消」）。迟到回执不会覆盖已落定行（settle 幂等）。
  */
 async function claimAndRunOperation(input: {
   registry: TaskRegistry;
@@ -679,6 +719,8 @@ async function claimAndRunOperation(input: {
   window: RuntimeAttemptWindow;
   operation: string;
   taskId?: string;
+  /** 宿主取消信号（任务取消/回合中止）；缺省 = 不参与取消（既有行为）。 */
+  signal?: AbortSignal;
   /** 执行回调抛错时的机械处置：unknown = 外部是否生效未知（默认）；propagate = 已知失败，原样抛出。 */
   executeThrows?: 'unknown' | 'propagate';
   execute: (dispatchKey: string) => Promise<ExecutionOutcome>;
@@ -714,10 +756,57 @@ async function claimAndRunOperation(input: {
         unresolved: true,
       };
     case 'minted': {
+      // 预取消：信号在发起前已中止 → 本次调用不发起（已认领行如实关闭，零执行、零未知）。
+      if (input.signal?.aborted === true) {
+        const aborted = abortedOutcome('调用在发起前已被取消。');
+        input.registry.settleOperation(
+          claim.dispatchKey,
+          aborted,
+          input.taskId === undefined ? {} : { taskId: input.taskId },
+        );
+        return { outcome: aborted, executed: false, unresolved: false };
+      }
+      let started: Promise<ExecutionOutcome>;
+      try {
+        started = input.execute(claim.dispatchKey);
+      } catch (error) {
+        // 同步抛错的坏实现：与异步拒绝同路。
+        started = Promise.reject(error);
+      }
+      // 竞速只取「谁先落定」；取消胜出后，迟到的回执不得变成未处理拒绝。
+      void started.catch(() => undefined);
       let outcome: ExecutionOutcome;
       try {
-        outcome = await input.execute(claim.dispatchKey);
+        outcome = await raceWithAbort(started, input.signal);
       } catch (error) {
+        if (isAborted(input.signal) && isAbortErrorLike(error)) {
+          // 宿主取消在飞调用：不再等待回执。
+          if (input.executeThrows === 'propagate') {
+            input.registry.settleOperation(
+              claim.dispatchKey,
+              abortedOutcome('调用被宿主取消。'),
+              input.taskId === undefined ? {} : { taskId: input.taskId },
+            );
+            throw error;
+          }
+          if (readOnly) {
+            // 读路径没有副作用要核对：如实落 aborted（可安全重试），不污染成 unknown。
+            const aborted = abortedOutcome('调用被宿主取消。');
+            input.registry.settleOperation(
+              claim.dispatchKey,
+              aborted,
+              input.taskId === undefined ? {} : { taskId: input.taskId },
+            );
+            return { outcome: aborted, executed: true, unresolved: false };
+          }
+          // 写路径：取消在飞写操作仍不能断言「没发生」——结果未知优先（U3）。
+          input.registry.markOperationUnknown(claim.dispatchKey, 'cancelled_mid_flight');
+          return {
+            outcome: { status: 'failed', error: { code: 'result_unknown', message: RESULT_UNKNOWN_MESSAGE, retryable: false } },
+            executed: true,
+            unresolved: true,
+          };
+        }
         if (input.executeThrows === 'propagate') {
           // 已知失败（不是「结果未知」）：账行落 failed，原样抛给调用方（既有失败路径不变）。
           input.registry.settleOperation(claim.dispatchKey, {
@@ -1151,6 +1240,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     window: RuntimeAttemptWindow;
     operation: string;
     taskId?: string;
+    /** 宿主取消信号：中止在飞调用，不再等执行层回执。 */
+    signal?: AbortSignal;
     /** 执行回调抛错时的机械处置：unknown = 外部是否生效未知（默认）；propagate = 已知失败，原样抛出。 */
     executeThrows?: 'unknown' | 'propagate';
     execute: (dispatchKey: string) => Promise<ExecutionOutcome>;
@@ -1179,6 +1270,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     onUnresolved: () => void,
     exchange?: TaskExecutionBridge,
     taskFiles?: TurnFileRef[],
+    signal?: AbortSignal,
   ): Promise<ExecutionOutcome> {
     const operation = typeof args.operation === 'string' ? args.operation : '';
     if (operation === '') throw new Error('execute_operation 缺少 operation。');
@@ -1198,10 +1290,16 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       window,
       operation,
       taskId,
+      ...(signal === undefined ? {} : { signal }),
       execute: async (dispatchKey) => {
         // requestId 由宿主生成、每次调用换号（只作追踪）；dispatchKey 是操作身份，不换。
         const requestId = `req_${randomUUID()}`;
-        let outcome = await client.execute({ requestId, dispatchKey, operation, args: callArgs });
+        let outcome = await client.execute(
+          { requestId, dispatchKey, operation, args: callArgs },
+          signal === undefined ? undefined : { signal },
+        );
+        // 取消后到达的回执不落执行事实：任务已按取消处置，迟到的成功不得冒充本回合结果。
+        if (signal?.aborted === true) throw abortError();
         // CAP-01 S2 ③：回程登记在 runtime 出口（不在适配器）——登记 data.files、剥
         // path/base64 后，落定与转录只见登记事实。未注入桥时 outcome 原样（零变化）。
         if (exchange !== undefined && taskFiles !== undefined) {
@@ -1226,6 +1324,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         run.outcome.status === 'failed' ? run.outcome.error.message : RESULT_UNKNOWN_MESSAGE,
       );
     }
+    // 取消胜出：不再把（可能迟到的）执行结果交回 Worker；让回合按 abort 收尾。
+    if (signal?.aborted === true) throw abortError();
     return run.outcome;
   }
 
@@ -1248,7 +1348,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         return runJsInWorkerTurn(taskId, args, files.runJsMemo, files.taskFiles, signal);
       }
       if (tool !== EXECUTE_OPERATION_TOOL) throw new Error(`Worker 工具面之外的调用：${tool}`);
-      return executeOperation(taskId, args, window, onUnresolved, files?.exchange, files?.taskFiles);
+      return executeOperation(taskId, args, window, onUnresolved, files?.exchange, files?.taskFiles, signal);
     };
   }
 
@@ -1742,7 +1842,13 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       // U3：本交办内的重放窗口（只由 Worker 驱动的原生事件推进）。
       const workerWindow = newAttemptWindow();
       let unresolved = false;
-      const exec = async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
+      const exec = async (
+        tool: string,
+        args: Record<string, unknown>,
+        execSignal?: AbortSignal,
+      ): Promise<unknown> => {
+        // 取消信号：Pi 回合的 abort signal（父级取消 + 截止）优先；驱动未传时回落到任务信号。
+        const signal = execSignal ?? context.signal;
         if (tool !== EXECUTE_OPERATION_TOOL) throw new Error(`Worker 工具面之外的调用：${tool}`);
         const operation = typeof args.operation === 'string' ? args.operation : '';
         if (operation === '') throw new Error('execute_operation 缺少 operation。');
@@ -1760,10 +1866,16 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           window: workerWindow,
           operation,
           taskId: task.taskId,
+          signal,
           execute: async (dispatchKey) => {
             // requestId 由宿主生成、每次调用换号（只作追踪）；dispatchKey 是操作身份，不换。
             const requestId = `req_${randomUUID()}`;
-            const outcome = await options.client.execute({ requestId, dispatchKey, operation, args: callArgs });
+            const outcome = await options.client.execute(
+              { requestId, dispatchKey, operation, args: callArgs },
+              { signal },
+            );
+            // 取消后到达的回执不落执行事实：任务已按取消处置，迟到的成功不得冒充本回合结果。
+            if (signal.aborted) throw abortError();
             options.registry.noteExecution(task.taskId, {
               requestId,
               operation,
@@ -1781,6 +1893,8 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
             run.outcome.status === 'failed' ? run.outcome.error.message : RESULT_UNKNOWN_MESSAGE,
           );
         }
+        // 取消胜出：不再把（可能迟到的）执行结果交回 Worker；让回合按 abort 收尾。
+        if (signal.aborted) throw abortError();
         if (run.executed) recorded.push({ operation, outcome: run.outcome });
         return run.outcome;
       };

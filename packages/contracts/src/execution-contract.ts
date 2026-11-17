@@ -108,9 +108,19 @@ export type ExecutionOutcome =
   | { status: 'failed'; error: ExecutionFailure }
   | { status: 'refused'; error: ExecutionFailure };
 
+/**
+ * 单次执行调用的可选取消面（契约只带「必要的取消信息」，不是第二套协议）：
+ * `signal` = 宿主的取消信号。适配器观察到中止后应停止执行层工作并尽快以
+ * `AbortError` 拒绝；不支持中止的适配器可以忽略它——宿主不依赖执行层配合
+ * 也能终结本次任务（读路径可安全放弃；写路径按结果未知处置，见运行时）。
+ */
+export interface ExecutionCallOptions {
+  readonly signal?: AbortSignal;
+}
+
 /** 执行层客户端：适配器实现本接口；通用运行时只依赖本接口。 */
 export interface ExecutionClient {
   /** 能力快照：每个会话取一次，供装配使用。 */
   capabilities(): Promise<CapabilityManifest>;
-  execute(request: ExecutionRequest): Promise<ExecutionOutcome>;
+  execute(request: ExecutionRequest, options?: ExecutionCallOptions): Promise<ExecutionOutcome>;
 }

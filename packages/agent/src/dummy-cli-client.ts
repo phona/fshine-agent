@@ -26,6 +26,7 @@ import {
   EXECUTION_CONTRACT_VERSION,
   type CapabilityManifest,
   type ExecutionArgDeclaration,
+  type ExecutionCallOptions,
   type ExecutionClient,
   type ExecutionFailure,
   type ExecutionOutcome,
@@ -74,6 +75,8 @@ interface GatewayRun {
   stderr: string;
   timedOut?: boolean;
   spawnFailed?: boolean;
+  /** 宿主取消信号触发：网关子进程已被终止，本次调用没有可用回执。 */
+  aborted?: boolean;
 }
 
 interface ResultEnvelope {
@@ -87,7 +90,11 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
   const gatewayPath = path.join(options.root, options.gateway);
   let listing: Promise<readonly RawGatewayOperation[]> | undefined;
 
-  function runGateway(args: string[]): Promise<GatewayRun> {
+  function runGateway(args: string[], signal?: AbortSignal): Promise<GatewayRun> {
+    // 预取消：不 spawn、不产生任何网关副作用（与 run_js 执行器的预取消同口径）。
+    if (signal?.aborted === true) {
+      return Promise.resolve({ code: null, stdout: '', stderr: '', aborted: true });
+    }
     return new Promise((resolve) => {
       let settled = false;
       let timer: NodeJS.Timeout | undefined;
@@ -95,7 +102,13 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
         if (settled) return;
         settled = true;
         if (timer !== undefined) clearTimeout(timer);
+        if (signal !== undefined) signal.removeEventListener('abort', onAbort);
         resolve(run);
+      };
+      // 取消在飞调用：杀网关子进程并如实返回「无回执」，由调用方按取消语义处置。
+      const onAbort = (): void => {
+        child.kill('SIGKILL');
+        settle({ code: null, stdout: '', stderr: '', aborted: true });
       };
       const child = spawn(gatewayPath, args, {
         cwd: options.root,
@@ -117,6 +130,7 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
         child.kill('SIGTERM');
         settle({ code: null, stdout: '', stderr: '', timedOut: true });
       }, timeoutMs);
+      if (signal !== undefined) signal.addEventListener('abort', onAbort, { once: true });
     });
   }
 
@@ -156,7 +170,10 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
         })),
       };
     },
-    async execute(request: ExecutionRequest): Promise<ExecutionOutcome> {
+    async execute(
+      request: ExecutionRequest,
+      callOptions?: ExecutionCallOptions,
+    ): Promise<ExecutionOutcome> {
       const operations = await listOperations();
       const operation = operations.find((entry) => entry.name === request.operation);
       const scratch = mkdtempSync(path.join(os.tmpdir(), 'dummy-exec-'));
@@ -169,7 +186,13 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
           dispatchKey: request.dispatchKey,
           args: normalizeArgs(operation, request.args),
         }));
-        const run = await runGateway(['call', '--file', callFile, '--state-dir', options.stateDir]);
+        const run = await runGateway(['call', '--file', callFile, '--state-dir', options.stateDir], callOptions?.signal);
+        // 取消是「调用被中止」，不是执行层返回的失败：只抛中止，由运行时按取消语义处置。
+        if (run.aborted === true) {
+          const error = new Error('执行层调用已被取消。');
+          error.name = 'AbortError';
+          throw error;
+        }
         return outcomeOf(run, request, operations, timeoutMs);
       } finally {
         rmSync(scratch, { recursive: true, force: true });

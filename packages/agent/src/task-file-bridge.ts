@@ -28,7 +28,7 @@
  */
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
-import type { ExecutionClient, ExecutionRequest } from '@fshine/contracts/execution-contract';
+import type { ExecutionCallOptions, ExecutionClient, ExecutionRequest } from '@fshine/contracts/execution-contract';
 import {
   TaskFileRejectedError,
   type FileScope,
@@ -162,7 +162,7 @@ export function createTaskExecutionBridge(options: TaskExecutionBridgeOptions): 
 
     const client: ExecutionClient = {
       capabilities: () => options.inner.capabilities(),
-      async execute(request: ExecutionRequest) {
+      async execute(request: ExecutionRequest, callOptions?: ExecutionCallOptions) {
         let nextArgs = request.args;
         if (inputParam !== undefined && dirParamKeyOf(nextArgs, inputParam) !== undefined) {
           // 物化当前任务的文件面（可读绑定行，v8 §4 Worker 解析侧）到 <taskDir>/in/。
@@ -201,8 +201,11 @@ export function createTaskExecutionBridge(options: TaskExecutionBridgeOptions): 
           mkdirSync(outDir, { recursive: true });
           nextArgs = replaceDeclaredDir(nextArgs, outputFileParam, path.join(outDir, 'exec-output.json'));
         }
-        if (nextArgs === request.args) return options.inner.execute(request);
-        return options.inner.execute({ ...request, args: nextArgs });
+        if (nextArgs === request.args) {
+          return callOptions === undefined ? options.inner.execute(request) : options.inner.execute(request, callOptions);
+        }
+        const decorated = { ...request, args: nextArgs };
+        return callOptions === undefined ? options.inner.execute(decorated) : options.inner.execute(decorated, callOptions);
       },
     };
 
