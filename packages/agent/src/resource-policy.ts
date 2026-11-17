@@ -21,9 +21,9 @@
  *     （恢复时同一对象、用量不重置）；恢复**不保留**槽位/队列特权（先到先得，满即拒绝）。
  *   · token 上限仅在部署显式声明 `taskBudget.tokens` 时 `enforced`；未声明 = `unavailable`,
  *     观测用量照实记录但不作为强制上限——不得伪造硬上限（分诊 #10）。
- *   · 缺省（未配置 `runtime` 段）：单并发、排队容量 16、无任务级预算、回合时限沿用
+ *   · 缺省（未配置 `runtime` 段）：前台并发 4、排队容量 16、无任务级预算、回合时限沿用
  *     执行侧现行缺省（main 300s / worker 180s）、委派深度 1；显式 `queueCapacity: 0`
- *     仍关闭排队。
+ *     仍关闭排队，显式 `mainConcurrency: 1` 仍回到单并发（显式值不被缺省吞掉）。
  *
  * 接线边界：本模块不改 execution-runtime / server / ask-runtime——强制点接线由集成 Run
  * 承接（联合接口约定 §6）。消费方不得绕过本模块另读 `runtime` 配置（守卫见
@@ -145,13 +145,14 @@ export interface ResolvedRuntimeConfig {
 }
 
 /**
- * 缺省（2026-11-17 CAP-01 调整）：单并发 / **排队容量 16** / 无任务级预算；回合时限沿用
- * 执行侧现行缺省（`execution-runtime.ts` 的 DEFAULT_MAIN_TURN_MS / DEFAULT_WORKER_TURN_MS，
- * 300s/180s）；委派深度 1 = 现架构的 Main → Worker 一层。显式配置 `queueCapacity: 0`
- * 仍然关闭排队（语义不变，`assertRuntimeInteger` 最小值 0 不动）。
+ * 缺省（2026-11-17 CAP-01 调整）：**前台并发 4** / **排队容量 16** / 无任务级预算；回合时限
+ * 沿用执行侧现行缺省（`execution-runtime.ts` 的 DEFAULT_MAIN_TURN_MS / DEFAULT_WORKER_TURN_MS，
+ * 300s/180s）；委派深度 1 = 现架构的 Main → Worker 一层。显式配置 `mainConcurrency: 1`
+ * 仍回到单并发、显式 `queueCapacity: 0` 仍然关闭排队（显式值语义不变，
+ * `assertRuntimeInteger` 最小值不动）。
  */
 export const DEFAULT_RUNTIME_CONFIG: ResolvedRuntimeConfig = Object.freeze({
-  mainConcurrency: 1,
+  mainConcurrency: 4,
   backgroundConcurrency: 1,
   queueCapacity: 16,
   mainTurnMs: 300_000,

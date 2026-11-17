@@ -49,7 +49,7 @@ llm:
   model: your-model
 
 # ---- 资源强制与派发模式(可选;P5 单一入口,yaml 键、无 env 覆盖口) ----
-# 缺省(不写 runtime 段) = 现行为:前台单并发、无等待队列、无任务级预算、
+# 缺省(不写 runtime 段) = 现行为:前台并发 4、排队容量 16、无任务级预算、
 # 回合时限 300s/180s、委派深度 1、派发模式 inline。
 # 非法值 fail-fast、未知键拒绝;详解见 docs/environment-variables.md。
 # runtime:

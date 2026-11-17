@@ -7,9 +7,11 @@
  * 构造、编号解析在 scope 内做（越权=找不到）；取消/接续如实转述。
  *
  * 判据（TDD：实现前红 → 接线后绿；全部假件，零网络/零模型）：
- *   · 工具面：有 runner 时暴露四工具；无 runner 时只 run_task（面收窄，ask 单发零变化）；
- *   · task_status：空 ref 列本会话任务；#编号 查单个；
+ *   · 工具面：有 runner 时暴露四工具；无 runner 时只读查询（task_status/task_result）仍暴露、
+ *     治理工具（task_cancel/task_resume）不上面；Worker 工具面不含这四个工具；
+ *   · task_status：空 ref 列本会话任务；#编号 查单个；无任务时返回空列表而非报错；
  *   · 越权=找不到：跨会话同编号不可见（同一底账内按 scope 隔离，不泄露存在性）；
+ *     跨 principal 的列表查询返回空列表；
  *   · 身份注入绊线：参数里塞 principalId/sessionId 被忽略，scope 恒取宿主；
  *   · task_result：completed 返回逐字存档；非终态返回状态本身、不编造结果；
  *   · task_cancel：running → requested（cancelling≠cancelled）；queued → cancelled（机械确认）；
@@ -121,7 +123,7 @@ function value<T = Record<string, unknown>>(result: ExecResult): T {
 }
 
 describe('缺口 1 · 对话面任务工具', () => {
-  it('工具面：有 runner 暴露 run_task + 四工具；无 runner 只 run_task（面收窄）', async () => {
+  it('工具面：有 runner 暴露 run_task + 四工具；无 runner 时只读查询仍注册、治理工具不注册', async () => {
     const withRunner = await build([], { withRunner: true });
     await withRunner.session.send('随便说一句');
     const names = withRunner.turns[0]!.tools.map((tool) => tool.name);
@@ -129,7 +131,24 @@ describe('缺口 1 · 对话面任务工具', () => {
 
     const withoutRunner = await build([], { withRunner: false });
     await withoutRunner.session.send('随便说一句');
-    expect(withoutRunner.turns[0]!.tools.map((tool) => tool.name)).toEqual(['run_task']);
+    expect(withoutRunner.turns[0]!.tools.map((tool) => tool.name))
+      .toEqual(['run_task', 'task_status', 'task_result']);
+  });
+
+  it('无 runner 且无任务：task_status 空 ref 返回空列表而不是报错（只读查询不依赖 runner）', async () => {
+    const { session, turns } = await build([{ tool: 'task_status', args: {} }], { withRunner: false });
+    await session.send('现在有哪些任务');
+    const listed = value<{ tasks: unknown[] }>(turns[0]!.results[0]!);
+    expect(listed.tasks).toEqual([]);
+  });
+
+  it('跨 principal 查询隔离：无 runner 时 task_status 空 ref 对其它 principal 返回空列表', async () => {
+    const registry = createTaskRegistry();
+    seed(registry, SCOPE_A, 'task-a', 'A 的任务');
+    const b = await build([{ tool: 'task_status', args: {} }], { scope: SCOPE_B, registry, withRunner: false });
+    await b.session.send('B 有哪些任务');
+    const listed = value<{ tasks: unknown[] }>(b.turns[0]!.results[0]!);
+    expect(listed.tasks).toEqual([]);
   });
 
   it('task_status：空 ref 列本会话任务；#编号 返回状态与 pendingQuestion', async () => {
@@ -332,13 +351,50 @@ describe('缺口 1 · 对话面任务工具', () => {
     expect(hit.status).toBe('cancelled');
   });
 
-  it('未传 runner：治理工具不上面，调用治理工具名 → Main 工具面之外的调用（fail-closed）', async () => {
+  it('未传 runner：task_cancel/task_resume 不上面，调用即 Main 工具面之外的调用（fail-closed）', async () => {
     const registry = createTaskRegistry();
     seed(registry, SCOPE_A, 't1', '任务');
-    const { session, turns } = await build([{ tool: 'task_cancel', args: { ref: '#1' } }], { registry, withRunner: false });
-    await session.send('取消');
-    const result = turns[0]!.results[0]!;
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(String((result.error as Error).message)).toContain('Main 工具面之外的调用');
+    const { session, turns } = await build([
+      { tool: 'task_cancel', args: { ref: '#1' } },
+      { tool: 'task_resume', args: { ref: '#1', answer: '答复' } },
+    ], { registry, withRunner: false });
+    await session.send('取消并接续');
+
+    // 工具面快照：治理工具（需要 runner）不注册；只读查询仍在。
+    expect(turns[0]!.tools.map((tool) => tool.name)).toEqual(['run_task', 'task_status', 'task_result']);
+    for (const [index, name] of ['task_cancel', 'task_resume'].entries()) {
+      const result = turns[0]!.results[index]!;
+      expect(result.ok, `${name} 无 runner 必须 fail-closed`).toBe(false);
+      if (!result.ok) expect(String((result.error as Error).message)).toContain('Main 工具面之外的调用');
+    }
+  });
+
+  it('Worker 工具面快照：只有 execute_operation，不含 task_status/task_result/task_cancel/task_resume', async () => {
+    const registry = createTaskRegistry();
+    const turns: RecordedTurn[] = [];
+    const workerTools: string[][] = [];
+    const session = await createSession({
+      principalId: SCOPE_A.principalId,
+      sessionId: SCOPE_A.sessionId,
+      client: new FaceClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver: toolingMain([{ tool: 'run_task', args: { task: '查 documents 窗口 W202611' } }], turns),
+      workerDriver: {
+        async run(input) {
+          workerTools.push(input.tools.map((tool) => tool.name));
+          return { text: '（测试 Worker 汇报）', messages: [] } as never;
+        },
+      },
+      mainSystemPrompt: '（测试）',
+      taskRegistry: registry,
+      dispatchMode: 'inline',
+      workerTurnMs: 60_000,
+    });
+    await session.send('帮我查一下');
+
+    expect(workerTools).toEqual([['execute_operation']]);
+    for (const name of ['task_status', 'task_result', 'task_cancel', 'task_resume']) {
+      expect(workerTools.flat()).not.toContain(name);
+    }
   });
 });

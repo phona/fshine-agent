@@ -42,10 +42,10 @@ function refused(result: Permit | Rejection): Rejection {
   return result;
 }
 
-describe('resolveRuntimeConfig：缺省 = 单并发 + 排队 16，非法 fail-fast（不静默回落）', () => {
-  it('缺省：单并发 / 排队容量 16 / 无任务级预算 / 回合时限沿用执行侧现缺省', () => {
+describe('resolveRuntimeConfig：缺省 = 前台并发 4 + 排队 16，非法 fail-fast（不静默回落）', () => {
+  it('缺省：前台并发 4 / 排队容量 16 / 无任务级预算 / 回合时限沿用执行侧现缺省', () => {
     expect(resolveRuntimeConfig()).toEqual({
-      mainConcurrency: 1,
+      mainConcurrency: 4,
       backgroundConcurrency: 1,
       queueCapacity: 16,
       mainTurnMs: 300_000,
@@ -54,6 +54,14 @@ describe('resolveRuntimeConfig：缺省 = 单并发 + 排队 16，非法 fail-fa
       taskBudget: null,
       waitUserTimeoutMs: 86_400_000,
     });
+  });
+
+  it('显式 mainConcurrency=1 仍生效：缺省 4 不吞显式值，单并发语义（满即拒绝）不变', () => {
+    expect(resolveRuntimeConfig({ mainConcurrency: 1 }).mainConcurrency).toBe(1);
+
+    const policy = makePolicy({ mainConcurrency: 1, queueCapacity: 0 });
+    admit(policy.acquire('foreground', { taskId: 'only' }));
+    expect(refused(policy.acquire('foreground', { taskId: 'second' })).reason).toBe('queue_full');
   });
 
   it('显式值覆盖对应字段，其余回落缺省', () => {
@@ -108,8 +116,8 @@ describe('resolveRuntimeConfig：缺省 = 单并发 + 排队 16，非法 fail-fa
 });
 
 describe('许可/释放/拒绝矩阵', () => {
-  it('前台单并发：第一个 active（深度 0、截止 = now + mainTurnMs），队列容量 0 时第二个 queue_full 确定性拒绝', () => {
-    const policy = makePolicy({ queueCapacity: 0 });
+  it('前台单并发（显式 mainConcurrency=1）：第一个 active（深度 0、截止 = now + mainTurnMs），队列容量 0 时第二个 queue_full 确定性拒绝', () => {
+    const policy = makePolicy({ mainConcurrency: 1, queueCapacity: 0 });
     const first = admit(policy.acquire('foreground', { taskId: 'turn-1' }));
     expect(first.state).toBe('active');
     expect(first.kind).toBe('foreground');
@@ -153,6 +161,15 @@ describe('许可/释放/拒绝矩阵', () => {
     policy.release(a);
     policy.release(b);
     expect(policy.snapshot().foreground.active).toBe(0);
+  });
+
+  it('缺省前台并发 4：前 4 个 active、第 5 个排队（排队容量仍为 16）', () => {
+    const policy = makePolicy();
+    for (let i = 1; i <= 4; i++) {
+      expect(admit(policy.acquire('foreground', { taskId: `t-${i}` })).state, `t-${i}`).toBe('active');
+    }
+    expect(admit(policy.acquire('foreground', { taskId: 't-5' })).state).toBe('queued');
+    expect(policy.snapshot().foreground).toMatchObject({ limit: 4, active: 4, queued: 1 });
   });
 
   it('backgroundConcurrency=0：后台准入关闭，确定性 quota_exceeded；前台独立不受影响', () => {
@@ -228,9 +245,9 @@ describe('队列容量与 FIFO 晋升（有界等待）', () => {
     expect(snap.background.queuedTaskIds).toEqual(['bg-2', 'bg-3']);
   });
 
-  it('缺省排队容量 16（CAP-01）：并发 1 时第 2..17 个排队、第 18 个 queue_full；显式 0 仍关闭排队', () => {
-    // 缺省（未配置 runtime 段）：mainConcurrency=1 + queueCapacity=16。
-    const policy = makePolicy();
+  it('缺省排队容量 16（CAP-01）：单并发（显式 1）时第 2..17 个排队、第 18 个 queue_full；显式 0 仍关闭排队', () => {
+    // 排队容量与并发是两个旋钮：这里显式钉住单并发，只测缺省队列容量 16。
+    const policy = makePolicy({ mainConcurrency: 1 });
     const active = admit(policy.acquire('foreground', { taskId: 't-1' }));
     expect(active.state).toBe('active');
     for (let i = 2; i <= 17; i++) {
@@ -240,7 +257,7 @@ describe('队列容量与 FIFO 晋升（有界等待）', () => {
     expect(refused(policy.acquire('foreground', { taskId: 't-18' })).reason).toBe('queue_full');
 
     // 显式 0 = 关闭排队（既有语义不变）：并发满即确定性拒绝，一个队部位都不留。
-    const explicitZero = makePolicy({ queueCapacity: 0 });
+    const explicitZero = makePolicy({ mainConcurrency: 1, queueCapacity: 0 });
     admit(explicitZero.acquire('foreground', { taskId: 'z-1' }));
     expect(refused(explicitZero.acquire('foreground', { taskId: 'z-2' })).reason).toBe('queue_full');
     expect(explicitZero.snapshot().foreground.queued).toBe(0);
@@ -484,7 +501,7 @@ describe('snapshot：资源快照（P8 ops / P6 调度读面）', () => {
     const policy = makePolicy();
     const snap = policy.snapshot();
     expect(snap.queueCapacity).toBe(16);
-    expect(snap.foreground).toMatchObject({ limit: 1, active: 0, queued: 0 });
+    expect(snap.foreground).toMatchObject({ limit: 4, active: 0, queued: 0 });
     expect(snap.background).toMatchObject({ limit: 1, active: 0, queued: 0 });
     expect(snap.derived).toEqual({ active: 0, taskIds: [] });
     expect(snap.config).toEqual(DEFAULT_RUNTIME_CONFIG);
@@ -506,7 +523,7 @@ describe('拒绝 reason → 任务原因映射（联合接口约定 §5：resour
     budgetPolicy.budgetFor('budget-root').consume({ calls: 1 });
     const budget = refused(budgetPolicy.acquire('background', { taskId: 'b', parentPermit: budgetRoot }));
 
-    const queuePolicy = makePolicy({ queueCapacity: 0 });
+    const queuePolicy = makePolicy({ mainConcurrency: 1, queueCapacity: 0 });
     admit(queuePolicy.acquire('foreground', { taskId: 'queue-a' }));
     const queue = refused(queuePolicy.acquire('foreground', { taskId: 'queue-b' }));
 

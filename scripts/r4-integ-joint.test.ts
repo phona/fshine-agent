@@ -500,9 +500,10 @@ describe('R4 联合：P5 前台许可（inline 模式）', () => {
         workerDriver: unreachableDriver(),
       }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
-      // 本用例断言「占满即确定性拒绝」：显式 queueCapacity=0（缺省 16 会让第二回合排队等待，
-      // 不再是拒绝面——CAP-01 排队缺省调整后，拒绝场景必须显式关排队）。
-      runtime: { dispatchMode: 'inline', queueCapacity: 0 },
+      // 本用例断言「占满即确定性拒绝」：显式 mainConcurrency=1 + queueCapacity=0
+      // （缺省并发 4 / 排队 16 会让第二回合执行或排队，不再是拒绝面——CAP-01
+      // 并发/排队缺省调整后，拒绝场景必须显式钉住单槽且关排队）。
+      runtime: { dispatchMode: 'inline', mainConcurrency: 1, queueCapacity: 0 },
     });
     try {
       const held = assembled.policy.acquire('foreground', { taskId: '外部回合' });

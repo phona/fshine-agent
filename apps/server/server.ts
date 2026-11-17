@@ -207,7 +207,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   const sessionStoreDir = deps.sessionStoreDir ?? path.join(path.dirname(deps.dbPath), 'sessions');
   const sessionPersistence = new SessionPersistence({ rootDir: sessionStoreDir, cwd: REPO_ROOT });
 
-  // P5：资源策略进程级一份（跨会话共享账本）；缺省 runtime 段 = 现行为缺省（单并发/无队列）。
+  // P5：资源策略进程级一份（跨会话共享账本）；缺省 runtime 段 = 现行为缺省（前台并发 4 / 排队 16）。
   const dispatchMode = deps.config.runtime?.dispatchMode ?? 'inline';
   const policy = createResourcePolicy(deps.config.runtime);
   // P6/P4：background 才启用新受理/后台/通知路径；缺省 inline 零新增路径。

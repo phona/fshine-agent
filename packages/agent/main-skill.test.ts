@@ -329,10 +329,10 @@ describe('装配接线（mainSkillsDir 只作为装配参数；无配置键）',
     if (!rejected.ok) expect(String((rejected.error as Error).message)).toContain('Main 工具面之外的调用');
   });
 
-  it('缺省工具面：无登记表的 createSession = [run_task]（逐字节不变）', async () => {
+  it('缺省工具面：无登记表的 createSession = [run_task, task_status, task_result]（只读查询始终注册）', async () => {
     const { session, recorded } = await buildSession({});
     await session.send('随便说一句');
-    expect(recorded[0]!.tools.map((tool) => tool.name)).toEqual(['run_task']);
+    expect(recorded[0]!.tools.map((tool) => tool.name)).toEqual(['run_task', 'task_status', 'task_result']);
   });
 
   it('未知技能名 → 报错（不静默、不拼路径）', async () => {
