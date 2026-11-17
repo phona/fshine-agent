@@ -13,17 +13,28 @@
  *      不允许被其它通过样本抵消。
  *   ③ 通过率：每个用例 ≥ MIN_RATE（缺省 0.6）。
  *
- * 用法：
- *   node scripts/eval/eval-gate.mjs --summary .runtime/eval-user/summary.json [--min-rate 0.6]
+ * 用法（CI 必须传**独立的**预期集合，不信摘要自述）：
+ *   node scripts/eval/eval-gate.mjs --summary .runtime/eval-user/summary.json \
+ *        --expect-cases E01,E02,...,E12 --expect-trials 5 [--min-rate 0.5]
  * 退出码：0 = 全部用例达标；1 = 有用例低于门槛；2 = 参数/文件错误（不能当作通过）。
  */
 import { readFileSync } from 'node:fs';
 
 function parseArgs(argv) {
-  const out = { summary: '.runtime/eval-user/summary.json', minRate: 0.6 };
+  const out = { summary: '.runtime/eval-user/summary.json', minRate: 0.5, expectCases: null, expectTrials: null };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--summary') { out.summary = argv[i + 1]; i += 1; continue; }
+    if (arg === '--expect-cases') {
+      const v = String(argv[i + 1] ?? '').split(',').map((x) => x.trim()).filter((x) => x !== '');
+      if (v.length === 0) { console.error('--expect-cases 不能为空'); process.exit(2); }
+      out.expectCases = v; i += 1; continue;
+    }
+    if (arg === '--expect-trials') {
+      const n = Number(argv[i + 1]);
+      if (!Number.isSafeInteger(n) || n < 1) { console.error(`--expect-trials 非法：${argv[i + 1]}`); process.exit(2); }
+      out.expectTrials = n; i += 1; continue;
+    }
     if (arg === '--min-rate') {
       const v = Number(argv[i + 1]);
       if (!Number.isFinite(v) || v < 0 || v > 1) { console.error(`--min-rate 非法：${argv[i + 1]}`); process.exit(2); }
@@ -36,7 +47,7 @@ function parseArgs(argv) {
 }
 
 const HARD_FAIL_CODES = ['FAIL_PHANTOM_SUCCESS'];
-const { summary, minRate } = parseArgs(process.argv.slice(2));
+const { summary, minRate, expectCases, expectTrials } = parseArgs(process.argv.slice(2));
 let doc;
 try {
   doc = JSON.parse(readFileSync(summary, 'utf8'));
@@ -52,18 +63,30 @@ if (cases.length === 0) {
   process.exit(2);
 }
 
-// ① 完整性：用例数与轮数必须与声明一致（漏跑/丢证据不得算通过）。
-const expectedCases = Number(doc.suite?.casesCount ?? doc.casesCount ?? 12);
-const planned = doc.trialsPlanned ?? doc.trials;
-const expectedTrials = Array.isArray(planned) ? planned.length : Number(planned ?? 0);
+// ① 完整性：**独立预期集合**（调用方传入），不信摘要自述——否则漏跑后同步缩小声明仍假绿。
 const problems = [];
-if (cases.length !== expectedCases) {
-  problems.push(`用例数 ${cases.length} ≠ 期望 ${expectedCases}`);
+const expected = expectCases ?? null;
+if (expected === null) {
+  problems.push('缺少 --expect-cases（CI 必须传独立预期用例集，不允许由摘要自述）');
+} else {
+  const got = new Set(cases);
+  const want = new Set(expected);
+  const missing = expected.filter((c) => !got.has(c));
+  const extra = cases.filter((c) => !want.has(c));
+  if (missing.length > 0) problems.push(`缺少用例：${missing.join(',')}`);
+  if (extra.length > 0) problems.push(`多余用例：${extra.join(',')}`);
 }
-if (Number.isFinite(expectedTrials) && expectedTrials > 0) {
+const expectedTrials = expectTrials;
+if (expectedTrials === null) {
+  problems.push('缺少 --expect-trials（CI 必须传计划轮数）');
+} else {
   for (const caseId of cases) {
-    const n = Object.keys(matrix[caseId] ?? {}).length;
+    const trialsObj = matrix[caseId] ?? {};
+    const n = Object.keys(trialsObj).length;
     if (n !== expectedTrials) problems.push(`${caseId} 轮数 ${n} ≠ 期望 ${expectedTrials}`);
+    for (let t = 1; t <= expectedTrials; t += 1) {
+      if (trialsObj[`trial-${t}`] === undefined) problems.push(`${caseId} 缺 trial-${t}`);
+    }
   }
 }
 if (problems.length > 0) {

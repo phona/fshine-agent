@@ -70,7 +70,7 @@ jobs:
       # 门槛写在 scripts/eval/eval-gate.mjs 顶部；改门槛 = 改判据，必须单独提交并说明。
       - name: Gate on per-case pass rate (PR only)
         if: github.event_name == 'pull_request'
-        run: node scripts/eval/eval-gate.mjs --summary .runtime/eval-user/summary.json --min-rate 0.5
+        run: node scripts/eval/eval-gate.mjs --summary .runtime/eval-user/summary.json --expect-cases E01,E02,E03,E04,E05,E06,E07,E08,E09,E10,E11,E12 --expect-trials ${{ steps.trials.outputs.n }} --min-rate 0.5
 
       # 评论正文从 summary.json 全量生成逐用例表（不是日志尾部截断）；摘要缺失时脚本
       # 如实写「无法生成逐用例表」并退出 1，避免用日志推断结果。always()：eval 失败也要发。
