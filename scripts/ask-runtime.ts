@@ -48,6 +48,7 @@ import {
   type TurnFileRef,
   type WorkerSkill,
   type RunJsMemoryExitEvent,
+  type RunJsLayoutUnsafeReport,
 } from '../packages/agent/src/execution-runtime';
 import {
   createNotificationOutbox,
@@ -250,6 +251,8 @@ export interface SessionAssemblyInput {
   runJsExecutor?: RunJsExecutor;
   /** CAP-01 ④：run_js 内存墙结构化事件上报（装配层接日志；缺省静默）。 */
   onRunJsMemoryExit?: (event: RunJsMemoryExitEvent) => void;
+  /** CAP-01 symlink 收窄：run_js 运行目录布局不安全的结构化事件上报（装配层接日志；缺省静默）。 */
+  onRunJsLayoutUnsafe?: (event: RunJsLayoutUnsafeReport) => void;
   /**
    * CAP-01 S2：交办复制端口（task_run.inputFiles 的宿主侧执行；装配层注入 fileStore 本身）。
    * 缺省不注入 = task_run 工具面不带 inputFiles（逐字节不变），模型传了也 fail-closed 拒绝。
@@ -626,6 +629,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       ...(input.onTranscriptError === undefined ? {} : { onTranscriptError: input.onTranscriptError }),
       ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
       ...(input.onRunJsMemoryExit === undefined ? {} : { onRunJsMemoryExit: input.onRunJsMemoryExit }),
+      ...(input.onRunJsLayoutUnsafe === undefined ? {} : { onRunJsLayoutUnsafe: input.onRunJsLayoutUnsafe }),
       ...(input.taskInputCopier === undefined ? {} : { taskInputCopier: input.taskInputCopier }),
       ...(taskBridge === undefined ? {} : { taskExecutionBridge: taskBridge }),
       ...(input.fileManifestProvider === undefined ? {} : { fileManifestProvider: input.fileManifestProvider }),

@@ -8,6 +8,9 @@
  *   ① 开独立 run 目录（不共享）：<root>/<ph>/<sh>/runs/<runId>/{in,out,scratch,home,tmp}；
  *      输入先过 scope/激活校验并物化到 in/（fileId 命名，见 file-store.ts）——校验失败
  *      不起子进程；模型代码（CommonJS）**原样**写进 <runDir>/run.cjs，审计哈希 = 实际执行字节。
+ *      **布局收窄（symlink 收窄）**：物化前、建目录后与 spawn 前逐个 lstat runDir/in/out/
+ *      scratch/home/tmp——存在但不是真目录（软链/普通文件/其它）→ 拒跑
+ *      （RunJsLayoutUnsafeError；不写 run.cjs、不起子进程、零产物），机械事实进结构化事件。
  *   ② 受限子进程（v8 §3 实测有效，不是沙箱）：
  *        node --permission --allow-fs-read=<runDir> --allow-fs-read=<node_modules>
  *             --allow-fs-write=<runDir>/out --allow-fs-write=<runDir>/scratch run.cjs
@@ -17,8 +20,9 @@
  *      对同步忙循环不可靠、孙进程会逃逸，v8 §3）。stdout/stderr 在 data 回调里逐块计数，
  *      超限即弃并标 truncated（不先全读再截）。
  *   ④ 收尾扫 out/ 登记产物（fileStore.registerOutputsFromOut：只收普通文件、拒 symlink/
- *      hardlink、uid/大小/份数上限；同一 fd 流式 copy-on-register 成新 fileId + sha256，
- *      原件字节不动）。**无论 exitCode 都扫**——out/ 就是交付箱；交付去留归 S1。
+ *      hardlink、uid/大小/份数上限；候选按 realpath 包含校验必须仍在 runDir 内；同一 fd
+ *      流式 copy-on-register 成新 fileId + sha256，原件字节不动）。**无论 exitCode 都扫**——
+ *      out/ 就是交付箱；交付去留归 S1。
  *   ⑤ 审计随返回值走（脚本 sha256、输入/输出 fileId、exitCode、耗时、kill 原因）。
  *      S0 不落审计表（v8 §9 不做 run_code_runs 第二张表）；持久化落点归 S1 接线裁定。
  *
@@ -35,11 +39,22 @@
  */
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { workerSubprocessEnv } from './worker-env';
 import type { FileStore, MaterializedInput, RegisteredFile, SkippedOutput } from './file-store';
 import { runDirOf } from './file-store';
+import { RunJsLayoutUnsafeError, type RunJsLayoutItem, type RunJsLayoutUnsafeKind } from './run-js-layout';
+
+// 布局收窄的公开面（事件/错误/话术）与执行器同处一个入口：测试与装配方不必知道拆分模块。
+export {
+  RUN_JS_LAYOUT_UNSAFE_CODE,
+  RUN_JS_LAYOUT_UNSAFE_MESSAGE,
+  RunJsLayoutUnsafeError,
+  type RunJsLayoutItem,
+  type RunJsLayoutUnsafeEvent,
+  type RunJsLayoutUnsafeKind,
+} from './run-js-layout';
 
 /** 超时上限（宿主常量；模型没有 timeoutMs 参数，只能把请求调小，v8 §2）。 */
 export const RUN_JS_TIMEOUT_MS = 120_000;
@@ -133,6 +148,39 @@ export function killRunProcessGroup(pid: number): void {
   }
 }
 
+/**
+ * 运行目录布局校验（symlink 收窄的 fail-closed 边界）：逐个 lstat runDir/in/out/scratch/
+ * home/tmp；**不存在**是正常状态（随后由宿主创建），**存在但不是真目录**（软链/普通文件/
+ * fifo 等）→ RunJsLayoutUnsafeError。lstat 不跟随软链：symlink 的 isDirectory() 恒 false，
+ * 所以 isDirectory() 为真即真目录。
+ *
+ * 调用点三处（见 runJs 内注释）：物化输入前（in/ 是宿主写侧）、mkdir 前（物化期间可能被
+ * 换成软链）、spawn 前（此刻的布局项就是子进程的读/写面）。任一失败都在写 run.cjs/spawn
+ * 之前抛出——脚本零执行、零产物。
+ */
+function assertRunLayoutSafe(runId: string, runDir: string): void {
+  const items: ReadonlyArray<{ item: RunJsLayoutItem; itemPath: string }> = [
+    { item: 'runDir', itemPath: runDir },
+    { item: 'in', itemPath: path.join(runDir, 'in') },
+    { item: 'out', itemPath: path.join(runDir, 'out') },
+    { item: 'scratch', itemPath: path.join(runDir, 'scratch') },
+    { item: 'home', itemPath: path.join(runDir, 'home') },
+    { item: 'tmp', itemPath: path.join(runDir, 'tmp') },
+  ];
+  for (const { item, itemPath } of items) {
+    let st;
+    try {
+      st = lstatSync(itemPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') continue; // 尚未创建 = 正常
+      throw error;
+    }
+    if (st.isDirectory()) continue;
+    const kind: RunJsLayoutUnsafeKind = st.isSymbolicLink() ? 'symlink' : st.isFile() ? 'file' : 'other';
+    throw new RunJsLayoutUnsafeError({ runId, item, kind });
+  }
+}
+
 export interface RunJsExecutorOptions {
   fileStore: FileStore;
   /** node_modules 目录：`--allow-fs-read` 与 NODE_PATH 共用（require('exceljs') 的解析根）。 */
@@ -193,6 +241,10 @@ export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecuto
       const homeDir = path.join(runDir, 'home');
       const tmpDir = path.join(runDir, 'tmp');
 
+      // 布局收窄 ①：先于输入物化。in/ 是宿主写侧（copyFileSync）——若它是预植软链，
+      // 物化会把输入写进 run 目录之外；物化前先确认所有布局项要么不存在、要么是真目录。
+      assertRunLayoutSafe(runId, runDir);
+
       // ① 输入面先过（scope/激活校验 + 物化）：失败抛 FILE_REF_UNAVAILABLE，不起子进程。
       // 解析作用域（CAP-01 S2，v8 §4）：缺省 Main 面（task_id IS NULL）；Worker 面
       // （taskId 设置）只解析当前任务的绑定行。
@@ -203,7 +255,14 @@ export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecuto
         resolution: input.taskId === undefined ? { side: 'main' } : { side: 'worker', taskId: input.taskId },
       });
 
+      // 布局收窄 ②：物化期间布局项可能被替换（空输入时 in/ 已由物化创建）；mkdir 前再验，
+      // 避免 mkdirSync 对「软链 → 已存在目录」静默通过、或对悬空软链抛裸 ENOENT。
+      assertRunLayoutSafe(runId, runDir);
+
       for (const dir of [outDir, scratchDir, homeDir, tmpDir]) mkdirSync(dir, { recursive: true });
+
+      // 布局收窄 ③（spawn 前最后一道）：此刻的目录项就是子进程的读/写面与产物收集面。
+      assertRunLayoutSafe(runId, runDir);
 
       // ② 模型代码原样写进 run.cjs（CommonJS）；审计哈希 = 实际执行字节。
       const scriptBytes = Buffer.from(input.code, 'utf8');

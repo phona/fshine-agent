@@ -27,15 +27,21 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import { openTaskStore } from '@fshine/core';
 import { createFileStore, FILE_REF_TTL_MS, type FileStore } from './src/file-store';
-import { createRunJsExecutor, type RunJsExecutor } from './src/run-js-executor';
+import {
+  createRunJsExecutor,
+  RUN_JS_LAYOUT_UNSAFE_MESSAGE,
+  RunJsLayoutUnsafeError,
+  type RunJsExecutor,
+} from './src/run-js-executor';
 import {
   FILES_GENERATED_NOTICE,
   createSession,
   type Session,
   type TurnFileRef,
+  type RunJsLayoutUnsafeReport,
 } from './src/execution-runtime';
 import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
-import type { DriverMessage, TurnDriver } from './src/driver-contract';
+import { ToolUserError, type DriverMessage, type TurnDriver } from './src/driver-contract';
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -76,6 +82,8 @@ interface DriverCapture {
   injections: string[][];
   results: unknown[];
   toolErrors: string[];
+  /** 原始异常对象（判 ToolUserError 等类型的确定性面）。 */
+  toolErrorObjects: unknown[];
 }
 
 /** 按外部步骤队列驱动的假主驱动：exec 错误按真实驱动的语义记为工具结果消息（回合继续）。 */
@@ -92,6 +100,7 @@ function queueDriver(capture: DriverCapture): { driver: TurnDriver; push(step: D
           capture.results.push(await input.exec(call.tool, call.args));
         } catch (error) {
           capture.toolErrors.push(error instanceof Error ? error.message : String(error));
+          capture.toolErrorObjects.push(error);
         }
       }
       return { text: step.text, messages: [] as unknown as DriverMessage[] };
@@ -114,6 +123,9 @@ interface Fixture {
 
 async function makeFixture(input: {
   withExecutor?: boolean;
+  /** 测试替身执行器（布局不安全用例；缺省 = 真实受限执行器）。 */
+  executor?: RunJsExecutor;
+  onRunJsLayoutUnsafe?: (event: RunJsLayoutUnsafeReport) => void;
   fileManifestProvider?: (principalId: string, sessionId: string) => readonly TurnFileRef[];
 } = {}): Promise<Fixture> {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'runtime-run-js-'));
@@ -129,7 +141,8 @@ async function makeFixture(input: {
       return realExecutor.runJs(runInput);
     },
   };
-  const capture: DriverCapture = { toolNames: [], injections: [], results: [], toolErrors: [] };
+  const runJsExecutor = input.executor ?? countingExecutor;
+  const capture: DriverCapture = { toolNames: [], injections: [], results: [], toolErrors: [], toolErrorObjects: [] };
   const { driver, push } = queueDriver(capture);
   const reasons: string[] = [];
   const session = await createSession({
@@ -141,7 +154,8 @@ async function makeFixture(input: {
     workerDriver: workerNeverCalled,
     mainSystemPrompt: '你是测试主 Agent。',
     taskRegistry: registry,
-    ...(input.withExecutor === false ? {} : { runJsExecutor: countingExecutor }),
+    ...(input.withExecutor === false ? {} : { runJsExecutor }),
+    ...(input.onRunJsLayoutUnsafe === undefined ? {} : { onRunJsLayoutUnsafe: input.onRunJsLayoutUnsafe }),
     ...(input.fileManifestProvider === undefined ? {} : { fileManifestProvider: input.fileManifestProvider }),
     onFileRefUnavailable: (reason) => reasons.push(reason),
   });
@@ -254,6 +268,37 @@ describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', (
       expect(fx.reasons[1]).toBe(`pending:${pending.fileId}`);
       expect(fx.reasons[2]).toBe(`expired:${expired.fileId}`);
       expect(fx.reasons[3]!.startsWith(`missing_or_foreign:${foreign.fileId}`)).toBe(true);
+    } finally {
+      fx.ro.close();
+      fx.close();
+    }
+  });
+
+  it('布局不安全（Main）：执行器拒跑 → ToolUserError 用户话术 + 结构化事件（side=main）；零产物', async () => {
+    const events: RunJsLayoutUnsafeReport[] = [];
+    const failingExecutor: RunJsExecutor = {
+      async runJs() {
+        throw new RunJsLayoutUnsafeError({ runId: 'run_0123456789abcdef0123456789abcdef', item: 'home', kind: 'file' });
+      },
+    };
+    const fx = await makeFixture({
+      executor: failingExecutor,
+      onRunJsLayoutUnsafe: (event) => events.push(event),
+    });
+    try {
+      fx.push({ execCalls: [{ tool: 'run_js', args: { code: WRITE_ONE_OUTPUT } }], text: '模型自由文本。' });
+      const turn = await fx.session.send('生成一份文件');
+
+      // 工具层确定性失败话术（ToolUserError 由 driver 直接作为最终回复，不经模型改写）。
+      expect(fx.capture.toolErrorObjects.at(-1)).toBeInstanceOf(ToolUserError);
+      expect(fx.capture.toolErrors.at(-1)).toBe(RUN_JS_LAYOUT_UNSAFE_MESSAGE);
+      // 结构化事件：定位 + 机械形状 + 作用面；只进日志回调，不进用户话术。
+      expect(events).toEqual([
+        { runId: 'run_0123456789abcdef0123456789abcdef', item: 'home', kind: 'file', side: 'main' },
+      ]);
+      // 零产物：不交付、不登记。
+      expect(turn.files).toBeUndefined();
+      expect(fx.ro.listFileRefs(SCOPE)).toEqual([]);
     } finally {
       fx.ro.close();
       fx.close();

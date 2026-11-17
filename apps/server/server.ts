@@ -286,6 +286,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           // CAP-01 ④：内存墙结构化事件（runId/side/bytes/exitCode/exitSignal/stderr 尾窗）——
           // 日志能查到是哪次、多大、怎么死的；用户话术同句由 runtime 出口统一。
           onRunJsMemoryExit: (event) => log({ event: 'run_js_memory_exit', principalId, sessionId, ...event }),
+          // CAP-01 symlink 收窄：运行目录布局不安全（预植软链/非真目录）→ 拒跑的结构化事件
+          // （runId/哪一项/实际类型/side/taskId）——日志可查；用户只见统一失败话术。
+          onRunJsLayoutUnsafe: (event) => log({ event: 'run_js_layout_unsafe', principalId, sessionId, ...event }),
           taskInputCopier: fileStore,
           taskExecutionBridge: {
             store: fileStore,

@@ -35,6 +35,7 @@ import { createHash } from 'node:crypto';
 import {
   existsSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -60,6 +61,8 @@ import {
 import {
   createRunJsExecutor,
   killRunProcessGroup,
+  RUN_JS_LAYOUT_UNSAFE_MESSAGE,
+  RunJsLayoutUnsafeError,
   type RunJsExecutor,
 } from './src/run-js-executor';
 
@@ -541,6 +544,192 @@ describe('run_js 执行器（CAP-01 S0）', () => {
     });
     expect(outputs).toEqual([]);
     expect(skipped).toEqual([]);
+    store.close();
+  });
+});
+
+describe('run_js 运行目录布局收窄（预植软链；symlink 收窄）', () => {
+  /**
+   * 预植钩子：materializeInputs 是执行器在建目录/spawn 之前唯一的外部调用点——
+   * 真实装配里 run 目录由宿主独占，这里用它模拟「目录项在宿主建目录前已被替换」的
+   * 确定性形状（runId 随机，测试无法预先算出 runDir）。
+   */
+  function plantingFileStore(fileStore: FileStore, plant: (runDir: string) => void): FileStore {
+    return {
+      ...fileStore,
+      materializeInputs(input) {
+        mkdirSync(input.runDir, { recursive: true });
+        plant(input.runDir);
+        return fileStore.materializeInputs(input);
+      },
+    };
+  }
+
+  /** 记录「子进程是否真的起过」的假 node：spawn 一次就 touch 一个标记文件。 */
+  function spawnMarkerNode(fixtureRoot: string): { nodePath: string; markerPath: string } {
+    const markerPath = path.join(fixtureRoot, 'spawned.marker');
+    const nodePath = path.join(fixtureRoot, 'marker-node.sh');
+    writeFileSync(nodePath, `#!/bin/sh\ntouch "${markerPath}"\n`, { mode: 0o755 });
+    return { nodePath, markerPath };
+  }
+
+  it('① out → /etc 的预植软链：拒跑（out/symlink）、零执行、不写 run.cjs、零 file_refs', async () => {
+    const { fixtureRoot, workspaceRoot, store, fileStore } = makeFixture();
+    const { nodePath, markerPath } = spawnMarkerNode(fixtureRoot);
+    const executor = createRunJsExecutor({
+      fileStore: plantingFileStore(fileStore, (runDir) => {
+        symlinkSync('/etc', path.join(runDir, 'out'));
+      }),
+      nodeModulesDir: NODE_MODULES,
+      nodePath,
+    });
+
+    const error = await executor
+      .runJs({ code: "require('node:fs').writeFileSync('out/leak.txt', 'x');", scope: SCOPE })
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toBeInstanceOf(RunJsLayoutUnsafeError);
+    const layoutError = error as RunJsLayoutUnsafeError;
+    expect(layoutError.event).toMatchObject({ item: 'out', kind: 'symlink' });
+    expect(layoutError.event.runId).toMatch(/^run_[0-9a-f]{32}$/);
+    expect(layoutError.message).toBe(RUN_JS_LAYOUT_UNSAFE_MESSAGE);
+
+    // 零执行：子进程一次都没起；run.cjs 不存在；没有任何产物登记。
+    expect(existsSync(markerPath)).toBe(false);
+    const runsDir = path.join(sessionDirOf(workspaceRoot, SCOPE), 'runs');
+    expect(readdirSync(runsDir)).toEqual([layoutError.event.runId]);
+    expect(existsSync(path.join(runsDir, layoutError.event.runId, 'run.cjs'))).toBe(false);
+    expect(store.listFileRefs(SCOPE)).toEqual([]);
+    store.close();
+  });
+
+  it('④ in/ 或 scratch/ 的预植软链同样拒跑（零执行、零产物、目标目录零写入）', async () => {
+    for (const item of ['in', 'scratch'] as const) {
+      const { fixtureRoot, workspaceRoot, store, fileStore } = makeFixture();
+      const { nodePath, markerPath } = spawnMarkerNode(fixtureRoot);
+      const outside = path.join(fixtureRoot, `${item}-outside`);
+      mkdirSync(outside, { recursive: true });
+      const executor = createRunJsExecutor({
+        fileStore: plantingFileStore(fileStore, (runDir) => {
+          symlinkSync(outside, path.join(runDir, item));
+        }),
+        nodeModulesDir: NODE_MODULES,
+        nodePath,
+      });
+
+      const error = await executor
+        .runJs({ code: "console.log('should-not-run');", scope: SCOPE })
+        .then(
+          () => undefined,
+          (reason: unknown) => reason,
+        );
+
+      expect(error, `${item} 软链必须拒跑`).toBeInstanceOf(RunJsLayoutUnsafeError);
+      const layoutError = error as RunJsLayoutUnsafeError;
+      expect(layoutError.event).toMatchObject({ item, kind: 'symlink' });
+      expect(existsSync(markerPath), `${item} 软链下不得起子进程`).toBe(false);
+      expect(store.listFileRefs(SCOPE)).toEqual([]);
+      // 目标目录不得被宿主（in 物化）或脚本写入。
+      expect(readdirSync(outside)).toEqual([]);
+      const runsDir = path.join(sessionDirOf(workspaceRoot, SCOPE), 'runs');
+      expect(existsSync(path.join(runsDir, layoutError.event.runId, 'run.cjs'))).toBe(false);
+      store.close();
+    }
+  });
+
+  it('布局项是普通文件（非软链）同样拒跑：home 被预植成文件 → kind=file', async () => {
+    const { fixtureRoot, store, fileStore } = makeFixture();
+    const { nodePath, markerPath } = spawnMarkerNode(fixtureRoot);
+    const executor = createRunJsExecutor({
+      fileStore: plantingFileStore(fileStore, (runDir) => {
+        writeFileSync(path.join(runDir, 'home'), 'not-a-directory', 'utf8');
+      }),
+      nodeModulesDir: NODE_MODULES,
+      nodePath,
+    });
+
+    const error = await executor
+      .runJs({ code: "console.log('should-not-run');", scope: SCOPE })
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toBeInstanceOf(RunJsLayoutUnsafeError);
+    expect((error as RunJsLayoutUnsafeError).event).toMatchObject({ item: 'home', kind: 'file' });
+    expect(existsSync(markerPath)).toBe(false);
+    expect(store.listFileRefs(SCOPE)).toEqual([]);
+    store.close();
+  });
+
+  it('② out/x.xlsx → /etc/passwd 的预植软链：跳过、不交付、不登记 file_refs；普通产物照常', async () => {
+    const { workspaceRoot, store, fileStore } = makeFixture();
+    const executor = createRunJsExecutor({
+      fileStore: plantingFileStore(fileStore, (runDir) => {
+        mkdirSync(path.join(runDir, 'out'), { recursive: true });
+        symlinkSync('/etc/passwd', path.join(runDir, 'out', 'x.xlsx'));
+      }),
+      nodeModulesDir: NODE_MODULES,
+    });
+
+    const result = await executor.runJs({
+      code: "require('node:fs').writeFileSync('out/ok.txt', 'normal-bytes');",
+      scope: SCOPE,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.outputs.map((file) => file.name)).toEqual(['ok.txt']);
+    expect(result.audit.skippedOutputs).toEqual([{ name: 'x.xlsx', reason: 'symlink' }]);
+    expect(store.listFileRefs(SCOPE).map((row) => row.name)).toEqual(['ok.txt']);
+    // 交付字节是普通产物，不是被跟随的 /etc/passwd。
+    const row = store.getFileRef(result.outputs[0]!.fileId, SCOPE, { side: 'main' })!;
+    expect(readFileSync(fileStoragePathOf(workspaceRoot, SCOPE, row.fileId, row.name), 'utf8')).toBe('normal-bytes');
+    expect(row.sha256).toBe(createHash('sha256').update(Buffer.from('normal-bytes', 'utf8')).digest('hex'));
+    store.close();
+  });
+
+  it('③ 正常目录布局与正常产物完全不受影响（回归）', async () => {
+    const { store, executor } = makeFixture();
+    const result = await executor.runJs({
+      code: "require('node:fs').writeFileSync('out/正常.txt', 'ok');",
+      scope: SCOPE,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.outputs.map((file) => file.name)).toEqual(['正常.txt']);
+    expect(result.audit.skippedOutputs).toEqual([]);
+    for (const item of ['in', 'out', 'scratch', 'home', 'tmp'] as const) {
+      const st = lstatSync(path.join(result.audit.runDir, item));
+      expect(st.isDirectory(), `${item} 应保持真目录`).toBe(true);
+      expect(st.isSymbolicLink(), `${item} 不得是软链`).toBe(false);
+    }
+    const runDirStat = lstatSync(result.audit.runDir);
+    expect(runDirStat.isDirectory()).toBe(true);
+    expect(runDirStat.isSymbolicLink()).toBe(false);
+    store.close();
+  });
+
+  it('产物收集：out 自身为软链（直调文件区）→ realpath 不在 runDir 内 → 跳过、零登记', () => {
+    const { fixtureRoot, workspaceRoot, store, fileStore } = makeFixture();
+    const runDir = runDirOf(workspaceRoot, SCOPE, 'run_outdir_symlink');
+    mkdirSync(runDir, { recursive: true });
+    const outside = path.join(fixtureRoot, 'outside-out');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(path.join(outside, 'secret.txt'), 'secret-bytes', 'utf8');
+    symlinkSync(outside, path.join(runDir, 'out'));
+
+    const { outputs, skipped } = fileStore.registerOutputsFromOut({
+      runDir,
+      scope: SCOPE,
+      limits: { maxFileBytes: 1024, maxCount: 10 },
+    });
+
+    expect(outputs).toEqual([]);
+    expect(skipped).toEqual([{ name: 'secret.txt', reason: 'outside_run_dir' }]);
+    expect(store.listFileRefs(SCOPE)).toEqual([]);
     store.close();
   });
 });
