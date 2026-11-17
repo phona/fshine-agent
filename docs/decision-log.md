@@ -3840,6 +3840,15 @@ Pi 1.5.2 迁移 U3（恢复/重试后同一逻辑写操作被重复执行）以*
 - **gap6（历史红态不可独立复现）**：复核员只读、不得改文件，故实施员自报的「现场反向绊线红态」无法从当前树/git 独立复现，标 unconfirmed 属预期（破坏态不入库）。本轮已把 gap1/gap4 两条新断言各自做了「注入破坏→转红→复原绿」的现场可复核绊线；源码内既有绊线式断言（Worker 面无 recalc、描述无流程话术、enabled=false 逐字节不变、report mismatch fail-closed）保持。
 状态：**6 项 gaps 全部处理（gap1/2/3/4 实修 + 绑定的现场绊线，gap5 登记无异议不改判据，gap6 登记为只读不可复现的预期限制）·待最终独立复核**。
 
+**Codex 对 PR #63 独立复审 6 finding 及修复（2026-11-17，owner 已确认 6 条成立）**：逐条 TDD（按 Codex 复现写红→最小实现转绿→反向绊线红→复原）；既有测试未删、断言未弱。
+- **P1-1（B 类·伪造报告绕过投递门）**：原报告写 `<runDir>/out/.recalc-report.json`，而 run_js 子进程对 `out/` 有写权限（run-js-executor.ts 的 `--allow-fs-write=<runDir>/out`），模型可在 out/ 伪造 `name/sha256/status:pass` 报告放行未重算的陈旧缓存。正解（最小可信边界，不依赖提示词）：报告改宿主独占的 **`<runDir>/.recalc-report.json`（runDir 根，run_js 无写权限）**；`collectRecalcReports(workspaceRoot, scope)` 只读该根位置，`out/` 同名文件一律不认。绊线：collector 读回 out/ → 伪造报告用例红（1 failed|16 passed）。**注：上文第二轮 gap4 记录中的 `out/.recalc-report.json` 路径已被本条改到 runDir 根，旧文字按维护规则不改、以此条为准。**
+- **P1-2（sheet 局部验证放行整本）**：原 `selectedSheets` 按 `input.sheet` 过滤，选一个干净 sheet 即授权整本 pass、不存在的 sheet 空检查直接 pass。正解：验证/比对恒遍历**全本**（status/report 的 errorCells/valueDiffs 覆盖所有 sheet，report 保留全量），`sheet` 只收窄 **CSV 展示**与**返回 valueDiffs 呈现**（均按 sheet 过滤），不缩验证范围。绊线：验证范围改回选中 sheet → 别本陈旧用例红（1 failed|25 passed）。
+- **P1-3（共享公式从属格漏比对）**：ExcelJS 共享公式从属格读回是 `{sharedFormula:'<master>', result}`（无 `formula` 属性），原 `isFormula` 只认 `formula`，anchor 正确但 follower 999→2 仍 pass。正解：`formula` 与 `sharedFormula` 两种表示都算公式格。绊线：去掉 sharedFormula 分支 → follower 陈旧用例红（1 failed|23 passed）。
+- **P2-4（CSV 产物未进交付链）**：原 CSV 留执行器私有 runDir/out/，未登记 fileStore、未进 turnFiles，server 投不出。正解：执行器 export=csv 时用 `fileStore.putFile` 登记 CSV（产出即交付箱）并随 `RecalcXlsxResult.outputs` 交回；execution-runtime 的 recalc_xlsx handler 把 outputs push 进 turnFiles（与 run_js 同纪律，不改 Worker 面）。绊线 A：handler 不收口 outputs → turnFiles 用例红；绊线 B：执行器不登记 → outputs 用例红（各 1 failed）。
+- **P2-5（容差遮分级差异）**：原相对容差 `1e-9` 在 1 亿量级容 ~0.1 元，100000000 vs 100000000.05 误判 pass。正解：容差 = `min(半分 0.005, 浮点尾数噪声 1e-9×量级)`——浮点噪声只吸收 ULP 级尾差，绝对上限锁死半分（金额精确到分）。绊线：去掉半分封顶 → 分级差异用例红（1 failed|24 passed）；原浮点噪声用例仍绿。
+- **P2-6（eval 没量闸门决策）**：原 before `delivered=true` 硬编码、after 取 executor.status，闸门改 allow-all 仍绿。正解：before 走 **disabled 闸**（enabled=false = 机制前 allow-all）、after 走 **enabled 闸**（enabled=true + collect 报告），两臂 delivered/reason 均从 `applyRecalcDeliveryGate` 结果取；evidenceDir 的 `readings.json` 留 delivered/reason。allow-all 绊线：after 闸改 enabled=false → 真引擎 eval `pass=false`、after delivered=true、测试 2 failed。真引擎读数：`before delivered=true` / `after engine=soffice 26.8.3 cached=999 computed=5 verdict=fail delivered=false reason=report_fail`。
+状态：**Codex 6 finding 全部按最小可信边界/口径实修并各自通过红→绿→绊线；受影响测试集 5 文件 57 例全绿；待最终独立复核**。
+
 ---
 
 ## 维护规则

@@ -1622,7 +1622,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
               throw new Error('recalc_xlsx 需要 file 与 export（csv|none）。');
             }
             // 结果原样交回模型（status/errorCells/valueDiffs/artifacts）；CSV 等产物由
-            // 执行器落本回合 runDir/out/，交付去留归宿主投递面（与 run_js 同一纪律）。
+            // 执行器登记进 fileStore 并随 result.outputs 交回（Codex P2-4，与 run_js 同一
+            // 交付纪律）——handler 在此把产物收进 turnFiles，交付去留归宿主投递面。
             // R4 资源账（Gap1）：LO 重算耗时入前台预算 + 结构化事件，不静默消耗预算。
             const recalcStartedAt = Date.now();
             const result = await executor.recalc({
@@ -1640,6 +1641,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
               principalId: options.principalId,
               sessionId: options.sessionId,
             });
+            // P2-4：CSV 产物收口进本回合交付清单（与 run_js:turnFiles.push 同纪律）。
+            if (result.outputs !== undefined) {
+              turnFiles.push(...result.outputs.map((f) => ({ fileId: f.fileId, name: f.name, bytes: f.bytes })));
+            }
             return result;
           }
           throw new Error(`Main 工具面之外的调用：${tool}`);

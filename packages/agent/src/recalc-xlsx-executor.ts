@@ -50,8 +50,10 @@ export const RECALC_XLSX_DEFAULT_MAX_VALUE_DIFFS = 50;
 export const RECALC_XLSX_DEFAULT_MAX_INPUT_BYTES = 20 * 1024 * 1024;
 /** 超时上限（宿主常量；模型无 timeoutMs 参数）。 */
 export const RECALC_XLSX_DEFAULT_TIMEOUT_MS = 120_000;
-/** 数值比对相对容差（吸收 LO 浮点尾数差异，不掩盖真实陈旧值）。 */
-const VALUE_COMPARE_REL_TOL = 1e-9;
+/** 金额级绝对误差上限：半分（1 分 = 0.01，精确到分即误差 < 0.005）。Codex P2-5。 */
+const VALUE_COMPARE_HALF_CENT = 0.005;
+/** 浮点尾数噪声相对系数（只补 ULP 级；被半分上限封顶，绝不吞掉分级差异）。Codex P2-5。 */
+const VALUE_COMPARE_FLOAT_REL = 1e-9;
 /** 错误码集合（契约；不得改名）。 */
 export type RecalcErrorCode =
   | 'path_escape' | 'not_found' | 'corrupt' | 'too_large' | 'timeout' | 'engine_failed';
@@ -111,6 +113,8 @@ export interface RecalcXlsxResult {
   errorCells: RecalcErrorCell[];
   valueDiffs: RecalcValueDiff[];
   artifacts: RecalcArtifacts;
+  /** export=csv 时登记进 fileStore 的 CSV 产物（交付链收口用；与 run_js outputs 同形状）。Codex P2-4。 */
+  outputs?: Array<{ fileId: string; name: string; bytes: number }>;
   /** 引擎重算墙钟耗时（ms）；R4 资源账与结构化事件用。缺省装配的执行器必填，注入替身可省。 */
   durationMs?: number;
 }
@@ -172,7 +176,11 @@ function valuesEqual(a: ExcelJS.CellValue, b: ExcelJS.CellValue): boolean {
   if (a === b) return true;
   if (typeof a === 'number' && typeof b === 'number') {
     if (Number.isNaN(a) && Number.isNaN(b)) return true;
-    return Math.abs(a - b) <= VALUE_COMPARE_REL_TOL * Math.max(1, Math.abs(a), Math.abs(b));
+    // Codex P2-5：容差取「浮点尾数噪声」与「半分」的较小者——浮点噪声只吸收 ULP 级
+    // 重算尾差，但绝对上限锁死在半分，1e8 量级的 0.05 分级差异不再被相对容差吞掉。
+    const floatNoise = VALUE_COMPARE_FLOAT_REL * Math.max(1, Math.abs(a), Math.abs(b));
+    const tol = Math.min(VALUE_COMPARE_HALF_CENT, floatNoise);
+    return Math.abs(a - b) <= tol;
   }
   return false;
 }
@@ -306,14 +314,12 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
       const errorCells: RecalcErrorCell[] = [];
       const allDiffs: RecalcValueDiff[] = [];
       const csvRows: string[] = ['sheet,ref,value'];
-      const selectedSheets =
-        input.sheet === undefined
-          ? srcWb.worksheets.map((ws) => ws.name)
-          : srcWb.worksheets.some((ws) => ws.name === input.sheet)
-            ? [input.sheet]
-            : [];
+      // Codex P1-2：验证范围 = 全本（workbook 级判定，status/report 覆盖所有 sheet）；
+      // sheet 参数**只缩 CSV 展示与返回 valueDiffs 呈现**，绝不缩验证范围。
+      const allSheets = srcWb.worksheets.map((ws) => ws.name);
+      const sheetFilter = input.sheet;
 
-      for (const sheetName of selectedSheets) {
+      for (const sheetName of allSheets) {
         const srcSheet = srcWb.getWorksheet(sheetName);
         const outSheet = outWb.getWorksheet(sheetName);
         if (srcSheet === undefined) continue;
@@ -327,15 +333,19 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
             if (err !== null) {
               errorCells.push({ sheet: sheetName, ref: address, code: err });
             }
+            // Codex P1-3：ExcelJS 共享公式从属格是 {sharedFormula,result}（无 formula 属性），
+            // 必须与 anchor 的 {formula,result} 一并按公式格比对，否则 follower 陈旧值漏检。
             const isFormula = !!cachedCell && typeof cachedCell === 'object' && !Array.isArray(cachedCell)
-              && 'formula' in cachedCell;
+              && ('formula' in cachedCell || 'sharedFormula' in cachedCell);
             if (isFormula) {
               const cachedValue = cellValueOf(cachedCell);
               if (!valuesEqual(cachedValue, computedValue)) {
                 allDiffs.push({ sheet: sheetName, ref: address, cached: cachedValue, computed: computedValue });
               }
             }
-            if (input.export === 'csv' && computedValue !== null) {
+            // sheet 只收窄 CSV 展示（P1-2）：验证已对全本完成，这里仅决定导出哪些行。
+            if (input.export === 'csv' && computedValue !== null
+              && (sheetFilter === undefined || sheetName === sheetFilter)) {
               csvRows.push(`${csvCell(sheetName)},${csvCell(address)},${csvCell(computedValue)}`);
             }
           });
@@ -346,7 +356,9 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
       // 投递闸绑定字段（步骤 ③）：name = 输入文件用户可见名、sha256 = 源字节哈希——
       // 投递面据此确认「这份报告是对那个待投递文件做的实算」（不匹配 = 不投递）。
       const reportStatus = errorCells.length > 0 || allDiffs.length > 0 ? 'fail' : 'pass';
-      const reportPath = path.join(outDir, '.recalc-report.json');
+      // Codex P1-1：报告写 **runDir 根**（宿主独占），不写 out/——run_js 子进程只有 out/ 与
+      // scratch/ 的写权限（run-js-executor.ts --allow-fs-write），无法伪造根报告；投递闸只认根报告。
+      const reportPath = path.join(runDir, '.recalc-report.json');
       writeFileSync(
         reportPath,
         JSON.stringify({
@@ -364,21 +376,34 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
       );
 
       let valuesArtifact: string | undefined;
+      let registeredOutputs: Array<{ fileId: string; name: string; bytes: number }> | undefined;
       if (input.export === 'csv') {
         const name = `${parsed.fileId}.values.csv`;
         const csvPath = path.join(outDir, name);
-        writeFileSync(csvPath, `${csvRows.join('\n')}\n`, 'utf8');
+        const csvBytes = Buffer.from(`${csvRows.join('\n')}\n`, 'utf8');
+        writeFileSync(csvPath, csvBytes);
         valuesArtifact = relativeArtifact(runDir, csvPath);
+        // Codex P2-4：CSV 登记进 fileStore（产出即交付箱），随结果交回宿主收进 turnFiles，
+        // 与 run_js 同一交付纪律——否则产物留在私有 runDir、server 投不出去。
+        const registered = options.fileStore.putFile({
+          scope, name, bytes: csvBytes, activatedAt: Date.now(),
+        });
+        registeredOutputs = [{ fileId: registered.fileId, name: registered.name, bytes: registered.bytes }];
       }
 
+      // 进上下文的 valueDiffs 按 sheet 收窄呈现（P1-2），但 report 上方已保留全量。
+      const visibleDiffs = sheetFilter === undefined
+        ? allDiffs
+        : allDiffs.filter((d) => d.sheet === sheetFilter);
       return {
         status: errorCells.length > 0 || allDiffs.length > 0 ? 'fail' : 'pass',
         errorCells,
-        valueDiffs: allDiffs.slice(0, maxValueDiffs),
+        valueDiffs: visibleDiffs.slice(0, maxValueDiffs),
         artifacts: {
           report: relativeArtifact(runDir, reportPath),
           ...(valuesArtifact === undefined ? {} : { values: valuesArtifact }),
         },
+        ...(registeredOutputs === undefined ? {} : { outputs: registeredOutputs }),
         durationMs: Date.now() - startedAt,
       };
     },
@@ -386,7 +411,7 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
 }
 
 function errorResult(error: RecalcErrorCode): RecalcXlsxResult {
-  return { status: 'error', error, errorCells: [], valueDiffs: [], artifacts: { report: 'out/.recalc-report.json' } };
+  return { status: 'error', error, errorCells: [], valueDiffs: [], artifacts: { report: '.recalc-report.json' } };
 }
 
 const TIMEOUT_SENTINEL = Symbol('recalc-timeout');
@@ -582,7 +607,9 @@ export function collectRecalcReports(workspaceRoot: string, scope: FileScope): R
     return [];
   }
   for (const runId of runIds) {
-    const reportPath = path.join(runsDir, runId, 'out', '.recalc-report.json');
+    // Codex P1-1：只读 runDir **根**的 .recalc-report.json（宿主独占位置）；
+    // run_js 子进程仅能写 out/ 与 scratch/，故 out/.recalc-report.json 一律不认。
+    const reportPath = path.join(runsDir, runId, '.recalc-report.json');
     if (!existsSync(reportPath)) continue;
     try {
       const parsed = JSON.parse(readFileSync(reportPath, 'utf8')) as Record<string, unknown>;

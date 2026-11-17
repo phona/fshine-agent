@@ -123,24 +123,32 @@ describe('recalc_delivery_gate 判定核心', () => {
 
 // ───────────────────────────── 报告收集（绑定文件名/sha256） ─────────────────────────────
 describe('collectRecalcReports：从会话 runs 目录收集报告绑定', () => {
-  it('读取每个 run 的 out/.recalc-report.json，投影 name/sha256/status；坏报告跳过', () => {
+  it('只读 run 根目录 .recalc-report.json（宿主独占）；out/ 里的伪造报告一律不认（Codex P1-1）', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'recalc-gate-reports-'));
     dirs.push(root);
     const store = openTaskStore(':memory:');
     const fileStore = createFileStore({ store, workspaceRoot: path.join(root, 'workspace') });
-    // 用真实的 fileStore 布局：sessionDir/runs/<runId>/out
     const sessionDir = sessionDirOf(fileStore.workspaceRoot, SCOPE);
-    const writeReport = (runId: string, obj: unknown): void => {
+    // 宿主独占位置：runDir 根（run_js 子进程无写权限，只有 out/ 与 scratch/ 可写）。
+    const writeRootReport = (runId: string, obj: unknown): void => {
+      const runDir = path.join(sessionDir, 'runs', runId);
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(path.join(runDir, '.recalc-report.json'), JSON.stringify(obj), 'utf8');
+    };
+    // run_js 可写位置：out/ —— 模型伪造的 pass 报告放这里必须被忽略。
+    const writeOutReport = (runId: string, obj: unknown): void => {
       const out = path.join(sessionDir, 'runs', runId, 'out');
       mkdirSync(out, { recursive: true });
       writeFileSync(path.join(out, '.recalc-report.json'), JSON.stringify(obj), 'utf8');
     };
-    writeReport('run_good', { name: '汇总.xlsx', sha256: 'abc', status: 'pass', file: 'in/file_x.xlsx' });
-    writeReport('run_bad', { name: '汇总.xlsx', sha256: 'def', status: 'fail', file: 'in/file_y.xlsx' });
+    writeRootReport('run_good', { name: '汇总.xlsx', sha256: 'abc', status: 'pass', file: 'in/file_x.xlsx' });
+    writeRootReport('run_bad', { name: '汇总.xlsx', sha256: 'def', status: 'fail', file: 'in/file_y.xlsx' });
+    // Codex 复现：模型经 run_js 在 out/ 写 pass 报告（缓存 999 未重算），必须不被收集。
+    writeOutReport('run_forged', { name: '汇总.xlsx', sha256: 'forged', status: 'pass', file: 'in/file_z.xlsx' });
     // 坏 JSON 跳过
-    const badOut = path.join(sessionDir, 'runs', 'run_corrupt', 'out');
-    mkdirSync(badOut, { recursive: true });
-    writeFileSync(path.join(badOut, '.recalc-report.json'), '{not json', 'utf8');
+    const badRun = path.join(sessionDir, 'runs', 'run_corrupt');
+    mkdirSync(badRun, { recursive: true });
+    writeFileSync(path.join(badRun, '.recalc-report.json'), '{not json', 'utf8');
 
     const reports = collectRecalcReports(fileStore.workspaceRoot, SCOPE);
     expect(reports).toHaveLength(2);
@@ -148,6 +156,8 @@ describe('collectRecalcReports：从会话 runs 目录收集报告绑定', () =>
       { name: '汇总.xlsx', sha256: 'abc', status: 'pass', file: 'in/file_x.xlsx' },
       { name: '汇总.xlsx', sha256: 'def', status: 'fail', file: 'in/file_y.xlsx' },
     ]));
+    // 明确断言 out/ 的伪造报告没被收进来。
+    expect(reports.some((r) => r.sha256 === 'forged')).toBe(false);
   });
 });
 
@@ -284,10 +294,9 @@ async function makeServerGateFixture(input: {
         // 正向链路：recalc_xlsx 已对该字节实算通过 → 报告在独立 runDir，绑定 name+sha256。
         // 报告 sha 必须是「被投递文件」的字节哈希，与 server 读回投递字节一致才匹配。
         const recalcRunDir = runDirOf(workspaceRoot, scope, 'run_gate_recalc_00000000000000000001');
-        const recalcOut = path.join(recalcRunDir, 'out');
-        mkdirSync(recalcOut, { recursive: true });
+        mkdirSync(recalcRunDir, { recursive: true });
         writeFileSync(
-          path.join(recalcOut, '.recalc-report.json'),
+          path.join(recalcRunDir, '.recalc-report.json'),
           JSON.stringify({
             status: 'pass', name: '汇总.xlsx', sha256: sha256(input.formulaXlsx),
             file: 'in/file_x.xlsx', errorCells: [], valueDiffs: [],

@@ -276,6 +276,28 @@ describe('recalc_xlsx 读回比对', () => {
     expect(res.errorCells).toEqual([]);
   });
 
+  it('共享公式从属格 {sharedFormula,result} 缓存陈旧 → 也须报 valueDiffs（Codex P1-3）', async () => {
+    const h = makeHarness();
+    // A2 是共享公式 master（{formula,result}），A3 是从属格（{sharedFormula:'A2',result}，读回无 formula 属性）。
+    const src = await workbookBuffer('汇总', {
+      A1: 2, B1: 3,
+      A2: { formula: 'A1+B1', result: 5 },
+      A3: { sharedFormula: 'A2', result: 999 } as unknown as ExcelJS.CellValue,
+    });
+    const computed = await workbookBuffer('汇总', {
+      A1: 2, B1: 3,
+      A2: { formula: 'A1+B1', result: 5 },
+      A3: { sharedFormula: 'A2', result: 5 } as unknown as ExcelJS.CellValue,
+    });
+    const rel = h.putInput('src.xlsx', src);
+    const executor = makeExecutor(h, computedEngine(computed));
+    const res = await executor.recalc({ file: rel, export: 'none', scope: SCOPE });
+    expect(res.status).toBe('fail');
+    expect(res.valueDiffs).toEqual([
+      { sheet: '汇总', ref: 'A3', cached: 999, computed: 5 },
+    ]);
+  });
+
   it('缓存与计算一致（含浮点噪声）→ status=pass,valueDiffs 空', async () => {
     const h = makeHarness();
     const src = await workbookBuffer('汇总', {
@@ -289,6 +311,23 @@ describe('recalc_xlsx 读回比对', () => {
     const res = await executor.recalc({ file: rel, export: 'none', scope: SCOPE });
     expect(res.status).toBe('pass');
     expect(res.valueDiffs).toEqual([]);
+  });
+
+  it('金额分级差异：1e8 vs 1e8.05 须报 valueDiffs，不被相对容差吞掉（Codex P2-5）', async () => {
+    const h = makeHarness();
+    const src = await workbookBuffer('汇总', {
+      A1: { formula: '100000000', result: 100000000 },
+    });
+    const computed = await workbookBuffer('汇总', {
+      A1: { formula: '100000000', result: 100000000.05 },
+    });
+    const rel = h.putInput('src.xlsx', src);
+    const executor = makeExecutor(h, computedEngine(computed));
+    const res = await executor.recalc({ file: rel, export: 'none', scope: SCOPE });
+    expect(res.status).toBe('fail');
+    expect(res.valueDiffs).toEqual([
+      { sheet: '汇总', ref: 'A1', cached: 100000000, computed: 100000000.05 },
+    ]);
   });
 
   it('错误格 #REF!/#VALUE!/#DIV/0! → status=fail,errorCells 逐格上报', async () => {
@@ -329,9 +368,9 @@ describe('recalc_xlsx 读回比对', () => {
     const res = await executor.recalc({ file: rel, export: 'none', scope: SCOPE });
     expect(res.valueDiffs.length).toBe(2);
     expect(RECALC_XLSX_DEFAULT_MAX_VALUE_DIFFS).toBeGreaterThanOrEqual(2);
-    // 报告 JSON 落 out/.recalc-report.json，保留全量 7 条。
+    // 报告 JSON 落 runDir 根 .recalc-report.json（宿主独占，P1-1），保留全量 7 条。
     const newest = latestRunDir(h);
-    const report = JSON.parse(readFileSync(path.join(newest, 'out', '.recalc-report.json'), 'utf8'));
+    const report = JSON.parse(readFileSync(path.join(newest, '.recalc-report.json'), 'utf8'));
     expect(report.valueDiffs.length).toBe(7);
   });
 });
@@ -369,6 +408,20 @@ describe('recalc_xlsx CSV 导出（契约显式部分）', () => {
     expect(csv).not.toContain('999');
   });
 
+  it('export=csv：CSV 产物登记进 fileStore 并随结果返回 outputs（Codex P2-4）', async () => {
+    const h = makeHarness();
+    const src = await workbookBuffer('汇总', { A1: '名称', B1: { formula: '2*3', result: 6 } });
+    const rel = h.putInput('src.xlsx', src);
+    const executor = makeExecutor(h, computedEngine(src));
+    const res = await executor.recalc({ file: rel, export: 'csv', scope: SCOPE });
+    expect(res.outputs).toHaveLength(1);
+    expect(res.outputs![0]!.name).toMatch(/\.values\.csv$/);
+    expect(res.outputs![0]!.bytes).toBeGreaterThan(0);
+    // 产物确实登记进 fileStore（可按 fileId 解析回字节）：用 listActiveFiles 核对。
+    const active = h.fileStore.listActiveFiles({ scope: SCOPE, now: Date.now() });
+    expect(active.some((f) => f.fileId === res.outputs![0]!.fileId && f.name === res.outputs![0]!.name)).toBe(true);
+  });
+
   it('export=none：不出 CSV，artifacts.values 缺席', async () => {
     const h = makeHarness();
     const src = await workbookBuffer('S', { A1: 1 });
@@ -380,7 +433,34 @@ describe('recalc_xlsx CSV 导出（契约显式部分）', () => {
     const runDir = latestRunDir(h);
     const files = (require('node:fs') as typeof import('node:fs')).readdirSync(path.join(runDir, 'out'));
     expect(files.some((f) => f.endsWith('.values.csv'))).toBe(false);
-    expect(files).toContain('.recalc-report.json');
+    // P1-1：报告在 runDir 根（宿主独占），不在 out/（run_js 可写、不可信）。
+    expect(files).not.toContain('.recalc-report.json');
+    expect(existsSync(path.join(runDir, '.recalc-report.json'))).toBe(true);
+  });
+
+  it('sheet 只缩 CSV 展示，不缩验证范围：选干净 sheet 但别本有陈旧公式仍须 fail（Codex P1-2）', async () => {
+    const h = makeHarness();
+    const src = new ExcelJS.Workbook();
+    src.addWorksheet('甲').getCell('A1').value = 1; // 干净本
+    src.addWorksheet('乙').getCell('A1').value = { formula: '1+1', result: 999 }; // 陈旧本
+    const comp = new ExcelJS.Workbook();
+    comp.addWorksheet('甲').getCell('A1').value = 1;
+    comp.addWorksheet('乙').getCell('A1').value = { formula: '1+1', result: 2 };
+    const srcBuf = Buffer.from(await src.xlsx.writeBuffer());
+    const compBuf = Buffer.from(await comp.xlsx.writeBuffer());
+    const rel = h.putInput('two.xlsx', srcBuf);
+    const executor = makeExecutor(h, computedEngine(compBuf));
+    const res = await executor.recalc({ file: rel, sheet: '甲', export: 'csv', scope: SCOPE });
+    // workbook 级判定：必须验全本，乙的陈旧 diff 不能被「只选甲」掩盖。
+    expect(res.status).toBe('fail');
+    const runDir = latestRunDir(h);
+    const report = JSON.parse(readFileSync(path.join(runDir, '.recalc-report.json'), 'utf8'));
+    expect(report.valueDiffs).toEqual(expect.arrayContaining([
+      { sheet: '乙', ref: 'A1', cached: 999, computed: 2 },
+    ]));
+    // CSV 展示范围仍按 sheet='甲' 收窄（此步 CSV 仍在 out/，P2-4 后再改交付链）。
+    const csv = readFileSync(path.join(runDir, 'out', path.basename(res.artifacts.values!)), 'utf8');
+    expect(csv).not.toContain('999');
   });
 
   it('sheet 选项：只导出指定 sheet 的单元格', async () => {
@@ -547,6 +627,40 @@ describe('recalc_xlsx 接线（fail-closed + Worker 不上）', () => {
       required: ['file', 'export'],
       additionalProperties: false,
     });
+  });
+
+  it('handler 把 recalc 的 CSV 产物收进 turnFiles（Codex P2-4）', async () => {
+    const h = makeHarness();
+    const csvOut = { fileId: 'file_csvout1', name: 'src.values.csv', bytes: 42 };
+    const outputExecutor: RecalcXlsxExecutor = {
+      available: true,
+      engineFacts: null,
+      async recalc() {
+        return {
+          status: 'pass', errorCells: [], valueDiffs: [],
+          artifacts: { report: '.recalc-report.json', values: 'out/src.values.csv' },
+          outputs: [csvOut],
+        };
+      },
+    };
+    const session = await createSession({
+      principalId: SCOPE.principalId,
+      sessionId: SCOPE.sessionId,
+      client: new FaceClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver: {
+        async run(runInput) {
+          await runInput.exec(RECALC_XLSX_TOOL, { file: 'in/file_x.xlsx', export: 'csv' });
+          return { text: 'ok', messages: [] as unknown as DriverMessage[] };
+        },
+      },
+      workerDriver: noopWorker,
+      mainSystemPrompt: 'test',
+      taskRegistry: h.store as never,
+      recalcXlsxExecutor: outputExecutor,
+    });
+    const turn = await session.send('export csv');
+    expect(turn.files).toEqual([csvOut]);
   });
 
   it('Worker 工具面永不上 recalc_xlsx（即使注入执行器）', async () => {

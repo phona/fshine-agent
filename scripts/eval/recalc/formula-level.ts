@@ -24,9 +24,10 @@ import ExcelJS from 'exceljs';
 import { openTaskStore } from '@fshine/core';
 import { createFileStore } from '../../../packages/agent/src/file-store';
 import {
+  applyRecalcDeliveryGate,
+  collectRecalcReports,
   createRecalcXlsxExecutor,
   createSofficeRecalcEngine,
-  decideRecalcDelivery,
   RECALC_DELIVERY_GATE_STATUS,
   RECALC_XLSX_REQUIRED_VERSION,
   type RecalcEngine,
@@ -89,18 +90,19 @@ export async function runFormulaLevelEval(): Promise<{
   const src = await makeWorkbook(CELLS);
   const cached = await cachedValueOf(src, 'A2');
 
-  // ── 增加前：数据级 oracle——只看缓存，缓存与缓存比对 → pass（看不见陈旧）。
-  const beforeDeliver = await decideRecalcDelivery({
-    bytes: src, name: '汇总.xlsx', reports: [],
+  // ── 增加前：机制前无闸门 = disabled 闸（allow-all）。陈旧缓存被当作真值 → 放行。
+  // Codex P2-6：delivered 不再硬编码，而是真走闸门（enabled=false → outgoing 含文件）。
+  const beforeGate = await applyRecalcDeliveryGate({
+    files: [{ name: '汇总.xlsx', bytes: src }], reports: [], enabled: false,
   });
   const before: FormulaLevelReading = {
     arm: 'before_data_level',
     engine: 'data-oracle(no recalc)',
     cached,
     computed: null,
-    verdict: 'pass（陈旧缓存被当作真值，静默通过）',
-    delivered: true,
-    reason: beforeDeliver.reason,
+    verdict: beforeGate.outgoing.length > 0 ? 'pass（陈旧缓存被当作真值，静默通过）' : 'fail',
+    delivered: beforeGate.outgoing.length > 0,
+    reason: beforeGate.gated[0]?.reason ?? RECALC_DELIVERY_GATE_STATUS.PASS,
   };
 
   // ── 增加后：公式级 recalc——强制重算读回计算值 → valueDiffs → fail → 不投递。
@@ -122,14 +124,20 @@ export async function runFormulaLevelEval(): Promise<{
   const executor = createRecalcXlsxExecutor({ fileStore: fileStore as never, engine });
   const result = await executor.recalc({ file: `in/${file.fileId}.xlsx`, export: 'none', scope: SCOPE as never });
   const diff = result.valueDiffs.find((d) => d.ref === 'A2');
+  // Codex P2-6：after 真走 enabled 闸——收集执行器写出的报告，闸门据 name+sha256+status 决定投递，
+  // delivered/reason 从闸门结果取（不再取 executor.status，allow-all 会让这里红）。
+  const reports = collectRecalcReports(workspaceRoot, SCOPE as never);
+  const afterGate = await applyRecalcDeliveryGate({
+    files: [{ name: '汇总.xlsx', bytes: src }], reports, enabled: true,
+  });
   const after: FormulaLevelReading = {
     arm: 'after_formula_level',
     engine: useReal ? `soffice ${realFacts!.version}` : 'fake-computed(deterministic)',
     cached,
     computed: diff?.computed ?? cached,
-    verdict: result.status,
-    delivered: result.status !== 'fail',
-    reason: diff !== undefined ? RECALC_DELIVERY_GATE_STATUS.REPORT_FAIL : result.status,
+    verdict: afterGate.outgoing.length > 0 ? 'pass' : 'fail',
+    delivered: afterGate.outgoing.length > 0,
+    reason: afterGate.gated[0]?.reason ?? RECALC_DELIVERY_GATE_STATUS.PASS,
   };
 
   const readings = [before, after];
