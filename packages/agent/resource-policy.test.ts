@@ -54,7 +54,21 @@ describe('resolveRuntimeConfig：缺省 = 前台并发 4 + 排队 16，非法 fa
       taskBudget: null,
       waitUserTimeoutMs: 86_400_000,
       fileRetentionDays: 30,
+      fileRetentionSweepOnStart: false,
     });
+  });
+
+  it('fileRetentionSweepOnStart：缺省 false（零行为）；显式 true/false 保留；非布尔 fail-fast', () => {
+    expect(resolveRuntimeConfig().fileRetentionSweepOnStart).toBe(false);
+    expect(resolveRuntimeConfig({ fileRetentionSweepOnStart: true }).fileRetentionSweepOnStart).toBe(true);
+    expect(resolveRuntimeConfig({ fileRetentionSweepOnStart: false }).fileRetentionSweepOnStart).toBe(false);
+
+    for (const bad of ['true', 1, null]) {
+      expect(
+        () => resolveRuntimeConfig({ fileRetentionSweepOnStart: bad } as unknown as RuntimeConfig),
+        `fileRetentionSweepOnStart=${String(bad)}`,
+      ).toThrowError(/runtime\.fileRetentionSweepOnStart/);
+    }
   });
 
   it('显式 mainConcurrency=1 仍生效：缺省 4 不吞显式值，单并发语义（满即拒绝）不变', () => {

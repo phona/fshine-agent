@@ -13,6 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WecomBotChannel } from '@fshine/channel-wecom';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
+import { resolveRuntimeConfig } from '../../packages/agent/src/resource-policy';
 import { explicitConfigFrom } from '../../scripts/resolve-config-path';
 import {
   channelModeOf,
@@ -20,8 +21,9 @@ import {
   serverStartedEvent,
   startChannelForMode,
 } from './channel-mode';
-import { createServer, resolveSingleProfile } from './server';
+import { createServer, resolveSingleProfile, workspaceRootOf } from './server';
 import { createFileNotificationSink } from './notification-file-sink';
+import { sweepExpiredRunDirsOnStart } from './startup-sweep';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -63,6 +65,13 @@ async function main(): Promise<void> {
       deliveryMode: channel.deliveryMode,
       sendToConversation: (route, files) => channel.sendToConversation(route, { files }),
     },
+  });
+  // 保留期启动清扫（runtime.fileRetentionSweepOnStart；缺省 false = 零行为变化）：
+  // 装配完成、渠道真正开始接消息之前扫一次。只扫一次，不引入定时器（周期调度归部署侧）；
+  // 抛错已在 sweepExpiredRunDirsOnStart 内收口为观测事件，不阻断启动。
+  sweepExpiredRunDirsOnStart({
+    config: resolveRuntimeConfig(config.runtime),
+    workspaceRoot: workspaceRootOf(dbPath),
   });
   // offline 下不 start：不建立 WS 连接、不认证，渠道出站保持 silent。
   await startChannelForMode(channelMode, channel, server.handler);

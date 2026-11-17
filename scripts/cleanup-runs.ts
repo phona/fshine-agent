@@ -7,8 +7,9 @@
  *   npm run cleanup:runs -- --config=<path> # 与 ask/tasks/ops 同义（AGENT_CONFIG_PATH 次之）
  *
  * 边界（本切片刻意最小）：
- *   · **只有显式运行才会删**：server/ask 启动路径不引用清理执行器（默认产品行为零变化；
- *     守卫见 scripts/cleanup-runs.test.ts）；
+ *   · **默认只有显式运行才会删**：server/ask 启动路径默认不引用清理执行器；server 另有
+ *     显式开关 `runtime.fileRetentionSweepOnStart`（缺省 false）可在启动装配后扫一次
+ *     （守卫见 scripts/cleanup-runs.test.ts）；
  *   · 删除规则全部在 `packages/agent/src/run-dir-cleanup.ts`：只处理仓库自己的
  *     `<workspace>/<16hex>/<16hex>/runs/run_<32hex>` 布局，lstat 不跟随 symlink，
  *     根内包含判定，单项失败只记事件不中断；

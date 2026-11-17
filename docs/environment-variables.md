@@ -43,6 +43,9 @@
 > `runtime` 段另含 `dispatchMode: inline | background`（R4 集成接线，2026-11-14；缺省
 > `inline` = 现行为：委派同步执行；`background` = 受理即回执、后台 TaskRunner 执行——
 > 仅 server 渠道面承接，ask/redo 入口对 background 显式拒绝；模板见 `config/agent.example.yaml`）。
+> `runtime.fileRetentionSweepOnStart`（2026-11-17；缺省 `false`）：server 启动装配完成后、
+> 渠道开始接消息之前，按 `fileRetentionDays` **扫一次**到期 run 目录（`dryRun=false`，
+> 结果进启动日志）；缺省关闭 = 零行为变化，只扫一次、无定时器（周期调度归部署侧）。
 
 下表仍只从 env 读（不是部署配置）：
 
