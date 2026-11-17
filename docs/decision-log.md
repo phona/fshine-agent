@@ -3806,6 +3806,29 @@ Pi 1.5.2 迁移 U3（恢复/重试后同一逻辑写操作被重复执行）以*
 
 ---
 
+## 九十九、recalc_xlsx 集成 · 决定登记与准入证据指针（2026-11-17，分支 `arch/recalc-xlsx`，基线 = `arch/integration` @ `5428723`）状态：**实现中·待独立复核**
+
+> 授权与边界：owner 2026-11-17 认可方案 v2 + R1–R7 裁定，指定「编排 workflow，拉 worktree，丢给 deepseek-v4.1-flash@high 执行」。本节只做决定登记与准入证据指针，不代表实现已通过；产品改动限定在钉死产出（`docs/decision-log.md`、`packages/agent/src/recalc-xlsx-executor.ts`、`packages/agent/recalc-xlsx.test.ts`、`packages/agent/recalc-delivery-gate.test.ts`、`.agents/skills/table-verification/SKILL.md`）。不 push、不合并、不动 main/tag。
+
+- **owner 边界裁定 R1–R7（不得重新讨论）**：① LibreOffice 仅部署时安装，用户机器零依赖；② 表格公式/模型工程归 Main 文档工程面；③ 执行层交付无公式表格（数据非活模型）；④ 带公式产物由 Main 侧验收（数据级 oracle / 公式级 LO 两档）；⑤ 不为 Excel 派生执行层；⑥ `recalc_xlsx` 是宿主 agent 工具（Option 1，与 `run_js` 并列）；⑦ skill 只验不建/改，CSV 纯数据导出是工具契约显式部分。
+
+- **Q1–Q4 收口（按推荐）**：① LibreOffice 固定 **26.8.3**，仅部署时安装、PATH 可见才上工具面，缺失即 **fail-closed 不上工具**；② Worker 面不上 `recalc_xlsx`（仅 Main 宿主面）；③ LO 开销进 **R4 资源账**（结构化事件）；④ 实施顺序 **④ decision-log → ② recalc_xlsx 工具（TDD）→ ① table-verification skill → ③ 投递门**。确定性门在 commit 后由脚本跑；全量 `npm test` 本机有 vitest-worker 超时抖动，失败如实上报不掩盖。
+
+- **四项产出与顺序**：④ `docs/decision-log.md`（§九十九，本节）→ ② `packages/agent/src/recalc-xlsx-executor.ts` + `packages/agent/recalc-xlsx.test.ts`（TDD）→ ① `.agents/skills/table-verification/SKILL.md`（只验不建/改）→ ③ `packages/agent/recalc-delivery-gate.test.ts`（投递门）。新增 skill 若需更新测试金样，单独在 deviations 说明。
+
+- **新增机制准入五条 · 逐项证据指针**（按 AGENTS.md「新增机制准入」）：
+  1. **最小可复现失败**：汇总表共享公式与静态值混排时，读回走缓存导致值陈旧——`recalc_xlsx` 必须强制重新计算后读回，否则交付陈旧值。该失败场景在 `packages/agent/recalc-xlsx.test.ts` 以最小用例钉住（实现步 ② 产出）。
+  2. **Pi 原生 / Skill 方案尝试结果**：仓内已有 dummy 执行层 + `exceljs` 数据级断言（`scripts/eval/cap01/r2b-formats.ts:86` 的 `cellText/gridOfXlsx/compareGrids` 数据级 oracle、`packages/agent/run-js-executor.test.ts` 经 `run_js` 数据级比对）已覆盖「无公式数据」；**缺的是公式级读回门**——Pi 原生 `run_js` 无法强制 LO 重算读回，故以宿主工具补齐，不另建框架。
+  3. **为什么执行层不能承担**：公式/模型工程归 Main 文档工程面（裁定 ②），执行层只交无公式数据（裁定 ③）；`recalc_xlsx` 重算是 Main 侧文档工程责任，执行层不承担，故不上 Worker 面（Q1②）。
+  4. **最小改动方案**：复用 `run_js` 装配与 `fileStore` 纪律（`packages/agent/src/run-js-executor.ts`、`packages/agent/src/file-store.ts`、`packages/agent/src/execution-runtime.ts`），作为与 `run_js` 并列的宿主 agent 工具（裁定 ⑥），不新增第二套协议/框架。
+  5. **Eval（增加前后）**：待补的公式级用例——数据级 oracle 已有（见第 2 条），公式级 LO 两档（裁定 ④）的增加前/增加后读数在 ①③④ 步补齐；本节不伪造通过。
+
+- **LO 版本与资源账**：LibreOffice 固定 **26.8.3**，部署期安装、PATH 可见才注册工具，缺失 fail-closed；LO 重算开销计入 R4 资源账，以结构化事件上报（`packages/agent/src/execution-runtime.ts` 的 `onRuntimeEvent`/资源事件面），不静默消耗预算。
+
+**指针**：本节；`packages/agent/src/recalc-xlsx-executor.ts`（待 ② 产出）、`packages/agent/recalc-xlsx.test.ts`（待 ② 产出）、`.agents/skills/table-verification/SKILL.md`（待 ① 产出）、`packages/agent/recalc-delivery-gate.test.ts`（待 ③ 产出）。状态：**实现中·待独立复核**。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
