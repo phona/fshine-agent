@@ -26,6 +26,7 @@ import {
   accountCalls, CallAccountingGuard, resolveLimits, R6HardStopError,
   type ModelCallRecord,
 } from './accounting';
+import { scanStructureLeak, type StructureLeakBounds, type StructureLeakReport } from './structure-leak';
 
 /** 会话面（真实 = 生产同源装配适配；测试 = 假会话）。只暴露只读事实。 */
 export interface HarnessSession {
@@ -64,6 +65,8 @@ export interface HarnessRunInput {
   readonly infraSignals?: readonly string[];
   readonly productFaultSignals?: readonly string[];
   readonly bounds?: CompactionBounds;
+  /** 结构泄漏判据的阈值覆盖（缺省 `R6_STRUCTURE_LEAK_BOUNDS`；只影响读数）。 */
+  readonly structureLeakBounds?: StructureLeakBounds;
 }
 
 export interface HarnessRunResult {
@@ -71,6 +74,8 @@ export interface HarnessRunResult {
   readonly judgement: SessionJudgement;
   readonly disposition: SampleDisposition;
   readonly summary: Readonly<Record<string, unknown>>;
+  /** 结构泄漏读数（不参与 disposition；见 `structure-leak.ts`）。 */
+  readonly structureLeak: StructureLeakReport;
 }
 
 const DEFAULT_AT = (turn: number): string => new Date(Date.UTC(2026, 0, 1, 0, 0, turn)).toISOString();
@@ -171,9 +176,15 @@ export async function runHarnessSession(input: HarnessRunInput): Promise<Harness
     factVerdicts, sessionFactsPass: sessionFacts.pass, factFailures: sessionFacts.failures,
     taskVerdict, compactionVerdict,
   };
+  // 结构泄漏 = 只读读数：扫描已记录的回复与工具调用，不新增模型调用、不参与处置。
+  const structureLeak = scanStructureLeak(
+    { replies: evidence.replies, toolCalls: evidence.toolCalls },
+    input.structureLeakBounds,
+  );
   return {
     evidence, judgement,
     disposition: classifySample(evidence, judgement),
-    summary: buildEvidenceSummary(evidence, judgement),
+    summary: buildEvidenceSummary(evidence, judgement, structureLeak),
+    structureLeak,
   };
 }

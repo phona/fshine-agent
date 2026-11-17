@@ -125,10 +125,28 @@
 | `tasks-snapshots.jsonl` | Task Registry 逐轮快照 | `turn`、`tasks`、`reply`、`cancelCalled` |
 | `tasks-final.json` | 会话末 Task Registry 全量 | `session.tasks()` 快照 |
 | `resource-samples.jsonl` | 长稳资源读数（LS5） | `ts`、`rssBytes`、`cpuPct` |
-| `evidence.json` | 汇总清单 | 引用上述文件 + `effectiveCompactions` + `disposition` + `hardZeroHits` + `factFailures` + `evidenceGaps` |
+| `structure-leak.jsonl` | 结构泄漏逐条命中（读数项） | `turn`、`surface`、`code`、`ref`、`evidence`（≤180 字符截断） |
+| `evidence.json` | 汇总清单 | 引用上述文件 + `effectiveCompactions` + `disposition` + `hardZeroHits` + `factFailures` + `evidenceGaps` + `structureLeak`（逐会话计数 + 阈值） |
 
 - **逐会话可复核**：每个结论（T1–T5 / 硬零 / UX）都能回溯到原始文件的具体行；**压缩尝试保留 before/after**（判「有效压缩」与「零收益」）；**摘要调用单独留档**（原生暴露时），闭合 R5「摘要调用疑似绕过 budget hook」。
 - **三态处置写入**：`evidence.json` 记 `disposition`（`valid`/`insufficient_coverage`/`environment_interrupted`/`product_fault`）；**产品故障样本保留判负，不作废**（见 §十一）。
+
+### 五.1 结构泄漏判据（确定性读数；实现：`scripts/eval/r6/structure-leak.ts`）
+
+**目的**：把 Wave1 重跑时 ad-hoc 扫描发现的「裸任务信封 / 内部 `task_<uuid>`·`req_<uuid>` id / 整包明细」变成**可复现、可调阈值**的确定性读数，替代一次性人工扫描。
+
+**命中定义**（任一即记 `structure_leak`，逐 `turn + surface + code` 去重）：
+1. `bare_task_envelope`：文本出现任务底账 JSON 键形状（`{"taskId":…,"requestIds":[…]}`、`{"tasks":[…]}`
+   或 `"taskId"` 与 `"requestIds"/"executions"/"taskNo"` 在 2,000 字符窗口内共现）；
+2. `internal_task_id` / `internal_request_id`：内部 `task_<uuid>` / `req_<uuid>` 出现在**给用户的回复文本或工具参数**；
+3. `bulk_detail_package`：单条文本 **> 200 行或 > 16 KiB（UTF-8）**（阈值见 `R6_STRUCTURE_LEAK_BOUNDS`，可整体注入覆盖）。
+
+**扫描面**（只读既有证据，**零新增模型调用**）：`SessionEvidence.replies`（四条规则）、`toolCalls[].args`（四条规则）、
+`toolCalls[].resultSummary`（只判信封/整包；内部 id 是正常回执字段，不按 id 规则计入）、可选原始转录文本（只判信封/整包）。
+
+**纪律**：本判据**不改变原有 `disposition`**，不参与 `classifySample`、不进硬零；`evidence.json.structureLeak`
+与报告对象都带 `affectsDisposition: false`。判官 U2（JSON·内部结构泄漏率）仍按 §六独立执行。逐会话计数写入
+`evidence.json`，跨会话汇总用 `aggregateStructureLeak`（逐会话 + 总命中）。
 
 ## 六、判官接线（rubric 冻结、判官与实施分离）
 
@@ -187,7 +205,7 @@
 
 ## 十一、测试基建说明与运行方式（本轮交付）
 
-**模块（`scripts/eval/r6/`）**：`oracle.ts`、`compaction.ts`、`load-generator.ts`、`evidence.ts`、`harness.ts`、`g3-readiness.ts`、`fake-session.ts`（测试支持）。
+**模块（`scripts/eval/r6/`）**：`oracle.ts`、`compaction.ts`、`load-generator.ts`、`evidence.ts`、`harness.ts`、`structure-leak.ts`、`g3-readiness.ts`、`fake-session.ts`（测试支持）。
 
 **确定性测试（假模型，零网、零 key）**：
 
@@ -195,7 +213,7 @@
 npm test -- scripts/eval/r6        # 或在仓根：npx vitest run scripts/eval/r6
 ```
 
-覆盖：事实 Oracle（exact/unanswerable/clarify/session_value + 会话聚合）、任务 Oracle（H3/H4/H5/E-G/五态）、压缩生命周期（有效数/零收益连串/H6.a/H6.b/覆盖不足/证据缺口）、负载生成器（逐轨计划/推进器确定性）、三态处置优先序与证据 schema、端到端管线（假会话）、G3 确定性四项。
+覆盖：事实 Oracle（exact/unanswerable/clarify/session_value + 会话聚合）、任务 Oracle（H3/H4/H5/E-G/五态）、压缩生命周期（有效数/零收益连串/H6.a/H6.b/覆盖不足/证据缺口）、负载生成器（逐轨计划/推进器确定性）、三态处置优先序与证据 schema、结构泄漏正反例（裸信封/内部 id/整包明细 + 阈值可调 + 只增读数）、端到端管线（假会话）、G3 确定性四项。
 
 **三态处置（`classifySample`，优先序冻结）**：`product_fault`（硬零或产品故障信号；**保留判负，不作废**）> `environment_interrupted`（环境信号；登记待重跑）> `insufficient_coverage`（有效压缩不足；留档）> `valid`。**产品故障不被环境信号吞掉**（防幸存者偏差）。
 

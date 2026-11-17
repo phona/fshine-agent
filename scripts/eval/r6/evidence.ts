@@ -16,6 +16,10 @@ import type { CompactionAttempt, TurnObservation, CompactionVerdict } from './co
 import type { TaskTurnFact, TaskView } from './oracle';
 import type { FactFailureCode, FactVerdict, TaskVerdict } from './oracle';
 import type { AccountedUsage, ModelCallRecord } from './accounting';
+import {
+  scanStructureLeak, structureLeakSummary,
+  type StructureLeakReport,
+} from './structure-leak';
 
 export type Wave = 'Wave1' | 'Wave2';
 /**
@@ -127,8 +131,13 @@ export function evidenceDir(root: string, wave: Wave, track: Track, sessionId: s
 }
 
 /** 汇总清单（evidence.json 内容；只陈述事实 + Oracle 结论 + 处置）。 */
-export function buildEvidenceSummary(evidence: SessionEvidence, judgement: SessionJudgement): Record<string, unknown> {
+export function buildEvidenceSummary(
+  evidence: SessionEvidence,
+  judgement: SessionJudgement,
+  structureLeak?: StructureLeakReport,
+): Record<string, unknown> {
   const disposition = classifySample(evidence, judgement);
+  const leak = structureLeak ?? scanStructureLeak({ replies: evidence.replies, toolCalls: evidence.toolCalls });
   return {
     manifest: {
       sessionId: evidence.sessionId, principalId: evidence.principalId, model: evidence.model,
@@ -149,12 +158,15 @@ export function buildEvidenceSummary(evidence: SessionEvidence, judgement: Sessi
     infraSignals: evidence.infraSignals,
     productFaultSignals: evidence.productFaultSignals,
     disposition,
+    // 读数项：判 `structure_leak` 计数与阈值；**不进入 classifySample**（affectsDisposition=false）。
+    structureLeak: structureLeakSummary(leak),
     files: {
       turns: 'turns.jsonl', replies: 'replies.jsonl', compactionEvents: 'compaction-events.jsonl',
       tokenCurve: 'token-curve.jsonl', toolCalls: 'tool-calls.jsonl',
       modelCalls: 'model-calls.jsonl',
       tasksSnapshots: 'tasks-snapshots.jsonl', tasksFinal: 'tasks-final.json',
-      resourceSamples: 'resource-samples.jsonl', manifest: 'manifest.json',
+      resourceSamples: 'resource-samples.jsonl', structureLeak: 'structure-leak.jsonl',
+      manifest: 'manifest.json',
     },
   };
 }
@@ -173,7 +185,8 @@ export function collectEvidence(root: string, evidence: SessionEvidence, judgeme
 } {
   const dir = evidenceDir(root, evidence.wave, evidence.track, evidence.sessionId);
   mkdirSync(dir, { recursive: true });
-  const summary = buildEvidenceSummary(evidence, judgement);
+  const structureLeak = scanStructureLeak({ replies: evidence.replies, toolCalls: evidence.toolCalls });
+  const summary = buildEvidenceSummary(evidence, judgement, structureLeak);
   writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({
     sessionId: evidence.sessionId, principalId: evidence.principalId, model: evidence.model,
     contextWindow: evidence.contextWindow, wave: evidence.wave, track: evidence.track,
@@ -186,6 +199,8 @@ export function collectEvidence(root: string, evidence: SessionEvidence, judgeme
   writeFileSync(path.join(dir, 'token-curve.jsonl'), jsonl(evidence.tokenCurve));
   writeFileSync(path.join(dir, 'model-calls.jsonl'), jsonl(evidence.modelCalls));
   writeFileSync(path.join(dir, 'tool-calls.jsonl'), jsonl(evidence.toolCalls));
+  // 结构泄漏逐条命中（读数项；只增证据，不改 disposition）。
+  writeFileSync(path.join(dir, 'structure-leak.jsonl'), jsonl(structureLeak.hits));
   writeFileSync(path.join(dir, 'tasks-snapshots.jsonl'), jsonl(evidence.taskTurns.map((t) => ({
     turn: t.turn, tasks: t.tasks, reply: t.reply ?? null, cancelCalled: t.cancelCalled ?? false,
   }))));
