@@ -28,7 +28,7 @@ import type {
   ProgressFn,
   ReplyHandler,
 } from '@fshine/contracts';
-import { formatFileReceipt } from '@fshine/contracts';
+import { formatFileAck } from '@fshine/contracts';
 import { MAX_REPLY_BYTES, stripMentionPrefix, truncateReply } from './text';
 import { extractMessageReference } from './quote';
 import {
@@ -188,9 +188,10 @@ interface ReplyDegrade {
  * 消息就是一个气泡，N 个文件必然是 N 条"已收到 X"，和随后指令回合的帧在会话里互相
  * 穿插。修法是**不为文件起气泡**：附件-only 消息连秒回 ack 都不发（"收到,正在处理…"
  * 对一条只暂存不处理的消息是假承诺，而且没有终帧来改写它），收据改由两处承载——
- * ① 带指令的回合首帧（宿主的规则二披露，与这里同一句措辞 formatFileReceipt）；
+ * ① 带指令的回合首帧（宿主的规则二披露，`formatFileReceipt`，带文件名）；
  * ② 只发文件、迟迟没有指令时，本类在窗口到点后补一条，否则用户对着静默的会话
- *    不知道文件到底收没收到。
+ *    不知道文件到底收没收到。这一条只说"收了几份"（`formatFileAck`，不带文件名）：
+ *    文件名由随后的主动追问列，回执再列一遍就是两条几乎一样的清单（2026-11-17）。
  *
  * 通道挂在**最后到达**的那条附件消息上：时间上最接近用户所见，且窗内每条早到的消息
  * 都没有起过流——没有流就不会有转圈的 spinner。
@@ -1044,7 +1045,7 @@ export class WecomBotChannel implements ChannelAdapter {
       pending.frame,
       pending.frame.headers?.req_id ?? '',
       pending.streamId,
-      formatFileReceipt(pending.filenames),
+      formatFileAck(pending.filenames),
       true,
       { chatId: pending.chatId, once: { used: false } },
     );

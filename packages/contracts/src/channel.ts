@@ -48,12 +48,13 @@ export const MAX_QUOTED_TEXT_BYTES = 16_384;
 export const FILE_RECEIPT_NAME_LIMIT = 3;
 
 /**
- * 文件收据文案：**宿主回合首帧与渠道孤儿收据共用同一句**，所以住在这里而不是各写一份。
+ * 文件收据文案。两处出现，用途不同，**不再共用同一句**（2026-11-17）：
  *
- * 为什么必须一个权威位置：同一句"你发了哪些文件"会在两个地方出现——① 带指令的回合
- * 首帧（handler 的规则二披露，告诉用户"这轮我用这些文件"，假设错时用户几秒内能纠正）；
- * ② 只发文件、迟迟没有指令时渠道补的那条（告诉用户"文件我收下了，在等你的指令"）。
- * 两处各写一份措辞，迟早漂移成一桩"同一个事实两种说法"的交互债。
+ *   ① `formatFileReceipt`（带文件名）= 带指令回合的首帧披露：告诉用户"这轮我用这些文件"，
+ *      假设错时用户几秒内能纠正——列名在这里有信息价值，保留。
+ *   ② `formatFileAck`（只报个数）= 只发文件、迟迟没有指令时渠道补的回执：它唯一的职责是
+ *      "文件我收下了"。文件名由随后的主动追问（30s）列，回执再列一遍就是两条几乎相同的
+ *      清单（实测观感是机器人结巴）。追问关闭时用户也知道自己发了几份，不缺信息。
  *
  * 去重按文件名：同名文件（不同路径）在清单里出现两行没有信息量。计数按去重后的个数，
  * 与暂存池的"保留最新 N 个"无关——这里只说用户看见了什么。
@@ -63,6 +64,12 @@ export function formatFileReceipt(filenames: readonly string[]): string {
   const listed = unique.slice(0, FILE_RECEIPT_NAME_LIMIT);
   const rest = unique.length - listed.length;
   return `已收到 ${unique.length} 个文件：${listed.join('、')}${rest > 0 ? ' 等' : ''}`;
+}
+
+/** 附件回执（不带文件名）：只说"收下了几份"，文件名交给随后的主动追问。 */
+export function formatFileAck(filenames: readonly string[]): string {
+  const unique = new Set(filenames);
+  return `已收到 ${unique.size} 个文件`;
 }
 
 export interface IncomingChannelMessage {

@@ -371,6 +371,9 @@ describe('目标 B：30 秒主动追问', () => {
       expect(fx.texts).toHaveLength(1);
       expect(fx.texts[0]).toContain('3 个文件');
       expect(fx.texts[0]).toContain('名册.xlsx');
+      // 不复述"收到 N 个文件"：渠道到点时已发过那条回执（formatFileAck），
+      // 追问只补"是哪几个" + 选项（2026-11-17：两条几乎相同的清单观感像结巴）。
+      expect(fx.texts[0]).not.toContain('收到 3 个文件');
       const options = optionsOf(fx.texts[0]!);
       expect(options.length).toBeGreaterThanOrEqual(2);
       expect(options.length).toBeLessThanOrEqual(4);
