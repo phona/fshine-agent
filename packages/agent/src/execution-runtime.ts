@@ -1066,9 +1066,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     memo.set(memoKey, output);
     // 执行事实入账（2026-11-17 修）：Worker 的 run_js 是**真实执行**，必须进底账——完成判定
     // （judgeReportedTask）只看执行事实，不进账会出现两种假象：①查询成功 + 脚本失败仍判
-    // completed；②只靠脚本完成的任务被判 unexecuted。取消/超时杀掉的运行不写（留给取消路径定性）。
-    if (output.audit.killReason === undefined) {
-      const scriptOk = output.exitCode === 0;
+    // completed；②只靠脚本完成的任务被判 unexecuted。
+    // 宿主超时杀进程组（killReason=timeout）同样是一次真实执行的失败结局（脚本没跑完）：
+    // 超时只杀脚本、Worker 仍有预算并正常汇报，不写失败事实会让「查询成功 + 脚本超时」判
+    // completed（假绿）。abort 不写——取消/宿主中止由取消路径定性，不能把取消说成失败。
+    const killReason = output.audit.killReason;
+    if (killReason !== 'abort') {
+      const scriptOk = killReason === undefined && output.exitCode === 0;
       registry.noteExecution(taskId, {
         requestId: `runjs_${output.audit.runId}`,
         operation: RUN_JS_TOOL,
@@ -1077,11 +1081,17 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         ...(scriptOk
           ? {}
           : {
-              error: {
-                code: 'run_js_failed',
-                message: `run_js 脚本以非零退出码结束（exit=${String(output.exitCode)}）`,
-                retryable: false,
-              },
+              error: killReason === 'timeout'
+                ? {
+                    code: 'run_js_timeout',
+                    message: 'run_js 脚本超时被终止',
+                    retryable: false,
+                  }
+                : {
+                    code: 'run_js_failed',
+                    message: `run_js 脚本以非零退出码结束（exit=${String(output.exitCode)}）`,
+                    retryable: false,
+                  },
             }),
       });
     }
