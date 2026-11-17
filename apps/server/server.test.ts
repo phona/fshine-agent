@@ -220,6 +220,70 @@ describe('server（假渠道 + 假执行客户端 + 假模型）', () => {
     server.close();
   });
 
+  /**
+   * 观测面写失败不得翻转回合结果（r7-faults.ts 登记的 message_done 点）：message_done 落
+   * 在 .then 成功分支，写日志抛错会拒绝已成功回合的 promise → 渠道把成功回复改写成失败
+   * 话术。修复：写失败只降级为一条独立观测事件；回复与成功收口保持原样。
+   */
+  it('message_done 事件写失败：回合仍是成功回复（不改写成失败话术），只降级为观测事件', async () => {
+    const dir = tempDir();
+    const logs: Array<Record<string, unknown>> = [];
+    const client = new FakeClient();
+    const frames: Array<{ streamId: string; content: string; finish: boolean }> = [];
+    const server = await createServer({
+      env: { LLM_MODEL: 'test-model' },
+      config: testConfig(),
+      dbPath: path.join(dir, 'state.db'),
+      createDrivers: async () => ({
+        mainDriver: await driverFor([
+          toolCallAssistant('task_run', { task: '查询 documents 窗口 W202611' }, 'call_main_1'),
+          textAssistant('documents 窗口 W202611 共 3 条。'),
+        ]),
+        workerDriver: await driverFor([
+          toolCallAssistant('execute_operation', {
+            operation: 'dummy.query',
+            args: { '--collection': 'documents', '--window': 'W202611' },
+          }, 'call_worker_1'),
+          textAssistant('已查询 documents W202611：3 条。'),
+        ]),
+      }),
+      createExecutionFace: async () => ({ client, allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
+      logger: (line) => {
+        // 故障注入：message_done 的写抛错（事件存储不可写），其余事件照常记录。
+        if (line['event'] === 'message_done') throw new Error('（测试注入）事件写失败：存储不可写');
+        logs.push(line);
+      },
+    });
+
+    const stub = sdkStub(frames);
+    const channel = new WecomBotChannel({
+      env: { WECOM_BOT_ID: 'bot-id', WECOM_BOT_SECRET: 'bot-secret' },
+      clientFactory: () => stub,
+      platformRoot: dir,
+      deliveryMode: 'live',
+    });
+    await channel.start(server.handler);
+    stub.emit('message.text', textMessageFrame('test-user', '帮我查一下 documents 窗口 W202611 的数据', 'msg-logfail', 'req-logfail'));
+
+    await vi.waitFor(() => {
+      expect(frames.filter((frame) => frame.finish)).toHaveLength(1);
+    });
+    const final = frames.filter((frame) => frame.finish)[0]!;
+    // 回合结果保持原样：用户拿到模型回复，不是渠道兜底失败话术。
+    expect(final.content).toContain('3 条');
+    expect(final.content).not.toBe('处理失败,请稍后再试');
+    // 写失败只降级为一条独立观测事件；message_done 本身没落。
+    const observed = logs.filter((line) => line['event'] === 'message_done_log_write_failed');
+    expect(observed).toHaveLength(1);
+    expect(observed[0]!['principalId']).toBe('wecom:test-user');
+    expect(observed[0]!['sessionId']).toBe('wecom:test-user');
+    expect(observed[0]!['messageId']).toBe('msg-logfail');
+    expect(logs.some((line) => line['event'] === 'message_done')).toBe(false);
+
+    await channel.stop();
+    server.close();
+  });
+
   it('未开通的 principal：确定性拒绝，不建会话、不调模型、不发起执行', async () => {
     const dir = tempDir();
     const logs: Array<Record<string, unknown>> = [];

@@ -879,10 +879,11 @@ async function fault3(): Promise<FaultOutcome> {
         + ` server.ts:549「处理失败不缓存」清缓存）→ 重投整回合重跑 → 重复交付 = 前置可达时的红判据面。`,
       );
       notes.push(
-        '绊线观察（不判红，本脚本常规注入不触发）：回合收口段（server.ts:529-545 message_done 落在 .then 成功分支）'
-        + '的日志写失败不在 deliverTurnFiles 保护面内——实测注入该点抛错会翻转回合结果（首回合抛错、message_done 行已记录），'
-        + '但缓存不清（server.ts:549 的删除只挂源 promise 拒绝分支，不接成功分支抛错）→ 重投重放既有（已拒绝的）回执 promise，'
-        + '无第二份交付。该点在 R7-F3 修复面之外，如实登记待 owner 裁定；证据见本次提交信息。',
+        '已修复（dec-logflip）：回合收口段（server.ts:566-599 message_done 落在 .then 成功分支）的日志写失败'
+        + '不再翻转回合结果——写失败只降级为一条独立观测事件 message_done_log_write_failed，回复照常返回'
+        + '（守卫见 apps/server/server.test.ts「message_done 事件写失败」用例）。修复前实测注入该点抛错会翻转回合结果'
+        + '（首回合抛错、message_done 行已记录），且缓存不清（「处理失败不缓存」只挂源 promise 拒绝分支，不接成功分支抛错）'
+        + '→ 重投重放既有（已拒绝的）回执 promise；修复后成功回合的 promise 不再拒绝，重投按既有 dedup 语义重放成功回执。',
       );
       notes.push(doneLogged
         ? 'message_done 落了（回合按成功收口——与修复后链路一致；修复前此处会缺失并触发重投重跑）。'
