@@ -434,6 +434,13 @@ export interface WecomSimOptions {
   readonly nudgeAfterMs?: number;
   /** 写面开关（runtime.allowWriteOperations）。缺省 false = 只读。 */
   readonly allowWriteOperations?: boolean;
+  /**
+   * 派发模式（runtime.dispatchMode）。缺省 inline；background 才有受理即回执、
+   * 后台完成主动投递与 task_run 短等待窗口（G 组任务面）。
+   */
+  readonly dispatchMode?: 'inline' | 'background';
+  /** 短等待窗口（runtime.taskRunWaitMs）。缺省产品值 1500ms；1 = 确定性超窗。 */
+  readonly taskRunWaitMs?: number;
   /** 临时目录前缀（定位用）。 */
   readonly label?: string;
 }
@@ -450,6 +457,8 @@ export interface WecomSimFixture {
   readonly book: SimScriptBook;
   /** dummy 执行层状态根（audit.jsonl 所在；写面零写入的机械读数）。 */
   readonly execStateDir: string;
+  /** 宿主底账（state.db；只读打开用于任务状态机械读数）。 */
+  readonly dbPath: string;
   /** 单聊会话（conversationId；群聊另行传入）。 */
   readonly conversationId: string;
   /** 发一条文字入站帧（异步派发；返回 messageId 供 doneOf 精确取该回合终态）。 */
@@ -527,6 +536,8 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
     runtime: {
       attachmentNudgeAfterMs: options.nudgeAfterMs ?? NUDGE_AFTER_MS,
       ...(options.allowWriteOperations === true ? { allowWriteOperations: true } : {}),
+      ...(options.dispatchMode === undefined ? {} : { dispatchMode: options.dispatchMode }),
+      ...(options.taskRunWaitMs === undefined ? {} : { taskRunWaitMs: options.taskRunWaitMs }),
     },
   };
 
@@ -586,6 +597,7 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
     logs,
     book,
     execStateDir,
+    dbPath,
     conversationId,
     sendText(text, frameOptions = {}) {
       frameSeq += 1;
