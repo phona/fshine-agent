@@ -141,11 +141,11 @@ export interface TaskBudgetConfig {
  * 与其它部署段的判据刻意不同：非法值 fail-fast（不按「非法 = 未配置」回落）、
  * 未知键拒绝——资源限额静默失效比缺省危险，拼错的旋钮不允许被默认值吞掉。
  * 缺省值不住加载层：由 `packages/agent/src/resource-policy.ts` 的
- * `resolveRuntimeConfig` 补齐（单并发 / 排队容量 16 / 无任务级预算 /
+ * `resolveRuntimeConfig` 补齐（前台并发 4 / 排队容量 16 / 无任务级预算 /
  * 回合时限沿用执行侧现缺省）。
  */
 export interface RuntimeConfig {
-  /** 前台（Main 交互回合）并发准入上限。缺省 1。 */
+  /** 前台（Main 交互回合）并发准入上限。缺省 4；显式 1 仍为单并发。 */
   mainConcurrency?: number;
   /** 后台（委派 Worker / 后台任务）并发准入上限；0 = 关闭后台准入（确定性拒绝）。缺省 1。 */
   backgroundConcurrency?: number;

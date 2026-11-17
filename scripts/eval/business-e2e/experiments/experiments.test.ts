@@ -145,8 +145,8 @@ describe('① 用例展开与硬上限（缺一不跑）', () => {
   });
 });
 
-describe('② 工具面门控核实（缺口 1 taskRunner 同源门控）', () => {
-  it('withTaskRunner 注入 runner → 四工具注册；无 runner → 仅 run_task', async () => {
+describe('② 工具面门控核实（缺口 1：只读查询始终注册，治理工具随 taskRunner）', () => {
+  it('withTaskRunner 注入 runner → 四工具注册；无 runner → 只读查询注册、治理工具不注册', async () => {
     const root = freshRoot();
     const steps = [async (e: Exec) => { await e('run_task', { task: '核对 alpha W1 记录' }); }];
     const exec = executorWith(steps);
@@ -160,7 +160,8 @@ describe('② 工具面门控核实（缺口 1 taskRunner 同源门控）', () =
 
     const bare: ExpCase = { ...isolated, id: 'T01bare', withTaskRunner: false };
     const without = await exec(itemFor(bare), bare, path.join(root, 'b'));
-    expect(without.perTurnMainTools[0], 'bizprobe/ask inline 路径缺省无 runner → 四工具不注册').toEqual(['run_task']);
+    expect(without.perTurnMainTools[0], 'bizprobe/ask inline 路径无 runner → 只读查询仍注册、治理工具不注册')
+      .toEqual(['run_task', 'task_status', 'task_result']);
   });
 
   /**
@@ -174,11 +175,12 @@ describe('② 工具面门控核实（缺口 1 taskRunner 同源门控）', () =
     const skillsMain = path.join(FIXTURE_ROOT, '.agents', 'skills-main'); // 夹具 catalog（两技能）
     const skillsNone = path.join(FIXTURE_ROOT, '.agents', 'skills-none'); // 故意不存在 = 空索引
     const taskTools = ['task_status', 'task_result', 'task_cancel', 'task_resume'];
+    const queryTools = ['task_status', 'task_result'];
     const cells: ReadonlyArray<{ label: string; withTaskRunner: boolean; mainSkillsDir: string; expected: string[]; catalog: boolean }> = [
       { label: 'runner＋catalog', withTaskRunner: true, mainSkillsDir: skillsMain, expected: ['run_task', ...taskTools, 'read_skill'], catalog: true },
       { label: 'runner＋空目录', withTaskRunner: true, mainSkillsDir: skillsNone, expected: ['run_task', ...taskTools], catalog: false },
-      { label: '无 runner＋catalog', withTaskRunner: false, mainSkillsDir: skillsMain, expected: ['run_task', 'read_skill'], catalog: true },
-      { label: '无 runner＋空目录', withTaskRunner: false, mainSkillsDir: skillsNone, expected: ['run_task'], catalog: false },
+      { label: '无 runner＋catalog', withTaskRunner: false, mainSkillsDir: skillsMain, expected: ['run_task', ...queryTools, 'read_skill'], catalog: true },
+      { label: '无 runner＋空目录', withTaskRunner: false, mainSkillsDir: skillsNone, expected: ['run_task', ...queryTools], catalog: false },
     ];
     for (const cell of cells) {
       const def: ExpCase = { ...T01, id: `gate-${cell.label}`, withTaskRunner: cell.withTaskRunner, mainSkillsDir: cell.mainSkillsDir };

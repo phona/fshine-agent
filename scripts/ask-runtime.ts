@@ -226,7 +226,7 @@ export interface SessionAssemblyInput {
   mainSkillsDir?: string;
   /** 预装载 Worker 技能（server 启动时装载一次）；缺省现装。 */
   workerSkills?: readonly WorkerSkill[];
-  /** P5：runtime 段（资源强制单一配置入口）；缺省 = 现行为缺省（单并发/无队列/无任务级预算）。 */
+  /** P5：runtime 段（资源强制单一配置入口）；缺省 = 现行为缺省（前台并发 4/排队 16/无任务级预算）。 */
   runtime?: RuntimeConfig;
   /** P5：进程级共享策略（server 跨会话复用）；缺省由本核心按 runtime 建。 */
   policy?: ResourcePolicy;

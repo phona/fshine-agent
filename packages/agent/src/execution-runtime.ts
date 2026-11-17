@@ -6,8 +6,9 @@
  * import-boundary.test.ts 静态检查）。执行层客户端由装配方注入。
  *
  * 每回合链路：
- *   1) 用户文本进 Main 转录，mainDriver 跑一个回合；Main 工具面 = run_task（委派）+（注入 runner
- *      时）task_status/task_result/task_cancel/task_resume（查询/取消/接续，缺口 1）+（注入 Main
+ *   1) 用户文本进 Main 转录，mainDriver 跑一个回合；Main 工具面 = run_task（委派）+ 始终可见的
+ *      task_status/task_result（只读查询，缺口 1）+（注入 runner 时）task_cancel/task_resume
+ *      （取消/接续，缺口 1）+（注入 Main
  *      技能登记表时）read_skill（缺口 2 臂 B，按需读业务技能正文）+（注入 runJsExecutor 时）
  *      run_js（CAP-01 S1：受限代码执行，产物登记进文件区、回合末随 TurnResult.files 交投递面）；
  *   2) run_task 触发委派：宿主生成 taskId（绑定 principal/session）→ Worker 回合
@@ -116,8 +117,10 @@ export const RUN_TASK_TOOL_SCHEMA_WITH_INPUT_FILES: Record<string, unknown> = {
  * 对话面任务工具（缺口 1）：把既有 registry/runner 能力以服务端身份授权接到 Main 工具面。
  * 统一纪律：**参数量只收任务引用（`#编号` 或 taskId），绝不收 principalId/sessionId**——scope 由宿主
  * 在 send() 闭包用运行时 principal/session 构造，编号解析在 scope 内做（越权=找不到，不泄露存在性）。
- * 四个工具都随 `options.taskRunner` 一起上/下（background 模式天然有 runner；inline/ask 单发不上面，
- * 缺省零变化）；cancel/resume 复用 runner 既有生命周期，不在此新建治理。
+ * 门控按能力拆开：**只读查询 task_status/task_result 只依赖 registry/scope，始终上 Main 工具面**
+ * （无 runner 的 inline/ask 也能查已受理任务）；**task_cancel/task_resume 需要 runner 生命周期，
+ * 只在注入 `options.taskRunner` 时上/下**（background 模式天然有 runner）。Worker 工具面不含这四个
+ * 工具（Worker 不持有宿主任务治理面）。
  */
 export const TASK_STATUS_TOOL = 'task_status';
 export const TASK_STATUS_TOOL_DESCRIPTION =
@@ -1430,7 +1433,11 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         tools: [
           // CAP-01 S2：run_task 的 schema 是否带 inputFiles 取决于交办复制面注入（缺省零变化）。
           runTaskTool(options.taskInputCopier !== undefined),
-          ...(taskRunner === undefined ? [] : [taskStatusTool(), taskResultTool(), taskCancelTool(), taskResumeTool()]),
+          // 只读查询只依赖 registry/scope——始终可见（无 runner 的 inline/ask 也能查任务）。
+          taskStatusTool(),
+          taskResultTool(),
+          // 取消/接续需要 runner 生命周期：无 runner 不上面（fail-closed）。
+          ...(taskRunner === undefined ? [] : [taskCancelTool(), taskResumeTool()]),
           ...(options.mainSkillRegistry === undefined ? [] : [readSkillTool()]),
           // CAP-01 S1：run_js 只在装配方注入执行器时上工具面（缺省零变化，fail-closed）。
           ...(options.runJsExecutor === undefined ? [] : [runJsTool()]),
@@ -1463,10 +1470,11 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
             if (typeof taskId === 'string' && !taskIds.includes(taskId)) taskIds.push(taskId);
             return answer;
           }
-          // 任务查询/治理工具：与工具面同源门控（无 runner 时不暴露、也不受理），fail-closed。
+          // 任务只读查询：不依赖 runner，始终受理（scope 仍取宿主闭包，越权=找不到）。
+          if (tool === TASK_STATUS_TOOL) return taskStatus(args);
+          if (tool === TASK_RESULT_TOOL) return taskResult(args);
+          // 任务治理工具：与工具面同源门控（无 runner 时不暴露、也不受理），fail-closed。
           if (taskRunner !== undefined) {
-            if (tool === TASK_STATUS_TOOL) return taskStatus(args);
-            if (tool === TASK_RESULT_TOOL) return taskResult(args);
             if (tool === TASK_CANCEL_TOOL) return taskCancel(args, taskRunner);
             if (tool === TASK_RESUME_TOOL) return taskResume(args, taskRunner);
           }
