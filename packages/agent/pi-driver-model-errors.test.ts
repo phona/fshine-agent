@@ -17,7 +17,7 @@ import { shouldNudgeFinalReply } from './src/pi-driver';
 /**
  * 空回复的第二种形状（今天实测日志）：`stopReason=stop`、content 只有 thinking 块、
  * 没有 text 块。这不是供应商错误，也不是窗口爆了——是模型只输出了思考过程。
- * 判据必须只认这个形状：有正文不催、toolResult 终结不催、error/aborted 不催
+ * 判据必须只认这个形状：有正文不催、toolResult/用户消息收尾**要催**（2026-11-17 扩条件）、error/aborted 不催
  * （那两类不是"模型拒绝收尾"，催了只会白烧一次调用）。
  */
 describe('T7 只输出思考没有正文时的收尾催问', () => {

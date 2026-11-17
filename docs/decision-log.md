@@ -3833,12 +3833,14 @@ PR #62（`CAP-01 收口：文件处理与交付能力 + 并发/保留期/部署�
 | 1 | 新增文档写入开发者主目录绝对路径（blocking） | 文档中的开发者主目录绝对路径统一改为 `~`；验收聚合脚本的 TMPDIR 缺省改用 `os.tmpdir()` | `d2efdb1` 已合入 |
 | 2 | `run_js` 取消信号未贯穿；预先取消的信号不会终止脚本 | main/worker 两处 `runJs` 把 Pi 回合 `AbortSignal` 传到执行器；调用前已 aborted → 直接 `killReason=abort`（不建目录、不物化、不写 run.cjs、不 spawn、零产物） | `b58a1ce`、`1e98382` 已合入 |
 | 3 | Worker 的 `run_js` 未进执行事实（查询成功 + 脚本失败仍判 completed）；任务产物复用键只看 sha256（同字节不同名丢文件名） | Worker `run_js` 按退出码 `noteExecution`；复用键改为 `(scope, taskId, sha256, name)` | `7458c76` 已合入 |
-| 4 | 脚本超时仍不写失败执行事实（查询成功 + 脚本超时假绿）；`fileParams` 未接入默认服务装配 | 超时 `killReason=timeout` 写 `run_js_timeout` 失败事实（`abort` 仍不写）；`contextProfiles.*.fileParams` 解析/校验并透传到 `taskExecutionBridge`，新增 `createServer` 端到端用例 | `fb3bb4b`、`af01a20` **分支待合**（`arch/fix-timeoutfact`、`arch/fix-fileparamswire`，未合入 `23ae585`） |
+| 4 | 脚本超时仍不写失败执行事实（查询成功 + 脚本超时假绿）；`fileParams` 未接入默认服务装配 | 超时 `killReason=timeout` 写 `run_js_timeout` 失败事实（`abort` 仍不写）；`contextProfiles.*.fileParams` 解析/校验并透传到 `taskExecutionBridge`，新增 `createServer` 端到端用例 | `fb3bb4b`、`af01a20` 已合入 `9d98b70`（复核员对 `fb3bb4b` 曾判「假修」，主会话用反向绊线复核：撤掉修复 → `expected 'completed' to be 'failed'` 立即红，判定为复核员误判） |
+| 5 | eval-real 评论截尾（E01–E05 不可见）；eval-real 出现「通过转失败」（E08 `FAIL_STATE_INCONSISTENCY`） | 评论改由 `summary.json` 生成完整逐样本表（轨 `arch/q-evalreport`）；「通过转失败」需在当前 head 上逐例复验，不接受「模型波动」解释 | **未关闭**（`arch/q-evalreport` 未提交；当前 head 逐例复验待跑） |
 
 ### 3. 未覆盖与已知漂移
 
-- **Codex 第 4 批未合入**：`fb3bb4b`、`af01a20` 只在各自分支；截至 `23ae585`，`packages/agent/src/execution-runtime.ts:1070` 仍是「`killReason === undefined` 才写执行事实」的旧条件，`apps/server/server.ts:293-296` 的桥装配仍未传 `fileParams`。因此「查询成功 + 脚本超时」在 integration 上仍可能被判 completed；默认 server 的附件单文件参数仍未接线。PR #62 仍 OPEN，未做修复后的复审。
-- **启动自动清扫不在本轮**：integration 未把 `run-dir-cleanup` 接到 server/ask 启动路径（`scripts/cleanup-runs.test.ts:48-66` 守卫）；分支 `fcd949a`（`runtime.fileRetentionSweepOnStart`，缺省关）未合入，不属于本裁定。
+- **Codex 第 4 批已合入**：`fb3bb4b`（超时写失败执行事实）与 `af01a20`（`fileParams` 接线）均在 `9d98b70`。
+- **Codex 第 5 轮未关闭**：① `eval-real` 评论仍截尾（E01–E05 不可见）——修复轨 `arch/q-evalreport` 未提交；② `eval-real` 出现「通过转失败」（run `44040983108` 绑 `c33b927`，E08 trial-3 `FAIL_STATE_INCONSISTENCY`，同用例前一 run 为 PASS），需在当前 head 的逐例复验里核对，不能以「模型波动」结案。
+- **启动自动清扫已合入（缺省关）**：`fcd949a`（`runtime.fileRetentionSweepOnStart`）在 `9d98b70` 内，缺省 `false` = 零行为变化。
 - **历史条目/注释漂移（只登记，不改历史条目）**：
   - `docs/product/cap01-record.md:90` 仍写「新口径 3/5」，与同节 `:86-88` 及 §9 `:105` 的 2/5 不一致；按 2/5 裁定，该句是早期读数残留。
   - `docs/product/cap01-record.md:137` 的「判定层仍无执行器」是 §11 当时状态；§12 的 `b250d3f` 已补显式执行器。
@@ -3852,7 +3854,7 @@ PR #62（`CAP-01 收口：文件处理与交付能力 + 并发/保留期/部署�
 
 **指针**：`docs/product/cap01-record.md` §8（S3 口径）、§9（收口读数）、§10（R6 重跑）、§11（owner 裁定）、§12/§12.1（上线前补漏）；`docs/product/business-coverage.md` §八（盲区）；`packages/agent/src/resource-policy.ts`（保留期/并发缺省）、`packages/agent/src/run-dir-cleanup.ts` 与 `scripts/cleanup-runs.ts`（清理执行器）、`packages/agent/src/pi-driver.ts`（催问）、`apps/server/channel-mode.ts`（档位）、`packages/agent/src/run-js-executor.ts`/`run-js-layout.ts`（软链）、`packages/agent/src/task-file-bridge.ts`（fileParams）、`packages/agent/src/execution-runtime.ts`/`task-registry.ts`（任务 scope）；提交 `844fb3c`、`267cfd0`、`7806428`、`b250d3f`、`ce08070`、`bcdf316`、`4ba05c6`、`4dc42d5`、`6181985`、`1d0bc3b`、`85a3b5b`、`f25dc49`、`fab9e86`、`23ae585`、`d2efdb1`、`b58a1ce`、`1e98382`、`7458c76`；待合 `fb3bb4b`、`af01a20`。
 
-**状态：主面已裁定并合入 integration @ `23ae585`；Codex 第 4 批两项修复在分支待合（`fb3bb4b` / `af01a20`），PR #62 仍 OPEN。**
+**状态：CAP-01 主面与两批补漏、Codex 第 1–4 轮修复均已合入 integration @ `9d98b70`；Codex 第 5 轮（eval-real 完整逐样本表 + E08 通过转失败复验）未关闭，PR #62 仍 OPEN。**
 
 ---
 
