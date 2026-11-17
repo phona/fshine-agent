@@ -3850,6 +3850,15 @@ Pi 1.5.2 迁移 U3（恢复/重试后同一逻辑写操作被重复执行）以*
 - **P2-6（eval 没量闸门决策）**：原 before `delivered=true` 硬编码、after 取 executor.status，闸门改 allow-all 仍绿。正解：before 走 **disabled 闸**（enabled=false = 机制前 allow-all）、after 走 **enabled 闸**（enabled=true + collect 报告），两臂 delivered/reason 均从 `applyRecalcDeliveryGate` 结果取；evidenceDir 的 `readings.json` 留 delivered/reason。allow-all 绊线：after 闸改 enabled=false → 真引擎 eval `pass=false`、after delivered=true、测试 2 failed。真引擎读数：`before delivered=true` / `after engine=soffice 26.8.3 cached=999 computed=5 verdict=fail delivered=false reason=report_fail`。
 状态：**Codex 6 finding 全部按最小可信边界/口径实修并各自通过红→绿→绊线；受影响测试集 5 文件 57 例全绿；待最终独立复核**。
 
+ **投递闸判定基础纠偏 + 四轮独立复审（2026-11-18，owner 裁定「按最初职责边界」）**：
+ - **判定基础反转（根因收敛）**：原投递门试图「扫描任意 xlsx 内容猜它含不含公式」，exceljs 的 CellValue 形态空间开放（shared/array/falsy/前导字节…），连审八轮每轮补一种形态=打地鼠。owner 纠偏回最初裁定——执行层交付无公式数据、公式工程只归 Main 的 `recalc_xlsx`。正解：投递门**完全报告驱动、不解析任何 xlsx 内容**：有 name+sha256 双匹配的实算报告按 pass/fail 判定，**无报告放行**（执行层数据的边界内信任）；builder 自检（认不出公式形态就拒盖章）归执行器内部 `scanWorkbookFormulas`。按内容扫描的函数与过时用例删除（本步净删约 190 行）。此后四轮独立复审再无「特殊 xlsx 形态绕过」类发现——打地鼠已停。
+ - **报告生命周期收敛（Codex R9/R10）**：重算失败（timeout/engine_failed/too_large/sheet 不存/corrupt/unsupported_formula）也落 fail 报告，门才能拦住已排队文件；同 sha 多份报告按 `createdAt` 取最新，防旧 pass 覆盖新 fail；金额容差加「分位取整须相等」，防 1e8 量级 0.004 vs 0.006 吞掉一分差。
+ - **资源安全（Codex R11 + 四轮 subagent）**：recalc 调用前预检 `taskBudget.exhausted()`，防同回合无限重算绕过预算；解压上限从「信任 CD 声明尺寸」（R6 声明尺寸/R11 前导字节/R12 CD 伪造，同族第 3 例不收敛）改为**结构性修法**——JSZip `loadAsync` + `entry.nodeStream` 实际流式解压计数，累计 >128MB 立即 destroy 中断，不依赖任何可伪造元数据（jszip 3.10.2 转正式依赖）。四轮复审实测：400MB bomb、CD 声明伪造 512、堆上限 160MB 下 451ms 被拒、峰值堆 21.8MB。
+ - **身份绑定（R13）**：投递门从 name+sha 双绑定改为**只按 sha256**——name 是可变展示字段（run_js 拷贝/改名会变），双绑定让已知 fail 报告被改文件名绕过；eval 补第三臂 `after_renamed_still_blocked`（真 soffice 三臂 pass=true）。
+ - **四轮独立复审（仿 `.github/prompts/pr-review.md`，全新上下文逐轮带 prior findings）**：第 1–3 轮挖出并复现上述 blocking/major/minor，第 4 轮确认全部修复成立。终态 HEAD `f718cfd`：typecheck=0、全量 1712 例绿、流式解压/改名/eval 三臂正反向绊线齐全、真实 soffice 26.8.3 eval pass=true。
+ - **已登记残余（owner 裁定不再修，避免把内容扫描请回来）**：报告绑定 recalc **输入字节的精确 sha**；待投递文件若在宿主内被「无害重编码」（exceljs load→write、LO 读写、改压缩级别/时间戳，单元格缓存值不变但 zip 字节 sha 变），sha 失配 → `no_report` 放行。四轮复审第 4 轮复现（src sha `3b195710…` → 重编码 `784d26c6…`，缓存 999 保留，同份 fail 报告判定 `deliver:true`）。该残余属「报告绑定键与投递对象可脱钩」族（与改名绕过同族，输入空间无限）；任何修法（内容指纹/逻辑内容哈希）都会把已删除的「解析任意 xlsx 内容」重新引入宿主、重开打地鼠，与 owner 职责边界裁定冲突。按边界接受：重编码后的字节视为执行层新产物、无报告放行，如实登记为已知限制。若未来要收口，须由 owner 新裁定「身份随文件而非字节」（报告绑宿主 fileId），不在本切片自主推进。
+ - 状态：**实现与四轮独立复审完成；带一条已登记残余；未合入/未推送（由 owner 决定）**。
+
 ---
 
 ## 维护规则
