@@ -34,7 +34,6 @@ import type {
   OutgoingFileReply,
   ReplyHandler,
 } from '@fshine/contracts';
-import type { TurnDriver } from '../../packages/agent/src/driver-contract';
 import { applyExecutorLabel, loadAgentProfile } from '../../packages/agent/src/agent-profile';
 import {
   createFileStore,

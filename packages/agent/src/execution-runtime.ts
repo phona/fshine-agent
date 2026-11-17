@@ -71,7 +71,7 @@ import {
   type RejectionReason,
   type ResourcePolicy,
 } from './resource-policy';
-import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor, TaskRunner } from './task-runner';
+import type { TaskExecutionOutcome, TaskExecutor, TaskRunner } from './task-runner';
 
 /** Main 委派工具名（实例名可经部署声明替换的演进留在后续切片；当前用中性名）。 */
 export const TASK_RUN_TOOL = 'task_run';

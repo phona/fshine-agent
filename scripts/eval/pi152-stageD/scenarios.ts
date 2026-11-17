@@ -84,9 +84,6 @@ export const A_TURNS: readonly StageTurn[] = [
   },
 ];
 
-// A 的重启点：带 restartAfter 的回合结束之后（下一个回合开始前）。
-export const A_RESTART_BEFORE_TURN = A_TURNS.length;
-
 /** B：业务任务——一句话多个任务、工具委派、任务查询、取消、结果找回、同回合回复归档。 */
 export const B_TURNS: readonly StageTurn[] = [
   { text: '帮我核对 alpha 集合W1 的记录，同时核对 beta 集合 W1 的记录。两件事都要办。', label: 'multi-task' },
