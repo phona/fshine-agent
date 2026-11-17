@@ -58,7 +58,11 @@ interface CliArgs {
   cases: string[];
   trial?: number;
   trials: number;
-  /** 并发跑的 trial 数（缺省 5；每个 trial 自带 state/db/config 目录，互不干扰）。 */
+  /**
+   * 并发跑的 trial 数（缺省 1 = 串行）。
+   * **注意**：并发必须先隔离平台 root（每个 trial 一份 dummy-platform 副本），否则多个 trial
+   * 共用 fixture 的 tmp/attachments 会互相干扰——2026-11-17 CI 实测并发 4 时 13/60 通过。
+   */
   concurrency: number;
   outDir?: string;
   suite?: string;
@@ -67,7 +71,7 @@ interface CliArgs {
 }
 
 function parseArgs(argv: readonly string[]): CliArgs | { usageError: string } {
-  const args: CliArgs = { cases: [], trials: 1, concurrency: 5, judgeSelftest: false };
+  const args: CliArgs = { cases: [], trials: 1, concurrency: 1, judgeSelftest: false };
   const readValue = (index: number, flag: string): string | { error: string } => {
     const value = argv[index + 1];
     if (value === undefined || value.startsWith('--')) return { error: `${flag} 需要一个值` };
