@@ -146,6 +146,8 @@ async function sessionFor(
     policy: stack.policy,
     dispatchMode: 'background',
     taskRunner: stack.runner,
+    // B 切片：钉 0 窗口（本套件测受理上界/背压的机械读数；窗口行为由专测覆盖）。
+    taskRunWaitMs: 0,
   });
 }
 
@@ -163,8 +165,11 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
     expect(receipts).toHaveLength(3);
     const rows = receipts.map(receiptOf);
     expect(rows.every((receipt) => receipt.accepted === true)).toBe(true);
-    expect(rows.every((receipt) => receipt.status === 'queued')).toBe(true);
+    // B 切片：status = 受理后实时机械事实（首个已被认领 running，其余 2 个 queued 排队）；
+    // 受理仍是异步语义（任务留后台），话术去编号（不含 #）。
+    expect(rows.map((receipt) => receipt.status)).toEqual(['running', 'queued', 'queued']);
     expect(rows.every((receipt) => receipt.notice?.includes('已受理'))).toBe(true);
+    expect(rows.every((receipt) => !(receipt.notice ?? '').includes('#'))).toBe(true);
     // 1 个进入执行（唯一并发位），其余 2 个 = queueCapacity 个排队位。
     expect(stack.executor.started).toHaveLength(1);
     expect(queuedRows(stack)).toBe(2);

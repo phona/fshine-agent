@@ -81,6 +81,10 @@ llm:
 #   # 新消息/回合时,发一句业务化选项的追问并把同一份选项作为系统注记注入下一回合。
 #   # 同一会话冷却 10 分钟;非 live 投递只记 suppressed,不冒充 sent。
 #   attachmentNudgeAfterMs: 30000
+#   # task_run 受理后的短等待窗口(缺省 1500ms;0=不等直接后台):窗口内完成 → 结果同回合
+#   # 回复(不打受理回执、不主动投递);超窗 → 机械事实受理回执(不含工单编号),任务留后台,
+#   # 完成后结果主动发回原会话(live 送达;非 live 只记 suppressed)。
+#   taskRunWaitMs: 1500
 #   # taskBudget: { ms: 600000, calls: 50 }  # 任务级共享预算(ms/calls 必填;tokens 可选)
 
 # ---- 任务底账(可选):SQLite 路径;相对路径按进程 cwd 解析 ----

@@ -64,6 +64,7 @@ import {
 } from '../../scripts/ask-runtime';
 import { createAttachmentFactQueue, createScopedNoteQueue } from './attachment-facts';
 import { AttachmentNudge, type NudgeClock } from './attachment-nudge';
+import { deliverTaskResult } from './task-completion-delivery';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -241,7 +242,22 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   let runner: TaskRunner | undefined;
   let outbox: NotificationOutbox | undefined;
   let notificationAttachment: ReturnType<typeof attachNotificationOutbox> | undefined;
+  /**
+   * B 切片（工单回执收敛）：本会话已在同一回合拿到结果的任务（快活）——完成投递对其抑制
+   * （结果已由模型在本回合转述，不重复发两遍）。条目一次性消费（完成回调核销后即删），
+   * 不跨进程（重启后只有未完成的慢活会完成回调，快活不存在跨重启完成）。
+   */
+  const relayedInTurnTasks = new Map<string, Set<string>>();
+  const markRelayedInTurn = (sessionKey: string, taskId: string): void => {
+    let set = relayedInTurnTasks.get(sessionKey);
+    if (set === undefined) {
+      set = new Set();
+      relayedInTurnTasks.set(sessionKey, set);
+    }
+    set.add(taskId);
+  };
   if (dispatchMode === 'background') {
+    const completionDelivery = deps.fileDelivery;
     runner = (await createBackgroundDispatch({
       env: deps.env,
       profile,
@@ -255,6 +271,34 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       ...(deps.createDrivers !== undefined ? { createDrivers: deps.createDrivers } : {}),
       ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
       ...(deps.taskExecutor !== undefined ? { taskExecutor: deps.taskExecutor } : {}),
+      // B 切片：后台任务确认完成 → 结果主动发回原会话（走既有主动投递面 fileDelivery.sendText）。
+      // 回调经会话链串行（快活抑制判定须在受理回合结束后做）；投递失败/抑制只记事件，不改任务事实。
+      onTaskCompleted: (completion) => {
+        const sessionKey = `${completion.principalId}\u0000${completion.sessionId}`;
+        enqueueSessionTurn(sessionKey, async () => {
+          // 快活（结果已在本回合交给模型）：抑制，结果不重复发两遍。
+          if (relayedInTurnTasks.get(sessionKey)?.delete(completion.taskId) === true) {
+            log({
+              event: 'task_result_delivery_suppressed',
+              principalId: completion.principalId,
+              sessionId: completion.sessionId,
+              taskId: completion.taskId,
+              deliveryMode: completionDelivery?.deliveryMode ?? 'unavailable',
+              reason: 'relayed_in_turn',
+            });
+            return;
+          }
+          await deliverTaskResult({
+            taskId: completion.taskId,
+            principalId: completion.principalId,
+            sessionId: completion.sessionId,
+            resultText: completion.resultText,
+          }, {
+            ...(completionDelivery === undefined ? {} : { delivery: completionDelivery }),
+            log,
+          });
+        });
+      },
     })).runner;
     if (deps.notificationSink !== undefined) {
       outbox = createNotificationOutbox({ dbPath: deps.dbPath, sink: deps.notificationSink });
@@ -301,6 +345,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           ...(mainSkills.registry === undefined ? {} : { mainSkillRegistry: mainSkills.registry }),
           policy,
           dispatchMode,
+          // runtime 段随装配核心进会话（单一配置源）：taskRunWaitMs（B 切片短等待窗口）与
+          // 回合时限等旋钮由 resolveRuntimeConfig 在核心内统一解析，不再各自单传。
+          ...(deps.config.runtime === undefined ? {} : { runtime: deps.config.runtime }),
           ...(runner === undefined ? {} : { taskRunner: runner }),
           ...(deps.createDrivers !== undefined ? { createDrivers: deps.createDrivers } : {}),
           ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
@@ -641,6 +688,14 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       await drainNotifications();
       const session = await sessionFor(principalId, sessionId);
       const turn = await session.send(message.text);
+      // B 切片：本回合已把结果交给模型的任务（快活，仅 background 有完成投递）——完成投递
+      // 对其抑制（一次性核销）。完成回调排在会话链上，读本集时本回合已结束（受理回合内
+      // 不产生重复投递）；inline 会话没有完成回调，不登记（抑制集合不积累无用条目）。
+      if (dispatchMode === 'background') {
+        for (const relayedTaskId of turn.relayedTaskIds ?? []) {
+          markRelayedInTurn(sessionKey, relayedTaskId);
+        }
+      }
       // CAP-01 S1 交付 B（v8 §7）：handler 只返回 text；文件经装配注入的端口在回合末主动投递。
       // 投递失败/无端口时以话术如实纠正正文，但不判回合失败（文件未送达 ≠ 回报失败）。
       let reply = turn.reply;
@@ -691,6 +746,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             sessionId,
             messageId: message.messageId,
             taskIds: [...result.turn.taskIds],
+            // B 切片（可观测）：本回合经 execute_operation 发起的执行次数（执行面扩散观测）。
+            operations: result.turn.operations,
             executions: result.turn.executions.map((execution) => ({
               requestId: execution.requestId,
               operation: execution.operation,
@@ -734,6 +791,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       attachmentNudge.close();
       attachmentFacts.clear();
       systemNotes.clear();
+      relayedInTurnTasks.clear();
       sessions.clear();
       outbox?.close();
       taskRegistry.close();

@@ -163,6 +163,11 @@ export interface RuntimeConfig {
   mainTurnMs?: number;
   /** Worker 回合墙钟上限（ms）。缺省 180000（与执行侧现行缺省一致）。 */
   workerTurnMs?: number;
+  /**
+   * 单回合内允许发起的执行 operation 上限（同一回合全部委派合计计数；缺省 5）。
+   * 资源边界，不是计划门：超限在**发起前**确定性拒绝并如实告知，不判断业务。
+   */
+  maxOperationsPerTurn?: number;
   /** 委派深度上限；0 = 不允许委派。缺省 1（Main → Worker 一层）。 */
   maxDelegationDepth?: number;
   /** 任务级共享预算；缺省未配置 = 无任务级预算（现行为）。 */
@@ -196,6 +201,13 @@ export interface RuntimeConfig {
    * 操作授权、确认句柄绑定、有效期、防重放与业务校验仍归执行层——宿主不因此获得裁决权。
    */
   allowWriteOperations?: boolean;
+  /**
+   * task_run 受理后的短等待窗口（ms；2026-11-18 工单回执收敛切片）。缺省 1500；0 = 不等
+   * 直接后台。窗口内执行端确认完成 → 结果同回合交给模型（与 inline 同形状）；超窗 →
+   * 工具结果返回机械事实（已受理、在后台办理中，不含工单编号），任务留后台推进，完成后
+   * 由宿主主动投递面把结果发回原会话。
+   */
+  taskRunWaitMs?: number;
   /**
    * 纯附件登记后、用户迟迟没有给指令时的主动追问延迟（ms；2026-11-17 附件追问切片）。
    * 缺省 30000（30 秒）；0 = 关闭（零行为变化）。同一会话冷却 10 分钟。

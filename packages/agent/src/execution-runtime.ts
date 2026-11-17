@@ -68,6 +68,7 @@ import { READ_SKILL_TOOL, type SkillRegistry } from './skills';
 import { stripServerPaths } from './server-paths';
 import { createTaskRegistry, deriveTaskName, DispatchConflictError, TaskTransitionError, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
 import {
+  DEFAULT_RUNTIME_CONFIG,
   taskFailureReasonFor,
   type Permit,
   type RejectionReason,
@@ -132,12 +133,12 @@ export const TASK_RUN_TOOL_SCHEMA_WITH_INPUT_FILES: Record<string, unknown> = {
  */
 export const TASK_STATUS_TOOL = 'task_status';
 export const TASK_STATUS_TOOL_DESCRIPTION =
-  '查询本会话已有任务的状态：ref 给受理回执里的 #编号（如 "#3"）查单个任务，留空列本会话全部任务。'
+  '查询本会话已有任务的状态：ref 给任务列表里的 #编号（如 "#3"）查单个任务，留空列本会话全部任务。'
   + '用户问「那个任务怎么样了 / 在等什么」时用它，不要为此新交办任务。';
 export const TASK_STATUS_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    ref: { type: 'string', description: '任务引用：受理回执里的 #编号（如 "#3"）；留空列本会话全部任务。' },
+    ref: { type: 'string', description: '任务引用：任务列表里的 #编号（如 "#3"）；留空列本会话全部任务。' },
   },
   additionalProperties: false,
 };
@@ -148,7 +149,7 @@ export const TASK_RESULT_TOOL_DESCRIPTION =
 export const TASK_RESULT_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    ref: { type: 'string', description: '任务引用：受理回执里的 #编号（如 "#3"）。' },
+    ref: { type: 'string', description: '任务引用：任务列表里的 #编号（如 "#3"）。' },
   },
   required: ['ref'],
   additionalProperties: false,
@@ -302,6 +303,8 @@ export const MAIN_PROTOCOL_NOTE = [
   '【本轮工具协议】',
   '- 涉及平台数据的请求，用 task_run 工具交给执行层 Worker；不得自行编造或猜测平台数据。',
   '- 收到 Worker 汇报后，用用户能懂的话给出结论与数据；平台没有给出的内容不要补全，也不要声称已验证。',
+  '- task_run 返回「已受理/在后台办理中」时，如实告诉用户事情已在后台办理、完成后结果会自动发回来；'
+    + '不要向用户提及工单编号（#数字）或内部任务 id——编号只在任务查询工具结果里，给用户说清办的是什么、办到哪一步即可。',
   '- 本轮执行面只开放查询（只读）操作；用户要求写入或变更时，如实说明该能力尚未开通。',
 ].join('\n');
 
@@ -315,6 +318,8 @@ export const MAIN_PROTOCOL_NOTE_WITH_WRITES = [
   '【本轮工具协议】',
   '- 涉及平台数据的请求，用 task_run 工具交给执行层 Worker；不得自行编造或猜测平台数据。',
   '- 收到 Worker 汇报后，用用户能懂的话给出结论与数据；平台没有给出的内容不要补全，也不要声称已验证。',
+  '- task_run 返回「已受理/在后台办理中」时，如实告诉用户事情已在后台办理、完成后结果会自动发回来；'
+    + '不要向用户提及工单编号（#数字）或内部任务 id——编号只在任务查询工具结果里，给用户说清办的是什么、办到哪一步即可。',
   '- 本轮执行面开放查询与写入操作。执行层返回待确认时，把执行层给出的确认摘要原样转给用户；'
     + '用户表态后的下一回合再继续，不要替用户假定已确认。',
   '- 写入是否生效以执行层返回的读回验证为准；执行层返回失败或读回不一致时，如实转述，不得说成成功。',
@@ -389,6 +394,25 @@ export interface TaskOutputSweepSkippedEvent {
   reasons: Record<string, number>;
 }
 
+/**
+ * B 切片（工单回执收敛）：task_run 短等待窗口的时钟端口。只有 now + sleep 两个原语——
+ * 窗口轮询复用本端口，不引入定时器/调度框架。缺省 = 系统时钟；测试注入手动时钟保证确定性。
+ */
+export interface RuntimeClock {
+  now(): number;
+  /** 让出一次等待（窗口轮询步进）；缺省实现 = 真实 setTimeout。 */
+  sleep(ms: number): Promise<void>;
+}
+
+/** 缺省时钟（真实系统时钟 + setTimeout 让出）。 */
+const SYSTEM_RUNTIME_CLOCK: RuntimeClock = {
+  now: () => Date.now(),
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+/** 窗口轮询步长（机械轮询；25ms × 缺省 1500ms 窗口 ≤ 60 次 SQLite 读，开销可忽略）。 */
+const TASK_RUN_WAIT_POLL_MS = 25;
+
 export interface RuntimeOptions {
   /** 可信身份：来自装配/渠道事实，绝不来自模型输入。 */
   principalId: string;
@@ -428,6 +452,17 @@ export interface RuntimeOptions {
   dispatchMode?: 'inline' | 'background';
   /** P6：后台任务运行器（background 模式必需；submit→pump，执行/恢复/取消由它承担）。 */
   taskRunner?: TaskRunner;
+  /**
+   * B 切片（工单回执收敛）：task_run 受理后的短等待窗口（ms）。缺省取 runtime 配置解析值
+   * （1500）；0 = 不等直接后台。窗口内执行端确认完成 → 结果同回合交给模型（与 inline 同
+   * 形状）；超窗 → 机械事实受理回执（不含工单编号），任务留后台推进。
+   */
+  taskRunWaitMs?: number;
+  /**
+   * B 切片：窗口轮询时钟（测试确定性注入；缺省系统时钟）。只有 now + sleep 两个原语，
+   * 不引入定时器/调度框架。注入实现的 sleep 必须推进时间（否则窗口永不超时——注入契约）。
+   */
+  taskRunClock?: RuntimeClock;
   /**
    * Main 技能登记表（catalog 非空时由装配层注入）：Main 工具面多一个 read_skill，按登记表内的
    * 技能名读正文（32KiB 上限由 registry 既有钳制）。缺省不注入 = 无该工具（工具面逐字节不变）。
@@ -581,6 +616,17 @@ export interface TurnResult {
   reply: string;
   taskIds: readonly string[];
   executions: readonly ExecutionRecord[];
+  /**
+   * B 切片（可观测）：本回合经 execute_operation 发起的执行次数（A2 同源计数；后台任务的
+   * 执行在后台回合计入任务底账，不计入本字段）。供 message_done 等观测面看「执行面扩散」。
+   */
+  operations: number;
+  /**
+   * B 切片（工单回执收敛）：本回合已把执行结果交给模型（模型将向用户转述）的任务。
+   * 完成投递面据此抑制——同一份结果不重复发两遍；受理回执路径的任务不在列，
+   * 完成后由宿主主动投递面送达原会话。
+   */
+  relayedTaskIds?: readonly string[];
   /** 进度帧（本回合 onStep 产出；当前只收集，不在此投递渠道）。 */
   progress: readonly string[];
   /**
@@ -605,6 +651,12 @@ export interface Session {
 
 const DEFAULT_MAIN_TURN_MS = 300_000;
 const DEFAULT_WORKER_TURN_MS = 180_000;
+/**
+ * A2（2026-11-18）：单回合执行 operation 上限的执行侧缺省（与 resource-policy 缺省 5
+ * 同值）。注入策略时读策略解析值（单一配置源：runtime 配置的缺省与解释归 resource-policy）；
+ * 未注入策略的纯内存会话（测试/嵌入）用本缺省——上界照常生效，不依赖策略注入。
+ */
+const DEFAULT_MAX_OPERATIONS_PER_TURN = 5;
 /** Worker 必须在 Main 截止前留出的收尾余量（Main 还要拿汇报生成用户回复）。 */
 const WORKER_DEADLINE_MARGIN_MS = 30_000;
 
@@ -631,6 +683,32 @@ export function renderWorkerFileManifest(files: readonly TurnFileRef[]): string 
  * `answer` = 用户对上一次待办问题的补答（waiting_user 续跑回合），原文交给 Worker——
  * 每个后台回合都是新 Worker（不带上一回合转录），补答不随委派交给执行端就等于丢失。
  */
+/**
+ * 能力快照标题下的中性事实（A1，2026-11-18）：让模型看见「执行的重量」——成本陈述，
+ * **不是阈值规则**：宿主不设阈值、不裁决、不拦截；每个 operation 是否标注估时/重量
+ * 由执行层自述（缺省不出现）。只陈述 N 次执行与 N 倍等待/失败面的机械关系。
+ */
+export const WORKER_SNAPSHOT_COST_NOTE =
+  '每个 operation 标注单次估时与重量；一次任务发起 N 次执行，等待与失败面按 N 倍增长。';
+
+/**
+ * B 切片（工单回执收敛）：超窗受理回执话术（机械事实：已受理、在后台办理中）。
+ * **不含工单编号**——编号只保留在 npm run tasks / 任务查询详情面；Main 协议文本同步
+ * 写明不向用户提及编号（回执去编号，反向绊线：话术出现 `#`/编号数字即测试红）。
+ */
+export function backgroundTaskReceiptNotice(name: string): string {
+  return `已受理「${name}」，在后台办理中；完成后结果会自动发给你。`;
+}
+
+/** 终态集合（窗口内落定判定）。waiting_user 不是终态——等待接续仍属后台推进。 */
+const SETTLED_TASK_STATUSES: ReadonlySet<string> = new Set([
+  'cancelled',
+  'completed',
+  'failed',
+  'timed_out',
+  'unexecuted',
+]);
+
 export function renderWorkerDelegation(input: {
   task: string;
   manifest: CapabilityManifest;
@@ -643,6 +721,7 @@ export function renderWorkerDelegation(input: {
     input.task,
     '',
     '## 能力快照（本轮唯一可执行面：只能调用这里登记的 operation）',
+    WORKER_SNAPSHOT_COST_NOTE,
     '```json',
     JSON.stringify(input.manifest, null, 2),
     '```',
@@ -720,6 +799,23 @@ const RESULT_UNKNOWN_MESSAGE =
   '结果待核对：无法确认这次操作是否已经发生，已停止自动重试，需要人工核对后再决定是否重办。';
 const OPERATION_IN_PROGRESS_MESSAGE =
   '这次操作正在执行中，本次没有重复发起；请以已有执行记录为准，不要并发重试。';
+
+/**
+ * A2 同回合拒话术（2026-11-18）：存在本回合发放、尚未消费的待确认提案时，同一回合内
+ * 再发起非只读 operation 一律在**发起前**拒绝。旧纪律只挡句柄透传（同回合 commit 仍会
+ * 打到执行层的 CONFIRMATION_NOT_FOUND）；现在以工具错误如实告知模型等用户下一回合表态
+ * ——不发起执行、不落执行事实，宿主不判断用户是否在确认。
+ */
+export const SAME_TURN_CONFIRMATION_PENDING_MESSAGE =
+  '待确认提案已生成：需要用户在下一回合确认后才能提交；本回合不再发起新的执行。';
+
+/**
+ * A2 单回合 operation 上限话术：如实报数（已发起 N 次 / 上限 M），不是静默失败。
+ * 这是资源边界，不是计划门：不判断业务，只数本回合已发起的执行次数。
+ */
+export function turnOperationLimitMessage(limit: number, used: number): string {
+  return `本回合已发起 ${used} 次执行，达到单回合上限 ${limit}：本回合不再发起新的执行；如有需要，请等用户下一回合再继续。`;
+}
 
 /** 认领结果的机械处置（runtime 内部；不对外暴露身份键细节）。 */
 interface OperationRunResult {
@@ -940,11 +1036,23 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   const mainTurnMs = options.mainTurnMs ?? DEFAULT_MAIN_TURN_MS;
   const workerTurnMs = options.workerTurnMs ?? DEFAULT_WORKER_TURN_MS;
   const policy = options.policy;
+  /**
+   * A2：单回合执行 operation 上限。注入策略时读策略解析值（缺省与解释归 resource-policy，
+   * 不在运行时重读 runtime 配置）；未注入策略时用执行侧同值缺省——上界照常生效。
+   */
+  const maxOperationsPerTurn = policy !== undefined
+    ? policy.snapshot().config.maxOperationsPerTurn
+    : DEFAULT_MAX_OPERATIONS_PER_TURN;
+  /** A2：本回合已发起的执行次数（send 时清零；跨本回合全部委派合计）。 */
+  let operationsThisTurn = 0;
   const dispatchMode: 'inline' | 'background' = options.dispatchMode ?? 'inline';
   const taskRunner = options.taskRunner;
   if (dispatchMode === 'background' && taskRunner === undefined) {
     throw new Error('background 派发需要注入 TaskRunner（装配方构造 runner；此处 fail-closed）。');
   }
+  // B 切片：task_run 短等待窗口（单一配置源 = runtime 解析值；未走配置解析的纯内存会话同值缺省）。
+  const taskRunWaitMs = options.taskRunWaitMs ?? DEFAULT_RUNTIME_CONFIG.taskRunWaitMs;
+  const taskRunClock = options.taskRunClock ?? SYSTEM_RUNTIME_CLOCK;
 
   /** 可信 scope：来自装配层渠道事实，绝不来自模型输入（工具参数里也不收身份字段）。 */
   const scope: TaskScope = { principalId: options.principalId, sessionId: options.sessionId };
@@ -962,7 +1070,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
 
   function refFromArgs(args: Record<string, unknown>): string {
     const ref = typeof args.ref === 'string' ? args.ref.trim() : '';
-    if (ref === '') throw new Error('缺少任务引用 ref（受理回执里的 #编号）。');
+    if (ref === '') throw new Error('缺少任务引用 ref（任务列表里的 #编号）。');
     return ref;
   }
 
@@ -1391,6 +1499,24 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // 允许集合边界：集合外的 operation 在发起执行前被拒——不依赖模型遵守提示词。
       throw new Error(`「${operation}」不在本轮允许集合内，未发起执行。`);
     }
+    // A2 同回合拒（2026-11-18）：存在**本回合**发放、尚未消费的待确认提案时，同一回合内
+    // 再发起非只读 operation 一律不执行——同回合 commit 不是用户表态（旧纪律只挡住了句柄
+    // 透传，模型仍会反复 commit 打到执行层的 CONFIRMATION_NOT_FOUND）。以工具错误如实
+    // 告知模型等用户下一回合表态；不发起执行、不落执行事实。只读 operation 不受影响。
+    if (
+      pendingConfirmation !== undefined
+      && pendingConfirmation.issuedTurn >= turnNo
+      && !readOnlyOperations.has(operation)
+    ) {
+      throw new Error(SAME_TURN_CONFIRMATION_PENDING_MESSAGE);
+    }
+    // A2 单回合上界（资源边界，不是计划门）：本回合已发起次数达到上限时，后续调用在
+    // 发起前被拒并如实告知；不判断业务。计数在发起前同步推进（含随后的每次真实发起，
+    // 被拒/回放的调用不计——它们没有走到这里）。
+    if (operationsThisTurn >= maxOperationsPerTurn) {
+      throw new Error(turnOperationLimitMessage(maxOperationsPerTurn, operationsThisTurn));
+    }
+    operationsThisTurn += 1;
     const rawArgs = args.args;
     const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
       ? (rawArgs as Record<string, unknown>)
@@ -1488,6 +1614,21 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   }
 
   /**
+   * B 切片：短等待窗口内轮询任务终态（注入时钟让出；窗口内未落定返回 undefined）。
+   * waiting_user 不是终态（等待接续仍属后台推进）——窗口内进入等待也按超窗回执处理，
+   * 补问经既有通知事实注入与 task_resume 接续。轮询只读底账，不写任何状态。
+   */
+  async function waitForTaskSettled(taskId: string, waitMs: number): Promise<TaskRecord | undefined> {
+    const deadline = taskRunClock.now() + waitMs;
+    for (;;) {
+      const task = registry.get(taskId, scope);
+      if (SETTLED_TASK_STATUSES.has(task.status)) return task;
+      if (taskRunClock.now() >= deadline) return undefined;
+      await taskRunClock.sleep(TASK_RUN_WAIT_POLL_MS);
+    }
+  }
+
+  /**
    * 受理侧确定性拒绝（背景满员/队列满）：任务经 P2 合法边落终态 failed + resource_limited
    * （running→failed，镜像 inline ⑮ 的拒绝形状），不进入执行、不产生 queued 积压；
    * 回执携带机械事实 accepted:false + reason=resource_limited（用户话术由 Main 层处理）。
@@ -1502,16 +1643,15 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     });
     registry.transition(taskId, 'failed', { reason: 'resource_limited' });
     const rejected = registry.get(taskId, { principalId: options.principalId, sessionId: options.sessionId });
-    const taskNo = rejected.taskNo ?? 0;
     const name = rejected.name ?? deriveTaskName(request);
     return {
       taskId,
-      taskNo,
       name,
       status: 'failed',
       accepted: false,
       reason: 'resource_limited',
-      notice: `未受理 #${taskNo} ${name}：${detail}`,
+      // B 切片回执去编号：受理/拒绝话术不含工单编号（编号只在 npm run tasks / 任务查询详情面）。
+      notice: `未受理「${name}」：${detail}`,
     };
   }
 
@@ -1584,15 +1724,35 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         request,
       });
       taskRunner!.pump();
-      const taskNo = accepted.taskNo ?? 0;
       const name = accepted.name ?? deriveTaskName(request);
+      // B 切片（工单回执收敛）：短等待窗口（runtime.taskRunWaitMs，缺省 1500ms；0 = 不等）。
+      // 窗口内执行端确认 completed → 与 inline 同形状把结果交给模型（同回合、零受理回执、
+      // 零主动投递——结果不重复发两遍）；超窗 → 机械事实受理回执（不含工单编号），任务留
+      // 后台推进，完成后由宿主完成投递面把结果发回原会话。
+      if (taskRunWaitMs > 0) {
+        const settled = await waitForTaskSettled(taskId, taskRunWaitMs);
+        if (settled !== undefined) {
+          if (settled.status === 'completed') {
+            return {
+              taskId,
+              taskNo: settled.taskNo ?? null,
+              // 后台结果逐字存档在 replyText（runner settle 经 archiveReply 写）；inline 的
+              // resultText 由 complete() 写——两处兼容读取，与 inline 同形状交给模型。
+              summary: settled.replyText ?? settled.resultText ?? '',
+              executions: settled.executions,
+            };
+          }
+          // 窗口内落定的非完成终态：与 inline 失败同语义如实上抛（失败/取消不冒充进行中）。
+          throw new Error(settled.failureReason ?? `后台任务已落定（${settled.status}）。`);
+        }
+      }
+      const live = registry.get(taskId, scope);
       return {
         taskId,
-        taskNo,
         name,
-        status: 'queued',
+        status: live.status,
         accepted: true,
-        notice: `已受理 #${taskNo} ${name}，将在后台执行。`,
+        notice: backgroundTaskReceiptNotice(name),
       };
     }
 
@@ -1719,6 +1879,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       currentUserText = text;
       const progress: string[] = [];
       const taskIds: string[] = [];
+      // B 切片：本回合已把执行结果交给模型（模型将向用户转述）的任务——完成投递面据此抑制。
+      const relayedTaskIds: string[] = [];
       // CAP-01 S1：本回合产出文件（run_js 交付箱登记事实；回合末进 TurnResult.files）。
       const turnFiles: TurnFileRef[] = [];
       // run_js 幂等（v8 §5）：局部 Map 随本回合创建、随本回合丢弃（进程内、跨重启不保证）。
@@ -1729,6 +1891,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       currentTurnDeadline = Date.now() + mainTurnMs;
       // U3：本回合的 turn 作用域（task_run 逻辑操作身份的作用域）与重放窗口。
       turnNo += 1;
+      // A2：单回合执行计数随回合清零（上界按回合计，不跨回合累计）。
+      operationsThisTurn = 0;
       const turnScopeKey = `turn:${options.sessionId}:${turnNo}`;
       const mainWindow = newAttemptWindow();
       // 宿主只交「本轮输入」：最后一条 user = 本轮文本；历史种子仅在驱动尚无会话时使用。
@@ -1792,7 +1956,14 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
             const answer = run.outcome.status === 'completed' ? run.outcome.data : run.outcome;
             const taskId = (answer as { taskId?: unknown }).taskId;
             // 回放同一回执时任务只算一次（同一 taskId 不重复记账）。
-            if (typeof taskId === 'string' && !taskIds.includes(taskId)) taskIds.push(taskId);
+            if (typeof taskId === 'string' && !taskIds.includes(taskId)) {
+              taskIds.push(taskId);
+              // B 切片：带 summary = 结果已在本回合交给模型（模型将向用户转述）——完成投递面
+              // 对这些任务抑制，同一份结果不重复发两遍；受理回执路径不在列（完成后主动投递）。
+              if (answer !== null && typeof answer === 'object' && 'summary' in answer) {
+                relayedTaskIds.push(taskId);
+              }
+            }
             return answer;
           }
           // 任务只读查询：不依赖 runner，始终受理（scope 仍取宿主闭包，越权=找不到）。
@@ -1857,6 +2028,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         reply,
         taskIds,
         executions,
+        // B 切片（可观测）：本回合经 execute_operation 发起的执行次数（A2 同源计数）。
+        operations: operationsThisTurn,
+        ...(relayedTaskIds.length > 0 ? { relayedTaskIds } : {}),
         progress,
         ...(turnFiles.length > 0 ? { files: turnFiles } : {}),
         ...(manifestBytes === undefined ? {} : { fileManifestBytes: manifestBytes }),

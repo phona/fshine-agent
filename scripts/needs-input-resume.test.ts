@@ -191,7 +191,8 @@ async function makeFixture(): Promise<Fixture> {
       allowedOperations: ['dummy.query'],
       readOnlyOperations: ['dummy.query'],
     }),
-    runtime: { dispatchMode: 'background', backgroundConcurrency: 1, queueCapacity: 0 },
+    // B 切片：钉 0 窗口（本套件测 needs_input/接续机制；窗口行为由专测覆盖）。
+    runtime: { dispatchMode: 'background', backgroundConcurrency: 1, queueCapacity: 0, taskRunWaitMs: 0 },
     notificationSink: sink,
   });
   return {
@@ -222,7 +223,10 @@ async function delegateFirstTurn(fixture: Fixture): Promise<{ taskId: string; ta
   await fixture.assembled.session.send('把上个月的合同清单整理出来');
   await fixture.assembled.runner!.whenIdle();
   const receipt = receiptOf(fixture.records[0]!);
-  return { taskId: String(receipt['taskId']), taskNo: Number(receipt['taskNo']) };
+  const taskId = String(receipt['taskId']);
+  // B 切片回执去编号：受理回执不再携带工单编号，编号从底账事实读（与详情面同源）。
+  const taskNo = fixture.assembled.taskRegistry.get(taskId, SCOPE).taskNo ?? 0;
+  return { taskId, taskNo };
 }
 
 describe('业务：执行层 needs_input → 用户补答 → 同一任务完成', () => {
@@ -230,9 +234,12 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
     const fixture = await makeFixture();
     try {
       const { taskId, taskNo } = await delegateFirstTurn(fixture);
-      // 受理回执：Main 拿到编号与回执话术（用户看到的就是这个编号）。
+      // 受理回执（B 切片去编号）：机械事实「已受理、在后台办理中」，不含工单编号；
+      // 编号只在详情面（task_status 查询结果）与底账。
       const receipt = receiptOf(fixture.records[0]!);
-      expect(receipt['notice']).toContain(`#${taskNo}`);
+      expect(String(receipt['notice'])).toContain('已受理');
+      expect(String(receipt['notice'])).not.toContain('#');
+      expect(receipt).not.toHaveProperty('taskNo');
 
       // 用户问「那个任务怎么样了」：Main 用回执里的 #编号查，拿到同一编号 + 待办问题。
       fixture.push({

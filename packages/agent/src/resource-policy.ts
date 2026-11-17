@@ -142,6 +142,12 @@ export interface ResolvedRuntimeConfig {
   readonly queueCapacity: number;
   readonly mainTurnMs: number;
   readonly workerTurnMs: number;
+  /**
+   * 单回合执行 operation 上限（A2，2026-11-18）：同一回合全部委派合计计数，超限在
+   * 发起前确定性拒绝。资源边界，不是计划门——不判断业务；消费点在 execution-runtime
+   * （每回合计数；策略缺省 5，执行侧无策略时用同值缺省）。
+   */
+  readonly maxOperationsPerTurn: number;
   readonly maxDelegationDepth: number;
   readonly taskBudget: TaskBudgetLimits | null;
   readonly waitUserTimeoutMs: number;
@@ -151,6 +157,12 @@ export interface ResolvedRuntimeConfig {
   readonly fileRetentionSweepOnStart: boolean;
   /** 纯附件后主动追问延迟（ms）；0 = 关闭，缺省 30000（同一会话冷却 10 分钟）。 */
   readonly attachmentNudgeAfterMs: number;
+  /**
+   * task_run 受理后的短等待窗口（ms；B 切片 2026-11-18）：窗口内执行端确认完成 → 结果
+   * 同回合交给模型；超窗 → 机械事实受理回执（不含工单编号），任务留后台推进。0 = 不等。
+   * 消费点在 execution-runtime 的委派受理路径。
+   */
+  readonly taskRunWaitMs: number;
 }
 
 /**
@@ -166,6 +178,9 @@ export const DEFAULT_RUNTIME_CONFIG: ResolvedRuntimeConfig = Object.freeze({
   queueCapacity: 16,
   mainTurnMs: 300_000,
   workerTurnMs: 180_000,
+  // A2（2026-11-18 owner 定）：单回合执行 operation 上限缺省 5——live 实测单任务 15 次
+  // operation、用户转 90 秒的资源边界；不是计划门，超限只在发起前确定性拒绝。
+  maxOperationsPerTurn: 5,
   maxDelegationDepth: 1,
   taskBudget: null,
   waitUserTimeoutMs: 86_400_000,
@@ -176,6 +191,9 @@ export const DEFAULT_RUNTIME_CONFIG: ResolvedRuntimeConfig = Object.freeze({
   fileRetentionSweepOnStart: false,
   // 纯附件后 30 秒无指令 → 宿主主动追问；0 = 关闭（显式值不被缺省吞掉）。
   attachmentNudgeAfterMs: 30_000,
+  // task_run 短等待窗口：1.5 秒内确认完成 → 结果同回合交给模型（不打受理回执、不主动投递）；
+  // 超窗 → 机械事实回执（不含工单编号）+ 完成后主动投递。0 = 不等直接后台。
+  taskRunWaitMs: 1_500,
 });
 
 function assertRuntimeInteger(value: unknown, label: string, min: number): number {
@@ -282,6 +300,9 @@ export function resolveRuntimeConfig(config: RuntimeConfig = {}): ResolvedRuntim
     workerTurnMs: config.workerTurnMs === undefined
       ? DEFAULT_RUNTIME_CONFIG.workerTurnMs
       : assertRuntimeInteger(config.workerTurnMs, 'runtime.workerTurnMs', 1),
+    maxOperationsPerTurn: config.maxOperationsPerTurn === undefined
+      ? DEFAULT_RUNTIME_CONFIG.maxOperationsPerTurn
+      : assertRuntimeInteger(config.maxOperationsPerTurn, 'runtime.maxOperationsPerTurn', 1),
     maxDelegationDepth: config.maxDelegationDepth === undefined
       ? DEFAULT_RUNTIME_CONFIG.maxDelegationDepth
       : assertRuntimeInteger(config.maxDelegationDepth, 'runtime.maxDelegationDepth', 0),
@@ -301,6 +322,10 @@ export function resolveRuntimeConfig(config: RuntimeConfig = {}): ResolvedRuntim
     attachmentNudgeAfterMs: config.attachmentNudgeAfterMs === undefined
       ? DEFAULT_RUNTIME_CONFIG.attachmentNudgeAfterMs
       : assertRuntimeInteger(config.attachmentNudgeAfterMs, 'runtime.attachmentNudgeAfterMs', 0),
+    // 0 = 不等直接后台（显式值合法）；负数/非整数 fail-fast。
+    taskRunWaitMs: config.taskRunWaitMs === undefined
+      ? DEFAULT_RUNTIME_CONFIG.taskRunWaitMs
+      : assertRuntimeInteger(config.taskRunWaitMs, 'runtime.taskRunWaitMs', 0),
   });
 }
 

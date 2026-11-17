@@ -209,6 +209,8 @@ async function assembleBackground(options: AssembleOptions): Promise<Awaited<Ret
       dispatchMode: 'background',
       backgroundConcurrency: options.backgroundConcurrency ?? 1,
       queueCapacity: options.queueCapacity ?? 0,
+      // B 切片：故障注入套件钉在异步受理语义（测故障机制，不测短等待窗口的默认行为）。
+      taskRunWaitMs: 0,
       ...(options.taskBudget === undefined ? {} : { taskBudget: options.taskBudget }),
     },
     ...(options.taskExecutor === undefined ? {} : { taskExecutor: options.taskExecutor }),

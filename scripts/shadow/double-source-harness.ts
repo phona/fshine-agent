@@ -222,7 +222,9 @@ export async function runChainOnSource(options: ChainRunOptions): Promise<Shadow
     workerSkills: [],
     createDrivers: () => ({ mainDriver, workerDriver }),
     createExecutionFace: async () => ({ client: face.client, allowedOperations: face.allowedOperations, readOnlyOperations: face.readOnlyOperations }),
-    runtime: { dispatchMode: 'background' },
+    // B 切片：双源对照钉在异步受理语义（两源等价断言的机械形状）；短等待窗口的
+    // 默认行为由 runtime-task-wait-window / server-task-wait-window 专测覆盖。
+    runtime: { dispatchMode: 'background', taskRunWaitMs: 0 },
     notificationSink: sink,
   });
   const runner = assembled.runner;

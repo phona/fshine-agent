@@ -54,6 +54,12 @@ export interface ExecutionOperationDeclaration {
   /** 人类可读标签：只作展示，不参与宿主的任何业务判断。 */
   label?: string;
   args: readonly ExecutionArgDeclaration[];
+  /**
+   * 执行层自述的成本提示：单次执行的重量（weight）与估时秒数（estimatedSeconds）。
+   * 宿主原样转述进能力快照，不解释、不裁决、不做阈值判定；执行层未声明时字段不出现。
+   */
+  weight?: number;
+  estimatedSeconds?: number;
 }
 
 /** 能力快照：单个会话开始时的执行面声明。 */

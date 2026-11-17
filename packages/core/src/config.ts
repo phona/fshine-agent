@@ -143,6 +143,7 @@ const RUNTIME_KEYS = [
   'queueCapacity',
   'mainTurnMs',
   'workerTurnMs',
+  'maxOperationsPerTurn',
   'maxDelegationDepth',
   'taskBudget',
   'waitUserTimeoutMs',
@@ -193,6 +194,8 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     ['queueCapacity', 0],
     ['mainTurnMs', 1],
     ['workerTurnMs', 1],
+    // 单回合执行 operation 上限（资源边界）；缺省 5 住策略层。
+    ['maxOperationsPerTurn', 1],
     ['maxDelegationDepth', 0],
     ['waitUserTimeoutMs', 1],
     // 0 = 不清理（缺省值 30 由策略层提供）；负数 = 配置错误，不按「非法 = 未配置」回落。
