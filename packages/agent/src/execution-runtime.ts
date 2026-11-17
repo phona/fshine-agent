@@ -1267,7 +1267,19 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         if (probe.ok === false) {
           return rejectedBackgroundDelegation(taskId, request, probe.message);
         }
+        // 后台受理上界（复用 queueCapacity；行为与前台一致：满即拒绝，不阻塞排队）。
+        // 探测为排队许可 = 并发位已满；此时底账 queued 行数必须 < queueCapacity 才受理，
+        // 否则第 capacity+1 个等待者确定性拒绝，不产生新的 queued 积压。队列事实源仍是
+        // 底账 queued 行（policy 等待位不充当第二套队列，探测许可立即释放）。
+        const saturated = probe.state === 'queued';
         policy.release(probe);
+        if (saturated) {
+          const capacity = policy.snapshot().queueCapacity;
+          const queued = registry.list().filter((task) => task.status === 'queued').length;
+          if (queued >= capacity) {
+            return rejectedBackgroundDelegation(taskId, request, `后台排队已满（容量 ${capacity}）`);
+          }
+        }
       }
       const accepted = taskRunner!.submit({
         taskId,

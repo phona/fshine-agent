@@ -70,6 +70,9 @@ const DELETED_ENV_KEYS = [
  *  - agent/src/resource-policy.ts：缺省值、并发/队列/预算/深度的解释与消费；
  *  - agent/src/execution-runtime.ts：回合时限的**执行侧入参**（现行缺省 300s/180s 与
  *    P5 缺省一致；集成接线时改由策略解析值注入，不得在此重读 `runtime` 配置）；
+ *    2026-11-17 起另**只读** policy 快照的解析值（`snapshot().queueCapacity`）做后台
+ *    受理上界判定（底账 queued 行 < 容量才受理）——不解析/不重定义缺省、不读原始
+ *    `config.runtime.*`（单一配置源不破坏）；
  *  - scripts/ask-runtime.ts（R4 集成登记，2026-11-14）：**装配点的解析值透传**——把
  *    `resolveRuntimeConfig` 的 mainTurnMs/workerTurnMs 注入执行侧消费点与后台 runner
  *    leaseMs；不自行解释旋钮、不读原始 `config.runtime.*`（单一配置源不破坏）。
@@ -77,7 +80,7 @@ const DELETED_ENV_KEYS = [
 const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   mainConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, P2_SCENARIOS, R8_CONCURRENCY],
   backgroundConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS, P2_SCENARIOS],
-  queueCapacity: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS, P2_SCENARIOS, R8_CONCURRENCY],
+  queueCapacity: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS, P2_SCENARIOS, R8_CONCURRENCY, EXECUTION_RUNTIME],
   mainTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME],
   workerTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME, P2_SCENARIOS],
   maxDelegationDepth: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],

@@ -258,15 +258,16 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
       ['任务二', { delegates: ['任务二'], reply: 'r2' }],
       ['任务三', { delegates: ['任务三'], reply: 'r3' }],
     ]);
-    // P7b 起：有排队位（queueCapacity=1）时其余任务留底账 queued，由槽位释放后的再派发接续；
-    // runner 不据 policy 排队许可直派发（否则 maxActive>1）。queueCapacity=0 的拒绝落点见
-    // 故障套件 ⑤（受理侧确定性拒绝 resource_limited）。
+    // P7b 起：有排队位时其余任务留底账 queued，由槽位释放后的再派发接续；runner 不据
+    // policy 排队许可直派发（否则 maxActive>1）。容量取 2 = 1 活跃 + 2 排队恰好在上界内
+    //（本用例只验串行化；后台排队上界本身由 background-queue-bound.test.ts 钉住）。
+    // queueCapacity=0 的拒绝落点见故障套件 ⑤（受理侧确定性拒绝 resource_limited）。
     const assembled = await assembleBackground({
       dbPath,
       taskExecutor: executor,
       mainPlans: plans,
       records,
-      queueCapacity: 1,
+      queueCapacity: 2,
     });
     try {
       const turns = [
