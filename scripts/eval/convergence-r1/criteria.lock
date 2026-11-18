@@ -1,8 +1,8 @@
 {
   "generatedBy": "node --import tsx scripts/eval/convergence-r1/freeze.ts",
-  "frozenAt": "2026-11-18T06:48:18.477Z",
+  "frozenAt": "2026-11-18T07:24:05.075Z",
   "criteriaSha256": "9d4b0824a429658e7f633ff8af928fd3ad94b633f02c95f151866679bb8d6cd4",
-  "casesSha256": "cb319a62b1f8f1d461a55ad9b31f4b291e64517511d22db3a037225d5b7b481b",
+  "casesSha256": "286bdfd38653a7084cc24b1f806cb9311c80cfad00f6604f083f0f32869c9e9b",
   "files": {
     "scripts/eval/convergence-r1/criteria.ts": "f5daa2a2d8377d7250150b6d907126dea26e652dcb8493f32801a5ddf1d68025",
     "scripts/eval/convergence-r1/cases.ts": "5a46fa2d44d31d696c9b250ad3620f65b16e0975d1d0214c7e47de7114c1726c",
@@ -23,7 +23,7 @@
     "scripts/eval/convergence-r1/cases/E11.ts": "4973a48ab260d00ae34afc6047519cd149298d73f41b1a08d52855deb130a968",
     "scripts/eval/convergence-r1/cases/E12.ts": "66622b8afb95311c5b24d078684c17612451c0559718846ec2a5e8cf303fc07e",
     "scripts/eval/convergence-r1/cases/E13.ts": "a6b83d3a38190b9fcb3137701140d4b222bebd449a916067c9e9271f2b237f99",
-    "scripts/eval/convergence-r1/cases/E14.ts": "974a3cbd1e7c34f58489439fc682746ebdced475a0e5c15f3e4d5e603fae6f34",
+    "scripts/eval/convergence-r1/cases/E14.ts": "2dd7d56023e371b676a9c269ab1750bf7dfa8ca24274d0ea9468b2f6432cb280",
     "scripts/eval/convergence-r1/cases/E15.ts": "b702ed5d0127e06249fa855a6842ac858229a7e026f749d518c2e04056e30b88"
   },
   "note": "冻结后不得修改 criteria/用例/判定器；runner 校验 criteriaSha256/casesSha256，不一致即拒绝运行（fail-closed）。"

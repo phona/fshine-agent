@@ -37,7 +37,9 @@ export const E14: UserCase = {
     // maxExecutions 判负（judge 记 FAIL_UNNECESSARY_DELEGATION，见 judgeNotes）。
   },
   hardAnchors: [
-    { kind: 'containsAny', values: ['finance-invoices', 'finance', '发票'] },
+    // 对象身份由**执行行**机械约束（allowedCollections=['finance-invoices']），不靠回复措辞：
+    // 实测模型常写「这个集合」，按名字判会出假红（2026-11-18 E14 ×10 里 2 条）。
+    { kind: 'containsAny', values: ['窗口', '客户', '明细'] },
     {
       kind: 'containsAny',
       values: ['客户', '筛选', '筛', '不支持', '无法', '不能', '无效', '不认'],
