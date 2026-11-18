@@ -53,6 +53,7 @@ import {
   type RecalcXlsxExecutor,
 } from '../../packages/agent/src/recalc-xlsx-executor';
 import { FILES_GENERATED_NOTICE, mainProtocolNoteFor, type Session, type TurnFileRef } from '../../packages/agent/src/execution-runtime';
+import type { LongRunningNoticePort } from '../../packages/agent/src/task-runner';
 import {
   createNotificationOutbox,
   type NotificationOutbox,
@@ -165,6 +166,35 @@ const FILE_DELIVERY_FAILED_NOTE = '文件未送达（投递失败，请重试或
 const RECALC_DELIVERY_GATED_NOTE = '部分表格未通过公式实算校验，未予发送（请确认表格已重算校验后再试）';
 /** 混合批次（部分投递成功、部分被闸拦）时的如实话术：不让用户误以为全部送达。 */
 const RECALC_DELIVERY_PARTIAL_NOTE = '部分表格未通过公式实算校验，未予发送；其余文件已发送';
+
+/**
+ * 主动提醒投递端口（预期契约 2026-11-18）：10/30 分钟两档文案由 runner 生成，这里只决定
+ * 「发给谁」——只在 1:1、只在 live 部署、只在已知路由上发；是否真送达如实返回（失败不重试、
+ * 不冒充 sent）。群聊不发（跨 principal 泄漏面）。
+ */
+export function createLongRunningNoticePort(input: {
+  isDirectSession: (sessionId: string) => boolean;
+  routeOf: (sessionId: string) => ChannelRoute | undefined;
+  delivery: FileDeliveryPort | undefined;
+}): LongRunningNoticePort {
+  return {
+    isDirectSession: input.isDirectSession,
+    async sendNotice({ sessionId, text }) {
+      const delivery = input.delivery;
+      if (delivery === undefined || delivery.deliveryMode !== 'live' || delivery.sendText === undefined) {
+        return false;
+      }
+      const route = input.routeOf(sessionId);
+      if (route === undefined) return false;
+      try {
+        const receipt = await delivery.sendText(route, text);
+        return receipt.parts.some((part) => part.kind === 'text' && part.status === 'sent');
+      } catch {
+        return false;
+      }
+    },
+  };
+}
 
 /** 交付结果状态（skipped_internal = 本批全部是宿主内部诊断产物，一件都不投）。 */
 export type TurnFileDeliveryStatus =
@@ -467,6 +497,18 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   // 两者都缺省 = 无端口部署，保持同步等结果（无推送可发，降级不崩——现行为不变）。
   const hasPushSurface = deps.fileDelivery !== undefined || deps.notificationSink !== undefined;
   const taskDispatch: 'sync' | 'async' = hasPushSurface ? 'async' : 'sync';
+  /**
+   * 主动提醒的会话事实（inbound 时登记，有界）：sessionId → 投递路由；1:1 集合用于
+   * 「群聊不发主动提醒」。未知会话一律不发（fail-quiet，不猜路由）。
+   */
+  const directSessions = new Set<string>();
+  const sessionRoutes = new Map<string, ChannelRoute>();
+  const SESSION_FACT_LIMIT = 5_000;
+  const longRunningNotice = createLongRunningNoticePort({
+    isDirectSession: (sessionId) => directSessions.has(sessionId),
+    routeOf: (sessionId) => sessionRoutes.get(sessionId),
+    delivery: deps.fileDelivery,
+  });
   let runner: TaskRunner | undefined;
   let outbox: NotificationOutbox | undefined;
   let notificationAttachment: ReturnType<typeof attachNotificationOutbox> | undefined;
@@ -546,6 +588,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       }),
       // 片 1：后台 Worker 的 run_js 与前台同一执行器端口（缺省不注入 = Worker 工具面零变化）。
       runJsExecutor,
+      // 预期契约（2026-11-18）：10/30 分钟两档主动提醒的投递端口（只 1:1、只 live）。
+      longRunningNotice,
       // 长任务异步（契约 v4）：accepted / 协议违约 / 续跑回程登记与等待推进只进日志。
       onExecutionEvent: (event) => log({ mode: 'background', ...event }),
       log: (line) => log({ mode: 'background-runner', ...line }),
@@ -827,6 +871,17 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     const sessionId = `${channel}:${message.conversationId}`;
     // 审计事实：这一回合是谁在群里说的（不改 principal，不加任务列）。
     const speakerId = message.wecomUserId;
+    // 主动提醒的会话事实（只在 inbound 时可信）：路由 + 是否 1:1。群聊登记为「非 1:1」。
+    sessionRoutes.set(sessionId, { channel, conversationId: message.conversationId });
+    if (isGroupChat) directSessions.delete(sessionId);
+    else directSessions.add(sessionId);
+    // 有界：超限淘汰最旧（只影响「能否提醒」，不影响任何任务事实）。
+    while (sessionRoutes.size > SESSION_FACT_LIMIT) {
+      const oldest = sessionRoutes.keys().next().value;
+      if (oldest === undefined) break;
+      sessionRoutes.delete(oldest);
+      directSessions.delete(oldest);
+    }
     const principal = deps.config.principals[principalId];
     if (principal === undefined || principal.enabled !== true) {
       log({ event: 'message_refused', principalId, sessionId, speakerId, messageId: message.messageId, reason: 'principal_not_enabled' });

@@ -1119,7 +1119,14 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       started.push(claimed.taskId);
       startRound(claimed, acquired);
     }
-    if (dueConsumerEnabled) armDueTimer(nextDue);
+    if (dueConsumerEnabled) {
+      // 本趟刚认领的任务在扫描之后才变 running（扫描时还看不到它们）：若这趟没有别的到期项，
+      // 必须补一个扫描节拍，否则「长任务无事件」永远等不到下一次扫描 → 超时提醒发不出去。
+      const reasscan = nextDue === undefined && started.length > 0 && longRunningConsumerEnabled
+        ? now().getTime() + waitingScanThrottleMs
+        : undefined;
+      armDueTimer(nextDue ?? reasscan);
+    }
     return {
       recovered,
       started,
