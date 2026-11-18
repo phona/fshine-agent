@@ -102,7 +102,7 @@
 ## 三、五轨场景清单（含 ≥3 次真实压缩达成路径）
 
 > **共同前提**：每会话必须在**真实窗口**下记录到 **≥3 次「有效压缩尝试」**（Pi 原生生命周期暴露的压缩尝试中 `after < before` 者）方判该会话样本**可用于结论**（§六 门槛）。达成路径见 §三.6（机制）与 harness 设计 §二（负载生成器）。
-> **压缩事实面（Pi 原生，不含私有事件名）**：会话生命周期暴露的**压缩尝试**（`{turn, kind: threshold|overflow|post_turn|unknown, before, after, summaryChunks?}`）。**不得**再绑定 fshine 私有事件（`context_compacted`/`context_compact_trimmed`/…）或私有函数（`splitForCompaction`/`compactionSettingsFor`/…）——它们随 Pi 迁移将删除（见 `docs/product/pi-compaction-api-audit.md`）。
+> **压缩事实面（Pi 原生，不含私有事件名）**：会话生命周期暴露的**压缩尝试**（`{turn, kind: threshold|overflow|post_turn|unknown, before, after, summaryChunks?}`）。**不得**再绑定 fshine 私有事件（`context_compacted`/`context_compact_trimmed`/…）或私有函数（`splitForCompaction`/`compactionSettingsFor`/…）——它们随 Pi 迁移将删除（原审核档 `docs/product/pi-compaction-api-audit.md` 已删，git 历史可考）。
 
 ### LS1 · 长期事实保留
 

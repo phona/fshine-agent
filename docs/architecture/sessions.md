@@ -1,6 +1,7 @@
 # 会话转录与上下文压缩
 
 > 状态：现行。Pi 1.5.2 `AgentSession` 适配已实施；B1 会话持久化已接 server 装配；retention 未实现（issue #67）。
+> 最后核对：2026-11-18（本轮文档重组；文内 `path:line` 指向现行代码，行号以代码为准）。
 > 口径：只写今天做决定 / 排障需要的边界；实施过程与实验读数在 `docs/decisions/index.md` 与 git 历史（历史档 `docs/history/decision-log-2026-11.md`）。
 > 指针：`packages/agent/src/pi-driver.ts`（唯一 Pi 接缝）、`packages/agent/src/session-persistence.ts`（落盘）、`apps/server/server.ts:252-253`（装配）。
 
