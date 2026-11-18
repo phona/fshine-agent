@@ -27,12 +27,12 @@ const A_DONE = T('task-A', 1, '查 alpha W1', 'completed');
 const B_DONE = T('task-B', 2, '查 documents W202611', 'completed');
 const C_DONE = T('task-C', 3, '查 beta W1', 'completed');
 const D_DONE = T('task-D', 4, '重做 beta W1', 'completed');
-const E_DONE = T('task-E', 5, '查 r6-load-a W1', 'completed');
-const E_CANCELLED = T('task-E', 5, '查 r6-load-a W1', 'cancelled');
+const E_DONE = T('task-E', 5, '查 bulk-a W1', 'completed');
+const E_CANCELLED = T('task-E', 5, '查 bulk-a W1', 'cancelled');
 
 const RUNNING_A = T('task-A', 1, '查 alpha W1', 'running');
 const RUNNING_B = T('task-B', 2, '查 documents W202611', 'running');
-const RUNNING_E = T('task-E', 5, '查 r6-load-a W1', 'running');
+const RUNNING_E = T('task-E', 5, '查 bulk-a W1', 'running');
 
 interface Ls6Overrides {
   readonly replies?: Partial<Record<number, string>>;
@@ -60,7 +60,7 @@ function ls6Script(overrides: Ls6Overrides = {}): FakeScenario {
     { reply: '好，重做一遍，已经开了新任务。', tasks: [A_DONE, B_DONE, C_DONE, D_DONE] },
     { reply: '收到，alpha 之前查的是 2 条，我按 2 条记着。', tasks: [A_DONE, B_DONE, C_DONE, D_DONE] },
     { reply: '更正后按 2 条：alpha 共 2 条，总金额 2000 元。', tasks: [A_DONE, B_DONE, C_DONE, D_DONE] },
-    { reply: '好，开了任务查 r6-load-a W1 的明细。', tasks: [A_DONE, B_DONE, C_DONE, D_DONE, RUNNING_E] },
+    { reply: '好，开了任务查 bulk-a W1 的明细。', tasks: [A_DONE, B_DONE, C_DONE, D_DONE, RUNNING_E] },
     {
       reply: '已取消。', tasks: [A_DONE, B_DONE, C_DONE, D_DONE, E_CANCELLED], cancelCalled: true,
       cancelFacts: [{ taskId: E_CANCELLED.taskId, outcome: 'requested', status: null }],
@@ -207,7 +207,7 @@ describe('轮期望纯函数判定', () => {
     expect(falseClaim[0]?.evidence).toMatchObject({ taskId: 'task-A', which: 'oldest', status: 'completed', claimsCancelled: true });
     // 真模型回执：同一个回复里既说「最早 alpha 取消不了」，又说另一个任务「已取消」——
     // 明确说取消不了的信号优先，不能被另一任务的合法「已取消」带成假红。
-    const mixed = '最早那个 alpha 任务取消不了，因为它早就办完了。r6-load-a 那个任务：已确认取消，状态是「已取消」。';
+    const mixed = '最早那个 alpha 任务取消不了，因为它早就办完了。bulk-a 那个任务：已确认取消，状态是「已取消」。';
     expect(judgeTurnExpectations(spec({ expectCancelHonest: true, cancelTarget: 'oldest' }), ctx({
       tasksAfter: [A_DONE, E_CANCELLED], reply: mixed,
     }))).toEqual([]);

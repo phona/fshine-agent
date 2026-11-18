@@ -169,13 +169,13 @@ export function pumpTurn(index: number, fetchResult: boolean): TurnSpec {
   if (fetchResult) {
     return {
       index, kind: 'pump',
-      text: '不要新建任务：把刚才受理的那个 r6-load 任务（任务编号以你上一条回执为准）的完整结果原样复述给我，逐条列出名称和金额，不要省略，并给出总条数与总金额。',
+      text: '不要新建任务：把刚才受理的那个 bulk 任务（任务编号以你上一条回执为准）的结果报给我——先给总条数与总金额，再列出前 5 条的名称和金额即可，不用逐条全列。',
     };
   }
-  const collection = index % 2 === 0 ? 'r6-load-a' : 'r6-load-b';
+  const collection = index % 2 === 0 ? 'bulk-a' : 'bulk-b';
   return {
     index, kind: 'pump',
-    text: `开一个任务：查 ${collection} 集合 W1 窗口的全部记录，逐条把名称和金额按原样写入任务结果（不要省略、不要只给汇总），最后给出总条数与总金额。`,
+    text: `开一个任务：查 ${collection} 集合 W1 窗口的记录，给出总条数与总金额，并列前 5 条的名称与金额（不要逐条全列）。`,
   };
 }
 

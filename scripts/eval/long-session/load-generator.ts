@@ -209,9 +209,9 @@ function ls6Turns(): Omit<TurnSpec, 'index'>[] {
     },
     // ── N6 三档取消 ──────────────────────────────────────────────────────────
     // ①在飞取消：Q1 交办即返回（任务仍在执行），Q2 在任务未完成时发出取消，
-    //   并在判定前等它落定。Q1 取大载荷集合（r6-load-a）以保证「在飞」窗口稳定存在，
+    //   并在判定前等它落定。Q1 取大载荷集合（bulk-a）以保证「在飞」窗口稳定存在，
     //   避免小查询在取消到达前就完成（那是时序竞态，不是取消语义）。
-    { kind: 'interaction', label: 'N6-Q1', text: '开个任务查 r6-load-a 集合 W1 窗口的全部记录，逐条列出来。', expectNewTask: true, deferIdle: true },
+    { kind: 'interaction', label: 'N6-Q1', text: '开个任务查 bulk-a 集合 W1 窗口的记录，报总条数与总金额，并列前 5 条即可。', expectNewTask: true, deferIdle: true },
     { kind: 'interaction', label: 'N6-Q2', text: '刚开的那个任务先别跑了，取消掉。', expectInflightCancel: true, deferIdle: true, settleBeforeJudge: true },
     // ②对已完成任务取消：必须如实拒绝，状态不变、不得声称已取消
     {

@@ -28,7 +28,7 @@ const tool = (turn: number, args: unknown, resultSummary = ''): ToolCallRecord =
 
 /** 正例：真实 Wave1 转录形状——信封 JSON + 400 行明细（>缺省行/字节阈值）。 */
 function leakyReply(): string {
-  const rows = Array.from({ length: 400 }, (_, i) => `${i + 1}. r6-load-a-item-${i + 1} — ${100 + i}`);
+  const rows = Array.from({ length: 400 }, (_, i) => `${i + 1}. bulk-a-item-${i + 1} — ${100 + i}`);
   return `{"taskId":"${TASK_ID}","taskNo":16,"status":"completed","requestIds":["${REQ_ID}"],"createdAt":"2026-11-17T02:39:37.050Z"}\n${rows.join('\n')}`;
 }
 

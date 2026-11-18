@@ -129,11 +129,11 @@ describe('Wave1 推进决策', () => {
     const decide = createWave1PumpDecider({ probeTurns: [probe], steadyPumps: 0, pumpCap: 2, smoke: false });
     const first = decide({ completedTurns: 3, effectiveCompactions: 0 });
     expect(first).toMatchObject({ index: 4, kind: 'pump' });
-    expect(first?.text).toContain('r6-load-a');
+    expect(first?.text).toContain('bulk-a');
     const second = decide({ completedTurns: 4, effectiveCompactions: 0 });
     expect(second).toMatchObject({ index: 5, kind: 'pump' });
     // 推进轮交替：奇数次开新任务查询，偶数次取回完整结果。
-    expect(second?.text).toContain('完整结果原样复述');
+    expect(second?.text).toContain('前 5 条');
     const afterCap = decide({ completedTurns: 5, effectiveCompactions: 0 });
     expect(afterCap).toMatchObject({ index: 6, kind: 'probe', text: '压缩后复查' });
     expect(decide({ completedTurns: 6, effectiveCompactions: 0 })).toBeNull();

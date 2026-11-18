@@ -111,8 +111,8 @@ function seedStateFile(stateDir: string, loadItems: number): void {
   const state = {
     collections: {
       ...seed.collections,
-      'r6-load-a': loadCollection('r6-load-a', loadItems),
-      'r6-load-b': loadCollection('r6-load-b', loadItems),
+      'bulk-a': loadCollection('bulk-a', loadItems),
+      'bulk-b': loadCollection('bulk-b', loadItems),
     },
   };
   writeFileSync(path.join(stateDir, 'dummy-state.json'), `${JSON.stringify(state, null, 2)}\n`);
