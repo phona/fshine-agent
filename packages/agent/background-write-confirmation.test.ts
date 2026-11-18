@@ -29,6 +29,9 @@ import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
 import type { TaskRegistry } from './src/task-registry';
 import { createTaskRunner, type TaskExecutionOutcome, type TaskExecutor, type TaskRunner } from './src/task-runner';
 import { createResourcePolicy } from './src/resource-policy';
+import { createNotificationOutbox } from './src/notifications';
+import { renderNotification } from './src/notification-render';
+import { attachNotificationOutbox } from '../../scripts/ask-runtime';
 
 const SCOPE = { principalId: 'wecom:s1', sessionId: 'conv-s1' };
 
@@ -76,6 +79,30 @@ class ProposalClient implements ExecutionClient {
   }
 }
 
+/**
+ * S3 用执行层：只读正常完成，写操作发提案（与 ProposalClient 同形）。
+ * 记录每次请求的 confirmation（透传断言用）。
+ */
+class S3Client implements ExecutionClient {
+  readonly requests: Array<{ operation: string; confirmation?: unknown }> = [];
+
+  constructor(private readonly handle = 'cf_s3_handle') {}
+
+  async capabilities(): Promise<CapabilityManifest> {
+    return MANIFEST;
+  }
+
+  async execute(request: { operation: string; confirmation?: unknown }): Promise<ExecutionOutcome> {
+    this.requests.push(request);
+    if (request.operation === 'dummy.query') return { status: 'completed', data: { rows: 2 } };
+    return {
+      status: 'needs_confirmation',
+      confirmation: { handle: this.handle, summary: SUMMARY, expiresAt: EXPIRES_AT },
+      data: { collection: 'alpha' },
+    };
+  }
+}
+
 /** 只读执行层：正常完成（零变化对照用）。 */
 class ReadClient implements ExecutionClient {
   async capabilities(): Promise<CapabilityManifest> {
@@ -99,6 +126,21 @@ function callingWorker(args: Record<string, unknown>, capture: WorkerCapture): T
   return {
     async run(input) {
       capture.results.push(await input.exec(EXECUTE_OPERATION_TOOL, args));
+      return { text: '已按执行层回执汇报。', messages: [] as unknown as DriverMessage[] };
+    },
+  };
+}
+
+/** 多轮脚本化 Worker：每轮消费一组工具调用（S3 透传断言用）。 */
+function roundWorker(
+  rounds: ReadonlyArray<ReadonlyArray<Record<string, unknown>>>,
+  capture: WorkerCapture,
+): TurnDriver {
+  const remaining = rounds.map((calls) => [...calls]);
+  return {
+    async run(input) {
+      const calls = remaining.shift() ?? [];
+      for (const args of calls) capture.results.push(await input.exec(EXECUTE_OPERATION_TOOL, args));
       return { text: '已按执行层回执汇报。', messages: [] as unknown as DriverMessage[] };
     },
   };
@@ -190,6 +232,39 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     expect(projected).toContain(SUMMARY);
   });
 
+  it('⑤ S2 待确认推送：用户看到「将写入什么」+ 两个动作；句柄不进 payload/文案', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bg-write-push-'));
+    tempDirs.push(dir);
+    const dbPath = join(dir, 'state.db');
+    const registry = createSqliteTaskRegistry(dbPath);
+    const outbox = createNotificationOutbox({ dbPath, sink: { send: async () => ({ delivered: true }) } });
+    attachNotificationOutbox(registry, outbox);
+    const capture: WorkerCapture = { results: [] };
+    const executor = await makeExecutor({
+      client: new ProposalClient(() => 'cf_push_secret_handle'),
+      registry,
+      worker: callingWorker(WRITE_ARGS, capture),
+    });
+
+    await runBackground(registry, executor, 't_push');
+
+    const rows = outbox.listNotifications('t_push');
+    const waiting = rows.find((row) => row.kind === 'waiting_user');
+    expect(waiting).toBeDefined();
+    // 摘要进 payload（执行层原话），句柄不进——用户不需要也不该看到凭据。
+    expect(waiting!.payload.summary).toBe(SUMMARY);
+    expect(JSON.stringify(waiting!.payload)).not.toContain('cf_');
+    expect('handle' in waiting!.payload).toBe(false);
+
+    // 用户可见文案：说清将写入什么 + 两个能做的动作，且不含内部术语/句柄。
+    const text = renderNotification({ kind: waiting!.kind, payload: waiting!.payload });
+    expect(text).toContain(SUMMARY);
+    expect(text).toContain('回「确认」');
+    expect(text).toContain('回「不」');
+    expect(text).not.toContain('cf_');
+    expect(text).not.toContain('handle');
+  });
+
   it('② Worker 工具结果与 task_status 投影都不含 cf_ 与 handle', async () => {
     const registry = makeRegistry();
     const capture: WorkerCapture = { results: [] };
@@ -246,6 +321,57 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     expect(projected).not.toContain('cf_s1_round_1');
     expect(projected).not.toContain('cf_s1_round_2');
     expect(projected).not.toContain('handle');
+  });
+
+  it('⑥ S3 接续轮透传：底账句柄 + 用户原话交给执行层；只读不消耗、一轮只发一次', async () => {
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new S3Client('cf_s3_handle');
+    const executor = await createTaskExecutor({
+      client,
+      allowedOperations: ['dummy.query', 'dummy.commit'],
+      readOnlyOperations: ['dummy.query'],
+      // 轮 1：发起写提案；轮 2：先读一次（不得消耗确认）再提交两条写。
+      workerDriver: roundWorker([[WRITE_ARGS], [READ_ARGS, WRITE_ARGS, WRITE_ARGS]], capture),
+      registry,
+      workerTurnMs: 30_000,
+    });
+    const runner = await runBackground(registry, executor, 't_s3');
+    // 首回合自造提案不带句柄（没有「上一回合的用户表态」）。
+    expect(client.requests[0]!.confirmation).toBeUndefined();
+    expect(registry.get('t_s3', SCOPE).pendingQuestion?.confirmation?.handle).toBe('cf_s3_handle');
+
+    const resumed = runner.resume('t_s3', { answer: '确认，提交吧', scope: SCOPE });
+    expect(resumed.outcome).toBe('started');
+    await runner.whenIdle();
+
+    // 只读调用不消耗确认。
+    expect(client.requests[1]!.operation).toBe('dummy.query');
+    expect(client.requests[1]!.confirmation).toBeUndefined();
+    // 首条非只读执行拿到底账句柄 + 用户原话。
+    expect(client.requests[2]!.operation).toBe('dummy.commit');
+    expect(client.requests[2]!.confirmation).toEqual({ handle: 'cf_s3_handle', userText: '确认，提交吧' });
+    // 一轮只发一次：同一回合的第二条写不再带句柄。
+    expect(client.requests[3]!.operation).toBe('dummy.commit');
+    expect(client.requests[3]!.confirmation).toBeUndefined();
+  });
+
+  it('⑦ 同回合 prepare 后立刻 commit：两条都不带句柄（同回合自我确认不是用户表态）', async () => {
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new S3Client('cf_same_turn');
+    const executor = await createTaskExecutor({
+      client,
+      allowedOperations: ['dummy.query', 'dummy.commit'],
+      readOnlyOperations: ['dummy.query'],
+      workerDriver: roundWorker([[WRITE_ARGS, WRITE_ARGS]], capture),
+      registry,
+      workerTurnMs: 30_000,
+    });
+    await runBackground(registry, executor, 't_same');
+    expect(client.requests).toHaveLength(2);
+    expect(client.requests[0]!.confirmation).toBeUndefined();
+    expect(client.requests[1]!.confirmation).toBeUndefined();
   });
 
   it('④ 非写操作后台任务逐字节不变（零变化对照）', async () => {

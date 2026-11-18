@@ -3073,6 +3073,16 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         bytes: file.bytes,
       }));
       const runJsMemo = new Map<string, RunJsOutput>();
+      /**
+       * S3 接续轮透传（写确认）：runner 在答复前从底账取出的提案（句柄 + 摘要），与本轮
+       * 用户原话一起，随本回合首条非只读执行原样交给执行层，发过即止（一次性）。
+       *   · 只有带用户答复的续跑回合才带 pendingConfirmation——本回合新造的提案不在其中，
+       *     所以「同回合 prepare 后立刻 commit」结构性不会拿到句柄；
+       *   · 只读调用不消耗用户的确认；
+       *   · 宿主不解释句柄、不判断用户是否在确认——语义归执行层（它校验句柄与提案绑定）。
+       */
+      const pendingConfirmation = task.pendingConfirmation;
+      let confirmationPassed = false;
       const workerRunJsTurn = createWorkerRunJsTurn({
         ...(options.runJsExecutor === undefined ? {} : { executor: options.runJsExecutor }),
         // 可信身份取自任务行（底账持有），不取模型参数。
@@ -3129,10 +3139,21 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           execute: async (dispatchKey) => {
             // requestId 由宿主生成、每次调用换号（只作追踪）；dispatchKey 是操作身份，不换。
             const requestId = `req_${randomUUID()}`;
+            // S3：待确认提案的句柄随本回合首条非只读执行透传（一轮只发一次）。
+            const confirmation = pendingConfirmation === undefined || confirmationPassed
+              || readOnlyOperations.has(operation)
+              ? undefined
+              : { handle: pendingConfirmation.handle, userText: task.answer ?? '' };
             let outcome: ExecutionOutcome;
             try {
               outcome = await executionClient.execute(
-                { requestId, dispatchKey, operation, args: callArgs },
+                {
+                  requestId,
+                  dispatchKey,
+                  operation,
+                  args: callArgs,
+                  ...(confirmation === undefined ? {} : { confirmation }),
+                },
                 { signal },
               );
             } catch (error) {
@@ -3144,6 +3165,9 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
               }
               throw error;
             }
+            // 执行层已收到本次透传：句柄不再复用（是否真的被接受由执行层回执说明；
+            // 宿主不判断确认语义）。抛错时不算发过——下一条非只读调用仍可带同一句柄。
+            if (confirmation !== undefined) confirmationPassed = true;
             // 取消后到达的回执不落执行事实：任务已按取消处置，迟到的成功不得冒充本回合结果。
             if (signal.aborted) throw abortError();
             // 契约 v4：accepted 只允许出现在声明 long_running 的 operation 上。未声明却返回 =

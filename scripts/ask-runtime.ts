@@ -804,12 +804,18 @@ export function attachNotificationOutbox(
   registry.onTaskFact((fact) => {
     const kind = notificationKindForTransition(fact.from, fact.to, fact.reason as NotificationReason | undefined);
     if (kind === undefined) return;
-    // R5 补字段：waiting_user 时从底账读回 pendingQuestion.missing（事实钩子无 scope，
-    // 底账自身即事实来源；读不到不编造）。
+    // R5 补字段：waiting_user 时从底账读回 pendingQuestion（事实钩子无 scope，底账自身即
+    // 事实来源；读不到不编造）。写确认时再取 confirmation.summary——用户要看到「将写入什么」
+    // 才能决定；**handle 永不进 payload**（宿主持有，用户不需要也不该看到）。
     const record = (registry as unknown as {
-      get(taskId: string): { principalId: string; sessionId: string; pendingQuestion?: { missing?: readonly string[] } };
+      get(taskId: string): {
+        principalId: string;
+        sessionId: string;
+        pendingQuestion?: { missing?: readonly string[]; confirmation?: { summary?: string } };
+      };
     }).get(fact.taskId);
     const missing = kind === 'waiting_user' ? record.pendingQuestion?.missing : undefined;
+    const summary = kind === 'waiting_user' ? record.pendingQuestion?.confirmation?.summary : undefined;
     outbox.record({
       taskId: fact.taskId,
       kind,
@@ -819,6 +825,7 @@ export function attachNotificationOutbox(
       name: fact.name,
       ...(fact.reason === undefined ? {} : { reason: fact.reason }),
       ...(missing === undefined ? {} : { missing }),
+      ...(summary === undefined ? {} : { summary }),
     });
     if (B_CHANNEL_KINDS.has(kind)) {
       const key = `${fact.taskId}:${kind}:${fact.stateVersion ?? fact.at}`;
@@ -837,6 +844,7 @@ export function attachNotificationOutbox(
               name: fact.name,
               ...(fact.reason === undefined ? {} : { reason: fact.reason }),
               ...(missing === undefined ? {} : { missing }),
+              ...(summary === undefined ? {} : { summary }),
             },
           }),
         });

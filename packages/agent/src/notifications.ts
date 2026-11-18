@@ -76,6 +76,12 @@ export interface NotificationPayload {
   requestIds?: readonly string[];
   /** R5 补字段：waiting_user 时缺什么的条目（底账 pendingQuestion.missing）。 */
   missing?: readonly string[];
+  /**
+   * 写确认提案的机械摘要（底账 pendingQuestion.confirmation.summary，执行层原话）。
+   * 只有 waiting_user 且待确认时才有：用户据此决定「确认」还是「不」。
+   * **句柄不进 payload**：handle 是宿主持有的凭据，用户不需要也不该看到。
+   */
+  summary?: string;
 }
 
 /**
@@ -95,6 +101,8 @@ export interface NotificationFact {
   requestIds?: readonly string[];
   /** R5 补字段：waiting_user 必带（底账 pendingQuestion.missing）。 */
   missing?: readonly string[];
+  /** 写确认提案摘要（底账 pendingQuestion.confirmation.summary）；只有待确认时才有。 */
+  summary?: string;
 }
 
 /** 白名单违规（编造/未知字段、非法枚举、缺必填）：拒绝写入，不污染 outbox。 */
@@ -204,6 +212,7 @@ const FACT_KEYS: ReadonlySet<string> = new Set([
   'reason',
   'requestIds',
   'missing',
+  'summary',
 ]);
 
 const SCHEMA = `
@@ -312,6 +321,9 @@ function validateFact(fact: NotificationFact): void {
   ) {
     throw new NotificationPayloadError('missing 必须是非空字符串数组（底账 pendingQuestion.missing 同口径）。');
   }
+  if (fact.summary !== undefined && (typeof fact.summary !== 'string' || fact.summary.trim() === '')) {
+    throw new NotificationPayloadError('summary 必须是非空字符串（底账 pendingQuestion.confirmation.summary 同口径）。');
+  }
 }
 
 function buildPayload(fact: NotificationFact): NotificationPayload {
@@ -322,6 +334,7 @@ function buildPayload(fact: NotificationFact): NotificationPayload {
     ...(fact.reason === undefined ? {} : { reason: fact.reason }),
     ...(fact.requestIds === undefined ? {} : { requestIds: [...fact.requestIds] }),
     ...(fact.missing === undefined ? {} : { missing: [...fact.missing] }),
+    ...(fact.summary === undefined ? {} : { summary: fact.summary }),
   };
 }
 

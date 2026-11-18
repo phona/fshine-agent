@@ -5,7 +5,8 @@
  *   · 9 类 kind 折叠成 4 类用户语言：开始办了 / 需要你一句话 / 办完了·没办成 / 已按你说的停了；
  *   · reason 人话映射且失败分级：result_unknown 必须说「不确定做没做完，需要再确认」（严禁读作成功）；
  *   · 内部术语黑名单机械断言：渲染器拼装的文本不得含 task_status/resource_limited/requestId/
- *     uuid/request_N/绝对路径/W 窗口码（name 是用户原话，按规则原样保留，不在断言范围）；
+ *     uuid/request_N/绝对路径/W 窗口码（name 与写确认 summary 都是执行层/用户原话，按规则原样
+ *     保留，不在断言范围）；
  *   · 每条输出必含 name（缺省机械回落「未命名任务」）。
  */
 import type { NotificationKind, NotificationPayload, NotificationReason } from './notifications';
@@ -68,11 +69,18 @@ export function renderNotification(input: { kind: NotificationKind; payload: Not
     case 'started':
     case 'resumed':
       return assemble(`开始办了：${NAME_PLACEHOLDER}。`, name);
-    case 'waiting_user':
+    case 'waiting_user': {
+      // 写确认：执行层已冻结一次待确认操作，用户要决定的是「做不做」——先把将写入什么
+      // （执行层原话摘要）说清，再给两个能做的动作。无摘要 = 缺信息类等待，照旧说缺什么。
+      const summary = input.payload.summary;
+      if (summary !== undefined && summary.trim() !== '') {
+        return assemble(`要写入：${summary}。回「确认」我就提交，回「不」我就不动。`, name);
+      }
       return assemble(
         `需要你一句话：${NAME_PLACEHOLDER}——还缺：${missing.length > 0 ? missing.join('、') : '未说明'}。`,
         name,
       );
+    }
     case 'completed':
       return assemble(`办完了：${NAME_PLACEHOLDER}。`, name);
     case 'failed':

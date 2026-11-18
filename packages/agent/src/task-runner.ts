@@ -251,6 +251,11 @@ export interface TaskExecutionInput {
   /** waiting_user 答复接续时的用户答复原文（首轮执行缺省）。 */
   answer?: string;
   /**
+   * S3 写确认透传：答复前底账里的提案（句柄 + 摘要）。执行端只把句柄随本回合首条
+   * 非只读执行原样交给执行层，一轮只发一次；宿主不解释句柄。
+   */
+  pendingConfirmation?: PendingConfirmation;
+  /**
    * 长任务续跑（契约 v4）：上一轮委派以 accepted 结束时，runner 用 wait 取回结果后
    * 在这里把受理事实与执行层原始回执交回执行端；执行端据此渲染「长任务结果」并续跑
    * 同一任务。缺省 = 首轮执行/普通接续（零变化）。
@@ -1128,6 +1133,11 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     permit: ResourcePermit,
     answer?: string,
     resumedOperation?: ResumedOperation,
+    /**
+     * S3 写确认透传：**答复前**的底账提案（waiting_user → running 会把 pendingQuestion 清掉，
+     * 所以必须在 resume 里先取出再交给执行端）。缺省 = 无待确认提案。
+     */
+    pendingConfirmation?: PendingConfirmation,
   ): void {
     const controller = new AbortController();
     controllers.set(task.taskId, controller);
@@ -1143,6 +1153,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       sessionId: task.sessionId,
       ...(answer === undefined ? {} : { answer }),
       ...(resumedOperation === undefined ? {} : { resumedOperation }),
+      ...(pendingConfirmation === undefined ? {} : { pendingConfirmation }),
     };
     // 同步发起（pump 返回前执行端已被调用）；经 Promise 化兜住执行端同步抛错。
     let round: Promise<TaskExecutionOutcome>;
@@ -1324,6 +1335,8 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     if (isRejection(acquired)) {
       return { outcome: 'rejection', taskId, reason: acquired.reason };
     }
+    // S3：答复会清掉底账的 pendingQuestion，所以在 answerResumes 之前取出待确认提案。
+    const pendingConfirmation = task.pendingQuestion?.confirmation;
     let resumed: TaskRecordView;
     try {
       resumed = registry.answerResumes(taskId, mutationOptions(scope));
@@ -1331,7 +1344,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       policy.release(acquired);
       throw error;
     }
-    startRound(resumed, acquired, options?.answer);
+    startRound(resumed, acquired, options?.answer, undefined, pendingConfirmation);
     return { outcome: 'started', taskId };
   }
 
