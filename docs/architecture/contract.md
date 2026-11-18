@@ -10,14 +10,14 @@
 
 - **能力快照**：每会话取一次 `CapabilityManifest`，按其装配工具面；`operations[]` 只带执行层自述的 name/label/args/weight/estimatedSeconds（`packages/contracts/src/execution-contract.ts:51-69`），成本提示原样转述，宿主不解释、不裁档。
 - **请求**：`requestId`（宿主生成，重试换号，只作追踪）＋ `dispatchKey`（首次创建这笔逻辑操作时生成并持久化，重试/重规划只读回同值）＋ `operation` ＋ 对宿主不透明的 `args`（`:71-85`）；身份一致由 `packages/agent/dispatch-key-identity.test.ts` 钉住。
+- **参数结构化直传**：tool args 里的数组/对象原样进 `call --file` 请求体，适配器只按执行层声明把裸名改成前缀 flag，不拍平成命令字符串、不要求模型手拼 JSON（`packages/agent/src/dummy-cli-client.ts:204-215`、`:254-272`）。逐项校验与上限归执行层：`records` 报「第 N 条」、单次上限 500、全部通过后才一次落盘（原子）（`scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:378-415`；直传数组用例 `packages/agent/dummy-client.test.ts:255`）。
 - **结果五态互斥**：completed / needs_confirmation / needs_input / failed / refused（`packages/contracts/src/execution-contract.ts:96`、`:137-142`）。`refused`＝策略拒绝、`failed`＝执行失败，不得混用（`:16-20`）；`needs_input` 必带非空 `missing`，`needs_confirmation` 必带非空 handle/summary（`:17-20`、`:105-118`）。
-- **确认仍走同一次 execute**：执行层先返 `needs_confirmation`，下一回合宿主把 `confirmation{handle, userText}` 原样带回；handle 不透明，宿主不解析、不比较、不判「这是不是在确认」（`:86-92`、`:127-136`；`packages/agent/write-confirmation.test.ts:339`）。
+- **确认仍走同一次 execute**：执行层先返 `needs_confirmation`，下一回合宿主把 `confirmation{handle, userText}` 原样带回；handle 不透明，宿主不解析、不比较、不判「这是不是在确认」（`:86-92`、`:127-136`；`packages/agent/write-confirmation.test.ts:339`）。确认摘要的中文人话与本地时间由执行层生成，宿主只转述 `summary`（`scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:514-525`；`packages/agent/src/execution-runtime.ts:1750-1758`）。
 - **取消只带信号**：`ExecutionCallOptions.signal`，不是独立 cancel 协议；适配器可忽略，宿主不依赖执行层配合也能终结任务（`:144-152`）。
-- **失败默认不可重试**：`ExecutionFailure.retryable` 缺省 = 不可重试，只有执行层显式 `true`（超时/网关暂不可用等瞬时故障）才放行；`false` 与未声明一律让宿主锁住该 `(operation, 对象)` 本回合不再发起（`packages/contracts/src/execution-contract.ts:121-134`；`packages/agent/src/execution-runtime.ts:1675-1690`、`:1744`）。每次拦截落一条 `execution_retry_blocked`（operation/object/code/declaredRetryable），每次显式可重试的失败落一条 `execution_retry_allowed`（operation/object/code），均在 `apps/server/server.ts:830-852`；告警归部署侧读事件，宿主不自建告警通道——但「停了」与「一直在试」两种都要可见。
+- **失败默认不可重试**：`ExecutionFailure.retryable` 缺省 = 不可重试，只有执行层显式 `true`（超时/网关暂不可用等瞬时故障）才放行；`false` 与未声明一律让宿主锁住该 `(operation, 对象)` 本回合不再发起（`packages/contracts/src/execution-contract.ts:121-134`；`packages/agent/src/execution-runtime.ts:1799-1806`、`:1868-1876`）。每次拦截落一条 `execution_retry_blocked`（operation/object/code/declaredRetryable），每次显式可重试的失败落一条 `execution_retry_allowed`（operation/object/code），均在 `apps/server/server.ts:911-940`；告警归部署侧读事件，宿主不自建告警通道——但「停了」与「一直在试」两种都要可见。
 
-宿主「允许集合」不在契约里：装配方从执行层 `access` 派生（只读集合，`allowWriteOperations=true` 时并入写集合），发起前确定性拒绝集合外调用（`scripts/ask-runtime.ts:344-354`；`packages/agent/src/execution-runtime.ts:1546-1549`）。它挡的是「宿主没开这个口」，不是业务授权。
+宿主「允许集合」不在契约里：装配方从执行层 `access` 派生（只读集合，`allowWriteOperations=true` 时并入写集合），发起前确定性拒绝集合外调用（`scripts/ask-runtime.ts:380-388`；`packages/agent/src/execution-runtime.ts:1771-1773`）。它挡的是「宿主没开这个口」，不是业务授权。
 ## 2. 刻意不放进契约
-
 | 项 | 处置与指针 |
 | --- | --- |
 | readback | `completed` 只表示执行完成，不代表业务生效（`packages/contracts/src/execution-contract.ts:24`、`:130`） |
@@ -26,9 +26,8 @@
 | 授权策略 / 业务字段 | 归执行层声明与校验；宿主不建实体门（`AGENTS.md:30`、`:52`） |
 | 第二套协议 | 确认是同一 execute 上的最小增量；与官方 A2A 完全独立、不得冒充（`:25-30`） |
 
-宿主只留三类确认职责：按装配开关派生允许集、会话级小表记执行层发放的确认提示、下一回合把句柄与本回合用户原话原样透传（`packages/agent/src/execution-runtime.ts:36-40`）。冻结、操作绑定、有效期、一次性/防重放与业务校验全归执行层（`packages/contracts/src/execution-contract.ts:27-30`）。
+宿主只留三类确认职责：按装配开关派生允许集、会话级小表记执行层发放的确认提示、下一回合把句柄与本回合用户原话原样透传（`packages/agent/src/execution-runtime.ts:36-40`）。冻结、操作绑定、有效期、一次性/防重放与业务校验全归执行层（`packages/contracts/src/execution-contract.ts:27-30`）。⚠️ `AGENTS.md:53` 把 `effects` 列为宿主「只识别」的通用字段之一，但现行生产代码无读取点（仅契约注释 `:31` 与 eval sim 计数器）；以代码为准：`effects` 目前不是跨层字段。
 
-> ⚠️ `AGENTS.md:53` 把 `effects` 列为宿主「只识别」的通用字段之一，但现行生产代码无读取点（仅契约注释 `:31` 与 eval sim 计数器）。以代码为准：`effects` 目前不是跨层字段。
 ## 3. 宿主禁止清单
 
 禁止新增（`AGENTS.md:38`）：Planner、Router、意图分类器、规则引擎、事件总线、通用 Workflow Engine、平台模拟框架、新任务状态框架、第二套协议、Docker/K8s/沙箱。
