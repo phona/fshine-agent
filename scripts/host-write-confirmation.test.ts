@@ -353,9 +353,10 @@ async function runWriteTurn(
   return await fx.session.send(input.userText);
 }
 
-describe('写确认回环·带逐条内容（--records）', () => {
+describe('写确认回环·带逐条内容（--records 结构化数组）', () => {
   const records = [{ name: 'alpha-item-3', value: 100 }, { name: 'alpha-item-4', value: 200 }];
-  const prepareArgs = { '--collection': 'alpha', '--window': 'W1', '--records': JSON.stringify(records) };
+  // 模型给的是结构化数组（不是 JSON 字符串）：宿主原样透传，执行层逐项校验。
+  const prepareArgs = { '--collection': 'alpha', '--window': 'W1', '--records': records };
   const commitArgs = { ...prepareArgs };
 
   it('1b 摘要列出用户给的内容；commit 写入的正是这些 name/value；读回可见', async () => {

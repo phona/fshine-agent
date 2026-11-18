@@ -225,9 +225,8 @@ function rateLimitRefused(opName, mode, via, args) {
 // 只对登记了该 flag 的 operation 生效（dummy.query / dummy.prepare / dummy.commit）；
 // 其它 operation 保持「未声明 flag 在 CLI 路径被忽略、在结构化 call 路径被拒」的既有行为。
 // 取值必须是 0..60000 的整数，超限确定性拒绝（exit 2 + failed 信封 + 审计行），不截断。
-function delayOf(op, args) {
+function delayOf(op, flags) {
   if (!(op.args?.flags ?? []).some((f) => f.flag === '--delay-ms')) return { ok: true, ms: 0 };
-  const { flags } = parseFlags(args);
   return parseDelayMs(flags['delay-ms']);
 }
 function refuseDelay(opName, mode, via, args, parsed) {
@@ -248,6 +247,31 @@ function parseFlags(argv) {
   }
   return { flags, positional };
 }
+/**
+ * 结构化 call 的 args（Record）→ 与 parseFlags 同形的 { flags, positional }：
+ * 键去掉 `--` 前缀，**值原样保留**（数组/对象不拍平、不 stringify）。宿主/模型给的是
+ * 结构化 JSON，执行层按自己的声明逐项校验；argv 路径的字符串形态只留给人类与既有测试。
+ */
+function structuredArgsOf(op, args) {
+  const flags = {}; const positional = [];
+  const declaredPositional = new Set((op.args?.positional ?? []).map((p) => p.name));
+  for (const [key, value] of Object.entries(args)) {
+    if (value === false || value === null || value === undefined) continue;
+    const bare = key.startsWith('--') ? key.slice(2) : key;
+    if (declaredPositional.has(key) || declaredPositional.has(bare)) { positional.push(value); continue; }
+    flags[bare] = value;
+  }
+  return { flags, positional };
+}
+/** argv 路径（人类/既有测试）：`--records` 在命令行上必然是字符串，这里只做语法还原，
+ *  数组语义与逐项校验仍归 normalizeRecords；解析失败保持字符串，让执行层报明确形态错误。 */
+function argvFlagsOf(argv) {
+  const { flags, positional } = parseFlags(argv);
+  if (typeof flags.records === 'string') {
+    try { flags.records = JSON.parse(flags.records); } catch { /* normalizeRecords 报形态错误 */ }
+  }
+  return { flags, positional };
+}
 function resolveOperation(ref) {
   if (!ref) return null;
   const byName = OPERATIONS.find((o) => o.name === ref);
@@ -258,7 +282,7 @@ function resolveOperation(ref) {
   const name = map[base];
   return name ? OPERATIONS.find((o) => o.name === name) ?? null : null;
 }
-function decide(mode, op, args) {
+function decide(mode, op, flags) {
   if (!['query', 'prepare', 'commit'].includes(mode)) return { allowed: false, reason: `Unknown mode "${mode}"` };
   if (!op.serve || op.serve[mode] !== true) return { allowed: false, reason: `${op.name} is not open in ${mode} mode (serve.${mode} is not true)` };
   const sem = ACCESS_SEMANTICS[op.access];
@@ -266,7 +290,8 @@ function decide(mode, op, args) {
   if (mode === 'query' && sem.confirm) return { allowed: false, reason: `query only allows operations that do not write; ${op.name} requires confirmation, use commit` };
   if (mode === 'prepare') {
     if (op.access === 'write' && !op.writeFlag) return { allowed: false, reason: `prepare does not allow always-write operation ${op.name}` };
-    if (op.writeFlag && args.includes(op.writeFlag)) return { allowed: false, reason: `prepare does not allow ${op.writeFlag} on ${op.name} -- a write must go through commit` };
+    const writeKey = op.writeFlag ? op.writeFlag.replace(/^--/, '') : '';
+    if (writeKey !== '' && Object.prototype.hasOwnProperty.call(flags, writeKey)) return { allowed: false, reason: `prepare does not allow ${op.writeFlag} on ${op.name} -- a write must go through commit` };
   }
   return { allowed: true };
 }
@@ -292,8 +317,7 @@ function structuredModeOf(op) {
 // completed 落解析后的规范名（found.name，子串检索也落 canonical 名），not_found /
 // needs_input 落该次检索的名字（没有可解析的规范名）。不落对象名的 result 匹配不上任何
 // 命题 ⇒ 交叉核 fail-closed，不会把证据挂到错的对象上。
-function doQuery(opName, args) {
-  const { flags } = parseFlags(args);
+function doQuery(opName, flags) {
   const read = READ_DECLARATIONS[opName];
   if (!read) {
     emit(opName, 'failed', null, errObj('QUERY_REQUIRED', `No declarative read contract for ${opName}`));
@@ -317,8 +341,7 @@ function doQuery(opName, args) {
     ...(outcome.refused === undefined ? {} : { refused: outcome.refused }),
   };
 }
-function doScratch(opName, args) {
-  const { flags } = parseFlags(args);
+function doScratch(opName, flags) {
   if (!flags.input) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --input')); return 1; }
   let text;
   try { text = fs.readFileSync(flags.input, 'utf8'); } catch (e) { emit(opName, 'failed', null, { code: 'INPUT_NOT_FOUND', message: String(e.message) }); return 1; }
@@ -352,23 +375,41 @@ function confirmationPolicy() {
     readbackShort: cfg !== null && typeof cfg === 'object' && cfg.readbackShort === true,
   };
 }
-/** `--records`：逐条内容的 JSON 数组（name+value，≤50）。不给则沿用「只按条数新增」。 */
-function parseRecordsFlag(raw) {
+/** `--records`：结构化数组（元素 {name, value}）。不给则沿用「只按条数新增」。
+ *  写路径只接受数组；命令行形态的 JSON 字符串由 argvFlagsOf 在入口处还原成数组
+ *  （执行层不再在 prepare/commit 里解析 JSON 字符串——模型给的是结构化 tool 参数）。
+ *  上限 = 执行层自己的单次写入能力（RECORDS_MAX，不是让调用方拆批的提示）；
+ *  逐项校验且报「第 N 条」；**全部校验通过后才发放提案/落盘**（任一不合法 → 一条都不写）。 */
+const RECORDS_MAX = 500;
+function normalizeRecords(raw) {
   if (raw === undefined || raw === null || raw === '') return undefined;
-  let parsed;
-  try {
-    parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-  } catch (e) {
-    return { error: 'INVALID_RECORDS', message: `--records 不是合法 JSON：${e.message}。正确形态：--records '[{"name":"alpha-item-3","value":100}]'（JSON 数组，每项 name+value）` };
+  if (typeof raw === 'string') {
+    return {
+      error: 'INVALID_RECORDS',
+      message: '--records 必须是结构化数组（每项 {name, value}），不要传 JSON 字符串。'
+        + '正确形态：--records \'[{"name":"alpha-item-3","value":100}]\'（命令行）或直接把数组作为参数值（工具调用）',
+    };
   }
-  if (!Array.isArray(parsed) || parsed.length === 0) return { error: 'INVALID_RECORDS', message: '--records 必须是非空 JSON 数组' };
-  if (parsed.length > 50) return { error: 'INVALID_RECORDS', message: '--records 最多 50 条' };
+  if (!Array.isArray(raw)) return { error: 'INVALID_RECORDS', message: '--records 必须是数组（每项 {name, value}）' };
+  if (raw.length === 0) return { error: 'INVALID_RECORDS', message: '--records 不能是空数组' };
+  if (raw.length > RECORDS_MAX) {
+    return {
+      error: 'INVALID_RECORDS',
+      message: `--records 超过执行层单次写入上限 ${RECORDS_MAX} 条（收到 ${raw.length} 条）`,
+    };
+  }
   const records = [];
-  for (const entry of parsed) {
-    if (entry === null || typeof entry !== 'object') return { error: 'INVALID_RECORDS', message: '每条记录必须是 {name, value} 对象' };
+  for (let index = 0; index < raw.length; index += 1) {
+    const entry = raw[index];
+    const nth = `第 ${index + 1} 条`;
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      return { error: 'INVALID_RECORDS', message: `${nth}：不是 {name, value} 对象` };
+    }
     const name = typeof entry.name === 'string' && entry.name.trim() !== '' ? entry.name : undefined;
     const value = typeof entry.value === 'number' || typeof entry.value === 'string' ? entry.value : undefined;
-    if (name === undefined || value === undefined) return { error: 'INVALID_RECORDS', message: '每条记录必须同时给出 name 与 value' };
+    if (name === undefined && value === undefined) return { error: 'INVALID_RECORDS', message: `${nth}：缺 name 与 value（每项必须是 {name, value}）` };
+    if (name === undefined) return { error: 'INVALID_RECORDS', message: `${nth}：缺 name` };
+    if (value === undefined) return { error: 'INVALID_RECORDS', message: `${nth}：缺 value` };
     records.push({ name, value });
   }
   return { records };
@@ -377,7 +418,7 @@ function parseRecordsFlag(raw) {
 function normalizeWriteArgs(flags) {
   const collection = flags.collection || flags.topic;
   const window = flags.window || flags.round || 'W1';
-  const parsedRecords = parseRecordsFlag(flags.records);
+  const parsedRecords = normalizeRecords(flags.records);
   const rawCount = flags.count !== undefined ? Number(flags.count) : (parsedRecords && parsedRecords.records ? parsedRecords.records.length : 1);
   return {
     collection: typeof collection === 'string' && collection !== '' ? collection : null,
@@ -445,8 +486,7 @@ function refuseConfirmation(opName, args, via, code, message) {
   audit({ mode: 'commit', ...(via ? { via } : {}), script: opName, args, serve: orchestrated(), refused: code });
   return 3;
 }
-function doPrepare(opName, args) {
-  const { flags } = parseFlags(args);
+function doPrepare(opName, flags) {
   const state = loadState();
   const { collection, window, count, records, recordsError } = normalizeWriteArgs(flags);
   if (recordsError) { emit(opName, 'failed', null, errObj(recordsError.error, recordsError.message)); return 1; }
@@ -476,17 +516,19 @@ function doPrepare(opName, args) {
   const expiresLocal = new Intl.DateTimeFormat('zh-CN', {
     timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
   }).format(new Date(expiresAt));
-  const recordList = records === undefined
+  // 逐条内容最多列 10 条（确认摘要是给用户读的，200 条全列会淹掉重点）；条数单独说清。
+  const shownRecords = records === undefined ? [] : records.slice(0, 10);
+  const omittedRecords = records === undefined ? 0 : records.length - shownRecords.length;
+  const recordList = shownRecords.length === 0
     ? ''
-    : `：${records.map((r) => `${r.name}=${r.value}`).join('、')}`;
-  const summary = `将向集合「${collection}」的 ${window} 窗口新增 ${count} 条记录${recordList}；此操作不可撤销，需在 ${expiresLocal}（北京时间）前确认。`;
+    : `：${shownRecords.map((r) => `${r.name}=${r.value}`).join('、')}${omittedRecords > 0 ? `……（其余 ${omittedRecords} 条略）` : ''}`;
+  const summary = `将向集合「${collection}」的 ${window} 窗口新增记录：共 ${count} 条${recordList}；此操作不可撤销，需在 ${expiresLocal}（北京时间）前确认。`;
   emit(opName, 'needs_confirmation', { collection, window, count, expiresAt, status: 'pending' }, null, {
     confirmation: { handle, summary, expiresAt },
   });
   return 0;
 }
-function doCommit(opName, args, confirmation, via) {
-  const { flags } = parseFlags(args);
+function doCommit(opName, flags, confirmation, via) {
   // 集合级策略先于句柄校验：锁定集合的写路径仍以 COLLECTION_LOCKED 拒绝（旧契约保持）。
   const state = loadState();
   const { collection, window, count, records, recordsError } = normalizeWriteArgs(flags);
@@ -497,10 +539,10 @@ function doCommit(opName, args, confirmation, via) {
   const handle = confirmation && typeof confirmation === 'object' && typeof confirmation.handle === 'string' && confirmation.handle !== ''
     ? confirmation.handle
     : (typeof flags.confirmation === 'string' && flags.confirmation !== '' ? flags.confirmation : null);
-  if (!handle) return refuseConfirmation(opName, args, via, 'CONFIRMATION_REQUIRED', 'commit requires a confirmation handle (--confirmation <handle>)');
+  if (!handle) return refuseConfirmation(opName, flags, via, 'CONFIRMATION_REQUIRED', 'commit requires a confirmation handle (--confirmation <handle>)');
   const claim = claimConfirmation(opName, handle, { collection, window, count, ...(records === undefined ? {} : { records }) });
-  if (claim.locked === true) return refuseConfirmation(opName, args, via, 'CONFIRMATION_IN_PROGRESS', 'confirmation handle is being consumed by another call');
-  if (!claim.value.ok) return refuseConfirmation(opName, args, via, claim.value.code, claim.value.message);
+  if (claim.locked === true) return refuseConfirmation(opName, flags, via, 'CONFIRMATION_IN_PROGRESS', 'confirmation handle is being consumed by another call');
+  if (!claim.value.ok) return refuseConfirmation(opName, flags, via, claim.value.code, claim.value.message);
   // 已原子标记已用：从这里开始的任何失败都不允许第二次提交。
   const record = claim.value.record;
   const applyState = loadState();
@@ -549,17 +591,16 @@ function verifyProposalToken(token, proposalId, expiresAt, secret) {
   } catch { return false; }
 }
 function proposalTtlMs() { const n = Number(env('DUMMY_PROPOSAL_TTL_SECONDS', '')); return Number.isInteger(n) && n > 0 ? n * 1000 : 30 * 60 * 1000; }
-function doProposalCreate(opName, args) {
-  const { positional } = parseFlags(args);
+function doProposalCreate(opName, positional) {
   const file = positional[0];
   // 这个操作要的是**宿主提供的载荷文件**，模型侧没有这个通道——拒绝时必须指条明路，
   // 否则模型会换着写法反复撞（2026-11-18 live 实测：3 次 ENOENT 后仍无路可走）。
   if (!file) {
-    process.stderr.write('PROPOSAL_REFUSE 该操作需要宿主提供的载荷文件（模型侧没有这个通道）；要逐条新增请改用 dummy.prepare --records \'[{"name":"x","value":100}]\'\n');
+    process.stderr.write('PROPOSAL_REFUSE 该操作需要宿主提供的载荷文件（模型侧没有这个通道）；要逐条新增请改用 dummy.prepare --records \'[{"name":"x","value":100}]\'（结构化数组，直接作为参数值传）\n');
     return 3;
   }
   let payload;
-  try { payload = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { process.stderr.write(`PROPOSAL_REFUSE 载荷文件读不到：${e.message}；要逐条新增请改用 dummy.prepare --records '[{\"name\":\"x\",\"value\":100}]'\n`); return 3; }
+  try { payload = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { process.stderr.write(`PROPOSAL_REFUSE 载荷文件读不到：${e.message}；要逐条新增请改用 dummy.prepare --records（结构化数组，每项 {name, value}）\n`); return 3; }
   const allowed = ['collection', 'window', 'records'];
   const extra = Object.keys(payload).filter((k) => !allowed.includes(k));
   if (extra.length) { process.stderr.write(`PROPOSAL_REFUSE unknown field: ${extra.join(',')}\n`); emit(opName, 'failed', null, errObj('PROPOSAL_UNKNOWN_FIELD', `Unknown field: ${extra.join(',')}`)); return 3; }
@@ -588,8 +629,7 @@ function doProposalStatus(proposalId) {
   process.stdout.write(JSON.stringify({ proposalId, status: rec.status, createdAt: rec.createdAt, expiresAt: rec.expiresAt, expired: new Date(rec.expiresAt).getTime() < Date.now() }) + '\n');
   return 0;
 }
-function doProposalCommit(opName, args) {
-  const { flags } = parseFlags(args);
+function doProposalCommit(opName, flags) {
   const proposalId = flags['proposal-id'];
   if (!proposalId) { process.stderr.write('PROPOSAL_REFUSE missing --proposal-id\n'); return 3; }
   const proposals = loadProposals();
@@ -912,12 +952,18 @@ async function main() {
       confirmation = { handle, ...(call.confirmation.userText === undefined ? {} : { userText: call.confirmation.userText }) };
     }
     // Accept both legacy array format and current protocol object format.
+    // 两种形态都归一到 { flags, positional }：结构化对象的数组/对象值**原样保留**，
+    // 不再拍平成 argv 再重新 parse（拍平会把数组 stringify 成字符串，执行层只能收到
+    // "[object Object]" 或一段需要二次解析的 JSON）。审计行仍记调用方给的原始 args。
+    let op = resolveOperation(call.operation);
+    let callFlags;
+    let callPositional;
     if (Array.isArray(call.args)) {
       // legacy path: args is string[] (flat flag array) — no shape change.
+      ({ flags: callFlags, positional: callPositional } = parseFlags(call.args));
     } else if (typeof call.args === 'object' && call.args !== null) {
       // structured-call protocol path: args is Record<string, unknown>.
-      // Validate against operation declaration and convert to flat flag array.
-      const op = resolveOperation(call.operation);
+      // Validate against operation declaration; values stay structured.
       if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n'); audit({ mode: 'call', script: call.operation, args: call.args, serve: orchestrated(), refused: 'unregistered' }); return 3; }
       const allowed = new Set();
       for (const f of (op.args?.flags || [])) allowed.add(f.flag);
@@ -927,19 +973,10 @@ async function main() {
         process.stderr.write('CALL_REFUSE undeclared args: ' + undeclared.join(', ') + '\n');
         return 3;
       }
-      const flat = [];
-      for (const [key, value] of Object.entries(call.args)) {
-        if (value === false || value === null || value === undefined) continue;
-        flat.push(key);
-        // 结构化参数（数组/对象）按 JSON 传给下游：模型给结构化 tool 参数比手拼 JSON 字符串
-        // 可靠得多（2026-11-18 live：手拼 --records 反复语法错）。
-        if (value !== true) flat.push(typeof value === 'object' ? JSON.stringify(value) : String(value));
-      }
-      call.args = flat;
+      ({ flags: callFlags, positional: callPositional } = structuredArgsOf(op, call.args));
     } else {
       process.stderr.write('CALL_REFUSE payload args must be string[] or Record<string, unknown>\n'); return 3;
     }
-    const op = resolveOperation(call.operation);
     if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n' + unregisteredCallNotice(call.operation)); audit({ mode: 'call', script: call.operation, args: call.args, serve: orchestrated(), refused: 'unregistered' }); return 3; }
     // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
     // 两条路都**先记一行调用事实、再补一行最终结果**（2026-11-09 十审 major）：旧写法只在
@@ -953,38 +990,37 @@ async function main() {
     if (op.protocol === 'proposal.create') {
       const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
       audit({ callId, phase: 'start', mode: 'prepare', via: 'structured', script: op.name, args: call.args, serve: orchestrated(), protocol: op.protocol });
-      const code = doProposalCreate(op.name, call.args);
+      const code = doProposalCreate(op.name, callPositional);
       audit({ callId, phase: 'result', mode: 'prepare', via: 'structured', script: op.name, args: call.args, serve: orchestrated(), protocol: op.protocol, exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
       return code;
     }
     if (op.protocol === 'proposal.commit') {
-      const { flags: innerFlags } = parseFlags(call.args);
-      if (!innerFlags['proposal-id']) { process.stderr.write('PROPOSAL_REFUSE missing --proposal-id\n'); return 3; }
+      if (!callFlags['proposal-id']) { process.stderr.write('PROPOSAL_REFUSE missing --proposal-id\n'); return 3; }
       const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
-      audit({ callId, phase: 'start', mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: orchestrated(), protocol: op.protocol, proposalId: innerFlags['proposal-id'] });
-      const code = doProposalCommit(op.name, call.args);
-      audit({ callId, phase: 'result', mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: orchestrated(), protocol: op.protocol, proposalId: innerFlags['proposal-id'], exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      audit({ callId, phase: 'start', mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: orchestrated(), protocol: op.protocol, proposalId: callFlags['proposal-id'] });
+      const code = doProposalCommit(op.name, callFlags);
+      audit({ callId, phase: 'result', mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: orchestrated(), protocol: op.protocol, proposalId: callFlags['proposal-id'], exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
       return code;
     }
     // 结构化 call 无 mode 字段：按 operation 自己的 serve 矩阵派生（写 op 必须唯一开放）。
     const accessMode = structuredModeOf(op);
     if (accessMode === null) { process.stderr.write(`GATE_REFUSE no unambiguous mode for ${op.name}: serve matrix must open exactly one of prepare/commit for a write operation\n`); audit({ mode: 'call', script: op.name, args: call.args, serve: orchestrated(), refused: 'mode-ambiguous' }); return 3; }
-    const verdict = decide(accessMode, op, call.args);
+    const verdict = decide(accessMode, op, callFlags);
     if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: 'call', script: op.name, args: call.args, serve: orchestrated(), refused: verdict.reason }); return 3; }
     const planId = env2('EXECUTION_PLAN_ID', 'DUMMY_PLAN_ID', '');
     const requirePlan = env2('EXECUTION_REQUIRE_PLAN', 'DUMMY_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: orchestrated(), refused: 'PLAN_REQUIRED' }); return 3; }
     // 声明式延迟：先校验（超限确定性拒绝，不占限流名额），再取限流名额，再真实等待。
-    const declaredDelay = delayOf(op, call.args);
+    const declaredDelay = delayOf(op, callFlags);
     if (!declaredDelay.ok) return refuseDelay(op.name, accessMode, 'structured', call.args, declaredDelay);
     if (rateLimitRefused(op.name, accessMode, 'structured', call.args)) return 1;
     sleepSync(declaredDelay.ms);
     let code;
     let queryResult;
     let queryRefused;
-    if (op.name === 'dummy.query' || op.name === 'ballot.query') { const q = doQuery(op.name, call.args); code = q.code; queryResult = q.result; queryRefused = q.refused; }
-    else if (op.name === 'dummy.scratch' || op.name === 'ballot.scratch') code = doScratch(op.name, call.args);
-    else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, call.args);
+    if (op.name === 'dummy.query' || op.name === 'ballot.query') { const q = doQuery(op.name, callFlags); code = q.code; queryResult = q.result; queryRefused = q.refused; }
+    else if (op.name === 'dummy.scratch' || op.name === 'ballot.scratch') code = doScratch(op.name, callFlags);
+    else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, callFlags);
     else if (op.name === 'dummy.commit' || op.name === 'ballot.commit') {
       const secret = env2('EXECUTION_GATE_SECRET', 'DUMMY_GATE_SECRET', '');
       const token = env2('EXECUTION_COMMIT_TOKEN', 'DUMMY_COMMIT_TOKEN', '');
@@ -999,7 +1035,7 @@ async function main() {
         } catch { ok = false; }
         if (!ok) { process.stderr.write('GATE_REFUSE commit token verification failed\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: orchestrated(), refused: 'commit-token' }); return 3; }
       }
-      code = doCommit(op.name, call.args, confirmation, 'structured');
+      code = doCommit(op.name, callFlags, confirmation, 'structured');
     } else { process.stderr.write('GATE_REFUSE no handler for ' + op.name + '\n'); return 3; }
     // mode 记**按 access 分级**的值（2026-11-09 九审 major）：旧写法这里无脑记 'call'，
     // 而 bash 路径按 access 算 query/prepare——于是同一次 dummy.query，走 bash 落
@@ -1037,6 +1073,9 @@ async function main() {
     // 拒绝事实不变（审计行照旧落 refused='unregistered'，那是评测的「畸形调用」信号）；
     // 另附正确形态，让下一跳能拼对（教学，不是放行）。
     if (!op) { process.stderr.write(unregisteredNotice(cmd, target)); audit({ mode: cmd, script: target, args: rest, serve: orchestrated(), refused: 'unregistered' }); return 3; }
+    // argv 形态归一到 { flags, positional }：`--records` 的命令行字符串在这里还原成数组，
+    // 逐项校验与执行层单次写入上限都由 normalizeRecords 统一负责。
+    const { flags: argvFlags, positional: argvPositional } = argvFlagsOf(rest);
     // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
     // 起止两行 + 同一 callId（2026-11-09 十二审 major）：bash 侧这条路径与结构化侧同规，
     // 都要补结果行——否则 classifyExecutionCall 拿不到 exitCode=0，正常完成并读回的 bash
@@ -1044,35 +1083,34 @@ async function main() {
     if (op.protocol === 'proposal.create' && cmd === 'prepare') {
       const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
       audit({ callId, phase: 'start', mode: cmd, script: op.name, args: rest, serve: orchestrated(), protocol: op.protocol });
-      const code = doProposalCreate(op.name, rest);
+      const code = doProposalCreate(op.name, argvPositional);
       audit({ callId, phase: 'result', mode: cmd, script: op.name, args: rest, serve: orchestrated(), protocol: op.protocol, exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
       return code;
     }
     if (op.protocol === 'proposal.commit' && cmd === 'commit') {
-      const { flags } = parseFlags(rest);
-      if (!flags['proposal-id']) { process.stderr.write('PROPOSAL_REFUSE missing --proposal-id\n'); return 3; }
+      if (!argvFlags['proposal-id']) { process.stderr.write('PROPOSAL_REFUSE missing --proposal-id\n'); return 3; }
       const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
-      audit({ callId, phase: 'start', mode: cmd, script: op.name, args: rest, serve: orchestrated(), protocol: op.protocol, proposalId: flags['proposal-id'] });
-      const code = doProposalCommit(op.name, rest);
-      audit({ callId, phase: 'result', mode: cmd, script: op.name, args: rest, serve: orchestrated(), protocol: op.protocol, proposalId: flags['proposal-id'], exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      audit({ callId, phase: 'start', mode: cmd, script: op.name, args: rest, serve: orchestrated(), protocol: op.protocol, proposalId: argvFlags['proposal-id'] });
+      const code = doProposalCommit(op.name, argvFlags);
+      audit({ callId, phase: 'result', mode: cmd, script: op.name, args: rest, serve: orchestrated(), protocol: op.protocol, proposalId: argvFlags['proposal-id'], exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
       return code;
     }
-    const verdict = decide(cmd, op, rest);
+    const verdict = decide(cmd, op, argvFlags);
     if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), refused: verdict.reason }); return 3; }
     // Plan binding (only when the caller opts in, mirroring EXECUTION_REQUIRE_PLAN).
     const planId = env2('EXECUTION_PLAN_ID', 'DUMMY_PLAN_ID', '');
     const requirePlan = env2('EXECUTION_REQUIRE_PLAN', 'DUMMY_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), refused: 'PLAN_REQUIRED' }); return 3; }
-    const declaredDelay = delayOf(op, rest);
+    const declaredDelay = delayOf(op, argvFlags);
     if (!declaredDelay.ok) return refuseDelay(op.name, cmd, null, rest, declaredDelay);
     if (rateLimitRefused(op.name, cmd, null, rest)) return 1;
     sleepSync(declaredDelay.ms);
     let code;
     let queryResult;
     let queryRefused;
-    if (op.name === 'dummy.query' || op.name === 'ballot.query') { const q = doQuery(op.name, rest); code = q.code; queryResult = q.result; queryRefused = q.refused; }
-    else if (op.name === 'dummy.scratch' || op.name === 'ballot.scratch') code = doScratch(op.name, rest);
-    else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, rest);
+    if (op.name === 'dummy.query' || op.name === 'ballot.query') { const q = doQuery(op.name, argvFlags); code = q.code; queryResult = q.result; queryRefused = q.refused; }
+    else if (op.name === 'dummy.scratch' || op.name === 'ballot.scratch') code = doScratch(op.name, argvFlags);
+    else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, argvFlags);
     else if (op.name === 'dummy.commit' || op.name === 'ballot.commit') {
       // Direct (non-proposal) commit requires a commit token when a gate secret is set,
       // mirroring gateway commit-token binding (operation name preferred).
@@ -1089,7 +1127,7 @@ async function main() {
         } catch { ok = false; }
         if (!ok) { process.stderr.write('GATE_REFUSE commit token verification failed\n'); audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), refused: 'commit-token' }); return 3; }
       }
-      code = doCommit(op.name, rest, undefined, null);
+      code = doCommit(op.name, argvFlags, undefined, null);
     } else { process.stderr.write(`GATE_REFUSE no handler for ${op.name}\n`); return 3; }
     // query 的 completed/needs_input/not_found 行把该次实际结果状态写进审计行 result
     // （audited 申报模式交叉核的事实基准：结果状态与 items 都可供独立核对）；被拒/失败的
