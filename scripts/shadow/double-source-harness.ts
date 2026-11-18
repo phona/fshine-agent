@@ -143,6 +143,8 @@ function summariseOutcome(operation: string, outcome: ExecutionOutcome): string 
       return `未能完成：${operation}（failed）。`;
     case 'refused':
       return `未能完成：${operation}（refused）。`;
+    case 'accepted':
+      return `已受理：${operation}（长任务进行中）。`;
   }
 }
 

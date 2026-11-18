@@ -192,6 +192,13 @@ export interface TaskRegistryPort {
    * 缺省 = 不启用提醒（无法持久化「已发」事实时不发——fail-closed，避免重启重复打扰）。
    */
   claimLongRunningNotice?(taskId: string, stage: 'overdue' | 'stuck', at: string): boolean;
+  // ---- 长任务（契约 v4；全部可选：不实现 = 不支持长任务，零行为变化） ----
+  /** accepted 行（按 claimed_at 升序）：重启后重新 wait 的唯一来源。 */
+  listAcceptedOperations?(): readonly AcceptedOperationRecordView[];
+  /** accepted → 终态（wait 返回的原始回执；非 accepted 行不覆盖）。 */
+  settleAcceptedOperation?(dispatchKey: string, outcome: unknown): void;
+  /** 清 running 行的租约（任务保持 running，让出并发槽；不产状态转换事实）。 */
+  releaseTaskLease?(taskId: string): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +250,35 @@ export interface TaskExecutionInput {
   sessionId: string;
   /** waiting_user 答复接续时的用户答复原文（首轮执行缺省）。 */
   answer?: string;
+  /**
+   * 长任务续跑（契约 v4）：上一轮委派以 accepted 结束时，runner 用 wait 取回结果后
+   * 在这里把受理事实与执行层原始回执交回执行端；执行端据此渲染「长任务结果」并续跑
+   * 同一任务。缺省 = 首轮执行/普通接续（零变化）。
+   */
+  resumedOperation?: ResumedOperation;
+}
+
+/**
+ * 长任务受理事实（执行端返回 accepted 时携带；runner 据此释放槽位、落账并等待）。
+ * operationId 是执行层发放的不透明句柄（宿主只转交 wait/abort）；dispatchKey 是宿主
+ * 自己的稳定操作身份（账行键，重启后靠它读回同一行）。
+ */
+export interface AcceptedOperation {
+  operationId: string;
+  operation: string;
+  dispatchKey: string;
+  /** 执行层建议的轮询间隔（缺省由 runner 配置/缺省值决定）。 */
+  pollAfterMs?: number;
+}
+
+/** 续跑用：受理事实 + wait 返回的原始回执（执行端原样注入 Worker，不解释）。 */
+export interface ResumedOperation extends AcceptedOperation {
+  outcome: unknown;
+  /**
+   * 本次续跑是否跨越了宿主重启（等待项是从底账 accepted 行重建的）。
+   * 续跑注记据此区分「同一进程内唤醒」与「重启后唤醒」——Worker 的上一回合上下文不在了。
+   */
+  restarted?: boolean;
 }
 
 export interface TaskExecutionContext {
@@ -291,7 +327,12 @@ export type TaskExecutionOutcome =
    * U3：结果未知（无法证明本次调用属于已有操作 / 外部无回执 / 调用中断）——
    * 不是成功、也不是已确认失败；落 failed + reason=result_unknown，禁止自动重试。
    */
-  | { kind: 'result_unknown'; reason: string };
+  | { kind: 'result_unknown'; reason: string }
+  /**
+   * 长任务已受理（契约 v4）：执行层返回 accepted，本轮工作结束——任务保持 running，
+   * runner 释放槽位与租约，并落账等待（重启后按账行重新 wait）。不是失败、不是完成。
+   */
+  | ({ kind: 'accepted' } & AcceptedOperation);
 
 export interface TaskExecutor {
   execute(task: TaskExecutionInput, context: TaskExecutionContext): Promise<TaskExecutionOutcome>;
@@ -336,6 +377,43 @@ export interface LongRunningNoticePort {
 export interface RunnerTimers {
   set(callback: () => void, delayMs: number): unknown;
   clear(handle: unknown): void;
+}
+
+// ---------------------------------------------------------------------------
+// 长任务等待端口（契约 v4；装配方用 ExecutionClient.wait/abort 实现）
+// ---------------------------------------------------------------------------
+
+/** wait 的机械结果（accepted = 窗口内仍在执行；其余 = 终态）。 */
+export interface LongTaskWaitResult {
+  status: 'accepted' | 'completed' | 'failed' | 'refused' | 'needs_input' | 'needs_confirmation';
+  /** 执行层建议的下次轮询间隔（accepted 时有效）。 */
+  pollAfterMs?: number;
+  /** failed/refused 的机械话术（落 failureReason 用；不编造）。 */
+  message?: string;
+  /** 执行层原始回执（原样交给续跑回合；runner 不解释）。 */
+  outcome: unknown;
+}
+
+export interface LongTaskWaitPort {
+  /**
+   * 长轮询 wait(operationId, timeoutMs)；窗口内未完成返回 accepted。
+   * signal 中止后应尽快以 AbortError 拒绝（runner 的取消路径）。
+   */
+  wait(operationId: string, timeoutMs: number, signal?: AbortSignal): Promise<LongTaskWaitResult>;
+  /** 请求执行层中止；只有 aborted:true 才算确认停掉。缺省 = 不支持中止。 */
+  abort?(operationId: string): Promise<{ aborted: boolean; reason?: string }>;
+  /** 单次长轮询窗口（缺省 30s）。 */
+  timeoutMs?: number;
+  /** accepted 未给 pollAfterMs 时的重排间隔（缺省 1s）。 */
+  pollAfterMs?: number;
+}
+
+/** runner 只读的 accepted 账行投影（实现方 = task-registry 的 OperationRecord）。 */
+export interface AcceptedOperationRecordView {
+  dispatchKey: string;
+  taskId?: string;
+  operation: string;
+  outcome?: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +465,13 @@ export interface TaskRunnerOptions {
   waitingScanThrottleMs?: number;
   /** 收尾错误的观察点（如外部先落终态、底账拒绝非法边）：不改变任务事实，只如实上报。 */
   onError?: (failure: { taskId: string; error: unknown }) => void;
+  /**
+   * 长任务等待端口（契约 v4；装配方用 ExecutionClient 的 wait/abort 实现）。
+   * 注入后并配合底账的 accepted 行能力：accepted 回合释放槽位后由 runner 的**同一个**
+   * 有界定时器驱动 wait；完成即续跑、超窗按 pollAfterMs 重排、失败如实落终态、
+   * 用户取消走 abort。缺省 = 不支持长任务（accepted 会被当作装配错误确定性失败）。
+   */
+  longTasks?: LongTaskWaitPort;
 }
 
 export interface SubmitInput {
@@ -487,8 +572,19 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     && longRunningNotice !== undefined
     && longRunningRowsSource !== undefined;
   const waitingConsumerEnabled = waitUserTimeoutMs > 0 && (registry.listWaiting !== undefined || registry.list !== undefined);
-  /** 两个消费者共用**同一个**有界定时器轮（不新增第二个循环）。 */
-  const dueConsumerEnabled = waitingConsumerEnabled || longRunningConsumerEnabled;
+  /**
+   * 长任务等待（契约 v4）：需要注入端口 + 底账 accepted 行能力 + 状态落定/清租约能力。
+   * 缺一项 = 不支持长任务（accepted 在 settle 处按装配错误确定性失败，不留下无人推进的行）。
+   */
+  const longTasks = options.longTasks;
+  const longTaskEnabled = longTasks !== undefined
+    && registry.listAcceptedOperations !== undefined
+    && registry.settleAcceptedOperation !== undefined
+    && registry.releaseTaskLease !== undefined;
+  const longTaskPollMs = longTasks?.pollAfterMs ?? 1_000;
+  const longTaskWaitTimeoutMs = longTasks?.timeoutMs ?? 30_000;
+  /** 两个消费者共用**同一个**有界定时器轮（不新增第二个循环）；长任务等待也接在这一个上。 */
+  const dueConsumerEnabled = waitingConsumerEnabled || longRunningConsumerEnabled || longTasks !== undefined;
   let lastDueScan: { at: number; nextDue?: number } | undefined;
   const timers: RunnerTimers | undefined = dueConsumerEnabled
     ? options.timers ?? {
@@ -514,6 +610,32 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   const controllers = new Map<string, AbortController>();
   const inFlight = new Map<string, Promise<void>>();
   let pumpQueued = false;
+
+  /**
+   * 长任务等待表（dispatchKey → 等待项）。不是队列：队列仍是底账 queued 行；这里只是
+   * 「本进程正在等谁」的账，条目可由 pump 从底账 accepted 行重建（重启路径）。
+   */
+  interface WaiterEntry {
+    taskId: string;
+    dispatchKey: string;
+    operation: string;
+    operationId: string;
+    pollAfterMs: number;
+    /** 下次允许发起 wait 的时刻（epoch ms；超窗重排、瞬时故障退避都写这里）。 */
+    nextDue: number;
+    /** 等待起点（execution_wait_resumed 的 waitedMs 口径）。 */
+    startedAt: number;
+    inFlight: boolean;
+    /** 等待项由底账重建（上一次进程留下的 accepted 行）= 宿主重启后续等。 */
+    restarted?: boolean;
+    controller?: AbortController;
+  }
+  const waiters = new Map<string, WaiterEntry>();
+  /**
+   * 在飞的取消确认调用（whenIdle 收尾等待）。wait 本身是长轮询、可以挂很久，**不**计入
+   * idle 判据——它是等待账，不是执行回合；续跑回合会写 inFlight，whenIdle 照常等它。
+   */
+  const cancelCalls = new Set<Promise<void>>();
 
   function report(taskId: string, error: unknown): void {
     if (onError === undefined) return;
@@ -702,10 +824,224 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     return { noticed, ...(nextDue === undefined ? {} : { nextDue }) };
   }
 
+  /** accepted outcome 的机械读取（operationId/pollAfterMs 是执行层给的形状；坏形状跳过）。 */
+  function acceptedOf(outcome: unknown): { operationId: string; pollAfterMs?: number } | undefined {
+    if (outcome === null || typeof outcome !== 'object') return undefined;
+    const record = outcome as { operationId?: unknown; pollAfterMs?: unknown };
+    if (typeof record.operationId !== 'string' || record.operationId === '') return undefined;
+    const poll = typeof record.pollAfterMs === 'number' && Number.isFinite(record.pollAfterMs) && record.pollAfterMs >= 0
+      ? record.pollAfterMs
+      : undefined;
+    return { operationId: record.operationId, ...(poll === undefined ? {} : { pollAfterMs: poll }) };
+  }
+
+  /** 从底账重建等待表（重启路径）：accepted 行 → 本进程等待项。任务已终态的行不进入
+   * （不复活已结束的事实）；同时清一次租约（进程在 settle 后、清租约前崩溃时补上，
+   * 避免长任务等待期间被 expireLeases 判 result_unknown）。
+   */
+  function syncWaiters(nowMs: number): void {
+    if (!longTaskEnabled) return;
+    for (const row of registry.listAcceptedOperations!()) {
+      if (row.taskId === undefined || waiters.has(row.dispatchKey)) continue;
+      let task: TaskRecordView;
+      try {
+        task = registry.get(row.taskId);
+      } catch (error) {
+        report(row.taskId, error);
+        continue;
+      }
+      if (task.status !== 'running') continue;
+      const accepted = acceptedOf(row.outcome);
+      if (accepted === undefined) {
+        report(row.taskId, new Error(`accepted 账行缺少 operationId（${row.dispatchKey}），无法等待。`));
+        continue;
+      }
+      waiters.set(row.dispatchKey, {
+        taskId: row.taskId,
+        dispatchKey: row.dispatchKey,
+        operation: row.operation,
+        operationId: accepted.operationId,
+        pollAfterMs: accepted.pollAfterMs ?? longTaskPollMs,
+        nextDue: nowMs,
+        startedAt: nowMs,
+        inFlight: false,
+        restarted: true,
+      });
+      try {
+        registry.releaseTaskLease?.(row.taskId);
+      } catch (error) {
+        report(row.taskId, error);
+      }
+    }
+  }
+
+  /** 发起一轮 wait（异步、不阻塞 pump；结果经 handleWaitResult 推进）。 */
+  function startWait(entry: WaiterEntry, nowMs: number): void {
+    if (entry.inFlight) return;
+    entry.inFlight = true;
+    const controller = new AbortController();
+    entry.controller = controller;
+    // waitedMs 口径 = 从受理/发现开始的整段等待（entry.startedAt），不是最后一个 wait 窗口。
+    const startedAt = entry.startedAt;
+    const call = (async (): Promise<void> => {
+      let result: LongTaskWaitResult;
+      try {
+        result = await longTasks!.wait(entry.operationId, longTaskWaitTimeoutMs, controller.signal);
+      } catch (error) {
+        // 取消（abort 路径）不算故障；其余（出站失败/子进程被杀）按瞬时故障退避重排，
+        // 不把任务判死——长任务结果只能由 wait 的终态落定。
+        if (!controller.signal.aborted) {
+          const live = waiters.get(entry.dispatchKey);
+          if (live === entry) {
+            entry.nextDue = now().getTime() + entry.pollAfterMs;
+            schedulePump();
+          }
+        }
+        return;
+      } finally {
+        entry.inFlight = false;
+        if (entry.controller === controller) delete entry.controller;
+      }
+      try {
+        await handleWaitResult(entry, result, startedAt);
+      } catch (error) {
+        report(entry.taskId, error);
+      }
+    })();
+    void call.catch(() => undefined);
+  }
+
+  /** wait 返回后的推进：accepted=重排；完成=续跑 Worker；失败=如实落终态。 */
+  async function handleWaitResult(entry: WaiterEntry, result: LongTaskWaitResult, startedAt: number): Promise<void> {
+    const nowMs = now().getTime();
+    const live = waiters.get(entry.dispatchKey);
+    if (live !== entry) return; // 已被取消/外部终态摘除：不再推进
+    if (result.status === 'accepted') {
+      log?.({ event: 'execution_wait_timeout', operationId: entry.operationId });
+      entry.nextDue = nowMs + (result.pollAfterMs ?? entry.pollAfterMs);
+      schedulePump();
+      return;
+    }
+    const task = registry.get(entry.taskId);
+    if (task.status !== 'running') {
+      waiters.delete(entry.dispatchKey);
+      return;
+    }
+    if (result.status === 'failed' || result.status === 'refused') {
+      // 失败/拒绝也要唤醒 Worker（续跑注记 #3）：先取许可再落账；许可不足就保持 accepted
+      // 账行（事实不丢），稍后重排。执行端会据失败事实如实说明并给出可选项。
+      const acquired = policy.acquire('background', { taskId: entry.taskId });
+      if (isRejection(acquired) || acquired.state === 'queued') {
+        if (!isRejection(acquired)) policy.release(acquired);
+        entry.nextDue = nowMs + entry.pollAfterMs;
+        schedulePump();
+        return;
+      }
+      waiters.delete(entry.dispatchKey);
+      registry.settleAcceptedOperation!(entry.dispatchKey, result.outcome);
+      log?.({ event: 'execution_wait_resumed', operationId: entry.operationId, waitedMs: Math.max(0, nowMs - startedAt) });
+      startRound(registry.get(entry.taskId), acquired, undefined, {
+        operationId: entry.operationId,
+        operation: entry.operation,
+        dispatchKey: entry.dispatchKey,
+        pollAfterMs: entry.pollAfterMs,
+        ...(entry.restarted === true ? { restarted: true } : {}),
+        outcome: result.outcome,
+      });
+      return;
+    }
+    // 完成（含 needs_input/needs_confirmation）：先取许可再落账，许可不足就保持 accepted
+    // 账行（结果不丢），稍后重排。
+    const acquired = policy.acquire('background', { taskId: entry.taskId });
+    if (isRejection(acquired) || acquired.state === 'queued') {
+      if (!isRejection(acquired)) policy.release(acquired);
+      entry.nextDue = nowMs + entry.pollAfterMs;
+      schedulePump();
+      return;
+    }
+    waiters.delete(entry.dispatchKey);
+    registry.settleAcceptedOperation!(entry.dispatchKey, result.outcome);
+    log?.({ event: 'execution_wait_resumed', operationId: entry.operationId, waitedMs: Math.max(0, nowMs - startedAt) });
+    startRound(registry.get(entry.taskId), acquired, undefined, {
+      operationId: entry.operationId,
+      operation: entry.operation,
+      dispatchKey: entry.dispatchKey,
+      pollAfterMs: entry.pollAfterMs,
+      ...(entry.restarted === true ? { restarted: true } : {}),
+      outcome: result.outcome,
+    });
+  }
+
+  /** 本任务在等的长任务（内存表优先；重启后可能还没 sync，查一次底账）。 */
+  function pendingWaiterOf(taskId: string): WaiterEntry | undefined {
+    for (const entry of waiters.values()) {
+      if (entry.taskId === taskId) return entry;
+    }
+    if (!longTaskEnabled) return undefined;
+    for (const row of registry.listAcceptedOperations!()) {
+      if (row.taskId !== taskId) continue;
+      const accepted = acceptedOf(row.outcome);
+      if (accepted === undefined) continue;
+      return {
+        taskId,
+        dispatchKey: row.dispatchKey,
+        operation: row.operation,
+        operationId: accepted.operationId,
+        pollAfterMs: accepted.pollAfterMs ?? longTaskPollMs,
+        nextDue: now().getTime(),
+        startedAt: now().getTime(),
+        inFlight: false,
+        restarted: true,
+      };
+    }
+    return undefined;
+  }
+
+  /** 用户取消：请求执行层 abort；确认才落 cancelled，否则回 running 并如实记失败事件。 */
+  function abortPendingWait(entry: WaiterEntry): void {
+    entry.controller?.abort();
+    const call = (async (): Promise<void> => {
+      const abortFn = longTasks?.abort;
+      let aborted = false;
+      let reason = '适配器不支持中止长任务。';
+      if (abortFn !== undefined) {
+        try {
+          const result = await abortFn.call(longTasks, entry.operationId);
+          aborted = result.aborted;
+          if (result.reason !== undefined) reason = result.reason;
+        } catch (error) {
+          reason = error instanceof Error ? error.message : String(error);
+        }
+      }
+      try {
+        const status = registry.get(entry.taskId).status;
+        if (status !== 'cancelling' && status !== 'running') return;
+        if (aborted) {
+          waiters.delete(entry.dispatchKey);
+          // 账行如实关闭（长任务没有完成；错误码是宿主侧取消事实，不冒充执行层失败）。
+          registry.settleAcceptedOperation?.(entry.dispatchKey, {
+            status: 'failed',
+            error: { code: 'cancelled_by_user', message: '长任务已按用户请求中止。' },
+          });
+          registry.confirmCancelled(entry.taskId);
+          log?.({ event: 'execution_aborted', operationId: entry.operationId, result: 'cancelled' });
+          return;
+        }
+        log?.({ event: 'execution_aborted', operationId: entry.operationId, result: 'failed', reason });
+        registry.transition(entry.taskId, 'running'); // 未获确认：不得宣称取消
+        entry.nextDue = now().getTime();
+        schedulePump();
+      } catch (error) {
+        report(entry.taskId, error);
+      }
+    })();
+    cancelCalls.add(call);
+    void call.finally(() => cancelCalls.delete(call));
+  }
+
   function pump(): PumpSummary {
     const recovered = registry.expireLeases(now().toISOString()).map((task) => task.taskId);
     let waiting: WaitingScan | undefined;
-    let scanned = false;
     let nextDue: number | undefined;
     if (dueConsumerEnabled) {
       const nowMs = now().getTime();
@@ -714,7 +1050,6 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         || (due !== undefined && nowMs >= due)
         || nowMs - lastDueScan.at >= waitingScanThrottleMs;
       if (shouldScan) {
-        scanned = true;
         if (waitingConsumerEnabled) {
           waiting = scanWaiting(nowMs);
           if (waiting.nextDue !== undefined) nextDue = waiting.nextDue;
@@ -726,6 +1061,16 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
           }
         }
         lastDueScan = { at: nowMs, ...(nextDue === undefined ? {} : { nextDue }) };
+      }
+      // 长任务等待：每趟从底账补齐等待项（accepted 行通常为 0~个别条），到点发起 wait。
+      if (longTasks !== undefined) {
+        syncWaiters(nowMs);
+        for (const entry of [...waiters.values()]) {
+          if (!entry.inFlight && entry.nextDue <= nowMs) startWait(entry, nowMs);
+          if (!entry.inFlight && (nextDue === undefined || entry.nextDue < nextDue)) {
+            nextDue = entry.nextDue;
+          }
+        }
       }
     }
     const started: string[] = [];
@@ -753,7 +1098,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       started.push(claimed.taskId);
       startRound(claimed, acquired);
     }
-    if (scanned) armDueTimer(nextDue);
+    if (dueConsumerEnabled) armDueTimer(nextDue);
     return {
       recovered,
       started,
@@ -762,7 +1107,12 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     };
   }
 
-  function startRound(task: TaskRecordView, permit: ResourcePermit, answer?: string): void {
+  function startRound(
+    task: TaskRecordView,
+    permit: ResourcePermit,
+    answer?: string,
+    resumedOperation?: ResumedOperation,
+  ): void {
     const controller = new AbortController();
     controllers.set(task.taskId, controller);
     // P0-C①：后台回合按真实 taskId 计入任务预算（calls=1 + 实际时长）；
@@ -776,6 +1126,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       principalId: task.principalId,
       sessionId: task.sessionId,
       ...(answer === undefined ? {} : { answer }),
+      ...(resumedOperation === undefined ? {} : { resumedOperation }),
     };
     // 同步发起（pump 返回前执行端已被调用）；经 Promise 化兜住执行端同步抛错。
     let round: Promise<TaskExecutionOutcome>;
@@ -848,6 +1199,33 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       return;
     }
     switch (outcome.kind) {
+      case 'accepted': {
+        // 长任务受理（契约 v4）：回合正常结束、任务保持 running；释放租约（槽位在 finally
+        // 释放）后交给等待端口推进。未注入等待端口 = 装配错误：不能留下无人推进的 running
+        // 任务，确定性失败并如实说明。
+        if (!longTaskEnabled) {
+          registry.fail(taskId, '长任务需要注入 LongTaskPort（wait/abort）与底账 accepted 能力才能推进。');
+          return;
+        }
+        try {
+          registry.releaseTaskLease?.(taskId);
+        } catch (error) {
+          report(taskId, error);
+        }
+        const nowMs = now().getTime();
+        waiters.set(outcome.dispatchKey, {
+          taskId,
+          dispatchKey: outcome.dispatchKey,
+          operation: outcome.operation,
+          operationId: outcome.operationId,
+          pollAfterMs: outcome.pollAfterMs ?? longTaskPollMs,
+          nextDue: nowMs,
+          startedAt: nowMs,
+          inFlight: false,
+        });
+        schedulePump();
+        return;
+      }
       case 'completed': {
         // 后台终态 = 执行端确认的回合结局（P2 契约：后台不经 inline judgeReportedTask——
         // 其「首个非 completed 判负」会把等待接续的历史行误判为 failed）。
@@ -906,6 +1284,12 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       case 'cancelling': {
         registry.requestCancel(taskId, mutationOptions(scope));
         controllers.get(taskId)?.abort(); // 本进程在飞才可 abort；否则只请求，不宣称取消
+        // 长任务没有在飞回合（槽位已释放）：取消必须走执行层 abort，确认后才落 cancelled。
+        const waiting = pendingWaiterOf(taskId);
+        if (waiting !== undefined) {
+          waiters.set(waiting.dispatchKey, waiting);
+          abortPendingWait(waiting);
+        }
         return { outcome: 'requested', taskId };
       }
       default:
@@ -943,6 +1327,10 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       }
       if (noticeSends.size > 0) {
         await Promise.allSettled([...noticeSends]);
+        continue;
+      }
+      if (cancelCalls.size > 0) {
+        await Promise.allSettled([...cancelCalls]);
         continue;
       }
       if (pumpQueued) {

@@ -259,6 +259,11 @@ export interface FileStore {
     name: string;
     bytes: Buffer;
     maxFileBytes: number;
+    /**
+     * 登记角色（可选；缺省 true = 用户产物）。false = 宿主内部/执行层诊断产物
+     * （如长任务大日志）：任务作用域可读，但交付面按 deliverable 过滤，不进用户附件。
+     */
+    deliverable?: boolean;
   }): RegisteredFile;
   /**
    * 任务回程文件登记（CAP-01 S2 ③，路径源）：执行层返回的 path → 校验 sourcePath 是
@@ -882,16 +887,26 @@ export function createFileStore(options: {
           createdAt: row.createdAt,
         }));
     },
-    registerTaskFile({ scope, taskId, name, bytes, maxFileBytes }) {
+    registerTaskFile({ scope, taskId, name, bytes, maxFileBytes, deliverable }) {
       // 内联字节面：超限拒收 → 任务池 sha256 去重（复用旧 fileId、不落盘）→ 新 file_id 落盘登记。
       if (bytes.length > maxFileBytes) throw new TaskFileRejectedError('size_limit');
       const sha256 = createHash('sha256').update(bytes).digest('hex');
       const reused = findTaskRowBySha(scope, taskId, sha256, name);
-      if (reused !== undefined) return { fileId: reused.fileId, name: reused.name, bytes: reused.bytes, sha256: reused.sha256, deliverable: true };
+      // 去重命中的行角色以已登记行为准（同一份字节不会因为本次声明而改变交付角色）。
+      if (reused !== undefined) {
+        return {
+          fileId: reused.fileId,
+          name: reused.name,
+          bytes: reused.bytes,
+          sha256: reused.sha256,
+          deliverable: reused.deliverable ?? true,
+        };
+      }
       const fileId = newFileId();
       const storagePath = fileStoragePathOf(workspaceRoot, scope, fileId, name);
       mkdirSync(path.dirname(storagePath), { recursive: true });
       writeFileSync(storagePath, bytes, { flag: 'wx', mode: 0o600 });
+      const role = deliverable ?? true;
       const row = store.insertFileRef({
         fileId,
         principalId: scope.principalId,
@@ -902,10 +917,10 @@ export function createFileStore(options: {
         bytes: bytes.length,
         activatedAt: Date.now(),
         createdAt: Date.now(),
-        // 任务回程文件（内联字节）：用户产物角色。
-        deliverable: true,
+        // 任务回程文件（内联字节）：缺省用户产物；日志等内部产物显式 false。
+        deliverable: role,
       });
-      return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256, deliverable: true };
+      return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256, deliverable: role };
     },
     registerTaskFileFromPath({ scope, taskId, sourcePath, allowedRoot, name, maxFileBytes }) {
       // 路径源：先包含性（任务暂存目录之外的任何路径不开口子），再 fd 纪律，再查重落盘。

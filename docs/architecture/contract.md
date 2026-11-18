@@ -1,17 +1,18 @@
 # 宿主 ↔ 执行层：契约与禁止面
 
 > 状态：现行。契约只承载最小执行语义；治理、业务与副作用判定归执行层；宿主禁止面由常驻守卫钉住。
-> 最后核对：2026-11-18（指针以现行代码为准；文档与代码冲突就地标 ⚠️，以代码为准）。
+> 最后核对：2026-11-19（指针以现行代码为准；文档与代码冲突就地标 ⚠️，以代码为准）。
 > 上游指针：`AGENTS.md:22-30`（职责边界）、`:38`（禁止新增）、`:52-53`（跨层协议）；`docs/decisions/index.md`；`packages/contracts/src/execution-contract.ts`。
 
 ## 1. 契约的语义面
 
-契约只定义语义、零传输实现：模块零 import，依赖方向「适配器 → 契约 ← 运行时」（`packages/contracts/src/execution-contract.ts:1-6`；守卫 `packages/agent/import-boundary.test.ts:188-191`）；`EXECUTION_CONTRACT_VERSION = 3`（`:37`）。
+契约只定义语义、零传输实现：模块零 import，依赖方向「适配器 → 契约 ← 运行时」（`packages/contracts/src/execution-contract.ts:1-6`；守卫 `packages/agent/import-boundary.test.ts:188-191`）；`EXECUTION_CONTRACT_VERSION = 4`（长任务异步 + 批量逐条结果，2026-11-19）。
 
 - **能力快照**：每会话取一次 `CapabilityManifest`，按其装配工具面；`operations[]` 只带执行层自述的 name/label/args/weight/estimatedSeconds（`packages/contracts/src/execution-contract.ts:51-69`），成本提示原样转述，宿主不解释、不裁档。
 - **请求**：`requestId`（宿主生成，重试换号，只作追踪）＋ `dispatchKey`（首次创建这笔逻辑操作时生成并持久化，重试/重规划只读回同值）＋ `operation` ＋ 对宿主不透明的 `args`（`:71-85`）；身份一致由 `packages/agent/dispatch-key-identity.test.ts` 钉住。
 - **参数结构化直传**：tool args 里的数组/对象原样进 `call --file` 请求体，适配器只按执行层声明把裸名改成前缀 flag，不拍平成命令字符串、不要求模型手拼 JSON（`packages/agent/src/dummy-cli-client.ts:204-215`、`:254-272`）。逐项校验与上限归执行层：`records` 报「第 N 条」、单次上限 500、全部通过后才一次落盘（原子）（`scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:378-415`；直传数组用例 `packages/agent/dummy-client.test.ts:255`）。
-- **结果五态互斥**：completed / needs_confirmation / needs_input / failed / refused（`packages/contracts/src/execution-contract.ts:96`、`:137-142`）。`refused`＝策略拒绝、`failed`＝执行失败，不得混用（`:16-20`）；`needs_input` 必带非空 `missing`，`needs_confirmation` 必带非空 handle/summary（`:17-20`、`:105-118`）。
+- **结果六态互斥**：completed / needs_confirmation / needs_input / failed / refused / accepted（`packages/contracts/src/execution-contract.ts:96`、`:137-142`）。`refused`＝策略拒绝、`failed`＝执行失败，不得混用（`:16-20`）；`needs_input` 必带非空 `missing`，`needs_confirmation` 必带非空 handle/summary（`:17-20`、`:105-118`）。`accepted` 只允许出现在声明 `long_running: true` 的 operation 上（`operationId` 非空）；宿主用 `wait(operationId, timeoutMs)` 长轮询取回终态、用 `abort(operationId)` 中止；未声明却返回 accepted 一律 fail-closed（协议违约，落 failed）。
+- **批量写以逐条结果为准**：`completed.items`（可选）是每条记录的真实结局（`ok / failed / unknown`）。只要有一条 failed/unknown，任务结局仍是 completed，但模型必须如实说「完成 X、未完成 Y」，**不得把 partial 说成成功**；整批原子失败时执行层返回 failed 且不写任何一条（不携带 items）。宿主只做形状校验与原样转述，不合并、不改写（`packages/contracts/src/execution-contract.ts` 的 `ExecutionItemResult`；夹具 `dummy.commit --fail-index` 演示原子失败）。
 - **确认仍走同一次 execute**：执行层先返 `needs_confirmation`，下一回合宿主把 `confirmation{handle, userText}` 原样带回；handle 不透明，宿主不解析、不比较、不判「这是不是在确认」（`:86-92`、`:127-136`；`packages/agent/write-confirmation.test.ts:339`）。确认摘要的中文人话与本地时间由执行层生成，宿主只转述 `summary`（`scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:514-525`；`packages/agent/src/execution-runtime.ts:1750-1758`）。
 - **取消只带信号**：`ExecutionCallOptions.signal`，不是独立 cancel 协议；适配器可忽略，宿主不依赖执行层配合也能终结任务（`:144-152`）。
 - **失败默认不可重试**：`ExecutionFailure.retryable` 缺省 = 不可重试，只有执行层显式 `true`（超时/网关暂不可用等瞬时故障）才放行；`false` 与未声明一律让宿主锁住该 `(operation, 对象)` 本回合不再发起（`packages/contracts/src/execution-contract.ts:121-134`；`packages/agent/src/execution-runtime.ts:1799-1806`、`:1868-1876`）。每次拦截落一条 `execution_retry_blocked`（operation/object/code/declaredRetryable），每次显式可重试的失败落一条 `execution_retry_allowed`（operation/object/code），均在 `apps/server/server.ts:911-940`；告警归部署侧读事件，宿主不自建告警通道——但「停了」与「一直在试」两种都要可见。

@@ -472,6 +472,50 @@ export function createSqliteTaskRegistry(
       const row = store.getOperation(dispatchKey);
       return row === undefined ? undefined : toOperationRecord(row);
     },
+    listAcceptedOperations() {
+      // 底账里按状态取（重启后本进程内存为空，唯一可恢复来源就是这行）。
+      return store.listOperationsByStatus('accepted').map(toOperationRecord);
+    },
+    settleAcceptedOperation(dispatchKey, outcome, options = {}) {
+      const now = options.now ?? new Date().toISOString();
+      return store.transaction((): OperationRecord => {
+        const current = store.getOperation(dispatchKey);
+        if (current === undefined) {
+          throw new Error(`未知的逻辑操作身份：${dispatchKey}（只认已持久化的 key，不接受现造身份）。`);
+        }
+        // 只推进 accepted 行；已终态/未知不覆盖（幂等，未知不被洗白）。
+        if (current.status !== 'accepted') return toOperationRecord(current);
+        const status = operationStatusOf(outcome);
+        if (status === 'accepted') return toOperationRecord(current);
+        store.applyOperationState(dispatchKey, {
+          expectedStatus: 'accepted',
+          status,
+          reason: status === 'unknown' ? 'result_unknown' : null,
+          outcomeJson: JSON.stringify(outcome),
+          settledAt: now,
+          deliveredAt: now,
+        });
+        return requireOperation(dispatchKey);
+      });
+    },
+    releaseTaskLease(taskId, options: MutationOptions = {}) {
+      const stored = require(taskId, options.scope);
+      if (stored.task.status !== 'running') return toRecord(stored);
+      // 长任务让出槽位：状态仍是 running（没有合法自反边），只清单据租约——别的字段原样保留。
+      store.applyTaskState(taskId, {
+        expectedStatus: 'running',
+        status: 'running',
+        reason: stored.task.reason ?? null,
+        resultText: stored.task.resultText ?? null,
+        failureReason: stored.task.failureReason ?? null,
+        pendingQuestion: stored.task.pendingQuestion,
+        waitingSince: stored.task.waitingSince ?? null,
+        leaseOwner: null,
+        leaseUntil: null,
+        updatedAt: new Date().toISOString(),
+      });
+      return toRecord(require(taskId));
+    },
     store,
     close() {
       store.close();

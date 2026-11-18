@@ -29,10 +29,12 @@ import {
   EXECUTION_CONTRACT_VERSION,
   type CapabilityManifest,
   type ConfirmationPrompt,
+  type ExecutionAbortResult,
   type ExecutionArgDeclaration,
   type ExecutionCallOptions,
   type ExecutionClient,
   type ExecutionFailure,
+  type ExecutionItemResult,
   type ExecutionOutcome,
   type ExecutionRequest,
   type MissingInput,
@@ -47,6 +49,11 @@ export interface RawGatewayOperation {
   /** 执行层自述的成本提示（A1）：形状校验后投影为契约的 weight/estimatedSeconds。 */
   weight?: unknown;
   est_seconds?: unknown;
+  /**
+   * 长任务声明（契约 v4）：只做形状校验（true 才投影）——执行层声明该 operation 可能
+   * 返回 accepted；宿主据此决定是否允许 accepted（未声明却返回 = 协议违约，fail-closed）。
+   */
+  long_running?: unknown;
   args?: {
     positional?: Array<{ name?: string; required?: boolean }>;
     flags?: Array<{ flag?: string; required?: boolean; style?: string }>;
@@ -99,6 +106,11 @@ interface ResultEnvelope {
   data?: unknown;
   error?: unknown;
   confirmation?: unknown;
+  /** 长任务受理句柄（accepted 信封的顶层字段，与 confirmation 同层）。 */
+  operationId?: unknown;
+  pollAfterMs?: unknown;
+  /** 批量写逐条结果（completed 信封的顶层字段；与 data 同层，宿主只做形状校验）。 */
+  items?: unknown;
 }
 
 export function createDummyCliClient(options: DummyCliClientOptions): DummyCliClient {
@@ -106,11 +118,14 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
   const gatewayPath = path.join(options.root, options.gateway);
   let listing: Promise<readonly RawGatewayOperation[]> | undefined;
 
-  function runGateway(args: string[], signal?: AbortSignal): Promise<GatewayRun> {
+  function runGateway(args: string[], signal?: AbortSignal, timeoutOverrideMs?: number): Promise<GatewayRun> {
     // 预取消：不 spawn、不产生任何网关副作用（与 run_js 执行器的预取消同口径）。
     if (signal?.aborted === true) {
       return Promise.resolve({ code: null, stdout: '', stderr: '', aborted: true });
     }
+    // wait 的长轮询窗口可以超过通用单次调用上限：调用方给出覆盖值（网关内部按 timeoutMs
+    // 自己返回 accepted，适配器只负责别在窗口内把自己的子进程杀掉）。
+    const callTimeoutMs = timeoutOverrideMs ?? timeoutMs;
     return new Promise((resolve) => {
       let settled = false;
       let timer: NodeJS.Timeout | undefined;
@@ -145,7 +160,7 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
       timer = setTimeout(() => {
         child.kill('SIGTERM');
         settle({ code: null, stdout: '', stderr: '', timedOut: true });
-      }, timeoutMs);
+      }, callTimeoutMs);
       if (signal !== undefined) signal.addEventListener('abort', onAbort, { once: true });
     });
   }
@@ -189,6 +204,8 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
             ...(typeof operation.label === 'string' && operation.label !== '' ? { label: operation.label } : {}),
             ...(weight === undefined ? {} : { weight }),
             ...(estimatedSeconds === undefined ? {} : { estimatedSeconds }),
+            // 契约 v4：long_running 只认显式 true（缺省/其它形状 = 未声明）。
+            ...(operation.long_running === true ? { long_running: true } : {}),
             args: declaredArgsOf(operation),
           };
         }),
@@ -223,6 +240,48 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
       } finally {
         rmSync(scratch, { recursive: true, force: true });
       }
+    },
+    /**
+     * 长轮询等待（契约 v4）：`wait --operation-id <id> --timeout-ms <n>` 在网关侧阻塞到
+     * 完成/失败/窗口到期；窗口到期返回 accepted（仍在执行）。适配器的子进程上限取
+     * `max(timeoutMs + 5s, 通用上限)`——窗口是网关自己的事，别在窗口内杀它。
+     */
+    async wait(
+      operationId: string,
+      timeoutMs: number,
+      signal?: AbortSignal,
+    ): Promise<ExecutionOutcome> {
+      const run = await runGateway(
+        ['wait', '--operation-id', operationId, '--timeout-ms', String(timeoutMs), '--state-dir', options.stateDir],
+        signal,
+        Math.max(timeoutMs + 5_000, timeoutMs),
+      );
+      if (run.aborted === true) {
+        const error = new Error('执行层等待已被取消。');
+        error.name = 'AbortError';
+        throw error;
+      }
+      return waitOutcomeOf(run, operationId, timeoutMs);
+    },
+    /** 中止（契约 v4）：只有执行层明确回 `aborted: true` 才算停掉，其余如实返回失败原因。 */
+    async abort(operationId: string, callOptions?: ExecutionCallOptions): Promise<ExecutionAbortResult> {
+      const run = await runGateway(
+        ['abort', '--operation-id', operationId, '--state-dir', options.stateDir],
+        callOptions?.signal,
+      );
+      if (run.aborted === true) return { aborted: false, reason: '中止请求已被宿主取消。' };
+      if (run.timedOut === true) return { aborted: false, reason: `中止请求超时（${timeoutMs}ms）。` };
+      if (run.spawnFailed === true) return { aborted: false, reason: '执行层网关无法启动。' };
+      const envelope = parseEnvelope(run.stdout);
+      const data = envelope?.data;
+      if (envelope?.status === 'completed' && data !== null && typeof data === 'object'
+        && (data as { aborted?: unknown }).aborted === true) {
+        return { aborted: true };
+      }
+      const reason = data !== null && typeof data === 'object' && typeof (data as { reason?: unknown }).reason === 'string'
+        ? (data as { reason: string }).reason
+        : (run.stderr.trim() !== '' ? run.stderr.trim() : `执行层未确认中止（exit ${String(run.code)}）。`);
+      return { aborted: false, reason };
     },
   };
 }
@@ -366,7 +425,12 @@ function outcomeOf(
   if (envelope) {
     const status = envelope.status;
     if (status === 'completed') {
-      return { status: 'completed', data: envelope.data ?? undefined };
+      const items = itemsOf(envelope);
+      return {
+        status: 'completed',
+        data: envelope.data ?? undefined,
+        ...(items === undefined ? {} : { items }),
+      };
     }
     if (status === 'needs_confirmation') {
       const confirmation = confirmationOf(envelope.confirmation);
@@ -389,6 +453,9 @@ function outcomeOf(
         data: envelope.data ?? undefined,
         error: failureOf(envelope.error),
       };
+    }
+    if (status === 'accepted') {
+      return acceptedOutcomeOf(envelope);
     }
     if (status === 'not_found') {
       // 执行层的确定性答案（查无匹配）：执行完成，事实在 data 里，宿主不改写语义。
@@ -413,6 +480,137 @@ function outcomeOf(
     error: {
       code: 'EXECUTION_NO_RESULT',
       message: (stderr !== '' ? stderr : run.stdout.trim()).slice(0, 500) || '执行层没有返回结果信封。',
+    },
+  };
+}
+
+/**
+ * 批量写逐条结果的形状校验（契约 v4）：只收 index 为非负整数、status 为
+ * ok/failed/unknown 的条目；reason 非空字符串才带上。信封顶层 items 优先，
+ * 其次 data.items（执行层两种放法都认）。没有合法条目 = 不携带 items。
+ */
+function itemsOf(envelope: ResultEnvelope): ExecutionItemResult[] | undefined {
+  const candidate = Array.isArray(envelope.items)
+    ? envelope.items
+    : (envelope.data !== null && typeof envelope.data === 'object' && Array.isArray((envelope.data as { items?: unknown }).items)
+      ? (envelope.data as { items: unknown[] }).items
+      : undefined);
+  if (candidate === undefined) return undefined;
+  const items: ExecutionItemResult[] = [];
+  for (const entry of candidate) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const record = entry as { index?: unknown; status?: unknown; reason?: unknown };
+    const index = typeof record.index === 'number' && Number.isInteger(record.index) && record.index >= 0
+      ? record.index
+      : undefined;
+    const status = record.status === 'ok' || record.status === 'failed' || record.status === 'unknown'
+      ? record.status
+      : undefined;
+    if (index === undefined || status === undefined) continue;
+    items.push({
+      index,
+      status,
+      ...(typeof record.reason === 'string' && record.reason !== '' ? { reason: record.reason } : {}),
+    });
+  }
+  return items.length === 0 ? undefined : items;
+}
+
+/**
+ * accepted 信封的形状校验（与 confirmation 同口径）：operationId 必须是非空字符串；
+ * pollAfterMs 只收有限非负数（缺省/坏形状 = 不出现，宿主用缺省间隔）。形状不合法 =
+ * 执行层回执不可用，按 failed 机械分流——绝不把半截句柄交给宿主去 wait。
+ */
+function acceptedOutcomeOf(envelope: ResultEnvelope): ExecutionOutcome {
+  const candidate = envelope.operationId ?? (envelope.data !== null && typeof envelope.data === 'object'
+    ? (envelope.data as { operationId?: unknown }).operationId
+    : undefined);
+  if (typeof candidate !== 'string' || candidate === '') {
+    return {
+      status: 'failed',
+      error: { code: 'EXECUTION_BAD_ACCEPTED', message: '执行层返回的 accepted 缺少有效的 operationId。' },
+    };
+  }
+  const pollAfterMs = declaredCostOf(envelope.pollAfterMs);
+  return {
+    status: 'accepted',
+    operationId: candidate,
+    ...(pollAfterMs === undefined || pollAfterMs < 0 ? {} : { pollAfterMs }),
+  };
+}
+
+/**
+ * `wait` 信封投影：completed/failed/refused/needs_* 原样映射；accepted = 窗口内仍在执行。
+ * 与 execute 的 outcomeOf 同一套机械分流（wait 没有请求参数，needs_input 的 missing 用
+ * 执行层错误原话兜底）。
+ */
+function waitOutcomeOf(run: GatewayRun, operationId: string, timeoutMs: number): ExecutionOutcome {
+  if (run.timedOut) {
+    return {
+      status: 'failed',
+      error: { code: 'EXECUTION_WAIT_TIMEOUT', message: `执行层等待调用超时（${timeoutMs}ms）。`, retryable: true },
+    };
+  }
+  if (run.spawnFailed) {
+    return {
+      status: 'failed',
+      error: { code: 'EXECUTION_SPAWN_FAILED', message: '执行层网关无法启动。', retryable: true },
+    };
+  }
+  const envelope = parseEnvelope(run.stdout);
+  if (envelope !== undefined) {
+    if (envelope.status === 'completed') {
+      const items = itemsOf(envelope);
+      return {
+        status: 'completed',
+        data: envelope.data ?? undefined,
+        ...(items === undefined ? {} : { items }),
+      };
+    }
+    if (envelope.status === 'failed') return { status: 'failed', error: failureOf(envelope.error) };
+    if (envelope.status === 'refused') return { status: 'refused', error: failureOf(envelope.error) };
+    if (envelope.status === 'needs_confirmation') {
+      const confirmation = confirmationOf(envelope.confirmation);
+      return confirmation === undefined
+        ? { status: 'failed', error: { code: 'EXECUTION_BAD_CONFIRMATION', message: '执行层返回的 needs_confirmation 缺少有效的 confirmation（handle/summary）。' } }
+        : { status: 'needs_confirmation', confirmation, data: envelope.data ?? undefined };
+    }
+    if (envelope.status === 'needs_input') {
+      const failure = failureOf(envelope.error);
+      return {
+        status: 'needs_input',
+        missing: [{ description: failure.message }],
+        data: envelope.data ?? undefined,
+        error: failure,
+      };
+    }
+    if (envelope.status === 'accepted') {
+      // 仍在执行：沿用受理句柄（wait 只等，不换号）。
+      const pollAfterMs = declaredCostOf(envelope.pollAfterMs);
+      return {
+        status: 'accepted',
+        operationId: typeof envelope.operationId === 'string' && envelope.operationId !== ''
+          ? envelope.operationId
+          : operationId,
+        ...(pollAfterMs === undefined || pollAfterMs < 0 ? {} : { pollAfterMs }),
+      };
+    }
+    return {
+      status: 'failed',
+      error: { code: 'EXECUTION_UNKNOWN_STATUS', message: `执行层返回了未定义状态：${String(envelope.status)}` },
+    };
+  }
+  const stderr = run.stderr.trim();
+  if (run.code === 3) {
+    const firstToken = stderr.split(/\s+/)[0] ?? '';
+    const code = /^[A-Z][A-Z0-9_]*$/.test(firstToken) ? firstToken : 'EXECUTION_REFUSED';
+    return { status: 'refused', error: { code, message: stderr !== '' ? stderr : '执行层拒绝了本次等待。' } };
+  }
+  return {
+    status: 'failed',
+    error: {
+      code: 'EXECUTION_NO_RESULT',
+      message: (stderr !== '' ? stderr : run.stdout.trim()).slice(0, 500) || '执行层没有返回等待结果信封。',
     },
   };
 }

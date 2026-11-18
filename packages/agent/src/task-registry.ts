@@ -431,11 +431,12 @@ export interface TaskFactSeed {
 }
 
 /**
- * 逻辑操作账的状态集（U3）。completed/needs_confirmation/needs_input/failed/refused
- * 与执行结果五态同名；claimed = 已认领未落定；unknown = 结果未知（待核对，禁止自动重放）。
+ * 逻辑操作账的状态集（U3 + 长任务 v4）。completed/needs_confirmation/needs_input/failed/
+ * refused 与执行结果同态；accepted = 执行层已受理长任务（operationId 在 outcome 里），
+ * 等待宿主用 wait 推进；claimed = 已认领未落定；unknown = 结果未知（待核对，禁止自动重放）。
  * needs_confirmation 只是执行层返回的机械事实：宿主把它记进账行，不代表宿主裁决确认。
  */
-export const OPERATION_STATUSES = ['claimed', 'completed', 'needs_confirmation', 'needs_input', 'failed', 'refused', 'unknown'] as const;
+export const OPERATION_STATUSES = ['claimed', 'accepted', 'completed', 'needs_confirmation', 'needs_input', 'failed', 'refused', 'unknown'] as const;
 
 export type OperationStatus = (typeof OPERATION_STATUSES)[number];
 
@@ -638,6 +639,23 @@ export interface TaskRegistry {
   markOperationUnknown(dispatchKey: string, reason: string, options?: { now?: string }): OperationRecord;
   /** U3：按身份键读回（审计/测试；不存在返回 undefined）。 */
   getOperation(dispatchKey: string): OperationRecord | undefined;
+  /**
+   * 长任务（契约 v4）：所有 accepted 行（按 claimed_at 升序）。宿主重启后据此重新 wait——
+   * operationId 在 outcome 里（`{status:'accepted', operationId, pollAfterMs?}`），
+   * taskId 绑定到任务行。只读；不推进任何状态。
+   */
+  listAcceptedOperations(): readonly OperationRecord[];
+  /**
+   * 长任务终态落定：accepted → completed/failed（别的状态不覆盖，幂等）。
+   * 结果由 wait 返回；这里只把账行从「进行中」推进到终态，不重放、不重铸身份。
+   */
+  settleAcceptedOperation(dispatchKey: string, outcome: ExecutionOutcome, options?: { now?: string }): OperationRecord;
+  /**
+   * 长任务让出槽位：清掉 running 行的租约（任务仍 running，等待宿主 wait 唤醒）。
+   * 不产状态转换事实（状态没变）；只清租约，避免 expireLeases 把等待中的任务判成
+   * result_unknown。
+   */
+  releaseTaskLease(taskId: string, options?: MutationOptions): TaskRecord;
 }
 
 /** 库内可变形状：对外只读视图由 TaskRecord 承担。 */
@@ -983,6 +1001,35 @@ export function createTaskRegistry(): TaskRegistry {
     },
     getOperation(dispatchKey) {
       return operations.get(dispatchKey);
+    },
+    listAcceptedOperations() {
+      return [...operations.values()]
+        .filter((row) => row.status === 'accepted')
+        .sort((left, right) => (left.claimedAt < right.claimedAt ? -1 : left.claimedAt > right.claimedAt ? 1 : left.opSeq - right.opSeq));
+    },
+    settleAcceptedOperation(dispatchKey, outcome, options = {}) {
+      const row = operations.get(dispatchKey);
+      if (row === undefined) {
+        throw new Error(`未知的逻辑操作身份：${dispatchKey}（只认已持久化的 key，不接受现造身份）。`);
+      }
+      // 只推进 accepted 行；重复落定/已终态不覆盖（幂等，未知不被洗白）。
+      if (row.status !== 'accepted') return row;
+      const now = options.now ?? new Date().toISOString();
+      row.status = operationStatusOf(outcome);
+      if (row.status === 'accepted') return row; // 仍进行中：不推进
+      if (row.status === 'unknown') row.reason = 'result_unknown';
+      else delete row.reason;
+      row.outcome = outcome;
+      row.settledAt = now;
+      row.deliveredAt = now;
+      return row;
+    },
+    releaseTaskLease(taskId, options = {}) {
+      const task = require(taskId, options.scope);
+      delete task.leaseOwner;
+      delete task.leaseUntil;
+      task.updatedAt = new Date().toISOString();
+      return task;
     },
   };
 }
