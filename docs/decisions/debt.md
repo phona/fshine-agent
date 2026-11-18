@@ -69,3 +69,16 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 | P-1 | `principals.capabilities` / `principals.accountSetScope` 解析后**无任何消费点**（配置写了不生效） | `packages/core/src/config.ts:336-348` 解析；`apps/server/server.ts`、`scripts/ask-runtime.ts` 无读取点 | 本轮先做"解耦 + 粗粒度 RBAC"（角色 → read/write 白名单，宿主求交拦截）；两个字段随该切片删除或替换，不并行保留两套 |
 | P-2 | **细粒度（实体级）授权未实现**：谁能看哪些账套/哪些记录，未做任何透传或校验 | 无 acting-principal 透传；执行层调用只带 operation+args | 归执行层研判；真实 17dz 是否有"按主体授权"概念未验。挂债，等真实层冒烟与业务确认后再做 |
 | P-3 | 写面是**全局开关**（`runtime.allowWriteOperations`），非按人 | `apps/server/server.ts`、`scripts/ask-runtime.ts` 派生允许集合处 | 由 P-1 的角色白名单取代其"按人"部分；部署总闸语义保留（关掉即全员不可写） |
+
+## 八、长任务异步协议（2026-11-18 设计完成，暂不实施）
+
+**背景**：执行层可能出现 30 分钟级的长任务（浏览器自动化）。固定总时长上限会把正常业务按卡死处理；挂长 RPC 又会长期占用后台槽。
+
+**结论（owner 2026-11-18）**：设计保留、**暂不实施**——当前适配层只有 CLI 实现，先把业务流程用顺；等真实执行层确认支持再动。
+
+| 编号 | 事项 | 设计要点 | 为什么现在不做 |
+|---|---|---|---|
+| L-1 | 契约第六态 `accepted(operationId, pollAfterMs)` + `wait(operationId, timeoutMs)` + `abort(operationId)` | 只对声明 `long_running: true` 的 operation 生效，普通操作逐字节不变；Worker `accepted` 后回合结束、让出槽位；宿主用**长轮询**（出站、穿 NAT）实现"完成即唤醒"；`operationId` 落底账，重启续等；用户可停 | 需要执行层真实支持（异步执行 + 句柄持久化 + poll/wait + abort）；真实 17dz 未验；当前只有 dummy CLI，先跑顺业务流 |
+| L-2 | 续租/心跳替代总时长上限 | `workerTurnMs` 从"总时长"降级为"静默阈值"（无任何事件 N 秒才判卡死） | 与 L-1 一起做才有意义；当前短活场景下固定上限不构成问题 |
+| L-3 | 实体级并发写（长写期间的第二个写请求） | 由执行层用锁/排队返回确定性 `locked/busy`；宿主只转述并给用户"等/停"选择；宿主不排队等实体锁、不盲杀中间态 | 属执行层能力，未验；宿主侧无对应实体知识 |
+| L-4 | `dispatchKey` 双边职责 | 宿主负责"不重复发起"（已实现），执行层负责"不重复执行"（未实现）；配套 per-operation `idempotent` 声明（缺省 false）与一致性探针（同 key 连发两次记录数不变） | 执行层未实现；dummy 里零引用 |
