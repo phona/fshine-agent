@@ -127,17 +127,23 @@ interface PayloadEntry {
   name: string | null;
   sourcePath?: string;
   contentBase64?: string;
+  /**
+   * 登记角色（契约 v4 长任务大日志）：条目显式 `deliverable:false` = 宿主内部产物
+   * （任务作用域可读，不进用户附件）。缺省/true = 用户产物（既有语义不变）。
+   */
+  deliverable?: boolean;
 }
 
 function classifyEntry(entry: unknown): PayloadEntry | { kind: 'unconsumed' } {
   if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return { kind: 'unconsumed' };
   const record = entry as Record<string, unknown>;
   const name = typeof record.name === 'string' && record.name.trim() !== '' ? record.name : null;
+  const deliverable = record.deliverable === false ? false : undefined;
   if (typeof record.path === 'string' && record.path.trim() !== '') {
-    return { kind: 'payload', name, sourcePath: record.path };
+    return { kind: 'payload', name, sourcePath: record.path, ...(deliverable === undefined ? {} : { deliverable }) };
   }
   if (typeof record.content === 'string' && record.content.trim() !== '') {
-    return { kind: 'payload', name, contentBase64: record.content };
+    return { kind: 'payload', name, contentBase64: record.content, ...(deliverable === undefined ? {} : { deliverable }) };
   }
   return { kind: 'unconsumed' };
 }
@@ -257,6 +263,7 @@ export function createTaskExecutionBridge(options: TaskExecutionBridgeOptions): 
                 name: classified.name!,
                 bytes: Buffer.from(classified.contentBase64!, 'base64'),
                 maxFileBytes: maxOutputFileBytes,
+                ...(classified.deliverable === undefined ? {} : { deliverable: classified.deliverable }),
               });
             files.push(file);
             // 登记事实整体替换原条目：path / base64 不进替换列表（runtime 回填后进转录与落定）。

@@ -13,12 +13,14 @@
  *     **dispatchKey = 稳定逻辑操作身份**（U3，见字段注释）：它在宿主**首次创建这笔逻辑
  *     操作**时生成并持久化，重试/重新规划时只能读回同一条记录；toolCallId / requestId
  *     只是本次调用的追踪号，重试会换号。
- *   · ExecutionOutcome   —— 执行状态与失败结果。五态互斥：completed / needs_confirmation /
- *     needs_input / failed / refused。**refused = 执行层策略拒绝，failed =
+ *   · ExecutionOutcome   —— 执行状态与失败结果。六态互斥：completed / needs_confirmation /
+ *     needs_input / failed / refused / accepted。**refused = 执行层策略拒绝，failed =
  *     执行失败，两者语义不得混用**；needs_input 必须携带「缺什么」的结构化描述
  *     （missing 非空）；needs_confirmation 必须携带执行层发放的确认提示（handle 非空、
- *     summary 非空）。
- *   · ExecutionClient    —— 能力快照 / 执行两个操作。
+ *     summary 非空）；accepted 表示执行层已受理一笔**长任务**并立即返回（operationId 非空），
+ *     只有声明 `long_running: true` 的 operation 才可以返回它（未声明却返回 = 协议违约，
+ *     宿主 fail-closed）。
+ *   · ExecutionClient    —— 能力快照 / 执行 / 长轮询等待 / 中止四个操作。
  *
  * 刻意不在这里的东西（后续切片再定，不在这里预造执行面）：
  *   · readback（副作用验证状态）：写切片再定——不得把「执行完成」当「业务生效」；
@@ -34,7 +36,7 @@
  */
 
 /** 契约语义版本：跨宿主/执行层的结构化语义集合版本（非某实例的版本，也不是 A2A）。 */
-export const EXECUTION_CONTRACT_VERSION = 3;
+export const EXECUTION_CONTRACT_VERSION = 4;
 
 /**
  * 参数声明：name 是执行层接受的参数名（CLI 形态可带前缀，如 `--collection`），
@@ -60,6 +62,12 @@ export interface ExecutionOperationDeclaration {
    */
   weight?: number;
   estimatedSeconds?: number;
+  /**
+   * 长任务声明（可选）：true = 该 operation 可能执行 30 分钟级任务，执行层可以返回
+   * `accepted` 并让调用方用 `wait` 长轮询、用 `abort` 中止。未声明（缺省）的 operation
+   * **不得**返回 accepted——宿主按协议违约 fail-closed，不把它当成功或进行中。
+   */
+  long_running?: boolean;
 }
 
 /** 能力快照：单个会话开始时的执行面声明。 */
@@ -92,8 +100,8 @@ export interface ExecutionRequest {
   confirmation?: { handle: string; userText?: string };
 }
 
-/** 执行结果五态（互斥）。 */
-export type ExecutionStatus = 'completed' | 'needs_confirmation' | 'needs_input' | 'failed' | 'refused';
+/** 执行结果六态（互斥）。 */
+export type ExecutionStatus = 'completed' | 'needs_confirmation' | 'needs_input' | 'failed' | 'refused' | 'accepted';
 
 /**
  * 执行层返回的确认提示（needs_confirmation 必带）。
@@ -133,20 +141,42 @@ export interface ExecutionFailure {
 }
 
 /**
+ * 批量写入的逐条结果（completed 可选携带；owner 2026-11-19）：
+ * 「部分完成」是安全相关事实——用户必须知道哪几条真写进去了。
+ *   · index —— 输入记录在本次批次里的 0 基序号（执行层原样给出，宿主不改写）；
+ *   · status —— ok / failed / unknown（unknown = 执行层无法确认，不得当成功）；
+ *   · reason —— failed/unknown 的机械原因（执行层原话，宿主只转述）。
+ * 整批原子失败时执行层返回 failed（不写任何一条），此时不携带 items；
+ * 执行层若支持部分写，必须逐条给出真实状态——宿主/模型不得把 partial 说成成功。
+ */
+export interface ExecutionItemResult {
+  index: number;
+  status: 'ok' | 'failed' | 'unknown';
+  reason?: string;
+}
+
+/**
  * 执行结果。
  *   · completed——执行完成（不代表业务副作用已验证生效：readback 归写切片）。
+ *     `items`（可选）= 批量写的逐条真实结果；只要有一条 failed/unknown，模型必须如实
+ *     说明「完成 X、未完成 Y」，不得把整体说成单纯成功（任务结局仍是 completed）。
  *   · needs_confirmation——执行层已冻结一次待确认操作，confirmation 给出句柄与机械摘要；
  *     这不是「缺输入」，也不是宿主计划门：是否继续由用户在下一回合表态，执行层校验句柄。
  *   · needs_input——执行层要求补充输入，missing 非空。
  *   · failed——执行失败。
  *   · refused——执行层策略拒绝（含门拒、请求形状拒绝、确认句柄无效/过期/已用/绑定不符）。
+ *   · accepted——执行层已受理一笔长任务（仅 `long_running: true` 的 operation 可返回）：
+ *     operationId 是执行层发放的不透明任务句柄（宿主只存与转交 wait/abort，不解析）；
+ *     pollAfterMs 是执行层建议的轮询间隔（缺省由宿主决定）。本轮工作已经结束——
+ *     宿主不把它当失败，也不当成功：任务保持进行中，由 `wait` 长轮询取回终态。
  */
 export type ExecutionOutcome =
-  | { status: 'completed'; data?: unknown }
+  | { status: 'completed'; data?: unknown; items?: readonly ExecutionItemResult[] }
   | { status: 'needs_confirmation'; confirmation: ConfirmationPrompt; data?: unknown }
   | { status: 'needs_input'; missing: readonly MissingInput[]; data?: unknown; error?: ExecutionFailure }
   | { status: 'failed'; error: ExecutionFailure }
-  | { status: 'refused'; error: ExecutionFailure };
+  | { status: 'refused'; error: ExecutionFailure }
+  | { status: 'accepted'; operationId: string; pollAfterMs?: number };
 
 /**
  * 单次执行调用的可选取消面（契约只带「必要的取消信息」，不是第二套协议）：
@@ -163,4 +193,30 @@ export interface ExecutionClient {
   /** 能力快照：每个会话取一次，供装配使用。 */
   capabilities(): Promise<CapabilityManifest>;
   execute(request: ExecutionRequest, options?: ExecutionCallOptions): Promise<ExecutionOutcome>;
+  /**
+   * 长轮询等待一笔已受理（accepted）的长任务，最长阻塞 timeoutMs：
+   *   · 完成/失败/拒绝 → 返回对应终态；
+   *   · 窗口内仍未完成 → 返回 `{status:'accepted', ...}`（`running` 复用同一形状），
+   *     宿主按 pollAfterMs 重排；
+   *   · 宿主取消（signal 中止）→ 适配器应尽快以 AbortError 拒绝。
+   * 出站调用、不开入站端口——完成即返回，天然穿 NAT。
+   *
+   * 可选：不支持长任务的适配器可以不实现。**声明了 `long_running: true` 却实现不了
+   * wait 是装配错误**——宿主在收到 accepted 后无法等待，必须 fail-closed（不留下
+   * 无人推进的进行中任务）。
+   */
+  wait?(operationId: string, timeoutMs: number, signal?: AbortSignal): Promise<ExecutionOutcome>;
+  /**
+   * 请求执行层中止一笔长任务（用户取消）。
+   * 返回 `aborted: true` = 执行层已确认中止；`false` = 停不下来（执行层拒绝/未知句柄/
+   * 已经结束等），宿主必须如实转述，不得宣称已取消。
+   *
+   * 可选：缺省 = 适配器不支持中止（宿主按「停不下来」如实报，不宣称取消）。
+   */
+  abort?(operationId: string, options?: ExecutionCallOptions): Promise<ExecutionAbortResult>;
 }
+
+/** 中止请求的机械结果（只有 aborted=true 才算执行层确认停掉）。 */
+export type ExecutionAbortResult =
+  | { aborted: true }
+  | { aborted: false; reason: string };

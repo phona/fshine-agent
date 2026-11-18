@@ -60,6 +60,7 @@ const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-
 const WRITE_NOT_ALLOWED_MESSAGE = '不在本轮允许集合内';
 /** 夹具声明的写 operation（access=write；开关关闭时一个都不进允许集）。 */
 const WRITE_OPERATIONS = [
+  'dummy.longtask',
   'dummy.prepare',
   'dummy.commit',
   'dummy.proposal',

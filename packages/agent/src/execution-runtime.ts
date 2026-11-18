@@ -84,7 +84,7 @@ import {
   type RejectionReason,
   type ResourcePolicy,
 } from './resource-policy';
-import type { TaskExecutionOutcome, TaskExecutor, TaskRunner } from './task-runner';
+import type { TaskExecutionOutcome, TaskExecutor, TaskRunner, ResumedOperation } from './task-runner';
 
 /** Main 委派工具名（实例名可经部署声明替换的演进留在后续切片；当前用中性名）。 */
 export const TASK_RUN_TOOL = 'task_run';
@@ -484,6 +484,34 @@ const SYSTEM_RUNTIME_CLOCK: RuntimeClock = {
 /** 窗口轮询步长（机械轮询；25ms × 缺省 1500ms 窗口 ≤ 60 次 SQLite 读，开销可忽略）。 */
 const TASK_RUN_WAIT_POLL_MS = 25;
 
+/**
+ * 长任务异步（契约 v4）的结构化事件（**只进日志**，不进用户话术）：
+ *   · execution_accepted            —— 执行层受理一笔长任务（Worker 回合结束、槽位释放）；
+ *   · execution_accepted_undeclared —— 协议违约：未声明 long_running 的 operation 返回了
+ *     accepted（宿主已按 failed 落定）；
+ *   · execution_wait_resumed        —— wait 返回终态、Worker 续跑（waitedMs = 等待时长）；
+ *   · execution_wait_timeout        —— wait 窗口到期仍在执行（按 pollAfterMs 重排）；
+ *   · execution_aborted             —— 用户取消：result=cancelled（执行层确认）/failed（停不下来）；
+ *   · execution_wait_files_registered —— 长任务回程文件/大日志已登记为任务文件。
+ */
+export type ExecutionEvent =
+  | { event: 'execution_accepted'; taskId: string; operationId: string; operation?: string }
+  | { event: 'execution_accepted_undeclared'; taskId: string; operation: string; operationId: string }
+  | { event: 'execution_wait_resumed'; operationId: string; waitedMs: number }
+  | { event: 'execution_wait_timeout'; operationId: string }
+  | { event: 'execution_aborted'; operationId: string; result: 'cancelled' | 'failed'; reason?: string }
+  | { event: 'execution_wait_files_registered'; operationId: string; files: number; logsFileized: number };
+
+/** 长任务结果渲染的日志内联上限（字节；超过走任务文件，不留绝对路径也不灌转录）。 */
+export const LONG_TASK_LOG_INLINE_MAX_BYTES = 4 * 1024;
+
+/**
+ * 长任务同步的装配错误话术（确定性失败）：声明了长任务却没有等待端口 = 不能留下
+ * 无人推进的进行中任务。
+ */
+export const LONG_TASK_UNSUPPORTED_MESSAGE =
+  '长任务需要后台派发并注入等待端口（wait/abort）才能推进；本次装配不支持，已停止该任务。';
+
 export interface RuntimeOptions {
   /** 可信身份：来自装配/渠道事实，绝不来自模型输入。 */
   principalId: string;
@@ -641,6 +669,11 @@ export interface RuntimeOptions {
    * 整轮扫描抛错仍走 taskExecutionBridge.onSkip('scan_failed:…')，两者不重复。
    */
   onTaskOutputSweepSkipped?: (event: TaskOutputSweepSkippedEvent) => void;
+  /**
+   * 长任务异步（契约 v4）的结构化事件出口（**只进日志**，不进用户话术）。
+   * 缺省静默；装配层按条落 `execution_*` 事件。
+   */
+  onExecutionEvent?: (event: ExecutionEvent) => void;
 }
 
 /**
@@ -885,6 +918,16 @@ export function renderWorkerDelegation(input: {
   /** 文件引用方式（缺省 = inline run_js 原文；background 传执行层文件参数口径）。 */
   fileManifestHint?: string;
   answer?: string;
+  /**
+   * 长任务续跑（契约 v4）：把已受理 operation 的终态结果原样交给 Worker（形状只含
+   * status/summary/files/logs；文件只有 fileId，没有路径）。
+   */
+  resumedOperation?: { operationId: string; operation: string; outcome: unknown };
+  /**
+   * 续跑注记（契约 v4；owner 2026-11-19）：显式告诉 Worker「这是续跑、之前发生了什么」，
+   * 防止它重复发起同一个操作。缺省空串 = 拼接结果逐字节不变（普通首轮/接续）。
+   */
+  resumeNote?: string;
 }): string {
   const parts = [
     '## 本次任务（宿主委派）',
@@ -903,6 +946,20 @@ export function renderWorkerDelegation(input: {
     parts.push('', input.fileManifestHint === undefined
       ? renderWorkerFileManifest(input.files)
       : renderWorkerFileManifest(input.files, input.fileManifestHint));
+  }
+  if (input.resumedOperation !== undefined) {
+    if (input.resumeNote !== undefined && input.resumeNote !== '') {
+      parts.push('', input.resumeNote);
+    }
+    parts.push(
+      '',
+      '## 长任务结果（宿主注入，原样事实）',
+      '此前异步执行的 operation 已在执行层结束；结果如下。文件只给 fileId——用 run_js 的 inputs 按 fileId 读取，不要猜路径。',
+      '```json',
+      JSON.stringify(input.resumedOperation, null, 2),
+      '```',
+      '据此核对并汇报最终事实。',
+    );
   }
   for (const skill of input.skills ?? []) {
     parts.push('', `## 域技能：${skill.name}`, '', skill.content);
@@ -999,6 +1056,8 @@ interface OperationRunResult {
   executed: boolean;
   /** 必须是「待核对」：调用方不得当作成功，也不得自动重试。 */
   unresolved: boolean;
+  /** 本次绑定的稳定逻辑操作身份（长任务 accepted 的账行键；其它路径不消费）。 */
+  dispatchKey?: string;
 }
 
 /** 宿主取消（abort）引起的调用终止：不是「结果未知」的另一种写法。 */
@@ -1166,6 +1225,7 @@ async function claimAndRunOperation(input: {
         outcome,
         executed: true,
         unresolved: outcome.status === 'failed' && outcome.error.code === 'result_unknown',
+        dispatchKey: claim.dispatchKey,
       };
     }
   }
@@ -1215,9 +1275,15 @@ function runJsToolResult(output: RunJsOutput): Record<string, unknown> {
 }
 
 /** 交付事实按 fileId 去重（回程登记 + 兜底扫描同池去重后，同一产物不重复进交付面）。 */
-function pushTurnFileOnce(list: TurnFileRef[], file: { fileId: string; name: string; bytes: number }): void {
+function pushTurnFileOnce(list: TurnFileRef[], file: { fileId: string; name: string; bytes: number; deliverable?: boolean }): void {
   if (list.some((existing) => existing.fileId === file.fileId)) return;
-  list.push({ fileId: file.fileId, name: file.name, bytes: file.bytes });
+  list.push({
+    fileId: file.fileId,
+    name: file.name,
+    bytes: file.bytes,
+    // 内部角色（如长任务大日志）显式标 false；用户产物缺省 = 可交付（字段不出现）。
+    ...(file.deliverable === false ? { deliverable: false } : {}),
+  });
 }
 
 /** 内存墙结构化事件（真实运行一次报一次；memo 命中不重复上报）。 */
@@ -1348,6 +1414,147 @@ export function createWorkerRunJsTurn(
   };
 }
 
+/**
+ * 长任务续跑准备（契约 v4；owner 2026-11-19）：wait 返回的 completed 结果与普通 completed
+ * 走**同一套回程登记**——
+ *   · data.files（执行层产出的输出文件）→ 任务文件桥 registerReturnedFiles（任务作用域、
+ *     去重、剥离 path/base64）；Worker 只见 fileId/name/bytes；
+ *   · data.logs（可选）→ 小日志（≤4KB）内联进结果；大日志登记成**任务文件**
+ *     （deliverable:false，内部可读），Worker 只见 fileId；{name,fileId} 形状原样保留；
+ *   · 输出形状只保留 summary/files/logs —— 任何绝对路径/内联字节都不会进入 Worker 转录。
+ * 未注入文件桥时文件只按 unavailable 标记（不给 path、不伪造 fileId）。
+ * 事件 execution_wait_files_registered{operationId, files, logsFileized} 由本函数发。
+ */
+async function prepareResumedLongTask(
+  resumed: ResumedOperation,
+  bridge: TaskExecutionBridge | undefined,
+  onEvent: ((event: ExecutionEvent) => void) | undefined,
+  onSkip: ((reason: string) => void) | undefined,
+  taskFiles: TurnFileRef[],
+): Promise<ExecutionOutcome> {
+  const raw = resumed.outcome;
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    // 适配器违约（wait 没有返回执行契约形状）：如实落失败，不猜内容。
+    return {
+      status: 'failed',
+      error: { code: 'EXECUTION_BAD_RESULT', message: '执行层等待返回了非对象结果。' },
+    };
+  }
+  const outcome = raw as ExecutionOutcome;
+  if (outcome.status !== 'completed') return outcome;
+  // 批量写逐条结果（若执行层在长任务回执里也给了）原样随结果保留——不因文件重排丢失。
+  const items = outcome.items === undefined ? {} : { items: outcome.items };
+  const data = outcome.data;
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+    return { status: 'completed', data: { files: [], logs: [] }, ...items };
+  }
+  const record = data as Record<string, unknown>;
+  const fileEntries = Array.isArray(record.files) ? record.files : [];
+  const logs = Array.isArray(record.logs) ? record.logs : [];
+
+  const inlineLogs: Array<Record<string, unknown>> = [];
+  const largeLogEntries: Array<{ name: string; content: string }> = [];
+  const fileIdLogs: Array<Record<string, unknown>> = [];
+  for (let index = 0; index < logs.length; index += 1) {
+    const entry = logs[index];
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const log = entry as { name?: unknown; text?: unknown; fileId?: unknown };
+    const name = typeof log.name === 'string' && log.name.trim() !== '' ? log.name : `log-${index + 1}`;
+    if (typeof log.fileId === 'string' && log.fileId !== '') {
+      fileIdLogs.push({ name, fileId: log.fileId });
+      continue;
+    }
+    if (typeof log.text !== 'string') continue;
+    if (Buffer.byteLength(log.text, 'utf8') > LONG_TASK_LOG_INLINE_MAX_BYTES) {
+      // 大日志：登记成任务文件（内部角色），Worker 只拿 fileId。
+      largeLogEntries.push({
+        name: `${name.replace(/[/\\]/g, '_')}.log`,
+        content: Buffer.from(log.text, 'utf8').toString('base64'),
+      });
+    } else {
+      inlineLogs.push({ name, text: log.text });
+    }
+  }
+
+  let fileViews: unknown[];
+  let largeLogViews: unknown[];
+  if (bridge !== undefined && (fileEntries.length > 0 || largeLogEntries.length > 0)) {
+    // 日志条目显式标 internal（deliverable:false）——登记面按角色打标，不靠文件名判断。
+    const entries = [
+      ...fileEntries,
+      ...largeLogEntries.map((entry) => ({ ...entry, deliverable: false })),
+    ];
+    const registered = await bridge.registerReturnedFiles(entries);
+    fileViews = registered.entries.slice(0, fileEntries.length).map(sanitizedFileRef);
+    largeLogViews = registered.entries.slice(fileEntries.length).map(sanitizedFileRef);
+    const filesRegistered = fileViews.filter((view) => isRegisteredView(view)).length;
+    const logsFileized = largeLogViews.filter((view) => isRegisteredView(view)).length;
+    for (const file of registered.files) {
+      // 大日志是内部角色：交付面按 deliverable 过滤，不进用户附件。
+      pushTurnFileOnce(taskFiles, file);
+    }
+    onEvent?.({
+      event: 'execution_wait_files_registered',
+      operationId: resumed.operationId,
+      files: filesRegistered,
+      logsFileized,
+    });
+  } else {
+    // 没有文件桥：绝不把路径/字节交给 Worker（也绝不伪造 fileId）。
+    if (fileEntries.length > 0 || largeLogEntries.length > 0) onSkip?.('long_task_no_file_bridge');
+    fileViews = fileEntries.map(() => ({ unavailable: 'no_file_bridge' }));
+    largeLogViews = largeLogEntries.map((entry) => ({ name: entry.name, unavailable: 'no_file_bridge' }));
+  }
+
+  return {
+    status: 'completed',
+    data: {
+      ...(typeof record.summary === 'string' ? { summary: record.summary } : {}),
+      files: fileViews,
+      logs: [...inlineLogs, ...fileIdLogs, ...largeLogViews],
+    },
+    ...items,
+  };
+}
+
+/**
+ * 续跑注记（owner 2026-11-19）：三种机械情形分别说清——正常唤醒 / 宿主重启后唤醒 /
+ * 失败唤醒。目的只有一个：让 Worker 知道「上一回合已经发起过这个操作」，不要重复发起。
+ * 只陈述账本事实（operation/operationId/失败原因），不改写用户任务原文。
+ */
+export function longTaskResumeNote(resumed: ResumedOperation, outcome: ExecutionOutcome): string {
+  const operation = resumed.operation;
+  const operationId = resumed.operationId;
+  if (outcome.status === 'failed' || outcome.status === 'refused') {
+    const reason = outcome.error.message.trim() !== '' ? outcome.error.message.trim() : '执行层未给出原因';
+    return `[续跑] 你发起的操作 ${operation}（id ${operationId}）失败了：${reason}。不要盲目重试；如实说明并向用户提出可选项。`;
+  }
+  if (resumed.restarted === true) {
+    return `[续跑·宿主曾重启] 你在本任务上一回合发起了操作 ${operation}（id ${operationId}），其间宿主重启过，你的上一回合上下文不在了。下面只有账本事实与文件；以它们为准，不要重复发起同一操作。`;
+  }
+  return `[续跑] 你在本任务上一回合发起了操作 ${operation}（id ${operationId}），它现在已完成；结果见下/见文件。不要重复发起同一操作，先核对结果。`;
+}
+
+function isRegisteredView(view: unknown): boolean {  return view !== null && typeof view === 'object' && typeof (view as { fileId?: unknown }).fileId === 'string';
+}
+
+/** 文件/日志引用只保留宿主登记事实（fileId/name/bytes）；其余字段（path/base64…）一律剥掉。 */
+function sanitizedFileRef(entry: unknown): Record<string, unknown> {
+  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+    return { unavailable: 'not_registered' };
+  }
+  const record = entry as { fileId?: unknown; name?: unknown; bytes?: unknown; unavailable?: unknown };
+  const fileId = typeof record.fileId === 'string' && record.fileId !== '' ? record.fileId : undefined;
+  return {
+    ...(fileId === undefined ? {} : { fileId }),
+    ...(typeof record.name === 'string' ? { name: record.name } : {}),
+    ...(typeof record.bytes === 'number' ? { bytes: record.bytes } : {}),
+    ...(fileId !== undefined
+      ? {}
+      : { unavailable: typeof record.unavailable === 'string' ? record.unavailable : 'not_registered' }),
+  };
+}
+
 export async function createSession(options: RuntimeOptions): Promise<Session> {
   if (options.principalId.trim() === '' || options.sessionId.trim() === '') {
     throw new Error('最小切片需要非空 principalId 与 sessionId（可信身份来自装配层）。');
@@ -1369,6 +1576,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   };
   /** 受理回执的估时锚点（执行层自述 est_seconds 累加；没有声明 = undefined）。 */
   const receiptEstimateMinutes = estimatedMinutesOf(workerManifest);
+  /** 契约 v4：只有声明 long_running 的 operation 可以返回 accepted（否则协议违约 fail-closed）。 */
+  const longRunningOperations = new Set(
+    workerManifest.operations.filter((operation) => operation.long_running === true).map((operation) => operation.name),
+  );
 
   const registry = options.taskRegistry ?? createTaskRegistry();
   /** U3：只读 operation 集合（装配方声明；缺省保守为空 = 一律按可能有副作用处理）。 */
@@ -1832,6 +2043,23 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           },
           signal === undefined ? undefined : { signal },
         );
+        // 契约 v4：accepted 只允许出现在声明 long_running 的 operation 上。未声明却返回 =
+        // 协议违约：落 failed（账行不落 accepted）并记事件，绝不把半截句柄交给宿主。
+        if (outcome.status === 'accepted' && !longRunningOperations.has(operation)) {
+          options.onExecutionEvent?.({
+            event: 'execution_accepted_undeclared',
+            taskId,
+            operation,
+            operationId: outcome.operationId,
+          });
+          outcome = {
+            status: 'failed',
+            error: {
+              code: 'EXECUTION_PROTOCOL_VIOLATION',
+              message: `执行层对未声明 long_running 的 operation「${operation}」返回了 accepted（协议违约）。`,
+            },
+          };
+        }
         // 执行层已返回：本次透传结束，宿主侧句柄清除（是否真的被接受由执行层回执说明；
         // 宿主不判断确认语义）。
         if (confirmation !== undefined) pendingConfirmation = undefined;
@@ -1854,6 +2082,22 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         return outcome;
       },
     });
+    // 契约 v4：长任务受理——回合正常结束（不是失败），把受理事实交给模型；任务保持
+    // running，等待端口由后台 runner 推进（inline 装配无 runner 时在 delegate 处 fail-closed）。
+    if (run.outcome.status === 'accepted') {
+      options.onExecutionEvent?.({
+        event: 'execution_accepted',
+        taskId,
+        operationId: run.outcome.operationId,
+        operation,
+      });
+      return toModelVisibleOutcome(run.outcome);
+    }
+    // 未声明 long_running 却返回 accepted：已在 execute 回调里机械落 failed，这里确定性
+    // 终结本回合（不许模型把它当可重试的普通失败继续撞）。
+    if (run.outcome.status === 'failed' && run.outcome.error.code === 'EXECUTION_PROTOCOL_VIOLATION') {
+      throw new ToolUserError(run.outcome.error.message);
+    }
     // A2b：执行层**没有显式说可重试**（retryable !== true）时，本回合锁住该 (operation, 对象)。
     // fail-safe 缺省（owner 2026-11-18）：不确定就不往下撞——宁可停下报错让人介入，
     // 也不能把执行层打到不能用。只有显式 retryable:true（超时/网关不可用等瞬时故障）放行。
@@ -2142,6 +2386,24 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       });
       // 出现过「无法证明绑定 / 结果未知」：不判成功、不判确认失败，交还待核对。
       if (taskUnresolved) return unresolvedReceipt();
+      // 契约 v4：本回合以长任务受理结束——任务保持 running（不 complete、不判失败），
+      // 由后台 runner 的等待端口推进；没有 runner 的后台推进能力 = 装配错误，如实失败。
+      const acceptedExecution = registry.get(taskId, scope).executions.find((execution) => execution.status === 'accepted');
+      if (acceptedExecution !== undefined) {
+        if (taskRunner === undefined) {
+          registry.fail(taskId, LONG_TASK_UNSUPPORTED_MESSAGE);
+          throw new ToolUserError(LONG_TASK_UNSUPPORTED_MESSAGE);
+        }
+        const current = registry.get(taskId, scope);
+        return {
+          taskId,
+          taskNo: current.taskNo ?? null,
+          name: current.name ?? deriveTaskName(current.request),
+          status: 'running',
+          accepted: true,
+          notice: '这项任务已在执行层受理，完成后会继续处理并告知结果。',
+        };
+      }
       if (workerResult.text.trim() === '') {
         throw new Error('执行层 Worker 未产出有效汇报，本次任务未完成。');
       }
@@ -2531,6 +2793,8 @@ export interface TaskExecutorOptions {
   backgroundTaskBridge?: BackgroundTaskBridgeFactory;
   /** 文件引用被拒（桥物化失败）的机械 reason 观察点；只进日志，不进用户话术。 */
   onFileRefUnavailable?: (reason: string) => void;
+  /** 长任务异步（契约 v4）的结构化事件出口（只进日志；缺省静默）。 */
+  onExecutionEvent?: (event: ExecutionEvent) => void;
 }
 
 function isAbortErrorLike(error: unknown): boolean {
@@ -2614,10 +2878,14 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
   const workerTurnMs = options.workerTurnMs ?? DEFAULT_WORKER_TURN_MS;
   const now = options.now ?? Date.now;
   const readOnlyOperations = new Set(options.readOnlyOperations ?? []);
+  /** 契约 v4：accepted 只允许出现在这些声明 long_running 的 operation 上。 */
+  const longRunningOperations = new Set(
+    workerManifest.operations.filter((operation) => operation.long_running === true).map((operation) => operation.name),
+  );
 
   return {
     async execute(task, context): Promise<TaskExecutionOutcome> {
-      const recorded: Array<{ operation: string; outcome: ExecutionOutcome }> = [];
+      const recorded: Array<{ operation: string; outcome: ExecutionOutcome; dispatchKey?: string }> = [];
       // U3：本交办内的重放窗口（只由 Worker 驱动的原生事件推进）。
       const workerWindow = newAttemptWindow();
       let unresolved = false;
@@ -2633,6 +2901,27 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         taskId: task.taskId,
       });
       const executionClient = taskBridge?.client ?? options.client;
+      // 契约 v4：续跑回合先把 wait 结果走同一套回程登记（任务作用域文件；大日志落文件），
+      // 再取任务文件清单——登记出来的 fileId 因此出现在本次委派清单里，Worker 直接引用。
+      const resumedOperation = task.resumedOperation;
+      const resumedOutcome = resumedOperation === undefined
+        ? undefined
+        : await prepareResumedLongTask(
+          resumedOperation,
+          taskBridge,
+          options.onExecutionEvent,
+          options.onFileRefUnavailable,
+          taskFiles,
+        );
+      if (resumedOperation !== undefined && resumedOutcome !== undefined) {
+        // 续跑回合的「本回合执行事实」= 执行层 wait 返回的终态（零 exec 也算执行过，
+        // 不判 unexecuted）；Worker 后续的 run_js/查询照常追加。
+        recorded.push({
+          operation: resumedOperation.operation,
+          outcome: resumedOutcome,
+          dispatchKey: resumedOperation.dispatchKey,
+        });
+      }
       const delegationFiles: TurnFileRef[] = (taskBridge?.taskFiles() ?? []).map((file) => ({
         fileId: file.fileId,
         name: file.name,
@@ -2712,6 +3001,23 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
             }
             // 取消后到达的回执不落执行事实：任务已按取消处置，迟到的成功不得冒充本回合结果。
             if (signal.aborted) throw abortError();
+            // 契约 v4：accepted 只允许出现在声明 long_running 的 operation 上。未声明却返回 =
+            // 协议违约：落 failed（账行不落 accepted）并记事件，绝不把半截句柄交给宿主。
+            if (outcome.status === 'accepted' && !longRunningOperations.has(operation)) {
+              options.onExecutionEvent?.({
+                event: 'execution_accepted_undeclared',
+                taskId: task.taskId,
+                operation,
+                operationId: outcome.operationId,
+              });
+              outcome = {
+                status: 'failed',
+                error: {
+                  code: 'EXECUTION_PROTOCOL_VIOLATION',
+                  message: `执行层对未声明 long_running 的 operation「${operation}」返回了 accepted（协议违约）。`,
+                },
+              };
+            }
             options.registry.noteExecution(task.taskId, {
               requestId,
               operation,
@@ -2731,10 +3037,32 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         }
         // 取消胜出：不再把（可能迟到的）执行结果交回 Worker；让回合按 abort 收尾。
         if (signal.aborted) throw abortError();
-        if (run.executed) recorded.push({ operation, outcome: run.outcome });
+        if (run.executed) recorded.push({ operation, outcome: run.outcome, dispatchKey: run.dispatchKey });
         // 与前台同一套脱敏投影：Worker 永远看不到 confirmation.handle（后台也曾直回原始
         // outcome，句柄会漏进模型上下文；S1 起两处共用 toModelVisibleOutcome）。
         return toModelVisibleOutcome(run.outcome);
+      };
+
+      // 契约 v4：本轮以长任务受理收尾——正常结束回合（不是完成、不是失败）；runner 的
+      // 等待端口随后驱动 wait。必须在「空汇报/未成功」判定之前，否则 accepted 会被误判失败。
+      const acceptedRoundOf = (): TaskExecutionOutcome | undefined => {
+        const entry = [...recorded].reverse().find((candidate) => candidate.outcome.status === 'accepted');
+        if (entry === undefined) return undefined;
+        const outcome = entry.outcome as Extract<ExecutionOutcome, { status: 'accepted' }>;
+        options.onExecutionEvent?.({
+          event: 'execution_accepted',
+          taskId: task.taskId,
+          operationId: outcome.operationId,
+          operation: entry.operation,
+        });
+        return {
+          kind: 'accepted',
+          operationId: outcome.operationId,
+          operation: entry.operation,
+          // 账行键由 claimAndRunOperation 返回；兜底只为形状完整（正常路径恒有值）。
+          dispatchKey: entry.dispatchKey ?? `task:${task.taskId}:accepted`,
+          ...(outcome.pollAfterMs === undefined ? {} : { pollAfterMs: outcome.pollAfterMs }),
+        };
       };
 
       const deadline = now() + workerTurnMs;
@@ -2755,6 +3083,17 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
               : { files: delegationFiles, fileManifestHint: BACKGROUND_FILE_MANIFEST_HINT }),
             // waiting_user 续跑回合：用户补答必须随委派交给执行端（新 Worker 没有上一回合转录）。
             ...(task.answer === undefined ? {} : { answer: task.answer }),
+            // 长任务续跑：wait 终态（已登记文件只有 fileId）原样注入本次委派。
+            ...(resumedOperation === undefined || resumedOutcome === undefined
+              ? {}
+              : {
+                resumedOperation: {
+                  operationId: resumedOperation.operationId,
+                  operation: resumedOperation.operation,
+                  outcome: resumedOutcome,
+                },
+                resumeNote: longTaskResumeNote(resumedOperation, resumedOutcome),
+              }),
           }))],
           onStep: () => {},
           exec,
@@ -2767,12 +3106,18 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         // 同回合被取消，任务仍是「待核对」——取消只停止后续动作，不把未知改写成 cancelled。
         if (unresolved) return { kind: 'result_unknown', reason: RESULT_UNKNOWN_MESSAGE };
         if (context.signal.aborted) return { kind: 'cancelled' };
+        const accepted = acceptedRoundOf();
+        if (accepted !== undefined) return accepted;
         if (isAbortErrorLike(error) && now() >= deadline) return { kind: 'timed_out' };
         return { kind: 'failed', reason: error instanceof Error ? error.message : String(error) };
       }
       // 同上：正常返回路径也必须先判待核对，再判取消。
       if (unresolved) return { kind: 'result_unknown', reason: RESULT_UNKNOWN_MESSAGE };
       if (context.signal.aborted) return { kind: 'cancelled' };
+      {
+        const accepted = acceptedRoundOf();
+        if (accepted !== undefined) return accepted;
+      }
       if (workerResult.text.trim() === '') {
         return now() >= deadline
           ? { kind: 'timed_out' }

@@ -289,6 +289,11 @@ export interface TaskStore {
    * 判定由 registry 的纯函数做；本方法只读。
    */
   listOperationCandidates(input: { scopeKey: string; operation: string; attempt: number }): OperationRow[];
+  /**
+   * 长任务（契约 v4）：按状态列出逻辑操作行（accepted = 执行层已受理、等待宿主 wait）。
+   * 只读；claimed_at 升序。旧库无 operations 表时返回空（不崩溃、不伪造）。
+   */
+  listOperationsByStatus(status: string): OperationRow[];
   /** U3：按身份键读回一行（重试/重放只读回，不重铸）。 */
   getOperation(dispatchKey: string): OperationRow | undefined;
   /**
@@ -760,6 +765,9 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   const selectOperationCandidates = hasOperations
     ? db.prepare('SELECT * FROM operations WHERE scope_key = @scopeKey AND operation = @operation AND attempt = @attempt ORDER BY op_seq')
     : undefined;
+  const selectOperationsByStatus = hasOperations
+    ? db.prepare('SELECT * FROM operations WHERE status = ? ORDER BY claimed_at, op_seq')
+    : undefined;
   const selectMaxOpSeq = hasOperations
     ? db.prepare('SELECT COALESCE(MAX(op_seq), 0) AS maxSeq FROM operations WHERE scope_key = ?')
     : undefined;
@@ -1084,6 +1092,11 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     listOperationCandidates(input) {
       if (selectOperationCandidates === undefined) throw new Error(missingOperationsError);
       return (selectOperationCandidates.all(input) as OperationDbRow[]).map(toOperation);
+    },
+    listOperationsByStatus(status) {
+      // 只读旧库没有 operations 表 = 没有账（读出空集，不崩溃、不伪造）。
+      if (selectOperationsByStatus === undefined) return [];
+      return (selectOperationsByStatus.all(status) as OperationDbRow[]).map(toOperation);
     },
     getOperation(dispatchKey) {
       // 只读旧库没有 operations 表 = 没有账（读出缺省，不崩溃、不伪造）。

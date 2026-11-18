@@ -21,6 +21,7 @@
   },
   "labels": {
     "dummy.query": "query records",
+    "dummy.longtask": "long running task",
     "dummy.scratch": "local computation",
     "dummy.prepare": "prepare records",
     "dummy.commit": "commit records",
@@ -388,6 +389,40 @@
       "protocol": null
     },
     {
+      "name": "dummy.longtask",
+      "domain": "dummy",
+      "command": "longtask",
+      "access": "write",
+      "script": "src/dummy/scripts/longtask.js",
+      "executor": "dummy-script",
+      "est_seconds": 1800,
+      "weight": 60,
+      "long_running": true,
+      "args": {
+        "positional": [],
+        "flags": [
+          {
+            "flag": "--seconds",
+            "required": true,
+            "style": "code",
+            "desc": "test-only: how long the job stays running before completing (integer seconds, >=0)"
+          },
+          {
+            "flag": "--fail-after",
+            "required": false,
+            "style": "code",
+            "desc": "test-only: fail the job this many seconds after acceptance (integer seconds)"
+          }
+        ]
+      },
+      "serve": {
+        "query": true,
+        "prepare": false,
+        "commit": false
+      },
+      "protocol": null
+    },
+    {
       "name": "dummy.scratch",
       "domain": "dummy",
       "command": "scratch",
@@ -519,6 +554,12 @@
             "required": false,
             "style": "code",
             "desc": "test-only: real wall-clock delay before the commit runs (integer ms, 0..60000; over the cap is refused deterministically)"
+          },
+          {
+            "flag": "--fail-index",
+            "required": false,
+            "style": "code",
+            "desc": "test-only: inject a write failure for the 1-based record index; the whole batch is refused atomically (nothing written)"
           },
           {
             "flag": "--records",
