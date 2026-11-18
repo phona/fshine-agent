@@ -36,16 +36,14 @@
 - `docs/product/dead-code-audit.md`、`cleanup-2026-11-16.md`——待办清单（未销项在册）
 - `docs/environment-variables.md`——环境变量清单
 
-## ④ 历史参考（定位为档案，文首有注记；不按现行规范读）
+## ④ 历史参考（定位为档案；不按现行规范读）
 
-- `docs/v0-architecture.md`——架构总览（§8 宿主预算/计划门表述为已删机制的历史叙述）
-- `docs/v0-functional-spec.md`、`docs/artifacts.md`、`docs/product/r4-slice-plan.md`——已被取代，失效注记在册
-- `docs/architecture-laws.md`、`docs/a2a-protocol.md`、`docs/execution-layer-interface.md`——历史判据 / 协议档案（AGENTS.md 指针）
-- `docs/debt-ledger.md`、`docs/change-safety.md`、`docs/e2e-ownership.md`——历史台账（ci.sh / PR review prompt 引用）
-- `docs/rule-landing.md`、`docs/business-skill.md`、`docs/roadmap.md`
+- `docs/architecture-laws.md`、`docs/debt-ledger.md`、`docs/change-safety.md`——历史判据 / 台账 / 防线档（PR review prompt 与 ci.sh 注释仍引用，删除待 owner 单独裁定）
 - `docs/product/exp-pi-native-config-headroom.md`——压缩配置安全值推导出处（ask-runtime.ts 注释引用）
 - `docs/product/evidence/`——补丁证据 json（git pin 锚点）
 
-## ⑤ 已删除（2026-11-18 清理）
+## ⑤ 已删除（2026-11-18 清理，两轮共 81 篇）
 
-删除 71 篇：0.85.1 压缩/实验簇（pi-compaction×5、exp-pi-native×4、pi-152-stage-b/c/d/d2、minimality-audit）、main-skill-face-design、R4 切片报告 22 篇、R5 收官 9 篇、R6 收官 5 篇、已实施/被取代设计 7 篇、退役工具旧档 11 篇、R5 清理 meta 2 篇、push-runbook 等。处置依据与取代者映射见 `docs/product/cleanup-2026-11-16.md`；内容考古用 `git log --diff-filter=D -- docs/`。
+- 第一轮 71 篇：0.85.1 压缩/实验簇（pi-compaction×5、exp-pi-native×4、pi-152-stage-b/c/d/d2、minimality-audit）、main-skill-face-design、R4 切片报告 22 篇、R5 收官 9 篇、R6 收官 5 篇、已实施/被取代设计 7 篇、退役工具旧档 11 篇、R5 清理 meta 2 篇。处置依据与取代者映射见 `docs/product/cleanup-2026-11-16.md`。
+- 第二轮 10 篇历史原位档：v0-architecture、v0-functional-spec、artifacts、r4-slice-plan、roadmap、rule-landing、business-skill、a2a-protocol、execution-layer-interface、e2e-ownership（AGENTS.md / ci.sh / 代码注释 / 活文档引用已同步改）。
+- 内容考古用 `git log --diff-filter=D -- docs/`。

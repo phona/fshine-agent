@@ -1,8 +1,8 @@
 # 方法论：不确定性治理与经验沉淀（methodology）
 
 状态：**作业纪律与设计判据**。来源：2026-10-18~19 薪酬域全链诊断与 A2A 协议落地的实战复盘。
-本文管"怎么工作、怎么判断"；机械约束在 architecture-laws.md，协议历史蓝图在 a2a-protocol.md
-（失效注记见其文件头；现行契约语义面见 `packages/contracts/src/execution-contract.ts` 与
+本文管"怎么工作、怎么判断"；机械约束在 architecture-laws.md，协议历史蓝图 a2a-protocol.md
+（2026-11-18 已删，git 历史可考；现行契约语义面见 `packages/contracts/src/execution-contract.ts` 与
 decision-log），改动防线在 change-safety.md，未清偿事项在 debt-ledger.md——四者引用本文判据编号，不重复正文。
 
 ## 一、诊断纪律（与不确定性 battle 的作业流程）

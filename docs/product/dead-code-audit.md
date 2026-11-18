@@ -303,7 +303,7 @@ grep -rn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=.runtime '<
 
 - 代码面（`.ts/.js/.cjs/.mjs/.json/.yaml/.yml`）中 `a2a`/`A2A` 仅剩 `execution-contract.ts:32` 的否定式注释；`CancelResult`、`confirmation_required`、`resend_artifact`、`task_control`、`measure-summary`、`generic-model-eval`（除退役说明）零命中。
 - `.github/workflows/eval-real.yml:10` 明确写旧 harness 已删除且不恢复；当前入口为 `npm run eval:user`（`package.json:19`）。
-- 文档面 `docs/a2a-protocol.md`、`docs/execution-layer-interface.md`、`docs/decision-log.md` 的历史章节按维护规则保留历史文本（不作为现行代码指针，也不改写），不计入代码面残留。
+- 文档面 `docs/a2a-protocol.md`、`docs/execution-layer-interface.md`（均已 2026-11-18 docs 清理删除，git 历史可考）、`docs/decision-log.md` 的历史章节按维护规则保留历史文本（不作为现行代码指针，也不改写），不计入代码面残留。
 - 因此本节**没有执行任何删除**；任何“清理注释”都属于文字修正，需与历史文档口径一起评审。
 
 ---

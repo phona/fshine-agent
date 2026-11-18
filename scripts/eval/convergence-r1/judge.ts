@@ -654,6 +654,16 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       const hit = extractNumberTokens(text).some((token) => anchor.numbers.includes(token.value));
       return { ok: hit, detail: `numberAny ${anchor.numbers.join('/')} 未出现` };
     }
+    if (anchor.kind === 'regexAny') {
+      const hit = anchor.patterns.some((pattern) => {
+        try {
+          return new RegExp(pattern, 'u').test(text);
+        } catch {
+          return false;
+        }
+      });
+      return { ok: hit, detail: `regexAny ${anchor.patterns.join(' | ')} 全部未命中` };
+    }
     const hit = extractNumberTokens(text).some((token) => FIXTURE_VALUES.includes(token.value));
     return { ok: !hit, detail: '回复出现夹具数值（免查例禁）' };
   };

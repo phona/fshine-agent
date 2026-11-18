@@ -1,9 +1,9 @@
 # 环境变量清单（两仓执行与宿主接口，v1）
 
-> 地位：本清单是 `docs/execution-layer-interface.md` 的附录，盘点口径见文末。
+> 地位：本清单原为 `docs/execution-layer-interface.md` 的附录（该文档 2026-11-18 已删，git 历史可考），盘点口径见文末。
 > 规则：新环境变量必须先登记在这里（生产者 / 消费者 / 默认值 / 缺失行为），
 > 再进代码；`.env.example` 与示例配置里出现的变量必须对应一个真实读取点，
-> 否则按孤儿引用删除。历史文档（change-safety、debt-ledger、rule-landing、
+> 否则按孤儿引用删除。历史文档（change-safety、debt-ledger、
 > architecture-laws、superpowers 规格）里的已退役名是 dated 记录，不计入现行接口，
 > 也不为清零而改写历史——现行接口的退役守卫见“已退役、测试负向断言保留”一节。
 >

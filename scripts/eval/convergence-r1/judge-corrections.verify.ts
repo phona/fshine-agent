@@ -17,6 +17,7 @@ import { judgeTrial } from './judge';
 import { E04 } from './cases/E04';
 import { E07 } from './cases/E07';
 import { E14 } from './cases/E14';
+import { E08 } from './cases/E08';
 
 const REPO = path.resolve(import.meta.dirname, '../../..');
 const WORK = path.join(REPO, '.runtime', 'judge-corrections');
@@ -101,6 +102,21 @@ if (e07Dir !== undefined) {
   const e07Codes = codesOf(e07Dir, E07);
   const wordingFail = e07Codes.includes('FAIL_STATE_INCONSISTENCY');
   check('E07 真实轨迹（空窗口话术）不再判硬锚点缺失', !wordingFail, `codes=${e07Codes.join(',') || '（空）'}`);
+}
+
+// ── 4) E08 否定存在语义的模式锚点 ──────────────────────────────────────────
+const e08Source = '.runtime/eval-wb-base2/runs/E08/trial-1';
+try {
+  const e08Real = freshCopy(e08Source, 'e08-wording');
+  const e08Codes = codesOf(e08Real, E08);
+  check('E08 真实轨迹（"平台里没有名为 zeta 的集合"）锚点命中', !e08Codes.includes('FAIL_STATE_INCONSISTENCY'), `codes=${e08Codes.join(',') || '（空）'}`);
+
+  const e08Fake = freshCopy(e08Source, 'e08-claims-success');
+  rewriteReply(e08Fake, () => '查询已完成：zeta 集合共 3 条记录，金额分别为 100、200、300。\n');
+  const e08FakeCodes = codesOf(e08Fake, E08);
+  check('E08 改成"宣称查到数据" → 仍判负', e08FakeCodes.length > 0, `codes=${e08FakeCodes.join(',') || '（空）'}`);
+} catch {
+  console.log('（跳过 E08 模式锚点绊线：样本目录不存在）');
 }
 
 if (failures.length > 0) {

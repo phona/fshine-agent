@@ -95,5 +95,5 @@
 
 - 契约与运行时：`packages/contracts/src/execution-contract.ts`、`packages/agent/src/execution-runtime.ts`、适配器对照 `packages/agent/src/dummy-cli-client.ts`。
 - 权威决定：`docs/decision-log.md` §十二（交付边界与清单）、§十七（§17.1 授权边界、§17.3 CLI flag 残余）、§二十三（真实只读 = 仅准备档）。
-- 授权门与切片：`docs/product/r3-open-decisions.md`、`docs/product/r4-slice-plan.md`。
-- 历史裁定：`docs/env-naming-ruling-20261110.md`（消费端边界）、`docs/environment-variables.md` §4a。
+- 授权门与切片：`docs/product/r3-open-decisions.md`、`docs/product/r4-slices.md`（原 r4-slice-plan.md 已删）。
+- 历史裁定：消费端边界（env-naming-ruling-20261110.md 已删，git 历史可考）、`docs/environment-variables.md` §4a。

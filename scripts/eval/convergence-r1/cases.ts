@@ -35,6 +35,9 @@ export type AnchorRule =
   | { kind: 'containsAll'; values: readonly string[] }
   | { kind: 'containsAny'; values: readonly string[] }
   | { kind: 'numberAny'; numbers: readonly number[] }
+  /** 正则族（2026-11-18）：同一语义的不同措辞用**模式**表达，避免逐个词补锚点。
+   *  例：「平台里没有名为 X 的集合」「没有返回任何相近的候选名称」= 同一条否定存在语义。 */
+  | { kind: 'regexAny'; patterns: readonly string[] }
   | { kind: 'noFixtureValues' };
 
 /** 逐轮期望（多轮用例；turn 从 1 计）。 */
