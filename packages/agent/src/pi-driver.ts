@@ -32,6 +32,7 @@ import type { Model } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver-contract';
+import { archiveCompactedSessionFile } from './session-persistence';
 import { renderToolStepText } from './step-text';
 
 /** 主模型瞬时失败的有界重试策略（交给 Pi 原生 RetrySettings 执行；沿用旧 [1000,2000] 两次延迟）。 */
@@ -489,6 +490,45 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
     const slot: Conversation['slot'] = { current: undefined };
     session.subscribe((event: AgentSessionEvent) => {
       if (event.type === 'compaction_end') {
+        // issue #67：Pi 的压缩只压模型上下文，会话文件仍是线性 append；压缩完成后把
+        // firstKeptEntryId 之前的死历史移入 archive/（见 archiveCompactedSessionFile）。
+        // 同步执行：与 Pi 的 append 同一 tick，改写期间不会插入新条目。
+        if (!event.aborted && event.result !== undefined) {
+          const sessionFile = sessionManager.getSessionFile();
+          if (sessionFile !== undefined) {
+            try {
+              const archived = archiveCompactedSessionFile(sessionFile);
+              if (archived.archived) {
+                // 路径不变（同一文件原地重写）。ownSessionFile 必须继续指向它：本实例的
+                // 会话重建（提示/工具集变化、异常丢弃）都按 ownSessionFile 回到同一份文件；
+                // 若这里不钉住，重建时 Pi 可能另建文件，重启解析就分成两份。
+                ownSessionFile = sessionFile;
+                // Pi 的树还在内存里；按重写后的文件重载，后续读/追加都只看活跃条目。
+                let reloadError: string | undefined;
+                try {
+                  sessionManager.setSessionFile(sessionFile);
+                } catch (error) {
+                  reloadError = String(error instanceof Error ? error.message : error).slice(0, 500);
+                }
+                console.warn(JSON.stringify({
+                  event: 'session_archive_written',
+                  archivedEntries: archived.archivedEntries,
+                  archivedBytes: archived.archivedBytes,
+                  activeBytesBefore: archived.activeBytesBefore,
+                  activeBytesAfter: archived.activeBytesAfter,
+                  archivePath: archived.archivePath,
+                  ...(reloadError === undefined ? {} : { reloadError }),
+                }));
+              }
+            } catch (error) {
+              // 失败只记事件：archiveCompactedSessionFile 在替换活跃文件前抛出，原文件保持原样。
+              console.warn(JSON.stringify({
+                event: 'session_archive_failed',
+                reason: String(error instanceof Error ? error.message : error).slice(0, 500),
+              }));
+            }
+          }
+        }
         // U3：溢出/阈值压缩后将继续重试 = 上一次 assistant 尝试被丢弃（Pi 的 _omitRecoveryAttempt
         // 只隐藏该尝试及其 toolResult，不回滚已发生的副作用）。只转述事实，判定归宿主。
         if (event.willRetry) input.surfaceRef.current?.onRuntimeEvent?.({ kind: 'recovery', reason: 'compaction' });
