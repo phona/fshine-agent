@@ -469,6 +469,55 @@ describe('长任务异步（契约 v4）', () => {
     expect(h.events.filter((event) => event['event'] !== undefined && String(event['event']).startsWith('execution_'))).toHaveLength(0);
   });
 
+  it('⑨ wait 连续出站失败 → 指数退避重排（封顶 60s），任务保持 running 不判死', async () => {
+    const h = await makeHarness();
+    submit(h.runner, 'A', 'LONG 导出');
+    await flush();
+    await flush();
+    expect(h.longTasks.waits).toHaveLength(1);
+
+    const retries = (): Array<{ failures: number; delayMs: number }> => h.events
+      .filter((event) => event['event'] === 'execution_wait_retry')
+      .map((event) => ({ failures: event['failures'] as number, delayMs: event['delayMs'] as number }));
+
+    // 执行层一直不可达：每次失败都退避，任务事实保持 running（结果只能由 wait 终态落定）。
+    const delays: number[] = [];
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const waits = h.longTasks.waits.length;
+      h.longTasks.waits[waits - 1]!.reject(new Error('executor unreachable'));
+      await flush();
+      const seen = retries();
+      expect(seen).toHaveLength(attempt + 1);
+      expect(seen[attempt]!.failures).toBe(attempt + 1);
+      delays.push(seen[attempt]!.delayMs);
+      expect(h.registry.get('A', SCOPE).status).toBe('running');
+      // 退避到期才重排下一次 wait（到期前 pump 不应再打执行层）。
+      h.clock.advance(seen[attempt]!.delayMs - 1);
+      h.runner.pump();
+      await flush();
+      expect(h.longTasks.waits).toHaveLength(waits);
+      h.clock.advance(1);
+      h.runner.pump();
+      await flush();
+      expect(h.longTasks.waits).toHaveLength(waits + 1);
+    }
+
+    // 250 → 500 → 1000 … 单调翻倍到 60s 封顶，之后不再增长（不按秒打执行层）。
+    expect(delays.slice(0, 4)).toEqual([250, 500, 1000, 2000]);
+    expect(delays[delays.length - 1]).toBe(60_000);
+    expect(Math.max(...delays)).toBe(60_000);
+
+    // 恢复后取到终态：退避计数清零，任务照常完成。
+    h.longTasks.waits[h.longTasks.waits.length - 1]!.resolve({
+      status: 'completed',
+      outcome: { status: 'completed', data: { summary: '导出完成' } },
+    });
+    await flush();
+    await h.runner.whenIdle();
+    expect(h.registry.get('A', SCOPE).status).toBe('completed');
+    expect(h.client.executeCalls).toHaveLength(1);
+  });
+
   it('⑦ wait completed 的输出文件/大日志走同一套回程登记：Worker 只见 fileId，读得回字节，无绝对路径', async () => {
     const runtimeRoot = tempDir('long-task-files-');
     const platformRoot = path.join(runtimeRoot, 'platform');

@@ -583,6 +583,11 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     && registry.releaseTaskLease !== undefined;
   const longTaskPollMs = longTasks?.pollAfterMs ?? 1_000;
   const longTaskWaitTimeoutMs = longTasks?.timeoutMs ?? 30_000;
+  /**
+   * wait 瞬时故障的退避上限（60s）：执行层长时间不可用时，等待项继续存在（事实不丢），
+   * 但重试频率收敛到一分钟一次，不把执行层打爆。
+   */
+  const LONG_TASK_MAX_RETRY_DELAY_MS = 60_000;
   /** 两个消费者共用**同一个**有界定时器轮（不新增第二个循环）；长任务等待也接在这一个上。 */
   const dueConsumerEnabled = waitingConsumerEnabled || longRunningConsumerEnabled || longTasks !== undefined;
   let lastDueScan: { at: number; nextDue?: number } | undefined;
@@ -628,6 +633,11 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     inFlight: boolean;
     /** 等待项由底账重建（上一次进程留下的 accepted 行）= 宿主重启后续等。 */
     restarted?: boolean;
+    /**
+     * 连续瞬时故障次数（wait 出站失败 / 子进程被杀 / 超时抛错）。退避重排用：执行层
+     * 宕机时按 pollAfterMs 固定重试会变成每秒打一次执行层。成功取到结果即清零。
+     */
+    transientFailures?: number;
     controller?: AbortController;
   }
   const waiters = new Map<string, WaiterEntry>();
@@ -889,11 +899,16 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         result = await longTasks!.wait(entry.operationId, longTaskWaitTimeoutMs, controller.signal);
       } catch (error) {
         // 取消（abort 路径）不算故障；其余（出站失败/子进程被杀）按瞬时故障退避重排，
-        // 不把任务判死——长任务结果只能由 wait 的终态落定。
+        // 不把任务判死——长任务结果只能由 wait 的终态落定。退避是指数型的且封顶：
+        // 执行层整体宕机时固定 pollAfterMs 会变成每秒一次出站调用（打爆执行层）。
         if (!controller.signal.aborted) {
           const live = waiters.get(entry.dispatchKey);
           if (live === entry) {
-            entry.nextDue = now().getTime() + entry.pollAfterMs;
+            const failures = (entry.transientFailures ?? 0) + 1;
+            entry.transientFailures = failures;
+            const delayMs = Math.min(entry.pollAfterMs * 2 ** Math.min(failures - 1, 16), LONG_TASK_MAX_RETRY_DELAY_MS);
+            entry.nextDue = now().getTime() + delayMs;
+            log?.({ event: 'execution_wait_retry', operationId: entry.operationId, failures, delayMs });
             schedulePump();
           }
         }
@@ -902,6 +917,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         entry.inFlight = false;
         if (entry.controller === controller) delete entry.controller;
       }
+      entry.transientFailures = 0;
       try {
         await handleWaitResult(entry, result, startedAt);
       } catch (error) {
