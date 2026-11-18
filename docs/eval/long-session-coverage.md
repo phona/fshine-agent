@@ -2,7 +2,7 @@
 
 - 状态：2026-11-18 补全（eval/long-session-ls6）。本文件**只描述测试面**：哪条轨测什么、
   判据来自哪个模块、已知盲区在哪、怎么跑。质量结论仍只由真实模型会话产生
-  （`docs/product/r6-longsession-prereg.md` §〇.1），本文件不承载任何「通过/稳定」结论。
+  （`docs/eval/long-session-prereg.md` §〇.1），本文件不承载任何「通过/稳定」结论。
 - 代码位置：`scripts/eval/long-session/`。语料与逐轮期望 = `load-generator.ts`；
   判定 = `oracle.ts`（事实/任务）、`compaction.ts`（压缩生命周期）、`harness.ts`
   （`judgeTurnExpectations`，轮期望）；证据/三态 = `evidence.ts`；真实会话适配 = `real-session.ts`；
@@ -151,7 +151,7 @@ node --env-file=.env --import tsx scripts/eval/long-session/wave1-runner.ts \
       定义与校验；状态机允许 `waiting_user→timed_out`（`packages/agent/src/task-registry.ts:249`），
       但全仓只有 `task-runner.ts:486` 调 `registry.timeout(taskId,'execution')`，**没有任何定时器
       调 `timeout(...,'waiting_user')`**（P5-T06 登记为 blocked-by-P2，见
-      `docs/product/p5-resource-policy.md` §P5-T06）。
+      `docs/architecture/contract.md` §P5-T06）。
     - **夹具造不出 `needs_input`**：`packages/agent/src/dummy-cli-client.ts:380` 只映射执行层显式
       `status:'needs_input'` 的信封；dummy 平台 read 的歧义返回是 `ambiguous`
       （`scripts/eval/fixtures/dummy-platform/runtime/read.cjs:97`），query 仅产出

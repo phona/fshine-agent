@@ -74,3 +74,4 @@
 - `history/business-e2e-prereg.md` — 业务 E2E 阶段 2 预注册（已收官）。
 - `history/business-e2e-prereg-addendum.md` — 上述预注册的事后修订附录（owner 裁定：N=3 / 每轮 18 会话 / 总上限 150）。
 - `history/business-e2e-final-report.md` — 业务 E2E 三轴总报告（功能边界 / 可靠性 / 稳定性，已收官）。
+- `eval/long-session-coverage.md` — 长会话轨 LS1–LS6 的覆盖、判据来源、盲区与跑法。
