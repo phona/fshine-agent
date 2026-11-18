@@ -363,7 +363,10 @@ describe('目标 B：30 秒主动追问', () => {
     const fx = await makeFixture();
     try {
       for (const [index, name] of ['名册.xlsx', '工资表.xlsx', '说明.docx'].entries()) {
-        await fx.server.handler(attachmentMessage({ dir: fx.dir, messageId: `m-file-${index + 1}`, filename: name }));
+        // 三份**不同**文件：同字节在同 scope 会按 sha256 去重成一个 fileId（F-1 语义），
+        // 本用例验证的是「连发 3 个文件」的追问面，字节必须互不相同。
+        const bytes = Buffer.alloc(6861, 0x61 + index);
+        await fx.server.handler(attachmentMessage({ dir: fx.dir, messageId: `m-file-${index + 1}`, filename: name, bytes }));
       }
       expect(fx.clock.pending()).toBe(1);
       await fx.clock.advance(NUDGE_AFTER_MS);

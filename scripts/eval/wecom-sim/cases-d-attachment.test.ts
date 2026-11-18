@@ -142,8 +142,10 @@ describe('D 组·附件时序（W-13～W-18）', () => {
     const sim = await startWecomSim({ label: 'w17' });
     try {
       sim.sendFile('销售明细.xlsx', sample);
-      sim.sendFile('客户往来.xlsx', sample);
-      sim.sendFile('说明.docx', sample);
+      // 三份**不同**文件：同字节在同 scope 会按 sha256 去重成一个 fileId（F-1 语义），
+      // 本用例验证「连发 3 个文件」的回执/追问面，字节必须互不相同。
+      sim.sendFile('客户往来.xlsx', Buffer.concat([sample, Buffer.from('variant-2')]));
+      sim.sendFile('说明.docx', Buffer.concat([sample, Buffer.from('variant-3')]));
       await sim.waitFor('回执出现', () => sim.finalBubbles().some((bubble) => bubble.content.startsWith('已收到')));
       // 一条回执，只报个数、不带名（去重计数=3；不逐条回执）。
       const receipts = sim.finalBubbles().filter((bubble) => bubble.content.startsWith('已收到'));
