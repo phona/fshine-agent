@@ -1,5 +1,5 @@
 /**
- * Task 副本与解析作用域（CAP-01 S2；docs/product/cap01-main-direct-execution.md §4）。
+ * Task 副本与解析作用域（CAP-01 S2；docs/architecture/files.md §4）。
  *
  * 覆盖（对应 ask ①②③④ 的 file-store 侧断言）：
  *   · copyInputsForTask（交办复制）：先全部解析、后复制——任一 fileId 不可用 → 整次拒绝

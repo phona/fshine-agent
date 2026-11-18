@@ -1,7 +1,7 @@
 # 决定索引
 
 > 状态：现行。只列**今天仍会被代码或文档引用**的决定，每条一行：日期 / 主题 / 结论 / 指针。
-> 同一主题的多轮记录已合并为一行并标「多轮」；未列入的条目是一次性实施记录或已被后继取代，正文都在历史分片（`../history/decision-log-part*.md`，全量快照 `../history/decision-log-2026-11.md`），本页不改写正文。
+> 同一主题的多轮记录已合并为一行并标「多轮」；未列入的条目是一次性实施记录或已被后继取代，正文都在历史分片（`../history/decision-log-part*.md`），本页不改写正文。已收官轮次的原件同样在 history：`../history/business-e2e-final-report.md`（三轴总报告）、`../history/business-e2e-prereg.md` 与 `../history/business-e2e-prereg-addendum.md`、`../history/r4-stability-prereg.md`。
 > § 号沿用原 `docs/decision-log.md` 编号（该文件已拆档、不在当前树）——代码与旧文档里指向 `docs/decision-log.md` §N 的注释，按本表指针考古。
 > 未决项不在本页：GitHub issues #67–#74（逐项见 `debt.md`）。
 
@@ -26,4 +26,4 @@
 | 2026-11-16 | U3 稳定逻辑操作身份 `dispatchKey`（§九十七） | 新增 `operations` 账 + 两层身份（`delegationId` / `dispatchKey`）；同 key 异 op 确定性拒绝；重试不另铸身份；结果未知 → `result_unknown` 待核对 | `../history/decision-log-part06-2026-11_undated.md:145` |
 | 2026-11-17 | CAP-01 收口（§九十九） | S3 端到端 2/5 接受为模型能力包络；run 目录保留 30 天；并发 4；渠道三档；软链 fail-closed；跨会话能力不做 | `../history/decision-log-part06-2026-11_undated.md:255` |
 | 2026-11-17–18 | recalc_xlsx 集成（§一百） | `recalc_xlsx` 仅 Main 宿主工具；LibreOffice 26.8.3 仅 PATH 可见时上工具面、缺失 fail-closed；投递门报告驱动、只按 sha256 绑定；一条重编码残余登记 | `../history/decision-log-part06-2026-11_undated.md:305` |
-| 2026-11-18 | 文档清理与未决项转 issue | 五轮删除 93 篇 + 1 篇移出 docs；未决项转 GitHub #67–#74；仓库不再保留待办/待裁定文档 | `../index.md`、`../../AGENTS.md:71` |
+| 2026-11-18 | 文档清理与未决项转 issue | 未决项转 GitHub #67–#74；仓库不再保留待办/待裁定文档；删除/移档流水以 `git log --diff-filter=D -- docs/` 为准 | `../index.md`、`../../AGENTS.md` |

@@ -31,7 +31,7 @@
 
 ## 2. 两层身份：交办意图 / 业务操作
 
-`dispatchKey` 是**业务操作**的身份；`taskId` 是**交办意图**的身份（`docs/decision-log.md` §九十七）。
+`dispatchKey` 是**业务操作**的身份；`taskId` 是**交办意图**的身份（§九十七 U3 合入，索引 `docs/decisions/index.md`「U3 稳定逻辑操作身份 `dispatchKey`」行；原文 `docs/history/decision-log-part06-2026-11_undated.md:145`）。
 两者不互换：重试不新造交办，交办重复不合并操作。
 
 | 层 | 身份 | 作用域字符串 | 铸造点 |
@@ -71,7 +71,7 @@
 已落定行不被覆盖，`unknown` 不被晚到的结果洗白（`packages/agent/src/task-registry.ts:897`）。
 
 上抛到任务层：前台 `run.unresolved` → 抛 `ToolUserError` 确定性终结回合（`packages/agent/src/execution-runtime.ts:1612`）；
-后台 → `{kind:'result_unknown'}`（`:2359`）→ `runner.settle` 走 `markResultUnknown`（`packages/agent/src/task-runner.ts:478`），
+后台 → `{kind:'result_unknown'}`（`:2359`）→ `runner.settle` 走 `markResultUnknown`（`packages/agent/src/task-runner.ts:480`），
 任务落 `failed + reason=result_unknown`。测试：`packages/agent/dispatch-key-identity.test.ts:195`。
 
 ## 4. 取消三态：排队 / 在飞 / 已完成
@@ -99,7 +99,7 @@
 （`packages/agent/src/task-registry.ts:83`，校验 `:303`）。**只由执行层事实填写，不编造、不改写候选**。
 
 入边（仅后台路径）：执行器看到 `needs_input` → `pendingQuestionFrom` 原样转述 `missing`（`packages/agent/src/execution-runtime.ts:2226`、
-`:2366-2375`）；`missing` 为空则判 `failed` 而非等待（`:2372`）。`runner.settle` 落 `waitForUser`（`packages/agent/src/task-runner.ts:482`）。
+`:2366-2375`）；`missing` 为空则判 `failed` 而非等待（`:2372`）。`runner.settle` 落 `waitForUser`（`packages/agent/src/task-runner.ts:483`）。
 
 > ⚠️ 文档与代码不一致：inline 路径不产生 `waiting_user`——`judgeReportedTask` 把含 `needs_input` 的执行事实判为
 > `failed`（`packages/agent/task-status-boundary.test.ts:60`），registry 头注也写明「waiting_user 仅后台任务使用」（`packages/agent/src/task-registry.ts:29`）。
@@ -147,17 +147,16 @@
 
 ## 来源
 
-本页由以下文档收拢（均已从 `docs/` 删除，git 历史可考；每篇只保留"今天做决定/排障还读"的条款）：
+本页由以下文档收拢（除标「现存」者外均已从 `docs/` 删除，git 历史可考；每篇只保留"今天做决定/排障还读"的条款）：
 
-- `p2a-task-contract.md`（现存）——状态集/合法边/单写路径/机械原因/契约测试判据；
+- `p2a-task-contract.md`（现存：`docs/product/p2a-task-contract.md`）——状态集/合法边/单写路径/机械原因/契约测试判据；
 - `p2b-display.md`——9 态用户词与 5 种原因行金样、未知值 fail-open；
 - `p1-ledger.md`——`taskNo` 原子分配不复用、`deriveTaskName` 机械回落、回复存档；
 - `p1-task-viewing.md`——只读消费底账、不在读时重算终态；
-- `p3-human-redo.md`——redo 输入=存储原文逐字、仅终态、原任务零改动；
+- `p3-human-redo.md`（现存：`docs/product/p3-human-redo.md`）——redo 输入=存储原文逐字、仅终态、原任务零改动；
 - `p6-task-runner.md`——受理即 `queued`、租约认领、重启恢复、取消/接续分派；
 - `p7a-ask-first.md`——交互/回放共用同一装配（未涉及任务生命周期的部分未取）；
 - `idempotency-cross-restart.md`——三处幂等覆盖边界与"跨重启不幂等"的结论；
-- `u3-dispatch-key-program.md` / `pi-152-dispatch-key-design.md`——两层身份、铸造点唯一、证明边界、R0–R5 规则；
+- `pi-152-dispatch-key-design.md`（U3 设计；合入决定 §九十七）——两层身份、铸造点唯一、证明边界、R0–R5 规则；
 - `s4-stats-four-state.md`——**未取**（评测统计口径，不属任务生命周期）；
-- `task-creation-and-query-surface.md`（实现对应 `gap-task-surface.md`）——工具只收任务引用、scope 由宿主注入、
-  取消/接续只转述 outcome。
+- `gap-task-surface.md`——工具只收任务引用、scope 由宿主注入、取消/接续只转述 outcome。

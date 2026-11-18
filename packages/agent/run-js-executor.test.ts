@@ -1,5 +1,5 @@
 /**
- * run_js 执行器（CAP-01 S0；docs/product/cap01-main-direct-execution.md §2/§3/§8）。
+ * run_js 执行器（CAP-01 S0；docs/architecture/files.md §2/§3/§8）。
  *
  * 覆盖（S0 验收 ①-⑥，逐条对应）：
  *   ① 脚本读 in/、写 out/ → 产物登记成新 fileId、**原件 sha256 不变**（存储字节不动、

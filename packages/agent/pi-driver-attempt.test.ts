@@ -4,7 +4,7 @@
  * 背景：重试不在驱动自建的循环里，而由 Pi 原生 `AgentSession` 按
  * `MAIN_MODEL_RETRY_SETTINGS`（`pi-driver.ts:38`，`maxRetries: 2`）执行；驱动只订阅
  * `auto_retry_start` / assistant `message_end`。旧实现把 `attempt` 硬编码为 1
- * （`pi-driver.ts:641`），于是「事件说 1、实际重试 2 次」，`docs/decision-log.md:2408`
+ * （`pi-driver.ts:641`），于是「事件说 1、实际重试 2 次」，`docs/decisions/index.md`（R6 预注册 §七十八 行）
  * 的 H6.b（`attempt > 3`）无从核对。
  *
  * 判据：

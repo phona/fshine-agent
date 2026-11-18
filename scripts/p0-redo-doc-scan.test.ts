@@ -22,7 +22,8 @@ import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const README_PATH = path.join(REPO_ROOT, 'README.md');
-const DECISION_LOG_PATH = path.join(REPO_ROOT, 'docs', 'decision-log.md');
+// decision-log 2026-11-18 已拆档进 docs/history/；§二十 落在第 2 块（原文件行号已不可考）。
+const DECISION_LOG_PATH = path.join(REPO_ROOT, 'docs', 'history', 'decision-log-part02-2026-11.md');
 const P3_REPORT_PATH = path.join(REPO_ROOT, 'docs', 'product', 'p3-human-redo.md');
 
 /** 去空白（含换行）归一：把跨行句子变成可精确比对的连续串。 */
@@ -68,7 +69,7 @@ describe('P0-T05 S3 redo 口径文档扫描', () => {
     expect(section, 'decision-log §二十 缺「名称说明」加注').toContain('名称说明');
     expect(flat(section), `decision-log §二十 注记需含「${CANONICAL_BOUNDARY}」`).toContain(CANONICAL_BOUNDARY);
 
-    const mis = unnegatedMisdescriptions('docs/decision-log.md', text);
+    const mis = unnegatedMisdescriptions('docs/history/decision-log-part02-2026-11.md', text);
     expect(mis, `decision-log 出现未否定的 redo=接管/续跑表述：\n${mis.join('\n')}`).toEqual([]);
   });
 

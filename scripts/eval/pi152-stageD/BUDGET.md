@@ -47,7 +47,7 @@
 | M8 | Overflow recovery | 恢复成功的 overflow 事件 / 全部 overflow 事件 | 每个事件必须收束：成功恢复或**有界失败**（无无限重试）。真实运行未触发则 NOT_MEASURED，并引用阶段 B：G3 成功 3/3、G1/G2/G4 有界失败（每次超窗外发 ≤1、总发出 ≤2、`retry_scheduled=0`） |
 | M9 | token·延迟·成本 | 逐组调用数 / input / output / total / 墙钟 / 平均回合 / cost | 只记录与对照，不设通过阈值；provider 未返回非零 cost 则标“不可得”，不编造 |
 
-**0.85.1 基线对照**（`docs/decision-log.md` §九十五 §5）：A-bare 49 calls / 329,835 tokens / 243s；B-w24576 18 / 144,596 / 32s；C-bare 42 / 289,668 / 240s。本轮回合数与窗口不同，只作量级对照。
+**0.85.1 基线对照**（`docs/decisions/index.md` §九十五行，§5 小节的 0.85.1 基线）：A-bare 49 calls / 329,835 tokens / 243s；B-w24576 18 / 144,596 / 32s；C-bare 42 / 289,668 / 240s。本轮回合数与窗口不同，只作量级对照。
 
 ## 4. `blocked` 判定（跑后不改）
 

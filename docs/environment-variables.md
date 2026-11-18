@@ -8,7 +8,7 @@
 > 也不为清零而改写历史——现行接口的退役守卫见“已退役、测试负向断言保留”一节。
 >
 > 前缀规则：执行层治理接口与夹具 per-run 隔离路径统一用 `EXECUTION_*`（唯一规范族，
-> 2026-11-10 裁定见 `docs/env-naming-ruling-20261110.md`），宿主自用参数用 `FSHINE_*`；
+> 2026-11-10 裁定原文 `docs/env-naming-ruling-20261110.md` 已删，git 历史可考），宿主自用参数用 `FSHINE_*`；
 > `DUMMY_*` / `STOCK_*` 只是夹具**调试入口**（手工跑时可用；B 类隔离路径与令牌面在
 > 评测进程内不可见，见 §4；C 类按用例旋钮仍用夹具专名，见 §9）。上一轮的旧前缀已全量清零。
 >
@@ -38,7 +38,7 @@
 > step cap）**删除**——零生产读取点的「写着不生效」假配置；旧 YAML 里的残留键由加载层
 > 忽略。资源旋钮的唯一入口改为 `runtime` 段（yaml 键、**无 env 覆盖口**）：非法值
 > fail-fast、未知键拒绝，缺省由 `packages/agent/src/resource-policy.ts` 按「缺省=现行为」
-> 补齐；登记见 `docs/decision-log.md` §三十二，静态守卫见
+> 补齐；登记见 `docs/decisions/index.md` §三十二，静态守卫见
 > `packages/agent/resource-policy-single-source.test.ts`。
 > `runtime` 段另含 `dispatchMode: inline | background`（R4 集成接线，2026-11-14；缺省
 > `inline` = 现行为：委派同步执行；`background` = 受理即回执、后台 TaskRunner 执行——

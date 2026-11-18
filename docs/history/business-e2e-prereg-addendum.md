@@ -339,3 +339,6 @@ LLM_MODEL=step-3.7-flash node --env-file-if-exists=.env --import tsx \
   `business-e2e/run.ts --infra-gate`：`--case B06 --trials 6` → **6 样本**、`--case B01,B02,B03,B04,B06,B08 --trials 3` → **18 样本**，均 exit 0（`verifyLock` 一致，冻结面未动）。
 - **样本局限声明**：本节只登记装配与确定性自检，**不含任何真实模型读数**；「自然语料是否触发压缩、压缩后能否
   恢复上下文、#6 漂移复现率、跨轮方差」均待运行阶段按 §6.2–6.4 判据实测，本预注册不预判胜负。
+---
+
+> 历史归档（2026-11-18 移入 `docs/history/`）：本轮已收官，冻结口径与读数只作考古；文内 worktree / 分支名与行号按当时口径，不保证可用。

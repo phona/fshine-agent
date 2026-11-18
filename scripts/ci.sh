@@ -20,7 +20,7 @@
 # CI runs only the deterministic gates; consistency between this repo's generic
 # budget-protocol defaults and any execution layer's own policy is owned by the
 # execution layer's repository, not by this single-repo CI (the check moved there
-# in wave W4). Boundary registered as a known limit: docs/debt-ledger.md D-150.
+# in wave W4). Boundary registered as a known limit: D-150 (现行指针 docs/decisions/debt.md; 台账原文已归档 docs/history/debt-ledger-part03-2026-10_2026-11.md:284).
 set -eu
 cd "$(dirname "$0")/.."
 echo "== node =="

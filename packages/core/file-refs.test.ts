@@ -1,5 +1,5 @@
 /**
- * file_refs 行访问器（CAP-01 S0；docs/product/cap01-main-direct-execution.md §4）。
+ * file_refs 行访问器（CAP-01 S0；docs/architecture/files.md §4）。
  *
  * 覆盖：
  *   ① 插/查/列的最小面：插入行回读字段一致；activated_at NULL 读出 undefined（= pending，

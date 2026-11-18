@@ -1,5 +1,5 @@
 /**
- * run_js 执行器（CAP-01 S0；docs/product/cap01-main-direct-execution.md §2/§3/§8）。
+ * run_js 执行器（CAP-01 S0；docs/architecture/files.md §2/§3/§8）。
  *
  * S0 面只到「跑完一次受限脚本并登记产物」：不接 Main、不接渠道、不进 Execution
  * Contract、不改 execution-runtime 的工具面（接线与端口注入归 S1）。

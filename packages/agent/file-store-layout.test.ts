@@ -1,5 +1,5 @@
 /**
- * workspace 目录布局派生（CAP-01 S1 测试补齐；docs/product/cap01-main-direct-execution.md §2/§3）。
+ * workspace 目录布局派生（CAP-01 S1 测试补齐；docs/architecture/files.md §2/§3）。
  *
  * S0 落了派生函数（file-store.ts），但确定性此前没有测试锁住。本文件只锁派生面（纯字符串
  * 运算，不触盘写）：

@@ -1,7 +1,7 @@
 /**
  * recalc_xlsx（宿主 agent 工具，Main 面）· TDD 用例。
  *
- * 覆盖工具契约（docs/decision-log.md §九十九）：
+ * 覆盖工具契约（docs/decisions/index.md §九十九）：
  *   · 参数 {file, sheet?, export}；file 只能是本回合运行目录的规范相对路径 in/<fileId><安全扩展名>，
  *     绝对路径 / .. / 多级 / 反斜杠 / 非规范 / symlink 逃逸一律 path_escape；
  *   · 错误码 path_escape|not_found|corrupt|too_large|timeout|engine_failed；

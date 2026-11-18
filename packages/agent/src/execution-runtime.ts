@@ -239,7 +239,7 @@ export const RUN_JS_TOOL_SCHEMA: Record<string, unknown> = {
 };
 
 /**
- * recalc_xlsx（docs/decision-log.md §九十九；owner 裁定 R1–R7 / Q1–Q4）：Main 宿主面的
+ * recalc_xlsx（docs/decisions/index.md §九十九；owner 裁定 R1–R7 / Q1–Q4）：Main 宿主面的
  * 表格重算读回工具，与 run_js 并列。**Worker 面不上**（裁定 ②/⑥，Q1②）。只在装配方注入
  * `recalcXlsxExecutor` 时上工具面（fail-closed，缺省零变化）；引擎不可用即不上工具面。
  * 描述只声明已实现的参数与后果，不写业务流程话术（tool-description-facts 纪律）。

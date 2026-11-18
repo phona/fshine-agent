@@ -18,7 +18,7 @@
  *   · pending_question / waiting_since：waiting_user 形状（JSON：missing[]/candidates?/raw? + ISO 时刻）；
  *   · lease_owner / lease_until：后台认领租约（仅 running 持有；过期 → result_unknown，不自动重放）。
  *
- * 迁移口径（版本化迁移；登记：本注 + docs/decision-log.md R4 登记节）：
+ * 迁移口径（版本化迁移；登记：本注 + docs/decisions/index.md R4 登记节）：
  *   · 触发 = 可写打开且 tasks 表缺列（旧库）或缺 operations 表 / executions.dispatch_key
  *     （U3 schema v4）；只读打开永不迁移——旧库只读时新列新表读出缺省（不崩溃）、主库哈希不变；
  *   · 迁移前自动备份：wal_checkpoint(FULL) 后整文件复制为 <dbPath>.backup-v<N>

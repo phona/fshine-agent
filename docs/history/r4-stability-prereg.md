@@ -165,3 +165,6 @@ TMPDIR=~/.tmp npx vitest run scripts/stab/soak.test.ts scripts/stab/pressure.tes
 ## 十、预注册冻结声明
 
 本文件提交后，§二/§三 的场景、阈值、样本量与断言即为冻结记录；运行后新增的一切数字只能写入报告（`docs/product/r4-stability-report.md`）与 `.runtime/stab/` 证据，不得回填本文件。若发现本预注册自身缺陷（如场景不可实现、断言与登记 blocked 冲突），处置为：保留原文 → 追加「修正记录」小节（新日期）→ 作废对应批次/场景并重跑新编号；不得静默修改。
+---
+
+> 历史归档（2026-11-18 移入 `docs/history/`）：本轮已收官，冻结口径与读数只作考古；文内 worktree / 分支名与行号按当时口径，不保证可用。

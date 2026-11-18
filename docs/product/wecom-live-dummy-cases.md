@@ -281,7 +281,7 @@ TMPDIR=/home/tao/.tmp node scripts/eval/fixtures/make-sales-sample.mjs /home/tao
 
 **已登记**：I 组用例（W-33～W-38，2026-11-18 拆为 I-1 语义扩散 / I-2 机械重试两条线）把这件事写成
 可复现判据（单回合 ≤3、单任务 ≤3、同确定性拒绝 ≤2）；自动化侧对应 `E13`/`E14`（convergence-r1
-用户级黑盒）与 R6 `H6.b`（本轮 Wave1 读数 14/15 命中，见 `docs/product/cap01-record.md` §10）。
+用户级黑盒）与 R6 `H6.b`（本轮 Wave1 读数 14/15 命中，见 `docs/product/cap01-record.md`（已删，git 历史可考）§10）。
 
 **未修**（需 owner 定方向，二选一或都做）：
 - a) 工具结果层面：`needs_confirmation` 时明确告诉模型"提案已生成，等用户下一句话再提交"，

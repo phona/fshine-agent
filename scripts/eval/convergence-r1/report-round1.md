@@ -1,7 +1,7 @@
 # fshine-agent「Eval 收敛 · 第一轮」交付报告（convergence-r1，arch/eval-r1）
 
 > 范围：用户级黑盒评测 convergence-r1 第一轮——固定语料 E01–E12 × 3 trial = **36 次真实模型运行**、逐失败归因、判定器缺陷修复与重切、同例复测。
-> 数据来源：批次台账 `.runtime/eval-r1/reports/batch-EvalR1-{A,B,C,D}.json`（36 样本全量字段）、运行证据 `.runtime/eval-r1/runs/<case>/trial-<n>/`、修复登记 `docs/decision-log.md` §十六、独立复核与终核记录（本轮工作流材料）。证据路径均相对 eval 工作树根。
+> 数据来源：批次台账 `.runtime/eval-r1/reports/batch-EvalR1-{A,B,C,D}.json`（36 样本全量字段）、运行证据 `.runtime/eval-r1/runs/<case>/trial-<n>/`、修复登记 `docs/decisions/index.md` §十六、独立复核与终核记录（本轮工作流材料）。证据路径均相对 eval 工作树根。
 > 交付形态（M5）：① 固定语料与可复现运行入口；② 首轮 36 次原始运行索引；③ 逐失败证据与归因（层次分类）；④ 已实施最小修复及复测前后对照；⑤ 尚未达标能力清单（含宿主机制待批项）；⑥ 运行环境与口径限制。
 
 ## 摘要
@@ -221,7 +221,7 @@ npm run eval:user -- --case E04 --trial 1 --out-dir .runtime/eval-r1/e04-repro
 
 ## 4. 已实施的最小修复及复测前后对照
 
-修复范围仅限允许类「判定器自身缺陷」；**仅改 `judge.ts`**，`criteria.ts` 与 12 个用例文件逐字节未动；每次修复按同流程：修复 → `--judge-selftest` 8/8 + 全样本 `--judge-existing` 复判比对 → 重切冻结 → 同例真实模型复测 → 登记 `docs/decision-log.md` §十六。
+修复范围仅限允许类「判定器自身缺陷」；**仅改 `judge.ts`**，`criteria.ts` 与 12 个用例文件逐字节未动；每次修复按同流程：修复 → `--judge-selftest` 8/8 + 全样本 `--judge-existing` 复判比对 → 重切冻结 → 同例真实模型复测 → 登记 `docs/decisions/index.md` §十六。
 
 ### 4.1 E04（提交 6c601d5；第三次冻结 2026-11-13T11:30:50Z，judge.ts=734bd234…）
 
@@ -308,7 +308,7 @@ npm run eval:user -- --case E04 --trial 1 --out-dir .runtime/eval-r1/e04-repro
 - 首轮运行代码点：081b46d（第二次冻结 10:49:28Z；与批次表 head 一致）。
 - 修复提交（fix + 重切 + 冻结）：6c601d5（E04，第三次冻结 734bd234…/11:30:50Z）、629da36（E06，第四次冻结 eb7a0c19…/11:42:22Z）、5398a4c（E07，第五次冻结 a6a5b293…/11:48:26Z，当前 lock）。
 - 复测/登记提交：bd019cb（E04 复测登记）、2834f62（E06）、ae67821（E07）。
-- 关键留档：批次台账 `.runtime/eval-r1/reports/batch-EvalR1-{A,B,C,D}.json`；运行证据 `.runtime/eval-r1/runs/`；修复复测 `.runtime/eval-r1/{e04,e06,e07}-after/`；修复前复现 `.runtime/eval-r1/{e04,e05,e06,e07,e08}-repro/`；判定器自测 `.runtime/eval-r1/judge-selftest/`；修复登记 `docs/decision-log.md` §十六。
+- 关键留档：批次台账 `.runtime/eval-r1/reports/batch-EvalR1-{A,B,C,D}.json`；运行证据 `.runtime/eval-r1/runs/`；修复复测 `.runtime/eval-r1/{e04,e06,e07}-after/`；修复前复现 `.runtime/eval-r1/{e04,e05,e06,e07,e08}-repro/`；判定器自测 `.runtime/eval-r1/judge-selftest/`；修复登记 `docs/decisions/index.md` §十六。
 - 本报告：`scripts/eval/convergence-r1/report-round1.md`（随 arch/eval-r1 提交；副本发布至 `.runtime/eval-r1/report-round1.md`，不提交）。
 
 ## 7. 合后复测（M4 修复并入 arch/integration 后，2026-11-13）

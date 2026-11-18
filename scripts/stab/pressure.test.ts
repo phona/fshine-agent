@@ -1,7 +1,7 @@
 /**
  * R4 · 稳定性加固 · 压力套件（TDD 先在红：harness 缺失）。
  *
- * 预注册：`docs/product/r4-stability-prereg.md` §三（场景 P1/P2/P3）与 §四（不变量 I1–I5）。
+ * 预注册：`docs/history/r4-stability-prereg.md` §三（场景 P1/P2/P3）与 §四（不变量 I1–I5）。
  * 假件（假 executor / 假 sink / 假渠道 / 可注入时钟）由 `./pressure-harness` 提供。
  * **先红 = harness 文件尚未实现（collection 失败）**；不弱化任何断言、不删除任何场景。
  *

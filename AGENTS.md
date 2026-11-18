@@ -1,6 +1,6 @@
 # fshine-agent 项目约定
 
-> 本文件是**每个 Agent 进仓的第一约束**。2026-11-13 起按「Minimal Rewrite」重写：哲学、职责边界、新增机制准入与删除纪律都是硬约束；架构现状与历史台账以 `docs/decision-log.md` 为准（§九 V0 交付、§十 M2 波次 1 退役、§十一 产品面收口、§十三 M4 死代码清扫、§十四 eval 入口、§十五/§十六 R1 清理与冻结登记）。
+> 本文件是**每个 Agent 进仓的第一约束**。2026-11-13 起按「Minimal Rewrite」重写：哲学、职责边界、新增机制准入与删除纪律都是硬约束；架构现状与历史台账以 `docs/decisions/index.md` 为准（§九–§十二 Minimal Rewrite 收口、§十三 M4 死代码清扫、§十四 eval 入口、§十五 R1 清理、§十六 判据冻结；正文在 `docs/history/decision-log-part01-2026-11_undated.md` 与 `-part02-2026-11.md`）。
 
 ## 定位
 
@@ -62,10 +62,8 @@ fshine-agent 的定位（2026-11-12 第三版，2026-11-13 Minimal 细化）：*
 
 ## 现状（2026-11-13 Minimal Reset 产品面收口；不要读成已完成）
 
-## 现状（2026-11-13 Minimal Reset 产品面收口；不要读成已完成）
-
-**Minimal Rewrite 已收口**：旧 Runtime hub（runtime/context/pi-coding-driver/serve-gate/plan-runtime/task-manager 及旧 app 接线）与旧 demo/试跑脚手架已按可达性删除，`minimal` 过渡命名已收口。仓库只保留产品面——运行＝`npm run ask`（一条消息 → 回复 + 机械证据，缺省仓内 dummy 执行层）与 `npm start`（渠道消息 → 回复）；测试＝`npm test`（vitest）；评测＝`npm run eval:user`（用户级黑盒入口，真实模型 + 仓内 dummy 夹具，与 `ask` 同源装配；确定性门＝typecheck + unit）。写/确认/取消/产物是后续切片。防回潮守卫见 `packages/agent/transition-naming.test.ts`；收口记录见 `docs/decision-log.md` §十一、§十三、§十四、§十五。
+**Minimal Rewrite 已收口**：旧 Runtime hub（runtime/context/pi-coding-driver/serve-gate/plan-runtime/task-manager 及旧 app 接线）与旧 demo/试跑脚手架已按可达性删除，`minimal` 过渡命名已收口。仓库只保留产品面——运行＝`npm run ask`（一条消息 → 回复 + 机械证据，缺省仓内 dummy 执行层）与 `npm start`（渠道消息 → 回复）；测试＝`npm test`（vitest）；评测＝`npm run eval:user`（用户级黑盒入口，真实模型 + 仓内 dummy 夹具，与 `ask` 同源装配；确定性门＝typecheck + unit）。写/确认/取消/产物是后续切片。防回潮守卫见 `packages/agent/transition-naming.test.ts`；收口记录见 `docs/decisions/index.md`（§十一、§十三、§十四、§十五 各一行，正文在 `docs/history/decision-log-part01-2026-11_undated.md`）。
 
 **现行协议**：Main 直接委派 Worker，Worker 经 Execution Contract 结构化调用执行层；不经过宿主计划门。
 
-**指针**：`docs/decision-log.md`（权威决定与状态）、GitHub issues #67–#74（2026-11-18 结转的未决项：会话存储 retention/capacity、跨重启消息级幂等、executions 时间列、tasks CLI 增强、P8 ops 扩展、死代码重复实现、eval 候选池、B2 真实租户联调）、`packages/contracts/src/execution-contract.ts`（现行执行契约语义面）、`docs/architecture-laws.md`（律法与历史判据档案；多数守卫引用已随 `0b97227`/M4 退役，见其文首 2026-11-13 M4 注）、`docs/methodology.md`（作业纪律）。原 `docs/product/r3-open-decisions.md` 待裁定登记已随 2026-11-18 清理删除并逐项转 issue（内容经 git 历史可考）；`docs/a2a-protocol.md` 与 `docs/execution-layer-interface.md` 同轮删除（A2A 为历史别名；旧 a2a 契约类型 `packages/contracts/src/a2a-protocol.ts` 已随 M4 死代码清扫删除且不恢复）。旧文档章节（三层分工、九类删除表、迁移期对账）只作历史参考，与 decision-log 冲突时以 decision-log 为准。
+**指针**：`docs/decisions/index.md`（权威决定与状态）、GitHub issues #67–#74（2026-11-18 结转的未决项：会话存储 retention/capacity、跨重启消息级幂等、executions 时间列、tasks CLI 增强、P8 ops 扩展、死代码重复实现、eval 候选池、B2 真实租户联调）、`packages/contracts/src/execution-contract.ts`（现行执行契约语义面）、`docs/architecture-laws.md`（律法与历史判据档案；多数守卫引用已随 `0b97227`/M4 退役，见其文首 2026-11-13 M4 注）、`docs/methodology.md`（作业纪律）。原 `docs/product/r3-open-decisions.md` 待裁定登记已随 2026-11-18 清理删除并逐项转 issue（内容经 git 历史可考）；`docs/a2a-protocol.md` 与 `docs/execution-layer-interface.md` 同轮删除（A2A 为历史别名；旧 a2a 契约类型 `packages/contracts/src/a2a-protocol.ts` 已随 M4 死代码清扫删除且不恢复）。旧文档章节（三层分工、九类删除表、迁移期对账）只作历史参考；与 `docs/decisions/index.md` 冲突时以该索引为准。
