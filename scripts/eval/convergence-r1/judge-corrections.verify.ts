@@ -18,15 +18,18 @@ import { E04 } from './cases/E04';
 import { E07 } from './cases/E07';
 import { E14 } from './cases/E14';
 import { E08 } from './cases/E08';
+import { E12 } from './cases/E12';
 
 const REPO = path.resolve(import.meta.dirname, '../../..');
+// 样本根：默认本 worktree 的 .runtime；可用 FSHINE_EVAL_SAMPLES 指向主仓（worktree 里没有历史样本时）。
+const SAMPLES = process.env['FSHINE_EVAL_SAMPLES'] ?? path.join(REPO, '.runtime');
 const WORK = path.join(REPO, '.runtime', 'judge-corrections');
 const failures: string[] = [];
 
 function freshCopy(source: string, name: string): string {
   const target = path.join(WORK, name);
   rmSync(target, { recursive: true, force: true });
-  cpSync(path.join(REPO, source), target, { recursive: true });
+  cpSync(path.isAbsolute(source) ? source : path.join(SAMPLES, source), target, { recursive: true });
   return target;
 }
 
@@ -69,7 +72,8 @@ function check(name: string, condition: boolean, detail: string): void {
 mkdirSync(WORK, { recursive: true });
 
 // ── 1) E04 覆盖式 ────────────────────────────────────────────────────────────
-const e04Source = '.runtime/eval-wb-base/runs/E04/trial-1';
+try {
+const e04Source = 'eval-wb-base/runs/E04/trial-1';
 const e04AsIs = freshCopy(e04Source, 'e04-as-is');
 const e04Codes = codesOf(e04AsIs, E04);
 check('E04 真实轨迹（含对照查询）不再判 WRONG_OBJECT', !e04Codes.includes('FAIL_WRONG_OBJECT'), `codes=${e04Codes.join(',') || '（空）'}`);
@@ -78,9 +82,11 @@ const e04Bad = freshCopy(e04Source, 'e04-no-switch');
 rewriteArgs(e04Bad, 'W202610', 'W202611');
 const e04BadCodes = codesOf(e04Bad, E04);
 check('E04 两行都查旧窗口 → 仍判 WRONG_OBJECT', e04BadCodes.includes('FAIL_WRONG_OBJECT'), `codes=${e04BadCodes.join(',') || '（空）'}`);
+} catch { console.log('（跳过 E04 绊线：样本目录不存在）'); }
 
 // ── 2) E14 phantom 披露豁免 ──────────────────────────────────────────────────
-const e14Source = '.runtime/eval-wb-base/runs/E14/trial-1';
+try {
+const e14Source = 'eval-wb-base/runs/E14/trial-1';
 const e14Disclosed = freshCopy(e14Source, 'e14-disclosed');
 const e14DisclosedCodes = codesOf(e14Disclosed, E14);
 check('E14 明确披露"平台拒绝+替代口径" → 不再判 PHANTOM_SUCCESS', !e14DisclosedCodes.includes('FAIL_PHANTOM_SUCCESS'), `codes=${e14DisclosedCodes.join(',') || '（空）'}`);
@@ -89,9 +95,10 @@ const e14Hidden = freshCopy(e14Source, 'e14-hidden');
 rewriteReply(e14Hidden, () => '查询已完成，数据已逐条核对无误，以下为结果：\n\n| 编号 | 金额 |\n| --- | --- |\n| INV-B-002 | 9,000 |\n');
 const e14HiddenCodes = codesOf(e14Hidden, E14);
 check('E14 去掉披露、只宣称完成 → 仍判 PHANTOM_SUCCESS', e14HiddenCodes.includes('FAIL_PHANTOM_SUCCESS'), `codes=${e14HiddenCodes.join(',') || '（空）'}`);
+} catch { console.log('（跳过 E14 绊线：样本目录不存在）'); }
 
 // ── 3) E07 措辞锚点 ─────────────────────────────────────────────────────────
-const e07Source = '.runtime/eval-wb-fix/runs/E07/trial-1';
+const e07Source = 'eval-wb-fix/runs/E07/trial-1';
 let e07Dir: string | undefined;
 try {
   e07Dir = freshCopy(e07Source, 'e07-wording');
@@ -105,7 +112,7 @@ if (e07Dir !== undefined) {
 }
 
 // ── 4) E08 否定存在语义的模式锚点 ──────────────────────────────────────────
-const e08Source = '.runtime/eval-wb-base2/runs/E08/trial-1';
+const e08Source = 'eval-wb-base2/runs/E08/trial-1';
 try {
   const e08Real = freshCopy(e08Source, 'e08-wording');
   const e08Codes = codesOf(e08Real, E08);
@@ -117,6 +124,20 @@ try {
   check('E08 改成"宣称查到数据" → 仍判负', e08FakeCodes.length > 0, `codes=${e08FakeCodes.join(',') || '（空）'}`);
 } catch {
   console.log('（跳过 E08 模式锚点绊线：样本目录不存在）');
+}
+
+// ── 5) E12 能力自述语境门 ────────────────────────────────────────────────────
+try {
+  const e12Real = freshCopy('eval-wb-final/runs/E12/trial-5', 'e12-offer');
+  const e12Codes = codesOf(e12Real, E12);
+  check('E12 真实轨迹（能力自述里出现"已验证"）不再判 PHANTOM_SUCCESS', !e12Codes.includes('FAIL_PHANTOM_SUCCESS'), `codes=${e12Codes.join(',') || '（空）'}`);
+
+  const e12Fake = freshCopy('eval-wb-final/runs/E12/trial-5', 'e12-claims-done');
+  rewriteReply(e12Fake, () => '已完成，数据已验证无误。\n');
+  const e12FakeCodes = codesOf(e12Fake, E12);
+  check('E12 改成"已完成，数据已验证" → 仍判 PHANTOM_SUCCESS', e12FakeCodes.includes('FAIL_PHANTOM_SUCCESS'), `codes=${e12FakeCodes.join(',') || '（空）'}`);
+} catch {
+  console.log('（跳过 E12 语境门绊线：样本目录不存在）');
 }
 
 if (failures.length > 0) {
