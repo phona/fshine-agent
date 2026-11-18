@@ -70,15 +70,15 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 | P-2 | **细粒度（实体级）授权未实现**：谁能看哪些账套/哪些记录，未做任何透传或校验 | 无 acting-principal 透传；执行层调用只带 operation+args | 归执行层研判；真实 17dz 是否有"按主体授权"概念未验。仍挂债，等真实层冒烟与业务确认后再做 |
 | P-3 | ~~写面是**全局开关**（`runtime.allowWriteOperations`），非按人~~ **已解决（2026-11-19 RBAC 切片）** | 全局开关降级为**部署总闸**：角色含 `write` 且总闸打开才并入写集合（`scripts/ask-runtime.ts:422`）；viewer 即使总闸打开也写不了；总闸关闭时 operator 也写不了（`scripts/rbac-roles.test.ts` ⑥） | —（按人部分由角色白名单承接，总闸语义保留） |
 
-## 八、长任务异步协议（2026-11-18 设计完成，暂不实施）
+## 八、长任务异步协议（L-1 已落地 2026-11-19；L-2～L-4 仍挂债）
 
 **背景**：执行层可能出现 30 分钟级的长任务（浏览器自动化）。固定总时长上限会把正常业务按卡死处理；挂长 RPC 又会长期占用后台槽。
 
-**结论（owner 2026-11-18）**：设计保留、**暂不实施**——当前适配层只有 CLI 实现，先把业务流程用顺；等真实执行层确认支持再动。
+**结论**：owner 2026-11-18 先定「设计保留、暂不实施」，当日深夜改判「契约扩展还是要做，实现上只用考虑命令行」→ L-1 已按 CLI/适配层抽象落地。**真实 17dz 未验**（只跑通 dummy CLI）。
 
-| 编号 | 事项 | 设计要点 | 为什么现在不做 |
+| 编号 | 事项 | 设计要点 | 状态 / 为什么现在不做 |
 |---|---|---|---|
-| L-1 | 契约第六态 `accepted(operationId, pollAfterMs)` + `wait(operationId, timeoutMs)` + `abort(operationId)` | 只对声明 `long_running: true` 的 operation 生效，普通操作逐字节不变；Worker `accepted` 后回合结束、让出槽位；宿主用**长轮询**（出站、穿 NAT）实现"完成即唤醒"；`operationId` 落底账，重启续等；用户可停 | 需要执行层真实支持（异步执行 + 句柄持久化 + poll/wait + abort）；真实 17dz 未验；当前只有 dummy CLI，先跑顺业务流 |
-| L-2 | 续租/心跳替代总时长上限 | `workerTurnMs` 从"总时长"降级为"静默阈值"（无任何事件 N 秒才判卡死） | 与 L-1 一起做才有意义；当前短活场景下固定上限不构成问题 |
+| L-1 | 契约第六态 `accepted(operationId, pollAfterMs)` + `wait(operationId, timeoutMs)` + `abort(operationId)` | 只对声明 `long_running: true` 的 operation 生效，普通操作逐字节不变；Worker `accepted` 后回合结束、让出槽位；宿主用**长轮询**（出站、穿 NAT）实现"完成即唤醒"；`operationId` 落底账，重启续等；用户可停 | **已落地（契约 v4）**：runner 等待推进（瞬时故障指数退避封顶 60s）、续跑注记三态、续跑回程文件与大日志（`deliverable:false`）、`completed.items` 逐条结果；装配接线见 `scripts/ask-runtime.ts` 的 `longTaskPortOf`。只剩真实执行层验证 |
+| L-2 | 续租/心跳替代总时长上限 | `workerTurnMs` 从"总时长"降级为"静默阈值"（无任何事件 N 秒才判卡死） | 未做：长任务已让出槽位，但**执行中**回合的静默阈值仍缺证据 |
 | L-3 | 实体级并发写（长写期间的第二个写请求） | 由执行层用锁/排队返回确定性 `locked/busy`；宿主只转述并给用户"等/停"选择；宿主不排队等实体锁、不盲杀中间态 | 属执行层能力，未验；宿主侧无对应实体知识 |
 | L-4 | `dispatchKey` 双边职责 | 宿主负责"不重复发起"（已实现），执行层负责"不重复执行"（未实现）；配套 per-operation `idempotent` 声明（缺省 false）与一致性探针（同 key 连发两次记录数不变） | 执行层未实现；dummy 里零引用 |

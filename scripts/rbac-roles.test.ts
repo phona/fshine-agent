@@ -46,8 +46,9 @@ import { createServer } from '../apps/server/server';
 const REPO_ROOT = path.resolve(__dirname, '..');
 const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform');
 
-/** 夹具声明的写 operation（access=write；dummy 执行层自述）。 */
+/** 夹具声明的写 operation（access=write；dummy 执行层自述，含契约 v4 的长任务）。 */
 const WRITE_OPERATIONS = [
+  'dummy.longtask',
   'dummy.prepare',
   'dummy.commit',
   'dummy.proposal',
