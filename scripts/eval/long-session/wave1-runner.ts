@@ -238,6 +238,8 @@ async function runOne(job: WaveJob, opts: { runId: string; config: AppConfig; db
       steadyPumps: script.steadyPumps,
       pumpCap,
       smoke: opts.smoke === true,
+      // 与 bounds 同源：LS6 的压缩地板是 0（交互轨），否则会补满推进轮撞模型调用预算。
+      ...(job.track === 'LS6' ? { minEffectiveCompactions: 0 } : {}),
     }),
   });
 

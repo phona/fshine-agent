@@ -181,8 +181,14 @@ export function replyExcludedHits(reply: string, excludes: readonly string[], sc
   const text = scope === undefined || scope === ''
     ? full
     : full.split(/\n+|(?<=[。！？!?])/u).filter((chunk) => chunk.includes(scope)).join('\n');
-  const compact = compactText(text);
-  const nums = parseNumbers(text);
+  // 引号里的内容是**提及**而非宣称（2026-11-18）：实测 N5-B 回复写「"3 条"的说法作废」——
+  // 它恰是在否定那个值，却被负向词判成沿用。与收敛判据同一原则：引用≠断言。
+  const withoutQuotes = text
+    .replace(/“[^”]*”/g, '“”')
+    .replace(/「[^」]*」/g, '「」')
+    .replace(/『[^』]*』/g, '『』');
+  const compact = compactText(withoutQuotes);
+  const nums = parseNumbers(withoutQuotes);
   const hits: string[] = [];
   for (const raw of excludes) {
     const token = raw.trim();

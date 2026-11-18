@@ -235,3 +235,18 @@ describe('结构泄漏批汇总（主线判据）', () => {
     expect(batch.perSession[0]?.sessionId).toBe('s-harness-leak');
   });
 });
+
+describe('推进决策的压缩地板（2026-11-18）', () => {
+  it('地板=0（交互轨）：不补推进轮，直接走复查', () => {
+    const probe = { index: 0, kind: 'probe' as const, text: '压缩后复查' };
+    const decide = createWave1PumpDecider({ probeTurns: [probe], steadyPumps: 0, pumpCap: 24, smoke: false, minEffectiveCompactions: 0 });
+    const next = decide({ completedTurns: 13, effectiveCompactions: 0 });
+    expect(next?.kind).toBe('probe');
+  });
+
+  it('地板=3（缺省）：仍未达标 → 继续补推进轮', () => {
+    const decide = createWave1PumpDecider({ probeTurns: [], steadyPumps: 0, pumpCap: 24, smoke: false });
+    const next = decide({ completedTurns: 13, effectiveCompactions: 0 });
+    expect(next?.kind).toBe('pump');
+  });
+});

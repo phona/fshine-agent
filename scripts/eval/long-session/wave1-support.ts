@@ -202,6 +202,10 @@ export interface Wave1PumpOptions {
   /** 未达有效压缩门槛时最多追加的推进轮数。 */
   readonly pumpCap: number;
   readonly smoke: boolean;
+  /** 有效压缩门槛（缺省 R6_COMPACTION_BOUNDS.minEffectiveCompactions）。
+   *  交互轨（LS6）把它设为 0：压缩不是它的目标，否则会一直补推进轮撞模型调用预算
+   *  （2026-11-18 实测：LS6 补满 24 轮 → 151 次调用 > 150 上限 → H6.b）。 */
+  readonly minEffectiveCompactions?: number;
 }
 
 /**
@@ -211,9 +215,10 @@ export interface Wave1PumpOptions {
 export function createWave1PumpDecider(options: Wave1PumpOptions): (progress: PumpProgress) => TurnSpec | null {
   let pumps = 0;
   let probeIndex = 0;
+  const floor = options.minEffectiveCompactions ?? R6_COMPACTION_BOUNDS.minEffectiveCompactions;
   return (progress) => {
     if (
-      progress.effectiveCompactions < R6_COMPACTION_BOUNDS.minEffectiveCompactions
+      progress.effectiveCompactions < floor
       && pumps < options.pumpCap
     ) {
       pumps += 1;

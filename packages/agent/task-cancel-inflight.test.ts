@@ -315,7 +315,11 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
 
       await session.send('算了别做了，取消掉');
       // 机械回执：请求 ≠ 已取消（先 requested，确认中止后才 cancelled）。
-      expect(results[1]).toEqual({ outcome: 'requested', taskId: receipt.taskId });
+      // 2026-11-18：取消回执新增 taskNo / taskRequest（供核对是否指错任务），改成子集断言 + 身份断言。
+      expect(results[1]).toMatchObject({ outcome: 'requested', taskId: receipt.taskId });
+      const cancelReceipt = results[1] as unknown as { taskNo?: number; taskRequest?: string };
+      expect(cancelReceipt.taskNo).toBe(1);
+      expect(cancelReceipt.taskRequest).toContain('alpha');
 
       await vi.waitFor(() => {
         expect(registry.get(receipt.taskId, SCOPE).status).toBe('cancelled');
@@ -415,7 +419,9 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
     await session.send('把 #1 取消掉');
 
     // 机械回执：终态任务无操作，原样给出 completed（模型不得据此宣称已取消）。
-    expect(results[0]).toEqual({ outcome: 'terminal', taskId: 'task_done', status: 'completed' });
+    // 同上：回执带身份，断言改为子集 + 身份存在。
+    expect(results[0]).toMatchObject({ outcome: 'terminal', taskId: 'task_done', status: 'completed' });
+    expect((results[0] as unknown as { taskNo?: number }).taskNo).toBeTypeOf('number');
     const task = registry.get('task_done', SCOPE);
     expect(task.status).toBe('completed');
     expect(task.reason).toBeUndefined();

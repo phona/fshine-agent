@@ -331,4 +331,13 @@ describe('replyExcludes 作用域（2026-11-18 判据缺陷修复）', () => {
   it('不给作用域时保持原行为（全文检查）', () => {
     expect(replyExcludedHits('beta：3 条。', ['3条'])).toEqual(['3条']);
   });
+
+  it('引号里的被否定值不算沿用（"3 条"的说法作废 → 不判负）', () => {
+    const reply = 'alpha 的最终结论是 2 条 / 2000；之前那版「3条」的说法作废。';
+    expect(replyExcludedHits(reply, ['3条'], 'alpha')).toEqual([]);
+  });
+
+  it('引号外的同值仍判负（alpha 是 3条。）', () => {
+    expect(replyExcludedHits('alpha 是 3条。', ['3条'], 'alpha')).toEqual(['3条']);
+  });
 });

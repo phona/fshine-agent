@@ -153,6 +153,12 @@ export interface TaskRegistryPort {
    * 真底账实现提供；runner 只读状态与 waitingSince，不直接写状态。
    */
   list?(scope?: TaskScope): readonly TaskRecordView[];
+  /**
+   * 只读 **waiting_user 行**（到期扫描用；可选）。缺省时回落到 `list()` 再过滤——
+   * 大积压（实测 500 任务）下全表 list 每趟 pump 都分配一遍，把 RSS 顶到 10% 门槛以上；
+   * 提供本方法后每趟只取等待行（通常 0 条）。
+   */
+  listWaiting?(): readonly TaskRecordView[];
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +276,13 @@ export interface TaskRunnerOptions {
   waitUserTimeoutMs?: number;
   /** 单一定时器轮（缺省全局 setTimeout；测试注入假定时器）。仅在启用到期消费者时使用。 */
   timers?: RunnerTimers;
+  /**
+   * waiting 扫描节流（ms，缺省 1000）：pump 很频繁，每趟全表扫 500 行会把 RSS 顶起来
+   * （2026-11-18 实测：500 积压下 I5 从 <10% 变 14–28%）。仅当"到了上次算出的到期点、
+   * 或距上次扫描超过节流窗口、或从未扫过"才真正扫一次；超时判定精度让出最多一个窗口，
+   * 相对缺省 24h 的超时阈值可忽略。
+   */
+  waitingScanThrottleMs?: number;
   /** 收尾错误的观察点（如外部先落终态、底账拒绝非法边）：不改变任务事实，只如实上报。 */
   onError?: (failure: { taskId: string; error: unknown }) => void;
 }
@@ -357,7 +370,9 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
    * 直用 runner 的调用方行为零变化。装配方注入配置值（缺省 24h）才启用。
    */
   const waitUserTimeoutMs = options.waitUserTimeoutMs ?? 0;
-  const waitingConsumerEnabled = waitUserTimeoutMs > 0 && registry.list !== undefined;
+  const waitingScanThrottleMs = options.waitingScanThrottleMs ?? 1000;
+  let lastWaitingScan: { at: number; nextDue?: number } | undefined;
+  const waitingConsumerEnabled = waitUserTimeoutMs > 0 && (registry.listWaiting !== undefined || registry.list !== undefined);
   const timers: RunnerTimers | undefined = waitingConsumerEnabled
     ? options.timers ?? {
       set(callback, delayMs) {
@@ -428,7 +443,8 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   function scanWaiting(nowMs: number): WaitingScan {
     const timedOut: string[] = [];
     let nextDue: number | undefined;
-    for (const task of registry.list!()) {
+    const rows = registry.listWaiting !== undefined ? registry.listWaiting() : registry.list!();
+    for (const task of rows) {
       const due = waitingDeadlineOf(task);
       if (due === undefined) continue;
       if (due <= nowMs) {
@@ -475,7 +491,18 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
 
   function pump(): PumpSummary {
     const recovered = registry.expireLeases(now().toISOString()).map((task) => task.taskId);
-    const waiting = waitingConsumerEnabled ? scanWaiting(now().getTime()) : undefined;
+    let waiting: WaitingScan | undefined;
+    if (waitingConsumerEnabled) {
+      const nowMs = now().getTime();
+      const due = lastWaitingScan?.nextDue;
+      const shouldScan = lastWaitingScan === undefined
+        || (due !== undefined && nowMs >= due)
+        || nowMs - lastWaitingScan.at >= waitingScanThrottleMs;
+      if (shouldScan) {
+        waiting = scanWaiting(nowMs);
+        lastWaitingScan = { at: nowMs, ...(waiting.nextDue === undefined ? {} : { nextDue: waiting.nextDue }) };
+      }
+    }
     const started: string[] = [];
     let rejection: ResourceRejectionReason | undefined;
     for (;;) {

@@ -256,6 +256,12 @@ export function createSqliteTaskRegistry(
     get(taskId, scope) {
       return toRecord(require(taskId, scope));
     },
+    listWaiting() {
+      // 只返回等待行（store 暂无按状态查询面，先内存过滤；映射后与 list 同形）。
+      return store.listTasks(undefined)
+        .filter((stored) => stored.task.status === 'waiting_user')
+        .map(toRecord);
+    },
     list(scope) {
       return store.listTasks(scope).map(toRecord);
     },
