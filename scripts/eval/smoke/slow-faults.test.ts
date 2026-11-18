@@ -82,11 +82,12 @@ describe('冒烟·长时执行（--delay-ms）', () => {
       await sim.waitFor('受理回执终帧', () => sim.finalBubbles().length === 1);
 
       const receipt = sim.finalBubbles()[0]!.content;
-      expect(receipt).toContain('已受理');
-      expect(receipt).toContain('后台');
-      // 受理回执去编号：不含 `#`，也不含任何数字（任务名本身无数字）。
+      // 受理回执（预期契约）：谁办 + 大概多久 + 办完发你；去编号：不含 `#`，
+      // 除估时锚点外不得出现任何其他数字（工单编号只在详情面/底账）。
+      expect(receipt).toContain('这个我来办');
+      expect(receipt).toContain('办完发你');
       expect(receipt).not.toContain('#');
-      expect(receipt).not.toMatch(/\d/);
+      expect(receipt.replace(/\d+\s*分钟/g, '')).not.toMatch(/\d/);
 
       const done = sim.doneOf(messageId)!;
       expect(done.taskIds).toHaveLength(1);

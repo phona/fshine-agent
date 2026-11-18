@@ -516,6 +516,11 @@ export interface RuntimeOptions {
    */
   taskRunClock?: RuntimeClock;
   /**
+   * 前台排队超时的结构化事件（`resource_queue_timeout`；只进日志，不进用户话术）。
+   * 缺省静默（不影响回合的拒绝结果）。
+   */
+  onResourceQueueTimeout?: (event: ResourceQueueTimeoutEvent) => void;
+  /**
    * Main 技能登记表（catalog 非空时由装配层注入）：Main 工具面多一个 read_skill，按登记表内的
    * 技能名读正文（32KiB 上限由 registry 既有钳制）。缺省不注入 = 无该工具（工具面逐字节不变）。
    * 摘要在系统提示里由装配层经 renderSkillCatalog 拼入，本选项只管工具面。
@@ -619,7 +624,17 @@ export interface RuntimeOptions {
   onTaskOutputSweepSkipped?: (event: TaskOutputSweepSkippedEvent) => void;
 }
 
-/** 前台回合被资源策略确定性拒绝（queued 排队等晋升后不适用；携带机械 reason）。 */
+/**
+ * 前台回合排队超时的结构化事件（2026-11-18）：`resource_queue_timeout{kind, principalId,
+ * waitedMs}`。只进日志/资源账，不进用户话术（用户见 ForegroundRejectionError 的统一说明）。
+ */
+export interface ResourceQueueTimeoutEvent {
+  readonly kind: 'foreground';
+  readonly principalId: string;
+  readonly waitedMs: number;
+}
+
+/** 前台回合被资源策略确定性拒绝（queued 排队等晋升超时/取消后不适用；携带机械 reason）。 */
 export class ForegroundRejectionError extends Error {
   readonly reason: RejectionReason;
 
@@ -801,12 +816,31 @@ export const WORKER_SNAPSHOT_COST_NOTE =
   '每个 operation 标注单次估时与重量；一次任务发起 N 次执行，等待与失败面按 N 倍增长。';
 
 /**
- * B 切片（工单回执收敛）：超窗受理回执话术（机械事实：已受理、在后台办理中）。
- * **不含工单编号**——编号只保留在 npm run tasks / 任务查询详情面；Main 协议文本同步
- * 写明不向用户提及编号（回执去编号，反向绊线：话术出现 `#`/编号数字即测试红）。
+ * 受理回执话术（B 切片去编号 + 预期契约 2026-11-18 owner 定）：只说「谁来办 + 大概多久 +
+ * 办完发你」；估不出来就只说办完发你（不编造时间、不报进度、不含工单编号）。
  */
-export function backgroundTaskReceiptNotice(name: string): string {
-  return `已受理「${name}」，在后台办理中；完成后结果会自动发给你。`;
+export function backgroundTaskReceiptNotice(estimatedMinutes?: number): string {
+  return estimatedMinutes === undefined
+    ? '这个我来办，办完发你。'
+    : `这个我来办，大概 ${estimatedMinutes} 分钟，办完发你。`;
+}
+
+/**
+ * 估时锚点（预期契约）：执行层自述 `est_seconds` 累加，取整到分钟（向上，最小 1）。
+ * 没有任何声明 → undefined（不按本地经验补数；回执只说「办完发你」）。
+ * 说明：宿主在受理时只持有允许集合的能力快照（具体 operation 由 Worker 决定），
+ * 因此锚点 = 允许集合内已声明估时的累加——只当锚点用，文案必须带「大概」。
+ */
+export function estimatedMinutesOf(manifest: CapabilityManifest): number | undefined {
+  let totalSeconds = 0;
+  let declared = false;
+  for (const operation of manifest.operations) {
+    if (operation.estimatedSeconds === undefined) continue;
+    totalSeconds += operation.estimatedSeconds;
+    declared = true;
+  }
+  if (!declared || totalSeconds <= 0) return undefined;
+  return Math.max(1, Math.ceil(totalSeconds / 60));
 }
 
 /** 终态集合（窗口内落定判定）。waiting_user 不是终态——等待接续仍属后台推进。 */
@@ -1124,6 +1158,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     contractVersion: manifest.contractVersion,
     operations: manifest.operations.filter((operation) => allowed.has(operation.name)),
   };
+  /** 受理回执的估时锚点（执行层自述 est_seconds 累加；没有声明 = undefined）。 */
+  const receiptEstimateMinutes = estimatedMinutesOf(workerManifest);
 
   const registry = options.taskRegistry ?? createTaskRegistry();
   /** U3：只读 operation 集合（装配方声明；缺省保守为空 = 一律按可能有副作用处理）。 */
@@ -1540,7 +1576,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   /**
    * 前台回合许可（P5）：策略存在时回合开始 acquire、结束 release。
    *   · 拒绝 → 确定性 ForegroundRejectionError（错误面由入口归类；server 走既有 fallback）；
-   *   · 排队（queueCapacity>0）→ 受控等待晋升（release 触发 FIFO），等待不空转（10ms 让出）。
+   *   · 排队（queueCapacity>0）→ 受控等待晋升（release 触发 FIFO），等待不空转（让出）；
+   *   · 排队有上限（`runtime.queueWaitMs`，缺省 120s）：超时释放排队位（不留残留）后
+   *     确定性拒绝（「当前系统忙，请稍后再说」），并记录 `resource_queue_timeout` 事件。
    */
   async function acquireForegroundPermit(): Promise<Permit | undefined> {
     if (policy === undefined) return undefined;
@@ -1548,8 +1586,26 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     if (acquired.ok === false) {
       throw new ForegroundRejectionError(acquired.reason, acquired.message);
     }
-    while (acquired.state === 'queued') {
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    if (acquired.state === 'queued') {
+      const queueWaitMs = policy.snapshot().config.queueWaitMs;
+      const deadline = acquired.acquiredAt + queueWaitMs;
+      while (acquired.state === 'queued') {
+        if (taskRunClock.now() >= deadline) {
+          // 超时：先退队（队列唯一事实源里不留残留），再按既有拒绝形状确定性拒绝。
+          policy.release(acquired);
+          const waitedMs = Math.max(0, taskRunClock.now() - acquired.acquiredAt);
+          options.onResourceQueueTimeout?.({
+            kind: 'foreground',
+            principalId: options.principalId,
+            waitedMs,
+          });
+          throw new ForegroundRejectionError(
+            'queue_full',
+            `排队等待超过 ${Math.round(queueWaitMs / 1000)} 秒（当前系统忙，请稍后再说）`,
+          );
+        }
+        await taskRunClock.sleep(TASK_RUN_WAIT_POLL_MS);
+      }
     }
     if (acquired.state !== 'active') {
       throw new ForegroundRejectionError('queue_full', '前台许可在等待晋升中被取消');
@@ -1934,7 +1990,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         name,
         status: live.status,
         accepted: true,
-        notice: backgroundTaskReceiptNotice(name),
+        notice: backgroundTaskReceiptNotice(receiptEstimateMinutes),
       };
     }
 

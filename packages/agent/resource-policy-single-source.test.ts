@@ -118,6 +118,13 @@ const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   fileRetentionDays: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   fileRetentionSweepOnStart: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STARTUP_SWEEP],
   attachmentNudgeAfterMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, SERVER, SIM_HARNESS],
+  // 预期契约（2026-11-18）：两档「长时间没动静」提醒阈值——缺省与解释归策略；ask-runtime
+  // 装配时取解析值注入 runner，runner 只消费注入的毫秒数（不读原始 runtime 配置）。
+  longRunningNoticeMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, ASK_RUNTIME, TASK_RUNNER],
+  longRunningStuckNoticeMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, ASK_RUNTIME, TASK_RUNNER],
+  // 前台排队最长等待（2026-11-18）：缺省与解释归策略；execution-runtime 只读策略解析值
+  // （`snapshot().config.queueWaitMs`）做排队上限，不读原始 runtime 配置。
+  queueWaitMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME],
 };
 
 interface SourceFacts {

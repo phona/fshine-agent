@@ -194,6 +194,13 @@ export interface TaskRecord {
   name?: string;
   /** P1：本回合 Main 最终回复全文（同回合各任务行同值；缺省=无最终回复存档）。 */
   replyText?: string;
+  /**
+   * 预期契约（2026-11-18）：宿主已发过对应档「长时间没动静」提醒的时刻（ISO）。
+   * 缺省 = 尚未提醒；每档写入一次后不再改（同一任务每档只提醒一次，重启不重发）。
+   *   · longRunningNotifiedAt = 超预期档（10 分钟）；longRunningStuckNotifiedAt = 卡住档（30 分钟）。
+   */
+  longRunningNotifiedAt?: string;
+  longRunningStuckNotifiedAt?: string;
   executions: readonly ExecutionRecord[];
   createdAt: string;
   updatedAt: string;
@@ -546,6 +553,17 @@ export interface TaskRegistry {
   list(scope?: TaskScope): readonly TaskRecord[];
   /** 只读 waiting_user 行（到期扫描用：避免每趟 pump 全表分配）。 */
   listWaiting(): readonly TaskRecord[];
+  /**
+   * 只读 running 行（预期契约 2026-11-18：长时间提醒扫描用；避免每趟 pump 全表分配）。
+   * 只读状态事实，不做判定。
+   */
+  listRunning(): readonly TaskRecord[];
+  /**
+   * 预期契约（2026-11-18）：原子领取一档「长时间没动静」提醒——只有该档尚未提醒过才写入
+   * 并返回 true；已提醒过返回 false（零写入）。stage = 'overdue'（10 分钟档）|'stuck'（30 分钟档）。
+   * 并发/重启下同一任务每档至多一次；不改任务状态、不产状态事实。
+   */
+  claimLongRunningNotice(taskId: string, stage: 'overdue' | 'stuck', at: string): boolean;
   /** 通用状态转换（合法边见冻结矩阵；给出 scope 先校验归属）。 */
   transition(taskId: string, to: TaskStatus, options?: TransitionOptions): TaskRecord;
   /** running→waiting_user：持久化 pendingQuestion（missing/candidates?/raw?）与 waiting_since。 */
@@ -754,6 +772,16 @@ export function createTaskRegistry(): TaskRegistry {
     },
     listWaiting() {
       return [...tasks.values()].filter((task) => task.status === 'waiting_user').map((task) => ({ ...task }));
+    },
+    listRunning() {
+      return [...tasks.values()].filter((task) => task.status === 'running').map((task) => ({ ...task }));
+    },
+    claimLongRunningNotice(taskId, stage, at) {
+      const task = require(taskId);
+      const field = stage === 'overdue' ? 'longRunningNotifiedAt' : 'longRunningStuckNotifiedAt';
+      if (task[field] !== undefined) return false;
+      task[field] = at;
+      return true;
     },
     list(scope) {
       const all = [...tasks.values()];

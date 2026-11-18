@@ -169,6 +169,22 @@ export interface ResolvedRuntimeConfig {
    * 消费点在 execution-runtime 的委派受理路径。
    */
   readonly taskRunWaitMs: number;
+  /**
+   * 后台任务「比预计久了」提醒阈值（ms，2026-11-18 预期契约）：任务 running 且从认领
+   * 时刻起超过本阈值、尚未提醒过 → 宿主主动发一条（只发一次）；0 = 关闭。缺省 10 分钟。
+   * 消费点在 TaskRunner（装配方注入解析值；runner 不读原始配置）。
+   */
+  readonly longRunningNoticeMs: number;
+  /**
+   * 「卡住了」提醒阈值（ms）：任务 running 且超过本阈值仍无事件 → 再发一条（之后不再发）
+   * ——两个阈值都走本配置源（不硬编码魔法数）。缺省 30 分钟。0 = 关闭该档提醒。
+   */
+  readonly longRunningStuckNoticeMs: number;
+  /**
+   * 前台回合排队晋升的最长等待（ms，2026-11-18）：超过即确定性拒绝（不留下排队残留）。
+   * 缺省 2 分钟。消费点在 execution-runtime 的排队等待循环。
+   */
+  readonly queueWaitMs: number;
 }
 
 /**
@@ -203,6 +219,12 @@ export const DEFAULT_RUNTIME_CONFIG: ResolvedRuntimeConfig = Object.freeze({
   // task_run 短等待窗口：1.5 秒内确认完成 → 结果同回合交给模型（不打受理回执、不主动投递）；
   // 超窗 → 机械事实回执（不含工单编号）+ 完成后主动投递。0 = 不等直接后台。
   taskRunWaitMs: 1_500,
+  // 预期契约（2026-11-18 owner 定）：交办 10 分钟后仍无动静 → 问用户「停下来还是继续等」；
+  // 30 分钟后仍无动静 → 再发一条「卡住了，建议先停掉」（之后不再发）。0 = 关闭对应档。
+  longRunningNoticeMs: 600_000,
+  longRunningStuckNoticeMs: 1_800_000,
+  // 前台排队最长等待（2026-11-18 owner 定）：缺省 2 分钟；超时确定性拒绝（系统忙）。
+  queueWaitMs: 120_000,
 });
 
 function assertRuntimeInteger(value: unknown, label: string, min: number): number {
@@ -347,6 +369,17 @@ export function resolveRuntimeConfig(config: RuntimeConfig = {}): ResolvedRuntim
     taskRunWaitMs: config.taskRunWaitMs === undefined
       ? DEFAULT_RUNTIME_CONFIG.taskRunWaitMs
       : assertRuntimeInteger(config.taskRunWaitMs, 'runtime.taskRunWaitMs', 0),
+    // 0 = 关闭提醒（显式值合法）；负数/非整数 fail-fast。上限同理（0 = 不设上限）。
+    longRunningNoticeMs: config.longRunningNoticeMs === undefined
+      ? DEFAULT_RUNTIME_CONFIG.longRunningNoticeMs
+      : assertRuntimeInteger(config.longRunningNoticeMs, 'runtime.longRunningNoticeMs', 0),
+    longRunningStuckNoticeMs: config.longRunningStuckNoticeMs === undefined
+      ? DEFAULT_RUNTIME_CONFIG.longRunningStuckNoticeMs
+      : assertRuntimeInteger(config.longRunningStuckNoticeMs, 'runtime.longRunningStuckNoticeMs', 0),
+    // 0 = 不排队（立即拒绝）；负数/非整数 fail-fast。
+    queueWaitMs: config.queueWaitMs === undefined
+      ? DEFAULT_RUNTIME_CONFIG.queueWaitMs
+      : assertRuntimeInteger(config.queueWaitMs, 'runtime.queueWaitMs', 0),
   });
 }
 

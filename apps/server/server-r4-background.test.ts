@@ -217,12 +217,13 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
     try {
       const reply = await server.handler(incoming('user-a', 'conv-a', 'msg-1', '查 documents W202611'));
       expect(reply).toBe('已受理，稍后通知你。');
-      // 受理事实（task_run 返回）：业务名 + 机械事实话术；B 切片回执去编号（不含 #）
+      // 受理事实（task_run 返回）：受理回执（谁办 + 办完发你）；B 切片回执去编号（不含 #）
       const accepted = records[0]!.execResults[0] as Record<string, unknown>;
       expect(accepted).toMatchObject({ accepted: true });
       expect(accepted).not.toHaveProperty('taskNo');
       const notice = String(accepted['notice']);
-      expect(notice).toContain('已受理');
+      expect(notice).toContain('这个我来办');
+      expect(notice).toContain('办完发你');
       expect(notice).not.toContain('#');
       const taskId = String(accepted['taskId']);
       const taskScope = { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' };
