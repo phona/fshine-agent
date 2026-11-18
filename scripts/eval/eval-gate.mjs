@@ -15,7 +15,7 @@
  *
  * 用法（CI 必须传**独立的**预期集合，不信摘要自述）：
  *   node scripts/eval/eval-gate.mjs --summary .runtime/eval-user/summary.json \
- *        --expect-cases E01,E02,...,E14 --expect-trials 5 [--min-rate 0.5]
+ *        --expect-cases E01,E02,...,E15 --expect-trials 5 [--min-rate 0.5]
  * 退出码：0 = 全部用例达标；1 = 有用例低于门槛；2 = 参数/文件错误（不能当作通过）。
  */
 import { readFileSync } from 'node:fs';

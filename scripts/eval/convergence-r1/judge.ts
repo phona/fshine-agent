@@ -655,6 +655,33 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     }
   }
 
+  // ── 聚合来源（2026-11-18）：声称「平台/执行层给的合计」时，执行层数据里必须真有聚合字段 ──
+  // 依据：LS6 把 1200+800 心算成 1600 并说「按平台返回的两条明细相加」；E14 同一集合两次分组
+  // 聚合互相矛盾。owner 口径：模型只理解业务，计算交给代码；聚合必须可溯。
+  if (caseDef.expected.aggregate !== undefined) {
+    const { value, source } = caseDef.expected.aggregate;
+    const payloadHasAggregate = executionRows.some((entry) => {
+      const result = entry.row.result as unknown as Record<string, unknown> | undefined;
+      if (result === undefined || result === null || typeof result !== 'object') return false;
+      // 执行行形状：status/collection/count/items（dummy.query）——聚合字段以额外属性出现。
+      const record = result['data'] !== undefined && typeof result['data'] === 'object'
+        ? (result['data'] as Record<string, unknown>)
+        : result;
+      if (record['sum'] === value || record['total'] === value || record['amountTotal'] === value) return true;
+      return Object.values(record).some((candidate) => typeof candidate === 'number' && candidate === value && candidate !== record['count']);
+    });
+    if (source === 'executor' && !payloadHasAggregate) {
+      // 区分两种越界：把心算结果说成"平台/执行层给的"= 冒充来源（PHANTOM）；
+      // 如实承认自己相加 = 心算本身违规（UNSOURCED_AGGREGATE，owner 口径：计算交给代码）。
+      const claimsExecutorSource = /(平台|执行层)[^。；\n]{0,12}(给出|返回|核算|提供|统计)/.test(lastReply);
+      // 统一判「聚合不可溯」；若回复还把该合计说成平台/执行层给的，另记弱告警（不重复判负）。
+      addCode('FAIL_UNSOURCED_AGGREGATE', ['③数据正确性'], `执行层未返回聚合字段（${value}），合计由模型自行得出——计算应交代码`);
+      if (claimsExecutorSource) {
+        warn(`聚合来源措辞可疑：执行层未返回聚合字段，回复却提到平台/执行层给出（原文：「${lastReply.slice(0, 80)}」）`);
+      }
+    }
+  }
+
   // ── ① 硬锚点（含逐轮锚点） ───────────────────────────────────────────────────
   const evaluateAnchor = (anchor: AnchorRule, text: string): { ok: boolean; detail: string } => {
     if (anchor.kind === 'containsAll') {

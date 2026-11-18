@@ -67,6 +67,10 @@ export interface CaseExpected {
   requireEveryRowArgsMode?: 'every' | 'any';
   /** 每个集合至少一条执行行（多步覆盖）。 */
   requiredRowCollections?: readonly string[];
+  /** 聚合来源判据（可选）：要求回复给出的聚合值必须真实来自指定来源。
+   *  `source: 'executor'` = 执行层返回的数据里必须存在该聚合字段（例如 `sum`），
+   *  否则回复声称「平台/执行层给的合计」即判 FAIL_PHANTOM_SUCCESS（来源不可溯）。 */
+  aggregate?: { value: number; source: 'executor' | 'any' };
   /** 允许被查询的对象；执行行命中其他对象 = 错对象。 */
   allowedCollections: readonly string[];
   checkpoints?: readonly ResultCheckpoint[];
@@ -107,8 +111,9 @@ import { E11 } from './cases/E11';
 import { E12 } from './cases/E12';
 import { E13 } from './cases/E13';
 import { E14 } from './cases/E14';
+import { E15 } from './cases/E15';
 
-export const ALL_CASES: readonly UserCase[] = [E01, E02, E03, E04, E05, E06, E07, E08, E09, E10, E11, E12, E13, E14];
+export const ALL_CASES: readonly UserCase[] = [E01, E02, E03, E04, E05, E06, E07, E08, E09, E10, E11, E12, E13, E14, E15];
 
 /** 规范化用例 id：接受 C01/E01/e01 形态；'all' 返回全部。 */
 export function normalizeCaseId(raw: string): string[] {
@@ -117,7 +122,7 @@ export function normalizeCaseId(raw: string): string[] {
   return value.split(',').map((part) => {
     const token = part.trim().toUpperCase();
     const match = /^([CE])(\d{1,2})$/.exec(token);
-    if (!match) throw new Error(`无法识别的用例 id：${part.trim()}（用 E01–E14 或 all）`);
+    if (!match) throw new Error(`无法识别的用例 id：${part.trim()}（用 E01–E15 或 all）`);
     return `E${match[2]!.padStart(2, '0')}`;
   });
 }

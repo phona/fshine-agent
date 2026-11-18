@@ -1,12 +1,12 @@
 {
   "generatedBy": "node --import tsx scripts/eval/convergence-r1/freeze.ts",
-  "frozenAt": "2026-11-18T04:47:39.612Z",
+  "frozenAt": "2026-11-18T06:09:30.683Z",
   "criteriaSha256": "9d4b0824a429658e7f633ff8af928fd3ad94b633f02c95f151866679bb8d6cd4",
-  "casesSha256": "3618f5e2ec84d931176b66ce20bb42ab0bf44961c0e98c9d1560d3d7e25fd12f",
+  "casesSha256": "cb319a62b1f8f1d461a55ad9b31f4b291e64517511d22db3a037225d5b7b481b",
   "files": {
     "scripts/eval/convergence-r1/criteria.ts": "f5daa2a2d8377d7250150b6d907126dea26e652dcb8493f32801a5ddf1d68025",
-    "scripts/eval/convergence-r1/cases.ts": "4a7f29d631af47553b0964ed73ffbaff5324152ca5eb0eba2c3be1768f4362db",
-    "scripts/eval/convergence-r1/judge.ts": "2715950ee12f80b78ba7a16411bd0fed2d646086cabbe8a2959ae7b3d2c8d5b3",
+    "scripts/eval/convergence-r1/cases.ts": "5a46fa2d44d31d696c9b250ad3620f65b16e0975d1d0214c7e47de7114c1726c",
+    "scripts/eval/convergence-r1/judge.ts": "d750103b891697d5e96f9aec6c8037f3d7aef31945bdaeacda8a99b96689e5c1",
     "scripts/eval/convergence-r1/hash.ts": "e03bdcacc362515796cf6d248f2244a2b31b3e19ceddaee32cd7ec6795376637",
     "scripts/eval/convergence-r1/evidence.ts": "4003a8b78ef15a46649a83232cf0db0506c1d932d497e369e06a8289a6689418",
     "scripts/eval/convergence-r1/selftest.ts": "aaff9094e491e9ad4cf8c3c78372e30485140e70d962c7ca550327a240840c31",
@@ -23,7 +23,8 @@
     "scripts/eval/convergence-r1/cases/E11.ts": "4973a48ab260d00ae34afc6047519cd149298d73f41b1a08d52855deb130a968",
     "scripts/eval/convergence-r1/cases/E12.ts": "66622b8afb95311c5b24d078684c17612451c0559718846ec2a5e8cf303fc07e",
     "scripts/eval/convergence-r1/cases/E13.ts": "a6b83d3a38190b9fcb3137701140d4b222bebd449a916067c9e9271f2b237f99",
-    "scripts/eval/convergence-r1/cases/E14.ts": "974a3cbd1e7c34f58489439fc682746ebdced475a0e5c15f3e4d5e603fae6f34"
+    "scripts/eval/convergence-r1/cases/E14.ts": "974a3cbd1e7c34f58489439fc682746ebdced475a0e5c15f3e4d5e603fae6f34",
+    "scripts/eval/convergence-r1/cases/E15.ts": "b702ed5d0127e06249fa855a6842ac858229a7e026f749d518c2e04056e30b88"
   },
   "note": "冻结后不得修改 criteria/用例/判定器；runner 校验 criteriaSha256/casesSha256，不一致即拒绝运行（fail-closed）。"
 }
