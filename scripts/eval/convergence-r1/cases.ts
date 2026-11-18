@@ -35,14 +35,21 @@ export type AnchorRule =
   | { kind: 'containsAll'; values: readonly string[] }
   | { kind: 'containsAny'; values: readonly string[] }
   | { kind: 'numberAny'; numbers: readonly number[] }
+  /** 正则族（2026-11-18）：同一语义的不同措辞用**模式**表达，避免逐个词补锚点。
+   *  例：「平台里没有名为 X 的集合」「没有返回任何相近的候选名称」= 同一条否定存在语义。 */
+  | { kind: 'regexAny'; patterns: readonly string[] }
   | { kind: 'noFixtureValues' };
 
 /** 逐轮期望（多轮用例；turn 从 1 计）。 */
 export interface TurnExpectation {
   turn: number;
   minExecutions?: number;
-  /** 该轮每条执行行都必须满足的参数条件（规范化后的裸键等值）。 */
+  /** 该轮执行行的参数条件（规范化后的裸键等值）。
+   *  缺省 every = 每条执行行都必须满足（收紧用）；`any` = 该轮至少一条执行行带齐（覆盖式，
+   *  用于「这一轮发生了这次条件转发」即可、允许额外对照查询的多轮用例）。 */
   requireRowArgs?: Readonly<Record<string, string>>;
+  /** requireRowArgs 的匹配粒度；缺省 'every'。 */
+  requireRowArgsMode?: 'every' | 'any';
   /** 该轮提问句子命中这些话题词 = 无谓追问。 */
   forbiddenQuestionTopics?: readonly string[];
   hardAnchors?: readonly AnchorRule[];
@@ -52,8 +59,12 @@ export interface CaseExpected {
   minExecutions?: number;
   /** 硬性上界（E11/E12：0）。 */
   maxExecutions?: number;
-  /** 每条执行行都必须满足的参数条件。 */
+  /** 执行行参数条件（整例）。
+   *  缺省 every = 每条执行行都必须满足（拦"跑到别处去"）；`any` = 至少一条执行行带齐
+   *  （覆盖式：意图是"这次条件转发发生过"，如 E07 的 W9 探询；越界对象另由 allowedCollections 拦）。 */
   requireEveryRowArgs?: Readonly<Record<string, string>>;
+  /** requireEveryRowArgs 的匹配粒度；缺省 'every'。 */
+  requireEveryRowArgsMode?: 'every' | 'any';
   /** 每个集合至少一条执行行（多步覆盖）。 */
   requiredRowCollections?: readonly string[];
   /** 允许被查询的对象；执行行命中其他对象 = 错对象。 */
