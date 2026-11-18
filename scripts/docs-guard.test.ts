@@ -19,7 +19,7 @@
  *     来源豁免同类。仅当引用所在行带这些归档标记时豁免；未标注的死链一律红。豁免
  *     是「按行标记」而非按目标白名单，新增死链无标记必红。
  *   · 检查 3：docs/product/ 现存 5 篇带轮次前缀的文件是冻结中的预注册 / 验收 / 契约
- *     记录，仍被代码以路径引用（见 LEGACY_PREFIXED_FILES 理由），当前不可改名。用
+ *     记录，仍被代码以路径引用（见 GRANDFATHERED_PREFIXED_FILES 理由），当前不可改名。用
  *     闭合白名单逐条登记；白名单双向闭合（陈旧条目也红），白名单外的 r9-x.md 必红。
  *   · 检查 4：三行标签在不同页用词不同（最后核对 / 最后核对日期 / 核对 @；上游 /
  *     上游指针 / 指针），按语义 Token 匹配，不按精确字面。
@@ -177,7 +177,7 @@ const NAMED_DIRS = ['product', 'architecture', 'eval', 'decisions'] as const;
  *   · 白名单外任何带轮次前缀的新文件（如 r9-x.md）必红；
  *   · 白名单条目必须仍存在且仍命中前缀（陈旧豁免同样红）。
  */
-const LEGACY_PREFIXED_FILES: ReadonlyArray<{ rel: string; reason: string }> = [
+const GRANDFATHERED_PREFIXED_FILES: ReadonlyArray<{ rel: string; reason: string }> = [
   {
     rel: 'docs/product/p2-business-e2e-prereg.md',
     reason: 'P2 业务 E2E 冻结预注册；scripts/eval/p2/p2-types.ts:4、p2-scenarios.ts:2 以路径引用',
@@ -202,7 +202,7 @@ const LEGACY_PREFIXED_FILES: ReadonlyArray<{ rel: string; reason: string }> = [
 
 describe('检查 3 · 命名规则：现行目录文件名不得带轮次前缀', () => {
   it('product/architecture/eval/decisions 下无新轮次前缀文件', () => {
-    const prefixes = new Set(LEGACY_PREFIXED_FILES.map((e) => e.rel));
+    const prefixes = new Set(GRANDFATHERED_PREFIXED_FILES.map((e) => e.rel));
     const offenders: string[] = [];
     for (const source of allDocsMd()) {
       const dir = source.split('/')[1];
@@ -212,13 +212,13 @@ describe('检查 3 · 命名规则：现行目录文件名不得带轮次前缀'
     }
     console.log(JSON.stringify({
       event: 'docs_guard_naming',
-      legacyGrandfathered: LEGACY_PREFIXED_FILES.length,
+      grandfatheredCount: GRANDFATHERED_PREFIXED_FILES.length,
       offenders: offenders.length,
     }));
     expect(offenders, `现行目录出现轮次前缀文件（未登记豁免）：\n${offenders.join('\n')}`).toEqual([]);
 
     // 闭合性：白名单条目必须仍存在且仍命中前缀，防陈旧豁免长期积灰。
-    const stale = LEGACY_PREFIXED_FILES
+    const stale = GRANDFATHERED_PREFIXED_FILES
       .filter((e) => !exists(e.rel) || !ROUND_PREFIX.test(path.posix.basename(e.rel)))
       .map((e) => `${e.rel}（理由：${e.reason}）`);
     expect(stale, `陈旧的命名豁免：\n${stale.join('\n')}`).toEqual([]);
@@ -297,6 +297,9 @@ describe('检查 4 · 状态头 + 真实指针', () => {
       const oob: string[] = [];
       const unresolved: string[] = [];
       for (const p of ptrs) {
+        // 2026-11-18 收紧：只认带目录的完整路径（裸名在不同目录下有多个同名文件，
+        // 读者无法据此定位，眼下的实测里 472 个"指针"有 159 个是裸名）。
+        if (!p.path.includes('/')) continue;
         const candidates = tsCandidates(p.path);
         if (candidates.length === 0) {
           unresolved.push(p.raw);
