@@ -283,6 +283,54 @@ describe('回收的安全边界：dryRun / 根外 / 软链 / 空根', () => {
     fx.store.close();
   });
 
+  it.each(['principal', 'session'] as const)(
+    '父层软链（<%s> 层 → 根外目录）同样不跟随：三层目录链逐层校验，不是只盖 files/',
+    (layer) => {
+      const fx = makeFixture();
+      const now = Date.now();
+      const outsideDir = path.join(fx.root, `outside-${layer}`);
+      mkdirSync(outsideDir, { recursive: true });
+      const fileId = `file_symlink_${layer}`;
+      const sessionDir = sessionDirOf(fx.workspaceRoot, SCOPE);
+      const principalDir = path.dirname(sessionDir);
+      // 派生路径按布局展开后落在软链目标里：<outside>/[<session>]/files/<fileId><ext>
+      const insideOutside = layer === 'principal'
+        ? path.join(outsideDir, path.basename(sessionDir), 'files')
+        : path.join(outsideDir, 'files');
+      mkdirSync(insideOutside, { recursive: true });
+      const outsideTarget = path.join(insideOutside, `${fileId}.csv`);
+      writeFileSync(outsideTarget, 'outside-bytes');
+      if (layer === 'principal') {
+        symlinkSync(outsideDir, principalDir);
+      } else {
+        mkdirSync(principalDir, { recursive: true });
+        symlinkSync(outsideDir, sessionDir);
+      }
+      fx.store.insertFileRef({
+        fileId,
+        principalId: SCOPE.principalId,
+        sessionId: SCOPE.sessionId,
+        name: '根外.csv',
+        sha256: `sha_${layer}`,
+        bytes: 13,
+        activatedAt: now - 30 * DAY_MS,
+        createdAt: now - 30 * DAY_MS,
+      });
+
+      const result = cleanupExpiredFileRefBytes({
+        store: fx.store,
+        workspaceRoot: fx.workspaceRoot,
+        config: resolveRuntimeConfig(),
+        nowMs: now,
+      });
+
+      expect(existsSync(outsideTarget)).toBe(true); // 根外字节未被删
+      expect(result.events[0]).toMatchObject({ action: 'skipped_symlink', fileId });
+      expect(result.summary).toMatchObject({ deleted: 0, skipped: 1 });
+      fx.store.close();
+    },
+  );
+
   it('删除抛错：该行记 delete_failed、同轮后续行仍被处理、summary.failed=1', () => {
     const fx = makeFixture();
     const now = Date.now();

@@ -236,7 +236,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       })();
   /**
    * CAP-01 S1 清单注入（机械事实）：每回合开始由 runtime 取走本会话已激活（TTL 内）文件。
-   * 投影 fileId/name/bytes + activatedAt（收到时间），不含内容/路径/sha256。
+   * 投影 fileId/name/bytes + activatedAt/createdAt（清单时间取 createdAt），不含内容/路径/sha256。
    */
   const fileManifestProvider = (principalId: string, sessionId: string): readonly TurnFileRef[] =>
     fileStore.listActiveFiles({ scope: { principalId, sessionId }, now: Date.now() });

@@ -116,7 +116,7 @@ const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   // 文件引用可读期（天）：缺省 7 与 ms 派生归策略；字节回收只读解析值（R5 验评透传）。
   fileRefTtlDays: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, FILE_REF_CLEANUP, R5_RESOURCES],
   fileRetentionDays: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
-  fileRetentionSweepOnStart: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STARTUP_SWEEP, R5_RESOURCES],
+  fileRetentionSweepOnStart: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STARTUP_SWEEP],
   attachmentNudgeAfterMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, SERVER, SIM_HARNESS],
 };
 

@@ -490,7 +490,10 @@ function runFileRefCleanupProbe(dbPath: string, workspaceRoot: string): FileRefC
         row.name,
       )),
     ).length;
+    // 真空保护：若回收/过期判定整体退化成 no-op，wouldDelete 与 deleted 会同时为 0 而
+    // 「一致」——必须要求「确实有过期行该删」，否则这一项等于没测。
     const ok = atNow.summary.deleted === 0
+      && dry.summary.wouldDelete > 0
       && dry.summary.wouldDelete === actual.summary.deleted
       && actual.summary.failed === 0
       && allRows.length === rowsBefore
@@ -693,7 +696,7 @@ async function main(): Promise<void> {
 
     // 缺环（代码阅读注记 + 实测对照；不判红，只写清「缺的是哪一环」）。
     const missingLink = [
-      'runs/ 与 files/ 的回收只在显式 ops 入口（npm run cleanup:runs）或 server 启动开关 fileRetentionSweepOnStart 下发生，无定时器：run 目录见 packages/agent/src/run-dir-cleanup.ts，过期 file_refs 字节见 packages/agent/src/file-ref-cleanup.ts。',
+      'runs/ 与 files/ 的回收只在显式 ops 入口（npm run cleanup:runs）或 server 启动时的一次性清扫下发生，无定时器：run 目录见 packages/agent/src/run-dir-cleanup.ts，过期 file_refs 字节见 packages/agent/src/file-ref-cleanup.ts。',
       `文件引用可读期 TTL 来自 runtime.fileRefTtlDays（实测 ttlDays=${fileRefCleanupProbe.ttlDays}，${fileRefCleanupProbe.ttlMs}ms）：过期后行不可解析；把时钟推过 TTL 后 sweeper 实跑 deleted=${fileRefCleanupProbe.deletedAtExpiry}（dryRun wouldDelete=${fileRefCleanupProbe.wouldDeleteAtExpiry}，failed=${fileRefCleanupProbe.failedAtExpiry}），file_refs 行数 ${fileRefCleanupProbe.rowsBefore}→${fileRefCleanupProbe.rowsAfter}，deleted 行残留字节=${fileRefCleanupProbe.bytesRemainingForDeleted}。`,
       'server-paths.ts:15 提到的 sweepScratchDirs 只在注释/历史文档里，现产品面无实现。',
       'SessionPersistence.delete 只删 Pi 转录文件（session-persistence.ts:357），不删 workspace 的 runs//files/。',
