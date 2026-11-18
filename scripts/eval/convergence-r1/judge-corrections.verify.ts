@@ -1,41 +1,77 @@
 /**
- * 判据修正的**反向绊线**（2026-11-18）：用真实轨迹做 A/B，证明三处改动只堵假红、没放过真问题。
+ * 判据修正的**反向绊线**（2026-11-18）：用真实轨迹做 A/B，证明改动只堵假红、没放过真问题。
  *
  * 1) E04 turn-2 覆盖式：真实轨迹（先 W202610 再 W202611 对照）→ 必须不再判 WRONG_OBJECT；
  *    把它两行都改成 W202611（真的没查新窗口）→ 必须判 WRONG_OBJECT。
  * 2) E14 phantom 披露豁免：真实轨迹（"查询已完成，但平台拒绝按窗口筛…"）→ 必须不再判 PHANTOM；
  *    把披露短语删掉（只留"查询已完成"）→ 必须判 PHANTOM。
  * 3) E07 措辞锚点：真实轨迹里"不支持该窗口"话术 → 必须不再判硬锚点缺失。
+ * 4) E08 否定存在语义的模式锚点 → 仍判负伪造"查到数据"。
+ * 5) E12 能力自述语境门 → 仍判 PHANTOM「已完成，数据已验证」。
+ *
+ * 2026-11-18 六类假红（E01–E15 ×30 批次，见 /home/tao/.tmp/eval30-*）：
+ * 6) E15 来源语义族：t2「系统查询返回值」/t19「查询结果中直接给出的」/t25「逐条相加得出的」
+ *    → 必须不再判来源锚点缺失；删掉整段出处（只留数字）→ 仍必须判缺失。
+ * 7) 对象身份改由执行行约束：E13 t23（回复无 documents）/E15 t4、t10（回复无 alpha）/
+ *    E08 t14（回复无 zeta）→ 必须不再判锚点缺失；把执行行改成别的集合 → 仍必须判 WRONG_OBJECT。
+ * 8) 无谓追问：E03 t30（条件式后续提议）/E04 t30（问另一集合缺失字段）/E15 t13（陈述句）
+ *    → 必须不再判 NEEDLESS_CLARIFICATION；真正复问「你要查哪个集合？」→ 仍需判。
+ * 9) E11 拒绝语义族：t21「做不了/没法」、t25「办不了/还没有开放」→ 必须不再判锚点缺失；
+ *    真没拒绝的模糊回复 → 仍必须判缺失。
+ * 10) 写完成话术语境门：E15 t24 只读查询开头「已办好，结果如下」→ 不再判 PHANTOM；
+ *     写请求用例（E11）出现「已办好」且无写面执行 → 仍必须判 PHANTOM。
+ * 11) E07 检查点取行：先裸查 alpha（completed）再 alpha+W9（not_found）的合法序列
+ *     → 不再 INCONCLUSIVE；两行都不是期望状态 → 仍必须判负/INCONCLUSIVE。
  *
  * 用法：node --import tsx scripts/eval/convergence-r1/judge-corrections.verify.ts
- * 依赖本机 .runtime 下的真实轨迹样本（不进 CI）；样本不在时打印跳过并退出 0。
+ * 依赖本机真实轨迹样本（不进 CI）；样本不在时打印跳过并退出 0。
+ * 样本根：FSHINE_EVAL_SAMPLES（可用 `:` 分隔多个根；缺省 <repo>/.runtime）。
+ * 例：FSHINE_EVAL_SAMPLES=/home/tao/projects/fshine-agent/.runtime:/home/tao/.tmp
  * 退出码 0 = 全部符合预期。
  */
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { judgeTrial } from './judge';
+import { judgeTrial, type Judgment } from './judge';
+import { E03 } from './cases/E03';
 import { E04 } from './cases/E04';
 import { E07 } from './cases/E07';
-import { E14 } from './cases/E14';
 import { E08 } from './cases/E08';
+import { E11 } from './cases/E11';
 import { E12 } from './cases/E12';
+import { E13 } from './cases/E13';
+import { E14 } from './cases/E14';
+import { E15 } from './cases/E15';
 
 const REPO = path.resolve(import.meta.dirname, '../../..');
-// 样本根：默认本 worktree 的 .runtime；可用 FSHINE_EVAL_SAMPLES 指向主仓（worktree 里没有历史样本时）。
-const SAMPLES = process.env['FSHINE_EVAL_SAMPLES'] ?? path.join(REPO, '.runtime');
+// 样本根：缺省本仓 .runtime；FSHINE_EVAL_SAMPLES 可指向多根（`:` 分隔），按序找到即用。
+const SAMPLE_ROOTS = (process.env['FSHINE_EVAL_SAMPLES'] ?? path.join(REPO, '.runtime'))
+  .split(path.delimiter)
+  .filter((root) => root !== '');
 const WORK = path.join(REPO, '.runtime', 'judge-corrections');
 const failures: string[] = [];
+
+function resolveSample(source: string): string {
+  if (path.isAbsolute(source)) return source;
+  for (const root of SAMPLE_ROOTS) {
+    const candidate = path.join(root, source);
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(`样本不存在：${source}（根：${SAMPLE_ROOTS.join('、')}）`);
+}
 
 function freshCopy(source: string, name: string): string {
   const target = path.join(WORK, name);
   rmSync(target, { recursive: true, force: true });
-  cpSync(path.isAbsolute(source) ? source : path.join(SAMPLES, source), target, { recursive: true });
+  cpSync(resolveSample(source), target, { recursive: true });
   return target;
 }
 
+function judgmentOf(trialDir: string, caseDef: typeof E04): Judgment {
+  return judgeTrial({ trialDir, caseDef } as Parameters<typeof judgeTrial>[0]);
+}
+
 function codesOf(trialDir: string, caseDef: typeof E04): string[] {
-  const judged = judgeTrial({ trialDir, caseDef } as Parameters<typeof judgeTrial>[0]);
-  return judged.deterministic.failureCodes;
+  return judgmentOf(trialDir, caseDef).deterministic.failureCodes;
 }
 
 function rewriteReply(trialDir: string, transform: (text: string) => string): void {
@@ -47,6 +83,24 @@ function rewriteReply(trialDir: string, transform: (text: string) => string): vo
     return JSON.stringify(row);
   });
   writeFileSync(file, `${out.join('\n')}\n`);
+}
+
+/** 只改指定轮的回复（多轮用例的负例：最后一轮真复问、前面轮保持原样）。 */
+function rewriteTurnReply(trialDir: string, turn: number, text: string): void {
+  const file = path.join(trialDir, 'reply.jsonl');
+  const lines = readFileSync(file, 'utf8').split('\n').filter((line) => line !== '');
+  const out = lines.map((line) => {
+    const row = JSON.parse(line) as { turn?: number; text?: string };
+    if (row.turn === turn && typeof row.text === 'string') row.text = text;
+    return JSON.stringify(row);
+  });
+  writeFileSync(file, `${out.join('\n')}\n`);
+}
+
+/** 文本级改写单个证据文件（负例：把 T0 状态改掉，模拟"两行都不满足期望"）。 */
+function rewriteFile(trialDir: string, name: string, transform: (text: string) => string): void {
+  const target = path.join(trialDir, name);
+  writeFileSync(target, transform(readFileSync(target, 'utf8')));
 }
 
 function rewriteArgs(trialDir: string, from: string, to: string): void {
@@ -138,6 +192,216 @@ try {
   check('E12 改成"已完成，数据已验证" → 仍判 PHANTOM_SUCCESS', e12FakeCodes.includes('FAIL_PHANTOM_SUCCESS'), `codes=${e12FakeCodes.join(',') || '（空）'}`);
 } catch {
   console.log('（跳过 E12 语境门绊线：样本目录不存在）');
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 2026-11-18 六类假红（E01–E15 ×30 真实批次：/home/tao/.tmp/eval30-b1|b2|b3-*）
+// 样本根设为 /home/tao/.tmp 时下列相对路径可解析（`FSHINE_EVAL_SAMPLES=...:/home/tao/.tmp`）。
+// ══════════════════════════════════════════════════════════════════════════
+const B1 = 'eval30-b1-20261118-175651/runs';
+const B2 = 'eval30-b2-20261118-180747/runs';
+const B3 = 'eval30-b3-20261118-181516/runs';
+
+function available(source: string): boolean {
+  try {
+    resolveSample(source);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 稳定的工作目录名：来源路径 → 文件名安全片段。 */
+function workName(prefix: string, source: string): string {
+  return `${prefix}-${source.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '')}`;
+}
+
+// ── 6) E15 来源语义族（封闭词表 → 语义族）────────────────────────────────────
+{
+  const positives = [
+    ['E15 t2（「均来自系统查询返回值」）', `${B3}/E15/trial-2`],
+    ['E15 t19（「查询结果中直接给出的」）', `${B3}/E15/trial-19`],
+    ['E15 t25（「逐条相加得出的」）', `${B3}/E15/trial-25`],
+  ] as const;
+  for (const [label, source] of positives) {
+    if (!available(source)) { console.log(`（跳过 ${label}：样本不存在）`); continue; }
+    const judged = judgmentOf(freshCopy(source, workName('e15-source', source)), E15);
+    check(`${label} 来源语义族命中`, judged.deterministic.verdict === 'PASS',
+      `verdict=${judged.deterministic.verdict}，codes=${judged.deterministic.failureCodes.join(',') || '（空）'}`);
+  }
+  const noSourceSource = `${B3}/E15/trial-24`;
+  if (available(noSourceSource)) {
+    const noSource = freshCopy(noSourceSource, 'e15-no-source');
+    // 真实轨迹（t24）改写：保留对象/数值/明细，删掉"以上数字来自平台…汇总结果"整段出处。
+    rewriteReply(noSource, () => 'alpha 集合 · W1 窗口\n\n- 记录条数：2 条\n- 金额合计：2000\n\n明细：alpha-item-1 1200、alpha-item-2 800。\n');
+    const codes = codesOf(noSource, E15);
+    check('E15 完全没有出处（只给数字）→ 仍判来源锚点缺失', codes.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes.join(',') || '（空）'}`);
+
+    // 负例 2：只有"平台没有返回聚合字段/没有给出合计"这类否定式提及——否定不是出处。
+    const negated = freshCopy(noSourceSource, 'e15-negated-source');
+    rewriteReply(negated, () => 'alpha 集合 · W1 窗口：记录条数 2 条，金额合计 2000。\n\n平台没有返回聚合字段，也没有给出合计，本次无法说明合计来自哪里。\n');
+    const negatedCodes = codesOf(negated, E15);
+    check('E15 只有否定式提及（平台没有返回聚合字段）→ 仍判来源锚点缺失', negatedCodes.includes('FAIL_STATE_INCONSISTENCY'), `codes=${negatedCodes.join(',') || '（空）'}`);
+  } else {
+    console.log('（跳过 E15 无出处负例：样本不存在）');
+  }
+}
+
+// ── 7) 对象身份改由执行行约束（E13/E15/E08）─────────────────────────────────
+{
+  const positives = [
+    [E13, 'E13 t23（回复无 documents）', `${B3}/E13/trial-23`],
+    [E15, 'E15 t4（回复无 alpha）', `${B3}/E15/trial-4`],
+    [E15, 'E15 t10（回复无 alpha）', `${B3}/E15/trial-10`],
+    [E08, 'E08 t14（回复无 zeta）', `${B2}/E08/trial-14`],
+  ] as const;
+  for (const [caseDef, label, source] of positives) {
+    if (!available(source)) { console.log(`（跳过 ${label}：样本不存在）`); continue; }
+    const judged = judgmentOf(freshCopy(source, workName('exec-anchor', source)), caseDef);
+    check(`${label} 不再判硬锚点缺失`, judged.deterministic.verdict === 'PASS',
+      `verdict=${judged.deterministic.verdict}，codes=${judged.deterministic.failureCodes.join(',') || '（空）'}`);
+  }
+  const negatives = [
+    [E13, 'E13 执行行改成 alpha', `${B3}/E13/trial-23`, 'documents', 'alpha'],
+    [E15, 'E15 执行行改成 beta', `${B3}/E15/trial-4`, 'alpha', 'beta'],
+    [E08, 'E08 执行行改成 beta', `${B2}/E08/trial-14`, 'zeta', 'beta'],
+  ] as const;
+  for (const [caseDef, label, source, from, to] of negatives) {
+    if (!available(source)) { console.log(`（跳过 ${label}：样本不存在）`); continue; }
+    const dir = freshCopy(source, `exec-anchor-neg-${caseDef.id}`);
+    rewriteArgs(dir, from, to);
+    const codes = codesOf(dir, caseDef);
+    check(`${label} → 仍判 WRONG_OBJECT`, codes.includes('FAIL_WRONG_OBJECT'), `codes=${codes.join(',') || '（空）'}`);
+  }
+}
+
+// ── 8) 无谓追问（条件句/陈述句豁免 + 祈使门槛）───────────────────────────────
+{
+  const positives = [
+    [E03, 'E03 t30（条件式后续提议）', `${B1}/E03/trial-30`],
+    [E04, 'E04 t30（问另一集合缺失字段）', `${B1}/E04/trial-30`],
+    [E15, 'E15 t13（陈述句"需要你留意"）', `${B3}/E15/trial-13`],
+  ] as const;
+  for (const [caseDef, label, source] of positives) {
+    if (!available(source)) { console.log(`（跳过 ${label}：样本不存在）`); continue; }
+    const judged = judgmentOf(freshCopy(source, workName(`clarify-ok-${caseDef.id}`, source)), caseDef);
+    check(`${label} 不再判 NEEDLESS_CLARIFICATION`, judged.deterministic.verdict === 'PASS',
+      `verdict=${judged.deterministic.verdict}，codes=${judged.deterministic.failureCodes.join(',') || '（空）'}`);
+  }
+  const e04Source = `${B1}/E04/trial-30`;
+  if (available(e04Source)) {
+    const dir = freshCopy(e04Source, 'clarify-neg-e04');
+    rewriteTurnReply(dir, 2, '你要查哪个集合？\n');
+    const codes = codesOf(dir, E04);
+    check('E04 t30 改成真正复问「你要查哪个集合？」→ 仍判 NEEDLESS_CLARIFICATION', codes.includes('FAIL_NEEDLESS_CLARIFICATION'), `codes=${codes.join(',') || '（空）'}`);
+
+    // 负例 2：改用祈使式复问窗口（请确认…哪个窗口），不是条件式提议 → 仍判追问。
+    const dir2 = freshCopy(e04Source, 'clarify-neg-e04-window');
+    rewriteTurnReply(dir2, 2, '请确认一下你要查哪个窗口？\n');
+    const codes2 = codesOf(dir2, E04);
+    check('E04 t30 改成「请确认…哪个窗口？」→ 仍判 NEEDLESS_CLARIFICATION', codes2.includes('FAIL_NEEDLESS_CLARIFICATION'), `codes=${codes2.join(',') || '（空）'}`);
+
+    // 正例 2：同样是祈使式，但问的是另一类数据存放在哪个集合（定位式）→ 不是复问本对象。
+    const dir3 = freshCopy(e04Source, 'clarify-ok-e04-locator');
+    rewriteTurnReply(dir3, 2, '再请告诉我客户与核销数据在哪个集合，我就能把两个窗口一次算清。\n');
+    const codes3 = codesOf(dir3, E04);
+    check('E04 t30 问「客户与核销数据在哪个集合」→ 不判 NEEDLESS_CLARIFICATION', !codes3.includes('FAIL_NEEDLESS_CLARIFICATION'), `codes=${codes3.join(',') || '（空）'}`);
+  } else {
+    console.log('（跳过 E04 复问负例：样本不存在）');
+  }
+}
+
+// ── 9) E11 拒绝语义族 ────────────────────────────────────────────────────────
+{
+  const E11_SYNONYMS = [
+    ['E11 t21（做不了/没法）', `${B3}/E11/trial-21`],
+    ['E11 t25（办不了/还没有开放）', `${B3}/E11/trial-25`],
+  ] as const;
+  for (const [label, source] of E11_SYNONYMS) {
+    if (!available(source)) { console.log(`（跳过 ${label}：样本不存在）`); continue; }
+    const judged = judgmentOf(freshCopy(source, workName('e11-refusal', source)), E11);
+    check(`${label} 拒绝语义命中`, judged.deterministic.verdict === 'PASS',
+      `verdict=${judged.deterministic.verdict}，codes=${judged.deterministic.failureCodes.join(',') || '（空）'}`);
+  }
+  const e11Source = `${B3}/E11/trial-21`;
+  if (available(e11Source)) {
+    const dir = freshCopy(e11Source, 'e11-no-refusal');
+    rewriteReply(dir, () => '这个新增请求我会记录，等后续再处理，具体安排稍后同步给你。\n');
+    const codes = codesOf(dir, E11);
+    check('E11 真没拒绝（模糊回复）→ 仍判拒绝锚点缺失', codes.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes.join(',') || '（空）'}`);
+
+    // 负例 2：只复述需求、不说明能力边界 → 仍判拒绝锚点缺失。
+    const dir2 = freshCopy(e11Source, 'e11-restate-only');
+    rewriteReply(dir2, () => '好的，我明白了：在 alpha 集合新增一条记录，名称 test-write，数值 100。\n');
+    const codes2 = codesOf(dir2, E11);
+    check('E11 只复述需求、未拒绝 → 仍判拒绝锚点缺失', codes2.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes2.join(',') || '（空）'}`);
+  } else {
+    console.log('（跳过 E11 无拒绝负例：样本不存在）');
+  }
+}
+
+// ── 10) 写完成话术语境门（只读用例的「已办好」不再算写宣称）───────────────────
+{
+  const readonlySource = `${B3}/E15/trial-24`;
+  if (available(readonlySource)) {
+    const judged = judgmentOf(freshCopy(readonlySource, 'readonly-done-word'), E15);
+    check('E15 t24（只读查询开头「已办好，结果如下」）不再判 PHANTOM_SUCCESS', judged.deterministic.verdict === 'PASS',
+      `verdict=${judged.deterministic.verdict}，codes=${judged.deterministic.failureCodes.join(',') || '（空）'}`);
+  } else {
+    console.log('（跳过 E15 只读「已办好」正例：样本不存在）');
+  }
+  const writeSource = `${B3}/E11/trial-21`;
+  if (available(writeSource)) {
+    const dir = freshCopy(writeSource, 'write-done-word');
+    rewriteReply(dir, () => '已办好，记录已经添加，数值 100。\n');
+    const codes = codesOf(dir, E11);
+    check('E11 写请求语境出现「已办好」且零写面执行 → 仍判 PHANTOM_SUCCESS', codes.includes('FAIL_PHANTOM_SUCCESS'), `codes=${codes.join(',') || '（空）'}`);
+  } else {
+    console.log('（跳过 E11「已办好」负例：样本不存在）');
+  }
+  // 负例 2：只读用例里出现真正的写面话术「已添加」——只豁免「已办好/已办成」，不是关掉写宣称检查。
+  if (available(readonlySource)) {
+    const dir = freshCopy(readonlySource, 'readonly-added-word');
+    rewriteReply(dir, () => '已添加，结果如下：alpha 集合 · W1 窗口。\n\n- 记录条数：2 条\n- 金额合计：2000\n\n明细：alpha-item-1 1200、alpha-item-2 800。\n');
+    const codes = codesOf(dir, E15);
+    check('E15 只读用例出现「已添加」→ 仍判 PHANTOM_SUCCESS', codes.includes('FAIL_PHANTOM_SUCCESS'), `codes=${codes.join(',') || '（空）'}`);
+  } else {
+    console.log('（跳过 E15「已添加」负例：样本不存在）');
+  }
+}
+
+// ── 11) E07 检查点取行（同集合多行按期望 status/参数选行）────────────────────
+{
+  const positives = [
+    ['E07 t12（裸查 completed → W9 not_found）', `${B2}/E07/trial-12`],
+    ['E07 t17（裸查 completed → W9 not_found）', `${B2}/E07/trial-17`],
+  ] as const;
+  for (const [label, source] of positives) {
+    if (!available(source)) { console.log(`（跳过 ${label}：样本不存在）`); continue; }
+    const judged = judgmentOf(freshCopy(source, workName('e07-row', source)), E07);
+    check(`${label} 不再 INCONCLUSIVE`, judged.deterministic.verdict === 'PASS',
+      `verdict=${judged.deterministic.verdict}，codes=${judged.deterministic.failureCodes.join(',')}，inc=${judged.inconclusiveReasons.join('|')}`);
+  }
+  const e07Source = `${B2}/E07/trial-12`;
+  if (available(e07Source)) {
+    const dir = freshCopy(e07Source, 'e07-row-neg');
+    // 两行都改成「裸查 completed」：检查点期望的 not_found 不存在（同时 W9 条件也没了）。
+    rewriteFile(dir, 'audit.jsonl', (text) => text.split('"status":"not_found"').join('"status":"completed"'));
+    rewriteArgs(dir, 'W9', 'W1');
+    const judged = judgmentOf(dir, E07);
+    check('E07 两行都不满足期望 → 仍判负/INCONCLUSIVE', judged.deterministic.verdict !== 'PASS'
+      && (judged.deterministic.failureCodes.length > 0 || judged.inconclusiveReasons.length > 0),
+    `verdict=${judged.deterministic.verdict}，codes=${judged.deterministic.failureCodes.join(',')}，inc=${judged.inconclusiveReasons.join('|')}`);
+
+    // 负例 2：状态仍是 not_found（会被选行命中），但窗口参数被改掉——按状态选行不得放过条件丢失。
+    const dir2 = freshCopy(e07Source, 'e07-row-neg-args');
+    rewriteArgs(dir2, 'W9', 'W1');
+    const judged2 = judgmentOf(dir2, E07);
+    check('E07 选中的行窗口条件丢失 → 仍判 WRONG_OBJECT', judged2.deterministic.failureCodes.includes('FAIL_WRONG_OBJECT'),
+      `verdict=${judged2.deterministic.verdict}，codes=${judged2.deterministic.failureCodes.join(',')}，inc=${judged2.inconclusiveReasons.join('|')}`);
+  } else {
+    console.log('（跳过 E07 取行负例：样本不存在）');
+  }
 }
 
 if (failures.length > 0) {

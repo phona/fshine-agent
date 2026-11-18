@@ -42,7 +42,10 @@ export const E13: UserCase = {
     expectedT1Status: 'completed',
   },
   hardAnchors: [
-    { kind: 'containsAll', values: ['documents', 'W202611'] },
+    // 对象身份由**执行行**机械约束（allowedCollections=['documents'] 且 requireEveryRowArgs
+    // 锁定 documents × W202611），回复只留窗口与数值/结论锚点——实测模型只写「W202611 在平台里
+    // 是一个数据窗口」、不重复集合名（E13 trial-23），按名字判会出假红（同 E14 先例）。
+    { kind: 'containsAll', values: ['W202611'] },
     { kind: 'numberAny', numbers: [1200, 800, 900] },
   ],
   weakNotes: [

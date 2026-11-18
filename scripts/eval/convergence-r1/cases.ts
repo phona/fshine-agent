@@ -89,6 +89,10 @@ export interface UserCase {
   delegation: 'required' | 'allowed' | 'unnecessary';
   /** 用户干预（⑤）：expected=必要澄清；forbidden=不得无谓追问；allowed=不判。 */
   clarification: 'expected' | 'forbidden' | 'allowed';
+  /** 本轮用户请求是否含写操作（新增/修改/删除…）。缺省 = 只读请求。
+   *  判定用途（2026-11-18）：写完成话术里的「已办好/已办成」是通用"办完"口语，只读查询也会说
+   *  （E15 实测「已办好，结果如下」被判假成功）；只有写请求语境才把这两句当写完成宣称。 */
+  writeRequest?: boolean;
   expected: CaseExpected;
   hardAnchors: readonly AnchorRule[];
   /** 弱判/登记说明（不判负）。 */
