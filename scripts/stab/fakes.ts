@@ -3,7 +3,7 @@
  *
  * 纯测试基建，零产品语义：全部假 executor / 假 sink / 假渠道（经 `server.handler`）/
  * 可注入时钟；装配走生产同一核心 `assembleSessionCore`（不 mock 产品逻辑）。
- * 预注册：`docs/product/r4-stability-prereg.md` §三/§四。
+ * 预注册：`docs/history/r4-stability-prereg.md` §三/§四。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';

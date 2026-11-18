@@ -79,4 +79,4 @@
 ## 6. 证据落盘
 
 - `.runtime/pi152-stageD2/`：`evidence.json`（逐会话/逐调用原始读数）、`metrics.json`、`report.md`、`summary.json`、`run.log`。
-- 预注册副本（运行时）：本文件；仓内权威副本：`docs/product/pi-152-stage-d2.md`（运行后按实测补读数，不预先写结果）。
+- 预注册副本（运行时）：本文件；仓内权威副本：`docs/product/pi-152-stage-d2.md`（已删，git 历史可考；运行后按实测补读数，不预先写结果）。

@@ -1,5 +1,5 @@
 /**
- * recalc_xlsx 公式级 Eval（准入五条第 5 项；docs/decision-log.md §九十九）。
+ * recalc_xlsx 公式级 Eval（准入五条第 5 项；docs/decisions/index.md §九十九）。
  *
  * 目的：给出「增加机制前 / 增加后」两档的可复现读数，证明宿主 recalc 工具不是多余机制——
  *   · 增加前（纯数据臂 / data-level oracle）：只读 xlsx 里现存的缓存值，拿缓存与缓存比对，

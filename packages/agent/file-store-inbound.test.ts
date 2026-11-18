@@ -1,5 +1,5 @@
 /**
- * 入站附件登记与激活（CAP-01 S1；docs/product/cap01-main-direct-execution.md §4/§8）。
+ * 入站附件登记与激活（CAP-01 S1；docs/architecture/files.md §4/§8）。
  *
  * 覆盖：
  *   ① registerInboundFile：字节从源路径**流式**读、算 sha256、copy 进 workspace——登记为

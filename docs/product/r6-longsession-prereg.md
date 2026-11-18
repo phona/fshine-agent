@@ -1,8 +1,8 @@
 # R6 · 真实生产窗口长会话压缩长稳 · 预注册（修订版 v2 · owner 2026-11-15 裁决）
 
-- 状态：**预注册修订版 v2**。**Wave1 口径已冻结**（见 §十三）。**Wave2 方案待重新裁决**（§二、§四）。冻结后只允许「作废对应批次 → 追加新预注册记录（新 run 编号）→ 重跑」，不得事后调阈值、样本量或断言（对齐 `docs/product/r4-stability-prereg.md` §十）。
+- 状态：**预注册修订版 v2**。**Wave1 口径已冻结**（见 §十三）。**Wave2 方案待重新裁决**（§二、§四）。冻结后只允许「作废对应批次 → 追加新预注册记录（新 run 编号）→ 重跑」，不得事后调阈值、样本量或断言（对齐 `docs/history/r4-stability-prereg.md` §十）。
 - 归属：`arch/r6-harness`（worktree `~/projects/fshine-agent-r6-harness`，分支 `arch/r6-harness`，基线 = `arch/integration` 启动时 HEAD `e2d12bd`）。本轮交付**测试基建 + 预注册修订 + 冻结口径**：零产品代码改动、**零真实模型调用**、不新增 Runtime 机制、**不改被测对象产品码**（`packages/**`、`apps/**` 不动）。
-- 姊妹文档：`docs/product/r6-longsession-harness-design.md`（负载生成器 + Oracle + 证据 schema + 判官接线）。
+- 姊妹文档：`docs/product/r6-longsession-harness-design.md`（已删，git 历史可考；负载生成器 + Oracle + 证据 schema + 判官接线）。
 - 领号：轨道号 **LS1–LS5**；顶层正确性要求号 **T1–T5**（本文档内部）。**说明**：本仓**不存在**「Pi 替换实验阶段三 T1–T12」的权威矩阵；R6 的需求以 **T1–T5 + CMP 判据**为准，与他处 T 号无关（不臆造外部编号）。
 - 本轮修订依据（owner 裁决，逐条落实）：① 窗口政策改**混合**；② 入口门槛 G1/G2/G3 显式化；③ 预注册五条硬改；④ 架构纪律；⑤ 冻结 Wave1 口径。
 
@@ -18,8 +18,8 @@
 8. **观测/负载代码只采集事实、不得改变压缩触发/门控**，不得演变为第二套压缩决策机制（见 harness 设计 §一）。
 9. **架构纪律（硬）**：不改 Worker 提示词；不新增 fshine 自研压缩机制；**不因评测失败擅自给 Pi 增加宿主侧压缩治理**；**Pi 迁移失败时如实报告，不用旧机制暗中兜底制造通过结果**。
 10. **不借测试名义增 Runtime 机制**；不动 Worker 提示/任务账本/权限。
-11. **会话持久化问题不混入**：重启恢复、转录落盘属独立验收（`docs/product/r5-session-persistence-design.md`），R6 不评、不据此判负。
-12. `.runtime` 一律 gitignored、不得 `git add`；`docs/decision-log.md` 由集成 Agent 单点写，本批**不得改**。
+11. **会话持久化问题不混入**：重启恢复、转录落盘属独立验收（现行见 `docs/architecture/sessions.md`；原 `docs/product/r5-session-persistence-design.md` 已删，git 历史可考），R6 不评、不据此判负。
+12. `.runtime` 一律 gitignored、不得 `git add`；`docs/decisions/index.md` 由集成 Agent 单点写，本批**不得改**。
 
 ## 一、R6 目标与顶层正确性要求 T1–T5
 
@@ -102,7 +102,7 @@
 ## 三、五轨场景清单（含 ≥3 次真实压缩达成路径）
 
 > **共同前提**：每会话必须在**真实窗口**下记录到 **≥3 次「有效压缩尝试」**（Pi 原生生命周期暴露的压缩尝试中 `after < before` 者）方判该会话样本**可用于结论**（§六 门槛）。达成路径见 §三.6（机制）与 harness 设计 §二（负载生成器）。
-> **压缩事实面（Pi 原生，不含私有事件名）**：会话生命周期暴露的**压缩尝试**（`{turn, kind: threshold|overflow|post_turn|unknown, before, after, summaryChunks?}`）。**不得**再绑定 fshine 私有事件（`context_compacted`/`context_compact_trimmed`/…）或私有函数（`splitForCompaction`/`compactionSettingsFor`/…）——它们随 Pi 迁移将删除（见 `docs/product/pi-compaction-api-audit.md`）。
+> **压缩事实面（Pi 原生，不含私有事件名）**：会话生命周期暴露的**压缩尝试**（`{turn, kind: threshold|overflow|post_turn|unknown, before, after, summaryChunks?}`）。**不得**再绑定 fshine 私有事件（`context_compacted`/`context_compact_trimmed`/…）或私有函数（`splitForCompaction`/`compactionSettingsFor`/…）——它们随 Pi 迁移将删除（原审核档 `docs/product/pi-compaction-api-audit.md` 已删，git 历史可考）。
 
 ### LS1 · 长期事实保留
 
@@ -166,7 +166,7 @@
 
 **用例**：**Wave1 = 3 会话/轨**（2×40k + 1×128k）；**Wave2 会话数与布局待重新裁决**。每进程 ≥2 会话并行是**布局**，不是 N。
 
-**判据**：硬零：跨 Session 转录污染 = 0（§五 H7）；资源面：RSS 增长率（预热 + 中位数 3 次采样，对齐 `r4-stability-prereg.md` §四-I5）；异常面：进程异常/挂死/未捕获错误 = 0。
+**判据**：硬零：跨 Session 转录污染 = 0（§五 H7）；资源面：RSS 增长率（预热 + 中位数 3 次采样，对齐 `docs/history/r4-stability-prereg.md` §四-I5）；异常面：进程异常/挂死/未捕获错误 = 0。
 
 ### 三.6 · 达成路径与窗口政策
 
@@ -329,7 +329,7 @@
 
 - 证据根：`.runtime/r6/`（gitignored，**不得 git add**）；逐会话原始留档（schema 见 harness 设计 §五）。
 - 提交：本文件、harness 设计文件两份 docs，及 `scripts/eval/long-session/**` 测试基建与确定性测试；提交身份 `Tao <34084876+phona@users.noreply.github.com>`；commit message 禁绝对路径；`TMPDIR=~/.tmp`；不 push/不合并/不碰 main/tag。
-- **不写 `docs/decision-log.md`**（集成 Agent 单点写）。
+- **不写 `docs/decisions/index.md`**（集成 Agent 单点写）。
 
 ## 十三、**Wave1 冻结口径块**（逐轨 2×40k + 1×128k；失败分类冻结；单实验硬停；停止条件）
 

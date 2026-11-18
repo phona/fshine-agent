@@ -1,5 +1,5 @@
 /**
- * 文件区监管 fileStore（CAP-01 S0；docs/product/cap01-main-direct-execution.md §1/§2/§3/§4）。
+ * 文件区监管 fileStore（CAP-01 S0；docs/architecture/files.md §1/§2/§3/§4）。
  *
  * 职责：workspace 布局派生 + 文件字节与 file_refs 行的**唯一写侧**（putFile 落新文件 /
  * materializeInputs 物化输入 / registerOutputsFromOut 从交付箱 copy-on-register 登记产物 /

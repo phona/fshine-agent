@@ -10,7 +10,7 @@
  *
  * 与 R1 的关系：R1 的 B03 是用户第二轮**明说**「上个月也一起看看」——按本口径那是用户授权，
  * 「直接做上月」不算越界；故 R1 #3 读数（0/3，命中 documents@W202610）按新口径作废、不可复用，
- * 本轮按新用例重跑（见 `docs/product/business-e2e-prereg-addendum.md`）。
+ * 本轮按新用例重跑（见 `docs/history/business-e2e-prereg-addendum.md`）。
  */
 import { defineBizCase } from '../../../business-e2e/scenarios';
 import type { BizCase } from '../../../business-e2e/scenarios';

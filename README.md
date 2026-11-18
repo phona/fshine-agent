@@ -28,7 +28,7 @@
 | `config` | 部署模板（`agent.example.yaml`）与仓内 dummy 面配置（`agent.fixture.yaml`） |
 | `scripts` | `ask` 入口、eval 与仓库守卫脚本 |
 | `tests` | 测试装置（vitest setup） |
-| [`docs`](docs/index.md) | 文档索引（权威决定见 [decision-log](docs/decision-log.md)） |
+| [`docs`](docs/index.md) | 文档索引（权威决定见 [决定索引](docs/decisions/index.md)） |
 
 ## 命令
 
@@ -111,7 +111,7 @@ npm run tasks -- <taskId> --redo         # 以该任务存储的交办原文逐�
   真实模型 workflow 面：`eval-real.yml`（per-push 1 轮，advisory）与 `eval-nightly.yml`（12×3）——
   **配置就绪 ≠ 持续运行已启用**：两者分别触发于 `main` 的 push/PR 与每日 cron；当前工作线未合入
   `main`、远端 Secrets（`LLM_API_*`）未经本仓验证，故在合入并留档首次真实运行之前，不构成持续保障
-  （口径见 `docs/decision-log.md` §十七.4）。
+  （口径见 `docs/decisions/index.md`「R2：E05 边界与 task.status（§十七）」行与 `docs/history/decision-log-part02-2026-11.md:40` §十七.4）。
 - 测试与评测只依赖仓内 dummy/假件；真实 SaaS / 真实企微渠道未验证，不作前置条件。
 
 ## 上线前必填

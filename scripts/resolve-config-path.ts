@@ -7,7 +7,7 @@
  *
  * 本模块不再持「仓根 config/agent.yaml 存在才用 > scripts/eval/eval.agent.yaml 回退」的
  * 隐式链：旧 eval 回退配置与 resolveConfigPath* 入口已随 M4 死代码清扫退役
- * （2026-11-13，见 docs/decision-log.md §十三；0 生产调用，唯一调用者是其自身测试）。
+ * （2026-11-13，见 docs/decisions/index.md §十三；0 生产调用，唯一调用者是其自身测试）。
  *
  * eval 配置物化：contextProfiles.*.root 的相对路径 → 相对仓根解析成绝对路径
  * （loadConfig 强制 root 绝对）；提交进仓的 YAML 因此不含开发者主目录、不依赖环境变量。

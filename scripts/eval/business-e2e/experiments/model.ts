@@ -4,7 +4,7 @@
  * 只提供数据面与机械展开：不跑模型、不判定、不采集（判定归 `./judge`，执行归 `./executor`，
  * 入口归 `./run`）。与探测基线（`../scenarios`）并行的**新实验面**，不改动既有套件与冻结面。
  *
- * 三实验（预注册见 `docs/product/business-e2e-prereg-addendum.md` §五）：
+ * 三实验（预注册见 `docs/history/business-e2e-prereg-addendum.md` §五）：
  *   ① task-surface：缺口 1 对话面四工具（task_status/result/cancel/resume）。工具面与分派同源
  *      门控 `taskRunner`——bizprobe/ask 装配路径缺省无 runner（inline），四工具**不注册**；本实验
  *      用例以 `withTaskRunner` 在 **inline 模式直接注入 runner**（缺口 1 设计 §3.3 明示的合法装配：

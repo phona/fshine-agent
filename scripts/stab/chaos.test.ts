@@ -1,7 +1,7 @@
 /**
  * R4 · 稳定性加固 · 混沌套件（TDD 先在红：harness 缺失）。
  *
- * 预注册：`docs/product/r4-stability-prereg.md` §三（场景 C1–C4）与 §四（不变量 I1–I5）。
+ * 预注册：`docs/history/r4-stability-prereg.md` §三（场景 C1–C4）与 §四（不变量 I1–I5）。
  * 假件（假 executor / 假 sink / 假渠道[server.handler 同 messageId 重投] / 可注入时钟）
  * 由 `./chaos-harness` 提供。**先红 = harness 文件尚未实现（collection 失败）**。
  *

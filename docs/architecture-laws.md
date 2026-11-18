@@ -8,7 +8,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **裁定记录的权威（2026-11-11 统一）**：删除 / 保留的**裁定、对象与状态**以 [decision-log.md](decision-log.md) 为权威记录；本文与 v0-architecture 是它的可执行判据转写与架构叙述。三者冲突时：**判据**以本文为准，**裁定的有无与状态**以 decision-log 为准，并回头修本文与 v0。AGENTS.md 只承载归属判据与迁移期现状，逐条删除状态的权威是 decision-log.md。本文与 v0 的删除状态已与 2026-11-11 裁定同批修订。
 
-> **2026-11-13 M4 注（守卫引用清点，复核 findings）**：本文是律法与历史判据档案。正文按路径引用的 18 个守卫/模块中 15 个已不在当前树（随 `0b97227` Minimal Reset 或 M4 死代码清扫退役）：`platform-leak-lint.test.ts`、`docs-reality.test.ts`、`runtime.ts`、`error-codes.ts`、`context.ts`、`assembly.ts`、`plan-confirmation-route.ts`、`reply.ts`、`env-doc-reconciliation.test.ts`、`cases.yaml`、`score.ts`、`judge-prompt.md`、旧 e2e `harness.ts` 等；裸名引用同样已删：`runtime-quality.ts`、`exposure-lint`、`worker-step-cap.ts`、`proposal-review.ts`、`task-handover.ts`、`committed-unverified.ts`、`tool-definition-guard.ts`。**凡以现时态写「机械守卫 = <已删文件>」「存在性由 <已删测试> 钉住」的行，一律按历史记录阅读**；现行可执行判据 = 现存守卫测试（`packages/agent/import-boundary.test.ts`、`transition-naming.test.ts`、`worker-env.test.ts`、`server-paths.test.ts`、`dummy-client.test.ts`、`runtime.test.ts`、`task-registry-sqlite.test.ts`、`apps/server/server.test.ts`）+ `decision-log.md` §十三。删除 / 保留的裁定权威仍是 decision-log（见上「裁定记录的权威」）。
+> **2026-11-13 M4 注（守卫引用清点，复核 findings）**：本文是律法与历史判据档案。正文按路径引用的 18 个守卫/模块中 15 个已不在当前树（随 `0b97227` Minimal Reset 或 M4 死代码清扫退役）：`platform-leak-lint.test.ts`、`docs-reality.test.ts`、`runtime.ts`、`error-codes.ts`、`context.ts`、`assembly.ts`、`plan-confirmation-route.ts`、`reply.ts`、`env-doc-reconciliation.test.ts`、`cases.yaml`、`score.ts`、`judge-prompt.md`、旧 e2e `harness.ts` 等；裸名引用同样已删：`runtime-quality.ts`、`exposure-lint`、`worker-step-cap.ts`、`proposal-review.ts`、`task-handover.ts`、`committed-unverified.ts`、`tool-definition-guard.ts`。**凡以现时态写「机械守卫 = <已删文件>」「存在性由 <已删测试> 钉住」的行，一律按历史记录阅读**；现行可执行判据 = 现存守卫测试（`packages/agent/import-boundary.test.ts`、`transition-naming.test.ts`、`worker-env.test.ts`、`server-paths.test.ts`、`dummy-client.test.ts`、`runtime.test.ts`、`task-registry-sqlite.test.ts`、`apps/server/server.test.ts`）+ `decision-log.md` §十三。删除 / 保留的裁定权威仍是 decision-log（原 `docs/decision-log.md` 已拆档；现行索引 `docs/decisions/index.md`，见上「裁定记录的权威」）。
 
 ---
 
@@ -203,7 +203,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **L4 整体保持开放**：闭环判据的 §17 写路径 latent 七项（D-031，执行层侧执行器的数据正确性债）仍未闭环——编排层侧不再有违例，不等于写路径可以开放。
 
-**闭环判据**：走查通过 + 写 e2e 改写全绿 + **§17 写路径 latent 七项中，声明可守与读回计数可守两类已有守卫；执行层内部不可守三类（S3/S9/S10）不宣称整体闭环**——`rule-landing.md` 的 §17 latent 清单列的 S2（fill.js 批量契约只用 `contracts[0].accountSet`→凭证落错账套）、S3（gen-from-journal 账户下拉子串 + `.first()` 多候选不歧义）、S4（`--direction`/`--date-mode` 无枚举白名单，空转报"无符合条件" + exit 0）、S5③（fill `--start-no` NaN 静默丢起始号）、S7（upload-all 未找到凭证静默跳过仍 exit 0）、S9（voucher.js fuzzyFind 子串 + stripCity 静默采纳简称）、S10（parse-tianren-bills creditRules 未命中静默回落 1122）。
+**闭环判据**：走查通过 + 写 e2e 改写全绿 + **§17 写路径 latent 七项中，声明可守与读回计数可守两类已有守卫；执行层内部不可守三类（S3/S9/S10）不宣称整体闭环**——`rule-landing.md`（已删，git 历史可考）的 §17 latent 清单列的 S2（fill.js 批量契约只用 `contracts[0].accountSet`→凭证落错账套）、S3（gen-from-journal 账户下拉子串 + `.first()` 多候选不歧义）、S4（`--direction`/`--date-mode` 无枚举白名单，空转报"无符合条件" + exit 0）、S5③（fill `--start-no` NaN 静默丢起始号）、S7（upload-all 未找到凭证静默跳过仍 exit 0）、S9（voucher.js fuzzyFind 子串 + stripCity 静默采纳简称）、S10（parse-tianren-bills creditRules 未命中静默回落 1122）。
 
 ---
 
@@ -245,9 +245,9 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 ### L7 可信度可量化
 
-**陈述**：可信度靠 eval 基线跑漂移，不靠审计轮次。人工复盘替代不了机器报漂移——执行层 `docs/architecture.md` 的「已知短板（用「建评测」解决，勿用「加抽象」解决）」节自己写着「端到端 eval 缺失……让**机器**报漂移，替代人工复盘」。
+**陈述**：可信度靠 eval 基线跑漂移，不靠审计轮次。人工复盘替代不了机器报漂移——执行层仓的 `docs/architecture.md`（跨仓，本仓无此文件）的「已知短板（用「建评测」解决，勿用「加抽象」解决）」节自己写着「端到端 eval 缺失……让**机器**报漂移，替代人工复盘」。
 
-**机械守卫**：Tier-1 打分器已建（2026-10-16，D-060 关账）。`npm run eval` 一条命令：探针基线集（真模型 + mock 执行器：A1/A2/A3/A4/B1/Y2）→ acceptance 写链（5.1→5.2 全链）→ LLM 评委 → 对 `scripts/eval/baseline.json` 逐项比对，回归 exit 1，输入缺失/语料-基线失配/旧格式报告 exit 2。语料库 `scripts/eval/cases.yaml`（存量事故→用例的版本化映射；2026-11-08 切片 C 起与原 `corpus.jsonl` 的 inBaseline/incidents/expect 合并——消息序列、轮次标记、夹具隔离声明、期望值同住一份）与评委提示词 `scripts/eval/judge-prompt.md`（版本 = 内容 sha256 前八位，改一字即换版）进仓库；记分台 `.runtime/scores.jsonl` 每轮追加——探针写机械四维分量、打分器写评委分量与判定，行带 corpusVersion / judgePromptVersion / judgeModel 三元组，三元组一变分数即不可比、须重定基线。基线重定唯一入口 `scripts/eval/score.ts --write-baseline`（既有 strict 用例 ok 翻转即拒绝烤入）；标定批（尺子校准）随 commit 手改 + 台账留痕。
+**机械守卫**：Tier-1 打分器已建（2026-10-16，D-060 关账）。`npm run eval` 一条命令：探针基线集（真模型 + mock 执行器：A1/A2/A3/A4/B1/Y2）→ acceptance 写链（5.1→5.2 全链）→ LLM 评委 → 对 `scripts/eval/baseline.json` 逐项比对，回归 exit 1，输入缺失/语料-基线失配/旧格式报告 exit 2。语料库 `scripts/eval/cases.yaml`（存量事故→用例的版本化映射；2026-11-08 切片 C 起与原 `corpus.jsonl` 的 inBaseline/incidents/expect 合并——消息序列、轮次标记、夹具隔离声明、期望值同住一份）与评委提示词 `scripts/eval/judge-prompt.md`（已删，git 历史可考；版本 = 内容 sha256 前八位，改一字即换版）进仓库；记分台 `.runtime/scores.jsonl` 每轮追加——探针写机械四维分量、打分器写评委分量与判定，行带 corpusVersion / judgePromptVersion / judgeModel 三元组，三元组一变分数即不可比、须重定基线。基线重定唯一入口 `scripts/eval/score.ts --write-baseline`（既有 strict 用例 ok 翻转即拒绝烤入）；标定批（尺子校准）随 commit 手改 + 台账留痕。
 
 **当前违例**：**无**（转为不变量）。已知边界（登记不修，非违例）：
 

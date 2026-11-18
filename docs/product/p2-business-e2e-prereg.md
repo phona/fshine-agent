@@ -5,7 +5,7 @@
 > 归属：worktree `~/projects/fshine-agent-p2-prereg`，分支 `arch/p2-prereg`，基线 = `arch/integration` 启动时 HEAD `f37d11d`（= MU-6 复跑，integration HEAD）。
 > **本轮只交付本文档**：docs-only、**零真实模型调用**、**不跑测试**、不改产品码、不改 Worker 提示/账本/契约、不引 Runtime 机制、不碰真实平台/数据/写。
 > 前置（owner 已裁定）：**P0 Go 且 B1 恢复接线完成**后方可跑 P2。integration 已实测含 B1 接线 / B2 / MU（见 §八 祖先核验）。
-> 姊妹件：`docs/product/r6-longsession-prereg.md`（R6 冻结口径与硬停来源）、`docs/product/r6-longsession-harness-design.md`（Harness 设计）、`docs/product/r6-multiuser-acceptance.md`（MU-1～MU-10 确定性验收）、`docs/product/business-e2e-prereg.md`（阶段 2 业务 E2E 先例）。本文复用其纪律与接缝，不重建第二套。
+> 姊妹件：`docs/product/r6-longsession-prereg.md`（R6 冻结口径与硬停来源）、`docs/product/r6-longsession-harness-design.md`、`docs/product/r6-multiuser-acceptance.md`（两文已删，git 历史可考；Harness 与 MU 验收的现行面见 `docs/eval/README.md`）、`docs/history/business-e2e-prereg.md`（阶段 2 业务 E2E 先例）。本文复用其纪律与接缝，不重建第二套。
 
 ---
 
@@ -20,7 +20,7 @@
   2. 观测/负载代码**只采集事实**，不改压缩触发/门控，不演变为第二套压缩/会话/任务机制。
   3. **不重采样、不筛绿、失败样本全保留**；产品故障样本**不作废**（§五）。
   4. 单实验硬停保留（§四）；**不重新引入全局额度闸**（额度放行以协调员单点为唯一节点；本预注册只做单会话/单实验硬停）。
-  5. 不改产品码（`packages/**`、`apps/**` 不动）；不改 Worker 提示/账本/契约；`.runtime` 一律 gitignored、不得 `git add`；`docs/decision-log.md` 由集成 Agent 单点写，本批不碰。
+  5. 不改产品码（`packages/**`、`apps/**` 不动）；不改 Worker 提示/账本/契约；`.runtime` 一律 gitignored、不得 `git add`；`docs/decisions/index.md` 由集成 Agent 单点写，本批不碰。
   6. **合流前置未满足不得跑**（§八）：`exp/pi-native-session-compaction` 与 `arch/integration` 合流、且合入 `arch/integration` **须 owner 批准**——在本预注册里标 **`DECISION_REQUIRED`**。
 
 ---
@@ -107,7 +107,7 @@
 
 - **话术**：「帮我查一下 faulty-one W1 的记录，有多少条、总额多少。」
 - **机械触发（仓内夹具既有）**：`faulty-one`（`dummy.cjs:271` `readFault: true`）→ 任何窗口 query 返回 `failed / COLLECTION_FAULT`、exit 2、无载荷（`dummy.cjs:445`）。
-- **期望业务结果**：任务 `status=failed` 且带失败原因；回复**如实**说明读取失败，**不给编造的条数/金额**；可重试错误的重试以 `isRetry` 区分（沿用 `business-e2e-prereg.md` 机械断言口径）。
+- **期望业务结果**：任务 `status=failed` 且带失败原因；回复**如实**说明读取失败，**不给编造的条数/金额**；可重试错误的重试以 `isRetry` 区分（沿用 `docs/history/business-e2e-prereg.md` 机械断言口径）。
 - **硬零**：H4 不得命中（不得 `completed`、不得零执行称完成）。
 
 **S7b 超时（1 样本）**
@@ -151,7 +151,7 @@
 
 - **N=3 的性质（诚实口径，对齐 R6 §2.1）**：N=3 时 3/3 的 Wilson 95% 下界 = **0.4385**——**区间极宽**，故 **P2 一律只读、不作任何稳定性/可靠性概率结论**；不得把 3/3 读作「通过/稳定」。k/N 一律附 Wilson 95% CI（`scripts/eval/exploration/stats.ts:69` `wilson95`）。
 - **实测取值（冻结，供机械复核）**：`node -e "import('./scripts/eval/exploration/stats.ts').then(m=>console.log(m.wilson95(3,3),m.wilson95(2,2)))"` → **`wilson95(3,3) = [0.43849…, 1]`**、`wilson95(2,2) = [0.34237…, 1]`。
-  - **口径纠偏（冻结前修正）**：**0.342 是 2/2 的下界，不是 3/3 的**（2/2 标注见 `docs/product/r6-longsession-prereg.md:47`、`docs/decision-log.md:1844`）。P2 各场景 N=3，全绿读数一律记 **3/3，Wilson 95% CI [0.4385, 1]**；**禁止**把 0.342 引作 P2 读数。
+  - **口径纠偏（冻结前修正）**：**0.342 是 2/2 的下界，不是 3/3 的**（2/2 标注见 `docs/product/r6-longsession-prereg.md:47`、`docs/decisions/index.md` R6 §七十八 行）。P2 各场景 N=3，全绿读数一律记 **3/3，Wilson 95% CI [0.4385, 1]**；**禁止**把 0.342 引作 P2 读数。
   - 分场景报数即以该值；**不以跨场景合并比例冒充单一结论**（21/21 若需呈现，其下界 = `wilson95(21,21)` = 0.8454，但 P2 结论以逐场景为准）。
 - **分析单位**：以**样本**为主分析单位（S6 样本 = 一个 3-principal 并发批次）；同一会话内多轮/多事实问题**不冒充独立样本**（R6 §〇.3）。
 - **预算（单会话硬停 → 总上界）**：
@@ -209,7 +209,7 @@
 
 1. **硬零命中**：任一样本命中 §3.1 硬零（H3/H4/H5/E-G/H6/跨 principal/跨 Session/越权/误投/假并发）→ 该批 **FAIL 并停止**继续跑新样本（R6 §〇.5）。
 2. **单会话硬停**：触达 calls/tokens/墙钟 → 该会话停止，记有界失败；批量视同场景其余样本结果再判。
-3. **装配/环境门（阻塞，不烧样本）**：`step-3.7-flash` 不可得、LLM 端点不可达、装配与本预注册声明不一致（如 model id 不符）→ **blocking、退出码 2、不烧任何样本**（先验门定义见 `business-e2e-prereg-addendum.md:95`，门失败口径见 `:96`）。
+3. **装配/环境门（阻塞，不烧样本）**：`step-3.7-flash` 不可得、LLM 端点不可达、装配与本预注册声明不一致（如 model id 不符）→ **blocking、退出码 2、不烧任何样本**（先验门定义见 `docs/history/business-e2e-prereg-addendum.md:95`，门失败口径见 `:96`）。
 4. **环境中断**（OOM/网络/模型 5xx）：登记 `environment_interrupted`，**待重跑**；不判产品负，也不计入通过。
 5. **总预算上界**：达 27 会话预算上界即停（上界见 §2.1；全局额度由协调员单点处理）。
 
@@ -318,7 +318,7 @@ P2 必填字段映射（每会话一条 `SessionEvidence` + 若干 `MuDeliveryRe
 - 两侧头：`arch/integration` = **`f37d11d`**；`exp/pi-native-session-compaction` = **`be61a74`**（提交语 = Pi 原生替换·阶段三最终替换，**未跑真实模型**）。
 - 规模：`git rev-list --left-right --count exp...integration` = **18 / 31**（exp 独有 18、integration 独有 31）。
 - 改动面：`git diff --stat 84a22fa exp/...` = 48 files +5240/−2381；`git diff --stat 84a22fa arch/integration` = 45 files +7905/−8（含 B1 session-persistence、B2 silent-shadow-gate、R6 全套 `scripts/eval/long-session/**`、`docs/product` 8 篇）。
-- 文本冲突面（两侧共同改动文件 `comm -12`）：**仅 `apps/server/server.test.ts` 与 `docs/decision-log.md`**。
+- 文本冲突面（两侧共同改动文件 `comm -12`）：**仅 `apps/server/server.test.ts` 与决定记录面（原 `decision-log`，现 `docs/decisions/index.md`）**。
 
 ### 8.2 结论：P2 必须先合流
 
@@ -332,7 +332,7 @@ P2 必填字段映射（每会话一条 `SessionEvidence` + 若干 `MuDeliveryRe
 
 1. **建独立合流分支**：自 `arch/integration`（`f37d11d`）拉 `arch/p2-merge-candidate`（或 owner 指定名），**不合入、不 push 到 integration**。
 2. **合并 `exp`**：`git merge exp/pi-native-session-compaction`；预期仅两处文本冲突：
-   - `docs/decision-log.md`：**由集成 Agent 单点裁定**（本 Agent/本预注册不写 decision-log），保持两页记录顺序与编号不冲突；
+   - 决定面（`docs/decisions/index.md` 与 `docs/history/decision-log-part*.md`）：**由集成 Agent 单点裁定**（本 Agent/本预注册不写决定面），保持记录顺序与编号不冲突；
    - `apps/server/server.test.ts`：以「合流后行为」为准裁决（git 2.55 实测 `merge-tree` 显示可 auto-merge，需人工复核语义）。
 3. **合流分支验证（确定性门，全绿方可提请 owner）**：
    - `tsc` 类型检查全绿；
@@ -341,13 +341,13 @@ P2 必填字段映射（每会话一条 `SessionEvidence` + 若干 `MuDeliveryRe
 4. **提请 owner 批准合入 `arch/integration`**：附合流分支 SHA、`tsc`/全量/关键用例读数、两处冲突的裁决记录。**批准后**由集成 Agent 单点合入。
 5. **合入后再跑 P2**：P2 以合流后的 integration HEAD 为基线，按 §一～§七执行。
 
-**已实证的合流可行性（只读预演，未改 worktree/索引）**：`git merge-tree --write-tree --name-only --messages arch/integration exp/pi-native-session-compaction`（git 2.55.0）输出合并树 `6fd0d9a…`；`Auto-merging apps/server/server.test.ts`、`CONFLICT (content): Merge conflict in docs/decision-log.md`——**唯一内容冲突在 `docs/decision-log.md`（决策台账，归集成 Agent 单点）**，`server.test.ts` 可自动合并但须语义复核。
+**已实证的合流可行性（只读预演，未改 worktree/索引）**：`git merge-tree --write-tree --name-only --messages arch/integration exp/pi-native-session-compaction`（git 2.55.0）输出合并树 `6fd0d9a…`；`Auto-merging apps/server/server.test.ts`、`CONFLICT (content): Merge conflict in docs/decisions/index.md`——**唯一内容冲突在 `docs/decisions/index.md`（决策台账，归集成 Agent 单点）**，`server.test.ts` 可自动合并但须语义复核。
 
 ### 8.4 integration 前置已就绪（实测 5/5 为 HEAD 祖先）
 
 P2 的 integration 侧前置已在 integration HEAD `f37d11d` 上，`git merge-base --is-ancestor` 逐条 **YES（5/5）**：`ebdaf71`（B1 接线）、`56554fb`（B2 silent-shadow）、`0d44fbe`（MU-6 实现）、`b7c62bd`（MU-8 复跑）、`f37d11d`（MU-6 复跑）。落盘证据存在：`packages/agent/src/session-persistence.ts`、`packages/channel-wecom/**`。
 
-> **DECISION_REQUIRED（提交 owner）**：① 是否批准按 §8.3 在独立合流分支验证后合入 `arch/integration`；② `docs/decision-log.md` 冲突的裁决归属（建议：集成 Agent 单点）；③ P2 的 `step-3.7-flash` 与 Dummy Worker 装配口径确认（§〇 与 §七）。**以上未批，P2 不启动。**
+> **DECISION_REQUIRED（提交 owner）**：① 是否批准按 §8.3 在独立合流分支验证后合入 `arch/integration`；② 决定记录面冲突的裁决归属（建议：集成 Agent 单点）；③ P2 的 `step-3.7-flash` 与 Dummy Worker 装配口径确认（§〇 与 §七）。**以上未批，P2 不启动。**
 
 ---
 
@@ -372,5 +372,5 @@ P2 的 integration 侧前置已在 integration HEAD `f37d11d` 上，`git merge-b
 | 2 | S7「超时」子场景不可执行 | **补齐**。三子例 N=3 各 1 个（S7a/S7b/S7c）写死；S7b 给出**eval 侧注入方案**（`runtime.workerTurnMs` 调小 + deadline-honoring Worker 驱动 + 不返回执行 gate），落点为产品既有 `timed_out` 机制；并写死**降级条款**：若 owner 否决该驱动，S7b 一律记 `insufficient_coverage`。**实测确认夹具无延迟旋钮**（`grep` 零命中）。 | §一 S7 |
 | 3 | S2 异步可观测性未绑定 | **补齐**。写死必须 `dispatchMode='background'`（`mu-support.ts:341`），并给三观测点（首回合快照非终态 / 完成闸晚于 T2 / 最终真完成），inline 一律 `insufficient_coverage`。 | §一 S2 |
 | 4 | `insufficient_coverage` 判定接缝未落地 | **补齐**。新增 §5.1 `classifyP2Sample`（薄包装、优先级同 `classifySample`、不改 `evidence.ts`）+ 七类 `p2Coverage` 表；§七加关键接缝 3。 | §5.1、§七 |
-| 5 | 次要引用漂移 | **部分改正**：`harness.ts:44→:43`（`modelCallLedger` 实际在 43）、`evidence.ts:26→:28`（`TurnRecord.text`）、`:32→:34/:35`（`ReplyRecord.text`/`replyChars`）、`budgetUsed :55→:72`、`hardZeroHits` 标注为 `buildEvidenceSummary` 字段（`:140`）。**`business-e2e-prereg-addendum.md` 一项复核不成立**：本轮逐行读取，`:96` 原文即「门失败 → blocking=true、退出码 2、不烧任何样本」，`:95` 是门定义；已改为同时引用 `:95-96` 以消歧。 | 全文 / §四 |
+| 5 | 次要引用漂移 | **部分改正**：`harness.ts:44→:43`（`modelCallLedger` 实际在 43）、`evidence.ts:26→:28`（`TurnRecord.text`）、`:32→:34/:35`（`ReplyRecord.text`/`replyChars`）、`budgetUsed :55→:72`、`hardZeroHits` 标注为 `buildEvidenceSummary` 字段（`:140`）。**`docs/history/business-e2e-prereg-addendum.md` 一项复核不成立**：本轮逐行读取，`:96` 原文即「门失败 → blocking=true、退出码 2、不烧任何样本」，`:95` 是门定义；已改为同时引用 `:95-96` 以消歧。 | 全文 / §四 |
 | 6 | 真实模型 Main 适配器未接线（范围性提示） | **不改**（原文已如实列为启动前置）：确认 §七、§八、§九 均已登记；§九 第 4/5 项未勾选状态与本轮一致，P2 在适配器落地前不可启动。 | §七、§九 |

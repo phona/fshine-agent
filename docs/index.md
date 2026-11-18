@@ -1,45 +1,70 @@
 # 文档索引
 
-> 2026-11-18 全量清理后重写（上一版只覆盖 25/114 且多处过时，已废弃；各轮清理的处置记录原在 `cleanup-2026-11-16.md`，该台账亦已随清理删除，git 历史可考）。
->
-> 口径（2026-11-18 owner 裁定）：**真删为主，不留归档目录**——已收官/被取代/前提已死的一次性记录一律删除（git 历史可考）；未决项不留在仓库文档里，一律开 GitHub issue；decision-log 等冻结面里的旧路径指针不回改，考古入口 = `git log --diff-filter=D`。
+> 状态：现行，唯一入口。覆盖 `docs/` 下全部 41 篇 Markdown（2026-11-18 本轮清点）；本页 `docs/index.md` 即入口，不重复列入分组。仓根另见 `../AGENTS.md`（进仓第一约束）与 `../README.md`（使用说明）。
+> 分工：本页只回答「该读哪篇」；决定正文与索引在 `decisions/index.md`，未清债务在 `decisions/debt.md`，未决项在 GitHub issues #67–#74。
+> 历史口径：`history/` 只收封存档案，不按现行规范读、内部链接不保证可用；删除与移档全量以 `git log --diff-filter=D -- docs/` 与 `git log --diff-filter=R -- docs/` 为准（本页不记流水数字）。
 
-## ① 权威与纪律（现行）
+## architecture（现行架构与契约，9 篇）
 
-- `AGENTS.md`——进仓第一约束（哲学 / 职责边界 / 删除纪律 / 现状指针）
-- `docs/decision-log.md`——权威裁定与状态台账（只增不删）
-- `docs/methodology.md`——作业纪律与判据编号
+宿主与执行层的职责边界，以及任务 / 会话 / 渠道 / 文件四条运行生命周期——判断「该谁做、边界在哪」先读这一组。
 
-## ② 现行设计出处（已实施子系统的设计/登记档）
+- `architecture/contract.md` — 宿主↔执行层契约语义面、禁止面与现行变更安全不变量（§6 为该位置的唯一提炼面）。
+- `architecture/tasks.md` — 任务底账与状态机、取消三态、`dispatchKey` 两层身份、等待与续跑。
+- `architecture/sessions.md` — 会话转录与压缩：Pi 所有权、`.runtime/sessions`、压缩边界（retention 见 issue #67）。
+- `architecture/channels.md` — 渠道三档（offline/shadow/live）、入站附件时序、silent 三档、出站六路。
+- `architecture/files.md` — `fileId` 模型、`run_js`、per-run 目录、产物登记与保留期。
+- `product/event-catalog.md` — 29 个结构化事件的观测字典。
+- `product/r4-joint-interfaces.md` — R4 联合接口约定 v1（P2/P5/P6/P4 冻结面，代码仍引用）。
+- `product/p2a-task-contract.md` — P2a Task Registry 契约核心冻结记录（状态机/取消/waiting）。
+- `product/p3-human-redo.md` — `--redo` 语义边界：重新交办 ≠ 人工接管/会话续跑（`scripts/p0-redo-doc-scan.test.ts` 逐字扫描）。
 
-- `patches/README.md`——Pi 1.5.2 最小依赖补丁登记（diff / 缺陷来源 / 删除条件 / 证据 pin；补丁在生效）
+## eval（评测口径与现行基线，5 篇）
 
-## ③ 活的联调 / 评测 / 运维面
+怎么判、样本与预算怎么先写死、接下来还要跑什么——评测只看这一组，过程读数不回流成口径。
 
-- `docs/product/wecom-live-dummy-cases.md`——企微×dummy 联调用例档（39 条 P0/P1）
-- `docs/product/business-coverage.md`——业务级用例覆盖图（持续更新）
-- `docs/product/event-catalog.md`——结构化事件字典
-- `docs/product/p2-business-e2e-prereg.md`——P2 业务 E2E 预注册（待真实模型执行）
-- `docs/product/r6-longsession-prereg.md`——R6 长会话预注册（wave1-runner 运行时读取取证）
-- `docs/product/r4-joint-interfaces.md`、`r4-acceptance.md`、`r4-stability-prereg.md`、`p2a-task-contract.md`——R4 契约冻结面与预注册（测试逐条引用）
-- `docs/product/business-e2e-prereg.md`、`business-e2e-prereg-addendum.md`——业务 E2E 预注册
-- `docs/product/business-e2e-final-report.md`——三轴总报告（产品定义文档）
-- `docs/product/manual-test-handbook.md`——手工测试手册
-- `docs/product/real-read-readiness.md`——真实只读接入准备档
-- `docs/environment-variables.md`——环境变量清单
-- **未决项**：仓库不再保留待办/待裁定文档；未决项一律在 GitHub issues（当前结转 #67–#74）。
+- `eval/README.md` — 三类入口、判据冻结纪律、预注册规则、读数与退出码（现行口径）。
+- `product/business-coverage.md` — 业务级用例覆盖图（持续更新）。
+- `product/r4-acceptance.md` — R4 验收用例设计（v1 预注册基线，测试按 P*-T* 编号引用）。
+- `product/r6-longsession-prereg.md` — R6 长会话压缩预注册（Wave1 已冻结、Wave2 待裁决；`scripts/eval/long-session/wave1-runner.ts:66` 运行时按其算 sha256）。
+- `product/p2-business-e2e-prereg.md` — P2 业务 E2E 预注册（七场景 21 样本 / 27 会话；尚未跑真实模型，仍是下一次运行的口径）。
 
-## ④ 历史参考（定位为档案；不按现行规范读）
+## ops（运行、变量、联调与手工走查，5 篇）
 
-- `docs/architecture-laws.md`、`docs/debt-ledger.md`、`docs/change-safety.md`——历史判据 / 台账 / 防线档（PR review prompt 与 ci.sh 注释仍引用，删除待 owner 单独裁定）
-- `docs/product/evidence/`——补丁证据 json（git pin 锚点；登记表见 `patches/README.md`）
+今天怎么启动、变量从哪来、出事看哪里、真实面走到哪一步——排障与联调入口。
 
-## ⑤ 已删除（2026-11-18 清理，五轮共 93 篇；另 1 篇移出 docs）
+- `ops/README.md` — 启动与单实例纪律、`channel.mode` 三档、变量入口、排障 runbook。
+- `environment-variables.md` — 环境变量完整清单、默认值与缺失行为。
+- `product/manual-test-handbook.md` — 手工功能走查手册（R4；`ops/README.md` §6 按其行号引用）。
+- `product/real-read-readiness.md` — 真实只读接入准备档（硬声明：准备材料 ≠ 已授权接入）。
+- `product/wecom-live-dummy-cases.md` — 企微 × dummy 联调用例（W-01 起，自动/人工分工）。
 
-- 第一轮 71 篇：0.85.1 压缩/实验簇（pi-compaction×5、exp-pi-native×4、pi-152-stage-b/c/d/d2、minimality-audit）、main-skill-face-design、R4 切片报告 22 篇、R5 收官 9 篇、R6 收官 5 篇、已实施/被取代设计 7 篇、退役工具旧档 11 篇、R5 清理 meta 2 篇。
-- 第二轮 10 篇历史原位档：v0-architecture、v0-functional-spec、artifacts、r4-slice-plan、roadmap、rule-landing、business-skill、a2a-protocol、execution-layer-interface、e2e-ownership（AGENTS.md / ci.sh / 代码注释 / 活文档引用已同步改）。
-- 第三轮 1 篇：`docs/product/r4-slices.md`（R4 分片计划；P0–P7b 全落地，唯一未落地的 P8 已转 issue #71）。
-- 第四轮 4 篇已实施设计稿：cap01-main-direct-execution、pi-152-adapter-design、pi-152-dispatch-key-design、exp-pi-native-config-headroom（引用它们的 11 处代码注释已同步改为「已删，git 历史可考」或指向实现文件）。
-- 第五轮 7 篇（未决项全部转 issue，仓库不再留待办文档）：r3-open-decisions（→ #69/#70/#71/#73）、b1-session-persistence-impl + b1-wiring（→ #67）、b2-silent-shadow-gate（→ #74）、idempotency-cross-restart（→ #68，复现探针保留在 scripts/probes/）、dead-code-audit（→ #72）、cleanup-2026-11-16（清理元台账，已收口）。
-- 另有 1 篇**移出 docs**：pi-152-dependency-patches → `patches/README.md`（补丁登记紧附补丁本体，登记规则要求「记 diff / 版本 / 来源 / 删除条件」）。
-- 内容考古用 `git log --diff-filter=D -- docs/`。
+## decisions（决定、债务与作业纪律，3 篇）
+
+「决定了什么、还欠什么、按什么纪律做事」——先查索引，再按指针进历史分片。
+
+- `decisions/index.md` — 决定索引（每条一行：日期 / 主题 / 结论 / 历史分片指针）；§ 号沿用原 `decision-log` 编号，代码里指向旧文件的注释按本表考古。
+- `decisions/debt.md` — 未清债务：issue 追踪、现行指针、待核旧账。
+- `methodology.md` — 作业纪律与判据编号。
+
+## history（历史档案，18 篇）
+
+冻结的流水与判据档案，只作考古与引用锚点，不按现行规范读；引用时以分片行号为准，文内 worktree / 分支名按当时口径。
+
+- `architecture-laws.md` — 律法与历史判据档案（2026-11-13 M4 注：多数守卫引用已退役）。
+- `history/decision-log-part01-2026-11_undated.md` — 第 1 块（读法、§零–§十五）。
+- `history/decision-log-part02-2026-11.md` — 第 2 块（§十六–§四十九）。
+- `history/decision-log-part03-2026-11.md` — 第 3 块（§五十–§七十一）。
+- `history/decision-log-part04-2026-11.md` — 第 4 块（§七十二–§八十四）。
+- `history/decision-log-part05-2026-11.md` — 第 5 块（§八十五–§九十四）。
+- `history/decision-log-part06-2026-11_undated.md` — 第 6 块（§九十五–§一百、维护规则）。
+- `history/change-safety-part01-2026-09_2026-10_2026-11_undated.md` — 防线档第 1 块（§0 模式铁律 / §1 通用防线 + 2026-09–10 波次）。
+- `history/change-safety-part02-2026-10_2026-11_undated.md` — 防线档第 2 块。
+- `history/change-safety-part03-2026-11.md` — 防线档第 3 块。
+- `history/debt-ledger-part01-2026-09_2026-10_2026-11_undated.md` — 台账第 1 块。
+- `history/debt-ledger-part02-2026-09_2026-10.md` — 台账第 2 块。
+- `history/debt-ledger-part03-2026-10_2026-11.md` — 台账第 3 块（D-150 等已关条目在此）。
+- `history/debt-ledger-part04-2026-11.md` — 台账第 4 块（未清项见 `decisions/debt.md`）。
+- `history/r4-stability-prereg.md` — R4 稳定性预注册（2026-11-14 冻结；`scripts/stab/*` 的 §三/§四 出处）。
+- `history/business-e2e-prereg.md` — 业务 E2E 阶段 2 预注册（已收官）。
+- `history/business-e2e-prereg-addendum.md` — 上述预注册的事后修订附录（owner 裁定：N=3 / 每轮 18 会话 / 总上限 150）。
+- `history/business-e2e-final-report.md` — 业务 E2E 三轴总报告（功能边界 / 可靠性 / 稳定性，已收官）。

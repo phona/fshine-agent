@@ -1,5 +1,5 @@
 /**
- * recalc_xlsx 投递前机械闸 · TDD 用例（docs/decision-log.md §九十九 步骤 ③）。
+ * recalc_xlsx 投递前机械闸 · TDD 用例（docs/decisions/index.md §九十九 步骤 ③）。
  *
  * 判定（owner 最初职责边界裁定，2026-11-17 纠偏）：
  *   · 执行层交付无公式数据、公式工程只归 Main 的 recalc_xlsx；

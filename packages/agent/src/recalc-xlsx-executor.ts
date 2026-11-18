@@ -1,5 +1,5 @@
 /**
- * recalc_xlsx 执行器（宿主 agent 工具，Main 面；docs/decision-log.md §九十九）。
+ * recalc_xlsx 执行器（宿主 agent 工具，Main 面；docs/decisions/index.md §九十九）。
  *
  * 职责：把一个「本回合运行目录内的 xlsx」交给 LibreOffice 强制重算后读回，比对
  * 缓存值与计算值、检测公式错误格、按需导出 CSV 纯数据。产物落本回合 runDir/out/，

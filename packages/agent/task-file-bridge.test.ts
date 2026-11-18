@@ -1,5 +1,5 @@
 /**
- * 执行层文件桥（CAP-01 S2 ②③④；docs/product/cap01-main-direct-execution.md §6/§10-3）。
+ * 执行层文件桥（CAP-01 S2 ②③④；docs/architecture/files.md §6/§10-3）。
  *
  * 覆盖：
  *   · 出站（②，assemble 装饰器）：替换执行层**声明的目录参数**为任务暂存目录

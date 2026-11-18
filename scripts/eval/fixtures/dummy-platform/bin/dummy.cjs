@@ -7,7 +7,7 @@
  * here are deliberately neutral: record / collection / window. No finance,
  * voucher, account-set or period vocabulary lives in this fixture.
  *
- * Transport: binary CLI only, same surface as any execution-layer gateway (see docs/execution-layer-interface.md):
+ * Transport: binary CLI only, same surface as any execution-layer gateway (see docs/architecture/contract.md; 原 docs/execution-layer-interface.md 已删，git 历史可考):
  *   operation list --json | plan --schema | plan evaluate/current/status/activate
  *   proposal status | query|prepare|commit|local <target> [args]
  * Protocol: RESULT envelope v1 on the last stdout line, exit codes 0/1/2/3.
@@ -30,8 +30,8 @@
  *   <state-dir>/audit.jsonl        (JSONL audit, refusals included; only when
  *                                   --state-dir is given, null otherwise)
  * Default root (no flag) = <fixture>/.runtime (manual debug runs).
- * Naming family (docs/env-naming-ruling-20261110.md + the 2026-11-10 consumer
- * boundary addendum): EXECUTION_* remains the canonical family for the token
+ * Naming family (docs/environment-variables.md §前缀规则 + the 2026-11-10 consumer
+ * boundary addendum; the original docs/env-naming-ruling-20261110.md 已删，git 历史可考): EXECUTION_* remains the canonical family for the token
  * surface; DUMMY_* are debug-only entries read second. C-class per-case knobs
  * such as DUMMY_READBACK_SHORT keep their fixture names (see docs §9).
  * Call shape: this fixture does not take a domain declaration (no domain env,
@@ -46,7 +46,7 @@
  * memory / breaker / cache auxiliary groups, grind/variant plan guards,
  * browser/platform execution. Those are
  * execution-layer-instance specifics, not protocol; no in-repo harness scores them
- * (the retired generic-mock eval did; registration in docs/decision-log.md §十三),
+ * (the retired generic-mock eval did; registration in docs/decisions/index.md §十三),
  * and they are not faked.
  * (A per-state-dir rate-limit window WAS added later — 2026-11-14 business E2E #4 —
  *  driven by <state-dir>/rate-limit-config.json or DUMMY_RATE_LIMIT_MAX; see below.)

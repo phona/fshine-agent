@@ -1,5 +1,5 @@
 /**
- * 执行层文件桥（CAP-01 S2 ②③④；docs/product/cap01-main-direct-execution.md §6/§10-3）。
+ * 执行层文件桥（CAP-01 S2 ②③④；docs/architecture/files.md §6/§10-3）。
  *
  * 位置与依赖方向：由**装配层**（ask-runtime 的装配核心）构造——它持有 `platformRoot`
  * （profile.root）与 fileStore（文件区监管，唯一写侧），并把装饰后的执行客户端按任务交给

@@ -1,7 +1,7 @@
 /**
  * 后台受理上界（复用 `runtime.queueCapacity`，不新增旋钮）。
  *
- * 缺口登记（docs/decision-log.md P0-C）：前台等待队列有 `queueCapacity` 上界，后台
+ * 缺口登记（原 decision-log P0-C；索引 docs/decisions/index.md）：前台等待队列有 `queueCapacity` 上界，后台
  * `task_run` 受理侧只按 policy 并发位探测——并发满时探测返回「排队许可」后立即释放，
  * 底账 queued 行因此没有上界，可持续堆积。本文件钉住与前台一致的行为：
  *   · 底账 queued 行数 < queueCapacity 才受理（队列唯事实源仍是底账 queued 行）；
