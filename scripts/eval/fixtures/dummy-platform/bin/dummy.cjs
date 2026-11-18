@@ -443,7 +443,12 @@ function doPrepare(opName, args) {
     usedAt: null,
   };
   saveConfirmations(confirmations);
-  const summary = `Prepare to add ${count} record(s) to collection "${collection}" window ${window}; this operation cannot be undone. Confirmation expires at ${expiresAt}.`;
+  // 用户可见的确认摘要必须是**人话中文 + 本地时间**（2026-11-18 live 实测：英文原文 + 原始
+  // ISO 时间被模型原样贴给用户，后面还得再翻译一遍）。措辞由执行层拥有，宿主只转述。
+  const expiresLocal = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(new Date(expiresAt));
+  const summary = `将向集合「${collection}」的 ${window} 窗口新增 ${count} 条记录；此操作不可撤销，需在 ${expiresLocal}（北京时间）前确认。`;
   emit(opName, 'needs_confirmation', { collection, window, count, expiresAt, status: 'pending' }, null, {
     confirmation: { handle, summary, expiresAt },
   });

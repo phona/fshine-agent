@@ -374,7 +374,11 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
       expect(prepared.summary).toContain('alpha');
       expect(prepared.summary).toContain('W1');
       expect(prepared.summary).toContain('2');
-      expect(prepared.summary).toMatch(/cannot be undone/i);
+      // 摘要必须是用户能直接读的中文 + 本地时间，不得是英文模板或原始 ISO（live 实测过）
+      expect(prepared.summary).toContain('不可撤销');
+      expect(prepared.summary).toContain('将向集合「alpha」');
+      expect(prepared.summary).not.toMatch(/cannot be undone/i);
+      expect(prepared.summary).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
       expect(JSON.stringify(prepared)).not.toContain('cf_');
       expect(fx.requests).toHaveLength(1);
       expect(fx.requests[0]!.confirmation).toBeUndefined();
