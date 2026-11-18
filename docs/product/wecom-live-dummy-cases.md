@@ -30,6 +30,7 @@
 | 1 | **单实例** | 同一 bot 只允许一条 WS 连接；起第二个实例会把第一个踢掉，表现为「时好时坏」。起之前确认没有残留进程 |
 | 2 | `channel.mode: live` | 启动日志 `server_started` 里 `channelMode: "live"`、`deliveryMode: "live"` |
 | 3 | 白名单 principal | `config/agent.yaml` 的 `principals` 里有你的企微 userid |
+| 4 | **部署档位** | `runtime.dispatchMode`：`background` 才有受理回执 / 完成主动推送 / 任务取消 / 通知 outbox；`inline`（当前 live 缺省）**不会**产生这些事件——G/H 组与 W-39～W-41 类用例须在 background 装配下才可判 |
 | 4 | dummy 执行层 | `contextProfiles.dummy.root` 指向 `scripts/eval/fixtures/dummy-platform`，`gateway: bin/dummy` |
 | 5 | 模型 | `.env` 的 `LLM_MODEL`；记录本次用的模型名（读数与模型绑定） |
 | 6 | 会话干净（**换过执行层/改过配置时必须清**） | 备份后清 `.runtime/sessions/` 与 `.runtime/state.db`。只清 DB 不清转录 → 模型会复述旧结论（2026-11-17 踩过） |
