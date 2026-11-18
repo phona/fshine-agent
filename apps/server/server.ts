@@ -514,6 +514,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       ...(deps.createDrivers !== undefined ? { createDrivers: deps.createDrivers } : {}),
       ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
       ...(deps.taskExecutor !== undefined ? { taskExecutor: deps.taskExecutor } : {}),
+      // CAP-01 S2 后台文件面：与 inline 会话桥同一 fileStore 实例与同一装配参数（profile 声明
+      // 的 fileParams），按任务懒建桥——background 的 Worker 才有任务文件清单与物化路径。
+      taskExecutionBridge: {
+        store: fileStore,
+        ...(profile.fileParams === undefined ? {} : { fileParams: profile.fileParams }),
+        onSkip: (reason) => log({ event: 'task_file_bridge_skip', mode: 'background', reason }),
+      },
+      // 文件引用被拒的机械 reason（与 inline 同事件名；只进日志，用户/Worker 只见统一话术）。
+      onFileRefUnavailable: (reason) => log({ event: 'file_ref_unavailable', mode: 'background', reason }),
       // 片 1：后台 Worker 的 run_js 与前台同一执行器端口（缺省不注入 = Worker 工具面零变化）。
       runJsExecutor,
       // B 切片：后台任务确认完成 → 结果主动发回原会话（走既有主动投递面 fileDelivery.sendText）。

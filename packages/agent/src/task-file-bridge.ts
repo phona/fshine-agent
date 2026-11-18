@@ -31,6 +31,7 @@ import path from 'node:path';
 import type { ExecutionCallOptions, ExecutionClient, ExecutionRequest } from '@fshine/contracts/execution-contract';
 import {
   TaskFileRejectedError,
+  type ActiveFileRef,
   type FileScope,
   type FileStore,
   type RegisteredFile,
@@ -90,6 +91,11 @@ export interface ReturnedFileRegistration {
 export interface TaskExecutionBridge {
   /** 出站装饰后的执行客户端（本任务的目录翻译；响应原样透传）。 */
   readonly client: ExecutionClient;
+  /**
+   * 当前任务的文件面（机械事实投影：fileId/name/bytes；与物化同源、同一可读性谓词）。
+   * Worker 委派的任务文件清单从这里取——后台单回合执行器不另建文件发现路径。
+   */
+  taskFiles(): ActiveFileRef[];
   /** 回程登记（runtime 出口调用）：data.files 原始条目 → 等长替换列表 + 登记事实。 */
   registerReturnedFiles(entries: readonly unknown[]): Promise<ReturnedFileRegistration>;
   /** 兜底扫描（v8 §10-3）：任务 out/ 全量登记（同池去重）；目录不存在 → 空结果。 */
@@ -211,6 +217,10 @@ export function createTaskExecutionBridge(options: TaskExecutionBridgeOptions): 
 
     return {
       client,
+      taskFiles() {
+        // 与出站物化同一来源：任务副本 + 任务产物池（当前任务的绑定行、已激活且 TTL 内）。
+        return options.fileStore.listTaskFiles({ scope: options.scope, taskId, now: Date.now() });
+      },
       async registerReturnedFiles(entries: readonly unknown[]): Promise<ReturnedFileRegistration> {
         const out: unknown[] = [];
         const files: RegisteredFile[] = [];

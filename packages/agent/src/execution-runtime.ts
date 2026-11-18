@@ -797,10 +797,16 @@ function userMessage(text: string): DriverMessage {
  * **清单没有行数据**（不含文件内容、不含宿主路径、不含 sha256，与 Main 清单同一硬
  * 边界，v8 §8）。Worker 只解析当前任务的绑定行（v8 §4），清单给出的是交办副本/任务文件
  * 面的引用面——Main 的源 fileId 不进 Worker 转录。
+ *
+ * `hint` = 引用方式（inline Worker 走 run_js.inputs；background 另见后台执行器的文件面
+ * 说明）。缺省保持 inline 原文逐字节不变。
  */
-export function renderWorkerFileManifest(files: readonly TurnFileRef[]): string {
+export function renderWorkerFileManifest(
+  files: readonly TurnFileRef[],
+  hint = '以下文件已随任务交付；处理文件时用 run_js 的 inputs 按 fileId 引用',
+): string {
   return [
-    '[本任务文件清单]（机械事实：以下文件已随任务交付；处理文件时用 run_js 的 inputs 按 fileId 引用）',
+    `[本任务文件清单]（机械事实：${hint}）`,
     ...files.map((file) => manifestLineOf(file)),
   ].join('\n');
 }
@@ -841,6 +847,8 @@ export function renderWorkerDelegation(input: {
   manifest: CapabilityManifest;
   skills?: readonly WorkerSkill[];
   files?: readonly TurnFileRef[];
+  /** 文件引用方式（缺省 = inline run_js 原文；background 传执行层文件参数口径）。 */
+  fileManifestHint?: string;
   answer?: string;
 }): string {
   const parts = [
@@ -857,7 +865,9 @@ export function renderWorkerDelegation(input: {
     parts.push('', '## 用户补充（对上一次待办问题的答复）', input.answer);
   }
   if (input.files !== undefined && input.files.length > 0) {
-    parts.push('', renderWorkerFileManifest(input.files));
+    parts.push('', input.fileManifestHint === undefined
+      ? renderWorkerFileManifest(input.files)
+      : renderWorkerFileManifest(input.files, input.fileManifestHint));
   }
   for (const skill of input.skills ?? []) {
     parts.push('', `## 域技能：${skill.name}`, '', skill.content);
@@ -1915,12 +1925,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     if (request === '') throw new Error('task_run 缺少 task：请写清要办什么。');
     const taskId = `task_${randomUUID()}`;
     // CAP-01 S2（v8 §4/§6）：inputFiles 的解析与交办复制全部发生在建任务行/进 Worker 之前——
-    // 任一 fileId 不可用 → 整次拒绝（不部分执行、不留任务行、零副本）。
+    // 任一 fileId 不可用 → 整次拒绝（不部分执行、不留任务行、零副本）。public（inline）与
+    // background 同一条前置路径：background 在 submit 之前就已完成复制，任务一受理即带副本
+    // 绑定（file_refs.task_id），Worker 侧只从任务副本物化（见 createTaskExecutor 文件桥）。
     const inputFiles = parseFileIdList(rawInputFiles, 'task_run', 'inputFiles');
-    // S2 边界（v8 §8）：交办复制只做 inline——background 派发不静默丢文件，确定性拒绝。
-    if (inputFiles.length > 0 && dispatchMode === 'background') {
-      throw new Error('task_run 的 inputFiles 暂不支持 background 派发（文件交办当前只做 inline）。');
-    }
     let copiedInputs: CopiedTaskInput[] = [];
     if (inputFiles.length > 0) {
       const copier = options.taskInputCopier;
@@ -2009,8 +2017,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     }
 
     // CAP-01 S2 ①③④：任务作用域的 Worker 工具面（run_js）、执行层文件桥与本任务交付收集。
-    // 全部随本委派创建、随本委派丢弃（未注入执行器/桥 = 零变化缺省）；background 派发
-    // 不经过这里（S2 文件面只做 inline——后台 Worker 工具面与回程登记归后续切片）。
+    // 全部随本委派创建、随本委派丢弃（未注入执行器/桥 = 零变化缺省）；background 派发的
+    // 文件面在 createTaskExecutor（后台单回合执行器）里按任务构造文件桥——本函数只负责
+    // 在受理前完成交办复制。
     const taskFiles: TurnFileRef[] = [];
     const taskExchange = options.taskExecutionBridge === undefined ? undefined : options.taskExecutionBridge(taskId);
     const workerRunJsMemo = new Map<string, RunJsOutput>();
@@ -2415,6 +2424,24 @@ function executeOperationTool(): DiscoveredTool {
   };
 }
 
+/**
+ * 后台 Worker 任务文件清单的引用方式（与 inline 的 run_js.inputs 同源，另加执行层的声明
+ * 文件参数：后台 Worker 的 execute_operation 文件参数由宿主替换为任务目录内的物化路径）。
+ */
+const BACKGROUND_FILE_MANIFEST_HINT =
+  '以下文件已随任务交付；处理文件时用 run_js 的 inputs 按 fileId 引用，或调用 execute_operation 时按能力快照声明的文件参数引用（宿主会替换为任务目录内的物化路径）';
+
+/**
+ * 后台任务文件桥工厂（按任务身份构造）：装配层注入 fileStore/platformRoot/内层客户端，
+ * runtime 只认这个面。每回合按 (principalId, sessionId, taskId) 建桥——任务副本按
+ * file_refs.task_id 解析（Worker 侧只物化当前任务的副本，从不读 Main 侧原文件）。
+ */
+export type BackgroundTaskBridgeFactory = (input: {
+  principalId: string;
+  sessionId: string;
+  taskId: string;
+}) => TaskExecutionBridge;
+
 export interface TaskExecutorOptions {
   /** 执行层客户端（后台执行面的专属实例；能力快照在本工厂内取一次）。 */
   client: ExecutionClient;
@@ -2445,6 +2472,15 @@ export interface TaskExecutorOptions {
    * 副本、产物登记绑定本任务）；缺省不注入 = Worker 工具面与现行逐字节相同（零变化）。
    */
   runJsExecutor?: RunJsExecutor;
+  /**
+   * 后台任务文件桥（CAP-01 S2 后台面）：注入后本执行器的 Worker 委派带任务文件清单
+   * （任务副本 fileId/name/bytes），execute_operation 经桥把任务副本物化到
+   * `<platformRoot>/tmp/task_<id>/in` 并按执行层声明的文件参数替换值。
+   * 未注入 = 零变化缺省（后台 Worker 无文件面）。
+   */
+  backgroundTaskBridge?: BackgroundTaskBridgeFactory;
+  /** 文件引用被拒（桥物化失败）的机械 reason 观察点；只进日志，不进用户话术。 */
+  onFileRefUnavailable?: (reason: string) => void;
 }
 
 function isAbortErrorLike(error: unknown): boolean {
@@ -2506,6 +2542,20 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       // 片 1：本任务的交付收集（Worker run_js 产物登记事实）与委派级幂等 Map。
       // 全部随本次执行创建、随本次执行丢弃（未注入执行器 = 不参会、零变化）。
       const taskFiles: TurnFileRef[] = [];
+      // CAP-01 S2 后台文件面：按任务身份建桥（任务副本按 file_refs.task_id 解析）；未注入
+      // = 零变化（raw client、无文件清单）。清单可能在 waiting_user 续跑时含此前产物，
+      // 与任务文件面语义一致——Worker 只解析当前任务的绑定行。
+      const taskBridge = options.backgroundTaskBridge?.({
+        principalId: task.principalId,
+        sessionId: task.sessionId,
+        taskId: task.taskId,
+      });
+      const executionClient = taskBridge?.client ?? options.client;
+      const delegationFiles: TurnFileRef[] = (taskBridge?.taskFiles() ?? []).map((file) => ({
+        fileId: file.fileId,
+        name: file.name,
+        bytes: file.bytes,
+      }));
       const runJsMemo = new Map<string, RunJsOutput>();
       const workerRunJsTurn = createWorkerRunJsTurn({
         ...(options.runJsExecutor === undefined ? {} : { executor: options.runJsExecutor }),
@@ -2563,10 +2613,21 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           execute: async (dispatchKey) => {
             // requestId 由宿主生成、每次调用换号（只作追踪）；dispatchKey 是操作身份，不换。
             const requestId = `req_${randomUUID()}`;
-            const outcome = await options.client.execute(
-              { requestId, dispatchKey, operation, args: callArgs },
-              { signal },
-            );
+            let outcome: ExecutionOutcome;
+            try {
+              outcome = await executionClient.execute(
+                { requestId, dispatchKey, operation, args: callArgs },
+                { signal },
+              );
+            } catch (error) {
+              // 桥物化失败（任务副本不可读）与 inline 同一话术：机械 reason 只进日志，
+              // Worker 与用户不见存在性/状态差异（v8 §4）。
+              if (error instanceof FileRefUnavailableError) {
+                options.onFileRefUnavailable?.(error.reason);
+                throw new Error(FILE_INPUT_UNAVAILABLE_MESSAGE);
+              }
+              throw error;
+            }
             // 取消后到达的回执不落执行事实：任务已按取消处置，迟到的成功不得冒充本回合结果。
             if (signal.aborted) throw abortError();
             options.registry.noteExecution(task.taskId, {
@@ -2604,6 +2665,10 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
             task: task.request,
             manifest: workerManifest,
             ...(options.workerSkills === undefined ? {} : { skills: options.workerSkills }),
+            // 后台文件面：清单只含当前任务的绑定行（交办副本/任务文件），Main 源 fileId 不进转录。
+            ...(delegationFiles.length === 0
+              ? {}
+              : { files: delegationFiles, fileManifestHint: BACKGROUND_FILE_MANIFEST_HINT }),
             // waiting_user 续跑回合：用户补答必须随委派交给执行端（新 Worker 没有上一回合转录）。
             ...(task.answer === undefined ? {} : { answer: task.answer }),
           }))],

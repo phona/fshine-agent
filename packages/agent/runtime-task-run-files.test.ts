@@ -11,8 +11,9 @@
  *     原件不动），任务照常受理与完成；inputFiles 不进 Worker 转录；
  *   ⑤ 不带 inputFiles 的 task_run 与改造前完全一致：未注入复制面时工具 schema 不含该属性
  *     （工具面逐字节不变）、任务照常；注入复制面后不带 inputFiles 也零副本、行为一致；
- *   · fail-closed：未注入复制面时模型传 inputFiles → 确定性拒绝；background 派发 + inputFiles
- *     → 确定性拒绝（本切片只做 inline）；Worker 的任务绑定 fileId 被 Main 引用 → 整次拒绝。
+ *   · fail-closed：未注入复制面时模型传 inputFiles → 确定性拒绝；background 派发带
+ *     inputFiles → 受理（复制先于 submit；完整后台文件面见 runtime-background-input-files）；
+ *     Worker 的任务绑定 fileId 被 Main 引用 → 整次拒绝。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -120,6 +121,8 @@ async function makeFixture(input: {
   withCopier?: boolean;
   worker?: TurnDriver;
   dispatchMode?: 'inline' | 'background';
+  /** 后台派发替身：由用例在 runner 内部观察底账（缺省 stub 一律抛错）。 */
+  makeRunner?: (registry: ReturnType<typeof createSqliteTaskRegistry>) => TaskRunner;
 } = {}): Promise<Fixture> {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'runtime-task-run-files-'));
   tempDirs.push(dir);
@@ -148,6 +151,7 @@ async function makeFixture(input: {
     },
     inFlight: () => [],
   };
+  const runner = input.makeRunner?.(registry) ?? stubRunner;
   const session = await createSession({
     principalId: SCOPE.principalId,
     sessionId: SCOPE.sessionId,
@@ -158,7 +162,7 @@ async function makeFixture(input: {
     mainSystemPrompt: '你是测试主 Agent。',
     taskRegistry: registry,
     ...(input.dispatchMode === undefined ? {} : { dispatchMode: input.dispatchMode }),
-    ...(input.dispatchMode === 'background' ? { taskRunner: stubRunner } : {}),
+    ...(input.dispatchMode === 'background' ? { taskRunner: runner } : {}),
     ...(copier === undefined ? {} : { taskInputCopier: copier }),
     onFileRefUnavailable: (reason) => reasons.push(reason),
   });
@@ -321,8 +325,33 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
     }
   });
 
-  it('fail-closed：background 派发 + inputFiles → 确定性拒绝（本切片只做 inline，不静默丢文件）', async () => {
-    const fx = await makeFixture({ dispatchMode: 'background' });
+  it('background 派发 + inputFiles → 受理（不再拒绝）；交办副本在 submit 时已绑定任务', async () => {
+    // 2026-11-18 A 决策第 1 片：background 支持附件交办；复制先于 submit（同一 task_run 内）。
+    // 这里用只受理/不派发的 runner 替身，观察受理瞬间的底账事实（真实执行链见
+    // runtime-background-input-files.test.ts）。
+    const submitCopies: string[][] = [];
+    const fx = await makeFixture({
+      dispatchMode: 'background',
+      makeRunner: (registry) => ({
+        submit(task) {
+          submitCopies.push(
+            registry.store.listFileRefs(SCOPE).filter((row) => row.taskId === task.taskId).map((row) => row.fileId),
+          );
+          return registry.begin({
+            taskId: task.taskId,
+            principalId: task.principalId,
+            sessionId: task.sessionId,
+            request: task.request,
+            status: 'queued',
+          });
+        },
+        pump: () => ({ recovered: [], started: [] }),
+        whenIdle: async () => {},
+        cancel: (taskId) => ({ outcome: 'terminal', taskId, status: 'queued' }),
+        resume: (taskId) => ({ outcome: 'not_waiting', taskId, status: 'queued' }),
+        inFlight: () => [],
+      }),
+    });
     try {
       const source = putActiveSource(fx, '后台.csv', Buffer.from('bg'));
       fx.push({
@@ -330,10 +359,20 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
         text: '收到',
       });
       await fx.session.send('后台交办带文件的任务');
-      expect(fx.capture.toolErrors).toHaveLength(1);
-      expect(fx.capture.toolErrors[0]).toContain('background');
-      expect(fx.session.tasks()).toHaveLength(0);
-      expect(fx.ro.listFileRefs(SCOPE).every((row) => row.taskId === undefined)).toBe(true);
+
+      // 不再被 mode 拒绝：任务受理为 queued，回执带 accepted。
+      expect(fx.capture.toolErrors).toHaveLength(0);
+      const receipt = fx.capture.results[0] as Record<string, unknown>;
+      expect(receipt['accepted']).toBe(true);
+      expect(receipt['status']).toBe('queued');
+      // 复制先于受理：submit 那一刻副本已绑定该 taskId。
+      expect(submitCopies).toHaveLength(1);
+      expect(submitCopies[0]).toHaveLength(1);
+      // 任务行与任务副本各一；源行不动。
+      const taskId = String(receipt['taskId']);
+      const rows = fx.ro.listFileRefs(SCOPE);
+      expect(rows.filter((row) => row.taskId === taskId)).toHaveLength(1);
+      expect(rows.filter((row) => row.taskId === undefined).map((row) => row.fileId)).toEqual([source.fileId]);
     } finally {
       fx.ro.close();
       fx.close();
