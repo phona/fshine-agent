@@ -12,7 +12,7 @@
  *     （白名单在 spawn 面生效）——对照组直接 spawn 同一网关则被 plan 门拒。
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -153,7 +153,8 @@ describe('dummy 执行层适配器（Execution Contract 传输面）', () => {
     expect(last.via).toBe('structured');
     expect(last.script).toBe('dummy.query');
     expect(last.exitCode).toBe(0);
-    expect(last.args).toContain('--collection');
+    // 结构化 call 的审计行保留调用方给的 args 形态（对象），不再拍平成 argv 数组。
+    expect(last.args).toMatchObject({ '--collection': 'alpha', '--window': 'W1' });
   });
 
   it('拒绝与澄清：未登记 operation → refused；歧义 → needs_input（缺什么非空）', async () => {
@@ -251,23 +252,148 @@ describe('dummy 执行层适配器（Execution Contract 传输面）', () => {
 });
 
 describe('dummy：结构化参数直接传数组（模型不手拼 JSON）', () => {
-  it('--records 传对象数组 → 执行层收到合法记录并出提案', async () => {
+  it('--records 传对象数组 → 执行层收到合法记录并出提案（审计里仍是数组，不是 [object Object]）', async () => {
     const client = clientWith(baseEnv());
+    const records = [
+      { name: 'alpha-item-3', value: 'hello' },
+      { name: 'alpha-item-4', value: 'world' },
+      { name: 'alpha-item-5', value: 500 },
+    ];
     const outcome = await client.execute({
       requestId: 'req_array_records',
       dispatchKey: 'dk_test_req_array_records',
       operation: 'dummy.prepare',
-      args: {
-        '--collection': 'alpha',
-        '--window': 'W1',
-        '--records': [{ name: 'alpha-item-3', value: 'hello' }, { name: 'alpha-item-4', value: 'world' }],
-      },
+      args: { '--collection': 'alpha', '--window': 'W1', '--records': records },
     });
     expect(outcome.status).toBe('needs_confirmation');
     if (outcome.status === 'needs_confirmation') {
       expect(outcome.confirmation.summary).toContain('alpha-item-3=hello');
       expect(outcome.confirmation.summary).toContain('alpha-item-4=world');
+      expect(outcome.confirmation.summary).toContain('alpha-item-5=500');
+      expect(outcome.confirmation.summary).toContain('共 3 条');
     }
+    // 执行层拿到的就是结构化数组：审计行（执行层自己的账）里 records 原样保留。
+    const rows = readFileSync(path.join(stateDir, 'audit.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    const last = rows[rows.length - 1]! as { args?: Record<string, unknown> };
+    expect(last.args?.['--records']).toEqual(records);
+    expect(JSON.stringify(last.args)).not.toContain('[object Object]');
+  });
+
+  it('坏的第 3 条 → 失败并指到「第 3 条」，零提案零写入', async () => {
+    const client = clientWith(baseEnv());
+    const outcome = await client.execute({
+      requestId: 'req_bad_item_index',
+      dispatchKey: 'dk_test_req_bad_item_index',
+      operation: 'dummy.prepare',
+      args: {
+        '--collection': 'alpha',
+        '--window': 'W1',
+        '--records': [
+          { name: 'alpha-item-3', value: 100 },
+          { name: 'alpha-item-4', value: 200 },
+          { name: 'alpha-item-5' },
+        ],
+      },
+    });
+    expect(outcome.status).toBe('failed');
+    if (outcome.status === 'failed') {
+      expect(outcome.error.code).toBe('INVALID_RECORDS');
+      expect(outcome.error.retryable).toBe(true);
+      expect(outcome.error.message).toContain('第 3 条');
+      expect(outcome.error.message).toContain('value');
+    }
+    // 零提案：没有发放任何确认句柄。
+    expect(existsSync(path.join(stateDir, 'confirmations.json'))).toBe(false);
+    // 零写入：alpha 仍是种子里的 2 条。
+    const after = await client.execute({
+      requestId: 'req_after_bad_item',
+      dispatchKey: 'dk_test_req_after_bad_item',
+      operation: 'dummy.query',
+      args: { '--collection': 'alpha', '--window': 'W1' },
+    });
+    expect(after.status).toBe('completed');
+    expect((after as { data?: { count?: number } }).data?.count).toBe(2);
+  });
+
+  it('200 条一次性提案：摘要写「共 200 条」，commit 后读回 delta=200', async () => {
+    const client = clientWith(baseEnv());
+    const records = Array.from({ length: 200 }, (_, index) => ({ name: `bulk-item-${index + 1}`, value: index + 1 }));
+    const prepared = await client.execute({
+      requestId: 'req_records_200',
+      dispatchKey: 'dk_test_req_records_200',
+      operation: 'dummy.prepare',
+      args: { '--collection': 'alpha', '--window': 'W1', '--records': records },
+    });
+    expect(prepared.status).toBe('needs_confirmation');
+    if (prepared.status !== 'needs_confirmation') throw new Error('未出提案');
+    expect(prepared.confirmation.summary).toContain('共 200 条');
+    // 摘要不把所有 200 条都贴出来（只列前 10 条 + 其余条数）。
+    expect(prepared.confirmation.summary).toContain('其余 190 条略');
+
+    const committed = await client.execute({
+      requestId: 'req_records_200_commit',
+      dispatchKey: 'dk_test_req_records_200_commit',
+      operation: 'dummy.commit',
+      args: { '--collection': 'alpha', '--window': 'W1', '--records': records },
+      confirmation: { handle: prepared.confirmation.handle },
+    });
+    expect(committed.status).toBe('completed');
+    expect((committed as { data?: { readBack?: { delta?: number }; added?: number } }).data?.readBack?.delta).toBe(200);
+    expect((committed as { data?: { added?: number } }).data?.added).toBe(200);
+
+    const after = await client.execute({
+      requestId: 'req_records_200_query',
+      dispatchKey: 'dk_test_req_records_200_query',
+      operation: 'dummy.query',
+      args: { '--collection': 'alpha', '--window': 'W1' },
+    });
+    expect((after as { data?: { count?: number } }).data?.count).toBe(202);
+  });
+
+  it('第 137 条不合法 → 一条都不写（before/after 相同），错误指到「第 137 条」', async () => {
+    const client = clientWith(baseEnv());
+    const records = Array.from({ length: 200 }, (_, index) => ({ name: `bulk-item-${index + 1}`, value: index + 1 }));
+    // 第 137 条（1-based）缺 value。
+    delete (records[136] as { value?: number }).value;
+    const outcome = await client.execute({
+      requestId: 'req_records_bad_137',
+      dispatchKey: 'dk_test_req_records_bad_137',
+      operation: 'dummy.prepare',
+      args: { '--collection': 'alpha', '--window': 'W1', '--records': records },
+    });
+    expect(outcome.status).toBe('failed');
+    if (outcome.status === 'failed') {
+      expect(outcome.error.code).toBe('INVALID_RECORDS');
+      expect(outcome.error.message).toContain('第 137 条');
+      expect(outcome.error.message).toContain('value');
+    }
+    // 零提案（没有句柄）且零写入（仍是种子里的 2 条）——原子性由执行层保证。
+    expect(existsSync(path.join(stateDir, 'confirmations.json'))).toBe(false);
+    const after = await client.execute({
+      requestId: 'req_records_bad_137_query',
+      dispatchKey: 'dk_test_req_records_bad_137_query',
+      operation: 'dummy.query',
+      args: { '--collection': 'alpha', '--window': 'W1' },
+    });
+    expect((after as { data?: { count?: number } }).data?.count).toBe(2);
+  });
+
+  it('超过执行层单次写入上限（500）→ 明确报上限，不教分批', async () => {
+    const client = clientWith(baseEnv());
+    const tooMany = Array.from({ length: 501 }, (_, index) => ({ name: `limit-item-${index + 1}`, value: index + 1 }));
+    const refused = await client.execute({
+      requestId: 'req_records_501',
+      dispatchKey: 'dk_test_req_records_501',
+      operation: 'dummy.prepare',
+      args: { '--collection': 'alpha', '--window': 'W1', '--records': tooMany },
+    });
+    expect(refused.status).toBe('failed');
+    if (refused.status === 'failed') {
+      expect(refused.error.code).toBe('INVALID_RECORDS');
+      expect(refused.error.message).toContain('超过执行层单次写入上限 500 条');
+      expect(refused.error.message).not.toContain('分批');
+    }
+    expect(existsSync(path.join(stateDir, 'confirmations.json'))).toBe(false);
   });
 });
 
@@ -286,6 +412,7 @@ describe('dummy：参数形状错误声明可重试（同回合允许按正确�
       expect(bad.error.retryable).toBe(true);
       expect(bad.error.message).toContain('--records');
       expect(bad.error.message).toContain('name');
+      expect(bad.error.message).toContain('结构化数组');
     }
   });
 });

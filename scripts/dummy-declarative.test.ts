@@ -321,6 +321,19 @@ describe('④ 写路径：prepare 冻结提案 → commit 凭句柄提交并读�
     expect(after.envelope).toMatchObject({ status: 'completed', data: { count: 4 } });
   });
 
+  it('argv 路径仍可用：--records 的 JSON 字符串还原成数组，摘要含逐条内容', () => {
+    const stateDir = freshDir('s1-write-records-argv-');
+    const prepare = runDummy([
+      'prepare', 'dummy.prepare', '--collection', 'alpha', '--window', 'W1',
+      '--records', JSON.stringify([{ name: 'argv-1', value: 11 }, { name: 'argv-2', value: 22 }]),
+    ], { stateDir });
+    expect(prepare.status).toBe(0);
+    expect(prepare.envelope).toMatchObject({ status: 'needs_confirmation' });
+    const confirmation = prepare.envelope?.['confirmation'] as { summary?: string };
+    expect(confirmation.summary).toContain('argv-1=11');
+    expect(confirmation.summary).toContain('argv-2=22');
+  });
+
   it('proposal create → commit 全链读回，且后续 query 看得到提交的条目', () => {
     const stateDir = freshDir('s1-proposal-state-');
     const payload = path.join(stateDir, 'payload.json');
