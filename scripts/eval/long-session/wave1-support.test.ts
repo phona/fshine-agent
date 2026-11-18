@@ -77,8 +77,8 @@ describe('LS6 脚本装配（时间线轨，不是「建立轮 + 压缩后探针
     const script = scriptFor('LS6', 'sess-ls6');
     expect(script.probeTurns.map((t) => t.label)).toEqual(['N2-B', 'N4', 'N5-B']);
     expect(script.probeTurns.every((t) => t.index === 0)).toBe(true);
-    // 2026-11-18：LS6 补 8 轮推进——有界输出使 13 轮时间线在 40k 下压不出压缩（有效压缩=0）。
-    expect(script.steadyPumps).toBe(8);
+    // LS6 是交互轨：压缩覆盖不在这里判，推进轮保持 0。
+    expect(script.steadyPumps).toBe(0);
   });
 });
 

@@ -53,6 +53,7 @@ import type { HarnessRunResult } from './harness';
 import type { SessionJudgement } from './evidence';
 import { collectEvidence } from './evidence';
 import { runHarnessSession } from './harness';
+import { R6_COMPACTION_BOUNDS } from './compaction';
 import { structureLeakSummary, type StructureLeakReport } from './structure-leak';
 import { openRealSession } from './real-session';
 import {
@@ -253,6 +254,12 @@ async function runOne(job: WaveJob, opts: { runId: string; config: AppConfig; db
       model: opts.model,
       contextWindow: job.window,
       limits: { ...opts.limits },
+      // LS6 是**交互轨**：它测的是交错/改口径/暂停/反悔/更正/取消的机械判据，
+      // 压缩覆盖不是它的目标（40k 下有界输出跑 21 轮也压不出 3 次，实测 2.04M tokens/0 次）。
+      // 因此只对 LS6 把「每会话 ≥3 次有效压缩」的地板降到 0；LS1/LS4/LS5 的压缩判据不变。
+      ...(job.track === 'LS6'
+        ? { bounds: { ...R6_COMPACTION_BOUNDS, minEffectiveCompactions: 0 } }
+        : {}),
     });
   } catch (error) {
     session.close();

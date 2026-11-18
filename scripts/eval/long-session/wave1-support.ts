@@ -162,10 +162,10 @@ export function scriptFor(track: Track, sessionId: string): TrackScript {
         plan: { track, turns: markFirst(base.turns, marker) },
         // 压缩后复查：改口径后回头 / 反悔重做 / 自我更正（N2-B、N4、N5-B）。
         probeTurns: base.turns.filter((t) => t.label !== undefined && keyLabels.has(t.label)).map((t) => ({ ...t, index: 0 })),
-        // 2026-11-18 实测：把推进轮改成"有界输出"后，13 轮时间线在 40k 窗口下有效压缩=0
-        // （insufficient_coverage）——压缩压力本来就来自累计轮次，不是单条大输出。
-        // 因此 LS6 也要补推进轮：8 轮 × 每轮~1–2k 上下文，才够跨过 40k 两三次。
-        steadyPumps: 8,
+        // LS6 是**交互轨**（时段/改口径/暂停/取消的机械判据），压缩不是它的目标：
+        // 实测 21 轮 / 2.04M tokens 在 40k 下仍有效压缩=0（有界输出不涨上下文）。
+        // 压缩覆盖交给 LS1/LS4/LS5；LS6 不再补推进轮（省 token 与时间）。
+        steadyPumps: 0,
       };
     }
   }
