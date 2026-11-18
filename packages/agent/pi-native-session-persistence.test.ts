@@ -13,9 +13,10 @@
  * 反向绊线（故意破坏必红）：把 pi-driver 的 resume 分支改成「永远新建内存会话」
  * （忽略 sessionDir/resumeSessionFile），①② 必红——本文件即该行为的守卫。
  */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { DiscoveredTool } from '@fshine/contracts';
@@ -186,7 +187,16 @@ async function runCompactedSessionThenResume(): Promise<CompactedRun> {
 
   const raw = readFileSync(resumed.resumeSessionFile!, 'utf8');
   expect(raw, '落盘必须含 Pi 的 compaction entry').toContain('"type":"compaction"');
-  expect(raw, '原始 message entry 仍在（Pi 日志只增不减）').toContain('历史问题 0');
+  // issue #67 后继守卫（取代旧断言「Pi 日志只增不减」）：死历史已移入 archive，活跃文件
+  // 不再回放；原始字节仍在归档里逐字节可考，不是丢失。
+  const archiveDir = path.join(path.dirname(resumed.resumeSessionFile!), 'archive');
+  const archives = readdirSync(archiveDir).filter((name) => name.endsWith('.jsonl.gz'));
+  expect(archives.length, '压缩后必须产生归档文件').toBeGreaterThan(0);
+  const archivedText = archives
+    .map((name) => gunzipSync(readFileSync(path.join(archiveDir, name))).toString('utf8'))
+    .join('');
+  expect(archivedText, '早期原始 message entry 已移入归档').toContain('历史问题 0');
+  expect(raw, '活跃文件不再保留已归档的早期历史').not.toContain('历史问题 0');
 
   const resumedRuntime = await createScriptedModelRuntime({
     contextWindow: WINDOW,

@@ -6,10 +6,12 @@
  *     message：对话写入、压缩摘要、重启恢复全部由 Pi 的 `AgentSession` + `SessionManager`
  *     完成（生产接线见 `apps/server/server.ts` 的 `sessionFor`，落在 Pi 驱动的
  *     `sessionDir` / `sessionId` / `resumeSessionFile`）。
- *   · 本层只做 Pi 单用 `SessionManager` 做不到的三件**确定性**事：
+ *   · 本层只做 Pi 单用 `SessionManager` 做不到的**确定性**事：
  *       ① 把 `principalId` 映射成**独立存储子树**（物理隔离，同名 sessionId 互不串读）；
  *       ② 把 `(principalId, sessionId)` 映射成**唯一**一份会话文件（重复/非法 id 显式报错）；
- *       ③ 打开前**校验落盘文件**（坏 header / 坏 JSON 行显式抛错，崩溃半行尾丢弃）。
+ *       ③ 打开前**校验落盘文件**（坏 header / 坏 JSON 行显式抛错，崩溃半行尾丢弃）；
+ *       ④ 压缩后把 `firstKeptEntryId` 之前的死历史归档出活跃文件（issue #67，
+ *          见 `archiveCompactedSessionFile`；不改写 Pi 的写入路径，只做文件级维护）。
  *   · 交付物是一个位置 `MainSessionLocation`：文件存在 → 交给驱动 `resumeSessionFile`
  *     （Pi 原生 resume，历史与压缩摘要都在）；不存在 → 驱动在同一目录以同一 Pi id 新建。
  *     本层不 open/create `SessionManager`，也不 import 任何 message 类型。
@@ -22,15 +24,22 @@
 import { createHash } from 'node:crypto';
 import {
   closeSync,
+  existsSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
   readSync,
   readdirSync,
+  renameSync,
   statSync,
   truncateSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
 } from 'node:fs';
 import path from 'node:path';
+import { gzipSync } from 'node:zlib';
 
 /** 会话持久化层构造参数。 */
 export interface SessionPersistenceOptions {
@@ -199,6 +208,209 @@ function validateSessionFile(filePath: string): void {
     offset = lineStart + byteLength + (terminated ? 1 : 0);
   }
   if (!headerSeen) throw new Error(`Session file has missing header: ${filePath}`);
+}
+
+/**
+ * 会话归档结果（压缩后把**已死**的历史段移出活跃文件）。
+ *
+ * 触发口径（issue #67 / owner 2026-11-18）：Pi 的压缩只压模型上下文，`SessionManager`
+ * 仍以 `appendFileSync` 往同一文件追加；历史段在压缩后不可能再被回放，故把
+ * `firstKeptEntryId` **之前**的条目原样移入 `<sessionDir>/archive/<文件名>.<序号>.jsonl.gz`。
+ */
+export type SessionArchiveOutcome =
+  | {
+    readonly archived: true;
+    readonly archivePath: string;
+    readonly archivedEntries: number;
+    readonly archivedBytes: number;
+    readonly activeBytesBefore: number;
+    readonly activeBytesAfter: number;
+  }
+  | { readonly archived: false; readonly reason: 'no_compaction' | 'nothing_to_archive' };
+
+const LF = 0x0a;
+
+/** 按 `\n` 切原始行（保留行尾换行；最后一行可以没有换行）。切点只在 ASCII 换行上，UTF-8 安全。 */
+function splitRawLines(raw: Buffer): Buffer[] {
+  const lines: Buffer[] = [];
+  let start = 0;
+  for (let index = 0; index < raw.length; index += 1) {
+    if (raw[index] === LF) {
+      lines.push(raw.subarray(start, index + 1));
+      start = index + 1;
+    }
+  }
+  if (start < raw.length) lines.push(raw.subarray(start));
+  return lines;
+}
+
+/** 解析一行 entry（只用于定位切分点；原始字节不因解析而改变）。空行返回 undefined。 */
+function parseSessionLine(line: Buffer, filePath: string, lineNumber: number): Record<string, unknown> | undefined {
+  const text = line.toString('utf8').trim();
+  if (text.length === 0) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`Cannot archive ${filePath}: line ${lineNumber} is not valid JSON`);
+  }
+  if (!isRecord(parsed)) {
+    throw new Error(`Cannot archive ${filePath}: line ${lineNumber} is not a session entry`);
+  }
+  return parsed;
+}
+
+/**
+ * 压缩后归档：把活跃会话文件中 `firstKeptEntryId` 之前的条目逐字节移入 gzip 归档，
+ * 并原子重写活跃文件（header + 保留段 + 压缩摘要）。
+ *
+ * 边界（确定性）：
+ *   · 只信 Pi 的 `compaction.firstKeptEntryId`；找不到该 id 显式抛错，**不按行号猜**；
+ *   · 归档内容是原文件行（含换行）的逐字节拼接，不重排、不改写；
+ *   · 先成功写出归档，再临时文件 + rename 替换活跃文件；任何一步失败都保持原文件不变；
+ *   · 活跃文件保留 session header（Pi 的 `_loadEntries` 没有 header 会新建会话并换文件名/ id，
+ *     那会直接打断重启恢复）；保留段与压缩条目顺序维持 Pi 的原始追加顺序——压缩条目必须是
+ *     叶子（在保留段之后），否则它不在 leaf 路径上，回放拿不到摘要。
+ *   · 压缩条目 `parentId` 若指向被归档条目（无保留段的极端情形），置 null：Pi 的路径遍历从
+ *     叶子沿 parentId 上溯，遇到缺失父条目即停止，空 parentId 没有副作用；置 null 是为了让
+ *     重写后的文件在语义上不引用已不在文件里的条目。
+ *
+ * 同步实现：调用点（`compaction_end`）与 Pi 的追加处在同一事件循环 tick，同步文件操作
+ * 保证改写期间不会插入新的 append。
+ */
+export function archiveCompactedSessionFile(filePath: string): SessionArchiveOutcome {
+  const raw = readFileSync(filePath);
+  const lines = splitRawLines(raw);
+  if (lines.length === 0) throw new Error(`Cannot archive ${filePath}: file is empty`);
+  const parsed = lines.map((line, index) => parseSessionLine(line, filePath, index + 1));
+  const header = parsed[0];
+  if (header === undefined || header['type'] !== 'session') {
+    throw new Error(`Cannot archive ${filePath}: first line is not a session header`);
+  }
+
+  // 最靠后的压缩条目决定当前上下文；更早的压缩条目本身也属于可归档的死历史。
+  let compactionIndex = -1;
+  let compactionEntry: Record<string, unknown> | undefined;
+  for (let index = parsed.length - 1; index >= 1; index -= 1) {
+    const entry = parsed[index];
+    if (entry !== undefined && entry['type'] === 'compaction') {
+      compactionIndex = index;
+      compactionEntry = entry;
+      break;
+    }
+  }
+  if (compactionEntry === undefined) return { archived: false, reason: 'no_compaction' };
+
+  // 切分点 = firstKeptEntryId 那一行。Pi 在 firstKeptEntryId 为空时会写成压缩条目自己的 id，
+  // 此时没有保留段，压缩条目之前的全部条目都可归档。
+  const firstKeptEntryId = compactionEntry['firstKeptEntryId'];
+  let cutIndex = -1;
+  if (typeof firstKeptEntryId === 'string' && firstKeptEntryId.length > 0) {
+    for (let index = 1; index < compactionIndex; index += 1) {
+      if (parsed[index]?.['id'] === firstKeptEntryId) {
+        cutIndex = index;
+        break;
+      }
+    }
+    if (cutIndex < 0 && firstKeptEntryId === compactionEntry['id']) cutIndex = compactionIndex;
+  }
+  if (cutIndex < 0) {
+    throw new Error(
+      `Cannot archive ${filePath}: compaction.firstKeptEntryId ${String(firstKeptEntryId)} is not in the file; refusing to guess`,
+    );
+  }
+
+  const archivedLines = lines.slice(1, cutIndex);
+  if (archivedLines.length === 0) return { archived: false, reason: 'nothing_to_archive' };
+  for (const line of archivedLines) {
+    // 活跃文件中间的行必须带换行；缺少换行说明文件已损坏，宁可失败也不拼出错位归档。
+    if (line[line.length - 1] !== LF) {
+      throw new Error(`Cannot archive ${filePath}: archived entry is missing its trailing newline`);
+    }
+  }
+  const archivedBytes = Buffer.concat(archivedLines);
+
+  const sessionDir = path.dirname(filePath);
+  const baseName = path.basename(filePath);
+  const archiveDir = path.join(sessionDir, 'archive');
+  mkdirSync(archiveDir, { recursive: true });
+  let sequence = 1;
+  let archivePath = path.join(archiveDir, `${baseName}.${sequence}.jsonl.gz`);
+  while (existsSync(archivePath)) {
+    sequence += 1;
+    archivePath = path.join(archiveDir, `${baseName}.${sequence}.jsonl.gz`);
+  }
+  const tmpArchive = path.join(archiveDir, `.${baseName}.${sequence}.tmp-${process.pid}-${Date.now()}`);
+  try {
+    writeFileSync(tmpArchive, gzipSync(archivedBytes), { flag: 'wx' });
+    renameSync(tmpArchive, archivePath);
+  } catch (error) {
+    try {
+      unlinkSync(tmpArchive);
+    } catch {
+      // 临时文件清理失败不掩盖真实错误。
+    }
+    throw error;
+  }
+
+  const archivedIds = new Set<string>();
+  for (let index = 1; index < cutIndex; index += 1) {
+    const id = parsed[index]?.['id'];
+    if (typeof id === 'string') archivedIds.add(id);
+  }
+  const keptLines = lines.slice(cutIndex);
+  const compactionKeptIndex = compactionIndex - cutIndex;
+  if (keptLines[compactionKeptIndex] === undefined) {
+    throw new Error(`Cannot archive ${filePath}: compaction entry disappeared from the kept segment`);
+  }
+  const parentId = compactionEntry['parentId'];
+  if (typeof parentId === 'string' && archivedIds.has(parentId)) {
+    keptLines[compactionKeptIndex] = Buffer.from(
+      `${JSON.stringify({ ...compactionEntry, parentId: null })}\n`,
+      'utf8',
+    );
+  }
+  const nextActive = Buffer.concat([lines[0] as Buffer, ...keptLines]);
+
+  const mode = statSync(filePath).mode & 0o777;
+  const tmpActive = path.join(sessionDir, `.${baseName}.tmp-${process.pid}-${Date.now()}`);
+  let activeFd: number | undefined;
+  try {
+    activeFd = openSync(tmpActive, 'wx', mode);
+    let written = 0;
+    while (written < nextActive.length) {
+      const step = writeSync(activeFd, nextActive, written, nextActive.length - written);
+      if (step === 0) throw new Error(`Cannot archive ${filePath}: short write`);
+      written += step;
+    }
+    fsyncSync(activeFd);
+    closeSync(activeFd);
+    activeFd = undefined;
+    renameSync(tmpActive, filePath);
+  } catch (error) {
+    if (activeFd !== undefined) {
+      try {
+        closeSync(activeFd);
+      } catch {
+        // 已尽力关闭；不影响原文件。
+      }
+    }
+    try {
+      unlinkSync(tmpActive);
+    } catch {
+      // 临时文件清理失败不掩盖真实错误。
+    }
+    throw error;
+  }
+
+  return {
+    archived: true,
+    archivePath,
+    archivedEntries: archivedLines.length,
+    archivedBytes: archivedBytes.length,
+    activeBytesBefore: raw.length,
+    activeBytesAfter: nextActive.length,
+  };
 }
 
 /**
