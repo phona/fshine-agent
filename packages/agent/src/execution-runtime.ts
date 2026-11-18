@@ -1198,18 +1198,29 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     // 回执带任务身份（2026-11-18，LS6 实测缺陷）：多任务并存时模型按编号引用错任务，
     // 旧的取消回执只有状态、看不出取消了谁，错误被掩盖。这里附上被取消任务的编号与请求原文
     // 片段——纯机械事实，供模型/用户当场核对；查不到就照常让 runner 拒绝。
-    let identity: { taskNo?: number; taskRequest?: string } = {};
+    let identity: { taskNo?: number; taskName?: string; taskRequest?: string; taskCreatedAt?: string } = {};
     try {
       const row = registry.get(taskId, scope);
       identity = {
         ...(row.taskNo === undefined ? {} : { taskNo: row.taskNo }),
+        ...(row.name === undefined ? {} : { taskName: row.name }),
         taskRequest: row.request.length > 120 ? `${row.request.slice(0, 120)}…` : row.request,
+        taskCreatedAt: row.createdAt,
       };
     } catch {
       // 不存在/越权：保持原行为（由 runner 给出确定性拒绝）。
     }
     const outcome = runner.cancel(taskId, scope);
-    return { ...outcome, ...identity, ...(reason === '' ? {} : { reason }) };
+    // 给用户看的一句话（2026-11-18，owner 要求）：业务名 + 编号，按结果分三种说法。
+    // 模型必须逐字引用——用户要能一眼确认"被停掉的是哪件事"，而不是读一个裸编号。
+    const label = identity.taskName ?? identity.taskRequest ?? '该任务';
+    const suffix = identity.taskNo === undefined ? '' : `（编号 ${identity.taskNo}）`;
+    const userMessage = outcome.outcome === 'cancelled'
+      ? `已停止：${label}${suffix}`
+      : outcome.outcome === 'requested'
+        ? `已请求停止：${label}${suffix}（执行端确认前还不算停掉）`
+        : `没停成：${label}${suffix} 已经办完了（当前状态：${outcome.status}）`;
+    return { ...outcome, ...identity, userMessage, ...(reason === '' ? {} : { reason }) };
   }
 
   /** 接续：复用 runner.resume，原样转述 ResumeOutcome（非 waiting_user 由 registry 状态机拒绝）。 */
