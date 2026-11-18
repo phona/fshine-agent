@@ -182,10 +182,11 @@ describe('run_js 描述：模块面接口事实（R2-S1）', () => {
       expect(RUN_JS_TOOL_DESCRIPTION).not.toContain(phrase);
       expect(WORKER_RUN_JS_TOOL_DESCRIPTION).not.toContain(phrase);
     }
-    // 片 2（owner 裁定「交付物只从 Worker 出」）：Main 面的接口事实 = scratch/ 是工作区、
-    // 写 out/ 不登记不投递、要交付文件走 task_run 交办（这是能力边界，不是流程诱导）。
+    // 权限层收窄（owner 2026-11-18 裁定 A）：Main 面的接口事实 = scratch/ 是唯一可写工作区、
+    // 写 out/ 被权限拒绝（不是「不登记」）、要交付文件走 task_run 交办（能力边界，不是流程诱导）。
     expect(RUN_JS_TOOL_DESCRIPTION).toContain('scratch/ 是工作区');
-    expect(RUN_JS_TOOL_DESCRIPTION).toContain('不登记、不投递');
+    expect(RUN_JS_TOOL_DESCRIPTION).toContain('只能写 scratch/');
+    expect(RUN_JS_TOOL_DESCRIPTION).toContain('权限拒绝');
     expect(RUN_JS_TOOL_DESCRIPTION).toContain('task_run 交办');
     // Worker 面：out/ 是本任务交付箱；Worker 不能再交办（不做跨工具流程诱导）。
     expect(WORKER_RUN_JS_TOOL_DESCRIPTION).toContain('out/');

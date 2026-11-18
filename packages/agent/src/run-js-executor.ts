@@ -14,6 +14,10 @@
  *   ② 受限子进程（v8 §3 实测有效，不是沙箱）：
  *        node --permission --allow-fs-read=<runDir> --allow-fs-read=<node_modules>
  *             --allow-fs-write=<runDir>/out --allow-fs-write=<runDir>/scratch run.cjs
+ *      写权限面由调用方 `writableDirs` 决定（2026-11-18，AGENTS「Main 的 run_js 只写
+ *      scratch/」）：'out+scratch'（缺省）= 上一条 argv（Worker 的 out/ 是交付箱）；
+ *      'scratch-only' = **只**给 scratch/，out/ 在权限层不可写（写入 ERR_ACCESS_DENIED），
+ *      不是「写了不登记」——Main 面。
  *      env 按 worker-env 白名单重建（PATH），再加 NODE_PATH=<node_modules>；HOME/TMPDIR
  *      指向 run 目录下的空目录——宿主凭据结构上进不了子进程。
  *   ③ detached:true 建进程组；超时/宿主中止 → kill(-pid,'SIGKILL') 杀**整组**（SIGTERM
@@ -23,7 +27,8 @@
  *      hardlink、uid/大小/份数上限；候选按 realpath 包含校验必须仍在 runDir 内；同一 fd
  *      流式 copy-on-register 成新 fileId + sha256，原件字节不动）。**无论 exitCode 都扫**——
  *      out/ 就是交付箱；交付去留归 S1。片 2：`registerOutputs:false`（Main 面）**不扫不登记**
- *      ——结构性禁止 Main 产交付物；Main 的 scratch/ 才是它的工作区。
+ *      ——结构性禁止 Main 产交付物；Main 的 scratch/ 才是它的工作区（且是它唯一可写目录，
+ *      见 ② 的 `writableDirs`）。
  *   ⑤ 审计随返回值走（脚本 sha256、输入/输出 fileId、exitCode、耗时、kill 原因）。
  *      S0 不落审计表（v8 §9 不做 run_code_runs 第二张表）；持久化落点归 S1 接线裁定。
  *
@@ -73,6 +78,14 @@ export interface RunJsScope {
   sessionId: string;
 }
 
+/**
+ * 子进程可写目录集合（`--allow-fs-write` 的面；2026-11-18 owner 裁定 A）：
+ *   · 'out+scratch'：out/（交付箱）+ scratch/（工作区）——**缺省**，Worker 面；
+ *   · 'scratch-only'：只有 scratch/——Main 面（AGENTS「Main 的 run_js 只写 scratch/」）。
+ * 是权限层收窄，不是「写 out/ 不登记」：写 out/ 的脚本以 ERR_ACCESS_DENIED 非零退出。
+ */
+export type RunJsWritableDirs = 'out+scratch' | 'scratch-only';
+
 export interface RunJsInput {
   /** CommonJS 代码原样（写进 <runDir>/run.cjs 执行）。 */
   code: string;
@@ -91,6 +104,11 @@ export interface RunJsInput {
    * 结构性禁止 Main 产交付物；缺省 true = 现行为（Worker 面 / 直接调用）。
    */
   registerOutputs?: boolean;
+  /**
+   * 子进程可写目录集合（缺省 'out+scratch' = 现行为，零变化）：Main 面传 'scratch-only'
+   * ——out/ 在权限层不可写（非零退出 + ERR_ACCESS_DENIED），scratch/ 仍可写。
+   */
+  writableDirs?: RunJsWritableDirs;
   /** 宿主中止信号（任务取消等）；触发即对进程组 SIGKILL。超时不是模型参数（宿主常量）。 */
   signal?: AbortSignal;
 }
@@ -358,15 +376,20 @@ export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecuto
         }
       }
 
-      // ③ 受限子进程（v8 §3 的命令形状 + 内存上限 argv）。
+      // ③ 受限子进程（v8 §3 的命令形状 + 内存上限 argv）。写权限面按 writableDirs：
+      // 缺省 out+scratch（现行为）；'scratch-only'（Main 面）只放行 scratch/——out/ 由
+      // 权限模型拒绝，不靠「写了不登记」。
+      const writableDirs = input.writableDirs ?? 'out+scratch';
+      const writableArgs = writableDirs === 'scratch-only'
+        ? [`--allow-fs-write=${scratchDir}`]
+        : [`--allow-fs-write=${outDir}`, `--allow-fs-write=${scratchDir}`];
       const child = spawn(
         nodePath,
         [
           '--permission',
           `--allow-fs-read=${runDir}`,
           `--allow-fs-read=${options.nodeModulesDir}`,
-          `--allow-fs-write=${outDir}`,
-          `--allow-fs-write=${scratchDir}`,
+          ...writableArgs,
           `--max-old-space-size=${RUN_JS_MAX_OLD_SPACE_MB}`,
           runCjsPath,
         ],

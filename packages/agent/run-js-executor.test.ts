@@ -15,6 +15,10 @@
  *   ⑥ 越限输出被截断：stdout/stderr 流式截断并标 truncated；超大产物（size_limit）与
  *      超份数产物（count_limit）不登记。
  *
+ * 写权限面（2026-11-18 owner 裁定 A）：`writableDirs:'scratch-only'`（Main 面）→ 写 out/
+ * 非零退出 + ERR_ACCESS_DENIED、out/ 零字节、零 file_refs；scratch/ 仍可写。缺省
+ * `'out+scratch'` 逐项零变化（Worker 面）。
+ *
  * 另覆盖输入面：pending / 越权 / 不存在 → 同码 FILE_REF_UNAVAILABLE，且不起子进程。
  *
  * S1 测试补齐（2026-11-17，缺口来自对 S0 测试面的重读）：
@@ -194,11 +198,11 @@ describe('run_js 执行器（CAP-01 S0）', () => {
     expect(ws.getRow(2).getCell(2).value).toBe(12);
   });
 
-  it('①c 片 2：registerOutputs=false（Main 面）→ out/ 不登记、outputs 为空、零 file_refs 行', async () => {
+  it('①c registerOutputs=false → out/ 不登记、outputs 为空、零 file_refs 行（Main 面另加 scratch-only 收窄，见 ①d）', async () => {
     const { executor, store, workspaceRoot } = makeFixture();
     const code = "require('node:fs').writeFileSync('out/不该交付.txt', 'bytes');";
     const result = await executor.runJs({ code, scope: SCOPE, registerOutputs: false });
-    expect(result.exitCode).toBe(0); // 脚本照跑（Main 仍可执行代码）
+    expect(result.exitCode).toBe(0); // 仅关登记：写权限面仍是缺省（out+scratch）
     expect(result.outputs).toEqual([]);
     expect(result.audit.outputs).toEqual([]);
     expect(store.listFileRefs(SCOPE)).toEqual([]); // 结构性：不建行、不落 workspace 副本
@@ -210,6 +214,45 @@ describe('run_js 执行器（CAP-01 S0）', () => {
     const rows = store.listFileRefs(SCOPE);
     expect(rows).toHaveLength(1);
     expect(fileStoragePathOf(workspaceRoot, SCOPE, rows[0]!.fileId, '不该交付.txt')).toContain(rows[0]!.fileId);
+    store.close();
+  });
+
+  it('①d 权限层收窄：writableDirs=scratch-only → 写 out/ 非零退出 + ERR_ACCESS_DENIED、out/ 零字节；scratch/ 仍可写', async () => {
+    const { executor, store } = makeFixture();
+    // Main 面的真实形状：scratch-only + registerOutputs:false。
+    const denied = await executor.runJs({
+      code: "require('node:fs').writeFileSync('out/x.txt', 'bytes');",
+      scope: SCOPE,
+      writableDirs: 'scratch-only',
+      registerOutputs: false,
+    });
+    // 不是「写了不登记」：权限模型在写入调用点拒绝（ERR_ACCESS_DENIED，非零退出）。
+    expect(denied.exitCode).not.toBe(0);
+    expect(denied.stderr).toContain('ERR_ACCESS_DENIED');
+    expect(denied.outputs).toEqual([]);
+    expect(store.listFileRefs(SCOPE)).toEqual([]); // 零 file_refs 行
+    expect(readdirSync(path.join(denied.audit.runDir, 'out'))).toEqual([]); // out/ 无字节
+
+    // scratch/ 仍可写（Main 的唯一可写工作区）。
+    const ok = await executor.runJs({
+      code: "require('node:fs').writeFileSync('scratch/x.txt', 'ok');",
+      scope: SCOPE,
+      writableDirs: 'scratch-only',
+    });
+    expect(ok.exitCode).toBe(0);
+    expect(readFileSync(path.join(ok.audit.runDir, 'scratch', 'x.txt'), 'utf8')).toBe('ok');
+    store.close();
+  });
+
+  it('①e 缺省 writableDirs（零变化对照）：不传 → out/ 仍可写、产物照常登记（现行为）', async () => {
+    const { executor, store } = makeFixture();
+    const result = await executor.runJs({
+      code: "require('node:fs').writeFileSync('out/default.txt', 'bytes');",
+      scope: SCOPE,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.outputs.map((file) => file.name)).toEqual(['default.txt']);
+    expect(store.listFileRefs(SCOPE)).toHaveLength(1);
     store.close();
   });
 

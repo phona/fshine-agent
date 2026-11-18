@@ -212,15 +212,16 @@ export const READ_SKILL_TOOL_SCHEMA: Record<string, unknown> = {
  * （import 图守卫钉住），scope/物化/产物登记全归宿主，模型只给 code 与 fileId 引用。
  * 没有 deliver 参数、没有 timeoutMs——超时/上限是宿主常量。
  *
- * 片 2（owner 2026-11-18：交付物只从 Worker 出）：**Main 面的 out/ 不登记、不交付**——
- * 结构性禁止（执行器 registerOutputs=false），不是提示词请求。要交付文件 = task_run 交办
- * 给 Worker；scratch/ 是 Main 的一次性工作区（中间文件，不产交付物）。
+ * 片 2（owner 2026-11-18：交付物只从 Worker 出）：**Main 面的 out/ 不可写、不登记、不交付**——
+ * 权限层收窄（执行器 `writableDirs:'scratch-only'`，写 out/ 得 ERR_ACCESS_DENIED）+ 结构性
+ * 禁止登记（`registerOutputs:false`），不是提示词请求。要交付文件 = task_run 交办
+ * 给 Worker；scratch/ 是 Main 的唯一可写工作区（中间文件，不产交付物）。
  * **Worker 面用另一份描述**（WORKER_RUN_JS_TOOL_DESCRIPTION）：Worker 的 out/ 就是交付箱。
  */
 export const RUN_JS_TOOL = 'run_js';
 export const RUN_JS_TOOL_DESCRIPTION =
   '运行一段受限的 CommonJS 脚本处理文件：输入文件用文件清单里的 fileId 引用（宿主物化到本次运行目录的 in/，按返回的 materializedName 读取）。'
-  + 'scratch/ 是工作区（中间文件写这里）；主会话写 out/ 不登记、不投递——需要交付文件请 task_run 交办。'
+  + 'scratch/ 是工作区（中间文件写这里），主会话只能写 scratch/——写 out/ 会被权限拒绝（不是静默丢弃）；需要交付文件请 task_run 交办。'
   + '超时与资源上限由宿主决定，只能通过把请求调小来适配。'
   // CAP-01 修复轮（R2-S1，接口事实声明）：声明沙箱的模块面——模型此前首调 require("xlsx")
   // （未安装）失败后转去 task_run 兜底建 Task。只声明能力边界，不写业务流程话术。
@@ -1531,9 +1532,11 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
    *   · 输入引用（照 resolveTaskId 的写法）：参数面只收 fileId 数组；权威校验（scope/激活/TTL/
    *     字节）归执行器侧 fileStore.materializeInputs——这里把「越权/不存在/pending/过期/字节
    *     缺失」收成**同一句**话术抛回（不泄露存在性），机械 reason 经 onFileRefUnavailable 只进日志。
-   *   · 产物（片 2，owner 裁定「交付物只从 Worker 出」）：Main 面**不登记 out/**——执行器
-   *     按 registerOutputs=false 运行，写进 out/ 的文件不建行、不落 workspace 副本、不进
-   *     TurnResult.files。要交付文件 = task_run 交办（Worker 的 out/ 才是交付箱）。
+   *   · 产物（片 2，owner 裁定「交付物只从 Worker 出」）：Main 面 out/ **不可写也不登记**——
+   *     执行器按 `writableDirs:'scratch-only'` + `registerOutputs=false` 运行：写 out/ 的脚本
+   *     由权限模型拒绝（ERR_ACCESS_DENIED，非零退出），写进 scratch/ 的文件不建行、不落
+   *     workspace 副本、不进 TurnResult.files。要交付文件 = task_run 交办（Worker 的 out/
+   *     才是交付箱）。
    */
   async function runJsInTurn(
     args: Record<string, unknown>,
@@ -1561,6 +1564,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         scope: fileScope,
         // 片 2：Main 面不登记 out/（结构性禁止 Main 产交付物；不是提示词约束）。
         registerOutputs: false,
+        // 2026-11-18 owner 裁定 A：Main 的 run_js 只写 scratch/——执行器收窄
+        // --allow-fs-write（去掉 out/），写 out/ 由权限模型拒绝，不是「写了不登记」。
+        writableDirs: 'scratch-only',
         // 取消信号必须贯穿到执行器：否则任务取消/宿主中止后脚本仍跑到自然结束或 120s 超时。
         ...(signal === undefined ? {} : { signal }),
       });
