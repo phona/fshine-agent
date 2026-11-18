@@ -14,7 +14,7 @@
 
 - F 组钉写确认：提案零写入 → 确认后 commit 可读回 → 二次确认只执行一次（`scripts/eval/wecom-sim/cases-f-write.test.ts:5-8`）；G 组钉后台受理与查询不重执行（同目录 `scripts/eval/wecom-sim/cases-g-task.test.ts:7-10`）。
 - 补充入口 `eval:bizprobe` / `eval:bizbatch2` / `eval:bizbatch3` 是业务 E2E 预注册批次（`package.json:17-19`）；infra 门缺 key / 锁不符 → `exit 2`、不烧样本（`scripts/eval/business-e2e/run.ts:188-194`）。
-- ⚠️ 全量 `eval:cap01` 的 r6 面指向 `r6-lifecycle.ts`（`scripts/eval/cap01/run-all.ts:40`），该文件**不存在**（实为 `lifecycle.ts`；`test -f` 实测 MISSING）→ 全量在该面失败，`--only` 其余面不受影响。
+- ✅ 2026-11-18 修复：`scripts/eval/cap01/run-all.ts` 引用的 `r6-lifecycle.ts` 已随改名同步为 `lifecycle.ts`，全量面恢复可跑。
 - ⚠️ 旧文案仍写「12 例」（`.github/workflows/eval-real.yml:66`、nightly `:5`、convergence-r1 README `:34`），现行用例集是 14 例（`scripts/eval/convergence-r1/cases.ts:111`）。
 
 ## 二、判据与 criteria.lock 冻结纪律

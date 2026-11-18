@@ -12,6 +12,8 @@
 9 个状态，顺序即契约登记顺序：`TASK_STATUSES`（`packages/agent/src/task-registry.ts:54`）。
 五个是终态（无边出）：`cancelled / completed / failed / timed_out / unexecuted`。
 
+起始状态取决于受理方式：**inline（缺省）直接 `running`**；只有 `dispatchMode=background` 的受理才先落 `queued`（`docs/product/p2a-task-contract.md:33`、`packages/agent/src/task-runner.ts:501-505`）。
+
 合法边只有一张表：`LEGAL_TRANSITIONS`（`packages/agent/src/task-registry.ts:246`）。读法：
 
 - `queued → running | cancelling | timed_out`；

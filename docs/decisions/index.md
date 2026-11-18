@@ -11,7 +11,7 @@
 | 2026-11-13 | M4 死代码清扫与契约收口（§十三） | 删 19 个跟踪文件 3,386 行；完成状态按 `completed`/`failed`/`unexecuted` 判定；契约收为四态（无 cancel/artifacts）；确定性门 = typecheck + unit | `../history/decision-log-part01-2026-11_undated.md:642` |
 | 2026-11-13 | Eval 入口收口（§十四） | 真模型 workflow 改挂 `npm run eval:user`；eval-measure 退役；不重建评测平台 | `../history/decision-log-part01-2026-11_undated.md:736` |
 | 2026-11-13 | R1 旧协议与旧治理清理（§十五） | 删旧 a2a 协议、contracts 未用面、generic-mock 评测簇；覆盖面由用户级 eval 承接；桥键闭集守卫缺口如实登记 | `../history/decision-log-part01-2026-11_undated.md:762` |
-| 2026-11-13 | convergence-r1 判据冻结（§十六） | 12 用例 + 六维判定器；`criteriaSha256`/`casesSha256` 冻结后不得改；判定器缺陷按「修复→全样本复判→重切」流程处理 | `../history/decision-log-part02-2026-11.md:5` |
+| 2026-11-13 | convergence-r1 判据冻结（§十六；2026-11-18 扩到 14 例） | 14 用例（E01–E14，2026-11-18 由 12 扩到 14）+ 六维判定器；`criteriaSha256`/`casesSha256` 冻结后不得改；判定器缺陷按「修复→全样本复判→重切」流程处理 | `../history/decision-log-part02-2026-11.md:5` |
 | 2026-11-13 | R2：E05 边界与 task.status（§十七） | 歧义标识先交执行层裁决（`needs_input` + candidates），不猜候选；判据 v1 不变；task.status 语义边界登记 | `../history/decision-log-part02-2026-11.md:40` |
 | 2026-11-14 | R3 收官裁定与只读准备档（§二十二–§二十四，多轮） | M01=a（复用同任务内有效事实）、E01=a（修判据形态）、真实只读仅准备档、holdout 封存；E01/M01 按裁定落实 | `../history/decision-log-part02-2026-11.md:120–150` |
 | 2026-11-14 | P1–P4 产品切片（§十八–§二十一，多轮） | 任务查看 / 结果交付 / `--redo` 重新交办 / 只读 ops 快照落地；`--redo` 是重新交办，不是人工接管或会话续跑 | `../history/decision-log-part02-2026-11.md:83–119` |
@@ -23,7 +23,7 @@
 | 2026-11-15 | R6 长会话预注册（§七十八） | 五轨（LS1–LS5）各 N=15、真实 128k、每会话 ≥3 次压缩；Wilson 95% CI 落会话层；失败分类 E-A–E-K 冻结 | `../history/decision-log-part04-2026-11.md:270` |
 | 2026-11-15 | B1 会话持久化 + B2 Silent Shadow（§八十–§八十七，多轮） | B1 持久化接入真实会话生命周期；B2 出站整体包裹、缺省静默、opt-in 放行；真实租户联调待 issue #74 | `../history/decision-log-part04-2026-11.md:439`、`../history/decision-log-part05-2026-11.md:5` |
 | 2026-11-15–16 | P2 业务 E2E：预注册与落成（§八十八、§九十八，多轮） | 七场景 21 样本 / 27 会话预注册（N=3、单会话硬停）；9 个 case 落成、确定性自检通过，待真实模型执行 | `../history/decision-log-part05-2026-11.md:231`、`../history/decision-log-part06-2026-11_undated.md:236` |
-| 2026-11-16 | U3 稳定逻辑操作身份 `dispatchKey`（§九十七） | 新增 `operations` 账 + 两层身份（`delegationId` / `dispatchKey`）；同 key 异 op 确定性拒绝；重试不另铸身份；结果未知 → `result_unknown` 待核对 | `../history/decision-log-part06-2026-11_undated.md:145` |
+| 2026-11-16 | U3 稳定逻辑操作身份 `dispatchKey`（§九十七） | 新增 `operations` 账 + 两层身份（`taskId` / `dispatchKey`）；同 key 异 op 确定性拒绝；重试不另铸身份；结果未知 → `result_unknown` 待核对 | `../history/decision-log-part06-2026-11_undated.md:145` |
 | 2026-11-17 | CAP-01 收口（§九十九） | S3 端到端 2/5 接受为模型能力包络；run 目录保留 30 天；并发 4；渠道三档；软链 fail-closed；跨会话能力不做 | `../history/decision-log-part06-2026-11_undated.md:255` |
 | 2026-11-17–18 | recalc_xlsx 集成（§一百） | `recalc_xlsx` 仅 Main 宿主工具；LibreOffice 26.8.3 仅 PATH 可见时上工具面、缺失 fail-closed；投递门报告驱动、只按 sha256 绑定；一条重编码残余登记 | `../history/decision-log-part06-2026-11_undated.md:305` |
 | 2026-11-18 | 文档清理与未决项转 issue | 未决项转 GitHub #67–#74；仓库不再保留待办/待裁定文档；删除/移档流水以 `git log --diff-filter=D -- docs/` 为准 | `../index.md`、`../../AGENTS.md` |

@@ -75,7 +75,7 @@ jobs:
       # 单轮不设通过率门（1 轮没有通过率可言）；多轮时才有意义。
       - name: Gate on per-case pass rate (multi-trial only)
         if: github.event_name == 'pull_request' && steps.trials.outputs.n != '1'
-        run: node scripts/eval/eval-gate.mjs --summary .runtime/eval-user/summary.json --expect-cases E01,E02,E03,E04,E05,E06,E07,E08,E09,E10,E11,E12 --expect-trials ${{ steps.trials.outputs.n }} --min-rate 0.5
+        run: node scripts/eval/eval-gate.mjs --summary .runtime/eval-user/summary.json --expect-cases E01,E02,E03,E04,E05,E06,E07,E08,E09,E10,E11,E12,E13,E14 --expect-trials ${{ steps.trials.outputs.n }} --min-rate 0.5
 
       # 评论正文从 summary.json 全量生成逐用例表（不是日志尾部截断）；摘要缺失时脚本
       # 如实写「无法生成逐用例表」并退出 1，避免用日志推断结果。always()：eval 失败也要发。

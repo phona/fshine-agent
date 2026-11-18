@@ -37,7 +37,7 @@ const FACES: readonly Face[] = [
   { key: 'r3', script: 'scripts/eval/cap01/r3-core.ts', args: [], what: '核心攻击面' },
   { key: 'r3b', script: 'scripts/eval/cap01/r3b-attacks.ts', args: [], what: '攻击加厚' },
   { key: 'r5', script: 'scripts/eval/cap01/r5-resources.ts', args: [], what: '资源与内存墙' },
-  { key: 'r6', script: 'scripts/eval/cap01/r6-lifecycle.ts', args: [], what: '任务生命周期（取消/续跑）' },
+  { key: 'r6', script: 'scripts/eval/cap01/lifecycle.ts', args: [], what: '任务生命周期（取消/续跑）' },
   { key: 'r7', script: 'scripts/eval/cap01/r7-faults.ts', args: [], what: '故障注入' },
   { key: 'r8', script: 'scripts/eval/cap01/r8-concurrency.ts', args: [], what: '并发与隔离' },
 ];

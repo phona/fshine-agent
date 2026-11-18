@@ -4,6 +4,12 @@
 > 分工：本页只回答「该读哪篇」；决定正文与索引在 `decisions/index.md`，未清债务在 `decisions/debt.md`，未决项在 GitHub issues #67–#74。
 > 历史口径：`history/` 只收封存档案，不按现行规范读、内部链接不保证可用；删除与移档全量以 `git log --diff-filter=D -- docs/` 与 `git log --diff-filter=R -- docs/` 为准（本页不记流水数字）。
 
+## 术语（读文档前先对齐这三组）
+
+- **交办 / 任务**：同一件事的两个视角——用户"交办"，系统落成一条 `taskId`。**不用 `delegationId`（该名不存在）**。
+- **受理回执 / 渠道回执**：前者是任务被受理时的回话（`architecture/tasks.md`），后者是文件到账时的「已收到 N 个文件」（`architecture/channels.md`）——两类不同事件，不要混用"回执"。
+- **会话转录 / 会话日志**：同一对象的两种叫法，统一指 Pi 的 `SessionManager` 落盘事实（`architecture/sessions.md`）。
+
 ## architecture（现行架构与契约，9 篇）
 
 宿主与执行层的职责边界，以及任务 / 会话 / 渠道 / 文件四条运行生命周期——判断「该谁做、边界在哪」先读这一组。
@@ -13,7 +19,7 @@
 - `architecture/sessions.md` — 会话转录与压缩：Pi 所有权、`.runtime/sessions`、压缩边界（retention 见 issue #67）。
 - `architecture/channels.md` — 渠道三档（offline/shadow/live）、入站附件时序、silent 三档、出站六路。
 - `architecture/files.md` — `fileId` 模型、`run_js`、per-run 目录、产物登记与保留期。
-- `product/event-catalog.md` — 29 个结构化事件的观测字典。
+- `product/event-catalog.md` — 结构化事件字典（以 `23ae585` 为基线列 29 个；`attachment_nudge_*`、`task_result_delivery_*`、`recalc_*`、`run_dir_cleanup_startup*` 等新增事件以 `architecture/channels.md` 的事件表与代码为准）。
 - `product/r4-joint-interfaces.md` — R4 联合接口约定 v1（P2/P5/P6/P4 冻结面，代码仍引用）。
 - `product/p2a-task-contract.md` — P2a Task Registry 契约核心冻结记录（状态机/取消/waiting）。
 - `product/p3-human-redo.md` — `--redo` 语义边界：重新交办 ≠ 人工接管/会话续跑（`scripts/p0-redo-doc-scan.test.ts` 逐字扫描）。

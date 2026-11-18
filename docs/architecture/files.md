@@ -1,6 +1,6 @@
 # 文件面：fileId、run_js、产物登记、保留期与回传
 
-> 状态：现行。2026-11-18 核对 @ `32a331c`（`git diff --stat 2823880 HEAD -- packages apps scripts` 为空，代码树一致）；fileId 模型、`run_js`、per-run 目录、回程桥与 recalc 门均已实施；保留期只清 run 目录，`file_refs` 行与 `files/` 字节没有回收路径。
+> 状态：现行。2026-11-18 核对（`path:line` 以现行代码为准；代码与本文冲突时以代码为准）；fileId 模型、`run_js`、per-run 目录、回程桥与 recalc 门均已实施；保留期只清 run 目录，`file_refs` 行与 `files/` 字节没有回收路径。
 > 口径：只写今天做决定或排障需要的边界；实施过程与被删来源在 git 历史（`git log --diff-filter=D -- docs/`，清单见文末「来源」）。
 > 指针：`packages/agent/src/file-store.ts`（文件事实与字节落点）、`packages/agent/src/run-js-executor.ts`（受限执行）、`packages/agent/src/execution-runtime.ts`（工具面/清单/回程接线）、`packages/agent/src/task-file-bridge.ts`（执行层文件桥）；冲突以代码为准，就地标 ⚠️。
 

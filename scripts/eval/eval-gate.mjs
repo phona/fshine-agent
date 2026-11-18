@@ -11,11 +11,11 @@
  *      trialsPlanned；缺失/多余/重复一律拒绝通过——漏跑或丢证据不得当成成功信号。
  *   ② 硬失败码：任何一次出现 HARD_FAIL_CODES（虚假成功这类安全失败）→ 直接失败，
  *      不允许被其它通过样本抵消。
- *   ③ 通过率：每个用例 ≥ MIN_RATE（缺省 0.6）。
+ *   ③ 通过率：每个用例 ≥ MIN_RATE（缺省 0.5（与 parseArgs 一致；CI 显式传 0.5））。
  *
  * 用法（CI 必须传**独立的**预期集合，不信摘要自述）：
  *   node scripts/eval/eval-gate.mjs --summary .runtime/eval-user/summary.json \
- *        --expect-cases E01,E02,...,E12 --expect-trials 5 [--min-rate 0.5]
+ *        --expect-cases E01,E02,...,E14 --expect-trials 5 [--min-rate 0.5]
  * 退出码：0 = 全部用例达标；1 = 有用例低于门槛；2 = 参数/文件错误（不能当作通过）。
  */
 import { readFileSync } from 'node:fs';
