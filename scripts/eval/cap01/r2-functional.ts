@@ -1,7 +1,7 @@
 /**
  * CAP-01 R2 功能验收（可重复执行，不靠人工点）。
  *
- * 口径（docs/product/cap01-main-direct-execution.md v8 §7/§8 S1/S2 + R2 验收指令）：
+ * 口径（CAP-01 设计 v8 §7/§8 S1/S2，文档 2026-11-18 删除、git 历史可考 + R2 验收指令）：
  * 只验用户可见结果与安全不变量；全样本保留，不筛绿；失败样本连证据一起落盘。
  *
  * 三场景（假渠道 = 直调 server.handler；执行层 = 仓内 dummy 面；装配 = apps/server/server.ts

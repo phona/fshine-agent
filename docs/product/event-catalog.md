@@ -51,7 +51,7 @@
 | `pi_driver_final_text_nudge` | `packages/agent/src/pi-driver.ts:678` | 只思考没正文、未到 deadline、未 abort → 催一次最终文本 | 测试：`packages/agent/pi-driver-error-attribution.test.ts:165-167`、`:195-197`；`packages/agent/pi-driver-nudge.test.ts:71`。评测名称集合：`executor.ts:76`、`p3a-session.ts:80` | 是 | 催问是真实 user 消息进 Pi 转录（`:675-676`），不是隐藏改写；一轮一次。 |
 | `pi_driver_final_text_nudge_empty` | `packages/agent/src/pi-driver.ts:690` | 催问后仍无正文 | 测试：`packages/agent/pi-driver-error-attribution.test.ts:199-201`、`:228-230` | 是 | 与 `empty_reply` 成对（第二次归因）。 |
 | `pi_driver_final_text_nudge_failed` | `packages/agent/src/pi-driver.ts:683` | 催问 `session.prompt` 抛错 | 无 | 否 | 只有 `errorType`，**没有 message**（同组其他事件都带 errorMessage），可诊断性最弱。见「发了没人用」。 |
-| `pi_driver_prompt_changed_session_rebuild` | `packages/agent/src/pi-driver.ts:588` | 复用会话时 system prompt 变化 → 丢弃旧会话并按新配置重建 | 仅文档：`docs/product/pi-152-adapter-design.md:79`；仓内无代码读取者 | 否 | **裸事件、零字段**（不知哪段 prompt 变了）；工具名变化也会重建但完全静默（`:585-601` 只有 prompt 变化才记）。见「发了没人用」。 |
+| `pi_driver_prompt_changed_session_rebuild` | `packages/agent/src/pi-driver.ts:588` | 复用会话时 system prompt 变化 → 丢弃旧会话并按新配置重建 | 仅文档（适配设计文档 2026-11-18 删除，git 历史可考）；仓内无代码读取者 | 否 | **裸事件、零字段**（不知哪段 prompt 变了）；工具名变化也会重建但完全静默（`:585-601` 只有 prompt 变化才记）。见「发了没人用」。 |
 | `pi_driver_error` | `packages/agent/src/pi-driver.ts:699` | `driver.run` 抛出未预期异常（非 stopReason 失败形状） | 评测名称集合：`scripts/eval/business-e2e/experiments/executor.ts:75`、`scripts/eval/p3/p3a-session.ts:79`、`scripts/eval/p3/p3c-session.ts:68`；文档：`docs/decision-log.md:2000` | 否（无单测按事件名；p3c 的 verdict 也只判 `model_error`） | 随后丢弃复用会话（`:704`）、返回空文本；宿主侧再判回合失败。 |
 
 ## 三、`run_js` 执行面事件（2 个）
@@ -81,7 +81,7 @@
 | `task_file_bridge_skip` | `apps/server/server.ts:295`（发出）+ `packages/agent/src/task-file-bridge.ts`（触发源）；无测试、无评测。 |
 | `transcript_store_error` | `apps/server/server.ts:302`（发出）+ 两篇文档；无代码读取者。底层 fail-open 行为有测试（`packages/agent/session-persistence-wiring.test.ts:100`），但**事件本身**无人消费。 |
 | `pi_driver_final_text_nudge_failed` | 仅 `packages/agent/src/pi-driver.ts:683`。催问失败路径无测试注入。 |
-| `pi_driver_prompt_changed_session_rebuild` | 仅 `packages/agent/src/pi-driver.ts:588` + `docs/product/pi-152-adapter-design.md:79`；无测试、无评测。生产 Main 提示恒定（设计上不触发），但一旦触发也无人接收。 |
+| `pi_driver_prompt_changed_session_rebuild` | 仅 `packages/agent/src/pi-driver.ts:588`（原设计文档引用 2026-11-18 随文档删除失效）；无测试、无评测。生产 Main 提示恒定（设计上不触发），但一旦触发也无人接收。 |
 | `server_shutdown` | 仅 `apps/server/main.ts:82`；无测试、无评测。 |
 
 > 边界说明：`pi_driver_error` 虽无单测按名断言，但被 3 个评测脚本的名称集合采集（见上表），故**不**列入本节；

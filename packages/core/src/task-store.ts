@@ -31,7 +31,7 @@
  *     不改写）；二次打开零差异，旧库形状（tasks/executions 既有列与行）逐字节不变；
  *   · PRAGMA user_version 记录版本（新库直接建 v4）；向前兼容：加列/加表不破坏旧代码 SELECT。
  *
- * file_refs（CAP-01 S0，docs/product/cap01-main-direct-execution.md §4）：文件事实的
+ * file_refs（CAP-01 S0，设计 v8 §4；文档 2026-11-18 删除、git 历史可考）：文件事实的
  * 8 列最小形状，纯新增表走 CREATE TABLE IF NOT EXISTS，**不升 schema 版本**（旧库
  * 可写打开时由 SCHEMA_BASE 补建；只读旧库读出缺省，不崩溃）。没有 state 枚举——
  * activated_at IS NULL 即 pending；不存 path——字节位置由 workspace 布局 + file_id

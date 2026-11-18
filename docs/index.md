@@ -12,10 +12,7 @@
 
 ## ② 现行设计出处（已实施子系统的设计/登记档）
 
-- `docs/product/cap01-main-direct-execution.md`——CAP-01 run_js / 文件桥设计（已实施并合入）
-- `docs/product/pi-152-adapter-design.md`——Pi 1.5.2 适配器 / 转录所有权设计（已实施）
-- `docs/product/pi-152-dependency-patches.md`——Pi 最小依赖补丁登记表（补丁在生效）
-- `docs/product/pi-152-dispatch-key-design.md`——dispatchKey 设计（已实施；`task-registry.ts` 引其 §5.3）
+- `patches/README.md`——Pi 1.5.2 最小依赖补丁登记（diff / 缺陷来源 / 删除条件 / 证据 pin；补丁在生效）
 - `docs/product/b1-session-persistence-impl.md`、`b1-wiring.md`——B1 会话持久化实施与接线（retention / capacity 待裁）
 - `docs/product/b2-silent-shadow-gate.md`——B2 企微静默闸（默认交付语义待裁 + 联调手册）
 - `docs/product/idempotency-cross-restart.md`——跨重启幂等缺口设计（未实施，待裁决）
@@ -39,12 +36,13 @@
 ## ④ 历史参考（定位为档案；不按现行规范读）
 
 - `docs/architecture-laws.md`、`docs/debt-ledger.md`、`docs/change-safety.md`——历史判据 / 台账 / 防线档（PR review prompt 与 ci.sh 注释仍引用，删除待 owner 单独裁定）
-- `docs/product/exp-pi-native-config-headroom.md`——压缩配置安全值推导出处（ask-runtime.ts 注释引用）
-- `docs/product/evidence/`——补丁证据 json（git pin 锚点）
+- `docs/product/evidence/`——补丁证据 json（git pin 锚点；登记表见 `patches/README.md`）
 
-## ⑤ 已删除（2026-11-18 清理，三轮共 82 篇）
+## ⑤ 已删除（2026-11-18 清理，四轮共 86 篇；另 1 篇移出 docs）
 
 - 第一轮 71 篇：0.85.1 压缩/实验簇（pi-compaction×5、exp-pi-native×4、pi-152-stage-b/c/d/d2、minimality-audit）、main-skill-face-design、R4 切片报告 22 篇、R5 收官 9 篇、R6 收官 5 篇、已实施/被取代设计 7 篇、退役工具旧档 11 篇、R5 清理 meta 2 篇。处置依据与取代者映射见 `docs/product/cleanup-2026-11-16.md`。
 - 第二轮 10 篇历史原位档：v0-architecture、v0-functional-spec、artifacts、r4-slice-plan、roadmap、rule-landing、business-skill、a2a-protocol、execution-layer-interface、e2e-ownership（AGENTS.md / ci.sh / 代码注释 / 活文档引用已同步改）。
 - 第三轮 1 篇：`docs/product/r4-slices.md`（R4 分片计划；P0–P7b 全落地，唯一未落地的 P8 规格要点已登记进 `r3-open-decisions.md` 第四节第 6 条）。
+- 第四轮 4 篇已实施设计稿：cap01-main-direct-execution、pi-152-adapter-design、pi-152-dispatch-key-design、exp-pi-native-config-headroom（引用它们的 11 处代码注释已同步改为「已删，git 历史可考」或指向实现文件）。
+- 另有 1 篇**移出 docs**：pi-152-dependency-patches → `patches/README.md`（补丁登记紧附补丁本体，登记规则要求「记 diff / 版本 / 来源 / 删除条件」）。
 - 内容考古用 `git log --diff-filter=D -- docs/`。
