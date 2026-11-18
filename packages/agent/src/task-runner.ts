@@ -90,11 +90,21 @@ export type TaskReason = 'cancelled_by_user' | 'timeout' | 'failed_confirmed' | 
 
 export type TimeoutKind = 'queued' | 'execution' | 'waiting_user';
 
+/** 写操作提案的机械形状（与 task-registry.PendingConfirmation 同形；本文件零仓内 import）。 */
+export interface PendingConfirmation {
+  handle: string;
+  summary: string;
+  expiresAt?: string;
+  operation: string;
+}
+
 /** waiting_user 的机械问题形状（执行层 needs_input 事实；不编造、不改写候选）。 */
 export interface PendingQuestion {
   missing: readonly string[];
   candidates?: readonly string[];
   raw?: string;
+  /** 写操作提案（needs_confirmation 与 needs_input 同走 waiting_user，不新状态）。 */
+  confirmation?: PendingConfirmation;
 }
 
 export interface TaskScope {
@@ -253,6 +263,8 @@ export interface TaskOutcomeFile {
  *   · completed  → 回合正常收尾，**执行端已按本回合执行事实确认成功**（权威）；
  *   · failed     → 已确认失败（原因原文；无执行事实可判定时的机械失败）；
  *   · needs_input→ 执行层要求补充输入（running→waiting_user，同 Task 接续）；
+ *   · needs_confirmation → 执行层冻结了一次待确认写操作（running→waiting_user 同一状态机；
+ *     confirmation 原样进底账待后续回合透传，S1 不做推送/透传）；
  *   · timed_out  → 执行回合超时（P5 边界内的执行端判定）；
  *   · cancelled  → 执行端确认已中止（abort 观察）。
  *
@@ -268,6 +280,11 @@ export type TaskExecutionOutcome =
   | { kind: 'completed'; resultText: string; files?: readonly TaskOutcomeFile[] }
   | { kind: 'failed'; reason: string }
   | { kind: 'needs_input'; question: PendingQuestion }
+  /**
+   * 本回合以「写操作提案待用户确认」收尾：question 是 waiting_user 的问题形状，
+   * confirmation 是执行层发放的句柄/摘要（落底账 pendingQuestion.confirmation，同状态机）。
+   */
+  | { kind: 'needs_confirmation'; question: PendingQuestion; confirmation: PendingConfirmation }
   | { kind: 'timed_out' }
   | { kind: 'cancelled' }
   /**
@@ -852,6 +869,11 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         return;
       case 'needs_input':
         registry.waitForUser(taskId, outcome.question);
+        return;
+      case 'needs_confirmation':
+        // 写操作提案：与 needs_input 同一 waiting_user 状态机（不新状态、不建确认门）；
+        // confirmation 随问题落底账，是否确认由后续回合的用户表态与执行层校验决定。
+        registry.waitForUser(taskId, { ...outcome.question, confirmation: outcome.confirmation });
         return;
       case 'timed_out':
         registry.timeout(taskId, 'execution');

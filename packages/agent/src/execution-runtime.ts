@@ -980,6 +980,9 @@ const OPERATION_IN_PROGRESS_MESSAGE =
 export const SAME_TURN_CONFIRMATION_PENDING_MESSAGE =
   '待确认提案已生成：需要用户在下一回合确认后才能提交；本回合不再发起新的执行。';
 
+/** 写操作提案落底账时的机械 missing 条目（waiting_user 形状要求 missing 非空；不编造业务原因）。 */
+const CONFIRMATION_PENDING_MISSING = '用户确认';
+
 /**
  * A2 单回合 operation 上限话术：如实报数（已发起 N 次 / 上限 M），不是静默失败。
  * 这是资源边界，不是计划门：不判断业务，只数本回合已发起的执行次数。
@@ -1447,7 +1450,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       name: task.name ?? deriveTaskName(task.request),
       status: task.status,
       ...(task.reason === undefined ? {} : { reason: task.reason }),
-      ...(task.pendingQuestion === undefined ? {} : { pendingQuestion: task.pendingQuestion }),
+      ...(task.pendingQuestion === undefined ? {} : { pendingQuestion: pendingQuestionView(task.pendingQuestion) }),
       requestIds: task.executions.map((execution) => execution.requestId),
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
@@ -1742,21 +1745,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     return { handle: pendingConfirmation.handle, userText: currentUserText };
   }
 
-  /**
-   * 模型可见的执行结果：needs_confirmation 只给机械摘要（summary/expiresAt）与 data——
-   * 句柄是宿主持有的确认凭据，不进模型转录；模型无法伪造/转交句柄，透传只发生在
-   * 下一回合的宿主请求里。其余状态原样交回模型。
-   */
-  function modelVisibleOutcome(outcome: ExecutionOutcome): Record<string, unknown> {
-    if (outcome.status !== 'needs_confirmation') return outcome as unknown as Record<string, unknown>;
-    return {
-      status: 'needs_confirmation',
-      summary: outcome.confirmation.summary,
-      ...(outcome.confirmation.expiresAt === undefined ? {} : { expiresAt: outcome.confirmation.expiresAt }),
-      ...(outcome.data === undefined ? {} : { data: outcome.data }),
-    };
-  }
-
   async function executeOperation(
     taskId: string,
     args: Record<string, unknown>,
@@ -1901,7 +1889,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         issuedTurn: turnNo,
       };
     }
-    return modelVisibleOutcome(run.outcome);
+    return toModelVisibleOutcome(run.outcome);
   }
 
   /**
@@ -2557,6 +2545,37 @@ function pendingQuestionFrom(outcome: Extract<ExecutionOutcome, { status: 'needs
 }
 
 /**
+ * 模型可见的执行结果（单一实现：前台会话 execute_operation 与后台 TaskExecutor 共用）：
+ * needs_confirmation 只给机械摘要（summary/expiresAt）与 data——句柄是宿主持有的确认凭据，
+ * 不进模型转录/工具结果，模型无法伪造或转交；其余状态原样交回模型（逐字节不变）。
+ */
+function toModelVisibleOutcome(outcome: ExecutionOutcome): Record<string, unknown> {
+  if (outcome.status !== 'needs_confirmation') return outcome as unknown as Record<string, unknown>;
+  return {
+    status: 'needs_confirmation',
+    summary: outcome.confirmation.summary,
+    ...(outcome.confirmation.expiresAt === undefined ? {} : { expiresAt: outcome.confirmation.expiresAt }),
+    ...(outcome.data === undefined ? {} : { data: outcome.data }),
+  };
+}
+
+/**
+ * pendingQuestion 的对外投影（task_status / task_result）：写操作提案只暴露机械摘要与有效期，
+ * **去掉 handle 与 operation**——句柄留底账（S3 透传用），不给模型/用户可见面。
+ */
+function pendingQuestionView(question: PendingQuestion): Record<string, unknown> {
+  const { confirmation, ...rest } = question;
+  if (confirmation === undefined) return rest;
+  return {
+    ...rest,
+    confirmation: {
+      summary: confirmation.summary,
+      ...(confirmation.expiresAt === undefined ? {} : { expiresAt: confirmation.expiresAt }),
+    },
+  };
+}
+
+/**
  * 后台单回合执行器（P6 TaskExecutor 的生产实现；每次派发新建 Worker 回合）：
  *   · 转录隔离结构性满足：只持有本次任务投影（request/answer），不接触 Main 会话转录；
  *   · 执行经 `execute_operation` +（注入 runJsExecutor 时）`run_js`（任务作用域，片 1）；
@@ -2564,14 +2583,15 @@ function pendingQuestionFrom(outcome: Extract<ExecutionOutcome, { status: 'needs
  *   · 逐回合机械判定（不替执行端做 task 级二次判定）：
  *       中止/abort → cancelled；截止未产出 → timed_out；空汇报 → failed；
  *       执行层 needs_input → needs_input（missing 原样转述）；
+ *       本轮最后一条非只读执行 needs_confirmation → needs_confirmation（句柄随问题落底账）；
  *       零执行 → failed（不得报 completed）；任一非 completed → failed（原因机械合成）；
  *       全部 completed → completed{resultText, files?}（结果存档由 runner settle 经 archiveReply
  *       承接；files = Worker 产出的任务作用域交付物，装配方按它投递）。
  *
- * 写确认边界：needs_confirmation 的会话级句柄表与下一回合原话透传只接在**前台会话**
- * （createSession 的 send 回合）上——后台单回合执行器没有「下一回合」概念，也不持有
- * 用户原话。后台模式打开写面时，需要确认的写操作会确定性落 failed（不谎报 completed）；
- * 写确认的产品链路当前由 inline 派发承接（登记见本切片说明，不在此预造后台确认状态机）。
+ * 写确认边界（S1 起）：后台单回合执行器把 needs_confirmation 识别为 needs_confirmation 结局
+ * （不是 failed），句柄/摘要随 runner 落 waiting_user 底账（复用既有等待形状，不新状态）；
+ * 回给 Worker 的工具结果与前台同一套脱敏投影（toModelVisibleOutcome），Worker 永远看不到
+ * 句柄。**推送与接续轮透传不在本切片**：下一回合如何把底账句柄交给执行层由 S3 决定。
  */
 export async function createTaskExecutor(options: TaskExecutorOptions): Promise<TaskExecutor> {
   const manifest = await options.client.capabilities();
@@ -2706,7 +2726,9 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         // 取消胜出：不再把（可能迟到的）执行结果交回 Worker；让回合按 abort 收尾。
         if (signal.aborted) throw abortError();
         if (run.executed) recorded.push({ operation, outcome: run.outcome });
-        return run.outcome;
+        // 与前台同一套脱敏投影：Worker 永远看不到 confirmation.handle（后台也曾直回原始
+        // outcome，句柄会漏进模型上下文；S1 起两处共用 toModelVisibleOutcome）。
+        return toModelVisibleOutcome(run.outcome);
       };
 
       const deadline = now() + workerTurnMs;
@@ -2749,6 +2771,23 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         return now() >= deadline
           ? { kind: 'timed_out' }
           : { kind: 'failed', reason: '执行层 Worker 未产出有效汇报，本次任务未完成。' };
+      }
+      // 写操作提案（S1）：本轮**最后一条非只读执行**是 needs_confirmation → 回合结局是
+      // 待确认（不是 failed）——执行层已冻结一次待确认操作，用户还什么都没表态。只读调用
+      // 不计（读调用不会产生待确认写操作）。提案句柄原样带走，由 runner 落底账待 S3 透传。
+      const lastWritable = [...recorded].reverse().find((entry) => !readOnlyOperations.has(entry.operation));
+      if (lastWritable !== undefined && lastWritable.outcome.status === 'needs_confirmation') {
+        const confirmation = lastWritable.outcome.confirmation;
+        return {
+          kind: 'needs_confirmation',
+          question: { missing: [CONFIRMATION_PENDING_MISSING] },
+          confirmation: {
+            handle: confirmation.handle,
+            summary: confirmation.summary,
+            operation: lastWritable.operation,
+            ...(confirmation.expiresAt === undefined ? {} : { expiresAt: confirmation.expiresAt }),
+          },
+        };
       }
       const needsInput = recorded.find(
         (entry): entry is { operation: string; outcome: Extract<ExecutionOutcome, { status: 'needs_input' }> } =>
