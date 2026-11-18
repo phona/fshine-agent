@@ -101,15 +101,15 @@ grep -rn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=.runtime '<
 | `assessCompactionConfig` | `scripts/eval/pi-native/safe-config.ts:136` | `safe-config.test.ts` | 保留（压缩配置判定） |
 | `compactionSettingsOf` | `scripts/eval/pi-native/safe-config.ts:166` | `safe-config.test.ts` | 保留（压缩设置投影） |
 | `safeConfigEnv` | `scripts/eval/pi-native/safe-config.ts:171` | `safe-config.test.ts` | 保留（配置 env 投影） |
-| `missingCallKinds` | `scripts/eval/r6/accounting.ts:139` | `accounting.test.ts` | 保留（与 `missingSimKinds` 同族的反向绊线） |
-| `FakeHarnessSession` | `scripts/eval/r6/fake-session.ts:47` | `accounting.test.ts`、`pipeline.test.ts` | 保留（评测假会话） |
-| `noTasks` | `scripts/eval/r6/fake-session.ts:106` | `accounting.test.ts`、`pipeline.test.ts` | 保留（评测假数据） |
-| `asAttempt` | `scripts/eval/r6/fake-session.ts:109` | `pipeline.test.ts` | 保留（评测假数据） |
-| `runG3Checks` | `scripts/eval/r6/g3-readiness.ts:147` | `g3-readiness.test.ts` | 保留（就绪检查入口） |
-| `buildPumpTurns` | `scripts/eval/r6/load-generator.ts:90` | `load-generator.test.ts` | 保留（负载生成） |
-| `buildTrackPlan` | `scripts/eval/r6/load-generator.ts:111` | `load-generator.test.ts`、`pipeline.test.ts` | 保留（负载生成） |
-| `factTurns` | `scripts/eval/r6/load-generator.ts:127` | `load-generator.test.ts` | 保留（负载生成） |
-| `statesCovered` | `scripts/eval/r6/oracle.ts:267` | `oracle.test.ts` | 保留（覆盖判定） |
+| `missingCallKinds` | `scripts/eval/long-session/accounting.ts:139` | `accounting.test.ts` | 保留（与 `missingSimKinds` 同族的反向绊线） |
+| `FakeHarnessSession` | `scripts/eval/long-session/fake-session.ts:47` | `accounting.test.ts`、`pipeline.test.ts` | 保留（评测假会话） |
+| `noTasks` | `scripts/eval/long-session/fake-session.ts:106` | `accounting.test.ts`、`pipeline.test.ts` | 保留（评测假数据） |
+| `asAttempt` | `scripts/eval/long-session/fake-session.ts:109` | `pipeline.test.ts` | 保留（评测假数据） |
+| `runG3Checks` | `scripts/eval/long-session/g3-readiness.ts:147` | `g3-readiness.test.ts` | 保留（就绪检查入口） |
+| `buildPumpTurns` | `scripts/eval/long-session/load-generator.ts:90` | `load-generator.test.ts` | 保留（负载生成） |
+| `buildTrackPlan` | `scripts/eval/long-session/load-generator.ts:111` | `load-generator.test.ts`、`pipeline.test.ts` | 保留（负载生成） |
+| `factTurns` | `scripts/eval/long-session/load-generator.ts:127` | `load-generator.test.ts` | 保留（负载生成） |
+| `statesCovered` | `scripts/eval/long-session/oracle.ts:267` | `oracle.test.ts` | 保留（覆盖判定） |
 | `SIM_ALL_CASES` | `scripts/eval/sim/cases/index.ts:355` | `cases.test.ts` | 保留（用例全集） |
 | `createWriteSystem` | `scripts/eval/sim/write-system.ts:52` | `cases.test.ts` | 保留（写系统夹具） |
 | `runShadowComparison` | `scripts/shadow/double-source-harness.ts:462` | `double-source.test.ts` | 保留（影子对照入口） |
@@ -221,8 +221,8 @@ grep -rn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=.runtime '<
 | `scripts/eval/pi-native/r5p4-real.ts:263` | `originalError` | 未使用局部 |
 | `scripts/eval/pi152-stageD/harness.ts:18` | `ExecutionClient` | 未使用 type import |
 | `scripts/eval/pi152-stageD/harness.ts:19` | `ExecutionOutcome` | 未使用 type import |
-| `scripts/eval/r6/harness.ts:26` | `accountCalls` | 未使用局部 |
-| `scripts/eval/r6/multiuser/mu-cases.ts:54` | `plans` | 未使用参数 |
+| `scripts/eval/long-session/harness.ts:26` | `accountCalls` | 未使用局部 |
+| `scripts/eval/long-session/multiuser/mu-cases.ts:54` | `plans` | 未使用参数 |
 | `scripts/eval/sim/cases/scenario-oracles.ts:23` | `SimOracleContext` | 未使用 type |
 | `scripts/eval/sim/run.ts:176` | `tokensOf` | 未使用函数 |
 

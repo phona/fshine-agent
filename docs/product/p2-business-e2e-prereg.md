@@ -27,8 +27,8 @@
 
 ## 一、七类场景清单（逐场景：具体业务话术 + Oracle）
 
-> 语料全部落在**仓内 dummy 夹具既有种子**（`scripts/eval/r6/oracle.ts:36` `FACT_TRUTH`：alpha/beta/documents/bankflow-oct/contoso-*/empty-one/locked-one/faulty-one），真值机械可算；话术取自 `scripts/eval/r6/load-generator.ts` 的建立轮/任务轮/交互轮（`:39`/`:63`/`:74`），按 P2 七类归并。**不引入平台模拟、不使用中性名词之外的平台术语**。
-> Oracle 列：**事实**=`judgeFactAnswer`/`judgeSessionFacts`（`scripts/eval/r6/oracle.ts:112`/`:153`）；**任务**=`judgeTaskContinuity`（`:213`，含硬零 H3/H4/H5/E-G）；**压缩**=`judgeCompactionLifecycle`（`scripts/eval/r6/compaction.ts:126`）；**隔离/投递**=MU 五要素 + 硬零（`scripts/eval/r6/multiuser/mu-support.ts:453`、`:435`）。
+> 语料全部落在**仓内 dummy 夹具既有种子**（`scripts/eval/long-session/oracle.ts:36` `FACT_TRUTH`：alpha/beta/documents/bankflow-oct/contoso-*/empty-one/locked-one/faulty-one），真值机械可算；话术取自 `scripts/eval/long-session/load-generator.ts` 的建立轮/任务轮/交互轮（`:39`/`:63`/`:74`），按 P2 七类归并。**不引入平台模拟、不使用中性名词之外的平台术语**。
+> Oracle 列：**事实**=`judgeFactAnswer`/`judgeSessionFacts`（`scripts/eval/long-session/oracle.ts:112`/`:153`）；**任务**=`judgeTaskContinuity`（`:213`，含硬零 H3/H4/H5/E-G）；**压缩**=`judgeCompactionLifecycle`（`scripts/eval/long-session/compaction.ts:126`）；**隔离/投递**=MU 五要素 + 硬零（`scripts/eval/long-session/multiuser/mu-support.ts:453`、`:435`）。
 
 ### S1 自然语言交办
 
@@ -79,7 +79,7 @@
 
 - **话术（重启进程 / 关停重建 server 之后）**：「我昨天让你查的 bankflow-oct 2025-10 的记录还在吗？把结果给我，别再重跑一遍。」
 - **期望业务结果**：会话历史**恢复**、首回合任务**真实结果可找回**（逐字）、**不重放**执行、**不跨 principal 串读**。
-- **Oracle**（对齐 `scripts/eval/r6/multiuser/mu6-restart.ts:104` 四类断言）：
+- **Oracle**（对齐 `scripts/eval/long-session/multiuser/mu6-restart.ts:104` 四类断言）：
   1. 转录恢复：第二回合上下文含**本人**首回合原文与回复；
   2. 不跨读：上下文与任务行不含他人语料标记（`MuHardZero.cross_principal_leak`）；
   3. 不重放：重启后新 executor 调用 **= 0**（`task_crossover`）；
@@ -217,7 +217,7 @@
 
 ## 五、失败分类（三态冻结；**产品故障样本不作废**）
 
-对齐 `scripts/eval/r6/evidence.ts:24` `SampleDisposition` 与 `:111` `classifySample`（优先级：**产品故障 > 环境中断 > 覆盖不足 > 有效**；产品故障不得被环境信号吞掉）：
+对齐 `scripts/eval/long-session/evidence.ts:24` `SampleDisposition` 与 `:111` `classifySample`（优先级：**产品故障 > 环境中断 > 覆盖不足 > 有效**；产品故障不得被环境信号吞掉）：
 
 | 类 | 判定 | 处置 |
 |---|---|---|
@@ -260,7 +260,7 @@ d = classifySample(evidence, judgement)          // 产品故障 > 环境中断 
 
 ## 六、证据 schema（逐会话）
 
-**基线**：直接承接 `scripts/eval/r6/evidence.ts:64` `SessionEvidence`（字段：`turns/replies/compactionAttempts/tokenCurve/modelCalls/callAccounting/toolCalls/taskTurns/tasksFinal/infraSignals/productFaultSignals` 等），并叠加 MU 五要素记录（`mu-support.ts:453` `MuDeliveryRecord`：`principalId/sessionId/taskId/request/deliveredTo/kind`）。**不新建第二套证据层**。
+**基线**：直接承接 `scripts/eval/long-session/evidence.ts:64` `SessionEvidence`（字段：`turns/replies/compactionAttempts/tokenCurve/modelCalls/callAccounting/toolCalls/taskTurns/tasksFinal/infraSignals/productFaultSignals` 等），并叠加 MU 五要素记录（`mu-support.ts:453` `MuDeliveryRecord`：`principalId/sessionId/taskId/request/deliveredTo/kind`）。**不新建第二套证据层**。
 
 P2 必填字段映射（每会话一条 `SessionEvidence` + 若干 `MuDeliveryRecord`）：
 
@@ -285,7 +285,7 @@ P2 必填字段映射（每会话一条 `SessionEvidence` + 若干 `MuDeliveryRe
 
 ## 七、复用 R6 Harness 的映射
 
-> **总原则**：复用优先于抽象。P2 **不新建**判定/证据/记账/并发/重启框架，全部复用 `scripts/eval/r6/**` 与 `scripts/eval/r6/multiuser/**` 的既有件。
+> **总原则**：复用优先于抽象。P2 **不新建**判定/证据/记账/并发/重启框架，全部复用 `scripts/eval/long-session/**` 与 `scripts/eval/long-session/multiuser/**` 的既有件。
 
 | P2 需求 | 复用的 R6 件 | 接缝 / 说明 |
 |---|---|---|
@@ -317,7 +317,7 @@ P2 必填字段映射（每会话一条 `SessionEvidence` + 若干 `MuDeliveryRe
 - 分叉点：`git merge-base arch/integration exp/pi-native-session-compaction` = **`84a22fa`**（`merge(r5-piopt)`，即 Pi 压缩复用评估）。
 - 两侧头：`arch/integration` = **`f37d11d`**；`exp/pi-native-session-compaction` = **`be61a74`**（提交语 = Pi 原生替换·阶段三最终替换，**未跑真实模型**）。
 - 规模：`git rev-list --left-right --count exp...integration` = **18 / 31**（exp 独有 18、integration 独有 31）。
-- 改动面：`git diff --stat 84a22fa exp/...` = 48 files +5240/−2381；`git diff --stat 84a22fa arch/integration` = 45 files +7905/−8（含 B1 session-persistence、B2 silent-shadow-gate、R6 全套 `scripts/eval/r6/**`、`docs/product` 8 篇）。
+- 改动面：`git diff --stat 84a22fa exp/...` = 48 files +5240/−2381；`git diff --stat 84a22fa arch/integration` = 45 files +7905/−8（含 B1 session-persistence、B2 silent-shadow-gate、R6 全套 `scripts/eval/long-session/**`、`docs/product` 8 篇）。
 - 文本冲突面（两侧共同改动文件 `comm -12`）：**仅 `apps/server/server.test.ts` 与 `docs/decision-log.md`**。
 
 ### 8.2 结论：P2 必须先合流
@@ -337,7 +337,7 @@ P2 必填字段映射（每会话一条 `SessionEvidence` + 若干 `MuDeliveryRe
 3. **合流分支验证（确定性门，全绿方可提请 owner）**：
    - `tsc` 类型检查全绿；
    - `npm test` **全量**通过；
-   - **关键确定性用例**（零真实模型）逐一通过：MU 全套 `npx vitest run scripts/eval/r6/multiuser/mu.test.ts`（MU-1～MU-10，含 MU-6 重启恢复、MU-8 群私隔离）、B1 会话持久化接线用例、B2 silent-shadow 用例、Pi 压缩生命周期确定性用例。
+   - **关键确定性用例**（零真实模型）逐一通过：MU 全套 `npx vitest run scripts/eval/long-session/multiuser/mu.test.ts`（MU-1～MU-10，含 MU-6 重启恢复、MU-8 群私隔离）、B1 会话持久化接线用例、B2 silent-shadow 用例、Pi 压缩生命周期确定性用例。
 4. **提请 owner 批准合入 `arch/integration`**：附合流分支 SHA、`tsc`/全量/关键用例读数、两处冲突的裁决记录。**批准后**由集成 Agent 单点合入。
 5. **合入后再跑 P2**：P2 以合流后的 integration HEAD 为基线，按 §一～§七执行。
 

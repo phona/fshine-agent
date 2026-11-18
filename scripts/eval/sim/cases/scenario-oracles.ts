@@ -19,7 +19,7 @@
  * 不参与冒充话术的判断；用户没有可质疑对象时（系统首答就正确）不逼它制造质疑。
  */
 
-import { parseNumbers } from '../../r6/oracle';
+import { parseNumbers } from '../../long-session/oracle';
 import type { SimExecutionFact, SimOracle, SimOracleContext, SimOracleVerdict } from '../oracle';
 import {
   ALPHA_COUNT, ALPHA_ITEM_VALUES, ALPHA_SUM, ALPHA_TRUTH_PATTERNS,

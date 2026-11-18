@@ -5,7 +5,7 @@
 
 ## 1. 背景与解锁
 
-MU-1～MU-10 多用户确定性用例（`scripts/eval/r6/multiuser/`）中，MU-6 原本因依赖 **B1 会话持久化未合入**
+MU-1～MU-10 多用户确定性用例（`scripts/eval/long-session/multiuser/`）中，MU-6 原本因依赖 **B1 会话持久化未合入**
 而标 `BLOCKED`（`mu-cases.ts` 旧版：`existsSync(packages/agent/src/session-persistence.ts)` 为假 → BLOCKED）。
 B1 接线已随 `ebdaf71 merge(b1-wiring)` 合入基线：`SessionPersistence` 已接入 `createServer` 的真实会话生命周期
 （打开载入 / 回合后增量持久化 / 写失败 fail-open），故 MU-6 的 `BLOCKED` 解除，转为真实确定性用例。
@@ -27,7 +27,7 @@ MU-6 只 import 既有装配，不新增会话 / 压缩机制：
 **不使用** `registry.get` 代替交互路径：场景驱动全部走 `server.handler`（真实交互路径），判定读 `readTasks`
 （Task Registry 机械 Oracle 的只读投影）。**不建**第二套会话 / 压缩机制。
 
-## 3. 场景形状（`scripts/eval/r6/multiuser/mu6-restart.ts`）
+## 3. 场景形状（`scripts/eval/long-session/multiuser/mu6-restart.ts`）
 
 - ≥3 principal：`mu-alice` / `mu-bob` / `mu-carol`（`MU_PRINCIPALS`），各**一个独立会话** `conv-<user>`
   （`sessionId = wecom:conv-<user>`）。
@@ -60,7 +60,7 @@ MU-6 本身即本任务要落地的对象（旧版是 `BLOCKED` 占位，非既�
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型 | `npm run typecheck` | 0 错误（无输出） |
-| 定向 | `npx vitest run scripts/eval/r6/multiuser/mu.test.ts` | 12 passed（含 MU-6 PASS） |
+| 定向 | `npx vitest run scripts/eval/long-session/multiuser/mu.test.ts` | 12 passed（含 MU-6 PASS） |
 | 全量 | `npm test` | 98 files passed；988 passed + 3 todo；0 failed |
 | 例数 | `grep -c "it(" mu.test.ts`（working vs `HEAD`） | 12 = 12（未新增/删除用例；新增模块非 `.test.ts`） |
 | 反向绊线 | 临时把 `server.ts` 的 `transcriptStore` 置为 `undefined` 后跑 MU-6 | 变红（`FAIL`：`expected 'FAIL' to be 'PASS'`）；已 `git checkout` 复原 |

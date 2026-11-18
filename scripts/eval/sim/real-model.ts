@@ -4,7 +4,7 @@
  * 只做一件事：一次请求 → 一次补全 + usage。不重试、不掩盖限流（429 原样抛出，
  * 由 trial 记录为 error，样本照常保留）。被测系统不经过这里（走生产同源装配）。
  */
-import type { CallTokens } from '../r6/accounting';
+import type { CallTokens } from '../long-session/accounting';
 import type { ModelPrompt, SimModel, SimModelCompletion } from './simulator';
 
 export interface ChatModelInput {

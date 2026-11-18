@@ -4,7 +4,7 @@
 > （不引框架、不建服务、不加数据库）。复用现有资产：`scripts/ask-runtime.ts`（生产同源装配）、
 > `scripts/eval/fixtures/dummy-platform`（仓内 dummy 执行层）、`scripts/eval/business-e2e/batch.ts`
 > （并发池 + 硬上限登记）、`scripts/eval/business-e2e/collect.ts`（证据/manifest sha256 纪律）、
-> `scripts/eval/r6/oracle.ts`（事实真值机械判定）、`scripts/eval/r6/accounting.ts`（分类记账语义）。
+> `scripts/eval/long-session/oracle.ts`（事实真值机械判定）、`scripts/eval/long-session/accounting.ts`（分类记账语义）。
 
 ## 冻结参数
 

@@ -7,7 +7,7 @@
 
 ## 1. 把 MU-8 从 BLOCKED 接线的动机
 
-上个多用户 run 的基线（`b90f12f`）不含 B2 静默闸（`packages/channel-wecom/src/silent-shadow-gate.ts` 不存在），MU-8 判据「静默投递 = 0」不可满足，故标 `BLOCKED`（`scripts/eval/r6/multiuser/mu-cases.ts` 旧版 `mu8`；`docs/decision-log.md` §2659-2660）。本基线 B2 已合入，MU-8 改为**确定性两段用例**（会话/任务层 + 投递层），只复用既有装配，不新建第二套会话/静默机制。
+上个多用户 run 的基线（`b90f12f`）不含 B2 静默闸（`packages/channel-wecom/src/silent-shadow-gate.ts` 不存在），MU-8 判据「静默投递 = 0」不可满足，故标 `BLOCKED`（`scripts/eval/long-session/multiuser/mu-cases.ts` 旧版 `mu8`；`docs/decision-log.md` §2659-2660）。本基线 B2 已合入，MU-8 改为**确定性两段用例**（会话/任务层 + 投递层），只复用既有装配，不新建第二套会话/静默机制。
 
 ## 2. 复用点（不新增机制）
 
@@ -21,7 +21,7 @@
 | 适配器闸门接线 | `adapter.ts:148`（选项）、`:208`（解析）、`:221`（`gate.wrap`）；`shadowEvidence()` `:313-320` | 显式 `silent` → 全部用户可见投递被抑制 |
 | 记录型假 SDK 范式 | `packages/channel-wecom/adapter.silent-shadow.test.ts:36-91` | 本用例在 `mu-support.ts` 的 `MuSdkRecorder` 中同形复刻（记录每次出站调用） |
 
-夹具：`scripts/eval/r6/multiuser/mu-support.ts` 新增 `MuSdkRecorder` / `startSilentWecomChannel` / `wecomTextFrame` / `settle`；用例体：`scripts/eval/r6/multiuser/mu-cases.ts` 的 `mu8SessionLayer` / `mu8DeliveryLayer` / `mu8`。
+夹具：`scripts/eval/long-session/multiuser/mu-support.ts` 新增 `MuSdkRecorder` / `startSilentWecomChannel` / `wecomTextFrame` / `settle`；用例体：`scripts/eval/long-session/multiuser/mu-cases.ts` 的 `mu8SessionLayer` / `mu8DeliveryLayer` / `mu8`。
 
 ## 3. 判据（命中即 FAIL）
 
@@ -43,7 +43,7 @@
 
 ## 4. 证据（本次运行）
 
-命令：`npx vitest run scripts/eval/r6/multiuser/mu.test.ts`；证据落 `.runtime/r6/multiuser/MU-8/evidence.json`（gitignored）。
+命令：`npx vitest run scripts/eval/long-session/multiuser/mu.test.ts`；证据落 `.runtime/r6/multiuser/MU-8/evidence.json`（gitignored）。
 
 第一段：`sessionsDistinct=true`、`inheritedPrivateHistory=false`、`leakedIntoPrivate=false`、`groupFirstRejected=true`、`groupFirstLeaked=false`、`privOwnResolved=true`、`groupOwnResolved=true`、`scopeViolations=[]`、`crossoverCodes=[]`。任务：私聊 `taskNo=1` `sessionId=wecom:mu-alice`；群聊 `taskNo=2` `sessionId=wecom:group-g1`（均 `completed` 且带 `requestIds`）。
 
@@ -74,5 +74,5 @@ MU-8 **PASS**，`hardZeroHits=[]`。群聊不隐式继承私聊的任务/授权/
 ## 8. 校验命令与结果
 
 - `npm run typecheck` → 0 错误。
-- `npx vitest run scripts/eval/r6/multiuser/mu.test.ts` → 12 passed（与改动前同为 12 条：MU-8 由 1 条 BLOCKED 断言换为 1 条 PASS 断言，例数不变）。
+- `npx vitest run scripts/eval/long-session/multiuser/mu.test.ts` → 12 passed（与改动前同为 12 条：MU-8 由 1 条 BLOCKED 断言换为 1 条 PASS 断言，例数不变）。
 - `npm test`（全量）→ `Test Files 96 passed (96)`、`Tests 981 passed | 3 todo (984)`，全绿。

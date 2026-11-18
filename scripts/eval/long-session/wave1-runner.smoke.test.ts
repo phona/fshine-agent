@@ -14,7 +14,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '../../..');
-const RUNNER = path.join(REPO_ROOT, 'scripts/eval/r6/wave1-runner.ts');
+const RUNNER = path.join(REPO_ROOT, 'scripts/eval/long-session/wave1-runner.ts');
 
 function runWith(args: readonly string[]) {
   return spawnSync(process.execPath, ['--import', 'tsx', RUNNER, ...args], {

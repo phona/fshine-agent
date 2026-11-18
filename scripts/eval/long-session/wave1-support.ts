@@ -1,7 +1,7 @@
 /**
  * R6 Wave1 · 可单测的纯逻辑（参数解析 / 动态推进 / 结构泄漏批聚合）。
  *
- * **主线 harness 没有 `nextTurn`**：`scripts/eval/r6/harness.ts` 只顺序跑 `plan.turns`，
+ * **主线 harness 没有 `nextTurn`**：`scripts/eval/long-session/harness.ts` 只顺序跑 `plan.turns`，
  * 并在结束时统一做 Oracle 判定 + 结构泄漏扫描。Wave1 仍需「初始建立轮跑完后，按已观测
  * 的有效压缩次数决定是否追加推进轮」——本模块在每次 `send` 返回后向 `plan.turns`
  * 追加下一段真实内容；主线 harness 的 `for (const spec of plan.turns)` 是活数组迭代，

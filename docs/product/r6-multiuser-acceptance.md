@@ -1,7 +1,7 @@
 # R6 多用户 E2E MU · 验收报告（MU-1～MU-10）
 
 > 分支：`arch/r6-multiuser`（worktree `~/projects/fshine-agent-r6-multiuser`），基线 = `arch/integration` 启动时 HEAD `b90f12f`（`git rev-parse HEAD` = `b90f12f05368d45ddd125b32017205b569aecd97`）。
-> 范围：**确定性**多用户场景组（**零真实模型、零真实企微、零真实写**）。复用现有 R6 Harness（`scripts/eval/r6/{oracle,compaction}.ts`），产 `scripts/eval/r6/multiuser/**` 与本报告。
+> 范围：**确定性**多用户场景组（**零真实模型、零真实企微、零真实写**）。复用现有 R6 Harness（`scripts/eval/long-session/{oracle,compaction}.ts`），产 `scripts/eval/long-session/multiuser/**` 与本报告。
 > 本 run **不改产品码、不改 Worker 提示、不改 D7 判据、不引 Runtime 治理机制、不引第二套压缩/会话机制、不接真实企微/生产数据/真实写**。
 
 ---
@@ -31,7 +31,7 @@
 
 ## 二、逐条结果（PASS / FAIL / BLOCKED + 原始证据）
 
-> 原始证据出处：`.runtime/r6/multiuser/<id>/evidence.json`（下引为实跑产出摘录）。运行命令：`npx vitest run scripts/eval/r6/multiuser/mu.test.ts`。
+> 原始证据出处：`.runtime/r6/multiuser/<id>/evidence.json`（下引为实跑产出摘录）。运行命令：`npx vitest run scripts/eval/long-session/multiuser/mu.test.ts`。
 
 ### MU-1 不同 principal 同时交办 — **PASS**
 
@@ -117,10 +117,10 @@ alice 的执行注入确定性失败（假执行面按 `--collection` 返回 `fa
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型 | `npm run typecheck`（`tsc --noEmit`） | **0 错误** |
-| 定向 | `npx vitest run scripts/eval/r6/multiuser/mu.test.ts` | **12 passed** |
+| 定向 | `npx vitest run scripts/eval/long-session/multiuser/mu.test.ts` | **12 passed** |
 | 单一配置源守卫 | `npx vitest run packages/agent/resource-policy-single-source.test.ts` | **2 passed**（未触旋钮双源） |
 | 全量 | `npm test` | **93 文件 / 934 passed + 3 todo** |
-| 全量基线 | 移出 `scripts/eval/r6/multiuser/` 后 `npm test` | 92 文件 / 922 passed + 3 todo |
+| 全量基线 | 移出 `scripts/eval/long-session/multiuser/` 后 `npm test` | 92 文件 / 922 passed + 3 todo |
 
 → 例数**只增不减**（+1 文件 / +12 用例；0 删除/弱化）。
 
@@ -138,7 +138,7 @@ alice 的执行注入确定性失败（假执行面按 `--collection` 返回 `fa
 ## 六、边界声明（对齐 owner 与 AGENTS.md）
 
 - **零真实写**：假执行面只返回 `completed`/`failed` 结果，不落任何业务副作用；通知 sink 为假件。
-- **不改产品码**：仅新增 `scripts/eval/r6/multiuser/**` 与本报告；装配/执行契约/Worker 提示/D7 判据/状态机**零改动**（`git status` 仅新文件）。
-- **复用既有 R6 Harness**：机械任务 Oracle 与压缩判据直接 `import ../oracle` / `../compaction`；假件形状对齐既有 `scripts/eval/r6/fake-session.ts` 与 `apps/server/server-r4-background.test.ts`。
-- **`.runtime` 证据不 `git add`**：`scripts/eval/r6/multiuser` 的产物落 `.runtime/r6/multiuser/**`（gitignored）。
+- **不改产品码**：仅新增 `scripts/eval/long-session/multiuser/**` 与本报告；装配/执行契约/Worker 提示/D7 判据/状态机**零改动**（`git status` 仅新文件）。
+- **复用既有 R6 Harness**：机械任务 Oracle 与压缩判据直接 `import ../oracle` / `../compaction`；假件形状对齐既有 `scripts/eval/long-session/fake-session.ts` 与 `apps/server/server-r4-background.test.ts`。
+- **`.runtime` 证据不 `git add`**：`scripts/eval/long-session/multiuser` 的产物落 `.runtime/r6/multiuser/**`（gitignored）。
 - **`docs/decision-log.md` 由集成单点写者另行登记**（本场景组实现本身不改该文件；登记见 §八十）。

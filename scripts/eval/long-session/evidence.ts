@@ -8,7 +8,7 @@
  *   · 单实验硬停保留；真实模型调用**完整计量**（含摘要调用在内，能分离则单列）。
  *   · 观测只写事实，不改触发/门控。
  *
- * 本模块是**纯函数 + 落盘**：不 import 产品运行时。落盘根 `.runtime/r6/...`（gitignored）。
+ * 本模块是**纯函数 + 落盘**：不 import 产品运行时。落盘根 `.runtime/long-session/...`（gitignored）。
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -127,7 +127,7 @@ export function classifySample(evidence: SessionEvidence, judgement: SessionJudg
 
 /** 证据根目录（gitignored）。 */
 export function evidenceDir(root: string, wave: Wave, track: Track, sessionId: string): string {
-  return path.join(root, 'r6', wave.toLowerCase(), track.toLowerCase(), sessionId);
+  return path.join(root, 'long-session', wave.toLowerCase(), track.toLowerCase(), sessionId);
 }
 
 /** 汇总清单（evidence.json 内容；只陈述事实 + Oracle 结论 + 处置）。 */

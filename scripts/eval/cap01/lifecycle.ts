@@ -52,8 +52,8 @@
  *        ④ A 自己引用同一 fileId 成功（拒的不是文件本身，是越权）。
  *
  * 运行（零模型、零网络、零密钥）：
- *   node --import tsx scripts/eval/cap01/r6-lifecycle.ts [--scenario s1,s2,...] [--out-dir <dir>]
- * 缺省 out-dir = .runtime/eval-cap01-r6-lifecycle/<时间戳>（.runtime 不进 git）。
+ *   node --import tsx scripts/eval/cap01/lifecycle.ts [--scenario s1,s2,...] [--out-dir <dir>]
+ * 缺省 out-dir = .runtime/eval-cap01-lifecycle/<时间戳>（.runtime 不进 git）。
  * 退出码：0 = 无 FAIL（UNDEFINED 不计失败，进 summary.undefinedScenarios）；1 = 任一 FAIL。
  */
 import { createHash } from 'node:crypto';
@@ -91,7 +91,7 @@ const EXPECTED_FILE_INPUT_UNAVAILABLE_MESSAGE =
 // ── 夹具字节：确定性 ASCII（生命周期验收不解析内容，字节只用于哈希/逐字节比对） ──
 
 function fixtureBytes(label: string): Buffer {
-  return Buffer.from(`r6-lifecycle fixture bytes: ${label}\n`, 'utf8');
+  return Buffer.from(`lifecycle fixture bytes: ${label}\n`, 'utf8');
 }
 
 function sha256Of(bytes: Buffer): string {
@@ -167,7 +167,7 @@ type MainBehavior = (ctx: {
 
 const workerNeverCalled: TurnDriver = {
   async run() {
-    throw new Error('（r6-lifecycle）Worker 不应被调用：本脚本无委派场景');
+    throw new Error('（lifecycle）Worker 不应被调用：本脚本无委派场景');
   },
 };
 
@@ -240,8 +240,8 @@ const faceClient: ExecutionClient = {
 const CHANNEL = 'wecom';
 const USER_A = 'user-a';
 const USER_B = 'user-b';
-const CONVERSATION_A = 'conv-r6-solo';
-const CONVERSATION_SHARED = 'conv-r6-shared';
+const CONVERSATION_A = 'conv-lifecycle-solo';
+const CONVERSATION_SHARED = 'conv-lifecycle-shared';
 
 interface Harness {
   dir: string;
@@ -253,7 +253,7 @@ interface Harness {
 }
 
 async function makeHarness(label: string, behavior: MainBehavior, userIds: readonly string[]): Promise<Harness> {
-  const dir = mkdtempSync(path.join(os.tmpdir(), `cap01-r6-${label}-`));
+  const dir = mkdtempSync(path.join(os.tmpdir(), `cap01-lifecycle-${label}-`));
   const dbPath = path.join(dir, 'state.db');
   const config: AppConfig = {
     principals: Object.fromEntries(
@@ -268,7 +268,7 @@ async function makeHarness(label: string, behavior: MainBehavior, userIds: reado
   const sink: Sink = { runs: [], calls: [] };
   const logs: Array<Record<string, unknown>> = [];
   const server = await createServer({
-    env: { LLM_MODEL: 'scripted-r6' },
+    env: { LLM_MODEL: 'scripted-lifecycle' },
     config,
     dbPath,
     createDrivers: () => ({ mainDriver: scriptedMainDriver(behavior, sink), workerDriver: workerNeverCalled }),
@@ -448,7 +448,7 @@ async function runScenarioS1(): Promise<ScenarioOutcome> {
     async (ctx) => {
       if (ctx.turnNo === 1) return '好的，文件已登记，等你下一步指示。';
       // 第 2 回合：真引用——按清单里的 fileId 调 run_js，验证跨回合解析仍然成立。
-      if (state.fileId === undefined) throw new Error('（r6 S1）第 2 回合缺少第 1 回合登记的 fileId');
+      if (state.fileId === undefined) throw new Error('（lifecycle S1）第 2 回合缺少第 1 回合登记的 fileId');
       await ctx.exec('run_js', {
         code: "const fs = require('fs'); console.log(fs.readdirSync('in').join(','));",
         inputs: [state.fileId],
@@ -463,13 +463,13 @@ async function runScenarioS1(): Promise<ScenarioOutcome> {
   try {
     const attachment = stagedAttachment(harness.dir, S1_NAME, bytesA);
     handler1 = await callHandler(harness, incomingMessage({
-      userId: USER_A, conversationId: CONVERSATION_A, messageId: 'r6-s1-1',
+      userId: USER_A, conversationId: CONVERSATION_A, messageId: 'lifecycle-s1-1',
       text: '这是 12 月销售明细，先收下；我下一条消息再告诉你怎么处理。',
       attachments: [attachment],
     }));
     state.fileId = registeredFileIdsOf(harness.logs, scope.principalId)[0];
     handler2 = await callHandler(harness, incomingMessage({
-      userId: USER_A, conversationId: CONVERSATION_A, messageId: 'r6-s1-2',
+      userId: USER_A, conversationId: CONVERSATION_A, messageId: 'lifecycle-s1-2',
       text: '刚发的那份明细还在吗？在的话直接按文件清单引用它汇总。',
     }));
   } finally {
@@ -537,7 +537,7 @@ async function runScenarioS2(): Promise<ScenarioOutcome> {
     for (const [index, bytes] of [[1, bytesA], [2, bytesB]] as const) {
       const attachment = stagedAttachment(harness.dir, S2_NAME, bytes);
       handlerCalls.push(await callHandler(harness, incomingMessage({
-        userId: USER_A, conversationId: CONVERSATION_A, messageId: `r6-s2-${index}`,
+        userId: USER_A, conversationId: CONVERSATION_A, messageId: `lifecycle-s2-${index}`,
         text: index === 1 ? '上传第一版报表。' : '这是同名的新版报表，内容改过了。',
         attachments: [attachment],
       })));
@@ -628,7 +628,7 @@ async function runScenarioS3(): Promise<ScenarioOutcome> {
     for (const index of [1, 2]) {
       const attachment = stagedAttachment(harness.dir, S3_NAME, bytes);
       handlerCalls.push(await callHandler(harness, incomingMessage({
-        userId: USER_A, conversationId: CONVERSATION_A, messageId: `r6-s3-${index}`,
+        userId: USER_A, conversationId: CONVERSATION_A, messageId: `lifecycle-s3-${index}`,
         text: index === 1 ? '上传数据文件。' : '重新上传同一份数据文件。',
         attachments: [attachment],
       })));
@@ -694,7 +694,7 @@ async function runScenarioS4(): Promise<ScenarioOutcome> {
       stagedAttachment(harness.dir, '乙表.xlsx', bytesY),
     ];
     call = await callHandler(harness, incomingMessage({
-      userId: USER_A, conversationId: CONVERSATION_A, messageId: 'r6-s4-1',
+      userId: USER_A, conversationId: CONVERSATION_A, messageId: 'lifecycle-s4-1',
       text: '这两个文件都收一下，之后我会用到。',
       attachments,
     }));
@@ -762,7 +762,7 @@ async function runScenarioS5(): Promise<ScenarioOutcome> {
     ] as const) {
       const attachment = stagedAttachment(harness.dir, name, bytes);
       handlerCalls.push(await callHandler(harness, incomingMessage({
-        userId: USER_A, conversationId: CONVERSATION_A, messageId: `r6-s5-${index}`, text, attachments: [attachment],
+        userId: USER_A, conversationId: CONVERSATION_A, messageId: `lifecycle-s5-${index}`, text, attachments: [attachment],
       })));
     }
   } finally {
@@ -825,7 +825,7 @@ async function runScenarioS6(): Promise<ScenarioOutcome> {
       if (ctx.lastUserText.startsWith('把刚发的')) {
         // B 的回合（createDrivers 按会话各建驱动实例；这里按消息文本判别身份分支）：
         // 先引用 A 的 fileId（越权），再引用一个不存在的 fileId（同码对照）。
-        if (state.fileId === undefined) throw new Error('（r6 S6）B 回合缺少 A 登记的 fileId');
+        if (state.fileId === undefined) throw new Error('（lifecycle S6）B 回合缺少 A 登记的 fileId');
         try {
           await ctx.exec('run_js', { code: "console.log('should-not-run')", inputs: [state.fileId] });
         } catch {
@@ -840,7 +840,7 @@ async function runScenarioS6(): Promise<ScenarioOutcome> {
       }
       if (ctx.turnNo === 1) return '好的，共享文件已登记，等你下一步指示。';
       // A 的第 2 回合：同一 fileId、本人引用——应成功（拒的是越权，不是文件）。
-      if (state.fileId === undefined) throw new Error('（r6 S6）A 第 2 回合缺少已登记的 fileId');
+      if (state.fileId === undefined) throw new Error('（lifecycle S6）A 第 2 回合缺少已登记的 fileId');
       await ctx.exec('run_js', {
         code: "const fs = require('fs'); console.log(fs.readdirSync('in').join(','));",
         inputs: [state.fileId],
@@ -857,16 +857,16 @@ async function runScenarioS6(): Promise<ScenarioOutcome> {
   try {
     const attachment = stagedAttachment(harness.dir, '共享数据.xlsx', bytesA);
     handlerA1 = await callHandler(harness, incomingMessage({
-      userId: USER_A, conversationId: CONVERSATION_SHARED, messageId: 'r6-s6-a1',
+      userId: USER_A, conversationId: CONVERSATION_SHARED, messageId: 'lifecycle-s6-a1',
       text: '上传共享文件，等下要用。', attachments: [attachment],
     }));
     state.fileId = registeredFileIdsOf(harness.logs, scopeA.principalId)[0];
     handlerB1 = await callHandler(harness, incomingMessage({
-      userId: USER_B, conversationId: CONVERSATION_SHARED, messageId: 'r6-s6-b1',
+      userId: USER_B, conversationId: CONVERSATION_SHARED, messageId: 'lifecycle-s6-b1',
       text: '把刚发的共享文件按月汇总一下。',
     }));
     handlerA2 = await callHandler(harness, incomingMessage({
-      userId: USER_A, conversationId: CONVERSATION_SHARED, messageId: 'r6-s6-a2',
+      userId: USER_A, conversationId: CONVERSATION_SHARED, messageId: 'lifecycle-s6-a2',
       text: '现在把我的共享文件按月汇总一下。',
     }));
   } finally {
@@ -982,7 +982,7 @@ const ALL_SCENARIOS: ScenarioId[] = ['s1', 's2', 's3', 's4', 's5', 's6'];
 function parseCli(argv: readonly string[]): CliOptions {
   const options: CliOptions = {
     scenarios: [...ALL_SCENARIOS],
-    outDir: path.join(REPO_ROOT, '.runtime', 'eval-cap01-r6-lifecycle', new Date().toISOString().replace(/[:.]/g, '-')),
+    outDir: path.join(REPO_ROOT, '.runtime', 'eval-cap01-lifecycle', new Date().toISOString().replace(/[:.]/g, '-')),
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
@@ -1018,11 +1018,11 @@ const SCENARIO_RUNNERS: Record<ScenarioId, () => Promise<ScenarioOutcome>> = {
 async function main(): Promise<void> {
   const cli = parseCli(process.argv.slice(2));
   mkdirSync(cli.outDir, { recursive: true });
-  console.log(`[cap01-r6] mode=scripted（零模型调用）scenarios=${cli.scenarios.join(',')} outDir=${cli.outDir}`);
+  console.log(`[cap01-lifecycle] mode=scripted（零模型调用）scenarios=${cli.scenarios.join(',')} outDir=${cli.outDir}`);
 
   const outcomes: ScenarioOutcome[] = [];
   for (const scenario of cli.scenarios) {
-    console.log(`[cap01-r6] ── 场景 ${scenario.toUpperCase()} 开始 ──`);
+    console.log(`[cap01-lifecycle] ── 场景 ${scenario.toUpperCase()} 开始 ──`);
     const started = Date.now();
     let outcome: ScenarioOutcome;
     try {
@@ -1042,15 +1042,15 @@ async function main(): Promise<void> {
     const evidencePath = path.join(cli.outDir, `${outcome.scenario}-evidence.json`);
     writeFileSync(evidencePath, JSON.stringify(outcome.evidence, null, 2) + '\n');
     for (const check of outcome.checks) {
-      console.log(`[cap01-r6] ${outcome.scenario} ${check.pass ? 'PASS' : 'FAIL'} ${check.name} — ${check.detail}`);
+      console.log(`[cap01-lifecycle] ${outcome.scenario} ${check.pass ? 'PASS' : 'FAIL'} ${check.name} — ${check.detail}`);
     }
     for (const observation of outcome.observations) {
-      console.log(`[cap01-r6] ${outcome.scenario} OBSERVE ${observation.name} — ${observation.detail}`);
+      console.log(`[cap01-lifecycle] ${outcome.scenario} OBSERVE ${observation.name} — ${observation.detail}`);
     }
     if (outcome.undefinedReason !== undefined) {
-      console.log(`[cap01-r6] ${outcome.scenario} UNDEFINED — ${outcome.undefinedReason}`);
+      console.log(`[cap01-lifecycle] ${outcome.scenario} UNDEFINED — ${outcome.undefinedReason}`);
     }
-    console.log(`[cap01-r6] ── 场景 ${outcome.scenario.toUpperCase()} ${outcome.status.toUpperCase()}（${Date.now() - started}ms，证据=${evidencePath}）──`);
+    console.log(`[cap01-lifecycle] ── 场景 ${outcome.scenario.toUpperCase()} ${outcome.status.toUpperCase()}（${Date.now() - started}ms，证据=${evidencePath}）──`);
     outcomes.push(outcome);
   }
 
@@ -1076,19 +1076,19 @@ async function main(): Promise<void> {
   const summaryPath = path.join(cli.outDir, 'summary.json');
   writeFileSync(summaryPath, JSON.stringify(summary, null, 2) + '\n');
   for (const outcome of outcomes) {
-    console.log(`[cap01-r6] ${outcome.scenario}=${outcome.status.toUpperCase()}（asserts=${outcome.checks.filter((check) => check.pass).length}/${outcome.checks.length}）`);
+    console.log(`[cap01-lifecycle] ${outcome.scenario}=${outcome.status.toUpperCase()}（asserts=${outcome.checks.filter((check) => check.pass).length}/${outcome.checks.length}）`);
   }
   if (undefinedScenarios.length > 0) {
-    console.log(`[cap01-r6] UNDEFINED（记录不判定）= ${undefinedScenarios.map((outcome) => outcome.scenario).join(',')} — 明细见 summary.json`);
+    console.log(`[cap01-lifecycle] UNDEFINED（记录不判定）= ${undefinedScenarios.map((outcome) => outcome.scenario).join(',')} — 明细见 summary.json`);
   }
-  console.log(`[cap01-r6] 汇总=${summaryPath}`);
+  console.log(`[cap01-lifecycle] 汇总=${summaryPath}`);
   if (failed.length > 0) process.exitCode = 1;
 }
 
 const isDirectRun = process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isDirectRun) {
   main().catch((error) => {
-    console.error('[cap01-r6] 入口失败：', error);
+    console.error('[cap01-lifecycle] 入口失败：', error);
     process.exitCode = 1;
   });
 }

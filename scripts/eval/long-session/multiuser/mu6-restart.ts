@@ -31,7 +31,7 @@ import {
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..', '..', '..');
-const EVIDENCE_ROOT = path.join(REPO_ROOT, '.runtime', 'r6', 'multiuser');
+const EVIDENCE_ROOT = path.join(REPO_ROOT, '.runtime', 'long-session', 'multiuser');
 
 /** 首/次回合语料后缀与确定性结果前缀（结果按请求原文派生，不依赖并发调用顺序）。 */
 const R1_SUFFIX = ' 重启前交办';

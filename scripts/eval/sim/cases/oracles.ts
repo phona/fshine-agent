@@ -14,7 +14,7 @@
  *   · `oracle:archived-reference`      —— 用户真的用了指代；「刚才那个 / 第二条」解析正确；不重查、不编造。
  */
 
-import { parseNumbers } from '../../r6/oracle';
+import { parseNumbers } from '../../long-session/oracle';
 import type { SimExecutionFact, SimOracle, SimOracleContext, SimOracleVerdict } from '../oracle';
 import { isRepeatedIntent, stripMarkdownNoise } from '../simulator';
 

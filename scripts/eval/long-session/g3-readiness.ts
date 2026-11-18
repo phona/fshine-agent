@@ -104,7 +104,7 @@ export function checkPrincipalIsolation(): G3Item {
 
 /** 证据采集检查：对最小假会话证据落盘，断言 schema 文件齐全。 */
 export function checkEvidenceCollection(): G3Item {
-  const tmp = mkdtempSync(path.join(os.tmpdir(), 'r6-g3-'));
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'long-session-g3-'));
   try {
     const analysis = analyzeCompaction([], []);
     const evidence: SessionEvidence = {

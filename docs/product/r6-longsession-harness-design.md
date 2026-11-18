@@ -1,6 +1,6 @@
 # R6 · 真实生产窗口长会话长稳 · Harness 设计（修订版 v2）
 
-- 状态：**修订版 v2**，与 `docs/product/r6-longsession-prereg.md`（预注册修订版 v2）配套。本轮交付**测试基建（确定性、零真实模型）**：`scripts/eval/r6/**`。
+- 状态：**修订版 v2**，与 `docs/product/r6-longsession-prereg.md`（预注册修订版 v2）配套。本轮交付**测试基建（确定性、零真实模型）**：`scripts/eval/long-session/**`。
 - 归属：`arch/r6-harness`（worktree `~/projects/fshine-agent-r6-harness`，基线 `e2d12bd`）。领号：负载/观测设施用 **R6** 前缀，不新增 Runtime 机制。
 - 一图概览：`负载生成器（多轮驱动 + 上下文推进器）→ 真实 Pi 驱动/装配（与生产同源；Wave1 接线）→ 事实 Oracle / 任务 Oracle(Task Registry) / Pi 原生压缩生命周期采集 → 冻结 rubric 判官 → 逐会话证据 schema → 三态处置`。**全链只采集事实，不在任何环节改变压缩触发/门控。**
 
@@ -14,7 +14,7 @@
 6. **夹具隔离**：负载数据使用**独立于现有 dummy-platform seedState** 的专用夹具（新增集合/新 profile 或独立 state 根），避免改动 `scripts/eval/fixtures/dummy-platform/bin/dummy.cjs` 既有种子面而影响既有判定。
 7. `.runtime` gitignored、不得 `git add`；不改 `docs/decision-log.md`。
 
-## 二、负载生成器（实现：`scripts/eval/r6/load-generator.ts`）
+## 二、负载生成器（实现：`scripts/eval/long-session/load-generator.ts`）
 
 ### 2.0 与既有基建的关系
 
@@ -67,7 +67,7 @@
 - 逐轮 `kind ∈ {establish, fact, task, interaction, pump, probe}`；证据 schema 保留 `kind`。
 - **人工大载荷压力**（`pump`）与**普通业务多轮交互**（`fact`/`task`/`interaction`）**分开归因、分别报告**；**不得**把载荷压力结果外推成日常业务可靠性。
 
-## 三、事实 Oracle（实现：`scripts/eval/r6/oracle.ts`）
+## 三、事实 Oracle（实现：`scripts/eval/long-session/oracle.ts`）
 
 **目的**：把「事实保留」从模型自述中解耦，用**确定性真值**判定，且与业务夹具同源。
 
@@ -87,7 +87,7 @@
 | empty-one | 0 | 0 | W1 | 唯一答案=「空」 |
 | locked-one | 1 | 900 | W1 | `locked` 只挡写 |
 
-> 真值表以代码为准：`scripts/eval/r6/oracle.ts` `FACT_TRUTH`（含逐条 `items`）；歧义对 `AMBIGUOUS_PREFIX`（contoso→trade/logistics；fabrikam→retail/wholesale）。
+> 真值表以代码为准：`scripts/eval/long-session/oracle.ts` `FACT_TRUTH`（含逐条 `items`）；歧义对 `AMBIGUOUS_PREFIX`（contoso→trade/logistics；fabrikam→retail/wholesale）。
 
 **Oracle 判定三类（`judgeFactAnswer`）**：
 1. **唯一可答**（`exact`）：答案必须精确匹配（数值/条数）；容差 = 0（禁四舍五入漂移）。
@@ -99,7 +99,7 @@
 - **措辞面的模糊判定交判官层**（§六）：机械 Oracle 对不确定措辞返回 `E-INCONCLUSIVE`（不冒充产品失败）。
 - **真值独立性**：Oracle 只读夹具种子与已发生的真实工具结果，不看模型回复；被纠正/被撤销类由会话内 `expected` 提供。
 
-## 四、任务 Oracle = Task Registry（实现：`scripts/eval/r6/oracle.ts` `judgeTaskContinuity`）
+## 四、任务 Oracle = Task Registry（实现：`scripts/eval/long-session/oracle.ts` `judgeTaskContinuity`）
 
 - **唯一 Oracle**：`packages/agent/src/task-registry.ts` 的 `TaskRegistry`（SQLite 实现 `createSqliteTaskRegistry`；Wave1 由真实 registry 投影成 `TaskView[]` 后喂入）。任务状态/原因/执行清单/编号/归属由**确定性底账**表达，不嗅探模型文本（`judgeReportedTask`，`:137-156`）。
 - **判定项**：
@@ -110,7 +110,7 @@
 - **硬零子集**：H3（重复执行）、H4（虚假完成）、H5（取消虚假回执，回复声称已取消却未调 `task_cancel`）由本 Oracle 判定为 0。
 - **不判**：会话持久化/重启恢复——属独立验收（R6 不评）。
 
-## 五、证据 schema（实现：`scripts/eval/r6/evidence.ts`；逐会话可复核原始留档）
+## 五、证据 schema（实现：`scripts/eval/long-session/evidence.ts`；逐会话可复核原始留档）
 
 **根**：`.runtime/r6/<wave>/<lsN>/<sessionId>/`（gitignored）。每会话一个目录，全部为**原始留档**。
 
@@ -131,7 +131,7 @@
 - **逐会话可复核**：每个结论（T1–T5 / 硬零 / UX）都能回溯到原始文件的具体行；**压缩尝试保留 before/after**（判「有效压缩」与「零收益」）；**摘要调用单独留档**（原生暴露时），闭合 R5「摘要调用疑似绕过 budget hook」。
 - **三态处置写入**：`evidence.json` 记 `disposition`（`valid`/`insufficient_coverage`/`environment_interrupted`/`product_fault`）；**产品故障样本保留判负，不作废**（见 §十一）。
 
-### 五.1 结构泄漏判据（确定性读数；实现：`scripts/eval/r6/structure-leak.ts`）
+### 五.1 结构泄漏判据（确定性读数；实现：`scripts/eval/long-session/structure-leak.ts`）
 
 **目的**：把 Wave1 重跑时 ad-hoc 扫描发现的「裸任务信封 / 内部 `task_<uuid>`·`req_<uuid>` id / 整包明细」变成**可复现、可调阈值**的确定性读数，替代一次性人工扫描。
 
@@ -205,12 +205,12 @@
 
 ## 十一、测试基建说明与运行方式（本轮交付）
 
-**模块（`scripts/eval/r6/`）**：`oracle.ts`、`compaction.ts`、`load-generator.ts`、`evidence.ts`、`harness.ts`、`structure-leak.ts`、`g3-readiness.ts`、`fake-session.ts`（测试支持）。
+**模块（`scripts/eval/long-session/`）**：`oracle.ts`、`compaction.ts`、`load-generator.ts`、`evidence.ts`、`harness.ts`、`structure-leak.ts`、`g3-readiness.ts`、`fake-session.ts`（测试支持）。
 
 **确定性测试（假模型，零网、零 key）**：
 
 ```
-npm test -- scripts/eval/r6        # 或在仓根：npx vitest run scripts/eval/r6
+npm test -- scripts/eval/long-session        # 或在仓根：npx vitest run scripts/eval/long-session
 ```
 
 覆盖：事实 Oracle（exact/unanswerable/clarify/session_value + 会话聚合）、任务 Oracle（H3/H4/H5/E-G/五态）、压缩生命周期（有效数/零收益连串/H6.a/H6.b/覆盖不足/证据缺口）、负载生成器（逐轨计划/推进器确定性）、三态处置优先序与证据 schema、结构泄漏正反例（裸信封/内部 id/整包明细 + 阈值可调 + 只增读数）、端到端管线（假会话）、G3 确定性四项。

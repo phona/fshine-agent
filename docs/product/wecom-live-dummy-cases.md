@@ -51,7 +51,7 @@ TMPDIR=/home/tao/.tmp node scripts/eval/fixtures/make-sales-sample.mjs /home/tao
 | **企微 × dummy 自动联调（A～G 组）** | `TMPDIR=~/.tmp node --import tsx scripts/eval/wecom-sim/run.ts`（或 `vitest run scripts/eval/wecom-sim`） | 真 createServer 装配 + 仓内 dummy 执行层 + 假企微 SDK；26 条自动用例（见 §10） |
 | 文件面/能力面 | `TMPDIR=~/.tmp npm run eval:cap01` | 七个确定性面串行，约 60s；**不要并发跑** |
 | 用户级黑盒 | `TMPDIR=~/.tmp npm run eval:user -- --trials 1` | 真模型 + dummy；消耗 token |
-| 长会话 | R6 Wave1（见 `scripts/eval/r6/`） | 不在人工范围 |
+| 长会话 | R6 Wave1（见 `scripts/eval/long-session/`） | 不在人工范围 |
 
 人工只测：**真渠道上的观感与那句话对不对**、以及**渠道 × 宿主 × 执行层接线有没有漏**。
 

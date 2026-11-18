@@ -2473,7 +2473,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 - **② 入口门槛 G1/G2/G3**：G1（阶段一 GO）、G2（阶段二原型实际证明「压缩由 Pi 原生 Session/Harness 自动触发执行」，非旧 fshine 编排或手动调压缩函数）**已达成**；G3（真实模型/窗口装配/Dummy 隔离/principal 隔离/证据采集）**确定性部分已落地并自验**，**真实模型项标注「待 Wave1 前冒烟」**。三者齐备 → **授权自动启动 Wave1（不再申请）**；任一不满足 → 停止交证据（预注册 §七.2）。
 - **③ 五条硬改**：
   - ③.1 **CMP1–CMP9 / H6 / FI-1–FI-3 全部改为面向 Pi 原生生命周期**的行为判据，**不再绑定 fshine 私有事件/函数/重试常量**（`splitForCompaction`/`MAIN_MODEL_RETRY_DELAYS_MS` 等仅出现在**禁令语句**中，见预注册 §105/§312、harness §155；阈值为**预注册数字**：零收益连串上限 2、单回合调用上限 4、摘要分片上限 16）。
-  - ③.2 **三态处置（覆盖不足/环境中断/产品故障）分离，冻结**：优先序 **product_fault > environment_interrupted > insufficient_coverage > valid**；**产品故障触发的硬停/无法完成压缩样本保留并判负，不得简单作废**（防幸存者偏差）；实现 `scripts/eval/r6/evidence.ts` `classifySample`（预注册 §2.5）。
+  - ③.2 **三态处置（覆盖不足/环境中断/产品故障）分离，冻结**：优先序 **product_fault > environment_interrupted > insufficient_coverage > valid**；**产品故障触发的硬停/无法完成压缩样本保留并判负，不得简单作废**（防幸存者偏差）；实现 `scripts/eval/long-session/evidence.ts` `classifySample`（预注册 §2.5）。
   - ③.3 **统计功效诚实**：废止「新臂 Wilson 下界 ≥ baseline − δ」类**数学上几乎无法通过**的门槛（N=15 时 Wilson 下界上限 ≈0.796）；改为**差异区间**（Newcombe，仓库已有 `newcombe95`/`classifyV2`）；**Wave1 一律不作可靠性概率结论**；**Wave2 的 N/δ/检验形态整体待重新裁决**（预注册 §2.4）。
   - ③.4 **删除旧「全局配额已满」阻塞描述**，保留**单实验硬停 + 真实模型调用完整计量**（预注册 §6.1）。
   - ③.5 **128k 大载荷压力测试与普通业务多轮交互分开归因**（`TurnSpec.kind`），**不把人工大载荷压力结果外推成日常业务可靠性**（预注册 §3.7、harness §2.5）。
@@ -2484,16 +2484,16 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 - `docs/product/r6-longsession-prereg.md` = **修订版 v2**：含 §〇 纪律、§一 T1–T5、§2.3 冻结失败分类 E-A..E-K、§2.4 统计口径+功效、§2.5 三态处置、§三 五轨 LS1–LS5、§四 UX 六指标（Wave1 只读）、§五 硬零 H1–H7、§六 单实验硬停/停止条件/会话有效门槛、§七 Wave 分阶段+窗口政策+G1/G2/G3、§十 故障注入 FI-1..FI-8（Pi 原生边界）、§十三 **Wave1 冻结口径块**。
 - `docs/product/r6-longsession-harness-design.md` = **修订版 v2**：§一 观测只采集事实不改触发/门控；§二 负载生成器；§三/§四 事实 Oracle / Task Registry Oracle；§五 证据 schema（事实字段）；§七 FI-1..FI-3 Pi 原生边界；§八 复用与缺口；§十 边界与提交纪律；§十一 测试基建说明与运行方式。
 
-### 3. 测试基建（`scripts/eval/r6/`，测试代码，产品码零改动）
+### 3. 测试基建（`scripts/eval/long-session/`，测试代码，产品码零改动）
 
 `oracle.ts`（事实 Oracle + `judgeTaskContinuity` 任务 Oracle）、`compaction.ts`（`R6_COMPACTION_BOUNDS` + `analyzeCompaction`/`judgeCompactionLifecycle`）、`load-generator.ts`、`evidence.ts`（`collectEvidence`/`classifySample`）、`harness.ts`、`g3-readiness.ts`、`fake-session.ts`（测试支持）。共 13 文件（7 模块 + 6 `.test.ts`）。
 
 ### 4. 确定性测试读数（**本会话实跑**）
 
-- 命令：`npx vitest run scripts/eval/r6`（cwd = R6 worktree，`TMPDIR=~/.tmp`，零网零 key、假模型）。
+- 命令：`npx vitest run scripts/eval/long-session`（cwd = R6 worktree，`TMPDIR=~/.tmp`，零网零 key、假模型）。
 - 结果：**Test Files 6 passed（6）；Tests 51 passed（51）**。覆盖：事实 Oracle（exact/unanswerable/clarify/session_value + 会话聚合）、任务 Oracle（H3/H4/H5/E-G/五态）、压缩生命周期（有效数/零收益连串/H6.a/H6.b/覆盖不足/证据缺口）、负载生成器（逐轨计划/推进器确定性）、三态处置优先序与证据 schema、端到端管线（假会话）、G3 确定性四项。
 
-### 5. G3 就绪核查（确定性可验部分；`scripts/eval/r6/g3-readiness.ts` + `.test.ts`）
+### 5. G3 就绪核查（确定性可验部分；`scripts/eval/long-session/g3-readiness.ts` + `.test.ts`）
 
 - **确定性四项**（`runG3Checks`，全部 pass）：**窗口装配**（生产缺省窗口常量 = 冻结值，env 覆盖需显式登记）、**Dummy 隔离**（执行面根必须在仓内 dummy 夹具下且未开真实写；夹具外根须 fail）、**principal 隔离**（真实 Task Registry 上跑跨 principal 越权探针，必抛 `TaskOwnershipError`）、**证据采集**（假会话证据落盘 schema 齐全）。
 - **真实模型项**（可达性/128k 实际能力/生产同源装配）：`wave1SmokeItems()` 标注 `wave1-smoke-pending`，**不冒充通过**，**待 Wave1 前冒烟**。
@@ -2506,7 +2506,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 - **D. 单实验硬停**：`maxModelCalls=150` / `maxTokens=3,000,000` / `wallMs=2h`（长稳轨按设计时长）；**真实模型调用完整计量（含摘要调用）**。
 - **E. 会话有效门槛**：≥3 次有效压缩 + 窗口装配一致 + 无硬停 + 证据 schema 完整。
 - **F. 停止条件**：①硬停触达停留证；②任一硬零命中→整批 FAIL 停止；③infra 门失败→批次不开始；④同因连续失败（跨会话 ≥2）→停该轨登记 blocker。
-- **G. 生命周期判据上限（Pi 原生、冻结数字）**：零收益连串上限 2（≥3 判负）；单回合模型调用上限 4；单次摘要分片上限 16；每会话有效压缩下限 3（与 `scripts/eval/r6/compaction.ts` `R6_COMPACTION_BOUNDS` 同步）。
+- **G. 生命周期判据上限（Pi 原生、冻结数字）**：零收益连串上限 2（≥3 判负）；单回合模型调用上限 4；单次摘要分片上限 16；每会话有效压缩下限 3（与 `scripts/eval/long-session/compaction.ts` `R6_COMPACTION_BOUNDS` 同步）。
 - **H. 结论强度**：Wave1 **一律探索性**（只读、不判非劣效、不作可靠性概率结论）。
 
 ### 7. 本轮未执行 / 局限（如实登记）
@@ -2515,7 +2515,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 - 真实模型、128k 实际能力、生产同源装配**未验证**（G3 真实模型项待 Wave1 前冒烟）。
 - **未进行泛化架构调研**（仅做落地所需最小核实）；**Wave2 方案待重新裁决**。
 
-**指针**：`docs/product/r6-longsession-prereg.md`、`docs/product/r6-longsession-harness-design.md`、`scripts/eval/r6/**`；关联 §七十八（R6 预注册与负载设计准备档）、§七十五（Pi 压缩复用评估、迁移未实施）、§六十五/§六十九（R5 W=8192 长稳，不得外推 128k）。
+**指针**：`docs/product/r6-longsession-prereg.md`、`docs/product/r6-longsession-harness-design.md`、`scripts/eval/long-session/**`；关联 §七十八（R6 预注册与负载设计准备档）、§七十五（Pi 压缩复用评估、迁移未实施）、§六十五/§六十九（R5 W=8192 长稳，不得外推 128k）。
 
 **状态：待合入。**
 
@@ -2585,7 +2585,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 > 本轮 = R6 长会话验收的**评测侧**计量增强：把「**主模型调用 + Pi 摘要调用 + 重试（+ 溢出恢复）**」**全部**逐次记账，并**全部**纳入**单实验硬停（先验拒绝）**。**不改产品语义**（`packages/**`、`apps/**` 未动）、**不改已冻结口径**（150 / 3,000,000 / 2h 仍逐字取预注册 §十三.D）。**未启动真实模型 Wave1**。
 
-### 1. 记账面（逐次，`scripts/eval/r6/accounting.ts`）
+### 1. 记账面（逐次，`scripts/eval/long-session/accounting.ts`）
 
 - `ModelCallRecord`：`seq` / `kind(main|summary|retry|overflow_recovery)` / `sessionId+turn` / `tokens{input,output,total}` / `tokensObserved` / `durationMs`；`accountCalls()` → `AccountedUsage`（总计 + `byKind`）。
 - **Pi 摘要独立计数**：`summary` 由会话面 `modelCallLedger()` 按**实际发起**逐次记录，**不读** `session.budget().summaryCalls`（旧路径摘要绕过 budget）。
@@ -2607,13 +2607,13 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ### 4. 交付物
 
-- `scripts/eval/r6/accounting.ts`（+ `accounting.test.ts`）；`harness.ts` 回填 `modelCallLedger` + 回合前 precheck；`evidence.ts` + `fake-session.ts` 支撑。
+- `scripts/eval/long-session/accounting.ts`（+ `accounting.test.ts`）；`harness.ts` 回填 `modelCallLedger` + 回合前 precheck；`evidence.ts` + `fake-session.ts` 支撑。
 - `docs/product/b3-r6-call-accounting.md`（记账面 / 硬停口径 / 解耦说明 / 测试证据）。
 - 实现 commit：`9fda9a2`。
 
 ### 5. 测试证据（本会话实跑）
 
-- 命令：`npx vitest run scripts/eval/r6`（cwd = R6 worktree，`TMPDIR=~/.tmp`，零网零 key、假会话）。
+- 命令：`npx vitest run scripts/eval/long-session`（cwd = R6 worktree，`TMPDIR=~/.tmp`，零网零 key、假会话）。
 - 结果：**Test Files 7 passed（7）；Tests 66 passed（66）**。覆盖：三类记账齐 + 会话/回合关联 + `model-calls.jsonl` 落盘；`calls` / `tokens`（**含摘要调用**）/ `wallMs` 超限**拒发**、判定顺序 `ms`；反向绊线（去 `summary` 计数 → 7 例红；`precheck` 不复用 → 4 例红，均已回滚）。
 
 ### 6. 边界 / 前置条件
@@ -2622,7 +2622,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 - 生产 `HarnessSession` 适配器 `modelCallLedger` **未接线**（待 Wave1 前冒烟）；未提供 ledger 时退化为按 `budget().calls` 差补记「主模型」粗记录（`tokensObserved=false`，不虚增）。
 - 不改 Worker 提示、不引第二套压缩 / 会话机制；证据落 `.runtime/r6/`（gitignored，不 `git add`）。
 
-**指针**：`docs/product/b3-r6-call-accounting.md`、`scripts/eval/r6/accounting.ts`、`scripts/eval/r6/harness.ts`、`scripts/eval/r6/evidence.ts`；关联 §七十九（R6 预注册修订 + Harness 建设）、§七十八（R6 预注册准备档）。
+**指针**：`docs/product/b3-r6-call-accounting.md`、`scripts/eval/long-session/accounting.ts`、`scripts/eval/long-session/harness.ts`、`scripts/eval/long-session/evidence.ts`；关联 §七十九（R6 预注册修订 + Harness 建设）、§七十八（R6 预注册准备档）。
 
 ---
 
@@ -2640,7 +2640,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 ### 2. ≥3 principal / 多 Session / 同进程并发 / 真交错
 
 - **principal**：`wecom:mu-alice` / `wecom:mu-bob` / `wecom:mu-carol`（3 个独立 principal）；多会话由不同 `conversationId` 派生。
-- **并发见证**：会合同步栅 `Rendezvous`（`scripts/eval/r6/multiuser/mu-support.ts`）——第 N 个到达者解除全部等待；**串行假并发**只会到 1 个并触发安全超时（`timedOut=true`）→ 计入硬零 `fake_concurrency`。**不得串行假并发**。
+- **并发见证**：会合同步栅 `Rendezvous`（`scripts/eval/long-session/multiuser/mu-support.ts`）——第 N 个到达者解除全部等待；**串行假并发**只会到 1 个并触发安全超时（`timedOut=true`）→ 计入硬零 `fake_concurrency`。**不得串行假并发**。
 
 ### 3. 硬零（任一命中即 FAIL；本组全部为空）
 
@@ -2669,7 +2669,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ### 6. 测试读数（**本会话实跑**；cwd = R6 worktree，`TMPDIR=~/.tmp`，零网零 key）
 
-- 定向：`npx vitest run scripts/eval/r6/multiuser/mu.test.ts` → **12 passed（12）**。
+- 定向：`npx vitest run scripts/eval/long-session/multiuser/mu.test.ts` → **12 passed（12）**。
 - 类型：`npm run typecheck`（`tsc --noEmit`）→ **0 错误**。
 - 全量：`npm test` → **93 文件 / 934 passed + 3 todo**；全量基线（移出 `multiuser/`）92 文件 / 922 passed + 3 todo → **例数只增不减**（+1 文件 / +12 用例，0 删除/弱化）。
 
@@ -2679,7 +2679,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 - **MU-6 / MU-8 未接线**：依赖 B1 / B2 未合入，本 run **不预造第二套会话/静默机制、不改产品码**。
 - 压缩分片（`CMP4.summary_chunks_unexposed`）与真实 token 计量未观测（假会话不暴露）。
 
-**指针**：`docs/product/r6-multiuser-acceptance.md`（逐条 PASS/FAIL/BLOCKED + 原始证据 + 依赖状态）、`scripts/eval/r6/multiuser/**`（`mu-cases.ts`/`mu-support.ts`/`mu.test.ts`）；关联 §七十九（R6 Harness/Oracle 基建）、§七十二（D7 跨 principal 越权真实模型）。
+**指针**：`docs/product/r6-multiuser-acceptance.md`（逐条 PASS/FAIL/BLOCKED + 原始证据 + 依赖状态）、`scripts/eval/long-session/multiuser/**`（`mu-cases.ts`/`mu-support.ts`/`mu.test.ts`）；关联 §七十九（R6 Harness/Oracle 基建）、§七十二（D7 跨 principal 越权真实模型）。
 
 ---
 
@@ -2892,14 +2892,14 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 | 复用面 | 位置 | 用法 |
 | --- | --- | --- |
-| 生产同源装配 `createServer`（与 `npm start` 同源） | `apps/server/server.ts:89` | 两段都经 `scripts/eval/r6/multiuser/mu-support.ts` 的 `createMuServer` → `createServer` **真实交互路径**（不是直接 `registry.get`） |
+| 生产同源装配 `createServer`（与 `npm start` 同源） | `apps/server/server.ts:89` | 两段都经 `scripts/eval/long-session/multiuser/mu-support.ts` 的 `createMuServer` → `createServer` **真实交互路径**（不是直接 `registry.get`） |
 | 身份双键 `(principalId,sessionId)` | `apps/server/server.ts:217-218`（`principalId=channel:wecomUserId`、`sessionId=channel:conversationId`）；会话缓存键 `server.ts:146-147`（`principal\u0000session`） | 同 principal、不同 `conversationId` → 不同 Session |
 | 渠道群/私分派 | `packages/channel-wecom/src/adapter.ts`（`chatType`/`chatid` → `conversationId`） | 群 `conversationId=chatid`、私 `conversationId=userid` |
 | 任务引用会话内解析 | `packages/agent/src/execution-runtime.ts`（`resolveTaskId` 只在会话 scope 内解析）；拒绝文案与 `TaskOwnershipError` 同源 | 群会话取私聊 `#1` → `任务不存在或不属于当前会话。`（与 MU-5 同源） |
 | B2 出站闸门 opt-in | `packages/channel-wecom/src/silent-shadow-gate.ts`（`resolveDeliveryMode`/`wrap`/`suppressedUserVisible` 证据）；`adapter.ts` 构造期包裹 + `shadowEvidence()` | 显式 `silent` → 全部用户可见投递被抑制 |
 | 记录型假 SDK 范式 | `packages/channel-wecom/adapter.silent-shadow.test.ts` 的 `DeliveryRecorder` | 本用例在 `mu-support.ts` 的 `MuSdkRecorder`（`:504`）中同形复刻 |
 
-用例体：`scripts/eval/r6/multiuser/mu-cases.ts` 的 `mu8SessionLayer`（`:453`）/ `mu8DeliveryLayer`（`:562`）/ `mu8`（`:620`）；夹具：`mu-support.ts` 新增 `MuSdkRecorder`/`startSilentWecomChannel`（`:576`）/`wecomTextFrame`/`settle`；测试包装：`scripts/eval/r6/multiuser/mu.test.ts:102-115`。
+用例体：`scripts/eval/long-session/multiuser/mu-cases.ts` 的 `mu8SessionLayer`（`:453`）/ `mu8DeliveryLayer`（`:562`）/ `mu8`（`:620`）；夹具：`mu-support.ts` 新增 `MuSdkRecorder`/`startSilentWecomChannel`（`:576`）/`wecomTextFrame`/`settle`；测试包装：`scripts/eval/long-session/multiuser/mu.test.ts:102-115`。
 
 ### 3. 判据（命中即 FAIL）
 
@@ -2913,7 +2913,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ### 4. 证据（本会话实跑；`TMPDIR=~/.tmp`，零网零 key）
 
-命令：`npx vitest run scripts/eval/r6/multiuser/mu.test.ts`（cwd = 本 worktree）；证据落 `.runtime/r6/multiuser/MU-8/evidence.json`（**gitignored，不 `git add`**）。本次读数：
+命令：`npx vitest run scripts/eval/long-session/multiuser/mu.test.ts`（cwd = 本 worktree）；证据落 `.runtime/r6/multiuser/MU-8/evidence.json`（**gitignored，不 `git add`**）。本次读数：
 
 - **第一段**：`sessionsDistinct=true`、`inheritedPrivateHistory=false`、`leakedIntoPrivate=false`、`groupFirstRejected=true`、`groupFirstLeaked=false`、`privOwnResolved=true`、`groupOwnResolved=true`、`scopeViolations=[]`、`crossoverCodes=[]`。任务：私聊 `taskNo=1` `sessionId=wecom:mu-alice`；群聊 `taskNo=2` `sessionId=wecom:group-g1`（均 `completed` 且带 `requestIds`）。群首查 `error:"任务不存在或不属于当前会话。"`；群二查/私聊查 `error:null`。
 - **第二段**：`deliveryMode=silent`、`userVisibleSuppressed=4`（`suppressedKinds=["reply_stream","reply_stream","reply_stream","reply_stream"]`，即两条消息各 ack+终帧）、`realUserVisibleCalls=0`、`scopedDistinct=true`（群/私各成建任务、`sessionId`/`taskId` 不同）。
@@ -2944,9 +2944,9 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 ### 8. 校验命令与结果（本会话实跑）
 
 - `npm run typecheck`（`tsc --noEmit`）→ **exit 0**。
-- 定向：`npx vitest run scripts/eval/r6/multiuser/mu.test.ts` → **Test Files 1 passed（1）；Tests 12 passed（12）**（MU-8 由 1 条 BLOCKED 断言换为 1 条 PASS 断言，**例数不变**）。
+- 定向：`npx vitest run scripts/eval/long-session/multiuser/mu.test.ts` → **Test Files 1 passed（1）；Tests 12 passed（12）**（MU-8 由 1 条 BLOCKED 断言换为 1 条 PASS 断言，**例数不变**）。
 - 全量：`npm test` → **Test Files 96 passed（96）；Tests 981 passed | 3 todo（984）**，exit 0；**例数不减、0 删除/弱化**。
-- 判据未改核验：`git diff 56554fb..aa09f38 -- scripts/eval/r6/multiuser/mu-cases.ts` 仅改动注释/import 与 `mu8` 区段；`mu.test.ts` 仅改 MU-8 `describe` 块与汇总 `blocked` 期望（`['MU-6','MU-8']`→`['MU-6']`，为 BLOCKED→PASS 的应有转换）。**MU-1..10 判据未改。**
+- 判据未改核验：`git diff 56554fb..aa09f38 -- scripts/eval/long-session/multiuser/mu-cases.ts` 仅改动注释/import 与 `mu8` 区段；`mu.test.ts` 仅改 MU-8 `describe` 块与汇总 `blocked` 期望（`['MU-6','MU-8']`→`['MU-6']`，为 BLOCKED→PASS 的应有转换）。**MU-1..10 判据未改。**
 
 ### 9. 未执行 / 局限（如实登记）
 
@@ -2956,7 +2956,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 **结论：MU-8 PASS，`hardZeroHits=[]`。** 群聊不隐式继承私聊的任务/授权/历史；群/私投递不串；silent 闸下实际用户可见投递 = 0。
 
-**指针**：`scripts/eval/r6/multiuser/mu-cases.ts`（`mu8SessionLayer`/`mu8DeliveryLayer`/`mu8`）、`scripts/eval/r6/multiuser/mu-support.ts`（`MuSdkRecorder`/`startSilentWecomChannel`）、`scripts/eval/r6/multiuser/mu.test.ts:102-115`、`docs/product/r6-mu8-followup.md`；关联 §八十二（MU-1..10 场景组，MU-8 原 BLOCKED）、§八十三/§八十四（B2 闸门 + opt-in）。
+**指针**：`scripts/eval/long-session/multiuser/mu-cases.ts`（`mu8SessionLayer`/`mu8DeliveryLayer`/`mu8`）、`scripts/eval/long-session/multiuser/mu-support.ts`（`MuSdkRecorder`/`startSilentWecomChannel`）、`scripts/eval/long-session/multiuser/mu.test.ts:102-115`、`docs/product/r6-mu8-followup.md`；关联 §八十二（MU-1..10 场景组，MU-8 原 BLOCKED）、§八十三/§八十四（B2 闸门 + opt-in）。
 
 **状态：待合入。**
 
@@ -2982,7 +2982,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 | `close()` 释放 | `apps/server/server.ts:302-309` | 关停后同 `dbPath` 重建须先释放（否则读到陈旧内存态） |
 | Task Registry 只读快照 | `mu-support.ts:401-419` `readTasks` | 判定读 `TaskView` 快照，**非** `registry.get` 直调 |
 
-### 3. 场景形状（`scripts/eval/r6/multiuser/mu6-restart.ts`）
+### 3. 场景形状（`scripts/eval/long-session/multiuser/mu6-restart.ts`）
 
 - ≥3 principal：`mu-alice` / `mu-bob` / `mu-carol`，各一独立会话 `conv-<user>`（`sessionId = wecom:conv-<user>`）。
 - **background 模式**（唯此模式有 `runner.pump` 重启路径，③「任务不重放」才有机械意义）。
@@ -3007,7 +3007,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
-| 定向 | `npx vitest run scripts/eval/r6/multiuser/mu.test.ts` | **12 passed**（含 MU-6 PASS） |
+| 定向 | `npx vitest run scripts/eval/long-session/multiuser/mu.test.ts` | **12 passed**（含 MU-6 PASS） |
 
 MU-6 实测证据落 `.runtime/r6/multiuser/MU-6/evidence.json`（**未** `git add`）：`hardZeroHits=[]`；`restored`（`mu-alice`/`mu-bob`/`mu-carol`）全 `true`；`transcriptViolations=[]`；`taskViolations=[]`；`replayCallsAfterPump=0`、`replayCallsAfterTurn=0`、`noReplay=true`；`resultRetrieval` 三 principal 全 `ok=true`（`status=completed`、`replyText=RESULT:TAG-ALICE` / `RESULT:TAG-BOB` / `RESULT:TAG-CAROL`）；`taskCountBeforeRestart=3`、`taskCountAfterRestart=3`（**未重放**）。
 
@@ -3028,7 +3028,7 @@ MU-6 实测证据落 `.runtime/r6/multiuser/MU-6/evidence.json`（**未** `git a
 
 MU-6 在本基线（含 B1 接线）上 **PASS**：三 principal 同 `dbPath` 关停重建后，①各自转录恢复、②不跨 principal 串读、③任务不重放、④结果找回四类断言全部成立，硬零命中为空。未改产品码、未引第二套会话 / 压缩机制、未接真实平台 / 写、`.runtime` 未 `git add`。
 
-**指针**：`docs/product/r6-mu6-followup.md`（装配 / 判据 / 证据 / 五要素 / 结论）；`scripts/eval/r6/multiuser/mu6-restart.ts`、`mu-cases.ts`、`mu.test.ts`；关联 §八十二（MU 场景组）、§八十五（B1 接线）。
+**指针**：`docs/product/r6-mu6-followup.md`（装配 / 判据 / 证据 / 五要素 / 结论）；`scripts/eval/long-session/multiuser/mu6-restart.ts`、`mu-cases.ts`、`mu.test.ts`；关联 §八十二（MU 场景组）、§八十五（B1 接线）。
 
 **状态：待合入。**
 
@@ -3083,7 +3083,7 @@ MU-6 在本基线（含 B1 接线）上 **PASS**：三 principal 同 `dbPath` �
 
 ### 7. 复用 R6 Harness 的映射
 
-复用优先于抽象：**不新建**判定 / 证据 / 记账 / 并发 / 重启框架，全部复用 `scripts/eval/r6/**` 与 `multiuser/**`——`runHarnessSession`（`harness.ts:82`）、`judgeFactAnswer/judgeTaskContinuity`（`oracle.ts`）、`judgeCompactionLifecycle`（`compaction.ts:126`）、`CallAccountingGuard`（`accounting.ts:194`）、`SessionEvidence/classifySample/collectEvidence`（`evidence.ts`）、`createMuServer/Rendezvous/MuDeliveryRecord/judgeMuTasks`（`mu-support.ts`）、`mu6Restart`（`mu6-restart.ts:104`）、`wilson95`（`stats.ts:69`）。**关键前置接缝**（eval 侧、非产品码）：真实模型 Main 适配器（`modelCallLedger()` 必须逐次暴露主/摘要/重试/溢出恢复）+ Dummy Worker + `classifyP2Sample`/S2 完成闸/S7b 驱动。
+复用优先于抽象：**不新建**判定 / 证据 / 记账 / 并发 / 重启框架，全部复用 `scripts/eval/long-session/**` 与 `multiuser/**`——`runHarnessSession`（`harness.ts:82`）、`judgeFactAnswer/judgeTaskContinuity`（`oracle.ts`）、`judgeCompactionLifecycle`（`compaction.ts:126`）、`CallAccountingGuard`（`accounting.ts:194`）、`SessionEvidence/classifySample/collectEvidence`（`evidence.ts`）、`createMuServer/Rendezvous/MuDeliveryRecord/judgeMuTasks`（`mu-support.ts`）、`mu6Restart`（`mu6-restart.ts:104`）、`wilson95`（`stats.ts:69`）。**关键前置接缝**（eval 侧、非产品码）：真实模型 Main 适配器（`modelCallLedger()` 必须逐次暴露主/摘要/重试/溢出恢复）+ Dummy Worker + `classifyP2Sample`/S2 完成闸/S7b 驱动。
 
 ### 8. 合流依赖（**`DECISION_REQUIRED`，待 owner 批准**）
 
@@ -3764,7 +3764,7 @@ Pi 1.5.2 迁移 U3（恢复/重试后同一逻辑写操作被重复执行）以*
 - 唯一冲突文件：`packages/agent/src/execution-runtime.ts`（`RuntimeOptions`）：integration 侧 B1 转录端口（`transcriptStore`/`onTranscriptError`）与 U3 侧 `readOnlyOperations` **两个独立字段都保留**。
 - integration 侧独立修复全部保留：B1 转录所有权（打开现读→首回合种子、回合后只追加本回合新增、写失败 fail-open）、B1 持久化/恢复用例、B2 Silent Shadow 用例。
 - U3 侧窗口与认领逻辑整块合入（`execution-runtime` / `pi-driver` / `task-registry*` / `task-store` / `task-runner` / 契约 / 通知黑名单）。
-- 机械适配（仅类型面，不改任何断言）：integration 新增的 `ExecutionFace` 字面量补上 U3 变为必填的 `readOnlyOperations`（语义仍是只读 `dummy.query`）：`apps/server/server.test.ts` B2 用例、`apps/server/server-b1-persistence.test.ts` 六处、`scripts/eval/r6/multiuser/mu-support.ts`。
+- 机械适配（仅类型面，不改任何断言）：integration 新增的 `ExecutionFace` 字面量补上 U3 变为必填的 `readOnlyOperations`（语义仍是只读 `dummy.query`）：`apps/server/server.test.ts` B2 用例、`apps/server/server-b1-persistence.test.ts` 六处、`scripts/eval/long-session/multiuser/mu-support.ts`。
 
 ### 9. 硬门读数（2026-11-16，worktree `~/projects/fshine-agent-u3`，`TMPDIR=~/.tmp`）
 
@@ -3791,7 +3791,7 @@ Pi 1.5.2 迁移 U3（恢复/重试后同一逻辑写操作被重复执行）以*
 
 > 授权与边界：owner 授权在独立 worktree 落成预注册 `docs/product/p2-business-e2e-prereg.md` 的七类场景，**本轮零真实模型**（provider 并发额度让给其他线）、零真实平台/写，不 push main。新增代码全部在 `scripts/eval/p2/**`（eval 胶水）；产品码 `packages/**`、`apps/**` 零改动。
 
-- **交付物（新增 5 文件 / 改动 4 文件）**：新增 `scripts/eval/p2/{p2-types,p2-harness,p2-oracle,p2-scenarios}.ts` + `{p2-oracle,p2-scenarios}.test.ts`；改动（均为复用接缝/登记，非语义扩张）：`scripts/eval/business-e2e/shared-instance.ts`（导出 `recordingDriver` 供复用）、`scripts/eval/r6/evidence.ts`（`Track` 并集追加 `'P2'` 标签，**判定语义零变化**，有守卫用例）、`scripts/eval/r6/multiuser/mu-support.ts`（导出 MU 计划驱动、`createMuServer` 增 `createDrivers` 透传、`MuTaskSnapshot` 补 `failureReason/resultText` 只读投影）、`packages/agent/resource-policy-single-source.test.ts`（按该守卫既有「新增读者必须登记」路径登记 P2 场景文件的 RuntimeConfig 构造）。
+- **交付物（新增 5 文件 / 改动 4 文件）**：新增 `scripts/eval/p2/{p2-types,p2-harness,p2-oracle,p2-scenarios}.ts` + `{p2-oracle,p2-scenarios}.test.ts`；改动（均为复用接缝/登记，非语义扩张）：`scripts/eval/business-e2e/shared-instance.ts`（导出 `recordingDriver` 供复用）、`scripts/eval/long-session/evidence.ts`（`Track` 并集追加 `'P2'` 标签，**判定语义零变化**，有守卫用例）、`scripts/eval/long-session/multiuser/mu-support.ts`（导出 MU 计划驱动、`createMuServer` 增 `createDrivers` 透传、`MuTaskSnapshot` 补 `failureReason/resultText` 只读投影）、`packages/agent/resource-policy-single-source.test.ts`（按该守卫既有「新增读者必须登记」路径登记 P2 场景文件的 RuntimeConfig 构造）。
 - **复用（未建第二套框架）**：生产同源 `createServer`（与 `npm start` 同链）+ 真实 Pi 驱动 × 脚本化 provider（`testing/scripted-model-runtime`）+ 仓内 dummy 执行层（经装配链唯一入口 `resolveExecutionFace`，不旁路）；逐轮管线 `r6/harness.ts:runHarnessSession`；Oracle `r6/oracle.ts`（事实/H3/H4/H5/E-G）、`r6/compaction.ts`（H6）、`business-e2e/judge.ts:judgeMechanical`（越权/重复/虚假完成）；记账 `r6/accounting.ts`；证据 `r6/evidence.ts:collectEvidence`；多用户/重启 `r6/multiuser/mu-support.ts`；统计 `r6/oracle:FACT_TRUTH` 真值。
 - **七场景（S7 拆三子例，共 9 个 case）**：S1 交办（inline；事实 `alpha 2/2000` + 真实 taskNo；硬零 H4/E-G/false_completion/unauthorized）；S2 异步中继续对话（background + 执行面完成闸；硬零 H4/E-G/cross_principal_leak）；S3 查进度与结果（background；逐字存档 + deliveredTo）；S4 修改·取消·再交办（background 单槽排队 + 队列取消；硬零 H5/H3/H4）；S5 重启恢复（同 dbPath 关停重建 + 新执行面零调用；硬零 重放/跨读/旧回合冒充）；S6 三用户并发（会合栅；硬零 cross_principal_leak/task_crossover/unauthorized_execution/notification_misdelivery/fake_concurrency）；S7a `faulty-one` 真实 `COLLECTION_FAULT`；S7b `workerTurnMs=5000` + 不返回执行 gate + deadline 契约 Worker 驱动 → `timed_out`；S7c 四集合一次核完（H6.a/H6.b + 重试有界）。
 - **确定性自检读数**：`npm run typecheck` = **0 错**；`npx vitest run` = **105 文件 / 1099 通过 + 1 skipped（1100）**（基线 103 文件 / 1057 通过 + 1 skipped，例数 +42 未减）。反向绊线 11 条全部按预期转红：真值篡改（E-A）/ 伪造零执行（H4 → product_fault）/ 受理话术冒充结果（`result_verbatim_from_archive` + E-A）/ 谎称已取消（H5）/ 旧回合冒充（`retrieval_verbatim` + `no_old_turn_substitution`）/ 编造数值（`no_fabricated_numbers`）/ 谎报超时（`reply_reports_timeout_honestly`）/ 注入 task_crossover 与 H6.a（硬零不可抵消）/ 未触发超时 → `insufficient_coverage`（不折算产品负）/ S2 冲突自证。

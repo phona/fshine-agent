@@ -21,7 +21,7 @@
  *   【模型能力：只读数，不判宿主】
  *     read（读到日期+金额）/ partial-read（只读到一项）/ honest-cannot（如实说读不出）/
  *     vague（含糊，记录）/ fabricated（编造，红）。仓内没有 PDF 解析库，所以「读不出」是
- *     预期内的诚实结果；这一栏把旧 r6 S5 的 UNDEFINED 变成有读数。
+ *     预期内的诚实结果；这一栏把旧长会话 S5 的 UNDEFINED 变成有读数。
  *
  * 反向绊线：judge 的宿主栏虚构检测可被 `detectReplyFabrication=false` 关掉（仅测试用）；
  * r2d-judge.test.ts 用编数假样本证明关掉后模型栏仍判 fabricated、整体仍红。

@@ -8,7 +8,7 @@
 
 ## 〇、纪律与硬边界（本设计与未来执行批共同遵守）
 
-1. **真实模型**：质量结论只由真实模型产生；不得以 Mock/脚本假 driver 替代质量结论。**假模型仅用于确定性测试基建自证**（`scripts/eval/r6/**`），不得进入质量/稳定结论。
+1. **真实模型**：质量结论只由真实模型产生；不得以 Mock/脚本假 driver 替代质量结论。**假模型仅用于确定性测试基建自证**（`scripts/eval/long-session/**`），不得进入质量/稳定结论。
 2. **真实生产窗口**：生产装配窗口 = 模型能力声明（`createPiModelRuntime` 能力面 / `PiTurnDriverOptions.contextWindow`；缺省 `DEFAULT_CONTEXT_WINDOW = 128000`，`packages/agent/src/pi-driver.ts:77`）。**128k 会话必须确认实际模型能力与生产装配一致**（G3）；**不得伪造窗口**（不得靠缩小窗口或压缩注入量冒充「128k 下能压缩」）。40k 探索窗**只**用于验证压缩生命周期 / 测试设施 / 缺陷复现，**不得外推生产**。
 3. **统计纪律**：同一会话内多次压缩**不冒充独立样本**；同一会话内多个事实问题**不视作独立样本**。分析以**会话为主要分析单位**，会话内实例聚合后再统计（Wilson 95% 见 `scripts/eval/exploration/stats.ts` `wilson95`）。
 4. **预注册先行**：样本数 / 判据 / 场景 / 失败分类 / UX 口径与**非劣效判据**在运行前冻结；测试后不得改口径。
@@ -87,7 +87,7 @@
 
 ### 2.5 三态处置（**覆盖不足 / 环境中断 / 产品故障**，冻结）
 
-> 硬改（owner ③.2）：**不得把因产品故障触发硬停或无法完成压缩的样本简单作废**（防幸存者偏差）。三类分离，规则确定（实现见 `scripts/eval/r6/evidence.ts` `classifySample`，优先序冻结）：
+> 硬改（owner ③.2）：**不得把因产品故障触发硬停或无法完成压缩的样本简单作废**（防幸存者偏差）。三类分离，规则确定（实现见 `scripts/eval/long-session/evidence.ts` `classifySample`，优先序冻结）：
 
 | 处置 | 触发条件 | 处理 | 是否作废 |
 |---|---|---|---|
@@ -121,7 +121,7 @@
 | F7 | 用户指定保留约束 | 「金额一律不要四舍五入」→ 压缩后复述仍遵守 |
 | F8 | 唯一不可答 | 对**从未查过的窗口**提问 → 唯一答案是「需先查询/无法确认」，不得编造 |
 
-**判据**：逐题对照事实 Oracle（`scripts/eval/r6/oracle.ts` `judgeFactAnswer`）；**全对才判该会话 T1 通过**（会话内不拆独立样本，`judgeSessionFacts`）。
+**判据**：逐题对照事实 Oracle（`scripts/eval/long-session/oracle.ts` `judgeFactAnswer`）；**全对才判该会话 T1 通过**（会话内不拆独立样本，`judgeSessionFacts`）。
 
 **失败分类**：E-A（漂移/遗忘）、E-J（infra）。
 
@@ -131,7 +131,7 @@
 
 **用例（每会话 ≥6 个任务连续性轮）**：TSK1 已完成；TSK2 已取消（`confirmCancelled` 才算取消，`task-registry.ts:586-595` 族）；TSK3 失败（如实）；TSK4 待确认（waiting_user 语义，不得误报 completed）；TSK5 执行中（不重复建任务，幂等）；TSK6 编号不混淆（两任务并发，编号/对象/结果三者不交叉）。
 
-**判据**：Task Registry 快照逐字段比对（status/reason/executions 数/requestId 归属唯一/taskNo 不串）。**硬零子集**：重复执行（同一 requestId 归属多个任务）、虚假完成（未执行却 completed，`judgeReportedTask`，`task-registry.ts:137-156`）= 0（§五）。判定实现见 `scripts/eval/r6/oracle.ts` `judgeTaskContinuity`。
+**判据**：Task Registry 快照逐字段比对（status/reason/executions 数/requestId 归属唯一/taskNo 不串）。**硬零子集**：重复执行（同一 requestId 归属多个任务）、虚假完成（未执行却 completed，`judgeReportedTask`，`task-registry.ts:137-156`）= 0（§五）。判定实现见 `scripts/eval/long-session/oracle.ts` `judgeTaskContinuity`。
 
 ### LS3 · 自然语言连续交互质量
 
@@ -143,7 +143,7 @@
 
 ### LS4 · 压缩效率与生命周期（**Pi 原生行为判据**）
 
-**场景**：同一会话内观察每次压缩的完整生命周期。判据**全部**改写为面向 **Pi 原生 Session/Harness 生命周期**的可观测行为（实现 `scripts/eval/r6/compaction.ts`）：
+**场景**：同一会话内观察每次压缩的完整生命周期。判据**全部**改写为面向 **Pi 原生 Session/Harness 生命周期**的可观测行为（实现 `scripts/eval/long-session/compaction.ts`）：
 
 | 观测 | 定义（Pi 原生可观测） | 判负形态 |
 |---|---|---|
@@ -182,7 +182,7 @@
 
 - **128k 大载荷压力**（为达 ≥3 次压缩注入的大集合查询）与**普通业务多轮交互**（LS1 事实、LS3 交互）**分开归因、分别报告**。
 - **不得**把人工大载荷压力下观察到的行为**外推成日常业务可靠性**；反之，日常业务交互的读数也不替代载荷下的生命周期机械事实。
-- 证据 schema 中逐轮标注 `kind`（`pump` / `fact` / `task` / `interaction`），供分离归因（实现：`scripts/eval/r6/load-generator.ts`）。
+- 证据 schema 中逐轮标注 `kind`（`pump` / `fact` / `task` / `interaction`），供分离归因（实现：`scripts/eval/long-session/load-generator.ts`）。
 
 ## 四、UX 六指标：定义 + 判据（**Wave1 只读；Wave2 判据待重裁**）
 
@@ -267,10 +267,10 @@
 |---|---|---|
 | **G1** | Pi 替换实验**阶段一 GO** | **已达成**（owner 确认） |
 | **G2** | **阶段二原型实际证明「压缩由 Pi 原生 Session/Harness 自动触发执行」**（不是旧 fshine 编排或手动调压缩函数） | **已达成**（owner 确认） |
-| **G3** | 确认**真实模型、窗口装配、Dummy 隔离、principal 隔离、证据采集**正常 | 确定性部分已在 `scripts/eval/r6/g3-readiness.ts` 落地并自验；**真实模型/128k 装配项标注「待 Wave1 前冒烟」** |
+| **G3** | 确认**真实模型、窗口装配、Dummy 隔离、principal 隔离、证据采集**正常 | 确定性部分已在 `scripts/eval/long-session/g3-readiness.ts` 落地并自验；**真实模型/128k 装配项标注「待 Wave1 前冒烟」** |
 
 - **G1+G2+G3 齐备 → 授权自动启动 Wave1（不再申请）**；**任一不满足 → 停止并交回证据**。
-- G3 确定性可验部分（窗口装配/Dummy 隔离/principal 隔离/证据采集）由 `scripts/eval/r6/g3-readiness.ts` 与 `g3-readiness.test.ts` 钉住；真实模型项（G3-M1/M2/M3）**标注待 Wave1 前冒烟**，不冒充通过。
+- G3 确定性可验部分（窗口装配/Dummy 隔离/principal 隔离/证据采集）由 `scripts/eval/long-session/g3-readiness.ts` 与 `g3-readiness.test.ts` 钉住；真实模型项（G3-M1/M2/M3）**标注待 Wave1 前冒烟**，不冒充通过。
 
 ## 八、与 R5 长稳的关系（R6 取代其口径）
 
@@ -328,7 +328,7 @@
 ## 十二、证据与提交纪律
 
 - 证据根：`.runtime/r6/`（gitignored，**不得 git add**）；逐会话原始留档（schema 见 harness 设计 §五）。
-- 提交：本文件、harness 设计文件两份 docs，及 `scripts/eval/r6/**` 测试基建与确定性测试；提交身份 `Tao <34084876+phona@users.noreply.github.com>`；commit message 禁绝对路径；`TMPDIR=~/.tmp`；不 push/不合并/不碰 main/tag。
+- 提交：本文件、harness 设计文件两份 docs，及 `scripts/eval/long-session/**` 测试基建与确定性测试；提交身份 `Tao <34084876+phona@users.noreply.github.com>`；commit message 禁绝对路径；`TMPDIR=~/.tmp`；不 push/不合并/不碰 main/tag。
 - **不写 `docs/decision-log.md`**（集成 Agent 单点写）。
 
 ## 十三、**Wave1 冻结口径块**（逐轨 2×40k + 1×128k；失败分类冻结；单实验硬停；停止条件）
@@ -356,6 +356,6 @@
 
 **F. 停止条件**：① 硬停触达即停留证；② 任一硬零命中 → 整批 FAIL 停止；③ infra 门失败 → 批次不开始；④ 同因连续失败（跨会话 ≥2）→ 停该轨登记 blocker。
 
-**G. 压缩生命周期判据上限（Pi 原生，冻结数字）**：零收益连串上限 **2**（≥3 判负）；单回合模型调用上限 **4**；单次摘要分片上限 **16**；每会话有效压缩下限 **3**。与 `scripts/eval/r6/compaction.ts` `R6_COMPACTION_BOUNDS` 同步。
+**G. 压缩生命周期判据上限（Pi 原生，冻结数字）**：零收益连串上限 **2**（≥3 判负）；单回合模型调用上限 **4**；单次摘要分片上限 **16**；每会话有效压缩下限 **3**。与 `scripts/eval/long-session/compaction.ts` `R6_COMPACTION_BOUNDS` 同步。
 
 **H. 结论强度**：**Wave1 一律探索性（只读、不判非劣效、不作可靠性概率结论）**。

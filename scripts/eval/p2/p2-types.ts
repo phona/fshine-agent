@@ -8,11 +8,11 @@
  *   · `turns[]` 是用户话术（会进模型请求）；
  *   · `truth` 只进 Oracle 与证据的 expected 字段，**不进**任何模型提示/脚本。
  */
-import type { FactExpectation, TaskTurnFact, TaskView } from '../r6/oracle';
-import type { CompactionAttempt } from '../r6/compaction';
-import type { ModelCallRecord } from '../r6/accounting';
-import type { SessionEvidence, SessionJudgement } from '../r6/evidence';
-import type { MuDeliveryRecord } from '../r6/multiuser/mu-support';
+import type { FactExpectation, TaskTurnFact, TaskView } from '../long-session/oracle';
+import type { CompactionAttempt } from '../long-session/compaction';
+import type { ModelCallRecord } from '../long-session/accounting';
+import type { SessionEvidence, SessionJudgement } from '../long-session/evidence';
+import type { MuDeliveryRecord } from '../long-session/multiuser/mu-support';
 import type { DriverToolCallRecord } from '../business-e2e/shared-instance';
 import type { GrantedScope } from '../business-e2e/judge';
 

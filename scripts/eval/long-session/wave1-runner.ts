@@ -2,7 +2,7 @@
  * R6 Wave1 · 真实模型长会话执行器（最小 runner；复用 r6 harness/oracle/accounting/evidence）。
  *
  * 口径 = `docs/product/r6-longsession-prereg.md` §十三 冻结块（运行前快照见
- * `.runtime/r6-wave1/prereg.md`；无快照时按仓内预注册文档计算 sha256）：
+ * `.runtime/long-session/prereg.md`；无快照时按仓内预注册文档计算 sha256）：
  *   · 每轨 3 会话 = 2×40k 探索 + 1×128k 生产窗口可行性；五轨 15 会话；
  *   · 逐会话硬停 150 calls / 3,000,000 tokens / 2h（先验拒绝，达限即停并留证）；
  *   · 会话需 ≥3 次有效压缩（after < before）方可用于结论；不足按三态处置留档；
@@ -24,11 +24,11 @@
  *
  * 命令（在仓根执行；`--env-file` 指向含 LLM_API_KEY 的 .env）：
  *   # 最小冒烟：1 个 LS4/128k 会话，pump 上限 4，20 分钟墙钟（真实模型，必须跑）
- *   node --env-file=.env --import tsx scripts/eval/r6/wave1-runner.ts --smoke --concurrency=1
+ *   node --env-file=.env --import tsx scripts/eval/long-session/wave1-runner.ts --smoke --concurrency=1
  *   # 单轨正式跑（例：LS4，串行）
- *   node --env-file=.env --import tsx scripts/eval/r6/wave1-runner.ts --track=LS4 --concurrency=1
+ *   node --env-file=.env --import tsx scripts/eval/long-session/wave1-runner.ts --track=LS4 --concurrency=1
  *   # 全量五轨（15 会话；缺省串行，高额度端点再显式并发）
- *   node --env-file=.env --import tsx scripts/eval/r6/wave1-runner.ts --all --concurrency=8
+ *   node --env-file=.env --import tsx scripts/eval/long-session/wave1-runner.ts --all --concurrency=8
  *
  * 并发注意（2026-11-17 实测/owner 口径）：
  *   · runner 缺省 `--concurrency=1`（安全）：**step 账号模型级并发上限 5**，一次会话
@@ -66,7 +66,7 @@ const FIXTURES_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures');
 const REPO_PREREG = path.join(REPO_ROOT, 'docs', 'product', 'r6-longsession-prereg.md');
 const requireCjs = createRequire(import.meta.url);
 const OUT_ROOT = path.join(REPO_ROOT, '.runtime');
-const RUN_ROOT = path.join(REPO_ROOT, '.runtime', 'r6-wave1');
+const RUN_ROOT = path.join(REPO_ROOT, '.runtime', 'long-session');
 
 const PRIMARY_PRINCIPAL = 'wecom:fixture-user';
 /** FI-8 的第二个 principal（配置/渠道事实，非凭据；只在 .runtime 配置副本里追加）。 */
@@ -277,7 +277,7 @@ async function runOne(job: WaveJob, opts: { runId: string; config: AppConfig; db
   }
   const wallMs = Date.now() - wallStart;
 
-  // 证据落盘（prereg §十二 根：.runtime/r6/...）。evidence.ts 已写 structure-leak.jsonl 与
+  // 证据落盘（prereg §十二 根：.runtime/long-session/...）。evidence.ts 已写 structure-leak.jsonl 与
   // evidence.json 的 structureLeak 字段（主线判据），这里只额外留会话/驱动原始事实。
   const collected = collectEvidence(OUT_ROOT, result.evidence, result.judgement);
   writeFileSync(path.join(collected.dir, 'pi-session-file.jsonl'), sessionFile === undefined ? '' : readFileSync(sessionFile, 'utf8'));
@@ -445,7 +445,7 @@ function trackSummary(results: readonly SessionResult[], track: Track): Record<s
 
 async function main(): Promise<void> {
   const args = parseWave1Args(process.argv.slice(2));
-  const runId = `r6w1${args.smoke ? '-smoke' : ''}-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`;
+  const runId = `long-session${args.smoke ? '-smoke' : ''}-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`;
   mkdirSync(RUN_ROOT, { recursive: true });
 
   const preregSha = preregSha256();

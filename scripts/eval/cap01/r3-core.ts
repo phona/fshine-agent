@@ -547,7 +547,7 @@ require('node:fs').writeFileSync('out/原件.bin', Buffer.concat(parts));
   }
 }
 
-// ── server 级夹具（r6 同款：生产装配 + 脚本化驱动；零模型） ──────────────────
+// ── server 级夹具（长会话评测同款：生产装配 + 脚本化驱动；零模型） ──────────────────
 
 interface RunRecord {
   turnNo: number;
@@ -777,7 +777,7 @@ function runDirCount(workspaceRoot: string, scope: FileScope): number {
   return existsSync(runsDir) ? readdirSync(runsDir).length : 0;
 }
 
-/** 只读底账行投影（server 已持有写连接，另开只读连接，r6 同款）。 */
+/** 只读底账行投影（server 已持有写连接，另开只读连接，长会话评测同款）。 */
 function fileRows(dbPath: string, scope: FileScope): Array<{ fileId: string; name: string; bytes: number; activated: boolean; sha256: string }> {
   const registry = createSqliteTaskRegistry(dbPath, { readOnly: true });
   try {

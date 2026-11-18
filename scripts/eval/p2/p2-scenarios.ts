@@ -5,8 +5,8 @@
  * + 一个确定性跑法（假模型 + 仓内 dummy 执行层；零真实平台、零真实写）。
  *
  * 复用（不重建框架）：`./p2-harness`（生产同源 createServer + 脚本化 provider +
- * r6/harness 逐轮管线）、`r6/multiuser/mu-support`（MU 计划驱动/会合栅/快照）、
- * `business-e2e/shared-instance`（工具记录/消息构造）、`r6/oracle`（FACT_TRUTH 真值）。
+ * long-session/harness 逐轮管线）、`long-session/multiuser/mu-support`（MU 计划驱动/会合栅/快照）、
+ * `business-e2e/shared-instance`（工具记录/消息构造）、`long-session/oracle`（FACT_TRUTH 真值）。
  *
  * **真值只给 Oracle**：`truth.facts` 只用于判定；脚本回复由执行层真实返回派生
  * （`describeRecord` / 底账存档原文），不读 `FACT_TRUTH`。
@@ -16,16 +16,16 @@ import os from 'node:os';
 import path from 'node:path';
 import type { RuntimeConfig } from '@fshine/contracts';
 import type { ExecutionClient } from '@fshine/contracts/execution-contract';
-import { accountCalls } from '../r6/accounting';
-import { analyzeCompaction, judgeCompactionLifecycle } from '../r6/compaction';
-import { FACT_TRUTH, judgeTaskContinuity } from '../r6/oracle';
-import type { TaskTurnFact, TaskView } from '../r6/oracle';
+import { accountCalls } from '../long-session/accounting';
+import { analyzeCompaction, judgeCompactionLifecycle } from '../long-session/compaction';
+import { FACT_TRUTH, judgeTaskContinuity } from '../long-session/oracle';
+import type { TaskTurnFact, TaskView } from '../long-session/oracle';
 import {
   createMuServer, deliver, incoming, makeCtx, makeMainDriver, makeWorkerDriver, Rendezvous,
   MU_PRINCIPALS, MU_TAGS, MuPlans, MuRecordingSink,
   principalIdOf, readTasks, sessionIdOf, toTaskViews,
   type MuTaskSnapshot,
-} from '../r6/multiuser/mu-support';
+} from '../long-session/multiuser/mu-support';
 import {
   createDeadlineWorkerDriver, createDummyP2Client, createHangingClient,
   judgementOf, P2ScriptBook, runP2Sample, sessionEvidenceOf, startP2Server,
@@ -714,7 +714,7 @@ function applyTamper(observation: P2Observation, tamper: P2Tamper | undefined): 
 }
 
 function judgeTaskContinuityOf(turns: readonly TaskTurnFact[]) {
-  // 与 r6/oracle 同一判据（H3/H4/H5/E-G）。
+  // 与 long-session/oracle 同一判据（H3/H4/H5/E-G）。
   return judgeTaskContinuity(turns);
 }
 

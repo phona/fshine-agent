@@ -8,10 +8,10 @@
  *   · 脚本表匹配与耗尽抛错；`evidence.ts` 的 Track 扩展不改变 classifySample 行为。
  */
 import { describe, expect, it } from 'vitest';
-import type { SessionEvidence, SessionJudgement } from '../r6/evidence';
-import { classifySample } from '../r6/evidence';
-import { judgeTaskContinuity, type TaskTurnFact } from '../r6/oracle';
-import { accountCalls } from '../r6/accounting';
+import type { SessionEvidence, SessionJudgement } from '../long-session/evidence';
+import { classifySample } from '../long-session/evidence';
+import { judgeTaskContinuity, type TaskTurnFact } from '../long-session/oracle';
+import { accountCalls } from '../long-session/accounting';
 import { classifyModelCall, judgementOf, looksLikeSummaryRequest, P2ScriptBook, sessionEvidenceOf } from './p2-harness';
 import {
   assertNoFabricatedNumbers, claimsCompletion, classifyP2Sample,

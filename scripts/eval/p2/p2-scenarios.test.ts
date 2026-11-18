@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 import { p2Case, runP2Scenario } from './p2-scenarios';
 import { judgeP2Case, type P2Judgement } from './p2-oracle';
 import type { P2Observation } from './p2-types';
-import type { CompactionVerdict } from '../r6/compaction';
+import type { CompactionVerdict } from '../long-session/compaction';
 import type { P2RunOutput } from './p2-scenarios';
 
 function failedChecks(judgement: P2Judgement): string[] {

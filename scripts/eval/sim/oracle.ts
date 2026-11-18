@@ -1,7 +1,7 @@
 /**
  * SimCase 薄机制 · 独立 Oracle（真值判定；模拟用户看不到本模块）。
  *
- * 复用 R6 的 Oracle 思路与实现：事实真值来自夹具种子快照（`../r6/oracle.ts` 的
+ * 复用 R6 的 Oracle 思路与实现：事实真值来自夹具种子快照（`../long-session/oracle.ts` 的
  * `FACT_TRUTH`），机械比对走 `judgeFactAnswer`（数值/澄清/不可答三类）；本模块只做
  * id → 判定器的注册与投影，不新增真值来源、不读模型自述。
  *
@@ -12,7 +12,7 @@
  *     发起，由 Harness 记 `kind: judge`（记账见 `./accounting`）。
  */
 
-import { FACT_TRUTH, judgeFactAnswer, type FactExpectation } from '../r6/oracle';
+import { FACT_TRUTH, judgeFactAnswer, type FactExpectation } from '../long-session/oracle';
 import type { SimModelCompletion } from './simulator';
 
 /** 执行事实投影（系统适配器给出；只保留可机械核对的最小字段）。 */

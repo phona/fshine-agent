@@ -1,6 +1,6 @@
 # B3 · R6 Harness 全量调用记账与单实验硬停
 
-> 定位：R6 长会话可靠性验收（`scripts/eval/r6/**`）的**评测侧**计量增强。
+> 定位：R6 长会话可靠性验收（`scripts/eval/long-session/**`）的**评测侧**计量增强。
 > **不改产品语义**（`packages/`、`apps/` 不动）、**不改已冻结口径**（150/3,000,000/2h 数字仍取预注册 §十三.D）。
 > 本文件只说明「记账面 / 硬停口径 / 与生产 budget 解耦 / 测试证据」。
 > 关联：`docs/product/r6-longsession-prereg.md` §六.1、§六.3、§十三.D（单实验硬停与摘要入账）。
@@ -18,7 +18,7 @@
 
 ## 二、记账面（逐次）
 
-新增 `scripts/eval/r6/accounting.ts`，定义逐次调用记录 `ModelCallRecord`：
+新增 `scripts/eval/long-session/accounting.ts`，定义逐次调用记录 `ModelCallRecord`：
 
 | 字段 | 含义 |
 |---|---|
@@ -59,13 +59,13 @@ modelCallLedger?(): readonly ModelCallRecord[];
 ## 四、与生产 budget 解耦说明
 
 - **不改生产语义**：`TaskBudget` / `resource-policy` / `pi-driver` 一行未动（B3 明确「暂不改生产语义」）。
-- **本增强只在评测侧（`scripts/eval/r6/**`）**：记账与硬停由 harness 自己的 `CallAccountingGuard` 承担，**不依赖**生产 budget hook，也不向其写入。
+- **本增强只在评测侧（`scripts/eval/long-session/**`）**：记账与硬停由 harness 自己的 `CallAccountingGuard` 承担，**不依赖**生产 budget hook，也不向其写入。
 - **为什么摘要必须独立**：旧路径摘要生成绕过生产 budget（`BudgetUsage.calls` 不含摘要），若硬停读 budget 就会漏掉摘要调用。本增强改为**按实际发起逐次记录**，与 budget 计数并列，互不覆盖。
 - 两者关系：`evidence.budgetUsed`（生产/会话面聚合，原样保留）与 `evidence.callAccounting`（评测侧全量逐次账本）**并列留档**，便于交叉核对。
 
 ## 五、测试证据（确定性、零真实模型）
 
-新增 `scripts/eval/r6/accounting.test.ts`（15 例）；`evidence.test.ts` / `g3-readiness.ts` 的 schema 断言补入 `model-calls.jsonl`。全部经假会话（`FakeHarnessSession`），**不调用任何模型**。
+新增 `scripts/eval/long-session/accounting.test.ts`（15 例）；`evidence.test.ts` / `g3-readiness.ts` 的 schema 断言补入 `model-calls.jsonl`。全部经假会话（`FakeHarnessSession`），**不调用任何模型**。
 
 - **三类记账齐**：三类调用（主/摘要/重试）逐次记账且与会话/回合关联；`missingCallKinds` 空；`model-calls.jsonl` 落盘含 kind/tokens/duration/session/turn。
 - **硬停超限拒发**：
@@ -74,7 +74,7 @@ modelCallLedger?(): readonly ModelCallRecord[];
   - `wallMs`：注入时钟超 `wallMs` 即停；
   - 判定顺序：同时越限报 `ms`。
 - **反向绊线（故意破坏必须红）**：
-  - 把 `accountCalls` 中对 `summary` 的计数去掉 → `scripts/eval/r6/accounting.test.ts` **7 例红**（含三类覆盖与 `byKind.summary.calls` 断言）；
+  - 把 `accountCalls` 中对 `summary` 的计数去掉 → `scripts/eval/long-session/accounting.test.ts` **7 例红**（含三类覆盖与 `byKind.summary.calls` 断言）；
   - 把 `CallAccountingGuard.precheck` 改成不复用 → **4 例红**（calls/tokens/wall/顺序）。
   两处破坏均已回滚，最终全绿。
 
@@ -83,7 +83,7 @@ modelCallLedger?(): readonly ModelCallRecord[];
 | 命令 | 结果 |
 |---|---|
 | `npm run typecheck`（worktree，`tsc --noEmit`） | **0 错误** |
-| `vitest run scripts/eval/r6` | **7 文件 / 66 例全绿** |
+| `vitest run scripts/eval/long-session` | **7 文件 / 66 例全绿** |
 | `vitest run`（全量；worktree） | **93 文件 / 937 passed + 3 todo（940）全绿** |
 | `vitest run`（全量；基线 `arch/integration@b90f12f` 主仓） | 92 文件 / 922 passed + 3 todo（925） |
 

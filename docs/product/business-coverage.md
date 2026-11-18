@@ -42,13 +42,13 @@
 | `r3-core` | 读宿主 .env 被拒、起子进程被拒、产物目录软链/硬链拒收、死循环超时无残留、超大 stdout 截断、跨会话 fileId 同码、纯附件重投只登记一次、TTL 过期同码、附件注入无效、in/ 只读、三方 sha 一致、同回合重试只执行一次 | 宿主不变量 |
 | `r3b-attacks` | 路径穿越、恶意文件名、预植链接、凭据隔离、fork bomb、深树进程组、内存攻击、并发同名产物 | 宿主不变量 |
 | `r5-resources` | 连跑 100 次的磁盘/DB/RSS 增长、同 sha 重复登记、任务池去重 | 记录项（不判红） |
-| `r6-lifecycle` | 跨轮引用附件、同名重传不覆盖、同内容重传（UNDEFINED）、一条消息两附件（UNDEFINED）、PDF/ZIP（UNDEFINED）、跨 principal 同 session 号 | 两者/记录 |
+| `lifecycle` | 跨轮引用附件、同名重传不覆盖、同内容重传（UNDEFINED）、一条消息两附件（UNDEFINED）、PDF/ZIP（UNDEFINED）、跨 principal 同 session 号 | 两者/记录 |
 | `r7-faults` | 登记中途 kill、写盘失败、交付成功但事件写失败、两进程同写 SQLite | 宿主不变量 |
 | `r8-concurrency` | 并发上限（4/8 档）、转录隔离、SQLite 竞争、内存增量 | 宿主不变量 + 记录 |
 
 ## 四、多用户（脚本化，MU-1～MU-10）
 
-`scripts/eval/r6/multiuser/`
+`scripts/eval/long-session/multiuser/`
 
 | 用例 | 业务 |
 |---|---|
@@ -116,6 +116,6 @@
 | 4 | ~~跨会话继续上一件事~~ | **owner 裁定不做（2026-11-17）**：先不支持，避免把任务管理复杂化成跨会话授权面。现状保持「任务 scope = (principalId, sessionId)」，MU-3/MU-8 的隔离语义不动。 |
 | 5 | **群聊里多人交办** | MU-8 只覆盖同 principal 的群/私隔离。 |
 | 6 | **真实写操作成功 + 确认回环** | E11 是拒绝写；SIM-09/10 用假写系统；所有业务用例的 granted 都是 read。 |
-| 7 | **PDF/图片业务识别** | `r6-lifecycle` S5 只登记 `.pdf/.zip` 的机械生命周期（UNDEFINED），不调模型。 |
+| 7 | **PDF/图片业务识别** | `lifecycle` S5 只登记 `.pdf/.zip` 的机械生命周期（UNDEFINED），不调模型。 |
 | 8 | ~~**执行层 needs_input → 用户补答 → 同一任务完成**~~ | **2026-11-17 已补**：`scripts/needs-input-resume.test.ts`（生产装配链 + 假执行层/假驱动：受理 #编号 → waiting_user 问题与原编号一致 → task_resume 同一 taskId 续跑完成、两条执行事实；不补答则停在 waiting_user 不重复执行）。修复：后台续跑回合把用户补答随委派交给 Worker（此前新 Worker 拿不到补答，只能再次 needs_input/失败）。 |
 | 9 | **指定接收人/转发结果** | 所有投递断言都是「回到发起会话」。 |

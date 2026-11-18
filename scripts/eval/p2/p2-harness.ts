@@ -6,10 +6,10 @@
  *   · 真实 Pi 驱动 + **脚本化 provider**：`createPiTurnDriver` × `createScriptedModelRuntime`
  *     （`packages/agent/testing/scripted-model-runtime.ts`）——驱动链路真实，模型响应脚本化；
  *   · 仓内 dummy 执行层：`createDummyCliClient` / `readOnlyOperationNames`（与 server 缺省同源）；
- *   · 逐轮管线 + Oracle + 证据：`r6/harness.ts` 的 `runHarnessSession`、`r6/oracle.ts`、
- *     `r6/compaction.ts`、`r6/evidence.ts`、`r6/accounting.ts`；
+ *   · 逐轮管线 + Oracle + 证据：`long-session/harness.ts` 的 `runHarnessSession`、`long-session/oracle.ts`、
+ *     `long-session/compaction.ts`、`long-session/evidence.ts`、`long-session/accounting.ts`；
  *   · 工具调用记录：`business-e2e/shared-instance.ts` 的 `recordingDriver`（导出复用）；
- *   · 多用户/重启辅助：`r6/multiuser/mu-support.ts`。
+ *   · 多用户/重启辅助：`long-session/multiuser/mu-support.ts`。
  *
  * 本模块只做三件事：**脚本表**（按用户原文/委派原文索引的模型响应）、**装配与观测**、
  * **证据落盘**。判定在 `./p2-oracle`，场景定义在 `./p2-scenarios`。
@@ -32,18 +32,18 @@ import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import { createScriptedModelRuntime } from '../../../packages/agent/testing/scripted-model-runtime';
 import { createServer, type Server } from '../../../apps/server/server';
 import { resolveExecutionFace, type ExecutionFace } from '../../ask-runtime';
-import { accountCalls, type AccountedUsage, type CallKind, type ModelCallRecord } from '../r6/accounting';
-import type { SessionEvidence, SessionJudgement } from '../r6/evidence';
-import { collectEvidence } from '../r6/evidence';
-import { runHarnessSession } from '../r6/harness';
-import type { FactExpectation, TaskTurnFact, TaskView } from '../r6/oracle';
-import { judgeFactAnswer, judgeTaskContinuity } from '../r6/oracle';
-import { analyzeCompaction, judgeCompactionLifecycle, type CompactionAttempt } from '../r6/compaction';
-import type { TrackPlan } from '../r6/load-generator';
+import { accountCalls, type AccountedUsage, type CallKind, type ModelCallRecord } from '../long-session/accounting';
+import type { SessionEvidence, SessionJudgement } from '../long-session/evidence';
+import { collectEvidence } from '../long-session/evidence';
+import { runHarnessSession } from '../long-session/harness';
+import type { FactExpectation, TaskTurnFact, TaskView } from '../long-session/oracle';
+import { judgeFactAnswer, judgeTaskContinuity } from '../long-session/oracle';
+import { analyzeCompaction, judgeCompactionLifecycle, type CompactionAttempt } from '../long-session/compaction';
+import type { TrackPlan } from '../long-session/load-generator';
 import {
   MU_FIXTURE_ROOT, deliver, incoming, readTasks,
   type MuDeliveryRecord,
-} from '../r6/multiuser/mu-support';
+} from '../long-session/multiuser/mu-support';
 import {
   recordingDriver, textAssistant, toolCallAssistant,
   type DriverObservations,
@@ -433,7 +433,7 @@ export async function startP2Server(spec: P2ServerSpec): Promise<P2ServerHandle>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 逐回合驱动（复用 r6/harness 的 HarnessSession 接口与 runHarnessSession）
+// 逐回合驱动（复用 long-session/harness 的 HarnessSession 接口与 runHarnessSession）
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface P2HarnessSessionOptions {
@@ -672,10 +672,10 @@ export async function runP2Sample(input: P2SampleRunInput): Promise<P2Observatio
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 证据落盘（复用 r6 collectEvidence；P2 字段并列写入）
+// 证据落盘（复用长会话 collectEvidence；P2 字段并列写入）
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** 证据根（gitignored；collectEvidence 会在其下拼 `r6/<wave>/<track>/<sessionId>`）。 */
+/** 证据根（gitignored；collectEvidence 会在其下拼 `long-session/<wave>/<track>/<sessionId>`）。 */
 export const P2_EVIDENCE_ROOT = path.resolve(process.cwd(), '.runtime');
 
 /** 落盘：R6 证据包（collectEvidence）+ P2 判定/覆盖/执行事实（同目录）。 */

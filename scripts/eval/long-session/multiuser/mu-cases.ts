@@ -26,7 +26,7 @@ import { mu6Restart } from './mu6-restart';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..', '..', '..');
-export const EVIDENCE_ROOT = path.join(REPO_ROOT, '.runtime', 'r6', 'multiuser');
+export const EVIDENCE_ROOT = path.join(REPO_ROOT, '.runtime', 'long-session', 'multiuser');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 通用判定辅助
