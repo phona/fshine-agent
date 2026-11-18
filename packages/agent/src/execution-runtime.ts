@@ -706,6 +706,13 @@ export function renderFileManifest(files: readonly TurnFileRef[]): string {
   ].join('\n');
 }
 
+/** A2b 放行事实（观测用）：执行层显式声明 retryable:true 的失败——本回合允许继续尝试。 */
+export interface TurnRetryAllowed {
+  operation: string;
+  object: string;
+  code: string;
+}
+
 /** A2b 拦截事实（观测用；对象/操作/执行层给出的码与它的 retryable 声明）。 */
 export interface TurnRetryBlock {
   operation: string;
@@ -740,6 +747,8 @@ export interface TurnResult {
    * 只作运维可见（装配层按条记 `execution_retry_blocked` 事件），不改变回合结果、不进用户文本。
    */
   retryBlocked?: readonly TurnRetryBlock[];
+  /** A2b 观测面：执行层声明可重试的失败（瞬时故障）——本回合放行继续尝试。 */
+  retryAllowed?: readonly TurnRetryAllowed[];
   /** 进度帧（本回合 onStep 产出；当前只收集，不在此投递渠道）。 */
   progress: readonly string[];
   /**
@@ -1171,6 +1180,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   let deterministicFailuresThisTurn = new Map<string, { code: string; declaredRetryable?: boolean }>();
   /** A2b 观测：本回合被拦下的重试（回合末随 TurnResult 交装配层落事件；不改回合结果）。 */
   let retryBlockedThisTurn: TurnRetryBlock[] = [];
+  /** A2b 观测：本回合执行层声明可重试（瞬时故障）的失败。 */
+  let retryAllowedThisTurn: TurnRetryAllowed[] = [];
   const dispatchMode: 'inline' | 'background' = options.dispatchMode ?? 'inline';
   const taskRunner = options.taskRunner;
   if (dispatchMode === 'background' && taskRunner === undefined) {
@@ -1741,7 +1752,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     // 也不能把执行层打到不能用。只有显式 retryable:true（超时/网关不可用等瞬时故障）放行。
     if (deterministicKey !== undefined && run.outcome.status !== 'completed') {
       const error = (run.outcome as { error?: { code?: string; retryable?: boolean } }).error;
-      if (error?.retryable !== true) {
+      if (error?.retryable === true) {
+        // 瞬时故障：不锁，但要留下「为什么还在试」的可见事实（否则部署侧只看到停、看不到试）。
+        retryAllowedThisTurn.push({ operation, object: objectValue ?? '', code: error.code ?? 'retryable_failure' });
+      } else {
         deterministicFailuresThisTurn.set(deterministicKey, {
           code: error?.code ?? 'unclassified_failure',
           ...(error?.retryable === undefined ? {} : { declaredRetryable: error.retryable }),
@@ -2082,6 +2096,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       operationsThisTurn = 0;
       deterministicFailuresThisTurn = new Map();
       retryBlockedThisTurn = [];
+      retryAllowedThisTurn = [];
       const turnScopeKey = `turn:${options.sessionId}:${turnNo}`;
       const mainWindow = newAttemptWindow();
       // 宿主只交「本轮输入」：最后一条 user = 本轮文本；历史种子仅在驱动尚无会话时使用。
@@ -2277,6 +2292,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         ...(relayedTaskIds.length > 0 ? { relayedTaskIds } : {}),
         ...(pushSuppressedTaskIds.length > 0 ? { pushSuppressedTaskIds } : {}),
         ...(retryBlockedThisTurn.length > 0 ? { retryBlocked: retryBlockedThisTurn } : {}),
+        ...(retryAllowedThisTurn.length > 0 ? { retryAllowed: retryAllowedThisTurn } : {}),
         progress,
         ...(turnFiles.length > 0 ? { files: turnFiles } : {}),
         ...(manifestBytes === undefined ? {} : { fileManifestBytes: manifestBytes }),

@@ -142,6 +142,21 @@ describe('A2b 确定性失败后的同对象重试守卫', () => {
     ]);
   });
 
+  it('观测面：显式 retryable:true 的失败记入 retryAllowed（放行，但留下「为什么还在试」）', async () => {
+    const transient = (): ExecutionOutcome => ({ status: 'failed', error: { code: 'TRANSIENT', message: 'busy', retryable: true } });
+    const { client, turn } = await runWorkerCalls([
+      { operation: 'dummy.query', args: { '--collection': 'alpha' } },
+      { operation: 'dummy.query', args: { '--collection': 'alpha' } },
+    ], '查 alpha', transient);
+    expect(client.requests).toHaveLength(2);
+    expect(turn.retryBlocked).toBeUndefined();
+    // 每次瞬时失败都记一条（「一直在试」的可见面就是这些条数）
+    expect(turn.retryAllowed).toEqual([
+      { operation: 'dummy.query', object: 'alpha', code: 'TRANSIENT' },
+      { operation: 'dummy.query', object: 'alpha', code: 'TRANSIENT' },
+    ]);
+  });
+
   it('观测面：未声明 retryable 的失败，拦截记录里 declaredRetryable 缺省（不是编造 false）', async () => {
     const unclassified = (): ExecutionOutcome => ({ status: 'failed', error: { code: 'SOMETHING_ODD', message: 'unexpected' } });
     const { turn } = await runWorkerCalls([

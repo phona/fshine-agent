@@ -13,7 +13,7 @@
 - **结果五态互斥**：completed / needs_confirmation / needs_input / failed / refused（`packages/contracts/src/execution-contract.ts:96`、`:137-142`）。`refused`＝策略拒绝、`failed`＝执行失败，不得混用（`:16-20`）；`needs_input` 必带非空 `missing`，`needs_confirmation` 必带非空 handle/summary（`:17-20`、`:105-118`）。
 - **确认仍走同一次 execute**：执行层先返 `needs_confirmation`，下一回合宿主把 `confirmation{handle, userText}` 原样带回；handle 不透明，宿主不解析、不比较、不判「这是不是在确认」（`:86-92`、`:127-136`；`packages/agent/write-confirmation.test.ts:339`）。
 - **取消只带信号**：`ExecutionCallOptions.signal`，不是独立 cancel 协议；适配器可忽略，宿主不依赖执行层配合也能终结任务（`:144-152`）。
-- **失败默认不可重试**：`ExecutionFailure.retryable` 缺省 = 不可重试，只有执行层显式 `true`（超时/网关暂不可用等瞬时故障）才放行；`false` 与未声明一律让宿主锁住该 `(operation, 对象)` 本回合不再发起（`packages/contracts/src/execution-contract.ts:121-134`；`packages/agent/src/execution-runtime.ts:1675-1690`、`:1744`）。每次拦截落一条 `execution_retry_blocked` 事件（operation/object/code/declaredRetryable，`apps/server/server.ts:830-840`），告警归部署侧读事件，宿主不自建告警通道。
+- **失败默认不可重试**：`ExecutionFailure.retryable` 缺省 = 不可重试，只有执行层显式 `true`（超时/网关暂不可用等瞬时故障）才放行；`false` 与未声明一律让宿主锁住该 `(operation, 对象)` 本回合不再发起（`packages/contracts/src/execution-contract.ts:121-134`；`packages/agent/src/execution-runtime.ts:1675-1690`、`:1744`）。每次拦截落一条 `execution_retry_blocked`（operation/object/code/declaredRetryable），每次显式可重试的失败落一条 `execution_retry_allowed`（operation/object/code），均在 `apps/server/server.ts:830-852`；告警归部署侧读事件，宿主不自建告警通道——但「停了」与「一直在试」两种都要可见。
 
 宿主「允许集合」不在契约里：装配方从执行层 `access` 派生（只读集合，`allowWriteOperations=true` 时并入写集合），发起前确定性拒绝集合外调用（`scripts/ask-runtime.ts:344-354`；`packages/agent/src/execution-runtime.ts:1546-1549`）。它挡的是「宿主没开这个口」，不是业务授权。
 ## 2. 刻意不放进契约

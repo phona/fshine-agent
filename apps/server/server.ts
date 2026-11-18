@@ -827,6 +827,18 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       }
       // A2b 观测：本回合被拦下的重试逐条落事件（对象/操作/执行层码/它的 retryable 声明）。
       // 告警归部署侧读这条事件；宿主不自建告警通道（也是「宁可停下让人介入」的可见面）。
+      // 瞬时故障（执行层显式 retryable:true）：不拦，但同样要可见——否则部署侧只看到
+      // 「停了」，看不到「一直在试」。
+      for (const allowed of turn.retryAllowed ?? []) {
+        log({
+          event: 'execution_retry_allowed',
+          principalId,
+          sessionId,
+          operation: allowed.operation,
+          object: allowed.object,
+          code: allowed.code,
+        });
+      }
       for (const blocked of turn.retryBlocked ?? []) {
         log({
           event: 'execution_retry_blocked',
