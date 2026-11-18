@@ -359,7 +359,7 @@ function parseRecordsFlag(raw) {
   try {
     parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
   } catch (e) {
-    return { error: 'INVALID_RECORDS', message: `--records 不是合法 JSON：${e.message}` };
+    return { error: 'INVALID_RECORDS', message: `--records 不是合法 JSON：${e.message}。正确形态：--records '[{"name":"alpha-item-3","value":100}]'（JSON 数组，每项 name+value）` };
   }
   if (!Array.isArray(parsed) || parsed.length === 0) return { error: 'INVALID_RECORDS', message: '--records 必须是非空 JSON 数组' };
   if (parsed.length > 50) return { error: 'INVALID_RECORDS', message: '--records 最多 50 条' };
@@ -931,7 +931,9 @@ async function main() {
       for (const [key, value] of Object.entries(call.args)) {
         if (value === false || value === null || value === undefined) continue;
         flat.push(key);
-        if (value !== true) flat.push(String(value));
+        // 结构化参数（数组/对象）按 JSON 传给下游：模型给结构化 tool 参数比手拼 JSON 字符串
+        // 可靠得多（2026-11-18 live：手拼 --records 反复语法错）。
+        if (value !== true) flat.push(typeof value === 'object' ? JSON.stringify(value) : String(value));
       }
       call.args = flat;
     } else {

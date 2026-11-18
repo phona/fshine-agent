@@ -320,7 +320,10 @@ export const EXECUTE_OPERATION_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
     operation: { type: 'string', description: '本轮能力快照里登记的 operation 名。' },
-    args: { type: 'object', description: '该 operation 声明的参数（参数名见快照的 args 声明）。' },
+    args: {
+      type: 'object',
+      description: '该 operation 声明的参数（参数名见快照的 args 声明）。结构化参数（数组/对象）直接把值放进来，宿主负责序列化——不要手拼 JSON 字符串。',
+    },
   },
   required: ['operation'],
   additionalProperties: false,
@@ -1177,7 +1180,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
    * 报错、让人介入，也不能继续往下撞——打爆执行层就彻底没得用了。
    * 宿主只执行执行层的声明，不判断业务——这不是计划门。
    */
-  let deterministicFailuresThisTurn = new Map<string, { code: string; declaredRetryable?: boolean }>();
+  let deterministicFailuresThisTurn = new Map<string, { code: string; declaredRetryable?: boolean; message?: string }>();
   /** A2b 观测：本回合被拦下的重试（回合末随 TurnResult 交装配层落事件；不改回合结果）。 */
   let retryBlockedThisTurn: TurnRetryBlock[] = [];
   /** A2b 观测：本回合执行层声明可重试（瞬时故障）的失败。 */
@@ -1692,9 +1695,11 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         ...(blocked.declaredRetryable === undefined ? {} : { declaredRetryable: blocked.declaredRetryable }),
       });
       const codeNote = blocked.code === 'unclassified_failure' ? '且没有说明可以重试' : `（${blocked.code}）`;
+      const original = blocked.message === undefined ? '' : `执行层原话：${blocked.message}`;
       throw new Error(
         `执行层这次调用「${objectValue}」失败了${codeNote}；本回合不要再换参数重试——`
-        + '把执行层给出的说法如实转告用户，需要换口径或换对象时先问用户。',
+        + `把执行层给出的说法如实转告用户${original === '' ? '' : `（${original}）`}，`
+        + '需要换口径或换对象时先问用户。',
       );
     }
     if (operationsThisTurn >= maxOperationsPerTurn) {
@@ -1759,6 +1764,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         deterministicFailuresThisTurn.set(deterministicKey, {
           code: error?.code ?? 'unclassified_failure',
           ...(error?.retryable === undefined ? {} : { declaredRetryable: error.retryable }),
+          // 原话要留住：被拦下时模型仍必须能如实转述「执行层说了什么」，否则用户拿到的
+          // 只是一句"参数不合法"，连哪里不合法都不知道（2026-11-18 live 实测）。
+          ...(typeof (error as { message?: unknown } | undefined)?.message === 'string'
+            && (error as { message: string }).message !== ''
+            ? { message: (error as { message: string }).message }
+            : {}),
         });
       }
     }

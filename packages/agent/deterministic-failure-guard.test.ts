@@ -123,6 +123,8 @@ describe('A2b 确定性失败后的同对象重试守卫', () => {
     ], '查 2026-10', nonRetryable);
     expect(client.requests).toHaveLength(1);
     expect(worker.toolErrors.some((message) => message.includes('不要再换参数重试'))).toBe(true);
+    // 拦下时也必须把执行层原话带给模型（否则用户只听到"参数不合法"，不知道哪里不合法）
+    expect(worker.toolErrors.some((message) => message.includes('collection has no window dimension'))).toBe(true);
   });
 
   it('同一集合用完全相同参数重试：同样被挡', async () => {

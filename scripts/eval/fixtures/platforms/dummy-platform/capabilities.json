@@ -467,7 +467,7 @@
             "flag": "--records",
             "required": false,
             "style": "code",
-            "desc": "records to add as JSON array: [{\"name\":\"x\",\"value\":100}] (max 50); omit to add <count> auto-generated records"
+            "desc": "要新增的记录（结构化数组，每项 {name, value}，最多 50 条）；宿主会原样序列化，不要手拼 JSON 字符串。省略则按 --count 由平台自动生成占位记录"
           }
         ]
       },
@@ -524,7 +524,7 @@
             "flag": "--records",
             "required": false,
             "style": "code",
-            "desc": "records to add as JSON array: [{\"name\":\"x\",\"value\":100}] (max 50); omit to add <count> auto-generated records"
+            "desc": "要新增的记录（结构化数组，每项 {name, value}，最多 50 条）；宿主会原样序列化，不要手拼 JSON 字符串。省略则按 --count 由平台自动生成占位记录"
           }
         ]
       },

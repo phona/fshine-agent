@@ -242,9 +242,50 @@ describe('dummy 执行层适配器（Execution Contract 传输面）', () => {
       // 的唯一判据；丢掉这个字段守卫就形同不存在，E14 的 11 次重试风暴就是这么来的）。
       expect(locked.error.retryable).toBe(false);
     }
-    // 非确定性错误不带该字段：适配器不得替执行层编造 retryable。
+    // 参数形状错误（缺必填/JSON 不合法）由执行层显式声明可重试——同回合允许按正确形态再试；
+    // 业务性失败（找不到集合等）仍不可重试。适配器只透传，不替执行层判断。
     if (missing.status === 'failed') {
-      expect(missing.error).not.toHaveProperty('retryable');
+      expect(missing.error.retryable).toBe(true);
+    }
+  });
+});
+
+describe('dummy：结构化参数直接传数组（模型不手拼 JSON）', () => {
+  it('--records 传对象数组 → 执行层收到合法记录并出提案', async () => {
+    const client = clientWith(baseEnv());
+    const outcome = await client.execute({
+      requestId: 'req_array_records',
+      dispatchKey: 'dk_test_req_array_records',
+      operation: 'dummy.prepare',
+      args: {
+        '--collection': 'alpha',
+        '--window': 'W1',
+        '--records': [{ name: 'alpha-item-3', value: 'hello' }, { name: 'alpha-item-4', value: 'world' }],
+      },
+    });
+    expect(outcome.status).toBe('needs_confirmation');
+    if (outcome.status === 'needs_confirmation') {
+      expect(outcome.confirmation.summary).toContain('alpha-item-3=hello');
+      expect(outcome.confirmation.summary).toContain('alpha-item-4=world');
+    }
+  });
+});
+
+describe('dummy：参数形状错误声明可重试（同回合允许按正确形态再试）', () => {
+  it('INVALID_RECORDS → retryable:true，且 message 自带正确形态（模型一读就能改对）', async () => {
+    const client = clientWith(baseEnv());
+    const bad = await client.execute({
+      requestId: 'req_bad_records',
+      dispatchKey: 'dk_test_req_bad_records',
+      operation: 'dummy.prepare',
+      args: { '--collection': 'alpha', '--window': 'W1', '--records': 'alpha-item-3=hello' },
+    });
+    expect(bad.status).toBe('failed');
+    if (bad.status === 'failed') {
+      expect(bad.error.code).toBe('INVALID_RECORDS');
+      expect(bad.error.retryable).toBe(true);
+      expect(bad.error.message).toContain('--records');
+      expect(bad.error.message).toContain('name');
     }
   });
 });
