@@ -617,6 +617,23 @@ host:
     }
   });
 
+  it('runtime.taskRunWaitMs：0 / 正数解析；非法值 fail-fast；缺省不造键（缺省 1500 住策略层）', () => {
+    // 契约里有这个字段、之前漏在加载层白名单外：YAML 一写就 fail-fast「不是已知字段」，
+    // 配置文件与契约对不上（2026-11-19 在 cap01 里实测到）。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+
+    const zero = loadConfig({ yamlPath: writeFixture(`${VALID_YAML}runtime:\n  taskRunWaitMs: 0\n`), env: {} });
+    expect(zero.runtime).toEqual({ taskRunWaitMs: 0 });
+
+    const positive = loadConfig({ yamlPath: writeFixture(`${VALID_YAML}runtime:\n  taskRunWaitMs: 1200\n`), env: {} });
+    expect(positive.runtime).toEqual({ taskRunWaitMs: 1200 });
+
+    for (const bad of ['-1', '1.5', 'nope']) {
+      const yaml = `${VALID_YAML}runtime:\n  taskRunWaitMs: ${bad}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(/runtime\.taskRunWaitMs/);
+    }
+  });
+
   it('runtime.fileRetentionSweepOnStart：布尔 true/false 解析；非布尔 fail-fast；缺省不造键', () => {
     // 缺省 = 加载层不造键；缺省 false（不在启动时清扫）由 resolveRuntimeConfig 补齐。
     expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();

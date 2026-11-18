@@ -642,6 +642,20 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           }
           if (relayed) {
             suppressText();
+            // 快活抑制只免掉「办完了」这条重复播报；**文件没送达时必须单独说一句**——
+            // 同回合模型已经说过「见附件」，用户手上却什么都没有，那就是虚假交付
+            // （2026-11-19 真发现：默认窗口下 file_delivery=delivery_failed 后一句提示都没有）。
+            if (fileNote !== undefined) {
+              await deliverTaskResult({
+                taskId: completion.taskId,
+                principalId: completion.principalId,
+                sessionId: completion.sessionId,
+                resultText: fileNote,
+              }, {
+                ...(completionDelivery === undefined ? {} : { delivery: completionDelivery }),
+                log,
+              });
+            }
             return;
           }
           await deliverTaskResult({

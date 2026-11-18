@@ -221,6 +221,8 @@ async function makeFixture(input: {
   /** Worker 回合脚本（片 2：交付物由 Worker 产出）。缺省 = worker 不应被调用。 */
   workerSteps?: readonly DriverStep[];
   port?: FileDeliveryPort;
+  /** runtime 覆盖（例：短等待窗口 >0 造「快活」同回合落定）。 */
+  runtime?: AppConfig['runtime'];
   /**
    * 事件写失败注入（R7-F3）：谓词命中的日志写抛错（模拟事件存储不可写），其余照常记录。
    * 抛错先于记录（存储挂了就什么都不落），未命中行进 logs 供断言。
@@ -234,7 +236,7 @@ async function makeFixture(input: {
   const workerRecord = { toolNames: [] as string[][], errors: [] as string[] };
   const server = await createServer({
     env: { LLM_MODEL: 'test-model' },
-    config: testConfig(),
+    config: input.runtime === undefined ? testConfig() : { ...testConfig(), runtime: input.runtime },
     dbPath,
     createDrivers: () => ({
       mainDriver: sequencedDriver(input.steps, capture),
@@ -282,6 +284,36 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
       expect(texts[0]!.text).toContain('未送达');
       expect(logs.some((line) => line['event'] === 'task_result_delivery_sent')).toBe(true);
       expect(calls).toHaveLength(1); // live 确实发起了投递
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('①c 快活（同回合落定）但文件投递失败 → 仍单独发「未送达」；只抑制重复的「办完了」', async () => {
+    // 2026-11-19 真缺陷：同回合模型已经说过「见附件」，文件却没送达，而快活抑制把
+    // 未送达话术一起吞了 → 用户被虚假交付。修法：抑制只免重复播报，fileNote 必须单独发。
+    const { port, texts } = livePort({ fail: true });
+    const { server, logs } = await makeFixture({
+      steps: [TASK_RUN_STEP],
+      workerSteps: [WORKER_RUN_JS_STEP],
+      port,
+      // 短等待窗口 >0：任务在窗口内落定 = 快活（结果同回合交给模型转述）。
+      runtime: { taskRunWaitMs: 1_500 },
+    });
+    try {
+      await server.handler(incoming('m-relay-fail', '帮我汇总'));
+      await vi.waitFor(() => {
+        expect(logs.filter((line) => line['event'] === 'file_delivery')).toHaveLength(1);
+      });
+      expect(logs.find((line) => line['event'] === 'file_delivery')!['status']).toBe('delivery_failed');
+      // 快活抑制照旧（不重复播报「办完了」）……
+      expect(logs.some((line) => line['event'] === 'task_result_delivery_suppressed'
+        && line['reason'] === 'relayed_in_turn')).toBe(true);
+      // ……但文件未送达必须让用户知道（这是「如实交付」而不是重复播报）。
+      await vi.waitFor(() => {
+        expect(texts.some((entry) => entry.text.includes('未送达'))).toBe(true);
+      });
+      expect(texts).toHaveLength(1);
     } finally {
       await server.close();
     }

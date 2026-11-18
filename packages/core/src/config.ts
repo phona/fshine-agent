@@ -161,6 +161,8 @@ const RUNTIME_KEYS = [
   'queueWaitMs',
   // 大响应文件化（2026-11-19）：Worker 执行结果内联字节上限（缺省 64KiB 住策略层）。
   'oversizeDataBytes',
+  // task_run 短等待窗口（ms，缺省 1500 住策略层）：0 = 不等，受理即转后台推进。
+  'taskRunWaitMs',
 ] as const;
 
 /** runtime 段整数值：显式写错即 fail-fast（与 host.* 的「非法 = 未配置」刻意不同）。 */
@@ -222,6 +224,8 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     // 大响应文件化：最小 1 字节（缺省 65536 住策略层）；0/负数 = 配置错误，
     // 不按「关掉阈值」消化——阈值消失等于放弃上下文预算边界。
     ['oversizeDataBytes', 1],
+    // task_run 短等待窗口：0 = 不等（受理即回执、后台推进）；缺省 1500 住策略层。
+    ['taskRunWaitMs', 0],
   ];
   for (const [key, min] of integers) {
     const value = runtimeInteger(raw[key], key, min);

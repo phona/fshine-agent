@@ -131,7 +131,8 @@ TMPDIR=/home/tao/.tmp node scripts/eval/fixtures/make-sales-sample.mjs /home/tao
 
 > 前提：自动用例用独立装配 `runtime.allowWriteOperations: true`（W-25 用缺省只读装配对照），
 > 不改仓内配置、不需要重启；**每个用例自己的临时状态根**保证互不影响。
-> 注意：`principals.*.capabilities` 当前是 V1 占位、**不参与放行**；写面只看 `allowWriteOperations`。
+> 注意（2026-11-19 起）：写面 = `runtime.allowWriteOperations`（部署总闸）∩ `principals.<id>.role` 含
+> `write`（角色表见 `docs/architecture/permissions.md`）；`capabilities` 键已从契约删除、加载层忽略。
 
 | # | 优先级 | 发 | 预期（硬） | 观察 | 证据 |
 | --- | --- | --- | --- | --- | --- |
@@ -288,10 +289,23 @@ TMPDIR=/home/tao/.tmp node scripts/eval/fixtures/make-sales-sample.mjs /home/tao
 可复现判据（单回合 ≤3、单任务 ≤3、同确定性拒绝 ≤2）；自动化侧对应 `E13`/`E14`（convergence-r1
 用户级黑盒）与 R6 `H6.b`（本轮 Wave1 读数 14/15 命中，见 `docs/architecture/files.md`（已删，git 历史可考）§10）。
 
-**未修**（需 owner 定方向，二选一或都做）：
-- a) 工具结果层面：`needs_confirmation` 时明确告诉模型"提案已生成，等用户下一句话再提交"，
-  并在同一回合内对 commit 直接回拒（不发起执行）；
-- b) 宿主层面：单回合 operation 上限（如 3～5），超限即停并如实告知"这一步没跑完"。
+**已修（2026-11-19）**：同回合自我确认被结构性挡住——inline 面 `pendingConfirmation.issuedTurn >= turnNo`
+即不透传；后台面句柄只来自**答复前**的底账（本轮新造的提案不在快照里），因此「同回合 prepare →
+commit」拿不到句柄（`packages/agent/background-write-confirmation.test.ts` ⑦ 反向绊线）。
+另加单回合 operation 上限（缺省 5，超限确定性拒绝）。
+
+### J. 本轮新增能力（3，人工抽查；自动面见下条指针）
+
+> 前提：live 部署 `runtime.allowWriteOperations: true`（长任务与写面同一条总闸）。
+> 自动覆盖：长任务的协议/续跑/回执在 `packages/agent/long-task-async.test.ts` 与
+> `scripts/long-task-assembly.test.ts`；主动提醒在 `apps/server/server-long-running-notice.test.ts`；
+> RBAC 在 `scripts/rbac-roles.test.ts`。本组只抽查真机手感。
+
+| # | 优先级 | 操作 | 预期（硬） | 观察 | 证据 |
+| --- | --- | --- | --- | --- | --- |
+| W-42〔人工〕| P0 | `让 dummy 跑一个要很久的导出`（`dummy.longtask`） | 受理即回执（「这个我来办…办完发你」）；期间可以继续聊别的（不被占住）；完成后结果主动发回 | 期间发一句别的会不会卡住 | `execution_accepted` → `execution_wait_resumed`（日志）；任务一直 running 直到终态 |
+| W-43〔人工〕| P1 | 临时把 `runtime.longRunningNoticeMs` 调到 `30000` 后重启，再跑 W-42（任务需 >30s） | 30 秒后收到**恰一条**「这件事比预计久了。要我停下来，还是继续等？（回「停」我就停）」 | 文案是否像同事、是否给得出动作 | `long_running_notice_sent`；群聊场景应零发送 |
+| W-44〔人工〕| P1 | 把另一个账号的 `role` 设为 `viewer` 后重启，用该账号发 `给 alpha 集合 W1 追加 1 条记录`，再发一次查询 | 写被**发起前**拒绝（「当前权限不支持这个操作。」，不提内部 operation 名、零执行事实）；查询照常 | 话术是否解释得清 | 该账号日志 `message_done.executions: []`；换回 `operator` 后写恢复 |
 
 ## 10. 自动联调登记（2026-11-18，本轨产出的机械底座）
 
