@@ -137,6 +137,11 @@ export interface RegisteredFile {
   name: string;
   bytes: number;
   sha256: string;
+  /**
+   * 是否可交付给用户（方案 A：登记面角色标记）。用户产物/任务回程/入站文件 = true；
+   * `putFile` 缺省 = false（宿主内部写出的字节默认不算交付物，只作诊断/中间产物）。
+   */
+  deliverable: boolean;
 }
 
 export interface PutFileInput {
@@ -145,6 +150,11 @@ export interface PutFileInput {
   bytes: Buffer;
   /** epoch ms；缺省 = pending（入站上传的缺省形状，v8 §4 激活语义归 S1 接线）。 */
   activatedAt?: number | null;
+  /**
+   * 是否可交付给用户；**缺省 false**（宿主内部写出的字节默认不算交付物）。
+   * 用户产物请走 register* 入口或显式传 true；投递面只按这个角色过滤，不看文件名。
+   */
+  deliverable?: boolean;
 }
 
 export interface MaterializedInput {
@@ -488,8 +498,10 @@ export function createFileStore(options: {
       // 产出即交付箱内容（登记时刻激活）；入站附件传 undefined = pending（NULL）。
       ...(input.activatedAt === undefined ? {} : { activatedAt: input.activatedAt }),
       createdAt: Date.now(),
+      // 用户产物入口（out/ 扫描 / 入站附件）：可交付角色。
+      deliverable: true,
     });
-    return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256 };
+    return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256, deliverable: true };
   }
 
   /**
@@ -589,7 +601,7 @@ export function createFileStore(options: {
       }
       return undefined;
     }
-    return { fileId: row.fileId, name, bytes: row.bytes, sha256: row.sha256 };
+    return { fileId: row.fileId, name, bytes: row.bytes, sha256: row.sha256, deliverable: true };
   }
 
   /** fd 单遍流式哈希（回程登记/入站去重第一遍：先哈希查重，再决定是否落盘）。 */
@@ -626,7 +638,7 @@ export function createFileStore(options: {
       throw error;
     }
     const reused = findTaskRowBySha(input.scope, input.taskId, hashed.sha256, input.name);
-    if (reused !== undefined) return { fileId: reused.fileId, name: reused.name, bytes: reused.bytes, sha256: reused.sha256 };
+    if (reused !== undefined) return { fileId: reused.fileId, name: reused.name, bytes: reused.bytes, sha256: reused.sha256, deliverable: true };
     const fileId = newFileId();
     const destPath = fileStoragePathOf(workspaceRoot, input.scope, fileId, input.name);
     mkdirSync(path.dirname(destPath), { recursive: true });
@@ -655,8 +667,10 @@ export function createFileStore(options: {
       bytes: copied.bytes,
       activatedAt: Date.now(),
       createdAt: Date.now(),
+      // 任务回程产物（内联/路径/out/ 兜底扫）：用户产物角色。
+      deliverable: true,
     });
-    return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256 };
+    return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256, deliverable: true };
   }
 
   return {
@@ -666,7 +680,7 @@ export function createFileStore(options: {
       const storagePath = fileStoragePathOf(workspaceRoot, input.scope, fileId, input.name);
       mkdirSync(path.dirname(storagePath), { recursive: true });
       writeFileSync(storagePath, input.bytes, { flag: 'wx', mode: 0o600 });
-      return store.insertFileRef({
+      const row = store.insertFileRef({
         fileId,
         principalId: input.scope.principalId,
         sessionId: input.scope.sessionId,
@@ -675,7 +689,16 @@ export function createFileStore(options: {
         bytes: input.bytes.length,
         activatedAt: input.activatedAt ?? undefined,
         createdAt: Date.now(),
+        // 方案 A：缺省 false——宿主内部写出的字节默认不算交付物（只有显式/register* 入口才是用户产物）。
+        deliverable: input.deliverable ?? false,
       });
+      return {
+        fileId: row.fileId,
+        name: row.name,
+        bytes: row.bytes,
+        sha256: row.sha256,
+        deliverable: row.deliverable ?? false,
+      };
     },
     materializeInputs({ runDir, scope, fileIds, resolution }) {
       const inDir = path.join(runDir, 'in');
@@ -734,6 +757,8 @@ export function createFileStore(options: {
             bytes,
             activatedAt: Date.now(),
             createdAt: Date.now(),
+            // 交办副本继承源行的交付角色（用户输入文件复制品，不是宿主诊断产物）。
+            deliverable: row.deliverable ?? true,
           });
           return { sourceFileId: row.fileId, fileId, name: row.name, bytes, sha256 };
         } finally {
@@ -831,7 +856,7 @@ export function createFileStore(options: {
       if (bytes.length > maxFileBytes) throw new TaskFileRejectedError('size_limit');
       const sha256 = createHash('sha256').update(bytes).digest('hex');
       const reused = findTaskRowBySha(scope, taskId, sha256, name);
-      if (reused !== undefined) return { fileId: reused.fileId, name: reused.name, bytes: reused.bytes, sha256: reused.sha256 };
+      if (reused !== undefined) return { fileId: reused.fileId, name: reused.name, bytes: reused.bytes, sha256: reused.sha256, deliverable: true };
       const fileId = newFileId();
       const storagePath = fileStoragePathOf(workspaceRoot, scope, fileId, name);
       mkdirSync(path.dirname(storagePath), { recursive: true });
@@ -846,8 +871,10 @@ export function createFileStore(options: {
         bytes: bytes.length,
         activatedAt: Date.now(),
         createdAt: Date.now(),
+        // 任务回程文件（内联字节）：用户产物角色。
+        deliverable: true,
       });
-      return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256 };
+      return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256, deliverable: true };
     },
     registerTaskFileFromPath({ scope, taskId, sourcePath, allowedRoot, name, maxFileBytes }) {
       // 路径源：先包含性（任务暂存目录之外的任何路径不开口子），再 fd 纪律，再查重落盘。

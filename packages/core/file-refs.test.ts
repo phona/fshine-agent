@@ -64,6 +64,7 @@ function rowOf(overrides: Partial<FileRefRow> & { fileId: string; scope?: typeof
     bytes: 128,
     activatedAt: 1700000000000,
     createdAt: 1699999999000,
+    deliverable: true,
     ...rest,
   };
 }
@@ -155,7 +156,7 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
     store.close();
   });
 
-  it('⑥ 插/查往返：8 列全字段全等（getFileRef 与 listFileRefs 两条读路径；pending 形状同锁）', () => {
+  it('⑥ 插/查往返：9 列全字段全等（getFileRef 与 listFileRefs 两条读路径；pending 形状同锁）', () => {
     const store = openTaskStore(tempDbPath());
     const scope = { principalId: 'wecom:u-rt', sessionId: 'sess-rt' };
     const row: FileRefRow = {
@@ -167,6 +168,8 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
       bytes: 4096,
       activatedAt: 1_760_000_000_123,
       createdAt: 1_759_999_999_000,
+      // 方案 A（第 9 列）：用户产物角色；读路径总是返回布尔。
+      deliverable: true,
     };
     expect(store.insertFileRef(row)).toEqual(row);
     expect(store.getFileRef('file_roundtrip', scope, { side: 'main' })).toEqual(row);
@@ -329,5 +332,51 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
     expect(store.getFileRef('file_legacy', SCOPE_A, { side: 'worker', taskId: 'task_x' })).toBeUndefined();
     expect(() => store.insertFileRef(rowOf({ fileId: 'file_new' }))).toThrow(/file_refs/);
     store.close();
+  });
+
+  it('⑭ deliverable 列（方案 A）：写 false 读回 false；旧库缺列/旧行按 true 读出、user_version 不升', () => {
+    const dbPath = tempDbPath();
+    {
+      const seeded = openTaskStore(dbPath);
+      seeded.insertFileRef(rowOf({ fileId: 'file_user' }));
+      seeded.insertFileRef(rowOf({ fileId: 'file_diag', name: '明细.values.csv', deliverable: false }));
+      seeded.close();
+    }
+    {
+      // 新库：角色标记往返（读路径两条都返回布尔）。
+      const store = openTaskStore(dbPath);
+      expect(store.getFileRef('file_user', SCOPE_A, { side: 'main' })!.deliverable).toBe(true);
+      expect(store.getFileRef('file_diag', SCOPE_A, { side: 'main' })!.deliverable).toBe(false);
+      expect(store.listFileRefs(SCOPE_A).find((row) => row.fileId === 'file_diag')!.deliverable).toBe(false);
+      store.close();
+    }
+    {
+      // 角色标记上线前的旧库：删列 = 精确复刻缺列形状。
+      const shrink = new Database(dbPath);
+      shrink.exec('ALTER TABLE file_refs DROP COLUMN deliverable');
+      shrink.close();
+    }
+    {
+      // 只读旧库（不迁移）：缺列按 true 读出，不崩溃。
+      const readonlyStore = openTaskStore(dbPath, { readOnly: true });
+      expect(readonlyStore.getFileRef('file_diag', SCOPE_A, { side: 'main' })!.deliverable).toBe(true);
+      readonlyStore.close();
+    }
+    {
+      // 可写旧库：ADD COLUMN ... NOT NULL DEFAULT 1（前向加法），旧行按 true 读出；
+      // 纯加法不升 user_version（仍 v4），备份生成。
+      const migrated = openTaskStore(dbPath);
+      expect(migrated.getFileRef('file_diag', SCOPE_A, { side: 'main' })!.deliverable).toBe(true);
+      expect(migrated.getFileRef('file_user', SCOPE_A, { side: 'main' })!.deliverable).toBe(true);
+      // 迁移后新行仍可写 false 并读回。
+      migrated.insertFileRef(rowOf({ fileId: 'file_diag2', deliverable: false }));
+      expect(migrated.getFileRef('file_diag2', SCOPE_A, { side: 'main' })!.deliverable).toBe(false);
+      migrated.close();
+    }
+    expect(TASK_STORE_SCHEMA_VERSION).toBe(4);
+    expect(existsSync(`${dbPath}.backup-v${TASK_STORE_SCHEMA_VERSION}`)).toBe(true);
+    const probe = new Database(dbPath);
+    expect(probe.pragma('user_version', { simple: true })).toBe(TASK_STORE_SCHEMA_VERSION);
+    probe.close();
   });
 });

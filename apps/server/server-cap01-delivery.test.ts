@@ -27,8 +27,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { AppConfig, ChannelRoute, DeliveryReceipt, IncomingChannelMessage, OutgoingFileReply } from '@fshine/contracts';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver } from '../../packages/agent/src/driver-contract';
-import { FILES_GENERATED_NOTICE } from '../../packages/agent/src/execution-runtime';
-import { createServer, type FileDeliveryPort } from './server';
+import { createFileStore, type RegisteredFile } from '../../packages/agent/src/file-store';
+import { FILES_GENERATED_NOTICE, type TurnFileRef } from '../../packages/agent/src/execution-runtime';
+import { openTaskStore } from '@fshine/core';
+import { createServer, deliverTurnFilesCore, type FileDeliveryPort } from './server';
 
 const FIXTURE_ROOT = path.resolve(__dirname, '..', '..', 'scripts', 'eval', 'fixtures', 'dummy-platform');
 
@@ -425,6 +427,129 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
       expect(done?.['fileManifestBytes']).toBe(Buffer.byteLength(injected, 'utf8'));
     } finally {
       await server.close();
+    }
+  });
+});
+
+// ───────────────────────── 交付角色闸（方案 A：只看 deliverable，不看文件名） ─────────────────────────
+describe('交付角色闸（方案 A）', () => {
+  const scope = { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' };
+
+  function deliveryHarness(): {
+    store: ReturnType<typeof openTaskStore>;
+    fileStore: ReturnType<typeof createFileStore>;
+    workspaceRoot: string;
+    put(name: string, deliverable: boolean): RegisteredFile;
+  } {
+    const store = openTaskStore(':memory:');
+    const workspaceRoot = path.join(tempDir(), 'workspace');
+    const fileStore = createFileStore({ store, workspaceRoot });
+    return {
+      store,
+      fileStore,
+      workspaceRoot,
+      put(name, deliverable) {
+        return fileStore.putFile({
+          scope,
+          name,
+          bytes: Buffer.from(`bytes-of-${name}`),
+          activatedAt: Date.now(),
+          deliverable,
+        });
+      },
+    };
+  }
+
+  const refOf = (file: RegisteredFile): TurnFileRef => ({
+    fileId: file.fileId,
+    name: file.name,
+    bytes: file.bytes,
+    deliverable: file.deliverable,
+  });
+
+  it('② 同回合 汇总.xlsx(可交付) + 明细.values.csv(内部) → 只投 1 份；事件 files=1、skippedInternal=1', async () => {
+    const h = deliveryHarness();
+    const summary = h.put('汇总.xlsx', true);
+    const detail = h.put('明细.values.csv', false);
+    const { port, calls } = livePort();
+    const logs: Array<Record<string, unknown>> = [];
+    try {
+      const outcome = await deliverTurnFilesCore(
+        {
+          files: [refOf(summary), refOf(detail)],
+          scope,
+          channel: 'wecom',
+          conversationId: 'conv-a',
+          principalId: scope.principalId,
+          sessionId: scope.sessionId,
+        },
+        { fileDelivery: port, workspaceRoot: h.workspaceRoot, log: (line) => logs.push(line) },
+      );
+      expect(outcome).toEqual({ status: 'sent', files: 1 });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.files.map((file) => file.filename)).toEqual(['汇总.xlsx']);
+      const sent = logs.find((line) => line['event'] === 'file_delivery' && line['status'] === 'sent');
+      expect(sent?.['files']).toBe(1);
+      expect(sent?.['skippedInternal']).toBe(1);
+    } finally {
+      h.store.close();
+    }
+  });
+
+  it('③ 防退化：闸门只认角色不认名字——内部样式名但 deliverable:true 必投，普通名但 false 不投', async () => {
+    const h = deliveryHarness();
+    // 名字像内部产物的用户文件：必须投递（文件名不是判据）。
+    const disguisedUserFile = h.put('file_deadbeef.values.csv', true);
+    // 普通名字的内部诊断产物：必须不投（角色才是判据）。
+    const plainNamedInternal = h.put('明细.values.csv', false);
+    const { port, calls } = livePort();
+    const logs: Array<Record<string, unknown>> = [];
+    try {
+      const outcome = await deliverTurnFilesCore(
+        {
+          files: [refOf(disguisedUserFile), refOf(plainNamedInternal)],
+          scope,
+          channel: 'wecom',
+          conversationId: 'conv-a',
+          principalId: scope.principalId,
+          sessionId: scope.sessionId,
+        },
+        { fileDelivery: port, workspaceRoot: h.workspaceRoot, log: (line) => logs.push(line) },
+      );
+      expect(outcome).toEqual({ status: 'sent', files: 1 });
+      expect(calls[0]!.files.map((file) => file.filename)).toEqual(['file_deadbeef.values.csv']);
+      const sent = logs.find((line) => line['event'] === 'file_delivery' && line['status'] === 'sent');
+      expect(sent?.['files']).toBe(1);
+      expect(sent?.['skippedInternal']).toBe(1);
+    } finally {
+      h.store.close();
+    }
+  });
+
+  it('全部是内部产物 → 不调渠道、记 skipped_internal（不发空批）', async () => {
+    const h = deliveryHarness();
+    const internal = h.put('明细.values.csv', false);
+    const { port, calls } = livePort();
+    const logs: Array<Record<string, unknown>> = [];
+    try {
+      const outcome = await deliverTurnFilesCore(
+        {
+          files: [refOf(internal)],
+          scope,
+          channel: 'wecom',
+          conversationId: 'conv-a',
+          principalId: scope.principalId,
+          sessionId: scope.sessionId,
+        },
+        { fileDelivery: port, workspaceRoot: h.workspaceRoot, log: (line) => logs.push(line) },
+      );
+      expect(outcome).toEqual({ status: 'skipped_internal', files: 0 });
+      expect(calls).toHaveLength(0);
+      expect(logs).toContainEqual(
+        expect.objectContaining({ event: 'file_delivery', status: 'skipped_internal', files: 0, skippedInternal: 1 }),
+      );
+    } finally {
+      h.store.close();
     }
   });
 });
