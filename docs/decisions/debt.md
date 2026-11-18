@@ -59,3 +59,13 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 | F-1 | 纯附件重发（尚未激活的 pending 行）不去重：同内容连发两次 → 两行两个 fileId | `packages/agent/src/file-store.ts:529-545`（`findReusableInboundRow` 跳过 `activatedAt === undefined`，`:538`）；pending 登记 `:909` | pending 代表「已收到、未激活」的事实；提前复用会覆盖第一条的待激活名/时间，且多附件激活语义未定。现行为不丢文件，只多一行加一份字节；TTL 清扫回收字节、行留审计。合并规则属产品语义，不在本次去重切片 |
 | F-2 | 入站复用没有「来源」判据，理论上会吞同字节的 Main 产物行（`putFile` 造的、如 recalc 的 `*.values.csv`）：行名会被改成入站文件名 | `packages/agent/src/file-store.ts:534-542` 只排除 `taskId !== undefined` 的行；`putFile` 的 Main 行 `:664-679`；复用改行名 `:575-581` | 修法需给 `file_refs` 加 origin 列并覆盖所有写路径（putFile / registerFromFd / 任务副本 / 回程），是 schema 迁移；当前同字节碰撞概率低但真实存在，登记到下次 schema 变更一起做 |
 | F-3 | 同一消息内两个同内容不同名附件塌成同一 fileId、只留最后一个名字，而 `apps/server/attachment-facts.ts:79` 按 fileId 只留第一条事实 → 注入模型的名字与清单名不一致 | `packages/agent/src/file-store.ts:885-909`（复用不区分消息内批次）；`apps/server/attachment-facts.ts:79` | 需要批次身份（`file_refs` 无 `message_id`）或改事实队列按 (fileId,name) 去重；后者仍会让清单只有一个名字、与模型看到的两条事实不一致。正确修法是同消息批次内复用检测 + 名字冲突裁定，需产品裁定，本次只登记 |
+
+## 七、权限模型（2026-11-18 owner 裁定：解耦 + 只做粗粒度）
+
+**裁定**：`accountSetScope` 这类**业务实体字段不与执行层耦合**（执行层不一定是财税平台）；fshine 与执行层之间只耦合**通用 permissions**（粗粒度：read / write）。粗粒度由 fshine 在发起前拦截；**细粒度（实体级）研判归执行层，暂不做**。
+
+| 编号 | 事项 | 现行证据 | 为什么现在不做 |
+|---|---|---|---|
+| P-1 | `principals.capabilities` / `principals.accountSetScope` 解析后**无任何消费点**（配置写了不生效） | `packages/core/src/config.ts:336-348` 解析；`apps/server/server.ts`、`scripts/ask-runtime.ts` 无读取点 | 本轮先做"解耦 + 粗粒度 RBAC"（角色 → read/write 白名单，宿主求交拦截）；两个字段随该切片删除或替换，不并行保留两套 |
+| P-2 | **细粒度（实体级）授权未实现**：谁能看哪些账套/哪些记录，未做任何透传或校验 | 无 acting-principal 透传；执行层调用只带 operation+args | 归执行层研判；真实 17dz 是否有"按主体授权"概念未验。挂债，等真实层冒烟与业务确认后再做 |
+| P-3 | 写面是**全局开关**（`runtime.allowWriteOperations`），非按人 | `apps/server/server.ts`、`scripts/ask-runtime.ts` 派生允许集合处 | 由 P-1 的角色白名单取代其"按人"部分；部署总闸语义保留（关掉即全员不可写） |
