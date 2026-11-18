@@ -1,6 +1,8 @@
 /**
  * 只读探针：跨重启重投是否被当成新回合再执行一次。
  *
+ * 缺口与闭环判据登记：GitHub issue #68（原设计档 idempotency-cross-restart.md 2026-11-18 已删，git 历史可考）。
+ *
  * 不触网、不碰真实模型、不碰真实平台、不改产品代码：
  *   · 用 server 的真实装配（createServer）与真实 handler 去重路径；
  *   · 注入脚本化 TurnDriver（每回合调用一次 run_js）与计数 RunJsExecutor（外部副作用替身）；

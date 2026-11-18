@@ -1,6 +1,6 @@
 # 真实只读接入准备档（设计与安全评审材料）
 
-> **硬声明（准备材料 ≠ 已授权接入）**：本档仅为设计与安全评审材料，不代表已授权接入，也不构成任何安全结论。owner（2026-11-14）只批准准备档：**不允许实际连接、读取凭据、触碰真实数据**；实际接入须 owner 另行授权（授权门见 `docs/product/r3-open-decisions.md`；裁定登记见 `docs/decision-log.md` §二十三）。
+> **硬声明（准备材料 ≠ 已授权接入）**：本档仅为设计与安全评审材料，不代表已授权接入，也不构成任何安全结论。owner（2026-11-14）只批准准备档：**不允许实际连接、读取凭据、触碰真实数据**；实际接入须 owner 另行授权（裁定登记见 `docs/decision-log.md` §二十三；原待裁定登记文档 2026-11-18 已删，未决项转 issue）。
 >
 > 目标平台未定：本档不虚构平台细节；一切平台相关事项以 §6「未知项与待补清单」为准（平台名、只读面、凭据托管方、限流与审计要求）。
 >
@@ -95,5 +95,5 @@
 
 - 契约与运行时：`packages/contracts/src/execution-contract.ts`、`packages/agent/src/execution-runtime.ts`、适配器对照 `packages/agent/src/dummy-cli-client.ts`。
 - 权威决定：`docs/decision-log.md` §十二（交付边界与清单）、§十七（§17.1 授权边界、§17.3 CLI flag 残余）、§二十三（真实只读 = 仅准备档）。
-- 授权门与切片：`docs/product/r3-open-decisions.md`（R4 切片计划已随收官删除，P8 未授权停登记在该文第四节）。
+- 授权门与切片：裁定登记见 `docs/decision-log.md` §二十三；未决项在 GitHub issues（原 r3-open-decisions.md 2026-11-18 已删）。
 - 历史裁定：消费端边界（env-naming-ruling-20261110.md 已删，git 历史可考）、`docs/environment-variables.md` §4a。

@@ -229,7 +229,7 @@
 | **⑤** | **`queueCapacity>0` 账本队列上界未强制 / messageId 幂等跨重启** | policy 排队许可与底账 queued 行未合一；幂等为进程内有界 FIFO(1024) | policy 侧裁决面扩展（触冻结 §2 接口须批准）；持久幂等键（新 schema，owner 决定） | `r4-stability-report.md §六`；`r4-p7b-acceptance.md §五` |
 | **⑥** | **真实 WeCom sink / 多进程多实例 / 手工真机走查** | 适配器不实现、不连接；单实例；手册已交付但**本轮未执行人工走查** | 渠道适配器切片（新授权）；ops/多实例立项；按手册人工执行 | `r4-stability-report.md §六`；`manual-test-handbook.md` |
 
-> **说明**：⑤/⑥ 是 R4 阶段已登记 blocked 项，此处汇总不为新增议题；①/② 是本轮业务 E2E 新暴露、**必裁决**的产品面缺陷。**未裁定前不自主推进**（对齐 AGENTS.md 与 `r3-open-decisions.md` 纪律）。
+> **说明**：⑤/⑥ 是 R4 阶段已登记 blocked 项，此处汇总不为新增议题；①/② 是本轮业务 E2E 新暴露、**必裁决**的产品面缺陷。**未裁定前不自主推进**（对齐 AGENTS.md 纪律；未决项 2026-11-18 起转 GitHub issues）。
 
 ---
 
