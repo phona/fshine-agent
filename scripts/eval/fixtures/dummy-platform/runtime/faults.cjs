@@ -8,6 +8,8 @@
 const FAULT_STATE_FIELDS = Object.freeze({
   read_fault: 'readFault',
   restricted: 'restricted',
+  // A read that really takes time and then fails with the structured error envelope.
+  slow_fault: 'slowFault',
 });
 
 const FAULT_KINDS = Object.freeze(Object.keys(FAULT_STATE_FIELDS));

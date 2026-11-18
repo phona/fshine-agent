@@ -1,0 +1,6 @@
+{
+  "items": [
+    { "id": "sf-001", "name": "slow-fault-record-1", "value": 42 }
+  ],
+  "windows": ["W1"]
+}

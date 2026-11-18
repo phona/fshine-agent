@@ -15,6 +15,8 @@ const { resolveCollection } = require('./resolve.cjs');
 const { faultFor } = require('./faults.cjs');
 const { renderTemplate, renderValue } = require('./template.cjs');
 const { makeError } = require('./errors.cjs');
+const { missingRequiredInputs } = require('./requires.cjs');
+const { sleepSync } = require('./timing.cjs');
 
 function isPresent(value) {
   return value !== undefined && value !== '';
@@ -75,6 +77,9 @@ function buildResponse(read, name, values, catalog, overrides = {}) {
       status: declaration.status,
       data,
       error: errorDeclaration === undefined ? null : renderError(catalog, errorDeclaration, values),
+      // Structured "what is missing" names travel at the envelope top level (needs_input
+      // only); the contract's adapter projects them, the host never re-derives them.
+      ...(overrides.missing === undefined ? {} : { missing: overrides.missing }),
     },
     ...(result === undefined ? {} : { result }),
     ...(overrides.refused === undefined ? {} : { refused: overrides.refused }),
@@ -106,6 +111,14 @@ function executeDeclaredRead(input) {
   const collection = resolved.collection;
   values['source.collection'] = canonical;
 
+  // Declared required inputs come first: an incomplete request is not answered (and
+  // never judged by a fault). The response carries the structured names, not prose.
+  const missing = missingRequiredInputs(collection, flags);
+  if (missing.length > 0) {
+    values['needs.missing'] = missing;
+    return buildResponse(read, 'missing_input', values, catalog, { missing });
+  }
+
   const fault = faultFor(faults, canonical);
   if (fault !== null && fault.kind === 'restricted') {
     return {
@@ -116,6 +129,11 @@ function executeDeclaredRead(input) {
     };
   }
   if (fault !== null && fault.kind === 'read_fault') {
+    return buildResponse(read, 'read_fault', values, catalog, { error: fault.error, exitCode: fault.exitCode });
+  }
+  if (fault !== null && fault.kind === 'slow_fault') {
+    // Really takes the declared time, then fails with the existing structured envelope.
+    sleepSync(fault.delayMs);
     return buildResponse(read, 'read_fault', values, catalog, { error: fault.error, exitCode: fault.exitCode });
   }
 

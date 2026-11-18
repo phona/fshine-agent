@@ -678,6 +678,17 @@ export function describeOutcome(outcome: Record<string, unknown>): string {
     }
     return describeCompleted(data);
   }
+  if (status === 'needs_input') {
+    // 执行层显式要补充输入（fixture 的 requires 或歧义）：原样转述「缺什么」。
+    const raw = Array.isArray(outcome['missing']) ? (outcome['missing'] as unknown[]) : [];
+    const missing = raw.map((entry) => {
+      if (typeof entry === 'string') return entry;
+      const record = (entry ?? {}) as { description?: unknown; name?: unknown };
+      if (typeof record.description === 'string' && record.description !== '') return record.description;
+      return typeof record.name === 'string' ? record.name : '';
+    }).filter((entry) => entry !== '');
+    return `执行层要求补充输入：${missing.length > 0 ? missing.join('、') : (error.message ?? '未说明')}。`;
+  }
   if (status === 'refused') {
     return `没有权限读取 ${name}（执行层拒绝，${error.code ?? 'GATE_REFUSE'}）；请联系管理员开通权限，这次没有取得任何数据。`;
   }

@@ -58,6 +58,7 @@ const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 
 const runtime = require('../runtime/index.cjs');
+const { parseDelayMs, sleepSync } = require('../runtime/timing.cjs');
 const FIXTURE_ROOT = path.resolve(__dirname, '..');
 const FIXTURES_ROOT = path.resolve(FIXTURE_ROOT, '..');
 // 三层分离：能力定义（platforms/…/capabilities.json）、数据/绑定/故障（scenarios/…）、
@@ -220,6 +221,20 @@ function rateLimitRefused(opName, mode, via, args) {
   audit({ mode, ...(via ? { via } : {}), script: opName, args, serve: orchestrated(), exitCode: 1 });
   return true;
 }
+// ── 声明式延迟（2026-11-18）：--delay-ms 是显式声明的参数，真实 sleep ──────────────
+// 只对登记了该 flag 的 operation 生效（dummy.query / dummy.prepare / dummy.commit）；
+// 其它 operation 保持「未声明 flag 在 CLI 路径被忽略、在结构化 call 路径被拒」的既有行为。
+// 取值必须是 0..60000 的整数，超限确定性拒绝（exit 2 + failed 信封 + 审计行），不截断。
+function delayOf(op, args) {
+  if (!(op.args?.flags ?? []).some((f) => f.flag === '--delay-ms')) return { ok: true, ms: 0 };
+  const { flags } = parseFlags(args);
+  return parseDelayMs(flags['delay-ms']);
+}
+function refuseDelay(opName, mode, via, args, parsed) {
+  emit(opName, 'failed', null, errObj(parsed.code, parsed.message));
+  audit({ mode, ...(via ? { via } : {}), script: opName, args, serve: orchestrated(), exitCode: 2 });
+  return 2;
+}
 function parseFlags(argv) {
   const flags = {}; const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -292,7 +307,10 @@ function doQuery(opName, args) {
     catalog: CORRECT_FORM,
   });
   if (outcome.stderr !== undefined) process.stderr.write(outcome.stderr);
-  if (outcome.envelope !== null) emit(opName, outcome.envelope.status, outcome.envelope.data, outcome.envelope.error);
+  if (outcome.envelope !== null) {
+    emit(opName, outcome.envelope.status, outcome.envelope.data, outcome.envelope.error,
+      outcome.envelope.missing === undefined ? undefined : { missing: outcome.envelope.missing });
+  }
   return {
     code: outcome.exitCode,
     ...(outcome.result === undefined ? {} : { result: outcome.result }),
@@ -907,7 +925,11 @@ async function main() {
     const planId = env2('EXECUTION_PLAN_ID', 'DUMMY_PLAN_ID', '');
     const requirePlan = env2('EXECUTION_REQUIRE_PLAN', 'DUMMY_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: orchestrated(), refused: 'PLAN_REQUIRED' }); return 3; }
+    // 声明式延迟：先校验（超限确定性拒绝，不占限流名额），再取限流名额，再真实等待。
+    const declaredDelay = delayOf(op, call.args);
+    if (!declaredDelay.ok) return refuseDelay(op.name, accessMode, 'structured', call.args, declaredDelay);
     if (rateLimitRefused(op.name, accessMode, 'structured', call.args)) return 1;
+    sleepSync(declaredDelay.ms);
     let code;
     let queryResult;
     let queryRefused;
@@ -992,7 +1014,10 @@ async function main() {
     const planId = env2('EXECUTION_PLAN_ID', 'DUMMY_PLAN_ID', '');
     const requirePlan = env2('EXECUTION_REQUIRE_PLAN', 'DUMMY_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), refused: 'PLAN_REQUIRED' }); return 3; }
+    const declaredDelay = delayOf(op, rest);
+    if (!declaredDelay.ok) return refuseDelay(op.name, cmd, null, rest, declaredDelay);
     if (rateLimitRefused(op.name, cmd, null, rest)) return 1;
+    sleepSync(declaredDelay.ms);
     let code;
     let queryResult;
     let queryRefused;

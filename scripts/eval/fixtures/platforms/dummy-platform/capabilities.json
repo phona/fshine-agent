@@ -53,7 +53,10 @@
     "PLAN_NOT_PENDING": "Plan is not pending activation.",
     "COLLECTION_FAULT": "That collection cannot be read in its current state. Report the failure as-is.",
     "INVALID_ARGUMENT": "Provide a string value for the named argument.",
-    "WHERE_INVALID": "Filter with a single --where <dimension>=<value> pair using one of the collection's declared dimension values."
+    "WHERE_INVALID": "Filter with a single --where <dimension>=<value> pair using one of the collection's declared dimension values.",
+    "MISSING_INPUT": "Provide the missing input for this collection and retry the same task.",
+    "DELAY_INVALID": "--delay-ms takes an integer number of milliseconds (0..60000).",
+    "DELAY_OUT_OF_RANGE": "--delay-ms must be an integer between 0 and 60000 milliseconds."
   },
   "reads": {
     "dummy.query": {
@@ -179,6 +182,23 @@
           "status": "failed",
           "exitCode": 2,
           "data": null
+        },
+        "missing_input": {
+          "status": "needs_input",
+          "exitCode": 0,
+          "data": {
+            "collection": "{{source.collection}}",
+            "missing": "{{needs.missing}}"
+          },
+          "error": {
+            "code": "MISSING_INPUT",
+            "message": "Collection {{source.collection}} needs {{needs.missing}}; provide it and retry the same task"
+          },
+          "result": {
+            "status": "needs_input",
+            "collection": "{{source.collection}}",
+            "missing": "{{needs.missing}}"
+          }
         },
         "invalid_where": {
           "status": "failed",
@@ -351,6 +371,12 @@
             "required": false,
             "style": "code",
             "desc": "window code, e.g. W1; must exist for the collection"
+          },
+          {
+            "flag": "--delay-ms",
+            "required": false,
+            "style": "code",
+            "desc": "test-only: real wall-clock delay before the read runs (integer ms, 0..60000; over the cap is refused deterministically)"
           }
         ]
       },
@@ -430,6 +456,12 @@
             "required": false,
             "style": "code",
             "desc": "write flag: present means this call WOULD write, prepare must refuse it"
+          },
+          {
+            "flag": "--delay-ms",
+            "required": false,
+            "style": "code",
+            "desc": "test-only: real wall-clock delay before the prepare runs (integer ms, 0..60000; over the cap is refused deterministically)"
           }
         ]
       },
@@ -475,6 +507,12 @@
             "required": false,
             "style": "code",
             "desc": "confirmation handle returned by prepare; one-shot, bound to collection/window/count, expires in 15 minutes"
+          },
+          {
+            "flag": "--delay-ms",
+            "required": false,
+            "style": "code",
+            "desc": "test-only: real wall-clock delay before the commit runs (integer ms, 0..60000; over the cap is refused deterministically)"
           }
         ]
       },
