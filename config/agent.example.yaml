@@ -59,7 +59,8 @@ llm:
 
 # ---- 资源强制与派发模式(可选;P5 单一入口,yaml 键、无 env 覆盖口) ----
 # 缺省(不写 runtime 段) = 现行为:前台并发 4、排队容量 16、无任务级预算、
-# 回合时限 300s/180s、委派深度 1、文件保留期 30 天(不在启动时清扫)、派发模式 inline。
+# 回合时限 300s/180s、委派深度 1、文件引用可读期 7 天、文件保留期 30 天(不在启动时清扫)、
+# 派发模式 inline。
 # 非法值 fail-fast、未知键拒绝;详解见 docs/environment-variables.md。
 # runtime:
 #   # 派发模式:inline(缺省,委派同步执行) | background(受理即回执,后台 TaskRunner 执行)。
@@ -72,8 +73,10 @@ llm:
 #   workerTurnMs: 180000      # Worker 回合墙钟上限
 #   maxDelegationDepth: 1     # 委派深度上限(0=禁止委派)
 #   waitUserTimeoutMs: 86400000  # waiting_user 等待上限(24h)
+#   fileRefTtlDays: 7         # 文件引用可读期(天;最小 1;缺省 7):入站附件激活后的可读 TTL,
+#                             # 也是 pending 行的激活窗口;过期字节由清扫入口回收(只删字节留行)
 #   fileRetentionDays: 30     # run 目录/任务产物保留期(天;0=不清理;缺省 30)
-#   fileRetentionSweepOnStart: false  # server 启动装配完成后扫一次到期 run 目录(缺省 false=零行为)
+#   fileRetentionSweepOnStart: false  # server 启动装配完成后扫一次到期 run 目录 + 过期文件引用字节(缺省 false=零行为)
 #   # 写面开关(缺省 false=只读):true 时把执行层自述 access=write 的 operation 放进允许集合;
 #   # 确认句柄/绑定/有效期/一次性/业务校验仍归执行层(宿主只透传,不做计划门)。
 #   allowWriteOperations: false

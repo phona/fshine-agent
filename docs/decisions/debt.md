@@ -51,3 +51,11 @@
 ## 五、明确「接受不修 / 登记不修」（非待办，勿重开）
 
 D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）、D-040（auth 正则过渡债，限期）、D-054（`.env.real` 仓库侧已关）、D-149（提案 schema 死循环登记不修）、D-158（gitee refs 残留登记不修）— 原文见 `../history/debt-ledger-part01-2026-09_2026-10_2026-11_undated.md`、`../history/debt-ledger-part03-2026-10_2026-11.md`。
+
+## 六、文件去重边界（2026-11-18 实测登记，本次不修）
+
+| 编号 | 事项 | 现行证据 | 为什么现在不做 |
+|---|---|---|---|
+| F-1 | 纯附件重发（尚未激活的 pending 行）不去重：同内容连发两次 → 两行两个 fileId | `packages/agent/src/file-store.ts:529-545`（`findReusableInboundRow` 跳过 `activatedAt === undefined`，`:538`）；pending 登记 `:909` | pending 代表「已收到、未激活」的事实；提前复用会覆盖第一条的待激活名/时间，且多附件激活语义未定。现行为不丢文件，只多一行加一份字节；TTL 清扫回收字节、行留审计。合并规则属产品语义，不在本次去重切片 |
+| F-2 | 入站复用没有「来源」判据，理论上会吞同字节的 Main 产物行（`putFile` 造的、如 recalc 的 `*.values.csv`）：行名会被改成入站文件名 | `packages/agent/src/file-store.ts:534-542` 只排除 `taskId !== undefined` 的行；`putFile` 的 Main 行 `:664-679`；复用改行名 `:575-581` | 修法需给 `file_refs` 加 origin 列并覆盖所有写路径（putFile / registerFromFd / 任务副本 / 回程），是 schema 迁移；当前同字节碰撞概率低但真实存在，登记到下次 schema 变更一起做 |
+| F-3 | 同一消息内两个同内容不同名附件塌成同一 fileId、只留最后一个名字，而 `apps/server/attachment-facts.ts:79` 按 fileId 只留第一条事实 → 注入模型的名字与清单名不一致 | `packages/agent/src/file-store.ts:885-909`（复用不区分消息内批次）；`apps/server/attachment-facts.ts:79` | 需要批次身份（`file_refs` 无 `message_id`）或改事实队列按 (fileId,name) 去重；后者仍会让清单只有一个名字、与模型看到的两条事实不一致。正确修法是同消息批次内复用检测 + 名字冲突裁定，需产品裁定，本次只登记 |
