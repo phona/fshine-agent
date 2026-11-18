@@ -25,6 +25,10 @@
 - `product/p2a-task-contract.md` — P2a Task Registry 契约核心冻结记录（状态机/取消/waiting）。
 - `product/human-redo.md` — `--redo` 语义边界：重新交办 ≠ 人工接管/会话续跑（`scripts/p0-redo-doc-scan.test.ts` 逐字扫描）。
 
+## product（交互契约，1 篇）
+
+- `product/interaction-contract.md` — 什么算"好用"：五条可验收尺子（不打扰 / 有预期 / 可查可接管 / 结论有据 / 分工透明）+ 每条现状。
+
 ## eval（评测口径与现行基线，5 篇）
 
 怎么判、样本与预算怎么先写死、接下来还要跑什么——评测只看这一组，过程读数不回流成口径。
