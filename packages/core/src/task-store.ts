@@ -208,6 +208,12 @@ export interface FileRefRow {
   /** NULL = pending；非 NULL = 已激活（epoch ms；TTL 起点）。 */
   activatedAt?: number;
   createdAt: number;
+  /**
+   * 是否可交付给用户（方案 A：登记面打标，投递面按角色过滤，**不看文件名**）。
+   * 缺省/undefined = true（用户产物与历史行）；宿主内部诊断产物由写侧显式传 false。
+   * 读路径总是返回布尔（旧库缺列 / 旧行 NULL 按 true 读出）。
+   */
+  deliverable?: boolean;
 }
 
 /** 任务 + 其执行记录（读取单位）。 */
@@ -384,7 +390,10 @@ CREATE TABLE IF NOT EXISTS file_refs (
   bytes INTEGER NOT NULL,
   activated_at INTEGER,
   created_at INTEGER NOT NULL,
-  task_id TEXT
+  task_id TEXT,
+  -- 方案 A（2026-11-18）：登记面角色标记；缺省 1 = 可交付（历史行与用户产物），
+  -- 宿主内部诊断产物显式写 0。纯前向加法列，不升 user_version。
+  deliverable INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_file_refs_scope ON file_refs (principal_id, session_id);
 `;
@@ -459,6 +468,8 @@ interface FileRefDbRow {
   activated_at: number | null;
   created_at: number;
   task_id?: string | null;
+  /** 旧库缺列 / 旧行缺省时为 undefined（按 true 读出）。 */
+  deliverable?: number | null;
 }
 
 /**
@@ -509,6 +520,16 @@ function fileRefTaskColumnMissing(db: Database.Database): boolean {
 }
 
 /**
+ * 方案 A 加法迁移谓词：file_refs 表已存在但缺 deliverable 列（角色标记上线前的旧库）。
+ * 与 task_id 同一种前向加法：ADD COLUMN ... NOT NULL DEFAULT 1——旧行按 1（可交付）读出，
+ * 不升 user_version。
+ */
+function fileRefDeliverableColumnMissing(db: Database.Database): boolean {
+  const fileRefColumns = tableColumnsOf(db, 'file_refs');
+  return fileRefColumns.size > 0 && !fileRefColumns.has('deliverable');
+}
+
+/**
  * 迁移前自动备份（只做一次，不覆盖）：先 checkpoint 把 WAL 合入主文件，再整文件复制。
  * 命名 = <dbPath>.backup-v<迁移目标版本>（当前 v3）；`:memory:` 与库文件不存在不生成；
  * 已有同名备份时保留最早副本。
@@ -537,10 +558,12 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         const operationsMissing = tableExists && operationSchemaMissing(writable);
         // CAP-01 S2：旧 file_refs（有表无 task_id 列）→ ADD COLUMN（前向加法，不升版本）。
         const fileRefTaskMissing = tableExists && fileRefTaskColumnMissing(writable);
-        if (missing.length > 0 || operationsMissing || fileRefTaskMissing) {
+        const fileRefDeliverableMissing = tableExists && fileRefDeliverableColumnMissing(writable);
+        if (missing.length > 0 || operationsMissing || fileRefTaskMissing || fileRefDeliverableMissing) {
           // 旧库迁移：先备份（目标版本命名），再加列，再（仅缺 task_no 时）回填编号，
           // 最后建唯一索引与版本号。U3 的 operations / executions.dispatch_key、task 列迁移
-          // 与 file_refs.task_id 共用同一次备份（同一目标版本 v4；已有备份保留最早副本）。
+          // 与 file_refs.task_id / file_refs.deliverable 共用同一次备份（同一目标版本 v4；
+          // 已有备份保留最早副本）。
           backupBeforeMigration(writable, dbPath);
           for (const [name, type] of missing) writable.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${type}`);
           const executionColumns = tableColumnsOf(writable, 'executions');
@@ -548,6 +571,9 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
             writable.exec('ALTER TABLE executions ADD COLUMN dispatch_key TEXT');
           }
           if (fileRefTaskMissing) writable.exec('ALTER TABLE file_refs ADD COLUMN task_id TEXT');
+          if (fileRefDeliverableMissing) {
+            writable.exec('ALTER TABLE file_refs ADD COLUMN deliverable INTEGER NOT NULL DEFAULT 1');
+          }
         }
         writable.exec(SCHEMA_BASE);
         if (missing.some(([name]) => name === 'task_no')) {
@@ -767,11 +793,19 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   // Main 侧会话文件），Worker 无行可解析（undefined）。
   const hasFileRefs = tableColumnsOf(db, 'file_refs').size > 0;
   const hasFileRefTaskColumn = hasFileRefs && tableColumnsOf(db, 'file_refs').has('task_id');
+  // 方案 A：只读旧库（有表无 deliverable 列）不能写，但 prepare 含该列的语句会直接报
+  // no such column——按列是否存在选语句形状；可写打开时迁移已补列。
+  const hasFileRefDeliverableColumn = hasFileRefs && tableColumnsOf(db, 'file_refs').has('deliverable');
   const insertFileRefStmt = hasFileRefTaskColumn
-    ? db.prepare(`
-        INSERT INTO file_refs (file_id, principal_id, session_id, task_id, name, sha256, bytes, activated_at, created_at)
-        VALUES (@fileId, @principalId, @sessionId, @taskId, @name, @sha256, @bytes, @activatedAt, @createdAt)
-      `)
+    ? hasFileRefDeliverableColumn
+      ? db.prepare(`
+          INSERT INTO file_refs (file_id, principal_id, session_id, task_id, name, sha256, bytes, activated_at, created_at, deliverable)
+          VALUES (@fileId, @principalId, @sessionId, @taskId, @name, @sha256, @bytes, @activatedAt, @createdAt, @deliverable)
+        `)
+      : db.prepare(`
+          INSERT INTO file_refs (file_id, principal_id, session_id, task_id, name, sha256, bytes, activated_at, created_at)
+          VALUES (@fileId, @principalId, @sessionId, @taskId, @name, @sha256, @bytes, @activatedAt, @createdAt)
+        `)
     : undefined;
   const selectMainFileRef = hasFileRefTaskColumn
     ? db.prepare('SELECT * FROM file_refs WHERE file_id = ? AND principal_id = ? AND session_id = ? AND task_id IS NULL')
@@ -813,6 +847,8 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     bytes: row.bytes,
     ...(row.activated_at === null || row.activated_at === undefined ? {} : { activatedAt: row.activated_at }),
     createdAt: row.created_at,
+    // 方案 A：缺列/旧行 NULL/1 → 可交付；只有显式 0 才是内部诊断产物。
+    deliverable: row.deliverable === 0 ? false : true,
   });
 
   const toTask = (row: TaskDbRow): TaskRow => ({
@@ -1029,9 +1065,10 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         bytes: row.bytes,
         activatedAt: row.activatedAt ?? null,
         createdAt: row.createdAt,
+        ...(hasFileRefDeliverableColumn ? { deliverable: row.deliverable === false ? 0 : 1 } : {}),
       });
-      // 无 DB 生成列（file_id/时间戳都来自调用方）：输入行即落库行。
-      return row;
+      // 无 DB 生成列（file_id/时间戳都来自调用方）：行即落库行；deliverable 读路径总是布尔。
+      return { ...row, deliverable: row.deliverable ?? true };
     },
     getFileRef(fileId, scope, resolution) {
       // 解析侧决定查询（v8 §4）：Main → task_id IS NULL；Worker → task_id = 指定任务。

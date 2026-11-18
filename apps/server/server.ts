@@ -165,6 +165,189 @@ const RECALC_DELIVERY_GATED_NOTE = '部分表格未通过公式实算校验，�
 /** 混合批次（部分投递成功、部分被闸拦）时的如实话术：不让用户误以为全部送达。 */
 const RECALC_DELIVERY_PARTIAL_NOTE = '部分表格未通过公式实算校验，未予发送；其余文件已发送';
 
+/** 交付结果状态（skipped_internal = 本批全部是宿主内部诊断产物，一件都不投）。 */
+export type TurnFileDeliveryStatus =
+  | 'sent'
+  | 'suppressed'
+  | 'delivery_unavailable'
+  | 'delivery_failed'
+  | 'recalc_gated'
+  | 'skipped_internal';
+
+export interface TurnFileDeliveryOutcome {
+  status: TurnFileDeliveryStatus;
+  files: number;
+  note?: string;
+}
+
+export interface TurnFileDeliveryInput {
+  files: readonly TurnFileRef[];
+  scope: FileScope;
+  channel: string;
+  conversationId: string;
+  principalId: string;
+  sessionId: string;
+}
+
+export interface TurnFileDeliveryDeps {
+  fileDelivery?: FileDeliveryPort;
+  recalcXlsxExecutor?: RecalcXlsxExecutor;
+  workspaceRoot: string;
+  log: (line: Record<string, unknown>) => void;
+}
+
+/**
+ * 交付面最后一道闸（方案 A，2026-11-18）：只投 **deliverable !== false** 的项。
+ * 判据只看登记面角色，**不看文件名**（内部产物换成普通名也不会漏放，用户产物叫
+ * file_xxx.values.csv 也照投）。返回可投项与本次被过滤的内部产物计数（观测面）。
+ */
+export function partitionDeliverableTurnFiles(files: readonly TurnFileRef[]): {
+  deliverable: readonly TurnFileRef[];
+  skippedInternal: number;
+} {
+  const deliverable = files.filter((file) => file.deliverable !== false);
+  return { deliverable, skippedInternal: files.length - deliverable.length };
+}
+
+/**
+ * CAP-01 S1 交付（v8 §7 主动投递 B；失败必须可见）：
+ *   · 交付面第一件事 = 角色闸（partitionDeliverableTurnFiles）：内部诊断产物一律不投；
+ *   · 无端口 → fail-closed：用户可见「未送达」话术 + 事件 delivery_unavailable（四必守 #4）；
+ *   · deliveryMode 非 live → 不发起投递，记 `suppressed`（**不许记 sent**——silent 闸的
+ *     回执会假报 sent 而用户什么都看不到，宿主不得采信，四必守 #3）；
+ *   · live 投递失败 → 结构化事件（含已送达份数，来自 receipt.parts）+ 用户话术，绝不记 sent；
+ *   · live 成功 → 事件记 sent（唯一允许 sent 的分支）。
+ * handler 仍只返回 text（四必守 #1）：文件字节经端口单独发出，不进回执文本。
+ *
+ * 投递去重（用户级不变量）：同一回合里 **(sha256, 文件名)** 相同的交付项只发第一份。
+ * 判据是实际交付字节的 sha256（登记时已 copy 进 workspace，与 file_refs 行同源）——
+ * 不按路径/时间/内容相似度猜；文件名原值参与键（同名不同字节、同字节不同名照常各发）。
+ * 被去重的项不产生任何额外事件（事件里的 files = 实际投递份数）。
+ *
+ * R7-F3：投递结果一旦成功就**不得被日志写失败改写**——sent 事件写在投递 try 之外自成
+ * 一段；写失败只降级成一条独立的观测事件（file_delivery_log_write_failed，status 仍
+ * sent），绝不改道进投递失败分支、绝不让用户话术出现「未送达/请重试」（否则用户重试
+ * 同一产物 → file_refs 两行）。
+ *
+ * 模块级本体（不闭包 createServer 状态）：server 装配与确定性测试走同一份实现。
+ */
+export async function deliverTurnFilesCore(
+  input: TurnFileDeliveryInput,
+  deps: TurnFileDeliveryDeps,
+): Promise<TurnFileDeliveryOutcome> {
+  const base = {
+    principalId: input.principalId,
+    sessionId: input.sessionId,
+  };
+  // 方案 A：角色闸在最前——中间产物（deliverable:false）不进任何投递/重算计数。
+  const { deliverable: filesToDeliver, skippedInternal } = partitionDeliverableTurnFiles(input.files);
+  const internal = skippedInternal > 0 ? { skippedInternal } : {};
+  if (filesToDeliver.length === 0) {
+    // 本批全是内部诊断产物：不发空批、不调渠道（最后一道闸的拒绝路径）。
+    deps.log({ event: 'file_delivery', ...base, ...internal, files: 0, status: 'skipped_internal' });
+    return { status: 'skipped_internal', files: 0 };
+  }
+  if (deps.fileDelivery === undefined) {
+    deps.log({ event: 'file_delivery', ...base, ...internal, files: filesToDeliver.length, status: 'delivery_unavailable' });
+    return { status: 'delivery_unavailable', files: filesToDeliver.length, note: FILE_DELIVERY_UNAVAILABLE_NOTE };
+  }
+  if (deps.fileDelivery.deliveryMode !== 'live') {
+    deps.log({
+      event: 'file_delivery',
+      ...base,
+      ...internal,
+      files: filesToDeliver.length,
+      status: 'suppressed',
+      deliveryMode: deps.fileDelivery.deliveryMode,
+    });
+    return { status: 'suppressed', files: filesToDeliver.length };
+  }
+  // 字节从文件区派生布局现读（产物在登记时已 copy 进 workspace，原件路径从不进话术）。
+  // 同一回合的重复交付（同 sha256 + 同名）在投递层收成一份；顺序保序（先到者投递）。
+  const seen = new Set<string>();
+  const readFiles: Array<{ name: string; bytes: Buffer }> = [];
+  for (const file of filesToDeliver) {
+    const data = readFileSync(fileStoragePathOf(deps.workspaceRoot, input.scope, file.fileId, file.name));
+    const key = `${createHash('sha256').update(data).digest('hex')}\u0000${file.name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    readFiles.push({ name: file.name, bytes: data });
+  }
+  // recalc 投递闸（步骤 ③；时序决定终判落在这里：recalc 报告在独立 runDir、可能晚于
+  // run-js out/ 扫描才产生）。缺省未注入 recalc 执行器 = enabled=false，逐字节不变。
+  const gateEnabled = deps.recalcXlsxExecutor !== undefined;
+  const gate = gateEnabled
+    ? await applyRecalcDeliveryGate({
+        files: readFiles,
+        reports: collectRecalcReports(deps.workspaceRoot, input.scope),
+        enabled: true,
+      })
+    : { outgoing: readFiles, gated: [] as Array<{ name: string; sha256: string; reason: string }> };
+  if (gate.gated.length > 0) {
+    deps.log({
+      event: 'recalc_delivery_gated',
+      ...base,
+      ...internal,
+      files: gate.gated.length,
+      items: gate.gated,
+    });
+  }
+  const outgoing: OutgoingFileReply[] = gate.outgoing.map((f) => ({ data: f.bytes, filename: f.name }));
+  const files = outgoing.length;
+  // 所有待投递项都被闸拦下：不发空批、如实告知（fail-closed；非渠道投递失败，不记 sent）。
+  if (files === 0 && gate.gated.length > 0) {
+    deps.log({ event: 'file_delivery', ...base, ...internal, files: 0, status: 'recalc_gated' });
+    return { status: 'recalc_gated', files: 0, note: RECALC_DELIVERY_GATED_NOTE };
+  }
+  let receipt: DeliveryReceipt;
+  try {
+    receipt = await deps.fileDelivery.sendToConversation(
+      { channel: input.channel, conversationId: input.conversationId },
+      outgoing,
+    );
+  } catch (error) {
+    // 投递失败事实（v8 §7）：结构化事件 + 用户话术；receipt.parts 里先到的 ACK 只作
+    // 「已送达份数」照实记录，不把整批记成 sent。
+    const parts = (error as { receipt?: { parts?: readonly { kind: string }[] } }).receipt?.parts ?? [];
+    const delivered = parts.filter((part) => part.kind === 'file').length;
+    deps.log({
+      event: 'file_delivery',
+      ...base,
+      ...internal,
+      files,
+      status: 'delivery_failed',
+      delivered,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return { status: 'delivery_failed', files, note: FILE_DELIVERY_FAILED_NOTE };
+  }
+  // 走到这里 = 投递已成功，结果不再有任何改写路径（R7-F3）：日志写失败只降级为独立
+  // 观测事件；观测事件也写不进（logger 持续抛错）时同样到此为止——除吞掉外别无动作，
+  // 用户话术与回合结果已按「sent」定型。
+  try {
+    deps.log({ event: 'file_delivery', ...base, ...internal, files, status: 'sent', parts: receipt.parts.length });
+  } catch (logError) {
+    try {
+      deps.log({
+        event: 'file_delivery_log_write_failed',
+        ...base,
+        files,
+        status: 'sent',
+        message: logError instanceof Error ? logError.message : String(logError),
+      });
+    } catch {
+      // 观测事件写也失败：无第二观测面可用；投递结果已成立，不翻转、不重投、不触达用户。
+    }
+  }
+  // 混合批次（有被闸拦的文件、也有成功投递的）：如实附「部分未投递」话术——
+  // 不让用户正文停留在「汇总完成。」而误以为全部表格送达（如实交付 B 类责任）。
+  return {
+    status: 'sent',
+    files,
+    ...(gate.gated.length > 0 ? { note: RECALC_DELIVERY_PARTIAL_NOTE } : {}),
+  };
+}
+
 /**
  * 入站附件上限（20MB，2026-11-17 CAP-01 owner 裁决：100MB 必 OOM，实测 1.1MB 文件处理
  * 峰值 396MB）：与 file-store 的流式兜底 `INBOUND_MAX_FILE_BYTES` 同值单源。**登记前**
@@ -540,134 +723,14 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     return registered;
   };
 
-  /**
-   * CAP-01 S1 交付（v8 §7 主动投递 B；失败必须可见）：
-   *   · 无端口 → fail-closed：用户可见「未送达」话术 + 事件 delivery_unavailable（四必守 #4）；
-   *   · deliveryMode 非 live → 不发起投递，记 `suppressed`（**不许记 sent**——silent 闸的
-   *     回执会假报 sent 而用户什么都看不到，宿主不得采信，四必守 #3）；
-   *   · live 投递失败 → 结构化事件（含已送达份数，来自 receipt.parts）+ 用户话术，绝不记 sent；
-   *   · live 成功 → 事件记 sent（唯一允许 sent 的分支）。
-   * handler 仍只返回 text（四必守 #1）：文件字节经端口单独发出，不进回执文本。
-   *
-   * 投递去重（用户级不变量）：同一回合里 **(sha256, 文件名)** 相同的交付项只发第一份。
-   * 判据是实际交付字节的 sha256（登记时已 copy 进 workspace，与 file_refs 行同源）——
-   * 不按路径/时间/内容相似度猜；文件名原值参与键（同名不同字节、同字节不同名照常各发）。
-   * 被去重的项不产生任何额外事件（事件里的 files = 实际投递份数）。
-   *
-   * R7-F3：投递结果一旦成功就**不得被日志写失败改写**——sent 事件写在投递 try 之外自成
-   * 一段；写失败只降级成一条独立的观测事件（file_delivery_log_write_failed，status 仍
-   * sent），绝不改道进投递失败分支、绝不让用户话术出现「未送达/请重试」（否则用户重试
-   * 同一产物 → file_refs 两行）。
-   */
-  const deliverTurnFiles = async (input: {
-    files: readonly TurnFileRef[];
-    scope: FileScope;
-    channel: string;
-    conversationId: string;
-    principalId: string;
-    sessionId: string;
-  }): Promise<{ status: 'sent' | 'suppressed' | 'delivery_unavailable' | 'delivery_failed' | 'recalc_gated'; files: number; note?: string }> => {
-    const base = {
-      principalId: input.principalId,
-      sessionId: input.sessionId,
-    };
-    if (deps.fileDelivery === undefined) {
-      log({ event: 'file_delivery', ...base, files: input.files.length, status: 'delivery_unavailable' });
-      return { status: 'delivery_unavailable', files: input.files.length, note: FILE_DELIVERY_UNAVAILABLE_NOTE };
-    }
-    if (deps.fileDelivery.deliveryMode !== 'live') {
-      log({
-        event: 'file_delivery',
-        ...base,
-        files: input.files.length,
-        status: 'suppressed',
-        deliveryMode: deps.fileDelivery.deliveryMode,
-      });
-      return { status: 'suppressed', files: input.files.length };
-    }
-    // 字节从文件区派生布局现读（产物在登记时已 copy 进 workspace，原件路径从不进话术）。
-    // 同一回合的重复交付（同 sha256 + 同名）在投递层收成一份；顺序保序（先到者投递）。
-    const seen = new Set<string>();
-    const readFiles: Array<{ name: string; bytes: Buffer }> = [];
-    for (const file of input.files) {
-      const data = readFileSync(fileStoragePathOf(workspaceRoot, input.scope, file.fileId, file.name));
-      const key = `${createHash('sha256').update(data).digest('hex')}\u0000${file.name}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      readFiles.push({ name: file.name, bytes: data });
-    }
-    // recalc 投递闸（步骤 ③；时序决定终判落在这里：recalc 报告在独立 runDir、可能晚于
-    // run-js out/ 扫描才产生）。缺省未注入 recalc 执行器 = enabled=false，逐字节不变。
-    const gateEnabled = recalcXlsxExecutor !== undefined;
-    const gate = gateEnabled
-      ? await applyRecalcDeliveryGate({
-          files: readFiles,
-          reports: collectRecalcReports(workspaceRoot, input.scope),
-          enabled: true,
-        })
-      : { outgoing: readFiles, gated: [] as Array<{ name: string; sha256: string; reason: string }> };
-    if (gate.gated.length > 0) {
-      log({
-        event: 'recalc_delivery_gated',
-        ...base,
-        files: gate.gated.length,
-        items: gate.gated,
-      });
-    }
-    const outgoing: OutgoingFileReply[] = gate.outgoing.map((f) => ({ data: f.bytes, filename: f.name }));
-    const files = outgoing.length;
-    // 所有待投递项都被闸拦下：不发空批、如实告知（fail-closed；非渠道投递失败，不记 sent）。
-    if (files === 0 && gate.gated.length > 0) {
-      log({ event: 'file_delivery', ...base, files: 0, status: 'recalc_gated' });
-      return { status: 'recalc_gated', files: 0, note: RECALC_DELIVERY_GATED_NOTE };
-    }
-    let receipt: DeliveryReceipt;
-    try {
-      receipt = await deps.fileDelivery.sendToConversation(
-        { channel: input.channel, conversationId: input.conversationId },
-        outgoing,
-      );
-    } catch (error) {
-      // 投递失败事实（v8 §7）：结构化事件 + 用户话术；receipt.parts 里先到的 ACK 只作
-      // 「已送达份数」照实记录，不把整批记成 sent。
-      const parts = (error as { receipt?: { parts?: readonly { kind: string }[] } }).receipt?.parts ?? [];
-      const delivered = parts.filter((part) => part.kind === 'file').length;
-      log({
-        event: 'file_delivery',
-        ...base,
-        files,
-        status: 'delivery_failed',
-        delivered,
-        message: error instanceof Error ? error.message : String(error),
-      });
-      return { status: 'delivery_failed', files, note: FILE_DELIVERY_FAILED_NOTE };
-    }
-    // 走到这里 = 投递已成功，结果不再有任何改写路径（R7-F3）：日志写失败只降级为独立
-    // 观测事件；观测事件也写不进（logger 持续抛错）时同样到此为止——除吞掉外别无动作，
-    // 用户话术与回合结果已按「sent」定型。
-    try {
-      log({ event: 'file_delivery', ...base, files, status: 'sent', parts: receipt.parts.length });
-    } catch (logError) {
-      try {
-        log({
-          event: 'file_delivery_log_write_failed',
-          ...base,
-          files,
-          status: 'sent',
-          message: logError instanceof Error ? logError.message : String(logError),
-        });
-      } catch {
-        // 观测事件写也失败：无第二观测面可用；投递结果已成立，不翻转、不重投、不触达用户。
-      }
-    }
-    // 混合批次（有被闸拦的文件、也有成功投递的）：如实附「部分未投递」话术——
-    // 不让用户正文停留在「汇总完成。」而误以为全部表格送达（如实交付 B 类责任）。
-    return {
-      status: 'sent',
-      files,
-      ...(gate.gated.length > 0 ? { note: RECALC_DELIVERY_PARTIAL_NOTE } : {}),
-    };
-  };
+  /** 交付段接线（本体在模块级 deliverTurnFilesCore；装配只注入依赖）。 */
+  const deliverTurnFiles = (input: TurnFileDeliveryInput): Promise<TurnFileDeliveryOutcome> =>
+    deliverTurnFilesCore(input, {
+      fileDelivery: deps.fileDelivery,
+      recalcXlsxExecutor,
+      workspaceRoot,
+      log,
+    });
 
   const handler: ReplyHandler = async (message) => {
     const channel = (message.channel ?? 'wecom').trim() || 'wecom';

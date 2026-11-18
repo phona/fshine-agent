@@ -448,6 +448,22 @@ describe('recalc_xlsx CSV 导出（契约显式部分）', () => {
     expect(active.some((f) => f.fileId === res.outputs![0]!.fileId && f.name === res.outputs![0]!.name)).toBe(true);
   });
 
+  it('方案 A：CSV 名取输入的用户可见名 stem、deliverable=false（诊断产物，不投递）', async () => {
+    const h = makeHarness();
+    const src = await workbookBuffer('汇总', { A1: '名称', B1: { formula: '2*3', result: 6 } });
+    const rel = h.putInput('销售汇总.xlsx', src);
+    const executor = makeExecutor(h, computedEngine(src));
+    const res = await executor.recalc({ file: rel, export: 'csv', scope: SCOPE });
+    expect(res.status).toBe('pass');
+    expect(res.outputs).toHaveLength(1);
+    // 名字不再由内部 fileId 派生：stem 来自用户可见名；不含 file_ 前缀。
+    expect(res.outputs![0]!.name).toBe('销售汇总.values.csv');
+    expect(res.outputs![0]!.name).not.toMatch(/^file_/);
+    expect(res.outputs![0]!.deliverable).toBe(false);
+    // 登记行读回同样是内部角色（投递面据它过滤）。
+    expect(h.store.getFileRef(res.outputs![0]!.fileId, SCOPE, { side: 'main' })!.deliverable).toBe(false);
+  });
+
   it('export=none：不出 CSV，artifacts.values 缺席', async () => {
     const h = makeHarness();
     const src = await workbookBuffer('S', { A1: 1 });
@@ -696,6 +712,33 @@ describe('recalc_xlsx 接线（fail-closed + Worker 不上）', () => {
     });
     const turn = await session.send('export csv');
     expect(turn.files).toEqual([csvOut]);
+  });
+
+  it('方案 A：recalc 的 CSV 不进 TurnResult.files（中间产物不进交付面）', async () => {
+    const h = makeHarness();
+    const src = await workbookBuffer('汇总', { A1: '名称', B1: { formula: '2*3', result: 6 } });
+    const rel = h.putInput('销售汇总.xlsx', src);
+    const session = await createSession({
+      principalId: SCOPE.principalId,
+      sessionId: SCOPE.sessionId,
+      client: new FaceClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver: {
+        async run(runInput) {
+          const result = await runInput.exec(RECALC_XLSX_TOOL, { file: rel, export: 'csv' });
+          expect(result).toBeDefined();
+          return { text: '重算完成。', messages: [] as unknown as DriverMessage[] };
+        },
+      },
+      workerDriver: noopWorker,
+      mainSystemPrompt: 'test',
+      taskRegistry: h.store as never,
+      recalcXlsxExecutor: makeExecutor(h, computedEngine(src)),
+    });
+    const turn = await session.send('导出 csv');
+    // 诊断产物仍登记进 fileStore（可排查看），但交付面（TurnResult.files）里没有它。
+    expect(turn.files ?? []).not.toContainEqual(expect.objectContaining({ name: '销售汇总.values.csv' }));
+    expect((turn.files ?? []).some((file) => file.name.endsWith('.values.csv'))).toBe(false);
   });
 
   it('Worker 工具面永不上 recalc_xlsx（即使注入执行器）', async () => {

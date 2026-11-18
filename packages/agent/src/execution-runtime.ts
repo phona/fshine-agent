@@ -248,7 +248,8 @@ export const RECALC_XLSX_TOOL = 'recalc_xlsx';
 export const RECALC_XLSX_TOOL_DESCRIPTION =
   '对文件清单里的 xlsx 用 LibreOffice 强制重算后读回，报告公式缓存值与计算值不一致（valueDiffs）和错误格（errorCells），'
   + '并可按 export=csv 导出纯数据 CSV。file 只接受本回合运行目录的规范相对路径 in/<fileId><安全扩展名>（文件清单每条已给出脚本内路径）；'
-  + '绝对路径、..、多级路径与非规范形式一律拒绝。export=csv 时产物为 out/<name>.values.csv，实算报告在本回合运行目录根 .recalc-report.json（宿主独占，不写 out/）。'
+  + '绝对路径、..、多级路径与非规范形式一律拒绝。export=csv 时产物为 out/<name>.values.csv（name 取自输入文件的用户可见名），'
+  + 'CSV 是宿主内部诊断产物，不投递给用户；实算报告在本回合运行目录根 .recalc-report.json（宿主独占，不写 out/）。'
   + '引擎需部署期安装的 LibreOffice 26.8.3（PATH 可见才提供本工具，缺失则本工具不可用）。';
 export const RECALC_XLSX_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -664,6 +665,12 @@ export interface TurnFileRef {
    * 交付面（TurnResult.files）可缺省——渠道投递只用 fileId/name/bytes。
    */
   createdAt?: number;
+  /**
+   * 交付角色（方案 A）：false = 宿主内部诊断产物（如 recalc 的 .values.csv），不进交付面。
+   * 缺省/undefined = 可交付（run_js 产物、任务回程、out/ 扫描都是用户产物）。投递面按它
+   * 机械过滤，**不看文件名**。
+   */
+  deliverable?: boolean;
 }
 
 /** 清单里的收到时间格式（本地时区，`YYYY-MM-DD HH:mm`）：业务用户读得懂的机械事实。 */
@@ -2240,8 +2247,14 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
               sessionId: options.sessionId,
             });
             // P2-4：CSV 产物收口进本回合交付清单（与 run_js:turnFiles.push 同纪律）。
+            // 方案 A：只收可交付项——recalc 的 .values.csv 是宿主内部诊断产物
+            // （deliverable:false），不进交付面（投递口另有同一判据的最后一道闸）。
             if (result.outputs !== undefined) {
-              turnFiles.push(...result.outputs.map((f) => ({ fileId: f.fileId, name: f.name, bytes: f.bytes })));
+              turnFiles.push(
+                ...result.outputs
+                  .filter((f) => f.deliverable !== false)
+                  .map((f) => ({ fileId: f.fileId, name: f.name, bytes: f.bytes })),
+              );
             }
             return result;
           }

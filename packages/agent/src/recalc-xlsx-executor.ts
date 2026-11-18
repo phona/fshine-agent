@@ -117,8 +117,8 @@ export interface RecalcXlsxResult {
   errorCells: RecalcErrorCell[];
   valueDiffs: RecalcValueDiff[];
   artifacts: RecalcArtifacts;
-  /** export=csv 时登记进 fileStore 的 CSV 产物（交付链收口用；与 run_js outputs 同形状）。Codex P2-4。 */
-  outputs?: Array<{ fileId: string; name: string; bytes: number }>;
+  /** export=csv 时登记进 fileStore 的 CSV 产物（诊断产物，deliverable=false：不投递给用户）。Codex P2-4。 */
+  outputs?: Array<{ fileId: string; name: string; bytes: number; deliverable?: boolean }>;
   /** 引擎重算墙钟耗时（ms）；R4 资源账与结构化事件用。缺省装配的执行器必填，注入替身可省。 */
   durationMs?: number;
 }
@@ -286,6 +286,21 @@ async function readWorkbook(filePath: string): Promise<ExcelJS.Workbook> {
 /** 结果里的机械路径均相对 runDir（与 run_js 的 out/ 约定一致）。 */
 function relativeArtifact(runDir: string, absolute: string): string {
   return path.relative(runDir, absolute).split(path.sep).join('/');
+}
+
+/**
+ * CSV 产物的用户可见名（方案 A）：输入文件的**用户可见名 stem** + `.values.csv`。
+ * 不拼内部 fileId；只取最后一段（`/`、`\` 分隔的路径段之外全部丢弃），去掉控制字符，
+ * 空/`. `/`..` 形态回落 `values`——名字不能把产物写在 out/ 之外。
+ */
+export function valuesCsvNameOf(inputName: string): string {
+  const lastSegment = inputName.split(/[/\\]/).pop() ?? '';
+  const stem = path
+    .basename(lastSegment, path.extname(lastSegment))
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .trim();
+  const safeStem = stem === '' || stem === '.' || stem === '..' ? 'values' : stem;
+  return `${safeStem}.values.csv`;
 }
 
 export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): RecalcXlsxExecutor {
@@ -484,9 +499,12 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
       );
 
       let valuesArtifact: string | undefined;
-      let registeredOutputs: Array<{ fileId: string; name: string; bytes: number }> | undefined;
+      let registeredOutputs: Array<{ fileId: string; name: string; bytes: number; deliverable: boolean }> | undefined;
       if (input.export === 'csv') {
-        const name = `${parsed.fileId}.values.csv`;
+        // 方案 A：产物名只由**用户可见名**派生（stem + .values.csv），不再拼内部 fileId——
+        // fileId 是宿主机械 id，不该出现在用户收到的文件名里。stem 取最后一段并剔除控制字符，
+        // 路径分隔符已在取段时丢弃（name 不能把产物路径带出 out/）。
+        const name = valuesCsvNameOf(materialized.name);
         const csvPath = path.join(outDir, name);
         const csvBytes = Buffer.from(`${csvRows.join('\n')}\n`, 'utf8');
         writeFileSync(csvPath, csvBytes);
@@ -495,9 +513,19 @@ export function createRecalcXlsxExecutor(options: RecalcXlsxExecutorOptions): Re
         // 但**不登记为可交付产物**——否则含 #DIV/0! 的 CSV 会被无条件投递。
         if (reportStatus === 'pass') {
           const registered = options.fileStore.putFile({
-            scope, name, bytes: csvBytes, activatedAt: Date.now(),
+            scope,
+            name,
+            bytes: csvBytes,
+            activatedAt: Date.now(),
+            // 方案 A：CSV 是诊断产物（给宿主/排查看的值快照），不是给用户的交付物。
+            deliverable: false,
           });
-          registeredOutputs = [{ fileId: registered.fileId, name: registered.name, bytes: registered.bytes }];
+          registeredOutputs = [{
+            fileId: registered.fileId,
+            name: registered.name,
+            bytes: registered.bytes,
+            deliverable: false,
+          }];
         }
       }
 
