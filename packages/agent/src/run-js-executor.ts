@@ -22,7 +22,8 @@
  *   ④ 收尾扫 out/ 登记产物（fileStore.registerOutputsFromOut：只收普通文件、拒 symlink/
  *      hardlink、uid/大小/份数上限；候选按 realpath 包含校验必须仍在 runDir 内；同一 fd
  *      流式 copy-on-register 成新 fileId + sha256，原件字节不动）。**无论 exitCode 都扫**——
- *      out/ 就是交付箱；交付去留归 S1。
+ *      out/ 就是交付箱；交付去留归 S1。片 2：`registerOutputs:false`（Main 面）**不扫不登记**
+ *      ——结构性禁止 Main 产交付物；Main 的 scratch/ 才是它的工作区。
  *   ⑤ 审计随返回值走（脚本 sha256、输入/输出 fileId、exitCode、耗时、kill 原因）。
  *      S0 不落审计表（v8 §9 不做 run_code_runs 第二张表）；持久化落点归 S1 接线裁定。
  *
@@ -84,6 +85,12 @@ export interface RunJsInput {
    * 绑定该任务（task_id）；缺省 = Main 面（只解析 task_id IS NULL 的行，产物不绑任务）。
    */
   taskId?: string;
+  /**
+   * 产物登记开关（片 2，owner 裁定「交付物只从 Worker 出」）：false = **不登记** out/ 产物
+   * （不建 file_refs 行、不落 workspace 副本、返回 outputs 为空）——Main 的 run_js 走这条路，
+   * 结构性禁止 Main 产交付物；缺省 true = 现行为（Worker 面 / 直接调用）。
+   */
+  registerOutputs?: boolean;
   /** 宿主中止信号（任务取消等）；触发即对进程组 SIGKILL。超时不是模型参数（宿主常量）。 */
   signal?: AbortSignal;
 }
@@ -415,12 +422,16 @@ export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecuto
 
       // ④ 扫 out/ 登记产物（无论 exitCode——out/ 就是交付箱；交付去留归 S1）。
       // 产物绑定（CAP-01 S2 ①）：Worker 面（taskId 设置）的产物行绑定当前任务。
-      const { outputs, skipped } = options.fileStore.registerOutputsFromOut({
-        runDir,
-        scope,
-        limits: { maxFileBytes: maxOutputFileBytes, maxCount: maxOutputCount },
-        ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
-      });
+      // 片 2：registerOutputs=false（Main 面）时**根本不登记**——out/ 不是交付箱，
+      // Main 写 out/ 不产交付物（文件留在 run 目录，由既有 run 目录清理回收）。
+      const { outputs, skipped } = input.registerOutputs === false
+        ? { outputs: [] as RegisteredFile[], skipped: [] as SkippedOutput[] }
+        : options.fileStore.registerOutputsFromOut({
+          runDir,
+          scope,
+          limits: { maxFileBytes: maxOutputFileBytes, maxCount: maxOutputCount },
+          ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+        });
 
       const outputFiles = outputs.map(
         (file: RegisteredFile): RunJsOutputFile => ({ fileId: file.fileId, name: file.name, bytes: file.bytes }),

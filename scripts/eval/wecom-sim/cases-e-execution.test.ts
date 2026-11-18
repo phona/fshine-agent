@@ -17,7 +17,6 @@ import { describe, expect, it } from 'vitest';
 import {
   lastToolResultJsonOf,
   lastToolResultOf,
-  mainAttachmentSummaryResponses,
   manifestFileIdsOf,
   settleDispatch,
   startWecomSim,
@@ -78,7 +77,33 @@ describe('E 组·附件 → 执行层（W-19～W-21）', () => {
     const sample = await salesSampleXlsxAsync();
     const sim = await startWecomSim({ label: 'w19' });
     try {
-      sim.book.mainTurn('按客户汇总金额，做成一张新表发我\n[附件:销售明细.xlsx]', mainAttachmentSummaryResponses(true));
+      // 片 2：交付物只从 Worker 出 —— Main 交办并转述，Worker 的 run_js 写 out/ 回传。
+      const taskText = '按客户汇总金额并生成销售汇总表';
+      sim.book.mainTurn('按客户汇总金额，做成一张新表发我\n[附件:销售明细.xlsx]', [
+        (call) => {
+          const fileIds = manifestFileIdsOf(call.messages);
+          if (fileIds.length === 0) throw new Error('Main 脚本没有从文件清单注入里拿到 fileId。');
+          return toolCallAssistant('task_run', { task: taskText, inputFiles: fileIds });
+        },
+        (call) => {
+          const result = lastToolResultJsonOf(call.messages);
+          const summary = typeof result?.['summary'] === 'string' ? result['summary'] : '';
+          if (summary === '') throw new Error('Main 脚本没有拿到 task_run 的真实摘要。');
+          return textAssistant(summary);
+        },
+      ]);
+      sim.book.workerTask(taskText, [
+        (call) => {
+          const fileIds = manifestFileIdsOf(call.messages);
+          if (fileIds.length === 0) throw new Error('Worker 脚本没有拿到任务文件清单（副本 fileId）。');
+          return toolCallAssistant('run_js', { inputs: fileIds, code: summaryCode(true) });
+        },
+        (call) => {
+          const output = lastToolResultJsonOf(call.messages);
+          const stdout = typeof output?.['stdout'] === 'string' ? output['stdout'] : '';
+          return textAssistant(sumReply(sumFromStdout(stdout), true));
+        },
+      ]);
       sim.sendFile('销售明细.xlsx', sample);
       await settleDispatch();
       sim.sendText('按客户汇总金额，做成一张新表发我');

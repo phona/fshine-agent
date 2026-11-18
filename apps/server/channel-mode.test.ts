@@ -346,7 +346,9 @@ const workerNeverCalled = {
   },
 };
 
-const RUN_JS_CALL = {
+/** 片 2：交付物只从 Worker 出 —— Main 交办，Worker 的 run_js 写 out/汇总.txt。 */
+const TASK_RUN_CALL = { tool: 'task_run', args: { task: '帮我汇总成一份文件' } };
+const WORKER_RUN_JS_CALL = {
   tool: 'run_js',
   args: { code: "require('node:fs').writeFileSync('out/汇总.txt', 'summary-bytes');" },
 };
@@ -384,7 +386,8 @@ interface FileTurnRun {
 }
 
 /**
- * 同一输入（一条消息 → run_js 产出 out/汇总.txt → 回合末主动投递）跑一遍 server。
+ * 同一输入（一条消息 → Main 交办 → Worker run_js 产出 out/汇总.txt → 回合末主动投递）
+ * 跑一遍 server。片 2 起 Main 自己不产交付物。
  * previousAssembly=true 复现"改动前"的装配：直接 `new WecomBotChannel({deliveryMode:'live'})`
  * + 直接 `channel.start(...)`，不经档位装配；用于 live 的逐字对比。
  */
@@ -405,7 +408,13 @@ async function runFileTurn(options: { mode: ChannelMode; previousAssembly?: bool
   const logs: Array<Record<string, unknown>> = [];
   const mainDriver = {
     async run(input: { exec: (tool: string, args: Record<string, unknown>) => Promise<unknown> }) {
-      await input.exec(RUN_JS_CALL.tool, RUN_JS_CALL.args);
+      await input.exec(TASK_RUN_CALL.tool, TASK_RUN_CALL.args);
+      return { text: '汇总完成。', messages: [] };
+    },
+  };
+  const workerDriver = {
+    async run(input: { exec: (tool: string, args: Record<string, unknown>) => Promise<unknown> }) {
+      await input.exec(WORKER_RUN_JS_CALL.tool, WORKER_RUN_JS_CALL.args);
       return { text: '汇总完成。', messages: [] };
     },
   };
@@ -413,7 +422,7 @@ async function runFileTurn(options: { mode: ChannelMode; previousAssembly?: bool
     env: { LLM_MODEL: 'test-model' },
     config: testConfig(),
     dbPath: path.join(root, 'state.db'),
-    createDrivers: () => ({ mainDriver, workerDriver: workerNeverCalled }),
+    createDrivers: () => ({ mainDriver, workerDriver }),
     createExecutionFace: async () => ({
       client: new FaceClient(),
       allowedOperations: ['dummy.query'],

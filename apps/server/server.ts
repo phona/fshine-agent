@@ -71,7 +71,7 @@ import {
 } from '../../scripts/ask-runtime';
 import { createAttachmentFactQueue, createScopedNoteQueue } from './attachment-facts';
 import { AttachmentNudge, type NudgeClock } from './attachment-nudge';
-import { deliverTaskResult } from './task-completion-delivery';
+import { deliverTaskResult, routeFromSessionId } from './task-completion-delivery';
 import { composeNotificationSinks, createChatNotificationSink } from './notification-chat-sink';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -514,6 +514,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       ...(deps.createDrivers !== undefined ? { createDrivers: deps.createDrivers } : {}),
       ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
       ...(deps.taskExecutor !== undefined ? { taskExecutor: deps.taskExecutor } : {}),
+      // 片 1：后台 Worker 的 run_js 与前台同一执行器端口（缺省不注入 = Worker 工具面零变化）。
+      runJsExecutor,
       // B 切片：后台任务确认完成 → 结果主动发回原会话（走既有主动投递面 fileDelivery.sendText）。
       // 回调经会话链串行（快活抑制判定须在受理回合结束后做）；投递失败/抑制只记事件，不改任务事实。
       onTaskCompleted: (completion) => {
@@ -531,11 +533,43 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             });
             return;
           }
+          // 片 1 产物回程：任务产物走**同一交付面**（deliverable 角色闸、sha256+文件名去重、
+          // live/silent 记账与前台 TurnResult.files 完全同源），文本仍走 deliverTaskResult。
+          const files = completion.files ?? [];
+          let fileNote: string | undefined;
+          if (files.length > 0) {
+            const route = routeFromSessionId(completion.sessionId);
+            if (route === undefined) {
+              // 路由拆不出（异常 sessionId 形状）：如实记账、不猜路由（与文本投递同一纪律）。
+              log({
+                event: 'file_delivery',
+                principalId: completion.principalId,
+                sessionId: completion.sessionId,
+                taskId: completion.taskId,
+                files: files.length,
+                status: 'suppressed',
+                reason: 'route_unresolvable',
+              });
+            } else {
+              const outcome = await deliverTurnFiles({
+                files,
+                scope: { principalId: completion.principalId, sessionId: completion.sessionId },
+                channel: route.channel,
+                conversationId: route.conversationId,
+                principalId: completion.principalId,
+                sessionId: completion.sessionId,
+              });
+              fileNote = outcome.note;
+            }
+          }
           await deliverTaskResult({
             taskId: completion.taskId,
             principalId: completion.principalId,
             sessionId: completion.sessionId,
-            resultText: completion.resultText,
+            // 文件未送达的如实话术附在结果文本后（不覆盖模型/执行端正文）。
+            resultText: fileNote === undefined
+              ? completion.resultText
+              : `${completion.resultText}\n${fileNote}`,
           }, {
             ...(completionDelivery === undefined ? {} : { delivery: completionDelivery }),
             log,

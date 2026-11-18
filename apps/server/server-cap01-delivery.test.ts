@@ -1,8 +1,9 @@
 /**
  * CAP-01 S1 交付（主动投递 B）· server 级确定性验证（假渠道事实 + 假模型驱动；零网络）。
  *
- * run_js 走真实受限执行器（server 装配缺省构造；Node 权限模型子进程，只写 out/），
- * 产物经真实 fileStore 登记 → 回合末 TurnResult.files → handler 经注入端口投递。
+ * 片 2 起交付物只从 Worker 出：Main 交办（task_run）→ Worker 的 run_js 走真实受限执行器
+ * （server 装配缺省构造；Node 权限模型子进程，只写 out/）→ 产物经真实 fileStore 登记成
+ * 任务文件 → 汇入回合末 TurnResult.files → handler 经注入端口投递。
  *
  * 覆盖（逐条对应 ask ⑥，四必守见 v8 §7）：
  *   ① 故意让投递失败 → 用户看到「未送达」、事件记 delivery_failed、**不记 sent**；
@@ -20,11 +21,18 @@
  * 结果仍是 sent、用户话术无「未送达」、不产生「请重试」诱导；失败的写只降级成一条独立
  * 观测事件（不触达用户）。
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { AppConfig, ChannelRoute, DeliveryReceipt, IncomingChannelMessage, OutgoingFileReply } from '@fshine/contracts';
+import type {
+  AppConfig,
+  ChannelRoute,
+  DeliveryReceipt,
+  IncomingAttachment,
+  IncomingChannelMessage,
+  OutgoingFileReply,
+} from '@fshine/contracts';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver } from '../../packages/agent/src/driver-contract';
 import { createFileStore, type RegisteredFile } from '../../packages/agent/src/file-store';
@@ -33,6 +41,7 @@ import { openTaskStore } from '@fshine/core';
 import { createServer, deliverTurnFilesCore, type FileDeliveryPort } from './server';
 
 const FIXTURE_ROOT = path.resolve(__dirname, '..', '..', 'scripts', 'eval', 'fixtures', 'dummy-platform');
+const SCOPE = { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' };
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -106,7 +115,35 @@ function sequencedDriver(steps: readonly DriverStep[], capture: DriverCapture): 
   };
 }
 
-function incoming(messageId: string, text: string): IncomingChannelMessage {
+/** 按调用序回放的假 Worker 驱动（交办的活由它做：每回合按脚本调工具）。 */
+function sequencedWorkerDriver(
+  steps: readonly DriverStep[],
+  record: { toolNames: string[][]; errors: string[] },
+): TurnDriver {
+  let index = 0;
+  return {
+    async run(input) {
+      record.toolNames.push(input.tools.map((tool) => tool.name));
+      const step = steps[index];
+      index += 1;
+      if (step === undefined) throw new Error('（测试）没有更多 Worker 驱动步骤');
+      for (const call of step.execCalls ?? []) {
+        try {
+          await input.exec(call.tool, call.args);
+        } catch (error) {
+          record.errors.push(error instanceof Error ? error.message : String(error));
+        }
+      }
+      return { text: step.text, messages: [] as unknown as DriverMessage[] };
+    },
+  };
+}
+
+function incoming(
+  messageId: string,
+  text: string,
+  attachments?: readonly IncomingAttachment[],
+): IncomingChannelMessage {
   return {
     wecomUserId: 'user-a',
     channel: 'wecom',
@@ -114,8 +151,18 @@ function incoming(messageId: string, text: string): IncomingChannelMessage {
     messageId,
     chatType: 'single',
     text,
+    ...(attachments === undefined ? {} : { attachments }),
     receivedAt: new Date().toISOString(),
   };
+}
+
+/** 渠道落盘形状的附件（adapter 的 saveAttachments 义务）：写临时目录并返回契约形状。 */
+function stagedAttachment(root: string, filename: string, bytes: Buffer): IncomingAttachment {
+  const dir = path.join(root, 'attachments');
+  mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, filename);
+  writeFileSync(filePath, bytes);
+  return { filename, path: filePath, bytes: bytes.length };
 }
 
 /** live 端口：成功回 per-file 回执；fail=true 抛错（带空 receipt，模拟部分 ACK 形状）。 */
@@ -138,20 +185,29 @@ function livePort(options: { fail?: boolean } = {}): { port: FileDeliveryPort; c
   };
 }
 
-/** 产物写入脚本：写 out/汇总.txt（cwd = runDir；out/ 由执行器预建）。 */
+/** Worker 产物写入脚本：写 out/汇总.txt（cwd = runDir；out/ 由执行器预建）。 */
 const RUN_JS_CALL = {
   tool: 'run_js',
   args: { code: "require('node:fs').writeFileSync('out/汇总.txt', 'summary-bytes');" },
 };
 
+/** Main 的交办（片 2：交付物只从 Worker 出，Main 不再自己写 out/ 产交付物）。 */
+const TASK_RUN_CALL = { tool: 'task_run', args: { task: '帮我把结果汇总成一份文件' } };
+const TASK_RUN_STEP: DriverStep = { execCalls: [TASK_RUN_CALL], text: '汇总完成。' };
+const WORKER_RUN_JS_STEP: DriverStep = { execCalls: [RUN_JS_CALL], text: '汇总完成。' };
+
 interface Fixture {
   server: Awaited<ReturnType<typeof createServer>>;
+  dbPath: string;
   logs: Array<Record<string, unknown>>;
   capture: DriverCapture;
+  workerRecord: { toolNames: string[][]; errors: string[] };
 }
 
 async function makeFixture(input: {
   steps: readonly DriverStep[];
+  /** Worker 回合脚本（片 2：交付物由 Worker 产出）。缺省 = worker 不应被调用。 */
+  workerSteps?: readonly DriverStep[];
   port?: FileDeliveryPort;
   /**
    * 事件写失败注入（R7-F3）：谓词命中的日志写抛错（模拟事件存储不可写），其余照常记录。
@@ -160,13 +216,20 @@ async function makeFixture(input: {
   throwsOnLog?: (line: Record<string, unknown>) => boolean;
 }): Promise<Fixture> {
   const dir = tempDir();
+  const dbPath = path.join(dir, 'state.db');
   const logs: Array<Record<string, unknown>> = [];
   const capture: DriverCapture = { toolNames: [], injections: [] };
+  const workerRecord = { toolNames: [] as string[][], errors: [] as string[] };
   const server = await createServer({
     env: { LLM_MODEL: 'test-model' },
     config: testConfig(),
-    dbPath: path.join(dir, 'state.db'),
-    createDrivers: () => ({ mainDriver: sequencedDriver(input.steps, capture), workerDriver: workerNeverCalled }),
+    dbPath,
+    createDrivers: () => ({
+      mainDriver: sequencedDriver(input.steps, capture),
+      workerDriver: input.workerSteps === undefined
+        ? workerNeverCalled
+        : sequencedWorkerDriver(input.workerSteps, workerRecord),
+    }),
     createExecutionFace: async () => ({
       client: new FaceClient(),
       allowedOperations: ['dummy.query'],
@@ -178,14 +241,15 @@ async function makeFixture(input: {
       logs.push(line);
     },
   });
-  return { server, logs, capture };
+  return { server, dbPath, logs, capture, workerRecord };
 }
 
 describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
   it('① 故意让投递失败 → 用户看到「未送达」、事件记 delivery_failed、不记 sent', async () => {
     const { port, calls } = livePort({ fail: true });
     const { server, logs } = await makeFixture({
-      steps: [{ execCalls: [RUN_JS_CALL], text: '汇总完成。' }],
+      steps: [TASK_RUN_STEP],
+      workerSteps: [WORKER_RUN_JS_STEP],
       port,
     });
     try {
@@ -211,7 +275,8 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
   it('①b 投递成功后事件写失败（R7-F3）→ 结果仍是 sent、话术无「未送达」、不诱导重试', async () => {
     const { port, calls } = livePort();
     const { server, logs } = await makeFixture({
-      steps: [{ execCalls: [RUN_JS_CALL], text: '汇总完成。' }],
+      steps: [TASK_RUN_STEP],
+      workerSteps: [WORKER_RUN_JS_STEP],
       port,
       // R7-F3 故障注入：file_delivery 的 sent 事件写抛错（事件存储不可写），其余事件照常记录。
       throwsOnLog: (line) => line['event'] === 'file_delivery' && line['status'] === 'sent',
@@ -246,7 +311,8 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
       },
     };
     const { server, logs } = await makeFixture({
-      steps: [{ execCalls: [RUN_JS_CALL], text: '汇总完成。' }],
+      steps: [TASK_RUN_STEP],
+      workerSteps: [WORKER_RUN_JS_STEP],
       port,
     });
     try {
@@ -265,7 +331,8 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
 
   it('③ 无投递端口 → fail-closed：用户可见「文件未送达（当前渠道不支持文件投递）」+ delivery_unavailable', async () => {
     const { server, logs } = await makeFixture({
-      steps: [{ execCalls: [RUN_JS_CALL], text: '汇总完成。' }],
+      steps: [TASK_RUN_STEP],
+      workerSteps: [WORKER_RUN_JS_STEP],
     });
     try {
       const reply = await server.handler(incoming('m-noport', '帮我汇总'));
@@ -283,7 +350,9 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
   it('④ 只有文件、正文为空 → 不判回合失败，投递照常发生（live 成功记 sent）', async () => {
     const { port, calls } = livePort();
     const { server, logs } = await makeFixture({
-      steps: [{ execCalls: [RUN_JS_CALL], text: '' }],
+      // Main 正文为空、交付物来自 Worker：仍不判回合失败（v8 §7 四必守 #2）。
+      steps: [{ execCalls: [TASK_RUN_CALL], text: '' }],
+      workerSteps: [WORKER_RUN_JS_STEP],
       port,
     });
     try {
@@ -318,8 +387,10 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
   it('⑤ 同回合重复交付（同 sha256 + 同名）→ 只投递一份，去重项不产生额外事件/错误', async () => {
     const { port, calls } = livePort();
     const { server, logs } = await makeFixture({
-      // 两次 run_js 代码不同（memo 不命中，各自登记新 fileId），但产出同名同字节。
-      steps: [
+      // Main 交办一次；Worker 两次 run_js 代码不同（memo 不命中，各自登记新 fileId），
+      // 但产出同名同字节 → 交付面按 (sha256, 文件名) 去重。
+      steps: [TASK_RUN_STEP],
+      workerSteps: [
         {
           execCalls: [
             RUN_JS_CALL,
@@ -361,7 +432,8 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
   it('⑤b 去重键是 (sha256, 文件名)：同名不同字节、同字节不同名都各投一份', async () => {
     const { port, calls } = livePort();
     const { server, logs } = await makeFixture({
-      steps: [
+      steps: [TASK_RUN_STEP],
+      workerSteps: [
         {
           execCalls: [
             { tool: 'run_js', args: { code: "require('node:fs').writeFileSync('out/同名.txt', 'A');" } },
@@ -392,39 +464,52 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     }
   });
 
-  it('⑥ server 级清单注入：下一回合机械事实只有 fileId/name/bytes；message_done 记 fileManifestBytes', async () => {
-    const { port } = livePort();
-    const { server, logs, capture } = await makeFixture({
+  it('⑥ 片 2：Main 写 out/ 不登记、不投递；清单注入只含真登记的文件（入站附件）', async () => {
+    const { port, calls } = livePort();
+    const { server, logs, capture, dbPath } = await makeFixture({
       steps: [
+        // 第一回合：Main 自己 run_js 写 out/ —— 片 2 起不登记、不投递。
         { execCalls: [RUN_JS_CALL], text: '汇总完成。' },
+        // 第二回合：随消息收到一份入站附件（真登记 + 激活）→ 本回合清单注入。
         { text: '已按清单继续处理。' },
       ],
       port,
     });
     try {
-      await server.handler(incoming('m-1', '帮我汇总'));
-      await server.handler(incoming('m-2', '继续处理上一步的结果'));
+      await server.handler(incoming('m-main-out', '帮我汇总'));
 
-      // 第一回合：清单在回合开始构建，产出尚未登记 → 无清单注入；工具面已含 run_js。
+      // 用户可见路径变了：Main 写 out/ 既没有交付事件，也没有文件登记行。
+      expect(logs.some((line) => line['event'] === 'file_delivery')).toBe(false);
+      expect(calls).toHaveLength(0);
+      const ro = openTaskStore(dbPath, { readOnly: true });
+      try {
+        expect(ro.listFileRefs(SCOPE)).toEqual([]); // out/ 不登记（结构性）
+      } finally {
+        ro.close();
+      }
+      // 第一回合：回合开始构建清单时没有已激活文件 → 无清单注入；工具面仍含 run_js。
       expect(capture.injections[0]).toEqual([]);
       expect(capture.toolNames[0]).toContain('run_js');
 
-      // 第二回合：清单 = 本会话已激活文件，每行 name/fileId/bytes + 脚本内路径（修复轮 ⑤）。
+      // 第二回合：文字+附件一条消息 → 附件真登记并激活；清单 = 本会话已激活文件，
+      // 每行 name/fileId/bytes + 脚本内路径（修复轮 ⑤）。
+      await server.handler(incoming('m-inbound', '继续处理上一步的结果', [
+        stagedAttachment(path.dirname(dbPath), '明细.xlsx', Buffer.from('mingxi-bytes')),
+      ]));
       expect(capture.injections[1]).toHaveLength(1);
       const manifest = capture.injections[1]![0]!;
       const lines = manifest.split('\n');
       expect(lines[0]).toContain('[本会话文件清单]');
       // 2026-11-18 owner：行尾追加收到时间（YYYY-MM-DD HH:mm），字段顺序与 fileId 形态不变。
       expect(lines[1]).toMatch(
-        /^- 汇总\.txt（fileId: file_[0-9a-f]{32}，13 字节；脚本内路径：in\/file_[0-9a-f]{32}\.txt；\d{4}-\d{2}-\d{2} \d{2}:\d{2} 收到）$/,
+        /^- 明细\.xlsx（fileId: file_[0-9a-f]{32}，12 字节；脚本内路径：in\/file_[0-9a-f]{32}\.xlsx；\d{4}-\d{2}-\d{2} \d{2}:\d{2} 收到）$/,
       );
-      expect(manifest).not.toContain('summary-bytes'); // 没有文件内容（行数据不进清单）
+      expect(manifest).not.toContain('mingxi-bytes'); // 没有文件内容（行数据不进清单）
       expect(manifest).not.toContain('sha256');
       // 宿主路径边界：清单里唯一的斜杠是脚本内路径的 in/ 前缀，无任何宿主绝对/相对路径。
       expect(manifest.replaceAll('脚本内路径：in/', '')).not.toContain('/');
       const done = logs.filter((line) => line['event'] === 'message_done').at(-1);
-      const injected = capture.injections[1]![0]!;
-      expect(done?.['fileManifestBytes']).toBe(Buffer.byteLength(injected, 'utf8'));
+      expect(done?.['fileManifestBytes']).toBe(Buffer.byteLength(manifest, 'utf8'));
     } finally {
       await server.close();
     }

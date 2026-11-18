@@ -194,6 +194,25 @@ describe('run_js 执行器（CAP-01 S0）', () => {
     expect(ws.getRow(2).getCell(2).value).toBe(12);
   });
 
+  it('①c 片 2：registerOutputs=false（Main 面）→ out/ 不登记、outputs 为空、零 file_refs 行', async () => {
+    const { executor, store, workspaceRoot } = makeFixture();
+    const code = "require('node:fs').writeFileSync('out/不该交付.txt', 'bytes');";
+    const result = await executor.runJs({ code, scope: SCOPE, registerOutputs: false });
+    expect(result.exitCode).toBe(0); // 脚本照跑（Main 仍可执行代码）
+    expect(result.outputs).toEqual([]);
+    expect(result.audit.outputs).toEqual([]);
+    expect(store.listFileRefs(SCOPE)).toEqual([]); // 结构性：不建行、不落 workspace 副本
+    // out/ 里的字节仍在 run 目录（不登记 ≠ 不许写），交付面看不见它。
+    expect(readFileSync(path.join(result.audit.runDir, 'out', '不该交付.txt'), 'utf8')).toBe('bytes');
+    // 对照：缺省（Worker/直接调用）同一脚本照常登记。
+    const registered = await executor.runJs({ code, scope: SCOPE });
+    expect(registered.outputs.map((file) => file.name)).toEqual(['不该交付.txt']);
+    const rows = store.listFileRefs(SCOPE);
+    expect(rows).toHaveLength(1);
+    expect(fileStoragePathOf(workspaceRoot, SCOPE, rows[0]!.fileId, '不该交付.txt')).toContain(rows[0]!.fileId);
+    store.close();
+  });
+
   it('② 脚本读宿主 .env → 非零退出 + stderr 含 ACCESS_DENIED、产物为空；同仓宿主文件一样被拒', async () => {
     const { hostEnvPath, executor } = makeFixture();
     // 未捕获形状：子进程非零退出，stderr 带机械错误码（ask 的断言口径）。

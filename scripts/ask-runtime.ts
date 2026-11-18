@@ -423,6 +423,11 @@ export interface BackgroundTaskCompletion {
   request: string;
   /** 执行端确认的结果原文（仅 completed 且非空时回调；逐字，未过出口清理）。 */
   resultText: string;
+  /**
+   * 片 1 产物回程：本回合 Worker 产出的任务作用域交付物（登记事实；后台面对
+   * TurnResult.files 的同位面）。缺省 = 本回合无产物。
+   */
+  files?: readonly TurnFileRef[];
 }
 
 export interface BackgroundDispatchInput {
@@ -450,6 +455,11 @@ export interface BackgroundDispatchInput {
   /** 预构建执行面/worker 驱动（装配核心复用；已给 taskExecutor 时不需要）。 */
   face?: ExecutionFace;
   workerDriver?: TurnDriver;
+  /**
+   * 片 1：run_js 执行器端口（装配层构造注入，与前台同一实例/构造）。注入后后台 Worker
+   * 工具面含 run_js（任务作用域），产物经完成回调上交投递面。缺省不注入 = 零变化。
+   */
+  runJsExecutor?: RunJsExecutor;
   /** runner 覆盖（测试确定性：leaseMs/时钟/属主；缺省 leaseMs=workerTurnMs+60s）。 */
   runnerOptions?: { leaseMs?: number; owner?: string; now?: () => Date };
 }
@@ -486,6 +496,8 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
       workerTurnMs: resolved.workerTurnMs,
       // 可信工作目录：装配层持有的 profile.root（绝不取模型输出/用户消息）。
       workerWorkspaceRoot: input.profile.root,
+      // 片 1：run_js 执行器端口（与前台同一构造；缺省不注入 = Worker 工具面零变化）。
+      ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
     });
   }
   // B 切片：完成回调接缝——包装实际使用的执行器（注入的或默认构建的同一道包装）。
@@ -503,6 +515,7 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
             sessionId: task.sessionId,
             request: task.request,
             resultText: outcome.resultText,
+            ...(outcome.files === undefined ? {} : { files: outcome.files }),
           });
         }
         return outcome;
@@ -718,6 +731,8 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
         ...(input.runnerOptions === undefined ? {} : { runnerOptions: input.runnerOptions }),
         face,
         workerDriver: drivers.workerDriver,
+        // 片 1：后台 Worker 的 run_js 与前台同一执行器端口（缺省不注入 = 工具面零变化）。
+        ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
       })).runner;
     }
     // P4：通知链仅 background 且提供 sink 时启用（inline 默认零新增路径；投递由调用方触发）。

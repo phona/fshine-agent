@@ -285,7 +285,14 @@ async function makeServerGateFixture(input: {
     },
   };
 
-  const driver: TurnDriver = {
+  // 片 2：交付物只从 Worker 出 —— Main 交办，Worker 的 run_js 产出文件。
+  const mainDriver: TurnDriver = {
+    async run(runInput) {
+      await runInput.exec('task_run', { task: '汇总并生成表格' });
+      return { text: '汇总完成。', messages: [] as unknown as DriverMessage[] };
+    },
+  };
+  const workerDriver: TurnDriver = {
     async run(runInput) {
       await runInput.exec('run_js', { code: 'noop' });
       return { text: '汇总完成。', messages: [] as unknown as DriverMessage[] };
@@ -314,7 +321,7 @@ async function makeServerGateFixture(input: {
     env: { LLM_MODEL: 'test' },
     config,
     dbPath: path.join(dir, 'state.db'),
-    createDrivers: () => ({ mainDriver: driver, workerDriver: driver }),
+    createDrivers: () => ({ mainDriver, workerDriver }),
     createExecutionFace: face,
     createRunJsExecutor: () => runJs,
     ...(input.recalcMode === 'gate'

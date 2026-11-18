@@ -6,8 +6,9 @@
  *
  * 覆盖（对应 ask ⑥ 的 runtime 侧断言）：
  *   ⑤ run_js 在未注入 runJsExecutor 时不注册（工具面没有它，exec 也 fail-closed 拒绝）；
- *   · 注入后注册并执行：产物收进 TurnResult.files、file_refs 行激活、工具结果不带
- *     audit/runDir（机械路径不进转录）；
+ *   · 片 2（owner 裁定）：Main 的 run_js 能执行、能读 in/、能写 scratch/，但写 out/ **不登记
+ *     file_refs 行、不进 TurnResult.files**（结构性禁止 Main 产交付物）；脚本仍真跑，工具
+ *     结果不带 audit/runDir（机械路径不进转录）；
  *   · resolveFileRef 同码（照 resolveTaskId 写法）：不存在/pending/过期/越权 → 同一句
  *     话术（防存在性 oracle），机械 reason 只进 onFileRefUnavailable（不进错误消息）；
  *   · 幂等（v8 §5）：同回合同 code+inputs 重试命中，执行器只跑一次；
@@ -34,7 +35,6 @@ import {
   type RunJsExecutor,
 } from './src/run-js-executor';
 import {
-  FILES_GENERATED_NOTICE,
   createSession,
   type Session,
   type TurnFileRef,
@@ -81,6 +81,8 @@ interface DriverStep {
 
 interface DriverCapture {
   toolNames: string[][];
+  /** 每回合模型收到的工具描述（Main 面事实：scratch/ 是工作区、交付走 task_run）。 */
+  toolDescriptions: string[][];
   injections: string[][];
   results: unknown[];
   toolErrors: string[];
@@ -94,6 +96,7 @@ function queueDriver(capture: DriverCapture): { driver: TurnDriver; push(step: D
   const driver: TurnDriver = {
     async run(input) {
       capture.toolNames.push(input.tools.map((tool) => tool.name));
+      capture.toolDescriptions.push(input.tools.map((tool) => tool.description));
       capture.injections.push([...(input.injections ?? [])]);
       const step = pending.shift();
       if (step === undefined) throw new Error('（测试）没有更多驱动步骤');
@@ -147,7 +150,7 @@ async function makeFixture(input: {
     },
   };
   const runJsExecutor = input.executor ?? countingExecutor;
-  const capture: DriverCapture = { toolNames: [], injections: [], results: [], toolErrors: [], toolErrorObjects: [] };
+  const capture: DriverCapture = { toolNames: [], toolDescriptions: [], injections: [], results: [], toolErrors: [], toolErrorObjects: [] };
   const { driver, push } = queueDriver(capture);
   const reasons: string[] = [];
   const session = await createSession({
@@ -221,26 +224,29 @@ describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', (
     }
   });
 
-  it('注入后注册并执行：产物收进 TurnResult.files、行激活；工具结果不带 audit/runDir', async () => {
+  it('片 2：Main 写 out/ 不登记、不产交付物；脚本仍真跑，工具结果不带 audit/runDir', async () => {
     const fx = await makeFixture();
     try {
       fx.push({ execCalls: [{ tool: 'run_js', args: { code: WRITE_ONE_OUTPUT } }], text: '汇总完成。' });
       const turn = await fx.session.send('帮我汇总');
 
       expect(fx.capture.toolNames[0]).toContain('run_js');
-      const rows = fx.ro.listFileRefs(SCOPE);
-      expect(rows).toHaveLength(1);
-      expect(rows[0]!.activatedAt).toBeDefined();
-      expect(turn.files).toEqual([{ fileId: rows[0]!.fileId, name: '汇总.txt', bytes: rows[0]!.bytes }]);
+      // 结构性禁止：out/ 不登记（零 file_refs 行）、不进交付面。
+      expect(fx.ro.listFileRefs(SCOPE)).toEqual([]);
+      expect(turn.files).toBeUndefined();
       expect(turn.reply).toBe('汇总完成。');
 
-      // 工具结果：v8 §2 形状；audit/runDir 等机械路径不进转录。
+      // 脚本仍然真跑（exit 0），只是产物不登记：outputs 为空数组（不是隐藏的真 fileId）。
       const result = fx.capture.results[0] as Record<string, unknown>;
       expect(result).not.toHaveProperty('audit');
       expect(result).not.toHaveProperty('runDir');
       expect(result['exitCode']).toBe(0);
-      expect(result['outputs']).toEqual([{ fileId: rows[0]!.fileId, name: '汇总.txt', bytes: rows[0]!.bytes }]);
+      expect(result['outputs']).toEqual([]);
       expect(JSON.stringify(result)).not.toContain('runs/');
+      // 工具描述给了替代路径：scratch/ 是工作区，交付文件走 task_run。
+      const runJsIndex = fx.capture.toolNames[0]!.indexOf('run_js');
+      expect(fx.capture.toolDescriptions[0]![runJsIndex]).toContain('scratch/ 是工作区');
+      expect(fx.capture.toolDescriptions[0]![runJsIndex]).toContain('task_run 交办');
     } finally {
       fx.ro.close();
       fx.close();
@@ -336,7 +342,9 @@ describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', (
       fx.push({ execCalls: [call, { ...call, args: { code: WRITE_ONE_OUTPUT } }], text: '完成' });
       const turn = await fx.session.send('汇总（会重试一次）');
       expect(fx.executorCalls()).toBe(1);
-      expect(turn.files).toHaveLength(1);
+      // Main 面：无交付物（memo 命中回放的不是登记事实）。
+      expect(turn.files).toBeUndefined();
+      expect(fx.ro.listFileRefs(SCOPE)).toEqual([]);
       // 两次工具调用拿到同一结果（命中回放）。
       expect(fx.capture.results[0]).toEqual(fx.capture.results[1]);
     } finally {
@@ -345,7 +353,7 @@ describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', (
     }
   });
 
-  it('② 出口清理：返回前剥服务器路径；剥完为空且有文件 → 宿主话术（不判失败）', async () => {
+  it('② 出口清理：返回前剥服务器路径（Main 面不再有「只有文件、正文为空」兜底）', async () => {
     const fx = await makeFixture();
     try {
       // 正文里混入服务器路径 → 出口被剥（模型转录里原样，用户面干净）。
@@ -355,14 +363,8 @@ describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', (
       expect(withText.reply).not.toContain('fictional-user');
       expect(withText.reply).not.toContain('secret-drafts');
       expect(withText.reply).toContain('已经生成');
-      expect(withText.files).toHaveLength(1);
-
-      // 剥完为空且有文件 → 宿主话术兜底（只有文件、正文为空不判回合失败，v8 §7 四必守 #2）。
-      // 路径 token 只吃 ASCII 字符类，所以用纯 ASCII 路径让整条被剥空。
-      fx.push({ execCalls: [{ tool: 'run_js', args: { code: WRITE_ONE_OUTPUT } }], text: '/home/fictional-user/fictional-projects/secret-drafts/summary.xlsx' });
-      const emptyBody = await fx.session.send('再来一份');
-      expect(emptyBody.reply).toBe(FILES_GENERATED_NOTICE);
-      expect(emptyBody.files).toHaveLength(1);
+      // 片 2：Main 没有交付物，TurnResult.files 缺省（「文件已生成（见附件）」兜底属 Worker 面）。
+      expect(withText.files).toBeUndefined();
     } finally {
       fx.ro.close();
       fx.close();
