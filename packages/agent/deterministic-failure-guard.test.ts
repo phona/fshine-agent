@@ -84,7 +84,7 @@ async function runWorkerCalls(
   calls: ReadonlyArray<{ operation: string; args: Record<string, unknown> }>,
   sendText = '查一下',
   outcomeFor?: (request: ExecutionRequest) => ExecutionOutcome,
-): Promise<{ client: FakeExecutionClient; worker: StepDriver }> {
+): Promise<{ client: FakeExecutionClient; worker: StepDriver; turn: Awaited<ReturnType<Session['send']>> }> {
   const client = outcomeFor === undefined ? new FakeExecutionClient() : new FakeExecutionClient(outcomeFor);
   const main = new StepDriver();
   const worker = new StepDriver();
@@ -106,8 +106,8 @@ async function runWorkerCalls(
     workerDriver: worker,
     mainSystemPrompt: '你是测试主 Agent。',
   });
-  await session.send(sendText);
-  return { client, worker };
+  const turn = await session.send(sendText);
+  return { client, worker, turn };
 }
 
 describe('A2b 确定性失败后的同对象重试守卫', () => {
@@ -129,6 +129,26 @@ describe('A2b 确定性失败后的同对象重试守卫', () => {
     const call = { operation: 'dummy.query', args: { '--collection': 'finance-invoices', '--window': '2026-10' } };
     const { client } = await runWorkerCalls([call, call], '查两次', nonRetryable);
     expect(client.requests).toHaveLength(1);
+  });
+
+  it('观测面：被拦下的重试随回合交回（对象/操作/码/执行层的 retryable 声明）', async () => {
+    const { client, turn } = await runWorkerCalls([
+      { operation: 'dummy.query', args: { '--collection': 'finance-invoices', '--window': '2026-10' } },
+      { operation: 'dummy.query', args: { '--collection': 'finance-invoices', '--window': 'W202610' } },
+    ], '查 2026-10', nonRetryable);
+    expect(client.requests).toHaveLength(1);
+    expect(turn.retryBlocked).toEqual([
+      { operation: 'dummy.query', object: 'finance-invoices', code: 'WHERE_INVALID', declaredRetryable: false },
+    ]);
+  });
+
+  it('观测面：未声明 retryable 的失败，拦截记录里 declaredRetryable 缺省（不是编造 false）', async () => {
+    const unclassified = (): ExecutionOutcome => ({ status: 'failed', error: { code: 'SOMETHING_ODD', message: 'unexpected' } });
+    const { turn } = await runWorkerCalls([
+      { operation: 'dummy.query', args: { '--collection': 'alpha' } },
+      { operation: 'dummy.query', args: { '--collection': 'alpha' } },
+    ], '查 alpha', unclassified);
+    expect(turn.retryBlocked).toEqual([{ operation: 'dummy.query', object: 'alpha', code: 'SOMETHING_ODD' }]);
   });
 
   it('换集合照常放行（对象不同 = 不是同一请求）', async () => {

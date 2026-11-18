@@ -825,6 +825,19 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           markPushSuppressedInTurn(sessionKey, suppressedTaskId);
         }
       }
+      // A2b 观测：本回合被拦下的重试逐条落事件（对象/操作/执行层码/它的 retryable 声明）。
+      // 告警归部署侧读这条事件；宿主不自建告警通道（也是「宁可停下让人介入」的可见面）。
+      for (const blocked of turn.retryBlocked ?? []) {
+        log({
+          event: 'execution_retry_blocked',
+          principalId,
+          sessionId,
+          operation: blocked.operation,
+          object: blocked.object,
+          code: blocked.code,
+          declaredRetryable: blocked.declaredRetryable ?? 'unset',
+        });
+      }
       // CAP-01 S1 交付 B（v8 §7）：handler 只返回 text；文件经装配注入的端口在回合末主动投递。
       // 投递失败/无端口时以话术如实纠正正文，但不判回合失败（文件未送达 ≠ 回报失败）。
       let reply = turn.reply;

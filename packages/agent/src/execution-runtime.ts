@@ -706,6 +706,15 @@ export function renderFileManifest(files: readonly TurnFileRef[]): string {
   ].join('\n');
 }
 
+/** A2b 拦截事实（观测用；对象/操作/执行层给出的码与它的 retryable 声明）。 */
+export interface TurnRetryBlock {
+  operation: string;
+  object: string;
+  code: string;
+  /** 执行层对该失败的 retryable 声明；undefined = 未声明（按不可重试处理）。 */
+  declaredRetryable?: boolean;
+}
+
 export interface TurnResult {
   reply: string;
   taskIds: readonly string[];
@@ -726,6 +735,11 @@ export interface TurnResult {
    * 后台通知推送据此不重复发一条；受理回执路径的任务不在列（它们的结局仍靠推送送达）。
    */
   pushSuppressedTaskIds?: readonly string[];
+  /**
+   * A2b 观测面：本回合**被拦下**的重试（执行层没有显式声明可重试 → * 该对象本回合不再发起）。
+   * 只作运维可见（装配层按条记 `execution_retry_blocked` 事件），不改变回合结果、不进用户文本。
+   */
+  retryBlocked?: readonly TurnRetryBlock[];
   /** 进度帧（本回合 onStep 产出；当前只收集，不在此投递渠道）。 */
   progress: readonly string[];
   /**
@@ -1154,7 +1168,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
    * 报错、让人介入，也不能继续往下撞——打爆执行层就彻底没得用了。
    * 宿主只执行执行层的声明，不判断业务——这不是计划门。
    */
-  let deterministicFailuresThisTurn = new Map<string, { code: string }>();
+  let deterministicFailuresThisTurn = new Map<string, { code: string; declaredRetryable?: boolean }>();
+  /** A2b 观测：本回合被拦下的重试（回合末随 TurnResult 交装配层落事件；不改回合结果）。 */
+  let retryBlockedThisTurn: TurnRetryBlock[] = [];
   const dispatchMode: 'inline' | 'background' = options.dispatchMode ?? 'inline';
   const taskRunner = options.taskRunner;
   if (dispatchMode === 'background' && taskRunner === undefined) {
@@ -1658,6 +1674,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     const deterministicKey = objectValue === undefined ? undefined : `${operation}\u0000${objectValue}`;
     const blocked = deterministicKey === undefined ? undefined : deterministicFailuresThisTurn.get(deterministicKey);
     if (blocked !== undefined) {
+      retryBlockedThisTurn.push({
+        operation,
+        object: objectValue ?? '',
+        code: blocked.code,
+        ...(blocked.declaredRetryable === undefined ? {} : { declaredRetryable: blocked.declaredRetryable }),
+      });
       const codeNote = blocked.code === 'unclassified_failure' ? '且没有说明可以重试' : `（${blocked.code}）`;
       throw new Error(
         `执行层这次调用「${objectValue}」失败了${codeNote}；本回合不要再换参数重试——`
@@ -1720,7 +1742,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     if (deterministicKey !== undefined && run.outcome.status !== 'completed') {
       const error = (run.outcome as { error?: { code?: string; retryable?: boolean } }).error;
       if (error?.retryable !== true) {
-        deterministicFailuresThisTurn.set(deterministicKey, { code: error?.code ?? 'unclassified_failure' });
+        deterministicFailuresThisTurn.set(deterministicKey, {
+          code: error?.code ?? 'unclassified_failure',
+          ...(error?.retryable === undefined ? {} : { declaredRetryable: error.retryable }),
+        });
       }
     }
     if (run.unresolved) {
@@ -2056,6 +2081,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // A2：单回合执行计数随回合清零（上界按回合计，不跨回合累计）。
       operationsThisTurn = 0;
       deterministicFailuresThisTurn = new Map();
+      retryBlockedThisTurn = [];
       const turnScopeKey = `turn:${options.sessionId}:${turnNo}`;
       const mainWindow = newAttemptWindow();
       // 宿主只交「本轮输入」：最后一条 user = 本轮文本；历史种子仅在驱动尚无会话时使用。
@@ -2250,6 +2276,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         operations: operationsThisTurn,
         ...(relayedTaskIds.length > 0 ? { relayedTaskIds } : {}),
         ...(pushSuppressedTaskIds.length > 0 ? { pushSuppressedTaskIds } : {}),
+        ...(retryBlockedThisTurn.length > 0 ? { retryBlocked: retryBlockedThisTurn } : {}),
         progress,
         ...(turnFiles.length > 0 ? { files: turnFiles } : {}),
         ...(manifestBytes === undefined ? {} : { fileManifestBytes: manifestBytes }),
