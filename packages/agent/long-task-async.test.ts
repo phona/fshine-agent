@@ -476,9 +476,13 @@ describe('长任务异步（契约 v4）', () => {
     await flush();
     expect(h.longTasks.waits).toHaveLength(1);
 
+    // runner 的等待推进事件走 log 出口（不是执行器的 ExecutionEvent 联合），按字符串取。
     const retries = (): Array<{ failures: number; delayMs: number }> => h.events
-      .filter((event) => event['event'] === 'execution_wait_retry')
-      .map((event) => ({ failures: event['failures'] as number, delayMs: event['delayMs'] as number }));
+      .filter((event) => String(event['event']) === 'execution_wait_retry')
+      .map((event) => {
+        const line = event as unknown as { failures: number; delayMs: number };
+        return { failures: line.failures, delayMs: line.delayMs };
+      });
 
     // 执行层一直不可达：每次失败都退避，任务事实保持 running（结果只能由 wait 终态落定）。
     const delays: number[] = [];

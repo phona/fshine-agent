@@ -546,6 +546,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       }),
       // 片 1：后台 Worker 的 run_js 与前台同一执行器端口（缺省不注入 = Worker 工具面零变化）。
       runJsExecutor,
+      // 长任务异步（契约 v4）：accepted / 协议违约 / 续跑回程登记与等待推进只进日志。
+      onExecutionEvent: (event) => log({ mode: 'background', ...event }),
+      log: (line) => log({ mode: 'background-runner', ...line }),
       // B 切片：后台任务确认完成 → 结果主动发回原会话（走既有主动投递面 fileDelivery.sendText）。
       // 回调经会话链串行（快活抑制判定须在受理回合结束后做）；投递失败/抑制只记事件，不改任务事实。
       onTaskCompleted: (completion) => {
@@ -684,6 +687,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           // 宿主求交：本主体的角色权限（未写 role = viewer = 只读）。实际允许集合还要与
           // 执行层声明能力、部署总闸求交（assembleSessionCore 内收口）。
           allowedPermissions: permissionsOfRole(deps.config, effectiveRoleOf(deps.config, principalId)),
+          // 长任务异步（契约 v4）：前台会话的 accepted/协议违约事件只进日志（带会话身份）。
+          onExecutionEvent: (event) => log({ principalId, sessionId, ...event }),
           emptyOperationsMessage: '执行层没有声明任何只读 operation——server 拒绝以空允许集合运行。',
           taskRegistry,
           mainSystemPrompt,

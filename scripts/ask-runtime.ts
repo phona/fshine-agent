@@ -33,7 +33,7 @@ import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ContextProfileConfig, Permission, RuntimeConfig } from '@fshine/contracts';
-import type { ExecutionClient } from '@fshine/contracts/execution-contract';
+import type { ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import {
   effectiveDeploymentEnv,
   effectiveRoleOf,
@@ -59,6 +59,7 @@ import {
   type TaskOutputSweepSkippedEvent,
   type ExecutionResultFileizedEvent,
   type ExecutionResultOversizeUnhandledEvent,
+  type ExecutionEvent,
 } from '../packages/agent/src/execution-runtime';
 import {
   createNotificationOutbox,
@@ -74,7 +75,7 @@ import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/a
 import type { RunJsExecutor } from '../packages/agent/src/run-js-executor';
 import type { TaskInputCopier } from '../packages/agent/src/file-store';
 import { createTaskExecutionBridge, type TaskFileBridgeStore } from '../packages/agent/src/task-file-bridge';
-import { createTaskRunner, type LongRunningNoticePort, type TaskExecutor, type TaskRunner } from '../packages/agent/src/task-runner';
+import { createTaskRunner, type LongRunningNoticePort, type LongTaskWaitPort, type TaskExecutor, type TaskRunner } from '../packages/agent/src/task-runner';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../packages/agent/src/worker-skills';
 import type { SkillRegistry } from '../packages/agent/src/skills';
 import { explicitConfigFrom, materializeEvalConfig } from './resolve-config-path';
@@ -271,6 +272,11 @@ export interface SessionAssemblyInput {
    * 实际允许集合 = 执行层声明能力 ∩ 本白名单 ∩ 部署总闸。
    */
   allowedPermissions?: readonly Permission[];
+  /**
+   * 长任务异步（契约 v4）的结构化事件出口（只进日志，不进用户话术）。
+   * 前台会话与后台执行器共用同一个出口；缺省静默。
+   */
+  onExecutionEvent?: (event: ExecutionEvent) => void;
   createDrivers?: DriverFactory;
   createExecutionFace?: ExecutionFaceFactory;
   /** 预装载底账（server 共享库）；缺省自建并由 close 关闭（注入的归调用方）。 */
@@ -446,6 +452,39 @@ function narrowFaceByPermissions(
   return { client: face.client, allowedOperations, readOnlyOperations: readOnly };
 }
 
+/**
+ * 执行层 wait 回执 → runner 的机械等待结果（只做形状投影，不改语义）。
+ * accepted 带 pollAfterMs；failed/refused 带执行层原话；其余终态原样交给续跑回合。
+ */
+function longTaskWaitResultOf(outcome: ExecutionOutcome): {
+  status: 'accepted' | 'completed' | 'failed' | 'refused' | 'needs_input' | 'needs_confirmation';
+  pollAfterMs?: number;
+  message?: string;
+  outcome: ExecutionOutcome;
+} {
+  return {
+    status: outcome.status,
+    ...(outcome.status === 'accepted' ? { pollAfterMs: outcome.pollAfterMs } : {}),
+    ...(outcome.status === 'failed' || outcome.status === 'refused' ? { message: outcome.error.message } : {}),
+    outcome,
+  };
+}
+
+/**
+ * 长任务等待端口（契约 v4）：执行面客户端声明了 `wait` 才接。
+ * 未声明（或注入的假客户端没有该能力）→ 不接端口，runner 对 accepted 一律 fail-closed
+ * （任务落 failed 并落事件），不会留下无人推进的 running 任务。
+ */
+function longTaskPortOf(client: ExecutionClient): LongTaskWaitPort | undefined {
+  if (client.wait === undefined) return undefined;
+  return {
+    // 必须经 client 调用（不能解构后裸调）：适配器实现允许依赖 this。
+    wait: async (operationId, timeoutMs, signal) =>
+      longTaskWaitResultOf(await client.wait!(operationId, timeoutMs, signal)),
+    ...(client.abort === undefined ? {} : { abort: (operationId: string) => client.abort!(operationId) }),
+  };
+}
+
 /** 执行面解析（注入优先，缺省仓内 dummy；后台派发与装配核心共用同一链，不另建装配）。 */
 export interface ExecutionFaceResolverInput {
   profile: ContextProfileConfig;
@@ -571,6 +610,8 @@ export interface BackgroundDispatchInput {
    * 1:1 判据）。缺省不接 = 不提醒（无法投递就不打扰）。
    */
   longRunningNotice?: LongRunningNoticePort;
+  /** 长任务异步（契约 v4）的结构化事件出口（只进日志；缺省静默）。 */
+  onExecutionEvent?: (event: ExecutionEvent) => void;
   /** 结构化事件出口（提醒成功/失败；缺省静默）。 */
   log?: (line: Record<string, unknown>) => void;
 
@@ -586,6 +627,8 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
   const resolved = resolveRuntimeConfig(input.runtime);
   const allowWriteOperations = input.allowWriteOperations ?? input.runtime?.allowWriteOperations === true;
   let executor = input.taskExecutor;
+  /** 长任务等待端口（契约 v4）：执行面客户端声明 wait 才接；缺省不接 = accepted fail-closed。 */
+  let longTasks: LongTaskWaitPort | undefined;
   if (executor === undefined) {
     // 基面 = 执行层全集（读 + 部署总闸允许时的写），不做角色求交；求交在下面按主体收口。
     const baseEmptyError = input.emptyOperationsError ?? ((message: string) => new Error(message));
@@ -602,6 +645,8 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
     const workerDriver = input.workerDriver ?? (input.createDrivers !== undefined
       ? (await input.createDrivers(input.env)).workerDriver
       : createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env) }));
+    // 长任务等待走同一个执行面客户端（CLI 适配器的长轮询）；未实现 wait 的客户端不接端口。
+    longTasks = longTaskPortOf(face.client);
     // CAP-01 S2 后台文件面：与 inline 会话桥同一装配参数、同一 store，实例按任务懒建
     // （不建进程级单例：scope 随任务身份，platformRoot/inner 是本次执行面的可信值）。
     const bridgeAssembly = input.taskExecutionBridge;
@@ -643,6 +688,8 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
       ...(input.onExecutionResultOversizeUnhandled === undefined
         ? {}
         : { onExecutionResultOversizeUnhandled: input.onExecutionResultOversizeUnhandled }),
+      // 长任务异步（契约 v4）事件：accepted / 协议违约 / 续跑回程登记，只进日志。
+      ...(input.onExecutionEvent === undefined ? {} : { onExecutionEvent: input.onExecutionEvent }),
     });
     const emptyOperationsError = input.emptyOperationsError ?? ((message: string) => new Error(message));
     const executorForPermissions = (permissions: readonly Permission[]): Promise<TaskExecutor> =>
@@ -713,6 +760,8 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
     longRunningNoticeMs: resolved.longRunningNoticeMs,
     longRunningStuckNoticeMs: resolved.longRunningStuckNoticeMs,
     ...(input.longRunningNotice === undefined ? {} : { longRunningNotice: input.longRunningNotice }),
+    // 长任务异步（契约 v4）：等待端口由执行面客户端提供；缺省不接 = accepted fail-closed。
+    ...(longTasks === undefined ? {} : { longTasks }),
     ...(input.log === undefined ? {} : { log: input.log }),
     ...(input.runnerOptions?.owner === undefined ? {} : { owner: input.runnerOptions.owner }),
     ...(input.runnerOptions?.now === undefined ? {} : { now: input.runnerOptions.now }),
@@ -931,6 +980,8 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
         ...(input.onExecutionResultOversizeUnhandled === undefined
           ? {}
           : { onExecutionResultOversizeUnhandled: input.onExecutionResultOversizeUnhandled }),
+        // 长任务异步（契约 v4）事件与前台同一出口。
+        ...(input.onExecutionEvent === undefined ? {} : { onExecutionEvent: input.onExecutionEvent }),
       })).runner;
     }
     // P4：通知链仅 async 且提供 sink 时启用（sync 默认零新增路径；投递由调用方触发）。
@@ -975,6 +1026,8 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
         : { onExecutionResultOversizeUnhandled: input.onExecutionResultOversizeUnhandled }),
       ...(input.taskInputCopier === undefined ? {} : { taskInputCopier: input.taskInputCopier }),
       ...(taskBridge === undefined ? {} : { taskExecutionBridge: taskBridge }),
+      // 长任务异步（契约 v4）：inline 前台收到 accepted 也发同一条事件（只进日志）。
+      ...(input.onExecutionEvent === undefined ? {} : { onExecutionEvent: input.onExecutionEvent }),
       ...(input.fileManifestProvider === undefined ? {} : { fileManifestProvider: input.fileManifestProvider }),
       mainTurnMs: resolved.mainTurnMs,
       workerTurnMs: resolved.workerTurnMs,
