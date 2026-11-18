@@ -238,6 +238,13 @@ describe('dummy 执行层适配器（Execution Contract 传输面）', () => {
     expect(locked.status).toBe('failed');
     if (locked.status === 'failed') {
       expect(locked.error.code).toBe('COLLECTION_LOCKED');
+      // 执行层把确定性错误标了 retryable:false —— 适配器必须原样透传（A2b「本回合不再撞」
+      // 的唯一判据；丢掉这个字段守卫就形同不存在，E14 的 11 次重试风暴就是这么来的）。
+      expect(locked.error.retryable).toBe(false);
+    }
+    // 非确定性错误不带该字段：适配器不得替执行层编造 retryable。
+    if (missing.status === 'failed') {
+      expect(missing.error).not.toHaveProperty('retryable');
     }
   });
 });

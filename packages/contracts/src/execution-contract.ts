@@ -117,7 +117,14 @@ export interface MissingInput {
   description: string;
 }
 
-/** 失败/拒绝的结构化原因。code 与 message 由执行层给出，details 原样透传。 */
+/**
+ * 失败/拒绝的结构化原因。code 与 message 由执行层给出，details 原样透传。
+ *
+ * `retryable` 的**缺省语义是「不可重试」**（owner 2026-11-18）：只有执行层显式给 `true`
+ * （瞬时故障：超时、网关暂不可用、被中断）才允许同一对象在本回合继续尝试；`false` 与
+ * **未声明**一律按不可重试处理，宿主随即锁住该 (operation, 对象) 并把话交还用户。
+ * 宁可停下报错让人介入，也不在不确定时继续撞——打爆执行层就彻底没得用。
+ */
 export interface ExecutionFailure {
   code: string;
   message: string;

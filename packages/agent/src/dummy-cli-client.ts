@@ -284,7 +284,7 @@ function parseEnvelope(stdout: string): ResultEnvelope | undefined {
 
 function failureOf(error: unknown): ExecutionFailure {
   if (error !== null && typeof error === 'object') {
-    const candidate = error as { code?: unknown; message?: unknown; correctForm?: unknown };
+    const candidate = error as { code?: unknown; message?: unknown; correctForm?: unknown; retryable?: unknown };
     const code = typeof candidate.code === 'string' && candidate.code !== '' ? candidate.code : 'EXECUTION_UNKNOWN_ERROR';
     const message = typeof candidate.message === 'string' && candidate.message !== ''
       ? candidate.message
@@ -292,6 +292,10 @@ function failureOf(error: unknown): ExecutionFailure {
     return {
       code,
       message,
+      // 执行层的 **retryable 声明必须透传**：这是「确定性失败本回合不再撞」的唯一判据
+      // （execution-runtime A2b）。此前这里丢了这个字段，导致守卫在真实链路里从不生效——
+      // E14 30 轮里 11 次重试风暴就是这条断线。
+      ...(typeof candidate.retryable === 'boolean' ? { retryable: candidate.retryable } : {}),
       ...(typeof candidate.correctForm === 'string' && candidate.correctForm !== ''
         ? { details: { correctForm: candidate.correctForm } }
         : {}),

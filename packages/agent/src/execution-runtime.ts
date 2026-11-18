@@ -357,8 +357,9 @@ export const MAIN_PROTOCOL_NOTE = [
   '- 合计、计数、差值、占比这类运算一律交给代码：优先用执行层返回的聚合字段；'
     + '执行层没给聚合且本轮没有计算工具时，如实说明拿不到可靠合计，不要凭记忆心算。'
     + '给出聚合数时说明来源（执行层字段 / 脚本计算）。',
-  '- 执行层对某个参数给出**确定性拒绝**（`retryable=false`）时：如实说明它接受什么、不接受什么，'
-    + '并问用户要不要换口径；不要自行按维度取值批量查询——那是替用户扩大范围。',
+  '- 执行层的调用失败、且**没有说明可以重试**（`retryable` 为 false 或未声明）时：如实说明它接受'
+    + '什么、不接受什么，并问用户要不要换口径；同一对象本回合不要再换参数重试，也不要自行按维度'
+    + '取值批量查询——那是替用户扩大范围。',
   '- task_run 返回「已受理/在后台办理中」时，如实告诉用户事情已在后台办理、完成后结果会自动发回来；'
     + '不要向用户提及工单编号（#数字）或内部任务 id——编号只在任务查询工具结果里，给用户说清办的是什么、办到哪一步即可。',
   '- 本轮执行面只开放查询（只读）操作；用户要求写入或变更时，如实说明该能力尚未开通。',
@@ -377,8 +378,9 @@ export const MAIN_PROTOCOL_NOTE_WITH_WRITES = [
   '- 合计、计数、差值、占比这类运算一律交给代码：优先用执行层返回的聚合字段；'
     + '执行层没给聚合且本轮没有计算工具时，如实说明拿不到可靠合计，不要凭记忆心算。'
     + '给出聚合数时说明来源（执行层字段 / 脚本计算）。',
-  '- 执行层对某个参数给出**确定性拒绝**（`retryable=false`）时：如实说明它接受什么、不接受什么，'
-    + '并问用户要不要换口径；不要自行按维度取值批量查询——那是替用户扩大范围。',
+  '- 执行层的调用失败、且**没有说明可以重试**（`retryable` 为 false 或未声明）时：如实说明它接受'
+    + '什么、不接受什么，并问用户要不要换口径；同一对象本回合不要再换参数重试，也不要自行按维度'
+    + '取值批量查询——那是替用户扩大范围。',
   '- task_run 返回「已受理/在后台办理中」时，如实告诉用户事情已在后台办理、完成后结果会自动发回来；'
     + '不要向用户提及工单编号（#数字）或内部任务 id——编号只在任务查询工具结果里，给用户说清办的是什么、办到哪一步即可。',
   '- 本轮执行面开放查询与写入操作。执行层返回待确认时，把执行层给出的确认摘要原样转给用户；'
@@ -1143,10 +1145,14 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   /** A2：本回合已发起的执行次数（send 时清零；跨本回合全部委派合计）。 */
   let operationsThisTurn = 0;
   /**
-   * A2b：本回合内，执行层已**确定性失败/拒绝**（`error.retryable === false`）的对象，
-   * 后续换参数再试一律不发起（E14 实测：同一集合窗口被拒后，模型换 `2026-10`/`W202610`
-   * 两种写法连撞、再换新任务继续撞）。键 = operation + 对象参数（--collection/--topic）。
-   * 依据是**执行层自己的 retryable 声明**，宿主只执行不再判断业务——不是计划门。
+   * A2b：本回合内，执行层**没有明确说可重试**的失败对象，后续换参数再试一律不发起
+   * （E14 实测：同一集合窗口被拒后，模型换 `2026-10`/`W202610` 两种写法连撞、再换新任务
+   * 继续撞）。键 = operation + 对象参数（--collection/--topic）。
+   *
+   * **判据按 fail-safe 缺省**（owner 2026-11-18）：只有执行层**显式** `retryable === true`
+   * 才允许继续尝试；`false` 与**未声明**一律视为不可重试。理由是不确定场景下宁可停下来
+   * 报错、让人介入，也不能继续往下撞——打爆执行层就彻底没得用了。
+   * 宿主只执行执行层的声明，不判断业务——这不是计划门。
    */
   let deterministicFailuresThisTurn = new Map<string, { code: string }>();
   const dispatchMode: 'inline' | 'background' = options.dispatchMode ?? 'inline';
@@ -1652,9 +1658,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     const deterministicKey = objectValue === undefined ? undefined : `${operation}\u0000${objectValue}`;
     const blocked = deterministicKey === undefined ? undefined : deterministicFailuresThisTurn.get(deterministicKey);
     if (blocked !== undefined) {
+      const codeNote = blocked.code === 'unclassified_failure' ? '且没有说明可以重试' : `（${blocked.code}）`;
       throw new Error(
-        `执行层已判定「${objectValue}」在该操作上不可用（${blocked.code}，确定性失败）；`
-        + '本回合不要换参数再试——把执行层给出的说法如实转告用户，并给出可执行的替代路径。',
+        `执行层这次调用「${objectValue}」失败了${codeNote}；本回合不要再换参数重试——`
+        + '把执行层给出的说法如实转告用户，需要换口径或换对象时先问用户。',
       );
     }
     if (operationsThisTurn >= maxOperationsPerTurn) {
@@ -1707,11 +1714,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         return outcome;
       },
     });
-    // A2b：执行层声明确定性失败（retryable === false）时，本回合锁住该 (operation, 对象)。
+    // A2b：执行层**没有显式说可重试**（retryable !== true）时，本回合锁住该 (operation, 对象)。
+    // fail-safe 缺省（owner 2026-11-18）：不确定就不往下撞——宁可停下报错让人介入，
+    // 也不能把执行层打到不能用。只有显式 retryable:true（超时/网关不可用等瞬时故障）放行。
     if (deterministicKey !== undefined && run.outcome.status !== 'completed') {
       const error = (run.outcome as { error?: { code?: string; retryable?: boolean } }).error;
-      if (error?.retryable === false) {
-        deterministicFailuresThisTurn.set(deterministicKey, { code: error.code ?? 'deterministic_failure' });
+      if (error?.retryable !== true) {
+        deterministicFailuresThisTurn.set(deterministicKey, { code: error?.code ?? 'unclassified_failure' });
       }
     }
     if (run.unresolved) {
