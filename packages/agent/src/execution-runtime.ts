@@ -331,6 +331,15 @@ export interface RunJsLayoutUnsafeReport extends RunJsLayoutUnsafeEvent {
   readonly taskId?: string;
 }
 
+/**
+ * 允许集合边界拒绝话术（宿主在**发起执行前**确定性拒绝，2026-11-19 RBAC 切片）。
+ *
+ * 不暴露内部 operation 名：用户不需要知道执行层的 operation 目录，只需知道「当前权限
+ * 不支持」。拒绝仍由宿主允许集合在发起前一次性判定（零执行、零执行事实），不依赖模型
+ * 遵守提示词；角色求交发生在装配层（allowedOperations 派生）。
+ */
+export const OPERATION_NOT_PERMITTED_MESSAGE = '当前权限不支持这个操作。';
+
 /** Worker 唯一工具名：结构化执行入口（宿主生成 requestId，模型只给 operation + args）。 */
 export const EXECUTE_OPERATION_TOOL = 'execute_operation';
 export const EXECUTE_OPERATION_TOOL_DESCRIPTION =
@@ -1782,7 +1791,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     if (operation === '') throw new Error('execute_operation 缺少 operation。');
     if (!allowed.has(operation)) {
       // 允许集合边界：集合外的 operation 在发起执行前被拒——不依赖模型遵守提示词。
-      throw new Error(`「${operation}」不在本轮允许集合内，未发起执行。`);
+      throw new Error(OPERATION_NOT_PERMITTED_MESSAGE);
     }
     // A2 同回合拒（2026-11-18）：存在**本回合**发放、尚未消费的待确认提案时，同一回合内
     // 再发起非只读 operation 一律不执行——同回合 commit 不是用户表态（旧纪律只挡住了句柄
@@ -2814,7 +2823,7 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         const operation = typeof args.operation === 'string' ? args.operation : '';
         if (operation === '') throw new Error('execute_operation 缺少 operation。');
         if (!allowed.has(operation)) {
-          throw new Error(`「${operation}」不在本轮允许集合内，未发起执行。`);
+          throw new Error(OPERATION_NOT_PERMITTED_MESSAGE);
         }
         const rawArgs = args.args;
         const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)

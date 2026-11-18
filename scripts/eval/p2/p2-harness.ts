@@ -362,7 +362,7 @@ export interface P2ServerHandle {
 function p2Config(spec: P2ServerSpec): AppConfig {
   const principals: AppConfig['principals'] = {};
   for (const principal of spec.principals) {
-    principals[`wecom:${principal.userId}`] = { enabled: true, accountSetScope: 'all', capabilities: ['read'] };
+    principals[`wecom:${principal.userId}`] = { enabled: true };
   }
   return {
     principals,

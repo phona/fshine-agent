@@ -49,10 +49,19 @@ describe('loadConfig', () => {
     expect(config.sessionTtlMs).toBe(86_400_000); // 默认 24h:TTL 过期走软着陆,不再分钟级清零失忆
 
     const userA = config.principals['wecom:user_a'];
-    // accountSetIds 不再进契约（⑥）：YAML 里的旧键被加载层忽略
+    // accountSetIds / capabilities / accountSetScope 不再进契约：YAML 里的旧键被加载层忽略
     expect('accountSetIds' in (userA ?? {})).toBe(false);
+    expect('capabilities' in (userA ?? {})).toBe(false);
+    expect('accountSetScope' in (userA ?? {})).toBe(false);
     expect(userA?.enabled).toBe(true);
-    expect(userA?.capabilities).toEqual(['read']);
+    // 未写 role = 未配置（装配层按 viewer 处理，最小权限）。
+    expect(userA?.role).toBeUndefined();
+    // roles 未配置 = 内置三档默认（开箱可用）。
+    expect(config.roles).toEqual({
+      viewer: { permissions: ['read'] },
+      operator: { permissions: ['read', 'write'] },
+      admin: { permissions: ['read', 'write'] },
+    });
   });
 
   it('env 覆盖:APP_PORT / APP_CALLBACK_PATH', () => {
@@ -240,19 +249,47 @@ contextProfiles:
     expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV })).toThrowError(/workerTimeoutMs/);
   });
 
-  it('V1 capabilities:解析 read/validate/write 并默认旧 principal 为 read', () => {
-    const yaml = VALID_YAML.replace('enabled: true', 'enabled: true\n    capabilities: [read, validate, write]');
+  it('roles：解析自定义角色表；principal.role 命中已定义角色', () => {
+    const yaml = `${VALID_YAML}
+roles:
+  viewer: { permissions: [read] }
+  auditor: { permissions: [read, write] }
+`.replace('enabled: true', 'enabled: true\n    role: auditor');
     const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
-    expect(config.principals['wecom:user_a']?.capabilities).toEqual(['read', 'validate', 'write']);
-    expect(config.principals['wecom:user_b']?.capabilities).toEqual(['read']);
+    expect(config.roles).toEqual({
+      viewer: { permissions: ['read'] },
+      auditor: { permissions: ['read', 'write'] },
+    });
+    expect(config.principals['wecom:user_a']?.role).toBe('auditor');
   });
 
-  it('V1 capabilities:拒绝未知值、重复值和空数组', () => {
-    for (const capabilities of ['[admin]', '[read, read]', '[]']) {
-      const yaml = VALID_YAML.replace('enabled: true', `enabled: true\n    capabilities: ${capabilities}`);
+  it('roles：permissions 只允许 read/write;未知值/重复/空数组 fail-fast', () => {
+    for (const permissions of ['[admin]', '[read, read]', '[]']) {
+      const yaml = `${VALID_YAML}
+roles:
+  viewer: { permissions: ${permissions} }
+`;
       expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV }))
-        .toThrowError(/capabilities/);
+        .toThrowError(/roles\.viewer\.permissions/);
     }
+  });
+
+  it('role 未定义 → 启动失败（不静默降级）', () => {
+    const yaml = VALID_YAML.replace('enabled: true', 'enabled: true\n    role: ghost');
+    expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV }))
+      .toThrowError(/principals\.wecom:user_a\.role 未定义/);
+  });
+
+  it('旧 capabilities / accountSetScope 键被加载层忽略（不再进 PrincipalConfig）', () => {
+    const yaml = VALID_YAML.replace(
+      'enabled: true',
+      'enabled: true\n    capabilities: [read, validate, write]\n    accountSetScope: all',
+    );
+    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
+    const user = config.principals['wecom:user_a'];
+    expect('capabilities' in (user ?? {})).toBe(false);
+    expect('accountSetScope' in (user ?? {})).toBe(false);
+    expect(user?.role).toBeUndefined();
   });
 
   it('enabled 的 principal 无账套不再报错（⑥：宿主不持实体授权，账套校验随之退役）', () => {

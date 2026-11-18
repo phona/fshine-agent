@@ -42,7 +42,7 @@ function tempDir(): string {
 function testConfig(root: string, fileParams?: { input?: string; output?: string }): AppConfig {
   return {
     principals: {
-      'wecom:user-a': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:user-a': { enabled: true },
     },
     contextProfiles: {
       dummy: {

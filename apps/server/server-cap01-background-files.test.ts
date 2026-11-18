@@ -40,7 +40,7 @@ function tempDir(): string {
 function testConfig(): AppConfig {
   return {
     principals: {
-      [PRINCIPAL]: { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      [PRINCIPAL]: { enabled: true },
     },
     contextProfiles: {
       dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },

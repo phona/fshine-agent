@@ -423,11 +423,11 @@ export const MU_FIXTURE_ROOT = path.resolve(HERE, '..', '..', 'fixtures', 'dummy
 function muConfig(mode: 'inline' | 'background', runtime?: RuntimeConfig): AppConfig {
   const principals: AppConfig['principals'] = {};
   for (const userId of MU_PRINCIPALS) {
-    principals[principalIdOf(userId)] = { enabled: true, accountSetScope: 'all', capabilities: ['read'] };
+    principals[principalIdOf(userId)] = { enabled: true };
   }
   // 群 = 独立主体：群主体必须在配置里**显式开通**（未列出的群沿用既有拒绝路径）。
   for (const conversationId of MU_GROUP_IDS) {
-    principals[groupPrincipalIdOf(conversationId)] = { enabled: true, accountSetScope: 'all', capabilities: ['read'] };
+    principals[groupPrincipalIdOf(conversationId)] = { enabled: true };
   }
   return {
     principals,

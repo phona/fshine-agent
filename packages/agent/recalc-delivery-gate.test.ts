@@ -309,7 +309,7 @@ async function makeServerGateFixture(input: {
     readOnlyOperations: ['dummy.query'],
   });
   const config: AppConfig = {
-    principals: { 'wecom:u': { enabled: true, accountSetScope: 'all', capabilities: ['read'] } },
+    principals: { 'wecom:u': { enabled: true } },
     contextProfiles: { dummy: { root: dir, gateway: 'bin/dummy', skillRoots: [] } },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,

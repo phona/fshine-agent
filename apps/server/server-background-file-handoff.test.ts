@@ -58,7 +58,7 @@ function copyFixtureRoot(dir: string): string {
 function testConfig(root: string): AppConfig {
   return {
     principals: {
-      'wecom:user-a': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:user-a': { enabled: true },
     },
     contextProfiles: {
       dummy: {
@@ -167,7 +167,9 @@ async function makeFixture(): Promise<Fixture> {
     createExecutionFace: async () => ({
       client: createDummyCliClient({ root, gateway: 'bin/dummy', stateDir, env: process.env }),
       allowedOperations: ['dummy.scratch'],
-      readOnlyOperations: [],
+      // 本用例只验证文件面（scratch 是任务内本地写，不是对外写操作）：在**测试替身**里把它
+      // 登记为只读能力，使其对 viewer 也可用；生产默认面仍只从 access=read 派生只读集合。
+      readOnlyOperations: ['dummy.scratch'],
     }),
     // 有推送面 = async（派发方式不是配置键）：静默端口只作能力声明，不发起真实投递。
     fileDelivery: { deliveryMode: 'silent', async sendToConversation() { throw new Error('（测试）silent 不投递'); } },

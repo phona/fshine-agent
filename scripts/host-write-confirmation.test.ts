@@ -56,8 +56,8 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
 const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform');
 
-/** 宿主允许集合的确定性拒绝话术（execution-runtime.ts；不依赖模型自觉）。 */
-const WRITE_NOT_ALLOWED_MESSAGE = '不在本轮允许集合内';
+/** 宿主允许集合的确定性拒绝话术（execution-runtime.ts；不依赖模型自觉，且不含 operation 名）。 */
+const WRITE_NOT_ALLOWED_MESSAGE = '当前权限不支持这个操作';
 /** 夹具声明的写 operation（access=write；开关关闭时一个都不进允许集）。 */
 const WRITE_OPERATIONS = [
   'dummy.prepare',
@@ -187,6 +187,7 @@ async function createHostFixture(options: HostFixtureOptions): Promise<HostFixtu
       stateDir,
       emptyOperationsMessage: '（测试）空允许集合',
       allowWriteOperations: options.allowWrite === true,
+      allowedPermissions: options.allowWrite === true ? ['read', 'write'] : ['read'],
     });
     const client: ExecutionClient = {
       capabilities: () => face.client.capabilities(),
@@ -210,7 +211,7 @@ async function createHostFixture(options: HostFixtureOptions): Promise<HostFixtu
     dbPath: path.join(options.dir, 'state.db'),
     stateDir,
     setAuditPath: true,
-    ...(options.allowWrite === true ? { runtime: { allowWriteOperations: true } } : {}),
+    ...(options.allowWrite === true ? { runtime: { allowWriteOperations: true }, allowedPermissions: ['read', 'write'] } : {}),
     emptyOperationsMessage: '执行层没有声明任何只读 operation——测试拒绝。',
     taskRegistry: createTaskRegistry(),
     mainSystemPrompt: '你是测试主 Agent。',
@@ -681,6 +682,7 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
         stateDir: fx.stateDir,
         emptyOperationsMessage: '（测试）空允许集合',
         allowWriteOperations: true,
+        allowedPermissions: ['read', 'write'],
       });
       expect(writeFace.allowedOperations).toEqual([...writeFace.readOnlyOperations, ...WRITE_OPERATIONS]);
     } finally {

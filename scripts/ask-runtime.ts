@@ -32,9 +32,14 @@
 import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { ContextProfileConfig, RuntimeConfig } from '@fshine/contracts';
+import type { ContextProfileConfig, Permission, RuntimeConfig } from '@fshine/contracts';
 import type { ExecutionClient } from '@fshine/contracts/execution-contract';
-import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
+import {
+  effectiveDeploymentEnv,
+  effectiveRoleOf,
+  loadConfig,
+  permissionsOfRole,
+} from '@fshine/core';
 import { applyExecutorLabel, loadAgentProfile } from '../packages/agent/src/agent-profile';
 import { createPiTurnDriver, parseContextWindow, type PiTurnDriverOptions } from '../packages/agent/src/pi-driver';
 import type { MainSessionLocation } from '../packages/agent/src/session-persistence';
@@ -257,9 +262,15 @@ export interface SessionAssemblyInput {
   emptyOperationsError?: (message: string) => Error;
   /**
    * 写面开关（`runtime.allowWriteOperations` 的装配投影；缺省 false = 只读）。
-   * true 时允许集合 = access=read + access=write；只读集合仍只含 access=read。
+   * true 时仍要看 `allowedPermissions` 是否含 write：两者同时满足写集合才进入允许集合；
+   * 只读集合仍只含 access=read。
    */
   allowWriteOperations?: boolean;
+  /**
+   * 当前主体角色的权限白名单（宿主求交的中间项）。缺省 / 未提供 = 只读（最小权限）。
+   * 实际允许集合 = 执行层声明能力 ∩ 本白名单 ∩ 部署总闸。
+   */
+  allowedPermissions?: readonly Permission[];
   createDrivers?: DriverFactory;
   createExecutionFace?: ExecutionFaceFactory;
   /** 预装载底账（server 共享库）；缺省自建并由 close 关闭（注入的归调用方）。 */
@@ -370,14 +381,14 @@ export interface AssembledSession {
   close(): void;
 }
 
-/** 缺省执行面：仓内 dummy CLI + 从执行层自述派生的允许集（空集合按注入话术拒绝）。 */
+/** 缺省执行面：仓内 dummy CLI + 执行层自述派生的**全集**（读 + 部署总闸允许时的写）。 */
 async function defaultExecutionFace(input: {
   profile: ContextProfileConfig;
   env: NodeJS.ProcessEnv;
   stateDir: string;
   emptyOperationsMessage: string;
   emptyOperationsError: (message: string) => Error;
-  /** true = 允许集合追加 access=write 的写面（缺省 false = 只读，零行为变化）。 */
+  /** true = 部署总闸允许写面（缺省 false = 只读）。角色求交在 resolveExecutionFace 收口。 */
   allowWriteOperations?: boolean;
 }): Promise<ExecutionFace> {
   const client = createDummyCliClient({
@@ -388,7 +399,7 @@ async function defaultExecutionFace(input: {
   });
   const operations = await client.listOperations();
   // 两条集合各自派生：只读集合只看 access=read；写集合只看 access=write。写操作进入
-  // 允许集合（开关打开）时，只读集合不会跟着变大——重试语义不随写面开关变化。
+  // 允许集合时，只读集合不会跟着变大——重试语义不随写面开关变化。
   const readOnlyOperations = readOnlyOperationNames(operations);
   const writeOperations = writeOperationNames(operations);
   const allowedOperations = input.allowWriteOperations === true
@@ -400,6 +411,41 @@ async function defaultExecutionFace(input: {
   return { client, allowedOperations, readOnlyOperations };
 }
 
+/**
+ * 宿主求交（唯一收口）：实际可用集合 = 执行层声明能力 ∩ 角色白名单 ∩ 部署总闸。
+ *   · read  → 只并入执行层自述 access=read 的只读集合；
+ *   · write → 角色含 write 且部署总闸打开时，才并入写集合（即基面里不在只读集合的那些）；
+ *   · 角色未提供 / 不含 write / 总闸关闭 → 一律只读（最小权限，不静默给写）。
+ *
+ * 同时作用于缺省执行面与注入的 `createExecutionFace`——角色过滤不因替身注入而失效。
+ */
+/**
+ * 权限集合的缓存键（内部；导出只为绊线测试）。必须是**集合本身**：只分 read/read+write
+ * 两档会让自定义角色（例如只有 write）与读写角色共用同一个执行器，后者的只读面被吞。
+ */
+export function permissionsKey(permissions: readonly Permission[]): string {
+  return permissions.length === 0 ? 'none' : [...permissions].sort().join('+');
+}
+
+function narrowFaceByPermissions(
+  face: ExecutionFace,
+  permissions: readonly Permission[],
+  allowWriteOperations: boolean,
+  emptyOperationsError: (message: string) => Error,
+  emptyOperationsMessage: string,
+): ExecutionFace {
+  const readOnly = [...face.readOnlyOperations];
+  const writeOnly = face.allowedOperations.filter((operation) => !face.readOnlyOperations.includes(operation));
+  const allowedOperations = [
+    ...(permissions.includes('read') ? readOnly : []),
+    ...(permissions.includes('write') && allowWriteOperations ? writeOnly : []),
+  ];
+  if (allowedOperations.length === 0) {
+    throw emptyOperationsError(emptyOperationsMessage);
+  }
+  return { client: face.client, allowedOperations, readOnlyOperations: readOnly };
+}
+
 /** 执行面解析（注入优先，缺省仓内 dummy；后台派发与装配核心共用同一链，不另建装配）。 */
 export interface ExecutionFaceResolverInput {
   profile: ContextProfileConfig;
@@ -407,23 +453,34 @@ export interface ExecutionFaceResolverInput {
   stateDir: string;
   emptyOperationsMessage: string;
   emptyOperationsError?: (message: string) => Error;
-  /** true = 允许集合追加执行层自述 access=write 的写面（缺省 false = 只读）。 */
+  /** true = 部署总闸允许写面（缺省 false = 只读）。仍需角色含 write。 */
   allowWriteOperations?: boolean;
+  /** 当前主体角色的权限（read/write）；缺省 = 只读。 */
+  allowedPermissions?: readonly Permission[];
   createExecutionFace?: ExecutionFaceFactory;
 }
 
 export async function resolveExecutionFace(input: ExecutionFaceResolverInput): Promise<ExecutionFace> {
-  if (input.createExecutionFace !== undefined) {
-    return await input.createExecutionFace(input.profile, input.env);
-  }
-  return await defaultExecutionFace({
-    profile: input.profile,
-    env: input.env,
-    stateDir: input.stateDir,
-    emptyOperationsMessage: input.emptyOperationsMessage,
-    emptyOperationsError: input.emptyOperationsError ?? ((message) => new Error(message)),
-    ...(input.allowWriteOperations === undefined ? {} : { allowWriteOperations: input.allowWriteOperations }),
-  });
+  const allowWriteOperations = input.allowWriteOperations === true;
+  const permissions = input.allowedPermissions ?? ['read'];
+  const emptyOperationsError = input.emptyOperationsError ?? ((message: string) => new Error(message));
+  const face = input.createExecutionFace !== undefined
+    ? await input.createExecutionFace(input.profile, input.env)
+    : await defaultExecutionFace({
+        profile: input.profile,
+        env: input.env,
+        stateDir: input.stateDir,
+        emptyOperationsMessage: input.emptyOperationsMessage,
+        emptyOperationsError,
+        ...(input.allowWriteOperations === undefined ? {} : { allowWriteOperations: input.allowWriteOperations }),
+      });
+  return narrowFaceByPermissions(
+    face,
+    permissions,
+    allowWriteOperations,
+    emptyOperationsError,
+    input.emptyOperationsMessage,
+  );
 }
 
 /** worker 回合上限之上的租约余量：覆盖最长回合 + 收尾，避免在飞回合被误判 result_unknown。 */
@@ -459,6 +516,17 @@ export interface BackgroundDispatchInput {
   runtime?: RuntimeConfig;
   /** `runtime.allowWriteOperations` 的显式投影（缺省取 runtime 值；false = 只读）。 */
   allowWriteOperations?: boolean;
+  /**
+   * 本装配默认主体的角色权限（构造单会话 runner 时用）；缺省 = 只读。
+   * 进程级 runner 跨主体复用时，改用 `permissionsForPrincipal` 按任务主体求交。
+   */
+  allowedPermissions?: readonly Permission[];
+  /**
+   * 按任务主体解析角色权限（进程级 runner 用：server 的共享 runner 跨 principal）。
+   * 提供时按 `task.principalId` 为每个权限档位建一个执行器（只读 / 读写各一份），
+   * 任务执行时按主体取对应允许集合——viewer 的后台写不会借用 operator 的允许集。
+   */
+  permissionsForPrincipal?: (principalId: string) => readonly Permission[];
   emptyOperationsMessage: string;
   emptyOperationsError?: (message: string) => Error;
   createDrivers?: DriverFactory;
@@ -519,15 +587,18 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
   const allowWriteOperations = input.allowWriteOperations ?? input.runtime?.allowWriteOperations === true;
   let executor = input.taskExecutor;
   if (executor === undefined) {
-    const face = input.face ?? await resolveExecutionFace({
-      profile: input.profile,
-      env: input.env,
-      stateDir: input.stateDir,
-      emptyOperationsMessage: input.emptyOperationsMessage,
-      allowWriteOperations,
-      ...(input.emptyOperationsError === undefined ? {} : { emptyOperationsError: input.emptyOperationsError }),
-      ...(input.createExecutionFace === undefined ? {} : { createExecutionFace: input.createExecutionFace }),
-    });
+    // 基面 = 执行层全集（读 + 部署总闸允许时的写），不做角色求交；求交在下面按主体收口。
+    const baseEmptyError = input.emptyOperationsError ?? ((message: string) => new Error(message));
+    const face = input.face ?? (input.createExecutionFace !== undefined
+      ? await input.createExecutionFace(input.profile, input.env)
+      : await defaultExecutionFace({
+        profile: input.profile,
+        env: input.env,
+        stateDir: input.stateDir,
+        emptyOperationsMessage: input.emptyOperationsMessage,
+        emptyOperationsError: baseEmptyError,
+        allowWriteOperations,
+      }));
     const workerDriver = input.workerDriver ?? (input.createDrivers !== undefined
       ? (await input.createDrivers(input.env)).workerDriver
       : createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env) }));
@@ -550,10 +621,11 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
           }),
           ...(bridgeAssembly.onSkip === undefined ? {} : { onSkip: bridgeAssembly.onSkip }),
         })(taskId);
-    executor = await createTaskExecutor({
-      client: face.client,
-      allowedOperations: face.allowedOperations,
-      // U3：只读集合是执行面显式派生的 `access=read` 集合，不是允许集合的影子。
+    const buildExecutor = (narrowed: ExecutionFace): Promise<TaskExecutor> => createTaskExecutor({
+      client: narrowed.client,
+      allowedOperations: narrowed.allowedOperations,
+      // U3：只读集合是执行面显式派生的 `access=read` 集合，不是允许集合的影子
+      // （角色求交只收窄 allowedOperations，不改 readOnly 身份）。
       readOnlyOperations: face.readOnlyOperations,
       workerDriver,
       ...(input.workerSkills === undefined ? {} : { workerSkills: input.workerSkills }),
@@ -572,6 +644,40 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
         ? {}
         : { onExecutionResultOversizeUnhandled: input.onExecutionResultOversizeUnhandled }),
     });
+    const emptyOperationsError = input.emptyOperationsError ?? ((message: string) => new Error(message));
+    const executorForPermissions = (permissions: readonly Permission[]): Promise<TaskExecutor> =>
+      buildExecutor(narrowFaceByPermissions(
+        face,
+        permissions,
+        allowWriteOperations,
+        emptyOperationsError,
+        input.emptyOperationsMessage,
+      ));
+    if (input.permissionsForPrincipal === undefined) {
+      // 单主体装配（ask/eval/会话局部 runner）：直接用本装配的权限档位。
+      executor = await executorForPermissions(input.allowedPermissions ?? ['read']);
+    } else {
+      // 进程级共享 runner 跨主体：按**权限集合本身**缓存执行器（键不能只分 ro/rw——
+      // 自定义角色可以只有 write，或 read+write 之外的组合；用布尔档位会让后来的
+      // 主体复用上一个主体的允许集）。任务执行时按主体求交：viewer 的后台写不会
+      // 借用 operator 的允许集。
+      const byPermissions = new Map<string, Promise<TaskExecutor>>();
+      const tieredExecutorFor = (principalId: string): Promise<TaskExecutor> => {
+        const permissions = input.permissionsForPrincipal!(principalId);
+        const key = permissionsKey(permissions);
+        let pending = byPermissions.get(key);
+        if (pending === undefined) {
+          pending = executorForPermissions(permissions);
+          byPermissions.set(key, pending);
+        }
+        return pending;
+      };
+      executor = {
+        async execute(task, context) {
+          return await (await tieredExecutorFor(task.principalId)).execute(task, context);
+        },
+      };
+    }
   }
   // B 切片：完成回调接缝——包装实际使用的执行器（注入的或默认构建的同一道包装）。
   // 回调在 runner 收尾前同步触发；快活（结果已同回合交给模型）的抑制由装配调用方处置。
@@ -722,6 +828,10 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
   const policy = input.policy ?? createResourcePolicy(input.runtime);
   // 写面开关：显式投影优先，其次 runtime 段；缺省 false = 只读（零行为变化）。
   const allowWriteOperations = input.allowWriteOperations ?? input.runtime?.allowWriteOperations === true;
+  // 角色白名单（宿主求交的中间项）：未提供 = 只读（最小权限）。实际允许集合还要与
+  // 执行层声明能力和部署总闸求交（resolveExecutionFace 的唯一收口）。
+  const allowedPermissions: readonly Permission[] = input.allowedPermissions ?? ['read'];
+  const writePermitted = allowWriteOperations && allowedPermissions.includes('write');
 
   const auditPath = path.join(input.stateDir, 'audit.jsonl');
   if (input.setAuditPath === true) {
@@ -736,6 +846,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
     stateDir: input.stateDir,
     emptyOperationsMessage: input.emptyOperationsMessage,
     allowWriteOperations,
+    allowedPermissions,
     ...(input.emptyOperationsError === undefined ? {} : { emptyOperationsError: input.emptyOperationsError }),
     ...(input.createExecutionFace === undefined ? {} : { createExecutionFace: input.createExecutionFace }),
   });
@@ -773,7 +884,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       // 协议之前；目录为空/缺失时 promptBlock 为空串 → 提示逐字节不变；catalog 非空才交出
       // read_skill 登记表。目录来自装配参数或 `<repo>/.agents/skills`，不读配置键。
       const delivery = await loadMainSkillDelivery(input.mainSkillsDir ?? defaultMainSkillsDir());
-      mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, input.profile.executorLabel)}${delivery.promptBlock}\n\n${mainProtocolNoteFor(allowWriteOperations)}`;
+      mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, input.profile.executorLabel)}${delivery.promptBlock}\n\n${mainProtocolNoteFor(writePermitted)}`;
       mainSkillRegistry = delivery.registry;
     }
     const drivers = input.createDrivers !== undefined
@@ -802,6 +913,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
         workerSkills,
         ...(input.runtime === undefined ? {} : { runtime: input.runtime }),
         allowWriteOperations,
+        allowedPermissions,
         emptyOperationsMessage: input.emptyOperationsMessage,
         ...(input.emptyOperationsError === undefined ? {} : { emptyOperationsError: input.emptyOperationsError }),
         ...(input.createDrivers === undefined ? {} : { createDrivers: input.createDrivers }),
@@ -916,6 +1028,10 @@ export async function assembleAskRuntime(input: AskRuntimeInput): Promise<AskRun
   const stateDir = path.join(input.runtimeDir, 'state');
   const dbPath = input.dbPath
     ?? (config.store?.dbPath !== undefined ? path.resolve(config.store.dbPath) : DEFAULT_DB_PATH);
+  // 宿主求交：本主体的角色权限（未写 role = viewer = 只读）。实际允许集合还要与
+  // 执行层声明能力、runtime.allowWriteOperations 总闸求交（assembleSessionCore 内收口）。
+  const role = effectiveRoleOf(config, principalId);
+  const allowedPermissions = permissionsOfRole(config, role);
   const assembled = await assembleSessionCore({
     env,
     profile,
@@ -936,6 +1052,8 @@ export async function assembleAskRuntime(input: AskRuntimeInput): Promise<AskRun
     emptyOperationsError: (message) => new AssemblyRefusedError(message),
     // 写面开关：语义部署键 runtime.allowWriteOperations（缺省 false = 只读，ask 零行为变化）。
     allowWriteOperations: config.runtime?.allowWriteOperations === true,
+    // 角色白名单（宿主求交中间项）：未写 role = viewer = 只读。
+    allowedPermissions,
     // 进程内单轮入口：没有渠道推送面承接后台完成投递，装配恒为同步等结果（不是配置键）。
     taskDispatch: 'sync',
     ...(input.mainSkillsDir === undefined ? {} : { mainSkillsDir: input.mainSkillsDir }),

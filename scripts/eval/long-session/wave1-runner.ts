@@ -128,7 +128,7 @@ function materializeWaveConfig(configPath: string, dbPath: string): AppConfig {
   const doc = parseYaml(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
   doc['store'] = { dbPath };
   const principals = (doc['principals'] ?? {}) as Record<string, unknown>;
-  principals[SECOND_PRINCIPAL] = { accountSetScope: 'all', enabled: true, capabilities: ['read'] };
+  principals[SECOND_PRINCIPAL] = { enabled: true };
   doc['principals'] = principals;
   writeFileSync(configPath, stringifyYaml(doc));
   return loadConfig({ yamlPath: configPath, env: process.env });

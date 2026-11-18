@@ -20,23 +20,18 @@
 
 # ---- 授权名单：仓内夹具专用虚构 UserID ----
 principals:
-  # 默认身份（第一个 enabled = ask 的缺省 principal）：只读语义保持不变。
+  # 默认身份（第一个 enabled = ask 的缺省 principal）：viewer = 只读语义保持不变。
+  # 未写 role = viewer（只读，最小权限），启动日志记 principal_role_defaulted。
   "wecom:fixture-user":
-    accountSetScope: all
     enabled: true
-    # 本面缺省只走查询（读类）；写链路要 runtime.allowWriteOperations=true 才把执行层的
-    # access=write operation 放进允许集合，且提交必须带执行层发放的确认句柄。
-    capabilities: ["read"]
-  # 写链路专用身份（2026-11-17 登记）：给写确认切片一个稳定的虚构主体。
-  # 注意 capabilities 是遗留数据位——装配的开放面由执行层自述的 access 派生 + 部署开关
-  # runtime.allowWriteOperations（缺省 false）决定（scripts/ask-runtime.ts 的
-  # defaultExecutionFace），本项本身不授权写入。缺省只读时该身份的写请求仍被确定性拒绝
-  # （scripts/write-confirm-loop.test.ts）；显式打开开关后走 prepare→确认→commit 回环
+  # 写链路专用身份（2026-11-17 登记；2026-11-19 RBAC 切片改为 operator）：给写确认切片
+  # 一个稳定的虚构主体。写面仍需部署总闸 runtime.allowWriteOperations=true 才进入允许集合
+  # （角色含 write ∩ 总闸；缺省只读时该身份的写请求仍被确定性拒绝，见
+  # scripts/write-confirm-loop.test.ts）；显式打开开关后走 prepare→确认→commit 回环
   # （scripts/host-write-confirmation.test.ts）。
   "wecom:fixture-writer":
-    accountSetScope: all
     enabled: true
-    capabilities: ["read", "write"]
+    role: operator
 
 # ---- 通用 Worker 的受信上下文（仓内 dummy 夹具） ----
 contextProfiles:

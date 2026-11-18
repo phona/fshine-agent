@@ -257,7 +257,7 @@ async function makeHarness(label: string, behavior: MainBehavior, userIds: reado
   const dbPath = path.join(dir, 'state.db');
   const config: AppConfig = {
     principals: Object.fromEntries(
-      userIds.map((userId) => [`${CHANNEL}:${userId}`, { enabled: true, accountSetScope: 'all', capabilities: ['read'] }]),
+      userIds.map((userId) => [`${CHANNEL}:${userId}`, { enabled: true }]),
     ),
     contextProfiles: {
       dummy: { root: DUMMY_PLATFORM_ROOT, gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },

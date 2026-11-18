@@ -305,7 +305,7 @@ async function runCancelScenario(scenario: ChaosScenario): Promise<ChaosReport> 
 function serverConfig(scenario: ChaosScenario): AppConfig {
   return {
     principals: {
-      'wecom:user-a': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:user-a': { enabled: true },
     },
     contextProfiles: {
       dummy: { root: STAB_PROFILE.root, gateway: STAB_PROFILE.gateway, skillRoots: [...STAB_PROFILE.skillRoots] },
