@@ -8,7 +8,7 @@
 
 渠道层是官方 `@wecom/aibot-node-sdk` 的薄封装：认证/心跳/重连归 SDK（`packages/channel-wecom/src/adapter.ts:1128-1136`），本层只做 env 校验、入站归一化、附件落盘、出站帧整形与闸门。`start()` 缺 `WECOM_BOT_ID`/`WECOM_BOT_SECRET` 即拒启（`:293-298`），只订阅 `message.text / message.file / message.mixed`（`:332-341`）。
 
-**身份不在渠道层派生**：适配器只给 `channel: 'wecom'` + `wecomUserId` + `conversationId`（`:668-685`）；宿主拼 `principalId = <channel>:<userid>`、`sessionId = <channel>:<conversationId>`，未开通 principal 直接拒绝（`apps/server/server.ts:611-620`）。档位只在 yaml `channel.mode`（`packages/contracts/src/config.ts:248-261`），无 `FSHINE_*` 覆盖口；`apps/server/main.ts:52-68` 按档位构造渠道并注入投递端口（`:79` 启动）。渠道层不判业务、不建实体授权门。
+**身份不在渠道层派生**：适配器只给 `channel: 'wecom'` + `wecomUserId` + `conversationId` + `chatType`（`:668-685`）；宿主按 `chatType` 分流派生——1:1 `principalId = <channel>:<userid>`，群聊 `principalId = <channel>:group:<conversationId>`（群 = 独立主体，同群所有人共用一个主体；发言人只作审计 `speakerId`），`sessionId = <channel>:<conversationId>`；未开通 principal（群主体同样是名单里的 key，需显式开通）直接拒绝，走同一条拒绝路径（`apps/server/server.ts:779-790`）。档位只在 yaml `channel.mode`（`packages/contracts/src/config.ts:248-261`），无 `FSHINE_*` 覆盖口；`apps/server/main.ts:52-68` 按档位构造渠道并注入投递端口（`:79` 启动）。渠道层不判业务、不建实体授权门。
 
 ## 2. 入站归一化
 

@@ -527,6 +527,9 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
   const config: AppConfig = {
     principals: {
       [`wecom:${DEFAULT_USER_ID}`]: { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      // 群 = 独立主体（owner 2026-11-18）：群聊帧的 principal = `wecom:group:<群id>`，必须在
+      // 名单里显式开通——W-16 群聊用例因此走真实路径，不靠「未开通所以什么都没跑」冒充。
+      'wecom:group:group-w': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
     },
     contextProfiles: {
       dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },

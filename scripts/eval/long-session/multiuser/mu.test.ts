@@ -115,8 +115,8 @@ describe('R6 MU · MU-7 异步通知错投', () => {
   });
 });
 
-describe('R6 MU · MU-8 群聊与私聊隔离（同 principal）', () => {
-  it('群不继承私聊任务/授权/历史；群/私投递不串；silent 闸下实际投递=0', async () => {
+describe('R6 MU · MU-8 群聊与私聊隔离（群 = 独立主体）', () => {
+  it('群不继承私聊任务/授权/历史；群/私主体与会话各自成账；silent 闸下实际投递=0', async () => {
     const result = await mu8(MU_RUNTIME);
     expect(result.status).toBe('PASS');
     expect(result.hardZeroHits).toEqual([]);
