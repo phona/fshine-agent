@@ -479,7 +479,7 @@ export type OperationClaimDecision =
  * 重绑定决策（内存/SQLite 共用，只读输入、零 IO）：候选行由调用方按
  * 「显式 dispatchKey」或「(scope, operation, replayWindow)」读出；本函数不接收 args。
  *
- * 规则（R 系列，见 docs/product/pi-152-dispatch-key-design.md §5.3）：
+ * 规则（dispatchKey 设计 §5.3；设计文档 2026-11-18 删除，git 历史可考）：
  *   · 显式键：同 operation 且已落定 → 回放；进行中 → in_progress；未知 → 待核对；
  *     不同 operation → conflict；键不存在 → 待核对（不按该键铸造）；
  *   · 无窗口 → 铸造新行（两笔合法同参数操作 = 两行两 key）；

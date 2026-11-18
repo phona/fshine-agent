@@ -22,7 +22,7 @@
 | `docs/product/business-e2e-prereg.md` | 预注册正文（N=5 / ≤20 会话 / 三臂 / blocked） |
 | `docs/product/business-e2e-prereg-addendum.md` | §一–§三（post-hoc 登记）· §四（owner 2026-11-15 裁定：N=3 / 模型钉 / #3 口径）· §五（三实验预注册）· §六（bizbatch3 预注册） |
 | `docs/product/gap-task-surface.md` / `gap-main-skill.md` / `gap-compaction-window.md` | 缺口 1/2/3 设计与最小 diff |
-| `docs/product/r4-audit.md` · `r4-acceptance.md` · `r4-decisions-triage.md` · `r4-stability-prereg.md` · `r4-stability-report.md` · `r4-p7b-acceptance.md` · `r4-slices.md` 等 | R4 现状审计 / 验收设计 / 稳定性预注册与报告 / P7b 验收 |
+| `docs/product/r4-acceptance.md` · `r4-stability-prereg.md` · `r4-joint-interfaces.md` · `p2a-task-contract.md` 等 | R4 验收设计 / 稳定性预注册 / 契约冻结面（R4 实施报告与切片计划已于 2026-11-18 清理，git 历史可考） |
 | `docs/product/manual-test-handbook.md` | 手工测试定位与硬边界 |
 | `docs/decision-log.md` §四十二–§四十九 | 能力审计、阶段 1/2、缺口实施、三实验、夜跑续批 |
 | `.runtime/{bizprobe,bizbatch2,bizbatch3,stab,p7b}/`（gitignored，位于各自 worktree） | 原始读数（本报告已抽验，见 §附录 B） |
@@ -229,7 +229,7 @@
 | **⑤** | **`queueCapacity>0` 账本队列上界未强制 / messageId 幂等跨重启** | policy 排队许可与底账 queued 行未合一；幂等为进程内有界 FIFO(1024) | policy 侧裁决面扩展（触冻结 §2 接口须批准）；持久幂等键（新 schema，owner 决定） | `r4-stability-report.md §六`；`r4-p7b-acceptance.md §五` |
 | **⑥** | **真实 WeCom sink / 多进程多实例 / 手工真机走查** | 适配器不实现、不连接；单实例；手册已交付但**本轮未执行人工走查** | 渠道适配器切片（新授权）；ops/多实例立项；按手册人工执行 | `r4-stability-report.md §六`；`manual-test-handbook.md` |
 
-> **说明**：⑤/⑥ 是 R4 阶段已登记 blocked 项，此处汇总不为新增议题；①/② 是本轮业务 E2E 新暴露、**必裁决**的产品面缺陷。**未裁定前不自主推进**（对齐 AGENTS.md 与 `r3-open-decisions.md` 纪律）。
+> **说明**：⑤/⑥ 是 R4 阶段已登记 blocked 项，此处汇总不为新增议题；①/② 是本轮业务 E2E 新暴露、**必裁决**的产品面缺陷。**未裁定前不自主推进**（对齐 AGENTS.md 纪律；未决项 2026-11-18 起转 GitHub issues）。
 
 ---
 

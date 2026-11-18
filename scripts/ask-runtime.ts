@@ -174,8 +174,8 @@ export function contextWindowFrom(env: Record<string, string | undefined>): { co
  *   组合不可解释，静默补齐等于替调用方发明阈值）。
  * · 非正整数 → `parseContextWindow` 当场抛中文错误点名变量（不静默回落）。
  *
- * 安全值来源见 `scripts/eval/pi-native/safe-config.ts` 与
- * `docs/product/exp-pi-native-config-headroom.md`（余量不等式 + 摘要输出预算推导）。
+ * 安全值来源见 `scripts/eval/pi-native/safe-config.ts`（余量不等式 + 摘要输出预算推导的实现；
+ * 推导文档 2026-11-18 删除，git 历史可考）。
  */
 export function compactionSettingsFrom(
   env: Record<string, string | undefined>,

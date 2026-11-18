@@ -1,7 +1,7 @@
 /**
  * CAP-01 R2c 产物与失败面验收（r2-functional.ts 的姊妹篇；可重复执行，不靠人工点）。
  *
- * 口径（docs/product/cap01-main-direct-execution.md v8 §2/§3/§7/§10-3 + R2c 验收指令）：
+ * 口径（CAP-01 设计 v8 §2/§3/§7/§10-3，文档 2026-11-18 删除、git 历史可考 + R2c 验收指令）：
  * 只验用户可见结果与安全不变量；全样本保留，不筛绿；失败样本连证据一起落盘。
  * 装配与 r2-functional 同源：apps/server/server.ts 生产装配缺省链（fileStore / run_js
  * 受限执行器 / 清单注入 / 主动投递 B），假渠道 = 直调 server.handler，执行层 = 仓内 dummy 面。

@@ -1,7 +1,7 @@
 /**
  * CAP-01 R6 文件生命周期验收（脚本化，不调模型；每条命令口径见各场景）。
  *
- * 口径（R6 验收指令 ①-⑥ + docs/product/cap01-main-direct-execution.md v8 §4/§8）：
+ * 口径（CAP-01 设计 v8 §4/§8；设计文档 2026-11-18 删除，git 历史可考 + R6 验收指令 ①-⑥）：
  * 只验用户可见结果与安全不变量；全样本保留，不筛绿；失败样本连证据一起落盘；
  * 设计稿没写清的行为（产物同名、空产物、多附件、未知格式、同内容重传）**如实记录当前
  * 行为 + 影响，标 UNDEFINED，不发明判据**。本脚本零模型调用：Main/Worker 都是脚本化
@@ -665,7 +665,7 @@ async function runScenarioS3(): Promise<ScenarioOutcome> {
     checks: checks.list,
     observations,
     notes: [],
-    undefinedReason: '设计稿（cap01-main-direct-execution.md v8 §4）未定义入站同内容重传是否复用 fileId：'
+    undefinedReason: '设计稿（CAP-01 v8 §4，文档 2026-11-18 删除、git 历史可考）未定义入站同内容重传是否复用 fileId：'
       + 'file_refs 无 sha 去重键（主键 file_id），任务产物池的去重不覆盖入站面。当前行为=不复用（每次新 fileId、'
       + '旧行保留）；影响=清单里同名同内容条目按重传次数增长，模型可能引用任一重复份。不发明判据，仅登记。',
     evidence: {

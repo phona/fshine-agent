@@ -34,7 +34,7 @@
 | `pending_files_activated` | `apps/server/server.ts:546` | 有文字的消息激活本会话 TTL 内 pending 文件（`activated > 0` 才发） | 测试：`apps/server/server-cap01-inbound.test.ts:223`、`:257-258` | 是 | 与 `inbound_files_registered` 同一回合常先后各一条（登记→激活），**不是重复**；`activated` 只计 TTL 内行。 |
 | `task_file_bridge_skip` | `apps/server/server.ts:295`（回调）← `packages/agent/src/task-file-bridge.ts:146`；调用点 `:221`（`count_limit`）、`:227`（`missing_name`）、`:253`（登记拒收 `reason`）、`:270`（`scan_failed`） | 执行层文件桥拒收单项产物或整轮扫描失败 | 仅 stdout；仓内无读取者 | 否 | `reason` 拼进文件名（`:221`、`:253`）；任务收尾扫描的逐项 `skipped` 走 `task_output_sweep_skipped`（补口），整轮扫描失败仍走本回调的 `scan_failed:…`。见「发了没人用」。 |
 | `task_output_sweep_skipped` | `apps/server/server.ts:302`（装配注入）← `packages/agent/src/execution-runtime.ts:493`（回调定义）/`:1500`（delegate `finally` 发出） | 任务收尾 `sweepTaskOutputs()` 成功返回但 `skipped` 非空（`symlink` / `size_limit` / `count_limit` / `outside_run_dir` 等） | 测试：`apps/server/server-obs-wiring.test.ts`（数量 + reason 分布）。其余仅 stdout | 是 | **补口**：此前只取 `swept.files`，拒收明细被丢弃。事件带 `taskId`、`skipped`（总数）、`reasons`（reason→数量）；只进日志，不进用户话术。 |
-| `transcript_store_error` | `apps/server/server.ts:302` ← `packages/agent/src/execution-runtime.ts:1115`（读失败）、`:1580`（写失败） | 会话转录读取或回合后增量追加失败（fail-open，不阻塞回合） | 文档：`docs/decision-log.md`、`docs/product/b1-wiring.md`；仓内无代码读取者 | 否（`packages/agent/session-persistence-wiring.test.ts:100` 断言的是 runtime 回调收到 error，不是事件） | 不区分读/写（无 phase 字段），排障信息只有 `message`。见「发了没人用」。 |
+| `transcript_store_error` | `apps/server/server.ts:302` ← `packages/agent/src/execution-runtime.ts:1115`（读失败）、`:1580`（写失败） | 会话转录读取或回合后增量追加失败（fail-open，不阻塞回合） | 文档：`docs/decision-log.md`（B1 接线档 b1-wiring.md 2026-11-18 已删）；仓内无代码读取者 | 否（`packages/agent/session-persistence-wiring.test.ts:100` 断言的是 runtime 回调收到 error，不是事件） | 不区分读/写（无 phase 字段），排障信息只有 `message`。见「发了没人用」。 |
 
 ## 二、Pi 驱动事件（`packages/agent/src/pi-driver.ts`，9 个）
 
@@ -51,7 +51,7 @@
 | `pi_driver_final_text_nudge` | `packages/agent/src/pi-driver.ts:678` | 只思考没正文、未到 deadline、未 abort → 催一次最终文本 | 测试：`packages/agent/pi-driver-error-attribution.test.ts:165-167`、`:195-197`；`packages/agent/pi-driver-nudge.test.ts:71`。评测名称集合：`executor.ts:76`、`p3a-session.ts:80` | 是 | 催问是真实 user 消息进 Pi 转录（`:675-676`），不是隐藏改写；一轮一次。 |
 | `pi_driver_final_text_nudge_empty` | `packages/agent/src/pi-driver.ts:690` | 催问后仍无正文 | 测试：`packages/agent/pi-driver-error-attribution.test.ts:199-201`、`:228-230` | 是 | 与 `empty_reply` 成对（第二次归因）。 |
 | `pi_driver_final_text_nudge_failed` | `packages/agent/src/pi-driver.ts:683` | 催问 `session.prompt` 抛错 | 无 | 否 | 只有 `errorType`，**没有 message**（同组其他事件都带 errorMessage），可诊断性最弱。见「发了没人用」。 |
-| `pi_driver_prompt_changed_session_rebuild` | `packages/agent/src/pi-driver.ts:588` | 复用会话时 system prompt 变化 → 丢弃旧会话并按新配置重建 | 仅文档：`docs/product/pi-152-adapter-design.md:79`；仓内无代码读取者 | 否 | **裸事件、零字段**（不知哪段 prompt 变了）；工具名变化也会重建但完全静默（`:585-601` 只有 prompt 变化才记）。见「发了没人用」。 |
+| `pi_driver_prompt_changed_session_rebuild` | `packages/agent/src/pi-driver.ts:588` | 复用会话时 system prompt 变化 → 丢弃旧会话并按新配置重建 | 仅文档（适配设计文档 2026-11-18 删除，git 历史可考）；仓内无代码读取者 | 否 | **裸事件、零字段**（不知哪段 prompt 变了）；工具名变化也会重建但完全静默（`:585-601` 只有 prompt 变化才记）。见「发了没人用」。 |
 | `pi_driver_error` | `packages/agent/src/pi-driver.ts:699` | `driver.run` 抛出未预期异常（非 stopReason 失败形状） | 评测名称集合：`scripts/eval/business-e2e/experiments/executor.ts:75`、`scripts/eval/p3/p3a-session.ts:79`、`scripts/eval/p3/p3c-session.ts:68`；文档：`docs/decision-log.md:2000` | 否（无单测按事件名；p3c 的 verdict 也只判 `model_error`） | 随后丢弃复用会话（`:704`）、返回空文本；宿主侧再判回合失败。 |
 
 ## 三、`run_js` 执行面事件（2 个）
@@ -81,7 +81,7 @@
 | `task_file_bridge_skip` | `apps/server/server.ts:295`（发出）+ `packages/agent/src/task-file-bridge.ts`（触发源）；无测试、无评测。 |
 | `transcript_store_error` | `apps/server/server.ts:302`（发出）+ 两篇文档；无代码读取者。底层 fail-open 行为有测试（`packages/agent/session-persistence-wiring.test.ts:100`），但**事件本身**无人消费。 |
 | `pi_driver_final_text_nudge_failed` | 仅 `packages/agent/src/pi-driver.ts:683`。催问失败路径无测试注入。 |
-| `pi_driver_prompt_changed_session_rebuild` | 仅 `packages/agent/src/pi-driver.ts:588` + `docs/product/pi-152-adapter-design.md:79`；无测试、无评测。生产 Main 提示恒定（设计上不触发），但一旦触发也无人接收。 |
+| `pi_driver_prompt_changed_session_rebuild` | 仅 `packages/agent/src/pi-driver.ts:588`（原设计文档引用 2026-11-18 随文档删除失效）；无测试、无评测。生产 Main 提示恒定（设计上不触发），但一旦触发也无人接收。 |
 | `server_shutdown` | 仅 `apps/server/main.ts:82`；无测试、无评测。 |
 
 > 边界说明：`pi_driver_error` 虽无单测按名断言，但被 3 个评测脚本的名称集合采集（见上表），故**不**列入本节；

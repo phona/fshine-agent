@@ -1,7 +1,7 @@
 /**
  * PiTurnDriver：基于 `@earendil-works/pi-coding-agent@1.5.2` 公开 `AgentSession` 的回合驱动。
  *
- * 转录所有权（设计见 `docs/product/pi-152-adapter-design.md`）：
+ * 转录所有权（Pi 1.5.2 适配设计已实施；设计文档 2026-11-18 删除，git 历史可考）：
  *   · `AgentSession` + `SessionManager` 是会话转录、agent loop、压缩与原生重试的**唯一所有者**；
  *   · 宿主不再持有第二份可变转录：本驱动只把「本轮新增输入」交给 Pi，并把 Pi 会话
  *     投影成**只读** AgentMessage 快照交回（`TurnDriver.transcript()` 同样只读）；
