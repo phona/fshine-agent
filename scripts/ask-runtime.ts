@@ -37,6 +37,7 @@ import type { ExecutionClient } from '@fshine/contracts/execution-contract';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import { applyExecutorLabel, loadAgentProfile } from '../packages/agent/src/agent-profile';
 import { createPiTurnDriver, parseContextWindow, type PiTurnDriverOptions } from '../packages/agent/src/pi-driver';
+import type { MainSessionLocation } from '../packages/agent/src/session-persistence';
 import { createDummyCliClient, readOnlyOperationNames, writeOperationNames } from '../packages/agent/src/dummy-cli-client';
 import type { TurnDriver } from '../packages/agent/src/driver-contract';
 import {
@@ -44,7 +45,6 @@ import {
   createTaskExecutor,
   mainProtocolNoteFor,
   type Session,
-  type TranscriptStore,
   type TurnFileRef,
   type WorkerSkill,
   type RunJsMemoryExitEvent,
@@ -147,8 +147,13 @@ export type ExecutionFaceFactory = (
 /**
  * 回合驱动工厂（runner 记录包装器 / server 测试替身注入用；缺省 = 真实 Pi 驱动 ×2）。
  * 允许返回 Promise：Pi 1.5.2 的 ModelRuntime 创建是异步的（测试替身按需 await）。
+ * `mainSession` = 装配层为本 (principal, session) 解析的 Pi 会话位置（缺省 = 不落盘）；
+ * 真实 Pi 驱动据此落盘/resume，测试替身可忽略。
  */
-export type DriverFactory = (env: NodeJS.ProcessEnv) =>
+export type DriverFactory = (
+  env: NodeJS.ProcessEnv,
+  mainSession?: MainSessionLocation,
+) =>
   | { mainDriver: TurnDriver; workerDriver: TurnDriver }
   | Promise<{ mainDriver: TurnDriver; workerDriver: TurnDriver }>;
 
@@ -187,6 +192,26 @@ export function compactionSettingsFrom(
     throw new Error('LLM_COMPACTION_RESERVE_TOKENS 与 LLM_COMPACTION_KEEP_RECENT_TOKENS 必须同时设置（只设一个时无法解释 Pi 的压缩配置）');
   }
   return { compactionSettings: { enabled: true, reserveTokens, keepRecentTokens } };
+}
+
+/**
+ * 会话位置 → Pi 驱动参数（纯映射，无决策）：
+ *   · `sessionDir` = 本 principal 的独立会话目录；
+ *   · `sessionId` = 新建时交给 Pi 的会话 id（文件名/header 同源，重启按它解析回来）；
+ *   · `resumeSessionFile` = 已落盘会话文件（存在才有）→ Pi 原生 resume（含压缩摘要）。
+ * 缺省不传 = 进程内内存会话（`npm run ask` / eval / 无渠道入口逐字节不变）。
+ */
+export function mainSessionOptions(
+  mainSession: MainSessionLocation | undefined,
+): Pick<PiTurnDriverOptions, 'sessionDir' | 'sessionId' | 'resumeSessionFile'> {
+  if (mainSession === undefined) return {};
+  return {
+    sessionDir: mainSession.sessionDir,
+    sessionId: mainSession.piSessionId,
+    ...(mainSession.resumeSessionFile === undefined
+      ? {}
+      : { resumeSessionFile: mainSession.resumeSessionFile }),
+  };
 }
 
 /**
@@ -251,10 +276,12 @@ export interface SessionAssemblyInput {
   notificationMaxAttempts?: number;
   /** R5 B 通道：机械事实注入器（server 由 attachNotificationOutbox 返回值提供）。 */
   taskFactProvider?: NotificationAttachment['taskFactProvider'];
-  /** B1：会话转录持久化端口（装配方构造具体存储注入）；缺省 undefined = 不落盘会话（现行为）。 */
-  transcriptStore?: TranscriptStore;
-  /** B1：转录读/写失败上报（fail-open 日志；缺省静默）。 */
-  onTranscriptError?: (error: unknown) => void;
+  /**
+   * Main 会话的 Pi 原生落盘位置（装配层解析 `(principal, session)`；缺省 undefined =
+   * 内存会话，`npm run ask` / eval 逐字节现行为）。给出后由 Pi 自己写入/恢复：历史与
+   * 压缩摘要都在会话文件里，宿主不搬运任何消息。
+   */
+  mainSession?: MainSessionLocation;
   /** 纯附件机械事实注入器（与 taskFactProvider 同一 injections 机制；缺省不注入）。 */
   attachmentFactProvider?: (principalId: string, sessionId: string) => string | undefined;
   /** 主动追问系统注记注入器（模型可见/用户不可见；缺省不注入）。 */
@@ -658,8 +685,18 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       mainSkillRegistry = delivery.registry;
     }
     const drivers = input.createDrivers !== undefined
-      ? await input.createDrivers(input.env)
-      : { mainDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env), reuseConversation: true }), workerDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env) }) };
+      ? await input.createDrivers(input.env, input.mainSession)
+      : {
+        mainDriver: createPiTurnDriver({
+          env: input.env,
+          ...contextWindowFrom(input.env),
+          ...compactionSettingsFrom(input.env),
+          reuseConversation: true,
+          ...mainSessionOptions(input.mainSession),
+        }),
+        // Worker 是一次性回合（每任务独立会话），不落业务会话文件。
+        workerDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env) }),
+      };
 
     // P6：background = 受理/后台路径；runner 进程级共享（server 注入），缺省按本会话执行面构建。
     let runner = input.taskRunner;
@@ -712,8 +749,6 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       ...(input.taskFactProvider === undefined ? {} : { taskFactProvider: input.taskFactProvider }),
       ...(input.attachmentFactProvider === undefined ? {} : { attachmentFactProvider: input.attachmentFactProvider }),
       ...(input.systemNoteProvider === undefined ? {} : { systemNoteProvider: input.systemNoteProvider }),
-      ...(input.transcriptStore === undefined ? {} : { transcriptStore: input.transcriptStore }),
-      ...(input.onTranscriptError === undefined ? {} : { onTranscriptError: input.onTranscriptError }),
       ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
       ...(input.recalcXlsxExecutor === undefined ? {} : { recalcXlsxExecutor: input.recalcXlsxExecutor }),
       ...(input.onRecalcCost === undefined ? {} : { onRecalcCost: input.onRecalcCost }),

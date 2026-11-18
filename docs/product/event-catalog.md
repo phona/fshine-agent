@@ -1,10 +1,12 @@
-# 结构化事件观测字典（29 个）
+# 结构化事件观测字典（28 个）
 
 > 核对基线：`23ae585`（`arch/doc-events`，2026-11-17）。本文**只读代码**整理，不改产品代码。
 > 2026-11-17 观测面补口（`arch/obs-wiring`）新增 2 个事件（`file_ref_unavailable`、
 > `task_output_sweep_skipped`）并扩展 `inbound_files_registered` 覆盖纯附件路径——见 §一 标注
 > 「补口」的行；原有 27 个事件的名字与字段均未改名/删字段。
-> 范围 = 仓内产品代码里以 `{ event: "<name>", ... }` 形式发出的 29 个结构化事件；`packages/channel-wecom/src/adapter.ts`
+> 2026-11-18 删除 `transcript_store_error`（`transcriptStore` 端口与宿主转录搬运层退役：会话落盘归 Pi，
+> 该事件无发出点）→ 29 − 1 = 28。
+> 范围 = 仓内产品代码里以 `{ event: "<name>", ... }` 形式发出的结构化事件；`packages/channel-wecom/src/adapter.ts`
 > 与 `apps/server` 的 `wecom_*` 系列（12 个，`grep` 核实）不在本清单内，另行登记。
 
 ## 口径
@@ -34,7 +36,6 @@
 | `pending_files_activated` | `apps/server/server.ts:546` | 有文字的消息激活本会话 TTL 内 pending 文件（`activated > 0` 才发） | 测试：`apps/server/server-cap01-inbound.test.ts:223`、`:257-258` | 是 | 与 `inbound_files_registered` 同一回合常先后各一条（登记→激活），**不是重复**；`activated` 只计 TTL 内行。 |
 | `task_file_bridge_skip` | `apps/server/server.ts:295`（回调）← `packages/agent/src/task-file-bridge.ts:146`；调用点 `:221`（`count_limit`）、`:227`（`missing_name`）、`:253`（登记拒收 `reason`）、`:270`（`scan_failed`） | 执行层文件桥拒收单项产物或整轮扫描失败 | 仅 stdout；仓内无读取者 | 否 | `reason` 拼进文件名（`:221`、`:253`）；任务收尾扫描的逐项 `skipped` 走 `task_output_sweep_skipped`（补口），整轮扫描失败仍走本回调的 `scan_failed:…`。见「发了没人用」。 |
 | `task_output_sweep_skipped` | `apps/server/server.ts:302`（装配注入）← `packages/agent/src/execution-runtime.ts:493`（回调定义）/`:1500`（delegate `finally` 发出） | 任务收尾 `sweepTaskOutputs()` 成功返回但 `skipped` 非空（`symlink` / `size_limit` / `count_limit` / `outside_run_dir` 等） | 测试：`apps/server/server-obs-wiring.test.ts`（数量 + reason 分布）。其余仅 stdout | 是 | **补口**：此前只取 `swept.files`，拒收明细被丢弃。事件带 `taskId`、`skipped`（总数）、`reasons`（reason→数量）；只进日志，不进用户话术。 |
-| `transcript_store_error` | `apps/server/server.ts:302` ← `packages/agent/src/execution-runtime.ts:1115`（读失败）、`:1580`（写失败） | 会话转录读取或回合后增量追加失败（fail-open，不阻塞回合） | 文档：`docs/decisions/index.md`（B1 接线档 b1-wiring.md 2026-11-18 已删）；仓内无代码读取者 | 否（`packages/agent/session-persistence-wiring.test.ts:100` 断言的是 runtime 回调收到 error，不是事件） | 不区分读/写（无 phase 字段），排障信息只有 `message`。见「发了没人用」。 |
 
 ## 二、Pi 驱动事件（`packages/agent/src/pi-driver.ts`，9 个）
 
@@ -73,13 +74,12 @@
 
 判定：全仓（排除 `node_modules`/`.git`/`.runtime`/`out`）按事件名 `grep -rl`，只命中**发出点**（及文档），
 既无测试断言、也无评测/指标/日志解析器读取。部署侧对 stdout 的人工排查按口径**不**计为消费方。
-命令：`for e in <27 names>; do grep -rl ... "$e" .; done`（逐名输出文件清单，本节结论即该输出）。
+命令：`for e in <26 names>; do grep -rl ... "$e" .; done`（逐名输出文件清单，本节结论即该输出）。
 
 | 事件 | 依据（全仓仅命中） |
 |---|---|
 | `main_skills_loaded` | `apps/server/server.ts:201`（发出）；无测试、无评测、无文档读取。`catalogBytes` 目前只是启动时打给人看。 |
 | `task_file_bridge_skip` | `apps/server/server.ts:295`（发出）+ `packages/agent/src/task-file-bridge.ts`（触发源）；无测试、无评测。 |
-| `transcript_store_error` | `apps/server/server.ts:302`（发出）+ 两篇文档；无代码读取者。底层 fail-open 行为有测试（`packages/agent/session-persistence-wiring.test.ts:100`），但**事件本身**无人消费。 |
 | `pi_driver_final_text_nudge_failed` | 仅 `packages/agent/src/pi-driver.ts:683`。催问失败路径无测试注入。 |
 | `pi_driver_prompt_changed_session_rebuild` | 仅 `packages/agent/src/pi-driver.ts:588`（原设计文档引用 2026-11-18 随文档删除失效）；无测试、无评测。生产 Main 提示恒定（设计上不触发），但一旦触发也无人接收。 |
 | `server_shutdown` | 仅 `apps/server/main.ts:82`；无测试、无评测。 |
@@ -106,7 +106,8 @@
    `inbound_files_registered`/`message_attachment_only`（`:510`、`:535`），失败没有对应事件。
 4. **交付字节读取失败无事件** — `apps/server/server.ts:413` 的 `readFileSync` 在投递 `try` 之外；文件区缺失/
    不可读会直接拒绝回合，`file_delivery` 事件只覆盖 `sendToConversation` 的成败（`:421-440`），失败无文件归因。
-5. **会话建立/转录打开失败无事件** — `apps/server/server.ts:259`（`openOrCreate`）与 `:262-307`（装配）；
+5. **会话建立/会话文件解析失败无事件** — `apps/server/server.ts:259`（`SessionPersistence` 构造）与 `:421`
+   （`resolve(principal, session)`：坏 header/坏行/非法 id 显式抛错）与 `:262-307`（装配）；
    失败只经 `:312` 的 `pending.catch(() => sessions.delete(key))` 静默清缓存，无结构化事件。
 6. ~~**任务收尾 out/ 兜底扫描的逐项拒收被丢弃**~~ **【已补口 2026-11-17】** — `packages/agent/src/task-file-bridge.ts:259-267`
    的 `sweepTaskOutputs()` 返回 `{ files, skipped }`，此前 `packages/agent/src/execution-runtime.ts:1455-1457` 只消费
@@ -126,9 +127,8 @@
     `last_error`；`apps/server/server.ts:246-248` 的 `drainNotifications` 丢弃 `deliverPending()` 的结果，无事件/指标。
 11. **（次要）driver 中止失败静默** — `packages/agent/src/pi-driver.ts:563`
     `active.session.abort().catch(() => undefined)`：abort 抛错无事件，可能留下仍在跑的回合。
-12. **（条件性）转录错误回调未注入即静默** — `packages/agent/src/execution-runtime.ts:420` 的回调是可选的；
-    `scripts/ask-runtime.ts:632` 只在调用方传入时转注。当前 server 注入了（见上表），但 `ask` 路径若注入
-   `transcriptStore` 而不注入回调（`scripts/ask-runtime.ts:247,631`），读/写失败无任何记录。
+12. ~~**（条件性）转录错误回调未注入即静默**~~ **【已随机制退役 2026-11-18】** — `transcriptStore` /
+    `onTranscriptError` 端口与宿主转录搬运层已删（会话落盘归 Pi），本项不再成立。
 
 ### 观测面自身失败的盲区（补充）
 

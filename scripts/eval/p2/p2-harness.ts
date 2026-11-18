@@ -29,6 +29,7 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import type { NotificationSink } from '../../../packages/agent/src/notifications';
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
+import type { MainSessionLocation } from '../../../packages/agent/src/session-persistence';
 import { createScriptedModelRuntime } from '../../../packages/agent/testing/scripted-model-runtime';
 import { createServer, type Server } from '../../../apps/server/server';
 import { resolveExecutionFace, type ExecutionFace } from '../../ask-runtime';
@@ -389,12 +390,24 @@ export async function startP2Server(spec: P2ServerSpec): Promise<P2ServerHandle>
     return scripted.runtime;
   };
 
-  const createDrivers = async () => {
+  const createDrivers = async (_env: NodeJS.ProcessEnv, mainSession?: MainSessionLocation) => {
     const mainRuntime = spec.mainDriverFactory === undefined ? await makeScripted('main') : undefined;
     const workerRuntime = spec.workerDriverFactory === undefined ? await makeScripted('worker') : undefined;
     const main = spec.mainDriverFactory !== undefined
       ? spec.mainDriverFactory()
-      : createPiTurnDriver({ env, modelRuntime: mainRuntime!, reuseConversation: true });
+      // 主会话落盘归 Pi：装配层给的位置直接交给真实 Pi 驱动（sessionDir/sessionId/resumeSessionFile）。
+      : createPiTurnDriver({
+        env,
+        modelRuntime: mainRuntime!,
+        reuseConversation: true,
+        ...(mainSession === undefined
+          ? {}
+          : {
+            sessionDir: mainSession.sessionDir,
+            sessionId: mainSession.piSessionId,
+            ...(mainSession.resumeSessionFile === undefined ? {} : { resumeSessionFile: mainSession.resumeSessionFile }),
+          }),
+      });
     const worker = spec.workerDriverFactory !== undefined
       ? spec.workerDriverFactory()
       : createPiTurnDriver({ env, modelRuntime: workerRuntime! });

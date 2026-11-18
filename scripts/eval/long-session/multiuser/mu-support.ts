@@ -18,6 +18,8 @@ import { fileURLToPath } from 'node:url';
 import type { AppConfig, ChannelReply, IncomingChannelMessage, ReplyHandler, RuntimeConfig } from '@fshine/contracts';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome, ExecutionRequest } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver, TurnDriverInput, TurnDriverResult } from '../../../../packages/agent/src/driver-contract';
+import type { MainSessionLocation } from '../../../../packages/agent/src/session-persistence';
+import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { Notification, NotificationSink } from '../../../../packages/agent/src/notifications';
 import { createSqliteTaskRegistry } from '../../../../packages/agent/src/task-registry-sqlite';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../../../../packages/agent/src/task-runner';
@@ -199,8 +201,30 @@ function tagsIn(text: string): string[] {
   return Object.values(MU_TAGS).filter((tag) => text.includes(tag));
 }
 
-/** 主回合驱动：按用户原文取计划；执行显式工具调用（错误也采集，不逃逸）。 */
-export function makeMainDriver(ctx: MuCtx): TurnDriver {
+/**
+ * 主回合驱动：按用户原文取计划；执行显式工具调用（错误也采集，不逃逸）。
+ *
+ * 给出 `mainSession`（装配层解析的 Pi 会话位置）时，本驱动像真实 Pi 驱动一样**把转录交给
+ * Pi**：历史从会话文件读回（公开 `SessionManager`），本回合只追加本轮 user + assistant——
+ * 重启恢复断言因此验证的是真落盘链路，而不是宿主搬运或进程内缓存。缺省不带位置 = 逐字节旧行为。
+ */
+export function makeMainDriver(ctx: MuCtx, mainSession?: MainSessionLocation): TurnDriver {
+  let manager: SessionManager | undefined;
+  const session = (): SessionManager | undefined => {
+    if (mainSession === undefined) return undefined;
+    manager ??= mainSession.resumeSessionFile === undefined
+      ? SessionManager.create(process.cwd(), mainSession.sessionDir, { id: mainSession.piSessionId })
+      : SessionManager.open(mainSession.resumeSessionFile, mainSession.sessionDir, process.cwd());
+    return manager;
+  };
+  const projection = (): readonly DriverMessage[] => manager === undefined
+    ? []
+    : manager.getBranch()
+      .filter((entry): entry is Extract<typeof entry, { type: 'message' }> => entry.type === 'message')
+      .map((entry) => entry.message as unknown as DriverMessage);
+  const append = (message: DriverMessage): void => {
+    manager?.appendMessage(message as unknown as Parameters<SessionManager['appendMessage']>[0]);
+  };
   return {
     async run(input: TurnDriverInput): Promise<TurnDriverResult> {
       const text = lastUserText(input);
@@ -210,6 +234,11 @@ export function makeMainDriver(ctx: MuCtx): TurnDriver {
       if (owner === undefined) throw new Error(`MU 未登记原文 owner：${JSON.stringify(text)}`);
       const principal = principalIdOf(owner);
       const calls: MuCallRecord[] = [];
+      // 会话位置在场 = 转录归 Pi：历史取自会话文件，本回合只追加本轮输入。
+      const turnMessages: readonly DriverMessage[] = session() === undefined
+        ? input.messages
+        : [...projection(), userTurnMessage(text)];
+      if (session() !== undefined) append(userTurnMessage(text));
       if (plan.rendezvous === true) {
         ctx.trace.push({ seq: ctx.nextSeq++, principalId: principal, phase: 'enter', text });
         await ctx.rendezvous!.arrive();
@@ -224,19 +253,29 @@ export function makeMainDriver(ctx: MuCtx): TurnDriver {
       }
       if (plan.compact !== undefined) {
         const sawTags = new Set<string>();
-        for (const message of input.messages) {
+        for (const message of turnMessages) {
           const content = (message as { content?: unknown }).content;
           if (typeof content === 'string') for (const tag of tagsIn(content)) sawTags.add(tag);
         }
         ctx.compactions.push({ principalId: principal, before: plan.compact.before, after: plan.compact.after, sawTags: [...sawTags], kind: 'threshold' });
       }
-      ctx.mainRecords.push({ principalId: principal, userText: text, messages: input.messages, injections: input.injections ?? [], calls, reply: plan.reply });
+      append({ role: 'assistant', content: plan.reply } as unknown as DriverMessage);
+      const messages: readonly DriverMessage[] = session() === undefined
+        ? [...input.messages, { role: 'assistant', content: plan.reply } as never]
+        : projection();
+      ctx.mainRecords.push({ principalId: principal, userText: text, messages, injections: input.injections ?? [], calls, reply: plan.reply });
       if (plan.rendezvous === true) {
         ctx.trace.push({ seq: ctx.nextSeq++, principalId: principal, phase: 'exit', text });
       }
-      return { text: plan.reply, messages: [...input.messages, { role: 'assistant', content: plan.reply } as never] };
+      return { text: plan.reply, messages: [...messages] };
     },
+    ...(mainSession === undefined ? {} : { transcript: () => projection() }),
   };
+}
+
+/** 本轮输入消息（Pi 原生 user message 形状；只用于会话替身落盘）。 */
+function userTurnMessage(text: string): DriverMessage {
+  return { role: 'user', content: text, timestamp: Date.now() } as unknown as DriverMessage;
 }
 
 /** Worker 驱动：在委派文本里按任务子串匹配计划，发起一次结构化执行，返回汇报。 */
@@ -363,7 +402,7 @@ export async function createMuServer(input: CreateMuServerInput): Promise<MuServ
     config: muConfig(input.mode, input.runtime),
     dbPath,
     ...(input.createDrivers === undefined
-      ? { createDrivers: () => ({ mainDriver: makeMainDriver(ctx), workerDriver: makeWorkerDriver(ctx) }) }
+      ? { createDrivers: (_env: NodeJS.ProcessEnv, mainSession?: MainSessionLocation) => ({ mainDriver: makeMainDriver(ctx, mainSession), workerDriver: makeWorkerDriver(ctx) }) }
       : { createDrivers: input.createDrivers }),
     // 每会话一个假执行面（装配链逐会话调用该工厂）；同源共享 ctx 采集，身份由 collection 归属。
     createExecutionFace: async () => ({ client: new MuFaceClient(ctx, failFor), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
