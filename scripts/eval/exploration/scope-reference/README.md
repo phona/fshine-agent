@@ -59,5 +59,5 @@ N=15（+6 run，原 9 保留）→ 5/15；实验门槛未达（唯一 ≥4/9 单
 R3 收官裁定 M01=a（`docs/product/r3-open-decisions.md` §A.1）：t2 改为**交付导向**——允许复用同一
 任务上下文内已获得、仍然有效的查询事实（不得为凑工具调用次数重复执行；明确刷新/数据可能过期/
 来源不可信时不适用）。casesSha256 `29ef794e…`→`617eb97f…`；旧 15 样本复判 14/15（唯一 FAIL=旧
-trial-10）；新跑 N=9 = 8/9。详见 `docs/product/m01-recut.md`；旧锁保底 `criteria.lock.pre-m01recut`
+trial-10）；新跑 N=9 = 8/9。详见 m01-recut.md（2026-11-18 已删，git 历史可考）；旧锁保底 `criteria.lock.pre-m01recut`
 （未跟踪）。

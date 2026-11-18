@@ -1,53 +1,51 @@
 # 文档索引
 
-本文档仓库的阅读入口。四组文档的权威性与阅读前提不同，入门前先看标注。
+> 2026-11-18 全量清理后重写（上一版只覆盖 25/114 且多处过时，已废弃；本轮处置记录见 `docs/product/cleanup-2026-11-16.md` 的执行状态注）。
+>
+> 口径（2026-11-18 owner 裁定）：**真删为主，不留归档目录**——已收官/被取代/前提已死的一次性记录一律删除（git 历史可考）；decision-log 等冻结面里的旧路径指针不回改，考古入口 = `git log --diff-filter=D`。
 
-## ① 终局规格
+## ① 权威与纪律（现行）
 
-以下文档描述 fshine-agent 的终局架构与功能规格；`v0-architecture.md` 因含架构迁移史叙述仍有执行层实例痕迹（5 处，Tier B 在册、带闭环判据与限期），不代表终局规范已被中性化，阅读时把实例叙述当作"改造史档案"。
+- `AGENTS.md`——进仓第一约束（哲学 / 职责边界 / 删除纪律 / 现状指针）
+- `docs/decision-log.md`——权威裁定与状态台账（只增不删）
+- `docs/methodology.md`——作业纪律与判据编号
 
-- `docs/v0-architecture.md`——架构总览与分层判据
-- `docs/v0-functional-spec.md`——功能规格与能力表（文首 2026-11-15 注记：§4.1 申报/计划门等为已删机制的历史描述；现行口径以 `AGENTS.md` 现状节 + decision-log §十一/§十三 为准）
+## ② 现行设计出处（已实施子系统的设计/登记档）
 
-## ② 协议与准入
+- `docs/product/cap01-main-direct-execution.md`——CAP-01 run_js / 文件桥设计（已实施并合入）
+- `docs/product/pi-152-adapter-design.md`——Pi 1.5.2 适配器 / 转录所有权设计（已实施）
+- `docs/product/pi-152-dependency-patches.md`——Pi 最小依赖补丁登记表（补丁在生效）
+- `docs/product/pi-152-dispatch-key-design.md`——dispatchKey 设计（已实施；`task-registry.ts` 引其 §5.3）
+- `docs/product/b1-session-persistence-impl.md`、`b1-wiring.md`——B1 会话持久化实施与接线（retention / capacity 待裁）
+- `docs/product/b2-silent-shadow-gate.md`——B2 企微静默闸（默认交付语义待裁 + 联调手册）
+- `docs/product/idempotency-cross-restart.md`——跨重启幂等缺口设计（未实施，待裁决）
 
-以下文档定义执行层接入的协议形状、准入条件与架构律法。**注意**：其中 `execution-layer-interface`、`execution-layer-admission`、`architecture-laws` 三篇仍含执行层实例历史叙述（相关行在产品面痕迹登记表在册，Tier B，带闭环判据与限期），不代表它们已被中性化或适合直接公开引用；阅读时请把实例叙述当作"改造史档案"而非"终局规范"。
+## ③ 活的联调 / 评测 / 运维面
 
-- `docs/execution-layer-interface.md`——执行层接口文档（含 §10 遗留过渡表与实例叙述）
-- `docs/execution-layer-admission.md`——执行层准入清单（A1–A14）
-- `docs/architecture-laws.md`——架构律法与闭环判据（含守卫命令原文与基线记录）
+- `docs/product/wecom-live-dummy-cases.md`——企微×dummy 联调用例档（39 条 P0/P1）
+- `docs/product/business-coverage.md`——业务级用例覆盖图（持续更新）
+- `docs/product/event-catalog.md`——结构化事件字典
+- `docs/product/r3-open-decisions.md`——待裁定登记（未决项以本文件为准）
+- `docs/product/p2-business-e2e-prereg.md`——P2 业务 E2E 预注册（待真实模型执行）
+- `docs/product/r6-longsession-prereg.md`——R6 长会话预注册（wave1-runner 运行时读取取证）
+- `docs/product/r4-joint-interfaces.md`、`r4-acceptance.md`、`r4-stability-prereg.md`、`r4-slices.md`、`p2a-task-contract.md`——R4 契约冻结面与预注册（测试逐条引用）
+- `docs/product/business-e2e-prereg.md`、`business-e2e-prereg-addendum.md`——业务 E2E 预注册
+- `docs/product/business-e2e-final-report.md`——三轴总报告（产品定义文档）
+- `docs/product/manual-test-handbook.md`——手工测试手册
+- `docs/product/real-read-readiness.md`——真实只读接入准备档
+- `docs/product/dead-code-audit.md`、`cleanup-2026-11-16.md`——待办清单（未销项在册）
+- `docs/environment-variables.md`——环境变量清单
 
-## ③ 改造史档案
+## ④ 历史参考（定位为档案，文首有注记；不按现行规范读）
 
-以下文档记录迁移过程中的裁定、债务、风险与波次记录，包含执行层实例叙述。属档案例外，不要求中性化；阅读前提是已了解终局规格。
+- `docs/v0-architecture.md`——架构总览（§8 宿主预算/计划门表述为已删机制的历史叙述）
+- `docs/v0-functional-spec.md`、`docs/artifacts.md`、`docs/product/r4-slice-plan.md`——已被取代，失效注记在册
+- `docs/architecture-laws.md`、`docs/a2a-protocol.md`、`docs/execution-layer-interface.md`——历史判据 / 协议档案（AGENTS.md 指针）
+- `docs/debt-ledger.md`、`docs/change-safety.md`、`docs/e2e-ownership.md`——历史台账（ci.sh / PR review prompt 引用）
+- `docs/rule-landing.md`、`docs/business-skill.md`、`docs/roadmap.md`
+- `docs/product/exp-pi-native-config-headroom.md`——压缩配置安全值推导出处（ask-runtime.ts 注释引用）
+- `docs/product/evidence/`——补丁证据 json（git pin 锚点）
 
-- `docs/debt-ledger.md`——债务登记台账（D-153 起，每条含归属标签 + 闭环判据 + 限期）
-- `docs/a2a-protocol.md`——结构化调用协议历史蓝图（A2A 为历史别名；文件所述宿主侧契约类型 `packages/contracts/src/a2a-protocol.ts` 已随 M4 死代码清扫删除，现行契约语义面见 `packages/contracts/src/execution-contract.ts` 与 decision-log §十三）
-- `docs/change-safety.md`——波次记录与防线表（§25 起含 F3 变异留档）
-- `docs/env-naming-ruling-20261110.md`——隔离环境变量命名族裁定（2026-11-10，`EXECUTION_*` 唯一规范族；含失效条件与闭环判据）
-- `AGENTS.md`——项目约定与横切纪律（迁移期适配现状、授信期门语义、长期目标）
-- `git` 历史——全量 commit 记录（含已落地波次的完整改动链）
+## ⑤ 已删除（2026-11-18 清理）
 
-## ④ 运行与验收
-
-以下文档面向运行、调试、验收与排障，混合了终局机制与改造史叙述，阅读时请以终局规格为准。
-
-- `docs/e2e-ownership.md`——e2e 测试所有权与前置条件
-- `docs/manual-test-wecom.md`——企微手工测试指南（渠道机制与 harness，业务用例已移出）
-- `docs/test-hardening.md`——测试加固与基线记录
-- `docs/environment-variables.md`——环境变量说明（含执行层治理变量与通用旋钮）
-- `docs/perf-baseline.md`——性能基线
-- `docs/methodology.md`——方法论与验收纪律
-- `docs/rule-landing.md`——规则落点索引
-- `docs/eval-mechanism-registry.md`——eval harness 机制登记表（每个机制防什么、拆了会怎样、成本；含审计结论逐条核对记录）
-- `docs/roadmap.md`——路线图
-- `docs/artifacts.md`——产物清单（**历史**：2026-11-15 注记，其 artifacts/cancel 契约面已被取代；现行契约四态见 `packages/contracts/src/execution-contract.ts:66`）
-- `docs/interactive-session-plan.md`——会话交互方案
-- `docs/v0-implementation-decisions.md`——V0 实施决策记录
-- `docs/business-skill.md`——业务 skill（已中性化，执行默认值与业务路由例子已移出）
-- `docs/product/docs-cleanup-candidates.md`——R5 docs 只读审计候选清单（全量 70 篇分类与依据）
-- `docs/product/docs-cleanup-report.md`——R5 docs 清理实施记录（本次处置、待裁决定论、计数对账）
-
-## ⑤ R5 Phase 3 报告登记处（预留）
-
-`docs/product/r5-phase3-*.md`（Phase 3 报告落盘后在本节登记文件名与一句话状态；当前未落盘，本节为预留位置）。
+删除 71 篇：0.85.1 压缩/实验簇（pi-compaction×5、exp-pi-native×4、pi-152-stage-b/c/d/d2、minimality-audit）、main-skill-face-design、R4 切片报告 22 篇、R5 收官 9 篇、R6 收官 5 篇、已实施/被取代设计 7 篇、退役工具旧档 11 篇、R5 清理 meta 2 篇、push-runbook 等。处置依据与取代者映射见 `docs/product/cleanup-2026-11-16.md`；内容考古用 `git log --diff-filter=D -- docs/`。

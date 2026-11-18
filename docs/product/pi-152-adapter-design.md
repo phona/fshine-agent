@@ -4,6 +4,8 @@
 > 本文是动手前的设计：**先定转录所有权，再改代码**。只依赖 `@earendil-works/pi-coding-agent`
 > root 公开导出（`createAgentSession` / `AgentSession` / `SessionManager` / `SettingsManager` /
 > `ModelRuntime` / `defineTool` / `ResourceLoader` 类型），不 deep-import、不改 Pi 源码、不引 pi-durable。
+>
+> **状态（2026-11-18 注）**：本设计已按稿实施并合入 main（`pi-driver.ts` 为唯一 Pi 接缝）；「动手前」自述已失效，正文按设计原貌保留。
 
 ## 1. 边界图
 

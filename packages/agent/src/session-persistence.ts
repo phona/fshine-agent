@@ -19,7 +19,7 @@
  * 为什么不是「第二份转录」：本层不拥有转录。写 = `SessionManager.appendMessage`（Pi 内部
  * 追加单条 entry），读 = `SessionManager.getBranch`（Pi entry-log 回放）。本层只在两处之间
  * 传 Pi 原生 `AgentMessage`，不落任何自有 message 副本。这与被否证的
- * `docs/product/r5-session-persistence-design.md`「每回合追加完整转录快照」完全不同
+ * r5-session-persistence-design（2026-11-18 已删，git 历史可考）「每回合追加完整转录快照」完全不同
  * ——后者在 Pi 之外维护一份随回合数逐次重写的 `messages` 数组落盘（O(n²) 无界增长），
  * 本层复用 Pi 的**单条 entry 追加日志**（线性增长）。
  *
