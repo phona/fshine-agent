@@ -384,8 +384,8 @@ export async function mu12(rt: RuntimeConfig): Promise<MuCaseResult> {
   const aFileText = 'GROUP-MU12 A 已发文件';
   plans.turn('mu-alice', aFileText, { reply: '文件已收到。' });
   const ctx = makeCtx(plans.table(), null);
-  // inline：文件交办只支持 inline（background 对 inputFiles 确定性拒绝，会绕过本用例要测的
-  // 「文件解析作用域」路径）。
+  // inline：本用例固定前台派发，聚焦「文件解析作用域」路径（background 的受理/排队时序
+  // 不在本判据内；background 现已支持 inputFiles，见 runtime-background-input-files）。
   const handle = await createMuServer({ dir: tmp.dir, ctx, mode: 'inline', runtime: rt });
   try {
     // ① A 在群里发纯附件（暂存 pending，不起回合）→ ② A 发文字激活本会话文件。

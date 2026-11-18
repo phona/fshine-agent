@@ -215,6 +215,19 @@ export function mainSessionOptions(
 }
 
 /**
+ * CAP-01 S2：执行层文件桥装配参数（inline 会话面与 background 后台面同形）。
+ * store 必须是装配层唯一 fileStore 实例；platformRoot/scope/inner 由各自的构造点填。
+ */
+export interface TaskFileBridgeAssembly {
+  store: TaskFileBridgeStore;
+  dirParams?: { input?: string; output?: string };
+  /** 单文件参数（执行层吃一个文件 / 写一个文件）：宿主填物化路径，不猜。 */
+  fileParams?: { input?: string; output?: string };
+  limits?: { maxOutputFileBytes?: number; maxOutputCount?: number };
+  onSkip?: (reason: string) => void;
+}
+
+/**
  * 装配核心输入。各入口在门之后调用：本核心不做任何门判定、不改错误归类；
  * 一切差异（驱动/执行面/底账/技能提示词/审计路径/隔离断言/空集合话术）都从输入注入。
  */
@@ -317,15 +330,9 @@ export interface SessionAssemblyInput {
    * taskInputCopier **同一 fileStore 实例**（文件区监管唯一写侧）；dirParams 是部署对该执行
    * 层「声明目录参数」的认知（如 '--input-dir'），缺省无 = 桥只承担回程登记与任务 out/ 兜底。
    * 桥在装配核心构造（内层客户端只有这里拿得到：platformRoot=profile.root、scope=本会话身份）。
+   * 同一装配参数也供 background 面（按任务懒建桥）。
    */
-  taskExecutionBridge?: {
-    store: TaskFileBridgeStore;
-    dirParams?: { input?: string; output?: string };
-    /** 单文件参数（执行层吃一个文件 / 写一个文件）：宿主填物化路径，不猜。 */
-    fileParams?: { input?: string; output?: string };
-    limits?: { maxOutputFileBytes?: number; maxOutputCount?: number };
-    onSkip?: (reason: string) => void;
-  };
+  taskExecutionBridge?: TaskFileBridgeAssembly;
   /**
    * CAP-01 S1 清单注入（机械事实）：装配层提供本会话已激活（TTL 内）文件清单——
    * 字段只有 fileId/name/bytes。缺省不注入 = 无清单（回合输入逐字节不变）。
@@ -460,6 +467,18 @@ export interface BackgroundDispatchInput {
    * 工具面含 run_js（任务作用域），产物经完成回调上交投递面。缺省不注入 = 零变化。
    */
   runJsExecutor?: RunJsExecutor;
+  /**
+   * CAP-01 S2 后台文件面：执行层文件桥装配（与 inline 会话面同一形状/同一 store 实例）。
+   * 有值 = 本 runner 的每个任务按 (principal, session, taskId) 懒建桥：Worker 委派带任务
+   * 文件清单，execute_operation 经桥把声明参数替换为任务目录内的物化路径。
+   * 缺省不注入 = 零变化（后台 Worker 无文件面）。
+   */
+  taskExecutionBridge?: TaskFileBridgeAssembly;
+  /**
+   * 文件引用被拒（桥物化失败：越权/不存在/pending/过期/字节缺失）的机械 reason 上报；
+   * 只进日志，用户/Worker 只见统一话术（与 inline 同一模块常量）。
+   */
+  onFileRefUnavailable?: (reason: string) => void;
   /** runner 覆盖（测试确定性：leaseMs/时钟/属主；缺省 leaseMs=workerTurnMs+60s）。 */
   runnerOptions?: { leaseMs?: number; owner?: string; now?: () => Date };
 }
@@ -485,6 +504,25 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
     const workerDriver = input.workerDriver ?? (input.createDrivers !== undefined
       ? (await input.createDrivers(input.env)).workerDriver
       : createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env) }));
+    // CAP-01 S2 后台文件面：与 inline 会话桥同一装配参数、同一 store，实例按任务懒建
+    // （不建进程级单例：scope 随任务身份，platformRoot/inner 是本次执行面的可信值）。
+    const bridgeAssembly = input.taskExecutionBridge;
+    const backgroundTaskBridge = bridgeAssembly === undefined
+      ? undefined
+      : ({ principalId, sessionId, taskId }: { principalId: string; sessionId: string; taskId: string }) =>
+        createTaskExecutionBridge({
+          platformRoot: input.profile.root,
+          fileStore: bridgeAssembly.store,
+          scope: { principalId, sessionId },
+          inner: face.client,
+          ...(bridgeAssembly.dirParams === undefined ? {} : { dirParams: bridgeAssembly.dirParams }),
+          ...(bridgeAssembly.fileParams === undefined ? {} : { fileParams: bridgeAssembly.fileParams }),
+          ...(bridgeAssembly.limits === undefined ? {} : {
+            maxOutputFileBytes: bridgeAssembly.limits.maxOutputFileBytes,
+            maxOutputCount: bridgeAssembly.limits.maxOutputCount,
+          }),
+          ...(bridgeAssembly.onSkip === undefined ? {} : { onSkip: bridgeAssembly.onSkip }),
+        })(taskId);
     executor = await createTaskExecutor({
       client: face.client,
       allowedOperations: face.allowedOperations,
@@ -498,6 +536,8 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
       workerWorkspaceRoot: input.profile.root,
       // 片 1：run_js 执行器端口（与前台同一构造；缺省不注入 = Worker 工具面零变化）。
       ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
+      ...(backgroundTaskBridge === undefined ? {} : { backgroundTaskBridge }),
+      ...(input.onFileRefUnavailable === undefined ? {} : { onFileRefUnavailable: input.onFileRefUnavailable }),
     });
   }
   // B 切片：完成回调接缝——包装实际使用的执行器（注入的或默认构建的同一道包装）。
@@ -733,6 +773,9 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
         workerDriver: drivers.workerDriver,
         // 片 1：后台 Worker 的 run_js 与前台同一执行器端口（缺省不注入 = 工具面零变化）。
         ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
+        // 后台文件面与 inline 同源注入：同一 bridge 参数与 fileStore 实例，按任务懒建。
+        ...(input.taskExecutionBridge === undefined ? {} : { taskExecutionBridge: input.taskExecutionBridge }),
+        ...(input.onFileRefUnavailable === undefined ? {} : { onFileRefUnavailable: input.onFileRefUnavailable }),
       })).runner;
     }
     // P4：通知链仅 background 且提供 sink 时启用（inline 默认零新增路径；投递由调用方触发）。
