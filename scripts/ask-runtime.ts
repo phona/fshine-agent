@@ -487,6 +487,8 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
     policy: input.policy,
     executor,
     leaseMs: input.runnerOptions?.leaseMs ?? resolved.workerTurnMs + LEASE_MARGIN_MS,
+    // 等待用户到期消费者由装配方按配置启用（配置缺省 24h；runner 直用缺省关闭）。
+    waitUserTimeoutMs: resolved.waitUserTimeoutMs,
     ...(input.runnerOptions?.owner === undefined ? {} : { owner: input.runnerOptions.owner }),
     ...(input.runnerOptions?.now === undefined ? {} : { now: input.runnerOptions.now }),
   });

@@ -27,6 +27,7 @@ const CONTRACTS_CONFIG = 'packages/contracts/src/config.ts';
 const CORE_CONFIG = 'packages/core/src/config.ts';
 const RESOURCE_POLICY = 'packages/agent/src/resource-policy.ts';
 const EXECUTION_RUNTIME = 'packages/agent/src/execution-runtime.ts';
+const TASK_RUNNER = 'packages/agent/src/task-runner.ts';
 const ASK_RUNTIME = 'scripts/ask-runtime.ts';
 // R4 稳定性套件的假件 harness（2026-11-14 登记）：只**构造**测试场景的 RuntimeConfig 输入
 // （backgroundConcurrency/queueCapacity 逐场景参数），不解析/解释旋钮、不读原始
@@ -102,7 +103,9 @@ const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   maxOperationsPerTurn: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME],
   maxDelegationDepth: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   taskBudget: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
-  waitUserTimeoutMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
+  // W 切片（2026-11-18）：waiting_user 到期阈值由策略解析；ask-runtime 装配时取解析值，
+  // task-runner 只消费注入的已解析毫秒数（不读原始 runtime 配置）。
+  waitUserTimeoutMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, ASK_RUNTIME, TASK_RUNNER],
   fileRetentionDays: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   fileRetentionSweepOnStart: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STARTUP_SWEEP],
   attachmentNudgeAfterMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, SERVER, SIM_HARNESS],
