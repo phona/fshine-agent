@@ -2,13 +2,14 @@
  * CAP-01 S1 runtime 接线（run_js 工具 + 出口清理 + 清单注入）· 确定性验证。
  *
  * 零网络：假客户端 + 脚本化主驱动（按步骤调 exec 的假 TurnDriver）；run_js 用真实受限
- * 执行器（Node 权限模型子进程，与 run-js-executor.test.ts 同款手法，只写 out/）。
+ * 执行器（Node 权限模型子进程，与 run-js-executor.test.ts 同款手法；Main 面只写 scratch/）。
  *
  * 覆盖（对应 ask ⑥ 的 runtime 侧断言）：
  *   ⑤ run_js 在未注入 runJsExecutor 时不注册（工具面没有它，exec 也 fail-closed 拒绝）；
- *   · 片 2（owner 裁定）：Main 的 run_js 能执行、能读 in/、能写 scratch/，但写 out/ **不登记
- *     file_refs 行、不进 TurnResult.files**（结构性禁止 Main 产交付物）；脚本仍真跑，工具
- *     结果不带 audit/runDir（机械路径不进转录）；
+ *   · 权限层收窄（owner 2026-11-18 裁定 A）：Main 的 run_js 由执行器按
+ *     `writableDirs:'scratch-only'` 运行——写 out/ 是 ERR_ACCESS_DENIED 非零退出（不是
+ *     「写了不登记」），写 scratch/ 成功；两侧都零 file_refs、不进 TurnResult.files；
+ *     工具结果不带 audit/runDir（机械路径不进转录）；
  *   · resolveFileRef 同码（照 resolveTaskId 写法）：不存在/pending/过期/越权 → 同一句
  *     话术（防存在性 oracle），机械 reason 只进 onFileRefUnavailable（不进错误消息）；
  *   · 幂等（v8 §5）：同回合同 code+inputs 重试命中，执行器只跑一次；
@@ -17,7 +18,7 @@
  *   ⑥ 清单注入：机械事实只有 fileId/name/bytes（没有行数据/路径/sha256），
  *     字节数作为观察项随 TurnResult.fileManifestBytes 带出。
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -27,7 +28,7 @@ import type {
   ExecutionOutcome,
 } from '@fshine/contracts/execution-contract';
 import { openTaskStore } from '@fshine/core';
-import { createFileStore, FILE_REF_TTL_MS, type FileStore } from './src/file-store';
+import { createFileStore, FILE_REF_TTL_MS, sessionDirOf, type FileStore } from './src/file-store';
 import {
   createRunJsExecutor,
   RUN_JS_LAYOUT_UNSAFE_MESSAGE,
@@ -183,8 +184,10 @@ async function makeFixture(input: {
   };
 }
 
-/** 产物写入脚本：写 out/汇总.txt（cwd = runDir；out/ 由执行器预建）。 */
-const WRITE_ONE_OUTPUT = "require('node:fs').writeFileSync('out/汇总.txt', 'summary-bytes');";
+/** 工作区脚本：写 scratch/草稿.txt（cwd = runDir；Main 的 run_js 只可写 scratch/）。 */
+const WRITE_SCRATCH = "require('node:fs').writeFileSync('scratch/草稿.txt', 'draft-bytes');";
+/** 越界脚本：写 out/ 汇总.txt（Main 面由权限模型拒绝：ERR_ACCESS_DENIED、非零退出）。 */
+const WRITE_OUT = "require('node:fs').writeFileSync('out/汇总.txt', 'summary-bytes');";
 
 describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', () => {
   it('回合取消信号贯穿到执行器：run_js 收到调用方传下来的 AbortSignal', async () => {
@@ -215,7 +218,7 @@ describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', (
 
       // 工具面外调用：fail-closed（与 task/read_skill 工具同一门控形状）；
       // 假驱动按真实驱动的语义把 exec 错误记为工具结果消息（回合继续，模型看到拒收话术）。
-      fx.push({ execCalls: [{ tool: 'run_js', args: { code: WRITE_ONE_OUTPUT } }], text: '本轮没有代码执行面。' });
+      fx.push({ execCalls: [{ tool: 'run_js', args: { code: WRITE_SCRATCH } }], text: '本轮没有代码执行面。' });
       await fx.session.send('试试 run_js');
       expect(fx.capture.toolErrors.at(-1)).toBe('Main 工具面之外的调用：run_js');
     } finally {
@@ -224,29 +227,57 @@ describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', (
     }
   });
 
-  it('片 2：Main 写 out/ 不登记、不产交付物；脚本仍真跑，工具结果不带 audit/runDir', async () => {
+  it('① 权限层收窄（Main）：写 out/ 被权限模型拒绝（非零退出 + ERR_ACCESS_DENIED）、out/ 无字节、零 file_refs', async () => {
     const fx = await makeFixture();
     try {
-      fx.push({ execCalls: [{ tool: 'run_js', args: { code: WRITE_ONE_OUTPUT } }], text: '汇总完成。' });
+      fx.push({ execCalls: [{ tool: 'run_js', args: { code: WRITE_OUT } }], text: '汇总完成。' });
       const turn = await fx.session.send('帮我汇总');
 
       expect(fx.capture.toolNames[0]).toContain('run_js');
-      // 结构性禁止：out/ 不登记（零 file_refs 行）、不进交付面。
+      // 权限层拒绝（不是「写了不登记」）：脚本非零退出、stderr 带 ERR_ACCESS_DENIED。
+      const result = fx.capture.results[0] as Record<string, unknown>;
+      expect(result['exitCode']).not.toBe(0);
+      expect(String(result['stderr'])).toContain('ERR_ACCESS_DENIED');
+      expect(result['outputs']).toEqual([]);
+      // 零 file_refs、无交付物；工具结果不带 audit/runDir。
       expect(fx.ro.listFileRefs(SCOPE)).toEqual([]);
       expect(turn.files).toBeUndefined();
-      expect(turn.reply).toBe('汇总完成。');
-
-      // 脚本仍然真跑（exit 0），只是产物不登记：outputs 为空数组（不是隐藏的真 fileId）。
-      const result = fx.capture.results[0] as Record<string, unknown>;
       expect(result).not.toHaveProperty('audit');
       expect(result).not.toHaveProperty('runDir');
+      // out/ 无字节：本次 run 目录的 out/ 为空。
+      const runsDir = path.join(sessionDirOf(fx.fileStore.workspaceRoot, SCOPE), 'runs');
+      const runDirs = readdirSync(runsDir);
+      expect(runDirs).toHaveLength(1);
+      expect(readdirSync(path.join(runsDir, runDirs[0]!, 'out'))).toEqual([]);
+    } finally {
+      fx.ro.close();
+      fx.close();
+    }
+  });
+
+  it('② Main 写 scratch/ 成功（exit 0）、不产交付物；工具描述声明 out/ 权限拒绝、交付走 task_run', async () => {
+    const fx = await makeFixture();
+    try {
+      fx.push({ execCalls: [{ tool: 'run_js', args: { code: WRITE_SCRATCH } }], text: '完成。' });
+      const turn = await fx.session.send('先在工作区算');
+
+      expect(fx.capture.toolNames[0]).toContain('run_js');
+      const result = fx.capture.results[0] as Record<string, unknown>;
       expect(result['exitCode']).toBe(0);
       expect(result['outputs']).toEqual([]);
-      expect(JSON.stringify(result)).not.toContain('runs/');
-      // 工具描述给了替代路径：scratch/ 是工作区，交付文件走 task_run。
+      expect(fx.ro.listFileRefs(SCOPE)).toEqual([]);
+      expect(turn.files).toBeUndefined();
+      // scratch/ 里的字节真写成了（scratch 是 Main 的唯一可写工作区）。
+      const runsDir = path.join(sessionDirOf(fx.fileStore.workspaceRoot, SCOPE), 'runs');
+      const runDirs = readdirSync(runsDir);
+      expect(runDirs).toHaveLength(1);
+      expect(readFileSync(path.join(runsDir, runDirs[0]!, 'scratch', '草稿.txt'), 'utf8')).toBe('draft-bytes');
+      // 描述与代码行为一致：out/ 由权限层拒绝（不是「不登记」），交付文件走 task_run。
       const runJsIndex = fx.capture.toolNames[0]!.indexOf('run_js');
-      expect(fx.capture.toolDescriptions[0]![runJsIndex]).toContain('scratch/ 是工作区');
-      expect(fx.capture.toolDescriptions[0]![runJsIndex]).toContain('task_run 交办');
+      const description = fx.capture.toolDescriptions[0]![runJsIndex]!;
+      expect(description).toContain('scratch/ 是工作区');
+      expect(description).toContain('权限拒绝');
+      expect(description).toContain('task_run 交办');
     } finally {
       fx.ro.close();
       fx.close();
@@ -277,7 +308,7 @@ describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', (
       ];
       const messages: string[] = [];
       for (const testCase of cases) {
-        fx.push({ execCalls: [{ tool: 'run_js', args: { code: WRITE_ONE_OUTPUT, inputs: [testCase.fileId] } }], text: '收到' });
+        fx.push({ execCalls: [{ tool: 'run_js', args: { code: WRITE_SCRATCH, inputs: [testCase.fileId] } }], text: '收到' });
         await fx.session.send(`用 ${testCase.label} 的文件`);
         expect(fx.capture.toolErrors).toHaveLength(messages.length + 1);
         messages.push(fx.capture.toolErrors[messages.length]!);
@@ -316,7 +347,7 @@ describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', (
       onRunJsLayoutUnsafe: (event) => events.push(event),
     });
     try {
-      fx.push({ execCalls: [{ tool: 'run_js', args: { code: WRITE_ONE_OUTPUT } }], text: '模型自由文本。' });
+      fx.push({ execCalls: [{ tool: 'run_js', args: { code: WRITE_SCRATCH } }], text: '模型自由文本。' });
       const turn = await fx.session.send('生成一份文件');
 
       // 工具层确定性失败话术（ToolUserError 由 driver 直接作为最终回复，不经模型改写）。
@@ -338,8 +369,8 @@ describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', (
   it('幂等（v8 §5）：同回合同 code+inputs 的重试命中，执行器只跑一次', async () => {
     const fx = await makeFixture();
     try {
-      const call = { tool: 'run_js' as const, args: { code: WRITE_ONE_OUTPUT } };
-      fx.push({ execCalls: [call, { ...call, args: { code: WRITE_ONE_OUTPUT } }], text: '完成' });
+      const call = { tool: 'run_js' as const, args: { code: WRITE_SCRATCH } };
+      fx.push({ execCalls: [call, { ...call, args: { code: WRITE_SCRATCH } }], text: '完成' });
       const turn = await fx.session.send('汇总（会重试一次）');
       expect(fx.executorCalls()).toBe(1);
       // Main 面：无交付物（memo 命中回放的不是登记事实）。
@@ -357,7 +388,7 @@ describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', (
     const fx = await makeFixture();
     try {
       // 正文里混入服务器路径 → 出口被剥（模型转录里原样，用户面干净）。
-      fx.push({ execCalls: [{ tool: 'run_js', args: { code: WRITE_ONE_OUTPUT } }], text: '文件在 /home/fictional-user/fictional-projects/secret-drafts/汇总.xlsx 已经生成。' });
+      fx.push({ execCalls: [{ tool: 'run_js', args: { code: WRITE_SCRATCH } }], text: '文件在 /home/fictional-user/fictional-projects/secret-drafts/汇总.xlsx 已经生成。' });
       const withText = await fx.session.send('汇总并告诉我位置');
       expect(withText.reply).not.toContain('/home');
       expect(withText.reply).not.toContain('fictional-user');
