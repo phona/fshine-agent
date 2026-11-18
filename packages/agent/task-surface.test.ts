@@ -322,7 +322,7 @@ describe('缺口 1 · 对话面任务工具', () => {
       },
       mainSystemPrompt: '（测试）',
       taskRegistry: registry,
-      dispatchMode: 'inline',
+      taskDispatch: 'sync',
       workerTurnMs: 60_000,
     });
     await session.send('帮我查一下');
@@ -384,7 +384,7 @@ describe('缺口 1 · 对话面任务工具', () => {
       },
       mainSystemPrompt: '（测试）',
       taskRegistry: registry,
-      dispatchMode: 'inline',
+      taskDispatch: 'sync',
       workerTurnMs: 60_000,
     });
     await session.send('帮我查一下');

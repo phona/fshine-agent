@@ -258,9 +258,9 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
         mainDriver: recordingDriver(base.mainDriver, 'main', sink),
         workerDriver: recordingDriver(base.workerDriver, 'worker', sink),
       };
-      // 缺口 1 四工具同源门控 taskRunner：background 天然有；inline 由用例 withTaskRunner 直接注入。
+      // 缺口 1 四工具同源门控 taskRunner：async 天然有；sync 由用例 withTaskRunner 直接注入。
       let runner: TaskRunner | undefined;
-      if (caseDef.dispatchMode === 'background' || caseDef.withTaskRunner === true) {
+      if (caseDef.taskDispatch === 'async' || caseDef.withTaskRunner === true) {
         runner = (await createBackgroundDispatch({
           env,
           profile,
@@ -291,7 +291,7 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
         createDrivers: () => ({ mainDriver: drivers.mainDriver, workerDriver: drivers.workerDriver }),
         createExecutionFace: async () => face,
         ...(runner === undefined ? {} : { taskRunner: runner }),
-        ...(caseDef.dispatchMode === undefined ? {} : { dispatchMode: caseDef.dispatchMode }),
+        ...(caseDef.taskDispatch === undefined ? {} : { taskDispatch: caseDef.taskDispatch }),
         ...(caseDef.mainSkillsDir === undefined ? {} : { mainSkillsDir: caseDef.mainSkillsDir }),
       });
 

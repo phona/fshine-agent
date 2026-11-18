@@ -1,7 +1,7 @@
 /**
  * G 组·任务面 / 异步（W-26～W-28）· 自动用例（真装配链，见 ./harness.ts）。
  *
- * 装配差异：`runtime.dispatchMode: 'background'`（受理即回执、后台 TaskRunner 执行、
+ * 装配差异：任务派发 `taskDispatch: 'async'`（server 恒 async；受理即回执、后台 TaskRunner 执行、
  * 完成后宿主主动投递）+ `runtime.taskRunWaitMs`（B 切片短等待窗口）。
  *
  * 机械判据（用户可见结果；模型响应脚本化、执行层真实）：
@@ -38,7 +38,7 @@ const relayReceipt = (call: { messages: readonly unknown[] }) => {
 describe('G 组·任务面 / 异步（W-26～W-28）', () => {
   it('W-26 超窗请求：受理回执无编号，任务后台推进并最终完成；W-27 追问纯查询零执行', async () => {
     // 1ms 短等待窗口：真子进程执行必然超窗 → 走受理回执 + 后台推进路径。
-    const sim = await startWecomSim({ label: 'w26', dispatchMode: 'background', taskRunWaitMs: 1 });
+    const sim = await startWecomSim({ label: 'w26', taskDispatch: 'async', taskRunWaitMs: 1 });
     const registry = createSqliteTaskRegistry(sim.dbPath, { readOnly: true });
     try {
       const taskText = '把销售明细按客户汇总，做成表，做完发我';
@@ -92,7 +92,7 @@ describe('G 组·任务面 / 异步（W-26～W-28）', () => {
   }, 120_000);
 
   it('W-28 快活（缺省 1500ms 窗口内完成）：同回合给结果、零受理回执、零主动投递', async () => {
-    const sim = await startWecomSim({ label: 'w28', dispatchMode: 'background', taskRunWaitMs: 1_500 });
+    const sim = await startWecomSim({ label: 'w28', taskDispatch: 'async', taskRunWaitMs: 1_500 });
     try {
       const taskText = '查一下 documents 集合 W202611 有多少条';
       sim.book.mainTurn('查一下 documents 集合 W202611 有多少条，直接告诉我', [

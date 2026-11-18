@@ -41,9 +41,9 @@ export interface ExpCase {
   granted: readonly GrantedScope[];
   /** skill-arm 的臂（kind='skill-arm' 必填）。 */
   arm?: SkillArm;
-  /** 派发模式；缺省 'inline'（本批 inline-only）。 */
-  dispatchMode?: 'inline' | 'background';
-  /** inline 下直接注入 TaskRunner（缺口 1 四工具同源门控；非 background 的合法装配）。 */
+  /** 任务派发装配参数；缺省 'sync'（本批 sync-only）。 */
+  taskDispatch?: 'sync' | 'async';
+  /** sync 下直接注入 TaskRunner（缺口 1 四工具同源门控；非 async 的合法装配）。 */
   withTaskRunner?: boolean;
   /**
    * Main 技能目录（**装配参数**，不是配置键）：skill-arm 的 catalog 臂指向夹具技能目录；

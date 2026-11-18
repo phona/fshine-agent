@@ -90,7 +90,6 @@ export async function runPressureScenario(scenario: PressureScenario): Promise<P
   const sessionId = 'stab-pressure-1';
   const scope = stabScope(principalId, sessionId);
   const runtime: StabRuntimeConfig = {
-    dispatchMode: 'background',
     backgroundConcurrency: scenario.concurrency,
     queueCapacity: scenario.queueCapacity,
   };

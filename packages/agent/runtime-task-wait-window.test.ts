@@ -116,7 +116,7 @@ async function sessionFor(
     },
     mainSystemPrompt: '（测试）Main 系统提示',
     taskRegistry: stack.registry,
-    dispatchMode: 'background',
+    taskDispatch: 'async',
     taskRunner: stack.runner,
     taskRunWaitMs: options.taskRunWaitMs,
     ...(options.clock === undefined ? {} : { taskRunClock: options.clock }),

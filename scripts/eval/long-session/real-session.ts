@@ -405,7 +405,7 @@ export async function openRealSession(input: RealSessionInput): Promise<RealSess
     createDrivers: () => ({ mainDriver: scopedMain, workerDriver: scopedWorker }),
     createExecutionFace: async () => face,
     taskRunner: dispatch.runner,
-    dispatchMode: 'background',
+    taskDispatch: 'async',
   });
 
   const zeroReplyTurns: number[] = [];

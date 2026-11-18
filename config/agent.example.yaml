@@ -63,15 +63,12 @@ llm:
   apiKey:
   model: your-model
 
-# ---- 资源强制与派发模式(可选;P5 单一入口,yaml 键、无 env 覆盖口) ----
+# ---- 资源强制(可选;P5 单一入口,yaml 键、无 env 覆盖口) ----
 # 缺省(不写 runtime 段) = 现行为:前台并发 4、排队容量 16、无任务级预算、
-# 回合时限 300s/180s、委派深度 1、文件引用可读期 7 天、文件保留期 30 天(不在启动时清扫)、
-# 派发模式 inline。
+# 回合时限 300s/180s、委派深度 1、文件引用可读期 7 天、文件保留期 30 天(不在启动时清扫)。
+# 任务派发方式不是配置项:server(有渠道推送面)恒 async,ask/eval 恒同步等结果。
 # 非法值 fail-fast、未知键拒绝;详解见 docs/environment-variables.md。
 # runtime:
-#   # 派发模式:inline(缺省,委派同步执行) | background(受理即回执,后台 TaskRunner 执行)。
-#   # background 仅 server 渠道面支持(ask/redo 入口对 background 显式拒绝)。
-#   dispatchMode: inline
 #   mainConcurrency: 1        # 前台并发准入上限
 #   backgroundConcurrency: 1  # 后台并发上限(0=关闭后台准入)
 #   queueCapacity: 0          # 前台/后台各自等待队列容量(0=满即确定性拒绝)

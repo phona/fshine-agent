@@ -33,7 +33,7 @@ import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import { createScriptedModelRuntime } from '../../../packages/agent/testing/scripted-model-runtime';
 import { startChannelForMode } from '../../../apps/server/channel-mode';
-import { createServer, type Server } from '../../../apps/server/server';
+import { createServer, type FileDeliveryPort, type Server } from '../../../apps/server/server';
 import type { NudgeClock } from '../../../apps/server/attachment-nudge';
 import { textAssistant, toolCallAssistant } from '../business-e2e/shared-instance';
 
@@ -435,10 +435,11 @@ export interface WecomSimOptions {
   /** 写面开关（runtime.allowWriteOperations）。缺省 false = 只读。 */
   readonly allowWriteOperations?: boolean;
   /**
-   * 派发模式（runtime.dispatchMode）。缺省 inline；background 才有受理即回执、
-   * 后台完成主动投递与 task_run 短等待窗口（G 组任务面）。
+   * 任务派发装配参数（不是配置键）：缺省 sync（无会话投递端口 = 进程内同步等结果）；
+   * 'async' = 本部署有会话投递端口（fileDelivery）→ server 走后台派发/完成主动投递
+   * （G 组任务面、E 组回传文件）。端口按此显式注入（有推送面就一律 async）。
    */
-  readonly dispatchMode?: 'inline' | 'background';
+  readonly taskDispatch?: 'sync' | 'async';
   /** 短等待窗口（runtime.taskRunWaitMs）。缺省产品值 1500ms；1 = 确定性超窗。 */
   readonly taskRunWaitMs?: number;
   /** 临时目录前缀（定位用）。 */
@@ -539,7 +540,7 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
     runtime: {
       attachmentNudgeAfterMs: options.nudgeAfterMs ?? NUDGE_AFTER_MS,
       ...(options.allowWriteOperations === true ? { allowWriteOperations: true } : {}),
-      ...(options.dispatchMode === undefined ? {} : { dispatchMode: options.dispatchMode }),
+      // 短等待窗口只在 async 装配（有推送面）下有意义；sync 装配直接同回合拿结果。
       ...(options.taskRunWaitMs === undefined ? {} : { taskRunWaitMs: options.taskRunWaitMs }),
     },
   };
@@ -565,6 +566,12 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
     });
   };
 
+  // 会话投递端口（fileDelivery）：只在显式声明 async 的样本注入——有推送面就一律 async。
+  const fileDeliveryPort: FileDeliveryPort = {
+    deliveryMode: channel.deliveryMode,
+    sendToConversation: (route, files) => channel.sendToConversation(route, { files }),
+    sendText: (route, text) => channel.sendToConversation(route, { text }),
+  };
   // createExecutionFace **不注入**：装配链缺省 = 仓内 dummy CLI（真实子进程，--state-dir 落 execStateDir）。
   const server: Server = await createServer({
     env,
@@ -574,11 +581,9 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
     createDrivers: () => Promise.all([makeDriver('main'), makeDriver('worker')]).then(
       ([mainDriver, workerDriver]) => ({ mainDriver, workerDriver }),
     ),
-    fileDelivery: {
-      deliveryMode: channel.deliveryMode,
-      sendToConversation: (route, files) => channel.sendToConversation(route, { files }),
-      sendText: (route, text) => channel.sendToConversation(route, { text }),
-    },
+    // 有推送面就一律 async；未声明 async 的样本不注入会话投递端口 → 进程内同步等结果
+    // （与原 inline 装配逐字节同形：既有 A/B/C/D/F 组样本的语义不变）。
+    ...(options.taskDispatch === 'async' ? { fileDelivery: fileDeliveryPort } : {}),
     attachmentNudgeClock: clock,
     logger: (line) => logs.push(line),
   });

@@ -17,7 +17,7 @@
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   AppConfig,
   ChannelRoute,
@@ -71,6 +71,8 @@ function testConfig(root: string): AppConfig {
     },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
+    // 有推送面 = 后台派发（async）；0 窗口让受理即返回，产物走后台完成投递（确定性）。
+    runtime: { taskRunWaitMs: 0 },
   };
 }
 
@@ -207,7 +209,9 @@ describe('CAP-01 单文件参数：默认服务装配（createServer + 真 dummy
       expect(reply).toContain('名册统计完成。');
 
       // ③ 执行层真的读到了附件：--input 指向宿主物化的任务输入，内容 = 附件字节。
-      expect(outcomes).toHaveLength(1);
+      await vi.waitFor(() => {
+        expect(outcomes).toHaveLength(1);
+      }, { timeout: 30_000 });
       const outcome = outcomes[0]!;
       expect(outcome.status).toBe('completed');
       const data = (outcome as Extract<ExecutionOutcome, { status: 'completed' }>).data as {
@@ -225,7 +229,9 @@ describe('CAP-01 单文件参数：默认服务装配（createServer + 真 dummy
       expect(data.output).toMatch(/\/tmp\/task_[^/]+\/out\/exec-output\.json$/);
 
       // ④ 产物经兜底扫描登记后进入交付：渠道端口收到执行层写出的文件。
-      expect(delivered).toHaveLength(1);
+      await vi.waitFor(() => {
+        expect(delivered).toHaveLength(1);
+      }, { timeout: 30_000 });
       const files = delivered[0]!.files;
       expect(files.map((file) => file.filename)).toEqual(['exec-output.json']);
       expect(JSON.parse(files[0]!.data.toString('utf8'))).toEqual({ lines: 3, chars: 6 });

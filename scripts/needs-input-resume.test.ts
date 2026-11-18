@@ -192,7 +192,8 @@ async function makeFixture(): Promise<Fixture> {
       readOnlyOperations: ['dummy.query'],
     }),
     // B 切片：钉 0 窗口（本套件测 needs_input/接续机制；窗口行为由专测覆盖）。
-    runtime: { dispatchMode: 'background', backgroundConcurrency: 1, queueCapacity: 0, taskRunWaitMs: 0 },
+    taskDispatch: 'async',
+    runtime: { backgroundConcurrency: 1, queueCapacity: 0, taskRunWaitMs: 0 },
     notificationSink: sink,
   });
   return {

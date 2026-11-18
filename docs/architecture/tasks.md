@@ -6,9 +6,12 @@
 
 任务是一行底账（归属 + 状态 + 机械原因 + 执行事实）。**状态只经一个归约核心改**；**身份分成「哪一次交办」与「哪一笔业务操作」两层**；**证明不了是同一笔就停副作用**。
 ## 1. 状态集与合法转换
-9 个状态，顺序即契约登记顺序：`TASK_STATUSES`（`packages/agent/src/task-registry.ts:54`）。五个终态（无边出）：`cancelled / completed / failed / timed_out / unexecuted`。起始状态取决于受理方式：**inline（缺省）直接 `running`**；只有 `dispatchMode=background` 才先落 `queued`（`packages/agent/src/task-runner.ts:411`）。
-合法边只有一张表 `LEGAL_TRANSITIONS`（`packages/agent/src/task-registry.ts:253`）：`queued → running | cancelling | timed_out`；`running → completed | failed | waiting_user | cancelling | timed_out | unexecuted`（`unexecuted` = 已汇报零执行）；`waiting_user → running | cancelling | timed_out`；`cancelling → cancelled | running`——后者是**「中止未获确认不得宣称取消」的回滚边**（`:250`）。
-所有状态变化经唯一归约核心 `reduceTaskState`（`packages/agent/src/task-registry.ts:328`）：非法边抛 `TaskTransitionError`（`:218`），**状态不变、零事实**，不做隐式修正。机械原因由目标状态决定（`mechanicalReason` `:290`，枚举 `TASK_REASONS` `:69`）；显式传入与目标不符即拒绝（防编造）。单写路径由守卫钉住：task-store 之外零 `UPDATE tasks`、写 status 的 SQL 恰一条、registry 实现层无裸 SQL（`packages/agent/task-registry-write-path.test.ts:44`、`:57`、`:70`）。
+9 个状态，顺序即契约登记顺序：`TASK_STATUSES`（`packages/agent/src/task-registry.ts:54`）。五个终态（无边出）：`cancelled / completed / failed / timed_out / unexecuted`。起始状态取决于派发方式：**同步等结果（ask/eval）直接 `running`**；server 的异步派发才先落 `queued`（`packages/agent/src/task-runner.ts:501-505`）。派发方式不是配置项（2026-11-18 起 `runtime.dispatchMode` 已删除）：server 恒 async，进程内入口恒 sync。
+
+合法边只有一张表 `LEGAL_TRANSITIONS`（`packages/agent/src/task-registry.ts:246`）：`queued → running | cancelling | timed_out`；`running → completed | failed | waiting_user | cancelling | timed_out | unexecuted`（`unexecuted` = 已汇报零执行）；`waiting_user → running | cancelling | timed_out`；`cancelling → cancelled | running`——后者是**「中止未获确认不得宣称取消」的回滚边**（`:243`）。
+
+所有状态变化经唯一归约核心 `reduceTaskState`（`packages/agent/src/task-registry.ts:321`）：非法边抛 `TaskTransitionError`（`:211`），**状态不变、零事实**，不做隐式修正。机械原因由目标状态决定（`mechanicalReason` `:283`，枚举 `TASK_REASONS` `:69`）；显式传入与目标不符即拒绝（防编造）。单写路径由守卫钉住：task-store 之外零 `UPDATE tasks`、写 status 的 SQL 恰一条、registry 实现层无裸 SQL（`packages/agent/task-registry-write-path.test.ts:44`、`:57`、`:70`）。
+
 ## 2. 两层身份：交办意图 / 业务操作
 `taskId` 是**交办意图**的身份；`dispatchKey` 是**业务操作**的身份，两者不互换：重试不新造交办，交办重复不合并操作（决定见 `docs/decisions/index.md`「U3 稳定逻辑操作身份 `dispatchKey`」）。
 

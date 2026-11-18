@@ -205,8 +205,8 @@ async function assembleBackground(options: AssembleOptions): Promise<Awaited<Ret
       workerDriver: unreachableDriver(),
     }),
     createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
+    taskDispatch: 'async',
     runtime: {
-      dispatchMode: 'background',
       backgroundConcurrency: options.backgroundConcurrency ?? 1,
       queueCapacity: options.queueCapacity ?? 0,
       // B 切片：故障注入套件钉在异步受理语义（测故障机制，不测短等待窗口的默认行为）。
@@ -507,7 +507,7 @@ function serverConfig(mode: 'inline' | 'background'): AppConfig {
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
     ...(mode === 'background'
-      ? { runtime: { dispatchMode: 'background' as const, backgroundConcurrency: 1, queueCapacity: 0 } }
+      ? { runtime: { backgroundConcurrency: 1, queueCapacity: 0 } }
       : {}),
   };
 }

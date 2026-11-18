@@ -75,7 +75,9 @@ function sumReply(sum: { total: number; byCustomer: Record<string, number> }, wi
 describe('E 组·附件 → 执行层（W-19～W-21）', () => {
   it('W-19 汇总成表发我：回传 xlsx 真实可开，华远 21000 / 明达 18000 / 合计 39000', async () => {
     const sample = await salesSampleXlsxAsync();
-    const sim = await startWecomSim({ label: 'w19' });
+    // 回传文件需要会话投递端口 → 该样本走 async 装配（server 有推送面就一律 background）；
+    // 短等待窗口给足，让 Worker 摘要同回合交给 Main（与既有样本语义一致）。
+    const sim = await startWecomSim({ label: 'w19', taskDispatch: 'async', taskRunWaitMs: 20_000 });
     try {
       // 片 2：交付物只从 Worker 出 —— Main 交办并转述，Worker 的 run_js 写 out/ 回传。
       const taskText = '按客户汇总金额并生成销售汇总表';
@@ -113,12 +115,11 @@ describe('E 组·附件 → 执行层（W-19～W-21）', () => {
       expect(sim.sdk.uploads.map((upload) => upload.filename)).toEqual(['销售汇总.xlsx']);
       expect(sim.sdk.media).toHaveLength(1);
       expect(sim.sdk.media[0]).toMatchObject({ kind: 'sendMediaMessage', mediaType: 'file' });
-      // 投递事实：live 端口 sent，message_done 带同一事实。
+      // 投递事实：live 端口 sent（后台完成回调；受理回合的 message_done 不再承载文件投递）。
+      await sim.waitFor('文件投递落账', () => sim.logs.some((line) => line['event'] === 'file_delivery'));
       const delivery = sim.logs.filter((line) => line['event'] === 'file_delivery');
       expect(delivery).toHaveLength(1);
       expect(delivery[0]).toMatchObject({ status: 'sent', files: 1 });
-      const done = sim.logs.find((line) => line['event'] === 'message_done');
-      expect(done).toMatchObject({ fileDelivery: { status: 'sent', files: 1 } });
       // 用户可见正文给出真实数字。
       expect(sim.finalBubbles()[0]!.content).toContain('合计 39000 元');
 

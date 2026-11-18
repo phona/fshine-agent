@@ -7,7 +7,7 @@
  * 焦点（任务书 §③）：
  *   ① 受理快速返回；② 并发受 policy 限制；③ waiting_user 释放并同 Task 接续；④ 通知生成/去重/投递；
  *   ⑤ 重启恢复（queued 重领 / unknown 不重放 / completed 不重跑）；⑥ 取消请求不被报成已取消；
- *   ⑦ 多用户归属不绕过；⑧ resultText 经 archiveReply 取回；⑨ dispatchMode 配置面；⑩ tasks 通知展示。
+ *   ⑦ 多用户归属不绕过；⑧ resultText 经 archiveReply 取回；⑨ 旧派发配置键已删除（防回潮）；⑩ tasks 通知展示。
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -193,8 +193,8 @@ async function assembleBackground(options: AssembleOptions): Promise<Awaited<Ret
       workerDriver: unreachableDriver(),
     }),
     createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
+    taskDispatch: 'async',
     runtime: {
-      dispatchMode: 'background',
       backgroundConcurrency: options.backgroundConcurrency ?? 1,
       // B 切片：本套件钉在异步受理语义（受理与执行解耦的机械事实断言）；短等待窗口的
       // 默认行为由 runtime-task-wait-window / server-task-wait-window 专测覆盖。
@@ -511,7 +511,7 @@ describe('R4 联合：P5 前台许可（inline 模式）', () => {
       // 本用例断言「占满即确定性拒绝」：显式 mainConcurrency=1 + queueCapacity=0
       // （缺省并发 4 / 排队 16 会让第二回合执行或排队，不再是拒绝面——CAP-01
       // 并发/排队缺省调整后，拒绝场景必须显式钉住单槽且关排队）。
-      runtime: { dispatchMode: 'inline', mainConcurrency: 1, queueCapacity: 0 },
+      runtime: { mainConcurrency: 1, queueCapacity: 0 },
     });
     try {
       const held = assembled.policy.acquire('foreground', { taskId: '外部回合' });
@@ -547,7 +547,7 @@ describe('R4 联合：P5 前台许可（inline 模式）', () => {
         workerDriver: unreachableDriver(),
       }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
-      runtime: { dispatchMode: 'inline', maxDelegationDepth: 0 },
+      runtime: { maxDelegationDepth: 0 },
     });
     try {
       await expect(assembled.session.send('任务X')).rejects.toThrowError(/资源策略拒绝|resource_limited/);
@@ -694,7 +694,7 @@ describe('R4 联合：P4 通知（假 sink，background 模式）', () => {
   });
 });
 
-describe('R4 联合：配置面（runtime.dispatchMode）', () => {
+describe('R4 联合：旧派发配置键已删除（runtime.dispatchMode）', () => {
   function writeConfig(file: string, runtimeLines: readonly string[]): string {
     writeFileSync(file, [
       'principals: {}',
@@ -709,44 +709,22 @@ describe('R4 联合：配置面（runtime.dispatchMode）', () => {
     return file;
   }
 
-  it('⑨ 合法值解析；非法值 fail-fast 点名 runtime.dispatchMode；未知键仍拒', () => {
+  // ⑨ 原「合法值解析/非法值 fail-fast」用例随配置键删除退役：派发方式不再是部署配置，
+  // 而是各入口的装配参数（server 恒 async；ask/eval 恒 sync）。旧键必须表现为未知键被拒
+  // （防止「写着不生效」的假配置回潮）；生产源码零引用的常驻守卫见
+  // packages/agent/resource-policy-single-source.test.ts。
+  it('⑨ 旧键 dispatchMode 已是未知键（fail-fast，不是静默忽略）', () => {
     const dir = tempDir();
-    const background = loadConfig({ yamlPath: writeConfig(path.join(dir, 'a.yaml'), ['  dispatchMode: background']) });
-    expect(background.runtime?.dispatchMode).toBe('background');
-    const inline = loadConfig({ yamlPath: writeConfig(path.join(dir, 'b.yaml'), ['  dispatchMode: inline']) });
-    expect(inline.runtime?.dispatchMode).toBe('inline');
-    expect(() => loadConfig({ yamlPath: writeConfig(path.join(dir, 'c.yaml'), ['  dispatchMode: parallel']) }))
-      .toThrowError(/runtime\.dispatchMode/);
-    expect(() => loadConfig({ yamlPath: writeConfig(path.join(dir, 'd.yaml'), ['  dispatchModee: inline']) }))
+    expect(() => loadConfig({ yamlPath: writeConfig(path.join(dir, 'a.yaml'), ['  dispatchMode: background']) }))
+      .toThrowError(/不是已知字段/);
+    expect(() => loadConfig({ yamlPath: writeConfig(path.join(dir, 'b.yaml'), ['  dispatchModee: inline']) }))
       .toThrowError(/不是已知字段/);
   });
 });
 
-describe('R4 联合：ask 入口对 background 的登记边界', () => {
-  it('⑬ assembleAskRuntime 对 runtime.dispatchMode=background 显式拒绝（不静默忽略/不半程丢任务）', async () => {
-    const dir = tempDir();
-    const configPath = path.join(dir, 'ask-background.yaml');
-    writeFileSync(configPath, [
-      'principals:',
-      '  "test:user":',
-      '    enabled: true',
-      'contextProfiles:',
-      '  t:',
-      `    root: ${FIXTURE_ROOT}`,
-      '    gateway: bin/dummy',
-      '    skillRoots: [".agents/skills-serve"]',
-      'runtime:',
-      '  dispatchMode: background',
-    ].join('\n') + '\n');
-    await expect(assembleAskRuntime({
-      purpose: 'ask',
-      argv: [`--config=${configPath}`],
-      env: { PATH: process.env['PATH'], HOME: process.env['HOME'], TMPDIR: process.env['TMPDIR'], LLM_API_KEY: 'test-key' },
-      runtimeDir: dir,
-      sessionId: 'ask-bg',
-    })).rejects.toThrowError(/入口不支持 runtime\.dispatchMode=background/);
-  });
-});
+// ⑬ 原「assembleAskRuntime 对 runtime.dispatchMode=background 显式拒绝」用例随配置键删除
+// 退役：ask 入口没有渠道推送面承接后台完成投递，装配恒为同步等结果（装配参数，不是配置键）；
+// 配置里根本不存在可写 background 的键，因此不再有「静默忽略/半程丢任务」的输入面。
 
 describe('R4 联合：tasks 详情通知投递展示（只读最小）', () => {
   function taskRecord(overrides: Partial<TaskRecord> = {}): TaskRecord {

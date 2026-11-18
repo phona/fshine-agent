@@ -99,6 +99,16 @@ const DELETED_ENV_KEYS = [
  *    `resolveRuntimeConfig` 的 mainTurnMs/workerTurnMs 注入执行侧消费点与后台 runner
  *    leaseMs；不自行解释旋钮、不读原始 `config.runtime.*`（单一配置源不破坏）。
  */
+/**
+ * 已删的 runtime 配置键（2026-11-18 owner 决定）：`dispatchMode` 不是产品概念，是迁移期开关。
+ * 派发方式是各入口的**装配参数**（`taskDispatch: 'sync' | 'async'`，server 恒 async、
+ * ask/eval 恒 sync），不再有部署配置面。旧 YAML 里残留的键由解析层以「未知字段」拒绝——
+ * 这条守卫防它被重新加回类型/解析/装配，或作为「写着不生效」的死键复活。
+ *
+ * 豁免：`*.test.ts`（本扫描已排除）里可以提到旧名做回归/历史说明；docs 与 git 历史不在扫描面。
+ */
+const DELETED_RUNTIME_CONFIG_KEYS = ['dispatchMode'] as const;
+
 const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   mainConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, P2_SCENARIOS, R8_CONCURRENCY],
   backgroundConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS, P2_SCENARIOS],
@@ -199,6 +209,18 @@ describe('P5-T01 单一配置源守卫：host 死键零引用 + 资源旋钮唯�
     }
     console.log(JSON.stringify({ event: 'p5_deleted_host_keys', files: productionFiles().length, hits: hits.length }));
     expect(hits, `已删 host 键仍被生产代码引用（双源/假配置回潮）：\n${hits.join('\n')}`).toEqual([]);
+  });
+
+  it('已删配置键 runtime.dispatchMode 在生产代码零引用（防回潮）', () => {
+    const hits: string[] = [];
+    for (const file of productionFiles()) {
+      const source = readFileSync(path.join(REPO_ROOT, file), 'utf8');
+      for (const key of DELETED_RUNTIME_CONFIG_KEYS) {
+        if (source.includes(key)) hits.push(`${file} -> ${key}`);
+      }
+    }
+    console.log(JSON.stringify({ event: 'p5_deleted_runtime_config_keys', files: productionFiles().length, hits: hits.length }));
+    expect(hits, `已删配置键仍被生产代码引用（迁移期开关回潮）：\n${hits.join('\n')}`).toEqual([]);
   });
 
   it('资源旋钮只允许登记的所有者文件解释（所有者表双向闭合）', () => {

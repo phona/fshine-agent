@@ -403,8 +403,8 @@ export function createSharedInstanceFixture(
     },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
-    // 真共享任务管理资源：background = 进程级 TaskRunner + 同一底账队列 + 同一资源策略。
-    runtime: { dispatchMode: 'background' },
+    // 真共享任务管理资源：server 恒 async = 进程级 TaskRunner + 同一底账队列 + 同一资源策略。
+    runtime: {},
   };
 
   const queue: AgentMessage[] = [];
@@ -434,6 +434,8 @@ export function createSharedInstanceFixture(
       createDrivers: buildDrivers,
       createExecutionFace: async () => ({ client, allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       taskExecutor: executor,
+      // 原 background 装配（异步受理/执行解耦）由推送面显式声明：静默端口只作能力声明。
+      fileDelivery: { deliveryMode: 'silent', async sendToConversation() { throw new Error('（eval）silent 不投递'); } },
       logger: (line) => logs.push(line),
     });
 

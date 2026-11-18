@@ -38,7 +38,7 @@ function tempDir(): string {
   return dir;
 }
 
-function testConfig(mode: 'inline' | 'background'): AppConfig {
+function testConfig(): AppConfig {
   return {
     principals: {
       'wecom:user-a': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
@@ -49,7 +49,8 @@ function testConfig(mode: 'inline' | 'background'): AppConfig {
     },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
-    ...(mode === 'background' ? { runtime: { dispatchMode: 'background' as const, backgroundConcurrency: 1 } } : {}),
+    // server 恒 async（派发方式不是配置键）；后台并发 1 保留为确定性资源读数。
+    runtime: { backgroundConcurrency: 1 },
   };
 }
 
@@ -185,7 +186,7 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
     const locations1: MainSessionLocation[] = [];
     const server1 = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig('inline'),
+      config: testConfig(),
       dbPath,
       sessionStoreDir,
       createDrivers: (_env, mainSession) => {
@@ -209,7 +210,7 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
     const locations2: MainSessionLocation[] = [];
     const server2 = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig('inline'),
+      config: testConfig(),
       dbPath,
       sessionStoreDir,
       createDrivers: (_env, mainSession) => ({
@@ -244,7 +245,7 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
     const executor1 = new CountingExecutor([async () => ({ kind: 'completed', resultText: 'W202611：documents 共 3 条。' })]);
     const server1 = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig('background'),
+      config: testConfig(),
       dbPath,
       sessionStoreDir,
       createDrivers: () => ({
@@ -253,6 +254,8 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
       }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       taskExecutor: executor1,
+      // 有推送面 = async（派发方式不是配置键）：静默端口只作能力声明，不发起真实投递。
+      fileDelivery: { deliveryMode: 'silent', async sendToConversation() { throw new Error('（测试）silent 不投递'); } },
       logger: () => {},
     });
     let taskId: string;
@@ -280,7 +283,7 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
     const rec2: DriverMessage[][] = [];
     const server2 = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig('background'),
+      config: testConfig(),
       dbPath,
       sessionStoreDir,
       createDrivers: () => ({
@@ -289,6 +292,7 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
       }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       taskExecutor: replayExecutor,
+      fileDelivery: { deliveryMode: 'silent', async sendToConversation() { throw new Error('（测试）silent 不投递'); } },
       logger: () => {},
     });
     const ro2 = createSqliteTaskRegistry(dbPath, { readOnly: true });
@@ -318,7 +322,7 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
     const locations1: MainSessionLocation[] = [];
     const server1 = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig('inline'),
+      config: testConfig(),
       dbPath,
       sessionStoreDir,
       createDrivers: (_env, mainSession) => ({
@@ -349,7 +353,7 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
     const locations2: MainSessionLocation[] = [];
     const server2 = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig('inline'),
+      config: testConfig(),
       dbPath,
       sessionStoreDir,
       createDrivers: (_env, mainSession) => ({

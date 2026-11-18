@@ -279,8 +279,11 @@ export interface SessionAssemblyInput {
   runtime?: RuntimeConfig;
   /** P5：进程级共享策略（server 跨会话复用）；缺省由本核心按 runtime 建。 */
   policy?: ResourcePolicy;
-  /** P6：派发模式覆盖；缺省取 `runtime.dispatchMode ?? 'inline'`。 */
-  dispatchMode?: 'inline' | 'background';
+  /**
+   * P6：任务派发装配参数（**只由装配方显式传入，不是配置键**）。缺省 'sync' = 委派
+   * 同步执行；'async' 需要渠道/后台面（server 装配传 'async'，ask/eval 传 'sync'）。
+   */
+  taskDispatch?: 'sync' | 'async';
   /** P6：进程级共享 runner（server 预建）；background 且缺省时由本核心按本会话执行面构建。 */
   taskRunner?: TaskRunner;
   /** P6：后台执行回合注入（测试/特殊部署）；缺省 = 真实 Worker 回合执行器。 */
@@ -714,7 +717,7 @@ export function attachNotificationOutbox(
  * 顺序与抽取前逐入口一致（门内不建库、不落盘：执行面失败时底账尚未创建）。
  */
 export async function assembleSessionCore(input: SessionAssemblyInput): Promise<AssembledSession> {
-  const dispatchMode: 'inline' | 'background' = input.dispatchMode ?? input.runtime?.dispatchMode ?? 'inline';
+  const taskDispatch: 'sync' | 'async' = input.taskDispatch ?? 'sync';
   const resolved = resolveRuntimeConfig(input.runtime);
   const policy = input.policy ?? createResourcePolicy(input.runtime);
   // 写面开关：显式投影优先，其次 runtime 段；缺省 false = 只读（零行为变化）。
@@ -787,9 +790,9 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
         workerDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env) }),
       };
 
-    // P6：background = 受理/后台路径；runner 进程级共享（server 注入），缺省按本会话执行面构建。
+    // P6：async = 受理/后台路径；runner 进程级共享（server 注入），缺省按本会话执行面构建。
     let runner = input.taskRunner;
-    if (dispatchMode === 'background' && runner === undefined) {
+    if (taskDispatch === 'async' && runner === undefined) {
       runner = (await createBackgroundDispatch({
         env: input.env,
         profile: input.profile,
@@ -818,8 +821,8 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
           : { onExecutionResultOversizeUnhandled: input.onExecutionResultOversizeUnhandled }),
       })).runner;
     }
-    // P4：通知链仅 background 且提供 sink 时启用（inline 默认零新增路径；投递由调用方触发）。
-    if (dispatchMode === 'background' && input.notificationSink !== undefined) {
+    // P4：通知链仅 async 且提供 sink 时启用（sync 默认零新增路径；投递由调用方触发）。
+    if (taskDispatch === 'async' && input.notificationSink !== undefined) {
       notifications = createNotificationOutbox({
         dbPath: input.dbPath,
         sink: input.notificationSink,
@@ -841,7 +844,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       workerSkills,
       taskRegistry,
       policy,
-      dispatchMode,
+      taskDispatch,
       ...(runner === undefined ? {} : { taskRunner: runner }),
       ...(mainSkillRegistry === undefined ? {} : { mainSkillRegistry }),
       ...(input.taskFactProvider === undefined ? {} : { taskFactProvider: input.taskFactProvider }),
@@ -910,12 +913,6 @@ export async function assembleAskRuntime(input: AskRuntimeInput): Promise<AskRun
   if (principalId === undefined) {
     throw new AssemblyRefusedError('配置里没有 enabled principal——最小切片需要可信身份来源（fail-closed，不回落写死值）。');
   }
-  // R4 登记边界：ask/redo 是进程内单轮入口，不承接后台派发（受理后进程即退出会半程丢任务）。
-  // 显式拒绝而非静默忽略——需要 background 的部署走 server 渠道面。
-  if ((config.runtime?.dispatchMode ?? 'inline') === 'background') {
-    throw new AssemblyRefusedError(`${input.purpose} 入口不支持 runtime.dispatchMode=background——后台派发由 server 渠道面承接（本入口不静默忽略）。`);
-  }
-
   const stateDir = path.join(input.runtimeDir, 'state');
   const dbPath = input.dbPath
     ?? (config.store?.dbPath !== undefined ? path.resolve(config.store.dbPath) : DEFAULT_DB_PATH);
@@ -939,6 +936,8 @@ export async function assembleAskRuntime(input: AskRuntimeInput): Promise<AskRun
     emptyOperationsError: (message) => new AssemblyRefusedError(message),
     // 写面开关：语义部署键 runtime.allowWriteOperations（缺省 false = 只读，ask 零行为变化）。
     allowWriteOperations: config.runtime?.allowWriteOperations === true,
+    // 进程内单轮入口：没有渠道推送面承接后台完成投递，装配恒为同步等结果（不是配置键）。
+    taskDispatch: 'sync',
     ...(input.mainSkillsDir === undefined ? {} : { mainSkillsDir: input.mainSkillsDir }),
   });
   return {

@@ -24,7 +24,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   AppConfig,
   ChannelRoute,
@@ -36,7 +36,7 @@ import type {
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver } from '../../packages/agent/src/driver-contract';
 import { createFileStore, type RegisteredFile } from '../../packages/agent/src/file-store';
-import { FILES_GENERATED_NOTICE, type TurnFileRef } from '../../packages/agent/src/execution-runtime';
+import type { TurnFileRef } from '../../packages/agent/src/execution-runtime';
 import { openTaskStore } from '@fshine/core';
 import { createServer, deliverTurnFilesCore, type FileDeliveryPort } from './server';
 
@@ -64,6 +64,8 @@ function testConfig(): AppConfig {
     },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
+    // 有推送面 = 后台派发（async）；0 窗口让受理即返回，完成投递走后台完成回调（确定性）。
+    runtime: { taskRunWaitMs: 0 },
   };
 }
 
@@ -166,10 +168,16 @@ function stagedAttachment(root: string, filename: string, bytes: Buffer): Incomi
 }
 
 /** live 端口：成功回 per-file 回执；fail=true 抛错（带空 receipt，模拟部分 ACK 形状）。 */
-function livePort(options: { fail?: boolean } = {}): { port: FileDeliveryPort; calls: Array<{ route: ChannelRoute; files: readonly OutgoingFileReply[] }> } {
+function livePort(options: { fail?: boolean } = {}): {
+  port: FileDeliveryPort;
+  calls: Array<{ route: ChannelRoute; files: readonly OutgoingFileReply[] }>;
+  texts: Array<{ route: ChannelRoute; text: string }>;
+} {
   const calls: Array<{ route: ChannelRoute; files: readonly OutgoingFileReply[] }> = [];
+  const texts: Array<{ route: ChannelRoute; text: string }> = [];
   return {
     calls,
+    texts,
     port: {
       deliveryMode: 'live',
       async sendToConversation(route, files): Promise<DeliveryReceipt> {
@@ -180,6 +188,10 @@ function livePort(options: { fail?: boolean } = {}): { port: FileDeliveryPort; c
           throw error;
         }
         return { route, parts: files.map((_, index) => ({ kind: 'file' as const, index, status: 'sent' as const })) };
+      },
+      async sendText(route, text): Promise<DeliveryReceipt> {
+        texts.push({ route, text });
+        return { route, parts: [{ kind: 'text' as const, index: 0, status: 'sent' as const }] };
       },
     },
   };
@@ -245,27 +257,30 @@ async function makeFixture(input: {
 }
 
 describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
-  it('① 故意让投递失败 → 用户看到「未送达」、事件记 delivery_failed、不记 sent', async () => {
-    const { port, calls } = livePort({ fail: true });
+  it('① 后台完成投递失败 → 用户看到「未送达」、事件记 delivery_failed、不记 sent', async () => {
+    const { port, calls, texts } = livePort({ fail: true });
     const { server, logs } = await makeFixture({
       steps: [TASK_RUN_STEP],
       workerSteps: [WORKER_RUN_JS_STEP],
       port,
     });
     try {
-      const reply = await server.handler(incoming('m-fail', '帮我汇总'));
-      // 用户话术：模型正文 + 如实的未送达话术（失败不吞）。
-      expect(reply).toContain('汇总完成。');
-      expect(reply).toContain('未送达');
-      // 事件：结构化失败事实，绝不记 sent。
+      await server.handler(incoming('m-fail', '帮我汇总'));
+      // 后台完成 → 文件投递失败：结构化事实记 delivery_failed，绝不记 sent。
+      await vi.waitFor(() => {
+        expect(logs.filter((line) => line['event'] === 'file_delivery')).toHaveLength(1);
+      });
       const deliveryLogs = logs.filter((line) => line['event'] === 'file_delivery');
-      expect(deliveryLogs).toHaveLength(1);
       expect(deliveryLogs[0]!['status']).toBe('delivery_failed');
       expect(deliveryLogs[0]!['files']).toBe(1);
       expect(logs.some((line) => line['event'] === 'file_delivery' && line['status'] === 'sent')).toBe(false);
-      // 回合仍是成功回执（message_done 落了投递事实）。
-      const done = logs.find((line) => line['event'] === 'message_done');
-      expect(done?.['fileDelivery']).toEqual({ status: 'delivery_failed', files: 1 });
+      // 用户话术：结果文本 + 如实的未送达话术经文本投递面发出（失败不吞）。
+      await vi.waitFor(() => {
+        expect(texts).toHaveLength(1);
+      });
+      expect(texts[0]!.text).toContain('汇总完成。');
+      expect(texts[0]!.text).toContain('未送达');
+      expect(logs.some((line) => line['event'] === 'task_result_delivery_sent')).toBe(true);
       expect(calls).toHaveLength(1); // live 确实发起了投递
     } finally {
       await server.close();
@@ -273,7 +288,7 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
   });
 
   it('①b 投递成功后事件写失败（R7-F3）→ 结果仍是 sent、话术无「未送达」、不诱导重试', async () => {
-    const { port, calls } = livePort();
+    const { port, calls, texts } = livePort();
     const { server, logs } = await makeFixture({
       steps: [TASK_RUN_STEP],
       workerSteps: [WORKER_RUN_JS_STEP],
@@ -282,18 +297,21 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
       throwsOnLog: (line) => line['event'] === 'file_delivery' && line['status'] === 'sent',
     });
     try {
-      const reply = await server.handler(incoming('m-logfail', '帮我汇总'));
+      await server.handler(incoming('m-logfail', '帮我汇总'));
       // 用户话术：投递已成功，日志写失败不得改写结果——无「未送达」、无「请重试」诱导。
-      expect(reply).toContain('汇总完成。');
-      expect(reply).not.toContain('未送达');
-      expect(reply).not.toContain('请重试');
-      // 事实面：回合结果仍记 sent；端口确实收到字节（只投一次，无重复交付）。
-      const done = logs.find((line) => line['event'] === 'message_done');
-      expect(done?.['fileDelivery']).toEqual({ status: 'sent', files: 1 });
+      await vi.waitFor(() => {
+        expect(texts).toHaveLength(1);
+      });
+      expect(texts[0]!.text).toContain('汇总完成。');
+      expect(texts[0]!.text).not.toContain('未送达');
+      expect(texts[0]!.text).not.toContain('请重试');
+      // 端口确实收到字节（只投一次，无重复交付）。
       expect(calls).toHaveLength(1);
       // 失败的写只降级为一条独立观测事件（status 仍 sent），不产生任何 delivery_failed 事实。
+      await vi.waitFor(() => {
+        expect(logs.filter((line) => line['event'] === 'file_delivery_log_write_failed')).toHaveLength(1);
+      });
       const observed = logs.filter((line) => line['event'] === 'file_delivery_log_write_failed');
-      expect(observed).toHaveLength(1);
       expect(observed[0]!['status']).toBe('sent');
       expect(logs.some((line) => line['status'] === 'delivery_failed')).toBe(false);
     } finally {
@@ -318,8 +336,10 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     try {
       const reply = await server.handler(incoming('m-silent', '帮我汇总'));
       expect(reply).toBe('汇总完成。');
+      await vi.waitFor(() => {
+        expect(logs.filter((line) => line['event'] === 'file_delivery')).toHaveLength(1);
+      });
       const deliveryLogs = logs.filter((line) => line['event'] === 'file_delivery');
-      expect(deliveryLogs).toHaveLength(1);
       expect(deliveryLogs[0]!['status']).toBe('suppressed');
       expect(deliveryLogs[0]!['deliveryMode']).toBe('silent');
       expect(logs.some((line) => line['event'] === 'file_delivery' && line['status'] === 'sent')).toBe(false);
@@ -348,27 +368,32 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
   });
 
   it('④ 只有文件、正文为空 → 不判回合失败，投递照常发生（live 成功记 sent）', async () => {
-    const { port, calls } = livePort();
+    const { port, calls, texts } = livePort();
     const { server, logs } = await makeFixture({
-      // Main 正文为空、交付物来自 Worker：仍不判回合失败（v8 §7 四必守 #2）。
+      // Main 正文为空（只交办）：受理回执语由 Main 自己给；产物由后台 Worker 完成投递。
       steps: [{ execCalls: [TASK_RUN_CALL], text: '' }],
       workerSteps: [WORKER_RUN_JS_STEP],
       port,
     });
     try {
-      // 不抛（判失败就走不到投递了，v8 §7 四必守 #2 的理由）；正文 = 宿主兜底话术。
-      const reply = await server.handler(incoming('m-empty', '发文件'));
-      expect(reply).toBe(FILES_GENERATED_NOTICE);
-      // 投递面收到文件字节（handler 只传 files，文本不进端口）。
-      expect(calls).toHaveLength(1);
+      // 后台派发下主回合正文为空且无本回合文件 → 按既有判据失败（判定的是**主回合**，不是任务）。
+      await expect(server.handler(incoming('m-empty', '发文件'))).rejects.toThrow('本回合未产出可用回复');
+      // 投递面仍收到文件字节（后台任务完成回调，与前台同一交付面）。
+      await vi.waitFor(() => {
+        expect(calls).toHaveLength(1);
+      });
       expect(calls[0]!.files).toHaveLength(1);
       expect(calls[0]!.files[0]!.filename).toBe('汇总.txt');
       expect(calls[0]!.files[0]!.data.toString()).toBe('summary-bytes');
       expect(calls[0]!.route).toEqual({ channel: 'wecom', conversationId: 'conv-a' });
-      const deliveryLogs = logs.filter((line) => line['event'] === 'file_delivery');
-      expect(deliveryLogs[0]!['status']).toBe('sent');
-      const done = logs.find((line) => line['event'] === 'message_done');
-      expect(done?.['fileDelivery']).toEqual({ status: 'sent', files: 1 });
+      await vi.waitFor(() => {
+        expect(logs.some((line) => line['event'] === 'file_delivery' && line['status'] === 'sent')).toBe(true);
+      });
+      // 文本结果照常送达（文件过滤不影响结果正文）。
+      await vi.waitFor(() => {
+        expect(texts).toHaveLength(1);
+      });
+      expect(texts[0]!.text).toContain('汇总完成。');
     } finally {
       await server.close();
     }
@@ -408,22 +433,23 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
       port,
     });
     try {
-      const reply = await server.handler(incoming('m-dedupe', '帮我汇总两次'));
-      expect(reply).toBe('汇总完成。');
+      await server.handler(incoming('m-dedupe', '帮我汇总两次'));
       // 投递面：一次调用、一份文件（同 sha256 + 同文件名只投第一份）。
-      expect(calls).toHaveLength(1);
+      await vi.waitFor(() => {
+        expect(calls).toHaveLength(1);
+      });
       expect(calls[0]!.files).toHaveLength(1);
       expect(calls[0]!.files[0]!.filename).toBe('汇总.txt');
       expect(calls[0]!.files[0]!.data.toString()).toBe('summary-bytes');
       // 事件面：只有一条 sent 事实、计数按实际投递份数；去重项不产生额外事件或错误日志。
+      await vi.waitFor(() => {
+        expect(logs.filter((line) => line['event'] === 'file_delivery')).toHaveLength(1);
+      });
       const deliveryLogs = logs.filter((line) => line['event'] === 'file_delivery');
-      expect(deliveryLogs).toHaveLength(1);
       expect(deliveryLogs[0]!['status']).toBe('sent');
       expect(deliveryLogs[0]!['files']).toBe(1);
       expect(logs.some((line) => line['status'] === 'delivery_failed')).toBe(false);
       expect(logs.some((line) => line['event'] === 'file_delivery_log_write_failed')).toBe(false);
-      const done = logs.find((line) => line['event'] === 'message_done');
-      expect(done?.['fileDelivery']).toEqual({ status: 'sent', files: 1 });
     } finally {
       await server.close();
     }
@@ -448,7 +474,9 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     });
     try {
       await server.handler(incoming('m-dedupe-key', '发四份'));
-      expect(calls).toHaveLength(1);
+      await vi.waitFor(() => {
+        expect(calls).toHaveLength(1);
+      });
       // 四份两两不同（键 = sha256 + 文件名）→ 一份都不吞。
       expect(calls[0]!.files.map((file) => `${file.filename}:${file.data.toString()}`)).toEqual([
         '同名.txt:A',
@@ -456,8 +484,10 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
         '异名-1.txt:C',
         '异名-2.txt:C',
       ]);
+      await vi.waitFor(() => {
+        expect(logs.filter((line) => line['event'] === 'file_delivery')).toHaveLength(1);
+      });
       const deliveryLogs = logs.filter((line) => line['event'] === 'file_delivery');
-      expect(deliveryLogs).toHaveLength(1);
       expect(deliveryLogs[0]!['files']).toBe(4);
     } finally {
       await server.close();

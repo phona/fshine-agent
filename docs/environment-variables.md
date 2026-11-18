@@ -40,9 +40,11 @@
 > fail-fast、未知键拒绝，缺省由 `packages/agent/src/resource-policy.ts` 按「缺省=现行为」
 > 补齐；登记见 `docs/decisions/index.md` §三十二，静态守卫见
 > `packages/agent/resource-policy-single-source.test.ts`。
-> `runtime` 段另含 `dispatchMode: inline | background`（R4 集成接线，2026-11-14；缺省
-> `inline` = 现行为：委派同步执行；`background` = 受理即回执、后台 TaskRunner 执行——
-> 仅 server 渠道面承接，ask/redo 入口对 background 显式拒绝；模板见 `config/agent.example.yaml`）。
+> **任务派发不是配置项**（2026-11-18 owner 决定）：迁移期的 `runtime.dispatchMode`
+> 已删除——它不是产品概念。现在只有一个执行模型：**server 有渠道推送面，恒 async**
+> （受理即回执、后台 TaskRunner 执行、完成后主动投递）；**ask/eval 这类无渠道入口恒同步
+> 等结果**。两者由各入口的装配参数（`taskDispatch: 'sync' | 'async'`）显式传入，不从
+> config 读取；旧 YAML 里的 `dispatchMode` 按未知键拒绝（防「写着不生效」）。
 > `runtime.fileRetentionSweepOnStart`（2026-11-17；缺省 `false`）：server 启动装配完成后、
 > 渠道开始接消息之前，按 `fileRetentionDays` **扫一次**到期 run 目录（`dryRun=false`，
 > 结果进启动日志）；缺省关闭 = 零行为变化，只扫一次、无定时器（周期调度归部署侧）。

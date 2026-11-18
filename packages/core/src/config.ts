@@ -151,7 +151,6 @@ const RUNTIME_KEYS = [
   'fileRefTtlDays',
   'fileRetentionDays',
   'fileRetentionSweepOnStart',
-  'dispatchMode',
   'allowWriteOperations',
   'attachmentNudgeAfterMs',
   // 预期契约（2026-11-18）：后台任务超过 10 分钟无动静的提醒阈值与其自动发送上限（30 分钟）。
@@ -196,7 +195,7 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     }
   }
   const config: RuntimeConfig = {};
-  type RuntimeIntegerKey = Exclude<keyof RuntimeConfig, 'taskBudget' | 'dispatchMode' | 'fileRetentionSweepOnStart' | 'allowWriteOperations'>;
+  type RuntimeIntegerKey = Exclude<keyof RuntimeConfig, 'taskBudget' | 'fileRetentionSweepOnStart' | 'allowWriteOperations'>;
   const integers: ReadonlyArray<[RuntimeIntegerKey, number]> = [
     ['mainConcurrency', 1],
     ['backgroundConcurrency', 0],
@@ -246,13 +245,6 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     if (calls === undefined) throw new Error('配置项 runtime.taskBudget.calls 必填（taskBudget 必须同时声明 ms 与 calls）');
     const tokens = runtimeInteger(budget['tokens'], 'taskBudget.tokens', 1);
     config.taskBudget = { ms, calls, ...(tokens === undefined ? {} : { tokens }) };
-  }
-  const dispatchMode = raw['dispatchMode'];
-  if (dispatchMode !== undefined && dispatchMode !== null && dispatchMode !== '') {
-    if (dispatchMode !== 'inline' && dispatchMode !== 'background') {
-      throw new Error(`配置项 runtime.dispatchMode 必须是 inline 或 background（当前: ${String(dispatchMode)}）`);
-    }
-    config.dispatchMode = dispatchMode;
   }
   return Object.keys(config).length === 0 ? undefined : config;
 }

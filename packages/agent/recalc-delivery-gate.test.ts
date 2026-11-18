@@ -19,7 +19,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import ExcelJS from 'exceljs';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openTaskStore } from '@fshine/core';
 import { createFileStore, sessionDirOf } from './src/file-store';
 import {
@@ -229,6 +229,7 @@ interface ServerGateFixture {
   server: Awaited<ReturnType<typeof createServer>>;
   logs: Array<Record<string, unknown>>;
   calls: Array<{ route: ChannelRoute; files: readonly OutgoingFileReply[] }>;
+  texts: Array<{ route: ChannelRoute; text: string }>;
 }
 
 async function makeServerGateFixture(input: {
@@ -242,6 +243,7 @@ async function makeServerGateFixture(input: {
   dirs.push(dir);
   const logs: Array<Record<string, unknown>> = [];
   const calls: Array<{ route: ChannelRoute; files: readonly OutgoingFileReply[] }> = [];
+  const texts: Array<{ route: ChannelRoute; text: string }> = [];
 
   const runJs: RunJsExecutor = {
     async runJs({ scope }) {
@@ -311,6 +313,8 @@ async function makeServerGateFixture(input: {
     contextProfiles: { dummy: { root: dir, gateway: 'bin/dummy', skillRoots: [] } },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
+    // 有推送面 = 后台派发（async）；0 窗口让受理即返回，产物/话术走后台完成投递。
+    runtime: { taskRunWaitMs: 0 },
   };
   const recalcExecutor: RecalcXlsxExecutor = {
     available: true,
@@ -335,10 +339,14 @@ async function makeServerGateFixture(input: {
         calls.push({ route, files });
         return { route, parts: files.map((_, i) => ({ kind: 'file', index: i, status: 'sent' })) };
       },
+      async sendText(route, text): Promise<DeliveryReceipt> {
+        texts.push({ route, text });
+        return { route, parts: [{ kind: 'text', index: 0, status: 'sent' }] };
+      },
     },
     logger: (line) => { logs.push(line); },
   });
-  return { server, logs, calls };
+  return { server, logs, calls, texts };
 }
 
 function serverIncoming(): IncomingChannelMessage {
@@ -351,11 +359,16 @@ function serverIncoming(): IncomingChannelMessage {
 describe('server 投递闸挂点（终判在 deliverTurnFiles）', () => {
   it('注入 recalc 执行器 + fail 报告 → 不投递（recalc_gated），端口零调用', async () => {
     const f = await xlsxBuffer({ A1: 1, C1: FORMULA_CELL });
-    const { server, logs, calls } = await makeServerGateFixture({ formulaXlsx: f, recalcMode: 'gate', reportStatus: 'fail' });
+    const { server, logs, calls, texts } = await makeServerGateFixture({ formulaXlsx: f, recalcMode: 'gate', reportStatus: 'fail' });
     try {
-      const reply = await server.handler(serverIncoming());
-      expect(reply).toContain('公式实算校验');
+      await server.handler(serverIncoming());
       expect(calls).toHaveLength(0);
+      await vi.waitFor(() => {
+        expect(logs.filter((l) => l['event'] === 'recalc_delivery_gated')).toHaveLength(1);
+        expect(texts).toHaveLength(1);
+      });
+      // 用户话术（后台完成投递文本）如实说明闸门原因。
+      expect(texts[0]!.text).toContain('公式实算校验');
       const gated = logs.filter((l) => l['event'] === 'recalc_delivery_gated');
       expect(gated).toHaveLength(1);
       expect(gated[0]!['items']).toEqual([
@@ -371,7 +384,7 @@ describe('server 投递闸挂点（终判在 deliverTurnFiles）', () => {
     const { server, logs, calls } = await makeServerGateFixture({ formulaXlsx: f, recalcMode: 'gate' });
     try {
       await server.handler(serverIncoming());
-      expect(calls).toHaveLength(1);
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
       expect(calls[0]!.files[0]!.filename).toBe('汇总.xlsx');
       expect(logs.some((l) => l['event'] === 'recalc_delivery_gated')).toBe(false);
     } finally {
@@ -386,7 +399,7 @@ describe('server 投递闸挂点（终判在 deliverTurnFiles）', () => {
     });
     try {
       await server.handler(serverIncoming());
-      expect(calls).toHaveLength(1);
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
       expect(calls[0]!.files[0]!.filename).toBe('汇总.xlsx');
       expect(calls[0]!.files[0]!.data).toEqual(f);
       expect(logs.some((l) => l['event'] === 'recalc_delivery_gated')).toBe(false);
@@ -400,18 +413,21 @@ describe('server 投递闸 · 混合批次', () => {
   it('批次含 fail 报告表 + 无报告 CSV → 只投 CSV，用户可见「部分未投递」话术', async () => {
     const f = await xlsxBuffer({ A1: 1, C1: FORMULA_CELL });
     const csv = Buffer.from('名称,金额\n甲,6\n', 'utf8');
-    const { server, logs, calls } = await makeServerGateFixture({
+    const { server, logs, calls, texts } = await makeServerGateFixture({
       formulaXlsx: f,
       extraPlainFile: { name: '明细.values.csv', bytes: csv },
       recalcMode: 'gate',
       reportStatus: 'fail',
     });
     try {
-      const reply = await server.handler(serverIncoming());
-      expect(calls).toHaveLength(1);
+      await server.handler(serverIncoming());
+      await vi.waitFor(() => {
+        expect(calls).toHaveLength(1);
+        expect(texts).toHaveLength(1);
+      });
       expect(calls[0]!.files.map((x) => x.filename)).toEqual(['明细.values.csv']);
-      expect(reply).toContain('部分');
-      expect(reply).toMatch(/未投递|未发送|未通过/);
+      expect(texts[0]!.text).toContain('部分');
+      expect(texts[0]!.text).toMatch(/未投递|未发送|未通过/);
       expect(logs.some((l) => l['event'] === 'recalc_delivery_gated')).toBe(true);
     } finally {
       await server.close();

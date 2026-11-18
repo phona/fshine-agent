@@ -371,7 +371,8 @@ function p2Config(spec: P2ServerSpec): AppConfig {
     },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
-    runtime: { ...(spec.runtime ?? {}), ...(spec.mode === 'background' ? { dispatchMode: 'background' as const } : {}) },
+    // 派发方式不是配置键：server 恒 async；spec.mode 只留作评测样本的观测标签。
+    runtime: spec.runtime ?? {},
   };
 }
 
@@ -431,6 +432,10 @@ export async function startP2Server(spec: P2ServerSpec): Promise<P2ServerHandle>
     createDrivers,
     createExecutionFace: async () => face,
     ...(spec.notificationSink === undefined ? {} : { notificationSink: spec.notificationSink }),
+    // 原 background 装配由推送面显式声明（server 有推送面 = async）；inline 样本保持同步。
+    ...(spec.mode === 'background'
+      ? { fileDelivery: { deliveryMode: 'silent' as const, async sendToConversation() { throw new Error('（eval）silent 不投递'); } } }
+      : {}),
     logger: (line) => logs.push(line),
   });
   return {
