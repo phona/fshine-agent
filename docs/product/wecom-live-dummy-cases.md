@@ -150,9 +150,9 @@ TMPDIR=/home/tao/.tmp node scripts/eval/fixtures/make-sales-sample.mjs /home/tao
 | W-26〔自动〕| P1 | `帮我把销售明细按客户汇总，做成表，做完发我`（明显超窗） | 受理回执**不含 `#`、不含编号数字**；任务在后台推进并最终 completed；完成后结果主动投递一次 | 受理回执是否即时、是否像话 | `message_done` 的 `taskIds`；底账状态 `completed`；`task_result_delivery_sent` |
 | W-27〔自动〕| P1 | 接 W-26：`刚才那个跑完了吗？` | 纯查询（task_status）按上文找回同一任务状态，**不发起新的 execution** | 是否需要用户重复编号 | 该回合 `executions: []` |
 | W-28〔自动〕| P1 | 窗口内能完成的任务（快活） | 同回合直接给结果、**零受理回执**、零主动投递（B 轨短等待窗口的回归钉子） | 结果是否当场给出 | 无 `task_result_delivery_sent`；回复无「已受理/后台办理」 |
-| W-29〔自动〕| P1 | 后台任务失败（超窗后执行层拒绝） | 用户**主动**收到一条「没办成：<业务名>」，不用等下次开口；不冒充成功 | 失败是否主动告知 | `notification_push_sent`；`task_result_delivery_sent` 为 0 |
-| W-30〔自动〕| P1 | 后台任务卡在等补充（`needs_input`） | 主动一条「需要你一句话：<业务名>——还缺：X」 | 缺什么是否说清 | `notification_push_sent`（kind=waiting_user） |
-| W-31〔自动〕| P1 | 快活失败（窗口内落定） | **零**主动推送（模型同回合已说明），不重复发 | 是否出现两条同义消息 | 无 `notification_push_sent` |
+| W-39〔自动〕| P1 | 后台任务失败（超窗后执行层拒绝） | 用户**主动**收到一条「没办成：<业务名>」，不用等下次开口；不冒充成功 | 失败是否主动告知 | `notification_push_sent`；`task_result_delivery_sent` 为 0 |
+| W-40〔自动〕| P1 | 后台任务卡在等补充（`needs_input`） | 主动一条「需要你一句话：<业务名>——还缺：X」 | 缺什么是否说清 | `notification_push_sent`（kind=waiting_user） |
+| W-41〔自动〕| P1 | 快活失败（窗口内落定） | **零**主动推送（模型同回合已说明），不重复发 | 是否出现两条同义消息 | 无 `notification_push_sent` |
 
 ### H. 稳定性与多人（4）
 
@@ -298,7 +298,7 @@ TMPDIR=/home/tao/.tmp node scripts/eval/fixtures/make-sales-sample.mjs /home/tao
 （输出逐条 PASS/FAIL 与 summary，失败退出码非 0）；同一批用例进全量门
 `TMPDIR=~/.tmp vitest run scripts/eval/wecom-sim`。
 
-**主动推送（W-29～W-31）**：`apps/server/server-notification-push.test.ts`（假 executor + 假投递面，
+**主动推送（W-39～W-41）**：`apps/server/server-notification-push.test.ts`（假 executor + 假投递面，
 零网络）——失败/等补充/完成/silent/快活失败五条，含两条反向绊线（把 `completed` 也算推送种类 →
 「完成零推送」变红；去掉同回合抑制标记 →「快活失败零推送」变红）。
 
