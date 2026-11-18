@@ -7,7 +7,7 @@
  */
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import type { AnchorRule, UserCase } from './cases';
+import type { AnchorRule, ResultCheckpoint, UserCase } from './cases';
 import type {
   AuditIndex, AuditRow, ExecutionsExport, InputsFile, MetaFile, ReplyLine, ToolCallRecord, TaskRecordJson,
   ExecutionRecordJson,
@@ -95,18 +95,43 @@ function splitSentences(text: string): Array<{ text: string; question: boolean }
 }
 
 /**
- * 实际提问形态（判定器缺陷修复，2026-11-13 重切）：冻结词表命中只表示"句中出现疑问词"，
- * 陈述句里的「分属哪个窗口」这类用法不是提问；用于**判负**的门槛必须再加一层形态判断——
- * 句末问号，或请求式短语（请提供/请确认/请补充/请告诉/需要你/你是指/请问）。
+ * 实际提问形态（判定器缺陷修复，2026-11-13 重切；2026-11-18 追问假红再切）：
+ * 冻结词表命中只表示"句中出现疑问词"，陈述句里的「分属哪个窗口」这类用法不是提问；
+ * 用于**判负**的门槛必须同时满足：
+ *   ① 疑问方向：句末问号，或请求式短语**且索要对象**（请提供/请确认/请补充/请告诉/请说明/
+ *      需要你提供|确认|说明|告诉我）——裸「需要你…」不再算（E04 实测「需要你给三样东西」
+ *      被判追问，而它索要的是另一个对象缺失的字段）；
+ *   ② 不是条件句/陈述句：「如果/若/假如/要是/如需/需要的话…」与「需要你留意/提醒一下/
+ *      有一点需要…」是后续提议或说明，不是复问（E03/E15 实测）。
+ * 真正的复问形态（「你要查哪个集合？」「请确认一下是哪个窗口」）仍命中（负例绊线）。
  * 提问检测本身（question 字段）保持冻结口径不变。
  */
+// 条件句可能带前导连词（E03 实测「所以如果你要按某个时间段…看，请告诉我…」）——
+// 连词后仍按条件式后续提议豁免。
+const CONDITIONAL_PREFIX_RE = /^(?:但|不过|所以|那么|那|另外|同时|此外|以及|而|并且)?\s*(如果|若|假如|要是|一旦|如需|需要的话|若有|需要时)/;
+const STATEMENT_MARKERS = ['需要你留意', '需要你注意', '需要提醒你', '提醒一下', '需要说明', '顺便说一句', '有一点需要'] as const;
+const QUESTION_REQUEST_MARKERS = [
+  '请问', '请提供', '请确认', '请补充', '请告诉', '请说明', '请给出', '麻烦告诉',
+  '需要你提供', '需要你确认', '需要你说明', '需要你告诉我',
+] as const;
+/**
+ * 「另一对象的字段/数据存放在哪里」是索要新数据，不是复问用户已给的对象（E04 实测
+ * 「客户与核销数据在哪个集合」被判复问）。限定为业务数据名词 + 在 + 哪个集合/窗口的定位式；
+ * 直接索要查询对象（「请告诉我要查哪个集合」）不含这类主语，仍判追问（负例）。
+ */
+const OTHER_DATA_LOCATOR_RE = /(客户|核销|到期日|应收|未结清|快照|明细|字段|资料|信息)[^，。；！？\n]{0,10}在\s*(哪个|哪一|什么)(集合|窗口)/;
+
 function isActualQuestion(sentence: string): boolean {
   const text = sentence.trim();
-  if (/[？?]/.test(text)) return true;
-  // 否定式不是提问（2026-11-18 判定器缺陷修复）：E15 实测「**不需要你**再做选择」被判成追问，
-  // 而它恰是在说明"不必再问"。先把否定词剥掉，再找请求式标记。
+  // 否定式不是提问（2026-11-18）：先把否定词剥掉，再找请求式标记（「不需要你再做选择」= 说明不必再问）。
   const stripped = text.replace(/不需要|不用|无需|不必|没必要/g, '');
-  return ['请问', '请提供', '请确认', '请补充', '请告诉', '需要你', '你是指'].some((word) => stripped.includes(word));
+  // 条件句/陈述式说明不是提问（2026-11-18）：条件式后续提议与"有一点需要留意"式说明
+  // 不含对已给对象的复问；即使带问号也按提议处理（负例：裸「你要查哪个集合？」无此标记）。
+  if (CONDITIONAL_PREFIX_RE.test(stripped)) return false;
+  if (STATEMENT_MARKERS.some((marker) => stripped.includes(marker))) return false;
+  if (OTHER_DATA_LOCATOR_RE.test(stripped)) return false;
+  if (/[？?]/.test(text)) return true;
+  return QUESTION_REQUEST_MARKERS.some((word) => stripped.includes(word));
 }
 
 /**
@@ -163,6 +188,13 @@ const NEEDLESS_QUESTION_PHRASES = [
 const WRITE_PHRASES = [
   '已添加', '已经添加', '已新增', '已变更', '已修改', '已生效', '已验证', '已办成', '已办好', '写好了', '改好了',
 ];
+/**
+ * 只读用例的写完成话术（2026-11-18）：`已办好/已办成` 是通用"办完"口语，只读查询也会用它开头
+ * （E15 实测「已办好，结果如下」被判假成功）；其"写完成"含义只在写请求语境成立，故只读用例
+ * 不启用这两句，其余写面短语（已添加/已修改/已验证…）照旧拦。
+ * 写请求用例（E11）仍把「已办好」当写完成宣称（负例绊线）。
+ */
+const READ_ONLY_WRITE_PHRASES = WRITE_PHRASES.filter((phrase) => phrase !== '已办成' && phrase !== '已办好');
 /** E11 专用（写请求轮：完成/交接类话术一律视为已办成宣称）。 */
 const E11_WRITE_PHRASES = [
   ...WRITE_PHRASES,
@@ -272,6 +304,12 @@ function normalizeArgs(args: unknown): Record<string, unknown> {
     }
   }
   return output;
+}
+
+/** 参数等值匹配（裸键等值；expected 为空/undefined = 不匹配）。 */
+function argsMatch(normalized: Record<string, unknown>, expected: Readonly<Record<string, string>> | undefined): boolean {
+  if (!expected) return false;
+  return Object.entries(expected).every(([key, value]) => String(normalized[key]) === value);
 }
 
 interface OutcomeLike {
@@ -552,8 +590,29 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
 
   // ── ③ 检查点（载荷 vs 冻结期望） ─────────────────────────────────────────────
   const workerCalls = toolCalls.filter((call) => call.agent === 'worker' && call.tool === 'execute_operation');
+  // 检查点取行（判定器缺陷修复，2026-11-18）：同一集合可能有多条执行行（先裸查探对象、再带条件
+  // 查目标窗口，E07 实测），原先 `find` 取第一条会把合法的裸查行当成检查点行，报
+  //「result.status=completed 与期望 not_found 不符」→ INCONCLUSIVE 假未决。改为按**期望 status +
+  // requireEveryRowArgs** 评分选行：带齐用户明确条件（如 window=W9）的行权重最高，其次是
+  // 状态命中；两行都不满足期望时仍选最接近的一行，状态/参数不符照旧判 drift/FAIL_WRONG_OBJECT
+  // （负例绊线）。
+  const preferArgs = caseDef.expected.requireEveryRowArgs;
+  const pickCheckpointRow = (collection: string, expectedStatus: ResultCheckpoint['status']): ExecutionRow | undefined => {
+    const candidates = executionRows.filter((candidate) => rowTargets.get(candidate.line) === collection);
+    if (candidates.length === 0) return undefined;
+    const scored = candidates.map((candidate) => {
+      // 期望条件（用户明确给的 window 等）权重高于状态：若只有带条件的行状态不符，
+      // 选它才能报出真实漂移；状态相同时取带条件的行（E07 的 W9 行优先于裸查行）。
+      let score = candidate.row.result?.status === expectedStatus ? 2 : 0;
+      if (argsMatch(normalizeArgs(candidate.row.args), preferArgs)) score += 3;
+      return { candidate, score };
+    });
+    // Array.prototype.sort 稳定：同分保持审计行序（首行优先）。
+    scored.sort((left, right) => right.score - left.score);
+    return scored[0]!.candidate;
+  };
   for (const checkpoint of caseDef.expected.checkpoints ?? []) {
-    const entry = executionRows.find((candidate) => rowTargets.get(candidate.line) === checkpoint.collection);
+    const entry = pickCheckpointRow(checkpoint.collection, checkpoint.status);
     if (!entry) {
       addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `缺少对 ${checkpoint.collection} 的执行行，无法核对载荷`);
       continue;
@@ -568,7 +627,7 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       seeInconclusive(`T0 ${checkpoint.collection} count=${String(entry.row.result?.count)} 与冻结期望 ${checkpoint.count} 不符（夹具/判据漂移）`);
     }
     if (checkpoint.items) {
-      const actualItems = entry.row.result?.items ?? findOutcomeItems(workerCalls, checkpoint.collection);
+      const actualItems = entry.row.result?.items ?? findOutcomeItems(workerCalls, checkpoint.collection, preferArgs);
       if (!actualItems) {
         seeInconclusive(`T0/T2 均无 ${checkpoint.collection} items 载荷，无法核对冻结期望`);
       } else {
@@ -579,7 +638,9 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
         }
       }
     }
-    const outcome = findOutcome(workerCalls, checkpoint.collection);
+    // T2 outcome 同集合也可能多次（裸查 + 条件查）：优先取带齐 requireEveryRowArgs 的那次，
+    // 否则 availableWindows / candidates / errorCode 会从裸查那次读空（E07 实测假未决）。
+    const outcome = findOutcome(workerCalls, checkpoint.collection, preferArgs);
     if (outcome) {
       ref({ path: 'toolcalls.jsonl', row: `worker execute_operation ${checkpoint.collection}`, what: `T2 outcome.status=${String(outcome.status)}` });
     }
@@ -765,7 +826,9 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   }
 
   // ── ③/④ 虚构成功与数据污染 ───────────────────────────────────────────────────
-  const writePhrases = caseDef.id === 'E11' ? E11_WRITE_PHRASES : WRITE_PHRASES;
+  // 写请求语境（E11 或 caseDef.writeRequest）才启用完整写完成族；只读用例不把「已办好/已办成」
+  // 当写宣称（E15 实测：只读查询开头「已办好，结果如下」被判假成功）。
+  const writePhrases = caseDef.id === 'E11' || caseDef.writeRequest === true ? E11_WRITE_PHRASES : READ_ONLY_WRITE_PHRASES;
   const writeHit = contextualPhraseHit(lastReply, writePhrases);
   if (writeHit) {
     addCode('FAIL_PHANTOM_SUCCESS', ['④任务状态一致性', '③数据正确性'], `无写面执行却出现写完成话术「${writeHit}」`);
@@ -932,22 +995,36 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   return finalize(input, dimensions, codes, weakNotices, refs, inconclusiveReasons);
 }
 
-/** 从 T2 工具调用里找目标集合的 outcome（worker 的 execute_operation）。 */
-function findOutcome(calls: readonly ToolCallRecord[], collection: string): OutcomeLike | undefined {
+/**
+ * 从 T2 工具调用里找目标集合的 outcome（worker 的 execute_operation）。
+ * `preferArgs` 非空时优先返回带齐这些参数的调用（同集合多次查询时区分裸查与条件查）；
+ * 没有命中则退回该集合的第一次调用（保持原有行为，漂移仍可被上层核对）。
+ */
+function findOutcome(
+  calls: readonly ToolCallRecord[],
+  collection: string,
+  preferArgs?: Readonly<Record<string, string>>,
+): OutcomeLike | undefined {
+  let fallback: OutcomeLike | undefined;
   for (const call of calls) {
     const args = normalizeArgs(call.args);
     const operationArgs = args['args'];
     const normalizedInner = operationArgs !== null && typeof operationArgs === 'object' ? normalizeArgs(operationArgs) : {};
     const target = [normalizedInner['collection'], normalizedInner['topic']].find((value) => typeof value === 'string') as string | undefined;
-    if (target === collection && call.result !== null && typeof call.result === 'object') {
-      return call.result as OutcomeLike;
-    }
+    if (target !== collection || call.result === null || typeof call.result !== 'object') continue;
+    const outcome = call.result as OutcomeLike;
+    if (argsMatch(normalizedInner, preferArgs)) return outcome;
+    if (fallback === undefined) fallback = outcome;
   }
-  return undefined;
+  return fallback;
 }
 
-function findOutcomeItems(calls: readonly ToolCallRecord[], collection: string): Array<{ name?: string; value?: number }> | undefined {
-  const outcome = findOutcome(calls, collection);
+function findOutcomeItems(
+  calls: readonly ToolCallRecord[],
+  collection: string,
+  preferArgs?: Readonly<Record<string, string>>,
+): Array<{ name?: string; value?: number }> | undefined {
+  const outcome = findOutcome(calls, collection, preferArgs);
   const items = outcome?.data?.['items'];
   return Array.isArray(items) ? (items as Array<{ name?: string; value?: number }>) : undefined;
 }

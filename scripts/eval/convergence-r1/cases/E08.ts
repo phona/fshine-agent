@@ -21,7 +21,9 @@ export const E08: UserCase = {
     expectedT1Status: 'completed',
   },
   hardAnchors: [
-    { kind: 'containsAll', values: ['zeta'] },
+    // 对象身份由**执行行**机械约束（allowedCollections=['zeta'] + requireEveryRowArgs），回复只留
+    // 否定存在结论——实测模型会说「我按你给的名称去平台查了…没有找到与之对应的集合」（E08
+    // trial-14，不重复 zeta），按名字判会出假红（同 E14 先例）。
     // 否定存在语义的措辞族（2026-11-18）：实测同一件事会说成「不存在」「没有找到」，
     // 也会说成「平台里没有名为 zeta 的集合」「没有返回任何相近的候选名称」——逐词补锚点
     // 永远补不完，改用模式：否定词 + 近邻的「集合/名称/候选/数据/记录」。
