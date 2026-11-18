@@ -12,7 +12,8 @@
  *   · **过期判据**：activated_at 非 NULL → now − activated_at > TTL；pending（NULL）→
  *     now − created_at > TTL（激活窗口已关闭，同样不可读）。未过期行一律不碰；
  *   · **根内包含判定**：派生路径 `path.resolve` 后必须严格落在 workspace 根内（带分隔符
- *     前缀）；否则 `skipped_outside_root`，不删；
+ *     前缀），且 root → principal → session → files 目录链**逐层 `lstat`**——任一层是软链
+ *     （或非目录）即 `skipped_symlink`，不删（词法前缀看不见父层软链，会把删除带到根外）；
  *   · **lstat 不跟随软链**：软链整项跳过；非普通文件跳过；删除前再 lstat 复核一次
  *     （TOCTOU 收窄到一次调用）；
  *   · **可空跑**：dryRun 下零删除，只报 `would_delete_bytes`；
@@ -114,6 +115,47 @@ function isExpiredRow(row: FileRefRow, nowMs: number, ttlMs: number): { expired:
   return { expired: ageMs > ttlMs, ageMs };
 }
 
+type ChainVerdict =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly action: FileRefCleanupAction; readonly reason?: string };
+
+/**
+ * 目录链逐层 `lstat`（root 之下到 files/）：**任一层是软链（或不是目录）→ 整项跳过**。
+ *
+ * 为什么不能只做词法前缀比较：派生路径 `path.resolve` 后看起来在根内，但父层（如
+ * `<principal>/<session>/files`）本身是软链时，删除会沿着软链落到根外文件上——
+ * 前缀比较只看字符串，看不见这一层。祖先不存在 = 派生字节不可能存在（按字节缺失处理）。
+ * 与 `run-dir-cleanup.ts` 的逐层 lstat 纪律同一套。
+ */
+function directoryChainVerdict(dirs: readonly string[]): ChainVerdict {
+  for (const dir of dirs) {
+    const checked = probe(dir);
+    if (checked.stat === undefined) {
+      if (checked.code === 'ENOENT') return { ok: false, action: 'bytes_missing' };
+      return { ok: false, action: 'skipped_io_error', reason: checked.message ?? 'lstat 失败' };
+    }
+    if (checked.stat.isSymbolicLink() || !checked.stat.isDirectory()) {
+      return { ok: false, action: 'skipped_symlink' };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * root 之下到目标父目录的每一层（`<principal>` → `<session>` → `files`；不含 root 自身）。
+ * 按相对路径逐段拼出，不写死层数——布局派生的父链就是实际要校验的目录链。
+ */
+function directoryChainOf(root: string, target: string): string[] {
+  const chain: string[] = [];
+  let current = root;
+  for (const segment of path.relative(root, path.dirname(target)).split(path.sep)) {
+    if (segment === '') continue;
+    current = path.join(current, segment);
+    chain.push(current);
+  }
+  return chain;
+}
+
 function cleanupEvent(
   action: FileRefCleanupAction,
   row: FileRefRow,
@@ -202,6 +244,17 @@ export function cleanupExpiredFileRefBytes(input: CleanupFileRefBytesInput): Fil
     const timing = { ageMs, ttlDays };
     if (!expired) {
       events.push(cleanupEvent('kept', row, target, timing));
+      continue;
+    }
+
+    // 根内判定不止词法前缀：<principal>/<session>/files 任一层是软链时，删除会沿软链
+    // 落到根外——逐层 lstat，软链/非目录整项跳过（root 自身已在上方校验）。
+    const chain = directoryChainVerdict(directoryChainOf(root, target));
+    if (!chain.ok) {
+      events.push(cleanupEvent(chain.action, row, target, {
+        ...timing,
+        ...(chain.reason === undefined ? {} : { reason: chain.reason }),
+      }));
       continue;
     }
 

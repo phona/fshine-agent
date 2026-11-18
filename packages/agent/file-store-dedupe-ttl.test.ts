@@ -176,6 +176,24 @@ describe('③ 跨 scope 绝不复用（防越权与存在性泄露）', () => {
 });
 
 describe('④ 不可读的行不复用（过期 / 字节已回收 → 新 fileId）', () => {
+  it('既有同内容行仍 pending（未激活）→ 不复用、不激活、两行', () => {
+    const fx = makeFixture();
+    const source = stage(fx, '待激活.csv', 'pending-dedupe');
+    // 第一次登记 = pending（等带文字的消息激活）；此后再收到同内容，不能把 pending 行当可复用。
+    const first = fx.fileStore.registerInboundFile({ scope: SCOPE, name: '待激活.csv', sourcePath: source });
+
+    const second = fx.fileStore.registerInboundFile({ scope: SCOPE, name: '待激活.csv', sourcePath: source });
+
+    expect(second.fileId).not.toBe(first.fileId);
+    const rows = fx.store.listFileRefs(SCOPE);
+    expect(rows).toHaveLength(2);
+    // 登记不替用户激活：两行都仍是 pending（激活只由带文字的消息触发）。
+    expect(rows.every((row) => row.activatedAt === undefined)).toBe(true);
+    expect(rows.map((row) => row.fileId).sort()).toEqual([first.fileId, second.fileId].sort());
+    expect(storedFileNames(fx.workspaceRoot, SCOPE)).toHaveLength(2);
+    fx.store.close();
+  });
+
   it('既有行已过期 → 新 fileId', () => {
     const fx = makeFixture();
     const content = Buffer.from('expired-content');
@@ -262,11 +280,19 @@ describe('⑤ TTL 配置：fileRefTtlDays（缺省 7、最小 1）', () => {
 });
 
 describe('⑥ 清单行带收到时间（格式稳定，字段顺序与 fileId 形态不变）', () => {
-  const activatedAt = new Date(2026, 0, 2, 3, 4).getTime(); // 本地 2026-01-02 03:04
+  const createdAt = new Date(2026, 0, 2, 3, 4).getTime(); // 本地 2026-01-02 03:04
+
+  /** 与渲染侧同一本地时区格式（YYYY-MM-DD HH:mm），用于钉住取的是哪个时间点。 */
+  function localText(epochMs: number): string {
+    const date = new Date(epochMs);
+    const pad = (value: number): string => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+      + `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
 
   it('Main 清单行：既有字段原样 + 行尾「YYYY-MM-DD HH:mm 收到」', () => {
     const manifest = renderFileManifest([
-      { fileId: 'file_a8259b01', name: '明细.xlsx', bytes: 20480, activatedAt },
+      { fileId: 'file_a8259b01', name: '明细.xlsx', bytes: 20480, createdAt },
     ]);
     expect(manifest).toContain(
       '- 明细.xlsx（fileId: file_a8259b01，20480 字节；脚本内路径：in/file_a8259b01.xlsx；2026-01-02 03:04 收到）',
@@ -275,13 +301,30 @@ describe('⑥ 清单行带收到时间（格式稳定，字段顺序与 fileId �
     expect(manifest).toMatch(/；\d{4}-\d{2}-\d{2} \d{2}:\d{2} 收到）/);
   });
 
-  it('Worker 任务清单同一行公式；无 activatedAt 的交付面引用不渲染时间', () => {
+  it('Worker 任务清单同一行公式；无 createdAt 的交付面引用不渲染时间', () => {
     const manifest = renderWorkerFileManifest([
-      { fileId: 'file_copy04ab', name: '清单.csv', bytes: 3, activatedAt },
+      { fileId: 'file_copy04ab', name: '清单.csv', bytes: 3, createdAt },
     ]);
     expect(manifest).toContain(
       '- 清单.csv（fileId: file_copy04ab，3 字节；脚本内路径：in/file_copy04ab.csv；2026-01-02 03:04 收到）',
     );
     expect(renderFileManifest([{ fileId: 'file_noext01', name: '说明', bytes: 1 }])).not.toContain('收到');
+  });
+
+  it('清单时间 = 登记时刻（createdAt），不是激活时刻（activatedAt）', () => {
+    const fx = makeFixture();
+    // 纯附件场景：收到即登记（createdAt≈now），随后才被文字消息激活（这里故意拨早 3 天，
+    // 模拟「激活时刻 ≠ 真收到时刻」）。清单必须显示登记时刻。
+    const activatedAt = Date.now() - 3 * DAY_MS;
+    fx.fileStore.putFile({ scope: SCOPE, name: '纯附件.csv', bytes: Buffer.from('p'), activatedAt });
+
+    const [listed] = fx.fileStore.listActiveFiles({ scope: SCOPE, now: Date.now() });
+    expect(listed!.activatedAt).toBe(activatedAt);
+    expect(listed!.createdAt).toBeGreaterThan(activatedAt);
+
+    const manifest = renderFileManifest([listed!]);
+    expect(manifest).toContain(`；${localText(listed!.createdAt)} 收到`);
+    expect(manifest).not.toContain(`；${localText(activatedAt)} 收到`);
+    fx.store.close();
   });
 });

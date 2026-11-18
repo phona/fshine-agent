@@ -246,6 +246,87 @@ describe('回收的安全边界：dryRun / 根外 / 软链 / 空根', () => {
     fx.store.close();
   });
 
+  it('父层软链（<session>/files → 根外目录）不跟随：根外过期文件保留、skipped_symlink、deleted:0', () => {
+    const fx = makeFixture();
+    const now = Date.now();
+    // 根外目录里放一个「本该被回收」的过期文件；词法路径仍在根内（<session>/files/...），
+    // 但 <session>/files 整层是软链——纯 path.resolve 前缀比较会把它当根内并真的删掉。
+    const outsideDir = path.join(fx.root, 'outside-files');
+    mkdirSync(outsideDir, { recursive: true });
+    const fileId = 'file_symlinked_files';
+    const outsideTarget = path.join(outsideDir, `${fileId}.csv`);
+    writeFileSync(outsideTarget, 'outside-bytes');
+    const sessionDir = sessionDirOf(fx.workspaceRoot, SCOPE);
+    mkdirSync(sessionDir, { recursive: true });
+    symlinkSync(outsideDir, path.join(sessionDir, 'files'));
+    fx.store.insertFileRef({
+      fileId,
+      principalId: SCOPE.principalId,
+      sessionId: SCOPE.sessionId,
+      name: '根外.csv',
+      sha256: 'sha_outside',
+      bytes: 13,
+      activatedAt: now - 30 * DAY_MS,
+      createdAt: now - 30 * DAY_MS,
+    });
+
+    const result = cleanupExpiredFileRefBytes({
+      store: fx.store,
+      workspaceRoot: fx.workspaceRoot,
+      config: resolveRuntimeConfig(),
+      nowMs: now,
+    });
+
+    expect(existsSync(outsideTarget)).toBe(true); // 根外字节未被删
+    expect(result.events[0]).toMatchObject({ action: 'skipped_symlink', fileId });
+    expect(result.summary).toMatchObject({ deleted: 0, skipped: 1 });
+    fx.store.close();
+  });
+
+  it('删除抛错：该行记 delete_failed、同轮后续行仍被处理、summary.failed=1', () => {
+    const fx = makeFixture();
+    const now = Date.now();
+    const failingId = 'file_delete_fail';
+    const succeedingId = 'file_delete_ok';
+    // created_at 升序 = 处理顺序：先失败项、后成功项（钉住「失败不中断整轮」）。
+    seedRow(fx, {
+      fileId: failingId,
+      name: '删不掉.csv',
+      activatedAt: now - 40 * DAY_MS,
+      createdAt: now - 40 * DAY_MS,
+    });
+    seedRow(fx, {
+      fileId: succeedingId,
+      name: '能删.csv',
+      activatedAt: now - 30 * DAY_MS,
+      createdAt: now - 30 * DAY_MS,
+    });
+    const failingTarget = fileStoragePathOf(fx.workspaceRoot, SCOPE, failingId, '删不掉.csv');
+    const succeedingTarget = fileStoragePathOf(fx.workspaceRoot, SCOPE, succeedingId, '能删.csv');
+
+    const result = cleanupExpiredFileRefBytes({
+      store: fx.store,
+      workspaceRoot: fx.workspaceRoot,
+      config: resolveRuntimeConfig(),
+      nowMs: now,
+      remove: (target) => {
+        if (path.basename(target).startsWith(failingId)) throw new Error('EACCES: 注入的删除失败');
+        rmSync(target);
+      },
+    });
+
+    expect(result.events.map((event) => event.action)).toEqual(['delete_failed', 'deleted_bytes']);
+    expect(result.events[0]).toMatchObject({
+      action: 'delete_failed',
+      fileId: failingId,
+      reason: expect.stringContaining('注入的删除失败'),
+    });
+    expect(result.summary).toMatchObject({ scanned: 2, deleted: 1, failed: 1 });
+    expect(existsSync(failingTarget)).toBe(true); // 失败项字节保留（不掩盖）
+    expect(existsSync(succeedingTarget)).toBe(false); // 同轮后续行照常处理
+    fx.store.close();
+  });
+
   it('workspace 根不存在 = 正常空态（rootMissing，零事件零删除）', () => {
     const fx = makeFixture();
     const result = cleanupExpiredFileRefBytes({

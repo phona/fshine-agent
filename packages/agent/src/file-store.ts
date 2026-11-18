@@ -52,6 +52,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import type { FileRefResolution, FileRefRow, TaskStore } from '@fshine/core';
+import { DEFAULT_RUNTIME_CONFIG, fileRefTtlMsOf } from './resource-policy';
 
 /**
  * 文件事实归属（S0 形状）：principal + session。任务维度（CAP-01 S2）不走这里——
@@ -181,15 +182,21 @@ export interface SkippedOutput {
 
 /**
  * 已激活文件清单项（CAP-01 S1 清单注入源；机械事实投影）：fileId/name/bytes +
- * activatedAt（激活/收到时刻，2026-11-18 owner：清单要能判断新旧）。不暴露 sha256
+ * activatedAt（激活时刻，TTL 起点）+ createdAt（**登记/真收到时刻**）。不暴露 sha256
  * 与身份键——清单仍不含行数据（v8 §8 S1）。
+ *
+ * 时间口径（2026-11-18 修）：清单渲染的「收到」时间取 **createdAt**（渠道真收到/登记
+ * 时刻），不取 activatedAt——纯附件场景的 activated_at 是**文字消息激活时刻**，可能比
+ * 真正收到晚几天（与 apps/server/attachment-facts 的 receivedAt 口径一致）。
  */
 export interface ActiveFileRef {
   fileId: string;
   name: string;
   bytes: number;
-  /** 激活时刻（epoch ms）：入站文件即「收到时间」；清单按它渲染时间。 */
+  /** 激活时刻（epoch ms；可读性 TTL 起点，不是「收到」时间）。 */
   activatedAt: number;
+  /** 登记/真收到时刻（epoch ms；清单按它渲染「收到」时间）。 */
+  createdAt: number;
 }
 
 export interface ScanLimits {
@@ -295,7 +302,8 @@ export interface FileStore {
   /**
    * 本会话已激活（activated_at IS NOT NULL 且 TTL 内，与 materializeInputs 同一 TTL 谓词；
    * 只含 Main 侧行——task_id IS NULL，任务副本不进 Main 清单）的文件清单（CAP-01 S1
-   * 清单注入源；机械事实投影，只有 fileId/name/bytes）。
+   * 清单注入源；机械事实投影，只有 fileId/name/bytes + activatedAt + createdAt——
+   * 清单时间取 **createdAt**（登记/真收到时刻），不是 activatedAt）。
    * 顺序 = 底账既有排序（created_at, file_id 升序）。
    */
   listActiveFiles(input: { scope: FileScope; now: number }): ActiveFileRef[];
@@ -310,18 +318,17 @@ export type TaskInputCopier = Pick<FileStore, 'copyInputsForTask'>;
 /** 产物登记的流式拷贝块大小（登记阻塞 ≈ 一次流过；v8 §10-2 的处置就是流式）。 */
 const REGISTER_COPY_CHUNK_BYTES = 64 * 1024;
 
-/** 一天毫秒数（TTL 换算用；旋钮是整数天）。 */
-const DAY_MS = 24 * 60 * 60 * 1000;
-
 /**
- * 文件引用的**缺省**可读期：7 天（2026-11-18 owner 定；原写死 24h 过短）。
+ * 文件引用的**缺省**可读期（ms）：**唯一缺省值住 `resource-policy`**
+ * （`DEFAULT_RUNTIME_CONFIG.fileRefTtlDays = 7`），本模块只经 `fileRefTtlMsOf` 派生——
+ * 不再重定义第二份缺省（配置旋钮的缺省与解释只归 resource-policy）。
  *
  * 真正的 TTL 由装配层按 `runtime.fileRefTtlDays`（经 `resolveRuntimeConfig` +
- * `fileRefTtlMsOf`）解析后以 `createFileStore({ ttlMs })` 注入；本常量只用于
- * 未注入的构造（测试/嵌入）。语义不变（v8 §4）：activated_at 非 NULL 即可读、同时是
- * 可读性 TTL 起点；pending 的激活窗口（created_at → 被带文字的消息激活）沿用同一值。
+ * `fileRefTtlMsOf`）解析后以 `createFileStore({ ttlMs })` 注入；本常量只用于未注入的
+ * 构造（测试/嵌入）。语义不变（v8 §4）：activated_at 非 NULL 即可读、同时是可读性
+ * TTL 起点；pending 的激活窗口（created_at → 被带文字的消息激活）沿用同一值。
  */
-export const FILE_REF_TTL_MS = 7 * DAY_MS;
+export const FILE_REF_TTL_MS = fileRefTtlMsOf(DEFAULT_RUNTIME_CONFIG);
 
 /**
  * 入站登记的大小上限（20MB，2026-11-17 CAP-01 owner 裁决：100MB 必 OOM——实测 1.1MB
@@ -811,7 +818,13 @@ export function createFileStore(options: {
         .filter(
           (row) => row.taskId === taskId && row.activatedAt !== undefined && now - row.activatedAt <= ttlMs,
         )
-        .map((row) => ({ fileId: row.fileId, name: row.name, bytes: row.bytes, activatedAt: row.activatedAt! }));
+        .map((row) => ({
+          fileId: row.fileId,
+          name: row.name,
+          bytes: row.bytes,
+          activatedAt: row.activatedAt!,
+          createdAt: row.createdAt,
+        }));
     },
     registerTaskFile({ scope, taskId, name, bytes, maxFileBytes }) {
       // 内联字节面：超限拒收 → 任务池 sha256 去重（复用旧 fileId、不落盘）→ 新 file_id 落盘登记。
@@ -912,15 +925,21 @@ export function createFileStore(options: {
       // 与 materializeInputs 的可读性谓词同源：activated_at 非 NULL 且 (now - activated_at) ≤ TTL。
       // 只含 Main 侧行（task_id IS NULL）：任务副本只归当前任务的 Worker 解析，不进 Main 清单
       // （清单是 Main 的 run_js/inputFiles 引用面——给了也解析不到，且是存在性 oracle，v8 §4）。
-      // 投影 fileId/name/bytes + activatedAt（收到时间，供清单判断新旧）——sha256/身份键
-      // 仍不进清单。
+      // 投影 fileId/name/bytes + activatedAt（TTL 起点）+ createdAt（登记/真收到时刻，
+      // 清单按它渲染「收到」）——sha256/身份键仍不进清单。
       return store
         .listFileRefs(scope)
         .filter(
           (row) =>
             row.taskId === undefined && row.activatedAt !== undefined && now - row.activatedAt <= ttlMs,
         )
-        .map((row) => ({ fileId: row.fileId, name: row.name, bytes: row.bytes, activatedAt: row.activatedAt! }));
+        .map((row) => ({
+          fileId: row.fileId,
+          name: row.name,
+          bytes: row.bytes,
+          activatedAt: row.activatedAt!,
+          createdAt: row.createdAt,
+        }));
     },
   };
 }

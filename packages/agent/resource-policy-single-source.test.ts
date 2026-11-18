@@ -46,6 +46,10 @@ const P2_SCENARIOS = 'scripts/eval/p2/p2-scenarios.ts';
 // RuntimeConfig 输入（显式 `queueCapacity: 16` 压队列上限），不解析/解释旋钮、不读原始
 // `config.runtime.*`；缺省值那条走「不给 runtime 段」，不在此文件里重复定义缺省。
 const R8_CONCURRENCY = 'scripts/eval/cap01/r8-concurrency.ts';
+// CAP-01 R5 资源回收验评（2026-11-18 登记）：**只读** `resolveRuntimeConfig` 的解析值
+// `fileRefTtlDays`（装配时透传给回收探针做验评读数），不解析原始 `config.runtime.*`、
+// 不重定义缺省（缺省仍住 resource-policy）。
+const R5_RESOURCES = 'scripts/eval/cap01/r5-resources.ts';
 // 企微×dummy 联调自动用例 harness（2026-11-18 登记）：与上面三族同类——只**构造**测试场景
 // 的 RuntimeConfig 输入（把附件追问窗口压到 30ms，好让注入时钟推进），不解析/解释旋钮、
 // 不读原始 `config.runtime.*`；缺省仍住 resource-policy（30s）。
@@ -109,10 +113,10 @@ const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   // W 切片（2026-11-18）：waiting_user 到期阈值由策略解析；ask-runtime 装配时取解析值，
   // task-runner 只消费注入的已解析毫秒数（不读原始 runtime 配置）。
   waitUserTimeoutMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, ASK_RUNTIME, TASK_RUNNER],
-  // 文件引用可读期（天）：缺省 7 与 ms 派生归策略；字节回收只读解析值。
-  fileRefTtlDays: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, FILE_REF_CLEANUP],
+  // 文件引用可读期（天）：缺省 7 与 ms 派生归策略；字节回收只读解析值（R5 验评透传）。
+  fileRefTtlDays: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, FILE_REF_CLEANUP, R5_RESOURCES],
   fileRetentionDays: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
-  fileRetentionSweepOnStart: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STARTUP_SWEEP],
+  fileRetentionSweepOnStart: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STARTUP_SWEEP, R5_RESOURCES],
   attachmentNudgeAfterMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, SERVER, SIM_HARNESS],
 };
 

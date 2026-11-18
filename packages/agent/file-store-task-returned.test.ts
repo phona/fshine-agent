@@ -319,7 +319,7 @@ describe('listTaskFiles：目录桥物化源（只含当前任务绑定、已激
     expect(taskFiles.map((file) => file.fileId)).not.toContain(mainFile.fileId);
     expect(taskFiles.map((file) => file.fileId)).not.toContain(otherTask.fileId);
     for (const file of taskFiles) {
-      expect(Object.keys(file).sort()).toEqual(['activatedAt', 'bytes', 'fileId', 'name']);
+      expect(Object.keys(file).sort()).toEqual(['activatedAt', 'bytes', 'createdAt', 'fileId', 'name']);
     }
     store.close();
   });
