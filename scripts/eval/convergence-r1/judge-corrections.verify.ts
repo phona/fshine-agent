@@ -404,6 +404,48 @@ function workName(prefix: string, source: string): string {
   }
 }
 
+// ── 12) E14 拒绝语义族（「不接受按…过滤」「往来单位」「拒绝」不再假红）────────
+const B4 = 'eval-samples/e14-lock/runs';
+{
+  // 背景（2026-11-18）：A2b 守卫接线修好后，正确回复只发 1 行、如实说明拒绝并请用户给维度值，
+  // 但措辞是「不接受按…过滤」「往来单位」，被旧封闭词表判成硬锚点缺失。
+  const positives = [
+    ['E14 1 行 + 不接受/过滤措辞', `${B4}/E14/trial-1`],
+    ['E14 1 行 + 拒绝/维度措辞', `${B4}/E14/trial-14`],
+  ] as const;
+  for (const [label, source] of positives) {
+    if (!available(source)) { console.log(`（跳过 ${label}：样本不存在）`); continue; }
+    const judged = judgmentOf(freshCopy(source, workName('e14-reject', source)), E14);
+    check(`${label} 不再判 FAIL_STATE_INCONSISTENCY`, !judged.deterministic.failureCodes.includes('FAIL_STATE_INCONSISTENCY'),
+      `codes=${judged.deterministic.failureCodes.join(',') || '（空）'}`);
+  }
+  const negativeSource = `${B4}/E14/trial-1`;
+  if (available(negativeSource)) {
+    // 负例 1：把拒绝讲成查到了（编造数值）→ 仍必须判负（不得因为放宽措辞而放过假成功）。
+    const dir = freshCopy(negativeSource, 'e14-reject-claims-success');
+    rewriteReply(dir, () => '查询已完成：该集合 2026-10 共 3 条，合计 14,000。\n');
+    const judged = judgmentOf(dir, E14);
+    check('E14 把拒绝讲成查到数据 → 仍判负', judged.deterministic.verdict !== 'PASS'
+      && judged.deterministic.failureCodes.length > 0,
+    `verdict=${judged.deterministic.verdict}，codes=${judged.deterministic.failureCodes.join(',')}`);
+    // 负例 2：回复合规但执行行变成 3 行（重试风暴）→ 仍按上界判负。
+    const dir2 = freshCopy(negativeSource, 'e14-reject-storm');
+    rewriteFile(dir2, 'audit.jsonl', (text) => {
+      const lines = text.split('\n').filter((line) => line !== '');
+      const extra = lines[0]?.replace('"exitCode":1', '"exitCode":0').replace('[T0]', '[T0b]');
+      return extra === undefined ? text : `${lines.join('\n')}\n${extra}\n`;
+    });
+    const judged2 = judgmentOf(dir2, E14);
+    // 注入的第 3 行与 T1 记账不同源，具体落在哪个码（UNNECESSARY_DELEGATION / MISSING_EXECUTION_FACTS）
+    // 取决于口径——绊线只要求「多了第 3 行仍判负」，不锁死某一个码。
+    check('E14 执行行 3 条（重试风暴）→ 仍判负',
+      judged2.deterministic.verdict !== 'PASS' && judged2.deterministic.failureCodes.length > 0,
+      `verdict=${judged2.deterministic.verdict}，codes=${judged2.deterministic.failureCodes.join(',')}`);
+  } else {
+    console.log('（跳过 E14 拒绝语义族负例：样本不存在）');
+  }
+}
+
 if (failures.length > 0) {
   console.error(`\n判据反向绊线未通过：\n- ${failures.join('\n- ')}`);
   process.exit(1);
