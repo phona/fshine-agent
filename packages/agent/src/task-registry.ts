@@ -79,11 +79,28 @@ export type TaskReason = (typeof TASK_REASONS)[number];
 /** 超时种类（超时链：queued 排队等待 / execution 执行 / waiting_user 用户等待）。 */
 export type TimeoutKind = 'queued' | 'execution' | 'waiting_user';
 
+/**
+ * 写操作提案的机械形状（执行层 needs_confirmation 事实；原样承载，不解释、不裁决）。
+ * handle 是执行层发放的确认凭据：留底账供后续回合透传（S3），**不进模型/用户可见投影**
+ * （execution-runtime 的 toModelVisibleOutcome / pendingQuestionView 负责剥离）。
+ */
+export interface PendingConfirmation {
+  /** 执行层发放的确认句柄（非空；宿主持有）。 */
+  handle: string;
+  /** 机械摘要（可展示；非空）。 */
+  summary: string;
+  expiresAt?: string;
+  /** 提案所属 operation（执行事实原样；接续透传时用）。 */
+  operation: string;
+}
+
 /** waiting_user 的机械问题形状（执行层 needs_input 事实；不编造、不改写候选）。 */
 export interface PendingQuestion {
   missing: readonly string[];
   candidates?: readonly string[];
   raw?: string;
+  /** 写操作提案（可选）：needs_confirmation 与 needs_input 同走 waiting_user，不新状态。 */
+  confirmation?: PendingConfirmation;
 }
 
 /**
@@ -310,6 +327,21 @@ function assertPendingQuestion(question: PendingQuestion): void {
   }
   if (question.raw !== undefined && typeof question.raw !== 'string') {
     throw new TypeError('pendingQuestion 形状非法：raw 必须是字符串。');
+  }
+  if (question.confirmation !== undefined) {
+    const { handle, summary, expiresAt, operation } = question.confirmation;
+    if (typeof handle !== 'string' || handle.trim() === '') {
+      throw new TypeError('pendingQuestion 形状非法：confirmation.handle 必须是非空字符串。');
+    }
+    if (typeof summary !== 'string' || summary.trim() === '') {
+      throw new TypeError('pendingQuestion 形状非法：confirmation.summary 必须是非空字符串。');
+    }
+    if (expiresAt !== undefined && (typeof expiresAt !== 'string' || expiresAt.trim() === '')) {
+      throw new TypeError('pendingQuestion 形状非法：confirmation.expiresAt 必须是非空字符串。');
+    }
+    if (typeof operation !== 'string' || operation.trim() === '') {
+      throw new TypeError('pendingQuestion 形状非法：confirmation.operation 必须是非空字符串。');
+    }
   }
 }
 
