@@ -1087,7 +1087,7 @@ async function runS6(dir: string, trial: number): Promise<P2Observation> {
   const sink = new MuRecordingSink();
   const handle = await createMuServer({
     dir, ctx, mode: 'background', runtime,
-    createDrivers: async () => ({ mainDriver: makeMainDriver(ctx), workerDriver: makeWorkerDriver(ctx) }),
+    createDrivers: async (_env, mainSession) => ({ mainDriver: makeMainDriver(ctx, mainSession), workerDriver: makeWorkerDriver(ctx) }),
     notificationSink: sink,
   });
   try {

@@ -188,6 +188,12 @@ export interface PiTurnDriverOptions {
   /** 从已落盘的 Pi 会话文件继续同一 Session（只消费一次；缺省 = 新会话）。 */
   resumeSessionFile?: string;
   /**
+   * 新建落盘会话时使用的 Pi 会话 id（只与 `sessionDir` 同用；缺省 = Pi 随机生成）。
+   * 装配层从 `SessionPersistence.resolve()` 取——文件名与 header 用同一个 id，
+   * 进程重启后按该 id 解析回同一份文件（Pi 原生 resume）。
+   */
+  sessionId?: string;
+  /**
    * Pi 的 cwd（渲染进系统提示 <cwd> 段的工作目录）。必须是与宿主项目隔离的空目录；
    * 缺省 = 进程临时目录下的 `fshine-pi-<pid>`（不指向仓库根/用户主目录）。
    */
@@ -404,6 +410,11 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
   /** 已就绪的实例级会话（transcript 的同步读面；Promise 兑现时同步写入）。 */
   let resolvedConversation: Conversation | undefined;
   let pendingResumeFile = options.resumeSessionFile;
+  /**
+   * 本实例已分配（或已恢复）的 Pi 会话文件：会话重建（提示/工具集变化、异常丢弃）时
+   * 回到**同一份文件**，不为同一业务会话另建第二个文件（重启解析按 id 唯一）。
+   */
+  let ownSessionFile: string | undefined;
   let lastTurnProjection: readonly AgentMessage[] = [];
   /**
    * 实例级会话的工具执行面引用（跨回合同一个对象）：工具定义在会话创建时固定，
@@ -430,13 +441,20 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
       retry: { ...MAIN_MODEL_RETRY_SETTINGS },
     });
 
-    const resumeFile = pendingResumeFile;
+    const resumeFile = pendingResumeFile ?? ownSessionFile;
     pendingResumeFile = undefined;
     const sessionManager = resumeFile !== undefined
       ? SessionManager.open(resumeFile, options.sessionDir, workspaceDir)
       : options.sessionDir !== undefined
-        ? SessionManager.create(workspaceDir, options.sessionDir)
+        ? SessionManager.create(
+          workspaceDir,
+          options.sessionDir,
+          options.sessionId === undefined ? undefined : { id: options.sessionId },
+        )
         : SessionManager.inMemory(workspaceDir);
+    // 落盘会话的文件路径在会话建立时即确定（Pi 的 header 在首条 user/assistant 时落盘）；
+    // 记住它，会话重建时回到同一份文件（Pi 原生 resume）。
+    if (options.sessionDir !== undefined) ownSessionFile = sessionManager.getSessionFile();
     // 首回合/一次性回合的种子历史只进新会话；恢复会话不重灌（转录归 Pi）。
     if (resumeFile === undefined) {
       for (const message of input.seed) sessionManager.appendMessage(toSessionMessage(message));

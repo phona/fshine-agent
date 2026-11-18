@@ -41,7 +41,7 @@ import type {
   ExecutionOutcome,
 } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver, TurnDriverInput } from '../../../packages/agent/src/driver-contract';
-import { SessionPersistence } from '../../../packages/agent/src/session-persistence';
+import type { MainSessionLocation } from '../../../packages/agent/src/session-persistence';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
 import { createServer } from '../../../apps/server/server';
 
@@ -145,6 +145,8 @@ interface DriverView {
   readonly viewIndex: number;
   /** 本驱动实例每次 run 看到的全部 message 文本（含历史种子）。 */
   readonly observedTexts: string[];
+  /** 装配层交给本会话的 Pi 会话位置（隔离断言的机械事实；脚本化驱动不写盘）。 */
+  readonly location?: MainSessionLocation;
   readonly spans: Span[];
 }
 
@@ -291,10 +293,12 @@ interface ActiveReport {
 
 interface IsolationSessionRecord {
   readonly conversationId: string;
-  readonly ownSentinelPresent: boolean;
-  readonly foreignSentinelsFound: readonly string[];
-  readonly transcriptChars: number;
-  readonly transcriptExcerpt: string;
+  /** 装配层解析的 Pi 会话位置（脚本化驱动不写盘，隔离证据 = 位置 + 驱动输入面）。 */
+  readonly sessionDir: string;
+  readonly piSessionId: string;
+  readonly observedSentinels: readonly string[];
+  readonly observationChars: number;
+  readonly observationExcerpt: string;
 }
 
 interface IsolationReport {
@@ -332,8 +336,13 @@ async function runConcurrencyScenario(
     config: testConfig(),
     dbPath,
     sessionStoreDir,
-    createDrivers: () => {
-      const view: DriverView = { viewIndex: views.length + 1, observedTexts: [], spans: [] };
+    createDrivers: (_driverEnv, mainSession) => {
+      const view: DriverView = {
+        viewIndex: views.length + 1,
+        observedTexts: [],
+        spans: [],
+        ...(mainSession === undefined ? {} : { location: mainSession }),
+      };
       views.push(view);
       return { mainDriver: scriptedDriver(view, holdMs), workerDriver: neverWorkerDriver };
     },
@@ -480,49 +489,9 @@ async function runConcurrencyScenario(
     `突发墙钟=${round(burstMonoEnd - burstMonoStart)}ms`,
   );
 
-  // ② 生产同源转录导出：server 已关闭，重新打开同一 sessionStoreDir 现读 Pi entry-log。
-  const transcripts = new Map<string, string>();
-  const persistence = new SessionPersistence({ rootDir: sessionStoreDir, cwd: REPO_ROOT });
-  try {
-    for (const spec of SESSION_SPECS) {
-      const persisted = await persistence.openOrCreate(PRINCIPAL_ID, sessionIdOf(spec));
-      const messages = await persisted.readTranscript();
-      transcripts.set(spec.sentinel, messages.map(messageText).join('\n'));
-    }
-  } finally {
-    await persistence.close();
-  }
-
-  const isolationSessions: IsolationSessionRecord[] = SESSION_SPECS.map((spec) => {
-    const transcript = transcripts.get(spec.sentinel) ?? '';
-    const foreign = SESSION_SPECS
-      .filter((other) => other.sentinel !== spec.sentinel)
-      .filter((other) => sentinelFoundIn(transcript, other))
-      .map((other) => other.sentinel);
-    return {
-      conversationId: spec.conversationId,
-      ownSentinelPresent: sentinelFoundIn(transcript, spec),
-      foreignSentinelsFound: foreign,
-      transcriptChars: transcript.length,
-      transcriptExcerpt: transcript.slice(0, 300),
-    };
-  });
-
-  pushCheck(
-    checks,
-    'isolation/transcript-own-sentinel',
-    isolationSessions.every((session) => session.ownSentinelPresent),
-    isolationSessions.map((session) => `${session.conversationId}=${session.ownSentinelPresent}`).join(','),
-  );
-  pushCheck(
-    checks,
-    'isolation/transcript-no-foreign-sentinel',
-    isolationSessions.every((session) => session.foreignSentinelsFound.length === 0),
-    isolationSessions
-      .map((session) => `${session.conversationId}:${session.foreignSentinelsFound.join('|') || 'none'}`)
-      .join(','),
-  );
-
+  // ② 会话位置隔离（脚本化驱动不写盘）：装配层为每个会话解析的 Pi 会话位置必须互不相同，
+  //    同一 principal 落在同一 principal 子树、子会话 id 互不重复；轨迹隔离证据在驱动输入面
+  //    （下面 perViewSentinels）——装配层不再导出/搬运任何转录。
   const perViewSentinels = views.map((view) => {
     const found = new Set<string>();
     for (const text of view.observedTexts) {
@@ -532,6 +501,42 @@ async function runConcurrencyScenario(
     }
     return { viewIndex: view.viewIndex, sentinels: [...found] };
   });
+  const locationOf = (view: DriverView): MainSessionLocation | undefined => view.location;
+  const located = views.filter((view) => locationOf(view) !== undefined);
+  const piSessionIds = new Set(located.map((view) => locationOf(view)!.piSessionId));
+  const sessionDirs = new Set(located.map((view) => locationOf(view)!.sessionDir));
+  const resumed = located.filter((view) => locationOf(view)!.resumeSessionFile !== undefined);
+  pushCheck(
+    checks,
+    'isolation/session-location-present',
+    located.length === views.length,
+    `带位置的主驱动=${located.length}/${views.length}`,
+  );
+  pushCheck(
+    checks,
+    'isolation/session-locations-distinct',
+    piSessionIds.size === views.length && sessionDirs.size === 1,
+    `piSessionIds=${piSessionIds.size}/${views.length}，principal 子树数=${sessionDirs.size}（期望 1）`,
+  );
+  pushCheck(
+    checks,
+    'isolation/session-files-not-yet-written',
+    resumed.length === 0,
+    `已有落盘文件的会话=${resumed.length}（脚本化驱动不写盘，期望 0）`,
+  );
+
+  const isolationSessions: IsolationSessionRecord[] = views.map((view) => {
+    const observed = view.observedTexts.join('\n');
+    return {
+      conversationId: SESSION_SPECS[view.viewIndex - 1]?.conversationId ?? `view-${view.viewIndex}`,
+      sessionDir: view.location?.sessionDir ?? '',
+      piSessionId: view.location?.piSessionId ?? '',
+      observedSentinels: perViewSentinels[view.viewIndex - 1]?.sentinels ?? [],
+      observationChars: observed.length,
+      observationExcerpt: observed.slice(0, 300),
+    };
+  });
+
   const viewsWithExactlyOneSentinel = perViewSentinels.filter((view) => view.sentinels.length === 1).length;
   const coveredSentinels = new Set(perViewSentinels.flatMap((view) => view.sentinels));
   pushCheck(
@@ -1029,7 +1034,7 @@ async function main(): Promise<void> {
   }
   if (isolation !== undefined) {
     console.log(
-      `[cap01-r8] isolation: driverViews=${isolation.driverViews} transcripts=${isolation.sessions.length} foreignHits=${isolation.sessions.reduce((sum, session) => sum + session.foreignSentinelsFound.length, 0)}`,
+      `[cap01-r8] isolation: driverViews=${isolation.driverViews} sessions=${isolation.sessions.length} foreignHits=${isolation.sessions.reduce((sum, session) => sum + session.observedSentinels.filter((sentinel) => sentinel !== session.observedSentinels[0]).length, 0)}`,
     );
   }
   if (sqliteSingle !== undefined && sqliteWorkers !== undefined) {

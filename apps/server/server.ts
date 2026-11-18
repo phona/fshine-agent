@@ -436,11 +436,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   const mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, profile.executorLabel)}${mainSkills.promptBlock}\n\n${mainProtocolNoteFor(allowWriteOperations)}`;
   const stateDir = deps.stateDir ?? path.join(REPO_ROOT, '.runtime', 'server', 'state');
 
-  // B1 会话转录持久化：装配层是唯一构造具体存储处（基于 Pi SessionManager 的独立存储层）。
-  // cwd 跨重启必须稳定（Pi 会话 header 记录 cwd；变了会解析到不同身份，见
-  // session-persistence.ts 的 (principalId, sessionId) 唯一映射）。
+  // 会话落盘归 Pi：装配层解析本 (principal, session) 的唯一会话文件位置，直接交给 Pi 驱动
+  // （sessionDir/sessionId/resumeSessionFile）。本层无句柄、无 close，也不搬运任何 message。
   const sessionStoreDir = deps.sessionStoreDir ?? path.join(path.dirname(deps.dbPath), 'sessions');
-  const sessionPersistence = new SessionPersistence({ rootDir: sessionStoreDir, cwd: REPO_ROOT });
+  const sessionPersistence = new SessionPersistence({ rootDir: sessionStoreDir });
 
   // P5：资源策略进程级一份（跨会话共享账本）；缺省 runtime 段 = 现行为缺省（前台并发 4 / 排队 16）。
   const dispatchMode = deps.config.runtime?.dispatchMode ?? 'inline';
@@ -599,9 +598,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     let pending = sessions.get(key);
     if (pending === undefined) {
       pending = (async () => {
-        // B1：为本 (principal, session) 打开/新建独立存储句柄（跨 principal 物理隔离），
-        // 作为 runtime 的转录端口注入——打开即从存储载入转录，回合后增量持久化。
-        const transcriptStore = await sessionPersistence.openOrCreate(principalId, sessionId);
+        // 会话落盘归 Pi：本 (principal, session) 的独立会话位置（跨 principal 物理隔离）交给
+        // 真实 Pi 驱动作 sessionDir/sessionId/resumeSessionFile——历史与压缩摘要都在 Pi 会话
+        // 文件里，宿主不搬运任何消息、不 seed 任何转录。
+        const mainSession = sessionPersistence.resolve(principalId, sessionId);
         // 共享装配核心：执行面缺省 = 仓内 dummy CLI（按 profile root+gateway spawn），
         // 驱动缺省 = 真实 Pi 驱动；底账/提示词/技能为启动时装载的同一份（注入不回写）。
         const assembled = await assembleSessionCore({
@@ -658,15 +658,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           // 任务 out/ 兜底扫描的逐项拒收（此前只取 files，skipped 被丢弃）：数量 + reason 分布。
           onTaskOutputSweepSkipped: (event) => log({ event: 'task_output_sweep_skipped', principalId, sessionId, ...event }),
           fileManifestProvider,
-          transcriptStore,
-          // fail-open 日志：转录读/写失败不阻塞回合，只上报（错误面由入口按既有归类处理）。
-          onTranscriptError: (error) =>
-            log({
-              event: 'transcript_store_error',
-              principalId,
-              sessionId,
-              message: error instanceof Error ? error.message : String(error),
-            }),
+          mainSession,
         });
         return assembled.session;
       })();
@@ -1012,9 +1004,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       sessions.clear();
       outbox?.close();
       taskRegistry.close();
-      // B1：释放会话存储句柄（PI Session mutation barrier + JsonlStorage）；awaitable 以便
-      // 进程内「重启」在同一测试里先释放再重建（同 dbPath 重建不得二次打开同一文件）。
-      await sessionPersistence.close();
+      // 会话文件归 Pi 独占（无宿主句柄要释放）：这里不清盘、不重写，重启由 Pi 原生 resume。
     },
   };
 }

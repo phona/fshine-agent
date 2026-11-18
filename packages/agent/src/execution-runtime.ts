@@ -434,21 +434,6 @@ export interface WorkerSkill {
 }
 
 /**
- * 会话转录端口（依赖注入；runtime 只认接口，**不** import 任何具体存储实现）。
- *
- * 装配层提供实现（如基于 Pi `SessionManager` 的 `session-persistence.ts`）。语义：
- *   · `readTranscript()`：打开会话时**现读**该 `(principalId, sessionId)` 的完整转录
- *     （每次调用都从存储读，宿主不留第二份可变副本——Pi entry-log 是唯一转录所有者）；
- *   · `append(message)`：回合结束后向存储**追加一条**本条新增的转录消息（Pi 原生 message 形状）。
- *
- * 与 `PersistedSession`（session-persistence.ts:57）结构化相容——装配层直接注入后者。
- */
-export interface TranscriptStore {
-  readTranscript(): Promise<readonly DriverMessage[]>;
-  append(message: DriverMessage): Promise<void>;
-}
-
-/**
  * 任务 out/ 兜底扫描的逐项拒收（机械事实，只进日志）：收尾扫描登记产物时被拒的条目
  * 按机械 reason 汇总（symlink / size_limit / count_limit / outside_run_dir 等）——
  * 拒收原因与数量可查，不进用户话术。
@@ -561,14 +546,6 @@ export interface RuntimeOptions {
    * 缺省不注入 = Worker 提示与现行常量逐字节相同。
    */
   workerWorkspaceRoot?: string;
-  /**
-   * B1 会话持久化端口（装配层注入具体实现；缺省 undefined = 逐字节现行为：转录仅内存、归 Pi 会话独占）。
-   * 注入后：打开会话时从存储载入转录作为首回合种子、回合结束后把**本回合新增**消息增量持久化。
-   * 写失败 fail-open（不回滚回合），读/写错误经 `onTranscriptError` 上报。
-   */
-  transcriptStore?: TranscriptStore;
-  /** B1：转录读/写失败的上报回调（fail-open 日志；缺省静默吞掉，不影响回合）。 */
-  onTranscriptError?: (error: unknown) => void;
   /**
    * U3：执行层声明为只读的 operation 集合（由装配方从执行层 `access=read` 显式派生，
    * **独立于** allowedOperations）。只有这些 operation 的重试可以安全重发；
@@ -1547,28 +1524,16 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     return runJsToolResult(output);
   }
 
-  const transcriptStore = options.transcriptStore;
   /**
    * 上一回合 Main 转录的**只读投影**（Pi 会话 → 宿主可读形状）。
    * 宿主不持有可变对话历史：当前转录由 `mainTranscript()` 直接向驱动索取
-   * （`TurnDriver.transcript()`）；本变量只在驱动尚无会话（首回合）或测试替身没有
-   * 该方法时作**种子/回落快照**，每回合整体覆盖、从不追加改写。
+   * （`TurnDriver.transcript()`）；本变量只在测试替身没有该方法时作**回落快照**，
+   * 每回合整体覆盖、从不追加改写。跨重启的历史归 Pi 会话文件（装配层给驱动
+   * sessionDir/resumeSessionFile），宿主不读不写转录。
    */
   let lastMainProjection: readonly DriverMessage[] = [];
   const mainTranscript = (): readonly DriverMessage[] =>
     options.mainDriver.transcript?.() ?? lastMainProjection;
-  let persistedCount = 0;
-  // B1 打开→载入：注入存储时现读完整转录，作为**首回合种子历史**（驱动尚无 Pi 会话时导入；
-  // 会话已存在时转录仍归 Pi 独占）。宿主不留第二份可变副本，Pi entry-log 是唯一所有者。
-  // 读失败 fail-open：不阻塞会话打开（退化为空转录），错误经 onTranscriptError 上报。
-  if (transcriptStore !== undefined) {
-    try {
-      lastMainProjection = await transcriptStore.readTranscript();
-      persistedCount = lastMainProjection.length;
-    } catch (error) {
-      options.onTranscriptError?.(error);
-    }
-  }
   /** 本回合 Main 的截止时刻：委派算出的 Worker 截止不能越过它（再留收尾余量）。 */
   let currentTurnDeadline = 0;
 
@@ -2128,11 +2093,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const manifestFiles = options.fileManifestProvider?.(options.principalId, options.sessionId) ?? [];
       const manifestMessage = manifestFiles.length > 0 ? renderFileManifest(manifestFiles) : undefined;
       const manifestBytes = manifestMessage === undefined ? undefined : Buffer.byteLength(manifestMessage, 'utf8');
-      // 历史：驱动已有 Pi 会话时直接读其转录（Pi 独占）；尚无会话（首回合）时回落到
-      // 打开时从 B1 存储载入的投影，作为本回合的种子历史（驱动在无会话时才会导入）。
-      const liveTranscript = mainTranscript();
-      const history = liveTranscript.length > 0 ? liveTranscript : lastMainProjection;
-      const turnMessages = [...history, userMessage(text)];
+      // 历史：直接向驱动索取当前转录（Pi 会话是唯一所有者；重启恢复由驱动从会话文件
+      // 自己读回，宿主不再 seed 任何东西）。
+      const turnMessages = [...mainTranscript(), userMessage(text)];
       const injections = [
         ...(factsMessage !== undefined && factsMessage.trim() !== '' ? [factsMessage] : []),
         ...(attachmentFactsMessage !== undefined && attachmentFactsMessage.trim() !== '' ? [attachmentFactsMessage] : []),
@@ -2275,20 +2238,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         onRuntimeEvent: (event) => noteRuntimeEvent(mainWindow, event),
       });
       lastMainProjection = mainResult.messages;
-      // 回合后→持久化：把本回合**新增**消息逐条增量追加到存储（Pi 单条 entry 追加 = 线性，
-      // 不重写全文），每追加成功一条推进 persistedCount。写失败 fail-open：已成功的追加保留、
-      // 剩余不再尝试、**不回滚本回合**（回复照常返回），错误经 onTranscriptError 上报。
-      if (transcriptStore !== undefined) {
-        while (persistedCount < mainResult.messages.length) {
-          try {
-            await transcriptStore.append(mainResult.messages[persistedCount]!);
-          } catch (error) {
-            options.onTranscriptError?.(error);
-            break;
-          }
-          persistedCount += 1;
-        }
-      }
+      // 转录落盘归 Pi 会话（驱动自己的 SessionManager）：宿主回合结束后**不搬运任何消息**。
       // 出口清理（v8 §7）：用户可见回复在宿主出口剥服务器路径——ask/server 同走这一道链，
       // task_result 存档被 Main 转述后同样汇到这里，一道尺盖住两种来源（2026-10-19 事故形状）。
       // 剥完为空且有文件 → 宿主话术兜底（空文本帧会让渠道一个终帧都不发，用户什么都收不到）。
