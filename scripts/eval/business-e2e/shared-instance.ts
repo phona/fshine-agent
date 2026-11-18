@@ -395,8 +395,8 @@ export function createSharedInstanceFixture(
 
   const config: AppConfig = {
     principals: {
-      'wecom:alice': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
-      'wecom:bob': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:alice': { enabled: true },
+      'wecom:bob': { enabled: true },
     },
     contextProfiles: {
       dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },

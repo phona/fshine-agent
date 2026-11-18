@@ -43,7 +43,7 @@ interface EffectRecord {
 function testConfig(): AppConfig {
   return {
     principals: {
-      'wecom:probe-user': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:probe-user': { enabled: true },
     },
     contextProfiles: {
       dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },

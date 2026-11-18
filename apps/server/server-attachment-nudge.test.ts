@@ -83,10 +83,10 @@ class ManualClock implements NudgeClock {
 function testConfig(runtime: RuntimeConfig): AppConfig {
   return {
     principals: {
-      'wecom:user-a': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:user-a': { enabled: true },
       // 群 = 独立主体（owner 2026-11-18）：群聊 principal = `wecom:group:<群id>`。用例 ④ 要
       // 验证的是「群里不发追问」，所以群主体必须开通——否则拒绝路径会让断言因错的原因变绿。
-      'wecom:group:group-1': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:group:group-1': { enabled: true },
     },
     contextProfiles: {
       dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },

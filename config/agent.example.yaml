@@ -12,22 +12,32 @@
 # 新部署不要再写它们。
 # ============================================================
 
+# ---- 角色表（可选；不写 = 内置三档 viewer/operator/admin） ----
+# 粗粒度权限只有两个通用值：read / write（不耦合任何业务实体字段；实体级授权归执行层）。
+# 实际可用集合 = 执行层声明能力(access=read/write) ∩ 角色白名单 ∩ runtime.allowWriteOperations。
+# 角色名未定义、permissions 含未知值 / 空数组 / 重复 → 启动失败（不静默降级）。
+# roles:
+#   viewer:   { permissions: [read] }           # 只读
+#   operator: { permissions: [read, write] }    # 读写
+#   admin:    { permissions: [read, write] }    # 全部（本切片与 operator 无额外能力）
+
 # ---- 授权名单:key = <渠道>:<用户ID>；只有 enabled: true 的用户可用 ----
 # UserID 来源:企微后台通讯录,或机器人收到的 from.userid(明文)。
-# 读写范围不由这里裁决:最小切片只开放「执行层自述为 read 的 operation」,
-# 实体授权归执行层(AGENTS.md:宿主不建实体门)。
+# 权限由 role 决定（未写 role 的 principal 按 viewer = 只读，启动日志记
+# principal_role_defaulted）；角色未定义 → 启动失败。业务实体级授权归执行层
+# (AGENTS.md:宿主不建实体门)。
 #
 # 群聊是**独立主体**(owner 2026-11-18):群里的 principalId = <渠道>:group:<群id>
 # (群id = 企微 chatid),同群所有人共用一个主体、一份会话。要用某个群必须为它单独
 # 开一条(与个人是两条互不继承的记录;个人开通 ≠ 群开通):
 #   "wecom:group:<群chatid>":
 #     enabled: true
+#     role: viewer
 principals:
   "wecom:<你的企微UserID>":
     enabled: true
-    # 以下两键是旧字段:加载层仍接受,最小切片不读。
-    # accountSetScope: all
-    # capabilities: ["read"]
+    # 角色名必须在上面的 roles 表里；不写 = viewer（只读）。
+    role: operator
 
 # ---- Worker 的受信执行层上下文(路径只能由管理员配置,模型不能传入) ----
 contextProfiles:

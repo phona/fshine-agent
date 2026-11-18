@@ -11,19 +11,20 @@ import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import path from 'node:path';
 import type {
-  AccountSetScope,
   AppConfig,
   ChannelMode,
   ContextProfileConfig,
   ExecutionConfig,
   HostConfig,
   LlmConfig,
-  PrincipalCapability,
+  Permission,
   PrincipalConfig,
+  RoleConfig,
   RuntimeConfig,
   StoreConfig,
   WecomConfig,
 } from '@fshine/contracts';
+import { DEFAULT_PRINCIPAL_ROLE, DEFAULT_ROLES } from '@fshine/contracts';
 
 export interface LoadConfigOptions {
   yamlPath?: string;
@@ -279,32 +280,102 @@ function parseChannelMode(raw: Record<string, unknown>): ChannelMode | undefined
   return value as ChannelMode;
 }
 
-const CAPABILITIES: readonly PrincipalCapability[] = ['read', 'validate', 'write'];
-const ACCOUNT_SET_SCOPES: readonly AccountSetScope[] = ['all', 'allowlist'];
+const PERMISSIONS: readonly Permission[] = ['read', 'write'];
 
-function parseAccountSetScope(value: unknown, label: string): AccountSetScope {
-  if (value === undefined) return 'allowlist';
-  if (typeof value !== 'string' || !ACCOUNT_SET_SCOPES.includes(value as AccountSetScope)) {
-    throw new Error(`配置项 ${label} 不是有效账套范围(可选: all, allowlist)`);
+/**
+ * 角色表（yaml `roles` 段）。缺段 = 内置三档默认（viewer/operator/admin，见
+ * `DEFAULT_ROLES`）；显式配置即整表替换——不做逐角色合并，避免「自定义了 viewer 却
+ * 静默继承内置 operator」这类双源。
+ *
+ * 判据：角色名非空；每个角色只认 `permissions` 键；permissions 必须是非空数组、
+ * 只允许 read/write、无重复。未知权限值 / 空数组 / 未知键一律 fail-fast（角色是授权
+ * 边界，静默吞掉等于授权面不可预期）。
+ */
+function parseRoles(raw: unknown): Record<string, RoleConfig> {
+  if (raw === undefined || raw === null) {
+    return Object.fromEntries(
+      Object.entries(DEFAULT_ROLES).map(([name, role]) => [name, { permissions: [...role.permissions] }]),
+    );
   }
-  return value as AccountSetScope;
+  const entries = asRecord(raw, 'roles');
+  const roles: Record<string, RoleConfig> = {};
+  for (const [name, value] of Object.entries(entries)) {
+    const trimmed = name.trim();
+    if (trimmed === '') throw new Error('配置项 roles 的角色名不能为空');
+    const item = asRecord(value, `roles.${name}`);
+    for (const key of Object.keys(item)) {
+      if (key !== 'permissions') {
+        throw new Error(`配置项 roles.${name}.${key} 不是已知字段（只接受 permissions）`);
+      }
+    }
+    const rawPermissions = item['permissions'];
+    if (!Array.isArray(rawPermissions) || rawPermissions.length === 0) {
+      throw new Error(`配置项 roles.${name}.permissions 必须是非空数组（可选: read, write）`);
+    }
+    const permissions = rawPermissions.map((entry, index) => {
+      if (typeof entry !== 'string' || !PERMISSIONS.includes(entry as Permission)) {
+        throw new Error(`配置项 roles.${name}.permissions[${index}] 不是有效权限（可选: read, write）`);
+      }
+      return entry as Permission;
+    });
+    if (new Set(permissions).size !== permissions.length) {
+      throw new Error(`配置项 roles.${name}.permissions 不能包含重复权限`);
+    }
+    roles[trimmed] = { permissions };
+  }
+  if (Object.keys(roles).length === 0) {
+    throw new Error('配置项 roles 不能为空映射（未配置 roles 时使用内置三档默认）');
+  }
+  return roles;
 }
 
-function parseCapabilities(value: unknown, label: string): PrincipalCapability[] {
-  if (value === undefined) return ['read'];
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new Error(`配置项 ${label} 必须是非空 capabilities 数组`);
-  }
-  const capabilities = value.map((item, index) => {
-    if (typeof item !== 'string' || !CAPABILITIES.includes(item as PrincipalCapability)) {
-      throw new Error(`配置项 ${label}[${index}] 不是有效能力(可选: read, validate, write)`);
+function parsePrincipals(raw: unknown, roles: Record<string, RoleConfig>): Record<string, PrincipalConfig> {
+  const entries = asRecord(raw, 'principals');
+  const principals: Record<string, PrincipalConfig> = {};
+  for (const [key, value] of Object.entries(entries)) {
+    const item = asRecord(value, `principals.${key}`);
+    // accountSetScope / capabilities 已从契约删除（实体授权归执行层、角色表取代能力位）：
+    // YAML 里的旧键由加载层原样忽略，不解析、不校验、不进 PrincipalConfig。
+    const roleRaw = item['role'];
+    let role: string | undefined;
+    if (roleRaw !== undefined && roleRaw !== null) {
+      if (typeof roleRaw !== 'string' || roleRaw.trim() === '') {
+        throw new Error(`配置项 principals.${key}.role 必须是非空字符串（可选: ${Object.keys(roles).join(', ')}）`);
+      }
+      role = roleRaw.trim();
+      // 角色名未定义 → 启动失败（不静默降级为 viewer：配置写错必须可见）。
+      if (!Object.prototype.hasOwnProperty.call(roles, role)) {
+        throw new Error(`配置项 principals.${key}.role 未定义（可选: ${Object.keys(roles).join(', ')}）`);
+      }
     }
-    return item as PrincipalCapability;
-  });
-  if (new Set(capabilities).size !== capabilities.length) {
-    throw new Error(`配置项 ${label} 不能包含重复能力`);
+    principals[key] = {
+      enabled: item['enabled'] === true,
+      ...(role === undefined ? {} : { role }),
+    };
   }
-  return capabilities;
+  return principals;
+}
+
+/** 角色的有效权限（未写 role 的 principal 按 viewer；未知角色名加载期已拒绝）。 */
+export function permissionsOfRole(config: AppConfig, role: string | undefined): Permission[] {
+  const roles = config.roles ?? DEFAULT_ROLES;
+  const name = role ?? DEFAULT_PRINCIPAL_ROLE;
+  const definition = roles[name];
+  if (definition === undefined) {
+    // 运行期兜底：加载层已校验；这里仍 fail-closed 为只读，绝不放宽。
+    return ['read'];
+  }
+  return [...definition.permissions];
+}
+
+/** principal 的有效角色名（未写 role = viewer）。 */
+export function effectiveRoleOf(config: AppConfig, principalId: string): string {
+  return config.principals[principalId]?.role ?? DEFAULT_PRINCIPAL_ROLE;
+}
+
+/** principal 的有效权限集合（角色 → permissions；未写 role = viewer = 只读）。 */
+export function permissionsOfPrincipal(config: AppConfig, principalId: string): Permission[] {
+  return permissionsOfRole(config, config.principals[principalId]?.role);
 }
 
 function assertNoPlaceholders(value: unknown, path: string): void {
@@ -327,22 +398,6 @@ function assertNoPlaceholders(value: unknown, path: string): void {
       assertNoPlaceholders(item, childPath);
     }
   }
-}
-
-function parsePrincipals(raw: unknown): Record<string, PrincipalConfig> {
-  const entries = asRecord(raw, 'principals');
-  const principals: Record<string, PrincipalConfig> = {};
-  for (const [key, value] of Object.entries(entries)) {
-    const item = asRecord(value, `principals.${key}`);
-    principals[key] = {
-      // accountSetIds 不再进契约：实体授权归执行层，宿主不读 YAML 里的这个键
-      // （config/agent.yaml 里的旧键原样保留，加载层直接忽略）。
-      accountSetScope: parseAccountSetScope(item['accountSetScope'], `principals.${key}.accountSetScope`),
-      enabled: item['enabled'] === true,
-      capabilities: parseCapabilities(item['capabilities'], `principals.${key}.capabilities`),
-    };
-  }
-  return principals;
 }
 
 /**
@@ -455,7 +510,9 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   // principals 是授权边界,占位符一律启动失败。
   assertNoPlaceholders(root['principals'], 'principals');
 
-  const principals = parsePrincipals(root['principals']);
+  // 角色表先于 principals 解析：principal.role 必须命中已定义角色（未定义 = 启动失败）。
+  const roles = parseRoles(root['roles']);
+  const principals = parsePrincipals(root['principals'], roles);
   const contextProfiles = parseContextProfiles(root['contextProfiles']);
 
   const channelRaw: Record<string, unknown> = isRecord(root['channel']) ? root['channel'] : {};
@@ -494,6 +551,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
 
   return {
     principals,
+    roles,
     contextProfiles,
     channel: {
       ...(channelMode === undefined ? {} : { mode: channelMode }),

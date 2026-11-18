@@ -499,7 +499,7 @@ describe('P7-T06 故障注入 · ③ 通知失败（假 sink）', () => {
 function serverConfig(mode: 'inline' | 'background'): AppConfig {
   return {
     principals: {
-      'wecom:user-a': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:user-a': { enabled: true },
     },
     contextProfiles: {
       dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },

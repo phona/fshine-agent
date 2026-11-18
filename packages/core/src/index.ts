@@ -4,7 +4,14 @@
  * 按用例重建的持久化 = task-store 的 tasks/executions/operations + file_refs（CAP-01 S0，
  * 最小形状，不含旧计划字段）。
  */
-export { loadConfig, deploymentEnvOf, effectiveDeploymentEnv } from './config';
+export {
+  loadConfig,
+  deploymentEnvOf,
+  effectiveDeploymentEnv,
+  effectiveRoleOf,
+  permissionsOfPrincipal,
+  permissionsOfRole,
+} from './config';
 export type { LoadConfigOptions } from './config';
 export { openTaskStore, operationKeyOf, TASK_STORE_SCHEMA_VERSION } from './task-store';
 export type {

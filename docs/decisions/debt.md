@@ -66,9 +66,9 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 
 | 编号 | 事项 | 现行证据 | 为什么现在不做 |
 |---|---|---|---|
-| P-1 | `principals.capabilities` / `principals.accountSetScope` 解析后**无任何消费点**（配置写了不生效） | `packages/core/src/config.ts:336-348` 解析；`apps/server/server.ts`、`scripts/ask-runtime.ts` 无读取点 | 本轮先做"解耦 + 粗粒度 RBAC"（角色 → read/write 白名单，宿主求交拦截）；两个字段随该切片删除或替换，不并行保留两套 |
-| P-2 | **细粒度（实体级）授权未实现**：谁能看哪些账套/哪些记录，未做任何透传或校验 | 无 acting-principal 透传；执行层调用只带 operation+args | 归执行层研判；真实 17dz 是否有"按主体授权"概念未验。挂债，等真实层冒烟与业务确认后再做 |
-| P-3 | 写面是**全局开关**（`runtime.allowWriteOperations`），非按人 | `apps/server/server.ts`、`scripts/ask-runtime.ts` 派生允许集合处 | 由 P-1 的角色白名单取代其"按人"部分；部署总闸语义保留（关掉即全员不可写） |
+| P-1 | ~~`principals.capabilities` / `principals.accountSetScope` 解析后**无任何消费点**（配置写了不生效）~~ **已解决（2026-11-19 RBAC 切片）** | 两字段已从 `PrincipalConfig` 删除；加载层忽略旧键（`packages/core/src/config.ts:332`）。角色表 `roles` + `principals.<id>.role` 取代：`packages/core/src/config.ts:294`、`scripts/ask-runtime.ts:422`（宿主求交）、`apps/server/server.ts:686` | —（角色白名单已接线并拦截） |
+| P-2 | **细粒度（实体级）授权未实现**：谁能看哪些账套/哪些记录，未做任何透传或校验 | 无 acting-principal 透传；执行层调用只带 operation+args | 归执行层研判；真实 17dz 是否有"按主体授权"概念未验。仍挂债，等真实层冒烟与业务确认后再做 |
+| P-3 | ~~写面是**全局开关**（`runtime.allowWriteOperations`），非按人~~ **已解决（2026-11-19 RBAC 切片）** | 全局开关降级为**部署总闸**：角色含 `write` 且总闸打开才并入写集合（`scripts/ask-runtime.ts:422`）；viewer 即使总闸打开也写不了；总闸关闭时 operator 也写不了（`scripts/rbac-roles.test.ts` ⑥） | —（按人部分由角色白名单承接，总闸语义保留） |
 
 ## 八、长任务异步协议（2026-11-18 设计完成，暂不实施）
 

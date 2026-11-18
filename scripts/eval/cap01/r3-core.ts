@@ -664,7 +664,7 @@ async function makeServerHarness(options: HarnessOptions): Promise<ServerHarness
   const userIds = options.userIds ?? [USER_A];
   const config: AppConfig = {
     principals: Object.fromEntries(
-      userIds.map((userId) => [`${CHANNEL}:${userId}`, { enabled: true, accountSetScope: 'all', capabilities: ['read'] }]),
+      userIds.map((userId) => [`${CHANNEL}:${userId}`, { enabled: true }]),
     ),
     contextProfiles: {
       dummy: { root: path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform'), gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },

@@ -436,7 +436,7 @@ const RUN_JS_WRITE = "require('node:fs').writeFileSync('out/报告.txt', 'report
 const REPORT_SHA = createHash('sha256').update('report-v1-bytes').digest('hex');
 
 const FAULT_CONFIG: AppConfig = {
-  principals: { 'wecom:user-a': { enabled: true, accountSetScope: 'all', capabilities: ['read'] } },
+  principals: { 'wecom:user-a': { enabled: true } },
   contextProfiles: { dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] } },
   channel: { port: 0, publicUrl: '', callbackPath: '/wecom/callback' },
   sessionTtlMs: 86_400_000,

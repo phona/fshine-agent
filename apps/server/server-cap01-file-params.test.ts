@@ -58,7 +58,7 @@ function copyFixtureRoot(dir: string): string {
 function testConfig(root: string): AppConfig {
   return {
     principals: {
-      'wecom:user-a': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:user-a': { enabled: true },
     },
     contextProfiles: {
       dummy: {
@@ -163,7 +163,9 @@ async function makeFixture(): Promise<Fixture> {
         env: process.env,
       }),
       allowedOperations: ['dummy.scratch'],
-      readOnlyOperations: [],
+      // 本用例只验证单文件参数翻译（scratch 是任务内本地写，不是对外写操作）：在**测试替身**
+      // 里把它登记为只读能力，使其对 viewer 也可用；生产默认面仍只从 access=read 派生只读集合。
+      readOnlyOperations: ['dummy.scratch'],
     }),
     fileDelivery: {
       deliveryMode: 'live',

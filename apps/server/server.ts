@@ -34,6 +34,7 @@ import type {
   OutgoingFileReply,
   ReplyHandler,
 } from '@fshine/contracts';
+import { effectiveRoleOf, permissionsOfRole } from '@fshine/core';
 import { applyExecutorLabel, loadAgentProfile } from '../../packages/agent/src/agent-profile';
 import {
   createFileStore,
@@ -391,6 +392,12 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   }
 
   const log = deps.logger ?? ((line: Record<string, unknown>) => console.log(JSON.stringify(line)));
+  // 未写 role 的 principal 按 viewer（只读，最小权限）处理；启动日志如实登记，不静默。
+  for (const [principalId, principal] of Object.entries(deps.config.principals)) {
+    if (principal.role === undefined) {
+      log({ event: 'principal_role_defaulted', principalId, role: effectiveRoleOf(deps.config, principalId) });
+    }
+  }
   const taskRegistry = createSqliteTaskRegistry(deps.dbPath);
   // 解析后配置只读一次：fileStore 的 TTL 由它派生（单一配置源；本文件不重解释 runtime 段）。
   const resolvedRuntime = resolveRuntimeConfig(deps.config.runtime);
@@ -513,6 +520,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       workerSkills,
       ...(deps.config.runtime === undefined ? {} : { runtime: deps.config.runtime }),
       allowWriteOperations,
+      // 进程级共享 runner 跨主体：每个任务的 Worker 允许集合按任务 principal 的角色求交
+      // （viewer 的后台写不会借用 operator 的允许集）。
+      permissionsForPrincipal: (principalId) =>
+        permissionsOfRole(deps.config, effectiveRoleOf(deps.config, principalId)),
       emptyOperationsMessage: '执行层没有声明任何只读 operation——server 拒绝以空允许集合运行。',
       ...(deps.createDrivers !== undefined ? { createDrivers: deps.createDrivers } : {}),
       ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
@@ -670,6 +681,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           dbPath: deps.dbPath,
           stateDir,
           allowWriteOperations,
+          // 宿主求交：本主体的角色权限（未写 role = viewer = 只读）。实际允许集合还要与
+          // 执行层声明能力、部署总闸求交（assembleSessionCore 内收口）。
+          allowedPermissions: permissionsOfRole(deps.config, effectiveRoleOf(deps.config, principalId)),
           emptyOperationsMessage: '执行层没有声明任何只读 operation——server 拒绝以空允许集合运行。',
           taskRegistry,
           mainSystemPrompt,

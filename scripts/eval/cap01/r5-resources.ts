@@ -230,7 +230,7 @@ async function makeServerHarness(): Promise<ServerHarness> {
   const dir = mkdtempSync(path.join(os.tmpdir(), `cap01-r5-resources-`));
   const dbPath = path.join(dir, 'state.db');
   const config: AppConfig = {
-    principals: { [`${CHANNEL}:${USER_A}`]: { enabled: true, accountSetScope: 'all', capabilities: ['read'] } },
+    principals: { [`${CHANNEL}:${USER_A}`]: { enabled: true } },
     contextProfiles: {
       dummy: { root: path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform'), gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },
     },

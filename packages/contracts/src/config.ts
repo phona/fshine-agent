@@ -3,17 +3,40 @@
  * 秘密与本地参数从 .env / 环境变量并入,加载实现属 packages/core。
  */
 
-export interface PrincipalConfig {
-  /** 账套发现/授权范围（遗留数据位：实体授权归执行层，宿主不再读它裁决任何路径）。 */
-  accountSetScope?: AccountSetScope;
-  enabled: boolean;
-  /** V1 authority capabilities. Omitted values default to read for backwards compatibility. */
-  capabilities?: PrincipalCapability[];
+/**
+ * 通用权限（fshine 与执行层只耦合这两个值，不耦合任何业务实体字段）。
+ * 粗粒度由宿主在发起前求交拦截；细粒度（实体级）授权归执行层。
+ */
+export type Permission = 'read' | 'write';
+
+/** 角色定义：一份 permissions 白名单（顶层 `roles` 段的条目形状）。 */
+export interface RoleConfig {
+  permissions: Permission[];
 }
 
-export type AccountSetScope = 'all' | 'allowlist';
+/**
+ * 内置三档角色（`roles` 段未配置时的缺省，保证开箱可用）：
+ *   · viewer   —— 只读（外部人员、群主体；未写 role 的 principal 也按它处理）；
+ *   · operator —— 读写（内部人员）；
+ *   · admin    —— 全部（开发者；本切片与 operator 无额外能力差异）。
+ */
+export const DEFAULT_ROLES: Readonly<Record<string, RoleConfig>> = Object.freeze({
+  viewer: Object.freeze({ permissions: Object.freeze(['read']) as Permission[] }),
+  operator: Object.freeze({ permissions: Object.freeze(['read', 'write']) as Permission[] }),
+  admin: Object.freeze({ permissions: Object.freeze(['read', 'write']) as Permission[] }),
+});
 
-export type PrincipalCapability = 'read' | 'validate' | 'write';
+/** 未写 `role` 的 principal 使用的角色（最小权限，不静默给写）。 */
+export const DEFAULT_PRINCIPAL_ROLE = 'viewer';
+
+export interface PrincipalConfig {
+  enabled: boolean;
+  /**
+   * 角色名（对应顶层 `roles` 表的键）。缺省 = `viewer`（只读，最小权限）；
+   * 写了未定义的角色名 → 加载层 fail-fast（启动失败），不静默降级。
+   */
+  role?: string;
+}
 
 /** Trusted filesystem context mounted for the platform subagent. */
 export interface ContextProfileConfig {
@@ -277,6 +300,12 @@ export const DEFAULT_CHANNEL_MODE: ChannelMode = 'offline';
 
 export interface AppConfig {
   principals: Record<string, PrincipalConfig>;
+  /**
+   * 角色表（yaml `roles` 段）：角色名 → { permissions: ['read'|'write'] }。
+   * 加载层始终给出（未配置 = 内置三档 DEFAULT_ROLES），保证开箱可用；
+   * principal 的 `role` 必须命中本表的键。
+   */
+  roles?: Record<string, RoleConfig>;
   /** Trusted platform subagent context profiles. */
   contextProfiles: Record<string, ContextProfileConfig>;
   channel: {

@@ -220,7 +220,7 @@ class FaceClient implements ExecutionClient {
 
 function testConfig(): AppConfig {
   return {
-    principals: { [PRINCIPAL_ID]: { enabled: true, accountSetScope: 'all', capabilities: ['read'] } },
+    principals: { [PRINCIPAL_ID]: { enabled: true } },
     contextProfiles: {
       dummy: {
         root: DUMMY_PLATFORM_ROOT,

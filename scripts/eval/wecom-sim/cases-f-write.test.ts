@@ -224,7 +224,7 @@ describe('F 组·写确认回环（W-22～W-25）', () => {
           // 宿主允许集合边界的真实拒绝（写操作不在只读允许集、未发起执行）。
           const result = lastToolResultOf(call.messages);
           expect(result?.isError).toBe(true);
-          expect(result?.text).toContain('不在本轮允许集合内');
+          expect(result?.text).toContain('当前权限不支持这个操作');
           return textAssistant('当前没有写权限：写操作没有开放，这次没有执行，alpha 集合没有变化。');
         },
       ]);

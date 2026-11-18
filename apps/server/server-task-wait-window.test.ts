@@ -37,7 +37,7 @@ function tempDir(): string {
 function testConfig(runtime: RuntimeConfig): AppConfig {
   return {
     principals: {
-      'wecom:user-a': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:user-a': { enabled: true },
     },
     contextProfiles: {
       dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: [] },

@@ -106,7 +106,7 @@ function materializeConfig(item: BizItem, caseDef: BizCase, configCopy: string, 
     const principals = { ...(doc['principals'] as Record<string, unknown> ?? {}) };
     const template = Object.values(principals)[0] as Record<string, unknown> | undefined;
     for (const id of caseDef.biz.extraPrincipals) {
-      principals[id] = { ...(template ?? { accountSetScope: 'all' }), enabled: true };
+      principals[id] = { ...(template ?? {}), enabled: true };
     }
     doc['principals'] = principals;
   }

@@ -6,7 +6,7 @@
  *
  * 本文件钉住「缺省 = 零行为变化」：
  *   · 默认只读 principal 与写链路专用 principal 的写请求都在宿主发起执行前被确定性拒绝
- *     ——零执行、零审计写行、数据原样。拒绝来自宿主允许集合（`不在本轮允许集合内`），
+ *     ——零执行、零审计写行、数据原样。拒绝来自宿主允许集合（`当前权限不支持这个操作`），
  *     不是模型自觉；
  *   · 缺省执行面的允许集合 = 执行层自述 access=read；写 operation 一个都不在。
  *
@@ -34,8 +34,8 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
 const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform');
 
-/** 宿主允许集合的确定性拒绝话术（execution-runtime.ts；不依赖模型自觉）。 */
-const WRITE_NOT_ALLOWED_MESSAGE = '不在本轮允许集合内';
+/** 宿主允许集合的确定性拒绝话术（execution-runtime.ts；不依赖模型自觉，且不含 operation 名）。 */
+const WRITE_NOT_ALLOWED_MESSAGE = '当前权限不支持这个操作';
 /** 夹具声明的写 operation（access=write；缺省开关下一个都不进允许集合）。 */
 const WRITE_OPERATIONS = [
   'dummy.prepare',
@@ -217,13 +217,14 @@ describe('场景 4：没有写权限的 principal → 确定性拒绝、零写�
     });
   });
 
-  it('写链路专用 principal（wecom:fixture-writer）：缺省开关下 capabilities 有 write 也仍被只读允许集拒绝', async () => {
+  it('写链路专用 principal（wecom:fixture-writer，operator）：缺省开关下角色含 write 也仍被只读允许集拒绝', async () => {
     const dir = tempDir();
     const config = materializedConfig(dir);
 
-    // 配置事实：默认身份仍是只读；writer 身份声明了 write（遗留数据位，不授权运行时写面）。
-    expect(config.principals['wecom:fixture-user']?.capabilities).toEqual(['read']);
-    expect(config.principals['wecom:fixture-writer']?.capabilities).toEqual(['read', 'write']);
+    // 配置事实：默认身份未写 role（按 viewer 只读）；writer 身份是 operator（读写）。
+    expect(config.principals['wecom:fixture-user']?.role).toBeUndefined();
+    expect(config.principals['wecom:fixture-writer']?.role).toBe('operator');
+    expect(config.roles?.['operator']?.permissions).toEqual(['read', 'write']);
     // 默认 principal 选择不变（第一个 enabled）。
     expect(Object.entries(config.principals).find(([, principal]) => principal.enabled)?.[0]).toBe('wecom:fixture-user');
 
