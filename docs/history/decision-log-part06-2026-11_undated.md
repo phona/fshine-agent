@@ -235,7 +235,7 @@ Pi 1.5.2 迁移 U3（恢复/重试后同一逻辑写操作被重复执行）以*
 
 ## 九十八、P2 业务端到端验收 · 七场景落成与确定性自检（2026-11-16，分支 `arch/p2-e2e`，基线 = `arch/integration` 启动时 HEAD `1ab097d`）状态：**实现完成·确定性自检通过·待真实模型执行**
 
-> 授权与边界：owner 授权在独立 worktree 落成预注册 `docs/product/p2-business-e2e-prereg.md` 的七类场景，**本轮零真实模型**（provider 并发额度让给其他线）、零真实平台/写，不 push main。新增代码全部在 `scripts/eval/p2/**`（eval 胶水）；产品码 `packages/**`、`apps/**` 零改动。
+> 授权与边界：owner 授权在独立 worktree 落成预注册 `docs/eval/business-e2e-batch2-prereg.md` 的七类场景，**本轮零真实模型**（provider 并发额度让给其他线）、零真实平台/写，不 push main。新增代码全部在 `scripts/eval/p2/**`（eval 胶水）；产品码 `packages/**`、`apps/**` 零改动。
 
 - **交付物（新增 5 文件 / 改动 4 文件）**：新增 `scripts/eval/p2/{p2-types,p2-harness,p2-oracle,p2-scenarios}.ts` + `{p2-oracle,p2-scenarios}.test.ts`；改动（均为复用接缝/登记，非语义扩张）：`scripts/eval/business-e2e/shared-instance.ts`（导出 `recordingDriver` 供复用）、`scripts/eval/long-session/evidence.ts`（`Track` 并集追加 `'P2'` 标签，**判定语义零变化**，有守卫用例）、`scripts/eval/long-session/multiuser/mu-support.ts`（导出 MU 计划驱动、`createMuServer` 增 `createDrivers` 透传、`MuTaskSnapshot` 补 `failureReason/resultText` 只读投影）、`packages/agent/resource-policy-single-source.test.ts`（按该守卫既有「新增读者必须登记」路径登记 P2 场景文件的 RuntimeConfig 构造）。
 - **复用（未建第二套框架）**：生产同源 `createServer`（与 `npm start` 同链）+ 真实 Pi 驱动 × 脚本化 provider（`testing/scripted-model-runtime`）+ 仓内 dummy 执行层（经装配链唯一入口 `resolveExecutionFace`，不旁路）；逐轮管线 `r6/harness.ts:runHarnessSession`；Oracle `r6/oracle.ts`（事实/H3/H4/H5/E-G）、`r6/compaction.ts`（H6）、`business-e2e/judge.ts:judgeMechanical`（越权/重复/虚假完成）；记账 `r6/accounting.ts`；证据 `r6/evidence.ts:collectEvidence`；多用户/重启 `r6/multiuser/mu-support.ts`；统计 `r6/oracle:FACT_TRUTH` 真值。
@@ -246,7 +246,7 @@ Pi 1.5.2 迁移 U3（恢复/重试后同一逻辑写操作被重复执行）以*
 - **确定性跑不了、须真实模型确认的清单**：① 真实模型是否能遵守 S1/S3/S4 的工具与如实转述纪律（S4 取消 intent 的措辞与顺序）；② S2 的真实模型 T2 行为（进一步验证上述冲突）；③ S3/S7c 的「结果逐字从存档转述」在真实模型下的稳定性（确定性侧由夹具合成回复，不可替代）；④ S6 真实模型的并发交错与通知措辞（本确定性跑用 MU 计划驱动，零模型调用）；⑤ S7b 真实 Pi 驱动对「执行面不返回」的截止行为（本侧用预注册允许的 deadline-honoring 脚本化 Worker 驱动）；⑥ 压缩/摘要/重试/溢出恢复四类调用在真实压缩压力下的分离计量（本侧只覆盖分类器与 main 路径）。
 - **其他如实登记**：S6 的确定性跑以 MU 计划驱动（零模型调用）验证隔离/归属/会合栅，不为模型面读数；通知投递为共享 sink + 任务 owner 映射核对（真实渠道投递归后续切片）；`.runtime/**` 一律 gitignored、未 `git add`。
 
-**指针**：`docs/product/p2-business-e2e-prereg.md`、`scripts/eval/p2/p2-scenarios.ts`（七场景定义与跑法）、`scripts/eval/p2/p2-oracle.ts`（`classifyP2Sample` 接缝与硬零合成）、`scripts/eval/p2/p2-harness.ts`（装配/记账/证据）、`scripts/eval/p2/p2-scenarios.test.ts`（确定性自检 + 反向绊线）。**未烧真实模型。**
+**指针**：`docs/eval/business-e2e-batch2-prereg.md`、`scripts/eval/p2/p2-scenarios.ts`（七场景定义与跑法）、`scripts/eval/p2/p2-oracle.ts`（`classifyP2Sample` 接缝与硬零合成）、`scripts/eval/p2/p2-harness.ts`（装配/记账/证据）、`scripts/eval/p2/p2-scenarios.test.ts`（确定性自检 + 反向绊线）。**未烧真实模型。**
 
 **状态：实现完成·确定性自检通过·待真实模型执行。**
 

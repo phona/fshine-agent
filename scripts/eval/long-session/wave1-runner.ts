@@ -1,7 +1,7 @@
 /**
  * R6 Wave1 · 真实模型长会话执行器（最小 runner；复用 r6 harness/oracle/accounting/evidence）。
  *
- * 口径 = `docs/product/r6-longsession-prereg.md` §十三 冻结块（运行前快照见
+ * 口径 = `docs/eval/long-session-prereg.md` §十三 冻结块（运行前快照见
  * `.runtime/long-session/prereg.md`；无快照时按仓内预注册文档计算 sha256）：
  *   · 每轨 3 会话 = 2×40k 探索 + 1×128k 生产窗口可行性；五轨 15 会话；
  *   · 逐会话硬停 150 calls / 3,000,000 tokens / 2h（先验拒绝，达限即停并留证）；

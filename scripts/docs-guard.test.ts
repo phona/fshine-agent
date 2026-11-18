@@ -178,26 +178,9 @@ const NAMED_DIRS = ['product', 'architecture', 'eval', 'decisions'] as const;
  *   · 白名单条目必须仍存在且仍命中前缀（陈旧豁免同样红）。
  */
 const GRANDFATHERED_PREFIXED_FILES: ReadonlyArray<{ rel: string; reason: string }> = [
-  {
-    rel: 'docs/product/p2-business-e2e-prereg.md',
-    reason: 'P2 业务 E2E 冻结预注册；scripts/eval/p2/p2-types.ts:4、p2-scenarios.ts:2 以路径引用',
-  },
-  {
-    rel: 'docs/product/p3-human-redo.md',
-    reason: '--redo 语义报告；scripts/p0-redo-doc-scan.test.ts:27 逐字扫描该文件',
-  },
-  {
-    rel: 'docs/product/r4-acceptance.md',
-    reason: 'R4 验收用例冻结基线；测试文件头注释按 P*-T* 编号引用',
-  },
-  {
-    rel: 'docs/product/r4-joint-interfaces.md',
-    reason: 'R4 联合接口 v1 冻结面；packages/agent/src/task-registry.ts:14 等多处以路径引用',
-  },
-  {
-    rel: 'docs/product/r6-longsession-prereg.md',
-    reason: 'R6 预注册；scripts/eval/long-session/wave1-runner.ts:66 运行时读取并算 sha256',
-  },
+  // 2026-11-18 清空：最后 5 个豁免项已按主题改名（r6-longsession-prereg→eval/long-session-prereg、
+  // p2-business-e2e-prereg→eval/business-e2e-batch2-prereg、p3-human-redo→product/human-redo、
+  // r4-acceptance 与 r4-joint-interfaces→history/），引用同步。此表保持为空，新增轮次前缀即红。
 ];
 
 describe('检查 3 · 命名规则：现行目录文件名不得带轮次前缀', () => {

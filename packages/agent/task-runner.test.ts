@@ -1,5 +1,5 @@
 /**
- * TaskRunner 语义测试（P6，先红后绿；来源 docs/product/r4-joint-interfaces.md §1/§2/§3 v1 冻结）。
+ * TaskRunner 语义测试（P6，先红后绿；来源 docs/history/r4-joint-interfaces.md §1/§2/§3 v1 冻结）。
  *
  * 全部用假端口：
  *   · FakeRegistry —— 镜像 P2 契约核心的**消费面语义**（状态集/合法边/租约/认领/过期/取消/等待）；

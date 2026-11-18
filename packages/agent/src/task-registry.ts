@@ -11,7 +11,7 @@
  *     与迁移回填/显示回落同规则；#4-a 模型命名递延，不改 task_run 工具 schema）；
  *   · replyText：Main 本回合最终回复（send 收尾后 archiveReply 同值写本回合各任务行）。
  *
- * P2a 契约核心（2026-11-14；来源 docs/product/r4-joint-interfaces.md §1 v1 冻结）：
+ * P2a 契约核心（2026-11-14；来源 docs/history/r4-joint-interfaces.md §1 v1 冻结）：
  *   · 状态集 queued/running/waiting_user/cancelling/cancelled/completed/failed/timed_out
  *     + 保留 unexecuted（已汇报零执行）；
  *   · 合法转换矩阵见 LEGAL_TRANSITIONS（其余一律拒绝并留痕：TaskTransitionError，

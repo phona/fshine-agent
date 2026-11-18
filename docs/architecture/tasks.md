@@ -155,7 +155,7 @@
 - `p2b-display.md`——9 态用户词与 5 种原因行金样、未知值 fail-open；
 - `p1-ledger.md`——`taskNo` 原子分配不复用、`deriveTaskName` 机械回落、回复存档；
 - `p1-task-viewing.md`——只读消费底账、不在读时重算终态；
-- `p3-human-redo.md`（现存：`docs/product/p3-human-redo.md`）——redo 输入=存储原文逐字、仅终态、原任务零改动；
+- `p3-human-redo.md`（现存：`docs/product/human-redo.md`）——redo 输入=存储原文逐字、仅终态、原任务零改动；
 - `p6-task-runner.md`——受理即 `queued`、租约认领、重启恢复、取消/接续分派；
 - `p7a-ask-first.md`——交互/回放共用同一装配（未涉及任务生命周期的部分未取）；
 - `idempotency-cross-restart.md`——三处幂等覆盖边界与"跨重启不幂等"的结论；

@@ -1,7 +1,7 @@
 /**
  * P5 资源许可与强制：契约矩阵测试（TDD：先红 → 最小实现转绿 → 反向绊线）。
  *
- * 冻结面：`docs/product/r4-joint-interfaces.md` §2（acquire/release/cancelQueued/
+ * 冻结面：`docs/history/r4-joint-interfaces.md` §2（acquire/release/cancelQueued/
  * snapshot/budgetFor；拒绝 reason ∈ queue_full/quota_exceeded/budget_exhausted/depth_exceeded；
  * 前台与后台配额独立；子 Worker 共享父任务预算，不复制/不放大；token 仅可验证时启用）。
  *

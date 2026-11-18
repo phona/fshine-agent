@@ -230,7 +230,7 @@ MU-6 在本基线（含 B1 接线）上 **PASS**：三 principal 同 `dbPath` �
 
 ## 八十八、P2 业务 E2E 预注册准备（七类场景 / 判据 / 硬停 / 失败分类 / 证据 schema / 合流依赖）（2026-11-15，分支 `arch/p2-prereg`，基线 = `arch/integration` 启动时 HEAD `f37d11d`）状态：**待合入·准备档（未执行）**
 
-> 本轮 = **只文档、零真实模型、不跑测试**：产出 P2「业务端到端验收」预注册 `docs/product/p2-business-e2e-prereg.md`（v2，含 owner 侧复核逐条修订），把待执行的七类业务场景、样本量 N 与预算、判据、单实验硬停、失败分类、证据 schema、R6 Harness 复用映射与**合流依赖**冻结在跑之前，防跑后口径漂移 / 挑样本。**未跑任何 P2 样本、未调真实模型、未改产品码 / Worker 提示 / 账本 / 契约、未碰真实平台 / 写；`.runtime` 未 `git add`；`docs/decision-log.md` 除本条外未动。** P2 执行前的合流与适配器前置见 §8、§9。
+> 本轮 = **只文档、零真实模型、不跑测试**：产出 P2「业务端到端验收」预注册 `docs/eval/business-e2e-batch2-prereg.md`（v2，含 owner 侧复核逐条修订），把待执行的七类业务场景、样本量 N 与预算、判据、单实验硬停、失败分类、证据 schema、R6 Harness 复用映射与**合流依赖**冻结在跑之前，防跑后口径漂移 / 挑样本。**未跑任何 P2 样本、未调真实模型、未改产品码 / Worker 提示 / 账本 / 契约、未碰真实平台 / 写；`.runtime` 未 `git add`；`docs/decision-log.md` 除本条外未动。** P2 执行前的合流与适配器前置见 §8、§9。
 
 ### 0. 编号说明（既有重号，不改动）
 
@@ -298,7 +298,7 @@ MU-6 在本基线（含 B1 接线）上 **PASS**：三 principal 同 `dbPath` �
 - **合流未执行**：仅只读预演；分叉未合并、`arch/integration` 未动；合入待 owner 批。
 - **测试未跑**：本 run 纪律为「不跑测试」，故未执行 tsc / vitest；相关闸门留至合流分支与 P2 执行前。
 
-**指针**：`docs/product/p2-business-e2e-prereg.md`（预注册全文）；关联 §八十五（B1 接线）、§八十六（MU-8 / MU-6 复跑）、`docs/product/r6-longsession-harness-design.md`（适配器 wave）。
+**指针**：`docs/eval/business-e2e-batch2-prereg.md`（预注册全文）；关联 §八十五（B1 接线）、§八十六（MU-8 / MU-6 复跑）、`docs/product/r6-longsession-harness-design.md`（适配器 wave）。
 
 **状态：待合入·准备档（未执行）。**
 ## 八十九、Pi 原生压缩替换实验 · 阶段一「能力核实与接入路径」· 归档登记（2026-11-15，分支 `exp/pi-native-session-compaction`，基线 = `arch/integration` 启动时 HEAD `84a22fa`）状态：**实验分支·待裁决**

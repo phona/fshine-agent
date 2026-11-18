@@ -1,7 +1,7 @@
 /**
  * R4 P2a Task Registry 契约核心（冻结判据；TDD 先红）。
  *
- * 契约来源：docs/product/r4-joint-interfaces.md §1（v1 冻结）+ r4-acceptance.md P2-T01–T05。
+ * 契约来源：docs/history/r4-joint-interfaces.md §1（v1 冻结）+ r4-acceptance.md P2-T01–T05。
  * 覆盖：
  *   · 状态集：queued/running/waiting_user/cancelling/cancelled/completed/failed/timed_out，
  *     保留 unexecuted；

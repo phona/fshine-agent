@@ -269,7 +269,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ## 七十八、R6 长会话可靠性验收 · 预注册与负载设计（准备）（2026-11-15，分支 `arch/r6-prep`，基线 = `arch/integration` @ `84a22fa`）状态：**待合入**（准备档）
 
-> 角色：本条目为 **R6 长会话可靠性验收（预注册与负载设计）的**登记。目标是证明 fshine 在**真实模型 + 真实生产窗口 128k（不伪造窗口）**下，长时间多轮**反复压缩**后仍持续正确。**本轮为 docs-only 准备**：零产品代码改动、零真实模型调用、不跑测试、不新增 Runtime 机制。两份交付文档：`docs/product/r6-longsession-prereg.md`（预注册草案）+ `docs/product/r6-longsession-harness-design.md`（harness 设计）。**未执行任何测试/探针，未产生任何读数**——本条目前只登记设计与纪律，非结论。
+> 角色：本条目为 **R6 长会话可靠性验收（预注册与负载设计）的**登记。目标是证明 fshine 在**真实模型 + 真实生产窗口 128k（不伪造窗口）**下，长时间多轮**反复压缩**后仍持续正确。**本轮为 docs-only 准备**：零产品代码改动、零真实模型调用、不跑测试、不新增 Runtime 机制。两份交付文档：`docs/eval/long-session-prereg.md`（预注册草案）+ `docs/product/r6-longsession-harness-design.md`（harness 设计）。**未执行任何测试/探针，未产生任何读数**——本条目前只登记设计与纪律，非结论。
 
 ### 1. 范围与顶层要求 T1–T5
 
@@ -368,11 +368,11 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 - **零产品代码改动**：`packages/**`、`apps/**`、Worker 提示、任务账本、权限均未动；未升级 Pi；未新增 Runtime 机制。
 - **观测/负载代码不改变压缩触发/门控**：只采集事实；不得演变为第二套压缩决策机制（`r6-longsession-harness-design.md` §一）。
 - **会话持久化问题不混入**（重启恢复属独立验收）；**`.runtime` 不得 `git add`**。
-- **姊妹文档与基线**：`docs/product/r6-longsession-prereg.md`、`docs/product/r6-longsession-harness-design.md`；harness 复用 `scripts/eval/p3/p3a-session.ts` 驱动/事件/硬停骨架 + `enforce.ts` 硬停 + `ask-replay.ts` 多会话装配骨架 + `stats.ts wilson95`；**必须新建** 7 项缺口（128k 负载生成器 / ≥3 次压缩机械保障 / 事实 Oracle / 任务 Oracle 适配 / 证据落盘 / 判官接线 / 旧实现对照执行形态）。
+- **姊妹文档与基线**：`docs/eval/long-session-prereg.md`、`docs/product/r6-longsession-harness-design.md`；harness 复用 `scripts/eval/p3/p3a-session.ts` 驱动/事件/硬停骨架 + `enforce.ts` 硬停 + `ask-replay.ts` 多会话装配骨架 + `stats.ts wilson95`；**必须新建** 7 项缺口（128k 负载生成器 / ≥3 次压缩机械保障 / 事实 Oracle / 任务 Oracle 适配 / 证据落盘 / 判官接线 / 旧实现对照执行形态）。
 - **旧实现基线对照**（harness §九）：**仅当发生压缩管线迁移**时启用；迁移前 SHA 由 owner/集成指定（本设计不臆造 SHA）；同模型/提示词/用例/数据/工具/判据/窗口/Oracle，会话为主分析单位 + CI。未迁移时退化为同实现重复批次，**不产 IMPROVED/REGRESSED**。
 - **与 R5 长稳的关系**：R5 Phase 3 长稳全在 **W=8192**（§六十五/§六十九），**不得外推 128k**；其暴露的近空摘要塌缩空答、取消虚答、零收益循环是 R6 的**已知风险种子**，非 R6 结论。R6 **取代** R5 长稳口径。
 
-**指针**：`docs/product/r6-longsession-prereg.md`、`docs/product/r6-longsession-harness-design.md`；关联 §六十一（额度硬阻塞）、§六十五/§六十九（R5 8192 长稳与归属审计）、§七十一（摘要调用六项计量）、§七十五（Pi 压缩复用评估 A 条件式、迁移未实施）。
+**指针**：`docs/eval/long-session-prereg.md`、`docs/product/r6-longsession-harness-design.md`；关联 §六十一（额度硬阻塞）、§六十五/§六十九（R5 8192 长稳与归属审计）、§七十一（摘要调用六项计量）、§七十五（Pi 压缩复用评估 A 条件式、迁移未实施）。
 
 **状态：待合入（准备档）。**
 
@@ -396,7 +396,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ### 2. 交付物（修订版 v2）
 
-- `docs/product/r6-longsession-prereg.md` = **修订版 v2**：含 §〇 纪律、§一 T1–T5、§2.3 冻结失败分类 E-A..E-K、§2.4 统计口径+功效、§2.5 三态处置、§三 五轨 LS1–LS5、§四 UX 六指标（Wave1 只读）、§五 硬零 H1–H7、§六 单实验硬停/停止条件/会话有效门槛、§七 Wave 分阶段+窗口政策+G1/G2/G3、§十 故障注入 FI-1..FI-8（Pi 原生边界）、§十三 **Wave1 冻结口径块**。
+- `docs/eval/long-session-prereg.md` = **修订版 v2**：含 §〇 纪律、§一 T1–T5、§2.3 冻结失败分类 E-A..E-K、§2.4 统计口径+功效、§2.5 三态处置、§三 五轨 LS1–LS5、§四 UX 六指标（Wave1 只读）、§五 硬零 H1–H7、§六 单实验硬停/停止条件/会话有效门槛、§七 Wave 分阶段+窗口政策+G1/G2/G3、§十 故障注入 FI-1..FI-8（Pi 原生边界）、§十三 **Wave1 冻结口径块**。
 - `docs/product/r6-longsession-harness-design.md` = **修订版 v2**：§一 观测只采集事实不改触发/门控；§二 负载生成器；§三/§四 事实 Oracle / Task Registry Oracle；§五 证据 schema（事实字段）；§七 FI-1..FI-3 Pi 原生边界；§八 复用与缺口；§十 边界与提交纪律；§十一 测试基建说明与运行方式。
 
 ### 3. 测试基建（`scripts/eval/long-session/`，测试代码，产品码零改动）
@@ -430,7 +430,7 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 - 真实模型、128k 实际能力、生产同源装配**未验证**（G3 真实模型项待 Wave1 前冒烟）。
 - **未进行泛化架构调研**（仅做落地所需最小核实）；**Wave2 方案待重新裁决**。
 
-**指针**：`docs/product/r6-longsession-prereg.md`、`docs/product/r6-longsession-harness-design.md`、`scripts/eval/long-session/**`；关联 §七十八（R6 预注册与负载设计准备档）、§七十五（Pi 压缩复用评估、迁移未实施）、§六十五/§六十九（R5 W=8192 长稳，不得外推 128k）。
+**指针**：`docs/eval/long-session-prereg.md`、`docs/product/r6-longsession-harness-design.md`、`scripts/eval/long-session/**`；关联 §七十八（R6 预注册与负载设计准备档）、§七十五（Pi 压缩复用评估、迁移未实施）、§六十五/§六十九（R5 W=8192 长稳，不得外推 128k）。
 
 **状态：待合入。**
 

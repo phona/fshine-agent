@@ -5,7 +5,7 @@
 > 归属：worktree `~/projects/fshine-agent-p2-prereg`，分支 `arch/p2-prereg`，基线 = `arch/integration` 启动时 HEAD `f37d11d`（= MU-6 复跑，integration HEAD）。
 > **本轮只交付本文档**：docs-only、**零真实模型调用**、**不跑测试**、不改产品码、不改 Worker 提示/账本/契约、不引 Runtime 机制、不碰真实平台/数据/写。
 > 前置（owner 已裁定）：**P0 Go 且 B1 恢复接线完成**后方可跑 P2。integration 已实测含 B1 接线 / B2 / MU（见 §八 祖先核验）。
-> 姊妹件：`docs/product/r6-longsession-prereg.md`（R6 冻结口径与硬停来源）、`docs/eval/README.md`、`docs/eval/README.md`（两文已删，git 历史可考；Harness 与 MU 验收的现行面见 `docs/eval/README.md`）、`docs/history/business-e2e-prereg.md`（阶段 2 业务 E2E 先例）。本文复用其纪律与接缝，不重建第二套。
+> 姊妹件：`docs/eval/long-session-prereg.md`（R6 冻结口径与硬停来源）、`docs/eval/README.md`、`docs/eval/README.md`（两文已删，git 历史可考；Harness 与 MU 验收的现行面见 `docs/eval/README.md`）、`docs/history/business-e2e-prereg.md`（阶段 2 业务 E2E 先例）。本文复用其纪律与接缝，不重建第二套。
 
 ---
 
@@ -151,7 +151,7 @@
 
 - **N=3 的性质（诚实口径，对齐 R6 §2.1）**：N=3 时 3/3 的 Wilson 95% 下界 = **0.4385**——**区间极宽**，故 **P2 一律只读、不作任何稳定性/可靠性概率结论**；不得把 3/3 读作「通过/稳定」。k/N 一律附 Wilson 95% CI（`scripts/eval/exploration/stats.ts:69` `wilson95`）。
 - **实测取值（冻结，供机械复核）**：`node -e "import('./scripts/eval/exploration/stats.ts').then(m=>console.log(m.wilson95(3,3),m.wilson95(2,2)))"` → **`wilson95(3,3) = [0.43849…, 1]`**、`wilson95(2,2) = [0.34237…, 1]`。
-  - **口径纠偏（冻结前修正）**：**0.342 是 2/2 的下界，不是 3/3 的**（2/2 标注见 `docs/product/r6-longsession-prereg.md:47`、`docs/decisions/index.md` R6 §七十八 行）。P2 各场景 N=3，全绿读数一律记 **3/3，Wilson 95% CI [0.4385, 1]**；**禁止**把 0.342 引作 P2 读数。
+  - **口径纠偏（冻结前修正）**：**0.342 是 2/2 的下界，不是 3/3 的**（2/2 标注见 `docs/eval/long-session-prereg.md:47`、`docs/decisions/index.md` R6 §七十八 行）。P2 各场景 N=3，全绿读数一律记 **3/3，Wilson 95% CI [0.4385, 1]**；**禁止**把 0.342 引作 P2 读数。
   - 分场景报数即以该值；**不以跨场景合并比例冒充单一结论**（21/21 若需呈现，其下界 = `wilson95(21,21)` = 0.8454，但 P2 结论以逐场景为准）。
 - **分析单位**：以**样本**为主分析单位（S6 样本 = 一个 3-principal 并发批次）；同一会话内多轮/多事实问题**不冒充独立样本**（R6 §〇.3）。
 - **预算（单会话硬停 → 总上界）**：

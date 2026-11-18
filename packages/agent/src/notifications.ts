@@ -5,7 +5,7 @@
  * 通知失败或延迟不得改变任务结果。因此本模块把「通知事实」先落同库 outbox，再由
  * 渠道无关的 `NotificationSink` 投递；投递成功与否只改 outbox 的投递列。
  *
- * 最小形状（全部冻结项，见 docs/product/r4-joint-interfaces.md §4）：
+ * 最小形状（全部冻结项，见 docs/history/r4-joint-interfaces.md §4）：
  *   · 9 类通知意图枚举 + 状态转移→意图映射（阶段进展/里程碑由 state fact 生成）；
  *   · 同库最小表 notifications(id, task_id, kind, state_version, payload_json, created_at,
  *     delivered_at, attempts, last_error)，由本模块 `CREATE TABLE IF NOT EXISTS` 自建（幂等）；

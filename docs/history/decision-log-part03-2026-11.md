@@ -602,7 +602,7 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 
 ### ② payload 补字段（冻结 §4 补字段，owner 已批，最小）
 
-- `packages/agent/src/notifications.ts` 白名单新增 `missing`：`NotificationPayload`/`NotificationFact`/`FACT_KEYS`/`validateFact`/`buildPayload` 同步（`missing?: readonly string[]`，`waiting_user` 必带非空字符串数组，与底账 `pendingQuestion.missing` 同口径形状校验）——使通知能说出「需要你补什么」。**唯一键去重与有界重试语义未动**；`docs/product/r4-joint-interfaces.md` §4 只补字段说明，不改语义。
+- `packages/agent/src/notifications.ts` 白名单新增 `missing`：`NotificationPayload`/`NotificationFact`/`FACT_KEYS`/`validateFact`/`buildPayload` 同步（`missing?: readonly string[]`，`waiting_user` 必带非空字符串数组，与底账 `pendingQuestion.missing` 同口径形状校验）——使通知能说出「需要你补什么」。**唯一键去重与有界重试语义未动**；`docs/history/r4-joint-interfaces.md` §4 只补字段说明，不改语义。
 
 ### ③ A 通道（机械推送，无守护进程）
 

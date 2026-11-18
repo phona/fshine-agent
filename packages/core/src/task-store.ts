@@ -12,7 +12,7 @@
  * UUID）；业务名称 v1 机械回落（决策问题 #4 v1，零模型、不改 task_run 工具 schema）；
  * Main 最终回复存档（S1，决策问题 #12：同回合各任务行同值，不建 turns 表）。
  *
- * 为什么加 P2a 五列（2026-11-14，docs/product/r4-joint-interfaces.md §1）：
+ * 为什么加 P2a 五列（2026-11-14，docs/history/r4-joint-interfaces.md §1）：
  *   · reason：机械终止原因（cancelled_by_user/timeout/failed_confirmed/result_unknown/
  *     resource_limited）——与 failure_reason（人读文本）分工，result_unknown ≠ failed ≠ success；
  *   · pending_question / waiting_since：waiting_user 形状（JSON：missing[]/candidates?/raw? + ISO 时刻）；

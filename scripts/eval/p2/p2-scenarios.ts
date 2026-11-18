@@ -1,5 +1,5 @@
 /**
- * P2 业务端到端验收 · 七场景落成（预注册 `docs/product/p2-business-e2e-prereg.md` §一 逐项）。
+ * P2 业务端到端验收 · 七场景落成（预注册 `docs/eval/business-e2e-batch2-prereg.md` §一 逐项）。
  *
  * 每个场景 = 一个 `P2CaseDefinition`（话术 / 装配旋钮 / 真值 / 硬零 / 覆盖 / 特判）
  * + 一个确定性跑法（假模型 + 仓内 dummy 执行层；零真实平台、零真实写）。

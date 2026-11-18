@@ -20,9 +20,9 @@
 - `architecture/channels.md` — 渠道三档（offline/shadow/live）、入站附件时序、silent 三档、出站六路。
 - `architecture/files.md` — `fileId` 模型、`run_js`、per-run 目录、产物登记与保留期。
 - `product/event-catalog.md` — 结构化事件字典（以 `23ae585` 为基线列 29 个；`attachment_nudge_*`、`task_result_delivery_*`、`recalc_*`、`run_dir_cleanup_startup*` 等新增事件以 `architecture/channels.md` 的事件表与代码为准）。
-- `product/r4-joint-interfaces.md` — R4 联合接口约定 v1（P2/P5/P6/P4 冻结面，代码仍引用）。
+- `history/r4-joint-interfaces.md` — R4 联合接口约定 v1（P2/P5/P6/P4 冻结面，代码仍引用）。
 - `product/p2a-task-contract.md` — P2a Task Registry 契约核心冻结记录（状态机/取消/waiting）。
-- `product/p3-human-redo.md` — `--redo` 语义边界：重新交办 ≠ 人工接管/会话续跑（`scripts/p0-redo-doc-scan.test.ts` 逐字扫描）。
+- `product/human-redo.md` — `--redo` 语义边界：重新交办 ≠ 人工接管/会话续跑（`scripts/p0-redo-doc-scan.test.ts` 逐字扫描）。
 
 ## eval（评测口径与现行基线，5 篇）
 
@@ -30,9 +30,9 @@
 
 - `eval/README.md` — 三类入口、判据冻结纪律、预注册规则、读数与退出码（现行口径）。
 - `product/business-coverage.md` — 业务级用例覆盖图（持续更新）。
-- `product/r4-acceptance.md` — R4 验收用例设计（v1 预注册基线，测试按 P*-T* 编号引用）。
-- `product/r6-longsession-prereg.md` — R6 长会话压缩预注册（Wave1 已冻结、Wave2 待裁决；`scripts/eval/long-session/wave1-runner.ts:66` 运行时按其算 sha256）。
-- `product/p2-business-e2e-prereg.md` — P2 业务 E2E 预注册（七场景 21 样本 / 27 会话；尚未跑真实模型，仍是下一次运行的口径）。
+- `history/r4-acceptance.md` — R4 验收用例设计（v1 预注册基线，测试按 P*-T* 编号引用）。
+- `eval/long-session-prereg.md` — R6 长会话压缩预注册（Wave1 已冻结、Wave2 待裁决；`scripts/eval/long-session/wave1-runner.ts:66` 运行时按其算 sha256）。
+- `eval/business-e2e-batch2-prereg.md` — P2 业务 E2E 预注册（七场景 21 样本 / 27 会话；尚未跑真实模型，仍是下一次运行的口径）。
 
 ## ops（运行、变量、联调与手工走查，5 篇）
 

@@ -1,5 +1,5 @@
 /**
- * 资源许可与强制（R4 P5；`docs/product/r4-joint-interfaces.md` §2 冻结面）。
+ * 资源许可与强制（R4 P5；`docs/history/r4-joint-interfaces.md` §2 冻结面）。
  *
  * 定位：把「并发准入 / 队列容量 / 委派深度 / 任务级共享预算 / 回合时限」收口为一个
  * **纯逻辑对象**——无 IO、无定时器、无持久化；时间由注入时钟提供（缺省 `Date.now`），

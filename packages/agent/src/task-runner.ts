@@ -1,6 +1,6 @@
 /**
  * 后台任务执行（P6）：受理 → 底账 queued → dispatcher 认领（lease）→ running → 终态；
- * 进程内调度与重启恢复、取消、资源许可消费。契约来源：docs/product/r4-joint-interfaces.md
+ * 进程内调度与重启恢复、取消、资源许可消费。契约来源：docs/history/r4-joint-interfaces.md
  * §1（TaskRegistry）/§2（ResourcePolicy）/§3（TaskRunner）v1 冻结。
  *
  * 边界（硬约束，缺一不做）：
