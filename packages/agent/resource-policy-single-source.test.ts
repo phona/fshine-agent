@@ -125,6 +125,10 @@ const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   // 前台排队最长等待（2026-11-18）：缺省与解释归策略；execution-runtime 只读策略解析值
   // （`snapshot().config.queueWaitMs`）做排队上限，不读原始 runtime 配置。
   queueWaitMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME],
+  // 大响应文件化（2026-11-19）：缺省与解释归策略；execution-runtime 只读策略解析值
+  // （`snapshot().config.oversizeDataBytes`）做 Worker 结果投影上限；ask-runtime 装配时把
+  // 解析值注入后台 TaskExecutor（与 workerTurnMs 同一透传形态），不读原始 runtime 配置。
+  oversizeDataBytes: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME],
 };
 
 interface SourceFacts {

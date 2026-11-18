@@ -641,6 +641,17 @@ export interface RuntimeOptions {
    * 整轮扫描抛错仍走 taskExecutionBridge.onSkip('scan_failed:…')，两者不重复。
    */
   onTaskOutputSweepSkipped?: (event: TaskOutputSweepSkippedEvent) => void;
+  /**
+   * 大响应文件化成功（2026-11-19；**只进日志**，不进用户话术）：Worker 的 completed 结果
+   * 超过 `runtime.oversizeDataBytes` 时，完整 data 已落成任务作用域文件，模型只拿到摘要 +
+   * fileId。缺省静默（不影响回合）。
+   */
+  onExecutionResultFileized?: (event: ExecutionResultFileizedEvent) => void;
+  /**
+   * 大响应未能文件化（2026-11-19；**只进日志**）：未注入任务文件桥，或登记被拒/抛错时，
+   * 结果退化为原样返回（fail-open，不阻塞业务）。缺省静默。
+   */
+  onExecutionResultOversizeUnhandled?: (event: ExecutionResultOversizeUnhandledEvent) => void;
 }
 
 /**
@@ -1397,6 +1408,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   const maxOperationsPerTurn = policy !== undefined
     ? policy.snapshot().config.maxOperationsPerTurn
     : DEFAULT_MAX_OPERATIONS_PER_TURN;
+  /**
+   * 大响应文件化阈值（2026-11-19）：注入策略时读策略解析值（单一配置源 = resource-policy）；
+   * 未注入策略的纯内存会话用执行侧同值缺省——阈值照常生效，不依赖策略注入。
+   */
+  const oversizeDataBytes = policy !== undefined
+    ? policy.snapshot().config.oversizeDataBytes
+    : DEFAULT_OVERSIZE_DATA_BYTES;
   /** A2：本回合已发起的执行次数（send 时清零；跨本回合全部委派合计）。 */
   let operationsThisTurn = 0;
   /**
@@ -1895,7 +1913,20 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         issuedTurn: turnNo,
       };
     }
-    return toModelVisibleOutcome(run.outcome);
+    // 大响应文件化（2026-11-19）：completed 且超过阈值 → 完整 data 落任务文件，只回摘要 +
+    // fileId；needs_confirmation / needs_input 与未注入桥时保持既有投影（含脱敏）不变。
+    return projectWorkerOutcome(run.outcome, {
+      taskId,
+      operation,
+      thresholdBytes: oversizeDataBytes,
+      ...(exchange === undefined ? {} : { bridge: exchange }),
+      ...(options.onExecutionResultFileized === undefined
+        ? {}
+        : { onFileized: options.onExecutionResultFileized }),
+      ...(options.onExecutionResultOversizeUnhandled === undefined
+        ? {}
+        : { onUnhandled: options.onExecutionResultOversizeUnhandled }),
+    });
   }
 
   /**
@@ -2531,6 +2562,15 @@ export interface TaskExecutorOptions {
   backgroundTaskBridge?: BackgroundTaskBridgeFactory;
   /** 文件引用被拒（桥物化失败）的机械 reason 观察点；只进日志，不进用户话术。 */
   onFileRefUnavailable?: (reason: string) => void;
+  /**
+   * 大响应文件化阈值（字节；装配层注入 `resolveRuntimeConfig` 的解析值，单一配置源 =
+   * resource-policy）。缺省 65536（与策略缺省同值，纯内存嵌入/测试用）。
+   */
+  oversizeDataBytes?: number;
+  /** 大响应已落盘（只进日志）；缺省静默。 */
+  onExecutionResultFileized?: (event: ExecutionResultFileizedEvent) => void;
+  /** 大响应未文件化（无桥/登记失败，已 fail-open 原样返回；只进日志）；缺省静默。 */
+  onExecutionResultOversizeUnhandled?: (event: ExecutionResultOversizeUnhandledEvent) => void;
 }
 
 function isAbortErrorLike(error: unknown): boolean {
@@ -2563,6 +2603,100 @@ function toModelVisibleOutcome(outcome: ExecutionOutcome): Record<string, unknow
     ...(outcome.confirmation.expiresAt === undefined ? {} : { expiresAt: outcome.confirmation.expiresAt }),
     ...(outcome.data === undefined ? {} : { data: outcome.data }),
   };
+}
+
+/** 执行结果内联上限的执行侧缺省（与 resource-policy 缺省同值；注入策略时读解析值）。 */
+const DEFAULT_OVERSIZE_DATA_BYTES = 64 * 1024;
+
+/** 大响应已落为任务文件（只进日志）：bytes = 触发阈值时的 outcome JSON 字节数。 */
+export interface ExecutionResultFileizedEvent {
+  readonly taskId: string;
+  readonly operation: string;
+  readonly bytes: number;
+  readonly fileId: string;
+}
+
+/** 大响应未文件化（无桥/登记失败，已 fail-open）：bytes = 触发阈值时的 outcome JSON 字节数。 */
+export interface ExecutionResultOversizeUnhandledEvent {
+  readonly taskId: string;
+  readonly operation: string;
+  readonly bytes: number;
+}
+
+/** 任务文件名（机械可读、不含内部路径）：只保留安全字符，长度有界。 */
+function oversizeDataFileNameOf(operation: string): string {
+  const safe = operation.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80);
+  return `result-${safe === '' ? 'operation' : safe}.json`;
+}
+
+/**
+ * Worker 结果投影（大响应文件化，2026-11-19）。
+ *
+ * 背景：执行层结果是 in-band 进模型上下文的（工具结果 = data 原样投影、无截断），一次查回
+ * 几千行明细就把上下文打满。判据刻意窄：
+ *   · 只对 `completed` 生效——needs_confirmation / needs_input 的既有语义与脱敏规则不变，
+ *     这两个态**不落盘**（它们是用户/执行层的交互事实，不是可延迟读取的明细）；
+ *   · 阈值 = `runtime.oversizeDataBytes`（单一配置源 = resource-policy 解析值）；
+ *   · 超过阈值 → 完整 `data` 写成**任务作用域**文件（现有回程登记通道，不新增第二套文件
+ *     通道），模型只拿 `{status, oversize, bytes, fileId, note}`；明细由 run_js 的 inputs
+ *     按 fileId 读取；
+ *   · 未注入文件桥 / 登记失败 → **fail-open**：原样返回并记 `oversize_unhandled`
+ *     （不因为省上下文而阻塞业务）。
+ *
+ * bytes 口径 = `JSON.stringify(outcome)` 的 UTF-8 字节数（触发阈值的那次测量）。
+ */
+async function projectWorkerOutcome(
+  outcome: ExecutionOutcome,
+  input: {
+    readonly taskId: string;
+    readonly operation: string;
+    readonly thresholdBytes: number;
+    readonly bridge?: TaskExecutionBridge;
+    readonly onFileized?: (event: ExecutionResultFileizedEvent) => void;
+    readonly onUnhandled?: (event: ExecutionResultOversizeUnhandledEvent) => void;
+  },
+): Promise<Record<string, unknown>> {
+  if (outcome.status !== 'completed') return toModelVisibleOutcome(outcome);
+  let bytes: number;
+  try {
+    bytes = Buffer.byteLength(JSON.stringify(outcome), 'utf8');
+  } catch {
+    // 契约外的不可序列化 data：不引入新行为，交回既有投影（与原路径一致）。
+    return toModelVisibleOutcome(outcome);
+  }
+  if (bytes <= input.thresholdBytes) return toModelVisibleOutcome(outcome);
+  const unhandled = (): Record<string, unknown> => {
+    input.onUnhandled?.({ taskId: input.taskId, operation: input.operation, bytes });
+    return toModelVisibleOutcome(outcome);
+  };
+  if (input.bridge === undefined) return unhandled();
+  let dataJson: string | undefined;
+  try {
+    dataJson = JSON.stringify(outcome.data);
+  } catch {
+    return unhandled();
+  }
+  // completed 没有 data 时没有可落盘的明细（阈值只可能被其它字段推过）；不伪造空文件。
+  if (typeof dataJson !== 'string') return unhandled();
+  try {
+    const name = oversizeDataFileNameOf(input.operation);
+    const registration = await input.bridge.registerReturnedFiles([
+      { name, content: Buffer.from(dataJson, 'utf8').toString('base64') },
+    ]);
+    const file = registration.files[0];
+    if (file === undefined) return unhandled();
+    input.onFileized?.({ taskId: input.taskId, operation: input.operation, bytes, fileId: file.fileId });
+    return {
+      status: 'completed',
+      oversize: true,
+      bytes,
+      fileId: file.fileId,
+      note: `结果较大，已落为任务文件 ${file.name}；需要明细请用 run_js 的 inputs 按 fileId 读取`,
+    };
+  } catch {
+    // 登记被拒（size_limit 等）/桥抛错：不阻塞业务，退化为原样返回。
+    return unhandled();
+  }
 }
 
 /**
@@ -2612,6 +2746,8 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
     operations: manifest.operations.filter((operation) => allowed.has(operation.name)),
   };
   const workerTurnMs = options.workerTurnMs ?? DEFAULT_WORKER_TURN_MS;
+  // 大响应文件化阈值：装配层注入解析值；未注入（测试/嵌入）用执行侧同值缺省。
+  const oversizeDataBytes = options.oversizeDataBytes ?? DEFAULT_OVERSIZE_DATA_BYTES;
   const now = options.now ?? Date.now;
   const readOnlyOperations = new Set(options.readOnlyOperations ?? []);
 
@@ -2734,7 +2870,19 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         if (run.executed) recorded.push({ operation, outcome: run.outcome });
         // 与前台同一套脱敏投影：Worker 永远看不到 confirmation.handle（后台也曾直回原始
         // outcome，句柄会漏进模型上下文；S1 起两处共用 toModelVisibleOutcome）。
-        return toModelVisibleOutcome(run.outcome);
+        // 大响应文件化（2026-11-19）同源：completed 超阈值 → 落任务文件、只回摘要 + fileId。
+        return projectWorkerOutcome(run.outcome, {
+          taskId: task.taskId,
+          operation,
+          thresholdBytes: oversizeDataBytes,
+          ...(taskBridge === undefined ? {} : { bridge: taskBridge }),
+          ...(options.onExecutionResultFileized === undefined
+            ? {}
+            : { onFileized: options.onExecutionResultFileized }),
+          ...(options.onExecutionResultOversizeUnhandled === undefined
+            ? {}
+            : { onUnhandled: options.onExecutionResultOversizeUnhandled }),
+        });
       };
 
       const deadline = now() + workerTurnMs;

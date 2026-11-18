@@ -496,6 +496,10 @@ host:
       ['maxDelegationDepth: -1', /runtime\.maxDelegationDepth/],
       ['waitUserTimeoutMs: 0', /runtime\.waitUserTimeoutMs/],
       ['mainTurnMs: nope', /runtime\.mainTurnMs/],
+      // 大响应文件化阈值：0/负数同样 fail-fast（阈值为 0 = 每次结果都落盘，不是「关闭」）。
+      ['oversizeDataBytes: 0', /runtime\.oversizeDataBytes/],
+      ['oversizeDataBytes: -1', /runtime\.oversizeDataBytes/],
+      ['oversizeDataBytes: 1.5', /runtime\.oversizeDataBytes/],
     ];
     for (const [line, expected] of cases) {
       const yaml = `${VALID_YAML}runtime:\n  ${line}\n`;

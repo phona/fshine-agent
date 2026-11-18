@@ -236,6 +236,14 @@ export interface RuntimeConfig {
    * 超过即确定性拒绝（当前系统忙，请稍后再说），不留下排队残留。
    */
   queueWaitMs?: number;
+  /**
+   * Worker 执行结果内联进模型上下文的字节上限（2026-11-19 大响应文件化切片）。
+   * 缺省 65536（64KiB）；超过即把完整 `data` 落成任务作用域文件，只回摘要 + fileId。
+   * 只对 `completed` 的 `data` 生效（needs_confirmation / needs_input 不落盘）；
+   * 未注入文件桥时退化为原样返回并记 `execution_result_oversize_unhandled`。
+   * 0 / 负数 / 非整数 fail-fast——关掉阈值等于放弃上下文预算边界。
+   */
+  oversizeDataBytes?: number;
 }
 
 /**

@@ -65,7 +65,19 @@ describe('resolveRuntimeConfig：缺省 = 前台并发 4 + 排队 16，非法 fa
       longRunningStuckNoticeMs: 1_800_000,
       // 前台排队最长等待缺省 120s（超时确定性拒绝）。
       queueWaitMs: 120_000,
+      // 大响应文件化（2026-11-19）：Worker 结果内联上限缺省 64KiB。
+      oversizeDataBytes: 65_536,
     });
+  });
+
+  it('oversizeDataBytes：缺省 65536；可配；0/负数/非整数 fail-fast', () => {
+    expect(resolveRuntimeConfig().oversizeDataBytes).toBe(65_536);
+    expect(resolveRuntimeConfig({ oversizeDataBytes: 1_024 }).oversizeDataBytes).toBe(1_024);
+    for (const bad of [0, -1, 1.5, '65536']) {
+      expect(
+        () => resolveRuntimeConfig({ oversizeDataBytes: bad } as unknown as RuntimeConfig),
+      ).toThrowError(/runtime.oversizeDataBytes/);
+    }
   });
 
   it('taskRunWaitMs：缺省 1500；0 = 不等直接后台；负数/非整数 fail-fast', () => {
