@@ -217,6 +217,14 @@ export interface TaskExecutionContext {
   signal: AbortSignal;
 }
 
+/** 后台任务产物引用（结构 = 交付面 TurnFileRef 的机械事实三字段 + 交付角色）。 */
+export interface TaskOutcomeFile {
+  fileId: string;
+  name: string;
+  bytes: number;
+  deliverable?: boolean;
+}
+
 /**
  * 一次执行回合的机械结局（runner 据此走底账合法边；不替执行端二次判定）：
  *   · completed  → 回合正常收尾，**执行端已按本回合执行事实确认成功**（权威）；
@@ -230,7 +238,11 @@ export interface TaskExecutionContext {
  * 「执行层实际成功 / 拒绝或失败 / 未发起执行」的顶层可区分性由此在执行端回合判定中成立。
  */
 export type TaskExecutionOutcome =
-  | { kind: 'completed'; resultText: string }
+  /**
+   * 后台回合完成。files = 本回合 Worker 产出的**任务作用域**交付物（登记事实）；
+   * 这是后台面对 TurnResult.files 的同位面（后台没有前台回合）：装配方按它投递。
+   */
+  | { kind: 'completed'; resultText: string; files?: readonly TaskOutcomeFile[] }
   | { kind: 'failed'; reason: string }
   | { kind: 'needs_input'; question: PendingQuestion }
   | { kind: 'timed_out' }

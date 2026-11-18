@@ -29,6 +29,7 @@ import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
 import {
   RUN_JS_TOOL,
   RUN_JS_TOOL_DESCRIPTION,
+  WORKER_RUN_JS_TOOL_DESCRIPTION,
   TASK_RUN_TOOL,
   TASK_RUN_TOOL_DESCRIPTION,
   TASK_RUN_TOOL_DESCRIPTION_WITH_INPUT_FILES,
@@ -109,6 +110,46 @@ async function captureToolFaces(input: { withCopier?: boolean } = {}): Promise<T
 }
 
 /**
+ * Worker 真实工具面夹具（片 2 拆出两份描述后钉住 Worker 面）：Main 走 task_run 交办，
+ * Worker 回合里捕获它实际收到的工具面。
+ */
+async function captureWorkerToolFaces(): Promise<ToolFace[]> {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'tool-description-facts-worker-'));
+  tempDirs.push(dir);
+  const registry = createSqliteTaskRegistry(path.join(dir, 'state.db'));
+  const fileStore = createFileStore({ store: registry.store, workspaceRoot: path.join(dir, 'workspace') });
+  const workerFaces: ToolFace[][] = [];
+  const session: Session = await createSession({
+    principalId: 'wecom:test-user',
+    sessionId: 'sess_1',
+    client: new FaceClient(),
+    allowedOperations: ['dummy.query'],
+    mainDriver: {
+      async run(runInput) {
+        await runInput.exec(TASK_RUN_TOOL, { task: '把数据做成一张表' });
+        return { text: '已交办。', messages: [] as unknown as DriverMessage[] };
+      },
+    },
+    workerDriver: {
+      async run(runInput) {
+        workerFaces.push(runInput.tools.map((tool) => ({ name: tool.name, description: tool.description })));
+        return { text: '已完成。', messages: [] as unknown as DriverMessage[] };
+      },
+    },
+    mainSystemPrompt: '你是测试主 Agent。',
+    taskRegistry: registry,
+    taskInputCopier: fileStore,
+    runJsExecutor: neverRunJsExecutor,
+  });
+  try {
+    await session.send('把数据做成一张表。');
+  } finally {
+    registry.close();
+  }
+  return workerFaces[0]!;
+}
+
+/**
  * 业务流程话术负例（接口事实纪律）：描述只声明能力边界与参数后果，不做流程编排、
  * 补救诱导、用户面叙事——这些属于提示词补丁（A 类，默认删除）。
  */
@@ -131,20 +172,40 @@ describe('run_js 描述：模块面接口事实（R2-S1）', () => {
     expect(RUN_JS_TOOL_DESCRIPTION).toContain('xlsx-style');
     expect(RUN_JS_TOOL_DESCRIPTION).toContain('csv-parse');
     expect(RUN_JS_TOOL_DESCRIPTION).toContain('可用模块');
+    // 两份描述同源声明同一模块面（Worker 也会 require('exceljs')，不能少这句）。
+    expect(WORKER_RUN_JS_TOOL_DESCRIPTION).toContain('require("exceljs")');
+    expect(WORKER_RUN_JS_TOOL_DESCRIPTION).toContain('可用模块');
   });
 
-  it('负例：不含业务流程话术，也不做跨工具流程诱导（不提 task_run）', () => {
+  it('负例：不含业务流程话术；Main 面声明交付出口（task_run）、Worker 面不得再提 task_run', () => {
     for (const phrase of BUSINESS_FLOW_NEGATIVES) {
       expect(RUN_JS_TOOL_DESCRIPTION).not.toContain(phrase);
+      expect(WORKER_RUN_JS_TOOL_DESCRIPTION).not.toContain(phrase);
     }
-    expect(RUN_JS_TOOL_DESCRIPTION).not.toContain('task_run');
+    // 片 2（owner 裁定「交付物只从 Worker 出」）：Main 面的接口事实 = scratch/ 是工作区、
+    // 写 out/ 不登记不投递、要交付文件走 task_run 交办（这是能力边界，不是流程诱导）。
+    expect(RUN_JS_TOOL_DESCRIPTION).toContain('scratch/ 是工作区');
+    expect(RUN_JS_TOOL_DESCRIPTION).toContain('不登记、不投递');
+    expect(RUN_JS_TOOL_DESCRIPTION).toContain('task_run 交办');
+    // Worker 面：out/ 是本任务交付箱；Worker 不能再交办（不做跨工具流程诱导）。
+    expect(WORKER_RUN_JS_TOOL_DESCRIPTION).toContain('out/');
+    expect(WORKER_RUN_JS_TOOL_DESCRIPTION).toContain('随本任务完成投递');
+    expect(WORKER_RUN_JS_TOOL_DESCRIPTION).not.toContain('task_run');
   });
 
-  it('真实工具面：模型收到的 run_js description 就是该常量（逐字节一致）', async () => {
+  it('真实工具面：Main 收到的 run_js description 就是该常量（逐字节一致）', async () => {
     const faces = await captureToolFaces();
     const face = faces.find((tool) => tool.name === RUN_JS_TOOL);
     expect(face).toBeDefined();
     expect(face!.description).toBe(RUN_JS_TOOL_DESCRIPTION);
+  });
+
+  it('真实工具面：Worker 收到的 run_js description 是 Worker 常量（不是 Main 那份）', async () => {
+    const faces = await captureWorkerToolFaces();
+    const face = faces.find((tool) => tool.name === RUN_JS_TOOL);
+    expect(face).toBeDefined();
+    expect(face!.description).toBe(WORKER_RUN_JS_TOOL_DESCRIPTION);
+    expect(face!.description).not.toBe(RUN_JS_TOOL_DESCRIPTION);
   });
 });
 
