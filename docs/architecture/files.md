@@ -57,3 +57,21 @@ Worker 面无论 exitCode 都扫 `out/`（`packages/agent/src/run-js-executor.ts
 ## 8. Worker 系统提示的来源约束
 
 Worker 的「可信工作目录」**只能取装配层 `profile.root`**，禁止取模型输出或用户消息；系统提示只是纵深防御，不是安全边界（`docs/history/decision-log-part03-2026-11.md:292`；实现 `packages/agent/src/execution-runtime.ts:433-444`，装配 `scripts/ask-runtime.ts:544-545`）。
+
+## 9. 大响应自动文件化（2026-11-19）
+
+**问题**：执行层响应是 in-band 进模型上下文的——`execute_operation` 的工具结果就是 `data` 原样投影、无截断；一次查回几千行明细即可打满上下文。
+
+**判据**：Worker 的 `completed` 结果 `JSON.stringify(outcome)` 的 UTF-8 字节数 > `runtime.oversizeDataBytes`（缺省 **65536 / 64KiB**；单一配置源：类型 `packages/contracts/src/config.ts`、YAML 解析 `packages/core/src/config.ts`、缺省与解释 `packages/agent/src/resource-policy.ts`，守卫 `packages/agent/resource-policy-single-source.test.ts` 的所有者表；**0 / 负数 / 非整数 fail-fast**，阈值不能靠「关掉」表达）。
+
+**动作**（`packages/agent/src/execution-runtime.ts` 的 `projectWorkerOutcome`，Worker `execute_operation` 结果投影的唯一入口，inline 与后台 TaskExecutor 共用）：
+- 完整 `outcome.data` 以 JSON 写成**任务作用域**文件（复用现有回程登记通道 `TaskExecutionBridge.registerReturnedFiles` → `fileStore.registerTaskFile`，不新增第二套文件通道），名字形如 `result-<operation>.json`（只保留安全字符，不含内部路径）；
+- 回给 Worker 的投影变为 `{ status: 'completed', oversize: true, bytes, fileId, note }`；`note` 指明「需要明细请用 `run_js` 的 inputs 按 fileId 读取」（fileId 是本任务绑定行，Worker 按任务作用域解析）；
+- `bytes` = 触发阈值时的 `JSON.stringify(outcome)` UTF-8 字节数；
+- 只对 `completed` 生效：`needs_confirmation` / `needs_input` 的既有语义与脱敏规则**不变**，这两个态即便 data 很大也不落盘。
+
+**退化路径（fail-open，不阻塞业务）**：未注入任务文件桥（`taskExecutionBridge` / `backgroundTaskBridge`），或登记被拒/抛错时，**原样返回**执行层结果，并记结构化事件 `execution_result_oversize_unhandled{taskId, operation, bytes}`（只进日志）。落盘成功记 `execution_result_fileized{taskId, operation, bytes, fileId}`（只进日志）。装配点接线：`scripts/ask-runtime.ts`、`apps/server/server.ts`。
+
+**边界**：`run_js` 的产物路径（`out/` 扫描）不变——本机制只处理 `execute_operation` 的 in-band 结果；文件化产物是任务文件面的一行（可被任务文件清单列出、可被 `run_js.inputs` 按 fileId 读取），不自动进入用户交付面（不进 `TurnResult.files`）。
+
+**守卫**：`packages/agent/oversize-data-fileize.test.ts`（① 1KB 原样 / ② >64KiB 落盘且字节一致 / ③ 阈值可配 / ④ 无桥 fail-open + 事件 / ⑤ needs_confirmation 脱敏且不落盘）。

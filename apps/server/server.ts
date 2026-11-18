@@ -523,6 +523,13 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       },
       // 文件引用被拒的机械 reason（与 inline 同事件名；只进日志，用户/Worker 只见统一话术）。
       onFileRefUnavailable: (reason) => log({ event: 'file_ref_unavailable', mode: 'background', reason }),
+      // 大响应文件化（2026-11-19）：落盘/未落盘只进日志（后台无会话身份可拼时只带任务事实）。
+      onExecutionResultFileized: (event) => log({ event: 'execution_result_fileized', mode: 'background', ...event }),
+      onExecutionResultOversizeUnhandled: (event) => log({
+        event: 'execution_result_oversize_unhandled',
+        mode: 'background',
+        ...event,
+      }),
       // 片 1：后台 Worker 的 run_js 与前台同一执行器端口（缺省不注入 = Worker 工具面零变化）。
       runJsExecutor,
       // B 切片：后台任务确认完成 → 结果主动发回原会话（走既有主动投递面 fileDelivery.sendText）。
@@ -700,6 +707,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           },
           // 任务 out/ 兜底扫描的逐项拒收（此前只取 files，skipped 被丢弃）：数量 + reason 分布。
           onTaskOutputSweepSkipped: (event) => log({ event: 'task_output_sweep_skipped', principalId, sessionId, ...event }),
+          // 大响应文件化（2026-11-19）：Worker 结果超阈值 → 完整 data 落任务文件，只回摘要 +
+          // fileId；未注入桥/登记失败 → fail-open 原样返回。两类事件只进日志，不进用户话术。
+          onExecutionResultFileized: (event) => log({ event: 'execution_result_fileized', principalId, sessionId, ...event }),
+          onExecutionResultOversizeUnhandled: (event) => log({
+            event: 'execution_result_oversize_unhandled',
+            principalId,
+            sessionId,
+            ...event,
+          }),
           fileManifestProvider,
           mainSession,
         });

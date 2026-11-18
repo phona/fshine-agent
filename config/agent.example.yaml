@@ -94,6 +94,10 @@ llm:
 #   # 回复(不打受理回执、不主动投递);超窗 → 机械事实受理回执(不含工单编号),任务留后台,
 #   # 完成后结果主动发回原会话(live 送达;非 live 只记 suppressed)。
 #   taskRunWaitMs: 1500
+#   # 大响应文件化(缺省 65536 = 64KiB):Worker 的 execute_operation 完成结果超过该字节数时,
+#   # 完整 data 落成任务作用域文件,模型只拿摘要 + fileId(明细用 run_js 的 inputs 按 fileId 读取);
+#   # 只对 completed 生效;未注入文件桥时 fail-open 原样返回。0/负数 = 配置错误。
+#   oversizeDataBytes: 65536
 #   # taskBudget: { ms: 600000, calls: 50 }  # 任务级共享预算(ms/calls 必填;tokens 可选)
 
 # ---- 任务底账(可选):SQLite 路径;相对路径按进程 cwd 解析 ----

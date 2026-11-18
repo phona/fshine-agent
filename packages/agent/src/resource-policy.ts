@@ -185,6 +185,13 @@ export interface ResolvedRuntimeConfig {
    * 缺省 2 分钟。消费点在 execution-runtime 的排队等待循环。
    */
   readonly queueWaitMs: number;
+  /**
+   * Worker 执行结果内联进模型上下文的字节上限（2026-11-19 大响应文件化）。
+   * 缺省 65536（64KiB）；超过即把完整 `data` 落成任务作用域文件、只回摘要 + fileId。
+   * 消费点在 execution-runtime 的 Worker 结果投影（`completed` 才生效）；
+   * 0/负数/非整数 fail-fast（关掉阈值 = 放弃上下文预算边界）。
+   */
+  readonly oversizeDataBytes: number;
 }
 
 /**
@@ -225,6 +232,9 @@ export const DEFAULT_RUNTIME_CONFIG: ResolvedRuntimeConfig = Object.freeze({
   longRunningStuckNoticeMs: 1_800_000,
   // 前台排队最长等待（2026-11-18 owner 定）：缺省 2 分钟；超时确定性拒绝（系统忙）。
   queueWaitMs: 120_000,
+  // 大响应文件化（2026-11-19 owner 定）：Worker 结果超过 64KiB 即落任务文件，只回摘要 +
+  // fileId（in-band 结果无截断，一次几千行明细会打满上下文）。最小 1 字节。
+  oversizeDataBytes: 64 * 1024,
 });
 
 function assertRuntimeInteger(value: unknown, label: string, min: number): number {
@@ -380,6 +390,10 @@ export function resolveRuntimeConfig(config: RuntimeConfig = {}): ResolvedRuntim
     queueWaitMs: config.queueWaitMs === undefined
       ? DEFAULT_RUNTIME_CONFIG.queueWaitMs
       : assertRuntimeInteger(config.queueWaitMs, 'runtime.queueWaitMs', 0),
+    // 最小 1 字节；0/负数/非整数 fail-fast（阈值不能靠「关掉」表达）。
+    oversizeDataBytes: config.oversizeDataBytes === undefined
+      ? DEFAULT_RUNTIME_CONFIG.oversizeDataBytes
+      : assertRuntimeInteger(config.oversizeDataBytes, 'runtime.oversizeDataBytes', 1),
   });
 }
 

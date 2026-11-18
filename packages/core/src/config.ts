@@ -159,6 +159,8 @@ const RUNTIME_KEYS = [
   'longRunningStuckNoticeMs',
   // 前台排队最长等待（缺省 120s，住策略层）；超时即确定性拒绝。
   'queueWaitMs',
+  // 大响应文件化（2026-11-19）：Worker 执行结果内联字节上限（缺省 64KiB 住策略层）。
+  'oversizeDataBytes',
 ] as const;
 
 /** runtime 段整数值：显式写错即 fail-fast（与 host.* 的「非法 = 未配置」刻意不同）。 */
@@ -217,6 +219,9 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     ['longRunningStuckNoticeMs', 0],
     // 0 = 不排队直接拒绝（缺省 120000 住策略层）。
     ['queueWaitMs', 0],
+    // 大响应文件化：最小 1 字节（缺省 65536 住策略层）；0/负数 = 配置错误，
+    // 不按「关掉阈值」消化——阈值消失等于放弃上下文预算边界。
+    ['oversizeDataBytes', 1],
   ];
   for (const [key, min] of integers) {
     const value = runtimeInteger(raw[key], key, min);

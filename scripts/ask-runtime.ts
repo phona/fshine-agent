@@ -52,6 +52,8 @@ import {
   type RecalcXlsxExecutor,
   type RecalcCostEvent,
   type TaskOutputSweepSkippedEvent,
+  type ExecutionResultFileizedEvent,
+  type ExecutionResultOversizeUnhandledEvent,
 } from '../packages/agent/src/execution-runtime';
 import {
   createNotificationOutbox,
@@ -321,6 +323,13 @@ export interface SessionAssemblyInput {
    */
   onTaskOutputSweepSkipped?: (event: TaskOutputSweepSkippedEvent) => void;
   /**
+   * 大响应已文件化（2026-11-19；只进日志，缺省静默）：Worker completed 结果超过
+   * `runtime.oversizeDataBytes` → 完整 data 落任务文件，模型只拿摘要 + fileId。
+   */
+  onExecutionResultFileized?: (event: ExecutionResultFileizedEvent) => void;
+  /** 大响应未文件化（无桥/登记失败，已 fail-open；只进日志，缺省静默）。 */
+  onExecutionResultOversizeUnhandled?: (event: ExecutionResultOversizeUnhandledEvent) => void;
+  /**
    * CAP-01 S2：交办复制端口（task_run.inputFiles 的宿主侧执行；装配层注入 fileStore 本身）。
    * 缺省不注入 = task_run 工具面不带 inputFiles（逐字节不变），模型传了也 fail-closed 拒绝。
    */
@@ -481,6 +490,12 @@ export interface BackgroundDispatchInput {
    */
   onFileRefUnavailable?: (reason: string) => void;
   /**
+   * 大响应文件化事件（2026-11-19；只进日志，缺省静默）：后台 Worker 的 completed 结果
+   * 超过 `runtime.oversizeDataBytes` → 完整 data 落任务文件 / 无桥时 fail-open 原样返回。
+   */
+  onExecutionResultFileized?: (event: ExecutionResultFileizedEvent) => void;
+  onExecutionResultOversizeUnhandled?: (event: ExecutionResultOversizeUnhandledEvent) => void;
+  /**
    * 预期契约（2026-11-18）：长时间无动静提醒的投递端口（装配方接既有主动投递面 +
    * 1:1 判据）。缺省不接 = 不提醒（无法投递就不打扰）。
    */
@@ -541,12 +556,18 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
       ...(input.workerSkills === undefined ? {} : { workerSkills: input.workerSkills }),
       registry: input.registry,
       workerTurnMs: resolved.workerTurnMs,
+      // 大响应文件化阈值：策略解析值（单一配置源），后台 Worker 与 inline 同源。
+      oversizeDataBytes: resolved.oversizeDataBytes,
       // 可信工作目录：装配层持有的 profile.root（绝不取模型输出/用户消息）。
       workerWorkspaceRoot: input.profile.root,
       // 片 1：run_js 执行器端口（与前台同一构造；缺省不注入 = Worker 工具面零变化）。
       ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
       ...(backgroundTaskBridge === undefined ? {} : { backgroundTaskBridge }),
       ...(input.onFileRefUnavailable === undefined ? {} : { onFileRefUnavailable: input.onFileRefUnavailable }),
+      ...(input.onExecutionResultFileized === undefined ? {} : { onExecutionResultFileized: input.onExecutionResultFileized }),
+      ...(input.onExecutionResultOversizeUnhandled === undefined
+        ? {}
+        : { onExecutionResultOversizeUnhandled: input.onExecutionResultOversizeUnhandled }),
     });
   }
   // B 切片：完成回调接缝——包装实际使用的执行器（注入的或默认构建的同一道包装）。
@@ -791,6 +812,10 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
         // 后台文件面与 inline 同源注入：同一 bridge 参数与 fileStore 实例，按任务懒建。
         ...(input.taskExecutionBridge === undefined ? {} : { taskExecutionBridge: input.taskExecutionBridge }),
         ...(input.onFileRefUnavailable === undefined ? {} : { onFileRefUnavailable: input.onFileRefUnavailable }),
+        ...(input.onExecutionResultFileized === undefined ? {} : { onExecutionResultFileized: input.onExecutionResultFileized }),
+        ...(input.onExecutionResultOversizeUnhandled === undefined
+          ? {}
+          : { onExecutionResultOversizeUnhandled: input.onExecutionResultOversizeUnhandled }),
       })).runner;
     }
     // P4：通知链仅 background 且提供 sink 时启用（inline 默认零新增路径；投递由调用方触发）。
@@ -829,6 +854,10 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       ...(input.onRunJsLayoutUnsafe === undefined ? {} : { onRunJsLayoutUnsafe: input.onRunJsLayoutUnsafe }),
       ...(input.onFileRefUnavailable === undefined ? {} : { onFileRefUnavailable: input.onFileRefUnavailable }),
       ...(input.onTaskOutputSweepSkipped === undefined ? {} : { onTaskOutputSweepSkipped: input.onTaskOutputSweepSkipped }),
+      ...(input.onExecutionResultFileized === undefined ? {} : { onExecutionResultFileized: input.onExecutionResultFileized }),
+      ...(input.onExecutionResultOversizeUnhandled === undefined
+        ? {}
+        : { onExecutionResultOversizeUnhandled: input.onExecutionResultOversizeUnhandled }),
       ...(input.taskInputCopier === undefined ? {} : { taskInputCopier: input.taskInputCopier }),
       ...(taskBridge === undefined ? {} : { taskExecutionBridge: taskBridge }),
       ...(input.fileManifestProvider === undefined ? {} : { fileManifestProvider: input.fileManifestProvider }),
