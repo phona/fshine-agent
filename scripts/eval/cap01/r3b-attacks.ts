@@ -202,6 +202,24 @@ async function waitForFile(filePath: string, timeoutMs: number): Promise<void> {
   throw new Error(`等待文件超时：${filePath}`);
 }
 
+/**
+ * 等 pid 文件出现且内容是可解析的正整数再返回（a5b 专用）。
+ * `waitForFile` 只看文件存在：writeFileSync 先建空文件再写内容，早读到空串会得到
+ * Number('')=0；而 `process.kill(0, 0)` 检查的是调用者进程组，会把 0 误判成「进程活着」，
+ * 制造假红。这里等到内容合法且 >0 为止。
+ */
+async function waitForPidValue(filePath: string, timeoutMs: number): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(filePath)) {
+      const text = readFileSync(filePath, 'utf8').trim();
+      if (/^\d+$/.test(text) && Number(text) > 0) return Number(text);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`等待 pid 文件超时或内容非法：${filePath}`);
+}
+
 function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -773,8 +791,7 @@ async function attackA5b(): Promise<AttackPartial> {
   try {
     const pidFiles: number[] = [];
     for (let level = 1; level <= 4; level += 1) {
-      await waitForFile(path.join(pidDir, `pid-${level}.txt`), 10_000);
-      pidFiles.push(Number(readFileSync(path.join(pidDir, `pid-${level}.txt`), 'utf8')));
+      pidFiles.push(await waitForPidValue(path.join(pidDir, `pid-${level}.txt`), 10_000));
     }
     await new Promise((resolve) => setTimeout(resolve, 200)); // 末层 spawn 收尾窗口
 

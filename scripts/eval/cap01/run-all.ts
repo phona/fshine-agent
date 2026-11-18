@@ -32,7 +32,7 @@ interface Face {
 
 /** 顺序即台账顺序：功能面 → 攻击面 → 资源面 → 生命周期 → 故障面 → 并发面。 */
 const FACES: readonly Face[] = [
-  { key: 'r2', script: 'scripts/eval/cap01/r2-functional.ts', args: ['--scripted'], what: 'S1/S2/S3 功能面（脚本化）' },
+  { key: 'r2', script: 'scripts/eval/cap01/r2-functional.ts', args: ['--scripted'], what: 'S2/S3 功能面（脚本化；S1 已退役）' },
   { key: 'r2d', script: 'scripts/eval/cap01/r2d-unstructured.ts', args: ['--scripted'], what: '文本型 PDF 非结构化附件（脚本化；宿主面 + 模型能力读数）' },
   { key: 'r3', script: 'scripts/eval/cap01/r3-core.ts', args: [], what: '核心攻击面' },
   { key: 'r3b', script: 'scripts/eval/cap01/r3b-attacks.ts', args: [], what: '攻击加厚' },

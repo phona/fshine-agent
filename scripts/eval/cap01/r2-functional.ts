@@ -1,24 +1,23 @@
 /**
  * CAP-01 R2 功能验收（可重复执行，不靠人工点）。
  *
- * 口径（CAP-01 设计 v8 §7/§8 S1/S2，文档 2026-11-18 删除、git 历史可考 + R2 验收指令）：
+ * 口径（CAP-01 设计 v8 §7/§8 S2/S3，文档 2026-11-18 删除、git 历史可考 + R2 验收指令）：
  * 只验用户可见结果与安全不变量；全样本保留，不筛绿；失败样本连证据一起落盘。
  *
- * 三场景（假渠道 = 直调 server.handler；执行层 = 仓内 dummy 面；装配 = apps/server/server.ts
+ * 场景（假渠道 = 直调 server.handler；执行层 = 仓内 dummy 面；装配 = apps/server/server.ts
  * 生产装配缺省链——fileStore/run_js 执行器/清单注入/主动投递 B 全部同源）：
  *
- *   S1 Main 直做：一条「12 月 xlsx 附件 + 一句汇总指令」的消息（附件+文字同一条，激活语义
- *      走带文字消息）。断言：
- *        ① 不建 Task —— Task Registry 无新行（SQLite 只读开同一 dbPath）；
- *        ② 回复里带文件 —— 主动投递端口收到产物字节、message_done 记 fileDelivery=sent；
- *        ③ 用 exceljs 重新打开收到的产物，与预期逐格一致（首工作表、表头「月份/销售额」、
- *           12 行月份合计按 1月→12月 排、无多余行列、无多余工作表）。**收到的每一个产物都要
- *           一致**——交付面里任何一个与预期不符的文件都是用户实际收到的错误产物（禁「最佳
- *           匹配」代偿；2026-11-17 真跑曾出现「全 0 错误文件 + 正确文件」同投，据此收紧）。
+ *   S1 已退役（2026-11-19）：原「Main 直做」场景——Main 的 run_js 直接写 out/、
+ *      由宿主登记并投递。产品边界已改为「交付物只从 Worker 出」：Main 的 run_js 只能写
+ *      scratch/（run-js-executor.ts 的 RunJsWritableDirs、execution-runtime.ts 的
+ *      runJsInTurn），该场景的前提（Main 直接产出交付物）已不存在。等价覆盖由 S3 承接：
+ *      Main task_run → Worker run_js → 产物回 Main、逐格一致、file_refs 登记行、行数据
+ *      不进 Main。退役登记见 docs/decisions/debt.md。
  *
- *   S2 投递失败：同 S1 输入，投递端口换成必抛实现（live 模式，带空 receipt 部分回执形状）。
- *      断言：
- *        ① 用户话术含「未送达」；
+ *   S2 投递失败：同数据经 task_run.inputFiles 交给 Worker（Worker run_js 产出汇总），
+ *      投递端口换成必抛实现（live 模式，带空 receipt 部分回执形状）。产物由后台完成面
+ *      投递（taskRunWaitMs=0 强制走完成回调，产品同款路径）；断言：
+ *        ① 用户话术含「未送达」（同步回执 + 后台完成投递的主动文字，同一用户可见面）；
  *        ② 结构化事件 file_delivery 的 status != sent（= delivery_failed）；
  *        ③ 全部日志里没有任何 sent 记录（file_delivery 与 message_done.fileDelivery 两处）。
  *      前提检查：回合确实产出了文件（端口收到字节）；没产出 = 该路径未触发 = 判 FAIL 并写明。
@@ -27,7 +26,7 @@
  *        ① Main 确实交办且带了 inputFiles（工具参数里有入站 fileId）；
  *        ② 产物回 Main：主动投递端口收到产物；按 sha256 对回 file_refs 行——该行是新
  *          fileId（≠ 入站 fileId、≠ 交办副本 fileId）、task_id 绑定（Worker 产物面）；
- *        ③ 产物内容与预期逐格一致（同 S1 的 Oracle 重解析）；
+ *        ③ 产物内容与预期逐格一致（同一 Oracle 重解析）；
  *        ④ 行数据不出现在 **Main** 的工具参数与转录里（2026-11-17 口径收窄：设计约束是
  *          行数据不进 Main 上下文；Worker 经 run_js 读行数据是设计行为，不计入红）——
  *          对 24 个销售额原值逐个做「词边界」grep：覆盖 Main 全部工具调用参数与结果、
@@ -44,13 +43,13 @@
  * 真实回合中途失败一律如实记 FAIL，不静默降级、不重试换样本。
  *
  * 委派任务行的合法终态说明：inline 委派里 Worker 汇报但零执行落 `unexecuted`（task-registry.ts:53
- * 「已汇报零执行」）——R2 把「存在任务行」本身当断言对象（S1 不得建行、S3 必须交办），不判其终态。
+ * 「已汇报零执行」）——R2 把「存在任务行」本身当断言对象（S3 必须交办），不判其终态。
  *
  * 运行：
  *   node --env-file=<含 LLM_API_KEY 的 env> --import tsx scripts/eval/cap01/r2-functional.ts \
- *     [--scripted] [--scenario s1,s2,s3] [--out-dir <dir>]
+ *     [--scripted] [--scenario s2,s3] [--out-dir <dir>]
  * 缺省 out-dir = .runtime/eval-cap01-r2/<时间戳>（.runtime 不进 git）。
- * 退出码：0 = 三场景全过；1 = 任一 FAIL。
+ * 退出码：0 = 场景全过；1 = 任一 FAIL。
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -301,10 +300,12 @@ interface DeliveredFile {
 interface PortCapture {
   deliveryMode: 'live' | 'silent';
   calls: Array<{ route: ChannelRoute; files: DeliveredFile[] }>;
+  /** sendText 面（后台任务完成/失败话术等主动文字投递；与文件投递同一用户可见面）。 */
+  texts: Array<{ route: ChannelRoute; text: string }>;
 }
 
 function capturePort(): PortCapture & FileDeliveryPort {
-  const capture: PortCapture = { deliveryMode: 'live', calls: [] };
+  const capture: PortCapture = { deliveryMode: 'live', calls: [], texts: [] };
   return {
     ...capture,
     deliveryMode: 'live',
@@ -325,7 +326,7 @@ function capturePort(): PortCapture & FileDeliveryPort {
 }
 
 function throwingPort(): PortCapture & FileDeliveryPort {
-  const capture: PortCapture = { deliveryMode: 'live', calls: [] };
+  const capture: PortCapture = { deliveryMode: 'live', calls: [], texts: [] };
   return {
     ...capture,
     deliveryMode: 'live',
@@ -341,6 +342,12 @@ function throwingPort(): PortCapture & FileDeliveryPort {
       const error = new Error('企微主动交付失败（file[0] upload）: R2 验收注入的必抛投递') as Error & { receipt?: DeliveryReceipt };
       error.receipt = { route, parts: [] };
       throw error;
+    },
+    // 文件投递失败话术由后台完成投递面用 sendText 送达（产品 server-cap01-delivery 同款路径）：
+    // 这里捕获用户可见文字，让「用户看到未送达」的断言落在真实的用户可见面。
+    async sendText(route, text: string): Promise<DeliveryReceipt> {
+      capture.texts.push({ route, text });
+      return { route, parts: [{ kind: 'text' as const, index: 0, status: 'sent' as const }] };
     },
   };
 }
@@ -368,8 +375,9 @@ const CONVERSATION_ID = 'conv-cap01-r2';
 async function makeHarness(options: {
   port: PortCapture & FileDeliveryPort;
   scripted: boolean;
-  script: 'main-direct' | 'delegate-and-aggregate';
   label: string;
+  /** 覆盖 runtime.taskRunWaitMs（缺省产品值 1500ms）。 */
+  taskRunWaitMs?: number;
 }): Promise<ScenarioHarness> {
   const dir = mkdtempSync(path.join(os.tmpdir(), `cap01-r2-${options.label}-`));
   const dbPath = path.join(dir, 'state.db');
@@ -380,13 +388,18 @@ async function makeHarness(options: {
   configDoc['store'] = { dbPath };
   writeFileSync(configCopy, stringifyYaml(configDoc));
   const config: AppConfig = loadConfig({ yamlPath: configCopy });
+  // runtime.taskRunWaitMs 由策略层解析（YAML 的 runtime 段白名单不含它）：装配后直接注入，
+  // 与产品测试（server-cap01-delivery.test.ts 的 testConfig）同一构造口径。
+  if (options.taskRunWaitMs !== undefined) {
+    config.runtime = { ...(config.runtime ?? {}), taskRunWaitMs: options.taskRunWaitMs };
+  }
   const env = effectiveDeploymentEnv(config, process.env);
 
   const sink: ScenarioSink = { calls: [], runs: [] };
   const scripted = options.scripted;
   const createDrivers = scripted
     ? (): { mainDriver: TurnDriver; workerDriver: TurnDriver } => ({
-        mainDriver: recordingDriver(scriptedMainDriver(options.script), 'main', sink),
+        mainDriver: recordingDriver(scriptedMainDriver(), 'main', sink),
         workerDriver: recordingDriver(scriptedWorkerDriver(), 'worker', sink),
       })
     : (driverEnv: NodeJS.ProcessEnv): { mainDriver: TurnDriver; workerDriver: TurnDriver } => {
@@ -490,14 +503,10 @@ function scriptedAssistant(text: string): DriverMessage {
   } as unknown as DriverMessage;
 }
 
-function scriptedMainDriver(script: 'main-direct' | 'delegate-and-aggregate'): TurnDriver {
+function scriptedMainDriver(): TurnDriver {
   return {
     async run(input) {
       const fileId = fileIdFromInjections(input.injections ?? []);
-      if (script === 'main-direct') {
-        await input.exec('run_js', { code: AGGREGATE_RUN_JS_CODE, ...(fileId === undefined ? {} : { inputs: [fileId] }) });
-        return { text: '已按月汇总完成，见附件。', messages: [scriptedAssistant('已按月汇总完成，见附件。')] };
-      }
       await input.exec('task_run', {
         task: '把附件里每个月的销售额合计成每月一行，生成汇总 Excel。',
         ...(fileId === undefined ? {} : { inputFiles: [fileId] }),
@@ -569,14 +578,22 @@ function deliveredFiles(port: PortCapture): DeliveredFile[] {
   return port.calls.flatMap((call) => call.files);
 }
 
+/** 轮询等待（异步后台投递事实；超时即按现状采样，不重试换样本）。 */
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate() && Date.now() - startedAt < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 /** handler 回执的用户可见正文（string 直用；RichChannelReply 取 text）。 */
 function textOf(reply: ChannelReply): string {
   return typeof reply === 'string' ? reply : reply.text ?? '';
 }
 
-// ── 三场景 ──────────────────────────────────────────────────────────────────
+// ── 场景夹具与断言 ──────────────────────────────────────────────────────────
 
-const S1_INSTRUCTION =
+const S2_INSTRUCTION =
   '刚发的表在附件里，麻烦汇总一下：把每个月的销售额合计成每月一行，生成 Excel 发我，'
   + '表头用「月份、销售额」，一共 12 行，按 1月 到 12月 排，不要加别的行列。';
 const S3_INSTRUCTION =
@@ -584,7 +601,7 @@ const S3_INSTRUCTION =
   + '表头用「月份、销售额」，一共 12 行，按 1月 到 12月 排，不要加别的行列。';
 
 interface ScenarioOutcome {
-  scenario: 's1' | 's2' | 's3';
+  scenario: 's2' | 's3';
   status: 'pass' | 'fail';
   checks: Check[];
   notes: string[];
@@ -593,124 +610,28 @@ interface ScenarioOutcome {
   evidence: Record<string, unknown>;
 }
 
-async function runScenarioS1(scripted: boolean): Promise<ScenarioOutcome> {
-  const checks = new Checks();
-  const notes: string[] = [];
-  const port = capturePort();
-  const harness = await makeHarness({ port, scripted, script: 'main-direct', label: 's1' });
-  let reply: ChannelReply = '';
-  let handlerError: string | undefined;
-  try {
-    const fixture = await buildFixtureXlsx();
-    const attachment = stagedAttachment(harness.paths.dir, '月度销售明细.xlsx', fixture);
-    try {
-      reply = await harness.server.handler(incomingMessage('r2-s1-1', S1_INSTRUCTION, attachment));
-    } catch (error) {
-      handlerError = error instanceof Error ? error.message : String(error);
-    }
-  } finally {
-    await harness.server.close();
-  }
-
-  // ① Task Registry 无新行（进程结束后只读开同一库）。
-  const fileScope = { principalId: PRINCIPAL_ID, sessionId: `wecom:${CONVERSATION_ID}` };
-  let taskRows: Array<Record<string, unknown>> = [];
-  let fileRows: Array<{ fileId: string; taskId?: string; name: string; sha256: string; bytes: number }> = [];
-  try {
-    const registry = createSqliteTaskRegistry(harness.paths.dbPath, { readOnly: true });
-    taskRows = registry.list().map((task) => ({ taskId: task.taskId, request: task.request, status: task.status }));
-    fileRows = registry.store.listFileRefs(fileScope).map((row) => ({
-      fileId: row.fileId,
-      ...(row.taskId !== undefined ? { taskId: row.taskId } : {}),
-      name: row.name,
-      sha256: row.sha256,
-      bytes: row.bytes,
-    }));
-    registry.close();
-  } catch (error) {
-    checks.check('s1-registry-readable', false, `只读打开底账失败：${error instanceof Error ? error.message : String(error)}`);
-  }
-  checks.check('s1-no-task-rows', handlerError === undefined && taskRows.length === 0, handlerError !== undefined ? `回合失败：${handlerError}` : `Task Registry 行数=${taskRows.length}（${JSON.stringify(taskRows)}）`);
-
-  // ② 回复里带文件（用户可见：端口收到产物字节；message_done 记 sent）。
-  const delivered = deliveredFiles(port);
-  const doneLog = harness.logs.find((line) => line['event'] === 'message_done') as Record<string, unknown> | undefined;
-  const deliveryFact = (doneLog?.['fileDelivery'] ?? undefined) as { status?: unknown; files?: unknown } | undefined;
-  checks.check(
-    's1-reply-carries-file',
-    delivered.length >= 1 && deliveryFact?.['status'] === 'sent' && textOf(reply).trim() !== '',
-    `投递端口收到 ${delivered.length} 个文件（${delivered.map((file) => `${file.filename}:${file.bytes}B`).join('、')}）；message_done.fileDelivery=${JSON.stringify(deliveryFact)}；回复长度=${textOf(reply).length}`,
-  );
-  checks.check('s1-single-artifact-delivered', delivered.length === 1, `交付文件数=${delivered.length}${delivered.length > 1 ? `（文件名：${delivered.map((file) => file.filename).join('、')}）` : ''}`);
-
-  // ③ exceljs 重开收到的产物，逐格一致。**每个收到的产物都要与预期一致**——用户只该收到
-  // 一张正确的汇总表；交付面里任何一个与预期不符的文件都是用户实际收到的错误产物（禁放宽：
-  // 不取「最佳匹配」代偿）。判据收紧依据：R2 指令「用 exceljs 重新打开收到的产物、逐格一致」。
-  const parsedList: Array<{ filename: string; diff: GridDiff }> = [];
-  for (const file of delivered) {
-    try {
-      const actual = await gridOfXlsx(file.data);
-      parsedList.push({ filename: file.filename, diff: compareGrids(actual, EXPECTED_GRID) });
-    } catch (error) {
-      parsedList.push({ filename: file.filename, diff: { ok: false, problems: [`exceljs 打开失败：${error instanceof Error ? error.message : String(error)}`] } });
-    }
-  }
-  if (delivered.length > 0) {
-    const bad = parsedList.filter((entry) => !entry.diff.ok);
-    checks.check('s1-artifact-cell-by-cell', bad.length === 0, bad.length === 0
-      ? `全部 ${parsedList.length} 个收到的产物与预期逐格一致`
-      : `${bad.length}/${parsedList.length} 个收到的产物与预期不符：${bad.map((entry) => `「${entry.filename}」${entry.diff.problems.slice(0, 6).join('；')}`).join(' || ')}`);
-  } else {
-    checks.check('s1-artifact-cell-by-cell', false, handlerError !== undefined ? `回合失败无产物：${handlerError}` : '交付面没有任何文件可解析');
-  }
-  // 产物确经文件区登记（sha256 对回 file_refs 行）。
-  const deliveredShas = new Set(delivered.map((file) => file.sha256));
-  const registeredRows = fileRows.filter((row) => deliveredShas.has(String(row['sha256'])));
-  checks.check('s1-artifact-registered', fileRows.length >= 1 && registeredRows.length >= 1, `file_refs 行=${JSON.stringify(fileRows.map((row) => ({ fileId: row['fileId'], taskId: row['taskId'], bytes: row['bytes'] })))}；交付 sha 命中行数=${registeredRows.length}`);
-
-  const calls = harness.sink.runs.filter((run) => run.agent === 'main')
-    .reduce((sum, run) => sum + assistantCount(run.resultMessages), 0)
-    + harness.sink.runs.filter((run) => run.agent === 'worker')
-      .reduce((sum, run) => sum + assistantCount(run.resultMessages), 0);
-  if (handlerError !== undefined) notes.push(`handler 抛错：${handlerError}`);
-  if (textOf(reply).includes('未送达')) notes.push('回复含「未送达」话术（S1 不应出现）');
-
-  return {
-    scenario: 's1',
-    status: checks.allPassed ? 'pass' : 'fail',
-    checks: checks.list,
-    notes,
-    calls,
-    ...(handlerError !== undefined ? { error: handlerError } : {}),
-    evidence: {
-      reply,
-      logs: harness.logs,
-      toolCalls: harness.sink.calls,
-      driverRuns: harness.sink.runs,
-      deliveredFiles: deliveredFiles(port).map((file) => ({ filename: file.filename, bytes: file.bytes, sha256: file.sha256 })),
-      fileRefs: fileRows,
-      taskRows,
-      parsedArtifacts: parsedList,
-      expectedGrid: EXPECTED_GRID,
-    },
-  };
-}
-
 async function runScenarioS2(scripted: boolean): Promise<ScenarioOutcome> {
   const checks = new Checks();
   const notes: string[] = [];
   const port = throwingPort();
-  const harness = await makeHarness({ port, scripted, script: 'main-direct', label: 's2' });
+  // 交付物只从 Worker 出：Worker 产物经后台完成面投递（而不是 Main 回合内投递）。
+  // taskRunWaitMs=0 让 task_run 受理即返回、完成投递走后台完成回调——这是产品
+  // server-cap01-delivery.test.ts ①（投递失败 → 用户看到未送达）钉住的同一路径；
+  // 缺省 1500ms 的短等待窗口会把快活任务「同回合交给模型」，产物投递失败的话术
+  // 只能随后台完成面送出，无法进 handler 的同步回执。
+  const harness = await makeHarness({ port, scripted, label: 's2', taskRunWaitMs: 0 });
   let reply: ChannelReply = '';
   let handlerError: string | undefined;
   try {
     const fixture = await buildFixtureXlsx();
     const attachment = stagedAttachment(harness.paths.dir, '月度销售明细.xlsx', fixture);
     try {
-      reply = await harness.server.handler(incomingMessage('r2-s2-1', S1_INSTRUCTION, attachment));
+      reply = await harness.server.handler(incomingMessage('r2-s2-1', S2_INSTRUCTION, attachment));
     } catch (error) {
       handlerError = error instanceof Error ? error.message : String(error);
     }
+    // 后台完成投递是异步的：等投递端口/文字面出现事实再判（最多 5s，失败样本不重试）。
+    await waitFor(() => port.calls.length >= 1 || port.texts.length >= 1, 5_000);
   } finally {
     await harness.server.close();
   }
@@ -719,8 +640,13 @@ async function runScenarioS2(scripted: boolean): Promise<ScenarioOutcome> {
   const attempted = deliveredFiles(port);
   checks.check('s2-premise-file-produced', handlerError === undefined && attempted.length >= 1, handlerError !== undefined ? `回合失败：${handlerError}` : `必抛端口收到 ${attempted.length} 个待投文件（${attempted.map((file) => `${file.filename}:${file.bytes}B`).join('、')}）——没产出文件 = 投递失败路径未触发`);
 
-  // ① 用户话术含「未送达」。
-  checks.check('s2-user-sees-not-delivered', textOf(reply).includes('未送达'), `回复=${JSON.stringify(reply)}`);
+  // ① 用户话术含「未送达」——用户可见面 = 同步回执 + 后台完成投递的主动文字。
+  const userVisibleText = [textOf(reply), ...port.texts.map((entry) => entry.text)].join('\n');
+  checks.check(
+    's2-user-sees-not-delivered',
+    userVisibleText.includes('未送达'),
+    `回复=${JSON.stringify(reply)}；主动文字=${JSON.stringify(port.texts.map((entry) => entry.text))}`,
+  );
 
   // ② 结构化事件 status != sent（live 必抛 → delivery_failed）。
   const deliveryEvents = harness.logs.filter((line) => line['event'] === 'file_delivery') as Array<Record<string, unknown>>;
@@ -750,6 +676,7 @@ async function runScenarioS2(scripted: boolean): Promise<ScenarioOutcome> {
       toolCalls: harness.sink.calls,
       driverRuns: harness.sink.runs,
       attemptedFiles: attempted.map((file) => ({ filename: file.filename, bytes: file.bytes, sha256: file.sha256 })),
+      deliveredTexts: port.texts.map((entry) => entry.text),
     },
   };
 }
@@ -758,7 +685,7 @@ async function runScenarioS3(scripted: boolean): Promise<ScenarioOutcome> {
   const checks = new Checks();
   const notes: string[] = [];
   const port = capturePort();
-  const harness = await makeHarness({ port, scripted, script: 'delegate-and-aggregate', label: 's3' });
+  const harness = await makeHarness({ port, scripted, label: 's3' });
   let reply: ChannelReply = '';
   let handlerError: string | undefined;
   let inboundFileId: string | undefined;
@@ -783,7 +710,7 @@ async function runScenarioS3(scripted: boolean): Promise<ScenarioOutcome> {
   try {
     const registry = createSqliteTaskRegistry(harness.paths.dbPath, { readOnly: true });
     taskRows = registry.list().map((task) => ({ taskId: task.taskId, request: task.request, status: task.status }));
-    fileRows = registry.store.listFileRefs({ principalId: 'wecom:fixture-user', sessionId: `wecom:${CONVERSATION_ID}` }).map((row) => ({
+    fileRows = registry.store.listFileRefs({ principalId: PRINCIPAL_ID, sessionId: `wecom:${CONVERSATION_ID}` }).map((row) => ({
       fileId: row.fileId,
       ...(row.taskId !== undefined ? { taskId: row.taskId } : {}),
       name: row.name,
@@ -836,7 +763,7 @@ async function runScenarioS3(scripted: boolean): Promise<ScenarioOutcome> {
     `交付=${delivered.length} 个；file_refs=${JSON.stringify(fileRows)}；入站=${inboundFileId}；交办副本=${JSON.stringify([...copyIds])}；命中产物行=${matchingArtifact?.row?.fileId ?? '无'}`,
   );
 
-  // ③ 产物内容逐格一致（Oracle 重解析）——同 S1 口径：**每个收到的产物**都要与预期一致，
+  // ③ 产物内容逐格一致（Oracle 重解析）——同一口径：**每个收到的产物**都要与预期一致，
   // 禁「最佳匹配」代偿（交付面里任何一个不符文件都是用户实际收到的错误产物）。
   const parsedList: Array<{ filename: string; diff: GridDiff }> = [];
   for (const entry of artifactRows) {
@@ -897,22 +824,22 @@ function findCopySource(_fileId: string, _rows: Array<{ fileId: string; taskId?:
 
 interface CliOptions {
   scripted: boolean;
-  scenarios: Array<'s1' | 's2' | 's3'>;
+  scenarios: Array<'s2' | 's3'>;
   outDir: string;
 }
 
 function parseCli(argv: readonly string[]): CliOptions {
-  const options: CliOptions = { scripted: false, scenarios: ['s1', 's2', 's3'], outDir: path.join(REPO_ROOT, '.runtime', 'eval-cap01-r2', new Date().toISOString().replace(/[:.]/g, '-')) };
+  const options: CliOptions = { scripted: false, scenarios: ['s2', 's3'], outDir: path.join(REPO_ROOT, '.runtime', 'eval-cap01-r2', new Date().toISOString().replace(/[:.]/g, '-')) };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
     if (arg === '--scripted') options.scripted = true;
     else if (arg === '--scenario') {
       index += 1;
       const value = argv[index];
-      if (value === undefined) throw new Error('--scenario 需要值（s1/s2/s3，逗号分隔）');
-      const picked = value.split(',').map((item) => item.trim()).filter((item) => item !== '') as Array<'s1' | 's2' | 's3'>;
-      const valid = picked.filter((item) => item === 's1' || item === 's2' || item === 's3');
-      if (valid.length !== picked.length || valid.length === 0) throw new Error(`--scenario 只认 s1/s2/s3：${value}`);
+      if (value === undefined) throw new Error('--scenario 需要值（s2/s3，逗号分隔）');
+      const picked = value.split(',').map((item) => item.trim()).filter((item) => item !== '') as Array<'s2' | 's3'>;
+      const valid = picked.filter((item) => item === 's2' || item === 's3');
+      if (valid.length !== picked.length || valid.length === 0) throw new Error(`--scenario 只认 s2/s3：${value}`);
       options.scenarios = valid;
     } else if (arg === '--out-dir') {
       index += 1;
@@ -944,11 +871,9 @@ async function main(): Promise<void> {
     const started = Date.now();
     let outcome: ScenarioOutcome;
     try {
-      outcome = scenario === 's1'
-        ? await runScenarioS1(scripted)
-        : scenario === 's2'
-          ? await runScenarioS2(scripted)
-          : await runScenarioS3(scripted);
+      outcome = scenario === 's2'
+        ? await runScenarioS2(scripted)
+        : await runScenarioS3(scripted);
     } catch (error) {
       outcome = {
         scenario,

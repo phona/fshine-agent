@@ -497,6 +497,11 @@ async function makeFaultServer(input: {
   /** 缺省 = 记录全部事件到 logs；给定 = 先记录、再按规则抛错（事件写失败注入）。 */
   logger?: (line: Record<string, unknown>) => void;
   steps?: readonly SequencedStep[];
+  /**
+   * 委派链路的 Worker run_js 脚本（Main 只交办、不直写——交付物只从 Worker 出）：
+   * 缺省 = RUN_JS_WRITE（写 out/报告.txt）；F2/F3 都走 Main task_run → Worker run_js。
+   */
+  workerRunJsCode?: string;
 }): Promise<FaultServer> {
   const logs: Array<Record<string, unknown>> = [];
   const baseLogger = (line: Record<string, unknown>): void => {
@@ -523,8 +528,10 @@ async function makeFaultServer(input: {
     },
   };
   const driverRuns: string[] = [];
+  // 交付物只从 Worker 出：Main 默认只交办一次，Worker 的 run_js 写 out/。
   const steps: readonly SequencedStep[] = input.steps
-    ?? [{ execCalls: [{ tool: 'run_js', args: { code: RUN_JS_WRITE } }], text: '汇总完成。' }];
+    ?? [{ execCalls: [{ tool: 'task_run', args: { task: '帮我汇总' } }], text: '汇总完成。' }];
+  const workerRunJsCode = input.workerRunJsCode ?? RUN_JS_WRITE;
   const server = await createServer({
     env: { LLM_MODEL: 'scripted-fault-driver' },
     config: FAULT_CONFIG,
@@ -533,7 +540,12 @@ async function makeFaultServer(input: {
     sessionStoreDir: path.join(input.dir, 'sessions'),
     createDrivers: () => ({
       mainDriver: sequencedDriver(steps, driverRuns),
-      workerDriver: { async run() { throw new Error('（测试）worker 不应被调用'); } },
+      workerDriver: {
+        async run(runInput) {
+          await runInput.exec('run_js', { code: workerRunJsCode });
+          return { text: '已生成报告。', messages: [] as unknown as DriverMessage[] };
+        },
+      },
     }),
     createExecutionFace: async () => ({
       client: {
@@ -739,8 +751,8 @@ async function fault3(): Promise<FaultOutcome> {
       const fixture = await makeFaultServer({
         dir,
         steps: [
-          { execCalls: [{ tool: 'run_js', args: { code: RUN_JS_WRITE } }], text: '汇总完成。' },
-          { execCalls: [{ tool: 'run_js', args: { code: RUN_JS_WRITE } }], text: '汇总完成。' },
+          { execCalls: [{ tool: 'task_run', args: { task: '帮我汇总' } }], text: '汇总完成。' },
+          { execCalls: [{ tool: 'task_run', args: { task: '帮我汇总' } }], text: '汇总完成。' },
         ],
         logger: (line) => {
           if (line['event'] === 'file_delivery' && line['status'] === 'sent') {
@@ -806,8 +818,8 @@ async function fault3(): Promise<FaultOutcome> {
       const fixture = await makeFaultServer({
         dir,
         steps: [
-          { execCalls: [{ tool: 'run_js', args: { code: RUN_JS_WRITE } }], text: '汇总完成。' },
-          { execCalls: [{ tool: 'run_js', args: { code: RUN_JS_WRITE } }], text: '汇总完成。' },
+          { execCalls: [{ tool: 'task_run', args: { task: '帮我汇总' } }], text: '汇总完成。' },
+          { execCalls: [{ tool: 'task_run', args: { task: '帮我汇总' } }], text: '汇总完成。' },
         ],
         logger: (line) => {
           if (line['event'] === 'file_delivery') {
@@ -952,6 +964,13 @@ async function fault4(): Promise<FaultOutcome> {
     const burstDir = path.join(tmpRoot, 'burst');
     mkdirSync(burstDir, { recursive: true });
     const burstDb = path.join(burstDir, 'state.db');
+    // 先单进程建库/跑一次迁移再并发起子进程：两个子进程同时首次 open 时会在 schema
+    // 迁移/建表上抢写锁，偶发 SQLITE_BUSY（子进程还没进到逐笔 try/catch 就退出，制造
+    // 假红）。预初始化只做一次建库，不写业务行，不改变 F4a 的并发写口径。
+    {
+      const seed = openTaskStore(burstDb);
+      seed.close();
+    }
     const burstPayload = (childId: string): Record<string, unknown> => ({
       dbPath: burstDb,
       childId,

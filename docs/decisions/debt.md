@@ -44,6 +44,7 @@
 | 事项 | 证据 / 指针 | 状态 |
 |---|---|---|
 | `eval:cap01` 的 r6 面已改指 `lifecycle.ts`（2026-11-18 同步） | `scripts/eval/cap01/run-all.ts:40`；`../eval/README.md:12` | 已清 |
+| `eval:cap01` R2 S1 场景已退役（原「Main 直做写 out/ 并由宿主投递」；交付物只从 Worker 出，Main 的 run_js 只能写 scratch/） | `scripts/eval/cap01/r2-functional.ts` 文件头；`packages/agent/src/run-js-executor.ts`（RunJsWritableDirs）；等价覆盖 = 同文件 S3（Worker 产物回 Main + 逐格 + 登记 + 行数据不出 Main） | 已退役（2026-11-19） |
 | 判据锁只校验 criteria/cases 聚合值、不校验 `files` 表 | `../eval/README.md:24`；`scripts/eval/convergence-r1/runner.ts:220-230` | 未清 |
 | 服务无进程锁 / 单实例仅靠操作纪律；双实例共享 `.runtime/state.db` 行为未定义 | `../ops/README.md:13` | 未清 |
 | `DB_PATH` 文档缺省与实际代码不一致（文档 `data/agent.db`，代码 `.runtime/state.db`） | `../ops/README.md:25`；`../environment-variables.md:33`；`apps/server/main.ts:42-44` | 未清（文档待改） |

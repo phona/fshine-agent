@@ -44,8 +44,10 @@
  *       （copy-on-register 不动原件，file-store.ts:391）。
  *
  * 幂等三态（v8 §5，server 级生产装配 + 计数执行器注入 + 磁盘 runs/ 目录双口径计数）：
+ *   走 Worker 路径（Main 只 task_run 交办；Worker 的 run_js 写 out/ 并由执行器登记）——
+ *   交付物只从 Worker 出（Main 的 run_js 只能写 scratch/，写 out/ 会被权限拒绝）。
  *   idem1 同回合同参数重试 → 只执行一次（执行器调用 1 次、runs/ 1 个、登记 1 行、两次工具
- *         结果回放相等——memo 命中不再 push 交付，execution-runtime.ts:817-818）。
+ *         结果回放相等——委派级 memo 命中不再执行，execution-runtime.ts createWorkerRunJsTurn）。
  *   idem2 不同回合同参数重传 → 执行两次（**正确行为**：新回合新 memo；两次登记 fileId 不同）。
  *   idem3 重启后重投 → 执行一次。**如实登记：跨重启幂等不保证（v8 §5 明示「S1 只保证进程内、
  *         同一回合同一回合的交付」）**——重启后渠道重投是新回合，重新执行一次是登记的正确
@@ -576,6 +578,11 @@ type MainBehavior = (ctx: {
   exec: (tool: string, args: Record<string, unknown>) => Promise<unknown>;
 }) => Promise<string>;
 
+/** Worker 侧脚本行为（委派链路的真实执行面；与 Main 分开记录到同一 sink）。 */
+type WorkerBehavior = (ctx: {
+  exec: (tool: string, args: Record<string, unknown>) => Promise<unknown>;
+}) => Promise<string>;
+
 const workerNeverCalled: TurnDriver = {
   async run() {
     throw new Error('（r3-core）Worker 不应被调用：本脚本无委派场景');
@@ -609,6 +616,26 @@ function scriptedMainDriver(behavior: MainBehavior, sink: Sink): TurnDriver {
         },
       });
       record.resultText = reply;
+      return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as unknown as DriverMessage] };
+    },
+  };
+}
+
+function scriptedWorkerDriver(behavior: WorkerBehavior, sink: Sink): TurnDriver {
+  return {
+    async run(input) {
+      const reply = await behavior({
+        exec: async (tool, args) => {
+          try {
+            const value = await input.exec(tool, args);
+            sink.calls.push({ tool, args, isError: false, result: value });
+            return value;
+          } catch (error) {
+            sink.calls.push({ tool, args, isError: true, errorMessage: error instanceof Error ? error.message : String(error) });
+            throw error;
+          }
+        },
+      });
       return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as unknown as DriverMessage] };
     },
   };
@@ -653,6 +680,8 @@ interface ServerHarness {
 interface HarnessOptions {
   label: string;
   behavior: MainBehavior;
+  /** 委派场景的 Worker 脚本行为；缺省 = Worker 不应被调用。 */
+  workerBehavior?: WorkerBehavior;
   userIds?: readonly string[];
   countExecutorCalls?: boolean;
   dbPath?: string;
@@ -679,7 +708,12 @@ async function makeServerHarness(options: HarnessOptions): Promise<ServerHarness
     env: { LLM_MODEL: 'scripted-r3-core' },
     config,
     dbPath,
-    createDrivers: () => ({ mainDriver: scriptedMainDriver(options.behavior, sink), workerDriver: workerNeverCalled }),
+    createDrivers: () => ({
+      mainDriver: scriptedMainDriver(options.behavior, sink),
+      workerDriver: options.workerBehavior === undefined
+        ? workerNeverCalled
+        : scriptedWorkerDriver(options.workerBehavior, sink),
+    }),
     createExecutionFace: async () => ({
       client: faceClient,
       allowedOperations: ['dummy.query'],
@@ -1093,6 +1127,22 @@ fs.writeFileSync('out/leak-report.txt', __collected.join('\\n') || 'nothing-read
 
 const IDEM_CODE = "require('node:fs').writeFileSync('out/结果.txt', 'r3core-idem');";
 
+/**
+ * 幂等三态的 Main 行为：只交办、不直写（交付物只从 Worker 出——Main 的 run_js 只能写
+ * scratch/，写 out/ 会被权限拒绝）。Worker 每次委派在同回合重试两次同参数 run_js：
+ * 命中委派级 memo → 真实执行一次；产物由 Worker 的 out/ 登记（task 绑定行）。
+ */
+const IDEM_WORKER_BEHAVIOR: WorkerBehavior = async (ctx) => {
+  await ctx.exec('run_js', { code: IDEM_CODE });
+  await ctx.exec('run_js', { code: IDEM_CODE });
+  return '已写出幂等产物。';
+};
+
+const IDEM_MAIN_BEHAVIOR: MainBehavior = async (ctx) => {
+  await ctx.exec('task_run', { task: '写出幂等产物（同一委派内同参数重试）。' });
+  return '完成。';
+};
+
 async function runIdem12(): Promise<void> {
   const scope: FileScope = { principalId: `${CHANNEL}:${USER_A}`, sessionId: `${CHANNEL}:conv-r3-idem` };
   let harness: ServerHarness | undefined;
@@ -1101,14 +1151,8 @@ async function runIdem12(): Promise<void> {
       label: 'idem12',
       userIds: [USER_A],
       countExecutorCalls: true,
-      behavior: async (ctx) => {
-        // 每回合：按 lastUserText 决定调用次数（m-1 同回合两次同参数；m-2/m-3 各一次同参数）。
-        const calls = ctx.lastUserText.includes('IDEM_RETRY') ? 2 : 1;
-        for (let index = 0; index < calls; index += 1) {
-          await ctx.exec('run_js', { code: IDEM_CODE });
-        }
-        return '完成。';
-      },
+      behavior: IDEM_MAIN_BEHAVIOR,
+      workerBehavior: IDEM_WORKER_BEHAVIOR,
     });
 
     // idem1：同回合同参数重试 → 只执行一次。
@@ -1160,10 +1204,8 @@ async function runIdem3(): Promise<void> {
       userIds: [USER_A],
       countExecutorCalls: true,
       dbPath,
-      behavior: async (ctx) => {
-        await ctx.exec('run_js', { code: IDEM_CODE });
-        return '完成。';
-      },
+      behavior: IDEM_MAIN_BEHAVIOR,
+      workerBehavior: IDEM_WORKER_BEHAVIOR,
     });
     await callHandler(harness1, incomingMessage({ userId: USER_A, conversationId: 'conv-r3-idem3', messageId: 'r3-idem3-m1', text: 'IDEM3 第一回合' }));
     const callsBefore = harness1.executorCalls();
@@ -1175,10 +1217,8 @@ async function runIdem3(): Promise<void> {
       userIds: [USER_A],
       countExecutorCalls: true,
       dbPath,
-      behavior: async (ctx) => {
-        await ctx.exec('run_js', { code: IDEM_CODE });
-        return '完成。';
-      },
+      behavior: IDEM_MAIN_BEHAVIOR,
+      workerBehavior: IDEM_WORKER_BEHAVIOR,
     });
     await callHandler(harness2, incomingMessage({ userId: USER_A, conversationId: 'conv-r3-idem3', messageId: 'r3-idem3-m1', text: 'IDEM3 重启后重投（同 messageId）' }));
     const callsAfter = harness2.executorCalls();
