@@ -77,3 +77,8 @@
 - 走查主链 8 步（启动 → 交办受理 → 进展通知 → 结果找回 → 失败如实 → 取消 → 重启恢复 → 越权）见 `docs/product/manual-test-handbook.md:56-73`；交付物可读性见该手册 §6、体验见 §8。
 - 走查同样受 §1 单实例与 §5.3 清理纪律约束；真机走查的号码级用例在 `docs/product/wecom-live-dummy-cases.md`。
 - 真实只读接入**未获授权**：不得借走查去连真实执行层或真实数据；准备档硬声明见 `docs/product/real-read-readiness.md:3`。
+
+## 7. 禁令与操作纪律
+
+- **在"三道边界"闭环前，不得宣称可安全连接真实生产 SaaS**（V0 定位，裁定原文 `docs/history/decision-log-part01-2026-11_undated.md:493`）。真实只读接入需 owner 单独批准，见 §6。
+- **`.runtime/` 永不 `git add`**：底账、会话、证据、看门狗日志都在里面，属运行产物。

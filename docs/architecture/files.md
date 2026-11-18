@@ -72,6 +72,15 @@
 - 挂点：server 投递前 `applyRecalcDeliveryGate`（`apps/server/server.ts:542`-546）；未注入执行器 = 门不启用、逐字节原样返回（`packages/agent/src/recalc-xlsx-executor.ts:845`-847）。
 - 守卫：`packages/agent/recalc-delivery-gate.test.ts:56`（无报告放行）、`:75`（改名不绕过）、`:159`（未启用逐字节不变）、`:194`（真实执行器报告可被收集匹配）；`packages/agent/recalc-xlsx.test.ts`。
 
+## 8. Worker 系统提示的来源约束
+
+Worker 的"可信工作目录"**只能取装配层 `profile.root`**，禁止取模型输出或用户消息；系统提示只是纵深防御，不是安全边界（`docs/history/decision-log-part03-2026-11.md:292`；实现 `packages/agent/src/execution-runtime.ts:382-395`，装配 `scripts/ask-runtime.ts:461`）。
+
+## 9. recalc 的两条交付纪律
+
+- **混合批次部分被拦**：回复必须附「部分表格未通过校验，其余已发送」，不得让用户以为全部送达（`apps/server/server.ts:163-165,607` 的 `RECALC_DELIVERY_PARTIAL_NOTE`；裁定原文 `docs/history/decision-log-part06-2026-11_undated.md:325`）。
+- **引擎开销计入资源账**：`budget.consume({calls:1,ms})` + `recalc_cost` 事件（只进日志不进话术，不走 `onRuntimeEvent`；`packages/agent/src/execution-runtime.ts:2067`、`apps/server/server.ts:398`）。
+
 ## 来源
 
 - `docs/architecture/files.md`（已删，git 历史可考）：保留「产物必须有身份、引用是 id 不是路径」的问题框架；其 `session_artifacts` / `artifacts` / `cancel` 契约面已被现行 `file_refs` + 四态执行契约取代，不按现状读。

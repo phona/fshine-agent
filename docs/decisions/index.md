@@ -8,7 +8,7 @@
 | 日期 | 主题 | 结论 | 指针 |
 |---|---|---|---|
 | 2026-11-13 | Minimal Rewrite 收口（§九–§十二，多轮） | 旧 Runtime hub、demo 与试跑脚手架按可达性删除；产品面收敛为 `npm run ask` 与 `npm start` 两条路径；旧机制不恢复，恢复须先写「加回决定」 | `../history/decision-log-part01-2026-11_undated.md:563–606` |
-| 2026-11-13 | M4 死代码清扫与契约收口（§十三） | 删 19 个跟踪文件 3,386 行；完成状态按 `completed`/`failed`/`unexecuted` 判定；契约收为四态（无 cancel/artifacts）；确定性门 = typecheck + unit | `../history/decision-log-part01-2026-11_undated.md:642` |
+| 2026-11-13 | M4 死代码清扫与契约收口（§十三） | 删 19 个跟踪文件 3,386 行；完成状态按 `completed`/`failed`/`unexecuted` 判定；契约收为五态（completed / needs_confirmation / needs_input / failed / refused），无 cancel/artifacts 字段；确定性门 = typecheck + unit | `../history/decision-log-part01-2026-11_undated.md:642` |
 | 2026-11-13 | Eval 入口收口（§十四） | 真模型 workflow 改挂 `npm run eval:user`；eval-measure 退役；不重建评测平台 | `../history/decision-log-part01-2026-11_undated.md:736` |
 | 2026-11-13 | R1 旧协议与旧治理清理（§十五） | 删旧 a2a 协议、contracts 未用面、generic-mock 评测簇；覆盖面由用户级 eval 承接；桥键闭集守卫缺口如实登记 | `../history/decision-log-part01-2026-11_undated.md:762` |
 | 2026-11-13 | convergence-r1 判据冻结（§十六；2026-11-18 扩到 14 例） | 14 用例（E01–E14，2026-11-18 由 12 扩到 14）+ 六维判定器；`criteriaSha256`/`casesSha256` 冻结后不得改；判定器缺陷按「修复→全样本复判→重切」流程处理 | `../history/decision-log-part02-2026-11.md:5` |
@@ -27,3 +27,20 @@
 | 2026-11-17 | CAP-01 收口（§九十九） | S3 端到端 2/5 接受为模型能力包络；run 目录保留 30 天；并发 4；渠道三档；软链 fail-closed；跨会话能力不做 | `../history/decision-log-part06-2026-11_undated.md:255` |
 | 2026-11-17–18 | recalc_xlsx 集成（§一百） | `recalc_xlsx` 仅 Main 宿主工具；LibreOffice 26.8.3 仅 PATH 可见时上工具面、缺失 fail-closed；投递门报告驱动、只按 sha256 绑定；一条重编码残余登记 | `../history/decision-log-part06-2026-11_undated.md:305` |
 | 2026-11-18 | 文档清理与未决项转 issue | 未决项转 GitHub #67–#74；仓库不再保留待办/待裁定文档；删除/移档流水以 `git log --diff-filter=D -- docs/` 为准 | `../index.md`、`../../AGENTS.md` |
+
+## 写作约束（三条，继承自台账纪律）
+
+1. 已删机制只允许出现在「已删及理由」语境，不得写成现行能力；
+2. 未决项不得写成已解决（未决进 GitHub issues #67–#74 或 `debt.md`）；
+3. 目标态不得写成已实现（口径原文 `docs/history/decision-log-part01-2026-11_undated.md:25`）。
+
+## 恢复判据（想"加回"一个已删机制时先过这四条）
+
+按顺序回答，缺一条就不许加回（原文 `docs/history/decision-log-part01-2026-11_undated.md:202`）：
+
+1. **最小可复现失败**：现网哪个用户级任务因此做不成？给复现步骤与读数；
+2. **Pi/Skill 已试过**：先证明原生的上下文/工具/技能解决不了，记录尝试结果；
+3. **执行层不能承担**：说明为什么该责任不能落在执行层；
+4. **最小改动 + 前后 Eval**：给最小方案，以及增加前后的用户级 Eval 对照（全样本，不筛绿）。
+
+另：任何以 assistant 文本为证据源的"历史工具"都不算证据（`:192`）。

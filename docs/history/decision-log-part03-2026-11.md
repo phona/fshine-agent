@@ -99,7 +99,7 @@
 - **最小修复**：① task-runner 增可选 `budgetFor` 端口 + `meterRound`——后台回合在 settle finally 按真实 taskId `consume({calls:1, ms})`（未准入任务跳过不造预算，§2 契约不变；实现期实测修复了 meterRound 解构丢 this 绑定导致的静默跳过）；受理侧既有 probe acquire(background,{taskId}) 即预算种子，受理逻辑零改动；② 任何落定都在 finally 一次实际时长计量→release→出 inFlight，之后不再消费；③ `runner.submit` 对重复 taskId 确定性拒绝；④ 状态机零改动（超时/限流/重启状态可信由既有 25 例覆盖）。
 - **回归与绊线读数**：新增 3 条测试先红（计量 metered=[] 两例）后绿；`npm run typecheck`=0、`npm test` 75 文件/746 例全绿（743→746）。
 - **独立复核结论**：**passed=true、integrity=false**（轨1 独立复核阶段实跑；核不变式证明/未虚报窗口/未改 node_modules/两形态分别验证/回归与绊线；无审计写越权）。
-- **冻结面处置**：`queueCapacity>0` 上界属冻结 §2 接口——**只审计、只登记、不改机制**：受理上界只看 policy 队列，与「队列=底账 queued 行」单一事实源不一致；缺省 queueCapacity=0 下底账 queued 行仍无受理上界（开放面，建议后续切片改「底账 queued 行数 < queueCapacity 才受理」+集成测试）；queue_full 拒绝面既有 resource-policy.test.ts 覆盖正确。messageId 防重全权归执行层/渠道装配层（不建通用去重机制）。queued/waiting_user 超时接线、前台忙等上界、budgets Map 清除登记为后续切片。budgetFor 为可选调用面扩展，不改 §2 语义。
+- **冻结面处置**：`queueCapacity>0` 上界属冻结 §2 接口——**只审计、只登记、不改机制**：受理上界只看 policy 队列，与「队列=底账 queued 行」单一事实源不一致；缺省 queueCapacity=0 下底账 queued 行仍无受理上界（开放面，建议后续切片改「底账 queued 行数 < queueCapacity 才受理」+集成测试）；queue_full 拒绝面既有 resource-policy.test.ts 覆盖正确。messageId 防重全权归执行层（⚠️ 现行实现另有宿主侧 bounded FIFO 去重，见 `apps/server/server.ts:456,621-628` 与 `docs/architecture/tasks.md:140`）/渠道装配层（不建通用去重机制）。queued/waiting_user 超时接线、前台忙等上界、budgets Map 清除登记为后续切片。budgetFor 为可选调用面扩展，不改 §2 语义。
 - **回退**：`git revert 15777ba`（及本条目提交）。
 
 ---

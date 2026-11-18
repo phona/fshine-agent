@@ -117,6 +117,10 @@
 - 附件时序端到端（真 `createServer` + dummy 执行层 + 假 SDK）：`npx vitest run scripts/eval/wecom-sim/cases-d-attachment.test.ts` → **1 file / 6 tests passed**（W-13～W-18）。入口与真/假边界见 `docs/product/wecom-live-dummy-cases.md:291-320`。
 - 未验证：真实企微网络时序与真机气泡观感仍需 live 人工面（`docs/product/wecom-live-dummy-cases.md` §0 的人工分界；稳定性另见 H 组）；适配器没有时钟注入缝（3s/2s 都是真实定时器；仅 3s 合并窗长度可用构造参数收紧，`packages/channel-wecom/src/adapter.ts:170-175`），自动用例按事件驱动等待（同文 §10），不把离线结论读作已联调。
 
+## 9. 信任边界与残余风险
+
+适配层**不做签名校验**：`userid` 直接取自 SDK 帧，宿主没有第二道机械校验，身份可信性完全依赖企微 SDK 与 token 认证（裁定原文 `docs/history/decision-log-part04-2026-11.md:131`；实现 `packages/channel-wecom/src/adapter.ts:668-685`）。排障含义：principal 判错时先查"这条帧是谁转进来的"，而不是查宿主的身份映射。
+
 ## 来源
 
 - `docs/architecture/channels.md`（已删）：保留附件收据/30s 追问分工、真机时序不可替代的边界；其 `FSHINE_INBOUND_DEBOUNCE_MS` 与“首帧带文件名收据”两条已与现行代码不符，按代码更正。

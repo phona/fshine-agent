@@ -162,3 +162,5 @@
 - `pi-152-dispatch-key-design.md`（U3 设计；合入决定 §九十七）——两层身份、铸造点唯一、证明边界、R0–R5 规则；
 - `s4-stats-four-state.md`——**未取**（评测统计口径，不属任务生命周期）；
 - `gap-task-surface.md`——工具只收任务引用、scope 由宿主注入、取消/接续只转述 outcome。
+
+> 裁定（owner 2026-11-17）：**跨会话续办不做**。任务 scope 恒为 `(principalId, sessionId)`；不要据此扩成跨会话授权面（原文 `docs/history/decision-log-part06-2026-11_undated.md`，结论亦见 `docs/decisions/debt.md`）。

@@ -60,3 +60,12 @@
 **为什么还没做**：保留策略（按天 / 按大小 / 按会话数）与容量上限属装配层策略，取哪条、配置键放哪都还没裁定，所以没有实现，也不假装已解。补齐判据见 issue #67：明确策略并登记 `docs/environment-variables.md`；清理不动活跃会话、不破坏 crash-tail 修复；清理失败不阻塞回合；容量触顶行为有确定性用例。
 
 **今天的影响**：长期运行的部署需要外部磁盘监控 / 清理；单次 Dummy E2E 与验收规模不受影响。
+
+## 6. 转录的权威边界（重启后最容易搞错的一条）
+
+- **转录只作上下文**：恢复进 Pi 的转录不得成为授权、实体、执行范围的来源（`docs/history/decision-log-part04-2026-11.md:55`）。
+- **会话存储不承载任务事实**：只存转录，没有任务状态/原因/租约/编号字段；不 import `task-registry`/`task-store`，不发指向 `tasks`/`executions` 的 SQL。守卫在 `packages/agent/session-persistence.test.ts:453`（任务台账字段零出现）——任务真相唯一在 `.runtime/state.db`。
+
+## 7. 压缩超窗的接受上界（owner 2026-11-15 明文接受）
+
+允许"可能发出一次必然超窗的请求"，但有界：**每事件至多 1 次 over-window 外发、总发出有界、`retry_scheduled=0`**（`docs/history/decision-log-part05-2026-11.md:682` 的 A-1/A-2/A-3；绊线 `packages/agent/pi-native-tripwire.test.ts:156-183`）。读作"已接受的残余成本"，不是"待修缺陷"。

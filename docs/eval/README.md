@@ -65,3 +65,8 @@
 - P2 同口径：`product_fault` 判负留档、`environment_interrupted` 待重跑、`insufficient_coverage` 留档不进结论（`docs/product/p2-business-e2e-prereg.md:218-229`）。
 - 判据变更令旧读数作废 ≠ 改写旧读数：R1 #3 的 0/3 宣布作废且不复用，原读数原样保留（`docs/history/business-e2e-prereg-addendum.md:67-69`）。
 - 安全失败不能抵消：硬失败码一旦命中整批失败，不因其它样本通过转绿（`scripts/eval/eval-gate.mjs:12-13,104-107`；本 ask 实测 `exit=1`，见 §四）。
+
+## 七、读数保留与可复现
+
+- **三件套分别保留、不改写**：原始 `judgment.json`、离线复判结果、重跑结果各自留存；重判不得覆盖原判。
+- **报告必须标**：样本规模 N、模型版本（含 thinking level）、代码点（commit）、技能 revision。缺任一项的读数只能当参考，不能当基线（裁定原文 `docs/history/decision-log-part02-2026-11.md:78`）。
