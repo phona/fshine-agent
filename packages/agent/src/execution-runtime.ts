@@ -699,6 +699,11 @@ export interface TurnResult {
    * 完成后由宿主主动投递面送达原会话。
    */
   relayedTaskIds?: readonly string[];
+  /**
+   * 主动推送抑制（快活失败/等补充）：本回合已把失败原因或「还缺什么」交给模型的任务。
+   * 后台通知推送据此不重复发一条；受理回执路径的任务不在列（它们的结局仍靠推送送达）。
+   */
+  pushSuppressedTaskIds?: readonly string[];
   /** 进度帧（本回合 onStep 产出；当前只收集，不在此投递渠道）。 */
   progress: readonly string[];
   /**
@@ -1782,6 +1787,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     rawInputFiles: unknown,
     foregroundPermit: Permit | undefined,
     turnFiles: TurnFileRef[],
+    /** 主动推送抑制收集器（快活失败/等补充：失败原因本回合已交给模型）。 */
+    pushSuppressedTaskIds: string[],
   ): Promise<unknown> {
     const request = taskText.trim();
     if (request === '') throw new Error('task_run 缺少 task：请写清要办什么。');
@@ -1865,6 +1872,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
             };
           }
           // 窗口内落定的非完成终态：与 inline 失败同语义如实上抛（失败/取消不冒充进行中）。
+          // 这次失败的原因本回合就交给了模型（模型会向用户说明）——主动推送不重复发一条。
+          pushSuppressedTaskIds.push(taskId);
           throw new Error(settled.failureReason ?? `后台任务已落定（${settled.status}）。`);
         }
       }
@@ -2003,6 +2012,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const taskIds: string[] = [];
       // B 切片：本回合已把执行结果交给模型（模型将向用户转述）的任务——完成投递面据此抑制。
       const relayedTaskIds: string[] = [];
+      // 主动推送抑制（快活失败/等补充）：这些任务的失败原因本回合已交给模型，推送不重复发。
+      const pushSuppressedTaskIds: string[] = [];
       // CAP-01 S1：本回合产出文件（run_js 交付箱登记事实；回合末进 TurnResult.files）。
       const turnFiles: TurnFileRef[] = [];
       // run_js 幂等（v8 §5）：局部 Map 随本回合创建、随本回合丢弃（进程内、跨重启不保证）。
@@ -2071,7 +2082,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
               window: mainWindow,
               operation: TASK_RUN_TOOL,
               executeThrows: 'propagate',
-              execute: async () => ({ status: 'completed', data: await delegate(task, args.inputFiles, foregroundPermit, turnFiles) }),
+              execute: async () => ({ status: 'completed', data: await delegate(task, args.inputFiles, foregroundPermit, turnFiles, pushSuppressedTaskIds) }),
             });
             if (run.unresolved) {
               return {
@@ -2089,6 +2100,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
               // 对这些任务抑制，同一份结果不重复发两遍；受理回执路径不在列（完成后主动投递）。
               if (answer !== null && typeof answer === 'object' && 'summary' in answer) {
                 relayedTaskIds.push(taskId);
+              }
+              // 快活失败/等补充：失败原因或「还缺什么」也在本回合交给了模型（模型会向用户
+              // 如实说明）——主动推送据此抑制，同一件事不说两遍。受理回执（running）不在列：
+              // 那些任务的结果/失败仍要靠主动推送送达。
+              const inTurnStatus = (answer as { status?: unknown } | null)?.status;
+              if (inTurnStatus === 'failed' || inTurnStatus === 'needs_input') {
+                pushSuppressedTaskIds.push(taskId);
               }
             }
             return answer;
@@ -2202,6 +2220,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         // B 切片（可观测）：本回合经 execute_operation 发起的执行次数（A2 同源计数）。
         operations: operationsThisTurn,
         ...(relayedTaskIds.length > 0 ? { relayedTaskIds } : {}),
+        ...(pushSuppressedTaskIds.length > 0 ? { pushSuppressedTaskIds } : {}),
         progress,
         ...(turnFiles.length > 0 ? { files: turnFiles } : {}),
         ...(manifestBytes === undefined ? {} : { fileManifestBytes: manifestBytes }),

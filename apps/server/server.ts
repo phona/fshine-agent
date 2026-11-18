@@ -72,6 +72,7 @@ import {
 import { createAttachmentFactQueue, createScopedNoteQueue } from './attachment-facts';
 import { AttachmentNudge, type NudgeClock } from './attachment-nudge';
 import { deliverTaskResult } from './task-completion-delivery';
+import { composeNotificationSinks, createChatNotificationSink } from './notification-chat-sink';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -286,6 +287,31 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     }
     set.add(taskId);
   };
+  /**
+   * 主动推送抑制（快活失败/等补充）：本回合已把失败原因交给模型的任务——推送不再重复发一条。
+   * 一次性核销（推送核销后即删）；有界（会话长了不积累：超上限淘汰最旧）。
+   */
+  const PUSH_SUPPRESSED_LIMIT = 64;
+  const pushSuppressedInTurn = new Map<string, Set<string>>();
+  const markPushSuppressedInTurn = (sessionKey: string, taskId: string): void => {
+    let set = pushSuppressedInTurn.get(sessionKey);
+    if (set === undefined) {
+      set = new Set();
+      pushSuppressedInTurn.set(sessionKey, set);
+    }
+    set.add(taskId);
+    while (set.size > PUSH_SUPPRESSED_LIMIT) {
+      const oldest = set.values().next().value;
+      if (oldest === undefined) break;
+      set.delete(oldest);
+    }
+  };
+  const claimPushSuppressedInTurn = (sessionKey: string, taskId: string): boolean => {
+    const set = pushSuppressedInTurn.get(sessionKey);
+    if (set?.delete(taskId) !== true) return false;
+    if (set.size === 0) pushSuppressedInTurn.delete(sessionKey);
+    return true;
+  };
   if (dispatchMode === 'background') {
     const completionDelivery = deps.fileDelivery;
     runner = (await createBackgroundDispatch({
@@ -331,7 +357,37 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       },
     })).runner;
     if (deps.notificationSink !== undefined) {
-      outbox = createNotificationOutbox({ dbPath: deps.dbPath, sink: deps.notificationSink });
+      // 主动推送（B 类：任务事实到用户的如实交付）：outbox 的事实除了落盘审计，还要把
+      // 「用户必须知道、或必须做点什么」的几类发回原会话——等结果的人不该靠下次开口才发现
+      // 任务失败或卡在等他说一句话。文件审计与聊天推送各自独立成败（composeNotificationSinks）。
+      const chatSink = createChatNotificationSink({
+        // 底账即事实来源：读不到范围就不猜路由（读操作不带 scope，越权=找不到）。
+        taskScope: (taskId) => {
+          try {
+            const record = (taskRegistry as unknown as {
+              get(id: string): { principalId: string; sessionId: string };
+            }).get(taskId);
+            return { principalId: record.principalId, sessionId: record.sessionId };
+          } catch {
+            return undefined;
+          }
+        },
+        ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
+        // 会话此刻有回合在跑 → 改期到回合之后：模型还在打字时不抢先推一条；
+        // 也避免回合内 drainNotifications 的 await 与回合链互相等待。
+        deferWhileTurnActive: (sessionKey, run) => {
+          const tail = sessionChains.get(sessionKey);
+          if (tail === undefined) return false;
+          void tail.then(() => run()).catch(() => {});
+          return true;
+        },
+        claimRelayedInTurn: claimPushSuppressedInTurn,
+        log,
+      });
+      outbox = createNotificationOutbox({
+        dbPath: deps.dbPath,
+        sink: composeNotificationSinks([deps.notificationSink, chatSink]),
+      });
       // server 进程：事实落库后异步触发投递（终态通知即刻推送；同进程有界重试）。
       // R5 B 通道：同一挂钩缓冲机械事实，下一次回合开始前以普通 user 消息注入主对话。
       notificationAttachment = attachNotificationOutbox(taskRegistry, outbox, { deliverOnRecord: true });
@@ -758,6 +814,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       if (dispatchMode === 'background') {
         for (const relayedTaskId of turn.relayedTaskIds ?? []) {
           markRelayedInTurn(sessionKey, relayedTaskId);
+        }
+        // 快活失败/等补充：失败原因本回合已交给模型（模型会向用户说明）——主动推送不重复发。
+        for (const suppressedTaskId of turn.pushSuppressedTaskIds ?? []) {
+          markPushSuppressedInTurn(sessionKey, suppressedTaskId);
         }
       }
       // CAP-01 S1 交付 B（v8 §7）：handler 只返回 text；文件经装配注入的端口在回合末主动投递。
