@@ -24,6 +24,15 @@
  *   · completed/failed 等终态不在认领范围（不重跑）；无租约的 running 属 inline 任务，
  *     不在回收范围（expireLeases 语义）。
  *
+ * waiting_user 到期消费者（2026-11-18，W 切片）：注入 `waitUserTimeoutMs` 后，runner 持有
+ * **一个**有界定时器（同一时刻至多一个；每次 pump 重算最早到期点后重武装）。每个推进周期
+ * （含启动后的第一次 pump）先按底账行的 `waiting_since + waitUserTimeoutMs <= now` 扫一遍：
+ * 到期行走既有 `timeout(taskId,'waiting_user')` 合法边 → `timed_out` + reason=timeout，
+ * 事实钩子照常产出既有 `timed_out` 通知。判定只看持久化底账，不依赖上一进程的内存定时器，
+ * 因此重启后无需额外恢复路径。未注入 `waitUserTimeoutMs`（或底账没有 list 面）时完全不建
+ * 定时器、不扫底账——直用 runner 的调用方行为零变化；装配方传 `resolveRuntimeConfig()`
+ * 的值（配置缺省 24h）启用。
+ *
  * 租约口径（集成要求）：leaseMs 必须覆盖最长执行回合（按 P5 workerTurnMs 取，且执行端以截止
  * 时间强制中止）；§1 无租约续期方法，超出租约的在飞回合会被下一次 pump 判为 result_unknown
  * （保守口径：unknown ≠ failed ≠ success）。
@@ -39,7 +48,8 @@
  *   · 满员/队列满的「拒绝」落点（P7b 起）：由集成接线在受理侧落地——execution-runtime 委派前
  *     按 policy 事实拒绝（任务 failed + resource_limited，不进入执行）；runner 收到排队许可
  *     （state='queued'）时只停止派发（队列 = 底账 queued 行），不据此直派发（否则绕过并发上限）；
- *     queued/waiting_user 超时计时仍由 P5 边界触发底账 timeout（runner 不做计时器）；
+ *     queued 超时计时仍由 P5 边界触发底账 timeout（runner 不为排队做计时器）；
+ *     waiting_user 到期由上面的单一有界定时器轮消费（W 切片）。
  *   · 后台任务结果文本（resultText）：集成裁定落点=settle 确认 `completed` 终态后经端口
  *     可选方法 `archiveReply` 逐字存档（P2 的 P1 存档面；不经 inline `complete()`/
  *     task 级 judge，避免误伤等待接续）——P6-E01「结果可取回」由此具备执行口径。
@@ -138,6 +148,11 @@ export interface TaskRegistryPort {
   claimNextQueued(input: { owner: string; leaseMs: number }): TaskRecordView | undefined;
   /** 过期 running 租约 → result_unknown（返回受影响任务；不自动重放）。 */
   expireLeases(now?: string): readonly TaskRecordView[];
+  /**
+   * 只读任务行（waiting_user 到期扫描用；可选）。缺省 = 不启用到期消费者（零行为变化）；
+   * 真底账实现提供；runner 只读状态与 waitingSince，不直接写状态。
+   */
+  list?(scope?: TaskScope): readonly TaskRecordView[];
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +239,15 @@ export interface TaskExecutor {
   execute(task: TaskExecutionInput, context: TaskExecutionContext): Promise<TaskExecutionOutcome>;
 }
 
+/**
+ * 单一定时器端口（测试注入假时钟/假定时器，不真 sleep）。
+ * runner 同一时刻只持有一个 handle；clear 幂等。
+ */
+export interface RunnerTimers {
+  set(callback: () => void, delayMs: number): unknown;
+  clear(handle: unknown): void;
+}
+
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
@@ -238,6 +262,14 @@ export interface TaskRunnerOptions {
   leaseMs?: number;
   /** 注入时钟（租约计算与过期判定；缺省系统时钟）。 */
   now?: () => Date;
+  /**
+   * waiting_user 到期阈值（ms）。缺省/0 = 不启用到期消费者（直用 runner 零行为变化）；
+   * 装配方传 `resolveRuntimeConfig().waitUserTimeoutMs`（配置缺省 86_400_000）启用。
+   * 判定 = 底账 `waiting_since + waitUserTimeoutMs <= now`（与进程内定时器无关，重启可判）。
+   */
+  waitUserTimeoutMs?: number;
+  /** 单一定时器轮（缺省全局 setTimeout；测试注入假定时器）。仅在启用到期消费者时使用。 */
+  timers?: RunnerTimers;
   /** 收尾错误的观察点（如外部先落终态、底账拒绝非法边）：不改变任务事实，只如实上报。 */
   onError?: (failure: { taskId: string; error: unknown }) => void;
 }
@@ -257,6 +289,11 @@ export interface PumpSummary {
   started: readonly string[];
   /** 因许可拒绝而停止派发时的拒绝原因（任务留在 queued，等容量恢复/下次触发）。 */
   rejection?: ResourceRejectionReason;
+  /**
+   * 本次按 waiting_since + waitUserTimeoutMs 判为 timed_out 的任务。
+   * 仅在启用到期消费者时出现（未注入 waitUserTimeoutMs 时字段整个缺省，返回形状不变）。
+   */
+  timedOutWaiting?: readonly string[];
 }
 
 export type CancelOutcome =
@@ -315,6 +352,29 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   const leaseMs = options.leaseMs ?? 300_000;
   const now = options.now ?? ((): Date => new Date());
   const onError = options.onError;
+  /**
+   * waiting_user 到期消费者：未配阈值（或底账无 list 面）时完全不建定时器/不扫底账，
+   * 直用 runner 的调用方行为零变化。装配方注入配置值（缺省 24h）才启用。
+   */
+  const waitUserTimeoutMs = options.waitUserTimeoutMs ?? 0;
+  const waitingConsumerEnabled = waitUserTimeoutMs > 0 && registry.list !== undefined;
+  const timers: RunnerTimers | undefined = waitingConsumerEnabled
+    ? options.timers ?? {
+      set(callback, delayMs) {
+        const handle = setTimeout(callback, delayMs);
+        const unref = (handle as { unref?: () => void }).unref;
+        if (typeof unref === 'function') unref.call(handle);
+        return handle;
+      },
+      clear(handle) {
+        clearTimeout(handle as ReturnType<typeof setTimeout>);
+      },
+    }
+    : undefined;
+  /** setTimeout 的最大延迟（超过会被 Node 折成 1ms：先钳到上限，下一轮重算）。 */
+  const MAX_TIMER_DELAY_MS = 2_147_483_647;
+  let waitingTimer: unknown;
+  let waitingTimerArmed = false;
 
   /** 本进程在飞执行回合：taskId → abort 控制器 / 落定链。不是队列（队列=底账 queued 行）。 */
   const controllers = new Map<string, AbortController>();
@@ -344,8 +404,78 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     });
   }
 
+  interface WaitingScan {
+    timedOut: string[];
+    nextDue?: number;
+  }
+
+  /** waiting_user 行的到期时刻（waiting_since + 阈值）；非等待行/坏时间戳不参与判定。 */
+  function waitingDeadlineOf(task: TaskRecordView): number | undefined {
+    if (task.status !== 'waiting_user' || task.waitingSince === undefined) return undefined;
+    const since = Date.parse(task.waitingSince);
+    return Number.isFinite(since) ? since + waitUserTimeoutMs : undefined;
+  }
+
+  function isTransitionRace(error: unknown): boolean {
+    return error instanceof Error && error.name === 'TaskTransitionError';
+  }
+
+  /**
+   * 单趟扫描持久化底账：到期行走既有 timeout(...,'waiting_user') 边，返回下一个到期时刻。
+   * 只读 list + 状态方法族（不直接写状态）；并发下任务已被答复/取消时吞掉非法边（不是本进程
+   * 的目标），不推翻已发生的事实。
+   */
+  function scanWaiting(nowMs: number): WaitingScan {
+    const timedOut: string[] = [];
+    let nextDue: number | undefined;
+    for (const task of registry.list!()) {
+      const due = waitingDeadlineOf(task);
+      if (due === undefined) continue;
+      if (due <= nowMs) {
+        try {
+          registry.timeout(task.taskId, 'waiting_user');
+          timedOut.push(task.taskId);
+        } catch (error) {
+          if (isTransitionRace(error)) continue;
+          throw error;
+        }
+      } else if (nextDue === undefined || due < nextDue) {
+        nextDue = due;
+      }
+    }
+    return { timedOut, ...(nextDue === undefined ? {} : { nextDue }) };
+  }
+
+  function clearWaitingTimer(): void {
+    if (!waitingTimerArmed) return;
+    waitingTimerArmed = false;
+    timers!.clear(waitingTimer);
+    waitingTimer = undefined;
+  }
+
+  /** 重武装唯一定时器：无等待行即不建；有则只保留下一个到期点。 */
+  function armWaitingTimer(nextDue: number | undefined): void {
+    if (!waitingConsumerEnabled) return;
+    clearWaitingTimer();
+    if (nextDue === undefined) return;
+    const delayMs = Math.min(Math.max(0, nextDue - now().getTime()), MAX_TIMER_DELAY_MS);
+    waitingTimer = timers!.set(() => {
+      waitingTimerArmed = false;
+      waitingTimer = undefined;
+      try {
+        pump();
+      } catch (error) {
+        // 定时器回调里的异常不能变成进程级未捕获错误（如收尾阶段底账已关闭）：
+        // 只如实上报观察点，不改变任务事实（下一趟 pump 会重新判定）。
+        report('waiting_user_timeout', error);
+      }
+    }, delayMs);
+    waitingTimerArmed = true;
+  }
+
   function pump(): PumpSummary {
     const recovered = registry.expireLeases(now().toISOString()).map((task) => task.taskId);
+    const waiting = waitingConsumerEnabled ? scanWaiting(now().getTime()) : undefined;
     const started: string[] = [];
     let rejection: ResourceRejectionReason | undefined;
     for (;;) {
@@ -371,7 +501,13 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       started.push(claimed.taskId);
       startRound(claimed, acquired);
     }
-    return { recovered, started, ...(rejection === undefined ? {} : { rejection }) };
+    if (waiting !== undefined) armWaitingTimer(waiting.nextDue);
+    return {
+      recovered,
+      started,
+      ...(rejection === undefined ? {} : { rejection }),
+      ...(waiting === undefined ? {} : { timedOutWaiting: waiting.timedOut }),
+    };
   }
 
   function startRound(task: TaskRecordView, permit: ResourcePermit, answer?: string): void {

@@ -144,14 +144,16 @@ node --env-file=.env --import tsx scripts/eval/long-session/wave1-runner.ts \
    判据口径问题（不是产品缺陷），是否保留待 owner 裁定。
 8. **probe 轮只取关键轮**：LS6 压缩后复查取 N2-B/N4/N5-B；N1/N3/N6 不在压缩后复查范围内。
 9. **样本量**：Wave1 形状是每轨 3 会话，任何读数都不构成可靠性结论（预注册 §2.1）。
-10. **`waiting_user` 到期边界用例不可达（2026-11-18 owner 追问后登记，未伪造）**：目标用例是
-    「`runtime.waitUserTimeoutMs=2000` → 执行层 `needs_input` 落 `waiting_user` → 等 3000ms 必须
-    `timed_out`」。当前两处都不具备：
-    - **超时无消费者**：`waitUserTimeoutMs` 只在 `packages/agent/src/resource-policy.ts:153/186/310`
-      定义与校验；状态机允许 `waiting_user→timed_out`（`packages/agent/src/task-registry.ts:249`），
-      但全仓只有 `task-runner.ts:486` 调 `registry.timeout(taskId,'execution')`，**没有任何定时器
-      调 `timeout(...,'waiting_user')`**（P5-T06 登记为 blocked-by-P2，见
-      `docs/architecture/contract.md` §P5-T06）。
+10. **`waiting_user` 到期边界用例（2026-11-18 登记「不可达」，同日 W 切片补齐产品侧消费者）**：
+    目标用例是「`runtime.waitUserTimeoutMs=2000` → 执行层 `needs_input` 落 `waiting_user` → 等
+    3000ms 必须 `timed_out`」。
+    - **超时消费者 → 已补（2026-11-18）**：`TaskRunner` 在注入 `waitUserTimeoutMs` 后持有**一个**
+      有界定时器轮；每趟 pump（含启动后第一趟）按底账 `waiting_since + waitUserTimeoutMs <= now`
+      扫 `waiting_user` 行，到期走既有 `timeout(taskId,'waiting_user')` → `timed_out +
+      reason=timeout`，事实钩子照常产出既有 `timed_out` 通知。配置值由装配层从
+      `resolveRuntimeConfig()` 注入（配置缺省 24h）；runner 直用缺省关闭（零行为变化）。
+      确定性测试见 `packages/agent/waiting-user-timeout.test.ts`（真 SQLite 底账 + 假时钟/假定时器
+      + 假 sink，含重启按 `waiting_since` 判定）。
     - **夹具造不出 `needs_input` → 已支持（2026-11-18）**：集合绑定现在可以声明
       `requires: ["window"]`（现行例子：`scripts/eval/fixtures/scenarios/dummy-finance/scenario.json`
       的 `receivables-open`）。调用未带该输入时 `dummy.query` 返回 `status:"needs_input"` +
@@ -162,8 +164,8 @@ node --env-file=.env --import tsx scripts/eval/long-session/wave1-runner.ts \
       维度集合的形态同样支持（场景里配 `requires:["customer"]`，`--where customer=<值>`
       或 `--window <值>` 别名都可补齐）。既有「候选歧义」响应（`ambiguous`）保持不变，
       两条路互不复用。真实装配链冒烟见 `scripts/eval/smoke/slow-faults.test.ts`。
-    因此本轮**仍不新增 N7 轮次**：夹具侧已经具备，缺的只剩「`waiting_user` 到期没有消费者」
-    这一产品侧能力（上一条）；待 P2/P5 接线超时计时后再补该用例。
+    - 本轮（Wave1 复盘）**仍不新增 N7 轮次**：产品侧消费者与夹具侧均已具备，缺的是 eval 侧
+      新增该轮次与判据（归后续 eval 切片，未在本切片伪造读数）。
 11. **N3 的真空档为何是 1500ms 而非 30s**：产品里 30s 没有任何会到期的状态（`waitUserTimeoutMs`
     缺省 24h、worker lease 600s、附件追问 30s 与本场景无关），真等 30s 测不到额外东西、只拖慢
     每次会话与冒烟；N3 的目标只是「回合之间真的断开、状态保持」，故按 owner 修正用 1500ms。
