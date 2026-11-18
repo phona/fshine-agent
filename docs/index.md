@@ -10,7 +10,7 @@
 - **受理回执 / 渠道回执**：前者是任务被受理时的回话（`architecture/tasks.md`），后者是文件到账时的「已收到 N 个文件」（`architecture/channels.md`）——两类不同事件，不要混用"回执"。
 - **会话转录 / 会话日志**：同一对象的两种叫法，统一指 Pi 的 `SessionManager` 落盘事实（`architecture/sessions.md`）。
 
-## architecture（现行架构与契约，9 篇）
+## architecture（现行架构与契约，10 篇）
 
 宿主与执行层的职责边界，以及任务 / 会话 / 渠道 / 文件四条运行生命周期——判断「该谁做、边界在哪」先读这一组。
 
@@ -19,6 +19,7 @@
 - `architecture/sessions.md` — 会话转录与压缩：Pi 所有权、`.runtime/sessions`、压缩边界（retention 见 issue #67）。
 - `architecture/channels.md` — 渠道三档（offline/shadow/live）、入站附件时序、silent 三档、出站六路。
 - `architecture/files.md` — `fileId` 模型、`run_js`、per-run 目录、产物登记与保留期。
+- `architecture/permissions.md` — 权限三层（渠道身份 / 宿主粗粒度求交 / 执行层实体授权）、角色三档（viewer/operator/admin）、细粒度未实现。
 - `product/event-catalog.md` — 结构化事件字典（以 `23ae585` 为基线列 29 个；`attachment_nudge_*`、`task_result_delivery_*`、`recalc_*`、`run_dir_cleanup_startup*` 等新增事件以 `architecture/channels.md` 的事件表与代码为准）。
 - `history/r4-joint-interfaces.md` — R4 联合接口约定 v1（P2/P5/P6/P4 冻结面，代码仍引用）。
 - `product/p2a-task-contract.md` — P2a Task Registry 契约核心冻结记录（状态机/取消/waiting）。
