@@ -1,6 +1,6 @@
 # 文件面：fileId、run_js、产物登记、保留期与回传
 
-> 状态：现行。2026-11-18 核对（代码与本文冲突时以代码为准）；fileId 模型、`run_js`、per-run 目录、回程桥与 recalc 门均已实施；保留期只清 run 目录，`file_refs` 行与 `files/` 字节没有回收路径。
+> 状态：现行。2026-11-18 核对（代码与本文冲突时以代码为准）；fileId 模型、`run_js`、per-run 目录、回程桥与 recalc 门均已实施；保留期清扫 run 目录并回收过期 `file_refs` 字节（只删字节、保留行）。
 > 最后核对：2026-11-18（`path:line` 以现行代码为准；实施过程与被删来源在 git 历史）。
 > 上游指针：`packages/agent/src/file-store.ts`（文件事实与字节落点）、`packages/agent/src/run-js-executor.ts`（受限执行）、`packages/agent/src/execution-runtime.ts`（工具面/清单/回程接线）、`packages/agent/src/task-file-bridge.ts`（执行层文件桥）。
 
@@ -10,9 +10,9 @@
 
 文件事实只有一张表 `file_refs`：`file_id / principal_id / session_id / name / sha256 / bytes / activated_at / created_at / task_id`，**没有 path 列**（`packages/core/src/task-store.ts:360-370`；表注释 `:193-195` 明说路径不可由 name 拼出）；全仓无第二张文件表。字节落点是派生值：`sessionDirOf` = `<workspace>/<principalHash16>/<sessionHash16>`（`packages/agent/src/file-store.ts:117`），`fileStoragePathOf` = `…/files/<fileId><safeExt>`（`:127`）；扩展名只取 `safeExtensionOf(name)`（`:109`），原名不参与拼路径；`fileId` 形状 `file_<32hex>`，本侧生成（`:326-328`），`runId` 拼路径前过形状守卫（`:114-122`）。
 
-模型可见面只有 `fileId / name / bytes`（`TurnFileRef`，`packages/agent/src/execution-runtime.ts:630`）外加脚本内相对路径 `in/<fileId><safeExt>`：Main 清单 `renderFileManifest`（`:656`）、Worker 清单 `renderWorkerFileManifest`（`:722`）；清单与 `run_js` 参数不含宿主绝对路径。用户可见出口经 `stripServerPaths`（`:2102`；`packages/agent/src/server-paths.ts:34-40`），剥空且有文件 → 「文件已生成（见附件）」（`:631`、`:2107`）。
+模型可见面只有 `fileId / name / bytes`（`TurnFileRef`，`packages/agent/src/execution-runtime.ts:654`）外加脚本内相对路径 `in/<fileId><safeExt>`：Main 清单 `renderFileManifest`（`:700`）、Worker 清单 `renderWorkerFileManifest`（`:766`）；清单与 `run_js` 参数不含宿主绝对路径。Main 清单每行另带「YYYY-MM-DD HH:mm 收到」：时间取 `file_refs.created_at`（登记/真收到时刻，不是 `activated_at`——纯附件场景的激活时刻是后续文字消息到达时刻；`listActiveFiles` 投影 `createdAt`，`packages/agent/src/file-store.ts:924-942`；渲染 `packages/agent/src/execution-runtime.ts:668-691`；同内容重发复用旧行时保留**首次登记**时间，可读期起点另按 `activated_at` 刷新），入站附件事实另取渠道消息的 `receivedAt`（`apps/server/attachment-facts.ts:19`、`:48-57`）。用户可见出口经 `stripServerPaths`（调用 `:2203`；`packages/agent/src/server-paths.ts:77`），剥空且有文件 → 「文件已生成（见附件）」（`packages/agent/src/execution-runtime.ts:676`、`:2208`）。
 
-`run_js` 的 `inputs` 只收 fileId 数组（schema `packages/agent/src/execution-runtime.ts:227-240`）；scope/激活/TTL/字节的权威校验在 `fileStore.materializeInputs`（`packages/agent/src/file-store.ts:575-593`），越权/不存在/pending/过期/字节缺失收成同一句 `FILE_REF_UNAVAILABLE`（`:468-478`、`:585`），机械 reason 只进日志（防存在性 oracle）。入站附件先 pending（`activated_at IS NULL`），带文字的消息激活本会话 TTL 窗口内全部 pending（`:797-801`；接线 `apps/server/server.ts:477`、`:748`）。守卫：`packages/agent/file-store-layout.test.ts:36`（同输入同路径、name 不进路径）。
+`run_js` 的 `inputs` 只收 fileId 数组（schema `packages/agent/src/execution-runtime.ts:227-240`）；scope/激活/TTL/字节的权威校验在 `fileStore.materializeInputs`（`packages/agent/src/file-store.ts:680-695`），越权/不存在/pending/过期/字节缺失收成同一句 `FILE_REF_UNAVAILABLE`（`:507-509`、`:689`），机械 reason 只进日志（防存在性 oracle）。入站附件先 pending（`activated_at IS NULL`），带文字的消息激活本会话 TTL 窗口内全部 pending（`:919-923`；接线 `apps/server/server.ts:479-483`、`:751-753`）。守卫：`packages/agent/file-store-layout.test.ts:36`（同输入同路径、name 不进路径）。
 
 ## 2. run_js：本地文件只有一个工具
 
@@ -28,13 +28,13 @@
 
 无论 exitCode 都扫 `out/`（`packages/agent/src/run-js-executor.ts:418` → `fileStore.registerOutputsFromOut`），超时/失败前写下的产物照样登记交付（`scripts/eval/cap01/r2c-artifacts.ts:94`）。走查规则：symlink 不收不递归；候选 realpath 必须仍在 runDir 真实路径内；候选按 relPath 全排序（`packages/agent/src/file-store.ts:356-393`），因此 `count_limit` 截尾可复现。fd 级复检：`O_NOFOLLOW` 打开、必须普通文件、`nlink === 1`、uid 属本进程、size ≤ 上限（`:659-686`）；拒收记机械 reason（`:172-179`）。
 
-登记 = copy-on-register：同一 fd 流式读 → sha256 + 落到新 fileId 存储位；超限删半成品、不登记半份（`:402-431`）。Main 面每次登记新 fileId（`:686-694`）；任务面按 **(sha256, name)** 在任务产物池去重、复用旧 fileId（`:484-488`、`:718-727`——只按 sha 复用会把同字节不同名文件并成一份）。登记事实 `{fileId,name,bytes}` 进 `TurnResult.files`（`packages/agent/src/execution-runtime.ts:630`）；字节由投递面按 fileId 到派生位现读（`apps/server/server.ts:532`），runtime 不持路径。守卫：`packages/agent/run-js-executor.test.ts:126`、`:302`、`:365`；`packages/agent/runtime-worker-run-js.test.ts:391`。
+登记 = copy-on-register：同一 fd 流式读 → sha256 + 落到新 fileId 存储位；超限删半成品、不登记半份（`:468-493`）。Main 的 `run_js` 产物每次登记新 fileId（`:790-793`）；**入站附件同 (principal, session, sha256) 且仍可读 → 复用同一 fileId**：name 取本次、`activated_at` 刷新为本次收到时刻、字节与行都不新增（复用判据 `:529-545`、复用动作 `:554-593`、入站入口 `:885-909`）。任务面按 **(sha256, name)** 在任务产物池去重、复用旧 fileId（`:517-524`、`:628-629`——只按 sha 复用会把同字节不同名文件并成一份）。登记事实 `{fileId,name,bytes}` 进 `TurnResult.files`（`packages/agent/src/execution-runtime.ts:654`）；字节由投递面按 fileId 到派生位现读（`apps/server/server.ts:537`），runtime 不持路径。守卫：`packages/agent/run-js-executor.test.ts:126`、`:302`、`:365`；`packages/agent/runtime-worker-run-js.test.ts:391`；`packages/agent/file-store-dedupe-ttl.test.ts:73`、`:282`。
 
-## 5. 保留期：可读性 TTL 与磁盘保留是两层
+## 5. 保留期：可读性 TTL、过期字节回收与磁盘保留
 
-**可读性 TTL = 24h**：`activated_at` 既可读起点也是 TTL 起点，过期即 `FILE_REF_UNAVAILABLE`；写死 `FILE_REF_TTL_MS`（`packages/agent/src/file-store.ts:310`、`:476`），不是配置键。**磁盘保留期缺省 30 天**：`runtime.fileRetentionDays`（`packages/agent/src/resource-policy.ts:155`、`:189`），`fileRetentionDecision` 只做纯判定，`0` = 永不清理（`:239-251`）。执行器只删自己形状的 run 目录 `runs/run_<32hex>`，逐层 `lstat` 不解软链，删除前复核 + 根内包含判定；**不删 `file_refs` 行、不碰 `files/` 登记字节**（`packages/agent/src/run-dir-cleanup.ts:10-22`、`:39`）。
+**可读性 TTL = `runtime.fileRefTtlDays`**（缺省 7 天、最小 1 天；0/负数/小数 fail-fast）：`activated_at` 既可读起点也是 TTL 起点，过期即 `FILE_REF_UNAVAILABLE`；ms 派生唯一位置是 `fileRefTtlMsOf`（`packages/agent/src/resource-policy.ts:229-231`），file-store 只收装配层注入的 `ttlMs`（`packages/agent/src/file-store.ts:358-364`），pending 行的激活窗口沿用同一值。**磁盘保留期缺省 30 天**：`runtime.fileRetentionDays`（`packages/agent/src/resource-policy.ts:160-161`、`:198`），`fileRetentionDecision` 只做纯判定，`0` = 永不清理（`:256`）；run 目录执行器只删自己形状的 `runs/run_<32hex>`，逐层 `lstat` 不解软链（`packages/agent/src/run-dir-cleanup.ts:7-19`、`:39`）。
 
-入口只有两个：显式 `npm run cleanup:runs`（`package.json:14`；`scripts/cleanup-runs.ts`），或 server 启动时 `runtime.fileRetentionSweepOnStart=true`（缺省 false，`packages/agent/src/resource-policy.ts:191`；接线 `apps/server/main.ts:74`）。**现行行为（别读成有 GC）**：`file_refs` API 只有 `insertFileRef`/`listFileRefs`/`activatePendingFileRefs`（`packages/core/src/task-store.ts:283-301`），全仓无 `DELETE FROM file_refs`——过期只剥夺可读性，行与 `files/` 字节不回收，30 天到期删的只是 run 目录。守卫：`packages/agent/file-retention-policy.test.ts:48`、`scripts/cleanup-runs.test.ts:24`。
+**过期字节回收 = 只删字节、保留行**：`cleanupExpiredFileRefBytes`（`packages/agent/src/file-ref-cleanup.ts:187-194`）按 `runtime.fileRefTtlDays`（`:192-193`）逐行派生字节路径；激活行看 `activated_at`、pending 看 `created_at`，过期才删（`:228-233`），软链/非普通文件/根外一律跳过（`:211-218`、`:223-225`、`:235-248`），删除前再 lstat 复核（`:272-292`）；`file_refs` 行保留做审计，读取与去重都再查字节存在。入口仍是两个：显式 `npm run cleanup:runs`（`package.json:14`；`scripts/cleanup-runs.ts:160-175`），或 server 启动时 `runtime.fileRetentionSweepOnStart=true`（缺省 false，`packages/agent/src/resource-policy.ts:199-200`；接线 `apps/server/main.ts:73`、`apps/server/startup-sweep.ts:64-77`）。**行不删**：`file_refs` API 有 `insertFileRef`/`getFileRef`/`listFileRefs`/`listAllFileRefs`/`updateFileRef`/`activatePendingFileRefs`（`packages/core/src/task-store.ts:282-323`），但全仓无 `DELETE FROM file_refs`——过期行留着但不可读，30 天到期删的只是 run 目录。守卫：`packages/agent/file-retention-policy.test.ts:48`、`packages/agent/file-ref-cleanup.test.ts:343-344`、`scripts/cleanup-runs.test.ts:24`。
 
 ## 6. 执行层回传文件：唯一通道是「宿主分配路径 + 扫描」
 

@@ -54,6 +54,7 @@ describe('resolveRuntimeConfig：缺省 = 前台并发 4 + 排队 16，非法 fa
       maxOperationsPerTurn: 5,
       taskBudget: null,
       waitUserTimeoutMs: 86_400_000,
+      fileRefTtlDays: 7,
       fileRetentionDays: 30,
       fileRetentionSweepOnStart: false,
       attachmentNudgeAfterMs: 30_000,
@@ -83,6 +84,19 @@ describe('resolveRuntimeConfig：缺省 = 前台并发 4 + 排队 16，非法 fa
         () => resolveRuntimeConfig({ attachmentNudgeAfterMs: bad } as unknown as RuntimeConfig),
         `attachmentNudgeAfterMs=${String(bad)}`,
       ).toThrowError(/runtime\.attachmentNudgeAfterMs/);
+    }
+  });
+
+  it('fileRefTtlDays：缺省 7；显式值保留；0/负数/小数 fail-fast（最小 1）', () => {
+    expect(resolveRuntimeConfig().fileRefTtlDays).toBe(7);
+    expect(resolveRuntimeConfig({ fileRefTtlDays: 1 }).fileRefTtlDays).toBe(1);
+    expect(resolveRuntimeConfig({ fileRefTtlDays: 30 }).fileRefTtlDays).toBe(30);
+
+    for (const bad of [0, -1, 1.5, '7']) {
+      expect(
+        () => resolveRuntimeConfig({ fileRefTtlDays: bad } as unknown as RuntimeConfig),
+        `fileRefTtlDays=${String(bad)}`,
+      ).toThrowError(/runtime\.fileRefTtlDays/);
     }
   });
 

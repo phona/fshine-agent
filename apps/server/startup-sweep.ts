@@ -13,7 +13,14 @@
  * 配置来源：只读 `resolveRuntimeConfig` 的解析值（缺省与校验的唯一出处），不在这里
  * 重读 `config.runtime.*`（单一配置源守卫 `resource-policy-single-source.test.ts` 覆盖）。
  */
+import { existsSync } from 'node:fs';
+import { openTaskStore } from '@fshine/core';
 import type { ResolvedRuntimeConfig } from '../../packages/agent/src/resource-policy';
+import {
+  cleanupExpiredFileRefBytes,
+  type CleanupFileRefBytesInput,
+  type FileRefCleanupResult,
+} from '../../packages/agent/src/file-ref-cleanup';
 import {
   cleanupExpiredRunDirs,
   type CleanupRunDirsInput,
@@ -21,7 +28,7 @@ import {
 } from '../../packages/agent/src/run-dir-cleanup';
 
 /** 跳过原因分布：只统计 `skipped_*`（删除失败另计 failed，不算跳过）。 */
-function skipReasonCounts(events: RunDirCleanupResult['events']): Record<string, number> {
+function skipReasonCounts(events: readonly { readonly action: string }[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const event of events) {
     if (!event.action.startsWith('skipped_')) continue;
@@ -31,12 +38,19 @@ function skipReasonCounts(events: RunDirCleanupResult['events']): Record<string,
 }
 
 export interface StartupSweepInput {
-  /** `resolveRuntimeConfig` 的解析值（开关与保留期的唯一来源）。 */
+  /** `resolveRuntimeConfig` 的解析值（开关、保留期与文件引用 TTL 的唯一来源）。 */
   readonly config: ResolvedRuntimeConfig;
   /** 文件区 workspace 根（`workspaceRootOf(dbPath)`，与 cleanup:runs 同一布局）。 */
   readonly workspaceRoot: string;
-  /** 执行器注入（测试用；缺省 = 真实 `cleanupExpiredRunDirs`）。 */
+  /**
+   * 任务底账路径（可选）：给出且库存在时，同一轮清扫顺带回收**过期 file_refs 字节**
+   * （只读打开底账、只删字节不删行）。缺省 = 不做文件引用回收（零行为）。
+   */
+  readonly dbPath?: string;
+  /** run 目录执行器注入（测试用；缺省 = 真实 `cleanupExpiredRunDirs`）。 */
   readonly sweep?: (input: CleanupRunDirsInput) => RunDirCleanupResult;
+  /** 文件引用字节回收注入（测试用；缺省 = 真实 `cleanupExpiredFileRefBytes`）。 */
+  readonly fileRefSweep?: (input: CleanupFileRefBytesInput) => FileRefCleanupResult;
   /** 日志注入（测试用；缺省 = 结构化 JSON 一行到 stdout）。 */
   readonly log?: (event: Record<string, unknown>) => void;
 }
@@ -46,14 +60,54 @@ function errorText(error: unknown): string {
 }
 
 /**
- * 开关开启时执行一次 run 目录保留期清扫并记录启动日志；关闭时立即返回（零行为）。
- * 只返回结果供测试/调用方核对；抛错已在本函数内收口，绝不向上抛。
+ * 同一轮启动清扫里的**文件引用过期字节回收**：底账只读打开（不建库、不写库、不删行），
+ * 按 `runtime.fileRefTtlDays` 派生 TTL 回收字节。库不存在 = 没有行可回收（静默跳过）；
+ * 打开/回收抛错只记观测事件，绝不向上抛。
+ */
+function sweepExpiredFileRefBytesOnStart(input: StartupSweepInput, log: (event: Record<string, unknown>) => void): void {
+  if (input.dbPath === undefined || !existsSync(input.dbPath)) return;
+  let store: ReturnType<typeof openTaskStore> | undefined;
+  try {
+    store = openTaskStore(input.dbPath, { readOnly: true });
+    const result = (input.fileRefSweep ?? cleanupExpiredFileRefBytes)({
+      store,
+      workspaceRoot: input.workspaceRoot,
+      config: input.config,
+      dryRun: false,
+    });
+    log({
+      event: 'file_ref_cleanup_startup',
+      workspaceRoot: input.workspaceRoot,
+      rootMissing: result.rootMissing,
+      scanned: result.summary.scanned,
+      deleted: result.summary.deleted,
+      bytesMissing: result.summary.bytesMissing,
+      kept: result.summary.kept,
+      skipped: result.summary.skipped,
+      failed: result.summary.failed,
+      skipReasons: skipReasonCounts(result.events),
+    });
+  } catch (error) {
+    log({
+      event: 'file_ref_cleanup_startup_failed',
+      workspaceRoot: input.workspaceRoot,
+      reason: errorText(error),
+    });
+  } finally {
+    store?.close();
+  }
+}
+
+/**
+ * 开关开启时执行一次保留期清扫（run 目录 + 过期 file_refs 字节）并记录启动日志；
+ * 关闭时立即返回（零行为）。只返回 run 目录结果供测试/调用方核对；抛错已在本函数内
+ * 收口，绝不向上抛。
  */
 export function sweepExpiredRunDirsOnStart(input: StartupSweepInput): RunDirCleanupResult | undefined {
   if (!input.config.fileRetentionSweepOnStart) return undefined;
   const log = input.log ?? ((event: Record<string, unknown>) => console.log(JSON.stringify(event)));
 
-  let result: RunDirCleanupResult;
+  let result: RunDirCleanupResult | undefined;
   try {
     result = (input.sweep ?? cleanupExpiredRunDirs)({
       workspaceRoot: input.workspaceRoot,
@@ -66,19 +120,22 @@ export function sweepExpiredRunDirsOnStart(input: StartupSweepInput): RunDirClea
       workspaceRoot: input.workspaceRoot,
       reason: errorText(error),
     });
-    return undefined;
   }
 
-  log({
-    event: 'run_dir_cleanup_startup',
-    workspaceRoot: input.workspaceRoot,
-    rootMissing: result.rootMissing,
-    scanned: result.summary.scanned,
-    deleted: result.summary.deleted,
-    kept: result.summary.kept,
-    skipped: result.summary.skipped,
-    failed: result.summary.failed,
-    skipReasons: skipReasonCounts(result.events),
-  });
+  if (result !== undefined) {
+    log({
+      event: 'run_dir_cleanup_startup',
+      workspaceRoot: input.workspaceRoot,
+      rootMissing: result.rootMissing,
+      scanned: result.summary.scanned,
+      deleted: result.summary.deleted,
+      kept: result.summary.kept,
+      skipped: result.summary.skipped,
+      failed: result.summary.failed,
+      skipReasons: skipReasonCounts(result.events),
+    });
+  }
+  // 文件引用字节回收与 run 目录回收同一轮、同一开关：各自独立收口，互不阻断。
+  sweepExpiredFileRefBytesOnStart(input, log);
   return result;
 }

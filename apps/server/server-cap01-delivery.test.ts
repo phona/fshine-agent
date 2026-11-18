@@ -412,7 +412,10 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
       const manifest = capture.injections[1]![0]!;
       const lines = manifest.split('\n');
       expect(lines[0]).toContain('[本会话文件清单]');
-      expect(lines[1]).toMatch(/^- 汇总\.txt（fileId: file_[0-9a-f]{32}，13 字节；脚本内路径：in\/file_[0-9a-f]{32}\.txt）$/);
+      // 2026-11-18 owner：行尾追加收到时间（YYYY-MM-DD HH:mm），字段顺序与 fileId 形态不变。
+      expect(lines[1]).toMatch(
+        /^- 汇总\.txt（fileId: file_[0-9a-f]{32}，13 字节；脚本内路径：in\/file_[0-9a-f]{32}\.txt；\d{4}-\d{2}-\d{2} \d{2}:\d{2} 收到）$/,
+      );
       expect(manifest).not.toContain('summary-bytes'); // 没有文件内容（行数据不进清单）
       expect(manifest).not.toContain('sha256');
       // 宿主路径边界：清单里唯一的斜杠是脚本内路径的 in/ 前缀，无任何宿主绝对/相对路径。

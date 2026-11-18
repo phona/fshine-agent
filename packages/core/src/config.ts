@@ -147,6 +147,8 @@ const RUNTIME_KEYS = [
   'maxDelegationDepth',
   'taskBudget',
   'waitUserTimeoutMs',
+  // 文件引用可读期（天）：缺省 7 住策略层；最小 1（0 非法——不可读判定不能靠关闭 TTL）。
+  'fileRefTtlDays',
   'fileRetentionDays',
   'fileRetentionSweepOnStart',
   'dispatchMode',
@@ -198,6 +200,8 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     ['maxOperationsPerTurn', 1],
     ['maxDelegationDepth', 0],
     ['waitUserTimeoutMs', 1],
+    // 文件引用可读期（天）：最小 1（缺省 7 由策略层提供）；0 = 配置错误，不当作「关闭 TTL」。
+    ['fileRefTtlDays', 1],
     // 0 = 不清理（缺省值 30 由策略层提供）；负数 = 配置错误，不按「非法 = 未配置」回落。
     ['fileRetentionDays', 0],
     // 0 = 关闭主动追问（缺省 30000 由策略层提供）；负数/小数 = 配置错误。

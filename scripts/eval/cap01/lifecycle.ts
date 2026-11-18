@@ -26,10 +26,10 @@
  *      观察（不判）：第 2 回合清单同时列出**两个同名条目**——清单没有版本/时间戳字段，
  *      模型视角下同名两份并存（影响：模型可能引用错份；是否可接受设计稿未写清）。
  *
- *   S3 同内容重传：同一文件名、同字节两条消息。**UNDEFINED**：设计稿（v8 §4）未定义入站
- *      同内容重传是否复用 fileId——任务产物池有 sha256 去重（file-store.ts registerTaskFile，
- *      CAP-01 S2 ⑤），入站登记（registerInboundFile→registerFromFd）没有。只记录当前行为
- *      （是否复用、行数），不做 pass/fail 判定。
+ *   S3 同内容重传：同一文件名、同字节两条消息。**UNDEFINED（判据）**：设计稿（v8 §4）未定义
+ *      入站同内容重传是否复用 fileId；2026-11-18 owner 实现为同 (principal, session, sha256)
+ *      且仍可读 → 复用同一 fileId（name 取本次、TTL 起点刷新）。本场景只按实测记录
+ *      fileId/行数/复用，不做 pass/fail 判定。
  *
  *   S4 一条消息 2 个附件：契约允许多附件（channel.ts attachments 数组），v8 §4 写「当前
  *      企微文件消息一条一个文件」并暂缓 source_message_id/attachment_index。**UNDEFINED**：
@@ -650,24 +650,26 @@ async function runScenarioS3(): Promise<ScenarioOutcome> {
   checks.check('s3-turn2-manifest-consistent-with-rows', manifestTurn2.length === rows.length && manifestTurn2.every((entry) => rows.some((row) => row.fileId === entry.fileId)),
     `第 2 回合清单=${JSON.stringify(manifestTurn2)}；行数=${rows.length}`);
 
+  const distinctFileIds = new Set(fileIds);
   observations.push({
     name: 's3-observation-fileid-reuse',
-    detail: `同内容重传当前行为：登记 fileId=${JSON.stringify(fileIds)}，file_refs 行数=${rows.length}，`
-      + `复用=${reused ? '是（同 fileId）' : '否（每次新 fileId）'}；两份字节都落盘（派生布局各自落点）。`
-      + '对照：任务产物池登记有 sha256 去重（file-store.ts registerTaskFile：同 (scope, taskId, sha256) 复用旧 fileId），'
-      + '入站登记（registerInboundFile→registerFromFd）无去重，恒 newFileId。',
+    detail: `同内容重传实测：登记 fileId=${JSON.stringify(fileIds)}（distinct=${distinctFileIds.size}），`
+      + `file_refs 行数=${rows.length}，复用=${reused ? '是（两次登记同一 fileId）' : '否（每次登记新 fileId）'}。`
+      + '对照：任务产物池登记按 (sha256, name) 去重（file-store.ts:517-524、:628-629）；'
+      + '入站判据为同 (principal, session, sha256) 且行仍可读（file-store.ts:529-545、入口 :885-909）。',
   });
 
   return {
     scenario: 's3',
-    title: '③ 同内容重传 → 记录是否复用 fileId（UNDEFINED）',
+    title: '③ 同内容重传 → 记录 fileId 复用（判据 UNDEFINED）',
     status: checks.allPassed ? 'undefined' : 'fail',
     checks: checks.list,
     observations,
     notes: [],
-    undefinedReason: '设计稿（CAP-01 v8 §4，文档 2026-11-18 删除、git 历史可考）未定义入站同内容重传是否复用 fileId：'
-      + 'file_refs 无 sha 去重键（主键 file_id），任务产物池的去重不覆盖入站面。当前行为=不复用（每次新 fileId、'
-      + '旧行保留）；影响=清单里同名同内容条目按重传次数增长，模型可能引用任一重复份。不发明判据，仅登记。',
+    undefinedReason: '设计稿（CAP-01 v8 §4，文档 2026-11-18 删除、git 历史可考）未定义入站同内容重传的判据；'
+      + `2026-11-18 owner 实现为 sha256 去重。本次实测：登记 fileId=${JSON.stringify(fileIds)}（distinct=${distinctFileIds.size}），`
+      + `file_refs 行数=${rows.length}，复用=${reused ? '是' : '否'}。`
+      + '本场景不发明判据：只按实测记录，不把实现现状标成设计 PASS/FAIL。',
     evidence: {
       replies: handlerCalls,
       logs: harness.logs,

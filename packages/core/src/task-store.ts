@@ -294,6 +294,24 @@ export interface TaskStore {
   /** CAP-01 S0：按 scope 列出（created_at, file_id 升序；量 = 会话文件数，不做分页）。 */
   listFileRefs(scope: { principalId: string; sessionId: string }): FileRefRow[];
   /**
+   * 保留期字节回收：列出全部作用域的文件事实行（created_at, file_id 升序；只读扫描，
+   * 不删行）。ops 入口按行派生字节路径；行本身保留做审计。
+   */
+  listAllFileRefs(): FileRefRow[];
+  /**
+   * 入站内容去重（2026-11-18 owner）：把一行 Main 侧（task_id IS NULL）文件事实的
+   * name 与 activated_at 更新为本次值（复用既有 file_id；sha256/bytes/created_at 不动）。
+   * 身份键固定为 (file_id, principal_id, session_id) 且只命中 Main 侧行——跨作用域/任务
+   * 副本不可能被改写。返回是否命中一行。
+   */
+  updateFileRef(input: {
+    fileId: string;
+    principalId: string;
+    sessionId: string;
+    name: string;
+    activatedAt: number;
+  }): boolean;
+  /**
    * CAP-01 S1：激活 scope 内 TTL 窗口（created_at >= createdAfter）的全部 pending 行
    * （activated_at IS NULL → 置 = activatedAt）；返回激活行数。已激活行与窗口外（过期）
    * pending 不动——过期 pending 保持 pending（孤儿清理归后续 TTL 清扫，本层不删）。
@@ -766,6 +784,17 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   const selectFileRefsScoped = hasFileRefs
     ? db.prepare('SELECT * FROM file_refs WHERE principal_id = ? AND session_id = ? ORDER BY created_at, file_id')
     : undefined;
+  const selectFileRefsAll = hasFileRefs
+    ? db.prepare('SELECT * FROM file_refs ORDER BY created_at, file_id')
+    : undefined;
+  // 复用只允许 Main 侧行（task_id IS NULL）：任务副本/产物绑定任务，不能被入站登记改写。
+  const updateMainFileRefStmt = hasFileRefTaskColumn
+    ? db.prepare(`
+        UPDATE file_refs SET name = @name, activated_at = @activatedAt
+        WHERE file_id = @fileId AND principal_id = @principalId AND session_id = @sessionId
+          AND task_id IS NULL
+      `)
+    : undefined;
   const activatePendingFileRefsStmt = hasFileRefs
     ? db.prepare(`
         UPDATE file_refs SET activated_at = @activatedAt
@@ -1017,6 +1046,22 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     listFileRefs(scope) {
       if (selectFileRefsScoped === undefined) return [];
       return (selectFileRefsScoped.all(scope.principalId, scope.sessionId) as FileRefDbRow[]).map(toFileRef);
+    },
+    listAllFileRefs() {
+      if (selectFileRefsAll === undefined) return [];
+      return (selectFileRefsAll.all() as FileRefDbRow[]).map(toFileRef);
+    },
+    updateFileRef(input) {
+      if (updateMainFileRefStmt === undefined) {
+        throw new Error(hasFileRefs ? missingFileRefTaskColumnError : missingFileRefsError);
+      }
+      return updateMainFileRefStmt.run({
+        fileId: input.fileId,
+        principalId: input.principalId,
+        sessionId: input.sessionId,
+        name: input.name,
+        activatedAt: input.activatedAt,
+      }).changes > 0;
     },
     activatePendingFileRefs(scope, input) {
       if (activatePendingFileRefsStmt === undefined) throw new Error(missingFileRefsError);
