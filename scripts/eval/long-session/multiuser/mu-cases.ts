@@ -17,7 +17,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RuntimeConfig } from '@fshine/contracts';
 import {
-  createMuServer, deliver, incoming, judgeMuCompactions, judgeMuTasks, makeCtx, makeTempDir, readTasks,
+  createMuServer, deliver, groupPrincipalIdOf, incoming, judgeMuCompactions, judgeMuTasks, makeCtx, makeTempDir, readTasks,
   MU_PRINCIPALS, MU_TAGS, MuFakeExecutor, MuPlans, MuRecordingSink, Rendezvous,
   principalIdOf, sessionIdOf, settle, startSilentWecomChannel, wecomTextFrame,
   type MuCaseResult, type MuDeliveryRecord, type MuHardZero, type MuPlanTable, type MuTaskSnapshot,
@@ -33,6 +33,9 @@ export const EVIDENCE_ROOT = path.join(REPO_ROOT, '.runtime', 'long-session', 'm
 // ─────────────────────────────────────────────────────────────────────────────
 
 function ownerOf(plans: MuPlanTable, text: string): string | null {
+  // 应然主体（群聊回合 = 群主体）；未登记 principal 的老用例仍按 `wecom:<owner>`（逐字节旧行为）。
+  const principal = plans.principalOfText.get(text);
+  if (principal !== undefined) return principal;
   const owner = plans.ownerOfText.get(text);
   return owner === undefined ? null : principalIdOf(owner);
 }
@@ -447,10 +450,10 @@ function recordsHaveTag(records: readonly { userText: string; messages: readonly
 interface Mu8Layer { readonly hits: MuHardZero[]; readonly records: MuDeliveryRecord[]; readonly evidence: Record<string, unknown>; readonly notes: string; }
 
 /**
- * 第一段·会话/任务层：走 `createMuServer` 真实交互路径。同一 principal `wecom:mu-alice` 下
- * 私聊（conversationId=mu-alice → sessionId=wecom:mu-alice）与群聊（conversationId=group-g1 →
- * sessionId=wecom:group-g1）。断言：群**不继承**私聊的任务/授权/历史（群首查 #1 → 确定性拒绝），
- * 群 #1 只解析到群自己的任务，私聊 #1 不对群可见且无内容泄漏。
+ * 第一段·会话/任务层：走 `createMuServer` 真实交互路径。**群 = 独立主体**（owner 2026-11-18）：
+ * 私聊 principal = `wecom:mu-alice`（sessionId=wecom:mu-alice），群聊 principal =
+ * `wecom:group:group-g1`（sessionId=wecom:group-g1）。断言：群**不继承**私聊的任务/授权/历史
+ * （群首查 #1 → 确定性拒绝），群 #1 只解析到群自己的任务，私聊 #1 不对群可见且无内容泄漏。
  */
 async function mu8SessionLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
   const hits: MuHardZero[] = [];
@@ -463,9 +466,10 @@ async function mu8SessionLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
   const groupQuerySecond = `${MU8_GROUP_TAG} 查群任务 #2`;
   plans.delegate('mu-alice', privDelegate, { reply: '私聊已受理。', operation: 'dummy.query', args: { '--collection': 'MU8-PRIV' }, summary: '私聊完成。' });
   plans.turn('mu-alice', privQuery, { calls: [{ tool: 'task_status', args: { ref: '#1' } }], reply: '这是私聊自己的任务。' });
-  plans.turn('mu-alice', groupQueryFirst, { calls: [{ tool: 'task_status', args: { ref: '#1' } }], reply: '群里没有这个任务。' });
-  plans.delegate('mu-alice', groupDelegate, { reply: '群聊已受理。', operation: 'dummy.query', args: { '--collection': 'MU8-GROUP' }, summary: '群聊完成。' });
-  plans.turn('mu-alice', groupQuerySecond, { calls: [{ tool: 'task_status', args: { ref: '#2' } }], reply: '这是群聊自己的任务。' });
+  // 群 = 独立主体（owner 2026-11-18）：群回合的应然主体是 `wecom:group:group-g1`，不是发言人。
+  plans.turn('mu-alice', groupQueryFirst, { calls: [{ tool: 'task_status', args: { ref: '#1' } }], reply: '群里没有这个任务。', principal: groupPrincipalIdOf('group-g1') });
+  plans.delegate('mu-alice', groupDelegate, { reply: '群聊已受理。', operation: 'dummy.query', args: { '--collection': 'MU8-GROUP' }, summary: '群聊完成。', principal: groupPrincipalIdOf('group-g1') });
+  plans.turn('mu-alice', groupQuerySecond, { calls: [{ tool: 'task_status', args: { ref: '#2' } }], reply: '这是群聊自己的任务。', principal: groupPrincipalIdOf('group-g1') });
 
   const ctx = makeCtx(plans.table(), null);
   // background 派发：任务工具（task_status 等）在 Main 工具面可用（与 MU-5 同源）。
@@ -485,13 +489,15 @@ async function mu8SessionLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
 
     const tasks = readTasks(handle.dbPath);
     const privTask = tasks.find((task) => task.principalId === principalIdOf('mu-alice') && task.sessionId === sessionIdOf('mu-alice'));
-    const groupTask = tasks.find((task) => task.principalId === principalIdOf('mu-alice') && task.sessionId === sessionIdOf('group-g1'));
+    const groupTask = tasks.find((task) => task.principalId === groupPrincipalIdOf('group-g1') && task.sessionId === sessionIdOf('group-g1'));
 
-    // ① 两会话 Session 不同、任务分属各自 sessionId、taskId 不同（同 principal）。
+    // ① 主体不同（人 vs 群）+ Session 不同 + 任务各归其主体（群任务不落个人名下）。
     const sessionsDistinct = privTask !== undefined && groupTask !== undefined
       && privTask.sessionId === sessionIdOf('mu-alice') && groupTask.sessionId === sessionIdOf('group-g1')
       && privTask.sessionId !== groupTask.sessionId && privTask.taskId !== groupTask.taskId
-      && privTask.principalId === groupTask.principalId;
+      && privTask.principalId === principalIdOf('mu-alice')
+      && groupTask.principalId === groupPrincipalIdOf('group-g1')
+      && privTask.principalId !== groupTask.principalId;
 
     // ② 转录隔离：群回合主转录不含私聊标记（不继承群外历史）；私聊回合不含群标记。
     const groupRecords = ctx.mainRecords.filter((record) => record.userText.includes(MU8_GROUP_TAG));
@@ -551,7 +557,7 @@ async function mu8SessionLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
 
   return {
     hits, records, evidence,
-    notes: `会话层：同 principal 私聊/群聊各自成账=${String(evidence['sessionsDistinct'])}；群回合继承私聊历史=${String(evidence['inheritedPrivateHistory'])}（应 false）；群首查 #1 确定性拒绝=${String(evidence['groupFirstRejected'])}、泄漏=${String(evidence['groupFirstLeaked'])}（应 true/false）；私/群 #1 各命中己方=${String(evidence['privOwnResolved'])}/${String(evidence['groupOwnResolved'])}。`,
+    notes: `会话层：群 = 独立主体（人/群主体不同 + 会话不同 + 各归其主体）=${String(evidence['sessionsDistinct'])}；群回合继承私聊历史=${String(evidence['inheritedPrivateHistory'])}（应 false）；群首查 #1 确定性拒绝=${String(evidence['groupFirstRejected'])}、泄漏=${String(evidence['groupFirstLeaked'])}（应 true/false）；私/群 #1 各命中己方=${String(evidence['privOwnResolved'])}/${String(evidence['groupOwnResolved'])}。`,
   };
 }
 
@@ -568,7 +574,7 @@ async function mu8DeliveryLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
   const privText = `${MU8_PRIV_TAG} 私聊交办查账`;
   const groupText = `${MU8_GROUP_TAG} 群聊交办查账`;
   plans.delegate('mu-alice', privText, { reply: '私聊已受理。', operation: 'dummy.query', args: { '--collection': 'MU8-PRIV' }, summary: '私聊完成。' });
-  plans.delegate('mu-alice', groupText, { reply: '群聊已受理。', operation: 'dummy.query', args: { '--collection': 'MU8-GROUP' }, summary: '群聊完成。' });
+  plans.delegate('mu-alice', groupText, { reply: '群聊已受理。', operation: 'dummy.query', args: { '--collection': 'MU8-GROUP' }, summary: '群聊完成。', principal: groupPrincipalIdOf('group-g1') });
   const ctx = makeCtx(plans.table(), null);
   const handle = await createMuServer({ dir: tmp.dir, ctx, mode: 'inline', runtime: rt });
   let evidence: Record<string, unknown> = {};
@@ -589,7 +595,8 @@ async function mu8DeliveryLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
       const groupTask = tasks.find((task) => task.sessionId === sessionIdOf('group-g1'));
       const suppressedOk = shadow.mode === 'silent' && shadow.userVisibleSuppressed >= 4;
       const scopedDistinct = privTask !== undefined && groupTask !== undefined
-        && privTask.sessionId !== groupTask.sessionId && privTask.taskId !== groupTask.taskId;
+        && privTask.sessionId !== groupTask.sessionId && privTask.taskId !== groupTask.taskId
+        && privTask.principalId !== groupTask.principalId;
 
       // 判据：真实平台零用户可见投递（若闸门被摘/翻 live，recorder 会记到 ack/终帧 → 红）。
       if (realDeliveries !== 0) hits.push('cross_principal_leak');
@@ -621,7 +628,7 @@ async function mu8DeliveryLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
 
 export async function mu8(rt: RuntimeConfig): Promise<MuCaseResult> {
   const id = 'MU-8';
-  const title = '企微群聊与私聊隔离（同 principal：群不继承私聊任务/授权/历史；群/私投递不串）';
+  const title = '群聊与私聊隔离（群 = 独立主体：群不继承私聊任务/授权/历史；群/私投递不串）';
   const session = await mu8SessionLayer(rt);
   const delivery = await mu8DeliveryLayer(rt);
   const hardZeroHits = [...new Set([...session.hits, ...delivery.hits])];

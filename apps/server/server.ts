@@ -769,12 +769,24 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
 
   const handler: ReplyHandler = async (message) => {
     const channel = (message.channel ?? 'wecom').trim() || 'wecom';
-    // 可信身份取自渠道事实：principal = 发消息的人，session = 聊天窗口（conversationId）。
-    const principalId = `${channel}:${message.wecomUserId}`;
+    // 可信身份取自渠道事实。**群 = 独立主体**（owner 2026-11-18）：
+    //   · 1:1  → principal = `channel:userid`（发消息的人）
+    //   · 群聊 → principal = `channel:group:<conversationId>`（整个群一个主体：同群所有人
+    //     共享记忆/文件/任务，「围绕群文件讨论」天然成立；个人数据不进群，群主体按配置授权）
+    // session 两侧一致 = 聊天窗口（`channel:conversationId`）：同群所有人落在同一份 Pi 会话。
+    // 发言人身份**不是** principal，只作审计（下方 speakerId 进事件）。chatType 缺省按 1:1
+    // 处理——与适配器缺省一致，没有 chatType 事实就不擅自把人并进某个群主体。
+    const isGroupChat = message.chatType === 'group';
+    const principalId = isGroupChat
+      ? `${channel}:group:${message.conversationId}`
+      : `${channel}:${message.wecomUserId}`;
     const sessionId = `${channel}:${message.conversationId}`;
+    // 审计事实：这一回合是谁在群里说的（不改 principal，不加任务列）。
+    const speakerId = message.wecomUserId;
     const principal = deps.config.principals[principalId];
     if (principal === undefined || principal.enabled !== true) {
-      log({ event: 'message_refused', principalId, sessionId, messageId: message.messageId, reason: 'principal_not_enabled' });
+      log({ event: 'message_refused', principalId, sessionId, speakerId, messageId: message.messageId, reason: 'principal_not_enabled' });
+      // 群主体未开通：与未开通个人同一条拒绝路径、同一句话术（不区分主体形态）。
       return `该账号（${principalId}）未开通使用权限，请联系管理员开通。`;
     }
     // 渠道重投（同 messageId）命中：幂等重放既有回执（无任何新副作用）。
@@ -784,7 +796,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       : `${principalId}\u0000${sessionId}\u0000${message.messageId}`;
     const replayed = dedupKey === undefined ? undefined : messageReplies.get(dedupKey);
     if (replayed !== undefined) {
-      log({ event: 'message_duplicate_replayed', principalId, sessionId, messageId: message.messageId });
+      log({ event: 'message_duplicate_replayed', principalId, sessionId, speakerId, messageId: message.messageId });
       return await replayed;
     }
 
@@ -812,6 +824,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         event: 'inbound_attachment_too_large',
         principalId,
         sessionId,
+        speakerId,
         messageId: message.messageId,
         name: oversizedAttachment.filename,
         bytes: oversizedAttachment.bytes,
@@ -841,6 +854,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           event: 'message_attachment_only',
           principalId,
           sessionId,
+          speakerId,
           messageId: message.messageId,
           fileIds: registered.map((file) => file.fileId),
         });
@@ -851,6 +865,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           event: 'inbound_files_registered',
           principalId,
           sessionId,
+          speakerId,
           messageId: message.messageId,
           fileIds: registered.map((file) => file.fileId),
         });
@@ -898,6 +913,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           event: 'inbound_files_registered',
           principalId,
           sessionId,
+          speakerId,
           messageId: message.messageId,
           fileIds: registered.map((file) => file.fileId),
         });
@@ -906,7 +922,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // 本身不带附件，不按 messageId。先激活再开回合：回合内的清单/物化读激活后的事实。
       const activated = fileStore.activatePendingInputs({ scope, now: Date.now() });
       if (activated > 0) {
-        log({ event: 'pending_files_activated', principalId, sessionId, messageId: message.messageId, activated });
+        log({ event: 'pending_files_activated', principalId, sessionId, speakerId, messageId: message.messageId, activated });
       }
       await drainNotifications();
       const session = await sessionFor(principalId, sessionId);
@@ -932,6 +948,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           event: 'execution_retry_allowed',
           principalId,
           sessionId,
+          speakerId,
           operation: allowed.operation,
           object: allowed.object,
           code: allowed.code,
@@ -942,6 +959,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           event: 'execution_retry_blocked',
           principalId,
           sessionId,
+          speakerId,
           operation: blocked.operation,
           object: blocked.object,
           code: blocked.code,
@@ -996,6 +1014,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             event: 'message_done',
             principalId,
             sessionId,
+            speakerId,
             messageId: message.messageId,
             taskIds: [...result.turn.taskIds],
             // B 切片（可观测）：本回合经 execute_operation 发起的执行次数（执行面扩散观测）。
@@ -1014,6 +1033,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
               event: 'message_done_log_write_failed',
               principalId,
               sessionId,
+              speakerId,
               messageId: message.messageId,
               message: logError instanceof Error ? logError.message : String(logError),
             });

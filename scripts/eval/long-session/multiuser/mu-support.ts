@@ -52,6 +52,22 @@ export function principalIdOf(userId: MuPrincipal): string {
   return `wecom:${userId}`;
 }
 
+/**
+ * 群 = 独立主体（owner 2026-11-18）：群聊 principalId = `wecom:group:<conversationId>`，
+ * 同群所有人共用一个 principal（共享记忆/文件/任务）。发言人不是 principal，只作审计。
+ */
+export function groupPrincipalIdOf(conversationId: string): string {
+  return `wecom:group:${conversationId}`;
+}
+
+/** 用例用到的群会话 id（群主体必须在配置里显式开通，见 `muConfig`）。 */
+export const MU_GROUP_IDS = [
+  'group-g1',
+  'group-mu11', 'group-mu11-other',
+  'group-mu12', 'group-mu12-other',
+  'group-mu13', 'group-mu13-other',
+] as const;
+
 /** sessionId = `wecom:<conversationId>`（server 从渠道事实派生）；同 principal 多会话 = 多 conversationId。 */
 export function sessionIdOf(conversationId: string): string {
   return `wecom:${conversationId}`;
@@ -120,6 +136,16 @@ export interface MuPlanTable {
   readonly worker: ReadonlyMap<string, MuWorkerPlan>;
   /** 用户原文 → principalId（识别 owner，用于检漏与记录五要素）。 */
   readonly ownerOfText: ReadonlyMap<string, MuPrincipal>;
+  /**
+   * 用户原文 → 该回合的**应然主体**（默认 `wecom:<owner>`；群聊 = `wecom:group:<群id>`）。
+   * 归属判定读这张表（群 = 独立主体时，任务应归群而不是发言人）。
+   */
+  readonly principalOfText: ReadonlyMap<string, string>;
+}
+
+/** 计划条目可显式声明应然主体（群聊回合）；缺省 `wecom:<owner>`。 */
+interface MuPlanPrincipalOption {
+  readonly principal?: string;
 }
 
 /** 计划表构造器（链式登记，减少用例样板）。 */
@@ -127,10 +153,12 @@ export class MuPlans {
   private readonly main = new Map<string, MuMainPlan>();
   private readonly worker = new Map<string, MuWorkerPlan>();
   private readonly ownerOfText = new Map<string, MuPrincipal>();
+  private readonly principalOfText = new Map<string, string>();
 
-  turn(owner: MuPrincipal, text: string, plan: MuMainPlan): this {
+  turn(owner: MuPrincipal, text: string, plan: MuMainPlan & MuPlanPrincipalOption): this {
     this.main.set(text, plan);
     this.ownerOfText.set(text, owner);
+    this.principalOfText.set(text, plan.principal ?? principalIdOf(owner));
     return this;
   }
 
@@ -140,6 +168,8 @@ export class MuPlans {
     /** 交办输入文件（CAP-01 S2 task_run.inputFiles；fileId 需在本会话清单内）。 */
     inputFiles?: readonly string[];
     rendezvous?: boolean; compact?: { before: number; after: number };
+    /** 应然主体（群聊回合填 `wecom:group:<群id>`）；缺省 `wecom:<owner>`。 */
+    principal?: string;
   }): this {
     this.main.set(text, {
       calls: [{
@@ -152,10 +182,22 @@ export class MuPlans {
     });
     this.worker.set(text, { operation: opts.operation, args: opts.args, summary: opts.summary });
     this.ownerOfText.set(text, owner);
+    this.principalOfText.set(text, opts.principal ?? principalIdOf(owner));
     return this;
   }
 
-  table(): MuPlanTable { return { main: this.main, worker: this.worker, ownerOfText: this.ownerOfText }; }
+  /** 只登记 Worker 计划（自定义 calls 里的 task_run 用；不覆盖 main 回合的登记）。 */
+  workerTask(text: string, opts: { operation: string; args: Readonly<Record<string, unknown>>; summary: string }): this {
+    this.worker.set(text, { operation: opts.operation, args: opts.args, summary: opts.summary });
+    return this;
+  }
+
+  /** 某原文的应然主体（缺省 = 未登记 → undefined）。 */
+  principalFor(text: string): string | undefined { return this.principalOfText.get(text); }
+
+  table(): MuPlanTable {
+    return { main: this.main, worker: this.worker, ownerOfText: this.ownerOfText, principalOfText: this.principalOfText };
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -232,7 +274,8 @@ export function makeMainDriver(ctx: MuCtx, mainSession?: MainSessionLocation): T
       if (plan === undefined) throw new Error(`MU 主回合未配置计划：${JSON.stringify(text)}`);
       const owner = ctx.plans.ownerOfText.get(text);
       if (owner === undefined) throw new Error(`MU 未登记原文 owner：${JSON.stringify(text)}`);
-      const principal = principalIdOf(owner);
+      // 应然主体：群聊回合归群（`wecom:group:<群id>`），1:1 归发言人（`wecom:<userid>`）。
+      const principal = ctx.plans.principalOfText.get(text) ?? principalIdOf(owner);
       const calls: MuCallRecord[] = [];
       // 会话位置在场 = 转录归 Pi：历史取自会话文件，本回合只追加本轮输入。
       const turnMessages: readonly DriverMessage[] = session() === undefined
@@ -381,6 +424,10 @@ function muConfig(mode: 'inline' | 'background', runtime?: RuntimeConfig): AppCo
   const principals: AppConfig['principals'] = {};
   for (const userId of MU_PRINCIPALS) {
     principals[principalIdOf(userId)] = { enabled: true, accountSetScope: 'all', capabilities: ['read'] };
+  }
+  // 群 = 独立主体：群主体必须在配置里**显式开通**（未列出的群沿用既有拒绝路径）。
+  for (const conversationId of MU_GROUP_IDS) {
+    principals[groupPrincipalIdOf(conversationId)] = { enabled: true, accountSetScope: 'all', capabilities: ['read'] };
   }
   return {
     principals,
