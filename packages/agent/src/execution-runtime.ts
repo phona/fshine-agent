@@ -655,6 +655,19 @@ export interface TurnFileRef {
   fileId: string;
   name: string;
   bytes: number;
+  /**
+   * 激活/收到时刻（epoch ms；清单注入面带上，2026-11-18 owner：业务用户靠它判断新旧）。
+   * 交付面（TurnResult.files）可缺省——渠道投递只用 fileId/name/bytes。
+   */
+  activatedAt?: number;
+}
+
+/** 清单里的收到时间格式（本地时区，`YYYY-MM-DD HH:mm`）：业务用户读得懂的机械事实。 */
+function receivedAtTextOf(epochMs: number): string {
+  const date = new Date(epochMs);
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+    + `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 /** 回合末只有文件、正文为空时的宿主话术（v8 §7 出口清理；空文本帧会让渠道一个终帧都不发）。 */
@@ -666,10 +679,14 @@ export const FILES_GENERATED_NOTICE = '文件已生成（见附件）';
  * file-store materializeInputs），只由 fileId + 安全扩展名派生，**不由原始文件名拼路径**。
  * 显示名做机械净化：name 里的路径分隔符与 `..` 序列不进清单文本（name 只用于识别文件；
  * 路径注入面在结构上封死——净化只影响显示，不碰 file_refs 原值）。
+ * 2026-11-18 owner：每行追加「（YYYY-MM-DD HH:mm 收到）」——时间取激活/收到时刻，业务用户
+ * 靠它判断新旧；字段顺序与 fileId 形态不变（模型引用规则不变）。
  */
 function manifestLineOf(file: TurnFileRef): string {
   const displayName = file.name.replaceAll(/(\.\.[/\\]?|[/\\])/g, '_');
-  return `- ${displayName}（fileId: ${file.fileId}，${file.bytes} 字节；脚本内路径：in/${file.fileId}${safeExtensionOf(file.name)}）`;
+  // 收到时间追加在既有字段之后（字段顺序与 fileId 形态不变）；无时刻的交付面引用不渲染。
+  const received = file.activatedAt === undefined ? '' : `；${receivedAtTextOf(file.activatedAt)} 收到`;
+  return `- ${displayName}（fileId: ${file.fileId}，${file.bytes} 字节；脚本内路径：in/${file.fileId}${safeExtensionOf(file.name)}${received}）`;
 }
 
 /**

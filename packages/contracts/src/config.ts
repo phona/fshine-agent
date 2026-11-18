@@ -175,6 +175,12 @@ export interface RuntimeConfig {
   /** waiting_user 等待答复的上限（ms）。缺省 86400000（24h，与 sessionTtl 同量级）。 */
   waitUserTimeoutMs?: number;
   /**
+   * 文件引用（file_refs）的可读期（天）：入站附件激活后的可读 TTL，也是 pending 行的
+   * 激活窗口。缺省 7（2026-11-18 owner 定）；最小 1（0/负数/小数 fail-fast）。过期后
+   * 清单不再列出、引用得 FILE_REF_UNAVAILABLE，字节由保留期清理入口回收（行保留做审计）。
+   */
+  fileRefTtlDays?: number;
+  /**
    * run 目录 / 任务产物的保留期（天）。缺省 30（2026-11-17 owner 定）；0 = 不清理；
    * 正整数 = 超过该天数的目录/产物具备清理资格。本旋钮只提供判定（策略层），实际删除
    * 由 `fileRetentionSweepOnStart` 或显式 `npm run cleanup:runs` 触发。

@@ -151,6 +151,12 @@ export interface ResolvedRuntimeConfig {
   readonly maxDelegationDepth: number;
   readonly taskBudget: TaskBudgetLimits | null;
   readonly waitUserTimeoutMs: number;
+  /**
+   * 文件引用（file_refs）可读期（天）：入站附件激活后的可读 TTL，也是 pending 行的
+   * 激活窗口。最小 1；缺省 7（2026-11-18 owner 定）。ms 派生一律走
+   * `fileRefTtlMsOf`（本模块是唯一解释点；file-store 只收注入的毫秒数）。
+   */
+  readonly fileRefTtlDays: number;
   /** run 目录/任务产物保留期（天）；0 = 不清理，缺省 30（2026-11-17 owner 定）。 */
   readonly fileRetentionDays: number;
   /** server 启动时是否扫一遍到期 run 目录；缺省 false（零行为变化）。 */
@@ -184,6 +190,9 @@ export const DEFAULT_RUNTIME_CONFIG: ResolvedRuntimeConfig = Object.freeze({
   maxDelegationDepth: 1,
   taskBudget: null,
   waitUserTimeoutMs: 86_400_000,
+  // 文件引用可读期：缺省 7 天（2026-11-18 owner 定，原写死 24h 过短）；最小 1 天。
+  // 过期后清单不列、引用不可读；字节由保留期清理入口回收（行保留做审计）。
+  fileRefTtlDays: 7,
   // run 目录/任务产物：缺省 30 天（2026-11-17 owner 定）；显式 0 = 不清理。
   // 删除执行器只在显式 ops 入口或 server 启动开关下运行（下项缺省关闭）。
   fileRetentionDays: 30,
@@ -212,6 +221,14 @@ function assertRuntimeBoolean(value: unknown, label: string): boolean {
 
 /** 一天的毫秒数（保留期换算的唯一常量；旋钮本身是整数天）。 */
 export const FILE_RETENTION_DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 文件引用可读期的毫秒派生（`runtime.fileRefTtlDays` 的唯一解释点）：
+ * 消费方（file-store 装配、字节回收）只收这个解析结果，不自行换算/重定义缺省。
+ */
+export function fileRefTtlMsOf(config: Pick<ResolvedRuntimeConfig, 'fileRefTtlDays'>): number {
+  return assertRuntimeInteger(config.fileRefTtlDays, 'runtime.fileRefTtlDays', 1) * FILE_RETENTION_DAY_MS;
+}
 
 export type FileRetentionVerdict = 'keep' | 'eligible_for_cleanup';
 
@@ -310,6 +327,10 @@ export function resolveRuntimeConfig(config: RuntimeConfig = {}): ResolvedRuntim
     waitUserTimeoutMs: config.waitUserTimeoutMs === undefined
       ? DEFAULT_RUNTIME_CONFIG.waitUserTimeoutMs
       : assertRuntimeInteger(config.waitUserTimeoutMs, 'runtime.waitUserTimeoutMs', 1),
+    // 最小 1 天；0/负数/小数 fail-fast（不可读期不能被配成「立即过期」）。
+    fileRefTtlDays: config.fileRefTtlDays === undefined
+      ? DEFAULT_RUNTIME_CONFIG.fileRefTtlDays
+      : assertRuntimeInteger(config.fileRefTtlDays, 'runtime.fileRefTtlDays', 1),
     // 0 = 不清理（缺省）；负数/非整数 fail-fast，不静默回落成「不清理」。
     fileRetentionDays: config.fileRetentionDays === undefined
       ? DEFAULT_RUNTIME_CONFIG.fileRetentionDays

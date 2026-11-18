@@ -58,11 +58,22 @@ describe('接线边界：清理执行器只经 server 启动开关接入', () =>
     for (const relative of productionEntries) {
       const source = readFileSync(path.join(REPO_ROOT, relative), 'utf8');
       expect(source, `${relative} 不得直接引用 run-dir-cleanup`).not.toContain('run-dir-cleanup');
+      expect(source, `${relative} 不得直接引用 file-ref-cleanup`).not.toContain('file-ref-cleanup');
     }
     const startupSweep = readFileSync(path.join(REPO_ROOT, 'apps/server/startup-sweep.ts'), 'utf8');
     expect(startupSweep, 'server 启动开关必须复用同一清理执行器').toContain(
       "packages/agent/src/run-dir-cleanup",
     );
+    expect(startupSweep, 'server 启动开关同一轮回收过期文件字节').toContain(
+      "packages/agent/src/file-ref-cleanup",
+    );
+  });
+
+  it('cleanup-runs 显式入口同时接线过期文件引用字节回收（同一入口，不是第二套清理器）', () => {
+    const source = readFileSync(path.join(REPO_ROOT, 'scripts/cleanup-runs.ts'), 'utf8');
+    expect(source).toContain("packages/agent/src/file-ref-cleanup");
+    expect(source).toContain('file_ref_cleanup_summary');
+    expect(source, '底账只读打开（不建库、不写库、不删行）').toContain('readOnly: true');
   });
 
   it('main 在启动装配完成后、开始接消息（startChannelForMode）之前调用启动清扫', () => {

@@ -236,9 +236,15 @@ describe('入站附件登记与激活（CAP-01 S1）', () => {
 
     const active = fileStore.listActiveFiles({ scope: SCOPE, now: Date.now() });
     expect(active.map((file) => file.fileId)).toEqual([fresh.fileId]);
-    // 投影面只有三字段：sha256 / 身份键 / 时间戳不进清单（清单没有行数据，v8 §8）。
-    expect(Object.keys(active[0]!).sort()).toEqual(['bytes', 'fileId', 'name']);
-    expect(active[0]).toEqual({ fileId: fresh.fileId, name: '活.xlsx', bytes: 1 });
+    // 投影面 = fileId/name/bytes + activatedAt（收到时间，2026-11-18 owner）；sha256 /
+    // 身份键仍不进清单（清单没有行数据，v8 §8）。
+    expect(Object.keys(active[0]!).sort()).toEqual(['activatedAt', 'bytes', 'fileId', 'name']);
+    expect(active[0]).toEqual({
+      fileId: fresh.fileId,
+      name: '活.xlsx',
+      bytes: 1,
+      activatedAt: expect.any(Number),
+    });
     store.close();
   });
 });

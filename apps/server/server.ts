@@ -57,7 +57,7 @@ import {
   type NotificationOutbox,
   type NotificationSink,
 } from '../../packages/agent/src/notifications';
-import { createResourcePolicy, resolveRuntimeConfig } from '../../packages/agent/src/resource-policy';
+import { createResourcePolicy, fileRefTtlMsOf, resolveRuntimeConfig } from '../../packages/agent/src/resource-policy';
 import { SessionPersistence } from '../../packages/agent/src/session-persistence';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import type { TaskExecutor, TaskRunner } from '../../packages/agent/src/task-runner';
@@ -208,9 +208,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
 
   const log = deps.logger ?? ((line: Record<string, unknown>) => console.log(JSON.stringify(line)));
   const taskRegistry = createSqliteTaskRegistry(deps.dbPath);
+  // 解析后配置只读一次：fileStore 的 TTL 由它派生（单一配置源；本文件不重解释 runtime 段）。
+  const resolvedRuntime = resolveRuntimeConfig(deps.config.runtime);
   // CAP-01 S1：文件区监管（唯一写侧）建在底账同一引擎连接上（不开第二个库连接）。
   const workspaceRoot = workspaceRootOf(deps.dbPath);
-  const fileStore = createFileStore({ store: taskRegistry.store, workspaceRoot });
+  const fileStore = createFileStore({
+    store: taskRegistry.store,
+    workspaceRoot,
+    ttlMs: fileRefTtlMsOf(resolvedRuntime),
+  });
   // CAP-01 S1：run_js 执行器（装配构造；Node 权限模型的受限子进程，runtime 不 spawn）。
   const runJsExecutor = (deps.createRunJsExecutor ?? ((fileStoreRef: FileStore) =>
     createRunJsExecutor({ fileStore: fileStoreRef, nodeModulesDir: path.join(REPO_ROOT, 'node_modules') })))(fileStore);
@@ -229,7 +235,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       })();
   /**
    * CAP-01 S1 清单注入（机械事实）：每回合开始由 runtime 取走本会话已激活（TTL 内）文件。
-   * 只投影 fileId/name/bytes（listActiveFiles），不含内容/路径/sha256。
+   * 投影 fileId/name/bytes + activatedAt（收到时间），不含内容/路径/sha256。
    */
   const fileManifestProvider = (principalId: string, sessionId: string): readonly TurnFileRef[] =>
     fileStore.listActiveFiles({ scope: { principalId, sessionId }, now: Date.now() });
@@ -257,7 +263,6 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   const policy = createResourcePolicy(deps.config.runtime);
   // 附件事实/系统注记队列与主动追问（进程内，按 (principal, session) 收口）。
   // 事实出队即在下一回合注入；追问定时器注入时钟（测试不真 sleep），close() 全清。
-  const resolvedRuntime = resolveRuntimeConfig(deps.config.runtime);
   const attachmentFacts = createAttachmentFactQueue();
   const systemNotes = createScopedNoteQueue();
   const attachmentNudge = new AttachmentNudge({

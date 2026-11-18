@@ -26,6 +26,9 @@ const SKIP_DIRS = new Set(['node_modules', '.runtime', '.git', 'dist', 'out', 't
 const CONTRACTS_CONFIG = 'packages/contracts/src/config.ts';
 const CORE_CONFIG = 'packages/core/src/config.ts';
 const RESOURCE_POLICY = 'packages/agent/src/resource-policy.ts';
+// 文件引用可读期（2026-11-18 owner）：字节回收执行器**只读**解析值（事件里报 ttlDays），
+// 不解析原始 `config.runtime.*`、不重定义缺省；ms 派生走 resource-policy 的 fileRefTtlMsOf。
+const FILE_REF_CLEANUP = 'packages/agent/src/file-ref-cleanup.ts';
 const EXECUTION_RUNTIME = 'packages/agent/src/execution-runtime.ts';
 const TASK_RUNNER = 'packages/agent/src/task-runner.ts';
 const ASK_RUNTIME = 'scripts/ask-runtime.ts';
@@ -106,6 +109,8 @@ const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   // W 切片（2026-11-18）：waiting_user 到期阈值由策略解析；ask-runtime 装配时取解析值，
   // task-runner 只消费注入的已解析毫秒数（不读原始 runtime 配置）。
   waitUserTimeoutMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, ASK_RUNTIME, TASK_RUNNER],
+  // 文件引用可读期（天）：缺省 7 与 ms 派生归策略；字节回收只读解析值。
+  fileRefTtlDays: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, FILE_REF_CLEANUP],
   fileRetentionDays: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   fileRetentionSweepOnStart: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STARTUP_SWEEP],
   attachmentNudgeAfterMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, SERVER, SIM_HARNESS],

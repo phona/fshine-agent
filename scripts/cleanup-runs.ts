@@ -1,8 +1,8 @@
 /**
- * cleanup-runs：run 目录保留期清理的**显式 ops 入口**。
+ * cleanup-runs：保留期清理的**显式 ops 入口**（run 目录 + 过期文件引用字节）。
  *
  * 用法：
- *   npm run cleanup:runs --                 # 按 runtime 段保留期清理到期的 run 目录
+ *   npm run cleanup:runs --                 # 按 runtime 段清理到期的 run 目录与过期文件字节
  *   npm run cleanup:runs -- --dry-run       # 空跑：零删除，只报「本应删哪些」
  *   npm run cleanup:runs -- --config=<path> # 与 ask/tasks/ops 同义（AGENT_CONFIG_PATH 次之）
  *
@@ -10,22 +10,26 @@
  *   · **默认只有显式运行才会删**：server/ask 启动路径默认不引用清理执行器；server 另有
  *     显式开关 `runtime.fileRetentionSweepOnStart`（缺省 false）可在启动装配后扫一次
  *     （守卫见 scripts/cleanup-runs.test.ts）；
- *   · 删除规则全部在 `packages/agent/src/run-dir-cleanup.ts`：只处理仓库自己的
+ *   · run 目录规则在 `packages/agent/src/run-dir-cleanup.ts`：只处理仓库自己的
  *     `<workspace>/<16hex>/<16hex>/runs/run_<32hex>` 布局，lstat 不跟随 symlink，
  *     根内包含判定，单项失败只记事件不中断；
- *   · **只删磁盘 run 目录**：不打开任务底账、不删 file_refs 行（表行与删除的一致性归后续
- *     切片）、不碰会话 `files/` 登记字节与任何父目录；
+ *   · 文件字节规则在 `packages/agent/src/file-ref-cleanup.ts`：只按底账行（只读打开）
+ *     派生路径，删**已过 `runtime.fileRefTtlDays` 可读期**的字节；**不删 file_refs 行**
+ *     （保留做审计），不碰未过期行与 run 目录；
  *   · 配置来源与 server 同一优先级：显式 --config / AGENT_CONFIG_PATH > 仓根
- *     config/agent.yaml（存在时）> 代码缺省（缺省 30 天）；不回落 eval/fixture 配置。
+ *     config/agent.yaml（存在时）> 代码缺省（保留期 30 天 / 文件可读期 7 天）；
+ *     不回落 eval/fixture 配置。
  *
- * 输出：每条结构化事件一行 JSON（action=kept/deleted/would_delete/skipped_* 等），
- * 末行 `run_dir_cleanup_summary`；删除失败（delete_failed）时退出码 1，其余 0，用法错误 2。
+ * 输出：每条结构化事件一行 JSON（action=kept/deleted_bytes/would_delete/skipped_* 等），
+ * 末行 `run_dir_cleanup_summary` 与 `file_ref_cleanup_summary`；删除失败（delete_failed）时
+ * 退出码 1，其余 0，用法错误 2。
  */
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from '@fshine/core';
+import { loadConfig, openTaskStore } from '@fshine/core';
 import { workspaceRootOf } from '../apps/server/server';
+import { cleanupExpiredFileRefBytes } from '../packages/agent/src/file-ref-cleanup';
 import { cleanupExpiredRunDirs } from '../packages/agent/src/run-dir-cleanup';
 import { resolveRuntimeConfig, type ResolvedRuntimeConfig } from '../packages/agent/src/resource-policy';
 import { explicitConfigFrom } from './resolve-config-path';
@@ -34,7 +38,8 @@ import { resolveTaskDbPath } from './tasks';
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const USAGE = '用法：npm run cleanup:runs -- [--dry-run] [--config=<path>]\n'
-  + '  按 runtime 段保留期清理到期的 run 目录（只删 <workspace>/<身份哈希>/<会话哈希>/runs/run_<hex>）；\n'
+  + '  按 runtime 段清理到期的 run 目录（<workspace>/<身份哈希>/<会话哈希>/runs/run_<hex>）\n'
+  + '  与过期文件引用字节（按 runtime 配置的可读期；只删字节，不删 file_refs 行）；\n'
   + '  --dry-run 空跑：零删除，只输出「本应删哪些」。';
 
 export interface CleanupRunsCliArgs {
@@ -131,7 +136,52 @@ async function main(): Promise<void> {
     rootMissing: result.rootMissing,
     ...result.summary,
   }));
-  if (result.summary.failed > 0) process.exitCode = 1;
+
+  // 过期文件引用字节：底账只读打开（不建库、不写库、不删行）；库不存在 = 无行可回收。
+  let fileRefFailed = false;
+  if (!existsSync(context.dbPath)) {
+    console.log(JSON.stringify({
+      event: 'file_ref_cleanup_summary',
+      dryRun: parsed.dryRun,
+      workspaceRoot: context.workspaceRoot,
+      dbMissing: true,
+      scanned: 0,
+      deleted: 0,
+      wouldDelete: 0,
+      kept: 0,
+      bytesMissing: 0,
+      skipped: 0,
+      failed: 0,
+    }));
+  } else {
+    let store: ReturnType<typeof openTaskStore> | undefined;
+    try {
+      store = openTaskStore(context.dbPath, { readOnly: true });
+      const fileRefResult = cleanupExpiredFileRefBytes({
+        store,
+        workspaceRoot: context.workspaceRoot,
+        config: context.config,
+        dryRun: parsed.dryRun,
+      });
+      for (const event of fileRefResult.events) console.log(JSON.stringify(event));
+      console.log(JSON.stringify({
+        event: 'file_ref_cleanup_summary',
+        dryRun: parsed.dryRun,
+        workspaceRoot: context.workspaceRoot,
+        dbMissing: false,
+        rootMissing: fileRefResult.rootMissing,
+        ...fileRefResult.summary,
+      }));
+      fileRefFailed = fileRefResult.summary.failed > 0;
+    } catch (error) {
+      // 底账打不开/回收抛错：如实报错并置失败退出码（不静默当作「没有可回收的」）。
+      console.log(JSON.stringify({ event: 'file_ref_cleanup_failed', reason: errorText(error) }));
+      fileRefFailed = true;
+    } finally {
+      store?.close();
+    }
+  }
+  if (result.summary.failed > 0 || fileRefFailed) process.exitCode = 1;
 }
 
 // 仅作为 CLI 直接运行时执行 main；被 import（测试/复用）时不触发任何清理
