@@ -195,8 +195,10 @@ function ls6Turns(): Omit<TurnSpec, 'index'>[] {
       text: '刚才那个还是按 beta 吧？把 beta 的结论再报一遍，不用再查。',
       expectNoExecution: true, expectNoNewTask: true,
       fact: { kind: 'exact', collection: 'beta', count: beta.count, sum: beta.sum },
-      replyExcludes: ['2000'],
-      replyExcludesScope: 'beta',
+      // 2026-11-18 去掉「排除 2000」：实测回复里出现 2000 是**正确归属**的对比说明
+      // （「之前 alpha 的结果仍是 2 条、总额 2000，与 beta 是两次独立查询」），
+      // 裸数字排除无法区分"把 alpha 的 2000 说成 beta"与"如实并列两个口径"。
+      // beta 自己的合计由 fact 判据（sum=1000）保证。
     },
     // ── N3 真间隔暂停（1.5s 真空档 → 继续）────────────────────────────────
     { kind: 'interaction', label: 'N3-A', text: '先停一下，我过几分钟再回来继续。', expectNoNewTask: true, expectNoExecution: true, expectPrevTasksUnchanged: true },

@@ -4,7 +4,7 @@
  * 覆盖两层：
  *   1. 纯函数 `judgeTurnExpectations`：每类检查的通过/判负形态（含「会话面未暴露」→ E-INCONCLUSIVE）；
  *   2. `runHarnessSession` 端到端（LS6 全计划 + 假会话）：
- *      · 正向路径必须**判正**（23 条检查全过、事实全对）；
+ *      · 正向路径必须**判正**（22 条检查全过、事实全对）；
  *      · 4 条**反向绊线**必须各自**判负**：
  *        (a) N1 串台（A 的结论返回 documents 数字）、(b) N4 复用旧任务（没有新 taskId）、
  *        (c) N5 沿用 3 条、(d) N6 假取消（轮前在飞却落成 completed，且**未**触发既有 H5，
@@ -251,7 +251,8 @@ describe('LS6 端到端（假会话）', () => {
     const r = await runLs6(ls6Script(), LS6, sleeps);
     expect(r.judgement.turnExpectations?.failures).toEqual([]);
     expect(r.judgement.turnExpectations?.pass).toBe(true);
-    expect(r.judgement.turnExpectations?.checked).toBe(23);
+    // 2026-11-18：N2-B 去掉裸数字排除后少一条检查（23 → 22）。
+    expect(r.judgement.turnExpectations?.checked).toBe(22);
     expect(r.judgement.sessionFactsPass).toBe(true);
     expect(r.judgement.factFailures).toEqual([]);
     expect(r.judgement.taskVerdict.hardZeroHits).toEqual([]);
@@ -259,7 +260,7 @@ describe('LS6 端到端（假会话）', () => {
     expect(sleeps).toEqual([1500]);
     expect(r.evidence.turns.filter((t) => t.gapMs !== undefined).map((t) => [t.index, t.gapMs])).toEqual([[7, 1500]]);
     expect(r.summary['turnExpectationsPass']).toBe(true);
-    expect(r.summary['turnExpectationChecks']).toBe(23);
+    expect(r.summary['turnExpectationChecks']).toBe(22);
   });
 
   it('真交错：deferIdle 轮走 sendNoWait；N1-C 前与 N6-Q2 落定处各 waitIdle 一次', async () => {

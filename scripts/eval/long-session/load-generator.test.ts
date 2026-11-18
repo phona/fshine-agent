@@ -77,7 +77,9 @@ describe('负载生成器', () => {
     // N2 改口径：落到 beta 执行行；回头只报 beta、不再报 alpha 数值。
     expect(byLabel.get('N2-A')?.expectExecutionObjects).toEqual(['beta']);
     expect(byLabel.get('N2-B')?.expectNoExecution).toBe(true);
-    expect(byLabel.get('N2-B')?.replyExcludes).toEqual(['2000']);
+    // 2026-11-18：N2-B 不再用裸数字排除（会把正确归属的 alpha 2000 判负）；beta 合计由 fact 判据保证。
+    expect(byLabel.get('N2-B')?.replyExcludes).toBeUndefined();
+    expect(byLabel.get('N5-B')?.replyExcludesScope).toBe('alpha');
     // N3 真间隔：1500ms 空档 + 状态保持 + 不重复执行。
     expect(byLabel.get('N3-B')?.gapMs).toBe(1500);
     expect(byLabel.get('N3-B')?.expectPrevTasksUnchanged).toBe(true);
