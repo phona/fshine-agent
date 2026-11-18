@@ -116,8 +116,12 @@ function plannedMain(plans: ReadonlyMap<string, ServerPlan>, records: ServerDriv
 function executingWorker(calls: number): TurnDriver {
   return {
     async run(input) {
+      // 每次用不同窗口：同参数重复会被 A2b 守卫拒（资源边界），计数用例要的是真实 N 次执行。
       for (let index = 0; index < calls; index += 1) {
-        await input.exec(EXECUTE_OPERATION_TOOL, { operation: 'dummy.query', args: { '--collection': 'documents' } });
+        await input.exec(EXECUTE_OPERATION_TOOL, {
+          operation: 'dummy.query',
+          args: { '--collection': 'documents', '--window': `W${index + 1}` },
+        });
       }
       return { text: `查询完成（${calls} 次执行）`, messages: [...input.messages] };
     },

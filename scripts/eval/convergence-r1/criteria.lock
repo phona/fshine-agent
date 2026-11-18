@@ -1,12 +1,12 @@
 {
   "generatedBy": "node --import tsx scripts/eval/convergence-r1/freeze.ts",
-  "frozenAt": "2026-11-18T06:09:30.683Z",
+  "frozenAt": "2026-11-18T06:48:18.477Z",
   "criteriaSha256": "9d4b0824a429658e7f633ff8af928fd3ad94b633f02c95f151866679bb8d6cd4",
   "casesSha256": "cb319a62b1f8f1d461a55ad9b31f4b291e64517511d22db3a037225d5b7b481b",
   "files": {
     "scripts/eval/convergence-r1/criteria.ts": "f5daa2a2d8377d7250150b6d907126dea26e652dcb8493f32801a5ddf1d68025",
     "scripts/eval/convergence-r1/cases.ts": "5a46fa2d44d31d696c9b250ad3620f65b16e0975d1d0214c7e47de7114c1726c",
-    "scripts/eval/convergence-r1/judge.ts": "d750103b891697d5e96f9aec6c8037f3d7aef31945bdaeacda8a99b96689e5c1",
+    "scripts/eval/convergence-r1/judge.ts": "dc75c07b54d249378ba9e0d3bacd5f020c4e03cadd5811866f9b62210104d255",
     "scripts/eval/convergence-r1/hash.ts": "e03bdcacc362515796cf6d248f2244a2b31b3e19ceddaee32cd7ec6795376637",
     "scripts/eval/convergence-r1/evidence.ts": "4003a8b78ef15a46649a83232cf0db0506c1d932d497e369e06a8289a6689418",
     "scripts/eval/convergence-r1/selftest.ts": "aaff9094e491e9ad4cf8c3c78372e30485140e70d962c7ca550327a240840c31",

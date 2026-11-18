@@ -330,6 +330,17 @@ export const EXECUTE_OPERATION_TOOL_SCHEMA: Record<string, unknown> = {
  * Main 的静态协议义务（本切片的中性措辞；不含执行层实例名与业务字段）。
  * 装配方把它接在角色文本之后（agent.md 负责角色，这里只负责本轮工具协议）。
  */
+/** 参数规范化（判定「完全相同」用）：对象键排序后递归序列化；数组保序。 */
+function stableArgsKey(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableArgsKey(item)).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableArgsKey(item)}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
 export const MAIN_PROTOCOL_NOTE = [
   '【本轮工具协议】',
   '- 涉及平台数据的请求，用 task_run 工具交给执行层 Worker；不得自行编造或猜测平台数据。',
@@ -1093,6 +1104,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     : DEFAULT_MAX_OPERATIONS_PER_TURN;
   /** A2：本回合已发起的执行次数（send 时清零；跨本回合全部委派合计）。 */
   let operationsThisTurn = 0;
+  /**
+   * A2b：本回合内**完全相同的 (operation, 规范化 args)** 只允许发起一次。
+   * 依据（live 实测）：E14 里同一参数被重复提交 3 次（同一集合取两遍全表、同一窗口再撞一次），
+   * 属于自证循环里的无效重复。这是资源边界，不是计划门——不判断业务、不拦换参数的探索。
+   */
+  let identicalCallsThisTurn = new Map<string, 'failed' | 'refused' | 'completed' | 'needs_confirmation' | 'needs_input'>();
   const dispatchMode: 'inline' | 'background' = options.dispatchMode ?? 'inline';
   const taskRunner = options.taskRunner;
   if (dispatchMode === 'background' && taskRunner === undefined) {
@@ -1561,14 +1578,27 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     // A2 单回合上界（资源边界，不是计划门）：本回合已发起次数达到上限时，后续调用在
     // 发起前被拒并如实告知；不判断业务。计数在发起前同步推进（含随后的每次真实发起，
     // 被拒/回放的调用不计——它们没有走到这里）。
-    if (operationsThisTurn >= maxOperationsPerTurn) {
-      throw new Error(turnOperationLimitMessage(maxOperationsPerTurn, operationsThisTurn));
-    }
-    operationsThisTurn += 1;
     const rawArgs = args.args;
     const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
       ? (rawArgs as Record<string, unknown>)
       : {};
+    // A2b 同参数重复守卫（发起前拒；不发起执行、不落执行事实）。
+    // 作用域 = (本回合, 该任务)：同一任务内的逐字重复才拒；两个不同任务各自查同一对象是合法的。
+    const identicalKey = `${taskId}\u0000${operation}\u0000${stableArgsKey(callArgs)}`;
+    const previousIdentical = identicalCallsThisTurn.get(identicalKey);
+    // 边界（A2b）：**只挡「同一参数在确定性失败/拒绝之后的重试」**——
+    // 同参数的两笔合法操作必须各执行一次（owner 2026-11-16 裁定），所以成功过的重复不拦；
+    // 而被拒绝/失败的同一参数再撞一次，除了浪费一次执行没有任何信息收益（E14 实测）。
+    if (previousIdentical === 'failed' || previousIdentical === 'refused') {
+      throw new Error(
+        `本回合已用完全相同的参数调用过「${operation}」，执行层已${previousIdentical === 'refused' ? '拒绝' : '失败'}；`
+        + '不要重复提交同一请求——换参数，或把执行层返回的内容如实转告用户。',
+      );
+    }
+    if (operationsThisTurn >= maxOperationsPerTurn) {
+      throw new Error(turnOperationLimitMessage(maxOperationsPerTurn, operationsThisTurn));
+    }
+    operationsThisTurn += 1;
     // CAP-01 S2 ②：注入文件桥时出站走装饰器（声明目录参数替换 + 任务文件物化在桥内）；
     // 未注入时零变化（原客户端直连）。
     const client = exchange !== undefined ? exchange.client : options.client;
@@ -1615,6 +1645,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         return outcome;
       },
     });
+    // A2b：记录本回合该 (任务, operation, 参数) 的结果——只用于拦「失败/拒绝后同参数重试」。
+    identicalCallsThisTurn.set(identicalKey, run.outcome.status);
     if (run.unresolved) {
       onUnresolved();
       // 确定性终结本回合：不把待核对当作可重试的普通失败，模型不得自动重办。
@@ -1941,6 +1973,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       turnNo += 1;
       // A2：单回合执行计数随回合清零（上界按回合计，不跨回合累计）。
       operationsThisTurn = 0;
+      identicalCallsThisTurn = new Map();
       const turnScopeKey = `turn:${options.sessionId}:${turnNo}`;
       const mainWindow = newAttemptWindow();
       // 宿主只交「本轮输入」：最后一条 user = 本轮文本；历史种子仅在驱动尚无会话时使用。

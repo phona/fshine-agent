@@ -103,7 +103,10 @@ function splitSentences(text: string): Array<{ text: string; question: boolean }
 function isActualQuestion(sentence: string): boolean {
   const text = sentence.trim();
   if (/[？?]/.test(text)) return true;
-  return ['请问', '请提供', '请确认', '请补充', '请告诉', '需要你', '你是指'].some((word) => text.includes(word));
+  // 否定式不是提问（2026-11-18 判定器缺陷修复）：E15 实测「**不需要你**再做选择」被判成追问，
+  // 而它恰是在说明"不必再问"。先把否定词剥掉，再找请求式标记。
+  const stripped = text.replace(/不需要|不用|无需|不必|没必要/g, '');
+  return ['请问', '请提供', '请确认', '请补充', '请告诉', '需要你', '你是指'].some((word) => stripped.includes(word));
 }
 
 /**
@@ -139,6 +142,17 @@ function topicPhraseHit(sentence: string, topics: readonly string[]): string | u
 const QUESTION_WORDS = ['请问', '请提供', '请确认', '你是指', '哪一个', '哪一', '哪个', '需要你'];
 
 /** 无谓追问短语（冻结口径：把已给信息再问一遍的形态）。 */
+/**
+ * 短语命中（2026-11-18）：`集合名` / `窗口号` 是**前缀**，会把「集合名称」「窗口号码」这类
+ * 陈述句误判成追问（E15 实测）。这两个短语要求后面不接 称/字/码。
+ */
+function phraseMatches(sentence: string, phrase: string): boolean {
+  if (phrase === '集合名' || phrase === '窗口号') {
+    return new RegExp(`${phrase}(?![称字码])`).test(sentence);
+  }
+  return sentence.includes(phrase);
+}
+
 const NEEDLESS_QUESTION_PHRASES = [
   '哪个集合', '哪一集合', '什么集合', '集合名', '哪个窗口', '哪一窗口', '什么窗口', '窗口号',
   '请提供集合', '请提供窗口', '请确认集合', '请确认窗口', '哪个对象', '什么对象', '需要你提供',
@@ -734,7 +748,7 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     warn('expected_clarification_missing：未检测到澄清提问（词面判定，弱）');
   }
   if (caseDef.clarification === 'forbidden') {
-    if (lastSentences.some((sentence) => sentence.question && isActualQuestion(sentence.text) && NEEDLESS_QUESTION_PHRASES.some((phrase) => sentence.text.includes(phrase)))) {
+    if (lastSentences.some((sentence) => sentence.question && isActualQuestion(sentence.text) && NEEDLESS_QUESTION_PHRASES.some((phrase) => phraseMatches(sentence.text, phrase)))) {
       addCode('FAIL_NEEDLESS_CLARIFICATION', ['⑤用户干预'], '重复追问已被用户给出的对象/条件（无谓追问）');
     }
   }
