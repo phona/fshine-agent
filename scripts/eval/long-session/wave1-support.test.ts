@@ -12,7 +12,7 @@ import { runHarnessSession, type HarnessSession } from './harness';
 import { FakeHarnessSession, asAttempt, noTasks, type FakeScenario, type FakeTurnScript } from './fake-session';
 import { scanStructureLeak } from './structure-leak';
 import {
-  createWave1PumpDecider, parseWave1Args, structureLeakBatch, withPumpedTurns,
+  createWave1PumpDecider, parseWave1Args, scriptFor, sessionMarker, structureLeakBatch, withPumpedTurns,
 } from './wave1-support';
 
 const TASK_ID = 'task_e6296844-5e6a-4ed2-95c4-d0b24efc00c0';
@@ -30,13 +30,17 @@ function scripted(turns: readonly (Partial<FakeTurnScript> & { reply: string })[
 }
 
 describe('Wave1 参数解析', () => {
-  it('缺省：五轨 / 并发 1（step 安全缺省）/ 非冒烟 / 128k / step 模型', () => {
+  it('缺省：六轨 / 并发 1（step 安全缺省）/ 非冒烟 / 128k / step 模型', () => {
     const args = parseWave1Args([]);
-    expect(args.tracks).toEqual(['LS1', 'LS2', 'LS3', 'LS4', 'LS5']);
+    expect(args.tracks).toEqual(['LS1', 'LS2', 'LS3', 'LS4', 'LS5', 'LS6']);
     expect(args.concurrency).toBe(1);
     expect(args.smoke).toBe(false);
     expect(args.smokeWindow).toBe(128000);
     expect(args.model).toBe('step-3.7-flash');
+  });
+
+  it('--track=LS6 可单独选中（与其它轨同形）', () => {
+    expect(parseWave1Args(['--track=LS6']).tracks).toEqual(['LS6']);
   });
 
   it('解析冒烟形状与模型覆盖', () => {
@@ -53,6 +57,27 @@ describe('Wave1 参数解析', () => {
     expect(() => parseWave1Args(['--model='])).toThrow(/--model 需要值/);
     expect(() => parseWave1Args(['--concurrency=0'])).toThrow(/--concurrency 需要正整数/);
     expect(() => parseWave1Args(['--smoke-window=abc'])).toThrow(/--smoke-window 需要正整数/);
+  });
+});
+
+describe('LS6 脚本装配（时间线轨，不是「建立轮 + 压缩后探针」）', () => {
+  const LABELS = ['N1-A', 'N1-B', 'N1-C', 'N2-A', 'N2-B', 'N3-A', 'N3-B', 'N4', 'N5-A', 'N5-B', 'N6-Q1', 'N6-Q2', 'N6-C'];
+
+  it('plan 是完整 13 轮时间线：首轮带会话标记、全部期望字段随轮保留', () => {
+    const script = scriptFor('LS6', 'sess-ls6');
+    expect(script.plan.turns).toHaveLength(13);
+    expect(script.plan.turns.map((t) => t.label)).toEqual(LABELS);
+    expect(script.plan.turns[0]!.text.startsWith(sessionMarker('sess-ls6'))).toBe(true);
+    expect(script.plan.turns.filter((t) => t.fact !== undefined)).toHaveLength(3);
+    expect(script.plan.turns.find((t) => t.label === 'N3-B')?.gapMs).toBe(1500);
+    expect(script.plan.turns.find((t) => t.label === 'N2-A')?.expectExecutionObjects).toEqual(['beta']);
+  });
+
+  it('压缩后复查轮取 N2-B / N4 / N5-B（index 由推进器重排，期望不变）', () => {
+    const script = scriptFor('LS6', 'sess-ls6');
+    expect(script.probeTurns.map((t) => t.label)).toEqual(['N2-B', 'N4', 'N5-B']);
+    expect(script.probeTurns.every((t) => t.index === 0)).toBe(true);
+    expect(script.steadyPumps).toBe(0);
   });
 });
 

@@ -20,14 +20,16 @@ import {
   scanStructureLeak, structureLeakSummary,
   type StructureLeakReport,
 } from './structure-leak';
+import type { TurnExpectationVerdict } from './harness';
 
 export type Wave = 'Wave1' | 'Wave2';
 /**
  * 证据轨标签。`P2` 是 2026-11-16 追加的**标签**（P2 业务 E2E 胶水复用本证据层）；
  * 纯类型并集扩展，不改任何判定语义（`classifySample` 不看 track）。守卫：
  * `scripts/eval/p2/p2-oracle.test.ts` 钉住 classifySample 行为不随本行变化。
+ * `LS6` 是 2026-11-18 追加的「自然交互扰动」轨（同属 R6 长会话族）。
  */
-export type Track = 'LS1' | 'LS2' | 'LS3' | 'LS4' | 'LS5' | 'P2';
+export type Track = 'LS1' | 'LS2' | 'LS3' | 'LS4' | 'LS5' | 'LS6' | 'P2';
 
 /** 三态处置（+ 有效）。产品故障**不**作废。 */
 export type SampleDisposition = 'valid' | 'insufficient_coverage' | 'environment_interrupted' | 'product_fault';
@@ -36,6 +38,10 @@ export interface TurnRecord {
   readonly index: number;
   readonly text: string;
   readonly expected?: string;
+  /** 该轮 send 前的真实空档（毫秒；只有 `gapMs` 轮携带）。 */
+  readonly gapMs?: number;
+  /** 该轮只交办、未等后台收尾（`deferIdle`：真交错/在飞窗口）。 */
+  readonly deferIdle?: boolean;
 }
 
 export interface ReplyRecord {
@@ -107,6 +113,15 @@ export interface SessionJudgement {
   readonly factFailures: readonly FactFailureCode[];
   readonly taskVerdict: TaskVerdict;
   readonly compactionVerdict: CompactionVerdict;
+  /**
+   * 轮期望判定（interaction 轮的机械判据：不得新建任务 / 不得执行 / 执行对象 / 状态保持 /
+   * 回复负向检查 / 取消诚实性）。**可选**：由 `runHarnessSession` 产出；手工装配
+   * （P2 `judgementOf` 等）可不提供，缺省 = 该会话未做轮期望判定。
+   *
+   * 纪律：这属**行为判据**（预注册 §2.2 第二层），**不进入** `classifySample` 的硬零优先级；
+   * 判负只落在 verdict/证据通道，不冒充 H1–H7。
+   */
+  readonly turnExpectations?: TurnExpectationVerdict;
 }
 
 /**
@@ -155,6 +170,11 @@ export function buildEvidenceSummary(
     taskCodes: judgement.taskVerdict.codes,
     sessionFactsPass: judgement.sessionFactsPass,
     factFailures: judgement.factFailures,
+    // 轮期望（interaction 轮机械判据）：逐条判负 + 复用码；不影响 disposition（行为层）。
+    turnExpectationsPass: judgement.turnExpectations?.pass ?? null,
+    turnExpectationChecks: judgement.turnExpectations?.checked ?? 0,
+    turnExpectationCodes: judgement.turnExpectations?.codes ?? [],
+    turnExpectationFailures: judgement.turnExpectations?.failures ?? [],
     infraSignals: evidence.infraSignals,
     productFaultSignals: evidence.productFaultSignals,
     disposition,
