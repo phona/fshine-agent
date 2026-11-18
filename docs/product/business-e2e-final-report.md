@@ -22,7 +22,7 @@
 | `docs/product/business-e2e-prereg.md` | 预注册正文（N=5 / ≤20 会话 / 三臂 / blocked） |
 | `docs/product/business-e2e-prereg-addendum.md` | §一–§三（post-hoc 登记）· §四（owner 2026-11-15 裁定：N=3 / 模型钉 / #3 口径）· §五（三实验预注册）· §六（bizbatch3 预注册） |
 | `docs/product/gap-task-surface.md` / `gap-main-skill.md` / `gap-compaction-window.md` | 缺口 1/2/3 设计与最小 diff |
-| `docs/product/r4-audit.md` · `r4-acceptance.md` · `r4-decisions-triage.md` · `r4-stability-prereg.md` · `r4-stability-report.md` · `r4-p7b-acceptance.md` · `r4-slices.md` 等 | R4 现状审计 / 验收设计 / 稳定性预注册与报告 / P7b 验收 |
+| `docs/product/r4-acceptance.md` · `r4-stability-prereg.md` · `r4-joint-interfaces.md` · `p2a-task-contract.md` 等 | R4 验收设计 / 稳定性预注册 / 契约冻结面（R4 实施报告与切片计划已于 2026-11-18 清理，git 历史可考） |
 | `docs/product/manual-test-handbook.md` | 手工测试定位与硬边界 |
 | `docs/decision-log.md` §四十二–§四十九 | 能力审计、阶段 1/2、缺口实施、三实验、夜跑续批 |
 | `.runtime/{bizprobe,bizbatch2,bizbatch3,stab,p7b}/`（gitignored，位于各自 worktree） | 原始读数（本报告已抽验，见 §附录 B） |

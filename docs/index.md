@@ -28,7 +28,7 @@
 - `docs/product/r3-open-decisions.md`——待裁定登记（未决项以本文件为准）
 - `docs/product/p2-business-e2e-prereg.md`——P2 业务 E2E 预注册（待真实模型执行）
 - `docs/product/r6-longsession-prereg.md`——R6 长会话预注册（wave1-runner 运行时读取取证）
-- `docs/product/r4-joint-interfaces.md`、`r4-acceptance.md`、`r4-stability-prereg.md`、`r4-slices.md`、`p2a-task-contract.md`——R4 契约冻结面与预注册（测试逐条引用）
+- `docs/product/r4-joint-interfaces.md`、`r4-acceptance.md`、`r4-stability-prereg.md`、`p2a-task-contract.md`——R4 契约冻结面与预注册（测试逐条引用）
 - `docs/product/business-e2e-prereg.md`、`business-e2e-prereg-addendum.md`——业务 E2E 预注册
 - `docs/product/business-e2e-final-report.md`——三轴总报告（产品定义文档）
 - `docs/product/manual-test-handbook.md`——手工测试手册
@@ -42,8 +42,9 @@
 - `docs/product/exp-pi-native-config-headroom.md`——压缩配置安全值推导出处（ask-runtime.ts 注释引用）
 - `docs/product/evidence/`——补丁证据 json（git pin 锚点）
 
-## ⑤ 已删除（2026-11-18 清理，两轮共 81 篇）
+## ⑤ 已删除（2026-11-18 清理，三轮共 82 篇）
 
 - 第一轮 71 篇：0.85.1 压缩/实验簇（pi-compaction×5、exp-pi-native×4、pi-152-stage-b/c/d/d2、minimality-audit）、main-skill-face-design、R4 切片报告 22 篇、R5 收官 9 篇、R6 收官 5 篇、已实施/被取代设计 7 篇、退役工具旧档 11 篇、R5 清理 meta 2 篇。处置依据与取代者映射见 `docs/product/cleanup-2026-11-16.md`。
 - 第二轮 10 篇历史原位档：v0-architecture、v0-functional-spec、artifacts、r4-slice-plan、roadmap、rule-landing、business-skill、a2a-protocol、execution-layer-interface、e2e-ownership（AGENTS.md / ci.sh / 代码注释 / 活文档引用已同步改）。
+- 第三轮 1 篇：`docs/product/r4-slices.md`（R4 分片计划；P0–P7b 全落地，唯一未落地的 P8 规格要点已登记进 `r3-open-decisions.md` 第四节第 6 条）。
 - 内容考古用 `git log --diff-filter=D -- docs/`。
