@@ -25,8 +25,12 @@ import {
 } from './structure-leak';
 
 export const WAVE1_TRACKS: readonly Track[] = ['LS1', 'LS2', 'LS3', 'LS4', 'LS5', 'LS6'];
-/** 预注册口径：每轨 3 会话 = 2×40k 探索 + 1×128k 生产窗口。 */
-export const WAVE1_WINDOWS: readonly number[] = [40000, 40000, 128000];
+/**
+ * 每轨会话窗口（2026-11-18 owner 口径调整）：**默认全 40k**。
+ * 理由：128k 单会话要跑到 ≥3 次压缩得烧 3M+ tokens，常换来 insufficient_coverage（实测 3.19M）；
+ * 128k 只在"生产窗口专项"跑，用 `--smoke-window=128000` 或临时改本常量，并预注册预算。
+ */
+export const WAVE1_WINDOWS: readonly number[] = [40000, 40000, 40000];
 /** 预注册缺省被测模型；`--model=` 可改用另一条基线。 */
 export const WAVE1_DEFAULT_MODEL = 'step-3.7-flash';
 
