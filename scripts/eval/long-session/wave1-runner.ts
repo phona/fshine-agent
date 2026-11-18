@@ -357,9 +357,9 @@ async function pool<T>(items: readonly (() => Promise<T>)[], concurrency: number
 
 async function crossPrincipalProbe(opts: {
   runId: string; config: AppConfig; dbPath: string; model: string; results: readonly SessionResult[];
-}): Promise<{ ownershipErrors: number; probeErrors: string[]; bLeakFacts: string[]; bReplies: readonly string[]; bTranscriptText: string }> {
+}): Promise<{ ownershipEnforced: number; probeErrors: string[]; leakTokenHits: string[]; bReplies: readonly string[]; bTranscriptText: string }> {
   const withTasks = opts.results.filter((r) => r.registryTasks.length > 0);
-  if (withTasks.length === 0) return { ownershipErrors: 0, probeErrors: ['no_tasks_to_probe'], bLeakFacts: [], bReplies: [], bTranscriptText: '' };
+  if (withTasks.length === 0) return { ownershipEnforced: 0, probeErrors: ['no_tasks_to_probe'], leakTokenHits: [], bReplies: [], bTranscriptText: '' };
   const source = withTasks[0]!;
   const aTask = source.registryTasks[0]!;
 
@@ -378,14 +378,16 @@ async function crossPrincipalProbe(opts: {
     stateDir, dbPath: opts.dbPath, sessionDir, window: 40000,
   });
   const probeErrors: string[] = [];
-  let ownershipErrors = 0;
+  // 越权探针**被挡下**的次数：预注册 §五要求「必须被 TaskOwnershipError 挡下」——
+  // 因此 >0 才是通过（字段名按行为命名，避免读成「越权次数」）。
+  let ownershipEnforced = 0;
   try {
     // (a1) registry 层（真实 TaskRegistry 上的 FI-8 内核）
     try {
       bSession.registry.get(aTask.taskId, { principalId: SECOND_PRINCIPAL, sessionId: source.sessionId });
       probeErrors.push('ownership_not_enforced');
     } catch (error) {
-      if (error instanceof TaskOwnershipError) ownershipErrors += 1;
+      if (error instanceof TaskOwnershipError) ownershipEnforced += 1;
       else probeErrors.push(`ownership_unexpected:${error instanceof Error ? error.message : String(error)}`);
     }
     // (b) B 会话交互：问 A 的任务编号/结果；机械扫描 B 的回复与转录是否含 A 的任务事实。
@@ -399,8 +401,8 @@ async function crossPrincipalProbe(opts: {
     }
     const bTranscriptText = bSession.transcriptText();
     const leakTokens = source.registryTasks.flatMap((t) => [t.taskId, ...t.requestIds]).filter((t) => t !== '');
-    const bLeakFacts = leakTokens.filter((token) => bReplies.some((r) => r.includes(token)) || bTranscriptText.includes(token));
-    return { ownershipErrors, probeErrors, bLeakFacts, bReplies, bTranscriptText };
+    const leakTokenHits = leakTokens.filter((token) => bReplies.some((r) => r.includes(token)) || bTranscriptText.includes(token));
+    return { ownershipEnforced, probeErrors, leakTokenHits, bReplies, bTranscriptText };
   } finally {
     bSession.close();
   }
@@ -499,7 +501,7 @@ async function main(): Promise<void> {
   const fi8 = await crossPrincipalProbe({ runId, config, dbPath, model: args.model, results });
 
   const hardZero = {
-    H1_crossPrincipal: { ownershipErrors: fi8.ownershipErrors, probeErrors: fi8.probeErrors, bLeakFacts: fi8.bLeakFacts, bReplies: fi8.bReplies },
+    H1_crossPrincipal: { ownershipEnforced: fi8.ownershipEnforced, probeErrors: fi8.probeErrors, leakTokenHits: fi8.leakTokenHits, bReplies: fi8.bReplies },
     H3_duplicateExecution: results.flatMap((r) => (r.taskHardZero.includes('H3') ? [r.sessionId] : [])),
     H4_falseCompletion: results.flatMap((r) => (r.taskHardZero.includes('H4') ? [r.sessionId] : [])),
     H5_falseCancel: results.flatMap((r) => (r.taskHardZero.includes('H5') ? [r.sessionId] : [])),
