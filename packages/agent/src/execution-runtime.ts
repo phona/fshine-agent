@@ -330,6 +330,15 @@ export const EXECUTE_OPERATION_TOOL_SCHEMA: Record<string, unknown> = {
  * Main 的静态协议义务（本切片的中性措辞；不含执行层实例名与业务字段）。
  * 装配方把它接在角色文本之后（agent.md 负责角色，这里只负责本轮工具协议）。
  */
+/** 取对象参数里第一个存在的字符串值（--collection/--topic 等）；没有则 undefined。 */
+function firstString(args: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value === 'string' && value !== '') return value;
+  }
+  return undefined;
+}
+
 /** 参数规范化（判定「完全相同」用）：对象键排序后递归序列化；数组保序。 */
 function stableArgsKey(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map((item) => stableArgsKey(item)).join(',')}]`;
@@ -1105,11 +1114,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   /** A2：本回合已发起的执行次数（send 时清零；跨本回合全部委派合计）。 */
   let operationsThisTurn = 0;
   /**
-   * A2b：本回合内**完全相同的 (operation, 规范化 args)** 只允许发起一次。
-   * 依据（live 实测）：E14 里同一参数被重复提交 3 次（同一集合取两遍全表、同一窗口再撞一次），
-   * 属于自证循环里的无效重复。这是资源边界，不是计划门——不判断业务、不拦换参数的探索。
+   * A2b：本回合内，执行层已**确定性失败/拒绝**（`error.retryable === false`）的对象，
+   * 后续换参数再试一律不发起（E14 实测：同一集合窗口被拒后，模型换 `2026-10`/`W202610`
+   * 两种写法连撞、再换新任务继续撞）。键 = operation + 对象参数（--collection/--topic）。
+   * 依据是**执行层自己的 retryable 声明**，宿主只执行不再判断业务——不是计划门。
    */
-  let identicalCallsThisTurn = new Map<string, 'failed' | 'refused' | 'completed' | 'needs_confirmation' | 'needs_input'>();
+  let deterministicFailuresThisTurn = new Map<string, { code: string }>();
   const dispatchMode: 'inline' | 'background' = options.dispatchMode ?? 'inline';
   const taskRunner = options.taskRunner;
   if (dispatchMode === 'background' && taskRunner === undefined) {
@@ -1584,15 +1594,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       : {};
     // A2b 同参数重复守卫（发起前拒；不发起执行、不落执行事实）。
     // 作用域 = (本回合, 该任务)：同一任务内的逐字重复才拒；两个不同任务各自查同一对象是合法的。
-    const identicalKey = `${taskId}\u0000${operation}\u0000${stableArgsKey(callArgs)}`;
-    const previousIdentical = identicalCallsThisTurn.get(identicalKey);
-    // 边界（A2b）：**只挡「同一参数在确定性失败/拒绝之后的重试」**——
-    // 同参数的两笔合法操作必须各执行一次（owner 2026-11-16 裁定），所以成功过的重复不拦；
-    // 而被拒绝/失败的同一参数再撞一次，除了浪费一次执行没有任何信息收益（E14 实测）。
-    if (previousIdentical === 'failed' || previousIdentical === 'refused') {
+    const objectValue = firstString(callArgs, ['--collection', '--topic', 'collection', 'topic']);
+    const deterministicKey = objectValue === undefined ? undefined : `${operation}\u0000${objectValue}`;
+    const blocked = deterministicKey === undefined ? undefined : deterministicFailuresThisTurn.get(deterministicKey);
+    if (blocked !== undefined) {
       throw new Error(
-        `本回合已用完全相同的参数调用过「${operation}」，执行层已${previousIdentical === 'refused' ? '拒绝' : '失败'}；`
-        + '不要重复提交同一请求——换参数，或把执行层返回的内容如实转告用户。',
+        `执行层已判定「${objectValue}」在该操作上不可用（${blocked.code}，确定性失败）；`
+        + '本回合不要换参数再试——把执行层给出的说法如实转告用户，并给出可执行的替代路径。',
       );
     }
     if (operationsThisTurn >= maxOperationsPerTurn) {
@@ -1645,8 +1653,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         return outcome;
       },
     });
-    // A2b：记录本回合该 (任务, operation, 参数) 的结果——只用于拦「失败/拒绝后同参数重试」。
-    identicalCallsThisTurn.set(identicalKey, run.outcome.status);
+    // A2b：执行层声明确定性失败（retryable === false）时，本回合锁住该 (operation, 对象)。
+    if (deterministicKey !== undefined && run.outcome.status !== 'completed') {
+      const error = (run.outcome as { error?: { code?: string; retryable?: boolean } }).error;
+      if (error?.retryable === false) {
+        deterministicFailuresThisTurn.set(deterministicKey, { code: error.code ?? 'deterministic_failure' });
+      }
+    }
     if (run.unresolved) {
       onUnresolved();
       // 确定性终结本回合：不把待核对当作可重试的普通失败，模型不得自动重办。
@@ -1973,7 +1986,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       turnNo += 1;
       // A2：单回合执行计数随回合清零（上界按回合计，不跨回合累计）。
       operationsThisTurn = 0;
-      identicalCallsThisTurn = new Map();
+      deterministicFailuresThisTurn = new Map();
       const turnScopeKey = `turn:${options.sessionId}:${turnNo}`;
       const mainWindow = newAttemptWindow();
       // 宿主只交「本轮输入」：最后一条 user = 本轮文本；历史种子仅在驱动尚无会话时使用。

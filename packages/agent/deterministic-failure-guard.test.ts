@@ -1,11 +1,12 @@
 /**
- * A2b 同参数重复守卫（2026-11-18 执行面可靠性）。
+ * A2b 确定性失败后的「同对象」重试守卫（2026-11-18 执行面可靠性）。
  *
- * 根因（live 实测 E14）：同一参数被重复提交——同一集合连取两遍全表、同一窗口再撞一次，
- * 单回合 4 次执行里 2 次是纯重复。旧上界（单回合 5 次）拦不住这种"自证循环"里的无效重复。
+ * 根因（live 实测 E14，2026-11-18）：同一集合的窗口参数被执行层判定不可用后，模型换着写法
+ * （`2026-10` / `W202610`）连撞两次，又换新任务继续撞——单回合最多撞到 5 次上限。
  *
- * 纪律：这是**资源边界**，不是计划门——只挡「完全相同」的重复，换参数照常放行；
- * 被拒的调用不发起执行、不落执行事实，工具错误如实告知。
+ * 纪律：判据来自**执行层自己的 `error.retryable === false`**（确定性失败），宿主只执行：
+ * 本回合内该 (operation, 对象参数) 的后续调用一律不发起，工具错误如实告知并指向替代路径。
+ * 不判断业务、不拦成功过的重复（owner 2026-11-16 裁定：同参数两笔合法操作各执行一次）。
  */
 import { describe, expect, it } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
@@ -107,22 +108,48 @@ async function runWorkerCalls(
   return { client, worker };
 }
 
-describe('A2b 失败/拒绝后的同参数重试守卫', () => {
-  const refused: (request: ExecutionRequest) => ExecutionOutcome = () => ({
-    status: 'refused',
-    error: { code: 'WHERE_INVALID', message: 'collection has no window dimension' },
+describe('A2b 确定性失败后的同对象重试守卫', () => {
+  const nonRetryable: (request: ExecutionRequest) => ExecutionOutcome = () => ({
+    status: 'failed',
+    error: { code: 'WHERE_INVALID', message: 'collection has no window dimension', retryable: false },
   });
 
-  it('同一参数被拒后再次提交：第二次不发起执行，并如实说明「已拒绝」', async () => {
+  it('同一集合被判定确定性失败后，换个窗口写法再试也不发起执行', async () => {
     const { client, worker } = await runWorkerCalls([
       { operation: 'dummy.query', args: { '--collection': 'finance-invoices', '--window': '2026-10' } },
-      { operation: 'dummy.query', args: { '--collection': 'finance-invoices', '--window': '2026-10' } },
-    ], '查 2026-10', refused);
+      { operation: 'dummy.query', args: { '--collection': 'finance-invoices', '--window': 'W202610' } },
+    ], '查 2026-10', nonRetryable);
     expect(client.requests).toHaveLength(1);
-    expect(worker.toolErrors.some((message) => message.includes('已拒绝'))).toBe(true);
+    expect(worker.toolErrors.some((message) => message.includes('确定性失败'))).toBe(true);
   });
 
-  it('同参数成功过两次 → 都放行（owner 裁定：同参数两笔合法操作各执行一次）', async () => {
+  it('同一集合用完全相同参数重试：同样被挡', async () => {
+    const call = { operation: 'dummy.query', args: { '--collection': 'finance-invoices', '--window': '2026-10' } };
+    const { client } = await runWorkerCalls([call, call], '查两次', nonRetryable);
+    expect(client.requests).toHaveLength(1);
+  });
+
+  it('换集合照常放行（对象不同 = 不是同一请求）', async () => {
+    const { client } = await runWorkerCalls([
+      { operation: 'dummy.query', args: { '--collection': 'finance-invoices', '--window': '2026-10' } },
+      { operation: 'dummy.query', args: { '--collection': 'documents', '--window': 'W202611' } },
+    ], '查两个集合', nonRetryable);
+    expect(client.requests).toHaveLength(2);
+  });
+
+  it('可重试失败（retryable 不为 false）不挡后续尝试', async () => {
+    const retryable: (request: ExecutionRequest) => ExecutionOutcome = () => ({
+      status: 'failed',
+      error: { code: 'TRANSIENT', message: 'temporarily unavailable', retryable: true },
+    });
+    const { client } = await runWorkerCalls([
+      { operation: 'dummy.query', args: { '--collection': 'alpha' } },
+      { operation: 'dummy.query', args: { '--collection': 'alpha' } },
+    ], '查 alpha', retryable);
+    expect(client.requests).toHaveLength(2);
+  });
+
+  it('成功过的重复照常放行（同参数两笔合法操作各执行一次）', async () => {
     const { client } = await runWorkerCalls([
       { operation: 'dummy.query', args: { '--collection': 'alpha' } },
       { operation: 'dummy.query', args: { '--collection': 'alpha' } },
@@ -130,22 +157,27 @@ describe('A2b 失败/拒绝后的同参数重试守卫', () => {
     expect(client.requests).toHaveLength(2);
   });
 
-  it('失败后换参数照常放行', async () => {
-    const first = { operation: 'dummy.query', args: { '--collection': 'finance-invoices', '--window': '2026-10' } };
-    const second = { operation: 'dummy.query', args: { '--collection': 'finance-invoices', '--where': 'customer=华远贸易' } };
-    const { client } = await runWorkerCalls([first, second], '查 2026-10', (request) => (
-      (request.args as Record<string, string>)['--window'] === undefined
-        ? { status: 'completed', data: { count: 4 } }
-        : { status: 'refused', error: { code: 'WHERE_INVALID', message: 'no window dimension' } }
-    ));
+  it('跨回合不累计：下一回合对同一集合仍可再试', async () => {
+    const client = new FakeExecutionClient(nonRetryable);
+    const main = new StepDriver();
+    const worker = new StepDriver();
+    const call = { tool: EXECUTE_OPERATION_TOOL, args: { operation: 'dummy.query', args: { '--collection': 'finance-invoices' } } };
+    worker.push({ calls: [call], text: '第一回合失败' });
+    worker.push({ calls: [call], text: '第二回合再试' });
+    main.push({ calls: [{ tool: TASK_RUN_TOOL, args: { task: '查一下' } }], text: '好' });
+    main.push({ calls: [{ tool: TASK_RUN_TOOL, args: { task: '再查一下' } }], text: '好' });
+    const session = await createSession({
+      principalId: 'wecom:test-user',
+      sessionId: 'sess_deterministic_guard_turns',
+      client,
+      allowedOperations: ['dummy.query'],
+      readOnlyOperations: ['dummy.query'],
+      mainDriver: main,
+      workerDriver: worker,
+      mainSystemPrompt: '你是测试主 Agent。',
+    });
+    await session.send('查一下');
+    await session.send('再查一下');
     expect(client.requests).toHaveLength(2);
-  });
-
-  it('键顺序不同但参数相同，在拒绝后同样被挡（规范化去重）', async () => {
-    const { client } = await runWorkerCalls([
-      { operation: 'dummy.query', args: { '--collection': 'finance-invoices', '--window': '2026-10' } },
-      { operation: 'dummy.query', args: { '--window': '2026-10', '--collection': 'finance-invoices' } },
-    ], '查 2026-10', refused);
-    expect(client.requests).toHaveLength(1);
   });
 });

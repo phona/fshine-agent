@@ -162,7 +162,10 @@ export function scriptFor(track: Track, sessionId: string): TrackScript {
         plan: { track, turns: markFirst(base.turns, marker) },
         // 压缩后复查：改口径后回头 / 反悔重做 / 自我更正（N2-B、N4、N5-B）。
         probeTurns: base.turns.filter((t) => t.label !== undefined && keyLabels.has(t.label)).map((t) => ({ ...t, index: 0 })),
-        steadyPumps: 0,
+        // 2026-11-18 实测：把推进轮改成"有界输出"后，13 轮时间线在 40k 窗口下有效压缩=0
+        // （insufficient_coverage）——压缩压力本来就来自累计轮次，不是单条大输出。
+        // 因此 LS6 也要补推进轮：8 轮 × 每轮~1–2k 上下文，才够跨过 40k 两三次。
+        steadyPumps: 8,
       };
     }
   }
@@ -173,13 +176,13 @@ export function pumpTurn(index: number, fetchResult: boolean): TurnSpec {
   if (fetchResult) {
     return {
       index, kind: 'pump',
-      text: '不要新建任务：把刚才受理的那个 bulk 任务（任务编号以你上一条回执为准）的结果报给我——先给总条数与总金额，再列出前 5 条的名称和金额即可，不用逐条全列。',
+      text: '不要新建任务：把刚才受理的那个 bulk 任务（任务编号以你上一条回执为准）的结果报给我——先给总条数与总金额，再列出前 20 条的名称和金额即可。',
     };
   }
   const collection = index % 2 === 0 ? 'bulk-a' : 'bulk-b';
   return {
     index, kind: 'pump',
-    text: `开一个任务：查 ${collection} 集合 W1 窗口的记录，给出总条数与总金额，并列前 5 条的名称与金额（不要逐条全列）。`,
+    text: `开一个任务：查 ${collection} 集合 W1 窗口的记录，给出总条数与总金额，并列前 20 条的名称与金额（不用全列）。`,
   };
 }
 

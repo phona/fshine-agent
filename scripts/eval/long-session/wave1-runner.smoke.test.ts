@@ -10,6 +10,7 @@
  * （stdout 里出现 "sessions" 就说明它真的跑起来了 —— 那才是这条冒烟要拦的回归）。
  */
 import { spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -33,6 +34,14 @@ function runWith(args: readonly string[]) {
 }
 
 describe('Wave1 runner 入口冒烟（不调模型）', () => {
+  it('预注册文件路径存在，且源码里没有改名前的旧路径（防改名漂移）', () => {
+    // 2026-11-18 实测踩过：runner 的 REPO_PREREG 常量用 path.join 拼段，改名脚本漏改，
+    // 入口在 main() 里直接 ENOENT——参数冒烟抓不到，只能靠这条静态断言。
+    expect(existsSync(path.join(REPO_ROOT, 'docs/eval/long-session-prereg.md'))).toBe(true);
+    const source = readFileSync(RUNNER, 'utf8');
+    expect(source.includes('r6-longsession-prereg')).toBe(false);
+  });
+
   it('非法 --track：非零退出 + 打印失败原因，且没有产出运行摘要', () => {
     const result = runWith(['--track=XX']);
     expect(result.status).not.toBe(0);

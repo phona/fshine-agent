@@ -77,7 +77,8 @@ describe('LS6 脚本装配（时间线轨，不是「建立轮 + 压缩后探针
     const script = scriptFor('LS6', 'sess-ls6');
     expect(script.probeTurns.map((t) => t.label)).toEqual(['N2-B', 'N4', 'N5-B']);
     expect(script.probeTurns.every((t) => t.index === 0)).toBe(true);
-    expect(script.steadyPumps).toBe(0);
+    // 2026-11-18：LS6 补 8 轮推进——有界输出使 13 轮时间线在 40k 下压不出压缩（有效压缩=0）。
+    expect(script.steadyPumps).toBe(8);
   });
 });
 
@@ -133,7 +134,7 @@ describe('Wave1 推进决策', () => {
     const second = decide({ completedTurns: 4, effectiveCompactions: 0 });
     expect(second).toMatchObject({ index: 5, kind: 'pump' });
     // 推进轮交替：奇数次开新任务查询，偶数次取回完整结果。
-    expect(second?.text).toContain('前 5 条');
+    expect(second?.text).toContain('前 20 条');
     const afterCap = decide({ completedTurns: 5, effectiveCompactions: 0 });
     expect(afterCap).toMatchObject({ index: 6, kind: 'probe', text: '压缩后复查' });
     expect(decide({ completedTurns: 6, effectiveCompactions: 0 })).toBeNull();

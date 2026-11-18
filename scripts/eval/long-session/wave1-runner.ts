@@ -63,7 +63,7 @@ import {
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
 const FIXTURES_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures');
-const REPO_PREREG = path.join(REPO_ROOT, 'docs', 'product', 'r6-longsession-prereg.md');
+const REPO_PREREG = path.join(REPO_ROOT, 'docs', 'eval', 'long-session-prereg.md');
 const requireCjs = createRequire(import.meta.url);
 const OUT_ROOT = path.join(REPO_ROOT, '.runtime');
 const RUN_ROOT = path.join(REPO_ROOT, '.runtime', 'long-session');
