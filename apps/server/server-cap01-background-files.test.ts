@@ -47,7 +47,7 @@ function testConfig(): AppConfig {
     },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
-    runtime: { dispatchMode: 'background', backgroundConcurrency: 1, queueCapacity: 0, taskRunWaitMs: 0 },
+    runtime: { backgroundConcurrency: 1, queueCapacity: 0, taskRunWaitMs: 0 },
   };
 }
 
@@ -215,6 +215,8 @@ describe('片 1：后台任务产物投递（server 级）', () => {
         readOnlyOperations: ['dummy.query'],
       }),
       taskExecutor: completedWithFiles([file]),
+      // 无会话投递端口（文件必须 fail-closed）；通知 sink 仍是一个推送面 → 后台派发（async）。
+      notificationSink: { async send() { return { delivered: true }; } },
       logger: (line) => logs.push(line),
     });
     try {

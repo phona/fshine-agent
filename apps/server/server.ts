@@ -7,9 +7,9 @@
  * 执行器与文件清单注入由本装配构造注入（runtime 不 spawn）；回合产出文件走主动投递（B）——
  * handler 只返回 text，文件经注入的 fileDelivery.sendToConversation 发出（无端口 fail-closed，
  * 非 live 记 suppressed 不记 sent，投递失败用户可见「未送达」）。
- * R4（P5/P6/P4）：会话按 promise 链串行化（同会话不并发）；`runtime.dispatchMode='background'`
- * 时启动建进程级 TaskRunner（含重启恢复 pump）与通知 outbox（注入 sink），受理即回执；
- * 缺省 'inline' = 上段现行为。
+ * R4（P5/P6/P4）：会话按 promise 链串行化（同会话不并发）；启动即建进程级 TaskRunner
+ * （含重启恢复 pump）与通知 outbox（注入 sink），任务受理即回执、后台推进——server 是
+ * 唯一有渠道推送面的入口，派发恒为 async（不是一个配置开关）。
  * 执行面 = profile 声明的网关（缺省仓内 dummy CLI，不触网）；模型 = 真实 Pi 驱动（env）。
  * 任务底账 = SQLite（B 类）：会话共享一个库，list/get 按 principal+session 收口。
  *
@@ -100,9 +100,9 @@ export interface ServerDeps {
   createDrivers?: DriverFactory;
   /** 测试注入：执行面；缺省仓内 dummy CLI（按 profile root+gateway spawn）。 */
   createExecutionFace?: (profile: ContextProfileConfig, env: NodeJS.ProcessEnv) => Promise<ExecutionFace>;
-  /** 测试注入：后台执行回合（dispatchMode=background 时使用）；缺省真实 Worker 回合执行器。 */
+  /** 测试注入：后台执行回合（server 恒 async 派发时使用）；缺省真实 Worker 回合执行器。 */
   taskExecutor?: TaskExecutor;
-  /** 测试注入 / 部署注入：通知投递 sink（background 时建 outbox；真实 WeCom 适配面归后续切片）。 */
+  /** 测试注入 / 部署注入：通知投递 sink（提供时建 outbox；真实 WeCom 适配面归后续切片）。 */
   notificationSink?: NotificationSink;
   /**
    * CAP-01 S1 交付端口（v8 §7 主动投递 B）：装配层注入渠道的 sendToConversation 面与生效
@@ -442,7 +442,6 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   const sessionPersistence = new SessionPersistence({ rootDir: sessionStoreDir });
 
   // P5：资源策略进程级一份（跨会话共享账本）；缺省 runtime 段 = 现行为缺省（前台并发 4 / 排队 16）。
-  const dispatchMode = deps.config.runtime?.dispatchMode ?? 'inline';
   const policy = createResourcePolicy(deps.config.runtime);
   // 附件事实/系统注记队列与主动追问（进程内，按 (principal, session) 收口）。
   // 事实出队即在下一回合注入；追问定时器注入时钟（测试不真 sleep），close() 全清。
@@ -456,7 +455,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     enqueueSystemNote: (principalId, sessionId, note) => systemNotes.enqueue(principalId, sessionId, note),
     log,
   });
-  // P6/P4：background 才启用新受理/后台/通知路径；缺省 inline 零新增路径。
+  // P6/P4：**有渠道推送面就一律 async**（受理即回执、后台推进、完成后主动投递）：
+  // fileDelivery（会话投递）或 notificationSink（通知面）任一存在即建 runner；
+  // 两者都缺省 = 无端口部署，保持同步等结果（无推送可发，降级不崩——现行为不变）。
+  const hasPushSurface = deps.fileDelivery !== undefined || deps.notificationSink !== undefined;
+  const taskDispatch: 'sync' | 'async' = hasPushSurface ? 'async' : 'sync';
   let runner: TaskRunner | undefined;
   let outbox: NotificationOutbox | undefined;
   let notificationAttachment: ReturnType<typeof attachNotificationOutbox> | undefined;
@@ -499,7 +502,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     if (set.size === 0) pushSuppressedInTurn.delete(sessionKey);
     return true;
   };
-  if (dispatchMode === 'background') {
+  if (taskDispatch === 'async') {
     const completionDelivery = deps.fileDelivery;
     runner = (await createBackgroundDispatch({
       env: deps.env,
@@ -530,8 +533,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       onTaskCompleted: (completion) => {
         const sessionKey = `${completion.principalId}\u0000${completion.sessionId}`;
         enqueueSessionTurn(sessionKey, async () => {
-          // 快活（结果已在本回合交给模型）：抑制，结果不重复发两遍。
-          if (relayedInTurnTasks.get(sessionKey)?.delete(completion.taskId) === true) {
+          // 快活（结果已在本回合交给模型）：文本不重复发两遍（模型已转述）。
+          // 但**产物不因抑制丢失**——同回合交给模型的摘要里没有文件，产物只能由这里回程。
+          const relayed = relayedInTurnTasks.get(sessionKey)?.delete(completion.taskId) === true;
+          const suppressText = (): void => {
             log({
               event: 'task_result_delivery_suppressed',
               principalId: completion.principalId,
@@ -540,8 +545,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
               deliveryMode: completionDelivery?.deliveryMode ?? 'unavailable',
               reason: 'relayed_in_turn',
             });
-            return;
-          }
+          };
           // 片 1 产物回程：任务产物走**同一交付面**（deliverable 角色闸、sha256+文件名去重、
           // live/silent 记账与前台 TurnResult.files 完全同源），文本仍走 deliverTaskResult。
           const files = completion.files ?? [];
@@ -570,6 +574,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
               });
               fileNote = outcome.note;
             }
+          }
+          if (relayed) {
+            suppressText();
+            return;
           }
           await deliverTaskResult({
             taskId: completion.taskId,
@@ -661,7 +669,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           workerSkills,
           ...(mainSkills.registry === undefined ? {} : { mainSkillRegistry: mainSkills.registry }),
           policy,
-          dispatchMode,
+          // 派发方式是装配参数（不是配置键）：有推送面 = async；无端口部署 = sync。
+          taskDispatch,
           // runtime 段随装配核心进会话（单一配置源）：taskRunWaitMs（B 切片短等待窗口）与
           // 回合时限等旋钮由 resolveRuntimeConfig 在核心内统一解析，不再各自单传。
           ...(deps.config.runtime === undefined ? {} : { runtime: deps.config.runtime }),
@@ -911,17 +920,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       await drainNotifications();
       const session = await sessionFor(principalId, sessionId);
       const turn = await session.send(message.text);
-      // B 切片：本回合已把结果交给模型的任务（快活，仅 background 有完成投递）——完成投递
+      // B 切片：本回合已把结果交给模型的任务（快活，async 派发有完成投递）——完成投递
       // 对其抑制（一次性核销）。完成回调排在会话链上，读本集时本回合已结束（受理回合内
-      // 不产生重复投递）；inline 会话没有完成回调，不登记（抑制集合不积累无用条目）。
-      if (dispatchMode === 'background') {
-        for (const relayedTaskId of turn.relayedTaskIds ?? []) {
-          markRelayedInTurn(sessionKey, relayedTaskId);
-        }
-        // 快活失败/等补充：失败原因本回合已交给模型（模型会向用户说明）——主动推送不重复发。
-        for (const suppressedTaskId of turn.pushSuppressedTaskIds ?? []) {
-          markPushSuppressedInTurn(sessionKey, suppressedTaskId);
-        }
+      // 不产生重复投递）。
+      for (const relayedTaskId of turn.relayedTaskIds ?? []) {
+        markRelayedInTurn(sessionKey, relayedTaskId);
+      }
+      // 快活失败/等补充：失败原因本回合已交给模型（模型会向用户说明）——主动推送不重复发。
+      for (const suppressedTaskId of turn.pushSuppressedTaskIds ?? []) {
+        markPushSuppressedInTurn(sessionKey, suppressedTaskId);
       }
       // A2b 观测：本回合被拦下的重试逐条落事件（对象/操作/执行层码/它的 retryable 声明）。
       // 告警归部署侧读这条事件；宿主不自建告警通道（也是「宁可停下让人介入」的可见面）。

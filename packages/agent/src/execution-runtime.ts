@@ -41,9 +41,9 @@
  * 取消/接续经 task_cancel/task_resume 复用 runner 既有生命周期（不在此新建治理）；
  * 上下文与压缩归 Pi 原生（mainDriver 自带）；这里不另建记忆、检索或投影。
  *
- * R4 集成（P5/P6）：注入 `policy` 时前台回合持许可、inline 委派派生后台许可（共享父预算、
- * 深度 +1、不占并发槽）；`dispatchMode='background'` 时委派改为提交注入的 TaskRunner
- * （受理即 queued，执行/恢复/取消归 runner）；缺省 'inline' = 上文现行为逐字不变。
+ * R4 集成（P5/P6）：注入 `policy` 时前台回合持许可、同步委派派生后台许可（共享父预算、
+ * 深度 +1、不占并发槽）；`taskDispatch='async'` 时委派改为提交注入的 TaskRunner
+ * （受理即 queued，执行/恢复/取消归 runner）；缺省 'sync' = 上文现行为逐字不变。
  */
 import { createHash, randomUUID } from 'node:crypto';
 import type { DiscoveredTool } from '@fshine/contracts';
@@ -516,11 +516,11 @@ export interface RuntimeOptions {
    */
   policy?: ResourcePolicy;
   /**
-   * P6：派发模式（缺省 'inline' = 现行为：委派同步执行、Main 等待）。
-   * 'background' 需要同时注入 `taskRunner`（装配方构造，进程级共享）。
+   * P6：任务派发装配参数（**只由装配方显式传入，不是配置键**；缺省 'sync' = 现行为：
+   * 委派同步执行、Main 等待）。'async' 需要同时注入 `taskRunner`（装配方构造，进程级共享）。
    */
-  dispatchMode?: 'inline' | 'background';
-  /** P6：后台任务运行器（background 模式必需；submit→pump，执行/恢复/取消由它承担）。 */
+  taskDispatch?: 'sync' | 'async';
+  /** P6：后台任务运行器（async 模式必需；submit→pump，执行/恢复/取消由它承担）。 */
   taskRunner?: TaskRunner;
   /**
    * B 切片（工单回执收敛）：task_run 受理后的短等待窗口（ms）。缺省取 runtime 配置解析值
@@ -1374,10 +1374,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   let retryBlockedThisTurn: TurnRetryBlock[] = [];
   /** A2b 观测：本回合执行层声明可重试（瞬时故障）的失败。 */
   let retryAllowedThisTurn: TurnRetryAllowed[] = [];
-  const dispatchMode: 'inline' | 'background' = options.dispatchMode ?? 'inline';
+  const taskDispatch: 'sync' | 'async' = options.taskDispatch ?? 'sync';
   const taskRunner = options.taskRunner;
-  if (dispatchMode === 'background' && taskRunner === undefined) {
-    throw new Error('background 派发需要注入 TaskRunner（装配方构造 runner；此处 fail-closed）。');
+  if (taskDispatch === 'async' && taskRunner === undefined) {
+    throw new Error('async 派发需要注入 TaskRunner（装配方构造 runner；此处 fail-closed）。');
   }
   // B 切片：task_run 短等待窗口（单一配置源 = runtime 解析值；未走配置解析的纯内存会话同值缺省）。
   const taskRunWaitMs = options.taskRunWaitMs ?? DEFAULT_RUNTIME_CONFIG.taskRunWaitMs;
@@ -1946,8 +1946,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       }
     }
 
-    // P6 background：受理即底账 queued（Main 不等待）；派发/执行/恢复/取消归 TaskRunner。
-    if (dispatchMode === 'background') {
+    // P6 async：受理即底账 queued（Main 不等待）；派发/执行/恢复/取消归 TaskRunner。
+    if (taskDispatch === 'async') {
       // P7-T06 池满拒绝落点（P6 §七 登记缺口）：受理前按 policy 事实判定——满员且策略
       // 拒绝准入（无队列位）→ 确定性拒绝：任务按 P2 状态机落终态 failed + resource_limited
       // （镜像 inline ⑮ 的拒绝形状），不进入执行；有排队位时受理为 queued（队列 = 底账
@@ -2330,9 +2330,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // P1（S1）：本回合最终回复逐字存档——同回合各任务行同值；空白回复/回合失败不落
       // （缺省=无最终回复存档，显示层不用执行层汇报冒充）。存档用出口清理后的最终回复
       // （用户看到什么，task_result 就是什么）。
-      // background：受理话术不落任务行（结果由 runner 在确认 completed 后经 archiveReply
+      // async：受理话术不落任务行（结果由 runner 在确认 completed 后经 archiveReply
       // 逐字存档，避免受理话术覆盖结果）。
-      if (dispatchMode !== 'background' && taskIds.length > 0 && reply.trim() !== '') {
+      if (taskDispatch !== 'async' && taskIds.length > 0 && reply.trim() !== '') {
         registry.archiveReply(taskIds, reply);
       }
       const executions = taskIds.flatMap((taskId) => registry.get(taskId, scope).executions);
@@ -2721,6 +2721,11 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         }
         return { kind: 'failed', reason: `执行层未成功：${operation} 返回 ${outcome.status}。` };
       }
+      // CAP-01 S2 ④ 兜底扫描（与同步委派同一纪律）：任务 out/ 全量登记——执行层按
+      // fileParams 写出的产物即使没走 run_js 也要回程；与回程登记同池去重。
+      // 未注入桥 = 无兜底面（零变化缺省）。
+      const swept = taskBridge?.sweepTaskOutputs();
+      for (const file of swept?.files ?? []) pushTurnFileOnce(taskFiles, file);
       // 片 1 产物回程：Worker 的 run_js 产物已登记为**任务作用域**文件（task_id 绑定，
       // 登记时已 copy 进 workspace）。完成时随结局上交——后台面对 TurnResult.files 的
       // 同位面；装配方按它投递（投递去留与前台同一交付面/角色闸）。

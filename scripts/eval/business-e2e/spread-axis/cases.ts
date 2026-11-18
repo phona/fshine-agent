@@ -54,9 +54,9 @@ export interface DsCase {
    * 键：`operation` 精确匹配 或 `collection@*` 通配。
    */
   necessaryDiscovery?: readonly string[];
-  /** 派发模式；缺省 inline（与 Phase 2 对话面同装配）。 */
-  dispatchMode?: 'inline' | 'background';
-  /** inline 下直接注入 TaskRunner（四工具同源门控的合法装配）。 */
+  /** 任务派发装配参数；缺省 sync（与 Phase 2 对话面同装配）。 */
+  taskDispatch?: 'sync' | 'async';
+  /** sync 下直接注入 TaskRunner（四工具同源门控的合法装配）。 */
   withTaskRunner?: boolean;
   /** 逐用例环境变量（如限流旋钮）；键值进进程 env/物化配置，不入证据。 */
   env?: Readonly<Record<string, string>>;
@@ -175,7 +175,7 @@ const DS_3: DsCase = {
     { object: { collection: 'contoso-trade' }, access: 'read' },
     { object: { collection: 'contoso-logistics' }, access: 'read' },
   ],
-  dispatchMode: 'background',
+  taskDispatch: 'async',
   withTaskRunner: true,
   // 资源面场景旋钮（预注册 JSON 数据文件）：后台并发 3 才能观察多任务并行受理/活跃峰值/
   // 在飞峰值；缺省产品配置（后台并发 1、队列 0）下第 2 件起会确定性拒绝（queue_full）——

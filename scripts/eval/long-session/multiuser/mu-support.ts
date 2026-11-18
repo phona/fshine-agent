@@ -389,7 +389,8 @@ function muConfig(mode: 'inline' | 'background', runtime?: RuntimeConfig): AppCo
     },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
-    runtime: { ...(runtime ?? {}), ...(mode === 'background' ? { dispatchMode: 'background' as const } : {}) },
+    // 派发方式不是配置键：server 恒 async；mode 只留作评测样本的观测标签。
+    runtime: runtime ?? {},
   };
 }
 
@@ -408,6 +409,10 @@ export async function createMuServer(input: CreateMuServerInput): Promise<MuServ
     createExecutionFace: async () => ({ client: new MuFaceClient(ctx, failFor), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
     ...(input.taskExecutor === undefined ? {} : { taskExecutor: input.taskExecutor }),
     ...(input.notificationSink === undefined ? {} : { notificationSink: input.notificationSink }),
+    // 原 background 装配由推送面显式声明（server 有推送面 = async）；inline 样本保持同步。
+    ...(input.mode === 'background'
+      ? { fileDelivery: { deliveryMode: 'silent' as const, async sendToConversation() { throw new Error('（eval）silent 不投递'); } } }
+      : {}),
     logger: () => {},
   });
   return { server, ctx, dbPath, dir: input.dir, close: () => server.close() };

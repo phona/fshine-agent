@@ -256,6 +256,7 @@ export async function assembleStabSession(options: AssembleStabOptions): Promise
     createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
     // B 切片：稳定性套件钉在异步受理语义（受理/背压/排空的机械读数）；短等待窗口的
     // 默认行为由 runtime-task-wait-window / server-task-wait-window 专测覆盖。
+    taskDispatch: 'async',
     runtime: { taskRunWaitMs: 0, ...options.runtime },
     taskExecutor: options.taskExecutor,
     taskRegistry: options.registry,

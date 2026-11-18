@@ -170,7 +170,7 @@ const FILLER = (n: number, tag: string): string => {
   return out;
 };
 
-interface Scenario { name: string; dispatchMode: 'inline' | 'background'; turns: string[]; }
+interface Scenario { name: string; taskDispatch: 'sync' | 'async'; turns: string[]; }
 
 function fill(tag: string, n = 130): string {
   return `背景补充（${tag}），读完即可：\n${FILLER(n, tag)}`;
@@ -180,7 +180,7 @@ function scenarios(): Record<string, Scenario> {
   return {
     A: {
       name: 'A-长对话连续压缩',
-      dispatchMode: 'inline',
+      taskDispatch: 'sync',
       turns: [
         `先记住两件必须一直遵守的事：(1) 我的项目代号是「蓝鲸-42」；(2) 你回答我时一律用简体中文。\n${fill('A1')}`,
         `请用 task_run 让执行层查一下 collection=alpha（窗口取 recent）的记录，把条数和第一条内容告诉我。`,
@@ -202,7 +202,7 @@ function scenarios(): Record<string, Scenario> {
     },
     B: {
       name: 'B-多任务交替交办',
-      dispatchMode: 'background',
+      taskDispatch: 'async',
       turns: [
         `交办第一个任务：用 task_run 让执行层查 collection=alpha（窗口 recent）的记录，统计条数。`,
         `交办第二个任务：用 task_run 查 topic=budget 的 ballot（窗口 recent）结果，说明票数。`,
@@ -218,7 +218,7 @@ function scenarios(): Record<string, Scenario> {
     },
     C: {
       name: 'C-长会话稳定性',
-      dispatchMode: 'inline',
+      taskDispatch: 'sync',
       turns: [
         `第 1 段背景：\n${fill('C1')}`,
         `第 2 段背景：\n${fill('C2')}`,
@@ -301,7 +301,7 @@ async function main(): Promise<void> {
     setAuditPath: true,
     emptyOperationsMessage: '执行层没有声明任何只读 operation。',
     emptyOperationsError: (message) => new Error(message),
-    runtime: { dispatchMode: scenario.dispatchMode },
+    taskDispatch: scenario.taskDispatch,
     createDrivers: () => ({ mainDriver, workerDriver }),
   });
 
@@ -365,7 +365,7 @@ async function main(): Promise<void> {
     const summary = {
       scenario: scenario.name,
       scenarioId,
-      dispatchMode: scenario.dispatchMode,
+      taskDispatch: scenario.taskDispatch,
       model: modelId,
       provider: 'openai-completions',
       providerDeclaredMaxInputTokens: 262144,

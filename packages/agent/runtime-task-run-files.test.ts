@@ -120,7 +120,7 @@ interface Fixture {
 async function makeFixture(input: {
   withCopier?: boolean;
   worker?: TurnDriver;
-  dispatchMode?: 'inline' | 'background';
+  taskDispatch?: 'sync' | 'async';
   /** 后台派发替身：由用例在 runner 内部观察底账（缺省 stub 一律抛错）。 */
   makeRunner?: (registry: ReturnType<typeof createSqliteTaskRegistry>) => TaskRunner;
 } = {}): Promise<Fixture> {
@@ -161,8 +161,8 @@ async function makeFixture(input: {
     workerDriver: input.worker ?? workerNeverCalled,
     mainSystemPrompt: '你是测试主 Agent。',
     taskRegistry: registry,
-    ...(input.dispatchMode === undefined ? {} : { dispatchMode: input.dispatchMode }),
-    ...(input.dispatchMode === 'background' ? { taskRunner: runner } : {}),
+    ...(input.taskDispatch === undefined ? {} : { taskDispatch: input.taskDispatch }),
+    ...(input.taskDispatch === 'async' ? { taskRunner: runner } : {}),
     ...(copier === undefined ? {} : { taskInputCopier: copier }),
     onFileRefUnavailable: (reason) => reasons.push(reason),
   });
@@ -331,7 +331,7 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
     // runtime-background-input-files.test.ts）。
     const submitCopies: string[][] = [];
     const fx = await makeFixture({
-      dispatchMode: 'background',
+      taskDispatch: 'async',
       makeRunner: (registry) => ({
         submit(task) {
           submitCopies.push(

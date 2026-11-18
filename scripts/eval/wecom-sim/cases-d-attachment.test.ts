@@ -35,10 +35,12 @@ function optionsOf(text: string): string[] {
     .map((line) => line.replace(/^\d+\.\s*/, ''));
 }
 
+// D 组需要宿主主动追问（attachmentNudge 经会话投递端口发文本）→ 显式声明 async 装配
+// （有推送面）；追问与派发方式无关，但端口按「有推送面就一律 async」随装配注入。
 describe('D 组·附件时序（W-13～W-18）', () => {
   it('W-13 文件+3 秒窗口内补指令：合并一回合、只回一次终帧、能读到文件内容', async () => {
     const sample = await salesSampleXlsxAsync();
-    const sim = await startWecomSim({ label: 'w13' });
+    const sim = await startWecomSim({ label: 'w13', taskDispatch: 'async' });
     try {
       sim.book.mainTurn(MERGED_SUMMARY_TEXT, mainAttachmentSummaryResponses(false));
       sim.sendFile('销售明细.xlsx', sample);
@@ -64,7 +66,7 @@ describe('D 组·附件时序（W-13～W-18）', () => {
 
   it('W-14 只发文件：一条回执（只报个数、不带名）+ 30s 一条追问（列名 + 2~4 个选项）', async () => {
     const sample = await salesSampleXlsxAsync();
-    const sim = await startWecomSim({ label: 'w14' });
+    const sim = await startWecomSim({ label: 'w14', taskDispatch: 'async' });
     try {
       sim.sendFile('销售明细.xlsx', sample);
       // 渠道回执：合并窗 3s flush → 纯附件回合 → 回执并窗 2s → `已收到 1 个文件`（真实定时器到点）。
@@ -96,7 +98,7 @@ describe('D 组·附件时序（W-13～W-18）', () => {
 
   it('W-15 文件后补指令（别生成文件）：不触发追问、直接干活给出真实合计、不投文件', async () => {
     const sample = await salesSampleXlsxAsync();
-    const sim = await startWecomSim({ label: 'w15' });
+    const sim = await startWecomSim({ label: 'w15', taskDispatch: 'async' });
     try {
       sim.book.mainTurn('帮我汇总金额，别生成文件', mainAttachmentSummaryResponses(false));
       sim.sendFile('销售明细.xlsx', sample);
@@ -123,7 +125,7 @@ describe('D 组·附件时序（W-13～W-18）', () => {
 
   it('W-16 群聊只发文件：纯附件回合照常发生，但不发追问（仅单聊触发）', async () => {
     const sample = await salesSampleXlsxAsync();
-    const sim = await startWecomSim({ label: 'w16' });
+    const sim = await startWecomSim({ label: 'w16', taskDispatch: 'async' });
     try {
       sim.sendFile('销售明细.xlsx', sample, { chatType: 'group', conversationId: 'group-w' });
       // 等纯附件回合真实发生（登记已做）——不是「什么都没跑所以没有追问」的假绿。
@@ -139,7 +141,7 @@ describe('D 组·附件时序（W-13～W-18）', () => {
 
   it('W-17 连发 3 个文件：一条回执（只报个数）+ 一条追问（列 3 个文件名），不刷屏', async () => {
     const sample = await salesSampleXlsxAsync();
-    const sim = await startWecomSim({ label: 'w17' });
+    const sim = await startWecomSim({ label: 'w17', taskDispatch: 'async' });
     try {
       sim.sendFile('销售明细.xlsx', sample);
       // 三份**不同**文件：同字节在同 scope 会按 sha256 去重成一个 fileId（F-1 语义），
@@ -173,7 +175,7 @@ describe('D 组·附件时序（W-13～W-18）', () => {
 
   it('W-18 追问后回 1：按「1=汇总统计」执行（真实文件汇总 39000），注记接线可查', async () => {
     const sample = await salesSampleXlsxAsync();
-    const sim = await startWecomSim({ label: 'w18' });
+    const sim = await startWecomSim({ label: 'w18', taskDispatch: 'async' });
     try {
       sim.book.mainTurn('1', mainAttachmentSummaryResponses(false));
       sim.sendFile('销售明细.xlsx', sample);

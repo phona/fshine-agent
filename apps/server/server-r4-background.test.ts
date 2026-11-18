@@ -32,7 +32,7 @@ function tempDir(): string {
   return dir;
 }
 
-function testConfig(mode: 'inline' | 'background'): AppConfig {
+function testConfig(background: boolean = false): AppConfig {
   return {
     principals: {
       'wecom:user-a': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
@@ -43,10 +43,8 @@ function testConfig(mode: 'inline' | 'background'): AppConfig {
     },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
-    ...(mode === 'background'
-      // B 切片：钉 0 窗口（受理→后台→通知链路的机械断言；窗口行为由专测覆盖）。
-      ? { runtime: { dispatchMode: 'background' as const, backgroundConcurrency: 1, taskRunWaitMs: 0 } }
-      : {}),
+    // server 恒 async（派发方式不是配置键）；B 切片用例钉 0 窗口做受理→后台→通知的机械断言。
+    ...(background ? { runtime: { backgroundConcurrency: 1, taskRunWaitMs: 0 } } : {}),
   };
 }
 
@@ -164,7 +162,7 @@ describe('R4 联合：server 同会话串行化（P5-T02）', () => {
     };
     const server = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig('inline'),
+      config: testConfig(),
       dbPath: path.join(dir, 'state.db'),
       createDrivers: () => ({ mainDriver, workerDriver: unreachableDriver() }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
@@ -204,7 +202,7 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
     ]);
     const server = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig('background'),
+      config: testConfig(true),
       dbPath,
       createDrivers: () => ({ mainDriver: plannedDriver(plans, records), workerDriver: unreachableDriver() }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
@@ -271,7 +269,7 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
     ]);
     const server = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig('background'),
+      config: testConfig(true),
       dbPath,
       createDrivers: () => ({ mainDriver: plannedDriver(plans, records), workerDriver: unreachableDriver() }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
@@ -307,7 +305,7 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
     ]);
     const server = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig('background'),
+      config: testConfig(true),
       dbPath,
       createDrivers: () => ({ mainDriver: plannedDriver(plans, records), workerDriver: unreachableDriver() }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),

@@ -43,7 +43,6 @@ function testConfig(overrides: { taskRunWaitMs?: number } = {}): AppConfig {
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
     runtime: {
-      dispatchMode: 'background' as const,
       backgroundConcurrency: 1,
       taskRunWaitMs: overrides.taskRunWaitMs ?? 0,
     },

@@ -121,7 +121,7 @@ async function runGroupA(prepared: Awaited<ReturnType<typeof prepareGroup>>, met
     principalId: scope.principalId,
     sessionId: scope.sessionId,
     scope,
-    dispatchMode: 'inline',
+    taskDispatch: 'sync',
     withRunner: false,
     ...(resumeFile === undefined ? {} : { resumeFile }),
   });
@@ -159,7 +159,7 @@ async function runGroupB(prepared: Awaited<ReturnType<typeof prepareGroup>>, met
   const scope: TaskScope = { principalId: 'wecom:stage-d-b', sessionId: 'stage-d-b-session' };
   let handle = await buildSession({
     group: 'B', prepared, key: 'b', principalId: scope.principalId, sessionId: scope.sessionId, scope,
-    dispatchMode: 'inline',
+    taskDispatch: 'sync',
     withRunner: true,
   });
   const sessions = [handle.sink];
@@ -186,7 +186,7 @@ async function runGroupC(prepared: Awaited<ReturnType<typeof prepareGroup>>, met
   });
   let handle = await buildSession({
     group: 'C', prepared, key: 'c', principalId: scope.principalId, sessionId: scope.sessionId, scope,
-    dispatchMode: 'inline',
+    taskDispatch: 'sync',
     withRunner: true,
   });
   const sessions = [handle.sink];
@@ -224,7 +224,7 @@ async function runGroupD(prepared: Awaited<ReturnType<typeof prepareGroup>>, met
       principalId: user.principalId,
       sessionId: user.sessionId,
       scope: scopes.get(user.key)!,
-      dispatchMode: 'background',
+      taskDispatch: 'async',
       withRunner: true,
       ...(user.faultWindow === undefined ? {} : { faultWindow: user.faultWindow }),
       ...(resumeFile === undefined ? {} : { resumeFile }),
@@ -321,7 +321,7 @@ async function runSelftest(out: string): Promise<number> {
     principalId: scope.principalId,
     sessionId: scope.sessionId,
     scope,
-    dispatchMode: 'inline',
+    taskDispatch: 'sync',
     withRunner: true,
     driverFactory: () => ({ mainDriver: fakeMain(), workerDriver: fakeWorker() }),
   });
@@ -432,17 +432,17 @@ async function runDSelftest(out: string): Promise<number> {
   });
   const alice = await buildSession({
     group: 'D', prepared, key: 'alice', principalId: aliceScope.principalId, sessionId: aliceScope.sessionId, scope: aliceScope,
-    dispatchMode: 'background', withRunner: true,
+    taskDispatch: 'async', withRunner: true,
     driverFactory: () => ({ mainDriver: mainFor('run'), workerDriver: worker() }),
   });
   const bob = await buildSession({
     group: 'D', prepared, key: 'bob', principalId: bobScope.principalId, sessionId: bobScope.sessionId, scope: bobScope,
-    dispatchMode: 'background', withRunner: true,
+    taskDispatch: 'async', withRunner: true,
     driverFactory: () => ({ mainDriver: mainFor('status'), workerDriver: worker() }),
   });
   const dave = await buildSession({
     group: 'D', prepared, key: 'dave', principalId: daveScope.principalId, sessionId: daveScope.sessionId, scope: daveScope,
-    dispatchMode: 'background', withRunner: true,
+    taskDispatch: 'async', withRunner: true,
     faultWindow: 'W2',
     driverFactory: () => ({
       mainDriver: mainFor('run'),
@@ -544,7 +544,7 @@ async function runRestartSelftest(out: string): Promise<number> {
   const scope: TaskScope = { principalId: 'wecom:selftest-restart', sessionId: 'selftest-restart-session' };
   const build = (resumeFile?: string) => buildSession({
     group: 'B', prepared, key: 'restart', principalId: scope.principalId, sessionId: scope.sessionId, scope,
-    dispatchMode: 'inline',
+    taskDispatch: 'sync',
     withRunner: false,
     driverFactory: makeDrivers,
     ...(resumeFile === undefined ? {} : { resumeFile }),

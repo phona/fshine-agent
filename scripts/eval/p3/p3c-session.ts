@@ -390,7 +390,7 @@ async function run(): Promise<void> {
       createDrivers: () => drivers,
       createExecutionFace: async () => face,
       taskRunner: dispatch.runner,
-      dispatchMode: 'background',
+      taskDispatch: 'async',
     });
     const session = assembledE.session;
 

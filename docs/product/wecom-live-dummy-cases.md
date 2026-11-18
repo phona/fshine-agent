@@ -141,9 +141,10 @@ TMPDIR=/home/tao/.tmp node scripts/eval/fixtures/make-sales-sample.mjs /home/tao
 
 ### G. 任务面 / 异步（3，W-26～W-28）
 
-> 前提：自动用例用 `runtime.dispatchMode: 'background'` 装配（受理即回执、后台 TaskRunner
-> 执行、完成后主动投递），并用 `runtime.taskRunWaitMs` 控制短等待窗口：W-26 用 1ms
-> 确定性超窗，W-28 用缺省 1500ms 验证窗口内完成。inline 装配不产生受理回执。
+> 前提：自动用例走真 server 装配（server 恒 async：受理即回执、后台 TaskRunner 执行、
+> 完成后主动投递），并用 `runtime.taskRunWaitMs` 控制短等待窗口：W-26 用 1ms
+> 确定性超窗，W-28 用缺省 1500ms 验证窗口内完成。同步装配不产生受理回执（server 已无
+> 该模式；`runtime.dispatchMode` 配置键已于 2026-11-18 删除）。
 
 | # | 优先级 | 发 | 预期 | 观察 | 证据 |
 | --- | --- | --- | --- | --- | --- |
@@ -342,6 +343,6 @@ W-13 的「文件先到、指令在窗内到达」用一次 `settleDispatch`（�
   已补装——未改 package.json/lockfile）。
 - F（W-22～W-25）与 G（W-26～W-28）已按同一装配链补成自动用例（2026-11-18）：F 用
   `runtime.allowWriteOperations: true` 装配走完整写确认回环（提案 → 确认 → commit 读回 →
-  重复确认确定性拒绝），W-25 用缺省只读装配对照；G 用 `runtime.dispatchMode: 'background'`
-  + `runtime.taskRunWaitMs` 覆盖超窗受理、完成后追问与窗口内快活。harness 的测试面因此新增
-  `dispatchMode` / `taskRunWaitMs` 覆盖与只读 `dbPath`（产品码未改）。
+  重复确认确定性拒绝），W-25 用缺省只读装配对照；G 走 server 恒 async 装配 +
+  `runtime.taskRunWaitMs` 覆盖超窗受理、完成后追问与窗口内快活。harness 的测试面因此新增
+  `taskDispatch` / `taskRunWaitMs` 覆盖与只读 `dbPath`（产品码未改）。

@@ -295,7 +295,7 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       mainSystemPrompt: '（测试）Main 系统提示',
       taskRegistry: registry,
       policy,
-      dispatchMode: 'background',
+      taskDispatch: 'async',
       taskRunner: runner,
       // B 切片：钉 0 窗口（本套件测取消在飞机制；窗口行为由专测覆盖）。
       taskRunWaitMs: 0,

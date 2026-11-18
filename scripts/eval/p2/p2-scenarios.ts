@@ -175,7 +175,7 @@ const S2: P2CaseDefinition = {
   ],
   truth: { facts: [{ turn: 2, expectation: { kind: 'exact', collection: 'beta', count: 3, sum: 1000 } }] },
   preregConflict:
-    'S2 强制 dispatchMode=background（§一 S2），而 background 的 task_run 只返回受理回执（execution-runtime.ts:591），'
+    'S2 强制异步派发（§一 S2；旧派发配置键已删除，server 恒 async），而 async 的 task_run 只返回受理回执（execution-runtime.ts:591），'
     + 'Main 同回合无法取得 beta 数据；§一 S2 Oracle 却要求 T2 回复含 beta 条数/总额（count=3, sum=1000）。'
     + '合规产品的 T2 回复只能是受理回执 → 该事实判据在强制装配下不可满足。待 owner 裁定：'
     + '（a）把 beta 事实判据下移到结果取回轮，或（b）允许 beta 走 inline 子路径。本实现按预注册字面保留判据并登记冲突（不擅自改口径）。',

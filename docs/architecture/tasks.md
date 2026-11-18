@@ -7,7 +7,7 @@
 任务是一行底账（归属 + 状态 + 机械原因 + 执行事实）。**状态只经一个归约核心改**；**身份分成「哪一次交办」与「哪一笔业务操作」两层**；**证明不了是同一笔就停副作用**。
 ## 1. 状态集与合法转换
 
-9 个状态，顺序即契约登记顺序：`TASK_STATUSES`（`packages/agent/src/task-registry.ts:54`）。五个终态（无边出）：`cancelled / completed / failed / timed_out / unexecuted`。起始状态取决于受理方式：**inline（缺省）直接 `running`**；只有 `dispatchMode=background` 才先落 `queued`（`packages/agent/src/task-runner.ts:501-505`）。
+9 个状态，顺序即契约登记顺序：`TASK_STATUSES`（`packages/agent/src/task-registry.ts:54`）。五个终态（无边出）：`cancelled / completed / failed / timed_out / unexecuted`。起始状态取决于派发方式：**同步等结果（ask/eval）直接 `running`**；server 的异步派发才先落 `queued`（`packages/agent/src/task-runner.ts:501-505`）。派发方式不是配置项（2026-11-18 起 `runtime.dispatchMode` 已删除）：server 恒 async，进程内入口恒 sync。
 
 合法边只有一张表 `LEGAL_TRANSITIONS`（`packages/agent/src/task-registry.ts:246`）：`queued → running | cancelling | timed_out`；`running → completed | failed | waiting_user | cancelling | timed_out | unexecuted`（`unexecuted` = 已汇报零执行）；`waiting_user → running | cancelling | timed_out`；`cancelling → cancelled | running`——后者是**「中止未获确认不得宣称取消」的回滚边**（`:243`）。
 

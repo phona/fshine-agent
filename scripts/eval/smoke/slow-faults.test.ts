@@ -59,7 +59,7 @@ function auditRowsOf(stateDir: string): Array<Record<string, unknown>> {
 
 describe('冒烟·长时执行（--delay-ms）', () => {
   it('受理回执先于完成出现（无编号）；任务后台推进到 completed 并主动投递一次结果', async () => {
-    const sim = await startWecomSim({ label: 'smoke-slow', dispatchMode: 'background', taskRunWaitMs: 1 });
+    const sim = await startWecomSim({ label: 'smoke-slow', taskDispatch: 'async', taskRunWaitMs: 1 });
     const registry = createSqliteTaskRegistry(sim.dbPath, { readOnly: true });
     try {
       const userText = '把 documents 集合上月的明细跑出来';
@@ -112,7 +112,7 @@ describe('冒烟·长时执行（--delay-ms）', () => {
 
 describe('冒烟·执行很久后异常（slow_fault）', () => {
   it('跑了 2.5s 才失败：任务终态 failed、不谎报成功、零完成投递；用户追问得到如实原因', async () => {
-    const sim = await startWecomSim({ label: 'smoke-fault', dispatchMode: 'background', taskRunWaitMs: 1 });
+    const sim = await startWecomSim({ label: 'smoke-fault', taskDispatch: 'async', taskRunWaitMs: 1 });
     const registry = createSqliteTaskRegistry(sim.dbPath, { readOnly: true });
     try {
       const userText = '把 slow-fault-one 的数据取出来';
@@ -177,7 +177,7 @@ describe('冒烟·执行很久后异常（slow_fault）', () => {
 
 describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
   it('缺参 → waiting_user 且问题可见；补答后同一 taskId 续跑完成、结果投递一次', async () => {
-    const sim = await startWecomSim({ label: 'smoke-input', dispatchMode: 'background', taskRunWaitMs: 1 });
+    const sim = await startWecomSim({ label: 'smoke-input', taskDispatch: 'async', taskRunWaitMs: 1 });
     const registry = createSqliteTaskRegistry(sim.dbPath, { readOnly: true });
     try {
       const userText = '查一下 receivables-open 的明细';
@@ -265,7 +265,7 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
   }, 120_000);
 
   it('不补答：停在 waiting_user，不重复执行（夹具审计行数不变）', async () => {
-    const sim = await startWecomSim({ label: 'smoke-input-idle', dispatchMode: 'background', taskRunWaitMs: 1 });
+    const sim = await startWecomSim({ label: 'smoke-input-idle', taskDispatch: 'async', taskRunWaitMs: 1 });
     const registry = createSqliteTaskRegistry(sim.dbPath, { readOnly: true });
     try {
       const userText = '查一下 receivables-open 的明细';

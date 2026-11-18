@@ -170,7 +170,8 @@ async function makeFixture(options: { withBridge: boolean }): Promise<Fixture> {
       allowedOperations: ['dummy.query'],
       readOnlyOperations: ['dummy.query'],
     }),
-    runtime: { dispatchMode: 'background', backgroundConcurrency: 1, queueCapacity: 0, taskRunWaitMs: 0 },
+    taskDispatch: 'async',
+    runtime: { backgroundConcurrency: 1, queueCapacity: 0, taskRunWaitMs: 0 },
     // 生产装配同一条注入：交办复制端口与文件桥同一 fileStore 实例。
     taskInputCopier: fileStore,
     ...(options.withBridge

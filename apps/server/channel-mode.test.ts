@@ -363,6 +363,8 @@ function testConfig(): AppConfig {
     },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
+    // 有推送面 = 后台派发（async）；0 窗口让受理即返回，文件投递走后台完成回调。
+    runtime: { taskRunWaitMs: 0 },
   };
 }
 
@@ -442,6 +444,11 @@ async function runFileTurn(options: { mode: ChannelMode; previousAssembly?: bool
     sdk.emit('authenticated'); // offline 下无监听者（start 未调用），no-op
     await starting;
     const reply = await server.handler(incoming(options.previousAssembly === true ? 'm-beforeChange' : `m-${options.mode}`));
+    // 有推送面 = async：文件投递发生在后台完成回调里；关服务器前必须等它落账
+    // （否则 close 会先关库，后台收尾变成未处理异常）。
+    await vi.waitFor(() => {
+      expect(logs.some((line) => line['event'] === 'file_delivery')).toBe(true);
+    }, { timeout: 15_000 });
     return { logs, sdk, clientFactoryCalls, reply };
   } finally {
     await channel.stop();
@@ -453,9 +460,11 @@ describe('shadow / offline 的 file_delivery 事件：sent 数 = 0、suppressed 
   for (const mode of ['shadow', 'offline'] as const) {
     it(`${mode}：文件回合记 suppressed（sent=0、files=1、deliveryMode=silent）`, async () => {
       const run = await runFileTurn({ mode });
+      await vi.waitFor(() => {
+        expect(run.logs.filter((line) => line['event'] === 'file_delivery')).toHaveLength(1);
+      });
       const deliveryLogs = run.logs.filter((line) => line['event'] === 'file_delivery');
-      expect(deliveryLogs).toHaveLength(1);
-      expect(deliveryLogs[0]).toEqual({
+      expect(deliveryLogs[0]).toMatchObject({
         event: 'file_delivery',
         principalId: 'wecom:user-a',
         sessionId: 'wecom:conv-a',
@@ -464,8 +473,6 @@ describe('shadow / offline 的 file_delivery 事件：sent 数 = 0、suppressed 
         deliveryMode: 'silent',
       });
       expect(run.logs.filter((line) => line['event'] === 'file_delivery' && line['status'] === 'sent')).toHaveLength(0);
-      expect(run.logs.find((line) => line['event'] === 'message_done')?.['fileDelivery'])
-        .toEqual({ status: 'suppressed', files: 1 });
       // 用户收到的正文不被「未送达」污染（静默部署本就无真实收件人）。
       expect(run.reply).toBe('汇总完成。');
       if (mode === 'offline') {
@@ -560,18 +567,29 @@ describe('live：与改动前逐字节同序（同一输入同一事件序列）
     ]);
   });
 
-  it('server 侧同一输入：装配后的 live 与改动前硬编码 live 的 file_delivery/message_done 事实逐字相同', async () => {
+  it('server 侧同一输入：装配后的 live 与改动前硬编码 live 的 file_delivery 事实逐字相同', async () => {
     const assembled = await runFileTurn({ mode: 'live' });
     const beforeChange = await runFileTurn({ mode: 'live', previousAssembly: true });
 
-    const facts = (run: FileTurnRun) => ({
-      delivery: run.logs.filter((line) => line['event'] === 'file_delivery'),
-      doneDelivery: run.logs
-        .filter((line) => line['event'] === 'message_done')
-        .map((line) => line['fileDelivery']),
+    // 有推送面 = 后台派发（async）：文件投递在后台完成回调里落账（message_done 是受理回合，
+    // 不再承载 turn 级 fileDelivery——投递事实以 file_delivery/task_result_delivery_* 为准）。
+    await vi.waitFor(() => {
+      expect(assembled.logs.filter((line) => line['event'] === 'file_delivery')).toHaveLength(1);
+      expect(beforeChange.logs.filter((line) => line['event'] === 'file_delivery')).toHaveLength(1);
     });
-    expect(facts(assembled)).toEqual(facts(beforeChange));
-    expect(facts(assembled).delivery).toEqual([{
+    // 逐字比较时去掉每次任务不同的 taskId（投递事实的稳定字段逐字相同）。
+    const deliveryFacts = (run: FileTurnRun) => run.logs
+      .filter((line) => line['event'] === 'file_delivery')
+      .map((line) => ({
+        event: line['event'],
+        principalId: line['principalId'],
+        sessionId: line['sessionId'],
+        files: line['files'],
+        status: line['status'],
+        ...(line['parts'] === undefined ? {} : { parts: line['parts'] }),
+      }));
+    expect(deliveryFacts(assembled)).toEqual(deliveryFacts(beforeChange));
+    expect(deliveryFacts(assembled)).toEqual([{
       event: 'file_delivery',
       principalId: 'wecom:user-a',
       sessionId: 'wecom:conv-a',
@@ -579,7 +597,6 @@ describe('live：与改动前逐字节同序（同一输入同一事件序列）
       status: 'sent',
       parts: 1,
     }]);
-    expect(facts(assembled).doneDelivery).toEqual([{ status: 'sent', files: 1 }]);
     // live 的真实出站确实落到替身（证明 sent 来自闸门放行，而不是端口感官）。
     expect(assembled.sdk.uploads).toEqual(['汇总.txt']);
     expect(assembled.sdk.activeMedia).toHaveLength(1);

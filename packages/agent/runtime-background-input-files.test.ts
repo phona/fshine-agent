@@ -236,7 +236,7 @@ async function makeFixture(input: {
     workerDriver: input.worker ?? workerNeverCalled,
     mainSystemPrompt: '你是测试主 Agent。',
     taskRegistry: registry,
-    dispatchMode: 'background',
+    taskDispatch: 'async',
     taskRunner: runner,
     taskRunWaitMs: 0,
     taskInputCopier: copier,

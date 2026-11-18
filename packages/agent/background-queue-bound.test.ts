@@ -144,7 +144,7 @@ async function sessionFor(
     mainSystemPrompt: '（测试）Main 系统提示',
     taskRegistry: stack.registry,
     policy: stack.policy,
-    dispatchMode: 'background',
+    taskDispatch: 'async',
     taskRunner: stack.runner,
     // B 切片：钉 0 窗口（本套件测受理上界/背压的机械读数；窗口行为由专测覆盖）。
     taskRunWaitMs: 0,

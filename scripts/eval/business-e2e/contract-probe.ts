@@ -173,7 +173,7 @@ async function probeCapabilityApi(): Promise<Record<string, unknown>> {
     emptyOperationsMessage: '（探针）执行层没有声明任何只读 operation',
     createDrivers: () => ({ mainDriver, workerDriver: mainDriver }),
     taskExecutor: executor,
-    runtime: { dispatchMode: 'background' },
+    taskDispatch: 'async',
   });
   const observations: Record<string, unknown> = {};
   try {

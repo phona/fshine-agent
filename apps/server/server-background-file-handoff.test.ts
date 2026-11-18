@@ -70,8 +70,8 @@ function testConfig(root: string): AppConfig {
     },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
-    // background：0 窗口（受理即后台；机械断言不靠时序余量）。
-    runtime: { dispatchMode: 'background' as const, backgroundConcurrency: 1, taskRunWaitMs: 0 },
+    // 0 窗口（受理即后台；机械断言不靠时序余量）。
+    runtime: { backgroundConcurrency: 1, taskRunWaitMs: 0 },
   };
 }
 
@@ -169,6 +169,8 @@ async function makeFixture(): Promise<Fixture> {
       allowedOperations: ['dummy.scratch'],
       readOnlyOperations: [],
     }),
+    // 有推送面 = async（派发方式不是配置键）：静默端口只作能力声明，不发起真实投递。
+    fileDelivery: { deliveryMode: 'silent', async sendToConversation() { throw new Error('（测试）silent 不投递'); } },
     logger: (line) => logs.push(line),
   });
   return { root, dbPath, server, workerDelegations, outcomes, getReceipt: () => receipt, logs };

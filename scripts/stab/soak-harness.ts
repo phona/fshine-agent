@@ -78,7 +78,6 @@ export async function runSoakScenario(scenario: SoakScenario): Promise<SoakRepor
   const sessionId = 'stab-soak-1';
   const scope = stabScope(principalId, sessionId);
   const runtime: StabRuntimeConfig = {
-    dispatchMode: 'background',
     backgroundConcurrency: scenario.concurrency,
     queueCapacity: scenario.queueCapacity,
   };

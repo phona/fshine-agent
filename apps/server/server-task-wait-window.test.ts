@@ -5,7 +5,7 @@
  *   b. 慢活（超窗口）→ 受理话术不含 # 与编号数字；任务继续在后台并最终完成；
  *   c. 慢活完成 → 主动投递恰好一次（内容来自任务结果；live 记 sent）；silent 模式
  *      零投递、记 suppressed、不记 sent；
- *   e. message_done 带 operations 计数且数值与实际执行次数一致（inline N 次 execute_operation）。
+ *   e. 无渠道推送面 = 同步装配：message_done 的 operations 计数与实际执行次数一致。
  *
  * 零网络、零真实模型、零真实平台：假渠道事实直调 handler，假 driver / 假 executor / 假投递面。
  */
@@ -178,7 +178,7 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
     ]);
     const server = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig({ dispatchMode: 'background', backgroundConcurrency: 1 }),
+      config: testConfig({ backgroundConcurrency: 1 }),
       dbPath: path.join(dir, 'state.db'),
       createDrivers: () => ({ mainDriver: plannedMain(plans, records), workerDriver: { async run() { throw new Error('（测试）不该调用'); } } }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
@@ -217,7 +217,7 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
     const executor = new GatedExecutor();
     const server = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig({ dispatchMode: 'background', backgroundConcurrency: 1, taskRunWaitMs: 60 }),
+      config: testConfig({ backgroundConcurrency: 1, taskRunWaitMs: 60 }),
       dbPath: path.join(dir, 'state.db'),
       createDrivers: () => ({ mainDriver: plannedMain(plans, records), workerDriver: { async run() { throw new Error('（测试）不该调用'); } } }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
@@ -262,7 +262,7 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
     const executor = new GatedExecutor();
     const server = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig({ dispatchMode: 'background', backgroundConcurrency: 1, taskRunWaitMs: 60 }),
+      config: testConfig({ backgroundConcurrency: 1, taskRunWaitMs: 60 }),
       dbPath: path.join(dir, 'state.db'),
       createDrivers: () => ({ mainDriver: plannedMain(plans, records), workerDriver: { async run() { throw new Error('（测试）不该调用'); } } }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
@@ -300,7 +300,7 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
     const executor = new GatedExecutor();
     const server = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig({ dispatchMode: 'background', backgroundConcurrency: 1, taskRunWaitMs: 60 }),
+      config: testConfig({ backgroundConcurrency: 1, taskRunWaitMs: 60 }),
       dbPath: path.join(dir, 'state.db'),
       createDrivers: () => ({ mainDriver: plannedMain(plans, records), workerDriver: { async run() { throw new Error('（测试）不该调用'); } } }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
@@ -326,7 +326,7 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
     }
   });
 
-  it('e. message_done 带 operations 计数且与实际执行次数一致（inline 2 次 execute_operation）', async () => {
+  it('e. message_done 带 operations 计数且与实际执行次数一致（无推送面 = 同步装配，N 次 execute_operation）', async () => {
     const dir = tempDir();
     const logs: Array<Record<string, unknown>> = [];
     const records: ServerDriverRecord[] = [];
@@ -335,7 +335,7 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
     ]);
     const server = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig({ dispatchMode: 'inline' }),
+      config: testConfig({}),
       dbPath: path.join(dir, 'state.db'),
       createDrivers: () => ({ mainDriver: plannedMain(plans, records), workerDriver: executingWorker(2) }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
@@ -346,7 +346,7 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
       expect(reply).toBe('两笔都查完了。');
       const done = logs.find((line) => line['event'] === 'message_done') as Record<string, unknown> | undefined;
       expect(done).toBeDefined();
-      // 计数与实际执行次数一致：2 次 execute_operation → operations=2，executions 同为 2 行
+      // 无渠道推送面 → 同步等结果：2 次 execute_operation 都在本回合发生 → operations=2，executions 2 行
       expect(done!['operations']).toBe(2);
       expect(Array.isArray(done!['executions']) && (done!['executions'] as unknown[]).length === 2).toBe(true);
     } finally {

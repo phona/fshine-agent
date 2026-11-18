@@ -41,7 +41,7 @@
 
 ### S2 异步执行中继续对话
 
-- **装配口径（硬）**：本类**必须在 `runtime.dispatchMode='background'` 下跑**——`createMuServer` 以 `mode: 'background'` 走 `mu-support.ts:315`（`CreateMuServerInput.mode`）→ `:341` 把 `dispatchMode:'background'` 写进运行时配置；产品侧 background 分支见 `execution-runtime.ts:551`。**inline 模式下委派在回合内同步等待**，无法观测「执行中继续对话」，故 inline 跑出的样本一律记 `insufficient_coverage`（§5.1），不判产品负。
+- **装配口径（硬）**：本类**必须在异步派发下跑**——`createMuServer` 走真 server 装配，server 恒 async（受理即回执、后台 TaskRunner 推进）；评测侧以 `mode` 标签声明样本期望。同步装配下委派在回合内同步等待，无法观测「执行中继续对话」，故同步样本一律记 `insufficient_coverage`（§5.1），不判产品负。（旧配置键 `runtime.dispatchMode` 已于 2026-11-18 删除；派发方式是装配参数，不是部署配置。）
 - **话术（同一会话连续两轮）**：
   - **T1（交办，触发后台受理）**：「帮我查一下 alpha 集合 W1 的记录，一共几条、总金额多少，出结果直接告诉我。」
   - **T2（T1 任务仍在飞时插入对话）**：「alpha 那个你先跑着别停；另外 beta 集合 W1 有几条、总额多少？」
@@ -370,7 +370,7 @@ P2 的 integration 侧前置已在 integration HEAD `f37d11d` 上，`git merge-b
 |---|---|---|---|
 | 1 | 统计口径事实错误（0.342 误用于 3/3） | **改正**。实测 `wilson95(3,3)=[0.43849…,1]`、`wilson95(2,2)=[0.34237…,1]`；P2 全绿读数改记 **3/3 [0.4385,1]**，并注明 0.342 属 2/2（`r6-longsession-prereg.md:47`、`decision-log.md:1844`）。复核所述「仓内 `stats.ts:69` 实算」已在本轮以 `node -e` 导入该模块复现。 | §2.1 |
 | 2 | S7「超时」子场景不可执行 | **补齐**。三子例 N=3 各 1 个（S7a/S7b/S7c）写死；S7b 给出**eval 侧注入方案**（`runtime.workerTurnMs` 调小 + deadline-honoring Worker 驱动 + 不返回执行 gate），落点为产品既有 `timed_out` 机制；并写死**降级条款**：若 owner 否决该驱动，S7b 一律记 `insufficient_coverage`。**实测确认夹具无延迟旋钮**（`grep` 零命中）。 | §一 S7 |
-| 3 | S2 异步可观测性未绑定 | **补齐**。写死必须 `dispatchMode='background'`（`mu-support.ts:341`），并给三观测点（首回合快照非终态 / 完成闸晚于 T2 / 最终真完成），inline 一律 `insufficient_coverage`。 | §一 S2 |
+| 3 | S2 异步可观测性未绑定 | **补齐**。写死必须异步派发（`createMuServer` 走 server 恒 async），并给三观测点（首回合快照非终态 / 完成闸晚于 T2 / 最终真完成），同步一律 `insufficient_coverage`。 | §一 S2 |
 | 4 | `insufficient_coverage` 判定接缝未落地 | **补齐**。新增 §5.1 `classifyP2Sample`（薄包装、优先级同 `classifySample`、不改 `evidence.ts`）+ 七类 `p2Coverage` 表；§七加关键接缝 3。 | §5.1、§七 |
 | 5 | 次要引用漂移 | **部分改正**：`harness.ts:44→:43`（`modelCallLedger` 实际在 43）、`evidence.ts:26→:28`（`TurnRecord.text`）、`:32→:34/:35`（`ReplyRecord.text`/`replyChars`）、`budgetUsed :55→:72`、`hardZeroHits` 标注为 `buildEvidenceSummary` 字段（`:140`）。**`docs/history/business-e2e-prereg-addendum.md` 一项复核不成立**：本轮逐行读取，`:96` 原文即「门失败 → blocking=true、退出码 2、不烧任何样本」，`:95` 是门定义；已改为同时引用 `:95-96` 以消歧。 | 全文 / §四 |
 | 6 | 真实模型 Main 适配器未接线（范围性提示） | **不改**（原文已如实列为启动前置）：确认 §七、§八、§九 均已登记；§九 第 4/5 项未勾选状态与本轮一致，P2 在适配器落地前不可启动。 | §七、§九 |
