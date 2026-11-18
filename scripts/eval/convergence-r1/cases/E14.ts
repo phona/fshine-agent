@@ -37,7 +37,7 @@ export const E14: UserCase = {
     // maxExecutions 判负（judge 记 FAIL_UNNECESSARY_DELEGATION，见 judgeNotes）。
   },
   hardAnchors: [
-    { kind: 'containsAll', values: ['finance-invoices'] },
+    { kind: 'containsAny', values: ['finance-invoices', 'finance', '发票'] },
     {
       kind: 'containsAny',
       values: ['客户', '筛选', '筛', '不支持', '无法', '不能', '无效', '不认'],

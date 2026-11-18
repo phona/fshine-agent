@@ -41,11 +41,13 @@ export const E04: UserCase = {
       turn: 1,
       minExecutions: 1,
       requireRowArgs: { collection: 'documents', window: 'W202611' },
+      requireRowArgsMode: 'any',
     },
     {
       turn: 2,
       minExecutions: 1,
       requireRowArgs: { collection: 'documents', window: 'W202610' },
+      requireRowArgsMode: 'any',
       forbiddenQuestionTopics: ['窗口', '集合', '哪一个', '哪个', '哪一'],
       hardAnchors: [{ kind: 'numberAny', numbers: [1200, 800, 900] }],
     },
