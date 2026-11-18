@@ -340,3 +340,106 @@ describe('③ needs_input：确定性缺失输入 → 补齐后同一调用完�
     }
   });
 });
+
+/**
+ * ④ 聚合字段（2026-11-18）：合计由执行层算，模型只能引用，不得心算。
+ *
+ * 形状（声明面不加 flag，聚合是结果字段）：
+ *   · `sum`        —— 每条都有数值型 `value` 时；
+ *   · `amountSum`  —— 每条都有数值型 `amount` 时；
+ *   · `byDimension`—— 集合声明 `dimension` 时：`{ <值>: { count, sum } }`。
+ * 缺字段/空结果/非数值一律**不带**这些字段（不是 0）。`data`（模型可见）与审计
+ * `result`（E15 的机械依据：`judge.ts` 读执行行 result 里的聚合字段）同时携带。
+ */
+describe('④ 聚合字段：sum / amountSum / byDimension', () => {
+  it('alpha W1：sum 2000、count 2；data 与审计 result 都带（E15 的机械依据）', () => {
+    const r = runDummy(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1']);
+    expect(r.status).toBe(0);
+    expect(r.envelope).toMatchObject({ status: 'completed', data: { collection: 'alpha', count: 2, sum: 2000 } });
+    expect(dataOf(r.envelope)).not.toHaveProperty('amountSum');
+    expect(dataOf(r.envelope)).not.toHaveProperty('byDimension'); // alpha 未声明维度
+    expect(r.audit).toHaveLength(1);
+    expect(r.audit[0]?.['result']).toMatchObject({ status: 'completed', collection: 'alpha', count: 2, sum: 2000 });
+  });
+
+  it('beta W1：sum 1000（500+300+200），count 3', () => {
+    const r = runDummy(['query', 'dummy.query', '--collection', 'beta', '--window', 'W1']);
+    expect(r.envelope).toMatchObject({ status: 'completed', data: { count: 3, sum: 1000 } });
+  });
+
+  it('finance-invoices 按客户筛：amountSum 29000 + byDimension 单组；不返回 sum', () => {
+    const r = runDummy(['query', 'dummy.query', '--collection', 'finance-invoices', '--where', 'customer=华远贸易']);
+    expect(r.status).toBe(0);
+    const data = dataOf(r.envelope);
+    expect(data).toMatchObject({
+      collection: 'finance-invoices',
+      count: 4,
+      amountSum: 29000,
+      byDimension: { 华远贸易: { count: 4, sum: 29000 } },
+    });
+    expect(data).not.toHaveProperty('sum'); // 条目没有 value 字段
+    expect(r.audit[0]?.['result']).toMatchObject({ amountSum: 29000, byDimension: { 华远贸易: { count: 4, sum: 29000 } } });
+  });
+
+  it('finance-invoices 全量：amountSum 65000，三组分组求和等于总数（不重不漏）', () => {
+    const r = runDummy(['query', 'dummy.query', '--collection', 'finance-invoices']);
+    const data = dataOf(r.envelope) as { count: number; amountSum: number; byDimension: Record<string, { count: number; sum: number }> };
+    expect(data.count).toBe(10);
+    expect(data.amountSum).toBe(65000);
+    expect(Object.keys(data.byDimension).sort()).toEqual(['明达物流', '新程科技', '华远贸易'].sort());
+    expect(data.byDimension['华远贸易']).toEqual({ count: 4, sum: 29000 });
+    expect(data.byDimension['明达物流']).toEqual({ count: 3, sum: 25000 });
+    expect(data.byDimension['新程科技']).toEqual({ count: 3, sum: 11000 });
+    const groupedCount = Object.values(data.byDimension).reduce((total, group) => total + group.count, 0);
+    const groupedSum = Object.values(data.byDimension).reduce((total, group) => total + group.sum, 0);
+    expect(groupedCount).toBe(data.count);
+    expect(groupedSum).toBe(data.amountSum);
+  });
+
+  it('empty-one：空结果不带 sum / amountSum / byDimension（不返回 0）', () => {
+    const r = runDummy(['query', 'dummy.query', '--collection', 'empty-one']);
+    expect(r.status).toBe(0);
+    const data = dataOf(r.envelope);
+    expect(data).toMatchObject({ collection: 'empty-one', count: 0, items: [] });
+    for (const key of ['sum', 'amountSum', 'byDimension']) expect(data, key).not.toHaveProperty(key);
+    expect(r.audit[0]?.['result']).not.toHaveProperty('sum');
+  });
+
+  it('digits（字符串数值）与非数值集合不带聚合；未声明维度也不带 byDimension', () => {
+    const { fixturesRoot, bin } = copyFixtures();
+    editJson<{ collections: Array<Record<string, unknown>> }>(
+      path.join(fixturesRoot, 'scenarios', 'dummy-finance', 'scenario.json'),
+      (value) => {
+        value.collections.push(
+          { collection: 'digits', dataset: 'datasets/digits.json', locked: false, records: { W1: 2 } },
+          { collection: 'labels', dataset: 'datasets/labels.json', locked: false, records: { W1: 1 } },
+        );
+      },
+    );
+    writeFileSync(
+      path.join(fixturesRoot, 'scenarios', 'dummy-finance', 'datasets', 'digits.json'),
+      JSON.stringify({
+        items: [
+          { id: 'd-1', name: 'code-1', value: '0012' },
+          { id: 'd-2', name: 'code-2', value: '0007' },
+        ],
+        windows: ['W1'],
+      }) + '\n',
+    );
+    writeFileSync(
+      path.join(fixturesRoot, 'scenarios', 'dummy-finance', 'datasets', 'labels.json'),
+      JSON.stringify({ items: [{ id: 'l-1', name: 'label-1' }], windows: ['W1'] }) + '\n',
+    );
+
+    for (const collection of ['digits', 'labels']) {
+      const r = runDummy(['query', 'dummy.query', '--collection', collection], { bin });
+      expect(r.status, collection).toBe(0);
+      const data = dataOf(r.envelope);
+      expect(data, collection).toMatchObject({ collection });
+      for (const key of ['sum', 'amountSum', 'byDimension']) {
+        expect(data, `${collection}.${key}`).not.toHaveProperty(key);
+      }
+      expect(r.audit[0]?.['result'], collection).not.toHaveProperty('sum');
+    }
+  });
+});

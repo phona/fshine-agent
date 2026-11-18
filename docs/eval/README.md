@@ -85,5 +85,10 @@
 
 - 三条都在**读路径**生效；`requires` 的「补齐」形态与既有声明同源：`--<name> <值>`、`--where <name>=<值>`，
   或 `<name>` 恰为该集合声明的维度名时的 `--window`/`--round` 别名。缺参不写任何数据（状态文件逐字节不变）。
+- **聚合字段（结果字段，不是入参；不加 flag）**：`dummy.query` 的 `completed` 在 `data` 与审计 `result`
+  两处同时给出平台算好的聚合——每条都有数值 `value` 时 `sum`（alpha W1 = 2000）、都有数值 `amount` 时
+  `amountSum`（finance-invoices 全量 = 65000）、集合声明维度时 `byDimension: { <值>: { count, sum } }`
+  （分组求和等于总数）。空结果、缺数值字段或字符串数值（如 `"0012"`）一律**不带**这些字段（不返回 0）。
+  E15 的「聚合来源」判据读的就是审计 `result` 里的这些字段。
 - 既有候选歧义（`ambiguous`）仍是另一条响应，不与 `requires` 复用；既有 `read_fault` / `restricted`
   行为不变。夹具自测：`scripts/eval/fixtures/dummy-platform-capabilities.test.ts`（含耗时下界与反向绊线）。
