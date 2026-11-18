@@ -353,6 +353,47 @@ async function runWriteTurn(
   return await fx.session.send(input.userText);
 }
 
+describe('写确认回环·带逐条内容（--records）', () => {
+  const records = [{ name: 'alpha-item-3', value: 100 }, { name: 'alpha-item-4', value: 200 }];
+  const prepareArgs = { '--collection': 'alpha', '--window': 'W1', '--records': JSON.stringify(records) };
+  const commitArgs = { ...prepareArgs };
+
+  it('1b 摘要列出用户给的内容；commit 写入的正是这些 name/value；读回可见', async () => {
+    const fx = await createHostFixture({ dir: tempDir('host-wc-records-'), allowWrite: true, captureRequests: true });
+    try {
+      const turn1 = await runWriteTurn(fx, {
+        userText: '在 alpha 集合 W1 新增 alpha-item-3=100、alpha-item-4=200',
+        task: '在 alpha 集合新增两条指定内容',
+        operation: 'dummy.prepare',
+        args: prepareArgs,
+        report: '等你确认',
+      });
+      expect(turn1.executions.map((execution) => execution.status)).toEqual(['needs_confirmation']);
+      // 预演不写数据
+      expect((await queryData(fx.stateDir)).count).toBe(2);
+      // 摘要必须把「要写什么」说清（不能只说条数）
+      const prepared = fx.worker.toolResults[0] as { summary?: string };
+      expect(prepared.summary).toContain('alpha-item-3=100');
+      expect(prepared.summary).toContain('alpha-item-4=200');
+
+      const turn2 = await runWriteTurn(fx, {
+        userText: '确认',
+        task: '用户已确认，提交刚才的写入提案',
+        operation: 'dummy.commit',
+        args: commitArgs,
+        report: '已写入',
+      });
+      expect(turn2.executions.map((execution) => execution.status)).toEqual(['completed']);
+      // 写入的是用户给的内容，不是平台自动生成的占位记录
+      const after = await queryData(fx.stateDir);
+      expect(after.count).toBe(4);
+      expect(after.items.slice(2).map((item) => ({ name: item.name, value: item.value }))).toEqual(records);
+    } finally {
+      fx.close();
+    }
+  });
+});
+
 describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
   it('1 正常：prepare → 用户「确认」→ commit 成功 → query 读回看到新增记录', async () => {
     const fx = await createHostFixture({ dir: tempDir('host-wc-normal-'), allowWrite: true, captureRequests: true });

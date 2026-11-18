@@ -352,14 +352,39 @@ function confirmationPolicy() {
     readbackShort: cfg !== null && typeof cfg === 'object' && cfg.readbackShort === true,
   };
 }
+/** `--records`：逐条内容的 JSON 数组（name+value，≤50）。不给则沿用「只按条数新增」。 */
+function parseRecordsFlag(raw) {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  let parsed;
+  try {
+    parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch (e) {
+    return { error: 'INVALID_RECORDS', message: `--records 不是合法 JSON：${e.message}` };
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return { error: 'INVALID_RECORDS', message: '--records 必须是非空 JSON 数组' };
+  if (parsed.length > 50) return { error: 'INVALID_RECORDS', message: '--records 最多 50 条' };
+  const records = [];
+  for (const entry of parsed) {
+    if (entry === null || typeof entry !== 'object') return { error: 'INVALID_RECORDS', message: '每条记录必须是 {name, value} 对象' };
+    const name = typeof entry.name === 'string' && entry.name.trim() !== '' ? entry.name : undefined;
+    const value = typeof entry.value === 'number' || typeof entry.value === 'string' ? entry.value : undefined;
+    if (name === undefined || value === undefined) return { error: 'INVALID_RECORDS', message: '每条记录必须同时给出 name 与 value' };
+    records.push({ name, value });
+  }
+  return { records };
+}
+
 function normalizeWriteArgs(flags) {
   const collection = flags.collection || flags.topic;
   const window = flags.window || flags.round || 'W1';
-  const rawCount = flags.count !== undefined ? Number(flags.count) : 1;
+  const parsedRecords = parseRecordsFlag(flags.records);
+  const rawCount = flags.count !== undefined ? Number(flags.count) : (parsedRecords && parsedRecords.records ? parsedRecords.records.length : 1);
   return {
     collection: typeof collection === 'string' && collection !== '' ? collection : null,
     window: String(window),
     count: Number.isFinite(rawCount) ? Math.max(0, Math.trunc(rawCount)) : 1,
+    ...(parsedRecords && parsedRecords.records ? { records: parsedRecords.records } : {}),
+    ...(parsedRecords && parsedRecords.error ? { recordsError: parsedRecords } : {}),
   };
 }
 function confirmationLockFile(handle) {
@@ -404,7 +429,8 @@ function claimConfirmation(opName, handle, binding) {
     if (typeof rec.expiresAt !== 'string' || new Date(rec.expiresAt).getTime() <= Date.now()) {
       return { ok: false, code: 'CONFIRMATION_EXPIRED', message: `Confirmation handle expired at ${String(rec.expiresAt)}.` };
     }
-    if (rec.collection !== binding.collection || rec.window !== binding.window || rec.count !== binding.count) {
+    const sameRecords = JSON.stringify(rec.records ?? null) === JSON.stringify(binding.records ?? null);
+    if (rec.collection !== binding.collection || rec.window !== binding.window || rec.count !== binding.count || !sameRecords) {
       return { ok: false, code: 'CONFIRMATION_BINDING_MISMATCH', message: `Confirmation binding mismatch: prepared collection=${String(rec.collection)} window=${String(rec.window)} count=${String(rec.count)}; got collection=${String(binding.collection)} window=${String(binding.window)} count=${String(binding.count)}.` };
     }
     rec.usedAt = new Date().toISOString();
@@ -422,7 +448,8 @@ function refuseConfirmation(opName, args, via, code, message) {
 function doPrepare(opName, args) {
   const { flags } = parseFlags(args);
   const state = loadState();
-  const { collection, window, count } = normalizeWriteArgs(flags);
+  const { collection, window, count, records, recordsError } = normalizeWriteArgs(flags);
+  if (recordsError) { emit(opName, 'failed', null, errObj(recordsError.error, recordsError.message)); return 1; }
   if (!collection) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection or --topic')); return 1; }
   if (!Object.prototype.hasOwnProperty.call(state.collections, collection)) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${collection}"`)); return 0; }
   const col = state.collections[collection];
@@ -438,6 +465,7 @@ function doPrepare(opName, args) {
     collection,
     window,
     count,
+    ...(records === undefined ? {} : { records }),
     createdAt: new Date(now).toISOString(),
     expiresAt,
     usedAt: null,
@@ -448,7 +476,10 @@ function doPrepare(opName, args) {
   const expiresLocal = new Intl.DateTimeFormat('zh-CN', {
     timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
   }).format(new Date(expiresAt));
-  const summary = `将向集合「${collection}」的 ${window} 窗口新增 ${count} 条记录；此操作不可撤销，需在 ${expiresLocal}（北京时间）前确认。`;
+  const recordList = records === undefined
+    ? ''
+    : `：${records.map((r) => `${r.name}=${r.value}`).join('、')}`;
+  const summary = `将向集合「${collection}」的 ${window} 窗口新增 ${count} 条记录${recordList}；此操作不可撤销，需在 ${expiresLocal}（北京时间）前确认。`;
   emit(opName, 'needs_confirmation', { collection, window, count, expiresAt, status: 'pending' }, null, {
     confirmation: { handle, summary, expiresAt },
   });
@@ -458,7 +489,8 @@ function doCommit(opName, args, confirmation, via) {
   const { flags } = parseFlags(args);
   // 集合级策略先于句柄校验：锁定集合的写路径仍以 COLLECTION_LOCKED 拒绝（旧契约保持）。
   const state = loadState();
-  const { collection, window, count } = normalizeWriteArgs(flags);
+  const { collection, window, count, records, recordsError } = normalizeWriteArgs(flags);
+  if (recordsError) { emit(opName, 'failed', null, errObj(recordsError.error, recordsError.message)); return 1; }
   if (!collection) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection or --topic')); return 1; }
   if (!Object.prototype.hasOwnProperty.call(state.collections, collection)) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${collection}"`)); return 0; }
   if (state.collections[collection].locked) { emit(opName, 'failed', null, errObj('COLLECTION_LOCKED', `Collection ${collection} is locked`)); return 2; }
@@ -466,7 +498,7 @@ function doCommit(opName, args, confirmation, via) {
     ? confirmation.handle
     : (typeof flags.confirmation === 'string' && flags.confirmation !== '' ? flags.confirmation : null);
   if (!handle) return refuseConfirmation(opName, args, via, 'CONFIRMATION_REQUIRED', 'commit requires a confirmation handle (--confirmation <handle>)');
-  const claim = claimConfirmation(opName, handle, { collection, window, count });
+  const claim = claimConfirmation(opName, handle, { collection, window, count, ...(records === undefined ? {} : { records }) });
   if (claim.locked === true) return refuseConfirmation(opName, args, via, 'CONFIRMATION_IN_PROGRESS', 'confirmation handle is being consumed by another call');
   if (!claim.value.ok) return refuseConfirmation(opName, args, via, claim.value.code, claim.value.message);
   // 已原子标记已用：从这里开始的任何失败都不允许第二次提交。
@@ -479,8 +511,13 @@ function doCommit(opName, args, confirmation, via) {
   const applied = confirmationPolicy().readbackShort ? Math.max(0, required - 1) : required;
   applyCol.records[record.window] = before + applied;
   const stamp = String(handle).slice(-8).replace(/[^A-Za-z0-9]/g, '') || 'confirmed';
+  const declared = Array.isArray(record.records) ? record.records : undefined;
   for (let i = 0; i < applied; i += 1) {
-    applyCol.items.push({ id: `rec-${stamp}-${i}`, name: `${record.collection}-record-${stamp}-${i}`, value: 0 });
+    // 有逐条内容就用用户给的 name/value；没有才按平台自动生成（旧行为保持不变）。
+    const given = declared === undefined ? undefined : declared[i];
+    applyCol.items.push(given === undefined
+      ? { id: `rec-${stamp}-${i}`, name: `${record.collection}-record-${stamp}-${i}`, value: 0 }
+      : { id: `rec-${stamp}-${i}`, name: given.name, value: given.value });
   }
   saveState(applyState);
   // 读回验证：从持久化状态重新读，不把「内存里改了」当业务生效。
@@ -515,9 +552,14 @@ function proposalTtlMs() { const n = Number(env('DUMMY_PROPOSAL_TTL_SECONDS', ''
 function doProposalCreate(opName, args) {
   const { positional } = parseFlags(args);
   const file = positional[0];
-  if (!file) { process.stderr.write('PROPOSAL_REFUSE missing payload file\n'); return 3; }
+  // 这个操作要的是**宿主提供的载荷文件**，模型侧没有这个通道——拒绝时必须指条明路，
+  // 否则模型会换着写法反复撞（2026-11-18 live 实测：3 次 ENOENT 后仍无路可走）。
+  if (!file) {
+    process.stderr.write('PROPOSAL_REFUSE 该操作需要宿主提供的载荷文件（模型侧没有这个通道）；要逐条新增请改用 dummy.prepare --records \'[{"name":"x","value":100}]\'\n');
+    return 3;
+  }
   let payload;
-  try { payload = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { process.stderr.write(`PROPOSAL_REFUSE payload unreadable: ${e.message}\n`); return 3; }
+  try { payload = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { process.stderr.write(`PROPOSAL_REFUSE 载荷文件读不到：${e.message}；要逐条新增请改用 dummy.prepare --records '[{\"name\":\"x\",\"value\":100}]'\n`); return 3; }
   const allowed = ['collection', 'window', 'records'];
   const extra = Object.keys(payload).filter((k) => !allowed.includes(k));
   if (extra.length) { process.stderr.write(`PROPOSAL_REFUSE unknown field: ${extra.join(',')}\n`); emit(opName, 'failed', null, errObj('PROPOSAL_UNKNOWN_FIELD', `Unknown field: ${extra.join(',')}`)); return 3; }

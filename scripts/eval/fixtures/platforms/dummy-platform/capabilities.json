@@ -462,6 +462,12 @@
             "required": false,
             "style": "code",
             "desc": "test-only: real wall-clock delay before the prepare runs (integer ms, 0..60000; over the cap is refused deterministically)"
+          },
+          {
+            "flag": "--records",
+            "required": false,
+            "style": "code",
+            "desc": "records to add as JSON array: [{\"name\":\"x\",\"value\":100}] (max 50); omit to add <count> auto-generated records"
           }
         ]
       },
@@ -513,6 +519,12 @@
             "required": false,
             "style": "code",
             "desc": "test-only: real wall-clock delay before the commit runs (integer ms, 0..60000; over the cap is refused deterministically)"
+          },
+          {
+            "flag": "--records",
+            "required": false,
+            "style": "code",
+            "desc": "records to add as JSON array: [{\"name\":\"x\",\"value\":100}] (max 50); omit to add <count> auto-generated records"
           }
         ]
       },
