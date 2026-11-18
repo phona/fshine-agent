@@ -35,7 +35,7 @@
 
 - 窗口续期：每来一个新附件重排到 `min(now+3s, 起点+5s)`，不会无限后移（`packages/channel-wecom/src/adapter.ts:919-926`）。
 - 文字先到时不再新开合并窗（已有窗则并入；`textWaiting` 分支 `packages/channel-wecom/src/adapter.ts:604-620`）。
-- ⚠️ **文档与代码不一致**：已删的 `docs/manual-test-wecom.md` §8.5 让排查 `FSHINE_INBOUND_DEBOUNCE_MS`/`waitForBurstSettle`（“宿主 burst 稳定器最多 4×2s”）。现行生产代码零命中；`FSHINE_INBOUND_DEBOUNCE_MS` 只出现在“已删环境键、不再派生”的守护测试里（`packages/agent/resource-policy-single-source.test.ts:73-79`、`packages/core/config.test.ts:474-477`），`waitForBurstSettle` 全仓零命中。`packages/channel-wecom/src/adapter.ts:49-52` 的“D-108 burst 稳定器”注释是陈旧指向：今天的 8s 是附件处理等待（下载 + 交 handler 暂存），不是宿主防抖。
+- ⚠️ **文档与代码不一致**：已删的 `docs/architecture/channels.md` §8.5 让排查 `FSHINE_INBOUND_DEBOUNCE_MS`/`waitForBurstSettle`（“宿主 burst 稳定器最多 4×2s”）。现行生产代码零命中；`FSHINE_INBOUND_DEBOUNCE_MS` 只出现在“已删环境键、不再派生”的守护测试里（`packages/agent/resource-policy-single-source.test.ts:73-79`、`packages/core/config.test.ts:474-477`），`waitForBurstSettle` 全仓零命中。`packages/channel-wecom/src/adapter.ts:49-52` 的“D-108 burst 稳定器”注释是陈旧指向：今天的 8s 是附件处理等待（下载 + 交 handler 暂存），不是宿主防抖。
 - 覆盖：`packages/channel-wecom/adapter.merge-window.test.ts:154-329`（9 例）；`scripts/eval/wecom-sim/cases-d-attachment.test.ts:38-209`（W-13～W-18，6 例）。
 
 ## 4. 纯附件回执与 30s 追问的分工
@@ -119,8 +119,8 @@
 
 ## 来源
 
-- `docs/manual-test-wecom.md`（已删）：保留附件收据/30s 追问分工、真机时序不可替代的边界；其 `FSHINE_INBOUND_DEBOUNCE_MS` 与“首帧带文件名收据”两条已与现行代码不符，按代码更正。
-- `docs/product/b2-silent-shadow-gate.md`（已删）：保留闸门出口覆盖、六类路径矩阵、fail-safe 与反向绊线。
-- `docs/product/r5-wecom-shadow-readonly-admission.md`（已删）：保留入站/出站面审计口径与“入站已实现、真实企微 NotificationSink=0”的事实；其“渠道影子隔离无机械门”已被 B2 闸门取代，不再作为现状。
+- `docs/architecture/channels.md`（已删）：保留附件收据/30s 追问分工、真机时序不可替代的边界；其 `FSHINE_INBOUND_DEBOUNCE_MS` 与“首帧带文件名收据”两条已与现行代码不符，按代码更正。
+- `docs/architecture/channels.md`（已删）：保留闸门出口覆盖、六类路径矩阵、fail-safe 与反向绊线。
+- `docs/architecture/channels.md`（已删）：保留入站/出站面审计口径与“入站已实现、真实企微 NotificationSink=0”的事实；其“渠道影子隔离无机械门”已被 B2 闸门取代，不再作为现状。
 - `docs/product/wecom-live-dummy-cases.md`（活）：保留 D 组附件时序用例与自动/人工分工；§8 的“带指令回合首帧用 formatFileReceipt”与代码不符（见 §4）。
 - `docs/product/event-catalog.md`（活）：保留事件判读口径与 `wecom_*` 不在清单内的边界；基线 23ae585，行号已漂移。

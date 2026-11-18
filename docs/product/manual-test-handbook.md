@@ -2,13 +2,13 @@
 
 > 授权：owner 2026-11-14（1+2）。本手册**只测功能**：真机功能走查、交付物可读性、新功能验收、体验。
 > 它不是第二套回归——**自动化已兜的部分不要手工重测**（见 §2）。手工证据不替代自动化门，也不产「稳定/达标」结论。
-> 基线：`arch/integration @ 885ac638f2353be41e651f1ea3eb9199d905017b`；分支 `arch/r4-stab`；配对报告 `docs/product/r4-stability-report.md`（已删，git 历史可考）、预注册 `docs/history/r4-stability-prereg.md`。
+> 基线：`arch/integration @ 885ac638f2353be41e651f1ea3eb9199d905017b`；分支 `arch/r4-stab`；配对报告 `docs/history/r4-stability-prereg.md`（已删，git 历史可考）、预注册 `docs/history/r4-stability-prereg.md`。
 
 ## 1. 手工测试的定位与硬边界
 
 手工只回答自动化回答不了的问题：**真机上人看到什么、读得懂吗、愿不愿意用**。
 
-- 不接真实平台/真实渠道；执行层用仓内 dummy 夹具；通知用假 sink（`docs/product/r4-stability-report.md`（已删，git 历史可考）§blocked 已登记真实渠道未实现/未连接）。
+- 不接真实平台/真实渠道；执行层用仓内 dummy 夹具；通知用假 sink（`docs/history/r4-stability-prereg.md`（已删，git 历史可考）§blocked 已登记真实渠道未实现/未连接）。
 - 不写真实凭据进文档/截图；不做写操作。
 - 发现真实产品缺陷：**只登记**（写入报告或缺陷登记表），不在测试 Run 里改产品。
 - 手工结论只标「通过 / 不通过 / 存疑（附原文）」，**不写「稳定」「100%」「已达标」**。

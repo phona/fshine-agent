@@ -2,7 +2,7 @@
 
 > 状态：现行。Pi 1.5.2 `AgentSession` 适配已实施；B1 会话持久化已接 server 装配；retention 未实现（issue #67）。
 > 最后核对：2026-11-18（本轮文档重组；文内 `path:line` 指向现行代码，行号以代码为准）。
-> 口径：只写今天做决定 / 排障需要的边界；实施过程与实验读数在 `docs/decisions/index.md` 与 git 历史（历史档 `docs/history/decision-log-2026-11.md`）。
+> 口径：只写今天做决定 / 排障需要的边界；实施过程与实验读数在 `docs/decisions/index.md` 与 git 历史（历史档 `docs/decisions/index.md`）。
 > 指针：`packages/agent/src/pi-driver.ts`（唯一 Pi 接缝）、`packages/agent/src/session-persistence.ts`（落盘）、`apps/server/server.ts:252-253`（装配）。
 
 ## 1. 所有权：Pi 独占转录 / 压缩 / agent loop
@@ -49,7 +49,7 @@
 
 ## 4. 被撤销的旧机制
 
-自研压缩编排（请求前 force 臂 / 回合内 emergency 触发 / 溢出恢复臂 / `compactTranscriptWithPi` / `TurnDriver.compact`）、旧「每回合重建 Agent + 宿主全量回灌转录」、旧 R5「每回合追加完整转录快照」三类旧机制均已删除；逐项裁定与删除记录见 `docs/decisions/index.md`（历史档 `docs/history/decision-log-2026-11.md` §六十九、§九十六）。
+自研压缩编排（请求前 force 臂 / 回合内 emergency 触发 / 溢出恢复臂 / `compactTranscriptWithPi` / `TurnDriver.compact`）、旧「每回合重建 Agent + 宿主全量回灌转录」、旧 R5「每回合追加完整转录快照」三类旧机制均已删除；逐项裁定与删除记录见 `docs/decisions/index.md`（历史档 `docs/decisions/index.md` §六十九、§九十六）。
 
 ## 5. 未解决项：线性无界增长（GitHub issue #67）
 

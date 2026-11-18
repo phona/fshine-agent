@@ -13,7 +13,7 @@
 - 停机：SIGINT/SIGTERM → `channel.stop()` + `server.close()` 后退出（`apps/server/main.ts:89-99`）。
 - **单实例纪律（仓库不强制）**：仓内没有进程锁、pid 文件或端口占用守卫（`grep -rniE "pidfile|instanceLock|EADDRINUSE|flock" packages apps scripts --include="*.ts"` 只命中 `scripts/eval/cap01/r3b-attacks.ts:774-790` 的评测用 PID 记录，不是服务锁）；资源策略只声明「进程内单实例」（`packages/agent/src/resource-policy.ts:391`）。纪律靠操作：同一 bot 只允许一条 WS 连接，起第二个实例会把第一个踢掉（`docs/product/wecom-live-dummy-cases.md:30`）。起服务前先 `ps` 确认没有残留的 `main.ts`/tsx 进程；确认不了就别起。
 - 两个实例还共享同一 `.runtime/state.db` 与 `.runtime/sessions/`（`apps/server/main.ts:42-44`、`apps/server/server.ts:252`）——双写并发下的底账/转录行为**仓库内未定义、未测**，不要当成支持的多实例形态。
-- 部署复证（fresh clone 后）：`npm run ci` 退出 0 且末行 `CI deterministic gates: PASS`（`scripts/ci.sh:24-32`，= typecheck + unit）。原 push-runbook 复证清单里依赖 `history-hygiene.test.ts` / `migration-gate.test.ts` 的两行已随 M4 删除、**当前不可执行**；GitHub 发布、回滚与分支保护细节随 `docs/push-runbook.md` 于 2026-11-18 删除，需要时查 git 历史。
+- 部署复证（fresh clone 后）：`npm run ci` 退出 0 且末行 `CI deterministic gates: PASS`（`scripts/ci.sh:24-32`，= typecheck + unit）。原 push-runbook 复证清单里依赖 `history-hygiene.test.ts` / `migration-gate.test.ts` 的两行已随 M4 删除、**当前不可执行**；GitHub 发布、回滚与分支保护细节随 `docs/ops/README.md` 于 2026-11-18 删除，需要时查 git 历史。
 
 ## 2. 三档 `channel.mode`
 

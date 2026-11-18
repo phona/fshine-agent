@@ -74,6 +74,6 @@
 
 ## 来源
 
-- `docs/artifacts.md`（已删，git 历史可考）：保留「产物必须有身份、引用是 id 不是路径」的问题框架；其 `session_artifacts` / `artifacts` / `cancel` 契约面已被现行 `file_refs` + 四态执行契约取代，不按现状读。
-- `docs/product/cap01-record.md`（已删）：保留 owner 裁定（保留期 30 天、树内软链整轮拒跑）与遗留登记；其「清理器不接 server 启动路径」已被 `runtime.fileRetentionSweepOnStart` 开关取代，按代码。
+- `docs/architecture/files.md`（已删，git 历史可考）：保留「产物必须有身份、引用是 id 不是路径」的问题框架；其 `session_artifacts` / `artifacts` / `cancel` 契约面已被现行 `file_refs` + 四态执行契约取代，不按现状读。
+- `docs/architecture/files.md`（已删）：保留 owner 裁定（保留期 30 天、树内软链整轮拒跑）与遗留登记；其「清理器不接 server 启动路径」已被 `runtime.fileRetentionSweepOnStart` 开关取代，按代码。
 - `docs/architecture/files.md`（design doc，已删）：`run_js` / fileId / per-run 目录的原始设计来源；本页指针已全部改指实现文件。

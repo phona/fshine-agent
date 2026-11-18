@@ -2,7 +2,7 @@
 
 > 状态：现行。只列**今天仍会被代码或文档引用**的决定，每条一行：日期 / 主题 / 结论 / 指针。
 > 同一主题的多轮记录已合并为一行并标「多轮」；未列入的条目是一次性实施记录或已被后继取代，正文都在历史分片（`../history/decision-log-part*.md`），本页不改写正文。已收官轮次的原件同样在 history：`../history/business-e2e-final-report.md`（三轴总报告）、`../history/business-e2e-prereg.md` 与 `../history/business-e2e-prereg-addendum.md`、`../history/r4-stability-prereg.md`。
-> § 号沿用原 `docs/decision-log.md` 编号（该文件已拆档、不在当前树）——代码与旧文档里指向 `docs/decision-log.md` §N 的注释，按本表指针考古。
+> § 号沿用原 `docs/decisions/index.md` 编号（该文件已拆档、不在当前树）——代码与旧文档里指向 `docs/decisions/index.md` §N 的注释，按本表指针考古。
 > 未决项不在本页：GitHub issues #67–#74（逐项见 `debt.md`）。
 
 | 日期 | 主题 | 结论 | 指针 |

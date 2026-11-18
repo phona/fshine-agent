@@ -2,7 +2,7 @@
 
 - 状态：**预注册修订版 v2**。**Wave1 口径已冻结**（见 §十三）。**Wave2 方案待重新裁决**（§二、§四）。冻结后只允许「作废对应批次 → 追加新预注册记录（新 run 编号）→ 重跑」，不得事后调阈值、样本量或断言（对齐 `docs/history/r4-stability-prereg.md` §十）。
 - 归属：`arch/r6-harness`（worktree `~/projects/fshine-agent-r6-harness`，分支 `arch/r6-harness`，基线 = `arch/integration` 启动时 HEAD `e2d12bd`）。本轮交付**测试基建 + 预注册修订 + 冻结口径**：零产品代码改动、**零真实模型调用**、不新增 Runtime 机制、**不改被测对象产品码**（`packages/**`、`apps/**` 不动）。
-- 姊妹文档：`docs/product/r6-longsession-harness-design.md`（已删，git 历史可考；负载生成器 + Oracle + 证据 schema + 判官接线）。
+- 姊妹文档：`docs/eval/README.md`（已删，git 历史可考；负载生成器 + Oracle + 证据 schema + 判官接线）。
 - 领号：轨道号 **LS1–LS5**；顶层正确性要求号 **T1–T5**（本文档内部）。**说明**：本仓**不存在**「Pi 替换实验阶段三 T1–T12」的权威矩阵；R6 的需求以 **T1–T5 + CMP 判据**为准，与他处 T 号无关（不臆造外部编号）。
 - 本轮修订依据（owner 裁决，逐条落实）：① 窗口政策改**混合**；② 入口门槛 G1/G2/G3 显式化；③ 预注册五条硬改；④ 架构纪律；⑤ 冻结 Wave1 口径。
 
@@ -18,7 +18,7 @@
 8. **观测/负载代码只采集事实、不得改变压缩触发/门控**，不得演变为第二套压缩决策机制（见 harness 设计 §一）。
 9. **架构纪律（硬）**：不改 Worker 提示词；不新增 fshine 自研压缩机制；**不因评测失败擅自给 Pi 增加宿主侧压缩治理**；**Pi 迁移失败时如实报告，不用旧机制暗中兜底制造通过结果**。
 10. **不借测试名义增 Runtime 机制**；不动 Worker 提示/任务账本/权限。
-11. **会话持久化问题不混入**：重启恢复、转录落盘属独立验收（现行见 `docs/architecture/sessions.md`；原 `docs/product/r5-session-persistence-design.md` 已删，git 历史可考），R6 不评、不据此判负。
+11. **会话持久化问题不混入**：重启恢复、转录落盘属独立验收（现行见 `docs/architecture/sessions.md`；原 `docs/architecture/sessions.md` 已删，git 历史可考），R6 不评、不据此判负。
 12. `.runtime` 一律 gitignored、不得 `git add`；`docs/decisions/index.md` 由集成 Agent 单点写，本批**不得改**。
 
 ## 一、R6 目标与顶层正确性要求 T1–T5
@@ -102,7 +102,7 @@
 ## 三、五轨场景清单（含 ≥3 次真实压缩达成路径）
 
 > **共同前提**：每会话必须在**真实窗口**下记录到 **≥3 次「有效压缩尝试」**（Pi 原生生命周期暴露的压缩尝试中 `after < before` 者）方判该会话样本**可用于结论**（§六 门槛）。达成路径见 §三.6（机制）与 harness 设计 §二（负载生成器）。
-> **压缩事实面（Pi 原生，不含私有事件名）**：会话生命周期暴露的**压缩尝试**（`{turn, kind: threshold|overflow|post_turn|unknown, before, after, summaryChunks?}`）。**不得**再绑定 fshine 私有事件（`context_compacted`/`context_compact_trimmed`/…）或私有函数（`splitForCompaction`/`compactionSettingsFor`/…）——它们随 Pi 迁移将删除（原审核档 `docs/product/pi-compaction-api-audit.md` 已删，git 历史可考）。
+> **压缩事实面（Pi 原生，不含私有事件名）**：会话生命周期暴露的**压缩尝试**（`{turn, kind: threshold|overflow|post_turn|unknown, before, after, summaryChunks?}`）。**不得**再绑定 fshine 私有事件（`context_compacted`/`context_compact_trimmed`/…）或私有函数（`splitForCompaction`/`compactionSettingsFor`/…）——它们随 Pi 迁移将删除（原审核档 `docs/architecture/sessions.md` 已删，git 历史可考）。
 
 ### LS1 · 长期事实保留
 

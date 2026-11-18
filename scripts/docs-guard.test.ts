@@ -327,3 +327,44 @@ describe('检查 4 · 状态头 + 真实指针', () => {
     }
   });
 });
+
+// ---------- 检查 5：docs 之外的代码/配置引用同样不得死链 ----------
+
+/**
+ * 2026-11-18 增补：前面四条只扫 `docs/` 内部。实测 docs 之外仍有 10 处代码/配置引用指向
+ * 已删文档（`scripts/eval/fixtures/.../dummy.cjs`、`packages/agent/src/skills.ts`、
+ * `.github/prompts/pr-review.md`、`AGENTS.md`）。这里把同一套"存在性 + 按行归档标记豁免"
+ * 的判据扩到代码面，避免文档搬家后代码注释变成看不见的死链。
+ */
+describe('检查 5 · docs 之外的引用不得死链', () => {
+  it('代码/配置里引用的 docs/*.md 必须存在，或该行标注归档', () => {
+    const roots = ['packages', 'apps', 'scripts', '.github', 'patches'];
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === 'node_modules' || entry.name === '.git') continue;
+        const rel = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(rel);
+        else if (/\.(ts|mjs|cjs|json|yml|yaml|md|sh)$/.test(entry.name)) files.push(rel);
+      }
+    };
+    for (const root of roots) if (exists(root)) walk(root);
+    for (const extra of ['AGENTS.md', 'README.md']) if (exists(extra)) files.push(extra);
+
+    const dead: string[] = [];
+    for (const file of files) {
+      if (file.startsWith('docs/')) continue;
+      const lines = read(file).split('\n');
+      lines.forEach((line, i) => {
+        for (const tok of line.match(/docs\/[A-Za-z0-9_./-]+\.md/g) ?? []) {
+          if (tok.includes('...')) continue; // 形如 docs/...md 的泛指
+          if (exists(tok)) continue;
+          if (ARCHIVE_MARKERS.some((marker) => line.includes(marker))) continue;
+          dead.push(`${file}:${i + 1}  ${tok}`);
+        }
+      });
+    }
+    console.log(JSON.stringify({ event: 'docs_guard_code_refs', scanned: files.length, dead: dead.length }));
+    expect(dead, `docs 之外的死链：\n${dead.join('\n')}`).toEqual([]);
+  });
+});

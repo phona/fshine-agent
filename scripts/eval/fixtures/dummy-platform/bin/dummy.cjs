@@ -7,7 +7,7 @@
  * here are deliberately neutral: record / collection / window. No finance,
  * voucher, account-set or period vocabulary lives in this fixture.
  *
- * Transport: binary CLI only, same surface as any execution-layer gateway (see docs/architecture/contract.md; 原 docs/execution-layer-interface.md 已删，git 历史可考):
+ * Transport: binary CLI only, same surface as any execution-layer gateway (see docs/architecture/contract.md; 原 docs/architecture/contract.md 已删，git 历史可考):
  *   operation list --json | plan --schema | plan evaluate/current/status/activate
  *   proposal status | query|prepare|commit|local <target> [args]
  * Protocol: RESULT envelope v1 on the last stdout line, exit codes 0/1/2/3.
@@ -31,7 +31,7 @@
  *                                   --state-dir is given, null otherwise)
  * Default root (no flag) = <fixture>/.runtime (manual debug runs).
  * Naming family (docs/environment-variables.md §前缀规则 + the 2026-11-10 consumer
- * boundary addendum; the original docs/env-naming-ruling-20261110.md 已删，git 历史可考): EXECUTION_* remains the canonical family for the token
+ * boundary addendum; the original docs/ops/README.md 已删，git 历史可考): EXECUTION_* remains the canonical family for the token
  * surface; DUMMY_* are debug-only entries read second. C-class per-case knobs
  * such as DUMMY_READBACK_SHORT keep their fixture names (see docs §9).
  * Call shape: this fixture does not take a domain declaration (no domain env,

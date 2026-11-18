@@ -5,7 +5,7 @@
 > 归属：worktree `~/projects/fshine-agent-p2-prereg`，分支 `arch/p2-prereg`，基线 = `arch/integration` 启动时 HEAD `f37d11d`（= MU-6 复跑，integration HEAD）。
 > **本轮只交付本文档**：docs-only、**零真实模型调用**、**不跑测试**、不改产品码、不改 Worker 提示/账本/契约、不引 Runtime 机制、不碰真实平台/数据/写。
 > 前置（owner 已裁定）：**P0 Go 且 B1 恢复接线完成**后方可跑 P2。integration 已实测含 B1 接线 / B2 / MU（见 §八 祖先核验）。
-> 姊妹件：`docs/product/r6-longsession-prereg.md`（R6 冻结口径与硬停来源）、`docs/product/r6-longsession-harness-design.md`、`docs/product/r6-multiuser-acceptance.md`（两文已删，git 历史可考；Harness 与 MU 验收的现行面见 `docs/eval/README.md`）、`docs/history/business-e2e-prereg.md`（阶段 2 业务 E2E 先例）。本文复用其纪律与接缝，不重建第二套。
+> 姊妹件：`docs/product/r6-longsession-prereg.md`（R6 冻结口径与硬停来源）、`docs/eval/README.md`、`docs/eval/README.md`（两文已删，git 历史可考；Harness 与 MU 验收的现行面见 `docs/eval/README.md`）、`docs/history/business-e2e-prereg.md`（阶段 2 业务 E2E 先例）。本文复用其纪律与接缝，不重建第二套。
 
 ---
 
