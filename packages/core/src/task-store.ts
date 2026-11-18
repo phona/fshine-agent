@@ -300,16 +300,24 @@ export interface TaskStore {
   listAllFileRefs(): FileRefRow[];
   /**
    * 入站内容去重（2026-11-18 owner）：把一行 Main 侧（task_id IS NULL）文件事实的
-   * name 与 activated_at 更新为本次值（复用既有 file_id；sha256/bytes/created_at 不动）。
-   * 身份键固定为 (file_id, principal_id, session_id) 且只命中 Main 侧行——跨作用域/任务
-   * 副本不可能被改写。返回是否命中一行。
+   * name 与 activated_at 更新为本次值（复用既有 file_id；sha256/bytes 不动）。身份键固定
+   * 为 (file_id, principal_id, session_id) 且只命中 Main 侧行——跨作用域/任务副本不可能
+   * 被改写。返回是否命中一行。
+   *
+   * pending→pending 复用（2026-11-18 owner，F-1）：`activatedAt: null` 保持该行 pending
+   * （复用不得替用户激活）；给出 `createdAt` 时同时把 created_at 刷新为本次收到时刻，
+   * pending 激活窗口（created_at → 被文字消息激活）因此重新计时，与回收器
+   * `file-ref-cleanup.ts` 的 pending 过期口径（now − created_at > TTL）保持一致。
    */
   updateFileRef(input: {
     fileId: string;
     principalId: string;
     sessionId: string;
     name: string;
-    activatedAt: number;
+    /** null = 保持 pending（不激活）；number = 激活/刷新激活时刻。 */
+    activatedAt: number | null;
+    /** 给出时刷新 created_at（pending 窗口重新计时）；缺省 = 不动。 */
+    createdAt?: number;
   }): boolean;
   /**
    * CAP-01 S1：激活 scope 内 TTL 窗口（created_at >= createdAfter）的全部 pending 行
@@ -788,9 +796,12 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     ? db.prepare('SELECT * FROM file_refs ORDER BY created_at, file_id')
     : undefined;
   // 复用只允许 Main 侧行（task_id IS NULL）：任务副本/产物绑定任务，不能被入站登记改写。
+  // created_at 只在显式给出 @createdAt 时刷新（COALESCE 保旧值）：pending→pending 复用需要
+  // 让激活窗口重新计时，已激活复用则保留原始登记时刻做审计。
   const updateMainFileRefStmt = hasFileRefTaskColumn
     ? db.prepare(`
-        UPDATE file_refs SET name = @name, activated_at = @activatedAt
+        UPDATE file_refs SET name = @name, activated_at = @activatedAt,
+          created_at = COALESCE(@createdAt, created_at)
         WHERE file_id = @fileId AND principal_id = @principalId AND session_id = @sessionId
           AND task_id IS NULL
       `)
@@ -1061,6 +1072,7 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         sessionId: input.sessionId,
         name: input.name,
         activatedAt: input.activatedAt,
+        createdAt: input.createdAt ?? null,
       }).changes > 0;
     },
     activatePendingFileRefs(scope, input) {

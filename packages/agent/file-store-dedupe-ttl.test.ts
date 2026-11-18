@@ -9,14 +9,17 @@
  *   ③ 跨 principal / 跨 session（以及任务副本行）同内容 → 不复用；
  *   ④ 既有行已过期 / 字节已被回收 → 不复用，新 fileId；
  *   ⑤ TTL 配置：fileRefTtlDays=7 生效（6 天前可读、8 天前不可读）；最小 1；未配置 = 7 天；
- *   ⑥ 清单每行带「YYYY-MM-DD HH:mm 收到」，字段顺序与 fileId 形态不变。
+ *   ⑥ 清单每行带「YYYY-MM-DD HH:mm 收到」，字段顺序与 fileId 形态不变；
+ *   ⑦ pending → pending 复用（F-1）：纯附件连发两次只留一个 fileId/一行/一份字节，
+ *      name 与 created_at 取最后一次且仍未激活；过期 pending 不复用；随后文字消息正常激活；
+ *      不同 sha256 的 pending 不合并；字节已回收的 pending 不复用。
  *
  * 库用 :memory:，workspace 与源文件都用临时目录；不触网、不碰真实平台。
  */
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openTaskStore } from '@fshine/core';
 import {
   createFileStore,
@@ -32,6 +35,7 @@ import { renderFileManifest, renderWorkerFileManifest } from './src/execution-ru
 const DAY_MS = 24 * 60 * 60 * 1000;
 const dirs: string[] = [];
 afterEach(() => {
+  vi.useRealTimers();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -176,24 +180,6 @@ describe('③ 跨 scope 绝不复用（防越权与存在性泄露）', () => {
 });
 
 describe('④ 不可读的行不复用（过期 / 字节已回收 → 新 fileId）', () => {
-  it('既有同内容行仍 pending（未激活）→ 不复用、不激活、两行', () => {
-    const fx = makeFixture();
-    const source = stage(fx, '待激活.csv', 'pending-dedupe');
-    // 第一次登记 = pending（等带文字的消息激活）；此后再收到同内容，不能把 pending 行当可复用。
-    const first = fx.fileStore.registerInboundFile({ scope: SCOPE, name: '待激活.csv', sourcePath: source });
-
-    const second = fx.fileStore.registerInboundFile({ scope: SCOPE, name: '待激活.csv', sourcePath: source });
-
-    expect(second.fileId).not.toBe(first.fileId);
-    const rows = fx.store.listFileRefs(SCOPE);
-    expect(rows).toHaveLength(2);
-    // 登记不替用户激活：两行都仍是 pending（激活只由带文字的消息触发）。
-    expect(rows.every((row) => row.activatedAt === undefined)).toBe(true);
-    expect(rows.map((row) => row.fileId).sort()).toEqual([first.fileId, second.fileId].sort());
-    expect(storedFileNames(fx.workspaceRoot, SCOPE)).toHaveLength(2);
-    fx.store.close();
-  });
-
   it('既有行已过期 → 新 fileId', () => {
     const fx = makeFixture();
     const content = Buffer.from('expired-content');
@@ -325,6 +311,134 @@ describe('⑥ 清单行带收到时间（格式稳定，字段顺序与 fileId �
     const manifest = renderFileManifest([listed!]);
     expect(manifest).toContain(`；${localText(listed!.createdAt)} 收到`);
     expect(manifest).not.toContain(`；${localText(activatedAt)} 收到`);
+    fx.store.close();
+  });
+});
+
+describe('⑦ pending → pending 复用（F-1：纯附件连发不产生第二行/第二份字节）', () => {
+  /** 只假造 Date（文件 IO 照常走真实时钟）；8000 = 未过期的默认 TTL 窗口内。 */
+  function useFakeClock(start: number): void {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(start);
+  }
+
+  it('同一份纯附件连发两次（都未激活）→ 一个 fileId、一行、一份字节，name/created_at 取最后一次', () => {
+    const fx = makeFixture();
+    const t0 = new Date(2026, 0, 2, 9, 0).getTime();
+    useFakeClock(t0);
+    const source = stage(fx, '明细.csv', 'a,b\n1,2\n');
+
+    const first = fx.fileStore.registerInboundFile({ scope: SCOPE, name: '明细.csv', sourcePath: source });
+    const firstRow = fx.store.listFileRefs(SCOPE)[0]!;
+    expect(firstRow.createdAt).toBe(t0); // 第一次登记时刻
+    expect(firstRow.activatedAt).toBeUndefined(); // 纯附件 = pending
+
+    // 第二次收到（同一份字节，文件名变成 .txt：派生路径也要跟着改名）。
+    useFakeClock(t0 + 60_000);
+    const second = fx.fileStore.registerInboundFile({ scope: SCOPE, name: '明细-二次.txt', sourcePath: source });
+
+    // 同一个 fileId、只有一行、只有一份字节。
+    expect(second.fileId).toBe(first.fileId);
+    expect(second.name).toBe('明细-二次.txt');
+    const rows = fx.store.listFileRefs(SCOPE);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.fileId).toBe(first.fileId);
+    // name = 最后一次；created_at 刷新为本次收到时刻（pending 窗口重新计时）。
+    expect(rows[0]!.name).toBe('明细-二次.txt');
+    expect(rows[0]!.createdAt).toBe(t0 + 60_000);
+    // 复用不替用户激活：仍 pending。
+    expect(rows[0]!.activatedAt).toBeUndefined();
+    expect(storedFileNames(fx.workspaceRoot, SCOPE)).toEqual([`${first.fileId}.txt`]);
+    expect(existsSync(fileStoragePathOf(fx.workspaceRoot, SCOPE, first.fileId, '明细.csv'))).toBe(false);
+    // 未激活 → 清单里不出现。
+    expect(fx.fileStore.listActiveFiles({ scope: SCOPE, now: t0 + 60_000 })).toEqual([]);
+    fx.store.close();
+  });
+
+  it('第一条 pending 已过期（now − created_at > TTL）→ 不复用，建新行', () => {
+    const ttlMs = 60_000;
+    const fx = makeFixture(ttlMs);
+    const t0 = new Date(2026, 0, 3, 9, 0).getTime();
+    useFakeClock(t0);
+    const source = stage(fx, '过期.csv', 'expired-pending');
+
+    const first = fx.fileStore.registerInboundFile({ scope: SCOPE, name: '过期.csv', sourcePath: source });
+    // 越过 pending 激活窗口（与回收器同口径：now − created_at > ttl 即过期）。
+    useFakeClock(t0 + ttlMs + 1);
+    const second = fx.fileStore.registerInboundFile({ scope: SCOPE, name: '过期.csv', sourcePath: source });
+
+    expect(second.fileId).not.toBe(first.fileId);
+    const rows = fx.store.listFileRefs(SCOPE);
+    expect(rows).toHaveLength(2);
+    // 两行都仍是 pending（旧行保持 pending，新行也是 pending）。
+    expect(rows.every((row) => row.activatedAt === undefined)).toBe(true);
+    expect(storedFileNames(fx.workspaceRoot, SCOPE)).toEqual(
+      [`${first.fileId}.csv`, `${second.fileId}.csv`].sort(),
+    );
+    fx.store.close();
+  });
+
+  it('复用后仍未激活；随后文字消息到达时正常激活该行', () => {
+    const fx = makeFixture();
+    const t0 = new Date(2026, 0, 4, 9, 0).getTime();
+    useFakeClock(t0);
+    const source = stage(fx, '纯附件.csv', 'only-attachment');
+
+    const first = fx.fileStore.registerInboundFile({ scope: SCOPE, name: '纯附件.csv', sourcePath: source });
+    useFakeClock(t0 + 1_000);
+    const second = fx.fileStore.registerInboundFile({ scope: SCOPE, name: '纯附件.csv', sourcePath: source });
+    expect(second.fileId).toBe(first.fileId);
+    expect(fx.store.listFileRefs(SCOPE)[0]!.activatedAt).toBeUndefined();
+    expect(fx.fileStore.listActiveFiles({ scope: SCOPE, now: t0 + 1_000 })).toEqual([]);
+
+    // 文字消息到达 → 激活 TTL 窗口内的 pending（复用刷新过 created_at，仍在窗口内）。
+    useFakeClock(t0 + 2_000);
+    expect(fx.fileStore.activatePendingInputs({ scope: SCOPE, now: t0 + 2_000 })).toBe(1);
+    const rows = fx.store.listFileRefs(SCOPE);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.fileId).toBe(first.fileId);
+    expect(rows[0]!.activatedAt).toBe(t0 + 2_000);
+    expect(fx.fileStore.listActiveFiles({ scope: SCOPE, now: t0 + 2_000 })).toEqual([
+      expect.objectContaining({ fileId: first.fileId, name: '纯附件.csv', createdAt: t0 + 1_000 }),
+    ]);
+    fx.store.close();
+  });
+
+  it('负例：不同 sha256 的 pending 不合并', () => {
+    const fx = makeFixture();
+    useFakeClock(new Date(2026, 0, 5, 9, 0).getTime());
+    const first = fx.fileStore.registerInboundFile({
+      scope: SCOPE,
+      name: '甲.csv',
+      sourcePath: stage(fx, '甲.csv', 'content-one'),
+    });
+    const second = fx.fileStore.registerInboundFile({
+      scope: SCOPE,
+      name: '乙.csv',
+      sourcePath: stage(fx, '乙.csv', 'content-two'),
+    });
+
+    expect(second.fileId).not.toBe(first.fileId);
+    const rows = fx.store.listFileRefs(SCOPE);
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.activatedAt === undefined)).toBe(true);
+    expect(storedFileNames(fx.workspaceRoot, SCOPE)).toHaveLength(2);
+    fx.store.close();
+  });
+
+  it('负例：pending 行字节已被回收（文件不存在）→ 不复用', () => {
+    const fx = makeFixture();
+    useFakeClock(new Date(2026, 0, 6, 9, 0).getTime());
+    const source = stage(fx, '字节没了.csv', 'bytes-gone-pending');
+    const first = fx.fileStore.registerInboundFile({ scope: SCOPE, name: '字节没了.csv', sourcePath: source });
+    rmSync(fileStoragePathOf(fx.workspaceRoot, SCOPE, first.fileId, '字节没了.csv'));
+
+    const second = fx.fileStore.registerInboundFile({ scope: SCOPE, name: '字节没了.csv', sourcePath: source });
+
+    expect(second.fileId).not.toBe(first.fileId);
+    expect(fx.store.listFileRefs(SCOPE)).toHaveLength(2);
+    // 新 fileId 的字节真实落盘（不是把坏引用交出去）。
+    expect(existsSync(fileStoragePathOf(fx.workspaceRoot, SCOPE, second.fileId, '字节没了.csv'))).toBe(true);
     fx.store.close();
   });
 });

@@ -287,9 +287,14 @@ export interface FileStore {
    * （activated_at = NULL，等带文字的消息激活）。字节从 sourcePath 流式读、算 sha256、
    * copy 进 workspace（…/files/<fileId><safeExt>）——不引用原路径，登记后渠道层可清理
    * 原文件。fileId 本侧生成；源 O_NOFOLLOW 打开 + 只收普通文件（与 out/ 同纪律）。
-   * **内容去重（2026-11-18 owner）**：同 (principal, session)、同 sha256、仍可读
-   * （已激活、TTL 内、字节存在）的 Main 侧行 → 复用该 fileId（不落盘、不新增行），
-   * name 更新为本次名、activated_at 刷新为本次收到时刻；跨身份/会话/任务一律不复用。
+   * **内容去重（2026-11-18 owner）**：同 (principal, session)、同 sha256、仍可读的 Main
+   * 侧行 → 复用该 fileId（不落盘、不新增行），name 更新为本次名、TTL 起点刷新；跨身份/
+   * 会话/任务一律不复用。
+   * **pending → pending 复用（2026-11-18 owner，F-1）**：既有 pending 行（activated_at
+   * NULL）未过期（now − created_at ≤ TTL，与回收器同口径）、派生字节文件存在且字节数
+   * 一致时同样复用——同 fileId、不新增行、不新增字节；name 更新为本次名、created_at
+   * 刷新为本次收到时刻（pending 窗口重新计时），**但仍不激活**（激活仍归带文字的消息）。
+   * 已过期 pending、任务副本、跨作用域、字节缺失/不符一律不复用。
    * 源不可读 / 非普通文件 / 超大小兜底 → 抛错（handler 转述为回执失败，不登记半份）。
    */
   registerInboundFile(input: { scope: FileScope; name: string; sourcePath: string }): RegisteredFile;
@@ -521,34 +526,56 @@ export function createFileStore(options: {
   }
 
   /**
-   * 入站内容去重（2026-11-18 owner，B 方案）：同 scope、同 sha256、**仍可读**（已激活、
-   * TTL 内、字节文件存在）的 Main 侧行可复用。跨 principal/session 由 scope 查询隔离；
-   * task_id 绑定的副本/产物不参与（它们只归对应任务解析，复用会让 Main 拿到不可读的
-   * fileId）。顺序 = 底账既有排序（created_at, file_id），确定性取第一行。
+   * 入站内容去重（2026-11-18 owner，B 方案）：同 scope、同 sha256、未过期、字节文件存在
+   * 且字节数一致的 Main 侧行可复用。跨 principal/session 由 scope 查询隔离；task_id 绑定的
+   * 副本/产物不参与（它们只归对应任务解析，复用会让 Main 拿到不可读的 fileId）。顺序 =
+   * 底账既有排序（created_at, file_id），确定性取第一行。
+   *
+   * 两类可复用行（2026-11-18 F-1）：
+   *   · 已激活：激活行 TTL 内（now − activated_at ≤ TTL），复用刷新 activated_at；
+   *   · pending：激活窗口未关闭（now − created_at ≤ TTL，与 `file-ref-cleanup.ts` 的
+   *     pending 过期口径一致），复用只刷新 created_at/name，**保持 pending**——同一份纯
+   *     附件连发两次不再产生第二行/第二个 fileId/第二份字节。
    */
   function findReusableInboundRow(
     scope: FileScope,
     expected: { sha256: string; bytes: number },
     now: number,
-  ): FileRefRow | undefined {
+  ): { row: FileRefRow; pending: boolean } | undefined {
     for (const row of store.listFileRefs(scope)) {
       if (row.taskId !== undefined) continue;
       if (row.sha256 !== expected.sha256 || row.bytes !== expected.bytes) continue;
-      // pending 不可读，不参与复用（保持「激活才可读」的既有语义）。
-      if (row.activatedAt === undefined) continue;
-      if (now - row.activatedAt > ttlMs) continue;
-      // 字节可能已被保留期回收：文件不存在即视为不可读，复用会把坏引用交出去。
-      if (!existsSync(fileStoragePathOf(workspaceRoot, scope, row.fileId, row.name))) continue;
-      return row;
+      // 字节可能已被保留期回收 / 被截断：文件不是普通文件或字节数不配即视为不可读，
+      // 复用会把坏引用交出去（lstat 不跟随软链，比 existsSync 更严）。
+      if (!byteFileMatches(scope, row)) continue;
+      if (row.activatedAt !== undefined) {
+        if (now - row.activatedAt > ttlMs) continue;
+        return { row, pending: false };
+      }
+      // pending：过期口径 = now − created_at > TTL（过期的 pending 不复用，新登记）。
+      if (now - row.createdAt > ttlMs) continue;
+      return { row, pending: true };
     }
     return undefined;
   }
 
+  /** 派生字节文件存在、是普通文件、字节数与行一致（复用前置条件）。 */
+  function byteFileMatches(scope: FileScope, row: FileRefRow): boolean {
+    try {
+      const stat = lstatSync(fileStoragePathOf(workspaceRoot, scope, row.fileId, row.name));
+      return stat.isFile() && stat.size === row.bytes;
+    } catch {
+      return false;
+    }
+  }
+
   /**
-   * 复用既有 fileId：name 更新为本次文件名（用户最后一次的名字代表意图），activated_at
-   * 刷新为本次收到时刻（避免「重发反而更快过期」；created_at 保留原始登记时间做审计）。
-   * 字节不重写、不新增行；若安全扩展名变化导致派生存储路径变化，先把字节改名到新路径，
-   * 再更新行——保证不变量「字节位置 = fileId + 当前 name 的安全扩展名」始终成立。
+   * 复用既有 fileId：name 更新为本次文件名（用户最后一次的名字代表意图）。已激活行把
+   * activated_at 刷新为本次收到时刻（避免「重发反而更快过期」），created_at 保留原始登记
+   * 时间做审计；pending 行只刷新 created_at（pending 窗口重新计时）并**保持 activated_at
+   * NULL**（复用不得替用户激活，激活仍归带文字的消息）。字节不重写、不新增行；若安全
+   * 扩展名变化导致派生存储路径变化，先把字节改名到新路径，再更新行——保证不变量「字节
+   * 位置 = fileId + 当前 name 的安全扩展名」始终成立。
    * 改名/更新失败（竞态/IO）返回 undefined，调用方回落到新登记（零半成品）。
    */
   function reuseInboundRow(input: {
@@ -556,8 +583,9 @@ export function createFileStore(options: {
     name: string;
     row: FileRefRow;
     now: number;
+    pending: boolean;
   }): RegisteredFile | undefined {
-    const { scope, name, row, now } = input;
+    const { scope, name, row, now, pending } = input;
     const oldPath = fileStoragePathOf(workspaceRoot, scope, row.fileId, row.name);
     const newPath = fileStoragePathOf(workspaceRoot, scope, row.fileId, name);
     let moved = false;
@@ -577,7 +605,10 @@ export function createFileStore(options: {
       principalId: scope.principalId,
       sessionId: scope.sessionId,
       name,
-      activatedAt: now,
+      // pending 复用保持 pending（NULL）；已激活复用刷新激活时刻。
+      activatedAt: pending ? null : now,
+      // pending 窗口从本次收到重新计时；已激活行保留原始 created_at（审计）。
+      ...(pending ? { createdAt: now } : {}),
     });
     if (!updated) {
       if (moved) {
@@ -896,14 +927,15 @@ export function createFileStore(options: {
         // 入站源头是渠道适配器落盘（受信写侧，见 contracts IncomingAttachment 义务），不做
         // out/ 的 nlink/uid 走查；大小兜底见 INBOUND_MAX_FILE_BYTES。
         //
-        // 内容去重（2026-11-18 owner，B 方案）：先流式哈希（侧效零），同 scope 内已有
-        // 同 sha256 且仍可读的行 → 复用该 fileId（不落盘、不新增行），name 更新为本次名、
-        // TTL 起点刷新。无命中才走既有 pending 登记（copy-on-register + 新 file_id）。
+        // 内容去重（2026-11-18 owner，B 方案 + F-1）：先流式哈希（侧效零），同 scope 内
+        // 已有同 sha256 且未过期、字节一致的行 → 复用该 fileId（不落盘、不新增行）：
+        // 已激活行刷新 name/activated_at；pending 行刷新 name/created_at 且保持 pending。
+        // 无命中才走既有 pending 登记（copy-on-register + 新 file_id）。
         const hashed = hashFd(fd, INBOUND_MAX_FILE_BYTES);
         const now = Date.now();
         const reusable = findReusableInboundRow(scope, hashed, now);
         if (reusable !== undefined) {
-          const reused = reuseInboundRow({ scope, name, row: reusable, now });
+          const reused = reuseInboundRow({ scope, name, row: reusable.row, now, pending: reusable.pending });
           if (reused !== undefined) return reused;
         }
         return registerFromFd(fd, { scope, name, maxFileBytes: INBOUND_MAX_FILE_BYTES, activatedAt: undefined });
