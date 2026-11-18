@@ -11,7 +11,7 @@
 import type { BudgetUsage, Track } from './evidence';
 import type { CompactionAttempt, TurnObservation } from './compaction';
 import type { TaskView } from './oracle';
-import type { HarnessSession } from './harness';
+import type { CancelFact, ExecutionFact, HarnessSession } from './harness';
 import type { CallKind, ModelCallRecord } from './accounting';
 
 /** 假会话单次调用脚本项（逐次调用账本用；缺省由 modelCalls 合成「主模型」记录）。 */
@@ -31,6 +31,10 @@ export interface FakeTurnScript {
   readonly modelCalls?: number;
   /** 该轮实际发起的逐次调用（主/摘要/重试/溢出恢复）。给出则以此为准，否则按 modelCalls 合成主模型记录。 */
   readonly calls?: readonly FakeCallSpec[];
+  /** 该轮机械上发起的执行调用（execute_operation 审计行；缺省 = 本轮零执行）。 */
+  readonly executions?: readonly ExecutionFact[];
+  /** 该轮 task_cancel 回执（目标任务/outcome；缺省 = 本轮无取消调用）。 */
+  readonly cancelFacts?: readonly CancelFact[];
   readonly tokens: number;
   readonly messages: number;
   /** 该轮结束时把新出现的压缩尝试并入会话面（顺序追加）。 */
@@ -49,14 +53,47 @@ export class FakeHarnessSession implements HarnessSession {
   private calls = 0;
   private attempts: CompactionAttempt[] = [];
   private lastCancel = false;
+  /** 当前任务账本（send 后更新；首轮之前为空 —— 与真实 registry 一致）。 */
+  private currentTasks: readonly TaskView[] = [];
+  private lastExecutions: readonly ExecutionFact[] = [];
+  private lastCancelFacts: readonly CancelFact[] = [];
   private readonly ledger: ModelCallRecord[] = [];
   private readonly scenario: FakeScenario;
+  /** `waitIdle` 实际被调用的次数与「当时会话面未收尾」的观测（确定性自证缝）。 */
+  private waitIdleCalls = 0;
+  private awaitingIdle = false;
 
   constructor(scenario: FakeScenario) {
     this.scenario = scenario;
   }
 
   async send(_text: string): Promise<{ reply: string; taskIds: readonly string[] }> {
+    const result = await this.dispatchScript();
+    this.awaitingIdle = false;
+    return result;
+  }
+
+  /**
+   * 只交办：脚本推进一轮但**不**标记收尾（`awaitingIdle=true`），供 harness 的
+   * `deferIdle` 轮模拟 background 受理即返回；下一阻塞轮前 `waitIdle` 清标记。
+   */
+  async sendNoWait(_text: string): Promise<{ reply: string; taskIds: readonly string[] }> {
+    const result = await this.dispatchScript();
+    this.awaitingIdle = true;
+    return result;
+  }
+
+  async waitIdle(): Promise<void> {
+    this.waitIdleCalls += 1;
+    this.awaitingIdle = false;
+  }
+
+  /** 观测：`waitIdle` 次数（测试断言真交错轮确实等过）。 */
+  waitIdleCount(): number { return this.waitIdleCalls; }
+  /** 观测：会话面当前是否有未收尾的后台交办。 */
+  hasPendingBackground(): boolean { return this.awaitingIdle; }
+
+  private async dispatchScript(): Promise<{ reply: string; taskIds: readonly string[] }> {
     const s = this.scenario.turns[this.index];
     if (s === undefined) throw new Error(`假会话脚本用尽：index=${this.index}`);
     this.index += 1;
@@ -76,6 +113,9 @@ export class FakeHarnessSession implements HarnessSession {
     }
     this.calls += specs.length;
     this.lastCancel = s.cancelCalled ?? false;
+    this.currentTasks = s.tasks;
+    this.lastExecutions = s.executions ?? [];
+    this.lastCancelFacts = s.cancelFacts ?? [];
     if (s.newAttempts) this.attempts = [...this.attempts, ...s.newAttempts];
     return { reply: s.reply, taskIds: [] };
   }
@@ -84,9 +124,9 @@ export class FakeHarnessSession implements HarnessSession {
     return this.scenario.turns[Math.max(0, this.index - 1)]!;
   }
 
-  tasks(): readonly TaskView[] { return this.last().tasks; }
-  transcriptTokens(): number { return this.last().tokens; }
-  transcriptMessages(): number { return this.last().messages; }
+  tasks(): readonly TaskView[] { return this.currentTasks; }
+  transcriptTokens(): number { return this.index === 0 ? 0 : this.last().tokens; }
+  transcriptMessages(): number { return this.index === 0 ? 0 : this.last().messages; }
   budget(): BudgetUsage {
     return {
       calls: this.calls,
@@ -100,6 +140,10 @@ export class FakeHarnessSession implements HarnessSession {
   /** 逐次真实模型调用账本（主 / Pi 摘要 / 重试 / 溢出恢复）。 */
   modelCallLedger(): readonly ModelCallRecord[] { return this.ledger; }
   cancelCalledLastTurn(): boolean { return this.lastCancel; }
+  /** 本回合 execute_operation 审计行（脚本 `executions`；缺省空 = 零执行）。 */
+  executionsLastTurn(): readonly ExecutionFact[] { return this.lastExecutions; }
+  /** 本回合 task_cancel 回执（脚本 `cancelFacts`；缺省空 = 本轮无取消调用）。 */
+  cancelFactsLastTurn(): readonly CancelFact[] { return this.lastCancelFacts; }
 }
 
 /** 便捷构造：给一个空任务视图。 */

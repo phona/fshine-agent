@@ -27,16 +27,48 @@ import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
 import { createResourcePolicy } from '../../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { TASK_CANCEL_TOOL } from '../../../packages/agent/src/execution-runtime';
+import { TASK_CANCEL_TOOL, EXECUTE_OPERATION_TOOL } from '../../../packages/agent/src/execution-runtime';
 import {
   assembleSessionCore, compactionSettingsFrom, contextWindowFrom, createBackgroundDispatch, resolveExecutionFace,
 } from '../../ask-runtime';
 import { estimateContextTokens } from '../token-estimate';
-import type { HarnessSession } from './harness';
+import type { CancelFact, ExecutionFact, HarnessSession } from './harness';
 import type { CompactionAttempt } from './compaction';
 import type { TaskView } from './oracle';
 import type { BudgetUsage, ToolCallRecord } from './evidence';
 import type { CallKind, ModelCallRecord } from './accounting';
+
+/** 把参数里的字符串叶子全部收集（执行对象记号：集合名/窗口等）。 */
+function stringLeaves(value: unknown, out: string[] = []): string[] {
+  if (typeof value === 'string') { out.push(value); return out; }
+  if (Array.isArray(value)) { for (const item of value) stringLeaves(item, out); return out; }
+  if (value !== null && typeof value === 'object') {
+    for (const item of Object.values(value as Record<string, unknown>)) stringLeaves(item, out);
+  }
+  return out;
+}
+
+/**
+ * execute_operation 的调用参数 → 对象记号集合（`--collection=beta` → `beta`）。
+ * 只做机械投影：展示/判定用，不改变调用参数。
+ */
+function executionObjectsOf(args: unknown): readonly string[] {
+  let parsed = args;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed) as unknown; } catch { /* 保留原串 */ }
+  }
+  const leaves = stringLeaves(parsed);
+  const tokens = leaves.flatMap((leaf) => leaf.split(/[=\s,]+/)).map((t) => t.trim()).filter((t) => t !== '');
+  return [...new Set(tokens)];
+}
+
+function operationOf(args: unknown): string {
+  if (args !== null && typeof args === 'object') {
+    const operation = (args as { operation?: unknown }).operation;
+    if (typeof operation === 'string') return operation;
+  }
+  return '';
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pi 原生事件观测（只读包裹公开类；归属按 AsyncLocalStorage 绑定到会话）
@@ -61,6 +93,12 @@ interface SessionRecord {
   lastCompactionError?: string;
   fallbackAfter?: number;
   toolCalls: ToolCallRecord[];
+  /** tool_execution_start 的调用参数（`tool_execution_end` 事件**不带** args，按 toolCallId 补齐）。 */
+  pendingToolArgs: Map<string, unknown>;
+  /** 逐次执行审计行（`execute_operation` 的 start 事件；带回合号）。 */
+  executions: Array<{ readonly turn: number; readonly fact: ExecutionFact }>;
+  /** 逐次 `task_cancel` 回执（end 事件的 result；带回合号）。 */
+  cancels: Array<{ readonly turn: number; readonly fact: CancelFact }>;
 }
 
 /** 每个 RealSession 一个 collector（进程内并发会话互不串账）。 */
@@ -88,7 +126,7 @@ function recordFor(collector: Collector, session: AgentSession): SessionRecord {
       turn: collector.currentTurn, attempts: [], calls: [],
       toolsThisTurn: new Set(), lastTurnTools: new Set(),
       atCompactionStart: null, pendingRetry: false, pendingOverflow: false, summaryRetries: 0,
-      lastAssistantStop: null, toolCalls: [],
+      lastAssistantStop: null, toolCalls: [], pendingToolArgs: new Map(), executions: [], cancels: [],
     };
     collector.records.push(rec);
   }
@@ -166,16 +204,46 @@ function onSessionEvent(collector: Collector, rec: SessionRecord, event: unknown
     if (e['willRetry'] === true) rec.pendingOverflow = true;
     return;
   }
+  if (type === 'tool_execution_start') {
+    // end 事件不带 args：按 toolCallId 暂存，供执行对象判定与 tool-calls 证据使用。
+    const args = e['args'] ?? null;
+    rec.pendingToolArgs.set(String(e['toolCallId'] ?? ''), args);
+    // 执行审计行（发起即记；后续失败/拒绝仍是一次真实执行尝试）。
+    if (String(e['toolName'] ?? '') === EXECUTE_OPERATION_TOOL) {
+      const inner = args !== null && typeof args === 'object' ? (args as { args?: unknown }).args : undefined;
+      rec.executions.push({ turn, fact: { operation: operationOf(args), objects: executionObjectsOf(inner ?? args) } });
+    }
+    return;
+  }
   if (type === 'tool_execution_end') {
     const result = e['result'];
     let summary = '';
     try { summary = JSON.stringify(result) ?? ''; } catch { summary = String(result); }
+    const callId = String(e['toolCallId'] ?? '');
+    const args = rec.pendingToolArgs.get(callId) ?? e['args'] ?? null;
+    rec.pendingToolArgs.delete(callId);
     rec.toolCalls.push({
       turn, agent: rec.isMain ? 'main' : 'worker', seq: rec.toolCalls.length + 1,
-      tool: String(e['toolName'] ?? '?'), args: e['args'] ?? null,
+      tool: String(e['toolName'] ?? '?'), args,
       resultSummary: summary.length <= 400 ? summary : `${summary.slice(0, 400)}…`,
       elapsedMs: typeof e['durationMs'] === 'number' ? e['durationMs'] : 0,
     });
+    // task_cancel 回执：目标任务 + outcome/status（在飞取消的「如实迟到 vs 指错任务」判据）。
+    if (String(e['toolName'] ?? '') === TASK_CANCEL_TOOL) {
+      let parsed: unknown = result;
+      if (typeof result === 'string') {
+        try { parsed = JSON.parse(result) as unknown; } catch { parsed = null; }
+      }
+      const obj = parsed !== null && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+      rec.cancels.push({
+        turn,
+        fact: {
+          taskId: typeof obj['taskId'] === 'string' ? obj['taskId'] : null,
+          outcome: typeof obj['outcome'] === 'string' ? obj['outcome'] : null,
+          status: typeof obj['status'] === 'string' ? obj['status'] : null,
+        },
+      });
+    }
   }
 }
 
@@ -346,6 +414,39 @@ export async function openRealSession(input: RealSessionInput): Promise<RealSess
   const mainRec = (): SessionRecord | undefined =>
     collector.records.find((s) => s.isMain) ?? collector.records[0];
 
+  /**
+   * 一轮发送。`awaitIdle=false` = background 只交办（受理即返回），后台任务由
+   * `waitIdle` 统一收尾——用于 LS6 的真交错（A 在飞插 B）与在飞取消窗口。
+   */
+  async function performSend(text: string, awaitIdle: boolean): Promise<{ reply: string; taskIds: readonly string[] }> {
+    turn += 1;
+    collector.pendingText = text;
+    collector.currentTurn = turn;
+    for (const rec of collector.records) rec.turn = turn;
+    try {
+      const result = await COLLECTOR_ALS.run(collector, async () => {
+        const sent = await assembled.session.send(text);
+        if (awaitIdle) await dispatch.runner.whenIdle();
+        return sent;
+      });
+      if ((result.reply ?? '').trim() === '') zeroReplyTurns.push(turn);
+      return { reply: result.reply ?? '', taskIds: result.taskIds ?? [] };
+    } catch (error) {
+      zeroReplyTurns.push(turn);
+      collector.events.push({
+        event: 'r6_send_error', turn,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return { reply: '', taskIds: [] };
+    } finally {
+      collector.pendingText = null;
+      for (const rec of collector.records) {
+        rec.lastTurnTools = new Set(rec.toolsThisTurn);
+        rec.toolsThisTurn = new Set();
+      }
+    }
+  }
+
   return {
     sessionId: input.sessionId,
     principalId: input.principalId,
@@ -353,32 +454,17 @@ export async function openRealSession(input: RealSessionInput): Promise<RealSess
     registry,
 
     async send(text: string) {
-      turn += 1;
-      collector.pendingText = text;
-      collector.currentTurn = turn;
-      for (const rec of collector.records) rec.turn = turn;
-      try {
-        const result = await COLLECTOR_ALS.run(collector, async () => {
-          const sent = await assembled.session.send(text);
-          await dispatch.runner.whenIdle();
-          return sent;
-        });
-        if ((result.reply ?? '').trim() === '') zeroReplyTurns.push(turn);
-        return { reply: result.reply ?? '', taskIds: result.taskIds ?? [] };
-      } catch (error) {
-        zeroReplyTurns.push(turn);
-        collector.events.push({
-          event: 'r6_send_error', turn,
-          message: error instanceof Error ? error.message : String(error),
-        });
-        return { reply: '', taskIds: [] };
-      } finally {
-        collector.pendingText = null;
-        for (const rec of collector.records) {
-          rec.lastTurnTools = new Set(rec.toolsThisTurn);
-          rec.toolsThisTurn = new Set();
-        }
-      }
+      return performSend(text, true);
+    },
+
+    /** 只交办：不等后台任务收尾（真交错/在飞取消用；收尾由 waitIdle 显式触发）。 */
+    async sendNoWait(text: string) {
+      return performSend(text, false);
+    },
+
+    /** 等所有后台任务落定（与 sendNoWait 配对；幂等）。 */
+    async waitIdle() {
+      await dispatch.runner.whenIdle();
     },
 
     tasks(): readonly TaskView[] {
@@ -423,6 +509,31 @@ export async function openRealSession(input: RealSessionInput): Promise<RealSess
 
     cancelCalledLastTurn(): boolean {
       return mainRec()?.lastTurnTools.has(TASK_CANCEL_TOOL) ?? false;
+    },
+
+    /**
+     * 本回合 worker 实际发起的 execute_operation（审计行：operation + 参数对象记号）。
+     * 只读 tool_execution_end 观测，不改任何调用参数；对象记号用于「执行对象是否串台」判定。
+     */
+    executionsLastTurn(): readonly ExecutionFact[] {
+      const out: ExecutionFact[] = [];
+      for (const rec of collector.records) {
+        for (const item of rec.executions) {
+          if (item.turn === turn) out.push(item.fact);
+        }
+      }
+      return out;
+    },
+
+    /** 本回合 task_cancel 回执（目标任务/结果）；用于在飞取消的迟到判定。 */
+    cancelFactsLastTurn(): readonly CancelFact[] {
+      const out: CancelFact[] = [];
+      for (const rec of collector.records) {
+        for (const item of rec.cancels) {
+          if (item.turn === turn) out.push(item.fact);
+        }
+      }
+      return out;
     },
 
     mainModelCallsLastTurn(): number {

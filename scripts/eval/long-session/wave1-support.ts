@@ -24,7 +24,7 @@ import {
   aggregateStructureLeak, type StructureLeakBatch, type StructureLeakReport,
 } from './structure-leak';
 
-export const WAVE1_TRACKS: readonly Track[] = ['LS1', 'LS2', 'LS3', 'LS4', 'LS5'];
+export const WAVE1_TRACKS: readonly Track[] = ['LS1', 'LS2', 'LS3', 'LS4', 'LS5', 'LS6'];
 /** 预注册口径：每轨 3 会话 = 2×40k 探索 + 1×128k 生产窗口。 */
 export const WAVE1_WINDOWS: readonly number[] = [40000, 40000, 128000];
 /** 预注册缺省被测模型；`--model=` 可改用另一条基线。 */
@@ -88,19 +88,24 @@ function stripFact(turn: TurnSpec): TurnSpec {
 }
 
 export interface TrackScript {
-  /** 初始计划（建立轮；用例轮按需在压缩后发）。 */
+  /** 初始计划（LS1–LS5：建立轮，用例轮按需在压缩后发；LS6：完整 13 轮时间线）。 */
   readonly plan: TrackPlan;
-  /** 压缩后复查轮（LS1/2/3 有；LS4/LS5 为生命周期探针）。 */
+  /** 压缩后复查轮（LS1/2/3 有；LS4/LS5 为生命周期探针；LS6 取 N2-B/N4/N5-B）。 */
   readonly probeTurns: readonly TurnSpec[];
   /** 压缩门槛达成后是否还追加稳态推进轮（LS5）。 */
   readonly steadyPumps: number;
+}
+
+/** 会话标记注入首轮（H7 跨会话泄漏与语料首轮共用同一机械文本）。 */
+function markFirst(turns: readonly TurnSpec[], marker: string): TurnSpec[] {
+  return turns.map((t, i) => (i === 0 ? { ...t, text: `${marker}${t.text}` } : t));
 }
 
 export function scriptFor(track: Track, sessionId: string): TrackScript {
   const base = buildTrackPlan(track);
   const establish = base.turns.filter((t) => t.kind === 'establish');
   const marker = sessionMarker(sessionId);
-  const withMarker = establish.map((t, i) => (i === 0 ? { ...t, text: `${marker}${t.text}` } : t));
+  const withMarker = markFirst(establish, marker);
   const facts = base.turns.filter((t) => t.kind === 'fact').map(stripFact);
   const tasks = base.turns.filter((t) => t.kind === 'task');
   const interactions = base.turns.filter((t) => t.kind === 'interaction');
@@ -145,6 +150,17 @@ export function scriptFor(track: Track, sessionId: string): TrackScript {
         ],
         steadyPumps: 6,
       };
+    case 'LS6': {
+      // LS6 是**时间线轨**：N1–N6 的 13 轮必须按序真发（不是压缩后复查的探针），
+      // 否则交错/改口径/暂停/反悔/更正/取消的上下文根本不存在。首轮带会话标记（H7）。
+      const keyLabels = new Set(['N2-B', 'N4', 'N5-B']);
+      return {
+        plan: { track, turns: markFirst(base.turns, marker) },
+        // 压缩后复查：改口径后回头 / 反悔重做 / 自我更正（N2-B、N4、N5-B）。
+        probeTurns: base.turns.filter((t) => t.label !== undefined && keyLabels.has(t.label)).map((t) => ({ ...t, index: 0 })),
+        steadyPumps: 0,
+      };
+    }
   }
 }
 
@@ -235,21 +251,35 @@ export function withPumpedTurns(
   let consumed = 0;
   let exhausted = false;
   const plan: TrackPlan = { track: input.track, turns };
+  const advance = (): void => {
+    consumed += 1;
+    // 与 r6b 的 nextTurn 时机一致：初始计划跑完之前不插入推进轮。
+    if (!exhausted && consumed >= initialTurns) {
+      const next = input.nextTurn({
+        completedTurns: consumed,
+        effectiveCompactions: analyzeCompaction(session.compactionAttempts(), []).effectiveCount,
+      });
+      if (next === null) exhausted = true;
+      else turns.push(next);
+    }
+  };
   const wrapped = new Proxy(session, {
     get(target, property, receiver) {
       if (property === 'send') {
         return async (text: string): Promise<{ reply: string; taskIds: readonly string[] }> => {
           const result = await target.send(text);
-          consumed += 1;
-          // 与 r6b 的 nextTurn 时机一致：初始计划跑完之前不插入推进轮。
-          if (!exhausted && consumed >= initialTurns) {
-            const next = input.nextTurn({
-              completedTurns: consumed,
-              effectiveCompactions: analyzeCompaction(target.compactionAttempts(), []).effectiveCount,
-            });
-            if (next === null) exhausted = true;
-            else turns.push(next);
+          advance();
+          return result;
+        };
+      }
+      // 延迟交办轮同样算「已消费一轮」，否则推进器永远等不到初始计划跑完。
+      if (property === 'sendNoWait') {
+        return async (text: string): Promise<{ reply: string; taskIds: readonly string[] }> => {
+          if (typeof target.sendNoWait !== 'function') {
+            throw new Error('计划含 deferIdle 轮，但会话面未提供 sendNoWait');
           }
+          const result = await target.sendNoWait(text);
+          advance();
           return result;
         };
       }
