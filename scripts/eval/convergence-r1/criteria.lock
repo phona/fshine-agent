@@ -1,6 +1,6 @@
 {
   "generatedBy": "node --import tsx scripts/eval/convergence-r1/freeze.ts",
-  "frozenAt": "2026-11-18T01:03:36.007Z",
+  "frozenAt": "2026-11-18T04:47:39.612Z",
   "criteriaSha256": "9d4b0824a429658e7f633ff8af928fd3ad94b633f02c95f151866679bb8d6cd4",
   "casesSha256": "3618f5e2ec84d931176b66ce20bb42ab0bf44961c0e98c9d1560d3d7e25fd12f",
   "files": {
