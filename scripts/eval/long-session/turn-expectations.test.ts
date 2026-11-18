@@ -315,3 +315,19 @@ describe('LS6 端到端（假会话）', () => {
     expect(checks).toEqual(['prev_tasks_unchanged', 'task_status_in']);
   });
 });
+
+describe('replyExcludes 作用域（2026-11-18 判据缺陷修复）', () => {
+  it('只检查提到目标对象的句子：别的对象的合法数字不判负', () => {
+    const reply = 'alpha：2 条 / 2000。\nbeta：3 条 / 1000。';
+    expect(replyExcludedHits(reply, ['3条', '三条'], 'alpha')).toEqual([]);
+    expect(replyExcludedHits(reply, ['3条'], 'beta')).toEqual(['3条']);
+  });
+
+  it('同一句里提到目标对象且含被禁值 → 仍判负', () => {
+    expect(replyExcludedHits('alpha 是 3条。', ['3条'], 'alpha')).toEqual(['3条']);
+  });
+
+  it('不给作用域时保持原行为（全文检查）', () => {
+    expect(replyExcludedHits('beta：3 条。', ['3条'])).toEqual(['3条']);
+  });
+});

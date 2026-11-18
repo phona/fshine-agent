@@ -54,6 +54,9 @@ export interface TurnSpec {
   readonly expectTaskStatusIn?: TaskStatusPick;
   /** 回复文本（去空白）不得包含这些字面片段；纯数字片段按「出现该数值」判。 */
   readonly replyExcludes?: readonly string[];
+  /** 负向检查的作用域（2026-11-18）：只检查**提到该对象**的句子。
+   *  实测：N5-B 里回复合法地报了 beta 的「3 条」，被裸词判负——负向检查必须限定对象。 */
+  readonly replyExcludesScope?: string;
   /**
    * 取消诚实性：回复声称「已取消」时账本最新任务必须真的 `cancelled`；若任务已
    * `completed`，回复不得声称取消（如实说已完成即可）。用于「不许假取消」。
@@ -193,6 +196,7 @@ function ls6Turns(): Omit<TurnSpec, 'index'>[] {
       expectNoExecution: true, expectNoNewTask: true,
       fact: { kind: 'exact', collection: 'beta', count: beta.count, sum: beta.sum },
       replyExcludes: ['2000'],
+      replyExcludesScope: 'beta',
     },
     // ── N3 真间隔暂停（1.5s 真空档 → 继续）────────────────────────────────
     { kind: 'interaction', label: 'N3-A', text: '先停一下，我过几分钟再回来继续。', expectNoNewTask: true, expectNoExecution: true, expectPrevTasksUnchanged: true },
@@ -206,6 +210,7 @@ function ls6Turns(): Omit<TurnSpec, 'index'>[] {
       text: '更正：alpha 是 2 条，按 2 条重算，把条数和总额再给我一次。',
       fact: { kind: 'exact', collection: 'alpha', count: alpha.count, sum: alpha.sum },
       replyExcludes: ['3条', '三条'],
+      replyExcludesScope: 'alpha',
     },
     // ── N6 三档取消 ──────────────────────────────────────────────────────────
     // ①在飞取消：Q1 交办即返回（任务仍在执行），Q2 在任务未完成时发出取消，

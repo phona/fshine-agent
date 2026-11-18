@@ -175,8 +175,12 @@ function compactText(text: string): string {
 }
 
 /** 回复文本负向检查：纯数字片段按「出现该数值」判，其余按去空白子串判。 */
-export function replyExcludedHits(reply: string, excludes: readonly string[]): string[] {
-  const text = reply ?? '';
+export function replyExcludedHits(reply: string, excludes: readonly string[], scope?: string): string[] {
+  const full = reply ?? '';
+  // 作用域：只检查提到该对象的句子/段落（按换行与句末标点切）。
+  const text = scope === undefined || scope === ''
+    ? full
+    : full.split(/\n+|(?<=[。！？!?])/u).filter((chunk) => chunk.includes(scope)).join('\n');
   const compact = compactText(text);
   const nums = parseNumbers(text);
   const hits: string[] = [];
@@ -264,7 +268,7 @@ export function judgeTurnExpectations(spec: TurnSpec, ctx: TurnExpectationContex
     }
   }
   if (spec.replyExcludes !== undefined && spec.replyExcludes.length > 0) {
-    const hits = replyExcludedHits(ctx.reply, spec.replyExcludes);
+    const hits = replyExcludedHits(ctx.reply, spec.replyExcludes, spec.replyExcludesScope);
     if (hits.length > 0) push('reply_excludes', 'E-B', { hits });
   }
   if (spec.expectCancelHonest === true) {
