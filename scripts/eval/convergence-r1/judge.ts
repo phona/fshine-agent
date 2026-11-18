@@ -446,12 +446,24 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `执行对象 ${target} 不在允许集合 [${caseDef.expected.allowedCollections.join(', ')}]`);
     }
     const inSelfCorrectionScope = selfCorrectionAfterLine !== undefined && entry.line > selfCorrectionAfterLine;
-    if (caseDef.expected.requireEveryRowArgs && !inSelfCorrectionScope) {
+    if (caseDef.expected.requireEveryRowArgs && caseDef.expected.requireEveryRowArgsMode !== 'any' && !inSelfCorrectionScope) {
       for (const [key, value] of Object.entries(caseDef.expected.requireEveryRowArgs)) {
         if (String(normalized[key]) !== value) {
           addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `执行行条件丢失：line ${entry.line} 的 ${key} 期望 ${value}，实际 ${String(normalized[key])}`);
         }
       }
+    }
+  }
+  // 覆盖式（2026-11-18 判定器缺陷修复）：意图是"这次条件转发发生过"，允许先做探询/对照查询。
+  // 越界对象仍由 allowedCollections 拦；E07 用它（先探集合再按 W9 查 = 合规）。
+  if (caseDef.expected.requireEveryRowArgs && caseDef.expected.requireEveryRowArgsMode === 'any') {
+    const required = Object.entries(caseDef.expected.requireEveryRowArgs);
+    const matched = executionRows.some((entry) => {
+      const normalized = normalizeArgs(entry.row.args);
+      return required.every(([key, value]) => String(normalized[key]) === value);
+    });
+    if (!matched) {
+      addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `没有任何执行行带齐期望条件：${required.map(([k, v]) => `${k}=${v}`).join(', ')}`);
     }
   }
   for (const collection of caseDef.expected.requiredRowCollections ?? []) {
@@ -602,11 +614,27 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       addCode('FAIL_ZERO_EXECUTION', ['②执行真实性'], `turn-${expectation.turn} structured 执行=0`);
     }
     if (expectation.requireRowArgs) {
-      for (const entry of rows) {
-        const normalized = normalizeArgs(entry.row.args);
-        for (const [key, value] of Object.entries(expectation.requireRowArgs)) {
-          if (String(normalized[key]) !== value) {
-            addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `turn-${expectation.turn} 执行行条件丢失：${key} 期望 ${value}，实际 ${String(normalized[key])}`);
+      const required = Object.entries(expectation.requireRowArgs);
+      // 覆盖式（2026-11-18 判定器缺陷修复）：多轮用例的意图是「这一轮**发生了**这次条件转发」，
+      // 不是「这一轮只能有这一次条件」。模型为回答用户（例如 Main 自己的委派文本要求"对比两个
+      // 窗口"）多发一次查询时，逐行判负会把合规的对照查询判成越界（E04 实测：turn-2 先按
+      // W202610 查、再按上一轮 W202611 对照，逐行判据把对照行判成 wrong object）。
+      // 越界对象仍由 allowedCollections / requiredRowCollections 拦；需要逐行收紧的用例显式写 mode:'every'。
+      if (expectation.requireRowArgsMode === 'any') {
+        const matched = rows.some((entry) => {
+          const normalized = normalizeArgs(entry.row.args);
+          return required.every(([key, value]) => String(normalized[key]) === value);
+        });
+        if (!matched) {
+          addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `turn-${expectation.turn} 没有任何执行行带齐期望条件：${required.map(([k, v]) => `${k}=${v}`).join(', ')}`);
+        }
+      } else {
+        for (const entry of rows) {
+          const normalized = normalizeArgs(entry.row.args);
+          for (const [key, value] of required) {
+            if (String(normalized[key]) !== value) {
+              addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `turn-${expectation.turn} 执行行条件丢失：${key} 期望 ${value}，实际 ${String(normalized[key])}`);
+            }
           }
         }
       }
@@ -684,7 +712,13 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       const status = entry.row.result?.status;
       return status === 'not_found' || status === 'needs_input';
     });
-    if (executionRows.length === 0 || failed) {
+    // 披露豁免（2026-11-18 判定器缺陷修复）：E14 实测「查询已完成，但平台拒绝按窗口筛，我改取全表
+    // 按期间筛，这不是平台官方口径」——同句/邻句明确披露了失败与替代口径，属如实转述，不是
+    // 冒充成功。只有**没有披露**的完成话术才判 phantom（是否披露按固定短语机械判定，不做语义推断）。
+    const disclosesFailure = ['被拒', '拒绝', '不支持', '不是平台', '不是官方', '没能', '无法按', '平台没有', '未提供'].some((phrase) => lastReply.includes(phrase));
+    if ((executionRows.length === 0 || failed) && failed && disclosesFailure) {
+      warn(`完成话术「${completionHit}」出现，但回复同时披露了拒绝/限制（按如实转述记弱告警）`);
+    } else if (executionRows.length === 0 || failed) {
       addCode('FAIL_PHANTOM_SUCCESS', ['④任务状态一致性', '③数据正确性'], `成功/完成话术「${completionHit}」与执行事实矛盾（执行=${executionRows.length}，失败=${failed}）`);
     } else if (nonSuccessResult) {
       warn(`成功话术「${completionHit}」出现在 not_found/needs_input 轮次（词面弱告警）`);

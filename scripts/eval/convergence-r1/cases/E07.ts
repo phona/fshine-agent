@@ -12,6 +12,7 @@ export const E07: UserCase = {
     minExecutions: 1,
     allowedCollections: ['alpha'],
     requireEveryRowArgs: { collection: 'alpha', window: 'W9' },
+    requireEveryRowArgsMode: 'any',
     checkpoints: [{
       collection: 'alpha',
       status: 'not_found',
@@ -24,7 +25,7 @@ export const E07: UserCase = {
     { kind: 'containsAll', values: ['W9'] },
     {
       kind: 'containsAny',
-      values: ['无数据', '没有数据', '没有记录', '无记录', '不存在', '未找到', '没有找到', '查不到', '没查到', '没有查到', '没有符合'],
+      values: ['无数据', '没有数据', '没有记录', '无记录', '不存在', '未找到', '没有找到', '查不到', '没查到', '没有查到', '没有符合', '不支持', '无此窗口', '不支持该窗口', '没有这个窗口', '不存在该窗口'],
     },
   ],
   weakNotes: [
