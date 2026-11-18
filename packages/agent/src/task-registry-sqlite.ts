@@ -93,6 +93,13 @@ export function createSqliteTaskRegistry(
       ...(stored.task.taskNo === undefined ? {} : { taskNo: stored.task.taskNo }),
       ...(stored.task.name === undefined ? {} : { name: stored.task.name }),
       ...(stored.task.replyText === undefined ? {} : { replyText: stored.task.replyText }),
+      // 预期契约（2026-11-18）：旧库只读（未迁移）时该列为缺省，读出缺省不伪造。
+      ...(stored.task.longRunningNotifiedAt === undefined
+        ? {}
+        : { longRunningNotifiedAt: stored.task.longRunningNotifiedAt }),
+      ...(stored.task.longRunningStuckNotifiedAt === undefined
+        ? {}
+        : { longRunningStuckNotifiedAt: stored.task.longRunningStuckNotifiedAt }),
       executions: stored.executions.map((execution: ExecutionRow) => ({
         requestId: execution.requestId,
         operation: execution.operation,
@@ -261,6 +268,14 @@ export function createSqliteTaskRegistry(
       return store.listTasks(undefined)
         .filter((stored) => stored.task.status === 'waiting_user')
         .map(toRecord);
+    },
+    listRunning() {
+      // 预期契约（2026-11-18）：只读 running 行（长时间提醒扫描；不读全表）。
+      return store.listRunningTasks().map((row) => toRecord({ task: row, executions: [] }));
+    },
+    claimLongRunningNotice(taskId, stage, at) {
+      // 原子「每档仅一次」领取：已提醒过返回 false（零写入）；不改任务状态、不产状态事实。
+      return store.claimLongRunningNotice(taskId, stage, at);
     },
     list(scope) {
       return store.listTasks(scope).map(toRecord);

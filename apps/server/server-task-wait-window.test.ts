@@ -229,12 +229,13 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
     try {
       const reply = await server.handler(incoming('user-a', 'conv-a', 'msg-1', '交办一件要跑一阵的事'));
       expect(reply).toBe('已交办，正在后台办，完成后发你。');
-      // 受理回执：机械事实（已受理、在后台办理中），话术去编号
+      // 受理回执：谁办 + 办完发你，话术去编号
       const receipt = records[0]!.execResults[0] as Record<string, unknown>;
       expect(receipt['accepted']).toBe(true);
       expect(receipt['status']).toBe('running');
       const notice = String(receipt['notice']);
-      expect(notice).toContain('已受理');
+      expect(notice).toContain('这个我来办');
+      expect(notice).toContain('办完发你');
       expect(notice).not.toContain('#');
       expect(notice).not.toContain('1');
       expect(receipt).not.toHaveProperty('taskNo');

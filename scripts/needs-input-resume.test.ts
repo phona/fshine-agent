@@ -234,10 +234,11 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
     const fixture = await makeFixture();
     try {
       const { taskId, taskNo } = await delegateFirstTurn(fixture);
-      // 受理回执（B 切片去编号）：机械事实「已受理、在后台办理中」，不含工单编号；
+      // 受理回执（预期契约 2026-11-18）：谁办 + 办完发你，不含工单编号；
       // 编号只在详情面（task_status 查询结果）与底账。
       const receipt = receiptOf(fixture.records[0]!);
-      expect(String(receipt['notice'])).toContain('已受理');
+      expect(String(receipt['notice'])).toContain('这个我来办');
+      expect(String(receipt['notice'])).toContain('办完发你');
       expect(String(receipt['notice'])).not.toContain('#');
       expect(receipt).not.toHaveProperty('taskNo');
 

@@ -220,6 +220,22 @@ export interface RuntimeConfig {
    * 只影响宿主主动追问与系统注记，不改变附件登记/事实注入。
    */
   attachmentNudgeAfterMs?: number;
+  /**
+   * 后台任务「比预计久了」提醒阈值（ms；2026-11-18 预期契约切片）。缺省 600000（10 分钟）；
+   * 0 = 关闭。判据 = 任务 running 且从认领时刻起超过本阈值、尚未提醒过。只发一次
+   * （已发时刻持久化），只在 1:1 会话发；文案只给用户可做的动作，不报进度。
+   */
+  longRunningNoticeMs?: number;
+  /**
+   * 「卡住了」提醒阈值（ms）：任务 running 且超过本阈值仍无事件 → 再发一条（之后不再发）。
+   * 缺省 1800000（30 分钟）；必须 > `longRunningNoticeMs` 才有意义。
+   */
+  longRunningStuckNoticeMs?: number;
+  /**
+   * 前台回合排队晋升的最长等待（ms；2026-11-18）。缺省 120000（2 分钟）；
+   * 超过即确定性拒绝（当前系统忙，请稍后再说），不留下排队残留。
+   */
+  queueWaitMs?: number;
 }
 
 /**

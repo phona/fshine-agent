@@ -51,11 +51,12 @@ describe('G 组·任务面 / 异步（W-26～W-28）', () => {
       await sim.waitFor('W-26 受理回执终帧', () => sim.finalBubbles().length === 1);
 
       const receipt = sim.finalBubbles()[0]!.content;
-      expect(receipt).toContain('已受理');
-      expect(receipt).toContain('后台');
-      // 受理回执去编号：不含 `#`，也不含任何编号数字（任务名本身无数字）。
+      // 受理回执（预期契约）：谁办 + 大概多久 + 办完发你；去编号：不含 `#`，
+      // 除估时锚点外不得出现任何其他数字（工单编号只在详情面/底账）。
+      expect(receipt).toContain('这个我来办');
+      expect(receipt).toContain('办完发你');
       expect(receipt).not.toContain('#');
-      expect(receipt).not.toMatch(/\d/);
+      expect(receipt.replace(/\d+\s*分钟/g, '')).not.toMatch(/\d/);
 
       const done = sim.doneOf(w26)!;
       expect(done.taskIds).toHaveLength(1);
@@ -111,9 +112,9 @@ describe('G 组·任务面 / 异步（W-26～W-28）', () => {
       // 同回合直接给结果（真实执行层数字）。
       expect(reply).toContain('documents W202611 共 3 条');
       expect(reply).toContain('1200');
-      // 零受理回执：不出现「已受理/后台办理」这类受理话术。
-      expect(reply).not.toContain('已受理');
-      expect(reply).not.toContain('后台办理');
+      // 零受理回执：不出现受理话术（「这个我来办/办完发你」这类）。
+      expect(reply).not.toContain('这个我来办');
+      expect(reply).not.toContain('办完发你');
       // 零主动投递：结果已在本回合交给用户，完成回调不得重复发一遍。
       expect(sim.sdk.proactiveTexts).toHaveLength(0);
       expect(sim.logs.some((line) => line['event'] === 'task_result_delivery_sent')).toBe(false);

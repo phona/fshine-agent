@@ -33,6 +33,18 @@
  * 定时器、不扫底账——直用 runner 的调用方行为零变化；装配方传 `resolveRuntimeConfig()`
  * 的值（配置缺省 24h）启用。
  *
+ * 长时间无动静提醒（2026-11-18，预期契约切片）：与 waiting_user 到期消费者共用**同一个**
+ * 有界定时器轮（不新增第二个循环）。判据只看持久化底账：
+ *   · 任务 running、从认领时刻（租约起点 = lease_until − leaseMs）起超过 `longRunningNoticeMs`
+ *     （缺省 10 分钟）→ 发一条「比预计久了，停下来还是继续等」（每任务一次）；
+ *   · 超过 `longRunningStuckNoticeMs`（缺省 30 分钟）→ 再发一条「卡住了，建议先停掉」
+ *     （每任务一次；此后不再自动发）。
+ * 每档「已发」时刻持久化在任务行（owner 列），原子领取保证并发/重启下每档至多一次。
+ * 只在 1:1 会话发（chatType 事实源由装配方经 `isDirectSession` 注入；拿不到时按「私聊会话」
+ * 这一条机械事实处理——不猜群聊）。发送失败只记事件，不改任务事实、不重试。未注入
+ * 两档阈值或通知端口时完全不扫、零行为变化。
+ * 文案只给用户可做的动作，不报进度（不写 operation 名、不写已执行次数、不写最近一步）。
+ *
  * 租约口径（集成要求）：leaseMs 必须覆盖最长执行回合（按 P5 workerTurnMs 取，且执行端以截止
  * 时间强制中止）；§1 无租约续期方法，超出租约的在飞回合会被下一次 pump 判为 result_unknown
  * （保守口径：unknown ≠ failed ≠ success）。
@@ -159,6 +171,17 @@ export interface TaskRegistryPort {
    * 提供本方法后每趟只取等待行（通常 0 条）。
    */
   listWaiting?(): readonly TaskRecordView[];
+  /**
+   * 只读 **running 行**（长时间无动静提醒扫描用；可选）。缺省时回落到 `list()` 再过滤
+   * （同一性能口径）。只读状态事实，不做判定。
+   */
+  listRunning?(): readonly TaskRecordView[];
+  /**
+   * 预期契约：原子领取一档提醒（'overdue' = 10 分钟档 / 'stuck' = 30 分钟档）。
+   * 返回 true = 本次由本进程发出（已落库，重启不重发）；false = 该档已提醒过（零写入）。
+   * 缺省 = 不启用提醒（无法持久化「已发」事实时不发——fail-closed，避免重启重复打扰）。
+   */
+  claimLongRunningNotice?(taskId: string, stage: 'overdue' | 'stuck', at: string): boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +281,38 @@ export interface TaskExecutor {
 }
 
 /**
+ * 长时间无动静提醒的用户文案（2026-11-18 owner 定；只给用户可做的动作，**不报进度**：
+ * 不写 operation 名、不写已执行次数、不写最近一步）。
+ */
+export const LONG_RUNNING_NOTICE_TEXT =
+  '这件事比预计久了。要我停下来，还是继续等？（回「停」我就停）';
+
+/** 卡住档文案（>30 分钟仍无事件；发过一次后不再发）。 */
+export const LONG_RUNNING_STUCK_NOTICE_TEXT =
+  '这个我卡住了，建议先停掉；你稍后再试，或者把我们叫过来看看。';
+
+/**
+ * 主动提醒投递端口（装配方实现：走宿主既有主动投递面 `fileDelivery.sendText`）。
+ * 实现方自己负责路由解析与投递纪律；异常不应抛出（抛出也只按失败事件记）。
+ */
+export interface LongRunningNoticePort {
+  /**
+   * 1:1 会话判据（chatType 事实源；缺省 = 按「私聊会话」这一条机械事实处理）。
+   * false = 群聊，不发（也不落「已发」）。
+   */
+  isDirectSession?(sessionId: string): boolean;
+  /** 投递一条提醒；返回是否真正送达（失败/抑制只记账，不重试）。 */
+  sendNotice(input: {
+    taskId: string;
+    principalId: string;
+    sessionId: string;
+    stage: 'overdue' | 'stuck';
+    minutes: number;
+    text: string;
+  }): Promise<boolean>;
+}
+
+/**
  * 单一定时器端口（测试注入假时钟/假定时器，不真 sleep）。
  * runner 同一时刻只持有一个 handle；clear 幂等。
  */
@@ -288,6 +343,24 @@ export interface TaskRunnerOptions {
   waitUserTimeoutMs?: number;
   /** 单一定时器轮（缺省全局 setTimeout；测试注入假定时器）。仅在启用到期消费者时使用。 */
   timers?: RunnerTimers;
+  /**
+   * 长时间无动静提醒阈值（ms；2026-11-18 预期契约）。缺省/0 = 不启用（零行为变化）；
+   * 装配方传 `resolveRuntimeConfig().longRunningNoticeMs`（配置缺省 600_000 = 10 分钟）。
+   * 判定只看持久化底账 + 注入时钟，不依赖上一进程的内存定时器（重启可判）。
+   */
+  longRunningNoticeMs?: number;
+  /**
+   * 卡住档提醒阈值（ms；> 本值仍无事件 → 再发一条，之后不再发）。缺省/0 = 不启用该档；
+   * 装配方传 `resolveRuntimeConfig().longRunningStuckNoticeMs`（配置缺省 1_800_000 = 30 分钟）。
+   */
+  longRunningStuckNoticeMs?: number;
+  /**
+   * 提醒投递端口：缺省 = 不启用（无法投递就不打扰）。提供 `isDirectSession` 时群聊不发；
+   * 未提供时按「私聊会话」这一条机械事实处理（拿不到 chatType 事实源时的唯一安全默认）。
+   */
+  longRunningNotice?: LongRunningNoticePort;
+  /** 结构化事件出口（`task_long_running_notice`：成功/失败各一条；不含文案与业务内容）。 */
+  log?: (line: Record<string, unknown>) => void;
   /**
    * waiting 扫描节流（ms，缺省 1000）：pump 很频繁，每趟全表扫 500 行会把 RSS 顶起来
    * （2026-11-18 实测：500 积压下 I5 从 <10% 变 14–28%）。仅当"到了上次算出的到期点、
@@ -377,15 +450,30 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   const leaseMs = options.leaseMs ?? 300_000;
   const now = options.now ?? ((): Date => new Date());
   const onError = options.onError;
+  const log = options.log;
   /**
    * waiting_user 到期消费者：未配阈值（或底账无 list 面）时完全不建定时器/不扫底账，
    * 直用 runner 的调用方行为零变化。装配方注入配置值（缺省 24h）才启用。
    */
   const waitUserTimeoutMs = options.waitUserTimeoutMs ?? 0;
   const waitingScanThrottleMs = options.waitingScanThrottleMs ?? 1000;
-  let lastWaitingScan: { at: number; nextDue?: number } | undefined;
+  /**
+   * 长时间无动静提醒（预期契约）：两个阈值 + 投递端口 + 可持久化的「每档已发」领取。
+   * 缺任何一项都不启用（无法持久化就不发——重启不重复打扰是硬要求）。
+   */
+  const longRunningNoticeMs = options.longRunningNoticeMs ?? 0;
+  const longRunningStuckNoticeMs = options.longRunningStuckNoticeMs ?? 0;
+  const longRunningNotice = options.longRunningNotice;
+  const longRunningRowsSource = registry.listRunning !== undefined ? registry.listRunning : registry.list;
+  const longRunningConsumerEnabled = longRunningNoticeMs > 0
+    && registry.claimLongRunningNotice !== undefined
+    && longRunningNotice !== undefined
+    && longRunningRowsSource !== undefined;
   const waitingConsumerEnabled = waitUserTimeoutMs > 0 && (registry.listWaiting !== undefined || registry.list !== undefined);
-  const timers: RunnerTimers | undefined = waitingConsumerEnabled
+  /** 两个消费者共用**同一个**有界定时器轮（不新增第二个循环）。 */
+  const dueConsumerEnabled = waitingConsumerEnabled || longRunningConsumerEnabled;
+  let lastDueScan: { at: number; nextDue?: number } | undefined;
+  const timers: RunnerTimers | undefined = dueConsumerEnabled
     ? options.timers ?? {
       set(callback, delayMs) {
         const handle = setTimeout(callback, delayMs);
@@ -400,8 +488,10 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     : undefined;
   /** setTimeout 的最大延迟（超过会被 Node 折成 1ms：先钳到上限，下一轮重算）。 */
   const MAX_TIMER_DELAY_MS = 2_147_483_647;
-  let waitingTimer: unknown;
-  let waitingTimerArmed = false;
+  let dueTimer: unknown;
+  let dueTimerArmed = false;
+  /** 在飞的提醒投递（whenIdle 收尾等待；失败只记账，不改变任务事实）。 */
+  const noticeSends = new Set<Promise<void>>();
 
   /** 本进程在飞执行回合：taskId → abort 控制器 / 落定链。不是队列（队列=底账 queued 行）。 */
   const controllers = new Map<string, AbortController>();
@@ -474,45 +564,151 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     return { timedOut, ...(nextDue === undefined ? {} : { nextDue }) };
   }
 
-  function clearWaitingTimer(): void {
-    if (!waitingTimerArmed) return;
-    waitingTimerArmed = false;
-    timers!.clear(waitingTimer);
-    waitingTimer = undefined;
+  function clearDueTimer(): void {
+    if (!dueTimerArmed) return;
+    dueTimerArmed = false;
+    timers!.clear(dueTimer);
+    dueTimer = undefined;
   }
 
-  /** 重武装唯一定时器：无等待行即不建；有则只保留下一个到期点。 */
-  function armWaitingTimer(nextDue: number | undefined): void {
-    if (!waitingConsumerEnabled) return;
-    clearWaitingTimer();
+  /** 重武装唯一定时器：无到期点即不建；有则只保留最早到期点。 */
+  function armDueTimer(nextDue: number | undefined): void {
+    if (!dueConsumerEnabled) return;
+    clearDueTimer();
     if (nextDue === undefined) return;
     const delayMs = Math.min(Math.max(0, nextDue - now().getTime()), MAX_TIMER_DELAY_MS);
-    waitingTimer = timers!.set(() => {
-      waitingTimerArmed = false;
-      waitingTimer = undefined;
+    dueTimer = timers!.set(() => {
+      dueTimerArmed = false;
+      dueTimer = undefined;
       try {
         pump();
       } catch (error) {
         // 定时器回调里的异常不能变成进程级未捕获错误（如收尾阶段底账已关闭）：
         // 只如实上报观察点，不改变任务事实（下一趟 pump 会重新判定）。
-        report('waiting_user_timeout', error);
+        report('due_timer_tick', error);
       }
     }, delayMs);
-    waitingTimerArmed = true;
+    dueTimerArmed = true;
+  }
+
+  interface LongRunningScan {
+    noticed: string[];
+    nextDue?: number;
+  }
+
+  /**
+   * running 行的认领时刻（底账等价事实）：认领时写租约 `lease_until = claim + leaseMs`，
+   * 因此起点 = `lease_until − leaseMs`（runner 自己的 leaseMs 口径）。无租约的 running
+   * 行（inline/未认领）不参与判定——不猜开始时刻。
+   */
+  function runningStartedAt(task: TaskRecordView): number | undefined {
+    if (task.status !== 'running' || task.leaseUntil === undefined) return undefined;
+    const until = Date.parse(task.leaseUntil);
+    return Number.isFinite(until) ? until - leaseMs : undefined;
+  }
+
+  /** 原子领取一档提醒（已提醒过 → false）；底账不可写时如实上报并跳过（不打扰）。 */
+  function claimNotice(task: TaskRecordView, stage: 'overdue' | 'stuck', nowMs: number): boolean {
+    try {
+      return registry.claimLongRunningNotice!(task.taskId, stage, new Date(nowMs).toISOString());
+    } catch (error) {
+      report(task.taskId, error);
+      return false;
+    }
+  }
+
+  /** 投递一条提醒（fire-and-forget；成功/失败各记一条事件，不改任务事实、不重试）。 */
+  function deliverNotice(task: TaskRecordView, stage: 'overdue' | 'stuck', minutes: number): void {
+    const base = {
+      taskId: task.taskId,
+      principalId: task.principalId,
+      sessionId: task.sessionId,
+      stage,
+      minutes,
+    };
+    const text = stage === 'stuck' ? LONG_RUNNING_STUCK_NOTICE_TEXT : LONG_RUNNING_NOTICE_TEXT;
+    const send = (async (): Promise<void> => {
+      try {
+        const delivered = await longRunningNotice!.sendNotice({ ...base, text });
+        log?.({ event: 'task_long_running_notice', ...base, result: delivered ? 'sent' : 'failed' });
+      } catch (error) {
+        log?.({
+          event: 'task_long_running_notice',
+          ...base,
+          result: 'failed',
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })();
+    noticeSends.add(send);
+    void send.finally(() => noticeSends.delete(send));
+  }
+
+  /**
+   * 单趟扫描 running 行（共用同一刷新周期）：返回本次发出的任务与下一个到期点。
+   * 群聊不发（也不落「已发」）；每档只发一次（原子领取持久化，重启不重发）。
+   */
+  function scanLongRunning(nowMs: number): LongRunningScan {
+    const noticed: string[] = [];
+    let nextDue: number | undefined;
+    const arm = (at: number): void => {
+      if (nextDue === undefined || at < nextDue) nextDue = at;
+    };
+    for (const task of longRunningRowsSource!()) {
+      if (task.status !== 'running') continue; // 回落 list() 时过滤
+      const startedAt = runningStartedAt(task);
+      if (startedAt === undefined) continue;
+      const elapsed = nowMs - startedAt;
+      const overdueDue = startedAt + longRunningNoticeMs;
+      const stuckDue = longRunningStuckNoticeMs > 0 ? startedAt + longRunningStuckNoticeMs : undefined;
+      if (elapsed < longRunningNoticeMs) {
+        arm(overdueDue);
+        continue;
+      }
+      // 只在 1:1 会话发：chatType 事实源由装配方注入；拿不到时按「私聊会话」机械事实处理。
+      if (!(longRunningNotice!.isDirectSession?.(task.sessionId) ?? true)) continue;
+      if (stuckDue !== undefined && elapsed >= longRunningStuckNoticeMs) {
+        // 卡住档：发过即止（之后不再自动发）。
+        if (!claimNotice(task, 'stuck', nowMs)) continue;
+        noticed.push(task.taskId);
+        deliverNotice(task, 'stuck', Math.floor(elapsed / 60_000));
+        continue;
+      }
+      if (!claimNotice(task, 'overdue', nowMs)) {
+        if (stuckDue !== undefined) arm(stuckDue);
+        continue;
+      }
+      noticed.push(task.taskId);
+      deliverNotice(task, 'overdue', Math.floor(elapsed / 60_000));
+      if (stuckDue !== undefined) arm(stuckDue);
+    }
+    return { noticed, ...(nextDue === undefined ? {} : { nextDue }) };
   }
 
   function pump(): PumpSummary {
     const recovered = registry.expireLeases(now().toISOString()).map((task) => task.taskId);
     let waiting: WaitingScan | undefined;
-    if (waitingConsumerEnabled) {
+    let scanned = false;
+    let nextDue: number | undefined;
+    if (dueConsumerEnabled) {
       const nowMs = now().getTime();
-      const due = lastWaitingScan?.nextDue;
-      const shouldScan = lastWaitingScan === undefined
+      const due = lastDueScan?.nextDue;
+      const shouldScan = lastDueScan === undefined
         || (due !== undefined && nowMs >= due)
-        || nowMs - lastWaitingScan.at >= waitingScanThrottleMs;
+        || nowMs - lastDueScan.at >= waitingScanThrottleMs;
       if (shouldScan) {
-        waiting = scanWaiting(nowMs);
-        lastWaitingScan = { at: nowMs, ...(waiting.nextDue === undefined ? {} : { nextDue: waiting.nextDue }) };
+        scanned = true;
+        if (waitingConsumerEnabled) {
+          waiting = scanWaiting(nowMs);
+          if (waiting.nextDue !== undefined) nextDue = waiting.nextDue;
+        }
+        if (longRunningConsumerEnabled) {
+          const longRunning = scanLongRunning(nowMs);
+          if (longRunning.nextDue !== undefined && (nextDue === undefined || longRunning.nextDue < nextDue)) {
+            nextDue = longRunning.nextDue;
+          }
+        }
+        lastDueScan = { at: nowMs, ...(nextDue === undefined ? {} : { nextDue }) };
       }
     }
     const started: string[] = [];
@@ -540,7 +736,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       started.push(claimed.taskId);
       startRound(claimed, acquired);
     }
-    if (waiting !== undefined) armWaitingTimer(waiting.nextDue);
+    if (scanned) armDueTimer(nextDue);
     return {
       recovered,
       started,
@@ -721,6 +917,10 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     for (;;) {
       if (inFlight.size > 0) {
         await Promise.allSettled([...inFlight.values()]);
+        continue;
+      }
+      if (noticeSends.size > 0) {
+        await Promise.allSettled([...noticeSends]);
         continue;
       }
       if (pumpQueued) {

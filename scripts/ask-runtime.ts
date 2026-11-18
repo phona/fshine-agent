@@ -67,7 +67,7 @@ import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/a
 import type { RunJsExecutor } from '../packages/agent/src/run-js-executor';
 import type { TaskInputCopier } from '../packages/agent/src/file-store';
 import { createTaskExecutionBridge, type TaskFileBridgeStore } from '../packages/agent/src/task-file-bridge';
-import { createTaskRunner, type TaskExecutor, type TaskRunner } from '../packages/agent/src/task-runner';
+import { createTaskRunner, type LongRunningNoticePort, type TaskExecutor, type TaskRunner } from '../packages/agent/src/task-runner';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../packages/agent/src/worker-skills';
 import type { SkillRegistry } from '../packages/agent/src/skills';
 import { explicitConfigFrom, materializeEvalConfig } from './resolve-config-path';
@@ -463,6 +463,7 @@ export interface BackgroundDispatchInput {
   face?: ExecutionFace;
   workerDriver?: TurnDriver;
   /**
+
    * 片 1：run_js 执行器端口（装配层构造注入，与前台同一实例/构造）。注入后后台 Worker
    * 工具面含 run_js（任务作用域），产物经完成回调上交投递面。缺省不注入 = 零变化。
    */
@@ -479,6 +480,14 @@ export interface BackgroundDispatchInput {
    * 只进日志，用户/Worker 只见统一话术（与 inline 同一模块常量）。
    */
   onFileRefUnavailable?: (reason: string) => void;
+  /**
+   * 预期契约（2026-11-18）：长时间无动静提醒的投递端口（装配方接既有主动投递面 +
+   * 1:1 判据）。缺省不接 = 不提醒（无法投递就不打扰）。
+   */
+  longRunningNotice?: LongRunningNoticePort;
+  /** 结构化事件出口（提醒成功/失败；缺省静默）。 */
+  log?: (line: Record<string, unknown>) => void;
+
   /** runner 覆盖（测试确定性：leaseMs/时钟/属主；缺省 leaseMs=workerTurnMs+60s）。 */
   runnerOptions?: { leaseMs?: number; owner?: string; now?: () => Date };
 }
@@ -569,6 +578,12 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
     leaseMs: input.runnerOptions?.leaseMs ?? resolved.workerTurnMs + LEASE_MARGIN_MS,
     // 等待用户到期消费者由装配方按配置启用（配置缺省 24h；runner 直用缺省关闭）。
     waitUserTimeoutMs: resolved.waitUserTimeoutMs,
+    // 预期契约（2026-11-18）：10 分钟「比预计久了」/30 分钟「卡住了」两档阈值取自同一
+    // 配置源；投递端口由装配方接（缺省不接 = 不提醒）。
+    longRunningNoticeMs: resolved.longRunningNoticeMs,
+    longRunningStuckNoticeMs: resolved.longRunningStuckNoticeMs,
+    ...(input.longRunningNotice === undefined ? {} : { longRunningNotice: input.longRunningNotice }),
+    ...(input.log === undefined ? {} : { log: input.log }),
     ...(input.runnerOptions?.owner === undefined ? {} : { owner: input.runnerOptions.owner }),
     ...(input.runnerOptions?.now === undefined ? {} : { now: input.runnerOptions.now }),
   });

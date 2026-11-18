@@ -154,6 +154,11 @@ const RUNTIME_KEYS = [
   'dispatchMode',
   'allowWriteOperations',
   'attachmentNudgeAfterMs',
+  // 预期契约（2026-11-18）：后台任务超过 10 分钟无动静的提醒阈值与其自动发送上限（30 分钟）。
+  'longRunningNoticeMs',
+  'longRunningStuckNoticeMs',
+  // 前台排队最长等待（缺省 120s，住策略层）；超时即确定性拒绝。
+  'queueWaitMs',
 ] as const;
 
 /** runtime 段整数值：显式写错即 fail-fast（与 host.* 的「非法 = 未配置」刻意不同）。 */
@@ -206,6 +211,12 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     ['fileRetentionDays', 0],
     // 0 = 关闭主动追问（缺省 30000 由策略层提供）；负数/小数 = 配置错误。
     ['attachmentNudgeAfterMs', 0],
+    // 0 = 关闭长时间提醒（缺省 600000 住策略层）；负数/小数 = 配置错误。
+    ['longRunningNoticeMs', 0],
+    // 0 = 不设自动发送上限（缺省 1800000 住策略层）。
+    ['longRunningStuckNoticeMs', 0],
+    // 0 = 不排队直接拒绝（缺省 120000 住策略层）。
+    ['queueWaitMs', 0],
   ];
   for (const [key, min] of integers) {
     const value = runtimeInteger(raw[key], key, min);

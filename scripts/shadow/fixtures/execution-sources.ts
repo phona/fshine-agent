@@ -141,6 +141,8 @@ export const FAKE_REAL_READ_OPERATIONS: readonly RawGatewayOperation[] = [
     name: 'dummy.query',
     label: 'query records',
     access: 'read',
+    // 与源 A 夹具自述同值（capabilities.json 的 est_seconds）：受理回执的估时锚点因此两源同形。
+    est_seconds: 10,
     args: {
       flags: [
         { flag: '--collection', required: true, style: 'name' },
@@ -152,6 +154,7 @@ export const FAKE_REAL_READ_OPERATIONS: readonly RawGatewayOperation[] = [
     name: 'ballot.query',
     label: 'query ballots',
     access: 'read',
+    est_seconds: 10,
     args: {
       flags: [
         { flag: '--topic', required: true, style: 'name' },
@@ -222,6 +225,12 @@ export function createFakeRealClient(config: FakeRealConfig = {}): FakeRealExecu
         operations: operations.map((operation) => ({
           name: operation.name,
           ...(typeof operation.label === 'string' && operation.label !== '' ? { label: operation.label } : {}),
+          // 成本提示投影（与生产适配器同判据）：只投影 ≥0 的有限数值，形状不对就不出现。
+          ...(typeof operation.est_seconds === 'number'
+            && Number.isFinite(operation.est_seconds)
+            && operation.est_seconds >= 0
+            ? { estimatedSeconds: operation.est_seconds }
+            : {}),
           args: declaredArgsOf(operation),
         })),
       };
