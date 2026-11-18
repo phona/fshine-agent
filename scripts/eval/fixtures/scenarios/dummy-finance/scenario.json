@@ -146,6 +146,23 @@
       "records": {
         "2026-10": 0
       }
+    },
+    {
+      "collection": "receivables-open",
+      "dataset": "datasets/receivables-open.json",
+      "locked": false,
+      "records": {
+        "2026-10": 3
+      },
+      "requires": ["window"]
+    },
+    {
+      "collection": "slow-fault-one",
+      "dataset": "datasets/slow-fault-one.json",
+      "locked": false,
+      "records": {
+        "W1": 1
+      }
     }
   ],
   "faults": [
@@ -172,6 +189,16 @@
       "error": {
         "code": "COLLECTION_FAULT",
         "message": "Collection {{source.collection}} cannot be read in its current state"
+      }
+    },
+    {
+      "collection": "slow-fault-one",
+      "kind": "slow_fault",
+      "delayMs": 2500,
+      "exitCode": 2,
+      "error": {
+        "code": "COLLECTION_FAULT",
+        "message": "Collection {{source.collection}} cannot be read after a long run"
       }
     }
   ]

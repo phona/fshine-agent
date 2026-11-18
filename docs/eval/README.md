@@ -70,3 +70,25 @@
 
 - **三件套分别保留、不改写**：原始 `judgment.json`、离线复判结果、重跑结果各自留存；重判不得覆盖原判。
 - **报告必须标**：样本规模 N、模型版本（含 thinking level）、代码点（commit）、技能 revision。缺任一项的读数只能当参考，不能当基线（裁定原文 `docs/history/decision-log-part02-2026-11.md:78`）。
+
+## 八、dummy 夹具的「慢 / 久后失败 / 待补答」能力（2026-11-18）
+
+三条用户级路径（调用执行层很久、执行很久后异常、needs_input → 用户补答 → 同一任务续跑）此前点不出来；
+夹具现在用**声明**提供，产品码零改动。真实装配链（真 `createServer` + 假企微 SDK + 真 dummy 子进程）
+的确定性冒烟：`npx vitest run scripts/eval/smoke/slow-faults.test.ts`。
+
+| 能力 | 在哪声明 | 直接触发（dummy CLI） |
+|---|---|---|
+| 真实延迟 | `platforms/dummy-platform/capabilities.json` 里 `dummy.query/prepare/commit` 的 `--delay-ms`（显式 flag，`operation list --json` 可见） | `bin/dummy query dummy.query --collection alpha --delay-ms 150`（真实 sleep；整数 0..60000，60001 → `exit 2` + `DELAY_OUT_OF_RANGE`） |
+| 久后失败 | `scenarios/dummy-finance/scenario.json` 的 `faults[]`：`{ "kind": "slow_fault", "delayMs": 2500, "exitCode": 2, "error": {...} }` | `bin/dummy query dummy.query --collection slow-fault-one`（约 2.5s 后 `exit 2` + `failed` 信封） |
+| 待补输入 | `scenario.json` 集合绑定的 `requires: ["window"]`（维度集合可写 `["customer"]`） | `bin/dummy query dummy.query --collection receivables-open` → `needs_input` + `missing:["window"]`；加 `--window 2026-10` → `completed` |
+
+- 三条都在**读路径**生效；`requires` 的「补齐」形态与既有声明同源：`--<name> <值>`、`--where <name>=<值>`，
+  或 `<name>` 恰为该集合声明的维度名时的 `--window`/`--round` 别名。缺参不写任何数据（状态文件逐字节不变）。
+- **聚合字段（结果字段，不是入参；不加 flag）**：`dummy.query` 的 `completed` 在 `data` 与审计 `result`
+  两处同时给出平台算好的聚合——每条都有数值 `value` 时 `sum`（alpha W1 = 2000）、都有数值 `amount` 时
+  `amountSum`（finance-invoices 全量 = 65000）、集合声明维度时 `byDimension: { <值>: { count, sum } }`
+  （分组求和等于总数）。空结果、缺数值字段或字符串数值（如 `"0012"`）一律**不带**这些字段（不返回 0）。
+  E15 的「聚合来源」判据读的就是审计 `result` 里的这些字段。
+- 既有候选歧义（`ambiguous`）仍是另一条响应，不与 `requires` 复用；既有 `read_fault` / `restricted`
+  行为不变。夹具自测：`scripts/eval/fixtures/dummy-platform-capabilities.test.ts`（含耗时下界与反向绊线）。

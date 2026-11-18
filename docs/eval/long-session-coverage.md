@@ -152,12 +152,18 @@ node --env-file=.env --import tsx scripts/eval/long-session/wave1-runner.ts \
       但全仓只有 `task-runner.ts:486` 调 `registry.timeout(taskId,'execution')`，**没有任何定时器
       调 `timeout(...,'waiting_user')`**（P5-T06 登记为 blocked-by-P2，见
       `docs/architecture/contract.md` §P5-T06）。
-    - **夹具造不出 `needs_input`**：`packages/agent/src/dummy-cli-client.ts:380` 只映射执行层显式
-      `status:'needs_input'` 的信封；dummy 平台 read 的歧义返回是 `ambiguous`
-      （`scripts/eval/fixtures/dummy-platform/runtime/read.cjs:97`），query 仅产出
-      completed/not_found（`bin/dummy.cjs`），客户端会把 `ambiguous` 落到
-      `EXECUTION_UNKNOWN_STATUS`，不会进入 `waiting_user`。
-    因此本轮**不新增 N7 轮次**；待 P2/P5 接线超时计时、且夹具能稳定产出 `needs_input` 后再补该用例。
+    - **夹具造不出 `needs_input` → 已支持（2026-11-18）**：集合绑定现在可以声明
+      `requires: ["window"]`（现行例子：`scripts/eval/fixtures/scenarios/dummy-finance/scenario.json`
+      的 `receivables-open`）。调用未带该输入时 `dummy.query` 返回 `status:"needs_input"` +
+      结构化 `missing:["window"]`（`scripts/eval/fixtures/dummy-platform/runtime/requires.cjs`），
+      不写任何数据；补齐后同一次调用正常完成。触发方式（可直接照抄）：
+      `bin/dummy query dummy.query --collection receivables-open` → `needs_input`；
+      `bin/dummy query dummy.query --collection receivables-open --window 2026-10` → `completed`。
+      维度集合的形态同样支持（场景里配 `requires:["customer"]`，`--where customer=<值>`
+      或 `--window <值>` 别名都可补齐）。既有「候选歧义」响应（`ambiguous`）保持不变，
+      两条路互不复用。真实装配链冒烟见 `scripts/eval/smoke/slow-faults.test.ts`。
+    因此本轮**仍不新增 N7 轮次**：夹具侧已经具备，缺的只剩「`waiting_user` 到期没有消费者」
+    这一产品侧能力（上一条）；待 P2/P5 接线超时计时后再补该用例。
 11. **N3 的真空档为何是 1500ms 而非 30s**：产品里 30s 没有任何会到期的状态（`waitUserTimeoutMs`
     缺省 24h、worker lease 600s、附件追问 30s 与本场景无关），真等 30s 测不到额外东西、只拖慢
     每次会话与冒烟；N3 的目标只是「回合之间真的断开、状态保持」，故按 owner 修正用 1500ms。

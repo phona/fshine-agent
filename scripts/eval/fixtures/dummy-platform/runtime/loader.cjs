@@ -15,6 +15,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { placeholdersOf } = require('./template.cjs');
 const { FAULT_STATE_FIELDS, faultKinds } = require('./faults.cjs');
+const { MAX_DELAY_MS } = require('./timing.cjs');
 
 /** Placeholders the read engine supplies; anything else in a template is an error. */
 const ALLOWED_PLACEHOLDERS = Object.freeze([
@@ -29,6 +30,8 @@ const ALLOWED_PLACEHOLDERS = Object.freeze([
   'where.reason',
   'arg.name',
   'arg.type',
+  // Structured "what is missing" names from a collection binding's `requires`.
+  'needs.missing',
 ]);
 
 const PROTOCOLS = Object.freeze(['proposal.create', 'proposal.commit']);
@@ -226,6 +229,15 @@ function loadScenario(options) {
       expectString(fault.error.message, `scenario ${file}: fault(${fault.collection}).error.message`);
       checkTemplates(fault.error, `scenario ${file}: fault(${fault.collection}).error`);
     }
+    if (fault.kind === 'slow_fault') {
+      if (!Number.isInteger(fault.delayMs) || fault.delayMs <= 0 || fault.delayMs > MAX_DELAY_MS) {
+        fail(`scenario ${file}: fault(${fault.collection}).delayMs must be an integer between 1 and ${MAX_DELAY_MS}`);
+      }
+      if (!isObject(fault.error)) fail(`scenario ${file}: fault(${fault.collection}).error must be an object`);
+      expectString(fault.error.code, `scenario ${file}: fault(${fault.collection}).error.code`);
+      expectString(fault.error.message, `scenario ${file}: fault(${fault.collection}).error.message`);
+      checkTemplates(fault.error, `scenario ${file}: fault(${fault.collection}).error`);
+    }
     if (fault.kind === 'restricted') {
       expectString(fault.stderr, `scenario ${file}: fault(${fault.collection}).stderr`);
       checkTemplates(fault.stderr, `scenario ${file}: fault(${fault.collection}).stderr`);
@@ -273,12 +285,30 @@ function loadScenario(options) {
       }
       dimension = { name: dimensionName, values: [...dimensionValues] };
     }
+    // Optional declared required inputs: `requires: ["name", ...]`. A call that does
+    // not carry one of them gets the declared needs_input response (structured
+    // `missing` names) instead of a deterministic answer. Names are stored bare
+    // (`--window` and `window` are the same declaration).
+    let requires = [];
+    if (binding.requires !== undefined) {
+      const at = `scenario ${file}: collection(${name}).requires`;
+      const declaredRequired = new Set();
+      for (const entry of expectArray(binding.requires, at)) {
+        const raw = expectString(entry, `${at}[]`);
+        const bare = raw.startsWith('--') ? raw.slice(2) : raw;
+        if (bare === '') fail(`${at}[] must name a concrete input`);
+        if (declaredRequired.has(bare)) fail(`${at} has duplicate "${bare}"`);
+        declaredRequired.add(bare);
+        requires.push(bare);
+      }
+    }
     const collection = {
       items: dataset.items,
       windows: dataset.windows,
       locked: binding.locked === true,
       records: { ...(binding.records ?? {}) },
       ...(dimension === null ? {} : { dimension }),
+      ...(requires.length === 0 ? {} : { requires }),
     };
     for (const fault of faults) {
       if (fault.collection !== name) continue;

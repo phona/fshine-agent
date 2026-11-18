@@ -1,0 +1,8 @@
+{
+  "items": [
+    { "id": "ro-001", "name": "open-receivable-1", "value": 12000 },
+    { "id": "ro-002", "name": "open-receivable-2", "value": 8000 },
+    { "id": "ro-003", "name": "open-receivable-3", "value": 5000 }
+  ],
+  "windows": ["2026-10"]
+}
