@@ -41,8 +41,9 @@
  *     （每任务一次；此后不再自动发）。
  * 每档「已发」时刻持久化在任务行（owner 列），原子领取保证并发/重启下每档至多一次。
  * 只在 1:1 会话发（chatType 事实源由装配方经 `isDirectSession` 注入；拿不到时按「私聊会话」
- * 这一条机械事实处理——不猜群聊）。发送失败只记事件，不改任务事实、不重试。未注入
- * 两档阈值或通知端口时完全不扫、零行为变化。
+ * 这一条机械事实处理——不猜群聊）。发送失败只记事件、不改任务事实；**同一档内允许一次重试**
+ * （总尝试 ≤2，2026-11-19：先领取后投递的失败不再等于「这档永久不发」，见 deliverNotice）。
+ * 未注入两档阈值或通知端口时完全不扫、零行为变化。
  * 文案只给用户可做的动作，不报进度（不写 operation 名、不写已执行次数、不写最近一步）。
  *
  * 租约口径（集成要求）：leaseMs 必须覆盖最长执行回合（按 P5 workerTurnMs 取，且执行端以截止
@@ -366,8 +367,15 @@ export const LONG_RUNNING_STUCK_NOTICE_TEXT =
   '这个我卡住了，建议先停掉；你稍后再试，或者把我们叫过来看看。';
 
 /**
+ * 单档提醒的投递尝试上限（首投 + 一次重试 = 2；到限即止，不无限重试）。
+ * 「已发」领取在投递前落库，因此重试必须发生在**同一档**内（见 deliverNotice）。
+ */
+export const LONG_RUNNING_NOTICE_ATTEMPTS = 2;
+
+/**
  * 主动提醒投递端口（装配方实现：走宿主既有主动投递面 `fileDelivery.sendText`）。
- * 实现方自己负责路由解析与投递纪律；异常不应抛出（抛出也只按失败事件记）。
+ * 实现方自己负责路由解析与投递纪律；异常不应抛出（抛出与返回 false 同处理：按失败记账，
+ * 同一档内由 runner 再试一次）。
  */
 export interface LongRunningNoticePort {
   /**
@@ -375,7 +383,7 @@ export interface LongRunningNoticePort {
    * false = 群聊，不发（也不落「已发」）。
    */
   isDirectSession?(sessionId: string): boolean;
-  /** 投递一条提醒；返回是否真正送达（失败/抑制只记账，不重试）。 */
+  /** 投递一条提醒；返回是否真正送达（false/抛出 = 本次没送到，runner 会再试一次，至多两次）。 */
   sendNotice(input: {
     taskId: string;
     principalId: string;
@@ -817,7 +825,19 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     }
   }
 
-  /** 投递一条提醒（fire-and-forget；成功/失败各记一条事件，不改任务事实、不重试）。 */
+  /**
+   * 投递一条提醒（fire-and-forget；失败**再试一次**，每次一条事件，不改任务事实）。
+   *
+   * 2026-11-19（投递真相切片）：本档是**先领取后投递**（claim 落库 = 每档只发一次），旧实现
+   * 在领取成功、投递失败（非 live / 路由未知 / 渠道抛错）时直接放弃——该档永久不发，用户永远
+   * 等不到这条提醒（而底账上「已发」已经写下了）。修法 = 允许**一次**重试（总尝试 ≤2，与仓内
+   * 「同一件事一个回合内 ≤2 次」同口径）：
+   *   · 选「重试」而不是「回滚领取」：回滚后每一趟扫描都会重新领取并重发（任务跑多久就重试多久
+   *     = 重试风暴），且要在底账上新增一条「反领取」写路径；重试一次即止 = 有界、无新状态、
+   *     不新增表/配置键。
+   *   · 上限 = 2 次尝试；到限仍失败 = 该档到此为止（不无限重试），事实只进结构化事件
+   *     （result: 'failed'，每条带 attempt），告警面据此可见（见 docs/ops/alerts.md）。
+   */
   function deliverNotice(task: TaskRecordView, stage: 'overdue' | 'stuck', minutes: number): void {
     const base = {
       taskId: task.taskId,
@@ -828,16 +848,22 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     };
     const text = stage === 'stuck' ? LONG_RUNNING_STUCK_NOTICE_TEXT : LONG_RUNNING_NOTICE_TEXT;
     const send = (async (): Promise<void> => {
-      try {
-        const delivered = await longRunningNotice!.sendNotice({ ...base, text });
-        log?.({ event: 'task_long_running_notice', ...base, result: delivered ? 'sent' : 'failed' });
-      } catch (error) {
-        log?.({
-          event: 'task_long_running_notice',
-          ...base,
-          result: 'failed',
-          message: error instanceof Error ? error.message : String(error),
-        });
+      for (let attempt = 1; attempt <= LONG_RUNNING_NOTICE_ATTEMPTS; attempt += 1) {
+        let delivered = false;
+        try {
+          delivered = await longRunningNotice!.sendNotice({ ...base, text });
+        } catch (error) {
+          log?.({
+            event: 'task_long_running_notice',
+            ...base,
+            result: 'failed',
+            attempt,
+            message: error instanceof Error ? error.message : String(error),
+          });
+          continue;
+        }
+        log?.({ event: 'task_long_running_notice', ...base, result: delivered ? 'sent' : 'failed', attempt });
+        if (delivered) return;
       }
     })();
     noticeSends.add(send);

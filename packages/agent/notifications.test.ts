@@ -7,6 +7,8 @@
  *   ③ payload 字段白名单：仅来自传入底账事实，编造/未知字段被拒且不落库；
  *   ④ 假 sink 投递成功路径：delivered_at / attempts 落库；
  *   ⑤ 重试/退避/attempts 上限：超限停止且未送达仍可见（不静默丢）；
+ *   ⑤b 终态跳过（2026-11-19 投递真相切片）：sink 报 skipped → 不写 delivered_at、不再重试，
+ *      行留在未送达集合里可查（last_error 带 SKIPPED: 前缀）——绝不把跳过记成送达；
  *   ⑥ 终态与等待类通知不静默丢（完成/失败/取消/超时/等待用户）；
  *   ⑦ 失败不影响事实（投递与事实解耦：不抛、同库 tasks 行原样）；
  *   ⑧ 并发调用串行化不重复送达；重启后去重与可见性不变；只读查询（listNotifications/undelivered）。
@@ -294,6 +296,64 @@ describe('P4 假 sink 投递：成功与失败路径（P4-T02）', () => {
     expect(row!.lastError).toBe('渠道连接中断');
     expect(row!.deliveredAt).toBeUndefined();
     outbox.close();
+  });
+
+  it('改期（sink 报 deferred）：不写 delivered_at、不消耗 attempts、不记 last_error，下一次驱动再来', async () => {
+    // 2026-11-19：改期 = 本次没尝试投递（会话在跑回合，界面让路）。它既不是送达也不是失败，
+    // 所以不占 attempts 配额；下一次投递驱动（装配侧回合末补一次）就送到。
+    const sink = new FakeSink((_notification, call) =>
+      call === 1 ? { delivered: false, deferred: true } : { delivered: true },
+    );
+    const { outbox } = harness(tempDbPath(), sink, { maxAttempts: 3 });
+    outbox.record(fact());
+    expect(await outbox.deliverPending()).toMatchObject([{ outcome: 'deferred', attempts: 0 }]);
+    const [row] = outbox.listNotifications();
+    expect(row!.deliveredAt).toBeUndefined();
+    expect(row!.attempts).toBe(0);
+    expect(row!.lastError).toBeUndefined();
+    expect(row!.exhausted).toBe(false);
+    expect(outbox.undelivered()).toHaveLength(1);
+    expect(await outbox.deliverPending()).toMatchObject([{ outcome: 'delivered', attempts: 1 }]);
+    expect(outbox.undelivered()).toEqual([]);
+    outbox.close();
+  });
+
+  it('终态跳过（sink 报 skipped）：不写 delivered_at、不再重试、行留在未送达集合里可查', async () => {
+    // 2026-11-19 投递真相切片：真的没有东西要发（如剥完为空）/永不可能送达（如非 live）时，
+    // sink 报 skipped。旧行为是 sink 回 delivered:true → 这里写下 delivered_at（用户什么都
+    // 没收到，却记成送达，重试也不再接管）。现在：如实记跳过。
+    const sink = new FakeSink(() => ({ delivered: false, skipped: 'empty_after_strip' }));
+    const { outbox, clock } = harness(tempDbPath(), sink, { maxAttempts: 3 });
+    outbox.record(fact());
+
+    expect(await outbox.deliverPending()).toMatchObject([{ outcome: 'skipped', attempts: 3, error: 'SKIPPED:empty_after_strip' }]);
+    expect(sink.calls).toBe(1);
+    const [row] = outbox.listNotifications();
+    expect(row!.deliveredAt).toBeUndefined();
+    expect(row!.lastError).toBe('SKIPPED:empty_after_strip');
+    expect(row!.exhausted).toBe(true); // 重试已停止（不是「还在排队重试」）
+
+    // 之后的任何一次投递驱动都不再调 sink（跳过不是失败：不重试、也不放开上限）。
+    clock.advance(600_000);
+    expect(await outbox.deliverPending()).toMatchObject([{ outcome: 'stopped', attempts: 3 }]);
+    expect(sink.calls).toBe(1);
+    expect(outbox.undelivered()).toHaveLength(1);
+    outbox.close();
+  });
+
+  it('反向绊线口径：跳过与失败是两条路——失败照旧退避重试，跳过一次即止', async () => {
+    const failing = new FakeSink(() => ({ delivered: false, error: '渠道不可用' }));
+    const a = harness(tempDbPath(), failing, { maxAttempts: 3 });
+    a.outbox.record(fact());
+    expect(await a.outbox.deliverPending()).toMatchObject([{ outcome: 'retry_scheduled', attempts: 1 }]);
+    a.outbox.close();
+
+    const skipping = new FakeSink(() => ({ delivered: false, skipped: 'route_unresolvable' }));
+    const b = harness(tempDbPath(), skipping, { maxAttempts: 3 });
+    b.outbox.record(fact());
+    expect(await b.outbox.deliverPending()).toMatchObject([{ outcome: 'skipped', attempts: 3 }]);
+    expect(b.outbox.undelivered()[0]!.lastError).toBe('SKIPPED:route_unresolvable');
+    b.outbox.close();
   });
 });
 

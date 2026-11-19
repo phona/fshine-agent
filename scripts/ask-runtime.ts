@@ -60,6 +60,8 @@ import {
   type ExecutionResultFileizedEvent,
   type ExecutionResultOversizeUnhandledEvent,
   type ExecutionEvent,
+  type InjectionReceipt,
+  type InjectionValue,
 } from '../packages/agent/src/execution-runtime';
 import {
   createNotificationOutbox,
@@ -318,9 +320,9 @@ export interface SessionAssemblyInput {
    */
   mainSession?: MainSessionLocation;
   /** 纯附件机械事实注入器（与 taskFactProvider 同一 injections 机制；缺省不注入）。 */
-  attachmentFactProvider?: (principalId: string, sessionId: string) => string | undefined;
+  attachmentFactProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
   /** 主动追问系统注记注入器（模型可见/用户不可见；缺省不注入）。 */
-  systemNoteProvider?: (principalId: string, sessionId: string) => string | undefined;
+  systemNoteProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
   /** CAP-01 S1：run_js 执行器端口（装配层构造注入；缺省不注入 = Main 无 run_js 工具）。 */
   runJsExecutor?: RunJsExecutor;
   /** recalc_xlsx 执行器端口（Main 宿主面；缺省不注入或引擎不可用 = 无该工具）。 */
@@ -812,9 +814,11 @@ export interface NotificationHookOptions {
   factInjectionLimit?: number;
 }
 
-/** R5 B 通道注入器：用户下一次回合开始前取走本 (principal, session) 的待注入机械事实。 */
+/** R5 B 通道注入器：用户下一次回合开始前取走本 (principal, session) 的待注入机械事实。
+ *  取走带回退口（InjectionReceipt.requeue）：本回合没产出用户可见内容时把事实原样放回，
+ *  下一次回合再注入（「取走」不等于「已说」，见 execution-runtime 的注入核销）。 */
 export interface NotificationAttachment {
-  taskFactProvider(principalId: string, sessionId: string): string | undefined;
+  taskFactProvider(principalId: string, sessionId: string): InjectionReceipt | undefined;
 }
 
 /**
@@ -909,10 +913,17 @@ export function attachNotificationOutbox(
         }
       }
       if (mine.length === 0) return undefined;
+      // 回退口：本回合没产出用户可见内容时原样放回（同一 scope、原顺序、原条目）。
+      const requeue = (): void => {
+        for (const line of mine) pendingFacts.push({ scopeKey, line });
+      };
       if (mine.length > injectionLimit) {
-        return `[任务事实] 自上次对话以来有 ${mine.length} 项任务状态变化（超出单次注入上限 ${injectionLimit} 条），请用任务查询工具查看。`;
+        return {
+          text: `[任务事实] 自上次对话以来有 ${mine.length} 项任务状态变化（超出单次注入上限 ${injectionLimit} 条），请用任务查询工具查看。`,
+          requeue,
+        };
       }
-      return `[任务事实] ${mine.join('\n')}`;
+      return { text: `[任务事实] ${mine.join('\n')}`, requeue };
     },
   };
 }

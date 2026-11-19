@@ -7,6 +7,8 @@
  *   · > 30 分钟仍无事件 → 再发一条「卡住了，建议先停掉」（每任务一次，之后不再发）；
  *   · 只在 1:1 会话发（group 不发，也不落「已发」）；
  *   · 「已发」落库：重开 registry 再扫 → 零发送（重启不重发）；
+ *   · 投递失败 → 同一档内重试一次（总尝试 ≤2，2026-11-19 投递真相切片）：失败不再等于
+ *     「这档永久不发」；成功即止、一直失败也止于两次（不无限重试、不重复打扰）。
  *   · 文案只给用户可做的动作，不报进度（不写 operation 名、不写次数、不写最近一步）。
  *
  * 全部用真底账（SQLite 持久化）+ 假时钟/假定时器 + 假提醒端口（零网络、零真实平台）：
@@ -121,8 +123,12 @@ interface NoticeSend {
   text: string;
 }
 
-/** 记录每次投递的假提醒端口；`direct` 模拟 chatType 事实源。 */
-function recordingNotice(direct: (sessionId: string) => boolean = () => true): {
+/** 记录每次投递的假提醒端口；`direct` 模拟 chatType 事实源。
+ *  `results` = 第 n 次调用的送达结果（超出列表时沿用最后一个值；缺省 = 一直送达）。 */
+function recordingNotice(
+  direct: (sessionId: string) => boolean = () => true,
+  results: readonly boolean[] = [true],
+): {
   port: LongRunningNoticePort;
   sends: NoticeSend[];
 } {
@@ -130,8 +136,9 @@ function recordingNotice(direct: (sessionId: string) => boolean = () => true): {
   const port: LongRunningNoticePort = {
     isDirectSession: direct,
     async sendNotice(input): Promise<boolean> {
+      const result = results[sends.length] ?? results[results.length - 1] ?? true;
       sends.push({ ...input });
-      return true;
+      return result;
     },
   };
   return { port, sends };
@@ -173,12 +180,14 @@ function stack(options: {
   clock?: FakeClock;
   timers?: FakeTimers;
   direct?: (sessionId: string) => boolean;
+  /** 假提醒端口的逐次送达结果（首投/重试观察用；缺省一直送达）。 */
+  noticeResults?: readonly boolean[];
 }): Stack {
   const dbPath = tempDbPath();
   const registry = options.registry ?? openRegistry(dbPath);
   const clock = options.clock ?? new FakeClock(options.startIso);
   const timers = options.timers ?? new FakeTimers(clock);
-  const { port, sends } = recordingNotice(options.direct);
+  const { port, sends } = recordingNotice(options.direct, options.noticeResults);
   const events: Array<Record<string, unknown>> = [];
   const runner = createTaskRunner({
     registry,
@@ -333,5 +342,58 @@ describe('预期契约：长时间无动静的两档主动提醒', () => {
 
     expect(timers.armed).toBe(0);
     expect(registry.get('slow-default', SCOPE).longRunningNotifiedAt).toBeUndefined();
+  });
+
+  it('⑤ 先领取后投递失败 → 同一档内重试一次即达（不再永久不发）；事件逐次留痕', async () => {
+    // 2026-11-19（投递真相切片）：领取成功、投递失败（渠道瞬时故障/路由未知）不得等于「这档
+    // 永久不发」——旧实现先落「已发」再发，失败就没有下一次机会。修法：同一档内允许一次重试
+    // （总尝试 ≤2）。本用例钉住「失败后重试真的送达」。
+    const start = '2026-11-05T00:00:00.000Z';
+    const h = stack({ startIso: start, noticeResults: [false, true] });
+    seedRunning(h.registry, 'flaky-1', start);
+
+    h.runner.pump();
+    h.timers.advance(11 * 60_000);
+    await h.runner.whenIdle();
+
+    // 首投失败 + 重试成功：用户**收到**了这条提醒（旧实现只发一次 → 永远收不到）。
+    expect(h.sends.map((send) => send.stage)).toEqual(['overdue', 'overdue']);
+    expect(h.events.map((event) => event['result'])).toEqual(['failed', 'sent']);
+    expect(h.events.map((event) => event['attempt'])).toEqual([1, 2]);
+    // 「已发」仍在投递前落库（每档一次：不因重试变成每档多次提醒）。
+    expect(h.registry.get('flaky-1', SCOPE).longRunningNotifiedAt).toBeDefined();
+
+    // 再扫一趟：不再发（重试不是「重复打扰」——每档至多两条：首投 + 一次重试）。
+    h.clock.advance(1_000);
+    h.runner.pump();
+    await h.runner.whenIdle();
+    expect(h.sends).toHaveLength(2);
+  });
+
+  it('⑥ 不该重试的仍然不重试：投递成功只发一次；投递一直失败也止于两次（不无限重试）', async () => {
+    const start = '2026-11-06T00:00:00.000Z';
+    // (a) 健康投递：一次成功即止（不因新机制多发一条）。
+    const healthy = stack({ startIso: start });
+    seedRunning(healthy.registry, 'healthy-1', start);
+    healthy.runner.pump();
+    healthy.timers.advance(11 * 60_000);
+    await healthy.runner.whenIdle();
+    expect(healthy.sends.map((send) => send.stage)).toEqual(['overdue']);
+    expect(healthy.events.map((event) => event['result'])).toEqual(['sent']);
+
+    // (b) 渠道持续不可用：最多两次尝试即止（有界），不随扫描次数增长。
+    const broken = stack({ startIso: start, noticeResults: [false, false, false, false] });
+    seedRunning(broken.registry, 'broken-1', start);
+    broken.runner.pump();
+    broken.timers.advance(11 * 60_000);
+    await broken.runner.whenIdle();
+    expect(broken.sends).toHaveLength(2);
+    expect(broken.events.map((event) => event['result'])).toEqual(['failed', 'failed']);
+    // 后续扫描不再重发（「已发」领取保留：每档一条提醒的事实不变）。
+    broken.clock.advance(60_000);
+    broken.runner.pump();
+    broken.timers.advance(15 * 60_000);
+    await broken.runner.whenIdle();
+    expect(broken.sends).toHaveLength(2);
   });
 });

@@ -847,7 +847,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             systemNotes.enqueue(completion.principalId, completion.sessionId, factText);
           }
           const deliveredText = wokenText ?? fallbackText;
-          await deliverTaskResult({
+          const delivered = await deliverTaskResult({
             taskId: completion.taskId,
             principalId: completion.principalId,
             sessionId: completion.sessionId,
@@ -857,6 +857,22 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             ...(completionDelivery === undefined ? {} : { delivery: completionDelivery }),
             log,
           });
+          // 2026-11-19（投递真相切片）：唤醒**成功**但投递没落地（渠道瞬时故障 / 路由拆不出 /
+          // 出口剥空）——旧实现只记事件，那句话就此消失，用户永远收不到（而底账上任务已确认
+          // 完成）。后路 = 把**事实**退回既有待注入队列（与本函数上面降级路径同一条出口、同一个
+          // 队列；不新建重试、不重投同一句话）：下一次用户开口由模型补说这件事。
+          // 只有在「唤醒回合确实产出了一句话」时才退（wokenText undefined 的降级/silent 路径
+          // 上面已经入队，不退第二次）。
+          if (wokenText !== undefined && !delivered) {
+            systemNotes.enqueue(completion.principalId, completion.sessionId, factText);
+            log({
+              event: 'task_result_delivery_requeued',
+              principalId: completion.principalId,
+              sessionId: completion.sessionId,
+              taskId: completion.taskId,
+              reason: 'not_sent',
+            });
+          }
         });
       },
       // 失败投递（2026-11-19 收口）：任务终局 failed/result_unknown → 用户文本用
@@ -910,14 +926,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           }
         },
         ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
-        // 会话此刻有回合在跑 → 改期到回合之后：模型还在打字时不抢先推一条；
-        // 也避免回合内 drainNotifications 的 await 与回合链互相等待。
-        deferWhileTurnActive: (sessionKey, run) => {
-          const tail = sessionChains.get(sessionKey);
-          if (tail === undefined) return false;
-          void tail.then(() => run()).catch(() => {});
-          return true;
-        },
+        // 会话此刻有回合在跑 → 本次不投递（模型还在打字时不抢先推一条），回执按**改期**交出去
+        // （没尝试投递、不消耗尝试次数）；**回合结束**（会话链排空）时 `enqueueSessionTurn` 补一次
+        // 投递驱动，那一刻 turnActive 已为 false，推送即落地（不新增定时器/不改重试上限）。
+        turnActive: (sessionKey) => sessionChains.has(sessionKey),
         claimRelayedInTurn: claimPushSuppressedInTurn,
         log,
       });
@@ -1037,6 +1049,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   /**
    * P5-T02 同会话串行化：handler 在 `acquire('foreground')` 之前按会话排 promise 链
    * （前序失败不阻塞后续；链尾用完即清）。两条并发消息都处理、转录不互相覆盖。
+   *
+   * 链排空那一刻顺带补一次投递驱动（2026-11-19 投递真相切片）：回合期间被改期的主动推送
+   * （chat sink 按 `turnActive` 回「改期」）在此刻由**既有** outbox 退避重试接管——
+   * 同一个 `deliverPending`（与落库即试投、回合开始 drain 同源），无新定时器、无新重试机制。
+   * 排在 delete 之后：此刻会话已无在跑回合，推送不会再被改期。
    */
   const sessionChains = new Map<string, Promise<unknown>>();
   function enqueueSessionTurn<T>(key: string, run: () => Promise<T>): Promise<T> {
@@ -1048,7 +1065,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     );
     sessionChains.set(key, tail);
     void tail.then(() => {
-      if (sessionChains.get(key) === tail) sessionChains.delete(key);
+      if (sessionChains.get(key) !== tail) return;
+      sessionChains.delete(key);
+      void outbox?.deliverPending().catch(() => {});
     });
     return next;
   }

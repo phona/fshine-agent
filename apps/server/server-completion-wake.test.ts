@@ -111,7 +111,10 @@ class GatedExecutor implements TaskExecutor {
   }
 }
 
-function fakeDelivery(deliveryMode: 'live' | 'silent' = 'live'): { sentTexts: Array<{ route: ChannelRoute; text: string }>; port: FileDeliveryPort } {
+function fakeDelivery(
+  deliveryMode: 'live' | 'silent' = 'live',
+  textBehavior: 'ok' | 'throw' = 'ok',
+): { sentTexts: Array<{ route: ChannelRoute; text: string }>; port: FileDeliveryPort } {
   const sentTexts: Array<{ route: ChannelRoute; text: string }> = [];
   return {
     sentTexts,
@@ -121,6 +124,7 @@ function fakeDelivery(deliveryMode: 'live' | 'silent' = 'live'): { sentTexts: Ar
         return { route, parts: [] };
       },
       async sendText(route: ChannelRoute, text: string): Promise<DeliveryReceipt> {
+        if (textBehavior === 'throw') throw new Error('渠道瞬时故障');
         sentTexts.push({ route, text });
         return { route, parts: [{ kind: 'text', index: 0, status: 'sent' }] };
       },
@@ -176,7 +180,26 @@ function resultBodyOf(fact: string): string {
   return rest.slice(0, end);
 }
 
-type WakeMode = 'line' | 'echo' | 'named' | 'empty' | 'tool-only' | 'no-wake' | 'silent';
+/**
+ * 请求消息里完成事实出现的次数（**不等于**注入次数：唤醒回合那次已进会话历史，
+ * 每次重放历史都会再出现一遍）。断言时按「历史 1 份 + 本轮注入」计数。
+ */
+function factMessageCount(messages: readonly unknown[]): number {
+  let count = 0;
+  for (const message of messages) {
+    const content = (message as { content?: unknown } | undefined)?.content;
+    if (content === undefined) continue;
+    const text = typeof content === 'string'
+      ? content
+      : Array.isArray(content)
+        ? content.map((part) => String((part as { text?: unknown }).text ?? '')).join('')
+        : '';
+    if (text.includes('[任务完成]')) count += 1;
+  }
+  return count;
+}
+
+type WakeMode = 'line' | 'echo' | 'named' | 'empty' | 'tool-only' | 'no-wake' | 'silent' | 'send-fail';
 
 interface Fixture {
   server: Server;
@@ -197,7 +220,7 @@ interface Fixture {
 async function makeFixture(mode: WakeMode): Promise<Fixture> {
   const dir = tempDir();
   const dbPath = path.join(dir, 'state.db');
-  const delivery = fakeDelivery(mode === 'silent' ? 'silent' : 'live');
+  const delivery = fakeDelivery(mode === 'silent' ? 'silent' : 'live', mode === 'send-fail' ? 'throw' : 'ok');
   const logs: Array<Record<string, unknown>> = [];
   const executor = new GatedExecutor();
   const face = new CountingClient();
@@ -260,10 +283,14 @@ async function makeFixture(mode: WakeMode): Promise<Fixture> {
       const workerDriver: TurnDriver = { async run(): Promise<never> { throw new Error('（测试）Worker 由 executor 替身接管'); } };
       if (mode === 'no-wake') {
         // 假驱动：能跑回合、但没有唤醒能力（旧会话对象/测试替身形状）——wake 走 unavailable。
+        // 「空回复」/「驱动失败」两个输入让用例能钉住「本回合没有用户可见输出」的两种形状。
         let firstTurn = true;
         const driver: TurnDriver = {
           async run(input) {
             recorded.push(input);
+            const lastUser = lastUserTextOf(input.messages);
+            if (lastUser === '空回复') return { text: '', messages: [...input.messages] };
+            if (lastUser === '驱动失败') throw new Error('（测试）驱动失败');
             if (firstTurn) {
               firstTurn = false;
               await input.exec('task_run', { task: TASK_TEXT });
@@ -487,6 +514,82 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
         return false;
       });
       expect(anyUserText, '事实不丢：下一次用户回合随 injections 补说').toBe(true);
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('⑦ 唤醒成功但投递失败（渠道瞬时故障）→ 不假记 sent；事实退回待注入，下次开口补说', async () => {
+    // 2026-11-19（投递真相切片）：唤醒产出了一句话、投递这一下失败——旧实现只记事件，
+    // 那句话就此消失（任务已确认完成，用户却永远收不到）。后路 = 事实退回既有待注入队列，
+    // 下一次用户开口由模型补说（同一条出口，不新建重试、不重投同一句话）。
+    const fx = await makeFixture('send-fail');
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
+      await vi.waitFor(() => {
+        expect(fx.logs.some((line) => line['event'] === 'task_result_delivery_failed')).toBe(true);
+      }, { timeout: 10_000 });
+
+      // 投递没落地：绝不记 sent、用户可见面为空（不假报），失败可查；退回事实已留痕。
+      expect(fx.delivery.sentTexts).toHaveLength(0);
+      expect(fx.logs.some((line) => line['event'] === 'task_result_delivery_sent')).toBe(false);
+      expect(fx.logs.some((line) => line['event'] === 'task_result_delivery_requeued')).toBe(true);
+      expect(fx.logs.find((line) => line['event'] === 'task_completion_wake')).toMatchObject({ outcome: 'woken' });
+
+      // 后路真的生效：下一次用户开口，完成事实随 injections 进模型上下文（既有机制补说）。
+      await fx.server.handler(incoming('m-2', '然后呢'));
+      const second = fx.scripted!.requests().at(-1)!;
+      // 计数口径：唤醒回合那份已在会话历史里（1 份）；本轮**再注入**一份 = 2。只有 1 = 没补说。
+      expect(factMessageCount(second.messages), '投递失败的事实必须能重来：下次开口由模型补说').toBe(2);
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('⑧ 不许修过头：唤醒送达成功时不退回（下一次开口不重复注入同一件完成事实）', async () => {
+    const fx = await makeFixture('line');
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
+      expect(fx.logs.some((line) => line['event'] === 'task_result_delivery_requeued')).toBe(false);
+
+      await fx.server.handler(incoming('m-2', '然后呢'));
+      const second = fx.scripted!.requests().at(-1)!;
+      // 已送达（模型已说给用户）→ 不退回：历史里那 1 份之外**没有**第二份注入。
+      expect(factMessageCount(second.messages), '已说过的完成事实不再注入第二遍').toBe(1);
+    } finally {
+      await fx.close();
+    }
+  });
+});
+
+describe('注入核销（机械判据）：本回合没有用户可见输出 → 事实不核销', () => {
+  it('⑨ 待注入事实遇上空回复/驱动失败 → 事实留待注入，下一次开口再补说（取走 ≠ 已说）', async () => {
+    // 2026-11-19（投递真相切片）：旧实现「take 即视为已说」——注入器出队的那条事实，只要
+    // 本回合驱动失败/空回复就永久消失（用户永远看不到）。修法 = 核销判据改成机械事实：
+    // 本回合产出的用户可见文本非空才核销；否则把事实退回队列，下一次开口再注入一次。
+    const fx = await makeFixture('no-wake');
+    try {
+      // 完成 → 唤醒不可用（驱动无唤醒能力）→ 完成事实进「待注入」队列。
+      await fx.server.handler(incoming('m-1', ASK));
+      fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
+
+      // 第二回合：事实已注入，但模型一个可见字都没产出（空回复）→ 回合失败，事实不核销。
+      await expect(fx.server.handler(incoming('m-2', '空回复'))).rejects.toThrow();
+      expect(fx.recorded[1]!.injections?.some((text) => text.startsWith('[任务完成]'))).toBe(true);
+
+      // 第三回合：事实**仍在**待注入队列（旧实现这里就空了）——但本回合驱动抛错，同样不核销。
+      await expect(fx.server.handler(incoming('m-3', '驱动失败'))).rejects.toThrow();
+      expect(fx.recorded[2]!.injections?.some((text) => text.startsWith('[任务完成]'))).toBe(true);
+
+      // 第四回合：终于有用户可见文本 → 核销；此后的回合不再重复注入。
+      await fx.server.handler(incoming('m-4', '然后呢'));
+      expect(fx.recorded[3]!.injections?.some((text) => text.startsWith('[任务完成]'))).toBe(true);
+      await fx.server.handler(incoming('m-5', '还在吗'));
+      expect((fx.recorded[4]!.injections ?? []).some((text) => text.includes('[任务完成]'))).toBe(false);
     } finally {
       await fx.close();
     }
