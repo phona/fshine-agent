@@ -16,6 +16,8 @@
  *     （`runGateway` 定时器；缺省 `EXECUTION_CALL_TIMEOUT_MS` = 60s，可用构造参数收窄）：
  *     到点停掉子进程并如实返回 `failed` + `code: result_unknown`（**结果未知**：没有回执，
  *     无法确认执行层那边做没做完），不声明可重试——宿主据此走待核对收口，不做「失败已确认」。
+ *     `wait` 的截断（子进程上限 = 长轮询窗口 + 5s）**同一语义**：没有回执 ≠ 长任务失败，
+ *     任务仍在等（task-runner 退避续等、如实告知用户一次，不判死、不重试风暴）。
  *
  * 读路径切片的作用域不在这里：本适配器按契约忠实执行被请求的 operation；
  * 「本轮开放哪些 operation」由装配方从执行层自述的 access 声明派生（只读集合 +
@@ -588,9 +590,17 @@ function acceptedOutcomeOf(envelope: ResultEnvelope): ExecutionOutcome {
  */
 function waitOutcomeOf(run: GatewayRun, operationId: string, timeoutMs: number): ExecutionOutcome {
   if (run.timedOut) {
+    // 单次 wait 调用的传输截断（子进程上限 = 窗口 + 5s；网关没有在自己的窗口内回话）：
+    // 与 execute 的截断**同源**——没有回执，**不代表长任务失败**（它可能还在执行层跑）。
+    // 宿主（task-runner）据此继续退避轮询、不落下终态、并如实告知用户一次；
+    // retryable 显式 false：这次调用本身不构成「可重试的业务失败」。
     return {
       status: 'failed',
-      error: { code: 'EXECUTION_WAIT_TIMEOUT', message: `执行层等待调用超时（${timeoutMs}ms）。`, retryable: true },
+      error: {
+        code: 'result_unknown',
+        message: `执行层等待调用超时（${timeoutMs}ms）：没有收到回执，无法确认长任务当前的状态。`,
+        retryable: false,
+      },
     };
   }
   if (run.spawnFailed) {

@@ -116,7 +116,7 @@ function taskRows(dbPath: string): unknown[] {
 function longRunningColumnsOf(dbPath: string): unknown[] {
   const db = new Database(dbPath, { readonly: true });
   const rows = db.prepare(
-    'SELECT long_running_notified_at, long_running_stuck_notified_at, running_since FROM tasks ORDER BY task_id',
+    'SELECT long_running_notified_at, long_running_stuck_notified_at, running_since, wait_contact_lost_notified_at FROM tasks ORDER BY task_id',
   ).all();
   db.close();
   return rows;
@@ -158,11 +158,18 @@ describe('U3 v4 迁移（v3 → v4）', () => {
       'long_running_stuck_notified_at',
       // 2026-11-19：本轮开始运行时刻（长任务受理后清租约，提醒扫描需要独立起点）。
       'running_since',
+      // 2026-11-19：长任务等待「断联系」档的已告知时刻（同一「每档至多一次」口径）。
+      'wait_contact_lost_notified_at',
     ]);
     expect(taskRows(dbPath)).toEqual(beforeTasks);
     expect(longRunningColumnsOf(dbPath)).toEqual([
-      // 历史行不伪造：三列都是 NULL（running_since 也一样）。
-      { long_running_notified_at: null, long_running_stuck_notified_at: null, running_since: null },
+      // 历史行不伪造：四列都是 NULL（running_since 与「断联系」档也一样）。
+      {
+        long_running_notified_at: null,
+        long_running_stuck_notified_at: null,
+        running_since: null,
+        wait_contact_lost_notified_at: null,
+      },
     ]);
     const stored = store.getTask('task_old')!;
     expect(stored.task.request).toBe('历史任务');
