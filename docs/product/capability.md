@@ -56,7 +56,7 @@
 | 取消：在飞中止（请求≠已取消）、已完成任务再取消如实拒绝 | `packages/agent/task-cancel-inflight.test.ts:① 在飞 run_js`<br>`packages/agent/task-cancel-inflight.test.ts:③ 已完成任务再取消` | 已实现（有守卫） |
 | 长任务 accepted→wait→abort；未声明 long_running 却返回 accepted 一律 fail-closed | `packages/agent/long-task-async.test.ts:③ abort → 任务 cancelled`<br>`packages/agent/long-task-async.test.ts:⑤ 未声明 long_running 的 operation 返回 accepted` | 已实现（有守卫） |
 | 长任务跨重启：新 runner 从底账 accepted 行重新 wait，不重复发起 | `packages/agent/long-task-async.test.ts:④ 重启：关库重开` | 已实现（有守卫） |
-| 久等提醒一档（超阈值恰一条、每任务一次、重启不重发）；群聊同条件零提醒 | `packages/agent/long-running-notice.test.ts:① 10 分钟内零发送`<br>`apps/server/server-long-running-notice.test.ts:② 群聊：同条件一条都不发` | 已实现（有守卫） |
+| 久等提醒一档（超阈值恰一条、每任务一次、重启不重发）；群聊也发（话术去业务名，owner 2026-11-19 #9 迁移） | `packages/agent/long-running-notice.test.ts:① 10 分钟内零发送`<br>`apps/server/server-long-running-notice.test.ts:② 群聊也发` | 已实现（有守卫） |
 | 长任务等待与执行层断联系：先自查一次，兜得住照常走；连续两次拿不到回执才如实说一次（任务不判死、退避封顶 60s 继续等） | `packages/agent/long-task-wait-truncation.test.ts:② 先兜能兜住`<br>`packages/agent/long-task-wait-truncation.test.ts:任务不判死` | 已实现（有守卫） |
 
 ### 5. 写确认回环
@@ -130,7 +130,7 @@ detail 在 `docs/product/interaction-contract.md`（五条尺子逐条现状）�
 - **确认必回执**：确认/接续回合必有用户可见归宿（结果、失败话术或重新提案），不许静默终局。状态：已实现（有守卫）。锚点：`packages/agent/write-outcome-last-attempt.test.ts:① 主形状：确认回合 commit 失败（参数错）`、`apps/server/server-relay-silent-turn.test.ts:① 主形状：窗口内完成 + 模型全程空正文`。
 - **失败三选一归宿**：Main 兜（既有兜路径的刹车不放宽：wait 退避封顶 60s / A2b 同对象锁 / 失败缺省不可重试 / retry_storm 告警）→ 告诉用户（业务话 + 一个动作）→ 告警/开发介入（不给用户编话）。状态：已实现（有守卫）。锚点：`packages/agent/long-task-wait-truncation.test.ts:退避单调翻倍到 60s 封顶`、`packages/agent/background-retry-lock.test.ts:① 同键确定性拒绝两次`、`packages/agent/deterministic-failure-guard.test.ts:失败但**未声明** retryable → 按不可重试处理`、`packages/agent/alert-rules.test.ts:命中：同一任务执行事实达到阈值`。
 - **消息自含**：完成/失败/等补信息的事实都带业务名，用户不用猜是哪件事；用户可见文本最终由模型转述——事实链有守卫，模型转述面无自动用例（真模型评测守）。状态：已实现（无守卫）。锚点：`apps/server/server-completion-wake.test.ts:⑤ 完成消息要让用户看出是哪件事`。
-- **久等只提示不停**：超阈值恰一条「要我停下来，还是继续等？」；任务不判死、不杀，处置权在用户。提醒只发 1:1（群聊零主动提醒）。状态：已实现（有守卫）。锚点：`packages/agent/long-running-notice.test.ts:① 10 分钟内零发送`、`apps/server/server-long-running-notice.test.ts:② 群聊：同条件一条都不发`。⚠️ owner 口径转述中提过「群也发但不带业务名」——现行代码是群不发（`packages/agent/src/task-runner.ts` 的 `isDirectSession` 判据），本页以代码为准，待 owner 复核。
+- **久等只提示不停**：超阈值恰一条「要我停下来，还是继续等？」；任务不判死、不杀，处置权在用户。提醒 1:1 与群聊都发（owner 2026-11-19 #9：群 = 独立主体；群话术不带业务名——隐私口径归端口，重启判据只看底账任务事实 #10）。状态：已实现（有守卫）。锚点：`packages/agent/long-running-notice.test.ts:① 10 分钟内零发送`、`apps/server/server-long-running-notice.test.ts:② 群聊也发`。
 - **失败话术 = 业务话 + 一个动作，无内部词**（operation 名、任务编号、执行层、uuid、绝对路径不出现）。状态：已实现（有守卫）。锚点：`packages/agent/user-facing-failure.test.ts:⑤ 内部术语闸`。
 - **完成 = 业务名 + 结果正文**（机械事实），正文逐字交给模型转述。状态：已实现（有守卫）。锚点：`apps/server/server-completion-wake.test.ts:② 模型把结果正文逐字说给用户`。
 
@@ -149,7 +149,7 @@ detail 在 `docs/product/interaction-contract.md`（五条尺子逐条现状）�
 | 7 | Router / Planner / 意图分类器 / 规则引擎 / 事件总线 / 通用 Workflow Engine / 第二套协议 / 沙箱·Docker | 理解、规划、工具选择归 Pi；治理裁决归执行层；旧治理模块不得经值边复活 | 明确不做（裁定） | 裁定 2026-11-13（AGENTS.md 禁止新增清单）。守卫：`packages/agent/import-boundary.test.ts:值闭包不触及旧治理模块` |
 | 8 | 单任务 operation 硬上限 | 「单任务 operation ≤ 3」只是登记的观察判据，owner 推迟不做硬上限；已实现的只有单回合上限（缺省 5） | 明确不做（裁定） | 裁定 2026-11-18（owner 推迟；判据登记于 `docs/product/wecom-live-dummy-cases.md` §9 I 组）。单回合上限守卫：`packages/agent/resource-policy.test.ts:maxOperationsPerTurn：缺省 5`；单任务上限无守卫 |
 | 9 | 附件 emoji / 模板卡 | 企微 SDK 无 reaction 接口；「已接收」轻反馈（模板卡原地更新）未验证前不新增机制 | 明确不做（裁定） | 裁定 2026-11-19（owner 记债 X-1；`docs/decisions/debt.md` §九）。无守卫 |
-| 10 | 群聊附件追问 | 纯附件追问仅单聊触发；群聊登记照常但不追问（久无动静提醒的群聊规则同此、已覆盖，不单列） | 明确不做（裁定） | 裁定 2026-11-17（owner，W-16 立卷）。守卫：`apps/server/server-attachment-nudge.test.ts:④ 群聊 → 不发追问` |
+| 10 | 群聊附件追问 | 纯附件追问仅单聊触发；群聊登记照常但不追问（久无动静提醒的群聊规则**不同此**：owner 2026-11-19 #9 已改为群聊也发、话术去业务名——与本条不冲突，附件追问仍单聊） | 明确不做（裁定） | 裁定 2026-11-17（owner，W-16 立卷）。守卫：`apps/server/server-attachment-nudge.test.ts:④ 群聊 → 不发追问` |
 | 11 | inline（`npm run ask`）面的显式确认动作 | 显式确认（`task_confirm`/`task_resume`）只覆盖任务/后台路径；inline 冻结为会话级最小状态 + 下一回合透传，语义不得混用 | 明确不做（裁定） | 裁定 2026-11-19（owner 拍板显式确认切片范围；`docs/architecture/contract.md` §1）。无专项守卫；inline 现行行为被 `scripts/host-write-confirmation.test.ts:1 正常：prepare → 用户「确认」` 钉住 |
 | 12 | 读/写传输超时分叉 | 传输入口只有单一缺省界（60s），不分读/写设不同超时；截断语义=结果未知、不冒充失败已确认 | 明确不做（裁定） | 裁定 2026-11-19（owner，call-timeout 切片；`docs/architecture/tasks.md` §3）。无专项守卫；单一界与语义被 `packages/agent/execution-call-timeout.test.ts:缺省界常量 = 60s` 钉住 |
 | 13 | host_fault 类失败全面改第 3 档 | 是否把全部 host_fault 类失败从「告诉用户」移到「告警/开发介入」= **登记待裁，未裁定不推进**；个案（装配面缺陷/投递终局）已在第 3 档 | 未实现（设计在册） | 登记 2026-11-19（owner「失败归宿三选一」切片，commit `516f42ce`）。个案守卫：`packages/agent/alert-rules.test.ts:命中：装配面缺陷` |
