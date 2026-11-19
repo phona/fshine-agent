@@ -32,7 +32,7 @@ const CONSTRAINT_PHRASES = [
 ] as const;
 
 /** 现行 Worker 提示的内联锚（逐字节防漂移用，与 ② 的全量比对互补）。 */
-const BASE_PROMPT_ANCHOR = '你是 fshine 的执行层 Worker：宿主把一项平台任务委派给你，你在一个受信工作区里工作。';
+const BASE_PROMPT_ANCHOR = '你是 fshine 的办事 Worker：宿主把一项平台任务委派给你，你在一个受信工作区里工作。';
 
 /** 最小执行客户端假件：单只读 operation，execute 恒 completed。 */
 class FakeClient implements ExecutionClient {

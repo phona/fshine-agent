@@ -517,7 +517,7 @@ describe('成功后出现的失败：只读 / 同对象重复 / 另一个写（�
     // 不新增状态：部分完成的终态仍是既有 failed（原因文本承载逐项事实）。
     expect(task.status).toBe('failed');
     expect(task.reason).toBe('failed_confirmed');
-    expect(task.failureReason).toContain('执行层未全部成功');
+    expect(task.failureReason).toContain('没有全部办成');
     expect(task.failureReason).toContain('已完成 dummy.commit（empty-one）');
     expect(task.failureReason).toContain('未成功 dummy.commit（beta） 返回 failed');
     expect(task.failureReason).toContain('beta 集合被锁定');

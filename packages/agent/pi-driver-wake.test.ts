@@ -53,7 +53,7 @@ const PROBE: DiscoveredTool = {
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
 };
 
-const FACT = '[任务完成]「汇总那件事」已由执行端确认完成。结果正文（逐字）：共 7 条。请把这件事告诉用户。';
+const FACT = '[任务完成]「汇总那件事」办完了。结果正文（逐字）：共 7 条。请把这件事告诉用户。';
 
 function turnInput(messages: AgentMessage[], overrides: Partial<TurnDriverInput> = {}): TurnDriverInput {
   return {

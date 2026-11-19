@@ -24,12 +24,14 @@
  *   C6 写后读回 count 与逐条 name/value 与请求一致；C7 底账终态 completed 且成功
  *   prepare(needs_confirmation) 先于唯一一次成功 commit(completed)；
  *   C8 完成消息确实出现在用户可见面（主动投递的文字或本回合回复之一）；
- *   C9 底账状态序列按序包含 running → waiting_user → running → completed（确认把任务带回执行）。
+ *   C9 底账状态序列按序包含 running → waiting_user → running → completed（确认把任务带回执行）；
+ *   C10 有执行层摘要时，用户可见文本里出现摘要关键字段（集合名、窗口码、记录条数——
+ *   这些是执行层给的已知字符串，属"已知字符串存在性"，不违红线；无摘要时判 inconclusive，不判红）。
  * 不要求执行事实恰好两条：模型重试、无句柄 commit 被拒、Worker 事后读回都是合法事实，
  * 如实记录不当违约。
- * 三条观察（**只记录、不判红**，见 evaluateObservations）：① 提案消息里有没有执行层摘要
- * （已知字符串存在性）；② 完成那条消息是模型的话还是宿主兜底；③ 有没有「收到，正在处理」
- * 这类冗余过程话术（固定短语表的已知子串命中记录，不当质量判据）。
+ * 两条观察（**只记录、不判红**，见 evaluateObservations）：① 完成那条消息是模型的话还是宿主兜底；
+ * ② 有没有「收到，正在处理」这类冗余过程话术（固定短语表的已知子串命中记录，不当质量判据）。
+ * （原观察 O1「摘要全文命中」已升级为判据 C10，见 evaluateCriteria。）
  *
  * 不做什么：不用关键词/正则判「模型说得好不好」（仓规红线）；不改产品行为迁就验收；
  * 模型不可用（缺 key / 端点不通）一律如实失败（exit 2），**不退回脚本模型冒充真模型**。
@@ -488,6 +490,25 @@ export async function readCollection(options: ReadbackOptions): Promise<QueryRea
   };
 }
 
+/**
+ * 摘要的关键字段（执行层给的已知字符串；存在性判据，不判措辞质量）：
+ *   · 集合名 —— 摘要里的「<name>」；
+ *   · 窗口码 —— 「<code> 窗口」；
+ *   · 记录条数 —— 「共 <n> 条」的整段（含数字与量词，避免只凭一个数字命中）。
+ * 任取不到的字段不算违约（摘要形状可能因执行层版本变化），只按取到的字段判存在性。
+ */
+export function summaryKeyFields(summary: string | undefined): string[] {
+  if (summary === undefined || summary.trim() === '') return [];
+  const fields: string[] = [];
+  const collection = /「[^」]+」/u.exec(summary);
+  if (collection !== null) fields.push(collection[0]);
+  const window = /[A-Za-z0-9_-]+\s*窗口/u.exec(summary);
+  if (window !== null) fields.push(window[0]);
+  const count = /共\s*\d+\s*条/u.exec(summary);
+  if (count !== null) fields.push(count[0]);
+  return fields;
+}
+
 // ---------------------------------------------------------------------------
 // 判据与观察（纯函数；测试钉住正反两向）
 // ---------------------------------------------------------------------------
@@ -612,36 +633,44 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
     `观测序列=${orderedSequence.join(' → ') || '(空)'}`,
   );
 
+  // C10 提案摘要转述守卫（PM P1-4）：有执行层摘要时，用户可见文本里必须出现摘要的关键字段
+  // （集合名 / 窗口码 / 记录条数）。这些是执行层给的已知字符串，属"已知字符串存在性"，不判措辞。
+  // 用户可见文本 = 各回合回复 + push_text（与原 O1 观察同一取值面）。无摘要 = 前置缺失，判
+  // inconclusive（detail 说明，不判红——与"模型没转述"区分开）。
+  const keyFields = summaryKeyFields(evidence.ledger.proposal?.summary);
+  const userVisible = [
+    ...evidence.turns.map((turn) => turn.reply),
+    ...evidence.pushes.filter((push) => push.source === 'push_text').map((push) => push.text),
+  ];
+  if (keyFields.length === 0) {
+    results.push({
+      id: 'C10', title: '提案摘要关键字段进用户可见面', kind: 'structured', status: 'pass',
+      detail: '无执行层摘要或摘要无可提取关键字段 → inconclusive（前置缺失，不判红）',
+    });
+  } else {
+    const missing = keyFields.filter((field) => !userVisible.some((text) => text.includes(field)));
+    results.push({
+      id: 'C10', title: '提案摘要关键字段进用户可见面', kind: 'structured',
+      status: missing.length === 0 ? 'pass' : 'fail',
+      detail: `摘要关键字段=[${keyFields.join(' | ')}]；`
+        + `命中=[${keyFields.filter((field) => userVisible.some((text) => text.includes(field))).join(' | ') || '无'}]；`
+        + `缺失=[${missing.join(' | ') || '无'}]`,
+    });
+  }
+
   return results;
 }
 
-export function evaluateObservations(evidence: WriteLoopEvidence, proposalSummary: string | undefined): ObservationResult[] {
+export function evaluateObservations(evidence: WriteLoopEvidence): ObservationResult[] {
   const observations: ObservationResult[] = [];
 
-  // ① 提案那条消息里有没有执行层摘要（已知字符串存在性——不算判据、不判措辞）。
-  const proposalMessages = evidence.pushes.filter((push) => push.source === 'push_text');
-  const summaryInMessage = proposalSummary !== undefined && proposalSummary !== ''
-    ? proposalMessages.some((push) => push.text.includes(proposalSummary)) || evidence.turns.some((turn) => turn.reply.includes(proposalSummary))
-    : false;
-  const summaryPrefix = proposalSummary?.slice(0, 40) ?? '';
-  const prefixInMessage = summaryPrefix !== ''
-    ? proposalMessages.some((push) => push.text.includes(summaryPrefix)) || evidence.turns.some((turn) => turn.reply.includes(summaryPrefix))
-    : false;
-  observations.push({
-    id: 'O1',
-    title: '提案消息里有没有执行层摘要',
-    detail: proposalSummary === undefined
-      ? '底账未记录提案摘要，无法比对'
-      : `摘要全文命中=${summaryInMessage}；摘要前 40 字命中=${prefixInMessage}；投影摘要=${summaryPrefix}…`,
-  });
-
-  // ② 完成那条消息是谁的话：唤醒出口（模型）vs 宿主兜底（taskCompletionFallbackText 形状）。
+  // ① 完成那条消息是谁的话：唤醒出口（模型）vs 宿主兜底（taskCompletionFallbackText 形状）。
   const wake = evidence.wake;
   const lastPush = [...evidence.pushes].reverse().find((push) => push.source === 'push_text');
   const fallbackMarker = '办好了：';
   const pushedText = lastPush?.text ?? '';
   observations.push({
-    id: 'O2',
+    id: 'O1',
     title: '完成那条消息是谁的话',
     detail: wake === undefined
       ? '未观测到唤醒出口'
@@ -654,14 +683,14 @@ export function evaluateObservations(evidence: WriteLoopEvidence, proposalSummar
             : `模型的话（wake=woken；投递文本与唤醒正文不同：WakeResult 与投递面各自记录）：${digestValue(pushedText, 200)}`,
   });
 
-  // ③ 冗余过程话术（固定短语表命中记录；不判红）。
+  // ② 冗余过程话术（固定短语表命中记录；不判红）。
   const visibleTexts = [
     ...evidence.turns.map((turn) => turn.reply),
     ...evidence.pushes.map((push) => push.text),
   ].filter((text) => text.trim() !== '');
   const hits = PROCESS_TALK_PHRASES.filter((phrase) => visibleTexts.some((text) => text.includes(phrase)));
   observations.push({
-    id: 'O3',
+    id: 'O2',
     title: '冗余过程话术（固定短语表命中记录，不当判据）',
     detail: hits.length === 0
       ? `未命中（表：${PROCESS_TALK_PHRASES.join('/')}）`
@@ -1052,7 +1081,7 @@ async function main(): Promise<void> {
 
   // ---- 判据与观察 ----
   const criteria = evaluateCriteria(evidence);
-  const observations = evaluateObservations(evidence, proposal?.summary);
+  const observations = evaluateObservations(evidence);
   log('\n== 判据（机械事实） ==');
   for (const criterion of criteria) {
     log(`  [${criterion.status === 'pass' ? 'PASS' : 'FAIL'}] ${criterion.id} ${criterion.title}（${criterion.kind}）`);

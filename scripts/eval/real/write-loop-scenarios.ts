@@ -27,7 +27,7 @@
  * audit.jsonl）、底账状态与执行事实、结构化读回、工具调用记录、投递端口收到的原文、
  * 执行层 job 文件。**不判模型措辞质量**；允许的文本判据只有「已知字符串存在性」：
  *   · 宿主话术模板（`failureTextFor` / 通知渲染器取消模板）——确定性文本；
- *   · 宿主/执行层的**成功通道原文**（`办好了：` / `已由执行端确认完成` / `Confirmed write
+ *   · 宿主/办事通道的**成功通道原文**（`办好了：` / `办完了` / `Confirmed write
  *     applied`）在失败/取消/重复确认场景里的**不出现**——这些字符串只有真成功才会产生，
  *     出现即「假成功」事实；
  *   · 幂等回放与「还在办」话术（宿主常量，逐字）。
@@ -114,17 +114,17 @@ export const TWO_OBJECTS_SPECS: readonly CollectionSpec[] = [
 ];
 
 /**
- * 宿主/执行层「成功通道」原文（只有真的成功才会产生的字符串；不是模型措辞判断）：
+ * 宿主/办事通道「成功通道」原文（只有真的成功才会产生的字符串；不是模型措辞判断）：
  *   · `办好了：`        —— task-completion-delivery.taskCompletionFallbackText 模板形态；
  *   · `办完了：`        —— notification-render 的 completed 通知模板形态；
- *   · `已由执行端确认完成` —— task-completion-delivery.taskCompletionFactText 事实句；
+ *   · `[任务完成]`     —— task-completion-delivery.taskCompletionFactText 事实句头（宿主喂模型的成功事实）；
  *   · `Confirmed write applied` —— dummy 夹具 commit 成功摘要（执行层自己的成功原文）。
  * 失败/取消/重复确认场景里出现任意一条 = 用户被喂了与事实相反的「成功」。
  */
 export const SUCCESS_CHANNEL_MARKERS: readonly string[] = [
   '办好了：',
   '办完了：',
-  '已由执行端确认完成',
+  '[任务完成]',
   'Confirmed write applied',
 ];
 

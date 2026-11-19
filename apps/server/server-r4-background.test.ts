@@ -329,7 +329,9 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
       const completionFacts = records[1]!.injections.filter((text) => text.startsWith('[任务完成]'));
       expect(completionFacts, '降级路径把完成事实留待注入').toHaveLength(1);
       expect(completionFacts[0]).toContain('查 documents W202611');
-      expect(completionFacts[0]).not.toContain('办完了');
+      // 旧宿主完成模板是 `[任务事实] 办完了：<name>。`（带冒号 + 业务名）——新完成事实用
+      // `[任务完成]…办完了。结果正文（逐字）…`，不含那个旧模板形态。
+      expect(completionFacts[0]).not.toContain('办完了：');
       expect(completionFacts[0]).not.toContain('task_status');
       // 幂等：第三回合不再重复注入同一事实。
       await server.handler(incoming('user-a', 'conv-a', 'msg-3', '再一步'));

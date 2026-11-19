@@ -274,7 +274,7 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
         properties: {
           task: {
             type: 'string',
-            description: '要交给执行层 Worker 的任务：写清对象、范围与要回答的问题；用自然语言，不要写命令。',
+            description: '要交办出去的任务：写清对象、范围与要回答的问题；用自然语言，不要写命令。',
           },
         },
         required: ['task'],
@@ -302,7 +302,7 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
       expect((schema['properties'] as Record<string, unknown>)['inputFiles']).toEqual({
         type: 'array',
         items: { type: 'string' },
-        description: '随任务交给执行层处理的输入文件 fileId 列表（来自文件清单；宿主复制为任务私有副本，原件不动）。',
+        description: '随任务交给助手处理的输入文件 fileId 列表（来自文件清单；宿主复制为任务私有副本，原件不动）。',
       });
 
       expect(turn.taskIds).toHaveLength(1);

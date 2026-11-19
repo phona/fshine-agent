@@ -130,12 +130,12 @@ class ManualLongTasks implements LongTaskWaitPort {
 function noReceipt(timeoutMs = 30_000): LongTaskWaitResult {
   return {
     status: 'failed',
-    message: `执行层等待调用超时（${timeoutMs}ms）：没有收到回执，无法确认长任务当前的状态。`,
+    message: `等待回话超时（${timeoutMs}ms）：没有收到回执，无法确认长任务当前的状态。`,
     outcome: {
       status: 'failed',
       error: {
         code: 'result_unknown',
-        message: `执行层等待调用超时（${timeoutMs}ms）：没有收到回执，无法确认长任务当前的状态。`,
+        message: `等待回话超时（${timeoutMs}ms）：没有收到回执，无法确认长任务当前的状态。`,
         retryable: false,
       },
     },

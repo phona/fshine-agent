@@ -143,7 +143,7 @@ describe('冒烟·执行很久后异常（slow_fault）', () => {
 
       const failed = registry.get(taskId, TASK_SCOPE);
       expect(failed.status).toBe('failed');
-      expect(failed.failureReason).toContain('执行层未成功：dummy.query 返回 failed');
+      expect(failed.failureReason).toContain('没办成：dummy.query 返回 failed');
       expect(failed.failureReason).toContain('cannot be read after a long run');
 
       // 不谎报成功：**零完成投递**（没有「办完了」正文）；失败走失败投递分支主动说一句人话
