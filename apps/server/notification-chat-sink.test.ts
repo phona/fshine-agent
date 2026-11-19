@@ -152,6 +152,8 @@ describe('主动推送 sink：不投递的分支（终态跳过 / 未送达，�
     // 送达，重试也不再接管）。现在如实报「跳过」：没有东西可发/永不可能送达。
     expect(result.delivered).toBe(false);
     expect(result.skipped).toBe('delivery_unavailable');
+    // 部署模式事实随跳过回执带出（告警判据「live + skipped」靠它：静默部署不打扰）。
+    expect(result.deliveryMode).toBe('silent');
     expect(delivery.sent).toEqual([]);
     expect(events).toContainEqual(expect.objectContaining({
       event: 'notification_push_suppressed',
@@ -172,7 +174,8 @@ describe('主动推送 sink：不投递的分支（终态跳过 / 未送达，�
     const delivery = fakeDelivery();
     const { sink, events } = sinkOf({ delivery: delivery.port, taskScope: () => undefined });
     const result = await sink.send(notification('timed_out'));
-    expect(result).toMatchObject({ delivered: false, skipped: 'task_scope_unresolved' });
+    // live 部署上出现跳过 = 配错（告警面据此判；判据见 alert-rules 的 isDeliveryFailure）。
+    expect(result).toMatchObject({ delivered: false, skipped: 'task_scope_unresolved', deliveryMode: 'live' });
     expect(delivery.sent).toEqual([]);
     expect(events).toContainEqual(expect.objectContaining({ reason: 'task_scope_unresolved' }));
   });

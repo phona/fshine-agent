@@ -122,7 +122,7 @@
 | 场景 | 自动用例 | 层级 | 覆盖度 | 缺口说明 |
 | --- | --- | --- | --- | --- |
 | 运营告警规则：执行失败 / 超时（10min / 30min 边界）/ 投递非 sent 命中；冷却窗口去重 | `packages/agent/alert-rules.test.ts:命中：同一任务执行事实达到阈值`<br>`packages/agent/alert-rules.test.ts:边界：running 10 分 1 秒告`<br>`packages/agent/alert-rules.test.ts:命中：file_delivery 状态非 sent`<br>`packages/agent/alert-rules.test.ts:同一 (rule, subject) 冷却窗口内只出一次` | 宿主机制 | 已覆盖 | — |
-| 投递终局进告警面（2026-11-19 第 3 档）：通知 attempts 用尽（exhausted）/ 长活提醒投递失败 → `delivery_failed`（critical，真投影+真规则）；终态跳过（skipped）不告警 | `scripts/ops/alerts.test.ts:通知投递失败到 attempts 上限`<br>`scripts/ops/alerts.test.ts:长活提醒投递两次都失败`<br>`scripts/ops/alerts.test.ts:终态跳过（skipped）不告警`<br>`packages/agent/alert-rules.test.ts:命中：通知投递终局 exhausted`<br>`packages/agent/alert-rules.test.ts:命中：长活提醒投递 failed` | 宿主机制 | 已覆盖 | — |
+| 投递终局进告警面（2026-11-19 第 3 档）：通知 attempts 用尽（exhausted）/ 长活提醒投递失败 / **live 部署上的终态跳过**（配错：用户彻底收不到）→ `delivery_failed`（critical，真投影+真规则）；silent·unavailable 的 skipped 与正常送达不告警 | `scripts/ops/alerts.test.ts:通知投递失败到 attempts 上限`<br>`scripts/ops/alerts.test.ts:长活提醒投递两次都失败`<br>`scripts/ops/alerts.test.ts:终态跳过按`<br>`packages/agent/alert-rules.test.ts:命中：通知投递终局 exhausted`<br>`packages/agent/alert-rules.test.ts:命中：长活提醒投递 failed`<br>`packages/agent/alert-rules.test.ts:命中：live 部署上的终态跳过`<br>`packages/agent/alert-rules.test.ts:不命中：silent / unavailable 部署上的终态跳过` | 宿主机制 | 已覆盖 | — |
 | 告警原文可回溯：raw 字段含被命中内部原文、不截断 | `packages/agent/alert-rules.test.ts:告警项 raw 字段包含被命中的内部原文，且不截断` | 宿主机制 | 已覆盖 | — |
 | 运营页面：统计 / 失败清单 / 转义防注入 / 幂等生成 | `scripts/ops.test.ts:统计：总数与四态计数`<br>`scripts/ops.test.ts:恶意文本全字段：逐字段断言「原文不出现、转义实体出现」` | 宿主机制 | 已覆盖 | — |
 

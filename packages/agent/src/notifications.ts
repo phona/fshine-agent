@@ -144,6 +144,13 @@ export interface DeliveryReceipt {
    */
   skipped?: string;
   /**
+   * **部署模式事实**（2026-11-19 owner 裁定；只随 skipped 回执带）：投递面的
+   * `deliveryMode`（`'live'` / `'silent'`；没有投递面 = `'unavailable'`）。
+   * 告警判据按它切：**live 上出现 skipped = 渠道配置/路由配错**（用户彻底收不到任何消息，
+   * 必须有人看见）；silent/unavailable 是部署属性，不告警。
+   */
+  deliveryMode?: string;
+  /**
    * **本次不投递、也没尝试投递**（改期：会话此刻在跑回合，界面让路——2026-11-19 投递真相
    * 切片）：不写 delivered_at、**不消耗 attempts**、不记 last_error（没有失败可记），下一
    * 次投递驱动（装配侧在回合结束后补一次）再试。与 error 互斥：它不是失败尝试，也不是终态。
@@ -187,6 +194,8 @@ export interface NotificationTerminalFact {
   attempts: number;
   /** 终局原因：真实失败原因，或终态跳过的 `SKIPPED:<reason>`。 */
   reason: string;
+  /** 部署模式事实（只有跳过终局带）：告警判据「live + skipped」用它。 */
+  deliveryMode?: string;
 }
 
 export interface NotificationOutboxOptions {
@@ -442,10 +451,19 @@ export function createNotificationOutbox(options: NotificationOutboxOptions): No
     outcome: NotificationTerminalFact['outcome'],
     attempts: number,
     reason: string,
+    deliveryMode?: string,
   ): void => {
     if (onTerminal === undefined) return;
     try {
-      onTerminal({ notificationId: row.id, taskId: row.task_id, kind: row.kind as NotificationKind, outcome, attempts, reason });
+      onTerminal({
+        notificationId: row.id,
+        taskId: row.task_id,
+        kind: row.kind as NotificationKind,
+        outcome,
+        attempts,
+        reason,
+        ...(deliveryMode === undefined ? {} : { deliveryMode }),
+      });
     } catch {
       // 观察面写失败：终局事实已落库（delivered_at 仍为空、last_error 可查），不翻转。
     }
@@ -523,7 +541,7 @@ export function createNotificationOutbox(options: NotificationOutboxOptions): No
         const marker = `${SKIPPED_MARKER}${reason}`;
         updateSkipped.run({ id: row.id, attempts: maxAttempts, lastError: marker });
         results.push({ notificationId: row.id, outcome: 'skipped', attempts: maxAttempts, error: marker });
-        reportTerminal(row, 'skipped', maxAttempts, marker);
+        reportTerminal(row, 'skipped', maxAttempts, marker, receipt.deliveryMode);
       } else {
         const error = typeof receipt.error === 'string' && receipt.error !== '' ? receipt.error : SINK_UNDELIVERED_ERROR;
         updateFailed.run({ id: row.id, lastError: error });

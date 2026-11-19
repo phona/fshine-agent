@@ -247,14 +247,48 @@ describe('delivery_failed', () => {
     expect(result.alerts[0]!.severity).toBe('critical');
   });
 
-  it('不命中：通知投递终局 skipped（没有东西可发/永不可能送达——告警只会成噪音）', () => {
+  it('命中：live 部署上的终态跳过（渠道配置/路由配错，用户彻底收不到——最该死的黑盒）', () => {
+    // owner 2026-11-19 裁定：判据按**部署模式**切，只认既有事实 deliveryMode + skipped。
     const result = evaluateAlerts(
       [
         fact({
           event: 'notification_delivery_terminal',
           taskId: 't32',
-          raw: '{"event":"notification_delivery_terminal","taskId":"t32","result":"skipped","reason":"SKIPPED:delivery_unavailable"}',
-          detail: { deliveryResult: 'skipped' },
+          raw: '{"event":"notification_delivery_terminal","taskId":"t32","result":"skipped","reason":"SKIPPED:task_scope_unresolved","deliveryMode":"live"}',
+          detail: { deliveryResult: 'skipped', deliveryMode: 'live' },
+        }),
+      ],
+      { now: NOW },
+    );
+    expect(result.alerts.map((a) => a.rule)).toEqual(['delivery_failed']);
+    expect(result.alerts[0]!.severity).toBe('critical');
+  });
+
+  it('不命中：silent / unavailable 部署上的终态跳过（部署属性——静默部署每条都 skipped）', () => {
+    for (const deliveryMode of ['silent', 'unavailable'] as const) {
+      const result = evaluateAlerts(
+        [
+          fact({
+            event: 'notification_delivery_terminal',
+            taskId: 't32b',
+            raw: `{"event":"notification_delivery_terminal","taskId":"t32b","result":"skipped","deliveryMode":"${deliveryMode}"}`,
+            detail: { deliveryResult: 'skipped', deliveryMode },
+          }),
+        ],
+        { now: NOW },
+      );
+      expect(result.alerts).toEqual([]);
+    }
+  });
+
+  it('不命中：live 部署正常送达（成功不产生「终局未送达」事实）', () => {
+    const result = evaluateAlerts(
+      [
+        fact({
+          event: 'notification_push_sent',
+          taskId: 't32c',
+          raw: '{"event":"notification_push_sent","taskId":"t32c","parts":1,"deliveryMode":"live"}',
+          detail: { deliveryMode: 'live' },
         }),
       ],
       { now: NOW },

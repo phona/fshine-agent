@@ -19,8 +19,9 @@
  *   · task_stuck          —— 任务 `running` 超 10 分钟无事件；`waiting_user` 超 30 分钟；
  *   · delivery_failed     —— 文件/结果投递失败 ≥1（`file_delivery` 状态非 sent、
  *     `task_result_delivery_failed`、通知投递终局 `notification_delivery_terminal` 的
- *     `exhausted`、长活提醒 `task_long_running_notice` 的 `failed`；终态跳过 skipped 不告警
- *     ——没有东西可发/永不可能送达，开发也做不了什么）。
+ *     `exhausted`、长活提醒 `task_long_running_notice` 的 `failed`、**live 部署上的终态跳过**
+ *     （`skipped` + `deliveryMode=live` = 渠道配置/路由配错，用户彻底收不到）；
+ *     silent/unavailable 上的 skipped 是部署属性，不告警）。
  *
  * 去重：同一 `(rule, subject)` 在冷却窗口（缺省 30 分钟）内只出一次；冷却状态是可 JSON
  * 序列化的纯数据（`.runtime/ops/alerts-state.json` 持久化的正是它）。时间只从注入的 `now`
@@ -117,6 +118,11 @@ export interface AlertFactDetail {
    * 的 `'sent'` / `'failed'`。判据见 isDeliveryFailure——不猜缺省值。
    */
   deliveryResult?: string;
+  /**
+   * 部署模式事实（2026-11-19 owner 裁定；只随终态跳过带）：`'live'` / `'silent'` /
+   * `'unavailable'`。判据：live 上的终态跳过 = 配错，要告警（见 isDeliveryFailure）。
+   */
+  deliveryMode?: string;
   /** 任务状态投影：'running' / 'waiting_user' / …。 */
   taskStatus?: string;
   /** 协议违约标记（执行层对未声明 long_running 的 operation 返回 accepted）。 */
@@ -242,7 +248,13 @@ export function isDeliveryFailure(fact: AlertFact): boolean {
   //     终态跳过（skipped = 没有东西要发 / 永不可能送达）**不告警**（静默部署上每条都 skipped，
   //     告警就成了噪音，且开发也做不了什么）；
   //   · 长活提醒 `task_long_running_notice` 的 `failed`（渠道故障，用户没收到那条提醒）。
-  if (fact.event === 'notification_delivery_terminal') return fact.detail?.deliveryResult === 'exhausted';
+  if (fact.event === 'notification_delivery_terminal') {
+    if (fact.detail?.deliveryResult === 'exhausted') return true;
+    // owner 裁定（2026-11-19）：**按部署模式切**——live 部署上出现终态跳过 = 渠道配置/路由
+    // 配错，用户那边表现为「彻底收不到任何消息」（最该死的黑盒），必须有人看见；
+    // silent / unavailable 是部署属性（静默部署上每条都 skipped），不告警。
+    return fact.detail?.deliveryResult === 'skipped' && fact.detail?.deliveryMode === 'live';
+  }
   if (fact.event === 'task_long_running_notice') return fact.detail?.deliveryResult === 'failed';
   if (fact.event !== 'file_delivery') return false;
   const status = fact.detail?.deliveryStatus;

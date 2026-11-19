@@ -15,6 +15,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { ChannelRoute, DeliveryReceipt } from '@fshine/contracts';
 import { evaluateAlerts, type AlertItem } from '../../packages/agent/src/alert-rules';
 import { createNotificationOutbox } from '../../packages/agent/src/notifications';
 import { createResourcePolicy } from '../../packages/agent/src/resource-policy';
@@ -26,7 +27,7 @@ import {
   type TaskExecutionOutcome,
   type TaskExecutor,
 } from '../../packages/agent/src/task-runner';
-import { notificationTerminalLogLine } from '../../apps/server/notification-chat-sink';
+import { createChatNotificationSink, notificationTerminalLogLine } from '../../apps/server/notification-chat-sink';
 import { logLineToFact } from './alerts';
 
 const NOW_ISO = '2026-11-19T12:00:00.000Z';
@@ -82,21 +83,84 @@ describe('投递终局的上帝视角：既有 delivery_failed 规则看得见�
     }
   });
 
-  it('终态跳过（skipped）不告警：没有东西可发 / 永不可能送达，开发也做不了什么', async () => {
+  it('终态跳过按**部署模式**切（owner 2026-11-19）：live + skipped 告警；silent + skipped 不告警；live 正常送达不告警', async () => {
+    // 判据只认既有事实 deliveryMode + skipped（不判语义、不打量级）：
+    //   · live 部署上出现 skipped = 渠道配置/路由配错，用户那边表现为「彻底收不到任何消息」；
+    //   · silent/unavailable 是部署属性（静默部署上每条都 skipped），不告警。
+    // 三条都走**真 sink**（deliveryMode 由 chat sink 随跳过回执带出）+ 真投影 + 真规则。
     const lines: Array<Record<string, unknown>> = [];
-    const outbox = createNotificationOutbox({
+    const logLine = (terminal: Parameters<typeof notificationTerminalLogLine>[0]): void => {
+      lines.push(notificationTerminalLogLine(terminal));
+    };
+    // (a) live + skipped：读不到任务范围（路由不可知）= 配错。
+    const liveSkip = createNotificationOutbox({
       dbPath: tempDbPath(),
-      sink: { async send() { return { delivered: false, skipped: 'delivery_unavailable' }; } },
+      sink: createChatNotificationSink({
+        taskScope: () => undefined,
+        delivery: { deliveryMode: 'live', async sendText() { throw new Error('不该被调用'); } },
+        log: () => {},
+      }),
       maxAttempts: 2,
-      onTerminal: (terminal) => lines.push(notificationTerminalLogLine(terminal)),
+      onTerminal: logLine,
     });
     try {
-      outbox.record({ taskId: 'task-alert-skipped', kind: 'timed_out', at: NOW_ISO });
-      await outbox.deliverPending();
-      expect(lines).toHaveLength(1); // 事件照落（如实留痕）
-      expect(alertsOf(lines)).toEqual([]); // 但不进告警面（静默部署上每条都 skipped）
+      liveSkip.record({ taskId: 'task-alert-live-skip', kind: 'waiting_user', at: NOW_ISO });
+      await liveSkip.deliverPending();
+      const alerts = alertsOf(lines);
+      expect(alerts.map((alert) => alert.rule)).toEqual(['delivery_failed']);
+      expect(alerts[0]!.severity).toBe('critical');
+      expect(alerts[0]!.raw).toContain('"deliveryMode":"live"');
     } finally {
-      outbox.close();
+      liveSkip.close();
+    }
+
+    // (b) silent + skipped：部署属性，零告警（事件照落，如实留痕）。
+    const silentLines: Array<Record<string, unknown>> = [];
+    const silentSkip = createNotificationOutbox({
+      dbPath: tempDbPath(),
+      sink: createChatNotificationSink({
+        taskScope: () => ({ principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' }),
+        delivery: { deliveryMode: 'silent', async sendText() { throw new Error('不该被调用'); } },
+        log: () => {},
+      }),
+      maxAttempts: 2,
+      onTerminal: (terminal) => silentLines.push(notificationTerminalLogLine(terminal)),
+    });
+    try {
+      silentSkip.record({ taskId: 'task-alert-silent-skip', kind: 'timed_out', at: NOW_ISO });
+      await silentSkip.deliverPending();
+      expect(silentLines).toHaveLength(1); // 事件照落
+      expect(silentLines[0]).toMatchObject({ result: 'skipped', deliveryMode: 'silent' });
+      expect(alertsOf(silentLines)).toEqual([]);
+    } finally {
+      silentSkip.close();
+    }
+
+    // (c) live + 正常送达：零终局事件、零告警（成功不产生「终局未送达」事实）。
+    const okLines: Array<Record<string, unknown>> = [];
+    const okOutbox = createNotificationOutbox({
+      dbPath: tempDbPath(),
+      sink: createChatNotificationSink({
+        taskScope: () => ({ principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' }),
+        delivery: {
+          deliveryMode: 'live',
+          async sendText(route: ChannelRoute): Promise<DeliveryReceipt> {
+            return { route, parts: [{ kind: 'text', index: 0, status: 'sent' }] };
+          },
+        },
+        log: () => {},
+      }),
+      maxAttempts: 2,
+      onTerminal: (terminal) => okLines.push(notificationTerminalLogLine(terminal)),
+    });
+    try {
+      okOutbox.record({ taskId: 'task-alert-delivered', kind: 'timed_out', at: NOW_ISO });
+      await okOutbox.deliverPending();
+      expect(okLines).toEqual([]);
+      expect(okOutbox.undelivered()).toEqual([]);
+      expect(alertsOf(okLines)).toEqual([]);
+    } finally {
+      okOutbox.close();
     }
   });
 
