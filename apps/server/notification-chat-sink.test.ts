@@ -79,15 +79,17 @@ describe('主动推送 sink：种类与文案', () => {
     expect(delivery.sent[0]!.text).toContain('账套名');
   });
 
-  it('① failed 按机械原因说人话；result_unknown 不读作成功', async () => {
+  it('① failed 不再由本 sink 推（2026-11-19 收口）；result_unknown 也不读作成功', async () => {
+    // 口径变更：后台任务失败的主动告知改由 task-completion-delivery 的失败投递分支直发
+    // （deliverTaskFailure + failureMessageFor 模板），本 sink 不推 failed——两套话术并存
+    // 会双发。这里钉住「failed → kind_not_pushed」；result_unknown 落底账 failed + reason，
+    // 用户话术同样走失败分支，本 sink 不再转发。
     const delivery = fakeDelivery();
-    const { sink } = sinkOf({ delivery: delivery.port });
+    const { sink, events } = sinkOf({ delivery: delivery.port });
     await sink.send(notification('failed', { reason: 'failed_confirmed' }));
     await sink.send(notification('failed', { reason: 'result_unknown' }));
-    expect(delivery.sent.map((s) => s.text)).toEqual([
-      '没办成：查应收账款。',
-      '不确定做没做完，需要再确认：查应收账款。',
-    ]);
+    expect(delivery.sent).toEqual([]);
+    expect(events.filter((e) => e['reason'] === 'kind_not_pushed')).toHaveLength(2);
   });
 
   it('① 噪音类与 completed 一律不推（后者由结果正文投递负责）', async () => {
@@ -104,12 +106,13 @@ describe('主动推送 sink：种类与文案', () => {
   it('② 文案过用户可见出口清理（服务器路径不出现在用户文本里）', async () => {
     const delivery = fakeDelivery();
     const { sink } = sinkOf({ delivery: delivery.port });
-    await sink.send(notification('failed', { name: '整理 /home/fictional-user/fictional-projects/fshine-agent/.runtime/x.xlsx' }));
+    await sink.send(notification('timed_out', { name: '整理 /home/fictional-user/fictional-projects/fshine-agent/.runtime/x.xlsx' }));
     expect(delivery.sent[0]!.text).not.toContain('/home/');
   });
 
   it('① 推送种类清单是本文件唯一来源（防有人悄悄加种类绕过职责划分）', () => {
-    expect([...PUSHED_NOTIFICATION_KINDS]).toEqual(['waiting_user', 'failed', 'timed_out', 'resource_limited', 'cancelled']);
+    // 2026-11-19 口径变更：failed 移出（失败由 task-completion-delivery 失败分支直发）。
+    expect([...PUSHED_NOTIFICATION_KINDS]).toEqual(['waiting_user', 'timed_out', 'resource_limited', 'cancelled']);
   });
 });
 
@@ -117,7 +120,7 @@ describe('主动推送 sink：不投递的分支（suppressed，绝不记 sent�
   it('③ 非 live：零 sendText，记 deliveryMode=silent', async () => {
     const delivery = fakeDelivery('silent');
     const { sink, events } = sinkOf({ delivery: delivery.port });
-    const result = await sink.send(notification('failed'));
+    const result = await sink.send(notification('timed_out'));
     expect(result.delivered).toBe(true);
     expect(delivery.sent).toEqual([]);
     expect(events).toContainEqual(expect.objectContaining({
@@ -130,14 +133,14 @@ describe('主动推送 sink：不投递的分支（suppressed，绝不记 sent�
 
   it('③ 没有投递面：同样只记 suppressed', async () => {
     const { sink, events } = sinkOf();
-    await sink.send(notification('failed'));
+    await sink.send(notification('timed_out'));
     expect(events).toContainEqual(expect.objectContaining({ reason: 'delivery_unavailable', deliveryMode: 'unavailable' }));
   });
 
   it('③ 读不到任务范围：不猜路由', async () => {
     const delivery = fakeDelivery();
     const { sink, events } = sinkOf({ delivery: delivery.port, taskScope: () => undefined });
-    await sink.send(notification('failed'));
+    await sink.send(notification('timed_out'));
     expect(delivery.sent).toEqual([]);
     expect(events).toContainEqual(expect.objectContaining({ reason: 'task_scope_unresolved' }));
   });
@@ -153,10 +156,10 @@ describe('主动推送 sink：不投递的分支（suppressed，绝不记 sent�
         return true;
       },
     });
-    await sink.send(notification('failed'));
+    await sink.send(notification('timed_out'));
     expect(delivery.sent).toEqual([]);
     expect(events).toContainEqual(expect.objectContaining({ reason: 'relayed_in_turn' }));
-    await sink.send(notification('failed'));
+    await sink.send(notification('timed_out'));
     expect(delivery.sent).toHaveLength(1);
   });
 });
@@ -172,7 +175,7 @@ describe('主动推送 sink：时序与失败', () => {
         return true;
       },
     });
-    const result = await sink.send(notification('failed'));
+    const result = await sink.send(notification('timed_out'));
     expect(result.delivered).toBe(true);
     expect(delivery.sent).toEqual([]);
     expect(events).toContainEqual(expect.objectContaining({ event: 'notification_push_deferred', reason: 'turn_active' }));
@@ -183,7 +186,7 @@ describe('主动推送 sink：时序与失败', () => {
   it('⑥ 投递抛错向上抛（outbox 才能有界重试），并记 failed 事件', async () => {
     const delivery = fakeDelivery('live', 'throw');
     const { sink, events } = sinkOf({ delivery: delivery.port });
-    await expect(sink.send(notification('failed'))).rejects.toThrow('渠道不可用');
+    await expect(sink.send(notification('timed_out'))).rejects.toThrow('渠道不可用');
     expect(events).toContainEqual(expect.objectContaining({ event: 'notification_push_failed' }));
     expect(events.some((e) => e['event'] === 'notification_push_sent')).toBe(false);
   });

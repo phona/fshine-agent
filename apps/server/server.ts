@@ -62,6 +62,7 @@ import {
 import { createResourcePolicy, fileRefTtlMsOf, resolveRuntimeConfig } from '../../packages/agent/src/resource-policy';
 import { SessionPersistence } from '../../packages/agent/src/session-persistence';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
+import { deriveTaskName } from '../../packages/agent/src/task-registry';
 import type { TaskExecutor, TaskRunner } from '../../packages/agent/src/task-runner';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../../packages/agent/src/worker-skills';
 import {
@@ -73,7 +74,7 @@ import {
 } from '../../scripts/ask-runtime';
 import { createAttachmentFactQueue, createScopedNoteQueue } from './attachment-facts';
 import { AttachmentNudge, type NudgeClock } from './attachment-nudge';
-import { deliverTaskResult, routeFromSessionId } from './task-completion-delivery';
+import { deliverTaskResult, deliverTaskFailure, routeFromSessionId } from './task-completion-delivery';
 import { composeNotificationSinks, createChatNotificationSink } from './notification-chat-sink';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -439,6 +440,42 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     }
   }
   const taskRegistry = createSqliteTaskRegistry(deps.dbPath);
+  /**
+   * 任务业务名（完成投递身份行用）：底账 name（机械回落值）；旧库历史行缺省用
+   * deriveTaskName(request) 同款回落。读不到底账行（回调触达时行已清/异常）= 无身份行
+   * （投递逐字节不变，不猜名）。
+   */
+  const taskNameOf = (taskId: string, request: string): string | undefined => {
+    try {
+      const record = (taskRegistry as unknown as {
+        get(id: string): { name?: string | null; request: string };
+      }).get(taskId);
+      const name = record.name ?? deriveTaskName(record.request ?? request);
+      return name.trim() === '' ? undefined : name;
+    } catch {
+      return undefined;
+    }
+  };
+  /**
+   * 失败投递的分类输入（2026-11-19）：任务底账执行事实里第一条 failed/refused 行的
+   * error.code（执行层原始码，只用于 classifyFailure 归类；**不进用户文本**）。
+   * 取不到（无执行行/异常）= undefined，由投递面落 executor_failed。
+   */
+  const failureCodeOf = (taskId: string): string | undefined => {
+    try {
+      const record = (taskRegistry as unknown as {
+        get(id: string): { executions?: ReadonlyArray<{ status?: string; error?: { code?: string } }> };
+      }).get(taskId);
+      const failed = (record.executions ?? []).find((execution) =>
+        (execution.status === 'failed' || execution.status === 'refused')
+        && typeof execution.error?.code === 'string'
+        && execution.error.code !== '',
+      );
+      return failed?.error?.code;
+    } catch {
+      return undefined;
+    }
+  };
   // 解析后配置只读一次：fileStore 的 TTL 由它派生（单一配置源；本文件不重解释 runtime 段）。
   const resolvedRuntime = resolveRuntimeConfig(deps.config.runtime);
   // 入站消息幂等底账启动清扫（2026-11-19）：保留期 = runtime.fileRefTtlDays 派生的毫秒
@@ -666,6 +703,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             // 快活抑制只免掉「办完了」这条重复播报；**文件没送达时必须单独说一句**——
             // 同回合模型已经说过「见附件」，用户手上却什么都没有，那就是虚假交付
             // （2026-11-19 真发现：默认窗口下 file_delivery=delivery_failed 后一句提示都没有）。
+            // 这一条是投递失败话术，不是完成播报——不加「办完了」身份头（避免语义错位）。
             if (fileNote !== undefined) {
               await deliverTaskResult({
                 taskId: completion.taskId,
@@ -683,10 +721,45 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             taskId: completion.taskId,
             principalId: completion.principalId,
             sessionId: completion.sessionId,
+            // 任务身份（2026-11-19）：完成消息带业务名，用户一眼看出是哪件事。
+            name: taskNameOf(completion.taskId, completion.request),
             // 文件未送达的如实话术附在结果文本后（不覆盖模型/执行端正文）。
             resultText: fileNote === undefined
               ? completion.resultText
               : `${completion.resultText}\n${fileNote}`,
+          }, {
+            ...(completionDelivery === undefined ? {} : { delivery: completionDelivery }),
+            log,
+          });
+        });
+      },
+      // 失败投递（2026-11-19 收口）：任务终局 failed/result_unknown → 用户文本用
+      // failureMessageFor 模板（归类自任务底账执行事实的 code；取不到 = executor_failed），
+      // **不投 Worker 失败汇报原文**。快活失败（本回合已交给模型）经 pushSuppressedInTurn
+      // 抑制；非快活失败由这里主动发回原会话（与完成投递同一主动投递面、同一四必守）。
+      onTaskFailed: (failure) => {
+        const sessionKey = `${failure.principalId}\u0000${failure.sessionId}`;
+        enqueueSessionTurn(sessionKey, async () => {
+          // 快活失败：原因本回合已交给模型（模型会转述），不重复发一条话术。
+          if (claimPushSuppressedInTurn(sessionKey, failure.taskId)) {
+            log({
+              event: 'task_failure_delivery_suppressed',
+              principalId: failure.principalId,
+              sessionId: failure.sessionId,
+              taskId: failure.taskId,
+              deliveryMode: completionDelivery?.deliveryMode ?? 'unavailable',
+              reason: 'relayed_in_turn',
+            });
+            return;
+          }
+          // 归类输入：底账执行事实的 error.code（failed/refused 行；取不到 = 落 executor_failed）。
+          const code = failureCodeOf(failure.taskId);
+          await deliverTaskFailure({
+            taskId: failure.taskId,
+            principalId: failure.principalId,
+            sessionId: failure.sessionId,
+            ...(code === undefined ? {} : { code }),
+            ...(failure.status === 'result_unknown' ? { status: 'result_unknown' } : {}),
           }, {
             ...(completionDelivery === undefined ? {} : { delivery: completionDelivery }),
             log,

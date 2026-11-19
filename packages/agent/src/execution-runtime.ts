@@ -55,9 +55,9 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, RuntimeTurnEvent, TurnDriver, TurnDriverResult } from './driver-contract';
 import { ToolUserError } from './driver-contract';
-import { failureMessageFor } from './user-facing-failure';
 import { FileRefUnavailableError, safeExtensionOf, type CopiedTaskInput, type TaskInputCopier } from './file-store';
 export type { TaskInputCopier } from './file-store';
+import { classifyFailure, failureMessageFor, type UserFacingFailureKind } from './user-facing-failure';
 import type { RunJsExecutor, RunJsOutput } from './run-js-executor';
 import type { RecalcXlsxExecutor, RecalcCostEvent } from './recalc-xlsx-executor';
 export type {
@@ -593,7 +593,12 @@ export type ExecutionEvent =
    * 载荷型参数 lint 未过（2026-11-19）：宿主装信封失败——不发起执行，业务话术交回模型改。
    * missing/unknown 是结构化机械事实（只进日志，不进用户话术）。
    */
-  | { event: 'payload_lint_rejected'; taskId: string; operation: string; missing: readonly string[]; unknown: readonly string[] };
+  | { event: 'payload_lint_rejected'; taskId: string; operation: string; missing: readonly string[]; unknown: readonly string[] }
+  /**
+   * 失败归类（模型可见面收口，2026-11-19）：执行层失败/拒绝**不再逐字进模型投影**，
+   * 模型只见 kind + note（见 toModelVisibleOutcome）；原始 code 与原文只经这条事件进日志。
+   */
+  | { event: 'execution_failure_classified'; operation: string; code: string; status: 'failed' | 'refused'; kind: string };
 
 /** 长任务结果渲染的日志内联上限（字节；超过走任务文件，不留绝对路径也不灌转录）。 */
 export const LONG_TASK_LOG_INLINE_MAX_BYTES = 4 * 1024;
@@ -971,12 +976,12 @@ export function renderWorkerFileManifest(
  * 每个后台回合都是新 Worker（不带上一回合转录），补答不随委派交给执行端就等于丢失。
  */
 /**
- * 能力快照标题下的中性事实（A1，2026-11-18）：让模型看见「执行的重量」——成本陈述，
- * **不是阈值规则**：宿主不设阈值、不裁决、不拦截；每个 operation 是否标注估时/重量
- * 由执行层自述（缺省不出现）。只陈述 N 次执行与 N 倍等待/失败面的机械关系。
+ * 能力快照标题下的事实（2026-11-19 模型可见面收口）：**不再承诺「每个 operation 标注
+ * 估时与重量」**——重量/估时是内部度量（用户听不懂、模型拿它只会错误估计），已从委派
+ * 清单里去掉；这里只陈述 N 次执行与 N 倍等待/失败面的机械关系（原 A1 语义保留）。
  */
 export const WORKER_SNAPSHOT_COST_NOTE =
-  '每个 operation 标注单次估时与重量；一次任务发起 N 次执行，等待与失败面按 N 倍增长。';
+  '一次任务发起 N 次执行，等待与失败面按 N 倍增长；控制执行次数。';
 
 /** 终态集合（窗口内落定判定）。waiting_user 不是终态——等待接续仍属后台推进。 */
 const SETTLED_TASK_STATUSES: ReadonlySet<string> = new Set([
@@ -986,6 +991,37 @@ const SETTLED_TASK_STATUSES: ReadonlySet<string> = new Set([
   'timed_out',
   'unexecuted',
 ]);
+
+/**
+ * 写确认续跑事实块（P0，2026-11-19）：存在待确认提案、用户已在上一回合表态时，宿主从
+ * 底账提案组装这条**机械事实**（不是话术补丁），交给 renderWorkerDelegation 的
+ * `confirmationFact`。只含可展示摘要与直接提交指令；**handle 与 operation 名不进委派文本**
+ * （Worker 永远看不到凭据）。缺省（无提案/非续跑）由调用方不传字段 → 委派逐字节不变。
+ */
+export function renderConfirmationResumeFact(confirmation: {
+  summary: string;
+}): string {
+  return `用户已确认上一轮提案（摘要：${confirmation.summary}）。直接提交，不要重新生成提案。`;
+}
+
+/**
+ * 委派清单投影（模型可见面收口，2026-11-19）：Worker 只拿调用所需——operation 名、参数
+ * 声明、label（展示）与 `long_running`（影响行为：可能返回 accepted）。**去掉 weight /
+ * estimatedSeconds 等内部度量**（抽象泄露来源之一：模型拿「单次估时约半小时」向用户
+ * 承诺时长）；read/write 标记不进清单——允许集合（allowedOperations）才是宿主的执行面
+ * 边界，不靠清单文本冒充授权。字段按白名单逐项保留，未来契约新增字段不会自动漏进委派。
+ */
+export function workerDelegationManifest(manifest: CapabilityManifest): CapabilityManifest {
+  return {
+    contractVersion: manifest.contractVersion,
+    operations: manifest.operations.map((operation) => ({
+      name: operation.name,
+      ...(operation.label === undefined ? {} : { label: operation.label }),
+      args: operation.args,
+      ...(operation.long_running === true ? { long_running: true } : {}),
+    })),
+  };
+}
 
 export function renderWorkerDelegation(input: {
   task: string;
@@ -1005,6 +1041,14 @@ export function renderWorkerDelegation(input: {
    * 防止它重复发起同一个操作。缺省空串 = 拼接结果逐字节不变（普通首轮/接续）。
    */
   resumeNote?: string;
+  /**
+   * 写确认续跑的事实块（P0，2026-11-19）：存在待确认提案、且用户已在上一回合表态时，
+   * 由宿主从底账提案组装这条**机械事实**（不是话术补丁）——新 Worker 没有上一回合转录，
+   * 不知道「用户在等确认、已经确认了」，会重新走 prepare 再出一次提案。给这条即让
+   * Worker 直接提交、不重新生成提案。只含可展示摘要与指令；句柄/操作名不进委派文本
+   * （Worker 永远看不到 handle）。缺省 undefined = 拼接逐字节不变。
+   */
+  confirmationFact?: string;
 }): string {
   const parts = [
     '## 本次任务（宿主委派）',
@@ -1013,11 +1057,14 @@ export function renderWorkerDelegation(input: {
     '## 能力快照（本轮唯一可执行面：只能调用这里登记的 operation）',
     WORKER_SNAPSHOT_COST_NOTE,
     '```json',
-    JSON.stringify(input.manifest, null, 2),
+    JSON.stringify(workerDelegationManifest(input.manifest), null, 2),
     '```',
   ];
   if (input.answer !== undefined && input.answer.trim() !== '') {
     parts.push('', '## 用户补充（对上一次待办问题的答复）', input.answer);
+  }
+  if (input.confirmationFact !== undefined && input.confirmationFact.trim() !== '') {
+    parts.push('', '## 写确认续跑（宿主机械事实）', input.confirmationFact);
   }
   if (input.files !== undefined && input.files.length > 0) {
     parts.push('', input.fileManifestHint === undefined
@@ -2211,7 +2258,16 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         operationId: run.outcome.operationId,
         operation,
       });
-      return toModelVisibleOutcome(run.outcome);
+      return toModelVisibleOutcome(run.outcome, {
+        operation,
+        onClassified: (classified) => options.onExecutionEvent?.({
+          event: 'execution_failure_classified',
+          operation,
+          code: classified.code,
+          status: run.outcome.status as 'failed' | 'refused',
+          kind: classified.kind,
+        }),
+      });
     }
     // 未声明 long_running 却返回 accepted：已在 execute 回调里机械落 failed，这里确定性
     // 终结本回合（不许模型把它当可重试的普通失败继续撞）。
@@ -2272,6 +2328,18 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       ...(options.onExecutionResultOversizeUnhandled === undefined
         ? {}
         : { onUnhandled: options.onExecutionResultOversizeUnhandled }),
+      // 失败/拒绝归类只进日志（原始码与原文不进模型投影）。
+      ...(options.onExecutionEvent === undefined
+        ? {}
+        : {
+          onClassified: (classified) => options.onExecutionEvent?.({
+            event: 'execution_failure_classified',
+            operation,
+            code: classified.code,
+            status: run.outcome.status as 'failed' | 'refused',
+            kind: classified.kind,
+          }),
+        }),
     });
   }
 
@@ -2976,10 +3044,33 @@ function pendingQuestionFrom(outcome: Extract<ExecutionOutcome, { status: 'needs
 /**
  * 模型可见的执行结果（单一实现：前台会话 execute_operation 与后台 TaskExecutor 共用）：
  * needs_confirmation 只给机械摘要（summary/expiresAt）与 data——句柄是宿主持有的确认凭据，
- * 不进模型转录/工具结果，模型无法伪造或转交；其余状态原样交回模型（逐字节不变）。
+ * 不进模型转录/工具结果，模型无法伪造或转交；completed / needs_input / accepted 原样
+ * （逐字节不变）；**failed / refused 不再逐字透传**（2026-11-19 模型可见面收口）——执行层
+ * 原文与原始码是内部形态（用户不需要、也不该看到「确认凭据/令牌/参数名/协议」这类词），
+ * 模型只见 `{status, kind, note}`：kind 来自 classifyFailure（码表归类），note 来自
+ * failureMessageFor（用户话术 + 动作）。原始 code/原文只进日志（调用方经 onExecutionEvent
+ * 落 `execution_failure_classified`，见 projectWorkerOutcome）。
  */
-function toModelVisibleOutcome(outcome: ExecutionOutcome): Record<string, unknown> {
-  if (outcome.status !== 'needs_confirmation') return outcome as unknown as Record<string, unknown>;
+function toModelVisibleOutcome(
+  outcome: ExecutionOutcome,
+  input: {
+    operation: string;
+    /** 失败/拒绝的归类观察点（只进日志）；缺省静默 = 与改动前一致的纯投影路径。 */
+    onClassified?: (event: { code: string; kind: UserFacingFailureKind }) => void;
+  },
+): Record<string, unknown> {
+  if (outcome.status !== 'needs_confirmation') {
+    if (outcome.status !== 'failed' && outcome.status !== 'refused') {
+      return outcome as unknown as Record<string, unknown>;
+    }
+    const kind = classifyFailure({ code: outcome.error.code, status: outcome.status });
+    input.onClassified?.({ code: outcome.error.code, kind });
+    return {
+      status: outcome.status,
+      kind,
+      note: failureMessageFor(kind).text,
+    };
+  }
   return {
     status: 'needs_confirmation',
     summary: outcome.confirmation.summary,
@@ -3037,20 +3128,22 @@ async function projectWorkerOutcome(
     readonly bridge?: TaskExecutionBridge;
     readonly onFileized?: (event: ExecutionResultFileizedEvent) => void;
     readonly onUnhandled?: (event: ExecutionResultOversizeUnhandledEvent) => void;
+    /** 失败/拒绝归类观察点（只进日志；缺省静默）。 */
+    readonly onClassified?: (event: { code: string; kind: UserFacingFailureKind }) => void;
   },
 ): Promise<Record<string, unknown>> {
-  if (outcome.status !== 'completed') return toModelVisibleOutcome(outcome);
+  if (outcome.status !== 'completed') return toModelVisibleOutcome(outcome, { operation: input.operation, onClassified: input.onClassified });
   let bytes: number;
   try {
     bytes = Buffer.byteLength(JSON.stringify(outcome), 'utf8');
   } catch {
     // 契约外的不可序列化 data：不引入新行为，交回既有投影（与原路径一致）。
-    return toModelVisibleOutcome(outcome);
+    return toModelVisibleOutcome(outcome, { operation: input.operation, onClassified: input.onClassified });
   }
-  if (bytes <= input.thresholdBytes) return toModelVisibleOutcome(outcome);
+  if (bytes <= input.thresholdBytes) return toModelVisibleOutcome(outcome, { operation: input.operation, onClassified: input.onClassified });
   const unhandled = (): Record<string, unknown> => {
     input.onUnhandled?.({ taskId: input.taskId, operation: input.operation, bytes });
-    return toModelVisibleOutcome(outcome);
+    return toModelVisibleOutcome(outcome, { operation: input.operation, onClassified: input.onClassified });
   };
   if (input.bridge === undefined) return unhandled();
   let dataJson: string | undefined;
@@ -3191,15 +3284,19 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       }));
       const runJsMemo = new Map<string, RunJsOutput>();
       /**
-       * S3 接续轮透传（写确认）：runner 在答复前从底账取出的提案（句柄 + 摘要），与本轮
-       * 用户原话一起，随本回合首条非只读执行原样交给执行层，发过即止（一次性）。
+       * S3 接续轮透传（写确认，P0 修复 2026-11-19）：runner 在答复前从底账取出的提案
+       * （句柄 + 摘要），与本轮用户原话一起，随**每条非只读执行**原样交给执行层。
        *   · 只有带用户答复的续跑回合才带 pendingConfirmation——本回合新造的提案不在其中，
        *     所以「同回合 prepare 后立刻 commit」结构性不会拿到句柄；
-       *   · 只读调用不消耗用户的确认；
+       *   · 只读调用不携带（读调用不会产生待确认写操作；执行层也不为读发放确认）；
+       *   · 去掉旧的「一轮只发一次」一次性闸（confirmationPassed）：Worker 第一句是
+       *     prepare、真正的 commit 在后面——句柄被 prepare 消耗后 commit 手里是空的，
+       *     必然 CONFIRMATION_REQUIRED（owner 2026-11-19 live 实测：写不进去 P0）。
+       *     **一次性/防重放由执行层自己保证**（契约 ConfirmationPrompt 语义），宿主不再
+       *     在透传侧截流；每条非只读调用都带同一句柄，执行层只消费一次、其余拒绝。
        *   · 宿主不解释句柄、不判断用户是否在确认——语义归执行层（它校验句柄与提案绑定）。
        */
       const pendingConfirmation = task.pendingConfirmation;
-      let confirmationPassed = false;
       const workerRunJsTurn = createWorkerRunJsTurn({
         ...(options.runJsExecutor === undefined ? {} : { executor: options.runJsExecutor }),
         // 可信身份取自任务行（底账持有），不取模型参数。
@@ -3269,9 +3366,9 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           execute: async (dispatchKey) => {
             // requestId 由宿主生成、每次调用换号（只作追踪）；dispatchKey 是操作身份，不换。
             const requestId = `req_${randomUUID()}`;
-            // S3：待确认提案的句柄随本回合首条非只读执行透传（一轮只发一次）。
-            const confirmation = pendingConfirmation === undefined || confirmationPassed
-              || readOnlyOperations.has(operation)
+            // S3：待确认提案的句柄随本回合每条非只读执行透传（P0：不再一轮只发一次——
+            // prepare 先消耗句柄会让后续 commit 拿不到；一次性/防重放归执行层自己保证）。
+            const confirmation = pendingConfirmation === undefined || readOnlyOperations.has(operation)
               ? undefined
               : { handle: pendingConfirmation.handle, userText: task.answer ?? '' };
             let outcome: ExecutionOutcome;
@@ -3295,9 +3392,8 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
               }
               throw error;
             }
-            // 执行层已收到本次透传：句柄不再复用（是否真的被接受由执行层回执说明；
-            // 宿主不判断确认语义）。抛错时不算发过——下一条非只读调用仍可带同一句柄。
-            if (confirmation !== undefined) confirmationPassed = true;
+            // 执行层已收到本次透传：句柄是否真的被接受由执行层回执说明（一次性/防重放
+            // 归执行层，宿主不拦截复用）；宿主不判断确认语义。
             // 取消后到达的回执不落执行事实：任务已按取消处置，迟到的成功不得冒充本回合结果。
             if (signal.aborted) throw abortError();
             // 契约 v4：accepted 只允许出现在声明 long_running 的 operation 上。未声明却返回 =
@@ -3351,6 +3447,18 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           ...(options.onExecutionResultOversizeUnhandled === undefined
             ? {}
             : { onUnhandled: options.onExecutionResultOversizeUnhandled }),
+          // 失败/拒绝归类只进日志（原始码与原文不进 Worker 可见投影）。
+          ...(options.onExecutionEvent === undefined
+            ? {}
+            : {
+              onClassified: (classified) => options.onExecutionEvent?.({
+                event: 'execution_failure_classified',
+                operation,
+                code: classified.code,
+                status: run.outcome.status as 'failed' | 'refused',
+                kind: classified.kind,
+              }),
+            }),
         });
       };
 
@@ -3394,6 +3502,11 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
               : { files: delegationFiles, fileManifestHint: BACKGROUND_FILE_MANIFEST_HINT }),
             // waiting_user 续跑回合：用户补答必须随委派交给执行端（新 Worker 没有上一回合转录）。
             ...(task.answer === undefined ? {} : { answer: task.answer }),
+            // 写确认续跑（P0）：有底账提案且用户已表态 → 机械事实随委派交给 Worker，
+            // 让它直接提交、不重新生成提案（摘要可展示；handle 不进委派文本）。
+            ...(pendingConfirmation === undefined
+              ? {}
+              : { confirmationFact: renderConfirmationResumeFact(pendingConfirmation) }),
             // 长任务续跑：wait 终态（已登记文件只有 fileId）原样注入本次委派。
             ...(resumedOperation === undefined || resumedOutcome === undefined
               ? {}

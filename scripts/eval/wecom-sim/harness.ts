@@ -715,16 +715,20 @@ export function describeOutcome(outcome: Record<string, unknown>): string {
     return `执行层要求补充输入：${missing.length > 0 ? missing.join('、') : (error.message ?? '未说明')}。`;
   }
   if (status === 'refused') {
-    return `没有权限读取 ${name}（执行层拒绝，${error.code ?? 'GATE_REFUSE'}）；请联系管理员开通权限，这次没有取得任何数据。`;
+    // 模型可见面收口（2026-11-19）：refused 投影只带 kind + note（无原始码/原文）。
+    // 脚本如实转述用户话术——用户不需要、也不该看到 GATE_REFUSE 这类内部码。
+    const note = typeof outcome['note'] === 'string' && outcome['note'] !== ''
+      ? outcome['note']
+      : '这件事没权限，这次没有取得任何数据。';
+    return note;
   }
   if (status === 'failed') {
-    if (error.code === 'QUERY_REQUIRED') {
-      return '执行层要求先给集合：请告诉我要查哪个集合（比如 documents、alpha、beta），我再查。';
-    }
-    if (error.code === 'WHERE_INVALID') {
-      return `${name} 不能这样筛：${error.message ?? ''} 请改用 ${error.code === 'WHERE_INVALID' ? '按客户（华远贸易/明达物流/新程科技）' : '正确参数'}再查，这次没有取得任何数据。`;
-    }
-    return `${name} 读取失败（执行层 ${error.code ?? '失败'}），这次没有取得任何数据，也没有条数或金额。`;
+    // 同上：failed 投影只带 kind + note。kind 由执行层码归类（业务语义），note 是用户
+    // 话术；模型与用户都不再见原始码与原文（原文只进 execution_failure_classified 日志）。
+    const note = typeof outcome['note'] === 'string' && outcome['note'] !== ''
+      ? outcome['note']
+      : '这次没办成，没有取得任何数据。';
+    return note;
   }
   return `执行层返回了未预期的形态：${JSON.stringify(outcome).slice(0, 200)}`;
 }

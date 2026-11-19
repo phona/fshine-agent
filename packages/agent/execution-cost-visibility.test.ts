@@ -135,7 +135,7 @@ describe('A1 投影：执行层自述的成本提示进能力快照', () => {
   });
 });
 
-describe('A1 渲染：Worker 能力快照里的成本事实与中性说明', () => {
+describe('A1 渲染：Worker 能力快照不含内部度量（2026-11-19 模型可见面收口）', () => {
   const MANIFEST: CapabilityManifest = {
     contractVersion: 3,
     operations: [
@@ -144,19 +144,30 @@ describe('A1 渲染：Worker 能力快照里的成本事实与中性说明', () 
     ],
   };
 
-  it('快照 JSON 块里能看到估时与重量', () => {
+  it('快照 JSON 块不再出现估时与重量（内部度量只进宿主接收/日志，不进委派）', () => {
     const text = renderWorkerDelegation({ task: '查一下 alpha', manifest: MANIFEST });
-    expect(text).toContain('"estimatedSeconds": 10');
-    expect(text).toContain('"weight": 2');
-    expect(text).toContain('"weight": 20');
+    // 口径变更（owner 2026-11-19 抽象泄露）：weight/est_seconds 是内部度量，模型拿它
+    // 只会向用户承诺「单次估时约半小时」这类时长——已从委派清单去掉（只留调用所需）。
+    expect(text).not.toContain('"estimatedSeconds"');
+    expect(text).not.toContain('"weight"');
+    // 声明仍然原样交给装配面：快照 JSON 是委派投影的输入，不在委派输出里出现度量。
+    expect(manifestHasMetrics(MANIFEST)).toBe(true);
   });
 
-  it('快照标题下有那句中性事实（成本陈述，不是阈值规则）', () => {
+  it('快照标题下保留中性事实（成本陈述，不是阈值规则；不再宣称每个 operation 标注估时重量）', () => {
     const text = renderWorkerDelegation({ task: '查一下 alpha', manifest: MANIFEST });
     expect(text).toContain('## 能力快照');
     expect(text).toContain(WORKER_SNAPSHOT_COST_NOTE);
-    // 中性事实的原文（ask 指定措辞）：只陈述 N 次执行 = N 倍等待/失败面，不给阈值。
+    // 中性事实原文：只陈述 N 次执行 = N 倍等待/失败面，不给阈值、不承诺估时。
     expect(WORKER_SNAPSHOT_COST_NOTE).toContain('一次任务发起 N 次执行');
-    expect(WORKER_SNAPSHOT_COST_NOTE).toContain('等待与失败面按 N 倍增长');
+    expect(WORKER_SNAPSHOT_COST_NOTE).toContain('控制执行次数');
+    expect(WORKER_SNAPSHOT_COST_NOTE).not.toContain('估时');
+    expect(WORKER_SNAPSHOT_COST_NOTE).not.toContain('重量');
   });
 });
+
+/** 快照清单是否仍带内部度量（原样输入断言：投影发生在 renderWorkerDelegation 内）。 */
+function manifestHasMetrics(manifest: CapabilityManifest): boolean {
+  return manifest.operations.some((operation) =>
+    operation.weight !== undefined || operation.estimatedSeconds !== undefined);
+}

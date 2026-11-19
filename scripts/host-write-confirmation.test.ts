@@ -525,12 +525,16 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
         report: commitReport,
       });
       expect(turn3.executions.map((execution) => execution.status)).toEqual(['refused']);
+      // 2026-11-19 模型可见面收口：refused 投影不带原始码（CONFIRMATION_USED 只进底账
+      // execution.error 与日志），模型只见 kind + note（表外码 → executor_failed）。
       const refused = fx.worker.toolResults[fx.worker.toolResults.length - 1] as {
         status?: string;
-        error?: { code?: string };
+        kind?: string;
+        error?: unknown;
       };
       expect(refused.status).toBe('refused');
-      expect(refused.error?.code).toBe('CONFIRMATION_USED');
+      expect(refused.error).toBeUndefined();
+      expect(refused.kind).toBe('executor_failed');
       expect((await queryData(fx.stateDir)).count).toBe(4);
     } finally {
       fx.close();
@@ -572,6 +576,8 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
       });
       const stolen = sessionB.worker.toolResults[sessionB.worker.toolResults.length - 1] as {
         status?: string;
+        kind?: string;
+        note?: string;
         error?: unknown;
       };
       // B 再拿一个不存在的句柄：话术必须与上一条完全一致（不泄漏该句柄在别处存在）。
@@ -584,12 +590,19 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
       });
       const unknown = sessionB.worker.toolResults[sessionB.worker.toolResults.length - 1] as {
         status?: string;
+        kind?: string;
+        note?: string;
         error?: unknown;
       };
       expect(stolen.status).toBe('refused');
       expect(unknown.status).toBe('refused');
-      expect(stolen.error).toEqual(unknown.error);
-      expect((stolen.error as { code?: string }).code).toBe('CONFIRMATION_NOT_FOUND');
+      // 2026-11-19 模型可见面收口：refused 投影不带原始码（error 不下放）；越权与不存在
+      // 在模型/用户可见面完全一致（kind/note 同值）——存在性不泄露的断言因此更强。
+      expect(stolen.error).toBeUndefined();
+      expect(unknown.error).toBeUndefined();
+      expect(stolen.kind).toBe(unknown.kind);
+      expect(stolen.note).toBe(unknown.note);
+      expect(stolen).toEqual(unknown);
       // 两个会话都没有被写；A 的提案也没有因越权尝试被消费。
       expect((await queryData(sessionA.stateDir)).count).toBe(2);
       expect((await queryData(sessionB.stateDir)).count).toBe(2);
@@ -626,15 +639,17 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
         report: commitReport,
       });
       expect(turn2.executions.map((execution) => execution.status)).toEqual(['refused']);
-      // 回复来自执行事实：明确带过期事实（执行层 message 原文，模型如实转述）。
-      expect(turn2.reply).toMatch(/expired|过期/i);
+      // 2026-11-19 模型可见面收口：refused 投影不带原始码/原文（CONFIRMATION_EXPIRED 与
+      // 'expired' 原文只进底账与日志）；模型只见 kind + note。底账执行事实仍是 refused。
+      expect(turn2.executions.map((execution) => execution.status)).toEqual(['refused']);
       const refused = fx.worker.toolResults[fx.worker.toolResults.length - 1] as {
         status?: string;
-        error?: { code?: string; message?: string };
+        kind?: string;
+        error?: unknown;
       };
       expect(refused.status).toBe('refused');
-      expect(refused.error?.code).toBe('CONFIRMATION_EXPIRED');
-      expect(refused.error?.message).toContain('expired');
+      expect(refused.error).toBeUndefined();
+      expect(refused.kind).toBe('executor_failed');
       expect((await queryData(fx.stateDir)).count).toBe(2);
     } finally {
       fx.close();
@@ -713,12 +728,16 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
         report: commitReport,
       });
       // 执行层如实返回 failed（读回 1/2）；宿主不得把它变成 completed。
+      // 2026-11-19 模型可见面收口：failed 投影不带原始码（CONFIRMATION_READBACK_SHORT
+      // 只进底账 execution.error 与日志），模型只见 kind + note（表外码 → executor_failed）。
       const committed = fx.worker.toolResults[fx.worker.toolResults.length - 1] as {
         status?: string;
-        error?: { code?: string; message?: string };
+        kind?: string;
+        error?: unknown;
       };
       expect(committed.status).toBe('failed');
-      expect(committed.error?.code).toBe('CONFIRMATION_READBACK_SHORT');
+      expect(committed.error).toBeUndefined();
+      expect(committed.kind).toBe('executor_failed');
       expect(turn2.executions.map((execution) => execution.status)).toEqual(['failed']);
       // 用户可见回复来自执行事实：失败/待核对，不含成功话术。
       expect(turn2.reply).toContain('失败');

@@ -172,16 +172,19 @@ async function runCase(options: {
 }
 
 describe('主动推送：后台任务的失败与等待（用户不必下次开口才发现）', () => {
-  it('① 后台失败 → 主动一条人话（业务名 + 没办成），不冒充成功', async () => {
+  it('① 后台失败 → 主动一句人话（话术模板，不含 Worker 原文/内部词），不冒充成功', async () => {
+    // 口径变更（2026-11-19）：失败主动告知由失败投递分支直发，用户文本 = failureMessageFor
+    // 模板（kind 归类自执行事实的 code；假执行器不落执行事实 → 取不到 → executor_failed）。
+    // **不再拼接业务名**——模板话术是宿主契约，不把执行层原文/内部形态带给用户。
     const { server, delivery } = await runCase({ outcome: () => ({ kind: 'failed', reason: '执行层拒绝' }) });
     try {
       await server.handler(incoming('查 documents W202611'));
       await vi.waitFor(() => expect(delivery.pushed).toHaveLength(1));
       expect(delivery.pushed[0]!.route).toEqual({ channel: 'wecom', conversationId: 'conv-a' });
-      expect(delivery.pushed[0]!.text).toContain('没办成');
-      expect(delivery.pushed[0]!.text).toContain('查 documents W202611');
-      // 用户文本里不出现内部形态
+      expect(delivery.pushed[0]!.text).toBe('没办成。再试一次，还是先放着？');
+      // 用户文本里不出现内部形态（执行层原文「拒绝」与原始 reason 都不进文本）。
       expect(delivery.pushed[0]!.text).not.toMatch(/task_|request_|uuid|[0-9a-f]{8}-[0-9a-f]{4}/);
+      expect(delivery.pushed[0]!.text).not.toContain('执行层');
     } finally {
       server.close();
     }
@@ -201,16 +204,19 @@ describe('主动推送：后台任务的失败与等待（用户不必下次开�
     }
   });
 
-  it('③ 后台完成 → 零推送（结果正文只发一次，由完成投递负责）', async () => {
+  it('③ 后台完成 → 恰一次完成投递（带任务身份头），无第二条推送', async () => {
+    // 2026-11-19：完成消息带「<业务名>」办完了：身份头（业务名 = 底账机械回落值）。
+    // 断言没有第二条：改期到回合后的 chatSink 推送（完成类本来就该零推）在这段安静期内落地。
     const { server, delivery } = await runCase({ outcome: () => ({ kind: 'completed', resultText: 'W202611：documents 共 3 条。' }) });
     try {
       await server.handler(incoming('查 documents W202611'));
-      // 完成正文确实送达（证明链路是通的，不是整体没投）
+      // 完成正文确实送达（证明链路是通的，不是整体没投）。
       await vi.waitFor(() => expect(delivery.pushed.some((p) => p.text.includes('documents 共 3 条'))).toBe(true));
-      // 断言「没有第二条」需要一段安静期：改期到回合后的推送在这段时间内会落地
+      // 恰一条：完成投递（带身份头），没有 chatSink 的「办完了」第二条。
       await new Promise((resolve) => setTimeout(resolve, 150));
-      const notices = delivery.pushed.filter((p) => p.text.includes('办完了'));
-      expect(notices).toEqual([]);
+      expect(delivery.pushed).toHaveLength(1);
+      expect(delivery.pushed[0]!.text).toMatch(/^「[^」]+」办完了：/);
+      expect(delivery.pushed[0]!.text).toContain('documents 共 3 条');
     } finally {
       server.close();
     }

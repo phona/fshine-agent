@@ -87,8 +87,11 @@ describe('C 组·失败与边界（W-08～W-12）', () => {
       task: '查询 faulty-one 集合 W1 的记录',
       args: { '--collection': 'faulty-one', '--window': 'W1' },
       assert(reply, executions) {
-        expect(reply).toContain('读取失败');
-        expect(reply).toContain('COLLECTION_FAULT');
+        // 口径变更（2026-11-19 模型可见面收口）：failed 投影只带 kind+note，模型/用户不再
+        // 见原始码（COLLECTION_FAULT 只进 execution_failure_classified 日志）。note 是
+        // executor_failed 的用户话术（没办成），如实、且不假装成功。
+        expect(reply).toContain('没办成');
+        expect(reply).not.toContain('COLLECTION_FAULT');
         // 不假装成功：没有「共 N 条」式结论，没有具体数值。
         expect(reply).not.toMatch(/共 \d+ 条/);
         expect(reply).not.toMatch(/\d{3,}/);
@@ -98,15 +101,17 @@ describe('C 组·失败与边界（W-08～W-12）', () => {
     });
   }, 60_000);
 
-  it('W-11 denied-one：真实 GATE_REFUSE → 如实转述「没有权限」，不猜数据', async () => {
+  it('W-11 denied-one：真实 GATE_REFUSE → 如实转述「没权限」，不猜数据', async () => {
     await runQueryCase({
       label: 'w11',
       userText: '查一下 denied-one 集合 W1',
       task: '查询 denied-one 集合 W1 的记录',
       args: { '--collection': 'denied-one', '--window': 'W1' },
       assert(reply, executions) {
-        expect(reply).toContain('没有权限');
-        expect(reply).toContain('GATE_REFUSE');
+        // 口径变更（2026-11-19 模型可见面收口）：refused 投影只带 kind+note；原始码
+        // GATE_REFUSE 不进用户文本（图「没有权限」语义由 denied 话术承载）。
+        expect(reply).toContain('没权限');
+        expect(reply).not.toContain('GATE_REFUSE');
         expect(reply).not.toMatch(/\d{3,}/);
         // 真实拒绝（refused），不是 failed 也不是 completed。
         expect(executions).toHaveLength(1);
@@ -115,18 +120,21 @@ describe('C 组·失败与边界（W-08～W-12）', () => {
     });
   }, 60_000);
 
-  it('W-12 finance-invoices 给窗口：真实 WHERE_INVALID → 如实说明只能按客户筛，不硬编数', async () => {
+  it('W-12 finance-invoices 给窗口：真实 WHERE_INVALID → 如实转述条件不行，不硬编数', async () => {
     await runQueryCase({
       label: 'w12',
       userText: 'finance-invoices 集合 2026-10 窗口的数据给我',
       task: '查询 finance-invoices 集合 2026-10 窗口的数据',
       args: { '--collection': 'finance-invoices', '--window': '2026-10' },
       assert(reply, executions) {
-        // 可筛值来自执行层真实报错（维度声明：华远/明达/新程）。
-        expect(reply).toContain('华远');
-        expect(reply).toContain('明达');
-        expect(reply).toContain('新程');
-        // 不硬编一个数：没有条数/金额结论；去掉用户给的窗口值后，正文没有其它多位数字。
+        // 口径变更（2026-11-19 模型可见面收口）：可筛值（华远/明达/新程）此前来自执行层
+        // 原文（error.message 逐字透传 = 抽象泄露源头之一）；收口后 failed 投影只带
+        // invalid_input 的 note。如实说条件不行、给用户可执行的下一步，不硬编一个数。
+        expect(reply).toContain('条件不行');
+        expect(reply).not.toContain('华远');
+        expect(reply).not.toContain('明达');
+        expect(reply).not.toContain('新程');
+        // 不硬编一个数：去掉用户给的窗口值后，正文没有其它多位数字。
         expect(reply).not.toMatch(/共 \d+ 条/);
         expect(reply.replace('2026-10', '')).not.toMatch(/\d{3,}/);
         expect(executions).toHaveLength(1);
