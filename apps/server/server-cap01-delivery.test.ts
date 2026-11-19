@@ -408,17 +408,22 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     }
   });
 
-  it('④ 只有文件、正文为空 → 不判回合失败，投递照常发生（live 成功记 sent）', async () => {
+  it('④ 交办 + 正文为空 → 不算回合失败：零终帧、任务照常建、完成投递照常到达', async () => {
     const { port, calls, texts } = livePort();
     const { server, logs } = await makeFixture({
-      // Main 正文为空（只交办）：受理回执语由 Main 自己给；产物由后台 Worker 完成投递。
+      // Main 正文为空：agent.md 要求交办后不复述过程话，模型照做时该回合就是没有正文。
       steps: [{ execCalls: [TASK_RUN_CALL], text: '' }],
       workerSteps: [WORKER_RUN_JS_STEP],
       port,
     });
     try {
-      // 后台派发下主回合正文为空且无本回合文件 → 按既有判据失败（判定的是**主回合**，不是任务）。
-      await expect(server.handler(incoming('m-empty', '发文件'))).rejects.toThrow('本回合未产出可用回复');
+      // 交办了任务 = 本回合产出了「东西」：空正文不是回合失败；空就是空，不投帧。
+      const reply = await server.handler(incoming('m-empty', '发文件'));
+      expect(reply).toBe('');
+      // 任务照常建（message_done 带 taskIds 机械事实）。
+      const done = logs.find((line) => line['event'] === 'message_done') as Record<string, unknown> | undefined;
+      expect(done).toBeDefined();
+      expect((done!['taskIds'] as unknown[]).length).toBe(1);
       // 投递面仍收到文件字节（后台任务完成回调，与前台同一交付面）。
       await vi.waitFor(() => {
         expect(calls).toHaveLength(1);
@@ -430,7 +435,7 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
       await vi.waitFor(() => {
         expect(logs.some((line) => line['event'] === 'file_delivery' && line['status'] === 'sent')).toBe(true);
       });
-      // 文本结果照常送达（文件过滤不影响结果正文）。
+      // 结果正文照常送达（文件过滤不影响结果文本）。
       await vi.waitFor(() => {
         expect(texts).toHaveLength(1);
       });
@@ -440,7 +445,7 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     }
   });
 
-  it('④b 正文空且无文件 → 仍按既有「回合失败」处理（分支另一侧回归）', async () => {
+  it('④b 一无所有（无正文、无文件、无交办、无执行事实）→ 仍判回合失败（判据不收紧过头）', async () => {
     const { server, logs } = await makeFixture({ steps: [{ text: '' }] });
     try {
       await expect(server.handler(incoming('m-blank', '说点什么'))).rejects.toThrow('本回合未产出可用回复');
