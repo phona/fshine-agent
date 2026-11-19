@@ -62,6 +62,7 @@
 - **决定**：**本轮不修改语义**（不为无消费者的字段新增宿主行为）。当前口径——首个非 completed 判负（`[failed, completed]` 记 failed）、`needs_input` 并入 failed——以表征测试钉住：`packages/agent/task-status-boundary.test.ts`。
 - **复评触发条件**（出现任一）：ask 打印任务状态 / 状态查询切片 / 后台投递 / 判定器改用 task.status。届时先按用户可见性裁定，再改语义并同步更新该测试与本条。
 - **复评登记（2026-11-14，P1 任务查看切片）**：触发条件之一「状态查询切片」已达成——`npm run tasks` 列表/详情成为 `task.status` 的首个用户可见消费面。**裁定：保持既有语义**（P1 owner 规格：completed/failed/unexecuted 复用 `judgeReportedTask`，不新造状态）。实现口径：查看侧只读消费注册表写入时已判定的终态并把三态映射为中文词（已完成/失败/未执行），**不在读时重算**（fail() 路径零执行与 running 行会被重算错报）；表征测试 `packages/agent/task-status-boundary.test.ts` 断言零改动。
+- **复评登记（2026-11-19，owner 修法；真模型写闭环实跑缺陷）**：**改语义**——终局以**末次决定性结果**为准（`[failed, completed]` → completed；`[completed, failed]` 仍 failed；「任一非 completed 判负」废止）。根因：确认回合里「先参数错（执行层 INVALID_RECORDS，retryable:true）、后改对成功」的写被整体判 failed——数据其实已落库（句柄被消耗）、用户却收到「没办成…再试一次」（重复写风险），Worker 的成功读回汇报被丢弃（`result_text=null`）。实跑读数（分支 `fix/write-outcome-last-attempt`，`npm run eval:write-loop`）：修复前一次 6/9（C7/C8/C9 红、读回 count=4）、修复后一次 9/9；确定性用例与反向绊线（改回「取第一个非 completed」→ 主形状必红）见 `packages/agent/write-outcome-last-attempt.test.ts`。后台单回合执行器同改且更细：写操作以**最后一条非只读执行**为准（它知道只读集合）；inline `judgeReportedTask` 只拿到执行事实投影，以**末条执行事实**为准（局限如实登记在函数注释）。`result_unknown` 语义未动。
 
 ### 17.3 Execution Contract 残余：CLI flag 名称泄漏
 

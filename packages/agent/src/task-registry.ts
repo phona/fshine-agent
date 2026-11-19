@@ -156,9 +156,17 @@ export interface ExecutedFact {
 /**
  * 完成判定（内存 / SQLite 共用，两实现逐项一致）：只看已记录的执行事实，不嗅探汇报文本。
  *   · 零条执行 → unexecuted（Worker 汇报了但没向执行层发起任何调用）；
- *   · 全部 completed → completed；
- *   · 任一非 completed → failed，failureReason 机械合成（取首个非 completed 的
- *     operation/status/error.message 原样；无 error.message 时以状态收尾）。
+ *   · **末条执行** completed → completed；
+ *   · 末条执行非 completed → failed，failureReason 机械合成（取**末条**的 operation/status/
+ *     error.message 原样；无 error.message 时以状态收尾）。
+ * 为什么是「末条」而不是「首个非 completed」（2026-11-19 owner 修法）：执行层的参数形态反馈
+ * 回路本就鼓励模型「改对参数再试一次」；改对后的成功是末次决定性结果，写已经落库，不得被前序
+ * 失败整体判 failed（真模型写闭环实跑 5 次复现 2 次：写落库却告知失败并引导重试 → 重复写风险）。
+ * 前序失败逐条保留在 executions 里（审计可查、可追溯），只是不改写终局。末条仍是失败 → 照旧
+ * failed（不放宽；「只要有一次成功过就算成功」的万金油不成立）。result_unknown 不是成功，
+ * 也不属于本判定的收窄面。
+ * 局限（如实登记）：inline 判定只拿到执行事实投影（无只读集合），无法区分读写，因此以**末条
+ * 执行事实**为准；后台单回合执行器（execution-runtime）知道只读集合，以「末条非只读」为准。
  * 为什么不是无条件 completed：Worker 以汇报结束不等于执行层成功——「执行层实际成功 /
  * 拒绝或失败 / 未发起执行」必须在顶层 status 上可区分（B 类如实交付）。
  *
@@ -169,20 +177,20 @@ export function judgeReportedTask(executions: readonly ExecutedFact[]): {
   status: 'completed' | 'failed' | 'unexecuted';
   failureReason?: string;
 } {
-  if (executions.length === 0) {
+  const decisive = executions[executions.length - 1];
+  if (decisive === undefined) {
     return {
       status: 'unexecuted',
       failureReason: '未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。',
     };
   }
-  const unsuccessful = executions.find((execution) => execution.status !== 'completed');
-  if (unsuccessful === undefined) return { status: 'completed' };
-  const message = unsuccessful.error?.message ?? '';
+  if (decisive.status === 'completed') return { status: 'completed' };
+  const message = decisive.error?.message ?? '';
   return {
     status: 'failed',
     failureReason: message === ''
-      ? `执行层未成功：${unsuccessful.operation} 返回 ${unsuccessful.status}。`
-      : `执行层未成功：${unsuccessful.operation} 返回 ${unsuccessful.status}：${message}`,
+      ? `执行层未成功：${decisive.operation} 返回 ${decisive.status}。`
+      : `执行层未成功：${decisive.operation} 返回 ${decisive.status}：${message}`,
   };
 }
 

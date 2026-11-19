@@ -157,7 +157,9 @@ describe('tasks：状态词表与 judgeReportedTask 一致', () => {
       [[execution('failed', '执行层调用超时。')], '失败'],
       [[execution('refused', '执行层策略拒绝。')], '失败'],
       [[execution('needs_input')], '失败'],
-      [[execution('failed', '第一次参数错误。'), execution('completed')], '失败'],
+      // 2026-11-19 修订（末次决定性结果为准；见 task-status-boundary.test.ts 同批复评记录）：
+      // [failed, completed] 不再判失败——改对参数后的成功是末次决定性结果，写已经落库。
+      [[execution('failed', '第一次参数错误。'), execution('completed')], '已完成'],
       [[execution('completed'), execution('failed', '第二次超时。')], '失败'],
     ];
     for (const [executions, expected] of matrix) {
