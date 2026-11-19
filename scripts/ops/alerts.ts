@@ -226,7 +226,12 @@ export function ledgerFacts(dbPath: string): { facts: AlertFact[]; note?: string
         });
       }
       for (const execution of stored.executions) {
-        const detail: NonNullable<AlertFact['detail']> = { operation: execution.operation };
+        const detail: NonNullable<AlertFact['detail']> = {
+          operation: execution.operation,
+          // 结局状态进投影：retry_storm 的 (operation, 错误码) 计数只认失败类结局，
+          // 成功/待确认/受理等合法重复不算（2026-11-19 真部署假阳性修复）。
+          status: execution.status,
+        };
         const err = execution.error;
         if (err !== null && typeof err === 'object' && !Array.isArray(err)) {
           const e = err as Record<string, unknown>;
