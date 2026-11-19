@@ -3885,8 +3885,27 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
        * （GATE_REFUSE / COLLECTION_NOT_FOUND / …）时返回 undefined，仍按现状判 failed。
        */
       const selfConfirmBlockedRoundOf = (): Extract<TaskExecutionOutcome, { kind: 'needs_confirmation' }> | undefined => {
-        const proposal = [...recorded].reverse().find((entry) => entry.outcome.status === 'needs_confirmation');
+        // 提案取**最后一个**（与下方终局同一把尺：末次决定性结果说了算）——它之后有没有成功写，
+        // 决定这个提案还算不算本回合的结局。
+        let proposalIndex = -1;
+        for (let index = recorded.length - 1; index >= 0; index -= 1) {
+          if (recorded[index]?.outcome.status === 'needs_confirmation') { proposalIndex = index; break; }
+        }
+        const proposal = proposalIndex < 0 ? undefined : recorded[proposalIndex];
         if (proposal === undefined) return undefined;
+        // 本条归类的前提是「同回合**没有句柄**」（模型自己 prepare 完又自己 commit，用户从没被问到
+        // 确认）。而本回合若带用户确认句柄（pendingConfirmation 只在 runner.confirm 注入）且最后一条
+        // 非只读执行已经 **completed**，那说明用户确认后的写真的发生了（Worker 重新 prepare 后又带
+        // 句柄提交成功就是这一形状）——不得再报「等你确认」（用户会去确认一次已经做完的写，句柄已
+        // 消耗 → 会被执行层拒 → 永远停在等待）。结局交下方终局判定按 lastWritable 收尾。
+        // 非确认回合不进这条：那里 completed 的非只读执行也可能是「模型误用历史提案协议造了个提案
+        // 对象」，不能据此宣称写成功（有提案 + 容忍码失败 → 仍 waiting_user，见
+        // adversarial-worker / model-visible-operations 的冻结用例）。
+        if (pendingConfirmation !== undefined
+          && lastWritable !== undefined
+          && lastWritable.outcome.status === 'completed') {
+          return undefined;
+        }
         // 「不算真实失败」的码见 SAME_TURN_TOLERATED_FAILURE_CODES：同回合被挡（CONFIRMATION_REQUIRED）
         // 与模型误用历史提案协议（PROPOSAL_* / CALL_REFUSE）都不算真失败；其余失败仍按 failed。
         const realFailure = recorded.find(
@@ -3917,9 +3936,22 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         }
         return { kind: 'failed', reason: '未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。' };
       }
-      const unsuccessful = recorded.find((entry) => entry.outcome.status !== 'completed');
-      if (unsuccessful !== undefined) {
-        const { operation, outcome } = unsuccessful;
+      /**
+       * 终局 = **最后一次决定性结果**（2026-11-19 owner 修法；真模型写闭环实跑缺陷）。
+       * 写操作以**最后一条非只读执行**为准（纯只读回合以最后一条执行为准）——原先取「第一个
+       * 非 completed」会把「同回合里先参数错、后改对成功」的写整体判 failed：数据其实已经落库
+       * （句柄被消耗），却告诉用户「没办成」并引导重试（重复写风险；实跑 5 次复现 2 次）。
+       * 前序失败逐条留在 executions 里（审计可查、可追溯），只是不改写终局 status/failure_reason；
+       * 末次仍是失败（此后没有成功的写——后面一条成功的**只读**不算）→ 照旧 failed（不放宽）。
+       * result_unknown 已在上方（unresolved）先行返回，不受本判定影响。
+       */
+      const decisive = lastWritable ?? recorded[recorded.length - 1];
+      if (decisive === undefined) {
+        // recorded 为空已在上方拦下；此处不可达（防御性兜底，话术与「未发起执行」同源）。
+        return { kind: 'failed', reason: '未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。' };
+      }
+      if (decisive.outcome.status !== 'completed') {
+        const { operation, outcome } = decisive;
         if (outcome.status === 'failed' || outcome.status === 'refused') {
           const message = outcome.error.message ?? '';
           return {
