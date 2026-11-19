@@ -1,5 +1,5 @@
 /**
- * I 组·体验交互（I-1～I-8）· 自动用例（真装配链，见 ./harness.ts）。
+ * I 组·体验交互（I-1～I-6、I-8；I-7 未立编号）· 自动用例（真装配链，见 ./harness.ts）。
  *
  * 这组把「交互契约」（docs/product/interaction-contract.md 五条：①不打扰 ②有预期
  * ③可查可接管 ④结论有据 ⑤分工透明）里**能机械钉住**的部分变成确定性断言；
@@ -70,7 +70,7 @@ function hasWholeNumber(text: string, value: string): boolean {
   return new RegExp(`(?<!\\d)${value}(?!\\d)`).test(text);
 }
 
-describe('I 组·体验交互（I-1～I-8，自动）', () => {
+describe('I 组·体验交互（I-1～I-6、I-8，自动；I-7 未立编号）', () => {
   it('I-1 一条气泡：短活同回合给结果，零受理回执（钉：①不打扰 / ②有预期）', async () => {
     // async 装配 + 缺省窗口（8000ms）：快查询在窗口内落定 → 同回合把结果交给用户。
     const sim = await startWecomSim({ label: 'i1', taskDispatch: 'async' });
@@ -341,9 +341,13 @@ describe('I 组·体验交互（I-1～I-8，自动）', () => {
   }, 120_000);
 
   it.todo('I-8 重启重投（同 messageId 重投 → 回放同一句、零新执行）：'
-    + 'wecom-sim 每夹具 mkdtemp 新建独立底账、不暴露「同 dbPath 重建 server」的缝，'
-    + 'sim 面做不了（不硬凑）；跨重启入站幂等已由 apps/server/server-inbound-idempotency.test.ts 单测覆盖。');
+    + '此 todo 理由仍成立——wecom-sim 每夹具 mkdtemp 新建独立底账、不暴露「同 dbPath 重建 server」'
+    + '的缝，sim 面做不了（不硬凑）；跨重启入站幂等（底账 inbound_messages 为唯一判据）已由'
+    + ' apps/server/server-inbound-idempotency.test.ts 4/4 单测覆盖（含关 server 同 dbPath 重建重投）。');
 
   it.todo('C 组·写确认（提案 → 确认 → 真写入 → 读回 4 条 + 不重复提案）：'
-    + '等确认句柄轨合流后补（本组不加桩实现，避免第二套装配）。');
+    + '原等待理由「确认句柄轨合流」已过期（句柄轨 7eb7cce5 已是本仓祖先）；写闭环已在'
+    + ' cases-f-write.test.ts 的 F 组渠道级用例走完（W-22 提案零写入 / W-23 确认写入读回 4 条 /'
+    + ' W-24 再确认确定性拒绝，含不重复提案与不重复写入）。本组不重复造第二套装配，'
+    + '故保留 todo 作 C 组编号占位，实际判据以 F 组为准。');
 });
