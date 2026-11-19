@@ -15,6 +15,7 @@
     "cleanup:runs": "node --env-file-if-exists=.env --import tsx scripts/cleanup-runs.ts",
     "eval:user": "node --env-file-if-exists=.env --import tsx scripts/eval/convergence-r1/runner.ts",
     "eval:write-loop": "node --env-file-if-exists=.env --import tsx scripts/eval/real/write-loop.ts",
+    "eval:write-loop-scenarios": "node --env-file-if-exists=.env --import tsx scripts/eval/real/write-loop-scenarios.ts",
     "eval:cap01": "node --import tsx scripts/eval/cap01/run-all.ts",
     "eval:bizprobe": "node --env-file-if-exists=.env --import tsx scripts/eval/business-e2e/run.ts",
     "eval:bizbatch2": "node --env-file-if-exists=.env --import tsx scripts/eval/business-e2e/experiments/run.ts",
