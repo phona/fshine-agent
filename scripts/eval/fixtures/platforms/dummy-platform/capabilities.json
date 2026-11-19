@@ -590,6 +590,7 @@
           {
             "name": "payload",
             "required": true,
+            "payload": true,
             "desc": "proposal payload file (opaque to the host)"
           }
         ],
@@ -807,6 +808,7 @@
           {
             "name": "payload",
             "required": true,
+            "payload": true,
             "desc": "proposal payload file (opaque to the host)"
           }
         ],

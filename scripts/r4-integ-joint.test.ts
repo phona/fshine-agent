@@ -234,14 +234,11 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
       expect(turn.taskIds).toHaveLength(1);
       const taskId = turn.taskIds[0]!;
       const accepted = records[0]!.execResults[0] as Record<string, unknown>;
-      // 受理回执（预期契约 2026-11-18）：谁办 + 办完发你，不带工单编号；status = 受理后实时事实
+      // 受理事实（owner 2026-11-19：交办不再给固定回执话术）：只给机械事实，无 notice、无编号
       expect(accepted).toMatchObject({ taskId, status: 'running', accepted: true });
       expect(accepted).not.toHaveProperty('taskNo');
+      expect(accepted).not.toHaveProperty('notice');
       expect(String(accepted['name']).length).toBeGreaterThan(0);
-      const notice = String(accepted['notice']);
-      expect(notice).toContain('这个我来办');
-      expect(notice).toContain('办完发你');
-      expect(notice).not.toContain('#');
       // 受理后已触发派发：行进入 running，尚未终态
       expect(assembled.taskRegistry.get(taskId, SCOPE_A).status).toBe('running');
       // 放行后台回合 → 收尾 completed

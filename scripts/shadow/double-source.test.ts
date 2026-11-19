@@ -132,14 +132,12 @@ describe('Shadow 双源对照 ①：任务链语义等价（成功链路）', ()
     const a = await chainOn('dummy', SUCCESS_SCENARIO);
     const b = await chainOn('fake-real', SUCCESS_SCENARIO, B_SUCCESS);
 
-    // 受理：两源同一条委派 → 同一受理回执（谁办 + 办完发你；B 切片回执去编号，
-    // 编号只在详情面/底账——回执不带 taskNo，notice 不含 #）
+    // 受理：两源同一条委派 → 同一机械受理事实（owner 2026-11-19：交办不再给固定回执话术，
+    // 只回 taskId/name/status/accepted；无 notice、无编号——编号只在详情面/底账）
     for (const run of [a, b]) {
       expect(run.acceptance).toMatchObject({ status: 'running', accepted: true });
       expect(run.acceptance.taskNo).toBe(0);
-      expect(run.acceptance.notice).toContain('这个我来办');
-      expect(run.acceptance.notice).toContain('办完发你');
-      expect(run.acceptance.notice).not.toContain('#');
+      expect(run.acceptance.notice).toBe('');
       expect(run.acceptance.name.length).toBeGreaterThan(0);
       expect(run.afterAcceptStatus).toBe('running');
     }

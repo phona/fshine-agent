@@ -2,13 +2,14 @@
  * B 切片（工单回执收敛）· task_run 短等待窗口的运行时语义（确定性：注入时钟 + gate 假执行器）：
  *   a. 快活（窗口内执行端确认 completed）→ 同回合把结果交给模型（与 inline 同形状：summary），
  *      不走受理回执；窗口未走完即返回（机械事实：fake 时钟推进量 < 窗口）；
- *   b. 慢活（超窗口）→ 工具结果只给受理回执（「这个我来办…办完发你」：谁办 + 大概多久 +
- *      办完发你），话术**不含 #、不含编号数字**，回执不带 taskNo（编号只在 npm run tasks /
- *      任务查询详情面）；任务继续在后台推进并最终落定（结果逐字存档）；
+ *   b. 慢活（超窗口）→ 工具结果只回**机械受理事实**（taskId/name/status/accepted:true，
+ *      无任何给用户的回执话术、不带 taskNo，编号只在任务列表/详情面）；任务继续在后台推进
+ *      并最终落定（结果逐字存档）。owner 2026-11-19：交办不再给固定回执，久到消耗耐心才由
+ *      server 侧 10/30 分钟两档出声（本文件的「话术」断言随之改口径）；
  *   d. taskRunWaitMs=0 → 不等窗口立即走后台受理路径（快活也不再同回合返回；时钟零推进）；
  *   协议文本：Main 协议义务写明「不向用户提工单编号」，查询工具描述不再指向受理回执。
  *
- * 反向绊线：b 的「话术无 # / 无编号数字」断言即绊线——把 #编号 塞回受理话术必红（实验见提交说明）。
+ * 反向绊线（新口径）：b/d 的 `not.toHaveProperty('notice')` 即绊线——把受理回执话术塞回工具结果必红。
  * 零网络、零真实模型：假执行器 + 脚本化 Main 驱动 + 注入时钟（now/sleep 两原语，非定时器框架）。
  */
 import { describe, expect, it } from 'vitest';
@@ -153,7 +154,7 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
     }
   });
 
-  it('b. 慢活（超窗口）：回执话术不含 # 与编号数字；任务留后台并最终完成', async () => {
+  it('b. 慢活（超窗口）：只回机械受理事实（无回执话术、无编号）；任务留后台并最终完成', async () => {
     const clock = manualClock();
     const gate = deferred<TaskExecutionOutcome>();
     const stack = backgroundStack({
@@ -168,15 +169,14 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
     try {
       await session.send('交办一件要跑一阵的事');
       const receipt = results[0] as Record<string, unknown>;
-      // 受理回执：谁办 + 办完发你（本例能力快照未声明 est_seconds → 不编造时间）
+      // 受理只回机械事实：accepted + status（owner 2026-11-19：交办不再给固定回执话术）
       expect(receipt['accepted']).toBe(true);
       expect(receipt['status']).toBe('running');
-      const notice = String(receipt['notice']);
-      expect(notice).toBe('这个我来办，办完发你。');
-      // 回执去编号：话术不含 #、不含编号数字（本例 taskNo=1，任务名无数字）；回执不带 taskNo
-      expect(notice).not.toContain('#');
-      expect(notice).not.toContain('1');
+      expect(receipt).not.toHaveProperty('notice');
+      // 回执去编号：受理事实不带 taskNo（编号只在任务列表/详情面）；taskId/name 仍给机械事实
       expect(receipt).not.toHaveProperty('taskNo');
+      expect(typeof receipt['taskId']).toBe('string');
+      expect(String(receipt['name']).length).toBeGreaterThan(0);
       // 窗口走满才返回（fake 时钟推进量 ≥ 窗口）
       expect(clock.time()).toBeGreaterThanOrEqual(1500);
       // 任务继续在后台推进并最终完成（结果逐字存档）
@@ -206,11 +206,12 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
     try {
       await session.send('办一件快事');
       const receipt = results[0] as Record<string, unknown>;
-      // 快活也不再同回合返回：受理回执（机械事实），不是 summary
+      // 快活也不再同回合返回：只回机械受理事实，不是 summary
       expect(receipt['accepted']).toBe(true);
       expect(receipt).not.toHaveProperty('summary');
-      // 快活也不再同回合返回：受理回执（谁来办 + 办完发你），不是 summary
-      expect(String(receipt['notice'])).toBe('这个我来办，办完发你。');
+      // 只回机械受理事实（accepted/status），无回执话术、不带编号
+      expect(receipt).not.toHaveProperty('notice');
+      expect(receipt).not.toHaveProperty('taskNo');
       // 零等待：时钟零推进
       expect(clock.time()).toBe(0);
       // 任务照常在后台落定
@@ -221,9 +222,12 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
     }
   });
 
-  it('协议文本：不向用户提工单编号；查询工具描述不再指向受理回执', () => {
-    expect(MAIN_PROTOCOL_NOTE).toContain('工单编号');
-    expect(MAIN_PROTOCOL_NOTE_WITH_WRITES).toContain('工单编号');
+  it('协议文本：不再要求模型转述受理回执；查询工具描述不再指向受理回执', () => {
+    // owner 2026-11-19：受理固定回执已删除、只交办回合由宿主静默——协议里那句「task_run
+    // 返回已受理…如实告诉用户」是死提示词，已删；连带「不向用户提工单编号」的出处（同一句）
+    // 一并消失。编号只需在任务查询工具描述里保持「不指向受理回执」。
+    expect(MAIN_PROTOCOL_NOTE).not.toContain('已受理/在后台办理中');
+    expect(MAIN_PROTOCOL_NOTE_WITH_WRITES).not.toContain('已受理/在后台办理中');
     // 编号只保留在详情面：task_status 仍支持 #编号引用，但出处是任务列表，不再是受理回执
     expect(TASK_STATUS_TOOL_DESCRIPTION).not.toContain('受理回执');
     expect(String(TASK_RESULT_TOOL_SCHEMA.properties)).not.toContain('受理回执');

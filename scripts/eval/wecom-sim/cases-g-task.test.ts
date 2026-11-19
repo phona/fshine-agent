@@ -5,7 +5,8 @@
  * 完成后宿主主动投递）+ `runtime.taskRunWaitMs`（B 切片短等待窗口）。
  *
  * 机械判据（用户可见结果；模型响应脚本化、执行层真实）：
- *   W-26  明显超窗的请求 → 受理回执**不含 `#`、不含编号数字**；任务在后台推进并最终 completed；
+ *   W-26  明显超窗的请求 → **只交办回合对用户静默**（零终帧、零受理话术；owner 2026-11-19），
+ *         任务在后台推进并最终 completed、完成后主动投递一次结果；
  *   W-27  完成后追问「刚才那个跑完了吗？」→ 纯查询（task_status），**不发起新的 execution**；
  *   W-28  快活（窗口内完成）→ 同回合直接给结果、**零受理回执**、零主动投递
  *         （回归钉子：防止 B 轨短等待窗口被破坏）。
@@ -27,36 +28,34 @@ import {
 /** 宿主任务 scope：单聊 conversationId 就是 userid（适配器口径），故会话键 = 用户键。 */
 const TASK_SCOPE = { principalId: 'wecom:user-a', sessionId: 'wecom:user-a' } as const;
 
-/** Main 转述受理回执（慢活）：话术逐字来自 task_run 的真实 notice。 */
-const relayReceipt = (call: { messages: readonly unknown[] }) => {
+/**
+ * 交办回合模型会自行编的受理卡片（new 口径：这段不发终帧——宿主边界静默）。
+ * 顺带绊线：task_run 的受理事实**不得**再带回执话术（notice）——带了立即红。
+ */
+const dispatchCard = (call: { messages: readonly unknown[] }) => {
   const result = lastToolResultJsonOf(call.messages);
-  const notice = typeof result?.['notice'] === 'string' ? result['notice'] : '';
-  if (notice === '') throw new Error('Main 脚本没有拿到 task_run 的受理回执（notice）。');
-  return textAssistant(notice);
+  if (result?.['accepted'] !== true) throw new Error('task_run 没有回受理事实（accepted:true）。');
+  if (result !== undefined && 'notice' in result) throw new Error('受理事实不应再带受理回执话术（notice）。');
+  return textAssistant('好的，这件事我交给后台去办，办好就发给你。');
 };
 
 describe('G 组·任务面 / 异步（W-26～W-28）', () => {
-  it('W-26 超窗请求：受理回执无编号，任务后台推进并最终完成；W-27 追问纯查询零执行', async () => {
-    // 1ms 短等待窗口：真子进程执行必然超窗 → 走受理回执 + 后台推进路径。
+  it('W-26 超窗请求：只交办回合静默（零终帧），任务后台推进并最终完成；W-27 追问纯查询零执行', async () => {
+    // 1ms 短等待窗口：真子进程执行必然超窗 → 走只交办（静默）+ 后台推进路径。
     const sim = await startWecomSim({ label: 'w26', taskDispatch: 'async', taskRunWaitMs: 1 });
     const registry = createSqliteTaskRegistry(sim.dbPath, { readOnly: true });
     try {
       const taskText = '把销售明细按客户汇总，做成表，做完发我';
       sim.book.mainTurn('帮我把销售明细按客户汇总，做成表，做完发我', [
         toolCallAssistant('task_run', { task: taskText }),
-        relayReceipt,
+        dispatchCard,
       ]);
       sim.book.workerTask(taskText, workerQueryResponses('dummy.query', { '--collection': 'documents', '--window': 'W202611' }));
       const w26 = sim.sendText('帮我把销售明细按客户汇总，做成表，做完发我');
-      await sim.waitFor('W-26 受理回执终帧', () => sim.finalBubbles().length === 1);
-
-      const receipt = sim.finalBubbles()[0]!.content;
-      // 受理回执（预期契约）：谁办 + 大概多久 + 办完发你；去编号：不含 `#`，
-      // 除估时锚点外不得出现任何其他数字（工单编号只在详情面/底账）。
-      expect(receipt).toContain('这个我来办');
-      expect(receipt).toContain('办完发你');
-      expect(receipt).not.toContain('#');
-      expect(receipt.replace(/\d+\s*分钟/g, '')).not.toMatch(/\d/);
+      // 只交办回合静默：回合已结束（message_done 落定）但**零终帧**（卡片文本不进用户面）。
+      await sim.waitFor('W-26 交办回合结束（静默）', () => sim.doneOf(w26) !== undefined);
+      expect(sim.finalBubbles()).toHaveLength(0);
+      expect(sim.logs.some((line) => line['event'] === 'turn_dispatch_silent')).toBe(true);
 
       const done = sim.doneOf(w26)!;
       expect(done.taskIds).toHaveLength(1);
@@ -78,9 +77,9 @@ describe('G 组·任务面 / 异步（W-26～W-28）', () => {
         },
       ]);
       const w27 = sim.sendText('刚才那个跑完了吗？');
-      await sim.waitFor('W-27 终帧', () => sim.finalBubbles().length === 2);
+      await sim.waitFor('W-27 终帧', () => sim.finalBubbles().length === 1);
 
-      expect(sim.finalBubbles()[1]!.content).toContain('完成');
+      expect(sim.finalBubbles()[0]!.content).toContain('完成');
       // 纯查询：本回合零执行事实；也不再新增任务。
       const w27Done = sim.doneOf(w27)!;
       expect(w27Done.executions).toHaveLength(0);

@@ -65,10 +65,14 @@ describe('P2 七场景 · 确定性跑通（假模型，一次样本）', () => 
     // 闸在 T2 处理时仍未释放：alpha 任务此刻非终态（真异步的证据，不是串行假异步）。
     expect(['queued', 'running']).toContain(out.observation.extras['alphaStatusBeforeRelease']);
     // 预注册事实判据（T2 回复须含 beta 3/1000）在强制 background 下**不可满足**：
-    // 合规产品 T2 只回受理回执。此样本登记为 preregBlocked（不作为产品通过/失败结论）。
+    // T1（alpha）在飞 → 只交办回合对用户静默（reply 为空）；T2（beta 快活，窗口内落定）本回合
+    // 拿到结果但脚本按预注册字面仍回受理话术。此样本登记为 preregBlocked（不作为产品结论）。
     expect(out.judgement.preregBlocked).toBe(true);
     expect(out.judgement.pass).toBe(false);
     expect(out.judgement.factVerdicts[0]?.verdict.pass).toBe(false);
+    // T1（alpha 在飞）= 只交办回合 → 静默（零终帧，reply 为空）。
+    expect(out.observation.turns[0]?.reply ?? '').toBe('');
+    // T2（beta 快活，窗口内落定）本回合拿到结果 → 不是只交办回合，照常送达（脚本按预注册回受理话术）。
     expect(out.observation.turns[1]?.reply).toContain('已受理');
   }, 30_000);
 

@@ -127,6 +127,10 @@ describe('用户可见失败话术', () => {
       if (kind !== 'needs_confirmation' && kind !== 'needs_input') {
         expect(message.text.length, `${kind} 话术太长：${message.text}`).toBeLessThanOrEqual(40);
       }
+      // 简短（owner：「像真人回复」）：一句话说完；含摘要/缺失项的两种允许带上业务内容。
+      if (kind !== 'needs_confirmation' && kind !== 'needs_input') {
+        expect(message.text.length, `${kind} 话术太长：${message.text}`).toBeLessThanOrEqual(40);
+      }
     }
   });
 

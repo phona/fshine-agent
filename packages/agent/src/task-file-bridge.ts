@@ -37,6 +37,7 @@ import {
   type RegisteredFile,
   type SkippedOutput,
 } from './file-store';
+import { materializePayload, type PayloadMaterializeResult } from './payload-materializer';
 
 /** 任务产物上限（缺省与 run_js 交付箱同值；生产装配不得放宽，v8 §11 数值 S0 写死）。 */
 export const TASK_FILE_MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
@@ -100,6 +101,12 @@ export interface TaskExecutionBridge {
   registerReturnedFiles(entries: readonly unknown[]): Promise<ReturnedFileRegistration>;
   /** 兜底扫描（v8 §10-3）：任务 out/ 全量登记（同池去重）；目录不存在 → 空结果。 */
   sweepTaskOutputs(): { files: RegisteredFile[]; skipped: SkippedOutput[] };
+  /**
+   * 载荷型参数的物化（2026-11-19）：把模型给的结构化**值**按 schema lint 后原子落盘到
+   * `<taskDir>/in/<param>.json`，返回绝对路径或结构化失败（missing/unknown）。
+   * 任务暂存目录是桥持有的可信路径（模型/用户看不到、填不进）。
+   */
+  materializePayload(input: { param: string; value: unknown; schema?: unknown; maxBytes?: number }): PayloadMaterializeResult;
 }
 
 /** 按任务构造桥的工厂（runtime 的 RuntimeOptions.taskExecutionBridge 端口形状）。 */
@@ -226,6 +233,16 @@ export function createTaskExecutionBridge(options: TaskExecutionBridgeOptions): 
       taskFiles() {
         // 与出站物化同一来源：任务副本 + 任务产物池（当前任务的绑定行、已激活且 TTL 内）。
         return options.fileStore.listTaskFiles({ scope: options.scope, taskId, now: Date.now() });
+      },
+      materializePayload(input: { param: string; value: unknown; schema?: unknown; maxBytes?: number }): PayloadMaterializeResult {
+        // 装信封归宿主：值 → lint → 落盘到本任务 in/，返回路径。执行层只认路径参数。
+        return materializePayload({
+          taskDir,
+          label: input.param,
+          value: input.value,
+          ...(input.schema === undefined ? {} : { schema: input.schema }),
+          ...(input.maxBytes === undefined ? {} : { maxBytes: input.maxBytes }),
+        });
       },
       async registerReturnedFiles(entries: readonly unknown[]): Promise<ReturnedFileRegistration> {
         const out: unknown[] = [];

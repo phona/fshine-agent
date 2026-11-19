@@ -214,15 +214,13 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
     const reader = createNotificationReader(dbPath);
     try {
       const reply = await server.handler(incoming('user-a', 'conv-a', 'msg-1', '查 documents W202611'));
-      expect(reply).toBe('已受理，稍后通知你。');
-      // 受理事实（task_run 返回）：受理回执（谁办 + 办完发你）；B 切片回执去编号（不含 #）
+      // 「只交办」回合静默（owner 2026-11-19）：模型那段受理卡片不发终帧（reply 为空）。
+      expect(reply).toBe('');
+      // 受理事实（task_run 返回）：只给机械事实（accepted/status + name/taskId），无回执话术、无编号
       const accepted = records[0]!.execResults[0] as Record<string, unknown>;
-      expect(accepted).toMatchObject({ accepted: true });
+      expect(accepted).toMatchObject({ accepted: true, status: 'running' });
+      expect(accepted).not.toHaveProperty('notice');
       expect(accepted).not.toHaveProperty('taskNo');
-      const notice = String(accepted['notice']);
-      expect(notice).toContain('这个我来办');
-      expect(notice).toContain('办完发你');
-      expect(notice).not.toContain('#');
       const taskId = String(accepted['taskId']);
       const taskScope = { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' };
       // 后台完成 + 结果经 archiveReply 取回

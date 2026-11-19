@@ -31,8 +31,6 @@ import {
   type TaskExecutor,
   type TaskRunner,
 } from './src/task-runner';
-import { backgroundTaskReceiptNotice, estimatedMinutesOf } from './src/execution-runtime';
-import type { CapabilityManifest } from '@fshine/contracts/execution-contract';
 
 const SCOPE = { principalId: 'p', sessionId: 'wecom:conv-private' } as const;
 const GROUP_SCOPE = { principalId: 'p', sessionId: 'wecom:conv-group' } as const;
@@ -335,59 +333,5 @@ describe('预期契约：长时间无动静的两档主动提醒', () => {
 
     expect(timers.armed).toBe(0);
     expect(registry.get('slow-default', SCOPE).longRunningNotifiedAt).toBeUndefined();
-  });
-});
-
-describe('受理回执的预期契约（文案）', () => {
-  it('估得出时长：谁办 + 大概 N 分钟 + 办完发你（只说锚点，不报进度）', () => {
-    expect(backgroundTaskReceiptNotice(3)).toBe('这个我来办，大概 3 分钟，办完发你。');
-    expect(backgroundTaskReceiptNotice(3)).toContain('大概');
-    expect(backgroundTaskReceiptNotice(3)).not.toContain('#');
-  });
-
-  it('估不出来：只说办完发你（不编造时间）', () => {
-    expect(backgroundTaskReceiptNotice()).toBe('这个我来办，办完发你。');
-  });
-
-  it('估时锚点 = 执行层 est_seconds 累加取整到分钟；没有声明 = undefined', () => {
-    const withEstimate: CapabilityManifest = {
-      contractVersion: 1,
-      operations: [
-        { name: 'dummy.query', label: 'query', args: [], estimatedSeconds: 10 },
-        { name: 'dummy.commit', label: 'commit', args: [], estimatedSeconds: 5 },
-      ],
-    };
-    expect(estimatedMinutesOf(withEstimate)).toBe(1);
-    const longer: CapabilityManifest = {
-      contractVersion: 1,
-      operations: [
-        { name: 'dummy.query', label: 'query', args: [], estimatedSeconds: 70 },
-        { name: 'dummy.commit', label: 'commit', args: [], estimatedSeconds: 50 },
-      ],
-    };
-    expect(estimatedMinutesOf(longer)).toBe(2);
-    const undeclared: CapabilityManifest = {
-      contractVersion: 1,
-      operations: [{ name: 'dummy.query', label: 'query', args: [] }],
-    };
-    expect(estimatedMinutesOf(undeclared)).toBeUndefined();
-
-    // 2026-11-19：声明 long_running 的操作不算进「受理回执」的预期（它走 10/30 分钟两档）；
-    // 否则 dummy 夹具里那个 1800 秒的长任务会把每条回执变成「大概 32 分钟」（live 实测）。
-    const withLongTask: CapabilityManifest = {
-      contractVersion: 4,
-      operations: [
-        { name: 'dummy.query', label: 'query', args: [], estimatedSeconds: 10 },
-        { name: 'dummy.longtask', label: 'long', args: [], estimatedSeconds: 1800, long_running: true },
-      ],
-    };
-    expect(estimatedMinutesOf(withLongTask)).toBe(1);
-
-    // 超过半小时的估算对回执没有意义、也没有可信度 → 不估（只说办完发你）。
-    const absurd: CapabilityManifest = {
-      contractVersion: 1,
-      operations: [{ name: 'dummy.query', label: 'query', args: [], estimatedSeconds: 3_600 }],
-    };
-    expect(estimatedMinutesOf(absurd)).toBeUndefined();
   });
 });

@@ -49,6 +49,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { DiscoveredTool } from '@fshine/contracts';
 import type {
   CapabilityManifest,
+  ExecutionArgDeclaration,
   ExecutionClient,
   ExecutionOutcome,
 } from '@fshine/contracts/execution-contract';
@@ -376,6 +377,80 @@ function firstString(args: Record<string, unknown>, keys: readonly string[]): st
   return undefined;
 }
 
+/**
+ * 载荷型参数装信封（宿主侧；owner 2026-11-19）：模型给结构化**值** → 桥 lint+落盘 → 用文件
+ * 路径替换该参数，再提交执行层。未声明 payload 参数 = args 原样返回（零变化）。
+ *
+ * 失败处置（都在**发起执行之前**，零执行事实）：
+ *   · lint 未过：抛业务话术（`failureMessageFor('invalid_input')`）交模型一轮改对，并落
+ *     `payload_lint_rejected` 事件（missing/unknown 只进日志）；
+ *   · 同一 (回合, operation) 连续失败超过上限：`ToolUserError` 确定性停下（给「先停下来看看」）。
+ */
+const PAYLOAD_LINT_MAX_FAILURES = 2;
+
+const PAYLOAD_LINT_STOP_MESSAGE =
+  '这件事连续几次都因为内容不对被拦下了。先停下来看看：要写入的对象、范围和内容再核对一下，或者先别做这项操作。';
+
+/** 装配一个 operation 声明的载荷型参数清单（`payload` 声明）。 */
+function payloadArgsOf(manifest: CapabilityManifest, operation: string): ExecutionArgDeclaration[] {
+  const declaration = manifest.operations.find((entry) => entry.name === operation);
+  return (declaration?.args ?? []).filter((arg) => arg.payload !== undefined);
+}
+
+/** args 里该声明参数的命中形态（声明名或裸名）；返回实际键与值。 */
+function payloadArgOf(args: Record<string, unknown>, name: string): { key: string; value: unknown } | undefined {
+  if (Object.prototype.hasOwnProperty.call(args, name)) return { key: name, value: args[name] };
+  const bare = name.replace(/^--/, '');
+  if (bare !== name && Object.prototype.hasOwnProperty.call(args, bare)) return { key: bare, value: args[bare] };
+  return undefined;
+}
+
+function preparePayloadArgs(input: {
+  operation: string;
+  args: Record<string, unknown>;
+  manifest: CapabilityManifest;
+  taskId: string;
+  bridge: TaskExecutionBridge | undefined;
+  /** 同一回合的失败计数（键 = operation）；随回合丢弃。 */
+  failures: Map<string, number>;
+  onEvent: ((event: ExecutionEvent) => void) | undefined;
+}): Record<string, unknown> {
+  const payloadArgs = payloadArgsOf(input.manifest, input.operation);
+  if (payloadArgs.length === 0) return input.args;
+  let next = input.args;
+  for (const declaration of payloadArgs) {
+    const present = payloadArgOf(next, declaration.name);
+    if (present === undefined) continue;
+    const failed = input.failures.get(input.operation) ?? 0;
+    if (failed >= PAYLOAD_LINT_MAX_FAILURES) {
+      // 连续失败已达上限：不再 lint、不再发起执行——确定性停下并给「先停下来看看」。
+      throw new ToolUserError(PAYLOAD_LINT_STOP_MESSAGE);
+    }
+    const result = input.bridge === undefined
+      ? { ok: false as const, missing: [] as string[], unknown: [] as string[] }
+      : input.bridge.materializePayload({
+        param: declaration.name,
+        value: present.value,
+        ...(declaration.payload?.schema === undefined ? {} : { schema: declaration.payload.schema }),
+      });
+    if (!result.ok) {
+      input.failures.set(input.operation, failed + 1);
+      input.onEvent?.({
+        event: 'payload_lint_rejected',
+        taskId: input.taskId,
+        operation: input.operation,
+        missing: result.missing,
+        unknown: result.unknown,
+      });
+      throw new Error(failureMessageFor('invalid_input').text);
+    }
+    if (next === input.args) next = { ...next };
+    if (present.key !== declaration.name) delete next[present.key];
+    next[declaration.name] = result.path;
+  }
+  return next;
+}
+
 /** 参数规范化（判定「完全相同」用）：对象键排序后递归序列化；数组保序。 */
 function stableArgsKey(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map((item) => stableArgsKey(item)).join(',')}]`;
@@ -397,8 +472,8 @@ export const MAIN_PROTOCOL_NOTE = [
   '- 执行层的调用失败、且**没有说明可以重试**（`retryable` 为 false 或未声明）时：如实说明它接受'
     + '什么、不接受什么，并问用户要不要换口径；同一对象本回合不要再换参数重试，也不要自行按维度'
     + '取值批量查询——那是替用户扩大范围。',
-  '- task_run 返回「已受理/在后台办理中」时，如实告诉用户事情已在后台办理、完成后结果会自动发回来；'
-    + '不要向用户提及工单编号（#数字）或内部任务 id——编号只在任务查询工具结果里，给用户说清办的是什么、办到哪一步即可。',
+  // owner 2026-11-19：删除「task_run 返回已受理/在后台办理中时如实告诉用户…」——宿主对
+  // 「只交办」回合已确定性静默（server handler 的 turn_dispatch_silent），该句是死提示词。
   '- 本轮执行面只开放查询（只读）操作；用户要求写入或变更时，如实说明该能力尚未开通。',
 ].join('\n');
 
@@ -418,8 +493,7 @@ export const MAIN_PROTOCOL_NOTE_WITH_WRITES = [
   '- 执行层的调用失败、且**没有说明可以重试**（`retryable` 为 false 或未声明）时：如实说明它接受'
     + '什么、不接受什么，并问用户要不要换口径；同一对象本回合不要再换参数重试，也不要自行按维度'
     + '取值批量查询——那是替用户扩大范围。',
-  '- task_run 返回「已受理/在后台办理中」时，如实告诉用户事情已在后台办理、完成后结果会自动发回来；'
-    + '不要向用户提及工单编号（#数字）或内部任务 id——编号只在任务查询工具结果里，给用户说清办的是什么、办到哪一步即可。',
+  // owner 2026-11-19：同上删除「如实告诉用户事情已在后台办理…」（死提示词，只交办回合已静默）。
   '- 本轮执行面开放查询与写入操作。执行层返回待确认时，把执行层给出的确认摘要原样转给用户；'
     + '用户表态后的下一回合再继续，不要替用户假定已确认。',
   '- 写入是否生效以执行层返回的读回验证为准；执行层返回失败或读回不一致时，如实转述，不得说成成功。',
@@ -516,9 +590,13 @@ export type ExecutionEvent =
   | { event: 'execution_aborted'; operationId: string; result: 'cancelled' | 'failed'; reason?: string }
   | { event: 'execution_wait_files_registered'; operationId: string; files: number; logsFileized: number }
   /**
+   * 载荷型参数 lint 未过（2026-11-19）：宿主装信封失败——不发起执行，业务话术交回模型改。
+   * missing/unknown 是结构化机械事实（只进日志，不进用户话术）。
+   */
+  | { event: 'payload_lint_rejected'; taskId: string; operation: string; missing: readonly string[]; unknown: readonly string[] }
+  /**
    * 失败归类（模型可见面收口，2026-11-19）：执行层失败/拒绝**不再逐字进模型投影**，
    * 模型只见 kind + note（见 toModelVisibleOutcome）；原始 code 与原文只经这条事件进日志。
-   * 观测面 = 部署侧读事件定位哪次 operation 归成了什么种类，不丢排障信息。
    */
   | { event: 'execution_failure_classified'; operation: string; code: string; status: 'failed' | 'refused'; kind: string };
 
@@ -572,9 +650,10 @@ export interface RuntimeOptions {
   /** P6：后台任务运行器（async 模式必需；submit→pump，执行/恢复/取消由它承担）。 */
   taskRunner?: TaskRunner;
   /**
-   * B 切片（工单回执收敛）：task_run 受理后的短等待窗口（ms）。缺省取 runtime 配置解析值
-   * （1500）；0 = 不等直接后台。窗口内执行端确认完成 → 结果同回合交给模型（与 inline 同
-   * 形状）；超窗 → 机械事实受理回执（不含工单编号），任务留后台推进。
+   * B 切片（工单回执收敛）：task_run 受理后的短等待窗口（ms）。缺省取 runtime 配置解析值；
+   * 0 = 不等直接后台。窗口内执行端确认完成 → 结果同回合交给模型（与 inline 同形状）；
+   * 超窗 → 只回机械受理事实（taskId/name/status/accepted:true，**无给用户的回执话术**），
+   * 任务留后台推进（交办不再固定回执；久到消耗耐心才由 10/30 分钟两档出声）。
    */
   taskRunWaitMs?: number;
   /**
@@ -903,43 +982,6 @@ export function renderWorkerFileManifest(
  */
 export const WORKER_SNAPSHOT_COST_NOTE =
   '一次任务发起 N 次执行，等待与失败面按 N 倍增长；控制执行次数。';
-
-/**
- * 受理回执话术（B 切片去编号 + 预期契约 2026-11-18 owner 定）：只说「谁来办 + 大概多久 +
- * 办完发你」；估不出来就只说办完发你（不编造时间、不报进度、不含工单编号）。
- */
-export function backgroundTaskReceiptNotice(estimatedMinutes?: number): string {
-  return estimatedMinutes === undefined
-    ? '这个我来办，办完发你。'
-    : `这个我来办，大概 ${estimatedMinutes} 分钟，办完发你。`;
-}
-
-/**
- * 估时锚点（预期契约）：执行层自述 `est_seconds` 累加，取整到分钟（向上，最小 1）。
- *
- * 2026-11-19 修正：**排除声明 `long_running` 的 operation**——它们的时长不属于「受理回执」
- * 的预期（长任务本来就靠 10/30 分钟两档主动说明）。原先把允许集合里所有 operation 的
- * est 相加，dummy 夹具里带一个 1800 秒的长任务，于是每条回执都变成「大概 32 分钟」——
- * 对一个 3 条记录的查询是纯编造，还让模型误以为必须转到后台并去翻旧任务（live 实测）。
- * 仍只当锚点用，文案必须带「大概」；算不出来（无声明/超过 30 分钟）→ undefined，回执只说「办完发你」。
- */
-export function estimatedMinutesOf(manifest: CapabilityManifest): number | undefined {
-  let totalSeconds = 0;
-  let declared = false;
-  for (const operation of manifest.operations) {
-    if (operation.estimatedSeconds === undefined) continue;
-    if (operation.long_running === true) continue;
-    totalSeconds += operation.estimatedSeconds;
-    declared = true;
-  }
-  if (!declared || totalSeconds <= 0) return undefined;
-  const minutes = Math.max(1, Math.ceil(totalSeconds / 60));
-  // 超过半小时的估算对「受理回执」没有意义（用户自己都会来问），且极易离谱 → 不估。
-  return minutes > ESTIMATE_MAX_MINUTES ? undefined : minutes;
-}
-
-/** 受理回执估时上限（分钟）：超过就不说时长，只说「办完发你」。 */
-const ESTIMATE_MAX_MINUTES = 30;
 
 /** 终态集合（窗口内落定判定）。waiting_user 不是终态——等待接续仍属后台推进。 */
 const SETTLED_TASK_STATUSES: ReadonlySet<string> = new Set([
@@ -1656,8 +1698,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     contractVersion: manifest.contractVersion,
     operations: manifest.operations.filter((operation) => allowed.has(operation.name)),
   };
-  /** 受理回执的估时锚点（执行层自述 est_seconds 累加；没有声明 = undefined）。 */
-  const receiptEstimateMinutes = estimatedMinutesOf(workerManifest);
   /** 契约 v4：只有声明 long_running 的 operation 可以返回 accepted（否则协议违约 fail-closed）。 */
   const longRunningOperations = new Set(
     workerManifest.operations.filter((operation) => operation.long_running === true).map((operation) => operation.name),
@@ -1710,6 +1750,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
    * 宿主只执行执行层的声明，不判断业务——这不是计划门。
    */
   let deterministicFailuresThisTurn = new Map<string, { code: string; declaredRetryable?: boolean; message?: string }>();
+  /** 载荷型参数 lint 的本回合失败计数（键 = operation）；随回合清零（装信封失败不是执行事实）。 */
+  let payloadLintFailuresThisTurn = new Map<string, number>();
   /** A2b 观测：本回合被拦下的重试（回合末随 TurnResult 交装配层落事件；不改回合结果）。 */
   let retryBlockedThisTurn: TurnRetryBlock[] = [];
   /** A2b 观测：本回合执行层声明可重试（瞬时故障）的失败。 */
@@ -2106,9 +2148,20 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     // 发起前被拒并如实告知；不判断业务。计数在发起前同步推进（含随后的每次真实发起，
     // 被拒/回放的调用不计——它们没有走到这里）。
     const rawArgs = args.args;
-    const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
+    const baseCallArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
       ? (rawArgs as Record<string, unknown>)
       : {};
+    // 载荷型参数装信封（宿主侧；发起执行之前）：模型给结构化值 → 宿主 lint+落盘 → 路径替换。
+    // 失败（lint 未过/超上限）在此抛出——不发起执行、不落执行事实。
+    const callArgs = preparePayloadArgs({
+      operation,
+      args: baseCallArgs,
+      manifest: workerManifest,
+      taskId,
+      bridge: exchange,
+      failures: payloadLintFailuresThisTurn,
+      onEvent: options.onExecutionEvent,
+    });
     // A2b 同参数重复守卫（发起前拒；不发起执行、不落执行事实）。
     // 作用域 = (本回合, 该任务)：同一任务内的逐字重复才拒；两个不同任务各自查同一对象是合法的。
     const objectValue = firstString(callArgs, ['--collection', '--topic', 'collection', 'topic']);
@@ -2441,10 +2494,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       });
       taskRunner!.pump();
       const name = accepted.name ?? deriveTaskName(request);
-      // B 切片（工单回执收敛）：短等待窗口（runtime.taskRunWaitMs，缺省 1500ms；0 = 不等）。
-      // 窗口内执行端确认 completed → 与 inline 同形状把结果交给模型（同回合、零受理回执、
-      // 零主动投递——结果不重复发两遍）；超窗 → 机械事实受理回执（不含工单编号），任务留
-      // 后台推进，完成后由宿主完成投递面把结果发回原会话。
+      // B 切片（工单回执收敛）：短等待窗口（runtime.taskRunWaitMs，缺省 8000ms；0 = 不等）。
+      // 窗口内执行端确认 completed → 与 inline 同形状把结果交给模型（同回合、零主动投递——
+      // 结果不重复发两遍）；超窗 → 只回机械受理事实（taskId/name/status/accepted:true，
+      // **不带任何给用户看的回执话术**——owner 2026-11-19：交办不再给固定回执，久到消耗耐心
+      // 才出声，见 server handler 的 turn_dispatch_silent），任务留后台推进，完成后由宿主
+      // 完成投递面把结果发回原会话。
       if (taskRunWaitMs > 0) {
         const settled = await waitForTaskSettled(taskId, taskRunWaitMs);
         if (settled !== undefined) {
@@ -2470,7 +2525,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         name,
         status: live.status,
         accepted: true,
-        notice: backgroundTaskReceiptNotice(receiptEstimateMinutes),
       };
     }
 
@@ -2565,7 +2619,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           name: current.name ?? deriveTaskName(current.request),
           status: 'running',
           accepted: true,
-          notice: '这项任务已在执行层受理，完成后会继续处理并告知结果。',
         };
       }
       if (workerResult.text.trim() === '') {
@@ -2633,6 +2686,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // A2：单回合执行计数随回合清零（上界按回合计，不跨回合累计）。
       operationsThisTurn = 0;
       deterministicFailuresThisTurn = new Map();
+      payloadLintFailuresThisTurn = new Map();
       retryBlockedThisTurn = [];
       retryAllowedThisTurn = [];
       const turnScopeKey = `turn:${options.sessionId}:${turnNo}`;
@@ -3188,6 +3242,8 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       // U3：本交办内的重放窗口（只由 Worker 驱动的原生事件推进）。
       const workerWindow = newAttemptWindow();
       let unresolved = false;
+      /** 载荷型参数 lint 的本回合失败计数（键 = operation）；随本次执行丢弃。 */
+      const payloadLintFailures = new Map<string, number>();
       // 片 1：本任务的交付收集（Worker run_js 产物登记事实）与委派级幂等 Map。
       // 全部随本次执行创建、随本次执行丢弃（未注入执行器 = 不参会、零变化）。
       const taskFiles: TurnFileRef[] = [];
@@ -3285,9 +3341,20 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           throw new Error(OPERATION_NOT_PERMITTED_MESSAGE);
         }
         const rawArgs = args.args;
-        const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
+        const baseCallArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
           ? (rawArgs as Record<string, unknown>)
           : {};
+        // 载荷型参数装信封（宿主侧；发起执行之前）：模型给结构化值 → 宿主 lint+落盘 → 路径替换。
+        // 失败（lint 未过/超上限）在此抛出——不发起执行、不落执行事实。
+        const callArgs = preparePayloadArgs({
+          operation,
+          args: baseCallArgs,
+          manifest: workerManifest,
+          taskId: task.taskId,
+          bridge: taskBridge,
+          failures: payloadLintFailures,
+          onEvent: options.onExecutionEvent,
+        });
         const run = await claimAndRunOperation({
           registry: options.registry,
           readOnlyOperations,

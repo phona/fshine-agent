@@ -208,7 +208,8 @@ describe('CAP-01 单文件参数：默认服务装配（createServer + 真 dummy
 
       // ② 文字消息激活 pending 并起回合：Main 交办（inputFiles）→ Worker 调 dummy.scratch。
       const reply = await server.handler(incoming('m-go', '统计这份名册'));
-      expect(reply).toContain('名册统计完成。');
+      // 「只交办」回合静默（owner 2026-11-19）：模型那段受理卡片不发终帧（reply 为空）。
+      expect(reply).toBe('');
 
       // ③ 执行层真的读到了附件：--input 指向宿主物化的任务输入，内容 = 附件字节。
       await vi.waitFor(() => {

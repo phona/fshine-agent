@@ -55,8 +55,8 @@ export interface RawGatewayOperation {
    */
   long_running?: unknown;
   args?: {
-    positional?: Array<{ name?: string; required?: boolean }>;
-    flags?: Array<{ flag?: string; required?: boolean; style?: string }>;
+    positional?: Array<{ name?: string; required?: boolean; payload?: { schema?: unknown } }>;
+    flags?: Array<{ flag?: string; required?: boolean; style?: string; payload?: { schema?: unknown } }>;
   };
 }
 
@@ -291,17 +291,29 @@ function declaredCostOf(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-/** 参数声明投影：位置参数在前、flag 在后；空名条目丢弃。 */
+/** 载荷型参数声明的形状投影：只认 `{ schema }`（schema 缺省 = 不校验）；其余形状丢弃。 */
+function declaredPayloadOf(value: unknown): { schema?: unknown } | undefined {
+  if (value === null || typeof value !== 'object') return undefined;
+  const candidate = value as { schema?: unknown };
+  return candidate.schema === undefined ? {} : { schema: candidate.schema };
+}
+
+/** 参数声明投影：位置参数在前、flag 在后；空名条目丢弃。载荷型声明（payload）原样带上。 */
 function declaredArgsOf(operation: RawGatewayOperation): ExecutionArgDeclaration[] {
   const positional = (operation.args?.positional ?? [])
     .filter((entry) => typeof entry.name === 'string' && entry.name !== '')
-    .map((entry) => ({ name: entry.name as string, required: entry.required === true }));
+    .map((entry) => ({
+      name: entry.name as string,
+      required: entry.required === true,
+      ...(declaredPayloadOf(entry.payload) === undefined ? {} : { payload: declaredPayloadOf(entry.payload) }),
+    }));
   const flags = (operation.args?.flags ?? [])
     .filter((entry) => typeof entry.flag === 'string' && entry.flag !== '')
     .map((entry) => ({
       name: entry.flag as string,
       required: entry.required === true,
       ...(typeof entry.style === 'string' && entry.style !== '' ? { type: entry.style } : {}),
+      ...(declaredPayloadOf(entry.payload) === undefined ? {} : { payload: declaredPayloadOf(entry.payload) }),
     }));
   return [...positional, ...flags];
 }

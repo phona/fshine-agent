@@ -12,8 +12,8 @@
  * 子进程 + 假企微 SDK + 脚本化模型；断言面是用户可见气泡、宿主底账与夹具审计。
  *
  * 三条路径：
- *   ① 长时执行：`--delay-ms 1200` → 1ms 短等待窗口必然超窗 → 受理回执（无编号）先到，
- *      任务后台推进，最终 completed 并由宿主主动投递一次结果；
+ *   ① 长时执行：`--delay-ms 1200` → 1ms 短等待窗口必然超窗 → 交办回合**对用户静默**（零终帧、
+ *      零受理话术；owner 2026-11-19），任务后台推进，最终 completed 并由宿主主动投递一次结果；
  *   ② 执行很久后异常：`slow-fault-one`（slow_fault，2500ms 后 exit 2）→ 任务终态 failed、
  *      失败原因机械可读、不谎报成功、零「完成」主动投递；用户追问时如实说明；
  *   ③ needs_input → 补答 → 同一任务完成；以及不补答 → 停在 waiting_user、不重复执行。
@@ -39,12 +39,15 @@ import {
 /** 宿主任务 scope：单聊 conversationId 就是 userid（与 W-26 同口径）。 */
 const TASK_SCOPE = { principalId: 'wecom:user-a', sessionId: 'wecom:user-a' } as const;
 
-/** Main 转述受理回执（话术逐字来自 task_run 的真实 notice）。 */
-const relayReceipt = (call: { messages: readonly unknown[] }) => {
+/**
+ * 交办回合模型会自行编的受理卡片（new 口径：这段不发终帧——宿主边界静默）。
+ * 顺带绊线：task_run 的受理事实**不得**再带回执话术（notice）——带了立即红。
+ */
+const dispatchCard = (call: { messages: readonly unknown[] }) => {
   const result = lastToolResultJsonOf(call.messages);
-  const notice = typeof result?.['notice'] === 'string' ? result['notice'] : '';
-  if (notice === '') throw new Error('Main 脚本没有拿到 task_run 的受理回执（notice）。');
-  return textAssistant(notice);
+  if (result?.['accepted'] !== true) throw new Error('task_run 没有回受理事实（accepted:true）。');
+  if (result !== undefined && 'notice' in result) throw new Error('受理事实不应再带受理回执话术（notice）。');
+  return textAssistant('好的，这件事我交给后台去办，办好就发给你。');
 };
 
 function auditRowsOf(stateDir: string): Array<Record<string, unknown>> {
@@ -58,13 +61,13 @@ function auditRowsOf(stateDir: string): Array<Record<string, unknown>> {
 }
 
 describe('冒烟·长时执行（--delay-ms）', () => {
-  it('受理回执先于完成出现（无编号）；任务后台推进到 completed 并主动投递一次结果', async () => {
+  it('只交办回合用户侧静默（零终帧、零受理话术）；任务后台推进到 completed 并主动投递一次结果', async () => {
     const sim = await startWecomSim({ label: 'smoke-slow', taskDispatch: 'async', taskRunWaitMs: 1 });
     const registry = createSqliteTaskRegistry(sim.dbPath, { readOnly: true });
     try {
       const userText = '把 documents 集合上月的明细跑出来';
       const taskText = '把 documents 集合上月的明细跑出来';
-      sim.book.mainTurn(userText, [toolCallAssistant('task_run', { task: taskText }), relayReceipt]);
+      sim.book.mainTurn(userText, [toolCallAssistant('task_run', { task: taskText }), dispatchCard]);
       sim.book.workerTask(taskText, [
         toolCallAssistant('execute_operation', {
           operation: 'dummy.query',
@@ -79,21 +82,17 @@ describe('冒烟·长时执行（--delay-ms）', () => {
 
       const startedAt = Date.now();
       const messageId = sim.sendText(userText);
-      await sim.waitFor('受理回执终帧', () => sim.finalBubbles().length === 1);
-
-      const receipt = sim.finalBubbles()[0]!.content;
-      // 受理回执（预期契约）：谁办 + 大概多久 + 办完发你；去编号：不含 `#`，
-      // 除估时锚点外不得出现任何其他数字（工单编号只在详情面/底账）。
-      expect(receipt).toContain('这个我来办');
-      expect(receipt).toContain('办完发你');
-      expect(receipt).not.toContain('#');
-      expect(receipt.replace(/\d+\s*分钟/g, '')).not.toMatch(/\d/);
+      // 「只交办」回合静默：回合已结束（message_done 落定）但**零终帧**（卡片文本不进用户面）。
+      await sim.waitFor('交办回合结束（静默）', () => sim.doneOf(messageId) !== undefined);
+      expect(sim.finalBubbles()).toHaveLength(0);
+      // 静默是确定性宿主规则：落一条结构化事件（taskIds/replyBytes）。
+      expect(sim.logs.some((line) => line['event'] === 'turn_dispatch_silent')).toBe(true);
 
       const done = sim.doneOf(messageId)!;
       expect(done.taskIds).toHaveLength(1);
       const taskId = done.taskIds[0]!;
 
-      // 回执出现时任务确实还在跑（不是「等到完成才回一句已受理」的假异步）。
+      // 回合结束（静默）时任务确实还在跑（不是「等到完成才回一句已受理」的假异步）。
       expect(registry.get(taskId, TASK_SCOPE).status).not.toBe('completed');
 
       await sim.waitFor('任务后台 completed', () => registry.get(taskId, TASK_SCOPE).status === 'completed', 30_000);
@@ -118,7 +117,7 @@ describe('冒烟·执行很久后异常（slow_fault）', () => {
     try {
       const userText = '把 slow-fault-one 的数据取出来';
       const taskText = '把 slow-fault-one 的数据取出来';
-      sim.book.mainTurn(userText, [toolCallAssistant('task_run', { task: taskText }), relayReceipt]);
+      sim.book.mainTurn(userText, [toolCallAssistant('task_run', { task: taskText }), dispatchCard]);
       sim.book.workerTask(taskText, [
         toolCallAssistant('execute_operation', {
           operation: 'dummy.query',
@@ -133,7 +132,8 @@ describe('冒烟·执行很久后异常（slow_fault）', () => {
 
       const startedAt = Date.now();
       const messageId = sim.sendText(userText);
-      await sim.waitFor('受理回执终帧', () => sim.finalBubbles().length === 1);
+      await sim.waitFor('交办回合结束（静默）', () => sim.doneOf(messageId) !== undefined);
+      expect(sim.finalBubbles()).toHaveLength(0);
 
       const taskId = sim.doneOf(messageId)!.taskIds[0]!;
       await sim.waitFor('任务落 failed', () => registry.get(taskId, TASK_SCOPE).status === 'failed', 30_000);
@@ -169,9 +169,9 @@ describe('冒烟·执行很久后异常（slow_fault）', () => {
         },
       ]);
       sim.sendText('刚才那个查 slow-fault-one 的任务怎么样了？');
-      await sim.waitFor('追问终帧', () => sim.finalBubbles().length === 2);
+      await sim.waitFor('追问终帧', () => sim.finalBubbles().length === 1);
 
-      const reply = sim.finalBubbles()[1]!.content;
+      const reply = sim.finalBubbles()[0]!.content;
       expect(reply).toContain('没办成');
       expect(reply).toContain('cannot be read after a long run');
       expect(reply).not.toContain('办完了');
@@ -189,7 +189,7 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
     try {
       const userText = '查一下 receivables-open 的明细';
       const taskText = '查一下 receivables-open 的明细';
-      sim.book.mainTurn(userText, [toolCallAssistant('task_run', { task: taskText }), relayReceipt]);
+      sim.book.mainTurn(userText, [toolCallAssistant('task_run', { task: taskText }), dispatchCard]);
       sim.book.workerTask(taskText, [
         toolCallAssistant('execute_operation', {
           operation: 'dummy.query',
@@ -217,7 +217,8 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
       ]);
 
       const messageId = sim.sendText(userText);
-      await sim.waitFor('受理回执终帧', () => sim.finalBubbles().length === 1);
+      await sim.waitFor('交办回合结束（静默）', () => sim.doneOf(messageId) !== undefined);
+      expect(sim.finalBubbles()).toHaveLength(0);
       const taskId = sim.doneOf(messageId)!.taskIds[0]!;
       const taskNo = registry.get(taskId, TASK_SCOPE).taskNo;
 
@@ -238,8 +239,8 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
         },
       ]);
       sim.sendText('刚才那个任务怎么样了？');
-      await sim.waitFor('状态追问终帧', () => sim.finalBubbles().length === 2);
-      expect(sim.finalBubbles()[1]!.content).toContain('window');
+      await sim.waitFor('状态追问终帧', () => sim.finalBubbles().length === 1);
+      expect(sim.finalBubbles()[0]!.content).toContain('window');
 
       // 用户补答 → Main 用同一个 #编号接续（不是新 task_run）。
       sim.book.mainTurn('用 2026-10 这个窗口', [
@@ -251,7 +252,7 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
         },
       ]);
       sim.sendText('用 2026-10 这个窗口');
-      await sim.waitFor('补答回合终帧', () => sim.finalBubbles().length === 3);
+      await sim.waitFor('补答回合终帧', () => sim.finalBubbles().length === 2);
 
       await sim.waitFor('接续后 completed', () => registry.get(taskId, TASK_SCOPE).status === 'completed', 30_000);
       const completed = registry.get(taskId, TASK_SCOPE);
@@ -277,7 +278,7 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
     try {
       const userText = '查一下 receivables-open 的明细';
       const taskText = '查一下 receivables-open 的明细';
-      sim.book.mainTurn(userText, [toolCallAssistant('task_run', { task: taskText }), relayReceipt]);
+      sim.book.mainTurn(userText, [toolCallAssistant('task_run', { task: taskText }), dispatchCard]);
       sim.book.workerTask(taskText, [
         toolCallAssistant('execute_operation', {
           operation: 'dummy.query',
@@ -291,7 +292,8 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
       ]);
 
       const messageId = sim.sendText(userText);
-      await sim.waitFor('受理回执终帧', () => sim.finalBubbles().length === 1);
+      await sim.waitFor('交办回合结束（静默）', () => sim.doneOf(messageId) !== undefined);
+      expect(sim.finalBubbles()).toHaveLength(0);
       const taskId = sim.doneOf(messageId)!.taskIds[0]!;
       await sim.waitFor('任务落 waiting_user', () => registry.get(taskId, TASK_SCOPE).status === 'waiting_user', 30_000);
 
@@ -307,7 +309,7 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
         },
       ]);
       sim.sendText('还没好吗？');
-      await sim.waitFor('追问终帧', () => sim.finalBubbles().length === 2);
+      await sim.waitFor('追问终帧', () => sim.finalBubbles().length === 1);
 
       const after = registry.get(taskId, TASK_SCOPE);
       expect(after.status).toBe('waiting_user');
