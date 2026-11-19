@@ -17,6 +17,7 @@
  * 本模块只负责单次事实的投递与记账。
  */
 import type { ChannelRoute, DeliveryReceipt } from '@fshine/contracts';
+import { classifyFailure, failureMessageFor } from '../../packages/agent/src/user-facing-failure';
 import { stripServerPaths } from '../../packages/agent/src/server-paths';
 
 /** 宿主主动投递面（文字；与文件投递同一端口形状——FileDeliveryPort 的结构子集）。 */
@@ -31,6 +32,30 @@ export interface TaskCompletionFact {
   principalId: string;
   sessionId: string;
   resultText: string;
+  /**
+   * 业务名（任务底账 name / deriveTaskName(request) 的机械回落值）。给到时，投递文本加
+   * 一行身份「<name>」办完了：<结果正文>——用户一眼看出是哪件事（2026-11-19：完成消息
+   * 没有任务身份，「不知道是不是 longtask 的」）。缺省 = 无身份行（逐字节不变）。
+   */
+  name?: string;
+}
+
+/**
+ * 一次后台任务失败的事实（任务终局 = failed，或结果未知 result_unknown——两者都不是
+ * 「成功」，用户必须主动收到一句人话）。**不带 Worker 失败汇报原文**：原文只进
+ * task_result_delivery_failed 等结构化事件与底账，不进用户文本（2026-11-19 收口）。
+ */
+export interface TaskFailureFact {
+  taskId: string;
+  principalId: string;
+  sessionId: string;
+  /**
+   * 归类输入：底账执行事实的 error.code（执行层原始码，只用于 classifyFailure 归类）。
+   * 取不到 = 落 executor_failed。**码不进用户文本**，只决定 kind 与话术。
+   */
+  code?: string;
+  /** result_unknown 单独带状态（classifyFailure 的状态分支；其余 = failed/refused）。 */
+  status?: 'failed' | 'refused' | 'result_unknown';
 }
 
 export interface TaskResultDeliveryOptions {
@@ -47,11 +72,26 @@ export function routeFromSessionId(sessionId: string): ChannelRoute | undefined 
   return { channel: sessionId.slice(0, separator), conversationId: sessionId.slice(separator + 1) };
 }
 
+/** 完成消息身份行的业务名上限（字符；超长截断加省略号，防止用户刷屏读长名）。 */
+const COMPLETION_NAME_MAX = 30;
+
+/** 业务名截断（机械；只截显示，不改底账值）。 */
+function truncatedName(name: string): string {
+  const trimmed = name.trim();
+  if (trimmed.length <= COMPLETION_NAME_MAX) return trimmed;
+  return `${trimmed.slice(0, COMPLETION_NAME_MAX)}…`;
+}
+
 /**
- * 单次完成投递（调用方 fire-and-forget；本函数内部吞掉一切错误并如实记账）。
+ * 单次文本投递的核心（完成/失败共用同一套四必守：live 才发、送达才记 sent、失败记
+ * failed 不记 sent、剥空不投）。事件名统一 `task_result_delivery_*`（taskId 可区分场景）。
  * 返回是否真的发起了投递（测试断言用；生产调用方不依赖返回值）。
  */
-export async function deliverTaskResult(fact: TaskCompletionFact, options: TaskResultDeliveryOptions): Promise<boolean> {
+async function deliverText(
+  fact: { taskId: string; principalId: string; sessionId: string },
+  text: string,
+  options: TaskResultDeliveryOptions,
+): Promise<boolean> {
   const base = {
     principalId: fact.principalId,
     sessionId: fact.sessionId,
@@ -77,7 +117,7 @@ export async function deliverTaskResult(fact: TaskCompletionFact, options: TaskR
     return false;
   }
   // 结果原文过出口清理（与用户可见回复同一道尺）；剥完为空不投递（空帧用户什么都收不到）。
-  const stripped = stripServerPaths(fact.resultText).text;
+  const stripped = stripServerPaths(text).text;
   if (stripped.trim() === '') {
     options.log({
       event: 'task_result_delivery_suppressed',
@@ -105,4 +145,63 @@ export async function deliverTaskResult(fact: TaskCompletionFact, options: TaskR
     });
     return false;
   }
+}
+
+/**
+ * 单次完成投递（调用方 fire-and-forget；本函数内部吞掉一切错误并如实记账）。
+ * 返回是否真的发起了投递（测试断言用；生产调用方不依赖返回值）。
+ */
+export async function deliverTaskResult(fact: TaskCompletionFact, options: TaskResultDeliveryOptions): Promise<boolean> {
+  const base = {
+    principalId: fact.principalId,
+    sessionId: fact.sessionId,
+    taskId: fact.taskId,
+  };
+  const delivery = options.delivery;
+  if (delivery === undefined || delivery.deliveryMode !== 'live' || typeof delivery.sendText !== 'function') {
+    options.log({
+      event: 'task_result_delivery_suppressed',
+      ...base,
+      deliveryMode: delivery?.deliveryMode ?? 'unavailable',
+    });
+    return false;
+  }
+  // 结果正文的空白判定先行（2026-11-19）：resultText 为空/只有空白时仍按既有
+  // empty_after_strip 抑制——身份行本身不算正文，空结果不许只发一句「办完了」。
+  const bodyStripped = stripServerPaths(fact.resultText).text;
+  if (bodyStripped.trim() === '') {
+    options.log({
+      event: 'task_result_delivery_suppressed',
+      ...base,
+      deliveryMode: 'live',
+      reason: 'empty_after_strip',
+    });
+    return false;
+  }
+  // 任务身份行（2026-11-19）：「<业务名>」办完了：<结果正文>；name 缺省 = 无身份行（逐字节不变）。
+  const header = fact.name !== undefined && fact.name.trim() !== ''
+    ? `「${truncatedName(fact.name)}」办完了：`
+    : '';
+  return deliverText(fact, `${header}${bodyStripped}`, options);
+}
+
+/**
+ * 失败话术（2026-11-19 收口；单一来源，聊天推送与完成投递共用）：
+ * kind 由执行层码 / result_unknown 状态归类，取不到 = executor_failed；返回 failureMessageFor
+ * 的用户话术文本。**不含执行层原文、不含内部词**（执行层原始码只进分类，不进文本）。
+ */
+export function failureTextFor(code: string | undefined, status?: 'failed' | 'refused' | 'result_unknown'): string {
+  const kind = status === 'result_unknown'
+    ? 'unknown_result'
+    : classifyFailure({ code, status });
+  return failureMessageFor(kind).text;
+}
+
+/**
+ * 单次失败投递（调用方 fire-and-forget；内部吞错并如实记账）。
+ * 用户文本 = 话术模板（failureTextFor），**不含任何执行层原文/内部词**；
+ * kind 由底账执行事实的 code / result_unknown 状态归类，取不到 = executor_failed。
+ */
+export async function deliverTaskFailure(fact: TaskFailureFact, options: TaskResultDeliveryOptions): Promise<boolean> {
+  return deliverText(fact, failureTextFor(fact.code, fact.status), options);
 }

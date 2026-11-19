@@ -545,6 +545,23 @@ export interface BackgroundTaskCompletion {
   files?: readonly TurnFileRef[];
 }
 
+/**
+ * 一次后台执行回合的机械结局里，宿主**失败投递面**需要的事实（2026-11-19 收口）。
+ * 与 BackgroundTaskCompletion 对称的失败回调事实：任务终局 failed / result_unknown。
+ * **不含 Worker 失败汇报原文之外的任何内部形状**——原文只进日志与底账，不进用户文本
+ * （用户文本由投递面用 failureMessageFor 模板生成）。
+ */
+export interface BackgroundTaskFailure {
+  taskId: string;
+  principalId: string;
+  sessionId: string;
+  request: string;
+  /** 任务终局（failed / result_unknown——两者都不是成功，用户必须主动收到一句人话）。 */
+  status: 'failed' | 'result_unknown';
+  /** Worker 回合失败汇报原文（只进日志与底账；**不进用户文本**）。 */
+  reason: string;
+}
+
 export interface BackgroundDispatchInput {
   env: NodeJS.ProcessEnv;
   profile: ContextProfileConfig;
@@ -578,6 +595,12 @@ export interface BackgroundDispatchInput {
    * 异步化（fire-and-forget：不得阻塞收尾、不得改变任务事实）。缺省不接 = 零行为变化。
    */
   onTaskCompleted?: (completion: BackgroundTaskCompletion) => void;
+  /**
+   * 失败回调（2026-11-19 收口，与 onTaskCompleted 对称）：任务终局 failed / result_unknown
+   * 时触发。**只带机械事实（status/reason）**；用户可见文本由投递面用 failureMessageFor
+   * 模板生成，不在这里拼话术。缺省不接 = 零行为变化。
+   */
+  onTaskFailed?: (failure: BackgroundTaskFailure) => void;
   /** 预构建执行面/worker 驱动（装配核心复用；已给 taskExecutor 时不需要）。 */
   face?: ExecutionFace;
   workerDriver?: TurnDriver;
@@ -726,22 +749,35 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
       };
     }
   }
-  // B 切片：完成回调接缝——包装实际使用的执行器（注入的或默认构建的同一道包装）。
+  // B 切片：完成/失败回调接缝——包装实际使用的执行器（注入的或默认构建的同一道包装）。
   // 回调在 runner 收尾前同步触发；快活（结果已同回合交给模型）的抑制由装配调用方处置。
-  if (input.onTaskCompleted !== undefined) {
+  if (input.onTaskCompleted !== undefined || input.onTaskFailed !== undefined) {
     const inner = executor;
     const onTaskCompleted = input.onTaskCompleted;
+    const onTaskFailed = input.onTaskFailed;
     executor = {
       async execute(task, context) {
         const outcome = await inner.execute(task, context);
         if (outcome.kind === 'completed' && outcome.resultText.trim() !== '') {
-          onTaskCompleted({
+          onTaskCompleted?.({
             taskId: task.taskId,
             principalId: task.principalId,
             sessionId: task.sessionId,
             request: task.request,
             resultText: outcome.resultText,
             ...(outcome.files === undefined ? {} : { files: outcome.files }),
+          });
+        } else if (outcome.kind === 'failed' || outcome.kind === 'result_unknown') {
+          // 2026-11-19 失败投递收口：任务终局 failed/result_unknown 都触发失败回调
+          // （两者都不是成功）；result_unknown 落底账 failed + reason=result_unknown，
+          // 用户在话术层看到「不确定做没做完」，不是「没办成」。
+          onTaskFailed?.({
+            taskId: task.taskId,
+            principalId: task.principalId,
+            sessionId: task.sessionId,
+            request: task.request,
+            status: outcome.kind === 'result_unknown' ? 'result_unknown' : 'failed',
+            reason: outcome.reason,
           });
         }
         return outcome;

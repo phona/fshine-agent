@@ -100,8 +100,10 @@ describe('A 组·接入与基础（W-01～W-04b）', () => {
       await sim.waitFor('终帧出现', () => sim.finalBubbles().length === 1);
 
       const reply = sim.finalBubbles()[0]!.content;
-      // 如实转述 + 请用户补充（空参分支：执行层 QUERY_REQUIRED 的真实拒绝被转述）。
-      expect(reply).toContain('哪个集合');
+      // 口径变更（2026-11-19 模型可见面收口）：空参失败的原始原文（"Missing --collection
+      // or --topic"）不再逐字进模型投影——如实转述 + 请用户补充由 invalid_input 话术承载
+      // （「条件不行…换个写法再试」），不再要求原文里出现过「哪个集合」字样。
+      expect(reply).toContain('条件不行');
       // 零编造：全文没有具体数值（数字只会来自编造的行）。
       expect(reply).not.toMatch(/\d{3,}/);
       // 允许分支的机械事实：恰好 1 次空参执行、failed（E06 口径；0 执行分支同样允许，

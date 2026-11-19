@@ -426,7 +426,9 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     expect(projected).not.toContain('handle');
   });
 
-  it('⑥ S3 接续轮透传：底账句柄 + 用户原话交给执行层；只读不消耗、一轮只发一次', async () => {
+  it('⑥ S3 接续轮透传：底账句柄 + 用户原话交给执行层；只读不消耗、每条非只读都带', async () => {
+    // P0（owner 2026-11-19）起口径变更：句柄随**每条**非只读调用携带，不再一轮只发一次——
+    // 一次性/防重放由执行层自己保证，宿主截流会让「先 prepare 再 commit」的 commit 拿不到句柄。
     const registry = makeRegistry();
     const capture: WorkerCapture = { results: [] };
     const client = new S3Client('cf_s3_handle');
@@ -448,15 +450,87 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     expect(resumed.outcome).toBe('started');
     await runner.whenIdle();
 
-    // 只读调用不消耗确认。
+    // 只读调用不消耗确认、也不携带句柄。
     expect(client.requests[1]!.operation).toBe('dummy.query');
     expect(client.requests[1]!.confirmation).toBeUndefined();
     // 首条非只读执行拿到底账句柄 + 用户原话。
     expect(client.requests[2]!.operation).toBe('dummy.commit');
     expect(client.requests[2]!.confirmation).toEqual({ handle: 'cf_s3_handle', userText: '确认，提交吧' });
-    // 一轮只发一次：同一回合的第二条写不再带句柄。
+    // 同一回合的第二条写**也**带同一句柄（执行层自己保证一次性，宿主不再截流）。
     expect(client.requests[3]!.operation).toBe('dummy.commit');
-    expect(client.requests[3]!.confirmation).toBeUndefined();
+    expect(client.requests[3]!.confirmation).toEqual({ handle: 'cf_s3_handle', userText: '确认，提交吧' });
+  });
+
+  it('⑪ 续跑回合第一条非只读不再独吞句柄：同回合后续写调用也带（写不进去的根因）', async () => {
+    // P0（owner 2026-11-19 live 实测）：待确认句柄原挂在「首条非只读调用」上、发过即止，
+    // 而 Worker 第一句往往是 prepare 再才 commit——句柄被 prepare 消耗，真正 commit 时
+    // 手里空的 → commit 必然 CONFIRMATION_REQUIRED（写不进去）。修法：句柄随**每条**
+    // 非只读调用携带；一次性/防重放由执行层自己保证（契约不承诺宿主复用）。
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new S3Client('cf_every_call');
+    const executor = await createTaskExecutor({
+      client,
+      allowedOperations: ['dummy.query', 'dummy.commit'],
+      readOnlyOperations: ['dummy.query'],
+      // 轮 1：写提案；轮 2：两条写调用（先「prepare 形态」再「commit 形态」）都必须带句柄。
+      workerDriver: roundWorker([[WRITE_ARGS], [WRITE_ARGS, WRITE_ARGS]], capture),
+      registry,
+      workerTurnMs: 30_000,
+    });
+    const runner = await runBackground(registry, executor, 't_every');
+    // 首回合自造提案不带句柄（没有上一轮的用户表态）。
+    expect(client.requests[0]!.confirmation).toBeUndefined();
+    expect(registry.get('t_every', SCOPE).pendingQuestion?.confirmation?.handle).toBe('cf_every_call');
+
+    const resumed = runner.resume('t_every', { answer: '确认，提交吧', scope: SCOPE });
+    expect(resumed.outcome).toBe('started');
+    await runner.whenIdle();
+
+    // 续跑回合第一条非只读（相当于 prepare）带句柄……
+    expect(client.requests[1]!.confirmation).toEqual({ handle: 'cf_every_call', userText: '确认，提交吧' });
+    // ……第二条非只读（真正的 commit）也带同一句柄（执行层自己保证一次性，宿主不再截流）。
+    expect(client.requests[2]!.confirmation).toEqual({ handle: 'cf_every_call', userText: '确认，提交吧' });
+  });
+
+  it('⑫ 续跑委派文本出现机械事实：用户已确认上一轮提案（摘要），直接提交', async () => {
+    // 话术补丁不解决「新 Worker 不知道上一轮发生了什么」：续跑回合的委派必须携带一条
+    // **机械事实**（宿主从底账提案组装，不是模型话术）——Worker 据此直接提交、不重新出提案。
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    let delegationText = '';
+    const client = new S3Client('cf_delegation_fact');
+    const executor = await createTaskExecutor({
+      client,
+      allowedOperations: ['dummy.query', 'dummy.commit'],
+      readOnlyOperations: ['dummy.query'],
+      workerDriver: (() => {
+        const inner = roundWorker([[WRITE_ARGS], [WRITE_ARGS]], capture);
+        return {
+          async run(input) {
+            // 委派原文 = Worker 回合第一条 user 消息（renderWorkerDelegation 的产物）。
+            const first = input.messages.find((message) => message.role === 'user');
+            if (first !== undefined) delegationText = String((first as { content?: unknown }).content ?? '');
+            return inner.run(input);
+          },
+        };
+      })(),
+      registry,
+      workerTurnMs: 30_000,
+    });
+    const runner = await runBackground(registry, executor, 't_delegation');
+    const resumed = runner.resume('t_delegation', { answer: '确认，提交吧', scope: SCOPE });
+    expect(resumed.outcome).toBe('started');
+    await runner.whenIdle();
+
+    // 委派文本（renderWorkerDelegation 实际产出）必须包含机械事实 + 摘要 + 即时动作指令。
+    expect(delegationText).toContain('用户已确认上一轮提案');
+    expect(delegationText).toContain(SUMMARY);
+    expect(delegationText).toContain('直接提交');
+    expect(delegationText).toContain('不要重新生成提案');
+    // 机械事实是宿主的透传，不含句柄（Worker 永远看不到确认凭据）。
+    expect(delegationText).not.toContain('cf_delegation_fact');
+    expect(delegationText).not.toContain('handle');
   });
 
   it('⑦ 同回合 prepare 后立刻 commit：两条都不带句柄（同回合自我确认不是用户表态）', async () => {

@@ -145,9 +145,15 @@ describe('冒烟·执行很久后异常（slow_fault）', () => {
       expect(failed.failureReason).toContain('执行层未成功：dummy.query 返回 failed');
       expect(failed.failureReason).toContain('cannot be read after a long run');
 
-      // 不谎报成功：没有完成投递，也没有 completed/结果文本。
-      expect(sim.sdk.proactiveTexts).toHaveLength(0);
-      expect(sim.logs.some((line) => line['event'] === 'task_result_delivery_sent')).toBe(false);
+      // 不谎报成功：**零完成投递**（没有「办完了」正文）；失败走失败投递分支主动说一句人话
+      // （2026-11-19 收口：failureMessageFor 模板，不含执行层原文；事件名与完成投递共用
+      // task_result_delivery_sent——以正文形状区分，完成正文绝不出现）。
+      await sim.waitFor('失败主动投递恰一条', () => sim.sdk.proactiveTexts.length === 1, 30_000);
+      expect(sim.sdk.proactiveTexts[0]!.content).toContain('没办成');
+      expect(sim.sdk.proactiveTexts[0]!.content).not.toContain('办完了');
+      expect(sim.sdk.proactiveTexts[0]!.content).not.toContain('cannot be read after a long run');
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(sim.sdk.proactiveTexts).toHaveLength(1); // 没有第二条（非快活场景恰一条失败话术）
       expect(failed.replyText ?? failed.resultText ?? '').toBe('');
 
       // 用户追问：task_result 的真实失败原因被如实转述（不是「已完成」）。

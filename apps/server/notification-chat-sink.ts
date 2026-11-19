@@ -22,10 +22,17 @@ import type { Notification, NotificationKind, NotificationSink } from '../../pac
 import { stripServerPaths } from '../../packages/agent/src/server-paths';
 import { routeFromSessionId } from './task-completion-delivery';
 
-/** 主动推送给用户的意图（其余种类按上面的职责划分不推）。 */
+/**
+ * 主动推送给用户的意图（其余种类按上面的职责划分不推）。
+ *
+ * 2026-11-19 口径变更：**failed 不再由本 sink 推**——后台任务失败的主动告知改由
+ * `task-completion-delivery.ts` 的失败投递分支直发（deliverTaskFailure + failureMessageFor
+ * 话术模板，归类自底账执行事实的 code；不推 Worker 失败原文）。原因：renderNotification
+ * 的 failed 文案「没办成：<name>」与 failureMessageFor 的失败种类话术并存会双发；统一到
+ * 宿主模板后，本 sink 只留与完成/失败投递不重叠的等待/超时/忙/取消。
+ */
 export const PUSHED_NOTIFICATION_KINDS: readonly NotificationKind[] = [
   'waiting_user',
-  'failed',
   'timed_out',
   'resource_limited',
   'cancelled',

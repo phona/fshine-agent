@@ -186,7 +186,8 @@ describe('片 1：后台任务产物投递（server 级）', () => {
       expect(calls.files[0]!.files).toHaveLength(1);
       expect(calls.files[0]!.files[0]!.filename).toBe('汇总.xlsx');
       expect(calls.files[0]!.files[0]!.data.toString()).toBe('pk-bytes-of-summary');
-      expect(calls.texts[0]!.text).toBe('汇总表已生成。');
+      // 2026-11-19：完成投递带任务身份头「<业务名>」办完了：<正文>——用户一眼看出是哪件事。
+      expect(calls.texts[0]!.text).toMatch(/^「[^」]+」办完了：汇总表已生成。$/);
 
       // 事件面：文件投递记 sent、文本投递记 sent（都不是 suppressed）。
       await vi.waitFor(() => {

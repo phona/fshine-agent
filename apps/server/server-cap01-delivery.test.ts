@@ -37,6 +37,7 @@ import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fsh
 import type { DriverMessage, TurnDriver } from '../../packages/agent/src/driver-contract';
 import { createFileStore, type RegisteredFile } from '../../packages/agent/src/file-store';
 import type { TurnFileRef } from '../../packages/agent/src/execution-runtime';
+import type { TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/src/task-runner';
 import { openTaskStore } from '@fshine/core';
 import { createServer, deliverTurnFilesCore, type FileDeliveryPort } from './server';
 
@@ -572,6 +573,78 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
       expect(manifest.replaceAll('脚本内路径：in/', '')).not.toContain('/');
       const done = logs.filter((line) => line['event'] === 'message_done').at(-1);
       expect(done?.['fileManifestBytes']).toBe(Buffer.byteLength(manifest, 'utf8'));
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('⑧ 完成投递带任务身份：文本以「<业务名>」办完了：为头（name 从底账取，超长截断 30 字）', async () => {
+    // 2026-11-19 实测缺陷：完成消息没有任务身份，用户看不出是哪件事的
+    // （「不知道是不是 longtask 的」）。投递文本加一行简短身份。
+    const { port, texts } = livePort();
+    const { server } = await makeFixture({
+      steps: [TASK_RUN_STEP],
+      workerSteps: [WORKER_RUN_JS_STEP],
+      port,
+    });
+    try {
+      await server.handler(incoming('m-completion-name', '帮我汇总'));
+      await vi.waitFor(() => expect(texts).toHaveLength(1));
+      // 身份行 = 「业务名」办完了： + 结果正文（name 由底账 deriveTaskName 机械回落，
+      // TASK_RUN_CALL 的任务原文是「帮我把结果汇总成一份文件」）。
+      expect(texts[0]!.text).toMatch(/^「[^」]+」办完了：/);
+      expect(texts[0]!.text).toContain('汇总完成。');
+      // 身份头里的名字来自任务行（不是正文重复）；超长名截断到 30 字（机械截断）。
+      expect(texts[0]!.text.length).toBeGreaterThan('「」办完了：'.length);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('⑨ 失败投递的用户文本等于话术模板：归类自执行事实的码，不含 Worker 原文/内部词', async () => {
+    // 2026-11-19 收口：任务终局 failed 时用户可见文本用 failureMessageFor(kind) 模板
+    // （kind 由底账执行事实 error.code 归类；取不到 = executor_failed），**不投 Worker
+    // 失败汇报原文**——「COLLECTION_FAULT / gateway crashed」这类内部形态不进用户文本。
+    const dir = tempDir();
+    const dbPath = path.join(dir, 'state.db');
+    const delivery = livePort();
+    const { port, texts } = delivery;
+    const logs: Array<Record<string, unknown>> = [];
+    const server = await createServer({
+      env: { LLM_MODEL: 'test-model' },
+      config: { ...testConfig(), runtime: { taskRunWaitMs: 0 } },
+      dbPath,
+      createDrivers: () => ({
+        mainDriver: sequencedDriver([TASK_RUN_STEP], { toolNames: [], injections: [] }),
+        workerDriver: workerNeverCalled,
+      }),
+      createExecutionFace: async () => ({
+        client: new FaceClient(),
+        allowedOperations: ['dummy.query'],
+        readOnlyOperations: ['dummy.query'],
+      }),
+      // 假后台执行器：终局失败（Worker 失败汇报原文只进 reason，不进用户文本）。
+      taskExecutor: {
+        async execute(): Promise<TaskExecutionOutcome> {
+          return { kind: 'failed', reason: '执行层未成功：dummy.query 返回 failed：gateway crashed with exit 2（COLLECTION_FAULT）' };
+        },
+      },
+      fileDelivery: port,
+      logger: (line) => logs.push(line),
+    });
+    try {
+      await server.handler(incoming('m-failure-template', '帮我汇总'));
+      // 失败主动投递恰一条：用户文本 = 话术模板（executor_failed），无内部词。
+      await vi.waitFor(() => expect(texts).toHaveLength(1));
+      expect(texts[0]!.text).toBe('没办成。再试一次，还是先放着？');
+      expect(texts[0]!.text).not.toContain('COLLECTION_FAULT');
+      expect(texts[0]!.text).not.toContain('gateway');
+      expect(texts[0]!.text).not.toContain('执行层');
+      expect(texts[0]!.text).not.toContain('dummy.query');
+      // 事件面：失败投递记 sent（不是 suppressed）。
+      await vi.waitFor(() => {
+        expect(logs.some((line) => line['event'] === 'task_result_delivery_sent')).toBe(true);
+      });
     } finally {
       await server.close();
     }
