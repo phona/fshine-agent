@@ -27,12 +27,13 @@
 
 - `product/interaction-contract.md` — 什么算"好用"：五条可验收尺子（不打扰 / 有预期 / 可查可接管 / 结论有据 / 分工透明）+ 每条现状。
 
-## eval（评测口径与现行基线，5 篇）
+## eval（评测口径与现行基线，6 篇）
 
 怎么判、样本与预算怎么先写死、接下来还要跑什么——评测只看这一组，过程读数不回流成口径。
 
 - `eval/README.md` — 三类入口、判据冻结纪律、预注册规则、读数与退出码（现行口径）。
-- `product/business-coverage.md` — 业务级用例覆盖图（持续更新）。
+- `eval/coverage-matrix.md` — 用户级自动化覆盖矩阵：按「用户能做什么」组织的覆盖图 + 场景 → 测试用例定位（`scripts/coverage-matrix-guard.test.ts` 守卫）。
+- `product/business-coverage.md` — 业务级覆盖图（2026-11-19 起已被 `eval/coverage-matrix.md` 取代，仅留历史指针）。
 - `history/r4-acceptance.md` — R4 验收用例设计（v1 预注册基线，测试按 P*-T* 编号引用，已归档）。
 - `history/long-session-prereg.md` — R6 长会话压缩预注册（Wave1 已冻结、Wave2 待裁决；`scripts/eval/long-session/wave1-runner.ts:67` 运行时按其算 sha256，已归档）。
 - `history/business-e2e-batch2-prereg.md` — P2 业务 E2E 预注册（七场景 21 样本 / 27 会话；尚未跑真实模型，仍是下一次运行的口径，已归档）。
