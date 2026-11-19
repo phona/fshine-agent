@@ -214,8 +214,8 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
     const reader = createNotificationReader(dbPath);
     try {
       const reply = await server.handler(incoming('user-a', 'conv-a', 'msg-1', '查 documents W202611'));
-      // 「只交办」回合静默（owner 2026-11-19）：模型那段受理卡片不发终帧（reply 为空）。
-      expect(reply).toBe('');
+      // owner 2026-11-19：用户看到的话永远是模型说的——交办回合的模型文本原样送达。
+      expect(reply).toBe('已受理，稍后通知你。');
       // 受理事实（task_run 返回）：只给机械事实（accepted/status + name/taskId），无回执话术、无编号
       const accepted = records[0]!.execResults[0] as Record<string, unknown>;
       expect(accepted).toMatchObject({ accepted: true, status: 'running' });

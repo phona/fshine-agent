@@ -180,8 +180,8 @@ describe('片 1：后台任务产物投递（server 级）', () => {
     });
     try {
       const reply = await server.handler(incoming('msg-bg-1', '把数据做成表格发我'));
-      // 「只交办」回合静默（owner 2026-11-19）：模型那段受理卡片不发终帧（reply 为空）。
-      expect(reply).toBe('');
+      // owner 2026-11-19：用户看到的话永远是模型说的——交办回合的模型文本原样送达。
+      expect(reply).toBe('已受理：把数据做成表格发我');
 
       // 后台完成 → 文件经交付面（sendToConversation）投递；文本经 sendText 单独送达。
       await vi.waitFor(() => {

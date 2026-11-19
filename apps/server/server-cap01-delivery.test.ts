@@ -375,8 +375,8 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     });
     try {
       const reply = await server.handler(incoming('m-silent', '帮我汇总'));
-      // 「只交办」回合静默（owner 2026-11-19）：模型正文不发终帧（reply 为空）。
-      expect(reply).toBe('');
+      // owner 2026-11-19：用户看到的话永远是模型说的——交办回合的模型正文原样送达。
+      expect(reply).toBe('汇总完成。');
       await vi.waitFor(() => {
         expect(logs.filter((line) => line['event'] === 'file_delivery')).toHaveLength(1);
       });

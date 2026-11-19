@@ -62,7 +62,7 @@ import {
 import { createResourcePolicy, fileRefTtlMsOf, resolveRuntimeConfig } from '../../packages/agent/src/resource-policy';
 import { SessionPersistence } from '../../packages/agent/src/session-persistence';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
-import { deriveTaskName, type TaskRegistry, type TaskScope } from '../../packages/agent/src/task-registry';
+import { deriveTaskName } from '../../packages/agent/src/task-registry';
 import { failureMessageFor } from '../../packages/agent/src/user-facing-failure';
 import type { TaskExecutor, TaskRunner } from '../../packages/agent/src/task-runner';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../../packages/agent/src/worker-skills';
@@ -425,26 +425,6 @@ export function resolveSingleProfile(config: AppConfig): { id: string; profile: 
  */
 export function workspaceRootOf(dbPath: string): string {
   return path.join(path.dirname(dbPath), 'workspace');
-}
-
-/**
- * 提案回合取真实摘要（底账 pendingQuestion.confirmation.summary）；取不到返回 undefined。
- * 只读机械事实、不改写；越权/找不到静默跳过（摘要缺失时提案卡走兜底话术，不让提案丢失）。
- */
-function proposalSummaryOf(
-  registry: TaskRegistry,
-  taskIds: readonly string[],
-  scope: TaskScope,
-): string | undefined {
-  for (const taskId of taskIds) {
-    try {
-      const summary = registry.get(taskId, scope).pendingQuestion?.confirmation?.summary;
-      if (summary !== undefined && summary.trim() !== '') return summary;
-    } catch {
-      // 跳过：非本 scope 任务或已清空（摘要缺失时用兜底提案卡）。
-    }
-  }
-  return undefined;
 }
 
 export async function createServer(deps: ServerDeps): Promise<Server> {
@@ -1314,89 +1294,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       }
       // CAP-01 S1 交付 B（v8 §7）：handler 只返回 text；文件经装配注入的端口在回合末主动投递。
       // 投递失败/无端口时以话术如实纠正正文，但不判回合失败（文件未送达 ≠ 回报失败）。
+      // owner 2026-11-19：用户看到的话永远是模型说的——提案回合、只交办回合、no-target
+      // 都不再由宿主替换/吞掉模型文本（措辞放手；句柄、waiting_user 校验、同回合自确认
+      // 判等待、执行层 one-shot 绑定与 A2b 同对象锁等动作边界一律不动）。
       let reply = turn.reply;
       const files = turn.files ?? [];
-      /**
-       * 「只交办」回合静默（确定性宿主规则；owner 2026-11-19）：本回合只交办了任务
-       * （taskIds 非空）且**没有任何执行事实、也没把结果交回模型**——模型这段文本就是
-       * 「已经交给后台在办」那类受理卡片，**不发终帧**（用户静默到结果由完成投递送达）；
-       * 只记一条结构化事件（taskIds/replyBytes），不把卡片文本进日志。
-       *
-       * 例外（一律不许静默，`hasResultOrExecution`）：
-       *   · 本回合有执行事实（executions 非空，含 needs_confirmation / needs_input 的写确认
-       *     提案与补充问题）——那些必须让用户看见，照常送达；
-       *   · 本回合已把某任务结果/失败交回模型（relayedTaskIds / pushSuppressedTaskIds 非空
-       *     ——快活完成、快活失败、等补充）：那段文本是**结果/说明**而不是受理卡片，照常送达；
-       *   · **回复以问号结尾**（owner 2026-11-19：判据只做格式——trim 后以 ？ 或 ? 结尾，
-       *     不做语义/关键词）：同回合交办 + 顺带向用户反问时，吞掉问题比多一句话糟得多。
-       * 空回复的既有行为不变（下面照常判回合失败）。
-       */
-      const hasResultOrExecution = turn.executions.length > 0
-        || (turn.relayedTaskIds?.length ?? 0) > 0
-        || (turn.pushSuppressedTaskIds?.length ?? 0) > 0;
-      const trimmedReply = reply.trim();
-      const endsWithQuestion = trimmedReply.endsWith('？') || trimmedReply.endsWith('?');
-      /**
-       * 提案回合不让模型自己说话（2026-11-19）：本回合结局是写确认提案（executions 里有
-       * needs_confirmation）时，模型那段「任务已受理，正在办理中…如果又卡在确认凭据那一环…」
-       * 是噪声、还可能泄露内部词（「确认凭据」）。宿主用**提案卡**替换模型文本——卡 = 宿主
-       * 唯一话术来源 `failureMessageFor('needs_confirmation', { summary })`（含真实摘要 +
-       * 两个动作「确认/算了」）。用户看到的永远是宿主的机械事实卡，不是模型转述；模型文本
-       * 不进用户面。问号结尾仍例外（与「只交办回合静默」同一格式判据：同回合顺带反问的话
-       * 比少一嘴更该留着）。
-       */
-      const proposalTurn = turn.executions.some((execution) => execution.status === 'needs_confirmation');
-      let proposalCard: string | undefined;
-      if (proposalTurn && !endsWithQuestion) {
-        // 摘要来源：本回合 TurnResult 的机械事实优先（同步/inline 路径的提案停在会话内存，
-        // 不落底账 pendingQuestion）；回落到任务底账（async/后台路径任务已落 waiting_user）。
-        const summary = turn.pendingConfirmation?.summary ?? proposalSummaryOf(taskRegistry, turn.taskIds, scope);
-        proposalCard = failureMessageFor('needs_confirmation', summary === undefined ? {} : { summary }).text;
-      }
-      const dispatchSilent = turn.taskIds.length > 0
-        && !hasResultOrExecution
-        && !endsWithQuestion
-        && trimmedReply !== '';
-      /**
-       * 「没有可确认/接续对象」的宿主话术（owner 2026-11-19 真机噪声修复）：本回合唯一动作是
-       * task_confirm/task_resume 且给出 no-target 结局时（`turn.confirmNoTargetLine`），用宿主
-       * 确定性话术**替换**模型那段自编诊断（「任务仍在办理中…我不会把你的确认当成已提交…」）。
-       * 与提案卡同一套机制；问号结尾仍例外（同回合顺带反问的话留着）。
-       */
-      const confirmNoTargetLine = turn.confirmNoTargetLine;
-      if (confirmNoTargetLine !== undefined && !endsWithQuestion) {
-        log({
-          event: 'turn_confirm_no_target_spoken',
-          principalId,
-          sessionId,
-          speakerId,
-          messageId: message.messageId,
-          replyBytes: Buffer.byteLength(reply, 'utf8'),
-        });
-        reply = confirmNoTargetLine;
-      } else if (proposalCard !== undefined) {
-        log({
-          event: 'turn_proposal_card_delivered',
-          principalId,
-          sessionId,
-          speakerId,
-          messageId: message.messageId,
-          taskIds: [...turn.taskIds],
-          replyBytes: Buffer.byteLength(reply, 'utf8'),
-        });
-        reply = proposalCard;
-      } else if (dispatchSilent) {
-        log({
-          event: 'turn_dispatch_silent',
-          principalId,
-          sessionId,
-          speakerId,
-          messageId: message.messageId,
-          taskIds: [...turn.taskIds],
-          replyBytes: Buffer.byteLength(reply, 'utf8'),
-        });
-        reply = '';
-      }
       let delivery: { status: string; files: number } | undefined;
       if (files.length > 0) {
         const outcome = await deliverTurnFiles({
@@ -1422,9 +1324,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // message_done。**「只有文件、正文为空」不判失败**（v8 §7 四必守 #2）：文件走投递面，
       // 正文空帧由投递事实话术/宿主兜底话术补足——判失败就走不到投递了。放在这里抛出 =
       // 走既有的「回合失败」路径（失败不进重投缓存，渠道适配器的 handler 异常分支回失败
-      // 话术），不新造机制、不重试。**「只交办回合静默」不是模型失败**（上面已确定性判定）：
-      // 那种回合本就不该有正文帧，跳过这条失败判定。
-      if (!dispatchSilent && reply.trim() === '' && files.length === 0) {
+      // 话术），不新造机制、不重试。
+      if (reply.trim() === '' && files.length === 0) {
         throw new Error('本回合未产出可用回复（模型侧失败），本回合未完成。');
       }
       return {

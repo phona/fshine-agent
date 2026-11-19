@@ -42,7 +42,7 @@
 
 | 场景 | 自动用例 | 层级 | 覆盖度 | 缺口说明 |
 | --- | --- | --- | --- | --- |
-| 慢活受理：交办回合**对用户静默**（零终帧、零受理话术），任务后台推进 | `scripts/eval/wecom-sim/cases-g-task.test.ts:W-26 超窗请求`<br>`apps/server/server-task-wait-window.test.ts:b. 慢活：只交办回合对用户静默`<br>`scripts/eval/smoke/slow-faults.test.ts:只交办回合用户侧静默`<br>`scripts/r4-integ-joint.test.ts:① 受理快速返回` | 宿主机制 + 执行层 | 已覆盖 | — |
+| 慢活受理：交办回合**照发模型说的话**（逐字，宿主不再静默/替换），任务后台推进 | `scripts/eval/wecom-sim/cases-g-task.test.ts:W-26 超窗请求`<br>`apps/server/server-task-wait-window.test.ts:b. 慢活：只交办回合照发模型说的话`<br>`scripts/eval/smoke/slow-faults.test.ts:交办回合照发模型说的话`<br>`scripts/r4-integ-joint.test.ts:① 受理快速返回` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 快活：同回合给结果、零受理回执、零主动投递 | `scripts/eval/wecom-sim/cases-g-task.test.ts:W-28 快活（缺省 8000ms 窗口内完成）`<br>`apps/server/server-task-wait-window.test.ts:a. 快活：同回合回复带结果` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 后台完成：唤醒会话模型 → 投递它说的话，恰一次；silent 部署零投递（suppressed） | `apps/server/server-task-wait-window.test.ts:c. 慢活完成（live）：主动投递恰好一次`<br>`apps/server/server-task-wait-window.test.ts:c. 慢活完成（silent）：零投递`<br>`apps/server/server-cap01-delivery.test.ts:⑧ 完成投递文本 = 唤醒回合模型那句`<br>`apps/server/server-notification-push.test.ts:③ 后台完成 → 恰一次完成投递`<br>`apps/server/server-completion-wake.test.ts:① 主路径` | 宿主机制 | 已覆盖 | — |
 | 后台完成·唤醒失败：宿主兜底一句（host_fault）+ 事实留待注入 | `apps/server/server-completion-wake.test.ts:③ 唤醒失败（空回复）`<br>`apps/server/server-completion-wake.test.ts:③b 会话拿不到（驱动无唤醒能力）`<br>`apps/server/server-completion-wake.test.ts:④ 走岔路` | 宿主机制 | 已覆盖 | — |
@@ -60,7 +60,7 @@
 
 | 场景 | 自动用例 | 层级 | 覆盖度 | 缺口说明 |
 | --- | --- | --- | --- | --- |
-| 长任务受理：交办回合静默、后台挂起不占会话、完成后主动投递一次 | `scripts/eval/wecom-sim/cases-h-newcap.test.ts:W-42 长任务`<br>`scripts/long-task-assembly.test.ts:accepted → 任务 running 且槽位/租约释放` | 宿主机制 + 执行层 | 已覆盖 | — |
+| 长任务受理：交办回合照发模型的话、后台挂起不占会话、完成后主动投递一次 | `scripts/eval/wecom-sim/cases-h-newcap.test.ts:W-42 长任务`<br>`scripts/long-task-assembly.test.ts:accepted → 任务 running 且槽位/租约释放` | 宿主机制 + 执行层 | 已覆盖 | — |
 | accepted 后续跑 / abort 取消 / 停不下来如实回 running | `packages/agent/long-task-async.test.ts:① accepted → 回合结束、槽位释放`<br>`packages/agent/long-task-async.test.ts:③ abort → 任务 cancelled` | 宿主机制 | 已覆盖 | — |
 | 长任务跨重启：新 runner 从底账 accepted 行重新 wait 续跑、不重复发起 | `packages/agent/long-task-async.test.ts:④ 重启：关库重开，新 runner 从底账 accepted 行重新 wait` | 宿主机制 | 已覆盖 | — |
 | 未声明 long_running 却返回 accepted → fail-closed | `packages/agent/long-task-async.test.ts:⑤ 未声明 long_running 的 operation 返回 accepted` | 宿主机制 | 已覆盖 | — |
@@ -71,6 +71,7 @@
 | 场景 | 自动用例 | 层级 | 覆盖度 | 缺口说明 |
 | --- | --- | --- | --- | --- |
 | 写请求先给提案零写入；确认后写入读回；二次确认确定性拒绝 | `scripts/eval/wecom-sim/cases-f-write.test.ts:W-22 写请求先给提案、零写入`<br>`packages/agent/write-confirmation.test.ts:prepare 只出提案不写`<br>`packages/agent/write-confirmation.test.ts:重复确认：同一句柄只执行一次`<br>`scripts/host-write-confirmation.test.ts:1 正常：prepare → 用户「确认」` | 宿主机制 + 执行层 | 已覆盖 | — |
+| 提案内容让用户看到「要写入什么」：摘要作为机械事实交给模型，模型怎么说用户就逐字收到什么 | `apps/server/server-task-wait-window.test.ts:b2. 提案回合：模型自己说要写入什么`<br>`packages/agent/background-write-confirmation.test.ts:⑧ 提案回合走岔路`<br>`scripts/eval/wecom-sim/cases-f-write.test.ts:W-22 写请求先给提案、零写入` | 宿主机制 + 真模型统计 | 部分 | **宿主不再保证**（提案卡替换已删）：自动化只钉住「执行层摘要作为机械事实到达模型」与「模型说什么，用户逐字收到什么」；**没有真模型用例断言模型稳定转述摘要**（eval:user E01–E15 无写确认场景）。这条只能由真模型评测守——脚本模型走岔路（W-29 / ⑧）时用户看不到「要写入什么」，属已接受的措辞风险 |
 | 不确认 / 改说别的：零写入、提案未被消费仍可拒绝 | `packages/agent/write-confirmation.test.ts:不确认：零写入`<br>`scripts/host-write-confirmation.test.ts:2 不确认、改说别的` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 句柄安全：越权 / 过期 / 缺句柄 / 绑定不一致 → 拒绝且零写入 | `packages/agent/write-confirmation.test.ts:越权：另一个会话`<br>`packages/agent/write-confirmation.test.ts:过期：构造过期提案`<br>`packages/agent/write-confirmation.test.ts:缺句柄：commit 没有 confirmation`<br>`packages/agent/write-confirmation.test.ts:绑定不一致：commit 的 collection/window/count 与提案不符` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 只读装配下写请求：明确拒绝、零写入、不宣称成功（E11 同口径） | `scripts/eval/wecom-sim/cases-f-write.test.ts:W-25 只读装配下同一写请求`<br>`scripts/write-confirm-loop.test.ts:默认只读 principal`<br>`scripts/write-confirm-loop.test.ts:写链路专用 principal`<br>`scripts/write-confirm-loop.test.ts:resolveExecutionFace（不开开关）` | 宿主机制 + 执行层 | 已覆盖 | — |

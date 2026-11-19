@@ -24,7 +24,7 @@ import type {
   ExecutionOutcome,
 } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver } from './src/driver-contract';
-import { createSession, createTaskExecutor, EXECUTE_OPERATION_TOOL, NO_WAITING_TARGET_LINE, NO_WAITING_TARGET_RUNNING_LINE } from './src/execution-runtime';
+import { createSession, createTaskExecutor, EXECUTE_OPERATION_TOOL, NO_WAITING_TARGET_FACT, NO_WAITING_RESUME_TARGET_FACT } from './src/execution-runtime';
 import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
 import type { TaskRegistry } from './src/task-registry';
 import { createTaskRunner, type TaskExecutionOutcome, type TaskExecutor, type TaskRunner } from './src/task-runner';
@@ -885,7 +885,7 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
     expect(internalTermIn(message)).toBeUndefined();
   });
 
-  it('④ 无提案确认：没有等待中的提案时 task_confirm 给宿主机说话术（不新建任务、不执行）', async () => {
+  it('④ 无提案确认：没有等待中的提案时 task_confirm 给模型机械事实（不新建任务、不执行）', async () => {
     const registry = makeRegistry();
     // 一个「等补充信息」的等待任务（有 waiting_user，但没有 confirmation 提案）。
     registry.begin({ taskId: 't_needs_input', principalId: SCOPE.principalId, sessionId: SCOPE.sessionId, request: '查 alpha 的窗口' });
@@ -893,14 +893,14 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
     const before = registry.list(SCOPE).length;
     const runner = makeRunner(registry, await flowExecutor(new ConfirmFlowClient(), registry, roundWorker([], { results: [] })));
 
-    // 没有等待确认的提案 → no-target 结局 + 宿主机说话术（不再抛错让模型自由发挥）。
+    // 没有等待确认的提案 → no-target 结局 + 机械事实（不是给用户的成句话术）。
     const result = await callMainTool({ registry, tool: 'task_confirm', args: {}, runner });
     expect(result.ok).toBe(true);
-    const value = result.value as { outcome?: string; userLine?: string };
+    const value = result.value as { outcome?: string; fact?: string; runningTasks?: number };
     expect(value.outcome).toBe('no_waiting_task');
-    // 只有等待中的（非在跑）任务 → 「现在没有等你确认的事。」
-    expect(value.userLine).toBe(NO_WAITING_TARGET_LINE);
-    expect(internalTermIn(value.userLine!)).toBeUndefined();
+    expect(value.fact).toBe(NO_WAITING_TARGET_FACT);
+    expect(value.runningTasks).toBe(0);
+    expect(internalTermIn(value.fact!)).toBeUndefined();
     // 没有新建任务、没有发起执行。
     expect(registry.list(SCOPE)).toHaveLength(before);
     expect(registry.get('t_needs_input', SCOPE).status).toBe('waiting_user');
@@ -924,22 +924,23 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
   });
 
   /**
-   * 跑一个 Main 回合（唯一动作 = 给定工具调用），返回 TurnResult——验证 server 替换所依赖的
-   * `confirmNoTargetLine` 宿主话术字段。模型文本故意写成真机噪声形状的自编诊断。
+   * 跑一个 Main 回合（脚本模型 = 调用给定工具，然后说一句给定的话），返回 TurnResult 与
+   * 工具结果——验证 no-target 时工具结果只给模型机械事实、模型文本原样返回（宿主不替换）。
    */
-  async function noTargetTurn(input: {
+  async function scriptedConfirmTurn(input: {
     registry: TaskRegistry;
     runner: TaskRunner;
     tool: string;
     args: Record<string, unknown>;
-  }) {
+    modelText: string;
+  }): Promise<{ reply: string; toolResults: unknown[] }> {
+    const toolResults: unknown[] = [];
     const mainDriver: TurnDriver = {
       async run(turnInput) {
-        await turnInput.exec(input.tool, input.args).catch(() => undefined);
-        return {
-          text: '任务仍在办理中，我不会把你的确认当成已经提交过；等它进入待确认环节再说。',
-          messages: [] as unknown as DriverMessage[],
-        };
+        toolResults.push(await turnInput.exec(input.tool, input.args).catch((error: unknown) => {
+          throw error;
+        }));
+        return { text: input.modelText, messages: [] as unknown as DriverMessage[] };
       },
     };
     const session = await createSession({
@@ -953,41 +954,93 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
       taskRegistry: input.registry as never,
       taskRunner: input.runner,
     });
-    return session.send('确认');
+    const turn = await session.send('确认');
+    return { reply: turn.reply, toolResults };
   }
 
-  it('⑥ 没有等确认的事时：宿主给出确定性话术（不让模型自编诊断），短且过内部词闸', async () => {
+  it('⑥ 没有等确认的事：工具结果给模型机械事实，模型的话原样返回（宿主不再替换）', async () => {
     const registry = makeRegistry();
     const runner = makeRunner(registry, await flowExecutor(new ConfirmFlowClient(), registry, roundWorker([], { results: [] })));
-    const turn = await noTargetTurn({ registry, runner, tool: 'task_confirm', args: {} });
-    // 宿主话术字段就位（server 用它替换 reply）；模型那段自编诊断仍在 reply 里，等 server 替换。
-    expect(turn.confirmNoTargetLine).toBe(NO_WAITING_TARGET_LINE);
-    expect(turn.confirmNoTargetLine!.length).toBeLessThan(20);
-    expect(internalTermIn(turn.confirmNoTargetLine!)).toBeUndefined();
-    expect(turn.reply).toContain('办理中');
+    const modelText = '现在没有等你确认的事。还有其他要办的吗？';
+    const { reply, toolResults } = await scriptedConfirmTurn({
+      registry, runner, tool: 'task_confirm', args: {}, modelText,
+    });
+    // 工具结果 = 机械事实（不是给用户的成句话术）。
+    expect(toolResults[0]).toMatchObject({
+      outcome: 'no_waiting_task',
+      fact: NO_WAITING_TARGET_FACT,
+      runningTasks: 0,
+    });
+    expect(internalTermIn((toolResults[0] as { fact: string }).fact)).toBeUndefined();
+    // 用户看到的就是脚本模型那句话（提交面不再有宿主替换字段）。
+    expect(reply).toBe(modelText);
   });
 
-  it('⑦ 有在跑的任务时：宿主话术是「还在办，办完发你。」', async () => {
+  it('⑦ 有在跑的任务时：事实带 runningTasks=1；接续的 no-target 事实按 kind 区分', async () => {
     const registry = makeRegistry();
     // begin 缺省 status=running：本会话有一个在跑的任务。
     registry.begin({ taskId: 't_running', principalId: SCOPE.principalId, sessionId: SCOPE.sessionId, request: '在跑的活' });
     const runner = makeRunner(registry, await flowExecutor(new ConfirmFlowClient(), registry, roundWorker([], { results: [] })));
-    const turn = await noTargetTurn({ registry, runner, tool: 'task_confirm', args: {} });
-    expect(turn.confirmNoTargetLine).toBe(NO_WAITING_TARGET_RUNNING_LINE);
-    expect(turn.confirmNoTargetLine!.length).toBeLessThan(20);
-    expect(internalTermIn(turn.confirmNoTargetLine!)).toBeUndefined();
+    const confirm = await scriptedConfirmTurn({
+      registry, runner, tool: 'task_confirm', args: {}, modelText: '现在没有等你确认的事。',
+    });
+    expect(confirm.toolResults[0]).toMatchObject({
+      outcome: 'no_waiting_task',
+      fact: NO_WAITING_TARGET_FACT,
+      runningTasks: 1,
+    });
+    const resume = await scriptedConfirmTurn({
+      registry, runner, tool: 'task_resume', args: { answer: '按这版' }, modelText: '当前没有等待接续的任务。',
+    });
+    expect(resume.toolResults[0]).toMatchObject({
+      outcome: 'no_waiting_task',
+      fact: NO_WAITING_RESUME_TARGET_FACT,
+      runningTasks: 1,
+    });
+    expect(confirm.reply).toBe('现在没有等你确认的事。');
+    expect(resume.reply).toBe('当前没有等待接续的任务。');
   });
 
-  it('⑧ 正常确认路径不受影响：唯一动作是 task_confirm 但命中提案 → 无 no-target 话术', async () => {
+  it('⑧ 提案回合走岔路：脚本模型不带摘要乱说 → 用户逐字收到它的话；任务仍 waiting_user、句柄未消费、执行层只调一次', async () => {
     const registry = makeRegistry();
-    const capture: WorkerCapture = { results: [] };
     const client = new ConfirmFlowClient();
-    const executor = await flowExecutor(client, registry, roundWorker([[PREPARE_ARGS], [COMMIT_ARGS]], capture));
-    const runner = await runBackground(registry, executor, 't_confirm_normal');
-    expect(registry.get('t_confirm_normal', SCOPE).pendingQuestion?.confirmation?.handle).toBe('cf_flow_1');
-    const turn = await noTargetTurn({ registry, runner, tool: 'task_confirm', args: {} });
-    expect(turn.confirmNoTargetLine).toBeUndefined();
+    const executor = await flowExecutor(client, registry, roundWorker([[PREPARE_ARGS]], { results: [] }));
+    const runner = makeRunner(registry, executor);
+    const modelText = '好，我先记下了，回头再说。';
+    const mainDriver: TurnDriver = {
+      async run(turnInput) {
+        await turnInput.exec('task_run', { task: '把 alpha 集合提交到生产' });
+        // 走岔路：不提要写入什么（不带摘要），只说一句进程话。
+        return { text: modelText, messages: [] as unknown as DriverMessage[] };
+      },
+    };
+    const session = await createSession({
+      principalId: SCOPE.principalId,
+      sessionId: SCOPE.sessionId,
+      client: new ReadClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver,
+      workerDriver: { async run() { throw new Error('（测试）Worker 不应被调用'); } },
+      mainSystemPrompt: '（测试）Main 系统提示',
+      taskRegistry: registry as never,
+      taskRunner: runner,
+      taskDispatch: 'async',
+      taskRunWaitMs: 0,
+    });
+    const turn = await session.send('把 alpha 集合提交到生产');
     await runner.whenIdle();
-    expect(registry.get('t_confirm_normal', SCOPE).status).toBe('completed');
+
+    // 用户可见面 = 模型原话（宿主不替换），且不含内部词/句柄。
+    expect(turn.reply).toBe(modelText);
+    expect(internalTermIn(turn.reply)).toBeUndefined();
+    expect(JSON.stringify(turn)).not.toContain('cf_flow_1');
+    // 机械闸不受影响：任务仍等待确认、句柄仍在底账、执行层没被重复调用。
+    const task = registry.get(turn.taskIds[0]!, SCOPE);
+    expect(task.status).toBe('waiting_user');
+    expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_flow_1');
+    expect(client.requests).toHaveLength(1);
+    for (const request of client.requests) expect(request.confirmation).toBeUndefined();
+    // 提案摘要的机械事实在底账里（模型/用户面拿不到句柄）。
+    expect(task.pendingQuestion?.confirmation?.summary).toBe(SUMMARY);
   });
 });

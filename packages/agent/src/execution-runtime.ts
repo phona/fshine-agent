@@ -227,13 +227,11 @@ export const TASK_CONFIRM_TOOL_SCHEMA: Record<string, unknown> = {
 };
 
 /**
- * 「没有可确认/接续对象」时的宿主话术（owner 2026-11-19 真机噪声修复）：用户在没有待确认对象时
- * 说「确认」，模型会自行发挥一整段诊断（「任务仍在办理中…我不会把你的确认当成已提交…」）——
- * 用户可见噪声且夹带内部概念。宿主改为**确定性话术**：本会话有在跑的任务就说在办，没有就说没有，
- * 由 server 用这句替换模型文本（与提案卡替换模型噪声同一套机制）。短、业务语言、过 internalTermIn。
+ * 「没有可确认/接续对象」时给模型的机械事实（owner 2026-11-19：宿主不再替模型说话）。
+ * 只陈述事实，措辞归模型；不是给用户的成句话术，不进任何宿主替换路径。
  */
-export const NO_WAITING_TARGET_LINE = '现在没有等你确认的事。';
-export const NO_WAITING_TARGET_RUNNING_LINE = '还在办，办完发你。';
+export const NO_WAITING_TARGET_FACT = '当前没有等待确认的任务。';
+export const NO_WAITING_RESUME_TARGET_FACT = '当前没有等待接续的任务。';
 
 /**
  * 缺口 2 臂 B（实验面）：Main 按需读取业务技能正文。工具名复用 skills.ts 的 READ_SKILL_TOOL（不另起名）；
@@ -501,8 +499,7 @@ export const MAIN_PROTOCOL_NOTE = [
   '- 执行层的调用失败、且**没有说明可以重试**（`retryable` 为 false 或未声明）时：如实说明它接受'
     + '什么、不接受什么，并问用户要不要换口径；同一对象本回合不要再换参数重试，也不要自行按维度'
     + '取值批量查询——那是替用户扩大范围。',
-  // owner 2026-11-19：删除「task_run 返回已受理/在后台办理中时如实告诉用户…」——宿主对
-  // 「只交办」回合已确定性静默（server handler 的 turn_dispatch_silent），该句是死提示词。
+  // owner 2026-11-19：交办后不再由宿主固定受理回执——模型的话原样投递，无过程话时用户静默到结果。
   '- 本轮执行面只开放查询（只读）操作；用户要求写入或变更时，如实说明该能力尚未开通。',
 ].join('\n');
 
@@ -522,7 +519,7 @@ export const MAIN_PROTOCOL_NOTE_WITH_WRITES = [
   '- 执行层的调用失败、且**没有说明可以重试**（`retryable` 为 false 或未声明）时：如实说明它接受'
     + '什么、不接受什么，并问用户要不要换口径；同一对象本回合不要再换参数重试，也不要自行按维度'
     + '取值批量查询——那是替用户扩大范围。',
-  // owner 2026-11-19：同上删除「如实告诉用户事情已在后台办理…」（死提示词，只交办回合已静默）。
+  // owner 2026-11-19：交办后不再由宿主固定受理回执——模型的话原样投递。
   '- 本轮执行面开放查询与写入操作。执行层返回待确认时，把执行层给出的确认摘要原样转给用户；'
     + '用户表态后的下一回合再继续，不要替用户假定已确认。',
   '- 写入是否生效以执行层返回的读回验证为准；执行层返回失败或读回不一致时，如实转述，不得说成成功。',
@@ -931,20 +928,6 @@ export interface TurnResult {
    * 后台通知推送据此不重复发一条；受理回执路径的任务不在列（它们的结局仍靠推送送达）。
    */
   pushSuppressedTaskIds?: readonly string[];
-  /**
-   * 本回合产出的写确认提案（机械事实；**只带摘要，绝不带 handle**——handle 是宿主凭据，
-   * 不进任何模型/用户可见投影）。宿主的提案回合据此用唯一话术来源渲染**提案卡**
-   * （摘要 + 两个动作「确认/算了」）替换模型文本，不再让模型转述（2026-11-19：模型那段
-   * 「正在办理中…确认凭据…」是噪声且泄露内部词）。缺省 = 本回合无提案。
-   */
-  pendingConfirmation?: { summary: string };
-  /**
-   * 「没有可确认/接续对象」时的宿主话术（owner 2026-11-19 真机噪声修复）：本回合**唯一动作**
-   * 是 task_confirm/task_resume 且它们给出 no-target 类结局时，宿主持一句确定性话术（「还在办，
-   * 办完发你。」/「现在没有等你确认的事。」）。server 据此替换模型那段自编诊断文本（与提案卡
-   * 替换模型噪声同一套机制），并记 `turn_confirm_no_target_spoken`。缺省 = 无此情形。
-   */
-  confirmNoTargetLine?: string;
   /**
    * A2b 观测面：本回合**被拦下**的重试（执行层没有显式声明可重试 → * 该对象本回合不再发起）。
    * 只作运维可见（装配层按条记 `execution_retry_blocked` 事件），不改变回合结果、不进用户文本。
@@ -1801,13 +1784,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   /** 本回合用户原话（`send(text)` 原文；只作确认请求的 userText 透传，宿主不改写）。 */
   let currentUserText = '';
   /**
-   * 本回合「没有可确认/接续对象」的宿主机说话术，以及「本回合是否调用过 task_confirm/task_resume
-   * 以外的工具」——两者合起来判「唯一动作」：只有唯一动作是这两个工具且给出 no-target 结局时，
-   * 才把话术交给 server 替换模型自编诊断（2026-11-19 真机噪声修复）。
-   */
-  let confirmNoTargetLineThisTurn: string | undefined;
-  let nonConfirmToolUsedThisTurn = false;
-  /**
    * 会话级待确认句柄（最小状态；不是语义层、不做历史检索）：
    *   · 收到 needs_confirmation 时记 { handle, summary, expiresAt, issuedTurn }；
    *   · **下一回合**的 execute_operation 才把句柄与本回合用户原话原样透传给执行层；
@@ -1968,20 +1944,17 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   }
 
   /**
-   * 「没有可确认/接续对象」时的宿主话术（owner 2026-11-19）：本会话有在跑（queued/running）
-   * 的任务就说在办，没有就说没有——确定性、不让模型自由发挥。只看机械状态，不猜业务。
+   * 「没有可确认/接续对象」时给模型的机械事实（措辞归模型）：kind 区分确认/接续，并附在跑
+   * 任务数——只看机械状态，不猜业务，也不生成用户话术（宿主不再替换模型文本）。
    */
-  function noWaitingTargetLine(): string {
-    const active = registry.list(scope).some((task) => task.status === 'running' || task.status === 'queued');
-    return active ? NO_WAITING_TARGET_RUNNING_LINE : NO_WAITING_TARGET_LINE;
-  }
-
-  /** 记下 no-target 结局的宿主话术（本回合唯一动作判据在 exec 的 nonConfirmToolUsedThisTurn）。 */
-  function noteConfirmNoTarget(result: unknown): unknown {
-    if (result !== null && typeof result === 'object' && typeof (result as { userLine?: unknown }).userLine === 'string') {
-      confirmNoTargetLineThisTurn = (result as { userLine: string }).userLine;
-    }
-    return result;
+  function noWaitingTargetFacts(kind: 'confirm' | 'resume'): Record<string, unknown> {
+    const runningTasks = registry.list(scope).filter(
+      (task) => task.status === 'running' || task.status === 'queued',
+    ).length;
+    return {
+      fact: kind === 'confirm' ? NO_WAITING_TARGET_FACT : NO_WAITING_RESUME_TARGET_FACT,
+      runningTasks,
+    };
   }
 
   /** 接续：复用 runner.resume，原样转述 ResumeOutcome（非 waiting_user 由 registry 状态机拒绝）。 */
@@ -1992,8 +1965,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     // 引用可省略：本会话恰好一个等待中的任务时直接接续它（用户说「确认」时不该要求记编号）。
     const waiting = registry.listWaiting(scope);
     if (rawRef === '' && waiting.length === 0) {
-      // 没有可接续的对象：不给模型「没有等待任务」的错误去自由发挥，改用宿主机说话术。
-      return { outcome: 'no_waiting_task', userLine: noWaitingTargetLine() };
+      // 没有可接续的对象：给模型机械事实，由它自己说（宿主不替换其文本）。
+      return { outcome: 'no_waiting_task', ...noWaitingTargetFacts('resume') };
     }
     const ref = rawRef !== ''
       ? rawRef
@@ -2003,9 +1976,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           throw new Error(`本会话有 ${waiting.length} 个等待中的任务，请用 ref 指明要接续哪一个（#编号）。`);
         })();
     const outcome = runner.resume(resolveTaskId(ref), { answer, scope });
-    // 指到了但不是等待中的任务：同样给宿主机说话术（机械结局原样保留）。
+    // 指到了但不是等待中的任务：机械结局原样保留，另给同一份事实（措辞归模型）。
     if (outcome.outcome === 'not_waiting') {
-      return { ...outcome, userLine: noWaitingTargetLine() };
+      return { ...outcome, ...noWaitingTargetFacts('resume') };
     }
     return outcome;
   }
@@ -2023,8 +1996,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       (task) => task.pendingQuestion?.confirmation !== undefined,
     );
     if (rawRef === '' && waitingProposals.length === 0) {
-      // 没有可确认的对象：不给模型错误去自编诊断，改用宿主机说话术。
-      return { outcome: 'no_waiting_task', userLine: noWaitingTargetLine() };
+      // 没有可确认的对象：给模型机械事实，由它自己说（宿主不替换其文本）。
+      return { outcome: 'no_waiting_task', ...noWaitingTargetFacts('confirm') };
     }
     const ref = rawRef !== ''
       ? rawRef
@@ -2040,9 +2013,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     if (outcome.outcome === 'expired') {
       return { ...outcome, userMessage: confirmationExpiredMessage() };
     }
-    // 指到了但不是在等确认（跑完了/在等补充）：宿主机说话术替换模型自由发挥。
+    // 指到了但不是在等确认（跑完了/在等补充）：机械结局原样保留，另给同一份事实。
     if (outcome.outcome === 'not_waiting' || outcome.outcome === 'no_confirmation') {
-      return { ...outcome, userLine: noWaitingTargetLine() };
+      return { ...outcome, ...noWaitingTargetFacts('confirm') };
     }
     return outcome;
   }
@@ -2639,9 +2612,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // B 切片（工单回执收敛）：短等待窗口（runtime.taskRunWaitMs，缺省 8000ms；0 = 不等）。
       // 窗口内执行端确认 completed → 与 inline 同形状把结果交给模型（同回合、零主动投递——
       // 结果不重复发两遍）；超窗 → 只回机械受理事实（taskId/name/status/accepted:true，
-      // **不带任何给用户看的回执话术**——owner 2026-11-19：交办不再给固定回执，久到消耗耐心
-      // 才出声，见 server handler 的 turn_dispatch_silent），任务留后台推进，完成后由宿主
-      // 完成投递面把结果发回原会话。
+      // **不带任何给用户看的回执话术**——owner 2026-11-19：交办不再给固定回执，模型怎么说
+      // 由它自己决定并原样投递），任务留后台推进，完成后由宿主完成投递面把结果发回原会话。
       if (taskRunWaitMs > 0) {
         const settled = await waitForTaskSettled(taskId, taskRunWaitMs);
         if (settled !== undefined) {
@@ -2831,8 +2803,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       payloadLintFailuresThisTurn = new Map();
       retryBlockedThisTurn = [];
       retryAllowedThisTurn = [];
-      confirmNoTargetLineThisTurn = undefined;
-      nonConfirmToolUsedThisTurn = false;
       const turnScopeKey = `turn:${options.sessionId}:${turnNo}`;
       const mainWindow = newAttemptWindow();
       // 宿主只交「本轮输入」：最后一条 user = 本轮文本；历史种子仅在驱动尚无会话时使用。
@@ -2877,9 +2847,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         ...(injections.length > 0 ? { injections } : {}),
         onStep: (step) => progress.push(step),
         exec: async (tool, args, signal) => {
-          // 「唯一动作」判据：调用过 task_confirm/task_resume 以外的工具即不满足（含 task_run/
-          // task_status/task_result/task_cancel/run_js/…）。no-target 话术只在唯一动作时替换模型文本。
-          if (tool !== TASK_CONFIRM_TOOL && tool !== TASK_RESUME_TOOL) nonConfirmToolUsedThisTurn = true;
           if (tool === TASK_RUN_TOOL) {
             const task = typeof args.task === 'string' ? args.task : '';
             // U3：task_run 在宿主侧也是一笔有副作用的逻辑操作——先认领落库再委派；
@@ -2924,8 +2891,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           // 任务治理工具：与工具面同源门控（无 runner 时不暴露、也不受理），fail-closed。
           if (taskRunner !== undefined) {
             if (tool === TASK_CANCEL_TOOL) return taskCancel(args, taskRunner);
-            if (tool === TASK_RESUME_TOOL) return noteConfirmNoTarget(taskResume(args, taskRunner));
-            if (tool === TASK_CONFIRM_TOOL) return noteConfirmNoTarget(taskConfirm(args, taskRunner));
+            if (tool === TASK_RESUME_TOOL) return taskResume(args, taskRunner);
+            if (tool === TASK_CONFIRM_TOOL) return taskConfirm(args, taskRunner);
           }
           // 缺口 2 臂 B：read_skill 与工具面同源门控（未注入登记表则不受理）。
           if (tool === READ_SKILL_TOOL && options.mainSkillRegistry !== undefined) {
@@ -3014,23 +2981,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         registry.archiveReply(taskIds, reply);
       }
       const executions = taskIds.flatMap((taskId) => registry.get(taskId, scope).executions);
-      // 本回合产出的提案（机械事实，只带摘要）：宿主据此渲染提案卡，不再让模型转述。
-      const proposalThisTurn = pendingConfirmation !== undefined && pendingConfirmation.issuedTurn === turnNo
-        ? { pendingConfirmation: { summary: pendingConfirmation.summary } }
-        : {};
-      // 「没有可确认/接续对象」的宿主话术：只在**唯一动作**是 task_confirm/task_resume 且给出
-      // no-target 结局时交给 server 替换模型自编诊断（否则不设，模型文本照常）。
-      const confirmNoTarget = !nonConfirmToolUsedThisTurn && confirmNoTargetLineThisTurn !== undefined
-        ? { confirmNoTargetLine: confirmNoTargetLineThisTurn }
-        : {};
       return {
         reply,
         taskIds,
         executions,
         // B 切片（可观测）：本回合经 execute_operation 发起的执行次数（A2 同源计数）。
         operations: operationsThisTurn,
-        ...proposalThisTurn,
-        ...confirmNoTarget,
         ...(relayedTaskIds.length > 0 ? { relayedTaskIds } : {}),
         ...(pushSuppressedTaskIds.length > 0 ? { pushSuppressedTaskIds } : {}),
         ...(retryBlockedThisTurn.length > 0 ? { retryBlocked: retryBlockedThisTurn } : {}),

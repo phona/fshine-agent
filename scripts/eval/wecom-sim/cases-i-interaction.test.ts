@@ -7,7 +7,8 @@
  *
  * 装配：真渠道适配（WecomBotChannel/live）+ 真 server（createServer）+ 仓内 dummy CLI
  * 真子进程 + 脚本化模型；每条同时断言**用户可见面**（终帧气泡 / 主动投递文本）与
- * **结构化事件**（message_done / turn_dispatch_silent / attachment_nudge_sent / 底账）。
+ * **结构化事件**（message_done / attachment_nudge_sent / 底账）；用户看到的话永远是模型说的
+ * （宿主不再按回合类型静默/替换）。
  *
  * 长任务的两种时钟口径（都不写固定 sleep 充当判据）：
  *   · `dummy.query --delay-ms`：读操作真实墙钟延迟（起一眼「短活/慢活」边界）；
@@ -41,7 +42,7 @@ const TASK_SCOPE = { principalId: 'wecom:user-a', sessionId: 'wecom:user-a' } as
 const GROUP_SCOPE = { principalId: 'wecom:group:group-w', sessionId: 'wecom:group-w' } as const;
 
 /**
- * 只交办回合模型会自己编的受理卡片（new 口径：这段**不进用户面**——宿主边界静默）。
+ * 交办回合模型会自行编的受理卡片（owner 2026-11-19：这段原样投递，宿主不再静默）。
  * 顺带绊线：task_run 的受理事实**不得**再带回执话术（notice）——带了立即红。
  */
 function acceptCard(call: { messages: readonly unknown[] }): AgentMessage {
@@ -70,7 +71,7 @@ function hasWholeNumber(text: string, value: string): boolean {
 }
 
 describe('I 组·体验交互（I-1～I-8，自动）', () => {
-  it('I-1 一条气泡：短活同回合给结果，零受理回执、不落 turn_dispatch_silent（钉：①不打扰 / ②有预期）', async () => {
+  it('I-1 一条气泡：短活同回合给结果，零受理回执（钉：①不打扰 / ②有预期）', async () => {
     // async 装配 + 缺省窗口（8000ms）：快查询在窗口内落定 → 同回合把结果交给用户。
     const sim = await startWecomSim({ label: 'i1', taskDispatch: 'async' });
     try {
@@ -88,8 +89,7 @@ describe('I 组·体验交互（I-1～I-8，自动）', () => {
       for (const phrase of ['这个我来办', '办完发你', '正在处理', '已收到']) {
         expect(reply).not.toContain(phrase);
       }
-      // 快活不是静默回合：不落 turn_dispatch_silent；结果已在同回合交付 → 零主动投递。
-      expect(sim.logs.some((line) => line['event'] === 'turn_dispatch_silent')).toBe(false);
+      // 快活：结果已在同回合交付 → 零主动投递。
       expect(sim.sdk.proactiveTexts).toHaveLength(0);
       expect(sim.doneOf(messageId)!.taskIds).toHaveLength(1);
     } finally {
@@ -144,8 +144,8 @@ describe('I 组·体验交互（I-1～I-8，自动）', () => {
     }
   }, 120_000);
 
-  it('I-3 长任务静默到结果：交办后前 3 秒零气泡零主动消息；完成后恰一条带任务身份的结果（钉：①不打扰 / ④结论有据）', async () => {
-    // 窗口 1ms：受理回合立即结束（静默），任务留后台推进到完成。
+  it('I-3 长任务：交办回合照发模型的话，结果完成前不提前投递；完成后恰一条带任务身份的结果（钉：①不打扰 / ④结论有据）', async () => {
+    // 窗口 1ms：受理回合立即结束（模型的话原样发出），任务留后台推进到完成。
     const sim = await startWecomSim({
       label: 'i3',
       taskDispatch: 'async',
@@ -158,13 +158,13 @@ describe('I 组·体验交互（I-1～I-8，自动）', () => {
       sim.book.mainTurn(taskText, [toolCallAssistant('task_run', { task: taskText }), acceptCard]);
       sim.book.workerTask(taskText, longTaskWorker('documents W202611 导出完成：共 3 条。', 5));
       const messageId = sim.sendText(taskText);
-      await sim.waitFor('I-3 只交办回合静默结束', () => sim.doneOf(messageId) !== undefined, 15_000);
-      expect(sim.finalBubbles()).toHaveLength(0);
-      expect(sim.logs.some((line) => line['event'] === 'turn_dispatch_silent')).toBe(true);
+      await sim.waitFor('I-3 交办回合结束', () => sim.doneOf(messageId) !== undefined, 15_000);
+      expect(sim.finalBubbles()).toHaveLength(1);
+      expect(sim.finalBubbles()[0]!.content).toBe('好的，这件事我交给后台去办，办好就发给你。');
 
-      // 期间（前 3 秒）什么都不发：零终帧、零主动消息。
+      // 期间（前 3 秒）不提前投递结果：终帧仍只有交办回合那一条、零主动消息。
       await new Promise((resolve) => setTimeout(resolve, 3_000));
-      expect(sim.finalBubbles()).toHaveLength(0);
+      expect(sim.finalBubbles()).toHaveLength(1);
       expect(sim.sdk.proactiveTexts).toHaveLength(0);
 
       // 完成后恰一条结果消息，且带任务身份（含交办原文的关键片段）。
@@ -244,7 +244,7 @@ describe('I 组·体验交互（I-1～I-8，自动）', () => {
       sim.book.mainTurn(taskText, [toolCallAssistant('task_run', { task: taskText }), acceptCard]);
       sim.book.workerTask(taskText, longTaskWorker('documents W202611 导出完成：共 3 条。', 5));
       const mA = sim.sendText(taskText);
-      await sim.waitFor('I-5 交办静默结束', () => sim.doneOf(mA) !== undefined, 15_000);
+      await sim.waitFor('I-5 交办回合结束', () => sim.doneOf(mA) !== undefined, 15_000);
       const taskId = sim.doneOf(mA)!.taskIds[0]!;
       // 任务确实在跑（不是「没跑所以答得上」的假绿）。
       await sim.waitFor('I-5 任务在跑', () => registry.get(taskId, TASK_SCOPE).status === 'running', 10_000);
@@ -260,9 +260,10 @@ describe('I 组·体验交互（I-1～I-8，自动）', () => {
         },
       ]);
       const mAsk = sim.sendText(ask);
-      await sim.waitFor('I-5 进度答复', () => sim.finalBubbles().length === 1, 15_000);
+      // 交办回合已占一条气泡；进度答复是第二条。
+      await sim.waitFor('I-5 进度答复', () => sim.finalBubbles().length === 2, 15_000);
 
-      const reply = sim.finalBubbles()[0]!.content;
+      const reply = sim.finalBubbles().at(-1)!.content;
       // 含真实事实（来自底账状态）：任务在跑 → 如实说还在办。
       expect(reply).toContain('还在办');
       // 不含「正在处理 / 进度 / 步骤」这类空话。
@@ -338,42 +339,6 @@ describe('I 组·体验交互（I-1～I-8，自动）', () => {
     }
   }, 120_000);
 
-  it('I-7 静默例外：交办回合里模型顺带反问（以？结尾）→ 该句送达、不落静默（钉：①不打扰的有界例外）', async () => {
-    const sim = await startWecomSim({
-      label: 'i7',
-      taskDispatch: 'async',
-      taskRunWaitMs: 1,
-      allowWriteOperations: true,
-    });
-    const registry = createSqliteTaskRegistry(sim.dbPath, { readOnly: true });
-    try {
-      const taskText = '把 documents 集合 W202611 的数据导出，跑完发我';
-      sim.book.mainTurn(taskText, [
-        toolCallAssistant('task_run', { task: taskText }),
-        (call) => {
-          const result = lastToolResultJsonOf(call.messages);
-          if (result?.['accepted'] !== true) throw new Error('task_run 没有回受理事实（accepted:true）。');
-          return textAssistant('这件事我交给后台去办了。顺便问一句：要不要也把 W202610 一起导出？');
-        },
-      ]);
-      sim.book.workerTask(taskText, longTaskWorker('documents W202611 导出完成：共 3 条。', 2));
-      const messageId = sim.sendText(taskText);
-      // 反问句照常送达（吞掉问题比多一句话糟）。
-      await sim.waitFor('I-7 反问句送达', () => sim.finalBubbles().length === 1, 15_000);
-      const reply = sim.finalBubbles()[0]!.content;
-      expect(reply.trim().endsWith('？')).toBe(true);
-      expect(reply).toContain('后台');
-      // 例外回合不落静默事件。
-      expect(sim.logs.some((line) => line['event'] === 'turn_dispatch_silent')).toBe(false);
-      // 收尾：等长任务完成。
-      const taskId = sim.doneOf(messageId)!.taskIds[0]!;
-      await sim.waitFor('I-7 任务完成', () => registry.get(taskId, TASK_SCOPE).status === 'completed', 20_000);
-    } finally {
-      registry.close();
-      await sim.close();
-    }
-  }, 90_000);
-
   it.todo('I-8 重启重投（同 messageId 重投 → 回放同一句、零新执行）：'
     + 'wecom-sim 每夹具 mkdtemp 新建独立底账、不暴露「同 dbPath 重建 server」的缝，'
     + 'sim 面做不了（不硬凑）；跨重启入站幂等已由 apps/server/server-inbound-idempotency.test.ts 单测覆盖。');
@@ -381,13 +346,3 @@ describe('I 组·体验交互（I-1～I-8，自动）', () => {
   it.todo('C 组·写确认（提案 → 确认 → 真写入 → 读回 4 条 + 不重复提案）：'
     + '等确认句柄轨合流后补（本组不加桩实现，避免第二套装配）。');
 });
-
-/*
- * 反向绊线（实测后还原，见文末报告）：
- *   ① server.ts 的静默判定去掉全部例外（taskIds 非空即静默）→ I-1 红
- *      （快活同回合的结果气泡被吞，finalBubbles 0）。
- *   ② server.ts 的问号例外关掉（endsWithQuestion=false）→ I-7 红
- *      （顺带反问的回合被静默，气泡不送达）。
- *   ③ server.ts 把静默规则整条关掉（dispatchSilent=false）→ I-3 红
- *      （只交办回合会立刻吐受理卡片，前 3 秒出现气泡）。
- */
