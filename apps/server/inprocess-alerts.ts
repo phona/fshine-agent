@@ -76,7 +76,7 @@ export interface InprocessAlertsOptions {
 export interface InprocessAlerts {
   /** server 产出结构化事件时调用：即时投影 + 判 + 双出口（同步落盘，异步推送）。 */
   observe(event: Record<string, unknown>): void;
-  /** 立即跑一次聚合扫描（retry_storm / task_stuck）；启动与定时器都调它。 */
+  /** 立即跑一次聚合扫描（retry_storm / task_stuck）；定时器到点调用，也供测试/手动触发。 */
   scanNow(): void;
   /** 停止扫描定时器（server.close 调用；重启不重发靠冷却持久化，不靠内存）。 */
   close(): void;
