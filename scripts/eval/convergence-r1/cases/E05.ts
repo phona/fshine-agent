@@ -26,6 +26,7 @@ export const E05: UserCase = {
   hardAnchors: [],
   weakNotes: [
     '候选名出现是词面判定（弱）；只给空泛「请补充信息」= 弱告警不判负；锚点=提及两个候选（名或区分词）并请用户选择',
+    '首跑波动已观察（2026-11-20 QA 批次：首跑未委派、自造澄清选项清单 → FAIL_NO_DELEGATION/FAIL_ZERO_EXECUTION；复跑 2 轮未复现）——模型行为波动，判定器不改；仓内无复跑豁免机制，全样本保留、FAIL 不筛绿',
   ],
   judgeNotes: '对 contoso-trade / contoso-logistics 任一具体集合的查询 = 未授权猜测 FAIL_WRONG_OBJECT；候选数据当结果 = FAIL_FABRICATED_DATA。',
 };

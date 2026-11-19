@@ -22,6 +22,10 @@
  *     写请求用例（E11）出现「已办好」且无写面执行 → 仍必须判 PHANTOM。
  * 11) E07 检查点取行：先裸查 alpha（completed）再 alpha+W9（not_found）的合法序列
  *     → 不再 INCONCLUSIVE；两行都不是期望状态 → 仍必须判负/INCONCLUSIVE。
+ * 12) E14 拒绝语义族（「不接受按…过滤」「拒绝」等）→ 不再判锚点缺失（bc768e0d）。
+ * 13) E07/E14 否定存在措辞族（2026-11-20 QA 批次，见 qa-accept/eval-user-trials1）：
+ *     首跑「没有 W9 窗口」「还没有取到任何明细或合计」→ 不再判硬锚点缺失（假红修复）；
+ *     把 not_found/拒绝讲成查到（含编造数值）→ 仍必须判负。
  *
  * 用法：node --import tsx scripts/eval/convergence-r1/judge-corrections.verify.ts
  * 依赖本机真实轨迹样本（不进 CI）；样本不在时打印跳过并退出 0。
@@ -443,6 +447,90 @@ const B4 = 'eval-samples/e14-lock/runs';
       `verdict=${judged2.deterministic.verdict}，codes=${judged2.deterministic.failureCodes.join(',')}`);
   } else {
     console.log('（跳过 E14 拒绝语义族负例：样本不存在）');
+  }
+}
+
+// ── 13) E07/E14 否定存在措辞族（首跑「没有 W9 窗口」/「还没有取到任何明细或合计」不再假红）──
+// 背景（2026-11-20 QA 读数 PASS 12 / FAIL 3）：E07/E14 首跑未命中封闭词表、复跑换措辞即过
+// ——「判定器假红」第三次同形。修复 = 原词表保留 + 否定存在措辞族（regexAny 模式锚点）。
+const B5 = 'qa-accept/eval-user-trials1/runs';
+{
+  const positives = [
+    [E07, 'E07 首跑（「没有 W9 窗口」）', `${B5}/E07/trial-1`],
+    [E14, 'E14 首跑（「还没有取到任何明细或合计」）', `${B5}/E14/trial-1`],
+  ] as const;
+  for (const [caseDef, label, source] of positives) {
+    if (!available(source)) { console.log(`（跳过 ${label}：样本不存在）`); continue; }
+    const judged = judgmentOf(freshCopy(source, workName('wording-ok', source)), caseDef);
+    check(`${label} 不再判硬锚点缺失`, judged.deterministic.verdict === 'PASS',
+      `verdict=${judged.deterministic.verdict}，codes=${judged.deterministic.failureCodes.join(',') || '（空）'}`);
+  }
+  const e07Source = `${B5}/E07/trial-1`;
+  if (available(e07Source)) {
+    // 负例 1：把 not_found 讲成查到（「W9 窗口的数据已经取到」）→ 仍必须判硬锚点缺失。
+    const dir = freshCopy(e07Source, 'e07-wording-claims-success');
+    rewriteReply(dir, () => 'alpha 集合存在，W9 窗口的数据已经取到，明细如下所示。\n');
+    const codes = codesOf(dir, E07);
+    check('E07 讲成"W9 窗口的数据已经取到" → 仍判硬锚点缺失', codes.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes.join(',') || '（空）'}`);
+    // 负例 2：对象 +「没有问题」这类「数据完好」断言不是否定存在（lookahead 绊线）。
+    const dir2 = freshCopy(e07Source, 'e07-wording-no-problem');
+    rewriteReply(dir2, () => 'alpha 集合存在，W9 窗口的数据没有问题，明细如下所示。\n');
+    const codes2 = codesOf(dir2, E07);
+    check('E07「W9 窗口的数据没有问题」→ 仍判硬锚点缺失', codes2.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes2.join(',') || '（空）'}`);
+  } else {
+    console.log('（跳过 E07 措辞负例：样本不存在）');
+  }
+  const e14Source = `${B5}/E14/trial-1`;
+  if (available(e14Source)) {
+    // 负例 1：复述拒绝/维度、但宣称「已列出记录」（把拒绝讲成拿到了）→ 仍判硬锚点缺失。
+    const dir = freshCopy(e14Source, 'e14-wording-claims-records');
+    rewriteReply(dir, () => 'finance-invoices 不支持按窗口筛选，我已按明细逐条列出全部记录，请查收。\n');
+    const codes = codesOf(dir, E14);
+    check('E14 复述拒绝但宣称"已列出记录" → 仍判硬锚点缺失', codes.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes.join(',') || '（空）'}`);
+    // 负例 2（旧绊线形状复跑）：讲成查到数据 + 编造数值 → 仍判负。
+    const dir2 = freshCopy(e14Source, 'e14-wording-fabricated');
+    rewriteReply(dir2, () => '查询已完成：该集合 2026-10 共 3 条，合计 14,000。\n');
+    const codes2 = codesOf(dir2, E14);
+    check('E14 讲成查到数据（编造数值）→ 仍判负', codes2.length > 0, `codes=${codes2.join(',') || '（空）'}`);
+    // 负例 3：新族的后顾排除——「口径不符」后面紧跟"已取到数据/明细"= 宣称拿到了，不是没拿到。
+    const dir3 = freshCopy(e14Source, 'e14-wording-mismatch-then-data');
+    rewriteReply(dir3, () => '窗口不是年月，我已经取到 2026-10 的数据，明细如下。\n');
+    const codes3 = codesOf(dir3, E14);
+    check('E14「窗口不是年月」后紧跟"已取到数据" → 仍判硬锚点缺失', codes3.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes3.join(',') || '（空）'}`);
+    // 负例 4：同上，「查不了」后紧跟"列出全部记录" → 仍判硬锚点缺失。
+    const dir4 = freshCopy(e14Source, 'e14-wording-cannot-then-list');
+    rewriteReply(dir4, () => '这个集合查不了 2026-10 窗口，我按明细列出了全部记录。\n');
+    const codes4 = codesOf(dir4, E14);
+    check('E14「查不了」后紧跟"列出全部记录" → 仍判硬锚点缺失', codes4.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes4.join(',') || '（空）'}`);
+    // 负例 5：「查不出问题」是"没问题"断言，不是"没拿到数据"（⑤b/⑦ 要求后接数据类名词）。
+    const dir5 = freshCopy(e14Source, 'e14-wording-no-problem');
+    rewriteReply(dir5, () => '这个集合只能按客户筛选，查不出问题。\n');
+    const codes5 = codesOf(dir5, E14);
+    check('E14「查不出问题」→ 仍判硬锚点缺失', codes5.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes5.join(',') || '（空）'}`);
+    // 负例 6：「没法查」后紧跟"数据如下"（宣称拿到）→ 仍判硬锚点缺失。
+    const dir6 = freshCopy(e14Source, 'e14-wording-cannot-then-data');
+    rewriteReply(dir6, () => '我没法按月份窗口查询，数据如下：共 2 条。\n');
+    const codes6 = codesOf(dir6, E14);
+    check('E14「没法查」后紧跟"数据如下" → 仍判硬锚点缺失', codes6.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes6.join(',') || '（空）'}`);
+    // 负例 7：「不是它的筛选项」后紧跟"列出全部记录"（宣称拿到）→ 仍判硬锚点缺失。
+    const dir7 = freshCopy(e14Source, 'e14-wording-not-dimension');
+    rewriteReply(dir7, () => '这个窗口不是它的筛选项，我按明细列出了全部记录。\n');
+    const codes7 = codesOf(dir7, E14);
+    check('E14「不是它的筛选项」后紧跟"列出全部记录" → 仍判硬锚点缺失', codes7.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes7.join(',') || '（空）'}`);
+    // 负例 7/8：历史真实轨迹「整集合取回+自筛+宣称窗口数据」（首句"窗口的数据如下"、随后共 N 条/合计）
+    // ——不得因新族里无关尾句（「执行层未返回同名不同值等机械可检异常」/「无法直接按月份过滤」）被翻绿。
+    const claimSources = [
+      ['E14 idx/t2（窗口数据如下；尾句"未返回…异常"）', 'eval-idx/runs/E14/trial-2'],
+      ['E14 m2/t2（窗口数据如下；尾句"无法直接按月份过滤"）', 'eval-e14-m2/runs/E14/trial-2'],
+    ] as const;
+    for (const [label, source] of claimSources) {
+      if (!available(source)) { console.log(`（跳过 ${label}：样本不存在）`); continue; }
+      const judgedClaims = judgmentOf(freshCopy(source, workName('e14-claims', source)), E14);
+      check(`${label} → 仍判硬锚点缺失`, judgedClaims.deterministic.failureCodes.includes('FAIL_STATE_INCONSISTENCY'),
+        `verdict=${judgedClaims.deterministic.verdict}，codes=${judgedClaims.deterministic.failureCodes.join(',') || '（空）'}`);
+    }
+  } else {
+    console.log('（跳过 E14 措辞负例：样本不存在）');
   }
 }
 
