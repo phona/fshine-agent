@@ -15,6 +15,7 @@
  * 与企微 live 人工交互面（见 docs/product/wecom-live-dummy-cases.md 文首分工）。
  */
 import { describe, expect, it } from 'vitest';
+import { failureMessageFor, internalTermIn } from '../../../packages/agent/src/user-facing-failure';
 import {
   mainRelayResponses,
   startWecomSim,
@@ -101,9 +102,11 @@ describe('A 组·接入与基础（W-01～W-04b）', () => {
 
       const reply = sim.finalBubbles()[0]!.content;
       // 口径变更（2026-11-19 模型可见面收口）：空参失败的原始原文（"Missing --collection
-      // or --topic"）不再逐字进模型投影——如实转述 + 请用户补充由 invalid_input 话术承载
-      // （「条件不行…换个写法再试」），不再要求原文里出现过「哪个集合」字样。
-      expect(reply).toContain('条件不行');
+      // or --topic"）不再逐字进模型投影——如实转述 + 请用户补充由 invalid_input 话术承载。
+      // 断言跟**话术常量**走（不硬编具体措辞）：以后改文案，用例自动跟随，不因措辞漂移误红。
+      expect(reply).toContain(failureMessageFor('invalid_input').text);
+      // 仍不含内部术语（执行层/参数名/句柄/路径…）：用户面收口的底线。
+      expect(internalTermIn(reply)).toBeUndefined();
       // 零编造：全文没有具体数值（数字只会来自编造的行）。
       expect(reply).not.toMatch(/\d{3,}/);
       // 允许分支的机械事实：恰好 1 次空参执行、failed（E06 口径；0 执行分支同样允许，
