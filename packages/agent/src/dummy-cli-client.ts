@@ -54,6 +54,11 @@ export interface RawGatewayOperation {
    * 返回 accepted；宿主据此决定是否允许 accepted（未声明却返回 = 协议违约，fail-closed）。
    */
   long_running?: unknown;
+  /**
+   * 模型可见性声明（契约 v4，可选）：只做形状校验（false 才投影）——执行层声明该
+   * operation 不进模型可见面；宿主据此收紧允许集合与委派清单。缺省/其它形状 = 可见。
+   */
+  model_visible?: unknown;
   args?: {
     positional?: Array<{ name?: string; required?: boolean; payload?: { schema?: unknown } }>;
     flags?: Array<{ flag?: string; required?: boolean; style?: string; payload?: { schema?: unknown } }>;
@@ -206,6 +211,8 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
             ...(estimatedSeconds === undefined ? {} : { estimatedSeconds }),
             // 契约 v4：long_running 只认显式 true（缺省/其它形状 = 未声明）。
             ...(operation.long_running === true ? { long_running: true } : {}),
+            // 契约 v4：model_visible 只认显式 false（缺省/其它形状 = 可见，逐字节不变）。
+            ...(operation.model_visible === false ? { model_visible: false } : {}),
             args: declaredArgsOf(operation),
           };
         }),

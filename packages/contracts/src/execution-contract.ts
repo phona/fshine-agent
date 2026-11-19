@@ -76,6 +76,14 @@ export interface ExecutionOperationDeclaration {
    * **不得**返回 accepted——宿主按协议违约 fail-closed，不把它当成功或进行中。
    */
   long_running?: boolean;
+  /**
+   * 模型可见性声明（可选）：`false` = 该 operation **不进模型可见的能力面**（不投影进
+   * Worker 委派清单），且宿主允许集合在发起执行前把它剔除（模型即使凭记忆/上下文拼出该
+   * operation 名，也被确定性拒绝）。执行层自己与宿主之外的调用方不受影响——它只是一条
+   * 「别告诉模型」的声明，不是访问控制。缺省（未声明）= true，逐字节不变（历史协议
+   * 中的替代路径因此可对模型隐身，同时保留给执行层与未来面使用）。
+   */
+  model_visible?: boolean;
 }
 
 /** 能力快照：单个会话开始时的执行面声明。 */
