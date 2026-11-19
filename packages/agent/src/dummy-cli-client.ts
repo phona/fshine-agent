@@ -12,6 +12,12 @@
  *     不解析句柄、不判断用户是不是在确认；
  *   · 结果 = stdout 末行 RESULT 信封 → ExecutionOutcome 五态（含 needs_confirmation）；
  *     非零退出且无信封 = 执行层拒绝或失败，按退出码与 stderr 机械分流，不嗅探文案。
+ *   · 单次调用的传输超时（owner 2026-11-19 分工表第一格）= 传输入口的**唯一**界
+ *     （`runGateway` 定时器；缺省 `EXECUTION_CALL_TIMEOUT_MS` = 60s，可用构造参数收窄）：
+ *     到点停掉子进程并如实返回 `failed` + `code: result_unknown`（**结果未知**：没有回执，
+ *     无法确认执行层那边做没做完），不声明可重试——宿主据此走待核对收口，不做「失败已确认」。
+ *     `wait` 的截断（子进程上限 = 长轮询窗口 + 5s）**同一语义**：没有回执 ≠ 长任务失败，
+ *     任务仍在等（task-runner 退避续等、如实告知用户一次，不判死、不重试风暴）。
  *
  * 读路径切片的作用域不在这里：本适配器按契约忠实执行被请求的 operation；
  * 「本轮开放哪些 operation」由装配方从执行层自述的 access 声明派生（只读集合 +
@@ -65,6 +71,15 @@ export interface RawGatewayOperation {
   };
 }
 
+/**
+ * 单次执行层调用的传输超时（宿主常量，2026-11-19 owner 分工表第一格）：**执行层调用挂住**
+ * 由「单次调用的传输超时」兜底——不是任务总时长、不是回合总时长、不是到点杀任务。
+ * 缺省 60s 沿用既有旋钮缺省（本适配器 `timeoutMs` 一直有此缺省，见
+ * `docs/product/real-read-readiness.md`「单次适配器调用缺省 60s」）；导出只为守卫测试，
+ * 不新增 runtime 配置键（与 `WAKE_TURN_MS` 同口径）。
+ */
+export const EXECUTION_CALL_TIMEOUT_MS = 60_000;
+
 export interface DummyCliClientOptions {
   /** 夹具根（绝对路径）：网关与技能面的挂载点。 */
   root: string;
@@ -74,7 +89,7 @@ export interface DummyCliClientOptions {
   stateDir: string;
   /** 继承的进程 env——spawn 前按 worker 白名单重建，不整体继承。 */
   env: NodeJS.ProcessEnv;
-  /** 单次网关调用上限；缺省 60s。 */
+  /** 单次网关调用上限；缺省 {@link EXECUTION_CALL_TIMEOUT_MS}（60s）。 */
   timeoutMs?: number;
 }
 
@@ -119,7 +134,7 @@ interface ResultEnvelope {
 }
 
 export function createDummyCliClient(options: DummyCliClientOptions): DummyCliClient {
-  const timeoutMs = options.timeoutMs ?? 60_000;
+  const timeoutMs = options.timeoutMs ?? EXECUTION_CALL_TIMEOUT_MS;
   const gatewayPath = path.join(options.root, options.gateway);
   let listing: Promise<readonly RawGatewayOperation[]> | undefined;
 
@@ -429,9 +444,19 @@ function outcomeOf(
   timeoutMs: number,
 ): ExecutionOutcome {
   if (run.timedOut) {
+    // 单次调用的传输超时（`timeoutMs`，缺省 EXECUTION_CALL_TIMEOUT_MS = 60s）：到点停掉本次
+    // 传输，但**不冒充「已确认失败」**——截断后无法确认执行层那边做没做完（写操作可能已经
+    // 生效），按宿主既有的「结果未知」语义如实落定（`execution-runtime` 的待核对收口）：
+    // 账行落 unknown、任务落 reason=result_unknown、不自动重试，把核对交给用户。
+    // retryable 显式 false：同一 (operation, 对象) 不因这次超时被重撞（fail-safe，
+    // 与 2026-11-18「缺省不可重试」同一口径）。
     return {
       status: 'failed',
-      error: { code: 'EXECUTION_TIMEOUT', message: `执行层调用超时（${timeoutMs}ms）。`, retryable: true },
+      error: {
+        code: 'result_unknown',
+        message: `执行层调用超时（${timeoutMs}ms）：没有收到回执，无法确认这次操作是否已经发生。`,
+        retryable: false,
+      },
     };
   }
   if (run.spawnFailed) {
@@ -565,9 +590,17 @@ function acceptedOutcomeOf(envelope: ResultEnvelope): ExecutionOutcome {
  */
 function waitOutcomeOf(run: GatewayRun, operationId: string, timeoutMs: number): ExecutionOutcome {
   if (run.timedOut) {
+    // 单次 wait 调用的传输截断（子进程上限 = 窗口 + 5s；网关没有在自己的窗口内回话）：
+    // 与 execute 的截断**同源**——没有回执，**不代表长任务失败**（它可能还在执行层跑）。
+    // 宿主（task-runner）据此继续退避轮询、不落下终态、并如实告知用户一次；
+    // retryable 显式 false：这次调用本身不构成「可重试的业务失败」。
     return {
       status: 'failed',
-      error: { code: 'EXECUTION_WAIT_TIMEOUT', message: `执行层等待调用超时（${timeoutMs}ms）。`, retryable: true },
+      error: {
+        code: 'result_unknown',
+        message: `执行层等待调用超时（${timeoutMs}ms）：没有收到回执，无法确认长任务当前的状态。`,
+        retryable: false,
+      },
     };
   }
   if (run.spawnFailed) {

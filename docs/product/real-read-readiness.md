@@ -38,7 +38,10 @@
 
 ### 1.5 运行约束
 
-- 超时：Main 300s / Worker 180s（`execution-runtime.ts:138-141`）；单次适配器调用缺省 60s（`dummy-cli-client.ts:86`）。
+- 超时：Main 300s / Worker 180s（`execution-runtime.ts:138-141`）；单次适配器调用缺省 60s
+  （`dummy-cli-client.ts` 的 `EXECUTION_CALL_TIMEOUT_MS`，2026-11-19 起截断语义 = `result_unknown`
+  「没有回执、不知道对方做没做完」，不冒充已确认失败、不自动重试；用例见
+  `packages/agent/execution-call-timeout.test.ts`）。
 - 单一 profile；gateway 必须是相对调用形式、root 必须绝对（`scripts/ask-runtime.ts:93-97`、`apps/server/server.ts:56-63`、`packages/core/src/config.ts:259-261、274-283`）。
 
 ## 2. 凭据与鉴权边界

@@ -118,10 +118,13 @@ export interface TaskRow {
    * 预期契约（2026-11-18）：宿主已发过对应档「长时间没动静」提醒的时刻（ISO）。
    * NULL = 尚未提醒。只用来保证同一任务每档只提醒一次（重启不重发）；不改任务状态。
    *   · longRunningNotifiedAt = 超预期档（10 分钟）；
-   *   · longRunningStuckNotifiedAt = 卡住档（30 分钟）。
+   *   · longRunningStuckNotifiedAt = 卡住档（30 分钟）；
+   *   · waitContactLostNotifiedAt = 长任务等待「与执行层断了联系」档（无回执的传输截断；
+   *     2026-11-19）——只说明没拿到回执，**不代表长任务失败**（任务继续等）。
    */
   longRunningNotifiedAt?: string;
   longRunningStuckNotifiedAt?: string;
+  waitContactLostNotifiedAt?: string;
   /**
    * 本轮开始运行时刻（ISO，单调写一次）：长任务受理后会清租约，「跑了多久」需要独立起点，
    * 否则最该主动汇报的长任务不在提醒扫描里（2026-11-19）。
@@ -308,9 +311,10 @@ export interface TaskStore {
   /**
    * 预期契约（2026-11-18）：原子领取一档「长时间没动静」提醒——只有当该档时间列
    * 为 NULL 时才写入并返回 true（并发/重启下同一任务每档至多一次；已提醒过返回 false，
-   * 零写入）。stage = 'overdue'（10 分钟档）| 'stuck'（30 分钟档）。
+   * 零写入）。stage = 'overdue'（10 分钟档）| 'stuck'（30 分钟档）| 'contact_lost'
+   * （长任务等待与执行层断了联系；只说明没拿到回执，不代表任务失败）。
    */
-  claimLongRunningNotice(taskId: string, stage: 'overdue' | 'stuck', at: string): boolean;
+  claimLongRunningNotice(taskId: string, stage: 'overdue' | 'stuck' | 'contact_lost', at: string): boolean;
   /**
    * 预期契约：只读 running 行（长时间提醒扫描用；避免每趟 pump 全表分配）。
    * 不读不写状态；旧库只读（未迁移）时该列读出缺省。
@@ -468,7 +472,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   long_running_stuck_notified_at TEXT,
   -- 「这一轮开始跑」的时刻（ISO，单调写一次；NULL = 未跑过）。长任务受理后租约会被清掉，
   -- 「跑了多久」不能只从租约反推，否则最该提醒的任务反而不在提醒扫描里（2026-11-19）。
-  running_since TEXT
+  running_since TEXT,
+  -- 2026-11-19：长任务等待「与执行层断了联系（无回执）」已告知过用户的时刻（ISO，NULL = 未告知）。
+  wait_contact_lost_notified_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_scope ON tasks (principal_id, session_id);
 CREATE TABLE IF NOT EXISTS task_sequences (
@@ -547,6 +553,8 @@ const TASK_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   ['long_running_stuck_notified_at', 'TEXT'],
   // 2026-11-19：本轮开始运行的时刻（长任务受理后租约被清，提醒扫描需要独立起点）。
   ['running_since', 'TEXT'],
+  // 2026-11-19：长任务等待「断联系」告知过用户的时刻（同一「每档至多一次」口径）。
+  ['wait_contact_lost_notified_at', 'TEXT'],
 ];
 
 interface TaskDbRow {
@@ -567,6 +575,7 @@ interface TaskDbRow {
   lease_until?: string | null;
   long_running_notified_at?: string | null;
   long_running_stuck_notified_at?: string | null;
+  wait_contact_lost_notified_at?: string | null;
   running_since?: string | null;
   created_at: string;
   updated_at: string;
@@ -831,6 +840,7 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   // claim 语句不写 status（状态单写路径不受影响）；旧库只读（未迁移）时没有该列 = 不能领。
   const hasLongRunningColumn = columns.has('long_running_notified_at');
   const hasLongRunningStuckColumn = columns.has('long_running_stuck_notified_at');
+  const hasWaitContactLostColumn = columns.has('wait_contact_lost_notified_at');
   const selectRunningTasks = db.prepare("SELECT * FROM tasks WHERE status = 'running' ORDER BY created_at, task_id");
   const claimLongRunningNoticeStatements = {
     overdue: hasLongRunningColumn
@@ -843,6 +853,13 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
       ? db.prepare(`
           UPDATE tasks SET long_running_stuck_notified_at = @at
           WHERE task_id = @taskId AND long_running_stuck_notified_at IS NULL
+        `)
+      : undefined,
+    // 长任务等待「断联系」档（2026-11-19）：同一「每档至多一次」口径（重启不重发）。
+    contact_lost: hasWaitContactLostColumn
+      ? db.prepare(`
+          UPDATE tasks SET wait_contact_lost_notified_at = @at
+          WHERE task_id = @taskId AND wait_contact_lost_notified_at IS NULL
         `)
       : undefined,
   };
@@ -1108,6 +1125,9 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     ...(row.long_running_stuck_notified_at === null || row.long_running_stuck_notified_at === undefined
       ? {}
       : { longRunningStuckNotifiedAt: row.long_running_stuck_notified_at }),
+    ...(row.wait_contact_lost_notified_at === null || row.wait_contact_lost_notified_at === undefined
+      ? {}
+      : { waitContactLostNotifiedAt: row.wait_contact_lost_notified_at }),
     ...(row.running_since === null || row.running_since === undefined ? {} : { runningSince: row.running_since }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -1216,7 +1236,12 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     claimLongRunningNotice(taskId, stage, at) {
       const statement = claimLongRunningNoticeStatements[stage];
       if (statement === undefined) {
-        throw new Error(`任务底账是旧版 schema（缺 ${stage === 'overdue' ? 'long_running_notified_at' : 'long_running_stuck_notified_at'} 列）且以只读打开：不能写长时间提醒事实（请先用可写入口完成迁移）。`);
+        const column = stage === 'overdue'
+          ? 'long_running_notified_at'
+          : stage === 'stuck'
+            ? 'long_running_stuck_notified_at'
+            : 'wait_contact_lost_notified_at';
+        throw new Error(`任务底账是旧版 schema（缺 ${column} 列）且以只读打开：不能写长时间提醒事实（请先用可写入口完成迁移）。`);
       }
       return statement.run({ taskId, at }).changes > 0;
     },

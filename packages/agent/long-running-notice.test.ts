@@ -116,7 +116,7 @@ interface NoticeSend {
   taskId: string;
   principalId: string;
   sessionId: string;
-  stage: 'overdue' | 'stuck';
+  stage: 'overdue' | 'stuck' | 'contact_lost';
   minutes: number;
   text: string;
 }
@@ -333,5 +333,27 @@ describe('预期契约：长时间无动静的两档主动提醒', () => {
 
     expect(timers.armed).toBe(0);
     expect(registry.get('slow-default', SCOPE).longRunningNotifiedAt).toBeUndefined();
+  });
+
+  it('⑤ 「断联系」档（contact_lost）：同一「每档至多一次」领取，与 10/30 分钟两档互不吞并，重启不重发（SQLite 面）', () => {
+    const start = '2026-11-05T00:00:00.000Z';
+    const h = stack({ startIso: start });
+    seedRunning(h.registry, 'wait-1', start);
+
+    // 领取成功并落库；同档第二次被拒（零写入）；视图如实暴露时刻。
+    expect(h.registry.claimLongRunningNotice('wait-1', 'contact_lost', start)).toBe(true);
+    expect(h.registry.claimLongRunningNotice('wait-1', 'contact_lost', start)).toBe(false);
+    expect(h.registry.get('wait-1', SCOPE).waitContactLostNotifiedAt).toBe(start);
+    // 与两档长时间提醒互不吞并（不是同一档）。
+    expect(h.registry.get('wait-1', SCOPE).longRunningNotifiedAt).toBeUndefined();
+    expect(h.registry.get('wait-1', SCOPE).longRunningStuckNotifiedAt).toBeUndefined();
+    expect(h.registry.claimLongRunningNotice('wait-1', 'overdue', start)).toBe(true);
+
+    // 重启（同一 dbPath 重开）后仍不重发：领取事实持久。
+    h.registry.close();
+    const reopened = openRegistry(h.dbPath);
+    expect(reopened.claimLongRunningNotice('wait-1', 'contact_lost', start)).toBe(false);
+    expect(reopened.get('wait-1', SCOPE).waitContactLostNotifiedAt).toBe(start);
+    reopened.close();
   });
 });

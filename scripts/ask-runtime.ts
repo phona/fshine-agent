@@ -76,6 +76,7 @@ import type { RunJsExecutor } from '../packages/agent/src/run-js-executor';
 import type { TaskInputCopier } from '../packages/agent/src/file-store';
 import { createTaskExecutionBridge, type TaskFileBridgeStore } from '../packages/agent/src/task-file-bridge';
 import { createTaskRunner, type LongRunningNoticePort, type LongTaskWaitPort, type TaskExecutor, type TaskRunner } from '../packages/agent/src/task-runner';
+import { failureMessageFor } from '../packages/agent/src/user-facing-failure';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../packages/agent/src/worker-skills';
 import type { SkillRegistry } from '../packages/agent/src/skills';
 import { explicitConfigFrom, materializeEvalConfig } from './resolve-config-path';
@@ -796,6 +797,9 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
     longRunningNoticeMs: resolved.longRunningNoticeMs,
     longRunningStuckNoticeMs: resolved.longRunningStuckNoticeMs,
     ...(input.longRunningNotice === undefined ? {} : { longRunningNotice: input.longRunningNotice }),
+    // 长任务等待「与执行层断了联系（无回执）」档的用户文案（2026-11-19）：装配层从**单一
+    // 话术来源**取（user-facing-failure 的 unknown_result 档），runner 不自己写文案。
+    contactLostNoticeText: failureMessageFor('unknown_result').text,
     // 长任务异步（契约 v4）：等待端口由执行面客户端提供；缺省不接 = accepted fail-closed。
     ...(longTasks === undefined ? {} : { longTasks }),
     ...(input.log === undefined ? {} : { log: input.log }),

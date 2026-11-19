@@ -82,6 +82,9 @@ const CODE_KIND: Readonly<Record<string, UserFacingFailureKind>> = {
   // 执行端业务失败
   COLLECTION_FAULT: 'executor_failed',
   EXECUTOR_FAILED: 'executor_failed',
+  // 结果未知（宿主/传输侧事实：如单次调用被传输超时截断——没有回执，不知道对方做没做完）。
+  // 不得读作「已确认失败」，更不得引导重试（写操作可能已经生效）。
+  result_unknown: 'unknown_result',
   // 我方故障（协议/凭据传递/内部不变量）——绝不向用户解释细节
   EXECUTION_PROTOCOL_VIOLATION: 'host_fault',
   CONFIRMATION_NOT_FOUND: 'host_fault',

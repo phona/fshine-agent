@@ -189,11 +189,12 @@ export interface TaskRegistryPort {
    */
   listRunning?(): readonly TaskRecordView[];
   /**
-   * 预期契约：原子领取一档提醒（'overdue' = 10 分钟档 / 'stuck' = 30 分钟档）。
+   * 预期契约：原子领取一档提醒（'overdue' = 10 分钟档 / 'stuck' = 30 分钟档 /
+   * 'contact_lost' = 长任务等待与执行层断了联系、无回执）。
    * 返回 true = 本次由本进程发出（已落库，重启不重发）；false = 该档已提醒过（零写入）。
    * 缺省 = 不启用提醒（无法持久化「已发」事实时不发——fail-closed，避免重启重复打扰）。
    */
-  claimLongRunningNotice?(taskId: string, stage: 'overdue' | 'stuck', at: string): boolean;
+  claimLongRunningNotice?(taskId: string, stage: 'overdue' | 'stuck' | 'contact_lost', at: string): boolean;
   // ---- 长任务（契约 v4；全部可选：不实现 = 不支持长任务，零行为变化） ----
   /** accepted 行（按 claimed_at 升序）：重启后重新 wait 的唯一来源。 */
   listAcceptedOperations?(): readonly AcceptedOperationRecordView[];
@@ -368,6 +369,10 @@ export const LONG_RUNNING_STUCK_NOTICE_TEXT =
 /**
  * 主动提醒投递端口（装配方实现：走宿主既有主动投递面 `fileDelivery.sendText`）。
  * 实现方自己负责路由解析与投递纪律；异常不应抛出（抛出也只按失败事件记）。
+ *
+ * 文案归属：10/30 分钟两档由 runner 生成（模块常量）；`contact_lost`（长任务等待与执行层
+ * 断了联系、无回执）档的文案由**装配方注入**（`contactLostNoticeText`）——它是既有失败
+ * 话术种类 `unknown_result` 的同一句话，runner 不自己写文案（保持零仓内 import）。
  */
 export interface LongRunningNoticePort {
   /**
@@ -380,7 +385,7 @@ export interface LongRunningNoticePort {
     taskId: string;
     principalId: string;
     sessionId: string;
-    stage: 'overdue' | 'stuck';
+    stage: 'overdue' | 'stuck' | 'contact_lost';
     minutes: number;
     text: string;
   }): Promise<boolean>;
@@ -410,6 +415,16 @@ export interface LongTaskWaitResult {
   outcome: unknown;
 }
 
+/**
+ * `failed` + `error.code = 'result_unknown'` 是**无回执**（这一次 wait 调用被传输超时截断）：
+ * 它**不是**长任务失败的终态——结果未知优先于任何结论。runner 的处置（2026-11-19 owner
+ * 裁定「能兜则兜、兜不住才暴露」）：
+ *   · 任务保持 running、不杀任务、不唤醒 Worker 报失败（继续等结果）；
+ *   · 退避重排再查一次（指数退避、封顶 60s：不撞执行层；也不会因为一次截断就放弃）；
+ *   · 连续两次仍拿不到回执（自查也查不出来）才如实告知用户一次（既有失败话术种类
+ *     `unknown_result` 的同一句话 + 一个动作；每任务一次，持久化领取）；
+ *   · 之后任何一次 wait 取到真实回执（含 accepted/终态）即视为联系恢复，一切照常。
+ */
 export interface LongTaskWaitPort {
   /**
    * 长轮询 wait(operationId, timeoutMs)；窗口内未完成返回 accepted。
@@ -430,6 +445,20 @@ export interface AcceptedOperationRecordView {
   taskId?: string;
   operation: string;
   outcome?: unknown;
+}
+
+/**
+ * wait 这次调用拿到的是「无回执」吗（传输截断；outcome 形状读，同 acceptedOf 口径）：
+ * 适配器以 `failed` + `code: result_unknown` 如实回「没有回执」——**不代表长任务失败**
+ * （它可能还在执行层跑）。runner 据此走「先兜、兜不住才说」的等待路径，不判死。
+ */
+function waitNoReceiptOf(result: LongTaskWaitResult): boolean {
+  if (result.status !== 'failed') return false;
+  const outcome = result.outcome;
+  if (outcome === null || typeof outcome !== 'object') return false;
+  const error = (outcome as { error?: unknown }).error;
+  if (error === null || typeof error !== 'object') return false;
+  return (error as { code?: unknown }).code === 'result_unknown';
 }
 
 // ---------------------------------------------------------------------------
@@ -470,6 +499,12 @@ export interface TaskRunnerOptions {
    * 未提供时按「私聊会话」这一条机械事实处理（拿不到 chatType 事实源时的唯一安全默认）。
    */
   longRunningNotice?: LongRunningNoticePort;
+  /**
+   * 长任务等待「与执行层断了联系（无回执）」档的用户文案（装配方注入；**单一话术来源** =
+   * `user-facing-failure.ts` 的 `unknown_result` 档，不在 runner 里另写一句）。缺省 = 不发
+   * 这一档（无法持久化/无话术就不发——与提醒端口同一 fail-closed 口径）。
+   */
+  contactLostNoticeText?: string;
   /** 结构化事件出口（`task_long_running_notice`：成功/失败各一条；不含文案与业务内容）。 */
   log?: (line: Record<string, unknown>) => void;
   /**
@@ -605,6 +640,8 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   const longRunningNoticeMs = options.longRunningNoticeMs ?? 0;
   const longRunningStuckNoticeMs = options.longRunningStuckNoticeMs ?? 0;
   const longRunningNotice = options.longRunningNotice;
+  /** 「断联系」档的用户文案（装配注入；单一话术来源 = unknown_result 档）。 */
+  const contactLostNoticeText = options.contactLostNoticeText;
   const longRunningRowsSource = registry.listRunning !== undefined ? registry.listRunning : registry.list;
   const longRunningConsumerEnabled = longRunningNoticeMs > 0
     && registry.claimLongRunningNotice !== undefined
@@ -673,10 +710,16 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     /** 等待项由底账重建（上一次进程留下的 accepted 行）= 宿主重启后续等。 */
     restarted?: boolean;
     /**
-     * 连续瞬时故障次数（wait 出站失败 / 子进程被杀 / 超时抛错）。退避重排用：执行层
-     * 宕机时按 pollAfterMs 固定重试会变成每秒打一次执行层。成功取到结果即清零。
+     * 连续瞬时故障次数（wait 出站失败 / 子进程被杀 / 超时抛错 / 无回执的传输截断）。退避重排用：
+     * 执行层宕机时按 pollAfterMs 固定重试会变成每秒打一次执行层。真实取到回执即清零。
      */
     transientFailures?: number;
+    /**
+     * 连续「无回执」截断次数（2026-11-19）：第一次截断先自己再查一次（兜），自查这一趟
+     * 若仍拿不到回执（又一次截断，或直接出站失败）就如实告知用户一次。真实回执
+     * （含 accepted/终态）即清零。
+     */
+    noReceiptStreak?: number;
     controller?: AbortController;
   }
   const waiters = new Map<string, WaiterEntry>();
@@ -808,7 +851,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   }
 
   /** 原子领取一档提醒（已提醒过 → false）；底账不可写时如实上报并跳过（不打扰）。 */
-  function claimNotice(task: TaskRecordView, stage: 'overdue' | 'stuck', nowMs: number): boolean {
+  function claimNotice(task: TaskRecordView, stage: 'overdue' | 'stuck' | 'contact_lost', nowMs: number): boolean {
     try {
       return registry.claimLongRunningNotice!(task.taskId, stage, new Date(nowMs).toISOString());
     } catch (error) {
@@ -818,7 +861,12 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   }
 
   /** 投递一条提醒（fire-and-forget；成功/失败各记一条事件，不改任务事实、不重试）。 */
-  function deliverNotice(task: TaskRecordView, stage: 'overdue' | 'stuck', minutes: number): void {
+  function deliverNotice(
+    task: TaskRecordView,
+    stage: 'overdue' | 'stuck' | 'contact_lost',
+    minutes: number,
+    text: string,
+  ): void {
     const base = {
       taskId: task.taskId,
       principalId: task.principalId,
@@ -826,7 +874,6 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       stage,
       minutes,
     };
-    const text = stage === 'stuck' ? LONG_RUNNING_STUCK_NOTICE_TEXT : LONG_RUNNING_NOTICE_TEXT;
     const send = (async (): Promise<void> => {
       try {
         const delivered = await longRunningNotice!.sendNotice({ ...base, text });
@@ -842,6 +889,36 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     })();
     noticeSends.add(send);
     void send.finally(() => noticeSends.delete(send));
+  }
+
+  /**
+   * 长任务等待「与执行层断了联系（无回执）」的如实告知（2026-11-19 owner 裁定「能兜则兜、
+   * 兜不住才暴露」）：只在连续两次无回执（第一次截断后的自查也查不出来）后发一次，
+   * 文案 = 装配注入的既有 `unknown_result` 话术（不新写）；每任务一次（持久化领取，
+   * 重启不重发）。缺端口/缺领取能力/缺文案 = 不发（fail-closed，与提醒端口同一口径）。
+   */
+  function notifyWaitContactLost(task: TaskRecordView, nowMs: number): void {
+    if (longRunningNotice === undefined || contactLostNoticeText === undefined) return;
+    if (registry.claimLongRunningNotice === undefined) return;
+    if (!claimNotice(task, 'contact_lost', nowMs)) return;
+    const startedAt = runningStartedAt(task);
+    deliverNotice(
+      task,
+      'contact_lost',
+      startedAt === undefined ? 0 : Math.max(0, Math.floor((nowMs - startedAt) / 60_000)),
+      contactLostNoticeText,
+    );
+  }
+
+  /** 兜不住就暴露（按任务 ID 的唯一入口；只在任务仍 running 时发一次，读不到就如实上报）。 */
+  function exposeContactLost(taskId: string, nowMs: number): void {
+    try {
+      const task = registry.get(taskId);
+      if (task.status !== 'running') return;
+      notifyWaitContactLost(task, nowMs);
+    } catch (error) {
+      report(taskId, error);
+    }
   }
 
   /**
@@ -871,7 +948,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         // 卡住档：发过即止（之后不再自动发）。
         if (!claimNotice(task, 'stuck', nowMs)) continue;
         noticed.push(task.taskId);
-        deliverNotice(task, 'stuck', Math.floor(elapsed / 60_000));
+        deliverNotice(task, 'stuck', Math.floor(elapsed / 60_000), LONG_RUNNING_STUCK_NOTICE_TEXT);
         continue;
       }
       if (!claimNotice(task, 'overdue', nowMs)) {
@@ -879,7 +956,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         continue;
       }
       noticed.push(task.taskId);
-      deliverNotice(task, 'overdue', Math.floor(elapsed / 60_000));
+      deliverNotice(task, 'overdue', Math.floor(elapsed / 60_000), LONG_RUNNING_NOTICE_TEXT);
       if (stuckDue !== undefined) arm(stuckDue);
     }
     return { noticed, ...(nextDue === undefined ? {} : { nextDue }) };
@@ -960,6 +1037,9 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
             const delayMs = Math.min(entry.pollAfterMs * 2 ** Math.min(failures - 1, 16), LONG_TASK_MAX_RETRY_DELAY_MS);
             entry.nextDue = now().getTime() + delayMs;
             log?.({ event: 'execution_wait_retry', operationId: entry.operationId, failures, delayMs });
+            // 前一次是「无回执」的截断、这一趟「自己再查一次」又出站失败＝联系还没恢复：
+            // 与截断同一处置（兜不住才暴露一次，claim 保证每任务只发一次）。
+            if ((entry.noReceiptStreak ?? 0) >= 1) exposeContactLost(entry.taskId, now().getTime());
             schedulePump();
           }
         }
@@ -968,7 +1048,14 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         entry.inFlight = false;
         if (entry.controller === controller) delete entry.controller;
       }
-      entry.transientFailures = 0;
+      // 真实回执（含 accepted/终态）才算「联系恢复」：清零瞬时故障与「无回执」连续计数；
+      // 无回执的传输截断不算回执（退避要能长起来，且「先兜一次」的判定要靠这个连续计数）。
+      if (waitNoReceiptOf(result)) {
+        entry.noReceiptStreak = (entry.noReceiptStreak ?? 0) + 1;
+      } else {
+        entry.transientFailures = 0;
+        entry.noReceiptStreak = 0;
+      }
       try {
         await handleWaitResult(entry, result, startedAt);
       } catch (error) {
@@ -992,6 +1079,20 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     const task = registry.get(entry.taskId);
     if (task.status !== 'running') {
       waiters.delete(entry.dispatchKey);
+      return;
+    }
+    if (waitNoReceiptOf(result)) {
+      // 单次 wait 被传输截断（没有回执）：**不代表长任务失败**（它可能还在执行层跑），
+      // 也**不杀任务**。先兜：退避重排、继续等（下一趟就是「自己再查一次」）；
+      // 连续两次仍拿不到回执（自查也查不出来）才如实暴露一次——不必把不确定性当结论播出去。
+      // 退避是指数型且封顶（同出站故障车道口径），执行层整体不可达时不按秒撞。
+      const failures = (entry.transientFailures ?? 0) + 1;
+      entry.transientFailures = failures;
+      const delayMs = Math.min(entry.pollAfterMs * 2 ** Math.min(failures - 1, 16), LONG_TASK_MAX_RETRY_DELAY_MS);
+      entry.nextDue = nowMs + delayMs;
+      log?.({ event: 'execution_wait_retry', operationId: entry.operationId, failures, delayMs, reason: 'no_receipt' });
+      if ((entry.noReceiptStreak ?? 0) >= 2) notifyWaitContactLost(task, nowMs);
+      schedulePump();
       return;
     }
     if (result.status === 'failed' || result.status === 'refused') {

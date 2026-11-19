@@ -99,6 +99,9 @@ describe('用户可见失败话术', () => {
     expect(classifyFailure({ code: 'COLLECTION_FAULT' })).toBe('executor_failed');
     expect(classifyFailure({ code: 'SOMETHING_NEW' })).toBe('executor_failed');
     expect(classifyFailure({ status: 'result_unknown' })).toBe('unknown_result');
+    // 单次调用被传输超时截断（无回执）带的就是这个码：码分支同样归 unknown_result
+    // ——绝不能落 executor_failed（那会给出「再试一次」的暗示，而写操作可能已经生效）。
+    expect(classifyFailure({ code: 'result_unknown', status: 'failed' })).toBe('unknown_result');
   });
 
   it('② 我方故障码一律 host_fault：协议违约、句柄丢失、令牌不匹配都不向用户解释', () => {
