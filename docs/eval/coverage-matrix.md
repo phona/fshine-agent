@@ -35,7 +35,8 @@
 | 附件 → 汇总成表发回：xlsx 真实可开、数值逐格对、不含单元格行数据 | `scripts/eval/wecom-sim/cases-e-execution.test.ts:W-19 汇总成表发我`<br>`scripts/eval/wecom-sim/cases-d-attachment.test.ts:W-18 追问后回 1`<br>`packages/agent/runtime-worker-run-js.test.ts:② 转录与工具参数里 grep 不到任何单元格数值`<br>`scripts/eval/cap01/r2d-judge.test.ts:委派链路带 inputFiles 且副本绑定任务：宿主绿` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 只要数字不要文件：只回文字数字、零文件投递 | `scripts/eval/wecom-sim/cases-e-execution.test.ts:W-20 只要数字不要文件` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 超过 20MB 附件：整条拒绝、话术与事件含上限、不失活 | `apps/server/server-cap01-attachment-limit.test.ts:② 21MB 被拒`<br>`apps/server/server-cap01-attachment-limit.test.ts:③ 恰好 20MB：放行并登记` | 宿主机制 | 已覆盖 | — |
-| 非结构化附件（文本 PDF）：读出日期 / 金额、作为产物回传 | `scripts/eval/fixtures/unstructured/invoice-fixture.test.ts:文本提取器读出预期三行（日期 / 金额 / 客户）`<br>`scripts/eval/cap01/r2d-judge.test.ts:回复里同时出现正确日期与金额 = read（绿）` | 执行层 | 已覆盖 | PDF/图片的**业务语义识别**只有机械提取与判读守卫（`ie r2d`），真模型面在 eval:user；图片附件登记与产物回传确定性覆盖，识别质量归真模型统计 |
+| 非结构化附件（文本 PDF）：读出日期 / 金额、作为产物回传 | `scripts/eval/fixtures/unstructured/invoice-fixture.test.ts:文本提取器读出预期三行（日期 / 金额 / 客户）`<br>`scripts/eval/cap01/r2d-judge.test.ts:回复里同时出现正确日期与金额 = read（绿）` | 执行层 | 已覆盖 | 文本 PDF 的提取与判读守卫已有；**图片 / 截图**形态见下行缺口 |
+| 图片 / 截图附件业务识别（如发票截图）：登记后识别并汇总 | — | 宿主机制 + 真模型统计 | 缺口 | 只有机械登记（`lifecycle` 对 `.pdf/.zip` 只做登记、内容 UNDEFINED）；图片附件无识别/汇总自动用例，也无图片夹具。登记与产物回传链路可确定性补；识别质量只可能真模型/人工验证（business-coverage 盲区 #7） |
 
 ## 三、后台任务（受理 / 静默 / 完成 / 失败 / 取消 / 并存 / 跨重启）
 
@@ -140,6 +141,7 @@
 | 场景 | 自动用例 | 层级 | 覆盖度 | 缺口说明 |
 | --- | --- | --- | --- | --- |
 | 单实例纪律与双实例行为 | — | 宿主机制 | 缺口 | 仓库**明确不强制**单实例（`docs/ops/README.md:13`）：无进程锁 / pid 文件 / 端口占用守卫，两个实例共享同一 `.runtime/state.db` 与会话目录，双写并发行为未定义未测；只有进程内单实例登记（`packages/agent/src/resource-policy.ts:465`）。用户若起两个实例，第二条连接会把第一条的 WS 踢掉（`docs/product/wecom-live-dummy-cases.md:30`）。真要做：给 `startup-sweep` 同位置加确定性守卫（锁 / EADDRINUSE 拒绝路径先写测试） |
+| 指定接收人 / 转发结果到其它会话 | — | 宿主机制 | 缺口 | 所有投递断言都是「回到发起会话」（business-coverage 盲区 #9）；没有「把结果转发给指定人 / 其它群」的自动用例。真要做：先定语义（宿主把任务结果定向投递允许吗 / 谁授权），再写渠道侧定向投递守卫 |
 
 ## 与 business-coverage.md 的关系
 
