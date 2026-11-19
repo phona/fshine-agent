@@ -826,7 +826,15 @@ export interface NotificationAttachment {
  *     幂等 = 事实键去重（有界 FIFO），有界 = 单次注入条数上限），由
  *     `taskFactProvider` 在下一次回合开始时取走（普通 user-role 注入，见 execution-runtime）。
  */
-const B_CHANNEL_KINDS = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'resource_limited', 'waiting_user']);
+/**
+ * B 通道注入 kinds（非终态唤醒面之外的机械事实）：
+ *   · `completed` 不在其中（2026-11-19 复核 F3）：完成已由**唤醒路径**负责说——唤醒回合
+ *     由模型把话带给用户；唤醒降级（unavailable/failed）与非 live 不唤醒时，完成**事实**
+ *     经 server 的 systemNotes 待注入队列在下一次用户回合补说。若这里再注入一条
+ *     `[任务事实] 办完了：…`，同一回合会出现两条同一件事的陈述（旧宿主完成模板残留）。
+ *   · 失败/取消/超时/资源/等补充**保留**：这几类还没改成唤醒，主动推送与 B 通道照旧。
+ */
+const B_CHANNEL_KINDS = new Set(['failed', 'cancelled', 'timed_out', 'resource_limited', 'waiting_user']);
 const INJECTED_KEYS_LIMIT = 1024;
 
 export function attachNotificationOutbox(

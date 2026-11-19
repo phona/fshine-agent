@@ -39,7 +39,8 @@ import { createFileStore, type RegisteredFile } from '../../packages/agent/src/f
 import type { TurnFileRef } from '../../packages/agent/src/execution-runtime';
 import type { TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/src/task-runner';
 import { openTaskStore } from '@fshine/core';
-import { createServer, deliverTurnFilesCore, type FileDeliveryPort } from './server';
+import { createServer, deliverTurnFilesCore, turnProducedNothing, type FileDeliveryPort } from './server';
+import { echoCompletionWake } from './testing/echo-completion-wake';
 import { failureTextFor } from './task-completion-delivery';
 import { failureMessageFor } from '../../packages/agent/src/user-facing-failure';
 
@@ -116,6 +117,10 @@ function sequencedDriver(steps: readonly DriverStep[], capture: DriverCapture): 
         await input.exec(call.tool, call.args);
       }
       return { text: step.text, messages: [] as unknown as DriverMessage[] };
+    },
+    // 唤醒回合（完成事实触发）按产品形状脚本化：模型把事实里的结果正文复读给用户。
+    async wake(factText) {
+      return echoCompletionWake(factText);
     },
   };
 }
@@ -370,8 +375,8 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     });
     try {
       const reply = await server.handler(incoming('m-silent', '帮我汇总'));
-      // 「只交办」回合静默（owner 2026-11-19）：模型正文不发终帧（reply 为空）。
-      expect(reply).toBe('');
+      // owner 2026-11-19：用户看到的话永远是模型说的——交办回合的模型正文原样送达。
+      expect(reply).toBe('汇总完成。');
       await vi.waitFor(() => {
         expect(logs.filter((line) => line['event'] === 'file_delivery')).toHaveLength(1);
       });
@@ -403,17 +408,22 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     }
   });
 
-  it('④ 只有文件、正文为空 → 不判回合失败，投递照常发生（live 成功记 sent）', async () => {
+  it('④ 交办 + 正文为空 → 不算回合失败：零终帧、任务照常建、完成投递照常到达', async () => {
     const { port, calls, texts } = livePort();
     const { server, logs } = await makeFixture({
-      // Main 正文为空（只交办）：受理回执语由 Main 自己给；产物由后台 Worker 完成投递。
+      // Main 正文为空：agent.md 要求交办后不复述过程话，模型照做时该回合就是没有正文。
       steps: [{ execCalls: [TASK_RUN_CALL], text: '' }],
       workerSteps: [WORKER_RUN_JS_STEP],
       port,
     });
     try {
-      // 后台派发下主回合正文为空且无本回合文件 → 按既有判据失败（判定的是**主回合**，不是任务）。
-      await expect(server.handler(incoming('m-empty', '发文件'))).rejects.toThrow('本回合未产出可用回复');
+      // 交办了任务 = 本回合产出了「东西」：空正文不是回合失败；空就是空，不投帧。
+      const reply = await server.handler(incoming('m-empty', '发文件'));
+      expect(reply).toBe('');
+      // 任务照常建（message_done 带 taskIds 机械事实）。
+      const done = logs.find((line) => line['event'] === 'message_done') as Record<string, unknown> | undefined;
+      expect(done).toBeDefined();
+      expect((done!['taskIds'] as unknown[]).length).toBe(1);
       // 投递面仍收到文件字节（后台任务完成回调，与前台同一交付面）。
       await vi.waitFor(() => {
         expect(calls).toHaveLength(1);
@@ -425,7 +435,7 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
       await vi.waitFor(() => {
         expect(logs.some((line) => line['event'] === 'file_delivery' && line['status'] === 'sent')).toBe(true);
       });
-      // 文本结果照常送达（文件过滤不影响结果正文）。
+      // 结果正文照常送达（文件过滤不影响结果文本）。
       await vi.waitFor(() => {
         expect(texts).toHaveLength(1);
       });
@@ -435,7 +445,7 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     }
   });
 
-  it('④b 正文空且无文件 → 仍按既有「回合失败」处理（分支另一侧回归）', async () => {
+  it('④b 一无所有（无正文、无文件、无交办、无执行事实）→ 仍判回合失败（判据不收紧过头）', async () => {
     const { server, logs } = await makeFixture({ steps: [{ text: '' }] });
     try {
       await expect(server.handler(incoming('m-blank', '说点什么'))).rejects.toThrow('本回合未产出可用回复');
@@ -443,6 +453,34 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     } finally {
       await server.close();
     }
+  });
+
+  it('④c 有执行事实但没交办任务 + 空正文 → 判回合失败（执行事实不豁免，防静默终局）', () => {
+    // 内联只读失败 / 内联写确认同族：executions 是内部动作，用户不会自动收到它——
+    // 正文为空就是静默终局，必须判失败（owner 2026-11-19 最终形状）。
+    expect(turnProducedNothing({
+      reply: '',
+      fileCount: 0,
+      taskIds: [],
+      executions: [{ status: 'failed' }],
+    })).toBe(true);
+    expect(turnProducedNothing({
+      reply: '',
+      fileCount: 0,
+      taskIds: [],
+      executions: [{ status: 'needs_confirmation' }],
+    })).toBe(true);
+    // 交办是唯一豁免：有 taskIds → 不判失败（结果由完成投递/唤醒送达）。
+    expect(turnProducedNothing({
+      reply: '',
+      fileCount: 0,
+      taskIds: ['task_x'],
+      executions: [],
+    })).toBe(false);
+    // 一无所有同样判失败（与 ④b 同一判据）；有正文 / 有文件永不判失败。
+    expect(turnProducedNothing({ reply: '', fileCount: 0, taskIds: [], executions: [] })).toBe(true);
+    expect(turnProducedNothing({ reply: '好', fileCount: 0, taskIds: [], executions: [] })).toBe(false);
+    expect(turnProducedNothing({ reply: '', fileCount: 1, taskIds: [], executions: [] })).toBe(false);
   });
 
   it('⑤ 同回合重复交付（同 sha256 + 同名）→ 只投递一份，去重项不产生额外事件/错误', async () => {
@@ -581,9 +619,9 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     }
   });
 
-  it('⑧ 完成投递带任务身份：文本以「<业务名>」办完了：为头（name 从底账取，超长截断 30 字）', async () => {
-    // 2026-11-19 实测缺陷：完成消息没有任务身份，用户看不出是哪件事的
-    // （「不知道是不是 longtask 的」）。投递文本加一行简短身份。
+  it('⑧ 完成投递文本 = 唤醒回合模型那句（宿主不再拼「业务名」办完了：模板）', async () => {
+    // 2026-11-19 唤醒切片：完成消息的身份由**模型**在唤醒回合里写（宿主只喂事实）；
+    // 宿主身份行模板已删——投递文本必须逐字等于模型产出，不夹带宿主拼接。
     const { port, texts } = livePort();
     const { server } = await makeFixture({
       steps: [TASK_RUN_STEP],
@@ -593,12 +631,9 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     try {
       await server.handler(incoming('m-completion-name', '帮我汇总'));
       await vi.waitFor(() => expect(texts).toHaveLength(1));
-      // 身份行 = 「业务名」办完了： + 结果正文（name 由底账 deriveTaskName 机械回落，
-      // TASK_RUN_CALL 的任务原文是「帮我把结果汇总成一份文件」）。
-      expect(texts[0]!.text).toMatch(/^「[^」]+」办完了：/);
-      expect(texts[0]!.text).toContain('汇总完成。');
-      // 身份头里的名字来自任务行（不是正文重复）；超长名截断到 30 字（机械截断）。
-      expect(texts[0]!.text.length).toBeGreaterThan('「」办完了：'.length);
+      // 脚本模型复读事实里的结果正文（逐字）；没有宿主身份头。
+      expect(texts[0]!.text).toBe('汇总完成。');
+      expect(texts[0]!.text).not.toMatch(/「[^」]*」办完了：/);
     } finally {
       await server.close();
     }

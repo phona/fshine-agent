@@ -112,17 +112,16 @@ describe('F 组·写确认回环（W-22～W-25）', () => {
       const w22 = sim.sendText('给 alpha 集合 W1 追加 2 条记录');
       await sim.waitFor('W-22 提案终帧', () => sim.finalBubbles().length === 1);
 
-      // 口径变更（2026-11-19 提案回合）：提案回合的终帧 = **宿主提案卡**，不是模型转述。
-      // 模型那段「任务已受理，正在办理中…」是噪声且可能泄露内部词，宿主用唯一话术来源
-      // failureMessageFor('needs_confirmation', { summary }) 渲染提案卡（真实摘要 + 两个动作）。
+      // 口径变更（2026-11-19 owner）：提案回合的终帧 = **模型自己说的话**（宿主不再替换成
+      // 提案卡）。脚本模型从真实 needs_confirmation 的 summary 组织转述；用户看到的就是
+      // 这句（含要写入什么 + 请求确认），机械动作仍由宿主/执行层把关。
       const proposal = sim.finalBubbles()[0]!.content;
-      expect(proposal).toContain('要写入');
       expect(proposal).toContain('alpha');
       expect(proposal).toContain('W1');
       expect(proposal).toContain('2 条');
       expect(proposal).toContain('不可撤销');
       // 提案请求用户表态（两个动作），不宣称已写入。
-      expect(proposal).toContain('回「确认」');
+      expect(proposal).toContain('回复「确认」');
       expect(proposal).not.toContain('已写入');
       // 零写入：审计无 commit 成功行，alpha W1 仍 2 条。
       expect(commitSuccessCount(sim)).toBe(0);
@@ -250,15 +249,16 @@ describe('F 组·写确认回环（W-22～W-25）', () => {
     }
   }, 90_000);
 
-  it('W-29 提案回合不让模型自己说话：噪声文本不投递，用户只看到宿主提案卡', async () => {
-    // owner 2026-11-19 live 实测：提案回合模型会自己编「任务已受理，正在办理中…如果又卡在
-    // 确认凭据那一环…」——噪声且泄露内部词。宿主改用唯一话术来源渲染提案卡（摘要 + 两个动作）
-    // 替换模型文本：finalBubbles 里只有提案卡，没有模型噪声。
+  it('W-29 提案回合走岔路：模型不带摘要也照发（宿主不替换），零写入与提案执行事实不变', async () => {
+    // owner 2026-11-19 定分界：措辞放手、动作不放。脚本模型在提案回合不带摘要、只说一句
+    // 进程话——用户逐字收到这句话（宿主不再替换成提案卡）；机械面照旧：零写入、执行事实
+    // 仍是 prepare 的真实 needs_confirmation。真模型是否会稳定带摘要，只能由真模型评测守。
     const sim = await startWecomSim({ label: 'w29', allowWriteOperations: true });
+    const modelText = '好的，这件事我处理一下。';
     try {
       sim.book.mainTurn('给 alpha 集合 W1 追加 2 条记录', [
         toolCallAssistant('task_run', { task: '给 alpha 集合 W1 追加 2 条记录' }),
-        textAssistant('任务已受理，正在办理中…如果又卡在确认凭据那一环，我会再告诉你。'),
+        textAssistant(modelText),
       ]);
       sim.book.workerTask('给 alpha 集合 W1 追加 2 条记录', [
         toolCallAssistant('execute_operation', {
@@ -271,14 +271,9 @@ describe('F 组·写确认回环（W-22～W-25）', () => {
       await sim.waitFor('W-29 提案终帧', () => sim.finalBubbles().length === 1);
 
       const bubbles = sim.finalBubbles();
-      // 恰一条终帧，且是宿主提案卡：含真实摘要（「要写入…」）与两个动作（回「确认」）。
+      // 恰一条终帧 = 模型原话（宿主不再替换）。
       expect(bubbles).toHaveLength(1);
-      expect(bubbles[0]!.content).toContain('要写入');
-      expect(bubbles[0]!.content).toContain('alpha');
-      expect(bubbles[0]!.content).toContain('回「确认」');
-      // 模型噪声/内部词不进用户面。
-      expect(bubbles[0]!.content).not.toContain('正在办理中');
-      expect(bubbles[0]!.content).not.toContain('确认凭据');
+      expect(bubbles[0]!.content).toBe(modelText);
       // 提案回合零写入；执行事实仍是 prepare 的真实 needs_confirmation。
       expect(commitSuccessCount(sim)).toBe(0);
       expect(queryDummy(sim, 'alpha', 'W1').count).toBe(2);

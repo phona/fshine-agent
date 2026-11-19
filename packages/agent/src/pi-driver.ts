@@ -31,7 +31,7 @@ import type { AgentMessage, AgentToolResult } from '@earendil-works/pi-agent-cor
 import type { Model } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import type { DiscoveredTool } from '@fshine/contracts';
-import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver-contract';
+import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult, type WakeResult } from './driver-contract';
 import { archiveCompactedSessionFile } from './session-persistence';
 import { renderToolStepText } from './step-text';
 
@@ -464,8 +464,11 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
     const toolDefinitions = input.tools.map((tool) => toAgentTool(
       tool,
       {
+        // 无执行面的回合（唤醒回合已按 Pi 原生 API 清空工具声明，正常到不了这里）：拒绝话术
+        // 必须干净且直接指示不调工具——这句话会被写进模型上下文，内部词（执行面/执行层）会
+        // 被模型复述到用户面前。
         exec: (name, args, signal) => input.surfaceRef.current === undefined
-          ? Promise.reject(new Error('本回合工具执行面尚未就绪'))
+          ? Promise.reject(new Error('请直接回答用户，不必调用工具。'))
           : input.surfaceRef.current.exec(name, args, signal),
         onStep: (text) => input.surfaceRef.current?.onStep(text),
         get signal() { return input.surfaceRef.current?.signal; },
@@ -781,6 +784,122 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
       }
     },
 
+    /**
+     * 唤醒入口（会话状态变化 → 模型把话带给用户；形状见 driver-contract 的 WakeResult）。
+     * 事实经 Pi 原生 custom message 注入（display=false；projectSession 投影成 user）——
+     * 与既有 injections 同一形状，区别只在会话空闲时 `triggerTurn: true` 触发一个回合。
+     * 苏醒回合**没有工具**：按 Pi 原生 `setActiveToolsByName` 清空本回合工具声明（回合收尾
+     * 恢复）——模型不存在调用工具的路径，执行层零接触、也没有内部拒绝话术进上下文。
+     * 会话忙时事实按 `followUp` 入队、由当前回合负责说（本入口不取正文）。
+     */
+    async wake(factText: string, wakeOptions?: { deadline?: number }): Promise<WakeResult> {
+      if (factText.trim() === '') return { outcome: 'failed' };
+      // 可唤醒的前提 = 本驱动持有实例级「睡眠中」的会话；一次性回合驱动没有可唤醒对象。
+      if (!reuseConversation) return { outcome: 'unavailable' };
+      const pending = conversation;
+      if (pending === undefined) return { outcome: 'unavailable' };
+      let active: Conversation;
+      try {
+        active = await pending;
+      } catch {
+        return { outcome: 'unavailable' };
+      }
+      const deadline = wakeOptions?.deadline;
+      const remaining = deadline === undefined ? undefined : deadline - Date.now();
+      if (remaining !== undefined && remaining <= 0) {
+        console.warn(JSON.stringify({ event: 'pi_driver_wake_expired' }));
+        return { outcome: 'failed' };
+      }
+      const session = active.session;
+      // 截止到达 → 中止本回合（与 run() 同一套原生 abort；abort 后回合以 aborted 收尾 → failed）。
+      const abort = new AbortController();
+      const timer = remaining === undefined ? undefined : setTimeout(() => abort.abort(), Math.max(1, remaining));
+      const abortSession = () => {
+        if (abort.signal.aborted) void session.abort().catch(() => undefined);
+      };
+      abort.signal.addEventListener('abort', abortSession, { once: true });
+      /** 唤醒回合清掉的工具集（回合收尾恢复；清空失败/未清 = undefined）。 */
+      let clearedToolNames: string[] | undefined;
+      try {
+        if (session.isStreaming) {
+          // 会话忙：事实入队（Pi 原生 followUp），由当前回合处理；不另起回合、不由本入口取正文。
+          await session.sendCustomMessage(
+            { customType: 'fshine_task_fact', content: factText, display: false },
+            { triggerTurn: true, deliverAs: 'followUp' },
+          );
+          return { outcome: 'busy' };
+        }
+        // 唤醒回合无执行面：清掉上一回合留下的 surface 引用（工具不得借用旧回合的执行闭包）。
+        if (sessionSurface !== undefined) sessionSurface.current = undefined;
+        active.slot.current = { retryScheduled: 0, attempt: 0 };
+        // 唤醒回合**不给工具**（2026-11-19 复核 F1；一审只清执行面，模型仍可无限调工具重试，
+        // 拒绝话术还会进模型上下文）。会话工具集本可按回合切换：Pi 公开 API
+        // `setActiveToolsByName`（"Changes take effect on the next agent turn"）——清空后
+        // 本回合请求不带任何工具声明，模型不存在「调用工具」的路径；回合收尾（含失败/异常）
+        // 在 finally 恢复原工具集，后续用户回合工具面不受影响。
+        clearedToolNames = session.getActiveToolNames();
+        session.setActiveToolsByName([]);
+        await session.sendCustomMessage(
+          { customType: 'fshine_task_fact', content: factText, display: false },
+          { triggerTurn: true },
+        );
+        const messages = projectSession(session);
+        active.lastProjection = messages;
+        lastTurnProjection = messages;
+        const slot = active.slot.current;
+        // 失败判据与 run() 同一处：回合判失败（error/aborted）且其后没有正常 assistant 消息。
+        if (slot?.runFailure !== undefined && slot.recovered !== true) {
+          console.warn(JSON.stringify({
+            event: 'pi_driver_wake_failed',
+            errorCode: slot.runFailure.code,
+            errorMessage: slot.runFailure.message.slice(0, 300),
+            attempt: slot.runFailure.attempt,
+          }));
+          return { outcome: 'failed' };
+        }
+        const text = wakeReplyText(messages, factText);
+        if (text.trim() === '') {
+          const lastMessage = messages[messages.length - 1] as {
+            role?: string; stopReason?: string; content?: unknown;
+          } | undefined;
+          console.warn(JSON.stringify({
+            event: 'pi_driver_wake_empty_reply',
+            role: lastMessage?.role,
+            stopReason: lastMessage?.stopReason,
+            contentBlocks: Array.isArray(lastMessage?.content)
+              ? lastMessage.content.map((block) => (block as { type?: string }).type ?? 'unknown')
+              : typeof lastMessage?.content,
+          }));
+          return { outcome: 'failed' };
+        }
+        return { outcome: 'woken', text };
+      } catch (error) {
+        console.error(JSON.stringify({
+          event: 'pi_driver_wake_error',
+          errorType: error instanceof Error ? error.name : 'UnknownError',
+          message: error instanceof Error ? error.message.slice(0, 300) : String(error),
+        }));
+        // 异常后会话中可能有半程条目：与 run() 同一纪律——丢弃、下一回合重建（不硬续坏状态）。
+        await discardConversation();
+        return { outcome: 'failed' };
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        abort.signal.removeEventListener('abort', abortSession);
+        // 恢复唤醒回合的工具集（异常/失败路径同样恢复；失败只记观测事件——会话若已丢弃，
+        // 下一回合重建时会带着完整工具面）。
+        if (clearedToolNames !== undefined) {
+          try {
+            session.setActiveToolsByName(clearedToolNames);
+          } catch (error) {
+            console.warn(JSON.stringify({
+              event: 'pi_driver_wake_tool_restore_failed',
+              errorType: error instanceof Error ? error.name : 'UnknownError',
+            }));
+          }
+        }
+      }
+    },
+
     /** 只读派生：Pi 会话当前转录（宿主不得据此累积可变历史）。 */
     transcript(): readonly AgentMessage[] {
       // 同步读：实例级会话已就绪时直接读 Pi 的 session.messages（每次重新投影，不缓存历史）。
@@ -868,6 +987,39 @@ function lastAssistantStop(messages: readonly AgentMessage[]): { stopReason?: st
     if (message?.role === 'assistant') return { stopReason: message.stopReason, errorMessage: message.errorMessage };
   }
   return undefined;
+}
+
+/**
+ * 取**唤醒回合**的正文：事实注入（custom message → user 投影）之后、模型自己产出的 assistant 正文。
+ *
+ * 与 `finalReplyText` 的两个差别（都是因为唤醒回合没有 promptText，也没有宿主执行面）：
+ *   · 归属判据 = **最后一条 user 消息就是这条事实**（字符相等）。唤醒回合的触发点只有它；
+ *     事实被压缩折进摘要 / 转录形状异常时取不到归属，宁空也不取旧回合的话——
+ *     "整段转录最后一条 assistant" 会取错（溢出恢复失败时那条是上一回合的答复）。
+ *   · **不认 toolResult**：工具结果的确定性话术只在有宿主提示词的回合里有语义；唤醒回合的
+ *     工具结果可能是执行面未就绪的内部错误形状，它不是模型的话，不许当正文投给用户。
+ *
+ * 导出只为确定性守卫测试（同 `finalReplyText` 的导出理由；不接线、不改变行为）。
+ */
+export function wakeReplyText(messages: readonly AgentMessage[], factText: string): string {
+  if (factText.trim() === '') return '';
+  let factIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] as { role?: string } | undefined;
+    if (message?.role === 'user') {
+      factIndex = i;
+      break;
+    }
+  }
+  if (factIndex === -1) return '';
+  const fact = messages[factIndex] as { content?: unknown } | undefined;
+  if (textFromContent(fact?.content).trim() !== factText.trim()) return '';
+  for (let i = messages.length - 1; i > factIndex; i -= 1) {
+    const message = messages[i] as { role?: string; content?: unknown; stopReason?: string } | undefined;
+    if (message?.role !== 'assistant') continue;
+    return message.stopReason === 'stop' ? textFromContent(message.content) : '';
+  }
+  return '';
 }
 
 /**

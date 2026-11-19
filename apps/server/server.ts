@@ -62,8 +62,7 @@ import {
 import { createResourcePolicy, fileRefTtlMsOf, resolveRuntimeConfig } from '../../packages/agent/src/resource-policy';
 import { SessionPersistence } from '../../packages/agent/src/session-persistence';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
-import { deriveTaskName, type TaskRegistry, type TaskScope } from '../../packages/agent/src/task-registry';
-import { failureMessageFor } from '../../packages/agent/src/user-facing-failure';
+import { deriveTaskName } from '../../packages/agent/src/task-registry';
 import type { TaskExecutor, TaskRunner } from '../../packages/agent/src/task-runner';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../../packages/agent/src/worker-skills';
 import {
@@ -75,7 +74,13 @@ import {
 } from '../../scripts/ask-runtime';
 import { createAttachmentFactQueue, createScopedNoteQueue } from './attachment-facts';
 import { AttachmentNudge, type NudgeClock } from './attachment-nudge';
-import { deliverTaskResult, deliverTaskFailure, routeFromSessionId } from './task-completion-delivery';
+import {
+  deliverTaskResult,
+  deliverTaskFailure,
+  routeFromSessionId,
+  taskCompletionFactText,
+  taskCompletionFallbackText,
+} from './task-completion-delivery';
 import { composeNotificationSinks, createChatNotificationSink } from './notification-chat-sink';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -428,23 +433,25 @@ export function workspaceRootOf(dbPath: string): string {
 }
 
 /**
- * 提案回合取真实摘要（底账 pendingQuestion.confirmation.summary）；取不到返回 undefined。
- * 只读机械事实、不改写；越权/找不到静默跳过（摘要缺失时提案卡走兜底话术，不让提案丢失）。
+ * 回合失败判据（唯一一处；owner 2026-11-19 最终形状）。
+ *
+ * 「一无所有」= 正文为空 **且** 无文件 **且** 没有交办任何任务（taskIds 空）：
+ *   · 交办是**唯一豁免**——任务结果由完成投递/唤醒欠着用户一条，空正文不是静默终局；
+ *   · **执行事实（executions）不参与豁免**——它是内部动作，用户不会自动收到它；内联只读
+ *     失败 / 内联写确认 + 空正文 = 用户什么都收不到（静默终局），必须判回合失败。
+ *
+ * executions 显式进调用面只为把这条语义钉住（当前它由 taskIds 派生；将来任何来源都必须
+ * 遵守「执行事实不豁免」）。判失败走既有「回合失败」路径（调用方 throw），不补宿主话术。
  */
-function proposalSummaryOf(
-  registry: TaskRegistry,
-  taskIds: readonly string[],
-  scope: TaskScope,
-): string | undefined {
-  for (const taskId of taskIds) {
-    try {
-      const summary = registry.get(taskId, scope).pendingQuestion?.confirmation?.summary;
-      if (summary !== undefined && summary.trim() !== '') return summary;
-    } catch {
-      // 跳过：非本 scope 任务或已清空（摘要缺失时用兜底提案卡）。
-    }
-  }
-  return undefined;
+export function turnProducedNothing(input: {
+  readonly reply: string;
+  readonly fileCount: number;
+  readonly taskIds: readonly string[];
+  readonly executions: readonly unknown[];
+}): boolean {
+  return input.reply.trim() === ''
+    && input.fileCount === 0
+    && input.taskIds.length === 0;
 }
 
 export async function createServer(deps: ServerDeps): Promise<Server> {
@@ -462,9 +469,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   }
   const taskRegistry = createSqliteTaskRegistry(deps.dbPath);
   /**
-   * 任务业务名（完成投递身份行用）：底账 name（机械回落值）；旧库历史行缺省用
-   * deriveTaskName(request) 同款回落。读不到底账行（回调触达时行已清/异常）= 无身份行
-   * （投递逐字节不变，不猜名）。
+   * 任务业务名（完成事实文本里「哪件事」用）：底账 name（机械回落值）；旧库历史行缺省用
+   * deriveTaskName(request) 同款回落。读不到底账行（回调触达时行已清/异常）= 无业务名
+   * （事实主语用中性指代，不猜名）。
    */
   const taskNameOf = (taskId: string, request: string): string | undefined => {
     try {
@@ -473,6 +480,50 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       }).get(taskId);
       const name = record.name ?? deriveTaskName(record.request ?? request);
       return name.trim() === '' ? undefined : name;
+    } catch {
+      return undefined;
+    }
+  };
+  /**
+   * 快活任务（本回合已把结果交给模型）的降级兜底文本：底账业务名 + 结果原文。
+   * background 完成经 runner settle 写 replyText；inline 完成写 resultText——两处兼容读取
+   * （与交给模型的 summary 同源同式：settled.replyText ?? settled.resultText）。结果原文为空/
+   * 底账读不到 = undefined（不编事实、不投递）。
+   */
+  const taskCompletionFallbackOf = (taskId: string): string | undefined => {
+    try {
+      const record = (taskRegistry as unknown as {
+        get(id: string): { request: string; replyText?: string; resultText?: string };
+      }).get(taskId);
+      const resultText = record.replyText ?? record.resultText ?? '';
+      if (resultText.trim() === '') return undefined;
+      const name = taskNameOf(taskId, record.request);
+      return taskCompletionFallbackText({
+        ...(name === undefined ? {} : { name }),
+        resultText,
+      });
+    } catch {
+      return undefined;
+    }
+  };
+  /**
+   * 快活失败任务的失败事实（回合末兜底投递用；与失败回调同源）：终局 failed（含
+   * result_unknown；资源拒绝也是 failed 终局）→ 执行事实的 error.code（failureCodeOf）
+   * + result_unknown 状态，两个输入与失败回调逐字同源；非失败终局（取消/超时/未执行——
+   * 窗口内不可达，仅注入式执行器能造）与底账读不到 = undefined（不替它们说话，交回
+   * 既有终态推送面）。
+   */
+  const taskFailureFactOf = (taskId: string): { code?: string; status?: 'result_unknown' } | undefined => {
+    try {
+      const record = (taskRegistry as unknown as {
+        get(id: string): { status?: string; reason?: string | null };
+      }).get(taskId);
+      if (record.status !== 'failed') return undefined;
+      const code = failureCodeOf(taskId);
+      return {
+        ...(code === undefined ? {} : { code }),
+        ...(record.reason === 'result_unknown' ? { status: 'result_unknown' as const } : {}),
+      };
     } catch {
       return undefined;
     }
@@ -672,12 +723,18 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // 长任务异步（契约 v4）：accepted / 协议违约 / 续跑回程登记与等待推进只进日志。
       onExecutionEvent: (event) => log({ mode: 'background', ...event }),
       log: (line) => log({ mode: 'background-runner', ...line }),
-      // B 切片：后台任务确认完成 → 结果主动发回原会话（走既有主动投递面 fileDelivery.sendText）。
+      // B 切片（2026-11-19 唤醒切片）：后台任务确认完成 → **唤醒原会话里的模型、由它把
+      // 这件事说给用户**，宿主只投递它说的话（宿主常规成功文案已删；身份行已删）。
+      // **非 live 部署不唤醒**（没有真实收件人，不白花模型调用；2026-11-19 复核 F5）。
+      // 会话拿不到 / 唤醒回合失败（含空回复）→ 宿主兜底**如实报完成事实**（业务名 + 结果
+      // 正文；不得说「没弄好/再试一次」——任务其实已成功，2026-11-19 复核 F2）+ 事实留在
+      // 待注入（下次用户开口由模型补说）；唤醒时会话忙 = 事实入队、由当前回合负责说
+      // （宿主不另行投递，避免说两遍）。
       // 回调经会话链串行（快活抑制判定须在受理回合结束后做）；投递失败/抑制只记事件，不改任务事实。
       onTaskCompleted: (completion) => {
         const sessionKey = `${completion.principalId}\u0000${completion.sessionId}`;
         enqueueSessionTurn(sessionKey, async () => {
-          // 快活（结果已在本回合交给模型）：文本不重复发两遍（模型已转述）。
+          // 快活（结果已在本回合交给模型）：不唤醒、不重复播报（模型已转述）。
           // 但**产物不因抑制丢失**——同回合交给模型的摘要里没有文件，产物只能由这里回程。
           const relayed = relayedInTurnTasks.get(sessionKey)?.delete(completion.taskId) === true;
           const suppressText = (): void => {
@@ -691,7 +748,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             });
           };
           // 片 1 产物回程：任务产物走**同一交付面**（deliverable 角色闸、sha256+文件名去重、
-          // live/silent 记账与前台 TurnResult.files 完全同源），文本仍走 deliverTaskResult。
+          // live/silent 记账与前台 TurnResult.files 完全同源），文本由完成投递送达。
           const files = completion.files ?? [];
           let fileNote: string | undefined;
           if (files.length > 0) {
@@ -724,7 +781,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             // 快活抑制只免掉「办完了」这条重复播报；**文件没送达时必须单独说一句**——
             // 同回合模型已经说过「见附件」，用户手上却什么都没有，那就是虚假交付
             // （2026-11-19 真发现：默认窗口下 file_delivery=delivery_failed 后一句提示都没有）。
-            // 这一条是投递失败话术，不是完成播报——不加「办完了」身份头（避免语义错位）。
+            // 这一条是投递失败话术，不是完成播报。
             if (fileNote !== undefined) {
               await deliverTaskResult({
                 taskId: completion.taskId,
@@ -738,16 +795,64 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             }
             return;
           }
+          // 完成事实（宿主拼，喂给模型读；不含 handle/内部码/执行层原文以外的内部标识）。
+          const name = taskNameOf(completion.taskId, completion.request);
+          const factText = taskCompletionFactText({
+            ...(name === undefined ? {} : { name }),
+            resultText: completion.resultText,
+          });
+          // 降级兜底文本（**全方案唯一允许的宿主用户文案**；只走 unavailable/failed 降级
+          // 路径与非 live 不唤醒路径）：任务已由执行端确认完成——如实报事实（业务名 + 结果
+          // 正文），不得说「没弄好/再试一次」（2026-11-19 复核 F2：那会诱导用户重复执行写）。
+          const fallbackText = taskCompletionFallbackText({
+            ...(name === undefined ? {} : { name }),
+            resultText: completion.resultText,
+          });
+          // 非 live 部署不唤醒（2026-11-19 复核 F5）：没有真实收件人，唤醒只会白花一次模型
+          // 调用（正文拿到后整段丢弃）。live/silent 语义不变——投递抑制记账照旧走
+          // deliverTaskResult（suppressed，绝不记 sent），完成事实进待注入队列补说。
+          const liveWake = completionDelivery !== undefined && completionDelivery.deliveryMode === 'live';
+          let outcome = liveWake ? 'unavailable' : 'suppressed';
+          let modelText = '';
+          let wakeFailure: { errorType: string; message: string } | undefined;
+          if (liveWake) {
+            try {
+              const session = await sessionFor(completion.principalId, completion.sessionId);
+              const woke = await session.wake(factText);
+              outcome = woke.outcome;
+              modelText = woke.text ?? '';
+            } catch (error) {
+              outcome = 'failed';
+              wakeFailure = {
+                errorType: error instanceof Error ? error.name : 'UnknownError',
+                message: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+              };
+            }
+          }
+          // 唤醒事实只进结构化事件（不带结果内容、不带内部标识）；非 live 不唤醒记 suppressed。
+          log({
+            event: 'task_completion_wake',
+            principalId: completion.principalId,
+            sessionId: completion.sessionId,
+            taskId: completion.taskId,
+            outcome,
+            ...(wakeFailure ?? {}),
+          });
+          // 会话忙：事实已入队，由当前回合处理——宿主不另行投递（说了两遍比少说一句糟）。
+          if (outcome === 'busy') return;
+          const wokenText = outcome === 'woken' && modelText.trim() !== '' ? modelText : undefined;
+          if (wokenText === undefined) {
+            // 降级（unavailable/failed）与非 live 不唤醒（suppressed）：事实留在「待注入」
+            // （既有 injections 机制，不新建队列）——下次用户开口由模型补说。
+            systemNotes.enqueue(completion.principalId, completion.sessionId, factText);
+          }
+          const deliveredText = wokenText ?? fallbackText;
           await deliverTaskResult({
             taskId: completion.taskId,
             principalId: completion.principalId,
             sessionId: completion.sessionId,
-            // 任务身份（2026-11-19）：完成消息带业务名，用户一眼看出是哪件事。
-            name: taskNameOf(completion.taskId, completion.request),
-            // 文件未送达的如实话术附在结果文本后（不覆盖模型/执行端正文）。
-            resultText: fileNote === undefined
-              ? completion.resultText
-              : `${completion.resultText}\n${fileNote}`,
+            // 文件未送达的如实话术附在模型正文后（不覆盖模型的话）。
+            resultText: fileNote === undefined ? deliveredText : `${deliveredText}\n${fileNote}`,
           }, {
             ...(completionDelivery === undefined ? {} : { delivery: completionDelivery }),
             log,
@@ -1276,89 +1381,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       }
       // CAP-01 S1 交付 B（v8 §7）：handler 只返回 text；文件经装配注入的端口在回合末主动投递。
       // 投递失败/无端口时以话术如实纠正正文，但不判回合失败（文件未送达 ≠ 回报失败）。
+      // owner 2026-11-19：用户看到的话永远是模型说的——提案回合、只交办回合、no-target
+      // 都不再由宿主替换/吞掉模型文本（措辞放手；句柄、waiting_user 校验、同回合自确认
+      // 判等待、执行层 one-shot 绑定与 A2b 同对象锁等动作边界一律不动）。
       let reply = turn.reply;
       const files = turn.files ?? [];
-      /**
-       * 「只交办」回合静默（确定性宿主规则；owner 2026-11-19）：本回合只交办了任务
-       * （taskIds 非空）且**没有任何执行事实、也没把结果交回模型**——模型这段文本就是
-       * 「已经交给后台在办」那类受理卡片，**不发终帧**（用户静默到结果由完成投递送达）；
-       * 只记一条结构化事件（taskIds/replyBytes），不把卡片文本进日志。
-       *
-       * 例外（一律不许静默，`hasResultOrExecution`）：
-       *   · 本回合有执行事实（executions 非空，含 needs_confirmation / needs_input 的写确认
-       *     提案与补充问题）——那些必须让用户看见，照常送达；
-       *   · 本回合已把某任务结果/失败交回模型（relayedTaskIds / pushSuppressedTaskIds 非空
-       *     ——快活完成、快活失败、等补充）：那段文本是**结果/说明**而不是受理卡片，照常送达；
-       *   · **回复以问号结尾**（owner 2026-11-19：判据只做格式——trim 后以 ？ 或 ? 结尾，
-       *     不做语义/关键词）：同回合交办 + 顺带向用户反问时，吞掉问题比多一句话糟得多。
-       * 空回复的既有行为不变（下面照常判回合失败）。
-       */
-      const hasResultOrExecution = turn.executions.length > 0
-        || (turn.relayedTaskIds?.length ?? 0) > 0
-        || (turn.pushSuppressedTaskIds?.length ?? 0) > 0;
-      const trimmedReply = reply.trim();
-      const endsWithQuestion = trimmedReply.endsWith('？') || trimmedReply.endsWith('?');
-      /**
-       * 提案回合不让模型自己说话（2026-11-19）：本回合结局是写确认提案（executions 里有
-       * needs_confirmation）时，模型那段「任务已受理，正在办理中…如果又卡在确认凭据那一环…」
-       * 是噪声、还可能泄露内部词（「确认凭据」）。宿主用**提案卡**替换模型文本——卡 = 宿主
-       * 唯一话术来源 `failureMessageFor('needs_confirmation', { summary })`（含真实摘要 +
-       * 两个动作「确认/算了」）。用户看到的永远是宿主的机械事实卡，不是模型转述；模型文本
-       * 不进用户面。问号结尾仍例外（与「只交办回合静默」同一格式判据：同回合顺带反问的话
-       * 比少一嘴更该留着）。
-       */
-      const proposalTurn = turn.executions.some((execution) => execution.status === 'needs_confirmation');
-      let proposalCard: string | undefined;
-      if (proposalTurn && !endsWithQuestion) {
-        // 摘要来源：本回合 TurnResult 的机械事实优先（同步/inline 路径的提案停在会话内存，
-        // 不落底账 pendingQuestion）；回落到任务底账（async/后台路径任务已落 waiting_user）。
-        const summary = turn.pendingConfirmation?.summary ?? proposalSummaryOf(taskRegistry, turn.taskIds, scope);
-        proposalCard = failureMessageFor('needs_confirmation', summary === undefined ? {} : { summary }).text;
-      }
-      const dispatchSilent = turn.taskIds.length > 0
-        && !hasResultOrExecution
-        && !endsWithQuestion
-        && trimmedReply !== '';
-      /**
-       * 「没有可确认/接续对象」的宿主话术（owner 2026-11-19 真机噪声修复）：本回合唯一动作是
-       * task_confirm/task_resume 且给出 no-target 结局时（`turn.confirmNoTargetLine`），用宿主
-       * 确定性话术**替换**模型那段自编诊断（「任务仍在办理中…我不会把你的确认当成已提交…」）。
-       * 与提案卡同一套机制；问号结尾仍例外（同回合顺带反问的话留着）。
-       */
-      const confirmNoTargetLine = turn.confirmNoTargetLine;
-      if (confirmNoTargetLine !== undefined && !endsWithQuestion) {
-        log({
-          event: 'turn_confirm_no_target_spoken',
-          principalId,
-          sessionId,
-          speakerId,
-          messageId: message.messageId,
-          replyBytes: Buffer.byteLength(reply, 'utf8'),
-        });
-        reply = confirmNoTargetLine;
-      } else if (proposalCard !== undefined) {
-        log({
-          event: 'turn_proposal_card_delivered',
-          principalId,
-          sessionId,
-          speakerId,
-          messageId: message.messageId,
-          taskIds: [...turn.taskIds],
-          replyBytes: Buffer.byteLength(reply, 'utf8'),
-        });
-        reply = proposalCard;
-      } else if (dispatchSilent) {
-        log({
-          event: 'turn_dispatch_silent',
-          principalId,
-          sessionId,
-          speakerId,
-          messageId: message.messageId,
-          taskIds: [...turn.taskIds],
-          replyBytes: Buffer.byteLength(reply, 'utf8'),
-        });
-        reply = '';
-      }
       let delivery: { status: string; files: number } | undefined;
       if (files.length > 0) {
         const outcome = await deliverTurnFiles({
@@ -1379,14 +1406,68 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             : `${reply}\n${outcome.note}`;
         }
       }
-      // 本回合没有可用正文（溢出恢复失败 / 只有思考没正文且催问后仍空）= 回合失败。
-      // 不得当作成功回执：空串会让渠道一个终帧都不发（用户什么也收不到），也不记
-      // message_done。**「只有文件、正文为空」不判失败**（v8 §7 四必守 #2）：文件走投递面，
-      // 正文空帧由投递事实话术/宿主兜底话术补足——判失败就走不到投递了。放在这里抛出 =
-      // 走既有的「回合失败」路径（失败不进重投缓存，渠道适配器的 handler 异常分支回失败
-      // 话术），不新造机制、不重试。**「只交办回合静默」不是模型失败**（上面已确定性判定）：
-      // 那种回合本就不该有正文帧，跳过这条失败判定。
-      if (!dispatchSilent && reply.trim() === '' && files.length === 0) {
+      // 豁免不能是静默（2026-11-19 复核缺陷的出口）：交办的任务在短等待窗口内完成（快活，
+      // 结果已交给模型转述）而模型**全程没说话**（正文空、无文件）——完成回调按 relayed
+      // 抑制播报的前提（模型已经说了）不成立，用户会什么都收不到。不得判回合失败（任务
+      // 已由执行端确认完成：「请稍后再试」是假话，对写操作还会诱导重做一次写），也不得
+      // 沉默——按既有降级兜底**如实报完成事实**（taskCompletionFallbackText：「<业务名>」
+      // 办好了：<结果>；全方案唯一允许的宿主用户文案），走 deliverTaskResult 同一投递面
+      // 与四必守记账。完成回调的 relayed 抑制照旧（本分支已把事实送达，不重复播报）；
+      // 宿主的话只走主动投递面，渠道终帧（模型的话路）不被替换。
+      if (reply.trim() === '' && files.length === 0) {
+        for (const relayedTaskId of turn.relayedTaskIds ?? []) {
+          const fallbackText = taskCompletionFallbackOf(relayedTaskId);
+          // 底账没有结果原文（生产装配不可达：relayed 的完成行必有非空汇报/归档；空汇报落
+          // failed 不归档）→ 不编事实、不投递；完成回调照旧按 relayed 记账。
+          if (fallbackText === undefined) continue;
+          await deliverTaskResult({
+            taskId: relayedTaskId,
+            principalId,
+            sessionId,
+            resultText: fallbackText,
+          }, {
+            ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
+            log,
+          });
+        }
+        // 快活**失败**同理（2026-11-19 复核相邻形状）：失败原因本回合已交给模型，推送抑制
+        // 的前提（模型会转述）在模型沉默时不成立——逐条按既有失败话术如实送达
+        // （deliverTaskFailure；事实从底账取，与失败回调同源，不新写一个字）。失败回调
+        // 照旧核销抑制（本分支已送达，不重复发）；非失败终局不替它说话：核销本回合抑制，
+        // 交回既有终态推送面（各自既有话术）。
+        for (const suppressedTaskId of new Set(turn.pushSuppressedTaskIds ?? [])) {
+          const failureFact = taskFailureFactOf(suppressedTaskId);
+          if (failureFact === undefined) {
+            claimPushSuppressedInTurn(sessionKey, suppressedTaskId);
+            continue;
+          }
+          await deliverTaskFailure({
+            taskId: suppressedTaskId,
+            principalId,
+            sessionId,
+            ...failureFact,
+          }, {
+            ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
+            log,
+          });
+        }
+      }
+      // 本回合**一无所有**才判回合失败：正文为空 **且** 无文件 **且** 没有交办任何任务
+      // （taskIds 空）。交办是**唯一豁免**——任务结果由完成投递/唤醒欠着用户一条，空正文
+      // 不是静默终局（owner 2026-11-19 修缺陷：agent.md 要求交办后不复述过程话，模型照做时
+      // 不能因为它闭嘴就被判回合失败）。**执行事实不参与豁免**：executions 是内部动作，用户
+      // 不会自动收到它——内联只读失败 / 内联写确认 + 空正文 = 用户什么都收不到，必须判失败。
+      // 不得当作成功回执：「一无所有」的空串会让渠道一个终帧都不发，也不记 message_done。
+      // **「只有文件、正文为空」不判失败**（v8 §7 四必守 #2）：文件走投递面，正文空帧由
+      // 投递事实话术/宿主兜底话术补足——判失败就走不到投递了。判失败走既有的「回合失败」
+      // 路径（throw；失败不进重投缓存，渠道适配器的 handler 异常分支回失败话术），
+      // 不新造机制、不重试。
+      if (turnProducedNothing({
+        reply,
+        fileCount: files.length,
+        taskIds: turn.taskIds,
+        executions: turn.executions,
+      })) {
         throw new Error('本回合未产出可用回复（模型侧失败），本回合未完成。');
       }
       return {

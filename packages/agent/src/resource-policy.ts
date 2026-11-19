@@ -175,7 +175,7 @@ export interface ResolvedRuntimeConfig {
    * 消费点在 TaskRunner（装配方注入解析值；runner 不读原始配置）。
    *
    * owner 2026-11-19：这一档就是「事情久到开始消耗用户耐心」的声音——交办本身不再给
-   * 固定受理回执（只交办回合对用户静默，见 server handler 的 turn_dispatch_silent），
+   * 固定受理回执（模型说的话原样投递，见 server handler），
    * 只有真跑久了才由本档（10 分钟）主动出声。**缺省 10 分钟不动**。
    */
   readonly longRunningNoticeMs: number;
