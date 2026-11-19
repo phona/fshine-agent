@@ -47,6 +47,14 @@ export interface ExecutionArgDeclaration {
   required: boolean;
   /** 可选类型提示（执行层声明，如 'name' / 'code'）：只作展示与装配参考，不参与业务判断。 */
   type?: string;
+  /**
+   * 载荷型参数声明（可选，owner 2026-11-19）：该参数要求一个**文件**，文件内容必须符合
+   * `schema`（执行层声明的窄结构：对象/shape/类型/additionalProperties）。模型只给结构化
+   * **值**（对象/数组）或一个大载荷数据文件；宿主负责 lint → 序列化落盘 → 把路径翻译进该
+   * 参数，再提交执行层——模型不关心信封怎么装。缺省不声明 = 现状逐字节不变（字符串直传）。
+   * schema 的具体语义归执行层（宿主只做窄实现的结构化校验，不引第三方 schema 库）。
+   */
+  payload?: { schema?: unknown };
 }
 
 /** 单个可执行 operation 的声明。 */

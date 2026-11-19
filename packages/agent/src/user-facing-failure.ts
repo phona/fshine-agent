@@ -139,7 +139,7 @@ export function failureMessageFor(
     case 'denied':
       return { kind, text: `${subject}没权限。换个对象，还是请管理员开通？`, actions: ['park', 'change_scope'] };
     case 'invalid_input':
-      return { kind, text: '这个条件不行（名称或值的写法有问题）。我换个写法再试？', actions: ['retry', 'provide_input'] };
+      return { kind, text: '这个内容不行（名称或值的写法有问题）。我换个写法再试？', actions: ['retry', 'provide_input'] };
     case 'executor_failed':
       return { kind, text: '没办成。再试一次，还是先放着？', actions: ['retry', 'park'] };
     case 'host_fault':

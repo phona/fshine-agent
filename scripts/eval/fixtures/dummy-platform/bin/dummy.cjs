@@ -1015,6 +1015,19 @@ function modeUsage(mode) {
     `把 flag 填在那一格会被拒并给出正确形态；写面（access=write）见 ${gatewayDisplay()} --help 的「写面」段。`,
   ].join('\n') + '\n';
 }
+/**
+ * operation list --json 的 args 投影：把**载荷型**位置参数（capabilities.json 里标 `payload:true`）
+ * 附上实际的 proposal schema——声明面只标「这是载荷」，schema 单一来源仍是 PROPOSAL_SCHEMA。
+ * 其余参数逐字节不变（不改任何业务行为；只让宿主知道该参数要按 schema 装信封）。
+ */
+function listArgsOf(o) {
+  const args = o.args ?? {};
+  if (!Array.isArray(args.positional) || !args.positional.some((p) => p && p.payload === true)) return args;
+  return {
+    ...args,
+    positional: args.positional.map((p) => (p && p.payload === true ? { ...p, payload: { schema: PROPOSAL_SCHEMA } } : p)),
+  };
+}
 async function main() {
   let argv = [...process.argv.slice(2)];
   const stateDirFlag = takeStateDirFlag(argv);
@@ -1031,7 +1044,7 @@ async function main() {
   }
   if (cmd === 'operation' && sub === 'list') {
     if (argv.includes('--json')) {
-      process.stdout.write(JSON.stringify({ operations: OPERATIONS.map((o) => ({ name: o.name, domain: o.domain, command: o.command, access: o.access, script: o.script, sharedLocalWrite: false, effects: o.access === 'read' ? ['read'] : o.access === 'scratch' ? ['local'] : ['write'], executor: o.executor, est_seconds: o.est_seconds, weight: o.weight, long_running: o.long_running === true, args: o.args, serve: o.serve, protocol: o.protocol, label: LABELS[o.name] ?? '', proposalSchema: o.protocol === 'proposal.create' ? PROPOSAL_SCHEMA : null })), accessSemantics: ACCESS_SEMANTICS }) + '\n');
+      process.stdout.write(JSON.stringify({ operations: OPERATIONS.map((o) => ({ name: o.name, domain: o.domain, command: o.command, access: o.access, script: o.script, sharedLocalWrite: false, effects: o.access === 'read' ? ['read'] : o.access === 'scratch' ? ['local'] : ['write'], executor: o.executor, est_seconds: o.est_seconds, weight: o.weight, long_running: o.long_running === true, args: listArgsOf(o), serve: o.serve, protocol: o.protocol, label: LABELS[o.name] ?? '', proposalSchema: o.protocol === 'proposal.create' ? PROPOSAL_SCHEMA : null })), accessSemantics: ACCESS_SEMANTICS }) + '\n');
       return 0;
     }
     for (const o of OPERATIONS) process.stdout.write(`${o.name}\t${o.command}\t${o.access}\t${o.executor}\t${LABELS[o.name] ?? ''}\n`);
