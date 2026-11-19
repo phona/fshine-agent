@@ -72,7 +72,7 @@ export interface ExpVerdict {
   };
 }
 
-const TASK_TOOLS: ReadonlySet<string> = new Set(['task_status', 'task_result', 'task_cancel', 'task_resume']);
+const TASK_TOOLS: ReadonlySet<string> = new Set(['task_status', 'task_result', 'task_cancel', 'task_resume', 'task_confirm']);
 const CANCEL_CLAIM_WORDS = ['已取消', '取消成功', '已为您取消', '已把它取消'];
 
 function lastReplyText(replies: readonly ReplyLine[]): string {

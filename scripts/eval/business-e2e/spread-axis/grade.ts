@@ -80,7 +80,7 @@ function objectKeyOf(object: { collection: string; window?: string } | undefined
   return object.window === undefined ? object.collection : `${object.collection}@${object.window}`;
 }
 
-const DECLARED_MAIN_TOOLS: ReadonlySet<string> = new Set(['task_run', 'task_status', 'task_result', 'task_cancel', 'task_resume', 'read_skill']);
+const DECLARED_MAIN_TOOLS: ReadonlySet<string> = new Set(['task_run', 'task_status', 'task_result', 'task_cancel', 'task_resume', 'task_confirm', 'read_skill']);
 
 function turnObservations(caseDef: DsCase, toolCalls: readonly ToolCallRecord[]): DsTurnObservation[] {
   return caseDef.turns.map((text, index) => {

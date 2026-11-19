@@ -17,7 +17,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig, ChannelRoute, DeliveryReceipt, IncomingChannelMessage, RuntimeConfig } from '@fshine/contracts';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
-import { EXECUTE_OPERATION_TOOL } from '../../packages/agent/src/execution-runtime';
+import { EXECUTE_OPERATION_TOOL, NO_WAITING_TARGET_LINE } from '../../packages/agent/src/execution-runtime';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/src/task-runner';
 import type { TurnDriver } from '../../packages/agent/src/driver-contract';
@@ -90,10 +90,12 @@ interface ServerDriverRecord {
 
 interface ServerPlan {
   delegates?: readonly string[];
+  /** 本回合唯一动作 = task_confirm（无 ref）；用于「没有等确认的事」话术替换用例。 */
+  confirm?: boolean;
   reply?: string;
 }
 
-/** 假 Main：按计划交办（task_run）并收下工具结果；零模型。 */
+/** 假 Main：按计划交办（task_run）或确认（task_confirm）并收下工具结果；零模型。 */
 function plannedMain(plans: ReadonlyMap<string, ServerPlan>, records: ServerDriverRecord[]): TurnDriver {
   return {
     async run(input) {
@@ -106,6 +108,11 @@ function plannedMain(plans: ReadonlyMap<string, ServerPlan>, records: ServerDriv
         const tool = input.tools.find((candidate) => candidate.name === 'task_run');
         if (tool === undefined) throw new Error('（测试）Main 无 task_run 工具面');
         execResults.push(await input.exec(tool.name, { task: request }));
+      }
+      if (plan.confirm === true) {
+        const tool = input.tools.find((candidate) => candidate.name === 'task_confirm');
+        if (tool === undefined) throw new Error('（测试）Main 无 task_confirm 工具面');
+        execResults.push(await input.exec(tool.name, {}));
       }
       records.push({ execResults });
       const reply = plan.reply ?? `（测试回复：${text}）`;
@@ -517,6 +524,43 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
       // 无渠道推送面 → 同步等结果：2 次 execute_operation 都在本回合发生 → operations=2，executions 2 行
       expect(done!['operations']).toBe(2);
       expect(Array.isArray(done!['executions']) && (done!['executions'] as unknown[]).length === 2).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('f. 没有等确认的事：宿主用确定性话术替换模型自编诊断（turn_confirm_no_target_spoken）', async () => {
+    // owner 2026-11-19 真机：用户没在等确认时说「确认」，Main 拿到 no-target 结局后自由发挥了一整段
+    // 诊断（「任务仍在办理中…我不会把你的确认当成已提交…」）——用户可见噪声且夹带内部概念。
+    const dir = tempDir();
+    const delivery = new FakeTextDelivery('live');
+    const logs: Array<Record<string, unknown>> = [];
+    const records: ServerDriverRecord[] = [];
+    const plans = new Map<string, ServerPlan>([
+      ['确认', { confirm: true, reply: '任务仍在办理中，还没有停下来向您提问；我不会把您的确认当成已经提交过。' }],
+    ]);
+    const server = await createServer({
+      env: { LLM_MODEL: 'test-model' },
+      config: testConfig({ backgroundConcurrency: 1 }),
+      dbPath: path.join(dir, 'state.db'),
+      createDrivers: () => ({ mainDriver: plannedMain(plans, records), workerDriver: { async run() { throw new Error('（测试）不该调用'); } } }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
+      taskExecutor: new ImmediateExecutor('（测试）不该有任务'),
+      fileDelivery: delivery,
+      logger: (line) => logs.push(line),
+    });
+    try {
+      const reply = await server.handler(incoming('user-a', 'conv-a', 'msg-1', '确认'));
+      // 用户可见文本 = 宿主机说话术（模型那段自编诊断被替换）；本会话无在跑任务 → 「现在没有等你确认的事。」
+      expect(reply).toBe(NO_WAITING_TARGET_LINE);
+      expect(reply).not.toContain('办理中');
+      // 工具结局是 no-target（不是执行错误）。
+      const answer = records[0]!.execResults[0] as Record<string, unknown>;
+      expect(answer).toMatchObject({ outcome: 'no_waiting_task', userLine: NO_WAITING_TARGET_LINE });
+      // 落了结构化事件；没有提案卡/静默那两条。
+      expect(logs.some((line) => line['event'] === 'turn_confirm_no_target_spoken')).toBe(true);
+      expect(logs.some((line) => line['event'] === 'turn_proposal_card_delivered')).toBe(false);
+      expect(delivery.sentTexts).toHaveLength(0);
     } finally {
       await server.close();
     }

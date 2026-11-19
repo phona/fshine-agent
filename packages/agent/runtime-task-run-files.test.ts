@@ -149,6 +149,9 @@ async function makeFixture(input: {
     resume: () => {
       throw new Error('（测试）');
     },
+    confirm: () => {
+      throw new Error('（测试）');
+    },
     inFlight: () => [],
   };
   const runner = input.makeRunner?.(registry) ?? stubRunner;
@@ -348,6 +351,7 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
         pump: () => ({ recovered: [], started: [] }),
         whenIdle: async () => {},
         cancel: (taskId) => ({ outcome: 'terminal', taskId, status: 'queued' }),
+        confirm: () => ({ outcome: 'no_confirmation', taskId: 't' }),
         resume: (taskId) => ({ outcome: 'not_waiting', taskId, status: 'queued' }),
         inFlight: () => [],
       }),

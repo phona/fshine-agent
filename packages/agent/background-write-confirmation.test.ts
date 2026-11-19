@@ -24,13 +24,14 @@ import type {
   ExecutionOutcome,
 } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver } from './src/driver-contract';
-import { createSession, createTaskExecutor, EXECUTE_OPERATION_TOOL } from './src/execution-runtime';
+import { createSession, createTaskExecutor, EXECUTE_OPERATION_TOOL, NO_WAITING_TARGET_LINE, NO_WAITING_TARGET_RUNNING_LINE } from './src/execution-runtime';
 import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
 import type { TaskRegistry } from './src/task-registry';
 import { createTaskRunner, type TaskExecutionOutcome, type TaskExecutor, type TaskRunner } from './src/task-runner';
 import { createResourcePolicy } from './src/resource-policy';
 import { createNotificationOutbox } from './src/notifications';
 import { renderNotification } from './src/notification-render';
+import { confirmationExpiredMessage, internalTermIn } from './src/user-facing-failure';
 import { attachNotificationOutbox } from '../../scripts/ask-runtime';
 
 const SCOPE = { principalId: 'wecom:s1', sessionId: 'conv-s1' };
@@ -44,7 +45,12 @@ const MANIFEST: CapabilityManifest = {
 };
 
 const SUMMARY = 'alpha 集合 2 条记录将被覆盖，不可撤销';
-const EXPIRES_AT = '2026-11-18T12:00:00.000Z';
+/**
+ * 提案有效期（显式确认切片起 runner 校验过期）：必须是**未来**时间，否则确认路径会走「过期重提」，
+ * 不再是「提交」。过期用例用 EXPIRED_AT（过去）。
+ */
+const EXPIRES_AT = '2035-01-01T00:00:00.000Z';
+const EXPIRED_AT = '2000-01-01T00:00:00.000Z';
 
 const tempDirs: string[] = [];
 afterAll(() => {
@@ -426,9 +432,10 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     expect(projected).not.toContain('handle');
   });
 
-  it('⑥ S3 接续轮透传：底账句柄 + 用户原话交给执行层；只读不消耗、每条非只读都带', async () => {
+  it('⑥ S3 确认路径透传：底账句柄 + 用户原话交给执行层；只读不消耗、每条非只读都带', async () => {
     // P0（owner 2026-11-19）起口径变更：句柄随**每条**非只读调用携带，不再一轮只发一次——
     // 一次性/防重放由执行层自己保证，宿主截流会让「先 prepare 再 commit」的 commit 拿不到句柄。
+    // 显式确认切片（2026-11-19）：句柄**只**经确认路径（runner.confirm）注入；resume 不带。
     const registry = makeRegistry();
     const capture: WorkerCapture = { results: [] };
     const client = new S3Client('cf_s3_handle');
@@ -446,8 +453,8 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     expect(client.requests[0]!.confirmation).toBeUndefined();
     expect(registry.get('t_s3', SCOPE).pendingQuestion?.confirmation?.handle).toBe('cf_s3_handle');
 
-    const resumed = runner.resume('t_s3', { answer: '确认，提交吧', scope: SCOPE });
-    expect(resumed.outcome).toBe('started');
+    const confirmed = runner.confirm('t_s3', { userText: '确认，提交吧', scope: SCOPE });
+    expect(confirmed.outcome).toBe('started');
     await runner.whenIdle();
 
     // 只读调用不消耗确认、也不携带句柄。
@@ -461,11 +468,12 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     expect(client.requests[3]!.confirmation).toEqual({ handle: 'cf_s3_handle', userText: '确认，提交吧' });
   });
 
-  it('⑪ 续跑回合第一条非只读不再独吞句柄：同回合后续写调用也带（写不进去的根因）', async () => {
+  it('⑪ 确认回合每条非只读都带句柄：不再独吞（写不进去的根因）', async () => {
     // P0（owner 2026-11-19 live 实测）：待确认句柄原挂在「首条非只读调用」上、发过即止，
     // 而 Worker 第一句往往是 prepare 再才 commit——句柄被 prepare 消耗，真正 commit 时
     // 手里空的 → commit 必然 CONFIRMATION_REQUIRED（写不进去）。修法：句柄随**每条**
     // 非只读调用携带；一次性/防重放由执行层自己保证（契约不承诺宿主复用）。
+    // 显式确认切片：句柄只经 runner.confirm 注入。
     const registry = makeRegistry();
     const capture: WorkerCapture = { results: [] };
     const client = new S3Client('cf_every_call');
@@ -483,8 +491,8 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     expect(client.requests[0]!.confirmation).toBeUndefined();
     expect(registry.get('t_every', SCOPE).pendingQuestion?.confirmation?.handle).toBe('cf_every_call');
 
-    const resumed = runner.resume('t_every', { answer: '确认，提交吧', scope: SCOPE });
-    expect(resumed.outcome).toBe('started');
+    const confirmed = runner.confirm('t_every', { userText: '确认，提交吧', scope: SCOPE });
+    expect(confirmed.outcome).toBe('started');
     await runner.whenIdle();
 
     // 续跑回合第一条非只读（相当于 prepare）带句柄……
@@ -493,9 +501,10 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     expect(client.requests[2]!.confirmation).toEqual({ handle: 'cf_every_call', userText: '确认，提交吧' });
   });
 
-  it('⑫ 续跑委派文本出现机械事实：用户已确认上一轮提案（摘要），直接提交', async () => {
-    // 话术补丁不解决「新 Worker 不知道上一轮发生了什么」：续跑回合的委派必须携带一条
+  it('⑫ 确认委派文本出现机械事实：用户已确认上一轮提案（摘要），直接提交', async () => {
+    // 话术补丁不解决「新 Worker 不知道上一轮发生了什么」：确认回合的委派必须携带一条
     // **机械事实**（宿主从底账提案组装，不是模型话术）——Worker 据此直接提交、不重新出提案。
+    // 该事实**只在确认路径**出现（resume 不带）。
     const registry = makeRegistry();
     const capture: WorkerCapture = { results: [] };
     let delegationText = '';
@@ -519,8 +528,8 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
       workerTurnMs: 30_000,
     });
     const runner = await runBackground(registry, executor, 't_delegation');
-    const resumed = runner.resume('t_delegation', { answer: '确认，提交吧', scope: SCOPE });
-    expect(resumed.outcome).toBe('started');
+    const confirmed = runner.confirm('t_delegation', { userText: '确认，提交吧', scope: SCOPE });
+    expect(confirmed.outcome).toBe('started');
     await runner.whenIdle();
 
     // 委派文本（renderWorkerDelegation 实际产出）必须包含机械事实 + 摘要 + 即时动作指令。
@@ -721,5 +730,264 @@ describe('同回合自我确认被挡：结局是 waiting_user（提案），不
     const task = registry.get('t_self_confirm_denied', SCOPE);
     expect(task.status).toBe('failed');
     expect(task.pendingQuestion).toBeUndefined();
+  });
+});
+
+/**
+ * 显式确认切片（2026-11-19 owner 拍板）：确认是一个**显式动作**，不是「下一条消息的默认含义」。
+ * 句柄**只**经确认路径（runner.confirm）注入；resume（补充/改口径）**永不**透传；宿主不做意图推断。
+ * 反向绊线：把②的「resume 不带句柄」改回旧行为（resume 透传句柄）→ ②红；
+ *   把③的过期判定去掉（过期当普通确认直接提交）→ ③红。
+ */
+describe('显式确认切片：确认是显式动作，resume 永不带句柄', () => {
+  /** 确认流执行层：prepare 出提案（每次新句柄）；commit 带句柄成功、无句柄拒绝；query 只读。 */
+  class ConfirmFlowClient implements ExecutionClient {
+    readonly requests: Array<{ operation: string; confirmation?: unknown }> = [];
+    private seq = 0;
+    constructor(private readonly firstExpiresAt: string = EXPIRES_AT) {}
+    async capabilities(): Promise<CapabilityManifest> {
+      return SELF_CONFIRM_MANIFEST;
+    }
+
+    async execute(request: { operation: string; confirmation?: unknown }): Promise<ExecutionOutcome> {
+      this.requests.push(request);
+      if (request.operation === 'dummy.query') return { status: 'completed', data: { rows: 2 } };
+      if (request.operation === 'dummy.prepare') {
+        this.seq += 1;
+        const expiresAt = this.seq === 1 ? this.firstExpiresAt : EXPIRES_AT;
+        return {
+          status: 'needs_confirmation',
+          confirmation: { handle: `cf_flow_${this.seq}`, summary: SUMMARY, expiresAt },
+          data: { collection: 'alpha' },
+        };
+      }
+      // dummy.commit：带句柄 = 提交成功；无句柄 = 同回合自我确认被挡（执行层确定性拒绝）。
+      return request.confirmation === undefined
+        ? { status: 'refused', error: { code: 'CONFIRMATION_REQUIRED', message: 'commit requires a confirmation handle' } }
+        : { status: 'completed', data: { added: 2, total: 4 } };
+    }
+  }
+
+  function flowExecutor(client: ExecutionClient, registry: TaskRegistry, worker: TurnDriver): Promise<TaskExecutor> {
+    return createTaskExecutor({
+      client,
+      allowedOperations: ['dummy.prepare', 'dummy.commit', 'dummy.query'],
+      readOnlyOperations: ['dummy.query'],
+      workerDriver: worker,
+      registry,
+      workerTurnMs: 30_000,
+    });
+  }
+
+  /** 在 Main 工具面上调一次工具（生产 createSession 装配 + 假 Main 驱动）。 */
+  async function callMainTool(input: {
+    registry: TaskRegistry;
+    tool: string;
+    args: Record<string, unknown>;
+    runner?: TaskRunner;
+  }): Promise<{ ok: boolean; value?: unknown; error?: string }> {
+    let captured: { ok: boolean; value?: unknown; error?: string } | undefined;
+    const mainDriver: TurnDriver = {
+      async run(turnInput) {
+        try {
+          captured = { ok: true, value: await turnInput.exec(input.tool, input.args) };
+        } catch (error) {
+          captured = { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+        return { text: '（测试回合）', messages: [] as unknown as DriverMessage[] };
+      },
+    };
+    const session = await createSession({
+      principalId: SCOPE.principalId,
+      sessionId: SCOPE.sessionId,
+      client: new ConfirmFlowClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver,
+      workerDriver: { async run() { throw new Error('（测试）Worker 不应被调用'); } },
+      mainSystemPrompt: '（测试）Main 系统提示',
+      taskRegistry: input.registry as never,
+      ...(input.runner === undefined ? {} : { taskRunner: input.runner }),
+    });
+    await session.send('（测试）');
+    return captured!;
+  }
+
+  it('① 确认路径：task_confirm → 每条非只读都带同名句柄 + 用户原话 → 提交成功、任务 completed', async () => {
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new ConfirmFlowClient();
+    // 轮 1：出提案；轮 2：先读一次（不消耗确认）再提交两条写（都带句柄）。
+    const executor = await flowExecutor(
+      client,
+      registry,
+      roundWorker([[PREPARE_ARGS], [QUERY_ARGS, COMMIT_ARGS, COMMIT_ARGS]], capture),
+    );
+    const runner = await runBackground(registry, executor, 't_confirm_ok');
+    expect(registry.get('t_confirm_ok', SCOPE).pendingQuestion?.confirmation?.handle).toBe('cf_flow_1');
+
+    const outcome = runner.confirm('t_confirm_ok', { userText: '确认，就按这版提交', scope: SCOPE });
+    expect(outcome).toEqual({ outcome: 'started', taskId: 't_confirm_ok' });
+    await runner.whenIdle();
+
+    // 只读调用不带句柄；两条写调用都带同一句柄 + 用户原话。
+    expect(client.requests[1]!.operation).toBe('dummy.query');
+    expect(client.requests[1]!.confirmation).toBeUndefined();
+    expect(client.requests[2]!.confirmation).toEqual({ handle: 'cf_flow_1', userText: '确认，就按这版提交' });
+    expect(client.requests[3]!.confirmation).toEqual({ handle: 'cf_flow_1', userText: '确认，就按这版提交' });
+    expect(registry.get('t_confirm_ok', SCOPE).status).toBe('completed');
+  });
+
+  it('② 改口径路径：task_resume → 任何调用都不带旧句柄；Worker 重新提案 → 底账是新句柄、旧的不再出现', async () => {
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new ConfirmFlowClient();
+    const executor = await flowExecutor(client, registry, roundWorker([[PREPARE_ARGS], [PREPARE_ARGS]], capture));
+    const runner = await runBackground(registry, executor, 't_resume_change');
+    expect(registry.get('t_resume_change', SCOPE).pendingQuestion?.confirmation?.handle).toBe('cf_flow_1');
+
+    // 「改成另一个口径」——语义在 resume（补充/改口径），不是确认。
+    const outcome = runner.resume('t_resume_change', { answer: '改成换成集合 beta 再提一次', scope: SCOPE });
+    expect(outcome.outcome).toBe('started');
+    await runner.whenIdle();
+
+    // 任何调用都不带旧句柄（resume 永不透传）。
+    for (const request of client.requests) expect(request.confirmation).toBeUndefined();
+    const task = registry.get('t_resume_change', SCOPE);
+    expect(task.status).toBe('waiting_user');
+    expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_flow_2');
+    // 旧句柄不再出现在底账。
+    expect(JSON.stringify(task)).not.toContain('cf_flow_1');
+  });
+
+  it('③ 过期确认：task_confirm 触发一轮重新提案（不判失败、不结束任务、零写执行）', async () => {
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    // 首份提案已过期（EXPIRED_AT 在过去）；重新提案的那份有效期正常。
+    const client = new ConfirmFlowClient(EXPIRED_AT);
+    const executor = await flowExecutor(client, registry, roundWorker([[PREPARE_ARGS], [PREPARE_ARGS]], capture));
+    const runner = await runBackground(registry, executor, 't_expired');
+    expect(registry.get('t_expired', SCOPE).pendingQuestion?.confirmation?.handle).toBe('cf_flow_1');
+
+    const outcome = runner.confirm('t_expired', { userText: '确认', scope: SCOPE });
+    expect(outcome).toEqual({ outcome: 'expired', taskId: 't_expired' });
+    await runner.whenIdle();
+
+    // 触发了一轮新的 prepare（重新提案），零写执行（没有 commit 调用）。
+    expect(client.requests.map((request) => request.operation)).toEqual(['dummy.prepare', 'dummy.prepare']);
+    // 任务仍等待确认，底账是**新**句柄，旧的不再出现。
+    const task = registry.get('t_expired', SCOPE);
+    expect(task.status).toBe('waiting_user');
+    expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_flow_2');
+    expect(JSON.stringify(task)).not.toContain('cf_flow_1');
+    // 用户可见话术：含「过期」，过 internalTermIn（无内部术语）。
+    const message = confirmationExpiredMessage(task.pendingQuestion?.confirmation?.summary);
+    expect(message).toContain('过期');
+    expect(internalTermIn(message)).toBeUndefined();
+  });
+
+  it('④ 无提案确认：没有等待中的提案时 task_confirm 给宿主机说话术（不新建任务、不执行）', async () => {
+    const registry = makeRegistry();
+    // 一个「等补充信息」的等待任务（有 waiting_user，但没有 confirmation 提案）。
+    registry.begin({ taskId: 't_needs_input', principalId: SCOPE.principalId, sessionId: SCOPE.sessionId, request: '查 alpha 的窗口' });
+    registry.waitForUser('t_needs_input', { missing: ['窗口编号'] });
+    const before = registry.list(SCOPE).length;
+    const runner = makeRunner(registry, await flowExecutor(new ConfirmFlowClient(), registry, roundWorker([], { results: [] })));
+
+    // 没有等待确认的提案 → no-target 结局 + 宿主机说话术（不再抛错让模型自由发挥）。
+    const result = await callMainTool({ registry, tool: 'task_confirm', args: {}, runner });
+    expect(result.ok).toBe(true);
+    const value = result.value as { outcome?: string; userLine?: string };
+    expect(value.outcome).toBe('no_waiting_task');
+    // 只有等待中的（非在跑）任务 → 「现在没有等你确认的事。」
+    expect(value.userLine).toBe(NO_WAITING_TARGET_LINE);
+    expect(internalTermIn(value.userLine!)).toBeUndefined();
+    // 没有新建任务、没有发起执行。
+    expect(registry.list(SCOPE)).toHaveLength(before);
+    expect(registry.get('t_needs_input', SCOPE).status).toBe('waiting_user');
+  });
+
+  it('⑤ 推断禁止：task_resume 的 answer 是「确认」这类话时也不带句柄（语义在 confirm，不在文案）', async () => {
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new ConfirmFlowClient();
+    const executor = await flowExecutor(client, registry, roundWorker([[PREPARE_ARGS], [PREPARE_ARGS]], capture));
+    const runner = await runBackground(registry, executor, 't_infer');
+    expect(registry.get('t_infer', SCOPE).pendingQuestion?.confirmation?.handle).toBe('cf_flow_1');
+
+    // 用户原话字面上就是「确认」——但走的是 resume（补充/改口径），宿主不猜：不带句柄。
+    const outcome = runner.resume('t_infer', { answer: '确认', scope: SCOPE });
+    expect(outcome.outcome).toBe('started');
+    await runner.whenIdle();
+
+    for (const request of client.requests) expect(request.confirmation).toBeUndefined();
+    expect(registry.get('t_infer', SCOPE).pendingQuestion?.confirmation?.handle).toBe('cf_flow_2');
+  });
+
+  /**
+   * 跑一个 Main 回合（唯一动作 = 给定工具调用），返回 TurnResult——验证 server 替换所依赖的
+   * `confirmNoTargetLine` 宿主话术字段。模型文本故意写成真机噪声形状的自编诊断。
+   */
+  async function noTargetTurn(input: {
+    registry: TaskRegistry;
+    runner: TaskRunner;
+    tool: string;
+    args: Record<string, unknown>;
+  }) {
+    const mainDriver: TurnDriver = {
+      async run(turnInput) {
+        await turnInput.exec(input.tool, input.args).catch(() => undefined);
+        return {
+          text: '任务仍在办理中，我不会把你的确认当成已经提交过；等它进入待确认环节再说。',
+          messages: [] as unknown as DriverMessage[],
+        };
+      },
+    };
+    const session = await createSession({
+      principalId: SCOPE.principalId,
+      sessionId: SCOPE.sessionId,
+      client: new ConfirmFlowClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver,
+      workerDriver: { async run() { throw new Error('（测试）Worker 不应被调用'); } },
+      mainSystemPrompt: '（测试）Main 系统提示',
+      taskRegistry: input.registry as never,
+      taskRunner: input.runner,
+    });
+    return session.send('确认');
+  }
+
+  it('⑥ 没有等确认的事时：宿主给出确定性话术（不让模型自编诊断），短且过内部词闸', async () => {
+    const registry = makeRegistry();
+    const runner = makeRunner(registry, await flowExecutor(new ConfirmFlowClient(), registry, roundWorker([], { results: [] })));
+    const turn = await noTargetTurn({ registry, runner, tool: 'task_confirm', args: {} });
+    // 宿主话术字段就位（server 用它替换 reply）；模型那段自编诊断仍在 reply 里，等 server 替换。
+    expect(turn.confirmNoTargetLine).toBe(NO_WAITING_TARGET_LINE);
+    expect(turn.confirmNoTargetLine!.length).toBeLessThan(20);
+    expect(internalTermIn(turn.confirmNoTargetLine!)).toBeUndefined();
+    expect(turn.reply).toContain('办理中');
+  });
+
+  it('⑦ 有在跑的任务时：宿主话术是「还在办，办完发你。」', async () => {
+    const registry = makeRegistry();
+    // begin 缺省 status=running：本会话有一个在跑的任务。
+    registry.begin({ taskId: 't_running', principalId: SCOPE.principalId, sessionId: SCOPE.sessionId, request: '在跑的活' });
+    const runner = makeRunner(registry, await flowExecutor(new ConfirmFlowClient(), registry, roundWorker([], { results: [] })));
+    const turn = await noTargetTurn({ registry, runner, tool: 'task_confirm', args: {} });
+    expect(turn.confirmNoTargetLine).toBe(NO_WAITING_TARGET_RUNNING_LINE);
+    expect(turn.confirmNoTargetLine!.length).toBeLessThan(20);
+    expect(internalTermIn(turn.confirmNoTargetLine!)).toBeUndefined();
+  });
+
+  it('⑧ 正常确认路径不受影响：唯一动作是 task_confirm 但命中提案 → 无 no-target 话术', async () => {
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new ConfirmFlowClient();
+    const executor = await flowExecutor(client, registry, roundWorker([[PREPARE_ARGS], [COMMIT_ARGS]], capture));
+    const runner = await runBackground(registry, executor, 't_confirm_normal');
+    expect(registry.get('t_confirm_normal', SCOPE).pendingQuestion?.confirmation?.handle).toBe('cf_flow_1');
+    const turn = await noTargetTurn({ registry, runner, tool: 'task_confirm', args: {} });
+    expect(turn.confirmNoTargetLine).toBeUndefined();
+    await runner.whenIdle();
+    expect(registry.get('t_confirm_normal', SCOPE).status).toBe('completed');
   });
 });

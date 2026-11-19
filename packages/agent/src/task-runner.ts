@@ -253,10 +253,19 @@ export interface TaskExecutionInput {
   /** waiting_user 答复接续时的用户答复原文（首轮执行缺省）。 */
   answer?: string;
   /**
-   * S3 写确认透传：答复前底账里的提案（句柄 + 摘要）。执行端只把句柄随本回合首条
-   * 非只读执行原样交给执行层，一轮只发一次；宿主不解释句柄。
+   * 写确认透传（2026-11-19 显式确认切片）：**只在确认路径**（`runner.confirm()`）出现——
+   * 用户明确表示「按这版提交」时，从底账提案取出句柄 + 摘要交给执行端；执行端把句柄随
+   * 本回合的每条非只读执行原样交给执行层。`resume()`（补充/改口径）**永不**带该字段：
+   * 旧提案视为作废，语义在「用户明确确认」，不在「下一条消息的默认含义」。
    */
   pendingConfirmation?: PendingConfirmation;
+  /**
+   * 确认路径·句柄已过期（2026-11-19 owner 口径修正）：用户确认时底账提案已过 `expiresAt`——
+   * **不判失败、不结束任务**；接续一个回合让 Worker **重新生成同一提案**（内容没变就照原样
+   * 再提一次，不要擅自改参数）。执行端据此渲染机械事实。与 pendingConfirmation 互斥
+   *（过期即不带旧句柄）。缺省 = 非过期确认（零变化）。
+   */
+  confirmationExpired?: boolean;
   /**
    * 长任务续跑（契约 v4）：上一轮委派以 accepted 结束时，runner 用 wait 取回结果后
    * 在这里把受理事实与执行层原始回执交回执行端；执行端据此渲染「长任务结果」并续跑
@@ -516,6 +525,23 @@ export type ResumeOutcome =
   | { outcome: 'rejection'; taskId: string; reason: ResourceRejectionReason }
   | { outcome: 'not_waiting'; taskId: string; status: TaskStatus };
 
+/**
+ * 显式确认的机械结局（2026-11-19 owner 拍板）：确认是一个**显式动作**（`task_confirm`），
+ * 不是「下一条消息的默认含义」。与 ResumeOutcome 同形的三种之外：
+ *   · `not_waiting`     —— 任务不在 waiting_user（无待确认提案可提交）；
+ *   · `no_confirmation` —— waiting_user 但没有提案（是等补充信息，不是等确认）；
+ *   · `expired`         —— 提案已过 `expiresAt`：**不判失败、不结束任务**，接续一个回合让
+ *     Worker 重新生成同一提案（任务仍回 waiting_user，等用户再确认；零写执行）。业务话术
+ *     （「那份提案过期了，我重新给你一份」）由调用方给出。
+ * 前两种 = 确定性拒绝（零执行）；`expired` 是「重提」而非拒绝。
+ */
+export type ConfirmOutcome =
+  | { outcome: 'started'; taskId: string }
+  | { outcome: 'rejection'; taskId: string; reason: ResourceRejectionReason }
+  | { outcome: 'not_waiting'; taskId: string; status: TaskStatus }
+  | { outcome: 'no_confirmation'; taskId: string }
+  | { outcome: 'expired'; taskId: string };
+
 export interface TaskRunner {
   /** 受理：底账 begin(status:'queued')，同步返回（Main 不等待）；派发由 pump 触发。 */
   submit(input: SubmitInput): TaskRecordView;
@@ -530,6 +556,12 @@ export interface TaskRunner {
   cancel(taskId: string, scope?: TaskScope): CancelOutcome;
   /** waiting_user 答复接续：同一 Task 新回合（编号不变、executions 追加）；许可不足不接续。 */
   resume(taskId: string, options?: { answer?: string; scope?: TaskScope }): ResumeOutcome;
+  /**
+   * 显式确认（2026-11-19 owner 拍板）：用户明确表示「按这版提交」时，从底账提案取出句柄并
+   * 把任务接续下去——`userText` = 用户原话，随本回合确认路径交给执行端。**只有本方法透传
+   * 待确认句柄**（`resume()` 永不透传）；提案缺失/已过期一律确定性拒绝（零执行）。
+   */
+  confirm(taskId: string, options?: { userText?: string; scope?: TaskScope }): ConfirmOutcome;
   /** 本进程在飞执行回合的任务 id（只读快照）。 */
   inFlight(): readonly string[];
 }
@@ -1158,10 +1190,16 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     answer?: string,
     resumedOperation?: ResumedOperation,
     /**
-     * S3 写确认透传：**答复前**的底账提案（waiting_user → running 会把 pendingQuestion 清掉，
-     * 所以必须在 resume 里先取出再交给执行端）。缺省 = 无待确认提案。
+     * 写确认透传（2026-11-19 显式确认切片）：**确认路径**（`confirm()`）在 answerResumes
+     * 之前取出的底账提案（waiting_user → running 会把 pendingQuestion 清掉，所以必须先取出
+     * 再交给执行端）。`resume()` 永不传本参数——补充/改口径不带句柄。缺省 = 无待确认提案。
      */
     pendingConfirmation?: PendingConfirmation,
+    /**
+     * 确认路径·句柄已过期（2026-11-19 owner 口径修正）：与 pendingConfirmation 互斥——过期
+     * 即不带旧句柄，改为让执行端渲染「重新生成同一提案」的机械事实。缺省 = 非过期确认。
+     */
+    confirmationExpired?: boolean,
   ): void {
     const controller = new AbortController();
     controllers.set(task.taskId, controller);
@@ -1178,6 +1216,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       ...(answer === undefined ? {} : { answer }),
       ...(resumedOperation === undefined ? {} : { resumedOperation }),
       ...(pendingConfirmation === undefined ? {} : { pendingConfirmation }),
+      ...(confirmationExpired === true ? { confirmationExpired: true } : {}),
     };
     // 同步发起（pump 返回前执行端已被调用）；经 Promise 化兜住执行端同步抛错。
     let round: Promise<TaskExecutionOutcome>;
@@ -1359,8 +1398,8 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     if (isRejection(acquired)) {
       return { outcome: 'rejection', taskId, reason: acquired.reason };
     }
-    // S3：答复会清掉底账的 pendingQuestion，所以在 answerResumes 之前取出待确认提案。
-    const pendingConfirmation = task.pendingQuestion?.confirmation;
+    // 语义收窄（2026-11-19）：resume = 用户补充信息 / 改口径 / 说了别的——**永不透传句柄**。
+    // 旧提案随 answerResumes 清掉（作废）；Worker 重新提案是允许且期望的（新提案替换旧的）。
     let resumed: TaskRecordView;
     try {
       resumed = registry.answerResumes(taskId, mutationOptions(scope));
@@ -1368,7 +1407,50 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       policy.release(acquired);
       throw error;
     }
-    startRound(resumed, acquired, options?.answer, undefined, pendingConfirmation);
+    startRound(resumed, acquired, options?.answer);
+    return { outcome: 'started', taskId };
+  }
+
+  /**
+   * 显式确认（2026-11-19 owner 拍板）：用户明确表示「按这版提交」。
+   *   · waiting_user + 提案存在 + 未过期 → 取句柄 → answerResumes → startRound（answer =
+   *     用户原话，pendingConfirmation = 底账提案）：句柄只在确认路径透传；
+   *   · waiting_user + 提案已过期 → **不判失败、不结束任务**：接续一个回合让 Worker 重新生成
+   *     同一提案（confirmationExpired 事实），返回 `expired`（零写执行，任务仍回 waiting_user）；
+   *   · 非 waiting_user / 无提案 → 确定性拒绝（零执行，不 acquire 许可、不接续）。
+   */
+  function confirm(taskId: string, options?: { userText?: string; scope?: TaskScope }): ConfirmOutcome {
+    const scope = options?.scope;
+    const task = registry.get(taskId, scope);
+    if (task.status !== 'waiting_user') {
+      return { outcome: 'not_waiting', taskId, status: task.status };
+    }
+    const confirmation = task.pendingQuestion?.confirmation;
+    if (confirmation === undefined) {
+      // waiting_user 但没有提案 = 在等补充信息，不是等确认。
+      return { outcome: 'no_confirmation', taskId };
+    }
+    // 过期判定（owner 2026-11-19）：句柄过期就过期——不判失败、不结束任务，接续一个回合让
+    // Worker 重新生成同一提案（带 confirmationExpired 事实、不带旧句柄），任务仍回 waiting_user。
+    const expired = confirmation.expiresAt !== undefined
+      && Number.isFinite(Date.parse(confirmation.expiresAt))
+      && Date.parse(confirmation.expiresAt) <= now().getTime();
+    const acquired = policy.acquire('background', { taskId });
+    if (isRejection(acquired)) {
+      return { outcome: 'rejection', taskId, reason: acquired.reason };
+    }
+    let resumed: TaskRecordView;
+    try {
+      resumed = registry.answerResumes(taskId, mutationOptions(scope));
+    } catch (error) {
+      policy.release(acquired);
+      throw error;
+    }
+    if (expired) {
+      startRound(resumed, acquired, options?.userText, undefined, undefined, true);
+      return { outcome: 'expired', taskId };
+    }
+    startRound(resumed, acquired, options?.userText, undefined, confirmation);
     return { outcome: 'started', taskId };
   }
 
@@ -1416,6 +1498,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     whenIdle,
     cancel,
     resume,
+    confirm,
     inFlight: () => [...inFlight.keys()],
   };
 }
