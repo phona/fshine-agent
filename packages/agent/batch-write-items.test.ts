@@ -7,7 +7,7 @@
  *   · 注入失败（--fail-index N）→ 整批原子失败：零写入、整体 failed、不携带 items。
  * 真实执行层若支持部分写，再逐条给出 failed/unknown——宿主只转述，不改语义。
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -53,16 +53,19 @@ const RECORDS = [
   { name: 'alpha-item-3', value: 3 },
 ];
 
-/** prepare → 拿句柄 → commit（同一批 records）→ 返回 commit 的 outcome。 */
+/** prepare → 拿句柄 → commit（同一批 records）→ 返回 commit 的 outcome。
+ *  records 是载荷参数：执行层只读宿主物化后的文件（这里手工物化成同样形状的 JSON 数组文件）。 */
 async function prepareAndCommit(
   client: ReturnType<typeof adapter>,
   commitExtra: Record<string, unknown> = {},
 ): Promise<ExecutionOutcome> {
+  const recordsPath = path.join(tempDir('batch-items-records-'), 'records.json');
+  writeFileSync(recordsPath, JSON.stringify(RECORDS));
   const prepared = await client.execute({
     requestId: 'req_prep',
     dispatchKey: 'dk_prep',
     operation: 'dummy.prepare',
-    args: { collection: 'documents', window: 'W202611', records: RECORDS },
+    args: { collection: 'documents', window: 'W202611', records: recordsPath },
   });
   expect(prepared.status).toBe('needs_confirmation');
   const handle = (prepared as { confirmation: { handle: string } }).confirmation.handle;
@@ -70,7 +73,7 @@ async function prepareAndCommit(
     requestId: 'req_commit',
     dispatchKey: 'dk_commit',
     operation: 'dummy.commit',
-    args: { collection: 'documents', window: 'W202611', records: RECORDS, ...commitExtra },
+    args: { collection: 'documents', window: 'W202611', records: recordsPath, ...commitExtra },
     confirmation: { handle, userText: '确认' },
   });
 }

@@ -49,7 +49,8 @@ import {
   TASK_RUN_TOOL,
   type Session,
 } from '../packages/agent/src/execution-runtime';
-import { createTaskRegistry } from '../packages/agent/src/task-registry';
+import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
+import { createFileStore } from '../packages/agent/src/file-store';
 import { assembleSessionCore, resolveExecutionFace, type ExecutionFaceFactory } from './ask-runtime';
 import { materializeEvalConfig } from './resolve-config-path';
 
@@ -150,6 +151,9 @@ async function createHostFixture(options: { dir: string; confirmationConfig?: Re
   const main = new ScriptedDriver();
   const worker = new ScriptedDriver();
   const requests: ExecutionRequest[] = [];
+  // 载荷型参数（records）需要任务文件桥：与生产装配同一条注入（fileStore 与底账 store 同一实例）。
+  const taskRegistry = createSqliteTaskRegistry(path.join(options.dir, 'state.db'));
+  const fileStore = createFileStore({ store: taskRegistry.store, workspaceRoot: path.join(options.dir, 'workspace') });
   // 真执行面（仓内 dummy CLI）外面包一层只做记录：请求原样向下、回执原样向上。
   const face = await resolveExecutionFace({
     profile,
@@ -183,7 +187,8 @@ async function createHostFixture(options: { dir: string; confirmationConfig?: Re
     runtime: { allowWriteOperations: true, taskRunWaitMs: 0 },
     allowedPermissions: ['read', 'write'],
     emptyOperationsMessage: '（测试）空执行面',
-    taskRegistry: createTaskRegistry(),
+    taskRegistry,
+    taskExecutionBridge: { store: fileStore },
     mainSystemPrompt: '你是测试主 Agent。',
     workerSkills: [],
     createDrivers: async () => ({ mainDriver: main, workerDriver: worker }),
@@ -199,7 +204,10 @@ async function createHostFixture(options: { dir: string; confirmationConfig?: Re
     main,
     worker,
     requests,
-    close: () => assembled.close(),
+    close: () => {
+      assembled.close();
+      taskRegistry.close();
+    },
   };
 }
 
@@ -258,7 +266,7 @@ function resumedCommitCall(delegation: string): { operation: string; args: Recor
     args: {
       '--collection': collection,
       '--window': windowCode,
-      ...(records.length === 0 ? {} : { '--records': records }),
+      ...(records.length === 0 ? {} : { records }),
     },
   };
 }
@@ -322,14 +330,14 @@ function recordsOf(count: number, start = 3): Array<{ name: string; value: numbe
 const PREPARE_12_ARGS: Record<string, unknown> = {
   '--collection': 'alpha',
   '--window': 'W1',
-  '--records': recordsOf(12),
+  records: recordsOf(12),
 };
-const RECORDS_12 = PREPARE_12_ARGS['--records'] as Array<{ name: string; value: number }>;
+const RECORDS_12 = PREPARE_12_ARGS['records'] as Array<{ name: string; value: number }>;
 
 const PREPARE_1_ARGS: Record<string, unknown> = {
   '--collection': 'alpha',
   '--window': 'W1',
-  '--records': [{ name: 'alpha-item-3', value: 100 }],
+  records: [{ name: 'alpha-item-3', value: 100 }],
 };
 
 describe('写确认续跑：提案载荷随底账记录交回 Worker（后台派发·真 dummy 夹具）', () => {
@@ -356,7 +364,11 @@ describe('写确认续跑：提案载荷随底账记录交回 Worker（后台派
       expect((await queryWindow(fx.stateDir, 'alpha', 'W1')).count).toBe(2);
       expect(fx.requests).toHaveLength(1);
       const proposalArgs = JSON.parse(JSON.stringify(fx.requests[0]!.args)) as Record<string, unknown>;
-      expect(proposalArgs).toEqual(PREPARE_12_ARGS);
+      // 交回执行层的参数：records 已被宿主物化成文件路径（其余字段原样），文件内容 = 用户给的 12 条。
+      expect(proposalArgs['--collection']).toBe('alpha');
+      expect(proposalArgs['--window']).toBe('W1');
+      expect(typeof proposalArgs['records']).toBe('string');
+      expect(JSON.parse(readFileSync(proposalArgs['records'] as string, 'utf8'))).toEqual(RECORDS_12);
 
       // 回合 2：用户确认 → task_confirm → 后台续跑；Worker **只**按委派里的机械事实提交。
       fx.worker.push({
@@ -371,9 +383,9 @@ describe('写确认续跑：提案载荷随底账记录交回 Worker（后台派
       const fact = proposalFactOf(delegation)!;
       expect(fact.operation).toBe('dummy.prepare');
       expect(fact.args).toEqual(PREPARE_12_ARGS);
-      // 逐字段比对提案时交回执行层的参数（同一份 args 的独立拷贝）+ 用户的 12 条原文。
-      expect(fact.args).toEqual(proposalArgs);
-      expect((fact.args!['--records'] as unknown[])).toEqual(RECORDS_12);
+      // 逐字段比对提案时落底账的结构化原文（不是执行层侧的路径载体）+ 用户的 12 条原文。
+      expect(fact.args).toEqual(PREPARE_12_ARGS);
+      expect((fact.args!['records'] as unknown[])).toEqual(RECORDS_12);
       // 句柄不进委派文本（Worker 永远看不到凭据）。
       expect(delegation).not.toContain(handle);
 
@@ -445,7 +457,7 @@ describe('写确认续跑：提案载荷随底账记录交回 Worker（后台派
       // 回合 2：用户改口径（不是确认）→ task_resume（不带旧载荷）→ Worker 按新口径重新提案。
       const newRecords = [{ name: 'alpha-item-3', value: 7 }, { name: 'alpha-item-4', value: 8 }];
       fx.worker.push({
-        calls: [{ tool: EXECUTE_OPERATION_TOOL, args: { operation: 'dummy.prepare', args: { '--collection': 'alpha', '--window': 'W1', '--records': newRecords } } }],
+        calls: [{ tool: EXECUTE_OPERATION_TOOL, args: { operation: 'dummy.prepare', args: { '--collection': 'alpha', '--window': 'W1', records: newRecords } } }],
         text: '已按新口径重新提案。',
       });
       fx.main.push({ calls: [{ tool: TASK_RESUME_TOOL, args: { answer: '别加那 12 条了，只加 alpha-item-3=7、alpha-item-4=8' } }], text: '按新口径重新出提案了。' });
@@ -460,7 +472,7 @@ describe('写确认续跑：提案载荷随底账记录交回 Worker（后台派
       // 旧提案作废：底账提案换新（新句柄 + 新载荷）；旧句柄未被消耗。
       const newProposal = fx.taskRegistry.get(taskId, SCOPE).pendingQuestion?.confirmation!;
       expect(newProposal.handle).not.toBe(oldHandle);
-      expect(newProposal.args).toEqual({ '--collection': 'alpha', '--window': 'W1', '--records': newRecords });
+      expect(newProposal.args).toEqual({ '--collection': 'alpha', '--window': 'W1', records: newRecords });
       expect(confirmationsOf(fx.stateDir)[oldHandle]!.usedAt ?? null).toBeNull();
 
       // 回合 3：用户确认新提案 → 按新载荷提交、落地的是新内容。
@@ -548,10 +560,10 @@ describe('写确认续跑·委派机械事实（纯函数面）', () => {
     const withArgs = renderConfirmationResumeFact({
       summary: '将向集合「alpha」新增 2 条',
       operation: 'dummy.prepare',
-      args: { '--collection': 'alpha', '--records': [{ name: 'a', value: 1 }] },
+      args: { '--collection': 'alpha', records: [{ name: 'a', value: 1 }] },
     });
     expect(withArgs).toContain('用户已确认上一轮提案（摘要：将向集合「alpha」新增 2 条）。');
-    expect(withArgs).toContain('{"operation":"dummy.prepare","args":{"--collection":"alpha","--records":[{"name":"a","value":1}]}}');
+    expect(withArgs).toContain('{"operation":"dummy.prepare","args":{"--collection":"alpha","records":[{"name":"a","value":1}]}}');
     // 旧记录（无载荷）：逐字节保持既有句子（零变化）。
     expect(renderConfirmationResumeFact({ summary: '旧提案' }))
       .toBe('用户已确认上一轮提案（摘要：旧提案）。直接提交，不要重新生成提案。');

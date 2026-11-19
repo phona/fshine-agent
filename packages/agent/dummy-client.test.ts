@@ -252,31 +252,41 @@ describe('dummy 执行层适配器（Execution Contract 传输面）', () => {
   });
 });
 
-describe('dummy：结构化参数直接传数组（模型不手拼 JSON）', () => {
-  it('--records 传对象数组 → 执行层收到合法记录并出提案（审计里仍是数组，不是 [object Object]）', async () => {
+/** records 载荷文件：宿主按声明 schema lint 后物化的就是这种 JSON 数组文件（适配器把它当位置参数传）。 */
+function recordsFile(records: unknown): string {
+  const file = path.join(stateDir, `records-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
+  writeFileSync(file, JSON.stringify(records));
+  return file;
+}
+
+describe('dummy：records 载荷（宿主 lint + 物化文件，执行层只读文件）', () => {
+  it('载荷文件里的数组 → 执行层逐条读入并出提案；审计里是路径（不是内联数组）', async () => {
     const client = clientWith(baseEnv());
     const records = [
       { name: 'alpha-item-3', value: 'hello' },
       { name: 'alpha-item-4', value: 'world' },
       { name: 'alpha-item-5', value: 500 },
     ];
+    const file = recordsFile(records);
     const outcome = await client.execute({
       requestId: 'req_array_records',
       dispatchKey: 'dk_test_req_array_records',
       operation: 'dummy.prepare',
-      args: { '--collection': 'alpha', '--window': 'W1', '--records': records },
+      args: { '--collection': 'alpha', '--window': 'W1', records: file },
     });
     expect(outcome.status).toBe('needs_confirmation');
     if (outcome.status === 'needs_confirmation') {
+      // 摘要逐条来自执行层解析后的 records（不是回显字符串）。
       expect(outcome.confirmation.summary).toContain('alpha-item-3=hello');
       expect(outcome.confirmation.summary).toContain('alpha-item-4=world');
       expect(outcome.confirmation.summary).toContain('alpha-item-5=500');
       expect(outcome.confirmation.summary).toContain('共 3 条');
     }
-    // 执行层拿到的就是结构化数组：审计行（执行层自己的账）里 records 原样保留。
+    // 执行层收到的是宿主物化的文件路径（不是内联数组），审计行如实记录。
     const rows = readFileSync(path.join(stateDir, 'audit.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     const last = rows[rows.length - 1]! as { args?: Record<string, unknown> };
-    expect(last.args?.['--records']).toEqual(records);
+    expect(last.args?.['records']).toBe(file);
+    expect(last.args?.['--records']).toBeUndefined();
     expect(JSON.stringify(last.args)).not.toContain('[object Object]');
   });
 
@@ -289,11 +299,11 @@ describe('dummy：结构化参数直接传数组（模型不手拼 JSON）', () 
       args: {
         '--collection': 'alpha',
         '--window': 'W1',
-        '--records': [
+        records: recordsFile([
           { name: 'alpha-item-3', value: 100 },
           { name: 'alpha-item-4', value: 200 },
           { name: 'alpha-item-5' },
-        ],
+        ]),
       },
     });
     expect(outcome.status).toBe('failed');
@@ -319,11 +329,12 @@ describe('dummy：结构化参数直接传数组（模型不手拼 JSON）', () 
   it('200 条一次性提案：摘要写「共 200 条」，commit 后读回 delta=200', async () => {
     const client = clientWith(baseEnv());
     const records = Array.from({ length: 200 }, (_, index) => ({ name: `bulk-item-${index + 1}`, value: index + 1 }));
+    const file = recordsFile(records);
     const prepared = await client.execute({
       requestId: 'req_records_200',
       dispatchKey: 'dk_test_req_records_200',
       operation: 'dummy.prepare',
-      args: { '--collection': 'alpha', '--window': 'W1', '--records': records },
+      args: { '--collection': 'alpha', '--window': 'W1', records: file },
     });
     expect(prepared.status).toBe('needs_confirmation');
     if (prepared.status !== 'needs_confirmation') throw new Error('未出提案');
@@ -335,7 +346,7 @@ describe('dummy：结构化参数直接传数组（模型不手拼 JSON）', () 
       requestId: 'req_records_200_commit',
       dispatchKey: 'dk_test_req_records_200_commit',
       operation: 'dummy.commit',
-      args: { '--collection': 'alpha', '--window': 'W1', '--records': records },
+      args: { '--collection': 'alpha', '--window': 'W1', records: file },
       confirmation: { handle: prepared.confirmation.handle },
     });
     expect(committed.status).toBe('completed');
@@ -360,7 +371,7 @@ describe('dummy：结构化参数直接传数组（模型不手拼 JSON）', () 
       requestId: 'req_records_bad_137',
       dispatchKey: 'dk_test_req_records_bad_137',
       operation: 'dummy.prepare',
-      args: { '--collection': 'alpha', '--window': 'W1', '--records': records },
+      args: { '--collection': 'alpha', '--window': 'W1', records: recordsFile(records) },
     });
     expect(outcome.status).toBe('failed');
     if (outcome.status === 'failed') {
@@ -386,7 +397,7 @@ describe('dummy：结构化参数直接传数组（模型不手拼 JSON）', () 
       requestId: 'req_records_501',
       dispatchKey: 'dk_test_req_records_501',
       operation: 'dummy.prepare',
-      args: { '--collection': 'alpha', '--window': 'W1', '--records': tooMany },
+      args: { '--collection': 'alpha', '--window': 'W1', records: recordsFile(tooMany) },
     });
     expect(refused.status).toBe('failed');
     if (refused.status === 'failed') {
@@ -398,22 +409,40 @@ describe('dummy：结构化参数直接传数组（模型不手拼 JSON）', () 
   });
 });
 
-describe('dummy：参数形状错误声明可重试（同回合允许按正确形态再试）', () => {
-  it('INVALID_RECORDS → retryable:true，且 message 自带正确形态（模型一读就能改对）', async () => {
+describe('dummy：records 载荷形态错误声明可重试（同回合允许按正确形态再试）', () => {
+  it('内联数组（绕过宿主装信封）→ INVALID_RECORDS，retryable:true，指到宿主物化路径', async () => {
     const client = clientWith(baseEnv());
     const bad = await client.execute({
-      requestId: 'req_bad_records',
-      dispatchKey: 'dk_test_req_bad_records',
+      requestId: 'req_bad_records_inline',
+      dispatchKey: 'dk_test_req_bad_records_inline',
       operation: 'dummy.prepare',
-      args: { '--collection': 'alpha', '--window': 'W1', '--records': 'alpha-item-3=hello' },
+      args: { '--collection': 'alpha', '--window': 'W1', records: [{ name: 'alpha-item-3', value: 1 }] },
     });
     expect(bad.status).toBe('failed');
     if (bad.status === 'failed') {
       expect(bad.error.code).toBe('INVALID_RECORDS');
       expect(bad.error.retryable).toBe(true);
-      expect(bad.error.message).toContain('--records');
+      expect(bad.error.message).toContain('载荷文件路径');
+      expect(bad.error.message).toContain('不接受内联数组');
+    }
+  });
+
+  it('载荷文件内容不是数组（JSON 字符串）→ INVALID_RECORDS，message 说明载荷必须是数组', async () => {
+    const client = clientWith(baseEnv());
+    const file = path.join(stateDir, 'records-string.json');
+    writeFileSync(file, JSON.stringify('alpha-item-3=hello'));
+    const bad = await client.execute({
+      requestId: 'req_bad_records_string',
+      dispatchKey: 'dk_test_req_bad_records_string',
+      operation: 'dummy.prepare',
+      args: { '--collection': 'alpha', '--window': 'W1', records: file },
+    });
+    expect(bad.status).toBe('failed');
+    if (bad.status === 'failed') {
+      expect(bad.error.code).toBe('INVALID_RECORDS');
+      expect(bad.error.retryable).toBe(true);
+      expect(bad.error.message).toContain('records 载荷必须是数组');
       expect(bad.error.message).toContain('name');
-      expect(bad.error.message).toContain('结构化数组');
     }
   });
 });

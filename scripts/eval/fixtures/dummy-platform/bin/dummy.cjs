@@ -364,15 +364,6 @@ function structuredArgsOf(op, args) {
   }
   return { flags, positional };
 }
-/** argv 路径（人类/既有测试）：`--records` 在命令行上必然是字符串，这里只做语法还原，
- *  数组语义与逐项校验仍归 normalizeRecords；解析失败保持字符串，让执行层报明确形态错误。 */
-function argvFlagsOf(argv) {
-  const { flags, positional } = parseFlags(argv);
-  if (typeof flags.records === 'string') {
-    try { flags.records = JSON.parse(flags.records); } catch { /* normalizeRecords 报形态错误 */ }
-  }
-  return { flags, positional };
-}
 function resolveOperation(ref) {
   if (!ref) return null;
   const byName = OPERATIONS.find((o) => o.name === ref);
@@ -476,9 +467,9 @@ function confirmationPolicy() {
     readbackShort: cfg !== null && typeof cfg === 'object' && cfg.readbackShort === true,
   };
 }
-/** `--records`：结构化数组（元素 {name, value}）。不给则沿用「只按条数新增」。
- *  写路径只接受数组；命令行形态的 JSON 字符串由 argvFlagsOf 在入口处还原成数组
- *  （执行层不再在 prepare/commit 里解析 JSON 字符串——模型给的是结构化 tool 参数）。
+/** `records`：宿主按声明 schema lint 后物化的载荷文件（位置参数）→ 数组（元素 {name, value}）。
+ *  执行层只从文件读数组；模型侧不再有「内联数组 / JSON 字符串」通道（给非路径值如实拒绝）。
+ *  不给位置参数则沿用「只按条数新增」。
  *  上限 = 执行层自己的单次写入能力（RECORDS_MAX，不是让调用方拆批的提示）；
  *  逐项校验且报「第 N 条」；**全部校验通过后才发放提案/落盘**（任一不合法 → 一条都不写）。 */
 const RECORDS_MAX = 500;
@@ -487,16 +478,15 @@ function normalizeRecords(raw) {
   if (typeof raw === 'string') {
     return {
       error: 'INVALID_RECORDS',
-      message: '--records 必须是结构化数组（每项 {name, value}），不要传 JSON 字符串。'
-        + '正确形态：--records \'[{"name":"alpha-item-3","value":100}]\'（命令行）或直接把数组作为参数值（工具调用）',
+      message: 'records 载荷必须是数组（每项 {name, value}）；宿主物化的文件内容不是数组，不要传 JSON 字符串',
     };
   }
-  if (!Array.isArray(raw)) return { error: 'INVALID_RECORDS', message: '--records 必须是数组（每项 {name, value}）' };
-  if (raw.length === 0) return { error: 'INVALID_RECORDS', message: '--records 不能是空数组' };
+  if (!Array.isArray(raw)) return { error: 'INVALID_RECORDS', message: 'records 载荷必须是数组（每项 {name, value}）' };
+  if (raw.length === 0) return { error: 'INVALID_RECORDS', message: 'records 不能是空数组' };
   if (raw.length > RECORDS_MAX) {
     return {
       error: 'INVALID_RECORDS',
-      message: `--records 超过执行层单次写入上限 ${RECORDS_MAX} 条（收到 ${raw.length} 条）`,
+      message: `records 超过执行层单次写入上限 ${RECORDS_MAX} 条（收到 ${raw.length} 条）`,
     };
   }
   const records = [];
@@ -516,10 +506,43 @@ function normalizeRecords(raw) {
   return { records };
 }
 
-function normalizeWriteArgs(flags) {
+/** records 载荷文件读取：宿主物化后传的是路径（positional[0]）。
+ *  非路径值（模型绕过宿主直接给数组/字符串）不是本执行层认可的形态——如实拒绝，
+ *  不在这里替宿主装信封（装信封 = lint + 落盘 + 路径替换，归宿主）。 */
+function recordsPayloadOf(positional) {
+  const file = Array.isArray(positional) ? positional[0] : undefined;
+  if (file === undefined || file === null || file === '') return { records: undefined };
+  if (typeof file !== 'string') {
+    return {
+      error: 'INVALID_RECORDS',
+      message: 'records 必须是宿主物化后的载荷文件路径（数组由宿主落盘后以位置参数传入）；执行层不接受内联数组',
+    };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (e) {
+    return { error: 'INVALID_RECORDS', message: `records 载荷文件读不到：${e.message}` };
+  }
+  return normalizeRecords(parsed);
+}
+
+function normalizeWriteArgs(flags, positional) {
   const collection = flags.collection || flags.topic;
   const window = flags.window || flags.round || 'W1';
-  const parsedRecords = normalizeRecords(flags.records);
+  // `--records` 已退役为载荷参数：仍按 flag 传的一律拒绝（不静默忽略，避免"以为写了"）。
+  if (flags.records !== undefined) {
+    return {
+      collection: typeof collection === 'string' && collection !== '' ? collection : null,
+      window: String(window),
+      count: 1,
+      recordsError: {
+        error: 'INVALID_RECORDS',
+        message: '--records 已退役：records 是载荷参数（宿主按声明 schema lint 后物化成文件、以位置参数传入）；不要再把数组/JSON 字符串当 flag 传',
+      },
+    };
+  }
+  const parsedRecords = recordsPayloadOf(positional);
   const rawCount = flags.count !== undefined ? Number(flags.count) : (parsedRecords && parsedRecords.records ? parsedRecords.records.length : 1);
   return {
     collection: typeof collection === 'string' && collection !== '' ? collection : null,
@@ -587,9 +610,9 @@ function refuseConfirmation(opName, args, via, code, message) {
   audit({ mode: 'commit', ...(via ? { via } : {}), script: opName, args, serve: orchestrated(), refused: code });
   return 3;
 }
-function doPrepare(opName, flags) {
+function doPrepare(opName, flags, positional) {
   const state = loadState();
-  const { collection, window, count, records, recordsError } = normalizeWriteArgs(flags);
+  const { collection, window, count, records, recordsError } = normalizeWriteArgs(flags, positional);
   if (recordsError) { emit(opName, 'failed', null, errObj(recordsError.error, recordsError.message)); return 1; }
   if (!collection) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection or --topic')); return 1; }
   if (!Object.prototype.hasOwnProperty.call(state.collections, collection)) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${collection}"`)); return 0; }
@@ -629,10 +652,10 @@ function doPrepare(opName, flags) {
   });
   return 0;
 }
-function doCommit(opName, flags, confirmation, via) {
+function doCommit(opName, flags, positional, confirmation, via) {
   // 集合级策略先于句柄校验：锁定集合的写路径仍以 COLLECTION_LOCKED 拒绝（旧契约保持）。
   const state = loadState();
-  const { collection, window, count, records, recordsError } = normalizeWriteArgs(flags);
+  const { collection, window, count, records, recordsError } = normalizeWriteArgs(flags, positional);
   if (recordsError) { emit(opName, 'failed', null, errObj(recordsError.error, recordsError.message)); return 1; }
   if (!collection) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection or --topic')); return 1; }
   if (!Object.prototype.hasOwnProperty.call(state.collections, collection)) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${collection}"`)); return 0; }
@@ -711,11 +734,11 @@ function doProposalCreate(opName, positional) {
   // 这个操作要的是**宿主提供的载荷文件**，模型侧没有这个通道——拒绝时必须指条明路，
   // 否则模型会换着写法反复撞（2026-11-18 live 实测：3 次 ENOENT 后仍无路可走）。
   if (!file) {
-    process.stderr.write('PROPOSAL_REFUSE 该操作需要宿主提供的载荷文件（模型侧没有这个通道）；要逐条新增请改用 dummy.prepare --records \'[{"name":"x","value":100}]\'（结构化数组，直接作为参数值传）\n');
+    process.stderr.write('PROPOSAL_REFUSE 该操作需要宿主提供的载荷文件（模型侧没有这个通道）；要逐条新增请改用 dummy.prepare 的 records 载荷（结构化数组，宿主会物化成文件）\n');
     return 3;
   }
   let payload;
-  try { payload = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { process.stderr.write(`PROPOSAL_REFUSE 载荷文件读不到：${e.message}；要逐条新增请改用 dummy.prepare --records（结构化数组，每项 {name, value}）\n`); return 3; }
+  try { payload = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { process.stderr.write(`PROPOSAL_REFUSE 载荷文件读不到：${e.message}；要逐条新增请改用 dummy.prepare 的 records 载荷（结构化数组，每项 {name, value}）\n`); return 3; }
   const allowed = ['collection', 'window', 'records'];
   const extra = Object.keys(payload).filter((k) => !allowed.includes(k));
   if (extra.length) { process.stderr.write(`PROPOSAL_REFUSE unknown field: ${extra.join(',')}\n`); emit(opName, 'failed', null, errObj('PROPOSAL_UNKNOWN_FIELD', `Unknown field: ${extra.join(',')}`)); return 3; }
@@ -1160,7 +1183,7 @@ async function main() {
     let queryRefused;
     if (op.name === 'dummy.query' || op.name === 'ballot.query') { const q = doQuery(op.name, callFlags); code = q.code; queryResult = q.result; queryRefused = q.refused; }
     else if (op.name === 'dummy.scratch' || op.name === 'ballot.scratch') code = doScratch(op.name, callFlags);
-    else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, callFlags);
+    else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, callFlags, callPositional);
     else if (op.name === 'dummy.commit' || op.name === 'ballot.commit') {
       const secret = env2('EXECUTION_GATE_SECRET', 'DUMMY_GATE_SECRET', '');
       const token = env2('EXECUTION_COMMIT_TOKEN', 'DUMMY_COMMIT_TOKEN', '');
@@ -1175,7 +1198,7 @@ async function main() {
         } catch { ok = false; }
         if (!ok) { process.stderr.write('GATE_REFUSE commit token verification failed\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: orchestrated(), refused: 'commit-token' }); return 3; }
       }
-      code = doCommit(op.name, callFlags, confirmation, 'structured');
+      code = doCommit(op.name, callFlags, callPositional, confirmation, 'structured');
     } else { process.stderr.write('GATE_REFUSE no handler for ' + op.name + '\n'); return 3; }
     // mode 记**按 access 分级**的值（2026-11-09 九审 major）：旧写法这里无脑记 'call'，
     // 而 bash 路径按 access 算 query/prepare——于是同一次 dummy.query，走 bash 落
@@ -1214,10 +1237,10 @@ async function main() {
     // 另附正确形态，让下一跳能拼对（教学，不是放行）。
     if (!op) { process.stderr.write(unregisteredNotice(cmd, target)); audit({ mode: cmd, script: target, args: rest, serve: orchestrated(), refused: 'unregistered' }); return 3; }
     // 长任务（契约 v4）：argv 形态同样立即受理（人类直跑/旧调用形态）。
-    if (op.name === 'dummy.longtask') { const { flags: longFlags } = argvFlagsOf(rest); return doLongTaskAccept(op.name, longFlags, rest); }
-    // argv 形态归一到 { flags, positional }：`--records` 的命令行字符串在这里还原成数组，
+    if (op.name === 'dummy.longtask') { const { flags: longFlags } = parseFlags(rest); return doLongTaskAccept(op.name, longFlags, rest); }
+    // argv 形态归一到 { flags, positional }：records 载荷是宿主物化后的文件路径（位置参数），
     // 逐项校验与执行层单次写入上限都由 normalizeRecords 统一负责。
-    const { flags: argvFlags, positional: argvPositional } = argvFlagsOf(rest);
+    const { flags: argvFlags, positional: argvPositional } = parseFlags(rest);
     // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
     // 起止两行 + 同一 callId（2026-11-09 十二审 major）：bash 侧这条路径与结构化侧同规，
     // 都要补结果行——否则 classifyExecutionCall 拿不到 exitCode=0，正常完成并读回的 bash
@@ -1252,7 +1275,7 @@ async function main() {
     let queryRefused;
     if (op.name === 'dummy.query' || op.name === 'ballot.query') { const q = doQuery(op.name, argvFlags); code = q.code; queryResult = q.result; queryRefused = q.refused; }
     else if (op.name === 'dummy.scratch' || op.name === 'ballot.scratch') code = doScratch(op.name, argvFlags);
-    else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, argvFlags);
+    else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, argvFlags, argvPositional);
     else if (op.name === 'dummy.commit' || op.name === 'ballot.commit') {
       // Direct (non-proposal) commit requires a commit token when a gate secret is set,
       // mirroring gateway commit-token binding (operation name preferred).
@@ -1269,7 +1292,7 @@ async function main() {
         } catch { ok = false; }
         if (!ok) { process.stderr.write('GATE_REFUSE commit token verification failed\n'); audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), refused: 'commit-token' }); return 3; }
       }
-      code = doCommit(op.name, argvFlags, undefined, null);
+      code = doCommit(op.name, argvFlags, argvPositional, undefined, null);
     } else { process.stderr.write(`GATE_REFUSE no handler for ${op.name}\n`); return 3; }
     // query 的 completed/needs_input/not_found 行把该次实际结果状态写进审计行 result
     // （audited 申报模式交叉核的事实基准：结果状态与 items 都可供独立核对）；被拒/失败的
