@@ -53,7 +53,11 @@ import {
   type RecalcXlsxExecutor,
 } from '../../packages/agent/src/recalc-xlsx-executor';
 import { FILES_GENERATED_NOTICE, mainProtocolNoteFor, type Session, type TurnFileRef } from '../../packages/agent/src/execution-runtime';
-import type { LongRunningNoticePort } from '../../packages/agent/src/task-runner';
+import {
+  LONG_RUNNING_NOTICE_FALLBACK_TEXT,
+  longRunningNoticeFactText,
+  type LongRunningNoticePort,
+} from '../../packages/agent/src/task-runner';
 import {
   createNotificationOutbox,
   type NotificationOutbox,
@@ -190,12 +194,25 @@ const RECALC_DELIVERY_PARTIAL_NOTE = '部分表格未通过公式实算校验，
 const INBOUND_STILL_PROCESSING_NOTE = '这条我还在办，办完会发你，不用再发一遍。';
 
 /**
- * 主动提醒投递端口（预期契约 2026-11-18）：10/30 分钟两档文案由 runner 生成，这里只决定
- * 「发给谁」——只在 1:1、只在 live 部署、只在已知路由上发；是否真送达如实返回（失败不重试、
- * 不冒充 sent）。群聊不发（跨 principal 泄漏面）。
+ * 群主体判定（宿主自己的身份推导，见 handler：群聊 principalId = `<渠道>:group:<会话id>`；
+ * 群 = 独立主体，2026-11-18 owner 定）。用于**话术层的隐私口径**——群里的提醒不带业务名
+ * （业务名是任务原文，可能是个人数据/具体人的事），1:1 照常带。不用 chatType 事实源、不用
+ * 进程内集合：判据只看底账任务行里的主体身份（重启后照样成立）。
+ */
+export function isGroupPrincipal(principalId: string): boolean {
+  const parts = principalId.split(':');
+  return parts.length >= 3 && parts[1] === 'group';
+}
+
+/**
+ * 主动提醒投递端口（预期契约 2026-11-18；2026-11-19 owner 补 #9/#10 改形）：
+ *   · 判据只看**底账任务事实**（任务属于谁、活在哪个会话）——1:1 与**群聊都发**（群 = 独立
+ *     主体，群里的任务就是这个群的事）；不用「群聊一律不发」的一刀切，也不依赖进程内集合
+ *     （重启后集合是空的，但提醒照常发）；
+ *   · 事实文本与兜底句在这里拼：**群主体去业务名**（中性主语），1:1 带业务名；
+ *   · 是否真送达如实返回（失败不重试、不冒充 sent）。
  */
 export function createLongRunningNoticePort(input: {
-  isDirectSession: (sessionId: string) => boolean;
   /**
    * 状态变化唤醒出口（server 的统一出口：喂事实 → 唤醒模型 → 投递它说的话，模型挂掉投
    * fallbackText；见 server.ts 的 wakeStateChangeText）。缺省 = 未接会话面：如实返回
@@ -212,18 +229,22 @@ export function createLongRunningNoticePort(input: {
   }) => Promise<boolean>;
 }): LongRunningNoticePort {
   return {
-    isDirectSession: input.isDirectSession,
-    async sendNotice({ taskId, principalId, sessionId, name, minutes, factText, fallbackText }) {
+    async sendNotice({ taskId, principalId, sessionId, name, minutes }) {
       const wakeStateChange = input.wakeStateChange;
       if (wakeStateChange === undefined) return false;
+      // 群主体：事实与话术都不带业务名（隐私口径）；1:1：带业务名（用户要知道是哪件事）。
+      const named = isGroupPrincipal(principalId) ? undefined : name;
       return await wakeStateChange({
         taskId,
         principalId,
         sessionId,
-        ...(name === undefined ? {} : { name }),
+        ...(named === undefined ? {} : { name: named }),
         minutes,
-        factText,
-        fallbackText,
+        factText: longRunningNoticeFactText({
+          ...(named === undefined ? {} : { name: named }),
+          minutes,
+        }),
+        fallbackText: LONG_RUNNING_NOTICE_FALLBACK_TEXT,
       });
     },
   };
@@ -661,15 +682,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   // 两者都缺省 = 无端口部署，保持同步等结果（无推送可发，降级不崩——现行为不变）。
   const hasPushSurface = deps.fileDelivery !== undefined || deps.notificationSink !== undefined;
   const taskDispatch: 'sync' | 'async' = hasPushSurface ? 'async' : 'sync';
-  /**
-   * 主动提醒的会话事实（inbound 时登记，有界）：1:1 集合用于「群聊不发主动提醒」。
-   * 未知会话一律不发（fail-quiet，不猜）。投递路由由 sessionId 机械还原
-   * （`routeFromSessionId`）——本集合不再持有第二份路由事实。
-   */
-  const directSessions = new Set<string>();
-  const SESSION_FACT_LIMIT = 5_000;
+  // 主动提醒（久无动静）的判据只看**底账任务事实**（任务属于谁、活在哪个会话）——
+  // 2026-11-19 owner 补 #10：此前用进程内集合（inbound 时登记）判 1:1，重启后集合是空的，
+  // 用户再开口前一条提醒都发不出去；现在群聊也覆盖（#9），进程内集合整体删除。
   const longRunningNotice = createLongRunningNoticePort({
-    isDirectSession: (sessionId) => directSessions.has(sessionId),
     // 唤醒出口定义在本文件下半部（函数声明，装配完成前不会被调用——启动 pump 也在装配
     // 完成之后才跑）。
     wakeStateChange: (notice) => wakeLongRunningNotice(notice),
@@ -759,7 +775,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       }),
       // 片 1：后台 Worker 的 run_js 与前台同一执行器端口（缺省不注入 = Worker 工具面零变化）。
       runJsExecutor,
-      // 预期契约（2026-11-18）：10/30 分钟两档主动提醒的投递端口（只 1:1、只 live）。
+      // 预期契约（2026-11-18；2026-11-19 #9/#10 改形）：久无动静提醒端口（只一档；1:1 与群聊
+      // 都发，判据只看底账任务事实，不看进程内集合；群主体话术不带业务名）。
       longRunningNotice,
       // 长任务异步（契约 v4）：accepted / 协议违约 / 续跑回程登记与等待推进只进日志。
       onExecutionEvent: (event) => log({ mode: 'background', ...event }),
@@ -1142,6 +1159,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   /**
    * 状态变化出口的完整处置：唤醒取话（wakeStateChangeText）→ 有话说就走既有投递面
    * （deliverTaskResult，四必守记账）→ 返回「用户可见的那句话是否已交出」。
+   * **busy 也算已交出**：事实已按 Pi 原生态交给正在跑的本回合，由它说（不另投、不算失败）。
    * 完成路径不用本包装（它要把文件未送达话术附在正文后、且靠自己算的文本投递），
    * 其余出口（失败/说停/久无动静/重启对账）走这里，保证同一套投递与记账。
    */
@@ -1156,6 +1174,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     appendText?: string;
   }): Promise<boolean> {
     const resolved = await wakeStateChangeText(input);
+    // 会话忙：事实已交给正在跑的回合（由它说）——不是失败、也不另投（同一件事不说两遍）。
+    if (resolved.outcome === 'busy') return true;
     if (resolved.text === undefined) return false;
     const resultText = input.appendText === undefined ? resolved.text : `${resolved.text}\n${input.appendText}`;
     return await deliverTaskResult({
@@ -1281,16 +1301,6 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     const speakerId = message.wecomUserId;
     // 入站消息身份事实（事件与幂等底账共用同一组键，避免各处重拼）。
     const inboundIds: InboundIds = { principalId, sessionId, speakerId, messageId: message.messageId };
-    // 主动提醒的会话事实（只在 inbound 时可信）：是否 1:1。群聊登记为「非 1:1」。
-    // 投递路由不进这里（由 sessionId 机械还原）。
-    if (isGroupChat) directSessions.delete(sessionId);
-    else directSessions.add(sessionId);
-    // 有界：超限淘汰最旧（只影响「能否提醒」，不影响任何任务事实）。
-    while (directSessions.size > SESSION_FACT_LIMIT) {
-      const oldest = directSessions.values().next().value;
-      if (oldest === undefined) break;
-      directSessions.delete(oldest);
-    }
     const principal = deps.config.principals[principalId];
     if (principal === undefined || principal.enabled !== true) {
       log({ event: 'message_refused', principalId, sessionId, speakerId, messageId: message.messageId, reason: 'principal_not_enabled' });

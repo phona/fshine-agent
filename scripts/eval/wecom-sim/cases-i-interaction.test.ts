@@ -327,10 +327,13 @@ describe('I 组·体验交互（I-1～I-8，自动）', () => {
       await group.waitFor('I-6 群长任务受理', () => group.doneOf(mt) !== undefined, 15_000);
       const taskId = group.doneOf(mt)!.taskIds[0]!;
       await group.waitFor('I-6 群长任务在跑', () => groupRegistry.get(taskId, GROUP_SCOPE).status === 'running', 10_000);
-      // 阈值 200ms 早该触发；群里零提醒。
-      await new Promise((resolve) => setTimeout(resolve, 600));
-      // 群里零主动提醒（唤醒回合的模型台词与宿主兜底句都不该出现）。
-      expect(group.sdk.proactiveTexts.some((entry) => entry.content.includes('比预计久'))).toBe(false);
+      // 群里也发（owner 2026-11-19 #9 迁移；旧口径「群聊零主动提醒」已作废）：群 = 独立主体，
+      // 群任务的久无动静提醒回到群会话，话术走隐私口径（不带业务名）。
+      await group.waitFor('I-6 群聊也有久无动静提醒', () => group.sdk.proactiveTexts.length >= 1, 10_000);
+      const groupNotice = group.sdk.proactiveTexts[0]!;
+      expect(groupNotice.chatId).toBe('group-w');
+      expect(groupNotice.content).toContain('比预计久');
+      expect(groupNotice.content).not.toContain(t);
       expect(group.sdk.proactiveTexts.filter((entry) => entry.content === LONG_RUNNING_NOTICE_FALLBACK_TEXT)).toHaveLength(0);
       // 收尾：等群长任务跑完再关库。
       await group.waitFor('I-6 群长任务完成', () => groupRegistry.get(taskId, GROUP_SCOPE).status === 'completed', 20_000);

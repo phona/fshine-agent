@@ -115,7 +115,7 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
     }
   });
 
-  it('W-43 预期式提醒：超阈值恰一条「比预计久了」；群聊零主动提醒（长任务也要发）', async () => {
+  it('W-43 预期式提醒：超阈值恰一条「比预计久了」；群聊也发（话术不带业务名；长任务也要发）', async () => {
     // 首档阈值调到 200ms；长任务 `--seconds 3` 保证触发时任务还在飞。
     const sim = await startWecomSim({
       label: 'w43',
@@ -165,11 +165,18 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
         const task = groupRegistry.get(taskId, GROUP_SCOPE);
         return task.status === 'running';
       }, 10_000);
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      // 群里零主动提醒：既没有唤醒回合模型那句，也没有宿主兜底那句。
-      expect(group.sdk.proactiveTexts.filter((entry) =>
-        entry.content === longRunningWakeLine(deriveTaskName(taskText)))).toHaveLength(0);
-      expect(group.sdk.proactiveTexts.some((entry) => entry.content.includes('比预计久'))).toBe(false);
+      // 群里也发（owner 2026-11-19 #9 迁移；旧口径「群聊零主动提醒」已作废）：
+      // 群 = 独立主体，群里的任务就是这个群的事；话术走隐私口径 = **不带业务名**。
+      await group.waitFor('W-43 群聊也有久无动静提醒', () => group.sdk.proactiveTexts.length >= 1, 10_000);
+      const groupNotice = group.sdk.proactiveTexts[0]!;
+      expect(groupNotice.chatId).toBe('group-w');
+      expect(groupNotice.content).toBe(longRunningWakeLine(undefined));
+      expect(groupNotice.content).toContain('比预计久');
+      expect(groupNotice.content).not.toContain(taskText);
+      expect(groupNotice.content).not.toContain(deriveTaskName(taskText));
+      // 恰一条（不刷屏；也没有宿主兜底句——模型说得出话）。
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(group.sdk.proactiveTexts.filter((entry) => entry.content.includes('比预计久'))).toHaveLength(1);
       expect(group.sdk.proactiveTexts.filter((entry) => entry.content === LONG_RUNNING_NOTICE_FALLBACK_TEXT)).toHaveLength(0);
       // 让群里的长任务跑完再收尾（不在库里跑着就关库）。
       await group.waitFor('群里长任务终态', () => groupRegistry.get(taskId, GROUP_SCOPE).status === 'completed', 15_000);

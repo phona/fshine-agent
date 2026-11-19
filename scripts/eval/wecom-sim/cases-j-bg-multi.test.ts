@@ -182,8 +182,9 @@ describe('J 组·后台任务并存（J-1～J-3）', () => {
       taskRunWaitMs: 1_500,
       allowWriteOperations: true,
       groupRole: 'operator',
-      // 首档提醒阈值压到 200ms：若群聊被误当成 1:1 会话（isDirectSession 判错），
-      // 任务还没跑完就会先出一条「比预计久了」——这是真实绊线，不只是长任务顺带。
+      // 首档提醒阈值压到 200ms：群任务的久无动静提醒（2026-11-19 #9 起群里也发）会在任务
+      // 跑着的时候到达——本轮恰落在交办回合的忙窗口内（busy 交回当前回合，见 ②），
+      // 这是真实绊线，不只是长任务顺带。
       longRunningNoticeMs: 200,
     });
     const registry = createSqliteTaskRegistry(sim.dbPath, { readOnly: true });
@@ -207,17 +208,27 @@ describe('J 组·后台任务并存（J-1～J-3）', () => {
       const groupTaskId = sim.doneOf(groupId)!.taskIds[0]!;
 
       // ① 完成后结果**投递到群会话**（sendMessage 通道 chatId = group-w），不是私聊。
-      await sim.waitFor('J-2 群任务完成后追投到群', () => sim.sdk.proactiveTexts.length === 1, 30_000);
-      expect(sim.sdk.proactiveTexts[0]!.chatId).toBe('group-w');
-      expect(sim.sdk.proactiveTexts[0]!.content).toContain('凭证');
+      await sim.waitFor('J-2 群任务完成追投到群', () =>
+        sim.sdk.proactiveTexts.some((entry) => entry.content.includes('凭证')), 30_000);
+      const completion = sim.sdk.proactiveTexts.filter((entry) => entry.content.includes('凭证'));
+      expect(completion).toHaveLength(1);
+      expect(completion[0]!.chatId).toBe('group-w');
       // 任务在群里真实跑完了（不是「没开通所以安静」冒充）。
       await sim.waitFor('J-2 群任务 completed', () => registry.get(groupTaskId, GROUP_SCOPE).status === 'completed', 15_000);
 
-      // ② 期间零主动提醒：没有任何「比预计久了」（群聊不该发预期式提醒）。
-      expect(proactiveTexts(sim).filter((text) => text.includes('比预计久'))).toHaveLength(0);
+      // ② 群聊的久无动静提醒**指向这个群**（owner 2026-11-19 #9 迁移；旧口径「群聊零提醒」已
+      // 作废）：本轮的提醒恰好落在交办回合还在跑的窗口内 → 唤醒出口按 busy 把事实交回当前
+      // 回合（既不另发一条、也绝不串到私聊）；送达时同样只发群、且不带业务名（隐私口径）。
+      const noticeWake = sim.logs.filter((line) => line['event'] === 'task_long_running_wake'
+        && line['taskId'] === groupTaskId);
+      expect(noticeWake).toHaveLength(1);
+      expect(noticeWake[0]).toMatchObject({ principalId: 'wecom:group:group-w', sessionId: 'wecom:group-w' });
+      expect(noticeWake[0]!['outcome']).toMatch(/^(woken|busy)$/);
+      for (const notice of sim.sdk.proactiveTexts.filter((entry) => entry.content.includes('比预计久'))) {
+        expect(notice.chatId).toBe('group-w');
+        expect(notice.content).not.toContain(groupTaskText);
+      }
       expect(proactiveTexts(sim).filter((text) => text === LONG_RUNNING_NOTICE_FALLBACK_TEXT)).toHaveLength(0);
-      expect(sim.sdk.proactiveTexts.filter((entry) => entry.chatId === 'group-w'
-        && entry.content === LONG_RUNNING_NOTICE_FALLBACK_TEXT)).toHaveLength(0);
       // ③ 另一条私聊会话收不到这份结果：全部主动消息只发给 group-w，从不发给 user-a。
       expect(sim.sdk.proactiveTexts.every((entry) => entry.chatId === 'group-w')).toBe(true);
       expect(sim.sdk.proactiveTexts.filter((entry) => entry.chatId === 'user-a')).toHaveLength(0);

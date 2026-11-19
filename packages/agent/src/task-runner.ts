@@ -38,16 +38,17 @@
  *   · 任务 running、从认领时刻（无租约的长任务用 running_since）起超过 `longRunningNoticeMs`
  *     （缺省 10 分钟）→ 交给提醒端口处置（**只此一档**，每任务一次）。
  * 「已发」时刻持久化在任务行（owner 列），原子领取保证并发/重启下至多一次。
- * 只在 1:1 会话发（chatType 事实源由装配方经 `isDirectSession` 注入；拿不到时按「私聊会话」
- * 这一条机械事实处理——不猜群聊）。发送失败只记事件，不改任务事实、不重试。未注入阈值或
- * 通知端口时完全不扫、零行为变化。
+ * **1:1 与群聊都发**（owner 2026-11-19 补：群 = 独立主体，群里的任务就是这个群的事；
+ * 判据只看底账任务事实，不用「群聊一律不发」的一刀切，也不碰进程内集合——重启后照样发）。
+ * 发送失败只记事件，不改任务事实、不重试。未注入阈值或通知端口时完全不扫、零行为变化。
  *
  * 「卡住」那一档（>30 分钟「我卡住了，建议先停掉」，2026-11-18 起的第二档）**已删**（owner
  * 2026-11-19）：它断言了我们不知道的事（「我卡住了」），还替用户下结论（「建议先停掉」）；
  * 只留上面一档。
  *
- * 提醒分两层：本模块只出**事实**（业务名 + 已跑多久，见 {@link longRunningNoticeFactText}）
- * 与「模型回合挂掉时的兜底一句」（{@link LONG_RUNNING_NOTICE_FALLBACK_TEXT}）；用户看到的
+ * 提醒分两层：本模块只交**时机 + 事实原料**（业务名、已跑多久；事实文本与「模型回合挂掉时
+ * 的兜底一句」由端口按宿主的身份/隐私口径拼，见 {@link longRunningNoticeFactText} 与
+ * {@link LONG_RUNNING_NOTICE_FALLBACK_TEXT}）；用户看到的
  * 那句话由**模型**在唤醒回合里写（端口实现负责唤醒与投递，见 server 的
  * `createLongRunningNoticePort`）。事实不报进度（不写 operation 名、不写已执行次数、不写
  * 最近一步）——我们不知道进度，就不编。
@@ -393,19 +394,18 @@ export const LONG_RUNNING_NOTICE_FALLBACK_TEXT =
   '这件事比预计久了。要我停下来，还是继续等？（回「停」我就停）';
 
 /**
- * 主动提醒端口（装配方实现：唤醒原会话模型说话，模型挂掉则投兜底文案；见 server 的
- * `createLongRunningNoticePort`）。实现方自己负责路由解析、唤醒与投递纪律；异常不应抛出
- * （抛出也只按失败事件记）。
+ * 主动提醒端口（装配方实现：唤醒任务所属会话的模型说话，模型挂掉则投兜底文案；见 server 的
+ * `createLongRunningNoticePort`）。实现方自己负责**事实拼装**（含对群主体去业务名的隐私
+ * 口径）、路由解析、唤醒与投递纪律；异常不应抛出（抛出也只按失败事件记）。
+ *
+ * 判据（2026-11-19 owner 补：#9 群聊覆盖 / #10 重启后判据）：**只看任务事实**——发不发由
+ * 「这个任务属于谁、活在哪个会话」决定（端口收到的 taskId/principalId/sessionId 全来自
+ * 底账任务行），不再有「群聊一律不发」的一刀切，也不依赖任何进程内集合（重启后照样发）。
  */
 export interface LongRunningNoticePort {
   /**
-   * 1:1 会话判据（chatType 事实源；缺省 = 按「私聊会话」这一条机械事实处理）。
-   * false = 群聊，不发（也不落「已发」）。
-   */
-  isDirectSession?(sessionId: string): boolean;
-  /**
-   * 处置一条提醒：把 `factText` 唤醒给原会话模型、投递它说的话；模型说不出话时投
-   * `fallbackText`（如实、不诱导重试）。`name`/`minutes` 只作事实与记账（含结构化事件）。
+   * 处置一条提醒：事实由端口按 `{name?, minutes}` 拼（**群主体不带业务名**），唤醒任务所属
+   * 会话的模型说；模型说不出话时投兜底句（如实、不诱导重试）。
    * 返回「用户可见的那句话已交出」（模型说了 / 兜底送达）——失败/抑制只记账，不重试。
    */
   sendNotice(input: {
@@ -414,8 +414,6 @@ export interface LongRunningNoticePort {
     sessionId: string;
     name?: string;
     minutes: number;
-    factText: string;
-    fallbackText: string;
   }): Promise<boolean>;
 }
 
@@ -495,8 +493,8 @@ export interface TaskRunnerOptions {
    */
   longRunningNoticeMs?: number;
   /**
-   * 提醒投递端口：缺省 = 不启用（无法投递就不打扰）。提供 `isDirectSession` 时群聊不发；
-   * 未提供时按「私聊会话」这一条机械事实处理（拿不到 chatType 事实源时的唯一安全默认）。
+   * 提醒投递端口：缺省 = 不启用（无法投递就不打扰）。端口负责事实拼装（群主体去业务名）、
+   * 唤醒任务所属会话与投递；runner 只判时机与「已发」（底账任务事实，不碰进程内集合）。
    */
   longRunningNotice?: LongRunningNoticePort;
   /** 结构化事件出口（`task_long_running_notice`：成功/失败各一条；不含文案与业务内容）。 */
@@ -862,15 +860,11 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     };
     const send = (async (): Promise<void> => {
       try {
+        // 本模块只交**时机 + 事实原料**（业务名、已跑多久）；事实文本与兜底句由端口（宿主）
+        // 拼装——群主体的隐私口径（不去业务名 vs 去业务名）是宿主的身份约定，不在 runner。
         const delivered = await longRunningNotice!.sendNotice({
           ...base,
           ...(task.name === undefined ? {} : { name: task.name }),
-          // 事实（给模型读）与兜底一句（模型回合挂掉）都由本模块拼，端口只负责唤醒与投递。
-          factText: longRunningNoticeFactText({
-            ...(task.name === undefined ? {} : { name: task.name }),
-            minutes,
-          }),
-          fallbackText: LONG_RUNNING_NOTICE_FALLBACK_TEXT,
         });
         log?.({ event: 'task_long_running_notice', ...base, result: delivered ? 'sent' : 'failed' });
       } catch (error) {
@@ -888,7 +882,10 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
 
   /**
    * 单趟扫描 running 行（共用同一刷新周期）：返回本次发出的任务与下一个到期点。
-   * 群聊不发（也不落「已发」）；每任务只发一次（原子领取持久化，重启不重发）。
+   * **1:1 与群聊都发**（2026-11-19 owner 补 #9：群 = 独立主体，群里的任务本来就是这个群
+   * 的事）；判据只看底账任务事实（任务属于谁、活在哪个会话），不引入任何进程内集合或
+   * 「群聊一律不发」的一刀切（#10：重启后照样发）。话术层面的隐私口径（群主体不带业务名）
+   * 归端口。每任务只发一次（原子领取持久化，重启不重发）。
    */
   function scanLongRunning(nowMs: number): LongRunningScan {
     const noticed: string[] = [];
@@ -903,11 +900,10 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         if (nextDue === undefined || due < nextDue) nextDue = due;
         continue;
       }
-      // 只在 1:1 会话发：chatType 事实源由装配方注入；拿不到时按「私聊会话」机械事实处理。
-      if (!(longRunningNotice!.isDirectSession?.(task.sessionId) ?? true)) continue;
       if (!claimNotice(task, nowMs)) continue;
       noticed.push(task.taskId);
-      deliverNotice(task, Math.floor(elapsed / 60_000));
+      // 分钟数下限 1：阈值可被部署配到亚分钟（「已经跑了 0 分钟」是废话）。
+      deliverNotice(task, Math.max(1, Math.floor(elapsed / 60_000)));
     }
     return { noticed, ...(nextDue === undefined ? {} : { nextDue }) };
   }
