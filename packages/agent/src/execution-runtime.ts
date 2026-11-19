@@ -2536,6 +2536,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     rawInputFiles: unknown,
     foregroundPermit: Permit | undefined,
     turnFiles: TurnFileRef[],
+    /** 本回合交办的任务（taskIds）：落定的非完成终态也要记账（见下方窗口内落定分支）。 */
+    taskIds: string[],
     /** 主动推送抑制收集器（快活失败/等补充：失败原因本回合已交给模型）。 */
     pushSuppressedTaskIds: string[],
   ): Promise<unknown> {
@@ -2637,6 +2639,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           }
           // 窗口内落定的非完成终态：与 inline 失败同语义如实上抛（失败/取消不冒充进行中）。
           // 这次失败的原因本回合就交给了模型（模型会向用户说明）——主动推送不重复发一条。
+          // 任务事实也要留下（2026-11-19 复核修复）：本分支抛错会绕过 exec 级的 taskIds 记账，
+          // 缺了它回合会被判「一无所有」（渠道回失败话术 = 假话 + 诱导重试），message_done
+          // 也看不到这笔任务；同回合一笔 taskId 只记一次。
+          if (!taskIds.includes(taskId)) taskIds.push(taskId);
           pushSuppressedTaskIds.push(taskId);
           throw new Error(settled.failureReason ?? `后台任务已落定（${settled.status}）。`);
         }
@@ -2864,7 +2870,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
               window: mainWindow,
               operation: TASK_RUN_TOOL,
               executeThrows: 'propagate',
-              execute: async () => ({ status: 'completed', data: await delegate(task, args.inputFiles, foregroundPermit, turnFiles, pushSuppressedTaskIds) }),
+              execute: async () => ({ status: 'completed', data: await delegate(task, args.inputFiles, foregroundPermit, turnFiles, taskIds, pushSuppressedTaskIds) }),
             });
             if (run.unresolved) {
               return {

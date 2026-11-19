@@ -485,6 +485,50 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     }
   };
   /**
+   * 快活任务（本回合已把结果交给模型）的降级兜底文本：底账业务名 + 结果原文。
+   * background 完成经 runner settle 写 replyText；inline 完成写 resultText——两处兼容读取
+   * （与交给模型的 summary 同源同式：settled.replyText ?? settled.resultText）。结果原文为空/
+   * 底账读不到 = undefined（不编事实、不投递）。
+   */
+  const taskCompletionFallbackOf = (taskId: string): string | undefined => {
+    try {
+      const record = (taskRegistry as unknown as {
+        get(id: string): { request: string; replyText?: string; resultText?: string };
+      }).get(taskId);
+      const resultText = record.replyText ?? record.resultText ?? '';
+      if (resultText.trim() === '') return undefined;
+      const name = taskNameOf(taskId, record.request);
+      return taskCompletionFallbackText({
+        ...(name === undefined ? {} : { name }),
+        resultText,
+      });
+    } catch {
+      return undefined;
+    }
+  };
+  /**
+   * 快活失败任务的失败事实（回合末兜底投递用；与失败回调同源）：终局 failed（含
+   * result_unknown；资源拒绝也是 failed 终局）→ 执行事实的 error.code（failureCodeOf）
+   * + result_unknown 状态，两个输入与失败回调逐字同源；非失败终局（取消/超时/未执行——
+   * 窗口内不可达，仅注入式执行器能造）与底账读不到 = undefined（不替它们说话，交回
+   * 既有终态推送面）。
+   */
+  const taskFailureFactOf = (taskId: string): { code?: string; status?: 'result_unknown' } | undefined => {
+    try {
+      const record = (taskRegistry as unknown as {
+        get(id: string): { status?: string; reason?: string | null };
+      }).get(taskId);
+      if (record.status !== 'failed') return undefined;
+      const code = failureCodeOf(taskId);
+      return {
+        ...(code === undefined ? {} : { code }),
+        ...(record.reason === 'result_unknown' ? { status: 'result_unknown' as const } : {}),
+      };
+    } catch {
+      return undefined;
+    }
+  };
+  /**
    * 失败投递的分类输入（2026-11-19）：任务底账执行事实里第一条 failed/refused 行的
    * error.code（执行层原始码，只用于 classifyFailure 归类；**不进用户文本**）。
    * 取不到（无执行行/异常）= undefined，由投递面落 executor_failed。
@@ -1360,6 +1404,52 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           reply = reply === FILES_GENERATED_NOTICE || reply.trim() === ''
             ? outcome.note
             : `${reply}\n${outcome.note}`;
+        }
+      }
+      // 豁免不能是静默（2026-11-19 复核缺陷的出口）：交办的任务在短等待窗口内完成（快活，
+      // 结果已交给模型转述）而模型**全程没说话**（正文空、无文件）——完成回调按 relayed
+      // 抑制播报的前提（模型已经说了）不成立，用户会什么都收不到。不得判回合失败（任务
+      // 已由执行端确认完成：「请稍后再试」是假话，对写操作还会诱导重做一次写），也不得
+      // 沉默——按既有降级兜底**如实报完成事实**（taskCompletionFallbackText：「<业务名>」
+      // 办好了：<结果>；全方案唯一允许的宿主用户文案），走 deliverTaskResult 同一投递面
+      // 与四必守记账。完成回调的 relayed 抑制照旧（本分支已把事实送达，不重复播报）；
+      // 宿主的话只走主动投递面，渠道终帧（模型的话路）不被替换。
+      if (reply.trim() === '' && files.length === 0) {
+        for (const relayedTaskId of turn.relayedTaskIds ?? []) {
+          const fallbackText = taskCompletionFallbackOf(relayedTaskId);
+          // 底账没有结果原文（生产装配不可达：relayed 的完成行必有非空汇报/归档；空汇报落
+          // failed 不归档）→ 不编事实、不投递；完成回调照旧按 relayed 记账。
+          if (fallbackText === undefined) continue;
+          await deliverTaskResult({
+            taskId: relayedTaskId,
+            principalId,
+            sessionId,
+            resultText: fallbackText,
+          }, {
+            ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
+            log,
+          });
+        }
+        // 快活**失败**同理（2026-11-19 复核相邻形状）：失败原因本回合已交给模型，推送抑制
+        // 的前提（模型会转述）在模型沉默时不成立——逐条按既有失败话术如实送达
+        // （deliverTaskFailure；事实从底账取，与失败回调同源，不新写一个字）。失败回调
+        // 照旧核销抑制（本分支已送达，不重复发）；非失败终局不替它说话：核销本回合抑制，
+        // 交回既有终态推送面（各自既有话术）。
+        for (const suppressedTaskId of new Set(turn.pushSuppressedTaskIds ?? [])) {
+          const failureFact = taskFailureFactOf(suppressedTaskId);
+          if (failureFact === undefined) {
+            claimPushSuppressedInTurn(sessionKey, suppressedTaskId);
+            continue;
+          }
+          await deliverTaskFailure({
+            taskId: suppressedTaskId,
+            principalId,
+            sessionId,
+            ...failureFact,
+          }, {
+            ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
+            log,
+          });
         }
       }
       // 本回合**一无所有**才判回合失败：正文为空 **且** 无文件 **且** 没有交办任何任务
