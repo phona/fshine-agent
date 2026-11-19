@@ -51,7 +51,7 @@
 
 对话面 `resolveTaskId` 只在**本会话 scope** 内解析，跨会话 = 找不到（`packages/agent/src/execution-runtime.ts:1429`）。对账测试钉住同源：`scripts/ops.test.ts:305`、`scripts/tasks.test.ts:211`。
 
-**群 = 独立主体**（owner 2026-11-18）：1:1 `principalId=channel:userid`；群聊 `principalId=channel:group:<conversationId>`——同群所有人共用一个主体，记忆/文件/任务归「这个群」，个人数据不进群（群主体按配置授权）；`sessionId=channel:conversationId`（`apps/server/server.ts:779-785`），两侧一致，于是同群所有人落在**同一** `(principalId, sessionId)` = 同一份 Pi 会话（群文件讨论天然成立），不同群互不串。发言人不是主体：只以 `speakerId`（`wecomUserId`）进日志事件作审计，任务行不加列。任务结果按 `sessionId` 还原路由回原会话（`apps/server/task-completion-delivery.ts:44-48`），群任务因此回群；「主动消息只在 1:1 发」的判据是另一条事实（`chatType`），与主体派生互不影响。
+**群 = 独立主体**（owner 2026-11-18）：1:1 `principalId=channel:userid`；群聊 `principalId=channel:group:<conversationId>`——同群所有人共用一个主体，记忆/文件/任务归「这个群」，个人数据不进群（群主体按配置授权）；`sessionId=channel:conversationId`（`apps/server/server.ts:779-785`），两侧一致，于是同群所有人落在**同一** `(principalId, sessionId)` = 同一份 Pi 会话（群文件讨论天然成立），不同群互不串。发言人不是主体：只以 `speakerId`（`wecomUserId`）进日志事件作审计，任务行不加列。任务结果按 `sessionId` 还原路由回原会话（`apps/server/task-completion-delivery.ts:44-48`），群任务因此回群。**久无动静提醒**（2026-11-19 owner 补 #9/#10）不看 `chatType`、也不看进程内集合：判据只看底账任务事实（任务属于谁、活在哪个会话），1:1 与群聊都发；群主体的话术不带业务名（隐私口径，宿主拼事实时去名），与主体派生互补。
 ## 7. 不承诺什么 / 相邻出口
 
 - **不是 Exactly Once**：只承诺「同一 `dispatchKey` 至多一次自动执行 + 结果未知可核对」（`packages/contracts/src/execution-contract.ts:80`）；业务效果是否只写一次归执行层幂等键/状态查询。

@@ -72,7 +72,7 @@
 | accepted 后续跑 / abort 取消 / 停不下来如实回 running | `packages/agent/long-task-async.test.ts:① accepted → 回合结束、槽位释放`<br>`packages/agent/long-task-async.test.ts:③ abort → 任务 cancelled` | 宿主机制 | 已覆盖 | — |
 | 长任务跨重启：新 runner 从底账 accepted 行重新 wait 续跑、不重复发起 | `packages/agent/long-task-async.test.ts:④ 重启：关库重开，新 runner 从底账 accepted 行重新 wait` | 宿主机制 | 已覆盖 | — |
 | 未声明 long_running 却返回 accepted → fail-closed | `packages/agent/long-task-async.test.ts:⑤ 未声明 long_running 的 operation 返回 accepted` | 宿主机制 | 已覆盖 | — |
-| 预期式提醒：超阈值恰一条、长任务也要提醒、群聊零主动提醒 | `scripts/eval/wecom-sim/cases-h-newcap.test.ts:W-43 预期式提醒`<br>`apps/server/server-long-running-notice.test.ts:① 1:1 会话：任务超阈值无事件`<br>`apps/server/server-long-running-notice.test.ts:② 群聊：同条件一条都不发` | 宿主机制 + 执行层 | 已覆盖 | — |
+| 预期式提醒：超阈值恰一条、长任务也要提醒、群聊覆盖（#9） | `scripts/eval/wecom-sim/cases-h-newcap.test.ts:W-43 预期式提醒`<br>`apps/server/server-long-running-notice.test.ts:① 1:1 会话：任务超阈值无事件`<br>`apps/server/server-long-running-notice.test.ts:② 群聊也发` | 宿主机制 + 执行层 | 已覆盖 | — |
 
 ## 五、写确认（提案 / 确认 / 重复 / 权限）
 
@@ -86,7 +86,7 @@
 | 后台任务写确认：待确认提案阻塞新交办、接续轮透传、句柄不进模型/用户面 | `packages/agent/background-write-confirmation.test.ts:⑧ 已有待确认提案时再 task_run 被拒绝`<br>`packages/agent/background-write-confirmation.test.ts:⑤ S2 待确认推送`<br>`packages/agent/oversize-data-fileize.test.ts:⑤ needs_confirmation 不受影响` | 宿主机制 | 已覆盖 | — |
 | 批量写入：items 逐条、一条坏整批拒、partial 不谎报成功 | `packages/agent/batch-write-items.test.ts:① 全成功：items 逐条 ok`<br>`packages/agent/batch-write-items.test.ts:② 注入一条写失败`<br>`packages/agent/dummy-client.test.ts:第 137 条不合法` | 执行层 | 已覆盖 | — |
 
-## 六、提醒（10 分钟 · 群聊不发）
+## 六、提醒（10 分钟 · 群聊覆盖）
 
 | 场景 | 自动用例 | 层级 | 覆盖度 | 缺口说明 |
 | --- | --- | --- | --- | --- |
@@ -94,7 +94,8 @@
 | 提醒降级：模型说不出话 → 宿主兜底句（停下来 / 继续等）、任务保持 running | `apps/server/server-state-wake.test.ts:③b 走岔路`<br>`apps/server/server-long-running-notice.test.ts:① 1:1 会话：任务超阈值无事件` | 宿主机制 | 已覆盖 | — |
 | 重启不重发：已发落库，重开扫描零次发送 | `packages/agent/long-running-notice.test.ts:② 重启不重发` | 宿主机制 | 已覆盖 | — |
 | 提醒投递失败要能重来：同一档内重试一次（首投失败 + 重试成功 = 用户收得到）；成功即止、一直失败止于两次（不无限重试、不重复打扰） | `packages/agent/long-running-notice.test.ts:⑥ 先领取后投递失败`<br>`packages/agent/long-running-notice.test.ts:⑦ 不该重试的仍然不重试` | 宿主机制 | 已覆盖 | — |
-| 群聊不发提醒（长任务 / 附件追问同规则）：跨 principal 泄漏面归零 | `packages/agent/long-running-notice.test.ts:③ 群聊不发`<br>`apps/server/server-attachment-nudge.test.ts:④ 群聊 → 不发追问` | 宿主机制 | 已覆盖 | — |
+| 群聊**也发**久无动静提醒（owner 2026-11-19 #9：群 = 独立主体，群里的任务就是这个群的事）；群主体话术**不带业务名**（隐私口径），1:1 照常带 | `packages/agent/long-running-notice.test.ts:③ 群聊也发`<br>`apps/server/server-long-running-notice.test.ts:② 群聊也发`<br>`apps/server/server-long-running-notice.test.ts:群主体：照样发`<br>`scripts/eval/wecom-sim/cases-h-newcap.test.ts:W-43 预期式提醒`<br>`scripts/eval/wecom-sim/cases-i-interaction.test.ts:I-6 群聊` | 宿主机制 | 已覆盖 | 旧口径「群聊零主动提醒」已作废（sim 的 W-43 群对照 / I-6 / J-2 按新口径迁移，非删除）；**附件追问**仍只在单聊（`apps/server/server-attachment-nudge.test.ts:④ 群聊 → 不发追问`，本轮未改） |
+| 提醒判据只看底账任务事实（任务属于谁、活在哪个会话）：**重启后**（进程内无任何 inbound、无会话集合）照样发 | `apps/server/server-long-running-notice.test.ts:②b 重启后判据` | 宿主机制 | 已覆盖 | 进程内 `directSessions` 集合整体删除（#10） |
 
 ## 七、失败与话术
 

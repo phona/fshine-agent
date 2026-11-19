@@ -38,17 +38,20 @@
  *   · 任务 running、从认领时刻（无租约的长任务用 running_since）起超过 `longRunningNoticeMs`
  *     （缺省 10 分钟）→ 交给提醒端口处置（**只此一档**，每任务一次）。
  * 「已发」时刻持久化在任务行（owner 列），原子领取保证并发/重启下至多一次。
- * 只在 1:1 会话发（chatType 事实源由装配方经 `isDirectSession` 注入；拿不到时按「私聊会话」
- * 这一条机械事实处理——不猜群聊）。发送失败只记事件、不改任务事实；**同一档内允许一次重试**
- * （总尝试 ≤2，2026-11-19：先领取后投递的失败不再等于「这档永久不发」，见 deliverNotice）。
+ * **1:1 与群聊都发**（owner 2026-11-19 补 #9：群 = 独立主体，群里的任务就是这个群的事；
+ * 判据只看底账任务事实，不用「群聊一律不发」的一刀切，也不碰进程内集合——重启后照样发）。
+ * 发送失败只记事件、不改任务事实；**同一档内允许一次重试**（总尝试 ≤2，2026-11-19：先领取
+ * 后投递的失败不再等于「这档永久不发」，见 deliverNotice——重试是投递如实修复 a70c5eeb
+ * 引入的，wake 分支分叉点没见过它，不取入侧「不重试」的旧底稿）。
  * 未注入阈值或通知端口时完全不扫、零行为变化。
  *
  * 「卡住」那一档（>30 分钟「我卡住了，建议先停掉」，2026-11-18 起的第二档）**已删**（owner
  * 2026-11-19）：它断言了我们不知道的事（「我卡住了」），还替用户下结论（「建议先停掉」）；
  * 只留上面一档。
  *
- * 提醒分两层：本模块只出**事实**（业务名 + 已跑多久，见 {@link longRunningNoticeFactText}）
- * 与「模型回合挂掉时的兜底一句」（{@link LONG_RUNNING_NOTICE_FALLBACK_TEXT}）；用户看到的
+ * 提醒分两层：本模块只交**时机 + 事实原料**（业务名、已跑多久；事实文本与「模型回合挂掉时
+ * 的兜底一句」由端口按宿主的身份/隐私口径拼，见 {@link longRunningNoticeFactText} 与
+ * {@link LONG_RUNNING_NOTICE_FALLBACK_TEXT}）；用户看到的
  * 那句话由**模型**在唤醒回合里写（端口实现负责唤醒与投递，见 server 的
  * `createLongRunningNoticePort`）。事实不报进度（不写 operation 名、不写已执行次数、不写
  * 最近一步）——我们不知道进度，就不编。
@@ -413,7 +416,7 @@ export const LONG_RUNNING_NOTICE_FALLBACK_TEXT =
 export const LONG_RUNNING_NOTICE_ATTEMPTS = 2;
 
 /**
- * 主动提醒端口（装配方实现：唤醒原会话模型说话，模型挂掉则投兜底文案；见 server 的
+ * 主动提醒端口（装配方实现：唤醒任务所属会话的模型说话，模型挂掉则投兜底文案；见 server 的
  * `createLongRunningNoticePort`）。实现方自己负责路由解析、唤醒与投递纪律；异常不应抛出
  * （抛出与返回 false 同处理：按失败记账，同一档内由 runner 再试一次）。
  *
@@ -422,18 +425,19 @@ export const LONG_RUNNING_NOTICE_ATTEMPTS = 2;
  * 档的文案由**装配方注入**（`contactLostNoticeText`）——它是既有失败话术种类
  * `unknown_result` 的同一句话，runner 不自己写文案（保持零仓内 import），注入文案同时用作
  * 事实与兜底。
+ *
+ * 判据（2026-11-19 owner 补：#9 群聊覆盖 / #10 重启后判据）：**只看任务事实**——发不发由
+ * 「这个任务属于谁、活在哪个会话」决定（端口收到的 taskId/principalId/sessionId 全来自
+ * 底账任务行），不再有「群聊一律不发」的一刀切，也不依赖任何进程内集合（重启后照样发）。
+ * 群主体的隐私口径（事实与话术不带业务名）归端口实现（宿主身份约定，见 server 的
+ * `isGroupPrincipal`）。
  */
 export interface LongRunningNoticePort {
   /**
-   * 1:1 会话判据（chatType 事实源；缺省 = 按「私聊会话」这一条机械事实处理）。
-   * false = 群聊，不发（也不落「已发」）。
-   */
-  isDirectSession?(sessionId: string): boolean;
-  /**
-   * 处置一条提醒：把 `factText` 唤醒给原会话模型、投递它说的话；模型说不出话时投
+   * 处置一条提醒：把 `factText` 唤醒给任务所属会话的模型、投递它说的话；模型说不出话时投
    * `fallbackText`（如实、不诱导重试）。`name`/`minutes`/`stage` 只作事实与记账
-   * （含结构化事件）。返回「用户可见的那句话已交出」（模型说了 / 兜底送达）——
-   * false/抛出 = 本次没送到，同一档内由 runner 再试一次（至多两次）。
+   * （含结构化事件；**群主体不带业务名**由端口裁量）。返回「用户可见的那句话已交出」
+   * （模型说了 / 兜底送达）——false/抛出 = 本次没送到，同一档内由 runner 再试一次（至多两次）。
    */
   sendNotice(input: {
     taskId: string;
@@ -547,8 +551,8 @@ export interface TaskRunnerOptions {
    */
   longRunningNoticeMs?: number;
   /**
-   * 提醒投递端口：缺省 = 不启用（无法投递就不打扰）。提供 `isDirectSession` 时群聊不发；
-   * 未提供时按「私聊会话」这一条机械事实处理（拿不到 chatType 事实源时的唯一安全默认）。
+   * 提醒投递端口：缺省 = 不启用（无法投递就不打扰）。端口负责事实拼装（群主体去业务名）、
+   * 唤醒任务所属会话与投递；runner 只判时机与「已发」（底账任务事实，不碰进程内集合）。
    */
   longRunningNotice?: LongRunningNoticePort;
   /**
@@ -952,6 +956,8 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       minutes,
     };
     const send = (async (): Promise<void> => {
+      // 同一档内有界重试（首投 + 1 = ≤2）：领取先于投递，投递失败不再等于「这档永久不发」。
+      // 群主体的隐私口径（事实/话术不带业务名）在端口实现里裁量——runner 只交事实原料。
       for (let attempt = 1; attempt <= LONG_RUNNING_NOTICE_ATTEMPTS; attempt += 1) {
         let delivered = false;
         try {
@@ -1013,7 +1019,10 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
 
   /**
    * 单趟扫描 running 行（共用同一刷新周期）：返回本次发出的任务与下一个到期点。
-   * 群聊不发（也不落「已发」）；每任务只发一次（原子领取持久化，重启不重发）。
+   * **1:1 与群聊都发**（2026-11-19 owner 补 #9：群 = 独立主体，群里的任务本来就是这个群
+   * 的事）；判据只看底账任务事实（任务属于谁、活在哪个会话），不引入任何进程内集合或
+   * 「群聊一律不发」的一刀切（#10：重启后照样发）。话术层面的隐私口径（群主体不带业务名）
+   * 归端口。每任务只发一次（原子领取持久化，重启不重发）。
    */
   function scanLongRunning(nowMs: number): LongRunningScan {
     const noticed: string[] = [];
@@ -1028,11 +1037,12 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         if (nextDue === undefined || due < nextDue) nextDue = due;
         continue;
       }
-      // 只在 1:1 会话发：chatType 事实源由装配方注入；拿不到时按「私聊会话」机械事实处理。
-      if (!(longRunningNotice!.isDirectSession?.(task.sessionId) ?? true)) continue;
+      // 群聊覆盖（owner 2026-11-19 #9）：判据只看底账任务事实，不设「群聊一律不发」，
+      // 也不依赖进程内会话集合（#10：重启后照样发）；群主体隐私口径归端口。
       if (!claimNotice(task, 'overdue', nowMs)) continue;
       noticed.push(task.taskId);
-      const minutes = Math.floor(elapsed / 60_000);
+      // 分钟数下限 1：阈值可被部署配到亚分钟（「已经跑了 0 分钟」是废话）。
+      const minutes = Math.max(1, Math.floor(elapsed / 60_000));
       // 事实（给模型读）与兜底一句（模型回合挂掉）都由本模块拼，端口只负责唤醒与投递。
       deliverNotice(
         task,

@@ -184,13 +184,12 @@ class ScriptedWorker implements TurnDriver {
   }
 }
 
-/** 记录每次提醒投递的假端口（1:1 私聊）。 */
+/** 记录每次提醒投递的假端口（判据只看底账任务事实，无 chatType 门——owner #9）。 */
 function recordingNotice(): { port: LongRunningNoticePort; sends: Array<{ stage: string; factText: string; minutes: number }> } {
   const sends: Array<{ stage: string; factText: string; minutes: number }> = [];
   return {
     sends,
     port: {
-      isDirectSession: () => true,
       async sendNotice(input): Promise<boolean> {
         sends.push({ stage: input.stage, factText: input.factText, minutes: input.minutes });
         return true;

@@ -116,7 +116,6 @@ describe('投递终局的上帝视角：既有 delivery_failed 规则看得见�
         updatedAt: startedAt,
       });
       const failingPort: LongRunningNoticePort = {
-        isDirectSession: () => true,
         // 渠道故障：两次尝试都送不出去（runner 同一档内重试一次，见 deliverNotice）。
         async sendNotice() { return false; },
       };
