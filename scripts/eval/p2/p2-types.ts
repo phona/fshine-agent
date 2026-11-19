@@ -1,7 +1,7 @@
 /**
  * P2 业务端到端验收 · 数据面类型（eval 胶水层；零产品码改动）。
  *
- * 口径来源：`docs/eval/business-e2e-batch2-prereg.md`（冻结预注册）。本文件只声明形状，
+ * 口径来源：`docs/history/business-e2e-batch2-prereg.md`（冻结预注册）。本文件只声明形状，
  * **不判定**（判定归 `./p2-oracle`）、**不装配**（装配归 `./p2-harness`）。
  *
  * 目标与真值分离（预注册 §一 要求 ①）：

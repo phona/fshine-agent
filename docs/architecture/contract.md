@@ -58,4 +58,4 @@
 | 结构性守卫：契约零 import / 旧治理不复活 / 命名不回流 | `packages/agent/import-boundary.test.ts:185-191`；`packages/agent/transition-naming.test.ts:40` |
 | 单一配置源 / 单一装配点 / 非沙箱风险如实登记 | `packages/agent/resource-policy-single-source.test.ts:161-204`；`scripts/p0-assembly-single-point.test.ts:170-201`；`packages/agent/src/run-js-executor.ts:36-38` |
 
-A 类（模型能力补丁）不变量一律看消融/模型 Eval，不因「有代码、有守卫」固化（`AGENTS.md:43-45`）；历史判据档案 `docs/architecture-laws.md:11` 已注明多数守卫引用随 M4 退役。
+A 类（模型能力补丁）不变量一律看消融/模型 Eval，不因「有代码、有守卫」固化（`AGENTS.md:43-45`）；历史判据档案 `docs/history/architecture-laws-2026-11_undated.md:13` 已注明多数守卫引用随 M4 退役。

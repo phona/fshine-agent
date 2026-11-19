@@ -8,13 +8,13 @@
  * 判据：
  *  ① README 的语义边界句保持逐字（换行归一后比对）；
  *  ② decision-log §二十（P3 历史记录）加注「名称说明」，且历史标题保留不改（加注不改正文）；
- *  ③ P3 报告首部（`## 一` 之前）加注「名称说明」，历史标题行逐字保留；
- *  ④ 三个文件里非标题/非引注行不得出现把 redo 说成接管/续跑的无否定表述；
- *  ⑤ CLI 帮助（scripts/tasks.ts 的 USAGE）只说「重新交办」。
+ *  ③ 两个文件里非标题/非引注行不得出现把 redo 说成接管/续跑的无否定表述；
+ *  ④ CLI 帮助（scripts/tasks.ts 的 USAGE）只说「重新交办」。
  *
- * 范围说明：只扫产品面与历史注记的这三个文件 + CLI 帮助；其余历史文档（rule-landing
+ * 范围说明：只扫产品面与历史注记的这两个文件 + CLI 帮助；其余历史文档（rule-landing
  * 等，2026-11-18 已删、git 历史可考）承载其他机制的「续跑」语义，S3 不要求改写（R4 边界：不改历史证据）。
- * 现状（实现前）：②③ 缺「名称说明」注记 → 红；实现（P0 docs 提交）后全绿。
+ * 退役（2026-11-19 docs 瘦身）：原「P3 报告首部加注」断言的扫描目标 `docs/product/human-redo.md` 已删，此条退役；
+ * README（①）与 decision-log §二十（②）两条断言作后继守卫保留。
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -24,7 +24,6 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const README_PATH = path.join(REPO_ROOT, 'README.md');
 // decision-log 2026-11-18 已拆档进 docs/history/；§二十 落在第 2 块（原文件行号已不可考）。
 const DECISION_LOG_PATH = path.join(REPO_ROOT, 'docs', 'history', 'decision-log-part02-2026-11.md');
-const P3_REPORT_PATH = path.join(REPO_ROOT, 'docs', 'product', 'human-redo.md');
 
 /** 去空白（含换行）归一：把跨行句子变成可精确比对的连续串。 */
 function flat(text: string): string {
@@ -71,20 +70,6 @@ describe('P0-T05 S3 redo 口径文档扫描', () => {
 
     const mis = unnegatedMisdescriptions('docs/history/decision-log-part02-2026-11.md', text);
     expect(mis, `decision-log 出现未否定的 redo=接管/续跑表述：\n${mis.join('\n')}`).toEqual([]);
-  });
-
-  it('P3 报告：首部加注「名称说明」；历史标题与正文不改', () => {
-    const text = readFileSync(P3_REPORT_PATH, 'utf8');
-    // 历史证据不改：标题行逐字保持（注记只能追加，不得改写）。
-    expect(text.split('\n')[0]).toBe('# P3 切片报告：人工接管 v1（`npm run tasks -- <id> --redo`）');
-    const headEnd = text.indexOf('## 一');
-    expect(headEnd).toBeGreaterThan(0);
-    const head = text.slice(0, headEnd);
-    expect(head, 'P3 报告首部缺「名称说明」加注').toContain('名称说明');
-    expect(flat(head), `P3 报告首部注记需含「${CANONICAL_BOUNDARY}」`).toContain(CANONICAL_BOUNDARY);
-
-    const mis = unnegatedMisdescriptions('docs/product/human-redo.md', text);
-    expect(mis, `P3 报告出现未否定的 redo=接管/续跑表述：\n${mis.join('\n')}`).toEqual([]);
   });
 
   it('CLI 帮助一致：tasks USAGE 只说重新交办，不提接管/续跑', () => {
