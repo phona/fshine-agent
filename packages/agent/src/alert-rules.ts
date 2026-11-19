@@ -70,6 +70,32 @@ export const HOST_FAULT_EVENTS: readonly string[] = [
 ];
 
 /**
+ * 失败类结局集合：只有这些结局参与 retry_storm 的 `(operation, 错误码)` 重复计数。
+ *
+ * 为什么需要它：同一任务里对同一 operation 的多条**成功/待确认/受理**执行（例如按
+ * W1/W2/无窗口各查一次 `dummy.query`，或对一个对象反复出提案 `needs_confirmation`）
+ * 是合法业务形态，不是重试风暴。把它们当成「错误重复」是假阳性——2026-11-19 真部署
+ * `--dry-run` 实测到两例：`dummy.query`（3× completed）、`dummy.prepare`（3× needs_confirmation）
+ * 都被 "(无错误码) 重复 3 次" 误报。
+ *
+ * 判据只认失败类结局：`failed`（含 `result_unknown` 这类失败码）/ `refused` / `unknown`
+ * （执行层无法确认，也不当成功）/ `timed_out`。`completed` / `needs_confirmation` /
+ * `accepted` / `needs_input` 一律不参与；**无错误码时也必须有失败状态才算一条**。
+ */
+export const FAILURE_EXECUTION_STATUSES: readonly string[] = [
+  'failed',
+  'refused',
+  'unknown',
+  'timed_out',
+];
+
+/** 执行事实是否失败类结局（无状态 = 未知，不参与计数：宁可漏报也不误报）。 */
+export function isFailureExecution(fact: AlertFact): boolean {
+  const status = fact.detail?.status;
+  return status !== undefined && FAILURE_EXECUTION_STATUSES.includes(status);
+}
+
+/**
  * 结构化事实的投影明细（日志行 / 底账行按需带字段；缺省字段 = 未知，不作猜测）。
  */
 export interface AlertFactDetail {
@@ -77,6 +103,8 @@ export interface AlertFactDetail {
   operation?: string;
   /** 执行事实：错误码。 */
   errorCode?: string;
+  /** 执行事实：结局状态（'failed' / 'refused' / 'completed' / 'needs_confirmation' / …）。 */
+  status?: string;
   /** 执行事实：失败分类（如 'host_fault'）。 */
   failureKind?: string;
   /** 投递事实：投递状态（'sent' / 'delivery_failed' / …）。 */
@@ -275,9 +303,12 @@ function retryStormCandidates(facts: readonly AlertFact[]): Candidate[] {
   }
 
   // (b) 同一 (operation, 错误码) 在同一任务 ≥ RETRY_STORM_OP_ERROR。
+  //     只计失败类结局：成功/待确认/受理等合法重复（如按窗口各查一次、反复出提案）不算
+  //     重试风暴；无错误码时也必须有失败状态才算一条（isFailureExecution）。
   const byOpError = new Map<string, { taskId: string; entry: AlertFact[] }>();
   for (const fact of executions) {
     if (fact.taskId === undefined || fact.taskId === '') continue;
+    if (!isFailureExecution(fact)) continue; // 非失败类结局不参与
     const operation = fact.detail?.operation;
     if (operation === undefined || operation === '') continue;
     const code = fact.detail?.errorCode ?? '(无错误码)';

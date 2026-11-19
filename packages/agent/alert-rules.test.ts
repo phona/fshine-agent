@@ -2,11 +2,13 @@
  * 运营告警规则单测（纯函数）。
  *
  * 覆盖：四条规则各一条命中 + 一条不命中（含「刚好到阈值不告、超一秒才告」的边界）；冷却去重；
- * **证据含原文**（告警项 raw 字段含被命中的内部原文——钉住「能回溯原始文本」这条不变量）。
+ * **证据含原文**（告警项 raw 字段含被命中的内部原文——钉住「能回溯原始文本」这条不变量）；
+ * retry_storm 的 `(operation, 错误码)` 计数**只认失败类结局**（2026-11-19 真部署假阳性修复）。
  *
  * 反向绊线（已实测会红，随后还原；见 decision 记录/交付报告）：
  *   ① 把 hostFaultCandidates 的 raw 截断或丢弃 → 「证据含原文」用例红；
- *   ② 去掉 evaluateAlerts 里的冷却判断 → 「冷却内去重」用例红。
+ *   ② 去掉 evaluateAlerts 里的冷却判断 → 「冷却内去重」用例红；
+ *   ③ 去掉 retryStormCandidates 的 `isFailureExecution` 状态过滤 → 「同任务 3 次 completed query 不告警」用例红。
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -90,15 +92,49 @@ describe('retry_storm', () => {
     expect(result.alerts.some((a) => a.rule === 'retry_storm' && a.subject === 'task:t9')).toBe(true);
   });
 
-  it('命中：同一 (operation, 错误码) 在同一任务重复达到阈值', () => {
+  it('命中：同一 (operation, 错误码) 在同一任务重复达到阈值（失败类结局）', () => {
     const facts: AlertFact[] = Array.from({ length: RETRY_STORM_OP_ERROR }, (_, i) => fact({
       event: 'execution',
       taskId: 't10',
       raw: `{"event":"execution","taskId":"t10","seq":${i}}`,
-      detail: { operation: 'commit', errorCode: 'CONFIRMATION_NOT_FOUND' },
+      detail: { operation: 'commit', errorCode: 'CONFIRMATION_NOT_FOUND', status: 'refused' },
     }));
     const result = evaluateAlerts(facts, { now: NOW });
     expect(result.alerts.some((a) => a.rule === 'retry_storm' && a.subject === 'task:t10')).toBe(true);
+  });
+
+  // 2026-11-19 真部署假阳性修复：同任务同 operation 的**合法重复**（成功/待确认/受理）不算错误重复。
+  it('不命中：同任务 3 次 completed 的 query（同一 operation、无错误码）→ 不告警', () => {
+    const facts: AlertFact[] = Array.from({ length: RETRY_STORM_OP_ERROR }, (_, i) => fact({
+      event: 'execution',
+      taskId: 't12',
+      raw: `{"event":"execution","taskId":"t12","operation":"dummy.query","status":"completed","seq":${i}}`,
+      detail: { operation: 'dummy.query', status: 'completed' },
+    }));
+    const result = evaluateAlerts(facts, { now: NOW });
+    expect(result.alerts.filter((a) => a.rule === 'retry_storm')).toEqual([]);
+  });
+
+  it('不命中：同任务 3 次 needs_confirmation 的 prepare（合法提案重复）→ 不告警', () => {
+    const facts: AlertFact[] = Array.from({ length: RETRY_STORM_OP_ERROR }, (_, i) => fact({
+      event: 'execution',
+      taskId: 't13',
+      raw: `{"event":"execution","taskId":"t13","operation":"dummy.prepare","status":"needs_confirmation","seq":${i}}`,
+      detail: { operation: 'dummy.prepare', status: 'needs_confirmation' },
+    }));
+    const result = evaluateAlerts(facts, { now: NOW });
+    expect(result.alerts.filter((a) => a.rule === 'retry_storm')).toEqual([]);
+  });
+
+  it('命中：同任务 3 次 failed 且同码 → 告警', () => {
+    const facts: AlertFact[] = Array.from({ length: RETRY_STORM_OP_ERROR }, (_, i) => fact({
+      event: 'execution',
+      taskId: 't14',
+      raw: `{"event":"execution","taskId":"t14","operation":"dummy.commit","status":"failed","error":{"code":"GATE_REFUSE"},"seq":${i}}`,
+      detail: { operation: 'dummy.commit', errorCode: 'GATE_REFUSE', status: 'failed' },
+    }));
+    const result = evaluateAlerts(facts, { now: NOW });
+    expect(result.alerts.some((a) => a.rule === 'retry_storm' && a.subject === 'task:t14')).toBe(true);
   });
 
   it('不命中：同一任务执行事实未达阈值', () => {
