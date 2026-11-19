@@ -127,7 +127,7 @@ describe('parseWriteLoopArgs', () => {
 describe('evaluateCriteria：正例全绿 + 逐条反向破坏必红', () => {
   it('全绿样例（含一次失败重试与 Worker 事后读回）：九条判据全 pass', () => {
     const results = evaluateCriteria(greenEvidence());
-    expect(results.map((result) => result.id)).toEqual(['C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9']);
+    expect(results.map((result) => result.id)).toEqual(['C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9', 'C10']);
     expect(results.filter((result) => result.status === 'fail')).toEqual([]);
   });
 
@@ -232,29 +232,57 @@ describe('evaluateCriteria：正例全绿 + 逐条反向破坏必红', () => {
   });
 });
 
-describe('evaluateObservations：只记录不判红', () => {
-  it('O1：摘要全文命中 → 记录命中；摘要缺失 → 记录无法比对', () => {
-    const hit = evaluateObservations(greenEvidence(), PROPOSAL_SUMMARY).find((entry) => entry.id === 'O1');
-    expect(hit?.detail).toContain('摘要全文命中=true');
-    const missing = evaluateObservations(greenEvidence(), undefined).find((entry) => entry.id === 'O1');
-    expect(missing?.detail).toContain('无法比对');
+describe('C10：提案摘要关键字段进用户可见面（原 O1 观察升级为判据）', () => {
+  it('全绿证据：摘要关键字段（集合名/窗口码/条数）都在用户可见文本里 → pass', () => {
+    const result = evaluateCriteria(greenEvidence()).find((entry) => entry.id === 'C10');
+    expect(result?.status).toBe('pass');
+    expect(result?.detail).toContain('「empty-one」');
+    expect(result?.detail).toContain('W1 窗口');
+    expect(result?.detail).toContain('共 4 条');
   });
 
-  it('O2：woken 且投递文本 == 唤醒正文 → 判为模型的话；wake 非 woken → 记录宿主兜底', () => {
+  it('关键字段缺失（用户可见文本被换成空话）→ fail', () => {
+    const evidence = greenEvidence();
+    evidence.pushes = [{ at: 't', source: 'push_text', text: '收到，我处理好了。' }];
+    evidence.turns = evidence.turns.map((turn) => ({ ...turn, reply: '好的。' }));
+    const result = evaluateCriteria(evidence).find((entry) => entry.id === 'C10');
+    expect(result?.status).toBe('fail');
+    expect(result?.detail).toContain('缺失=');
+  });
+
+  it('无摘要 → inconclusive（pass，不判红，detail 说明）', () => {
+    const evidence = greenEvidence();
+    evidence.ledger.proposal = undefined;
+    const result = evaluateCriteria(evidence).find((entry) => entry.id === 'C10');
+    expect(result?.status).toBe('pass');
+    expect(result?.detail).toContain('inconclusive');
+  });
+
+  it('反向绊线：把判据改成恒真（忽略关键字段）→ 关键字段缺失仍 pass', () => {
+    // 这里用「恒真等价」证据注入模拟：把摘要关键字段清空即等价于判据恒真（无字段可查）。
+    const evidence = greenEvidence();
+    evidence.ledger.proposal = { summary: '无关键字段的摘要', handlePrefix: 'cf_x', operation: 'dummy.prepare' };
+    // 无关键字段 → summaryKeyFields 返回 [] → 判据走「无摘要」分支 pass（恒真行为）。
+    expect(evaluateCriteria(evidence).find((entry) => entry.id === 'C10')?.status).toBe('pass');
+  });
+});
+
+describe('evaluateObservations：只记录不判红', () => {
+  it('O1：woken 且投递文本 == 唤醒正文 → 判为模型的话；wake 非 woken → 记录宿主兜底', () => {
     const modelSpoke = greenEvidence();
     modelSpoke.pushes = [{ at: 't', source: 'push_text', text: modelSpoke.wake!.text! }];
-    expect(evaluateObservations(modelSpoke, PROPOSAL_SUMMARY).find((entry) => entry.id === 'O2')?.detail).toContain('模型的话');
+    expect(evaluateObservations(modelSpoke).find((entry) => entry.id === 'O1')?.detail).toContain('模型的话');
     const fallback = greenEvidence();
     fallback.wake = { outcome: 'failed' };
     fallback.pushes = [{ at: 't', source: 'push_text', text: '「新增4条」办好了：4 条已新增。' }];
-    expect(evaluateObservations(fallback, PROPOSAL_SUMMARY).find((entry) => entry.id === 'O2')?.detail).toContain('宿主兜底');
+    expect(evaluateObservations(fallback).find((entry) => entry.id === 'O1')?.detail).toContain('宿主兜底');
   });
 
-  it('O3：固定短语表命中记录（不判红）', () => {
+  it('O2：固定短语表命中记录（不判红）', () => {
     const evidence = greenEvidence();
     evidence.turns[1]!.reply = '收到，正在处理';
-    expect(evaluateObservations(evidence, PROPOSAL_SUMMARY).find((entry) => entry.id === 'O3')?.detail).toContain('收到，正在处理');
-    expect(evaluateObservations(greenEvidence(), PROPOSAL_SUMMARY).find((entry) => entry.id === 'O3')?.detail).toContain('未命中');
+    expect(evaluateObservations(evidence).find((entry) => entry.id === 'O2')?.detail).toContain('收到，正在处理');
+    expect(evaluateObservations(greenEvidence()).find((entry) => entry.id === 'O2')?.detail).toContain('未命中');
   });
 });
 

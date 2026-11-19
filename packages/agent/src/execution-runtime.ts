@@ -99,8 +99,8 @@ import type { TaskExecutionOutcome, TaskExecutor, TaskRunner, ResumedOperation }
 /** Main 委派工具名（实例名可经部署声明替换的演进留在后续切片；当前用中性名）。 */
 export const TASK_RUN_TOOL = 'task_run';
 export const TASK_RUN_TOOL_DESCRIPTION =
-  '把一项平台任务交给执行层 Worker 执行：在 task 里写清要办什么（对象、范围、口径）。'
-  + '返回 Worker 的事实汇报与结构化的执行结果。涉及平台数据的请求一律经它办理。';
+  '把一项平台任务交办出去执行：在 task 里写清要办什么（对象、范围、口径）。'
+  + '返回办事的事实汇报与结构化的执行结果。涉及平台数据的请求一律经它办理。';
 /**
  * CAP-01 修复轮（R2-S2，接口事实声明）：注入交办复制面时 task_run 的工具描述——
  * 写清 inputFiles 参数的用法与不带的后果（交办复制零发生 → Worker 无文件 → 任务
@@ -112,7 +112,7 @@ export const TASK_RUN_TOOL_DESCRIPTION_WITH_INPUT_FILES =
   + '要处理的本会话文件，把文件清单里的 fileId 放进 inputFiles；不带 inputFiles 则 Worker 拿不到任何文件。';
 const TASK_RUN_TASK_PROPERTY = {
   type: 'string',
-  description: '要交给执行层 Worker 的任务：写清对象、范围与要回答的问题；用自然语言，不要写命令。',
+  description: '要交办出去的任务：写清对象、范围与要回答的问题；用自然语言，不要写命令。',
 };
 export const TASK_RUN_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -135,7 +135,7 @@ export const TASK_RUN_TOOL_SCHEMA_WITH_INPUT_FILES: Record<string, unknown> = {
     inputFiles: {
       type: 'array',
       items: { type: 'string' },
-      description: '随任务交给执行层处理的输入文件 fileId 列表（来自文件清单；宿主复制为任务私有副本，原件不动）。',
+      description: '随任务交给助手处理的输入文件 fileId 列表（来自文件清单；宿主复制为任务私有副本，原件不动）。',
     },
   },
   required: ['task'],
@@ -179,7 +179,7 @@ export const TASK_RESULT_TOOL_SCHEMA: Record<string, unknown> = {
 
 export const TASK_CANCEL_TOOL = 'task_cancel';
 export const TASK_CANCEL_TOOL_DESCRIPTION =
-  '请求取消本会话某个任务。返回机械结果：requested=已发出取消请求、待执行端确认；cancelled=已确认取消。'
+  '请求取消本会话某个任务。返回机械结果：requested=已发出取消请求、尚未确认停掉；cancelled=已确认取消。'
   + '确认前不得向用户宣称已取消，如实按返回结果转述。';
 export const TASK_CANCEL_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -386,7 +386,7 @@ export const OPERATION_NOT_PERMITTED_MESSAGE = '当前权限不支持这个操�
 export const EXECUTE_OPERATION_TOOL = 'execute_operation';
 export const EXECUTE_OPERATION_TOOL_DESCRIPTION =
   '发起一次结构化执行。operation 必须是本轮能力快照里登记的 operation 名；'
-  + 'args 按该 operation 声明的参数名填写（对宿主不透明，形状由执行层校验）。返回执行层的状态与数据。';
+  + 'args 按该 operation 声明的参数名填写（对宿主不透明，形状由平台校验）。返回执行的状态与数据。';
 export const EXECUTE_OPERATION_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
@@ -492,12 +492,12 @@ function stableArgsKey(value: unknown): string {
 
 export const MAIN_PROTOCOL_NOTE = [
   '【本轮工具协议】',
-  '- 涉及平台数据的请求，用 task_run 工具交给执行层 Worker；不得自行编造或猜测平台数据。',
-  '- 收到 Worker 汇报后，用用户能懂的话给出结论与数据；平台没有给出的内容不要补全，也不要声称已验证。',
-  '- 合计、计数、差值、占比这类运算一律交给代码：优先用执行层返回的聚合字段；'
-    + '执行层没给聚合且本轮没有计算工具时，如实说明拿不到可靠合计，不要凭记忆心算。'
-    + '给出聚合数时说明来源（执行层字段 / 脚本计算）。',
-  '- 执行层的调用失败、且**没有说明可以重试**（`retryable` 为 false 或未声明）时：如实说明它接受'
+  '- 涉及平台数据的请求，用 task_run 工具交办出去；不得自行编造或猜测平台数据。',
+  '- 收到办事结果后，用用户能懂的话给出结论与数据；平台没有给出的内容不要补全，也不要声称已验证。',
+  '- 合计、计数、差值、占比这类运算一律交给代码：优先用平台返回的聚合字段；'
+    + '平台没给聚合且本轮没有计算工具时，如实说明拿不到可靠合计，不要凭记忆心算。'
+    + '给出聚合数时说明来源（平台返回的字段 / 脚本计算）。',
+  '- 办事请求失败、且**没有说明可以重试**（`retryable` 为 false 或未声明）时：如实说明它接受'
     + '什么、不接受什么，并问用户要不要换口径；同一对象本回合不要再换参数重试，也不要自行按维度'
     + '取值批量查询——那是替用户扩大范围。',
   // owner 2026-11-19：交办后不再由宿主固定受理回执——模型的话原样投递，无过程话时用户静默到结果。
@@ -512,18 +512,18 @@ export const MAIN_PROTOCOL_NOTE = [
  */
 export const MAIN_PROTOCOL_NOTE_WITH_WRITES = [
   '【本轮工具协议】',
-  '- 涉及平台数据的请求，用 task_run 工具交给执行层 Worker；不得自行编造或猜测平台数据。',
-  '- 收到 Worker 汇报后，用用户能懂的话给出结论与数据；平台没有给出的内容不要补全，也不要声称已验证。',
-  '- 合计、计数、差值、占比这类运算一律交给代码：优先用执行层返回的聚合字段；'
-    + '执行层没给聚合且本轮没有计算工具时，如实说明拿不到可靠合计，不要凭记忆心算。'
-    + '给出聚合数时说明来源（执行层字段 / 脚本计算）。',
-  '- 执行层的调用失败、且**没有说明可以重试**（`retryable` 为 false 或未声明）时：如实说明它接受'
+  '- 涉及平台数据的请求，用 task_run 工具交办出去；不得自行编造或猜测平台数据。',
+  '- 收到办事结果后，用用户能懂的话给出结论与数据；平台没有给出的内容不要补全，也不要声称已验证。',
+  '- 合计、计数、差值、占比这类运算一律交给代码：优先用平台返回的聚合字段；'
+    + '平台没给聚合且本轮没有计算工具时，如实说明拿不到可靠合计，不要凭记忆心算。'
+    + '给出聚合数时说明来源（平台返回的字段 / 脚本计算）。',
+  '- 办事请求失败、且**没有说明可以重试**（`retryable` 为 false 或未声明）时：如实说明它接受'
     + '什么、不接受什么，并问用户要不要换口径；同一对象本回合不要再换参数重试，也不要自行按维度'
     + '取值批量查询——那是替用户扩大范围。',
   // owner 2026-11-19：交办后不再由宿主固定受理回执——模型的话原样投递。
-  '- 本轮执行面开放查询与写入操作。执行层返回待确认时，把执行层给出的确认摘要原样转给用户；'
+  '- 本轮可以查询和写入。平台返回待确认时，把平台给出的确认摘要原样转给用户；'
     + '用户表态后的下一回合再继续，不要替用户假定已确认。',
-  '- 写入是否生效以执行层返回的读回验证为准；执行层返回失败或读回不一致时，如实转述，不得说成成功。',
+  '- 写入是否生效以平台返回的读回验证为准；平台返回失败或读回不一致时，如实转述，不得说成成功。',
 ].join('\n');
 
 /** 按装配的写面开关选工具协议文本（缺省 = 只读原文，零行为变化）。 */
@@ -533,7 +533,7 @@ export function mainProtocolNoteFor(allowWriteOperations: boolean): string {
 
 /** Worker 的静态系统提示：协议义务、机械边界与输出纪律；零执行层实例名。 */
 export const WORKER_SYSTEM_PROMPT = [
-  '你是 fshine 的执行层 Worker：宿主把一项平台任务委派给你，你在一个受信工作区里工作。',
+  '你是 fshine 的办事 Worker：宿主把一项平台任务委派给你，你在一个受信工作区里工作。',
   '',
   '执行纪律：',
   '- 只能通过 execute_operation 工具发起执行；operation 名与参数写法必须取自本轮能力快照。',
@@ -1183,7 +1183,7 @@ export function renderWorkerDelegation(input: {
     parts.push(
       '',
       '## 长任务结果（宿主注入，原样事实）',
-      '此前异步执行的 operation 已在执行层结束；结果如下。文件只给 fileId——用 run_js 的 inputs 按 fileId 读取，不要猜路径。',
+      '此前交办的那件事已在后台办完；结果如下。文件只给 fileId——用 run_js 的 inputs 按 fileId 读取，不要猜路径。',
       '```json',
       JSON.stringify(input.resumedOperation, null, 2),
       '```',
@@ -1340,7 +1340,7 @@ function partialCompletionReason(input: {
     const head = `${describeRecorded(entry)} 返回 ${outcome.status}`;
     return message === '' ? head : `${head}：${message}`;
   }).join('；');
-  return `执行层未全部成功：已完成 ${done}；未成功 ${failed}。`;
+  return `没有全部办成：已完成 ${done}；未成功 ${failed}。`;
 }
 
 /** 认领结果的机械处置（runtime 内部；不对外暴露身份键细节）。 */
@@ -1731,7 +1731,7 @@ async function prepareResumedLongTask(
     // 适配器违约（wait 没有返回执行契约形状）：如实落失败，不猜内容。
     return {
       status: 'failed',
-      error: { code: 'EXECUTION_BAD_RESULT', message: '执行层等待返回了非对象结果。' },
+      error: { code: 'EXECUTION_BAD_RESULT', message: '等待返回的结果格式不对。' },
     };
   }
   const outcome = raw as ExecutionOutcome;
@@ -1820,7 +1820,7 @@ export function longTaskResumeNote(resumed: ResumedOperation, outcome: Execution
   const operation = resumed.operation;
   const operationId = resumed.operationId;
   if (outcome.status === 'failed' || outcome.status === 'refused') {
-    const reason = outcome.error.message.trim() !== '' ? outcome.error.message.trim() : '执行层未给出原因';
+    const reason = outcome.error.message.trim() !== '' ? outcome.error.message.trim() : '对方没给出原因';
     return `[续跑] 你发起的操作 ${operation}（id ${operationId}）失败了：${reason}。不要盲目重试；如实说明并向用户提出可选项。`;
   }
   if (resumed.restarted === true) {
@@ -2046,7 +2046,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     const userMessage = outcome.outcome === 'cancelled'
       ? `已停止：${label}${suffix}`
       : outcome.outcome === 'requested'
-        ? `已请求停止：${label}${suffix}（执行端确认前还不算停掉）`
+        ? `已请求停止：${label}${suffix}（还没确认停掉）`
         : `没停成：${label}${suffix} 已经办完了（当前状态：${outcome.status}）`;
     return { ...outcome, ...identity, userMessage, ...(reason === '' ? {} : { reason }) };
   }
@@ -2410,10 +2410,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     if (blockedRetry !== undefined) {
       retryBlockedThisTurn.push(blockedRetry.block);
       const codeNote = blockedRetry.block.code === 'unclassified_failure' ? '且没有说明可以重试' : `（${blockedRetry.block.code}）`;
-      const original = blockedRetry.executorMessage === undefined ? '' : `执行层原话：${blockedRetry.executorMessage}`;
+      const original = blockedRetry.executorMessage === undefined ? '' : `对方的说法：${blockedRetry.executorMessage}`;
       throw new Error(
-        `执行层这次调用「${blockedRetry.block.object}」失败了${codeNote}；本回合不要再换参数重试——`
-        + `把执行层给出的说法如实转告用户${original === '' ? '' : `（${original}）`}，`
+        `刚才办「${blockedRetry.block.object}」失败了${codeNote}；本回合不要再换参数重试——`
+        + `把对方给出的说法如实转告用户${original === '' ? '' : `（${original}）`}，`
         + '需要换口径或换对象时先问用户。',
       );
     }
@@ -2458,7 +2458,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
             status: 'failed',
             error: {
               code: 'EXECUTION_PROTOCOL_VIOLATION',
-              message: `执行层对未声明 long_running 的 operation「${operation}」返回了 accepted（协议违约）。`,
+              message: '平台尚未支持长任务却返回了受理（数据异常）。',
             },
           };
         }
@@ -3771,7 +3771,7 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
                 status: 'failed',
                 error: {
                   code: 'EXECUTION_PROTOCOL_VIOLATION',
-                  message: `执行层对未声明 long_running 的 operation「${operation}」返回了 accepted（协议违约）。`,
+                  message: '平台尚未支持长任务却返回了受理（数据异常）。',
                 },
               };
             }
@@ -3938,7 +3938,7 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       if (workerResult.text.trim() === '') {
         return now() >= deadline
           ? { kind: 'timed_out' }
-          : { kind: 'failed', reason: '执行层 Worker 未产出有效汇报，本次任务未完成。' };
+          : { kind: 'failed', reason: '办事助手没能给出有效汇报，本次任务未完成。' };
       }
       // 写操作提案（S1）：本轮**最后一条非只读执行**是 needs_confirmation → 回合结局是
       // 待确认（不是 failed）——执行层已冻结一次待确认操作，用户还什么都没表态。只读调用
@@ -4016,7 +4016,7 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       if (needsInput !== undefined) {
         const question = pendingQuestionFrom(needsInput.outcome);
         return question === undefined
-          ? { kind: 'failed', reason: '执行层要求补充输入但未说明缺什么（missing 为空）。' }
+          ? { kind: 'failed', reason: '对方要求补充信息但没说清缺什么。' }
           : { kind: 'needs_input', question };
       }
       if (recorded.length === 0) {
@@ -4025,7 +4025,7 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         if (hostRefusedOperations.length > 0) {
           return { kind: 'failed', reason: OPERATION_NOT_PERMITTED_MESSAGE };
         }
-        return { kind: 'failed', reason: '未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。' };
+        return { kind: 'failed', reason: '没有实际办理：助手已汇报，但这次交办没有发出任何办理动作。' };
       }
       /**
        * 终局 = **最后一次决定性结果**（2026-11-19 owner 修法；真模型写闭环实跑缺陷）。
@@ -4081,7 +4081,7 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         const decisive = lastWritable ?? recorded[recorded.length - 1];
         if (decisive === undefined) {
           // recorded 为空已在上方拦下；此处不可达（防御性兜底，话术与「未发起执行」同源）。
-          return { kind: 'failed', reason: '未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。' };
+          return { kind: 'failed', reason: '没有实际办理：助手已汇报，但这次交办没有发出任何办理动作。' };
         }
         if (decisive.outcome.status !== 'completed') {
           const { operation, outcome } = decisive;
@@ -4090,11 +4090,11 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
             return {
               kind: 'failed',
               reason: message === ''
-                ? `执行层未成功：${operation} 返回 ${outcome.status}。`
-                : `执行层未成功：${operation} 返回 ${outcome.status}：${message}`,
+                ? `没办成：${operation} 返回 ${outcome.status}。`
+                : `没办成：${operation} 返回 ${outcome.status}：${message}`,
             };
           }
-          return { kind: 'failed', reason: `执行层未成功：${operation} 返回 ${outcome.status}。` };
+          return { kind: 'failed', reason: `没办成：${operation} 返回 ${outcome.status}。` };
         }
       }
       // CAP-01 S2 ④ 兜底扫描（与同步委派同一纪律）：任务 out/ 全量登记——执行层按

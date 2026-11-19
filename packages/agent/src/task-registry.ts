@@ -190,7 +190,7 @@ export function judgeReportedTask(executions: readonly ExecutedFact[]): {
   if (decisive === undefined) {
     return {
       status: 'unexecuted',
-      failureReason: '未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。',
+      failureReason: '没有实际办理：助手已汇报，但这次交办没有发出任何办理动作。',
     };
   }
   if (decisive.status === 'completed') return { status: 'completed' };
@@ -198,8 +198,8 @@ export function judgeReportedTask(executions: readonly ExecutedFact[]): {
   return {
     status: 'failed',
     failureReason: message === ''
-      ? `执行层未成功：${decisive.operation} 返回 ${decisive.status}。`
-      : `执行层未成功：${decisive.operation} 返回 ${decisive.status}：${message}`,
+      ? `没办成：${decisive.operation} 返回 ${decisive.status}。`
+      : `没办成：${decisive.operation} 返回 ${decisive.status}：${message}`,
   };
 }
 

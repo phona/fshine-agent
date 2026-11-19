@@ -184,7 +184,7 @@ describe('Shadow 双源对照 ②：四态语义等价（needs_input / failed / 
     const b = await chainOn('fake-real', FAILED_SCENARIO, B_FAILED);
     for (const run of [a, b]) {
       expect(run.terminal.status).toBe('failed');
-      expect(run.terminal.failureReason).toContain('执行层未成功：dummy.query 返回 failed');
+      expect(run.terminal.failureReason).toContain('没办成：dummy.query 返回 failed');
       expect(run.terminal.failureReason).toContain('Collection faulty-one cannot be read in its current state');
       expect(run.terminal.replyText).toBeUndefined();
       expect(run.executions.map((entry) => entry.status)).toEqual(['failed']);

@@ -48,7 +48,7 @@ export const EXECUTOR_LABEL_PLACEHOLDER = '{{executorLabel}}';
  * 执行层称谓的宿主中性缺省（原 `system-prompt.ts` 的 DEFAULT_EXECUTOR_LABEL，Track D 随
  * 角色文本一并迁移到此：占位符与它的缺省值同处一个事实源）。不取任何实例名。
  */
-export const DEFAULT_EXECUTOR_LABEL = '执行层子 Agent';
+export const DEFAULT_EXECUTOR_LABEL = '办事助手';
 
 /**
  * 装配期替换：显式占位 → 生效称谓（缺省中性）。没有占位的正文原样返回（行为中性，

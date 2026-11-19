@@ -37,10 +37,10 @@ function execution(
 }
 
 describe('task.status 语义边界（R2 表征测试；2026-11-19 按末次决定性结果修订）', () => {
-  it('零执行 → unexecuted（reason 说明未发起执行）', () => {
+  it('零执行 → unexecuted（reason 说明没有实际办理）', () => {
     const judged = judgeReportedTask([]);
     expect(judged.status).toBe('unexecuted');
-    expect(judged.failureReason).toContain('未发起执行');
+    expect(judged.failureReason).toContain('没有实际办理');
   });
 
   it('单条成功 → completed', () => {

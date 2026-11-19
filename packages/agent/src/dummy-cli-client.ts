@@ -381,7 +381,7 @@ function failureOf(error: unknown): ExecutionFailure {
     const code = typeof candidate.code === 'string' && candidate.code !== '' ? candidate.code : 'EXECUTION_UNKNOWN_ERROR';
     const message = typeof candidate.message === 'string' && candidate.message !== ''
       ? candidate.message
-      : '执行层返回了未结构化错误。';
+      : '对方返回了无法识别的错误。';
     return {
       code,
       message,
@@ -394,7 +394,7 @@ function failureOf(error: unknown): ExecutionFailure {
         : {}),
     };
   }
-  return { code: 'EXECUTION_UNKNOWN_ERROR', message: '执行层返回了未结构化错误。' };
+  return { code: 'EXECUTION_UNKNOWN_ERROR', message: '对方返回了无法识别的错误。' };
 }
 
 function missingInputsOf(
@@ -412,7 +412,7 @@ function missingInputsOf(
   if (absent.length > 0) {
     return absent.map((entry) => ({
       name: entry.name,
-      description: `执行层声明该输入必填：${entry.name}`,
+      description: `这项输入必须填写：${entry.name}`,
     }));
   }
   const failure = failureOf(envelope.error);
@@ -454,7 +454,7 @@ function outcomeOf(
       status: 'failed',
       error: {
         code: 'result_unknown',
-        message: `执行层调用超时（${timeoutMs}ms）：没有收到回执，无法确认这次操作是否已经发生。`,
+        message: `这次操作等待超时（${timeoutMs}ms）：没有收到回执，无法确认这次操作是否已经发生。`,
         retryable: false,
       },
     };
@@ -462,7 +462,7 @@ function outcomeOf(
   if (run.spawnFailed) {
     return {
       status: 'failed',
-      error: { code: 'EXECUTION_SPAWN_FAILED', message: '执行层网关无法启动。', retryable: true },
+      error: { code: 'EXECUTION_SPAWN_FAILED', message: '办事通道没能启动。', retryable: true },
     };
   }
   const envelope = parseEnvelope(run.stdout);
@@ -483,7 +483,7 @@ function outcomeOf(
           status: 'failed',
           error: {
             code: 'EXECUTION_BAD_CONFIRMATION',
-            message: '执行层返回的 needs_confirmation 缺少有效的 confirmation（handle/summary）。',
+            message: '对方说要确认，却没给出有效的确认信息。',
           },
         };
       }
@@ -510,20 +510,20 @@ function outcomeOf(
     }
     return {
       status: 'failed',
-      error: { code: 'EXECUTION_UNKNOWN_STATUS', message: `执行层返回了未定义状态：${String(status)}` },
+      error: { code: 'EXECUTION_UNKNOWN_STATUS', message: `对方返回了无法识别的状态：${String(status)}` },
     };
   }
   const stderr = run.stderr.trim();
   if (run.code === 3) {
     const firstToken = stderr.split(/\s+/)[0] ?? '';
     const code = /^[A-Z][A-Z0-9_]*$/.test(firstToken) ? firstToken : 'EXECUTION_REFUSED';
-    return { status: 'refused', error: { code, message: stderr !== '' ? stderr : '执行层拒绝了本次调用。' } };
+    return { status: 'refused', error: { code, message: stderr !== '' ? stderr : '这次请求被拒绝了。' } };
   }
   return {
     status: 'failed',
     error: {
       code: 'EXECUTION_NO_RESULT',
-      message: (stderr !== '' ? stderr : run.stdout.trim()).slice(0, 500) || '执行层没有返回结果信封。',
+      message: (stderr !== '' ? stderr : run.stdout.trim()).slice(0, 500) || '没有拿到这次办理的结果。',
     },
   };
 }
@@ -572,7 +572,7 @@ function acceptedOutcomeOf(envelope: ResultEnvelope): ExecutionOutcome {
   if (typeof candidate !== 'string' || candidate === '') {
     return {
       status: 'failed',
-      error: { code: 'EXECUTION_BAD_ACCEPTED', message: '执行层返回的 accepted 缺少有效的 operationId。' },
+      error: { code: 'EXECUTION_BAD_ACCEPTED', message: '对方说已受理，却没给出有效的任务编号。' },
     };
   }
   const pollAfterMs = declaredCostOf(envelope.pollAfterMs);
@@ -598,7 +598,7 @@ function waitOutcomeOf(run: GatewayRun, operationId: string, timeoutMs: number):
       status: 'failed',
       error: {
         code: 'result_unknown',
-        message: `执行层等待调用超时（${timeoutMs}ms）：没有收到回执，无法确认长任务当前的状态。`,
+        message: `等待回话超时（${timeoutMs}ms）：没有收到回执，无法确认长任务当前的状态。`,
         retryable: false,
       },
     };
@@ -606,7 +606,7 @@ function waitOutcomeOf(run: GatewayRun, operationId: string, timeoutMs: number):
   if (run.spawnFailed) {
     return {
       status: 'failed',
-      error: { code: 'EXECUTION_SPAWN_FAILED', message: '执行层网关无法启动。', retryable: true },
+      error: { code: 'EXECUTION_SPAWN_FAILED', message: '办事通道没能启动。', retryable: true },
     };
   }
   const envelope = parseEnvelope(run.stdout);
@@ -624,7 +624,7 @@ function waitOutcomeOf(run: GatewayRun, operationId: string, timeoutMs: number):
     if (envelope.status === 'needs_confirmation') {
       const confirmation = confirmationOf(envelope.confirmation);
       return confirmation === undefined
-        ? { status: 'failed', error: { code: 'EXECUTION_BAD_CONFIRMATION', message: '执行层返回的 needs_confirmation 缺少有效的 confirmation（handle/summary）。' } }
+        ? { status: 'failed', error: { code: 'EXECUTION_BAD_CONFIRMATION', message: '对方说要确认，却没给出有效的确认信息。' } }
         : { status: 'needs_confirmation', confirmation, data: envelope.data ?? undefined };
     }
     if (envelope.status === 'needs_input') {
@@ -649,20 +649,20 @@ function waitOutcomeOf(run: GatewayRun, operationId: string, timeoutMs: number):
     }
     return {
       status: 'failed',
-      error: { code: 'EXECUTION_UNKNOWN_STATUS', message: `执行层返回了未定义状态：${String(envelope.status)}` },
+      error: { code: 'EXECUTION_UNKNOWN_STATUS', message: `对方返回了无法识别的状态：${String(envelope.status)}` },
     };
   }
   const stderr = run.stderr.trim();
   if (run.code === 3) {
     const firstToken = stderr.split(/\s+/)[0] ?? '';
     const code = /^[A-Z][A-Z0-9_]*$/.test(firstToken) ? firstToken : 'EXECUTION_REFUSED';
-    return { status: 'refused', error: { code, message: stderr !== '' ? stderr : '执行层拒绝了本次等待。' } };
+    return { status: 'refused', error: { code, message: stderr !== '' ? stderr : '这次等待请求被拒绝了。' } };
   }
   return {
     status: 'failed',
     error: {
       code: 'EXECUTION_NO_RESULT',
-      message: (stderr !== '' ? stderr : run.stdout.trim()).slice(0, 500) || '执行层没有返回等待结果信封。',
+      message: (stderr !== '' ? stderr : run.stdout.trim()).slice(0, 500) || '没有拿到这次等待的结果。',
     },
   };
 }

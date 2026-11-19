@@ -464,7 +464,7 @@ describe('长任务异步（契约 v4）', () => {
     await runner.whenIdle();
 
     expect(registry.get('A', SCOPE).status).toBe('failed');
-    expect(registry.get('A', SCOPE).failureReason).toContain('协议违约');
+    expect(registry.get('A', SCOPE).failureReason).toContain('数据异常');
     expect(events).toEqual(expect.arrayContaining([
       expect.objectContaining({ event: 'execution_accepted_undeclared', operation: 'dummy.query' }),
     ]));

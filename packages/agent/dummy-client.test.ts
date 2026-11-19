@@ -526,7 +526,7 @@ describe('dummy 适配器的失败映射（stub 网关，零网络）', () => {
     expect(needs.status).toBe('needs_input');
     if (needs.status === 'needs_input') {
       expect(needs.missing).toEqual([
-        { name: '--collection', description: '执行层声明该输入必填：--collection' },
+        { name: '--collection', description: '这项输入必须填写：--collection' },
       ]);
     }
   });

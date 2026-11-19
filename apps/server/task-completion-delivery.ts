@@ -99,17 +99,17 @@ function truncatedName(name: string): string {
 
 /**
  * 任务完成**事实**文本（宿主拼，给模型读；用户看到的话由模型写，宿主不再拼结果文案）：
- *   `[任务完成]「<业务名>」已由执行端确认完成。结果正文（逐字）：<resultText>。请把这件事告诉用户。`
+ *   `[任务完成]「<业务名>」办完了。结果正文（逐字）：<resultText>。请把这件事告诉用户。`
  *
- * 硬边界（与 handle 隔离同一纪律）：不含 handle、不含 taskId/内部码、不含执行层原文以外的
- * 任何内部标识——resultText 是执行端确认的结果正文，逐字进事实（模型要能原样转述）。
+ * 硬边界（与 handle 隔离同一纪律）：不含 handle、不含 taskId/内部码、不含任何内部称谓与原文
+ * 标识——resultText 是确认过的结果正文，逐字进事实（模型要能原样转述）。
  * name 缺省 = 主语用中性指代（不猜名）；不加任何投递/记账话术。
  */
 export function taskCompletionFactText(input: { name?: string; resultText: string }): string {
   const subject = input.name !== undefined && input.name.trim() !== ''
     ? `「${truncatedName(input.name)}」`
     : '你交代的那件事';
-  return `[任务完成]${subject}已由执行端确认完成。结果正文（逐字）：${input.resultText}。请把这件事告诉用户。`;
+  return `[任务完成]${subject}办完了。结果正文（逐字）：${input.resultText}。请把这件事告诉用户。`;
 }
 
 /**
