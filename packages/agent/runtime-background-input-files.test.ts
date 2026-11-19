@@ -221,6 +221,7 @@ async function makeFixture(input: {
     whenIdle: () => realRunner.whenIdle(),
     cancel: (taskId, scope) => realRunner.cancel(taskId, scope),
     resume: (taskId, options) => realRunner.resume(taskId, options),
+    confirm: (taskId, options) => realRunner.confirm(taskId, options),
     inFlight: () => realRunner.inFlight(),
   };
 

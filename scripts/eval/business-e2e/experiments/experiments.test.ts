@@ -155,7 +155,7 @@ describe('② 工具面门控核实（缺口 1：只读查询始终注册，治�
     const isolated: ExpCase = { ...T01, mainSkillsDir: skillsNone };
 
     const withRunner = await exec(itemFor(isolated), isolated, path.join(root, 'a'));
-    expect(withRunner.perTurnMainTools[0]).toEqual(['task_run', 'task_status', 'task_result', 'task_cancel', 'task_resume']);
+    expect(withRunner.perTurnMainTools[0]).toEqual(['task_run', 'task_status', 'task_result', 'task_cancel', 'task_resume', 'task_confirm']);
 
     const bare: ExpCase = { ...isolated, id: 'T01bare', withTaskRunner: false };
     const without = await exec(itemFor(bare), bare, path.join(root, 'b'));
@@ -172,7 +172,7 @@ describe('② 工具面门控核实（缺口 1：只读查询始终注册，治�
     const exec = executorWith([async () => {}]);
     const skillsMain = path.join(FIXTURE_ROOT, '.agents', 'skills-main'); // 夹具 catalog（两技能）
     const skillsNone = path.join(FIXTURE_ROOT, '.agents', 'skills-none'); // 故意不存在 = 空索引
-    const taskTools = ['task_status', 'task_result', 'task_cancel', 'task_resume'];
+    const taskTools = ['task_status', 'task_result', 'task_cancel', 'task_resume', 'task_confirm'];
     const queryTools = ['task_status', 'task_result'];
     const cells: ReadonlyArray<{ label: string; withTaskRunner: boolean; mainSkillsDir: string; expected: string[]; catalog: boolean }> = [
       { label: 'runner＋catalog', withTaskRunner: true, mainSkillsDir: skillsMain, expected: ['task_run', ...taskTools, 'read_skill'], catalog: true },

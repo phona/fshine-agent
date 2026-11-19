@@ -1319,7 +1319,24 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         && !hasResultOrExecution
         && !endsWithQuestion
         && trimmedReply !== '';
-      if (proposalCard !== undefined) {
+      /**
+       * 「没有可确认/接续对象」的宿主话术（owner 2026-11-19 真机噪声修复）：本回合唯一动作是
+       * task_confirm/task_resume 且给出 no-target 结局时（`turn.confirmNoTargetLine`），用宿主
+       * 确定性话术**替换**模型那段自编诊断（「任务仍在办理中…我不会把你的确认当成已提交…」）。
+       * 与提案卡同一套机制；问号结尾仍例外（同回合顺带反问的话留着）。
+       */
+      const confirmNoTargetLine = turn.confirmNoTargetLine;
+      if (confirmNoTargetLine !== undefined && !endsWithQuestion) {
+        log({
+          event: 'turn_confirm_no_target_spoken',
+          principalId,
+          sessionId,
+          speakerId,
+          messageId: message.messageId,
+          replyBytes: Buffer.byteLength(reply, 'utf8'),
+        });
+        reply = confirmNoTargetLine;
+      } else if (proposalCard !== undefined) {
         log({
           event: 'turn_proposal_card_delivered',
           principalId,

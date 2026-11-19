@@ -61,7 +61,7 @@ export interface SpreadVerdict {
   details: readonly string[];
 }
 
-const TASK_TOOLS: ReadonlySet<string> = new Set(['task_status', 'task_result', 'task_cancel', 'task_resume']);
+const TASK_TOOLS: ReadonlySet<string> = new Set(['task_status', 'task_result', 'task_cancel', 'task_resume', 'task_confirm']);
 const GRADE_ORDER: readonly SpreadGrade[] = ['A', 'B', 'C', 'D'];
 
 function objectKey(object: { collection: string; window?: string } | undefined): string {

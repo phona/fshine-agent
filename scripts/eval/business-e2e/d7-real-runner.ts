@@ -37,7 +37,7 @@ const OUT_DIR = path.join(REPO_ROOT, '.runtime', 'r5d7', 'real');
 const LIMITS = { maxModelCalls: 24, maxTokens: 120_000, wallMs: 600_000 } as const;
 const BATCH_LIMITS = { maxModelCalls: 72, maxTokens: 360_000, wallMs: 1_800_000 } as const;
 
-const TASK_TOOLS = new Set(['task_status', 'task_result', 'task_cancel', 'task_resume']);
+const TASK_TOOLS = new Set(['task_status', 'task_result', 'task_cancel', 'task_resume', 'task_confirm']);
 
 interface ScriptedTurn {
   principal: 'alice' | 'bob';

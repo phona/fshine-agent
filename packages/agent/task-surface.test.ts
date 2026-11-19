@@ -125,7 +125,7 @@ describe('缺口 1 · 对话面任务工具', () => {
   it('工具面：有 runner 暴露 task_run + 四工具；无 runner 时只读查询仍注册、治理工具不注册', async () => {    const withRunner = await build([], { withRunner: true });
     await withRunner.session.send('随便说一句');
     const names = withRunner.turns[0]!.tools.map((tool) => tool.name);
-    expect(names).toEqual(['task_run', 'task_status', 'task_result', 'task_cancel', 'task_resume']);
+    expect(names).toEqual(['task_run', 'task_status', 'task_result', 'task_cancel', 'task_resume', 'task_confirm']);
 
     const withoutRunner = await build([], { withRunner: false });
     await withoutRunner.session.send('随便说一句');
@@ -199,7 +199,7 @@ describe('缺口 1 · 对话面任务工具', () => {
     const { session, turns } = await build([]);
     await session.send('看看工具');
     const byName = new Map(turns[0]!.tools.map((tool) => [tool.name, tool.inputSchema as Record<string, unknown>]));
-    for (const name of ['task_status', 'task_result', 'task_cancel', 'task_resume']) {
+    for (const name of ['task_status', 'task_result', 'task_cancel', 'task_resume', 'task_confirm']) {
       const schema = byName.get(name);
       expect(schema, `${name} 必须暴露`).toBeDefined();
       expect(schema!.additionalProperties).toBe(false);
@@ -349,18 +349,19 @@ describe('缺口 1 · 对话面任务工具', () => {
     expect(hit.status).toBe('cancelled');
   });
 
-  it('未传 runner：task_cancel/task_resume 不上面，调用即 Main 工具面之外的调用（fail-closed）', async () => {
+  it('未传 runner：task_cancel/task_resume/task_confirm 不上面，调用即 Main 工具面之外的调用（fail-closed）', async () => {
     const registry = createTaskRegistry();
     seed(registry, SCOPE_A, 't1', '任务');
     const { session, turns } = await build([
       { tool: 'task_cancel', args: { ref: '#1' } },
       { tool: 'task_resume', args: { ref: '#1', answer: '答复' } },
+      { tool: 'task_confirm', args: { ref: '#1' } },
     ], { registry, withRunner: false });
     await session.send('取消并接续');
 
     // 工具面快照：治理工具（需要 runner）不注册；只读查询仍在。
     expect(turns[0]!.tools.map((tool) => tool.name)).toEqual(['task_run', 'task_status', 'task_result']);
-    for (const [index, name] of ['task_cancel', 'task_resume'].entries()) {
+    for (const [index, name] of ['task_cancel', 'task_resume', 'task_confirm'].entries()) {
       const result = turns[0]!.results[index]!;
       expect(result.ok, `${name} 无 runner 必须 fail-closed`).toBe(false);
       if (!result.ok) expect(String((result.error as Error).message)).toContain('Main 工具面之外的调用');
