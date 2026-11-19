@@ -1,5 +1,5 @@
 /**
- * ops/alerts：运营告警巡检（仓内只读脚本，不进产品运行时）。
+ * ops/alerts：运营告警巡检（仓内只读脚本，手动 / 离线诊断入口，不进产品运行时）。
  *
  * 为什么需要它：用户侧已经改成「静默到有结果」，出事必须由我们自己看得见。本脚本把
  * `.runtime/server/wecom-live.log`（增量）与 `.runtime/state.db`（只读打开）投影成结构化
@@ -8,33 +8,38 @@
  *      `.runtime/ops/evidence/<id>.txt` 并在行里给路径）；
  *   ② 通过企微主动文字（SDK `sendMessage`，即宿主 sendText 同一通道）推给 owner 账号。
  *
+ * 与**进程内告警引擎**（apps/server 的 inprocess-alerts）的关系：
+ *   · 两者共用 packages/agent/src/alert-rules.ts 的**同一套规则**与 alert-persistence.ts 的
+ *     **同一投影 / 持久化格式 / 冷却文件 schema**（`.runtime/ops/alerts-state.json`）；
+ *   · 本脚本是**进程外**诊断入口（读日志 + 只读底账）；进程内引擎就地接结构化事件 + 低频
+ *     扫底账，不读自己的日志。两者可同时跑：共享冷却文件能减少重复，但非强一致。
+ *
  * 用法：
  *   npm run alerts                 # 缺省 --dry-run：只打印命中，不落盘、不推送
  *   npm run alerts -- --run        # 真正落盘 alerts.jsonl 并推送 owner
  *   npm run alerts -- --config=<path>   # 与 ask/tasks/ops 同义（决定 dbPath 与收件人）
  *
- * 边界（硬约束，见 docs/ops/alerts.md）：
- *   · **绝不改任务事实 / 绝不重启服务 / 绝不写 state.db**：state.db 一律只读打开，
- *     不建库、不迁移、不触碰一行；
- *   · 告警本身只带摘要，但每条告警凭 evidenceRef（messageId / taskId / 日志字节偏移 /
- *     事件 id）+ raw **回到当时的原始文本**；既有日志原文不因「对用户收口」而删——
- *     这是不变量，不是实现细节；
- *   · 推送失败只记一条 `alert_push_failed`，**不影响落盘**；
- *   · 收件人 userid 从 config/agent.yaml 的 principals 里取（enabled 的单聊主体），
- *     **不硬编码**；凭据取部署配置/`.env` 的 WECOM_BOT_ID / WECOM_BOT_SECRET。
+ * 边界（硬约束，见 docs/ops/alerts.md）：**绝不改任务事实 / 绝不重启服务 / 绝不写 state.db**。
+ * state.db 一律只读打开，不建库、不迁移、不触碰一行。
  */
-import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, readSync, closeSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, openSync, readFileSync, readSync, closeSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WSClient } from '@wecom/aibot-node-sdk';
-import { effectiveDeploymentEnv, loadConfig, openTaskStore } from '@fshine/core';
+import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import type { AppConfig } from '@fshine/contracts';
+import { evaluateAlerts, type AlertFact } from '../../packages/agent/src/alert-rules';
 import {
-  evaluateAlerts,
-  type AlertCooldownState,
-  type AlertFact,
-  type AlertItem,
-} from '../../packages/agent/src/alert-rules';
+  appendAlertLines,
+  buildAlertLine,
+  EVIDENCE_INLINE_LIMIT_BYTES,
+  ledgerFacts,
+  logLineToFact,
+  parseAlertsState,
+  writeAlertsState,
+  type AlertLine,
+  type AlertsState,
+} from '../../packages/agent/src/alert-persistence';
 import { explicitConfigFrom } from '../resolve-config-path';
 import { resolveTaskDbPath } from '../tasks';
 
@@ -44,39 +49,27 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 export const DEFAULT_LOG_PATH = path.join(REPO_ROOT, '.runtime', 'server', 'wecom-live.log');
 /** 缺省 ops 落点目录（与 `npm run ops` 同目录，.runtime/ 已 gitignore）。 */
 export const DEFAULT_OPS_DIR = path.join(REPO_ROOT, '.runtime', 'ops');
-/** raw 内联上限（字节）：超过时另落证据文件，但 raw 字段仍保留全文、绝不截断。 */
-export const EVIDENCE_INLINE_LIMIT_BYTES = 8192;
-/** 企微连接/认证超时（毫秒）。 */
+
+// 共享确定性层再导出（保持脚本既有导入面；规则/投影/格式/冷却 schema 单源在 alert-persistence）。
+export {
+  buildAlertLine,
+  EVIDENCE_INLINE_LIMIT_BYTES,
+  ledgerFacts,
+  logLineToFact,
+};
+export type { AlertLine, AlertsState };
+
 const WECOM_CONNECT_TIMEOUT_MS = 15_000;
 
 const USAGE = '用法：npm run alerts [-- --run] [--config=<path>] [--log=<path>]\n'
   + '  缺省 --dry-run：只打印命中；--run 才落盘 alerts.jsonl 并推送 owner。';
-
-/** 持久化状态：日志增量偏移 + 冷却表（同一 subject 冷却窗口内只告一次）。 */
-export interface AlertsState {
-  version: 1;
-  /** 已在上一轮消费到的日志字节偏移（下一轮从此处续读）。 */
-  logOffset: number;
-  /** 冷却状态：`${rule}\u0000${subject}` → 上次告警时刻（ISO）。 */
-  cooldown: AlertCooldownState;
-}
 
 export function emptyState(): AlertsState {
   return { version: 1, logOffset: 0, cooldown: {} };
 }
 
 export function parseState(raw: string | undefined): AlertsState {
-  if (raw === undefined || raw.trim() === '') return emptyState();
-  try {
-    const parsed = JSON.parse(raw) as Partial<AlertsState>;
-    return {
-      version: 1,
-      logOffset: typeof parsed.logOffset === 'number' && parsed.logOffset >= 0 ? parsed.logOffset : 0,
-      cooldown: parsed.cooldown !== null && typeof parsed.cooldown === 'object' ? (parsed.cooldown as AlertCooldownState) : {},
-    };
-  } catch {
-    return emptyState();
-  }
+  return parseAlertsState(raw);
 }
 
 export interface AlertsCliArgs {
@@ -109,67 +102,15 @@ export function parseAlertsArgs(argv: readonly string[]): AlertsCliArgs | { usag
   return args;
 }
 
-/** 从一行日志投影出事实；非结构化行（SDK 文本日志）返回 undefined。 */
-export function logLineToFact(line: string, logOffset: number, nowIso: string): AlertFact | undefined {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith('{')) return undefined;
-  let obj: Record<string, unknown>;
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
-    obj = parsed as Record<string, unknown>;
-  } catch {
-    return undefined;
-  }
-  const event = obj['event'];
-  if (typeof event !== 'string' || event === '') return undefined;
-
-  const detail: NonNullable<AlertFact['detail']> = {};
-  if (typeof obj['operation'] === 'string') detail.operation = obj['operation'];
-  const error = obj['error'];
-  if (error !== null && typeof error === 'object' && !Array.isArray(error)) {
-    const err = error as Record<string, unknown>;
-    if (typeof err['code'] === 'string') detail.errorCode = err['code'];
-    if (typeof err['kind'] === 'string') detail.failureKind = err['kind'];
-  }
-  if (typeof obj['failureKind'] === 'string') detail.failureKind = obj['failureKind'];
-  if (event === 'file_delivery' && typeof obj['status'] === 'string') detail.deliveryStatus = obj['status'];
-  // 投递结果（2026-11-19 第 3 档接线）：`notification_delivery_terminal` 的 exhausted/skipped、
-  // `task_long_running_notice` 的 sent/failed——判据只在 isDeliveryFailure 里，不在这里猜。
-  if (typeof obj['result'] === 'string') detail.deliveryResult = obj['result'];
-  // 部署模式事实（跳过终局带）：live + skipped 要告警（渠道配错）。
-  if (typeof obj['deliveryMode'] === 'string') detail.deliveryMode = obj['deliveryMode'];
-  if (typeof obj['taskStatus'] === 'string') detail.taskStatus = obj['taskStatus'];
-
-  const fact: AlertFact = {
-    source: 'log',
-    event,
-    // 结构化行普遍不带时间戳：事实时刻取处理时刻（task_stuck 只走底账，不依赖此值）。
-    at: typeof obj['at'] === 'string' ? obj['at'] : nowIso,
-    raw: line,
-    logOffset,
-  };
-  if (typeof obj['taskId'] === 'string') fact.taskId = obj['taskId'];
-  if (typeof obj['principalId'] === 'string') fact.principalId = obj['principalId'];
-  if (typeof obj['sessionId'] === 'string') fact.sessionId = obj['sessionId'];
-  if (typeof obj['messageId'] === 'string') fact.messageId = obj['messageId'];
-  if (Object.keys(detail).length > 0) fact.detail = detail;
-  return fact;
-}
-
-export interface LogScanResult {
-  facts: AlertFact[];
-  /** 消费到的字节偏移（只到最后一个完整行；半行留给下一轮）。 */
-  nextOffset: number;
-}
 
 /** 从 offset 增量读日志，解析为事实。半行不消费（避免读到写一半的行）。 */
-export function scanLog(logPath: string, fromOffset: number, nowIso: string): LogScanResult {
-  if (!existsSync(logPath)) return { facts: [], nextOffset: fromOffset };
+export function scanLog(logPath: string, fromOffset: number, nowIso: string): { facts: AlertFact[]; nextOffset: number } {
+  const outFacts: AlertFact[] = [];
+  if (!existsSync(logPath)) return { facts: outFacts, nextOffset: fromOffset };
   const size = statSync(logPath).size;
   // 文件被截断/轮转（size < offset）时从头再读，避免永久漏读。
   const start = size < fromOffset ? 0 : fromOffset;
-  if (size <= start) return { facts: [], nextOffset: start };
+  if (size <= start) return { facts: outFacts, nextOffset: start };
   const length = size - start;
   const buffer = Buffer.allocUnsafe(length);
   const fd = openSync(logPath, 'r');
@@ -186,79 +127,17 @@ export function scanLog(logPath: string, fromOffset: number, nowIso: string): Lo
   const chunk = buffer.toString('utf8');
   const lastNewline = chunk.lastIndexOf('\n');
   // 无完整行 = 整段都是半行，保留不动，下一轮再读。
-  if (lastNewline < 0) return { facts: [], nextOffset: start };
+  if (lastNewline < 0) return { facts: outFacts, nextOffset: start };
   const complete = chunk.slice(0, lastNewline + 1);
-  const facts: AlertFact[] = [];
   let cursor = start;
   for (const line of complete.split('\n')) {
     if (line !== '') {
       const fact = logLineToFact(line, cursor, nowIso);
-      if (fact !== undefined) facts.push(fact);
+      if (fact !== undefined) outFacts.push(fact);
     }
     cursor += Buffer.byteLength(line, 'utf8') + 1; // + '\n'
   }
-  return { facts, nextOffset: start + Buffer.byteLength(complete, 'utf8') };
-}
-
-/** 把任务/执行底账行投影成事实（只读，绝不写）。 */
-export function ledgerFacts(dbPath: string): { facts: AlertFact[]; note?: string } {
-  if (!existsSync(dbPath)) return { facts: [], note: `底账不存在，跳过：${dbPath}` };
-  let store;
-  try {
-    store = openTaskStore(dbPath, { readOnly: true });
-  } catch (error) {
-    return { facts: [], note: `底账只读打开失败，跳过：${error instanceof Error ? error.message : String(error)}` };
-  }
-  const facts: AlertFact[] = [];
-  try {
-    for (const stored of store.listTasks()) {
-      const task = stored.task;
-      const at = task.updatedAt;
-      if (task.status === 'running' || task.status === 'waiting_user') {
-        const since = task.status === 'waiting_user'
-          ? (task.waitingSince ?? task.updatedAt)
-          : (task.runningSince ?? task.updatedAt);
-        facts.push({
-          source: 'ledger',
-          event: 'task_state',
-          at: since,
-          raw: JSON.stringify(task),
-          taskId: task.taskId,
-          principalId: task.principalId,
-          sessionId: task.sessionId,
-          evidenceRef: `task:${task.taskId}`,
-          detail: { taskStatus: task.status },
-        });
-      }
-      for (const execution of stored.executions) {
-        const detail: NonNullable<AlertFact['detail']> = {
-          operation: execution.operation,
-          // 结局状态进投影：retry_storm 的 (operation, 错误码) 计数只认失败类结局，
-          // 成功/待确认/受理等合法重复不算（2026-11-19 真部署假阳性修复）。
-          status: execution.status,
-        };
-        const err = execution.error;
-        if (err !== null && typeof err === 'object' && !Array.isArray(err)) {
-          const e = err as Record<string, unknown>;
-          if (typeof e['code'] === 'string') detail.errorCode = e['code'];
-        }
-        facts.push({
-          source: 'ledger',
-          event: 'execution',
-          at,
-          raw: JSON.stringify(execution),
-          taskId: task.taskId,
-          principalId: task.principalId,
-          sessionId: task.sessionId,
-          evidenceRef: `task:${task.taskId}`,
-          detail,
-        });
-      }
-    }
-  } finally {
-    store.close();
-  }
-  return { facts };
+  return { facts: outFacts, nextOffset: start + Buffer.byteLength(complete, 'utf8') };
 }
 
 /** 从配置取 owner 收件人：enabled 的单聊（非群）企微主体的 userid；不硬编码。 */
@@ -316,25 +195,7 @@ export async function pushWecomText(input: {
   }
 }
 
-interface AlertLine extends AlertItem {
-  id: string;
-  evidencePath?: string;
-}
-
-/** 把一条告警序列化为落盘行；超长原文另落证据文件（raw 仍保留全文）。 */
-export function buildAlertLine(item: AlertItem, id: string, opsDir: string): { line: AlertLine; evidenceWritten?: string } {
-  const bytes = Buffer.byteLength(item.raw, 'utf8');
-  if (bytes <= EVIDENCE_INLINE_LIMIT_BYTES) {
-    return { line: { ...item, id } };
-  }
-  const evidenceDir = path.join(opsDir, 'evidence');
-  mkdirSync(evidenceDir, { recursive: true });
-  const evidencePath = path.join(evidenceDir, `${id}.txt`);
-  writeFileSync(evidencePath, item.raw, 'utf8');
-  return { line: { ...item, id, evidencePath }, evidenceWritten: evidencePath };
-}
-
-function renderPushText(items: readonly AlertItem[]): string {
+function renderPushText(items: readonly { rule: string; severity: string; summary: string; evidenceRef: string }[]): string {
   const head = `**运维告警**（${items.length} 条）`;
   const body = items.map((item, index) => {
     return `${index + 1}. [${item.severity}] ${item.rule} · ${item.summary}\n   证据：${item.evidenceRef}`;
@@ -395,16 +256,14 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  // ① 落盘：确保 ops 目录存在，逐条 append；超长原文落证据文件。
-  mkdirSync(opsDir, { recursive: true });
-  const lines: string[] = [];
+  // ① 落盘：逐条 append；超长原文落证据文件（与进程内引擎共用持久化层）。
+  const lines: AlertLine[] = [];
   alerts.forEach((item, index) => {
     const id = `${now.getTime()}-${index}-${item.rule}`;
-    const { line } = buildAlertLine(item, id, opsDir);
-    lines.push(JSON.stringify(line));
-    console.log(JSON.stringify({ event: 'alert_persisted', id, rule: line.rule, subject: line.subject }));
+    lines.push(buildAlertLine(item, id, opsDir).line);
+    console.log(JSON.stringify({ event: 'alert_persisted', id, rule: item.rule, subject: item.subject }));
   });
-  appendFileSync(jsonlPath, lines.join('\n') + '\n', 'utf8');
+  appendAlertLines(jsonlPath, lines);
 
   // ② 推送 owner（推送失败只记一条 alert_push_failed，不影响已落盘）。
   const configPath = configExplicit ?? path.join(REPO_ROOT, 'config', 'agent.yaml');
@@ -429,7 +288,6 @@ async function main(): Promise<number> {
       at: nowIso,
       recipients,
       error: push.error,
-      // 落盘的告警本身不受影响：失败只作为独立观测事件追加。
       alertCount: alerts.length,
     });
     appendFileSync(jsonlPath, `${failure}\n`, 'utf8');
@@ -438,9 +296,8 @@ async function main(): Promise<number> {
     console.log(JSON.stringify({ event: 'alert_pushed', recipients, alerts: alerts.length }));
   }
 
-  // 状态持久化：日志偏移 + 更新后的冷却表。
-  const nextState: AlertsState = { version: 1, logOffset: nextOffset, cooldown: cooldownState };
-  writeFileSync(statePath, `${JSON.stringify(nextState, null, 2)}\n`, 'utf8');
+  // 状态持久化：日志偏移 + 更新后的冷却表（schema 与进程内引擎共用）。
+  writeAlertsState(statePath, { version: 1, logOffset: nextOffset, cooldown: cooldownState });
   return 0;
 }
 
