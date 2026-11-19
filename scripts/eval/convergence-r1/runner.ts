@@ -27,7 +27,7 @@ import type { AppConfig } from '@fshine/contracts';
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver, TurnDriverInput } from '../../../packages/agent/src/driver-contract';
 import { materializeEvalConfig } from '../../resolve-config-path';
-import { assembleSessionCore } from '../../ask-runtime';
+import { assembleSessionCore, mainThinkingLevelFrom } from '../../ask-runtime';
 import { assessEvalIsolation, assertEvalIsolation } from '../safety-gate';
 import { ALL_CASES, normalizeCaseId, type UserCase } from './cases';
 import { buildCriteriaDocument, CRITERIA_VERSION, JUDGE_VERSION, RUNNER_VERSION } from './criteria';
@@ -394,7 +394,8 @@ async function runTrial(options: TrialOptions): Promise<void> {
     },
     emptyOperationsMessage: '执行层没有声明任何只读 operation——拒绝以空允许集合运行',
     createDrivers: (driverEnv) => ({
-      mainDriver: recordingDriver(createPiTurnDriver({ env: driverEnv }), 'main', sink),
+      // Main 思考档与生产同源（manifest 里记录的 thinkingLevel 才不会与实跑不符）。
+      mainDriver: recordingDriver(createPiTurnDriver({ env: driverEnv, ...mainThinkingLevelFrom(driverEnv) }), 'main', sink),
       workerDriver: recordingDriver(createPiTurnDriver({ env: driverEnv }), 'worker', sink),
     }),
   });

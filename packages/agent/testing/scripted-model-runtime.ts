@@ -24,6 +24,11 @@ export interface ScriptedModelRuntimeOptions {
   contextWindow?: number;
   maxTokens?: number;
   /**
+   * 模型能力声明：是否支持思考档（缺省 false = 既有夹具行为逐字节不变）。
+   * true 时 Pi 的档位钳制不再把非 off 档位压回 off——思考档接线用例需要它。
+   */
+  reasoning?: boolean;
+  /**
    * 第 `callIndex` 次模型请求（含压缩摘要请求）返回的 assistant 消息；
    * 返回 undefined = 队列耗尽（抛错，测试立刻可见）。
    */
@@ -34,6 +39,8 @@ export interface ScriptedModelRuntime {
   runtime: ModelRuntime;
   calls(): number;
   requests(): readonly ScriptedRequestContext[];
+  /** 第 n 次请求 provider 实际收到的思考档（`options.reasoning`；未传 = undefined）。 */
+  reasoningLevels(): readonly (string | undefined)[];
   modelId: string;
   contextWindow: number;
 }
@@ -51,6 +58,7 @@ export async function createScriptedModelRuntime(options: ScriptedModelRuntimeOp
     refreshOnCreate: false,
   });
   const requests: ScriptedRequestContext[] = [];
+  const reasoningLevels: Array<string | undefined> = [];
   let calls = 0;
   runtime.registerProvider(SCRIPTED_PROVIDER_ID, {
     name: 'Scripted',
@@ -61,17 +69,18 @@ export async function createScriptedModelRuntime(options: ScriptedModelRuntimeOp
       name: modelId,
       api: 'openai-completions',
       baseUrl: 'http://127.0.0.1:9/v1',
-      reasoning: false,
+      reasoning: options.reasoning ?? false,
       input: ['text'],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow,
       maxTokens,
     }],
-    streamSimple: (_model, context) => {
+    streamSimple: (_model, context, streamOptions) => {
       const index = calls;
       calls += 1;
       const request = context as unknown as ScriptedRequestContext;
       requests.push(request);
+      reasoningLevels.push(typeof streamOptions?.reasoning === 'string' ? streamOptions.reasoning : undefined);
       const message = options.script(index, request);
       const stream = createAssistantMessageEventStream();
       if (message === undefined) {
@@ -104,5 +113,5 @@ export async function createScriptedModelRuntime(options: ScriptedModelRuntimeOp
       return stream;
     },
   });
-  return { runtime, calls: () => calls, requests: () => requests, modelId, contextWindow };
+  return { runtime, calls: () => calls, requests: () => requests, reasoningLevels: () => reasoningLevels, modelId, contextWindow };
 }

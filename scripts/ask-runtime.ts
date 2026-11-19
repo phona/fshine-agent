@@ -41,7 +41,7 @@ import {
   permissionsOfRole,
 } from '@fshine/core';
 import { applyExecutorLabel, loadAgentProfile } from '../packages/agent/src/agent-profile';
-import { createPiTurnDriver, parseContextWindow, type PiTurnDriverOptions } from '../packages/agent/src/pi-driver';
+import { createPiTurnDriver, parseContextWindow, parsePiThinkingLevel, type PiThinkingLevel, type PiTurnDriverOptions } from '../packages/agent/src/pi-driver';
 import type { MainSessionLocation } from '../packages/agent/src/session-persistence';
 import { createDummyCliClient, readOnlyOperationNames, writeOperationNames } from '../packages/agent/src/dummy-cli-client';
 import type { TurnDriver } from '../packages/agent/src/driver-contract';
@@ -210,6 +210,25 @@ export function compactionSettingsFrom(
     throw new Error('LLM_COMPACTION_RESERVE_TOKENS 与 LLM_COMPACTION_KEEP_RECENT_TOKENS 必须同时设置（只设一个时无法解释 Pi 的压缩配置）');
   }
   return { compactionSettings: { enabled: true, reserveTokens, keepRecentTokens } };
+}
+
+/**
+ * Main 思考档装配接线（缺口 4：`llm.mainThinkingLevel` 此前在产品代码里零读取——Main 与
+ * Worker 共用 `llm.thinkingLevel` 一档）。owner 决定：Main 高、Worker 中。
+ *
+ *   · `LLM_MAIN_THINKING_LEVEL`（配置层写回自 llm.mainThinkingLevel）优先；
+ *   · 未设/空串回落 `LLM_THINKING_LEVEL`——Main 不出现"无档位"，向后兼容；
+ *   · 非法档位由 parsePiThinkingLevel 当场抛中文错误点名变量（fail-fast，不静默降级成
+ *     供应商/Pi 缺省）。
+ *
+ * Worker 侧不传参数：驱动的缺省解析（pi-driver.ts:392）就是 `llm.thinkingLevel`。
+ */
+export function mainThinkingLevelFrom(
+  env: Record<string, string | undefined>,
+): { thinkingLevel?: PiThinkingLevel } {
+  const level = parsePiThinkingLevel(env.LLM_MAIN_THINKING_LEVEL, 'LLM_MAIN_THINKING_LEVEL')
+    ?? parsePiThinkingLevel(env.LLM_THINKING_LEVEL, 'LLM_THINKING_LEVEL');
+  return level === undefined ? {} : { thinkingLevel: level };
 }
 
 /**
@@ -1036,10 +1055,13 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
           env: input.env,
           ...contextWindowFrom(input.env),
           ...compactionSettingsFrom(input.env),
+          // Main 思考档：llm.mainThinkingLevel 优先、未设回落 llm.thinkingLevel（见 helper 注释）。
+          ...mainThinkingLevelFrom(input.env),
           reuseConversation: true,
           ...mainSessionOptions(input.mainSession),
         }),
-        // Worker 是一次性回合（每任务独立会话），不落业务会话文件。
+        // Worker 是一次性回合（每任务独立会话），不落业务会话文件；思考档 = 驱动缺省解析
+        // （llm.thinkingLevel，owner 决定 medium）。
         workerDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env) }),
       };
 
