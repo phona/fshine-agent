@@ -1091,13 +1091,20 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
        *   · 本回合有执行事实（executions 非空，含 needs_confirmation / needs_input 的写确认
        *     提案与补充问题）——那些必须让用户看见，照常送达；
        *   · 本回合已把某任务结果/失败交回模型（relayedTaskIds / pushSuppressedTaskIds 非空
-       *     ——快活完成、快活失败、等补充）：那段文本是**结果/说明**而不是受理卡片，照常送达。
+       *     ——快活完成、快活失败、等补充）：那段文本是**结果/说明**而不是受理卡片，照常送达；
+       *   · **回复以问号结尾**（owner 2026-11-19：判据只做格式——trim 后以 ？ 或 ? 结尾，
+       *     不做语义/关键词）：同回合交办 + 顺带向用户反问时，吞掉问题比多一句话糟得多。
        * 空回复的既有行为不变（下面照常判回合失败）。
        */
       const hasResultOrExecution = turn.executions.length > 0
         || (turn.relayedTaskIds?.length ?? 0) > 0
         || (turn.pushSuppressedTaskIds?.length ?? 0) > 0;
-      const dispatchSilent = turn.taskIds.length > 0 && !hasResultOrExecution && reply.trim() !== '';
+      const trimmedReply = reply.trim();
+      const endsWithQuestion = trimmedReply.endsWith('？') || trimmedReply.endsWith('?');
+      const dispatchSilent = turn.taskIds.length > 0
+        && !hasResultOrExecution
+        && !endsWithQuestion
+        && trimmedReply !== '';
       if (dispatchSilent) {
         log({
           event: 'turn_dispatch_silent',

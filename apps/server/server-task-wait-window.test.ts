@@ -334,6 +334,91 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
     }
   });
 
+  it('b3. 问号例外：交办回合回复以「？」结尾（同回合顺带反问）→ 照常送达、不落 turn_dispatch_silent', async () => {
+    const dir = tempDir();
+    const logs: Array<Record<string, unknown>> = [];
+    const records: ServerDriverRecord[] = [];
+    const plans = new Map<string, ServerPlan>([
+      ['交办一件要跑一阵的事', {
+        delegates: ['交办一件要跑一阵的事'],
+        reply: '已交办，正在后台办，完成后发你。顺便问一句：要不要也把 beta 的汇总一起做了？',
+      }],
+    ]);
+    const executor = new GatedExecutor();
+    const server = await createServer({
+      env: { LLM_MODEL: 'test-model' },
+      config: testConfig({ backgroundConcurrency: 1, taskRunWaitMs: 60 }),
+      dbPath: path.join(dir, 'state.db'),
+      createDrivers: () => ({ mainDriver: plannedMain(plans, records), workerDriver: { async run() { throw new Error('（测试）不该调用'); } } }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
+      taskExecutor: executor,
+      fileDelivery: new FakeTextDelivery('live'),
+      logger: (line) => logs.push(line),
+    });
+    const registry = createSqliteTaskRegistry(path.join(dir, 'state.db'), { readOnly: true });
+    try {
+      const reply = await server.handler(incoming('user-a', 'conv-a', 'msg-1', '交办一件要跑一阵的事'));
+      // 只交办 + 纯格式判据（以问号结尾）：不静默，回复照常送达用户。
+      expect(reply).toContain('已交办');
+      expect(String(reply).trim().endsWith('？')).toBe(true);
+      expect(logs.some((line) => line['event'] === 'turn_dispatch_silent')).toBe(false);
+      // 受理事实仍只给机械事实（不回执话术）。
+      const receipt = records[0]!.execResults[0] as Record<string, unknown>;
+      expect(receipt['accepted']).toBe(true);
+      expect(receipt).not.toHaveProperty('notice');
+      // 收尾：让后台任务落终态再关库（否则收尾定时器在已关闭的底账上跑）。
+      const taskId = String(receipt['taskId']);
+      executor.settle({ kind: 'failed', reason: '（测试清理）' });
+      await vi.waitFor(() => {
+        expect(registry.get(taskId, { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' }).status).toBe('failed');
+      }, { timeout: 5000 });
+    } finally {
+      executor.settle({ kind: 'failed', reason: '（测试清理）' });
+      registry.close();
+      await server.close();
+    }
+  });
+
+  it('b4. 问号例外只认格式：同样交办但回复是陈述句 → 仍静默', async () => {
+    const dir = tempDir();
+    const logs: Array<Record<string, unknown>> = [];
+    const records: ServerDriverRecord[] = [];
+    const plans = new Map<string, ServerPlan>([
+      ['交办一件要跑一阵的事', {
+        delegates: ['交办一件要跑一阵的事'],
+        reply: '已交办，正在后台办，完成后发你。要不要也把 beta 的汇总一起做了',
+      }],
+    ]);
+    const executor = new GatedExecutor();
+    const server = await createServer({
+      env: { LLM_MODEL: 'test-model' },
+      config: testConfig({ backgroundConcurrency: 1, taskRunWaitMs: 60 }),
+      dbPath: path.join(dir, 'state.db'),
+      createDrivers: () => ({ mainDriver: plannedMain(plans, records), workerDriver: { async run() { throw new Error('（测试）不该调用'); } } }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
+      taskExecutor: executor,
+      fileDelivery: new FakeTextDelivery('live'),
+      logger: (line) => logs.push(line),
+    });
+    const registry = createSqliteTaskRegistry(path.join(dir, 'state.db'), { readOnly: true });
+    try {
+      const reply = await server.handler(incoming('user-a', 'conv-a', 'msg-1', '交办一件要跑一阵的事'));
+      // 内容含反问意图但结尾不是问号（判据只做格式、不做语义）→ 仍是只交办回合，静默。
+      expect(reply).toBe('');
+      expect(logs.some((line) => line['event'] === 'turn_dispatch_silent')).toBe(true);
+      // 收尾：让后台任务落终态再关库（否则收尾定时器在已关闭的底账上跑）。
+      const taskId = String((records[0]!.execResults[0] as Record<string, unknown>)['taskId']);
+      executor.settle({ kind: 'failed', reason: '（测试清理）' });
+      await vi.waitFor(() => {
+        expect(registry.get(taskId, { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' }).status).toBe('failed');
+      }, { timeout: 5000 });
+    } finally {
+      executor.settle({ kind: 'failed', reason: '（测试清理）' });
+      registry.close();
+      await server.close();
+    }
+  });
+
   it('c. 慢活完成（live）：主动投递恰好一次，内容来自任务结果', async () => {
     const dir = tempDir();
     const delivery = new FakeTextDelivery('live');

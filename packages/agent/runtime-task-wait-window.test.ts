@@ -222,9 +222,12 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
     }
   });
 
-  it('协议文本：不向用户提工单编号；查询工具描述不再指向受理回执', () => {
-    expect(MAIN_PROTOCOL_NOTE).toContain('工单编号');
-    expect(MAIN_PROTOCOL_NOTE_WITH_WRITES).toContain('工单编号');
+  it('协议文本：不再要求模型转述受理回执；查询工具描述不再指向受理回执', () => {
+    // owner 2026-11-19：受理固定回执已删除、只交办回合由宿主静默——协议里那句「task_run
+    // 返回已受理…如实告诉用户」是死提示词，已删；连带「不向用户提工单编号」的出处（同一句）
+    // 一并消失。编号只需在任务查询工具描述里保持「不指向受理回执」。
+    expect(MAIN_PROTOCOL_NOTE).not.toContain('已受理/在后台办理中');
+    expect(MAIN_PROTOCOL_NOTE_WITH_WRITES).not.toContain('已受理/在后台办理中');
     // 编号只保留在详情面：task_status 仍支持 #编号引用，但出处是任务列表，不再是受理回执
     expect(TASK_STATUS_TOOL_DESCRIPTION).not.toContain('受理回执');
     expect(String(TASK_RESULT_TOOL_SCHEMA.properties)).not.toContain('受理回执');
