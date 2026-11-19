@@ -92,6 +92,14 @@ export interface PendingConfirmation {
   expiresAt?: string;
   /** 提案所属 operation（执行事实原样；接续透传时用）。 */
   operation: string;
+  /**
+   * 提案调用的参数**原文**（不透明数据：宿主不解析业务字段、不改写、不补——与句柄同一条
+   * 底账记录，不另建表）。2026-11-19 live 修复（确认后续跑 Worker 是新会话、没有转录）：
+   * 只给摘要时 Worker 只能从人话摘要重编参数，与执行层绑定校验相撞（摘要超 10 条被截断 →
+   * 漏 --records → CONFIRMATION_BINDING_MISMATCH）；确认续跑时这份参数原样交回 Worker。
+   * 缺省 = 旧记录（无参数可交回；渲染端不编造）。
+   */
+  args?: Record<string, unknown>;
 }
 
 /** waiting_user 的机械问题形状（执行层 needs_input 事实；不编造、不改写候选）。 */

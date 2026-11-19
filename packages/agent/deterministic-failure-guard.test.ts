@@ -188,6 +188,37 @@ describe('A2b 确定性失败后的同对象重试守卫', () => {
     expect(client.requests).toHaveLength(2);
   });
 
+  it('显式 retryable 放行有次数上界（E14 口径：同一件事一个回合内兜/重试 ≤2 次）：第 3 次发起前被拦', async () => {
+    // 根因（真模型验收实跑）：执行层对参数形状错误声明 retryable:true 时宿主无条件放行，
+    // Worker 一个回合里用 5 种错误写法连撞 5 次——放行没有次数上限。修法：放行次数用尽后，
+    // 同一 (operation, 对象) 转入既有拦截路径（retryBlocked/事件），不新造计数通道。
+    const retryableShapeError: (request: ExecutionRequest) => ExecutionOutcome = () => ({
+      status: 'failed',
+      error: {
+        code: 'INVALID_RECORDS',
+        message: '--records 必须是结构化数组（每项 {name, value}）',
+        retryable: true,
+      },
+    });
+    const { client, worker, turn } = await runWorkerCalls([
+      { operation: 'dummy.query', args: { '--collection': 'alpha', '--records': 'bad-1' } },
+      { operation: 'dummy.query', args: { '--collection': 'alpha', '--records': 'bad-2' } },
+      { operation: 'dummy.query', args: { '--collection': 'alpha', '--records': 'bad-3' } },
+    ], '查 alpha', retryableShapeError);
+    // 前两次真实发起（放行），第三次在发起前被宿主拦下（执行层没被打第 3 次）。
+    expect(client.requests).toHaveLength(2);
+    expect(turn.retryAllowed).toEqual([
+      { operation: 'dummy.query', object: 'alpha', code: 'INVALID_RECORDS' },
+      { operation: 'dummy.query', object: 'alpha', code: 'INVALID_RECORDS' },
+    ]);
+    // 拦截事实带 declaredRetryable:true（执行层当时确实说可重试；拦的是次数，不是改写语义）。
+    expect(turn.retryBlocked).toEqual([
+      { operation: 'dummy.query', object: 'alpha', code: 'INVALID_RECORDS', declaredRetryable: true },
+    ]);
+    // 被拦时按既有话术如实告知模型停下（同一句「不要再换参数重试」）。
+    expect(worker.toolErrors.some((message) => message.includes('不要再换参数重试'))).toBe(true);
+  });
+
   it('失败但**未声明** retryable → 按不可重试处理（fail-safe 缺省）', async () => {
     // owner 2026-11-18：不确定就停下。执行层没写 retryable 不等于「可以重试」。
     const unclassified: (request: ExecutionRequest) => ExecutionOutcome = () => ({

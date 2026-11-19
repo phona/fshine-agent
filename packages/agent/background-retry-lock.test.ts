@@ -225,6 +225,49 @@ describe('A2b 后台执行器：同对象确定性失败不重撞', () => {
     expect(allowed[0]!.code).toBe('TRANSIENT');
   });
 
+  it('③-2 retryable:true 放行有次数上界（E14 口径：同一件事一个回合内兜/重试 ≤2 次）：第 3 次发起前被拦', async () => {
+    // 根因（真模型验收实跑）：夹具对参数形状错误 INVALID_RECORDS 声明 retryable:true，A2b 放行，
+    // 实测 Worker 一个回合里用 5 种错误写法连撞 5 次——放行没有次数上限。修法：放行次数用尽后，
+    // 同一 (operation, 对象) 转入既有拦截路径（before 拦下 + 既有 execution_retry_blocked 事件），
+    // 任务结局如实失败；回合边界不跨回合累计（与确定性失败锁同一作用域）。
+    const registry = makeRegistry();
+    const events: ExecutionEvent[] = [];
+    const capture: WorkerCapture = { results: [], errors: [] };
+    const client = new CountingClient(() => ({
+      status: 'failed',
+      error: { code: 'INVALID_RECORDS', message: '--records 必须是结构化数组（每项 {name, value}）', retryable: true },
+    }));
+    const badShape = (marker: string): Record<string, unknown> => ({
+      operation: 'dummy.query',
+      args: { '--collection': 'alpha', '--records': marker },
+    });
+    const executor = await makeExecutor({
+      client,
+      registry,
+      worker: roundWorker([[badShape('bad-1'), badShape('bad-2'), badShape('bad-3')]], capture),
+      onEvent: (event) => events.push(event),
+    });
+
+    await runBackground(registry, executor, 't_retryable_budget');
+
+    // 执行层只被真实打到 2 次（第 2 次失败后预算用尽，第 3 次在发起前被拦）。
+    expect(client.requests).toHaveLength(2);
+    const allowed = eventsNamed(events, 'execution_retry_allowed');
+    expect(allowed).toHaveLength(2);
+    const blocked = eventsNamed(events, 'execution_retry_blocked');
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]!).toMatchObject({
+      taskId: 't_retryable_budget',
+      operation: 'dummy.query',
+      object: 'alpha',
+      code: 'INVALID_RECORDS',
+      // 执行层当时确实说可重试——拦的是次数，不改写它的声明。
+      declaredRetryable: true,
+    });
+    // 任务结局如实失败（不把「停下来」讲成成功）。
+    expect(registry.get('t_retryable_budget', SCOPE).status).toBe('failed');
+  });
+
   it('④ 跨回合不记忆：下一个回合同键再调 → 允许（本回合才锁）', async () => {
     const registry = makeRegistry();
     const events: ExecutionEvent[] = [];

@@ -96,6 +96,13 @@ export interface PendingConfirmation {
   summary: string;
   expiresAt?: string;
   operation: string;
+  /**
+   * 提案调用的参数原文（不透明数据：宿主不解析、不改写）。确认续跑（`confirm()`）时随
+   * 提案对象原样注入 TaskExecutionInput.pendingConfirmation，由执行端渲染进 Worker 委派
+   * 的机械事实——续跑 Worker 是新会话，没有这份参数就只能从摘要重编（live 实测撞绑定校验）。
+   * 缺省 = 旧记录（无参数可交回）。与 task-registry 同名同义，跨边界逐字透传。
+   */
+  args?: Record<string, unknown>;
 }
 
 /** waiting_user 的机械问题形状（执行层 needs_input 事实；不编造、不改写候选）。 */

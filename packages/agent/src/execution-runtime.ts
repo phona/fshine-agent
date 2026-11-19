@@ -1030,15 +1030,35 @@ const SETTLED_TASK_STATUSES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * 写确认续跑事实块（P0，2026-11-19）：存在待确认提案、用户已在上一回合表态时，宿主从
- * 底账提案组装这条**机械事实**（不是话术补丁），交给 renderWorkerDelegation 的
- * `confirmationFact`。只含可展示摘要与直接提交指令；**handle 与 operation 名不进委派文本**
- * （Worker 永远看不到凭据）。缺省（无提案/非续跑）由调用方不传字段 → 委派逐字节不变。
+ * 写确认续跑事实块（P0，2026-11-19；载荷随行 = 2026-11-19 live 修复）：存在待确认提案、
+ * 用户已在上一回合表态时，宿主从底账提案组装这条**机械事实**（不是话术补丁），交给
+ * renderWorkerDelegation 的 `confirmationFact`。
+ *
+ * 载荷随行的根因（真模型验收实跑）：续跑 Worker 是**新会话、没有转录**，只拿人话摘要时只能
+ * 自己重编参数——而摘要超过 10 条会被截断（执行层只列前 10 条），实测漏掉 `--records` →
+ * 与执行层的绑定校验相撞（CONFIRMATION_BINDING_MISMATCH / CONFIRMATION_REQUIRED），写不进去。
+ * 所以提案时的参数**原文**（opaque：宿主不解析业务字段）随事实一并交回，Worker 原样照抄提交。
+ * handle 不进委派文本（Worker 永远看不到确认凭据）；operation 名与参数不是凭据——Worker
+ * 的委派里本来就有全量 operation 清单，缺了它反而不知道这份参数属于哪次调用。缺省
+ * （无提案/非续跑/旧记录没有参数）由调用方不传字段或渲染端保持不变。
  */
 export function renderConfirmationResumeFact(confirmation: {
   summary: string;
+  operation?: string;
+  args?: Record<string, unknown>;
 }): string {
-  return `用户已确认上一轮提案（摘要：${confirmation.summary}）。直接提交，不要重新生成提案。`;
+  const head = `用户已确认上一轮提案（摘要：${confirmation.summary}）。直接提交，不要重新生成提案。`;
+  if (confirmation.args === undefined) return head;
+  // 参数按不透明数据处理：只序列化，不排序、不裁剪、不改写（逐字节照抄才是机械事实）。
+  const proposal = JSON.stringify({
+    ...(confirmation.operation === undefined ? {} : { operation: confirmation.operation }),
+    args: confirmation.args,
+  });
+  return [
+    head,
+    '上一轮提案的调用原文（机械事实：按这份 operation 与 args 原样提交，不要重新生成、不要省略或改写任何参数）：',
+    proposal,
+  ].join('\n');
 }
 
 /**
@@ -1797,6 +1817,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
    *   · **下一回合**的 execute_operation 才把句柄与本回合用户原话原样透传给执行层；
    *   · 执行层返回后清除（不判断回执是不是「接受」——那是执行层的语义）。
    * 键 = 会话自身身份 (principalId, sessionId)：一个 createSession 一张表，不跨会话共享。
+   * 注意（2026-11-19 载荷修法的边界）：inline 面**没有显式确认动作**（确认与否由执行层
+   * 校验句柄），这条最小状态里没有「提案调用原文」，因此也**不渲染**续跑事实块——给不出
+   * 「用户已确认」这种话（那是替用户表态）。载荷随行只落在**底账提案 + task_confirm** 那条
+   * 显式确认路径上（见 PendingConfirmation.args / renderConfirmationResumeFact）。
    */
   let pendingConfirmation:
     | { handle: string; summary: string; expiresAt?: string; issuedTurn: number }
@@ -2548,12 +2572,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     // 这里给确定性拒绝 + 可执行下一步，不依赖模型自己想起来用 task_resume。
     // 用 listWaiting(scope) 而不是 list(scope)：只取等待行且走 (principal, session, status)
     // 索引——每次交办都全量映射会话任务会在浸泡里把 RSS 顶上去（实测 +13%）。
-    const pendingConfirmation = registry.listWaiting(scope).find(
+    // 变量名避开会话级 pendingConfirmation（同名的会话小表在下方委派渲染里要用）。
+    const waitingProposal = registry.listWaiting(scope).find(
       (task) => task.pendingQuestion?.confirmation !== undefined,
     );
-    if (pendingConfirmation !== undefined) {
-      const no = pendingConfirmation.taskNo === undefined ? '' : `（编号 #${pendingConfirmation.taskNo}）`;
-      const summary = pendingConfirmation.pendingQuestion?.confirmation?.summary ?? '';
+    if (waitingProposal !== undefined) {
+      const no = waitingProposal.taskNo === undefined ? '' : `（编号 #${waitingProposal.taskNo}）`;
+      const summary = waitingProposal.pendingQuestion?.confirmation?.summary ?? '';
       throw new Error(
         `还有一件事等你确认${no}：${summary}。回「确认」我就提交，回「不」我就不动；`
         + '这件事确认或放弃之后再办新的。',
@@ -3387,7 +3412,17 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
 
   return {
     async execute(task, context): Promise<TaskExecutionOutcome> {
-      const recorded: Array<{ operation: string; outcome: ExecutionOutcome; dispatchKey?: string }> = [];
+      const recorded: Array<{
+        operation: string;
+        outcome: ExecutionOutcome;
+        dispatchKey?: string;
+        /**
+         * needs_confirmation 提案调用的参数原文（不透明数据；宿主不解析业务字段）。随
+         * 提案结局带进底账（PendingConfirmation.args）——确认续跑的新 Worker 没有上一轮
+         * 转录，只给摘要时只能重编参数（live 实测撞执行层绑定校验）。非提案条目不携带。
+         */
+        proposalArgs?: Record<string, unknown>;
+      }> = [];
       /**
        * 本回合被**宿主**在发起前拒绝的 operation（允许集合之外）。它不产生执行事实
        * （没有到达执行层），但会改变零执行时的失败话术：权限问题不能说成「模型没干活」。
@@ -3626,7 +3661,17 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         }
         // 取消胜出：不再把（可能迟到的）执行结果交回 Worker；让回合按 abort 收尾。
         if (signal.aborted) throw abortError();
-        if (run.executed) recorded.push({ operation, outcome: run.outcome, dispatchKey: run.dispatchKey });
+        if (run.executed) {
+          recorded.push({
+            operation,
+            outcome: run.outcome,
+            dispatchKey: run.dispatchKey,
+            // 载荷随手柄落底账（提案接受的那一刻就在手里）：给的是**模型提交的原始结构化
+            // 参数**（装信封之前的值），确认续跑时原样交回 Worker 重提交——宿主不解析、
+            // 不改写；二次提交仍走同一套 lint+装信封（宿主继续是唯一的信封翻译者）。
+            ...(run.outcome.status === 'needs_confirmation' ? { proposalArgs: baseCallArgs } : {}),
+          });
+        }
         // 与前台同一套脱敏投影：Worker 永远看不到 confirmation.handle（后台也曾直回原始
         // outcome，句柄会漏进模型上下文；S1 起两处共用 toModelVisibleOutcome）。
         // 大响应文件化（2026-11-19）同源：completed 超阈值 → 落任务文件、只回摘要 + fileId。
@@ -3747,7 +3792,7 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       // 写操作提案（S1）：本轮**最后一条非只读执行**是 needs_confirmation → 回合结局是
       // 待确认（不是 failed）——执行层已冻结一次待确认操作，用户还什么都没表态。只读调用
       // 不计（读调用不会产生待确认写操作）。提案句柄原样带走，由 runner 落底账待 S3 透传。
-      const confirmationOutcomeOf = (entry: { operation: string; outcome: ExecutionOutcome }): Extract<TaskExecutionOutcome, { kind: 'needs_confirmation' }> => {
+      const confirmationOutcomeOf = (entry: { operation: string; outcome: ExecutionOutcome; proposalArgs?: Record<string, unknown> }): Extract<TaskExecutionOutcome, { kind: 'needs_confirmation' }> => {
         const confirmation = (entry.outcome as Extract<ExecutionOutcome, { status: 'needs_confirmation' }>).confirmation;
         return {
           kind: 'needs_confirmation',
@@ -3757,6 +3802,9 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
             summary: confirmation.summary,
             operation: entry.operation,
             ...(confirmation.expiresAt === undefined ? {} : { expiresAt: confirmation.expiresAt }),
+            // 提案调用的参数原文随手柄落底账（同一行；宿主不解释业务字段）。确认续跑时
+            // runner 把这条记录整条注入执行端，由 renderConfirmationResumeFact 原样交回 Worker。
+            ...(entry.proposalArgs === undefined ? {} : { args: entry.proposalArgs }),
           },
         };
       };
