@@ -1,13 +1,18 @@
 /**
- * 只读探针：跨重启重投是否被当成新回合再执行一次。
+ * 只读探针：跨重启重投**不**被当成新回合再执行（底账幂等）。
  *
- * 缺口与闭环判据登记：GitHub issue #68（原设计档 idempotency-cross-restart.md 2026-11-18 已删，git 历史可考）。
+ * 语义已于 2026-11-19 翻转：`inbound_messages` 底账落地（feat/inbound-idempotency）后，
+ * 去重事实落库——close 后同 dbPath 重建 server + 同 messageId 重投**不再重复执行**，
+ * 回放同一句回执、零新副作用。本探针据此改为**正向断言**：上述成立即通过（失败退出码 1）。
+ *
+ * 【历史】本探针原为反例：跨重启去重缓存（进程内存 Map）已丢，整回合重跑、重复副作用
+ * （GitHub issue #68；原设计档 idempotency-cross-restart.md 2026-11-18 已删，git 历史可考）。
  *
  * 不触网、不碰真实模型、不碰真实平台、不改产品代码：
  *   · 用 server 的真实装配（createServer）与真实 handler 去重路径；
  *   · 注入脚本化 TurnDriver（每回合调用一次 run_js）与计数 RunJsExecutor（外部副作用替身）；
- *   · 同一进程重复投递同一 messageId = 正例（去重命中，零新执行）；
- *   · close 后同 dbPath 重建 server + 同 messageId 重投 = 反例（去重缓存已丢，整回合重跑）。
+ *   · 同一进程重复投递同一 messageId = 零新执行（在途/底账去重）；
+ *   · close 后同 dbPath 重建 server + 同 messageId 重投 = 零新执行、回放同一句回执（本探针主张）。
  *
  * 运行：TMPDIR="${TMPDIR:-$HOME/.tmp}" node --import tsx scripts/probes/idempotency-cross-restart-probe.ts
  * 证据只写临时目录，退出时删除；仓库工作区零写入。
@@ -185,50 +190,61 @@ async function main(): Promise<void> {
     const firstReply = await serverA.handler(incoming(SAME_MESSAGE_ID));
     const afterFirst = effects.length;
 
-    // 同进程同 messageId 重投：去重缓存命中，零新执行（正例）。
+    // 同进程同 messageId 重投：在途/底账去重命中，零新执行、回放同一句。
     const duplicateReply = await serverA.handler(incoming(SAME_MESSAGE_ID));
     const afterInProcessDuplicate = effects.length;
 
     const messageDoneBeforeRestart = logs.filter((line) => line['event'] === 'message_done').length;
     await serverA.close();
 
-    // ── 进程 B（同 dbPath 重建 = 进程内“重启”）───────────────────────────────
+    // ── 进程 B（同 dbPath 重建 = 进程内“重启”）：去重事实落底账，跨重启仍零新执行。 ──
     const serverB = await startServer(dbPath, stateDir, effects, logs);
-    const afterRestartReply = await serverB.handler(incoming(SAME_MESSAGE_ID));
+    const restartReply = await serverB.handler(incoming(SAME_MESSAGE_ID));
     const afterRestart = effects.length;
     await serverB.close();
     const messageDoneAfterRestart = logs.filter((line) => line['event'] === 'message_done').length;
 
-    const replayed = logs.filter((line) => line['event'] === 'message_duplicate_replayed').length;
+    const replayEvents = logs.filter((line) => line['event'] === 'message_duplicate_replayed').length;
+
+    // 正向断言（全成立 = 探针通过）。
+    const checks = {
+      // 同进程重投：零新副作用，回放同一句。
+      inProcessDuplicateZeroEffects: afterInProcessDuplicate === afterFirst,
+      inProcessDuplicateSameReply: duplicateReply === firstReply,
+      // 跨重启重投：零新副作用、零新回合、回放同一句（底账效力）。
+      restartRedeliveryZeroEffects: afterRestart === afterInProcessDuplicate,
+      restartRedeliveryNoNewTurn: messageDoneAfterRestart === messageDoneBeforeRestart,
+      restartRedeliverySameReply: restartReply === firstReply,
+    };
+    const passed = Object.values(checks).every(Boolean);
+
     const scenarioB = probeRegistryReachability(dir);
     console.log(JSON.stringify({
       probe: 'idempotency-cross-restart',
-      scenarioA_messageRedelivery: {
+      semantic: '跨重启重投不重复执行（inbound_messages 底账，2026-11-19 翻转）',
+      passed,
+      checks,
+      scenarioA_crossRestartRedelivery: {
         sameMessageId: SAME_MESSAGE_ID,
-        sameTurnInProcess: {
-          firstReply,
-          duplicateReply,
-          effectsAfterFirst: afterFirst,
-          effectsAfterDuplicate: afterInProcessDuplicate,
-          newEffectsFromDuplicate: afterInProcessDuplicate - afterFirst,
-          duplicateReplayedEvents: replayed,
-        },
-        afterRestart: {
-          reply: afterRestartReply,
-          messageDoneEventsBeforeRestart: messageDoneBeforeRestart,
-          messageDoneEventsAfterRestart: messageDoneAfterRestart,
-          effectsBeforeRestart: afterInProcessDuplicate,
-          effectsAfterRestartRedelivery: afterRestart,
-          newEffectsFromRestartRedelivery: afterRestart - afterInProcessDuplicate,
-          runIds: effects.map((effect) => effect.runId),
-        },
-        conclusion:
-          afterInProcessDuplicate === afterFirst && afterRestart > afterInProcessDuplicate
-            ? '重启后同一 messageId 重投：进程内去重缓存已丢，整回合再次执行（反例成立）'
-            : '未复现：检查注入面',
+        firstReply,
+        inProcessDuplicateReply: duplicateReply,
+        restartReply,
+        effectsAfterFirst: afterFirst,
+        effectsAfterInProcessDuplicate: afterInProcessDuplicate,
+        effectsAfterRestartRedelivery: afterRestart,
+        newEffectsFromRestartRedelivery: afterRestart - afterInProcessDuplicate,
+        messageDoneEventsBeforeRestart: messageDoneBeforeRestart,
+        messageDoneEventsAfterRestart: messageDoneAfterRestart,
+        duplicateReplayedEvents: replayEvents,
+        runIds: effects.map((effect) => effect.runId),
+        conclusion: passed
+          ? '同一 messageId 进程内与跨重启重投均零新执行、回放同一句回执（正向断言成立）'
+          : '未成立：跨重启重投产生了新副作用或新回合——检查 inbound_messages 底账接线',
       },
       scenarioB_persistedOutcomeReachability: scenarioB,
     }, null, 2));
+
+    if (!passed) process.exitCode = 1;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
