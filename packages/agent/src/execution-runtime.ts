@@ -956,7 +956,7 @@ export interface Session {
    * 唤醒入口（会话状态变化 → 模型把话带给用户）：把一条宿主事实交给 Main 驱动——
    * 会话空闲时触发一个模型回合并取回它产出的正文；会话忙时事实入队、由当前回合负责。
    * 出口四态见 WakeResult；驱动不支持唤醒（测试替身/一次性驱动）= unavailable。
-   * 本层只透传事实与回合截止（mainTurnMs），不解释事实内容、不投递。
+   * 本层只透传事实与回合截止（WAKE_TURN_MS：单次调用量级），不解释事实内容、不投递。
    */
   wake(factText: string): Promise<WakeResult>;
   tasks(): readonly TaskRecord[];
@@ -966,6 +966,14 @@ export interface Session {
 
 const DEFAULT_MAIN_TURN_MS = 300_000;
 const DEFAULT_WORKER_TURN_MS = 180_000;
+/**
+ * 唤醒回合的界（2026-11-19 复核 F1）：唤醒 = **单次模型调用量级**（喂事实 → 模型说一句 →
+ * 取正文），不是含工具循环的业务回合——一审用 mainTurnMs（缺省 300s）当界，一次卡住的
+ * 唤醒会把会话链按住 5 分钟（用户消息同链等待，与「随时能接管」冲突）。
+ * 没有现成的 runtime 常量可复用（mainTurnMs 300s / workerTurnMs 180s 都是业务回合量级），
+ * 用模块内常量，不新增 runtime 配置键（导出只为守卫测试）。
+ */
+export const WAKE_TURN_MS = 60_000;
 /**
  * A2（2026-11-18）：单回合执行 operation 上限的执行侧缺省（与 resource-policy 缺省 5
  * 同值）。注入策略时读策略解析值（单一配置源：runtime 配置的缺省与解释归 resource-policy）；
@@ -3003,11 +3011,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   /**
    * 唤醒（宿主事实 → 模型说）：只把事实与回合截止转给 Main 驱动；驱动缺省（测试替身）
    * = 没有可唤醒的会话，按 unavailable 出口（调用方兜底，不冒充已唤醒）。
+   * 截止 = `WAKE_TURN_MS`（单次调用量级）——不是业务回合的 mainTurnMs（见其定义处）。
    */
   async function wake(factText: string): Promise<WakeResult> {
     const driverWake = options.mainDriver.wake;
     if (driverWake === undefined) return { outcome: 'unavailable' };
-    return await driverWake.call(options.mainDriver, factText, { deadline: Date.now() + mainTurnMs });
+    return await driverWake.call(options.mainDriver, factText, { deadline: Date.now() + WAKE_TURN_MS });
   }
 
   return {

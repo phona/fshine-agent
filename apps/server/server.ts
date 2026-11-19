@@ -63,7 +63,6 @@ import { createResourcePolicy, fileRefTtlMsOf, resolveRuntimeConfig } from '../.
 import { SessionPersistence } from '../../packages/agent/src/session-persistence';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import { deriveTaskName } from '../../packages/agent/src/task-registry';
-import { failureMessageFor } from '../../packages/agent/src/user-facing-failure';
 import type { TaskExecutor, TaskRunner } from '../../packages/agent/src/task-runner';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../../packages/agent/src/worker-skills';
 import {
@@ -75,7 +74,13 @@ import {
 } from '../../scripts/ask-runtime';
 import { createAttachmentFactQueue, createScopedNoteQueue } from './attachment-facts';
 import { AttachmentNudge, type NudgeClock } from './attachment-nudge';
-import { deliverTaskResult, deliverTaskFailure, routeFromSessionId, taskCompletionFactText } from './task-completion-delivery';
+import {
+  deliverTaskResult,
+  deliverTaskFailure,
+  routeFromSessionId,
+  taskCompletionFactText,
+  taskCompletionFallbackText,
+} from './task-completion-delivery';
 import { composeNotificationSinks, createChatNotificationSink } from './notification-chat-sink';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -675,9 +680,12 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       onExecutionEvent: (event) => log({ mode: 'background', ...event }),
       log: (line) => log({ mode: 'background-runner', ...line }),
       // B 切片（2026-11-19 唤醒切片）：后台任务确认完成 → **唤醒原会话里的模型、由它把
-      // 这件事说给用户**，宿主只投递它说的话（宿主不再拼完成文案；身份行已删）。会话拿不到 /
-      // 唤醒回合失败（含空回复）= 投宿主兜底话术一句 + 事实留在待注入（下次用户开口由模型
-      // 补说）；唤醒时会话忙 = 事实入队、由当前回合负责说（宿主不另行投递，避免说两遍）。
+      // 这件事说给用户**，宿主只投递它说的话（宿主常规成功文案已删；身份行已删）。
+      // **非 live 部署不唤醒**（没有真实收件人，不白花模型调用；2026-11-19 复核 F5）。
+      // 会话拿不到 / 唤醒回合失败（含空回复）→ 宿主兜底**如实报完成事实**（业务名 + 结果
+      // 正文；不得说「没弄好/再试一次」——任务其实已成功，2026-11-19 复核 F2）+ 事实留在
+      // 待注入（下次用户开口由模型补说）；唤醒时会话忙 = 事实入队、由当前回合负责说
+      // （宿主不另行投递，避免说两遍）。
       // 回调经会话链串行（快活抑制判定须在受理回合结束后做）；投递失败/抑制只记事件，不改任务事实。
       onTaskCompleted: (completion) => {
         const sessionKey = `${completion.principalId}\u0000${completion.sessionId}`;
@@ -749,22 +757,35 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             ...(name === undefined ? {} : { name }),
             resultText: completion.resultText,
           });
-          let outcome = 'unavailable';
+          // 降级兜底文本（**全方案唯一允许的宿主用户文案**；只走 unavailable/failed 降级
+          // 路径与非 live 不唤醒路径）：任务已由执行端确认完成——如实报事实（业务名 + 结果
+          // 正文），不得说「没弄好/再试一次」（2026-11-19 复核 F2：那会诱导用户重复执行写）。
+          const fallbackText = taskCompletionFallbackText({
+            ...(name === undefined ? {} : { name }),
+            resultText: completion.resultText,
+          });
+          // 非 live 部署不唤醒（2026-11-19 复核 F5）：没有真实收件人，唤醒只会白花一次模型
+          // 调用（正文拿到后整段丢弃）。live/silent 语义不变——投递抑制记账照旧走
+          // deliverTaskResult（suppressed，绝不记 sent），完成事实进待注入队列补说。
+          const liveWake = completionDelivery !== undefined && completionDelivery.deliveryMode === 'live';
+          let outcome = liveWake ? 'unavailable' : 'suppressed';
           let modelText = '';
           let wakeFailure: { errorType: string; message: string } | undefined;
-          try {
-            const session = await sessionFor(completion.principalId, completion.sessionId);
-            const woke = await session.wake(factText);
-            outcome = woke.outcome;
-            modelText = woke.text ?? '';
-          } catch (error) {
-            outcome = 'failed';
-            wakeFailure = {
-              errorType: error instanceof Error ? error.name : 'UnknownError',
-              message: (error instanceof Error ? error.message : String(error)).slice(0, 300),
-            };
+          if (liveWake) {
+            try {
+              const session = await sessionFor(completion.principalId, completion.sessionId);
+              const woke = await session.wake(factText);
+              outcome = woke.outcome;
+              modelText = woke.text ?? '';
+            } catch (error) {
+              outcome = 'failed';
+              wakeFailure = {
+                errorType: error instanceof Error ? error.name : 'UnknownError',
+                message: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+              };
+            }
           }
-          // 唤醒事实只进结构化事件（不带结果内容、不带内部标识）。
+          // 唤醒事实只进结构化事件（不带结果内容、不带内部标识）；非 live 不唤醒记 suppressed。
           log({
             event: 'task_completion_wake',
             principalId: completion.principalId,
@@ -777,11 +798,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           if (outcome === 'busy') return;
           const wokenText = outcome === 'woken' && modelText.trim() !== '' ? modelText : undefined;
           if (wokenText === undefined) {
-            // 兜底（unavailable/failed）：投宿主那一句兜底话术（不新写文案）；事实留在
-            // 「待注入」（既有 injections 机制，不新建队列）——下次用户开口由模型补说。
+            // 降级（unavailable/failed）与非 live 不唤醒（suppressed）：事实留在「待注入」
+            // （既有 injections 机制，不新建队列）——下次用户开口由模型补说。
             systemNotes.enqueue(completion.principalId, completion.sessionId, factText);
           }
-          const deliveredText = wokenText ?? failureMessageFor('host_fault').text;
+          const deliveredText = wokenText ?? fallbackText;
           await deliverTaskResult({
             taskId: completion.taskId,
             principalId: completion.principalId,

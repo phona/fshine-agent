@@ -23,7 +23,8 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import { createPiTurnDriver } from './src/pi-driver';
 import { createScriptedModelRuntime } from './testing/scripted-model-runtime';
-import { createSession } from './src/execution-runtime';
+import { WAKE_TURN_MS, createSession } from './src/execution-runtime';
+import type { TurnDriver, WakeResult } from './src/driver-contract';
 import { TaskOwnershipError, createTaskRegistry, type TaskRegistry } from './src/task-registry';
 import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
 
@@ -435,5 +436,38 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
     registry.begin({ taskId: 'task_forged_2', ...scope, request: '查询 documents' });
     registry.complete('task_forged_2', '查询成功，共 3 条数据。');
     expect(registry.get('task_forged_2', scope).status).toBe('unexecuted');
+  });
+});
+
+describe('唤醒回合的界（2026-11-19 复核 F1）', () => {
+  it('Session.wake 传给驱动的截止 = 单次调用量级（WAKE_TURN_MS），不是业务回合的 mainTurnMs(300s)', async () => {
+    let observedDeadline: number | undefined;
+    const fakeMain: TurnDriver = {
+      async run() {
+        throw new Error('（测试）唤醒用例不应起业务回合');
+      },
+      async wake(_factText: string, options?: { deadline?: number }): Promise<WakeResult> {
+        observedDeadline = options?.deadline;
+        return { outcome: 'woken', text: '好。' };
+      },
+    };
+    const session = await createSession({
+      principalId: 'wecom:test-user',
+      sessionId: 'sess_wake_bound',
+      client: new FakeClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver: fakeMain,
+      workerDriver: fakeMain,
+      mainSystemPrompt: '你是测试主 Agent。',
+      // 业务回合的界照旧是 300s：唤醒不能用它当界（一次卡住的唤醒按住会话链 5 分钟）。
+      mainTurnMs: 300_000,
+    });
+    const woke = await session.wake('[任务完成] 测试事实：已完成。');
+    expect(woke.outcome).toBe('woken');
+    expect(observedDeadline).toBeDefined();
+    const after = Date.now();
+    // deadline = 调用时刻 + WAKE_TURN_MS；用 after 收边（调用时刻 ≤ after）。
+    expect(observedDeadline! - after).toBeLessThanOrEqual(WAKE_TURN_MS);
+    expect(observedDeadline! - after).toBeGreaterThan(0);
   });
 });
