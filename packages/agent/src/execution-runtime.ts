@@ -62,6 +62,7 @@ export type { TaskInputCopier } from './file-store';
 import { classifyFailure, confirmationExpiredMessage, failureMessageFor, type UserFacingFailureKind } from './user-facing-failure';
 import {
   createDeterministicRetryLock,
+  retryObjectOf,
   type RetryAllowed,
   type RetryBlock,
 } from './deterministic-retry-lock';
@@ -1245,6 +1246,42 @@ const SAME_TURN_TOLERATED_FAILURE_CODES: ReadonlySet<string> = new Set([
  */
 export function turnOperationLimitMessage(limit: number, used: number): string {
   return `本回合已发起 ${used} 次执行，达到单回合上限 ${limit}：本回合不再发起新的执行；如有需要，请等用户下一回合再继续。`;
+}
+
+/** 本回合的一条执行事实（`args` 只用于「同对象」判据，不进底账/模型可见面）。 */
+export interface RecordedExecution {
+  operation: string;
+  outcome: ExecutionOutcome;
+  dispatchKey?: string;
+  args?: Record<string, unknown>;
+}
+
+/** 一条执行事实的机械描述（对象名复用 A2b 对象抽取；取不到对象时只给 operation）。 */
+function describeRecorded(entry: RecordedExecution): string {
+  const object = retryObjectOf(entry.args ?? {});
+  return object === undefined ? entry.operation : `${entry.operation}（${object}）`;
+}
+
+/**
+ * 部分完成的原因文本（2026-11-19 owner 第二轮；纯机械事实，不判语义、不新增状态）：
+ * 逐项写「哪件成了、哪件没成」——成功的写（operation + 对象）与成功后**另一个写**的失败
+ * （执行层 message 照录）。终态仍是既有 `failed`，该文本进 failure_reason（`npm run tasks`
+ * 详情/交付件可逐项核对）；用户可见通知仍按既有失败话术，不由本函数拼业务措辞。
+ */
+function partialCompletionReason(input: {
+  completed: readonly RecordedExecution[];
+  failed: readonly RecordedExecution[];
+}): string {
+  const done = [...new Set(input.completed.map(describeRecorded))].join('、');
+  const failed = input.failed.map((entry) => {
+    const outcome = entry.outcome;
+    // 执行层 message 原样照录；只去掉句末重复的句号（外层统一收尾一个「。」）。
+    const raw = outcome.status === 'failed' || outcome.status === 'refused' ? outcome.error.message ?? '' : '';
+    const message = raw.replace(/。+$/u, '');
+    const head = `${describeRecorded(entry)} 返回 ${outcome.status}`;
+    return message === '' ? head : `${head}：${message}`;
+  }).join('；');
+  return `执行层未全部成功：已完成 ${done}；未成功 ${failed}。`;
 }
 
 /** 认领结果的机械处置（runtime 内部；不对外暴露身份键细节）。 */
@@ -3381,7 +3418,12 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
 
   return {
     async execute(task, context): Promise<TaskExecutionOutcome> {
-      const recorded: Array<{ operation: string; outcome: ExecutionOutcome; dispatchKey?: string }> = [];
+      /**
+       * 本回合的执行事实（判定与审计同源）。
+       * `args` 只用于**「同对象」判据**（成功后重复写尝试的归类，对象抽取复用 A2b 锁的
+       * `retryObjectOf`）——不进底账、不进模型/用户可见面。
+       */
+      const recorded: RecordedExecution[] = [];
       /**
        * 本回合被**宿主**在发起前拒绝的 operation（允许集合之外）。它不产生执行事实
        * （没有到达执行层），但会改变零执行时的失败话术：权限问题不能说成「模型没干活」。
@@ -3620,7 +3662,7 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         }
         // 取消胜出：不再把（可能迟到的）执行结果交回 Worker；让回合按 abort 收尾。
         if (signal.aborted) throw abortError();
-        if (run.executed) recorded.push({ operation, outcome: run.outcome, dispatchKey: run.dispatchKey });
+        if (run.executed) recorded.push({ operation, outcome: run.outcome, dispatchKey: run.dispatchKey, args: callArgs });
         // 与前台同一套脱敏投影：Worker 永远看不到 confirmation.handle（后台也曾直回原始
         // outcome，句柄会漏进模型上下文；S1 起两处共用 toModelVisibleOutcome）。
         // 大响应文件化（2026-11-19）同源：completed 超阈值 → 落任务文件、只回摘要 + fileId。
@@ -3830,24 +3872,67 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
        * 前序失败逐条留在 executions 里（审计可查、可追溯），只是不改写终局 status/failure_reason；
        * 末次仍是失败（此后没有成功的写——后面一条成功的**只读**不算）→ 照旧 failed（不放宽）。
        * result_unknown 已在上方（unresolved）先行返回，不受本判定影响。
+       *
+       * 成功后出现的失败（2026-11-19 owner 第二轮，真跑 wl-after-34 证据）：写已经落库之后
+       * 的失败按**机械判据**分类，不再一律翻转终局——
+       *   · 只读失败（核对用的查询）→ 不算失败；
+       *   · **同对象**（A2b 对象抽取 `retryObjectOf`，--collection/--topic）的写失败 =
+       *     重复提案/重复提交被安全挡下 → 不算失败；
+       *   · 异对象 / 取不到对象（无法证明同一个）的写失败 = **另一个写没成** → 部分完成：
+       *     终态仍是既有 failed（不新增状态），failure_reason 逐项写「已完成什么、未成功什么」。
+       * 成功的**前面**有失败、之后再没成功 → 仍由下方 decisive 分支判 failed（语义不变）。
+       * 局限（如实登记）：inline `judgeReportedTask` 拿不到 args/只读集合，不做本层归类。
        */
-      const decisive = lastWritable ?? recorded[recorded.length - 1];
-      if (decisive === undefined) {
-        // recorded 为空已在上方拦下；此处不可达（防御性兜底，话术与「未发起执行」同源）。
-        return { kind: 'failed', reason: '未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。' };
-      }
-      if (decisive.outcome.status !== 'completed') {
-        const { operation, outcome } = decisive;
-        if (outcome.status === 'failed' || outcome.status === 'refused') {
-          const message = outcome.error.message ?? '';
+      const lastWriteSuccess = [...recorded].reverse().find(
+        (entry) => entry.outcome.status === 'completed'
+          // run_js 不是执行层声明的写操作：脚本成功不等于用户的写落库，不能当「写成功」锚点。
+          && entry.operation !== RUN_JS_TOOL
+          && !readOnlyOperations.has(entry.operation),
+      );
+      if (lastWriteSuccess !== undefined) {
+        const successIndex = recorded.lastIndexOf(lastWriteSuccess);
+        const successObject = retryObjectOf(lastWriteSuccess.args ?? {});
+        // 成功之后（按执行顺序）的写失败：只读失败直接排除；同对象的重复尝试不算新写。
+        const distinctWriteFailures = recorded
+          .slice(successIndex + 1)
+          .filter((entry) => (entry.outcome.status === 'failed' || entry.outcome.status === 'refused')
+            && !readOnlyOperations.has(entry.operation))
+          .filter((entry) => {
+            const object = retryObjectOf(entry.args ?? {});
+            return successObject === undefined || object === undefined || object !== successObject;
+          });
+        if (distinctWriteFailures.length > 0) {
           return {
             kind: 'failed',
-            reason: message === ''
-              ? `执行层未成功：${operation} 返回 ${outcome.status}。`
-              : `执行层未成功：${operation} 返回 ${outcome.status}：${message}`,
+            reason: partialCompletionReason({
+              completed: recorded.filter((entry) => entry.outcome.status === 'completed'
+                && entry.operation !== RUN_JS_TOOL
+                && !readOnlyOperations.has(entry.operation)),
+              failed: distinctWriteFailures,
+            }),
           };
         }
-        return { kind: 'failed', reason: `执行层未成功：${operation} 返回 ${outcome.status}。` };
+        // 成功之后的失败只有「只读核对」与「同对象重复尝试」→ 写已经落库：completed
+        // （结果正文仍取 Worker 本次汇报；全部失败事实逐条留在 executions 里）。
+      } else {
+        const decisive = lastWritable ?? recorded[recorded.length - 1];
+        if (decisive === undefined) {
+          // recorded 为空已在上方拦下；此处不可达（防御性兜底，话术与「未发起执行」同源）。
+          return { kind: 'failed', reason: '未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。' };
+        }
+        if (decisive.outcome.status !== 'completed') {
+          const { operation, outcome } = decisive;
+          if (outcome.status === 'failed' || outcome.status === 'refused') {
+            const message = outcome.error.message ?? '';
+            return {
+              kind: 'failed',
+              reason: message === ''
+                ? `执行层未成功：${operation} 返回 ${outcome.status}。`
+                : `执行层未成功：${operation} 返回 ${outcome.status}：${message}`,
+            };
+          }
+          return { kind: 'failed', reason: `执行层未成功：${operation} 返回 ${outcome.status}。` };
+        }
       }
       // CAP-01 S2 ④ 兜底扫描（与同步委派同一纪律）：任务 out/ 全量登记——执行层按
       // fileParams 写出的产物即使没走 run_js 也要回程；与回程登记同池去重。

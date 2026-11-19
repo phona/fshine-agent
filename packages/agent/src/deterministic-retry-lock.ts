@@ -18,6 +18,8 @@ import type { ExecutionOutcome } from '@fshine/contracts/execution-contract';
 /**
  * 对象参数名（与内联路径逐字一致）：取对象参数里第一个存在的字符串值作为「对象标识」。
  * 一个都取不到时保守行为 = 不启用锁（没有对象名就无法判定「同对象」，宁可不挡也不误挡）。
+ * 2026-11-19 起本函数同时是**「同对象」判据的唯一来源**：回合终局把「成功后同对象的重复写失败」
+ * 归为多余尝试（见 execution-runtime 的终局判定），不要在别处另造一套对象识别。
  */
 const OBJECT_ARG_KEYS = ['--collection', '--topic', 'collection', 'topic'] as const;
 
@@ -61,7 +63,7 @@ export interface DeterministicRetryLock {
 }
 
 /** 对象标识的取法（逐字搬运内联路径）：args 里第一个存在的字符串对象参数。 */
-function retryObjectOf(args: Record<string, unknown>): string | undefined {
+export function retryObjectOf(args: Record<string, unknown>): string | undefined {
   for (const key of OBJECT_ARG_KEYS) {
     const value = args[key];
     if (typeof value === 'string' && value !== '') return value;
