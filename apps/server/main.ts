@@ -23,6 +23,7 @@ import {
 } from './channel-mode';
 import { createServer, resolveSingleProfile, workspaceRootOf } from './server';
 import { createFileNotificationSink } from './notification-file-sink';
+import { guardSingleInstance } from './instance-guard';
 import { sweepExpiredRunDirsOnStart } from './startup-sweep';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -42,6 +43,13 @@ async function main(): Promise<void> {
   const dbPath = config.store?.dbPath !== undefined
     ? path.resolve(config.store.dbPath)
     : path.join(REPO_ROOT, '.runtime', 'state.db');
+
+  // 单实例守卫（连渠道**之前**）：同一 bot 只允许一条 WS 连接。取独占锁
+  // `<dbPath 所在目录>/server/instance.lock`（与 dbPath 同根；既有 dummy 状态目录
+  // `.runtime/server/state` 的平级邻居）；已有存活且命令行匹配的实例 → 打印可操作
+  // 话术并 exit(1)；陈旧锁（pid 不在 / 命令行不匹配）→ 覆盖。
+  // 释放：SIGINT/SIGTERM 与异常退出都走 guardSingleInstance 挂的 process.on('exit')。
+  guardSingleInstance({ stateDir: path.join(path.dirname(dbPath), 'server') });
 
   // 渠道装配档位（yaml `channel.mode`；缺省 offline）：
   //   offline = 不调用 channel.start（不建 WS 连接），出站视为 silent；
