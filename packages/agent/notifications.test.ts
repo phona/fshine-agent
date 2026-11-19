@@ -31,6 +31,7 @@ import {
   type NotificationFact,
   type NotificationReason,
   type NotificationSink,
+  type NotificationTerminalFact,
   type TaskState,
 } from './src/notifications';
 
@@ -81,7 +82,12 @@ function fact(overrides: Partial<NotificationFact> = {}): NotificationFact {
 function harness(
   dbPath: string,
   sink: FakeSink,
-  overrides: { maxAttempts?: number; baseBackoffMs?: number; maxBackoffMs?: number } = {},
+  overrides: {
+    maxAttempts?: number;
+    baseBackoffMs?: number;
+    maxBackoffMs?: number;
+    onTerminal?: (terminal: NotificationTerminalFact) => void;
+  } = {},
 ) {
   const clock = manualClock();
   const outbox = createNotificationOutbox({
@@ -316,6 +322,40 @@ describe('P4 假 sink 投递：成功与失败路径（P4-T02）', () => {
     expect(await outbox.deliverPending()).toMatchObject([{ outcome: 'delivered', attempts: 1 }]);
     expect(outbox.undelivered()).toEqual([]);
     outbox.close();
+  });
+
+  it('投递终局观察口：失败到 attempts 上限 / 终态跳过各报一次（不重复报）', async () => {
+    // 2026-11-19 第 3 档接线：未送达就进终局的通知必须落一条观察事件（server 装配接日志，
+    // ops/alerts 的 delivery_failed 规则据此可见）——旧实现只改行内状态，谁都不知道。
+    const terminals: NotificationTerminalFact[] = [];
+    const failing = new FakeSink(() => ({ delivered: false, error: '渠道不可用' }));
+    const a = harness(tempDbPath(), failing, { maxAttempts: 2, onTerminal: (terminal) => terminals.push(terminal) });
+    a.outbox.record(fact());
+    expect(await a.outbox.deliverPending()).toMatchObject([{ outcome: 'retry_scheduled', attempts: 1 }]);
+    expect(terminals).toEqual([]); // 还有下一次机会：不算终局
+    a.clock.advance(1000);
+    expect(await a.outbox.deliverPending()).toMatchObject([{ outcome: 'stopped', attempts: 2 }]);
+    expect(terminals).toMatchObject([
+      { outcome: 'exhausted', taskId: 'task_1', kind: 'completed', attempts: 2, reason: '渠道不可用' },
+    ]);
+    // 终局只报一次：后续投递驱动对已到限的行早退（不重复报，也不重复调 sink）。
+    a.clock.advance(600_000);
+    await a.outbox.deliverPending();
+    expect(terminals).toHaveLength(1);
+    expect(failing.calls).toBe(2);
+    a.outbox.close();
+
+    const skips: NotificationTerminalFact[] = [];
+    const s = harness(tempDbPath(), new FakeSink(() => ({ delivered: false, skipped: 'empty_after_strip' })), {
+      maxAttempts: 2,
+      onTerminal: (terminal) => skips.push(terminal),
+    });
+    s.outbox.record(fact());
+    await s.outbox.deliverPending();
+    expect(skips).toMatchObject([
+      { outcome: 'skipped', taskId: 'task_1', kind: 'completed', attempts: 2, reason: 'SKIPPED:empty_after_strip' },
+    ]);
+    s.outbox.close();
   });
 
   it('终态跳过（sink 报 skipped）：不写 delivered_at、不再重试、行留在未送达集合里可查', async () => {

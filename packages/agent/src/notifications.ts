@@ -172,6 +172,23 @@ export interface DeliveryAttempt {
   error?: string;
 }
 
+/**
+ * 一条通知的**投递终局**（2026-11-19 第 3 档接线）：进入终局且**未送达**时才报一次。
+ *   · `exhausted` —— 真实投递失败到 attempts 上限（用户最终没收到）；
+ *   · `skipped`   —— 终态跳过（真的没有东西要发 / 永不可能送达；重试也没用）。
+ * 只报终局转换（不是每次 deliverPending 都报），装配层接日志，运营告警（ops/alerts 的
+ * delivery_failed 规则）据此可见——「兜不住、用户也做不了什么」这一类不许没有归宿。
+ */
+export interface NotificationTerminalFact {
+  notificationId: number;
+  taskId: string;
+  kind: NotificationKind;
+  outcome: 'exhausted' | 'skipped';
+  attempts: number;
+  /** 终局原因：真实失败原因，或终态跳过的 `SKIPPED:<reason>`。 */
+  reason: string;
+}
+
 export interface NotificationOutboxOptions {
   /** 与任务底账同一 SQLite 库路径（本模块自建 notifications 表）。 */
   dbPath: string;
@@ -184,6 +201,11 @@ export interface NotificationOutboxOptions {
   maxBackoffMs?: number;
   /** 时钟注入（测试确定性用；缺省系统时钟）。 */
   now?: () => Date;
+  /**
+   * 投递终局观察口（缺省静默；不影响任何投递语义）：一条通知进入**未送达终局**时调用一次
+   * ——`exhausted`（失败到上限）或 `skipped`（终态跳过）。观察口自身抛错不改投递事实。
+   */
+  onTerminal?: (terminal: NotificationTerminalFact) => void;
 }
 
 export interface NotificationOutbox {
@@ -413,6 +435,21 @@ export function createNotificationOutbox(options: NotificationOutboxOptions): No
   const baseBackoffMs = requirePositiveInteger(options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS, 'baseBackoffMs');
   const maxBackoffMs = requirePositiveInteger(options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS, 'maxBackoffMs');
   const now = options.now ?? (() => new Date());
+  const onTerminal = options.onTerminal;
+  /** 终局观察口 best-effort：观察者故障不改投递事实（不抛进投递循环）。 */
+  const reportTerminal = (
+    row: NotificationRow,
+    outcome: NotificationTerminalFact['outcome'],
+    attempts: number,
+    reason: string,
+  ): void => {
+    if (onTerminal === undefined) return;
+    try {
+      onTerminal({ notificationId: row.id, taskId: row.task_id, kind: row.kind as NotificationKind, outcome, attempts, reason });
+    } catch {
+      // 观察面写失败：终局事实已落库（delivered_at 仍为空、last_error 可查），不翻转。
+    }
+  };
 
   if (dbPath !== ':memory:') mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
@@ -486,15 +523,19 @@ export function createNotificationOutbox(options: NotificationOutboxOptions): No
         const marker = `${SKIPPED_MARKER}${reason}`;
         updateSkipped.run({ id: row.id, attempts: maxAttempts, lastError: marker });
         results.push({ notificationId: row.id, outcome: 'skipped', attempts: maxAttempts, error: marker });
+        reportTerminal(row, 'skipped', maxAttempts, marker);
       } else {
         const error = typeof receipt.error === 'string' && receipt.error !== '' ? receipt.error : SINK_UNDELIVERED_ERROR;
         updateFailed.run({ id: row.id, lastError: error });
+        const exhausted = nextAttempts >= maxAttempts;
         results.push({
           notificationId: row.id,
-          outcome: nextAttempts >= maxAttempts ? 'stopped' : 'retry_scheduled',
+          outcome: exhausted ? 'stopped' : 'retry_scheduled',
           attempts: nextAttempts,
           error,
         });
+        // 只有**本次**打到上限才报终局（后续 deliverPending 对已到限的行早退，不重复报）。
+        if (exhausted) reportTerminal(row, 'exhausted', nextAttempts, error);
       }
     }
     return results;

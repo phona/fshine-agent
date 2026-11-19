@@ -81,7 +81,7 @@ import {
   taskCompletionFactText,
   taskCompletionFallbackText,
 } from './task-completion-delivery';
-import { composeNotificationSinks, createChatNotificationSink } from './notification-chat-sink';
+import { composeNotificationSinks, createChatNotificationSink, notificationTerminalLogLine } from './notification-chat-sink';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -783,7 +783,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             // （2026-11-19 真发现：默认窗口下 file_delivery=delivery_failed 后一句提示都没有）。
             // 这一条是投递失败话术，不是完成播报。
             if (fileNote !== undefined) {
-              await deliverTaskResult({
+              const noteDelivered = await deliverTaskResult({
                 taskId: completion.taskId,
                 principalId: completion.principalId,
                 sessionId: completion.sessionId,
@@ -792,6 +792,21 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
                 ...(completionDelivery === undefined ? {} : { delivery: completionDelivery }),
                 log,
               });
+              // 2026-11-19（同形缺口，与 woken 投递失败同一手法）：**这一句本身没送出去**时
+              // （渠道瞬时故障/路由拆不出），用户会一直以为附件已经到了（模型说过「见附件」）。
+              // 后路 = 话术退回既有待注入队列，下一次用户开口由模型补说「文件没送出去」；
+              // 不新建重试、不重投同一句话。
+              if (!noteDelivered) {
+                systemNotes.enqueue(completion.principalId, completion.sessionId, fileNote);
+                log({
+                  event: 'task_result_delivery_requeued',
+                  principalId: completion.principalId,
+                  sessionId: completion.sessionId,
+                  taskId: completion.taskId,
+                  source: 'file_note',
+                  reason: 'not_sent',
+                });
+              }
             }
             return;
           }
@@ -867,6 +882,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             systemNotes.enqueue(completion.principalId, completion.sessionId, factText);
             log({
               event: 'task_result_delivery_requeued',
+              source: 'completion',
               principalId: completion.principalId,
               sessionId: completion.sessionId,
               taskId: completion.taskId,
@@ -936,6 +952,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       outbox = createNotificationOutbox({
         dbPath: deps.dbPath,
         sink: composeNotificationSinks([deps.notificationSink, chatSink]),
+        // 投递终局（2026-11-19 第 3 档接线）：一条通知**未送达就进终局**（失败到 attempts 上限，
+        // 或终态跳过）时落一条结构化事件——「兜不住、用户也做不了什么」不许没有归宿：
+        // ops/alerts 的 delivery_failed 规则据此判（exhausted 判投递失败；skipped 是「没有东西
+        // 可发/永不可能送达」，不告警——静默部署上每条都 skipped，告警就成了噪音）。
+        onTerminal: (terminal) => log(notificationTerminalLogLine(terminal)),
       });
       // server 进程：事实落库后异步触发投递（终态通知即刻推送；同进程有界重试）。
       // R5 B 通道：同一挂钩缓冲机械事实，下一次回合开始前以普通 user 消息注入主对话。

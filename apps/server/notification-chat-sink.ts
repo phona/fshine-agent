@@ -35,6 +35,7 @@ import type {
   Notification,
   NotificationKind,
   NotificationSink,
+  NotificationTerminalFact,
 } from '../../packages/agent/src/notifications';
 import { stripServerPaths } from '../../packages/agent/src/server-paths';
 import { routeFromSessionId } from './task-completion-delivery';
@@ -117,6 +118,23 @@ export function composeNotificationSinks(sinks: readonly NotificationSink[]): No
       }
       return { delivered: true };
     },
+  };
+}
+
+/**
+ * 通知投递**终局**的日志行（2026-11-19 第 3 档接线；形状单源，ops/alerts 的 delivery_failed
+ * 规则按 `result` 判——改这里必须同步 `alert-rules.ts` 的 `isDeliveryFailure`）。
+ * 装配层（server）把它接到 outbox 的 `onTerminal` 上：一条通知未送达就进终局时落一条。
+ */
+export function notificationTerminalLogLine(terminal: NotificationTerminalFact): Record<string, unknown> {
+  return {
+    event: 'notification_delivery_terminal',
+    taskId: terminal.taskId,
+    kind: terminal.kind,
+    notificationId: terminal.notificationId,
+    result: terminal.outcome,
+    attempts: terminal.attempts,
+    reason: terminal.reason,
   };
 }
 

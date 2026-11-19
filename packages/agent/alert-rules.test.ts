@@ -227,6 +227,69 @@ describe('delivery_failed', () => {
     );
     expect(result.alerts).toEqual([]);
   });
+
+  it('命中：通知投递终局 exhausted（失败到 attempts 上限 = 用户最终没收到）', () => {
+    // 2026-11-19 第 3 档接线：outbox 的终局事件（server 装配落 notification_delivery_terminal）
+    // 必须进告警面——否则「兜不住、用户也做不了什么」这一类断了归宿。
+    const result = evaluateAlerts(
+      [
+        fact({
+          event: 'notification_delivery_terminal',
+          taskId: 't31',
+          sessionId: 's4',
+          raw: '{"event":"notification_delivery_terminal","taskId":"t31","result":"exhausted","attempts":5,"reason":"渠道不可用"}',
+          detail: { deliveryResult: 'exhausted' },
+        }),
+      ],
+      { now: NOW },
+    );
+    expect(result.alerts.map((a) => a.rule)).toEqual(['delivery_failed']);
+    expect(result.alerts[0]!.severity).toBe('critical');
+  });
+
+  it('不命中：通知投递终局 skipped（没有东西可发/永不可能送达——告警只会成噪音）', () => {
+    const result = evaluateAlerts(
+      [
+        fact({
+          event: 'notification_delivery_terminal',
+          taskId: 't32',
+          raw: '{"event":"notification_delivery_terminal","taskId":"t32","result":"skipped","reason":"SKIPPED:delivery_unavailable"}',
+          detail: { deliveryResult: 'skipped' },
+        }),
+      ],
+      { now: NOW },
+    );
+    expect(result.alerts).toEqual([]);
+  });
+
+  it('命中：长活提醒投递 failed；不命中：sent', () => {
+    const failed = evaluateAlerts(
+      [
+        fact({
+          event: 'task_long_running_notice',
+          taskId: 't33',
+          sessionId: 's5',
+          raw: '{"event":"task_long_running_notice","taskId":"t33","stage":"overdue","result":"failed","attempt":2}',
+          detail: { deliveryResult: 'failed' },
+        }),
+      ],
+      { now: NOW },
+    );
+    expect(failed.alerts.map((a) => a.rule)).toEqual(['delivery_failed']);
+
+    const sent = evaluateAlerts(
+      [
+        fact({
+          event: 'task_long_running_notice',
+          taskId: 't34',
+          raw: '{"event":"task_long_running_notice","taskId":"t34","result":"sent","attempt":1}',
+          detail: { deliveryResult: 'sent' },
+        }),
+      ],
+      { now: NOW },
+    );
+    expect(sent.alerts).toEqual([]);
+  });
 });
 
 describe('冷却去重', () => {
