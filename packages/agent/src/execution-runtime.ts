@@ -606,7 +606,8 @@ const TASK_RUN_WAIT_POLL_MS = 25;
  *   · execution_wait_resumed        —— wait 返回终态、Worker 续跑（waitedMs = 等待时长）；
  *   · execution_wait_timeout        —— wait 窗口到期仍在执行（按 pollAfterMs 重排）；
  *   · execution_aborted             —— 用户取消：result=cancelled（执行层确认）/failed（停不下来）；
- *   · execution_wait_files_registered —— 长任务回程文件/大日志已登记为任务文件。
+ *   · execution_wait_files_registered —— 长任务回程文件/大日志已登记为任务文件；
+ *   · execution_result_unknown      —— 一次真实发起的调用以「结果未知」收尾（无回执；只进日志）。
  */
 export type ExecutionEvent =
   | { event: 'execution_accepted'; taskId: string; operationId: string; operation?: string }
@@ -632,7 +633,14 @@ export type ExecutionEvent =
    * `execution_retry_blocked` 同一形状）。放行（显式 retryable:true）记 `execution_retry_allowed`。
    */
   | { event: 'execution_retry_blocked'; taskId: string; operation: string; object: string; code: string; declaredRetryable: boolean | 'unset' }
-  | { event: 'execution_retry_allowed'; taskId: string; operation: string; object: string; code: string };
+  | { event: 'execution_retry_allowed'; taskId: string; operation: string; object: string; code: string }
+  /**
+   * 一次**真实发起**的执行调用以「结果未知」收尾（无回执：单次调用被传输超时截断、
+   * 连接中断、写操作取消在飞等——owner 2026-11-19 分工表第一格）：调用有界结束，但宿主
+   * **不能**断言它发生过没有——账行落 unknown、任务落 reason=result_unknown、不自动重试。
+   * 只进日志；超时原话留在账行的 outcome 里（`unknown` 行）。回放/未发起（executed=false）不记。
+   */
+  | { event: 'execution_result_unknown'; taskId: string; operation: string };
 
 /** 长任务结果渲染的日志内联上限（字节；超过走任务文件，不留绝对路径也不灌转录）。 */
 export const LONG_TASK_LOG_INLINE_MAX_BYTES = 4 * 1024;
@@ -2420,6 +2428,11 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     }
     if (run.unresolved) {
       onUnresolved();
+      // 一次真实发起的调用以「结果未知」收尾（无回执：传输超时截断/连接中断/写操作取消
+      // 在飞等）：如实记一条结构化事件（只进日志；超时原话在账行的 outcome 里）。
+      if (run.executed) {
+        options.onExecutionEvent?.({ event: 'execution_result_unknown', taskId, operation });
+      }
       // 确定性终结本回合：不把待核对当作可重试的普通失败，模型不得自动重办。
       throw new ToolUserError(
         run.outcome.status === 'failed' ? run.outcome.error.message : RESULT_UNKNOWN_MESSAGE,
@@ -3619,6 +3632,11 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         }
         if (run.unresolved) {
           unresolved = true;
+          // 与前台 inline 同源：一次真实发起的调用以「结果未知」收尾 → 记一条结构化事件
+          // （只进日志；超时原话在账行的 outcome 里）。
+          if (run.executed) {
+            options.onExecutionEvent?.({ event: 'execution_result_unknown', taskId: task.taskId, operation });
+          }
           // 确定性终结本回合：待核对不得被模型当作可重试的普通失败。
           throw new ToolUserError(
             run.outcome.status === 'failed' ? run.outcome.error.message : RESULT_UNKNOWN_MESSAGE,

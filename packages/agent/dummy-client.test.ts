@@ -7,7 +7,8 @@
  *   · 结果四态映射：completed / needs_input（缺什么结构化）/ refused（未登记 operation）/
  *     failed；not_found 信封是执行完成（确定性答案，宿主不改写语义）；
  *   · 失败映射：清单非 JSON / exit≠0 / 超时 fail-closed；调用超时 / 未知状态 / 无信封
- *     按机械 code 分流（stub 网关，零网络）；
+ *     按机械 code 分流（stub 网关，零网络）；**调用超时截断 = 结果未知**（result_unknown，
+ *     不声明可重试；端到端语义见 execution-call-timeout.test.ts）；
  *   · 拒绝路径：继承 env 里的 EXECUTION_REQUIRE_PLAN=1 **不会**被适配器传给子进程
  *     （白名单在 spawn 面生效）——对照组直接 spawn 同一网关则被 plan 门拒。
  */
@@ -480,7 +481,11 @@ describe('dummy 适配器的失败映射（stub 网关，零网络）', () => {
     const client = stubClient('normal', 300);
 
     const slow = await client.execute({ requestId: 'req_slow', dispatchKey: 'dk_test_req_slow', operation: 'stub.slow', args: {} });
-    expect(slow).toMatchObject({ status: 'failed', error: { code: 'EXECUTION_TIMEOUT', retryable: true } });
+    // 单次调用被传输超时截断 = 没有回执 → 结果未知（**不是**「已确认失败」，也不声明可重试）：
+    // owner 2026-11-19——截断后不知道执行层那边做没做完，按宿主既有的待核对收口
+    // （账行 unknown / 任务 reason=result_unknown / 不自动重试；端到端见 execution-call-timeout.test.ts）。
+    expect(slow).toMatchObject({ status: 'failed', error: { code: 'result_unknown', retryable: false } });
+    expect((slow as { error: { message: string } }).error.message).toContain('超时');
 
     const weird = await client.execute({ requestId: 'req_weird', dispatchKey: 'dk_test_req_weird', operation: 'stub.weird', args: {} });
     expect(weird).toMatchObject({ status: 'failed', error: { code: 'EXECUTION_UNKNOWN_STATUS' } });
