@@ -93,7 +93,7 @@
 | 长任务提醒阈值 10min：**唤醒模型说**（事实 = 业务名 + 已跑多久）、每任务一次、第二次扫描不再发 | `packages/agent/long-running-notice.test.ts:① 10 分钟内零发送`<br>`apps/server/server-state-wake.test.ts:③ 任务超阈值无事件 → 唤醒模型说`<br>`apps/server/server-long-running-notice.test.ts:③ 长任务（accepted 后租约被清）也要提醒` | 宿主机制 | 已覆盖 | 30 分钟「卡住」档已整档删除（文案/阈值/扫描/领取/配置键）——**不覆盖**该档是设计，不是缺口；旧 YAML 里的该键按未知字段拒绝（`resource-policy-single-source.test.ts` 已删键守卫） |
 | 提醒降级：模型说不出话 → 宿主兜底句（停下来 / 继续等）、任务保持 running | `apps/server/server-state-wake.test.ts:③b 走岔路`<br>`apps/server/server-long-running-notice.test.ts:① 1:1 会话：任务超阈值无事件` | 宿主机制 | 已覆盖 | — |
 | 重启不重发：已发落库，重开扫描零次发送 | `packages/agent/long-running-notice.test.ts:② 重启不重发` | 宿主机制 | 已覆盖 | — |
-| 提醒投递失败要能重来：同一档内重试一次（首投失败 + 重试成功 = 用户收得到）；成功即止、一直失败止于两次（不无限重试、不重复打扰） | `packages/agent/long-running-notice.test.ts:⑤ 先领取后投递失败`<br>`packages/agent/long-running-notice.test.ts:⑥ 不该重试的仍然不重试` | 宿主机制 | 已覆盖 | — |
+| 提醒投递失败要能重来：同一档内重试一次（首投失败 + 重试成功 = 用户收得到）；成功即止、一直失败止于两次（不无限重试、不重复打扰） | `packages/agent/long-running-notice.test.ts:⑥ 先领取后投递失败`<br>`packages/agent/long-running-notice.test.ts:⑦ 不该重试的仍然不重试` | 宿主机制 | 已覆盖 | — |
 | 群聊不发提醒（长任务 / 附件追问同规则）：跨 principal 泄漏面归零 | `packages/agent/long-running-notice.test.ts:③ 群聊不发`<br>`apps/server/server-attachment-nudge.test.ts:④ 群聊 → 不发追问` | 宿主机制 | 已覆盖 | — |
 
 ## 七、失败与话术

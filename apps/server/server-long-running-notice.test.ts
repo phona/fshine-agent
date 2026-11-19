@@ -337,7 +337,6 @@ describe('主动提醒端口（纯函数）', () => {
       taskId: 't',
       principalId: 'p',
       sessionId: 's',
-      stage: 'overdue',
       name: '查上季度报销',
       minutes: 11,
       factText: '事实',
