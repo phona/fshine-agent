@@ -47,6 +47,16 @@
  * 只读旧库（有 file_refs 无 task_id 列）Main 解析退回旧 3 条件查询（历史行都是 Main 侧）、
  * Worker 解析读出 undefined、写入确定性拒绝。
  *
+ * inbound_messages（跨重启渠道重投幂等，2026-11-19）：把「这一条入站消息处理过没有」
+ * 从进程内存搬成底账事实。主键 (principal_id, session_id, message_id)——渠道 messageId
+ * 只在同一会话内有意义，跨会话同名消息不得互相吞。纯新增表走 CREATE TABLE IF NOT EXISTS，
+ * **不升 schema 版本**（旧库可写打开时由 SCHEMA_BASE 补建；只读旧库读出缺省，不崩溃）。
+ * 两阶段：认领写 state='processing'（claimed_at）；处理完成 UPDATE state='done' +
+ * reply_text + completed_at。命中原行时——done → 回放 reply_text（零新副作用）；processing
+ * → 上一进程未落定，不重复执行（由上层回「还在办」并记事件）。处理失败删行（失败不缓存，
+ * 渠道可重投）。claimed_at/completed_at 用 ISO TEXT（与本表读取比对口径一致；启动清扫按
+ * COALESCE(completed_at, claimed_at) < 保留期）。本表不承载任务/执行事实，只做入站消息查重。
+ *
  * 数字编号（P1）：
  *   · 分配 = 计数器行（task_sequences.name='task_no'）在**同一事务**内
  *     `UPDATE task_sequences SET value = value + 1 … RETURNING value` + INSERT：
@@ -236,6 +246,35 @@ export interface StoredTask {
   executions: ExecutionRow[];
 }
 
+/**
+ * 一条入站消息处理底账行（渠道重投幂等，B 类确定性事实；存储形状）。
+ * 主键 (principalId, sessionId, messageId)：渠道 messageId 只在同一会话内有意义。
+ * state='processing'（已认领，未落定）| 'done'（已完成，replyText 可回放）。
+ */
+export interface InboundMessageRow {
+  messageId: string;
+  principalId: string;
+  sessionId: string;
+  state: string;
+  /** 最终回执（仅 state='done' 有值；回放用）。 */
+  replyText?: string;
+  /** 认领时刻（ISO）。 */
+  claimedAt: string;
+  /** 完成时刻（ISO；NULL = 尚未完成）。 */
+  completedAt?: string;
+}
+
+/**
+ * 入站消息认领结果：
+ *   · claimed    —— 首次认领（本调用负责处理，调用方据此起回合）；
+ *   · done       —— 已处理过：回放 replyText，**不产生任何新副作用**；
+ *   · processing —— 已认领但未落定（上一进程挂了）：不重复执行。
+ */
+export type InboundClaimOutcome =
+  | { outcome: 'claimed' }
+  | { outcome: 'done'; replyText: string }
+  | { outcome: 'processing' };
+
 /** P2a 单语句状态写入（TaskRegistry 唯一写路径；expectedStatus = 乐观并发期望值）。 */
 export interface TaskStateWrite {
   /** 期望的当前状态：不匹配（并发已变化）则不写、返回 false。 */
@@ -364,6 +403,42 @@ export interface TaskStore {
     scope: { principalId: string; sessionId: string },
     input: { activatedAt: number; createdAfter: number },
   ): number;
+  /**
+   * 入站消息幂等认领（渠道重投，2026-11-19）：同 (principalId, sessionId, messageId) 原子
+   * 首次写入 state='processing' 并返回 claimed；已存在且 state='done' → 回放 replyText；
+   * 已存在且 state='processing' → 上一进程未落定（不重复执行）。纯新增表；旧库只读缺表时抛错。
+   */
+  claimInboundMessage(input: {
+    messageId: string;
+    principalId: string;
+    sessionId: string;
+    claimedAt: string;
+  }): InboundClaimOutcome;
+  /** 入站消息处理完成：置 state='done' + 最终回执；命中一行返回 true。 */
+  completeInboundMessage(input: {
+    messageId: string;
+    principalId: string;
+    sessionId: string;
+    replyText: string;
+    completedAt: string;
+  }): boolean;
+  /** 入站消息处理失败：删除认领行（失败不缓存，渠道可重投）；命中一行返回 true。 */
+  releaseInboundMessage(input: {
+    messageId: string;
+    principalId: string;
+    sessionId: string;
+  }): boolean;
+  /** 入站消息只读一行（旧库只读缺表时返回 undefined，不崩溃）。 */
+  getInboundMessage(input: {
+    messageId: string;
+    principalId: string;
+    sessionId: string;
+  }): InboundMessageRow | undefined;
+  /**
+   * 入站消息启动清扫：删除 claimed_at/completed_at 早于保留期的行（保留期由调用方按
+   * 部署事实派生）。返回删除行数；旧库只读缺表时返回 0。
+   */
+  cleanupInboundMessages(before: string): number;
   close(): void;
 }
 
@@ -441,6 +516,17 @@ CREATE TABLE IF NOT EXISTS file_refs (
   deliverable INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_file_refs_scope ON file_refs (principal_id, session_id);
+CREATE TABLE IF NOT EXISTS inbound_messages (
+  message_id TEXT,
+  principal_id TEXT,
+  session_id TEXT,
+  state TEXT,
+  reply_text TEXT,
+  claimed_at TEXT,
+  completed_at TEXT,
+  -- 渠道 messageId 只在同一会话内有意义：主键带 principal + session，跨会话同名不互相吞。
+  PRIMARY KEY (principal_id, session_id, message_id)
+);
 `;
 
 /** 数字编号唯一索引：部分索引允许历史/缺省行多个 NULL，但已分配编号必须唯一。 */
@@ -523,6 +609,16 @@ interface FileRefDbRow {
   task_id?: string | null;
   /** 旧库缺列 / 旧行缺省时为 undefined（按 true 读出）。 */
   deliverable?: number | null;
+}
+
+interface InboundMessageDbRow {
+  message_id: string;
+  principal_id: string;
+  session_id: string;
+  state: string;
+  reply_text: string | null;
+  claimed_at: string;
+  completed_at: string | null;
 }
 
 /**
@@ -925,6 +1021,42 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
       `)
     : undefined;
 
+  // inbound_messages（2026-11-19）：入站消息跨重启幂等底账。纯新增表——可写打开必由
+  // SCHEMA_BASE 建成；只读旧库缺表 = 没有账（get 读出缺省、cleanup 返回 0；写入给确定性拒绝）。
+  const hasInboundMessages = tableColumnsOf(db, 'inbound_messages').size > 0;
+  const insertInboundStmt = hasInboundMessages
+    ? db.prepare(`
+        INSERT INTO inbound_messages (message_id, principal_id, session_id, state, reply_text, claimed_at, completed_at)
+        VALUES (@messageId, @principalId, @sessionId, 'processing', NULL, @claimedAt, NULL)
+        ON CONFLICT(principal_id, session_id, message_id) DO NOTHING
+      `)
+    : undefined;
+  const selectInboundStmt = hasInboundMessages
+    ? db.prepare('SELECT * FROM inbound_messages WHERE principal_id = ? AND session_id = ? AND message_id = ?')
+    : undefined;
+  const completeInboundStmt = hasInboundMessages
+    ? db.prepare(`
+        UPDATE inbound_messages SET state = 'done', reply_text = @replyText, completed_at = @completedAt
+        WHERE principal_id = @principalId AND session_id = @sessionId AND message_id = @messageId
+      `)
+    : undefined;
+  const deleteInboundStmt = hasInboundMessages
+    ? db.prepare('DELETE FROM inbound_messages WHERE principal_id = ? AND session_id = ? AND message_id = ?')
+    : undefined;
+  const cleanupInboundStmt = hasInboundMessages
+    ? db.prepare('DELETE FROM inbound_messages WHERE COALESCE(completed_at, claimed_at) < ?')
+    : undefined;
+  /** 认领事务（BEGIN IMMEDIATE）：INSERT ... DO NOTHING 与冲突后的读同一写事务，跨进程不重号、不误判。 */
+  const claimInboundTx = insertInboundStmt === undefined || selectInboundStmt === undefined
+    ? undefined
+    : db.transaction((input: { messageId: string; principalId: string; sessionId: string; claimedAt: string }): InboundClaimOutcome => {
+        const inserted = insertInboundStmt.run(input).changes > 0;
+        if (inserted) return { outcome: 'claimed' };
+        const row = selectInboundStmt.get(input.principalId, input.sessionId, input.messageId) as InboundMessageDbRow | undefined;
+        if (row !== undefined && row.state === 'done') return { outcome: 'done', replyText: row.reply_text ?? '' };
+        return { outcome: 'processing' };
+      });
+
   const toFileRef = (row: FileRefDbRow): FileRefRow => ({
     fileId: row.file_id,
     principalId: row.principal_id,
@@ -937,6 +1069,16 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     createdAt: row.created_at,
     // 方案 A：缺列/旧行 NULL/1 → 可交付；只有显式 0 才是内部诊断产物。
     deliverable: row.deliverable === 0 ? false : true,
+  });
+
+  const toInbound = (row: InboundMessageDbRow): InboundMessageRow => ({
+    messageId: row.message_id,
+    principalId: row.principal_id,
+    sessionId: row.session_id,
+    state: row.state,
+    ...(row.reply_text === null || row.reply_text === undefined ? {} : { replyText: row.reply_text }),
+    claimedAt: row.claimed_at,
+    ...(row.completed_at === null || row.completed_at === undefined ? {} : { completedAt: row.completed_at }),
   });
 
   const toTask = (row: TaskDbRow): TaskRow => ({
@@ -1011,6 +1153,8 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     '任务底账是旧版 schema（缺 file_refs 表）且以只读打开：不能登记文件事实（请先用可写入口完成迁移）。';
   const missingFileRefTaskColumnError =
     '任务底账是旧版 schema（file_refs 缺 task_id 列）且以只读打开：不能登记文件事实（请先用可写入口完成迁移）。';
+  const missingInboundError =
+    '任务底账是旧版 schema（缺 inbound_messages 表）且以只读打开：不能读写入站消息幂等账（请先用可写入口完成迁移）。';
 
   /**
    * U3：把「读候选 + 决策 + 写」包进同一写事务（BEGIN IMMEDIATE）。
@@ -1221,6 +1365,35 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         activatedAt: input.activatedAt,
         createdAfter: input.createdAfter,
       }).changes;
+    },
+    claimInboundMessage(input) {
+      if (claimInboundTx === undefined) throw new Error(missingInboundError);
+      return claimInboundTx.immediate(input);
+    },
+    completeInboundMessage(input) {
+      if (completeInboundStmt === undefined) throw new Error(missingInboundError);
+      return completeInboundStmt.run({
+        messageId: input.messageId,
+        principalId: input.principalId,
+        sessionId: input.sessionId,
+        replyText: input.replyText,
+        completedAt: input.completedAt,
+      }).changes > 0;
+    },
+    releaseInboundMessage(input) {
+      if (deleteInboundStmt === undefined) throw new Error(missingInboundError);
+      return deleteInboundStmt.run(input.principalId, input.sessionId, input.messageId).changes > 0;
+    },
+    getInboundMessage(input) {
+      // 只读旧库没有该表 = 没有账（读出缺省，不崩溃、不伪造）。
+      if (selectInboundStmt === undefined) return undefined;
+      const row = selectInboundStmt.get(input.principalId, input.sessionId, input.messageId) as InboundMessageDbRow | undefined;
+      return row === undefined ? undefined : toInbound(row);
+    },
+    cleanupInboundMessages(before) {
+      // 只读旧库没有该表 = 无行可清（返回 0，不崩溃）。
+      if (cleanupInboundStmt === undefined) return 0;
+      return cleanupInboundStmt.run(before).changes;
     },
     close() {
       db.close();

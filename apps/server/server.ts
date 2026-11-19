@@ -78,7 +78,10 @@ import { composeNotificationSinks, createChatNotificationSink } from './notifica
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-/** 渠道重投幂等窗口（有界 FIFO；同 messageId 的回执在此窗口内重放）。 */
+/**
+ * 同进程在途重投表上限（有界兜底）：条目落定即删，天然有界；上限只防极端并发泄漏。
+ * 跨重启判据不在这里——见底账 inbound_messages（task-store.ts）。
+ */
 const MESSAGE_REPLY_LIMIT = 1024;
 
 /** 执行面：结构化执行客户端 + 本轮允许集合（从执行层自述的 access=read 派生）。 */
@@ -166,6 +169,13 @@ const FILE_DELIVERY_FAILED_NOTE = '文件未送达（投递失败，请重试或
 const RECALC_DELIVERY_GATED_NOTE = '部分表格未通过公式实算校验，未予发送（请确认表格已重算校验后再试）';
 /** 混合批次（部分投递成功、部分被闸拦）时的如实话术：不让用户误以为全部送达。 */
 const RECALC_DELIVERY_PARTIAL_NOTE = '部分表格未通过公式实算校验，未予发送；其余文件已发送';
+
+/**
+ * 入站消息跨重启幂等的「上一进程未落定」话术（2026-11-19）：底账里这条 messageId 是
+ * state='processing'（上一进程认领后挂了）且本进程无在途。不重复执行、不重复办事，如实
+ * 告知用户；同时记事件 message_still_processing 供运维发现（这类卡住的账要能被看到）。
+ */
+const INBOUND_STILL_PROCESSING_NOTE = '这条我还在办，办完会发你，不用再发一遍。';
 
 /**
  * 主动提醒投递端口（预期契约 2026-11-18）：10/30 分钟两档文案由 runner 生成，这里只决定
@@ -431,6 +441,17 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   const taskRegistry = createSqliteTaskRegistry(deps.dbPath);
   // 解析后配置只读一次：fileStore 的 TTL 由它派生（单一配置源；本文件不重解释 runtime 段）。
   const resolvedRuntime = resolveRuntimeConfig(deps.config.runtime);
+  // 入站消息幂等底账启动清扫（2026-11-19）：保留期 = runtime.fileRefTtlDays 派生的毫秒
+  // （缺省 7 天）。复用该保留期而非新开配置键——同为「部署保留地平线」的单一来源，且本切片
+  // 不改配置 schema。只删过期行（COALESCE(completed_at, claimed_at) < cutoff）；清理失败不影响
+  // 启动（只记观测事件）。
+  try {
+    const inboundCutoff = new Date(Date.now() - fileRefTtlMsOf(resolvedRuntime)).toISOString();
+    const removed = taskRegistry.store.cleanupInboundMessages(inboundCutoff);
+    if (removed > 0) log({ event: 'inbound_messages_cleanup', removed, cutoff: inboundCutoff });
+  } catch (error) {
+    log({ event: 'inbound_messages_cleanup_failed', reason: error instanceof Error ? error.message : String(error) });
+  }
   // CAP-01 S1：文件区监管（唯一写侧）建在底账同一引擎连接上（不开第二个库连接）。
   const workspaceRoot = workspaceRootOf(deps.dbPath);
   const fileStore = createFileStore({
@@ -834,16 +855,54 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   }
 
   /**
-   * P7-T06 渠道重投幂等（重复消息）：同 (principal, session, messageId) 只产生一次回执，
-   * 重投按既有回执幂等重放——查重先于一切副作用（不新起 Main 回合、不新建任务、不重复执行）；
-   * 有界 FIFO（超出淘汰最旧）；处理失败不缓存（渠道可重试，不伪造回执）。
+   * 渠道重投幂等（重复消息，2026-11-19 跨重启）：**底账事实为唯一判据**——同
+   * (principal, session, messageId) 在 inbound_messages 表里留账（见 task-store.ts），
+   * 进程重启后同一 messageId 不再被当成新消息。查重先于一切副作用（不新起 Main 回合、
+   * 不新建任务、不重复执行）；处理失败删行（渠道可重投，不伪造回执）。
+   *
+   * 本进程在途表只解决**同进程并发重投**：两路相同 messageId 几乎同时到达时，第二条要在
+   * 第一条落定后拿到同一句回执，而不是把第一条的 processing 行误读成「上一进程挂了」。
+   * 它不承担跨重启判据——那归底账，且落定即删（天然有界，上限只作兜底）。
    */
-  const messageReplies = new Map<string, Promise<string>>();
-  const rememberMessageReply = (key: string, reply: Promise<string>): void => {
-    messageReplies.set(key, reply);
-    if (messageReplies.size > MESSAGE_REPLY_LIMIT) {
-      const oldest = messageReplies.keys().next().value;
-      if (oldest !== undefined && oldest !== key) messageReplies.delete(oldest);
+  const inboundInFlight = new Map<string, Promise<string>>();
+  const rememberInFlight = (key: string, reply: Promise<string>): void => {
+    inboundInFlight.set(key, reply);
+    if (inboundInFlight.size > MESSAGE_REPLY_LIMIT) {
+      const oldest = inboundInFlight.keys().next().value;
+      if (oldest !== undefined && oldest !== key) inboundInFlight.delete(oldest);
+    }
+  };
+  /** 处理失败/落定后清在途条目（幂等，键可能已不在）。 */
+  const forgetInFlight = (key: string): void => {
+    inboundInFlight.delete(key);
+  };
+  /** 一次入站消息的身份事实（审计 + 底账键）。 */
+  type InboundIds = {
+    principalId: string;
+    sessionId: string;
+    speakerId: string;
+    messageId: string;
+  };
+  /** 落定底账（置 done + 最终回执）；写失败只降级为观测事件（不翻转本次成功结果）。 */
+  const settleInbound = (ids: InboundIds, replyText: string): void => {
+    try {
+      taskRegistry.store.completeInboundMessage({
+        messageId: ids.messageId,
+        principalId: ids.principalId,
+        sessionId: ids.sessionId,
+        replyText,
+        completedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      log({ event: 'inbound_message_settle_failed', ...ids, reason: error instanceof Error ? error.message : String(error) });
+    }
+  };
+  /** 处理失败：删认领行（失败不缓存，渠道可重投）；删失败只记观测事件。 */
+  const releaseInbound = (ids: InboundIds): void => {
+    try {
+      taskRegistry.store.releaseInboundMessage({ messageId: ids.messageId, principalId: ids.principalId, sessionId: ids.sessionId });
+    } catch (error) {
+      log({ event: 'inbound_message_release_failed', ...ids, reason: error instanceof Error ? error.message : String(error) });
     }
   };
 
@@ -885,6 +944,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     const sessionId = `${channel}:${message.conversationId}`;
     // 审计事实：这一回合是谁在群里说的（不改 principal，不加任务列）。
     const speakerId = message.wecomUserId;
+    // 入站消息身份事实（事件与幂等底账共用同一组键，避免各处重拼）。
+    const inboundIds: InboundIds = { principalId, sessionId, speakerId, messageId: message.messageId };
     // 主动提醒的会话事实（只在 inbound 时可信）：路由 + 是否 1:1。群聊登记为「非 1:1」。
     sessionRoutes.set(sessionId, { channel, conversationId: message.conversationId });
     if (isGroupChat) directSessions.delete(sessionId);
@@ -902,15 +963,28 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // 群主体未开通：与未开通个人同一条拒绝路径、同一句话术（不区分主体形态）。
       return `该账号（${principalId}）未开通使用权限，请联系管理员开通。`;
     }
-    // 渠道重投（同 messageId）命中：幂等重放既有回执（无任何新副作用）。
+    // 渠道重投（同 messageId）命中：幂等回放既有回执（无任何新副作用）。
     // CAP-01 S1：查重必须先于附件分支——纯附件消息的重投才走缓存，不重复登记。
     const dedupKey = message.messageId.trim() === ''
       ? undefined
       : `${principalId}\u0000${sessionId}\u0000${message.messageId}`;
-    const replayed = dedupKey === undefined ? undefined : messageReplies.get(dedupKey);
-    if (replayed !== undefined) {
-      log({ event: 'message_duplicate_replayed', principalId, sessionId, speakerId, messageId: message.messageId });
-      return await replayed;
+    if (dedupKey !== undefined) {
+      // ① 本进程在途（并发重投）：等第一条落定，回放同一句（不把它误读成「上一进程挂了」）。
+      const inFlight = inboundInFlight.get(dedupKey);
+      if (inFlight !== undefined) {
+        log({ event: 'message_duplicate_replayed', principalId, sessionId, speakerId, messageId: message.messageId, source: 'in_flight' });
+        return await inFlight;
+      }
+      // ② 底账事实：已落定 → 回放存下的回执（零任务、零执行）；未落定 → 上一进程挂了。
+      const prior = taskRegistry.store.getInboundMessage({ messageId: message.messageId, principalId, sessionId });
+      if (prior !== undefined && prior.state === 'done') {
+        log({ event: 'message_duplicate_replayed', principalId, sessionId, speakerId, messageId: message.messageId, source: 'ledger' });
+        return prior.replyText ?? '';
+      }
+      if (prior !== undefined && prior.state === 'processing') {
+        log({ event: 'message_still_processing', principalId, sessionId, speakerId, messageId: message.messageId });
+        return INBOUND_STILL_PROCESSING_NOTE;
+      }
     }
 
     const scope: FileScope = { principalId, sessionId };
@@ -948,6 +1022,25 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         attachmentNudge.onInboundMessage({ principalId, sessionId, attachmentOnly: false });
       }
       return ATTACHMENT_TOO_LARGE_NOTE;
+    }
+
+    // 认领幂等账（以底账为准的第一次写入）：同进程在途已在上方拦下，这里兜跨进程竞态。
+    // 只在确定要处理这条消息时写——超限拒收等「无副作用返回」不占账（未被缓存，渠道可重投）。
+    if (dedupKey !== undefined) {
+      const claim = taskRegistry.store.claimInboundMessage({
+        messageId: message.messageId,
+        principalId,
+        sessionId,
+        claimedAt: new Date().toISOString(),
+      });
+      if (claim.outcome === 'done') {
+        log({ event: 'message_duplicate_replayed', principalId, sessionId, speakerId, messageId: message.messageId, source: 'ledger' });
+        return claim.replyText;
+      }
+      if (claim.outcome === 'processing') {
+        log({ event: 'message_still_processing', principalId, sessionId, speakerId, messageId: message.messageId });
+        return INBOUND_STILL_PROCESSING_NOTE;
+      }
     }
 
     if (message.attachmentOnly === true) {
@@ -1007,14 +1100,24 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         }
         return '';
       }).then(
-        (reply) => reply,
+        (reply) => {
+          // 落定：底账置 done（回执='' 也如实存下），清在途条目。
+          if (dedupKey !== undefined) {
+            settleInbound(inboundIds, reply);
+            forgetInFlight(dedupKey);
+          }
+          return reply;
+        },
         (error: unknown) => {
-          // 登记失败不缓存：渠道重投可重试（回执不伪造；不标 sent）。
-          if (dedupKey !== undefined) messageReplies.delete(dedupKey);
+          // 登记失败不缓存：删认领行，渠道重投可重试（回执不伪造；不标 sent）。
+          if (dedupKey !== undefined) {
+            releaseInbound(inboundIds);
+            forgetInFlight(dedupKey);
+          }
           throw error;
         },
       );
-      if (dedupKey !== undefined) rememberMessageReply(dedupKey, pendingReply);
+      if (dedupKey !== undefined) rememberInFlight(dedupKey, pendingReply);
       return await pendingReply;
     }
 
@@ -1189,15 +1292,23 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             // 观测事件写也失败：无第二观测面可用；回合结果已成立，不翻转、不改写话术。
           }
         }
+        // 落定底账（置 done + 最终回执）；写失败只降级为观测事件，不翻转成功回执。
+        if (dedupKey !== undefined) {
+          settleInbound(inboundIds, result.reply);
+          forgetInFlight(dedupKey);
+        }
         return result.reply;
       },
       (error: unknown) => {
-        // 处理失败不缓存：渠道重投可重试（回执不伪造）。
-        if (dedupKey !== undefined) messageReplies.delete(dedupKey);
+        // 处理失败不缓存：删认领行，渠道可重投（回执不伪造）。
+        if (dedupKey !== undefined) {
+          releaseInbound(inboundIds);
+          forgetInFlight(dedupKey);
+        }
         throw error;
       },
     );
-    if (dedupKey !== undefined) rememberMessageReply(dedupKey, pending);
+    if (dedupKey !== undefined) rememberInFlight(dedupKey, pending);
     return await pending;
   };
 
