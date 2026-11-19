@@ -172,6 +172,11 @@ export interface AlertItem {
   raw: string;
   /** 本次判定的时刻（ISO）。 */
   at: string;
+  /**
+   * 任务归属（可缺省）：从命中的事实搬运，供持久化行做结构化消费（AI/人回溯）。
+   * 不是新的去重键——去重仍按 (rule, subject)；这里只是把事实里已有的 taskId 带出来。
+   */
+  taskId?: string;
 }
 
 /** 冷却状态：`${rule}\u0000${subject}` → 上次告警时刻（ISO）。可 JSON 序列化后持久化。 */
@@ -271,6 +276,13 @@ interface Candidate {
   evidenceRef: string;
   summary: string;
   raw: string;
+  /** 命中事实的任务归属（取第一条非空 taskId）；无归属时缺省。 */
+  taskId?: string;
+}
+
+/** 从一组命中事实里取任务归属（第一条非空 taskId）；没有则 undefined。 */
+function taskIdOf(facts: readonly AlertFact[]): string | undefined {
+  return facts.find((fact) => fact.taskId !== undefined && fact.taskId !== '')?.taskId;
 }
 
 function hostFaultCandidates(facts: readonly AlertFact[]): Candidate[] {
@@ -292,6 +304,7 @@ function hostFaultCandidates(facts: readonly AlertFact[]): Candidate[] {
       evidenceRef: evidenceRefOf(first),
       summary: `我方故障（${events}）${subject === 'global' ? '' : `，归属 ${subject}`}`,
       raw: joinRaws(bucket),
+      ...(taskIdOf(bucket) === undefined ? {} : { taskId: taskIdOf(bucket) }),
     });
   }
   return out;
@@ -318,6 +331,7 @@ function retryStormCandidates(facts: readonly AlertFact[]): Candidate[] {
       evidenceRef: evidenceRefOf(bucket[0]!),
       summary: `重试风暴：任务 ${taskId} 执行事实 ${bucket.length} 条（阈值 ${RETRY_STORM_TASK_FACTS}）`,
       raw: joinRaws(bucket),
+      taskId,
     });
   }
 
@@ -345,6 +359,7 @@ function retryStormCandidates(facts: readonly AlertFact[]): Candidate[] {
       evidenceRef: evidenceRefOf(entry[0]!),
       summary: `重试风暴：任务 ${taskId} 操作 ${operation} 错误 ${code} 重复 ${entry.length} 次（阈值 ${RETRY_STORM_OP_ERROR}）`,
       raw: joinRaws(entry),
+      taskId,
     });
   }
   return out;
@@ -366,6 +381,7 @@ function taskStuckCandidates(facts: readonly AlertFact[], nowMs: number): Candid
         evidenceRef: evidenceRefOf(fact),
         summary: `任务卡住：${fact.taskId ?? '未知任务'} 处于 running 已 ${minutesOf(elapsed)} 分钟无事件（阈值 ${minutesOf(TASK_RUNNING_STUCK_MS)} 分钟）`,
         raw: fact.raw,
+        ...(fact.taskId === undefined ? {} : { taskId: fact.taskId }),
       });
     } else if (status === 'waiting_user' && elapsed > USER_WAITING_STUCK_MS) {
       out.push({
@@ -374,6 +390,7 @@ function taskStuckCandidates(facts: readonly AlertFact[], nowMs: number): Candid
         evidenceRef: evidenceRefOf(fact),
         summary: `任务卡住：${fact.taskId ?? '未知任务'} 处于 waiting_user 已 ${minutesOf(elapsed)} 分钟（阈值 ${minutesOf(USER_WAITING_STUCK_MS)} 分钟）`,
         raw: fact.raw,
+        ...(fact.taskId === undefined ? {} : { taskId: fact.taskId }),
       });
     }
   }
@@ -399,6 +416,7 @@ function deliveryFailedCandidates(facts: readonly AlertFact[]): Candidate[] {
       evidenceRef: evidenceRefOf(first),
       summary: `投递失败（${events}）${subject === 'global' ? '' : `，归属 ${subject}`}`,
       raw: joinRaws(bucket),
+      ...(taskIdOf(bucket) === undefined ? {} : { taskId: taskIdOf(bucket) }),
     });
   }
   return out;
@@ -450,6 +468,7 @@ export function evaluateAlerts(
       summary: candidate.summary,
       raw: candidate.raw,
       at: nowIso,
+      ...(candidate.taskId === undefined ? {} : { taskId: candidate.taskId }),
     });
   }
 

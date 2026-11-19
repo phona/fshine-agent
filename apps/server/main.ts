@@ -11,6 +11,7 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { ChannelRoute, OutgoingFileReply } from '@fshine/contracts';
 import { WecomBotChannel } from '@fshine/channel-wecom';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import { resolveRuntimeConfig } from '../../packages/agent/src/resource-policy';
@@ -64,16 +65,35 @@ async function main(): Promise<void> {
   // CAP-01 S1 交付端口（v8 §7 主动投递 B）：装配层持有渠道的 sendToConversation 面并注入
   // server——handler 只返回 text，文件由这里发出（只传 files，不传正文）；deliveryMode 用
   // 渠道生效模式，非 live 的投递由 server 记 suppressed、不记 sent。
+  const fileDelivery = {
+    deliveryMode: channel.deliveryMode,
+    sendToConversation: (route: ChannelRoute, files: readonly OutgoingFileReply[]) =>
+      channel.sendToConversation(route, { files }),
+    // 纯附件后主动追问：文字走既有主动投递面（silent 由 server 先行抑制，不靠闸门假回执）。
+    sendText: (route: ChannelRoute, text: string) =>
+      channel.sendToConversation(route, { text }),
+  };
+  // 进程内告警引擎（owner 2026-11-20）：第 3 档（兜不住且用户做不了）的执行者。
+  // 投递端口**复用上面的 fileDelivery.sendText**（= 同一条 WS 上的渠道主动消息），不另开
+  // 企微 WS（单 WS 约束）。owner 路由取配置里第一个 enabled 的单聊企微主体（不硬编码）；
+  // 没有单聊主体 = 只落盘不推（alert-persistence 的确定性出口仍完整）。
+  const ownerUserId = Object.entries(config.principals)
+    .filter(([id, principal]) => principal.enabled && id.startsWith('wecom:') && !id.startsWith('wecom:group:'))
+    .map(([id]) => id.slice('wecom:'.length))
+    .find((userid) => userid !== '');
   const server = await createServer({
     env,
     config,
     dbPath,
     notificationSink: createFileNotificationSink(path.join(path.dirname(dbPath), 'notifications.jsonl')),
-    fileDelivery: {
-      deliveryMode: channel.deliveryMode,
-      sendToConversation: (route, files) => channel.sendToConversation(route, { files }),
-      // 纯附件后主动追问：文字走既有主动投递面（silent 由 server 先行抑制，不靠闸门假回执）。
-      sendText: (route, text) => channel.sendToConversation(route, { text }),
+    fileDelivery,
+    inprocessAlerts: {
+      enabled: true,
+      opsDir: path.join(path.dirname(dbPath), 'ops'),
+      ...(ownerUserId === undefined ? {} : {
+        ownerRoute: { channel: 'wecom', conversationId: ownerUserId },
+        pushPort: { sendText: (route, text) => fileDelivery.sendText(route, text) },
+      }),
     },
   });
   // 保留期启动清扫（runtime.fileRetentionSweepOnStart；缺省 false = 零行为变化）：

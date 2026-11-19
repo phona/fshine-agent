@@ -87,6 +87,12 @@ import {
   taskRestartFactText,
 } from './task-completion-delivery';
 import { composeNotificationSinks, createChatNotificationSink, notificationTerminalLogLine } from './notification-chat-sink';
+import {
+  createInprocessAlerts,
+  type AlertPushPort,
+  type AlertTimers,
+  type InprocessAlerts,
+} from './inprocess-alerts';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -144,6 +150,20 @@ export interface ServerDeps {
    */
   attachmentNudgeClock?: NudgeClock;
   logger?: (line: Record<string, unknown>) => void;
+  /**
+   * 进程内告警引擎开关（owner 2026-11-20 决定：第 3 档要有自己的执行者）。
+   * 测试注入 opsDir / 时钟 / 定时器 / 推送端口；生产由 main.ts 传 enabled:true + owner 投递端口。
+   * 缺省 undefined = 不启用（保持既有装配零行为变化）。
+   */
+  inprocessAlerts?: {
+    enabled: boolean;
+    opsDir: string;
+    ownerRoute?: ChannelRoute;
+    pushPort?: AlertPushPort;
+    now?: () => Date;
+    timers?: AlertTimers;
+    scanIntervalMs?: number;
+  };
 }
 
 export interface Server {
@@ -476,7 +496,37 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     throw new Error(`contextProfile ${profileId} 缺少 gateway——server 需要执行层挂载声明。`);
   }
 
-  const log = deps.logger ?? ((line: Record<string, unknown>) => console.log(JSON.stringify(line)));
+  const baseLog = deps.logger ?? ((line: Record<string, unknown>) => console.log(JSON.stringify(line)));
+  /**
+   * 进程内告警引擎（第 3 档执行者）：server 产出的结构化事件经本 log 出口**同时**喂给引擎
+   * 就地判（不读自己的日志）。用 reentrancy guard 防止引擎自身事件（alert_persisted 等）
+   * 再被 observe 接住形成递归。引擎缺省关闭 = baseLog 原样，既有装配零行为变化。
+   */
+  let alerts: InprocessAlerts | undefined;
+  let logDepth = 0;
+  const log = (line: Record<string, unknown>): void => {
+    baseLog(line);
+    if (alerts === undefined || logDepth > 0) return;
+    logDepth += 1;
+    try {
+      alerts.observe(line);
+    } finally {
+      logDepth -= 1;
+    }
+  };
+  if (deps.inprocessAlerts?.enabled === true) {
+    const cfg = deps.inprocessAlerts;
+    alerts = createInprocessAlerts({
+      opsDir: cfg.opsDir,
+      dbPath: deps.dbPath,
+      log,
+      ...(cfg.ownerRoute === undefined ? {} : { ownerRoute: cfg.ownerRoute }),
+      ...(cfg.pushPort === undefined ? {} : { pushPort: cfg.pushPort }),
+      ...(cfg.now === undefined ? {} : { now: cfg.now }),
+      ...(cfg.timers === undefined ? {} : { timers: cfg.timers }),
+      ...(cfg.scanIntervalMs === undefined ? {} : { scanIntervalMs: cfg.scanIntervalMs }),
+    });
+  }
   // 未写 role 的 principal 按 viewer（只读，最小权限）处理；启动日志如实登记，不静默。
   for (const [principalId, principal] of Object.entries(deps.config.principals)) {
     if (principal.role === undefined) {
@@ -1759,7 +1809,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       await drainNotifications();
     },
     async close() {
-      // 停机：撤掉主动追问定时器与批次、清空进程内附件事实/系统注记（重启不补发）。
+      // 停机：撤掉告警聚合扫描定时器（冷却持久化在文件里，重启不重发）、追问定时器与批次。
+      alerts?.close();
       attachmentNudge.close();
       attachmentFacts.clear();
       systemNotes.clear();
