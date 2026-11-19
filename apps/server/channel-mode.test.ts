@@ -255,12 +255,12 @@ describe('shadow：建立连接，六类出站路径全抑制、底层零投递�
     sdk.emit('authenticated');
     await starting;
     sdk.emit('message.text', textFrame('cb-env', '你好'));
-    await vi.waitFor(() => expect(channel.shadowEvidence().userVisibleSuppressed).toBe(2)); // ack+终帧
+    await vi.waitFor(() => expect(channel.shadowEvidence().userVisibleSuppressed).toBe(1)); // 终帧（受理帧已取消）
     expect(sdk.userVisibleCalls).toBe(0);
     await channel.stop();
   });
 
-  it('ACK/进度/终态/异常兜底/拒绝/主动消息 = 17 次抑制、0 次真实投递', async () => {
+  it('进度/终态/异常兜底/拒绝/主动消息 = 14 次抑制、0 次真实投递', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const root = tempDir();
     const sdk = new RecordingSdk();
@@ -283,13 +283,13 @@ describe('shadow：建立连接，六类出站路径全抑制、底层零投递�
     expect(outcome.started).toBe(true);
     expect(channel.deliveryMode).toBe('silent'); // shadow = 出站全抑制
 
-    // ① ACK ② 进度 ③ 终态（文字 + 文件 + 图片）⑥ 主动消息同一条通道
+    // ② 进度 ③ 终态（文字 + 文件 + 图片）⑥ 主动消息同一条通道（2026-11-19 起不再有受理帧 ACK）
     sdk.emit('message.text', textFrame('cb-main', '你好'));
-    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(8));
+    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(7));
     sdk.emit('message.text', textFrame('cb-throw', 'throw')); // ④ 异常兜底
-    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(10));
+    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(8));
     sdk.emit('message.text', textFrame('cb-refuse', 'refuse')); // ⑤ 宿主拒绝文案
-    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(12));
+    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(9));
 
     const route: ChannelRoute = { channel: 'wecom', conversationId: 'g-mode' };
     const receipt = await channel.sendToConversation(route, {
@@ -301,11 +301,11 @@ describe('shadow：建立连接，六类出站路径全抑制、底层零投递�
     });
 
     // 闸门证据：六类路径逐一计数，总数精确（多/少一条都会红）。
-    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(17));
+    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(14));
     const evidence = channel.shadowEvidence();
     expect(evidence.mode).toBe('silent');
-    expect(evidence.userVisibleSuppressed).toBe(13);
-    expect(evidence.events.filter((event) => event.kind === 'reply_stream')).toHaveLength(8);
+    expect(evidence.userVisibleSuppressed).toBe(10);
+    expect(evidence.events.filter((event) => event.kind === 'reply_stream')).toHaveLength(5);
     expect(evidence.events.filter((event) => event.kind === 'send_message')).toHaveLength(1);
     expect(evidence.events.filter((event) => event.kind === 'upload_media')).toHaveLength(4);
     expect(evidence.events.filter((event) => event.kind === 'send_media')).toHaveLength(2);
@@ -553,7 +553,7 @@ describe('live：与改动前逐字节同序（同一输入同一事件序列）
       { method: 'on', detail: 'message.file' },
       { method: 'on', detail: 'message.mixed' },
       { method: 'connect', detail: '' },
-      { method: 'replyStream', detail: '收到,正在处理…:false' },
+      // 2026-11-19：受理帧「收到,正在处理…」已删（owner 判定无用），流从进度帧开始。
       { method: 'replyStream', detail: '步骤一:正在定位账套:false' },
       { method: 'replyStream', detail: '计划通知：本期口径已变更:false' },
       { method: 'replyStream', detail: '完成:true' },

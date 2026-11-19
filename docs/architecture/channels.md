@@ -29,7 +29,7 @@
 
 任何新入站消息取消待发追问；非附件消息丢弃本批；纯附件并入同批并重新计时（`apps/server/attachment-nudge.ts:199-210`、`:218-254`）。回执并窗从第一条附件-only 回合起算，后续只追加、不续期（`packages/channel-wecom/src/adapter.ts:1010-1023`）。纯附件路径宿主不消费 `message.text`，下载失败项不进回执/追问（`apps/server/server.ts:668-721`）；全部失败时用户侧静默——现行行为，未定义专门话术。
 
-> ⚠️ `formatFileReceipt`（带文件名）只有定义与注释，**无生产调用点**：带指令回合的受理帧是「收到,正在处理…」（`packages/channel-wecom/src/adapter.ts:573`），文件名以 `[附件:<名>]` 拼进入站正文（`:662`）。`packages/contracts/src/channel.ts:53` 与该文件 `:191` 的旧说法以代码为准。
+> ⚠️ `formatFileReceipt`（带文件名）只有定义与注释，**无生产调用点**：2026-11-19 起正文回合**不再发受理帧**（「收到,正在处理…」那张卡片已删，owner 判定无用），文件名以 `[附件:<名>]` 拼进入站正文（`packages/channel-wecom/src/adapter.ts:662`）。`packages/contracts/src/channel.ts:53` 与该文件 `:191` 的旧说法以代码为准。
 
 ## 5. silent 闸与 `channel.mode` 三档
 
@@ -51,7 +51,7 @@
 
 ## 8. 核对与验证入口
 
-渠道机制确定性测试：`packages/channel-wecom/adapter.merge-window.test.ts`、`adapter.silent-shadow.test.ts`、`packages/channel-wecom/adapter.test.ts:1053-1171`、`apps/server/channel-mode.test.ts`、`apps/server/server-attachment-nudge.test.ts`；附件时序端到端（真 `createServer` + dummy 执行层 + 假 SDK）`scripts/eval/wecom-sim/cases-d-attachment.test.ts`。**未验证**：真实企微网络时序与真机气泡观感仍需 live 人工面（`docs/product/wecom-live-dummy-cases.md:291-320`）；适配器没有时钟注入缝（3s/2s 是真实定时器，仅 3s 合并窗长度可用构造参数收紧，`packages/channel-wecom/src/adapter.ts:170-175`），不把离线结论读作已联调。
+渠道机制确定性测试：`packages/channel-wecom/adapter.merge-window.test.ts`、`adapter.silent-shadow.test.ts`、`packages/channel-wecom/adapter.test.ts:1037-1162`、`apps/server/channel-mode.test.ts`、`apps/server/server-attachment-nudge.test.ts`；附件时序端到端（真 `createServer` + dummy 执行层 + 假 SDK）`scripts/eval/wecom-sim/cases-d-attachment.test.ts`。**未验证**：真实企微网络时序与真机气泡观感仍需 live 人工面（`docs/product/wecom-live-dummy-cases.md:291-320`）；适配器没有时钟注入缝（3s/2s 是真实定时器，仅 3s 合并窗长度可用构造参数收紧，`packages/channel-wecom/src/adapter.ts:170-175`），不把离线结论读作已联调。
 
 ## 9. 信任边界与残余风险
 

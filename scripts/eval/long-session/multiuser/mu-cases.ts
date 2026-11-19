@@ -584,8 +584,9 @@ async function mu8DeliveryLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
     try {
       started.sdk.emit('message.text', wecomTextFrame('cb-mu8-group', { msgid: 'mu8-g1', from: 'mu-alice', content: groupText, chattype: 'group', chatid: 'group-g1' }));
       started.sdk.emit('message.text', wecomTextFrame('cb-mu8-priv', { msgid: 'mu8-p1', from: 'mu-alice', content: privText, chattype: 'single' }));
-      // 静默闸下每条消息产出 ack + 终帧（2 条用户可见尝试）；等两条消息的抑制尝试都落定。
-      await waitUntil(() => started.channel.shadowEvidence().userVisibleSuppressed >= 4, 5000);
+      // 静默闸下每条消息产出 1 条用户可见尝试（终帧；2026-11-19 起不再有受理帧 ack）；
+      // 等两条消息的抑制尝试都落定。
+      await waitUntil(() => started.channel.shadowEvidence().userVisibleSuppressed >= 2, 5000);
       await settle();
 
       const shadow = started.channel.shadowEvidence();
@@ -593,7 +594,7 @@ async function mu8DeliveryLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
       const tasks = readTasks(handle.dbPath);
       const privTask = tasks.find((task) => task.sessionId === sessionIdOf('mu-alice'));
       const groupTask = tasks.find((task) => task.sessionId === sessionIdOf('group-g1'));
-      const suppressedOk = shadow.mode === 'silent' && shadow.userVisibleSuppressed >= 4;
+      const suppressedOk = shadow.mode === 'silent' && shadow.userVisibleSuppressed >= 2;
       const scopedDistinct = privTask !== undefined && groupTask !== undefined
         && privTask.sessionId !== groupTask.sessionId && privTask.taskId !== groupTask.taskId
         && privTask.principalId !== groupTask.principalId;
@@ -622,7 +623,7 @@ async function mu8DeliveryLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
 
   return {
     hits, records, evidence,
-    notes: `投递层：silent 闸下实际用户可见投递=${String(evidence['realUserVisibleCalls'])}（应 0），被抑制尝试=${String(evidence['userVisibleSuppressed'])}（应 ≥4），群/私分属各自 session=${String(evidence['scopedDistinct'])}。`,
+    notes: `投递层：silent 闸下实际用户可见投递=${String(evidence['realUserVisibleCalls'])}（应 0），被抑制尝试=${String(evidence['userVisibleSuppressed'])}（应 ≥2，每条消息一条终帧），群/私分属各自 session=${String(evidence['scopedDistinct'])}。`,
   };
 }
 

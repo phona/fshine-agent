@@ -42,7 +42,6 @@ import {
   type SuppressedSend,
 } from './silent-shadow-gate';
 
-const ACK_TEXT = '收到,正在处理…';
 const FALLBACK_REPLY = '处理失败,请稍后再试';
 const IMAGE_FAIL_REPLY = '图片发送失败,请稍后再试';
 const START_TIMEOUT_MS = 30_000;
@@ -187,7 +186,8 @@ interface ReplyDegrade {
  * 为什么需要并窗（2026-10-19）：企微的流式回复按入站消息的 `req_id` 走——一条用户
  * 消息就是一个气泡，N 个文件必然是 N 条"已收到 X"，和随后指令回合的帧在会话里互相
  * 穿插。修法是**不为文件起气泡**：附件-only 消息连秒回 ack 都不发（"收到,正在处理…"
- * 对一条只暂存不处理的消息是假承诺，而且没有终帧来改写它），收据改由两处承载——
+ * 对一条只暂存不处理的消息是假承诺，而且没有终帧来改写它；2026-11-19 起**正文回合也不再
+ * 发受理帧**，见 dispatchMessage），收据改由两处承载——
  * ① 带指令的回合首帧（宿主的规则二披露，`formatFileReceipt`，带文件名）；
  * ② 只发文件、迟迟没有指令时，本类在窗口到点后补一条，否则用户对着静默的会话
  *    不知道文件到底收没收到。这一条只说"收了几份"（`formatFileAck`，不带文件名）：
@@ -568,9 +568,10 @@ export class WecomBotChannel implements ChannelAdapter {
     const attachmentOnly = typeof content !== 'string' || content.trim() === '';
     const reqId = typeof frame.headers?.req_id === 'string' ? frame.headers.req_id : randomUUID();
     const streamId = randomUUID();
-    // 正文先发受理帧，再等待同会话在途附件；这样等待期间用户有即时反馈，且终帧复用
-    // 同一 req_id/streamId。附件-only 仍不起流，收据由并窗承载。
-    if (!attachmentOnly) void this.reply(frame, reqId, streamId, ACK_TEXT, false);
+    // 不先发「收到,正在处理…」受理帧（owner 2026-11-19：这张卡片没用——用户要么马上拿到
+    // 结果，要么稍后由终帧/回执说话）。流从终帧开始；终帧被拒仍走 reply() 的降级
+    // （sendMessage 全新消息），所以「首帧即终帧」不会变成静默。附件-only 仍不起流，
+    // 收据由并窗承载。
     let attachments: { saved: IncomingAttachment[]; failed: string[] };
     let finishAttachmentProcessing: (() => void) | undefined;
     if (msgtype === 'file') {

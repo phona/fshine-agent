@@ -286,11 +286,9 @@ describe('WecomBotChannel(官方 SDK 封装)', () => {
     expect(message.chatType).toBe('single');
     expect(message.text).toBe('查一下6月账套');
 
-    expect(fake.replies).toHaveLength(2);
-    expect(fake.replies[0]).toMatchObject({ reqId: 'cb-1', content: '收到,正在处理…', finish: false });
-    expect(fake.replies[1]).toMatchObject({ reqId: 'cb-1', content: '好的,已收到', finish: true });
-    // ack 与最终帧共用同一 streamId(最终整体替换过程)
-    expect(fake.replies[0]!.streamId).toBe(fake.replies[1]!.streamId);
+    // 2026-11-19：不再先发「收到,正在处理…」受理帧（那张卡片没用）——只有一条终帧。
+    expect(fake.replies).toHaveLength(1);
+    expect(fake.replies[0]).toMatchObject({ reqId: 'cb-1', content: '好的,已收到', finish: true });
   });
 
   it('群聊:剥离 @机器人 前缀,conversationId 取 chatid', async () => {
@@ -415,7 +413,8 @@ describe('WecomBotChannel(官方 SDK 封装)', () => {
     const progressTexts = fake.replies
       .filter((reply) => !reply.finish)
       .map((reply) => reply.content);
-    expect(progressTexts).toEqual(['收到,正在处理…', '步骤一:正在定位账套']);
+    // 2026-11-19：没有受理帧了，进度帧只有 handler 自己发的那一条。
+    expect(progressTexts).toEqual(['步骤一:正在定位账套']);
   });
 
   // 受理帧豁免（首帧提速，2026-10-16）：本流第一帧 progress 是宿主在回合真正开跑时发的
@@ -441,7 +440,7 @@ describe('WecomBotChannel(官方 SDK 封装)', () => {
 
     expect(fake.replies.filter((reply) => reply.finish)).toHaveLength(1);
     const progressTexts = fake.replies
-      .filter((reply) => !reply.finish && reply.content !== '收到,正在处理…')
+      .filter((reply) => !reply.finish)
       .map((reply) => reply.content);
     // 第 1 帧豁免 + 4 帧预算 = 5 帧；第 6 帧被硬顶丢（老行为：第 1 帧占预算，只送出 4 帧）
     expect(progressTexts).toEqual(['进度帧1', '进度帧2', '进度帧3', '进度帧4', '进度帧5']);
@@ -744,8 +743,8 @@ describe('WecomBotChannel 附件(file 消息)', () => {
     // 文件事件先到，但 downloadFile 还没完成；正文不能冷启动进入 handler，
     // 否则下游会在附件进入暂存池前开始执行。
     expect(handler).not.toHaveBeenCalled();
-    const ack = fake.replies.find((reply) => reply.reqId === 'req-text-after-file' && !reply.finish);
-    expect(ack).toMatchObject({ content: '收到,正在处理…', finish: false });
+    // 2026-11-19：不再发受理帧——「已收下但在等附件」用「无任何回复帧 + handler 未调用」证明。
+    expect(fake.replies.filter((reply) => reply.reqId === 'req-text-after-file')).toHaveLength(0);
 
     resolveDownload({ buffer: Buffer.from('xlsx'), filename: '工资.xlsx' });
     await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(2));
@@ -753,7 +752,7 @@ describe('WecomBotChannel 附件(file 消息)', () => {
       .toEqual(['msg-file-slow', 'msg-text-after-file']);
     expect((handler.mock.calls[1]![0] as IncomingChannelMessage).text).toBe('帮我做工资表');
     const final = fake.replies.find((reply) => reply.reqId === 'req-text-after-file' && reply.finish);
-    expect(final?.streamId).toBe(ack?.streamId);
+    expect(final?.content).toBeTruthy();
 
     rmSync(root, { recursive: true, force: true });
   });
@@ -808,11 +807,7 @@ describe('WecomBotChannel 附件(file 消息)', () => {
       await Promise.resolve();
       await Promise.resolve();
       expect(handler).not.toHaveBeenCalled();
-      expect(fake.replies).toContainEqual(expect.objectContaining({
-        reqId: 'req-text-timeout',
-        content: '收到,正在处理…',
-        finish: false,
-      }));
+      expect(fake.replies.filter((reply) => reply.reqId === 'req-text-timeout')).toHaveLength(0);
 
       await vi.advanceTimersByTimeAsync(ATTACHMENT_WAIT_TIMEOUT_MS);
       expect(handler).not.toHaveBeenCalled();
@@ -894,11 +889,7 @@ describe('WecomBotChannel 附件(file 消息)', () => {
       await channel.stop();
       await Promise.resolve();
       expect(handler).not.toHaveBeenCalled();
-      expect(fake.replies).toContainEqual(expect.objectContaining({
-        reqId: 'req-text-stop',
-        content: '收到,正在处理…',
-        finish: false,
-      }));
+      expect(fake.replies.filter((reply) => reply.reqId === 'req-text-stop')).toHaveLength(0);
       expect(fake.replies.some((reply) => reply.finish)).toBe(false);
 
       resolveDownload({ buffer: Buffer.from('xlsx'), filename: '工资.xlsx' });
@@ -1111,7 +1102,7 @@ describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)'
     expect(fake.replies[0]!.reqId).toBe('req-f2');
   });
 
-  it('带正文的消息到达即取消挂起的收据（那一回合的首帧会带同样的收据）', async () => {
+  it('带正文的消息到达即取消挂起的收据（那一回合只有终帧，不再有收据/受理帧）', async () => {
     const root = freshRoot();
     // 宿主正常路径对附件-only 无话可说；带正文的回合照常出终帧
     const handler = vi.fn(async (msg: IncomingChannelMessage): Promise<string> => (msg.attachmentOnly ? '' : '做完了'));
@@ -1121,8 +1112,8 @@ describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)'
     fake.emit('message.text', textFrame('req-t1'));
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(5_000);               // 窗口早过了
-    // 只有那一回合的两帧；没有第三条收据——同一句话说两遍才是冗余
-    expect(fake.replies.map((r) => r.content)).toEqual(['收到,正在处理…', '做完了']);
+    // 那一回合只有一条终帧；也没有收据——同一句话说两遍才是冗余
+    expect(fake.replies.map((r) => r.content)).toEqual(['做完了']);
   });
 
   it('例外路径（暂存超限等）宿主自己回文本：当即终帧，不进并窗', async () => {
