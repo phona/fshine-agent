@@ -179,11 +179,9 @@ export interface ResolvedRuntimeConfig {
    * 只有真跑久了才由本档（10 分钟）主动出声。**缺省 10 分钟不动**。
    */
   readonly longRunningNoticeMs: number;
-  /**
-   * 「卡住了」提醒阈值（ms）：任务 running 且超过本阈值仍无事件 → 再发一条（之后不再发）
-   * ——两个阈值都走本配置源（不硬编码魔法数）。缺省 30 分钟。0 = 关闭该档提醒。
-   */
-  readonly longRunningStuckNoticeMs: number;
+  // 「卡住了」档（2026-11-18 起的第二档，缺省 30 分钟）已随 2026-11-19 唤醒切片删除：
+  // 它断言了我们不知道的事（「我卡住了」），还替用户下结论（「建议先停掉」）。字段与配置键
+  // 都不再存在——只留上面 10 分钟一档。
   /**
    * 前台回合排队晋升的最长等待（ms，2026-11-18）：超过即确定性拒绝（不留下排队残留）。
    * 缺省 2 分钟。消费点在 execution-runtime 的排队等待循环。
@@ -232,10 +230,9 @@ export const DEFAULT_RUNTIME_CONFIG: ResolvedRuntimeConfig = Object.freeze({
   // 缺省 8 秒（owner 2026-11-19 定 A 案）：真模型下 Worker 回合实测 5～10 秒，1.5s 窗口等于
   // 「每件事都转后台」，用户看到回执 + 结果两条气泡；8s 让短活在回合内一条气泡给结果。
   taskRunWaitMs: 8_000,
-  // 预期契约（2026-11-18 owner 定）：交办 10 分钟后仍无动静 → 问用户「停下来还是继续等」；
-  // 30 分钟后仍无动静 → 再发一条「卡住了，建议先停掉」（之后不再发）。0 = 关闭对应档。
+  // 预期契约（2026-11-18 owner 定）：交办 10 分钟后仍无动静 → 唤醒模型问用户「停下来还是
+  // 继续等」（30 分钟「卡住」档已随 2026-11-19 唤醒切片删除）。0 = 关闭这一档。
   longRunningNoticeMs: 600_000,
-  longRunningStuckNoticeMs: 1_800_000,
   // 前台排队最长等待（2026-11-18 owner 定）：缺省 2 分钟；超时确定性拒绝（系统忙）。
   queueWaitMs: 120_000,
   // 大响应文件化（2026-11-19 owner 定）：Worker 结果超过 64KiB 即落任务文件，只回摘要 +
@@ -385,13 +382,10 @@ export function resolveRuntimeConfig(config: RuntimeConfig = {}): ResolvedRuntim
     taskRunWaitMs: config.taskRunWaitMs === undefined
       ? DEFAULT_RUNTIME_CONFIG.taskRunWaitMs
       : assertRuntimeInteger(config.taskRunWaitMs, 'runtime.taskRunWaitMs', 0),
-    // 0 = 关闭提醒（显式值合法）；负数/非整数 fail-fast。上限同理（0 = 不设上限）。
+    // 0 = 关闭提醒（显式值合法）；负数/非整数 fail-fast。
     longRunningNoticeMs: config.longRunningNoticeMs === undefined
       ? DEFAULT_RUNTIME_CONFIG.longRunningNoticeMs
       : assertRuntimeInteger(config.longRunningNoticeMs, 'runtime.longRunningNoticeMs', 0),
-    longRunningStuckNoticeMs: config.longRunningStuckNoticeMs === undefined
-      ? DEFAULT_RUNTIME_CONFIG.longRunningStuckNoticeMs
-      : assertRuntimeInteger(config.longRunningStuckNoticeMs, 'runtime.longRunningStuckNoticeMs', 0),
     // 0 = 不排队（立即拒绝）；负数/非整数 fail-fast。
     queueWaitMs: config.queueWaitMs === undefined
       ? DEFAULT_RUNTIME_CONFIG.queueWaitMs

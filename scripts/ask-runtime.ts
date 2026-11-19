@@ -77,7 +77,14 @@ import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/a
 import type { RunJsExecutor } from '../packages/agent/src/run-js-executor';
 import type { TaskInputCopier } from '../packages/agent/src/file-store';
 import { createTaskExecutionBridge, type TaskFileBridgeStore } from '../packages/agent/src/task-file-bridge';
-import { createTaskRunner, type LongRunningNoticePort, type LongTaskWaitPort, type TaskExecutor, type TaskRunner } from '../packages/agent/src/task-runner';
+import {
+  createTaskRunner,
+  type LongRunningNoticePort,
+  type LongTaskWaitPort,
+  type TaskExecutionOutcome,
+  type TaskExecutor,
+  type TaskRunner,
+} from '../packages/agent/src/task-runner';
 import { failureMessageFor } from '../packages/agent/src/user-facing-failure';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../packages/agent/src/worker-skills';
 import type { SkillRegistry } from '../packages/agent/src/skills';
@@ -760,7 +767,24 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
     const onTaskFailed = input.onTaskFailed;
     executor = {
       async execute(task, context) {
-        const outcome = await inner.execute(task, context);
+        let outcome: TaskExecutionOutcome;
+        try {
+          outcome = await inner.execute(task, context);
+        } catch (error) {
+          // 2026-11-19 唤醒切片：回合**抛错**（Worker 驱动/基础设施故障）也是任务失败终局
+          // （runner 收尾会 registry.fail）——此前不触发失败回调，用户只能等下次开口才从
+          // B 通道侧面知道。这里按同一条失败出口如实上报（reason = 错误文本，只进事实/日志），
+          // 然后原样抛出：任务事实仍由 runner 收尾决定，本层不改判。
+          onTaskFailed?.({
+            taskId: task.taskId,
+            principalId: task.principalId,
+            sessionId: task.sessionId,
+            request: task.request,
+            status: 'failed',
+            reason: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
+        }
         if (outcome.kind === 'completed' && outcome.resultText.trim() !== '') {
           onTaskCompleted?.({
             taskId: task.taskId,
@@ -794,10 +818,9 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
     leaseMs: input.runnerOptions?.leaseMs ?? resolved.workerTurnMs + LEASE_MARGIN_MS,
     // 等待用户到期消费者由装配方按配置启用（配置缺省 24h；runner 直用缺省关闭）。
     waitUserTimeoutMs: resolved.waitUserTimeoutMs,
-    // 预期契约（2026-11-18）：10 分钟「比预计久了」/30 分钟「卡住了」两档阈值取自同一
-    // 配置源；投递端口由装配方接（缺省不接 = 不提醒）。
+    // 预期契约（2026-11-18）：10 分钟「比预计久了」提醒阈值取自同一配置源（30 分钟「卡住」
+    // 档已随 2026-11-19 唤醒切片删除）；投递端口由装配方接（缺省不接 = 不提醒）。
     longRunningNoticeMs: resolved.longRunningNoticeMs,
-    longRunningStuckNoticeMs: resolved.longRunningStuckNoticeMs,
     ...(input.longRunningNotice === undefined ? {} : { longRunningNotice: input.longRunningNotice }),
     // 长任务等待「与执行层断了联系（无回执）」档的用户文案（2026-11-19）：装配层从**单一
     // 话术来源**取（user-facing-failure 的 unknown_result 档），runner 不自己写文案。
@@ -840,9 +863,12 @@ export interface NotificationAttachment {
  *     由模型把话带给用户；唤醒降级（unavailable/failed）与非 live 不唤醒时，完成**事实**
  *     经 server 的 systemNotes 待注入队列在下一次用户回合补说。若这里再注入一条
  *     `[任务事实] 办完了：…`，同一回合会出现两条同一件事的陈述（旧宿主完成模板残留）。
- *   · 失败/取消/超时/资源/等补充**保留**：这几类还没改成唤醒，主动推送与 B 通道照旧。
+ *   · `failed` / `cancelled` 同理移出（2026-11-19 唤醒切片）：失败（含回合抛错）由失败唤醒
+ *     出口说、「用户说停」由取消唤醒出口说；唤醒降级/非 live 时两条**事实**同样进
+ *     systemNotes 待注入队列，宿主兜底屏也在同一出口。这里再注入就是同一件事说两遍。
+ *   · 超时/资源拒绝/等补充**保留**：这几类还没改成唤醒，主动推送与 B 通道照旧。
  */
-const B_CHANNEL_KINDS = new Set(['failed', 'cancelled', 'timed_out', 'resource_limited', 'waiting_user']);
+const B_CHANNEL_KINDS = new Set(['timed_out', 'resource_limited', 'waiting_user']);
 const INJECTED_KEYS_LIMIT = 1024;
 
 export function attachNotificationOutbox(

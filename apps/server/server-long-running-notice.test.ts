@@ -1,12 +1,14 @@
 /**
- * 主动提醒生产接线（预期契约 2026-11-18）：10 分钟「比预计久了」/30 分钟「卡住了」两档文案
- * 由 runner 生成；本套件只验证 **server 把投递端口接对了**：
- *   · 1:1 会话：任务跑过阈值且无事件 → 恰好一条主动消息（走既有 sendText 主动投递面）；
+ * 主动提醒生产接线（预期契约 2026-11-18；2026-11-19 唤醒切片改形、只留一档）：
+ * 「比预计久了」提醒由 runner 判时机、出**事实**与**兜底句**；本套件验证 **server 把唤醒
+ * 出口接对了**：
+ *   · 1:1 会话：任务跑过阈值且无事件 → 恰好一条主动消息（唤醒模型说；本夹具的假 driver
+ *     没有唤醒能力 = 「模型回合挂了」那一支，如实投兜底句）；
  *   · 群聊：一条都不发（跨 principal 泄漏面），且不落「已发」；
- *   · 非 live 部署：sendText 不被调用（不冒充 sent）；
- *   · 未知会话（无 inbound 事实的路由）：不发（fail-quiet，不猜路由）。
+ *   · 提醒端口：未接唤醒出口 = 如实返回 false（不冒充已送达）；接上 = 原样透传事实/兜底句。
  *
- * 假件：假 driver（只交办）、挂起的假 executor（任务保持 running）、假渠道投递面。零网络。
+ * 假件：假 driver（只交办、无 wake）、挂起的假 executor（任务保持 running）、假渠道投递面。
+ * 零网络。「唤醒说话」正支（模型真说了一句）由 server-state-wake.test.ts 覆盖。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -16,7 +18,7 @@ import type { AppConfig, ChannelRoute, DeliveryReceipt, IncomingChannelMessage }
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver } from '../../packages/agent/src/driver-contract';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
-import { LONG_RUNNING_NOTICE_TEXT, type TaskExecutionInput, type TaskExecutionOutcome, type TaskExecutor } from '../../packages/agent/src/task-runner';
+import { LONG_RUNNING_NOTICE_FALLBACK_TEXT, type TaskExecutionInput, type TaskExecutionOutcome, type TaskExecutor } from '../../packages/agent/src/task-runner';
 import { createLongRunningNoticePort, createServer, type FileDeliveryPort } from './server';
 
 const FIXTURE_ROOT = path.resolve(__dirname, '..', '..', 'scripts', 'eval', 'fixtures', 'dummy-platform');
@@ -48,7 +50,6 @@ function testConfig(allowWriteOperations = false): AppConfig {
       backgroundConcurrency: 1,
       taskRunWaitMs: 0,
       longRunningNoticeMs: 1,
-      longRunningStuckNoticeMs: 0,
       ...(allowWriteOperations ? { allowWriteOperations: true } : {}),
     },
   };
@@ -186,7 +187,7 @@ async function waitFor(assertion: () => void, timeoutMs = 1_000): Promise<void> 
 }
 
 describe('预期契约·主动提醒的生产接线', () => {
-  it('① 1:1 会话：任务超阈值无事件 → 恰一条主动提醒（走 sendText、带可做的动作）', async () => {
+  it('① 1:1 会话：任务超阈值无事件 → 恰一条主动提醒（假 driver 无唤醒能力 = 模型挂了 → 兜底句，带可做的动作）', async () => {
     const delivery = new RecordingDelivery();
     const { executor, release } = hangingExecutor();
     const dbPath = path.join(tempDir(), 'state.db');
@@ -204,7 +205,10 @@ describe('预期契约·主动提醒的生产接线', () => {
       await server.handler(incoming('user-a', 'conv-a', '跑一个很久的活'));
       await waitFor(() => expect(delivery.texts).toHaveLength(1), 3_000);
       expect(delivery.texts[0]!.route).toEqual({ channel: 'wecom', conversationId: 'conv-a' });
-      expect(delivery.texts[0]!.text).toBe(LONG_RUNNING_NOTICE_TEXT);
+      // 本夹具的假 driver 没有唤醒能力 → 走「模型回合挂掉」降级：如实投兜底句（不说进度、不诱导重试）。
+      expect(delivery.texts[0]!.text).toBe(LONG_RUNNING_NOTICE_FALLBACK_TEXT);
+      expect(delivery.texts[0]!.text).toContain('停下来');
+      expect(delivery.texts[0]!.text).toContain('继续等');
       // 只发一条（幂等：已发落库，不刷屏）。
       await new Promise((resolve) => setTimeout(resolve, 120));
       expect(delivery.texts).toHaveLength(1);
@@ -297,52 +301,61 @@ describe('预期契约·主动提醒的生产接线', () => {
 });
 
 describe('主动提醒端口（纯函数）', () => {
-  const route: ChannelRoute = { channel: 'wecom', conversationId: 'conv-a' };
-
-  it('非 live 部署 / 无 sendText / 未知路由 / 投递抛错：一律不宣称送达', async () => {
-    const silence = new RecordingDelivery('silent');
-    const port = createLongRunningNoticePort({
-      isDirectSession: () => true,
-      routeOf: () => route,
-      delivery: silence,
-    });
-    await expect(port.sendNotice({ taskId: 't', principalId: 'p', sessionId: 's', stage: 'overdue', minutes: 11, text: 'x' }))
-      .resolves.toBe(false);
-    expect(silence.texts).toHaveLength(0);
-
-    const unknownRoute = createLongRunningNoticePort({
-      isDirectSession: () => true,
-      routeOf: () => undefined,
-      delivery: new RecordingDelivery(),
-    });
-    await expect(unknownRoute.sendNotice({ taskId: 't', principalId: 'p', sessionId: 's', stage: 'stuck', minutes: 31, text: 'x' }))
-      .resolves.toBe(false);
-
-    const throwing = createLongRunningNoticePort({
-      isDirectSession: () => true,
-      routeOf: () => route,
-      delivery: {
-        deliveryMode: 'live',
-        sendToConversation: async () => ({ route, parts: [] }),
-        sendText: async () => {
-          throw new Error('channel down');
-        },
-      },
-    });
-    await expect(throwing.sendNotice({ taskId: 't', principalId: 'p', sessionId: 's', stage: 'overdue', minutes: 11, text: 'x' }))
-      .resolves.toBe(false);
-    await expect(createLongRunningNoticePort({
-      isDirectSession: () => true,
-      routeOf: () => route,
-      delivery: undefined,
-    }).sendNotice({ taskId: 't', principalId: 'p', sessionId: 's', stage: 'overdue', minutes: 11, text: 'x' })).resolves.toBe(false);
+  it('未接唤醒出口：如实返回 false（不冒充已送达、不静默猜）', async () => {
+    const port = createLongRunningNoticePort({ isDirectSession: () => true });
+    await expect(port.sendNotice({
+      taskId: 't',
+      principalId: 'p',
+      sessionId: 's',
+      stage: 'overdue',
+      minutes: 11,
+      factText: '事实',
+      fallbackText: '兜底',
+    })).resolves.toBe(false);
   });
 
-  it('live + 已知路由：真投递才返回 true', async () => {
-    const delivery = new RecordingDelivery();
-    const port = createLongRunningNoticePort({ isDirectSession: () => true, routeOf: () => route, delivery });
-    await expect(port.sendNotice({ taskId: 't', principalId: 'p', sessionId: 's', stage: 'overdue', minutes: 11, text: '提醒' }))
-      .resolves.toBe(true);
-    expect(delivery.texts).toEqual([{ route, text: '提醒' }]);
+  it('接上唤醒出口：事实与兜底句原样透传，返回值照搬唤醒出口的处置结果', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const port = createLongRunningNoticePort({
+      isDirectSession: () => true,
+      wakeStateChange: async (notice) => {
+        seen.push({ ...notice });
+        return true;
+      },
+    });
+    await expect(port.sendNotice({
+      taskId: 't',
+      principalId: 'p',
+      sessionId: 's',
+      stage: 'overdue',
+      name: '查上季度报销',
+      minutes: 11,
+      factText: '事实',
+      fallbackText: '兜底',
+    })).resolves.toBe(true);
+    expect(seen).toEqual([{
+      taskId: 't',
+      principalId: 'p',
+      sessionId: 's',
+      stage: 'overdue',
+      name: '查上季度报销',
+      minutes: 11,
+      factText: '事实',
+      fallbackText: '兜底',
+    }]);
+
+    const refusing = createLongRunningNoticePort({
+      isDirectSession: () => true,
+      wakeStateChange: async () => false,
+    });
+    await expect(refusing.sendNotice({
+      taskId: 't',
+      principalId: 'p',
+      sessionId: 's',
+      stage: 'overdue',
+      minutes: 11,
+      factText: '事实',
+      fallbackText: '兜底',
+    })).resolves.toBe(false);
   });
 });

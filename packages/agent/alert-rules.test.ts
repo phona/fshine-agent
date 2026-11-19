@@ -64,6 +64,21 @@ describe('host_fault_reported', () => {
     expect(result.alerts.some((a) => a.rule === 'host_fault_reported')).toBe(true);
   });
 
+  it('命中：装配面缺陷（accepted 但没给等待端口）→ 我方故障告警（不拿用户干不了的事打扰他）', () => {
+    // 2026-11-19 只读审计 #3：事件由 runner 在落终态时记；归既有 host_fault 规则（不新建规则）。
+    const result = evaluateAlerts(
+      [
+        fact({
+          event: 'task_long_task_unsupported',
+          taskId: 't4',
+          raw: '{"event":"task_long_task_unsupported","taskId":"t4"}',
+        }),
+      ],
+      { now: NOW },
+    );
+    expect(result.alerts.some((a) => a.rule === 'host_fault_reported' && a.subject === 'task:t4')).toBe(true);
+  });
+
   it('不命中：普通执行事实（无我方故障标记）', () => {
     const result = evaluateAlerts(
       [

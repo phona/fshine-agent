@@ -18,7 +18,7 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { describe, expect, it } from 'vitest';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { LONG_RUNNING_NOTICE_TEXT } from '../../../packages/agent/src/task-runner';
+import { LONG_RUNNING_NOTICE_FALLBACK_TEXT } from '../../../packages/agent/src/task-runner';
 import {
   classifyFailure,
   failureMessageFor,
@@ -317,7 +317,6 @@ describe('I 组·体验交互（I-1～I-8，自动）', () => {
       allowWriteOperations: true,
       groupRole: 'operator',
       longRunningNoticeMs: 200,
-      longRunningStuckNoticeMs: 0,
     });
     const groupRegistry = createSqliteTaskRegistry(group.dbPath, { readOnly: true });
     try {
@@ -330,7 +329,9 @@ describe('I 组·体验交互（I-1～I-8，自动）', () => {
       await group.waitFor('I-6 群长任务在跑', () => groupRegistry.get(taskId, GROUP_SCOPE).status === 'running', 10_000);
       // 阈值 200ms 早该触发；群里零提醒。
       await new Promise((resolve) => setTimeout(resolve, 600));
-      expect(group.sdk.proactiveTexts.filter((entry) => entry.content === LONG_RUNNING_NOTICE_TEXT)).toHaveLength(0);
+      // 群里零主动提醒（唤醒回合的模型台词与宿主兜底句都不该出现）。
+      expect(group.sdk.proactiveTexts.some((entry) => entry.content.includes('比预计久'))).toBe(false);
+      expect(group.sdk.proactiveTexts.filter((entry) => entry.content === LONG_RUNNING_NOTICE_FALLBACK_TEXT)).toHaveLength(0);
       // 收尾：等群长任务跑完再关库。
       await group.waitFor('I-6 群长任务完成', () => groupRegistry.get(taskId, GROUP_SCOPE).status === 'completed', 20_000);
     } finally {

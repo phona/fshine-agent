@@ -278,6 +278,20 @@ export class SimScriptBook {
       }
       return textAssistant(body);
     }
+    // 其余状态变化唤醒回合（失败 / 已停止 / 重启对账 / 久无动静；2026-11-19 唤醒切片）：
+    // 显式脚本优先；未显式脚本时按同一产品形状脚本化——假模型按事实说一句人话（台词唯一
+    // 来源见 simWakeLine，用例断言用同一函数，不硬编）。
+    if (
+      driver === 'main'
+      && (text.startsWith(FAILURE_FACT_PREFIX)
+        || text.startsWith(CANCELLED_FACT_PREFIX)
+        || text.startsWith(RESTART_FACT_PREFIX)
+        || text.startsWith(LONG_RUNNING_FACT_PREFIX))
+      && !this.main.has(text)
+    ) {
+      this.requestMessages.set(`main\u0000${text}`, messages);
+      return textAssistant(simWakeLine(text));
+    }
     const { key, entry } = this.resolve(driver, text);
     this.requestMessages.set(`${driver}\u0000${key}`, messages);
     const counterKey = `${driver}\u0000${key}`;
@@ -343,6 +357,57 @@ export function completionResultBodyOf(factText: string): string | undefined {
   const end = rest.lastIndexOf(COMPLETION_TAIL_MARKER);
   if (end === -1) return undefined;
   return rest.slice(0, end);
+}
+
+/**
+ * 状态变化事实前缀（与宿主拼装同源；2026-11-19 唤醒切片四出口）：
+ * 失败（task-completion-delivery 的 taskFailureFactText）/ 已停止（taskCancelledFactText）/
+ * 重启对账（taskRestartFactText）/ 久无动静（task-runner 的 longRunningNoticeFactText）。
+ */
+export const FAILURE_FACT_PREFIX = '[任务失败]';
+export const CANCELLED_FACT_PREFIX = '[已停止]';
+export const RESTART_FACT_PREFIX = '[重启对账]';
+export const LONG_RUNNING_FACT_PREFIX = '[久无动静]';
+
+/** 事实里的业务名（「<名>」；中性指代 = undefined）。 */
+export function factSubjectOf(factText: string): string | undefined {
+  const hit = /「([^」]+)」/.exec(factText);
+  return hit?.[1];
+}
+
+/**
+ * 假模型在状态变化唤醒回合说的那几句（**产品形状**：宿主只喂事实，用户看到的话由模型写）。
+ * 用例要断言「投递的就是模型说的那句」时 import 这里的唯一来源，不各自硬编。
+ */
+export function longRunningWakeLine(name?: string): string {
+  return `${lineSubjectOf(name)}比预计久了。要我停下来，还是继续等？`;
+}
+
+export function failureWakeLine(name?: string): string {
+  return `${lineSubjectOf(name)}这次没办成。要我再试一次，还是先放着？`;
+}
+
+export function cancelledWakeLine(name?: string): string {
+  return `${lineSubjectOf(name)}已经停了。`;
+}
+
+export function restartWakeLine(name?: string): string {
+  return `${lineSubjectOf(name)}我这边重启过，它的状态说不清了；你说一声我就重来一遍。`;
+}
+
+/** 假模型台词的主语（业务名缺省 / 空 = 中性指代，与宿主事实拼装同口径）。 */
+function lineSubjectOf(name?: string): string {
+  return name === undefined || name.trim() === '' ? '你交代的那件事' : `「${name}」`;
+}
+
+/** 按事实前缀派发到上面那位台词（respond 用；未知前缀立刻抛，脚本不静默）。 */
+export function simWakeLine(factText: string): string {
+  const name = factSubjectOf(factText);
+  if (factText.startsWith(FAILURE_FACT_PREFIX)) return failureWakeLine(name);
+  if (factText.startsWith(CANCELLED_FACT_PREFIX)) return cancelledWakeLine(name);
+  if (factText.startsWith(RESTART_FACT_PREFIX)) return restartWakeLine(name);
+  if (factText.startsWith(LONG_RUNNING_FACT_PREFIX)) return longRunningWakeLine(name);
+  throw new Error(`未知的状态变化事实（脚本没有对应台词）：${JSON.stringify(factText.slice(0, 120))}`);
 }
 
 /** 最后一条工具结果（执行层真实返回 / run_js 真实出口 / 宿主拒绝话术）。 */
@@ -473,11 +538,10 @@ export interface WecomSimOptions {
   /** 群主体的角色（缺省 viewer）。要让群里的任务真跑起来时给 operator（W-43 的群静默对照）。 */
   readonly groupRole?: string;
   /**
-   * 「长时间没动静」两档提醒阈值（runtime.longRunningNoticeMs / longRunningStuckNoticeMs）。
-   * 缺省 = 产品值（10 分钟 / 30 分钟）；用例把首档调到几百毫秒来确定性触发。
+   * 「长时间没动静」提醒阈值（runtime.longRunningNoticeMs；只此一档——30 分钟「卡住」档已随
+   * 2026-11-19 唤醒切片删除）。缺省 = 产品值（10 分钟）；用例把它调到几百毫秒确定性触发。
    */
   readonly longRunningNoticeMs?: number;
-  readonly longRunningStuckNoticeMs?: number;
   /** 临时目录前缀（定位用）。 */
   readonly label?: string;
 }
@@ -580,11 +644,8 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
       ...(options.allowWriteOperations === true ? { allowWriteOperations: true } : {}),
       // 短等待窗口只在 async 装配（有推送面）下有意义；sync 装配直接同回合拿结果。
       ...(options.taskRunWaitMs === undefined ? {} : { taskRunWaitMs: options.taskRunWaitMs }),
-      // 两档主动提醒阈值（缺省住策略层：10 分钟 / 30 分钟）。
+      // 主动提醒阈值（缺省住策略层：10 分钟；只此一档）。
       ...(options.longRunningNoticeMs === undefined ? {} : { longRunningNoticeMs: options.longRunningNoticeMs }),
-      ...(options.longRunningStuckNoticeMs === undefined
-        ? {}
-        : { longRunningStuckNoticeMs: options.longRunningStuckNoticeMs }),
     },
   };
 

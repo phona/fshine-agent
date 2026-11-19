@@ -1,20 +1,23 @@
 /**
- * 预期契约（2026-11-18 owner 定）：后台任务长时间无动静的两档主动提醒（先红后绿）。
+ * 预期契约（2026-11-18 owner 定；2026-11-19 唤醒切片改形、只留一档）：
+ * 后台任务长时间无动静的主动提醒（先红后绿）。
  *
  * 目标（机械、只看持久化底账 + 注入时钟）：
  *   · 任务 running 且从认领时刻起 10 分钟内 → **一条都不发**；
- *   · > 10 分钟仍无事件 → 发一条「比预计久了，停下来还是继续等」（每任务一次）；
- *   · > 30 分钟仍无事件 → 再发一条「卡住了，建议先停掉」（每任务一次，之后不再发）；
+ *   · > 10 分钟仍无事件 → 交一条提醒（**只此一档**，每任务一次）：喂给模型的是**事实**
+ *     （业务名 + 已跑多久，`longRunningNoticeFactText`）+ 模型挂掉时的兜底句
+ *     （`LONG_RUNNING_NOTICE_FALLBACK_TEXT`）；用户看到的那句话由模型写（本文件只验事实）；
+ *   · > 30 分钟不再有第二档（「卡住」档整档删除：断言我们不知道的事 + 替用户下结论）；
  *   · 只在 1:1 会话发（group 不发，也不落「已发」）；
  *   · 「已发」落库：重开 registry 再扫 → 零发送（重启不重发）；
  *   · 投递失败 → 同一档内重试一次（总尝试 ≤2，2026-11-19 投递真相切片）：失败不再等于
  *     「这档永久不发」；成功即止、一直失败也止于两次（不无限重试、不重复打扰）。
- *   · 文案只给用户可做的动作，不报进度（不写 operation 名、不写次数、不写最近一步）。
+ *   · 事实不报进度（不写 operation 名、不写次数、不写最近一步）。
  *
  * 全部用真底账（SQLite 持久化）+ 假时钟/假定时器 + 假提醒端口（零网络、零真实平台）：
  *   · 假时钟：不真 sleep 10 分钟；`now` 注入 TaskRunner（阈值判定的唯一时间来源）；
  *   · 假定时器：与 waiting_user 到期消费者共用的那**一个**有界定时器轮由测试推进；
- *   · 假端口：记录每次投递（stage/文案/分钟数），判据只看它。
+ *   · 假端口：记录每次投递（taskId/name/minutes/factText/fallbackText），判据只看它。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -23,9 +26,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createResourcePolicy } from './src/resource-policy';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from './src/task-registry-sqlite';
 import {
-  LONG_RUNNING_NOTICE_TEXT,
-  LONG_RUNNING_STUCK_NOTICE_TEXT,
+  LONG_RUNNING_NOTICE_FALLBACK_TEXT,
   createTaskRunner,
+  longRunningNoticeFactText,
   type LongRunningNoticePort,
   type TaskExecutionContext,
   type TaskExecutionInput,
@@ -36,9 +39,8 @@ import {
 
 const SCOPE = { principalId: 'p', sessionId: 'wecom:conv-private' } as const;
 const GROUP_SCOPE = { principalId: 'p', sessionId: 'wecom:conv-group' } as const;
-/** 两个阈值（测试用秒级值；生产缺省 10 分钟 / 30 分钟由配置源给出）。 */
+/** 提醒阈值（生产缺省 10 分钟由配置源给出）。 */
 const NOTICE_MS = 600_000;
-const STUCK_MS = 1_800_000;
 /** 认领租约：必须覆盖测试里的在飞时长（否则 pump 会先把任务判成 result_unknown）。 */
 const LEASE_MS = 3_600_000;
 
@@ -118,13 +120,18 @@ interface NoticeSend {
   taskId: string;
   principalId: string;
   sessionId: string;
-  stage: 'overdue' | 'stuck' | 'contact_lost';
+  stage: 'overdue' | 'contact_lost';
+  name?: string;
   minutes: number;
-  text: string;
+  factText: string;
+  fallbackText: string;
 }
 
-/** 记录每次投递的假提醒端口；`direct` 模拟 chatType 事实源。
- *  `results` = 第 n 次调用的送达结果（超出列表时沿用最后一个值；缺省 = 一直送达）。 */
+/**
+ * 记录每次投递的假提醒端口；`direct` 模拟 chatType 事实源。
+ *  `results` = 第 n 次调用的送达结果（超出列表时沿用最后一个值；缺省 = 一直送达）；
+ *  false = 模型说不出话且兜底也失败（本次没交出话）。
+ */
 function recordingNotice(
   direct: (sessionId: string) => boolean = () => true,
   results: readonly boolean[] = [true],
@@ -197,15 +204,14 @@ function stack(options: {
     timers,
     leaseMs: LEASE_MS,
     longRunningNoticeMs: NOTICE_MS,
-    longRunningStuckNoticeMs: STUCK_MS,
     longRunningNotice: port,
     log: (line) => events.push(line),
   });
   return { dbPath, registry, runner, clock, timers, sends, events };
 }
 
-describe('预期契约：长时间无动静的两档主动提醒', () => {
-  it('① 10 分钟内零发送、>10min 发一次、第二次扫描不再发；>30min 再一条，之后不再发', async () => {
+describe('预期契约：长时间无动静的主动提醒（只一档）', () => {
+  it('① 10 分钟内零发送、>10min 交一次（事实 + 兜底句）、之后不再发；>30min 也没有第二档', async () => {
     const start = '2026-11-01T00:00:00.000Z';
     const h = stack({ startIso: start });
     seedRunning(h.registry, 'slow-1', start);
@@ -220,7 +226,7 @@ describe('预期契约：长时间无动静的两档主动提醒', () => {
     await h.runner.whenIdle();
     expect(h.sends).toHaveLength(0);
 
-    // 到 10 分钟：发一条「比预计久了，停下来还是继续等」。
+    // 到 10 分钟：交一条提醒（事实喂模型 + 模型挂掉时的兜底句）。
     h.timers.advance(60_000);
     await h.runner.whenIdle();
     expect(h.sends).toHaveLength(1);
@@ -228,47 +234,72 @@ describe('预期契约：长时间无动静的两档主动提醒', () => {
       taskId: 'slow-1',
       principalId: SCOPE.principalId,
       sessionId: SCOPE.sessionId,
-      stage: 'overdue',
       minutes: 10,
-      text: LONG_RUNNING_NOTICE_TEXT,
     });
-    // 文案必须给出两个可做的动作；不得出现进度事实（operation 名/次数/最近一步）。
-    expect(h.sends[0]!.text).toContain('停下来');
-    expect(h.sends[0]!.text).toContain('继续等');
-    expect(h.sends[0]!.text).not.toMatch(/operation|\.query|已执行|次|最近一步/);
-    // 「已发」已落库（超预期档）。
+    // 事实：业务名 + 已跑多久（模型据此说人话）；不得出现进度事实（operation 名/次数/最近一步）。
+    expect(h.sends[0]!.factText).toContain('[久无动静]');
+    expect(h.sends[0]!.factText).toContain('10 分钟');
+    expect(h.sends[0]!.factText).not.toMatch(/operation|\.query|已执行|最近一步/);
+    // 兜底句（只走「模型回合挂掉」路径）必须给出两个可做的动作，且不诱导重试。
+    expect(h.sends[0]!.fallbackText).toBe(LONG_RUNNING_NOTICE_FALLBACK_TEXT);
+    expect(h.sends[0]!.fallbackText).toContain('停下来');
+    expect(h.sends[0]!.fallbackText).toContain('继续等');
+    // 「已发」已落库。
     expect(h.registry.get('slow-1', SCOPE).longRunningNotifiedAt).toBeDefined();
-    expect(h.registry.get('slow-1', SCOPE).longRunningStuckNotifiedAt).toBeUndefined();
 
-    // 紧接着再扫一趟：不再发（每档一次）。
+    // 紧接着再扫一趟：不再发（每任务一次）。
     h.clock.advance(1_000);
     h.runner.pump();
     await h.runner.whenIdle();
     expect(h.sends).toHaveLength(1);
 
-    // 到 30 分钟：再发一条「卡住了」。
-    h.timers.advance(20 * 60_000 - 1_000);
+    // 跨过 30 分钟（第二档已整档删除）：仍只有那一条，不再有「卡住了/建议先停掉」。
+    h.timers.advance(30 * 60_000);
+    h.runner.pump();
     await h.runner.whenIdle();
-    expect(h.sends).toHaveLength(2);
-    expect(h.sends[1]).toMatchObject({
-      taskId: 'slow-1',
-      stage: 'stuck',
-      text: LONG_RUNNING_STUCK_NOTICE_TEXT,
-    });
-    expect(h.registry.get('slow-1', SCOPE).longRunningStuckNotifiedAt).toBeDefined();
+    expect(h.sends).toHaveLength(1);
+    expect(h.sends.some((send) => /卡住|先停掉/.test(send.factText) || /卡住|先停掉/.test(send.fallbackText))).toBe(false);
 
-    // 之后不再自动发（再推进 10 分钟 + 主动扫）。
+    // 一条事件（成功）。
+    expect(h.events.map((event) => event['event'])).toEqual(['task_long_running_notice']);
+    expect(h.events.map((event) => event['result'])).toEqual(['sent']);
+  });
+
+  it('①b 走岔路：端口交不出话（模型说不出话且兜底失败）→ 逐次记 failed，任务不被改判终态、止于两次', async () => {
+    // 2026-11-19 并集：投递真相切片把「交不出话」从「当场放弃」改成「同一档内再试一次」
+    //（总尝试 ≤2，与仓内「同一件事一个回合内 ≤2 次」同口径）——本用例留下的断言是
+    //「有界、不刷屏、不改任务事实」：两次以后不再交、任务仍 running。
+    const start = '2026-11-01T00:00:00.000Z';
+    const h = stack({ startIso: start, noticeResults: [false, false] });
+    seedRunning(h.registry, 'slow-1', start);
+
+    h.runner.pump();
+    h.timers.advance(11 * 60_000);
+    await h.runner.whenIdle();
+
+    // 端口被交到（事实与兜底句都在），但它如实回报「没交出去」：首投 + 一次重试。
+    expect(h.sends).toHaveLength(2);
+    expect(h.events).toEqual([
+      expect.objectContaining({ event: 'task_long_running_notice', result: 'failed', attempt: 1 }),
+      expect.objectContaining({ event: 'task_long_running_notice', result: 'failed', attempt: 2 }),
+    ]);
+    // 任务事实不动（仍 running、未被误判 result_unknown），「已发」已落库（不刷屏）。
+    expect(h.registry.get('slow-1', SCOPE).status).toBe('running');
+    expect(h.registry.get('slow-1', SCOPE).longRunningNotifiedAt).toBeDefined();
+    // 到限即止：再推进时间也不再交。
     h.timers.advance(10 * 60_000);
     h.runner.pump();
     await h.runner.whenIdle();
     expect(h.sends).toHaveLength(2);
+  });
 
-    // 两档各一条事件（成功）。
-    expect(h.events.map((event) => event['event'])).toEqual([
-      'task_long_running_notice',
-      'task_long_running_notice',
-    ]);
-    expect(h.events.map((event) => event['result'])).toEqual(['sent', 'sent']);
+  it('①c 事实文本：业务名缺省用中性指代，长名截断；分钟数逐字进事实', () => {
+    expect(longRunningNoticeFactText({ minutes: 12 })).toContain('你交代的那件事');
+    expect(longRunningNoticeFactText({ name: '  ', minutes: 12 })).toContain('你交代的那件事');
+    expect(longRunningNoticeFactText({ name: '查上季度报销', minutes: 12 })).toContain('「查上季度报销」');
+    const long = '一'.repeat(40);
+    expect(longRunningNoticeFactText({ name: long, minutes: 12 })).not.toContain(long);
+    expect(longRunningNoticeFactText({ name: long, minutes: 12 })).toContain('…');
   });
 
   it('② 重启不重发：「已发」落库，重开 registry 再扫零次发送', async () => {
@@ -330,7 +361,6 @@ describe('预期契约：长时间无动静的两档主动提醒', () => {
       timers,
       leaseMs: LEASE_MS,
       longRunningNoticeMs: NOTICE_MS,
-      longRunningStuckNoticeMs: STUCK_MS,
       // 无 longRunningNotice 端口 = 不启用（无法投递就不打扰）。
     });
     seedRunning(registry, 'slow-default', start);
@@ -344,7 +374,7 @@ describe('预期契约：长时间无动静的两档主动提醒', () => {
     expect(registry.get('slow-default', SCOPE).longRunningNotifiedAt).toBeUndefined();
   });
 
-  it('⑤ 「断联系」档（contact_lost）：同一「每档至多一次」领取，与 10/30 分钟两档互不吞并，重启不重发（SQLite 面）', () => {
+  it('⑤ 「断联系」档（contact_lost）：同一「每档至多一次」领取，与「久无动静」档互不吞并，重启不重发（SQLite 面）', () => {
     const start = '2026-11-05T00:00:00.000Z';
     const h = stack({ startIso: start });
     seedRunning(h.registry, 'wait-1', start);
@@ -353,9 +383,8 @@ describe('预期契约：长时间无动静的两档主动提醒', () => {
     expect(h.registry.claimLongRunningNotice('wait-1', 'contact_lost', start)).toBe(true);
     expect(h.registry.claimLongRunningNotice('wait-1', 'contact_lost', start)).toBe(false);
     expect(h.registry.get('wait-1', SCOPE).waitContactLostNotifiedAt).toBe(start);
-    // 与两档长时间提醒互不吞并（不是同一档）。
+    // 与「久无动静」档互不吞并（不是同一档）。
     expect(h.registry.get('wait-1', SCOPE).longRunningNotifiedAt).toBeUndefined();
-    expect(h.registry.get('wait-1', SCOPE).longRunningStuckNotifiedAt).toBeUndefined();
     expect(h.registry.claimLongRunningNotice('wait-1', 'overdue', start)).toBe(true);
 
     // 重启（同一 dbPath 重开）后仍不重发：领取事实持久。
@@ -364,6 +393,8 @@ describe('预期契约：长时间无动静的两档主动提醒', () => {
     expect(reopened.claimLongRunningNotice('wait-1', 'contact_lost', start)).toBe(false);
     expect(reopened.get('wait-1', SCOPE).waitContactLostNotifiedAt).toBe(start);
     reopened.close();
+  });
+
   it('⑥ 先领取后投递失败 → 同一档内重试一次即达（不再永久不发）；事件逐次留痕', async () => {
     // 2026-11-19（投递真相切片）：领取成功、投递失败（渠道瞬时故障/路由未知）不得等于「这档
     // 永久不发」——旧实现先落「已发」再发，失败就没有下一次机会。修法：同一档内允许一次重试

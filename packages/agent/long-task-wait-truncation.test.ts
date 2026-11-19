@@ -185,14 +185,14 @@ class ScriptedWorker implements TurnDriver {
 }
 
 /** 记录每次提醒投递的假端口（1:1 私聊）。 */
-function recordingNotice(): { port: LongRunningNoticePort; sends: Array<{ stage: string; text: string; minutes: number }> } {
-  const sends: Array<{ stage: string; text: string; minutes: number }> = [];
+function recordingNotice(): { port: LongRunningNoticePort; sends: Array<{ stage: string; factText: string; minutes: number }> } {
+  const sends: Array<{ stage: string; factText: string; minutes: number }> = [];
   return {
     sends,
     port: {
       isDirectSession: () => true,
       async sendNotice(input): Promise<boolean> {
-        sends.push({ stage: input.stage, text: input.text, minutes: input.minutes });
+        sends.push({ stage: input.stage, factText: input.factText, minutes: input.minutes });
         return true;
       },
     },
@@ -211,7 +211,7 @@ interface Harness {
   runner: TaskRunner;
   clock: Clock;
   events: Array<Record<string, unknown>>;
-  sends: Array<{ stage: string; text: string; minutes: number }>;
+  sends: Array<{ stage: string; factText: string; minutes: number }>;
   task(): TaskRecord;
 }
 
@@ -307,7 +307,7 @@ describe('长任务等待的传输截断（无回执）：不判死、先兜再�
     // 第二次仍无回执：自查也查不出来 → 如实暴露一次（既有 unknown_result 话术 + 动作）。
     h.longTasks.waits[1]!.resolve(noReceipt());
     await flush();
-    expect(h.sends).toEqual([{ stage: 'contact_lost', text: CONTACT_LOST_TEXT, minutes: 0 }]);
+    expect(h.sends).toEqual([{ stage: 'contact_lost', factText: CONTACT_LOST_TEXT, minutes: 0 }]);
     expect(CONTACT_LOST_TEXT).toContain('不确定做没做完');
     expect(CONTACT_LOST_TEXT).not.toContain('再试');
     expect(failureMessageFor('unknown_result').actions).toEqual(['check_status', 'park']);
@@ -442,7 +442,7 @@ describe('长任务等待的传输截断（无回执）：不判死、先兜再�
     // 自查这一趟没有回执可拿（出站失败）：兜不住 → 如实暴露一次；任务继续等（不判死）。
     h.longTasks.waits[1]!.reject(new Error('executor unreachable'));
     await flush();
-    expect(h.sends).toEqual([{ stage: 'contact_lost', text: CONTACT_LOST_TEXT, minutes: 0 }]);
+    expect(h.sends).toEqual([{ stage: 'contact_lost', factText: CONTACT_LOST_TEXT, minutes: 0 }]);
     expect(h.task().status).toBe('running');
     expect(h.driver.rounds.filter((round) => round.resumed)).toEqual([]);
     expect(retries(h)).toHaveLength(2);
@@ -524,7 +524,7 @@ describe('装配同源（话术单一来源）', () => {
  *   ② 去掉「先兜一次」门槛（把 `(entry.noReceiptStreak ?? 0) >= 2` 改成恒真＝第一次截断就
  *      暴露）：本文件 3/7 红——①②⑤ 均为
  *      `expected [{ stage: 'contact_lost', …(2) }] to deeply equal []`，收到的正是
- *      `{stage:'contact_lost', text:'不确定做没做完，先别重复。我帮你查一下现在的状态？'}`
+ *      `{stage:'contact_lost', factText:'不确定做没做完，先别重复。我帮你查一下现在的状态？'}`
  *      （自查随即拿到完成的情况下仍把不确定性当结论播给了用户）。
  *   恢复后本文件 7/7 全绿。
  */

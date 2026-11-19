@@ -214,11 +214,11 @@ export interface TaskRecord {
   /**
    * 预期契约（2026-11-18）：宿主已发过对应档「长时间没动静」提醒的时刻（ISO）。
    * 缺省 = 尚未提醒；每档写入一次后不再改（同一任务每档只提醒一次，重启不重发）。
-   *   · longRunningNotifiedAt = 超预期档（10 分钟）；longRunningStuckNotifiedAt = 卡住档（30 分钟）；
-   *   · waitContactLostNotifiedAt = 长任务等待「与执行层断了联系（无回执）」档（2026-11-19）。
+   *   · longRunningNotifiedAt = 「久无动静」档（10 分钟；唤醒切片起由唤醒模型说）；
+   *   · waitContactLostNotifiedAt = 长任务等待「与执行层断了联系（无回执）」档（2026-11-19）；
+   *   · 30 分钟「卡住」档已随 2026-11-19 唤醒切片删除（longRunningStuckNotifiedAt 不再写入）。
    */
   longRunningNotifiedAt?: string;
-  longRunningStuckNotifiedAt?: string;
   waitContactLostNotifiedAt?: string;
   /**
    * 本轮开始运行的时刻（ISO，单调写一次）。长任务受理后租约会被清掉，「跑了多久」不能
@@ -603,12 +603,13 @@ export interface TaskRegistry {
    */
   listRunning(): readonly TaskRecord[];
   /**
-   * 预期契约（2026-11-18）：原子领取一档「长时间没动静」提醒——只有该档尚未提醒过才写入
-   * 并返回 true；已提醒过返回 false（零写入）。stage = 'overdue'（10 分钟档）|'stuck'（30 分钟档）|
-   * 'contact_lost'（长任务等待与执行层断了联系、无回执；只说明没拿到回执，不代表任务失败）。
+   * 预期契约（2026-11-18；2026-11-19 唤醒切片删除「卡住」档）：原子领取一档「长时间没动静」
+   * 提醒——只有该档尚未提醒过才写入并返回 true；已提醒过返回 false（零写入）。
+   * stage = 'overdue'（10 分钟「久无动静」档）|'contact_lost'（长任务等待与执行层断了联系、
+   * 无回执；只说明没拿到回执，不代表任务失败）。
    * 并发/重启下同一任务每档至多一次；不改任务状态、不产状态事实。
    */
-  claimLongRunningNotice(taskId: string, stage: 'overdue' | 'stuck' | 'contact_lost', at: string): boolean;
+  claimLongRunningNotice(taskId: string, stage: 'overdue' | 'contact_lost', at: string): boolean;
   /** 通用状态转换（合法边见冻结矩阵；给出 scope 先校验归属）。 */
   transition(taskId: string, to: TaskStatus, options?: TransitionOptions): TaskRecord;
   /** running→waiting_user：持久化 pendingQuestion（missing/candidates?/raw?）与 waiting_since。 */
@@ -847,11 +848,7 @@ export function createTaskRegistry(): TaskRegistry {
     },
     claimLongRunningNotice(taskId, stage, at) {
       const task = require(taskId);
-      const field = stage === 'overdue'
-        ? 'longRunningNotifiedAt'
-        : stage === 'stuck'
-          ? 'longRunningStuckNotifiedAt'
-          : 'waitContactLostNotifiedAt';
+      const field = stage === 'overdue' ? 'longRunningNotifiedAt' : 'waitContactLostNotifiedAt';
       if (task[field] !== undefined) return false;
       task[field] = at;
       return true;

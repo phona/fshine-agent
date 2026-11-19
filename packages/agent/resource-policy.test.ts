@@ -60,9 +60,9 @@ describe('resolveRuntimeConfig：缺省 = 前台并发 4 + 排队 16，非法 fa
       attachmentNudgeAfterMs: 30_000,
       // B 切片：task_run 短等待窗口缺省 8000ms（owner 2026-11-19 A 案；0 = 不等直接后台）。
       taskRunWaitMs: 8_000,
-      // 预期契约（2026-11-18）：10 分钟「比预计久了」/ 30 分钟「卡住了」两档提醒。
+      // 预期契约（2026-11-18；2026-11-19 唤醒切片只留一档）：10 分钟「比预计久了」提醒
+      // （30 分钟「卡住」档整档删除，不再出现在解析值里）。
       longRunningNoticeMs: 600_000,
-      longRunningStuckNoticeMs: 1_800_000,
       // 前台排队最长等待缺省 120s（超时确定性拒绝）。
       queueWaitMs: 120_000,
       // 大响应文件化（2026-11-19）：Worker 结果内联上限缺省 64KiB。

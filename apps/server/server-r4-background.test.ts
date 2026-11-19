@@ -299,7 +299,8 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
     //   · B 通道不再注入 completed（本夹具的假驱动没有唤醒能力 → 降级路径把完成**事实**
     //     留在 systemNotes 待注入，形状 = `[任务完成]…`，不是旧的 `[任务事实] 办完了：…`）；
     //   · 一次性：第三回合不再重复注入（take 即出队，幂等）。
-    // 失败/取消/超时/资源/等补充等 kind 仍留在 B 通道，本用例不动它们。
+    // 超时/资源/等补充等 kind 仍留在 B 通道；failure 与 cancelled 也已随 2026-11-19 唤醒
+    // 切片移出（失败/取消各由自己的唤醒出口说，降级时事实进 systemNotes）——本用例不动它们。
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     const executor = new FakeExecutor([async () => ({ kind: 'completed', resultText: 'W202611：documents 共 3 条。' })]);

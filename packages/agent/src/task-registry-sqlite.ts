@@ -97,9 +97,6 @@ export function createSqliteTaskRegistry(
       ...(stored.task.longRunningNotifiedAt === undefined
         ? {}
         : { longRunningNotifiedAt: stored.task.longRunningNotifiedAt }),
-      ...(stored.task.longRunningStuckNotifiedAt === undefined
-        ? {}
-        : { longRunningStuckNotifiedAt: stored.task.longRunningStuckNotifiedAt }),
       // 2026-11-19：长任务等待「断联系」档的已告知时刻（旧库未迁移 = 缺省，不伪造）。
       ...(stored.task.waitContactLostNotifiedAt === undefined
         ? {}

@@ -77,9 +77,14 @@ import { AttachmentNudge, type NudgeClock } from './attachment-nudge';
 import {
   deliverTaskResult,
   deliverTaskFailure,
+  failureKindFor,
+  failureTextFor,
   routeFromSessionId,
+  taskCancelledFactText,
   taskCompletionFactText,
   taskCompletionFallbackText,
+  taskFailureFactText,
+  taskRestartFactText,
 } from './task-completion-delivery';
 import { composeNotificationSinks, createChatNotificationSink, notificationTerminalLogLine } from './notification-chat-sink';
 
@@ -191,24 +196,35 @@ const INBOUND_STILL_PROCESSING_NOTE = '这条我还在办，办完会发你，�
  */
 export function createLongRunningNoticePort(input: {
   isDirectSession: (sessionId: string) => boolean;
-  routeOf: (sessionId: string) => ChannelRoute | undefined;
-  delivery: FileDeliveryPort | undefined;
+  /**
+   * 状态变化唤醒出口（server 的统一出口：喂事实 → 唤醒模型 → 投递它说的话，模型挂掉投
+   * fallbackText；见 server.ts 的 wakeStateChangeText）。缺省 = 未接会话面：如实返回
+   * false（不冒充已送达、不静默猜）。
+   */
+  wakeStateChange?: (notice: {
+    taskId: string;
+    principalId: string;
+    sessionId: string;
+    name?: string;
+    minutes: number;
+    factText: string;
+    fallbackText: string;
+  }) => Promise<boolean>;
 }): LongRunningNoticePort {
   return {
     isDirectSession: input.isDirectSession,
-    async sendNotice({ sessionId, text }) {
-      const delivery = input.delivery;
-      if (delivery === undefined || delivery.deliveryMode !== 'live' || delivery.sendText === undefined) {
-        return false;
-      }
-      const route = input.routeOf(sessionId);
-      if (route === undefined) return false;
-      try {
-        const receipt = await delivery.sendText(route, text);
-        return receipt.parts.some((part) => part.kind === 'text' && part.status === 'sent');
-      } catch {
-        return false;
-      }
+    async sendNotice({ taskId, principalId, sessionId, name, minutes, factText, fallbackText }) {
+      const wakeStateChange = input.wakeStateChange;
+      if (wakeStateChange === undefined) return false;
+      return await wakeStateChange({
+        taskId,
+        principalId,
+        sessionId,
+        ...(name === undefined ? {} : { name }),
+        minutes,
+        factText,
+        fallbackText,
+      });
     },
   };
 }
@@ -485,6 +501,20 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     }
   };
   /**
+   * 任务归属事实（重启对账出口用：把一条底账恢复事实还原到会话，好唤醒它说清）：
+   * 底账行读不到（已清/异常形状）= undefined——不猜会话、不猜到哪个窗口。
+   */
+  const taskScopeOf = (taskId: string): { principalId: string; sessionId: string; request: string } | undefined => {
+    try {
+      const record = (taskRegistry as unknown as {
+        get(id: string): { principalId: string; sessionId: string; request: string };
+      }).get(taskId);
+      return { principalId: record.principalId, sessionId: record.sessionId, request: record.request };
+    } catch {
+      return undefined;
+    }
+  };
+  /**
    * 快活任务（本回合已把结果交给模型）的降级兜底文本：底账业务名 + 结果原文。
    * background 完成经 runner settle 写 replyText；inline 完成写 resultText——两处兼容读取
    * （与交给模型的 summary 同源同式：settled.replyText ?? settled.resultText）。结果原文为空/
@@ -509,20 +539,24 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   /**
    * 快活失败任务的失败事实（回合末兜底投递用；与失败回调同源）：终局 failed（含
    * result_unknown；资源拒绝也是 failed 终局）→ 执行事实的 error.code（failureCodeOf）
-   * + result_unknown 状态，两个输入与失败回调逐字同源；非失败终局（取消/超时/未执行——
+   * + result_unknown 状态 + 底账机械原因（reason=resource_limited 时话术必须走「系统太忙」
+   * ——2026-11-19 只读审计 #18），输入与失败回调逐字同源；非失败终局（取消/超时/未执行——
    * 窗口内不可达，仅注入式执行器能造）与底账读不到 = undefined（不替它们说话，交回
    * 既有终态推送面）。
    */
-  const taskFailureFactOf = (taskId: string): { code?: string; status?: 'result_unknown' } | undefined => {
+  const taskFailureFactOf = (taskId: string): { code?: string; status?: 'result_unknown'; reason?: string; name?: string } | undefined => {
     try {
       const record = (taskRegistry as unknown as {
-        get(id: string): { status?: string; reason?: string | null };
+        get(id: string): { status?: string; reason?: string | null; request?: string; name?: string | null };
       }).get(taskId);
       if (record.status !== 'failed') return undefined;
       const code = failureCodeOf(taskId);
+      const name = taskNameOf(taskId, record.request ?? '');
       return {
         ...(code === undefined ? {} : { code }),
         ...(record.reason === 'result_unknown' ? { status: 'result_unknown' as const } : {}),
+        ...(record.reason === undefined || record.reason === null ? {} : { reason: record.reason }),
+        ...(name === undefined ? {} : { name }),
       };
     } catch {
       return undefined;
@@ -628,20 +662,27 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   const hasPushSurface = deps.fileDelivery !== undefined || deps.notificationSink !== undefined;
   const taskDispatch: 'sync' | 'async' = hasPushSurface ? 'async' : 'sync';
   /**
-   * 主动提醒的会话事实（inbound 时登记，有界）：sessionId → 投递路由；1:1 集合用于
-   * 「群聊不发主动提醒」。未知会话一律不发（fail-quiet，不猜路由）。
+   * 主动提醒的会话事实（inbound 时登记，有界）：1:1 集合用于「群聊不发主动提醒」。
+   * 未知会话一律不发（fail-quiet，不猜）。投递路由由 sessionId 机械还原
+   * （`routeFromSessionId`）——本集合不再持有第二份路由事实。
    */
   const directSessions = new Set<string>();
-  const sessionRoutes = new Map<string, ChannelRoute>();
   const SESSION_FACT_LIMIT = 5_000;
   const longRunningNotice = createLongRunningNoticePort({
     isDirectSession: (sessionId) => directSessions.has(sessionId),
-    routeOf: (sessionId) => sessionRoutes.get(sessionId),
-    delivery: deps.fileDelivery,
+    // 唤醒出口定义在本文件下半部（函数声明，装配完成前不会被调用——启动 pump 也在装配
+    // 完成之后才跑）。
+    wakeStateChange: (notice) => wakeLongRunningNotice(notice),
   });
   let runner: TaskRunner | undefined;
   let outbox: NotificationOutbox | undefined;
   let notificationAttachment: ReturnType<typeof attachNotificationOutbox> | undefined;
+  /**
+   * 启动 pump 的恢复事实（2026-11-19 唤醒切片）：`running` 且租约过期的任务在启动时如实落
+   * result_unknown（不重放）——用户以为它还在办，重启对账出口据此逐条唤醒原会话说清
+   * （见文件末）。装配完成后才跑 pump，这里先留一个空集合。
+   */
+  let startupRecovered: readonly string[] = [];
   /**
    * B 切片（工单回执收敛）：本会话已在同一回合拿到结果的任务（快活）——完成投递对其抑制
    * （结果已由模型在本回合转述，不重复发两遍）。条目一次性消费（完成回调核销后即删），
@@ -823,82 +864,30 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             ...(name === undefined ? {} : { name }),
             resultText: completion.resultText,
           });
-          // 非 live 部署不唤醒（2026-11-19 复核 F5）：没有真实收件人，唤醒只会白花一次模型
-          // 调用（正文拿到后整段丢弃）。live/silent 语义不变——投递抑制记账照旧走
-          // deliverTaskResult（suppressed，绝不记 sent），完成事实进待注入队列补说。
-          const liveWake = completionDelivery !== undefined && completionDelivery.deliveryMode === 'live';
-          let outcome = liveWake ? 'unavailable' : 'suppressed';
-          let modelText = '';
-          let wakeFailure: { errorType: string; message: string } | undefined;
-          if (liveWake) {
-            try {
-              const session = await sessionFor(completion.principalId, completion.sessionId);
-              const woke = await session.wake(factText);
-              outcome = woke.outcome;
-              modelText = woke.text ?? '';
-            } catch (error) {
-              outcome = 'failed';
-              wakeFailure = {
-                errorType: error instanceof Error ? error.name : 'UnknownError',
-                message: (error instanceof Error ? error.message : String(error)).slice(0, 300),
-              };
-            }
-          }
-          // 唤醒事实只进结构化事件（不带结果内容、不带内部标识）；非 live 不唤醒记 suppressed。
-          log({
+          // 走统一的状态变化出口（见 wakeAndDeliverStateChange）：非 live 不唤醒（不白花模型
+          // 调用）、事实进待注入、投递抑制记账照旧；文件未送达的如实话术附在正文后（不覆盖
+          // 模型的话）。
+          await wakeAndDeliverStateChange({
+            taskId: completion.taskId,
+            principalId: completion.principalId,
+            sessionId: completion.sessionId,
             event: 'task_completion_wake',
-            principalId: completion.principalId,
-            sessionId: completion.sessionId,
-            taskId: completion.taskId,
-            outcome,
-            ...(wakeFailure ?? {}),
+            factText,
+            fallbackText,
+            ...(fileNote === undefined ? {} : { appendText: fileNote }),
           });
-          // 会话忙：事实已入队，由当前回合处理——宿主不另行投递（说了两遍比少说一句糟）。
-          if (outcome === 'busy') return;
-          const wokenText = outcome === 'woken' && modelText.trim() !== '' ? modelText : undefined;
-          if (wokenText === undefined) {
-            // 降级（unavailable/failed）与非 live 不唤醒（suppressed）：事实留在「待注入」
-            // （既有 injections 机制，不新建队列）——下次用户开口由模型补说。
-            systemNotes.enqueue(completion.principalId, completion.sessionId, factText);
-          }
-          const deliveredText = wokenText ?? fallbackText;
-          const delivered = await deliverTaskResult({
-            taskId: completion.taskId,
-            principalId: completion.principalId,
-            sessionId: completion.sessionId,
-            // 文件未送达的如实话术附在模型正文后（不覆盖模型的话）。
-            resultText: fileNote === undefined ? deliveredText : `${deliveredText}\n${fileNote}`,
-          }, {
-            ...(completionDelivery === undefined ? {} : { delivery: completionDelivery }),
-            log,
-          });
-          // 2026-11-19（投递真相切片）：唤醒**成功**但投递没落地（渠道瞬时故障 / 路由拆不出 /
-          // 出口剥空）——旧实现只记事件，那句话就此消失，用户永远收不到（而底账上任务已确认
-          // 完成）。后路 = 把**事实**退回既有待注入队列（与本函数上面降级路径同一条出口、同一个
-          // 队列；不新建重试、不重投同一句话）：下一次用户开口由模型补说这件事。
-          // 只有在「唤醒回合确实产出了一句话」时才退（wokenText undefined 的降级/silent 路径
-          // 上面已经入队，不退第二次）。
-          if (wokenText !== undefined && !delivered) {
-            systemNotes.enqueue(completion.principalId, completion.sessionId, factText);
-            log({
-              event: 'task_result_delivery_requeued',
-              source: 'completion',
-              principalId: completion.principalId,
-              sessionId: completion.sessionId,
-              taskId: completion.taskId,
-              reason: 'not_sent',
-            });
-          }
         });
       },
-      // 失败投递（2026-11-19 收口）：任务终局 failed/result_unknown → 用户文本用
-      // failureMessageFor 模板（归类自任务底账执行事实的 code；取不到 = executor_failed），
-      // **不投 Worker 失败汇报原文**。快活失败（本回合已交给模型）经 pushSuppressedInTurn
-      // 抑制；非快活失败由这里主动发回原会话（与完成投递同一主动投递面、同一四必守）。
+      // 失败投递（2026-11-19 收口；唤醒切片改形）：任务终局 failed/result_unknown → **唤醒
+      // 模型、由它把失败说给用户**（宿主只喂事实：业务名 + 归类后的业务种类 + 机械原因）。
+      // 宿主不再直接投失败话术；唤醒 unavailable/failed（模型说不出话）时降级投**既有失败
+      // 话术**（failureMessageFor；这就是「模型回合挂了」的兜底，保留——绝不投 Worker 原文）。
+      // 快活失败（本回合已交给模型）经 pushSuppressedInTurn 抑制；非快活失败由这里主动发回
+      // 原会话（与完成投递同一主动投递面、同一四必守）。
       onTaskFailed: (failure) => {
         const sessionKey = `${failure.principalId}\u0000${failure.sessionId}`;
         enqueueSessionTurn(sessionKey, async () => {
-          // 快活失败：原因本回合已交给模型（模型会转述），不重复发一条话术。
+          // 快活失败：原因本回合已交给模型（模型会转述），不重复唤醒/播报。
           if (claimPushSuppressedInTurn(sessionKey, failure.taskId)) {
             log({
               event: 'task_failure_delivery_suppressed',
@@ -911,16 +900,23 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             return;
           }
           // 归类输入：底账执行事实的 error.code（failed/refused 行；取不到 = 落 executor_failed）。
+          // 归类出口与话术共用同一个 failureKindFor（安全口径：needs_* 一律改判 host_fault）。
           const code = failureCodeOf(failure.taskId);
-          await deliverTaskFailure({
+          const kind = failureKindFor(code, failure.status);
+          const name = taskNameOf(failure.taskId, failure.request);
+          await wakeAndDeliverStateChange({
             taskId: failure.taskId,
             principalId: failure.principalId,
             sessionId: failure.sessionId,
-            ...(code === undefined ? {} : { code }),
-            ...(failure.status === 'result_unknown' ? { status: 'result_unknown' } : {}),
-          }, {
-            ...(completionDelivery === undefined ? {} : { delivery: completionDelivery }),
-            log,
+            event: 'task_failure_wake',
+            // 事实（给模型读；业务名 + 归类后的业务种类 + 机械原因），**不投 Worker 失败原文**。
+            factText: taskFailureFactText({
+              ...(name === undefined ? {} : { name }),
+              kind,
+              reason: failure.reason,
+            }),
+            // 降级兜底（模型说不出话）= 既有失败话术（与老路径逐字同源）。
+            fallbackText: failureTextFor(code, failure.status),
           });
         });
       },
@@ -947,6 +943,16 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         // 投递驱动，那一刻 turnActive 已为 false，推送即落地（不新增定时器/不改重试上限）。
         turnActive: (sessionKey) => sessionChains.has(sessionKey),
         claimRelayedInTurn: claimPushSuppressedInTurn,
+        // 「用户说停」（cancelled）改走统一的状态变化唤醒出口（2026-11-19 唤醒切片）：
+        // 喂取消事实 → 唤醒模型说 → 模型说不出话投既有渲染文案。sink 不再拼那句话。
+        wakeCancelled: (notice) => wakeAndDeliverStateChange({
+          taskId: notice.taskId,
+          principalId: notice.principalId,
+          sessionId: notice.sessionId,
+          event: 'task_cancel_wake',
+          factText: notice.factText,
+          fallbackText: notice.fallbackText,
+        }),
         log,
       });
       outbox = createNotificationOutbox({
@@ -962,8 +968,6 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // R5 B 通道：同一挂钩缓冲机械事实，下一次回合开始前以普通 user 消息注入主对话。
       notificationAttachment = attachNotificationOutbox(taskRegistry, outbox, { deliverOnRecord: true });
     }
-    // 重启恢复：新进程第一次 pump（queued 重领 / 过期租约 → result_unknown 不重放 / completed 不重跑）。
-    runner.pump();
   }
 
   /**
@@ -1094,6 +1098,138 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   }
 
   /**
+   * 状态变化唤醒出口（2026-11-19 唤醒切片；完成 / 失败 / 用户说停 / 久无动静 / 重启对账
+   * 共用**同一个**入口——不新建第二套唤醒，也不新建第二套投递）。宿主只做四件事：
+   * 时机、事实、凭据、投递与记账。本函数只做前三件里的「唤醒取话」：
+   *   · 非 live 不唤醒（没有真实收件人，不白花一次模型调用）：记 suppressed 事件，返回
+   *     兜底文本（有则投——投递记账照旧走 deliverTaskResult 的 suppressed 分支）；
+   *   · live：唤醒原会话模型（Session.wake；事实经 Pi 原生 custom message 注入，唤醒回合
+   *     没有工具声明），woken 且正文非空 → 返回**模型写的那句**（调用方原样投递，不得改写）；
+   *   · 唤醒 unavailable / failed（含只调工具不产出正文、回合超时中止）→ 事实进既有
+   *     systemNotes 待注入（下次用户开口由模型补说，事实不丢）+ 返回兜底文本
+   *     （无兜底 = undefined：只记事件，不猜、不替它说）；
+   *   · busy（会话正忙，事实已按 Pi 原生队列入队、由当前回合说）→ 返回 undefined，调用方
+   *     **不得**另行投递（同一件事说两遍比少说一句糟）。
+   * 事实文本由调用方拼（不含句柄/内部码；句柄永不出宿主）；本函数不投递、不记账。
+   */
+  async function wakeStateChangeText(input: {
+    taskId: string;
+    principalId: string;
+    sessionId: string;
+    /** 结构化事件名（各出口各自可辨；事实内容不进事件）。 */
+    event: string;
+    factText: string;
+    /** 模型回合挂掉时的兜底一句（全方案唯一允许的宿主用户文案）；缺省 = 无兜底。 */
+    fallbackText?: string;
+  }): Promise<{ outcome: 'woken' | 'busy' | 'unavailable' | 'failed' | 'suppressed'; text?: string }> {
+    const base = {
+      principalId: input.principalId,
+      sessionId: input.sessionId,
+      taskId: input.taskId,
+    };
+    const delivery = deps.fileDelivery;
+    const live = delivery !== undefined && delivery.deliveryMode === 'live';
+    if (!live) {
+      log({ event: input.event, ...base, outcome: 'suppressed' });
+      // 事实不丢：非 live 也一样进待注入（下次用户开口由模型补说）——与唤醒降级同一处置。
+      systemNotes.enqueue(input.principalId, input.sessionId, input.factText);
+      return { outcome: 'suppressed', ...(input.fallbackText === undefined ? {} : { text: input.fallbackText }) };
+    }
+    let outcome: 'woken' | 'busy' | 'unavailable' | 'failed' = 'unavailable';
+    let modelText = '';
+    let wakeFailure: { errorType: string; message: string } | undefined;
+    try {
+      const session = await sessionFor(input.principalId, input.sessionId);
+      const woke = await session.wake(input.factText);
+      outcome = woke.outcome;
+      modelText = woke.text ?? '';
+    } catch (error) {
+      outcome = 'failed';
+      wakeFailure = {
+        errorType: error instanceof Error ? error.name : 'UnknownError',
+        message: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+      };
+    }
+    // 唤醒事实只进结构化事件（不带事实内容、不带内部标识）。
+    log({ event: input.event, ...base, outcome, ...(wakeFailure ?? {}) });
+    // 会话忙：事实已入队，由当前回合处理——宿主不另行投递（说了两遍比少说一句糟）。
+    if (outcome === 'busy') return { outcome };
+    const wokenText = outcome === 'woken' && modelText.trim() !== '' ? modelText : undefined;
+    if (wokenText !== undefined) return { outcome, text: wokenText };
+    // 降级（unavailable/failed）与非 live 不唤醒（suppressed）：事实留在「待注入」（既有
+    // injections 机制，不新建队列）——下次用户开口由模型补说。
+    systemNotes.enqueue(input.principalId, input.sessionId, input.factText);
+    return { outcome, ...(input.fallbackText === undefined ? {} : { text: input.fallbackText }) };
+  }
+
+  /**
+   * 状态变化出口的完整处置：唤醒取话（wakeStateChangeText）→ 有话说就走既有投递面
+   * （deliverTaskResult，四必守记账）→ 返回「用户可见的那句话是否已交出」。
+   * 完成路径不用本包装（它要把文件未送达话术附在正文后、且靠自己算的文本投递），
+   * 其余出口（失败/说停/久无动静/重启对账）走这里，保证同一套投递与记账。
+   */
+  async function wakeAndDeliverStateChange(input: {
+    taskId: string;
+    principalId: string;
+    sessionId: string;
+    event: string;
+    factText: string;
+    fallbackText?: string;
+    /** 附加在用户文本之后的一句（不覆盖模型的话；如「文件没发出去」的如实话术）。 */
+    appendText?: string;
+  }): Promise<boolean> {
+    const resolved = await wakeStateChangeText(input);
+    if (resolved.text === undefined) return false;
+    const resultText = input.appendText === undefined ? resolved.text : `${resolved.text}\n${input.appendText}`;
+    const delivered = await deliverTaskResult({
+      taskId: input.taskId,
+      principalId: input.principalId,
+      sessionId: input.sessionId,
+      resultText,
+    }, {
+      ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
+      log,
+    });
+    // 2026-11-19（投递真相切片）：唤醒**成功**但投递没落地（渠道瞬时故障 / 路由拆不出 /
+    // 出口剥空）——旧实现只记事件，那句话就此消失，用户永远收不到（而底账上任务已确认）。
+    // 后路 = 把**事实**退回既有待注入队列（与降级路径同一条出口、同一个队列；不新建重试、
+    // 不重投同一句话）：下一次用户开口由模型补说这件事。只有在「唤醒回合确实产出了一句话」
+    // 时才退（降级/silent 路径 wakeStateChangeText 内部已经入队，不退第二次）。
+    if (resolved.outcome === 'woken' && !delivered) {
+      systemNotes.enqueue(input.principalId, input.sessionId, input.factText);
+      log({
+        event: 'task_result_delivery_requeued',
+        source: input.event,
+        principalId: input.principalId,
+        sessionId: input.sessionId,
+        taskId: input.taskId,
+        reason: 'not_sent',
+      });
+    }
+    return delivered;
+  }
+
+  /** 「久无动静」提醒出口（runner 的提醒端口回调；事实与兜底句由 runner 侧拼好）。 */
+  async function wakeLongRunningNotice(notice: {
+    taskId: string;
+    principalId: string;
+    sessionId: string;
+    name?: string;
+    minutes: number;
+    factText: string;
+    fallbackText: string;
+  }): Promise<boolean> {
+    return await wakeAndDeliverStateChange({
+      taskId: notice.taskId,
+      principalId: notice.principalId,
+      sessionId: notice.sessionId,
+      event: 'task_long_running_wake',
+      factText: notice.factText,
+      fallbackText: notice.fallbackText,
+    });
+  }
+
+  /**
    * 渠道重投幂等（重复消息，2026-11-19 跨重启）：**底账事实为唯一判据**——同
    * (principal, session, messageId) 在 inbound_messages 表里留账（见 task-store.ts），
    * 进程重启后同一 messageId 不再被当成新消息。查重先于一切副作用（不新起 Main 回合、
@@ -1185,15 +1321,14 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     const speakerId = message.wecomUserId;
     // 入站消息身份事实（事件与幂等底账共用同一组键，避免各处重拼）。
     const inboundIds: InboundIds = { principalId, sessionId, speakerId, messageId: message.messageId };
-    // 主动提醒的会话事实（只在 inbound 时可信）：路由 + 是否 1:1。群聊登记为「非 1:1」。
-    sessionRoutes.set(sessionId, { channel, conversationId: message.conversationId });
+    // 主动提醒的会话事实（只在 inbound 时可信）：是否 1:1。群聊登记为「非 1:1」。
+    // 投递路由不进这里（由 sessionId 机械还原）。
     if (isGroupChat) directSessions.delete(sessionId);
     else directSessions.add(sessionId);
     // 有界：超限淘汰最旧（只影响「能否提醒」，不影响任何任务事实）。
-    while (sessionRoutes.size > SESSION_FACT_LIMIT) {
-      const oldest = sessionRoutes.keys().next().value;
+    while (directSessions.size > SESSION_FACT_LIMIT) {
+      const oldest = directSessions.values().next().value;
       if (oldest === undefined) break;
-      sessionRoutes.delete(oldest);
       directSessions.delete(oldest);
     }
     const principal = deps.config.principals[principalId];
@@ -1426,6 +1561,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // 判等待、执行层 one-shot 绑定与 A2b 同对象锁等动作边界一律不动）。
       let reply = turn.reply;
       const files = turn.files ?? [];
+      /**
+       * 模型自己有没有说话（**在看文件投递结果之前**取）——兜底判据只看这一条事实。
+       * 2026-11-19 只读审计 #8：此前兜底条件是「正文空 **且** 无文件」，于是「快活失败 +
+       * 模型沉默 + 本回合有文件」时失败话术永不送达（用户只看到文件，不知道失败了）。
+       * 沉默与有没有文件无关：有文件也照样要如实说一句。
+       * 两种形状都算沉默：①正文空；②正文被会话出口清理成空、由会话用文件通知
+       * （`FILES_GENERATED_NOTICE`）顶上的情形（同一个常量、本文件下方投递话术替换也按它判）。
+       */
+      const modelSilent = turn.reply.trim() === '' || turn.reply === FILES_GENERATED_NOTICE;
       let delivery: { status: string; files: number } | undefined;
       if (files.length > 0) {
         const outcome = await deliverTurnFiles({
@@ -1447,14 +1591,16 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         }
       }
       // 豁免不能是静默（2026-11-19 复核缺陷的出口）：交办的任务在短等待窗口内完成（快活，
-      // 结果已交给模型转述）而模型**全程没说话**（正文空、无文件）——完成回调按 relayed
-      // 抑制播报的前提（模型已经说了）不成立，用户会什么都收不到。不得判回合失败（任务
-      // 已由执行端确认完成：「请稍后再试」是假话，对写操作还会诱导重做一次写），也不得
-      // 沉默——按既有降级兜底**如实报完成事实**（taskCompletionFallbackText：「<业务名>」
-      // 办好了：<结果>；全方案唯一允许的宿主用户文案），走 deliverTaskResult 同一投递面
-      // 与四必守记账。完成回调的 relayed 抑制照旧（本分支已把事实送达，不重复播报）；
-      // 宿主的话只走主动投递面，渠道终帧（模型的话路）不被替换。
-      if (reply.trim() === '' && files.length === 0) {
+      // 结果已交给模型转述）而模型**全程没说话**——完成回调按 relayed 抑制播报的前提
+      // （模型已经说了）不成立，用户会什么都收不到。不得判回合失败（任务已由执行端确认完成：
+      // 「请稍后再试」是假话，对写操作还会诱导重做一次写），也不得沉默——按既有降级兜底
+      // **如实报完成事实**（taskCompletionFallbackText：「<业务名>」办好了：<结果>；全方案
+      // 唯一允许的宿主用户文案），走 deliverTaskResult 同一投递面与四必守记账。完成回调的
+      // relayed 抑制照旧（本分支已把事实送达，不重复播报）；宿主的话只走主动投递面，渠道
+      // 终帧（模型的话路）不被替换。
+      // 判据 = **模型沉默**（与有没有文件无关；2026-11-19 只读审计 #8：带文件时失败话术
+      // 永不送达是静默终局的一种）。
+      if (modelSilent) {
         for (const relayedTaskId of turn.relayedTaskIds ?? []) {
           const fallbackText = taskCompletionFallbackOf(relayedTaskId);
           // 底账没有结果原文（生产装配不可达：relayed 的完成行必有非空汇报/归档；空汇报落
@@ -1571,6 +1717,41 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     if (dedupKey !== undefined) rememberInFlight(dedupKey, pending);
     return await pending;
   };
+
+  // 重启恢复 + 重启对账（2026-11-19 唤醒切片）：新进程第一次 pump（queued 重领 / 过期租约 →
+  // result_unknown 不重放 / completed 不重跑 / `cancelling` 断电遗留 → 取消孤儿回收）放在
+  // 装配完成之后——唤醒出口、提醒端口与会话工厂都已就绪，pump 里可能触发的「久无动静」提醒
+  // 与这里逐条发起的重启唤醒都不会撞上未定义。
+  if (runner !== undefined) {
+    const pump = runner.pump();
+    startupRecovered = pump.recovered;
+    const pendingCancel = new Set(pump.recoveredCancelling ?? []);
+    for (const taskId of [...startupRecovered, ...(pump.recoveredCancelling ?? [])]) {
+      const scope = taskScopeOf(taskId);
+      if (scope === undefined) {
+        // 底账读不到（行已清/异常形状）：不猜会话，只记事件。
+        log({ event: 'task_restart_wake', taskId, outcome: 'unresolved' });
+        continue;
+      }
+      const name = taskNameOf(taskId, scope.request);
+      // 取消孤儿（用户说过停）按「你要我停，我重启前没停完」如实说——别让用户以为停已生效。
+      const factText = taskRestartFactText({
+        ...(name === undefined ? {} : { name }),
+        ...(pendingCancel.has(taskId) ? { pendingCancel: true } : {}),
+      });
+      // 逐条 fire-and-forget（经会话链，与用户回合串行）：不阻塞启动、不改变任务事实。
+      // 宿主侧**没有**这一条的文案（新增出口）：唤醒不可用/失败 = 只记事件（不静默猜）。
+      void enqueueSessionTurn(`${scope.principalId}\u0000${scope.sessionId}`, async () => {
+        await wakeAndDeliverStateChange({
+          taskId,
+          principalId: scope.principalId,
+          sessionId: scope.sessionId,
+          event: 'task_restart_wake',
+          factText,
+        });
+      });
+    }
+  }
 
   return {
     handler,

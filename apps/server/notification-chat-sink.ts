@@ -6,9 +6,11 @@
  * （事实注入）。本模块把「用户必须知道、或必须做点什么」的那几类主动发回原会话。
  *
  * 纪律（与文件投递 / 完成投递同一套四必守）：
- *   · 只推 waiting_user / failed / timed_out / resource_limited / cancelled；
- *     accepted/started/resumed 是噪音（回合内回执已经说了），completed 由结果正文投递
- *     （`task-completion-delivery.ts`）负责——两边都推就是同一件事说两遍；
+ *   · 只推 waiting_user / timed_out / resource_limited；accepted/started/resumed 是噪音
+ *     （回合内回执已经说了），completed 由结果正文投递（`task-completion-delivery.ts`）
+ *     负责——两边都推就是同一件事说两遍；failed 由失败唤醒出口负责（2026-11-19 唤醒切片）；
+ *   · `cancelled`（用户说停）**不经本文件的渲染文案**直发：改走唤醒出口（`wakeCancelled`
+ *     → 唤醒原会话模型说；模型说不出话才投渲染文案作兜底）——用户看到的话永远是模型说的；
  *   · 文案只复用 `renderNotification`（四类人话 + 内部术语黑名单），不新增一句话、不加编号；
  *   · 非 live 部署不投递，记 suppressed，**绝不记 sent**；
  *   · 同回合已交给模型的（受理窗口内落定的失败/等补充）不推：模型会自己转述；
@@ -24,7 +26,10 @@
  *   · 本 sink 不负责的 kind（@see PUSHED_NOTIFICATION_KINDS）→ `{delivered:true}`：不是「跳过」
  *     也不是「送达」，这条通知由别的 sink（落盘审计）负责，本 sink 无事可做；
  *   · 同回合已交给模型（relayed_in_turn）→ `{delivered:true}`：用户已经听到了这句话（模型
- *     说的），用户级事实成立——不记 delivered 反而会把「已告知」误报成没人知道。
+ *     说的），用户级事实成立——不记 delivered 反而会把「已告知」误报成没人知道；
+ *   · `cancelled`（用户说停）不走本 sink 的渲染直发，交唤醒出口：交出话 = `{delivered:true}`
+ *     （用户已听到）、未接唤醒出口 = `skipped:'wake_unavailable'`（装配静态事实，重试不变）、
+ *     唤醒出口叫不出话 = `skipped:'wake_not_delivered'`（该出口已按同一套四必守记账）。
  *
  * 不做的：新表/新定时器/新配置键/第二套话术/第二套重试。
  */
@@ -38,22 +43,24 @@ import type {
   NotificationTerminalFact,
 } from '../../packages/agent/src/notifications';
 import { stripServerPaths } from '../../packages/agent/src/server-paths';
-import { routeFromSessionId } from './task-completion-delivery';
+import { routeFromSessionId, taskCancelledFactText } from './task-completion-delivery';
 
 /**
  * 主动推送给用户的意图（其余种类按上面的职责划分不推）。
  *
  * 2026-11-19 口径变更：**failed 不再由本 sink 推**——后台任务失败的主动告知改由
- * `task-completion-delivery.ts` 的失败投递分支直发（deliverTaskFailure + failureMessageFor
- * 话术模板，归类自底账执行事实的 code；不推 Worker 失败原文）。原因：renderNotification
- * 的 failed 文案「没办成：<name>」与 failureMessageFor 的失败种类话术并存会双发；统一到
- * 宿主模板后，本 sink 只留与完成/失败投递不重叠的等待/超时/忙/取消。
+ * `task-completion-delivery.ts` 的失败分支直发（failureMessageFor 话术模板，归类自底账执行
+ * 事实的 code；不推 Worker 失败原文）。原因：renderNotification 的 failed 文案「没办成：<name>」
+ * 与 failureMessageFor 的失败种类话术并存会双发；统一到失败出口后，本 sink 只留与完成/失败
+ * 投递不重叠的等待/超时/忙。
+ *
+ * 2026-11-19 唤醒切片：`cancelled` 也移出本清单——用户说停不再由宿主渲染「已按你说的停了」，
+ * 改由 {@link ChatNotificationSinkOptions.wakeCancelled} 唤醒模型说（渲染文案降级为兜底）。
  */
 export const PUSHED_NOTIFICATION_KINDS: readonly NotificationKind[] = [
   'waiting_user',
   'timed_out',
   'resource_limited',
-  'cancelled',
 ];
 
 /** 宿主主动投递面（与完成投递同一端口形状；文字只要求 sendText）。 */
@@ -75,6 +82,19 @@ export interface ChatNotificationSinkOptions {
   turnActive?(sessionKey: string): boolean;
   /** 本回合已交给模型的任务（一次性核销）：true = 不推。 */
   claimRelayedInTurn?(sessionKey: string, taskId: string): boolean;
+  /**
+   * 「用户说停」出口（cancelled；2026-11-19 唤醒切片）：取消不再由本 sink 渲染直发——
+   * 交给装配注入的统一状态变化唤醒出口（喂取消事实 → 唤醒原会话模型说 → 模型说不出话才投
+   * `fallbackText`）。返回「用户可见的那句话是否已交出」。缺省 = 未接会话面：只记 suppressed，
+   * **不冒充已说**（不投渲染文案——宿主的话只在「模型回合挂掉」时才有位置）。
+   */
+  wakeCancelled?(input: {
+    taskId: string;
+    principalId: string;
+    sessionId: string;
+    factText: string;
+    fallbackText: string;
+  }): Promise<boolean>;
   /** 结构化事件出口（不含结果正文与内部路径）。 */
   log(line: Record<string, unknown>): void;
 }
@@ -143,7 +163,8 @@ export function createChatNotificationSink(options: ChatNotificationSinkOptions)
   return {
     async send(notification: Notification): Promise<NotificationDeliveryReceipt> {
       const base = { taskId: notification.taskId, kind: notification.kind, notificationId: notification.id };
-      if (!PUSHED_NOTIFICATION_KINDS.includes(notification.kind)) {
+      const isCancelled = notification.kind === 'cancelled';
+      if (!isCancelled && !PUSHED_NOTIFICATION_KINDS.includes(notification.kind)) {
         // 本 sink 不负责这一类（落盘审计由另一个 sink 负责）：不是「跳过」也不是「送达」，
         // 本 sink 无事可做 → 回执 delivered（组合面按「各自该做的都做了」判）。
         log({ event: 'notification_push_skipped', ...base, reason: 'kind_not_pushed' });
@@ -158,24 +179,58 @@ export function createChatNotificationSink(options: ChatNotificationSinkOptions)
       const sessionKey = `${scope.principalId}\u0000${scope.sessionId}`;
       const tagged = { ...base, principalId: scope.principalId, sessionId: scope.sessionId };
       const delivery = options.delivery;
-      if (delivery === undefined || delivery.deliveryMode !== 'live' || typeof delivery.sendText !== 'function') {
-        // 部署属性（没有投递面 / 非 live）：永不可能送达 → 终态跳过；**绝不记 delivered**
-        //（silent 闸会让用户的收件箱里什么都没有，记送达就是假账）。
-        log({
-          event: 'notification_push_suppressed',
-          ...tagged,
-          reason: 'delivery_unavailable',
-          deliveryMode: delivery?.deliveryMode ?? 'unavailable',
-        });
-        return { delivered: false, skipped: 'delivery_unavailable' };
-      }
-      const sendText = delivery.sendText;
+      // 渲染文案（唯一话术来源）也是 cancelled 的降级兜底：过用户可见出口清理。
+      const renderedText = stripServerPaths(
+        renderNotification({ kind: notification.kind, payload: notification.payload }),
+      ).text;
       const run = async (): Promise<NotificationDeliveryReceipt> => {
         // 同回合已交给模型（快活失败/等补充）：模型会自己转述，不重复发一条。用户**已经听到**
         // 了这件事（由模型说出）——用户级事实成立，不能报成「没人知道」。
         if (options.claimRelayedInTurn?.(sessionKey, notification.taskId) === true) {
           log({ event: 'notification_push_suppressed', ...tagged, reason: 'relayed_in_turn' });
           return { delivered: true };
+        }
+        // 用户说停：唤醒模型说（宿主只喂事实）；模型说不出话才投渲染文案（降级兜底）。
+        // 非 live / 唤醒失败的事实留存与投递抑制记账由唤醒出口统一处置（同一套四必守）。
+        if (isCancelled) {
+          const wakeCancelled = options.wakeCancelled;
+          if (wakeCancelled === undefined) {
+            // 未接会话面 = 静态装配事实，重试也不会变 → 终态跳过；**不冒充已说**
+            //（不投渲染文案——宿主的话只在「模型回合挂掉」时才有位置）。
+            log({ event: 'notification_push_suppressed', ...tagged, reason: 'wake_unavailable' });
+            return { delivered: false, skipped: 'wake_unavailable' };
+          }
+          const handedOver = await wakeCancelled({
+            taskId: notification.taskId,
+            principalId: scope.principalId,
+            sessionId: scope.sessionId,
+            factText: taskCancelledFactText(
+              notification.payload.name === undefined ? {} : { name: notification.payload.name },
+            ),
+            fallbackText: renderedText,
+          });
+          log({
+            event: 'notification_cancel_woken',
+            ...tagged,
+            result: handedOver ? 'handed_over' : 'not_delivered',
+          });
+          // 交出去了 = 用户已经听到（模型说的，或兜底文案已送达）；叫不出话 = 未送达——
+          // 唤醒出口已按同一套四必守记账（事实退待注入/告警面可见），本 sink 不另试一遍
+          // （重试会重复唤醒一次模型），如实报终态跳过。
+          return handedOver
+            ? { delivered: true }
+            : { delivered: false, skipped: 'wake_not_delivered' };
+        }
+        if (delivery === undefined || delivery.deliveryMode !== 'live' || typeof delivery.sendText !== 'function') {
+          // 部署属性（没有投递面 / 非 live）：永不可能送达 → 终态跳过；**绝不记 delivered**
+          //（silent 闸会让用户的收件箱里什么都没有，记送达就是假账）。
+          log({
+            event: 'notification_push_suppressed',
+            ...tagged,
+            reason: 'delivery_unavailable',
+            deliveryMode: delivery?.deliveryMode ?? 'unavailable',
+          });
+          return { delivered: false, skipped: 'delivery_unavailable' };
         }
         const route = routeFromSessionId(scope.sessionId);
         if (route === undefined) {
@@ -185,13 +240,13 @@ export function createChatNotificationSink(options: ChatNotificationSinkOptions)
         }
         // 文案来自渲染器（唯一话术来源）；过用户可见出口清理，剥完为空不投（空帧用户什么都
         // 收不到）——没有东西可发是终态（渲染是纯函数，重试还是空）→ 终态跳过。
-        const text = stripServerPaths(renderNotification({ kind: notification.kind, payload: notification.payload })).text;
-        if (text.trim() === '') {
+        if (renderedText.trim() === '') {
           log({ event: 'notification_push_suppressed', ...tagged, reason: 'empty_after_strip' });
           return { delivered: false, skipped: 'empty_after_strip' };
         }
+        const sendText = delivery.sendText;
         try {
-          const receipt = await sendText(route, text);
+          const receipt = await sendText(route, renderedText);
           log({ event: 'notification_push_sent', ...tagged, parts: receipt.parts.length });
           return { delivered: true };
         } catch (error) {
