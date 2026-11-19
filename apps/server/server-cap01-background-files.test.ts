@@ -21,6 +21,7 @@ import type { DriverMessage, TurnDriver } from '../../packages/agent/src/driver-
 import { createFileStore } from '../../packages/agent/src/file-store';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/src/task-runner';
 import { createServer, workspaceRootOf, type FileDeliveryPort } from './server';
+import { echoCompletionWake } from './testing/echo-completion-wake';
 
 const FIXTURE_ROOT = path.resolve(__dirname, '..', '..', 'scripts', 'eval', 'fixtures', 'dummy-platform');
 const PRINCIPAL = 'wecom:user-a';
@@ -93,6 +94,10 @@ function plannedMainDriver(): TurnDriver {
       await input.exec(tool.name, { task: '做一张汇总表' });
       const reply = `已受理：${text}`;
       return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
+    },
+    // 唤醒回合（完成事实触发）按产品形状脚本化：模型把事实里的结果正文复读给用户。
+    async wake(factText) {
+      return echoCompletionWake(factText);
     },
   };
 }
@@ -187,8 +192,10 @@ describe('片 1：后台任务产物投递（server 级）', () => {
       expect(calls.files[0]!.files).toHaveLength(1);
       expect(calls.files[0]!.files[0]!.filename).toBe('汇总.xlsx');
       expect(calls.files[0]!.files[0]!.data.toString()).toBe('pk-bytes-of-summary');
-      // 2026-11-19：完成投递带任务身份头「<业务名>」办完了：<正文>——用户一眼看出是哪件事。
-      expect(calls.texts[0]!.text).toMatch(/^「[^」]+」办完了：汇总表已生成。$/);
+      // 2026-11-19 唤醒切片：完成投递文本 = 唤醒回合里模型写给用户的那句（宿主不再拼
+      // 「「业务名」办完了：」模板）；这里脚本模型把事实里的结果正文复读。
+      expect(calls.texts[0]!.text).toBe('汇总表已生成。');
+      expect(calls.texts[0]!.text).not.toMatch(/「[^」]*」办完了：/);
 
       // 事件面：文件投递记 sent、文本投递记 sent（都不是 suppressed）。
       await vi.waitFor(() => {

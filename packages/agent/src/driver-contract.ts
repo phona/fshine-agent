@@ -70,6 +70,23 @@ export interface TurnDriverResult {
   messages: DriverMessage[];
 }
 
+/**
+ * 唤醒出口四态（互斥；调用方按态处置，不猜、不重试）：
+ *   · woken       —— 会话空闲，事实已触发一个模型回合，`text` = 本回合模型产出的正文；
+ *   · busy        —— 会话正忙（流式中）：事实已按 Pi 原生队列入队，由当前回合负责说，
+ *                    调用方**不得**另行投递（否则同一件事说两遍）；
+ *   · unavailable —— 驱动没有可唤醒的实例级会话（未创建 / 一次性会话 / 已丢弃）——
+ *                    调用方按失败兜底处置（事实留待下次用户回合由模型补说）；
+ *   · failed      —— 唤醒回合报错或空回复（含只调工具不产出正文）——同 unavailable 兜底。
+ */
+export type WakeOutcome = 'woken' | 'busy' | 'unavailable' | 'failed';
+
+export interface WakeResult {
+  outcome: WakeOutcome;
+  /** `woken` 时的本回合模型正文（宿主直接投递它，不得改写）；其余态缺省。 */
+  text?: string;
+}
+
 export interface PiSessionInspection {
   /** Pi 实际对模型使用的系统提示（受控 ResourceLoader + Pi 原生渲染）。 */
   systemPrompt: string;
@@ -81,6 +98,15 @@ export interface PiSessionInspection {
 
 export interface TurnDriver {
   run(input: TurnDriverInput): Promise<TurnDriverResult>;
+  /**
+   * 唤醒入口（会话状态变化 → 让模型把话带给用户）：以一条宿主**事实**文本注入并触发
+   * 一个模型回合（会话空闲时）或并入当前回合（会话忙时），出口见 {@link WakeResult}。
+   * 事实由调用方拼装（模型可见；不含句柄/内部码/执行层原文以外的内部标识）；
+   * 用户看到的正文由模型写，本入口只负责取回它。
+   * `options.deadline` = 本回合绝对截止（缺省不设界）——超时中止本回合，按 failed 出口。
+   * 缺省（未实现）= 调用方按 unavailable 处置。
+   */
+  wake?(factText: string, options?: { deadline?: number }): Promise<WakeResult>;
   /**
    * 只读派生：驱动持有的 Pi 会话当前转录投影（宿主 `Session.transcript()` 直接委托它）。
    * 无此方法的测试替身由调用方回落到上一回合结果快照。

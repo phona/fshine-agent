@@ -21,6 +21,7 @@ import { EXECUTE_OPERATION_TOOL, NO_WAITING_TARGET_LINE } from '../../packages/a
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/src/task-runner';
 import type { TurnDriver } from '../../packages/agent/src/driver-contract';
+import { echoCompletionWake } from './testing/echo-completion-wake';
 import { createServer } from './server';
 
 const FIXTURE_ROOT = path.resolve(__dirname, '..', '..', 'scripts', 'eval', 'fixtures', 'dummy-platform');
@@ -95,7 +96,8 @@ interface ServerPlan {
   reply?: string;
 }
 
-/** 假 Main：按计划交办（task_run）或确认（task_confirm）并收下工具结果；零模型。 */
+/** 假 Main：按计划交办（task_run）或确认（task_confirm）并收下工具结果；零模型。
+ *  唤醒回合（完成事实触发）按产品形状脚本化：模型把事实里的结果正文复读给用户。 */
 function plannedMain(plans: ReadonlyMap<string, ServerPlan>, records: ServerDriverRecord[]): TurnDriver {
   return {
     async run(input) {
@@ -117,6 +119,9 @@ function plannedMain(plans: ReadonlyMap<string, ServerPlan>, records: ServerDriv
       records.push({ execResults });
       const reply = plan.reply ?? `（测试回复：${text}）`;
       return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
+    },
+    async wake(factText) {
+      return echoCompletionWake(factText);
     },
   };
 }

@@ -75,7 +75,7 @@ import {
 } from '../../scripts/ask-runtime';
 import { createAttachmentFactQueue, createScopedNoteQueue } from './attachment-facts';
 import { AttachmentNudge, type NudgeClock } from './attachment-nudge';
-import { deliverTaskResult, deliverTaskFailure, routeFromSessionId } from './task-completion-delivery';
+import { deliverTaskResult, deliverTaskFailure, routeFromSessionId, taskCompletionFactText } from './task-completion-delivery';
 import { composeNotificationSinks, createChatNotificationSink } from './notification-chat-sink';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -462,9 +462,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   }
   const taskRegistry = createSqliteTaskRegistry(deps.dbPath);
   /**
-   * 任务业务名（完成投递身份行用）：底账 name（机械回落值）；旧库历史行缺省用
-   * deriveTaskName(request) 同款回落。读不到底账行（回调触达时行已清/异常）= 无身份行
-   * （投递逐字节不变，不猜名）。
+   * 任务业务名（完成事实文本里「哪件事」用）：底账 name（机械回落值）；旧库历史行缺省用
+   * deriveTaskName(request) 同款回落。读不到底账行（回调触达时行已清/异常）= 无业务名
+   * （事实主语用中性指代，不猜名）。
    */
   const taskNameOf = (taskId: string, request: string): string | undefined => {
     try {
@@ -672,12 +672,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // 长任务异步（契约 v4）：accepted / 协议违约 / 续跑回程登记与等待推进只进日志。
       onExecutionEvent: (event) => log({ mode: 'background', ...event }),
       log: (line) => log({ mode: 'background-runner', ...line }),
-      // B 切片：后台任务确认完成 → 结果主动发回原会话（走既有主动投递面 fileDelivery.sendText）。
+      // B 切片（2026-11-19 唤醒切片）：后台任务确认完成 → **唤醒原会话里的模型、由它把
+      // 这件事说给用户**，宿主只投递它说的话（宿主不再拼完成文案；身份行已删）。会话拿不到 /
+      // 唤醒回合失败（含空回复）= 投宿主兜底话术一句 + 事实留在待注入（下次用户开口由模型
+      // 补说）；唤醒时会话忙 = 事实入队、由当前回合负责说（宿主不另行投递，避免说两遍）。
       // 回调经会话链串行（快活抑制判定须在受理回合结束后做）；投递失败/抑制只记事件，不改任务事实。
       onTaskCompleted: (completion) => {
         const sessionKey = `${completion.principalId}\u0000${completion.sessionId}`;
         enqueueSessionTurn(sessionKey, async () => {
-          // 快活（结果已在本回合交给模型）：文本不重复发两遍（模型已转述）。
+          // 快活（结果已在本回合交给模型）：不唤醒、不重复播报（模型已转述）。
           // 但**产物不因抑制丢失**——同回合交给模型的摘要里没有文件，产物只能由这里回程。
           const relayed = relayedInTurnTasks.get(sessionKey)?.delete(completion.taskId) === true;
           const suppressText = (): void => {
@@ -691,7 +694,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             });
           };
           // 片 1 产物回程：任务产物走**同一交付面**（deliverable 角色闸、sha256+文件名去重、
-          // live/silent 记账与前台 TurnResult.files 完全同源），文本仍走 deliverTaskResult。
+          // live/silent 记账与前台 TurnResult.files 完全同源），文本由完成投递送达。
           const files = completion.files ?? [];
           let fileNote: string | undefined;
           if (files.length > 0) {
@@ -724,7 +727,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             // 快活抑制只免掉「办完了」这条重复播报；**文件没送达时必须单独说一句**——
             // 同回合模型已经说过「见附件」，用户手上却什么都没有，那就是虚假交付
             // （2026-11-19 真发现：默认窗口下 file_delivery=delivery_failed 后一句提示都没有）。
-            // 这一条是投递失败话术，不是完成播报——不加「办完了」身份头（避免语义错位）。
+            // 这一条是投递失败话术，不是完成播报。
             if (fileNote !== undefined) {
               await deliverTaskResult({
                 taskId: completion.taskId,
@@ -738,16 +741,51 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             }
             return;
           }
+          // 完成事实（宿主拼，喂给模型读；不含 handle/内部码/执行层原文以外的内部标识）。
+          const name = taskNameOf(completion.taskId, completion.request);
+          const factText = taskCompletionFactText({
+            ...(name === undefined ? {} : { name }),
+            resultText: completion.resultText,
+          });
+          let outcome = 'unavailable';
+          let modelText = '';
+          let wakeFailure: { errorType: string; message: string } | undefined;
+          try {
+            const session = await sessionFor(completion.principalId, completion.sessionId);
+            const woke = await session.wake(factText);
+            outcome = woke.outcome;
+            modelText = woke.text ?? '';
+          } catch (error) {
+            outcome = 'failed';
+            wakeFailure = {
+              errorType: error instanceof Error ? error.name : 'UnknownError',
+              message: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+            };
+          }
+          // 唤醒事实只进结构化事件（不带结果内容、不带内部标识）。
+          log({
+            event: 'task_completion_wake',
+            principalId: completion.principalId,
+            sessionId: completion.sessionId,
+            taskId: completion.taskId,
+            outcome,
+            ...(wakeFailure ?? {}),
+          });
+          // 会话忙：事实已入队，由当前回合处理——宿主不另行投递（说了两遍比少说一句糟）。
+          if (outcome === 'busy') return;
+          const wokenText = outcome === 'woken' && modelText.trim() !== '' ? modelText : undefined;
+          if (wokenText === undefined) {
+            // 兜底（unavailable/failed）：投宿主那一句兜底话术（不新写文案）；事实留在
+            // 「待注入」（既有 injections 机制，不新建队列）——下次用户开口由模型补说。
+            systemNotes.enqueue(completion.principalId, completion.sessionId, factText);
+          }
+          const deliveredText = wokenText ?? failureMessageFor('host_fault').text;
           await deliverTaskResult({
             taskId: completion.taskId,
             principalId: completion.principalId,
             sessionId: completion.sessionId,
-            // 任务身份（2026-11-19）：完成消息带业务名，用户一眼看出是哪件事。
-            name: taskNameOf(completion.taskId, completion.request),
-            // 文件未送达的如实话术附在结果文本后（不覆盖模型/执行端正文）。
-            resultText: fileNote === undefined
-              ? completion.resultText
-              : `${completion.resultText}\n${fileNote}`,
+            // 文件未送达的如实话术附在模型正文后（不覆盖模型的话）。
+            resultText: fileNote === undefined ? deliveredText : `${deliveredText}\n${fileNote}`,
           }, {
             ...(completionDelivery === undefined ? {} : { delivery: completionDelivery }),
             log,

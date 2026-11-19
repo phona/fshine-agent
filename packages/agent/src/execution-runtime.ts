@@ -55,7 +55,7 @@ import type {
   ExecutionClient,
   ExecutionOutcome,
 } from '@fshine/contracts/execution-contract';
-import type { DriverMessage, RuntimeTurnEvent, TurnDriver, TurnDriverResult } from './driver-contract';
+import type { DriverMessage, RuntimeTurnEvent, TurnDriver, TurnDriverResult, WakeResult } from './driver-contract';
 import { ToolUserError } from './driver-contract';
 import { FileRefUnavailableError, safeExtensionOf, type CopiedTaskInput, type TaskInputCopier } from './file-store';
 export type { TaskInputCopier } from './file-store';
@@ -969,6 +969,13 @@ export interface Session {
   /** 本回合后 Main 转录快照（Pi 原生转录即状态；当前只存内存）。 */
   transcript(): readonly DriverMessage[];
   send(text: string): Promise<TurnResult>;
+  /**
+   * 唤醒入口（会话状态变化 → 模型把话带给用户）：把一条宿主事实交给 Main 驱动——
+   * 会话空闲时触发一个模型回合并取回它产出的正文；会话忙时事实入队、由当前回合负责。
+   * 出口四态见 WakeResult；驱动不支持唤醒（测试替身/一次性驱动）= unavailable。
+   * 本层只透传事实与回合截止（mainTurnMs），不解释事实内容、不投递。
+   */
+  wake(factText: string): Promise<WakeResult>;
   tasks(): readonly TaskRecord[];
   /** 按本会话 scope 取任务；越权抛 TaskOwnershipError。 */
   getTask(taskId: string): TaskRecord;
@@ -3037,11 +3044,22 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     }
   }
 
+  /**
+   * 唤醒（宿主事实 → 模型说）：只把事实与回合截止转给 Main 驱动；驱动缺省（测试替身）
+   * = 没有可唤醒的会话，按 unavailable 出口（调用方兜底，不冒充已唤醒）。
+   */
+  async function wake(factText: string): Promise<WakeResult> {
+    const driverWake = options.mainDriver.wake;
+    if (driverWake === undefined) return { outcome: 'unavailable' };
+    return await driverWake.call(options.mainDriver, factText, { deadline: Date.now() + mainTurnMs });
+  }
+
   return {
     principalId: options.principalId,
     sessionId: options.sessionId,
     transcript: () => mainTranscript(),
     send,
+    wake,
     tasks: () => registry.list(scope),
     getTask: (taskId) => registry.get(taskId, scope),
   };

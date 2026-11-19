@@ -267,6 +267,17 @@ export class SimScriptBook {
   respond(driver: 'main' | 'worker', context: unknown): AgentMessage {
     const messages = ((context as { messages?: readonly unknown[] } | undefined)?.messages ?? []) as readonly unknown[];
     const text = lastUserTextOf(messages);
+    // 完成唤醒回合（宿主完成事实触发；2026-11-19 唤醒切片）：显式脚本优先；未显式脚本时按
+    // 新形状脚本化——模型把事实里的结果正文原样说给用户（产品形状：宿主只喂事实 + 投递模型
+    // 说的话；用户可见内容仍由用例断言钉住，宿主不再拼完成文案）。
+    if (driver === 'main' && text.startsWith(COMPLETION_FACT_PREFIX) && !this.main.has(text)) {
+      this.requestMessages.set(`main\u0000${text}`, messages);
+      const body = completionResultBodyOf(text);
+      if (body === undefined) {
+        throw new Error(`完成事实形状不符（缺结果正文段）：${JSON.stringify(text.slice(0, 160))}`);
+      }
+      return textAssistant(body);
+    }
     const { key, entry } = this.resolve(driver, text);
     this.requestMessages.set(`${driver}\u0000${key}`, messages);
     const counterKey = `${driver}\u0000${key}`;
@@ -317,6 +328,21 @@ function lastUserTextOf(messages: readonly unknown[]): string {
     }
   }
   return '';
+}
+
+/** 完成事实前缀与结果正文段标记（与 apps/server/task-completion-delivery.ts 的拼装同源）。 */
+export const COMPLETION_FACT_PREFIX = '[任务完成]';
+const COMPLETION_RESULT_MARKER = '结果正文（逐字）：';
+const COMPLETION_TAIL_MARKER = '。请把这件事告诉用户。';
+
+/** 从完成事实里取逐字结果正文；形状不符返回 undefined（脚本立刻暴露事实形状漂移）。 */
+export function completionResultBodyOf(factText: string): string | undefined {
+  const start = factText.indexOf(COMPLETION_RESULT_MARKER);
+  if (start === -1) return undefined;
+  const rest = factText.slice(start + COMPLETION_RESULT_MARKER.length);
+  const end = rest.lastIndexOf(COMPLETION_TAIL_MARKER);
+  if (end === -1) return undefined;
+  return rest.slice(0, end);
 }
 
 /** 最后一条工具结果（执行层真实返回 / run_js 真实出口 / 宿主拒绝话术）。 */

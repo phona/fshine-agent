@@ -40,6 +40,7 @@ import type { TurnFileRef } from '../../packages/agent/src/execution-runtime';
 import type { TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/src/task-runner';
 import { openTaskStore } from '@fshine/core';
 import { createServer, deliverTurnFilesCore, type FileDeliveryPort } from './server';
+import { echoCompletionWake } from './testing/echo-completion-wake';
 import { failureTextFor } from './task-completion-delivery';
 import { failureMessageFor } from '../../packages/agent/src/user-facing-failure';
 
@@ -116,6 +117,10 @@ function sequencedDriver(steps: readonly DriverStep[], capture: DriverCapture): 
         await input.exec(call.tool, call.args);
       }
       return { text: step.text, messages: [] as unknown as DriverMessage[] };
+    },
+    // 唤醒回合（完成事实触发）按产品形状脚本化：模型把事实里的结果正文复读给用户。
+    async wake(factText) {
+      return echoCompletionWake(factText);
     },
   };
 }
@@ -581,9 +586,9 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     }
   });
 
-  it('⑧ 完成投递带任务身份：文本以「<业务名>」办完了：为头（name 从底账取，超长截断 30 字）', async () => {
-    // 2026-11-19 实测缺陷：完成消息没有任务身份，用户看不出是哪件事的
-    // （「不知道是不是 longtask 的」）。投递文本加一行简短身份。
+  it('⑧ 完成投递文本 = 唤醒回合模型那句（宿主不再拼「业务名」办完了：模板）', async () => {
+    // 2026-11-19 唤醒切片：完成消息的身份由**模型**在唤醒回合里写（宿主只喂事实）；
+    // 宿主身份行模板已删——投递文本必须逐字等于模型产出，不夹带宿主拼接。
     const { port, texts } = livePort();
     const { server } = await makeFixture({
       steps: [TASK_RUN_STEP],
@@ -593,12 +598,9 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     try {
       await server.handler(incoming('m-completion-name', '帮我汇总'));
       await vi.waitFor(() => expect(texts).toHaveLength(1));
-      // 身份行 = 「业务名」办完了： + 结果正文（name 由底账 deriveTaskName 机械回落，
-      // TASK_RUN_CALL 的任务原文是「帮我把结果汇总成一份文件」）。
-      expect(texts[0]!.text).toMatch(/^「[^」]+」办完了：/);
-      expect(texts[0]!.text).toContain('汇总完成。');
-      // 身份头里的名字来自任务行（不是正文重复）；超长名截断到 30 字（机械截断）。
-      expect(texts[0]!.text.length).toBeGreaterThan('「」办完了：'.length);
+      // 脚本模型复读事实里的结果正文（逐字）；没有宿主身份头。
+      expect(texts[0]!.text).toBe('汇总完成。');
+      expect(texts[0]!.text).not.toMatch(/「[^」]*」办完了：/);
     } finally {
       await server.close();
     }

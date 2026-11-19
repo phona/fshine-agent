@@ -19,6 +19,7 @@ import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fsh
 import type { DriverMessage, TurnDriver } from '../../packages/agent/src/driver-contract';
 import type { Notification, NotificationSink } from '../../packages/agent/src/notifications';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/src/task-runner';
+import { echoCompletionWake } from './testing/echo-completion-wake';
 import { createServer } from './server';
 
 const FIXTURE_ROOT = path.resolve(__dirname, '..', '..', 'scripts', 'eval', 'fixtures', 'dummy-platform');
@@ -83,7 +84,8 @@ function unreachableDriver(): TurnDriver {
   };
 }
 
-/** 模型：第一回合委派一句，回复里如实转述（工具报错与真实 Pi 一样作为工具结果回给模型）。 */
+/** 模型：第一回合委派一句，回复里如实转述（工具报错与真实 Pi 一样作为工具结果回给模型）；
+ *  唤醒回合（完成事实触发）按产品形状脚本化：模型把事实里的结果正文复读给用户。 */
 function delegatingDriver(request: string, reply: string): TurnDriver {
   return {
     async run(input) {
@@ -96,6 +98,9 @@ function delegatingDriver(request: string, reply: string): TurnDriver {
       }
       const messages = [...input.messages, { role: 'assistant', content: reply } as never];
       return { text: reply, messages };
+    },
+    async wake(factText) {
+      return echoCompletionWake(factText);
     },
   };
 }
@@ -204,19 +209,21 @@ describe('主动推送：后台任务的失败与等待（用户不必下次开�
     }
   });
 
-  it('③ 后台完成 → 恰一次完成投递（带任务身份头），无第二条推送', async () => {
-    // 2026-11-19：完成消息带「<业务名>」办完了：身份头（业务名 = 底账机械回落值）。
+  it('③ 后台完成 → 恰一次完成投递（投递的是模型唤醒回合那句），无第二条推送', async () => {
+    // 2026-11-19 唤醒切片：宿主不再拼完成文案（身份行已删）——完成消息 = 唤醒原会话模型、
+    // 由它把结果说给用户；这里脚本模型把事实里的结果正文复读。
     // 断言没有第二条：改期到回合后的 chatSink 推送（完成类本来就该零推）在这段安静期内落地。
-    const { server, delivery } = await runCase({ outcome: () => ({ kind: 'completed', resultText: 'W202611：documents 共 3 条。' }) });
+    const resultText = 'W202611：documents 共 3 条。';
+    const { server, delivery } = await runCase({ outcome: () => ({ kind: 'completed', resultText }) });
     try {
       await server.handler(incoming('查 documents W202611'));
       // 完成正文确实送达（证明链路是通的，不是整体没投）。
       await vi.waitFor(() => expect(delivery.pushed.some((p) => p.text.includes('documents 共 3 条'))).toBe(true));
-      // 恰一条：完成投递（带身份头），没有 chatSink 的「办完了」第二条。
+      // 恰一条：完成投递 = 模型那句；没有 chatSink 的「办完了」第二条。
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(delivery.pushed).toHaveLength(1);
-      expect(delivery.pushed[0]!.text).toMatch(/^「[^」]+」办完了：/);
-      expect(delivery.pushed[0]!.text).toContain('documents 共 3 条');
+      expect(delivery.pushed[0]!.text).toBe(resultText);
+      expect(delivery.pushed[0]!.text).not.toMatch(/「[^」]*」办完了：/);
     } finally {
       server.close();
     }

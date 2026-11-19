@@ -1,13 +1,16 @@
 /**
- * 后台任务完成的主动投递（B 切片，工单回执收敛）：任务经执行端确认 completed 后，
- * 把结果原文发回原会话——走宿主既有主动投递面（装配注入的 `fileDelivery.sendText`）。
+ * 后台任务完成的主动投递（B 切片，工单回执收敛；2026-11-19 唤醒切片改形）：任务经执行端
+ * 确认 completed 后，**唤醒原会话的模型、由它把这件事说给用户**，宿主只投递它说的话——走
+ * 宿主既有主动投递面（装配注入的 `fileDelivery.sendText`）。宿主不再拼成功文案（身份行
+ * 「<业务名>」办完了： 已随本切片删除）；喂给模型的是**事实**（见 taskCompletionFactText），
+ * 不是话术。
  *
  * 纪律（与文件投递 / 附件追问同一套，四必守同源）：
  *   · 非 live 部署**不发起投递**，记 `task_result_delivery_suppressed`，**不许记 sent**
  *     （silent 闸的回执会假报 sent 而用户什么都看不到，宿主不得采信）；
  *   · live 送达才记 `task_result_delivery_sent`（唯一允许 sent 的分支）；
  *   · live 投递失败记 `task_result_delivery_failed`，不记 sent（失败必须可查）；
- *   · 结果原文投递前过 stripServerPaths——与用户可见回复同一道出口清理（2026-10-19
+ *   · 待投递文本投递前过 stripServerPaths——与用户可见回复同一道出口清理（2026-10-19
  *     事故形状：服务器路径不进用户文本）；剥完为空不投递（空文本帧会让渠道无终帧）；
  *   · 投递是 fire-and-forget：失败/抑制只记事件，不改变任务事实（与通知 outbox 同语义）。
  *
@@ -32,12 +35,6 @@ export interface TaskCompletionFact {
   principalId: string;
   sessionId: string;
   resultText: string;
-  /**
-   * 业务名（任务底账 name / deriveTaskName(request) 的机械回落值）。给到时，投递文本加
-   * 一行身份「<name>」办完了：<结果正文>——用户一眼看出是哪件事（2026-11-19：完成消息
-   * 没有任务身份，「不知道是不是 longtask 的」）。缺省 = 无身份行（逐字节不变）。
-   */
-  name?: string;
 }
 
 /**
@@ -72,14 +69,29 @@ export function routeFromSessionId(sessionId: string): ChannelRoute | undefined 
   return { channel: sessionId.slice(0, separator), conversationId: sessionId.slice(separator + 1) };
 }
 
-/** 完成消息身份行的业务名上限（字符；超长截断加省略号，防止用户刷屏读长名）。 */
+/** 完成事实里业务名的上限（字符；超长截断加省略号——事实给模型读，防止刷屏）。 */
 const COMPLETION_NAME_MAX = 30;
 
-/** 业务名截断（机械；只截显示，不改底账值）。 */
+/** 业务名截断（机械；只影响事实文本，不改底账值）。 */
 function truncatedName(name: string): string {
   const trimmed = name.trim();
   if (trimmed.length <= COMPLETION_NAME_MAX) return trimmed;
   return `${trimmed.slice(0, COMPLETION_NAME_MAX)}…`;
+}
+
+/**
+ * 任务完成**事实**文本（宿主拼，给模型读；用户看到的话由模型写，宿主不再拼结果文案）：
+ *   `[任务完成]「<业务名>」已由执行端确认完成。结果正文（逐字）：<resultText>。请把这件事告诉用户。`
+ *
+ * 硬边界（与 handle 隔离同一纪律）：不含 handle、不含 taskId/内部码、不含执行层原文以外的
+ * 任何内部标识——resultText 是执行端确认的结果正文，逐字进事实（模型要能原样转述）。
+ * name 缺省 = 主语用中性指代（不猜名）；不加任何投递/记账话术。
+ */
+export function taskCompletionFactText(input: { name?: string; resultText: string }): string {
+  const subject = input.name !== undefined && input.name.trim() !== ''
+    ? `「${truncatedName(input.name)}」`
+    : '你交代的那件事';
+  return `[任务完成]${subject}已由执行端确认完成。结果正文（逐字）：${input.resultText}。请把这件事告诉用户。`;
 }
 
 /**
@@ -148,7 +160,8 @@ async function deliverText(
 }
 
 /**
- * 单次完成投递（调用方 fire-and-forget；本函数内部吞掉一切错误并如实记账）。
+ * 单次完成投递（调用方 fire-and-forget；本函数内部吞掉一切错误并如实记账）：
+ * text = 唤醒回合里模型写给用户的正文（或兜底话术），宿主不再拼任何结果文案。
  * 返回是否真的发起了投递（测试断言用；生产调用方不依赖返回值）。
  */
 export async function deliverTaskResult(fact: TaskCompletionFact, options: TaskResultDeliveryOptions): Promise<boolean> {
@@ -166,8 +179,7 @@ export async function deliverTaskResult(fact: TaskCompletionFact, options: TaskR
     });
     return false;
   }
-  // 结果正文的空白判定先行（2026-11-19）：resultText 为空/只有空白时仍按既有
-  // empty_after_strip 抑制——身份行本身不算正文，空结果不许只发一句「办完了」。
+  // 投递文本的空白判定先行：空文本不投（空帧用户什么都收不到），按 empty_after_strip 抑制记账。
   const bodyStripped = stripServerPaths(fact.resultText).text;
   if (bodyStripped.trim() === '') {
     options.log({
@@ -178,11 +190,7 @@ export async function deliverTaskResult(fact: TaskCompletionFact, options: TaskR
     });
     return false;
   }
-  // 任务身份行（2026-11-19）：「<业务名>」办完了：<结果正文>；name 缺省 = 无身份行（逐字节不变）。
-  const header = fact.name !== undefined && fact.name.trim() !== ''
-    ? `「${truncatedName(fact.name)}」办完了：`
-    : '';
-  return deliverText(fact, `${header}${bodyStripped}`, options);
+  return deliverText(fact, bodyStripped, options);
 }
 
 /**
