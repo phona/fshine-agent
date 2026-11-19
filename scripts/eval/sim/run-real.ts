@@ -22,7 +22,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SIM_CASE_ORACLES, SIM_READ_CASES } from './cases';
+import { SIM_CASE_ORACLES, SIM_INTERACTION_CASES, SIM_READ_CASES } from './cases';
 import type { SimCase } from './case';
 import { createAskRuntimeSystem, type AskRuntimeSystem } from './ask-adapter';
 import { runSimSuite, type SimTrialResult, type SimSuiteResult } from './run';
@@ -240,7 +240,7 @@ function buildReport(input: {
   lines.push(`- 预注册: \`${path.relative(REPO_ROOT, path.join(OUT_ROOT_BASE, 'prereg.md'))}\`（跑批前落盘）`);
   lines.push(`- 被测系统模型: \`${input.model}\`（生产同源装配 + 仓内 dummy 执行层）`);
   lines.push(`- 模拟用户模型: \`${input.model}\`（独立调用，\`kind: simulator\`）`);
-  lines.push(`- 判官: 未启用（${SIM_CASE_ORACLES.length} 个确定性 Oracle）`);
+  lines.push(`- 判官: \`${input.model}\`（与模拟用户同一端点；仅模型 Oracle 会调用，确定性 Oracle 不产生 judge 调用）`);
   lines.push(`- 并发: ${suite.summary.isolation.concurrency}（观测最大并发 ${suite.batch.observedMaxConcurrency}）`);
   lines.push(`- 样本: ${suite.summary.n}（${new Set(suite.trials.map((trial) => trial.caseId)).size} 用例 × trials=${trialsPerCase.join('/')}）· 墙钟 ${(wallMs / 1000).toFixed(1)}s`);
   lines.push(`- 选中用例: ${input.cases.map((caseDef) => caseDef.id).join('、')}（\`SIM_CASES_ONLY\`；缺省=全部读用例）`);
@@ -293,7 +293,7 @@ function buildReport(input: {
   lines.push(...accountingLines(suite.summary.accounting));
   lines.push('', '口径说明：模拟用户逐次调用由 Harness 直接记录（`simulator`）；系统侧 `main` 来自 Pi 转录里');
   lines.push('assistant 消息的 `usage` 累计差分（`summary/retry/overflow_recovery` 在转录投影里不可分离，');
-  lines.push('标注不可得，不补零）；判官未启用。', '');
+  lines.push('标注不可得，不补零）；判官调用只在模型 Oracle 上发生（确定性 Oracle 的 runs 里 judge.calls=0）。', '');
   lines.push('## 6. 并发隔离', '');
   const isolation = suite.summary.isolation;
   lines.push(`session 目录唯一=${isolation.uniqueSessionDirs} · state.db 唯一=${isolation.uniqueStateDbPaths} · 证据目录唯一=${isolation.uniqueEvidenceDirs} · 目录已建=${isolation.dirsCreated} · 共享路径=${isolation.shared.length}`, '');
@@ -323,9 +323,15 @@ async function main(): Promise<void> {
   }
 
   const runId = stamp();
+  // 用例池：缺省读切片；`SIM_INTERACTION=1` 切换到交互性质场景（SIM-INT-*，需要独立判官）。
+  const interactionRun = process.env['SIM_INTERACTION'] === '1';
+  const casePool = interactionRun ? SIM_INTERACTION_CASES : SIM_READ_CASES;
   // 先选用例并核对样本硬停（超限立即报错，绝不先发请求）：只控制跑几条，不改任何判据。
-  const selectedCases = selectSimCases(SIM_READ_CASES, process.env['SIM_CASES_ONLY']);
+  const selectedCases = selectSimCases(casePool, process.env['SIM_CASES_ONLY']);
   assertSampleCap(selectedCases);
+  // 并发：缺省 5；本地端点有并发上限时用 `SIM_CONCURRENCY=1` 固定单并发（不改任何判据）。
+  const concurrencyRaw = Number(process.env['SIM_CONCURRENCY'] ?? '5');
+  const concurrency = Number.isInteger(concurrencyRaw) && concurrencyRaw >= 1 ? concurrencyRaw : 5;
   const outRoot = path.join(OUT_ROOT_BASE, `run-${runId}`);
   mkdirSync(outRoot, { recursive: true });
   writeFileSync(path.join(outRoot, 'prereg-snapshot.md'), readFileSync(path.join(OUT_ROOT_BASE, 'prereg.md'), 'utf8'), 'utf8');
@@ -338,6 +344,14 @@ async function main(): Promise<void> {
     label: 'simulator',
     timeoutMs: 120_000,
   });
+  // 独立判官（只有模型 Oracle 会调用；确定性 Oracle 不产生 judge 调用）。
+  const judge: SimModel = createChatModel({
+    baseUrl,
+    apiKey,
+    model,
+    label: 'judge',
+    timeoutMs: 120_000,
+  });
 
   const systems = new Map<string, AskRuntimeSystem>();
   let wallTimer: NodeJS.Timeout | undefined;
@@ -346,9 +360,10 @@ async function main(): Promise<void> {
   const suitePromise = runSimSuite({
     cases: selectedCases,
     outRoot,
-    concurrency: 5,
+    concurrency,
     oracles: SIM_CASE_ORACLES,
     simulator,
+    judge,
     createSystem: async (paths, caseDef) => {
       const system = await createAskRuntimeSystem({
         runtimeDir: paths.root,

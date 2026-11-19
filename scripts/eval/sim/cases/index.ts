@@ -30,6 +30,11 @@ import {
 } from './scenario-oracles';
 import { FINANCE_AR_CASES } from './finance-cases';
 import { FINANCE_AR_ORACLES } from './finance-oracles';
+import {
+  createAmbiguousScopeOracle, createFailureNextStepOracle,
+  createGroupOneLinerOracle, createInterjectionAnsweredOracle,
+} from './interaction-oracles';
+import { SIM_INTERACTION_BLOCKED_CASES, SIM_INTERACTION_CASES } from './interaction-cases';
 
 export {
   ALPHA_TRUTH_PATTERNS,
@@ -48,6 +53,18 @@ export {
 } from './finance-oracles';
 export { SIM_FIXTURES, resolveFixtureDeclaration, type SimFixtureDeclaration } from './fixtures';
 
+/**
+ * 交互性质场景（INT）· 判据先行登记 + 可达性单列（见 `./interaction-cases` 头注）。
+ *   · `SIM_INTERACTION_CASES` = 当前回合制单会话 harness 可在真实装配上跑的 2 条；
+ *   · `SIM_INTERACTION_BLOCKED_CASES` = 需要异步/跨会话表达力、当前 harness 表达不了的 2 条
+ *     （blockedBy 逐条写明缺什么）——**不并入跑批**，绝不冒充读数（与 `SIM_WRITE_CASES` 同纪律）。
+ */
+export { SIM_INTERACTION_CASES, SIM_INTERACTION_BLOCKED_CASES, type BlockedInteractionCase } from './interaction-cases';
+export {
+  createAmbiguousScopeOracle, createFailureNextStepOracle,
+  createGroupOneLinerOracle, createInterjectionAnsweredOracle,
+} from './interaction-oracles';
+
 /** 套件局部 Oracle 注册（`runSimSuite({ oracles: SIM_CASE_ORACLES })`）；全部确定性、零 judge 调用。 */
 export const SIM_CASE_ORACLES: readonly SimOracle[] = Object.freeze([
   createPartialFailureHonestOracle(),
@@ -61,6 +78,11 @@ export const SIM_CASE_ORACLES: readonly SimOracle[] = Object.freeze([
   createRepeatNoDuplicateEffectOracle(),
   createReceiptLostHonestOracle(),
   ...FINANCE_AR_ORACLES,
+  // 交互性质场景（INT）：机械硬零 + 独立判官（判官调用由 harness 记 kind: judge）。
+  createAmbiguousScopeOracle(),
+  createFailureNextStepOracle(),
+  createInterjectionAnsweredOracle(),
+  createGroupOneLinerOracle(),
 ]);
 
 /** alpha 真值同时作为禁知（见本文件头「真值纪律」）；`2条` 覆盖数量真值。 */
