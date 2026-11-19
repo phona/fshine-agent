@@ -25,11 +25,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AppConfig, ChannelRoute, DeliveryReceipt, IncomingChannelMessage } from '@fshine/contracts';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
-import type { TurnDriver } from '../../packages/agent/src/driver-contract';
+import type { DriverMessage, TurnDriver } from '../../packages/agent/src/driver-contract';
 import { createPiTurnDriver } from '../../packages/agent/src/pi-driver';
 import { createScriptedModelRuntime } from '../../packages/agent/testing/scripted-model-runtime';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/src/task-runner';
-import { internalTermIn } from '../../packages/agent/src/user-facing-failure';
+import type { Notification, NotificationSink } from '../../packages/agent/src/notifications';
+import { failureMessageFor, internalTermIn } from '../../packages/agent/src/user-facing-failure';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import { mainSessionOptions } from '../../scripts/ask-runtime';
 import { createServer, type FileDeliveryPort, type Server } from './server';
@@ -40,6 +41,7 @@ const SCOPE = { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' };
 const ASK = '帮我汇总';
 const TASK_TEXT = '帮我把结果汇总成一份文件';
 const RESULT_TEXT = '汇总完成，共 3 条。';
+const FAIL_REASON = '执行层拒绝';
 /** 模型在（非静默）回合里说的话：刻意不含结果正文——用来区分「模型的话」与「宿主兜底」。 */
 const MODEL_LINE = '好，这件事我盯过了，你随时问我细节。';
 /** 慢活落定后的唤醒回合台词（既有唤醒路径，不被本切片改动）。 */
@@ -56,14 +58,14 @@ function tempDir(): string {
   return dir;
 }
 
-function testConfig(taskRunWaitMs: number): AppConfig {
+function testConfig(taskRunWaitMs: number, overrides: Partial<NonNullable<AppConfig['runtime']>> = {}): AppConfig {
   return {
     principals: { 'wecom:user-a': { enabled: true } },
     contextProfiles: { dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: [] } },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
     // 短等待窗口：窗口内落定 = 快活（relayed）；窗口外 = 受理（accepted）。
-    runtime: { taskRunWaitMs },
+    runtime: { taskRunWaitMs, ...overrides },
   };
 }
 
@@ -88,6 +90,32 @@ class CountingClient implements ExecutionClient {
     this.calls += 1;
     return { status: 'completed', data: {} };
   }
+}
+
+/** 执行层对每次调用都确定性拒绝（真实 Worker 路径：执行事实带 error.code 进底账）。 */
+class FailingFaceClient implements ExecutionClient {
+  calls = 0;
+  constructor(private readonly code: string, private readonly message: string) {}
+  async capabilities(): Promise<CapabilityManifest> {
+    return { contractVersion: 1, operations: [{ name: 'dummy.query', label: 'query', args: [] }] };
+  }
+  async execute(): Promise<ExecutionOutcome> {
+    this.calls += 1;
+    return { status: 'failed', error: { code: this.code, message: this.message, retryable: false } };
+  }
+}
+
+/**
+ * 真实后台 Worker 回合的替身（只做形状）：调一次 execute_operation、如实汇报。
+ * 与真实 Worker 一样：工具失败由汇报文本承接，执行事实（含 error.code）经宿主落底账。
+ */
+function executingWorkerDriver(): TurnDriver {
+  return {
+    async run(input) {
+      await input.exec('execute_operation', { operation: 'dummy.query', args: {} }).catch(() => undefined);
+      return { text: '执行层拒绝了这次查询。', messages: [] as unknown as DriverMessage[] };
+    },
+  };
 }
 
 /** 立即完成的执行器：任务在等待窗口内落定（快活路线）。 */
@@ -127,6 +155,34 @@ class GatedExecutor implements TaskExecutor {
     this.resolve?.(outcome);
     this.gate = undefined;
     this.resolve = undefined;
+  }
+}
+
+/** 立即失败的执行器：窗口内落定 = 快活失败（注入式无执行事实 → code 取不到 = executor_failed）。 */
+class FailingExecutor implements TaskExecutor {
+  calls = 0;
+  constructor(private readonly make: () => TaskExecutionOutcome = () => ({ kind: 'failed', reason: FAIL_REASON })) {}
+  async execute(_input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
+    this.calls += 1;
+    return this.make();
+  }
+}
+
+/** 同回合第一次失败、第二次成功（一成一败用例）。 */
+class MixedExecutor implements TaskExecutor {
+  calls = 0;
+  async execute(_input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
+    this.calls += 1;
+    return this.calls === 1 ? { kind: 'failed', reason: FAIL_REASON } : { kind: 'completed', resultText: RESULT_TEXT };
+  }
+}
+
+/** 通知 sink 替身（只收事实；聊天推送走同一个 fakeDelivery 文本端口，与生产装配同形）。 */
+class NoopSink implements NotificationSink {
+  readonly sent: Notification[] = [];
+  async send(notification: Notification): Promise<{ delivered: boolean }> {
+    this.sent.push(notification);
+    return { delivered: true };
   }
 }
 
@@ -227,7 +283,8 @@ interface Fixture {
   delivery: { sentTexts: Array<{ route: ChannelRoute; text: string }>; port: FileDeliveryPort };
   logs: Array<Record<string, unknown>>;
   executor: TaskExecutor;
-  face: CountingClient;
+  face: CountingClient | FailingFaceClient;
+  sink?: NoopSink;
   wakeCalls: () => number;
   close(): Promise<void>;
 }
@@ -239,13 +296,26 @@ async function makeFixture(input: {
   wakeLine?: string;
   emptyOnly?: boolean;
   delegations?: number;
+  /**
+   * 真实 Worker 路径（不注入 taskExecutor）：Worker 替身调一次 execute_operation，
+   * 执行层按给定码拒绝——执行事实（error.code）进底账，失败事实的来源可被逐字验证。
+   */
+  workerExecutionFailure?: { code: string; message: string };
+  /** 注入通知 sink：生产装配（有 notificationSink）时 chatSink 与通知 outbox 才接线。 */
+  notificationSink?: boolean;
+  /** runtime 段覆盖（例：backgroundConcurrency/queueCapacity 造资源拒绝）。 */
+  runtimeOverrides?: Partial<NonNullable<AppConfig['runtime']>>;
 }): Promise<Fixture> {
   const dir = tempDir();
   const dbPath = path.join(dir, 'state.db');
   const delivery = fakeDelivery();
   const logs: Array<Record<string, unknown>> = [];
+  const realWorker = input.workerExecutionFailure !== undefined;
   const executor = input.executor ?? new ImmediateExecutor();
-  const face = new CountingClient();
+  const sink = input.notificationSink === true ? new NoopSink() : undefined;
+  const face = input.workerExecutionFailure === undefined
+    ? new CountingClient()
+    : new FailingFaceClient(input.workerExecutionFailure.code, input.workerExecutionFailure.message);
   let wakeCalls = 0;
   const scripted = createScripted({
     ...(input.afterToolText === undefined ? {} : { afterToolText: input.afterToolText }),
@@ -257,10 +327,12 @@ async function makeFixture(input: {
   const runtime = await scripted;
   const server = await createServer({
     env: { LLM_MODEL: 'test-model' },
-    config: testConfig(input.waitMs),
+    config: testConfig(input.waitMs, input.runtimeOverrides ?? {}),
     dbPath,
     createDrivers: (env, mainSession) => {
-      const workerDriver: TurnDriver = { async run(): Promise<never> { throw new Error('（测试）Worker 由 executor 替身接管'); } };
+      const workerDriver: TurnDriver = realWorker
+        ? executingWorkerDriver()
+        : { async run(): Promise<never> { throw new Error('（测试）Worker 由 executor 替身接管'); } };
       const mainDriver = createPiTurnDriver({
         env,
         modelRuntime: runtime.runtime,
@@ -274,7 +346,8 @@ async function makeFixture(input: {
       allowedOperations: ['dummy.query'],
       readOnlyOperations: ['dummy.query'],
     }),
-    taskExecutor: executor,
+    ...(realWorker ? {} : { taskExecutor: executor }),
+    ...(sink === undefined ? {} : { notificationSink: sink }),
     fileDelivery: delivery.port,
     logger: (line) => logs.push(line),
   });
@@ -285,9 +358,13 @@ async function makeFixture(input: {
     logs,
     executor,
     face,
+    ...(sink === undefined ? {} : { sink }),
     wakeCalls: () => wakeCalls,
     close: async () => {
       if (executor instanceof GatedExecutor) executor.settle({ kind: 'failed', reason: '（测试清理）' });
+      // 让 settle 的收尾与由此触发的再派发（pump 走 microtask）落地后再停机——否则停机后
+      // 触发的 pump 会撞上已关闭的底账连接（vitest 记未处理错误）。
+      await new Promise((resolve) => setTimeout(resolve, 0));
       await server.close();
     },
   };
@@ -427,6 +504,216 @@ describe('快活 + 模型沉默（server 级）：不许静默终局', () => {
       await vi.waitFor(() => {
         expect(fx.logs.filter((line) => line['event'] === 'task_result_delivery_suppressed'
           && line['reason'] === 'relayed_in_turn')).toHaveLength(2);
+      }, { timeout: 5_000 });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(fx.delivery.sentTexts).toHaveLength(2);
+      expect(fx.wakeCalls()).toBe(0);
+    } finally {
+      await fx.close();
+    }
+  });
+});
+
+/**
+ * 相邻形状（2026-11-19 复核，同一病根的失败出口）：短等待窗口内**失败**的快活任务
+ * （pushSuppressedTaskIds 非空）+ 模型沉默 → 失败回调按 claimPushSuppressedInTurn 抑制
+ * → 用户同样什么都收不到。出口与成功侧同形同在：回合末 reply 空 + 无文件 + 有
+ * pushSuppressedTaskIds → 逐条按**既有失败话术**如实送达（deliverTaskFailure；事实
+ * 【执行事实的 error.code / result_unknown 状态】从底账取，与失败回调同源）。
+ */
+describe('快活失败 + 模型沉默（server 级）：失败也必须送达', () => {
+  it('① 主形状：窗口内失败 + 模型全程空正文 → 用户收到既有失败话术那一句（不判失败、不重复）', async () => {
+    const executor = new FailingExecutor();
+    // 通知 sink 按生产装配注入：failed 不进推送种类（既有口径），宿主失败投递是唯一出口。
+    const fx = await makeFixture({ waitMs: 1_500, executor, notificationSink: true });
+    try {
+      const reply = await fx.server.handler(incoming('m-1', ASK));
+
+      // 用户收到了：失败话术（逐字 = failureMessageFor(executor_failed)——注入式执行器无执行
+      // 事实，码取不到时的既有归类）；不是成功兜底、不含结果正文当成功说。
+      expect(fx.delivery.sentTexts).toHaveLength(1);
+      const text = fx.delivery.sentTexts[0]!.text;
+      expect(text).toBe(failureMessageFor('executor_failed').text);
+      expect(text).toContain('没办成');
+      expect(text).not.toContain('办好了');
+      expect(text).not.toContain(RESULT_TEXT);
+      expect(internalTermIn(text)).toBeUndefined();
+      expect(fx.delivery.sentTexts[0]!.route).toEqual({ channel: 'wecom', conversationId: 'conv-a' });
+
+      // 不是判回合失败：回合成功落定（message_done 记 taskIds），任务终局 failed 不被重跑。
+      expect(reply).toBe('');
+      const done = fx.logs.find((line) => line['event'] === 'message_done');
+      expect((done?.['taskIds'] as string[] | undefined)?.length).toBe(1);
+      expect(executor.calls).toBe(1);
+      const taskId = (done!['taskIds'] as string[])[0]!;
+      const ro = createSqliteTaskRegistry(fx.dbPath, { readOnly: true });
+      try {
+        expect(ro.get(taskId, SCOPE).status).toBe('failed');
+      } finally {
+        ro.close();
+      }
+
+      // 记账四必守：live 送达记 sent（带任务身份），无 failed。
+      const sent = fx.logs.filter((line) => line['event'] === 'task_result_delivery_sent');
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({
+        taskId,
+        principalId: 'wecom:user-a',
+        sessionId: 'wecom:conv-a',
+        deliveryMode: 'live',
+      });
+      // 通知推送面不重复发（failed 不进推送种类；事实照常落 sink，只是不推）。
+      expect(fx.sink!.sent.some((notification) => notification.kind === 'failed')).toBe(true);
+      expect(fx.logs.some((line) => line['event'] === 'notification_push_sent')).toBe(false);
+      // 失败回调的抑制照旧核销（本回合已送达，不重复发）——等回调落定后仍是 1 条。
+      await vi.waitFor(() => {
+        expect(fx.logs.some((line) => line['event'] === 'task_failure_delivery_suppressed'
+          && line['reason'] === 'relayed_in_turn')).toBe(true);
+      }, { timeout: 5_000 });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(fx.delivery.sentTexts).toHaveLength(1);
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('①b 失败事实从底账取：执行事实的 error.code 决定话术种类（真实 Worker 路径）', async () => {
+    // Worker 替身在窗口内被执行层以 GATE_REFUSE 拒绝 → error.code 进任务底账执行事实 →
+    // 回合末按既有归类（denied）投递。与失败回调同源：同一条 failureCodeOf 链。
+    const fx = await makeFixture({
+      waitMs: 1_500,
+      workerExecutionFailure: { code: 'GATE_REFUSE', message: '执行层拒绝了这次查询' },
+    });
+    try {
+      const reply = await fx.server.handler(incoming('m-1', ASK));
+      expect(reply).toBe('');
+      expect(fx.delivery.sentTexts).toHaveLength(1);
+      expect(fx.delivery.sentTexts[0]!.text).toBe(failureMessageFor('denied').text);
+      // 执行层原文/内部码不进用户文本。
+      expect(fx.delivery.sentTexts[0]!.text).not.toContain('GATE_REFUSE');
+      expect(fx.delivery.sentTexts[0]!.text).not.toContain('执行层');
+      // 底账执行事实里确实带着那个码（证明文本不是凭空来的）。
+      const done = fx.logs.find((line) => line['event'] === 'message_done');
+      const taskId = (done!['taskIds'] as string[])[0]!;
+      const ro = createSqliteTaskRegistry(fx.dbPath, { readOnly: true });
+      try {
+        const record = ro.get(taskId, SCOPE);
+        expect(record.status).toBe('failed');
+        expect(record.executions.some((execution) => execution.error?.code === 'GATE_REFUSE')).toBe(true);
+      } finally {
+        ro.close();
+      }
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('①c 结果未知（result_unknown）单独带状态：说「先别重复」，不说重试', async () => {
+    const executor = new FailingExecutor(() => ({ kind: 'result_unknown', reason: '回执丢失' }));
+    const fx = await makeFixture({ waitMs: 1_500, executor });
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      expect(fx.delivery.sentTexts).toHaveLength(1);
+      const text = fx.delivery.sentTexts[0]!.text;
+      expect(text).toBe(failureMessageFor('unknown_result').text);
+      expect(text).toContain('先别重复');
+      expect(text).not.toContain('再试一次');
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('② 不回归：失败但模型说了话 → 宿主完全不介入（用户看到的话永远是模型说的）', async () => {
+    const executor = new FailingExecutor();
+    const fx = await makeFixture({ waitMs: 1_500, executor, afterToolText: MODEL_LINE });
+    try {
+      const reply = await fx.server.handler(incoming('m-1', ASK));
+      expect(reply).toBe(MODEL_LINE);
+      // 回合结束后给抑制记账一点时间：模型同回合已说明 → 宿主不另推一条失败话术。
+      await vi.waitFor(() => {
+        expect(fx.logs.some((line) => line['event'] === 'task_failure_delivery_suppressed'
+          && line['reason'] === 'relayed_in_turn')).toBe(true);
+      }, { timeout: 5_000 });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(fx.delivery.sentTexts).toHaveLength(0);
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('③ 非失败终局（注入式取消）+ 沉默 → 交回既有终态推送面：一条取消通知，不冒充失败、不重复', async () => {
+    // 取消/超时/未执行在窗口内不可达（要用户取消命令或 Worker 截止，二者都进不了 8s 窗口，
+    // 只有注入式执行器能造）：不替它们说失败话——核销本回合抑制，既有终态推送面照常送达。
+    // 通知 sink 按生产装配注入（有 notificationSink 时 chatSink 与 outbox 才接线）。
+    const executor = new FailingExecutor(() => ({ kind: 'cancelled' }));
+    const fx = await makeFixture({ waitMs: 1_500, executor, notificationSink: true });
+    try {
+      const reply = await fx.server.handler(incoming('m-1', ASK));
+      expect(reply).toBe('');
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
+      const text = fx.delivery.sentTexts[0]!.text;
+      expect(text).toContain('已按你说的停了');
+      expect(text).toContain(TASK_TEXT);
+      expect(text).not.toBe(failureMessageFor('executor_failed').text);
+      // 既有通知面确实收到事实（不是宿主新造的话术）。
+      expect(fx.sink!.sent.some((notification) => notification.kind === 'cancelled')).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(fx.delivery.sentTexts).toHaveLength(1);
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('③b 资源拒绝（failed 终局，通知面也认这一类）+ 沉默 → 恰一条（失败话术），不双发', async () => {
+    // 窗口内被拒（后台满员 + 队列满）：底账 failed + reason=resource_limited。失败投递面与
+    // 通知面（resource_limited 种类）都认这笔任务——核销只发生一次，用户只收到一条：
+    // 本切片走失败投递（既有 failureMessageFor 话术），通知面按既有 relayed 抑制记账。
+    const executor = new GatedExecutor();
+    const fx = await makeFixture({
+      waitMs: 100,
+      executor,
+      delegations: 2,
+      notificationSink: true,
+      // 唯一并发位被第一个任务占住 + 队列容量 0 → 第二个交办确定性拒绝（resource_limited）。
+      runtimeOverrides: { backgroundConcurrency: 1, queueCapacity: 0 },
+    });
+    try {
+      const reply = await fx.server.handler(incoming('m-1', ASK));
+      expect(reply).toBe('');
+      expect(fx.delivery.sentTexts).toHaveLength(1);
+      expect(fx.delivery.sentTexts[0]!.text).toBe(failureMessageFor('executor_failed').text);
+      // 通知面没有第二条（「系统太忙」那句被既有 relayed 抑制吃掉，不双发）。
+      expect(fx.delivery.sentTexts.some((entry) => entry.text.includes('系统太忙'))).toBe(false);
+      expect(fx.logs.some((line) => line['event'] === 'notification_push_suppressed'
+        && line['reason'] === 'relayed_in_turn')).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(fx.delivery.sentTexts).toHaveLength(1);
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('④ 同回合一成一败 + 沉默 → 两条都在、各是各的话、无重复', async () => {
+    const executor = new MixedExecutor();
+    const fx = await makeFixture({ waitMs: 1_500, executor, delegations: 2, notificationSink: true });
+    try {
+      const reply = await fx.server.handler(incoming('m-1', ASK));
+      expect(reply).toBe('');
+      // 失败那条：既有失败话术；成功那条：既有完成兜底（业务名 + 结果正文）——互不冒充。
+      expect(fx.delivery.sentTexts.map((entry) => entry.text)).toEqual([
+        taskCompletionFallbackText({ name: TASK_TEXT, resultText: RESULT_TEXT }),
+        failureMessageFor('executor_failed').text,
+      ]);
+      expect(executor.calls).toBe(2);
+      const sent = fx.logs.filter((line) => line['event'] === 'task_result_delivery_sent');
+      expect(sent).toHaveLength(2);
+      expect(new Set(sent.map((line) => line['taskId'])).size).toBe(2);
+      // 完成回调与失败回调各自抑制核销：两条推送、零重复。
+      await vi.waitFor(() => {
+        expect(fx.logs.filter((line) => line['event'] === 'task_result_delivery_suppressed'
+          && line['reason'] === 'relayed_in_turn')).toHaveLength(1);
+        expect(fx.logs.filter((line) => line['event'] === 'task_failure_delivery_suppressed'
+          && line['reason'] === 'relayed_in_turn')).toHaveLength(1);
       }, { timeout: 5_000 });
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(fx.delivery.sentTexts).toHaveLength(2);
