@@ -346,14 +346,15 @@ describe('P4 假 sink 投递：成功与失败路径（P4-T02）', () => {
     a.outbox.close();
 
     const skips: NotificationTerminalFact[] = [];
-    const s = harness(tempDbPath(), new FakeSink(() => ({ delivered: false, skipped: 'empty_after_strip' })), {
+    const s = harness(tempDbPath(), new FakeSink(() => ({ delivered: false, skipped: 'empty_after_strip', deliveryMode: 'live' })), {
       maxAttempts: 2,
       onTerminal: (terminal) => skips.push(terminal),
     });
     s.outbox.record(fact());
     await s.outbox.deliverPending();
+    // 跳过终局带上部署模式事实（owner 2026-11-19：live + skipped 要告警）。
     expect(skips).toMatchObject([
-      { outcome: 'skipped', taskId: 'task_1', kind: 'completed', attempts: 2, reason: 'SKIPPED:empty_after_strip' },
+      { outcome: 'skipped', taskId: 'task_1', kind: 'completed', attempts: 2, reason: 'SKIPPED:empty_after_strip', deliveryMode: 'live' },
     ]);
     s.outbox.close();
   });

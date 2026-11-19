@@ -134,6 +134,7 @@ export function composeNotificationSinks(sinks: readonly NotificationSink[]): No
         return {
           delivered: false,
           ...(skipped.value.skipped === undefined ? {} : { skipped: skipped.value.skipped }),
+          ...(skipped.value.deliveryMode === undefined ? {} : { deliveryMode: skipped.value.deliveryMode }),
         };
       }
       return { delivered: true };
@@ -155,6 +156,8 @@ export function notificationTerminalLogLine(terminal: NotificationTerminalFact):
     result: terminal.outcome,
     attempts: terminal.attempts,
     reason: terminal.reason,
+    // 部署模式事实（跳过回执带；exhausted 无此字段）：告警判据按 live+skipped 切。
+    ...(terminal.deliveryMode === undefined ? {} : { deliveryMode: terminal.deliveryMode }),
   };
 }
 
@@ -170,19 +173,36 @@ export function createChatNotificationSink(options: ChatNotificationSinkOptions)
         log({ event: 'notification_push_skipped', ...base, reason: 'kind_not_pushed' });
         return { delivered: true };
       }
+      // 部署模式事实（既有事实：装配注入的 deliveryMode；没有投递面 = unavailable）：
+      // 随**跳过**回执带给 outbox/告警面——live 部署上出现跳过 = 渠道配置/路由配错，
+      // 用户那边表现为「彻底收不到任何消息」，必须有人看见；silent/unavailable 是部署属性。
+      const delivery = options.delivery;
+      const deploymentMode = delivery?.deliveryMode ?? 'unavailable';
       const scope = options.taskScope(notification.taskId);
       if (scope === undefined) {
         // 读不到任务范围 = 路由不可知，重试也不会变（不猜路由）→ 终态跳过。
-        log({ event: 'notification_push_suppressed', ...base, reason: 'task_scope_unresolved' });
-        return { delivered: false, skipped: 'task_scope_unresolved' };
+        log({ event: 'notification_push_suppressed', ...base, reason: 'task_scope_unresolved', deliveryMode: deploymentMode });
+        return { delivered: false, skipped: 'task_scope_unresolved', deliveryMode: deploymentMode };
       }
       const sessionKey = `${scope.principalId}\u0000${scope.sessionId}`;
       const tagged = { ...base, principalId: scope.principalId, sessionId: scope.sessionId };
-      const delivery = options.delivery;
       // 渲染文案（唯一话术来源）也是 cancelled 的降级兜底：过用户可见出口清理。
       const renderedText = stripServerPaths(
         renderNotification({ kind: notification.kind, payload: notification.payload }),
       ).text;
+      if (!isCancelled && (delivery === undefined || delivery.deliveryMode !== 'live' || typeof delivery.sendText !== 'function')) {
+        // 部署属性（没有投递面 / 非 live）：普通推送永不可能送达 → 终态跳过；**绝不记
+        // delivered**（silent 闸会让用户的收件箱里什么都没有，记送达就是假账）。
+        // cancelled 不在此挡：「用户说停」是交互面事实，先走唤醒出口（deliveryMode 事实
+        // 随唤醒出口的记账/告警走）。
+        log({
+          event: 'notification_push_suppressed',
+          ...tagged,
+          reason: 'delivery_unavailable',
+          deliveryMode: deploymentMode,
+        });
+        return { delivered: false, skipped: 'delivery_unavailable', deliveryMode: deploymentMode };
+      }
       const run = async (): Promise<NotificationDeliveryReceipt> => {
         // 同回合已交给模型（快活失败/等补充）：模型会自己转述，不重复发一条。用户**已经听到**
         // 了这件事（由模型说出）——用户级事实成立，不能报成「没人知道」。
@@ -221,30 +241,25 @@ export function createChatNotificationSink(options: ChatNotificationSinkOptions)
             ? { delivered: true }
             : { delivered: false, skipped: 'wake_not_delivered' };
         }
-        if (delivery === undefined || delivery.deliveryMode !== 'live' || typeof delivery.sendText !== 'function') {
-          // 部署属性（没有投递面 / 非 live）：永不可能送达 → 终态跳过；**绝不记 delivered**
-          //（silent 闸会让用户的收件箱里什么都没有，记送达就是假账）。
-          log({
-            event: 'notification_push_suppressed',
-            ...tagged,
-            reason: 'delivery_unavailable',
-            deliveryMode: delivery?.deliveryMode ?? 'unavailable',
-          });
-          return { delivered: false, skipped: 'delivery_unavailable' };
-        }
+        // （原 inner 的「无投递面 / 非 live」闸已上提到 run 之外——含 deliveryMode 事实，
+        // 非 cancelled 在进 run 前就被终态跳过；此处不再有第二个闸。）
         const route = routeFromSessionId(scope.sessionId);
         if (route === undefined) {
           // sessionId 形状拆不出路由：重试也不会变（不猜路由）→ 终态跳过。
           log({ event: 'notification_push_suppressed', ...tagged, reason: 'route_unresolvable' });
-          return { delivered: false, skipped: 'route_unresolvable' };
+          return { delivered: false, skipped: 'route_unresolvable', deliveryMode: deploymentMode };
         }
         // 文案来自渲染器（唯一话术来源）；过用户可见出口清理，剥完为空不投（空帧用户什么都
         // 收不到）——没有东西可发是终态（渲染是纯函数，重试还是空）→ 终态跳过。
         if (renderedText.trim() === '') {
           log({ event: 'notification_push_suppressed', ...tagged, reason: 'empty_after_strip' });
-          return { delivered: false, skipped: 'empty_after_strip' };
+          return { delivered: false, skipped: 'empty_after_strip', deliveryMode: deploymentMode };
         }
-        const sendText = delivery.sendText;
+        const sendText = delivery?.sendText;
+        if (sendText === undefined) {
+          // 防御收口（正常不可达：非 cancelled 的无投递面/非 live 已在上提闸终态跳过）。
+          return { delivered: false, skipped: 'delivery_unavailable', deliveryMode: deploymentMode };
+        }
         try {
           const receipt = await sendText(route, renderedText);
           log({ event: 'notification_push_sent', ...tagged, parts: receipt.parts.length });
