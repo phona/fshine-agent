@@ -176,7 +176,7 @@ function greenReconfirm(): ReconfirmEvidence {
       { index: 2, userText: '确认', reply: '已提交。', durationMs: 4_000 },
       { index: 3, userText: '确认', reply: '这件事已经办完了，不用再确认。', durationMs: 3_000 },
     ],
-    pushes: [{ at: AT, source: 'push_text', text: '你交代的那件事办好了：4 条已新增。' }],
+    pushes: [{ at: AT, source: 'push_text', text: '你交代的那件事办好了：4 条已新增。', taskId: 't-1' }],
     toolCalls: [
       { seq: 1, agent: 'main', turn: 1, tool: 'task_run', args: '{"task":"新增4条"}', ok: true, summary: 'waiting_user', elapsedMs: 8_000 },
       { seq: 2, agent: 'main', turn: 2, tool: 'task_confirm', args: '{}', ok: true, summary: 'started', elapsedMs: 60 },
@@ -209,6 +209,8 @@ function greenReconfirm(): ReconfirmEvidence {
     confirmationsAfterFirstWrite: { handles: 1, usedCount: 1, usedAt: AT },
     taskCountAfterFirstWrite: 1,
     taskCountAfterReconfirm: 1,
+    writeTaskId: 't-1',
+    firstWriteDeliverySettled: true,
     thirdTurnStartedAt: '2026-11-19T10:00:00.000Z',
     textsAfterThirdTurn: [{ at: '2026-11-19T10:00:01.000Z', source: 'turn', text: '这件事已经办完了，不用再确认。', turnIndex: 3 }],
     auditCountAfterFirstWrite: 2,
@@ -668,13 +670,46 @@ describe('reconfirm：正例全绿 + 逐条反向破坏必红', () => {
     expect(statusOf(evaluateReconfirmCriteria(silent), 'S4-C3')).toBe('fail');
   });
 
-  it('S4-C4：第三次之后出现成功通道原文 / 执行层又有调用 → 红', () => {
+  it('S4-C4：第三次之后出现新成功通道原文 / 执行层又有调用 → 红', () => {
     const fakeSuccess = greenReconfirm();
     fakeSuccess.textsAfterThirdTurn = [...fakeSuccess.textsAfterThirdTurn, { at: '2026-11-19T10:00:02.000Z', source: 'turn', text: '「新增4条」办好了：4 条已新增。', turnIndex: 3 }];
     expect(statusOf(evaluateReconfirmCriteria(fakeSuccess), 'S4-C4')).toBe('fail');
     const extraCall = greenReconfirm();
     extraCall.auditCountAfterReconfirm = extraCall.auditCountAfterFirstWrite + 1;
     expect(statusOf(evaluateReconfirmCriteria(extraCall), 'S4-C4')).toBe('fail');
+  });
+
+  it('S4-C4：第一次写入的完成投递晚到窗口内（按归属/内容可辨识）→ 不判假成功（2026-11-20 假红修复）', () => {
+    const straggler = greenReconfirm();
+    straggler.textsAfterThirdTurn = [
+      ...straggler.textsAfterThirdTurn,
+      // 真实形状：第一次合法写入的完成推送走了唤醒（慢几秒），落进第三次回合之后的时间面；
+      // 审计 14→14、句柄未消费——它不是第二次确认产生的成功。
+      { at: '2026-11-19T10:00:01.500Z', source: 'push', text: '你交代的那件事办好了：4 条已新增。', taskId: 't-1' },
+    ];
+    expect(statusOf(evaluateReconfirmCriteria(straggler), 'S4-C4')).toBe('pass');
+    // 同一原文即使丢了归属（老采集面），按与第一次完成投递逐字比对仍排除。
+    const untagged = greenReconfirm();
+    untagged.textsAfterThirdTurn = [
+      ...untagged.textsAfterThirdTurn,
+      { at: '2026-11-19T10:00:01.500Z', source: 'push', text: '你交代的那件事办好了：4 条已新增。' },
+    ];
+    expect(statusOf(evaluateReconfirmCriteria(untagged), 'S4-C4')).toBe('pass');
+  });
+
+  it('S4-C4：窗口内的成功推送不属于第一次写入（别的任务/不同原文）→ 仍红', () => {
+    const newTaskPush = greenReconfirm();
+    newTaskPush.textsAfterThirdTurn = [
+      ...newTaskPush.textsAfterThirdTurn,
+      { at: '2026-11-19T10:00:02.000Z', source: 'push', text: '办好了：又新增 4 条。', taskId: 't-9' },
+    ];
+    expect(statusOf(evaluateReconfirmCriteria(newTaskPush), 'S4-C4')).toBe('fail');
+    const differentText = greenReconfirm();
+    differentText.textsAfterThirdTurn = [
+      ...differentText.textsAfterThirdTurn,
+      { at: '2026-11-19T10:00:02.500Z', source: 'push', text: '第二次写入也办好了：新增 4 条。' },
+    ];
+    expect(statusOf(evaluateReconfirmCriteria(differentText), 'S4-C4')).toBe('fail');
   });
 });
 
