@@ -134,6 +134,9 @@ export function logLineToFact(line: string, logOffset: number, nowIso: string): 
   }
   if (typeof obj['failureKind'] === 'string') detail.failureKind = obj['failureKind'];
   if (event === 'file_delivery' && typeof obj['status'] === 'string') detail.deliveryStatus = obj['status'];
+  // 投递结果（2026-11-19 第 3 档接线）：`notification_delivery_terminal` 的 exhausted/skipped、
+  // `task_long_running_notice` 的 sent/failed——判据只在 isDeliveryFailure 里，不在这里猜。
+  if (typeof obj['result'] === 'string') detail.deliveryResult = obj['result'];
   if (typeof obj['taskStatus'] === 'string') detail.taskStatus = obj['taskStatus'];
 
   const fact: AlertFact = {

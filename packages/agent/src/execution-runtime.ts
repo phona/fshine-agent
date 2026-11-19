@@ -652,6 +652,25 @@ export const LONG_TASK_LOG_INLINE_MAX_BYTES = 4 * 1024;
 export const LONG_TASK_UNSUPPORTED_MESSAGE =
   '长任务需要后台派发并注入等待端口（wait/abort）才能推进；本次装配不支持，已停止该任务。';
 
+/**
+ * 一次待注入事实的**回执**（2026-11-19 注入核销切片）：`text` = 注入文本；`requeue` =
+ * 本回合**没有产出用户可见内容**时把事实原样退回队列的回退口。
+ *
+ * 为什么必须有它：注入器是「take 即出队」——取走就视为已说给用户听过；驱动失败/空回复/
+ * 模型一言不发时那句话并没有出现，事实却已经出队 = 永久丢失（用户永远看不到这件事）。
+ * 有了回退口，核销判据变成**机械事实**：本回合产出的用户可见文本非空才核销；否则退回，
+ * 下一次用户开口再注入一次（判据不看模型有没有提到事实——语义不可判，不猜）。
+ *
+ * 返回**纯字符串** = 没有回退口（等价旧行为，既有装配逐字节不变）。
+ */
+export interface InjectionReceipt {
+  text: string;
+  requeue?: () => void;
+}
+
+/** 注入器返回值：纯文本（无回退口）或带回退口的回执。 */
+export type InjectionValue = string | InjectionReceipt;
+
 export interface RuntimeOptions {
   /** 可信身份：来自装配/渠道事实，绝不来自模型输入。 */
   principalId: string;
@@ -719,20 +738,20 @@ export interface RuntimeOptions {
    * 回合开始时调用一次；返回非空文本即以普通 user-role 消息注入主对话（不造 custom
    * message type、不改 Pi 消息流不变量）。注入器自身保证幂等与有界。
    */
-  taskFactProvider?: (principalId: string, sessionId: string) => string | undefined;
+  taskFactProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
   /**
    * 纯附件机械事实注入器（与 taskFactProvider 同一 injections 机制）：装配层在纯附件
    * 登记成功后按 (principal, session) 排队；回合开始时取走并以 Pi 原生 custom message
    * （display=false、不触发单独回合）注入主对话。注入器自身保证同 fileId 只出队一次。
    * 事实只含文件名/fileId/字节数/时间，不含路径与内容。缺省不注入 = 无附件事实。
    */
-  attachmentFactProvider?: (principalId: string, sessionId: string) => string | undefined;
+  attachmentFactProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
   /**
    * 宿主主动追问的系统注记注入器（同一 injections 机制）：追问真实送达后入队，下一次
    * 回合注入（模型可见/用户不可见/不触发回合），让模型能把用户的数字回复对应到选项。
    * 缺省不注入 = 无系统注记。
    */
-  systemNoteProvider?: (principalId: string, sessionId: string) => string | undefined;
+  systemNoteProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
   /**
    * Worker 可信工作目录（渲染进 Worker 系统提示的工作目录约束块）。
    * 来源必须是装配层持有的可信路径（如 profile.root）；不得取模型输出或用户消息。
@@ -2805,6 +2824,27 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
 
   async function send(text: string): Promise<TurnResult> {
     const foregroundPermit = await acquireForegroundPermit();
+    /**
+     * 本回合取走的待注入事实（带回退口者）：注入器是 take 即出队，事实一旦取走就只剩这一份。
+     * **注入核销（2026-11-19）= 机械判据**：本回合产出的用户可见文本非空才算「说给用户听了」；
+     * 否则（驱动失败/空回复/回合失败）退回队列，下一次用户开口再注入——「取走」不再等于
+     * 「已说」（判据不看模型有没有提到事实：语义不可判）。
+     */
+    const injectionReceipts: InjectionReceipt[] = [];
+    /**
+     * 退回本回合取走、但没说出声的事实（核销的反面）：回退口由装配层按队列自己的入队语义
+     * 给出。best-effort——回退本身抛错不得改变本回合已定型的结局（异常留给驱动/回合失败那条
+     * 链），也绝不因此把事实当成已说；一次性（退过即清空，不重复退回）。
+     */
+    const requeueUncreditedInjections = (): void => {
+      for (const receipt of injectionReceipts.splice(0)) {
+        try {
+          receipt.requeue?.();
+        } catch {
+          // 回退失败：这一份事实丢在进程里（无第二落库面），但不冒充「已说给用户」。
+        }
+      }
+    };
     try {
       // 本回合用户原话：确认请求的 userText 原样取自这里（不改写、不解释）。
       currentUserText = text;
@@ -2832,12 +2872,21 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       retryAllowedThisTurn = [];
       const turnScopeKey = `turn:${options.sessionId}:${turnNo}`;
       const mainWindow = newAttemptWindow();
+      /** 取走一条待注入事实（带回执者登记进 injectionReceipts，供核销/退回）。 */
+      const takeInjection = (value: InjectionValue | undefined): string | undefined => {
+        if (value === undefined) return undefined;
+        const receipt: InjectionReceipt = typeof value === 'string' ? { text: value } : value;
+        // 空白文本照旧不注入（既有行为）；它没有可说的内容，不回退也不核销。
+        if (receipt.text.trim() === '') return undefined;
+        injectionReceipts.push(receipt);
+        return receipt.text;
+      };
       // 宿主只交「本轮输入」：最后一条 user = 本轮文本；历史种子仅在驱动尚无会话时使用。
-      const factsMessage = options.taskFactProvider?.(options.principalId, options.sessionId);
+      const factsMessage = takeInjection(options.taskFactProvider?.(options.principalId, options.sessionId));
       // 纯附件机械事实（文件名/fileId/字节数/时间，不含路径）与主动追问的系统注记
       // （模型可见/用户不可见）走同一 injections 机制；take 即出队（同 fileId 只注入一次）。
-      const attachmentFactsMessage = options.attachmentFactProvider?.(options.principalId, options.sessionId);
-      const systemNoteMessage = options.systemNoteProvider?.(options.principalId, options.sessionId);
+      const attachmentFactsMessage = takeInjection(options.attachmentFactProvider?.(options.principalId, options.sessionId));
+      const systemNoteMessage = takeInjection(options.systemNoteProvider?.(options.principalId, options.sessionId));
       // CAP-01 S1 清单注入（机械事实）：本会话已激活文件，字段只有 fileId/name/bytes；
       // 字节数作为观察项随 TurnResult 带出（fileManifestBytes）。
       const manifestFiles = options.fileManifestProvider?.(options.principalId, options.sessionId) ?? [];
@@ -2847,10 +2896,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // 自己读回，宿主不再 seed 任何东西）。
       const turnMessages = [...mainTranscript(), userMessage(text)];
       const injections = [
-        ...(factsMessage !== undefined && factsMessage.trim() !== '' ? [factsMessage] : []),
-        ...(attachmentFactsMessage !== undefined && attachmentFactsMessage.trim() !== '' ? [attachmentFactsMessage] : []),
+        ...(factsMessage !== undefined ? [factsMessage] : []),
+        ...(attachmentFactsMessage !== undefined ? [attachmentFactsMessage] : []),
         ...(manifestMessage !== undefined ? [manifestMessage] : []),
-        ...(systemNoteMessage !== undefined && systemNoteMessage.trim() !== '' ? [systemNoteMessage] : []),
+        ...(systemNoteMessage !== undefined ? [systemNoteMessage] : []),
       ];
       const mainResult = await options.mainDriver.run({
         systemPrompt: options.mainSystemPrompt,
@@ -3008,6 +3057,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         registry.archiveReply(taskIds, reply);
       }
       const executions = taskIds.flatMap((taskId) => registry.get(taskId, scope).executions);
+      // 注入核销（机械判据）：本回合产出的用户可见文本为空 = 那些事实没有说给用户听
+      // （模型一言不发/只调工具/被内存墙话术以外的空白收尾）→ 退回队列，不核销。
+      if (reply.trim() === '') requeueUncreditedInjections();
       return {
         reply,
         taskIds,
@@ -3022,6 +3074,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         ...(turnFiles.length > 0 ? { files: turnFiles } : {}),
         ...(manifestBytes === undefined ? {} : { fileManifestBytes: manifestBytes }),
       };
+    } catch (error) {
+      // 本回合以异常收尾（驱动失败/回合失败）：一个用户可见字都没产出，取走的事实不核销。
+      requeueUncreditedInjections();
+      throw error;
     } finally {
       releaseForegroundPermit(foregroundPermit);
     }

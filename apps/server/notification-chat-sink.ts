@@ -14,11 +14,29 @@
  *   · 同回合已交给模型的（受理窗口内落定的失败/等补充）不推：模型会自己转述；
  *   · 投递失败只记事件、由 outbox 有界重试，**不改任务事实**。
  *
- * 不做的：新表/新定时器/新配置键/第二套话术。
+ * 回执纪律（2026-11-19 投递真相切片）：**投出去了才记 delivered**。四类分支各有正确回执：
+ *   · 没有东西要发 / 永不可能送达（非 live、读不到范围、路由拆不出、剥完为空）→
+ *     `{delivered:false, skipped:'<reason>'}`：outbox 不写 delivered_at、不再重试（重试也没用），
+ *     行留在未送达集合里可查——「跳过」不许被记成「送达」；
+ *   · 会话此刻在跑回合（改期）→ `{delivered:false, deferred:true}`：**没尝试投递**（不算失败
+ *     尝试、不消耗 attempts），不记 delivered——由 outbox 既有退避重试接管（装配侧回合结束后
+ *     补一次投递驱动即送达）；
+ *   · 本 sink 不负责的 kind（@see PUSHED_NOTIFICATION_KINDS）→ `{delivered:true}`：不是「跳过」
+ *     也不是「送达」，这条通知由别的 sink（落盘审计）负责，本 sink 无事可做；
+ *   · 同回合已交给模型（relayed_in_turn）→ `{delivered:true}`：用户已经听到了这句话（模型
+ *     说的），用户级事实成立——不记 delivered 反而会把「已告知」误报成没人知道。
+ *
+ * 不做的：新表/新定时器/新配置键/第二套话术/第二套重试。
  */
 import type { ChannelRoute, DeliveryReceipt } from '@fshine/contracts';
 import { renderNotification } from '../../packages/agent/src/notification-render';
-import type { Notification, NotificationKind, NotificationSink } from '../../packages/agent/src/notifications';
+import type {
+  DeliveryReceipt as NotificationDeliveryReceipt,
+  Notification,
+  NotificationKind,
+  NotificationSink,
+  NotificationTerminalFact,
+} from '../../packages/agent/src/notifications';
 import { stripServerPaths } from '../../packages/agent/src/server-paths';
 import { routeFromSessionId } from './task-completion-delivery';
 
@@ -50,10 +68,11 @@ export interface ChatNotificationSinkOptions {
   /** 主动投递面；缺省 = 无投递面（按 suppressed 记账，绝不记 sent）。 */
   delivery?: ChatPushDeliveryPort;
   /**
-   * 回合内改期：该会话此刻有回合在跑时，把这次推送排到回合之后并返回 true
-   * （装配侧因此不阻塞 outbox；模型还在打字时不抢先推一条）。
+   * 该会话此刻是否有回合在跑（装配侧给出的事实）。true = 本次不投递（模型还在打字时不抢先
+   * 推一条），回执按未送达交 outbox 既有退避重试——装配侧在回合结束后补一次投递驱动。
+   * 缺省 = 无判据（照常投递）。
    */
-  deferWhileTurnActive?(sessionKey: string, run: () => Promise<void>): boolean;
+  turnActive?(sessionKey: string): boolean;
   /** 本回合已交给模型的任务（一次性核销）：true = 不推。 */
   claimRelayedInTurn?(sessionKey: string, taskId: string): boolean;
   /** 结构化事件出口（不含结果正文与内部路径）。 */
@@ -62,69 +81,119 @@ export interface ChatNotificationSinkOptions {
 
 /**
  * 组合多个 sink（文件审计 + 聊天推送）：各自独立成败，互不吞噬。
- * 任一未送达 → 整体未送达（outbox 会重试；已送达的 sink 重复收到同一通知，幂等由 sink 自身保证）。
+ * 回执取最「需要再动一次」的那个（任一 sink 的表态都算数）：
+ *   ① 失败（delivered=false 且未声明跳过/改期，或抛错）→ 整体失败（outbox 有界退避重试）；
+ *   ② 改期（deferred）→ 整体改期（不算尝试、不写 delivered_at，下一次投递驱动再来）；
+ *   ③ 终态跳过（skipped）→ 整体跳过（不写 delivered_at、不再重试）；
+ *   ④ 全都送达 → delivered。
+ * 绝不把「跳过/改期」合成「送达」（旧实现就是这样把用户没收到的东西记成已送达的）。
+ * 已送达的 sink 重复收到同一通知，幂等由 sink 自身保证。
  */
 export function composeNotificationSinks(sinks: readonly NotificationSink[]): NotificationSink {
   return {
-    async send(notification: Notification): Promise<{ delivered: boolean; error?: string }> {
+    async send(notification: Notification): Promise<NotificationDeliveryReceipt> {
       const results = await Promise.allSettled(sinks.map((sink) => sink.send(notification)));
-      const failed = results.find((result) => result.status === 'rejected' || result.value.delivered === false);
-      if (failed === undefined) return { delivered: true };
-      if (failed.status === 'rejected') {
-        return { delivered: false, error: failed.reason instanceof Error ? failed.reason.message : String(failed.reason) };
+      const failed = results.find(
+        (result) => result.status === 'rejected'
+          || (result.value.delivered === false && result.value.skipped === undefined && result.value.deferred !== true),
+      );
+      if (failed !== undefined) {
+        if (failed.status === 'rejected') {
+          return { delivered: false, error: failed.reason instanceof Error ? failed.reason.message : String(failed.reason) };
+        }
+        return { delivered: false, error: failed.value.error ?? 'SINK_UNDELIVERED' };
       }
-      return { delivered: false, error: failed.value.error ?? 'SINK_UNDELIVERED' };
+      const fulfilled = results.filter(
+        (result): result is PromiseFulfilledResult<NotificationDeliveryReceipt> => result.status === 'fulfilled',
+      );
+      if (fulfilled.some((result) => result.value.deferred === true)) {
+        return { delivered: false, deferred: true };
+      }
+      const skipped = fulfilled.find((result) => result.value.delivered === false);
+      if (skipped !== undefined) {
+        return {
+          delivered: false,
+          ...(skipped.value.skipped === undefined ? {} : { skipped: skipped.value.skipped }),
+        };
+      }
+      return { delivered: true };
     },
+  };
+}
+
+/**
+ * 通知投递**终局**的日志行（2026-11-19 第 3 档接线；形状单源，ops/alerts 的 delivery_failed
+ * 规则按 `result` 判——改这里必须同步 `alert-rules.ts` 的 `isDeliveryFailure`）。
+ * 装配层（server）把它接到 outbox 的 `onTerminal` 上：一条通知未送达就进终局时落一条。
+ */
+export function notificationTerminalLogLine(terminal: NotificationTerminalFact): Record<string, unknown> {
+  return {
+    event: 'notification_delivery_terminal',
+    taskId: terminal.taskId,
+    kind: terminal.kind,
+    notificationId: terminal.notificationId,
+    result: terminal.outcome,
+    attempts: terminal.attempts,
+    reason: terminal.reason,
   };
 }
 
 export function createChatNotificationSink(options: ChatNotificationSinkOptions): NotificationSink {
   const { log } = options;
   return {
-    async send(notification: Notification): Promise<{ delivered: boolean; error?: string }> {
+    async send(notification: Notification): Promise<NotificationDeliveryReceipt> {
       const base = { taskId: notification.taskId, kind: notification.kind, notificationId: notification.id };
       if (!PUSHED_NOTIFICATION_KINDS.includes(notification.kind)) {
+        // 本 sink 不负责这一类（落盘审计由另一个 sink 负责）：不是「跳过」也不是「送达」，
+        // 本 sink 无事可做 → 回执 delivered（组合面按「各自该做的都做了」判）。
         log({ event: 'notification_push_skipped', ...base, reason: 'kind_not_pushed' });
         return { delivered: true };
       }
       const scope = options.taskScope(notification.taskId);
       if (scope === undefined) {
+        // 读不到任务范围 = 路由不可知，重试也不会变（不猜路由）→ 终态跳过。
         log({ event: 'notification_push_suppressed', ...base, reason: 'task_scope_unresolved' });
-        return { delivered: true };
+        return { delivered: false, skipped: 'task_scope_unresolved' };
       }
       const sessionKey = `${scope.principalId}\u0000${scope.sessionId}`;
       const tagged = { ...base, principalId: scope.principalId, sessionId: scope.sessionId };
       const delivery = options.delivery;
       if (delivery === undefined || delivery.deliveryMode !== 'live' || typeof delivery.sendText !== 'function') {
+        // 部署属性（没有投递面 / 非 live）：永不可能送达 → 终态跳过；**绝不记 delivered**
+        //（silent 闸会让用户的收件箱里什么都没有，记送达就是假账）。
         log({
           event: 'notification_push_suppressed',
           ...tagged,
           reason: 'delivery_unavailable',
           deliveryMode: delivery?.deliveryMode ?? 'unavailable',
         });
-        return { delivered: true };
+        return { delivered: false, skipped: 'delivery_unavailable' };
       }
       const sendText = delivery.sendText;
-      const run = async (): Promise<void> => {
-        // 同回合已交给模型（快活失败/等补充）：模型会自己转述，不重复发一条。
+      const run = async (): Promise<NotificationDeliveryReceipt> => {
+        // 同回合已交给模型（快活失败/等补充）：模型会自己转述，不重复发一条。用户**已经听到**
+        // 了这件事（由模型说出）——用户级事实成立，不能报成「没人知道」。
         if (options.claimRelayedInTurn?.(sessionKey, notification.taskId) === true) {
           log({ event: 'notification_push_suppressed', ...tagged, reason: 'relayed_in_turn' });
-          return;
+          return { delivered: true };
         }
         const route = routeFromSessionId(scope.sessionId);
         if (route === undefined) {
+          // sessionId 形状拆不出路由：重试也不会变（不猜路由）→ 终态跳过。
           log({ event: 'notification_push_suppressed', ...tagged, reason: 'route_unresolvable' });
-          return;
+          return { delivered: false, skipped: 'route_unresolvable' };
         }
-        // 文案来自渲染器（唯一话术来源）；过用户可见出口清理，剥完为空不投（空帧用户什么都收不到）。
+        // 文案来自渲染器（唯一话术来源）；过用户可见出口清理，剥完为空不投（空帧用户什么都
+        // 收不到）——没有东西可发是终态（渲染是纯函数，重试还是空）→ 终态跳过。
         const text = stripServerPaths(renderNotification({ kind: notification.kind, payload: notification.payload })).text;
         if (text.trim() === '') {
           log({ event: 'notification_push_suppressed', ...tagged, reason: 'empty_after_strip' });
-          return;
+          return { delivered: false, skipped: 'empty_after_strip' };
         }
         try {
           const receipt = await sendText(route, text);
           log({ event: 'notification_push_sent', ...tagged, parts: receipt.parts.length });
+          return { delivered: true };
         } catch (error) {
           log({
             event: 'notification_push_failed',
@@ -134,12 +203,14 @@ export function createChatNotificationSink(options: ChatNotificationSinkOptions)
           throw error;
         }
       };
-      if (options.deferWhileTurnActive?.(sessionKey, run) === true) {
+      if (options.turnActive?.(sessionKey) === true) {
+        // 会话此刻在跑回合：本次不投递（不抢先推），回执按**改期**交出去——本次**没有尝试
+        // 投递**，所以不算一次失败尝试、不写 delivered_at、不消耗 attempts；装配侧在回合结束
+        // 后补一次投递驱动（既有 deliverPending），那一刻 turnActive 已为 false，推送即落地。
         log({ event: 'notification_push_deferred', ...tagged, reason: 'turn_active' });
-        return { delivered: true };
+        return { delivered: false, deferred: true };
       }
-      await run();
-      return { delivered: true };
+      return await run();
     },
   };
 }

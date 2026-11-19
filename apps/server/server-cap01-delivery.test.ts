@@ -20,6 +20,10 @@
  * CAP-01 修复轮（R7-F3）：①b 投递成功后事件写失败 → 结果不得被日志写失败改写——回合
  * 结果仍是 sent、用户话术无「未送达」、不产生「请重试」诱导；失败的写只降级成一条独立
  * 观测事件（不触达用户）。
+ *
+ * 2026-11-19（投递真相切片）：①c 快活（同回合落定）+ 文件投递失败 → 「未送达」话术必须
+ * 单独发；①d 这条话术**本身也投递失败** → 退回既有待注入队列（下次开口由模型补说，不静默
+ * 终局）；①e 反向：话术送达成功时不退回（下次开口不重复说同一句）。
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -175,8 +179,9 @@ function stagedAttachment(root: string, filename: string, bytes: Buffer): Incomi
   return { filename, path: filePath, bytes: bytes.length };
 }
 
-/** live 端口：成功回 per-file 回执；fail=true 抛错（带空 receipt，模拟部分 ACK 形状）。 */
-function livePort(options: { fail?: boolean } = {}): {
+/** live 端口：成功回 per-file 回执；fail=true 抛错（带空 receipt，模拟部分 ACK 形状）。
+ *  `textFail=true`：文字投递（sendText）同样抛错——「未送达话术本身也送不出去」的故障形状。 */
+function livePort(options: { fail?: boolean; textFail?: boolean } = {}): {
   port: FileDeliveryPort;
   calls: Array<{ route: ChannelRoute; files: readonly OutgoingFileReply[] }>;
   texts: Array<{ route: ChannelRoute; text: string }>;
@@ -198,6 +203,7 @@ function livePort(options: { fail?: boolean } = {}): {
         return { route, parts: files.map((_, index) => ({ kind: 'file' as const, index, status: 'sent' as const })) };
       },
       async sendText(route, text): Promise<DeliveryReceipt> {
+        if (options.textFail === true) throw new Error('渠道路由故障：文字投递失败');
         texts.push({ route, text });
         return { route, parts: [{ kind: 'text' as const, index: 0, status: 'sent' as const }] };
       },
@@ -322,6 +328,60 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
         expect(texts.some((entry) => entry.text.includes('未送达'))).toBe(true);
       });
       expect(texts).toHaveLength(1);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('①d 未送达话术本身也投递失败 → 退回待注入（下次开口由模型补说），不静默终局', async () => {
+    // 2026-11-19（同形缺口，与唤醒投递失败同一手法）：模型已经说过「见附件」、文件投递失败、
+    // 而「文件未送达」这条宿主话术**再失败**时，用户会一直以为附件到了。后路 = 话术退进既有
+    // 待注入队列，下一次用户开口由模型补说；不新建重试、不重投同一句话。
+    const { port, texts } = livePort({ fail: true, textFail: true });
+    const { server, logs, capture } = await makeFixture({
+      steps: [TASK_RUN_STEP, { text: '收到。' }],
+      workerSteps: [WORKER_RUN_JS_STEP],
+      port,
+      // 短等待窗口 >0：任务在窗口内落定 = 快活（结果同回合交给模型转述）。
+      runtime: { taskRunWaitMs: 1_500 },
+    });
+    try {
+      await server.handler(incoming('m-note-fail', '帮我汇总'));
+      await vi.waitFor(() => {
+        expect(logs.some((line) => line['event'] === 'task_result_delivery_requeued' && line['source'] === 'file_note')).toBe(true);
+      });
+      // 投递全失败：零用户可见文本、绝不记 sent；失败与退回各留痕。
+      expect(texts).toEqual([]);
+      expect(logs.some((line) => line['event'] === 'task_result_delivery_failed')).toBe(true);
+      expect(logs.some((line) => line['event'] === 'task_result_delivery_sent')).toBe(false);
+
+      // 后路真的生效：下一次用户开口，未送达话术随 injections 进模型上下文（既有机制补说）。
+      await server.handler(incoming('m-note-fail-2', '到了吗'));
+      const second = capture.injections[1] ?? [];
+      expect(second.some((text) => text.includes('未送达'))).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('①e 不许修过头：未送达话术送达成功时不退回（下次开口不重复说同一句）', async () => {
+    const { port, texts } = livePort({ fail: true });
+    const { server, logs, capture } = await makeFixture({
+      steps: [TASK_RUN_STEP, { text: '收到。' }],
+      workerSteps: [WORKER_RUN_JS_STEP],
+      port,
+      runtime: { taskRunWaitMs: 1_500 },
+    });
+    try {
+      await server.handler(incoming('m-note-ok', '帮我汇总'));
+      await vi.waitFor(() => {
+        expect(texts.some((entry) => entry.text.includes('未送达'))).toBe(true);
+      });
+      expect(logs.some((line) => line['event'] === 'task_result_delivery_requeued')).toBe(false);
+
+      await server.handler(incoming('m-note-ok-2', '到了吗'));
+      const second = capture.injections[1] ?? [];
+      expect(second.some((text) => text.includes('未送达'))).toBe(false);
     } finally {
       await server.close();
     }

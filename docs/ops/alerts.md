@@ -2,7 +2,7 @@
 
 > 状态：现行。用户侧已改「静默到有结果」——出事必须我方自己看得见，本页是这套告警的口径与操作面。
 > 最后核对：2026-11-19（`path:line` 以现行代码为准；规则/阈值单源在 `packages/agent/src/alert-rules.ts`）。
-> 上游指针：`packages/agent/src/alert-rules.ts:47`（阈值常量）、`packages/agent/src/alert-rules.ts:407`（判定+冷却入口）、`scripts/ops/alerts.ts:340`（巡检主流程）、`package.json`（`alerts` 入口）。
+> 上游指针：`packages/agent/src/alert-rules.ts:49`（阈值常量）、`packages/agent/src/alert-rules.ts:422`（判定+冷却入口）、`scripts/ops/alerts.ts:340`（巡检主流程）、`package.json`（`alerts` 入口）。
 
 ## 1. 干什么、不干什么
 
@@ -21,23 +21,24 @@ state.db 一律只读打开（`openTaskStore(dbPath, { readOnly: true })`），�
 ## 2. 四条规则、阈值与去重
 
 判定是纯函数 `evaluateAlerts(facts, { now, cooldownMs, cooldownState })`
-（`packages/agent/src/alert-rules.ts:407`）；事实、`now`、冷却状态都由脚本注入——不读文件、不连网、不取系统时钟。
+（`packages/agent/src/alert-rules.ts:422`）；事实、`now`、冷却状态都由脚本注入——不读文件、不连网、不取系统时钟。
 
 | 规则 | 命中判据 | 严重度 | subject（去重键） | 阈值单源 |
 | --- | --- | --- | --- | --- |
-| `host_fault_reported` | 出现我方故障：执行失败分类 `host_fault`、协议违约（`execution_accepted_undeclared` / `EXECUTION_PROTOCOL_VIOLATION`）、确认句柄丢失（`CONFIRMATION_NOT_FOUND`）等 ≥1 | critical | `task:<id>` / `global` | `HOST_FAULT_EVENTS` / `HOST_FAULT_ERROR_CODES`（`alert-rules.ts:63`） |
-| `retry_storm` | 同一任务执行事实 ≥5 条，**或**同一 `(operation, 错误码)` 在同一任务 ≥3 次——**后者只计失败类结局**（`failed` / `refused` / `unknown` / `timed_out`；`completed` / `needs_confirmation` / `accepted` / `needs_input` 的合法重复不算，无错误码时也必须有失败状态） | warning | `task:<id>` | `RETRY_STORM_TASK_FACTS=5`、`RETRY_STORM_OP_ERROR=3`（`alert-rules.ts:51`）、`FAILURE_EXECUTION_STATUSES`（`alert-rules.ts:85`） |
-| `task_stuck` | 任务 `running` 超 10 分钟无事件；`waiting_user` 超 30 分钟 | warning | `task:<id>` | `TASK_RUNNING_STUCK_MS=10min`、`USER_WAITING_STUCK_MS=30min`（`alert-rules.ts:47`） |
-| `delivery_failed` | 文件/结果投递失败 ≥1：`file_delivery` 状态非 `sent`，或 `task_result_delivery_failed` | critical | `session:<id>` / `task:<id>` / `global` | `isDeliveryFailure`（`alert-rules.ts:230`） |
+| `host_fault_reported` | 出现我方故障：执行失败分类 `host_fault`、协议违约（`execution_accepted_undeclared` / `EXECUTION_PROTOCOL_VIOLATION`）、确认句柄丢失（`CONFIRMATION_NOT_FOUND`）等 ≥1 | critical | `task:<id>` / `global` | `HOST_FAULT_EVENTS` / `HOST_FAULT_ERROR_CODES`（`alert-rules.ts:65`） |
+| `retry_storm` | 同一任务执行事实 ≥5 条，**或**同一 `(operation, 错误码)` 在同一任务 ≥3 次——**后者只计失败类结局**（`failed` / `refused` / `unknown` / `timed_out`；`completed` / `needs_confirmation` / `accepted` / `needs_input` 的合法重复不算，无错误码时也必须有失败状态） | warning | `task:<id>` | `RETRY_STORM_TASK_FACTS=5`、`RETRY_STORM_OP_ERROR=3`（`alert-rules.ts:53`）、`FAILURE_EXECUTION_STATUSES`（`alert-rules.ts:87`） |
+| `task_stuck` | 任务 `running` 超 10 分钟无事件；`waiting_user` 超 30 分钟 | warning | `task:<id>` | `TASK_RUNNING_STUCK_MS=10min`、`USER_WAITING_STUCK_MS=30min`（`alert-rules.ts:49`） |
+| `delivery_failed` | 文件/结果投递失败 ≥1：`file_delivery` 状态非 `sent`、`task_result_delivery_failed`，**通知投递终局** `notification_delivery_terminal` 的 `exhausted`（失败到 attempts 上限：用户最终没收到），**长活提醒** `task_long_running_notice` 的 `failed`——终态跳过（`result=skipped`：没有东西可发/永不可能送达）**不告警**（静默部署上每条都 skipped，告警只会成噪音） | critical | `session:<id>` / `task:<id>` / `global` | `isDeliveryFailure`（`alert-rules.ts:238`） |
 
-**边界口径**：`task_stuck` 用**严格大于**——**刚好 10 分钟不告、10 分 1 秒告**（`alert-rules.ts:334` 的 `elapsed > 阈值`）。
+**边界口径**：`task_stuck` 用**严格大于**——**刚好 10 分钟不告、10 分 1 秒告**（`alert-rules.ts:358` 的 `elapsed > 阈值`）。
 **去重**：同一 `(rule, subject)` 在**冷却窗口（缺省 30 分钟，`DEFAULT_COOLDOWN_MS`）内只告一次**；
 冷却状态是可 JSON 序列化的纯数据，持久化在 `.runtime/ops/alerts-state.json`（键 = `rule + \u0000 + subject`）。
 时间只从注入的 `now` 取（同输入 + 同 now ⇒ 同输出）。
 
 **四类事实的来源**（`scripts/ops/alerts.ts:113` / `:199`）：
 - 日志行（`.runtime/server/wecom-live.log`）：投影成 `file_delivery` / `task_result_delivery_failed` /
-  `execution_accepted_undeclared` 等事实；
+  `notification_delivery_terminal`（通知投递终局：`result=exhausted|skipped`，2026-11-19 接线）/
+  `task_long_running_notice`（长活提醒投递：`result=sent|failed`）/ `execution_accepted_undeclared` 等事实；
 - 底账行（`state.db`，只读）：`task_state`（running / waiting_user，带 `running_since` / `waiting_since`）
   与 `execution`（每次执行一行，带 `operation` / `error.code`）事实。
 
@@ -61,7 +62,7 @@ state.db 一律只读打开（`openTaskStore(dbPath, { readOnly: true })`），�
 
 - 每条落盘行都带 `evidenceRef`——`messageId` / `taskId` / 日志字节偏移 / 事件 id（`alert-rules.ts` 的
   `evidenceRefOf`：显式键优先，否则按 `task:` → `msg:` → `log@<偏移>` → `event:` 派生）。
-- 每条告警项都带 **`raw`——被命中的原始文本，不截断**（`alert-rules.ts:257` 起各候选只搬运原文，绝不裁剪）。
+- 每条告警项都带 **`raw`——被命中的原始文本，不截断**（`alert-rules.ts:272` 起各候选只搬运原文，绝不裁剪）。
 - **既有日志里的原文不许因为「对用户收口」而被删**：日志原文是回溯链的末端，一旦删除，`evidenceRef`
   就指向空气。对用户收口只收敛**面向上游用户的措辞**，不删**面向运维证据**的原文。
 

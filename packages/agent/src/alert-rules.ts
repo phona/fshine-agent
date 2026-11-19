@@ -18,7 +18,9 @@
  *     ≥3 次；
  *   · task_stuck          —— 任务 `running` 超 10 分钟无事件；`waiting_user` 超 30 分钟；
  *   · delivery_failed     —— 文件/结果投递失败 ≥1（`file_delivery` 状态非 sent、
- *     `task_result_delivery_failed`）。
+ *     `task_result_delivery_failed`、通知投递终局 `notification_delivery_terminal` 的
+ *     `exhausted`、长活提醒 `task_long_running_notice` 的 `failed`；终态跳过 skipped 不告警
+ *     ——没有东西可发/永不可能送达，开发也做不了什么）。
  *
  * 去重：同一 `(rule, subject)` 在冷却窗口（缺省 30 分钟）内只出一次；冷却状态是可 JSON
  * 序列化的纯数据（`.runtime/ops/alerts-state.json` 持久化的正是它）。时间只从注入的 `now`
@@ -109,6 +111,12 @@ export interface AlertFactDetail {
   failureKind?: string;
   /** 投递事实：投递状态（'sent' / 'delivery_failed' / …）。 */
   deliveryStatus?: string;
+  /**
+   * 投递结果（2026-11-19 第 3 档接线）：`notification_delivery_terminal` 的
+   * `'exhausted'`（失败到 attempts 上限）/ `'skipped'`（终态跳过），`task_long_running_notice`
+   * 的 `'sent'` / `'failed'`。判据见 isDeliveryFailure——不猜缺省值。
+   */
+  deliveryResult?: string;
   /** 任务状态投影：'running' / 'waiting_user' / …。 */
   taskStatus?: string;
   /** 协议违约标记（执行层对未声明 long_running 的 operation 返回 accepted）。 */
@@ -229,6 +237,13 @@ export function isExecutionFact(fact: AlertFact): boolean {
 /** 事实是否是投递失败（delivery_failed）。 */
 export function isDeliveryFailure(fact: AlertFact): boolean {
   if (fact.event === 'task_result_delivery_failed') return true;
+  // 2026-11-19 第 3 档接线：**投递终局且未送达**才算失败——
+  //   · `notification_delivery_terminal` 的 `exhausted`（失败到 attempts 上限：用户最终没收到）；
+  //     终态跳过（skipped = 没有东西要发 / 永不可能送达）**不告警**（静默部署上每条都 skipped，
+  //     告警就成了噪音，且开发也做不了什么）；
+  //   · 长活提醒 `task_long_running_notice` 的 `failed`（渠道故障，用户没收到那条提醒）。
+  if (fact.event === 'notification_delivery_terminal') return fact.detail?.deliveryResult === 'exhausted';
+  if (fact.event === 'task_long_running_notice') return fact.detail?.deliveryResult === 'failed';
   if (fact.event !== 'file_delivery') return false;
   const status = fact.detail?.deliveryStatus;
   // `file_delivery` 状态非 sent 即判投递失败（缺省字段 = 未知，不判）。
