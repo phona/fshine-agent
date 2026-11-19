@@ -3031,6 +3031,11 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
   return {
     async execute(task, context): Promise<TaskExecutionOutcome> {
       const recorded: Array<{ operation: string; outcome: ExecutionOutcome; dispatchKey?: string }> = [];
+      /**
+       * 本回合被**宿主**在发起前拒绝的 operation（允许集合之外）。它不产生执行事实
+       * （没有到达执行层），但会改变零执行时的失败话术：权限问题不能说成「模型没干活」。
+       */
+      const hostRefusedOperations: string[] = [];
       // U3：本交办内的重放窗口（只由 Worker 驱动的原生事件推进）。
       const workerWindow = newAttemptWindow();
       let unresolved = false;
@@ -3122,6 +3127,8 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         const operation = typeof args.operation === 'string' ? args.operation : '';
         if (operation === '') throw new Error('execute_operation 缺少 operation。');
         if (!allowed.has(operation)) {
+          // 发起前拒绝：零执行事实，但记下来——零执行时的失败话术要指向权限，不是「没干活」。
+          hostRefusedOperations.push(operation);
           throw new Error(OPERATION_NOT_PERMITTED_MESSAGE);
         }
         const rawArgs = args.args;
@@ -3332,6 +3339,11 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           : { kind: 'needs_input', question };
       }
       if (recorded.length === 0) {
+        // 发起前被宿主拒绝（权限/允许集合）时，用户该看到「没权限」，不是「模型没干活」：
+        // 后者把权限问题说成模型问题，还会诱导用户让模型重试同一个动作。
+        if (hostRefusedOperations.length > 0) {
+          return { kind: 'failed', reason: OPERATION_NOT_PERMITTED_MESSAGE };
+        }
         return { kind: 'failed', reason: '未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。' };
       }
       const unsuccessful = recorded.find((entry) => entry.outcome.status !== 'completed');

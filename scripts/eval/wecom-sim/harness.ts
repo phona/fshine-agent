@@ -442,6 +442,16 @@ export interface WecomSimOptions {
   readonly taskDispatch?: 'sync' | 'async';
   /** 短等待窗口（runtime.taskRunWaitMs）。缺省产品值 1500ms；1 = 确定性超窗。 */
   readonly taskRunWaitMs?: number;
+  /** 单聊主体的角色（缺省 operator）。viewer = 只读（W-44 的权限拦截面）。 */
+  readonly userRole?: string;
+  /** 群主体的角色（缺省 viewer）。要让群里的任务真跑起来时给 operator（W-43 的群静默对照）。 */
+  readonly groupRole?: string;
+  /**
+   * 「长时间没动静」两档提醒阈值（runtime.longRunningNoticeMs / longRunningStuckNoticeMs）。
+   * 缺省 = 产品值（10 分钟 / 30 分钟）；用例把首档调到几百毫秒来确定性触发。
+   */
+  readonly longRunningNoticeMs?: number;
+  readonly longRunningStuckNoticeMs?: number;
   /** 临时目录前缀（定位用）。 */
   readonly label?: string;
 }
@@ -527,12 +537,12 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
 
   const config: AppConfig = {
     principals: {
-      // 单聊主体：operator（读写）——写面仍受部署总闸 allowWriteOperations 约束（W-25）。
-      [`wecom:${DEFAULT_USER_ID}`]: { enabled: true, role: 'operator' },
+      // 单聊主体：缺省 operator（读写）——写面仍受部署总闸 allowWriteOperations 约束（W-25）。
+      [`wecom:${DEFAULT_USER_ID}`]: { enabled: true, role: options.userRole ?? 'operator' },
       // 群 = 独立主体（owner 2026-11-18）：群聊帧的 principal = `wecom:group:<群id>`，必须在
       // 名单里显式开通——W-16 群聊用例因此走真实路径，不靠「未开通所以什么都没跑」冒充。
       // 群主体按 viewer（只读）：跨群/跨人隔离不回归。
-      'wecom:group:group-w': { enabled: true, role: 'viewer' },
+      'wecom:group:group-w': { enabled: true, role: options.groupRole ?? 'viewer' },
     },
     contextProfiles: {
       dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },
@@ -544,6 +554,11 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
       ...(options.allowWriteOperations === true ? { allowWriteOperations: true } : {}),
       // 短等待窗口只在 async 装配（有推送面）下有意义；sync 装配直接同回合拿结果。
       ...(options.taskRunWaitMs === undefined ? {} : { taskRunWaitMs: options.taskRunWaitMs }),
+      // 两档主动提醒阈值（缺省住策略层：10 分钟 / 30 分钟）。
+      ...(options.longRunningNoticeMs === undefined ? {} : { longRunningNoticeMs: options.longRunningNoticeMs }),
+      ...(options.longRunningStuckNoticeMs === undefined
+        ? {}
+        : { longRunningStuckNoticeMs: options.longRunningStuckNoticeMs }),
     },
   };
 

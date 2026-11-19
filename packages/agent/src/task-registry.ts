@@ -218,6 +218,12 @@ export interface TaskRecord {
    */
   longRunningNotifiedAt?: string;
   longRunningStuckNotifiedAt?: string;
+  /**
+   * 本轮开始运行的时刻（ISO，单调写一次）。长任务受理后租约会被清掉，「跑了多久」不能
+   * 只从租约反推——否则最该主动汇报的长任务反而不在提醒扫描里（2026-11-19）。
+   * 缺省 = 未跑过（排队中 / 旧库只读未迁移）。
+   */
+  runningSince?: string;
   executions: readonly ExecutionRecord[];
   createdAt: string;
   updatedAt: string;
@@ -759,6 +765,8 @@ export function createTaskRegistry(): TaskRegistry {
       else task.failureReason = extras.failureReason;
     }
     task.updatedAt = at;
+    // 本轮开始运行时刻：第一次进入 running 写一次，之后不动（长任务受理会清租约，不清它）。
+    if (task.status === 'running' && task.runningSince === undefined) task.runningSince = at;
     const fact = factOf(task, {
       from,
       to: next.status,
@@ -783,6 +791,7 @@ export function createTaskRegistry(): TaskRegistry {
         taskNo: nextTaskNo,
         name: deriveTaskName(input.request),
         executions: [],
+        ...(status === 'running' ? { runningSince: now } : {}),
         createdAt: now,
         updatedAt: now,
       };

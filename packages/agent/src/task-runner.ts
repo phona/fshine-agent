@@ -126,6 +126,8 @@ export interface TaskRecordView {
   waitingSince?: string;
   leaseOwner?: string;
   leaseUntil?: string;
+  /** 本轮开始运行时刻（ISO，单调写一次）：长任务受理后租约被清，提醒扫描靠它算「跑了多久」。 */
+  runningSince?: string;
   taskNo?: number;
   name?: string;
   createdAt: string;
@@ -755,8 +757,20 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
    * 因此起点 = `lease_until − leaseMs`（runner 自己的 leaseMs 口径）。无租约的 running
    * 行（inline/未认领）不参与判定——不猜开始时刻。
    */
+  /**
+   * running 行的开始时刻。
+   *   · 首选底账的 `running_since`（单调写一次）——长任务受理后会清租约，「跑了多久」
+   *     不能只从租约反推，否则最该提醒的长任务反而不在扫描里（2026-11-19 修）；
+   *   · 旧行（迁移前写入、没有该列）回落到「租约到期时刻 − leaseMs」；
+   *   · 两者都没有（inline/未认领）→ 不猜开始时刻，不参与判定。
+   */
   function runningStartedAt(task: TaskRecordView): number | undefined {
-    if (task.status !== 'running' || task.leaseUntil === undefined) return undefined;
+    if (task.status !== 'running') return undefined;
+    if (task.runningSince !== undefined) {
+      const since = Date.parse(task.runningSince);
+      if (Number.isFinite(since)) return since;
+    }
+    if (task.leaseUntil === undefined) return undefined;
     const until = Date.parse(task.leaseUntil);
     return Number.isFinite(until) ? until - leaseMs : undefined;
   }
@@ -1120,9 +1134,12 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       startRound(claimed, acquired);
     }
     if (dueConsumerEnabled) {
-      // 本趟刚认领的任务在扫描之后才变 running（扫描时还看不到它们）：若这趟没有别的到期项，
-      // 必须补一个扫描节拍，否则「长任务无事件」永远等不到下一次扫描 → 超时提醒发不出去。
-      const reasscan = nextDue === undefined && started.length > 0 && longRunningConsumerEnabled
+      // 扫描被节流时，「本趟没有到期项」不等于「以后也不会到期」：
+      //   · 本趟刚认领的任务在扫描之后才变 running（扫描时还看不到它们）；
+      //   · 长任务在飞时 wait 挂起（inFlight 不算到期项），后续没有别的事件再 pump。
+      // 两种情况都必须补一个扫描节拍，否则「跑到多久该提醒」永远等不到下一次扫描。
+      const keepScanning = started.length > 0 || waiters.size > 0;
+      const reasscan = nextDue === undefined && keepScanning && longRunningConsumerEnabled
         ? now().getTime() + waitingScanThrottleMs
         : undefined;
       armDueTimer(nextDue ?? reasscan);

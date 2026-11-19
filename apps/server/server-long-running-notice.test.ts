@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { AppConfig, ChannelRoute, DeliveryReceipt, IncomingChannelMessage } from '@fshine/contracts';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver } from '../../packages/agent/src/driver-contract';
+import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import { LONG_RUNNING_NOTICE_TEXT, type TaskExecutionInput, type TaskExecutionOutcome, type TaskExecutor } from '../../packages/agent/src/task-runner';
 import { createLongRunningNoticePort, createServer, type FileDeliveryPort } from './server';
 
@@ -31,7 +32,7 @@ function tempDir(): string {
   return dir;
 }
 
-function testConfig(): AppConfig {
+function testConfig(allowWriteOperations = false): AppConfig {
   return {
     principals: {
       'wecom:user-a': { enabled: true, role: 'operator' },
@@ -43,7 +44,13 @@ function testConfig(): AppConfig {
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
     // 提醒阈值钉到 1ms（本套件测接线；两档语义由 packages/agent/long-running-notice.test.ts 覆盖）。
-    runtime: { backgroundConcurrency: 1, taskRunWaitMs: 0, longRunningNoticeMs: 1, longRunningStuckNoticeMs: 0 },
+    runtime: {
+      backgroundConcurrency: 1,
+      taskRunWaitMs: 0,
+      longRunningNoticeMs: 1,
+      longRunningStuckNoticeMs: 0,
+      ...(allowWriteOperations ? { allowWriteOperations: true } : {}),
+    },
   };
 }
 
@@ -118,6 +125,53 @@ function hangingExecutor(): { executor: TaskExecutor; release: () => void } {
   return { executor, release };
 }
 
+/** 长任务执行器：首回合返回 accepted（释放租约与槽位），wait 完成后第二回合收尾。 */
+function longTaskExecutor(): { executor: TaskExecutor; rounds: () => number } {
+  let calls = 0;
+  const executor: TaskExecutor = {
+    async execute(): Promise<TaskExecutionOutcome> {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          kind: 'accepted',
+          operationId: 'op-1',
+          operation: 'dummy.longtask',
+          dispatchKey: 'dk-long-1',
+          pollAfterMs: 5,
+        };
+      }
+      return { kind: 'completed', resultText: '（测试）导出完成' };
+    },
+  };
+  return { executor, rounds: () => calls };
+}
+
+/** 长任务执行面：capabilities 声明 long_running + wait 端口（挂起到测试推进）。 */
+class LongTaskFace implements ExecutionClient {
+  readonly waits: string[] = [];
+  private pending: ((outcome: ExecutionOutcome) => void) | undefined;
+  async capabilities(): Promise<CapabilityManifest> {
+    return {
+      contractVersion: 4,
+      operations: [{ name: 'dummy.longtask', label: 'long', args: [], long_running: true }],
+    };
+  }
+  async execute(): Promise<ExecutionOutcome> {
+    return { status: 'accepted', operationId: 'op-1', pollAfterMs: 5 };
+  }
+  wait(operationId: string): Promise<ExecutionOutcome> {
+    this.waits.push(operationId);
+    return new Promise((resolve) => {
+      this.pending = resolve;
+    });
+  }
+  finish(): void {
+    const resolve = this.pending;
+    this.pending = undefined;
+    resolve?.({ status: 'completed', data: { summary: '导出完成' } });
+  }
+}
+
 async function waitFor(assertion: () => void, timeoutMs = 1_000): Promise<void> {
   const startedAt = Date.now();
   for (;;) {
@@ -181,6 +235,61 @@ describe('预期契约·主动提醒的生产接线', () => {
       expect(delivery.texts).toHaveLength(0);
     } finally {
       release();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      server.close();
+    }
+  });
+  it('③ 长任务（accepted 后租约被清）也要提醒：按 running_since 算，之后照常被 wait 唤醒收尾', async () => {
+    // 2026-11-19 缺陷：长任务受理会清租约，而「跑了多久」原先只从租约反推 →
+    // 最该主动汇报的长任务反而不在提醒扫描里。改用底账 running_since（单调写一次）。
+    const delivery = new RecordingDelivery();
+    const face = new LongTaskFace();
+    let workerRounds = 0;
+    const worker: TurnDriver = {
+      async run(input) {
+        workerRounds += 1;
+        if (workerRounds === 1) {
+          await input.exec('execute_operation', { operation: 'dummy.longtask', args: {} });
+          const text = '已受理长任务，等结果。';
+          return { text, messages: [{ role: 'assistant', content: text } as never] };
+        }
+        const text = '导出完成。';
+        return { text, messages: [{ role: 'assistant', content: text } as never] };
+      },
+    };
+    const dbPath = path.join(tempDir(), 'state.db');
+    const server = await createServer({
+      env: { LLM_MODEL: 'test-model' },
+      config: testConfig(true),
+      dbPath,
+      createDrivers: () => ({ mainDriver: delegatingMain(), workerDriver: worker }),
+      createExecutionFace: async () => ({
+        client: face,
+        allowedOperations: ['dummy.longtask'],
+        readOnlyOperations: [],
+      }),
+      fileDelivery: delivery,
+      logger: () => {},
+    });
+    try {
+      await server.handler(incoming('user-a', 'conv-long', '跑一个很久的导出'));
+      // 受理：任务保持 running，但租约已释放（不该被 expireLeases 判 result_unknown）。
+      await waitFor(() => expect(face.waits.length).toBe(1), 3_000);
+      const registry = createSqliteTaskRegistry(dbPath, { readOnly: true });
+      const taskId = registry.list({ principalId: 'wecom:user-a', sessionId: 'wecom:conv-long' })[0]!.taskId;
+      const running = registry.get(taskId, { principalId: 'wecom:user-a', sessionId: 'wecom:conv-long' });
+      registry.close();
+      expect(running.status).toBe('running');
+      expect(running.leaseUntil).toBeUndefined();
+      expect(running.runningSince).toBeDefined();
+
+      // 超过阈值仍然提醒（这就是本次修的那条）。
+      await waitFor(() => expect(delivery.texts.some((entry) => entry.text.includes('比预计久了'))).toBe(true), 2_000);
+
+      // 长任务自己照常被唤醒收尾。
+      face.finish();
+      await waitFor(() => expect(workerRounds).toBe(2), 3_000);
+    } finally {
       await new Promise((resolve) => setTimeout(resolve, 30));
       server.close();
     }

@@ -100,6 +100,8 @@ export function createSqliteTaskRegistry(
       ...(stored.task.longRunningStuckNotifiedAt === undefined
         ? {}
         : { longRunningStuckNotifiedAt: stored.task.longRunningStuckNotifiedAt }),
+      // 2026-11-19：本轮开始运行时刻（长任务受理后租约被清，提醒扫描用它算「跑了多久」）。
+      ...(stored.task.runningSince === undefined ? {} : { runningSince: stored.task.runningSince }),
       executions: stored.executions.map((execution: ExecutionRow) => ({
         requestId: execution.requestId,
         operation: execution.operation,

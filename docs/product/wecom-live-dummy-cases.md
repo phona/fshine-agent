@@ -294,22 +294,23 @@ TMPDIR=/home/tao/.tmp node scripts/eval/fixtures/make-sales-sample.mjs /home/tao
 commit」拿不到句柄（`packages/agent/background-write-confirmation.test.ts` ⑦ 反向绊线）。
 另加单回合 operation 上限（缺省 5，超限确定性拒绝）。
 
-### J. 本轮新增能力（3，人工抽查；自动面见下条指针）
+### J. 本轮新增能力（3，**已自动化**：`scripts/eval/wecom-sim/cases-h-newcap.test.ts`）
 
-> 前提：live 部署 `runtime.allowWriteOperations: true`（长任务与写面同一条总闸）。
-> 自动覆盖：长任务的协议/续跑/回执在 `packages/agent/long-task-async.test.ts` 与
-> `scripts/long-task-assembly.test.ts`；主动提醒在 `apps/server/server-long-running-notice.test.ts`；
-> RBAC 在 `scripts/rbac-roles.test.ts`。本组只抽查真机手感。
+> 前提：装配 `runtime.allowWriteOperations: true`（长任务与写面同一条总闸）。
+> 这三条已做成自动用例（真渠道适配 + 真 server + 真 dummy 子进程），判据落在用户可见结果与
+> 底账事实；下方「观察」列保留为**真机手感**的抽查点（自动化不判定措辞像不像人）。
+> 分层覆盖：协议/续跑在 `packages/agent/long-task-async.test.ts` 与 `scripts/long-task-assembly.test.ts`；
+> 提醒接线在 `apps/server/server-long-running-notice.test.ts`；RBAC 求交在 `scripts/rbac-roles.test.ts`。
 
 | # | 优先级 | 操作 | 预期（硬） | 观察 | 证据 |
 | --- | --- | --- | --- | --- | --- |
-| W-42〔人工〕| P0 | `让 dummy 跑一个要很久的导出`（`dummy.longtask`） | 受理即回执（「这个我来办…办完发你」）；期间可以继续聊别的（不被占住）；完成后结果主动发回 | 期间发一句别的会不会卡住 | `execution_accepted` → `execution_wait_resumed`（日志）；任务一直 running 直到终态 |
-| W-43〔人工〕| P1 | 临时把 `runtime.longRunningNoticeMs` 调到 `30000` 后重启，再跑 W-42（任务需 >30s） | 30 秒后收到**恰一条**「这件事比预计久了。要我停下来，还是继续等？（回「停」我就停）」 | 文案是否像同事、是否给得出动作 | `long_running_notice_sent`；群聊场景应零发送 |
-| W-44〔人工〕| P1 | 把另一个账号的 `role` 设为 `viewer` 后重启，用该账号发 `给 alpha 集合 W1 追加 1 条记录`，再发一次查询 | 写被**发起前**拒绝（「当前权限不支持这个操作。」，不提内部 operation 名、零执行事实）；查询照常 | 话术是否解释得清 | 该账号日志 `message_done.executions: []`；换回 `operator` 后写恢复 |
+| W-42〔自动〕| P0 | `让 dummy 跑一个要很久的导出`（`dummy.longtask`） | 受理即回执（「这个我来办…办完发你」）；期间同一会话发下一句**不被占住**；完成后结果主动投递一次；执行层只被发起一次 | 期间发一句别的会不会卡住 | `execution_accepted` → `execution_wait_resumed`（日志）；任务 running（无租约）直到 completed；`executions` 里 `dummy.longtask` 恰好 1 条 |
+| W-43〔自动〕| P1 | 首档阈值调到 200ms（装配注入，不改正产品缺省）后跑 W-42（任务约 3 秒） | **恰一条**「这件事比预计久了。要我停下来，还是继续等？（回「停」我就停）」；群聊同条件**零**主动提醒（但群里的任务真在跑） | 文案是否像同事、是否给得出动作 | `execution_wait_timeout` 后宿主 `sendText`；群聊 `proactiveTexts` 为空 |
+| W-44〔自动〕| P1 | 单聊主体 `role: viewer`（总闸打开）发 `给 alpha 集合 W1 追加 2 条记录`，再发一次查询 | 写被**发起前**拒绝（「当前权限不支持这个操作。」，不提内部 operation 名、零执行事实、任务不落 running/completed）；同一主体读查询照常 | 话术是否解释得清 | 该回合 `executions: []`；底账无 running/completed 任务；读回合有真实条数 |
 
 ## 10. 自动联调登记（2026-11-18，本轨产出的机械底座）
 
-**位置**：`scripts/eval/wecom-sim/`——`harness.ts`（夹具）+ `cases-{a,b,c,d,e,f,g}-*.test.ts`（26 条）
+**位置**：`scripts/eval/wecom-sim/`——`harness.ts`（夹具）+ `cases-{a,b,c,d,e,f,g,h}-*.test.ts`（29 条）
 + `run.ts`（一条命令入口）。命令：`TMPDIR=~/.tmp node --import tsx scripts/eval/wecom-sim/run.ts`
 （输出逐条 PASS/FAIL 与 summary，失败退出码非 0）；同一批用例进全量门
 `TMPDIR=~/.tmp vitest run scripts/eval/wecom-sim`。

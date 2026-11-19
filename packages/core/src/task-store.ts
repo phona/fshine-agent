@@ -112,6 +112,11 @@ export interface TaskRow {
    */
   longRunningNotifiedAt?: string;
   longRunningStuckNotifiedAt?: string;
+  /**
+   * 本轮开始运行时刻（ISO，单调写一次）：长任务受理后会清租约，「跑了多久」需要独立起点，
+   * 否则最该主动汇报的长任务不在提醒扫描里（2026-11-19）。
+   */
+  runningSince?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -385,7 +390,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- 预期契约（2026-11-18）：已发过「超预期」/「卡住」两档长时间提醒的时刻（ISO，NULL = 未提醒）。
   -- 纯前向加法列，不升 user_version。
   long_running_notified_at TEXT,
-  long_running_stuck_notified_at TEXT
+  long_running_stuck_notified_at TEXT,
+  -- 「这一轮开始跑」的时刻（ISO，单调写一次；NULL = 未跑过）。长任务受理后租约会被清掉，
+  -- 「跑了多久」不能只从租约反推，否则最该提醒的任务反而不在提醒扫描里（2026-11-19）。
+  running_since TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_scope ON tasks (principal_id, session_id);
 CREATE TABLE IF NOT EXISTS task_sequences (
@@ -451,6 +459,8 @@ const TASK_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   // 预期契约（2026-11-18）：单调写入一次的时间戳列（前向加法，不升 user_version）。
   ['long_running_notified_at', 'TEXT'],
   ['long_running_stuck_notified_at', 'TEXT'],
+  // 2026-11-19：本轮开始运行的时刻（长任务受理后租约被清，提醒扫描需要独立起点）。
+  ['running_since', 'TEXT'],
 ];
 
 interface TaskDbRow {
@@ -471,6 +481,7 @@ interface TaskDbRow {
   lease_until?: string | null;
   long_running_notified_at?: string | null;
   long_running_stuck_notified_at?: string | null;
+  running_since?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -693,6 +704,8 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   const taskExists = db.prepare('SELECT 1 FROM tasks WHERE task_id = ?');
   const touch = db.prepare('UPDATE tasks SET updated_at = ? WHERE task_id = ?');
   /** P2a 唯一状态写入语句（单条；源码级守卫按此判据守住「单写路径」）。 */
+  // 旧库只读打开（未迁移）时可能没有 running_since 列：语句按列存在性拼装，不硬引用。
+  const hasRunningSinceColumn = columns.has('running_since');
   const applyState = hasLifecycleColumns
     ? db.prepare(`
         UPDATE tasks
@@ -704,6 +717,10 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
             waiting_since = @waitingSince,
             lease_owner = @leaseOwner,
             lease_until = @leaseUntil,
+            ${hasRunningSinceColumn
+              // 本轮开始运行时刻：第一次进入 running 时写入，之后保持（长任务受理后清租约不清它）。
+              ? "running_since = CASE WHEN @status = 'running' THEN COALESCE(running_since, @updatedAt) ELSE running_since END,"
+              : ''}
             updated_at = @updatedAt
         WHERE task_id = @taskId AND status = @expectedStatus
       `)
@@ -945,6 +962,7 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     ...(row.long_running_stuck_notified_at === null || row.long_running_stuck_notified_at === undefined
       ? {}
       : { longRunningStuckNotifiedAt: row.long_running_stuck_notified_at }),
+    ...(row.running_since === null || row.running_since === undefined ? {} : { runningSince: row.running_since }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
