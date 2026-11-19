@@ -44,7 +44,8 @@ import {
   TASK_RUN_TOOL,
   type Session,
 } from '../packages/agent/src/execution-runtime';
-import { createTaskRegistry } from '../packages/agent/src/task-registry';
+import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
+import { createFileStore } from '../packages/agent/src/file-store';
 import {
   assembleSessionCore,
   resolveExecutionFace,
@@ -176,6 +177,9 @@ async function createHostFixture(options: HostFixtureOptions): Promise<HostFixtu
   const config = materializedConfig(options.dir);
   const profile = config.contextProfiles['dummy'];
   if (profile === undefined) throw new Error('fixture 配置缺少 dummy contextProfile');
+  // 载荷型参数（records）需要任务文件桥的 fileStore 与底账 store：与生产装配同一实例形状。
+  const taskRegistry = createSqliteTaskRegistry(path.join(options.dir, 'state.db'));
+  const fileStore = createFileStore({ store: taskRegistry.store, workspaceRoot: path.join(options.dir, 'workspace') });
 
   const main = new ScriptedDriver();
   const worker = new ScriptedDriver();
@@ -214,7 +218,10 @@ async function createHostFixture(options: HostFixtureOptions): Promise<HostFixtu
     setAuditPath: true,
     ...(options.allowWrite === true ? { runtime: { allowWriteOperations: true }, allowedPermissions: ['read', 'write'] } : {}),
     emptyOperationsMessage: '执行层没有声明任何只读 operation——测试拒绝。',
-    taskRegistry: createTaskRegistry(),
+    taskRegistry,
+    // 载荷型参数（records）的宿主装信封需要任务文件桥：与生产装配同一条注入
+    // （不注入 = 宿主无法 lint/落盘，会按「内容不行」在发起执行前拒绝）。
+    taskExecutionBridge: { store: fileStore },
     mainSystemPrompt: '你是测试主 Agent。',
     workerSkills: [],
     createDrivers: async () => ({ mainDriver: main, workerDriver: worker }),
@@ -226,7 +233,10 @@ async function createHostFixture(options: HostFixtureOptions): Promise<HostFixtu
     main,
     worker,
     requests,
-    close: () => assembled.close(),
+    close: () => {
+      assembled.close();
+      taskRegistry.close();
+    },
   };
 }
 
@@ -355,10 +365,10 @@ async function runWriteTurn(
   return await fx.session.send(input.userText);
 }
 
-describe('写确认回环·带逐条内容（--records 结构化数组）', () => {
+describe('写确认回环·带逐条内容（records 载荷：宿主 lint + 物化文件）', () => {
   const records = [{ name: 'alpha-item-3', value: 100 }, { name: 'alpha-item-4', value: 200 }];
-  // 模型给的是结构化数组（不是 JSON 字符串）：宿主原样透传，执行层逐项校验。
-  const prepareArgs = { '--collection': 'alpha', '--window': 'W1', '--records': records };
+  // 模型给的是结构化数组（不是 JSON 字符串）：宿主按声明 schema lint 后物化成文件，执行层逐项校验。
+  const prepareArgs = { collection: 'alpha', window: 'W1', records };
   const commitArgs = { ...prepareArgs };
 
   it('1b 摘要列出用户给的内容；commit 写入的正是这些 name/value；读回可见', async () => {

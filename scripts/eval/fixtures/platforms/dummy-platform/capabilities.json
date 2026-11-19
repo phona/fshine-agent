@@ -466,7 +466,40 @@
       "est_seconds": 10,
       "weight": 5,
       "args": {
-        "positional": [],
+        "positional": [
+          {
+            "name": "records",
+            "required": false,
+            "payload": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "$id": "RecordBatchPayload",
+                "title": "RecordBatchPayload",
+                "description": "Record batch payload shape (host -> platform: the host lints by this schema, materializes the array to a file and passes that path as the records positional). additionalProperties is false; max 500 records per write (the execution layer's single-write limit).",
+                "type": "array",
+                "maxItems": 500,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "value": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            },
+            "desc": "要新增的记录：结构化数组，每项 {name, value}；宿主会按此 schema lint 后物化成文件，并把路径交给执行层（模型不手拼 JSON 字符串）。单次最多 500 条（执行层单次写入上限），超过会被拒绝。省略则按 --count 由平台自动生成占位记录"
+          }
+        ],
         "flags": [
           {
             "flag": "--collection",
@@ -497,12 +530,6 @@
             "required": false,
             "style": "code",
             "desc": "test-only: real wall-clock delay before the prepare runs (integer ms, 0..60000; over the cap is refused deterministically)"
-          },
-          {
-            "flag": "--records",
-            "required": false,
-            "style": "code",
-            "desc": "要新增的记录：结构化数组，每项 {name, value}；直接把数组作为参数值传（不要传 JSON 字符串）。单次最多 500 条（执行层单次写入上限），超过会被执行层拒绝。省略则按 --count 由平台自动生成占位记录"
           }
         ]
       },
@@ -523,7 +550,40 @@
       "est_seconds": 10,
       "weight": 20,
       "args": {
-        "positional": [],
+        "positional": [
+          {
+            "name": "records",
+            "required": false,
+            "payload": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "$id": "RecordBatchPayload",
+                "title": "RecordBatchPayload",
+                "description": "Record batch payload shape (host -> platform: the host lints by this schema, materializes the array to a file and passes that path as the records positional). additionalProperties is false; max 500 records per write (the execution layer's single-write limit).",
+                "type": "array",
+                "maxItems": 500,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "value": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            },
+            "desc": "要新增的记录：结构化数组，每项 {name, value}；宿主会按此 schema lint 后物化成文件，并把路径交给执行层（模型不手拼 JSON 字符串）。单次最多 500 条（执行层单次写入上限），超过会被拒绝。省略则按 --count 由平台自动生成占位记录"
+          }
+        ],
         "flags": [
           {
             "flag": "--collection",
@@ -560,12 +620,6 @@
             "required": false,
             "style": "code",
             "desc": "test-only: inject a write failure for the 1-based record index; the whole batch is refused atomically (nothing written)"
-          },
-          {
-            "flag": "--records",
-            "required": false,
-            "style": "code",
-            "desc": "要新增的记录：结构化数组，每项 {name, value}；直接把数组作为参数值传（不要传 JSON 字符串）。单次最多 500 条（执行层单次写入上限），超过会被执行层拒绝。省略则按 --count 由平台自动生成占位记录"
           }
         ]
       },

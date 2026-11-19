@@ -29,11 +29,15 @@ export type PayloadMaterializeResult =
   | { ok: true; path: string }
   | { ok: false; missing: string[]; unknown: string[] };
 
-interface ObjectSchema {
+interface ValueSchema {
   type?: unknown;
   required?: unknown;
   properties?: unknown;
   additionalProperties?: unknown;
+  items?: unknown;
+  minItems?: unknown;
+  maxItems?: unknown;
+  minLength?: unknown;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -66,35 +70,90 @@ function matchesType(value: unknown, type: unknown): boolean {
   }
 }
 
+/** 违规路径的展示形态：根值用 `(root)`，其余原样（`records[2].value` / `[2].name`）。 */
+function displayPath(path: string): string {
+  return path === '' ? '(root)' : path;
+}
+
+/** 整数型上限/下限声明的读取：只认非负整数，其余形状不裁决。 */
+function limitOf(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
 /**
- * 窄结构校验（不做递归深校验）：对象性 / required / 顶层属性类型 / additionalProperties。
+ * 窄值校验（递归但只覆盖执行层声明用到的子集）：对象 required/additionalProperties、
+ * 数组 items/minItems/maxItems、string minLength、基本类型。schema 未声明/未识别的构造
+ * 一律不裁决（执行层 schema 是权威，宿主只做窄实现）。
+ *
+ * 违规以路径记入 missing（必填缺失）或 unknown（值形态不符/多出来）：
+ *   · 根值 `(root)`；对象字段 `collection`；数组元素 `records[2]`；
+ *   · 数组超上限记 `records>maxItems:500`（"多出来"的机械形态）。
+ */
+function lintValue(value: unknown, schema: unknown, path: string, out: { missing: string[]; unknown: string[] }): void {
+  const spec = asRecord(schema) as ValueSchema | undefined;
+  if (spec === undefined) return;
+  if (spec.type === 'object') {
+    const required = Array.isArray(spec.required)
+      ? spec.required.filter((key): key is string => typeof key === 'string')
+      : [];
+    const record = asRecord(value);
+    if (record === undefined) {
+      // 非对象值：必填全部缺失（值形态错，不能逐字段判定）。
+      out.missing.push(...required.map((key) => (path === '' ? key : `${path}.${key}`)));
+      return;
+    }
+    const properties = asRecord(spec.properties) ?? {};
+    for (const key of required) {
+      if (record[key] === undefined) out.missing.push(path === '' ? key : `${path}.${key}`);
+    }
+    for (const [key, item] of Object.entries(record)) {
+      const child = path === '' ? key : `${path}.${key}`;
+      const declared = properties[key];
+      if (declared === undefined) {
+        // additionalProperties:false 才拒额外字段；缺省/true 允许。
+        if (spec.additionalProperties === false) out.unknown.push(child);
+        continue;
+      }
+      lintValue(item, declared, child, out);
+    }
+    return;
+  }
+  if (spec.type === 'array') {
+    if (!Array.isArray(value)) {
+      out.unknown.push(displayPath(path));
+      return;
+    }
+    const minItems = limitOf(spec.minItems);
+    if (minItems !== undefined && value.length < minItems) out.missing.push(displayPath(path));
+    const maxItems = limitOf(spec.maxItems);
+    if (maxItems !== undefined && value.length > maxItems) {
+      out.unknown.push(`${displayPath(path)}>maxItems:${maxItems}`);
+    }
+    if (spec.items !== undefined) {
+      for (const [index, item] of value.entries()) lintValue(item, spec.items, `${path}[${index}]`, out);
+    }
+    return;
+  }
+  if (!matchesType(value, spec.type)) {
+    out.unknown.push(displayPath(path));
+    return;
+  }
+  const minLength = limitOf(spec.minLength);
+  if (spec.type === 'string' && minLength !== undefined && typeof value === 'string' && value.length < minLength) {
+    out.unknown.push(displayPath(path));
+  }
+}
+
+/**
+ * 窄结构校验：对象性 / required / 属性类型 / additionalProperties，数组的
+ * items / minItems / maxItems，string 的 minLength（见 `lintValue`）。
  * 返回 missing（必填缺失）与 unknown（额外字段或值形态不符）——两类都非空即通过。
- * schema 不是对象/不适用（如非 object 类型）时不裁决（放行）。
+ * schema 不是对象/不适用时不裁决（放行）。
  */
 export function lintPayload(value: unknown, schema: unknown): { missing: string[]; unknown: string[] } {
-  const spec = asRecord(schema) as ObjectSchema | undefined;
-  if (spec === undefined || spec.type !== 'object') return { missing: [], unknown: [] };
-  const required = Array.isArray(spec.required)
-    ? spec.required.filter((key): key is string => typeof key === 'string')
-    : [];
-  const properties = asRecord(spec.properties) ?? {};
-  // 非对象值：必填全部缺失（值形态错，不能逐字段判定）。
-  const record = asRecord(value);
-  if (record === undefined) {
-    return { missing: [...required], unknown: [] };
-  }
-  const missing = required.filter((key) => record[key] === undefined);
-  const unknown: string[] = [];
-  for (const [key, item] of Object.entries(record)) {
-    const declared = asRecord(properties[key]);
-    if (declared === undefined) {
-      // additionalProperties:false 才拒额外字段；缺省/true 允许（只判类型）。
-      if (spec.additionalProperties === false) unknown.push(key);
-      continue;
-    }
-    if (!matchesType(item, declared['type'])) unknown.push(key);
-  }
-  return { missing, unknown };
+  const out = { missing: [] as string[], unknown: [] as string[] };
+  lintValue(value, schema, '', out);
+  return out;
 }
 
 /** 载荷文件名 label：只保留安全字符（param 名派生；越界形状不参与路径拼接）。 */

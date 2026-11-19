@@ -108,6 +108,70 @@ describe('A. 载荷 materializer（窄结构校验 + 原子落盘）', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// A2. 数组型载荷（records：宿主 lint 按执行层 schema，非法形状到不了执行面）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 与夹具声明同形的 records schema（array of {name,value}，maxItems 2 便于测上限）。 */
+const RECORDS_PAYLOAD_SCHEMA = {
+  type: 'array',
+  maxItems: 2,
+  items: {
+    type: 'object',
+    required: ['name', 'value'],
+    additionalProperties: false,
+    properties: {
+      name: { type: 'string', minLength: 1 },
+      value: { type: 'number' },
+    },
+  },
+};
+
+describe('A2. 数组型载荷：逐条 lint（items / maxItems / 类型 / 额外字段）', () => {
+  it('合法数组：lint 通过，物化文件内容就是数组本身', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'payload-arr-'));
+    dirs.push(dir);
+    const value = [{ name: 'a', value: 1 }, { name: 'b', value: 2 }];
+    expect(lintPayload(value, RECORDS_PAYLOAD_SCHEMA)).toEqual({ missing: [], unknown: [] });
+    const result = materializePayload({ taskDir: dir, label: 'records', value, schema: RECORDS_PAYLOAD_SCHEMA });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('应物化成功');
+    expect(JSON.parse(readFileSync(result.path, 'utf8'))).toEqual(value);
+  });
+
+  it('非数组（JSON 字符串/对象）：unknown 指到根值，不落盘', () => {
+    expect(lintPayload('[{"name":"a","value":1}]', RECORDS_PAYLOAD_SCHEMA)).toEqual({ missing: [], unknown: ['(root)'] });
+    expect(lintPayload({ name: 'a', value: 1 }, RECORDS_PAYLOAD_SCHEMA)).toEqual({ missing: [], unknown: ['(root)'] });
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'payload-arr-'));
+    dirs.push(dir);
+    expect(materializePayload({ taskDir: dir, label: 'records', value: '[]', schema: RECORDS_PAYLOAD_SCHEMA }).ok).toBe(false);
+    expect(existsSync(path.join(dir, 'in', 'records.json'))).toBe(false);
+  });
+
+  it('某条缺 value / 类型不对 / 多字段：missing/unknown 指到具体条目', () => {
+    expect(lintPayload([{ name: 'a', value: 1 }, { name: 'b' }], RECORDS_PAYLOAD_SCHEMA))
+      .toEqual({ missing: ['[1].value'], unknown: [] });
+    expect(lintPayload([{ name: 'a', value: 'x' }], RECORDS_PAYLOAD_SCHEMA))
+      .toEqual({ missing: [], unknown: ['[0].value'] });
+    expect(lintPayload([{ name: '', value: 1 }], RECORDS_PAYLOAD_SCHEMA))
+      .toEqual({ missing: [], unknown: ['[0].name'] });
+    expect(lintPayload([{ name: 'a', value: 1, bump: 2 }], RECORDS_PAYLOAD_SCHEMA))
+      .toEqual({ missing: [], unknown: ['[0].bump'] });
+    expect(lintPayload(['not-an-object'], RECORDS_PAYLOAD_SCHEMA))
+      .toEqual({ missing: ['[0].name', '[0].value'], unknown: [] });
+  });
+
+  it('超过 maxItems：unknown 记 `(root)>maxItems:N`（多出来的机械形态）', () => {
+    expect(lintPayload([{ name: 'a', value: 1 }, { name: 'b', value: 2 }, { name: 'c', value: 3 }], RECORDS_PAYLOAD_SCHEMA))
+      .toEqual({ missing: [], unknown: ['(root)>maxItems:2'] });
+  });
+
+  it('minItems：空数组按声明记 missing', () => {
+    expect(lintPayload([], { ...RECORDS_PAYLOAD_SCHEMA, minItems: 1 }))
+      .toEqual({ missing: ['(root)'], unknown: [] });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // B. 端到端（真装配）
 // ─────────────────────────────────────────────────────────────────────────────
 
