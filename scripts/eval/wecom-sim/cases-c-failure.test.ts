@@ -13,6 +13,7 @@
  * 没有真的失败/拒绝，或者转述环节把失败说成成功，这里都会红。
  */
 import { describe, expect, it } from 'vitest';
+import { failureMessageFor, internalTermIn } from '../../../packages/agent/src/user-facing-failure';
 import {
   mainRelayResponses,
   startWecomSim,
@@ -129,8 +130,10 @@ describe('C 组·失败与边界（W-08～W-12）', () => {
       assert(reply, executions) {
         // 口径变更（2026-11-19 模型可见面收口）：可筛值（华远/明达/新程）此前来自执行层
         // 原文（error.message 逐字透传 = 抽象泄露源头之一）；收口后 failed 投影只带
-        // invalid_input 的 note。如实说条件不行、给用户可执行的下一步，不硬编一个数。
-        expect(reply).toContain('条件不行');
+        // invalid_input 的 note。断言跟**话术常量**走（不硬编措辞，措辞再改用例自动跟随），
+        // 并仍不含内部术语与硬编的候选值。
+        expect(reply).toContain(failureMessageFor('invalid_input').text);
+        expect(internalTermIn(reply)).toBeUndefined();
         expect(reply).not.toContain('华远');
         expect(reply).not.toContain('明达');
         expect(reply).not.toContain('新程');
