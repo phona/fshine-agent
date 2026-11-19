@@ -145,7 +145,7 @@ TMPDIR=/home/tao/.tmp node scripts/eval/fixtures/make-sales-sample.mjs /home/tao
 
 > 前提：自动用例走真 server 装配（server 恒 async：受理即回执、后台 TaskRunner 执行、
 > 完成后主动投递），并用 `runtime.taskRunWaitMs` 控制短等待窗口：W-26 用 1ms
-> 确定性超窗，W-28 用缺省 1500ms 验证窗口内完成。同步装配不产生受理回执（server 已无
+> 确定性超窗，W-28 用缺省 8000ms（owner 2026-11-19 A 案）验证窗口内完成。同步装配不产生受理回执（server 已无
 > 该模式；`runtime.dispatchMode` 配置键已于 2026-11-18 删除）。
 
 | # | 优先级 | 发 | 预期 | 观察 | 证据 |

@@ -58,8 +58,8 @@ describe('resolveRuntimeConfig：缺省 = 前台并发 4 + 排队 16，非法 fa
       fileRetentionDays: 30,
       fileRetentionSweepOnStart: false,
       attachmentNudgeAfterMs: 30_000,
-      // B 切片：task_run 短等待窗口缺省 1500ms（0 = 不等直接后台）。
-      taskRunWaitMs: 1_500,
+      // B 切片：task_run 短等待窗口缺省 8000ms（owner 2026-11-19 A 案；0 = 不等直接后台）。
+      taskRunWaitMs: 8_000,
       // 预期契约（2026-11-18）：10 分钟「比预计久了」/ 30 分钟「卡住了」两档提醒。
       longRunningNoticeMs: 600_000,
       longRunningStuckNoticeMs: 1_800_000,
@@ -80,8 +80,8 @@ describe('resolveRuntimeConfig：缺省 = 前台并发 4 + 排队 16，非法 fa
     }
   });
 
-  it('taskRunWaitMs：缺省 1500；0 = 不等直接后台；负数/非整数 fail-fast', () => {
-    expect(resolveRuntimeConfig().taskRunWaitMs).toBe(1_500);
+  it('taskRunWaitMs：缺省 8000；0 = 不等直接后台；负数/非整数 fail-fast', () => {
+    expect(resolveRuntimeConfig().taskRunWaitMs).toBe(8_000);
     expect(resolveRuntimeConfig({ taskRunWaitMs: 0 }).taskRunWaitMs).toBe(0);
     expect(resolveRuntimeConfig({ taskRunWaitMs: 5_000 }).taskRunWaitMs).toBe(5_000);
     for (const bad of [-1, 1.5, '1500']) {

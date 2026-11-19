@@ -223,9 +223,11 @@ export const DEFAULT_RUNTIME_CONFIG: ResolvedRuntimeConfig = Object.freeze({
   fileRetentionSweepOnStart: false,
   // 纯附件后 30 秒无指令 → 宿主主动追问；0 = 关闭（显式值不被缺省吞掉）。
   attachmentNudgeAfterMs: 30_000,
-  // task_run 短等待窗口：1.5 秒内确认完成 → 结果同回合交给模型（不打受理回执、不主动投递）；
+  // task_run 短等待窗口：窗口内落定 → 结果同回合交给模型（不打受理回执、不主动投递）；
   // 超窗 → 机械事实回执（不含工单编号）+ 完成后主动投递。0 = 不等直接后台。
-  taskRunWaitMs: 1_500,
+  // 缺省 8 秒（owner 2026-11-19 定 A 案）：真模型下 Worker 回合实测 5～10 秒，1.5s 窗口等于
+  // 「每件事都转后台」，用户看到回执 + 结果两条气泡；8s 让短活在回合内一条气泡给结果。
+  taskRunWaitMs: 8_000,
   // 预期契约（2026-11-18 owner 定）：交办 10 分钟后仍无动静 → 问用户「停下来还是继续等」；
   // 30 分钟后仍无动静 → 再发一条「卡住了，建议先停掉」（之后不再发）。0 = 关闭对应档。
   longRunningNoticeMs: 600_000,

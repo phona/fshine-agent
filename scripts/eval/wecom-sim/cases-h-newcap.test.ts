@@ -174,7 +174,7 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
     const sim = await startWecomSim({
       label: 'w44',
       taskDispatch: 'async',
-      // 窗口用产品缺省 1500ms：读写两回合都在窗口内落定（快活），用户话术由模型同回合转述。
+      // 窗口用产品缺省（8000ms）：读写两回合都在窗口内落定（快活），用户话术由模型同回合转述。
       allowWriteOperations: true,
       userRole: 'viewer',
     });

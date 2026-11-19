@@ -11,7 +11,7 @@
  *         （回归钉子：防止 B 轨短等待窗口被破坏）。
  *
  * 时钟纪律：taskRunWaitMs 是产品侧真实短等待窗口（execution-runtime 的 waitForTaskSettled）；
- * 本组用「1ms 窗口 + 真子进程执行」确定性超窗、「1500ms 缺省窗口 + 真快查询」确定性落窗内，
+ * 本组用「1ms 窗口 + 真子进程执行」确定性超窗、「缺省窗口（8000ms）+ 真快查询」确定性落窗内，
  * 不写固定 sleep，也不注入第二套时钟。
  */
 import { describe, expect, it } from 'vitest';
@@ -91,7 +91,7 @@ describe('G 组·任务面 / 异步（W-26～W-28）', () => {
     }
   }, 120_000);
 
-  it('W-28 快活（缺省 1500ms 窗口内完成）：同回合给结果、零受理回执、零主动投递', async () => {
+  it('W-28 快活（缺省 8000ms 窗口内完成）：同回合给结果、零受理回执、零主动投递', async () => {
     const sim = await startWecomSim({ label: 'w28', taskDispatch: 'async', taskRunWaitMs: 1_500 });
     try {
       const taskText = '查一下 documents 集合 W202611 有多少条';

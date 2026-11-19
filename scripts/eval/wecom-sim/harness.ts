@@ -440,7 +440,7 @@ export interface WecomSimOptions {
    * （G 组任务面、E 组回传文件）。端口按此显式注入（有推送面就一律 async）。
    */
   readonly taskDispatch?: 'sync' | 'async';
-  /** 短等待窗口（runtime.taskRunWaitMs）。缺省产品值 1500ms；1 = 确定性超窗。 */
+  /** 短等待窗口（runtime.taskRunWaitMs）。缺省产品值 8000ms；1 = 确定性超窗。 */
   readonly taskRunWaitMs?: number;
   /** 单聊主体的角色（缺省 operator）。viewer = 只读（W-44 的权限拦截面）。 */
   readonly userRole?: string;
