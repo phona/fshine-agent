@@ -103,9 +103,9 @@ describe('执行层声明义务：结构化入参必须声明 payload', () => {
     for (const name of ['dummy.prepare', 'dummy.commit']) {
       const operation = operations.find((candidate) => candidate.name === name);
       expect(operation, `缺少 operation ${name}`).toBeDefined();
-      const legacyFlag = (operation?.args?.flags ?? []).find((entry) => entry.flag === '--records');
+      const retiredRecordsFlag = (operation?.args?.flags ?? []).find((entry) => entry.flag === '--records');
       expect(
-        legacyFlag,
+        retiredRecordsFlag,
         `${name} 的 --records 已退役：records 是结构化入参，必须声明为 payload 位置参数（宿主 lint 后物化文件）`,
       ).toBeUndefined();
     }
