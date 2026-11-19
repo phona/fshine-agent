@@ -23,8 +23,9 @@
 - `product/event-catalog.md` — 结构化事件字典（以 `23ae585` 为基线列 29 个；`attachment_nudge_*`、`task_result_delivery_*`、`recalc_*`、`run_dir_cleanup_startup*` 等新增事件以 `architecture/channels.md` 的事件表与代码为准）。
 - `history/r4-joint-interfaces.md` — R4 联合接口约定 v1（P2/P5/P6/P4 冻结面，代码仍引用，已归档）。
 
-## product（交互契约，1 篇）
+## product（交互契约与能力页，2 篇）
 
+- `product/capability.md` — 产品能力页：支持什么 / 预期行为 / 明确不做（owner 对接正式平台的一页纸；`scripts/product-capability-guard.test.ts` 守卫）。
 - `product/interaction-contract.md` — 什么算"好用"：五条可验收尺子（不打扰 / 有预期 / 可查可接管 / 结论有据 / 分工透明）+ 每条现状。
 
 ## eval（评测口径与现行基线，6 篇）
