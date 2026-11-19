@@ -189,12 +189,19 @@ export async function deliverTaskResult(fact: TaskCompletionFact, options: TaskR
  * 失败话术（2026-11-19 收口；单一来源，聊天推送与完成投递共用）：
  * kind 由执行层码 / result_unknown 状态归类，取不到 = executor_failed；返回 failureMessageFor
  * 的用户话术文本。**不含执行层原文、不含内部词**（执行层原始码只进分类，不进文本）。
+ *
+ * 失败路径不得输出「需要你确认/补充」类话术（2026-11-19）：任务已落 failed/终局，底账里
+ * **没有等待中的提案、也没有有效句柄或可接续任务**。若归类落到 `needs_confirmation` /
+ * `needs_input`（说明宿主没把提案/问题交给用户——例如把 CONFIRMATION_REQUIRED 这类被挡码
+ * 误当业务码），说「点个头 / 补一句」就是**假承诺**（用户回「确认」什么都不会发生，比不说更糟）。
+ * 这属于我方故障：一律改判 `host_fault`，话术不解释内部原因，只说「我这边没弄好，再试/记下来」。
  */
 export function failureTextFor(code: string | undefined, status?: 'failed' | 'refused' | 'result_unknown'): string {
   const kind = status === 'result_unknown'
     ? 'unknown_result'
     : classifyFailure({ code, status });
-  return failureMessageFor(kind).text;
+  const safeKind = kind === 'needs_confirmation' || kind === 'needs_input' ? 'host_fault' : kind;
+  return failureMessageFor(safeKind).text;
 }
 
 /**
