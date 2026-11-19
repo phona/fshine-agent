@@ -11,6 +11,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -25,7 +26,9 @@ function runWith(args: readonly string[]) {
     // 故意给不可路由的模型端点与空密钥：即便入口漂移到"先跑再校验"，也只会快速失败，不会真的打模型。
     env: {
       ...process.env,
-      TMPDIR: '/home/tao/.tmp',
+      // 不写死任何机器相关的家目录（原写死开发机临时目录；CI runner 家目录不同 → tsx 建缓存
+      // 目录 EACCES 直接把本用例打成红）。用运行时发现的临时目录（缺省 $TMPDIR，未设则 /tmp）。
+      TMPDIR: os.tmpdir(),
       LLM_API_KEY: '',
       LLM_API_BASE_URL: 'http://127.0.0.1:9/v1',
       LLM_MODEL: 'smoke-no-model',

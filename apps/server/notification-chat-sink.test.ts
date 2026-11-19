@@ -104,8 +104,8 @@ describe('主动推送 sink：种类与文案', () => {
   it('② 文案过用户可见出口清理（服务器路径不出现在用户文本里）', async () => {
     const delivery = fakeDelivery();
     const { sink } = sinkOf({ delivery: delivery.port });
-    await sink.send(notification('failed', { name: '整理 /home/tao/projects/fshine-agent/.runtime/x.xlsx' }));
-    expect(delivery.sent[0]!.text).not.toContain('/home/tao');
+    await sink.send(notification('failed', { name: '整理 /home/fictional-user/fictional-projects/fshine-agent/.runtime/x.xlsx' }));
+    expect(delivery.sent[0]!.text).not.toContain('/home/');
   });
 
   it('① 推送种类清单是本文件唯一来源（防有人悄悄加种类绕过职责划分）', () => {

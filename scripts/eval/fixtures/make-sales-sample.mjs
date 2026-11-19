@@ -5,7 +5,7 @@
  *   2) 汇总-期望.xlsx 不需要——期望值写在脚本输出里，人工对着看即可。
  *
  * 用法：
- *   node scripts/eval/fixtures/make-sales-sample.mjs /home/tao/.tmp/wecom-sample
+ *   node scripts/eval/fixtures/make-sales-sample.mjs /tmp/wecom-sample
  *
  * 为什么放仓内：文件面用例（发文件 → 汇总 → 回传新表）需要一份**金额已知**的输入，
  * 否则「回传的表对不对」只能靠感觉。数据是构造的，不含任何真实业务信息。

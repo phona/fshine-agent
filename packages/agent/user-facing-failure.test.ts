@@ -88,7 +88,7 @@ describe('用户可见失败话术', () => {
       '能力清单里标记为长时间运行操作',
       '这个 operation 不在允许集合',
       '任务 task_71d08976-4b7e-4041-8976-6aeac6eeecef 失败',
-      '报错文件 /home/tao/projects/x/y.ts',
+      '报错文件 /home/fictional-user/fictional-projects/x/y.ts',
     ];
     for (const text of shouldHit) expect(internalTermIn(text), text).toBeDefined();
 
