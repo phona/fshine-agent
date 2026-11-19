@@ -24,6 +24,7 @@
  * 本模块只负责单次事实的投递与记账。
  */
 import type { ChannelRoute, DeliveryReceipt } from '@fshine/contracts';
+import { resourceLimitedText } from '../../packages/agent/src/notification-render';
 import {
   classifyFailure,
   failureMessageFor,
@@ -62,6 +63,14 @@ export interface TaskFailureFact {
   code?: string;
   /** result_unknown 单独带状态（classifyFailure 的状态分支；其余 = failed/refused）。 */
   status?: 'failed' | 'refused' | 'result_unknown';
+  /**
+   * 底账机械原因（§1 枚举；只用于归类，不进文本）。`resource_limited` = 池满/队列满的
+   * 确定性拒绝——那种失败不是「执行端没办成」，话术必须走「系统太忙，这个没接」
+   * （2026-11-19 只读审计 #18）。
+   */
+  reason?: string;
+  /** 业务名（只给资源受限那句带上「是哪件事」；其余话术不带名字）。 */
+  name?: string;
 }
 
 export interface TaskResultDeliveryOptions {
@@ -240,6 +249,10 @@ export function failureTextFor(code: string | undefined, status?: 'failed' | 're
  * 失败**归类**（安全口径的唯一实现；话术与喂模型的事实共用同一出口）：
  * result_unknown 状态优先；否则按执行层码归类，取不到 = executor_failed；
  * needs_confirmation / needs_input 一律改判 host_fault（理由见 {@link failureTextFor}）。
+ *
+ * 资源受限（底账 reason=resource_limited：池满/队列满的确定性拒绝，没进入执行）不属于
+ * 上面任何一类——它有自己的既有句子（见 {@link failureFallbackTextFor}），因此这里只负责
+ * 码/状态那一半；调用方按 reason 优先判资源受限。
  */
 export function failureKindFor(
   code: string | undefined,
@@ -249,6 +262,25 @@ export function failureKindFor(
     ? 'unknown_result'
     : classifyFailure({ code, status });
   return kind === 'needs_confirmation' || kind === 'needs_input' ? 'host_fault' : kind;
+}
+
+/**
+ * 失败降级话术（**模型回合挂掉时的兜底**；唯一入口，完成/失败投递与回合内沉默兜底共用）：
+ *   · 底账 reason=resource_limited（池满/队列满的确定性拒绝）→ 复用通知渲染器的既有那句
+ *     「系统太忙，这个没接：<业务名>。」（2026-11-19 只读审计 #18：此前这类失败落到
+ *     「没办成。再试一次，还是先放着？」——把「系统太忙」说成了「执行端没办成」，不实话）；
+ *   · 其余按种类走 `failureMessageFor`（needs_* 已在 failureKindFor 里归 host_fault）。
+ */
+export function failureFallbackTextFor(input: {
+  code?: string;
+  status?: 'failed' | 'refused' | 'result_unknown';
+  reason?: string;
+  name?: string;
+}): string {
+  if (input.reason === 'resource_limited') {
+    return resourceLimitedText(input.name);
+  }
+  return failureTextFor(input.code, input.status);
 }
 
 /** 失败事实里机械原因的上限（字符；超长截断——事实给模型读，防止把执行层原文整段灌进去）。 */
@@ -292,26 +324,33 @@ export function taskCancelledFactText(input: { name?: string }): string {
 
 /**
  * 重启对账**事实**文本（宿主拼，给模型读）：进程重启后，用户以为还在办的任务实际状态已变或
- * 说不清（`running` 且租约过期的行在启动 pump 里如实落 result_unknown，不重放）——
- *   `[重启对账]「<业务名>」这件事我这边重启过，重启后状态说不清了（做没做完无法确认）。
+ * 说不清（`running` 且租约过期的行在启动 pump 里如实落 result_unknown，不重放；
+ * `cancelling` 断电遗留的「取消孤儿」也一并回收）——
+ *   `[重启对账]「<业务名>」这件事我这边重启过，现在状态说不清（做没做完无法确认）。
  *    请如实告诉用户，别让他一直等下去，并给出下一步能做什么。`
+ * `pendingCancel` = 用户说过停、重启前没停完的那一类：主语如实点明「你要我停」，
+ * 免得用户以为停已经生效。
  *
  * 这是新增出口（此前没有任何东西告诉用户），宿主没有对应文案——唤醒不可用时只记事件
  * （不猜、不替它说）。
  */
-export function taskRestartFactText(input: { name?: string }): string {
+export function taskRestartFactText(input: { name?: string; pendingCancel?: boolean }): string {
   const subject = input.name !== undefined && input.name.trim() !== ''
     ? `「${truncatedName(input.name)}」`
     : '你交代的那件事';
-  return `[重启对账]${subject}这件事我这边重启过，重启后的状态说不清（做没做完无法确认）。`
+  const subjectClause = input.pendingCancel === true
+    ? `${subject}这件事你要我停，我重启前没停完`
+    : `${subject}这件事我这边重启过`;
+  return `[重启对账]${subjectClause}，现在状态说不清（做没做完无法确认）。`
     + '请如实告诉用户，别让他一直等下去，并给出下一步能做什么。';
 }
 
 /**
  * 单次失败投递（调用方 fire-and-forget；内部吞错并如实记账）。
- * 用户文本 = 话术模板（failureTextFor），**不含任何执行层原文/内部词**；
- * kind 由底账执行事实的 code / result_unknown 状态归类，取不到 = executor_failed。
+ * 用户文本 = 降级话术（failureFallbackTextFor：资源受限走既有「系统太忙」句，其余按 kind），
+ * **不含任何执行层原文/内部词**；kind 由底账执行事实的 code / result_unknown 状态归类，
+ * 取不到 = executor_failed；reason=resource_limited 单独成句（审计 #18）。
  */
 export async function deliverTaskFailure(fact: TaskFailureFact, options: TaskResultDeliveryOptions): Promise<boolean> {
-  return deliverText(fact, failureTextFor(fact.code, fact.status), options);
+  return deliverText(fact, failureFallbackTextFor(fact), options);
 }

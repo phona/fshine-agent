@@ -396,6 +396,43 @@ describe('长任务异步（契约 v4）', () => {
     registry2.close();
   });
 
+  it('⑤b 声明了长任务但装配没给等待端口 → 落 failed + 结构化事件（告警面），不给用户编话', async () => {
+    // 2026-11-19 只读审计 #3：这是**装配面缺陷**（部署漏接 wait/abort），用户做不了什么——
+    // 按 owner 的失败归宿规则归第 3 档「告警/开发介入」：落终态 + 一条可供部署侧告警面
+    // （`npm run alerts` 的 host_fault 规则认这个事件名）识别的事件，不投用户话术。
+    const client = new ScriptedClient(MANIFEST, 'dummy.longtask');
+    const driver = new ScriptedWorker();
+    const registry = createTaskRegistry();
+    const logs: Array<Record<string, unknown>> = [];
+    const executor = await createTaskExecutor({
+      client,
+      allowedOperations: ['dummy.longtask'],
+      workerDriver: driver,
+      registry,
+      now: () => 1_000_000,
+    });
+    const runner = createTaskRunner({
+      registry,
+      policy: new CapPolicy(),
+      executor,
+      now: () => new Date(1_000_000),
+      timers: new ManualTimers(),
+      // 故意不给 longTasks：accepted 无处推进 = 装配错误。
+      log: (line) => logs.push(line),
+    });
+    submit(runner, 'A', 'LONG 导出');
+    await flush();
+    await runner.whenIdle();
+
+    expect(registry.get('A', SCOPE).status).toBe('failed');
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: 'task_long_task_unsupported', taskId: 'A' }),
+    ]));
+    // 不重复发起（执行层只被调一次；也没有任何续跑回合）。
+    expect(client.executeCalls).toHaveLength(1);
+    expect(driver.rounds).toHaveLength(1);
+  });
+
   it('⑤ 未声明 long_running 的 operation 返回 accepted → fail-closed（落 failed + 事件）', async () => {
     const declaredPlain: CapabilityManifest = {
       contractVersion: 4,

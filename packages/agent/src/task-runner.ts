@@ -530,6 +530,13 @@ export interface SubmitInput {
 export interface PumpSummary {
   /** 本次 pump 判为 result_unknown 的过期租约任务。 */
   recovered: readonly string[];
+  /**
+   * 本次启动恢复里「取消孤儿」的任务（`cancelling` 断电遗留 → 回 running → result_unknown；
+   * 2026-11-19 唤醒切片 / 只读审计 #14）。**只在启动后的第一趟 pump 出现**（进程内正常的
+   * cancelling 一定有在飞回合在推进，不是孤儿）；装配层据此按「你要停的那件事」如实说清。
+   * 缺省（测试替身/旧装配）= 无取消孤儿（与本接口既有的可选字段同形）。
+   */
+  recoveredCancelling?: readonly string[];
   /** 本次启动执行回合的任务（认领成功）。 */
   started: readonly string[];
   /** 因许可拒绝而停止派发时的拒绝原因（任务留在 queued，等容量恢复/下次触发）。 */
@@ -1126,8 +1133,42 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     void call.finally(() => cancelCalls.delete(call));
   }
 
+  /** 启动恢复是否已跑过（取消孤儿只在第一趟 pump 扫，见下）。 */
+  let startupRecoveryDone = false;
+
+  /**
+   * 重启恢复·取消孤儿（2026-11-19 唤醒切片；只读审计 #14）：进程死在 `cancelling`（用户
+   * 说了停、执行端还没确认就断电）时，行会永远停在 cancelling——既没有在飞回合去确认，
+   * 也没有任何东西告诉用户「停没停成」（再取消撞非法边）。**只在启动后的第一趟 pump** 扫
+   * 一次（进程内正常的 cancelling 一定有在飞回合在推进，不是孤儿），且只回收「请求时刻已
+   * 超过一个租约窗口」的行（跨进程并发时另一进程正在确认的行不动——与租约过期同一保守
+   * 口径）。恢复走既有合法边：cancelling → running（「中止未获确认不得宣称取消」的回滚边）
+   * → result_unknown（做没做完/停没停成都说不清，不重放）；受影响任务并进 pump 摘要的
+   * `recoveredCancelling`，由装配层对原会话如实说清。
+   */
+  function recoverCancellingOrphans(nowMs: number): string[] {
+    const rows = registry.list !== undefined ? registry.list() : [];
+    const recovered: string[] = [];
+    for (const task of rows) {
+      if (task.status !== 'cancelling') continue;
+      const requestedAt = Date.parse(task.updatedAt);
+      if (!Number.isFinite(requestedAt) || nowMs - requestedAt < leaseMs) continue;
+      try {
+        registry.transition(task.taskId, 'running');
+        registry.markResultUnknown(task.taskId);
+        recovered.push(task.taskId);
+      } catch (error) {
+        // 并发下状态已被别的进程改变：跳过（不是本进程的回收目标），不推翻已发生的事实。
+        report(task.taskId, error);
+      }
+    }
+    return recovered;
+  }
+
   function pump(): PumpSummary {
     const recovered = registry.expireLeases(now().toISOString()).map((task) => task.taskId);
+    const recoveredCancelling = startupRecoveryDone ? [] : recoverCancellingOrphans(now().getTime());
+    startupRecoveryDone = true;
     let waiting: WaitingScan | undefined;
     let nextDue: number | undefined;
     if (dueConsumerEnabled) {
@@ -1198,6 +1239,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     }
     return {
       recovered,
+      recoveredCancelling,
       started,
       ...(rejection === undefined ? {} : { rejection }),
       ...(waiting === undefined ? {} : { timedOutWaiting: waiting.timedOut }),
@@ -1314,6 +1356,11 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         // 释放）后交给等待端口推进。未注入等待端口 = 装配错误：不能留下无人推进的 running
         // 任务，确定性失败并如实说明。
         if (!longTaskEnabled) {
+          // 归宿（owner 2026-11-19 失败归宿规则第 3 档「告警/开发介入」）：这是**装配面缺陷**
+          // ——部署声明了长任务却没给等待端口，用户做不了什么，所以**不给用户编话**；落终态
+          // 的同时记一条结构化事件（进部署侧告警面：`npm run alerts` 的 host_fault 规则
+          // 认这个事件名），运维可见、可查。
+          log?.({ event: 'task_long_task_unsupported', taskId });
           registry.fail(taskId, '长任务需要注入 LongTaskPort（wait/abort）与底账 accepted 能力才能推进。');
           return;
         }

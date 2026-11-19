@@ -539,20 +539,24 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   /**
    * 快活失败任务的失败事实（回合末兜底投递用；与失败回调同源）：终局 failed（含
    * result_unknown；资源拒绝也是 failed 终局）→ 执行事实的 error.code（failureCodeOf）
-   * + result_unknown 状态，两个输入与失败回调逐字同源；非失败终局（取消/超时/未执行——
+   * + result_unknown 状态 + 底账机械原因（reason=resource_limited 时话术必须走「系统太忙」
+   * ——2026-11-19 只读审计 #18），输入与失败回调逐字同源；非失败终局（取消/超时/未执行——
    * 窗口内不可达，仅注入式执行器能造）与底账读不到 = undefined（不替它们说话，交回
    * 既有终态推送面）。
    */
-  const taskFailureFactOf = (taskId: string): { code?: string; status?: 'result_unknown' } | undefined => {
+  const taskFailureFactOf = (taskId: string): { code?: string; status?: 'result_unknown'; reason?: string; name?: string } | undefined => {
     try {
       const record = (taskRegistry as unknown as {
-        get(id: string): { status?: string; reason?: string | null };
+        get(id: string): { status?: string; reason?: string | null; request?: string; name?: string | null };
       }).get(taskId);
       if (record.status !== 'failed') return undefined;
       const code = failureCodeOf(taskId);
+      const name = taskNameOf(taskId, record.request ?? '');
       return {
         ...(code === undefined ? {} : { code }),
         ...(record.reason === 'result_unknown' ? { status: 'result_unknown' as const } : {}),
+        ...(record.reason === undefined || record.reason === null ? {} : { reason: record.reason }),
+        ...(name === undefined ? {} : { name }),
       };
     } catch {
       return undefined;
@@ -1517,6 +1521,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // 判等待、执行层 one-shot 绑定与 A2b 同对象锁等动作边界一律不动）。
       let reply = turn.reply;
       const files = turn.files ?? [];
+      /**
+       * 模型自己有没有说话（**在看文件投递结果之前**取）——兜底判据只看这一条事实。
+       * 2026-11-19 只读审计 #8：此前兜底条件是「正文空 **且** 无文件」，于是「快活失败 +
+       * 模型沉默 + 本回合有文件」时失败话术永不送达（用户只看到文件，不知道失败了）。
+       * 沉默与有没有文件无关：有文件也照样要如实说一句。
+       * 两种形状都算沉默：①正文空；②正文被会话出口清理成空、由会话用文件通知
+       * （`FILES_GENERATED_NOTICE`）顶上的情形（同一个常量、本文件下方投递话术替换也按它判）。
+       */
+      const modelSilent = turn.reply.trim() === '' || turn.reply === FILES_GENERATED_NOTICE;
       let delivery: { status: string; files: number } | undefined;
       if (files.length > 0) {
         const outcome = await deliverTurnFiles({
@@ -1538,14 +1551,16 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         }
       }
       // 豁免不能是静默（2026-11-19 复核缺陷的出口）：交办的任务在短等待窗口内完成（快活，
-      // 结果已交给模型转述）而模型**全程没说话**（正文空、无文件）——完成回调按 relayed
-      // 抑制播报的前提（模型已经说了）不成立，用户会什么都收不到。不得判回合失败（任务
-      // 已由执行端确认完成：「请稍后再试」是假话，对写操作还会诱导重做一次写），也不得
-      // 沉默——按既有降级兜底**如实报完成事实**（taskCompletionFallbackText：「<业务名>」
-      // 办好了：<结果>；全方案唯一允许的宿主用户文案），走 deliverTaskResult 同一投递面
-      // 与四必守记账。完成回调的 relayed 抑制照旧（本分支已把事实送达，不重复播报）；
-      // 宿主的话只走主动投递面，渠道终帧（模型的话路）不被替换。
-      if (reply.trim() === '' && files.length === 0) {
+      // 结果已交给模型转述）而模型**全程没说话**——完成回调按 relayed 抑制播报的前提
+      // （模型已经说了）不成立，用户会什么都收不到。不得判回合失败（任务已由执行端确认完成：
+      // 「请稍后再试」是假话，对写操作还会诱导重做一次写），也不得沉默——按既有降级兜底
+      // **如实报完成事实**（taskCompletionFallbackText：「<业务名>」办好了：<结果>；全方案
+      // 唯一允许的宿主用户文案），走 deliverTaskResult 同一投递面与四必守记账。完成回调的
+      // relayed 抑制照旧（本分支已把事实送达，不重复播报）；宿主的话只走主动投递面，渠道
+      // 终帧（模型的话路）不被替换。
+      // 判据 = **模型沉默**（与有没有文件无关；2026-11-19 只读审计 #8：带文件时失败话术
+      // 永不送达是静默终局的一种）。
+      if (modelSilent) {
         for (const relayedTaskId of turn.relayedTaskIds ?? []) {
           const fallbackText = taskCompletionFallbackOf(relayedTaskId);
           // 底账没有结果原文（生产装配不可达：relayed 的完成行必有非空汇报/归档；空汇报落
@@ -1664,11 +1679,14 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   };
 
   // 重启恢复 + 重启对账（2026-11-19 唤醒切片）：新进程第一次 pump（queued 重领 / 过期租约 →
-  // result_unknown 不重放 / completed 不重跑）放在装配完成之后——唤醒出口、提醒端口与会话
-  // 工厂都已就绪，pump 里可能触发的「久无动静」提醒与这里逐条发起的重启唤醒都不会撞上未定义。
+  // result_unknown 不重放 / completed 不重跑 / `cancelling` 断电遗留 → 取消孤儿回收）放在
+  // 装配完成之后——唤醒出口、提醒端口与会话工厂都已就绪，pump 里可能触发的「久无动静」提醒
+  // 与这里逐条发起的重启唤醒都不会撞上未定义。
   if (runner !== undefined) {
-    startupRecovered = runner.pump().recovered;
-    for (const taskId of startupRecovered) {
+    const pump = runner.pump();
+    startupRecovered = pump.recovered;
+    const pendingCancel = new Set(pump.recoveredCancelling ?? []);
+    for (const taskId of [...startupRecovered, ...(pump.recoveredCancelling ?? [])]) {
       const scope = taskScopeOf(taskId);
       if (scope === undefined) {
         // 底账读不到（行已清/异常形状）：不猜会话，只记事件。
@@ -1676,7 +1694,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         continue;
       }
       const name = taskNameOf(taskId, scope.request);
-      const factText = taskRestartFactText({ ...(name === undefined ? {} : { name }) });
+      // 取消孤儿（用户说过停）按「你要我停，我重启前没停完」如实说——别让用户以为停已生效。
+      const factText = taskRestartFactText({
+        ...(name === undefined ? {} : { name }),
+        ...(pendingCancel.has(taskId) ? { pendingCancel: true } : {}),
+      });
       // 逐条 fire-and-forget（经会话链，与用户回合串行）：不阻塞启动、不改变任务事实。
       // 宿主侧**没有**这一条的文案（新增出口）：唤醒不可用/失败 = 只记事件（不静默猜）。
       void enqueueSessionTurn(`${scope.principalId}\u0000${scope.sessionId}`, async () => {

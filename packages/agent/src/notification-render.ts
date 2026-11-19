@@ -90,8 +90,20 @@ export function renderNotification(input: { kind: NotificationKind; payload: Not
     case 'timed_out':
       return assemble(`${REASON_TEXT.timeout}：${NAME_PLACEHOLDER}。`, name);
     case 'resource_limited':
-      return assemble(`${REASON_TEXT.resource_limited}：${NAME_PLACEHOLDER}。`, name);
+      return resourceLimitedText(name);
     case 'cancelled':
       return assemble(`${REASON_TEXT.cancelled_by_user}：${NAME_PLACEHOLDER}。`, name);
   }
+}
+
+/**
+ * 资源受限（池满/队列满的确定性拒绝）的既有用户文案——渲染器是唯一来源；失败降级出口
+ * 对「reason=resource_limited 的失败」复用同一句（2026-11-19 只读审计 #18：此前那类失败
+ * 在模型沉默时拿到的是「没办成。再试一次，还是先放着？」——不是这件事的实话）。
+ * 尾句 = 既有动作句（「再试一次，还是先放着？」的等一会儿版：资源受限的实话是等一下，
+ * 不是立刻重试）——owner 的归宿规则要求「一句话 + 一个动作」，资源类失败落在「告诉用户」档。
+ */
+export function resourceLimitedText(name?: string): string {
+  const subject = name !== undefined && name.trim() !== '' ? name : '未命名任务';
+  return assemble(`${REASON_TEXT.resource_limited}：${NAME_PLACEHOLDER}。等一会儿再试一次，还是先放着？`, subject);
 }
