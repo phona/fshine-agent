@@ -1081,6 +1081,35 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // 投递失败/无端口时以话术如实纠正正文，但不判回合失败（文件未送达 ≠ 回报失败）。
       let reply = turn.reply;
       const files = turn.files ?? [];
+      /**
+       * 「只交办」回合静默（确定性宿主规则；owner 2026-11-19）：本回合只交办了任务
+       * （taskIds 非空）且**没有任何执行事实、也没把结果交回模型**——模型这段文本就是
+       * 「已经交给后台在办」那类受理卡片，**不发终帧**（用户静默到结果由完成投递送达）；
+       * 只记一条结构化事件（taskIds/replyBytes），不把卡片文本进日志。
+       *
+       * 例外（一律不许静默，`hasResultOrExecution`）：
+       *   · 本回合有执行事实（executions 非空，含 needs_confirmation / needs_input 的写确认
+       *     提案与补充问题）——那些必须让用户看见，照常送达；
+       *   · 本回合已把某任务结果/失败交回模型（relayedTaskIds / pushSuppressedTaskIds 非空
+       *     ——快活完成、快活失败、等补充）：那段文本是**结果/说明**而不是受理卡片，照常送达。
+       * 空回复的既有行为不变（下面照常判回合失败）。
+       */
+      const hasResultOrExecution = turn.executions.length > 0
+        || (turn.relayedTaskIds?.length ?? 0) > 0
+        || (turn.pushSuppressedTaskIds?.length ?? 0) > 0;
+      const dispatchSilent = turn.taskIds.length > 0 && !hasResultOrExecution && reply.trim() !== '';
+      if (dispatchSilent) {
+        log({
+          event: 'turn_dispatch_silent',
+          principalId,
+          sessionId,
+          speakerId,
+          messageId: message.messageId,
+          taskIds: [...turn.taskIds],
+          replyBytes: Buffer.byteLength(reply, 'utf8'),
+        });
+        reply = '';
+      }
       let delivery: { status: string; files: number } | undefined;
       if (files.length > 0) {
         const outcome = await deliverTurnFiles({
@@ -1106,8 +1135,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // message_done。**「只有文件、正文为空」不判失败**（v8 §7 四必守 #2）：文件走投递面，
       // 正文空帧由投递事实话术/宿主兜底话术补足——判失败就走不到投递了。放在这里抛出 =
       // 走既有的「回合失败」路径（失败不进重投缓存，渠道适配器的 handler 异常分支回失败
-      // 话术），不新造机制、不重试。
-      if (reply.trim() === '' && files.length === 0) {
+      // 话术），不新造机制、不重试。**「只交办回合静默」不是模型失败**（上面已确定性判定）：
+      // 那种回合本就不该有正文帧，跳过这条失败判定。
+      if (!dispatchSilent && reply.trim() === '' && files.length === 0) {
         throw new Error('本回合未产出可用回复（模型侧失败），本回合未完成。');
       }
       return {

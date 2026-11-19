@@ -189,7 +189,8 @@ describe('background 渠道 + 附件交办（createServer 默认装配 + 真 dum
 
       // ② 文字消息激活 pending 并起回合：Main 交办（background，0 窗口）。
       const reply = await fx.server.handler(incoming('m-go', '统计这份名册'));
-      expect(reply).toBe('已受理，后台办理中。');
+      // 「只交办」回合静默（owner 2026-11-19）：模型那段受理卡片不发终帧（reply 为空）。
+      expect(reply).toBe('');
 
       const receipt = fx.getReceipt();
       expect(receipt).toBeDefined();

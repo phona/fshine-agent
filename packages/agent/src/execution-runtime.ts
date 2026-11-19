@@ -565,9 +565,10 @@ export interface RuntimeOptions {
   /** P6：后台任务运行器（async 模式必需；submit→pump，执行/恢复/取消由它承担）。 */
   taskRunner?: TaskRunner;
   /**
-   * B 切片（工单回执收敛）：task_run 受理后的短等待窗口（ms）。缺省取 runtime 配置解析值
-   * （1500）；0 = 不等直接后台。窗口内执行端确认完成 → 结果同回合交给模型（与 inline 同
-   * 形状）；超窗 → 机械事实受理回执（不含工单编号），任务留后台推进。
+   * B 切片（工单回执收敛）：task_run 受理后的短等待窗口（ms）。缺省取 runtime 配置解析值；
+   * 0 = 不等直接后台。窗口内执行端确认完成 → 结果同回合交给模型（与 inline 同形状）；
+   * 超窗 → 只回机械受理事实（taskId/name/status/accepted:true，**无给用户的回执话术**），
+   * 任务留后台推进（交办不再固定回执；久到消耗耐心才由 10/30 分钟两档出声）。
    */
   taskRunWaitMs?: number;
   /**
@@ -896,43 +897,6 @@ export function renderWorkerFileManifest(
  */
 export const WORKER_SNAPSHOT_COST_NOTE =
   '每个 operation 标注单次估时与重量；一次任务发起 N 次执行，等待与失败面按 N 倍增长。';
-
-/**
- * 受理回执话术（B 切片去编号 + 预期契约 2026-11-18 owner 定）：只说「谁来办 + 大概多久 +
- * 办完发你」；估不出来就只说办完发你（不编造时间、不报进度、不含工单编号）。
- */
-export function backgroundTaskReceiptNotice(estimatedMinutes?: number): string {
-  return estimatedMinutes === undefined
-    ? '这个我来办，办完发你。'
-    : `这个我来办，大概 ${estimatedMinutes} 分钟，办完发你。`;
-}
-
-/**
- * 估时锚点（预期契约）：执行层自述 `est_seconds` 累加，取整到分钟（向上，最小 1）。
- *
- * 2026-11-19 修正：**排除声明 `long_running` 的 operation**——它们的时长不属于「受理回执」
- * 的预期（长任务本来就靠 10/30 分钟两档主动说明）。原先把允许集合里所有 operation 的
- * est 相加，dummy 夹具里带一个 1800 秒的长任务，于是每条回执都变成「大概 32 分钟」——
- * 对一个 3 条记录的查询是纯编造，还让模型误以为必须转到后台并去翻旧任务（live 实测）。
- * 仍只当锚点用，文案必须带「大概」；算不出来（无声明/超过 30 分钟）→ undefined，回执只说「办完发你」。
- */
-export function estimatedMinutesOf(manifest: CapabilityManifest): number | undefined {
-  let totalSeconds = 0;
-  let declared = false;
-  for (const operation of manifest.operations) {
-    if (operation.estimatedSeconds === undefined) continue;
-    if (operation.long_running === true) continue;
-    totalSeconds += operation.estimatedSeconds;
-    declared = true;
-  }
-  if (!declared || totalSeconds <= 0) return undefined;
-  const minutes = Math.max(1, Math.ceil(totalSeconds / 60));
-  // 超过半小时的估算对「受理回执」没有意义（用户自己都会来问），且极易离谱 → 不估。
-  return minutes > ESTIMATE_MAX_MINUTES ? undefined : minutes;
-}
-
-/** 受理回执估时上限（分钟）：超过就不说时长，只说「办完发你」。 */
-const ESTIMATE_MAX_MINUTES = 30;
 
 /** 终态集合（窗口内落定判定）。waiting_user 不是终态——等待接续仍属后台推进。 */
 const SETTLED_TASK_STATUSES: ReadonlySet<string> = new Set([
@@ -1607,8 +1571,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     contractVersion: manifest.contractVersion,
     operations: manifest.operations.filter((operation) => allowed.has(operation.name)),
   };
-  /** 受理回执的估时锚点（执行层自述 est_seconds 累加；没有声明 = undefined）。 */
-  const receiptEstimateMinutes = estimatedMinutesOf(workerManifest);
   /** 契约 v4：只有声明 long_running 的 operation 可以返回 accepted（否则协议违约 fail-closed）。 */
   const longRunningOperations = new Set(
     workerManifest.operations.filter((operation) => operation.long_running === true).map((operation) => operation.name),
@@ -2371,10 +2333,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       });
       taskRunner!.pump();
       const name = accepted.name ?? deriveTaskName(request);
-      // B 切片（工单回执收敛）：短等待窗口（runtime.taskRunWaitMs，缺省 1500ms；0 = 不等）。
-      // 窗口内执行端确认 completed → 与 inline 同形状把结果交给模型（同回合、零受理回执、
-      // 零主动投递——结果不重复发两遍）；超窗 → 机械事实受理回执（不含工单编号），任务留
-      // 后台推进，完成后由宿主完成投递面把结果发回原会话。
+      // B 切片（工单回执收敛）：短等待窗口（runtime.taskRunWaitMs，缺省 8000ms；0 = 不等）。
+      // 窗口内执行端确认 completed → 与 inline 同形状把结果交给模型（同回合、零主动投递——
+      // 结果不重复发两遍）；超窗 → 只回机械受理事实（taskId/name/status/accepted:true，
+      // **不带任何给用户看的回执话术**——owner 2026-11-19：交办不再给固定回执，久到消耗耐心
+      // 才出声，见 server handler 的 turn_dispatch_silent），任务留后台推进，完成后由宿主
+      // 完成投递面把结果发回原会话。
       if (taskRunWaitMs > 0) {
         const settled = await waitForTaskSettled(taskId, taskRunWaitMs);
         if (settled !== undefined) {
@@ -2400,7 +2364,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         name,
         status: live.status,
         accepted: true,
-        notice: backgroundTaskReceiptNotice(receiptEstimateMinutes),
       };
     }
 
@@ -2495,7 +2458,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           name: current.name ?? deriveTaskName(current.request),
           status: 'running',
           accepted: true,
-          notice: '这项任务已在执行层受理，完成后会继续处理并告知结果。',
         };
       }
       if (workerResult.text.trim() === '') {

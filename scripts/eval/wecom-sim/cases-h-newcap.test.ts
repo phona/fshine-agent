@@ -3,7 +3,7 @@
  *
  * 这三条原来登记成「人工抽查」，其实都能自动化——装配链完整（真渠道适配 + 真 server +
  * 真 dummy 子进程），所以判据全部落在用户可见结果与底账事实上：
- *   W-42 长任务（契约 v4）：受理回执即时、任务在后台挂起等结果、完成后主动投递一次；
+ *   W-42 长任务（契约 v4）：只交办回合对用户静默、任务在后台挂起等结果、完成后主动投递一次；
  *        期间用户发下一句不被占住（同一会话第二回合照常回）。
  *   W-43 预期式提醒：任务超过首档阈值仍无事件 → **恰一条**「这件事比预计久了…」；
  *        群聊同条件**零**主动提醒（跨 principal 泄漏面）。长任务也要发（受理后租约被清，
@@ -59,7 +59,7 @@ function longTaskWorkerResponses(seconds: number): readonly SimResponse[] {
 }
 
 describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
-  it('W-42 长任务：受理即回执、后台挂起不占会话、完成后主动投递；执行层只被调一次', async () => {
+  it('W-42 长任务：只交办回合静默、后台挂起不占会话、完成后主动投递；执行层只被调一次', async () => {
     const sim = await startWecomSim({
       label: 'w42',
       taskDispatch: 'async',
@@ -71,21 +71,21 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
       const taskText = '让 dummy 跑一个要很久的导出';
       sim.book.mainTurn(taskText, [
         toolCallAssistant('task_run', { task: taskText }),
-        // 受理回执由宿主给出（task_run 的 notice），模型逐字转述。
+        // 交办回合模型会自己编一句受理卡片；new 口径下这段不发终帧（宿主边界静默）。
+        // 顺带绊线：受理事实不得再带回执话术（notice）——带了立即红。
         (call) => {
           const result = lastToolResultJsonOf(call.messages);
-          const notice = typeof result?.['notice'] === 'string' ? result['notice'] : '';
-          if (notice === '') throw new Error('Main 没有拿到受理回执。');
-          return textAssistant(notice);
+          if (result?.['accepted'] !== true) throw new Error('Main 没有拿到受理事实（accepted:true）。');
+          if (result !== undefined && 'notice' in result) throw new Error('受理事实不应再带受理回执话术（notice）。');
+          return textAssistant('好的，这个导出我交给后台去跑，好了就发给你。');
         },
       ]);
       sim.book.workerTask(taskText, longTaskWorkerResponses(1));
 
       const messageId = sim.sendText(taskText);
-      await sim.waitFor('W-42 受理回执终帧', () => sim.finalBubbles().length === 1, 10_000);
-      const receipt = sim.finalBubbles()[0]!.content;
-      expect(receipt).toContain('这个我来办');
-      expect(receipt).toContain('办完发你');
+      // 只交办回合静默：回合已结束（message_done 落定）但**零终帧**（卡片文本不进用户面）。
+      await sim.waitFor('W-42 交办回合结束（静默）', () => sim.doneOf(messageId) !== undefined, 10_000);
+      expect(sim.finalBubbles()).toHaveLength(0);
 
       const taskId = sim.doneOf(messageId)!.taskIds[0]!;
       // 受理后：任务 running 但租约已释放（长任务让出槽位/租约，不该被当过期的执行中回合）。
@@ -97,7 +97,7 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
       // 期间用户还能聊别的：同一会话第二回合照常拿到回复（不被长任务占住）。
       sim.book.mainTurn('顺便问一句：现在几点了？', [textAssistant('这个我查不了时间，但我在的，随时说。')]);
       sim.sendText('顺便问一句：现在几点了？');
-      await sim.waitFor('W-42 期间第二回合有回复', () => sim.finalBubbles().length === 2, 10_000);
+      await sim.waitFor('W-42 期间第二回合有回复', () => sim.finalBubbles().length === 1, 10_000);
 
       // 长任务在后台跑完 → 宿主主动投递一次结果。
       await sim.waitFor('长任务完成并主动投递', () => sim.sdk.proactiveTexts.length === 1, 30_000);

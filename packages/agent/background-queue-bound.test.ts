@@ -166,11 +166,11 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
     const rows = receipts.map(receiptOf);
     expect(rows.every((receipt) => receipt.accepted === true)).toBe(true);
     // B 切片：status = 受理后实时机械事实（首个已被认领 running，其余 2 个 queued 排队）；
-    // 受理仍是异步语义（任务留后台），话术去编号（不含 #）。
+    // 受理仍是异步语义（任务留后台）。owner 2026-11-19：受理只回机械事实（taskId/name/status/
+    // accepted），**无回执话术**（notice）、无编号。
     expect(rows.map((receipt) => receipt.status)).toEqual(['running', 'queued', 'queued']);
-    expect(rows.every((receipt) => receipt.notice?.includes('这个我来办'))).toBe(true);
-    expect(rows.every((receipt) => receipt.notice?.includes('办完发你'))).toBe(true);
-    expect(rows.every((receipt) => !(receipt.notice ?? '').includes('#'))).toBe(true);
+    expect(rows.every((receipt) => !('notice' in receipt))).toBe(true);
+    expect(rows.every((receipt) => typeof receipt.taskId === 'string')).toBe(true);
     // 1 个进入执行（唯一并发位），其余 2 个 = queueCapacity 个排队位。
     expect(stack.executor.started).toHaveLength(1);
     expect(queuedRows(stack)).toBe(2);

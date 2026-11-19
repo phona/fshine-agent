@@ -1,8 +1,10 @@
 /**
  * B 切片（工单回执收敛）· server 装配级（假执行器 + 假投递面 + 小窗口真实轮询）：
- *   a. 快活（窗口内完成）→ 同回合回复带结果（模型转述），零受理回执、零主动投递
+ *   a. 快活（窗口内完成）→ 同回合回复带结果（模型转述），零主动投递
  *      （sendText 零调用、零 sent 事件）；message_done 带 operations 计数；
- *   b. 慢活（超窗口）→ 受理话术不含 # 与编号数字；任务继续在后台并最终完成；
+ *   b. 慢活（超窗口）→ **「只交办」回合静默**（owner 2026-11-19：不发终帧、reply 为空），
+ *      落一条 `turn_dispatch_silent`（taskIds/replyBytes）；task_run 只回机械受理事实
+ *      （accepted/status，无回执话术、无编号）；任务继续在后台并最终完成；
  *   c. 慢活完成 → 主动投递恰好一次（内容来自任务结果；live 记 sent）；silent 模式
  *      零投递、记 suppressed、不记 sent；
  *   e. 无渠道推送面 = 同步装配：message_done 的 operations 计数与实际执行次数一致。
@@ -128,6 +130,36 @@ function executingWorker(calls: number): TurnDriver {
   };
 }
 
+/** 假 inline Worker：发起一次写操作（执行层回 needs_confirmation → 提案回合）。 */
+function confirmingWorker(): TurnDriver {
+  return {
+    async run(input) {
+      await input.exec(EXECUTE_OPERATION_TOOL, { operation: 'dummy.commit', args: { '--collection': 'alpha' } });
+      return { text: '执行层要求确认这次写入。', messages: [...input.messages] };
+    },
+  };
+}
+
+/** 假执行面：只读查询 completed + 写操作 dummy.commit 回 needs_confirmation（提案）。 */
+class ConfirmationClient implements ExecutionClient {
+  async capabilities(): Promise<CapabilityManifest> {
+    return {
+      contractVersion: 1,
+      operations: [
+        { name: 'dummy.query', label: 'query', args: [] },
+        { name: 'dummy.commit', label: 'commit', args: [] },
+      ],
+    };
+  }
+  async execute(): Promise<ExecutionOutcome> {
+    return {
+      status: 'needs_confirmation',
+      confirmation: { handle: 'h-1', summary: '将把 alpha 集合 W1 标记为已完成（1 条，不可撤销）' },
+      data: {},
+    };
+  }
+}
+
 class ImmediateExecutor implements TaskExecutor {
   constructor(private readonly resultText: string) {}
   readonly calls: Array<{ taskId: string }> = [];
@@ -207,8 +239,9 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
     }
   });
 
-  it('b. 慢活：受理话术不含 # 与编号数字；任务继续在后台并最终完成', async () => {
+  it('b. 慢活：只交办回合对用户静默（零终帧），任务继续在后台完成并主动投递结果', async () => {
     const dir = tempDir();
+    const delivery = new FakeTextDelivery('live');
     const logs: Array<Record<string, unknown>> = [];
     const records: ServerDriverRecord[] = [];
     const plans = new Map<string, ServerPlan>([
@@ -222,32 +255,81 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
       createDrivers: () => ({ mainDriver: plannedMain(plans, records), workerDriver: { async run() { throw new Error('（测试）不该调用'); } } }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       taskExecutor: executor,
-      fileDelivery: new FakeTextDelivery('live'),
+      fileDelivery: delivery,
       logger: (line) => logs.push(line),
     });
     const registry = createSqliteTaskRegistry(path.join(dir, 'state.db'), { readOnly: true });
     try {
       const reply = await server.handler(incoming('user-a', 'conv-a', 'msg-1', '交办一件要跑一阵的事'));
-      expect(reply).toBe('已交办，正在后台办，完成后发你。');
-      // 受理回执：谁办 + 办完发你，话术去编号
+      // 「只交办」回合静默（owner 2026-11-19）：模型那段「已交办…」不发终帧（reply 为空）。
+      expect(reply).toBe('');
+      // 落一条结构化事件（带 taskIds/replyBytes；不发卡片文本进日志）。
+      const silent = logs.find((line) => line['event'] === 'turn_dispatch_silent') as Record<string, unknown> | undefined;
+      expect(silent).toBeDefined();
+      expect(Array.isArray(silent!['taskIds']) && (silent!['taskIds'] as unknown[]).length === 1).toBe(true);
+      expect(typeof silent!['replyBytes']).toBe('number');
+      expect((silent!['replyBytes'] as number)).toBeGreaterThan(0);
+      // 受理事实（task_run 返回）：只给机械事实，不带回执话术、不带编号
       const receipt = records[0]!.execResults[0] as Record<string, unknown>;
       expect(receipt['accepted']).toBe(true);
       expect(receipt['status']).toBe('running');
-      const notice = String(receipt['notice']);
-      expect(notice).toContain('这个我来办');
-      expect(notice).toContain('办完发你');
-      expect(notice).not.toContain('#');
-      expect(notice).not.toContain('1');
+      expect(receipt).not.toHaveProperty('notice');
       expect(receipt).not.toHaveProperty('taskNo');
-      // 任务继续在后台并最终完成
+      // 静默不等于丢结果：任务后台完成 → 结果经主动投递面送达原会话。
+      expect(delivery.sentTexts).toHaveLength(0);
       executor.settle({ kind: 'completed', resultText: '长任务结果：核对完成，共 3 条。' });
       const taskId = String(receipt['taskId']);
       await vi.waitFor(() => {
         expect(registry.get(taskId, { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' }).status).toBe('completed');
       }, { timeout: 5000 });
+      await vi.waitFor(() => expect(delivery.sentTexts).toHaveLength(1), { timeout: 5000 });
+      expect(delivery.sentTexts[0]!.text).toContain('长任务结果：核对完成，共 3 条。');
+      expect(delivery.sentTexts[0]!.route).toEqual({ channel: 'wecom', conversationId: 'conv-a' });
     } finally {
       executor.settle({ kind: 'failed', reason: '（测试清理）' });
       registry.close();
+      await server.close();
+    }
+  });
+
+  it('b2. 提案/补充问题回合不被静默：本回合有执行事实（needs_confirmation）→ 用户仍看到提案', async () => {
+    const dir = tempDir();
+    const logs: Array<Record<string, unknown>> = [];
+    const records: ServerDriverRecord[] = [];
+    const proposal = '执行层需要你确认：将把 alpha 集合 W1 标记为已完成（1 条，不可撤销）。';
+    const plans = new Map<string, ServerPlan>([
+      ['把 alpha 集合 W1 标记为已完成', { delegates: ['把 alpha 集合 W1 标记为已完成'], reply: `${proposal}回「确认」我就提交。` }],
+    ]);
+    const server = await createServer({
+      env: { LLM_MODEL: 'test-model' },
+      // 缺省无 fileDelivery/notificationSink → 同步装配（本回合内委派 + 执行），提案落本回合 executions。
+      // operator 角色 + allowWriteOperations：允许集合含写操作 dummy.commit（needs_confirmation 提案面）。
+      config: {
+        principals: { 'wecom:user-a': { enabled: true, role: 'operator' } },
+        contextProfiles: { dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: [] } },
+        channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
+        sessionTtlMs: 86_400_000,
+        runtime: { allowWriteOperations: true },
+      },
+      dbPath: path.join(dir, 'state.db'),
+      createDrivers: () => ({ mainDriver: plannedMain(plans, records), workerDriver: confirmingWorker() }),
+      createExecutionFace: async () => ({
+        client: new ConfirmationClient(),
+        allowedOperations: ['dummy.query', 'dummy.commit'],
+        readOnlyOperations: ['dummy.query'],
+      }),
+      logger: (line) => logs.push(line),
+    });
+    try {
+      const reply = await server.handler(incoming('user-a', 'conv-a', 'msg-1', '把 alpha 集合 W1 标记为已完成'));
+      // 本回合 taskIds>0 但 executions 非空（needs_confirmation）→ 静默规则的例外生效，提案照常送达。
+      const receipt = records[0]!.execResults[0] as Record<string, unknown>;
+      expect(receipt).not.toHaveProperty('notice');
+      expect(reply).toContain('确认');
+      expect(reply).toContain('alpha');
+      // 例外回合不落静默事件。
+      expect(logs.some((line) => line['event'] === 'turn_dispatch_silent')).toBe(false);
+    } finally {
       await server.close();
     }
   });

@@ -175,7 +175,8 @@ describe('片 1：后台任务产物投递（server 级）', () => {
     });
     try {
       const reply = await server.handler(incoming('msg-bg-1', '把数据做成表格发我'));
-      expect(reply).toContain('已受理');
+      // 「只交办」回合静默（owner 2026-11-19）：模型那段受理卡片不发终帧（reply 为空）。
+      expect(reply).toBe('');
 
       // 后台完成 → 文件经交付面（sendToConversation）投递；文本经 sendText 单独送达。
       await vi.waitFor(() => {

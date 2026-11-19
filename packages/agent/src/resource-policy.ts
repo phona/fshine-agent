@@ -165,14 +165,18 @@ export interface ResolvedRuntimeConfig {
   readonly attachmentNudgeAfterMs: number;
   /**
    * task_run 受理后的短等待窗口（ms；B 切片 2026-11-18）：窗口内执行端确认完成 → 结果
-   * 同回合交给模型；超窗 → 机械事实受理回执（不含工单编号），任务留后台推进。0 = 不等。
-   * 消费点在 execution-runtime 的委派受理路径。
+   * 同回合交给模型；超窗 → 只回机械受理事实（无给用户的回执话术），任务留后台推进。
+   * 0 = 不等。消费点在 execution-runtime 的委派受理路径。
    */
   readonly taskRunWaitMs: number;
   /**
    * 后台任务「比预计久了」提醒阈值（ms，2026-11-18 预期契约）：任务 running 且从认领
    * 时刻起超过本阈值、尚未提醒过 → 宿主主动发一条（只发一次）；0 = 关闭。缺省 10 分钟。
    * 消费点在 TaskRunner（装配方注入解析值；runner 不读原始配置）。
+   *
+   * owner 2026-11-19：这一档就是「事情久到开始消耗用户耐心」的声音——交办本身不再给
+   * 固定受理回执（只交办回合对用户静默，见 server handler 的 turn_dispatch_silent），
+   * 只有真跑久了才由本档（10 分钟）主动出声。**缺省 10 分钟不动**。
    */
   readonly longRunningNoticeMs: number;
   /**

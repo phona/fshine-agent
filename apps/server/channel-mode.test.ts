@@ -473,8 +473,9 @@ describe('shadow / offline 的 file_delivery 事件：sent 数 = 0、suppressed 
         deliveryMode: 'silent',
       });
       expect(run.logs.filter((line) => line['event'] === 'file_delivery' && line['status'] === 'sent')).toHaveLength(0);
-      // 用户收到的正文不被「未送达」污染（静默部署本就无真实收件人）。
-      expect(run.reply).toBe('汇总完成。');
+      // 「只交办」回合静默（owner 2026-11-19）：模型那段受理卡片不发终帧（reply 为空），
+      // 也就不会被「未送达」话术污染（静默部署本就无真实收件人）。
+      expect(run.reply).toBe('');
       if (mode === 'offline') {
         expect(run.clientFactoryCalls).toBe(0); // 全程没有建立 WS 连接
         expect(run.sdk.connected).toBe(0);
