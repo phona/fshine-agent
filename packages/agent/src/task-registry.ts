@@ -590,8 +590,11 @@ export interface TaskRegistry {
   get(taskId: string, scope: TaskScope): TaskRecord;
   /** scope 缺省 = 全部任务；给出时只返回该 principal + session 的任务（不跨会话泄漏）。 */
   list(scope?: TaskScope): readonly TaskRecord[];
-  /** 只读 waiting_user 行（到期扫描用：避免每趟 pump 全表分配）。 */
-  listWaiting(): readonly TaskRecord[];
+  /**
+   * 只读 waiting_user 行（到期扫描用：避免每趟 pump 全表分配）。
+   * 给出 scope 时只返回该 principal + session 的等待行（交办前的「有没有待确认提案」检查走索引）。
+   */
+  listWaiting(scope?: TaskScope): readonly TaskRecord[];
   /**
    * 只读 running 行（预期契约 2026-11-18：长时间提醒扫描用；避免每趟 pump 全表分配）。
    * 只读状态事实，不做判定。
@@ -829,8 +832,12 @@ export function createTaskRegistry(): TaskRegistry {
     get(taskId, scope) {
       return require(taskId, scope);
     },
-    listWaiting() {
-      return [...tasks.values()].filter((task) => task.status === 'waiting_user').map((task) => ({ ...task }));
+    listWaiting(scope) {
+      return [...tasks.values()]
+        .filter((task) => task.status === 'waiting_user'
+          && (scope === undefined
+            || (task.principalId === scope.principalId && task.sessionId === scope.sessionId)))
+        .map((task) => ({ ...task }));
     },
     listRunning() {
       return [...tasks.values()].filter((task) => task.status === 'running').map((task) => ({ ...task }));

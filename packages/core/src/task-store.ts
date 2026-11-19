@@ -288,7 +288,7 @@ export interface TaskStore {
   insertExecution(row: ExecutionRow): boolean;
   getTask(taskId: string): StoredTask | undefined;
   /** scope 缺省 = 全部任务；给出时按 principal + session 过滤。 */
-  listTasks(scope?: { principalId: string; sessionId: string }): StoredTask[];
+  listTasks(scope?: { principalId: string; sessionId: string }, status?: string): StoredTask[];
   /**
    * U3：读重放窗口候选行（同 scope / 同 operation / 同 attempt，按 op_seq 升序）。
    * 判定由 registry 的纯函数做；本方法只读。
@@ -774,6 +774,10 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   const selectTasksScoped = db.prepare(
     'SELECT * FROM tasks WHERE principal_id = ? AND session_id = ? ORDER BY created_at, task_id',
   );
+  /** 按 scope + 状态取行（2026-11-19：交办前的「有没有待确认提案」检查必须走索引，不能全表）。 */
+  const selectTasksScopedByStatus = db.prepare(
+    'SELECT * FROM tasks WHERE principal_id = ? AND session_id = ? AND status = ? ORDER BY created_at, task_id',
+  );
 
   const hasOperations = tableColumnsOf(db, 'operations').size > 0;
   const selectOperation = hasOperations
@@ -1101,10 +1105,12 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
       const row = selectTask.get(taskId) as TaskDbRow | undefined;
       return row === undefined ? undefined : storedTask(row);
     },
-    listTasks(scope) {
+    listTasks(scope, status) {
       const rows = (scope === undefined
         ? selectTasks.all()
-        : selectTasksScoped.all(scope.principalId, scope.sessionId)) as TaskDbRow[];
+        : status === undefined
+          ? selectTasksScoped.all(scope.principalId, scope.sessionId)
+          : selectTasksScopedByStatus.all(scope.principalId, scope.sessionId, status)) as TaskDbRow[];
       return rows.map(storedTask);
     },
     listOperationCandidates(input) {

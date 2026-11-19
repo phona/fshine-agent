@@ -203,6 +203,109 @@ async function taskStatusOf(registry: TaskRegistry, ref: string): Promise<Record
 }
 
 describe('S1 后台写确认：底账承载与后台识别', () => {
+  /**
+   * 在 Main 工具面上调一次工具（生产 createSession 装配 + 假 Main 驱动）。
+   * 返回工具结果或工具错误原文——错误也是事实（本套件要用它断言拒绝话术）。
+   */
+  async function callMainTool(input: {
+    registry: TaskRegistry;
+    tool: string;
+    args: Record<string, unknown>;
+    runner?: TaskRunner;
+  }): Promise<{ ok: boolean; value?: unknown; error?: string }> {
+    let captured: { ok: boolean; value?: unknown; error?: string } | undefined;
+    const mainDriver: TurnDriver = {
+      async run(turnInput) {
+        try {
+          captured = { ok: true, value: await turnInput.exec(input.tool, input.args) };
+        } catch (error) {
+          captured = { ok: false, error: error instanceof Error ? error.message : String(error) };
+        }
+        return { text: '（测试回合）', messages: [] as unknown as DriverMessage[] };
+      },
+    };
+    const session = await createSession({
+      principalId: SCOPE.principalId,
+      sessionId: SCOPE.sessionId,
+      client: new ReadClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver,
+      workerDriver: { async run() { throw new Error('（测试）Worker 不应被调用'); } },
+      mainSystemPrompt: '（测试）Main 系统提示',
+      taskRegistry: input.registry as never,
+      ...(input.runner === undefined ? {} : { taskRunner: input.runner }),
+    });
+    await session.send('（测试）');
+    return captured!;
+  }
+
+  it('⑧ 已有待确认提案时再 task_run 被拒绝，并给「确认/不」两个动作（不再新开任务）', async () => {
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const executor = await makeExecutor({
+      client: new ProposalClient(() => 'cf_guard'),
+      registry,
+      worker: callingWorker(WRITE_ARGS, capture),
+    });
+    await runBackground(registry, executor, 't_guard');
+    expect(registry.get('t_guard', SCOPE).status).toBe('waiting_user');
+    const before = registry.list(SCOPE).length;
+
+    const result = await callMainTool({ registry, tool: 'task_run', args: { task: '再把 alpha 提交一次' } });
+    expect(result.ok).toBe(false);
+    // 话术：说清在等什么 + 两个可执行动作；不暴露内部工具名。
+    expect(result.error).toContain('等你确认');
+    expect(result.error).toContain('回「确认」');
+    expect(result.error).toContain('回「不」');
+    expect(result.error).not.toContain('task_resume');
+    // 没有新任务行（不产生半截任务）。
+    expect(registry.list(SCOPE)).toHaveLength(before);
+  });
+
+  it('⑨ 用户回「确认」时 task_resume 省略 ref 也能接续同一个任务（编号不变）', async () => {
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const executor = await makeExecutor({
+      client: new ProposalClient(() => 'cf_resume'),
+      registry,
+      worker: callingWorker(WRITE_ARGS, capture),
+    });
+    const runner = await runBackground(registry, executor, 't_resume');
+    const taskNo = registry.get('t_resume', SCOPE).taskNo;
+
+    const result = await callMainTool({ registry, tool: 'task_resume', args: { answer: '确认' }, runner });
+    expect(result.ok).toBe(true);
+    expect((result.value as { outcome?: string }).outcome).toBe('started');
+    await runner.whenIdle();
+
+    // 同一任务（编号不变）被接续，而不是新开一个。
+    expect(registry.list(SCOPE)).toHaveLength(1);
+    expect(registry.get('t_resume', SCOPE).taskNo).toBe(taskNo);
+  });
+
+  it('⑩ task_status 列表默认只给最近 10 条（新→旧）+ 截断计数，不把 20 条历史全倒给模型', async () => {
+    const registry = makeRegistry();
+    // 造 12 个已完成任务（编号 1..12），按创建顺序。
+    for (let index = 1; index <= 12; index += 1) {
+      const taskId = `t_list_${index}`;
+      registry.begin({ taskId, principalId: SCOPE.principalId, sessionId: SCOPE.sessionId, request: `第 ${index} 件事` });
+      registry.transition(taskId, 'completed');
+    }
+    const result = await callMainTool({ registry, tool: 'task_status', args: {} });
+    expect(result.ok).toBe(true);
+    const listed = result.value as {
+      tasks: ReadonlyArray<{ taskNo?: number }>;
+      total?: number;
+      truncated?: number;
+    };
+    expect(listed.tasks).toHaveLength(10);
+    // 新→旧：第一条是最新的 #12。
+    expect(listed.tasks[0]!.taskNo).toBe(12);
+    expect(listed.tasks[9]!.taskNo).toBe(3);
+    expect(listed.total).toBe(12);
+    expect(listed.truncated).toBe(2);
+  });
+
   it('① 后台 needs_confirmation → waiting_user，底账 pending_question.confirmation.summary 有值', async () => {
     const registry = makeRegistry();
     const capture: WorkerCapture = { results: [] };

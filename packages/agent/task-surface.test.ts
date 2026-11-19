@@ -157,7 +157,8 @@ describe('缺口 1 · 对话面任务工具', () => {
     const { session, turns } = await build([{ tool: 'task_status', args: {} }], { registry });
     await session.send('我那两个任务怎么样了');
     const listed = value<{ tasks: Array<Record<string, unknown>> }>(turns[0]!.results[0]!);
-    expect(listed.tasks.map((task) => task.taskNo)).toEqual([1, 2]);
+    // 2026-11-19：列表改为新→旧（live 实测：老的排前面时，模型会去抓 #20 的旧任务来答当前问题）。
+    expect(listed.tasks.map((task) => task.taskNo)).toEqual([2, 1]);
 
     const one = await build([{ tool: 'task_status', args: { ref: '#1' } }], { registry });
     await one.session.send('第一个任务在等什么');

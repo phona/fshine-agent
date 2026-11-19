@@ -142,6 +142,8 @@ export const TASK_RUN_TOOL_SCHEMA_WITH_INPUT_FILES: Record<string, unknown> = {
  * 工具（Worker 不持有宿主任务治理面）。
  */
 export const TASK_STATUS_TOOL = 'task_status';
+/** 任务列表默认条数上限（新→旧）。会话历史越长越容易让模型抓错对象，默认只给最近的。 */
+const TASK_STATUS_LIST_LIMIT = 10;
 export const TASK_STATUS_TOOL_DESCRIPTION =
   '查询本会话已有任务的状态：ref 给任务列表里的 #编号（如 "#3"）查单个任务，留空列本会话全部任务。'
   + '用户问「那个任务怎么样了 / 在等什么」时用它，不要为此新交办任务。';
@@ -181,14 +183,16 @@ export const TASK_CANCEL_TOOL_SCHEMA: Record<string, unknown> = {
 
 export const TASK_RESUME_TOOL = 'task_resume';
 export const TASK_RESUME_TOOL_DESCRIPTION =
-  '当已有任务在等待用户补齐信息时，用用户的答复把同一任务接续下去（编号不变）。非等待中的任务会被如实拒绝。';
+  '当已有任务在等待用户补齐信息（或等用户确认写入）时，用用户的答复把同一任务接续下去（编号不变）。'
+  + 'ref 可省略：本会话只有一个等待中的任务时直接接续它。'
+  + '用户说「确认」「对」「继续」这类表态时用它，不要为此新交办任务。';
 export const TASK_RESUME_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    ref: { type: 'string', description: '等待中的任务引用：#编号。' },
+    ref: { type: 'string', description: '等待中的任务引用：#编号（可省略，本会话仅一个等待中的任务时）。' },
     answer: { type: 'string', description: '对任务待办问题的答复，用用户原话的意思写清。' },
   },
-  required: ['ref', 'answer'],
+  required: ['answer'],
   additionalProperties: false,
 };
 
@@ -905,21 +909,30 @@ export function backgroundTaskReceiptNotice(estimatedMinutes?: number): string {
 
 /**
  * 估时锚点（预期契约）：执行层自述 `est_seconds` 累加，取整到分钟（向上，最小 1）。
- * 没有任何声明 → undefined（不按本地经验补数；回执只说「办完发你」）。
- * 说明：宿主在受理时只持有允许集合的能力快照（具体 operation 由 Worker 决定），
- * 因此锚点 = 允许集合内已声明估时的累加——只当锚点用，文案必须带「大概」。
+ *
+ * 2026-11-19 修正：**排除声明 `long_running` 的 operation**——它们的时长不属于「受理回执」
+ * 的预期（长任务本来就靠 10/30 分钟两档主动说明）。原先把允许集合里所有 operation 的
+ * est 相加，dummy 夹具里带一个 1800 秒的长任务，于是每条回执都变成「大概 32 分钟」——
+ * 对一个 3 条记录的查询是纯编造，还让模型误以为必须转到后台并去翻旧任务（live 实测）。
+ * 仍只当锚点用，文案必须带「大概」；算不出来（无声明/超过 30 分钟）→ undefined，回执只说「办完发你」。
  */
 export function estimatedMinutesOf(manifest: CapabilityManifest): number | undefined {
   let totalSeconds = 0;
   let declared = false;
   for (const operation of manifest.operations) {
     if (operation.estimatedSeconds === undefined) continue;
+    if (operation.long_running === true) continue;
     totalSeconds += operation.estimatedSeconds;
     declared = true;
   }
   if (!declared || totalSeconds <= 0) return undefined;
-  return Math.max(1, Math.ceil(totalSeconds / 60));
+  const minutes = Math.max(1, Math.ceil(totalSeconds / 60));
+  // 超过半小时的估算对「受理回执」没有意义（用户自己都会来问），且极易离谱 → 不估。
+  return minutes > ESTIMATE_MAX_MINUTES ? undefined : minutes;
 }
+
+/** 受理回执估时上限（分钟）：超过就不说时长，只说「办完发你」。 */
+const ESTIMATE_MAX_MINUTES = 30;
 
 /** 终态集合（窗口内落定判定）。waiting_user 不是终态——等待接续仍属后台推进。 */
 const SETTLED_TASK_STATUSES: ReadonlySet<string> = new Set([
@@ -1698,7 +1711,21 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
 
   function taskStatus(args: Record<string, unknown>): unknown {
     const ref = typeof args.ref === 'string' ? args.ref.trim() : '';
-    if (ref === '') return { tasks: registry.list(scope).map(statusView) };
+    if (ref === '') {
+      // 列表默认只给最近的 N 条（新→旧）：一个用了两天的会话会有几十条历史任务，全量倒给模型
+      // 只会让它抓错对象（2026-11-19 live 实测：问 alpha 却去取 #20 的 documents 结果）。
+      const all = [...registry.list(scope)].sort((left, right) => (
+        left.createdAt === right.createdAt
+          ? ((right.taskNo ?? 0) - (left.taskNo ?? 0))
+          : (left.createdAt < right.createdAt ? 1 : -1)
+      ));
+      return {
+        tasks: all.slice(0, TASK_STATUS_LIST_LIMIT).map(statusView),
+        ...(all.length > TASK_STATUS_LIST_LIMIT
+          ? { total: all.length, truncated: all.length - TASK_STATUS_LIST_LIMIT }
+          : {}),
+      };
+    }
     return statusView(registry.get(resolveTaskId(ref), scope));
   }
 
@@ -1755,7 +1782,18 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   function taskResume(args: Record<string, unknown>, runner: TaskRunner): unknown {
     const answer = typeof args.answer === 'string' ? args.answer : '';
     if (answer.trim() === '') throw new Error('task_resume 缺少 answer：请写清对任务待办问题的答复。');
-    return runner.resume(resolveTaskId(refFromArgs(args)), { answer, scope });
+    const rawRef = typeof args.ref === 'string' ? args.ref.trim() : '';
+    // 引用可省略：本会话恰好一个等待中的任务时直接接续它（用户说「确认」时不该要求记编号）。
+    const waiting = registry.listWaiting(scope);
+    const ref = rawRef !== ''
+      ? rawRef
+      : waiting.length === 1 && waiting[0]!.taskNo !== undefined
+        ? `#${waiting[0]!.taskNo}`
+        : (() => {
+          if (waiting.length === 0) throw new Error('本会话当前没有等待答复的任务。');
+          throw new Error(`本会话有 ${waiting.length} 个等待中的任务，请用 ref 指明要接续哪一个（#编号）。`);
+        })();
+    return runner.resume(resolveTaskId(ref), { answer, scope });
   }
 
   /** 文件工具的 scope（宿主持有的可信身份；模型参数里没有身份字段）。 */
@@ -2257,6 +2295,22 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   ): Promise<unknown> {
     const request = taskText.trim();
     if (request === '') throw new Error('task_run 缺少 task：请写清要办什么。');
+    // 已有等待用户确认的提案时不许再新建任务（2026-11-19 live 实测缺陷：用户回「确认」，
+    // Main 新开了一个任务去提交 → 新任务拿不到上一任务的确认句柄 → 写入确定失败）。
+    // 这里给确定性拒绝 + 可执行下一步，不依赖模型自己想起来用 task_resume。
+    // 用 listWaiting(scope) 而不是 list(scope)：只取等待行且走 (principal, session, status)
+    // 索引——每次交办都全量映射会话任务会在浸泡里把 RSS 顶上去（实测 +13%）。
+    const pendingConfirmation = registry.listWaiting(scope).find(
+      (task) => task.pendingQuestion?.confirmation !== undefined,
+    );
+    if (pendingConfirmation !== undefined) {
+      const no = pendingConfirmation.taskNo === undefined ? '' : `（编号 #${pendingConfirmation.taskNo}）`;
+      const summary = pendingConfirmation.pendingQuestion?.confirmation?.summary ?? '';
+      throw new Error(
+        `还有一件事等你确认${no}：${summary}。回「确认」我就提交，回「不」我就不动；`
+        + '这件事确认或放弃之后再办新的。',
+      );
+    }
     const taskId = `task_${randomUUID()}`;
     // CAP-01 S2（v8 §4/§6）：inputFiles 的解析与交办复制全部发生在建任务行/进 Worker 之前——
     // 任一 fileId 不可用 → 整次拒绝（不部分执行、不留任务行、零副本）。public（inline）与

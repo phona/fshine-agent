@@ -371,5 +371,23 @@ describe('受理回执的预期契约（文案）', () => {
       operations: [{ name: 'dummy.query', label: 'query', args: [] }],
     };
     expect(estimatedMinutesOf(undeclared)).toBeUndefined();
+
+    // 2026-11-19：声明 long_running 的操作不算进「受理回执」的预期（它走 10/30 分钟两档）；
+    // 否则 dummy 夹具里那个 1800 秒的长任务会把每条回执变成「大概 32 分钟」（live 实测）。
+    const withLongTask: CapabilityManifest = {
+      contractVersion: 4,
+      operations: [
+        { name: 'dummy.query', label: 'query', args: [], estimatedSeconds: 10 },
+        { name: 'dummy.longtask', label: 'long', args: [], estimatedSeconds: 1800, long_running: true },
+      ],
+    };
+    expect(estimatedMinutesOf(withLongTask)).toBe(1);
+
+    // 超过半小时的估算对回执没有意义、也没有可信度 → 不估（只说办完发你）。
+    const absurd: CapabilityManifest = {
+      contractVersion: 1,
+      operations: [{ name: 'dummy.query', label: 'query', args: [], estimatedSeconds: 3_600 }],
+    };
+    expect(estimatedMinutesOf(absurd)).toBeUndefined();
   });
 });
