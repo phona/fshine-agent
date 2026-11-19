@@ -49,11 +49,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { DiscoveredTool } from '@fshine/contracts';
 import type {
   CapabilityManifest,
+  ExecutionArgDeclaration,
   ExecutionClient,
   ExecutionOutcome,
 } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, RuntimeTurnEvent, TurnDriver, TurnDriverResult } from './driver-contract';
 import { ToolUserError } from './driver-contract';
+import { failureMessageFor } from './user-facing-failure';
 import { FileRefUnavailableError, safeExtensionOf, type CopiedTaskInput, type TaskInputCopier } from './file-store';
 export type { TaskInputCopier } from './file-store';
 import type { RunJsExecutor, RunJsOutput } from './run-js-executor';
@@ -375,6 +377,80 @@ function firstString(args: Record<string, unknown>, keys: readonly string[]): st
   return undefined;
 }
 
+/**
+ * 载荷型参数装信封（宿主侧；owner 2026-11-19）：模型给结构化**值** → 桥 lint+落盘 → 用文件
+ * 路径替换该参数，再提交执行层。未声明 payload 参数 = args 原样返回（零变化）。
+ *
+ * 失败处置（都在**发起执行之前**，零执行事实）：
+ *   · lint 未过：抛业务话术（`failureMessageFor('invalid_input')`）交模型一轮改对，并落
+ *     `payload_lint_rejected` 事件（missing/unknown 只进日志）；
+ *   · 同一 (回合, operation) 连续失败超过上限：`ToolUserError` 确定性停下（给「先停下来看看」）。
+ */
+const PAYLOAD_LINT_MAX_FAILURES = 2;
+
+const PAYLOAD_LINT_STOP_MESSAGE =
+  '这件事连续几次都因为内容不对被拦下了。先停下来看看：要写入的对象、范围和内容再核对一下，或者先别做这项操作。';
+
+/** 装配一个 operation 声明的载荷型参数清单（`payload` 声明）。 */
+function payloadArgsOf(manifest: CapabilityManifest, operation: string): ExecutionArgDeclaration[] {
+  const declaration = manifest.operations.find((entry) => entry.name === operation);
+  return (declaration?.args ?? []).filter((arg) => arg.payload !== undefined);
+}
+
+/** args 里该声明参数的命中形态（声明名或裸名）；返回实际键与值。 */
+function payloadArgOf(args: Record<string, unknown>, name: string): { key: string; value: unknown } | undefined {
+  if (Object.prototype.hasOwnProperty.call(args, name)) return { key: name, value: args[name] };
+  const bare = name.replace(/^--/, '');
+  if (bare !== name && Object.prototype.hasOwnProperty.call(args, bare)) return { key: bare, value: args[bare] };
+  return undefined;
+}
+
+function preparePayloadArgs(input: {
+  operation: string;
+  args: Record<string, unknown>;
+  manifest: CapabilityManifest;
+  taskId: string;
+  bridge: TaskExecutionBridge | undefined;
+  /** 同一回合的失败计数（键 = operation）；随回合丢弃。 */
+  failures: Map<string, number>;
+  onEvent: ((event: ExecutionEvent) => void) | undefined;
+}): Record<string, unknown> {
+  const payloadArgs = payloadArgsOf(input.manifest, input.operation);
+  if (payloadArgs.length === 0) return input.args;
+  let next = input.args;
+  for (const declaration of payloadArgs) {
+    const present = payloadArgOf(next, declaration.name);
+    if (present === undefined) continue;
+    const failed = input.failures.get(input.operation) ?? 0;
+    if (failed >= PAYLOAD_LINT_MAX_FAILURES) {
+      // 连续失败已达上限：不再 lint、不再发起执行——确定性停下并给「先停下来看看」。
+      throw new ToolUserError(PAYLOAD_LINT_STOP_MESSAGE);
+    }
+    const result = input.bridge === undefined
+      ? { ok: false as const, missing: [] as string[], unknown: [] as string[] }
+      : input.bridge.materializePayload({
+        param: declaration.name,
+        value: present.value,
+        ...(declaration.payload?.schema === undefined ? {} : { schema: declaration.payload.schema }),
+      });
+    if (!result.ok) {
+      input.failures.set(input.operation, failed + 1);
+      input.onEvent?.({
+        event: 'payload_lint_rejected',
+        taskId: input.taskId,
+        operation: input.operation,
+        missing: result.missing,
+        unknown: result.unknown,
+      });
+      throw new Error(failureMessageFor('invalid_input').text);
+    }
+    if (next === input.args) next = { ...next };
+    if (present.key !== declaration.name) delete next[present.key];
+    next[declaration.name] = result.path;
+  }
+  return next;
+}
+
 /** 参数规范化（判定「完全相同」用）：对象键排序后递归序列化；数组保序。 */
 function stableArgsKey(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map((item) => stableArgsKey(item)).join(',')}]`;
@@ -513,7 +589,12 @@ export type ExecutionEvent =
   | { event: 'execution_wait_resumed'; operationId: string; waitedMs: number }
   | { event: 'execution_wait_timeout'; operationId: string }
   | { event: 'execution_aborted'; operationId: string; result: 'cancelled' | 'failed'; reason?: string }
-  | { event: 'execution_wait_files_registered'; operationId: string; files: number; logsFileized: number };
+  | { event: 'execution_wait_files_registered'; operationId: string; files: number; logsFileized: number }
+  /**
+   * 载荷型参数 lint 未过（2026-11-19）：宿主装信封失败——不发起执行，业务话术交回模型改。
+   * missing/unknown 是结构化机械事实（只进日志，不进用户话术）。
+   */
+  | { event: 'payload_lint_rejected'; taskId: string; operation: string; missing: readonly string[]; unknown: readonly string[] };
 
 /** 长任务结果渲染的日志内联上限（字节；超过走任务文件，不留绝对路径也不灌转录）。 */
 export const LONG_TASK_LOG_INLINE_MAX_BYTES = 4 * 1024;
@@ -1661,6 +1742,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
    * 宿主只执行执行层的声明，不判断业务——这不是计划门。
    */
   let deterministicFailuresThisTurn = new Map<string, { code: string; declaredRetryable?: boolean; message?: string }>();
+  /** 载荷型参数 lint 的本回合失败计数（键 = operation）；随回合清零（装信封失败不是执行事实）。 */
+  let payloadLintFailuresThisTurn = new Map<string, number>();
   /** A2b 观测：本回合被拦下的重试（回合末随 TurnResult 交装配层落事件；不改回合结果）。 */
   let retryBlockedThisTurn: TurnRetryBlock[] = [];
   /** A2b 观测：本回合执行层声明可重试（瞬时故障）的失败。 */
@@ -2057,9 +2140,20 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     // 发起前被拒并如实告知；不判断业务。计数在发起前同步推进（含随后的每次真实发起，
     // 被拒/回放的调用不计——它们没有走到这里）。
     const rawArgs = args.args;
-    const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
+    const baseCallArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
       ? (rawArgs as Record<string, unknown>)
       : {};
+    // 载荷型参数装信封（宿主侧；发起执行之前）：模型给结构化值 → 宿主 lint+落盘 → 路径替换。
+    // 失败（lint 未过/超上限）在此抛出——不发起执行、不落执行事实。
+    const callArgs = preparePayloadArgs({
+      operation,
+      args: baseCallArgs,
+      manifest: workerManifest,
+      taskId,
+      bridge: exchange,
+      failures: payloadLintFailuresThisTurn,
+      onEvent: options.onExecutionEvent,
+    });
     // A2b 同参数重复守卫（发起前拒；不发起执行、不落执行事实）。
     // 作用域 = (本回合, 该任务)：同一任务内的逐字重复才拒；两个不同任务各自查同一对象是合法的。
     const objectValue = firstString(callArgs, ['--collection', '--topic', 'collection', 'topic']);
@@ -2563,6 +2657,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // A2：单回合执行计数随回合清零（上界按回合计，不跨回合累计）。
       operationsThisTurn = 0;
       deterministicFailuresThisTurn = new Map();
+      payloadLintFailuresThisTurn = new Map();
       retryBlockedThisTurn = [];
       retryAllowedThisTurn = [];
       const turnScopeKey = `turn:${options.sessionId}:${turnNo}`;
@@ -3093,6 +3188,8 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       // U3：本交办内的重放窗口（只由 Worker 驱动的原生事件推进）。
       const workerWindow = newAttemptWindow();
       let unresolved = false;
+      /** 载荷型参数 lint 的本回合失败计数（键 = operation）；随本次执行丢弃。 */
+      const payloadLintFailures = new Map<string, number>();
       // 片 1：本任务的交付收集（Worker run_js 产物登记事实）与委派级幂等 Map。
       // 全部随本次执行创建、随本次执行丢弃（未注入执行器 = 不参会、零变化）。
       const taskFiles: TurnFileRef[] = [];
@@ -3186,9 +3283,20 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           throw new Error(OPERATION_NOT_PERMITTED_MESSAGE);
         }
         const rawArgs = args.args;
-        const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
+        const baseCallArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
           ? (rawArgs as Record<string, unknown>)
           : {};
+        // 载荷型参数装信封（宿主侧；发起执行之前）：模型给结构化值 → 宿主 lint+落盘 → 路径替换。
+        // 失败（lint 未过/超上限）在此抛出——不发起执行、不落执行事实。
+        const callArgs = preparePayloadArgs({
+          operation,
+          args: baseCallArgs,
+          manifest: workerManifest,
+          taskId: task.taskId,
+          bridge: taskBridge,
+          failures: payloadLintFailures,
+          onEvent: options.onExecutionEvent,
+        });
         const run = await claimAndRunOperation({
           registry: options.registry,
           readOnlyOperations,
