@@ -23,6 +23,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { failureMessageFor, internalTermIn } from './src/user-facing-failure';
 import { lintPayload, materializePayload } from './src/payload-materializer';
 import { createDummyCliClient } from './src/dummy-cli-client';
+import type { CapabilityManifest, ExecutionClient } from '@fshine/contracts/execution-contract';
 import { createTaskExecutionBridge } from './src/task-file-bridge';
 import { createFileStore, type FileScope } from './src/file-store';
 import { createSession, type ExecutionEvent, type Session } from './src/execution-runtime';
@@ -171,12 +172,29 @@ async function makeFixture(workerCalls: ReadonlyArray<{ tool: string; args: Reco
   mkdirSync(stateDir, { recursive: true });
   const registry = createSqliteTaskRegistry(path.join(dir, 'state.db'));
   const fileStore = createFileStore({ store: registry.store, workspaceRoot: path.join(dir, 'workspace') });
-  const client = createDummyCliClient({
+  const rawClient = createDummyCliClient({
     root: FIXTURE_ROOT,
     gateway: 'bin/dummy',
     stateDir,
     env: { PATH: process.env['PATH'], HOME: process.env['HOME'], TMPDIR: process.env['TMPDIR'] },
   });
+  // 本套件测的是**宿主载荷装信封**机制（与具体 operation 无关），需要一个带 payload 声明的
+  // operation 作为载体。历史协议 operation（dummy.proposal）在夹具里已标 model_visible:false
+  // （不进模型可见面）；这里对该测试客户端剥掉该声明，让载体对模型可见——载荷路径照常被覆盖，
+  // 可见性过滤本身另在 model-visible-operations.test.ts 守护。
+  const client: ExecutionClient = {
+    capabilities: async (): Promise<CapabilityManifest> => {
+      const manifest = await rawClient.capabilities();
+      return {
+        contractVersion: manifest.contractVersion,
+        operations: manifest.operations.map((operation) => {
+          const { model_visible: _drop, ...rest } = operation;
+          return rest;
+        }),
+      };
+    },
+    execute: (request, callOptions) => rawClient.execute(request, callOptions),
+  };
   const bridgeFactory = createTaskExecutionBridge({ platformRoot, fileStore, scope: SCOPE, inner: client });
   const worker = workerDriver(workerCalls);
   const events: ExecutionEvent[] = [];

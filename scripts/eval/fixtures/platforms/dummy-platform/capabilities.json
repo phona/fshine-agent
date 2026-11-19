@@ -578,6 +578,7 @@
     },
     {
       "name": "dummy.proposal",
+      "model_visible": false,
       "domain": "dummy",
       "command": "proposal",
       "access": "write",
@@ -612,6 +613,7 @@
     },
     {
       "name": "dummy.proposal-commit",
+      "model_visible": false,
       "domain": "dummy",
       "command": "proposal-commit",
       "access": "write",
@@ -796,6 +798,7 @@
     },
     {
       "name": "ballot.proposal",
+      "model_visible": false,
       "domain": "ballot",
       "command": "proposal",
       "access": "write",
@@ -830,6 +833,7 @@
     },
     {
       "name": "ballot.proposal-commit",
+      "model_visible": false,
       "domain": "ballot",
       "command": "proposal-commit",
       "access": "write",

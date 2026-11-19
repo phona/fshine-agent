@@ -1173,6 +1173,25 @@ export const SAME_TURN_CONFIRMATION_PENDING_MESSAGE =
 const CONFIRMATION_PENDING_MISSING = '用户确认';
 
 /**
+ * 「不算真实失败」的失败码（owner 2026-11-19，判据兜底）：**同回合已存在提案（needs_confirmation）**
+ * 时，这些 failed/refused 只说明「同回合没法自己确认」或「模型误用了历史协议」，不应把整个
+ * 有提案的回合判死（那样用户既没拿到提案、也没法确认）：
+ *   · CONFIRMATION_REQUIRED —— 同回合 commit 没有句柄（预期：句柄下一回合才透传）；
+ *   · PROPOSAL_REFUSE / PROPOSAL_UNKNOWN_FIELD / PROPOSAL_TOKEN_UNTRUSTED —— 模型去用历史
+ *     提案协议（自己造载荷文件、凭记忆拼提交 token）被执行层拒；
+ *   · CALL_REFUSE —— 结构化调用形状被拒（同一「模型用错协议」面）。
+ * 出现任何**其它** failed/refused（GATE_REFUSE / COLLECTION_NOT_FOUND / …）仍是真实失败。
+ * 「仅当同回合已有提案」由调用点结构性保证（selfConfirmBlockedRoundOf 先找到提案才用本集合）。
+ */
+const SAME_TURN_TOLERATED_FAILURE_CODES: ReadonlySet<string> = new Set([
+  'CONFIRMATION_REQUIRED',
+  'PROPOSAL_REFUSE',
+  'PROPOSAL_UNKNOWN_FIELD',
+  'PROPOSAL_TOKEN_UNTRUSTED',
+  'CALL_REFUSE',
+]);
+
+/**
  * A2 单回合 operation 上限话术：如实报数（已发起 N 次 / 上限 M），不是静默失败。
  * 这是资源边界，不是计划门：不判断业务，只数本回合已发起的执行次数。
  */
@@ -1701,6 +1720,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     throw new Error(`允许集合不在能力快照里（fail-closed）：${missingAllowed.join('、')}`);
   }
   const allowed = new Set(options.allowedOperations);
+  // 模型可见面收口（2026-11-19，B 类最小边界）：执行层声明 model_visible:false 的
+  // operation（历史协议/内部替代路径）**不进模型可见面**——从允许集合里剔除：既不出现在
+  // Worker 委派清单，模型凭记忆硬调它也在发起执行前被确定性拒绝（走 OPERATION_NOT_PERMITTED_MESSAGE，
+  // 零执行事实、不提 operation 名）。只过滤清单不够：允许集合才是执行面边界。
+  for (const operation of manifest.operations) {
+    if (operation.model_visible === false) allowed.delete(operation.name);
+  }
   const workerManifest: CapabilityManifest = {
     contractVersion: manifest.contractVersion,
     operations: manifest.operations.filter((operation) => allowed.has(operation.name)),
@@ -3231,6 +3257,12 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
     throw new Error(`允许集合不在能力快照里（fail-closed）：${missingAllowed.join('、')}`);
   }
   const allowed = new Set(options.allowedOperations);
+  // 模型可见面收口（2026-11-19，B 类最小边界；与 createSession 同源）：执行层声明
+  // model_visible:false 的 operation 从允许集合剔除——不进后台 Worker 委派清单，模型凭
+  // 记忆硬调也在发起执行前被确定性拒绝（OPERATION_NOT_PERMITTED_MESSAGE，零执行事实）。
+  for (const operation of manifest.operations) {
+    if (operation.model_visible === false) allowed.delete(operation.name);
+  }
   const workerManifest: CapabilityManifest = {
     contractVersion: manifest.contractVersion,
     operations: manifest.operations.filter((operation) => allowed.has(operation.name)),
@@ -3588,17 +3620,20 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
        * 不生效（任务不是 waiting_user）；③用户回「确认」时没有可接续的任务（owner live 三连症状）。
        *
        * 判据（结构化，不看文案）：本回合 recorded 里存在 needs_confirmation，且**所有** failed/refused
-       * 条目的码都是 CONFIRMATION_REQUIRED（即「同回合没有句柄」这类被挡，不是真实业务失败）。
-       * 满足则返回该提案的 needs_confirmation（句柄/摘要来自底账提案）；出现任何其它真实失败
+       * 条目的码都落在「不算真实失败」集合（CONFIRMATION_REQUIRED = 同回合没有句柄；PROPOSAL_*
+       * / CALL_REFUSE = 模型误用了历史提案协议——见 SAME_TURN_TOLERATED_FAILURE_CODES）。满足则
+       * 返回该提案的 needs_confirmation（句柄/摘要来自底账提案）；出现任何其它真实失败
        * （GATE_REFUSE / COLLECTION_NOT_FOUND / …）时返回 undefined，仍按现状判 failed。
        */
       const selfConfirmBlockedRoundOf = (): Extract<TaskExecutionOutcome, { kind: 'needs_confirmation' }> | undefined => {
         const proposal = [...recorded].reverse().find((entry) => entry.outcome.status === 'needs_confirmation');
         if (proposal === undefined) return undefined;
+        // 「不算真实失败」的码见 SAME_TURN_TOLERATED_FAILURE_CODES：同回合被挡（CONFIRMATION_REQUIRED）
+        // 与模型误用历史提案协议（PROPOSAL_* / CALL_REFUSE）都不算真失败；其余失败仍按 failed。
         const realFailure = recorded.find(
           (entry) =>
             (entry.outcome.status === 'failed' || entry.outcome.status === 'refused')
-            && entry.outcome.error.code !== 'CONFIRMATION_REQUIRED',
+            && !SAME_TURN_TOLERATED_FAILURE_CODES.has(entry.outcome.error.code),
         );
         if (realFailure !== undefined) return undefined;
         return confirmationOutcomeOf(proposal);
