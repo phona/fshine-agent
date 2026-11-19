@@ -74,9 +74,25 @@ function retryLockKey(operation: string, object: string): string {
   return `${operation}\u0000${object}`;
 }
 
+/**
+ * 「显式 retryable 放行」的重复尝试上界（owner 2026-11-19，沿用仓内 E14 口径
+ * 「同一件事一个回合内兜/重试 ≤2 次」）：同一 (operation, 对象) 一个回合里最多放行
+ * 2 次显式可重试的失败——第 3 次再发起在 `before` 被拦。
+ *
+ * 根因（真模型验收实跑）：执行层对参数形状错误（如 INVALID_RECORDS）声明 retryable:true，
+ * 宿主无条件放行，Worker 在一个回合里用 5 种错误写法连撞 5 次——放行**没有次数上限**，
+ * E14 的 ≤2 口径只落在「未声明 retryable」那一侧。
+ * 复用既有机制：拦截事实与事件仍走 failures/before（execution_retry_blocked），不新造计数
+ * 通道；拦截记录保留 declaredRetryable=true（执行层当时确实说可重试，拦的是次数不是语义，
+ * 调用点据此仍能如实解释）。
+ */
+const RETRYABLE_ATTEMPTS_PER_KEY = 2;
+
 /** 新建一次回合的锁（回合边界清零：每次调用即独立作用域，不跨回合记忆）。 */
 export function createDeterministicRetryLock(): DeterministicRetryLock {
   const failures = new Map<string, { code: string; declaredRetryable?: boolean; message?: string }>();
+  /** 本回合已放行的显式可重试失败次数（键同上；只在放行路径累加，回合结束即丢弃）。 */
+  const retryableAttempts = new Map<string, number>();
   return {
     before(operation, args) {
       const object = retryObjectOf(args);
@@ -101,8 +117,20 @@ export function createDeterministicRetryLock(): DeterministicRetryLock {
       if (outcome.status !== 'failed' && outcome.status !== 'refused') return undefined;
       const error = outcome.error;
       if (error.retryable === true) {
-        // 瞬时故障：不锁，返回放行事实（调用点可留「为什么还在试」的可见面）。
-        return { operation, object, code: error.code ?? 'retryable_failure' };
+        // 瞬时故障：放行（调用点可留「为什么还在试」的可见面），但**有次数上界**——
+        // 放行次数用尽后，本键转入与确定性失败同一条拦截路径（before 拦下 + 既有事件）。
+        const key = retryLockKey(operation, object);
+        const attempts = (retryableAttempts.get(key) ?? 0) + 1;
+        retryableAttempts.set(key, attempts);
+        const allowed: RetryAllowed = { operation, object, code: error.code ?? 'retryable_failure' };
+        if (attempts >= RETRYABLE_ATTEMPTS_PER_KEY) {
+          failures.set(key, {
+            code: error.code ?? 'retryable_failure',
+            declaredRetryable: true,
+            ...(typeof error.message === 'string' && error.message !== '' ? { message: error.message } : {}),
+          });
+        }
+        return allowed;
       }
       failures.set(retryLockKey(operation, object), {
         code: error.code ?? 'unclassified_failure',
