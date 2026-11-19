@@ -50,7 +50,7 @@ import type { Notification, NotificationSink } from '../../../packages/agent/src
 import { stripServerPaths } from '../../../packages/agent/src/server-paths';
 import { createServer, resolveSingleProfile, type FileDeliveryPort, type Server } from '../../../apps/server/server';
 import { failureTextFor } from '../../../apps/server/task-completion-delivery';
-import { mainSessionOptions, resolveExecutionFace } from '../../ask-runtime';
+import { mainSessionOptions, mainThinkingLevelFrom, resolveExecutionFace } from '../../ask-runtime';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import { assessEvalIsolation } from '../safety-gate';
 import {
@@ -1143,9 +1143,10 @@ async function createHarness(
     notificationSink,
     createDrivers: (driverEnv, mainSession) => ({
       // 与缺省装配逐项同形（ask-runtime 缺省分支）：Main 持实例级会话 + 会话落盘位置
-      // ——唤醒（wake）以实例级会话为前提。
+      // ——唤醒（wake）以实例级会话为前提；思考档同样同源（mainThinkingLevel 回落 thinkingLevel）。
       mainDriver: recordingDriver(createPiTurnDriver({
         env: driverEnv,
+        ...mainThinkingLevelFrom(driverEnv),
         reuseConversation: true,
         ...mainSessionOptions(mainSession),
       }), 'main', sink),

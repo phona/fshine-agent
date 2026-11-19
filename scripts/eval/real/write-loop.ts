@@ -48,7 +48,7 @@ import { stripServerPaths } from '../../../packages/agent/src/server-paths';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
 import type { TaskScope } from '../../../packages/agent/src/task-registry';
 import { createServer, resolveSingleProfile, type FileDeliveryPort } from '../../../apps/server/server';
-import { mainSessionOptions, resolveExecutionFace } from '../../ask-runtime';
+import { mainSessionOptions, mainThinkingLevelFrom, resolveExecutionFace } from '../../ask-runtime';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import { assessEvalIsolation } from '../safety-gate';
 
@@ -867,9 +867,11 @@ async function main(): Promise<void> {
     notificationSink,
     createDrivers: (driverEnv, mainSession) => ({
       // 与缺省装配逐项同形（ask-runtime 的缺省分支）：Main 持实例级会话 + 会话落盘位置
-      // ——**唤醒（wake）以实例级会话为前提**，少了 reuseConversation 就只剩宿主兜底。
+      // ——**唤醒（wake）以实例级会话为前提**，少了 reuseConversation 就只剩宿主兜底；
+      // 思考档同样同源：Main = mainThinkingLevel 回落 thinkingLevel。
       mainDriver: recordingDriver(createPiTurnDriver({
         env: driverEnv,
+        ...mainThinkingLevelFrom(driverEnv),
         reuseConversation: true,
         ...mainSessionOptions(mainSession),
       }), 'main', sink),
