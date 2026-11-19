@@ -427,6 +427,28 @@ export function workspaceRootOf(dbPath: string): string {
   return path.join(path.dirname(dbPath), 'workspace');
 }
 
+/**
+ * 回合失败判据（唯一一处；owner 2026-11-19 最终形状）。
+ *
+ * 「一无所有」= 正文为空 **且** 无文件 **且** 没有交办任何任务（taskIds 空）：
+ *   · 交办是**唯一豁免**——任务结果由完成投递/唤醒欠着用户一条，空正文不是静默终局；
+ *   · **执行事实（executions）不参与豁免**——它是内部动作，用户不会自动收到它；内联只读
+ *     失败 / 内联写确认 + 空正文 = 用户什么都收不到（静默终局），必须判回合失败。
+ *
+ * executions 显式进调用面只为把这条语义钉住（当前它由 taskIds 派生；将来任何来源都必须
+ * 遵守「执行事实不豁免」）。判失败走既有「回合失败」路径（调用方 throw），不补宿主话术。
+ */
+export function turnProducedNothing(input: {
+  readonly reply: string;
+  readonly fileCount: number;
+  readonly taskIds: readonly string[];
+  readonly executions: readonly unknown[];
+}): boolean {
+  return input.reply.trim() === ''
+    && input.fileCount === 0
+    && input.taskIds.length === 0;
+}
+
 export async function createServer(deps: ServerDeps): Promise<Server> {
   const { id: profileId, profile } = resolveSingleProfile(deps.config);
   if (profile.gateway === undefined && deps.createExecutionFace === undefined) {
@@ -1320,19 +1342,21 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         }
       }
       // 本回合**一无所有**才判回合失败：正文为空 **且** 无文件 **且** 没有交办任何任务
-      // （taskIds 空）**且** 没有任何执行事实（executions 空）。交办/执行本身就是本回合产出
-      // 的「东西」，结果由完成投递/唤醒送达——空正文不判失败（owner 2026-11-19 修缺陷：
-      // agent.md 要求交办后不复述过程话，模型照做时不能因为它闭嘴就被判回合失败）。
+      // （taskIds 空）。交办是**唯一豁免**——任务结果由完成投递/唤醒欠着用户一条，空正文
+      // 不是静默终局（owner 2026-11-19 修缺陷：agent.md 要求交办后不复述过程话，模型照做时
+      // 不能因为它闭嘴就被判回合失败）。**执行事实不参与豁免**：executions 是内部动作，用户
+      // 不会自动收到它——内联只读失败 / 内联写确认 + 空正文 = 用户什么都收不到，必须判失败。
       // 不得当作成功回执：「一无所有」的空串会让渠道一个终帧都不发，也不记 message_done。
       // **「只有文件、正文为空」不判失败**（v8 §7 四必守 #2）：文件走投递面，正文空帧由
-      // 投递事实话术/宿主兜底话术补足——判失败就走不到投递了。放在这里抛出 = 走既有的
-      // 「回合失败」路径（失败不进重投缓存，渠道适配器的 handler 异常分支回失败话术），
+      // 投递事实话术/宿主兜底话术补足——判失败就走不到投递了。判失败走既有的「回合失败」
+      // 路径（throw；失败不进重投缓存，渠道适配器的 handler 异常分支回失败话术），
       // 不新造机制、不重试。
-      const producedNothing = reply.trim() === ''
-        && files.length === 0
-        && turn.taskIds.length === 0
-        && turn.executions.length === 0;
-      if (producedNothing) {
+      if (turnProducedNothing({
+        reply,
+        fileCount: files.length,
+        taskIds: turn.taskIds,
+        executions: turn.executions,
+      })) {
         throw new Error('本回合未产出可用回复（模型侧失败），本回合未完成。');
       }
       return {

@@ -39,7 +39,7 @@ import { createFileStore, type RegisteredFile } from '../../packages/agent/src/f
 import type { TurnFileRef } from '../../packages/agent/src/execution-runtime';
 import type { TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/src/task-runner';
 import { openTaskStore } from '@fshine/core';
-import { createServer, deliverTurnFilesCore, type FileDeliveryPort } from './server';
+import { createServer, deliverTurnFilesCore, turnProducedNothing, type FileDeliveryPort } from './server';
 import { echoCompletionWake } from './testing/echo-completion-wake';
 import { failureTextFor } from './task-completion-delivery';
 import { failureMessageFor } from '../../packages/agent/src/user-facing-failure';
@@ -453,6 +453,34 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
     } finally {
       await server.close();
     }
+  });
+
+  it('④c 有执行事实但没交办任务 + 空正文 → 判回合失败（执行事实不豁免，防静默终局）', () => {
+    // 内联只读失败 / 内联写确认同族：executions 是内部动作，用户不会自动收到它——
+    // 正文为空就是静默终局，必须判失败（owner 2026-11-19 最终形状）。
+    expect(turnProducedNothing({
+      reply: '',
+      fileCount: 0,
+      taskIds: [],
+      executions: [{ status: 'failed' }],
+    })).toBe(true);
+    expect(turnProducedNothing({
+      reply: '',
+      fileCount: 0,
+      taskIds: [],
+      executions: [{ status: 'needs_confirmation' }],
+    })).toBe(true);
+    // 交办是唯一豁免：有 taskIds → 不判失败（结果由完成投递/唤醒送达）。
+    expect(turnProducedNothing({
+      reply: '',
+      fileCount: 0,
+      taskIds: ['task_x'],
+      executions: [],
+    })).toBe(false);
+    // 一无所有同样判失败（与 ④b 同一判据）；有正文 / 有文件永不判失败。
+    expect(turnProducedNothing({ reply: '', fileCount: 0, taskIds: [], executions: [] })).toBe(true);
+    expect(turnProducedNothing({ reply: '好', fileCount: 0, taskIds: [], executions: [] })).toBe(false);
+    expect(turnProducedNothing({ reply: '', fileCount: 1, taskIds: [], executions: [] })).toBe(false);
   });
 
   it('⑤ 同回合重复交付（同 sha256 + 同名）→ 只投递一份，去重项不产生额外事件/错误', async () => {
