@@ -5,11 +5,14 @@
  *   ① 完成 → 投递文本 == 脚本模型唤醒回合产出的那句（宿主不再拼「「业务名」办完了：」模板）；
  *      转录里那句话在（宿主说的与模型上下文里的是同一句）；
  *   ② 模型把事实里的结果正文逐字说给用户 → 投递文本含原文（不截断、不改写）；
- *   ③ 唤醒失败（空回复）→ 用户收到宿主兜底那一句（host_fault 模板，不新写文案）+ 结构化事件；
- *   ③b 会话拿不到（驱动无唤醒能力）→ 同兜底，且事实留在「待注入」：下次用户开口随 injections
- *      进模型上下文（既有机制，不新建队列）；
- *   ④ 走岔路：唤醒回合只调工具、不产出正文 → 用户仍拿兜底那一句；任务不被误判终态、执行层零
- *      新增调用、用户可见面无内部词。
+ *   ③ 唤醒失败（空回复）→ 用户收到宿主**如实报完成事实**那句（业务名 + 结果正文；
+ *      2026-11-19 复核 F2：任务已成功，不得说「没弄好/再试一次」）+ 结构化事件；
+ *   ③b 会话拿不到（驱动无唤醒能力）→ 同如实兜底，且事实留在「待注入」：下次用户开口随
+ *      injections 进模型上下文（既有机制，不新建队列）；
+ *   ④ 走岔路：唤醒回合只调工具、不产出正文 → 用户仍拿如实兜底那句；任务不被误判终态、
+ *      执行层零新增调用、用户可见面无内部词；
+ *   ⑤ 复核 F4：完成消息要让用户看出是哪件事——事实带业务名、模型复读 → 用户可见文本有名字；
+ *   ⑥ 复核 F5：silent 部署不唤醒（零模型调用增量），只记事实（suppressed 记账照旧）。
  *
  * 记账字段（不许少）：task_result_delivery_sent 带 taskId/principalId/sessionId/deliveryMode。
  * 本文件不覆盖「会话忙」——server 的完成回调经会话链串行（链上空闲才唤醒），忙态在驱动侧
@@ -26,7 +29,7 @@ import type { TurnDriver, TurnDriverInput } from '../../packages/agent/src/drive
 import { createPiTurnDriver } from '../../packages/agent/src/pi-driver';
 import { createScriptedModelRuntime, type ScriptedModelRuntime } from '../../packages/agent/testing/scripted-model-runtime';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/src/task-runner';
-import { internalTermIn, failureMessageFor } from '../../packages/agent/src/user-facing-failure';
+import { internalTermIn } from '../../packages/agent/src/user-facing-failure';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import { mainSessionOptions } from '../../scripts/ask-runtime';
 import { createServer, type FileDeliveryPort, type Server } from './server';
@@ -35,6 +38,8 @@ const FIXTURE_ROOT = path.resolve(__dirname, '..', '..', 'scripts', 'eval', 'fix
 const SCOPE = { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' };
 const ASK = '帮我汇总';
 const TASK_TEXT = '帮我把结果汇总成一份文件';
+/** 任务业务名（底账 name 缺省 = deriveTaskName(request) 机械回落；短原文即原文）。 */
+const TASK_NAME = TASK_TEXT;
 /** 脚本模型在唤醒回合产出的那句（用户看到的话由模型写）。 */
 const WOKE_LINE = '你交办的那件事办好了：汇总完成，共 3 条。';
 const LONG_RESULT = '华远贸易 21000 元、明达物流 18000 元，合计 39000 元（共 12 行）。';
@@ -106,12 +111,12 @@ class GatedExecutor implements TaskExecutor {
   }
 }
 
-function fakeDelivery(): { sentTexts: Array<{ route: ChannelRoute; text: string }>; port: FileDeliveryPort } {
+function fakeDelivery(deliveryMode: 'live' | 'silent' = 'live'): { sentTexts: Array<{ route: ChannelRoute; text: string }>; port: FileDeliveryPort } {
   const sentTexts: Array<{ route: ChannelRoute; text: string }> = [];
   return {
     sentTexts,
     port: {
-      deliveryMode: 'live',
+      deliveryMode,
       async sendToConversation(route: ChannelRoute): Promise<DeliveryReceipt> {
         return { route, parts: [] };
       },
@@ -171,7 +176,7 @@ function resultBodyOf(fact: string): string {
   return rest.slice(0, end);
 }
 
-type WakeMode = 'line' | 'echo' | 'empty' | 'tool-only' | 'no-wake';
+type WakeMode = 'line' | 'echo' | 'named' | 'empty' | 'tool-only' | 'no-wake' | 'silent';
 
 interface Fixture {
   server: Server;
@@ -182,6 +187,8 @@ interface Fixture {
   face: CountingClient;
   /** 真实 Pi 驱动（no-wake 夹具为 undefined）。 */
   mainDriver?: TurnDriver;
+  /** 脚本模型运行时（观察模型调用次数/请求；no-wake 夹具为 undefined）。 */
+  scripted?: ScriptedModelRuntime;
   /** no-wake 夹具：假驱动的回合输入记录（injections 观察用）。 */
   recorded: TurnDriverInput[];
   close(): Promise<void>;
@@ -190,7 +197,7 @@ interface Fixture {
 async function makeFixture(mode: WakeMode): Promise<Fixture> {
   const dir = tempDir();
   const dbPath = path.join(dir, 'state.db');
-  const delivery = fakeDelivery();
+  const delivery = fakeDelivery(mode === 'silent' ? 'silent' : 'live');
   const logs: Array<Record<string, unknown>> = [];
   const executor = new GatedExecutor();
   const face = new CountingClient();
@@ -220,6 +227,11 @@ async function makeFixture(mode: WakeMode): Promise<Fixture> {
           wakeCalls += 1;
           if (mode === 'echo') return textAssistant(resultBodyOf(last));
           if (mode === 'empty') return textAssistant('');
+          if (mode === 'named') {
+            // 脚本模型从**事实**里取业务名，再复读给用户（钉住「事实里带名字」这条链）。
+            const name = /「([^」]+)」/.exec(last)?.[1] ?? '';
+            return textAssistant(`「${name}」办好了：${resultBodyOf(last)}`);
+          }
           if (mode === 'tool-only') {
             // 走岔路：唤醒回合只调工具（拿不到执行面），工具错误回执后空收尾，不产出正文。
             return wakeCalls === 1 ? toolCallAssistant('task_run', { task: TASK_TEXT }) : textAssistant('');
@@ -237,6 +249,7 @@ async function makeFixture(mode: WakeMode): Promise<Fixture> {
         return textAssistant('好的。');
       },
     });
+    fixture.scripted = scripted;
   }
 
   const server = await createServer({
@@ -345,14 +358,20 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
     }
   });
 
-  it('③ 唤醒失败（空回复）→ 用户收到宿主兜底那一句，事件有记录', async () => {
+  it('③ 唤醒失败（空回复）→ 用户收到宿主**如实报完成事实**那句（业务名 + 结果正文；不说「再试一次」），事件有记录', async () => {
     const fx = await makeFixture('empty');
     try {
       await fx.server.handler(incoming('m-1', ASK));
       fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
-      expect(fx.delivery.sentTexts[0]!.text).toBe(failureMessageFor('host_fault').text);
-      expect(internalTermIn(fx.delivery.sentTexts[0]!.text)).toBeUndefined();
+      const text = fx.delivery.sentTexts[0]!.text;
+      // 2026-11-19 复核 F2：任务**已经完成**——兜底不得说「我这边没弄好 / 再试一次」
+      //（对写操作会诱导用户重复执行一次写）；如实报事实：业务名 + 结果正文。
+      expect(text).toContain(`「${TASK_NAME}」`);
+      expect(text).toContain('汇总完成，共 3 条。');
+      expect(text).not.toContain('再试一次');
+      expect(text).not.toContain('没弄好');
+      expect(internalTermIn(text)).toBeUndefined();
       expect(fx.logs.find((line) => line['event'] === 'task_completion_wake')).toMatchObject({ outcome: 'failed' });
       // 兜底也是如实投递（live sent），不是 suppressed。
       expect(fx.logs.some((line) => line['event'] === 'task_result_delivery_sent')).toBe(true);
@@ -361,13 +380,16 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
     }
   });
 
-  it('③b 会话拿不到（驱动无唤醒能力）→ 兜底 + 事实留待注入（下次用户开口随 injections 补说）', async () => {
+  it('③b 会话拿不到（驱动无唤醒能力）→ 如实报完成事实 + 事实留待注入（下次用户开口随 injections 补说）', async () => {
     const fx = await makeFixture('no-wake');
     try {
       await fx.server.handler(incoming('m-1', ASK));
       fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
-      expect(fx.delivery.sentTexts[0]!.text).toBe(failureMessageFor('host_fault').text);
+      const text = fx.delivery.sentTexts[0]!.text;
+      expect(text).toContain(TASK_NAME);
+      expect(text).toContain('汇总完成，共 3 条。');
+      expect(text).not.toContain('再试一次');
       expect(fx.logs.find((line) => line['event'] === 'task_completion_wake')).toMatchObject({ outcome: 'unavailable' });
       // 事实留在「待注入」（既有 injections 机制）：下一次用户开口时进模型上下文。
       await fx.server.handler(incoming('m-2', '然后呢'));
@@ -378,7 +400,7 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
     }
   });
 
-  it('④ 走岔路：唤醒回合只调工具不产出正文 → 兜底；任务不被误判、执行层零新增调用、无内部词', async () => {
+  it('④ 走岔路：唤醒回合只调工具不产出正文 → 如实报完成事实；任务不被误判、执行层零新增调用、无内部词', async () => {
     const fx = await makeFixture('tool-only');
     try {
       await fx.server.handler(incoming('m-1', ASK));
@@ -386,7 +408,9 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
 
       const text = fx.delivery.sentTexts[0]!.text;
-      expect(text).toBe(failureMessageFor('host_fault').text);
+      expect(text).toContain(TASK_NAME);
+      expect(text).toContain('汇总完成，共 3 条。');
+      expect(text).not.toContain('再试一次');
       // 用户可见面无内部词（工具名/执行层/错误形状都不进用户文本）。
       expect(internalTermIn(text)).toBeUndefined();
       expect(text).not.toContain('task_run');
@@ -398,7 +422,7 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
       // 任务不被误判终态、不被重跑：completed 保持，执行器只被调用一次。
       const taskId = String(wake!['taskId']);
       expect(fx.executor.calls).toBe(1);
-      // 执行层零新增调用：唤醒回合的工具调用在发起前被拒（碰不到执行面）。
+      // 执行层零新增调用：唤醒回合没有工具声明（工具调用匹配不到工具，碰不到执行面）。
       expect(fx.face.calls).toBe(0);
       const ro = createSqliteTaskRegistry(fx.dbPath, { readOnly: true });
       try {
@@ -406,6 +430,63 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
       } finally {
         ro.close();
       }
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('⑤ 完成消息要让用户看出是哪件事：脚本模型从**事实**里取业务名复读 → 用户可见文本里出现该业务名', async () => {
+    // 2026-11-19 复核 F4：宿主身份行已删，投递文本 = 模型那句话——**没有任何测试断言用户能
+    // 看出是哪件事**。本用例钉住那条链：① 喂进模型的事实里带业务名（缺了模型无从复读）；
+    // ② 模型说出业务名 → 用户可见文本里出现它。
+    const fx = await makeFixture('named');
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
+      const text = fx.delivery.sentTexts[0]!.text;
+      expect(text, '用户可见文本必须能看出是哪件事').toContain(TASK_NAME);
+      expect(text).toContain('汇总完成，共 3 条。');
+      // ① 的机械事实：唤醒回合（最后一条 user = 完成事实）里带着业务名——模型才能复读它。
+      const wakeRequest = fx.scripted!.requests().at(-1)!;
+      const fact = lastUserTextOf(wakeRequest.messages);
+      expect(fact.startsWith('[任务完成]')).toBe(true);
+      expect(fact).toContain(`「${TASK_NAME}」`);
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('⑥ silent 部署不唤醒（不白花模型调用）：只记事实（suppressed 记账照旧、零投递、零 sent）', async () => {
+    const fx = await makeFixture('silent');
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      const callsAfterAsk = fx.scripted!.calls();
+      expect(callsAfterAsk).toBeGreaterThan(0);
+      fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
+      // 既有抑制记账照旧（deliveryMode: silent），只是唤醒不再发生。
+      await vi.waitFor(() => {
+        expect(fx.logs.some((line) => line['event'] === 'task_result_delivery_suppressed' && line['deliveryMode'] === 'silent')).toBe(true);
+      }, { timeout: 10_000 });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // 零模型调用增量：silent 下唤醒（一次真实模型请求）不再发起。
+      expect(fx.scripted!.calls(), 'silent 部署不得为完成播报调用模型').toBe(callsAfterAsk);
+      expect(fx.logs.find((line) => line['event'] === 'task_completion_wake')).toMatchObject({ outcome: 'suppressed' });
+      expect(fx.delivery.sentTexts).toHaveLength(0);
+      expect(fx.logs.some((line) => line['event'] === 'task_result_delivery_sent')).toBe(false);
+      // 事实不丢：只记事实——下一次用户回合随 injections 补说（既有机制；注入在 prompt 之前）。
+      await fx.server.handler(incoming('m-2', '然后呢'));
+      const second = fx.scripted!.requests().at(-1)!;
+      const anyUserText = second.messages.some((message) => {
+        const record = message as { role?: string; content?: unknown };
+        if (record.role !== 'user') return false;
+        if (typeof record.content === 'string') return record.content.includes('[任务完成]');
+        if (Array.isArray(record.content)) {
+          return record.content.some((part) => String((part as { text?: unknown }).text ?? '').includes('[任务完成]'));
+        }
+        return false;
+      });
+      expect(anyUserText, '事实不丢：下一次用户回合随 injections 补说').toBe(true);
     } finally {
       await fx.close();
     }

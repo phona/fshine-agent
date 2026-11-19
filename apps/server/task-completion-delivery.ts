@@ -1,9 +1,10 @@
 /**
  * 后台任务完成的主动投递（B 切片，工单回执收敛；2026-11-19 唤醒切片改形）：任务经执行端
  * 确认 completed 后，**唤醒原会话的模型、由它把这件事说给用户**，宿主只投递它说的话——走
- * 宿主既有主动投递面（装配注入的 `fileDelivery.sendText`）。宿主不再拼成功文案（身份行
- * 「<业务名>」办完了： 已随本切片删除）；喂给模型的是**事实**（见 taskCompletionFactText），
- * 不是话术。
+ * 宿主既有主动投递面（装配注入的 `fileDelivery.sendText`）。宿主不再有常规成功文案
+ * （身份行「<业务名>」办完了： 已随唤醒切片删除）；喂给模型的是**事实**（见
+ * taskCompletionFactText），不是话术。**唯一例外**是唤醒降级（模型说不出话）与非 live
+ * 不唤醒时的宿主兜底一句（见 taskCompletionFallbackText）——它如实报完成事实，不是话术模板。
  *
  * 纪律（与文件投递 / 附件追问同一套，四必守同源）：
  *   · 非 live 部署**不发起投递**，记 `task_result_delivery_suppressed`，**不许记 sent**
@@ -92,6 +93,25 @@ export function taskCompletionFactText(input: { name?: string; resultText: strin
     ? `「${truncatedName(input.name)}」`
     : '你交代的那件事';
   return `[任务完成]${subject}已由执行端确认完成。结果正文（逐字）：${input.resultText}。请把这件事告诉用户。`;
+}
+
+/**
+ * 唤醒降级兜底文本：**全方案唯一允许的宿主用户文案**，只走唤醒降级路径
+ * （unavailable / failed / 非 live 不唤醒），模型说得出话（woken）时永远不用它。
+ *
+ * 为什么必须如实报事实（2026-11-19 复核 F2，最严重一条）：走到这里时任务**已经由执行端
+ * 确认完成**——一审兜底投 `failureMessageFor('host_fault')`（「是我这边没弄好。再试一次，
+ * 还是记下来让人看？」）是**假话**，对写操作还会诱导用户重复执行一次写。所以本句：
+ *   · 只陈述已完成的事实 + 结果正文（逐字，与旧宿主完成模板同形）；业务名缺省用中性指代；
+ *   · **不得出现「再试一次」这类导向重试的话**；
+ *   · 剥路径 / 空白不投 / sent·failed·suppressed 四必守记账全走 `deliverTaskResult`，
+ *     不另开投递路径。
+ */
+export function taskCompletionFallbackText(input: { name?: string; resultText: string }): string {
+  const subject = input.name !== undefined && input.name.trim() !== ''
+    ? `「${truncatedName(input.name)}」`
+    : '你交代的那件事';
+  return `${subject}办好了：${input.resultText}`;
 }
 
 /**

@@ -4,6 +4,8 @@
  * 形状（owner 2026-11-19）：任务状态变化 → 用一条宿主**事实**唤醒会话里的模型，由它把话
  * 带给用户；宿主只投递它说的话。本文件钉驱动侧四件事：
  *   · 空闲会话：事实注入 → 触发回合 → 取回**本回合**模型正文（不取上一回合答复）；
+ *   · **唤醒回合零工具**（2026-11-19 复核 F1）：唤醒请求不声明任何工具（Pi 原生
+ *     `setActiveToolsByName` 按回合切换），收尾恢复——下一用户回合工具面照旧；
  *   · 会话忙：事实入队（Pi 原生 followUp），wake 返回 busy——由当前回合处理，宿主不得另行投递；
  *   · 失败：回合报错 / 空回复（含只调工具不产出正文）→ failed，不冒充正文；
  *   · 切点：事实之后只有 toolResult 或非 stop 的 assistant 时取不到（工具结果不是模型的话）。
@@ -12,7 +14,8 @@
  *   · 切点判据退回「整段转录最后一条 assistant」→ 空回复用例返回历史答复、变红；
  *   · 认 toolResult 当正文 → toolResult 用例变红；
  *   · 去掉 busy 分支 → busy 用例收到 failed（重复投递的根因）变红；
- *   · 去掉 runFailure 判据 → 模型报错用例变红。
+ *   · 去掉 runFailure 判据 → 模型报错用例变红；
+ *   · 去掉唤醒回合的工具清空/恢复 → 零工具声明与恢复用例变红。
  */
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
@@ -86,13 +89,33 @@ function userTextsOf(messages: readonly unknown[]): string[] {
     });
 }
 
+/**
+ * 某次请求**有效**的工具声明（F1 断言用）：Pi 把工具集变化写成 system 消息上的
+ * `toolsAdded`/`toolsRemoved` 增量（`getCurrentTools` 同规则）；折叠全部 system 增量
+ * 得到「本次请求模型实际拿到的工具」。唤醒回合必须为 []。
+ */
+function declaredToolNames(messages: readonly unknown[]): string[] {
+  const tools = new Set<string>();
+  for (const message of messages) {
+    const record = message as {
+      role?: string;
+      toolsAdded?: ReadonlyArray<{ name?: string }>;
+      toolsRemoved?: ReadonlyArray<{ name?: string }>;
+    };
+    if (record.role !== 'system') continue;
+    for (const tool of record.toolsRemoved ?? []) tools.delete(String(tool.name ?? ''));
+    for (const tool of record.toolsAdded ?? []) tools.add(String(tool.name ?? ''));
+  }
+  return [...tools];
+}
+
 async function driverWith(responses: ReadonlyArray<AgentMessage | ((context: { messages: readonly unknown[] }) => AgentMessage)>) {
-  const requests: Array<{ messages: readonly unknown[] }> = [];
+  const requests: Array<{ messages: readonly unknown[]; toolNames: string[] }> = [];
   let index = 0;
   const scripted = await createScriptedModelRuntime({
     contextWindow: 40_000,
     script: (_callIndex, context) => {
-      requests.push({ messages: context.messages });
+      requests.push({ messages: context.messages, toolNames: declaredToolNames(context.messages) });
       const slot = responses[index];
       index += 1;
       if (slot === undefined) return undefined;
@@ -124,6 +147,8 @@ describe('唤醒入口（driver 侧，脚本化模型）', () => {
       // 模型真的读到了事实（不是话术）：唤醒回合请求里 fact 是最后一条 user。
       const wakeRequest = requests.at(-1)!;
       expect(userTextsOf(wakeRequest.messages).at(-1)).toBe(FACT);
+      // 唤醒回合对模型不声明任何工具（F1：清执行面不够，模型不能有工具可调）。
+      expect(wakeRequest.toolNames, '唤醒回合请求零工具声明').toEqual([]);
       // 转录一致性：事实（custom → user 投影）与模型那句话都在会话转录里。
       const transcript = driver.transcript!();
       const texts = userTextsOf(transcript);
@@ -151,7 +176,7 @@ describe('唤醒入口（driver 侧，脚本化模型）', () => {
       user('旧问题。', 1),
       textAssistant('旧答复。'),
       user(FACT, 2),
-      { role: 'toolResult', content: [{ type: 'text', text: '本回合工具执行面尚未就绪' }], timestamp: 3 } as unknown as AgentMessage,
+      { role: 'toolResult', content: [{ type: 'text', text: '请直接回答用户，不必调用工具。' }], timestamp: 3 } as unknown as AgentMessage,
     ], FACT)).toBe('');
     // 事实之后是 error/aborted 的 assistant → 不认（失败回合不得冒充答复）；
     // 供应商错误可能带半截正文，照样不是本回合可用的答复。
@@ -159,6 +184,28 @@ describe('唤醒入口（driver 侧，脚本化模型）', () => {
     expect(wakeReplyText([user(FACT, 2), assistant([{ type: 'text', text: '半截话' }], 'error', 'boom')], FACT)).toBe('');
     expect(wakeReplyText([user(FACT, 2), assistant([], 'aborted')], FACT)).toBe('');
     expect(wakeReplyText([user(FACT, 2), assistant([{ type: 'text', text: '半截话' }], 'aborted')], FACT)).toBe('');
+  });
+
+  it('F1 边界：唤醒回合请求零工具声明，回合收尾恢复——下一用户回合工具面照旧', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { driver, requests } = await driverWith([
+        textAssistant('第一回合答复。'),
+        textAssistant('办好了：共 7 条。'),
+        textAssistant('第二回合答复。'),
+      ]);
+      await driver.run(turnInput([user('第一问。')]));
+      expect(requests.at(-1)!.toolNames).toEqual(['probe']);
+      const woke = await driver.wake!(FACT);
+      expect(woke.outcome).toBe('woken');
+      expect(requests.at(-1)!.toolNames, '唤醒回合对模型不声明任何工具').toEqual([]);
+      const second = await driver.run(turnInput([user('第二问。')]));
+      expect(second.text).toBe('第二回合答复。');
+      expect(requests.at(-1)!.toolNames, '唤醒回合后必须恢复工具面（否则用户回合没有工具）').toEqual(['probe']);
+      driver.close?.();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('会话忙：wake 返回 busy（事实入队、当前回合处理），宿主不另行投递', async () => {
@@ -242,17 +289,20 @@ describe('唤醒入口（driver 侧，脚本化模型）', () => {
     }
   });
 
-  it('走岔路：唤醒回合只调工具不产出正文 → failed；工具在发起前被确定性拒绝（不碰执行面）', async () => {
+  it('走岔路：脚本模型在唤醒回合硬发工具调用 → 零工具声明下匹配不到工具（不碰执行面），空正文 → failed', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       let execCalls = 0;
+      const toolNamesPerRequest: string[][] = [];
       let index = 0;
       const scripted = await createScriptedModelRuntime({
         contextWindow: 40_000,
-        script: () => {
+        script: (_callIndex, context) => {
+          toolNamesPerRequest.push(declaredToolNames(context.messages));
           index += 1;
           if (index === 1) return textAssistant('先问一句的答复。');
-          // 唤醒回合：先调工具（拿不到执行面），工具错误回执后再以空 assistant 收尾（不产出正文）。
+          // 唤醒回合：脚本模型无视「零工具声明」硬发 toolCall（真实模型没有可调的声明面，
+          // 这是脚本夹具的极限情况）；Pi 记一条工具错误回执后以空 assistant 收尾（不产出正文）。
           if (index === 2) return toolCallAssistant('probe', 'call-wake');
           return assistant([]);
         },
@@ -270,7 +320,8 @@ describe('唤醒入口（driver 侧，脚本化模型）', () => {
       }));
       const woke = await driver.wake!(FACT, { deadline: Date.now() + 30_000 });
       expect(woke).toEqual({ outcome: 'failed' });
-      // 唤醒回合的执行面为空：工具调用到不了 exec（执行层零调用；本夹具里首回合也没调过工具）。
+      // 唤醒回合请求零工具声明；硬发的调用匹配不到工具 → 到不了 exec（执行层零调用）。
+      expect(toolNamesPerRequest[1], '唤醒回合请求零工具声明').toEqual([]);
       expect(execCalls, '唤醒回合的工具调用不得打到执行面').toBe(0);
       expect(warn.mock.calls.map((call) => String(call[0])).some((line) => line.includes('pi_driver_wake_empty_reply'))).toBe(true);
       driver.close?.();

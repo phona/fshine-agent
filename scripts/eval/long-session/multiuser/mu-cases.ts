@@ -373,7 +373,7 @@ export async function mu6(rt: RuntimeConfig): Promise<MuCaseResult> {
 
 export async function mu7(rt: RuntimeConfig): Promise<MuCaseResult> {
   const id = 'MU-7';
-  const title = '异步通知错投（B 通道事实只注入 owner 会话）';
+  const title = '异步通知错投（完成事实只注入 owner 会话）';
   const tmp = makeTempDir('mu7-');
   const plans = new MuPlans();
   const aSubmit = `${MU_TAGS['mu-alice']} 交办后台任务`;
@@ -383,7 +383,11 @@ export async function mu7(rt: RuntimeConfig): Promise<MuCaseResult> {
   const ctx = makeCtx(plans.table(), null);
   const sink = new MuRecordingSink();
   const executor = new MuFakeExecutor([async () => ({ kind: 'completed', resultText: '账已清点：3 条。' })]);
-  const handle = await createMuServer({ dir: tmp.dir, ctx, mode: 'background', runtime: rt, taskExecutor: executor, notificationSink: sink });
+  // 2026-11-19 复核 F3 迁移：completed 从 B 通道移除后，完成事实只在**慢活**路径上由唤醒
+  // （降级）注入——快活路径的结果已在同回合交给模型，不再重复注入。本用例要的正是慢活路径
+  // 的两面性：owner 下一回合拿到自己的完成事实、非 owner 拿不到。故本用例关掉 task_run 短
+  // 等待窗口（0 = 受理即返回，结果不在同回合交给模型）；其余旋钮原样用调用方传入的 rt。
+  const handle = await createMuServer({ dir: tmp.dir, ctx, mode: 'background', runtime: { ...rt, taskRunWaitMs: 0 }, taskExecutor: executor, notificationSink: sink });
   try {
     await deliver(handle.server.handler, incoming('mu-alice', 'conv-a7', 'a-1', aSubmit));
     const aliceTask = readTasks(handle.dbPath).find((task) => task.principalId === principalIdOf('mu-alice'));
@@ -399,11 +403,15 @@ export async function mu7(rt: RuntimeConfig): Promise<MuCaseResult> {
     const aliceTurn = ctx.mainRecords.find((record) => record.userText === `${MU_TAGS['mu-alice']} 下一步`);
     // 事实注入在 1.5.2 走 Pi 原生 custom message（`TurnDriverInput.injections`），
     // 与普通 messages 并列；两处任一命中都算该回合拿到了事实。
+    // 2026-11-19 复核 F3：completed 从 B 通道（`[任务事实]`）移除——完成由唤醒路径负责；
+    // 本夹具的假主驱动没有唤醒能力 → 降级事实经既有 systemNotes 注入（`[任务完成]` 形状）。
+    // 本用例判的是**事实只到 owner 会话**（跨 principal 不泄漏），两种事实形状任一命中都算。
+    const factShapes = ['[任务事实]', '[任务完成]'];
     const turnCarriesFact = (turn: typeof aliceTurn): boolean => turn !== undefined
       && [
         ...turn.messages.map((message) => String((message as { content?: unknown }).content ?? '')),
         ...turn.injections,
-      ].some((text) => text.includes('[任务事实]') && text.includes(aSubmit));
+      ].some((text) => factShapes.some((prefix) => text.includes(prefix)) && text.includes(aSubmit));
     const bobGotFact = turnCarriesFact(bobTurn);
     const aliceGotFact = turnCarriesFact(aliceTurn);
     const sinkAllAlice = sink.sent.length > 0 && sink.sent.every((notification) => notification.taskId === taskId);
