@@ -134,6 +134,8 @@ export interface PushEvidence {
   at: string;
   source: 'push_text' | 'file_push';
   text: string;
+  /** 投递记账归属的任务（采集端按 task_result_delivery_sent 记账补填；可选——迟到的完成投递靠它归属）。 */
+  taskId?: string;
 }
 
 export interface LedgerSnapshot {
@@ -509,6 +511,17 @@ export function summaryKeyFields(summary: string | undefined): string[] {
   return fields;
 }
 
+/**
+ * 「已知字符串存在性」的比对形态（2026-11-20 第三次同形假红修复）：去掉包裹类符号
+ * （「」『』【】[]()（）“”‘’）并折叠空白后做包含判定——括号与空白是排版，不是事实内容
+ * ——写闭环 2/3 次实测：模型把摘要里的「empty-one」（带角括号字面量）改写成
+ * 「empty-one 集合」就挂 C10。数值/条数/对象名本身的事实内容**不放宽**：
+ * 去括号只让「共 4 条」匹配「共4条」，「共 40 条」仍不命中（负例绊线）。
+ */
+export function bareForm(text: string): string {
+  return text.replace(/[「」『』【】[\]()（）“”‘’"']/gu, '').replace(/\s+/gu, '');
+}
+
 // ---------------------------------------------------------------------------
 // 判据与观察（纯函数；测试钉住正反两向）
 // ---------------------------------------------------------------------------
@@ -635,6 +648,9 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
 
   // C10 提案摘要转述守卫（PM P1-4）：有执行层摘要时，用户可见文本里必须出现摘要的关键字段
   // （集合名 / 窗口码 / 记录条数）。这些是执行层给的已知字符串，属"已知字符串存在性"，不判措辞。
+  // 存在性按**去括号形态**断言（2026-11-20 假红修复，见 bareForm）：各字段独立判定——
+  // 集合名 「empty-one」 → 文本「empty-one 集合」/「empty-one」都算命中；窗口码、条数同理，
+  // 但事实内容不放宽（「共 4 条」不匹配「共 40 条」，完全没提集合名仍判缺失）。
   // 用户可见文本 = 各回合回复 + push_text（与原 O1 观察同一取值面）。无摘要 = 前置缺失，判
   // inconclusive（detail 说明，不判红——与"模型没转述"区分开）。
   const keyFields = summaryKeyFields(evidence.ledger.proposal?.summary);
@@ -648,13 +664,17 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
       detail: '无执行层摘要或摘要无可提取关键字段 → inconclusive（前置缺失，不判红）',
     });
   } else {
-    const missing = keyFields.filter((field) => !userVisible.some((text) => text.includes(field)));
+    const hit = (field: string): boolean => {
+      const expected = bareForm(field);
+      return userVisible.some((text) => bareForm(text).includes(expected));
+    };
+    const missing = keyFields.filter((field) => !hit(field));
     results.push({
       id: 'C10', title: '提案摘要关键字段进用户可见面', kind: 'structured',
       status: missing.length === 0 ? 'pass' : 'fail',
       detail: `摘要关键字段=[${keyFields.join(' | ')}]；`
-        + `命中=[${keyFields.filter((field) => userVisible.some((text) => text.includes(field))).join(' | ') || '无'}]；`
-        + `缺失=[${missing.join(' | ') || '无'}]`,
+        + `命中=[${keyFields.filter((field) => hit(field)).join(' | ') || '无'}]；`
+        + `缺失=[${missing.join(' | ') || '无'}]（去括号形态比对）`,
     });
   }
 

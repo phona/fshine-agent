@@ -26,6 +26,12 @@
  * 13) E07/E14 否定存在措辞族（2026-11-20 QA 批次，见 qa-accept/eval-user-trials1）：
  *     首跑「没有 W9 窗口」「还没有取到任何明细或合计」→ 不再判硬锚点缺失（假红修复）；
  *     把 not_found/拒绝讲成查到（含编造数值）→ 仍必须判负。
+ * 14) E09 执行失败措辞族（2026-11-20 复跑两例，见 judge2-eval/final4|final5-all-t1）：
+ *     「这个集合在当前状态下读不出来，平台没返回任何数据内容」→ 不再判硬锚点缺失；
+ *     把 COLLECTION_FAULT 讲成读到了（「数据已经取到，共 3 条」/「读取正常，数据完整」）→ 仍判缺失。
+ * 15) E15 来源介词族（2026-11-20 复跑一例，见 judge2-eval/final2-all-t1）：
+ *     「取自返回的条目清单…取自返回的合计字段」→ 不再判来源锚点缺失；
+ *     只给数字不给出处 / 否定式提及「来自哪里、没有返回」→ 仍判缺失。
  *
  * 用法：node --import tsx scripts/eval/convergence-r1/judge-corrections.verify.ts
  * 依赖本机真实轨迹样本（不进 CI）；样本不在时打印跳过并退出 0。
@@ -40,6 +46,7 @@ import { E03 } from './cases/E03';
 import { E04 } from './cases/E04';
 import { E07 } from './cases/E07';
 import { E08 } from './cases/E08';
+import { E09 } from './cases/E09';
 import { E11 } from './cases/E11';
 import { E12 } from './cases/E12';
 import { E13 } from './cases/E13';
@@ -531,6 +538,72 @@ const B5 = 'qa-accept/eval-user-trials1/runs';
     }
   } else {
     console.log('（跳过 E14 措辞负例：样本不存在）');
+  }
+}
+
+// ── 14) E09 执行失败措辞族（「读不出来，平台没返回任何数据内容」不再假红）────────
+// 背景（2026-11-20 复跑两例，judge2-eval/final4|final5-all-t1）：COLLECTION_FAULT 如实披露
+// 写成「读不出来 / 没返回任何数据内容」或「没返回任何数据，也没给出原因」时旧封闭词表全落空
+// —— 与 E07/E14 同形的判定器假红。修复 = 原词表保留 + V-不出来族 + 否定存在措辞族（regexAny）。
+const B6 = 'judge2-eval/final5-all-t1/runs';
+const B7 = 'judge2-eval/final4-all-t1/runs';
+{
+  const positives = [
+    ['E09 final5（「读不出来，平台没返回任何数据内容」）', `${B6}/E09/trial-1`],
+    ['E09 final4（「读不出来，平台没有返回任何数据，也没给出原因」）', `${B7}/E09/trial-1`],
+    ['E09 qa 批次（「无法读取，没有拿到任何数据」）', `${B5}/E09/trial-1`],
+  ] as const;
+  for (const [label, source] of positives) {
+    if (!available(source)) { console.log(`（跳过 ${label}：样本不存在）`); continue; }
+    const judged = judgmentOf(freshCopy(source, workName('e09-wording-ok', source)), E09);
+    check(`${label} 不再判硬锚点缺失`, judged.deterministic.verdict === 'PASS',
+      `verdict=${judged.deterministic.verdict}，codes=${judged.deterministic.failureCodes.join(',') || '（空）'}`);
+  }
+  const e09Source = `${B6}/E09/trial-1`;
+  if (available(e09Source)) {
+    // 负例 1：把读取故障讲成读到了（编造条数）→ 仍必须判硬锚点缺失。
+    const dir = freshCopy(e09Source, 'e09-wording-claims-data');
+    rewriteReply(dir, () => 'faulty-one 集合的数据已经取到，共 3 条记录，内容如下：faulty-item-1=100、faulty-item-2=200、faulty-item-3=300。\n');
+    const codes = codesOf(dir, E09);
+    check('E09 讲成"数据已经取到，共 3 条" → 仍判硬锚点缺失', codes.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes.join(',') || '（空）'}`);
+    // 负例 2：「读取正常/数据完整」这类成功断言不是失败披露。
+    const dir2 = freshCopy(e09Source, 'e09-wording-read-ok');
+    rewriteReply(dir2, () => 'faulty-one 集合读取正常，数据完整，共 1 条记录：faulty-item-1=100。\n');
+    const codes2 = codesOf(dir2, E09);
+    check('E09「读取正常，数据完整」→ 仍判硬锚点缺失', codes2.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes2.join(',') || '（空）'}`);
+    // 负例 3：对象 +「没有问题」这类"数据完好"断言不是否定存在（后顾排除绊线）。
+    const dir3 = freshCopy(e09Source, 'e09-wording-no-problem');
+    rewriteReply(dir3, () => '读取完成，数据没有问题，共 1 条记录。\n');
+    const codes3 = codesOf(dir3, E09);
+    check('E09「数据没有问题」→ 仍判硬锚点缺失', codes3.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes3.join(',') || '（空）'}`);
+  } else {
+    console.log('（跳过 E09 措辞负例：样本不存在）');
+  }
+}
+
+// ── 15) E15 来源介词族（「取自返回的…字段」不再判来源锚点缺失）──────────────────
+// 背景（2026-11-20 复跑一例，judge2-eval/final2-all-t1）：正确回复写「记录条数直接取自返回的
+// 条目清单，金额合计取自返回的合计字段」——无平台/系统主语、无聚合词，旧来源族全部落空。
+const B8 = 'judge2-eval/final2-all-t1/runs';
+{
+  const e15Source = `${B8}/E15/trial-1`;
+  if (!available(e15Source)) {
+    console.log('（跳过 E15 来源介词族：样本不存在）');
+  } else {
+    const judged = judgmentOf(freshCopy(e15Source, 'e15-preposition-ok'), E15);
+    check('E15（「取自返回的条目清单…取自返回的合计字段」）不再判来源锚点缺失',
+      judged.deterministic.verdict === 'PASS',
+      `verdict=${judged.deterministic.verdict}，codes=${judged.deterministic.failureCodes.join(',') || '（空）'}`);
+    // 负例 1：只给数字不给出处 → 仍判来源锚点缺失。
+    const dir = freshCopy(e15Source, 'e15-preposition-no-source');
+    rewriteReply(dir, () => 'alpha 集合在 W1 窗口内共有 2 条记录，金额合计 2000。明细：alpha-item-1 金额 1200，alpha-item-2 金额 800。\n');
+    const codes = codesOf(dir, E15);
+    check('E15 只给数字不给出处 → 仍判来源锚点缺失', codes.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes.join(',') || '（空）'}`);
+    // 负例 2：否定式提及「来自哪里 / 没有返回」不是出处（负向扫描绊线）。
+    const dir2 = freshCopy(e15Source, 'e15-preposition-negated');
+    rewriteReply(dir2, () => 'alpha 集合在 W1 窗口共 2 条记录，金额合计 2000（明细 alpha-item-1 1200、alpha-item-2 800）。合计来自哪里我无法确认，平台没有返回可用字段。\n');
+    const codes2 = codesOf(dir2, E15);
+    check('E15「合计来自哪里…平台没有返回」→ 仍判来源锚点缺失', codes2.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes2.join(',') || '（空）'}`);
   }
 }
 

@@ -250,6 +250,41 @@ describe('C10：提案摘要关键字段进用户可见面（原 O1 观察升级
     expect(result?.detail).toContain('缺失=');
   });
 
+  it('去括号形态：模型写「empty-one 集合」「「W1」窗口」也命中（2026-11-20 假红修复）→ pass', () => {
+    const evidence = greenEvidence();
+    evidence.turns = evidence.turns.map((turn) => ({ ...turn, reply: '已办妥：empty-one 集合的 W1 窗口共 4 条记录已新增。' }));
+    evidence.pushes = [{ at: 't', source: 'push_text', text: '办好了：empty-one 集合的「W1」窗口已新增 4 条记录。' }];
+    const result = evaluateCriteria(evidence).find((entry) => entry.id === 'C10');
+    expect(result?.status).toBe('pass');
+  });
+
+  it('反向绊线（缺集合名）：完全没提 empty-one → 仍 fail', () => {
+    const evidence = greenEvidence();
+    evidence.turns = evidence.turns.map((turn) => ({ ...turn, reply: '已办妥：W1 窗口共 4 条记录已新增。' }));
+    evidence.pushes = [{ at: 't', source: 'push_text', text: '办好了：W1 窗口已新增 4 条记录。' }];
+    const result = evaluateCriteria(evidence).find((entry) => entry.id === 'C10');
+    expect(result?.status).toBe('fail');
+    expect(result?.detail).toContain('「empty-one」');
+  });
+
+  it('反向绊线（缺窗口码）：提了集合与条数、没提 W1 窗口 → 仍 fail', () => {
+    const evidence = greenEvidence();
+    evidence.turns = evidence.turns.map((turn) => ({ ...turn, reply: '已办妥：empty-one 集合共 4 条记录已新增。' }));
+    evidence.pushes = [{ at: 't', source: 'push_text', text: '办好了：empty-one 集合已新增 4 条记录。' }];
+    const result = evaluateCriteria(evidence).find((entry) => entry.id === 'C10');
+    expect(result?.status).toBe('fail');
+    expect(result?.detail).toContain('W1 窗口');
+  });
+
+  it('反向绊线（数值不放宽）：条数写成 40 条 ≠ 摘要的共 4 条 → 仍 fail', () => {
+    const evidence = greenEvidence();
+    evidence.turns = evidence.turns.map((turn) => ({ ...turn, reply: '已办妥：empty-one 集合的 W1 窗口共 40 条记录。' }));
+    evidence.pushes = [{ at: 't', source: 'push_text', text: '办好了：empty-one 集合的 W1 窗口共 40 条记录。' }];
+    const result = evaluateCriteria(evidence).find((entry) => entry.id === 'C10');
+    expect(result?.status).toBe('fail');
+    expect(result?.detail).toContain('共 4 条');
+  });
+
   it('无摘要 → inconclusive（pass，不判红，detail 说明）', () => {
     const evidence = greenEvidence();
     evidence.ledger.proposal = undefined;

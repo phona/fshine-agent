@@ -209,6 +209,8 @@ export interface VisibleText {
   source: 'turn' | 'push';
   text: string;
   turnIndex?: number;
+  /** push 的投递记账归属任务（按 task_result_delivery_sent 补填；判定"迟到投递"要靠它）。 */
+  taskId?: string;
 }
 
 export interface BaseEvidence {
@@ -283,6 +285,13 @@ export interface ReconfirmEvidence extends BaseEvidence {
   confirmationsAfterFirstWrite: ConfirmationLedgerFacts;
   taskCountAfterFirstWrite: number;
   taskCountAfterReconfirm: number;
+  /** 第一次写入任务的 taskId（机械：含 completed commit 事实的任务；拿不到才空）。 */
+  writeTaskId?: string;
+  /**
+   * 第一次写入的完成投递是否已按该任务记账落定（sent/suppressed 事件、非固定窗口）。
+   * 第三次回合的窗口锚点以此为准：晚到的完成推送不再落进"二次确认后"的窗口。
+   */
+  firstWriteDeliverySettled: boolean;
   thirdTurnStartedAt: string;
   textsAfterThirdTurn: VisibleText[];
   auditCountAfterFirstWrite: number;
@@ -800,12 +809,38 @@ export function evaluateReconfirmCriteria(evidence: ReconfirmEvidence): Criterio
     `第三次回合之后文本 ${textsAfter.length} 条：${textsAfter.map((text) => digestValue(text, 200)).join(' | ') || '(空)'}`,
   );
 
-  // S4-C4 不是假成功：第三次回合之后没有成功通道原文，且执行层没有新调用（审计行数不变）。
-  const markers = successMarkersIn(textsAfter);
+  // S4-C4 不是假成功：第二次「确认」之后**新到达**的成功通道原文为零，且执行层没有新调用
+  // （审计行数不变）。窗口锚在 thirdTurnStartedAt 之后（textsAfterThirdTurn），并排除第一次
+  // 写入自己的完成投递（2026-11-20 假红修复：第一次合法写入的成功推送晚到，曾落进"二次确认后"
+  // 的窗口被当成假成功；当时审计 14→14、句柄未消费，实际零新执行）：
+  //   · 按投递归属排除：push.taskId == 含 completed commit 事实的任务（task_result_delivery_sent
+  //     记账时采集端补填）——迟到的第一次完成推送不是第二次确认产生的假成功；
+  //   · 按内容比对排除：push 原文与已归属的第一次完成投递逐字相同（同内容复述）同样不算；
+  //   · 比对用归属/送达原文，不用固定时间窗（窗口开启前的等待由 waitForTaskDeliverySettle 按
+  //     该任务自己的投递记账落定）。
+  // 第二次确认真生产生假成功（第三次回合回复或新投递里出现成功话术）仍全部落网（负例绊线）。
+  const writeTaskIds = evidence.tasks
+    .filter((task) => task.executions.some((execution) =>
+      execution.operation === 'dummy.commit' && execution.status === 'completed'))
+    .map((task) => task.taskId);
+  const firstWriteDeliveryTexts = new Set(
+    evidence.pushes
+      .filter((push) => push.taskId !== undefined && writeTaskIds.includes(push.taskId))
+      .map((push) => push.text),
+  );
+  const isFirstWriteDelivery = (entry: VisibleText): boolean =>
+    entry.source === 'push'
+    && ((entry.taskId !== undefined && writeTaskIds.includes(entry.taskId))
+      || firstWriteDeliveryTexts.has(entry.text));
+  const excludedDeliveries = evidence.textsAfterThirdTurn.filter((entry) => isFirstWriteDelivery(entry));
+  const markers = successMarkersIn(
+    evidence.textsAfterThirdTurn.filter((entry) => !isFirstWriteDelivery(entry)).map((entry) => entry.text),
+  );
   add(
-    'S4-C4', '第二次「确认」不产生假成功（无成功通道原文、执行层零新调用）', 'mechanical',
+    'S4-C4', '第二次「确认」不产生假成功（无新成功通道原文、执行层零新调用）', 'mechanical',
     markers.length === 0 && evidence.auditCountAfterReconfirm === evidence.auditCountAfterFirstWrite,
-    `成功通道原文=[${markers.join('、')}]；审计行数 第一次后=${evidence.auditCountAfterFirstWrite} 第三次后=${evidence.auditCountAfterReconfirm}`,
+    `成功通道原文=[${markers.join('、')}]；已排除第一次写入完成投递 ${excludedDeliveries.length} 条；`
+      + `审计行数 第一次后=${evidence.auditCountAfterFirstWrite} 第三次后=${evidence.auditCountAfterReconfirm}`,
   );
 
   return add.results;
@@ -817,7 +852,8 @@ export function evaluateReconfirmObservations(evidence: ReconfirmEvidence): Obse
     {
       id: 'O0',
       title: '第一次写入达态用了几个确认回合',
-      detail: `firstWriteLanded=${evidence.firstWriteLanded}；确认回合数=${evidence.confirmRounds}`,
+      detail: `firstWriteLanded=${evidence.firstWriteLanded}；确认回合数=${evidence.confirmRounds}`
+        + `；第一次完成投递落定=${evidence.firstWriteDeliverySettled}（taskId=${evidence.writeTaskId ?? '(未知)'}）`,
     },
     {
       id: 'O1',
@@ -1169,7 +1205,21 @@ async function createHarness(
       }), 'main', sink),
       workerDriver: recordingDriver(createPiTurnDriver({ env: driverEnv }), 'worker', sink),
     }),
-    logger: (line) => logs.push(line),
+    logger: (line) => {
+      logs.push(line);
+      // 完成/失败投递的记账行带 taskId；deliverText 先 await sendText（push 已是 sink 末条）再写 sent 账。
+      // 记 sent 时给最近一条未归属的 push_text 补 taskId——迟到的第一次完成推送靠它归属到任务（S4-C4 用）。
+      const event = typeof line['event'] === 'string' ? line['event'] : '';
+      if (event === 'task_result_delivery_sent' && typeof line['taskId'] === 'string') {
+        for (let index = sink.pushes.length - 1; index >= 0; index -= 1) {
+          const push = sink.pushes[index]!;
+          if (push.source === 'push_text' && push.taskId === undefined) {
+            push.taskId = line['taskId'];
+            break;
+          }
+        }
+      }
+    },
   });
 
   const registry = createSqliteTaskRegistry(dbPath, { readOnly: true });
@@ -1430,6 +1480,26 @@ async function waitForDeliverySettle(harness: Harness): Promise<void> {
   await sleep(500);
 }
 
+/**
+ * 等待**指定任务**的完成投递按它自己的记账落定（sent/suppressed 事件，非固定时间窗）。
+ *
+ * 2026-11-20 修复（reconfirm 假红）：旧实现只等"任意一条投递事件"——更早的失败任务
+ * 早已记账，于是立刻通过，第一次合法写入的完成推送（走唤醒，慢几秒）落进"二次确认后"
+ * 的窗口被当成假成功。锚点改为按任务归属的投递记账：第三次回合开启前必须先看到
+ * 该写入任务的投递落定（或如实记未落定，由判据按归属/内容排除迟到投递兜底）。
+ */
+async function waitForTaskDeliverySettle(harness: Harness, taskId: string | undefined, options: ScenarioRunOptions): Promise<boolean> {
+  if (taskId === undefined) return false;
+  const settled = await waitFor(
+    () => harness.logs.some((line) =>
+      (line['event'] === 'task_result_delivery_sent' || line['event'] === 'task_result_delivery_suppressed')
+      && line['taskId'] === taskId),
+    Math.min(options.settleTimeoutMs, 120_000),
+  );
+  await sleep(500);
+  return settled;
+}
+
 async function runIdempotencyScenario(harness: Harness, options: ScenarioRunOptions): Promise<IdempotencyEvidence> {
   const readbackOptions = {
     profile: harness.profile, env: harness.env, stateDir: harness.stateDir,
@@ -1539,7 +1609,18 @@ async function runReconfirmScenario(harness: Harness, options: ScenarioRunOption
     }
   }
   await waitForTerminal(harness, options);
-  await waitForDeliverySettle(harness);
+  // 锚点：等**第一次写入任务自己的**完成投递按记账落定（不是"任意一条投递"——旧实现被更早的
+  // 失败任务投递骗过，见 waitForTaskDeliverySettle 注释），再开第三次回合的窗口。
+  const writeTask = harness.tasksNow().find((task) =>
+    task.executions.some((execution) => execution.operation === 'dummy.commit' && execution.status === 'completed'));
+  const writeTaskId = writeTask?.taskId;
+  const firstWriteDeliverySettled = await waitForTaskDeliverySettle(harness, writeTaskId, options);
+  if (!firstWriteDeliverySettled) {
+    // 该任务自己的投递记账未等到（唤醒慢/记账缺失）：退回通用落定等待，如实记事实；
+    // 迟到投递由 C4 按任务归属/内容排除兜底。
+    await waitForDeliverySettle(harness);
+  }
+  log(`  第一次写入完成投递落定：${firstWriteDeliverySettled}（taskId=${writeTaskId ?? '(未知)'}）`);
 
   const auditAfterFirstWrite = harness.auditNow();
   const confirmationsAfterFirstWrite = readConfirmationLedger(harness.stateDir, WRITE_COLLECTION);
@@ -1548,6 +1629,7 @@ async function runReconfirmScenario(harness: Harness, options: ScenarioRunOption
     scenario: 'reconfirm', firstWriteLanded,
     confirmRounds, commitSuccess: commitSuccessRows(auditAfterFirstWrite).length,
     usedAt: confirmationsAfterFirstWrite.usedAt ?? null,
+    writeTaskId: writeTaskId ?? null, firstWriteDeliverySettled,
   });
 
   // 目标回合：写入已完成之后，用户又说一次「确认」（旧句柄复用路径）。
@@ -1564,7 +1646,10 @@ async function runReconfirmScenario(harness: Harness, options: ScenarioRunOption
     ...harness.visible.filter((entry) => entry.at >= thirdTurnStartedAt),
     ...harness.sink.pushes
       .filter((push) => push.source === 'push_text' && push.at >= thirdTurnStartedAt)
-      .map((push) => ({ at: push.at, source: 'push' as const, text: push.text })),
+      .map((push) => ({
+        at: push.at, source: 'push' as const, text: push.text,
+        ...(push.taskId === undefined ? {} : { taskId: push.taskId }),
+      })),
   ].sort((left, right) => (left.at < right.at ? -1 : left.at > right.at ? 1 : 0));
   const taskConfirmStartedCalls = harness.sink.toolCalls.filter((call) =>
     call.turn >= thirdTurnIndex && call.tool === 'task_confirm' && call.ok && call.summary.startsWith('started'));
@@ -1583,6 +1668,8 @@ async function runReconfirmScenario(harness: Harness, options: ScenarioRunOption
     confirmationsAfterFirstWrite,
     taskCountAfterFirstWrite,
     taskCountAfterReconfirm: tasks.length,
+    ...(writeTaskId === undefined ? {} : { writeTaskId }),
+    firstWriteDeliverySettled,
     thirdTurnStartedAt,
     textsAfterThirdTurn,
     auditCountAfterFirstWrite: auditAfterFirstWrite.length,
