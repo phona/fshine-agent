@@ -1,0 +1,407 @@
+/**
+ * 运营告警规则（纯函数；仓内 ops 脚本的判定核心，不进产品运行时）。
+ *
+ * 为什么需要它：用户侧已经改成「静默到有结果」，出不出事必须由我们自己看得见。规则面
+ * 只做两件事——把**一批结构化事实**（日志行 / 底账行的投影）判成告警项，并按
+ * (rule, subject) 做冷却去重。它不读文件、不连网、不碰时钟：事实、`now`、冷却状态都由
+ * 调用方（scripts/ops/alerts.ts）注入，因而可单测、可复现。
+ *
+ * 【回溯原始文本】：每条告警项都带 `raw`——被命中的**原始文本**（原始日志行 / 原始错误
+ * 原文），**不截断**。告警只带摘要，真正能回到现场的是 `evidenceRef`（messageId / taskId /
+ * 日志字节偏移 / 事件 id）+ `raw`。这是本模块的硬不变量：构造告警时只搬运原文，绝不改写、
+ * 绝不裁剪（见 alert-rules.test.ts 的「证据含原文」用例与反向绊线）。
+ *
+ * 四条规则（阈值与判据集中在此，脚本与文档只引用，不另立口径）：
+ *   · host_fault_reported —— 出现我方故障（执行失败分类为 host_fault、协议违约、确认句柄
+ *     丢失等）≥1；
+ *   · retry_storm         —— 同一任务执行事实 ≥5 条，或同一 (operation, 错误码) 在同一任务
+ *     ≥3 次；
+ *   · task_stuck          —— 任务 `running` 超 10 分钟无事件；`waiting_user` 超 30 分钟；
+ *   · delivery_failed     —— 文件/结果投递失败 ≥1（`file_delivery` 状态非 sent、
+ *     `task_result_delivery_failed`）。
+ *
+ * 去重：同一 `(rule, subject)` 在冷却窗口（缺省 30 分钟）内只出一次；冷却状态是可 JSON
+ * 序列化的纯数据（`.runtime/ops/alerts-state.json` 持久化的正是它）。时间只从注入的 `now`
+ * 取——绝不调用 Date.now()，保证「同样输入 + 同样 now」得到同样输出。
+ */
+
+/** 四条规则的身份。 */
+export type AlertRule =
+  | 'host_fault_reported'
+  | 'retry_storm'
+  | 'task_stuck'
+  | 'delivery_failed';
+
+/** 告警严重度（三条规则里我方故障与投递失败是对用户的直接伤害，判 higher）。 */
+export type AlertSeverity = 'critical' | 'warning' | 'info';
+
+/** 每条规则的严重度（集中一处，脚本/文档不另立）。 */
+export const ALERT_SEVERITY: Readonly<Record<AlertRule, AlertSeverity>> = {
+  host_fault_reported: 'critical',
+  delivery_failed: 'critical',
+  retry_storm: 'warning',
+  task_stuck: 'warning',
+};
+
+/** 任务 `running` 超过该时长无事件即判卡住（缺省 10 分钟）。 */
+export const TASK_RUNNING_STUCK_MS = 10 * 60 * 1000;
+/** 任务 `waiting_user` 超过该时长即判卡住（缺省 30 分钟）。 */
+export const USER_WAITING_STUCK_MS = 30 * 60 * 1000;
+/** 同一任务执行事实条数上限（达到即判重试风暴）。 */
+export const RETRY_STORM_TASK_FACTS = 5;
+/** 同一任务内同一 (operation, 错误码) 的重复次数上限（达到即判重试风暴）。 */
+export const RETRY_STORM_OP_ERROR = 3;
+/** 冷却窗口缺省值（毫秒）：同一 (rule, subject) 在此窗口内只告一次。 */
+export const DEFAULT_COOLDOWN_MS = 30 * 60 * 1000;
+
+/** 判定任务条数/操作重复这类聚合规则时要计入的执行事实事件名。 */
+export const EXECUTION_FACT_EVENT = 'execution';
+/** task_stuck 依赖的任务状态投影事件名。 */
+export const TASK_STATE_EVENT = 'task_state';
+
+/** 触发 host_fault_reported 的错误码集合（确认句柄丢失 / 协议违约）。 */
+export const HOST_FAULT_ERROR_CODES: readonly string[] = [
+  'CONFIRMATION_NOT_FOUND',
+  'EXECUTION_PROTOCOL_VIOLATION',
+];
+/** 触发 host_fault_reported 的事件名集合（协议违约在我方落 failed 时的事件）。 */
+export const HOST_FAULT_EVENTS: readonly string[] = [
+  'execution_accepted_undeclared',
+];
+
+/**
+ * 结构化事实的投影明细（日志行 / 底账行按需带字段；缺省字段 = 未知，不作猜测）。
+ */
+export interface AlertFactDetail {
+  /** 执行事实：操作名。 */
+  operation?: string;
+  /** 执行事实：错误码。 */
+  errorCode?: string;
+  /** 执行事实：失败分类（如 'host_fault'）。 */
+  failureKind?: string;
+  /** 投递事实：投递状态（'sent' / 'delivery_failed' / …）。 */
+  deliveryStatus?: string;
+  /** 任务状态投影：'running' / 'waiting_user' / …。 */
+  taskStatus?: string;
+  /** 协议违约标记（执行层对未声明 long_running 的 operation 返回 accepted）。 */
+  protocolViolation?: boolean;
+  /** 确认句柄丢失标记。 */
+  confirmationLost?: boolean;
+}
+
+/**
+ * 一条结构化事实。调用方（脚本）负责把原始日志行 / 底账行投影成这个形状；
+ * `raw` 必须是被命中的**原始文本**（不截断），`at` 是事实时刻（ISO）。
+ */
+export interface AlertFact {
+  /** 事实来源：'log' = 结构化日志行；'ledger' = 底账行。 */
+  source: 'log' | 'ledger';
+  /** 事件/行类型，如 'file_delivery' / 'task_result_delivery_failed' / 'execution' / 'task_state'。 */
+  event: string;
+  /** 事实时刻（ISO 字符串）。task_stuck 据它与 now 算时长。 */
+  at: string;
+  /** 被命中的原始文本（原始日志行 / 原始错误原文），**不截断**。 */
+  raw: string;
+  /** 任务归属（可缺省）。 */
+  taskId?: string;
+  /** 主体归属（可缺省）。 */
+  principalId?: string;
+  /** 会话归属（可缺省）。 */
+  sessionId?: string;
+  /** 消息 id（可回溯键之一）。 */
+  messageId?: string;
+  /** 日志字节偏移（可回溯键之一）。 */
+  logOffset?: number;
+  /** 显式回溯键；缺省按 task/message/log/event 派生。 */
+  evidenceRef?: string;
+  /** 结构化明细。 */
+  detail?: AlertFactDetail;
+}
+
+/** 一条告警项。 */
+export interface AlertItem {
+  rule: AlertRule;
+  severity: AlertSeverity;
+  /** 同一 rule 下去重的键（任务 / 会话 / 全局）。 */
+  subject: string;
+  /** 回到原始现场的键（messageId / taskId / 日志偏移 / 事件 id）。 */
+  evidenceRef: string;
+  /** 人读摘要（不长于一段；原文在 raw）。 */
+  summary: string;
+  /** 被命中的原始文本（不截断）。 */
+  raw: string;
+  /** 本次判定的时刻（ISO）。 */
+  at: string;
+}
+
+/** 冷却状态：`${rule}\u0000${subject}` → 上次告警时刻（ISO）。可 JSON 序列化后持久化。 */
+export type AlertCooldownState = Readonly<Record<string, string>>;
+
+export interface EvaluateAlertsOptions {
+  /** 判定时刻（注入；不取系统时钟）。 */
+  now: Date;
+  /** 冷却窗口（毫秒）；缺省 DEFAULT_COOLDOWN_MS。 */
+  cooldownMs?: number;
+  /** 既有的冷却状态（来自持久化文件）；缺省空。 */
+  cooldownState?: AlertCooldownState;
+}
+
+export interface EvaluateAlertsResult {
+  /** 本次应发出的告警（已过冷却过滤）。 */
+  alerts: AlertItem[];
+  /** 更新后的冷却状态（调用方负责持久化）。 */
+  cooldownState: AlertCooldownState;
+}
+
+/** 冷却键：rule + subject（\u0000 分隔，避免拼接歧义）。 */
+export function cooldownKey(rule: AlertRule, subject: string): string {
+  return `${rule}\u0000${subject}`;
+}
+
+/** 事实时刻解析（ISO → ms）；非法/缺省返回 undefined（按未知处理，不猜）。 */
+function timeMsOf(fact: AlertFact): number | undefined {
+  const ms = Date.parse(fact.at);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
+/** 回溯键：显式优先，否则按 task → message → log → event 派生。 */
+export function evidenceRefOf(fact: AlertFact): string {
+  if (fact.evidenceRef !== undefined && fact.evidenceRef !== '') return fact.evidenceRef;
+  if (fact.taskId !== undefined && fact.taskId !== '') return `task:${fact.taskId}`;
+  if (fact.messageId !== undefined && fact.messageId !== '') return `msg:${fact.messageId}`;
+  if (fact.logOffset !== undefined) return `log@${fact.logOffset}`;
+  return `event:${fact.event}`;
+}
+
+/** 归属主体：task → session → principal → 全局（同一 rule 下去重的键）。 */
+export function subjectOf(fact: AlertFact, scope: 'task' | 'session' | 'event' = 'task'): string {
+  if (scope === 'event') return `event:${fact.event}`;
+  if (fact.taskId !== undefined && fact.taskId !== '') return `task:${fact.taskId}`;
+  if (scope === 'session' && fact.sessionId !== undefined && fact.sessionId !== '') return `session:${fact.sessionId}`;
+  if (fact.sessionId !== undefined && fact.sessionId !== '') return `session:${fact.sessionId}`;
+  if (fact.principalId !== undefined && fact.principalId !== '') return `principal:${fact.principalId}`;
+  return 'global';
+}
+
+/** 事实是否我方故障（host_fault_reported）。 */
+export function isHostFault(fact: AlertFact): boolean {
+  if (fact.detail?.failureKind === 'host_fault') return true;
+  if (fact.detail?.protocolViolation === true) return true;
+  if (fact.detail?.confirmationLost === true) return true;
+  if (HOST_FAULT_EVENTS.includes(fact.event)) return true;
+  const code = fact.detail?.errorCode;
+  return code !== undefined && HOST_FAULT_ERROR_CODES.includes(code);
+}
+
+/** 事实是否是执行事实（retry_storm 计数单位）。 */
+export function isExecutionFact(fact: AlertFact): boolean {
+  return fact.event === EXECUTION_FACT_EVENT;
+}
+
+/** 事实是否是投递失败（delivery_failed）。 */
+export function isDeliveryFailure(fact: AlertFact): boolean {
+  if (fact.event === 'task_result_delivery_failed') return true;
+  if (fact.event !== 'file_delivery') return false;
+  const status = fact.detail?.deliveryStatus;
+  // `file_delivery` 状态非 sent 即判投递失败（缺省字段 = 未知，不判）。
+  return status !== undefined && status !== 'sent';
+}
+
+/** 把一组事实的原文拼成一段（不截断；用换行分隔，原样保留每条）。 */
+function joinRaws(facts: readonly AlertFact[]): string {
+  return facts.map((f) => f.raw).join('\n');
+}
+
+/** 分钟数（向下取整；用于摘要文案）。 */
+function minutesOf(ms: number): number {
+  return Math.floor(ms / 60_000);
+}
+
+/** 内部候选告警（未过冷却）。 */
+interface Candidate {
+  rule: AlertRule;
+  subject: string;
+  evidenceRef: string;
+  summary: string;
+  raw: string;
+}
+
+function hostFaultCandidates(facts: readonly AlertFact[]): Candidate[] {
+  const out: Candidate[] = [];
+  const bySubject = new Map<string, AlertFact[]>();
+  for (const fact of facts) {
+    if (!isHostFault(fact)) continue;
+    const subject = subjectOf(fact, 'task');
+    const bucket = bySubject.get(subject);
+    if (bucket === undefined) bySubject.set(subject, [fact]);
+    else bucket.push(fact);
+  }
+  for (const [subject, bucket] of bySubject) {
+    const first = bucket[0]!;
+    const events = [...new Set(bucket.map((f) => f.event))].join('、');
+    out.push({
+      rule: 'host_fault_reported',
+      subject,
+      evidenceRef: evidenceRefOf(first),
+      summary: `我方故障（${events}）${subject === 'global' ? '' : `，归属 ${subject}`}`,
+      raw: joinRaws(bucket),
+    });
+  }
+  return out;
+}
+
+function retryStormCandidates(facts: readonly AlertFact[]): Candidate[] {
+  const executions = facts.filter(isExecutionFact);
+  if (executions.length === 0) return [];
+  const out: Candidate[] = [];
+
+  // (a) 同一任务执行事实 ≥ RETRY_STORM_TASK_FACTS。
+  const byTask = new Map<string, AlertFact[]>();
+  for (const fact of executions) {
+    if (fact.taskId === undefined || fact.taskId === '') continue;
+    const bucket = byTask.get(fact.taskId);
+    if (bucket === undefined) byTask.set(fact.taskId, [fact]);
+    else bucket.push(fact);
+  }
+  for (const [taskId, bucket] of byTask) {
+    if (bucket.length < RETRY_STORM_TASK_FACTS) continue;
+    out.push({
+      rule: 'retry_storm',
+      subject: `task:${taskId}`,
+      evidenceRef: evidenceRefOf(bucket[0]!),
+      summary: `重试风暴：任务 ${taskId} 执行事实 ${bucket.length} 条（阈值 ${RETRY_STORM_TASK_FACTS}）`,
+      raw: joinRaws(bucket),
+    });
+  }
+
+  // (b) 同一 (operation, 错误码) 在同一任务 ≥ RETRY_STORM_OP_ERROR。
+  const byOpError = new Map<string, { taskId: string; entry: AlertFact[] }>();
+  for (const fact of executions) {
+    if (fact.taskId === undefined || fact.taskId === '') continue;
+    const operation = fact.detail?.operation;
+    if (operation === undefined || operation === '') continue;
+    const code = fact.detail?.errorCode ?? '(无错误码)';
+    const key = `${fact.taskId}\u0000${operation}\u0000${code}`;
+    const found = byOpError.get(key);
+    if (found === undefined) byOpError.set(key, { taskId: fact.taskId, entry: [fact] });
+    else found.entry.push(fact);
+  }
+  for (const [key, { taskId, entry }] of byOpError) {
+    if (entry.length < RETRY_STORM_OP_ERROR) continue;
+    const [, operation, code] = key.split('\u0000');
+    out.push({
+      rule: 'retry_storm',
+      subject: `task:${taskId}`,
+      evidenceRef: evidenceRefOf(entry[0]!),
+      summary: `重试风暴：任务 ${taskId} 操作 ${operation} 错误 ${code} 重复 ${entry.length} 次（阈值 ${RETRY_STORM_OP_ERROR}）`,
+      raw: joinRaws(entry),
+    });
+  }
+  return out;
+}
+
+function taskStuckCandidates(facts: readonly AlertFact[], nowMs: number): Candidate[] {
+  const out: Candidate[] = [];
+  for (const fact of facts) {
+    if (fact.event !== TASK_STATE_EVENT) continue;
+    const status = fact.detail?.taskStatus;
+    const atMs = timeMsOf(fact);
+    if (status === undefined || atMs === undefined) continue;
+    const elapsed = nowMs - atMs;
+    // 边界：刚好到阈值不告（严格大于才告）——「刚好 10 分钟不告、10 分 1 秒告」。
+    if (status === 'running' && elapsed > TASK_RUNNING_STUCK_MS) {
+      out.push({
+        rule: 'task_stuck',
+        subject: subjectOf(fact, 'task'),
+        evidenceRef: evidenceRefOf(fact),
+        summary: `任务卡住：${fact.taskId ?? '未知任务'} 处于 running 已 ${minutesOf(elapsed)} 分钟无事件（阈值 ${minutesOf(TASK_RUNNING_STUCK_MS)} 分钟）`,
+        raw: fact.raw,
+      });
+    } else if (status === 'waiting_user' && elapsed > USER_WAITING_STUCK_MS) {
+      out.push({
+        rule: 'task_stuck',
+        subject: subjectOf(fact, 'task'),
+        evidenceRef: evidenceRefOf(fact),
+        summary: `任务卡住：${fact.taskId ?? '未知任务'} 处于 waiting_user 已 ${minutesOf(elapsed)} 分钟（阈值 ${minutesOf(USER_WAITING_STUCK_MS)} 分钟）`,
+        raw: fact.raw,
+      });
+    }
+  }
+  return out;
+}
+
+function deliveryFailedCandidates(facts: readonly AlertFact[]): Candidate[] {
+  const out: Candidate[] = [];
+  const bySubject = new Map<string, AlertFact[]>();
+  for (const fact of facts) {
+    if (!isDeliveryFailure(fact)) continue;
+    const subject = subjectOf(fact, 'session');
+    const bucket = bySubject.get(subject);
+    if (bucket === undefined) bySubject.set(subject, [fact]);
+    else bucket.push(fact);
+  }
+  for (const [subject, bucket] of bySubject) {
+    const first = bucket[0]!;
+    const events = [...new Set(bucket.map((f) => f.event))].join('、');
+    out.push({
+      rule: 'delivery_failed',
+      subject,
+      evidenceRef: evidenceRefOf(first),
+      summary: `投递失败（${events}）${subject === 'global' ? '' : `，归属 ${subject}`}`,
+      raw: joinRaws(bucket),
+    });
+  }
+  return out;
+}
+
+/** 全部候选（无冷却）。顺序稳定：规则固定序 → subject 字典序。 */
+function allCandidates(facts: readonly AlertFact[], nowMs: number): Candidate[] {
+  const candidates: Candidate[] = [
+    ...hostFaultCandidates(facts),
+    ...retryStormCandidates(facts),
+    ...taskStuckCandidates(facts, nowMs),
+    ...deliveryFailedCandidates(facts),
+  ];
+  return candidates.sort((a, b) => {
+    if (a.rule !== b.rule) return a.rule < b.rule ? -1 : 1;
+    if (a.subject !== b.subject) return a.subject < b.subject ? -1 : 1;
+    return 0;
+  });
+}
+
+/**
+ * 判定 + 冷却过滤。纯函数：同样 (facts, now, cooldownState) 得到同样输出；
+ * 不读文件、不连网、不取系统时钟。
+ */
+export function evaluateAlerts(
+  facts: readonly AlertFact[],
+  options: EvaluateAlertsOptions,
+): EvaluateAlertsResult {
+  const cooldownMs = options.cooldownMs ?? DEFAULT_COOLDOWN_MS;
+  const prev = options.cooldownState ?? {};
+  const nowMs = options.now.getTime();
+  const nowIso = options.now.toISOString();
+  const next: Record<string, string> = { ...prev };
+  const alerts: AlertItem[] = [];
+
+  for (const candidate of allCandidates(facts, nowMs)) {
+    const key = cooldownKey(candidate.rule, candidate.subject);
+    const last = prev[key];
+    if (last !== undefined) {
+      const lastMs = Date.parse(last);
+      if (!Number.isNaN(lastMs) && nowMs - lastMs < cooldownMs) continue; // 冷却内不重复
+    }
+    next[key] = nowIso;
+    alerts.push({
+      rule: candidate.rule,
+      severity: ALERT_SEVERITY[candidate.rule],
+      subject: candidate.subject,
+      evidenceRef: candidate.evidenceRef,
+      summary: candidate.summary,
+      raw: candidate.raw,
+      at: nowIso,
+    });
+  }
+
+  return { alerts, cooldownState: next };
+}

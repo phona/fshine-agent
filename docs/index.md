@@ -39,11 +39,12 @@
 - `eval/long-session-prereg.md` — R6 长会话压缩预注册（Wave1 已冻结、Wave2 待裁决；`scripts/eval/long-session/wave1-runner.ts:66` 运行时按其算 sha256）。
 - `eval/business-e2e-batch2-prereg.md` — P2 业务 E2E 预注册（七场景 21 样本 / 27 会话；尚未跑真实模型，仍是下一次运行的口径）。
 
-## ops（运行、变量、联调与手工走查，5 篇）
+## ops（运行、变量、联调与手工走查，6 篇）
 
 今天怎么启动、变量从哪来、出事看哪里、真实面走到哪一步——排障与联调入口。
 
 - `ops/README.md` — 启动与单实例纪律、`channel.mode` 三档、变量入口、排障 runbook。
+- `ops/alerts.md` — 运营告警（四条规则与阈值、双出口、去重、原始文本可回溯不变量、真跑前置）。
 - `environment-variables.md` — 环境变量完整清单、默认值与缺失行为。
 - `product/manual-test-handbook.md` — 手工功能走查手册（R4；`ops/README.md` §6 按其行号引用）。
 - `product/real-read-readiness.md` — 真实只读接入准备档（硬声明：准备材料 ≠ 已授权接入）。
