@@ -63,6 +63,7 @@ export interface ExecutionArgDeclaration {
    * 关键词猜语义是判据红线（也不可靠），所以这条只能靠执行层在声明里自觉写明。
    * 字段类型保持可选只为兼容既有声明；**新声明结构化参数时省略 `payload` 即违约**。
    * schema 的具体语义归执行层（宿主只做窄实现的结构化校验，不引第三方 schema 库）。
+   * schema 支持 oneOf/anyOf 组合子（窄实现：逐分支跑既有校验，任一分支通过即放行）。
    */
   payload?: { schema?: unknown };
 }

@@ -8,9 +8,13 @@
  *   · 宿主负责 lint → 序列化落盘 → 把路径翻译进该参数 → 才提交执行层。
  *
  * 本模块是**纯函数**（零 import 面，除 node:fs/path 的确定性文件写）：给定 schema 与模型给的
- * 值，做**窄结构校验**（对象性 / required / 顶层类型 / additionalProperties 拒绝），合法则
+ * 值，做**窄结构校验**（对象性 / required / 顶层类型 / additionalProperties 拒绝，
+ * 以及 oneOf/anyOf 分支选择与 string pattern/minLength、数组 items/边界），合法则
  * 原子写进 `<taskDir>/in/<label>.json`，返回路径或结构化失败（missing/unknown）。不引第三方
  * schema 库（保持窄实现），不做业务判断，不触网、不 spawn。
+ *
+ * oneOf/anyOf：只展开一层，对每个分支跑既有窄校验，任一分支干净即通过；全不匹配时把
+ * 最接近分支的「缺什么/多什么」拼进反馈，让模型一轮改对。不引第三方库、不做完整 JSON Schema。
  *
  * 契约（execution-contract.ts `ExecutionArgDeclaration.payload`）：schema 的具体语义归执行层；
  * 本模块只实现「足够让模型一轮改对」的最小子集——多余/缺失/写法不对都如实回报，不猜、不补。
@@ -38,6 +42,9 @@ interface ValueSchema {
   minItems?: unknown;
   maxItems?: unknown;
   minLength?: unknown;
+  pattern?: unknown;
+  oneOf?: unknown;
+  anyOf?: unknown;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -80,6 +87,67 @@ function limitOf(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
+/** 组合子分支的可读名字：优先 title，其次按 type 给中文形状名，兜底用序号。 */
+function branchLabel(branch: Record<string, unknown> | undefined, index: number): string {
+  const title = branch?.['title'];
+  if (typeof title === 'string' && title.trim() !== '') return title;
+  const type = branch?.['type'];
+  if (type === 'object') return '单对象';
+  if (type === 'array') return '数组';
+  if (typeof type === 'string') return type;
+  return `分支${index + 1}`;
+}
+
+/** 反馈里的路径去重 + 限量（避免把长数组每条都倒给用户）：最多 6 条，超出用 … 收尾。 */
+function capPaths(paths: string[]): string {
+  const unique = [...new Set(paths)];
+  return unique.length <= 6 ? unique.join('、') : `${unique.slice(0, 6).join('、')}…`;
+}
+
+/** pattern 的 secure 编译：非法正则不裁决（执行层 schema 是权威，宿主只做窄实现）。 */
+function safeRegExp(pattern: string): RegExp | undefined {
+  try {
+    return new RegExp(pattern);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * oneOf/anyOf 分支选择：对每个分支分别跑既有窄校验，**任一分支 missing/unknown 皆空即通过**。
+ * 全部分支都不匹配时，按违规数升序（最接近的先）把每支「差什么/多什么」拼成可修复反馈，
+ * 例如「按单对象缺 entries」「按数组多出/写法不对 (root)」——不许只说「不匹配」。
+ *
+ * 克制：嵌套组合子不处理（分支内再含 oneOf/anyOf 视为无约束），只覆盖执行层声明用到的
+ * 一层；oneOf 的「恰好一支」与 anyOf 的「至少一支」在此不区分（两支都合法也放行）。
+ */
+function lintCombinator(
+  value: unknown,
+  branches: readonly unknown[],
+  path: string,
+  out: { missing: string[]; unknown: string[] },
+): void {
+  const reports = branches.map((branch, index) => {
+    const branchOut = { missing: [] as string[], unknown: [] as string[] };
+    // allowCombinator=false：分支里的组合子不再展开（嵌套组合子不覆盖）。
+    lintValue(value, branch, path, branchOut, false);
+    return {
+      branchOut,
+      label: branchLabel(asRecord(branch), index),
+      violations: branchOut.missing.length + branchOut.unknown.length,
+    };
+  });
+  // 任一分支干净 = 通过（oneOf/anyOf 在宿主窄校验里同义）。
+  if (reports.some((report) => report.violations === 0)) return;
+  const where = path === '' ? '' : `${displayPath(path)}: `;
+  for (const report of [...reports].sort((a, b) => a.violations - b.violations)) {
+    const parts: string[] = [];
+    if (report.branchOut.missing.length > 0) parts.push(`缺 ${capPaths(report.branchOut.missing)}`);
+    if (report.branchOut.unknown.length > 0) parts.push(`多出/写法不对 ${capPaths(report.branchOut.unknown)}`);
+    out.unknown.push(`${where}按${report.label}形状${parts.join('；') || '不匹配'}`);
+  }
+}
+
 /**
  * 窄值校验（递归但只覆盖执行层声明用到的子集）：对象 required/additionalProperties、
  * 数组 items/minItems/maxItems、string minLength、基本类型。schema 未声明/未识别的构造
@@ -88,10 +156,28 @@ function limitOf(value: unknown): number | undefined {
  * 违规以路径记入 missing（必填缺失）或 unknown（值形态不符/多出来）：
  *   · 根值 `(root)`；对象字段 `collection`；数组元素 `records[2]`；
  *   · 数组超上限记 `records>maxItems:500`（"多出来"的机械形态）。
+ *
+ * allowCombinator=false 用于分支内部：嵌套 oneOf/anyOf 不展开（只覆盖一层）。
  */
-function lintValue(value: unknown, schema: unknown, path: string, out: { missing: string[]; unknown: string[] }): void {
+function lintValue(
+  value: unknown,
+  schema: unknown,
+  path: string,
+  out: { missing: string[]; unknown: string[] },
+  allowCombinator = true,
+): void {
   const spec = asRecord(schema) as ValueSchema | undefined;
   if (spec === undefined) return;
+  if (allowCombinator) {
+    if (Array.isArray(spec.oneOf) && spec.oneOf.length > 0) {
+      lintCombinator(value, spec.oneOf, path, out);
+      return;
+    }
+    if (Array.isArray(spec.anyOf) && spec.anyOf.length > 0) {
+      lintCombinator(value, spec.anyOf, path, out);
+      return;
+    }
+  }
   if (spec.type === 'object') {
     const required = Array.isArray(spec.required)
       ? spec.required.filter((key): key is string => typeof key === 'string')
@@ -114,7 +200,7 @@ function lintValue(value: unknown, schema: unknown, path: string, out: { missing
         if (spec.additionalProperties === false) out.unknown.push(child);
         continue;
       }
-      lintValue(item, declared, child, out);
+      lintValue(item, declared, child, out, allowCombinator);
     }
     return;
   }
@@ -130,7 +216,7 @@ function lintValue(value: unknown, schema: unknown, path: string, out: { missing
       out.unknown.push(`${displayPath(path)}>maxItems:${maxItems}`);
     }
     if (spec.items !== undefined) {
-      for (const [index, item] of value.entries()) lintValue(item, spec.items, `${path}[${index}]`, out);
+      for (const [index, item] of value.entries()) lintValue(item, spec.items, `${path}[${index}]`, out, allowCombinator);
     }
     return;
   }
@@ -139,15 +225,24 @@ function lintValue(value: unknown, schema: unknown, path: string, out: { missing
     return;
   }
   const minLength = limitOf(spec.minLength);
-  if (spec.type === 'string' && minLength !== undefined && typeof value === 'string' && value.length < minLength) {
-    out.unknown.push(displayPath(path));
+  if (spec.type === 'string' && typeof value === 'string') {
+    if (minLength !== undefined && value.length < minLength) {
+      out.unknown.push(displayPath(path));
+      return;
+    }
+    // pattern 只做窄实现（字符串 + 合法正则才裁决）；非法声明不裁决。
+    if (typeof spec.pattern === 'string') {
+      const regex = safeRegExp(spec.pattern);
+      if (regex !== undefined && !regex.test(value)) out.unknown.push(displayPath(path));
+    }
   }
 }
 
 /**
  * 窄结构校验：对象性 / required / 属性类型 / additionalProperties，数组的
- * items / minItems / maxItems，string 的 minLength（见 `lintValue`）。
- * 返回 missing（必填缺失）与 unknown（额外字段或值形态不符）——两类都非空即通过。
+ * items / minItems / maxItems，string 的 minLength/pattern，基本类型；oneOf/anyOf
+ * 逐分支跑窄校验、任一干净即通过（见 `lintValue` / `lintCombinator`）。
+ * 返回 missing（必填缺失）与 unknown（额外字段或值形态不符/组合子反馈）——两类都为空即通过。
  * schema 不是对象/不适用时不裁决（放行）。
  */
 export function lintPayload(value: unknown, schema: unknown): { missing: string[]; unknown: string[] } {
