@@ -125,7 +125,7 @@ describe('用例定义', () => {
       expect.objectContaining({ collection: 'faulty-one', field: 'readFault' }),
     ]));
     expect(SIM_FIXTURES.map((fixture) => fixture.id).sort()).toEqual([
-      'dummy-platform:default', 'dummy-platform:finance', 'dummy-platform:write',
+      'dummy-platform:default', 'dummy-platform:finance', 'dummy-platform:interaction', 'dummy-platform:write',
     ]);
     expect(SIM_WRITE_CASES.every((caseDef) => caseDef.fixtureId === 'dummy-platform:write')).toBe(true);
   });

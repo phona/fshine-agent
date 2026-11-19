@@ -80,6 +80,30 @@ export const SIM_FIXTURES: readonly SimFixtureDeclaration[] = Object.freeze([
       '因此写场景单列在 SIM_WRITE_CASES，不冒充「产品已支持写」。',
     ].join(''),
   },
+  {
+    id: 'dummy-platform:interaction',
+    kind: 'dummy-cli-default-seed',
+    fixtureRoot: 'scripts/eval/fixtures/dummy-platform',
+    scenario: 'dummy-finance',
+    collections: ['documents', 'denied-one'],
+    deterministicFaults: [
+      {
+        collection: 'denied-one',
+        field: 'scenario.faults[kind=restricted]',
+        effect: 'dummy.query 返回 GATE_REFUSE（exit 3，无载荷）：集合对当前调用方受限，任何查询都确定性被拒',
+      },
+      {
+        collection: 'documents',
+        field: '（无故障）',
+        effect: '两个窗口 W202610/W202611 返回同一批 items（document-1/1200、document-2/800、document-2/900）',
+      },
+    ],
+    note: [
+      '交互用例（SIM-INT-01/02）用缺省平台场景 dummy-finance（capabilities.json 的 scenario）：',
+      'documents 提供带窗口只读数据；denied-one 提供确定性「无权限」失败（GATE_REFUSE）。',
+      '本夹具只声明可达性，不进模拟用户 prompt。',
+    ].join(''),
+  },
 ]);
 
 export function resolveFixtureDeclaration(id: string): SimFixtureDeclaration {
