@@ -93,3 +93,12 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 | 编号 | 事项 | 设计要点 | 状态 / 为什么现在不做 |
 |---|---|---|---|
 | X-1 | 「已接收」轻反馈（贴表情 / reaction） | SDK 无 reaction 接口；可选替代 = **模板卡片原地更新**（⏳ → ✅，同一条卡片从「办理中」更新为「完成」），但需 live 验证该卡片类型对我们的机器人是否开放 | **当前不做**：短活缺省 **8 秒**就出结果，「收到」与「结果」几乎同时到；长活有 **10 分钟兜底**（超时如实告知）+ **运维告警**，已覆盖「接收感」。真实诉求未验证前不新增机制（新增机制准入：给不出「更省心/更省时间」的证据就不做） |
+
+## 十、独立复核登记（2026-11-20，明确不修）
+
+> 来自 9 点攻击独立复核：三处模型可见残留（agent.md / renderWorkerSystemPrompt 工作目录块 / 空汇报 reason）已由源头改写 + 守卫扩面修复；下列两项按复核建议**只登记、不修**，等真模型测量或专门切片再定。
+
+| 编号 | 事项 | 现行证据 | 为什么现在不做 |
+|---|---|---|---|
+| R-1 | `wakeCancelled` 不在会话链上的 run/wake 竞态：任务取消时若该会话此刻没有在跑的回合（`turnActive=false`），`wakeCancelled` 直接起一次唤醒；若紧接着用户回合/另一状态变化又起 wake，两个 wake 可能并发。复核实测 **1 次可复现** driver 报错、用户回合空 | `apps/server/notification-chat-sink.ts:216-235`（`wakeCancelled` 出口）；`apps/server/server.ts:1023-1030`（接 `wakeAndDeliverStateChange`）；`turnActive` 判据见 `server.ts:1019` | 属竞态收口，不是本次去内部词切片；复现率与用户级影响待专门测。修法要给唤醒加会话级串行/去重（新机制，需过准入），本轮不引入 |
+| R-2 | `WAKE_TURN_MS = 60s` 与 Main `mainThinkingLevel=high` 的张力：high 档长思考的唤醒回合可能 60s 内出不来 → 超时 abort → 模型那句丢失、走兜底渲染文案（用户看到的是模板话而非模型话） | `packages/agent/src/execution-runtime.ts:1006`（`WAKE_TURN_MS = 60_000`）、`:3180`/`:3196`（wake/coldWake 截止）；`packages/contracts/src/config.ts:121`、`packages/core/src/config.ts:96`（`mainThinkingLevel` 配置）；兜底见 `notification-chat-sink.ts:216-235` | 是否真发生取决于真模型在 high 档的唤醒耗时，**当前无真模型测量**。不擅自放宽截止或降档——等 `eval:user` 真模型读数再定，避免为假设问题改超时语义 |

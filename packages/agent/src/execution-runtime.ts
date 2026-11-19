@@ -557,7 +557,7 @@ export function renderWorkerSystemPrompt(workspaceRoot?: string): string {
     '【可信工作目录】',
     `你的可信工作目录是：${workspaceRoot}`,
     '不要主动访问该目录之外的文件；不要读取宿主配置、凭据、其他项目或用户主目录；该约束同样适用于你启动的任何子进程。',
-    '（以上是纵深防御提醒，不构成操作系统级隔离；执行环境的实际权限边界由执行层负责。）',
+    '（以上是纵深防御提醒，不构成操作系统级隔离；执行环境的实际权限边界由办事的执行面负责。）',
   ].join('\n');
 }
 
@@ -2856,7 +2856,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         };
       }
       if (workerResult.text.trim() === '') {
-        throw new Error('执行层 Worker 未产出有效汇报，本次任务未完成。');
+        throw new Error('没产出有效的办理结果汇报，本次任务未完成。');
       }
       registry.complete(taskId, workerResult.text);
       const task = registry.get(taskId, { principalId: options.principalId, sessionId: options.sessionId });
