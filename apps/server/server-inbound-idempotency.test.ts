@@ -1,0 +1,234 @@
+/**
+ * 入站消息跨重启幂等（底账事实，2026-11-19）。
+ *
+ * 问题：渠道重投幂等原先只在进程内存（`messageReplies` Map）——进程一重启，同一条
+ * messageId 会被当成新消息**重新处理一遍**（重复建任务、重复执行写操作）。本片把
+ * 「这条入站消息处理过没有」搬成底账事实（inbound_messages 表），跨重启仍成立。
+ *
+ * 真装配：createServer + 真实 handler（不 stub 去重路径），假执行客户端计数执行层调用，
+ * 假模型驱动；服务端缺省（无 push 面）= 同步派发，await handler 即回合落定。
+ * 用例：
+ *   ① 同 messageId 连发两次（同一实例）→ 第二次回放同一句回执、零新任务、零新执行；
+ *   ② 关掉 server、同 dbPath 重建、再投同一条 messageId → 回放同一句回执、零新任务、零执行；
+ *   ③ 底账留一條 processing（上一进程挂了）→ 再投不执行、回「还在办」、落事件；
+ *   ④ 不同会话的相同 messageId 不得互相吞（主键含 principal+session）。
+ */
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import type { AppConfig, IncomingChannelMessage } from '@fshine/contracts';
+import type {
+  CapabilityManifest,
+  ExecutionClient,
+  ExecutionOutcome,
+  ExecutionRequest,
+} from '@fshine/contracts/execution-contract';
+import { openTaskStore } from '@fshine/core';
+import type { TurnDriver } from '../../packages/agent/src/driver-contract';
+import { createServer, type Server } from './server';
+
+const FIXTURE_ROOT = path.resolve(__dirname, '..', '..', 'scripts', 'eval', 'fixtures', 'dummy-platform');
+/** 「上一进程挂了」话术（与 server.ts 的 INBOUND_STILL_PROCESSING_NOTE 逐字一致）。 */
+const STILL_PROCESSING_NOTE = '这条我还在办，办完会发你，不用再发一遍。';
+
+const tempDirs: string[] = [];
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+function tempDir(): string {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'server-inbound-idem-'));
+  tempDirs.push(dir);
+  return dir;
+}
+
+function testConfig(): AppConfig {
+  return {
+    principals: {
+      'wecom:test-user': { enabled: true },
+      'wecom:other-user': { enabled: true },
+    },
+    contextProfiles: {
+      dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },
+    },
+    channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
+    sessionTtlMs: 86_400_000,
+  };
+}
+
+/** 单聊里 conversationId = userid → principal/session 都是 `wecom:<userid>`。 */
+function incoming(userid: string, messageId: string): IncomingChannelMessage {
+  return {
+    wecomUserId: userid,
+    channel: 'wecom',
+    conversationId: userid,
+    messageId,
+    chatType: 'single',
+    text: '帮我查一下 documents 窗口 W202611 的数据',
+    receivedAt: new Date().toISOString(),
+  };
+}
+
+const MANIFEST: CapabilityManifest = {
+  contractVersion: 1,
+  operations: [{ name: 'dummy.query', label: 'query items', args: [] }],
+};
+
+/** 计数执行客户端：每次真实执行都进 requests（外部副作用计数）。 */
+class CountingClient implements ExecutionClient {
+  readonly requests: ExecutionRequest[] = [];
+  async capabilities(): Promise<CapabilityManifest> {
+    return MANIFEST;
+  }
+  async execute(request: ExecutionRequest): Promise<ExecutionOutcome> {
+    this.requests.push(request);
+    return { status: 'completed', data: {} };
+  }
+}
+
+function mainDriver(): TurnDriver {
+  return {
+    async run(input) {
+      await input.exec('task_run', { task: '查询 documents 窗口 W202611' });
+      const reply = '已受理：documents 窗口 W202611 共 3 条。';
+      return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
+    },
+  };
+}
+
+function workerDriver(): TurnDriver {
+  return {
+    async run(input) {
+      await input.exec('execute_operation', { operation: 'dummy.query', args: { '--collection': 'documents' } });
+      const reply = '已查询 documents W202611：3 条。';
+      return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
+    },
+  };
+}
+
+async function startServer(
+  dbPath: string,
+  client: CountingClient,
+  logs: Array<Record<string, unknown>>,
+): Promise<Server> {
+  return createServer({
+    env: { LLM_MODEL: 'test-model' },
+    config: testConfig(),
+    dbPath,
+    createDrivers: async () => ({ mainDriver: mainDriver(), workerDriver: workerDriver() }),
+    createExecutionFace: async () => ({
+      client,
+      allowedOperations: ['dummy.query'],
+      readOnlyOperations: ['dummy.query'],
+    }),
+    logger: (line) => logs.push(line),
+  });
+}
+
+/** 底账任务行数（另开一条连接读；真值，不看内存）。 */
+function countTasks(dbPath: string): number {
+  const store = openTaskStore(dbPath);
+  const count = store.listTasks().length;
+  store.close();
+  return count;
+}
+
+describe('入站消息跨重启幂等（底账事实）', () => {
+  it('① 同一 messageId 连发两次（同一实例）：第二次回放同一句回执，零新任务、零新执行', async () => {
+    const dir = tempDir();
+    const dbPath = path.join(dir, 'state.db');
+    const logs: Array<Record<string, unknown>> = [];
+    const client = new CountingClient();
+    const server = await startServer(dbPath, client, logs);
+    try {
+      const first = await server.handler(incoming('test-user', 'msg-1'));
+      const second = await server.handler(incoming('test-user', 'msg-1'));
+
+      expect(second).toBe(first);
+      expect(first).toContain('3 条');
+      expect(countTasks(dbPath)).toBe(1);
+      expect(client.requests).toHaveLength(1);
+      expect(logs.filter((line) => line['event'] === 'message_duplicate_replayed').length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('② 关掉 server、同 dbPath 重建、再投同一条 messageId：回放同一句回执，零新任务、零执行', async () => {
+    const dir = tempDir();
+    const dbPath = path.join(dir, 'state.db');
+    const logs: Array<Record<string, unknown>> = [];
+    const client = new CountingClient();
+
+    const serverA = await startServer(dbPath, client, logs);
+    const first = await serverA.handler(incoming('test-user', 'msg-restart'));
+    const tasksAfterFirst = countTasks(dbPath);
+    await serverA.close();
+
+    // 进程内「重启」：同 dbPath 重建（去重必须靠底账，内存 Map 已随 serverA 消失）。
+    const serverB = await startServer(dbPath, client, logs);
+    try {
+      const replay = await serverB.handler(incoming('test-user', 'msg-restart'));
+
+      expect(replay).toBe(first);
+      expect(replay).toContain('3 条');
+      expect(countTasks(dbPath)).toBe(tasksAfterFirst); // 零新任务
+      expect(client.requests).toHaveLength(1); // 零执行
+      expect(logs.filter((line) => line['event'] === 'message_duplicate_replayed').length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await serverB.close();
+    }
+  });
+
+  it('③ 底账留 processing（上一进程挂了）：再投不执行、回「还在办」、落事件', async () => {
+    const dir = tempDir();
+    const dbPath = path.join(dir, 'state.db');
+
+    // 模拟上一进程认领后挂在半途：直接往底账插一条 state='processing' 行。
+    const seed = openTaskStore(dbPath);
+    const seeded = seed.claimInboundMessage({
+      messageId: 'msg-stuck',
+      principalId: 'wecom:test-user',
+      sessionId: 'wecom:test-user',
+      claimedAt: new Date().toISOString(),
+    });
+    seed.close();
+    expect(seeded).toEqual({ outcome: 'claimed' });
+
+    const logs: Array<Record<string, unknown>> = [];
+    const client = new CountingClient();
+    const server = await startServer(dbPath, client, logs);
+    try {
+      const reply = await server.handler(incoming('test-user', 'msg-stuck'));
+
+      expect(reply).toBe(STILL_PROCESSING_NOTE);
+      expect(client.requests).toHaveLength(0); // 不重复执行
+      expect(countTasks(dbPath)).toBe(0); // 不重复办事
+      const events = logs.filter((line) => line['event'] === 'message_still_processing');
+      expect(events).toHaveLength(1);
+      expect(events[0]!['messageId']).toBe('msg-stuck');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('④ 不同会话的相同 messageId 不得互相吞（主键含 principal+session）', async () => {
+    const dir = tempDir();
+    const dbPath = path.join(dir, 'state.db');
+    const logs: Array<Record<string, unknown>> = [];
+    const client = new CountingClient();
+    const server = await startServer(dbPath, client, logs);
+    try {
+      // 同一 messageId，两个不同用户（= 两个不同 principal/session）。
+      const a = await server.handler(incoming('test-user', 'same-msg'));
+      const b = await server.handler(incoming('other-user', 'same-msg'));
+
+      expect(a).toContain('3 条');
+      expect(b).toContain('3 条');
+      expect(client.requests).toHaveLength(2); // 两条都真办了
+      expect(countTasks(dbPath)).toBe(2);
+    } finally {
+      await server.close();
+    }
+  });
+});
