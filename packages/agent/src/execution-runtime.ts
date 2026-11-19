@@ -58,6 +58,11 @@ import { ToolUserError } from './driver-contract';
 import { FileRefUnavailableError, safeExtensionOf, type CopiedTaskInput, type TaskInputCopier } from './file-store';
 export type { TaskInputCopier } from './file-store';
 import { classifyFailure, failureMessageFor, type UserFacingFailureKind } from './user-facing-failure';
+import {
+  createDeterministicRetryLock,
+  type RetryAllowed,
+  type RetryBlock,
+} from './deterministic-retry-lock';
 import type { RunJsExecutor, RunJsOutput } from './run-js-executor';
 import type { RecalcXlsxExecutor, RecalcCostEvent } from './recalc-xlsx-executor';
 export type {
@@ -368,14 +373,6 @@ export const EXECUTE_OPERATION_TOOL_SCHEMA: Record<string, unknown> = {
  * Main 的静态协议义务（本切片的中性措辞；不含执行层实例名与业务字段）。
  * 装配方把它接在角色文本之后（agent.md 负责角色，这里只负责本轮工具协议）。
  */
-/** 取对象参数里第一个存在的字符串值（--collection/--topic 等）；没有则 undefined。 */
-function firstString(args: Record<string, unknown>, keys: readonly string[]): string | undefined {
-  for (const key of keys) {
-    const value = args[key];
-    if (typeof value === 'string' && value !== '') return value;
-  }
-  return undefined;
-}
 
 /**
  * 载荷型参数装信封（宿主侧；owner 2026-11-19）：模型给结构化**值** → 桥 lint+落盘 → 用文件
@@ -598,7 +595,15 @@ export type ExecutionEvent =
    * 失败归类（模型可见面收口，2026-11-19）：执行层失败/拒绝**不再逐字进模型投影**，
    * 模型只见 kind + note（见 toModelVisibleOutcome）；原始 code 与原文只经这条事件进日志。
    */
-  | { event: 'execution_failure_classified'; operation: string; code: string; status: 'failed' | 'refused'; kind: string };
+  | { event: 'execution_failure_classified'; operation: string; code: string; status: 'failed' | 'refused'; kind: string }
+  /**
+   * A2b（2026-11-18；后台执行器）：同一 (operation, 对象) 本回合已被执行层判定确定性失败
+   * （retryable !== true）时**再次发起**的调用，在发起前被宿主拦下——对象/操作/执行层码与
+   * 它的 retryable 声明随本条进日志（与前台 `turn.retryBlocked` → server 的
+   * `execution_retry_blocked` 同一形状）。放行（显式 retryable:true）记 `execution_retry_allowed`。
+   */
+  | { event: 'execution_retry_blocked'; taskId: string; operation: string; object: string; code: string; declaredRetryable: boolean | 'unset' }
+  | { event: 'execution_retry_allowed'; taskId: string; operation: string; object: string; code: string };
 
 /** 长任务结果渲染的日志内联上限（字节；超过走任务文件，不留绝对路径也不灌转录）。 */
 export const LONG_TASK_LOG_INLINE_MAX_BYTES = 4 * 1024;
@@ -870,21 +875,9 @@ export function renderFileManifest(files: readonly TurnFileRef[]): string {
   ].join('\n');
 }
 
-/** A2b 放行事实（观测用）：执行层显式声明 retryable:true 的失败——本回合允许继续尝试。 */
-export interface TurnRetryAllowed {
-  operation: string;
-  object: string;
-  code: string;
-}
-
-/** A2b 拦截事实（观测用；对象/操作/执行层给出的码与它的 retryable 声明）。 */
-export interface TurnRetryBlock {
-  operation: string;
-  object: string;
-  code: string;
-  /** 执行层对该失败的 retryable 声明；undefined = 未声明（按不可重试处理）。 */
-  declaredRetryable?: boolean;
-}
+/** A2b 放行/拦截事实（观测用）：类型单源于共享锁模块（前台与后台同一形状）。 */
+export type TurnRetryAllowed = RetryAllowed;
+export type TurnRetryBlock = RetryBlock;
 
 export interface TurnResult {
   reply: string;
@@ -1781,8 +1774,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
    * 才允许继续尝试；`false` 与**未声明**一律视为不可重试。理由是不确定场景下宁可停下来
    * 报错、让人介入，也不能继续往下撞——打爆执行层就彻底没得用了。
    * 宿主只执行执行层的声明，不判断业务——这不是计划门。
+   * 实现单源：`deterministic-retry-lock.ts`（与后台执行器同一份「键 + 记录 + 判定」）。
    */
-  let deterministicFailuresThisTurn = new Map<string, { code: string; declaredRetryable?: boolean; message?: string }>();
+  let retryLock = createDeterministicRetryLock();
   /** 载荷型参数 lint 的本回合失败计数（键 = operation）；随回合清零（装信封失败不是执行事实）。 */
   let payloadLintFailuresThisTurn = new Map<string, number>();
   /** A2b 观测：本回合被拦下的重试（回合末随 TurnResult 交装配层落事件；不改回合结果）。 */
@@ -2197,20 +2191,14 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     });
     // A2b 同参数重复守卫（发起前拒；不发起执行、不落执行事实）。
     // 作用域 = (本回合, 该任务)：同一任务内的逐字重复才拒；两个不同任务各自查同一对象是合法的。
-    const objectValue = firstString(callArgs, ['--collection', '--topic', 'collection', 'topic']);
-    const deterministicKey = objectValue === undefined ? undefined : `${operation}\u0000${objectValue}`;
-    const blocked = deterministicKey === undefined ? undefined : deterministicFailuresThisTurn.get(deterministicKey);
-    if (blocked !== undefined) {
-      retryBlockedThisTurn.push({
-        operation,
-        object: objectValue ?? '',
-        code: blocked.code,
-        ...(blocked.declaredRetryable === undefined ? {} : { declaredRetryable: blocked.declaredRetryable }),
-      });
-      const codeNote = blocked.code === 'unclassified_failure' ? '且没有说明可以重试' : `（${blocked.code}）`;
-      const original = blocked.message === undefined ? '' : `执行层原话：${blocked.message}`;
+    // 键 + 判定来自共享锁（与后台执行器同一份语义，见 deterministic-retry-lock.ts）。
+    const blockedRetry = retryLock.before(operation, callArgs);
+    if (blockedRetry !== undefined) {
+      retryBlockedThisTurn.push(blockedRetry.block);
+      const codeNote = blockedRetry.block.code === 'unclassified_failure' ? '且没有说明可以重试' : `（${blockedRetry.block.code}）`;
+      const original = blockedRetry.executorMessage === undefined ? '' : `执行层原话：${blockedRetry.executorMessage}`;
       throw new Error(
-        `执行层这次调用「${objectValue}」失败了${codeNote}；本回合不要再换参数重试——`
+        `执行层这次调用「${blockedRetry.block.object}」失败了${codeNote}；本回合不要再换参数重试——`
         + `把执行层给出的说法如实转告用户${original === '' ? '' : `（${original}）`}，`
         + '需要换口径或换对象时先问用户。',
       );
@@ -2310,23 +2298,11 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     // A2b：执行层**没有显式说可重试**（retryable !== true）时，本回合锁住该 (operation, 对象)。
     // fail-safe 缺省（owner 2026-11-18）：不确定就不往下撞——宁可停下报错让人介入，
     // 也不能把执行层打到不能用。只有显式 retryable:true（超时/网关不可用等瞬时故障）放行。
-    if (deterministicKey !== undefined && run.outcome.status !== 'completed') {
-      const error = (run.outcome as { error?: { code?: string; retryable?: boolean } }).error;
-      if (error?.retryable === true) {
-        // 瞬时故障：不锁，但要留下「为什么还在试」的可见事实（否则部署侧只看到停、看不到试）。
-        retryAllowedThisTurn.push({ operation, object: objectValue ?? '', code: error.code ?? 'retryable_failure' });
-      } else {
-        deterministicFailuresThisTurn.set(deterministicKey, {
-          code: error?.code ?? 'unclassified_failure',
-          ...(error?.retryable === undefined ? {} : { declaredRetryable: error.retryable }),
-          // 原话要留住：被拦下时模型仍必须能如实转述「执行层说了什么」，否则用户拿到的
-          // 只是一句"参数不合法"，连哪里不合法都不知道（2026-11-18 live 实测）。
-          ...(typeof (error as { message?: unknown } | undefined)?.message === 'string'
-            && (error as { message: string }).message !== ''
-            ? { message: (error as { message: string }).message }
-            : {}),
-        });
-      }
+    // 记录/放行判定来自共享锁（键 + 判定与后台执行器同源）。
+    const allowedRetry = retryLock.after(operation, callArgs, run.outcome);
+    if (allowedRetry !== undefined) {
+      // 瞬时故障：不锁，但要留下「为什么还在试」的可见事实（否则部署侧只看到停、看不到试）。
+      retryAllowedThisTurn.push(allowedRetry);
     }
     if (run.unresolved) {
       onUnresolved();
@@ -2718,7 +2694,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       turnNo += 1;
       // A2：单回合执行计数随回合清零（上界按回合计，不跨回合累计）。
       operationsThisTurn = 0;
-      deterministicFailuresThisTurn = new Map();
+      retryLock = createDeterministicRetryLock();
       payloadLintFailuresThisTurn = new Map();
       retryBlockedThisTurn = [];
       retryAllowedThisTurn = [];
@@ -3290,6 +3266,12 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       let unresolved = false;
       /** 载荷型参数 lint 的本回合失败计数（键 = operation）；随本次执行丢弃。 */
       const payloadLintFailures = new Map<string, number>();
+      /**
+       * A2b 同对象确定性失败锁（与前台 inline 会话**同一份实现**，见 deterministic-retry-lock.ts）：
+       * 本回合（本次 execute）内，执行层没有显式说可重试的失败对象，后续换参数再试一律不发起。
+       * 每个后台回合独立新建、回合结束即丢弃——不跨回合记忆。
+       */
+      const retryLock = createDeterministicRetryLock();
       // 片 1：本任务的交付收集（Worker run_js 产物登记事实）与委派级幂等 Map。
       // 全部随本次执行创建、随本次执行丢弃（未注入执行器 = 不参会、零变化）。
       const taskFiles: TurnFileRef[] = [];
@@ -3401,6 +3383,25 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           failures: payloadLintFailures,
           onEvent: options.onExecutionEvent,
         });
+        // A2b 同对象确定性失败锁（发起前拒；不发起执行、不落执行事实）——键 + 判定与前台
+        // inline 同一份（本次 execute 内该 (operation, 对象) 已被判确定性失败 → 不再打执行层）。
+        const blockedRetry = retryLock.before(operation, callArgs);
+        if (blockedRetry !== undefined) {
+          options.onExecutionEvent?.({
+            event: 'execution_retry_blocked',
+            taskId: task.taskId,
+            operation: blockedRetry.block.operation,
+            object: blockedRetry.block.object,
+            code: blockedRetry.block.code,
+            declaredRetryable: blockedRetry.block.declaredRetryable ?? 'unset',
+          });
+          // 模型可见面：业务话术（复用 failureMessageFor 的唯一话术来源；内部原因/原始码不进
+          // 模型文本），让 Worker 据此如实收尾，不再换参数撞执行层。宿主侧故障码归 host_fault，
+          // 其余按 executor_failed（用户侧只允许「没办成 / 我这边没弄好」这类业务语言）。
+          const classified = classifyFailure({ code: blockedRetry.block.code, status: 'failed' });
+          const kind: UserFacingFailureKind = classified === 'host_fault' ? 'host_fault' : 'executor_failed';
+          throw new Error(failureMessageFor(kind).text);
+        }
         const run = await claimAndRunOperation({
           registry: options.registry,
           readOnlyOperations,
@@ -3469,6 +3470,18 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
             return outcome;
           },
         });
+        // A2b 记录（与前台 inline 同源）：执行层没有显式说可重试的失败 → 记入本回合锁；
+        // 显式 retryable:true（瞬时故障）→ 放行并留「为什么还在试」的可见事实。
+        const allowedRetry = retryLock.after(operation, callArgs, run.outcome);
+        if (allowedRetry !== undefined) {
+          options.onExecutionEvent?.({
+            event: 'execution_retry_allowed',
+            taskId: task.taskId,
+            operation: allowedRetry.operation,
+            object: allowedRetry.object,
+            code: allowedRetry.code,
+          });
+        }
         if (run.unresolved) {
           unresolved = true;
           // 确定性终结本回合：待核对不得被模型当作可重试的普通失败。
