@@ -607,3 +607,119 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     });
   });
 });
+
+/**
+ * 同回合自我确认被挡的**结局归类**（owner 2026-11-19 live 实测：后台写不进去 P0）。
+ *
+ * 根因：模型在**同一回合**里 prepare 出提案后紧接着 commit——同回合没有句柄，commit 被执行层
+ * 以 CONFIRMATION_REQUIRED 拒。旧归类只看「最后一条非只读」，于是落成 failed，导致：
+ *   ① 用户从没被问到确认；② 下游「有待确认提案就拒绝新建」的守卫不生效（任务不是 waiting_user）；
+ *   ③ 用户回「确认」时没有可接续的任务（他 14:37 那句「确认」什么都没发生）。
+ *
+ * 判据（结构化，不看文案）：本回合 recorded 里存在 needs_confirmation，且所有 failed/refused
+ * 条目的码都是 CONFIRMATION_REQUIRED → 判 needs_confirmation（句柄/摘要随问题落底账）；
+ * 出现任何其它真实失败（GATE_REFUSE / COLLECTION_NOT_FOUND / …）→ 仍 failed。
+ *
+ * 反向绊线：去掉这条归类（selfConfirmBlockedRoundOf 返回 undefined）→ ⑬ 立即红（任务变 failed）。
+ */
+const SELF_CONFIRM_MANIFEST: CapabilityManifest = {
+  contractVersion: 2,
+  operations: [
+    { name: 'dummy.prepare', label: 'prepare', args: [] },
+    { name: 'dummy.commit', label: 'commit', args: [{ name: '--collection', required: true }] },
+    { name: 'dummy.query', label: 'query', args: [] },
+    { name: 'dummy.denied', label: 'denied', args: [] },
+  ],
+};
+
+/** 执行层语义镜像（真 dummy 同形）：prepare 出提案；commit 无句柄 = CONFIRMATION_REQUIRED。 */
+class SelfConfirmClient implements ExecutionClient {
+  readonly requests: Array<{ operation: string; confirmation?: unknown }> = [];
+  constructor(private readonly handle = 'cf_self_confirm') {}
+  async capabilities(): Promise<CapabilityManifest> {
+    return SELF_CONFIRM_MANIFEST;
+  }
+  async execute(request: { operation: string; confirmation?: unknown }): Promise<ExecutionOutcome> {
+    this.requests.push(request);
+    if (request.operation === 'dummy.query') return { status: 'completed', data: { rows: 2 } };
+    if (request.operation === 'dummy.prepare') {
+      return {
+        status: 'needs_confirmation',
+        confirmation: { handle: this.handle, summary: SUMMARY, expiresAt: EXPIRES_AT },
+        data: { collection: 'alpha' },
+      };
+    }
+    if (request.operation === 'dummy.denied') return { status: 'refused', error: { code: 'GATE_REFUSE', message: 'denied' } };
+    // dummy.commit：无句柄（同回合自我确认）→ 被挡；带句柄（用户已表态）→ 完成。
+    return request.confirmation === undefined
+      ? { status: 'refused', error: { code: 'CONFIRMATION_REQUIRED', message: 'commit requires a confirmation handle' } }
+      : { status: 'completed', data: { added: 2 } };
+  }
+}
+
+const PREPARE_ARGS = { operation: 'dummy.prepare', args: { '--collection': 'alpha' } };
+const COMMIT_ARGS = { operation: 'dummy.commit', args: { '--collection': 'alpha' } };
+const QUERY_ARGS = { operation: 'dummy.query', args: {} };
+const DENIED_ARGS = { operation: 'dummy.denied', args: {} };
+
+function selfConfirmExecutor(client: ExecutionClient, registry: TaskRegistry, worker: TurnDriver): Promise<TaskExecutor> {
+  return createTaskExecutor({
+    client,
+    allowedOperations: ['dummy.prepare', 'dummy.commit', 'dummy.query', 'dummy.denied'],
+    readOnlyOperations: ['dummy.query'],
+    workerDriver: worker,
+    registry,
+    workerTurnMs: 30_000,
+  });
+}
+
+describe('同回合自我确认被挡：结局是 waiting_user（提案），不是 failed', () => {
+  it('⑬ prepare→commit 被挡 → 任务 waiting_user、底账有提案、可见面是提案（不是「没办成」）', async () => {
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new SelfConfirmClient('cf_blocked_1');
+    const executor = await selfConfirmExecutor(client, registry, roundWorker([[PREPARE_ARGS, COMMIT_ARGS]], capture));
+    await runBackground(registry, executor, 't_self_confirm');
+
+    // 结局 = waiting_user（不是 failed）：底账带真实提案（句柄 + 摘要）。
+    const task = registry.get('t_self_confirm', SCOPE);
+    expect(task.status).toBe('waiting_user');
+    expect(task.pendingQuestion?.confirmation?.summary).toBe(SUMMARY);
+    expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_blocked_1');
+    // 两次非只读都真的打到执行层（同回合自我确认不是用户表态，但也不是宿主预先拦下）。
+    expect(client.requests.map((r) => r.operation)).toEqual(['dummy.prepare', 'dummy.commit']);
+
+    // 用户可见面 = 提案（含摘要），不是「没办成」；句柄不进可见投影。
+    const visible = await taskStatusOf(registry, '#1');
+    expect(visible.status).toBe('waiting_user');
+    const projected = JSON.stringify(visible);
+    expect(projected).toContain(SUMMARY);
+    expect(projected).not.toContain('cf_');
+    expect(projected).not.toContain('handle');
+    expect(projected).not.toContain('没办成');
+  });
+
+  it('⑭ 被挡后再 query 成功 → 仍 waiting_user（不被后面的成功掩盖）', async () => {
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new SelfConfirmClient('cf_blocked_2');
+    const executor = await selfConfirmExecutor(client, registry, roundWorker([[PREPARE_ARGS, COMMIT_ARGS, QUERY_ARGS]], capture));
+    await runBackground(registry, executor, 't_self_confirm_query');
+
+    expect(registry.get('t_self_confirm_query', SCOPE).status).toBe('waiting_user');
+    expect(registry.get('t_self_confirm_query', SCOPE).pendingQuestion?.confirmation?.handle).toBe('cf_blocked_2');
+    expect(client.requests.map((r) => r.operation)).toEqual(['dummy.prepare', 'dummy.commit', 'dummy.query']);
+  });
+
+  it('⑮ prepare→真实失败（GATE_REFUSE）→ 仍 failed（不许把真失败说成等确认）', async () => {
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new SelfConfirmClient('cf_blocked_3');
+    const executor = await selfConfirmExecutor(client, registry, roundWorker([[PREPARE_ARGS, DENIED_ARGS]], capture));
+    await runBackground(registry, executor, 't_self_confirm_denied');
+
+    const task = registry.get('t_self_confirm_denied', SCOPE);
+    expect(task.status).toBe('failed');
+    expect(task.pendingQuestion).toBeUndefined();
+  });
+});

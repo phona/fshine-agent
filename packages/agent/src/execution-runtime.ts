@@ -907,6 +907,13 @@ export interface TurnResult {
    */
   pushSuppressedTaskIds?: readonly string[];
   /**
+   * 本回合产出的写确认提案（机械事实；**只带摘要，绝不带 handle**——handle 是宿主凭据，
+   * 不进任何模型/用户可见投影）。宿主的提案回合据此用唯一话术来源渲染**提案卡**
+   * （摘要 + 两个动作「确认/算了」）替换模型文本，不再让模型转述（2026-11-19：模型那段
+   * 「正在办理中…确认凭据…」是噪声且泄露内部词）。缺省 = 本回合无提案。
+   */
+  pendingConfirmation?: { summary: string };
+  /**
    * A2b 观测面：本回合**被拦下**的重试（执行层没有显式声明可重试 → * 该对象本回合不再发起）。
    * 只作运维可见（装配层按条记 `execution_retry_blocked` 事件），不改变回合结果、不进用户文本。
    */
@@ -2866,12 +2873,17 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         registry.archiveReply(taskIds, reply);
       }
       const executions = taskIds.flatMap((taskId) => registry.get(taskId, scope).executions);
+      // 本回合产出的提案（机械事实，只带摘要）：宿主据此渲染提案卡，不再让模型转述。
+      const proposalThisTurn = pendingConfirmation !== undefined && pendingConfirmation.issuedTurn === turnNo
+        ? { pendingConfirmation: { summary: pendingConfirmation.summary } }
+        : {};
       return {
         reply,
         taskIds,
         executions,
         // B 切片（可观测）：本回合经 execute_operation 发起的执行次数（A2 同源计数）。
         operations: operationsThisTurn,
+        ...proposalThisTurn,
         ...(relayedTaskIds.length > 0 ? { relayedTaskIds } : {}),
         ...(pushSuppressedTaskIds.length > 0 ? { pushSuppressedTaskIds } : {}),
         ...(retryBlockedThisTurn.length > 0 ? { retryBlocked: retryBlockedThisTurn } : {}),
@@ -3200,6 +3212,8 @@ function pendingQuestionView(question: PendingQuestion): Record<string, unknown>
  *       中止/abort → cancelled；截止未产出 → timed_out；空汇报 → failed；
  *       执行层 needs_input → needs_input（missing 原样转述）；
  *       本轮最后一条非只读执行 needs_confirmation → needs_confirmation（句柄随问题落底账）；
+ *       同回合 prepare→commit 被挡（存在提案且所有 failed/refused 都是 CONFIRMATION_REQUIRED）
+ *       → needs_confirmation（owner 2026-11-19：不是 failed——见 execute 内 selfConfirmBlockedRoundOf）；
  *       零执行 → failed（不得报 completed）；任一非 completed → failed（原因机械合成）；
  *       全部 completed → completed{resultText, files?}（结果存档由 runner settle 经 archiveReply
  *       承接；files = Worker 产出的任务作用域交付物，装配方按它投递）。
@@ -3550,20 +3564,47 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       // 写操作提案（S1）：本轮**最后一条非只读执行**是 needs_confirmation → 回合结局是
       // 待确认（不是 failed）——执行层已冻结一次待确认操作，用户还什么都没表态。只读调用
       // 不计（读调用不会产生待确认写操作）。提案句柄原样带走，由 runner 落底账待 S3 透传。
-      const lastWritable = [...recorded].reverse().find((entry) => !readOnlyOperations.has(entry.operation));
-      if (lastWritable !== undefined && lastWritable.outcome.status === 'needs_confirmation') {
-        const confirmation = lastWritable.outcome.confirmation;
+      const confirmationOutcomeOf = (entry: { operation: string; outcome: ExecutionOutcome }): Extract<TaskExecutionOutcome, { kind: 'needs_confirmation' }> => {
+        const confirmation = (entry.outcome as Extract<ExecutionOutcome, { status: 'needs_confirmation' }>).confirmation;
         return {
           kind: 'needs_confirmation',
           question: { missing: [CONFIRMATION_PENDING_MISSING] },
           confirmation: {
             handle: confirmation.handle,
             summary: confirmation.summary,
-            operation: lastWritable.operation,
+            operation: entry.operation,
             ...(confirmation.expiresAt === undefined ? {} : { expiresAt: confirmation.expiresAt }),
           },
         };
+      };
+      const lastWritable = [...recorded].reverse().find((entry) => !readOnlyOperations.has(entry.operation));
+      if (lastWritable !== undefined && lastWritable.outcome.status === 'needs_confirmation') {
+        return confirmationOutcomeOf(lastWritable);
       }
+      /**
+       * 同回合自我确认被挡（owner 2026-11-19 live 实测，后台路径）：模型在**同一回合**里
+       * prepare 出提案后紧接着 commit——同回合没有句柄，commit 被执行层以 CONFIRMATION_REQUIRED
+       * 拒。结局不能落 failed：那样①用户从没被问到确认；②下游「有待确认提案就拒绝新建」的守卫
+       * 不生效（任务不是 waiting_user）；③用户回「确认」时没有可接续的任务（owner live 三连症状）。
+       *
+       * 判据（结构化，不看文案）：本回合 recorded 里存在 needs_confirmation，且**所有** failed/refused
+       * 条目的码都是 CONFIRMATION_REQUIRED（即「同回合没有句柄」这类被挡，不是真实业务失败）。
+       * 满足则返回该提案的 needs_confirmation（句柄/摘要来自底账提案）；出现任何其它真实失败
+       * （GATE_REFUSE / COLLECTION_NOT_FOUND / …）时返回 undefined，仍按现状判 failed。
+       */
+      const selfConfirmBlockedRoundOf = (): Extract<TaskExecutionOutcome, { kind: 'needs_confirmation' }> | undefined => {
+        const proposal = [...recorded].reverse().find((entry) => entry.outcome.status === 'needs_confirmation');
+        if (proposal === undefined) return undefined;
+        const realFailure = recorded.find(
+          (entry) =>
+            (entry.outcome.status === 'failed' || entry.outcome.status === 'refused')
+            && entry.outcome.error.code !== 'CONFIRMATION_REQUIRED',
+        );
+        if (realFailure !== undefined) return undefined;
+        return confirmationOutcomeOf(proposal);
+      };
+      const selfConfirmBlocked = selfConfirmBlockedRoundOf();
+      if (selfConfirmBlocked !== undefined) return selfConfirmBlocked;
       const needsInput = recorded.find(
         (entry): entry is { operation: string; outcome: Extract<ExecutionOutcome, { status: 'needs_input' }> } =>
           entry.outcome.status === 'needs_input',

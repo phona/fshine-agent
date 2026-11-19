@@ -62,7 +62,8 @@ import {
 import { createResourcePolicy, fileRefTtlMsOf, resolveRuntimeConfig } from '../../packages/agent/src/resource-policy';
 import { SessionPersistence } from '../../packages/agent/src/session-persistence';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
-import { deriveTaskName } from '../../packages/agent/src/task-registry';
+import { deriveTaskName, type TaskRegistry, type TaskScope } from '../../packages/agent/src/task-registry';
+import { failureMessageFor } from '../../packages/agent/src/user-facing-failure';
 import type { TaskExecutor, TaskRunner } from '../../packages/agent/src/task-runner';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../../packages/agent/src/worker-skills';
 import {
@@ -424,6 +425,26 @@ export function resolveSingleProfile(config: AppConfig): { id: string; profile: 
  */
 export function workspaceRootOf(dbPath: string): string {
   return path.join(path.dirname(dbPath), 'workspace');
+}
+
+/**
+ * 提案回合取真实摘要（底账 pendingQuestion.confirmation.summary）；取不到返回 undefined。
+ * 只读机械事实、不改写；越权/找不到静默跳过（摘要缺失时提案卡走兜底话术，不让提案丢失）。
+ */
+function proposalSummaryOf(
+  registry: TaskRegistry,
+  taskIds: readonly string[],
+  scope: TaskScope,
+): string | undefined {
+  for (const taskId of taskIds) {
+    try {
+      const summary = registry.get(taskId, scope).pendingQuestion?.confirmation?.summary;
+      if (summary !== undefined && summary.trim() !== '') return summary;
+    } catch {
+      // 跳过：非本 scope 任务或已清空（摘要缺失时用兜底提案卡）。
+    }
+  }
+  return undefined;
 }
 
 export async function createServer(deps: ServerDeps): Promise<Server> {
@@ -1277,11 +1298,39 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         || (turn.pushSuppressedTaskIds?.length ?? 0) > 0;
       const trimmedReply = reply.trim();
       const endsWithQuestion = trimmedReply.endsWith('？') || trimmedReply.endsWith('?');
+      /**
+       * 提案回合不让模型自己说话（2026-11-19）：本回合结局是写确认提案（executions 里有
+       * needs_confirmation）时，模型那段「任务已受理，正在办理中…如果又卡在确认凭据那一环…」
+       * 是噪声、还可能泄露内部词（「确认凭据」）。宿主用**提案卡**替换模型文本——卡 = 宿主
+       * 唯一话术来源 `failureMessageFor('needs_confirmation', { summary })`（含真实摘要 +
+       * 两个动作「确认/算了」）。用户看到的永远是宿主的机械事实卡，不是模型转述；模型文本
+       * 不进用户面。问号结尾仍例外（与「只交办回合静默」同一格式判据：同回合顺带反问的话
+       * 比少一嘴更该留着）。
+       */
+      const proposalTurn = turn.executions.some((execution) => execution.status === 'needs_confirmation');
+      let proposalCard: string | undefined;
+      if (proposalTurn && !endsWithQuestion) {
+        // 摘要来源：本回合 TurnResult 的机械事实优先（同步/inline 路径的提案停在会话内存，
+        // 不落底账 pendingQuestion）；回落到任务底账（async/后台路径任务已落 waiting_user）。
+        const summary = turn.pendingConfirmation?.summary ?? proposalSummaryOf(taskRegistry, turn.taskIds, scope);
+        proposalCard = failureMessageFor('needs_confirmation', summary === undefined ? {} : { summary }).text;
+      }
       const dispatchSilent = turn.taskIds.length > 0
         && !hasResultOrExecution
         && !endsWithQuestion
         && trimmedReply !== '';
-      if (dispatchSilent) {
+      if (proposalCard !== undefined) {
+        log({
+          event: 'turn_proposal_card_delivered',
+          principalId,
+          sessionId,
+          speakerId,
+          messageId: message.messageId,
+          taskIds: [...turn.taskIds],
+          replyBytes: Buffer.byteLength(reply, 'utf8'),
+        });
+        reply = proposalCard;
+      } else if (dispatchSilent) {
         log({
           event: 'turn_dispatch_silent',
           principalId,
