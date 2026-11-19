@@ -3,6 +3,8 @@
  *
  * 规则（owner 授权文案层）：
  *   · 9 类 kind 折叠成 4 类用户语言：开始办了 / 需要你一句话 / 办完了·没办成 / 已按你说的停了；
+ *     2026-11-19 唤醒切片起：**失败与「用户说停」由唤醒出口让模型说**，这里的对应文案只作
+ *     「模型回合挂掉」的降级兜底（见 server 的 wakeStateChangeText 与 chat sink 的 wakeCancelled）；
  *   · reason 人话映射且失败分级：result_unknown 必须说「不确定做没做完，需要再确认」（严禁读作成功）；
  *   · 内部术语黑名单机械断言：渲染器拼装的文本不得含 task_status/resource_limited/requestId/
  *     uuid/request_N/绝对路径/W 窗口码（name 与写确认 summary 都是执行层/用户原话，按规则原样

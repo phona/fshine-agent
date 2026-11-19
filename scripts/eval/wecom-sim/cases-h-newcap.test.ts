@@ -15,11 +15,13 @@
  * `--seconds` 真等待（1～3 秒），断言用事件驱动 waitFor，不写固定 sleep。
  */
 import { describe, expect, it } from 'vitest';
+import { deriveTaskName } from '../../../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { LONG_RUNNING_NOTICE_TEXT } from '../../../packages/agent/src/task-runner';
+import { LONG_RUNNING_NOTICE_FALLBACK_TEXT } from '../../../packages/agent/src/task-runner';
 import {
   lastToolResultJsonOf,
   lastToolResultOf,
+  longRunningWakeLine,
   mainRelayResponses,
   startWecomSim,
   textAssistant,
@@ -121,7 +123,6 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
       taskRunWaitMs: 1,
       allowWriteOperations: true,
       longRunningNoticeMs: 200,
-      longRunningStuckNoticeMs: 0,
     });
     try {
       const taskText = '跑一个三秒的长任务';
@@ -130,10 +131,14 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
       sim.sendText(taskText);
 
       await sim.waitFor('W-43 超预期提醒', () => sim.sdk.proactiveTexts.length === 1, 10_000);
-      expect(sim.sdk.proactiveTexts[0]!.content).toBe(LONG_RUNNING_NOTICE_TEXT);
-      // 恰一条：不会刷屏。
+      // 用户可见文本 = 唤醒回合里模型说的那句（2026-11-19 唤醒切片；宿主只喂事实）——
+      // 台词唯一来源 = harness 的模拟模型（不硬编、不比对宿主文案）。
+      const noticeLine = longRunningWakeLine(deriveTaskName(taskText));
+      expect(sim.sdk.proactiveTexts[0]!.content).toBe(noticeLine);
+      // 恰一条：不会刷屏（宿主兜底文案一次都不该出现——模型说的出话）。
       await new Promise((resolve) => setTimeout(resolve, 300));
-      expect(sim.sdk.proactiveTexts.filter((entry) => entry.content === LONG_RUNNING_NOTICE_TEXT)).toHaveLength(1);
+      expect(sim.sdk.proactiveTexts.filter((entry) => entry.content === noticeLine)).toHaveLength(1);
+      expect(sim.sdk.proactiveTexts.some((entry) => entry.content === LONG_RUNNING_NOTICE_FALLBACK_TEXT)).toBe(false);
     } finally {
       await sim.close();
     }
@@ -146,7 +151,6 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
       allowWriteOperations: true,
       groupRole: 'operator',
       longRunningNoticeMs: 200,
-      longRunningStuckNoticeMs: 0,
     });
     const groupRegistry = createSqliteTaskRegistry(group.dbPath, { readOnly: true });
     try {
@@ -162,7 +166,11 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
         return task.status === 'running';
       }, 10_000);
       await new Promise((resolve) => setTimeout(resolve, 500));
-      expect(group.sdk.proactiveTexts.filter((entry) => entry.content === LONG_RUNNING_NOTICE_TEXT)).toHaveLength(0);
+      // 群里零主动提醒：既没有唤醒回合模型那句，也没有宿主兜底那句。
+      expect(group.sdk.proactiveTexts.filter((entry) =>
+        entry.content === longRunningWakeLine(deriveTaskName(taskText)))).toHaveLength(0);
+      expect(group.sdk.proactiveTexts.some((entry) => entry.content.includes('比预计久'))).toBe(false);
+      expect(group.sdk.proactiveTexts.filter((entry) => entry.content === LONG_RUNNING_NOTICE_FALLBACK_TEXT)).toHaveLength(0);
       // 让群里的长任务跑完再收尾（不在库里跑着就关库）。
       await group.waitFor('群里长任务终态', () => groupRegistry.get(taskId, GROUP_SCOPE).status === 'completed', 15_000);
     } finally {

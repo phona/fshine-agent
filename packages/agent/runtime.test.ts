@@ -470,4 +470,87 @@ describe('唤醒回合的界（2026-11-19 复核 F1）', () => {
     expect(observedDeadline! - after).toBeLessThanOrEqual(WAKE_TURN_MS);
     expect(observedDeadline! - after).toBeGreaterThan(0);
   });
+
+  it('冷会话（驱动可唤醒但实例级会话还没建）→ 补一次**零工具**单回合（重启对账的形状）', async () => {
+    // 2026-11-19 唤醒切片：重启后第一次状态变化（重启对账）时，驱动实例级会话还没建——
+    // 驱动侧 wake 只能回 unavailable。本层按与 send 同一份装配参数补一次零工具单回合，
+    // 否则「用户以为在办、实际说不清」这件事永远说不出话。
+    let observedTools: readonly unknown[] | undefined;
+    let observedMessages: readonly unknown[] | undefined;
+    let observedDeadline: number | undefined;
+    let observedExec: ((tool: string, args: Record<string, unknown>) => Promise<unknown>) | undefined;
+    const cold: TurnDriver = {
+      async run(input) {
+        observedTools = input.tools;
+        observedMessages = input.messages;
+        observedDeadline = input.deadline;
+        observedExec = input.exec;
+        return { text: '我这边重启过，这件事的状态说不清了。', messages: [...input.messages] };
+      },
+      async wake(): Promise<WakeResult> {
+        return { outcome: 'unavailable' };
+      },
+    };
+    const session = await createSession({
+      principalId: 'wecom:test-user',
+      sessionId: 'sess_wake_cold',
+      client: new FakeClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver: cold,
+      workerDriver: cold,
+      mainSystemPrompt: '你是测试主 Agent。',
+      mainTurnMs: 300_000,
+    });
+    const woke = await session.wake('[重启对账] 测试事实：状态说不清。');
+    expect(woke).toEqual({ outcome: 'woken', text: '我这边重启过，这件事的状态说不清了。' });
+    // 零工具（唤醒回合不得碰执行层——与驱动侧 wake 同一条纪律）。
+    expect(observedTools).toEqual([]);
+    // 本轮输入 = 事实（最后一条 user）。
+    expect(observedMessages?.at(-1)).toMatchObject({
+      role: 'user',
+      content: '[重启对账] 测试事实：状态说不清。',
+    });
+    expect(observedDeadline! - Date.now()).toBeLessThanOrEqual(WAKE_TURN_MS);
+    // 零工具下模型真去调工具也只拿到一句安全话术（不是执行面）。
+    await expect(observedExec!('task_run', {})).rejects.toThrow('唤醒回合不提供工具。');
+  });
+
+  it('冷唤醒说不出话（空正文）→ failed（不冒充已说）；驱动没有唤醒能力 → unavailable（语义不变）', async () => {
+    const silent: TurnDriver = {
+      async run(input) {
+        return { text: '', messages: [...input.messages] };
+      },
+      async wake(): Promise<WakeResult> {
+        return { outcome: 'unavailable' };
+      },
+    };
+    const session = await createSession({
+      principalId: 'wecom:test-user',
+      sessionId: 'sess_wake_cold_silent',
+      client: new FakeClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver: silent,
+      workerDriver: silent,
+      mainSystemPrompt: '你是测试主 Agent。',
+      mainTurnMs: 300_000,
+    });
+    await expect(session.wake('[重启对账] 测试事实。')).resolves.toEqual({ outcome: 'failed' });
+
+    const noWake: TurnDriver = {
+      async run() {
+        throw new Error('（测试）没有唤醒能力的驱动不应起回合');
+      },
+    };
+    const plain = await createSession({
+      principalId: 'wecom:test-user',
+      sessionId: 'sess_wake_nowake',
+      client: new FakeClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver: noWake,
+      workerDriver: noWake,
+      mainSystemPrompt: '你是测试主 Agent。',
+      mainTurnMs: 300_000,
+    });
+    await expect(plain.wake('[重启对账] 测试事实。')).resolves.toEqual({ outcome: 'unavailable' });
+  });
 });

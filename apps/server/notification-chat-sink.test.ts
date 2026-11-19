@@ -2,8 +2,9 @@
  * 主动推送 sink（`notification-chat-sink.ts`）· 确定性单测（零网络、零真模型、零真平台）。
  *
  * 钉住的语义（每条都对应任务书里的一条纪律）：
- *   ① 只推 5 类（waiting_user/failed/timed_out/resource_limited/cancelled）；
+ *   ① 只推 3 类（waiting_user/timed_out/resource_limited）；
  *      accepted/started/resumed/completed 一律不推（后者由结果正文投递负责）；
+ *      failed 由失败唤醒出口负责；cancelled 走取消唤醒出口（渲染文案只作兜底）；
  *   ② 文案只来自 `renderNotification`（四类人话），过用户可见出口清理；
  *   ③ 非 live 不投递、只记 suppressed；读不到任务范围不猜路由；
  *   ④ 同回合已交给模型的一次性核销（不重复发同一条）；
@@ -111,8 +112,51 @@ describe('主动推送 sink：种类与文案', () => {
   });
 
   it('① 推送种类清单是本文件唯一来源（防有人悄悄加种类绕过职责划分）', () => {
-    // 2026-11-19 口径变更：failed 移出（失败由 task-completion-delivery 失败分支直发）。
-    expect([...PUSHED_NOTIFICATION_KINDS]).toEqual(['waiting_user', 'timed_out', 'resource_limited', 'cancelled']);
+    // 2026-11-19 口径变更：failed 移出（失败由失败唤醒出口直发）；唤醒切片再把 cancelled
+    // 移出（「用户说停」由取消唤醒出口说）——两者都不在直发清单里。
+    expect([...PUSHED_NOTIFICATION_KINDS]).toEqual(['waiting_user', 'timed_out', 'resource_limited']);
+  });
+
+  it('① cancelled 不再由本 sink 渲染直发：交给取消唤醒出口说（事实带业务名；渲染文案只作兜底）', async () => {
+    const delivery = fakeDelivery();
+    const wakes: Array<{ taskId: string; principalId: string; sessionId: string; factText: string; fallbackText: string }> = [];
+    const { sink, events } = sinkOf({
+      delivery: delivery.port,
+      wakeCancelled: async (input) => {
+        wakes.push(input);
+        return true;
+      },
+    });
+    const result = await sink.send(notification('cancelled', { reason: 'cancelled_by_user' }));
+    expect(result.delivered).toBe(true);
+    // 事实唤醒给模型（业务名在内、不含句柄/内部码）；渲染文案降级为模型挂掉时的兜底。
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]).toMatchObject({ taskId: 'task-1', principalId: SCOPE.principalId, sessionId: SCOPE.sessionId });
+    expect(wakes[0]!.factText).toContain('[已停止]');
+    expect(wakes[0]!.factText).toContain('查应收账款');
+    expect(wakes[0]!.fallbackText).toContain('已按你说的停了');
+    // sink 自己不投那条渲染文案（用户看到的话由模型的唤醒回合给）。
+    expect(delivery.sent).toEqual([]);
+    expect(events).toContainEqual(expect.objectContaining({ event: 'notification_cancel_woken', result: 'handed_over' }));
+  });
+
+  it('① cancelled 走岔路：唤醒出口交不出话 → 如实记 not_delivered（不冒充已说、不自己补一条）', async () => {
+    const delivery = fakeDelivery();
+    const { sink, events } = sinkOf({ delivery: delivery.port, wakeCancelled: async () => false });
+    await sink.send(notification('cancelled', { reason: 'cancelled_by_user' }));
+    expect(delivery.sent).toEqual([]);
+    expect(events).toContainEqual(expect.objectContaining({ event: 'notification_cancel_woken', result: 'not_delivered' }));
+  });
+
+  it('① cancelled 未接唤醒出口 → 只记 suppressed（wake_unavailable），不直发渲染文案', async () => {
+    const delivery = fakeDelivery();
+    const { sink, events } = sinkOf({ delivery: delivery.port });
+    await sink.send(notification('cancelled', { reason: 'cancelled_by_user' }));
+    expect(delivery.sent).toEqual([]);
+    expect(events).toContainEqual(expect.objectContaining({
+      event: 'notification_push_suppressed',
+      reason: 'wake_unavailable',
+    }));
   });
 });
 

@@ -33,17 +33,24 @@
  * 定时器、不扫底账——直用 runner 的调用方行为零变化；装配方传 `resolveRuntimeConfig()`
  * 的值（配置缺省 24h）启用。
  *
- * 长时间无动静提醒（2026-11-18，预期契约切片）：与 waiting_user 到期消费者共用**同一个**
- * 有界定时器轮（不新增第二个循环）。判据只看持久化底账：
- *   · 任务 running、从认领时刻（租约起点 = lease_until − leaseMs）起超过 `longRunningNoticeMs`
- *     （缺省 10 分钟）→ 发一条「比预计久了，停下来还是继续等」（每任务一次）；
- *   · 超过 `longRunningStuckNoticeMs`（缺省 30 分钟）→ 再发一条「卡住了，建议先停掉」
- *     （每任务一次；此后不再自动发）。
- * 每档「已发」时刻持久化在任务行（owner 列），原子领取保证并发/重启下每档至多一次。
+ * 长时间无动静提醒（2026-11-18，预期契约切片；2026-11-19 唤醒切片改形）：与 waiting_user
+ * 到期消费者共用**同一个**有界定时器轮（不新增第二个循环）。判据只看持久化底账：
+ *   · 任务 running、从认领时刻（无租约的长任务用 running_since）起超过 `longRunningNoticeMs`
+ *     （缺省 10 分钟）→ 交给提醒端口处置（**只此一档**，每任务一次）。
+ * 「已发」时刻持久化在任务行（owner 列），原子领取保证并发/重启下至多一次。
  * 只在 1:1 会话发（chatType 事实源由装配方经 `isDirectSession` 注入；拿不到时按「私聊会话」
- * 这一条机械事实处理——不猜群聊）。发送失败只记事件，不改任务事实、不重试。未注入
- * 两档阈值或通知端口时完全不扫、零行为变化。
- * 文案只给用户可做的动作，不报进度（不写 operation 名、不写已执行次数、不写最近一步）。
+ * 这一条机械事实处理——不猜群聊）。发送失败只记事件，不改任务事实、不重试。未注入阈值或
+ * 通知端口时完全不扫、零行为变化。
+ *
+ * 「卡住」那一档（>30 分钟「我卡住了，建议先停掉」，2026-11-18 起的第二档）**已删**（owner
+ * 2026-11-19）：它断言了我们不知道的事（「我卡住了」），还替用户下结论（「建议先停掉」）；
+ * 只留上面一档。
+ *
+ * 提醒分两层：本模块只出**事实**（业务名 + 已跑多久，见 {@link longRunningNoticeFactText}）
+ * 与「模型回合挂掉时的兜底一句」（{@link LONG_RUNNING_NOTICE_FALLBACK_TEXT}）；用户看到的
+ * 那句话由**模型**在唤醒回合里写（端口实现负责唤醒与投递，见 server 的
+ * `createLongRunningNoticePort`）。事实不报进度（不写 operation 名、不写已执行次数、不写
+ * 最近一步）——我们不知道进度，就不编。
  *
  * 租约口径（集成要求）：leaseMs 必须覆盖最长执行回合（按 P5 workerTurnMs 取，且执行端以截止
  * 时间强制中止）；§1 无租约续期方法，超出租约的在飞回合会被下一次 pump 判为 result_unknown
@@ -189,11 +196,11 @@ export interface TaskRegistryPort {
    */
   listRunning?(): readonly TaskRecordView[];
   /**
-   * 预期契约：原子领取一档提醒（'overdue' = 10 分钟档 / 'stuck' = 30 分钟档）。
-   * 返回 true = 本次由本进程发出（已落库，重启不重发）；false = 该档已提醒过（零写入）。
+   * 预期契约：原子领取「长时间无动静」提醒（只此一档 = 10 分钟档）。
+   * 返回 true = 本次由本进程发出（已落库，重启不重发）；false = 已提醒过（零写入）。
    * 缺省 = 不启用提醒（无法持久化「已发」事实时不发——fail-closed，避免重启重复打扰）。
    */
-  claimLongRunningNotice?(taskId: string, stage: 'overdue' | 'stuck', at: string): boolean;
+  claimLongRunningNotice?(taskId: string, at: string): boolean;
   // ---- 长任务（契约 v4；全部可选：不实现 = 不支持长任务，零行为变化） ----
   /** accepted 行（按 claimed_at 升序）：重启后重新 wait 的唯一来源。 */
   listAcceptedOperations?(): readonly AcceptedOperationRecordView[];
@@ -354,20 +361,41 @@ export interface TaskExecutor {
   execute(task: TaskExecutionInput, context: TaskExecutionContext): Promise<TaskExecutionOutcome>;
 }
 
+/** 提醒事实里业务名的上限（字符；超长截断加省略号——事实给模型读，防止刷屏）。 */
+const NOTICE_NAME_MAX = 30;
+
 /**
- * 长时间无动静提醒的用户文案（2026-11-18 owner 定；只给用户可做的动作，**不报进度**：
- * 不写 operation 名、不写已执行次数、不写最近一步）。
+ * 「长时间无动静」的**事实**（宿主拼，给模型读；用户看到的那句话由模型写）：
+ *   `[久无动静]「<业务名>」已经跑了 N 分钟还没有结果，我这边也不知道进度。请如实告诉用户，
+ *    并给他两个选择：停下来，还是继续等。`
+ *
+ * 只放机械事实（业务名 + 已跑多久 + 「不知道进度」）与一条交代，不报进度、不编原因。name
+ * 缺省 = 主语用中性指代（不猜名）；minutes 由调用方按底账时刻机械算出。
  */
-export const LONG_RUNNING_NOTICE_TEXT =
+export function longRunningNoticeFactText(input: { name?: string; minutes: number }): string {
+  const raw = input.name?.trim() ?? '';
+  const trimmed = raw.length <= NOTICE_NAME_MAX ? raw : `${raw.slice(0, NOTICE_NAME_MAX)}…`;
+  const subject = trimmed === '' ? '你交代的那件事' : `「${trimmed}」`;
+  return `[久无动静]${subject}已经跑了 ${input.minutes} 分钟还没有结果，我这边也不知道进度。`
+    + '请如实告诉用户，并给他两个选择：停下来，还是继续等。';
+}
+
+/**
+ * 唤醒降级兜底文本：这一档**唯一允许的宿主用户文案**，只走「模型回合挂掉/说不出话」的
+ * 降级路径（驱动没有可唤醒的会话 / 唤醒回合报错或空回复 / 非 live 部署不唤醒）——模型
+ * 说得出话时永远不用它。
+ *
+ * 2026-11-19 之前它是本档的唯一文案（直接由宿主发出）；唤醒切片起改为兜底。内容不动：
+ * 只给用户可做的两个动作（停下来 / 继续等），不报进度（不写 operation 名、不写已执行
+ * 次数、不写最近一步），也不诱导重试。
+ */
+export const LONG_RUNNING_NOTICE_FALLBACK_TEXT =
   '这件事比预计久了。要我停下来，还是继续等？（回「停」我就停）';
 
-/** 卡住档文案（>30 分钟仍无事件；发过一次后不再发）。 */
-export const LONG_RUNNING_STUCK_NOTICE_TEXT =
-  '这个我卡住了，建议先停掉；你稍后再试，或者把我们叫过来看看。';
-
 /**
- * 主动提醒投递端口（装配方实现：走宿主既有主动投递面 `fileDelivery.sendText`）。
- * 实现方自己负责路由解析与投递纪律；异常不应抛出（抛出也只按失败事件记）。
+ * 主动提醒端口（装配方实现：唤醒原会话模型说话，模型挂掉则投兜底文案；见 server 的
+ * `createLongRunningNoticePort`）。实现方自己负责路由解析、唤醒与投递纪律；异常不应抛出
+ * （抛出也只按失败事件记）。
  */
 export interface LongRunningNoticePort {
   /**
@@ -375,14 +403,19 @@ export interface LongRunningNoticePort {
    * false = 群聊，不发（也不落「已发」）。
    */
   isDirectSession?(sessionId: string): boolean;
-  /** 投递一条提醒；返回是否真正送达（失败/抑制只记账，不重试）。 */
+  /**
+   * 处置一条提醒：把 `factText` 唤醒给原会话模型、投递它说的话；模型说不出话时投
+   * `fallbackText`（如实、不诱导重试）。`name`/`minutes` 只作事实与记账（含结构化事件）。
+   * 返回「用户可见的那句话已交出」（模型说了 / 兜底送达）——失败/抑制只记账，不重试。
+   */
   sendNotice(input: {
     taskId: string;
     principalId: string;
     sessionId: string;
-    stage: 'overdue' | 'stuck';
+    name?: string;
     minutes: number;
-    text: string;
+    factText: string;
+    fallbackText: string;
   }): Promise<boolean>;
 }
 
@@ -458,13 +491,9 @@ export interface TaskRunnerOptions {
    * 长时间无动静提醒阈值（ms；2026-11-18 预期契约）。缺省/0 = 不启用（零行为变化）；
    * 装配方传 `resolveRuntimeConfig().longRunningNoticeMs`（配置缺省 600_000 = 10 分钟）。
    * 判定只看持久化底账 + 注入时钟，不依赖上一进程的内存定时器（重启可判）。
+   * 只此一档：30 分钟「卡住」档已随 2026-11-19 唤醒切片删除（见文件头）。
    */
   longRunningNoticeMs?: number;
-  /**
-   * 卡住档提醒阈值（ms；> 本值仍无事件 → 再发一条，之后不再发）。缺省/0 = 不启用该档；
-   * 装配方传 `resolveRuntimeConfig().longRunningStuckNoticeMs`（配置缺省 1_800_000 = 30 分钟）。
-   */
-  longRunningStuckNoticeMs?: number;
   /**
    * 提醒投递端口：缺省 = 不启用（无法投递就不打扰）。提供 `isDirectSession` 时群聊不发；
    * 未提供时按「私聊会话」这一条机械事实处理（拿不到 chatType 事实源时的唯一安全默认）。
@@ -599,11 +628,10 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   const waitUserTimeoutMs = options.waitUserTimeoutMs ?? 0;
   const waitingScanThrottleMs = options.waitingScanThrottleMs ?? 1000;
   /**
-   * 长时间无动静提醒（预期契约）：两个阈值 + 投递端口 + 可持久化的「每档已发」领取。
+   * 长时间无动静提醒（预期契约）：一个阈值 + 投递端口 + 可持久化的「已发」领取。
    * 缺任何一项都不启用（无法持久化就不发——重启不重复打扰是硬要求）。
    */
   const longRunningNoticeMs = options.longRunningNoticeMs ?? 0;
-  const longRunningStuckNoticeMs = options.longRunningStuckNoticeMs ?? 0;
   const longRunningNotice = options.longRunningNotice;
   const longRunningRowsSource = registry.listRunning !== undefined ? registry.listRunning : registry.list;
   const longRunningConsumerEnabled = longRunningNoticeMs > 0
@@ -807,29 +835,36 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     return Number.isFinite(until) ? until - leaseMs : undefined;
   }
 
-  /** 原子领取一档提醒（已提醒过 → false）；底账不可写时如实上报并跳过（不打扰）。 */
-  function claimNotice(task: TaskRecordView, stage: 'overdue' | 'stuck', nowMs: number): boolean {
+  /** 原子领取提醒（已提醒过 → false）；底账不可写时如实上报并跳过（不打扰）。 */
+  function claimNotice(task: TaskRecordView, nowMs: number): boolean {
     try {
-      return registry.claimLongRunningNotice!(task.taskId, stage, new Date(nowMs).toISOString());
+      return registry.claimLongRunningNotice!(task.taskId, new Date(nowMs).toISOString());
     } catch (error) {
       report(task.taskId, error);
       return false;
     }
   }
 
-  /** 投递一条提醒（fire-and-forget；成功/失败各记一条事件，不改任务事实、不重试）。 */
-  function deliverNotice(task: TaskRecordView, stage: 'overdue' | 'stuck', minutes: number): void {
+  /** 交一条提醒（fire-and-forget；成功/失败各记一条事件，不改任务事实、不重试）。 */
+  function deliverNotice(task: TaskRecordView, minutes: number): void {
     const base = {
       taskId: task.taskId,
       principalId: task.principalId,
       sessionId: task.sessionId,
-      stage,
       minutes,
     };
-    const text = stage === 'stuck' ? LONG_RUNNING_STUCK_NOTICE_TEXT : LONG_RUNNING_NOTICE_TEXT;
     const send = (async (): Promise<void> => {
       try {
-        const delivered = await longRunningNotice!.sendNotice({ ...base, text });
+        const delivered = await longRunningNotice!.sendNotice({
+          ...base,
+          ...(task.name === undefined ? {} : { name: task.name }),
+          // 事实（给模型读）与兜底一句（模型回合挂掉）都由本模块拼，端口只负责唤醒与投递。
+          factText: longRunningNoticeFactText({
+            ...(task.name === undefined ? {} : { name: task.name }),
+            minutes,
+          }),
+          fallbackText: LONG_RUNNING_NOTICE_FALLBACK_TEXT,
+        });
         log?.({ event: 'task_long_running_notice', ...base, result: delivered ? 'sent' : 'failed' });
       } catch (error) {
         log?.({
@@ -846,41 +881,26 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
 
   /**
    * 单趟扫描 running 行（共用同一刷新周期）：返回本次发出的任务与下一个到期点。
-   * 群聊不发（也不落「已发」）；每档只发一次（原子领取持久化，重启不重发）。
+   * 群聊不发（也不落「已发」）；每任务只发一次（原子领取持久化，重启不重发）。
    */
   function scanLongRunning(nowMs: number): LongRunningScan {
     const noticed: string[] = [];
     let nextDue: number | undefined;
-    const arm = (at: number): void => {
-      if (nextDue === undefined || at < nextDue) nextDue = at;
-    };
     for (const task of longRunningRowsSource!()) {
       if (task.status !== 'running') continue; // 回落 list() 时过滤
       const startedAt = runningStartedAt(task);
       if (startedAt === undefined) continue;
       const elapsed = nowMs - startedAt;
-      const overdueDue = startedAt + longRunningNoticeMs;
-      const stuckDue = longRunningStuckNoticeMs > 0 ? startedAt + longRunningStuckNoticeMs : undefined;
       if (elapsed < longRunningNoticeMs) {
-        arm(overdueDue);
+        const due = startedAt + longRunningNoticeMs;
+        if (nextDue === undefined || due < nextDue) nextDue = due;
         continue;
       }
       // 只在 1:1 会话发：chatType 事实源由装配方注入；拿不到时按「私聊会话」机械事实处理。
       if (!(longRunningNotice!.isDirectSession?.(task.sessionId) ?? true)) continue;
-      if (stuckDue !== undefined && elapsed >= longRunningStuckNoticeMs) {
-        // 卡住档：发过即止（之后不再自动发）。
-        if (!claimNotice(task, 'stuck', nowMs)) continue;
-        noticed.push(task.taskId);
-        deliverNotice(task, 'stuck', Math.floor(elapsed / 60_000));
-        continue;
-      }
-      if (!claimNotice(task, 'overdue', nowMs)) {
-        if (stuckDue !== undefined) arm(stuckDue);
-        continue;
-      }
+      if (!claimNotice(task, nowMs)) continue;
       noticed.push(task.taskId);
-      deliverNotice(task, 'overdue', Math.floor(elapsed / 60_000));
-      if (stuckDue !== undefined) arm(stuckDue);
+      deliverNotice(task, Math.floor(elapsed / 60_000));
     }
     return { noticed, ...(nextDue === undefined ? {} : { nextDue }) };
   }

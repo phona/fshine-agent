@@ -154,9 +154,9 @@ const RUNTIME_KEYS = [
   'fileRetentionSweepOnStart',
   'allowWriteOperations',
   'attachmentNudgeAfterMs',
-  // 预期契约（2026-11-18）：后台任务超过 10 分钟无动静的提醒阈值与其自动发送上限（30 分钟）。
+  // 预期契约（2026-11-18）：后台任务超过 10 分钟无动静的提醒阈值（10 分钟；30 分钟「卡住」
+  // 档已随 2026-11-19 唤醒切片删除——旧 YAML 里的该键按未知字段拒绝）。
   'longRunningNoticeMs',
-  'longRunningStuckNoticeMs',
   // 前台排队最长等待（缺省 120s，住策略层）；超时即确定性拒绝。
   'queueWaitMs',
   // 大响应文件化（2026-11-19）：Worker 执行结果内联字节上限（缺省 64KiB 住策略层）。
@@ -217,8 +217,6 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     ['attachmentNudgeAfterMs', 0],
     // 0 = 关闭长时间提醒（缺省 600000 住策略层）；负数/小数 = 配置错误。
     ['longRunningNoticeMs', 0],
-    // 0 = 不设自动发送上限（缺省 1800000 住策略层）。
-    ['longRunningStuckNoticeMs', 0],
     // 0 = 不排队直接拒绝（缺省 120000 住策略层）。
     ['queueWaitMs', 0],
     // 大响应文件化：最小 1 字节（缺省 65536 住策略层）；0/负数 = 配置错误，

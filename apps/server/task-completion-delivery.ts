@@ -1,10 +1,13 @@
 /**
- * 后台任务完成的主动投递（B 切片，工单回执收敛；2026-11-19 唤醒切片改形）：任务经执行端
- * 确认 completed 后，**唤醒原会话的模型、由它把这件事说给用户**，宿主只投递它说的话——走
- * 宿主既有主动投递面（装配注入的 `fileDelivery.sendText`）。宿主不再有常规成功文案
- * （身份行「<业务名>」办完了： 已随唤醒切片删除）；喂给模型的是**事实**（见
- * taskCompletionFactText），不是话术。**唯一例外**是唤醒降级（模型说不出话）与非 live
- * 不唤醒时的宿主兜底一句（见 taskCompletionFallbackText）——它如实报完成事实，不是话术模板。
+ * 任务**状态变化**的主动投递（B 切片，工单回执收敛；2026-11-19 唤醒切片改形并扩到四条出口）：
+ * 任务由执行端确认的终局/状态变化（完成 / 失败 / 用户说停 / 久无动静 / 重启后状态说不清）→
+ * **唤醒原会话的模型、由它把这件事说给用户**，宿主只投递它说的话——走宿主既有主动投递面
+ * （装配注入的 `fileDelivery.sendText`）。宿主不再有常规用户文案（身份行「<业务名>」办完了：
+ * 与失败/取消模板都已随唤醒切片退出常规路径，只留「模型回合挂掉时」的兜底句）；喂给模型的
+ * 是**事实**（见 taskCompletionFactText / taskFailureFactText / taskCancelledFactText /
+ * taskRestartFactText），不是话术。**唯一例外**是唤醒降级（模型说不出话）与非 live 不唤醒时
+ * 的宿主兜底一句（见 taskCompletionFallbackText / failureTextFor）——它如实报事实，不是话术
+ * 模板。
  *
  * 纪律（与文件投递 / 附件追问同一套，四必守同源）：
  *   · 非 live 部署**不发起投递**，记 `task_result_delivery_suppressed`，**不许记 sent**
@@ -21,7 +24,12 @@
  * 本模块只负责单次事实的投递与记账。
  */
 import type { ChannelRoute, DeliveryReceipt } from '@fshine/contracts';
-import { classifyFailure, failureMessageFor } from '../../packages/agent/src/user-facing-failure';
+import {
+  classifyFailure,
+  failureMessageFor,
+  USER_FACING_FAILURE_KIND_LABEL,
+  type UserFacingFailureKind,
+} from '../../packages/agent/src/user-facing-failure';
 import { stripServerPaths } from '../../packages/agent/src/server-paths';
 
 /** 宿主主动投递面（文字；与文件投递同一端口形状——FileDeliveryPort 的结构子集）。 */
@@ -225,11 +233,78 @@ export async function deliverTaskResult(fact: TaskCompletionFact, options: TaskR
  * 这属于我方故障：一律改判 `host_fault`，话术不解释内部原因，只说「我这边没弄好，再试/记下来」。
  */
 export function failureTextFor(code: string | undefined, status?: 'failed' | 'refused' | 'result_unknown'): string {
+  return failureMessageFor(failureKindFor(code, status)).text;
+}
+
+/**
+ * 失败**归类**（安全口径的唯一实现；话术与喂模型的事实共用同一出口）：
+ * result_unknown 状态优先；否则按执行层码归类，取不到 = executor_failed；
+ * needs_confirmation / needs_input 一律改判 host_fault（理由见 {@link failureTextFor}）。
+ */
+export function failureKindFor(
+  code: string | undefined,
+  status?: 'failed' | 'refused' | 'result_unknown',
+): UserFacingFailureKind {
   const kind = status === 'result_unknown'
     ? 'unknown_result'
     : classifyFailure({ code, status });
-  const safeKind = kind === 'needs_confirmation' || kind === 'needs_input' ? 'host_fault' : kind;
-  return failureMessageFor(safeKind).text;
+  return kind === 'needs_confirmation' || kind === 'needs_input' ? 'host_fault' : kind;
+}
+
+/** 失败事实里机械原因的上限（字符；超长截断——事实给模型读，防止把执行层原文整段灌进去）。 */
+const FAILURE_REASON_MAX = 200;
+
+/**
+ * 任务失败**事实**文本（宿主拼，给模型读；用户看到的话由模型写）：
+ *   `[任务失败]「<业务名>」这次没办成，问题分类：<业务种类>。机械原因：<原因>。
+ *    请把这件事如实告诉用户，并给他一个能做的下一步。`
+ *
+ * 硬边界：不含 handle、不含 taskId、不含执行层原始码；种类用 `USER_FACING_FAILURE_KIND_LABEL`
+ * 的业务语言名（即使被原样复述也不含内部形态）；原因只作判断依据（截断 + 去换行），模型
+ * 不该原样丢给用户。name 缺省 = 主语用中性指代（不猜名）。
+ */
+export function taskFailureFactText(input: {
+  name?: string;
+  kind: UserFacingFailureKind;
+  reason?: string;
+}): string {
+  const subject = input.name !== undefined && input.name.trim() !== ''
+    ? `「${truncatedName(input.name)}」`
+    : '你交代的那件事';
+  const reason = input.reason === undefined
+    ? ''
+    : input.reason.replace(/\s+/g, ' ').trim().slice(0, FAILURE_REASON_MAX);
+  return `[任务失败]${subject}这次没办成，问题分类：${USER_FACING_FAILURE_KIND_LABEL[input.kind]}。`
+    + `${reason === '' ? '' : `机械原因（供你判断，别原样丢给用户）：${reason}。`}`
+    + '请把这件事如实告诉用户，并给他一个能做的下一步。';
+}
+
+/**
+ * 任务被用户停掉**事实**文本（宿主拼，给模型读）：`[已停止]「<业务名>」已经按用户的要求停下了。
+ * 请把这件事如实告诉用户。`
+ */
+export function taskCancelledFactText(input: { name?: string }): string {
+  const subject = input.name !== undefined && input.name.trim() !== ''
+    ? `「${truncatedName(input.name)}」`
+    : '你交代的那件事';
+  return `[已停止]${subject}已经按用户的要求停下了。请把这件事如实告诉用户。`;
+}
+
+/**
+ * 重启对账**事实**文本（宿主拼，给模型读）：进程重启后，用户以为还在办的任务实际状态已变或
+ * 说不清（`running` 且租约过期的行在启动 pump 里如实落 result_unknown，不重放）——
+ *   `[重启对账]「<业务名>」这件事我这边重启过，重启后状态说不清了（做没做完无法确认）。
+ *    请如实告诉用户，别让他一直等下去，并给出下一步能做什么。`
+ *
+ * 这是新增出口（此前没有任何东西告诉用户），宿主没有对应文案——唤醒不可用时只记事件
+ * （不猜、不替它说）。
+ */
+export function taskRestartFactText(input: { name?: string }): string {
+  const subject = input.name !== undefined && input.name.trim() !== ''
+    ? `「${truncatedName(input.name)}」`
+    : '你交代的那件事';
+  return `[重启对账]${subject}这件事我这边重启过，重启后的状态说不清（做没做完无法确认）。`
+    + '请如实告诉用户，别让他一直等下去，并给出下一步能做什么。';
 }
 
 /**

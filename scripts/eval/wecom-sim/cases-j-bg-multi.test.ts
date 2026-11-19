@@ -35,7 +35,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { LONG_RUNNING_NOTICE_TEXT } from '../../../packages/agent/src/task-runner';
+import { LONG_RUNNING_NOTICE_FALLBACK_TEXT } from '../../../packages/agent/src/task-runner';
 import {
   lastToolResultJsonOf,
   startWecomSim,
@@ -215,8 +215,9 @@ describe('J 组·后台任务并存（J-1～J-3）', () => {
 
       // ② 期间零主动提醒：没有任何「比预计久了」（群聊不该发预期式提醒）。
       expect(proactiveTexts(sim).filter((text) => text.includes('比预计久'))).toHaveLength(0);
-      expect(proactiveTexts(sim).filter((text) => text === LONG_RUNNING_NOTICE_TEXT)).toHaveLength(0);
-      expect(sim.sdk.proactiveTexts.filter((entry) => entry.chatId === 'group-w' && entry.content === LONG_RUNNING_NOTICE_TEXT)).toHaveLength(0);
+      expect(proactiveTexts(sim).filter((text) => text === LONG_RUNNING_NOTICE_FALLBACK_TEXT)).toHaveLength(0);
+      expect(sim.sdk.proactiveTexts.filter((entry) => entry.chatId === 'group-w'
+        && entry.content === LONG_RUNNING_NOTICE_FALLBACK_TEXT)).toHaveLength(0);
       // ③ 另一条私聊会话收不到这份结果：全部主动消息只发给 group-w，从不发给 user-a。
       expect(sim.sdk.proactiveTexts.every((entry) => entry.chatId === 'group-w')).toBe(true);
       expect(sim.sdk.proactiveTexts.filter((entry) => entry.chatId === 'user-a')).toHaveLength(0);

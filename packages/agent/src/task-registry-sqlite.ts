@@ -97,9 +97,6 @@ export function createSqliteTaskRegistry(
       ...(stored.task.longRunningNotifiedAt === undefined
         ? {}
         : { longRunningNotifiedAt: stored.task.longRunningNotifiedAt }),
-      ...(stored.task.longRunningStuckNotifiedAt === undefined
-        ? {}
-        : { longRunningStuckNotifiedAt: stored.task.longRunningStuckNotifiedAt }),
       // 2026-11-19：本轮开始运行时刻（长任务受理后租约被清，提醒扫描用它算「跑了多久」）。
       ...(stored.task.runningSince === undefined ? {} : { runningSince: stored.task.runningSince }),
       executions: stored.executions.map((execution: ExecutionRow) => ({
@@ -275,9 +272,9 @@ export function createSqliteTaskRegistry(
       // 预期契约（2026-11-18）：只读 running 行（长时间提醒扫描；不读全表）。
       return store.listRunningTasks().map((row) => toRecord({ task: row, executions: [] }));
     },
-    claimLongRunningNotice(taskId, stage, at) {
-      // 原子「每档仅一次」领取：已提醒过返回 false（零写入）；不改任务状态、不产状态事实。
-      return store.claimLongRunningNotice(taskId, stage, at);
+    claimLongRunningNotice(taskId, at) {
+      // 原子「仅一次」领取：已提醒过返回 false（零写入）；不改任务状态、不产状态事实。
+      return store.claimLongRunningNotice(taskId, at);
     },
     list(scope) {
       return store.listTasks(scope).map(toRecord);

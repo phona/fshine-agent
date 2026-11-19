@@ -105,9 +105,14 @@ const DELETED_ENV_KEYS = [
  * ask/eval 恒 sync），不再有部署配置面。旧 YAML 里残留的键由解析层以「未知字段」拒绝——
  * 这条守卫防它被重新加回类型/解析/装配，或作为「写着不生效」的死键复活。
  *
+ * 2026-11-19 唤醒切片加入第二个已删键：`longRunningStuckNoticeMs`（30 分钟「卡住」档）
+ * ——那一档断言了我们不知道的事（「我卡住了」），还替用户下结论（「建议先停掉」），与
+ * 「>30 分钟不再报、只提示不停」冲突，整档删除（文案/阈值/扫描/领取/配置键一并删）；
+ * 旧 YAML 里的该键同样按未知字段拒绝。防它以任何形式回潮。
+ *
  * 豁免：`*.test.ts`（本扫描已排除）里可以提到旧名做回归/历史说明；docs 与 git 历史不在扫描面。
  */
-const DELETED_RUNTIME_CONFIG_KEYS = ['dispatchMode'] as const;
+const DELETED_RUNTIME_CONFIG_KEYS = ['dispatchMode', 'longRunningStuckNoticeMs'] as const;
 
 const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   mainConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, P2_SCENARIOS, R8_CONCURRENCY],
@@ -128,10 +133,10 @@ const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   fileRetentionDays: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   fileRetentionSweepOnStart: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STARTUP_SWEEP],
   attachmentNudgeAfterMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, SERVER, SIM_HARNESS],
-  // 预期契约（2026-11-18）：两档「长时间没动静」提醒阈值——缺省与解释归策略；ask-runtime
-  // 装配时取解析值注入 runner，runner 只消费注入的毫秒数（不读原始 runtime 配置）。
+  // 预期契约（2026-11-18；2026-11-19 唤醒切片只留一档）：长时间无动静提醒阈值——缺省与
+  // 解释归策略；ask-runtime 装配时取解析值注入 runner，runner 只消费注入的毫秒数
+  // （不读原始 runtime 配置）。第二档（30 分钟「卡住」）已删除并入已删键守卫。
   longRunningNoticeMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, ASK_RUNTIME, TASK_RUNNER, SIM_HARNESS],
-  longRunningStuckNoticeMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, ASK_RUNTIME, TASK_RUNNER, SIM_HARNESS],
   // 前台排队最长等待（2026-11-18）：缺省与解释归策略；execution-runtime 只读策略解析值
   // （`snapshot().config.queueWaitMs`）做排队上限，不读原始 runtime 配置。
   queueWaitMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME],
