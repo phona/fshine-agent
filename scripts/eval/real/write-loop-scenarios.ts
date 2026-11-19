@@ -528,14 +528,21 @@ export function evaluateStopCriteria(evidence: StopEvidence): CriterionResult[] 
     `非空文本 ${texts.filter((text) => text.trim() !== '').length} 条；成功通道原文命中=[${markers.join('、')}]`,
   );
 
-  // S1-C6 宿主停止事实模板出现在用户可见面（宿主主动推送通道的确定性文本）。
-  const cancelledFacts = texts.filter((text) => text.includes(CANCELLATION_FACT_MARKER));
+  // S1-C6 用户可见面出现**非空的停止告知**：唤醒设计下模型说话为主（停止回合的回复 /
+  // 唤醒投递），宿主停止模板「已按你说的停了：」只在「唤醒说不出话」的降级路径出现——
+  // 来源不限，模型的话与降级模板都算。本条把「用户看到了非空告知」与底账终局 cancelled、
+  // 停后审计冻结一起断言（这些机械事实另由 S1-C2/C3/C4 独立钉住，此处重复是为了净更严）；
+  // 不再要求宿主模板必现（否则只有系统退化时才可能绿——旧判据的假红根因）。
+  const stopNotice = texts.find((text) => text.trim() !== '');
+  const cancelledLedger = evidence.tasks.some((task) => task.status === 'cancelled');
+  const frozenAfterStop = evidence.auditAfterFreeze === evidence.auditAtCancel;
   add(
-    'S1-C6', `宿主停止事实模板「${CANCELLATION_FACT_MARKER}」出现在用户可见面`, 'mechanical',
-    cancelledFacts.length >= 1,
-    cancelledFacts.length >= 1
-      ? cancelledFacts.map((text) => digestValue(text, 200)).join('；')
-      : `未命中模板；用户可见文本=${texts.map((text) => digestValue(text, 160)).join(' | ') || '(空)'}`,
+    'S1-C6', '非空停止告知（来源不限）+ 底账终局 cancelled + 停后审计冻结', 'mechanical',
+    stopNotice !== undefined && cancelledLedger && frozenAfterStop,
+    `停止告知=${stopNotice === undefined ? '(无非空文本)' : digestValue(stopNotice, 200)}`
+      + `；非空用户可见文本 ${texts.filter((text) => text.trim() !== '').length} 条`
+      + `；底账 cancelled=${cancelledLedger}；停后审计冻结=${frozenAfterStop}`
+      + `（终态=${evidence.auditAtCancel}、冻结后=${evidence.auditAfterFreeze}）`,
   );
 
   return add.results;
@@ -599,16 +606,26 @@ export function evaluateFailureCriteria(evidence: FailureEvidence): CriterionRes
       + `工具面发起写调用（含被本地拦下的）=${evidence.attemptsOnTarget} 次`,
   );
 
-  // S2-C3 用户收到如实的失败交付：宿主失败话术模板（按底账 code 归类，与实现同源）
-  // 或「本回合已交给模型」的抑制事实 + 非空回合回复。
+  // S2-C3 用户收到如实的失败告知：唤醒设计下模型说话为主（失败回合回复 / 唤醒投递），
+  // 宿主失败话术模板只在「唤醒说不出话」的降级路径出现——来源不限，模型的话与降级模板
+  // 都算，统一在用户可见面（回合回复 + 主动投递）上判定非空文本。同时把零写入与无成功
+  // 通道原文两条机械事实并入本条，使判据比旧版更严（旧版只钉模板 / relayed_in_turn）。
+  // 具体失败业务事实（执行层拒写、读回零落地、无假成功）另由 S2-C1/C4/C5 机械钉住。
+  const visibleTexts = evidence.visible.map((entry) => entry.text);
+  const failureNotice = visibleTexts.find((text) => text.trim() !== '');
   const expectedFailureText = failureTextFor(evidence.failureCode, 'failed');
   const deliveredTemplate = evidence.pushTexts.some((text) => text.includes(expectedFailureText));
-  const relayedWithReply = evidence.failureRelayedInTurn && evidence.turns.some((turn) => turn.reply.trim() !== '');
+  const zeroWrites = evidence.readbackAfter.status === 'completed'
+    && evidence.readbackAfter.count === evidence.readbackBefore.count
+    && digestValue(evidence.readbackAfter.items, 300) === digestValue(evidence.readbackBefore.items, 300);
+  const noSuccessChannel = successMarkersIn(visibleTexts).length === 0;
   add(
-    'S2-C3', '用户收到宿主失败话术模板（如实交付失败），或本回合已交给模型且回合有非空回复', 'mechanical',
-    deliveredTemplate || relayedWithReply,
-    `底账失败码=${evidence.failureCode ?? '(无)'} → 期望模板=${digestValue(expectedFailureText, 120)}`
-      + `；主动投递命中=${deliveredTemplate}；relayed_in_turn=${evidence.failureRelayedInTurn}；非空回合回复=${evidence.turns.some((turn) => turn.reply.trim() !== '')}`,
+    'S2-C3', '用户可见面非空失败告知（来源不限）+ 零写入 + 无成功通道原文', 'mechanical',
+    failureNotice !== undefined && zeroWrites && noSuccessChannel,
+    `失败告知=${failureNotice === undefined ? '(无非空文本)' : digestValue(failureNotice, 200)}`
+      + `（非空用户可见文本 ${visibleTexts.filter((text) => text.trim() !== '').length} 条）`
+      + `；期望模板=${digestValue(expectedFailureText, 120)}、模板命中=${deliveredTemplate}、relayed_in_turn=${evidence.failureRelayedInTurn}`
+      + `；零写入=${zeroWrites}；无成功通道原文=${noSuccessChannel}`,
   );
 
   // S2-C4 不是假成功：用户可见面没有成功通道原文（一次成功写都没有，出现即假）。

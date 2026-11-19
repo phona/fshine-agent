@@ -429,11 +429,33 @@ describe('stop：正例全绿 + 逐条反向破坏必红', () => {
     expect(statusOf(evaluateStopCriteria(fakeDone), 'S1-C5')).toBe('fail');
   });
 
-  it('S1-C6：没有宿主停止事实模板 → 红', () => {
-    const evidence = greenStop();
-    evidence.visible = evidence.visible.filter((entry) => !entry.text.includes(CANCELLATION_FACT_MARKER));
-    evidence.pushes = [];
-    expect(statusOf(evaluateStopCriteria(evidence), 'S1-C6')).toBe('fail');
+  it('S1-C6：健康路径（模型说话，无宿主模板）与降级路径（宿主模板）都绿 —— 来源不限', () => {
+    // 健康路径：唤醒设计下用户可见文本 = 模型的话，宿主「已按你说的停了：」模板不出现。
+    const healthy = greenStop();
+    healthy.visible = [
+      { at: AT, source: 'turn', text: '受理了，在跑了。', turnIndex: 1 },
+      { at: AT, source: 'push', text: '「慢活」已经停了。' }, // 模型/唤醒投递的话，无宿主模板
+    ];
+    healthy.pushes = [];
+    expect(statusOf(evaluateStopCriteria(healthy), 'S1-C6')).toBe('pass');
+    expect(healthy.visible.some((entry) => entry.text.includes(CANCELLATION_FACT_MARKER))).toBe(false);
+    // 降级路径：唤醒说不出话，宿主模板兜底 —— 也绿。
+    const degraded = greenStop();
+    expect(statusOf(evaluateStopCriteria(degraded), 'S1-C6')).toBe('pass');
+    expect(degraded.visible.some((entry) => entry.text.includes(CANCELLATION_FACT_MARKER))).toBe(true);
+  });
+
+  it('S1-C6：用户可见面无非空停止告知 / 底账未 cancelled / 停后审计未冻结 → 红', () => {
+    const silent = greenStop();
+    silent.visible = silent.visible.map((entry) => ({ ...entry, text: '' }));
+    silent.pushes = [];
+    expect(statusOf(evaluateStopCriteria(silent), 'S1-C6')).toBe('fail');
+    const notCancelled = greenStop();
+    notCancelled.tasks = [{ taskId: 't-1', taskNo: 1, status: 'running', executions: [] }];
+    expect(statusOf(evaluateStopCriteria(notCancelled), 'S1-C6')).toBe('fail');
+    const notFrozen = greenStop();
+    notFrozen.auditAfterFreeze = notFrozen.auditAtCancel + 1;
+    expect(statusOf(evaluateStopCriteria(notFrozen), 'S1-C6')).toBe('fail');
   });
 });
 
@@ -499,17 +521,35 @@ describe('failure：正例全绿 + 逐条反向破坏必红', () => {
     expect(statusOf(evaluateFailureCriteria(hammered), 'S2-C2')).toBe('fail');
   });
 
-  it('S2-C3：没有宿主失败模板且没有本回合转述 → 红', () => {
+  it('S2-C3：健康路径（模型说话，无宿主模板）与降级路径（宿主模板）都绿 —— 来源不限', () => {
+    // 健康路径：唤醒设计下用户可见文本 = 模型/唤醒投递的话，宿主失败模板不出现。
+    const healthy = greenFailure();
+    const template = failureTextFor('COLLECTION_LOCKED', 'failed');
+    healthy.visible = [{ at: AT, source: 'turn', text: '这件事没办成，我再看下。', turnIndex: 1 }];
+    healthy.pushTexts = [];
+    healthy.failureRelayedInTurn = false;
+    expect(statusOf(evaluateFailureCriteria(healthy), 'S2-C3')).toBe('pass');
+    expect(healthy.visible.some((entry) => entry.text.includes(template))).toBe(false);
+    // 降级路径：唤醒说不出话，宿主失败话术模板兜底 —— 也绿。
+    const degraded = greenFailure();
+    expect(statusOf(evaluateFailureCriteria(degraded), 'S2-C3')).toBe('pass');
+    expect(degraded.visible.some((entry) => entry.text.includes(template))).toBe(true);
+  });
+
+  it('S2-C3：无非空失败告知 / 有写入落地 / 有成功通道原文 → 红', () => {
     const noDelivery = greenFailure();
-    noDelivery.pushTexts = ['收到了。'];
-    noDelivery.visible = [{ at: AT, source: 'turn', text: '收到了。', turnIndex: 1 }];
+    noDelivery.visible = [{ at: AT, source: 'turn', text: '   ', turnIndex: 1 }];
+    noDelivery.pushTexts = [];
     noDelivery.failureRelayedInTurn = false;
     expect(statusOf(evaluateFailureCriteria(noDelivery), 'S2-C3')).toBe('fail');
-    const relayedButSilent = greenFailure();
-    relayedButSilent.pushTexts = [];
-    relayedButSilent.failureRelayedInTurn = true;
-    relayedButSilent.turns = [{ index: 1, userText: 'x', reply: '   ', durationMs: 1 }];
-    expect(statusOf(evaluateFailureCriteria(relayedButSilent), 'S2-C3')).toBe('fail');
+    // 零写入被破坏：读回数量变了。
+    const landed = greenFailure();
+    landed.readbackAfter = { status: 'completed', count: 2, items: [{ name: 'x', value: 1 }] };
+    expect(statusOf(evaluateFailureCriteria(landed), 'S2-C3')).toBe('fail');
+    // 成功通道原文被破坏：出现「办好了」这类假成功。
+    const fake = greenFailure();
+    fake.visible = [...fake.visible, { at: AT, source: 'push', text: '办好了：2 条已写入。' }];
+    expect(statusOf(evaluateFailureCriteria(fake), 'S2-C3')).toBe('fail');
   });
 
   it('S2-C4：用户可见面出现「办好了」这类成功通道原文 → 红', () => {
