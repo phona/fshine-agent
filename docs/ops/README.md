@@ -39,7 +39,7 @@ kill <pid> 结束它再重试，或改端口 / 换部署点（不同 dbPath 状�
 
 ## 5. 排障 runbook
 
-**5.1 静默连接**：先读 `server_started`（`apps/server/channel-mode.ts:66-81`）——`offline` = 压根没建连接（`:57`），用户发什么都石沉大海；`shadow` = 连上但出站全抑制；只有 `live` 真投递。别用 `FSHINE_WECOM_DELIVERY=live` 在 shadow 上放行：显式档位压过环境开关（`packages/channel-wecom/src/silent-shadow-gate.ts:49-57`）。连接（订阅/心跳/指数退避重连）由官方 SDK 管理，宿主只管认证与错误（`packages/channel-wecom/src/adapter.ts:3`）：启动期等 `authenticated` 最多 30 秒（`:315`、`:330`），错误即启动失败（`:331`），**连接层不重试、不告警**。只有某个人不回：看 `message_refused`（`apps/server/server.ts:616-620`）。查任务事实用 `npm run tasks -- "#<编号>"`（`package.json:12`）或 `npm run ops`（`:13`），不要靠对话复述。
+**5.1 静默连接**：先读 `server_started`（`apps/server/channel-mode.ts:66-81`）——`offline` = 压根没建连接（`:57`），用户发什么都石沉大海；`shadow` = 连上但出站全抑制；只有 `live` 真投递。别用 `FSHINE_WECOM_DELIVERY=live` 在 shadow 上放行：显式档位压过环境开关（`packages/channel-wecom/src/silent-shadow-gate.ts:49-57`）。连接（订阅/心跳/指数退避重连）由官方 SDK 管理，宿主只管认证与错误（`packages/channel-wecom/src/adapter.ts:3`）：启动期等 `authenticated` 最多 30 秒（`:315`、`:330`），错误即启动失败（`:331`），**连接层不重试、不告警**。只有某个人不回：看 `message_refused`（`apps/server/server.ts:616-620`）。查任务事实用 `npm run tasks -- "#<编号>"`（`package.json:12`）或 `npm run ops`（`:13`），不要靠对话复述。任务终态后可用 `npm run tasks -- <id> --redo` 重新交办（= 新任务、委派原文逐字、经与 `ask` 同源的生产装配；不是人工接管、也不是会话续跑）。
 
 **5.2 双实例（忽好忽坏）**：先看有没有拒启话术（§1 单实例纪律）——第二个实例现在**起不来**：启动即被锁拒（exit 非 0）。若历史上有两个实例同时跑过，残留进程不会自己让路，杀干净再起：`kill <pid>`（pid 在锁文件 `<dbPath 所在目录>/server/instance.lock` 里，或 `ps` 找 `apps/server/main.ts`；`ps -p <pid> -o command=` 核命令行）。真撞上了：同一 bot 的第二条 WS 连接会把第一条踢掉，表现为间歇失效（`docs/product/wecom-live-dummy-cases.md:30`）；两实例同时写同一 `.runtime/state.db` 与 `sessions/`（`apps/server/main.ts:43-45`、`apps/server/server.ts:499`），出现「编号跳号/回复接错会话」先怀疑这里。
 
@@ -47,7 +47,7 @@ kill <pid> 结束它再重试，或改端口 / 换部署点（不同 dbPath 状�
 
 ## 6. 人工走查只测交互
 
-功能与不变量由自动化兜（`npm test`、`scripts/eval/wecom-sim/run.ts`、`npm run eval:cap01`），人工只测**观感与措辞**、**真网络时序**、**真实文件上传下载**（`docs/product/wecom-live-dummy-cases.md:15-21`）；不要重测自动化已兜的部分（`docs/product/manual-test-handbook.md:16-26`）。结论只写「通过 / 不通过 / 存疑（附原文）」，**不写「稳定」「100%」「已达标」**（`:14`），手工证据不替代自动化门。走查主链 8 步（启动 → 交办受理 → 进展通知 → 结果找回 → 失败如实 → 取消 → 重启恢复 → 越权）见 `docs/product/manual-test-handbook.md:56-73`。真实只读接入**未获授权**：不得借走查连真实执行层或真实数据（`docs/product/real-read-readiness.md:3`）。
+功能与不变量由自动化兜（`npm test`、`scripts/eval/wecom-sim/run.ts`、`npm run eval:cap01`），人工只测**观感与措辞**、**真网络时序**、**真实文件上传下载**（`docs/product/wecom-live-dummy-cases.md` §0）；不要重测自动化已兜的部分——手工只判措辞/可用性与体验，**手工证据不替代自动化门**。结论只写「通过 / 不通过 / 存疑（附原文）」，**不写「稳定」「100%」「已达标」**。真实只读接入**未获授权**：不得借走查连真实执行层或真实数据（`docs/product/real-read-readiness.md:3`）。
 
 ## 7. 禁令与操作纪律
 

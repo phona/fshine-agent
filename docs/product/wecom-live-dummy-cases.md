@@ -4,9 +4,9 @@
 > **用户看到的对不对、说不说得通**；**宿主不变量在真渠道上有没有破**。
 > 它不是回归门——自动化已兜的部分见 §2 与 §10，不重复测；判定只写「通过 / 不通过 / 存疑（附原文）」，
 > **不写「稳定」「100%」「已达标」**。
+> 手工只判**措辞 / 可用性与体验**；自动化已兜的功能不重测；**手工证据不替代自动化门**。
 >
-> 配套：`docs/product/business-coverage.md`（覆盖图）、`docs/product/manual-test-handbook.md`（手工纪律）、
-> `docs/product/event-catalog.md`（事件字典）。
+> 配套：`docs/product/business-coverage.md`（覆盖图）、`docs/product/event-catalog.md`（事件字典）。
 
 ## 0. 自动/人工分工（2026-11-18 起，本文的分界线）
 

@@ -40,7 +40,7 @@ describe('Wave1 runner 入口冒烟（不调模型）', () => {
   it('预注册文件路径存在，且源码里没有改名前的旧路径（防改名漂移）', () => {
     // 2026-11-18 实测踩过：runner 的 REPO_PREREG 常量用 path.join 拼段，改名脚本漏改，
     // 入口在 main() 里直接 ENOENT——参数冒烟抓不到，只能靠这条静态断言。
-    expect(existsSync(path.join(REPO_ROOT, 'docs/eval/long-session-prereg.md'))).toBe(true);
+    expect(existsSync(path.join(REPO_ROOT, 'docs/history/long-session-prereg.md'))).toBe(true);
     const source = readFileSync(RUNNER, 'utf8');
     expect(source.includes('r6-longsession-prereg')).toBe(false);
   });

@@ -22,12 +22,12 @@
 | 编号 | 事项 | 现行证据 | 状态 |
 |---|---|---|---|
 | D-204 | dummy 夹具两套 commit 令牌契约不一致 | `scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:542-545` 注释自述「两者不一致已登记」；`verifyProposalToken` 见 `:479`，script 绑定校验见 `:927`/`:1014` | 待办（未统一） |
-| D-156 | 两支真实读数（61,000 / 86,000）残留 | `docs/architecture-laws.md:240`「遗留待清」；现行树 grep 仅此一行命中 | 待办（无 issue） |
+| D-156 | 两支真实读数（61,000 / 86,000）残留 | `docs/history/architecture-laws-2026-11_undated.md:242`「遗留待清」；现行树 grep 仅此一行命中 | 待办（无 issue） |
 | D-052 | `step-text.ts` 六个退役工具名死分支 | `packages/agent/src/step-text.ts` 仍在，但六个工具名 grep 零命中；无结案记录 | 待核 |
 | D-062 | `npm test` 在无凭据环境全红 | `package.json:9`（`vitest run`）；无结案记录 | 待核 |
 | D-168 | 门①「产品面」口径未定义 | 现行树 `grep -rn '17dz' packages apps scripts --include='*.ts'` 零命中；无结案记录 | 待核 |
 | D-170 | exposure-lint 剩余核对与扩展 | `packages/agent/exposure-lint.test.ts` 已不存在（`ls` 实测）；无结案记录 | 待核 |
-| D-190 | 门①测试夹具豁免口径分歧 | `docs/architecture-laws.md` 仍在，但 17dz 字面量零命中；无结案记录 | 待核 |
+| D-190 | 门①测试夹具豁免口径分歧 | `docs/history/architecture-laws-2026-11_undated.md` 仍在，但 17dz 字面量零命中；无结案记录 | 待核 |
 | D-196 | 退役 `FSHINE_PLATFORM_ROOT` | `grep -rn 'FSHINE_PLATFORM_ROOT'` 零命中；无结案记录 | 待核 |
 
 ## 三、指针失效、无结案记录 → 待核（64 条）
