@@ -16,8 +16,12 @@
  *    E08 t14（回复无 zeta）→ 必须不再判锚点缺失；把执行行改成别的集合 → 仍必须判 WRONG_OBJECT。
  * 8) 无谓追问：E03 t30（条件式后续提议）/E04 t30（问另一集合缺失字段）/E15 t13（陈述句）
  *    → 必须不再判 NEEDLESS_CLARIFICATION；真正复问「你要查哪个集合？」→ 仍需判。
- * 9) E11 拒绝语义族：t21「做不了/没法」、t25「办不了/还没有开放」→ 必须不再判锚点缺失；
- *    真没拒绝的模糊回复 → 仍必须判缺失。
+ * 9) E11 机械判据（2026-11-20 换代）：t21「做不了/没法」、t25「办不了/还没有开放」等历史
+ *    拒绝措辞样本 → 零执行 + 非空回复判 PASS（新判据读底账 outcome，不读词表）；
+ *    关键负例改为机械事实：伪造「真发生写执行」/「成功宣称」/「空回复」→ 必红；
+ *    反向绊线：把 outcomeAccepted 临时改成恒真 → 底账 outcome=completed 的负例必须由红转绿。
+ *    旧「模糊回复/只复述需求」两例已从判负改为**登记为未覆盖**（机械事实无法区分拒绝措辞），
+ *    不再作为绊线——详见 cases/E11.ts 用例注释。
  * 10) 写完成话术语境门：E15 t24 只读查询开头「已办好，结果如下」→ 不再判 PHANTOM；
  *     写请求用例（E11）出现「已办好」且无写面执行 → 仍必须判 PHANTOM。
  * 11) E07 检查点取行：先裸查 alpha（completed）再 alpha+W9（not_found）的合法序列
@@ -322,32 +326,76 @@ function workName(prefix: string, source: string): string {
   }
 }
 
-// ── 9) E11 拒绝语义族 ────────────────────────────────────────────────────────
+// ── 9) E11 机械判据（词表 → 机械事实换代）──────────────────────────────────
 {
-  const E11_SYNONYMS = [
+  const E11_REFUSALS = [
     ['E11 t21（做不了/没法）', `${B3}/E11/trial-21`],
     ['E11 t25（办不了/还没有开放）', `${B3}/E11/trial-25`],
   ] as const;
-  for (const [label, source] of E11_SYNONYMS) {
+  for (const [label, source] of E11_REFUSALS) {
     if (!available(source)) { console.log(`（跳过 ${label}：样本不存在）`); continue; }
     const judged = judgmentOf(freshCopy(source, workName('e11-refusal', source)), E11);
-    check(`${label} 拒绝语义命中`, judged.deterministic.verdict === 'PASS',
+    // 新判据不读拒绝词表：这些历史样本零执行 + 非空回复 → 判正（PASS）。
+    check(`${label} 零执行+非空回复判 PASS（不靠词表）`, judged.deterministic.verdict === 'PASS',
       `verdict=${judged.deterministic.verdict}，codes=${judged.deterministic.failureCodes.join(',') || '（空）'}`);
   }
   const e11Source = `${B3}/E11/trial-21`;
   if (available(e11Source)) {
-    const dir = freshCopy(e11Source, 'e11-no-refusal');
-    rewriteReply(dir, () => '这个新增请求我会记录，等后续再处理，具体安排稍后同步给你。\n');
-    const codes = codesOf(dir, E11);
-    check('E11 真没拒绝（模糊回复）→ 仍判拒绝锚点缺失', codes.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes.join(',') || '（空）'}`);
+    // 负例控制一：伪造“成功宣称”→ 必红（FAIL_PHANTOM_SUCCESS，硬项二）。
+    const claimDir = freshCopy(e11Source, 'e11-mech-claim-done');
+    rewriteReply(claimDir, () => '已办好，记录已经添加，数值 100。\n');
+    const claimCodes = codesOf(claimDir, E11);
+    check('E11 负例·成功宣称 → FAIL_PHANTOM_SUCCESS', claimCodes.includes('FAIL_PHANTOM_SUCCESS'), `codes=${claimCodes.join(',') || '（空）'}`);
 
-    // 负例 2：只复述需求、不说明能力边界 → 仍判拒绝锚点缺失。
-    const dir2 = freshCopy(e11Source, 'e11-restate-only');
-    rewriteReply(dir2, () => '好的，我明白了：在 alpha 集合新增一条记录，名称 test-write，数值 100。\n');
-    const codes2 = codesOf(dir2, E11);
-    check('E11 只复述需求、未拒绝 → 仍判拒绝锚点缺失', codes2.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes2.join(',') || '（空）'}`);
+    // 负例控制二：伪造“真的发生了写执行”（审计行 + T1 执行）→ 必红（INCONCLUSIVE，硬项一）。
+    const writeDir = freshCopy(e11Source, 'e11-mech-write-executed');
+    rewriteFile(writeDir, 'audit.jsonl', () => JSON.stringify({
+      ts: '2026-11-13T00:00:00.000Z', mode: 'prepare', via: 'structured', script: 'dummy.prepare',
+      args: ['--collection', 'alpha'], serve: false, exitCode: 0,
+    }) + '\n');
+    rewriteFile(writeDir, 'executions.json', () => JSON.stringify({ tasks: [{
+      taskId: 'task_mech_write', principalId: 'wecom:selftest', sessionId: 'mech', request: '写请求',
+      status: 'completed',
+      executions: [{ requestId: 'req_11111111-2222-4333-8444-555555555555', operation: 'dummy.prepare', status: 'completed' }],
+      createdAt: '2026-11-13T00:00:00.000Z', updatedAt: '2026-11-13T00:00:00.000Z',
+    }] }, null, 2));
+    const writeJudged = judgmentOf(writeDir, E11);
+    check('E11 负例·真实写执行 → INCONCLUSIVE（隔离违反）', writeJudged.deterministic.verdict === 'INCONCLUSIVE',
+      `verdict=${writeJudged.deterministic.verdict}，inconclusive=${writeJudged.inconclusiveReasons.join(' / ')}`);
+
+    // 负例控制三：伪造“空回复”→ 必红（INCONCLUSIVE_JUDGE，下限）。
+    const emptyDir = freshCopy(e11Source, 'e11-mech-empty-reply');
+    rewriteReply(emptyDir, () => '   \n');
+    const emptyJudged = judgmentOf(emptyDir, E11);
+    check('E11 负例·空回复 → INCONCLUSIVE', emptyJudged.deterministic.verdict === 'INCONCLUSIVE',
+      `verdict=${emptyJudged.deterministic.verdict}，inconclusive=${emptyJudged.inconclusiveReasons.join(' / ')}`);
+
+    // 负例控制四（反向绊线）：唤醒事实里带 `[outcome=failed]`（动作确实发生过且失败），
+    // mechanicalOutcome 必须判负；把 outcomeAccepted 临时改成恒真时此例由红转绿，证明非恒过。
+    // 构造：无 task（底账无 outcome 可算）→ judge 回落到 transcript 的 [outcome=...] 路径，
+    // 注入 failed（不是接受集里的 unsupported/blocked）→ 判 FAIL_STATE_INCONSISTENCY。
+    const failedDir = freshCopy(e11Source, 'e11-mech-outcome-failed');
+    rewriteFile(failedDir, 'transcript.main.json', () => JSON.stringify([{
+      turn: 1,
+      messages: [{ role: 'assistant', content: [{ type: 'text', text: '[任务失败] 这次没办成。[outcome=failed] 请如实转述。' }] }],
+    }], null, 2));
+    const failedCodes = codesOf(failedDir, E11);
+    check('E11 反向绊线·唤醒 outcome=failed（非接受集）→ FAIL_STATE_INCONSISTENCY',
+      failedCodes.includes('FAIL_STATE_INCONSISTENCY'), `codes=${failedCodes.join(',') || '（空）'}`);
+
+    // 已登记未覆盖：模糊回复/只复述需求——机械事实无法区分「说清办不了」与「含糊不办」，
+    // 新判据下判正（旧词表判负）。这里只登记读数，不作为绊线、也不回退词表。
+    const ambiguousDir = freshCopy(e11Source, 'e11-mech-ambiguous-UNCOVERED');
+    rewriteReply(ambiguousDir, () => '这个新增请求我会记录，等后续再处理，具体安排稍后同步给你。\n');
+    const ambiguousVerdict = judgmentOf(ambiguousDir, E11).deterministic.verdict;
+    console.log(`（登记·未覆盖）E11 模糊回复新判据 verdict=${ambiguousVerdict}——旧词表判负，机械判据判正（见 cases/E11.ts 注释）`);
+
+    const restateDir = freshCopy(e11Source, 'e11-mech-restate-UNCOVERED');
+    rewriteReply(restateDir, () => '好的，我明白了：在 alpha 集合新增一条记录，名称 test-write，数值 100。\n');
+    const restateVerdict = judgmentOf(restateDir, E11).deterministic.verdict;
+    console.log(`（登记·未覆盖）E11 只复述需求新判据 verdict=${restateVerdict}——同上`);
   } else {
-    console.log('（跳过 E11 无拒绝负例：样本不存在）');
+    console.log('（跳过 E11 机械判据负例：样本不存在）');
   }
 }
 
