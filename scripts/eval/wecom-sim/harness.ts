@@ -58,6 +58,8 @@ export interface BubbleRecord {
   readonly streamId: string;
   readonly content: string;
   readonly finish: boolean;
+  /** L1 通道语义（要求 C）：本帧被假 SDK 拒收（回复上下文过期）= 未送达用户。 */
+  readonly rejected?: boolean;
 }
 
 /** 主动文字消息（aibot_send_msg 通道；追问走这里）。 */
@@ -99,6 +101,14 @@ export class FakeWecomSdk implements SdkClientLike {
   readonly uploads: UploadRecord[] = [];
   connected = 0;
   disconnected = 0;
+  /**
+   * L1 通道语义（要求 C，2026-11-21）：从第 N 次 replyStream 起 reject——模拟平台拒绝
+   * 回复上下文（errcode 846608「流式更新窗口过期」一类；慢回合终稿因此走降级主动推送）。
+   * undefined = 永不拒收（既有行为逐字节不变）。帧**先记录再抛**：出站尝试可观测，
+   * 用户可见面由 rejected 标记与主动推送面判定。
+   */
+  replyFailureFrom: number | undefined = undefined;
+  private replyStreamCalls = 0;
   private readonly listeners = new Map<string, Array<(...args: never[]) => void>>();
   private readonly staged = new Map<string, { filename: string; buffer: Buffer }>();
   private uploadSeq = 0;
@@ -133,13 +143,19 @@ export class FakeWecomSdk implements SdkClientLike {
   }
 
   replyStream(frame: SdkFrame, streamId: string, content: string, finish: boolean): Promise<unknown> {
+    this.replyStreamCalls += 1;
+    const rejected = this.replyFailureFrom !== undefined && this.replyStreamCalls >= this.replyFailureFrom;
     this.bubbles.push({
       kind: 'replyStream',
       reqId: typeof frame.headers?.req_id === 'string' ? frame.headers.req_id : '',
       streamId,
       content,
       finish,
+      ...(rejected ? { rejected: true } : {}),
     });
+    if (rejected) {
+      return Promise.reject(new Error('Reply ack error: errcode=846608, errmsg=stream message update expired'));
+    }
     return Promise.resolve({});
   }
 
@@ -570,6 +586,11 @@ export interface WecomSimOptions {
    * 2026-11-19 唤醒切片删除）。缺省 = 产品值（10 分钟）；用例把它调到几百毫秒确定性触发。
    */
   readonly longRunningNoticeMs?: number;
+  /**
+   * L1 通道语义（要求 C，2026-11-21）：从第 N 次 replyStream 起拒收——模拟平台拒绝回复
+   * 上下文（回复窗口过期）。缺省 undefined = 永不拒收（既有样本逐字节不变）。
+   */
+  readonly replyFailureFrom?: number;
   /** 临时目录前缀（定位用）。 */
   readonly label?: string;
 }
@@ -637,6 +658,8 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
   const platformRoot = path.join(root, 'platform');
   const conversationId = DEFAULT_CONVERSATION_ID;
   const sdk = new FakeWecomSdk();
+  // L1 通道语义（要求 C）：回复窗口过期模式按样本注入（缺省 undefined = 永不拒收）。
+  if (options.replyFailureFrom !== undefined) sdk.replyFailureFrom = options.replyFailureFrom;
   const clock = new ManualClock();
   const logs: Array<Record<string, unknown>> = [];
   const book = new SimScriptBook();
