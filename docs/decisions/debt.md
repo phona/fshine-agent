@@ -21,9 +21,9 @@
 
 | 编号 | 事项 | 现行证据 | 状态 |
 |---|---|---|---|
-| D-204 | dummy 夹具两套 commit 令牌契约不一致 | `scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:542-545` 注释自述「两者不一致已登记」；`verifyProposalToken` 见 `:479`，script 绑定校验见 `:927`/`:1014` | 待办（未统一） |
+| D-204 | dummy 夹具两套 commit 令牌契约不一致 | `scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:789-792` 注释自述「两者不一致已登记」（`:791`）；`verifyProposalToken` 见 `:723`，script 绑定校验见 `:1201`/`:1295`（旧行号 `:542-545`/`:479`/`:927`/`:1014` 系 11-19/20 文件增长漂移） | 待办（未统一） |
 | D-156 | 两支真实读数（61,000 / 86,000）残留 | `docs/history/architecture-laws-2026-11_undated.md:242`「遗留待清」；**口径不明**：2026-11-20 核对按字面量实测（非 history 面 0 行、history 7 行、本表 1 行），复现不出原文「仅此一行命中」，原口径待考 | 待办（无 issue，口径存疑） |
-| D-052 | `step-text.ts` 六个退役工具名死分支 | `packages/agent/src/step-text.ts` 仍在，但六个工具名 grep 零命中；无结案记录 | 待核 |
+| D-052 | `step-text.ts` 六个退役工具名死分支 | `packages/agent/src/step-text.ts` 仍在，但六个工具名在该文件域内 grep 零命中（全仓另有 `packages/agent/pi-driver.test.ts:18/:24` 的合成工具名 `search_references`，与死分支无关）；无结案记录 | 待核 |
 | D-062 | `npm test` 在无凭据环境全红 | `package.json:9`（`vitest run`）；无结案记录 | 待核 |
 | D-168 | 门①「产品面」口径未定义 | 现行树**实测 4 处命中**（`packages/agent/src/user-facing-failure.ts:78`、`packages/agent/payload-oneof.test.ts:2`、`:23`、`scripts/eval/real/smoke.ts:4`，均注释/文案级；2026-11-20 核对，原文写「零命中」已不成立） | 待核 |
 | D-170 | exposure-lint 剩余核对与扩展 | `packages/agent/exposure-lint.test.ts` 已不存在（`ls` 实测）；无结案记录 | 待核 |
