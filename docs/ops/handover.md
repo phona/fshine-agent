@@ -24,6 +24,7 @@ Pi Agent（Main）+ 最小宿主 + Execution Contract + Channel Adapter 的产�
 - 分支 `arch/integration`，收尾提交 `1b230ef8`（2026-11-21；此前的 `e0f105e0` 是交接快照，其后为可靠性/对话面整备）。
 - 确定性门：`npm run typecheck` exit 0；`npm test` → 269 文件 / 2736 passed（1 skipped / 3 todo）；`node --import tsx scripts/eval/wecom-sim/run.ts` → 48/51、失败 0（3 条 SKIP 有登记理由）；文档守卫 30 passed（docs-guard / product-capability / coverage-matrix）。
 - 真模型稳定性读数（冻结 `5105b795`，独立复核逐份核过产物）：写闭环 **5/5 全绿**（C1–C10）；场景集 **24/24、24/24、22/24、24/24、20/24**；`eval:user` **14/15、15/15、13/15+1 INCONCLUSIVE**。9 处红经逐条拆解：模型旅程方差为主，另含 1 条 taskId 泄漏与 2 个判据形状问题（已修，见下）。
+- 判据换形后的确认批次（`1b230ef8`/`99af8382`，代码面零差异）：`eval:user` **15/15 ×2**（零 FAIL/INCONCLUSIVE，failureCodeHistogram 空）、场景集 **24/24 ×2**、写闭环 **C1–C10 ×1**；泄漏 0、对话形态 0。**E11** 两次均 PASS（只读 1 次 + 零写 + 如实拒绝；`UNNECESSARY_DELEGATION_WARN` 按用例定义为 WARN 不判负）、**E14** 两次均 PASS（回复点出执行层维度取值）。
 - 泄漏扫描（单一入口 `scripts/eval/shared/internal-terms.ts`）：内部词表 + `#N` 编号形态 + **taskId 形态 `task_[A-Za-z0-9-]{8,}`**（2026-11-21 加，源自 live 实测「任务号 task_db2b3ca3」）；接进四个用户级批次与 wecom-sim。
 - 判据换形（2026-11-21）：**E11** 的隔离判据从「任何执行行」改为「**零写面执行**」（只读允许——产品会先读后判）；**E14** 的措辞族换成**执行层已知字符串存在性**（华远贸易/明达物流/新程科技 任一）。两处都保留了对象身份/重试上限/零写/无成功宣称等机械硬判。
 - 独立复核做法（可复制）：① 复跑四门；② 亲手破坏三个最强守卫（Main 工具面精确集合 / 机制参数拒绝 / 内部词 AST 守卫）必须红、恢复必须绿；③ 故意放宽一条守卫 + 注入回归，看是否被**其它**测试抓住；④ 逐条把文档里的「对现状的陈述与指针」对代码核（`docs-guard` 只校验行号存在与不越界，不校验指对没有）。
