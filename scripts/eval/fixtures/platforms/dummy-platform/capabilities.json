@@ -475,7 +475,7 @@
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "$id": "RecordBatchPayload",
                 "title": "RecordBatchPayload",
-                "description": "Record batch payload shape (host -> platform: the host lints by this schema, materializes the array to a file and passes that path as the records positional). additionalProperties is false; max 500 records per write (the execution layer's single-write limit). On commit, the submitted records must match the proposal exactly (the confirmation handle is bound to records too).",
+                "description": "Record batch payload shape: give the records as a structured array, checked against this schema and written as the operation's records. additionalProperties is false; max 500 records per write. On commit, the submitted records must match the proposal exactly (the proposal is bound to records too).",
                 "type": "array",
                 "maxItems": 500,
                 "items": {
@@ -559,7 +559,7 @@
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "$id": "RecordBatchPayload",
                 "title": "RecordBatchPayload",
-                "description": "Record batch payload shape (host -> platform: the host lints by this schema, materializes the array to a file and passes that path as the records positional). additionalProperties is false; max 500 records per write (the execution layer's single-write limit). On commit, the submitted records must match the proposal exactly (the confirmation handle is bound to records too).",
+                "description": "Record batch payload shape: give the records as a structured array, checked against this schema and written as the operation's records. additionalProperties is false; max 500 records per write. On commit, the submitted records must match the proposal exactly (the proposal is bound to records too).",
                 "type": "array",
                 "maxItems": 500,
                 "items": {

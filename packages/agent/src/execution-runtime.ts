@@ -262,14 +262,14 @@ export const READ_SKILL_TOOL_SCHEMA: Record<string, unknown> = {
  */
 export const RUN_JS_TOOL = 'run_js';
 export const RUN_JS_TOOL_DESCRIPTION =
-  '运行一段受限的 CommonJS 脚本处理文件：输入文件用文件清单里的 fileId 引用（宿主物化到本次运行目录的 in/，按返回的 materializedName 读取）。'
+  '运行一段受限的 CommonJS 脚本处理文件：输入文件用文件清单里的 fileId 引用（已放到本次运行目录的 in/，按返回的 materializedName 读取）。'
   + 'scratch/ 是工作区（中间文件写这里），主会话只能写 scratch/——写 out/ 会被权限拒绝（不是静默丢弃）；需要交付文件请 task_run 交办。'
-  + '超时与资源上限由宿主决定，只能通过把请求调小来适配。'
+  + '超时与资源上限有限，只能通过把请求调小来适配。'
   // CAP-01 修复轮（R2-S1，接口事实声明）：声明沙箱的模块面——模型此前首调 require("xlsx")
   // （未安装）失败后转去 task_run 兜底建 Task。只声明能力边界，不写业务流程话术。
   + '可用模块只有 exceljs（require("exceljs")，读写 xlsx）；没有 xlsx/xlsx-style/csv-parse 等包。'
   // CAP-01 修复轮（⑤，接口事实声明）：声明输入文件在脚本内的路径约定——清单每条已给出
-  // 「脚本内路径」（in/<fileId><安全扩展名>，与宿主物化的 materializedName 同一公式）；
+  // 「脚本内路径」（in/<fileId><安全扩展名>，与 materializedName 同一公式）；
   // 模型此前先写 in/<fileId>（无扩展名）失败一次才改对。路径只由 fileId + 安全扩展名派生，
   // 不由原始文件名拼出（机械事实，不是业务流程话术）。
   + '输入文件在脚本内的路径固定为 in/<fileId><安全扩展名>（文件清单每条已给出「脚本内路径」，按它读取）；'
@@ -279,20 +279,20 @@ export const RUN_JS_TOOL_DESCRIPTION =
  * 随任务完成投递）；**不提 task_run**（Worker 不能再交办——不做跨工具流程诱导）。
  */
 export const WORKER_RUN_JS_TOOL_DESCRIPTION =
-  '运行一段受限的 CommonJS 脚本处理文件：输入文件用文件清单里的 fileId 引用（宿主物化到本次运行目录的 in/，按返回的 materializedName 读取），'
-  + '要交付的产物写到 out/ 目录（宿主登记后随本任务完成投递），中间文件写 scratch/。'
-  + '超时与资源上限由宿主决定，只能通过把请求调小来适配。'
+  '运行一段受限的 CommonJS 脚本处理文件：输入文件用文件清单里的 fileId 引用（已放到本次运行目录的 in/，按返回的 materializedName 读取），'
+  + '要交付的产物写到 out/ 目录（登记后随本任务完成投递），中间文件写 scratch/。'
+  + '超时与资源上限有限，只能通过把请求调小来适配。'
   + '可用模块只有 exceljs（require("exceljs")，读写 xlsx）；没有 xlsx/xlsx-style/csv-parse 等包。'
   + '输入文件在脚本内的路径固定为 in/<fileId><安全扩展名>（文件清单每条已给出「脚本内路径」，按它读取）；'
   + '路径只由 fileId 和安全扩展名派生，不由原始文件名拼出。';
 export const RUN_JS_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    code: { type: 'string', description: 'CommonJS 脚本原文（宿主原样执行；中间文件写 scratch/）。' },
+    code: { type: 'string', description: 'CommonJS 脚本原文（原样执行；中间文件写 scratch/）。' },
     inputs: {
       type: 'array',
       items: { type: 'string' },
-      description: '输入文件的 fileId 列表（来自文件清单；宿主物化后按 materializedName 读取）。',
+      description: '输入文件的 fileId 列表（来自文件清单；按 materializedName 读取）。',
     },
   },
   required: ['code'],
@@ -501,7 +501,7 @@ export const MAIN_PROTOCOL_NOTE = [
     + '什么、不接受什么，并问用户要不要换口径；同一对象本回合不要再换参数重试，也不要自行按维度'
     + '取值批量查询——那是替用户扩大范围。',
   // owner 2026-11-19：交办后不再由宿主固定受理回执——模型的话原样投递，无过程话时用户静默到结果。
-  '- 本轮执行面只开放查询（只读）操作；用户要求写入或变更时，如实说明该能力尚未开通。',
+  '- 本轮只开放查询（只读）操作；用户要求写入或变更时，如实说明该能力尚未开通。',
 ].join('\n');
 
 /**
@@ -560,7 +560,7 @@ export function renderWorkerSystemPrompt(workspaceRoot?: string): string {
     '',
     '【工作目录】',
     `你的工作目录是：${workspaceRoot}`,
-    '处理文件只在这个目录里进行；不要去翻别人的配置、凭据或别的目录；这条对你调用的工具一样适用。',
+    '处理文件只在这个目录里进行；不要去翻别人的配置、账号信息或别的目录；这条对你调用的工具一样适用。',
   ].join('\n');
 }
 
@@ -1836,7 +1836,7 @@ export function longTaskResumeNote(resumed: ResumedOperation, outcome: Execution
     return `[续跑] 你发起的操作 ${operation}（id ${operationId}）失败了：${reason}。不要盲目重试；如实说明并向用户提出可选项。`;
   }
   if (resumed.restarted === true) {
-    return `[续跑·宿主曾重启] 你在本任务上一回合发起了操作 ${operation}（id ${operationId}），其间宿主重启过，你的上一回合上下文不在了。下面只有账本事实与文件；以它们为准，不要重复发起同一操作。`;
+    return `[续跑·上下文重建] 你在本任务上一回合发起了操作 ${operation}（id ${operationId}），这一回合的上下文不在了，现有的只是重建后的记录。下面只有账本事实与文件；以它们为准，不要重复发起同一操作。`;
   }
   return `[续跑] 你在本任务上一回合发起了操作 ${operation}（id ${operationId}），它现在已完成；结果见下/见文件。不要重复发起同一操作，先核对结果。`;
 }
@@ -1980,37 +1980,43 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   }
 
   /**
-   * 失败的结构化投影（2026-11-20 底账投影收口）：只回**封闭的 failureKind**（复用
-   * classifyFailure 的码表归类）+ 一条**清洗过的业务摘要**，**不再把 failureReason 这段
-   * 拼装自由文本整段倒给模型**——底账里旧文案含内部词（执行层/执行端/句柄等），结构性不给
-   * 拼装字段才是根治，不是对文本做词表过滤。摘要只取自末条执行的 error.message，经既有
-   * cleanExecutorDiagnostic 机械清理（剥技术码/路径/机构自称），业务原话保留——模型据此
-   * 才能「读懂结果、如实转述」；码仍只进 failureKind，不进文本。
+   * 底账投影（2026-11-20 收口）：**封闭种类 + 结构化原因码 + 机械清理的业务摘要**。
    *
-   * 摘要清洗：复用执行诊断清理（剥码/路径/机构自称），再去掉内部凭据/角色词。
+   * 口径 = 末次决定性结果（与 write-outcome 同一把尺）：task.status 已是回合结局，
+   * 已完成的末尾执行之后的前序失败只留在 executions 里审计，**不得**再冒出 failureKind /
+   * summary——「倒序找第一个 failed/refused」会让 completed 任务同时带失败视图（真 bug）。
+   *
+   * 三种形状：
+   *   · 完成 / 在跑 / 等待 / 取消 → 空视图（无 failureKind / outcomeKind / summary）；
+   *   · 失败且末条决定性执行是 failed/refused → 封闭 failureKind（码表归类）+ 业务摘要
+   *     （摘要只经 cleanExecutorDiagnostic 机械清理：剥技术码/路径/机构自称，不按词表替换）；
+   *   · 失败但没有决定性失败执行（空汇报：registry.fail 无 failed execution）→ 封闭
+   *     outcomeKind='no_report'，不恢复 failureReason 自由文本。
+   * result_unknown / timed_out 各给封闭 failureKind，同样不给摘要。
    */
-  function failureSummaryOf(message: string): string {
-    return cleanExecutorDiagnostic(message)
-      .replace(/确认凭据|确认句柄|句柄|handle|凭据/giu, '确认信息')
-      .replace(/(确认信息\s*){2,}/gu, '确认信息')
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  function failureViewOfTask(task: TaskRecord): { failureKind?: UserFacingFailureKind; summary?: string } {
-    const failed = [...task.executions].reverse().find((execution) =>
-      (execution.status === 'failed' || execution.status === 'refused') && execution.error !== undefined);
-    const failureKind = failed?.error !== undefined
-      ? classifyFailure({ code: failed.error.code })
-      : task.reason === 'result_unknown' ? 'unknown_result'
-      : task.status === 'timed_out' ? 'timed_out'
-      : task.status === 'failed' ? 'executor_failed'
-      : undefined;
-    const summary = failed?.error?.message === undefined ? undefined : failureSummaryOf(failed.error.message);
-    return {
-      ...(failureKind === undefined ? {} : { failureKind }),
-      ...(summary === undefined || summary === '' ? {} : { summary }),
-    };
+  type ProjectedFailureView = {
+    failureKind?: UserFacingFailureKind;
+    outcomeKind?: 'no_report';
+    summary?: string;
+  };
+  function failureViewOfTask(task: TaskRecord): ProjectedFailureView {
+    // 末次决定性结果不是失败：不给任何失败字段（completed 任务不得带 failureKind/summary）。
+    if (task.status !== 'failed' && task.status !== 'timed_out') return {};
+    if (task.reason === 'result_unknown') return { failureKind: 'unknown_result' };
+    if (task.status === 'timed_out') return { failureKind: 'timed_out' };
+    // 只看末条决定性执行（倒序找失败会跳过成功的末条，把 completed 误报成失败）。
+    const decisive = task.executions[task.executions.length - 1];
+    if (decisive !== undefined
+      && (decisive.status === 'failed' || decisive.status === 'refused')
+      && decisive.error !== undefined) {
+      const summary = cleanExecutorDiagnostic(decisive.error.message).replace(/\s+/gu, ' ').trim();
+      return {
+        failureKind: classifyFailure({ code: decisive.error.code }),
+        ...(summary === '' ? {} : { summary }),
+      };
+    }
+    // 失败但没有决定性失败执行（空汇报/无执行行）：封闭原因码，替代被丢掉的自由文本原因。
+    return { failureKind: 'executor_failed', outcomeKind: 'no_report' };
   }
 
   /** 任务行只读投影：白名单字段，不含内部路径/租约/身份字段，也不含拼装的 failureReason 自由文本。 */
@@ -2023,6 +2029,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       status: task.status,
       ...(task.reason === undefined ? {} : { reason: task.reason }),
       ...(failure.failureKind === undefined ? {} : { failureKind: failure.failureKind }),
+      ...(failure.outcomeKind === undefined ? {} : { outcomeKind: failure.outcomeKind }),
       ...(task.pendingQuestion === undefined ? {} : { pendingQuestion: pendingQuestionView(task.pendingQuestion) }),
       requestIds: task.executions.map((execution) => execution.requestId),
       createdAt: task.createdAt,
@@ -2055,8 +2062,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     const failure = failureViewOfTask(task);
     return {
       ...statusView(task),
-      // 失败摘要：清洗过的业务原话（剥技术码/路径/机构自称），替代原 failureReason 拼装文本。
-      // 模型据此读懂结果、如实转述；不再是「执行层内部栈…」这类内部文案。
+      // 失败摘要：仅末条决定性执行的业务原话，机械清理（剥码/路径/机构自称），不按词表替换；
+      // 前序失败只留 executions，completed 任务不带 summary。空汇报走 outcomeKind，无摘要。
       ...(failure.summary === undefined ? {} : { summary: failure.summary }),
       // 结果存档：completed 走 complete() 的 resultText；background 终态走 archiveReply 的 replyText。
       replyText: task.replyText ?? null,
@@ -2065,13 +2072,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         operation: execution.operation,
         status: execution.status,
         requestId: execution.requestId,
-        // 失败只给封闭种类 + 清洗摘要，不给 error.code 技术码。
+        // 每条执行失败只给封闭种类 + 机械清理摘要，不给 error.code 技术码。
         ...(execution.error === undefined
           ? {}
           : {
             failureKind: classifyFailure({ code: execution.error.code }),
             ...(() => {
-              const cleaned = failureSummaryOf(execution.error!.message);
+              const cleaned = cleanExecutorDiagnostic(execution.error!.message).replace(/\s+/gu, ' ').trim();
               return cleaned === '' ? {} : { summary: cleaned };
             })(),
           }),
@@ -3353,8 +3360,8 @@ function executeOperationTool(): DiscoveredTool {
  * 后台 Worker 任务文件清单的引用方式（与 inline 的 run_js.inputs 同源，另加执行层的声明
  * 文件参数：后台 Worker 的 execute_operation 文件参数由宿主替换为任务目录内的物化路径）。
  */
-const BACKGROUND_FILE_MANIFEST_HINT =
-  '以下文件已随任务交付；处理文件时用 run_js 的 inputs 按 fileId 引用，或调用 execute_operation 时按能力快照声明的文件参数引用（宿主会替换为任务目录内的物化路径）';
+export const BACKGROUND_FILE_MANIFEST_HINT =
+  '以下文件已随任务交付；处理文件时用 run_js 的 inputs 按 fileId 引用，或调用 execute_operation 时按清单里声明的文件参数引用（会替换为本任务目录内的实际路径）';
 
 /**
  * 后台任务文件桥工厂（按任务身份构造）：装配层注入 fileStore/platformRoot/内层客户端，

@@ -27,7 +27,7 @@ const TRUSTED_ROOT = '/trusted/root';
 const CONSTRAINT_PHRASES = [
   `你的工作目录是：${TRUSTED_ROOT}`,
   '处理文件只在这个目录里进行',
-  '不要去翻别人的配置、凭据或别的目录',
+  '不要去翻别人的配置、账号信息或别的目录',
   '这条对你调用的工具一样适用',
 ] as const;
 

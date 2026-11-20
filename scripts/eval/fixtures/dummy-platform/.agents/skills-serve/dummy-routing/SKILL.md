@@ -19,7 +19,7 @@ list you are given; permission and validation belong to the platform.
 - 准备（`dummy.prepare`）：给出要操作的对象（collection），以及涉及的窗口（window）、
   条数上限（count）等口径；这一步只生成一份待确认提案（摘要 + 过期时间），**不真正落账**。
 - 提交（`dummy.commit`）：凭准备时的提案提交；这份提案绑定 collection/window/count/records（与提案完全一致）——提交必须携带与提案一致的 records，否则会被确定性拒绝。
-  提案一次性、15 分钟内过期；别自己编造这份凭据，确认流程会替你带上。
+  提案一次性、15 分钟内过期；别自己编造这份确认信息，确认流程会替你带上。
 - 另一条提交路径（`dummy.proposal` → `dummy.proposal-commit`）：先建提案，再按提案提交；
   两者都要先取得用户确认。
 
@@ -55,14 +55,14 @@ list you are given; permission and validation belong to the platform.
 | alpha-group | W1 | alpha-group-item-1 / 700 | |
 | locked-one | W1 | locked-item-1 / 900 | 锁定集合：写面（prepare/commit）被拒；只读查询正常返回条目 |
 | empty-one | W1 | （空） | 零条目 |
-| faulty-one | W1 | faulty-item-1 / 100 | 行为以执行层返回为准 |
-| denied-one | W1 | denied-item-1 / 700 | 行为以执行层返回为准 |
+| faulty-one | W1 | faulty-item-1 / 100 | 行为以平台返回为准 |
+| denied-one | W1 | denied-item-1 / 700 | 行为以平台返回为准 |
 | contoso-trade | W1, W2 | contoso-trade-item-1 / 1500；contoso-trade-item-2 / 600 | 「contoso」是前缀 → 与 contoso-logistics 歧义 |
 | contoso-logistics | W1 | contoso-logistics-item-1 / 450 | |
 | fabrikam-retail | W1 | fabrikam-retail-item-1 / 880 | 「fabrikam」是前缀 → 与 fabrikam-wholesale 歧义 |
 | fabrikam-wholesale | W1 | fabrikam-wholesale-item-1 / 1320 | |
 
-**业务词映射（口语 → 本夹具；只是本域说明，不是宿主规则）**：单据/记录 → `documents`；
+**业务词映射（口语 → 本夹具；只是本域说明，不是通用规则）**：单据/记录 → `documents`；
 本月 → `W202611`；上个月 → `W202610`。用户给了别的对象名就按上表解析；解析不出时，
 **先把这个标识本身交给平台裁决**——对歧义前缀它会回「还差信息」并给出候选清单；把平台
 给的候选作为**一次**澄清交给用户，不要要求用户背集合名。**不要自行猜测具体候选集合逐个查询**
@@ -74,5 +74,5 @@ list you are given; permission and validation belong to the platform.
 **核对口径**：本域「核对」= 读该集合的 items 并检查可机械判定的异常——**同名不同值**
 （`document-2` 出现两次，金额 800 与 900）就是"核对发现的问题"，报出第几条、名称、值即可；
 没有异常就如实说没发现。
-改已保存数据（写面）只能按上面「准备 → 用户确认 → 提交」两步走，凭据由确认流程按会话带上，
+改已保存数据（写面）只能按上面「准备 → 用户确认 → 提交」两步走，确认信息由确认流程按会话带上，
 不要自己拼。查询是只读，不要为了"核对"走写面。
