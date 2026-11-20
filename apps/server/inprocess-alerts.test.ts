@@ -265,6 +265,85 @@ describe('进程内告警引擎', () => {
       engine.close();
     }
   });
+
+  // ── message_stuck（2026-11-21 接进）：消息卡住的账必须能被看到 ─────────────────
+
+  /** message_still_processing 事件（真生产者形状：server.ts 的入站跨重投分支只记身份事实）。 */
+  function stillProcessingEvent(messageId: string): Record<string, unknown> {
+    return {
+      event: 'message_still_processing',
+      principalId: 'wecom:owner',
+      sessionId: 'wecom:conv-owner',
+      speakerId: 'owner',
+      messageId,
+    };
+  }
+
+  it('5b. 注入 message_still_processing 事件 → message_stuck 告警一条（含 messageId 与 principal/session，不含消息正文）+ 推送', async () => {
+    const dir = tempDir();
+    const timers = fakeTimers();
+    const push = fakePush();
+    const logs: Array<Record<string, unknown>> = [];
+    const engine = makeEngine(dir, { timers, push, logs });
+    try {
+      engine.observe(stillProcessingEvent('msg-stuck-1'));
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const lines = readLines(path.join(dir, 'alerts.jsonl'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatchObject({
+        v: 1,
+        rule: 'message_stuck',
+        severity: 'critical',
+        // 去重主体 = 底账同键 (principal, session, messageId)：同一卡住消息在冷却内不重复。
+        subject: 'message:wecom:owner:wecom:conv-owner:msg-stuck-1',
+      });
+      const summary = String(lines[0]!['summary']);
+      // 守卫（2026-11-21）：告警必须含 messageId 与 principal/session——回溯键齐全。
+      expect(summary).toContain('msg-stuck-1');
+      expect(summary).toContain('wecom:owner');
+      expect(summary).toContain('wecom:conv-owner');
+      // **不含消息正文**：事件与告警只搬身份事实（server 的事件形状就不带正文）。
+      expect(String(lines[0]!['raw'])).not.toContain('还在办');
+      expect(String(lines[0]!['raw'])).not.toContain('请帮我');
+      // 推送出口照常发起。
+      expect(push.pushed).toHaveLength(1);
+      expect(push.pushed[0]).toContain('message_stuck');
+      expect(logs.some((line) => line['event'] === 'alert_persisted')).toBe(true);
+    } finally {
+      engine.close();
+    }
+  });
+
+  it('5c. 同一条卡住消息在冷却窗口内再次注入 → 不推、不重写行（另一条消息照常告警）', async () => {
+    const dir = tempDir();
+    const timers = fakeTimers();
+    const push = fakePush();
+    const engine = makeEngine(dir, { timers, push });
+    try {
+      engine.observe(stillProcessingEvent('msg-cool-1'));
+      await Promise.resolve();
+      await Promise.resolve();
+      engine.observe(stillProcessingEvent('msg-cool-1'));
+      await Promise.resolve();
+      await Promise.resolve();
+      // 同一条件（同 messageId）冷却内不重复。
+      expect(readLines(path.join(dir, 'alerts.jsonl'))).toHaveLength(1);
+      expect(push.pushed).toHaveLength(1);
+      const state = readAlertsState(path.join(dir, 'alerts-state.json'));
+      expect(Object.keys(state.cooldown)).toEqual(['message_stuck\u0000message:wecom:owner:wecom:conv-owner:msg-cool-1']);
+      // 另一条消息是新条件：照常告警（冷却键按消息，不按规则全局吞）。
+      engine.observe(stillProcessingEvent('msg-cool-2'));
+      await Promise.resolve();
+      await Promise.resolve();
+      const lines = readLines(path.join(dir, 'alerts.jsonl'));
+      expect(lines).toHaveLength(2);
+      expect(lines[1]!['subject']).toBe('message:wecom:owner:wecom:conv-owner:msg-cool-2');
+    } finally {
+      engine.close();
+    }
+  });
 });
 
 /** 往底账写 5 条同任务执行事实（retry_storm 阈值）：用 core 的只写引擎，与生产同库同 schema。 */

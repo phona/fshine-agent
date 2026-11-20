@@ -11,7 +11,7 @@
  * 日志字节偏移 / 事件 id）+ `raw`。这是本模块的硬不变量：构造告警时只搬运原文，绝不改写、
  * 绝不裁剪（见 alert-rules.test.ts 的「证据含原文」用例与反向绊线）。
  *
- * 四条规则（阈值与判据集中在此，脚本与文档只引用，不另立口径）：
+ * 五条规则（阈值与判据集中在此，脚本与文档只引用，不另立口径）：
  *   · host_fault_reported —— 出现我方故障（执行失败分类为 host_fault、协议违约、确认句柄
  *     丢失等）≥1；
  *   · retry_storm         —— 同一任务执行事实 ≥5 条，或同一 (operation, 错误码) 在同一任务
@@ -21,19 +21,24 @@
  *     `task_result_delivery_failed`、通知投递终局 `notification_delivery_terminal` 的
  *     `exhausted`、长活提醒 `task_long_running_notice` 的 `failed`、**live 部署上的终态跳过**
  *     （`skipped` + `deliveryMode=live` = 渠道配置/路由配错，用户彻底收不到）；
- *     silent/unavailable 上的 skipped 是部署属性，不告警）。
+ *     silent/unavailable 上的 skipped 是部署属性，不告警）；
+ *   · message_stuck       —— 入站消息跨重启幂等的「上一进程认领后挂掉、本进程无在途」
+ *     （`message_still_processing` 事件，2026-11-20）≥1：用户已被如实告知「还在办，办完会
+ *     发你，不用再发一遍」，但上一进程已死——这句话永远兑现不了，且用户不会再来问
+ *     （最该死的静默丢交办，2026-11-21 接进进程内告警：这类卡住的账必须能被看到）。
  *
  * 去重：同一 `(rule, subject)` 在冷却窗口（缺省 30 分钟）内只出一次；冷却状态是可 JSON
  * 序列化的纯数据（`.runtime/ops/alerts-state.json` 持久化的正是它）。时间只从注入的 `now`
  * 取——绝不调用 Date.now()，保证「同样输入 + 同样 now」得到同样输出。
  */
 
-/** 四条规则的身份。 */
+/** 五条规则的身份。 */
 export type AlertRule =
   | 'host_fault_reported'
   | 'retry_storm'
   | 'task_stuck'
-  | 'delivery_failed';
+  | 'delivery_failed'
+  | 'message_stuck';
 
 /** 告警严重度（三条规则里我方故障与投递失败是对用户的直接伤害，判 higher）。 */
 export type AlertSeverity = 'critical' | 'warning' | 'info';
@@ -44,6 +49,8 @@ export const ALERT_SEVERITY: Readonly<Record<AlertRule, AlertSeverity>> = {
   delivery_failed: 'critical',
   retry_storm: 'warning',
   task_stuck: 'warning',
+  // 用户被承诺「办完会发你」而上一进程已挂——不介入就永远不兑现的静默丢交办。
+  message_stuck: 'critical',
 };
 
 /** 任务 `running` 超过该时长无事件即判卡住（缺省 10 分钟）。 */
@@ -61,6 +68,8 @@ export const DEFAULT_COOLDOWN_MS = 30 * 60 * 1000;
 export const EXECUTION_FACT_EVENT = 'execution';
 /** task_stuck 依赖的任务状态投影事件名。 */
 export const TASK_STATE_EVENT = 'task_state';
+/** message_stuck 判据的事件名（server：上一进程认领后挂掉、本进程无在途的跨重投）。 */
+export const MESSAGE_STUCK_EVENT = 'message_still_processing';
 
 /** 触发 host_fault_reported 的错误码集合（确认句柄丢失 / 协议违约）。 */
 export const HOST_FAULT_ERROR_CODES: readonly string[] = [
@@ -434,6 +443,42 @@ function deliveryFailedCandidates(facts: readonly AlertFact[]): Candidate[] {
   return out;
 }
 
+/** message_stuck 的去重主体：一条卡住的消息 = (principal, session, messageId)（底账同键）。 */
+function messageStuckSubjectOf(fact: AlertFact): string {
+  const parts = [fact.principalId, fact.sessionId, fact.messageId]
+    .filter((part) => part !== undefined && part !== '');
+  return parts.length > 0 ? `message:${parts.join(':')}` : `event:${fact.event}`;
+}
+
+/**
+ * message_stuck 候选：一条 `message_still_processing` 事件即一条候选（阈值 ≥1，与事件驱动
+ * 规则同口径）。摘要带 messageId 与 principal/session（回溯键），**不带消息正文**——事件
+ * 本身就不含正文（server 只记身份事实），raw=原事件行，搬运不改写。
+ */
+function messageStuckCandidates(facts: readonly AlertFact[]): Candidate[] {
+  const out: Candidate[] = [];
+  const bySubject = new Map<string, AlertFact[]>();
+  for (const fact of facts) {
+    if (fact.event !== MESSAGE_STUCK_EVENT) continue;
+    const subject = messageStuckSubjectOf(fact);
+    const bucket = bySubject.get(subject);
+    if (bucket === undefined) bySubject.set(subject, [fact]);
+    else bucket.push(fact);
+  }
+  for (const [subject, bucket] of bySubject) {
+    const first = bucket[0]!;
+    out.push({
+      rule: 'message_stuck',
+      subject,
+      evidenceRef: evidenceRefOf(first),
+      summary: `消息卡住：message ${first.messageId ?? '未知'} 在上一进程认领后未落定（本进程无在途），`
+        + `归属 ${first.principalId ?? '?'}/${first.sessionId ?? '?'}`,
+      raw: joinRaws(bucket),
+    });
+  }
+  return out;
+}
+
 /** 全部候选（无冷却）。顺序稳定：规则固定序 → subject 字典序。 */
 function allCandidates(facts: readonly AlertFact[], nowMs: number): Candidate[] {
   const candidates: Candidate[] = [
@@ -441,6 +486,7 @@ function allCandidates(facts: readonly AlertFact[], nowMs: number): Candidate[] 
     ...retryStormCandidates(facts),
     ...taskStuckCandidates(facts, nowMs),
     ...deliveryFailedCandidates(facts),
+    ...messageStuckCandidates(facts),
   ];
   return candidates.sort((a, b) => {
     if (a.rule !== b.rule) return a.rule < b.rule ? -1 : 1;

@@ -14,7 +14,8 @@
  *     并 evaluateAlerts —— **不读自己的日志文件**（进程外脚本才需要绕这一圈）。
  *     覆盖：host_fault_reported（host_fault / 协议违约 / 确认句柄丢失 / 装配缺陷事件）、
  *     delivery_failed（task_result_delivery_failed / notification_delivery_terminal=exhausted /
- *     task_long_running_notice=failed / file_delivery 非 sent）。
+ *     task_long_running_notice=failed / file_delivery 非 sent）、
+ *     message_stuck（message_still_processing：上一进程认领后挂掉的消息，2026-11-21 接进）。
  *   · **聚合低频扫描**：retry_storm / task_stuck 需要时间窗与底账聚合，挂一个低频扫描，
  *     复用 task-runner 的单定时器模式（setTimeout 链、非 setInterval），频率用模块常量
  *     （SCAN_INTERVAL_MS = 5 分钟，**不加配置键**；测试注入短周期 / 可注入时钟 now）。
@@ -82,7 +83,7 @@ export interface InprocessAlerts {
   close(): void;
 }
 
-/** 会进告警面的结构化事件（host_fault / delivery_failed 两规则的来源）。 */
+/** 会进告警面的结构化事件（host_fault / delivery_failed / message_stuck 规则的来源）。 */
 const EVENT_DRIVEN_EVENTS: ReadonlySet<string> = new Set([
   'host_fault',
   'execution_accepted_undeclared',
@@ -91,6 +92,10 @@ const EVENT_DRIVEN_EVENTS: ReadonlySet<string> = new Set([
   'notification_delivery_terminal',
   'task_long_running_notice',
   'file_delivery',
+  // 消息卡住的账必须能被看到（2026-11-21）：上一进程认领后挂掉、本进程无在途——用户已被
+  // 告知「还在办，不用再发一遍」，这句话永远不兑现且没人会再来问。message_stuck 规则判据
+  // 在 alert-rules.ts（五条规则单源）；沿用既有阈值（≥1）/冷却/双出口，不新开机制。
+  'message_still_processing',
 ]);
 
 /**
