@@ -87,6 +87,22 @@ export interface WakeResult {
   text?: string;
 }
 
+/**
+ * 唤醒回合的**只读工具面**（B 类最小可信边界）：
+ *   · `names` = 宿主装配层允许在唤醒回合保留的宿主工具原始名（如 task_status/task_result）；
+ *     驱动只按名字机械激活，不认识业务语义，也不自动放行任何执行类工具；
+ *   · `exec` = 只受理 `names` 内工具的只读执行闭包（注册表读），其余必须拒绝——不得触执行层。
+ *
+ * 为什么由调用方传入而不是驱动内建：业务工具名与只读执行语义归执行层（宿主不复制业务规则），
+ * 驱动只负责「按名字激活 + 按名字路由 + 拒绝集合外调用」这件确定性事实。
+ */
+export interface WakeToolFace {
+  /** 唤醒回合允许保留的宿主工具原始名（其余一律不激活、不执行）。 */
+  names: readonly string[];
+  /** 只读执行面：只受理 names 内的工具；其余必须拒绝，不得触执行层。 */
+  exec: (tool: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
+}
+
 export interface PiSessionInspection {
   /** Pi 实际对模型使用的系统提示（受控 ResourceLoader + Pi 原生渲染）。 */
   systemPrompt: string;
@@ -104,9 +120,11 @@ export interface TurnDriver {
    * 事实由调用方拼装（模型可见；不含句柄/内部码/执行层原文以外的内部标识）；
    * 用户看到的正文由模型写，本入口只负责取回它。
    * `options.deadline` = 本回合绝对截止（缺省不设界）——超时中止本回合，按 failed 出口。
+   * `options.toolFace` = 唤醒回合保留的只读工具面（缺省 = 零工具，旧行为）。调用方按名字
+   * 授予只读工具与其只读执行闭包；驱动按名字机械激活、拒绝集合外调用。
    * 缺省（未实现）= 调用方按 unavailable 处置。
    */
-  wake?(factText: string, options?: { deadline?: number }): Promise<WakeResult>;
+  wake?(factText: string, options?: { deadline?: number; toolFace?: WakeToolFace }): Promise<WakeResult>;
   /**
    * 只读派生：驱动持有的 Pi 会话当前转录投影（宿主 `Session.transcript()` 直接委托它）。
    * 无此方法的测试替身由调用方回落到上一回合结果快照。

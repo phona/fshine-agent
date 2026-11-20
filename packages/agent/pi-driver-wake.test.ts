@@ -53,6 +53,27 @@ const PROBE: DiscoveredTool = {
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
 };
 
+/** 唤醒回合只读工具面用例：只读任务工具 + 一个执行类工具（执行类必须不可见）。 */
+const TASK_STATUS_TOOL: DiscoveredTool = {
+  name: 'task_status',
+  description: '（测试）查询任务状态',
+  inputSchema: { type: 'object', properties: { ref: { type: 'string' } }, additionalProperties: false },
+};
+const TASK_RESULT_TOOL: DiscoveredTool = {
+  name: 'task_result',
+  description: '（测试）取回任务结果',
+  inputSchema: { type: 'object', properties: { ref: { type: 'string' } }, required: ['ref'], additionalProperties: false },
+};
+const EXEC_OPERATION_TOOL: DiscoveredTool = {
+  name: 'execute_operation',
+  description: '（测试）执行操作（执行类，唤醒回合必须不可见）',
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+};
+const ALL_TOOLS = [PROBE, TASK_STATUS_TOOL, TASK_RESULT_TOOL, EXEC_OPERATION_TOOL];
+const READ_NAMES = ['task_status', 'task_result'];
+/** 假 ledger：verify 真调用拿到的是真实底账结果（不是"工具不存在"回执）。 */
+const FAKE_LEDGER = { tasks: [{ taskNo: 1, name: '汇总那件事', status: 'completed' }] };
+
 const FACT = '[任务完成]「汇总那件事」办完了。结果正文（逐字）：共 7 条。请把这件事告诉用户。';
 
 function turnInput(messages: AgentMessage[], overrides: Partial<TurnDriverInput> = {}): TurnDriverInput {
@@ -128,6 +149,57 @@ async function driverWith(responses: ReadonlyArray<AgentMessage | ((context: { m
     reuseConversation: true,
   });
   return { driver, requests, scripted };
+}
+
+/**
+ * 唤醒只读工具面用例的装配：首回合带全量工具（含执行类），wake 授予 {task_status,task_result}
+ * 只读面。捕获请求的工具声明、exec 调用与只读 exec 的返回。
+ */
+async function driverWithWakeFace(
+  script: ReadonlyArray<AgentMessage | ((context: { messages: readonly unknown[] }) => AgentMessage)>,
+  options: { readExec?: (tool: string, args: Record<string, unknown>) => Promise<unknown> } = {},
+) {
+  const requests: Array<{ messages: readonly unknown[]; toolNames: string[] }> = [];
+  const execCalls: string[] = [];
+  let index = 0;
+  const scripted = await createScriptedModelRuntime({
+    contextWindow: 40_000,
+    script: (_callIndex, context) => {
+      requests.push({ messages: context.messages, toolNames: declaredToolNames(context.messages) });
+      const slot = script[index];
+      index += 1;
+      if (slot === undefined) return undefined;
+      return typeof slot === 'function' ? slot(context) : slot;
+    },
+  });
+  const driver = createPiTurnDriver({
+    env: { LLM_MODEL: 'test-model' },
+    modelRuntime: scripted.runtime,
+    reuseConversation: true,
+  });
+  const toolFace = {
+    names: READ_NAMES,
+    exec: async (tool: string, args: Record<string, unknown>) => {
+      execCalls.push(tool);
+      // 镜像生产只读闭包（execution-runtime.wake 的 toolFace.exec）：集合外工具确定性拒绝。
+      if (!READ_NAMES.includes(tool)) throw new Error(`唤醒回合不允许调用工具：${tool}`);
+      if (options.readExec !== undefined) return options.readExec(tool, args);
+      return FAKE_LEDGER;
+    },
+  };
+  return { driver, requests, execCalls, toolFace };
+}
+
+/** 工具的 text 结果（Pi 工具回执 content[].text）。 */
+function toolResultText(messages: readonly unknown[], name: string): string | undefined {
+  for (const message of messages) {
+    const record = message as { role?: string; toolName?: string; content?: unknown };
+    if (record.role !== 'toolResult' || record.toolName !== name) continue;
+    if (Array.isArray(record.content)) {
+      return record.content.map((block) => String((block as { text?: unknown }).text ?? '')).join('');
+    }
+  }
+  return undefined;
 }
 
 describe('唤醒入口（driver 侧，脚本化模型）', () => {
@@ -339,6 +411,155 @@ describe('唤醒入口（driver 侧，脚本化模型）', () => {
       await driver.run(turnInput([user('问一句。')]));
       const woke = await driver.wake!(FACT);
       expect(woke).toEqual({ outcome: 'unavailable' });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // ── 唤醒回合只读工具面（DSML 泄漏根因修复）五条用例 ──────────────────────────
+
+  it('【请求面】唤醒回合声明只读任务工具集（task_status/task_result），不含执行类工具', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { driver, requests, toolFace } = await driverWithWakeFace([
+        textAssistant('先办的事：A 完成。'),
+        textAssistant('你交办的那件事办完了。'),
+      ]);
+      await driver.run(turnInput([user('先办一件小事。')], { tools: ALL_TOOLS }));
+      const woke = await driver.wake!(FACT, { toolFace });
+      expect(woke.outcome).toBe('woken');
+      const wakeToolNames = requests.at(-1)!.toolNames;
+      // 断言名字集合恰好是只读任务工具（不是全量，也不是零）。
+      expect([...wakeToolNames].sort()).toEqual([...READ_NAMES].sort());
+      // 执行类工具一律不可见。
+      expect(wakeToolNames).not.toContain('execute_operation');
+      expect(wakeToolNames).not.toContain('probe');
+      // 反向绊线（实测）：把实现改回零工具（session.setActiveToolsByName([])）→ 这里拿到 []，
+      // 期望 ['task_status','task_result'] → 红。
+      driver.close?.();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('【真调用】唤醒回合调 task_status 拿到真实 ledger 结果，最终正文是模型的话', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { driver, requests, execCalls, toolFace } = await driverWithWakeFace([
+        textAssistant('先办的事：A 完成。'),
+        toolCallAssistant('task_status', 'call-status'),
+        textAssistant('我查了一下底账：你交办的那件事确实办完了，共 7 条。'),
+      ]);
+      await driver.run(turnInput([user('先办一件小事。')], { tools: ALL_TOOLS }));
+      const woke = await driver.wake!(FACT, { toolFace });
+      expect(execCalls, 'task_status 必须真走到只读执行面').toContain('task_status');
+      // 工具回执里有真实 ledger 结果（不是"工具不存在"的内部话术）。
+      const followUpRequest = requests.at(-1)!;
+      const ledgerText = toolResultText(followUpRequest.messages, 'task_status');
+      expect(ledgerText, '工具结果必须是真实 ledger 数据').toContain('汇总那件事');
+      expect(ledgerText).toContain('completed');
+      // 最终正文是模型的话（不是工具回执、不是 DSML）。
+      expect(woke.outcome).toBe('woken');
+      expect(woke.text).toBe('我查了一下底账：你交办的那件事确实办完了，共 7 条。');
+      driver.close?.();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('【执行面隔离】唤醒回合硬发 execute_operation → 工具不存在、执行层零调用', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { driver, requests, execCalls, toolFace } = await driverWithWakeFace([
+        textAssistant('先办的事：A 完成。'),
+        // 唤醒回合：脚本模型硬发执行类工具调用（真实模型不会——执行类不在声明面里）。
+        toolCallAssistant('execute_operation', 'call-exec'),
+        assistant([]),
+      ]);
+      await driver.run(turnInput([user('先办一件小事。')], { tools: ALL_TOOLS }));
+      const woke = await driver.wake!(FACT, { deadline: Date.now() + 30_000, toolFace });
+      expect(woke.outcome).toBe('failed');
+      // 执行类工具不在声明面；硬发匹配不到工具 → 到不了执行闭包 → exec 面零调用。
+      expect(requests.at(-1)!.toolNames).not.toContain('execute_operation');
+      expect(execCalls, '执行类工具不得触达只读执行面').toEqual([]);
+      // 只读执行闭包自身也拒绝集合外工具（第二道闸）。
+      await expect(toolFace.exec('execute_operation', {})).rejects.toThrow('唤醒回合不允许调用工具');
+      driver.close?.();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('【不回归】唤醒回合之后的用户回合：工具面恢复全量（含执行类），执行面照常工作', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      let normalExecCalls = 0;
+      const requests: string[][] = [];
+      let index = 0;
+      const script: AgentMessage[] = [
+        textAssistant('第一回合答复。'),
+        textAssistant('办好了：共 7 条。'),
+        toolCallAssistant('probe', 'call-probe'),
+        textAssistant('第二回合答复。'),
+      ];
+      const scripted = await createScriptedModelRuntime({
+        contextWindow: 40_000,
+        script: (_callIndex, context) => {
+          requests.push(declaredToolNames(context.messages));
+          return script[index++];
+        },
+      });
+      const driver = createPiTurnDriver({
+        env: { LLM_MODEL: 'test-model' },
+        modelRuntime: scripted.runtime,
+        reuseConversation: true,
+      });
+      const toolFace = { names: READ_NAMES, exec: async () => FAKE_LEDGER };
+      await driver.run(turnInput([user('第一问。')], { tools: ALL_TOOLS }));
+      expect([...requests.at(-1)!].sort()).toEqual(['execute_operation', 'probe', 'task_result', 'task_status']);
+      await driver.wake!(FACT, { toolFace });
+      expect([...requests.at(-1)!].sort()).toEqual([...READ_NAMES].sort());
+      const second = await driver.run(turnInput([user('第二问。')], {
+        tools: ALL_TOOLS,
+        exec: async () => { normalExecCalls += 1; return { ok: true }; },
+      }));
+      expect([...requests.at(-1)!].sort()).toEqual(['execute_operation', 'probe', 'task_result', 'task_status']);
+      expect(second.text).toBe('第二回合答复。');
+      expect(normalExecCalls, '正常用户回合的执行面不受影响').toBe(1);
+      driver.close?.();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('【DSML 形状】唤醒回合想调工具时，用户可见面不出现 DSML/<invoke/parameter name= 形状', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { driver, requests, execCalls, toolFace } = await driverWithWakeFace([
+        textAssistant('先办的事：A 完成。'),
+        toolCallAssistant('task_status', 'call-status'),
+        textAssistant('我查过了，那件事办完了，共 7 条。'),
+      ]);
+      await driver.run(turnInput([user('先办一件小事。')], { tools: ALL_TOOLS }));
+      const woke = await driver.wake!(FACT, { toolFace });
+      expect(woke.outcome).toBe('woken');
+      // 根因修复的直接证据：想核实状态 → 走真实工具调用（不是把 DSML 写进正文）。
+      expect(execCalls, '必须通过真实工具调用查询，而不是吐 DSML 文本').toContain('task_status');
+      const forbidden = ['DSML', '<invoke', 'parameter name='];
+      // 用户可见面 = 投递正文 + 转录里所有 assistant 文本。
+      const visibleTexts = [woke.text ?? ''];
+      for (const message of driver.transcript!()) {
+        const record = message as { role?: string; content?: unknown };
+        if (record.role !== 'assistant' || !Array.isArray(record.content)) continue;
+        visibleTexts.push(record.content.map((block) => String((block as { text?: unknown }).text ?? '')).join(''));
+      }
+      const joined = visibleTexts.join('\n');
+      for (const token of forbidden) {
+        expect(joined, `用户可见面不得出现 ${token}`).not.toContain(token);
+      }
+      // 反向绊线：若改回零工具、模型把 DSML 当正文，execCalls 不再含 task_status → 本用例红。
+      expect(requests.at(-1)!.toolNames).toContain('task_status');
+      driver.close?.();
     } finally {
       warn.mockRestore();
     }

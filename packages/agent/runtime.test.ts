@@ -24,7 +24,7 @@ import type {
 import { createPiTurnDriver } from './src/pi-driver';
 import { createScriptedModelRuntime } from './testing/scripted-model-runtime';
 import { WAKE_TURN_MS, createSession } from './src/execution-runtime';
-import type { TurnDriver, WakeResult } from './src/driver-contract';
+import type { TurnDriver, WakeResult, WakeToolFace } from './src/driver-contract';
 import { TaskOwnershipError, createTaskRegistry, type TaskRegistry } from './src/task-registry';
 import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
 
@@ -440,6 +440,48 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
 });
 
 describe('唤醒回合的界（2026-11-19 复核 F1）', () => {
+  it('wake 授予只读工具面（task_status/task_result）：exec 读真实底账，执行层零调用；执行类工具被拒', async () => {
+    const scope = { principalId: 'wecom:test-user', sessionId: 'sess_wake_face' };
+    const registry = createTaskRegistry();
+    registry.begin({ taskId: 'task_wake_face', ...scope, request: '汇总那件事' });
+    registry.complete('task_wake_face', '共 7 条，已确认无误。');
+
+    const client = new FakeClient();
+
+    let seenToolFace: WakeToolFace | undefined;
+    const capture: TurnDriver = {
+      async run() { throw new Error('（测试）唤醒用例不应起业务回合'); },
+      async wake(_factText: string, options?: { deadline?: number; toolFace?: WakeToolFace }): Promise<WakeResult> {
+        seenToolFace = options?.toolFace;
+        return { outcome: 'woken', text: '那件事办完了，共 7 条。' };
+      },
+    };
+    const session = await createSession({
+      ...scope,
+      client,
+      allowedOperations: ['dummy.query'],
+      mainDriver: capture,
+      workerDriver: capture,
+      mainSystemPrompt: '你是测试主 Agent。',
+      taskRegistry: registry,
+    });
+
+    const woke = await session.wake('[任务完成]「汇总那件事」办完了。');
+    expect(woke.outcome).toBe('woken');
+    // 请求面：只读工具集（名字集合恰好 task_status/task_result，且不含执行类）。
+    expect(seenToolFace).toBeDefined();
+    expect([...seenToolFace!.names].sort()).toEqual(['task_result', 'task_status']);
+    // 只读执行面：task_status 读真实底账（拿到刚建的任务），task_result 拿结果存档。
+    const status = await seenToolFace!.exec('task_status', {}) as { tasks: Array<{ name: string }> };
+    expect(status.tasks[0]!.name, 'task_status 读到真实底账').toBe('汇总那件事');
+    const result = await seenToolFace!.exec('task_result', { ref: '#1' }) as { resultText: string | null };
+    expect(result.resultText, 'task_result 读到真实结果存档').toBe('共 7 条，已确认无误。');
+    // 执行类工具（含集合外任何名字）被只读闭包确定性拒绝，执行层零调用。
+    await expect(seenToolFace!.exec('execute_operation', {})).rejects.toThrow('唤醒回合不允许调用工具');
+    await expect(seenToolFace!.exec('task_run', {})).rejects.toThrow('唤醒回合不允许调用工具');
+    expect(client.requests, '只读工具面不得触执行层').toHaveLength(0);
+  });
+
   it('Session.wake 传给驱动的截止 = 单次调用量级（WAKE_TURN_MS），不是业务回合的 mainTurnMs(300s)', async () => {
     let observedDeadline: number | undefined;
     const fakeMain: TurnDriver = {

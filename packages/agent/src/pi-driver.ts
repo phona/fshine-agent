@@ -31,7 +31,7 @@ import type { AgentMessage, AgentToolResult } from '@earendil-works/pi-agent-cor
 import type { Model } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import type { DiscoveredTool } from '@fshine/contracts';
-import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult, type WakeResult } from './driver-contract';
+import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult, type WakeResult, type WakeToolFace } from './driver-contract';
 import { archiveCompactedSessionFile } from './session-persistence';
 import { renderToolStepText } from './step-text';
 
@@ -371,6 +371,8 @@ interface Conversation {
   sessionManager: SessionManager;
   systemPrompt: string;
   toolNames: string;
+  /** 宿主工具名 → provider 工具名（唤醒回合按名字筛只读工具时用；不携带业务语义）。 */
+  providerNames: Map<string, string>;
   contextWindow: number;
   /** 回合归因槽：事件 listener 只随会话注册一次，每回合指向本回合的计数/失败。 */
   slot: { current: TurnSlot | undefined };
@@ -582,6 +584,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
       sessionManager,
       systemPrompt: input.systemPrompt,
       toolNames: toolDefinitions.map((tool) => tool.name).join(','),
+      providerNames: input.providerNames,
       contextWindow: model.contextWindow,
       slot,
       lastProjection: projectSession(session),
@@ -788,11 +791,15 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
      * 唤醒入口（会话状态变化 → 模型把话带给用户；形状见 driver-contract 的 WakeResult）。
      * 事实经 Pi 原生 custom message 注入（display=false；projectSession 投影成 user）——
      * 与既有 injections 同一形状，区别只在会话空闲时 `triggerTurn: true` 触发一个回合。
-     * 苏醒回合**没有工具**：按 Pi 原生 `setActiveToolsByName` 清空本回合工具声明（回合收尾
-     * 恢复）——模型不存在调用工具的路径，执行层零接触、也没有内部拒绝话术进上下文。
+     * 唤醒回合的工具面 = 调用方授予的**只读任务工具子集**（task_status/task_result 这类只读底账
+     * 查询），不是全量、也不是零；`options.toolFace` 缺省 = 零工具（旧行为）。只读工具经 Pi 原生
+     * `setActiveToolsByName` 按回合激活（回合收尾恢复），配一条**只读执行闭包**——只受理 names
+     * 内工具，其余（含所有执行类工具）确定性拒绝、执行层零接触。这条修法针对 live 实测：
+     * 模型在唤醒回合想核实任务状态却无工具可调，把原生 DSML 标记当正文吐给用户；给它真能跑的
+     * 只读工具后，查询走工具调用，最终正文仍是模型的话。60s 界由 deadline 兜底（反复调用不挂死）。
      * 会话忙时事实按 `followUp` 入队、由当前回合负责说（本入口不取正文）。
      */
-    async wake(factText: string, wakeOptions?: { deadline?: number }): Promise<WakeResult> {
+    async wake(factText: string, wakeOptions?: { deadline?: number; toolFace?: WakeToolFace }): Promise<WakeResult> {
       if (factText.trim() === '') return { outcome: 'failed' };
       // 可唤醒的前提 = 本驱动持有实例级「睡眠中」的会话；一次性回合驱动没有可唤醒对象。
       if (!reuseConversation) return { outcome: 'unavailable' };
@@ -818,8 +825,12 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         if (abort.signal.aborted) void session.abort().catch(() => undefined);
       };
       abort.signal.addEventListener('abort', abortSession, { once: true });
-      /** 唤醒回合清掉的工具集（回合收尾恢复；清空失败/未清 = undefined）。 */
+      /**
+       * 唤醒回合改过的工具集（回合收尾恢复；未改 = undefined）。
+       */
       let clearedToolNames: string[] | undefined;
+      /** 调用方授予的只读工具面（缺省 = 零工具，旧行为逐字不变）。 */
+      const toolFace = wakeOptions?.toolFace;
       try {
         if (session.isStreaming) {
           // 会话忙：事实入队（Pi 原生 followUp），由当前回合处理；不另起回合、不由本入口取正文。
@@ -829,16 +840,36 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
           );
           return { outcome: 'busy' };
         }
-        // 唤醒回合无执行面：清掉上一回合留下的 surface 引用（工具不得借用旧回合的执行闭包）。
-        if (sessionSurface !== undefined) sessionSurface.current = undefined;
-        active.slot.current = { retryScheduled: 0, attempt: 0 };
-        // 唤醒回合**不给工具**（2026-11-19 复核 F1；一审只清执行面，模型仍可无限调工具重试，
-        // 拒绝话术还会进模型上下文）。会话工具集本可按回合切换：Pi 公开 API
-        // `setActiveToolsByName`（"Changes take effect on the next agent turn"）——清空后
-        // 本回合请求不带任何工具声明，模型不存在「调用工具」的路径；回合收尾（含失败/异常）
-        // 在 finally 恢复原工具集，后续用户回合工具面不受影响。
         clearedToolNames = session.getActiveToolNames();
-        session.setActiveToolsByName([]);
+        const activeToolNames = clearedToolNames;
+
+        // 唤醒回合的工具面 = 调用方授予的**只读工具子集**，不是全量、也不是零：
+        //   · 无 toolFace（缺省）= 零工具（旧行为逐字不变）；
+        //   · 有 toolFace = 只激活 names ∩ 本会话已声明工具，其余（含所有执行类工具）不激活。
+        // 为什么保留只读工具：live 实测——模型在唤醒回合想核实任务状态（task_status）却无工具
+        // 可调，把原生 DSML 标记当正文吐给用户。给它真能执行的只读任务工具，让查询走工具调用，
+        // 模型最终用自然语言作答（取正文口径不变）。
+        const wakeToolNames = toolFace === undefined
+          ? []
+          : [...active.providerNames.entries()]
+            // 只认本会话**已声明**的宿主工具名：调用方给集合外的名字也不激活（fail-closed）。
+            .filter(([hostName]) => toolFace.names.includes(hostName))
+            .map(([, providerName]) => providerName)
+            .filter((providerName) => activeToolNames.includes(providerName));
+        session.setActiveToolsByName(wakeToolNames);
+
+        // 执行面：有 toolFace 时接**只读闭包**（只允许 names 内的只读工具；其余确定性拒绝，
+        // 不触执行层），否则清空 surface（工具不得借用旧回合的执行闭包）。
+        if (sessionSurface !== undefined) {
+          sessionSurface.current = toolFace === undefined ? undefined : {
+            exec: (name, args, signal) => toolFace.names.includes(name)
+              ? toolFace.exec(name, args, signal)
+              : Promise.reject(new Error(`唤醒回合不允许调用工具：${name}`)),
+            onStep: () => {},
+            signal: abort.signal,
+          };
+        }
+        active.slot.current = { retryScheduled: 0, attempt: 0 };
         await session.sendCustomMessage(
           { customType: 'fshine_task_fact', content: factText, display: false },
           { triggerTurn: true },

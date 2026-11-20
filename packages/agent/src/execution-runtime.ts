@@ -3197,7 +3197,22 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   async function wake(factText: string): Promise<WakeResult> {
     const driverWake = options.mainDriver.wake;
     if (driverWake === undefined) return { outcome: 'unavailable' };
-    const result = await driverWake.call(options.mainDriver, factText, { deadline: Date.now() + WAKE_TURN_MS });
+    // 唤醒回合保留**只读任务工具**（task_status/task_result）：这两个闭包只读 registry/scope，
+    // 不触执行层（无 client.execute / 无 runner / 无预算消费）。修 live 实测的 DSML 泄漏——
+    // 模型想核实任务状态时无工具可调，就把原生工具标记当正文吐给用户。执行类工具不授予，
+    // 驱动侧按名字机械激活 + 只读闭包隔离（见 pi-driver.wake 的 toolFace）。
+    const result = await driverWake.call(options.mainDriver, factText, {
+      deadline: Date.now() + WAKE_TURN_MS,
+      toolFace: {
+        names: [TASK_STATUS_TOOL, TASK_RESULT_TOOL],
+        exec: async (tool, args, signal) => {
+          if (tool === TASK_STATUS_TOOL) return taskStatus(args);
+          if (tool === TASK_RESULT_TOOL) return taskResult(args);
+          // 集合外工具（含所有执行类）确定性拒绝，执行层零调用。
+          throw new Error(`唤醒回合不允许调用工具：${tool}`);
+        },
+      },
+    });
     if (result.outcome !== 'unavailable') return result;
     // 可唤醒但会话是冷的：补一次零工具单回合（不复用驱动侧 custom message 注入——那需要
     // 已存在的实例级会话）。
