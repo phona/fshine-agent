@@ -1129,10 +1129,12 @@ function normalizeWindowMs(value: number | undefined, fallback: number): number 
 function defaultClientFactory(env: Record<string, string | undefined>): () => SdkClientLike {
   return () => {
     // 长连接由官方 SDK 管理:认证、心跳、指数退避重连(不限次数,服务型进程要求常连)
+    // 心跳从默认 30s 缩到 15s:企微约 90s 无心跳即断开;官方社区对「连接看似正常仍偶发丢消息」的缓解手段就是把 30s 缩到 15s
     return new WSClient({
       botId: (env['WECOM_BOT_ID'] ?? '').trim(),
       secret: (env['WECOM_BOT_SECRET'] ?? '').trim(),
       maxReconnectAttempts: -1,
+      heartbeatInterval: 15000,
     }) as unknown as SdkClientLike;
   };
 }
