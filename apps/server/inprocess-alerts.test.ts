@@ -140,6 +140,46 @@ describe('进程内告警引擎', () => {
     }
   });
 
+  it('1b. 推送失败 → alert_push_failed 带路由与可读原因（失败如实记账，不吞 chatId；2026-11-21 live）', async () => {
+    // live 根因配对缺陷：告警推送 93006 invalid chatid 时日志只给「[object Object]」，
+    // 看不出打到了哪个路由、平台说了什么。现在失败行必须带 route 与平台原始信息。
+    const dir = tempDir();
+    const timers = fakeTimers();
+    const logs: Array<Record<string, unknown>> = [];
+    const failingPort = {
+      async sendText(_route: ChannelRoute, _text: string) {
+        // 真实 SDK 形状：reject 的是普通对象（errcode/errmsg），不是 Error。
+        throw { errcode: 93006, errmsg: 'invalid chatid' };
+      },
+    };
+    const engine = createInprocessAlerts({
+      opsDir: dir,
+      dbPath: path.join(dir, 'state.db'),
+      scanIntervalMs: SCAN_INTERVAL_MS,
+      timers,
+      now: () => new Date(NOW_MS),
+      log: (line) => logs.push(line),
+      ownerRoute: OWNER,
+      pushPort: { sendText: failingPort.sendText },
+    });
+    try {
+      engine.observe(hostFaultEvent('task-push-fail'));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const failed = logs.find((line) => line['event'] === 'alert_push_failed');
+      expect(failed).toBeDefined();
+      expect(failed!['route']).toEqual(OWNER);
+      const reason = String(failed!['reason']);
+      expect(reason).toContain('93006');
+      expect(reason).toContain('invalid chatid');
+      expect(reason).not.toContain('[object Object]');
+    } finally {
+      engine.close();
+    }
+  });
+
   it('2. 同 subject 冷却窗口内第二次 → 不推、不重写行', async () => {
     const dir = tempDir();
     const timers = fakeTimers();

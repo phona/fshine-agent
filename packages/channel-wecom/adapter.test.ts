@@ -118,14 +118,22 @@ class FakeSdkClient {
   /** 主动消息通道（终帧拒收降级用）：默认成功并记录；测试可用 failNextSend 注入失败。 */
   readonly sentMessages: Array<{ chatid: string; content: string }> = [];
   private sendFailNext = false;
+  private sendFailCause: unknown = new Error('send boom');
   sendMessage(chatid: string, body: { msgtype: 'markdown'; markdown: { content: string } }): Promise<unknown> {
     this.sentMessages.push({ chatid, content: body.markdown.content });
-    if (this.sendFailNext) return Promise.reject(new Error('send boom'));
+    if (this.sendFailNext) return Promise.reject(this.sendFailCause);
     return Promise.resolve({});
   }
 
   failNextSend(): void {
     this.sendFailNext = true;
+    this.sendFailCause = new Error('send boom');
+  }
+
+  /** 注入**任意形状**的拒收原因（真实 SDK 的 ack error 是普通对象 {errcode,errmsg}，不是 Error）。 */
+  failNextSendWith(cause: unknown): void {
+    this.sendFailNext = true;
+    this.sendFailCause = cause;
   }
 
   sendMediaMessage(chatid: string, mediaType: 'file', mediaId: string): Promise<unknown> {
@@ -682,6 +690,28 @@ describe('WecomBotChannel 独立主动交付', () => {
       receipt: { route, parts: [] },
     });
     expect(fake.sentMessages).toHaveLength(1);
+  });
+
+  it('主动文字发送失败且 SDK 拒收原因是普通对象（errcode/errmsg）→ 错误消息如实携带平台信息，不是 [object Object]', async () => {
+    // 2026-11-21 live P1：告警推送 93006 invalid chatid 时日志只见「[object Object]」——
+    // 平台说了什么、哪个 chatid 被拒都看不到。拒收原因是普通对象时必须 JSON 化进 detail。
+    const { channel, fake } = await startChannel(async () => 'ok');
+    const route: ChannelRoute = { channel: 'wecom', conversationId: 'e2e_user' };
+    fake.failNextSendWith({ errcode: 93006, errmsg: 'invalid chatid' });
+
+    const error = await sendToConversation(channel, route, { text: '告警' }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(error).toMatchObject({
+      code: 'CHANNEL_TRANSPORT_FAILED',
+      route,
+      failedPart: { kind: 'text', index: 0, stage: 'send' },
+    });
+    const message = (error as Error).message;
+    expect(message).toContain('93006');
+    expect(message).toContain('invalid chatid');
+    expect(message).not.toContain('[object Object]');
   });
 
   it('主动素材上传失败时报告 upload 阶段及之前已 ACK 部分', async () => {

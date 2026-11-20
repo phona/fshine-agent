@@ -21,6 +21,7 @@ import type {
   PrincipalConfig,
   RoleConfig,
   RuntimeConfig,
+  AlertConfig,
   StoreConfig,
   WecomConfig,
 } from '@fshine/contracts';
@@ -261,6 +262,23 @@ function parseExecution(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): E
 function parseStore(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): StoreConfig | undefined {
   const dbPath = pickString(env, 'DB_PATH', raw['dbPath']);
   return dbPath === undefined ? undefined : { dbPath };
+}
+
+/**
+ * ops 告警推送（yaml `alerts` 段；2026-11-21 live P1）：缺段 / 空段 = 未配置（告警只落盘
+ * 不推——owner 路由是部署事实，不允许代码从主体清单顺序猜）；`ownerPrincipalId` 键存在但
+ * 非字符串 = fail-fast（拼错的旋钮不允许被默认值吞掉，与 runtime 段同一口径）。指向的
+ * 主体是否存在/启用/单聊由装配层校验（需要 principals 全表，见 server 的
+ * resolveAlertOwnerRoute）。
+ */
+function parseAlerts(raw: Record<string, unknown>): AlertConfig | undefined {
+  if (!('ownerPrincipalId' in raw)) return undefined;
+  const value = raw['ownerPrincipalId'];
+  if (typeof value !== 'string') {
+    throw new Error(`配置项 alerts.ownerPrincipalId 必须是字符串（当前: ${JSON.stringify(value)}）`);
+  }
+  if (value.trim() === '') return undefined;
+  return { ownerPrincipalId: value };
 }
 
 const CHANNEL_MODES: readonly ChannelMode[] = ['offline', 'shadow', 'live'];
@@ -548,6 +566,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   const host = parseHost(optionalSection(root, 'host'), env);
   const execution = parseExecution(optionalSection(root, 'execution'), env);
   const store = parseStore(optionalSection(root, 'store'), env);
+  const alerts = parseAlerts(optionalSection(root, 'alerts'));
   // P5 资源段：唯一入口、无 env 覆盖口；非法值 / 未知键在这里 fail-fast。
   const runtime = parseRuntime(optionalSection(root, 'runtime'));
 
@@ -568,6 +587,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     ...(runtime ? { runtime } : {}),
     ...(execution ? { execution } : {}),
     ...(store ? { store } : {}),
+    ...(alerts ? { alerts } : {}),
   };
 }
 

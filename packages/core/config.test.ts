@@ -488,6 +488,27 @@ runtime:
     expect(deploymentEnvOf(config)).toEqual({});
   });
 
+  it('alerts 段（2026-11-21 live P1）：ownerPrincipalId yaml 是源；缺段 = 未配置；非字符串 fail-fast', () => {
+    const withOwner = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}alerts:\n  ownerPrincipalId: wecom:real-user\n`),
+      env: {},
+    });
+    expect(withOwner.alerts).toEqual({ ownerPrincipalId: 'wecom:real-user' });
+
+    // 缺段 / 空段（只有注释 → null）= 未配置：告警只落盘不推（不猜 owner 路由）。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).alerts).toBeUndefined();
+    expect(loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}alerts:\n# 只有注释 → null\n`),
+      env: {},
+    }).alerts).toBeUndefined();
+
+    // 拼错的旋钮不允许被默认值吞掉（与 runtime 段同一口径）。
+    expect(() => loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}alerts:\n  ownerPrincipalId: 42\n`),
+      env: {},
+    })).toThrow(/alerts\.ownerPrincipalId/);
+  });
+
   it('已删 host.* 死键（分诊 #6）：旧 YAML 残留被忽略，不再进 AppConfig、不再派生覆盖口', () => {
     const staleHostYaml = `principals:
   "wecom:user_a":

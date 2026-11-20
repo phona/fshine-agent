@@ -132,7 +132,12 @@ export class WecomChannelDeliveryError extends Error implements ChannelDeliveryE
     receipt: DeliveryReceipt,
     cause: unknown,
   ) {
-    const detail = cause instanceof Error ? cause.message : String(cause);
+    // detail 可读化（2026-11-21 live P1）：真实 SDK 的拒收原因是普通对象（{errcode,errmsg}），
+    // String() 会变成「[object Object]」——平台说了什么、哪个 chatid 被拒全被吞掉（live 实测
+    // 告警推送 93006 的日志只有这一句）。对象一律 JSON 化，普通值照原样。
+    const detail = cause instanceof Error
+      ? cause.message
+      : (cause !== undefined && cause !== null && typeof cause === 'object' ? JSON.stringify(cause) : String(cause));
     super(`企微主动交付失败（${failedPart.kind}[${failedPart.index}] ${failedPart.stage}）: ${detail}`);
     this.name = 'WecomChannelDeliveryError';
     this.route = { ...route };

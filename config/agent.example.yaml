@@ -107,6 +107,14 @@ llm:
 #   oversizeDataBytes: 65536
 #   # taskBudget: { ms: 600000, calls: 50 }  # 任务级共享预算(ms/calls 必填;tokens 可选)
 
+# ---- ops 告警推送(可选;2026-11-21 live P1) ----
+# owner 路由只认显式配置:必须指向 principals 里的**单聊企微主体**(wecom:<userid>)。
+# 缺省(不写 alerts 段) = 告警只落盘不推(ops/alerts 可查)——不按主体清单顺序猜
+# (live 实测:猜到评测夹具主体,告警推送恒 93006 invalid chatid,永远送不到人)。
+# 指向不存在/未启用/群主体/非企微 = 拒启(配置错误必须炸出来)。
+# alerts:
+#   ownerPrincipalId: wecom:<userid>
+
 # ---- 任务底账(可选):SQLite 路径;相对路径按进程 cwd 解析 ----
 # 缺省 = 仓根 .runtime/state.db(任务 + 执行记录两张最小表;重启后仍在)。
 # store:

@@ -296,6 +296,22 @@ export type ChannelMode = 'offline' | 'shadow' | 'live';
 /** 渠道装配缺省档位：offline（不连生产、不出站）。 */
 export const DEFAULT_CHANNEL_MODE: ChannelMode = 'offline';
 
+/**
+ * ops 告警推送配置（yaml `alerts` 段；缺段 = 只落盘不推）。
+ *
+ * 2026-11-21 live P1：owner 路由此前由装配层按 principals **配置顺序**猜第一个 enabled
+ * 单聊主体——本部署猜到评测夹具主体 `wecom:e2e_user`，告警推送（aibot_send_msg）恒
+ * 93006 invalid chatid。「告警发给谁」是部署事实，只认显式配置；缺省不推（告警照常
+ * 落盘，ops/alerts 可查），拼错主体在装配层 fail-fast。
+ */
+export interface AlertConfig {
+  /**
+   * 告警推送的 owner 主体：principals 里的**单聊企微主体**键（`wecom:<userid>`）。
+   * 未配置 = 不推送（只落盘）；指向不存在/未启用/群主体/非企微主体 = 装配时 fail-fast。
+   */
+  ownerPrincipalId?: string;
+}
+
 export interface AppConfig {
   principals: Record<string, PrincipalConfig>;
   /**
@@ -327,4 +343,6 @@ export interface AppConfig {
   store?: StoreConfig;
   /** 执行层交接配置（yaml `execution` 段；env 非空值覆盖）。 */
   execution?: ExecutionConfig;
+  /** ops 告警推送配置（yaml `alerts` 段；缺段 = 只落盘不推）。 */
+  alerts?: AlertConfig;
 }

@@ -111,6 +111,15 @@ function renderPushText(lines: readonly AlertLine[]): string {
   return `${head}\n\n${body}`;
 }
 
+/** 推送失败原因的可读化：Error 取 message；普通对象（真实 SDK 的 ack error {errcode,errmsg}）JSON 化——不许出现 [object Object]。 */
+function alertPushFailureReason(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error !== undefined && error !== null && typeof error === 'object') {
+    return JSON.stringify(error);
+  }
+  return String(error);
+}
+
 export function createInprocessAlerts(options: InprocessAlertsOptions): InprocessAlerts {
   const { opsDir, dbPath } = options;
   const now = options.now ?? (() => new Date());
@@ -143,7 +152,10 @@ export function createInprocessAlerts(options: InprocessAlertsOptions): Inproces
         (error: unknown) => log({
           event: 'alert_push_failed',
           rules: result.lines.map((line) => line.rule),
-          reason: error instanceof Error ? error.message : String(error),
+          // 失败如实记账（2026-11-21 live P1）：带路由与平台原始信息——告警送不到人时
+          // 运维要能一眼看出「打到了哪个 chatid、平台回了什么」（此前只有 [object Object]）。
+          route: { channel: route.channel, conversationId: route.conversationId },
+          reason: alertPushFailureReason(error),
           source: 'inprocess',
         }),
       );
@@ -187,7 +199,8 @@ export function createInprocessAlerts(options: InprocessAlertsOptions): Inproces
           (error: unknown) => log({
             event: 'alert_push_failed',
             rules: result.lines.map((line) => line.rule),
-            reason: error instanceof Error ? error.message : String(error),
+            route: { channel: route.channel, conversationId: route.conversationId },
+            reason: alertPushFailureReason(error),
             source: 'inprocess-scan',
           }),
         );

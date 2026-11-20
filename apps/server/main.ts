@@ -26,6 +26,7 @@ import { createServer, resolveSingleProfile, workspaceRootOf } from './server';
 import { createFileNotificationSink } from './notification-file-sink';
 import { guardSingleInstance } from './instance-guard';
 import { sweepExpiredRunDirsOnStart } from './startup-sweep';
+import { resolveAlertOwnerRoute } from './alert-owner-route';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -75,12 +76,15 @@ async function main(): Promise<void> {
   };
   // 进程内告警引擎（owner 2026-11-20）：第 3 档（兜不住且用户做不了）的执行者。
   // 投递端口**复用上面的 fileDelivery.sendText**（= 同一条 WS 上的渠道主动消息），不另开
-  // 企微 WS（单 WS 约束）。owner 路由取配置里第一个 enabled 的单聊企微主体（不硬编码）；
-  // 没有单聊主体 = 只落盘不推（alert-persistence 的确定性出口仍完整）。
-  const ownerUserId = Object.entries(config.principals)
-    .filter(([id, principal]) => principal.enabled && id.startsWith('wecom:') && !id.startsWith('wecom:group:'))
-    .map(([id]) => id.slice('wecom:'.length))
-    .find((userid) => userid !== '');
+  // 企微 WS（单 WS 约束）。owner 路由**只认显式配置**（yaml `alerts.ownerPrincipalId`，
+  // 2026-11-21 live P1）：此前按 principals 配置顺序猜第一个 enabled 单聊主体——本部署
+  // 猜到评测夹具主体 wecom:e2e_user，告警推送恒 93006 invalid chatid，告警永远送不到人。
+  // 未配置 = 只落盘不推（alert-persistence 的确定性出口仍完整）；配置了不合法 = 拒启。
+  const alertOwnerRoute = resolveAlertOwnerRoute(config);
+  console.log(JSON.stringify({
+    event: 'alert_owner_route',
+    ...(alertOwnerRoute === undefined ? { configured: false } : { configured: true, ...alertOwnerRoute }),
+  }));
   const server = await createServer({
     env,
     config,
@@ -90,8 +94,8 @@ async function main(): Promise<void> {
     inprocessAlerts: {
       enabled: true,
       opsDir: path.join(path.dirname(dbPath), 'ops'),
-      ...(ownerUserId === undefined ? {} : {
-        ownerRoute: { channel: 'wecom', conversationId: ownerUserId },
+      ...(alertOwnerRoute === undefined ? {} : {
+        ownerRoute: alertOwnerRoute,
         pushPort: { sendText: (route, text) => fileDelivery.sendText(route, text) },
       }),
     },
