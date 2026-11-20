@@ -197,10 +197,12 @@ describe('E 组·附件 → 执行层（W-19～W-21）', () => {
         }),
         (call) => {
           // 宿主允许集合边界的真实拒绝（写操作不在只读允许集、未发起执行）：如实转述。
+          // 模型台词用业务语言（不暴露"执行层"内部词）；下面三条断言只钉业务事实
+          // （没有写权限 / 没写入 / 没写成功），不依赖被改写的内部措辞，语义不变。
           const result = lastToolResultOf(call.messages);
           expect(result?.isError).toBe(true);
           expect(result?.text).toContain('当前权限不支持这个操作');
-          return textAssistant('当前没有写权限：执行层写操作未开放，写入没有执行，你的数据原样保留。');
+          return textAssistant('当前没有写权限：写操作还没开放，写入没有执行，你的数据原样保留。');
         },
       ]);
       sim.sendFile('销售明细.xlsx', sample);
