@@ -226,7 +226,7 @@ describe('静态守卫：所有用户级批次都接入了扫描', () => {
     for (const file of enumerated) {
       expect(listed, `新增/现存批次 ${file} 未登记进通用泄漏守卫清单（忘了接入）`).toContain(file);
     }
-    // 清单里至少四个 expectScan 的批次入口被登记（防止把 batches 全标 false 绕过守卫）。
+    // 清单里恰五个 expectScan 的批次入口被登记（防止把 batches 全标 false 绕过守卫）。
     expect(WIRING.filter((entry) => entry.expectScan)).toHaveLength(5);
   });
 });
