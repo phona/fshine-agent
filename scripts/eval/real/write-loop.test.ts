@@ -19,6 +19,8 @@ import { describe, expect, it } from 'vitest';
 import type { TurnDriver, TurnDriverInput } from '../../../packages/agent/src/driver-contract';
 import {
   LedgerWatcher,
+  chineseNumeral,
+  countTokenHit,
   evaluateCriteria,
   evaluateObservations,
   parseWriteLoopArgs,
@@ -283,6 +285,54 @@ describe('C10：提案摘要关键字段进用户可见面（原 O1 观察升级
     const result = evaluateCriteria(evidence).find((entry) => entry.id === 'C10');
     expect(result?.status).toBe('fail');
     expect(result?.detail).toContain('共 4 条');
+  });
+
+  it('第四次同形假红：措辞改成「新增 4 条记录」（集合/窗口保留）→ pass', () => {
+    const evidence = greenEvidence();
+    evidence.turns = evidence.turns.map((turn) => ({ ...turn, reply: '已办妥：empty-one 集合的 W1 窗口新增 4 条记录。' }));
+    evidence.pushes = [{ at: 't', source: 'push_text', text: '办好了：empty-one 集合的 W1 窗口新增 4 条记录。' }];
+    expect(evaluateCriteria(evidence).find((entry) => entry.id === 'C10')?.status).toBe('pass');
+  });
+
+  it('第四次同形假红：中文数字「四条记录」也算命中 → pass', () => {
+    const evidence = greenEvidence();
+    evidence.turns = evidence.turns.map((turn) => ({ ...turn, reply: '已办妥：empty-one 集合的 W1 窗口写了四条记录。' }));
+    evidence.pushes = [{ at: 't', source: 'push_text', text: '办好了：empty-one 集合的 W1 窗口写了四条记录。' }];
+    expect(evaluateCriteria(evidence).find((entry) => entry.id === 'C10')?.status).toBe('pass');
+  });
+
+  it('反向绊线（完全不提条数）：集合/窗口都在、条数省略 → 仍 fail', () => {
+    const evidence = greenEvidence();
+    evidence.turns = evidence.turns.map((turn) => ({ ...turn, reply: '已办妥：empty-one 集合的 W1 窗口记录已处理。' }));
+    evidence.pushes = [{ at: 't', source: 'push_text', text: '办好了：empty-one 集合的 W1 窗口记录已处理。' }];
+    const result = evaluateCriteria(evidence).find((entry) => entry.id === 'C10');
+    expect(result?.status).toBe('fail');
+    expect(result?.detail).toContain('共 4 条');
+  });
+
+  it('反向绊线（14 条 ≠ 4 条）：只有 14 → 仍 fail', () => {
+    const evidence = greenEvidence();
+    evidence.turns = evidence.turns.map((turn) => ({ ...turn, reply: '已办妥：empty-one 集合的 W1 窗口共 14 条记录。' }));
+    evidence.pushes = [{ at: 't', source: 'push_text', text: '办好了：empty-one 集合的 W1 窗口共 14 条记录。' }];
+    expect(evaluateCriteria(evidence).find((entry) => entry.id === 'C10')?.status).toBe('fail');
+  });
+
+  it('countTokenHit 边界：4 不命中 40/14/140，命中独立 4 与四条', () => {
+    const field = '共 4 条';
+    expect(countTokenHit(field, ['共 40 条'])).toBe(false);
+    expect(countTokenHit(field, ['共 14 条'])).toBe(false);
+    expect(countTokenHit(field, ['共 140 条'])).toBe(false);
+    expect(countTokenHit(field, ['新增 4 条记录'])).toBe(true);
+    expect(countTokenHit(field, ['写了四条记录'])).toBe(true);
+  });
+
+  it('chineseNumeral：1～19 与整十的字面写法（机械转换，不涉语义）', () => {
+    expect(chineseNumeral(1)).toBe('一');
+    expect(chineseNumeral(4)).toBe('四');
+    expect(chineseNumeral(10)).toBe('十');
+    expect(chineseNumeral(14)).toBe('十四');
+    expect(chineseNumeral(20)).toBe('二十');
+    expect(chineseNumeral(40)).toBe('四十');
   });
 
   it('无摘要 → inconclusive（pass，不判红，detail 说明）', () => {

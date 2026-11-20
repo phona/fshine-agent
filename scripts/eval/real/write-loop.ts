@@ -522,6 +522,48 @@ export function bareForm(text: string): string {
   return text.replace(/[「」『』【】[\]()（）“”‘’"']/gu, '').replace(/\s+/gu, '');
 }
 
+const CN_DIGITS = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'] as const;
+/** 十位/个位汉字的边界：避免「四」在「十四」里被当成 4。 */
+const CN_NUMERAL_CHARS = '零一二两三四五六七八九十百千万亿';
+
+/**
+ * 1～99 的中文写法（判据只需识别摘要里抽取出的那个小整数条数；≥100 不猜中文形态，
+ * 交给阿拉伯数字 token 判定）。这是字面转换，不是语义理解。
+ */
+export function chineseNumeral(n: number): string {
+  if (!Number.isSafeInteger(n) || n < 0 || n >= 100) return '';
+  if (n < 10) return CN_DIGITS[n]!;
+  if (n < 20) return `十${n === 10 ? '' : CN_DIGITS[n - 10]!}`;
+  const tens = Math.floor(n / 10);
+  const ones = n % 10;
+  return `${CN_DIGITS[tens]!}十${ones === 0 ? '' : CN_DIGITS[ones]!}`;
+}
+
+/**
+ * 条数 token 命中（2026-11-20 第四次同形假红修复）：从摘要字段「共 N 条」抽出 N，判
+ * 用户可见面是否出现**独立的** N——阿拉伯数字前后都不是数字（所以 4 不命中 40/14/140），
+ * 或 N 的中文写法独立出现（「四条」算命中）。这是"已知字符串存在性"的机械扩展：
+ * 只认执行层摘要给的那个数，不判措辞、不判语义——模型说「新增 4 条」「四条记录」都算，
+ * 完全不提条数 / 只写 40 / 只写 14 都不算。
+ *
+ * 拦的是：摘要把条数给了用户，但用户可见面把这个数改成了别的数或干脆省略。
+ * 可能漏判：可见面出现的 4 指的是别的量（如「4 个字段」）也可能被当成条数命中——
+ * 但这仍是字符串存在性层面的机械判定，语义层面的对错归用户级 eval，不在此处扩张。
+ */
+export function countTokenHit(countField: string, texts: readonly string[]): boolean {
+  const match = /共\s*(\d+)\s*条/u.exec(countField);
+  if (match === null) return false; // 抽不出 N：形状变了，按缺失处理，不冒充命中。
+  const n = Number(match[1]);
+  if (!Number.isSafeInteger(n)) return false;
+  const ascii = String(n); // 去前导零，统一比较形态。
+  const asciiToken = new RegExp(`(?<![0-9])${ascii}(?![0-9])`, 'u');
+  const zh = chineseNumeral(n);
+  const zhToken = zh === ''
+    ? null
+    : new RegExp(`(?<![${CN_NUMERAL_CHARS}0-9])${zh}(?![${CN_NUMERAL_CHARS}0-9])`, 'u');
+  return texts.some((text) => asciiToken.test(text) || (zhToken !== null && zhToken.test(text)));
+}
+
 // ---------------------------------------------------------------------------
 // 判据与观察（纯函数；测试钉住正反两向）
 // ---------------------------------------------------------------------------
@@ -648,9 +690,14 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
 
   // C10 提案摘要转述守卫（PM P1-4）：有执行层摘要时，用户可见文本里必须出现摘要的关键字段
   // （集合名 / 窗口码 / 记录条数）。这些是执行层给的已知字符串，属"已知字符串存在性"，不判措辞。
-  // 存在性按**去括号形态**断言（2026-11-20 假红修复，见 bareForm）：各字段独立判定——
-  // 集合名 「empty-one」 → 文本「empty-one 集合」/「empty-one」都算命中；窗口码、条数同理，
-  // 但事实内容不放宽（「共 4 条」不匹配「共 40 条」，完全没提集合名仍判缺失）。
+  // 三类字段按各自性质比对：
+  //   · 集合名「empty-one」、窗口码「W1 窗口」——是标识符，不该被模型改写，仍走 bareForm
+  //     逐字包含（2026-11-20 前三次同形假红修复）；
+  //   · 条数「共 4 条」——用户只需看到那个数，措辞可换（「新增 4 条」「四条记录」都算），
+  //     改用 countTokenHit 判独立数字 token（2026-11-20 第四次同形假红修复，见该函数注释）。
+  // 事实内容不放宽：集合名/窗口码缺一仍判缺失；条数只有 40/14 或完全不提都判缺失。
+  // 拦的是：摘要把已知字段给了用户，用户可见面却漏掉或改错（尤其条数被换数/省略）。
+  // 可能漏判：可见面的 4 可能指别的量却仍命中——语义对错归用户级 eval，此处只做机械存在性。
   // 用户可见文本 = 各回合回复 + push_text（与原 O1 观察同一取值面）。无摘要 = 前置缺失，判
   // inconclusive（detail 说明，不判红——与"模型没转述"区分开）。
   const keyFields = summaryKeyFields(evidence.ledger.proposal?.summary);
@@ -665,6 +712,7 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
     });
   } else {
     const hit = (field: string): boolean => {
+      if (/^共\s*\d+\s*条$/u.test(field)) return countTokenHit(field, userVisible);
       const expected = bareForm(field);
       return userVisible.some((text) => bareForm(text).includes(expected));
     };
@@ -674,7 +722,7 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
       status: missing.length === 0 ? 'pass' : 'fail',
       detail: `摘要关键字段=[${keyFields.join(' | ')}]；`
         + `命中=[${keyFields.filter((field) => hit(field)).join(' | ') || '无'}]；`
-        + `缺失=[${missing.join(' | ') || '无'}]（去括号形态比对）`,
+        + `缺失=[${missing.join(' | ') || '无'}]（标识符去括号逐字 / 条数按独立数字 token 比对）`,
     });
   }
 

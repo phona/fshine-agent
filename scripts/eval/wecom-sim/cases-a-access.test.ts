@@ -27,7 +27,7 @@ describe('A 组·接入与基础（W-01～W-04b）', () => {
   it('W-01 闲聊：零执行、不编造数据', async () => {
     const sim = await startWecomSim({ label: 'w01' });
     try {
-      sim.book.mainTurn('你好，你能做什么？', [textAssistant('你好！我可以帮你查询、核对执行层里的业务数据，也可以处理你发来的表格文件。')]);
+      sim.book.mainTurn('你好，你能做什么？', [textAssistant('你好！我可以帮你查询、核对系统里的业务数据，也可以处理你发来的表格文件。')]);
       const messageId = sim.sendText('你好，你能做什么？');
       await sim.waitFor('终帧出现', () => sim.finalBubbles().length === 1);
 
