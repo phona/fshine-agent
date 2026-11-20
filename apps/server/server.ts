@@ -233,6 +233,16 @@ export function isGroupPrincipal(principalId: string): boolean {
 }
 
 /**
+ * 终态唤醒出口 → 终态类型（缺陷 A，2026-11-21 live）。只有这三类终态有状态变化唤醒出口；
+ * waiting_user / 久无动静 / 重启对账不是终态事实——**永远唤醒**，不在抑制范围。
+ */
+const TERMINAL_WAKE_KINDS: ReadonlyMap<string, 'cancelled' | 'completed' | 'failed'> = new Map([
+  ['task_cancel_wake', 'cancelled'],
+  ['task_completion_wake', 'completed'],
+  ['task_failure_wake', 'failed'],
+]);
+
+/**
  * 主动提醒投递端口（预期契约 2026-11-18；2026-11-19 owner 补 #9/#10 改形）：
  *   · 判据只看**底账任务事实**（任务属于谁、活在哪个会话）——1:1 与**群聊都发**（群 = 独立
  *     主体，群里的任务就是这个群的事）；不用「群聊一律不发」的一刀切，也不依赖进程内集合
@@ -891,6 +901,34 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     if (set.size === 0) pushSuppressedInTurn.delete(sessionKey);
     return true;
   };
+  /**
+   * 唤醒抑制（缺陷 A，2026-11-21 live）：本回合等待窗口观察到落定、且模型本回合已说话的
+   * 任务终态——(taskId, 终态类型) 一次性核销：对应的状态变化唤醒不再发送（用户已在本回合
+   * 听到这件事，再说一遍就是同一事实两条）。条目只在「回合回复非空」时标记（回复为空 =
+   * 不抑制，否则静默）；回合外落定不进这个表（照常唤醒）。有界（同 pushSuppressedInTurn）。
+   */
+  const WAKE_SUPPRESSED_LIMIT = 64;
+  const wakeSuppressedInTurn = new Map<string, Set<string>>();
+  const markWakeSuppressedInTurn = (sessionKey: string, taskId: string, kind: string): void => {
+    let set = wakeSuppressedInTurn.get(sessionKey);
+    if (set === undefined) {
+      set = new Set();
+      wakeSuppressedInTurn.set(sessionKey, set);
+    }
+    set.add(`${taskId}\u0000${kind}`);
+    while (set.size > WAKE_SUPPRESSED_LIMIT) {
+      const oldest = set.values().next().value;
+      if (oldest === undefined) break;
+      set.delete(oldest);
+    }
+  };
+  const claimWakeSuppressedInTurn = (sessionKey: string, taskId: string, kind: string): boolean => {
+    const set = wakeSuppressedInTurn.get(sessionKey);
+    const key = `${taskId}\u0000${kind}`;
+    if (set?.delete(key) !== true) return false;
+    if (set.size === 0) wakeSuppressedInTurn.delete(sessionKey);
+    return true;
+  };
   if (taskDispatch === 'async') {
     const completionDelivery = deps.fileDelivery;
     runner = (await createBackgroundDispatch({
@@ -1358,6 +1396,25 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     /** 附加在用户文本之后的一句（不覆盖模型的话；如「文件没发出去」的如实话术）。 */
     appendText?: string;
   }): Promise<boolean> {
+    // 唤醒抑制（缺陷 A）：该终态已在本回合由模型说给用户（回合等待窗口观察到落定 + 回复
+    // 非空）→ 状态变化唤醒不再发送，记 wake_suppressed_already_delivered（taskId/kind）。
+    // 一次性核销 = 同一终态最多抑制一次；waiting_user / 久无动静 / 重启对账不在
+    // TERMINAL_WAKE_KINDS 里，永远照常唤醒。
+    const terminalKind = TERMINAL_WAKE_KINDS.get(input.event);
+    if (terminalKind !== undefined && claimWakeSuppressedInTurn(
+      `${input.principalId}\u0000${input.sessionId}`,
+      input.taskId,
+      terminalKind,
+    )) {
+      log({
+        event: 'wake_suppressed_already_delivered',
+        principalId: input.principalId,
+        sessionId: input.sessionId,
+        taskId: input.taskId,
+        kind: terminalKind,
+      });
+      return true;
+    }
     const resolved = await wakeStateChangeText(input);
     // 会话忙：事实已交给正在跑的回合（由它说）——不是失败、也不另投（同一件事不说两遍）。
     if (resolved.outcome === 'busy') return true;
@@ -1742,6 +1799,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
        * （`FILES_GENERATED_NOTICE`）顶上的情形（同一个常量、本文件下方投递话术替换也按它判）。
        */
       const modelSilent = turn.reply.trim() === '' || turn.reply === FILES_GENERATED_NOTICE;
+      // 缺陷 A：本回合等待窗口观察到的任务终态 + 模型本回合说了话 = 事实已交出 → 对应的
+      // 状态变化唤醒一次性抑制（判定与标记机械：看 TurnResult.terminalObservedInTurn 与
+      // modelSilent，不猜模型有没有「提到」这件事）。回复为空不标记（唤醒照发，不静默）；
+      // 「见附件」占位顶替正文视为沉默（模型没说话，占位句不带终态事实）。
+      if (!modelSilent) {
+        for (const observation of turn.terminalObservedInTurn ?? []) {
+          markWakeSuppressedInTurn(sessionKey, observation.taskId, observation.kind);
+        }
+      }
       let delivery: { status: string; files: number } | undefined;
       if (files.length > 0) {
         const outcome = await deliverTurnFiles({
@@ -1937,6 +2003,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       attachmentFacts.clear();
       systemNotes.clear();
       relayedInTurnTasks.clear();
+      wakeSuppressedInTurn.clear();
       sessions.clear();
       outbox?.close();
       taskRegistry.close();

@@ -53,6 +53,12 @@ const TASK_NAME = deriveTaskName(TASK_TEXT);
 const FAIL_REASON = '执行层拒绝';
 /** ⑤d 用：用户对等待中的任务表态（脚本模型据此调 task_resume 接续）。 */
 const RESUME_MESSAGE = '按这版提交';
+/** 缺陷 A 用：用户说停（脚本模型据此调 task_cancel——回合内取消）。 */
+const STOP_MESSAGE = '停';
+/** 缺陷 A① 用：取消回合里模型收尾那句（用户可见文本只有它）。 */
+const STOP_TURN_LINE = '好，那件事已经停了，不用再等它。';
+/** 缺陷 A③ 用：取消没在窗口内落定时模型照实说的那句（不冒进）。 */
+const REQUESTED_LINE = '先发出停止请求了，一有确认我马上告诉你。';
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -182,6 +188,27 @@ function lastUserTextOf(messages: readonly unknown[]): string {
   return '';
 }
 
+/** 转录尾部是不是 toolResult（工具已回执 → 本次模型请求该出正文了）。 */
+function tailIsToolResult(messages: readonly unknown[]): boolean {
+  const last = messages[messages.length - 1] as { role?: unknown } | undefined;
+  return last?.role === 'toolResult';
+}
+
+/** 转录里最近一条 task_run 受理回执的 taskId（task_cancel 的 ref 取它——数字 ref 已退役）。 */
+function lastTaskIdOf(messages: readonly unknown[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const content = (messages[index] as { content?: unknown } | undefined)?.content;
+    const text = typeof content === 'string'
+      ? content
+      : Array.isArray(content)
+        ? content.map((part) => String((part as { text?: unknown }).text ?? '')).join('')
+        : '';
+    const hit = /"taskId":"(task_[0-9a-f][0-9a-f-]+)"/u.exec(text);
+    if (hit !== null) return hit[1]!;
+  }
+  throw new Error('（测试）转录里没有 task_run 受理回执，无法构造 task_cancel 引用');
+}
+
 /** 唤醒回合：模型按**事实**说一句（业务名从事实里取——钉住「事实里带名字」这条链）。 */
 function wakeLineFor(factText: string, mode: 'line' | 'silent' | 'tool-only', wakeCalls: number): AgentMessage {
   if (mode === 'silent') return textAssistant('');
@@ -228,6 +255,11 @@ async function makeFixture(mode: Mode, options: {
   deliveryMode?: 'live' | 'silent';
   /** 执行器替身覆盖（缺省 = 受闸的 GatedExecutor；抛错回合用例用）。 */
   executorOverride?: TaskExecutor;
+  /**
+   * 缺陷 A（回合内取消）：给出后，用户消息「停」会让脚本模型调 task_cancel（ref 取
+   * 上一回合受理回执的 taskId），收尾出本字段那句正文（'' = 模型沉默）。
+   */
+  stopTurn?: { reply: string };
 } = {}): Promise<Fixture> {
   const dir = tempDir();
   const dbPath = path.join(dir, 'state.db');
@@ -288,6 +320,8 @@ async function makeFixture(mode: Mode, options: {
   let scripted: ScriptedModelRuntime | undefined;
   let wakeCalls = 0;
   let resumeCalled = false;
+  // 缺陷 A②：停止回合模型沉默后，驱动的「催一句」重试也保持沉默（与 silent 模式同形）。
+  let stopSilence = false;
   if (mode !== 'no-wake') {
     scripted = await createScriptedModelRuntime({
       contextWindow: 40_000,
@@ -313,6 +347,16 @@ async function makeFixture(mode: Mode, options: {
           }
           return textAssistant('好的，已按你的表态接续。');
         }
+        // 缺陷 A（回合内取消）：用户说停 → 模型调 task_cancel；工具回执后收尾出正文
+        //（正文由用例给：非空 = 事实已交出；'' = 模型沉默，后续「催一句」也沉默）。
+        if (last === STOP_MESSAGE && options.stopTurn !== undefined) {
+          if (tailIsToolResult(context.messages)) {
+            if (options.stopTurn.reply.trim() === '') stopSilence = true;
+            return textAssistant(options.stopTurn.reply);
+          }
+          return toolCallAssistant('task_cancel', { ref: lastTaskIdOf(context.messages) });
+        }
+        if (stopSilence) return textAssistant('');
         // silent 模式对任何输入都不产出正文（含驱动的「催一句」）——测「模型说不出话」。
         return textAssistant(mode === 'silent' ? '' : '好的。');
       },
@@ -376,6 +420,22 @@ function readTask(dbPath: string, taskId: string): { status: string; reason?: st
   } finally {
     registry.close();
   }
+}
+
+/** 交办回合留下的那条 running 任务（缺陷 A 用例：本会话恰有一个在跑的后台任务）。 */
+function runningTaskIdOf(dbPath: string): string {
+  const registry = createSqliteTaskRegistry(dbPath, { readOnly: true });
+  try {
+    const running = registry.list(SCOPE).find((task) => task.status === 'running');
+    if (running === undefined) throw new Error('（测试）没有 running 状态的任务');
+    return running.taskId;
+  } finally {
+    registry.close();
+  }
+}
+
+function taskStatusIs(dbPath: string, taskId: string, status: string): boolean {
+  return readTask(dbPath, taskId).status === status;
 }
 
 function userTextOf(message: unknown): string {
@@ -565,6 +625,106 @@ describe('状态变化唤醒（server 级）：用户说停', () => {
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(fx.delivery.sentTexts).toHaveLength(1);
       expect(fx.executor.calls).toBe(1);
+    } finally {
+      await fx.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 缺陷 A（2026-11-21 live，P0）：同一件事说两遍。用户说「停」→ 回合内 task_cancel 落定
+// cancelled，模型已在回合里说了「已停」→ 0.5s 后「取消」状态变化唤醒又发一条「已停」。
+// 机械判据：终态在**本回合等待窗口内**落定（TurnResult.terminalObservedInTurn，只有回合
+// 自己观察到的才算）+ 该回合最终回复非空 → 该终态的状态变化唤醒不再发送，记
+// `wake_suppressed_already_delivered`（taskId/kind）。三条守卫 + 回合外照常唤醒：
+//   A① 回合内取消 + 回复非空 → 恰 0 次唤醒、用户可见文本只有模型那句；
+//   A② 回合内取消 + 回复为空 → 唤醒照发（不静默）；
+//   A③ 取消请求在回合内、终态在回合外落定（超窗）→ 唤醒照发、不抑制。
+// 反向绊线（见提交说明）：去掉 wakeAndDeliverStateChange 的抑制核销 → A① 用户可见文本
+// 变 2 条（模型回合那句 + 唤醒投递那句），必红。
+// ---------------------------------------------------------------------------
+describe('状态变化唤醒（server 级）：回合内终态不重复唤醒（缺陷 A）', () => {
+  it('A① 回合内取消（等待窗口观察到落定）+ 回复非空 → 恰 0 次唤醒，用户可见文本只有模型那句', async () => {
+    const fx = await makeFixture('line', {
+      runtimeOverrides: { taskRunWaitMs: 1_500 },
+      stopTurn: { reply: STOP_TURN_LINE },
+    });
+    try {
+      // 上一回合交办 → 后台在跑（执行器挂起）。
+      await fx.server.handler(incoming('m-1', ASK));
+      const taskId = runningTaskIdOf(fx.dbPath);
+      // 本回合取消：执行端确认落在 task_cancel 的等待窗口内（终态在回合内落定）。
+      const stopTurn = fx.server.handler(incoming('m-2', STOP_MESSAGE));
+      await vi.waitFor(() => expect(taskStatusIs(fx.dbPath, taskId, 'cancelling')).toBe(true), { timeout: 5_000 });
+      fx.executor.settle({ kind: 'cancelled' });
+      const reply = await stopTurn;
+      // 稳定：稍等片刻也不蹦出第二条（同一事实 ≤ 1 次；反向绊线——去掉抑制核销——这里
+      // 会变成第二条主动投递，用户可见文本成 2 条，本用例必红）。
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      // 用户可见文本只有模型那句（回合回复原样）；0 次主动投递、0 次 task_cancel_wake。
+      expect(reply).toBe(STOP_TURN_LINE);
+      expect(fx.delivery.sentTexts).toHaveLength(0);
+      expect(fx.logs.some((line) => line['event'] === 'task_cancel_wake')).toBe(false);
+      // 抑制被记账（机械事件带 taskId/kind）；任务落 cancelled（取消是真的）。
+      const suppressed = fx.logs.filter((line) => line['event'] === 'wake_suppressed_already_delivered');
+      expect(suppressed).toHaveLength(1);
+      expect(suppressed[0]).toMatchObject({
+        taskId,
+        kind: 'cancelled',
+        principalId: PRINCIPAL,
+        sessionId: SESSION,
+      });
+      expect(readTask(fx.dbPath, taskId)).toMatchObject({ status: 'cancelled', reason: 'cancelled_by_user' });
+      expect(fx.executor.calls).toBe(1);
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('A② 回合内取消 + 回复为空 → 唤醒照发（不静默）', async () => {
+    const fx = await makeFixture('line', {
+      runtimeOverrides: { taskRunWaitMs: 1_500 },
+      stopTurn: { reply: '' },
+    });
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      const taskId = runningTaskIdOf(fx.dbPath);
+      const stopTurn = fx.server.handler(incoming('m-2', STOP_MESSAGE));
+      await vi.waitFor(() => expect(taskStatusIs(fx.dbPath, taskId, 'cancelling')).toBe(true), { timeout: 5_000 });
+      fx.executor.settle({ kind: 'cancelled' });
+      // 纯取消回合 + 模型沉默：无正文、无文件、无交办 → 回合按模型侧失败判（既有出口）。
+      await expect(stopTurn).rejects.toThrow();
+      // 但抑制不发生（回复为空 = 事实没说给用户）：唤醒照发，用户听到「已停」。
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
+      expect(fx.delivery.sentTexts[0]!.text).toBe(`「${TASK_NAME}」已经停了。`);
+      expect(wakeEventOf(fx.logs, 'task_cancel_wake')).toMatchObject({ outcome: 'woken' });
+      expect(fx.logs.some((line) => line['event'] === 'wake_suppressed_already_delivered')).toBe(false);
+      expect(readTask(fx.dbPath, taskId).status).toBe('cancelled');
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('A③ 取消请求在回合内、终态在回合外落定（超窗）→ 唤醒照发', async () => {
+    const fx = await makeFixture('line', {
+      runtimeOverrides: { taskRunWaitMs: 300 },
+      stopTurn: { reply: REQUESTED_LINE },
+    });
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      const taskId = runningTaskIdOf(fx.dbPath);
+      // 等待窗口（300ms）内不落定：回执如实说「已请求停止」（不冒进），回合照常收尾。
+      const reply = await fx.server.handler(incoming('m-2', STOP_MESSAGE));
+      expect(reply).toBe(REQUESTED_LINE);
+      expect(fx.delivery.sentTexts).toHaveLength(0);
+      // 终态在回合外落定 → 唤醒照发（用户终会得到下文），不抑制。
+      fx.executor.settle({ kind: 'cancelled' });
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
+      expect(fx.delivery.sentTexts[0]!.text).toBe(`「${TASK_NAME}」已经停了。`);
+      expect(wakeEventOf(fx.logs, 'task_cancel_wake')).toMatchObject({ outcome: 'woken' });
+      expect(fx.logs.some((line) => line['event'] === 'wake_suppressed_already_delivered')).toBe(false);
+      expect(readTask(fx.dbPath, taskId).status).toBe('cancelled');
     } finally {
       await fx.close();
     }

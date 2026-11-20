@@ -1001,6 +1001,22 @@ export function renderFileManifest(files: readonly TurnFileRef[]): string {
 export type TurnRetryAllowed = RetryAllowed;
 export type TurnRetryBlock = RetryBlock;
 
+/**
+ * 本回合等待窗口观察到的任务终态（缺陷 A，2026-11-21 live）。
+ *
+ * 判据是机械的：只有回合**自己观察到**的落定才算——task_run 的短等待窗口
+ * （waitForTaskSettled）与 task_cancel 的落定窗口（见 taskCancel）。回合外落定
+ * （后台完成/重启对账/长任务结束）不进这个列表，状态变化唤醒照发。
+ * kind 只取有状态变化唤醒出口的三类（completed/failed/cancelled）；其余终态
+ * （timed_out/unexecuted）没有唤醒出口，不观察、不抑制。
+ */
+export type TurnTerminalKind = 'cancelled' | 'completed' | 'failed';
+
+export interface TurnTerminalObservation {
+  taskId: string;
+  kind: TurnTerminalKind;
+}
+
 export interface TurnResult {
   reply: string;
   taskIds: readonly string[];
@@ -1021,6 +1037,13 @@ export interface TurnResult {
    * 后台通知推送据此不重复发一条；受理回执路径的任务不在列（它们的结局仍靠推送送达）。
    */
   pushSuppressedTaskIds?: readonly string[];
+  /**
+   * 缺陷 A（2026-11-21 live）：本回合等待窗口**观察到落定**的任务终态（taskId + 终态类型）。
+   * 装配层对它们做一次性唤醒抑制：回合最终回复非空 = 这件事模型已说给用户 → 对应的状态
+   * 变化唤醒（completed/failed/cancelled）不再发送，记 `wake_suppressed_already_delivered`；
+   * 回复为空不抑制（不静默）。观察面只来自本回合的等待窗口——回合外落定不进列（照常唤醒）。
+   */
+  terminalObservedInTurn?: readonly TurnTerminalObservation[];
   /**
    * A2b 观测面：本回合**被拦下**的重试（执行层没有显式声明可重试 → * 该对象本回合不再发起）。
    * 只作运维可见（装配层按条记 `execution_retry_blocked` 事件），不改变回合结果、不进用户文本。
@@ -2157,8 +2180,22 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     };
   }
 
-  /** 取消：复用 runner.cancel，原样转述 CancelOutcome（requested≠cancelled），不宣称已取消。 */
-  function taskCancel(args: Record<string, unknown>, runner: TaskRunner): unknown {
+  /**
+   * 取消：复用 runner.cancel，原样转述 CancelOutcome（requested≠cancelled），不宣称已取消。
+   *
+   * 缺陷 A（2026-11-21 live，回合内终态观察）：requested 不再干等回复——有在飞回合时在
+   * taskRunWaitMs 窗口内轮询落定（waitForTaskSettled）；窗口内确认 cancelled（或其他终态）
+   * → ① 回执按真实结局说（确认了才说「已停止」，没确认仍说「已请求停止」——不冒进）；
+   * ② 终态记入本回合 collector（TurnResult.terminalObservedInTurn），装配层据此对随后的
+   * 状态变化唤醒做一次性抑制（用户已在本回合听到这件事，不再说第二遍）。超窗 → requested
+   * 照旧、不观察（终态在回合外落定，唤醒照发——用户终会得到下文）。无在飞回合的 requested
+   * （没有可中止的执行，没人会去确认）不等待，不阻塞回合。
+   */
+  async function taskCancel(
+    args: Record<string, unknown>,
+    runner: TaskRunner,
+    terminalObserved: TurnTerminalObservation[],
+  ): Promise<unknown> {
     const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
     const taskId = resolveTaskId(refFromArgs(args));
     // 回执带任务身份（2026-11-18，LS6 实测缺陷）：多任务并存时模型会引用错任务，
@@ -2176,15 +2213,40 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // 不存在/越权：保持原行为（由 runner 给出确定性拒绝）。
     }
     const outcome = runner.cancel(taskId, scope);
+    // 缺陷 A：取消在本回合内落定的观察。queued/waiting_user 的取消由 runner 同步机械确认
+    // （outcome=cancelled）；running 的取消（requested）只在**有在飞回合**时等窗口——竞态
+    // 兜底先看一眼底账（请求与回合收尾几乎同时落定时 inFlight 已清、底账已终态）。
+    let observed: TurnTerminalKind | undefined;
+    let settledStatus: string | undefined;
+    if (outcome.outcome === 'cancelled') {
+      observed = 'cancelled';
+    } else if (outcome.outcome === 'requested' && taskRunWaitMs > 0) {
+      const settled = runner.inFlight().includes(taskId)
+        ? await waitForTaskSettled(taskId, taskRunWaitMs)
+        : undefined;
+      const statusNow = registry.get(taskId, scope).status;
+      settledStatus = settled?.status ?? (SETTLED_TASK_STATUSES.has(statusNow) ? statusNow : undefined);
+      observed = settledStatus === 'cancelled' || settledStatus === 'completed' || settledStatus === 'failed'
+        ? settledStatus
+        : undefined;
+    }
+    if (observed !== undefined) terminalObserved.push({ taskId, kind: observed });
+    // 观察到落定的取消 → 回执按真实结局说（确认了才说「已停止」；停成了别的结局（办完/失败）
+    // 也如实说「没停成」——不冒充已停）。未落定保持 requested 原样（不宣称已取消）。
+    const effective: Record<string, unknown> = observed === 'cancelled'
+      ? { outcome: 'cancelled', taskId }
+      : observed !== undefined
+        ? { outcome: 'terminal', taskId, status: settledStatus }
+        : { ...outcome };
     // 给用户看的一句话：业务名 + 结果，按结果分三种说法。编号属内部工单腔，不进模型投影/
     // 用户面；业务名足以让用户一眼确认"被停掉的是哪件事"（底账仍有编号，对账用）。
     const label = identity.taskName ?? identity.taskRequest ?? '该任务';
-    const userMessage = outcome.outcome === 'cancelled'
+    const userMessage = effective['outcome'] === 'cancelled'
       ? `已停止：${label}`
-      : outcome.outcome === 'requested'
+      : effective['outcome'] === 'requested'
         ? `已请求停止：${label}（还没确认停掉）`
-        : `没停成：${label} 已经办完了（当前状态：${outcome.status}）`;
-    return { ...outcome, ...identity, userMessage, ...(reason === '' ? {} : { reason }) };
+        : `没停成：${label} 已经办完了（当前状态：${effective['status']}）`;
+    return { ...effective, ...identity, userMessage, ...(reason === '' ? {} : { reason }) };
   }
 
   /**
@@ -3085,6 +3147,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const relayedTaskIds: string[] = [];
       // 主动推送抑制（快活失败/等补充）：这些任务的失败原因本回合已交给模型，推送不重复发。
       const pushSuppressedTaskIds: string[] = [];
+      // 缺陷 A：本回合等待窗口观察到的任务终态（task_cancel 落定窗口等）——装配层据此做
+      // 一次性唤醒抑制（回合回复非空 = 事实已说给用户）。回合外落定不进列（照常唤醒）。
+      const terminalObserved: TurnTerminalObservation[] = [];
       // CAP-01 S1：本回合产出文件（run_js 交付箱登记事实；回合末进 TurnResult.files）。
       const turnFiles: TurnFileRef[] = [];
       // run_js 幂等（v8 §5）：局部 Map 随本回合创建、随本回合丢弃（进程内、跨重启不保证）。
@@ -3201,7 +3266,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           if (tool === TASK_RESULT_TOOL) return taskResult(args);
           // 任务治理工具：与工具面同源门控（无 runner 时不暴露、也不受理），fail-closed。
           if (taskRunner !== undefined) {
-            if (tool === TASK_CANCEL_TOOL) return taskCancel(args, taskRunner);
+            if (tool === TASK_CANCEL_TOOL) return await taskCancel(args, taskRunner, terminalObserved);
             if (tool === TASK_RESUME_TOOL) return taskResume(args, taskRunner);
             if (tool === TASK_CONFIRM_TOOL) return taskConfirm(args, taskRunner);
           }
@@ -3310,6 +3375,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         operations: operationsThisTurn,
         ...(relayedTaskIds.length > 0 ? { relayedTaskIds } : {}),
         ...(pushSuppressedTaskIds.length > 0 ? { pushSuppressedTaskIds } : {}),
+        ...(terminalObserved.length > 0 ? { terminalObservedInTurn: terminalObserved } : {}),
         ...(retryBlockedThisTurn.length > 0 ? { retryBlocked: retryBlockedThisTurn } : {}),
         ...(retryAllowedThisTurn.length > 0 ? { retryAllowed: retryAllowedThisTurn } : {}),
         progress,
