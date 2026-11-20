@@ -317,12 +317,14 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       // 机械回执：请求 ≠ 已取消（先 requested，确认中止后才 cancelled）。
       // 2026-11-18：取消回执新增 taskNo / taskRequest（供核对是否指错任务），改成子集断言 + 身份断言。
       expect(results[1]).toMatchObject({ outcome: 'requested', taskId: receipt.taskId });
-      const cancelReceipt = results[1] as unknown as { taskNo?: number; taskRequest?: string; userMessage?: string };
-      expect(cancelReceipt.taskNo).toBe(1);
+      const cancelReceipt = results[1] as unknown as { taskRequest?: string; userMessage?: string };
+      // 2026-11-20：取消回执是模型可见投影，不带 taskNo（底账仍有）；以任务引用/业务名指代。
+      expect(cancelReceipt).not.toHaveProperty('taskNo');
       expect(cancelReceipt.taskRequest).toContain('alpha');
-      // 用户可读的一句话：含业务对象 + 编号 + 结果（2026-11-18 owner 要求，不许只给裸编号）。
+      // 用户可读的一句话：含业务对象 + 结果（2026-11-20：任务编号属工单腔，不进用户面）。
+      // 断言锚点从「编号 1」改成「不带编号」——原断言断的是用户可见面出现编号，该行为已废。
       expect(cancelReceipt.userMessage).toContain('alpha');
-      expect(cancelReceipt.userMessage).toContain('编号 1');
+      expect(cancelReceipt.userMessage).not.toMatch(/#\d+|编号\s*#?\d+/);
       expect(cancelReceipt.userMessage).toMatch(/已请求停止|已停止/);
       // 创建时间随回执给出：历史结论转述时能说"11-18 开的"，不与"刚才"混淆。
       expect((cancelReceipt as unknown as { taskCreatedAt?: string }).taskCreatedAt).toMatch(/T/);
@@ -427,7 +429,7 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
     // 机械回执：终态任务无操作，原样给出 completed（模型不得据此宣称已取消）。
     // 同上：回执带身份，断言改为子集 + 身份存在。
     expect(results[0]).toMatchObject({ outcome: 'terminal', taskId: 'task_done', status: 'completed' });
-    expect((results[0] as unknown as { taskNo?: number }).taskNo).toBeTypeOf('number');
+    expect(results[0]).not.toHaveProperty('taskNo');
     // 终态：用户可见话术必须说"没停成 + 已完成"，不能只说"已取消"。
     expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('没停成');
     expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('completed');

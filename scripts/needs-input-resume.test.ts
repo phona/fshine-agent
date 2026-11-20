@@ -242,14 +242,16 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
       expect(receipt).not.toHaveProperty('notice');
       expect(receipt).not.toHaveProperty('taskNo');
 
-      // 用户问「那个任务怎么样了」：Main 用回执里的 #编号查，拿到同一编号 + 待办问题。
+      // 用户问「那个任务怎么样了」：Main 用回执里的 taskId 查，拿到同一任务 + 待办问题。
+      // 2026-11-20：任务编号不进投影，ref 与断言锚点从 #编号/taskNo 改成 taskId（原断言断的是可见面出现编号）。
       fixture.push({
-        calls: [{ tool: 'task_status', args: { ref: `#${taskNo}` } }],
-        reply: `任务 #${taskNo} 需要你补充信息。`,
+        calls: [{ tool: 'task_status', args: { ref: taskId } }],
+        reply: '刚才交办的那件事需要你补充信息。',
       });
       await fixture.assembled.session.send('刚才那个任务怎么样了？');
       const status = receiptOf(fixture.records[1]!);
-      expect(status['taskNo']).toBe(taskNo);
+      expect(status['taskId']).toBe(taskId);
+      expect(status).not.toHaveProperty('taskNo');
       expect(status['status']).toBe('waiting_user');
       expect(status['pendingQuestion']).toEqual({
         missing: ['collection "contoso" 有多个候选：contracts / documents'],

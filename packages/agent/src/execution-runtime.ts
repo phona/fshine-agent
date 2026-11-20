@@ -155,12 +155,12 @@ export const TASK_STATUS_TOOL = 'task_status';
 /** 任务列表默认条数上限（新→旧）。会话历史越长越容易让模型抓错对象，默认只给最近的。 */
 const TASK_STATUS_LIST_LIMIT = 10;
 export const TASK_STATUS_TOOL_DESCRIPTION =
-  '查询本会话已有任务的状态：ref 给任务列表里的 #编号（如 "#3"）查单个任务，留空列本会话全部任务。'
+  '查询本会话已有任务的状态：ref 给任务列表里的任务引用（taskId）查单个任务，留空列本会话全部任务。'
   + '用户问「那个任务怎么样了 / 在等什么」时用它，不要为此新交办任务。';
 export const TASK_STATUS_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    ref: { type: 'string', description: '任务引用：任务列表里的 #编号（如 "#3"）；留空列本会话全部任务。' },
+    ref: { type: 'string', description: '任务引用：任务列表里的 taskId；留空列本会话全部任务。' },
   },
   additionalProperties: false,
 };
@@ -171,7 +171,7 @@ export const TASK_RESULT_TOOL_DESCRIPTION =
 export const TASK_RESULT_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    ref: { type: 'string', description: '任务引用：任务列表里的 #编号（如 "#3"）。' },
+    ref: { type: 'string', description: '任务引用：任务列表里的 taskId。' },
   },
   required: ['ref'],
   additionalProperties: false,
@@ -184,7 +184,7 @@ export const TASK_CANCEL_TOOL_DESCRIPTION =
 export const TASK_CANCEL_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    ref: { type: 'string', description: '要取消的任务引用：#编号。' },
+    ref: { type: 'string', description: '要取消的任务引用：任务列表里的 taskId。' },
     reason: { type: 'string', description: '用户给出的取消原因，一句话（可选，原样回显）。' },
   },
   required: ['ref'],
@@ -193,14 +193,14 @@ export const TASK_CANCEL_TOOL_SCHEMA: Record<string, unknown> = {
 
 export const TASK_RESUME_TOOL = 'task_resume';
 export const TASK_RESUME_TOOL_DESCRIPTION =
-  '当已有任务在等待用户补齐信息、改口径或说别的（不是确认提交）时，用用户的答复把同一任务接续下去（编号不变）。'
+  '当已有任务在等待用户补齐信息、改口径或说别的（不是确认提交）时，用用户的答复把同一任务接续下去。'
   + 'ref 可省略：本会话只有一个等待中的任务时直接接续它。'
   + '**它不会提交待确认的写入**——用户是在确认（「确认」「对，就这版」「提交吧」）时改用 task_confirm。'
   + '不确定用户是在确认还是在改口径时，先用一句话问清（给出版本摘要），不要自己选。';
 export const TASK_RESUME_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    ref: { type: 'string', description: '等待中的任务引用：#编号（可省略，本会话仅一个等待中的任务时）。' },
+    ref: { type: 'string', description: '等待中的任务引用：任务列表里的 taskId（可省略，本会话仅一个等待中的任务时）。' },
     answer: { type: 'string', description: '对任务待办问题的答复，用用户原话的意思写清。' },
   },
   required: ['answer'],
@@ -215,14 +215,14 @@ export const TASK_RESUME_TOOL_SCHEMA: Record<string, unknown> = {
  */
 export const TASK_CONFIRM_TOOL = 'task_confirm';
 export const TASK_CONFIRM_TOOL_DESCRIPTION =
-  '用户明确表示「按这版提交」时，确认并提交该任务上一轮给出的待确认提案（编号不变）。'
+  '用户明确表示「按这版提交」时，确认并提交该任务上一轮给出的待确认提案。'
   + 'ref 可省略：本会话只有一个等待确认的提案时直接用它。'
   + '只在用户明确确认时用；用户补充信息 / 改口径 / 说了别的用 task_resume。'
   + '拿不准用户是在确认还是在改口径时，先用一句话问清（给出版本摘要），不要自己选。';
 export const TASK_CONFIRM_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    ref: { type: 'string', description: '等待确认的任务引用：#编号（可省略，本会话仅一个等待确认的提案时）。' },
+    ref: { type: 'string', description: '等待确认的任务引用：任务列表里的 taskId（可省略，本会话仅一个等待确认的提案时）。' },
   },
   additionalProperties: false,
 };
@@ -1966,8 +1966,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   const scope: TaskScope = { principalId: options.principalId, sessionId: options.sessionId };
 
   /**
-   * 任务引用解析：只在**本会话 scope 化列表**内把 `#编号`/taskId 解析成 taskId——
-   * 跨会话/跨 principal 的编号自然表现为「找不到」（与不存在同一 TaskOwnershipError，不泄露存在性）。
+   * 任务引用解析：只在**本会话 scope 化列表**内解析 taskId（并兼容历史 `#编号`/裸编号写法）——
+   * 跨会话/跨 principal 的任务自然表现为「找不到」（与不存在同一 TaskOwnershipError，不泄露存在性）。
+   * 编号仅作历史兼容入口，不进任何投影/工具描述/用户可见文本。
    */
   function resolveTaskId(ref: string): string {
     const wanted = ref.trim();
@@ -1978,7 +1979,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
 
   function refFromArgs(args: Record<string, unknown>): string {
     const ref = typeof args.ref === 'string' ? args.ref.trim() : '';
-    if (ref === '') throw new Error('缺少任务引用 ref（任务列表里的 #编号）。');
+    if (ref === '') throw new Error('缺少任务引用 ref（任务列表里的 taskId）。');
     return ref;
   }
 
@@ -2022,12 +2023,15 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     return { failureKind: 'executor_failed', outcomeKind: 'no_report' };
   }
 
-  /** 任务行只读投影：白名单字段，不含内部路径/租约/身份字段，也不含拼装的 failureReason 自由文本。 */
+  /**
+   * 任务行只读投影：白名单字段，不含内部路径/租约/身份字段，也不含拼装的 failureReason 自由文本。
+   * 任务编号（taskNo）不进投影——它是内部形态；指代任务用业务名（name）与不透明任务引用
+   * （taskId），够用即可，不发明新形态。编号仍留在底账/通知 payload/日志里对账。
+   */
   function statusView(task: TaskRecord): Record<string, unknown> {
     const failure = failureViewOfTask(task);
     return {
       taskId: task.taskId,
-      taskNo: task.taskNo ?? null,
       name: task.name ?? deriveTaskName(task.request),
       status: task.status,
       ...(task.reason === undefined ? {} : { reason: task.reason }),
@@ -2093,14 +2097,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   function taskCancel(args: Record<string, unknown>, runner: TaskRunner): unknown {
     const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
     const taskId = resolveTaskId(refFromArgs(args));
-    // 回执带任务身份（2026-11-18，LS6 实测缺陷）：多任务并存时模型按编号引用错任务，
-    // 旧的取消回执只有状态、看不出取消了谁，错误被掩盖。这里附上被取消任务的编号与请求原文
-    // 片段——纯机械事实，供模型/用户当场核对；查不到就照常让 runner 拒绝。
-    let identity: { taskNo?: number; taskName?: string; taskRequest?: string; taskCreatedAt?: string } = {};
+    // 回执带任务身份（2026-11-18，LS6 实测缺陷）：多任务并存时模型会引用错任务，
+    // 旧的取消回执只有状态、看不出取消了谁，错误被掩盖。这里附上被取消任务的业务名与请求原文
+    // 片段——纯机械事实，供模型/用户当场核对；编号属内部形态不进回执（底账仍有，对账用）。
+    let identity: { taskName?: string; taskRequest?: string; taskCreatedAt?: string } = {};
     try {
       const row = registry.get(taskId, scope);
       identity = {
-        ...(row.taskNo === undefined ? {} : { taskNo: row.taskNo }),
         ...(row.name === undefined ? {} : { taskName: row.name }),
         taskRequest: row.request.length > 120 ? `${row.request.slice(0, 120)}…` : row.request,
         taskCreatedAt: row.createdAt,
@@ -2109,15 +2112,14 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // 不存在/越权：保持原行为（由 runner 给出确定性拒绝）。
     }
     const outcome = runner.cancel(taskId, scope);
-    // 给用户看的一句话（2026-11-18，owner 要求）：业务名 + 编号，按结果分三种说法。
-    // 模型必须逐字引用——用户要能一眼确认"被停掉的是哪件事"，而不是读一个裸编号。
+    // 给用户看的一句话：业务名 + 结果，按结果分三种说法。编号属内部工单腔，不进模型投影/
+    // 用户面；业务名足以让用户一眼确认"被停掉的是哪件事"（底账仍有编号，对账用）。
     const label = identity.taskName ?? identity.taskRequest ?? '该任务';
-    const suffix = identity.taskNo === undefined ? '' : `（编号 ${identity.taskNo}）`;
     const userMessage = outcome.outcome === 'cancelled'
-      ? `已停止：${label}${suffix}`
+      ? `已停止：${label}`
       : outcome.outcome === 'requested'
-        ? `已请求停止：${label}${suffix}（还没确认停掉）`
-        : `没停成：${label}${suffix} 已经办完了（当前状态：${outcome.status}）`;
+        ? `已请求停止：${label}（还没确认停掉）`
+        : `没停成：${label} 已经办完了（当前状态：${outcome.status}）`;
     return { ...outcome, ...identity, userMessage, ...(reason === '' ? {} : { reason }) };
   }
 
@@ -2148,10 +2150,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     }
     const ref = rawRef !== ''
       ? rawRef
-      : waiting.length === 1 && waiting[0]!.taskNo !== undefined
-        ? `#${waiting[0]!.taskNo}`
+      : waiting.length === 1
+        ? waiting[0]!.taskId
         : (() => {
-          throw new Error(`本会话有 ${waiting.length} 个等待中的任务，请用 ref 指明要接续哪一个（#编号）。`);
+          throw new Error(`本会话有 ${waiting.length} 个等待中的任务，请用 ref 指明要接续哪一个（taskId）。`);
         })();
     const outcome = runner.resume(resolveTaskId(ref), { answer, scope });
     // 指到了但不是等待中的任务：机械结局原样保留，另给同一份事实（措辞归模型）。
@@ -2179,10 +2181,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     }
     const ref = rawRef !== ''
       ? rawRef
-      : waitingProposals.length === 1 && waitingProposals[0]!.taskNo !== undefined
-        ? `#${waitingProposals[0]!.taskNo}`
+      : waitingProposals.length === 1
+        ? waitingProposals[0]!.taskId
         : (() => {
-          throw new Error(`本会话有 ${waitingProposals.length} 个等待确认的提案，请用 ref 指明要提交哪一个（#编号）。`);
+          throw new Error(`本会话有 ${waitingProposals.length} 个等待确认的提案，请用 ref 指明要提交哪一个（taskId）。`);
         })();
     // userText = 本回合用户原话（原样，不改写）；只在确认路径交给执行端。
     const outcome = runner.confirm(resolveTaskId(ref), { userText: currentUserText, scope });
@@ -2749,10 +2751,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       (task) => task.pendingQuestion?.confirmation !== undefined,
     );
     if (waitingProposal !== undefined) {
-      const no = waitingProposal.taskNo === undefined ? '' : `（编号 #${waitingProposal.taskNo}）`;
       const summary = waitingProposal.pendingQuestion?.confirmation?.summary ?? '';
       throw new Error(
-        `还有一件事等你确认${no}：${summary}。回「确认」我就提交，回「不」我就不动；`
+        `还有一件事等你确认：${summary}。回「确认」我就提交，回「不」我就不动；`
         + '这件事确认或放弃之后再办新的。',
       );
     }
@@ -2827,7 +2828,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           if (settled.status === 'completed') {
             return {
               taskId,
-              taskNo: settled.taskNo ?? null,
               // 后台结果逐字存档在 replyText（runner settle 经 archiveReply 写）；inline 的
               // resultText 由 complete() 写——两处兼容读取，与 inline 同形状交给模型。
               summary: settled.replyText ?? settled.resultText ?? '',
@@ -2887,7 +2887,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const task = registry.get(taskId, { principalId: options.principalId, sessionId: options.sessionId });
       return {
         taskId,
-        taskNo: task.taskNo ?? null,
         name: task.name ?? deriveTaskName(task.request),
         summary: RESULT_UNKNOWN_MESSAGE,
         executions: task.executions,
@@ -2941,7 +2940,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         const current = registry.get(taskId, scope);
         return {
           taskId,
-          taskNo: current.taskNo ?? null,
           name: current.name ?? deriveTaskName(current.request),
           status: 'running',
           accepted: true,
@@ -2952,7 +2950,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       }
       registry.complete(taskId, workerResult.text);
       const task = registry.get(taskId, { principalId: options.principalId, sessionId: options.sessionId });
-      return { taskId, taskNo: task.taskNo ?? null, summary: workerResult.text, executions: task.executions };
+      return { taskId, summary: workerResult.text, executions: task.executions };
     } catch (error) {
       // 待核对不是确认失败：不覆盖 result_unknown 事实，也不再自动重试。
       if (taskUnresolved) return unresolvedReceipt();

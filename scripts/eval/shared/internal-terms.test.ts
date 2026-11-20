@@ -20,6 +20,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
+import { renderNotification } from '../../../packages/agent/src/notification-render';
+import { NOTIFICATION_KINDS, type NotificationKind } from '../../../packages/agent/src/notifications';
 import { findLiteralHits, INTERNAL_WORDS, scanUserVisibleText } from './internal-terms';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -91,6 +93,49 @@ describe('内部词匹配器', () => {
     expect(hit.excerpt).toContain('执行层');
     // 命中点前后各取 40：49-char head? 精确断言片段里 '前'*40 + 命中词 + '后'*40，两端各带一个省略号。
     expect(hit.excerpt).toBe(`…${'前'.repeat(40)}执行层${'后'.repeat(40)}…`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ①b 任务编号形态机械断言（与 INTERNAL_WORDS 分开，不扩词表；同一 scanUserVisibleText 入口）
+// ---------------------------------------------------------------------------
+
+describe('任务编号形态扫描（不扩词表，三批次共用同一入口）', () => {
+  it('#N 与「编号 N」模板产物都命中，普通数字（条数/金额）不误报', () => {
+    const { hits } = scanUserVisibleText([
+      { where: 'a', text: '任务 #7 已经办完了。' },
+      { where: 'b', text: '已请求停止（编号 7）。' },
+      { where: 'c', text: '查到 7 条记录，金额 700 元。' },
+    ]);
+    expect(hits.map((hit) => hit.marker).sort()).toEqual(['#7', '编号 7'].sort());
+    expect(hits.every((hit) => hit.excerpt.length > 0)).toBe(true);
+  });
+
+  it('走的是同一个 scanUserVisibleText 入口（三个批次改一处即覆盖；无需批次侧复制断言）', () => {
+    // 用与批次侧完全相同的调用形态（scanUserVisibleText(texts).hits）即可拿到编号命中，
+    // 证明断言已在单一来源里生效，批次侧零改动。
+    expect(scanUserVisibleText([{ where: 'x', text: '办完了 #1。' }]).hits[0]).toMatchObject({
+      where: 'x', marker: '#1',
+    });
+  });
+
+  it('真实通知模板渲染 × taskNo=7 → 通用扫描零命中（模板重新拼编号即红）', () => {
+    // 批次侧把 renderNotification 的文本送进 scanUserVisibleText（见 write-loop.ts:772 /
+    // write-loop-scenarios.ts:1379）；这里用同一条链钉住"模板不得拼编号"。反向：恢复模板编号渲染，本例红。
+    const texts = (NOTIFICATION_KINDS as readonly NotificationKind[]).map((kind) => ({
+      where: `通知(${kind})`,
+      text: renderNotification({
+        kind,
+        payload: {
+          at: '2026-11-15T08:00:00.000Z',
+          taskNo: 7,
+          name: '查十一月的发票',
+          reason: 'failed_confirmed',
+          missing: ['开票日期'],
+        },
+      }),
+    }));
+    expect(scanUserVisibleText(texts).hits).toEqual([]);
   });
 });
 

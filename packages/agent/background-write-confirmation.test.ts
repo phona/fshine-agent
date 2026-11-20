@@ -300,14 +300,15 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     const result = await callMainTool({ registry, tool: 'task_status', args: {} });
     expect(result.ok).toBe(true);
     const listed = result.value as {
-      tasks: ReadonlyArray<{ taskNo?: number }>;
+      tasks: ReadonlyArray<{ taskId?: string }>;
       total?: number;
       truncated?: number;
     };
     expect(listed.tasks).toHaveLength(10);
-    // 新→旧：第一条是最新的 #12。
-    expect(listed.tasks[0]!.taskNo).toBe(12);
-    expect(listed.tasks[9]!.taskNo).toBe(3);
+    // 新→旧：第一条是最新的 t_list_12（2026-11-20：任务编号不进投影，锚点从 taskNo 改 taskId）。
+    expect(listed.tasks[0]!.taskId).toBe('t_list_12');
+    expect(listed.tasks[9]!.taskId).toBe('t_list_3');
+    for (const task of listed.tasks) expect(task).not.toHaveProperty('taskNo');
     expect(listed.total).toBe(12);
     expect(listed.truncated).toBe(2);
   });
