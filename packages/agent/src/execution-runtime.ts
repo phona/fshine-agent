@@ -1063,37 +1063,39 @@ const SETTLED_TASK_STATUSES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * 写确认续跑事实块（P0，2026-11-19；载荷随行 = 2026-11-19 live 修复）：存在待确认提案、
- * 用户已在上一回合表态时，宿主从底账提案组装这条**机械事实**（不是话术补丁），交给
- * renderWorkerDelegation 的 `confirmationFact`。
+ * 确认续跑的「本次任务」正文（S3，2026-11-20）：用户明确确认后，宿主从底账提案组装这段文本，
+ * **直接顶替原始交办 prose 作为委派的本次任务**，原始交办 prose（含被用户改掉的旧值）让位。
  *
- * 载荷随行的根因（真模型验收实跑）：续跑 Worker 是**新会话、没有转录**，只拿人话摘要时只能
- * 自己重编参数——而摘要超过 10 条会被截断（执行层只列前 10 条），实测漏掉 `--records` →
- * 与执行层的绑定校验相撞（CONFIRMATION_BINDING_MISMATCH / CONFIRMATION_REQUIRED），写不进去。
- * 所以提案时的参数**原文**（opaque：宿主不解析业务字段）随事实一并交回，Worker 原样照抄提交。
- * handle 不进委派文本（Worker 永远看不到确认凭据）。
+ * 根因（真模型 live 验收）：续跑回合 Worker 拿原始交办 prose 重跑 prepare（13/14 个回合），
+ * 且拿的是最早那份交办原文的旧值（原话 b=2，已确认写进提案的是 b=9）。把已确认提案的载荷
+ * 原文顶成本次任务后，Worker 直接对已确认提案提交，旧值没有机会覆盖已确认值。
+ * 只写正向动作「提交这份已确认提案」，以已确认值（提案 args）为唯一任务内容；非确认回合
+ * （首轮 / 改口径 resume / 句柄过期）不走本函数，仍用原始交办 prose。
  *
- * 2026-11-20（fix/visible-contract）动作指令明确化：真模型验收 13/14 个续跑回合先重跑 prepare
- * 而不是 commit——根因是事实块把 `operation: dummy.prepare` 与参数一起交回、又只说「原样提交」，
- * 模型照着那个 operation 名又准备了一次。修法：① 动作写成明确的「下一步是**提交**（用提交类
- * operation，如 commit），不是重新准备」；② **不再把提案时的 operation 名写进 JSON**（只留
- * `{"args":…}` 参数原文，并注明这是提案时的记录、不是要重跑的 operation），消除误导。
- * 缺省（无提案/非续跑/旧记录没有参数）由调用方不传字段或渲染端保持不变。
+ * 载荷随行（2026-11-19 live 修复）：续跑 Worker 是新会话、没有转录，提案参数**原文**
+ * （opaque：宿主不解析业务字段）逐字交回，Worker 原样照抄提交——摘要超 10 条会截断，
+ * 只给人话摘要会让 Worker 重编参数（漏 --records）撞执行层绑定校验。handle 不进委派。
+ * 缺省（旧记录没有参数）：只给摘要 + 提交指令，不编造载荷。
  */
 export function renderConfirmationResumeFact(confirmation: {
   summary: string;
   operation?: string;
   args?: Record<string, unknown>;
 }): string {
-  const head = `用户已确认上一轮提案（摘要：${confirmation.summary}）。下一步是提交（用提交类 operation，如 commit），不是重新准备、也不是重新生成提案。`;
-  if (confirmation.args === undefined) return head;
+  // 2026-11-20（S3 确认提案）：这段文本**直接作为委派的「本次任务」正文**，不是补充说明。
+  // 原始交办 prose（含被用户改掉的旧值 b=2）不进这次委派；本次任务就是已确认提案的载荷原文。
+  // 只写正向指令「提交这份已确认提案」，不写「不是重新准备 / 不要重新生成提案」这类否定话术：
+  // 否定词本身就成了 prepare 线索（真模型 13/14 个续跑先重跑 prepare），且属于 A 类提示补丁。
+  const head = `提交上一轮已确认的提案（摘要：${confirmation.summary}）。`;
+  if (confirmation.args === undefined) {
+    return `${head}\n按已确认的提案直接提交。`;
+  }
   // 参数按不透明数据处理：只序列化，不排序、不裁剪、不改写（逐字节照抄才是机械事实）。
-  // 不带 operation 名——提案时的 prepare 名会误导模型重跑 prepare；提交用哪个 operation 由
-  // 委派清单（含带 --confirmation 的 commit）自己说清，这里只交参数原文。
+  // 不带 operation 名——提交用哪个 operation 由委派清单（含带 --confirmation 的 commit）自己说清。
   const proposal = JSON.stringify({ args: confirmation.args });
   return [
     head,
-    '提案时的调用参数原文（机械事实；这是提案时的记录，不是要重跑的 operation 名）：提交时逐字复用这些参数，特别是 records，不要省略或改写任何参数。',
+    '下面是已确认提案的调用参数原文（宿主逐字持有）：按这些参数直接提交，不要省略或改写任何参数。',
     proposal,
   ].join('\n');
 }
@@ -1153,14 +1155,6 @@ export function renderWorkerDelegation(input: {
    */
   resumeNote?: string;
   /**
-   * 写确认续跑的事实块（P0，2026-11-19）：存在待确认提案、且用户已在上一回合表态时，
-   * 由宿主从底账提案组装这条**机械事实**（不是话术补丁）——新 Worker 没有上一回合转录，
-   * 不知道「用户在等确认、已经确认了」，会重新走 prepare 再出一次提案。给这条即让
-   * Worker 直接提交、不重新生成提案。只含可展示摘要与指令；句柄/操作名不进委派文本
-   * （Worker 永远看不到 handle）。缺省 undefined = 拼接逐字节不变。
-   */
-  confirmationFact?: string;
-  /**
    * 句柄过期的续跑事实块（2026-11-19 owner 口径修正）：上一份提案已过期，宿主接续一个回合
    * 让 Worker 重新生成同一提案（内容没变就照原样再提一次，不要擅自改参数）。只含机械指令，
    * 不含句柄。缺省 undefined = 拼接逐字节不变。
@@ -1179,9 +1173,6 @@ export function renderWorkerDelegation(input: {
   ];
   if (input.answer !== undefined && input.answer.trim() !== '') {
     parts.push('', '## 用户补充（对上一次待办问题的答复）', input.answer);
-  }
-  if (input.confirmationFact !== undefined && input.confirmationFact.trim() !== '') {
-    parts.push('', '## 写确认续跑', input.confirmationFact);
   }
   if (input.confirmationExpiredFact !== undefined && input.confirmationExpiredFact.trim() !== '') {
     parts.push('', '## 写确认续跑', input.confirmationExpiredFact);
@@ -4200,7 +4191,14 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           // 不再给 Worker 通用 execute_operation；Main 工具面不动。允许集合在 exec 发起前裁决。
           tools: [...workerOperationTools(workerToolManifest), ...(options.runJsExecutor === undefined ? [] : [runJsTool('worker')])],
           messages: [userMessage(renderWorkerDelegation({
-            task: task.request,
+            // 2026-11-20（S3 确认提案）：确认续跑的「本次任务」= 已确认提案的载荷原文（宿主机械
+            // 持有、逐字），原始交办 prose **让位、不进本次委派**。根因：真模型 13/14 个续跑回合
+            // 拿原始 prose（含被用户改掉的旧值 b=2）重跑 prepare；把载荷原文顶成任务正文后，
+            // Worker 直接对已确认提案提交，旧值没有机会覆盖已确认值（b=9）。
+            // 非确认回合（首轮 / 改口径 resume / 句柄过期）仍用原始交办 prose，语义零变化。
+            task: pendingConfirmation === undefined
+              ? task.request
+              : renderConfirmationResumeFact(pendingConfirmation),
             manifest: workerManifest,
             ...(options.workerSkills === undefined ? {} : { skills: options.workerSkills }),
             // 后台文件面：清单只含当前任务的绑定行（交办副本/任务文件），Main 源 fileId 不进转录。
@@ -4209,12 +4207,6 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
               : { files: delegationFiles, fileManifestHint: BACKGROUND_FILE_MANIFEST_HINT }),
             // waiting_user 续跑回合：用户补答必须随委派交给执行端（新 Worker 没有上一回合转录）。
             ...(task.answer === undefined ? {} : { answer: task.answer }),
-            // 写确认续跑（显式确认切片）：**只有确认路径**才带 pendingConfirmation（见上）——
-            // 用户明确确认 → 机械事实随委派交给 Worker，让它直接提交、不重新生成提案
-            //（摘要可展示；handle 不进委派文本）。resume（改口径）不带该事实。
-            ...(pendingConfirmation === undefined
-              ? {}
-              : { confirmationFact: renderConfirmationResumeFact(pendingConfirmation) }),
             // 句柄过期（owner 2026-11-19）：不带旧句柄，改为机械事实让 Worker 重新生成同一提案。
             ...(confirmationExpired ? { confirmationExpiredFact: renderConfirmationExpiredFact() } : {}),
             // 长任务续跑：wait 终态（已登记文件只有 fileId）原样注入本次委派。
