@@ -1004,8 +1004,9 @@ export type TurnRetryBlock = RetryBlock;
 /**
  * 本回合等待窗口观察到的任务终态（缺陷 A，2026-11-21 live）。
  *
- * 判据是机械的：只有回合**自己观察到**的落定才算——task_run 的短等待窗口
- * （waitForTaskSettled）与 task_cancel 的落定窗口（见 taskCancel）。回合外落定
+ * 判据是机械的：只有回合**自己观察到**的落定才算——当前唯一写入点是 task_cancel
+ * 的落定窗口（见 taskCancel）；task_run 短等待窗口捕获的非完成终态走既有
+ * pushSuppressedTaskIds 路径，不进本列表。回合外落定
  * （后台完成/重启对账/长任务结束）不进这个列表，状态变化唤醒照发。
  * kind 只取有状态变化唤醒出口的三类（completed/failed/cancelled）；其余终态
  * （timed_out/unexecuted）没有唤醒出口，不观察、不抑制。

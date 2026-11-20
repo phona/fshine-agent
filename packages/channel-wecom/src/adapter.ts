@@ -206,7 +206,6 @@ export function withReplyQuote(originalText: string, content: string): string {
   const fragment = originalText.replace(/\s+/gu, ' ').trim().slice(0, DEGRADE_QUOTE_MAX_CHARS);
   if (fragment === '') return content;
   return truncateReply(`回复「${fragment}」：\n\n${content}`).text;
-  return truncateReply(`回复「${fragment}」：\n\n${content}`).text;
 }
 
 /**
