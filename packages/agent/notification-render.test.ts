@@ -113,3 +113,30 @@ describe('R5 文案渲染：name 必含', () => {
     expect(text).toContain('未命名任务');
   });
 });
+
+/**
+ * 任务编号收口（2026-11-20）：taskNo 是内部底账形态，用户可见面不得出现工单腔的
+ * `#N` / 「编号 N」模板产物。内部 payload 仍保留 taskNo（对账用），只是渲染不得带出。
+ * 反向绊线：把 BLACKLIST 的任务编号两条删掉，本例与通用扫描（internal-terms.test）即红。
+ */
+describe('任务编号不进用户可见文本（taskNo=7）', () => {
+  const TASK_NO_SHAPE = /#\d+|编号\s*#?\d+/;
+
+  it('9 类文案 × taskNo=7：输出既无 #7 也无「编号 7」模板产物', () => {
+    for (const kind of NOTIFICATION_KINDS as readonly NotificationKind[]) {
+      const text = renderNotification({
+        kind,
+        payload: payload({ taskNo: 7, reason: 'failed_confirmed', missing: ['窗口'] }),
+      });
+      expect(text, `kind=${kind} 不得含工单编号：${text}`).not.toMatch(TASK_NO_SHAPE);
+      expect(text).not.toContain('7'); // 精确断言：name/摘要里本就没有 7，模板也未拼入编号。
+    }
+  });
+
+  it('即使 name 混进编号措辞，渲染器的黑名单断言也拒绝（源头挡，不靠调用方）', () => {
+    // name 本是执行层/用户原话，但「#7 / 编号 7」是工单腔——断言拼装文本时一并拒绝。
+    for (const bad of ['#7 的发票', '编号 7 的发票']) {
+      expect(() => assertUserLanguage(`办完了：${bad}。`)).toThrow(NotificationLanguageError);
+    }
+  });
+});

@@ -148,7 +148,7 @@ describe('缺口 1 · 对话面任务工具', () => {
     const listed = value<{ tasks: unknown[] }>(b.turns[0]!.results[0]!);
     expect(listed.tasks).toEqual([]);  });
 
-  it('task_status：空 ref 列本会话任务；#编号 返回状态与 pendingQuestion', async () => {
+  it('task_status：空 ref 列本会话任务；taskId 返回状态与 pendingQuestion（投影不带任务编号）', async () => {
     const registry = createTaskRegistry();
     seed(registry, SCOPE_A, 't1', '查 documents 窗口 W202611');
     registry.waitForUser('t1', { missing: ['窗口编号'] });
@@ -157,15 +157,18 @@ describe('缺口 1 · 对话面任务工具', () => {
     const { session, turns } = await build([{ tool: 'task_status', args: {} }], { registry });
     await session.send('我那两个任务怎么样了');
     const listed = value<{ tasks: Array<Record<string, unknown>> }>(turns[0]!.results[0]!);
-    // 2026-11-19：列表改为新→旧（live 实测：老的排前面时，模型会去抓 #20 的旧任务来答当前问题）。
-    expect(listed.tasks.map((task) => task.taskNo)).toEqual([2, 1]);
+    // 2026-11-20：任务编号不进模型投影——列表用不透明 taskId 指代（新→旧）。
+    // 断言锚点从 taskNo 改成 taskId（原断言断的是"用户/模型可见面出现编号"，该行为已废）。
+    expect(listed.tasks.map((task) => task.taskId)).toEqual(['t2', 't1']);
+    for (const task of listed.tasks) expect(task).not.toHaveProperty('taskNo');
 
-    const one = await build([{ tool: 'task_status', args: { ref: '#1' } }], { registry });
+    const one = await build([{ tool: 'task_status', args: { ref: 't1' } }], { registry });
     await one.session.send('第一个任务在等什么');
     const hit = value<Record<string, unknown>>(one.turns[0]!.results[0]!);
     expect(hit.status).toBe('waiting_user');
     expect(hit.pendingQuestion).toEqual({ missing: ['窗口编号'] });
     expect(hit.name).toBe('查 documents 窗口 W202611');
+    expect(hit).not.toHaveProperty('taskNo');
   });
 
   it('越权=找不到：同一底账内跨会话同编号不可见（不泄露存在性）', async () => {
@@ -328,7 +331,8 @@ describe('缺口 1 · 对话面任务工具', () => {
     });
     await session.send('帮我查一下');
     const receipt = value<Record<string, unknown>>(turns[0]!.results[0]!);
-    expect(receipt.taskNo, 'inline 回执必须带 taskNo（当前会话首任务为 1）').toBe(1);
+    // 2026-11-20：回执是模型可见投影，不带 taskNo；taskId 是唯一的无编号指代。
+    expect(receipt).not.toHaveProperty('taskNo');
     expect(typeof receipt.taskId).toBe('string');
   });
 

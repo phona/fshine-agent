@@ -60,9 +60,33 @@ export function findLiteralHits(texts: readonly VisibleText[], markers: readonly
 }
 
 /**
- * 通用入口：扫描一批用户可见文本里是否出现内部词。
+ * 任务编号形态（工单腔四项之一）：`#N` 与模板产物「编号 N / 编号 #N」。
+ *
+ * 与 INTERNAL_WORDS 分开——词表逐字冻结、不扩词；这是独立的**形状断言**（正则），
+ * 和字面词表走同一个 `scanUserVisibleText` 入口，故三个用户级批次自动生效（不复制三份）。
+ * 编号仍留在底账/日志/审计里对账，这里只拦用户可见文本。
+ */
+export const TASK_NO_SHAPE_RE = /#\d+|编号\s*#?\d+/gu;
+
+/** 在用户可见文本里找任务编号形态的命中（marker = 命中的那段文本）。 */
+export function findTaskNumberHits(texts: readonly VisibleText[]): Hit[] {
+  const hits: Hit[] = [];
+  for (const { where, text } of texts) {
+    TASK_NO_SHAPE_RE.lastIndex = 0; // global 正则先归零，避免跨文本状态泄漏。
+    for (const match of text.matchAll(TASK_NO_SHAPE_RE)) {
+      const index = match.index ?? 0;
+      hits.push({ where, marker: match[0], excerpt: excerptAt(text, index, match[0].length) });
+    }
+  }
+  return hits;
+}
+
+/**
+ * 通用入口：扫描一批用户可见文本里是否出现内部词或任务编号形态。
  * 返回 { hits }，hits 每项含 where、marker、excerpt（命中位置前后各 40 字符）。
+ * 三批（write-loop / write-loop-scenarios / convergence-r1）共用这一个入口；
+ * 新增形状断言只改这里，批次侧零改动。
  */
 export function scanUserVisibleText(texts: readonly VisibleText[]): { hits: Hit[] } {
-  return { hits: findLiteralHits(texts, INTERNAL_WORDS) };
+  return { hits: [...findLiteralHits(texts, INTERNAL_WORDS), ...findTaskNumberHits(texts)] };
 }
