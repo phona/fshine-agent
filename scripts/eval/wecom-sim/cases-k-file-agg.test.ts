@@ -435,7 +435,10 @@ function parseFileTotal(stdout: string): { total: number; byCustomer: Record<str
 /** 核对汇报（数字全部来自两边真实读数）：如实报差额、声明未改动、给可执行下一步。 */
 function reconcileText(fileTotal: number, execTotal: number): string {
   const diff = execTotal - fileTotal;
-  return `我把两边都核了一遍：文件里合计 ${fileTotal} 元，执行层 documents W202611 合计 ${execTotal} 元，两边差 ${diff} 元。我没有改动任何一边。下一步建议：以执行层为准，让财务重新导出这份文件后再核对一次。`;
+  // 「执行层」是内部词（2026-11-21 用户可见面泄漏守卫）：这句经 Main 转述成为用户气泡；
+  // 对象就用用户自己的说法「documents 集合」（原话：这份明细和 documents 集合 W202611 的合计），
+  // 差额/未改动/下一步事实与全部数字原样保留。
+  return `我把两边都核了一遍：文件里合计 ${fileTotal} 元，documents 集合 W202611 记录的合计 ${execTotal} 元，两边差 ${diff} 元。我没有改动任何一边。下一步建议：以 documents 集合的记录为准，让财务重新导出这份文件后再核对一次。`;
 }
 
 /*

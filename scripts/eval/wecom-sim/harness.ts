@@ -40,6 +40,7 @@ import {
   type ConversationStreamResult,
   type DeliveryProvenanceTarget,
 } from '../shared/conversation-shape';
+import { scanUserVisibleText } from '../shared/internal-terms';
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import { EXECUTE_OPERATION_TOOL } from '../../../packages/agent/src/execution-runtime';
 import { withInternalExecTool } from '../../../packages/agent/testing/internal-exec-fixture';
@@ -58,12 +59,16 @@ const DEFAULT_CONVERSATION_ID = 'conv-w';
 export const NUDGE_AFTER_MS = 30_000;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 对话形态自动守卫（要求 D，2026-11-21）：每个用例结束时，对**每个**启动过的夹具跑一遍
-// 四条对话形态规则（scripts/eval/shared/conversation-shape.ts 单源实现；不复制）。
+// 每用例自动守卫（2026-11-21）：每个用例结束时，对**每个**启动过的夹具跑两道机械检查。
+// ① 对话形态（要求 D）：四条对话形态规则（scripts/eval/shared/conversation-shape.ts 单源实现；
+//    不复制）。
 //   · inbound = 夹具的发帧记录（sendText/sendFile）；
 //   · reply   = adapter 的 replyStream 终帧（finish=true 且未被拒收；reqId → 消息锚点）；
 //   · delivery = 主动推送（proactiveTexts）+ 宿主 sent 记账行的归属补填（factKind）。
-// 违规即该用例失败（afterEach 抛错，打印违规 code 与上下文）。负例控制用例用
+// ② 内部词/内部标识泄漏（2026-11-21）：用户可见面（终帧气泡 + 主动推送，与形态守卫同口径）
+//    走 shared/internal-terms 的单一入口 scanUserVisibleText（内部词 + 任务编号形态 +
+//    taskId 形态）——与 write-loop / write-loop-scenarios / convergence-r1 三批同一来源。
+// 违规即该用例失败（afterEach 抛错，打印违规 code / marker 与上下文）。负例控制用例用
 // disarmShapeGuard() 解除自动守卫、在用例体内自行断言违规存在。
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -75,18 +80,31 @@ interface PendingShapeCheck {
 
 const pendingShapeChecks: PendingShapeCheck[] = [];
 
+/** 一次待检的泄漏扫描快照（close 时装配，afterEach 统一判）。 */
+interface PendingLeakCheck {
+  readonly label: string;
+  readonly hits: ReadonlyArray<{ where: string; marker: string; excerpt: string }>;
+}
+
+const pendingLeakChecks: PendingLeakCheck[] = [];
+
 afterEach(() => {
-  if (pendingShapeChecks.length === 0) return;
-  const pending = pendingShapeChecks.splice(0, pendingShapeChecks.length);
   const failures: string[] = [];
-  for (const snapshot of pending) {
+  const pendingShapes = pendingShapeChecks.splice(0, pendingShapeChecks.length);
+  for (const snapshot of pendingShapes) {
     for (const result of snapshot.results) {
       if (result.violations.length === 0) continue;
       failures.push(`[sim ${snapshot.label} · 会话 ${result.conversationId}]\n${formatShapeViolations(result.violations)}`);
     }
   }
+  const pendingLeaks = pendingLeakChecks.splice(0, pendingLeakChecks.length);
+  for (const snapshot of pendingLeaks) {
+    for (const hit of snapshot.hits) {
+      failures.push(`[sim ${snapshot.label} · ${hit.where}] 用户可见面出现内部词/内部标识「${hit.marker}」：…${hit.excerpt}…`);
+    }
+  }
   if (failures.length > 0) {
-    throw new Error(`对话形态断言违规（wecom-sim 每用例守卫）：\n${failures.join('\n')}`);
+    throw new Error(`用户可见面守卫违规（wecom-sim 每用例守卫：对话形态 + 内部词/内部标识泄漏）：\n${failures.join('\n')}`);
   }
 });
 
@@ -681,8 +699,16 @@ export interface WecomSimFixture {
    */
   shapeViolations(): readonly ConversationStreamResult[];
   /**
-   * 解除本夹具的对话形态自动守卫（负例控制专用：人为制造违规的用例自己断言违规存在，
-   * 不需要 afterEach 再抛一次）。守卫的活体性由「注入违规 → 用例变红 → 恢复」演示登记。
+   * 用户可见面泄漏扫描（2026-11-21）：对当前累计的终帧气泡 + 主动推送跑
+   * shared/internal-terms 的 scanUserVisibleText（内部词 + 任务编号形态 + taskId 形态），
+   * 返回命中。close() 时会自动再跑一遍（命中即该用例失败）；本方法供负例控制用例
+   * 在用例体内直接取读数。
+   */
+  leakHits(): ReadonlyArray<{ where: string; marker: string; excerpt: string }>;
+  /**
+   * 解除本夹具的每用例自动守卫（对话形态 + 泄漏扫描；负例控制专用：人为制造违规的
+   * 用例自己断言违规存在，不需要 afterEach 再抛一次）。守卫的活体性由
+   * 「注入违规 → 用例变红 → 恢复」演示登记。
    */
   disarmShapeGuard(): void;
   /**
@@ -907,6 +933,19 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
     })));
   };
 
+  /**
+   * 泄漏扫描快照（2026-11-21）：取值面与对话形态守卫同口径——终帧气泡（finish 且未被拒收）
+   * + 主动推送；被拒帧只是可观测的出站尝试，用户没看到，不算可见面。单一入口
+   * scanUserVisibleText（内部词 + 任务编号形态 + taskId 形态），与三批用户级批次同源。
+   */
+  const buildLeakHits = (): ReadonlyArray<{ where: string; marker: string; excerpt: string }> =>
+    scanUserVisibleText([
+      ...sdk.bubbles
+        .filter((bubble) => bubble.finish && bubble.rejected !== true)
+        .map((bubble) => ({ where: `气泡(req=${bubble.reqId})`, text: bubble.content })),
+      ...sdk.proactiveTexts.map((record, index) => ({ where: `主动推送#${index}`, text: record.content })),
+    ]).hits;
+
   const fixture: WecomSimFixture = {
     sdk,
     clock,
@@ -962,6 +1001,9 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
     shapeViolations() {
       return buildShapeResults();
     },
+    leakHits() {
+      return buildLeakHits();
+    },
     disarmShapeGuard() {
       shapeGuardDisarmed = true;
     },
@@ -980,11 +1022,13 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
     async close() {
       // 快照在拆卸前装配（任务名要从底账读）；守卫未解除时挂给 afterEach 统一判（违规即该用例失败）。
       const shapeResults = buildShapeResults();
+      const leakHits = buildLeakHits();
       await channel.stop();
       await server.close();
       rmSync(root, { recursive: true, force: true });
       if (!shapeGuardDisarmed) {
         pendingShapeChecks.push({ label: options.label ?? `fx-${fixtureSeq}`, results: shapeResults });
+        pendingLeakChecks.push({ label: options.label ?? `fx-${fixtureSeq}`, hits: leakHits });
       }
     },
   };
@@ -1032,6 +1076,7 @@ export function describeOutcome(outcome: Record<string, unknown>): string {
   }
   if (status === 'needs_input') {
     // 执行层显式要补充输入（fixture 的 requires 或歧义）：原样转述「缺什么」。
+    // 措辞不带内部词（2026-11-21 用户可见面泄漏守卫）：这句会被转述成用户气泡。
     const raw = Array.isArray(outcome['missing']) ? (outcome['missing'] as unknown[]) : [];
     const missing = raw.map((entry) => {
       if (typeof entry === 'string') return entry;
@@ -1039,7 +1084,7 @@ export function describeOutcome(outcome: Record<string, unknown>): string {
       if (typeof record.description === 'string' && record.description !== '') return record.description;
       return typeof record.name === 'string' ? record.name : '';
     }).filter((entry) => entry !== '');
-    return `执行层要求补充输入：${missing.length > 0 ? missing.join('、') : (error.message ?? '未说明')}。`;
+    return `还需要补充一些信息才能继续：${missing.length > 0 ? missing.join('、') : (error.message ?? '未说明')}。`;
   }
   if (status === 'refused') {
     // 模型可见面收口（2026-11-19）：refused 投影只带 kind + note（无原始码/原文）。

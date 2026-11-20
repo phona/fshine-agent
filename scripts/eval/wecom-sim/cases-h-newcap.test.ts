@@ -45,6 +45,13 @@ const relayWhatever = (call: { messages: readonly unknown[] }) => {
   const result = lastToolResultJsonOf(call.messages);
   const text = result?.['summary'] ?? result?.['notice'];
   if (typeof text === 'string' && text !== '') return textAssistant(text);
+  // 超窗受理事实（taskId/name/status/accepted:true，宿主不带任何回执话术——owner 2026-11-19）：
+  // 模型自己按事实说一句受理。机械 JSON 不能原样转给用户（taskId 是内部标识，2026-11-21
+  // 用户可见面泄漏守卫，与三批共用同一 scanUserVisibleText 入口，会红）；其余工具错误仍走
+  // 原样转述兜底（那是要暴露给用例的漂移证据）。
+  if (result?.['accepted'] === true && typeof result?.['name'] === 'string') {
+    return textAssistant(`好的，「${String(result['name'])}」交给后台去跑，好了就发给你。`);
+  }
   const toolResult = lastToolResultOf(call.messages);
   if (toolResult !== undefined && toolResult.text !== '') return textAssistant(toolResult.text);
   throw new Error('Main 没有拿到任何可转述的结果。');

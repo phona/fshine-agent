@@ -2,8 +2,9 @@
  * 用户可见文本「内部词」通用守卫的绊线（scripts/eval/shared/internal-terms.test.ts）。
  *
  * 两部分：
- *   ① 匹配器单测：正常文本零命中；「执行层确认过了。」命中 marker 执行层；反向绊线直接可验
- *      （改词表 / 改 findLiteralHits / 改 excerpt 半径，本组用例即红）。
+ *   ① 匹配器单测：正常文本零命中；「执行层确认过了。」命中 marker 执行层；taskId 形态
+ *      （task_ + ≥8 位标识段）命中实测泄漏句（①c）；反向绊线直接可验
+ *      （改词表 / 改 findLiteralHits / 改 excerpt 半径 / 去掉 taskId 形态判据，本组用例即红）。
  *   ② 静态守卫：一份**显式文件清单**（write-loop / write-loop-scenarios / convergence-r1 runner
  *      + live-replay）逐个用 **TypeScript AST** 断言文件里确实存在对扫描函数的 CallExpression；
  *      并用 glob 枚举 `scripts/eval/real/write-loop*.ts` 与 `scripts/eval/convergence-r1/runner.ts`，
@@ -140,7 +141,39 @@ describe('任务编号形态扫描（不扩词表，三批次共用同一入口�
 });
 
 // ---------------------------------------------------------------------------
-// ② 静态守卫：显式清单 + glob 闭包（新增批次忘接入会红，删调用会红）
+// ①c taskId 形态机械断言（2026-11-21 稳定性批次实测泄漏；与词表/任务编号形态并列，同一入口）
+// ---------------------------------------------------------------------------
+
+describe('taskId 形态扫描（task_ + ≥8 位标识段；不扩词表，同一 scanUserVisibleText 入口）', () => {
+  it('稳定性批次实测泄漏句（stop 场景受理话术）→ 命中，marker=命中原文，excerpt 引原文', () => {
+    const { hits } = scanUserVisibleText([
+      { where: '回合1 回复', text: '好的，已经请求停止（任务号 task_db2b3ca3），任务不会继续跑。' },
+    ]);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({ where: '回合1 回复', marker: 'task_db2b3ca3' });
+    // excerpt 引输出原文：命中段 + 前后各 40 字符。
+    expect(hits[0]!.excerpt).toContain('task_db2b3ca3');
+    expect(hits[0]!.excerpt).toContain('任务号');
+  });
+
+  it('正常文本零命中（短后缀/无前缀/普通数字不误报）', () => {
+    expect(scanUserVisibleText([
+      { where: 'a', text: '已经办完了，共 4 条记录。' },
+      { where: 'b', text: '这件事办好了。' },
+      { where: 'c', text: 'task_ 少于 8 位不叫 taskId，task_x 也不是。' },
+      { where: 'd', text: ' Tasks 列表见附件。' },
+    ]).hits).toEqual([]);
+  });
+
+  it('走的是同一个 scanUserVisibleText 入口（批次侧零改动；与任务编号形态并列）', () => {
+    // 与批次侧完全相同的调用形态即可拿到 taskId 命中，证明新形状在单一来源里生效。
+    const { hits } = scanUserVisibleText([{ where: 'x', text: '任务号 task_ab12cd34 已停止。' }]);
+    expect(hits.some((hit) => hit.marker === 'task_ab12cd34')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ② 静态守卫：显式清单 + glob 闭包（新增批次忘接入即红，删调用会红）
 // ---------------------------------------------------------------------------
 
 /**
@@ -159,6 +192,7 @@ const WIRING: ReadonlyArray<{
   { file: 'scripts/eval/real/write-loop.ts', fn: 'scanWriteLoopLeaks', expectScan: true, why: 'write-loop 用户级批次入口' },
   { file: 'scripts/eval/real/write-loop-scenarios.ts', fn: 'scanScenarioLeaks', expectScan: true, why: 'write-loop-scenarios 用户级批次入口' },
   { file: 'scripts/eval/convergence-r1/runner.ts', fn: 'scanTrialLeaks', expectScan: true, why: 'convergence-r1 runner 用户级批次入口' },
+  { file: 'scripts/eval/wecom-sim/harness.ts', fn: 'scanUserVisibleText', expectScan: true, why: 'wecom-sim 用户可见面每用例守卫（close 时扫描，afterEach 判）' },
   { file: 'scripts/eval/real/live-replay.ts', fn: 'findLiteralHits', requiredArg: 'INTERNAL_WORDS', expectScan: true, why: 'live-replay 既有内部词断言（词表单一来源）' },
   { file: 'scripts/eval/real/write-loop.test.ts', fn: '', expectScan: false, why: 'write-loop 绊线测试（非批次入口，glob 命中）' },
   { file: 'scripts/eval/real/write-loop-scenarios.test.ts', fn: '', expectScan: false, why: 'write-loop-scenarios 绊线测试（非批次入口，glob 命中）' },
@@ -182,16 +216,17 @@ describe('静态守卫：所有用户级批次都接入了扫描', () => {
     }
   });
 
-  it('glob 枚举 write-loop*.ts 与 convergence-r1/runner.ts 全部落在清单里（新增批次忘接入即红）', () => {
+  it('glob 枚举 write-loop*.ts、convergence-r1/runner.ts、wecom-sim/harness.ts 全部落在清单里（新增批次忘接入即红）', () => {
     const enumerated = [
       ...globSync('scripts/eval/real/write-loop*.ts', { cwd: REPO_ROOT }),
       ...globSync('scripts/eval/convergence-r1/runner.ts', { cwd: REPO_ROOT }),
+      ...globSync('scripts/eval/wecom-sim/harness.ts', { cwd: REPO_ROOT }),
     ].sort();
     const listed = WIRING.map((entry) => entry.file).sort();
     for (const file of enumerated) {
       expect(listed, `新增/现存批次 ${file} 未登记进通用泄漏守卫清单（忘了接入）`).toContain(file);
     }
-    // 清单里至少三个 expectScan 的批次入口被登记（防止把 batches 全标 false 绕过守卫）。
-    expect(WIRING.filter((entry) => entry.expectScan)).toHaveLength(4);
+    // 清单里至少四个 expectScan 的批次入口被登记（防止把 batches 全标 false 绕过守卫）。
+    expect(WIRING.filter((entry) => entry.expectScan)).toHaveLength(5);
   });
 });
