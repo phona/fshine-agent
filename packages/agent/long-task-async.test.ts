@@ -390,7 +390,7 @@ describe('长任务异步（契约 v4）', () => {
     expect(registry2.get('A', SCOPE).status).toBe('completed');
     const resumed = driver.rounds.filter((round) => round.resumed);
     expect(resumed).toHaveLength(1);
-    expect(resumed[0]!.delegation).toContain('宿主曾重启');
+    expect(resumed[0]!.delegation).toContain('续跑·上下文重建');
     // 续跑注记说清「上一回合已发起过」：执行层总共只被调用一次。
     expect(client.executeCalls).toHaveLength(1);
     registry2.close();

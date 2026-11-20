@@ -10,10 +10,11 @@
  *   ⑤ Main 系统提示正文（agent.md 经 applyExecutorLabel 渲染后的最终文本）无内部词；
  *   ⑥ Worker 系统提示的渲染形状（renderWorkerSystemPrompt 带工作目录块）无内部词；
  *   ⑦ 失败原因链（execution-runtime 空汇报 reason → taskFailureFactText 机械原因段）无内部词。
- * 内部词含「执行层 / 执行端 / 确认凭据」——都是不该出现在给模型/用户文本里的宿主内部形态。
- * 内部词是确定性事实（不该出现在给模型/用户的文本里），不是模型行为评估。
+ * 内部词含「执行层 / 执行端 / 确认凭据 / 宿主 / 委派 / 能力快照 / 执行面 / 凭据」——都是不该
+ * 出现在给模型/用户文本里的宿主内部形态（2026-11-20 扩面：复核发现 run_js 描述/续跑注记/
+ * 后台文件提示/技能正文里仍有漏网）。内部词是确定性事实，不是模型行为评估。
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -27,6 +28,11 @@ import {
   MAIN_PROTOCOL_NOTE_WITH_WRITES,
   WORKER_SYSTEM_PROMPT,
   TASK_CANCEL_TOOL_DESCRIPTION,
+  RUN_JS_TOOL_DESCRIPTION,
+  WORKER_RUN_JS_TOOL_DESCRIPTION,
+  RUN_JS_TOOL_SCHEMA,
+  BACKGROUND_FILE_MANIFEST_HINT,
+  longTaskResumeNote,
   renderWorkerSystemPrompt,
   renderWorkerDelegation,
   workerDelegationManifest,
@@ -36,7 +42,7 @@ import { DEFAULT_EXECUTOR_LABEL, loadAgentProfile, applyExecutorLabel } from '..
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome, ExecutionRequest } from '@fshine/contracts/execution-contract';
 import type { TurnDriver } from '../../packages/agent/src/driver-contract';
 
-const INTERNAL = /执行层|执行端|确认凭据/;
+const INTERNAL = /执行层|执行端|确认凭据|宿主|委派|能力快照|执行面|凭据/;
 
 describe('完成/失败事实文本：不含内部词，保留关键事实', () => {
   it('① 完成事实：无「执行层/执行端」，保留「办完了」与结果正文逐字', () => {
@@ -71,7 +77,7 @@ describe('模型上下文文本：工具描述/协议提示/Worker 提示不含�
     ['DEFAULT_EXECUTOR_LABEL', DEFAULT_EXECUTOR_LABEL],
   ];
   for (const [name, text] of texts) {
-    it(`${name} 不含「执行层/执行端/确认凭据」`, () => {
+    it(`${name} 不含内部词（执行层/执行端/确认凭据/宿主/委派/能力快照/执行面/凭据）`, () => {
       expect(text).not.toMatch(INTERNAL);
     });
   }
@@ -99,6 +105,71 @@ describe('模型上下文文本：工具描述/协议提示/Worker 提示不含�
     // 关键语义：工作目录 + 只在该目录处理文件（措辞业务化，约束没丢）。
     expect(rendered).toContain('你的工作目录是：/trusted/root');
     expect(rendered).toContain('处理文件只在这个目录里进行');
+  });
+});
+
+/**
+ * 卸载漏网扩面（2026-11-20 复核）：复核逐条点出 5 类残留——续跑注记 / 后台文件提示 /
+ * run_js 工具描述+schema / 技能正文 / 真实 dummy 清单的 payload.schema 英文描述。每条都进
+ * 模型上下文（模型照着说），所以按 INTERNAL 词表结构性拦住；不是行为评估。
+ */
+describe('卸载漏网扩面：续跑注记 / run_js 描述 / 真实清单 / 技能正文', () => {
+  it('⑧ longTaskResumeNote（重启续跑）：无内部词，保留「不要重复发起」语义', () => {
+    const note = longTaskResumeNote(
+      { operation: 'dummy.query', operationId: 'op-1', dispatchKey: 'dk-test', restarted: true, outcome: {} },
+      { status: 'completed', data: {} },
+    );
+    expect(note).not.toMatch(INTERNAL);
+    expect(note).toContain('不要重复发起同一操作');
+  });
+
+  it('⑧b 后台文件清单提示（BACKGROUND_FILE_MANIFEST_HINT）：无内部词，保留 fileId 引用语义', () => {
+    expect(BACKGROUND_FILE_MANIFEST_HINT).not.toMatch(INTERNAL);
+    expect(BACKGROUND_FILE_MANIFEST_HINT).toContain('fileId');
+  });
+
+  it('⑨ run_js 工具描述与 schema：Main/Worker 两份 + 两个参数描述都无内部词', () => {
+    for (const [name, text] of [
+      ['RUN_JS_TOOL_DESCRIPTION', RUN_JS_TOOL_DESCRIPTION],
+      ['WORKER_RUN_JS_TOOL_DESCRIPTION', WORKER_RUN_JS_TOOL_DESCRIPTION],
+      ['code 参数描述', String((RUN_JS_TOOL_SCHEMA.properties as Record<string, { description?: string }>)['code']?.description ?? '')],
+      ['inputs 参数描述', String((RUN_JS_TOOL_SCHEMA.properties as Record<string, { description?: string }>)['inputs']?.description ?? '')],
+    ] as const) {
+      expect(text, name).not.toMatch(INTERNAL);
+    }
+  });
+
+  it('⑩ 真实 dummy 清单投影：model_visible 的操作投影无内部词（不是合成 manifest）', async () => {
+    const root = path.resolve(__dirname, '../../scripts/eval/fixtures/dummy-platform');
+    const stateDir = mkdtempSync(path.join(os.tmpdir(), 'factword-manifest-'));
+    tempDirs.push(stateDir);
+    const client = createDummyCliClient({
+      root,
+      gateway: 'bin/dummy',
+      stateDir,
+      env: { PATH: process.env['PATH'], HOME: process.env['HOME'], TMPDIR: process.env['TMPDIR'] },
+    });
+    const manifest = await client.capabilities();
+    // 生产路径：model_visible:false 的 operation 先剔除，再走 workerDelegationManifest 白名单。
+    const worker = {
+      contractVersion: manifest.contractVersion,
+      operations: manifest.operations.filter((op) => op.model_visible !== false),
+    };
+    const projected = JSON.stringify(workerDelegationManifest(worker));
+    for (const term of ['宿主', '委派', '能力快照', '执行面', '凭据', 'the host lints', 'execution layer', 'confirmation handle', 'host -> platform']) {
+      expect(projected, `真实清单投影漏进了「${term}」`).not.toContain(term);
+    }
+    // 选操作/填参数所需仍在（投影没被削空）。
+    expect(projected).toContain('dummy.query');
+    expect(projected).toContain('"schema"');
+  });
+
+  it('⑪ 技能正文：dummy-routing/SKILL.md 无内部词', () => {
+    const skill = readFileSync(
+      path.resolve(__dirname, '../../scripts/eval/fixtures/dummy-platform/.agents/skills-serve/dummy-routing/SKILL.md'),
+      'utf8',
+    );
+    expect(skill).not.toMatch(INTERNAL);
   });
 });
 
@@ -277,25 +348,57 @@ describe('模型可见面收口：清单投影 / Worker 提示 / 底账投影', 
     expect(rendered).toContain('execute_operation');
   });
 
-  // ③ 底账投影：失败只给 status + 封闭 failureKind，不给 failureReason / error.message 自由文本。
+  // ③ 底账投影：封闭码（failureKind/outcomeKind）+ 机械清理的业务摘要，不给 failureReason 自由文本。
+  //    三形状：完成=空；失败且有决定性失败执行=failureKind+summary；空汇报=failureKind+outcomeKind。
   const SCOPE = { principalId: 'wecom:proj-user', sessionId: 'proj-conv' };
-  function seededFailedRegistry(): ReturnType<typeof createTaskRegistry> {
+  type SeedKind = 'failed' | 'completed' | 'no_report' | 'mechanically_cleaned';
+  function seededRegistry(kind: SeedKind): ReturnType<typeof createTaskRegistry> {
     const registry = createTaskRegistry();
     registry.begin({ taskId: 't_proj', ...SCOPE, request: '查 alpha' });
-    registry.noteExecution('t_proj', {
-      requestId: 'req_proj',
-      operation: 'dummy.query',
-      status: 'failed',
-      // 底账里 failureReason/旧文案含内部词：投影必须结构性不给这些拼装文本，不靠词表过滤。
-      error: { code: 'COLLECTION_FAULT', message: '执行层没法读这份集合，确认凭据 handle 失效' },
-    });
-    registry.fail('t_proj', '执行层调用超时，确认凭据 handle 失效');
+    if (kind === 'failed') {
+      registry.noteExecution('t_proj', {
+        requestId: 'req_proj',
+        operation: 'dummy.query',
+        status: 'failed',
+        // 底账里 failureReason 是拼装自由文本（含内部词）：投影必须结构性不给它。
+        // error.message 是执行层业务原话（机械清理只剥技术码/路径/机构自称，不按词表替换）。
+        error: { code: 'COLLECTION_FAULT', message: 'Collection alpha cannot be read in its current state' },
+      });
+      registry.fail('t_proj', '执行层调用超时，确认凭据 handle 失效（拼装自由文本，不得进投影）');
+    } else if (kind === 'mechanically_cleaned') {
+      // 钉「只做机械清理、不按 4 词表替换」：旧 failureSummaryOf 会把 handle→确认信息。
+      // 这里断言摘要逐字保留业务原话（含 handle），恢复词表替换即红。
+      registry.noteExecution('t_proj', {
+        requestId: 'req_mc',
+        operation: 'dummy.query',
+        status: 'failed',
+        error: { code: 'COLLECTION_FAULT', message: 'records at handle boundary cannot be read' },
+      });
+      registry.fail('t_proj', 'some assembled reason');
+    } else if (kind === 'completed') {
+      // P0 复现：前序 failed，末条 decisive=completed → completed 任务不得带任何失败视图。
+      registry.noteExecution('t_proj', {
+        requestId: 'req_fail',
+        operation: 'dummy.query',
+        status: 'failed',
+        error: { code: 'INVALID_ARGUMENT', message: '第一次参数不对，改对了' },
+      });
+      registry.noteExecution('t_proj', {
+        requestId: 'req_ok',
+        operation: 'dummy.query',
+        status: 'completed',
+      });
+      registry.complete('t_proj', '已查到 3 条。');
+    } else {
+      // 空汇报：registry.fail 但没有 failed execution（:2919 形状）→ 封闭 outcomeKind。
+      registry.fail('t_proj', '没产出有效的办理结果汇报，本次任务未完成。');
+    }
     return registry;
   }
 
   /** 经真实 createSession 调一次指定工具，拿到生产 statusView / taskResult 投影。 */
-  async function projectionOf(tool: 'task_status' | 'task_result'): Promise<Record<string, unknown>> {
-    const registry = seededFailedRegistry();
+  async function projectionOf(tool: 'task_status' | 'task_result', kind: SeedKind = 'failed'): Promise<Record<string, unknown>> {
+    const registry = seededRegistry(kind);
     let captured: Record<string, unknown> = {};
     const client: ExecutionClient = {
       async capabilities() { return { contractVersion: 4, operations: [{ name: 'dummy.query', args: [] }] }; },
@@ -320,53 +423,88 @@ describe('模型可见面收口：清单投影 / Worker 提示 / 底账投影', 
     return captured;
   }
 
-  it('③ task_status 投影：无 failureReason 自由文本，失败只出现封闭 failureKind', async () => {
-    const view = await projectionOf('task_status');
+  /** 任何投影都不得含拼装 failureReason / 内部词 / 技术码字段（三形状共用）。 */
+  function expectNoFreeText(view: Record<string, unknown>): void {
     const text = JSON.stringify(view);
     expect(text).not.toContain('failureReason');
     expect(text).not.toContain('执行层');
     expect(text).not.toContain('确认凭据');
     expect(text).not.toContain('handle');
     expect(text).not.toContain('"message"');
+    expect(text).not.toContain('"code"');
+  }
+
+  it('③ task_status 投影：无拼装自由文本，失败只出现封闭 failureKind', async () => {
+    const view = await projectionOf('task_status');
+    expectNoFreeText(view);
     // 封闭种类来自 classifyFailure：COLLECTION_FAULT → executor_failed。
     expect(view['failureKind']).toBe('executor_failed');
+    expect(view['outcomeKind']).toBeUndefined();
   });
 
-  it('③b task_result 投影：失败给 failureKind + 清洗摘要，不给 failureReason/技术码/error 对象', async () => {
+  it('③b task_result 投影：失败给 failureKind + 机械清理摘要，不给 failureReason/技术码/error 对象', async () => {
     const result = await projectionOf('task_result');
-    const text = JSON.stringify(result);
-    expect(text).not.toContain('failureReason');
-    expect(text).not.toContain('执行层');
-    expect(text).not.toContain('确认凭据');
-    expect(text).not.toContain('handle');
-    expect(text).not.toContain('"message"');
-    expect(text).not.toContain('"code"');
-    // 封闭种类来自 classifyFailure：COLLECTION_FAULT → executor_failed。
+    expectNoFreeText(result);
     expect(result['failureKind']).toBe('executor_failed');
-    // 必要的业务摘要仍在（清洗过：内部词替换成「确认信息」「对方」），模型能读懂结果。
-    expect(result['summary']).toContain('对方没法读这份集合');
-    expect(result['summary']).toContain('确认信息失效');
+    // 摘要是执行层业务原话、只经机械清理（剥码/路径/机构自称），不按词表替换。
+    expect(result['summary']).toBe('Collection alpha cannot be read in its current state');
+    expect(result['outcomeKind']).toBeUndefined();
     const executions = result['executions'] as Array<Record<string, unknown>>;
     expect(executions[0]!['failureKind']).toBe('executor_failed');
     expect(executions[0]!['error']).toBeUndefined();
+    expect(executions[0]!['summary']).toBe('Collection alpha cannot be read in its current state');
+  });
+
+  it('③c P0 复现：前序 failed + 末条 decisive=completed → completed 不带 failureKind/outcomeKind/summary', async () => {
+    for (const tool of ['task_status', 'task_result'] as const) {
+      const view = await projectionOf(tool, 'completed');
+      expectNoFreeText(view);
+      expect(view['status']).toBe('completed');
+      expect(view['failureKind']).toBeUndefined();
+      expect(view['outcomeKind']).toBeUndefined();
+      expect(view['summary']).toBeUndefined();
+      if (tool === 'task_result') {
+        const executions = view['executions'] as Array<Record<string, unknown>>;
+        // 两行执行事实都留痕（审计可查），只是不改写终局投影。
+        expect(executions.map((entry) => entry['status'])).toEqual(['failed', 'completed']);
+      }
+    }
+  });
+
+  it('③d 空汇报失败：无 failed execution → 封闭 outcomeKind=no_report，不恢复自由文本原因', async () => {
+    for (const tool of ['task_status', 'task_result'] as const) {
+      const view = await projectionOf(tool, 'no_report');
+      expectNoFreeText(view);
+      expect(view['status']).toBe('failed');
+      expect(view['outcomeKind']).toBe('no_report');
+      expect(view['summary']).toBeUndefined();
+    }
+  });
+
+  it('③e 摘要只做机械清理：不复活「确认凭据/handle→确认信息」的 4 词表替换', async () => {
+    const result = await projectionOf('task_result', 'mechanically_cleaned');
+    // 机械清理只剥技术码/路径/机构自称；业务原话里的 handle 逐字保留（不是词表替换）。
+    expect(result['summary']).toBe('records at handle boundary cannot be read');
+    expect(JSON.stringify(result)).not.toContain('确认信息');
   });
 });
 
 /**
- * 反向绊线（亲跑验证，恢复后全绿：19 passed）：
- *   · 把 taskCompletionFactText 的「办完了」改回「已由执行端确认完成」→ ① 红（内部词命中 + 丢「办完了」）；
- *   · 把 dummy-cli-client.ts 的 execute 超时 message 改回「执行层调用超时…」→ ④ 红（内部词命中）；
- *   · 把 MAIN_PROTOCOL_NOTE_WITH_WRITES 任一条改回带「执行层」→ ③ 对应用例红；
- *   · 把 agent.md 任一「办事助手/助手」改回「执行层」→ ⑤ 红；
- *   · 把 renderWorkerSystemPrompt 工作目录块的「办事的执行面」改回「执行层」→ ⑥ 红（旧锚，现文案已改）；
- *   · 把 execution-runtime.ts:2859 的「没产出有效的办理结果汇报」改回「执行层 Worker 未产出有效汇报」→ ⑦b 红（端到端读到的就是该 reason）。
- *   · ①a/①b：把 weight / long_running 放回 workerDelegationManifest 的白名单 → 2 failed｜17 passed，
- *     `清单投影漏进了「weight」`、①b renderWorkerDelegation 同红；
- *   · ②：把 WORKER_SYSTEM_PROMPT 首句改回「宿主把一项平台任务委派给你（能力快照/纵深防御/子进程/执行面）」
- *     → 1 failed｜18 passed，`Worker 提示漏进了「宿主」`；
- *   · ③b：把 taskResult 的 failureReason / error 自由文本投影放回 → 1 failed｜18 passed，
- *     `expected … not to contain 'failureReason'`，回执里 `failureReason:"执行层调用超时，确认凭据 handle 失效"`
- *     与 error.message `执行层没法读这份集合，确认凭据 handle 失效` 原样外泄（清洗摘要 summary 那道
- *     拦不住拼装字段——证明是结构性拦截，不是词表过滤）。
- * 用例断言一字未改即可复现；恢复后 19/19 全绿。
+ * 反向绊线（2026-11-20 亲跑验证，恢复后全绿：27 passed；逐条改回 → 对应守卫红）：
+ *   · ③c P0：failureViewOfTask 改回「倒序找第一个 failed/refused，不看末条」→ 1 failed｜26 passed，
+ *     `expected undefined to be 'invalid_input'`——completed 任务同时带 failureKind（本轮真 bug 复现）；
+ *   · ③d：去掉 outcomeKind='no_report'（空汇报只剩 executor_failed）→ 1 failed｜26 passed，
+ *     `expected 'no_report'` 处红（原因丢失重现）；
+ *   · ③e：把 4 词表替换放回 failureSummaryOf 的两处摘要 → 1 failed｜26 passed，
+ *     `expected 'records at handle boundary…'` / received 'records at 确认信息 boundary…'——钉住「只做机械清理」；
+ *   · ⑧：longTaskResumeNote 改回「宿主曾重启」→ 1 failed｜26 passed，`not to match …宿主`；
+ *   · ⑧b：BACKGROUND_FILE_MANIFEST_HINT 改回「能力快照…宿主会替换」→ 1 failed｜26 passed，同红；
+ *   · ⑨：RUN_JS_TOOL_DESCRIPTION 改回「宿主物化」→ 1 failed｜26 passed，`RUN_JS_TOOL_DESCRIPTION: not to match …宿主`；
+ *   · ③：MAIN_PROTOCOL_NOTE 改回「本轮执行面只开放查询」→ 1 failed｜26 passed，`not to match …执行面`；
+ *   · ⑪：SKILL.md 改回「行为以执行层返回为准」→ 1 failed｜26 passed，`not to match …执行层`；
+ *   · ⑤：agent.md 改回「组织成委派」→ 1 failed｜26 passed，`not to match …委派`；
+ *   · ⑩：capabilities.json payload.schema.description 改回英文「the host lints…execution layer…
+ *     confirmation handle」→ 1 failed｜26 passed，`真实清单投影漏进了「the host lints」`（真实 dummy 清单，
+ *     非合成 manifest——真网关 operation list 取数）。
+ * 用例断言一字未改即可复现；恢复后 27/27 全绿。
  */
