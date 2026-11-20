@@ -354,7 +354,8 @@ export type TaskExecutionOutcome =
    * 这是后台面对 TurnResult.files 的同位面（后台没有前台回合）：装配方按它投递。
    */
   | { kind: 'completed'; resultText: string; files?: readonly TaskOutcomeFile[] }
-  | { kind: 'failed'; reason: string }
+  /** `reasonCode` = 宿主/执行层的结构化拒绝原因码（如 `not_permitted`）；不是文案，不进用户文本。 */
+  | { kind: 'failed'; reason: string; reasonCode?: string }
   | { kind: 'needs_input'; question: PendingQuestion }
   /**
    * 本回合以「写操作提案待用户确认」收尾：question 是 waiting_user 的问题形状，

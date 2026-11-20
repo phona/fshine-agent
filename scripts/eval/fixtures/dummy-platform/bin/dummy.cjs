@@ -230,6 +230,10 @@ function rateLimitRefused(opName, mode, via, args) {
 //     已终态/未知 → completed + data.aborted=false + reason（宿主如实转述）。
 // 完成判定按 startedAt + seconds（墙钟）惰性计算：不需要后台进程，重启也不丢 job。
 const JOB_POLL_MS = 25;
+// 慢活默认就慢：模型面看不到 --seconds（hostOnly 测试旋钮），用户也不会在交办里写参数。
+// 缺省直接取长时默认值 —— 不再因缺参拒绝（否则慢活根本跑不起来，后面的「停」无从发生）。
+// 显式传入的 --seconds / --fail-after 仍按执行层原样名校验，作为测试旋钮保留。
+const LONG_TASK_DEFAULT_SECONDS = 600;
 function jobsDir() { return path.join(path.dirname(statePaths().stateFile), 'jobs'); }
 function validOperationId(value) { return typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(value) && !value.includes('..'); }
 function jobFileOf(operationId) { return path.join(jobsDir(), `${operationId}.json`); }
@@ -260,7 +264,7 @@ function integerOf(value, fallback) {
   return Number.isInteger(n) && n >= 0 ? n : undefined;
 }
 function doLongTaskAccept(opName, flags, rawArgs) {
-  const seconds = integerOf(flags.seconds, undefined);
+  const seconds = integerOf(flags.seconds, LONG_TASK_DEFAULT_SECONDS);
   if (seconds === undefined) { emit(opName, 'failed', null, errObj('INVALID_ARGUMENT', '--seconds must be an integer >= 0')); return 1; }
   const failAfter = integerOf(flags['fail-after'], undefined);
   if (flags['fail-after'] !== undefined && failAfter === undefined) { emit(opName, 'failed', null, errObj('INVALID_ARGUMENT', '--fail-after must be an integer >= 0')); return 1; }
@@ -1067,7 +1071,7 @@ async function main() {
   }
   if (cmd === 'operation' && sub === 'list') {
     if (argv.includes('--json')) {
-      process.stdout.write(JSON.stringify({ operations: OPERATIONS.map((o) => ({ name: o.name, domain: o.domain, command: o.command, access: o.access, script: o.script, sharedLocalWrite: false, effects: o.access === 'read' ? ['read'] : o.access === 'scratch' ? ['local'] : ['write'], executor: o.executor, est_seconds: o.est_seconds, weight: o.weight, long_running: o.long_running === true, model_visible: o.model_visible === false ? false : undefined, args: listArgsOf(o), serve: o.serve, protocol: o.protocol, label: LABELS[o.name] ?? '', proposalSchema: o.protocol === 'proposal.create' ? PROPOSAL_SCHEMA : null })), accessSemantics: ACCESS_SEMANTICS }) + '\n');
+      process.stdout.write(JSON.stringify({ operations: OPERATIONS.map((o) => ({ name: o.name, domain: o.domain, command: o.command, access: o.access, script: o.script, sharedLocalWrite: false, effects: o.access === 'read' ? ['read'] : o.access === 'scratch' ? ['local'] : ['write'], executor: o.executor, est_seconds: o.est_seconds, weight: o.weight, long_running: o.long_running === true, model_visible: o.model_visible === false ? false : undefined, capability: o.capability, args: listArgsOf(o), serve: o.serve, protocol: o.protocol, label: LABELS[o.name] ?? '', proposalSchema: o.protocol === 'proposal.create' ? PROPOSAL_SCHEMA : null })), accessSemantics: ACCESS_SEMANTICS }) + '\n');
       return 0;
     }
     for (const o of OPERATIONS) process.stdout.write(`${o.name}\t${o.command}\t${o.access}\t${o.executor}\t${LABELS[o.name] ?? ''}\n`);

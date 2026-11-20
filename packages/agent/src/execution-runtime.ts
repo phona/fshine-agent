@@ -95,6 +95,8 @@ import {
   type ResourcePolicy,
 } from './resource-policy';
 import type { TaskExecutionOutcome, TaskExecutor, TaskRunner, ResumedOperation } from './task-runner';
+import type { CapabilityEntry } from './capability-catalog';
+import { OUTCOME_REASON_NOT_PERMITTED } from './task-outcome';
 
 /** Main 委派工具名（实例名可经部署声明替换的演进留在后续切片；当前用中性名）。 */
 export const TASK_RUN_TOOL = 'task_run';
@@ -245,6 +247,21 @@ export const READ_SKILL_TOOL_SCHEMA: Record<string, unknown> = {
     name: { type: 'string', description: '技能清单里的技能名。' },
   },
   required: ['name'],
+  additionalProperties: false,
+};
+
+/**
+ * Main 的只读能力目录工具（判据档 §2；本切片 A4）：按需查「可办什么」。
+ *
+ * 输出只含业务能力名 + 只读/可写，**不含 operation 名、不含参数名、不含 --**；读/写从执行层
+ * 既有 access 派生，不由本工具重判。Worker 面完全不动。仅当装配注入非空目录时才上工具面
+ * （缺省零变化：未声明能力 → 没有这个工具，工具面逐字节不变）。
+ */
+export const CAPABILITIES_TOOL = 'capabilities';
+export const CAPABILITIES_TOOL_DESCRIPTION = '列出你这边能办的业务能力（以及每一项是只读还是可写）。不带参数。';
+export const CAPABILITIES_TOOL_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {},
   additionalProperties: false,
 };
 
@@ -540,6 +557,25 @@ export function mainProtocolNoteFor(allowWriteOperations: boolean): string {
 }
 
 /**
+ * 答复五态的 Main 行为句（判据档 §3 / 本切片 B2）：outcome 作为结构化事实进唤醒/工具结果，
+ * Main 据此按值选措辞。三条句分别钉住 unsupported / blocked / partial 的措辞纪律。
+ *
+ *   · unsupported → 说「这件事我这边办不了」+ 给出目录里能办的，**绝不提「再试一次」**；
+ *   · blocked     → 说缺什么 + 补的方式；
+ *   · partial     → 逐项说，不得说成单纯成功。
+ *
+ * 本常量是给模型的行为约束，不是宿主拼的用户话术；不含 operation 名/参数/--。
+ */
+export const OUTCOME_BEHAVIOR_NOTE = [
+  '【答复纪律】',
+  '- 若这件事办不了（没有对应能力）：说「这件事我这边办不了」，并列出你能办的几项；'
+    + '绝不要说「再试一次」「重试」，因为根本没有可办的动作。',
+  '- 若事情卡住是因为缺条件（本次不允许、或缺你补充的信息）：说清缺什么、怎么补，'
+    + '不要说成「办不了」。',
+  '- 若一件事只办成了一部分：逐项说明哪些办成、哪些没办成，不要说成单纯成功。',
+].join('\n');
+
+/**
  * Worker 的静态系统提示（2026-11-20 第二人称行为句收口）：只说「你收到一件活、按给你的
  * 输入去做、用工具报事实」。去掉宿主/委派/能力快照/纵深防御/子进程/执行面这些内部角色与
  * 机制词——它们不帮模型做对事，只让它把内部形态说给用户。机械边界（允许集合、结果真实性）
@@ -658,7 +694,13 @@ export type ExecutionEvent =
    * **不能**断言它发生过没有——账行落 unknown、任务落 reason=result_unknown、不自动重试。
    * 只进日志；超时原话留在账行的 outcome 里（`unknown` 行）。回放/未发起（executed=false）不记。
    */
-  | { event: 'execution_result_unknown'; taskId: string; operation: string };
+  | { event: 'execution_result_unknown'; taskId: string; operation: string }
+  /**
+   * 能力边界未声明（判据档 §2 / A5）：本次执行层清单里没有任何 operation 声明 `capability`。
+   * 目录为空、摘要不出现、Main 提示与今天逐字节一致——但装配必须**显式登记**这件事，
+   * 不许假装知道、不许伪造目录。每个会话一次（装配时记，不按回合刷）。
+   */
+  | { event: 'capability_catalog_undeclared'; principalId: string; sessionId: string };
 
 /** 长任务结果渲染的日志内联上限（字节；超过走任务文件，不留绝对路径也不灌转录）。 */
 export const LONG_TASK_LOG_INLINE_MAX_BYTES = 4 * 1024;
@@ -708,6 +750,12 @@ export interface RuntimeOptions {
   mainSystemPrompt: string;
   /** Worker 需嵌入本轮提示的领域技能正文（可选）。 */
   workerSkills?: readonly WorkerSkill[];
+  /**
+   * Main 可见的能力目录（可选；来自装配层按执行层 capability 声明派生，见 capability-catalog）。
+   * 非空 → Main 工具面多一个只读 `capabilities`，输出只含业务名 + 读/写；空/未注入 →
+   * 工具面零变化（缺省逐字节不变，Main 不承诺任何范围）。Worker 面恒不受影响。
+   */
+  capabilityCatalog?: readonly CapabilityEntry[];
   /**
    * 任务底账（B 类持久化）：装配方可注入 SQLite 实现使归属跨重启成立；
    * 缺省 = 进程内内存实现（测试与纯内存嵌入用）。
@@ -3084,6 +3132,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           // 取消/接续/确认需要 runner 生命周期：无 runner 不上面（fail-closed）。
           ...(taskRunner === undefined ? [] : [taskCancelTool(), taskResumeTool(), taskConfirmTool()]),
           ...(options.mainSkillRegistry === undefined ? [] : [readSkillTool()]),
+          // 能力目录（A4）：仅当装配注入非空目录时给 Main 一个只读 capabilities 工具。
+          ...(options.capabilityCatalog === undefined || options.capabilityCatalog.length === 0
+            ? []
+            : [capabilitiesTool()]),
           // CAP-01 S1：run_js 只在装配方注入执行器时上工具面（缺省零变化，fail-closed）。
           ...(options.runJsExecutor === undefined ? [] : [runJsTool('main')]),
           // recalc_xlsx：仅 Main 宿主面、仅引擎可用时上工具面（Worker 面永不注入）。
@@ -3147,6 +3199,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
             const name = typeof args.name === 'string' ? args.name : '';
             const skill = await options.mainSkillRegistry.read(name);
             return { name: skill.name, content: skill.content };
+          }
+          // 能力目录（A4）：与工具面同源门控（注入了非空目录才受理）。输出只含业务名 + 读/写，
+          // 绝不带 operation 名、参数名或 --（字符串守卫见 packages/agent/main-capability-surface.test.ts:66）。
+          if (tool === CAPABILITIES_TOOL && options.capabilityCatalog !== undefined && options.capabilityCatalog.length > 0) {
+            return {
+              capabilities: options.capabilityCatalog.map((entry) => ({ name: entry.name, read: entry.read, write: entry.write })),
+            };
           }
           // CAP-01 S1：run_js 与工具面同源门控（未注入执行器则不受理），fail-closed。
           if (tool === RUN_JS_TOOL && options.runJsExecutor !== undefined) {
@@ -3359,6 +3418,11 @@ function readSkillTool(): DiscoveredTool {
   return { name: READ_SKILL_TOOL, description: READ_SKILL_TOOL_DESCRIPTION, inputSchema: READ_SKILL_TOOL_SCHEMA };
 }
 
+/** Main 只读能力目录工具工厂：只返回业务名 + 读/写，形状与目录条目同源。 */
+function capabilitiesTool(): DiscoveredTool {
+  return { name: CAPABILITIES_TOOL, description: CAPABILITIES_TOOL_DESCRIPTION, inputSchema: CAPABILITIES_TOOL_SCHEMA };
+}
+
 /**
  * run_js 工具面（role 决定描述，schema 共用）：Main 面 out/ 不产交付物（片 2）；
  * Worker 面 out/ 是本任务交付箱。两面的机械纪律同源，差别只在「写进哪里算交付」。
@@ -3394,8 +3458,10 @@ function executeOperationTool(): DiscoveredTool {
  * 工具名 = `op_` + operation 名安全化（非字母数字压成 `_`）：`dummy.prepare` → `op_dummy_prepare`。
  * schema 只收非 hostOnly 参数：名字去掉 `--` 前缀；有 payload.schema 的用该 schema；
  * 其余按声明 type 给 string/number/array（type 是展示提示，缺省 string）。
- * 描述只用 label（缺省 operation 名）+ 一句「参数按声明填」——不含 `--` / style / weight /
- * effects / long_running 这些实现字样（守卫钉死）。
+ * 描述 = 业务能力名（可选）+ label（缺省 operation 名）+ 一句「参数按声明填」——不含 `--` /
+ * style / weight / effects / long_running 这些实现字样（守卫钉死）。capability 来自执行层声明，
+ * 只作业务展示名：让模型从业务措辞（如「导出 / 慢活」）认出该工具；缺省/空白时逐字节退回
+ * 旧形状（只有 label + 一句），调用方无 capability 的工具面不变。
  */
 export const WORKER_OP_TOOL_PREFIX = 'op_';
 
@@ -3422,6 +3488,7 @@ function argJsonSchema(arg: ExecutionArgDeclaration): Record<string, unknown> {
 export function workerOperationTool(operation: {
   name: string;
   label?: string;
+  capability?: string;
   args: readonly ExecutionArgDeclaration[];
 }): DiscoveredTool {
   const visible = workerVisibleArgs(operation);
@@ -3432,9 +3499,14 @@ export function workerOperationTool(operation: {
     if (declaration.required) required.push(field);
   }
   const label = operation.label !== undefined && operation.label !== '' ? operation.label : operation.name;
+  // 业务能力名只作展示（来自执行层 capability 声明）：拼在 label 前，给模型一条业务线索，
+  // 让它从用户措辞（「导出 / 慢活」）认出工具。只含业务信息，不泄漏 operation 名/--/实现字样。
+  // 缺省或空白 capability 时逐字节退回旧形状「${label}。参数按声明填。」。
+  const capability = operation.capability !== undefined && operation.capability.trim() !== '' ? operation.capability.trim() : '';
+  const description = capability === '' ? `${label}。参数按声明填。` : `${capability}：${label}。参数按声明填。`;
   return {
     name: workerOperationToolName(operation.name),
-    description: `${label}。参数按声明填。`,
+    description,
     inputSchema: {
       type: 'object',
       properties,
@@ -4373,7 +4445,11 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         // 发起前被宿主拒绝（权限/允许集合）时，用户该看到「没权限」，不是「模型没干活」：
         // 后者把权限问题说成模型问题，还会诱导用户让模型重试同一个动作。
         if (hostRefusedOperations.length > 0) {
-          return { kind: 'failed', reason: OPERATION_NOT_PERMITTED_MESSAGE };
+          return {
+            kind: 'failed',
+            reason: OPERATION_NOT_PERMITTED_MESSAGE,
+            reasonCode: OUTCOME_REASON_NOT_PERMITTED,
+          };
         }
         return { kind: 'failed', reason: '没有实际办理：助手已汇报，但这次交办没有发出任何办理动作。' };
       }

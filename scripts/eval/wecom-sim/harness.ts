@@ -389,6 +389,32 @@ export function failureWakeLine(name?: string): string {
   return `${lineSubjectOf(name)}这次没办成。要我再试一次，还是先放着？`;
 }
 
+/**
+ * B2：假模型按唤醒事实里的**结构化 outcome 值**选措辞（真模型按 OUTCOME_BEHAVIOR_NOTE 选）。
+ * 没有 `[outcome=...]` 字段时逐字节回落到 failureWakeLine（既有用例不变）。
+ *   · unsupported → 「办不了」+ 目录里能办的，**绝不含**再试/重试/retry；
+ *   · blocked     → 说清缺什么（[缺=...]）+ 补的方式；
+ *   · partial     → 逐项说，不说成单纯成功。
+ */
+export function outcomeWakeLine(factText: string): string | undefined {
+  const matched = /\[outcome=(completed|partial|unsupported|blocked|failed)\]/.exec(factText);
+  if (matched === null) return undefined;
+  const outcome = matched[1];
+  const name = factSubjectOf(factText);
+  const subject = lineSubjectOf(name);
+  if (outcome === 'unsupported') {
+    return `${subject}这件事我这边办不了。我能办的是：记录办理、长时导出。没有可办的动作。`;
+  }
+  if (outcome === 'blocked') {
+    const missing = /\[缺=([^\]]+)\]/.exec(factText)?.[1] ?? '本次允许范围';
+    return `${subject}这次没办成，缺的是${missing}。补上这个条件我就能继续办。`;
+  }
+  if (outcome === 'partial') {
+    return `${subject}这次只办成了一部分，我逐项说给你：有的成了，有的没成。`;
+  }
+  return failureWakeLine(name);
+}
+
 export function cancelledWakeLine(name?: string): string {
   return `${lineSubjectOf(name)}已经停了。`;
 }
@@ -405,7 +431,7 @@ function lineSubjectOf(name?: string): string {
 /** 按事实前缀派发到上面那位台词（respond 用；未知前缀立刻抛，脚本不静默）。 */
 export function simWakeLine(factText: string): string {
   const name = factSubjectOf(factText);
-  if (factText.startsWith(FAILURE_FACT_PREFIX)) return failureWakeLine(name);
+  if (factText.startsWith(FAILURE_FACT_PREFIX)) return outcomeWakeLine(factText) ?? failureWakeLine(name);
   if (factText.startsWith(CANCELLED_FACT_PREFIX)) return cancelledWakeLine(name);
   if (factText.startsWith(RESTART_FACT_PREFIX)) return restartWakeLine(name);
   if (factText.startsWith(LONG_RUNNING_FACT_PREFIX)) return longRunningWakeLine(name);

@@ -51,6 +51,11 @@ import { workerSubprocessEnv } from './worker-env';
 export interface RawGatewayOperation {
   name: string;
   label?: string;
+  /**
+   * 业务能力名（执行层自述，可选）：同域的 query/prepare/commit 共享同一值。
+   * 只做分组键与展示，不参与读写判据（读写仍由 {@link access} 派生）。
+   */
+  capability?: string;
   access?: string;
   /** 执行层自述的成本提示（A1）：形状校验后投影为契约的 weight/estimatedSeconds。 */
   weight?: unknown;
@@ -222,6 +227,14 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
           return {
             name: operation.name,
             ...(typeof operation.label === 'string' && operation.label !== '' ? { label: operation.label } : {}),
+            // 业务能力名：执行层自述的字符串才投影（缺省/形状不对 = 字段不出现，退化为未声明）。
+            ...(typeof operation.capability === 'string' && operation.capability !== ''
+              ? { capability: operation.capability }
+              : {}),
+            // 读写属性：既有 access 判据的投影，供能力目录复用（不为目录重造第二套）。
+            ...(typeof operation.access === 'string' && operation.access !== ''
+              ? { access: operation.access }
+              : {}),
             ...(weight === undefined ? {} : { weight }),
             ...(estimatedSeconds === undefined ? {} : { estimatedSeconds }),
             // 契约 v4：long_running 只认显式 true（缺省/其它形状 = 未声明）。

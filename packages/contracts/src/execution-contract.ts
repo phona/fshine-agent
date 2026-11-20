@@ -81,6 +81,20 @@ export interface ExecutionOperationDeclaration {
   name: string;
   /** 人类可读标签：只作展示，不参与宿主的任何业务判断。 */
   label?: string;
+  /**
+   * 业务能力名（可选；缺省 = 未声明，能力目录退化为现状）。
+   *
+   * 同一件业务的多个阶段（`query` / `prepare` / `commit`）**共享同一个值**——它们是同一
+   * 能力的阶段，不是多件能力。宿主据此按值 group by 派生给 Main 的能力目录（只读/可写
+   * 仍由执行层 `access` 派生，不从本字段重造读写判据）。本字段只作分组键与展示名，不参与
+   * 任何业务裁决；未声明时目录为空、Main 提示与今天逐字节一致，并显式登记「能力边界未声明」。
+   */
+  capability?: string;
+  /**
+   * 读写属性声明（可选，执行层自述：'read' / 'write' / 'scratch'）：仅供宿主派生能力目录的
+   * 只读/可写标记，是既有 access 判据的投影，不在这里重造第二套读写语义。缺省 = 未声明。
+   */
+  access?: string;
   args: readonly ExecutionArgDeclaration[];
   /**
    * 执行层自述的成本提示：单次执行的重量（weight）与估时秒数（estimatedSeconds）。

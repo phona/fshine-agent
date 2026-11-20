@@ -32,6 +32,7 @@ import {
   type UserFacingFailureKind,
 } from '../../packages/agent/src/user-facing-failure';
 import { stripServerPaths } from '../../packages/agent/src/server-paths';
+import { renderOutcomeFact, type TaskOutcome } from '../../packages/agent/src/task-outcome';
 
 /** 宿主主动投递面（文字；与文件投递同一端口形状——FileDeliveryPort 的结构子集）。 */
 export interface TaskResultDeliveryPort {
@@ -299,6 +300,10 @@ export function taskFailureFactText(input: {
   name?: string;
   kind: UserFacingFailureKind;
   reason?: string;
+  /** 结构化答复五态（B2 机械事实，不是话术）；缺省 = 不追加（既有路径逐字节不变）。 */
+  outcome?: TaskOutcome;
+  /** blocked 的缺失条件（非空）；只有 outcome=blocked 时写入事实。 */
+  missing?: string;
 }): string {
   const subject = input.name !== undefined && input.name.trim() !== ''
     ? `「${truncatedName(input.name)}」`
@@ -306,9 +311,11 @@ export function taskFailureFactText(input: {
   const reason = input.reason === undefined
     ? ''
     : input.reason.replace(/\s+/g, ' ').trim().slice(0, FAILURE_REASON_MAX);
-  return `[任务失败]${subject}这次没办成，问题分类：${USER_FACING_FAILURE_KIND_LABEL[input.kind]}。`
-    + `${reason === '' ? '' : `机械原因（供你判断，别原样丢给用户）：${reason}。`}`
-    + '请把这件事如实告诉用户，并给他一个能做的下一步。';
+  const base = `[任务失败]${subject}这次没办成，问题分类：${USER_FACING_FAILURE_KIND_LABEL[input.kind]}。`
+    + `${reason === '' ? '' : `机械原因（供你判断，别原样丢给用户）：${reason}。`}`;
+  // B2：outcome 值作为结构化机械事实进唤醒事实，Main 据此按值选措辞（不是话术替换）。
+  const outcomeFact = input.outcome === undefined ? '' : ` ${renderOutcomeFact(input.outcome, { missing: input.missing })}`;
+  return `${base}${outcomeFact}请把这件事如实告诉用户，并给他一个能做的下一步。`;
 }
 
 /**

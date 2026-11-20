@@ -90,6 +90,12 @@ import {
   taskFailureFactText,
   taskRestartFactText,
 } from './task-completion-delivery';
+import {
+  OUTCOME_REASON_NOT_PERMITTED,
+  type OutcomeLedger,
+  type TaskOutcome,
+} from '../../packages/agent/src/task-outcome';
+import { classifyFailureOutcome } from './task-outcome-reason';
 import { composeNotificationSinks, createChatNotificationSink, notificationTerminalLogLine } from './notification-chat-sink';
 import {
   createInprocessAlerts,
@@ -661,6 +667,50 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       return undefined;
     }
   };
+  /**
+   * 答复五态机械分类（B2/F3-1）：从任务底账取机械事实喂 classifyFailureOutcome，得到五值之一。
+   * 零执行 + 权限拒绝（**结构化原因码** not_permitted）→ blocked；零执行非拒绝 → unsupported。
+   * 判据只认 reasonCode，不扫 reason 文本里的「权限」字样（那是给模型读的转述，不是事实）。
+   * 只输出结构化值（不是话术），供 Main 按值选措辞。取不到底账时按失败原因码保守分类。
+   */
+  const outcomeOfTask = (
+    taskId: string,
+    status: 'failed' | 'result_unknown',
+    reasonCode?: string,
+  ): TaskOutcome => {
+    try {
+      const record = (taskRegistry as unknown as {
+        get(id: string): {
+          status?: string;
+          reason?: string;
+          executions?: ReadonlyArray<{
+            status?: string;
+            error?: { code?: string };
+            items?: readonly { status: 'ok' | 'failed' | 'unknown' }[];
+          }>;
+        };
+      }).get(taskId);
+      const executions = (record.executions ?? []).map((execution) => ({
+        status: (execution.status === 'completed' || execution.status === 'failed'
+          || execution.status === 'refused' || execution.status === 'needs_input'
+          || execution.status === 'needs_confirmation' || execution.status === 'accepted'
+          ? execution.status : 'result_unknown') as OutcomeLedger['executions'][number]['status'],
+        ...(execution.error?.code === undefined ? {} : { error: { code: execution.error.code } }),
+        ...(execution.items === undefined ? {} : { items: execution.items }),
+      }));
+      const terminal = (record.status === 'completed' || record.status === 'failed'
+        || record.status === 'timed_out' || record.status === 'unexecuted'
+        || record.status === 'running' || record.status === 'waiting_user'
+        ? record.status : 'failed') as OutcomeLedger['terminal'];
+      return classifyFailureOutcome(executions, {
+        terminal,
+        ...(reasonCode === undefined ? {} : { reasonCode }),
+        ...(record.reason === undefined ? {} : { ledgerReasonCode: record.reason }),
+      });
+    } catch {
+      return 'failed';
+    }
+  };
   // 解析后配置只读一次：fileStore 的 TTL 由它派生（单一配置源；本文件不重解释 runtime 段）。
   const resolvedRuntime = resolveRuntimeConfig(deps.config.runtime);
   // 入站消息幂等底账启动清扫（2026-11-19）：保留期 = runtime.fileRefTtlDays 派生的毫秒
@@ -985,10 +1035,16 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             sessionId: failure.sessionId,
             event: 'task_failure_wake',
             // 事实（给模型读；业务名 + 归类后的业务种类 + 机械原因），**不投 Worker 失败原文**。
+            // B2：追加结构化 outcome 五值（机械事实，不是话术），Main 据此按值选措辞。
+            // F3-1：blocked 判据与 missing 字段都只认结构化原因码，不扫 reason 文本「权限」字样。
             factText: taskFailureFactText({
               ...(name === undefined ? {} : { name }),
               kind,
               reason: failure.reason,
+              outcome: outcomeOfTask(failure.taskId, failure.status, failure.reasonCode),
+              ...(failure.reasonCode === OUTCOME_REASON_NOT_PERMITTED
+                ? { missing: '本次允许范围' }
+                : {}),
             }),
             // 降级兜底（模型说不出话）= 既有失败话术（与老路径逐字同源）。
             fallbackText: failureTextFor(code, failure.status),
