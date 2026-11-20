@@ -260,15 +260,15 @@ describe('用户可见失败话术', () => {
     expect(failedBinding['note']).toBe('没办成。再试一次，还是先放着？');
   });
 
-  it('⑦ Worker 委派文本不含内部度量（weight/est_seconds/估时字样）', () => {
-    // 2026-11-19 抽象泄露 fix：委派里的能力快照曾带 weight/est_seconds——模型据此向用户
-    // 承诺「单次估时约半小时」这类内部数字。收口后委派只保留调用所需（name/label/args/
-    // long_running）；长任务标记保留（它影响行为：可能返回 accepted）。
+  it('⑦ Worker 委派文本不含内部度量与机制细节（weight/est_seconds/估时/long_running 字样）', () => {
+    // 2026-11-20 再收口：委派里曾带 weight/est_seconds/long_running——模型据此向用户承诺
+    // 「单次估时约半小时」或复述内部机制。收口后委派只保留调用所需（name/label/参数名/
+    // required/payload.schema）；long_running 的 accepted/wait 机制由宿主机械裁决，不进模型面。
     const manifest = {
       contractVersion: 3,
       operations: [
         { name: 'dummy.query', label: 'query records', args: [], weight: 2, estimatedSeconds: 10 },
-        { name: 'dummy.commit', label: 'commit records', args: [{ name: '--collection', required: true }], weight: 20, estimatedSeconds: 10 },
+        { name: 'dummy.commit', label: 'commit records', args: [{ name: '--collection', required: true, type: 'name' }], weight: 20, estimatedSeconds: 10 },
         { name: 'dummy.longtask', label: 'long', args: [], estimatedSeconds: 1800, long_running: true },
       ],
     } as Parameters<typeof renderWorkerDelegation>[0]['manifest'];
@@ -278,12 +278,14 @@ describe('用户可见失败话术', () => {
     expect(text).not.toContain('1800');
     expect(text).not.toContain('估时');
     expect(text).not.toContain('重量');
+    expect(text).not.toContain('"long_running"');
+    expect(text).not.toContain('"type"');
     // 中性事实不再宣称「每个 operation 标注单次估时与重量」。
     expect(WORKER_SNAPSHOT_COST_NOTE).not.toContain('估时');
     expect(WORKER_SNAPSHOT_COST_NOTE).not.toContain('重量');
-    // 调用所需仍在：operation 名、参数签名、long_running（影响行为）。
+    // 调用所需仍在：operation 名、参数名、required、输入形状。
     expect(text).toContain('"dummy.commit"');
-    expect(text).toContain('"long_running": true');
-    expect(text).toContain('--collection');
+    expect(text).toContain('"--collection"');
+    expect(text).toContain('"required": true');
   });
 });

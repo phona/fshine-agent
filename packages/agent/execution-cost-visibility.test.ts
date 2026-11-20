@@ -154,9 +154,9 @@ describe('A1 渲染：Worker 能力快照不含内部度量（2026-11-19 模型�
     expect(manifestHasMetrics(MANIFEST)).toBe(true);
   });
 
-  it('快照标题下保留中性事实（成本陈述，不是阈值规则；不再宣称每个 operation 标注估时重量）', () => {
+  it('清单标题下保留中性事实（成本陈述，不是阈值规则；不再宣称每个 operation 标注估时重量）', () => {
     const text = renderWorkerDelegation({ task: '查一下 alpha', manifest: MANIFEST });
-    expect(text).toContain('## 能力快照');
+    expect(text).toContain('## 可调用的操作');
     expect(text).toContain(WORKER_SNAPSHOT_COST_NOTE);
     // 中性事实原文：只陈述 N 次执行 = N 倍等待/失败面，不给阈值、不承诺估时。
     expect(WORKER_SNAPSHOT_COST_NOTE).toContain('一次任务发起 N 次执行');

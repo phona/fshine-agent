@@ -18,7 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { taskCompletionFactText, taskFailureFactText } from './task-completion-delivery';
-import { judgeReportedTask } from '../../packages/agent/src/task-registry';
+import { judgeReportedTask, createTaskRegistry } from '../../packages/agent/src/task-registry';
 import { createDummyCliClient } from '../../packages/agent/src/dummy-cli-client';
 import {
   TASK_RUN_TOOL_DESCRIPTION,
@@ -28,6 +28,8 @@ import {
   WORKER_SYSTEM_PROMPT,
   TASK_CANCEL_TOOL_DESCRIPTION,
   renderWorkerSystemPrompt,
+  renderWorkerDelegation,
+  workerDelegationManifest,
   createSession,
 } from '../../packages/agent/src/execution-runtime';
 import { DEFAULT_EXECUTOR_LABEL, loadAgentProfile, applyExecutorLabel } from '../../packages/agent/src/agent-profile';
@@ -94,9 +96,9 @@ describe('模型上下文文本：工具描述/协议提示/Worker 提示不含�
   it('⑥ renderWorkerSystemPrompt（带 workerWorkspaceRoot）：无内部词，且工作目录约束语义仍在', () => {
     const rendered = renderWorkerSystemPrompt('/trusted/root');
     expect(rendered).not.toMatch(INTERNAL);
-    // 关键语义：可信目录 + 权限边界仍由执行面负责（措辞业务化，但责任归属没丢）。
-    expect(rendered).toContain('你的可信工作目录是：/trusted/root');
-    expect(rendered).toContain('执行环境的实际权限边界由办事的执行面负责');
+    // 关键语义：工作目录 + 只在该目录处理文件（措辞业务化，约束没丢）。
+    expect(rendered).toContain('你的工作目录是：/trusted/root');
+    expect(rendered).toContain('处理文件只在这个目录里进行');
   });
 });
 
@@ -216,12 +218,155 @@ describe('失败原因事实：无内部词，保留「没办成」语义', () =
 });
 
 /**
- * 反向绊线（亲跑验证，实测见文件末记录）：
+ * 模型可见面收口（2026-11-20）——三条结构性守卫：删掉实现细节不应影响模型选操作/填参数/
+ * 读结果。每条配反向绊线（改回就红，读数见文末记录）。
+ */
+describe('模型可见面收口：清单投影 / Worker 提示 / 底账投影', () => {
+  // ① 能力清单投影：只留 operation 名、参数名、required、payload.schema、一句说明。
+  const RICH_MANIFEST = {
+    contractVersion: 4,
+    operations: [
+      {
+        name: 'dummy.query',
+        label: '查记录',
+        weight: 2,
+        estimatedSeconds: 30,
+        effects: ['read'],
+        long_running: false,
+        args: [{ name: '--collection', required: true, type: 'name', style: 'name' }],
+      },
+      {
+        name: 'dummy.commit',
+        label: '提交',
+        weight: 20,
+        estimatedSeconds: 1800,
+        long_running: true,
+        args: [{ name: '--records', required: true, payload: { schema: { type: 'array' } } }],
+      },
+    ],
+  };
+
+  it('①a workerDelegationManifest：不含 weight/estimatedSeconds/effects/style/long_running 字样与内部角色词', () => {
+    const projected = JSON.stringify(workerDelegationManifest(RICH_MANIFEST as never));
+    for (const term of ['weight', 'estimatedSeconds', 'effects', 'style', 'long_running', '宿主', '委派', '能力快照', '纵深防御', '子进程', '执行面']) {
+      expect(projected, `清单投影漏进了「${term}」`).not.toContain(term);
+    }
+    // 选操作/填参数所需仍在：operation 名、参数名、required、payload.schema、说明。
+    expect(projected).toContain('dummy.query');
+    expect(projected).toContain('"--collection"');
+    expect(projected).toContain('"required":true');
+    expect(projected).toContain('"schema"');
+    expect(projected).toContain('查记录');
+  });
+
+  it('①b renderWorkerDelegation：整段委派文本也不含上述内部词', () => {
+    const text = renderWorkerDelegation({ task: '查记录', manifest: RICH_MANIFEST as never });
+    for (const term of ['weight', 'estimatedSeconds', 'effects', 'style', 'long_running', '宿主', '委派', '能力快照', '纵深防御', '子进程', '执行面']) {
+      expect(text, `委派文本漏进了「${term}」`).not.toContain(term);
+    }
+  });
+
+  // ② Worker 提示渲染后：只说「一件活 / 按输入去做 / 用工具报事实」，无内部角色/机制词。
+  it('② renderWorkerSystemPrompt：渲染后不含宿主/委派/能力快照/纵深防御/子进程/执行面', () => {
+    const rendered = renderWorkerSystemPrompt('/trusted/root');
+    for (const term of ['宿主', '委派', '能力快照', '纵深防御', '子进程', '执行面']) {
+      expect(rendered, `Worker 提示漏进了「${term}」`).not.toContain(term);
+    }
+    // 行为句语义仍在：你收到一件活、按输入做、用工具报事实。
+    expect(rendered).toContain('你接到一件要办的事');
+    expect(rendered).toContain('execute_operation');
+  });
+
+  // ③ 底账投影：失败只给 status + 封闭 failureKind，不给 failureReason / error.message 自由文本。
+  const SCOPE = { principalId: 'wecom:proj-user', sessionId: 'proj-conv' };
+  function seededFailedRegistry(): ReturnType<typeof createTaskRegistry> {
+    const registry = createTaskRegistry();
+    registry.begin({ taskId: 't_proj', ...SCOPE, request: '查 alpha' });
+    registry.noteExecution('t_proj', {
+      requestId: 'req_proj',
+      operation: 'dummy.query',
+      status: 'failed',
+      // 底账里 failureReason/旧文案含内部词：投影必须结构性不给这些拼装文本，不靠词表过滤。
+      error: { code: 'COLLECTION_FAULT', message: '执行层没法读这份集合，确认凭据 handle 失效' },
+    });
+    registry.fail('t_proj', '执行层调用超时，确认凭据 handle 失效');
+    return registry;
+  }
+
+  /** 经真实 createSession 调一次指定工具，拿到生产 statusView / taskResult 投影。 */
+  async function projectionOf(tool: 'task_status' | 'task_result'): Promise<Record<string, unknown>> {
+    const registry = seededFailedRegistry();
+    let captured: Record<string, unknown> = {};
+    const client: ExecutionClient = {
+      async capabilities() { return { contractVersion: 4, operations: [{ name: 'dummy.query', args: [] }] }; },
+      async execute() { return { status: 'completed', data: {} }; },
+    };
+    const session = await createSession({
+      principalId: SCOPE.principalId,
+      sessionId: SCOPE.sessionId,
+      client,
+      allowedOperations: ['dummy.query'],
+      mainDriver: {
+        async run(input) {
+          captured = await input.exec(tool, { ref: 't_proj' }) as Record<string, unknown>;
+          return { text: '', messages: [] } as never;
+        },
+      },
+      workerDriver: { async run() { return { text: '', messages: [] } as never; } },
+      mainSystemPrompt: '（测试）',
+      taskRegistry: registry,
+    });
+    await session.send('查一下');
+    return captured;
+  }
+
+  it('③ task_status 投影：无 failureReason 自由文本，失败只出现封闭 failureKind', async () => {
+    const view = await projectionOf('task_status');
+    const text = JSON.stringify(view);
+    expect(text).not.toContain('failureReason');
+    expect(text).not.toContain('执行层');
+    expect(text).not.toContain('确认凭据');
+    expect(text).not.toContain('handle');
+    expect(text).not.toContain('"message"');
+    // 封闭种类来自 classifyFailure：COLLECTION_FAULT → executor_failed。
+    expect(view['failureKind']).toBe('executor_failed');
+  });
+
+  it('③b task_result 投影：失败给 failureKind + 清洗摘要，不给 failureReason/技术码/error 对象', async () => {
+    const result = await projectionOf('task_result');
+    const text = JSON.stringify(result);
+    expect(text).not.toContain('failureReason');
+    expect(text).not.toContain('执行层');
+    expect(text).not.toContain('确认凭据');
+    expect(text).not.toContain('handle');
+    expect(text).not.toContain('"message"');
+    expect(text).not.toContain('"code"');
+    // 封闭种类来自 classifyFailure：COLLECTION_FAULT → executor_failed。
+    expect(result['failureKind']).toBe('executor_failed');
+    // 必要的业务摘要仍在（清洗过：内部词替换成「确认信息」「对方」），模型能读懂结果。
+    expect(result['summary']).toContain('对方没法读这份集合');
+    expect(result['summary']).toContain('确认信息失效');
+    const executions = result['executions'] as Array<Record<string, unknown>>;
+    expect(executions[0]!['failureKind']).toBe('executor_failed');
+    expect(executions[0]!['error']).toBeUndefined();
+  });
+});
+
+/**
+ * 反向绊线（亲跑验证，恢复后全绿：19 passed）：
  *   · 把 taskCompletionFactText 的「办完了」改回「已由执行端确认完成」→ ① 红（内部词命中 + 丢「办完了」）；
  *   · 把 dummy-cli-client.ts 的 execute 超时 message 改回「执行层调用超时…」→ ④ 红（内部词命中）；
  *   · 把 MAIN_PROTOCOL_NOTE_WITH_WRITES 任一条改回带「执行层」→ ③ 对应用例红；
  *   · 把 agent.md 任一「办事助手/助手」改回「执行层」→ ⑤ 红；
- *   · 把 renderWorkerSystemPrompt 工作目录块的「办事的执行面」改回「执行层」→ ⑥ 红；
+ *   · 把 renderWorkerSystemPrompt 工作目录块的「办事的执行面」改回「执行层」→ ⑥ 红（旧锚，现文案已改）；
  *   · 把 execution-runtime.ts:2859 的「没产出有效的办理结果汇报」改回「执行层 Worker 未产出有效汇报」→ ⑦b 红（端到端读到的就是该 reason）。
- * 用例断言一字未改即可复现；恢复后全绿。
+ *   · ①a/①b：把 weight / long_running 放回 workerDelegationManifest 的白名单 → 2 failed｜17 passed，
+ *     `清单投影漏进了「weight」`、①b renderWorkerDelegation 同红；
+ *   · ②：把 WORKER_SYSTEM_PROMPT 首句改回「宿主把一项平台任务委派给你（能力快照/纵深防御/子进程/执行面）」
+ *     → 1 failed｜18 passed，`Worker 提示漏进了「宿主」`；
+ *   · ③b：把 taskResult 的 failureReason / error 自由文本投影放回 → 1 failed｜18 passed，
+ *     `expected … not to contain 'failureReason'`，回执里 `failureReason:"执行层调用超时，确认凭据 handle 失效"`
+ *     与 error.message `执行层没法读这份集合，确认凭据 handle 失效` 原样外泄（清洗摘要 summary 那道
+ *     拦不住拼装字段——证明是结构性拦截，不是词表过滤）。
+ * 用例断言一字未改即可复现；恢复后 19/19 全绿。
  */
