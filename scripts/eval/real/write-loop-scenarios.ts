@@ -90,8 +90,6 @@ export const STOP_TURN_1 =
   '帮我导出去年全年的凭证，这是个慢活，要跑一会儿。'
   + '受理了说一声，我等着，之后可能让你停。';
 export const STOP_TURN_2 = '停。这件事我不要了，立刻停下。';
-// 与夹具 dummy.cjs 的长时默认值（LONG_TASK_DEFAULT_SECONDS = 600）对齐；当前无引用，保留供复核。
-export const LONG_TASK_SECONDS = 600;
 
 /** failure：锁定集合（执行层声明的 locked: true，写路径确定性拒绝）。 */
 export const LOCKED_COLLECTION = 'locked-one';

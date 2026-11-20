@@ -119,6 +119,11 @@ export function classifyOutcome(ledger: OutcomeLedger): TaskOutcome {
  * 用户话术由 Main 按 outcome 值选）。既有工具调用拒绝话术保持原样（锚点不放宽）。
  */
 export const OUTCOME_REASON_NOT_PERMITTED = 'not_permitted';
+// 仅分类器内部使用（非死常量，不删）：全仓 grep 无生产方——没有任何代码把 'unsupported' 写进
+// outcomeReasonCode，引用只有 classifyOutcome 的判定分支（task-outcome.ts:78）与 task-outcome.test.ts
+// 的锚点断言；零执行落 'unsupported' 实际由上方 fall-through 覆盖。保留它是因为 B3 的结构化原因码
+// 契约就是 unsupported / not_permitted 成对（见上注），分类分支与测试锚点按同一码表对齐——
+// 执行层/宿主将来真产出该码时不必先改本文件，也不会出现两个模块各写一个码表。
 export const OUTCOME_REASON_UNSUPPORTED = 'unsupported';
 
 /** 两种情形各自可辨的机械原因（只进事实/日志，不直接对用户说）。 */
