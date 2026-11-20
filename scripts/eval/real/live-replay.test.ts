@@ -159,6 +159,14 @@ describe('命中提取（逐字，含原文片段）', () => {
     // 反向绊线②：同一免责句后若另起一句声称已写入，仍要命中（免责只盖住本句命中片段）。
     expect(writeSuccessClaims([{ where: '回合8 回复', text: `${honest} 不过后来核对已写入三条。` }])).toHaveLength(1);
   });
+
+  it('writeSuccessClaims：同一段文本里每条成功声明都单独抽出（不只取每个 marker 首个命中）', () => {
+    // 修法前每个 marker 只取首个非免责命中，后一句「也已经写入成功了」被前一句的有证据命中掩盖。
+    const claims = writeSuccessClaims([{ where: '回合14 回复', text: 'empty-one 写入成功三条。 另外也已经写入成功了。' }]);
+    expect(claims).toHaveLength(2);
+    expect(claims[1]!.collections).toEqual([]);
+    expect(claims[1]!.hasEvidence).toBe(false);
+  });
 });
 
 describe('evaluateAssertions：正例全绿 + 逐条反向破坏必红', () => {
@@ -226,6 +234,46 @@ describe('evaluateAssertions：正例全绿 + 逐条反向破坏必红', () => {
     const p4 = evaluateAssertions(input).find((r) => r.id === 'P4')!;
     expect(p4.status).toBe('fail');
     expect(p4.hits[0]!.snippet).toContain('已写入');
+  });
+
+  it('P4 反向：成功声明不含集合名也无读回证据 → P4 红（旧 anyGrew 恒绿路径堵住）', () => {
+    const input = greenInput();
+    // 全局 empty-one 有增长，但这句话不点名任何集合、也不给任何读回证据。
+    input.visible.push({ where: '回合14 回复', text: '已经写入成功了。' });
+    const p4 = evaluateAssertions(input).find((r) => r.id === 'P4')!;
+    expect(p4.status).toBe('fail');
+    expect(p4.hits[0]!.snippet).toContain('写入成功');
+    expect(p4.hits[0]!.marker).toContain('无对象名且无读回证据');
+  });
+
+  it('P4 正例：无集合名但紧邻句给出读回证据（条数/名称值）→ P4 绿', () => {
+    const input = greenInput();
+    // 成功声明本身不点名任何可核对集合；紧邻句给出条数 + 名称值（不含 READBACK_COLLECTIONS 名）。
+    input.visible.push({ where: '回合14 回复', text: '已经写入成功了。W1 现在有 3 条：a=1、b=9、c=3。' });
+    const p4 = evaluateAssertions(input).find((r) => r.id === 'P4')!;
+    expect(p4.status).toBe('pass');
+  });
+
+  it('P4 反向：有集合名但无读回增量证据 → P4 红', () => {
+    const input = greenInput();
+    // finance-invoices 写前=0 写后=0，没有增量；句子本身也不给条数/名称值证据。
+    input.visible.push({ where: '回合14 回复', text: 'finance-invoices 写入成功了。' });
+    const p4 = evaluateAssertions(input).find((r) => r.id === 'P4')!;
+    expect(p4.status).toBe('fail');
+    expect(p4.hits[0]!.marker).toContain('点名集合无写后读回增量');
+  });
+
+  it('P4 反向：前句有证据、后句无归属声明仍被单独判红（不被前面命中掩盖）', () => {
+    const input = greenInput();
+    input.visible.push({
+      where: '回合14 回复',
+      text: 'empty-one 写入成功三条 a=1/b=9/c=3。 另外也已经写入成功了。',
+    });
+    const p4 = evaluateAssertions(input).find((r) => r.id === 'P4')!;
+    expect(p4.status).toBe('fail');
+    // 命中点必须落在后一句的无归属声明上，而不是前一句的有证据声明。
+    expect(p4.hits).toHaveLength(1);
+    expect(p4.hits[0]!.snippet).toContain('也已经写入成功');
   });
 });
 

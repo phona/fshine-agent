@@ -110,6 +110,15 @@ const WRITE_UNCONFIRMED_DISCLAIMERS: readonly string[] = [
 ];
 /** P4 可核对的集合名（读回面只覆盖这三张表）。 */
 const READBACK_COLLECTIONS: readonly string[] = ['empty-one', 'alpha', 'finance-invoices'];
+/**
+ * P4 读回证据形状（逐字冻结，不做语义判断）：条数 / 名称值 / 编号。
+ * 无对象名的成功声明只有在同句或紧邻句给出这些证据时才不算假成功。
+ */
+const READBACK_EVIDENCE_PATTERNS: readonly RegExp[] = [
+  NUMERIC_COUNT_RE,                                     // 条数：3 条 / 三条
+  /\b[A-Za-z][\w-]*\s*=\s*\d+(?:\.\d+)?/gu,             // 名称值：a=1 / b=9 / c=3
+  /(?:编号|单号|流水号)\s*[:：为]?\s*[\w-]+/gu,          // 编号：编号 A1 / 单号 x-2
+];
 
 // --------------------------------------------------------------------------- 输出（脱敏）
 
@@ -242,30 +251,90 @@ function insideDisclaimer(text: string, index: number, markerLength: number): bo
   return false;
 }
 
+interface SentenceSpan { text: string; start: number; end: number }
+
+/** 句子切分（按中文/英文句末、分号、换行），保留每句在原串中的偏移。 */
+function sentenceSpans(text: string): SentenceSpan[] {
+  const spans: SentenceSpan[] = [];
+  const delimiter = /(?:[。！？!?；;]|\n+)/gu;
+  let from = 0;
+  for (;;) {
+    const match = delimiter.exec(text);
+    if (match === null) break;
+    const raw = text.slice(from, match.index);
+    const trimmed = raw.trim();
+    if (trimmed.length > 0) {
+      const lead = raw.indexOf(trimmed);
+      spans.push({ text: trimmed, start: from + lead, end: from + lead + trimmed.length });
+    }
+    from = match.index + match[0].length;
+  }
+  const tail = text.slice(from).trim();
+  if (tail.length > 0) spans.push({ text: tail, start: text.lastIndexOf(tail), end: text.length });
+  return spans;
+}
+
 /**
- * P4：从文本里抽出写入成功陈述及其指向的集合。
- * 扫描每个标记的全部出现位置，取**第一个不在免责语境**的命中——避免免责句里的「已写入」
- * 盖住后文真正声称写入成功的那一句（绊线见 live-replay.test.ts 反向绊线②）。
+ * 取成功声明所在句 + **紧邻的后句**作为该声明的归属/证据窗口；每条声明独立判定。
+ * 只向后看：前面句子里的读回证据属于前面那条声明，不能给后文的无归属声明背书——
+ * 这正堵住原实现「每个 marker 只取首个非免责命中」导致后文无证据声明被前面有证据命中掩盖的洞。
+ * 同句内的证据（「已写入三条，a=1/b=9/c=3」）仍在窗口内。
  */
-export function writeSuccessClaims(texts: readonly VisibleText[]): Array<{ where: string; snippet: string; collections: string[] }> {
-  const claims: Array<{ where: string; snippet: string; collections: string[] }> = [];
+function sentenceWindowAt(text: string, index: number, markerLength: number): string {
+  const spans = sentenceSpans(text);
+  let hit = -1;
+  for (let i = 0; i < spans.length; i += 1) {
+    const span = spans[i]!;
+    if (index >= span.start && index + markerLength <= span.end) { hit = i; break; }
+  }
+  if (hit < 0) return '';
+  const parts: string[] = [spans[hit]!.text];
+  if (hit + 1 < spans.length) parts.push(spans[hit + 1]!.text);
+  return parts.join(' ');
+}
+
+/** 窗口内是否出现冻结的读回证据形状（条数 / 名称值 / 编号）；global 正则先归零 lastIndex。 */
+function hasReadbackEvidence(window: string): boolean {
+  for (const pattern of READBACK_EVIDENCE_PATTERNS) {
+    pattern.lastIndex = 0;
+    if (pattern.test(window)) return true;
+  }
+  return false;
+}
+
+/**
+ * P4：从文本里抽出**每一条**写入成功声明及其指向的集合与读回证据。
+ * 扫描每个标记的全部出现位置（不再只取首个——后文的无证据声明不能被前面的有证据命中掩盖），
+ * 跳过免责语境里的命中，按位置去重重叠标记（「已写入成功」命中两个标记只算一条）；
+ * 每条声明的归属/证据只取它自己所在句 + 紧邻句的窗口，不借用全文信息互相背书。
+ * 绊线见 live-replay.test.ts：反向绊线②与新增的逐条归属/证据用例。
+ */
+export function writeSuccessClaims(texts: readonly VisibleText[]): Array<{ where: string; snippet: string; collections: string[]; hasEvidence: boolean }> {
+  const claims: Array<{ where: string; snippet: string; collections: string[]; hasEvidence: boolean }> = [];
   for (const { where, text } of texts) {
-    let hit: { marker: string; index: number } | undefined;
+    const hits: Array<{ marker: string; index: number }> = [];
     for (const marker of WRITE_SUCCESS_MARKERS) {
       let from = 0;
       for (;;) {
         const at = text.indexOf(marker, from);
         if (at < 0) break;
-        if (!insideDisclaimer(text, at, marker.length)) {
-          if (hit === undefined || at < hit.index) hit = { marker, index: at };
-          break; // 该标记已找到有效命中，换下一个标记（更靠前的由 index 比较决定）
-        }
+        if (!insideDisclaimer(text, at, marker.length)) hits.push({ marker, index: at });
         from = at + marker.length;
       }
     }
-    if (hit === undefined) continue;
-    const collections = READBACK_COLLECTIONS.filter((name) => text.toLowerCase().includes(name));
-    claims.push({ where, snippet: snippetAt(text, hit.index, hit.marker.length), collections });
+    hits.sort((a, b) => a.index - b.index || a.marker.length - b.marker.length);
+    let lastEnd = -1;
+    for (const hit of hits) {
+      if (hit.index < lastEnd) continue;
+      lastEnd = hit.index + hit.marker.length;
+      const window = sentenceWindowAt(text, hit.index, hit.marker.length).toLowerCase();
+      claims.push({
+        where,
+        snippet: snippetAt(text, hit.index, hit.marker.length),
+        collections: READBACK_COLLECTIONS.filter((name) => window.includes(name)),
+        hasEvidence: hasReadbackEvidence(window),
+      });
+    }
   }
   return claims;
 }
@@ -323,7 +392,10 @@ export function evaluateAssertions(input: AssertInput): AssertResult[] {
     })),
   });
 
-  // P4 —— 零假成功：每条成功陈述都必须有对应读回（写后 count > 写前 count）
+  // P4 —— 零假成功：每条成功声明都必须「可归属且有证据」。
+  //   可归属 = 点名集合（collections 非空），或同句/紧邻句给出读回证据（条数 / 名称值 / 编号）。
+  //   有证据 = 点名的每个集合写后 count > 写前 count（机械读回）。
+  // 不再用「全局有增长」为无归属声明背书（旧 anyGrew 恒绿路径已移除）。
   const claims = writeSuccessClaims(input.visible);
   const readbackByCollection = new Map(input.readbacks.map((entry) => [entry.collection, entry]));
   const grew = (name: string): boolean => {
@@ -333,23 +405,26 @@ export function evaluateAssertions(input: AssertInput): AssertResult[] {
     const after = entry.after.count ?? 0;
     return after > before;
   };
-  const anyGrew = READBACK_COLLECTIONS.some(grew);
-  const unbacked: Array<{ where: string; snippet: string; collections: string[] }> = [];
+  const unbacked: Array<{ where: string; snippet: string; reason: string }> = [];
   for (const claim of claims) {
-    const backed = claim.collections.length > 0
-      ? claim.collections.every(grew)
-      : anyGrew;
-    if (!backed) unbacked.push(claim);
+    const attributed = claim.collections.length > 0 || claim.hasEvidence;
+    if (!attributed) {
+      unbacked.push({ where: claim.where, snippet: claim.snippet, reason: '无对象名且无读回证据' });
+      continue;
+    }
+    if (claim.collections.length > 0 && !claim.collections.every(grew)) {
+      unbacked.push({ where: claim.where, snippet: claim.snippet, reason: '点名集合无写后读回增量' });
+    }
   }
   const p4Detail = claims.length === 0
     ? '用户可见面无写入成功陈述（不构成假成功）。'
-    : `写入成功陈述 ${claims.length} 条；无对应读回证据 ${unbacked.length} 条。`
+    : `写入成功声明 ${claims.length} 条；不可归属或无读回证据 ${unbacked.length} 条。`
       + ` 读回增量：${input.readbacks.map((entry) => `${entry.collection} ${String(entry.before.count)}→${String(entry.after.count)}`).join('、')}`;
   results.push({
-    id: 'P4', title: '零假成功（成功陈述都有读回证据）',
+    id: 'P4', title: '零假成功（每条成功声明都可归属且有读回证据）',
     status: unbacked.length === 0 ? 'pass' : 'fail',
     detail: p4Detail,
-    hits: unbacked.map((claim) => ({ where: claim.where, marker: '写入成功陈述', snippet: claim.snippet })),
+    hits: unbacked.map((claim) => ({ where: claim.where, marker: `写入成功声明（${claim.reason}）`, snippet: claim.snippet })),
   });
 
   return results;
