@@ -559,21 +559,23 @@ describe('写确认续跑：提案载荷随底账记录交回 Worker（后台派
 });
 
 describe('写确认续跑·委派机械事实（纯函数面）', () => {
-  it('有载荷：摘要 + 明确提交指令 + 参数原文（JSON，无 operation 名误导）；无载荷（旧记录）同样带提交指令', () => {
+  it('有载荷：本次任务 = 已确认提案载荷原文（摘要 + 正向提交指令 + 参数原文 JSON，无 operation 名）；无载荷（旧记录）同样给提交指令', () => {
     const withArgs = renderConfirmationResumeFact({
       summary: '将向集合「alpha」新增 2 条',
       operation: 'dummy.prepare',
       args: { '--collection': 'alpha', records: [{ name: 'a', value: 1 }] },
     });
-    expect(withArgs).toContain('用户已确认上一轮提案（摘要：将向集合「alpha」新增 2 条）。');
-    // 2026-11-20：动作指令明确——提交、不是重准备；operation 名不得进事实块。
-    expect(withArgs).toContain('下一步是提交（用提交类 operation，如 commit），不是重新准备');
-    expect(withArgs).toContain('提交时逐字复用这些参数，特别是 records');
+    // 2026-11-20（S3）：这段文本直接作为委派「本次任务」正文——正向指令、不给 prepare 线索。
+    expect(withArgs).toContain('提交上一轮已确认的提案（摘要：将向集合「alpha」新增 2 条）。');
+    expect(withArgs).toContain('按这些参数直接提交，不要省略或改写任何参数');
+    // 正向指令：不再出现「不是重新准备 / 不要重新生成提案」这类否定话术（否定词本身是 prepare 线索）。
+    expect(withArgs).not.toContain('不是重新准备');
+    expect(withArgs).not.toContain('重新生成提案');
     expect(withArgs).not.toContain('dummy.prepare');
     expect(withArgs).toContain('{"args":{"--collection":"alpha","records":[{"name":"a","value":1}]}}');
-    // 旧记录（无载荷）：同样给明确提交指令（不再有含糊的「直接提交」）。
+    // 旧记录（无载荷）：同样给提交指令，不编造载荷。
     const noArgs = renderConfirmationResumeFact({ summary: '旧提案' });
-    expect(noArgs).toBe('用户已确认上一轮提案（摘要：旧提案）。下一步是提交（用提交类 operation，如 commit），不是重新准备、也不是重新生成提案。');
+    expect(noArgs).toBe('提交上一轮已确认的提案（摘要：旧提案）。\n按已确认的提案直接提交。');
     expect(noArgs).not.toContain('dummy.prepare');
   });
 });

@@ -501,12 +501,12 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     expect(client.requests[2]!.confirmation).toEqual({ handle: 'cf_every_call', userText: '确认，提交吧' });
   });
 
-  it('⑫ 确认委派文本出现机械事实：用户已确认上一轮提案（摘要），明确指令下一步提交、不是重准备', async () => {
+  it('⑫ 确认委派文本出现机械事实：本次任务 = 已确认提案（摘要），明确指令直接提交、原交办 prose 让位', async () => {
     // 话术补丁不解决「新 Worker 不知道上一轮发生了什么」：确认回合的委派必须携带一条
     // **机械事实**（宿主从底账提案组装，不是模型话术）——Worker 据此提交、不重新出提案。
-    // 2026-11-20（fix/visible-contract）：动作指令从含糊的「直接提交」改成明确的
-    // 「下一步是提交（用提交类 operation，如 commit），不是重新准备」——13/14 续跑回合
-    // 误重跑 prepare 的直接修法。该事实**只在确认路径**出现（resume 不带）。
+    // 2026-11-20（S3）：这条事实**直接顶替「本次任务」正文**（原交办 prose 不进委派），
+    // 动作写成正向的「提交上一轮已确认的提案 / 按已确认的提案直接提交」——13/14 续跑回合
+    // 拿原 prose 重跑 prepare 的直接修法。该事实**只在确认路径**出现（resume 不带）。
     const registry = makeRegistry();
     const capture: WorkerCapture = { results: [] };
     let delegationText = '';
@@ -534,11 +534,12 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     expect(confirmed.outcome).toBe('started');
     await runner.whenIdle();
 
-    // 委派文本（renderWorkerDelegation 实际产出）必须包含机械事实 + 摘要 + 明确动作指令。
-    expect(delegationText).toContain('用户已确认上一轮提案');
+    // 委派文本（renderWorkerDelegation 实际产出）：本次任务 = 已确认提案事实 + 摘要 + 正向提交指令。
+    expect(delegationText).toContain('提交上一轮已确认的提案');
     expect(delegationText).toContain(SUMMARY);
-    expect(delegationText).toContain('下一步是提交（用提交类 operation，如 commit），不是重新准备');
-    expect(delegationText).toContain('不是重新生成提案');
+    expect(delegationText).toContain('按这些参数直接提交，不要省略或改写任何参数');
+    // 2026-11-20（S3）：原交办 prose（含被用户改掉的旧值）不进委派，事实是本次任务正文。
+    expect(delegationText.split('## 本次任务\n')[1]!).toContain('提交上一轮已确认的提案');
     // 机械事实是宿主的透传，不含句柄（Worker 永远看不到确认凭据）。
     expect(delegationText).not.toContain('cf_delegation_fact');
     expect(delegationText).not.toContain('handle');
