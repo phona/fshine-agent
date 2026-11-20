@@ -42,6 +42,11 @@ export interface OutcomeLedger {
   zeroReason?: ZeroExecutionReason;
   /** 终态失败的原因码（如 result_unknown / failed_confirmed）；权限拒绝只走 zeroReason。 */
   reasonCode?: string;
+  /**
+   * B3 结构化原因码（宿主/执行层传下来的码，不是文案）：`unsupported` / `not_permitted`。
+   * 只用于零执行分支的可辨分类；缺省 = 不提供（退化为按 zeroReason/reasonCode 判定）。
+   */
+  outcomeReasonCode?: string;
 }
 
 /** 答复五值（互斥）。 */
@@ -68,6 +73,9 @@ export function classifyOutcome(ledger: OutcomeLedger): TaskOutcome {
 
   // ——零执行：先判「有能力但缺条件」，再判「根本没有这件事」——
   if (executions.length === 0) {
+    // B3 结构化原因码优先：宿主/执行层传下来的码，不看任何文案（如「权限」字样）。
+    if (ledger.outcomeReasonCode === OUTCOME_REASON_NOT_PERMITTED) return 'blocked';
+    if (ledger.outcomeReasonCode === OUTCOME_REASON_UNSUPPORTED) return 'unsupported';
     // 权限拒绝（本次不允许）或等用户补信息（用户没答）→ blocked，绝不是 unsupported。
     if (ledger.zeroReason === 'permission_denied' || ledger.zeroReason === 'awaiting_user') return 'blocked';
     if (terminal === 'waiting_user') return 'blocked';

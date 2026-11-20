@@ -591,6 +591,11 @@ export interface BackgroundTaskFailure {
   status: 'failed' | 'result_unknown';
   /** Worker 回合失败汇报原文（只进日志与底账；**不进用户文本**）。 */
   reason: string;
+  /**
+   * 结构化拒绝原因码（如 `not_permitted`，来自执行端失败结局）；不是文案，不进用户文本。
+   * 供失败投递的 outcome 分类用结构化码判 blocked，不靠 reason 文本里是否出现「权限」。
+   */
+  reasonCode?: string;
 }
 
 export interface BackgroundDispatchInput {
@@ -826,6 +831,9 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
             request: task.request,
             status: outcome.kind === 'result_unknown' ? 'result_unknown' : 'failed',
             reason: outcome.reason,
+            ...('reasonCode' in outcome && outcome.reasonCode !== undefined
+              ? { reasonCode: outcome.reasonCode }
+              : {}),
           });
         }
         return outcome;

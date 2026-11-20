@@ -90,7 +90,12 @@ import {
   taskFailureFactText,
   taskRestartFactText,
 } from './task-completion-delivery';
-import { classifyOutcome, type OutcomeLedger, type TaskOutcome } from '../../packages/agent/src/task-outcome';
+import {
+  OUTCOME_REASON_NOT_PERMITTED,
+  type OutcomeLedger,
+  type TaskOutcome,
+} from '../../packages/agent/src/task-outcome';
+import { classifyFailureOutcome } from './task-outcome-reason';
 import { composeNotificationSinks, createChatNotificationSink, notificationTerminalLogLine } from './notification-chat-sink';
 import {
   createInprocessAlerts,
@@ -663,11 +668,16 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     }
   };
   /**
-   * 答复五态机械分类（B2）：从任务底账取机械事实喂 classifyOutcome，得到五值之一。
-   * 零执行 + 权限拒绝（reason = 当前权限不支持）→ blocked；零执行非拒绝 → unsupported。
+   * 答复五态机械分类（B2/F3-1）：从任务底账取机械事实喂 classifyFailureOutcome，得到五值之一。
+   * 零执行 + 权限拒绝（**结构化原因码** not_permitted）→ blocked；零执行非拒绝 → unsupported。
+   * 判据只认 reasonCode，不扫 reason 文本里的「权限」字样（那是给模型读的转述，不是事实）。
    * 只输出结构化值（不是话术），供 Main 按值选措辞。取不到底账时按失败原因码保守分类。
    */
-  const outcomeOfTask = (taskId: string, status: 'failed' | 'result_unknown', reason: string): TaskOutcome => {
+  const outcomeOfTask = (
+    taskId: string,
+    status: 'failed' | 'result_unknown',
+    reasonCode?: string,
+  ): TaskOutcome => {
     try {
       const record = (taskRegistry as unknown as {
         get(id: string): {
@@ -692,13 +702,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         || record.status === 'timed_out' || record.status === 'unexecuted'
         || record.status === 'running' || record.status === 'waiting_user'
         ? record.status : 'failed') as OutcomeLedger['terminal'];
-      const zeroReason = executions.length === 0
-        ? (reason.includes('权限') || reason.includes('不允许') ? 'permission_denied' : undefined)
-        : undefined;
-      return classifyOutcome({
-        executions, terminal,
-        ...(zeroReason === undefined ? {} : { zeroReason }),
-        ...(record.reason === undefined ? {} : { reasonCode: record.reason }),
+      return classifyFailureOutcome(executions, {
+        terminal,
+        ...(reasonCode === undefined ? {} : { reasonCode }),
+        ...(record.reason === undefined ? {} : { ledgerReasonCode: record.reason }),
       });
     } catch {
       return 'failed';
@@ -1029,12 +1036,13 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             event: 'task_failure_wake',
             // 事实（给模型读；业务名 + 归类后的业务种类 + 机械原因），**不投 Worker 失败原文**。
             // B2：追加结构化 outcome 五值（机械事实，不是话术），Main 据此按值选措辞。
+            // F3-1：blocked 判据与 missing 字段都只认结构化原因码，不扫 reason 文本「权限」字样。
             factText: taskFailureFactText({
               ...(name === undefined ? {} : { name }),
               kind,
               reason: failure.reason,
-              outcome: outcomeOfTask(failure.taskId, failure.status, failure.reason),
-              ...(failure.reason.includes('权限') || failure.reason.includes('不允许')
+              outcome: outcomeOfTask(failure.taskId, failure.status, failure.reasonCode),
+              ...(failure.reasonCode === OUTCOME_REASON_NOT_PERMITTED
                 ? { missing: '本次允许范围' }
                 : {}),
             }),

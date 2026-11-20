@@ -10,6 +10,8 @@ import {
   UNSUPPORTED_FACT_FORBIDDEN_WORDS,
   OUTCOME_DETAIL_UNSUPPORTED,
   OUTCOME_DETAIL_NOT_PERMITTED,
+  OUTCOME_REASON_NOT_PERMITTED,
+  OUTCOME_REASON_UNSUPPORTED,
   type OutcomeLedger,
   type TaskOutcome,
 } from './src/task-outcome';
@@ -170,5 +172,17 @@ describe('B2 outcome 结构化事实 + B3 原因码拆分', () => {
     expect(OUTCOME_DETAIL_UNSUPPORTED).toContain('没有对应能力');
     expect(OUTCOME_DETAIL_NOT_PERMITTED).toContain('本次不允许');
     expect(OUTCOME_DETAIL_UNSUPPORTED).not.toBe(OUTCOME_DETAIL_NOT_PERMITTED);
+  });
+
+  it('④ B3 两个原因码真正接上分类器：not_permitted→blocked，unsupported→unsupported（零执行）', () => {
+    expect(OUTCOME_REASON_NOT_PERMITTED).toBe('not_permitted');
+    expect(OUTCOME_REASON_UNSUPPORTED).toBe('unsupported');
+    expect(classifyOutcome({ executions: [], terminal: 'failed', outcomeReasonCode: OUTCOME_REASON_NOT_PERMITTED })).toBe('blocked');
+    expect(classifyOutcome({ executions: [], terminal: 'unexecuted', outcomeReasonCode: OUTCOME_REASON_UNSUPPORTED })).toBe('unsupported');
+    // 结构化码优先于 zeroReason（防止文案/旧码覆盖新码）。
+    expect(classifyOutcome({
+      executions: [], terminal: 'failed',
+      outcomeReasonCode: OUTCOME_REASON_UNSUPPORTED, zeroReason: 'permission_denied',
+    })).toBe('unsupported');
   });
 });

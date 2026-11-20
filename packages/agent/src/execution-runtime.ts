@@ -96,6 +96,7 @@ import {
 } from './resource-policy';
 import type { TaskExecutionOutcome, TaskExecutor, TaskRunner, ResumedOperation } from './task-runner';
 import type { CapabilityEntry } from './capability-catalog';
+import { OUTCOME_REASON_NOT_PERMITTED } from './task-outcome';
 
 /** Main 委派工具名（实例名可经部署声明替换的演进留在后续切片；当前用中性名）。 */
 export const TASK_RUN_TOOL = 'task_run';
@@ -3194,7 +3195,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
             return { name: skill.name, content: skill.content };
           }
           // 能力目录（A4）：与工具面同源门控（注入了非空目录才受理）。输出只含业务名 + 读/写，
-          // 绝不带 operation 名、参数名或 --（字符串守卫见 capability-catalog.guard.test.ts）。
+          // 绝不带 operation 名、参数名或 --（字符串守卫见 packages/agent/main-capability-surface.test.ts:66）。
           if (tool === CAPABILITIES_TOOL && options.capabilityCatalog !== undefined && options.capabilityCatalog.length > 0) {
             return {
               capabilities: options.capabilityCatalog.map((entry) => ({ name: entry.name, read: entry.read, write: entry.write })),
@@ -4405,7 +4406,11 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         // 发起前被宿主拒绝（权限/允许集合）时，用户该看到「没权限」，不是「模型没干活」：
         // 后者把权限问题说成模型问题，还会诱导用户让模型重试同一个动作。
         if (hostRefusedOperations.length > 0) {
-          return { kind: 'failed', reason: OPERATION_NOT_PERMITTED_MESSAGE };
+          return {
+            kind: 'failed',
+            reason: OPERATION_NOT_PERMITTED_MESSAGE,
+            reasonCode: OUTCOME_REASON_NOT_PERMITTED,
+          };
         }
         return { kind: 'failed', reason: '没有实际办理：助手已汇报，但这次交办没有发出任何办理动作。' };
       }
