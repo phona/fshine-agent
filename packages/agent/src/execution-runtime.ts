@@ -3452,8 +3452,10 @@ function executeOperationTool(): DiscoveredTool {
  * 工具名 = `op_` + operation 名安全化（非字母数字压成 `_`）：`dummy.prepare` → `op_dummy_prepare`。
  * schema 只收非 hostOnly 参数：名字去掉 `--` 前缀；有 payload.schema 的用该 schema；
  * 其余按声明 type 给 string/number/array（type 是展示提示，缺省 string）。
- * 描述只用 label（缺省 operation 名）+ 一句「参数按声明填」——不含 `--` / style / weight /
- * effects / long_running 这些实现字样（守卫钉死）。
+ * 描述 = 业务能力名（可选）+ label（缺省 operation 名）+ 一句「参数按声明填」——不含 `--` /
+ * style / weight / effects / long_running 这些实现字样（守卫钉死）。capability 来自执行层声明，
+ * 只作业务展示名：让模型从业务措辞（如「导出 / 慢活」）认出该工具；缺省/空白时逐字节退回
+ * 旧形状（只有 label + 一句），调用方无 capability 的工具面不变。
  */
 export const WORKER_OP_TOOL_PREFIX = 'op_';
 
@@ -3480,6 +3482,7 @@ function argJsonSchema(arg: ExecutionArgDeclaration): Record<string, unknown> {
 export function workerOperationTool(operation: {
   name: string;
   label?: string;
+  capability?: string;
   args: readonly ExecutionArgDeclaration[];
 }): DiscoveredTool {
   const visible = workerVisibleArgs(operation);
@@ -3490,9 +3493,14 @@ export function workerOperationTool(operation: {
     if (declaration.required) required.push(field);
   }
   const label = operation.label !== undefined && operation.label !== '' ? operation.label : operation.name;
+  // 业务能力名只作展示（来自执行层 capability 声明）：拼在 label 前，给模型一条业务线索，
+  // 让它从用户措辞（「导出 / 慢活」）认出工具。只含业务信息，不泄漏 operation 名/--/实现字样。
+  // 缺省或空白 capability 时逐字节退回旧形状「${label}。参数按声明填。」。
+  const capability = operation.capability !== undefined && operation.capability.trim() !== '' ? operation.capability.trim() : '';
+  const description = capability === '' ? `${label}。参数按声明填。` : `${capability}：${label}。参数按声明填。`;
   return {
     name: workerOperationToolName(operation.name),
-    description: `${label}。参数按声明填。`,
+    description,
     inputSchema: {
       type: 'object',
       properties,

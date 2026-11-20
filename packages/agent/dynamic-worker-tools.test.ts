@@ -12,6 +12,7 @@ import type { CapabilityManifest } from '@fshine/contracts/execution-contract';
 import {
   mapWorkerOperationArgs,
   workerDelegationManifest,
+  workerOperationTool,
   workerOperationTools,
   workerOperationToolName,
 } from './src/execution-runtime';
@@ -105,6 +106,34 @@ describe('动态 Worker 工具面：schema 形状', () => {
         expect(tool.description, `${tool.name} 描述不得含 ${word}`).not.toContain(word);
       }
     }
+  });
+
+  it('③c 有 capability 的 operation：描述带业务名，且不含 operation 名与双连字符（反向绊线：去掉业务名注入 → 红）', () => {
+    // 用真实夹具里 dummy.longtask 的业务名（来自上一刀已声明的 capability，不改 label）。
+    const tool = workerOperationTool({
+      name: 'dummy.longtask',
+      label: 'long running task',
+      capability: '长时导出',
+      args: [],
+    });
+    expect(tool.description).toBe('长时导出：long running task。参数按声明填。');
+    expect(tool.description).toContain('长时导出');
+    expect(tool.description, '描述不得含 operation 名').not.toContain('dummy.longtask');
+    expect(tool.description, '描述不得含双连字符').not.toContain('--');
+    for (const word of ['style', 'weight', 'effects', 'long_running']) {
+      expect(tool.description, `描述不得含实现字样 ${word}`).not.toContain(word);
+    }
+  });
+
+  it('③d 无 capability 的 operation：描述与旧形状逐字节一致（缺省退化）', () => {
+    const withoutCapability = workerOperationTool({ name: 'dummy.query', label: 'query records', args: [] });
+    expect(withoutCapability.description).toBe('query records。参数按声明填。');
+    // 连显式空白 capability 也退回旧形状（不制造多余分隔符）。
+    const blank = workerOperationTool({ name: 'dummy.query', label: 'query records', capability: '   ', args: [] });
+    expect(blank.description).toBe('query records。参数按声明填。');
+    // label 缺省时用 operation 名，仍逐字节等于旧退化形状。
+    const noLabel = workerOperationTool({ name: 'dummy.query', args: [] });
+    expect(noLabel.description).toBe('dummy.query。参数按声明填。');
   });
 });
 
