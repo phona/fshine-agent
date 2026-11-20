@@ -108,7 +108,7 @@ npm run tasks -- <taskId> --redo         # 以该任务存储的交办原文逐�
   过渡命名收敛守卫）。
 - 评测入口：`npm run eval:user`（用户级黑盒评测，15 用例；真实模型 + 仓内 dummy 夹具，与
   `npm run ask` 同源装配；逐样本证据与判据见 `scripts/eval/convergence-r1/README.md`）。
-  真实模型 workflow 面：`eval-real.yml`（per-push 1 轮，advisory）与 `eval-nightly.yml`（12×3）——
+  真实模型 workflow 面：`eval-real.yml`（per-push 1 轮，advisory）与 `eval-nightly.yml`（全量用例 ×3，当前 15 例）——
   **配置就绪 ≠ 持续运行已启用**：两者分别触发于 `main` 的 push/PR 与每日 cron；当前工作线未合入
   `main`、远端 Secrets（`LLM_API_*`）未经本仓验证，故在合入并留档首次真实运行之前，不构成持续保障
   （口径见 `docs/decisions/index.md`「R2：E05 边界与 task.status（§十七）」行与 `docs/history/decision-log-part02-2026-11.md:40` §十七.4）。
