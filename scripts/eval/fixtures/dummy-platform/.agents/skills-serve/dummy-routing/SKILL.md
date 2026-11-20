@@ -9,30 +9,22 @@ Attribution: this file only contains dummy-domain examples. Generic routing
 principles (single step first, split only across independent objects, ask the
 user for what is missing) stay in fshine's neutral routing documentation;
 this file does not rewrite host plan, confirmation or audit flows.
-Capability is authoritative in `operation list --json`, proposal shape in the
-proposal schema, permission and validation in the gateway and executor.
+Which operation exists and what inputs it takes is stated in the operation
+list you are given; permission and validation belong to the platform.
 
-## serve 运行态的调用形态
+## 写一件事怎么走（调用语义，不是命令语法）
 
-调用形态是 `<gateway> <mode> <operation> [flags]`：mode ∈ query / prepare / commit
-（另有 local / call 等辅助出口），**第一个位置参数必须是 `operation list` 里登记的
-operation 名**——flag（`--collection` 之类）不是 operation 名，它填在后面的参数位。
-把 flag 填在 operation 名那一格会被门拒（script not registered）。
+写操作分两步：**先准备一个提案，等用户点头，再提交**。不要指望凭空直接写入。
 
-写面（access=write）的四个 operation 与到达它们的 mode：
+- 准备（`dummy.prepare`）：给出要操作的对象（collection），以及涉及的窗口（window）、
+  条数上限（count）等口径；这一步只生成一份待确认提案（摘要 + 过期时间），**不真正落账**。
+- 提交（`dummy.commit`）：凭准备时的提案提交；这份提案绑定 collection/window/count/records（与提案完全一致）——提交必须携带与提案一致的 records，否则会被确定性拒绝。
+  提案一次性、15 分钟内过期；别自己编造这份凭据，确认流程会替你带上。
+- 另一条提交路径（`dummy.proposal` → `dummy.proposal-commit`）：先建提案，再按提案提交；
+  两者都要先取得用户确认。
 
-| mode | operation | 形态（`<gateway>` = 平台入口，本夹具是 `bin/dummy`） |
-|---|---|---|
-| prepare | `dummy.prepare`（生成待确认提案：返回 handle / summary / expiresAt，不落账） | `<gateway> prepare dummy.prepare --collection <name> [--window <code>] [--count <code>]` |
-| prepare | `dummy.proposal`（建提案，payload 是位置参数） | `<gateway> prepare dummy.proposal <payload-file>` |
-| commit | `dummy.commit`（凭 prepare 句柄提交；句柄一次性、绑定 collection/window/count/records（与提案完全一致）、15 分钟过期） | `<gateway> commit dummy.commit --collection <name> [--window <code>] [--count <code>] --confirmation <handle>`；提交必须携带与提案一致的 records |
-| commit | `dummy.proposal-commit`（按提案提交） | `<gateway> commit dummy.proposal-commit --proposal-id <id>` |
-
-`prepare` 带 `--apply` 会被门拒（写必须走 commit）。`dummy.prepare` 返回
-`needs_confirmation` + `confirmation{handle, summary, expiresAt}`；句柄对宿主不透明，
-不存在/过期/已用/绑定不一致由执行层确定性拒绝。名、参数与可用 mode 的权威是
-`<gateway> operation list --json`；同一条注册表的可读形态在 `<gateway> --help` 与
-`<gateway> <mode> --help`。需许可的操作按能力清单声明先申请计划，形态与门禁以平台为准。
+无论哪条路径，都不能跳过「准备 + 用户确认 + 提交」直接落笔；查询是只读，不要为了
+「核对」走写面。需许可的操作先按清单申请，具体能不能做、怎么校验以平台为准。
 
 ## Routing examples (which route, not how)
 
@@ -50,7 +42,7 @@ operation 名**——flag（`--collection` 之类）不是 operation 名，它�
 
 ## 本夹具的确定性数据面（2026-11-12 补：让「核对是否完成」有可检查的事实基础）
 
-下面列出本夹具**全部**集合（`dummy.query` 的 `--collection` 取值）。表外名称一律 `not_found`
+下面列出本夹具**全部**集合（查询操作的 collection 参数取值）。表外名称一律 `not_found`
 （回 `candidates: []`）；子串命中多个会回 `ambiguous`（回候选名）。窗口必须在该集合声明的
 `windows` 里，否则回 `WINDOW_NO_DATA` 并带 `availableWindows`。`query` 返回该集合的 **items
 清单**（与窗口无关）与 `count = items.length`；`records` 是各窗口的记录计数，二者不是同一回事。
@@ -71,14 +63,16 @@ operation 名**——flag（`--collection` 之类）不是 operation 名，它�
 | fabrikam-wholesale | W1 | fabrikam-wholesale-item-1 / 1320 | |
 
 **业务词映射（口语 → 本夹具；只是本域说明，不是宿主规则）**：单据/记录 → `documents`；
-本月 → `W202611`；上个月 → `W202610`。用户给了别的对象名就按上表解析；解析不出时，**先把该标识本身交给执行层裁决**（例：`query dummy.query --collection contoso`——执行层对歧义前缀回 `needs_input` 与候选清单）；把**执行层返回的候选**作为**一次**澄清交给用户，不要要求用户背集合名。**不要自行猜测具体候选集合逐个查询**（用户未确认前对候选集合的查询 = 越权猜测），也**不要凭本表数字作答**。
+本月 → `W202611`；上个月 → `W202610`。用户给了别的对象名就按上表解析；解析不出时，
+**先把这个标识本身交给平台裁决**——对歧义前缀它会回「还差信息」并给出候选清单；把平台
+给的候选作为**一次**澄清交给用户，不要要求用户背集合名。**不要自行猜测具体候选集合逐个查询**
+（用户未确认前对候选集合的查询 = 越权猜测），也**不要凭本表数字作答**。
 
-**数字边界（2026-11-13 R2 技能对齐）**：上表的条目与数值只用于理解夹具域与路由判断；**一切查询结果以执行层返回为准，不得引用本表数字作答**（引用即编造）。
+**数字边界（2026-11-13 R2 技能对齐）**：上表的条目与数值只用于理解夹具域与路由判断；
+**一切查询结果以平台返回为准，不得引用本表数字作答**（引用即编造）。
 
 **核对口径**：本域「核对」= 读该集合的 items 并检查可机械判定的异常——**同名不同值**
 （`document-2` 出现两次，金额 800 与 900）就是"核对发现的问题"，报出第几条、名称、值即可；
 没有异常就如实说没发现。
-写面（改已保存数据）只能走 `prepare` → 用户确认 → `commit`：直提走
-`dummy.prepare` → `dummy.commit`（句柄由宿主按会话透传，模型不要自行拼句柄），
-提案走 `dummy.proposal` → `dummy.proposal-commit`；都必须先取得用户确认。
-查询是只读，不要为了"核对"走写面。
+改已保存数据（写面）只能按上面「准备 → 用户确认 → 提交」两步走，凭据由确认流程按会话带上，
+不要自己拼。查询是只读，不要为了"核对"走写面。

@@ -385,15 +385,15 @@ export const OPERATION_NOT_PERMITTED_MESSAGE = '当前权限不支持这个操�
 /** Worker 唯一工具名：结构化执行入口（宿主生成 requestId，模型只给 operation + args）。 */
 export const EXECUTE_OPERATION_TOOL = 'execute_operation';
 export const EXECUTE_OPERATION_TOOL_DESCRIPTION =
-  '发起一次结构化执行。operation 必须是本轮能力快照里登记的 operation 名；'
-  + 'args 按该 operation 声明的参数名填写（对宿主不透明，形状由平台校验）。返回执行的状态与数据。';
+  '把一步交出去办。operation 必须是这次给你的清单里列出的操作名；'
+  + 'args 按该操作声明的参数名填写（形状由对方校验）。返回办到哪一步与拿到的数据。';
 export const EXECUTE_OPERATION_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    operation: { type: 'string', description: '本轮能力快照里登记的 operation 名。' },
+    operation: { type: 'string', description: '这次给你的清单里列出的操作名。' },
     args: {
       type: 'object',
-      description: '该 operation 声明的参数（参数名见快照的 args 声明）。结构化参数（数组/对象）直接把值放进来，宿主负责序列化——不要手拼 JSON 字符串。',
+      description: '该操作的参数（名字见清单里的参数声明）。数组/对象直接把值放进来，不用自己拼 JSON 字符串。',
     },
   },
   required: ['operation'],
@@ -531,33 +531,36 @@ export function mainProtocolNoteFor(allowWriteOperations: boolean): string {
   return allowWriteOperations ? MAIN_PROTOCOL_NOTE_WITH_WRITES : MAIN_PROTOCOL_NOTE;
 }
 
-/** Worker 的静态系统提示：协议义务、机械边界与输出纪律；零执行层实例名。 */
+/**
+ * Worker 的静态系统提示（2026-11-20 第二人称行为句收口）：只说「你收到一件活、按给你的
+ * 输入去做、用工具报事实」。去掉宿主/委派/能力快照/纵深防御/子进程/执行面这些内部角色与
+ * 机制词——它们不帮模型做对事，只让它把内部形态说给用户。机械边界（允许集合、结果真实性）
+ * 由宿主在工具面守住，不靠这些词做提示词补丁。
+ */
 export const WORKER_SYSTEM_PROMPT = [
-  '你是 fshine 的办事 Worker：宿主把一项平台任务委派给你，你在一个受信工作区里工作。',
+  '你接到一件要办的事，按给你的输入去做。',
   '',
-  '执行纪律：',
-  '- 只能通过 execute_operation 工具发起执行；operation 名与参数写法必须取自本轮能力快照。',
-  '- 只能依据工具返回的 status/data/error 汇报事实，不得编造、不得补平台没给出的内容。',
-  '- 平台说缺信息或没有匹配时，把平台给的事实与候选原样写进汇报，不要自行猜测补全。',
-  '- 汇报用简体中文，一段话说清：执行了什么、返回了什么、还有什么平台没有给出。',
-  '- 不要在汇报里写内部编号、文件路径、协议原文或工具名；给宿主一段可直接向用户转述的事实。',
+  '怎么做：',
+  '- 用 execute_operation 把每一步交出去办；操作名和参数照着给你的那份清单填。',
+  '- 只根据工具回报的结果说话：办到哪一步、拿到了什么，都照实说；没拿到的不要自己补。',
+  '- 对方说缺信息或没找到对象时，把给出的说法和候选如实带回来，别替它猜一个。',
+  '- 用一段简体中文说清：你办了什么、对方回了什么、还有什么没拿到。',
+  '- 汇报里别写内部编号、文件路径或协议字样；写成一段能直接转给别人看的事实。',
 ].join('\n');
 
 /**
  * 渲染 Worker 系统提示：不传 workspaceRoot 时与 WORKER_SYSTEM_PROMPT 逐字节相同（缺省零变化）；
- * 传入可信绝对路径时追加工作目录约束块（纵深防御提醒，不是安全控制——执行环境的实际
- * 权限边界归执行层）。workspaceRoot 来源必须是装配层持有的可信路径（如 profile.root），
- * 不得取模型输出或用户消息。
+ * 传入可信绝对路径时追加一条工作目录纪律（不是安全控制——实际能访问到什么由执行环境决定）。
+ * workspaceRoot 来源必须是装配层持有的可信路径（如 profile.root），不得取模型输出或用户消息。
  */
 export function renderWorkerSystemPrompt(workspaceRoot?: string): string {
   if (workspaceRoot === undefined || workspaceRoot.trim() === '') return WORKER_SYSTEM_PROMPT;
   return [
     WORKER_SYSTEM_PROMPT,
     '',
-    '【可信工作目录】',
-    `你的可信工作目录是：${workspaceRoot}`,
-    '不要主动访问该目录之外的文件；不要读取宿主配置、凭据、其他项目或用户主目录；该约束同样适用于你启动的任何子进程。',
-    '（以上是纵深防御提醒，不构成操作系统级隔离；执行环境的实际权限边界由办事的执行面负责。）',
+    '【工作目录】',
+    `你的工作目录是：${workspaceRoot}`,
+    '处理文件只在这个目录里进行；不要去翻别人的配置、凭据或别的目录；这条对你调用的工具一样适用。',
   ].join('\n');
 }
 
@@ -1105,11 +1108,12 @@ export function renderConfirmationExpiredFact(): string {
 }
 
 /**
- * 委派清单投影（模型可见面收口，2026-11-19）：Worker 只拿调用所需——operation 名、参数
- * 声明、label（展示）与 `long_running`（影响行为：可能返回 accepted）。**去掉 weight /
- * estimatedSeconds 等内部度量**（抽象泄露来源之一：模型拿「单次估时约半小时」向用户
- * 承诺时长）；read/write 标记不进清单——允许集合（allowedOperations）才是宿主的执行面
- * 边界，不靠清单文本冒充授权。字段按白名单逐项保留，未来契约新增字段不会自动漏进委派。
+ * 委派清单投影（模型可见面收口，2026-11-19；2026-11-20 再收口）：Worker 只拿**选对操作、
+ * 填对参数**所需——operation 名、参数名、required、payload.schema（输入形状）与 label
+ * （一句业务说明）。**去掉 weight / estimatedSeconds / effects / style 派生的 type /
+ * long_running 等实现细节**：这些字段既不帮模型选操作也不帮它填参数（long_running 的
+ * `accepted`/`wait` 机制由宿主按完整清单机械裁决，不靠模型读字样）。字段按白名单逐项
+ * 保留，未来契约新增字段不会自动漏进委派。
  */
 export function workerDelegationManifest(manifest: CapabilityManifest): CapabilityManifest {
   return {
@@ -1117,8 +1121,12 @@ export function workerDelegationManifest(manifest: CapabilityManifest): Capabili
     operations: manifest.operations.map((operation) => ({
       name: operation.name,
       ...(operation.label === undefined ? {} : { label: operation.label }),
-      args: operation.args,
-      ...(operation.long_running === true ? { long_running: true } : {}),
+      // 参数同样白名单：只留名字、必填与输入形状；type（源自执行层 style）不进模型面。
+      args: operation.args.map((arg) => ({
+        name: arg.name,
+        required: arg.required,
+        ...(arg.payload === undefined ? {} : { payload: arg.payload }),
+      })),
     })),
   };
 }
@@ -1157,10 +1165,10 @@ export function renderWorkerDelegation(input: {
   confirmationExpiredFact?: string;
 }): string {
   const parts = [
-    '## 本次任务（宿主委派）',
+    '## 本次任务',
     input.task,
     '',
-    '## 能力快照（本轮唯一可执行面：只能调用这里登记的 operation）',
+    '## 可调用的操作（只能调用这里列出的操作名）',
     WORKER_SNAPSHOT_COST_NOTE,
     '```json',
     JSON.stringify(workerDelegationManifest(input.manifest), null, 2),
@@ -1170,10 +1178,10 @@ export function renderWorkerDelegation(input: {
     parts.push('', '## 用户补充（对上一次待办问题的答复）', input.answer);
   }
   if (input.confirmationFact !== undefined && input.confirmationFact.trim() !== '') {
-    parts.push('', '## 写确认续跑（宿主机械事实）', input.confirmationFact);
+    parts.push('', '## 写确认续跑', input.confirmationFact);
   }
   if (input.confirmationExpiredFact !== undefined && input.confirmationExpiredFact.trim() !== '') {
-    parts.push('', '## 写确认续跑（宿主机械事实）', input.confirmationExpiredFact);
+    parts.push('', '## 写确认续跑', input.confirmationExpiredFact);
   }
   if (input.files !== undefined && input.files.length > 0) {
     parts.push('', input.fileManifestHint === undefined
@@ -1186,7 +1194,7 @@ export function renderWorkerDelegation(input: {
     }
     parts.push(
       '',
-      '## 长任务结果（宿主注入，原样事实）',
+      '## 长任务结果（原样事实）',
       '此前交办的那件事已在后台办完；结果如下。文件只给 fileId——用 run_js 的 inputs 按 fileId 读取，不要猜路径。',
       '```json',
       JSON.stringify(input.resumedOperation, null, 2),
@@ -1971,14 +1979,50 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     return ref;
   }
 
-  /** 任务行只读投影：白名单字段，不含内部路径/租约/身份字段。 */
+  /**
+   * 失败的结构化投影（2026-11-20 底账投影收口）：只回**封闭的 failureKind**（复用
+   * classifyFailure 的码表归类）+ 一条**清洗过的业务摘要**，**不再把 failureReason 这段
+   * 拼装自由文本整段倒给模型**——底账里旧文案含内部词（执行层/执行端/句柄等），结构性不给
+   * 拼装字段才是根治，不是对文本做词表过滤。摘要只取自末条执行的 error.message，经既有
+   * cleanExecutorDiagnostic 机械清理（剥技术码/路径/机构自称），业务原话保留——模型据此
+   * 才能「读懂结果、如实转述」；码仍只进 failureKind，不进文本。
+   *
+   * 摘要清洗：复用执行诊断清理（剥码/路径/机构自称），再去掉内部凭据/角色词。
+   */
+  function failureSummaryOf(message: string): string {
+    return cleanExecutorDiagnostic(message)
+      .replace(/确认凭据|确认句柄|句柄|handle|凭据/giu, '确认信息')
+      .replace(/(确认信息\s*){2,}/gu, '确认信息')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function failureViewOfTask(task: TaskRecord): { failureKind?: UserFacingFailureKind; summary?: string } {
+    const failed = [...task.executions].reverse().find((execution) =>
+      (execution.status === 'failed' || execution.status === 'refused') && execution.error !== undefined);
+    const failureKind = failed?.error !== undefined
+      ? classifyFailure({ code: failed.error.code })
+      : task.reason === 'result_unknown' ? 'unknown_result'
+      : task.status === 'timed_out' ? 'timed_out'
+      : task.status === 'failed' ? 'executor_failed'
+      : undefined;
+    const summary = failed?.error?.message === undefined ? undefined : failureSummaryOf(failed.error.message);
+    return {
+      ...(failureKind === undefined ? {} : { failureKind }),
+      ...(summary === undefined || summary === '' ? {} : { summary }),
+    };
+  }
+
+  /** 任务行只读投影：白名单字段，不含内部路径/租约/身份字段，也不含拼装的 failureReason 自由文本。 */
   function statusView(task: TaskRecord): Record<string, unknown> {
+    const failure = failureViewOfTask(task);
     return {
       taskId: task.taskId,
       taskNo: task.taskNo ?? null,
       name: task.name ?? deriveTaskName(task.request),
       status: task.status,
       ...(task.reason === undefined ? {} : { reason: task.reason }),
+      ...(failure.failureKind === undefined ? {} : { failureKind: failure.failureKind }),
       ...(task.pendingQuestion === undefined ? {} : { pendingQuestion: pendingQuestionView(task.pendingQuestion) }),
       requestIds: task.executions.map((execution) => execution.requestId),
       createdAt: task.createdAt,
@@ -2008,9 +2052,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
 
   function taskResult(args: Record<string, unknown>): unknown {
     const task = registry.get(resolveTaskId(refFromArgs(args)), scope);
+    const failure = failureViewOfTask(task);
     return {
       ...statusView(task),
-      ...(task.failureReason === undefined ? {} : { failureReason: task.failureReason }),
+      // 失败摘要：清洗过的业务原话（剥技术码/路径/机构自称），替代原 failureReason 拼装文本。
+      // 模型据此读懂结果、如实转述；不再是「执行层内部栈…」这类内部文案。
+      ...(failure.summary === undefined ? {} : { summary: failure.summary }),
       // 结果存档：completed 走 complete() 的 resultText；background 终态走 archiveReply 的 replyText。
       replyText: task.replyText ?? null,
       resultText: task.resultText ?? null,
@@ -2018,7 +2065,16 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         operation: execution.operation,
         status: execution.status,
         requestId: execution.requestId,
-        ...(execution.error === undefined ? {} : { error: execution.error }),
+        // 失败只给封闭种类 + 清洗摘要，不给 error.code 技术码。
+        ...(execution.error === undefined
+          ? {}
+          : {
+            failureKind: classifyFailure({ code: execution.error.code }),
+            ...(() => {
+              const cleaned = failureSummaryOf(execution.error!.message);
+              return cleaned === '' ? {} : { summary: cleaned };
+            })(),
+          }),
       })),
     };
   }

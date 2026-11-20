@@ -163,9 +163,11 @@ describe('冒烟·执行很久后异常（slow_fault）', () => {
         (call) => {
           const result = lastToolResultJsonOf(call.messages);
           const status = result?.['status'];
-          const reason = typeof result?.['failureReason'] === 'string' ? result['failureReason'] : '';
+          // 底账投影收口（2026-11-20）：拼装的 failureReason 自由文本已移除，
+          // 改给清洗过的业务摘要（summary）——业务原话保留，内部词/技术码被剥掉。
+          const reason = typeof result?.['summary'] === 'string' ? result['summary'] : '';
           if (status !== 'failed') throw new Error(`任务状态不是 failed：${String(status)}`);
-          if (reason === '') throw new Error('task_result 没有返回失败原因。');
+          if (reason === '') throw new Error('task_result 没有返回失败摘要。');
           return textAssistant(`那个任务跑了很久，最后还是没办成：${reason}`);
         },
       ]);
