@@ -8,13 +8,13 @@
 
 | 入口 | 命令 | 判定与退出码 |
 | --- | --- | --- |
-| 用户级黑盒 `eval:user` | `npm run eval:user`（`package.json:16`） | 真模型 + 仓内 dummy，与 `ask` 同源装配；E01–E15 共 15 例（`scripts/eval/convergence-r1/cases.ts:129` 的 `ALL_CASES`；E15 的夹具前置已随聚合支持落地（316607b2，2026-11-18），2026-11-20 实跑 PASS）；确定性判定 + 冻结词表，0=无 FAIL、1=有 FAIL、2=infra/INCONCLUSIVE（`scripts/eval/convergence-r1/runner.ts:645-660`） |
+| 用户级黑盒 `eval:user` | `npm run eval:user`（`package.json:16`） | 真模型 + 仓内 dummy，与 `ask` 同源装配；E01–E15 共 15 例（`scripts/eval/convergence-r1/cases.ts:129` 的 `ALL_CASES`；E15 的夹具前置已随聚合支持落地（316607b2，2026-11-18），2026-11-20 实跑 PASS）；确定性判定 + 冻结词表，0=无 FAIL、1=有 FAIL、2=infra/INCONCLUSIVE（`scripts/eval/convergence-r1/runner.ts:958-960` 三态返回，`:773` 赋给 `process.exitCode`） |
 | 确定性面 `eval:cap01` | `npm run eval:cap01`（`package.json:19`） | 零真模型/零网络/零真渠道；8 面串行（`scripts/eval/cap01/run-all.ts:34-43`），每面子进程退出码即结论，汇总 `summary.json`（`:98-99`） |
 | 渠道级 wecom-sim | `node --import tsx scripts/eval/wecom-sim/run.ts`（`scripts/eval/wecom-sim/run.ts:4`） | 真 createServer + dummy + 假企微 SDK；判定全来自 vitest 用例，任一失败退出码非 0（`:6-9`） |
 
 - F 组钉写确认（提案零写入 → 确认后 commit 可读回 → 二次确认只执行一次，`scripts/eval/wecom-sim/cases-f-write.test.ts:5-8`）；G 组钉后台受理与查询不重执行（`scripts/eval/wecom-sim/cases-g-task.test.ts:7-10`）。
 - 补充入口 `eval:bizprobe` / `eval:bizbatch2` / `eval:bizbatch3`（`package.json:20-22`）；infra 门缺 key / 锁不符 → `exit 2`、不烧样本（`scripts/eval/business-e2e/run.ts:188-194`）。
-- ⚠️ 旧文案仍写「12 例」（`.github/workflows/eval-real.yml:66`、nightly `:5`、convergence-r1 README `:34`、`scripts/ci.sh:16`）或「14 例」，现行用例集以 `scripts/eval/convergence-r1/cases.ts:129` 的 `ALL_CASES` 为准，共 **15 例**。
+- ⚠️ 旧文案仍写「12 例」（`.github/workflows/eval-real.yml:66`、nightly `:5`、convergence-r1 README `:34`）或「14 例」，现行用例集以 `scripts/eval/convergence-r1/cases.ts:129` 的 `ALL_CASES` 为准，共 **15 例**。
 ## 二、判据与 criteria.lock 冻结纪律
 
 - 冻结：`node --import tsx scripts/eval/convergence-r1/freeze.ts` 重算 `criteriaSha256`/`casesSha256` 与逐文件哈希写入 `criteria.lock`（`scripts/eval/convergence-r1/freeze.ts:22-48`）。
@@ -32,7 +32,7 @@
 - infra 门先于运行：缺 key / 模型不符 / 锁不一致 → `blocking=true`、`exit 2`、不烧样本（`scripts/eval/business-e2e/run.ts:108-119`）；N 变更须正式修订，旧读数不得改写。
 ## 四、读数模板与通过率门
 - 用户级产物：`summary.json` 含 `matrix`（逐 case×trial 的 verdict/failureCodes）、`counts`、`failureCodeHistogram`、`dimensionHistogram`、`trialsPlanned`、`samples`（组装与落盘见 `scripts/eval/convergence-r1/runner.ts:880` 的 `matrix` 与 `:890` 的 `writeFileSync`）；`report.md` 标题即「全样本，不筛绿」，逐样本列维度与回复原文（`:893` 起）。
-- 退出码即三态：INCONCLUSIVE 或 infra 失败 → 2，任何 FAIL → 1，全 PASS → 0（`scripts/eval/convergence-r1/runner.ts:645-660` 的 `process.exitCode` 赋值链）。
+- 退出码即三态：INCONCLUSIVE 或 infra 失败 → 2，任何 FAIL → 1，全 PASS → 0（`scripts/eval/convergence-r1/runner.ts:958-960` 返回三态，`:773` 赋给 `process.exitCode`）。
 - 批次读数：逐场景 `k/N + Wilson 95% CI`（`scripts/eval/exploration/stats.ts:69`）；两臂比较用 `newcombe95` 差异区间 + 预注册等效界 δ（`:126`、`:162`），不得用小样本数学上无法通过的门（`docs/history/long-session-prereg.md:83-87`）。
 - 报告纪律：只呈现读数 + 失败分布 + 逐条归因 + 限制；INCONCLUSIVE 不计入 k，无 history 对照不产 IMPROVED/REGRESSED（`docs/history/r4-stability-prereg.md:55-57`）。
 - 通过率门 `scripts/eval/eval-gate.mjs`：① 完整性（调用方须传**独立**预期集，不信摘要自述）② 硬失败码 `FAIL_PHANTOM_SUCCESS` 不得被通过率抵消 ③ 每例通过率 ≥ `minRate`（`:9-19`、`:104-118`）。⚠️ 现行 CI 门实际不执行：trial 固定 1，门条件 `n != '1'` 永不成立（`.github/workflows/eval-real.yml:62`、`:77`）；nightly 只跑不设门（`.github/workflows/eval-nightly.yml:47`）。

@@ -22,12 +22,12 @@
 | 编号 | 事项 | 现行证据 | 状态 |
 |---|---|---|---|
 | D-204 | dummy 夹具两套 commit 令牌契约不一致 | `scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:542-545` 注释自述「两者不一致已登记」；`verifyProposalToken` 见 `:479`，script 绑定校验见 `:927`/`:1014` | 待办（未统一） |
-| D-156 | 两支真实读数（61,000 / 86,000）残留 | `docs/history/architecture-laws-2026-11_undated.md:242`「遗留待清」；现行树 grep 仅此一行命中 | 待办（无 issue） |
+| D-156 | 两支真实读数（61,000 / 86,000）残留 | `docs/history/architecture-laws-2026-11_undated.md:242`「遗留待清」；**口径不明**：2026-11-20 核对按字面量实测（非 history 面 0 行、history 7 行、本表 1 行），复现不出原文「仅此一行命中」，原口径待考 | 待办（无 issue，口径存疑） |
 | D-052 | `step-text.ts` 六个退役工具名死分支 | `packages/agent/src/step-text.ts` 仍在，但六个工具名 grep 零命中；无结案记录 | 待核 |
 | D-062 | `npm test` 在无凭据环境全红 | `package.json:9`（`vitest run`）；无结案记录 | 待核 |
 | D-168 | 门①「产品面」口径未定义 | 现行树**实测 4 处命中**（`packages/agent/src/user-facing-failure.ts:78`、`packages/agent/payload-oneof.test.ts:2`、`:23`、`scripts/eval/real/smoke.ts:4`，均注释/文案级；2026-11-20 核对，原文写「零命中」已不成立） | 待核 |
 | D-170 | exposure-lint 剩余核对与扩展 | `packages/agent/exposure-lint.test.ts` 已不存在（`ls` 实测）；无结案记录 | 待核 |
-| D-190 | 门①测试夹具豁免口径分歧 | `docs/history/architecture-laws-2026-11_undated.md` 仍在，但 17dz 字面量零命中；无结案记录 | 待核 |
+| D-190 | 门①测试夹具豁免口径分歧 | `docs/history/architecture-laws-2026-11_undated.md` 仍在；**口径限定**：该条原判据是「产品面（packages/apps 非测试文件）零 17dz 字面量」——按此口径现行树非测试面 0 行、测试/夹具面 4 行（同 D-168 的实测清单）；无结案记录 | 待核（口径见 D-168） |
 | D-196 | 退役 `FSHINE_PLATFORM_ROOT` | `grep -rn 'FSHINE_PLATFORM_ROOT'` 零命中；无结案记录 | 待核 |
 
 ## 三、指针失效、无结案记录 → 待核（64 条）
@@ -58,8 +58,8 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 | 编号 | 事项 | 现行证据 | 为什么现在不做 |
 |---|---|---|---|
 | F-1 | 纯附件重发（尚未激活的 pending 行）不去重：同内容连发两次 → 两行两个 fileId | **已清**（fee86cee，2026-11-18：pending→pending 复用同一 fileId）。现行证据：`packages/agent/src/file-store.ts:557`（`findReusableInboundRow` 不再跳过 pending）、`:973-977`（复用分支：pending 刷 name/created_at 且保持 pending）；守卫 `packages/agent/file-store-dedupe-ttl.test.ts`、`packages/agent/file-store-inbound.test.ts`（①/② pending 语义） | 已清（2026-11-20 核对） |
-| F-2 | 入站复用没有「来源」判据，理论上会吞同字节的 Main 产物行（`putFile` 造的、如 recalc 的 `*.values.csv`）：行名会被改成入站文件名 | `packages/agent/src/file-store.ts:534-542` 只排除 `taskId !== undefined` 的行；`putFile` 的 Main 行 `:664-679`；复用改行名 `:575-581` | 修法需给 `file_refs` 加 origin 列并覆盖所有写路径（putFile / registerFromFd / 任务副本 / 回程），是 schema 迁移；当前同字节碰撞概率低但真实存在，登记到下次 schema 变更一起做 |
-| F-3 | 同一消息内两个同内容不同名附件塌成同一 fileId、只留最后一个名字，而 `apps/server/attachment-facts.ts:79` 按 fileId 只留第一条事实 → 注入模型的名字与清单名不一致 | `packages/agent/src/file-store.ts:885-909`（复用不区分消息内批次）；`apps/server/attachment-facts.ts:79` | 需要批次身份（`file_refs` 无 `message_id`）或改事实队列按 (fileId,name) 去重；后者仍会让清单只有一个名字、与模型看到的两条事实不一致。正确修法是同消息批次内复用检测 + 名字冲突裁定，需产品裁定，本次只登记 |
+| F-2 | 入站复用没有「来源」判据，理论上会吞同字节的 Main 产物行（`putFile` 造的、如 recalc 的 `*.values.csv`）：行名会被改成入站文件名 | `packages/agent/src/file-store.ts:557-563`（`findReusableInboundRow` 只排除 `taskId !== undefined` 的行）；`putFile` 的 Main 行 `:714-738`；复用改名/TTL 刷新 `:598-629`（`reuseInboundRow`） | 修法需给 `file_refs` 加 origin 列并覆盖所有写路径（putFile / registerFromFd / 任务副本 / 回程），是 schema 迁移；当前同字节碰撞概率低但真实存在，登记到下次 schema 变更一起做 |
+| F-3 | 同一消息内两个同内容不同名附件塌成同一 fileId、只留最后一个名字，而 `apps/server/attachment-facts.ts:87` 按 fileId 只留第一条事实 → 注入模型的名字与清单名不一致 | `packages/agent/src/file-store.ts:557-576`（入站复用 `findReusableInboundRow`，不区分消息内批次）；`apps/server/attachment-facts.ts:87` | 需要批次身份（`file_refs` 无 `message_id`）或改事实队列按 (fileId,name) 去重；后者仍会让清单只有一个名字、与模型看到的两条事实不一致。正确修法是同消息批次内复用检测 + 名字冲突裁定，需产品裁定，本次只登记 |
 
 ## 七、权限模型（2026-11-18 owner 裁定：解耦 + 只做粗粒度）
 
@@ -67,9 +67,9 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 
 | 编号 | 事项 | 现行证据 | 为什么现在不做 |
 |---|---|---|---|
-| P-1 | ~~`principals.capabilities` / `principals.accountSetScope` 解析后**无任何消费点**（配置写了不生效）~~ **已解决（2026-11-19 RBAC 切片）** | 两字段已从 `PrincipalConfig` 删除；加载层忽略旧键（`packages/core/src/config.ts:332`）。角色表 `roles` + `principals.<id>.role` 取代：`packages/core/src/config.ts:294`、`scripts/ask-runtime.ts:422`（宿主求交）、`apps/server/server.ts:686` | —（角色白名单已接线并拦截） |
+| P-1 | ~~`principals.capabilities` / `principals.accountSetScope` 解析后**无任何消费点**（配置写了不生效）~~ **已解决（2026-11-19 RBAC 切片）** | 两字段已从 `PrincipalConfig` 删除；加载层忽略旧键（`packages/core/src/config.ts:339-340`）。角色表 `roles` + `principals.<id>.role` 取代：`packages/core/src/config.ts:296`（`parseRoles`）、`scripts/ask-runtime.ts:452`（求交口径）、`:533`（`resolveExecutionFace` 收口）、`apps/server/server.ts:686` | —（角色白名单已接线并拦截） |
 | P-2 | **细粒度（实体级）授权未实现**：谁能看哪些账套/哪些记录，未做任何透传或校验 | 无 acting-principal 透传；执行层调用只带 operation+args | 归执行层研判；真实 17dz 是否有"按主体授权"概念未验。仍挂债，等真实层冒烟与业务确认后再做 |
-| P-3 | ~~写面是**全局开关**（`runtime.allowWriteOperations`），非按人~~ **已解决（2026-11-19 RBAC 切片）** | 全局开关降级为**部署总闸**：角色含 `write` 且总闸打开才并入写集合（`scripts/ask-runtime.ts:422`）；viewer 即使总闸打开也写不了；总闸关闭时 operator 也写不了（`scripts/rbac-roles.test.ts` ⑥） | —（按人部分由角色白名单承接，总闸语义保留） |
+| P-3 | ~~写面是**全局开关**（`runtime.allowWriteOperations`），非按人~~ **已解决（2026-11-19 RBAC 切片）** | 全局开关降级为**部署总闸**：角色含 `write` 且总闸打开才并入写集合（`scripts/ask-runtime.ts:533` 收口；`apps/server/server.ts:1133-1134` 按主体角色取权限）；viewer 即使总闸打开也写不了；总闸关闭时 operator 也写不了（`scripts/rbac-roles.test.ts` ⑥） | —（按人部分由角色白名单承接，总闸语义保留） |
 
 ## 八、长任务异步协议（L-1 已落地 2026-11-19；L-2～L-4 仍挂债）
 
