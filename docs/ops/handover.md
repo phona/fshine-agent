@@ -27,7 +27,7 @@ Pi Agent（Main）+ 最小宿主 + Execution Contract + Channel Adapter 的产�
   - 用户级黑盒 `eval:user`：**E01–E15 全 PASS（15/15）**，内部词泄漏 0 —— `/home/tao/.tmp/handover-eu-76778081/`；
   - 写闭环 `eval:write-loop`：**C1–C10 全 PASS**，泄漏 0 —— `/home/tao/.tmp/handover-wl-76778081/`。
 - 独立复核做法（可复制）：① 复跑四门；② 亲手破坏三个最强守卫（Main 工具面精确集合 / 机制参数拒绝 / 内部词 AST 守卫）必须红、恢复必须绿；③ 故意放宽一条守卫 + 注入回归，看是否被**其它**测试抓住；④ 逐条把文档里的「对现状的陈述与指针」对代码核（`docs-guard` 只校验行号存在与不越界，不校验指对没有）。
-- 对话形态门（2026-11-21 起）：每条用户消息 ≤1 条回合回复；同一事实 ≤1 次（回合内已交付的终态不再重复唤醒）；非线程推送（降级新消息/主动投递）必须自含话题（带原话引用行）；不错挂（回复不挂到别的消息/别的话题上）。首批守卫 = 2026-11-21 live 两缺陷与其常跑化：缺陷 A（回合内终态抑制 `1a719936`）、缺陷 B（降级引用行 `e0bad29e`）、要求 C（wecom-sim M 组 L1 常跑用例 `ca2dee09`）。
+- 对话形态门（2026-11-21 起，**已实现为共享断言层** `scripts/eval/shared/conversation-shape.ts`，接进 wecom-sim / 写闭环 / 场景集 / eval:user 四个面）：每条用户消息 ≤1 条回合回复；同一事实 ≤1 次（回合内已交付的终态不再重复唤醒）；非线程推送（降级新消息/主动投递）必须自含话题（带原话引用行）；不错挂（回复不挂到别的消息/别的话题上）。判定用宿主记账里的 `(taskId, factKind)` 归属，不靠措辞。首批守卫 = live 两缺陷与其常跑化：缺陷 A（回合内终态抑制 `1a719936`）、缺陷 B（降级引用行 `e0bad29e`）、要求 C（wecom-sim M 组 L1 常跑用例 `ca2dee09`）、断言层（`cd1276ff`）。
 
 ## 四、明确未覆盖（不许当已验）
 
@@ -40,15 +40,15 @@ Pi Agent（Main）+ 最小宿主 + Execution Contract + Channel Adapter 的产�
 
 ## 五、必须先知道的风险
 
-1. **长连接断连窗口的消息会丢**（已实测）：停服 `12:02:15Z` → 重连 `12:03:43Z` 期间用户发 2 条，重连后底账零新增、`aibot_msg_callback` 帧 0 → 平台不补投、产品无补拉。缓解未做：`systemd Restart=always`、心跳 15s、`message_still_processing` 接告警；销账条件=切 Webhook（平台最多 3 次重试）+ 既有 messageId 幂等底账接重投。详见 `docs/decisions/debt.md` §十一。
+1. **长连接断连窗口的消息会丢**（已实测）：停服 `12:02:15Z` → 重连 `12:03:43Z` 期间用户发 2 条，重连后底账零新增、`aibot_msg_callback` 帧 0 → 平台不补投、产品无补拉。缓解已落地：`systemd Restart=always`（窗口秒级）、心跳 15s、`message_still_processing` 接进程内告警（规则 `message_stuck`）；销账条件=切 Webhook（平台最多 3 次重试）+ 既有 messageId 幂等底账接重投。详见 `docs/decisions/debt.md` §十一。
 2. **答复五态只走了一半**：`completed`/`partial` 目前送不到 Main（outcome 只写进失败唤醒出口，底账 `ExecutionRecord` 无 `items`）——文档已如实标「未接线」。
 3. 其它未清债务见 `docs/decisions/debt.md`（含 §五「接受不修 / 登记不修」）。
 
 ## 六、上线前建议（按收益排序）
 
 1. ~~进程守护~~ **已落地（2026-11-21）**：systemd user unit `fshine-live.service`（`Restart=always` + 开机自启），重启演练 20 秒内恢复在线；unit 属部署形态、不在仓库内，见 `docs/ops/README.md` §4。
-2. **心跳 30s → 15s**（官方社区对「连接看似正常也偶发丢」的缓解；改动在 `fix/reliability-small` 分支，待合入后生效）。
-3. **`message_still_processing` 接进行内告警**（事件已存在，只是无人消费）——待做。
+2. ~~心跳 30s → 15s~~ **已落地**（`52eaa0b2`，随 `fix/reliability-small` 并入）：适配器以 `heartbeatInterval=15000` 建 WSClient。
+3. ~~`message_still_processing` 接进行内告警~~ **已落地（2026-11-21）**：进程内告警新增规则 `message_stuck`（含 messageId 与 principal/session，不含消息正文；冷却去重与双出口沿用既有）。
 4. 若要「消息不丢」作为硬指标：评估 **Webhook 模式**（平台自带最多 3 次重试，我方幂等底账可接住重投），需公网回调地址 + 签名校验 + AES 解密。
 
 ## 七、接手第一小时

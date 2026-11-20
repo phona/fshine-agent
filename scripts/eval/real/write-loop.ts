@@ -1023,6 +1023,10 @@ async function main(): Promise<void> {
       return { delivered: true };
     },
   };
+  // 宿主 sent 记账行 → 推送归属补填（对话形态 ② 的前提；共享补填器，targets = sink.pushes）。
+  // 必须声明在 createServer 之前：logger 闭包在装配期就会同步被调用（无 role 主体的
+  // principal_role_defaulted 行），const 在 TDZ 里会抛 ReferenceError。
+  const attributeDeliveryProvenance = createDeliveryProvenanceAttributor(sink.pushes);
   const server = await createServer({
     env,
     config,
@@ -1055,8 +1059,6 @@ async function main(): Promise<void> {
   const scope: TaskScope = { principalId: PRINCIPAL_ID, sessionId: SESSION_ID };
   const watcher = new LedgerWatcher(registry, scope);
   watcher.start();
-  // 宿主 sent 记账行 → 推送归属补填（对话形态 ② 的前提；共享补填器，targets = sink.pushes）。
-  const attributeDeliveryProvenance = createDeliveryProvenanceAttributor(sink.pushes);
 
   const readbackOptions = { profile, env, stateDir, collection: WRITE_COLLECTION, window: WRITE_WINDOW };
   const turns: TurnEvidence[] = [];

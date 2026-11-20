@@ -116,7 +116,7 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 
 **官方口径**：`developer.work.weixin.qq.com/document/60904` 把「可靠性高（无状态）」判给 **Webhook**；长连接标注「需要心跳保活、断线重连」。官方社区另有「连接正常时也偶发丢」案例。
 
-**缓解未做**：`systemd Restart=always` / 心跳 15s / `message_still_processing` 接告警——均未实施。
+**缓解（已落地 2026-11-21）**：`systemd Restart=always`（停机窗口压到秒级）、WS 心跳 15s、`message_still_processing` 接进程内告警（规则 `message_stuck`）。窗口内消息仍会丢——这是长连接模式的固有代价。
 
 **销账条件**：切 **Webhook**（平台最多 3 次重试）+ 既有 `messageId` 幂等底账接重投。两项都落地并实测窗口内零丢失后才可关账。
 
