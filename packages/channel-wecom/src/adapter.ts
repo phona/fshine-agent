@@ -183,6 +183,30 @@ export interface WecomBotChannelOptions {
 interface ReplyDegrade {
   chatId: string;
   once: { used: boolean };
+  /**
+   * 缺陷 B（2026-11-21 live）：本回合要回的**原用户消息**文本（入站 frame 的 message
+   * 文本）。只在降级路径用——回复上下文过期后终稿经 sendMessage 作为**新消息**发出，
+   * 客户端把它排到最新消息下面，读起来像答非所问；正文前加一行原话引用（前 40 字）
+   * 让这条推送自含话题。原话取不到（纯附件消息的收据等）= 缺省不加引用，不编造。
+   */
+  quoteText?: string;
+}
+
+/** 降级推送的原话引用片段上限（字符）：取原话前 40 字（live 实测口径）。 */
+export const DEGRADE_QUOTE_MAX_CHARS = 40;
+
+/**
+ * 缺陷 B：降级推送（sendMessage 全新消息）的正文加一行原话引用——
+ *   `回复「<原话片段>」：` + 空行 + 正文
+ * 原话片段 = 原文压成单行后取前 {@link DEGRADE_QUOTE_MAX_CHARS} 字。机械事实，不编造：
+ * 原话为空/全空白 = 原样返回正文（不加引用）。组合后仍过同一字节上限
+ * （truncateReply：恰顶格的终稿被看见地截掉尾巴，不无声超限）。
+ */
+export function withReplyQuote(originalText: string, content: string): string {
+  const fragment = originalText.replace(/\s+/gu, ' ').trim().slice(0, DEGRADE_QUOTE_MAX_CHARS);
+  if (fragment === '') return content;
+  return truncateReply(`回复「${fragment}」：\n\n${content}`).text;
+  return truncateReply(`回复「${fragment}」：\n\n${content}`).text;
 }
 
 /**
@@ -636,7 +660,8 @@ export class WecomBotChannel implements ChannelAdapter {
           streamId,
           ATTACHMENT_WAIT_TIMEOUT_REPLY,
           true,
-          { chatId: conversationId, once: { used: false } },
+          // 缺陷 B：这条的降级推送同样带原话引用（要回的就是本条消息）。
+          { chatId: conversationId, once: { used: false }, quoteText: content },
         );
         return;
       }
@@ -804,8 +829,9 @@ export class WecomBotChannel implements ChannelAdapter {
       // 终帧失败可降级（degrade 参数）：流式更新被企微拒收（历史事故 errcode 846608——
       // 流式回复超过 10 分钟更新窗口，终帧被拒后用户端永远停在旧进度帧，整轮静默）时，
       // 改用 sendMessage 全新消息通道把终稿送达。中间进度帧不降级（降级是给"答案"的，
-      // 不是给中间帧的，否则每次拒收都是一条新消息）。
-      void this.reply(frame, reqId, streamId, bounded.text, true, { chatId: conversationId, once: degradeOnce });
+      // 不是给中间帧的，否则每次拒收都是一条新消息）。降级推送带原话引用（缺陷 B：
+      // 新消息丢话题归属——quoteText = 本回合用户原话，只在降级路径用）。
+      void this.reply(frame, reqId, streamId, bounded.text, true, { chatId: conversationId, once: degradeOnce, quoteText: message.text });
     } else if (message.attachmentOnly && message.attachments && message.attachments.length > 0) {
       // 宿主对这条附件-only 消息无话可说（正常路径）：文件名并进本会话的收据窗，到点合成
       // 一条。例外路径（暂存超限、指令跑完后才到的文件）宿主会返回文本，走上面的终帧分支，
@@ -845,7 +871,7 @@ export class WecomBotChannel implements ChannelAdapter {
           error: error instanceof Error ? error.message : String(error),
         }));
         if (!textSent) {
-          void this.reply(frame, reqId, streamId, IMAGE_FAIL_REPLY, true, { chatId: conversationId, once: degradeOnce });
+          void this.reply(frame, reqId, streamId, IMAGE_FAIL_REPLY, true, { chatId: conversationId, once: degradeOnce, quoteText: message.text });
         }
       }
     }
@@ -1085,13 +1111,20 @@ export class WecomBotChannel implements ChannelAdapter {
         // 降级再失败只记事件：两条通道都不可达时已无第三条路，日志是唯一的守夜人。
         if (finish && degrade && !degrade.once.used) {
           degrade.once.used = true;
+          // 缺陷 B（2026-11-21 live）：只在降级路径（新消息推送）加原话引用行——回复上下文
+          // 过期后这条会被客户端排到最新消息下面，读起来像答非所问；引用行让它自含话题。
+          // 正常 reply 路径（replyStream）逐字节不变。原话取不到 = 不加引用（不编造）。
+          const degradeContent = degrade.quoteText === undefined
+            ? content
+            : withReplyQuote(degrade.quoteText, content);
           try {
-            await client.sendMessage(degrade.chatId, { msgtype: 'markdown', markdown: { content } });
+            await client.sendMessage(degrade.chatId, { msgtype: 'markdown', markdown: { content: degradeContent } });
             console.info(JSON.stringify({
               event: 'wecom_reply_degraded',
               req_id: reqId,
               channel: 'send_message',
-              bytes: Buffer.byteLength(content, 'utf8'),
+              bytes: Buffer.byteLength(degradeContent, 'utf8'),
+              quoted: degrade.quoteText !== undefined,
               originError: error instanceof Error ? error.message.slice(0, 200) : String(error),
             }));
           } catch (degradeError: unknown) {
@@ -1099,7 +1132,7 @@ export class WecomBotChannel implements ChannelAdapter {
               event: 'wecom_reply_degrade_fail',
               req_id: reqId,
               error: degradeError instanceof Error ? degradeError.message : String(degradeError),
-              content,
+              content: degradeContent,
             }));
           }
         }
