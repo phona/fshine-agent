@@ -227,12 +227,12 @@ interface ResumedCall {
   source: 'fact' | 'summary';
 }
 
-/** 从委派里取「上一轮提案的调用原文」（renderConfirmationResumeFact 的 JSON 行）。 */
+/** 从委派里取「提案时的调用参数原文」（renderConfirmationResumeFact 的 JSON 行）。2026-11-20 起不带 operation 名（只 {"args":…}）。 */
 function proposalFactOf(delegation: string): { operation?: string; args?: Record<string, unknown> } | undefined {
-  const line = delegation.split('\n').find((candidate) => candidate.trim().startsWith('{"operation":'));
+  const line = delegation.split('\n').find((candidate) => candidate.trim().startsWith('{"args":'));
   if (line === undefined) return undefined;
   try {
-    return JSON.parse(line.trim()) as { operation?: string; args?: Record<string, unknown> };
+    return JSON.parse(line.trim()) as { args?: Record<string, unknown> };
   } catch {
     return undefined;
   }
@@ -379,9 +379,12 @@ describe('写确认续跑：提案载荷随底账记录交回 Worker（后台派
       await sendTurn(fx, '确认');
 
       const delegation = fx.worker.prompts[fx.worker.prompts.length - 1]!;
-      // 机械事实：JSON 行里的 operation/args 逐字段等于提案时的载荷（不是「看起来像」）。
+      // 机械事实：JSON 行只带提案时的 args 原文（不带 operation 名，避免误导重跑 prepare）。
       const fact = proposalFactOf(delegation)!;
-      expect(fact.operation).toBe('dummy.prepare');
+      expect(fact.operation).toBeUndefined();
+      const factLine = delegation.split('\n').find((line) => line.trim().startsWith('{"args":'));
+      expect(factLine).toBeDefined();
+      expect(factLine).not.toContain('dummy.prepare'); // 事实块本身不含误导的 prepare 名（清单里有是正常的）
       expect(fact.args).toEqual(PREPARE_12_ARGS);
       // 逐字段比对提案时落底账的结构化原文（不是执行层侧的路径载体）+ 用户的 12 条原文。
       expect(fact.args).toEqual(PREPARE_12_ARGS);
@@ -556,16 +559,21 @@ describe('写确认续跑：提案载荷随底账记录交回 Worker（后台派
 });
 
 describe('写确认续跑·委派机械事实（纯函数面）', () => {
-  it('有载荷：摘要 + operation + 参数原文（JSON）三样都在；无载荷（旧记录）保持原句', () => {
+  it('有载荷：摘要 + 明确提交指令 + 参数原文（JSON，无 operation 名误导）；无载荷（旧记录）同样带提交指令', () => {
     const withArgs = renderConfirmationResumeFact({
       summary: '将向集合「alpha」新增 2 条',
       operation: 'dummy.prepare',
       args: { '--collection': 'alpha', records: [{ name: 'a', value: 1 }] },
     });
     expect(withArgs).toContain('用户已确认上一轮提案（摘要：将向集合「alpha」新增 2 条）。');
-    expect(withArgs).toContain('{"operation":"dummy.prepare","args":{"--collection":"alpha","records":[{"name":"a","value":1}]}}');
-    // 旧记录（无载荷）：逐字节保持既有句子（零变化）。
-    expect(renderConfirmationResumeFact({ summary: '旧提案' }))
-      .toBe('用户已确认上一轮提案（摘要：旧提案）。直接提交，不要重新生成提案。');
+    // 2026-11-20：动作指令明确——提交、不是重准备；operation 名不得进事实块。
+    expect(withArgs).toContain('下一步是提交（用提交类 operation，如 commit），不是重新准备');
+    expect(withArgs).toContain('提交时逐字复用这些参数，特别是 records');
+    expect(withArgs).not.toContain('dummy.prepare');
+    expect(withArgs).toContain('{"args":{"--collection":"alpha","records":[{"name":"a","value":1}]}}');
+    // 旧记录（无载荷）：同样给明确提交指令（不再有含糊的「直接提交」）。
+    const noArgs = renderConfirmationResumeFact({ summary: '旧提案' });
+    expect(noArgs).toBe('用户已确认上一轮提案（摘要：旧提案）。下一步是提交（用提交类 operation，如 commit），不是重新准备、也不是重新生成提案。');
+    expect(noArgs).not.toContain('dummy.prepare');
   });
 });
