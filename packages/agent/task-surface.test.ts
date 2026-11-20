@@ -328,8 +328,9 @@ describe('缺口 1 · 对话面任务工具', () => {
     expect(registry.get('task-b', SCOPE_B).status).toBe('running');
   });
 
-  it('P0-A：inline 受理回执含可引用 taskNo（与 background 回执格式一致）', async () => {
-    // inline 模式（无 runner）下 task_run 直接走 delegate：回执必须带 taskNo，否则用户无编号可引用。
+  it('P0-A：inline 受理回执去编号：不含 taskNo，可引用指代是 taskId', async () => {
+    // inline 模式（无 runner）下 task_run 直接走 delegate：受理回执是模型可见投影，去编号
+    // （2026-11-20 起，编号不进投影）——回执不含 taskNo，taskId 是唯一无编号指代。
     const registry = createTaskRegistry();
     // 复用 toolingMain：调用 task_run，workerDriver 由宿主使用——用最简假件驱动 worker 汇报。
     // 这里只验证回执字段：让 workerDriver 返回一段非空文本即可（CompleteExecutor 不适用 inline）。
