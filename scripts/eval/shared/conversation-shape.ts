@@ -13,9 +13,10 @@
  *   · inbound-reply-duplicate  ① 同一条用户消息 >1 条线程回复（回合回复重复播报）；
  *   · fact-delivered-twice     ② 同一 (taskId, factKind) 的用户可见投递 >1 次（同一件事
  *     说两遍；provenance 缺省的投递无法归属，不参与本条——宁可漏报不误报，见下）；
- *   · push-needs-subject       ③ 非线程推送的正文既不含任何用户原话片段（≥8 字）也不含
- *     任何任务名（降级新消息/主动投递不自含话题 = 客户端把它排到最新消息下面，读起来
- *     像答非所问——缺陷 B 的模式）；
+ *   · push-needs-subject       ③ 非线程推送（降级回复 / **无归属**投递）的正文既不含任何
+ *     用户原话片段（≥8 字）也不含任何任务名（降级新消息/主动投递不自含话题 = 客户端把它
+ *     排到最新消息下面，读起来像答非所问——缺陷 B 的模式）；有归属（provenance 齐全）的
+ *     投递不判本条，见下「已知边界」；
  *   · reply-misattached        ④ 线程回复的 inReplyTo 不在其之前的 inbound 里，或 at 早于
  *     该 inbound（不错挂：回复挂到别的消息/时间倒挂）。
  *
@@ -36,6 +37,10 @@
  *     (taskId, factKind) 多重集不变（每条 sent 行恰补一条推送）。
  *   · ③ 的原话片段是 8 字滑窗包含检查：推文里出现原话中任意连续 8 字即算自含话题。这是
  *     机械下界（恒偏向放行），语义层面的「答非所问」归用户级 eval。
+ *   · ③ **不判有归属的投递**（2026-11-21 实测假红后收紧）：模型会自然改写主语——stop 场景
+ *     的取消推送写「去年全年的凭证导出任务已取消」，而任务名是「导出去年（2025 年）全年的
+ *     凭证…」；要求逐字包含任务名会误报。语义层面的「推送跑题」无法机械化，宁漏勿误：
+ *     有归属投递的重复由 ② 守、降级回复的引用行由 L1 常跑用例守。
  */
 /** 任务事实种类（与宿主 task_result_delivery_* 记账行的 factKind 字段同值域）。 */
 export type TaskFactKind = 'completed' | 'failed' | 'cancelled' | 'waiting_user' | 'warning';
@@ -186,13 +191,19 @@ export function checkConversationShape(input: CheckConversationShapeInput): Shap
     });
   }
 
-  // ③ 非线程推送必须自含话题：原话片段（≥8 字）或任务名。reply(inReplyTo=undefined) 与
-  //    delivery 都是推送面，都参与。群隐私流（见输入注释）对 warning 投递豁免。
+  // ③ 非线程推送必须自含话题：原话片段（≥8 字）或任务名。适用范围（2026-11-21 边界收紧）：
+  //   · reply(inReplyTo=undefined)（降级回复）——必须带宿主加的引用行；
+  //   · **无归属**的 delivery——没有 provenance，只能靠文本判；
+  //   · **有归属**的 delivery 不判 ③：模型会自然改写主语（实测「去年全年的凭证导出任务」
+  //     与任务名「导出去年（2025 年）全年的凭证…」不一致），语义话题无法机械判定——宁可
+  //     漏报不误报；这类投递的重复由 ② 守，降级回复的引用行由 L1 常跑用例（wecom-sim M 组）守。
+  //   群隐私流（见输入注释）对 warning 投递豁免。
   const inboundEvents = events.filter((event): event is InboundEvent => event.kind === 'inbound');
   events.forEach((event, index) => {
     const text = event.kind === 'reply' || event.kind === 'delivery' ? event.text : undefined;
     if (text === undefined) return;
     if (event.kind === 'reply' && event.inReplyTo !== undefined) return;
+    if (event.kind === 'delivery' && event.provenance !== undefined) return;
     if (input.groupPrivacy === true
       && event.kind === 'delivery'
       && event.provenance?.factKind === 'warning') return;

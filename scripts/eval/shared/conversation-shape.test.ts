@@ -70,6 +70,26 @@ describe('conversation-shape：逐条负例（每条规则必须能红）', () =
     expect(withQuote).toEqual([]);
   });
 
+  it('③ 边界：有归属（provenance）的投递不判 ③（模型改写主语，宁漏勿误）；无归属同文本仍判', () => {
+    const paraphrase = '已按您的要求停下：去年全年的凭证导出任务已取消，没有生成任何文件。';
+    const attributed = checkConversationShape({
+      taskNames: ['导出去年（2025 年）全年的凭证，这是一个长时导出任务'],
+      events: [
+        inbound('m1', '帮我导出去年全年的凭证，这是个慢活，要跑一会儿'),
+        delivery(paraphrase, 6000, { taskId: 't1', factKind: 'cancelled' }),
+      ],
+    });
+    expect(attributed).toEqual([]);
+    const unattributed = checkConversationShape({
+      taskNames: ['导出去年（2025 年）全年的凭证，这是一个长时导出任务'],
+      events: [
+        inbound('m1', '帮我导出去年全年的凭证，这是个慢活，要跑一会儿'),
+        delivery(paraphrase, 6000),
+      ],
+    });
+    expect(unattributed.map((violation) => violation.code)).toEqual(['push-needs-subject']);
+  });
+
   it('④ reply-misattached：挂到不存在的消息 / 时间倒挂 → 恰此 code（两个分支各一）', () => {
     const unknownTarget = checkConversationShape({
       events: [
@@ -131,10 +151,11 @@ describe('conversation-shape：组合与正常流', () => {
     expect(violations).toEqual([]);
   });
 
-  it('任务名判据：推送不含原话片段但含任务名 → 不违规；缺任务名 → 违规', () => {
+  it('任务名判据（无归属推送）：不含原话片段但含任务名 → 不违规；缺任务名 → 违规', () => {
+    // 2026-11-21 边界收紧：③ 只判**无归属**推送（有归属投递见上一条「③ 边界」用例）。
     const events: ConversationEvent[] = [
       inbound('m1', '报告季度数据汇总情况'),
-      delivery('季度数据汇总已生成，见附件。', 2000, { taskId: 't1', factKind: 'completed' }),
+      delivery('季度数据汇总已生成，见附件。', 2000),
     ];
     expect(checkConversationShape({ events, taskNames: ['季度数据汇总'] })).toEqual([]);
     const violations = checkConversationShape({ events, taskNames: ['别的任务名'] });
