@@ -13,7 +13,7 @@
 #      exit-code carrier for the real-model job.
 # 真实模型 eval（旧 probe / acceptance / score.ts / generic-model-eval.py 仪器）已随
 # Minimal Reset（0b97227）删除不再恢复；当前真实模型面 = 用户级黑盒入口
-# `npm run eval:user`，跑在 eval-real.yml（per-push 1 轮）与 eval-nightly.yml（12×3），
+# `npm run eval:user`，跑在 eval-real.yml（per-push 1 轮）与 eval-nightly.yml（全量用例 ×3，当前 15 例），
 # 不进这些确定性门。
 # 旧 e2e ownership 台账（tests/e2e 已随 Minimal Reset 删除；台账文档 2026-11-18 已删，git 历史可考）。
 # 这里不再有 e2e 门。

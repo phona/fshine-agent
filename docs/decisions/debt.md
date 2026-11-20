@@ -8,13 +8,13 @@
 
 | 编号 | 事项 | 证据 / 指针 | 状态 |
 |---|---|---|---|
-| #67 | 会话存储 retention / capacity（线性无界增长） | `../architecture/sessions.md:32` | 未清 |
-| #68 | 跨重启消息级幂等 / 真续跑恢复 | `../../AGENTS.md:71`；`../../README.md:93` | 未清 |
-| #69 | `executions` 时间列 | `../../AGENTS.md:71` | 未清 |
-| #70 | tasks CLI 增强 | `../../AGENTS.md:71` | 未清 |
-| #71 | P8 ops 扩展（原 R4 唯一未落地分片） | `../../AGENTS.md:71`；`index.md`（R4 行） | 未清 |
-| #72 | 死代码重复实现 | `../../AGENTS.md:71` | 未清 |
-| #73 | eval 候选池 | `../../AGENTS.md:71` | 未清 |
+| #67 | 会话存储 retention / capacity（线性无界增长） | `../architecture/sessions.md:35-37` | 未清 |
+| #68 | 跨重启消息级幂等 / 真续跑恢复 | `../../AGENTS.md:84`；`../../README.md:93` | 未清 |
+| #69 | `executions` 时间列 | `../../AGENTS.md:84` | 未清 |
+| #70 | tasks CLI 增强 | `../../AGENTS.md:84` | 未清 |
+| #71 | P8 ops 扩展（原 R4 唯一未落地分片） | `../../AGENTS.md:84`；`index.md`（R4 行） | 未清 |
+| #72 | 死代码重复实现 | `../../AGENTS.md:84` | 未清 |
+| #73 | eval 候选池 | `../../AGENTS.md:84` | 未清 |
 | #74 | B2 Silent Shadow 真实租户联调 | `../architecture/channels.md:3` | 未清 |
 
 ## 二、有现行指针、无 issue 号（逐条核对）
@@ -25,7 +25,7 @@
 | D-156 | 两支真实读数（61,000 / 86,000）残留 | `docs/history/architecture-laws-2026-11_undated.md:242`「遗留待清」；现行树 grep 仅此一行命中 | 待办（无 issue） |
 | D-052 | `step-text.ts` 六个退役工具名死分支 | `packages/agent/src/step-text.ts` 仍在，但六个工具名 grep 零命中；无结案记录 | 待核 |
 | D-062 | `npm test` 在无凭据环境全红 | `package.json:9`（`vitest run`）；无结案记录 | 待核 |
-| D-168 | 门①「产品面」口径未定义 | 现行树 `grep -rn '17dz' packages apps scripts --include='*.ts'` 零命中；无结案记录 | 待核 |
+| D-168 | 门①「产品面」口径未定义 | 现行树**实测 4 处命中**（`packages/agent/src/user-facing-failure.ts:78`、`packages/agent/payload-oneof.test.ts:2`、`:23`、`scripts/eval/real/smoke.ts:4`，均注释/文案级；2026-11-20 核对，原文写「零命中」已不成立） | 待核 |
 | D-170 | exposure-lint 剩余核对与扩展 | `packages/agent/exposure-lint.test.ts` 已不存在（`ls` 实测）；无结案记录 | 待核 |
 | D-190 | 门①测试夹具豁免口径分歧 | `docs/history/architecture-laws-2026-11_undated.md` 仍在，但 17dz 字面量零命中；无结案记录 | 待核 |
 | D-196 | 退役 `FSHINE_PLATFORM_ROOT` | `grep -rn 'FSHINE_PLATFORM_ROOT'` 零命中；无结案记录 | 待核 |
@@ -46,7 +46,7 @@
 | `eval:cap01` 的 r6 面已改指 `lifecycle.ts`（2026-11-18 同步） | `scripts/eval/cap01/run-all.ts:40`；`../eval/README.md:12` | 已清 |
 | `eval:cap01` R2 S1 场景已退役（原「Main 直做写 out/ 并由宿主投递」；交付物只从 Worker 出，Main 的 run_js 只能写 scratch/） | `scripts/eval/cap01/r2-functional.ts` 文件头；`packages/agent/src/run-js-executor.ts`（RunJsWritableDirs）；等价覆盖 = 同文件 S3（Worker 产物回 Main + 逐格 + 登记 + 行数据不出 Main） | 已退役（2026-11-19） |
 | 判据锁只校验 criteria/cases 聚合值、不校验 `files` 表 | `../eval/README.md:24`；`scripts/eval/convergence-r1/runner.ts:220-230` | 未清 |
-| 服务无进程锁 / 单实例仅靠操作纪律；双实例共享 `.runtime/state.db` 行为未定义 | `../ops/README.md:13` | 未清 |
+| 服务单实例 | 已清（2026-11-19 起有机械守卫）：启动取独占锁、存活实例在则 exit(1)、陈旧锁可覆盖；取锁先于连接渠道 | `apps/server/main.ts:53`（`guardSingleInstance`）；`apps/server/instance-guard.ts`；守卫 `apps/server/instance-guard.test.ts`（5 条）；`../ops/README.md:13` | 已清（2026-11-20 核对：原文「无进程锁/仅靠操作纪律」已不成立；本行留档，下次清理删除） |
 | `DB_PATH` 文档缺省与实际代码不一致（文档 `data/agent.db`，代码 `.runtime/state.db`） | `../ops/README.md:25`；`../environment-variables.md:33`；`apps/server/main.ts:42-44` | 未清（文档待改） |
 
 ## 五、明确「接受不修 / 登记不修」（非待办，勿重开）
@@ -57,7 +57,7 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 
 | 编号 | 事项 | 现行证据 | 为什么现在不做 |
 |---|---|---|---|
-| F-1 | 纯附件重发（尚未激活的 pending 行）不去重：同内容连发两次 → 两行两个 fileId | `packages/agent/src/file-store.ts:529-545`（`findReusableInboundRow` 跳过 `activatedAt === undefined`，`:538`）；pending 登记 `:909` | pending 代表「已收到、未激活」的事实；提前复用会覆盖第一条的待激活名/时间，且多附件激活语义未定。现行为不丢文件，只多一行加一份字节；TTL 清扫回收字节、行留审计。合并规则属产品语义，不在本次去重切片 |
+| F-1 | 纯附件重发（尚未激活的 pending 行）不去重：同内容连发两次 → 两行两个 fileId | **已清**（fee86cee，2026-11-18：pending→pending 复用同一 fileId）。现行证据：`packages/agent/src/file-store.ts:557`（`findReusableInboundRow` 不再跳过 pending）、`:973-977`（复用分支：pending 刷 name/created_at 且保持 pending）；守卫 `packages/agent/file-store-dedupe-ttl.test.ts`、`packages/agent/file-store-inbound.test.ts`（①/② pending 语义） | 已清（2026-11-20 核对） |
 | F-2 | 入站复用没有「来源」判据，理论上会吞同字节的 Main 产物行（`putFile` 造的、如 recalc 的 `*.values.csv`）：行名会被改成入站文件名 | `packages/agent/src/file-store.ts:534-542` 只排除 `taskId !== undefined` 的行；`putFile` 的 Main 行 `:664-679`；复用改行名 `:575-581` | 修法需给 `file_refs` 加 origin 列并覆盖所有写路径（putFile / registerFromFd / 任务副本 / 回程），是 schema 迁移；当前同字节碰撞概率低但真实存在，登记到下次 schema 变更一起做 |
 | F-3 | 同一消息内两个同内容不同名附件塌成同一 fileId、只留最后一个名字，而 `apps/server/attachment-facts.ts:79` 按 fileId 只留第一条事实 → 注入模型的名字与清单名不一致 | `packages/agent/src/file-store.ts:885-909`（复用不区分消息内批次）；`apps/server/attachment-facts.ts:79` | 需要批次身份（`file_refs` 无 `message_id`）或改事实队列按 (fileId,name) 去重；后者仍会让清单只有一个名字、与模型看到的两条事实不一致。正确修法是同消息批次内复用检测 + 名字冲突裁定，需产品裁定，本次只登记 |
 
@@ -100,8 +100,8 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 
 | 编号 | 事项 | 现行证据 | 为什么现在不做 |
 |---|---|---|---|
-| R-1 | `wakeCancelled` 不在会话链上的 run/wake 竞态：任务取消时若该会话此刻没有在跑的回合（`turnActive=false`），`wakeCancelled` 直接起一次唤醒；若紧接着用户回合/另一状态变化又起 wake，两个 wake 可能并发。复核实测 **1 次可复现** driver 报错、用户回合空 | `apps/server/notification-chat-sink.ts:216-235`（`wakeCancelled` 出口）；`apps/server/server.ts:1023-1030`（接 `wakeAndDeliverStateChange`）；`turnActive` 判据见 `server.ts:1019` | 属竞态收口，不是本次去内部词切片；复现率与用户级影响待专门测。修法要给唤醒加会话级串行/去重（新机制，需过准入），本轮不引入 |
-| R-2 | `WAKE_TURN_MS = 60s` 与 Main `mainThinkingLevel=high` 的张力：high 档长思考的唤醒回合可能 60s 内出不来 → 超时 abort → 模型那句丢失、走兜底渲染文案（用户看到的是模板话而非模型话） | `packages/agent/src/execution-runtime.ts:1006`（`WAKE_TURN_MS = 60_000`）、`:3180`/`:3196`（wake/coldWake 截止）；`packages/contracts/src/config.ts:121`、`packages/core/src/config.ts:96`（`mainThinkingLevel` 配置）；兜底见 `notification-chat-sink.ts:216-235` | 是否真发生取决于真模型在 high 档的唤醒耗时，**当前无真模型测量**。不擅自放宽截止或降档——等 `eval:user` 真模型读数再定，避免为假设问题改超时语义 |
+| R-1 | `wakeCancelled` 不在会话链上的 run/wake 竞态：任务取消时若该会话此刻没有在跑的回合（`turnActive=false`），`wakeCancelled` 直接起一次唤醒；若紧接着用户回合/另一状态变化又起 wake，两个 wake 可能并发。复核实测 **1 次可复现** driver 报错、用户回合空 | `apps/server/notification-chat-sink.ts:216-235`（`wakeCancelled` 出口）；`apps/server/server.ts:1303`（`wakeAndDeliverStateChange` 本体，出口逐步接它）；`turnActive` 判据见 `server.ts:1075` | 属竞态收口，不是本次去内部词切片；复现率与用户级影响待专门测。修法要给唤醒加会话级串行/去重（新机制，需过准入），本轮不引入 |
+| R-2 | `WAKE_TURN_MS = 60s` 与 Main `mainThinkingLevel=high` 的张力：high 档长思考的唤醒回合可能 60s 内出不来 → 超时 abort → 模型那句丢失、走兜底渲染文案（用户看到的是模板话而非模型话） | `packages/agent/src/execution-runtime.ts:1071`（`WAKE_TURN_MS = 60_000`）、`:3324-3358`（wake/coldWake 截止）；`packages/contracts/src/config.ts:121`、`packages/core/src/config.ts:96`（`mainThinkingLevel` 配置）；兜底见 `notification-chat-sink.ts:216-235` | 是否真发生取决于真模型在 high 档的唤醒耗时，**当前无真模型测量**。不擅自放宽截止或降档——等 `eval:user` 真模型读数再定，避免为假设问题改超时语义 |
 
 ## 十一、长连接可靠性：离线/断连窗口的用户消息不可恢复（owner 2026-11-20 要求登记）
 

@@ -148,7 +148,7 @@
 | 场景 | 自动用例 | 层级 | 覆盖度 | 缺口说明 |
 | --- | --- | --- | --- | --- |
 | 财务应收技能：汇总 / 未结清拆客户 / 指定客户筛选 / 逾期识别 / 数据缺失如实 | `scripts/eval/sim/cases/finance.test.ts:场景 1 正常交办：应收/已核销/未结清`<br>`scripts/eval/sim/cases/finance.test.ts:场景 3 指定客户筛选`<br>`scripts/eval/sim/cases/finance.test.ts:场景 4 发现逾期`<br>`scripts/eval/sim/cases/finance.test.ts:场景 5 数据缺失`<br>`scripts/eval/finance/truth.test.ts:按客户：应收 / 已核销 / 未结清` | 宿主机制 + 执行层 | 已覆盖 | 真模型面在 SIM-FIN（`scripts/eval/sim/cases/finance-cases.ts`），CI 预注册入口自动跑 |
-| 用户级黑盒查数（E01–E12）：真模型如实交付、编造 / 假成功 / 无谓追问判负 | `scripts/eval/user-eval-comment.test.ts:12 个用例全部出现在表里，顺序为 E01–E12`<br>`scripts/eval/business-e2e/judge.test.ts:干净样本判过：请求范围内读取 + 如实回复`<br>`scripts/eval/business-e2e/judge.test.ts:部分失败 + 如实不称完成：机械面判过` | 真模型统计 | 已覆盖 | 运行在 CI（`.github/workflows/eval-real.yml`；检测到 eval:eval-real 用真模型 + 仓内 dummy）；本行引用的是报告生成与判定器守卫——用例删 / 判据改，守卫即红；模型不可得时 CI 跳跑不等于用户能力退化，属 infra |
+| 用户级黑盒查数（E01–E15）：真模型如实交付、编造 / 假成功 / 无谓追问判负 | `scripts/eval/user-eval-comment.test.ts:全部用例按 CASE_IDS 顺序出现在表里`<br>`scripts/eval/business-e2e/judge.test.ts:干净样本判过：请求范围内读取 + 如实回复`<br>`scripts/eval/business-e2e/judge.test.ts:部分失败 + 如实不称完成：机械面判过` | 真模型统计 | 已覆盖 | 运行在 CI（`.github/workflows/eval-real.yml`；检测到 eval:eval-real 用真模型 + 仓内 dummy）；本行引用的是报告生成与判定器守卫——用例删 / 判据改，守卫即红；模型不可得时 CI 跳跑不等于用户能力退化，属 infra |
 | 业务 E2E（B/T/C/DS 系列）：越界判负、部分失败诚实、取消如实、隔离 | `scripts/eval/business-e2e/bizprobe.test.ts:机械判负：越界执行 → 样本 failed`<br>`scripts/eval/business-e2e/bizprobe.test.ts:经真实 model-executor 全链跑一个样本` | 真模型统计 | 已覆盖 | 真模型跑批 `npm run eval:bizprobe`（`package.json:17`），infra 门 / 冻结锁在前；本行引用判定器与全链冒烟守卫 |
 | 模拟用户长对话（SIM-01\~10）：部分失败、指代、叫停、两套账、排队写 | `scripts/eval/sim/cases/cases.test.ts:全部 15 个场景形状有效，且 SIM-05 先跑`<br>`scripts/eval/sim/cases/cases.test.ts:SIM-05：部分失败如实说明` | 真模型统计 | 已覆盖 | 真实跑批 `scripts/eval/sim/run-real.ts`（预注册 + 硬停 12）；本行引用 Oracle 与套件守卫 |
 | 长会话跨压缩（LS 轨）：事实保留、任务连续性、回查内存 | `scripts/eval/long-session/oracle.test.ts:会话内约定事实字面匹配`<br>`scripts/eval/long-session/oracle.test.ts:H4：completed 却零执行 → 虚假完成硬零` | 宿主机制 + 真模型统计 | 部分 | LS1–LS6 真实模型轨跑在 `wave1-runner.ts`（预注册 `docs/history/long-session-prereg.md`，已归档）；本行引用的是 Oracle 自检（确定性），真实模型读数尚未成为持续全体绿门（N 依赖模型可得性） |
@@ -157,7 +157,7 @@
 
 | 场景 | 自动用例 | 层级 | 覆盖度 | 缺口说明 |
 | --- | --- | --- | --- | --- |
-| 单实例纪律与双实例行为 | — | 宿主机制 | 缺口 | 仓库**明确不强制**单实例（`docs/ops/README.md:13`）：无进程锁 / pid 文件 / 端口占用守卫，两个实例共享同一 `.runtime/state.db` 与会话目录，双写并发行为未定义未测；只有进程内单实例登记（`packages/agent/src/resource-policy.ts:465`）。用户若起两个实例，第二条连接会把第一条的 WS 踢掉（`docs/product/wecom-live-dummy-cases.md:30`）。真要做：给 `startup-sweep` 同位置加确定性守卫（锁 / EADDRINUSE 拒绝路径先写测试） |
+| 单实例纪律与双实例行为 | `apps/server/instance-guard.test.ts:② 锁被另一个存活且命令行匹配的 pid 占用 → 取锁失败，话术可操作（含 kill pid）` | 宿主机制 | 已覆盖 | 2026-11-19 起启动时取独占锁（`apps/server/main.ts:53` `guardSingleInstance`，先于连接渠道）；存活实例在则 exit(1)、陈旧锁可覆盖；双实例共享同一 `.runtime/state.db` 的**并发写**行为仍未测（第二个实例会被锁挡在连接渠道之前） |
 | 指定接收人 / 转发结果到其它会话 | — | 宿主机制 | 缺口 | 所有投递断言都是「回到发起会话」（business-coverage 盲区 #9）；没有「把结果转发给指定人 / 其它群」的自动用例。真要做：先定语义（宿主把任务结果定向投递允许吗 / 谁授权），再写渠道侧定向投递守卫 |
 
 ## 与 business-coverage.md 的关系

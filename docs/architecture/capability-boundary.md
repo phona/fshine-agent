@@ -53,8 +53,8 @@ Worker 的汇报必须是**结构化 outcome**，Main 据此套用统一话术�
 
 交办（Main → Worker）是**结构化意图 = 能力 + 业务输入**，不是把用户原文当一段 prose 交下去。理由：prose 在交办那一刻就冻结，会和后续改口径冲突。
 
-- **live 实证**：真机重放脚本里用户原话是「往 empty-one 的 W1 加 3 条，a=1/**b=2**/c=3」（`scripts/eval/real/live-replay.ts:62`），但已确认并写进库的是 **b=9**（读回 `a=1/b=9/c=3`，`docs/ops/live-replay.md:55`；判据 `scripts/eval/real/live-replay.ts:211`、`:225`）。若 Worker 拿冻结的原文当任务内容重跑 prepare，会照旧值 b=2 再提一次，与已确认的 b=9 提案冲突、被执行层绑定校验拒掉——真模型验收里这一现象实测为「13/14 个续跑回合先重跑 prepare 而不是 commit」（`packages/agent/src/execution-runtime.ts:1132-1134`）。
-- **现行缓解（已实现，临时）**：不把操作名写进续跑事实，且明确指令「下一步是提交」（`renderConfirmationResumeFact`，`packages/agent/src/execution-runtime.ts:1142-1160`；守卫 `packages/agent/background-write-confirmation.test.ts:504`）。这解决的是「别误重跑 prepare」，**不等于**交办已结构化。
+- **live 实证**：真机重放脚本里用户原话是「往 empty-one 的 W1 加 3 条，a=1/**b=2**/c=3」（`scripts/eval/real/live-replay.ts:66`），但已确认并写进库的是 **b=9**（读回 `a=1/b=9/c=3`，`docs/ops/live-replay.md:55`；判据 `scripts/eval/real/live-replay.ts:211`、`:225`）。若 Worker 拿冻结的原文当任务内容重跑 prepare，会照旧值 b=2 再提一次，与已确认的 b=9 提案冲突、被执行层绑定校验拒掉——真模型验收里这一现象实测为「13/14 个续跑回合先重跑 prepare 而不是 commit」（`packages/agent/src/execution-runtime.ts:1132-1134`）。
+- **现行缓解（已实现，临时）**：不把操作名写进续跑事实，且明确指令「下一步是提交」（`renderConfirmationResumeFact`，`packages/agent/src/execution-runtime.ts:1142-1160`；守卫 `packages/agent/background-write-confirmation.test.ts:505`）。这解决的是「别误重跑 prepare」，**不等于**交办已结构化。
 - **确认回合以「已确认的提案」为任务内容，原有意图让位**：写确认后继续时，任务内容切成已确认提案的载荷原文（宿主机械持有、`args` 逐字交回；`docs/architecture/contract.md` §1 确认面、`packages/agent/src/execution-runtime.ts:1142-1160`）。
 - **结构化交办本身未实现**：现行 `TASK_RUN_TOOL_SCHEMA` 只收一个自然语言 `task` 字符串（`packages/agent/src/execution-runtime.ts:119`），委派块 = 任务原文 + 能力快照 + 文件清单（`renderWorkerDelegation`，`packages/agent/src/execution-runtime.ts:1201`），**无**「能力 + 业务输入」的结构化字段。待办守卫形状见 §7。
 
@@ -96,6 +96,6 @@ Worker 的汇报必须是**结构化 outcome**，Main 据此套用统一话术�
 | outcome `blocked` 缺条件说「缺 X」+补法（只用结构化码，不扫文案） | 已有守卫（反向绊线亲自反向执行过） | `apps/server/task-outcome-reason.test.ts:14`（reason 含「权限」但码非 not_permitted → 不得 blocked）、`:25`、`:30`；缺失条件非空 `task-outcome.test.ts:162`；B3 码接上 `:177` |
 | `failed` 该重试才说重试 | 已有守卫 | `packages/agent/deterministic-failure-guard.test.ts:222`、`:179`；`packages/agent/user-facing-failure.test.ts:117` |
 | 交办 = 结构化意图（能力 + 输入） | 未实现（无守卫） | 待办守卫（schema 含能力与结构化输入，不再仅 `task` 字符串） |
-| 确认回合以已确认提案为任务内容 | 已有守卫 | `packages/agent/background-write-confirmation.test.ts:504`；持久化 `packages/agent/src/execution-runtime.ts:1132-1160` |
+| 确认回合以已确认提案为任务内容 | 已有守卫 | `packages/agent/background-write-confirmation.test.ts:505`；持久化 `packages/agent/src/execution-runtime.ts:1132-1160` |
 
 **守卫缺口不能冒充通过**：上表标「已有守卫」的项已就地核对断言形状，B3/F3-1 的反向绊线亲自反向执行过；其余未逐条反向执行，不冒充全绿。标「部分守卫」「未实现/待接线」「未实现（无守卫）」的项（Main 硬发零执行绊线、partial 底账 items 接线、结构化交办）如实登记，不写成已实现。

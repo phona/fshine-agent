@@ -116,7 +116,7 @@ function rowFor(comment: string, caseId: string): string {
 }
 
 describe('buildEvalComment：逐用例表全量、不截断', () => {
-  it('12 个用例全部出现在表里，顺序为 E01–E12', () => {
+  it('全部用例按 CASE_IDS 顺序出现在表里', () => {
     const comment = buildEvalComment({ summary: fixtureSummary(), logTail: [], meta: META });
     const ids = tableRows(comment).map((line) => line.split('|')[1]!.trim());
     expect(ids).toEqual(CASE_IDS);

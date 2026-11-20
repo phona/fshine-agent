@@ -1,20 +1,20 @@
 # 评测口径（eval）
 
 > 状态：现行。三类入口、判据冻结与预注册先写死是硬纪律；过程读数与三轴报告不在此页（见 `docs/product/business-coverage.md`）。
-> 最后核对：2026-11-18（代码指针以现行代码为准；本轮只复核被移动/改名的文档指针）。
-> 上游指针：`package.json:15-19`（npm 入口）、`scripts/eval/eval-gate.mjs`（通过率门）、`scripts/eval/convergence-r1/criteria.ts`（冻结判据本体）、`docs/history/long-session-prereg.md`（长会话预注册，已归档）、`docs/history/long-session-coverage.md`（轨道覆盖台账，已归档）。
+> 最后核对：2026-11-20（代码指针以现行代码为准；本轮核对被移动/改名的文档指针与过期陈述）。
+> 上游指针：`package.json:16-22`（npm 入口）、`scripts/eval/eval-gate.mjs`（通过率门）、`scripts/eval/convergence-r1/criteria.ts`（冻结判据本体）、`docs/history/long-session-prereg.md`（长会话预注册，已归档）、`docs/history/long-session-coverage.md`（轨道覆盖台账，已归档）。
 
 ## 一、三类入口
 
 | 入口 | 命令 | 判定与退出码 |
 | --- | --- | --- |
-| 用户级黑盒 `eval:user` | `npm run eval:user`（`package.json:15`） | 真模型 + 仓内 dummy，与 `ask` 同源装配；E01–E15 共 15 例（`scripts/eval/convergence-r1/cases.ts:129` 的 `ALL_CASES`；E15 为「当前故意红」的新增判据）；确定性判定 + 冻结词表，0=无 FAIL、1=有 FAIL、2=infra/INCONCLUSIVE（`scripts/eval/convergence-r1/runner.ts:17`） |
-| 确定性面 `eval:cap01` | `npm run eval:cap01`（`package.json:16`） | 零真模型/零网络/零真渠道；8 面串行（`scripts/eval/cap01/run-all.ts:34-43`），每面子进程退出码即结论，汇总 `summary.json`（`:98-99`） |
+| 用户级黑盒 `eval:user` | `npm run eval:user`（`package.json:16`） | 真模型 + 仓内 dummy，与 `ask` 同源装配；E01–E15 共 15 例（`scripts/eval/convergence-r1/cases.ts:129` 的 `ALL_CASES`；E15 的夹具前置已随聚合支持落地（316607b2，2026-11-18），2026-11-20 实跑 PASS）；确定性判定 + 冻结词表，0=无 FAIL、1=有 FAIL、2=infra/INCONCLUSIVE（`scripts/eval/convergence-r1/runner.ts:645-660`） |
+| 确定性面 `eval:cap01` | `npm run eval:cap01`（`package.json:19`） | 零真模型/零网络/零真渠道；8 面串行（`scripts/eval/cap01/run-all.ts:34-43`），每面子进程退出码即结论，汇总 `summary.json`（`:98-99`） |
 | 渠道级 wecom-sim | `node --import tsx scripts/eval/wecom-sim/run.ts`（`scripts/eval/wecom-sim/run.ts:4`） | 真 createServer + dummy + 假企微 SDK；判定全来自 vitest 用例，任一失败退出码非 0（`:6-9`） |
 
 - F 组钉写确认（提案零写入 → 确认后 commit 可读回 → 二次确认只执行一次，`scripts/eval/wecom-sim/cases-f-write.test.ts:5-8`）；G 组钉后台受理与查询不重执行（`scripts/eval/wecom-sim/cases-g-task.test.ts:7-10`）。
-- 补充入口 `eval:bizprobe` / `eval:bizbatch2` / `eval:bizbatch3`（`package.json:17-19`）；infra 门缺 key / 锁不符 → `exit 2`、不烧样本（`scripts/eval/business-e2e/run.ts:188-194`）。
-- ⚠️ 旧文案仍写「12 例」（`.github/workflows/eval-real.yml:66`、nightly `:5`、convergence-r1 README `:34`）或「14 例」，现行用例集以 `scripts/eval/convergence-r1/cases.ts:129` 的 `ALL_CASES` 为准，共 **15 例**。
+- 补充入口 `eval:bizprobe` / `eval:bizbatch2` / `eval:bizbatch3`（`package.json:20-22`）；infra 门缺 key / 锁不符 → `exit 2`、不烧样本（`scripts/eval/business-e2e/run.ts:188-194`）。
+- ⚠️ 旧文案仍写「12 例」（`.github/workflows/eval-real.yml:66`、nightly `:5`、convergence-r1 README `:34`、`scripts/ci.sh:16`）或「14 例」，现行用例集以 `scripts/eval/convergence-r1/cases.ts:129` 的 `ALL_CASES` 为准，共 **15 例**。
 ## 二、判据与 criteria.lock 冻结纪律
 
 - 冻结：`node --import tsx scripts/eval/convergence-r1/freeze.ts` 重算 `criteriaSha256`/`casesSha256` 与逐文件哈希写入 `criteria.lock`（`scripts/eval/convergence-r1/freeze.ts:22-48`）。
@@ -31,8 +31,8 @@
 - 长会话 Wave1：五轨各 3 会话 = 2×40k 探索 + 1×128k 可行性，合计 15（`docs/history/long-session-prereg.md:336-345`）；runner 运行前记录预注册文档 sha256（`scripts/eval/long-session/wave1-runner.ts:191-194`）。
 - infra 门先于运行：缺 key / 模型不符 / 锁不一致 → `blocking=true`、`exit 2`、不烧样本（`scripts/eval/business-e2e/run.ts:108-119`）；N 变更须正式修订，旧读数不得改写。
 ## 四、读数模板与通过率门
-- 用户级产物：`summary.json` 含 `matrix`（逐 case×trial 的 verdict/failureCodes）、`counts`、`failureCodeHistogram`、`dimensionHistogram`、`trialsPlanned`、`samples`（`scripts/eval/convergence-r1/runner.ts:802-815`）；`report.md` 标题即「全样本，不筛绿」，逐样本列维度与回复原文（`:818-866`）。
-- 退出码即三态：INCONCLUSIVE 或 infra 失败 → 2，任何 FAIL → 1，全 PASS → 0（`scripts/eval/convergence-r1/runner.ts:868-871`）。
+- 用户级产物：`summary.json` 含 `matrix`（逐 case×trial 的 verdict/failureCodes）、`counts`、`failureCodeHistogram`、`dimensionHistogram`、`trialsPlanned`、`samples`（组装与落盘见 `scripts/eval/convergence-r1/runner.ts:880` 的 `matrix` 与 `:890` 的 `writeFileSync`）；`report.md` 标题即「全样本，不筛绿」，逐样本列维度与回复原文（`:893` 起）。
+- 退出码即三态：INCONCLUSIVE 或 infra 失败 → 2，任何 FAIL → 1，全 PASS → 0（`scripts/eval/convergence-r1/runner.ts:645-660` 的 `process.exitCode` 赋值链）。
 - 批次读数：逐场景 `k/N + Wilson 95% CI`（`scripts/eval/exploration/stats.ts:69`）；两臂比较用 `newcombe95` 差异区间 + 预注册等效界 δ（`:126`、`:162`），不得用小样本数学上无法通过的门（`docs/history/long-session-prereg.md:83-87`）。
 - 报告纪律：只呈现读数 + 失败分布 + 逐条归因 + 限制；INCONCLUSIVE 不计入 k，无 history 对照不产 IMPROVED/REGRESSED（`docs/history/r4-stability-prereg.md:55-57`）。
 - 通过率门 `scripts/eval/eval-gate.mjs`：① 完整性（调用方须传**独立**预期集，不信摘要自述）② 硬失败码 `FAIL_PHANTOM_SUCCESS` 不得被通过率抵消 ③ 每例通过率 ≥ `minRate`（`:9-19`、`:104-118`）。⚠️ 现行 CI 门实际不执行：trial 固定 1，门条件 `n != '1'` 永不成立（`.github/workflows/eval-real.yml:62`、`:77`）；nightly 只跑不设门（`.github/workflows/eval-nightly.yml:47`）。
@@ -44,7 +44,7 @@
 - **读数适用边界**：R5 长稳全部取自 **W=8192**，不得外推生产 128k（`docs/history/long-session-prereg.md:279`）。
 - 运行入口 `scripts/eval/long-session/wave1-runner.ts --track=LS4` / `--all`；缺省并发 1——step 账号模型级并发上限 5，多开会话会产生假红（`:27-36`）。
 ## 六、全样本不筛绿
-报告与摘要保留每 trial、不剔失败：`report.md` 标题「全样本，不筛绿」（`scripts/eval/convergence-r1/runner.ts:819`），矩阵含全部 case×trial（`:802-808`）；开跑即跑满 N，崩溃/中断则本批作废登记，**不补跑、不重采样**（`docs/history/r4-stability-prereg.md:123-126`）。长会话同口径：产品故障样本保留判负（`docs/history/long-session-prereg.md:90-102`）；硬失败码命中即整批失败，不因其它样本通过转绿（`scripts/eval/eval-gate.mjs:12-13`）。
+报告与摘要保留每 trial、不剔失败：`report.md` 标题「全样本，不筛绿」（`scripts/eval/convergence-r1/runner.ts:893`），矩阵含全部 case×trial（`:880`）；开跑即跑满 N，崩溃/中断则本批作废登记，**不补跑、不重采样**（`docs/history/r4-stability-prereg.md:123-126`）。长会话同口径：产品故障样本保留判负（`docs/history/long-session-prereg.md:90-102`）；硬失败码命中即整批失败，不因其它样本通过转绿（`scripts/eval/eval-gate.mjs:12-13`）。
 ## 七、读数保留与可复现
 
 原始 `judgment.json`、离线复判结果、重跑结果各自留存，重判不得覆盖原判；报告必须标 N、模型版本（含 thinking level）、代码点（commit）、技能 revision——缺任一项只能当参考，不能当基线（`docs/history/decision-log-part02-2026-11.md:78`）。

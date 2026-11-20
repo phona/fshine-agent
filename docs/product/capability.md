@@ -116,10 +116,10 @@
 | --- | --- | --- |
 | 运营告警四规则（host_fault / retry_storm / task_stuck / delivery_failed）+ 双出口（alerts.jsonl / 企微推送）、冷却去重、原文可回溯 | `packages/agent/alert-rules.test.ts:命中：同一任务执行事实达到阈值`<br>`packages/agent/alert-rules.test.ts:告警项 raw 字段包含被命中的内部原文`<br>`scripts/ops/alerts.test.ts:长活提醒投递两次都失败` | 已实现（有守卫） |
 | 我方故障（装配面缺陷/协议违约）落告警第 3 档，不给用户编话 | `packages/agent/long-task-async.test.ts:⑤b 声明了长任务但装配没给等待端口`<br>`packages/agent/alert-rules.test.ts:命中：装配面缺陷` | 已实现（有守卫） |
-| 用户级黑盒评测（E01–E12：编造/假成功/无谓追问判负；真模型跑批在 CI/预注册入口，判据与报告有守卫） | `scripts/eval/user-eval-comment.test.ts:12 个用例全部出现在表里` | 已实现（有守卫） |
+| 用户级黑盒评测（E01–E15 共 15 例：编造/假成功/无谓追问判负；真模型跑批在 CI/预注册入口，判据与报告有守卫） | `scripts/eval/user-eval-comment.test.ts:全部用例按 CASE_IDS 顺序出现在表里` | 已实现（有守卫） |
 | 真模型写闭环验收（`npm run eval:write-loop`：九条机械判据，缺模型配置如实失败） | `scripts/eval/real/write-loop.test.ts:九条判据全 pass` | 已实现（有守卫） |
 | 覆盖矩阵守卫：矩阵每条引用唯一命中现存用例（用户级能力台账不漂移） | `scripts/coverage-matrix-guard.test.ts:逐条引用都能唯一定位到现存用例` | 已实现（有守卫） |
-| 单实例纪律与双实例行为 | 无进程锁/端口守卫，双实例行为未定义未测（`docs/decisions/debt.md` §四；`docs/eval/coverage-matrix.md` §十三缺口行） | 未实现（设计在册） |
+| 单实例纪律与双实例行为 | 机械守卫已落地（2026-11-19 起）：启动时取独占锁、存活实例在则打印可操作话术并 exit(1)，陈旧锁可覆盖；取锁先于连接渠道 | 已实现（有守卫）：`apps/server/main.ts:53`（`guardSingleInstance`）、`apps/server/instance-guard.test.ts`（5 条，含取锁失败话术可操作） |
 
 ## 二、预期行为（交互契约浓缩）
 
