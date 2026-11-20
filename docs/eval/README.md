@@ -8,13 +8,13 @@
 
 | 入口 | 命令 | 判定与退出码 |
 | --- | --- | --- |
-| 用户级黑盒 `eval:user` | `npm run eval:user`（`package.json:15`） | 真模型 + 仓内 dummy，与 `ask` 同源装配；E01–E15 共 15 例（`scripts/eval/convergence-r1/cases.ts:116`；E15 为「当前故意红」的新增判据）；确定性判定 + 冻结词表，0=无 FAIL、1=有 FAIL、2=infra/INCONCLUSIVE（`scripts/eval/convergence-r1/runner.ts:17`） |
+| 用户级黑盒 `eval:user` | `npm run eval:user`（`package.json:15`） | 真模型 + 仓内 dummy，与 `ask` 同源装配；E01–E15 共 15 例（`scripts/eval/convergence-r1/cases.ts:129` 的 `ALL_CASES`；E15 为「当前故意红」的新增判据）；确定性判定 + 冻结词表，0=无 FAIL、1=有 FAIL、2=infra/INCONCLUSIVE（`scripts/eval/convergence-r1/runner.ts:17`） |
 | 确定性面 `eval:cap01` | `npm run eval:cap01`（`package.json:16`） | 零真模型/零网络/零真渠道；8 面串行（`scripts/eval/cap01/run-all.ts:34-43`），每面子进程退出码即结论，汇总 `summary.json`（`:98-99`） |
 | 渠道级 wecom-sim | `node --import tsx scripts/eval/wecom-sim/run.ts`（`scripts/eval/wecom-sim/run.ts:4`） | 真 createServer + dummy + 假企微 SDK；判定全来自 vitest 用例，任一失败退出码非 0（`:6-9`） |
 
 - F 组钉写确认（提案零写入 → 确认后 commit 可读回 → 二次确认只执行一次，`scripts/eval/wecom-sim/cases-f-write.test.ts:5-8`）；G 组钉后台受理与查询不重执行（`scripts/eval/wecom-sim/cases-g-task.test.ts:7-10`）。
 - 补充入口 `eval:bizprobe` / `eval:bizbatch2` / `eval:bizbatch3`（`package.json:17-19`）；infra 门缺 key / 锁不符 → `exit 2`、不烧样本（`scripts/eval/business-e2e/run.ts:188-194`）。
-- ⚠️ 旧文案仍写「12 例」（`.github/workflows/eval-real.yml:66`、nightly `:5`、convergence-r1 README `:34`），现行用例集是 14 例。
+- ⚠️ 旧文案仍写「12 例」（`.github/workflows/eval-real.yml:66`、nightly `:5`、convergence-r1 README `:34`）或「14 例」，现行用例集以 `scripts/eval/convergence-r1/cases.ts:129` 的 `ALL_CASES` 为准，共 **15 例**。
 ## 二、判据与 criteria.lock 冻结纪律
 
 - 冻结：`node --import tsx scripts/eval/convergence-r1/freeze.ts` 重算 `criteriaSha256`/`casesSha256` 与逐文件哈希写入 `criteria.lock`（`scripts/eval/convergence-r1/freeze.ts:22-48`）。

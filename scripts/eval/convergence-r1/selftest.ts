@@ -113,13 +113,15 @@ function completedBetaRow(): Record<string, unknown> {
   };
 }
 
-function betaWorkerCall(): Record<string, unknown> {
+function betaWorkerCall(tool: 'execute_operation' | 'op_dummy_query' = 'execute_operation'): Record<string, unknown> {
   return {
     turn: 1,
     agent: 'worker',
     seq: 1,
-    tool: 'execute_operation',
-    args: { operation: 'dummy.query', args: { collection: 'beta' } },
+    tool,
+    args: tool === 'execute_operation'
+      ? { operation: 'dummy.query', args: { collection: 'beta' } }
+      : { collection: 'beta' },
     result: {
       status: 'completed',
       data: {
@@ -242,6 +244,68 @@ export function runJudgeSelftest(outDir: string): number {
     workerCalls: [betaWorkerCall()],
     executions: [{ requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'completed' }],
   }, (judgment) => judgment.deterministic.verdict === 'PASS');
+
+  // ── 动态工具 op_* 识别守卫（2026-11-20 工具名失配修复）────────────────────────
+  // 真实模型 eval:user 三次被拖成 rc=2 / 8×INCONCLUSIVE：Worker 改用每 operation 一个 op_* 工具
+  // （op_dummy_query），判据只认 execute_operation → T2 outcome 永远找不到，E05 candidates /
+  // E07 availableWindows 报「无法核对冻结期望」。正控：op_dummy_query 的 outcome 必须被读到。
+  const alphaOpCall = (): Record<string, unknown> => ({
+    turn: 1,
+    agent: 'worker',
+    seq: 1,
+    tool: 'op_dummy_query',
+    args: { collection: 'alpha', window: 'W9' },
+    result: { status: 'completed', data: { query: 'alpha', window: 'W9', availableWindows: ['W1', 'W2'] } },
+    resultSummary: 'completed',
+    startedAt: '2026-11-20T00:00:00.000Z',
+    elapsedMs: 10,
+  });
+  const e07AlphaRow = (): Record<string, unknown> => ({
+    ts: '2026-11-20T00:00:00.000Z', mode: 'query', via: 'structured', script: 'dummy.query',
+    args: ['--collection', 'alpha', '--window', 'W9'], serve: false, exitCode: 0,
+    result: { status: 'not_found', collection: 'alpha' },
+  });
+  const e07Executions = [{ requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'completed' }];
+  const e07Reply = 'alpha 集合里查不到 W9 窗口的数据：没有 W9 这个窗口，目前只有 W1 和 W2。请确认要查 W1 还是 W2。';
+  const noAvailableWindowsGap = (judgment: Judgment): boolean => !judgment.inconclusiveReasons.some((reason) => reason.includes('availableWindows'));
+
+  runPack('op-tool-outcome-read', 'E07', 'PASS（op_dummy_query 的 availableWindows 被判据读到）', {
+    caseId: 'E07',
+    reply: e07Reply,
+    taskIds: ['task_selftest_op_1'],
+    auditRows: [e07AlphaRow()],
+    workerCalls: [alphaOpCall()],
+    executions: e07Executions,
+  }, (judgment) => noAvailableWindowsGap(judgment)
+    && judgment.evidenceRefs.some((entry) => entry.row?.includes('op_dummy_query')));
+
+  // 正控 2：历史形状 execute_operation 仍须能读到（与 op_* 形状并存，不回归老夹具）。
+  runPack('legacy-tool-outcome-read', 'E07', 'PASS（历史 execute_operation 的 availableWindows 仍被读到）', {
+    caseId: 'E07',
+    reply: e07Reply,
+    taskIds: ['task_selftest_op_2'],
+    auditRows: [e07AlphaRow()],
+    workerCalls: [{
+      turn: 1, agent: 'worker', seq: 1, tool: 'execute_operation',
+      args: { operation: 'dummy.query', args: { collection: 'alpha', window: 'W9' } },
+      result: { status: 'completed', data: { query: 'alpha', window: 'W9', availableWindows: ['W1', 'W2'] } },
+      resultSummary: 'completed', startedAt: '2026-11-20T00:00:00.000Z', elapsedMs: 10,
+    }],
+    executions: e07Executions,
+  }, (judgment) => noAvailableWindowsGap(judgment)
+    && judgment.evidenceRefs.some((entry) => entry.row?.includes('execute_operation')));
+
+  // 负控（反向绊线）：换成不含 T2 证据的 op_* 调用（无 availableWindows 载荷）→ 必须出现
+  // availableWindows 缺口 INCONCLUSIVE。这证明上面的正控不是橡皮图章：一旦把识别改回只认
+  // execute_operation（op_dummy_query 被过滤掉），op-tool-outcome-read 立刻转红。
+  runPack('op-tool-outcome-missing-tripwire', 'E07', 'INCONCLUSIVE（op_* 缺 availableWindows 载荷）', {
+    caseId: 'E07',
+    reply: e07Reply,
+    taskIds: ['task_selftest_op_3'],
+    auditRows: [e07AlphaRow()],
+    workerCalls: [{ turn: 1, agent: 'worker', seq: 1, tool: 'op_dummy_query', args: { collection: 'alpha', window: 'W9' }, result: { status: 'completed', data: { query: 'alpha', window: 'W9' } }, startedAt: '2026-11-20T00:00:00.000Z', elapsedMs: 10 }],
+    executions: e07Executions,
+  }, (judgment) => judgment.inconclusiveReasons.some((reason) => reason.includes('availableWindows')));
 
   // 负控 2：E06 免查零执行、问回对象 → PASS（不得因免查例零委派判负）。
   runPack('e06-zero-exec-accepted', 'E06', 'PASS', {

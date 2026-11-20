@@ -650,7 +650,8 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   }
 
   // ── ③ 检查点（载荷 vs 冻结期望） ─────────────────────────────────────────────
-  const workerCalls = toolCalls.filter((call) => call.agent === 'worker' && call.tool === 'execute_operation');
+  // Worker 执行层调用：历史 execute_operation 与动态 op_* 工具都算 T2 证据（见 isWorkerOperationTool）。
+  const workerCalls = toolCalls.filter((call) => call.agent === 'worker' && isWorkerOperationTool(call.tool));
   // 检查点取行（判定器缺陷修复，2026-11-18）：同一集合可能有多条执行行（先裸查探对象、再带条件
   // 查目标窗口，E07 实测），原先 `find` 取第一条会把合法的裸查行当成检查点行，报
   //「result.status=completed 与期望 not_found 不符」→ INCONCLUSIVE 假未决。改为按**期望 status +
@@ -701,9 +702,11 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     }
     // T2 outcome 同集合也可能多次（裸查 + 条件查）：优先取带齐 requireEveryRowArgs 的那次，
     // 否则 availableWindows / candidates / errorCode 会从裸查那次读空（E07 实测假未决）。
-    const outcome = findOutcome(workerCalls, checkpoint.collection, preferArgs);
-    if (outcome) {
-      ref({ path: 'toolcalls.jsonl', row: `worker execute_operation ${checkpoint.collection}`, what: `T2 outcome.status=${String(outcome.status)}` });
+    const outcomeHit = findOutcomeCall(workerCalls, checkpoint.collection, preferArgs);
+    const outcome = outcomeHit?.outcome;
+    if (outcomeHit) {
+      // ref 文案用实际工具名（op_dummy_query / 历史 execute_operation），不再写死旧名。
+      ref({ path: 'toolcalls.jsonl', row: `worker ${outcomeHit.tool} ${checkpoint.collection}`, what: `T2 outcome.status=${String(outcomeHit.outcome.status)}` });
     }
     if (checkpoint.candidates) {
       const actual = outcome?.data?.['candidates'];
@@ -728,7 +731,7 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     if (checkpoint.errorCode) {
       const direct = outcome?.error?.code ?? executions.find((execution) => execution.operation === 'dummy.query')?.error?.code;
       if (direct === checkpoint.errorCode) {
-        ref({ path: 'toolcalls.jsonl', row: `worker execute_operation ${checkpoint.collection}`, what: `T2 error.code=${checkpoint.errorCode}` });
+        ref({ path: 'toolcalls.jsonl', row: `worker ${outcomeHit?.tool ?? EXECUTE_TOOL_ORIGINAL} ${checkpoint.collection}`, what: `T2 error.code=${checkpoint.errorCode}` });
       } else if (direct === undefined && (checkpoint.status === 'not_found' || checkpoint.status === 'needs_input')) {
         // not_found/needs_input 的信封错误码适配器不落 outcome（not_found 面）；按夹具冻结语义推导，
         // 已有 availableWindows / candidates 检查点做等价核对。
@@ -1086,27 +1089,63 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
 }
 
 /**
- * 从 T2 工具调用里找目标集合的 outcome（worker 的 execute_operation）。
+ * Worker 执行层调用的工具名识别（2026-11-20 动态工具落地修复）。
+ * 两种形状都算 T2 执行证据：
+ *   · 历史/夹具：执行层原样名 `execute_operation`（args = {operation, args:{...}}）；
+ *   · 动态工具：每个 operation 一个 `op_*` 工具，业务参数平铺在 args。
+ * `op_*` 名按 execution-runtime.ts 的 workerOperationToolName 安全化：
+ * `op_` + operation，非字母数字压 `_`（dummy.query → op_dummy_query；反查同理）。
+ */
+const WORKER_OP_TOOL_PREFIX = 'op_';
+const EXECUTE_TOOL_ORIGINAL = 'execute_operation';
+
+function isWorkerOperationTool(tool: string): boolean {
+  return tool === EXECUTE_TOOL_ORIGINAL || tool.startsWith(WORKER_OP_TOOL_PREFIX);
+}
+
+/** Worker 工具调用的业务参数：历史形状在 args.args，动态 op_* 形状直接平铺在 args。 */
+function workerOperationArgsOf(call: ToolCallRecord): Record<string, unknown> {
+  const args = normalizeArgs(call.args);
+  if (call.tool === EXECUTE_TOOL_ORIGINAL) {
+    const inner = args['args'];
+    return inner !== null && typeof inner === 'object' ? normalizeArgs(inner) : {};
+  }
+  return args;
+}
+
+interface OutcomeHit {
+  outcome: OutcomeLike;
+  tool: string;
+}
+
+/**
+ * 从 T2 工具调用里找目标集合的 outcome（worker 的 execute_operation / op_*）。
  * `preferArgs` 非空时优先返回带齐这些参数的调用（同集合多次查询时区分裸查与条件查）；
  * 没有命中则退回该集合的第一次调用（保持原有行为，漂移仍可被上层核对）。
  */
+function findOutcomeCall(
+  calls: readonly ToolCallRecord[],
+  collection: string,
+  preferArgs?: Readonly<Record<string, string>>,
+): OutcomeHit | undefined {
+  let fallback: OutcomeHit | undefined;
+  for (const call of calls) {
+    const normalizedInner = workerOperationArgsOf(call);
+    const target = [normalizedInner['collection'], normalizedInner['topic']].find((value) => typeof value === 'string') as string | undefined;
+    if (target !== collection || call.result === null || typeof call.result !== 'object') continue;
+    const hit: OutcomeHit = { outcome: call.result as OutcomeLike, tool: call.tool };
+    if (argsMatch(normalizedInner, preferArgs)) return hit;
+    if (fallback === undefined) fallback = hit;
+  }
+  return fallback;
+}
+
 function findOutcome(
   calls: readonly ToolCallRecord[],
   collection: string,
   preferArgs?: Readonly<Record<string, string>>,
 ): OutcomeLike | undefined {
-  let fallback: OutcomeLike | undefined;
-  for (const call of calls) {
-    const args = normalizeArgs(call.args);
-    const operationArgs = args['args'];
-    const normalizedInner = operationArgs !== null && typeof operationArgs === 'object' ? normalizeArgs(operationArgs) : {};
-    const target = [normalizedInner['collection'], normalizedInner['topic']].find((value) => typeof value === 'string') as string | undefined;
-    if (target !== collection || call.result === null || typeof call.result !== 'object') continue;
-    const outcome = call.result as OutcomeLike;
-    if (argsMatch(normalizedInner, preferArgs)) return outcome;
-    if (fallback === undefined) fallback = outcome;
-  }
-  return fallback;
+  return findOutcomeCall(calls, collection, preferArgs)?.outcome;
 }
 
 function findOutcomeItems(

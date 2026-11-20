@@ -6,10 +6,10 @@
   "files": {
     "scripts/eval/convergence-r1/criteria.ts": "f5daa2a2d8377d7250150b6d907126dea26e652dcb8493f32801a5ddf1d68025",
     "scripts/eval/convergence-r1/cases.ts": "ee986678677db8114101d81a5877e46483b894960c90b2411ebc81a67d731dc6",
-    "scripts/eval/convergence-r1/judge.ts": "98028b26a6b15d3e3ccc83f24f646d7e4034f8eadda8e90ecaefbe2c1bf221ce",
+    "scripts/eval/convergence-r1/judge.ts": "97d13034a7112c1466dbb31b67dd74dcc65994fafce306e361993700299fe736",
     "scripts/eval/convergence-r1/hash.ts": "e03bdcacc362515796cf6d248f2244a2b31b3e19ceddaee32cd7ec6795376637",
     "scripts/eval/convergence-r1/evidence.ts": "4003a8b78ef15a46649a83232cf0db0506c1d932d497e369e06a8289a6689418",
-    "scripts/eval/convergence-r1/selftest.ts": "a896216208bedc0225152177c80f5d2cf78325404d83f384f59ceb6ff3c07661",
+    "scripts/eval/convergence-r1/selftest.ts": "816a70fae69de57e2d5f02f284307a9044fd85ca0a8905d399a29e3d2e752678",
     "scripts/eval/convergence-r1/cases/E01.ts": "411a33591d41daac652fd98c3249f2bb2020200bfdecc7fb973154eaa92651d5",
     "scripts/eval/convergence-r1/cases/E02.ts": "feb781db06529d69c2019697e904b2c65d2238187b4d516950577ae937842a61",
     "scripts/eval/convergence-r1/cases/E03.ts": "fca148ab9b107f8633c636577616e3a30d5388e30b061ce59f91da48549fc5da",

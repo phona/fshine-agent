@@ -102,3 +102,21 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 |---|---|---|---|
 | R-1 | `wakeCancelled` 不在会话链上的 run/wake 竞态：任务取消时若该会话此刻没有在跑的回合（`turnActive=false`），`wakeCancelled` 直接起一次唤醒；若紧接着用户回合/另一状态变化又起 wake，两个 wake 可能并发。复核实测 **1 次可复现** driver 报错、用户回合空 | `apps/server/notification-chat-sink.ts:216-235`（`wakeCancelled` 出口）；`apps/server/server.ts:1023-1030`（接 `wakeAndDeliverStateChange`）；`turnActive` 判据见 `server.ts:1019` | 属竞态收口，不是本次去内部词切片；复现率与用户级影响待专门测。修法要给唤醒加会话级串行/去重（新机制，需过准入），本轮不引入 |
 | R-2 | `WAKE_TURN_MS = 60s` 与 Main `mainThinkingLevel=high` 的张力：high 档长思考的唤醒回合可能 60s 内出不来 → 超时 abort → 模型那句丢失、走兜底渲染文案（用户看到的是模板话而非模型话） | `packages/agent/src/execution-runtime.ts:1006`（`WAKE_TURN_MS = 60_000`）、`:3180`/`:3196`（wake/coldWake 截止）；`packages/contracts/src/config.ts:121`、`packages/core/src/config.ts:96`（`mainThinkingLevel` 配置）；兜底见 `notification-chat-sink.ts:216-235` | 是否真发生取决于真模型在 high 档的唤醒耗时，**当前无真模型测量**。不擅自放宽截止或降档——等 `eval:user` 真模型读数再定，避免为假设问题改超时语义 |
+
+## 十一、长连接可靠性：离线/断连窗口的用户消息不可恢复（owner 2026-11-20 要求登记）
+
+**事项**：企微 AI 机器人长连接（WebSocket）模式下，服务停服或断连期间用户发出的消息**平台不补投、产品无补拉**，窗口内消息永久丢失。
+
+**实测读数（逐字）**：
+
+- 停服 `12:02:15Z` → 重连 `12:03:43Z`（Authenticated），期间用户发 **2 条**；
+- 重连后 `inbound_messages` 仍 **31 条（零新增）**、日志 `aibot_msg_callback` 帧 **0**、会话文件**零写入**；
+- 结论：平台不补投、产品无补拉——断连窗口的消息没有任何恢复路径。
+
+**官方口径**：`developer.work.weixin.qq.com/document/60904` 把「可靠性高（无状态）」判给 **Webhook**；长连接标注「需要心跳保活、断线重连」。官方社区另有「连接正常时也偶发丢」案例。
+
+**缓解未做**：`systemd Restart=always` / 心跳 15s / `message_still_processing` 接告警——均未实施。
+
+**销账条件**：切 **Webhook**（平台最多 3 次重试）+ 既有 `messageId` 幂等底账接重投。两项都落地并实测窗口内零丢失后才可关账。
+
+**状态**：未清（本次只登记，不修）。

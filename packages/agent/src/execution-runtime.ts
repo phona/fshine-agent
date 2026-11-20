@@ -3443,13 +3443,10 @@ function recalcXlsxTool(): DiscoveredTool {
   };
 }
 
-function executeOperationTool(): DiscoveredTool {
-  return {
-    name: EXECUTE_OPERATION_TOOL,
-    description: EXECUTE_OPERATION_TOOL_DESCRIPTION,
-    inputSchema: EXECUTE_OPERATION_TOOL_SCHEMA,
-  };
-}
+// executeOperationTool() 工厂已删（2026-11-20，M4 死代码清扫）：Worker 工具面改为每 operation
+// 一个 op_* 工具后该工厂零调用点；AGENTS.md 删除纪律禁止停用却长期保留两套实现。
+// EXECUTE_OPERATION_TOOL / _DESCRIPTION / _SCHEMA 常量仍保留——它们用作内部 exec 路由键，
+// 且夹具/测试的 internal-exec-fixture 依赖（非工具面注册）。
 
 /**
  * 动态 Worker 工具面（owner 2026-11-20）：**每个 operation 一个工具**，参数用业务字段名 +
