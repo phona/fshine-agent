@@ -71,7 +71,9 @@ describe('L 组·答复五态用户可见行为（B4，自动）', () => {
       sim.book.mainTurn(request, [toolCallAssistant('task_run', { task: request }), textAssistant('我这就办。')]);
       sim.book.workerTask(request, [
         // 写操作不在只读允许集 → 发起前确定性拒绝、零执行（hostRefusedOperations 记权限）。
-        toolCallAssistant('op_dummy_prepare', { collection: 'alpha', window: 'W1', '--count': 1 }),
+        // 参数只用业务字段名：op_* 已封死 `--` 前缀键与机制参数（本 case 不需要 count——
+        // 宿主在允许集那一步就拒了，执行层从未被调用）。
+        toolCallAssistant('op_dummy_prepare', { collection: 'alpha', window: 'W1' }),
         (call) => {
           const result = lastToolResultOf(call.messages);
           expect(result?.isError === true && result.text.includes('当前权限不支持')).toBe(true);
