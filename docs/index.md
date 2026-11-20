@@ -1,6 +1,6 @@
 # 文档索引
 
-> 状态：现行，唯一入口。覆盖 `docs/` 下全部 48 篇 Markdown（2026-11-20 增补能力边界判据档后清点；`docs/index.md` 自身不计，分组篇数之和须等于此数，由 `scripts/docs-guard.test.ts` 检查 1b 校验）；本页即入口，不重复列入分组。仓根另见 `../AGENTS.md`（进仓第一约束）与 `../README.md`（使用说明）。
+> 状态：现行，唯一入口。覆盖 `docs/` 下全部 49 篇 Markdown（2026-11-20 增补交付交接单后清点；`docs/index.md` 自身不计，分组篇数之和须等于此数，由 `scripts/docs-guard.test.ts` 检查 1b 校验）；本页即入口，不重复列入分组。仓根另见 `../AGENTS.md`（进仓第一约束）与 `../README.md`（使用说明）。
 > 分工：本页只回答「该读哪篇」；决定正文与索引在 `decisions/index.md`，未清债务在 `decisions/debt.md`，未决项在 GitHub issues #67–#74。
 > 历史口径：`history/` 只收封存档案，不按现行规范读、内部链接不保证可用；删除与移档全量以 `git log --diff-filter=D -- docs/` 与 `git log --diff-filter=R -- docs/` 为准（本页不记流水数字）。
 
@@ -41,10 +41,11 @@
 - `history/long-session-prereg.md` — R6 长会话压缩预注册（Wave1 已冻结、Wave2 待裁决；`scripts/eval/long-session/wave1-runner.ts:67` 运行时按其算 sha256，已归档）。
 - `history/business-e2e-batch2-prereg.md` — P2 业务 E2E 预注册（七场景 21 样本 / 27 会话；尚未跑真实模型，仍是下一次运行的口径，已归档）。
 
-## ops（运行、变量、联调与手工走查，8 篇）
+## ops（运行、变量、联调与手工走查，9 篇）
 
 今天怎么启动、变量从哪来、出事看哪里、真实面走到哪一步——排障与联调入口。
 
+- `ops/handover.md` — 交付交接单：冻结基线、八刀交付物、门与复核方法、未覆盖面、必须先知道的风险（长连接离线丢消息实测）与上线前建议。
 - `ops/README.md` — 启动与单实例纪律、`channel.mode` 三档、变量入口、排障 runbook。
 - `ops/alerts.md` — 运营告警（四条规则与阈值、双出口、去重、原始文本可回溯不变量、真跑前置）。
 - `ops/real-read-smoke.md` — 真实执行层只读冒烟判据清单（准备档；配套 `scripts/eval/real/smoke.ts`，默认干跑）。

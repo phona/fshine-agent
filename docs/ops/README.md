@@ -10,7 +10,7 @@
 
 拒启一律 fail-fast、不静默降级：找不到部署配置（`apps/server/main.ts:34-39`，不回落仓内 fixture）；`contextProfiles` 不是恰好 1 个（`apps/server/server.ts:185-192`）；profile 缺 `gateway`（`:205-207`）；`gateway` 是绝对路径或含 shell 元字符（`packages/core/src/config.ts:393-394`）；缺 LLM 三件套（`packages/agent/src/pi-driver.ts:208-215`）；缺 `WECOM_BOT_ID`/`WECOM_BOT_SECRET`（`packages/channel-wecom/src/adapter.ts:295-297`）；30 秒内未认证（`:315`）；以及**单实例守卫拒启**（`apps/server/instance-guard.ts:153` 取锁判据、`:180` 拒启话术）。「连没连、发不发」只认启动日志 `server_started`（`apps/server/channel-mode.ts:66-81`），不要用配置文件文本推断线上状态。停机：SIGINT/SIGTERM → `channel.stop()` + `server.close()`（`apps/server/main.ts:100-109`）。
 
-**单实例纪律（有机械守卫）**：`apps/server/main.ts:52` 在连渠道**之前**取独占锁 `<dbPath 所在目录>/server/instance.lock`（默认 `<仓根>/.runtime/server/instance.lock`；`apps/server/instance-guard.ts:40` 锁文件名、`:153` 取锁、`:227` 释放），内容 `{pid, startedAt, argv}`。判据是「该 pid 是不是我们的进程」——**不仅看 pid 存活**（kill 语义，`:108`），还校验命令行匹配启动入口 `apps/server/main.ts`（读 `/proc/<pid>/cmdline`、ps 兜底，`:75`、`:85`；匹配判据 `:132`），pid 被系统复用也不会误伤无辜进程。取锁失败即拒启，exit 非 0，话术（`:180`）：
+**单实例纪律（有机械守卫）**：`apps/server/main.ts:53` 在连渠道**之前**取独占锁 `<dbPath 所在目录>/server/instance.lock`（默认 `<仓根>/.runtime/server/instance.lock`；`apps/server/instance-guard.ts:40` 锁文件名、`:153` 取锁、`:227` 释放），内容 `{pid, startedAt, argv}`。判据是「该 pid 是不是我们的进程」——**不仅看 pid 存活**（kill 语义，`:108`），还校验命令行匹配启动入口 `apps/server/main.ts`（读 `/proc/<pid>/cmdline`、ps 兜底，`:75`、`:85`；匹配判据 `:132`），pid 被系统复用也不会误伤无辜进程。取锁失败即拒启，exit 非 0，话术（`:180`）：
 
 ```
 启动被拒：已有另一个 fshine server 实例在运行（pid=<pid>，启动于 <时间>，命令行 <argv>）。
