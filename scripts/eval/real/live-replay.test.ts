@@ -301,7 +301,13 @@ describe('子进程前置门', () => {
     expect(run.stdout).toContain('live');
   });
 
-  it('缺模型配置：exit 2、点名缺什么，不退回脚本模型', () => {
+  it('缺模型配置：exit 2、点名缺什么，不退回脚本模型', (ctx) => {
+    // 前置判据：子进程的快照目录（$TMPDIR/fixtures/live-snap）缺 state.db 时，脚本先被快照门拦下，
+    // 到不了模型配置门——本用例验证不了目标分支，跳过并打印一行（这不是失败）。快照在时断言逐字不变。
+    const snapshotDb = path.join(process.env['TMPDIR'] ?? os.tmpdir(), 'fixtures', 'live-snap', 'state.db');
+    const snapshotMissing = !existsSync(snapshotDb);
+    if (snapshotMissing) console.log('快照不存在，跳过（这不是失败）');
+    ctx.skip(snapshotMissing, '快照不存在，跳过（这不是失败）');
     const run = runScript(['--mode', 'b']);
     expect(run.status).toBe(2);
     expect(run.stderr).toContain('缺少真实模型配置');
