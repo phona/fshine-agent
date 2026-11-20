@@ -44,11 +44,13 @@ import { applyExecutorLabel, loadAgentProfile } from '../packages/agent/src/agen
 import { createPiTurnDriver, parseContextWindow, parsePiThinkingLevel, type PiThinkingLevel, type PiTurnDriverOptions } from '../packages/agent/src/pi-driver';
 import type { MainSessionLocation } from '../packages/agent/src/session-persistence';
 import { createDummyCliClient, readOnlyOperationNames, writeOperationNames } from '../packages/agent/src/dummy-cli-client';
+import { deriveCapabilityCatalog, renderCapabilitySummary, type CapabilityEntry } from '../packages/agent/src/capability-catalog';
 import type { TurnDriver } from '../packages/agent/src/driver-contract';
 import {
   createSession,
   createTaskExecutor,
   mainProtocolNoteFor,
+  OUTCOME_BEHAVIOR_NOTE,
   type Session,
   type TurnFileRef,
   type WorkerSkill,
@@ -1048,6 +1050,19 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, input.profile.executorLabel)}${delivery.promptBlock}\n\n${mainProtocolNoteFor(writePermitted)}`;
       mainSkillRegistry = delivery.registry;
     }
+
+    // 能力目录（A4/A5）：单一来源 = 执行层 operation 声明的 capability/access。按 capability
+    // 分组派生，给 Main 一句极短摘要常驻 + 只读 capabilities() 工具（见 createSession）。
+    // 未声明任何 capability → 目录为空：摘要/行为句一律不追加（提示与今天逐字节一致），
+    // 并记一次性结构化事件 capability_catalog_undeclared（装配时记，不按回合刷）。
+    let capabilityCatalog: readonly CapabilityEntry[] = [];
+    const manifest = await face.client.capabilities();
+    capabilityCatalog = deriveCapabilityCatalog(manifest.operations);
+    if (capabilityCatalog.length === 0) {
+      input.onExecutionEvent?.({ event: 'capability_catalog_undeclared', principalId: input.principalId, sessionId: input.sessionId });
+    } else {
+      mainSystemPrompt += `\n\n${renderCapabilitySummary(capabilityCatalog)}\n\n${OUTCOME_BEHAVIOR_NOTE}`;
+    }
     const drivers = input.createDrivers !== undefined
       ? await input.createDrivers(input.env, input.mainSession)
       : {
@@ -1120,6 +1135,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       workerDriver: drivers.workerDriver,
       mainSystemPrompt,
       workerSkills,
+      capabilityCatalog,
       taskRegistry,
       policy,
       taskDispatch,

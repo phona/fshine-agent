@@ -1067,7 +1067,7 @@ async function main() {
   }
   if (cmd === 'operation' && sub === 'list') {
     if (argv.includes('--json')) {
-      process.stdout.write(JSON.stringify({ operations: OPERATIONS.map((o) => ({ name: o.name, domain: o.domain, command: o.command, access: o.access, script: o.script, sharedLocalWrite: false, effects: o.access === 'read' ? ['read'] : o.access === 'scratch' ? ['local'] : ['write'], executor: o.executor, est_seconds: o.est_seconds, weight: o.weight, long_running: o.long_running === true, model_visible: o.model_visible === false ? false : undefined, args: listArgsOf(o), serve: o.serve, protocol: o.protocol, label: LABELS[o.name] ?? '', proposalSchema: o.protocol === 'proposal.create' ? PROPOSAL_SCHEMA : null })), accessSemantics: ACCESS_SEMANTICS }) + '\n');
+      process.stdout.write(JSON.stringify({ operations: OPERATIONS.map((o) => ({ name: o.name, domain: o.domain, command: o.command, access: o.access, script: o.script, sharedLocalWrite: false, effects: o.access === 'read' ? ['read'] : o.access === 'scratch' ? ['local'] : ['write'], executor: o.executor, est_seconds: o.est_seconds, weight: o.weight, long_running: o.long_running === true, model_visible: o.model_visible === false ? false : undefined, capability: o.capability, args: listArgsOf(o), serve: o.serve, protocol: o.protocol, label: LABELS[o.name] ?? '', proposalSchema: o.protocol === 'proposal.create' ? PROPOSAL_SCHEMA : null })), accessSemantics: ACCESS_SEMANTICS }) + '\n');
       return 0;
     }
     for (const o of OPERATIONS) process.stdout.write(`${o.name}\t${o.command}\t${o.access}\t${o.executor}\t${LABELS[o.name] ?? ''}\n`);

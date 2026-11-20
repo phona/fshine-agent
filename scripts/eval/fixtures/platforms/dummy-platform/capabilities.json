@@ -387,7 +387,8 @@
         "prepare": true,
         "commit": true
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "记录办理"
     },
     {
       "name": "dummy.longtask",
@@ -423,7 +424,8 @@
         "prepare": false,
         "commit": false
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "长时导出"
     },
     {
       "name": "dummy.scratch",
@@ -456,7 +458,8 @@
         "prepare": true,
         "commit": false
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "本地计算"
     },
     {
       "name": "dummy.prepare",
@@ -544,7 +547,8 @@
         "prepare": true,
         "commit": false
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "记录办理"
     },
     {
       "name": "dummy.commit",
@@ -638,7 +642,8 @@
         "prepare": false,
         "commit": true
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "记录办理"
     },
     {
       "name": "dummy.proposal",
@@ -673,7 +678,8 @@
         "prepare": true,
         "commit": false
       },
-      "protocol": "proposal.create"
+      "protocol": "proposal.create",
+      "capability": "提案办理"
     },
     {
       "name": "dummy.proposal-commit",
@@ -701,7 +707,8 @@
         "prepare": false,
         "commit": true
       },
-      "protocol": "proposal.commit"
+      "protocol": "proposal.commit",
+      "capability": "提案办理"
     },
     {
       "name": "ballot.query",
@@ -734,7 +741,8 @@
         "prepare": true,
         "commit": true
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "投票办理"
     },
     {
       "name": "ballot.scratch",
@@ -767,7 +775,8 @@
         "prepare": true,
         "commit": false
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "投票计算"
     },
     {
       "name": "ballot.prepare",
@@ -815,7 +824,8 @@
         "prepare": true,
         "commit": false
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "投票办理"
     },
     {
       "name": "ballot.commit",
@@ -862,7 +872,8 @@
         "prepare": false,
         "commit": true
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "投票办理"
     },
     {
       "name": "ballot.proposal",
@@ -897,7 +908,8 @@
         "prepare": true,
         "commit": false
       },
-      "protocol": "proposal.create"
+      "protocol": "proposal.create",
+      "capability": "投票提案"
     },
     {
       "name": "ballot.proposal-commit",
@@ -925,7 +937,8 @@
         "prepare": false,
         "commit": true
       },
-      "protocol": "proposal.commit"
+      "protocol": "proposal.commit",
+      "capability": "投票提案"
     }
   ]
 }
