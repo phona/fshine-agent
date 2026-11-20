@@ -213,6 +213,13 @@ export interface VisibleText {
   turnIndex?: number;
   /** push 的投递记账归属任务（按 task_result_delivery_sent 补填；判定"迟到投递"要靠它）。 */
   taskId?: string;
+  /**
+   * 可选的用户可见渠道名：给泄漏扫描的 `where` 用，用来区分同一回合里多次独立回执。
+   * 幂等场景的第二次回执（duplicate.secondReply）标 `幂等第二次回执`，确保它和第一次回执
+   * 各自作为独立条目进入扫描面——两次文本不同时（sameText=false）也不会漏掉第二次。
+   * 不填则沿用既有「回合回复/主动投递#N」标签，判据强度不变。
+   */
+  channel?: string;
 }
 
 export interface BaseEvidence {
@@ -1346,11 +1353,18 @@ export interface LeakReport {
  *   · 宿主通知面（notificationSink 捕获的 Notification，经 renderNotification 还原用户语言）。
  * 文件投递（sendToConversation）当前夹具只投 `(files:N)` 计数占位、没有 caption 文本——
  * 渠道缺口在 notes 里如实登记，不拿空数组冒充扫过。
+ *
+ * 记录项（不改语义）：notifications 扫描面当前把 `notification_push_skipped`（kind 不在
+ * PUSHED_NOTIFICATION_KINDS、本 sink 未投递；见 apps/server/notification-chat-sink.ts）的
+ * Notification 也一并渲染进扫描。这类文案实际没到用户面，存在把它计为泄漏的风险。
+ * 这里如实登记该口径、不改成「只看已投递」——是否收窄由用户级 eval / owner 裁定。
  */
 export function scanScenarioLeaks(evidence: BaseEvidence, notifications: readonly Notification[]): LeakReport {
   const texts: Array<{ where: string; text: string }> = [];
   evidence.visible.forEach((entry, index) => {
-    texts.push({ where: `${entry.source === 'turn' ? '回合回复' : '主动投递'}#${index + 1}${entry.turnIndex === undefined ? '' : `(回合${entry.turnIndex})`}`, text: entry.text });
+    const where = entry.channel
+      ?? `${entry.source === 'turn' ? '回合回复' : '主动投递'}#${index + 1}${entry.turnIndex === undefined ? '' : `(回合${entry.turnIndex})`}`;
+    texts.push({ where, text: entry.text });
   });
   notifications.forEach((notification, index) => {
     try {
@@ -1367,7 +1381,10 @@ export function scanScenarioLeaks(evidence: BaseEvidence, notifications: readonl
     hitCount: hits.length,
     hits,
     channels: ['回合回复(Main)', '宿主主动投递文字(push_text)', '宿主通知面(renderNotification)'],
-    notes: ['文件投递渠道：本夹具 sendToConversation 只投 (files:N) 计数占位、无文件说明/caption 文本，故无 caption 可扫。'],
+    notes: [
+      '文件投递渠道：本夹具 sendToConversation 只投 (files:N) 计数占位、无文件说明/caption 文本，故无 caption 可扫。',
+      '记录项：通知扫描面含 notification_push_skipped（未投递）的渲染文本，可能把未到用户面的文案计为泄漏；此处如实登记，不收窄为「只看已投递」。',
+    ],
   };
 }
 
@@ -1579,6 +1596,9 @@ async function runIdempotencyScenario(harness: Harness, options: ScenarioRunOpti
   const [first, second] = await Promise.all([firstPending, secondPending]);
   harness.turns.push({ index: 1, userText: `${USER_TURN_1}（同 messageId 并发重发一次）`, reply: first.reply, durationMs: first.elapsedMs });
   harness.visible.push({ at: new Date().toISOString(), source: 'turn', text: first.reply, turnIndex: 1 });
+  // 幂等第二次回执也进用户可见面：两次回执各自独立扫描（channel 名区分），
+  // 否则 sameText=false（第二次文本不同）时第二次回执的内部词会从扫描面漏掉。
+  harness.visible.push({ at: new Date().toISOString(), source: 'turn', text: second.reply, turnIndex: 1, channel: '幂等第二次回执' });
   const events = harness.logs
     .filter((line) => line['event'] === 'message_duplicate_replayed' || line['event'] === 'message_still_processing')
     .map((line) => String(line['event']));

@@ -774,7 +774,12 @@ export function scanWriteLoopLeaks(evidence: WriteLoopEvidence, notifications: r
     hitCount: hits.length,
     hits,
     channels: ['回合回复(Main)', '宿主主动投递文字(push_text)', '宿主通知面(renderNotification)', '唤醒出口正文'],
-    notes: ['文件投递渠道：本夹具 sendToConversation 只投 (files:N) 计数占位、无文件说明/caption 文本，故无 caption 可扫。'],
+    notes: [
+      '文件投递渠道：本夹具 sendToConversation 只投 (files:N) 计数占位、无文件说明/caption 文本，故无 caption 可扫。',
+      // 记录项（不改语义）：通知扫描面含 notification_push_skipped（未投递）的渲染文本，
+      // 这类文案没到用户面，存在被计为泄漏的风险；如实登记，不改成「只看已投递」。
+      '记录项：通知扫描面含 notification_push_skipped（未投递）的渲染文本，可能把未到用户面的文案计为泄漏；此处如实登记，不收窄为「只看已投递」。',
+    ],
   };
 }
 

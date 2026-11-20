@@ -5,15 +5,20 @@
  *   ① 匹配器单测：正常文本零命中；「执行层确认过了。」命中 marker 执行层；反向绊线直接可验
  *      （改词表 / 改 findLiteralHits / 改 excerpt 半径，本组用例即红）。
  *   ② 静态守卫：一份**显式文件清单**（write-loop / write-loop-scenarios / convergence-r1 runner
- *      + live-replay）逐个断言文件里确实调用了扫描；并用 glob 枚举
- *      `scripts/eval/real/write-loop*.ts` 与 `scripts/eval/convergence-r1/runner.ts`，断言这些文件
- *      都在清单里——新增批次忘了接入会红，删掉调用也会红。
+ *      + live-replay）逐个用 **TypeScript AST** 断言文件里确实存在对扫描函数的 CallExpression；
+ *      并用 glob 枚举 `scripts/eval/real/write-loop*.ts` 与 `scripts/eval/convergence-r1/runner.ts`，
+ *      断言这些文件都在清单里——新增批次忘了接入会红，删掉调用也会红。
+ *
+ * 「真解析」而非文本包含：用 typescript 自带 createSourceFile 解析源码（不落盘、不 emit），
+ * 遍历 AST 找 CallExpression，被调函数名（Identifier.text）等于清单里的扫描函数名才算接入。
+ * 注释掉的代码不会成为 AST 节点——所以**注释即红、删除即红**，不会因注释里还留着文本而假绿。
  *
  * 亲跑验证（红→绿）：临时注释掉某入口的扫描调用，静态守卫必红；恢复即绿。读数见交付报告。
  */
 import { globSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { findLiteralHits, INTERNAL_WORDS, scanUserVisibleText } from './internal-terms';
 
@@ -21,6 +26,27 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 
 function repo(relative: string): string {
   return path.join(REPO_ROOT, relative);
+}
+
+/**
+ * 解析源码，判断是否存在一次「被调函数名（标识符）等于 scanFunction」的 CallExpression。
+ * 只用 typescript 自带的解析器，不落盘、不 emit；注释/字符串里的文本不会成为节点。
+ * requiredArg 非空时，还要求该调用的某个实参是同名标识符（保住 live-replay 词表面判据强度：
+ * 必须真的把 INTERNAL_WORDS 传给 findLiteralHits，而不是随便一次 findLiteralHits 调用）。
+ */
+function hasScanCall(fileName: string, source: string, scanFunction: string, requiredArg?: string): boolean {
+  const sourceFile = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === scanFunction) {
+      if (requiredArg === undefined || node.arguments.some((arg) => ts.isIdentifier(arg) && arg.text === requiredArg)) {
+        found = true;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
 }
 
 // ---------------------------------------------------------------------------
@@ -74,24 +100,31 @@ describe('内部词匹配器', () => {
 
 /**
  * 显式维护的文件清单（单一来源）。
- *   · 三个用户级批次入口 + live-replay：expectScan=true，必须出现扫描调用标记；
+ *   · 三个用户级批次入口 + live-replay：expectScan=true，fn 是必须真实调用的扫描函数名；
  *   · glob `write-loop*.ts` 还会匹配到 2 个 *.test.ts（绊线测试，不是批次入口）：登记进清单
  *     保证「glob 枚举的文件都在清单里」成立，但它们本身不产出用户可见面，expectScan=false。
  */
-const WIRING: ReadonlyArray<{ file: string; marker: string; expectScan: boolean; why: string }> = [
-  { file: 'scripts/eval/real/write-loop.ts', marker: 'const leak = scanWriteLoopLeaks', expectScan: true, why: 'write-loop 用户级批次入口' },
-  { file: 'scripts/eval/real/write-loop-scenarios.ts', marker: 'const leak = scanScenarioLeaks', expectScan: true, why: 'write-loop-scenarios 用户级批次入口' },
-  { file: 'scripts/eval/convergence-r1/runner.ts', marker: 'const leak = scanTrialLeaks', expectScan: true, why: 'convergence-r1 runner 用户级批次入口' },
-  { file: 'scripts/eval/real/live-replay.ts', marker: 'findLiteralHits(input.visible, INTERNAL_WORDS)', expectScan: true, why: 'live-replay 既有内部词断言（词表单一来源）' },
-  { file: 'scripts/eval/real/write-loop.test.ts', marker: '', expectScan: false, why: 'write-loop 绊线测试（非批次入口，glob 命中）' },
-  { file: 'scripts/eval/real/write-loop-scenarios.test.ts', marker: '', expectScan: false, why: 'write-loop-scenarios 绊线测试（非批次入口，glob 命中）' },
+const WIRING: ReadonlyArray<{
+  file: string;
+  fn: string;
+  requiredArg?: string;
+  expectScan: boolean;
+  why: string;
+}> = [
+  { file: 'scripts/eval/real/write-loop.ts', fn: 'scanWriteLoopLeaks', expectScan: true, why: 'write-loop 用户级批次入口' },
+  { file: 'scripts/eval/real/write-loop-scenarios.ts', fn: 'scanScenarioLeaks', expectScan: true, why: 'write-loop-scenarios 用户级批次入口' },
+  { file: 'scripts/eval/convergence-r1/runner.ts', fn: 'scanTrialLeaks', expectScan: true, why: 'convergence-r1 runner 用户级批次入口' },
+  { file: 'scripts/eval/real/live-replay.ts', fn: 'findLiteralHits', requiredArg: 'INTERNAL_WORDS', expectScan: true, why: 'live-replay 既有内部词断言（词表单一来源）' },
+  { file: 'scripts/eval/real/write-loop.test.ts', fn: '', expectScan: false, why: 'write-loop 绊线测试（非批次入口，glob 命中）' },
+  { file: 'scripts/eval/real/write-loop-scenarios.test.ts', fn: '', expectScan: false, why: 'write-loop-scenarios 绊线测试（非批次入口，glob 命中）' },
 ];
 
 describe('静态守卫：所有用户级批次都接入了扫描', () => {
-  it('显式清单里的每个批次入口都确实调用了扫描（删调用即红）', () => {
+  it('显式清单里的每个批次入口都真实调用了扫描函数（AST：注释/删行即红）', () => {
     for (const entry of WIRING.filter((entry) => entry.expectScan)) {
       const source = readFileSync(repo(entry.file), 'utf8');
-      expect(source, `${entry.file}（${entry.why}）未出现扫描调用标记 ${entry.marker}`).toContain(entry.marker);
+      const called = hasScanCall(entry.file, source, entry.fn, entry.requiredArg);
+      expect(called, `${entry.file}（${entry.why}）的 AST 中未找到 ${entry.fn}(${entry.requiredArg ?? ''}) 调用——注释或删除即红`).toBe(true);
     }
   });
 
