@@ -167,8 +167,16 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
       }, 10_000);
       // 群里也发（owner 2026-11-19 #9 迁移；旧口径「群聊零主动提醒」已作废）：
       // 群 = 独立主体，群里的任务就是这个群的事；话术走隐私口径 = **不带业务名**。
-      await group.waitFor('W-43 群聊也有久无动静提醒', () => group.sdk.proactiveTexts.length >= 1, 10_000);
-      const groupNotice = group.sdk.proactiveTexts[0]!;
+      //
+      // 等「目标文本」本身出现，不是等「任意主动文本出现」再取 [0]：群里的长任务跑完
+      // 也会主动投递（"导出完成…"），与久无动静提醒是两种合法来源，谁先到不确定——
+      // 按内容筛出提醒再断言，不依赖 proactiveTexts 的数组顺序（排序竞态）。
+      const NOTICE_MARK = '比预计久';
+      const groupNoticesOf = () => group.sdk.proactiveTexts.filter((entry) => entry.content.includes(NOTICE_MARK));
+      await group.waitFor('W-43 群聊也有久无动静提醒', () => groupNoticesOf().length >= 1, 10_000);
+      const groupNotices = groupNoticesOf();
+      expect(groupNotices).toHaveLength(1);
+      const groupNotice = groupNotices[0]!;
       expect(groupNotice.chatId).toBe('group-w');
       expect(groupNotice.content).toBe(longRunningWakeLine(undefined));
       expect(groupNotice.content).toContain('比预计久');
