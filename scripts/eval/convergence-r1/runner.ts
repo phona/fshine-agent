@@ -36,6 +36,7 @@ import type { AuditIndexTurn, MetaTurn, ToolCallRecord } from './evidence';
 import { sha256Hex, stableStringify } from './hash';
 import { runJudgeSelftest } from './selftest';
 import { genericResolveCaseIds, loadSuite, type EvalSuite } from '../exploration/suite-contract';
+import { scanUserVisibleText } from '../shared/internal-terms';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
@@ -348,6 +349,44 @@ interface TrialOptions {
   frozen: FrozenRun;
 }
 
+/** 用户级批次的独立失败码：用户可见文本里出现内部词（不进 judge 的 criteria 打分）。 */
+export const LEAK_FAILURE_CODE = 'LEAK_INTERNAL_TERM';
+
+export interface TrialLeakReport {
+  caseId: string;
+  trial: number;
+  failureCodes: string[];
+  hitCount: number;
+  hits: Array<{ where: string; marker: string; excerpt: string }>;
+  channels: string[];
+  notes: string[];
+}
+
+/**
+ * 扫描一条 trial 的用户可见回复（Main 每轮 reply = reply.jsonl）。
+ * 本入口走 ask 同源 sync 装配，没有 fileDelivery / notificationSink（无主动投递、无通知渲染、
+ * 无文件 caption 渠道）——用户可见面就是每轮回复，渠道缺口在 notes 里如实登记。
+ * 命中记独立失败码 LEAK_INTERNAL_TERM，**不写进 judge 的 dimensions / failureCodes / verdict**。
+ */
+export function scanTrialLeaks(
+  caseId: string,
+  trial: number,
+  replies: readonly { turn: number; text: string }[],
+): TrialLeakReport {
+  const { hits } = scanUserVisibleText(replies.map((reply) => ({ where: `turn-${reply.turn} 回复`, text: reply.text })));
+  return {
+    caseId,
+    trial,
+    failureCodes: hits.length > 0 ? [LEAK_FAILURE_CODE] : [],
+    hitCount: hits.length,
+    hits,
+    channels: ['回合回复(Main, reply.jsonl)'],
+    notes: [
+      '本入口走 ask 同源 sync 装配：无 fileDelivery/notificationSink，故无宿主主动投递、通知渲染或文件 caption 渠道可扫；用户可见面即每轮回复。',
+    ],
+  };
+}
+
 async function runTrial(options: TrialOptions): Promise<void> {
   const { caseDef, trial, trialDir, runId, frozen } = options;
   rmSync(trialDir, { recursive: true, force: true });
@@ -541,6 +580,15 @@ async function runTrial(options: TrialOptions): Promise<void> {
     casesSha256: frozen.casesSha256,
   });
   writeFileSync(path.join(trialDir, 'judgment.json'), JSON.stringify(judgment, null, 2) + '\n');
+
+  // 用户可见文本内部词泄漏：独立于 judge。扫描每轮 reply，记独立失败码 LEAK_INTERNAL_TERM，
+  // 落 trial 的 leak.json；judge 的 dimensions / failureCodes / verdict / 哈希均不被改写。
+  const leak = scanTrialLeaks(caseDef.id, trial, replies);
+  writeFileSync(path.join(trialDir, 'leak.json'), JSON.stringify(leak, null, 2) + '\n');
+  if (leak.hitCount > 0) {
+    console.log(`[leak] ${caseDef.id} trial-${trial}: ${LEAK_FAILURE_CODE} 命中 ${leak.hitCount} 处`
+      + `（where/marker/excerpt 见 ${path.relative(REPO_ROOT, path.join(trialDir, 'leak.json'))}）`);
+  }
 }
 
 function safeParse(line: string): Record<string, unknown> | undefined {
@@ -570,7 +618,20 @@ interface RunTrialResult {
   caseId: string;
   trial: number;
   judgment: Judgment;
+  /** 独立的泄漏扫描报告（不写进 judge 的 criteria 打分）。 */
+  leak?: TrialLeakReport;
   infraError?: string;
+}
+
+/** 读 trial 的独立泄漏报告（旧 run / 中断缺文件时返回 undefined，不伪造命中）。 */
+function readTrialLeak(trialDir: string, caseId: string, trial: number): TrialLeakReport | undefined {
+  const file = path.join(trialDir, 'leak.json');
+  if (!existsSync(file)) return undefined;
+  try {
+    return JSON.parse(readFileSync(file, 'utf8')) as TrialLeakReport;
+  } catch {
+    return { caseId, trial, failureCodes: [], hitCount: 0, hits: [], channels: [], notes: [`leak.json 不可解析（${file}）——如实登记，不冒充扫过。`] };
+  }
 }
 
 function trialDirOf(outDir: string, caseId: string, trial: number): string {
@@ -667,8 +728,10 @@ async function main(): Promise<void> {
       try {
         await runTrial({ caseDef, trial, trialDir, runId, frozen });
         const judgment = JSON.parse(readFileSync(path.join(trialDir, 'judgment.json'), 'utf8')) as Judgment;
-        slots[index] = { caseId: caseDef.id, trial, judgment };
-        console.log(`[judge] ${caseDef.id} trial-${trial}: ${judgment.deterministic.verdict}${judgment.deterministic.failureCodes.length > 0 ? ` (${judgment.deterministic.failureCodes.join(', ')})` : ''}`);
+        const leak = readTrialLeak(trialDir, caseDef.id, trial);
+        slots[index] = { caseId: caseDef.id, trial, judgment, ...(leak === undefined ? {} : { leak }) };
+        console.log(`[judge] ${caseDef.id} trial-${trial}: ${judgment.deterministic.verdict}${judgment.deterministic.failureCodes.length > 0 ? ` (${judgment.deterministic.failureCodes.join(', ')})` : ''}`
+          + ` [leak] ${leak === undefined ? '未扫描(登记缺口)' : `${LEAK_FAILURE_CODE}=${leak.hitCount}`}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         console.error(`[run] ${caseDef.id} trial-${trial} 失败：${message}`);
@@ -783,15 +846,18 @@ interface SummaryInput {
 
 function writeSummaryAndReport(input: SummaryInput): number {
   const { outDir, results } = input;
-  const verdicts: Record<string, Record<string, { verdict: string; failureCodes: string[] }>> = {};
+  const verdicts: Record<string, Record<string, { verdict: string; failureCodes: string[]; leakFailureCodes: string[] }>> = {};
   const counts = { PASS: 0, FAIL: 0, INCONCLUSIVE: 0 };
   const codeHistogram: Record<string, number> = {};
   const dimensionHistogram: Record<string, Record<string, number>> = {};
+  // 泄漏独立汇总：不进 judge 的 counts / codeHistogram / dimensions。
+  const leakFailures: Array<{ caseId: string; trial: number; failureCodes: string[]; hits: Array<{ where: string; marker: string; excerpt: string }> }> = [];
   for (const result of results) {
     verdicts[result.caseId] ??= {};
     verdicts[result.caseId]![`trial-${result.trial}`] = {
       verdict: result.judgment.deterministic.verdict,
       failureCodes: result.judgment.deterministic.failureCodes,
+      leakFailureCodes: result.leak?.failureCodes ?? [],
     };
     counts[result.judgment.deterministic.verdict] += 1;
     for (const code of result.judgment.deterministic.failureCodes) codeHistogram[code] = (codeHistogram[code] ?? 0) + 1;
@@ -799,7 +865,12 @@ function writeSummaryAndReport(input: SummaryInput): number {
       dimensionHistogram[dim] ??= {};
       dimensionHistogram[dim]![state.status] = (dimensionHistogram[dim]![state.status] ?? 0) + 1;
     }
+    if (result.leak !== undefined && result.leak.hitCount > 0) {
+      // 只进独立 leak 栏；不写 codeHistogram（那是 judge 的 failureCode 汇总，保持分离）。
+      leakFailures.push({ caseId: result.caseId, trial: result.trial, failureCodes: result.leak.failureCodes, hits: result.leak.hits });
+    }
   }
+  const leakHitTotal = leakFailures.reduce((sum, entry) => sum + entry.hits.length, 0);
   const summary = {
     runId: input.runId,
     generatedAt: new Date().toISOString(),
@@ -810,6 +881,8 @@ function writeSummaryAndReport(input: SummaryInput): number {
     counts,
     failureCodeHistogram: codeHistogram,
     dimensionHistogram,
+    /** 独立泄漏栏（与 judge 打分分离）：命中即机械失败。 */
+    leak: { hitCount: leakHitTotal, failures: leakFailures },
     trialsPlanned: input.trials,
     samples: results.length,
     ...(input.suiteId !== undefined ? { suite: { id: input.suiteId, casesCount: input.selected.length } } : {}),
@@ -861,13 +934,29 @@ function writeSummaryAndReport(input: SummaryInput): number {
       lines.push(reply.text);
       lines.push('```');
     }
+    const trialLeak = result.leak;
+    lines.push(`- 内部词泄漏（独立守卫）：命中=${trialLeak?.hitCount ?? '未扫描'}`
+      + `${trialLeak && trialLeak.hitCount > 0 ? ` → ${trialLeak.failureCodes.join(',')}` : ''}`);
+    if (trialLeak !== undefined) {
+      for (const note of trialLeak.notes) lines.push(`  - 注：${note}`);
+      for (const hit of trialLeak.hits) lines.push(`  - 命中@${hit.where} 「${hit.marker}」：${hit.excerpt}`);
+    }
     lines.push(`- 证据目录：\`${path.relative(REPO_ROOT, trialDir)}\``);
     lines.push('');
   }
+  // 报告顶层 leak 小节：命中数 + where + marker（judge 判据不受影响）。
+  lines.push('## 内部词泄漏（独立机械守卫，不进 judge 打分）', '');
+  lines.push(`- 命中总数：${leakHitTotal}；失败 trial 数：${leakFailures.length}`);
+  for (const failure of leakFailures) {
+    for (const hit of failure.hits) {
+      lines.push(`- ${failure.caseId} trial-${failure.trial} ${failure.failureCodes.join(',')}@${hit.where} 「${hit.marker}」：${hit.excerpt}`);
+    }
+  }
+  lines.push('');
   writeFileSync(path.join(outDir, 'report.md'), lines.join('\n') + '\n');
 
   if (counts.INCONCLUSIVE > 0 || results.some((result) => result.infraError !== undefined)) return 2;
-  if (counts.FAIL > 0) return 1;
+  if (counts.FAIL > 0 || leakFailures.length > 0) return 1;
   return 0;
 }
 
@@ -942,7 +1031,8 @@ function runJudgeExisting(runDir: string): number {
       } else {
         writeFileSync(existingPath, JSON.stringify(judgment, null, 2) + '\n');
       }
-      results.push({ caseId, trial, judgment });
+      const leak = readTrialLeak(trialDir, caseId, trial);
+      results.push({ caseId, trial, judgment, ...(leak === undefined ? {} : { leak }) });
     }
   }
   const exitCode = writeSummaryAndReport({

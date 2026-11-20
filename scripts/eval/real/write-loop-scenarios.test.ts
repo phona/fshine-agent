@@ -31,6 +31,7 @@ import {
   readAuditFacts,
   readConfirmationLedger,
   readJobFacts,
+  scanScenarioLeaks,
   successMarkersIn,
   writeCallsOn,
   type FailureEvidence,
@@ -615,6 +616,42 @@ describe('idempotency：正例全绿 + 逐条反向破坏必红', () => {
     const empty = greenIdempotency();
     empty.duplicate = { ...empty.duplicate, secondReply: ' ', sameText: false };
     expect(statusOf(evaluateIdempotencyCriteria(empty), 'S3-C4')).toBe('fail');
+  });
+
+  it('内部词泄漏：幂等第二次回执（与第一次文本不同）也进扫描面 —— 第二次含内部词即报', () => {
+    // 覆盖：两次文本不同（sameText=false）时，只扫第一次会漏——这里构造第二次回执进 visible，
+    // 断言 scanScenarioLeaks 报出命中，且 where 标成「幂等第二次回执」可区分。
+    const dirty = greenIdempotency();
+    dirty.duplicate = { ...dirty.duplicate, secondReply: '执行层确认过了。', sameText: false };
+    dirty.visible = [
+      { at: AT, source: 'turn', text: dirty.duplicate.firstReply, turnIndex: 1 },
+      { at: AT, source: 'turn', text: dirty.duplicate.secondReply, turnIndex: 1, channel: '幂等第二次回执' },
+    ];
+    const leak = scanScenarioLeaks(dirty, []);
+    expect(leak.hitCount).toBeGreaterThanOrEqual(1);
+    expect(leak.hits.some((hit) => hit.where === '幂等第二次回执' && hit.marker === '执行层')).toBe(true);
+  });
+
+  it('内部词泄漏：第一次回执脏、第二次干净 —— 扫描照常报出第一次（不因加第二次而漏第一次）', () => {
+    const dirtyFirst = greenIdempotency();
+    dirtyFirst.duplicate = { ...dirtyFirst.duplicate, firstReply: '执行层确认过了。', secondReply: '已受理。', sameText: false };
+    dirtyFirst.visible = [
+      { at: AT, source: 'turn', text: dirtyFirst.duplicate.firstReply, turnIndex: 1 },
+      { at: AT, source: 'turn', text: dirtyFirst.duplicate.secondReply, turnIndex: 1, channel: '幂等第二次回执' },
+    ];
+    const leak = scanScenarioLeaks(dirtyFirst, []);
+    expect(leak.hits.some((hit) => hit.marker === '执行层')).toBe(true);
+    // 第二次回执（干净）本身不应命中内部词。
+    expect(leak.hits.some((hit) => hit.where === '幂等第二次回执')).toBe(false);
+  });
+
+  it('内部词泄漏：两次回执都干净时零命中（正例不假红）', () => {
+    const clean = greenIdempotency();
+    clean.visible = [
+      { at: AT, source: 'turn', text: clean.duplicate.firstReply, turnIndex: 1 },
+      { at: AT, source: 'turn', text: '已受理：还在办。', turnIndex: 1, channel: '幂等第二次回执' },
+    ];
+    expect(scanScenarioLeaks(clean, []).hits).toEqual([]);
   });
 });
 

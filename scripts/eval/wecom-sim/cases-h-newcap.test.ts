@@ -156,7 +156,13 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
     try {
       const taskText = '群里跑一个三秒的长任务';
       group.book.mainTurn(taskText, [toolCallAssistant('task_run', { task: taskText }), relayWhatever]);
-      group.book.workerTask(taskText, longTaskWorkerResponses(1));
+      // 任务时长必须**显著长于扫描节流窗**（缺省 1000ms）：runner 的到点扫描与等待扫描共用
+      // 同一节拍；本趟扫描之后才被认领的任务，下一次扫描落在「本趟 + 节流窗」（task-runner
+      // 的 reasscan），200ms 阈值只有到那一次扫描（约 1s 后）才被看到。任务若在 1s 前结束，
+      // 扫描时它已不是 running → 这档不发（产品语义：结束的任务由完成投递覆盖）。
+      // 用 1s 任务会让"发不发"取决于它与扫描节拍的毫秒级先后（实测 3/6 与 5/10 抖动）；
+      // 3s 任务让扫描必然在任务在飞时命中，判据与断言强度不变。
+      group.book.workerTask(taskText, longTaskWorkerResponses(3));
       const messageId = group.sendText(taskText, { chatType: 'group' });
       // 任务确实在群里跑起来了（不是「没开通所以安静」冒充）。
       await group.waitFor('W-43 群聊回合终态', () => group.doneOf(messageId) !== undefined, 10_000);
