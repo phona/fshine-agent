@@ -119,7 +119,7 @@
 | 用户级黑盒评测（E01–E15 共 15 例：编造/假成功/无谓追问判负；真模型跑批在 CI/预注册入口，判据与报告有守卫） | `scripts/eval/user-eval-comment.test.ts:全部用例按 CASE_IDS 顺序出现在表里` | 已实现（有守卫） |
 | 真模型写闭环验收（`npm run eval:write-loop`：九条机械判据，缺模型配置如实失败） | `scripts/eval/real/write-loop.test.ts:九条判据全 pass` | 已实现（有守卫） |
 | 覆盖矩阵守卫：矩阵每条引用唯一命中现存用例（用户级能力台账不漂移） | `scripts/coverage-matrix-guard.test.ts:逐条引用都能唯一定位到现存用例` | 已实现（有守卫） |
-| 单实例纪律与双实例行为 | 机械守卫已落地（2026-11-19 起）：启动时取独占锁、存活实例在则打印可操作话术并 exit(1)，陈旧锁可覆盖；取锁先于连接渠道 | 已实现（有守卫）：`apps/server/main.ts:53`（`guardSingleInstance`）、`apps/server/instance-guard.test.ts`（5 条，含取锁失败话术可操作） |
+| 单实例纪律与双实例行为 | `apps/server/instance-guard.test.ts:② 锁被另一个存活且命令行匹配的 pid 占用 → 取锁失败，话术可操作（含 kill pid）` | 已实现（有守卫） |
 
 ## 二、预期行为（交互契约浓缩）
 
@@ -176,7 +176,8 @@ detail 在 `docs/product/interaction-contract.md`（五条尺子逐条现状）�
 | 10 | 真实执行层（17dz）只读冒烟与真实写 | 只读=仅准备档待 owner 授权；写未验（`docs/product/real-read-readiness.md`；`docs/ops/real-write-loop.md` §6） |
 | 11 | P8 ops 扩展 | 「数字 ID→执行树/资源/通知投递」未获授权、未实施（debt #71） |
 | 12 | executions 时间列 / tasks CLI 增强 | 未清（debt #69、#70） |
-| 13 | 文件去重边界 F-1/F-2/F-3 | pending 不去重、入站复用无来源判据、同消息同名塌缩——登记不修，产品语义待裁（`docs/decisions/debt.md` §六） |
+| 13 | 文件去重边界 F-2/F-3 | 入站复用无来源判据、同消息同名塌缩——登记不修，产品语义待裁（`docs/decisions/debt.md` §六；F-1 pending 复用已于 2026-11-18 清账） |
+| 14 | 双实例共享 `.runtime/state.db` 的并发写语义 | 启动锁把第二个实例挡在连接渠道之前（`apps/server/main.ts:53`），锁失效/被绕开时的并发写未定义、未测（登记 2026-11-20：文档面复核发现原「无进程锁/仅靠操作纪律」陈述已过期） |
 
 ## 五、指针
 
