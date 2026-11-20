@@ -40,12 +40,21 @@ export interface TaskResultDeliveryPort {
   sendText?(route: ChannelRoute, text: string): Promise<DeliveryReceipt>;
 }
 
+/**
+ * 投递归属的事实种类（2026-11-21 对话形态断言层 ② 的前提）：投递记账行
+ * （task_result_delivery_sent/failed/suppressed）带上「这是哪个任务的哪类事实」，
+ * eval 侧据此判「同一事实投递两次」。缺省 = 调用方不知道（字段缺省，不猜）。
+ */
+export type TaskResultFactKind = 'completed' | 'failed' | 'cancelled' | 'waiting_user' | 'warning';
+
 /** 一次后台任务完成的事实（来自执行端确认的回合结局；resultText 逐字未清理）。 */
 export interface TaskCompletionFact {
   taskId: string;
   principalId: string;
   sessionId: string;
   resultText: string;
+  /** 投递归属（进 task_result_delivery_* 记账行；缺省 = 不带，不猜）。 */
+  factKind?: TaskResultFactKind;
 }
 
 /**
@@ -72,6 +81,8 @@ export interface TaskFailureFact {
   reason?: string;
   /** 业务名（只给资源受限那句带上「是哪件事」；其余话术不带名字）。 */
   name?: string;
+  /** 投递归属（进 task_result_delivery_* 记账行；缺省 = 不带，不猜）。 */
+  factKind?: TaskResultFactKind;
 }
 
 export interface TaskResultDeliveryOptions {
@@ -135,10 +146,12 @@ export function taskCompletionFallbackText(input: { name?: string; resultText: s
 /**
  * 单次文本投递的核心（完成/失败共用同一套四必守：live 才发、送达才记 sent、失败记
  * failed 不记 sent、剥空不投）。事件名统一 `task_result_delivery_*`（taskId 可区分场景）。
+ * 投递归属（factKind）随已知带进三类记账行（sent/failed/suppressed 同字段；2026-11-21
+ * 对话形态断言层 ② 的前提——只加字段，不改文案与投递语义）。
  * 返回是否真的发起了投递（测试断言用；生产调用方不依赖返回值）。
  */
 async function deliverText(
-  fact: { taskId: string; principalId: string; sessionId: string },
+  fact: { taskId: string; principalId: string; sessionId: string; factKind?: TaskResultFactKind },
   text: string,
   options: TaskResultDeliveryOptions,
 ): Promise<boolean> {
@@ -146,6 +159,7 @@ async function deliverText(
     principalId: fact.principalId,
     sessionId: fact.sessionId,
     taskId: fact.taskId,
+    ...(fact.factKind === undefined ? {} : { factKind: fact.factKind }),
   };
   const delivery = options.delivery;
   if (delivery === undefined || delivery.deliveryMode !== 'live' || typeof delivery.sendText !== 'function') {

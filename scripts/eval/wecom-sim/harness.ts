@@ -26,10 +26,20 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { afterEach } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AppConfig } from '@fshine/contracts';
+import { openTaskStore } from '@fshine/core';
 import { WecomBotChannel, type SdkClientLike } from '@fshine/channel-wecom';
 import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
+import {
+  checkConversationStreams,
+  createDeliveryProvenanceAttributor,
+  formatShapeViolations,
+  type ConversationEvent,
+  type ConversationStreamResult,
+  type DeliveryProvenanceTarget,
+} from '../shared/conversation-shape';
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import { EXECUTE_OPERATION_TOOL } from '../../../packages/agent/src/execution-runtime';
 import { withInternalExecTool } from '../../../packages/agent/testing/internal-exec-fixture';
@@ -48,6 +58,39 @@ const DEFAULT_CONVERSATION_ID = 'conv-w';
 export const NUDGE_AFTER_MS = 30_000;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 对话形态自动守卫（要求 D，2026-11-21）：每个用例结束时，对**每个**启动过的夹具跑一遍
+// 四条对话形态规则（scripts/eval/shared/conversation-shape.ts 单源实现；不复制）。
+//   · inbound = 夹具的发帧记录（sendText/sendFile）；
+//   · reply   = adapter 的 replyStream 终帧（finish=true 且未被拒收；reqId → 消息锚点）；
+//   · delivery = 主动推送（proactiveTexts）+ 宿主 sent 记账行的归属补填（factKind）。
+// 违规即该用例失败（afterEach 抛错，打印违规 code 与上下文）。负例控制用例用
+// disarmShapeGuard() 解除自动守卫、在用例体内自行断言违规存在。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 一次待检的夹具快照（close 时装配，afterEach 统一判）。 */
+interface PendingShapeCheck {
+  readonly label: string;
+  readonly results: readonly ConversationStreamResult[];
+}
+
+const pendingShapeChecks: PendingShapeCheck[] = [];
+
+afterEach(() => {
+  if (pendingShapeChecks.length === 0) return;
+  const pending = pendingShapeChecks.splice(0, pendingShapeChecks.length);
+  const failures: string[] = [];
+  for (const snapshot of pending) {
+    for (const result of snapshot.results) {
+      if (result.violations.length === 0) continue;
+      failures.push(`[sim ${snapshot.label} · 会话 ${result.conversationId}]\n${formatShapeViolations(result.violations)}`);
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`对话形态断言违规（wecom-sim 每用例守卫）：\n${failures.join('\n')}`);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 假企微 SDK：实现适配器用到的全部出站/下载面，只记录不触网
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -58,6 +101,8 @@ export interface BubbleRecord {
   readonly streamId: string;
   readonly content: string;
   readonly finish: boolean;
+  /** 记录时刻（毫秒；对话形态 ④ 的时序判据用——只要求单调可比，不依赖绝对值）。 */
+  readonly at: number;
   /** L1 通道语义（要求 C）：本帧被假 SDK 拒收（回复上下文过期）= 未送达用户。 */
   readonly rejected?: boolean;
 }
@@ -67,6 +112,8 @@ export interface ProactiveTextRecord {
   readonly kind: 'sendMessage';
   readonly chatId: string;
   readonly content: string;
+  /** 记录时刻（毫秒；对话形态判据用）。 */
+  readonly at: number;
 }
 
 /** 媒体回传/主动投递（文件与图片）。 */
@@ -151,6 +198,7 @@ export class FakeWecomSdk implements SdkClientLike {
       streamId,
       content,
       finish,
+      at: Date.now(),
       ...(rejected ? { rejected: true } : {}),
     });
     if (rejected) {
@@ -160,7 +208,7 @@ export class FakeWecomSdk implements SdkClientLike {
   }
 
   sendMessage(chatid: string, body: { msgtype: 'markdown'; markdown: { content: string } }): Promise<unknown> {
-    this.proactiveTexts.push({ kind: 'sendMessage', chatId: chatid, content: body.markdown.content });
+    this.proactiveTexts.push({ kind: 'sendMessage', chatId: chatid, content: body.markdown.content, at: Date.now() });
     return Promise.resolve({});
   }
 
@@ -287,14 +335,17 @@ export class SimScriptBook {
     const text = lastUserTextOf(messages);
     // 完成唤醒回合（宿主完成事实触发；2026-11-19 唤醒切片）：显式脚本优先；未显式脚本时按
     // 新形状脚本化——模型把事实里的结果正文原样说给用户（产品形状：宿主只喂事实 + 投递模型
-    // 说的话；用户可见内容仍由用例断言钉住，宿主不再拼完成文案）。
+    // 说的话；用户可见内容仍由用例断言钉住，宿主不再拼完成文案）。台词带事实的主语
+    // （「<业务名>」）：事实给的就是这件事的名字，合理的模型转述会带主语——对话形态门 ③
+    // （推送必须自含话题，要求 D）把这一条变成了机械判据，裸结果正文会被判 push-needs-subject。
     if (driver === 'main' && text.startsWith(COMPLETION_FACT_PREFIX) && !this.main.has(text)) {
       this.requestMessages.set(`main\u0000${text}`, messages);
       const body = completionResultBodyOf(text);
       if (body === undefined) {
         throw new Error(`完成事实形状不符（缺结果正文段）：${JSON.stringify(text.slice(0, 160))}`);
       }
-      return textAssistant(body);
+      const subject = factSubjectOf(text) ?? '你交代的那件事';
+      return textAssistant(`${subject}办完了：${body}`);
     }
     // 其余状态变化唤醒回合（失败 / 已停止 / 重启对账 / 久无动静；2026-11-19 唤醒切片）：
     // 显式脚本优先；未显式脚本时按同一产品形状脚本化——假模型按事实说一句人话（台词唯一
@@ -623,6 +674,22 @@ export interface WecomSimFixture {
   finalBubbles(): ReadonlyArray<BubbleRecord>;
   /** 主动追问文字（attachmentNudge → sendText → sendMessage 通道）。 */
   nudgeTexts(): ReadonlyArray<string>;
+  /**
+   * 对话形态断言（要求 D）：用当前累计的发帧记录 / adapter 回复 / 主动推送 + 记账归属
+   * 跑一遍四规则，逐会话返回违规。close() 时会自动再跑一遍（违规即该用例失败）；
+   * 本方法供负例控制用例在用例体内直接取读数。
+   */
+  shapeViolations(): readonly ConversationStreamResult[];
+  /**
+   * 解除本夹具的对话形态自动守卫（负例控制专用：人为制造违规的用例自己断言违规存在，
+   * 不需要 afterEach 再抛一次）。守卫的活体性由「注入违规 → 用例变红 → 恢复」演示登记。
+   */
+  disarmShapeGuard(): void;
+  /**
+   * 向推送面注入一条**带归属**的投递（负例控制专用，与宿主 sent 记账同形：一次真实
+   * 重复投递在夹具里看到的就是 proactiveTexts 多一条 + 该条带 taskId/factKind）。
+   */
+  injectDelivery(record: { text: string; taskId: string; factKind: 'completed' | 'failed' | 'cancelled' | 'waiting_user' | 'warning'; chatId?: string }): void;
   close(): Promise<void>;
 }
 
@@ -665,6 +732,17 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
   const book = new SimScriptBook();
   let messageSeq = 0;
   let frameSeq = 0;
+  // 对话形态（要求 D）的三个事实源：发帧记录（inbound）、推送归属槽位（与
+  // sdk.proactiveTexts 按下标对齐）、守卫开关。
+  const inbounds: Array<{ reqId: string; messageId: string; at: number; text: string; conversationId: string; group: boolean }> = [];
+  const provenanceByPush: Array<DeliveryProvenanceTarget> = [];
+  const attributeDeliveryProvenance = createDeliveryProvenanceAttributor(provenanceByPush);
+  let shapeGuardDisarmed = false;
+  /** 会话 id（与适配器同口径：单聊 = userid，群聊 = chatid）。 */
+  const conversationIdOf = (frameOptions: FrameOptions): string =>
+    frameOptions.chatType === 'group'
+      ? frameOptions.conversationId ?? 'group-w'
+      : frameOptions.userId ?? DEFAULT_USER_ID;
 
   const channel = new WecomBotChannel({
     // 假凭据：只给适配器这一个面；进程 env / .env 里的 WECOM_* 不进装配。
@@ -743,7 +821,14 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
     // （与原 inline 装配逐字节同形：既有 A/B/C/D/F 组样本的语义不变）。
     ...(options.taskDispatch === 'async' ? { fileDelivery: fileDeliveryPort } : {}),
     attachmentNudgeClock: clock,
-    logger: (line) => logs.push(line),
+    logger: (line) => {
+      logs.push(line);
+      // 宿主 sent 记账行 → 最近一条未归属主动推送补归属（对话形态 ② 的前提；共享补填器）。
+      // deliverText 先 await sendText（推送已入 sdk.proactiveTexts）再写 sent 行，此刻补填
+      // 看到的「最近未归属」就是这次投递的那条。
+      while (provenanceByPush.length < sdk.proactiveTexts.length) provenanceByPush.push({});
+      attributeDeliveryProvenance(line);
+    },
   });
 
   // 与 apps/server/channel-mode.test.ts 同形：先拿到启动 promise，emit authenticated（假连接
@@ -757,6 +842,71 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
     return `w-sim-${fixtureSeq}-${messageSeq}`;
   };
 
+  /** 任务名集合（③ 的「任务名」判据；只读底账投影，读不到 = 空集，不崩）。 */
+  const readTaskNames = (): readonly string[] => {
+    try {
+      const store = openTaskStore(dbPath, { readOnly: true });
+      try {
+        return store.listTasks()
+          .map((stored) => (stored.task.name ?? '').trim())
+          .filter((name) => name !== '');
+      } finally {
+        store.close();
+      }
+    } catch {
+      return [];
+    }
+  };
+
+  /**
+   * 对话形态快照（要求 D）：发帧记录 = inbound；adapter 终帧（finish 且未被拒收）= reply，
+   * reqId 映回消息锚点；主动推送 = delivery（归属按 sent 记账行补填）。逐会话排序后交
+   * 共享判定器（单一实现，不复制）。
+   */
+  const buildShapeResults = (): readonly ConversationStreamResult[] => {
+    const taskNames = readTaskNames();
+    const inboundByReqId = new Map(inbounds.map((record) => [record.reqId, record]));
+    const eventsByConversation = new Map<string, ConversationEvent[]>();
+    const push = (conversationId: string, event: ConversationEvent): void => {
+      const list = eventsByConversation.get(conversationId);
+      if (list === undefined) eventsByConversation.set(conversationId, [event]);
+      else list.push(event);
+    };
+    for (const record of inbounds) {
+      push(record.conversationId, { kind: 'inbound', messageId: record.messageId, at: record.at, text: record.text });
+    }
+    for (const bubble of sdk.bubbles) {
+      // 被拒帧只是可观测的出站尝试，不算用户可见面（与 M-1 的口径一致）。
+      if (!bubble.finish || bubble.rejected === true) continue;
+      const origin = inboundByReqId.get(bubble.reqId);
+      push(origin?.conversationId ?? '(unanchored)', {
+        kind: 'reply',
+        inReplyTo: origin?.messageId,
+        at: bubble.at,
+        text: bubble.content,
+      });
+    }
+    sdk.proactiveTexts.forEach((record, index) => {
+      const attributed = provenanceByPush[index];
+      push(record.chatId, {
+        kind: 'delivery',
+        at: record.at,
+        text: record.content,
+        ...(attributed?.taskId !== undefined && attributed.factKind !== undefined
+          ? { provenance: { taskId: attributed.taskId, factKind: attributed.factKind } }
+          : {}),
+      });
+    });
+    // 群会话按群隐私口径判（owner 2026-11-18：群推送不带业务名；③ 对 warning 投递豁免）。
+    const groupConversations = new Set(inbounds.filter((record) => record.group).map((record) => record.conversationId));
+    return checkConversationStreams([...eventsByConversation.entries()].map(([conversationId, events]) => ({
+      conversationId,
+      events: [...events].sort((left, right) => left.at - right.at),
+      taskNames,
+      ...(groupConversations.has(conversationId) ? { groupPrivacy: true } : {}),
+    })));
+  };
+
   const fixture: WecomSimFixture = {
     sdk,
     clock,
@@ -768,7 +918,9 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
     sendText(text, frameOptions = {}) {
       frameSeq += 1;
       const messageId = nextMessageId();
-      sdk.emit('message.text', textFrame(`req-${frameSeq}`, messageId, text, frameOptions));
+      const reqId = `req-${frameSeq}`;
+      inbounds.push({ reqId, messageId, at: Date.now(), text, conversationId: conversationIdOf(frameOptions), group: frameOptions.chatType === 'group' });
+      sdk.emit('message.text', textFrame(reqId, messageId, text, frameOptions));
       return messageId;
     },
     sendFile(filename, bytes, frameOptions = {}) {
@@ -776,7 +928,18 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
       const url = `https://wecom-sim.invalid/media/${frameSeq}-${encodeURIComponent(filename)}`;
       sdk.stageFile(url, filename, bytes);
       const messageId = nextMessageId();
-      sdk.emit('message.file', fileFrame(`req-${frameSeq}`, messageId, url, frameOptions));
+      const reqId = `req-${frameSeq}`;
+      // 纯附件帧的用户可见文本 = 适配器派发形状的附件占位（adapter 的 parts.push 同源）：
+      // 追问/收据提到文件名时，③ 的原话片段判据有锚点可比。
+      inbounds.push({
+        reqId,
+        messageId,
+        at: Date.now(),
+        text: `[附件:${filename}]`,
+        conversationId: conversationIdOf(frameOptions),
+        group: frameOptions.chatType === 'group',
+      });
+      sdk.emit('message.file', fileFrame(reqId, messageId, url, frameOptions));
       return messageId;
     },
     async waitFor(description, predicate, timeoutMs) {
@@ -796,10 +959,33 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
     nudgeTexts() {
       return sdk.proactiveTexts.map((record) => record.content);
     },
+    shapeViolations() {
+      return buildShapeResults();
+    },
+    disarmShapeGuard() {
+      shapeGuardDisarmed = true;
+    },
+    injectDelivery(record) {
+      // 先补齐归属槽位（logger 只在记账行到达时同步），再追加推送与归属——与宿主真投递
+      // 的最终状态逐字段同形（proactiveTexts 多一条、该条带 taskId/factKind）。
+      while (provenanceByPush.length < sdk.proactiveTexts.length) provenanceByPush.push({});
+      sdk.proactiveTexts.push({
+        kind: 'sendMessage',
+        chatId: record.chatId ?? conversationIdOf({}),
+        content: record.text,
+        at: Date.now(),
+      });
+      provenanceByPush.push({ taskId: record.taskId, factKind: record.factKind });
+    },
     async close() {
+      // 快照在拆卸前装配（任务名要从底账读）；守卫未解除时挂给 afterEach 统一判（违规即该用例失败）。
+      const shapeResults = buildShapeResults();
       await channel.stop();
       await server.close();
       rmSync(root, { recursive: true, force: true });
+      if (!shapeGuardDisarmed) {
+        pendingShapeChecks.push({ label: options.label ?? `fx-${fixtureSeq}`, results: shapeResults });
+      }
     },
   };
   fixtureSeq += 1;

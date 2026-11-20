@@ -56,6 +56,12 @@ import { materializeEvalConfig } from '../../resolve-config-path';
 import { assessEvalIsolation } from '../safety-gate';
 import { scanUserVisibleText } from '../shared/internal-terms';
 import {
+  checkTurnFaceShape,
+  createDeliveryProvenanceAttributor,
+  formatShapeViolations,
+  type ShapeViolation,
+} from '../shared/conversation-shape';
+import {
   EXPECTED_RECORDS,
   LedgerWatcher,
   USER_TURN_1,
@@ -1181,7 +1187,8 @@ async function createHarness(
   const delivery: FileDeliveryPort = {
     deliveryMode: 'live',
     async sendToConversation(route, files): Promise<DeliveryReceipt> {
-      sink.pushes.push({ at: new Date().toISOString(), source: 'file_push', text: `(files:${files.length})` });
+      // file_push 是占位（无用户文本），excluded = 不进对话形态面。
+      sink.pushes.push({ at: new Date().toISOString(), source: 'file_push', text: `(files:${files.length})`, excluded: true });
       return receipt(route, 'file');
     },
     async sendText(route, text): Promise<DeliveryReceipt> {
@@ -1215,24 +1222,19 @@ async function createHarness(
     }),
     logger: (line) => {
       logs.push(line);
-      // 完成/失败投递的记账行带 taskId；deliverText 先 await sendText（push 已是 sink 末条）再写 sent 账。
-      // 记 sent 时给最近一条未归属的 push_text 补 taskId——迟到的第一次完成推送靠它归属到任务（S4-C4 用）。
-      const event = typeof line['event'] === 'string' ? line['event'] : '';
-      if (event === 'task_result_delivery_sent' && typeof line['taskId'] === 'string') {
-        for (let index = sink.pushes.length - 1; index >= 0; index -= 1) {
-          const push = sink.pushes[index]!;
-          if (push.source === 'push_text' && push.taskId === undefined) {
-            push.taskId = line['taskId'];
-            break;
-          }
-        }
-      }
+      // 完成/失败投递的记账行带 taskId/factKind；deliverText 先 await sendText（push 已是
+      // sink 末条）再写 sent 账。记 sent 时给最近一条未归属的 push_text 补归属——迟到的
+      // 第一次完成推送靠它归属到任务（S4-C4 用）+ 对话形态 ② 判「同事实投两次」（要求 D）。
+      // 补填器单源（conversation-shape 的 createDeliveryProvenanceAttributor）。
+      attributeDeliveryProvenance(line);
     },
   });
 
   const registry = createSqliteTaskRegistry(dbPath, { readOnly: true });
   const watcher = new LedgerWatcher(registry, scope);
   watcher.start();
+  // 宿主 sent 记账行 → 推送归属补填（taskId/factKind；对话形态 ② 的前提；targets = sink.pushes）。
+  const attributeDeliveryProvenance = createDeliveryProvenanceAttributor(sink.pushes);
   const turns: TurnEvidence[] = [];
   const visible: VisibleText[] = [];
 
@@ -1275,6 +1277,7 @@ async function createHarness(
       }
       const turn: TurnEvidence = {
         index, userText: text, reply, durationMs: Date.now() - startedMs,
+        atMs: startedMs,
         ...(error === undefined ? {} : { error }),
       };
       turns.push(turn);
@@ -1393,6 +1396,8 @@ interface ScenarioResult {
   criteria: CriterionResult[];
   observations: ObservationResult[];
   leak: LeakReport;
+  /** 对话形态四条（要求 D）：独立守卫，违规即本场景失败（不进判据打分）。 */
+  shape: { violationCount: number; violations: ShapeViolation[] };
   evidencePath?: string;
   infraError?: string;
 }
@@ -1870,6 +1875,24 @@ async function runScenario(
     for (const hit of leak.hits) log(`  命中@${hit.where} 「${hit.marker}」：${redact(hit.excerpt)}`);
     emit('write_loop_scenarios_leak', { scenario: id, hitCount: leak.hitCount, hits: leak.hits.map((h) => ({ where: h.where, marker: h.marker })) });
 
+    // 对话形态四条（交接门 2026-11-21）：回合 + 推送（含归属补填）+ 底账业务名喂共享断言层，
+    // 违规即本场景失败（与内部词泄漏同一独立守卫位，不进判据打分、不降级为观察）。
+    const shapeTaskNames = harness.tasksNow()
+      .map((task) => (task.name ?? '').trim())
+      .filter((name) => name !== '');
+    const shapeViolations: ShapeViolation[] = checkTurnFaceShape(harness.turns, harness.sink.pushes, shapeTaskNames);
+    log(`\n== 对话形态（通用守卫，要求 D，场景 ${id}） ==`);
+    if (shapeViolations.length === 0) {
+      log('  零违规（①每消息≤1回复 ②同事实≤1投递 ③推送自含话题 ④回复不错挂）');
+    } else {
+      log(redact(formatShapeViolations(shapeViolations, `违规 ${shapeViolations.length} 条`)));
+    }
+    emit('write_loop_scenarios_shape', {
+      scenario: id,
+      violationCount: shapeViolations.length,
+      codes: shapeViolations.map((violation) => violation.code),
+    });
+
     const evidenceDir = path.join(runRoot, id);
     const evidencePath = path.join(evidenceDir, 'evidence.json');
     const bundle = {
@@ -1880,6 +1903,7 @@ async function runScenario(
       evidence: redactEvidence(evidence),
       criteria,
       observations,
+      shape: { violationCount: shapeViolations.length, violations: shapeViolations },
       leak: {
         hitCount: leak.hitCount,
         hits: leak.hits.map((hit) => ({ where: hit.where, marker: hit.marker, excerpt: redact(hit.excerpt) })),
@@ -1889,7 +1913,7 @@ async function runScenario(
     };
     writeFileSync(evidencePath, `${JSON.stringify(bundle, null, 2)}\n`);
     log(`\n证据已落盘：${path.relative(REPO_ROOT, evidencePath)}（gitignored；不含密钥）`);
-    return { id, title: SCENARIO_TITLES[id], criteria, observations, leak, evidencePath };
+    return { id, title: SCENARIO_TITLES[id], criteria, observations, leak, shape: { violationCount: shapeViolations.length, violations: shapeViolations }, evidencePath };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const infra = error instanceof InfraAbort;
@@ -1906,7 +1930,9 @@ async function runScenario(
       hitCount: 0, hits: [], channels: [],
       notes: [`场景在用户可见文本收集前中断（${infra ? '前置未过' : '运行异常'}），本场景无文本可扫；如实登记，不冒充扫过。`],
     };
-    return { id, title: SCENARIO_TITLES[id], criteria, observations: [], leak, ...(infra ? { infraError: message } : { infraError: message }) };
+    // 中断场景无对话形态证据：violationCount=0 只是「未判」的形状位（判据已如实记中断 fail）。
+    const shape = { violationCount: 0, violations: [] as ShapeViolation[] };
+    return { id, title: SCENARIO_TITLES[id], criteria, observations: [], leak, shape, ...(infra ? { infraError: message } : { infraError: message }) };
   } finally {
     await harness.close().catch(() => {});
   }
@@ -2026,12 +2052,15 @@ async function main(): Promise<void> {
   const failedCriteria = allCriteria.filter((criterion) => criterion.status === 'fail');
   const leakedScenarios = results.filter((result) => result.leak.hitCount > 0);
   const leakHitTotal = leakedScenarios.reduce((sum, result) => sum + result.leak.hitCount, 0);
+  const shapeFailedScenarios = results.filter((result) => result.shape.violationCount > 0);
+  const shapeViolationTotal = shapeFailedScenarios.reduce((sum, result) => sum + result.shape.violationCount, 0);
   log(`\n${'='.repeat(78)}\n== 汇总 ==`);
   for (const result of results) {
     const failed = result.criteria.filter((criterion) => criterion.status === 'fail');
     log(`  · ${result.id}（${result.title}）：判据 ${result.criteria.length} 条，fail=${failed.length}`
       + `${failed.length === 0 ? '' : ` → ${failed.map((criterion) => criterion.id).join(',')}`}`
-      + `；内部词泄漏命中=${result.leak.hitCount}${result.leak.hitCount > 0 ? '（机械失败）' : ''}`);
+      + `；内部词泄漏命中=${result.leak.hitCount}${result.leak.hitCount > 0 ? '（机械失败）' : ''}`
+      + `；对话形态违规=${result.shape.violationCount}${result.shape.violationCount > 0 ? '（机械失败）' : ''}`);
   }
   const summary = {
     generatedAt: new Date().toISOString(),
@@ -2044,10 +2073,11 @@ async function main(): Promise<void> {
         hits: result.leak.hits.map((hit) => ({ where: hit.where, marker: hit.marker, excerpt: redact(hit.excerpt) })),
         channels: result.leak.channels, notes: result.leak.notes,
       },
+      shape: { violationCount: result.shape.violationCount, violations: result.shape.violations },
       ...(result.evidencePath === undefined ? {} : { evidencePath: path.relative(REPO_ROOT, result.evidencePath) }),
       ...(result.infraError === undefined ? {} : { infraError: redact(result.infraError) }),
     })),
-    totals: { criteria: allCriteria.length, failed: failedCriteria.length, leakHits: leakHitTotal },
+    totals: { criteria: allCriteria.length, failed: failedCriteria.length, leakHits: leakHitTotal, shapeViolations: shapeViolationTotal },
     leak: {
       hitCount: leakHitTotal,
       scenarios: leakedScenarios.map((result) => ({
@@ -2057,13 +2087,14 @@ async function main(): Promise<void> {
     },
   };
   writeFileSync(path.join(runRoot, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
-  log(`  判据合计 ${allCriteria.length} 条，fail=${failedCriteria.length}；内部词泄漏命中=${leakHitTotal}`);
+  log(`  判据合计 ${allCriteria.length} 条，fail=${failedCriteria.length}；内部词泄漏命中=${leakHitTotal}；对话形态违规=${shapeViolationTotal}`);
   log(`  汇总落盘：${path.relative(REPO_ROOT, path.join(runRoot, 'summary.json'))}`);
   emit('write_loop_scenarios_summary', {
     scenarios: results.map((result) => result.id).join('+'),
     criteria: allCriteria.length,
     failed: failedCriteria.length,
     leakHits: leakHitTotal,
+    shapeViolations: shapeViolationTotal,
   });
   if (failedCriteria.length > 0) {
     for (const criterion of failedCriteria) log(`  FAIL ${criterion.id}：${criterion.detail}`);
@@ -2073,8 +2104,13 @@ async function main(): Promise<void> {
       log(`  FAIL LEAK_INTERNAL_TERM（场景 ${result.id}）：命中 ${result.leak.hitCount} 处（见各场景 evidence.json#leak）。`);
     }
   }
-  if (failedCriteria.length > 0 || leakedScenarios.length > 0) process.exitCode = 1;
-  log(`\n== 场景集结束：判据 ${allCriteria.length} 条，pass=${allCriteria.length - failedCriteria.length} fail=${failedCriteria.length}；内部词泄漏命中=${leakHitTotal} ==`);
+  if (shapeFailedScenarios.length > 0) {
+    for (const result of shapeFailedScenarios) {
+      log(`  FAIL SHAPE_CONVERSATION（场景 ${result.id}）：对话形态违规 ${result.shape.violationCount} 条（见各场景 evidence.json#shape）。`);
+    }
+  }
+  if (failedCriteria.length > 0 || leakedScenarios.length > 0 || shapeFailedScenarios.length > 0) process.exitCode = 1;
+  log(`\n== 场景集结束：判据 ${allCriteria.length} 条，pass=${allCriteria.length - failedCriteria.length} fail=${failedCriteria.length}；内部词泄漏命中=${leakHitTotal}；对话形态违规=${shapeViolationTotal} ==`);
 }
 
 if (import.meta.main) {

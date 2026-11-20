@@ -91,6 +91,7 @@ import {
   taskRestartFactText,
   taskWaitingUserFactText,
   waitingUserFallbackText,
+  type TaskResultFactKind,
 } from './task-completion-delivery';
 import {
   OUTCOME_REASON_NOT_PERMITTED,
@@ -240,6 +241,20 @@ const TERMINAL_WAKE_KINDS: ReadonlyMap<string, 'cancelled' | 'completed' | 'fail
   ['task_cancel_wake', 'cancelled'],
   ['task_completion_wake', 'completed'],
   ['task_failure_wake', 'failed'],
+]);
+
+/**
+ * 状态变化唤醒出口 → 投递归属事实种类（2026-11-21 对话形态断言层 ② 的前提）：每个出口
+ * 的投递记账行（task_result_delivery_*）带上「这是哪类事实」，eval 侧据此判同一事实是否
+ * 被投递两次。久无动静与重启对账都不是终局事实 → 归 warning；未登记的出口不带（不猜）。
+ */
+const WAKE_FACT_KINDS: ReadonlyMap<string, TaskResultFactKind> = new Map([
+  ['task_cancel_wake', 'cancelled'],
+  ['task_completion_wake', 'completed'],
+  ['task_failure_wake', 'failed'],
+  ['task_waiting_user_wake', 'waiting_user'],
+  ['task_long_running_wake', 'warning'],
+  ['task_restart_wake', 'warning'],
 ]);
 
 /**
@@ -1040,6 +1055,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
                 principalId: completion.principalId,
                 sessionId: completion.sessionId,
                 resultText: fileNote,
+                // 投递归属：文件未送达话术不是完成播报，是告警类事实（warning）。
+                factKind: 'warning',
               }, {
                 ...(completionDelivery === undefined ? {} : { delivery: completionDelivery }),
                 log,
@@ -1420,11 +1437,14 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     if (resolved.outcome === 'busy') return true;
     if (resolved.text === undefined) return false;
     const resultText = input.appendText === undefined ? resolved.text : `${resolved.text}\n${input.appendText}`;
+    // 投递归属（对话形态断言层 ② 的前提）：出口事件名 → 事实种类；未登记出口不带（不猜）。
+    const factKind = WAKE_FACT_KINDS.get(input.event);
     const delivered = await deliverTaskResult({
       taskId: input.taskId,
       principalId: input.principalId,
       sessionId: input.sessionId,
       resultText,
+      ...(factKind === undefined ? {} : { factKind }),
     }, {
       ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
       log,
@@ -1849,6 +1869,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             principalId,
             sessionId,
             resultText: fallbackText,
+            // 投递归属：模型沉默时宿主兜底说的正是完成事实（taskCompletionFallbackText）。
+            factKind: 'completed',
           }, {
             ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
             log,
@@ -1870,6 +1892,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             principalId,
             sessionId,
             ...failureFact,
+            // 投递归属：模型沉默时宿主兜底说的正是失败事实（failureFallbackTextFor）。
+            factKind: 'failed',
           }, {
             ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
             log,

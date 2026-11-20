@@ -37,6 +37,11 @@ import { sha256Hex, stableStringify } from './hash';
 import { runJudgeSelftest } from './selftest';
 import { genericResolveCaseIds, loadSuite, type EvalSuite } from '../exploration/suite-contract';
 import { scanUserVisibleText } from '../shared/internal-terms';
+import {
+  checkTurnFaceShape,
+  formatShapeViolations,
+  type ShapeViolation,
+} from '../shared/conversation-shape';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
@@ -352,6 +357,18 @@ interface TrialOptions {
 /** 用户级批次的独立失败码：用户可见文本里出现内部词（不进 judge 的 criteria 打分）。 */
 export const LEAK_FAILURE_CODE = 'LEAK_INTERNAL_TERM';
 
+/** 用户级批次的独立失败码：对话形态四条违规（要求 D；不进 judge 的 criteria 打分）。 */
+export const SHAPE_FAILURE_CODE = 'SHAPE_CONVERSATION';
+
+export interface TrialShapeReport {
+  caseId: string;
+  trial: number;
+  failureCodes: string[];
+  violationCount: number;
+  violations: ShapeViolation[];
+  notes: string[];
+}
+
 export interface TrialLeakReport {
   caseId: string;
   trial: number;
@@ -519,6 +536,38 @@ async function runTrial(options: TrialOptions): Promise<void> {
     assembled.close();
   }
 
+  // 对话形态四条（交接门 2026-11-21，要求 D）：回合回复 + 推送 + 事件日志喂共享断言层，
+  // 违规记独立失败码 SHAPE_CONVERSATION（与 leak 同位——不写进 judge 的打分/哈希）。
+  // 本入口走 ask 同源 sync 装配：没有 fileDelivery/notificationSink——推送与投递事件为空，
+  // ② ③ 无推送可判（notes 如实登记）；① ④ 按回合回复 × 交办原文判。
+  const shapeTaskNames = (tasksSnapshot as ReadonlyArray<{ name?: string }>)
+    .map((task) => (task.name ?? '').trim())
+    .filter((name) => name !== '');
+  const shapeViolations = checkTurnFaceShape(
+    caseDef.turns.map((text, index) => ({
+      index: index + 1,
+      userText: text,
+      reply: replies.find((reply) => reply.turn === index + 1)?.text ?? '',
+    })),
+    [],
+    shapeTaskNames,
+  );
+  const shape: TrialShapeReport = {
+    caseId: caseDef.id,
+    trial,
+    failureCodes: shapeViolations.length > 0 ? [SHAPE_FAILURE_CODE] : [],
+    violationCount: shapeViolations.length,
+    violations: shapeViolations,
+    notes: [
+      '本入口走 ask 同源 sync 装配：无 fileDelivery/notificationSink，故无宿主主动投递、推送或投递事件日志；②③ 无推送面可判（如实登记）。',
+      '①（每消息≤1回复）与 ④（回复不错挂）按每回合回复 × 交办原文判；任务名取底账业务名。',
+    ],
+  };
+  writeFileSync(path.join(trialDir, 'shape.json'), JSON.stringify(shape, null, 2) + '\n');
+  if (shape.violationCount > 0) {
+    console.log(`[shape] ${caseDef.id} trial-${trial}: ${SHAPE_FAILURE_CODE} 违规 ${shape.violationCount} 条\n${formatShapeViolations(shapeViolations)}`);
+  }
+
   // 证据落盘（全样本保留；audit 为 state/audit.jsonl 的字节副本）。
   const inputsJson = {
     caseId: caseDef.id,
@@ -620,6 +669,8 @@ interface RunTrialResult {
   judgment: Judgment;
   /** 独立的泄漏扫描报告（不写进 judge 的 criteria 打分）。 */
   leak?: TrialLeakReport;
+  /** 独立的对话形态报告（要求 D；不写进 judge 的 criteria 打分）。 */
+  shape?: TrialShapeReport;
   infraError?: string;
 }
 
@@ -631,6 +682,17 @@ function readTrialLeak(trialDir: string, caseId: string, trial: number): TrialLe
     return JSON.parse(readFileSync(file, 'utf8')) as TrialLeakReport;
   } catch {
     return { caseId, trial, failureCodes: [], hitCount: 0, hits: [], channels: [], notes: [`leak.json 不可解析（${file}）——如实登记，不冒充扫过。`] };
+  }
+}
+
+/** 读 trial 的独立对话形态报告（旧 run / 中断缺文件时返回 undefined，不伪造判定）。 */
+function readTrialShape(trialDir: string, caseId: string, trial: number): TrialShapeReport | undefined {
+  const file = path.join(trialDir, 'shape.json');
+  if (!existsSync(file)) return undefined;
+  try {
+    return JSON.parse(readFileSync(file, 'utf8')) as TrialShapeReport;
+  } catch {
+    return { caseId, trial, failureCodes: [], violationCount: 0, violations: [], notes: [`shape.json 不可解析（${file}）——如实登记，不冒充判过。`] };
   }
 }
 
@@ -729,9 +791,11 @@ async function main(): Promise<void> {
         await runTrial({ caseDef, trial, trialDir, runId, frozen });
         const judgment = JSON.parse(readFileSync(path.join(trialDir, 'judgment.json'), 'utf8')) as Judgment;
         const leak = readTrialLeak(trialDir, caseDef.id, trial);
-        slots[index] = { caseId: caseDef.id, trial, judgment, ...(leak === undefined ? {} : { leak }) };
+        const shape = readTrialShape(trialDir, caseDef.id, trial);
+        slots[index] = { caseId: caseDef.id, trial, judgment, ...(leak === undefined ? {} : { leak }), ...(shape === undefined ? {} : { shape }) };
         console.log(`[judge] ${caseDef.id} trial-${trial}: ${judgment.deterministic.verdict}${judgment.deterministic.failureCodes.length > 0 ? ` (${judgment.deterministic.failureCodes.join(', ')})` : ''}`
-          + ` [leak] ${leak === undefined ? '未扫描(登记缺口)' : `${LEAK_FAILURE_CODE}=${leak.hitCount}`}`);
+          + ` [leak] ${leak === undefined ? '未扫描(登记缺口)' : `${LEAK_FAILURE_CODE}=${leak.hitCount}`}`
+          + ` [shape] ${shape === undefined ? '未判(登记缺口)' : `${SHAPE_FAILURE_CODE}=${shape.violationCount}`}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         console.error(`[run] ${caseDef.id} trial-${trial} 失败：${message}`);
@@ -852,6 +916,9 @@ function writeSummaryAndReport(input: SummaryInput): number {
   const dimensionHistogram: Record<string, Record<string, number>> = {};
   // 泄漏独立汇总：不进 judge 的 counts / codeHistogram / dimensions。
   const leakFailures: Array<{ caseId: string; trial: number; failureCodes: string[]; hits: Array<{ where: string; marker: string; excerpt: string }> }> = [];
+  // 对话形态独立汇总（要求 D）：不进 judge 的 counts / codeHistogram / dimensions。
+  const shapeFailures: Array<{ caseId: string; trial: number; failureCodes: string[]; violationCount: number }> = [];
+  let shapeViolationTotal = 0;
   for (const result of results) {
     verdicts[result.caseId] ??= {};
     verdicts[result.caseId]![`trial-${result.trial}`] = {
@@ -869,6 +936,11 @@ function writeSummaryAndReport(input: SummaryInput): number {
       // 只进独立 leak 栏；不写 codeHistogram（那是 judge 的 failureCode 汇总，保持分离）。
       leakFailures.push({ caseId: result.caseId, trial: result.trial, failureCodes: result.leak.failureCodes, hits: result.leak.hits });
     }
+    if (result.shape !== undefined && result.shape.violationCount > 0) {
+      // 只进独立 shape 栏；不写 codeHistogram（那是 judge 的 failureCode 汇总，保持分离）。
+      shapeFailures.push({ caseId: result.caseId, trial: result.trial, failureCodes: result.shape.failureCodes, violationCount: result.shape.violationCount });
+      shapeViolationTotal += result.shape.violationCount;
+    }
   }
   const leakHitTotal = leakFailures.reduce((sum, entry) => sum + entry.hits.length, 0);
   const summary = {
@@ -883,6 +955,8 @@ function writeSummaryAndReport(input: SummaryInput): number {
     dimensionHistogram,
     /** 独立泄漏栏（与 judge 打分分离）：命中即机械失败。 */
     leak: { hitCount: leakHitTotal, failures: leakFailures },
+    /** 独立对话形态栏（要求 D，与 judge 打分分离）：违规即机械失败。 */
+    shape: { violationCount: shapeViolationTotal, failures: shapeFailures },
     trialsPlanned: input.trials,
     samples: results.length,
     ...(input.suiteId !== undefined ? { suite: { id: input.suiteId, casesCount: input.selected.length } } : {}),
@@ -941,6 +1015,13 @@ function writeSummaryAndReport(input: SummaryInput): number {
       for (const note of trialLeak.notes) lines.push(`  - 注：${note}`);
       for (const hit of trialLeak.hits) lines.push(`  - 命中@${hit.where} 「${hit.marker}」：${hit.excerpt}`);
     }
+    const trialShape = result.shape;
+    lines.push(`- 对话形态（独立守卫，要求 D）：违规=${trialShape?.violationCount ?? '未判'}`
+      + `${trialShape && trialShape.violationCount > 0 ? ` → ${trialShape.failureCodes.join(',')}` : ''}`);
+    if (trialShape !== undefined) {
+      for (const note of trialShape.notes) lines.push(`  - 注：${note}`);
+      for (const violation of trialShape.violations) lines.push(`  - [${violation.code}] ${violation.detail}`);
+    }
     lines.push(`- 证据目录：\`${path.relative(REPO_ROOT, trialDir)}\``);
     lines.push('');
   }
@@ -953,10 +1034,17 @@ function writeSummaryAndReport(input: SummaryInput): number {
     }
   }
   lines.push('');
+  // 报告顶层对话形态小节（要求 D；judge 判据不受影响）。
+  lines.push('## 对话形态（独立机械守卫，不进 judge 打分）', '');
+  lines.push(`- 违规总数：${shapeViolationTotal}；失败 trial 数：${shapeFailures.length}`);
+  for (const failure of shapeFailures) {
+    lines.push(`- ${failure.caseId} trial-${failure.trial} ${failure.failureCodes.join(',')}：违规 ${failure.violationCount} 条`);
+  }
+  lines.push('');
   writeFileSync(path.join(outDir, 'report.md'), lines.join('\n') + '\n');
 
   if (counts.INCONCLUSIVE > 0 || results.some((result) => result.infraError !== undefined)) return 2;
-  if (counts.FAIL > 0 || leakFailures.length > 0) return 1;
+  if (counts.FAIL > 0 || leakFailures.length > 0 || shapeFailures.length > 0) return 1;
   return 0;
 }
 
@@ -1032,7 +1120,8 @@ function runJudgeExisting(runDir: string): number {
         writeFileSync(existingPath, JSON.stringify(judgment, null, 2) + '\n');
       }
       const leak = readTrialLeak(trialDir, caseId, trial);
-      results.push({ caseId, trial, judgment, ...(leak === undefined ? {} : { leak }) });
+      const shape = readTrialShape(trialDir, caseId, trial);
+      results.push({ caseId, trial, judgment, ...(leak === undefined ? {} : { leak }), ...(shape === undefined ? {} : { shape }) });
     }
   }
   const exitCode = writeSummaryAndReport({
