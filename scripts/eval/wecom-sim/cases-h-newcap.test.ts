@@ -19,6 +19,7 @@ import { deriveTaskName } from '../../../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
 import { LONG_RUNNING_NOTICE_FALLBACK_TEXT } from '../../../packages/agent/src/task-runner';
 import {
+  internalOperationCall,
   lastToolResultJsonOf,
   lastToolResultOf,
   longRunningWakeLine,
@@ -33,6 +34,7 @@ import {
 const TASK_SCOPE = { principalId: 'wecom:user-a', sessionId: 'wecom:user-a' } as const;
 const GROUP_SCOPE = { principalId: 'wecom:group:group-w', sessionId: 'wecom:group-w' } as const;
 
+// 夹具专用参数：--count 是机制旋钮，必须经内部 exec 路由注入（见 W-44 用例）。
 const PREPARE_ARGS = { collection: 'alpha', window: 'W1', '--count': 2 };
 
 /**
@@ -54,7 +56,8 @@ const relayWhatever = (call: { messages: readonly unknown[] }) => {
  */
 function longTaskWorkerResponses(seconds: number): readonly SimResponse[] {
   return [
-    toolCallAssistant('op_dummy_longtask', { '--seconds': seconds }),
+    // 夹具注入 --seconds 走内部 exec 路由（op_* 工具面只收业务字段）。
+    internalOperationCall('dummy.longtask', { '--seconds': seconds }),
     textAssistant('已发起长任务，等它跑完。'),
     textAssistant('导出完成：上个月全部凭证共 42 张。'),
   ];
@@ -216,7 +219,8 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
         relayWhatever,
       ]);
       sim.book.workerTask(writeTask, [
-        toolCallAssistant('op_dummy_prepare', PREPARE_ARGS),
+        // PREPARE_ARGS 含 --count 机制旋钮，走内部 exec 路由。
+        internalOperationCall('dummy.prepare', PREPARE_ARGS),
         (call) => {
           const result = lastToolResultOf(call.messages);
           if (result === undefined || !result.isError) {

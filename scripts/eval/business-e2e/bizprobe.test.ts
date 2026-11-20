@@ -260,8 +260,9 @@ describe('⑧ 真实驱动器装配路径（注入假 driver/假执行面，零�
     };
     const workerDriver: TurnDriver = {
       async run(input) {
-        const tool = input.tools.find((t) => t.name === 'execute_operation') ?? input.tools[0]!;
-        await input.exec(tool.name, { operation: 'dummy.query', args: { collection: 'alpha', window: 'W1' } });
+        // 夹具走内部 exec 路由（execute_operation 兼容入口）：op_* 工具面只收声明过的业务字段，
+        // 不再兼容 {operation,args} 包装；本夹具没有任何模型可见字段需求，直接内部直调。
+        await input.exec('execute_operation', { operation: 'dummy.query', args: { collection: 'alpha', window: 'W1' } });
         const reply = 'query 完成';
         return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
       },

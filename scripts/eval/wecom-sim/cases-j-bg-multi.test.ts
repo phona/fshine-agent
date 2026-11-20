@@ -37,6 +37,7 @@ import { describe, expect, it } from 'vitest';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
 import { LONG_RUNNING_NOTICE_FALLBACK_TEXT } from '../../../packages/agent/src/task-runner';
 import {
+  internalOperationCall,
   lastToolResultJsonOf,
   startWecomSim,
   textAssistant,
@@ -63,7 +64,8 @@ function proactiveTexts(fixture: ReturnType<typeof startWecomSim> extends Promis
 /** 慢任务：真实发起 dummy.longtask，accepted 后由 runner 的 wait 端口推进，完成后续跑汇报。 */
 function longTaskWorkerResponses(seconds: number, doneText: string): readonly SimResponse[] {
   return [
-    toolCallAssistant('op_dummy_longtask', { '--seconds': seconds }),
+    // 夹具注入 --seconds 走内部 exec 路由（op_* 工具面只收业务字段）。
+    internalOperationCall('dummy.longtask', { '--seconds': seconds }),
     textAssistant('已发起长任务，等它跑完。'),
     textAssistant(doneText),
   ];

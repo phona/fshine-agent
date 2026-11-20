@@ -31,6 +31,8 @@ import type { AppConfig } from '@fshine/contracts';
 import { WecomBotChannel, type SdkClientLike } from '@fshine/channel-wecom';
 import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
+import { EXECUTE_OPERATION_TOOL } from '../../../packages/agent/src/execution-runtime';
+import { withInternalExecTool } from '../../../packages/agent/testing/internal-exec-fixture';
 import { createScriptedModelRuntime } from '../../../packages/agent/testing/scripted-model-runtime';
 import { startChannelForMode } from '../../../apps/server/channel-mode';
 import { createServer, type FileDeliveryPort, type Server } from '../../../apps/server/server';
@@ -658,16 +660,19 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
     ...(process.env['TMPDIR'] === undefined ? {} : { TMPDIR: process.env['TMPDIR'] }),
   };
 
+  // 夹具侧内部 exec 路由注入（见 withInternalExecTool）：脚本夹具经 internalOperationCall
+  // 注入机制参数，走 runtime 的 execute_operation 兼容入口，不经 op_* 工具面；生产无此工具。
   const makeDriver = async (driver: 'main' | 'worker'): Promise<TurnDriver> => {
     const scripted = await createScriptedModelRuntime({
       contextWindow: 40_000,
       script: (_index, context) => book.respond(driver, context),
     });
-    return createPiTurnDriver({
+    const base = createPiTurnDriver({
       env,
       modelRuntime: scripted.runtime,
       ...(driver === 'main' ? { reuseConversation: true } : {}),
     });
+    return driver === 'worker' ? withInternalExecTool(base) : base;
   };
 
   // 会话投递端口（fileDelivery）：只在显式声明 async 的样本注入——有推送面就一律 async。
@@ -818,6 +823,21 @@ export function describeOutcome(outcome: Record<string, unknown>): string {
     return note;
   }
   return `执行层返回了未预期的形态：${JSON.stringify(outcome).slice(0, 200)}`;
+}
+
+/**
+ * 夹具专用的内部 exec 路由调用（owner 2026-11-20）：需要注入机制旋钮
+ * （`--count`/`--seconds`/`--delay-ms`/`--confirmation` 等）的脚本夹具用它，而不是把
+ * `--` 前缀键硬塞进 op_* 工具调用——后者会被宿主结构化校验确定性拒绝。
+ * 真模型从拿不到 `execute_operation` 工具（生产 Worker 工具面已无它），只有本夹具的驱动
+ * 注入它（见 startWecomSim 的 makeDriver）。args 原样交给内部路由，不走 op_* 工具面。
+ */
+export function internalOperationCall(
+  operation: string,
+  args: Record<string, unknown>,
+  id?: string,
+): AgentMessage {
+  return toolCallAssistant(EXECUTE_OPERATION_TOOL, { operation, args }, id);
 }
 
 /** 一次查询任务的 Worker 脚本：发起真实 op_* 工具调用，再按真实返回汇报。 */

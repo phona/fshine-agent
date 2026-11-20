@@ -79,16 +79,16 @@ class RejectingClient implements ExecutionClient {
 function retryingWorkerDriver(): TurnDriver {
   return {
     async run(input) {
-      const tool = input.tools.find((entry) => entry.name === 'execute_operation') ?? input.tools[0];
-      if (tool === undefined) throw new Error('（测试）没有工具面');
+      // 夹具走内部 exec 路由（execute_operation 兼容入口）：执行层原样名（`--`）只在内部
+      // 路由使用，op_* 工具面一律确定性拒绝；本用例要真发起两次执行来测 A2b。
       const args = { operation: 'dummy.query', args: { '--collection': 'finance-invoices', '--window': 'W202610' } };
       try {
-        await input.exec(tool.name, args);
+        await input.exec('execute_operation', args);
       } catch {
         // 第一次失败：像真实 Worker 一样继续尝试换写法
       }
       try {
-        await input.exec(tool.name, { operation: 'dummy.query', args: { '--collection': 'finance-invoices', '--window': '2026-10' } });
+        await input.exec('execute_operation', { operation: 'dummy.query', args: { '--collection': 'finance-invoices', '--window': '2026-10' } });
       } catch {
         // 期望这里被 A2b 拦下（不发起执行）
       }
