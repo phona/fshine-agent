@@ -9,6 +9,8 @@
  *
  * 本文件只承载用例数据；判定规则在 judge.ts，冻结词表/映射在 criteria.ts。
  */
+import type { TaskOutcome } from '../../../packages/agent/src/task-outcome';
+
 export interface ItemFact {
   name: string;
   value: number;
@@ -38,7 +40,14 @@ export type AnchorRule =
   /** 正则族（2026-11-18）：同一语义的不同措辞用**模式**表达，避免逐个词补锚点。
    *  例：「平台里没有名为 X 的集合」「没有返回任何相近的候选名称」= 同一条否定存在语义。 */
   | { kind: 'regexAny'; patterns: readonly string[] }
-  | { kind: 'noFixtureValues' };
+  | { kind: 'noFixtureValues' }
+  /**
+   * 机械 outcome 判据（E11 能力缺失面）：**不读回复文案**。
+   * 从底账/唤醒事实取结构化 outcome（宿主 classifyOutcome 五值），要求落在 acceptedOutcomes。
+   * 若本轮根本没有产生任务（Main 直接答复拒绝），该判据由「零执行 + 非空回复」承接——
+   * 不要求出现任何拒绝措辞（下限只查回复非空，见 E11 用例注释）。
+   */
+  | { kind: 'mechanicalOutcome'; acceptedOutcomes: readonly TaskOutcome[] };
 
 /** 逐轮期望（多轮用例；turn 从 1 计）。 */
 export interface TurnExpectation {

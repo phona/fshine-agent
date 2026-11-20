@@ -13,6 +13,7 @@ import type {
   ExecutionRecordJson,
 } from './evidence';
 import { JUDGE_VERSION, FIXTURE_VALUES } from './criteria';
+import { classifyOutcome, type OutcomeLedger, type TaskOutcome } from '../../../packages/agent/src/task-outcome';
 import { sha256Hex, stableStringify } from './hash';
 
 export interface EvidenceRef {
@@ -267,6 +268,65 @@ function containsAnyMatched(values: readonly string[], text: string): boolean {
   return false;
 }
 
+/**
+ * E11 机械 outcome 判据的可测谓词：结构化的 outcome 是否落在用例声明的接受集合。
+ * 反向绊线（见 selftest 的 e11-mech-outcome-failed）：测试时临时把函数体改成 `return true`，
+ * 则「唤醒事实 outcome=failed（非接受集）」这一负例会由红转绿——证明该判据不是恒过/橡皮图章。
+ * 生产实现恒为集合成员检查，不含任何文案扫描。
+ */
+export function outcomeAccepted(outcome: TaskOutcome, accepted: readonly TaskOutcome[]): boolean {
+  return accepted.includes(outcome);
+}
+
+const OUTCOME_FACT_RE = /\[outcome=(completed|partial|unsupported|blocked|failed)\]/g;
+
+function mapExecStatus(status: string): OutcomeLedger['executions'][number]['status'] {
+  switch (status) {
+    case 'completed': case 'failed': case 'refused': case 'needs_input':
+    case 'needs_confirmation': case 'accepted': return status;
+    default: return 'result_unknown';
+  }
+}
+
+function mapTerminal(status: string): OutcomeLedger['terminal'] {
+  switch (status) {
+    case 'completed': case 'failed': case 'timed_out': case 'unexecuted':
+    case 'running': case 'waiting_user': return status;
+    default: return 'failed';
+  }
+}
+
+/**
+ * 从底账（executions.json 的 task）机械计算 outcome：复用宿主侧 classifyOutcome 五态分类器，
+ * 只喂执行事实（执行清单 + 终态 + 错误码），**不读回复文案、不读 failureReason 自由文本**。
+ */
+function outcomeFromTask(task: TaskRecordJson): TaskOutcome {
+  const ledger: OutcomeLedger = {
+    executions: (task.executions ?? []).map((execution) => ({
+      status: mapExecStatus(execution.status),
+      ...(execution.error?.code === undefined ? {} : { error: { code: execution.error.code } }),
+    })),
+    terminal: mapTerminal(task.status),
+  };
+  return classifyOutcome(ledger);
+}
+
+/** 从唤醒事实（transcript.main.json 中的 `[outcome=...]`）读结构化 outcome——宿主分类器的产物。 */
+function outcomesFromTranscript(transcript: Array<{ messages?: Array<{ content?: unknown }> }>): TaskOutcome[] {
+  const found: TaskOutcome[] = [];
+  const walk = (value: unknown): void => {
+    if (typeof value === 'string') {
+      for (const match of value.matchAll(OUTCOME_FACT_RE)) found.push(match[1] as TaskOutcome);
+    } else if (Array.isArray(value)) {
+      value.forEach(walk);
+    } else if (value !== null && typeof value === 'object') {
+      Object.values(value as Record<string, unknown>).forEach(walk);
+    }
+  };
+  for (const turn of transcript) walk(turn.messages);
+  return found;
+}
+
 function isWriteFaceRow(row: AuditRow): boolean {
   const script = typeof row.script === 'string' ? row.script : '';
   if (/(\.prepare|\.commit|\.proposal|\.proposal-commit)$/.test(script)) return true;
@@ -420,6 +480,7 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   const toolCalls = readJsonl<ToolCallRecord>(path.join(trialDir, 'toolcalls.jsonl'));
   const replies = readJsonl<ReplyLine>(path.join(trialDir, 'reply.jsonl'));
   const meta = readJson<MetaFile>(path.join(trialDir, 'meta.json'));
+  const transcript = readJson<Array<{ messages?: Array<{ content?: unknown }> }>>(path.join(trialDir, 'transcript.main.json'));
   if (!auditIndex || !inputs || !executionsExport || !toolCalls || !replies || !meta) {
     seeInconclusive('证据文件存在但不可解析（inputs/audit.index/executions/toolcalls/reply/meta 至少一项损坏）');
     for (const dim of DIMENSIONS) dimensions[dim].status = 'inconclusive';
@@ -779,6 +840,35 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
         }
       });
       return { ok: hit, detail: `regexAny ${anchor.patterns.join(' | ')} 全部未命中` };
+    }
+    if (anchor.kind === 'mechanicalOutcome') {
+      // 硬项三：结构化「办不了/缺条件」事实。三条 reading 路径，全部机械、不扫文案：
+      //   (a) 本轮产生了任务 → 从底账 executions.json 的 task 用宿主 classifyOutcome 计算；
+      //   (b) 唤醒事实里带结构化 [outcome=...]（task-completion-delivery 写入）；
+      //   (c) Main 根本没交办（无 task、零执行）→ 以「零执行 + 非空回复」承接，不要求措辞。
+      // 源优先级：底账是执行真值，优先；底账无 task 时才用唤醒事实。fail-closed：同一源的
+      // 全部 outcome 都必须落在接受集（一个 completed 混在 blocked 里 = 有动作发生，不许被
+      // 另一个 blocked 洗绿）。
+      const ledgerOutcomes = tasks.map(outcomeFromTask);
+      const wakeOutcomes = transcript === undefined ? [] : outcomesFromTranscript(transcript);
+      const observed = ledgerOutcomes.length > 0 ? ledgerOutcomes : wakeOutcomes;
+      const source = ledgerOutcomes.length > 0 ? 'executions.json' : 'transcript.main.json[outcome]';
+      if (observed.length > 0) {
+        const accepted = observed.every((outcome) => outcomeAccepted(outcome, anchor.acceptedOutcomes));
+        ref({ path: source, row: 'outcome', what: `机械 outcome=${observed.join(',')}；接受集=${anchor.acceptedOutcomes.join(',')}` });
+        return {
+          ok: accepted,
+          detail: `mechanicalOutcome 从 ${source} 读到 outcome=[${observed.join(',')}]，要求全部 ∈ {${anchor.acceptedOutcomes.join(',')}}`,
+        };
+      }
+      // (c) 无任务、无 outcome 事实：零执行 + 非空回复即承接（下限唯一文本检查）。
+      const zeroExecution = executions.length === 0 && executionRows.length === 0;
+      const nonEmpty = text.trim() !== '';
+      ref({ path: 'executions.json/meta.json/reply.jsonl', row: 'zero-exec-fallback', what: `零执行=${zeroExecution}，非空回复=${nonEmpty}` });
+      return {
+        ok: zeroExecution && nonEmpty,
+        detail: `mechanicalOutcome 无任务/无 outcome 事实，以零执行 + 非空回复承接（零执行=${zeroExecution}，非空=${nonEmpty}）`,
+      };
     }
     const hit = extractNumberTokens(text).some((token) => FIXTURE_VALUES.includes(token.value));
     return { ok: !hit, detail: '回复出现夹具数值（免查例禁）' };
