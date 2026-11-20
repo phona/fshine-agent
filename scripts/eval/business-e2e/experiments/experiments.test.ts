@@ -75,8 +75,8 @@ function scriptedMain(steps: Array<(exec: Exec) => Promise<void>>, reply = '已�
 function workerQuerier(collection = 'alpha', window = 'W1'): TurnDriver {
   return {
     async run(input) {
-      const tool = input.tools.find((t) => t.name === 'execute_operation') ?? input.tools[0]!;
-      await input.exec(tool.name, { operation: 'dummy.query', args: { collection, window } });
+      // 夹具走内部 exec 路由（execute_operation 兼容入口），不借 op_* 工具面透传参数包装。
+      await input.exec('execute_operation', { operation: 'dummy.query', args: { collection, window } });
       const reply = '查询完成。';
       return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
     },

@@ -19,6 +19,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import {
+  internalOperationCall,
   lastToolResultJsonOf,
   lastToolResultOf,
   startWecomSim,
@@ -99,7 +100,8 @@ describe('F 组·写确认回环（W-22～W-25）', () => {
         },
       ]);
       sim.book.workerTask('给 alpha 集合 W1 追加 2 条记录', [
-        toolCallAssistant('op_dummy_prepare', { 'collection': 'alpha', 'window': 'W1', '--count': '2' }),
+        // 夹具注入 --count 走内部 exec 路由（op_* 工具面只收业务字段）。
+        internalOperationCall('dummy.prepare', { collection: 'alpha', window: 'W1', '--count': '2' }),
         (call) => {
           const outcome = lastToolResultJsonOf(call.messages);
           if (outcome === undefined) throw new Error('Worker 脚本没有拿到 dummy.prepare 的真实返回。');
@@ -147,7 +149,7 @@ describe('F 组·写确认回环（W-22～W-25）', () => {
         },
       ]);
       sim.book.workerTask('确认给 alpha 集合 W1 追加 2 条记录', [
-        toolCallAssistant('op_dummy_commit', { 'collection': 'alpha', 'window': 'W1', '--count': '2' }),
+        internalOperationCall('dummy.commit', { collection: 'alpha', window: 'W1', '--count': '2' }),
         (call) => {
           const outcome = lastToolResultJsonOf(call.messages);
           if (outcome === undefined) throw new Error('Worker 脚本没有拿到 dummy.commit 的真实返回。');
@@ -169,7 +171,7 @@ describe('F 组·写确认回环（W-22～W-25）', () => {
 
       // ── W-24：再回一次确认 → 只执行一次（仍 4 条），第二次确定性拒绝 ──────────
       sim.book.workerTask('再次确认给 alpha 集合 W1 追加 2 条记录', [
-        toolCallAssistant('op_dummy_commit', { 'collection': 'alpha', 'window': 'W1', '--count': '2' }),
+        internalOperationCall('dummy.commit', { collection: 'alpha', window: 'W1', '--count': '2' }),
         (call) => {
           const outcome = lastToolResultJsonOf(call.messages);
           if (outcome === undefined) throw new Error('Worker 脚本没有拿到第二次 commit 的真实返回。');
@@ -208,7 +210,7 @@ describe('F 组·写确认回环（W-22～W-25）', () => {
         },
       ]);
       sim.book.workerTask('给 alpha 集合 W1 追加 1 条记录', [
-        toolCallAssistant('op_dummy_prepare', { 'collection': 'alpha', 'window': 'W1', '--count': '1' }),
+        internalOperationCall('dummy.prepare', { collection: 'alpha', window: 'W1', '--count': '1' }),
         (call) => {
           // 宿主允许集合边界的真实拒绝（写操作不在只读允许集、未发起执行）。
           const result = lastToolResultOf(call.messages);
@@ -249,7 +251,7 @@ describe('F 组·写确认回环（W-22～W-25）', () => {
         textAssistant(modelText),
       ]);
       sim.book.workerTask('给 alpha 集合 W1 追加 2 条记录', [
-        toolCallAssistant('op_dummy_prepare', { 'collection': 'alpha', 'window': 'W1', '--count': '2' }),
+        internalOperationCall('dummy.prepare', { collection: 'alpha', window: 'W1', '--count': '2' }),
         textAssistant('（Worker 已出提案）'),
       ]);
       const messageId = sim.sendText('给 alpha 集合 W1 追加 2 条记录');

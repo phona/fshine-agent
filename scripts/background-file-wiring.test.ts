@@ -86,8 +86,9 @@ function backgroundWorker(capture: WorkerCapture): TurnDriver {
       const first = input.messages[0] as unknown as { content?: unknown } | undefined;
       capture.delegations.push(typeof first?.content === 'string' ? first.content : JSON.stringify(first?.content ?? ''));
       capture.toolNames.push(input.tools.map((tool) => tool.name));
-      // 动态工具面：op_dummy_query 收执行层原样名（宿主原样透传）。
-      await input.exec('op_dummy_query', { '--input': '占位（宿主替换为任务目录内的物化路径）' });
+      // 文件参数走内部 exec 路由（execute_operation 兼容入口）：op_* 工具面只收声明过的业务
+      // 字段，执行层原样名（`--`）一律确定性拒绝；夹具直调内部路由不受工具面约束。
+      await input.exec('execute_operation', { operation: 'dummy.query', args: { '--input': '占位（宿主替换为任务目录内的物化路径）' } });
       return { text: '已按任务文件完成处理。', messages: [] as unknown as DriverMessage[] };
     },
   };

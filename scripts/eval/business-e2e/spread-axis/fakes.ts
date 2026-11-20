@@ -63,13 +63,9 @@ export function createSmokeExecutor(caseDef: DsCase): DsExecutor {
       const target = workerQueries[Math.min(workerSeq, workerQueries.length - 1)]!;
       workerSeq += 1;
       const [collection, window] = target.includes(' ') ? target.split(' ') : [target, undefined];
-      const tool = input.tools.find((t) => t.name === 'execute_operation') ?? input.tools[0]!;
-      // 动态工具面：op_* 工具直接收业务字段；legacy execute_operation 仍走 {operation,args}。
-      const callArgs = tool.name === 'execute_operation'
-        ? { operation: 'dummy.query', args: { collection, ...(window === undefined ? {} : { window }) } }
-        : { collection, ...(window === undefined ? {} : { window }) };
+      // 夹具走内部 exec 路由（execute_operation 兼容入口），不借 op_* 工具面透传参数包装。
       try {
-        await input.exec(tool.name, callArgs);
+        await input.exec('execute_operation', { operation: 'dummy.query', args: { collection, ...(window === undefined ? {} : { window }) } });
       } catch { /* smoke 假件：错误由 reply 面表达 */ }
       return { text: '查询完成', messages: [...input.messages, textMessage('查询完成')] };
     },

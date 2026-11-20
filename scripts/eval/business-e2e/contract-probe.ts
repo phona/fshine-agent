@@ -67,8 +67,8 @@ async function probeConversationFace(): Promise<Record<string, unknown>> {
   };
   const workerDriver: TurnDriver = {
     async run(input) {
-      const tool = input.tools.find((t) => t.name === 'execute_operation') ?? input.tools[0]!;
-      await input.exec(tool.name, { operation: 'dummy.query', args: { collection: 'alpha', window: 'W1' } });
+      // 夹具走内部 exec 路由（execute_operation 兼容入口），不借 op_* 工具面透传参数包装。
+      await input.exec('execute_operation', { operation: 'dummy.query', args: { collection: 'alpha', window: 'W1' } });
       const reply = 'query 完成';
       return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
     },

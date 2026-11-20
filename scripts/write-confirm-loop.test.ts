@@ -27,6 +27,7 @@ import { createDummyCliClient } from '../packages/agent/src/dummy-cli-client';
 import { createPiTurnDriver } from '../packages/agent/src/pi-driver';
 import { createTaskRegistry } from '../packages/agent/src/task-registry';
 import { createScriptedModelRuntime } from '../packages/agent/testing/scripted-model-runtime';
+import { withInternalExecTool } from '../packages/agent/testing/internal-exec-fixture';
 import { assembleSessionCore, resolveExecutionFace } from './ask-runtime';
 import { materializeEvalConfig } from './resolve-config-path';
 
@@ -129,9 +130,10 @@ async function runWriteAttempt(principalId: string, dir: string): Promise<WriteA
   const stateDir = path.join(dir, 'state');
 
   const worker = await driverFor((index) => [
+    // 夹具注入 --count 走内部 exec 路由（op_* 工具面只收业务字段）。
     toolCallAssistant(
-      'op_dummy_prepare',
-      { collection: 'alpha', '--count': 2 },
+      'execute_operation',
+      { operation: 'dummy.prepare', args: { collection: 'alpha', '--count': 2 } },
       'call_worker_1',
     ),
     textAssistant('写入没有执行。'),
@@ -153,7 +155,7 @@ async function runWriteAttempt(principalId: string, dir: string): Promise<WriteA
     taskRegistry: createTaskRegistry(),
     mainSystemPrompt: '你是测试主 Agent。',
     workerSkills: [],
-    createDrivers: async () => ({ mainDriver: main.driver, workerDriver: worker.driver }),
+    createDrivers: async () => ({ mainDriver: main.driver, workerDriver: withInternalExecTool(worker.driver) }),
   });
   try {
     const turn = await assembled.session.send('帮我在 alpha 集合里新增两条记录');

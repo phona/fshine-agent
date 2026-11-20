@@ -43,10 +43,11 @@ describe('① #4 端到端：限流经 state-dir 触发 RATE_LIMITED（真 dummy
     };
     const workerDriver: TurnDriver = {
       async run(input) {
-        const tool = input.tools.find((t) => t.name === 'execute_operation') ?? input.tools[0]!;
-        await input.exec(tool.name, { operation: 'dummy.query', args: { collection: 'alpha', window: 'W1' } });
-        await input.exec(tool.name, { operation: 'dummy.query', args: { collection: 'beta', window: 'W1' } });
-        await input.exec(tool.name, { operation: 'dummy.query', args: { collection: 'documents', window: 'W202611' } });
+        // 夹具走内部 exec 路由（execute_operation 兼容入口）：op_* 工具面只收声明过的业务字段，
+        // 不再兼容 {operation,args} 包装；本夹具直调内部路由，不经工具面。
+        await input.exec('execute_operation', { operation: 'dummy.query', args: { collection: 'alpha', window: 'W1' } });
+        await input.exec('execute_operation', { operation: 'dummy.query', args: { collection: 'beta', window: 'W1' } });
+        await input.exec('execute_operation', { operation: 'dummy.query', args: { collection: 'documents', window: 'W202611' } });
         const reply = 'alpha、beta 完成；documents 限流失败。';
         return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
       },

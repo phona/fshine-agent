@@ -30,6 +30,7 @@ import { describe, expect, it } from 'vitest';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
 import {
   describeOutcome,
+  internalOperationCall,
   lastToolResultJsonOf,
   messagesTextOf,
   startWecomSim,
@@ -70,7 +71,8 @@ describe('冒烟·长时执行（--delay-ms）', () => {
       const taskText = '把 documents 集合上月的明细跑出来';
       sim.book.mainTurn(userText, [toolCallAssistant('task_run', { task: taskText }), dispatchCard]);
       sim.book.workerTask(taskText, [
-        toolCallAssistant('op_dummy_query', { 'collection': 'documents', 'window': 'W202611', '--delay-ms': '1200' }),
+        // 夹具注入 --delay-ms 走内部 exec 路由（op_* 工具面只收业务字段）。
+        internalOperationCall('dummy.query', { collection: 'documents', window: 'W202611', '--delay-ms': '1200' }),
         (call) => {
           const outcome = lastToolResultJsonOf(call.messages);
           if (outcome === undefined) throw new Error('Worker 脚本没有拿到 execute_operation 的真实返回。');

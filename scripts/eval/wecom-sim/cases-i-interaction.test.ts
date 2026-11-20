@@ -25,6 +25,7 @@ import {
   internalTermIn,
 } from '../../../packages/agent/src/user-facing-failure';
 import {
+  internalOperationCall,
   lastToolResultJsonOf,
   mainRelayResponses,
   NUDGE_AFTER_MS,
@@ -59,7 +60,8 @@ function acceptCard(call: { messages: readonly unknown[] }): AgentMessage {
  */
 function longTaskWorker(resultText: string, seconds: number): readonly SimResponse[] {
   return [
-    toolCallAssistant('op_dummy_longtask', { '--seconds': String(seconds) }),
+    // 夹具注入 --seconds 走内部 exec 路由（op_* 工具面只收业务字段）。
+    internalOperationCall('dummy.longtask', { '--seconds': String(seconds) }),
     textAssistant('已发起长任务，我盯着，好了发你。'),
     textAssistant(resultText),
   ];

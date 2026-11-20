@@ -382,6 +382,14 @@ export interface RunJsLayoutUnsafeReport extends RunJsLayoutUnsafeEvent {
  */
 export const OPERATION_NOT_PERMITTED_MESSAGE = '当前权限不支持这个操作。';
 
+/**
+ * 工具参数结构校验的确定性拒绝话术（owner 2026-11-20「机制参数碰不到」）：模型给了一个
+ * 该工具没声明的字段（含猜到的机制参数裸名、任何 `--` 前缀键）时走既有工具错误面抛出。
+ * 不含 hostOnly 名、不含内部机制词（宿主/执行层/旋钮/flag 等），只说业务话——模型/用户
+ * 复述也不会泄密。字段名只经 `op_tool_args_rejected` 事件进日志，不进此话术。
+ */
+export const OP_TOOL_ARGS_REJECTED_MESSAGE = '这个操作的参数写法不对，请按这个操作声明的字段重新填写。';
+
 /** Worker 唯一工具名：结构化执行入口（宿主生成 requestId，模型只给 operation + args）。 */
 export const EXECUTE_OPERATION_TOOL = 'execute_operation';
 export const EXECUTE_OPERATION_TOOL_DESCRIPTION =
@@ -625,6 +633,12 @@ export type ExecutionEvent =
    * missing/unknown 是结构化机械事实（只进日志，不进用户话术）。
    */
   | { event: 'payload_lint_rejected'; taskId: string; operation: string; missing: readonly string[]; unknown: readonly string[] }
+  /**
+   * op_* 工具参数结构校验拒绝（owner 2026-11-20）：模型给了一个该工具没声明的字段
+   * （包含任何 `--` 前缀键 / hostOnly 裸名）。字段名/计数只进这条日志（取证面），
+   * 绝不进模型可见话术（见 OP_TOOL_ARGS_REJECTED_MESSAGE）。零执行、零执行事实。
+   */
+  | { event: 'op_tool_args_rejected'; tool: string; keys: readonly string[]; dashedKeys: number }
   /**
    * 失败归类（模型可见面收口，2026-11-19）：执行层失败/拒绝**不再逐字进模型投影**，
    * 模型只见 kind + note（见 toModelVisibleOutcome）；原始 code 与原文只经这条事件进日志。
@@ -2659,12 +2673,15 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         }
         return runJsInWorkerTurn(taskId, args, files.runJsMemo, files.taskFiles, signal);
       }
-      // op_<operation>：结构化调用 → 翻回执行层 args（含机制参数补齐）。
+      // op_<operation>：结构化调用 → 结构化校验（未知键/机制参数裸名/`--` 前缀键确定性拒绝）
+      // → 翻回执行层 args。夹具机制旋钮走下面的 execute_operation 内部路由，不借本面透传。
       const opDeclaration = sessionOpToolIndex.get(tool);
       if (opDeclaration !== undefined) {
+        const opArgs = unwrapCompatOpArgs(args);
+        assertOpToolArgs({ tool, operation: opDeclaration, args: opArgs, onEvent: options.onExecutionEvent });
         const mapped = mapWorkerOperationArgs({
           operation: opDeclaration,
-          args: unwrapCompatOpArgs(args),
+          args: opArgs,
           ...(() => {
             const confirmation = confirmationForOperation(opDeclaration.name);
             return confirmation === undefined ? {} : { confirmationHandle: confirmation.handle };
@@ -3422,9 +3439,10 @@ export function workerOperationTool(operation: {
       type: 'object',
       properties,
       ...(required.length === 0 ? {} : { required }),
-      // 放宽附加字段：测试夹具通过内部 exec 路由传机制参数（测试旋钮），但模型可见的
-      // properties/required 里没有任何 hostOnly 参数名或 `--` 前缀（守卫钉死）。
-      additionalProperties: true,
+      // 模型面严格（owner 2026-11-20「机制参数碰不到」）：只收声明过的业务字段名，未知字段
+      // （含 hostOnly 裸名/执行层原样名、任何 `--` 前缀键）由 Pi schema 校验 + 宿主结构化
+      // 校验双闸确定性拒绝。夹具经内部 exec 路由（execute_operation）传机制旋钮，不走此面。
+      additionalProperties: false,
     },
   };
 }
@@ -3451,8 +3469,11 @@ export function workerOpToolIndex(manifest: CapabilityManifest): Map<string, Cap
 }
 
 /**
- * 内部兼容：op_* 工具调用若收到兼容 `{operation, args}` 包装（脚本夹具用 `tools[0]` 直调），
- * 则解包成业务参数；真模型按 op_* schema 只给业务字段，永远走不到这条。
+ * 假驱动直调兼容：fake driver 用 `input.exec(tools[0].name, {operation, args})` 时，`op_*`
+ * 工具名收到的是 `{operation,args}` 包装——解包出业务参数后**照样过严格校验**（见
+ * assertOpToolArgs）。真模型按 op_* schema 只给业务字段，`operation`/`args` 两个键在
+ * additionalProperties:false 下根本到不了这里；这条只为 fake driver 的直调兼容保留，
+ * 不是机制参数的入口（任何 `--` 键在解包后仍被拒）。
  */
 function unwrapCompatOpArgs(args: Record<string, unknown>): Record<string, unknown> {
   if (typeof args.operation === 'string' && args.args !== null && typeof args.args === 'object' && !Array.isArray(args.args)) {
@@ -3462,11 +3483,42 @@ function unwrapCompatOpArgs(args: Record<string, unknown>): Record<string, unkno
 }
 
 /**
- * 工具调用参数 → 执行层 args：业务字段名映射回执行层参数名（`collection` → `--collection`）；
- * hostOnly 参数由宿主补齐，模型传入的同名/裸名值一律忽略（不被模型覆盖）：
+ * op_* 工具参数的**结构化校验**（owner 2026-11-20「机制参数碰不到」；宿主确定性责任 B 类）。
+ *
+ * Pi 的 schema 校验（additionalProperties:false）是第一道闸；本函数是第二道闸——fake driver
+ * 直接调 `input.exec` 时不经 Pi schema，仍必须挡住任何未声明字段/机制参数。规则只有一条：
+ * 每个键必须恰好是该工具声明过的业务字段名（去 `--` 前缀、非 hostOnly）。任何 `--` 前缀键、
+ * 任何 hostOnly 裸名、任何拼错字段 → 确定性拒绝（零执行、零执行事实），错误话术不含内部词，
+ * 字段名只经 `op_tool_args_rejected` 事件进日志（取证）。
+ *
+ * 夹具需要机制旋钮（--apply/--seconds/--delay-ms 等）时走内部 exec 路由
+ * （`execute_operation` 兼容入口，不经工具面）或在执行面显式注入——不借本面透传。
+ */
+export function assertOpToolArgs(input: {
+  tool: string;
+  operation: { args: readonly ExecutionArgDeclaration[] };
+  args: Record<string, unknown>;
+  onEvent?: (event: ExecutionEvent) => void;
+}): void {
+  const allowed = new Set(workerVisibleArgs(input.operation).map(({ field }) => field));
+  const bad = Object.keys(input.args).filter((key) => key.startsWith('--') || !allowed.has(key));
+  if (bad.length === 0) return;
+  input.onEvent?.({
+    event: 'op_tool_args_rejected',
+    tool: input.tool,
+    keys: bad,
+    dashedKeys: bad.filter((key) => key.startsWith('--')).length,
+  });
+  throw new Error(OP_TOOL_ARGS_REJECTED_MESSAGE);
+}
+
+/**
+ * 工具调用参数 → 执行层 args：业务字段名映射回执行层参数名（`collection` → `--collection`）。
+ * 只接受调用方给的**非 hostOnly 业务字段**（映射层已无 hostOnly 透传分支——owner 2026-11-20：
+ * 机制参数宿主补齐或内部 exec 路由注入，op_* 工具面永不传）。hostOnly 的宿主责任：
  *   · `--confirmation`：确认回合由宿主注入句柄（调用方永远看不到句柄）；
  *   · `--count`：从 records 条数自算（执行层口径）；
- *   · 其余机制参数（哨兵/测试旋钮）缺省不填。
+ *   · 其余机制参数（哨兵/测试旋钮）在 op_* 路径缺省不填——要注入请走内部 exec 路由。
  */
 export function mapWorkerOperationArgs(input: {
   operation: { args: readonly ExecutionArgDeclaration[] };
@@ -3475,25 +3527,18 @@ export function mapWorkerOperationArgs(input: {
 }): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   const declarations = input.operation.args;
-  // 业务参数：字段名 → 执行层声明名（`collection` → `--collection`）；声明名原样（测试夹具
-  // legacy 调用）也认——两者等价，后者只是提前给了执行层形态。
+  // 业务参数：字段名 → 执行层声明名（`collection` → `--collection`）。只认去前缀后的业务字段名；
+  // 执行层原样名（带 `--`）与未知键都不在这里透传（由 assertOpToolArgs 在工具面确定性拒绝）。
   const byField = new Map<string, ExecutionArgDeclaration>();
-  const byName = new Map<string, ExecutionArgDeclaration>();
   for (const declaration of declarations) {
+    if (declaration.hostOnly === true) continue;
     byField.set(declaration.name.replace(/^--/, ''), declaration);
-    byName.set(declaration.name, declaration);
   }
   for (const [key, value] of Object.entries(input.args)) {
-    const declaration = byField.get(key) ?? byName.get(key);
-    if (declaration !== undefined) {
-      if (declaration.hostOnly !== true) result[declaration.name] = value;
-      continue;
-    }
-    // 未声明的执行层原样名（`--flag`）：假执行客户端的清单可能不声明参数，但夹具仍以
-    // 执行层形态传值——原样保留（这与通用 execute_operation 的逐字节透传一致）。
-    if (key.startsWith('--')) result[key] = value;
+    const declaration = byField.get(key);
+    if (declaration !== undefined) result[declaration.name] = value;
   }
-  // 机制参数：宿主补齐；--confirmation / --count 由宿主计算，忽略调用方的业务字段值。
+  // 机制参数：宿主补齐；--confirmation / --count 由宿主计算，忽略调用方给的任何值。
   const records = input.args['records'];
   const recordCount = Array.isArray(records) ? records.length : undefined;
   for (const declaration of declarations) {
@@ -3503,16 +3548,9 @@ export function mapWorkerOperationArgs(input: {
       if (input.confirmationHandle !== undefined && input.confirmationHandle !== '') {
         result[declaration.name] = input.confirmationHandle;
       }
-    } else if (bare === 'count') {
-      // records 在 → 从条数自算（宿主口径，忽略任何调用方值）；否则认执行层原样名（测试夹具
-      // 用 `--count` 造占位记录）。业务字段名 `count` 永不透传。
-      if (recordCount !== undefined) result[declaration.name] = recordCount;
-      else if (input.args[declaration.name] !== undefined) result[declaration.name] = input.args[declaration.name];
-    } else if (input.args[declaration.name] !== undefined) {
-      // 其余 hostOnly（apply / delay-ms / fail-index / seconds / fail-after）是确定性夹具的
-      // 测试旋钮：调用方只有用**执行层原样名**（带 `--`）传入才透传——模型可见 schema 里
-      // 没有这些名，真模型拿不到，也不会从业务字段名拼出来。裸名（如 `seconds`）不认。
-      result[declaration.name] = input.args[declaration.name];
+    } else if (bare === 'count' && recordCount !== undefined) {
+      // records 在 → 从条数自算（宿主口径，忽略任何调用方值）。占位记录的旋钮走内部 exec 路由。
+      result[declaration.name] = recordCount;
     }
   }
   return result;
@@ -3965,19 +4003,22 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           if (options.runJsExecutor === undefined) throw new Error(`Worker 工具面之外的调用：${tool}`);
           return workerRunJsTurn(task.taskId, args, runJsMemo, taskFiles, signal);
         }
-        // owner 2026-11-20：op_<operation> 结构化调用 → 翻回执行层 args（含机制参数补齐）。
-        // execute_operation 仅为内部兼容路由保留（确定性脚本夹具直调；真实模型工具面已无它）。
+        // owner 2026-11-20：op_<operation> 结构化调用 → 结构化校验（未知键/机制参数裸名/
+        // `--` 前缀键确定性拒绝）→ 翻回执行层 args。execute_operation 仅为内部兼容路由保留
+        // （确定性脚本夹具直调；真实模型工具面已无它）；机制旋钮走它、不经 op_* 工具面。
         let operation: string;
         let baseCallArgs: Record<string, unknown>;
         const opDeclaration = opToolIndex.get(tool);
         if (opDeclaration !== undefined) {
+          const opArgs = unwrapCompatOpArgs(args);
+          assertOpToolArgs({ tool, operation: opDeclaration, args: opArgs, onEvent: options.onExecutionEvent });
           operation = opDeclaration.name;
           const confirmation = pendingConfirmation === undefined || readOnlyOperations.has(operation)
             ? undefined
             : { handle: pendingConfirmation.handle };
           baseCallArgs = mapWorkerOperationArgs({
             operation: opDeclaration,
-            args: unwrapCompatOpArgs(args),
+            args: opArgs,
             ...(confirmation === undefined ? {} : { confirmationHandle: confirmation.handle }),
           });
         } else {

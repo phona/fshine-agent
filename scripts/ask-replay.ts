@@ -417,12 +417,9 @@ function createScriptedController(): ScriptedController {
     async run(input: TurnDriverInput) {
       const step = pendingWorkers.shift() ?? {};
       if (step.operation !== undefined) {
-        const tool = input.tools.find((candidate) => candidate.name === 'execute_operation') ?? input.tools[0];
-        if (tool === undefined) throw new Error('回放假 driver：Worker 工具面缺失');
-        // 动态工具面：op_* 工具收业务字段；legacy execute_operation 收 {operation,args}。
-        await input.exec(tool.name, tool.name === 'execute_operation'
-          ? { operation: step.operation, ...(step.args === undefined ? {} : { args: step.args }) }
-          : Object.fromEntries(Object.entries(step.args ?? {}).map(([key, value]) => [key.replace(/^--/, ''), value])));
+        // 回放假 driver 走内部 exec 路由（execute_operation 兼容入口）：op_* 工具面只收声明过的
+        // 业务字段、不接受 {operation,args} 包装，也不吃 `--` 前缀名；回放参数原样交给内部路由。
+        await input.exec('execute_operation', { operation: step.operation, ...(step.args === undefined ? {} : { args: step.args }) });
       }
       const summary = step.summary ?? '回放汇报（未配置 summary）。';
       const messages = [...input.messages, { role: 'assistant', content: summary } as never];

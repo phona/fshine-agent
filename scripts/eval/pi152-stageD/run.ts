@@ -291,8 +291,8 @@ function fakeMain(): TurnDriver {
 function fakeWorker(): TurnDriver {
   return {
     async run(input) {
-      const tool = input.tools.find((entry) => entry.name === 'execute_operation') ?? input.tools[0]!;
-      await input.exec(tool.name, { operation: 'dummy.query', args: { collection: 'alpha', window: 'W1' } });
+      // 夹具走内部 exec 路由（execute_operation 兼容入口），不借 op_* 工具面透传参数包装。
+      await input.exec('execute_operation', { operation: 'dummy.query', args: { collection: 'alpha', window: 'W1' } });
       const text = '查询完成：2 条记录。';
       return { text, messages: [...input.messages, { role: 'assistant', content: text } as never] };
     },
@@ -424,8 +424,8 @@ async function runDSelftest(out: string): Promise<number> {
   });
   const worker = (): TurnDriver => ({
     async run(input) {
-      const tool = input.tools.find((entry) => entry.name === 'execute_operation') ?? input.tools[0]!;
-      await input.exec(tool.name, { operation: 'dummy.query', args: { collection: 'beta', window: 'W1' } });
+      // 夹具走内部 exec 路由（execute_operation 兼容入口），不借 op_* 工具面透传参数包装。
+      await input.exec('execute_operation', { operation: 'dummy.query', args: { collection: 'beta', window: 'W1' } });
       const text = '查询完成。';
       return { text, messages: [...input.messages, { role: 'assistant', content: text } as never] };
     },
@@ -448,8 +448,9 @@ async function runDSelftest(out: string): Promise<number> {
       mainDriver: mainFor('run'),
       workerDriver: {
         async run(input) {
-          const tool = input.tools.find((entry) => entry.name === 'execute_operation') ?? input.tools[0]!;
-          await input.exec(tool.name, { operation: 'dummy.query', args: { '--collection': 'beta', '--window': 'W2' } });
+          // 夹具走内部 exec 路由（execute_operation 兼容入口）：执行层原样名（`--`）只在内部
+          // 路由里使用，op_* 工具面一律确定性拒绝；故障窗口 W2 由夹具显式注入。
+          await input.exec('execute_operation', { operation: 'dummy.query', args: { '--collection': 'beta', '--window': 'W2' } });
           const text = '查询完成。';
           return { text, messages: [...input.messages, { role: 'assistant', content: text } as never] };
         },
