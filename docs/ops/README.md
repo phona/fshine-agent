@@ -31,7 +31,7 @@ kill <pid> 结束它再重试，或改端口 / 换部署点（不同 dbPath 状�
 
 优先级：**非空同名 env > `config/agent.yaml` > 代码缺省**；空串不算覆盖（`node --env-file` 会把模板里的 `KEY=` 设成空串）（`packages/core/src/config.ts:1-8`、`config/agent.example.yaml:5-7`）。解析点唯一 `loadConfig`（`packages/core/src/config.ts:432`）；yaml→env 派生 `deploymentEnvOf`（`:511`）、合并 `effectiveDeploymentEnv`（`:544`），不要在别处再写一份优先级逻辑。配置定位：`--config=<path>` > `AGENT_CONFIG_PATH` > 仓根 `config/agent.yaml`（`scripts/resolve-config-path.ts:25-40`）；server 找不到即拒启（`apps/server/main.ts:33-38`）。
 
-运维日常真正会动的少数几项：`AGENT_CONFIG_PATH`、`DB_PATH`、`FSHINE_ATTACHMENT_DIR`、`LLM_API_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL`、`WECOM_BOT_ID`/`WECOM_BOT_SECRET`、`EXECUTION_ALLOW_REAL`（仅字面量 `1` 授权；宿主只继承不判，`docs/environment-variables.md:78`）。完整清单与默认值见 `docs/environment-variables.md`。⚠️ 该文 `:33` 写 `DB_PATH` 缺省 = 仓库根 `data/agent.db`，现行代码缺省是 `<仓根>/.runtime/state.db`（`apps/server/main.ts:42-44`、`scripts/tasks.ts:129`），以代码为准。
+运维日常真正会动的少数几项：`AGENT_CONFIG_PATH`、`DB_PATH`、`FSHINE_ATTACHMENT_DIR`、`LLM_API_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL`、`WECOM_BOT_ID`/`WECOM_BOT_SECRET`、`EXECUTION_ALLOW_REAL`（仅字面量 `1` 授权；宿主只继承不判，`docs/environment-variables.md:80`）。完整清单与默认值见 `docs/environment-variables.md`。⚠️ 该文 `:33` 写 `DB_PATH` 缺省 = 仓库根 `data/agent.db`，现行代码缺省是 `<仓根>/.runtime/state.db`（`apps/server/main.ts:44-46`、`scripts/tasks.ts:129`），以代码为准。
 
 ## 4. 看门狗与无人值守
 

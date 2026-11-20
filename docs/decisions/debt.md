@@ -28,7 +28,7 @@
 | D-168 | 门①「产品面」口径未定义 | 现行树**实测 4 处命中**（`packages/agent/src/user-facing-failure.ts:78`、`packages/agent/payload-oneof.test.ts:2`、`:23`、`scripts/eval/real/smoke.ts:4`，均注释/文案级；2026-11-20 核对，原文写「零命中」已不成立） | 待核 |
 | D-170 | exposure-lint 剩余核对与扩展 | `packages/agent/exposure-lint.test.ts` 已不存在（`ls` 实测）；无结案记录 | 待核 |
 | D-190 | 门①测试夹具豁免口径分歧 | `docs/history/architecture-laws-2026-11_undated.md` 仍在；**口径限定**：该条原判据是「产品面（packages/apps 非测试文件）零 17dz 字面量」——按此口径现行树**非测试面 1 行**（`packages/agent/src/user-facing-failure.ts:78`，注释级）、测试/夹具面 3 行（`packages/agent/payload-oneof.test.ts:2`、`:23`、`scripts/eval/real/smoke.ts:4`），合计即 D-168 的 4 行实测清单；无结案记录 | 待核（口径见 D-168） |
-| D-196 | 退役 `FSHINE_PLATFORM_ROOT` | `grep -rn 'FSHINE_PLATFORM_ROOT'` 零命中；无结案记录 | 待核 |
+| D-196 | 退役 `FSHINE_PLATFORM_ROOT` | 代码面（packages/apps/scripts/config/tests/.github/package.json）grep 零命中；docs 档案与本表自身有历史提及；无结案记录 | 待核 |
 
 ## 三、指针失效、无结案记录 → 待核（64 条）
 
@@ -47,7 +47,7 @@
 | `eval:cap01` R2 S1 场景已退役（原「Main 直做写 out/ 并由宿主投递」；交付物只从 Worker 出，Main 的 run_js 只能写 scratch/） | `scripts/eval/cap01/r2-functional.ts` 文件头；`packages/agent/src/run-js-executor.ts`（RunJsWritableDirs）；等价覆盖 = 同文件 S3（Worker 产物回 Main + 逐格 + 登记 + 行数据不出 Main） | 已退役（2026-11-19） |
 | 判据锁只校验 criteria/cases 聚合值、不校验 `files` 表 | `../eval/README.md:24`；`scripts/eval/convergence-r1/runner.ts:220-230` | 未清 |
 | 服务单实例 | 已清（2026-11-19 起有机械守卫）：启动取独占锁、存活实例在则 exit(1)、陈旧锁可覆盖；取锁先于连接渠道 | `apps/server/main.ts:53`（`guardSingleInstance`）；`apps/server/instance-guard.ts`；守卫 `apps/server/instance-guard.test.ts`（5 条）；`../ops/README.md:13` | 已清（2026-11-20 核对：原文「无进程锁/仅靠操作纪律」已不成立；本行留档，下次清理删除） |
-| `DB_PATH` 文档缺省与实际代码不一致（文档 `data/agent.db`，代码 `.runtime/state.db`） | `../ops/README.md:25`；`../environment-variables.md:33`；`apps/server/main.ts:42-44` | 未清（文档待改） |
+| `DB_PATH` 文档缺省与实际代码不一致（文档 `data/agent.db`，代码 `.runtime/state.db`） | `../ops/README.md:34`；`../environment-variables.md:33`；`apps/server/main.ts:44-46` | 未清（文档待改） |
 
 ## 五、明确「接受不修 / 登记不修」（非待办，勿重开）
 
