@@ -11,8 +11,8 @@
  * 指定集合后，第二次必须带着补答执行并完成。
  *
  * 业务判据（对应用户交办 → 系统做成什么样）：
- *   ① 委派 → 执行层 needs_input → 用户可见的待办问题与受理时的 #编号对得上
- *      （task_status 同一 taskNo + pendingQuestion；通知同一条 taskNo/name/missing）；
+ *   ① 委派 → 执行层 needs_input → 受理回执去编号（无 notice/taskNo），按 taskId 查回同一
+ *      任务（task_status 同一 taskId + pendingQuestion，无 taskNo；通知带底账 taskNo/name/missing）；
  *   ② 用户补答 → **同一 taskId/taskNo** 继续执行（不新建任务）→ completed；底账能看到
  *      「原执行（needs_input）+ 补答后执行（completed）」两条事实；补答原文到达 Worker；
  *   ③ 用户不补答 → 任务停在 waiting_user（不是 failed/unexecuted），再次 pump 也不重复执行。
@@ -231,7 +231,7 @@ async function delegateFirstTurn(fixture: Fixture): Promise<{ taskId: string; ta
 }
 
 describe('业务：执行层 needs_input → 用户补答 → 同一任务完成', () => {
-  it('① 执行层要补输入：待办问题与受理时的 #编号对得上，任务停在 waiting_user', async () => {
+  it('① 执行层要补输入：受理回执去编号，按 taskId 查回同一任务的待办问题，任务停在 waiting_user', async () => {
     const fixture = await makeFixture();
     try {
       const { taskId, taskNo } = await delegateFirstTurn(fixture);
