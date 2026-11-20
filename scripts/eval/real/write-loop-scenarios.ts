@@ -50,9 +50,11 @@ import type { Notification, NotificationSink } from '../../../packages/agent/src
 import { stripServerPaths } from '../../../packages/agent/src/server-paths';
 import { createServer, resolveSingleProfile, type FileDeliveryPort, type Server } from '../../../apps/server/server';
 import { failureTextFor } from '../../../apps/server/task-completion-delivery';
+import { renderNotification } from '../../../packages/agent/src/notification-render';
 import { mainSessionOptions, mainThinkingLevelFrom, resolveExecutionFace } from '../../ask-runtime';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import { assessEvalIsolation } from '../safety-gate';
+import { scanUserVisibleText } from '../shared/internal-terms';
 import {
   EXPECTED_RECORDS,
   LedgerWatcher,
@@ -1329,11 +1331,52 @@ function pushTextsOf(harness: Harness): string[] {
 // 场景流程
 // ---------------------------------------------------------------------------
 
+/** 用户可见文本内部词泄漏报告（机械扫描；命中即机械失败，不进 judge、不降级为观察）。 */
+export interface LeakReport {
+  hitCount: number;
+  hits: Array<{ where: string; marker: string; excerpt: string }>;
+  channels: string[];
+  notes: string[];
+}
+
+/**
+ * 收集某场景的全部用户可见文本并扫描内部词。收全面：
+ *   · 回合回复（BaseEvidence.visible source=turn，含 Main 每轮回复）；
+ *   · 宿主主动投递文字（source=push / push_text：受理回执、通知、完成/失败消息）；
+ *   · 宿主通知面（notificationSink 捕获的 Notification，经 renderNotification 还原用户语言）。
+ * 文件投递（sendToConversation）当前夹具只投 `(files:N)` 计数占位、没有 caption 文本——
+ * 渠道缺口在 notes 里如实登记，不拿空数组冒充扫过。
+ */
+export function scanScenarioLeaks(evidence: BaseEvidence, notifications: readonly Notification[]): LeakReport {
+  const texts: Array<{ where: string; text: string }> = [];
+  evidence.visible.forEach((entry, index) => {
+    texts.push({ where: `${entry.source === 'turn' ? '回合回复' : '主动投递'}#${index + 1}${entry.turnIndex === undefined ? '' : `(回合${entry.turnIndex})`}`, text: entry.text });
+  });
+  notifications.forEach((notification, index) => {
+    try {
+      texts.push({
+        where: `通知#${index + 1}(${notification.kind})`,
+        text: renderNotification({ kind: notification.kind, payload: notification.payload }),
+      });
+    } catch {
+      // 渲染器自身拦内部术语并抛错（文案没到用户），此处不重复计泄漏。
+    }
+  });
+  const { hits } = scanUserVisibleText(texts);
+  return {
+    hitCount: hits.length,
+    hits,
+    channels: ['回合回复(Main)', '宿主主动投递文字(push_text)', '宿主通知面(renderNotification)'],
+    notes: ['文件投递渠道：本夹具 sendToConversation 只投 (files:N) 计数占位、无文件说明/caption 文本，故无 caption 可扫。'],
+  };
+}
+
 interface ScenarioResult {
   id: ScenarioId;
   title: string;
   criteria: CriterionResult[];
   observations: ObservationResult[];
+  leak: LeakReport;
   evidencePath?: string;
   infraError?: string;
 }
@@ -1800,6 +1843,14 @@ async function runScenario(
       emit('write_loop_scenarios_observation', { scenario: id, id: observation.id });
     }
 
+    // 用户可见文本内部词泄漏：机械扫描，命中即本场景失败（不进 judge、不降级为观察）。
+    const leak = scanScenarioLeaks(evidence as BaseEvidence, harness.notifications);
+    log(`\n== 用户可见文本内部词泄漏（通用守卫，场景 ${id}） ==`);
+    log(`  命中数=${leak.hitCount}；扫描渠道=${leak.channels.join('、')}`);
+    for (const note of leak.notes) log(`  注：${note}`);
+    for (const hit of leak.hits) log(`  命中@${hit.where} 「${hit.marker}」：${redact(hit.excerpt)}`);
+    emit('write_loop_scenarios_leak', { scenario: id, hitCount: leak.hitCount, hits: leak.hits.map((h) => ({ where: h.where, marker: h.marker })) });
+
     const evidenceDir = path.join(runRoot, id);
     const evidencePath = path.join(evidenceDir, 'evidence.json');
     const bundle = {
@@ -1810,10 +1861,16 @@ async function runScenario(
       evidence: redactEvidence(evidence),
       criteria,
       observations,
+      leak: {
+        hitCount: leak.hitCount,
+        hits: leak.hits.map((hit) => ({ where: hit.where, marker: hit.marker, excerpt: redact(hit.excerpt) })),
+        channels: leak.channels,
+        notes: leak.notes,
+      },
     };
     writeFileSync(evidencePath, `${JSON.stringify(bundle, null, 2)}\n`);
     log(`\n证据已落盘：${path.relative(REPO_ROOT, evidencePath)}（gitignored；不含密钥）`);
-    return { id, title: SCENARIO_TITLES[id], criteria, observations, evidencePath };
+    return { id, title: SCENARIO_TITLES[id], criteria, observations, leak, evidencePath };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const infra = error instanceof InfraAbort;
@@ -1826,7 +1883,11 @@ async function runScenario(
     }];
     log(`\n[场景 ${id} 中断] ${redact(message)}`);
     emit('write_loop_scenarios_criterion', { scenario: id, id: criteria[0]!.id, status: 'fail', kind: 'mechanical' });
-    return { id, title: SCENARIO_TITLES[id], criteria, observations: [], ...(infra ? { infraError: message } : { infraError: message }) };
+    const leak: LeakReport = {
+      hitCount: 0, hits: [], channels: [],
+      notes: [`场景在用户可见文本收集前中断（${infra ? '前置未过' : '运行异常'}），本场景无文本可扫；如实登记，不冒充扫过。`],
+    };
+    return { id, title: SCENARIO_TITLES[id], criteria, observations: [], leak, ...(infra ? { infraError: message } : { infraError: message }) };
   } finally {
     await harness.close().catch(() => {});
   }
@@ -1944,11 +2005,14 @@ async function main(): Promise<void> {
   // ---- 汇总 ----
   const allCriteria = results.flatMap((result) => result.criteria);
   const failedCriteria = allCriteria.filter((criterion) => criterion.status === 'fail');
+  const leakedScenarios = results.filter((result) => result.leak.hitCount > 0);
+  const leakHitTotal = leakedScenarios.reduce((sum, result) => sum + result.leak.hitCount, 0);
   log(`\n${'='.repeat(78)}\n== 汇总 ==`);
   for (const result of results) {
     const failed = result.criteria.filter((criterion) => criterion.status === 'fail');
     log(`  · ${result.id}（${result.title}）：判据 ${result.criteria.length} 条，fail=${failed.length}`
-      + `${failed.length === 0 ? '' : ` → ${failed.map((criterion) => criterion.id).join(',')}`}`);
+      + `${failed.length === 0 ? '' : ` → ${failed.map((criterion) => criterion.id).join(',')}`}`
+      + `；内部词泄漏命中=${result.leak.hitCount}${result.leak.hitCount > 0 ? '（机械失败）' : ''}`);
   }
   const summary = {
     generatedAt: new Date().toISOString(),
@@ -1956,24 +2020,42 @@ async function main(): Promise<void> {
     scenarios: results.map((result) => ({
       id: result.id, title: result.title,
       criteria: result.criteria, observations: result.observations,
+      leak: {
+        hitCount: result.leak.hitCount,
+        hits: result.leak.hits.map((hit) => ({ where: hit.where, marker: hit.marker, excerpt: redact(hit.excerpt) })),
+        channels: result.leak.channels, notes: result.leak.notes,
+      },
       ...(result.evidencePath === undefined ? {} : { evidencePath: path.relative(REPO_ROOT, result.evidencePath) }),
       ...(result.infraError === undefined ? {} : { infraError: redact(result.infraError) }),
     })),
-    totals: { criteria: allCriteria.length, failed: failedCriteria.length },
+    totals: { criteria: allCriteria.length, failed: failedCriteria.length, leakHits: leakHitTotal },
+    leak: {
+      hitCount: leakHitTotal,
+      scenarios: leakedScenarios.map((result) => ({
+        id: result.id,
+        hits: result.leak.hits.map((hit) => ({ where: hit.where, marker: hit.marker, excerpt: redact(hit.excerpt) })),
+      })),
+    },
   };
   writeFileSync(path.join(runRoot, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
-  log(`  判据合计 ${allCriteria.length} 条，fail=${failedCriteria.length}`);
+  log(`  判据合计 ${allCriteria.length} 条，fail=${failedCriteria.length}；内部词泄漏命中=${leakHitTotal}`);
   log(`  汇总落盘：${path.relative(REPO_ROOT, path.join(runRoot, 'summary.json'))}`);
   emit('write_loop_scenarios_summary', {
     scenarios: results.map((result) => result.id).join('+'),
     criteria: allCriteria.length,
     failed: failedCriteria.length,
+    leakHits: leakHitTotal,
   });
   if (failedCriteria.length > 0) {
     for (const criterion of failedCriteria) log(`  FAIL ${criterion.id}：${criterion.detail}`);
-    process.exitCode = 1;
   }
-  log(`\n== 场景集结束：判据 ${allCriteria.length} 条，pass=${allCriteria.length - failedCriteria.length} fail=${failedCriteria.length} ==`);
+  if (leakedScenarios.length > 0) {
+    for (const result of leakedScenarios) {
+      log(`  FAIL LEAK_INTERNAL_TERM（场景 ${result.id}）：命中 ${result.leak.hitCount} 处（见各场景 evidence.json#leak）。`);
+    }
+  }
+  if (failedCriteria.length > 0 || leakedScenarios.length > 0) process.exitCode = 1;
+  log(`\n== 场景集结束：判据 ${allCriteria.length} 条，pass=${allCriteria.length - failedCriteria.length} fail=${failedCriteria.length}；内部词泄漏命中=${leakHitTotal} ==`);
 }
 
 if (import.meta.main) {

@@ -46,6 +46,8 @@ import { effectiveDeploymentEnv, effectiveRoleOf, loadConfig, permissionsOfRole 
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver, TurnDriverInput, WakeResult } from '../../../packages/agent/src/driver-contract';
 import type { Notification, NotificationSink } from '../../../packages/agent/src/notifications';
+import { renderNotification } from '../../../packages/agent/src/notification-render';
+import { scanUserVisibleText } from '../shared/internal-terms';
 import { stripServerPaths } from '../../../packages/agent/src/server-paths';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
 import type { TaskScope } from '../../../packages/agent/src/task-registry';
@@ -729,6 +731,53 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
   return results;
 }
 
+/**
+ * 用户级批次的通用「内部词泄漏」机械扫描（所有用户级批次共用同一个 scanUserVisibleText）。
+ * 命中就是机械事实：调用方据此让本批次**失败**，不降级为观察、不进 judge 加分项。
+ *
+ * 用户可见面**尽量收全**：
+ *   · 每个回合的 Main 回复（turns[].reply）；
+ *   · 宿主主动投递文字（push_text：受理回执 / 通知 / 任务完成与失败消息）；
+ *   · 宿主通知面（notificationSink 捕获的 Notification，经 renderNotification 还原用户语言）；
+ *   · 唤醒出口正文（模型在被唤醒后说给用户的话，通常也会同时进 push_text，这里一并收）。
+ * 文件投递（sendToConversation）当前夹具只投 `(files:N)` 计数占位、没有文件说明/caption 文本，
+ * 故无 caption 可扫——channels/notes 如实登记该渠道缺口，不拿空数组冒充扫过。
+ */
+export interface LeakReport {
+  hitCount: number;
+  hits: Array<{ where: string; marker: string; excerpt: string }>;
+  channels: string[];
+  notes: string[];
+}
+
+export function scanWriteLoopLeaks(evidence: WriteLoopEvidence, notifications: readonly Notification[]): LeakReport {
+  const texts: Array<{ where: string; text: string }> = [];
+  for (const turn of evidence.turns) texts.push({ where: `回合${turn.index} 回复`, text: turn.reply });
+  evidence.pushes.forEach((push, index) => {
+    if (push.source === 'push_text') texts.push({ where: `主动投递#${index + 1}(push_text)`, text: push.text });
+  });
+  notifications.forEach((notification, index) => {
+    try {
+      texts.push({
+        where: `通知#${index + 1}(${notification.kind})`,
+        text: renderNotification({ kind: notification.kind, payload: notification.payload }),
+      });
+    } catch {
+      // renderNotification 自身会拦内部术语并抛错（文案根本没到用户）；此处不重复计泄漏。
+    }
+  });
+  if (evidence.wake !== undefined && evidence.wake.text !== undefined && evidence.wake.text !== '') {
+    texts.push({ where: '唤醒出口正文', text: evidence.wake.text });
+  }
+  const { hits } = scanUserVisibleText(texts);
+  return {
+    hitCount: hits.length,
+    hits,
+    channels: ['回合回复(Main)', '宿主主动投递文字(push_text)', '宿主通知面(renderNotification)', '唤醒出口正文'],
+    notes: ['文件投递渠道：本夹具 sendToConversation 只投 (files:N) 计数占位、无文件说明/caption 文本，故无 caption 可扫。'],
+  };
+}
+
 export function evaluateObservations(evidence: WriteLoopEvidence): ObservationResult[] {
   const observations: ObservationResult[] = [];
 
@@ -1150,6 +1199,13 @@ async function main(): Promise<void> {
   // ---- 判据与观察 ----
   const criteria = evaluateCriteria(evidence);
   const observations = evaluateObservations(evidence);
+  // 用户可见文本内部词泄漏：机械扫描，命中即本批次失败（不进 judge、不降级为观察）。
+  const leak = scanWriteLoopLeaks(evidence, notifications);
+  log('\n== 用户可见文本内部词泄漏（通用守卫） ==');
+  log(`  命中数=${leak.hitCount}；扫描渠道=${leak.channels.join('、')}`);
+  for (const note of leak.notes) log(`  注：${note}`);
+  for (const hit of leak.hits) log(`  命中@${hit.where} 「${hit.marker}」：${redact(hit.excerpt)}`);
+  emit('real_write_loop_leak', { hitCount: leak.hitCount, hits: leak.hits.map((h) => ({ where: h.where, marker: h.marker })) });
   log('\n== 判据（机械事实） ==');
   for (const criterion of criteria) {
     log(`  [${criterion.status === 'pass' ? 'PASS' : 'FAIL'}] ${criterion.id} ${criterion.title}（${criterion.kind}）`);
@@ -1184,6 +1240,12 @@ async function main(): Promise<void> {
     notifications: notifications.map((notification) => ({ kind: notification.kind, taskId: notification.taskId, createdAt: notification.createdAt })),
     criteria,
     observations,
+    leak: {
+      hitCount: leak.hitCount,
+      hits: leak.hits.map((hit) => ({ where: hit.where, marker: hit.marker, excerpt: redact(hit.excerpt) })),
+      channels: leak.channels,
+      notes: leak.notes,
+    },
   };
   writeFileSync(evidencePath, `${JSON.stringify(bundle, null, 2)}\n`);
   log(`\n证据已落盘：${path.relative(REPO_ROOT, evidencePath)}（gitignored；不含密钥）`);
@@ -1192,11 +1254,15 @@ async function main(): Promise<void> {
   registry.close();
 
   const failed = criteria.filter((criterion) => criterion.status === 'fail');
-  log(`\n== 写闭环结束：判据 ${criteria.length} 条，pass=${criteria.length - failed.length} fail=${failed.length} ==`);
+  const leakFailed = leak.hitCount > 0;
+  log(`\n== 写闭环结束：判据 ${criteria.length} 条，pass=${criteria.length - failed.length} fail=${failed.length}；内部词泄漏命中=${leak.hitCount}（${leakFailed ? '机械失败' : '无'}） ==`);
   if (failed.length > 0) {
     for (const criterion of failed) log(`  FAIL ${criterion.id}：${criterion.detail}`);
-    process.exitCode = 1;
   }
+  if (leakFailed) {
+    log(`  FAIL LEAK_INTERNAL_TERM：用户可见文本命中内部词 ${leak.hitCount} 处（见上面 leak 小节与 evidence.json#leak）。`);
+  }
+  if (failed.length > 0 || leakFailed) process.exitCode = 1;
 }
 
 if (import.meta.main) {
