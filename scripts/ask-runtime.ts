@@ -86,6 +86,7 @@ import {
   type TaskExecutionOutcome,
   type TaskExecutor,
   type TaskRunner,
+  type WaitingUserNoticePort,
 } from '../packages/agent/src/task-runner';
 import { failureMessageFor } from '../packages/agent/src/user-facing-failure';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../packages/agent/src/worker-skills';
@@ -669,6 +670,12 @@ export interface BackgroundDispatchInput {
    * 1:1 判据）。缺省不接 = 不提醒（无法投递就不打扰）。
    */
   longRunningNotice?: LongRunningNoticePort;
+  /**
+   * 等待用户提醒端口（2026-11-21 live P0）：后台任务由非等待态进入 waiting_user 时触发
+   * 恰好一次（形状见 task-runner 的 {@link WaitingUserNoticePort}）；装配方接统一状态变化
+   * 唤醒出口。缺省不接 = 零行为变化。
+   */
+  waitingUserNotice?: WaitingUserNoticePort;
   /** 长任务异步（契约 v4）的结构化事件出口（只进日志；缺省静默）。 */
   onExecutionEvent?: (event: ExecutionEvent) => void;
   /** 结构化事件出口（提醒成功/失败；缺省静默）。 */
@@ -851,6 +858,7 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
     // 档已随 2026-11-19 唤醒切片删除）；投递端口由装配方接（缺省不接 = 不提醒）。
     longRunningNoticeMs: resolved.longRunningNoticeMs,
     ...(input.longRunningNotice === undefined ? {} : { longRunningNotice: input.longRunningNotice }),
+    ...(input.waitingUserNotice === undefined ? {} : { waitingUserNotice: input.waitingUserNotice }),
     // 长任务等待「与执行层断了联系（无回执）」档的用户文案（2026-11-19）：装配层从**单一
     // 话术来源**取（user-facing-failure 的 unknown_result 档），runner 不自己写文案。
     contactLostNoticeText: failureMessageFor('unknown_result').text,

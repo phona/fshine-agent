@@ -6,9 +6,10 @@
  * （事实注入）。本模块把「用户必须知道、或必须做点什么」的那几类主动发回原会话。
  *
  * 纪律（与文件投递 / 完成投递同一套四必守）：
- *   · 只推 waiting_user / timed_out / resource_limited；accepted/started/resumed 是噪音
- *     （回合内回执已经说了），completed 由结果正文投递（`task-completion-delivery.ts`）
- *     负责——两边都推就是同一件事说两遍；failed 由失败唤醒出口负责（2026-11-19 唤醒切片）；
+ *   · 只推 timed_out / resource_limited（waiting_user 也已移出，2026-11-21 live P0：改由
+ *     等待唤醒出口说）；accepted/started/resumed 是噪音（回合内回执已经说了），completed
+ *     由结果正文投递（`task-completion-delivery.ts`）负责——两边都推就是同一件事说两遍；
+ *     failed 由失败唤醒出口负责（2026-11-19 唤醒切片）；
  *   · `cancelled`（用户说停）**不经本文件的渲染文案**直发：改走唤醒出口（`wakeCancelled`
  *     → 唤醒原会话模型说；模型说不出话才投渲染文案作兜底）——用户看到的话永远是模型说的；
  *   · 文案只复用 `renderNotification`（四类人话 + 内部术语黑名单），不新增一句话、不加编号；
@@ -56,9 +57,15 @@ import { routeFromSessionId, taskCancelledFactText } from './task-completion-del
  *
  * 2026-11-19 唤醒切片：`cancelled` 也移出本清单——用户说停不再由宿主渲染「已按你说的停了」，
  * 改由 {@link ChatNotificationSinkOptions.wakeCancelled} 唤醒模型说（渲染文案降级为兜底）。
+ *
+ * 2026-11-21 live P0：`waiting_user` 同样移出本清单——进入等待改由**等待唤醒出口**说
+ * （runner 的 waitingUserNotice 端口 → server 的 task_waiting_user_wake：唤醒原会话模型
+ * 把待确认/待补说给用户并等表态）。原因与 failed/cancelled 同形：模板直发只会把「还缺
+ * 什么」用宿主文案说一遍，模型不知道有人在等它说话（live 实测：进入等待零唤醒，用户
+ * 自己猜着发「按这版提交」才拿到确认摘要）；模板与模型文本并存 = 同一件事说两遍。
+ * outbox 仍照常记录 waiting_user 事实（落盘审计），只是聊天面不再渲染直发。
  */
 export const PUSHED_NOTIFICATION_KINDS: readonly NotificationKind[] = [
-  'waiting_user',
   'timed_out',
   'resource_limited',
 ];

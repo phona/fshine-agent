@@ -2,8 +2,8 @@
  * 主动推送 sink（`notification-chat-sink.ts`）· 确定性单测（零网络、零真模型、零真平台）。
  *
  * 钉住的语义（每条都对应任务书里的一条纪律）：
- *   ① 只推 3 类（waiting_user/timed_out/resource_limited）；「用户说停」（cancelled）走取消
- *      唤醒出口说（渲染文案只作兜底）；
+ *   ① 只推 2 类（timed_out/resource_limited）；「用户说停」（cancelled）走取消
+ *      唤醒出口说（渲染文案只作兜底）；waiting_user 也走等待唤醒出口（2026-11-21 live P0）；
  *      accepted/started/resumed/completed 一律不推（后者由结果正文投递负责）；
  *      failed 由失败唤醒出口负责；cancelled 走取消唤醒出口（渲染文案只作兜底）；
  *   ② 文案只来自 `renderNotification`（四类人话），过用户可见出口清理；
@@ -96,16 +96,18 @@ function sinkOf(overrides: Partial<Parameters<typeof createChatNotificationSink>
 }
 
 describe('主动推送 sink：种类与文案', () => {
-  it('① waiting_user 推一条人话（业务名 + 还缺什么），路由还原到原会话', async () => {
+  it('① waiting_user 不再由本 sink 推（2026-11-21 live P0）：改由等待唤醒出口说，模板直发会与模型文本双发', async () => {
+    // 口径变更（机制变化，断言不放宽）：进入等待（needs_input/needs_confirmation）的主动
+    // 告知改由 runner 的 waitingUserNotice 端口 → server 的 task_waiting_user_wake——唤醒
+    // 原会话模型把待确认/待补说给用户（事实 = missing + summary 原文 + expiresAt；兜底 =
+    // summary 原文）。旧直发测试（推一条渲染文案）随该机制退役；这里钉住
+    // 「waiting_user → kind_not_pushed」（outbox 照常落盘审计，只是聊天面不再直发）。
     const delivery = fakeDelivery();
-    const { sink } = sinkOf({ delivery: delivery.port });
+    const { sink, events } = sinkOf({ delivery: delivery.port });
     const result = await sink.send(notification('waiting_user', { missing: ['账套名'] }));
     expect(result.delivered).toBe(true);
-    expect(delivery.sent).toHaveLength(1);
-    expect(delivery.sent[0]!.route).toEqual(ROUTE);
-    expect(delivery.sent[0]!.text).toContain('需要你一句话');
-    expect(delivery.sent[0]!.text).toContain('查应收账款');
-    expect(delivery.sent[0]!.text).toContain('账套名');
+    expect(delivery.sent).toEqual([]);
+    expect(events.filter((e) => e['reason'] === 'kind_not_pushed')).toHaveLength(1);
   });
 
   it('① failed 不再由本 sink 推（2026-11-19 收口）；result_unknown 也不读作成功', async () => {
@@ -140,9 +142,9 @@ describe('主动推送 sink：种类与文案', () => {
   });
 
   it('① 推送种类清单是本文件唯一来源（防有人悄悄加种类绕过职责划分）', () => {
-    // 2026-11-19 口径变更：failed 移出（失败由失败唤醒出口直发）；唤醒切片再把 cancelled
-    // 移出（「用户说停」由取消唤醒出口说）——两者都不在直发清单里。
-    expect([...PUSHED_NOTIFICATION_KINDS]).toEqual(['waiting_user', 'timed_out', 'resource_limited']);
+    // 口径变更：2026-11-19 failed 移出（失败由失败唤醒出口直发）、cancelled 移出（「用户
+    // 说停」由取消唤醒出口说）；2026-11-21 waiting_user 移出（进入等待由等待唤醒出口说）。
+    expect([...PUSHED_NOTIFICATION_KINDS]).toEqual(['timed_out', 'resource_limited']);
   });
 
   it('① cancelled 不再由本 sink 渲染直发：交给取消唤醒出口说（事实带业务名；渲染文案只作兜底）', async () => {

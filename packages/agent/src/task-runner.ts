@@ -453,6 +453,34 @@ export interface LongRunningNoticePort {
 }
 
 /**
+ * 等待用户提醒端口（2026-11-21 live P0）：后台任务由非等待态进入 `waiting_user`
+ * （needs_input / needs_confirmation 收尾）时触发**恰好一次**——宿主据此唤醒原会话的
+ * 模型，把「还缺什么 / 待确认什么」说给用户并等表态。live 实测缺陷：进入等待此前只落
+ * 底账（唯一用户面是 outbox 模板推送），模型不知道有人在等它说话，用户只能自己猜着发
+ * 「按这版提交」才拿到确认摘要。
+ *
+ * 恰一次语义（去重 = (taskId, 进入等待次数)）：runner 只在**非等待态**回合以 needs_*
+ * 收尾落等待后触发本端口——状态机禁止 waiting→waiting，回到 running 再进等待 = 新的
+ * 一次收尾 = 新的一次触发；端口自身不承担重试（投递失败由宿主侧退回待注入，与完成 /
+ * 失败出口同一纪律）。`question` 直读底账提交后的 pendingQuestion（事实源 = 底账），
+ * **句柄（confirmation.handle）不进本端口之外的任何用户面**——用户可见文本归宿主拼装
+ * （missing 列表 + summary 原文 + expiresAt；见 server 的 taskWaitingUserFactText）。
+ * 实现方自己负责唤醒与投递纪律，异常不应抛出（抛出按 report 记账，不改任务事实）。
+ * 缺省不接 = 零行为变化（等待只有 outbox 事实记录）。
+ */
+export interface WaitingUserNoticePort {
+  sendNotice(input: {
+    taskId: string;
+    principalId: string;
+    sessionId: string;
+    /** 底账业务名（deriveTaskName 机械回落；缺省 = 宿主用中性指代）。 */
+    name?: string;
+    /** 等待事实（底账 pendingQuestion 原样）：missing 必带；confirmation 仅待确认时有。 */
+    question: PendingQuestion;
+  }): void | Promise<void>;
+}
+
+/**
  * 单一定时器端口（测试注入假时钟/假定时器，不真 sleep）。
  * runner 同一时刻只持有一个 handle；clear 幂等。
  */
@@ -556,6 +584,12 @@ export interface TaskRunnerOptions {
    * 唤醒任务所属会话与投递；runner 只判时机与「已发」（底账任务事实，不碰进程内集合）。
    */
   longRunningNotice?: LongRunningNoticePort;
+  /**
+   * 等待用户提醒端口（2026-11-21 live P0）：任务由非等待态进入 waiting_user 时触发恰好
+   * 一次（needs_input / needs_confirmation 收尾；形状见 {@link WaitingUserNoticePort}）。
+   * 缺省不接 = 零行为变化。
+   */
+  waitingUserNotice?: WaitingUserNoticePort;
   /**
    * 长任务等待「与执行层断了联系（无回执）」档的用户文案（装配方注入；**单一话术来源** =
    * `user-facing-failure.ts` 的 `unknown_result` 档，不在 runner 里另写一句）。缺省 = 不发
@@ -1575,11 +1609,13 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         return;
       case 'needs_input':
         registry.waitForUser(taskId, outcome.question);
+        notifyWaitingUser(taskId);
         return;
       case 'needs_confirmation':
         // 写操作提案：与 needs_input 同一 waiting_user 状态机（不新状态、不建确认门）；
         // confirmation 随问题落底账，是否确认由后续回合的用户表态与执行层校验决定。
         registry.waitForUser(taskId, { ...outcome.question, confirmation: outcome.confirmation });
+        notifyWaitingUser(taskId);
         return;
       case 'timed_out':
         registry.timeout(taskId, 'execution');
@@ -1588,6 +1624,33 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         if (status === 'running') registry.requestCancel(taskId); // 无请求而执行端确认取消：补齐请求事实
         registry.confirmCancelled(taskId);
         return;
+    }
+  }
+
+  /**
+   * 等待用户出口（2026-11-21 live P0）：等待落账**之后**触发一次宿主端口（fire-and-forget，
+   * 不阻塞回合收尾、不占并发槽——唤醒回合的耗时与资源由宿主侧承担）。等待事实直读底账
+   * 提交后的 pendingQuestion（不透传 outcome 引用：事实源 = 底账）；形状兜底 = 底账没有
+   * 等待形状就不触发（不猜）。恰一次：本函数只在 needs_input / needs_confirmation 收尾
+   * 落等待后各调用一次（状态机禁止 waiting→waiting；回 running 再进 = 新收尾 = 新一次）。
+   */
+  function notifyWaitingUser(taskId: string): void {
+    const waitingUserNotice = options.waitingUserNotice;
+    if (waitingUserNotice === undefined) return;
+    try {
+      const task = registry.get(taskId);
+      const question = task.pendingQuestion;
+      if (task.status !== 'waiting_user' || question === undefined) return;
+      const noticed = waitingUserNotice.sendNotice({
+        taskId,
+        principalId: task.principalId,
+        sessionId: task.sessionId,
+        ...(task.name === undefined ? {} : { name: task.name }),
+        question,
+      });
+      if (noticed !== undefined) void Promise.resolve(noticed).catch(() => undefined);
+    } catch (error) {
+      report(taskId, error);
     }
   }
 

@@ -51,6 +51,8 @@ const ASK = '帮我汇总';
 const TASK_TEXT = '帮我把结果汇总成一份文件';
 const TASK_NAME = deriveTaskName(TASK_TEXT);
 const FAIL_REASON = '执行层拒绝';
+/** ⑤d 用：用户对等待中的任务表态（脚本模型据此调 task_resume 接续）。 */
+const RESUME_MESSAGE = '按这版提交';
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -190,6 +192,14 @@ function wakeLineFor(factText: string, mode: 'line' | 'silent' | 'tool-only', wa
   if (factText.startsWith('[已停止]')) return textAssistant(`${subject}已经停了。`);
   if (factText.startsWith('[久无动静]')) return textAssistant(`${subject}比预计久了。要我停下来，还是继续等？`);
   if (factText.startsWith('[重启对账]')) return textAssistant(`${subject}我这边重启过，状态说不清了；你说一声我就重来。`);
+  if (factText.startsWith('[任务等待]')) {
+    // 待确认：模型按事实把提案原文原样转述给用户（模拟「原样告诉用户并等表态」）。
+    const summary = /将写入（逐字）：(.+?)（/u.exec(factText)?.[1];
+    if (summary !== undefined) return textAssistant(`待确认内容（原样）：${summary}。请回复确认或说不确认。`);
+    // 待补：把缺的条目原样报给用户。
+    const missing = /还缺：(.+?)。/u.exec(factText)?.[1] ?? '';
+    return textAssistant(`还差一点：${missing}。请补充一下。`);
+  }
   throw new Error(`脚本没有这条事实的台词：${factText.slice(0, 80)}`);
 }
 
@@ -277,13 +287,14 @@ async function makeFixture(mode: Mode, options: {
 
   let scripted: ScriptedModelRuntime | undefined;
   let wakeCalls = 0;
+  let resumeCalled = false;
   if (mode !== 'no-wake') {
     scripted = await createScriptedModelRuntime({
       contextWindow: 40_000,
       script: (_index, context) => {
         const last = lastUserTextOf(context.messages);
         if (last.startsWith('[任务完成]') || last.startsWith('[任务失败]') || last.startsWith('[已停止]')
-          || last.startsWith('[久无动静]') || last.startsWith('[重启对账]')) {
+          || last.startsWith('[久无动静]') || last.startsWith('[重启对账]') || last.startsWith('[任务等待]')) {
           wakeCalls += 1;
           return wakeLineFor(last, mode, wakeCalls);
         }
@@ -292,6 +303,15 @@ async function makeFixture(mode: Mode, options: {
           return hasToolResult
             ? textAssistant('好的，这件事我交给后台办，办完发你。')
             : toolCallAssistant('task_run', { task: TASK_TEXT });
+        }
+        // ⑤d（回 running 再进）：用户对等待中的任务表态 → 模型调 task_resume 接续
+        //（同一表态消息只在首个请求调工具，续回合收尾出正文）。
+        if (last === RESUME_MESSAGE) {
+          if (!resumeCalled) {
+            resumeCalled = true;
+            return toolCallAssistant('task_resume', { answer: RESUME_MESSAGE });
+          }
+          return textAssistant('好的，已按你的表态接续。');
         }
         // silent 模式对任何输入都不产出正文（含驱动的「催一句」）——测「模型说不出话」。
         return textAssistant(mode === 'silent' ? '' : '好的。');
@@ -689,6 +709,191 @@ describe('状态变化唤醒（server 级）：重启对账', () => {
       await fx.server.handler(incoming('m-2', '然后呢'));
       expect(requestHasUserText(fx.scripted!.requests(), '[重启对账]')).toBe(true);
       expect(readTask(fx.dbPath, 'task_interrupted')).toEqual({ status: 'failed', reason: 'result_unknown' });
+    } finally {
+      await fx.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 等待用户出口（2026-11-21 live P0）：任务由非等待态进入 waiting_user → **唤醒原会话的
+// 模型把待确认/待补说给用户**。live 实测缺陷：进入等待只落在底账，模型不知道、用户只能
+// 自己猜着发「按这版提交」才拿到确认摘要。本组钉住：
+//   ⑤ 进入等待（needs_confirmation）→ 恰一次唤醒；事实 = missing 列表 + confirmation.summary
+//      原文 + expiresAt，句柄（handle）永不进事实；投递文本 == 模型那句；任务保持 waiting_user；
+//   ⑤b 走岔路：模型说不出话 → 投兜底 = summary 原文 + expiresAt（执行端原话，不编新话术），
+//      事实留待注入（下次开口补说）；
+//   ⑤c 同一等待不重复唤醒（之后的状态查询不再触发）；
+//   ⑤d 回到 running 再进等待 → 第二次唤醒（按进入等待次数各唤醒一次）；
+//   ⑤e 待补（needs_input，无提案）→ 事实 = missing 列表、无 summary；模型照说；
+//   ⑤f 走岔路：待补且模型说不出话 → 无兜底（宿主没有这一条的文案，不猜）、零投递，事实留待注入。
+// 去重语义 = 每次 waitForUser 提交恰好一次（runner 只在非等待态落等待时触发端口；状态机
+// 禁止 waiting→waiting）。反向绊线：去掉唤醒接线 → ⑤/⑤c 必红（见提交说明）。
+// ---------------------------------------------------------------------------
+describe('状态变化唤醒（server 级）：等待用户', () => {
+  const CONF_SUMMARY = '将向「应收账款」表追加 3 行汇总记录';
+  const CONF_EXPIRES = '2026-11-21T16:00:00.000Z';
+  const CONF_HANDLE = 'handle-internal-0001';
+
+  function confirmationOutcome(summary: string, expiresAt: string, handle: string): TaskExecutionOutcome {
+    return {
+      kind: 'needs_confirmation',
+      question: { missing: ['用户确认'] },
+      confirmation: { handle, summary, expiresAt, operation: 'dummy.append_rows' },
+    };
+  }
+
+  /** 转录里以 prefix 开头的**最后一条**事实文本（唤醒事实经 custom message 投影成 user）。 */
+  function factTextOf(fx: Fixture, prefix: string): string {
+    const transcript = fx.mainDriver!.transcript?.() ?? [];
+    const matches = transcript.map((message) => {
+      const content = (message as { content?: unknown }).content;
+      if (typeof content === 'string') return content;
+      if (Array.isArray(content)) return content.map((block) => String((block as { text?: unknown }).text ?? '')).join('');
+      return '';
+    }).filter((text) => text.startsWith(prefix));
+    return matches[matches.length - 1] ?? '';
+  }
+
+  it('⑤ 进入等待（needs_confirmation）→ 恰一次唤醒；事实含 missing+summary 原文+expiresAt、不含句柄；投递==模型那句', async () => {
+    const fx = await makeFixture('line');
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      fx.executor.settle(confirmationOutcome(CONF_SUMMARY, CONF_EXPIRES, CONF_HANDLE));
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
+
+      // 用户拿到的是模型说的话（原样转述提案原文），不是宿主文案；句柄不进用户文本。
+      const text = fx.delivery.sentTexts[0]!.text;
+      expect(text).toBe(`待确认内容（原样）：${CONF_SUMMARY}。请回复确认或说不确认。`);
+      expect(text).not.toContain(CONF_HANDLE);
+
+      // 事实链：missing 列表 + summary 原文 + expiresAt；句柄永不进事实（宿主持有）。
+      const fact = factTextOf(fx, '[任务等待]');
+      expect(fact).toContain('用户确认');
+      expect(fact).toContain(CONF_SUMMARY);
+      expect(fact).toContain(CONF_EXPIRES);
+      expect(fact).not.toContain(CONF_HANDLE);
+      expect(fact).toContain('请把待确认/待补内容原样告诉用户并等表态');
+
+      // 恰一次唤醒 + 一次投递记账；任务保持 waiting_user（不被唤醒回合改判）。
+      const wakes = fx.logs.filter((line) => line['event'] === 'task_waiting_user_wake');
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0]).toMatchObject({ outcome: 'woken', principalId: PRINCIPAL, sessionId: SESSION });
+      expect(fx.logs.filter((line) => line['event'] === 'task_result_delivery_sent')).toHaveLength(1);
+      expect(readTask(fx.dbPath, String(wakes[0]!['taskId'])).status).toBe('waiting_user');
+      expect(fx.executor.calls).toBe(1);
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('⑤b 走岔路：模型说不出话 → 投兜底（summary 原文+expiresAt，不编新话术）；事实留待注入', async () => {
+    const fx = await makeFixture('silent');
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      fx.executor.settle(confirmationOutcome(CONF_SUMMARY, CONF_EXPIRES, CONF_HANDLE));
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
+
+      // 兜底 = 执行端原话（summary）+ 有效期，逐字；不含句柄、不含编出来的新话术。
+      expect(fx.delivery.sentTexts[0]!.text).toBe(`${CONF_SUMMARY}（${CONF_EXPIRES} 前有效）`);
+      expect(fx.delivery.sentTexts[0]!.text).not.toContain(CONF_HANDLE);
+      const wake = wakeEventOf(fx.logs, 'task_waiting_user_wake');
+      // 驱动口径：唤醒回合无正文 = failed（与重启对账 ④b 同一判定）——兜底由此投出。
+      expect(wake).toMatchObject({ outcome: 'failed' });
+      expect(readTask(fx.dbPath, String(wake!['taskId'])).status).toBe('waiting_user');
+
+      // 事实不丢：下一次用户开口随 injections 进模型上下文（既有机制）。silent 模式连
+      // 用户的下一回合也不出正文（回合按「模型侧失败」判）——注入先于回合判定，照常断言。
+      await fx.server.handler(incoming('m-2', '然后呢')).catch(() => undefined);
+      expect(requestHasUserText(fx.scripted!.requests(), '[任务等待]')).toBe(true);
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('⑤c 同一等待不重复唤醒（状态查询不再触发第二次）', async () => {
+    const fx = await makeFixture('line');
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      fx.executor.settle(confirmationOutcome(CONF_SUMMARY, CONF_EXPIRES, CONF_HANDLE));
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
+
+      // 等待期间用户再开口查状态：不产生第二次唤醒、第二次投递。
+      await fx.server.handler(incoming('m-2', '然后呢'));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(fx.logs.filter((line) => line['event'] === 'task_waiting_user_wake')).toHaveLength(1);
+      expect(fx.delivery.sentTexts).toHaveLength(1);
+      expect(fx.executor.calls).toBe(1);
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('⑤d 回到 running 再进等待 → 第二次唤醒（按进入等待次数各一次）', async () => {
+    const fx = await makeFixture('line');
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      fx.executor.settle(confirmationOutcome(CONF_SUMMARY, CONF_EXPIRES, CONF_HANDLE));
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
+
+      // 用户表态 → 模型 task_resume → 任务回 running → 执行端再次提案（新摘要/新有效期）→
+      // 再次落等待 → 第二次唤醒。
+      await fx.server.handler(incoming('m-2', RESUME_MESSAGE));
+      await vi.waitFor(() => expect(fx.executor.calls).toBe(2), { timeout: 10_000 });
+      const summary2 = '将向「应付账款」表追加 5 行记录';
+      const expires2 = '2026-11-21T17:00:00.000Z';
+      fx.executor.settle(confirmationOutcome(summary2, expires2, 'handle-internal-0002'));
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(2), { timeout: 10_000 });
+
+      const wakes = fx.logs.filter((line) => line['event'] === 'task_waiting_user_wake');
+      expect(wakes).toHaveLength(2);
+      const text2 = fx.delivery.sentTexts[1]!.text;
+      expect(text2).toBe(`待确认内容（原样）：${summary2}。请回复确认或说不确认。`);
+      const fact2 = factTextOf(fx, '[任务等待]');
+      expect(fact2).toContain(summary2);
+      expect(fact2).toContain(expires2);
+      expect(readTask(fx.dbPath, String(wakes[1]!['taskId'])).status).toBe('waiting_user');
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('⑤e 待补（needs_input，无提案）→ 事实 = missing 列表（无 summary）；模型照说', async () => {
+    const fx = await makeFixture('line');
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      fx.executor.settle({ kind: 'needs_input', question: { missing: ['账套名', '月份'] } });
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
+
+      const fact = factTextOf(fx, '[任务等待]');
+      expect(fact).toContain('账套名');
+      expect(fact).toContain('月份');
+      expect(fact).not.toContain('将写入（逐字）');
+      expect(fx.delivery.sentTexts[0]!.text).toBe('还差一点：账套名、月份。请补充一下。');
+      const wakes = fx.logs.filter((line) => line['event'] === 'task_waiting_user_wake');
+      expect(wakes).toHaveLength(1);
+      expect(readTask(fx.dbPath, String(wakes[0]!['taskId'])).status).toBe('waiting_user');
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('⑤f 走岔路：待补且模型说不出话 → 无兜底（宿主没有这一条的文案，不猜）、零投递；事实留待注入', async () => {
+    const fx = await makeFixture('silent');
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      fx.executor.settle({ kind: 'needs_input', question: { missing: ['账套名'] } });
+      await vi.waitFor(() => {
+        // 驱动口径：唤醒回合无正文 = failed（与重启对账 ④b 同一判定）。
+        expect(wakeEventOf(fx.logs, 'task_waiting_user_wake')).toMatchObject({ outcome: 'failed' });
+      }, { timeout: 10_000 });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      // 无提案 → 无 summary → 无兜底文案：零投递（不编新话术），事实留待注入。
+      expect(fx.delivery.sentTexts).toHaveLength(0);
+      expect(fx.logs.some((line) => line['event'] === 'task_result_delivery_sent')).toBe(false);
+      await fx.server.handler(incoming('m-2', '然后呢')).catch(() => undefined);
+      expect(requestHasUserText(fx.scripted!.requests(), '[任务等待]')).toBe(true);
+      expect(readTask(fx.dbPath, String(wakeEventOf(fx.logs, 'task_waiting_user_wake')!['taskId'])).status).toBe('waiting_user');
     } finally {
       await fx.close();
     }

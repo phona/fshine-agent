@@ -3,7 +3,8 @@
  *
  * 钉住的用户级行为：
  *   ① 后台任务失败 → 主动来一条人话（业务名 +「没办成」），不用等用户下次开口；
- *   ② 后台任务卡在等你说一句话 → 主动说清还缺什么；
+ *   ② 后台任务卡在等你说一句话 → 等待唤醒出口说清还缺什么（2026-11-21 live P0 改形：
+ *      模板直发退役，唤醒原会话模型说——用户仍会主动收到一句话，断言强度不放宽）；
  *   ③ 后台任务完成 → **零**推送（结果正文由完成投递发一次，不重复）；
  *   ④ 非 live（silent）→ 零投递，只记 suppressed（绝不假报 sent）；
  *   ⑤ 快活失败（短等待窗口内落定）→ **零**推送：模型同回合已经说明了。
@@ -195,15 +196,22 @@ describe('主动推送：后台任务的失败与等待（用户不必下次开�
     }
   });
 
-  it('② 后台任务等你说一句话 → 主动说清还缺什么', async () => {
+  it('② 后台任务等你说一句话 → 等待唤醒出口说清还缺什么（2026-11-21：模板直发退役，改唤醒模型说）', async () => {
+    // 机制变化（2026-11-21 live P0）：进入 waiting_user 的主动告知从「chat sink 渲染直发」
+    // 改为「唤醒原会话模型说」（runner 的 waitingUserNotice 端口 → task_waiting_user_wake；
+    // 事实 = missing 列表 + confirmation.summary 原文与 expiresAt；兜底 = summary 原文）。
+    // 旧断言「需要你一句话…」（通知渲染器模板）随直发退役；用户级「等待也要说清」由本条 +
+    // server-state-wake 的 ⑤e/⑤f 共同钉住，断言强度不放宽（用户仍会主动收到一句话）。
     const { server, delivery } = await runCase({
       outcome: () => ({ kind: 'needs_input', question: { missing: ['账套名'] } }),
     });
     try {
       await server.handler(incoming('查 documents W202611'));
       await vi.waitFor(() => expect(delivery.pushed).toHaveLength(1));
-      expect(delivery.pushed[0]!.text).toContain('需要你一句话');
+      expect(delivery.pushed[0]!.route).toEqual({ channel: 'wecom', conversationId: 'conv-a' });
       expect(delivery.pushed[0]!.text).toContain('账套名');
+      // 不是旧渲染模板（那条随直发机制退役；用户文本 = 模型按事实说的话）。
+      expect(delivery.pushed[0]!.text).not.toContain('需要你一句话');
     } finally {
       server.close();
     }

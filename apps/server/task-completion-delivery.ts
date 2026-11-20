@@ -353,6 +353,53 @@ export function taskRestartFactText(input: { name?: string; pendingCancel?: bool
 }
 
 /**
+ * 等待用户**事实**文本（2026-11-21 live P0；宿主拼，给模型读；用户看到的话由模型写）：
+ * 任务由非等待态进入 waiting_user（needs_input / needs_confirmation 同一状态机）——
+ *   `[任务等待]「<业务名>」办到一半，需要用户表态才能继续。还缺：<missing 顿号连接>。
+ *    将写入（逐字）：<confirmation.summary 执行端原话>（<expiresAt> 前有效）。
+ *    请把待确认/待补内容原样告诉用户并等表态。`
+ *
+ * 硬边界：**不含 handle**（句柄是宿主持有的凭据，永不出宿主）、不含 taskId/内部码；
+ * summary 是执行端提案原话，逐字进事实（模型要能原样转述）；待补（无提案）没有
+ * 「将写入」句。expiresAt 机械校验（解析不出就不写有效期，不猜）。name 缺省 = 主语用
+ * 中性指代。这条事实的出口见 server 的 waitingUserNotice 接线（task_waiting_user_wake）。
+ */
+export function taskWaitingUserFactText(input: {
+  name?: string;
+  missing: readonly string[];
+  summary?: string;
+  expiresAt?: string;
+}): string {
+  const subject = input.name !== undefined && input.name.trim() !== ''
+    ? `「${truncatedName(input.name)}」`
+    : '你交代的那件事';
+  const missing = input.missing.filter((entry) => entry.trim() !== '').join('、');
+  const proposal = input.summary === undefined || input.summary.trim() === ''
+    ? ''
+    : `将写入（逐字）：${input.summary}${expiresAtClause(input.expiresAt)}。`;
+  return `[任务等待]${subject}办到一半，需要用户表态才能继续。`
+    + (missing === '' ? '' : `还缺：${missing}。`)
+    + proposal
+    + '请把待确认/待补内容原样告诉用户并等表态。';
+}
+
+/** 有效期从句（机械；解析不出 = 不写，不猜）。 */
+function expiresAtClause(expiresAt: string | undefined): string {
+  if (expiresAt === undefined || !Number.isFinite(Date.parse(expiresAt))) return '';
+  return `（${expiresAt} 前有效）`;
+}
+
+/**
+ * 等待用户的**兜底**文本（模型说不出话时的宿主文案）：只用于**待确认**（有提案）——
+ * 内容 = 执行端提案原文（summary）+ 有效期，逐字拼装，**不编新话术**（用户要拿它当确认
+ * 依据）。待补（无提案）没有兜底：宿主没有这一条的文案，只记事件 + 事实留待注入
+ * （与重启对账出口同一口径——不猜、不替它说）。
+ */
+export function waitingUserFallbackText(input: { summary: string; expiresAt?: string }): string {
+  return `${input.summary}${expiresAtClause(input.expiresAt)}`;
+}
+
+/**
  * 单次失败投递（调用方 fire-and-forget；内部吞错并如实记账）。
  * 用户文本 = 降级话术（failureFallbackTextFor：资源受限走既有「系统太忙」句，其余按 kind），
  * **不含任何执行层原文/内部词**；kind 由底账执行事实的 code / result_unknown 状态归类，

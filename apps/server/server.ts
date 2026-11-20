@@ -67,7 +67,7 @@ import { createResourcePolicy, fileRefTtlMsOf, resolveRuntimeConfig } from '../.
 import { SessionPersistence } from '../../packages/agent/src/session-persistence';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import { deriveTaskName } from '../../packages/agent/src/task-registry';
-import type { TaskExecutor, TaskRunner } from '../../packages/agent/src/task-runner';
+import type { TaskExecutor, TaskRunner, WaitingUserNoticePort } from '../../packages/agent/src/task-runner';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../../packages/agent/src/worker-skills';
 import {
   assembleSessionCore,
@@ -89,6 +89,8 @@ import {
   taskCompletionFallbackText,
   taskFailureFactText,
   taskRestartFactText,
+  taskWaitingUserFactText,
+  waitingUserFallbackText,
 } from './task-completion-delivery';
 import {
   OUTCOME_REASON_NOT_PERMITTED,
@@ -798,6 +800,49 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     // 完成之后才跑）。
     wakeStateChange: (notice) => wakeLongRunningNotice(notice),
   });
+  // 等待用户出口（2026-11-21 live P0）：任务由非等待态进入 waiting_user（needs_input /
+  // needs_confirmation 收尾）→ **唤醒原会话的模型把待确认/待补说给用户并等表态**，与完成 /
+  // 失败/取消/久无动静/重启对账共用同一条状态变化出口（不新建第二套唤醒与投递）。live 实测
+  // 缺陷：进入等待此前只落底账，模型不知道有人在等它说话（15:25:55.992 落等待到 15:26:04
+  // 零推送），用户只能自己猜着发「按这版提交」才拿到确认摘要。
+  //   · 事实机械：missing 列表 + confirmation.summary 原文与 expiresAt；**句柄不进事实**；
+  //   · 兜底（模型说不出话）= summary 原文 + expiresAt（执行端原话，不编新话术）；
+  //     待补（无提案）没有兜底——只记事件 + 事实留待注入（不猜、不替它说）；
+  //   · 去重 = (taskId, 进入等待次数)：runner 只在非等待态落等待时触发端口（状态机禁止
+  //     waiting→waiting；回 running 再进 = 新的一次）；投递失败退回待注入，不重试唤醒。
+  const waitingUserNotice: WaitingUserNoticePort = {
+    sendNotice: (notice) => {
+      const confirmation = notice.question.confirmation;
+      void (async () => {
+        await wakeAndDeliverStateChange({
+          taskId: notice.taskId,
+          principalId: notice.principalId,
+          sessionId: notice.sessionId,
+          event: 'task_waiting_user_wake',
+          factText: taskWaitingUserFactText({
+            ...(notice.name === undefined ? {} : { name: notice.name }),
+            missing: notice.question.missing,
+            ...(confirmation === undefined ? {} : { summary: confirmation.summary }),
+            ...(confirmation?.expiresAt === undefined ? {} : { expiresAt: confirmation.expiresAt }),
+          }),
+          ...(confirmation === undefined ? {} : {
+            fallbackText: waitingUserFallbackText({
+              summary: confirmation.summary,
+              ...(confirmation.expiresAt === undefined ? {} : { expiresAt: confirmation.expiresAt }),
+            }),
+          }),
+        });
+      })().catch((error) => {
+        log({
+          event: 'task_waiting_user_wake_failed',
+          taskId: notice.taskId,
+          principalId: notice.principalId,
+          sessionId: notice.sessionId,
+          reason: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300),
+        });
+      });
+    },
+  };
   let runner: TaskRunner | undefined;
   let outbox: NotificationOutbox | undefined;
   let notificationAttachment: ReturnType<typeof attachNotificationOutbox> | undefined;
@@ -886,6 +931,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // 预期契约（2026-11-18；2026-11-19 #9/#10 改形）：久无动静提醒端口（只一档；1:1 与群聊
       // 都发，判据只看底账任务事实，不看进程内集合；群主体话术不带业务名）。
       longRunningNotice,
+      // 等待用户出口（2026-11-21 live P0）：任务落 waiting_user → 唤醒原会话模型说
+      // （见上方 waitingUserNotice 注释：事实机械、句柄不外泄、恰一次）。
+      waitingUserNotice,
       // 长任务异步（契约 v4）：accepted / 协议违约 / 续跑回程登记与等待推进只进日志。
       onExecutionEvent: (event) => log({ mode: 'background', ...event }),
       log: (line) => log({ mode: 'background-runner', ...line }),
