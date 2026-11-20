@@ -284,12 +284,13 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
     try {
       const { taskId, taskNo } = await delegateFirstTurn(fixture);
 
-      // 用户补一句 → Main 用同一 #编号 task_resume（不是新 task_run）。
+      // 用户补一句 → Main 用同一 taskId task_resume（不是新 task_run）。
+      // 2026-11-20 机制变化：数字 ref 退役，改按 taskId 引用（断言不变）。
       fixture.push({
         calls: [
           {
             tool: 'task_resume',
-            args: { ref: `#${taskNo}`, answer: '用 documents 这个集合' },
+            args: { ref: taskId, answer: '用 documents 这个集合' },
           },
         ],
         reply: '收到，继续办理。',
@@ -316,7 +317,7 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
 
       // 结果可见：task_result 的 replyText 是 Worker 最终汇报（逐字存档）。
       fixture.push({
-        calls: [{ tool: 'task_result', args: { ref: `#${taskNo}` } }],
+        calls: [{ tool: 'task_result', args: { ref: taskId } }],
         reply: '合同清单已经整理好。',
       });
       await fixture.assembled.session.send('结果发我一下');

@@ -91,6 +91,21 @@ function executorWith(steps: Array<(exec: Exec) => Promise<void>>, reply?: strin
   });
 }
 
+/**
+ * 2026-11-20：数字 ref（#N）退役，脚本分步改用真实 taskId——从前一步 task_run 的回执里取。
+ * 断言强度不放宽（仍须命中同一任务；取消结果仍须如实 terminal）。
+ */
+function taskIdSlot(): { ref(): Record<string, unknown>; capture(result: unknown): void } {
+  let taskId: string | undefined;
+  return {
+    ref: () => ({ ref: taskId ?? '' }),
+    capture(result) {
+      const candidate = (result as { taskId?: unknown } | undefined)?.taskId;
+      if (typeof candidate === 'string') taskId = candidate;
+    },
+  };
+}
+
 function itemFor(caseDef: ExpCase, trial = 1): ExpItem {
   return { id: `${caseDef.id}#${trial}`, caseId: caseDef.id, kind: caseDef.kind, arm: caseDef.kind === 'skill-arm' ? (caseDef.arm ?? 'none') : null, trial, sessionId: `s-${caseDef.id}-${trial}` };
 }
@@ -191,11 +206,12 @@ describe('② 工具面门控核实（缺口 1：只读查询始终注册，治�
 describe('③ 四工具全流程（假件）', () => {
   it('T01：task_run/task_status/task_result/task_cancel 各发生一次；取消如实（completed→terminal）；判定通过', async () => {
     const root = freshRoot();
+    const slot = taskIdSlot();
     const exec = executorWith([
-      async (e) => { await e('task_run', { task: '核对 alpha 集合 W1 的记录' }); },
-      async (e) => { await e('task_status', { ref: '#1' }); },
-      async (e) => { await e('task_result', { ref: '#1' }); },
-      async (e) => { await e('task_cancel', { ref: '#1' }); },
+      async (e) => { slot.capture(await e('task_run', { task: '核对 alpha 集合 W1 的记录' })); },
+      async (e) => { await e('task_status', slot.ref()); },
+      async (e) => { await e('task_result', slot.ref()); },
+      async (e) => { await e('task_cancel', slot.ref()); },
     ]);
     const ev = await exec(itemFor(T01), T01, path.join(root, 't01'));
     const verdict = judgeExp(ev);
@@ -208,11 +224,12 @@ describe('③ 四工具全流程（假件）', () => {
 });
 
 describe('④ 越权=找不到 与 挂起→接着办（预置任务）', () => {
-  it('T03：他会话 #1 不可见 → task_status 抛错（不泄露存在性）；判定通过', async () => {
+  it('T03：他会话任务不可见 → task_status 抛错（不泄露存在性）；判定通过', async () => {
     const root = freshRoot();
     const exec = executorWith([
       async (e) => { await e('task_run', { task: '核对 beta 集合 W1 的记录' }); },
-      async (e) => { await e('task_status', { ref: '#1' }); },
+      // 2026-11-20：数字 ref 退役——用任意外部 taskId 引用他会话任务，scope 内同样找不到。
+      async (e) => { await e('task_status', { ref: 'seed_foreign_other_session' }); },
     ], undefined, () => workerQuerier('beta', 'W1'));
     const ev = await exec(itemFor(T03), T03, path.join(root, 't03'));
     expect(ev.seedTaskNos.foreign, '预置的他会话任务应占 #1').toBe(1);
@@ -223,9 +240,16 @@ describe('④ 越权=找不到 与 挂起→接着办（预置任务）', () => 
 
   it('T02：挂起任务可查（pendingQuestion）→ task_resume 接续 → 落终态', async () => {
     const root = freshRoot();
+    const slot = taskIdSlot();
     const exec = executorWith([
-      async (e) => { await e('task_status', {}); },
-      async (e) => { await e('task_resume', { ref: '#1', answer: 'contoso-trade W1' }); },
+      async (e) => {
+        // 2026-11-20：数字 ref 退役——从 task_status 列表里取预置挂起任务的真实 taskId。
+        const listed = await e('task_status', {}) as { tasks?: Array<{ taskId?: string; status?: string }> };
+        const waiting = listed?.tasks?.find((task) => task.status === 'waiting_user');
+        if (waiting?.taskId === undefined) throw new Error('（测试）task_status 列表里没有等待中的任务');
+        slot.capture({ taskId: waiting.taskId });
+      },
+      async (e) => { await e('task_resume', { ...slot.ref(), answer: 'contoso-trade W1' }); },
     ], undefined, () => workerQuerier('contoso-trade', 'W1'));
     const ev = await exec(itemFor(T02), T02, path.join(root, 't02'));
     expect(ev.seedTaskNos.waiting, '预置的挂起任务应占 #1').toBe(1);
@@ -239,11 +263,12 @@ describe('⑤ 跑批装配（batch + collect + judge，假件）', () => {
   it('T01 × N=3：逐样本工作目录 + 证据落盘 + 判定汇总（Wilson）', async () => {
     const root = freshRoot();
     const outRoot = path.join(root, 'out');
+    const slot = taskIdSlot();
     const exec = executorWith([
-      async (e) => { await e('task_run', { task: '核对 alpha 集合 W1 的记录' }); },
-      async (e) => { await e('task_status', { ref: '#1' }); },
-      async (e) => { await e('task_result', { ref: '#1' }); },
-      async (e) => { await e('task_cancel', { ref: '#1' }); },
+      async (e) => { slot.capture(await e('task_run', { task: '核对 alpha 集合 W1 的记录' })); },
+      async (e) => { await e('task_status', slot.ref()); },
+      async (e) => { await e('task_result', slot.ref()); },
+      async (e) => { await e('task_cancel', slot.ref()); },
     ]);
     const items = expandExpItems([T01]);
     const report = await runExpBatch({ kind: 'task-surface', cases: [T01], items, executor: exec, outRoot, concurrency: 4 });

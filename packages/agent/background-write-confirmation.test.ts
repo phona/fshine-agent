@@ -333,8 +333,8 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
       confirmation?: { summary?: string };
     } | undefined;
     expect(pending?.confirmation?.summary).toBe(SUMMARY);
-    // 可见投影不带句柄（句柄留底账供 S3 透传）。
-    const visible = await taskStatusOf(registry, '#1');
+    // 可见投影不带句柄（句柄留底账供 S3 透传）。（2026-11-20：数字 ref 退役，按真实 taskId。）
+    const visible = await taskStatusOf(registry, 't_confirm');
     expect(visible.status).toBe('waiting_user');
     const projected = JSON.stringify(visible);
     expect(projected).not.toContain('cf_');
@@ -393,7 +393,8 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     // 脱敏不是隐藏一切：机械摘要仍然可见（Worker 要知道在等什么确认）。
     expect(workerSaw).toContain(SUMMARY);
 
-    const visible = await taskStatusOf(registry, '#1');
+    // 2026-11-20：数字 ref 退役，按真实 taskId 投影（断言不变）。
+    const visible = await taskStatusOf(registry, 't_leak');
     const projected = JSON.stringify(visible);
     expect(projected).not.toContain('cf_');
     expect(projected).not.toContain('handle');
@@ -427,7 +428,8 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     // 旧句柄不再可见（底账与投影都不带）。
     const ledger = JSON.stringify(task);
     expect(ledger).not.toContain('cf_s1_round_1');
-    const projected = JSON.stringify(await taskStatusOf(registry, '#1'));
+    // 2026-11-20：数字 ref 退役，按真实 taskId 投影（断言不变）。
+    const projected = JSON.stringify(await taskStatusOf(registry, 't_replace'));
     expect(projected).not.toContain('cf_s1_round_1');
     expect(projected).not.toContain('cf_s1_round_2');
     expect(projected).not.toContain('handle');
@@ -703,7 +705,8 @@ describe('同回合自我确认被挡：结局是 waiting_user（提案），不
     expect(client.requests.map((r) => r.operation)).toEqual(['dummy.prepare', 'dummy.commit']);
 
     // 用户可见面 = 提案（含摘要），不是「没办成」；句柄不进可见投影。
-    const visible = await taskStatusOf(registry, '#1');
+    // 2026-11-20：数字 ref 退役，按真实 taskId 投影（断言不变）。
+    const visible = await taskStatusOf(registry, 't_self_confirm');
     expect(visible.status).toBe('waiting_user');
     const projected = JSON.stringify(visible);
     expect(projected).toContain(SUMMARY);

@@ -1335,6 +1335,15 @@ const OPERATION_IN_PROGRESS_MESSAGE =
 export const SAME_TURN_CONFIRMATION_PENDING_MESSAGE =
   '待确认提案已生成：需要用户在下一回合确认后才能提交；本回合不再发起新的执行。';
 
+/**
+ * 数字任务引用拒答（2026-11-20 live 缺陷 P1）：`#N`/裸数字是已退役的历史兼容写法，
+ * 任务编号不进模型可见面，模型只能凭空编数字 → 查到错任务；在 task_confirm/task_cancel
+ * 上就是**操作错对象**。确定性拒绝并给可行动下一步（不含内部机制词），不猜编号映射。
+ */
+export const NUMERIC_TASK_REF_MESSAGE =
+  '任务引用要填任务清单里的那串标识（taskId），不要用 #数字 或纯数字；'
+  + '先留空引用查一下本会话任务，再用清单里的 taskId 查。';
+
 /** 写操作提案落底账时的机械 missing 条目（waiting_user 形状要求 missing 非空；不编造业务原因）。 */
 const CONFIRMATION_PENDING_MISSING = '用户确认';
 
@@ -2019,13 +2028,15 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   const scope: TaskScope = { principalId: options.principalId, sessionId: options.sessionId };
 
   /**
-   * 任务引用解析：只在**本会话 scope 化列表**内解析 taskId（并兼容历史 `#编号`/裸编号写法）——
-   * 跨会话/跨 principal 的任务自然表现为「找不到」（与不存在同一 TaskOwnershipError，不泄露存在性）。
-   * 编号仅作历史兼容入口，不进任何投影/工具描述/用户可见文本。
+   * 任务引用解析：只接受 taskId（任务清单里的那串标识），**不再兼容历史 `#编号`/裸编号**
+   * （2026-11-20 live 缺陷 P1：编号不进模型可见面，模型只能凭空编数字 → 查到错任务，
+   * 在 task_confirm/task_cancel 上就是操作错对象）。数字引用确定性拒绝并给可行动下一步，
+   * 不做任何编号映射；跨会话/跨 principal 的 taskId 仍按「找不到」处理（不泄露存在性）。
    */
   function resolveTaskId(ref: string): string {
     const wanted = ref.trim();
-    const hit = registry.list(scope).find((task) => (task.taskNo !== undefined && (`#${task.taskNo}` === wanted || String(task.taskNo) === wanted)) || task.taskId === wanted);
+    if (/^#?\d+$/u.test(wanted)) throw new Error(NUMERIC_TASK_REF_MESSAGE);
+    const hit = registry.list(scope).find((task) => task.taskId === wanted);
     if (hit === undefined) throw new TaskOwnershipError();
     return hit.taskId;
   }

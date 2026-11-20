@@ -221,9 +221,9 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
       expect(waiting.pendingQuestion?.missing.join(' ')).toContain('window');
       expect(waiting.executions.map((execution) => execution.status)).toEqual(['needs_input']);
 
-      // 用户问「怎么样了」：问题对用户可见（同一任务、同一编号）。
+      // 用户问「怎么样了」：问题对用户可见（同一任务）。2026-11-20：数字 ref 退役，按 taskId。
       sim.book.mainTurn('刚才那个任务怎么样了？', [
-        toolCallAssistant('task_status', { ref: `#${taskNo ?? 1}` }),
+        toolCallAssistant('task_status', { ref: taskId }),
         (call) => {
           const status = lastToolResultJsonOf(call.messages);
           const missing = (status?.['pendingQuestion'] as { missing?: readonly string[] } | undefined)?.missing ?? [];
@@ -235,9 +235,9 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
       await sim.waitFor('状态追问终帧', () => sim.finalBubbles().length === 2);
       expect(sim.finalBubbles().at(-1)!.content).toContain('window');
 
-      // 用户补答 → Main 用同一个 #编号接续（不是新 task_run）。
+      // 用户补答 → Main 用同一 taskId 接续（不是新 task_run）。2026-11-20：数字 ref 退役。
       sim.book.mainTurn('用 2026-10 这个窗口', [
-        toolCallAssistant('task_resume', { ref: `#${taskNo ?? 1}`, answer: '2026-10' }),
+        toolCallAssistant('task_resume', { ref: taskId, answer: '2026-10' }),
         (call) => {
           const result = lastToolResultJsonOf(call.messages);
           if (result?.['outcome'] !== 'started') throw new Error(`接续结果不是 started：${JSON.stringify(result)}`);

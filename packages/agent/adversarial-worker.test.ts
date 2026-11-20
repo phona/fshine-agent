@@ -329,7 +329,8 @@ describe('模型走岔路（确定性脚本模型）', () => {
 
     // ④ 用户可见面无内部词。
     assertUserVisibleClean(proposalCardText(task));
-    const projected = await taskStatusOf(registry, '#1');
+    // 2026-11-20：数字 ref 退役，按真实 taskId 投影（断言不变）。
+    const projected = await taskStatusOf(registry, 't_detour');
     expect(projected.status).toBe('waiting_user');
     expect(JSON.stringify(projected)).toContain('「alpha」将被覆盖，不可撤销');
     expect(JSON.stringify(projected)).not.toContain('cf_');
@@ -387,8 +388,8 @@ describe('模型走岔路（确定性脚本模型）', () => {
     // ③ 执行事实 2 条、无第三条。
     expect(client.calls).toHaveLength(2);
     expect(task.executions).toHaveLength(2);
-    // 旧句柄不再可见。
-    const projected = await taskStatusOf(registry, '#1');
+    // 旧句柄不再可见。（2026-11-20：数字 ref 退役，按真实 taskId 投影。）
+    const projected = await taskStatusOf(registry, 't_dup');
     expect(JSON.stringify(projected)).not.toContain('cf_');
     expect(JSON.stringify(projected)).not.toContain('handle');
   });
@@ -412,7 +413,8 @@ describe('模型走岔路（确定性脚本模型）', () => {
     // 旧句柄 cf_1 不再出现在用户可见文本与投影里；新摘要来自 B。
     assertUserVisibleClean(proposalCardText(task));
     expect(proposalCardText(task)).toContain('beta');
-    const projected = JSON.stringify(await taskStatusOf(registry, '#1'));
+    // 2026-11-20：数字 ref 退役，按真实 taskId 投影（断言不变）。
+    const projected = JSON.stringify(await taskStatusOf(registry, 't_reprep'));
     expect(projected).toContain('beta');
     expect(projected).not.toContain('cf_1');
     expect(projected).not.toContain('cf_');

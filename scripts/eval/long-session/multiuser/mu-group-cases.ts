@@ -328,20 +328,23 @@ export async function mu11(rt: RuntimeConfig): Promise<MuCaseResult> {
     const bTask = tasksAfterDelegation.find((task) => task.request === bSubmit) ?? null;
     const aNo = aTask?.taskNo ?? 0;
     const bNo = bTask?.taskNo ?? 0;
+    // 2026-11-20：数字 ref 退役——同群/异群引用改用真实 taskId（判据强度不变）。
+    const aRef = aTask?.taskId ?? '';
+    const bRef = bTask?.taskId ?? '';
 
     const bCrossText = 'GROUP-MU11 B 查 A 的编号';
     const aCrossText = 'GROUP-MU11 A 查 B 的编号';
     const otherGroupText = 'GROUP-MU11 别的群查 A 的编号';
     plans.turn('mu-bob', bCrossText, {
       calls: [
-        { tool: 'task_status', args: { ref: `#${aNo}` } },
-        { tool: 'task_result', args: { ref: `#${aNo}` } },
+        { tool: 'task_status', args: { ref: aRef } },
+        { tool: 'task_result', args: { ref: aRef } },
       ],
       reply: '本群的任务。',
       principal: groupPrincipal,
     });
-    plans.turn('mu-alice', aCrossText, { calls: [{ tool: 'task_status', args: { ref: `#${bNo}` } }], reply: '本群的任务。', principal: groupPrincipal });
-    plans.turn('mu-carol', otherGroupText, { calls: [{ tool: 'task_status', args: { ref: `#${aNo}` } }], reply: '别的群里没有这个任务。', principal: otherGroupPrincipal });
+    plans.turn('mu-alice', aCrossText, { calls: [{ tool: 'task_status', args: { ref: bRef } }], reply: '本群的任务。', principal: groupPrincipal });
+    plans.turn('mu-carol', otherGroupText, { calls: [{ tool: 'task_status', args: { ref: aRef } }], reply: '别的群里没有这个任务。', principal: otherGroupPrincipal });
 
     const bCrossReply = await deliver(handle.server.handler, incoming('mu-bob', GROUP11, 'b-2', bCrossText, 'group'));
     const aCrossReply = await deliver(handle.server.handler, incoming('mu-alice', GROUP11, 'a-2', aCrossText, 'group'));
@@ -592,12 +595,14 @@ export async function mu13(rt: RuntimeConfig): Promise<MuCaseResult> {
     const tasks = readTasks(handle.dbPath);
     const aTask = tasksOfGroupPrincipal(tasks, GROUP13).find((task) => task.request === aSubmit) ?? null;
     const aNo = aTask?.taskNo ?? 0;
+    // 2026-11-20：数字 ref 退役——按真实 taskId 查本群/异群（判据强度不变）。
+    const aRef = aTask?.taskId ?? '';
 
-    // ② 同群 B 查 A 的编号：必须成功（群共享）。③ 另一个群的 C 查同一编号：必须拒绝。
+    // ② 同群 B 查 A 的任务：必须成功（群共享）。③ 另一个群的 C 查同一任务：必须拒绝。
     const bQueryText = 'GROUP-MU13 B 查本群的编号';
     const cQueryText = 'GROUP-MU13 别的群查 A 的编号';
-    plans.turn('mu-bob', bQueryText, { calls: [{ tool: 'task_status', args: { ref: `#${aNo}` } }], reply: '本群的任务。', principal: groupPrincipal });
-    plans.turn('mu-carol', cQueryText, { calls: [{ tool: 'task_status', args: { ref: `#${aNo}` } }], reply: '别的群没有这个任务。', principal: otherGroupPrincipal });
+    plans.turn('mu-bob', bQueryText, { calls: [{ tool: 'task_status', args: { ref: aRef } }], reply: '本群的任务。', principal: groupPrincipal });
+    plans.turn('mu-carol', cQueryText, { calls: [{ tool: 'task_status', args: { ref: aRef } }], reply: '别的群没有这个任务。', principal: otherGroupPrincipal });
 
     started.sdk.emit('message.text', wecomTextFrame('cb-mu13-b', {
       msgid: 'b-1', from: 'mu-bob', content: bQueryText, chattype: 'group', chatid: GROUP13,
@@ -615,8 +620,8 @@ export async function mu13(rt: RuntimeConfig): Promise<MuCaseResult> {
     ];
     const bQueryRecord = ctx.mainRecords.find((record) => record.userText === bQueryText);
     const cQueryRecord = ctx.mainRecords.find((record) => record.userText === cQueryText);
-    const bQuery = observationOf(bQueryRecord?.calls[0]) ?? { tool: 'task_status', ref: `#${aNo}`, error: '未执行', result: null };
-    const cQuery = observationOf(cQueryRecord?.calls[0]) ?? { tool: 'task_status', ref: `#${aNo}`, error: '未执行', result: null };
+    const bQuery = observationOf(bQueryRecord?.calls[0]) ?? { tool: 'task_status', ref: aRef, error: '未执行', result: null };
+    const cQuery = observationOf(cQueryRecord?.calls[0]) ?? { tool: 'task_status', ref: aRef, error: '未执行', result: null };
 
     const judgement = judgeGroupDeliverySharing({
       groupChatId: GROUP13,

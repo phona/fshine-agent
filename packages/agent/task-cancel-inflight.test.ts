@@ -194,7 +194,8 @@ function faceClient(): ExecutionClient {
 }
 
 interface MainStep {
-  calls?: ReadonlyArray<{ tool: string; args: Record<string, unknown> }>;
+  /** args 可为函数：按上一回合收集到的结果动态解析（如用受理回执的 taskId 引用任务）。 */
+  calls?: ReadonlyArray<{ tool: string; args: Record<string, unknown> | ((results: readonly unknown[]) => Record<string, unknown>) }>;
   text: string;
 }
 
@@ -204,10 +205,23 @@ function scriptedMainDriver(steps: MainStep[], results: unknown[]): TurnDriver {
     async run(input) {
       const step = steps.shift();
       if (step === undefined) throw new Error('（测试）没有更多 Main 驱动步骤');
-      for (const call of step.calls ?? []) results.push(await input.exec(call.tool, call.args));
+      for (const call of step.calls ?? []) {
+        const args = typeof call.args === 'function' ? call.args(results) : call.args;
+        results.push(await input.exec(call.tool, args));
+      }
       return { text: step.text, messages: [...input.messages] };
     },
   };
+}
+
+/**
+ * 2026-11-20 机制变化：数字 ref（#1）退役，取消改用受理回执里的真实 taskId。
+ * 脚本按上一回合 results[0] 的 taskId 动态取引用，断言强度不变（仍取消同一任务）。
+ */
+function taskIdRefFrom(results: readonly unknown[]): Record<string, unknown> {
+  const receipt = results[0] as { taskId?: unknown } | undefined;
+  if (typeof receipt?.taskId !== 'string') throw new Error('（测试）受理回执没有 taskId，无法按 taskId 取消');
+  return { ref: receipt.taskId };
 }
 
 function submit(runner: ReturnType<typeof createTaskRunner>, taskId: string, request: string): void {
@@ -285,7 +299,8 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       readOnlyOperations: ['dummy.query'],
       mainDriver: scriptedMainDriver([
         { calls: [{ tool: TASK_RUN_TOOL, args: { task: '查一下 alpha 集合' } }], text: '已受理，后台跑着。' },
-        { calls: [{ tool: TASK_CANCEL_TOOL, args: { ref: '#1' } }], text: '好，已请求停止。' },
+        // 2026-11-20：数字 ref 退役，按受理回执的 taskId 取消。
+        { calls: [{ tool: TASK_CANCEL_TOOL, args: taskIdRefFrom }], text: '好，已请求停止。' },
       ], results),
       workerDriver: {
         async run() {
@@ -398,7 +413,8 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
     const results: unknown[] = [];
     const mainDriver: TurnDriver = {
       async run(input) {
-        results.push(await input.exec(TASK_CANCEL_TOOL, { ref: '#1' }));
+        // 2026-11-20：数字 ref 退役，按真实 taskId 取消。
+        results.push(await input.exec(TASK_CANCEL_TOOL, { ref: 'task_done' }));
         return { text: '该任务已经完成，不能取消。', messages: input.messages };
       },
     };

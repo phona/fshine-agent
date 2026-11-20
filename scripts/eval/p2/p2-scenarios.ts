@@ -909,12 +909,13 @@ async function runS4(dir: string, trial: number): Promise<P2Observation> {
     () => textAssistant('两个核对都已受理：alpha 先跑，beta 排队。'),
   ], 1);
   book.mainTurn(t2, [
-    () => toolCallAssistant('task_cancel', { ref: `#${findTaskNo(ref, 'beta')}` }),
-    () => textAssistant(`已取消 #${findTaskNo(ref, 'beta')}，beta 那边不会再执行。`),
+    // 2026-11-20：数字 ref 退役，按真实 taskId 取消/回话（断言强度不变）。
+    () => toolCallAssistant('task_cancel', { ref: findTaskId(ref, 'beta') }),
+    () => textAssistant('已取消 beta 那边的核对，不会再执行。'),
   ], 2);
   book.mainTurn(t3, [
     toolCallAssistant('task_run', { task: betaOnly }),
-    () => textAssistant(`已按新要求重新交办 #${taskNoOf(ref)}（只查 beta）。`),
+    () => textAssistant('已按新要求重新交办（只查 beta）。'),
   ], 3);
   book.workerTask(alphaCheck, [
     toolCallAssistant('op_dummy_query', { 'collection': 'alpha', 'window': 'W1' }),
@@ -957,6 +958,13 @@ async function runS4(dir: string, trial: number): Promise<P2Observation> {
 
 function findTaskNo(ref: ExecRef, requestFragment: string): number {
   return tasksOf(ref).find((task) => task.request.includes(requestFragment))?.taskNo ?? 1;
+}
+
+/** 2026-11-20：数字 ref 退役——场景里的取消/查询改为按真实 taskId 引用。 */
+function findTaskId(ref: ExecRef, requestFragment: string): string {
+  const taskId = tasksOf(ref).find((task) => task.request.includes(requestFragment))?.taskId;
+  if (taskId === undefined) throw new Error(`（场景）找不到含「${requestFragment}」的任务 taskId`);
+  return taskId;
 }
 
 async function runS5(dir: string, trial: number): Promise<P2Observation> {

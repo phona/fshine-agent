@@ -468,7 +468,8 @@ describe('唤醒回合的界（2026-11-19 复核 F1）', () => {
     // 只读执行面：task_status 读真实底账（拿到刚建的任务），task_result 拿结果存档。
     const status = await seenToolFace!.exec('task_status', {}) as { tasks: Array<{ name: string }> };
     expect(status.tasks[0]!.name, 'task_status 读到真实底账').toBe('汇总那件事');
-    const result = await seenToolFace!.exec('task_result', { ref: '#1' }) as { resultText: string | null };
+    // 2026-11-20：数字 ref 退役，按真实 taskId 读结果（断言不变）。
+    const result = await seenToolFace!.exec('task_result', { ref: 'task_wake_face' }) as { resultText: string | null };
     expect(result.resultText, 'task_result 读到真实结果存档').toBe('共 7 条，已确认无误。');
     // 执行类工具（含集合外任何名字）被只读闭包确定性拒绝，执行层零调用。
     await expect(seenToolFace!.exec('execute_operation', {})).rejects.toThrow('唤醒回合不允许调用工具');

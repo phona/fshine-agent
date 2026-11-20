@@ -300,22 +300,24 @@ export async function mu5(rt: RuntimeConfig): Promise<MuCaseResult> {
   const plans = new MuPlans();
   const aSubmit = `${MU_TAGS['mu-alice']} 交办查账`;
   plans.delegate('mu-alice', aSubmit, { reply: '已受理，稍后通知你。', operation: 'dummy.query', args: { '--collection': 'TAG-ALICE' }, summary: '完成。' });
-  plans.turn('mu-alice', `${MU_TAGS['mu-alice']} 查自己任务 #1`, { calls: [{ tool: 'task_status', args: { ref: '#1' } }], reply: '这是我自己的任务。' });
-  plans.turn('mu-bob', `${MU_TAGS['mu-bob']} 试图查看 #1`, {
-    calls: [
-      { tool: 'task_status', args: { ref: '#1' } },
-      { tool: 'task_result', args: { ref: '#1' } },
-      { tool: 'task_cancel', args: { ref: '#1' } },
-    ],
-    reply: '我无法访问。',
-  });
   const ctx = makeCtx(plans.table(), null);
   const handle = await createMuServer({ dir: tmp.dir, ctx, mode: 'background', runtime: rt, taskExecutor: new MuFakeExecutor([async () => ({ kind: 'completed', resultText: '完成。' })]) });
   try {
     await deliver(handle.server.handler, incoming('mu-alice', 'conv-a5', 'a-1', aSubmit));
     const aliceTask = readTasks(handle.dbPath).find((task) => task.principalId === principalIdOf('mu-alice'));
     const aliceTaskNo = aliceTask?.taskNo ?? 1;
-    // control：alice 查自己 #1 成功
+    // 2026-11-20：数字 ref 退役——用 A 的真实 taskId 注册控制/越权调用（plans.table() 是活引用）。
+    const aRef = aliceTask?.taskId ?? '';
+    plans.turn('mu-alice', `${MU_TAGS['mu-alice']} 查自己任务 #1`, { calls: [{ tool: 'task_status', args: { ref: aRef } }], reply: '这是我自己的任务。' });
+    plans.turn('mu-bob', `${MU_TAGS['mu-bob']} 试图查看 #1`, {
+      calls: [
+        { tool: 'task_status', args: { ref: aRef } },
+        { tool: 'task_result', args: { ref: aRef } },
+        { tool: 'task_cancel', args: { ref: aRef } },
+      ],
+      reply: '我无法访问。',
+    });
+    // control：alice 查自己任务成功（按真实 taskId）
     await deliver(handle.server.handler, incoming('mu-alice', 'conv-a5', 'a-2', `${MU_TAGS['mu-alice']} 查自己任务 #1`));
     // attack：bob 经任务工具访问 #1（经真实交互路径）
     await deliver(handle.server.handler, incoming('mu-bob', 'conv-b5', 'b-1', `${MU_TAGS['mu-bob']} 试图查看 #1`));
@@ -473,11 +475,9 @@ async function mu8SessionLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
   const groupDelegate = `${MU8_GROUP_TAG} 群聊交办查账`;
   const groupQuerySecond = `${MU8_GROUP_TAG} 查群任务 #2`;
   plans.delegate('mu-alice', privDelegate, { reply: '私聊已受理。', operation: 'dummy.query', args: { '--collection': 'MU8-PRIV' }, summary: '私聊完成。' });
-  plans.turn('mu-alice', privQuery, { calls: [{ tool: 'task_status', args: { ref: '#1' } }], reply: '这是私聊自己的任务。' });
   // 群 = 独立主体（owner 2026-11-18）：群回合的应然主体是 `wecom:group:group-g1`，不是发言人。
-  plans.turn('mu-alice', groupQueryFirst, { calls: [{ tool: 'task_status', args: { ref: '#1' } }], reply: '群里没有这个任务。', principal: groupPrincipalIdOf('group-g1') });
   plans.delegate('mu-alice', groupDelegate, { reply: '群聊已受理。', operation: 'dummy.query', args: { '--collection': 'MU8-GROUP' }, summary: '群聊完成。', principal: groupPrincipalIdOf('group-g1') });
-  plans.turn('mu-alice', groupQuerySecond, { calls: [{ tool: 'task_status', args: { ref: '#2' } }], reply: '这是群聊自己的任务。', principal: groupPrincipalIdOf('group-g1') });
+  // 2026-11-20：数字 ref 退役——三个查询的 ref 在各自任务落地后按真实 taskId 注册（plans.table() 是活引用）。
 
   const ctx = makeCtx(plans.table(), null);
   // background 派发：任务工具（task_status 等）在 Main 工具面可用（与 MU-5 同源）。
@@ -487,12 +487,19 @@ async function mu8SessionLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
   let evidence: Record<string, unknown> = {};
   const records: MuDeliveryRecord[] = [];
   try {
-    // 顺序：私聊交办（建私聊 #1）→ 私聊查 #1（命中自己的）→ 群聊查 #1（群内尚无任务，
-    // 应确定性拒绝且不得看见私聊历史）→ 群聊交办（建群 #1）→ 群聊查 #1（命中群自己的）。
+    // 顺序：私聊交办（建私聊任务）→ 私聊查（命中自己的真实 taskId）→ 群聊查私聊 taskId
+    // （群内无此任务，应确定性拒绝且不得看见私聊历史）→ 群聊交办（建群任务）→ 群聊查群 taskId。
     await deliver(handle.server.handler, incoming('mu-alice', 'mu-alice', 'p-1', privDelegate, 'single'));
+    const privTaskForRef = readTasks(handle.dbPath).find((task) => task.principalId === principalIdOf('mu-alice') && task.sessionId === sessionIdOf('mu-alice'));
+    const privRef = privTaskForRef?.taskId ?? '';
+    plans.turn('mu-alice', privQuery, { calls: [{ tool: 'task_status', args: { ref: privRef } }], reply: '这是私聊自己的任务。' });
+    plans.turn('mu-alice', groupQueryFirst, { calls: [{ tool: 'task_status', args: { ref: privRef } }], reply: '群里没有这个任务。', principal: groupPrincipalIdOf('group-g1') });
     await deliver(handle.server.handler, incoming('mu-alice', 'mu-alice', 'p-2', privQuery, 'single'));
     await deliver(handle.server.handler, incoming('mu-alice', 'group-g1', 'g-1', groupQueryFirst, 'group'));
     const groupDelegateReply = await deliver(handle.server.handler, incoming('mu-alice', 'group-g1', 'g-2', groupDelegate, 'group'));
+    const groupTaskForRef = readTasks(handle.dbPath).find((task) => task.principalId === groupPrincipalIdOf('group-g1') && task.sessionId === sessionIdOf('group-g1'));
+    const groupRef = groupTaskForRef?.taskId ?? '';
+    plans.turn('mu-alice', groupQuerySecond, { calls: [{ tool: 'task_status', args: { ref: groupRef } }], reply: '这是群聊自己的任务。', principal: groupPrincipalIdOf('group-g1') });
     const groupQueryReply = await deliver(handle.server.handler, incoming('mu-alice', 'group-g1', 'g-3', groupQuerySecond, 'group'));
 
     const tasks = readTasks(handle.dbPath);
