@@ -33,7 +33,7 @@ import {
 const TASK_SCOPE = { principalId: 'wecom:user-a', sessionId: 'wecom:user-a' } as const;
 const GROUP_SCOPE = { principalId: 'wecom:group:group-w', sessionId: 'wecom:group-w' } as const;
 
-const PREPARE_ARGS = { '--collection': 'alpha', '--window': 'W1', '--count': 2 };
+const PREPARE_ARGS = { collection: 'alpha', window: 'W1', '--count': 2 };
 
 /**
  * 宽容的 Main 转述：task_run 可能返回摘要（快活完成）、受理回执（受理）或工具错误
@@ -54,7 +54,7 @@ const relayWhatever = (call: { messages: readonly unknown[] }) => {
  */
 function longTaskWorkerResponses(seconds: number): readonly SimResponse[] {
   return [
-    toolCallAssistant('execute_operation', { operation: 'dummy.longtask', args: { '--seconds': seconds } }),
+    toolCallAssistant('op_dummy_longtask', { '--seconds': seconds }),
     textAssistant('已发起长任务，等它跑完。'),
     textAssistant('导出完成：上个月全部凭证共 42 张。'),
   ];
@@ -202,7 +202,7 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
         relayWhatever,
       ]);
       sim.book.workerTask(writeTask, [
-        toolCallAssistant('execute_operation', { operation: 'dummy.prepare', args: PREPARE_ARGS }),
+        toolCallAssistant('op_dummy_prepare', PREPARE_ARGS),
         (call) => {
           const result = lastToolResultOf(call.messages);
           if (result === undefined || !result.isError) {

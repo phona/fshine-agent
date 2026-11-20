@@ -283,9 +283,10 @@ describe('用户可见失败话术', () => {
     // 中性事实不再宣称「每个 operation 标注单次估时与重量」。
     expect(WORKER_SNAPSHOT_COST_NOTE).not.toContain('估时');
     expect(WORKER_SNAPSHOT_COST_NOTE).not.toContain('重量');
-    // 调用所需仍在：operation 名、参数名、required、输入形状。
+    // 调用所需仍在：operation 名、业务参数名（去 `--` 前缀）、required、输入形状。
     expect(text).toContain('"dummy.commit"');
-    expect(text).toContain('"--collection"');
+    expect(text).toContain('"collection"');
+    expect(text).not.toContain('"--collection"');
     expect(text).toContain('"required": true');
   });
 });

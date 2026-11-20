@@ -191,10 +191,7 @@ describe('E 组·附件 → 执行层（W-19～W-21）', () => {
         },
       ]);
       sim.book.workerTask('把附件里的销售数据存进 documents 集合', [
-        toolCallAssistant('execute_operation', {
-          operation: 'dummy.prepare',
-          args: { '--collection': 'documents', '--window': 'W202611', '--count': '3' },
-        }),
+        toolCallAssistant('op_dummy_prepare', { 'collection': 'documents', 'window': 'W202611', '--count': '3' }),
         (call) => {
           // 宿主允许集合边界的真实拒绝（写操作不在只读允许集、未发起执行）：如实转述。
           // 模型台词用业务语言（不暴露"执行层"内部词）；下面三条断言只钉业务事实

@@ -541,7 +541,7 @@ export const WORKER_SYSTEM_PROMPT = [
   '你接到一件要办的事，按给你的输入去做。',
   '',
   '怎么做：',
-  '- 用 execute_operation 把每一步交出去办；操作名和参数照着给你的那份清单填。',
+  '- 用给你的工具把每一步交出去办；每个工具对应一项操作，参数用工具声明的业务字段名填写。',
   '- 只根据工具回报的结果说话：办到哪一步、拿到了什么，都照实说；没拿到的不要自己补。',
   '- 对方说缺信息或没找到对象时，把给出的说法和候选如实带回来，别替它猜一个。',
   '- 用一段简体中文说清：你办了什么、对方回了什么、还有什么没拿到。',
@@ -1121,12 +1121,15 @@ export function workerDelegationManifest(manifest: CapabilityManifest): Capabili
     operations: manifest.operations.map((operation) => ({
       name: operation.name,
       ...(operation.label === undefined ? {} : { label: operation.label }),
-      // 参数同样白名单：只留名字、必填与输入形状；type（源自执行层 style）不进模型面。
-      args: operation.args.map((arg) => ({
-        name: arg.name,
-        required: arg.required,
-        ...(arg.payload === undefined ? {} : { payload: arg.payload }),
-      })),
+      // 参数白名单：去掉 hostOnly（机制参数不进调用方面）；payload 保留输入形状。
+      // 名字去掉执行层的 `--` 前缀——调用方只认业务字段名，宿主负责翻回执行层形态。
+      args: operation.args
+        .filter((arg) => arg.hostOnly !== true)
+        .map((arg) => ({
+          name: arg.name.replace(/^--/, ''),
+          required: arg.required,
+          ...(arg.payload === undefined ? {} : { payload: arg.payload }),
+        })),
     })),
   };
 }
@@ -2632,10 +2635,17 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   }
 
   /**
-   * Worker exec 面（CAP-01 S2 ①）：execute_operation +（注入 runJsExecutor 时）run_js。
+   * Worker exec 面（owner 2026-11-20 动态工具）：每个 operation 一个 `op_*` 工具（结构化参数），
+   * 不再给 Worker 通用 execute_operation。`execute_operation` 仅为**内部兼容路由**保留——
+   * 确定性脚本夹具用它不经工具面直调，真实模型拿不到该工具；两条路都归到同一执行语义。
    * run_js 只在工具面开启时受理（fail-closed：未注入执行器的直调被拒）；文件桥与任务交付
    * 收集随 delegate 传入（缺省装配两者皆缺省——零变化）。
    */
+  const workerToolManifest: CapabilityManifest = {
+    contractVersion: manifest.contractVersion,
+    operations: manifest.operations.filter((operation) => operation.model_visible !== false),
+  };
+  const sessionOpToolIndex = workerOpToolIndex(workerToolManifest);
   function workerExec(
     taskId: string,
     window: RuntimeAttemptWindow,
@@ -2649,6 +2659,20 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         }
         return runJsInWorkerTurn(taskId, args, files.runJsMemo, files.taskFiles, signal);
       }
+      // op_<operation>：结构化调用 → 翻回执行层 args（含机制参数补齐）。
+      const opDeclaration = sessionOpToolIndex.get(tool);
+      if (opDeclaration !== undefined) {
+        const mapped = mapWorkerOperationArgs({
+          operation: opDeclaration,
+          args: unwrapCompatOpArgs(args),
+          ...(() => {
+            const confirmation = confirmationForOperation(opDeclaration.name);
+            return confirmation === undefined ? {} : { confirmationHandle: confirmation.handle };
+          })(),
+        });
+        return executeOperation(taskId, { operation: opDeclaration.name, args: mapped }, window, onUnresolved, files?.exchange, files?.taskFiles, signal);
+      }
+      // 内部兼容路由（非模型可见工具面）：确定性脚本夹具兼容直调。
       if (tool !== EXECUTE_OPERATION_TOOL) throw new Error(`Worker 工具面之外的调用：${tool}`);
       return executeOperation(taskId, args, window, onUnresolved, files?.exchange, files?.taskFiles, signal);
     };
@@ -2875,8 +2899,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     try {
       const workerResult = await options.workerDriver.run({
         systemPrompt: renderWorkerSystemPrompt(options.workerWorkspaceRoot),
-        // CAP-01 S2 ①：Worker 工具面 = execute_operation +（注入执行器时）run_js（任务作用域）。
-        tools: [executeOperationTool(), ...(options.runJsExecutor === undefined ? [] : [runJsTool('worker')])],
+        // owner 2026-11-20：Worker 工具面 = 每个模型可见 operation 一个 op_* 工具（结构化参数），
+        // 不再给 Worker 通用 execute_operation；Main 工具面不动。允许集合在 exec 发起前裁决。
+        tools: [...workerOperationTools(workerToolManifest), ...(options.runJsExecutor === undefined ? [] : [runJsTool('worker')])],
         messages: [userMessage(renderWorkerDelegation({
           task: request,
           manifest: workerManifest,
@@ -3350,6 +3375,154 @@ function executeOperationTool(): DiscoveredTool {
 }
 
 /**
+ * 动态 Worker 工具面（owner 2026-11-20）：**每个 operation 一个工具**，参数用业务字段名 +
+ * 结构化 schema；宿主把结构化值翻回执行层要的形状。Worker 不再自己拼 `--flag`。
+ *
+ * 工具名 = `op_` + operation 名安全化（非字母数字压成 `_`）：`dummy.prepare` → `op_dummy_prepare`。
+ * schema 只收非 hostOnly 参数：名字去掉 `--` 前缀；有 payload.schema 的用该 schema；
+ * 其余按声明 type 给 string/number/array（type 是展示提示，缺省 string）。
+ * 描述只用 label（缺省 operation 名）+ 一句「参数按声明填」——不含 `--` / style / weight /
+ * effects / long_running 这些实现字样（守卫钉死）。
+ */
+export const WORKER_OP_TOOL_PREFIX = 'op_';
+
+export function workerOperationToolName(operation: string): string {
+  return `${WORKER_OP_TOOL_PREFIX}${operation.replace(/[^A-Za-z0-9_]/g, '_')}`;
+}
+
+/** 业务参数名（schema property）→ 执行层参数声明名（可带 `--`）。只含非 hostOnly 参数。 */
+export function workerVisibleArgs(operation: {
+  args: readonly ExecutionArgDeclaration[];
+}): Array<{ field: string; declaration: ExecutionArgDeclaration }> {
+  return operation.args
+    .filter((arg) => arg.hostOnly !== true)
+    .map((declaration) => ({ field: declaration.name.replace(/^--/, ''), declaration }));
+}
+
+/** schema 里单个参数的类型：payload.schema 优先，否则按声明 type 粗分。 */
+function argJsonSchema(arg: ExecutionArgDeclaration): Record<string, unknown> {
+  if (arg.payload?.schema !== undefined) return arg.payload.schema as Record<string, unknown>;
+  const schema: Record<string, unknown> = { type: arg.type === 'number' ? 'number' : arg.type === 'array' ? 'array' : 'string' };
+  return schema;
+}
+
+export function workerOperationTool(operation: {
+  name: string;
+  label?: string;
+  args: readonly ExecutionArgDeclaration[];
+}): DiscoveredTool {
+  const visible = workerVisibleArgs(operation);
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+  for (const { field, declaration } of visible) {
+    properties[field] = argJsonSchema(declaration);
+    if (declaration.required) required.push(field);
+  }
+  const label = operation.label !== undefined && operation.label !== '' ? operation.label : operation.name;
+  return {
+    name: workerOperationToolName(operation.name),
+    description: `${label}。参数按声明填。`,
+    inputSchema: {
+      type: 'object',
+      properties,
+      ...(required.length === 0 ? {} : { required }),
+      // 放宽附加字段：测试夹具通过内部 exec 路由传机制参数（测试旋钮），但模型可见的
+      // properties/required 里没有任何 hostOnly 参数名或 `--` 前缀（守卫钉死）。
+      additionalProperties: true,
+    },
+  };
+}
+
+/** 为允许集内每个 operation 生成一个工具（数量与清单一致；不重复、不漏）。 */
+export function workerOperationTools(manifest: CapabilityManifest): DiscoveredTool[] {
+  return manifest.operations.map((operation) => workerOperationTool(operation));
+}
+
+/**
+ * 工具名 → operation 声明的反查表（exec 路由用）。工具名 collisions（两个 operation 安全化后
+ * 同名）在此 fail-closed 抛错，绝不把一次工具调用路由到错的 operation。
+ */
+export function workerOpToolIndex(manifest: CapabilityManifest): Map<string, CapabilityManifest['operations'][number]> {
+  const index = new Map<string, CapabilityManifest['operations'][number]>();
+  for (const operation of manifest.operations) {
+    const toolName = workerOperationToolName(operation.name);
+    if (index.has(toolName)) {
+      throw new Error(`Worker 工具名冲突（operation 安全化后同名）：${toolName}`);
+    }
+    index.set(toolName, operation);
+  }
+  return index;
+}
+
+/**
+ * 内部兼容：op_* 工具调用若收到兼容 `{operation, args}` 包装（脚本夹具用 `tools[0]` 直调），
+ * 则解包成业务参数；真模型按 op_* schema 只给业务字段，永远走不到这条。
+ */
+function unwrapCompatOpArgs(args: Record<string, unknown>): Record<string, unknown> {
+  if (typeof args.operation === 'string' && args.args !== null && typeof args.args === 'object' && !Array.isArray(args.args)) {
+    return args.args as Record<string, unknown>;
+  }
+  return args;
+}
+
+/**
+ * 工具调用参数 → 执行层 args：业务字段名映射回执行层参数名（`collection` → `--collection`）；
+ * hostOnly 参数由宿主补齐，模型传入的同名/裸名值一律忽略（不被模型覆盖）：
+ *   · `--confirmation`：确认回合由宿主注入句柄（调用方永远看不到句柄）；
+ *   · `--count`：从 records 条数自算（执行层口径）；
+ *   · 其余机制参数（哨兵/测试旋钮）缺省不填。
+ */
+export function mapWorkerOperationArgs(input: {
+  operation: { args: readonly ExecutionArgDeclaration[] };
+  args: Record<string, unknown>;
+  confirmationHandle?: string;
+}): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  const declarations = input.operation.args;
+  // 业务参数：字段名 → 执行层声明名（`collection` → `--collection`）；声明名原样（测试夹具
+  // legacy 调用）也认——两者等价，后者只是提前给了执行层形态。
+  const byField = new Map<string, ExecutionArgDeclaration>();
+  const byName = new Map<string, ExecutionArgDeclaration>();
+  for (const declaration of declarations) {
+    byField.set(declaration.name.replace(/^--/, ''), declaration);
+    byName.set(declaration.name, declaration);
+  }
+  for (const [key, value] of Object.entries(input.args)) {
+    const declaration = byField.get(key) ?? byName.get(key);
+    if (declaration !== undefined) {
+      if (declaration.hostOnly !== true) result[declaration.name] = value;
+      continue;
+    }
+    // 未声明的执行层原样名（`--flag`）：假执行客户端的清单可能不声明参数，但夹具仍以
+    // 执行层形态传值——原样保留（这与通用 execute_operation 的逐字节透传一致）。
+    if (key.startsWith('--')) result[key] = value;
+  }
+  // 机制参数：宿主补齐；--confirmation / --count 由宿主计算，忽略调用方的业务字段值。
+  const records = input.args['records'];
+  const recordCount = Array.isArray(records) ? records.length : undefined;
+  for (const declaration of declarations) {
+    if (declaration.hostOnly !== true) continue;
+    const bare = declaration.name.replace(/^--/, '');
+    if (bare === 'confirmation') {
+      if (input.confirmationHandle !== undefined && input.confirmationHandle !== '') {
+        result[declaration.name] = input.confirmationHandle;
+      }
+    } else if (bare === 'count') {
+      // records 在 → 从条数自算（宿主口径，忽略任何调用方值）；否则认执行层原样名（测试夹具
+      // 用 `--count` 造占位记录）。业务字段名 `count` 永不透传。
+      if (recordCount !== undefined) result[declaration.name] = recordCount;
+      else if (input.args[declaration.name] !== undefined) result[declaration.name] = input.args[declaration.name];
+    } else if (input.args[declaration.name] !== undefined) {
+      // 其余 hostOnly（apply / delay-ms / fail-index / seconds / fail-after）是确定性夹具的
+      // 测试旋钮：调用方只有用**执行层原样名**（带 `--`）传入才透传——模型可见 schema 里
+      // 没有这些名，真模型拿不到，也不会从业务字段名拼出来。裸名（如 `seconds`）不认。
+      result[declaration.name] = input.args[declaration.name];
+    }
+  }
+  return result;
+}
+
+/**
  * 后台 Worker 任务文件清单的引用方式（与 inline 的 run_js.inputs 同源，另加执行层的声明
  * 文件参数：后台 Worker 的 execute_operation 文件参数由宿主替换为任务目录内的物化路径）。
  */
@@ -3664,6 +3837,14 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
     contractVersion: manifest.contractVersion,
     operations: manifest.operations.filter((operation) => allowed.has(operation.name)),
   };
+  // Worker 工具面 = 所有**模型可见** operation 的 op_* 工具（model_visible:false 的连工具都不给，
+  // 结构性不可调）。是否真正可执行仍由 exec 里的允许集合在发起前裁决——这与旧的通用
+  // execute_operation 语义一致：只读部署里写工具仍在面上、调用被宿主确定性拒绝（零执行事实）。
+  const workerToolManifest: CapabilityManifest = {
+    contractVersion: manifest.contractVersion,
+    operations: manifest.operations.filter((operation) => operation.model_visible !== false),
+  };
+  const opToolIndex = workerOpToolIndex(workerToolManifest);
   const workerTurnMs = options.workerTurnMs ?? DEFAULT_WORKER_TURN_MS;
   // 大响应文件化阈值：装配层注入解析值；未注入（测试/嵌入）用执行侧同值缺省。
   const oversizeDataBytes = options.oversizeDataBytes ?? DEFAULT_OVERSIZE_DATA_BYTES;
@@ -3788,18 +3969,35 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           if (options.runJsExecutor === undefined) throw new Error(`Worker 工具面之外的调用：${tool}`);
           return workerRunJsTurn(task.taskId, args, runJsMemo, taskFiles, signal);
         }
-        if (tool !== EXECUTE_OPERATION_TOOL) throw new Error(`Worker 工具面之外的调用：${tool}`);
-        const operation = typeof args.operation === 'string' ? args.operation : '';
-        if (operation === '') throw new Error('execute_operation 缺少 operation。');
+        // owner 2026-11-20：op_<operation> 结构化调用 → 翻回执行层 args（含机制参数补齐）。
+        // execute_operation 仅为内部兼容路由保留（确定性脚本夹具直调；真实模型工具面已无它）。
+        let operation: string;
+        let baseCallArgs: Record<string, unknown>;
+        const opDeclaration = opToolIndex.get(tool);
+        if (opDeclaration !== undefined) {
+          operation = opDeclaration.name;
+          const confirmation = pendingConfirmation === undefined || readOnlyOperations.has(operation)
+            ? undefined
+            : { handle: pendingConfirmation.handle };
+          baseCallArgs = mapWorkerOperationArgs({
+            operation: opDeclaration,
+            args: unwrapCompatOpArgs(args),
+            ...(confirmation === undefined ? {} : { confirmationHandle: confirmation.handle }),
+          });
+        } else {
+          if (tool !== EXECUTE_OPERATION_TOOL) throw new Error(`Worker 工具面之外的调用：${tool}`);
+          operation = typeof args.operation === 'string' ? args.operation : '';
+          if (operation === '') throw new Error('execute_operation 缺少 operation。');
+          const rawArgs = args.args;
+          baseCallArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
+            ? (rawArgs as Record<string, unknown>)
+            : {};
+        }
         if (!allowed.has(operation)) {
           // 发起前拒绝：零执行事实，但记下来——零执行时的失败话术要指向权限，不是「没干活」。
           hostRefusedOperations.push(operation);
           throw new Error(OPERATION_NOT_PERMITTED_MESSAGE);
         }
-        const rawArgs = args.args;
-        const baseCallArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
-          ? (rawArgs as Record<string, unknown>)
-          : {};
         // 载荷型参数装信封（宿主侧；发起执行之前）：模型给结构化值 → 宿主 lint+落盘 → 路径替换。
         // 失败（lint 未过/超上限）在此抛出——不发起执行、不落执行事实。
         const callArgs = preparePayloadArgs({
@@ -3993,9 +4191,9 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       try {
         workerResult = await options.workerDriver.run({
           systemPrompt: renderWorkerSystemPrompt(options.workerWorkspaceRoot),
-          // 片 1：Worker 工具面 = execute_operation +（注入执行器时）run_js（任务作用域）。
-          // 未注入 = 数组与现行逐字节相同（只有 execute_operation）。
-          tools: [executeOperationTool(), ...(options.runJsExecutor === undefined ? [] : [runJsTool('worker')])],
+          // owner 2026-11-20：Worker 工具面 = 每个模型可见 operation 一个 op_* 工具（结构化参数），
+          // 不再给 Worker 通用 execute_operation；Main 工具面不动。允许集合在 exec 发起前裁决。
+          tools: [...workerOperationTools(workerToolManifest), ...(options.runJsExecutor === undefined ? [] : [runJsTool('worker')])],
           messages: [userMessage(renderWorkerDelegation({
             task: task.request,
             manifest: workerManifest,

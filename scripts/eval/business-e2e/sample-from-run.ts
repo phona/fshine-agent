@@ -74,13 +74,25 @@ export function executionFactsFromToolCalls(toolCalls: readonly ToolCallRecord[]
   const failedRetryable = new Set<string>();
   let index = 0;
   for (const call of toolCalls) {
-    if (call.tool !== 'execute_operation') continue;
-    const args = (call.args ?? {}) as { operation?: unknown; args?: Record<string, unknown> };
-    const operation = typeof args.operation === 'string' ? args.operation : '';
+    // 动态工具面：Worker 执行工具是 legacy execute_operation 或每-operation 一个的 op_* 工具。
+    const isOpTool = call.tool.startsWith('op_');
+    if (call.tool !== 'execute_operation' && !isOpTool) continue;
+    const raw = (call.args ?? {}) as {
+      operation?: unknown;
+      args?: Record<string, unknown>;
+      [key: string]: unknown;
+    };
+    // legacy 包装 {operation, args}；op_* 工具直接收业务字段，operation 从工具名派生。
+    const wrapped = typeof raw.operation === 'string' && raw.args !== null && typeof raw.args === 'object' && !Array.isArray(raw.args);
+    const operation = wrapped
+      ? (raw.operation as string)
+      : isOpTool
+        ? call.tool.slice(3).replace(/_/g, '.') // op_dummy_query -> dummy.query（求值面只需操作名做 access/分组）
+        : '';
     if (operation === '') continue;
     index += 1;
     const access = accessOf(operation);
-    const object = objectOf(args.args);
+    const object = objectOf(wrapped ? raw.args : raw);
     const key = `${operation}|${object === undefined ? '<no-object>' : object.window === undefined ? object.collection : `${object.collection}@${object.window}`}`;
     const outcome = call.result as Outcome | undefined;
     const status = call.isError === true ? 'refused' : statusOf(outcome);

@@ -156,15 +156,9 @@ describe('运行时链路（假客户端 + 假模型）', () => {
         textAssistant('documents 窗口 W202610 已查询。'),
       ],
       workerResponses: [
-        toolCallAssistant('execute_operation', {
-          operation: 'dummy.query',
-          args: { '--collection': 'documents', '--window': 'W202611' },
-        }, 'call_worker_1'),
+        toolCallAssistant('op_dummy_query', { 'collection': 'documents', 'window': 'W202611' }, 'call_worker_1'),
         textAssistant('已查询 documents W202611：3 条。'),
-        toolCallAssistant('execute_operation', {
-          operation: 'dummy.query',
-          args: { '--collection': 'documents', '--window': 'W202610' },
-        }, 'call_worker_2'),
+        toolCallAssistant('op_dummy_query', { 'collection': 'documents', 'window': 'W202610' }, 'call_worker_2'),
         textAssistant('已查询 documents W202610：2 条。'),
       ],
     });
@@ -205,7 +199,7 @@ describe('运行时链路（假客户端 + 假模型）', () => {
         textAssistant('本轮未执行写入。'),
       ],
       workerResponses: [
-        toolCallAssistant('execute_operation', { operation: 'dummy.commit', args: { '--collection': 'documents' } }, 'call_worker_1'),
+        toolCallAssistant('op_dummy_commit', { 'collection': 'documents' }, 'call_worker_1'),
         textAssistant('该操作未被执行。'),
       ],
     });
@@ -244,7 +238,7 @@ describe('运行时链路（假客户端 + 假模型）', () => {
         textAssistant('已查询。'),
       ],
       workerResponses: [
-        toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'documents' } }, 'call_worker_1'),
+        toolCallAssistant('op_dummy_query', { 'collection': 'documents' }, 'call_worker_1'),
         textAssistant('已查询 documents。'),
       ],
     });
@@ -273,7 +267,7 @@ describe('运行时链路（假客户端 + 假模型）', () => {
         textAssistant('documents 共 3 条。'),
       ],
       workerResponses: [
-        toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'documents' } }, 'call_worker_1'),
+        toolCallAssistant('op_dummy_query', { 'collection': 'documents' }, 'call_worker_1'),
         textAssistant('已查询 documents。'),
       ],
       taskRegistry: registry,
@@ -306,7 +300,7 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
     textAssistant(reply),
   ];
   const queryCall = (id = 'call_worker_1'): AgentMessage =>
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'documents' } }, id);
+    toolCallAssistant('op_dummy_query', { 'collection': 'documents' }, id);
 
   it('① 执行层 failed：任务记 failed（不是 completed）；汇报原文保留；failureReason 取执行层 message', async () => {
     const client = new ScenarioClient([{ status: 'failed', error: { code: 'EXECUTION_TIMEOUT', message: '执行层调用超时。' } }]);

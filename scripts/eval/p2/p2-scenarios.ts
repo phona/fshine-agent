@@ -763,7 +763,7 @@ async function runS1(dir: string, trial: number): Promise<P2Observation> {
     },
   ], 1);
   book.workerTask(text, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'alpha', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'alpha', 'window': 'W1' }),
     () => {
       const record = lastRecordOf(ref, 'alpha');
       return textAssistant(record === undefined ? 'alpha 读取完成。' : describeCompleted(record));
@@ -805,14 +805,14 @@ async function runS2(dir: string, trial: number): Promise<P2Observation> {
   book.mainTurn(t1, [toolCallAssistant('task_run', { task: t1 }), () => textAssistant(receipt())], 1);
   book.mainTurn(t2, [toolCallAssistant('task_run', { task: '查询 beta 集合 W1 的条数与总额' }), () => textAssistant(receipt())], 2);
   book.workerTask(t1, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'alpha', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'alpha', 'window': 'W1' }),
     () => {
       const record = lastRecordOf(ref, 'alpha');
       return textAssistant(record === undefined ? 'alpha 读取完成。' : describeCompleted(record));
     },
   ]);
   book.workerTask('查询 beta 集合 W1 的条数与总额', [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'beta', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'beta', 'window': 'W1' }),
     () => {
       const record = lastRecordOf(ref, 'beta');
       return textAssistant(record === undefined ? 'beta 读取完成。' : describeCompleted(record));
@@ -857,7 +857,7 @@ async function runS3(dir: string, trial: number): Promise<P2Observation> {
     () => textAssistant(taskOfAny(ref)?.replyText ?? '还没有结果。'),
   ], 2);
   book.workerTask(t1, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'alpha', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'alpha', 'window': 'W1' }),
     () => {
       const record = lastRecordOf(ref, 'alpha');
       return textAssistant(record === undefined ? 'alpha 读取完成。' : describeCompleted(record));
@@ -917,21 +917,21 @@ async function runS4(dir: string, trial: number): Promise<P2Observation> {
     () => textAssistant(`已按新要求重新交办 #${taskNoOf(ref)}（只查 beta）。`),
   ], 3);
   book.workerTask(alphaCheck, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'alpha', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'alpha', 'window': 'W1' }),
     () => {
       const record = lastRecordOf(ref, 'alpha');
       return textAssistant(record === undefined ? 'alpha 核对完成。' : describeCompleted(record));
     },
   ]);
   book.workerTask(betaCheck, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'beta', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'beta', 'window': 'W1' }),
     () => {
       const record = lastRecordOf(ref, 'beta');
       return textAssistant(record === undefined ? 'beta 核对完成。' : describeCompleted(record));
     },
   ]);
   book.workerTask(betaOnly, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'beta', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'beta', 'window': 'W1' }),
     () => {
       const record = lastRecordOf(ref, 'beta');
       return textAssistant(record === undefined ? 'beta 读取完成。' : describeCompleted(record));
@@ -972,7 +972,7 @@ async function runS5(dir: string, trial: number): Promise<P2Observation> {
   const ref1: ExecRef = {};
   book1.mainTurn(t1, [toolCallAssistant('task_run', { task: t1 }), () => textAssistant(`已受理 #${taskNoOf(ref1)}，完成后把结果告诉你。`)], 1);
   book1.workerTask(t1, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'bankflow-oct', '--window': '2025-10' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'bankflow-oct', 'window': '2025-10' }),
     () => {
       const record = lastRecordOf(ref1, 'bankflow-oct');
       return textAssistant(record === undefined ? 'bankflow-oct 读取完成。' : describeCompleted(record));
@@ -1221,7 +1221,7 @@ async function runS7a(dir: string, trial: number): Promise<P2Observation> {
     },
   ], 1);
   book.workerTask(text, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'faulty-one', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'faulty-one', 'window': 'W1' }),
     () => {
       const record = recordsOf(ref).find((candidate) => candidate.collection === 'faulty-one');
       return textAssistant(record === undefined ? '读取失败，未取得记录。' : describeFailure(record));
@@ -1249,7 +1249,7 @@ async function runS7b(dir: string, trial: number): Promise<P2Observation> {
     () => textAssistant(`任务 #${findTaskNo(ref, 'alpha')} 已超时未完成：执行端在时限内没有返回结果，没有条数或金额可以给你。`),
   ], 2);
   book.workerTask(t1, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'alpha', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'alpha', 'window': 'W1' }),
     () => textAssistant('alpha 读取完成。'),
   ]);
   return await runP2Sample({
@@ -1287,10 +1287,7 @@ async function runS7c(dir: string, trial: number): Promise<P2Observation> {
     () => textAssistant(taskOfAny(ref)?.replyText ?? '还没有结果。'),
   ], 2);
   book.workerTask(t1, [
-    ...collections.map(([collection, window]) => toolCallAssistant('execute_operation', {
-      operation: 'dummy.query',
-      args: { '--collection': collection, '--window': window },
-    })),
+    ...collections.map(([collection, window]) => toolCallAssistant('op_dummy_query', { 'collection': collection, 'window': window })),
     () => textAssistant(summary()),
   ]);
   return await runP2Sample({

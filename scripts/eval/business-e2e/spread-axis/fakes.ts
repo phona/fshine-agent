@@ -24,7 +24,8 @@ export function fakeManifest(): CapabilityManifest {
 export class FakeClient implements ExecutionClient {
   async capabilities(): Promise<CapabilityManifest> { return fakeManifest(); }
   async execute(request: ExecutionRequest): Promise<ExecutionOutcome> {
-    const collection = (request.args as { collection?: unknown } | undefined)?.collection;
+    const callArgs = request.args as { collection?: unknown; '--collection'?: unknown } | undefined;
+    const collection = callArgs?.collection ?? callArgs?.['--collection'];
     if (collection === 'contoso') {
       // 歧义集合 → needs_input（任务应落 waiting_user，可被确定性取消）。
       return {
@@ -63,8 +64,12 @@ export function createSmokeExecutor(caseDef: DsCase): DsExecutor {
       workerSeq += 1;
       const [collection, window] = target.includes(' ') ? target.split(' ') : [target, undefined];
       const tool = input.tools.find((t) => t.name === 'execute_operation') ?? input.tools[0]!;
+      // 动态工具面：op_* 工具直接收业务字段；legacy execute_operation 仍走 {operation,args}。
+      const callArgs = tool.name === 'execute_operation'
+        ? { operation: 'dummy.query', args: { collection, ...(window === undefined ? {} : { window }) } }
+        : { collection, ...(window === undefined ? {} : { window }) };
       try {
-        await input.exec(tool.name, { operation: 'dummy.query', args: { collection, ...(window === undefined ? {} : { window }) } });
+        await input.exec(tool.name, callArgs);
       } catch { /* smoke 假件：错误由 reply 面表达 */ }
       return { text: '查询完成', messages: [...input.messages, textMessage('查询完成')] };
     },

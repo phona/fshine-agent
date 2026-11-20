@@ -742,10 +742,10 @@ describe('recalc_xlsx 接线（fail-closed + Worker 不上）', () => {
   });
 
   it('Worker 工具面永不上 recalc_xlsx（即使注入执行器）', async () => {
-    // 静态守卫：Worker 工具面装配处不得出现 recalcTool()。
+    // 静态守卫：Worker 工具面装配处（动态 op_* 工具 + run_js）不得出现 recalcTool()。
     const { readFileSync: read } = require('node:fs') as typeof import('node:fs');
     const src = read(path.join(__dirname, 'src', 'execution-runtime.ts'), 'utf8');
-    const workerToolsLine = src.split('\n').find((l) => l.includes('tools: [executeOperationTool()'));
+    const workerToolsLine = src.split('\n').find((l) => l.includes('tools: [...workerOperationTools(workerToolManifest)'));
     expect(workerToolsLine).toBeDefined();
     expect(workerToolsLine).not.toContain('recalc');
   });

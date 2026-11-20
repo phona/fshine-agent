@@ -820,13 +820,17 @@ export function describeOutcome(outcome: Record<string, unknown>): string {
   return `执行层返回了未预期的形态：${JSON.stringify(outcome).slice(0, 200)}`;
 }
 
-/** 一次查询任务的 Worker 脚本：发起真实 execute_operation，再按真实返回汇报。 */
+/** 一次查询任务的 Worker 脚本：发起真实 op_* 工具调用，再按真实返回汇报。 */
 export function workerQueryResponses(operation: string, args: Record<string, string>): readonly SimResponse[] {
+  const toolName = `op_${operation.replace(/[^A-Za-z0-9_]/g, '_')}`;
+  // 调用方历史上用执行层原样名（`--collection`）；op_* 工具只认业务字段名，宿主翻回 `--`。
+  const fields: Record<string, string> = {};
+  for (const [key, value] of Object.entries(args)) fields[key.replace(/^--/, '')] = value;
   return [
-    toolCallAssistant('execute_operation', { operation, args }),
+    toolCallAssistant(toolName, fields),
     (call) => {
       const outcome = lastToolResultJsonOf(call.messages);
-      if (outcome === undefined) throw new Error('Worker 脚本没有拿到 execute_operation 的真实返回。');
+      if (outcome === undefined) throw new Error('Worker 脚本没有拿到执行工具的真实返回。');
       return textAssistant(describeOutcome(outcome));
     },
   ];

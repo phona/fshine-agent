@@ -66,8 +66,8 @@ export interface RawGatewayOperation {
    */
   model_visible?: unknown;
   args?: {
-    positional?: Array<{ name?: string; required?: boolean; payload?: { schema?: unknown } }>;
-    flags?: Array<{ flag?: string; required?: boolean; style?: string; payload?: { schema?: unknown } }>;
+    positional?: Array<{ name?: string; required?: boolean; payload?: { schema?: unknown }; hostOnly?: boolean }>;
+    flags?: Array<{ flag?: string; required?: boolean; style?: string; payload?: { schema?: unknown }; hostOnly?: boolean }>;
   };
 }
 
@@ -328,6 +328,7 @@ function declaredArgsOf(operation: RawGatewayOperation): ExecutionArgDeclaration
       name: entry.name as string,
       required: entry.required === true,
       ...(declaredPayloadOf(entry.payload) === undefined ? {} : { payload: declaredPayloadOf(entry.payload) }),
+      ...(entry.hostOnly === true ? { hostOnly: true } : {}),
     }));
   const flags = (operation.args?.flags ?? [])
     .filter((entry) => typeof entry.flag === 'string' && entry.flag !== '')
@@ -336,6 +337,7 @@ function declaredArgsOf(operation: RawGatewayOperation): ExecutionArgDeclaration
       required: entry.required === true,
       ...(typeof entry.style === 'string' && entry.style !== '' ? { type: entry.style } : {}),
       ...(declaredPayloadOf(entry.payload) === undefined ? {} : { payload: declaredPayloadOf(entry.payload) }),
+      ...(entry.hostOnly === true ? { hostOnly: true } : {}),
     }));
   return [...positional, ...flags];
 }

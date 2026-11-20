@@ -286,10 +286,7 @@ describe('③ 失败回合不得进入业务成功归档', () => {
     const workerRt = await createScriptedModelRuntime({
       contextWindow: 40_000,
       script: () => (workerCount++ === 0
-        ? toolCall('execute_operation', {
-          operation: 'dummy.query',
-          args: { '--collection': 'documents', '--window': 'W202611' },
-        }, 'call_worker_1')
+        ? toolCall('op_dummy_query', { 'collection': 'documents', 'window': 'W202611' }, 'call_worker_1')
         : textReply('documents W202611：3 条。')),
     });
     const session = await createSession({

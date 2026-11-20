@@ -251,9 +251,10 @@ describe('模型可见面收口：清单投影 / Worker 提示 / 底账投影', 
     for (const term of ['weight', 'estimatedSeconds', 'effects', 'style', 'long_running', '宿主', '委派', '能力快照', '纵深防御', '子进程', '执行面']) {
       expect(projected, `清单投影漏进了「${term}」`).not.toContain(term);
     }
-    // 选操作/填参数所需仍在：operation 名、参数名、required、payload.schema、说明。
+    // 选操作/填参数所需仍在：operation 名、业务参数名（去 `--`）、required、payload.schema、说明。
     expect(projected).toContain('dummy.query');
-    expect(projected).toContain('"--collection"');
+    expect(projected).toContain('"collection"');
+    expect(projected).not.toContain('"--collection"');
     expect(projected).toContain('"required":true');
     expect(projected).toContain('"schema"');
     expect(projected).toContain('查记录');
@@ -272,9 +273,10 @@ describe('模型可见面收口：清单投影 / Worker 提示 / 底账投影', 
     for (const term of ['宿主', '委派', '能力快照', '纵深防御', '子进程', '执行面']) {
       expect(rendered, `Worker 提示漏进了「${term}」`).not.toContain(term);
     }
-    // 行为句语义仍在：你收到一件活、按输入做、用工具报事实。
+    // 行为句语义仍在：你收到一件活、按输入做、用工具报事实（工具按 operation 一一定制，无通用执行工具名）。
     expect(rendered).toContain('你接到一件要办的事');
-    expect(rendered).toContain('execute_operation');
+    expect(rendered).toContain('用给你的工具把每一步交出去办');
+    expect(rendered).not.toContain('execute_operation');
   });
 
   // ③ 底账投影：失败只给 status + 封闭 failureKind，不给 failureReason / error.message 自由文本。

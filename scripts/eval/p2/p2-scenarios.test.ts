@@ -265,7 +265,7 @@ describe('P2 并发隔离与证据落盘（确定性）', () => {
     expect(replies[0].text).toContain('2000');
     const toolLines = readFileSync(path.join(dir, 'tool-calls.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     expect(toolLines.some((row) => row.tool === 'task_run')).toBe(true);
-    expect(toolLines.some((row) => row.tool === 'execute_operation')).toBe(true);
+    expect(toolLines.some((row) => row.tool === 'execute_operation' || row.tool.startsWith('op_'))).toBe(true);
     const modelCalls = readFileSync(path.join(dir, 'model-calls.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     expect(modelCalls.length).toBe(2);
     expect(modelCalls.every((row) => row.kind === 'main')).toBe(true);
