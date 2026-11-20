@@ -96,7 +96,9 @@ describe('A 组·接入与基础（W-01～W-04b）', () => {
     const sim = await startWecomSim({ label: 'w04' });
     try {
       sim.book.mainTurn('查一下那个表', mainRelayResponses('查一下那个表'));
-      sim.book.workerTask('查一下那个表', workerQueryResponses('dummy.query', {}));
+      // 空指代：模型给一个 schema 合法的空串集合名（required 字段必须出现），触发执行层
+      // QUERY_REQUIRED → 如实转述请补充，零编造。
+      sim.book.workerTask('查一下那个表', workerQueryResponses('dummy.query', { collection: '' }));
       const messageId = sim.sendText('查一下那个表');
       await sim.waitFor('终帧出现', () => sim.finalBubbles().length === 1);
 

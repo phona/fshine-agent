@@ -63,7 +63,7 @@ function proactiveTexts(fixture: ReturnType<typeof startWecomSim> extends Promis
 /** 慢任务：真实发起 dummy.longtask，accepted 后由 runner 的 wait 端口推进，完成后续跑汇报。 */
 function longTaskWorkerResponses(seconds: number, doneText: string): readonly SimResponse[] {
   return [
-    toolCallAssistant('execute_operation', { operation: 'dummy.longtask', args: { '--seconds': seconds } }),
+    toolCallAssistant('op_dummy_longtask', { '--seconds': seconds }),
     textAssistant('已发起长任务，等它跑完。'),
     textAssistant(doneText),
   ];

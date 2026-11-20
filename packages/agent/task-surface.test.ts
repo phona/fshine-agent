@@ -368,7 +368,7 @@ describe('缺口 1 · 对话面任务工具', () => {
     }
   });
 
-  it('Worker 工具面快照：只有 execute_operation，不含 task_status/task_result/task_cancel/task_resume', async () => {
+  it('Worker 工具面快照：每个 operation 一个 op_* 工具，不含 task_status/task_result/task_cancel/task_resume', async () => {
     const registry = createTaskRegistry();
     const turns: RecordedTurn[] = [];
     const workerTools: string[][] = [];
@@ -391,7 +391,9 @@ describe('缺口 1 · 对话面任务工具', () => {
     });
     await session.send('帮我查一下');
 
-    expect(workerTools).toEqual([['execute_operation']]);
+    // FaceClient 只声明 dummy.query 一个 operation → 恰好一个 op_* 工具，无通用 execute_operation。
+    expect(workerTools).toEqual([['op_dummy_query']]);
+    expect(workerTools.flat()).not.toContain('execute_operation');
     for (const name of ['task_status', 'task_result', 'task_cancel', 'task_resume']) {
       expect(workerTools.flat()).not.toContain(name);
     }

@@ -506,14 +506,14 @@ describe('CAP-01 S2 ① Worker 接 run_js（任务作用域）', () => {
 });
 
 describe('CAP-01 S2 ⑥ Worker 工具面门控', () => {
-  it('⑥ 注入 runJsExecutor 时 Worker 工具面有 run_js；未注入时只有 execute_operation，直调 fail-closed', async () => {
+  it('⑥ 注入 runJsExecutor 时 Worker 工具面有 run_js；未注入时只有 op_* 工具，直调 fail-closed', async () => {
     const withExecutor = await makeFixture();
     try {
       const source = putActiveSource(withExecutor, 'g.csv', Buffer.from('g'));
       withExecutor.workerPush({ execCalls: [], text: 'noop' });
       withExecutor.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '触发委派', inputFiles: [source.fileId] } }], text: '完成。' });
       await withExecutor.session.send('触发');
-      expect(withExecutor.worker.toolNames[0]).toEqual(['execute_operation', 'run_js']);
+      expect(withExecutor.worker.toolNames[0]).toEqual(['op_dummy_query', 'run_js']);
     } finally {
       withExecutor.ro.close();
       withExecutor.close();
@@ -524,7 +524,7 @@ describe('CAP-01 S2 ⑥ Worker 工具面门控', () => {
       withoutExecutor.workerPush({ execCalls: [], text: 'noop' });
       withoutExecutor.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '触发委派' } }], text: '完成。' });
       await withoutExecutor.session.send('触发');
-      expect(withoutExecutor.worker.toolNames[0]).toEqual(['execute_operation']);
+      expect(withoutExecutor.worker.toolNames[0]).toEqual(['op_dummy_query']);
     } finally {
       withoutExecutor.ro.close();
       withoutExecutor.close();

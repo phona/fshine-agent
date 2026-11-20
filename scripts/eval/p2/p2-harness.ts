@@ -313,7 +313,7 @@ export async function createDummyP2Client(input: { dir: string; env?: NodeJS.Pro
 export function createHangingClient(): ExecutionClient {
   return {
     async capabilities(): Promise<CapabilityManifest> {
-      return { contractVersion: 1, operations: [{ name: 'dummy.query', label: 'query items', args: [{ name: '--collection', required: true }] }] };
+      return { contractVersion: 1, operations: [{ name: 'dummy.query', label: 'query items', args: [{ name: '--collection', required: true }, { name: '--window', required: false }] }] };
     },
     execute(): Promise<ExecutionOutcome> {
       return new Promise<ExecutionOutcome>(() => { /* 永不结算：由 Worker 驱动的 deadline 契约中止 */ });

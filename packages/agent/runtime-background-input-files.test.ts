@@ -101,12 +101,9 @@ function backgroundWorker(capture: WorkerCapture): TurnDriver {
       const delegation = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content ?? '');
       capture.delegationTexts.push(delegation);
       capture.toolNames.push(input.tools.map((tool) => tool.name));
-      if (input.tools.every((tool) => tool.name !== 'execute_operation')) {
-        throw new Error('（测试）后台 Worker 缺少 execute_operation');
-      }
-      await input.exec('execute_operation', {
-        operation: 'dummy.query',
-        args: { '--input': '占位（宿主替换为任务目录内的物化路径）', '--collection': 'documents' },
+      // 动态工具面：op_dummy_query 收执行层原样名（清单没声明参数，宿主原样透传）。
+      await input.exec('op_dummy_query', {
+        '--input': '占位（宿主替换为任务目录内的物化路径）', '--collection': 'documents',
       });
       return { text: '已按任务文件完成处理。', messages: [] as unknown as DriverMessage[] };
     },

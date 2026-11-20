@@ -343,10 +343,7 @@ describe('K 组·文件 → 聚合（K-1～K-3）', () => {
           const parsed = parseFileTotal(stdout);
           if (parsed === undefined) throw new Error(`run_js 真实出口没有 FILE 行：${stdout.slice(0, 160)}`);
           fileTotal = parsed.total;
-          return toolCallAssistant('execute_operation', {
-            operation: 'dummy.query',
-            args: { '--collection': 'documents', '--window': 'W202611' },
-          });
+          return toolCallAssistant('op_dummy_query', { 'collection': 'documents', 'window': 'W202611' });
         },
         (call) => {
           const outcome = lastToolResultJsonOf(call.messages);

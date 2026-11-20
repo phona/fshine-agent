@@ -74,7 +74,7 @@ describe('① #4 端到端：限流经 state-dir 触发 RATE_LIMITED（真 dummy
     // error.code/error.message——failed 投影只给 {status, kind, note}（RATE_LIMITED 只进
     // execution_failure_classified 日志与底账）。此处断言模型可见面的收口形状。
     const toolCalls = (JSON.parse(readFileSync(path.join(outRoot, 'B04', '1', 'tool-calls.json'), 'utf8')) as { toolCalls: Array<Record<string, any>> }).toolCalls;
-    const execCalls = toolCalls.filter((c) => c.tool === 'execute_operation');
+    const execCalls = toolCalls.filter((c) => c.tool === 'execute_operation' || c.tool.startsWith('op_'));
     expect(execCalls).toHaveLength(3);
     const statuses = execCalls.map((c) => c.result?.status);
     expect(statuses).toEqual(['completed', 'completed', 'failed']);

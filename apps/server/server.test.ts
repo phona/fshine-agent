@@ -175,10 +175,7 @@ describe('server（假渠道 + 假执行客户端 + 假模型）', () => {
           textAssistant('documents 窗口 W202611 共 3 条。'),
         ]),
         workerDriver: await driverFor([
-          toolCallAssistant('execute_operation', {
-            operation: 'dummy.query',
-            args: { '--collection': 'documents', '--window': 'W202611' },
-          }, 'call_worker_1'),
+          toolCallAssistant('op_dummy_query', { 'collection': 'documents', 'window': 'W202611' }, 'call_worker_1'),
           textAssistant('已查询 documents W202611：3 条。'),
         ]),
       }),
@@ -240,10 +237,7 @@ describe('server（假渠道 + 假执行客户端 + 假模型）', () => {
           textAssistant('documents 窗口 W202611 共 3 条。'),
         ]),
         workerDriver: await driverFor([
-          toolCallAssistant('execute_operation', {
-            operation: 'dummy.query',
-            args: { '--collection': 'documents', '--window': 'W202611' },
-          }, 'call_worker_1'),
+          toolCallAssistant('op_dummy_query', { 'collection': 'documents', 'window': 'W202611' }, 'call_worker_1'),
           textAssistant('已查询 documents W202611：3 条。'),
         ]),
       }),

@@ -59,7 +59,7 @@ function acceptCard(call: { messages: readonly unknown[] }): AgentMessage {
  */
 function longTaskWorker(resultText: string, seconds: number): readonly SimResponse[] {
   return [
-    toolCallAssistant('execute_operation', { operation: 'dummy.longtask', args: { '--seconds': String(seconds) } }),
+    toolCallAssistant('op_dummy_longtask', { '--seconds': String(seconds) }),
     textAssistant('已发起长任务，我盯着，好了发你。'),
     textAssistant(resultText),
   ];
@@ -193,10 +193,9 @@ describe('I 组·体验交互（I-1～I-6、I-8，自动；I-7 未立编号）',
       const taskText = '查一下 finance-invoices 集合 2026-10 这个窗口的发票';
       sim.book.mainTurn(taskText, mainRelayResponses(taskText));
       sim.book.workerTask(taskText, [
-        toolCallAssistant('execute_operation', {
-          operation: 'dummy.query',
+        toolCallAssistant('op_dummy_query', {
           // 窗口值不是执行层声明的维度值 → 真实 WHERE_INVALID（确定性拒绝）。
-          args: { '--collection': 'finance-invoices', '--window': '2026-10' },
+          'collection': 'finance-invoices', 'window': '2026-10',
         }),
         (call) => {
           const outcome = lastToolResultJsonOf(call.messages);

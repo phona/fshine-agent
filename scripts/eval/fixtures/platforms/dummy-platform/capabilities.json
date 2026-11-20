@@ -377,7 +377,8 @@
             "flag": "--delay-ms",
             "required": false,
             "style": "code",
-            "desc": "test-only: real wall-clock delay before the read runs (integer ms, 0..60000; over the cap is refused deterministically)"
+            "desc": "test-only: real wall-clock delay before the read runs (integer ms, 0..60000; over the cap is refused deterministically)",
+            "hostOnly": true
           }
         ]
       },
@@ -405,13 +406,15 @@
             "flag": "--seconds",
             "required": true,
             "style": "code",
-            "desc": "test-only: how long the job stays running before completing (integer seconds, >=0)"
+            "desc": "test-only: how long the job stays running before completing (integer seconds, >=0)",
+            "hostOnly": true
           },
           {
             "flag": "--fail-after",
             "required": false,
             "style": "code",
-            "desc": "test-only: fail the job this many seconds after acceptance (integer seconds)"
+            "desc": "test-only: fail the job this many seconds after acceptance (integer seconds)",
+            "hostOnly": true
           }
         ]
       },
@@ -517,19 +520,22 @@
             "flag": "--count",
             "required": false,
             "style": "code",
-            "desc": "record count to prepare"
+            "desc": "record count to prepare",
+            "hostOnly": true
           },
           {
             "flag": "--apply",
             "required": false,
             "style": "code",
-            "desc": "write flag: present means this call WOULD write, prepare must refuse it"
+            "desc": "write flag: present means this call WOULD write, prepare must refuse it",
+            "hostOnly": true
           },
           {
             "flag": "--delay-ms",
             "required": false,
             "style": "code",
-            "desc": "test-only: real wall-clock delay before the prepare runs (integer ms, 0..60000; over the cap is refused deterministically)"
+            "desc": "test-only: real wall-clock delay before the prepare runs (integer ms, 0..60000; over the cap is refused deterministically)",
+            "hostOnly": true
           }
         ]
       },
@@ -601,25 +607,29 @@
             "flag": "--count",
             "required": false,
             "style": "code",
-            "desc": "record count to add"
+            "desc": "record count to add",
+            "hostOnly": true
           },
           {
             "flag": "--confirmation",
             "required": false,
             "style": "code",
-            "desc": "confirmation handle returned by prepare; one-shot, bound to collection/window/count/records (commit must submit records identical to the proposal; commit without the proposal's records is refused), expires in 15 minutes"
+            "desc": "confirmation handle returned by prepare; one-shot, bound to collection/window/count/records (commit must submit records identical to the proposal; commit without the proposal's records is refused), expires in 15 minutes",
+            "hostOnly": true
           },
           {
             "flag": "--delay-ms",
             "required": false,
             "style": "code",
-            "desc": "test-only: real wall-clock delay before the commit runs (integer ms, 0..60000; over the cap is refused deterministically)"
+            "desc": "test-only: real wall-clock delay before the commit runs (integer ms, 0..60000; over the cap is refused deterministically)",
+            "hostOnly": true
           },
           {
             "flag": "--fail-index",
             "required": false,
             "style": "code",
-            "desc": "test-only: inject a write failure for the 1-based record index; the whole batch is refused atomically (nothing written)"
+            "desc": "test-only: inject a write failure for the 1-based record index; the whole batch is refused atomically (nothing written)",
+            "hostOnly": true
           }
         ]
       },
@@ -788,13 +798,15 @@
             "flag": "--count",
             "required": false,
             "style": "code",
-            "desc": "ballot count to prepare"
+            "desc": "ballot count to prepare",
+            "hostOnly": true
           },
           {
             "flag": "--apply",
             "required": false,
             "style": "code",
-            "desc": "write flag: present means this call WOULD write, prepare must refuse it"
+            "desc": "write flag: present means this call WOULD write, prepare must refuse it",
+            "hostOnly": true
           }
         ]
       },
@@ -833,13 +845,15 @@
             "flag": "--count",
             "required": false,
             "style": "code",
-            "desc": "ballot count to add"
+            "desc": "ballot count to add",
+            "hostOnly": true
           },
           {
             "flag": "--confirmation",
             "required": false,
             "style": "code",
-            "desc": "confirmation handle returned by prepare; one-shot, bound to topic/round/count, expires in 15 minutes"
+            "desc": "confirmation handle returned by prepare; one-shot, bound to topic/round/count, expires in 15 minutes",
+            "hostOnly": true
           }
         ]
       },

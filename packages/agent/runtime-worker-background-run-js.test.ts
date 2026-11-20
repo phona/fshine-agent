@@ -28,9 +28,8 @@ import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
 import type { DriverMessage, TurnDriver } from './src/driver-contract';
 import {
   EXECUTE_OPERATION_TOOL,
-  EXECUTE_OPERATION_TOOL_DESCRIPTION,
-  EXECUTE_OPERATION_TOOL_SCHEMA,
   RUN_JS_TOOL,
+  workerOperationTool,
 } from './src/execution-runtime';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -180,8 +179,8 @@ describe('片 1：后台 Worker run_js + 产物回程', () => {
         withRunJsExecutor: true,
       });
 
-      // 工具面：后台 Worker 拿到 run_js（与 execute_operation 并列）。
-      expect(record.tools[0]!.map((tool) => tool.name)).toEqual([EXECUTE_OPERATION_TOOL, RUN_JS_TOOL]);
+      // 工具面：后台 Worker 拿到 run_js（与 op_* 工具并列）。
+      expect(record.tools[0]!.map((tool) => tool.name)).toEqual(['op_dummy_query', RUN_JS_TOOL]);
       expect(record.errors).toEqual([]);
       // 脚本真跑成功（退出码 0，out/ 已登记一份产物）。
       const result = record.results[0] as Record<string, unknown>;
@@ -265,7 +264,7 @@ describe('片 1：后台 Worker run_js + 产物回程', () => {
     }
   }, 60_000);
 
-  it('③ 未注入 runJsExecutor：Worker 工具面逐字节不变（只有 execute_operation），直调 fail-closed', async () => {
+  it('③ 未注入 runJsExecutor：Worker 工具面只有 op_* 工具，直调 fail-closed', async () => {
     const fixture = makeFixture();
     const record: WorkerRecord = { tools: [], results: [], errors: [] };
     try {
@@ -278,17 +277,8 @@ describe('片 1：后台 Worker run_js + 产物回程', () => {
         withRunJsExecutor: false,
       });
 
-      // 工具面零变化对照：数组与现行逐字节相同（只有 execute_operation，字段取常量原值）。
-      expect(record.tools[0]).toEqual([{
-        name: EXECUTE_OPERATION_TOOL,
-        description: EXECUTE_OPERATION_TOOL_DESCRIPTION,
-        inputSchema: EXECUTE_OPERATION_TOOL_SCHEMA,
-      }]);
-      expect(JSON.stringify(record.tools[0])).toBe(JSON.stringify([{
-        name: 'execute_operation',
-        description: EXECUTE_OPERATION_TOOL_DESCRIPTION,
-        inputSchema: EXECUTE_OPERATION_TOOL_SCHEMA,
-      }]));
+      // Worker 工具面 = 每个模型可见 operation 一个 op_* 工具（这里清单只有 dummy.query）。
+      expect(record.tools[0]).toEqual([workerOperationTool({ name: 'dummy.query', label: 'query', args: [] })]);
       // 直调 run_js：门控拒绝（不进底账、不起子进程）。
       expect(record.errors).toEqual([`Worker 工具面之外的调用：${RUN_JS_TOOL}`]);
       // 零产物：file_refs 里没有任务行（没有 run_js 就没有产物登记）。

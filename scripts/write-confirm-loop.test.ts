@@ -130,8 +130,8 @@ async function runWriteAttempt(principalId: string, dir: string): Promise<WriteA
 
   const worker = await driverFor((index) => [
     toolCallAssistant(
-      'execute_operation',
-      { operation: 'dummy.prepare', args: { '--collection': 'alpha', '--count': 2 } },
+      'op_dummy_prepare',
+      { collection: 'alpha', '--count': 2 },
       'call_worker_1',
     ),
     textAssistant('写入没有执行。'),

@@ -186,9 +186,11 @@ export function extractD6(runDir: string): D6Metrics {
   // ── 3) 工具调用次数 + 交叉核对 ────────────────────────────────
   const byAgentTool: Record<string, number> = {};
   for (const c of calls) byAgentTool[`${c.agent}/${c.tool}`] = (byAgentTool[`${c.agent}/${c.tool}`] ?? 0) + 1;
-  const workerExecCount = byAgentTool['worker/execute_operation'] ?? 0;
+  // 动态工具面（owner 2026-11-20）：Worker 执行类调用是 legacy execute_operation 或
+  // 每-operation 一个的 op_* 工具；两者都算「执行层调用次数」。
+  const workerExecCount = workerCalls.filter((c) => c.tool === 'execute_operation' || c.tool.startsWith('op_')).length;
   const executionsTotal = (tasksExport?.tasks ?? []).reduce((a, t) => a + t.executions.length, 0);
-  let tcNote = `总数 + agent×tool 分桶（与样本实查同口径）；worker execute_operation=${workerExecCount} 即执行层调用次数`;
+  let tcNote = `总数 + agent×tool 分桶（与样本实查同口径）；worker 执行调用（execute_operation / op_*）=${workerExecCount} 即执行层调用次数`;
   if (workerExecCount !== executionsTotal) {
     tcNote += `；不一致：tasks.json executions 总数=${executionsTotal}（缺失=被宿主拒绝前不发执行、或多路复用），已登记不判`;
   }

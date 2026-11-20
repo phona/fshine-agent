@@ -66,6 +66,13 @@ export interface ExecutionArgDeclaration {
    * schema 支持 oneOf/anyOf 组合子（窄实现：逐分支跑既有校验，任一分支通过即放行）。
    */
   payload?: { schema?: unknown };
+  /**
+   * 调用方不可见（可选，缺省 = false）：该参数是机制参数（哨兵/凭据/派生的计数/测试旋钮），
+   * 不是给调用方填的——宿主补齐（如确认回合注入的哨兵）或执行层自己算（如从 records 条数
+   * 派生计数）。生成调用方工具面时，宿主据此把该参数从 schema 里剔除，并拒绝调用方值覆盖。
+   * 这是**通用机制声明**，不含任何业务语义；缺省 false = 与现状逐字节一致。
+   */
+  hostOnly?: boolean;
 }
 
 /** 单个可执行 operation 的声明。 */

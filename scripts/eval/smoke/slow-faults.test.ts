@@ -70,10 +70,7 @@ describe('冒烟·长时执行（--delay-ms）', () => {
       const taskText = '把 documents 集合上月的明细跑出来';
       sim.book.mainTurn(userText, [toolCallAssistant('task_run', { task: taskText }), dispatchCard]);
       sim.book.workerTask(taskText, [
-        toolCallAssistant('execute_operation', {
-          operation: 'dummy.query',
-          args: { '--collection': 'documents', '--window': 'W202611', '--delay-ms': '1200' },
-        }),
+        toolCallAssistant('op_dummy_query', { 'collection': 'documents', 'window': 'W202611', '--delay-ms': '1200' }),
         (call) => {
           const outcome = lastToolResultJsonOf(call.messages);
           if (outcome === undefined) throw new Error('Worker 脚本没有拿到 execute_operation 的真实返回。');
@@ -119,10 +116,7 @@ describe('冒烟·执行很久后异常（slow_fault）', () => {
       const taskText = '把 slow-fault-one 的数据取出来';
       sim.book.mainTurn(userText, [toolCallAssistant('task_run', { task: taskText }), dispatchCard]);
       sim.book.workerTask(taskText, [
-        toolCallAssistant('execute_operation', {
-          operation: 'dummy.query',
-          args: { '--collection': 'slow-fault-one' },
-        }),
+        toolCallAssistant('op_dummy_query', { 'collection': 'slow-fault-one' }),
         (call) => {
           const outcome = lastToolResultJsonOf(call.messages);
           if (outcome === undefined) throw new Error('Worker 脚本没有拿到 execute_operation 的真实返回。');
@@ -194,10 +188,7 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
       const taskText = '查一下 receivables-open 的明细';
       sim.book.mainTurn(userText, [toolCallAssistant('task_run', { task: taskText }), dispatchCard]);
       sim.book.workerTask(taskText, [
-        toolCallAssistant('execute_operation', {
-          operation: 'dummy.query',
-          args: { '--collection': 'receivables-open' },
-        }),
+        toolCallAssistant('op_dummy_query', { 'collection': 'receivables-open' }),
         (call) => {
           const outcome = lastToolResultJsonOf(call.messages);
           if (outcome === undefined) throw new Error('Worker 脚本没有拿到 execute_operation 的真实返回。');
@@ -207,10 +198,7 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
         (call) => {
           const delegation = messagesTextOf(call.messages);
           if (!delegation.includes('2026-10')) throw new Error('（测试）用户补答没有到达 Worker。');
-          return toolCallAssistant('execute_operation', {
-            operation: 'dummy.query',
-            args: { '--collection': 'receivables-open', '--window': '2026-10' },
-          });
+          return toolCallAssistant('op_dummy_query', { 'collection': 'receivables-open', 'window': '2026-10' });
         },
         (call) => {
           const outcome = lastToolResultJsonOf(call.messages);
@@ -283,10 +271,7 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
       const taskText = '查一下 receivables-open 的明细';
       sim.book.mainTurn(userText, [toolCallAssistant('task_run', { task: taskText }), dispatchCard]);
       sim.book.workerTask(taskText, [
-        toolCallAssistant('execute_operation', {
-          operation: 'dummy.query',
-          args: { '--collection': 'receivables-open' },
-        }),
+        toolCallAssistant('op_dummy_query', { 'collection': 'receivables-open' }),
         (call) => {
           const outcome = lastToolResultJsonOf(call.messages);
           if (outcome === undefined) throw new Error('Worker 脚本没有拿到 execute_operation 的真实返回。');
