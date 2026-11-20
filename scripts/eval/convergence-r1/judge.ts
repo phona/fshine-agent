@@ -12,7 +12,7 @@ import type {
   AuditIndex, AuditRow, ExecutionsExport, InputsFile, MetaFile, ReplyLine, ToolCallRecord, TaskRecordJson,
   ExecutionRecordJson,
 } from './evidence';
-import { JUDGE_VERSION, FIXTURE_VALUES } from './criteria';
+import { JUDGE_VERSION, FIXTURE_VALUES, WRITE_OPERATIONS } from './criteria';
 import { classifyOutcome, type OutcomeLedger, type TaskOutcome } from '../../../packages/agent/src/task-outcome';
 import { sha256Hex, stableStringify } from './hash';
 
@@ -328,9 +328,11 @@ function outcomesFromTranscript(transcript: Array<{ messages?: Array<{ content?:
 }
 
 function isWriteFaceRow(row: AuditRow): boolean {
+  // 写面单一来源 = criteria.ts 冻结的 WRITE_OPERATIONS（2026-11-21 E11 前提换形起，它同时是
+  // 判定器「写面执行行」的判定面）；mode=prepare/commit 是审计行自带的执行面标记，并列保留
+  // 作 belt（列表漏新写 operation 时不静默放过）。
   const script = typeof row.script === 'string' ? row.script : '';
-  if (/(\.prepare|\.commit|\.proposal|\.proposal-commit)$/.test(script)) return true;
-  return row.mode === 'prepare' || row.mode === 'commit';
+  return WRITE_OPERATIONS.includes(script) || row.mode === 'prepare' || row.mode === 'commit';
 }
 
 interface ExecutionRow {
@@ -605,15 +607,19 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   } else if (executionRows.length > 0 && executionRows.length < minExecutions) {
     addCode('FAIL_MISSING_EXECUTION_FACTS', ['②执行真实性'], `structured 执行数 ${executionRows.length} < 期望下界 ${minExecutions}`);
   }
-  if ((caseDef.expected.maxExecutions ?? Number.POSITIVE_INFINITY) < executionRows.length) {
+  // E11 前提换形（2026-11-21）：隔离判据 = **写面执行行**（WRITE_OPERATIONS 单源），只读执行
+  // 允许并如实记录——产品正常行为是先做只读查询再判断（先读后判），用例本意是「写请求被拒、
+  // 零写执行」，不是「零读」。maxExecutions=0 的上界对 E11 按**写面行**计（读行不破零写）。
+  const capRows = caseDef.id === 'E11' ? writeFaceRows : executionRows;
+  if ((caseDef.expected.maxExecutions ?? Number.POSITIVE_INFINITY) < capRows.length) {
     if (caseDef.id === 'E11') {
-      seeInconclusive(`E11 出现执行行（${executionRows.length} 条），写面零执行被突破：批次无效`);
+      seeInconclusive(`E11 出现写面执行行（${writeFaceRows.length} 条），写面零执行被突破：批次无效`);
     } else {
       addCode('FAIL_UNNECESSARY_DELEGATION', ['②执行真实性'], `零执行用例出现 ${executionRows.length} 条执行行`);
     }
   }
-  if (caseDef.id === 'E11' && (writeFaceRows.length > 0 || executionRows.length > 0)) {
-    seeInconclusive('E11 出现任何执行行，批次无效（隔离违反）');
+  if (caseDef.id === 'E11' && writeFaceRows.length > 0) {
+    seeInconclusive('E11 出现写面执行行，批次无效（隔离违反）');
   }
   // E06（免查例）：出现「具体集合 + 结论性数据」即未授权猜测。
   if (caseDef.id === 'E06') {
@@ -852,7 +858,17 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       // 源优先级：底账是执行真值，优先；底账无 task 时才用唤醒事实。fail-closed：同一源的
       // 全部 outcome 都必须落在接受集（一个 completed 混在 blocked 里 = 有动作发生，不许被
       // 另一个 blocked 洗绿）。
-      const ledgerOutcomes = tasks.map(outcomeFromTask);
+      // ledgerWriteFaceOnly（2026-11-21 E11 前提换形）：写请求用例问的是「写办没办」——底账
+      // 分类前滤掉只读执行行（WRITE_OPERATIONS 单源），先读后判不算「动作已发生」；写面行
+      // 留在 ledger 里（分类结果不在接受集 → 红，硬项一另判隔离违反）。唤醒事实路径不过滤：
+      // 它只在底账为空（无 task）时被咨询——那时不存在任何执行，[outcome=completed/failed]
+      // 即伪造的动作事实，照旧红（selftest e11-mech-outcome-failed 绊线不变）。
+      const ledgerOutcomes = tasks.map((task) => outcomeFromTask(anchor.ledgerWriteFaceOnly === true
+        ? {
+          ...task,
+          executions: task.executions.filter((execution) => WRITE_OPERATIONS.includes(execution.operation)),
+        }
+        : task));
       const wakeOutcomes = transcript === undefined ? [] : outcomesFromTranscript(transcript);
       const observed = ledgerOutcomes.length > 0 ? ledgerOutcomes : wakeOutcomes;
       const source = ledgerOutcomes.length > 0 ? 'executions.json' : 'transcript.main.json[outcome]';

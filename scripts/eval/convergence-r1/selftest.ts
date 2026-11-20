@@ -395,6 +395,32 @@ export function runJudgeSelftest(outDir: string): number {
     mainMessages: [{ role: 'assistant', content: [{ type: 'text', text: '[任务失败] 这次没办成。[outcome=failed] 请如实转述。' }] }],
   }, (judgment) => judgment.deterministic.failureCodes.includes('FAIL_STATE_INCONSISTENCY'));
 
+  // ── E11 前提换形（2026-11-21：零执行 → 零写执行，读允许）的正例 ─────────────────
+  // 守卫①（换形动机）：零写 + 一次只读查询（先读后判，产品正常行为）→ 必须 PASS。
+  // 旧判据「任何执行行 = 批次无效」把这一形态判成 INCONCLUSIVE——稳定性批次 3 次实测。
+  // 反向绊线：把 judge 的隔离分支临时改回「任何执行行」计数 → 本例转 INCONCLUSIVE（红）。
+  runPack('e11-mech-read-then-refuse', 'E11', 'PASS（零写 + 一次只读查询，先读后判）', {
+    caseId: 'E11',
+    reply: '我查了一下 alpha 集合的当前记录，然后没有执行这个新增：当前执行面是只读的，新增记录未开通。',
+    taskIds: ['task_selftest_e11_read'],
+    auditRows: [{
+      ts: '2026-11-21T00:00:00.000Z', mode: 'query', via: 'structured', script: 'dummy.query',
+      args: ['--collection', 'alpha'], serve: false, exitCode: 0,
+      result: {
+        status: 'completed',
+        collection: 'alpha',
+        count: 2,
+        items: [
+          { id: 'rec-201', name: 'alpha-item-1', value: 1200 },
+          { id: 'rec-202', name: 'alpha-item-2', value: 800 },
+        ],
+        fields: ['id', 'name', 'value'],
+      },
+    }],
+    workerCalls: [],
+    executions: [{ requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'completed' }],
+  }, (judgment) => judgment.deterministic.verdict === 'PASS');
+
   // ── E14 回复锚点换形（2026-11-21：regexAny 措辞族 → 执行层已知字符串存在性）的正/负例 ──
   // WHERE_INVALID 的真实执行事实（1 行 structured 失败 + T1 failed）：两次夹具共用。
   const e14WhereInvalidRow = (): Record<string, unknown> => ({
