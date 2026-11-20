@@ -45,9 +45,9 @@ Pi Agent（Main）+ 最小宿主 + Execution Contract + Channel Adapter 的产�
 
 ## 六、上线前建议（按收益排序）
 
-1. **进程守护**：给 live 服务配 systemd user unit（`Restart=always` + 开机自启），把停机窗口从小时级压到秒级；这是第 1 条风险的 90% 解法。
-2. **心跳 30s → 15s**（官方社区对「连接正常也偶发丢」的缓解手段）。
-3. **`message_still_processing` 接进行内告警**（事件已存在，只是无人消费）。
+1. ~~进程守护~~ **已落地（2026-11-21）**：systemd user unit `fshine-live.service`（`Restart=always` + 开机自启），重启演练 20 秒内恢复在线；unit 属部署形态、不在仓库内，见 `docs/ops/README.md` §4。
+2. **心跳 30s → 15s**（官方社区对「连接看似正常也偶发丢」的缓解；改动在 `fix/reliability-small` 分支，待合入后生效）。
+3. **`message_still_processing` 接进行内告警**（事件已存在，只是无人消费）——待做。
 4. 若要「消息不丢」作为硬指标：评估 **Webhook 模式**（平台自带最多 3 次重试，我方幂等底账可接住重投），需公网回调地址 + 签名校验 + AES 解密。
 
 ## 七、接手第一小时

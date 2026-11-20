@@ -33,9 +33,14 @@ kill <pid> 结束它再重试，或改端口 / 换部署点（不同 dbPath 状�
 
 运维日常真正会动的少数几项：`AGENT_CONFIG_PATH`、`DB_PATH`、`FSHINE_ATTACHMENT_DIR`、`LLM_API_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL`、`WECOM_BOT_ID`/`WECOM_BOT_SECRET`、`EXECUTION_ALLOW_REAL`（仅字面量 `1` 授权；宿主只继承不判，`docs/environment-variables.md:80`）。完整清单与默认值见 `docs/environment-variables.md`。⚠️ 该文 `:33` 写 `DB_PATH` 缺省 = 仓库根 `data/agent.db`，现行代码缺省是 `<仓根>/.runtime/state.db`（`apps/server/main.ts:44-46`、`scripts/tasks.ts:129`），以代码为准。
 
-## 4. 看门狗与无人值守
+## 4. 进程守护与无人值守
 
-**看门狗：当前由会话后台任务挂载，无仓库脚本**（`grep -ril watchdog` 除本页外零命中）；`scripts/vitest-orphan-guard.ts:23-24` 只管 vitest worker，不守护 server。进程挂掉不会自动拉起，也没有告警；长期在线须由部署侧上 systemd/pm2/容器重启策略，不在本仓发明。仓内唯一无人值守动作是 run 目录保留期清扫，且缺省关闭：`runtime.fileRetentionSweepOnStart`（缺省 `false`）在启动装配完成、渠道接消息前扫一次、无定时器（`apps/server/startup-sweep.ts:1-14`、`apps/server/main.ts:74-77`）；周期清理要部署侧自己调度 `npm run cleanup:runs`（`--dry-run` 只报不删，`scripts/cleanup-runs.ts:1-20`）。通知落盘逐条 append、无轮询无清扫，写失败只记未送达（`apps/server/notification-file-sink.ts:1-6`）。其余常驻面都是请求驱动——「服务在跑却什么都不发生」通常不是守护问题，按 §5 查档位与连接。
+**本机 live 部署已由 systemd user unit 守护**（2026-11-21 落地；unit 在 `~/.config/systemd/user/fshine-live.service`，不在仓库内，因为它是部署形态不是产品代码）：`WorkingDirectory=/home/tao/projects/fshine-agent-int`、`Environment=TMPDIR=/home/tao/.tmp`、`ExecStart=bash -lc 'exec npm start'`、`Restart=always`、`RestartSec=3`、日志 append 到 `/home/tao/.tmp/fshine-live-systemd.log`、`systemctl --user enable --now fshine-live.service` 已开机自启。
+
+- **重启演练已验**：`systemctl --user restart fshine-live` → 20 秒内 `Authenticated` + `server_started`，单实例锁正确释放并重取（`instance_guard_acquired` 两条）。
+- **它解决的是「进程不在=消息丢」**：实测停服 `12:02:15Z` → 重连 `12:03:43Z` 期间用户发的 2 条消息，重连后底账零新增、`aibot_msg_callback` 帧 0（平台不补投）——见 `docs/decisions/debt.md` §十一。有了 `Restart=always`，崩溃/重启的窗口从「小时级」压到「秒级」；窗口内仍可能丢，这是长连接模式的固有代价（销账条件=切 Webhook）。
+- **心跳**：计划把官方 SDK 的 `heartbeatInterval` 从 30s 收紧到 15s（社区对「连接看似正常也偶发丢」的缓解；企微约 90s 无心跳断开）。改动在 `fix/reliability-small` 分支，合入后生效；连接层仍由 SDK 管（认证/重连/退避），宿主不重试、不告警（既有纪律）。
+- **仓内无人值守动作**只有 run 目录保留期清扫，且缺省关闭：`runtime.fileRetentionSweepOnStart`（缺省 `false`）在启动装配完成、渠道接消息前扫一次、无定时器（`apps/server/startup-sweep.ts:1-14`、`apps/server/main.ts:74-77`）；周期清理要部署侧自己调度 `npm run cleanup:runs`（`--dry-run` 只报不删，`scripts/cleanup-runs.ts:1-20`）。通知落盘逐条 append、无轮询无清扫，写失败只记未送达（`apps/server/notification-file-sink.ts:1-6`）。其余常驻面都是请求驱动——「服务在跑却什么都不发生」通常不是守护问题，按 §5 查档位与连接。
 
 ## 5. 排障 runbook
 
