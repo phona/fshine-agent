@@ -1,6 +1,6 @@
 # 文档索引
 
-> 状态：现行，唯一入口。覆盖 `docs/` 下全部 45 篇 Markdown（2026-11-19 本轮清点）；本页 `docs/index.md` 即入口，不重复列入分组。仓根另见 `../AGENTS.md`（进仓第一约束）与 `../README.md`（使用说明）。
+> 状态：现行，唯一入口。覆盖 `docs/` 下全部 48 篇 Markdown（2026-11-20 增补能力边界判据档后清点；`docs/index.md` 自身不计，分组篇数之和须等于此数，由 `scripts/docs-guard.test.ts` 检查 1b 校验）；本页即入口，不重复列入分组。仓根另见 `../AGENTS.md`（进仓第一约束）与 `../README.md`（使用说明）。
 > 分工：本页只回答「该读哪篇」；决定正文与索引在 `decisions/index.md`，未清债务在 `decisions/debt.md`，未决项在 GitHub issues #67–#74。
 > 历史口径：`history/` 只收封存档案，不按现行规范读、内部链接不保证可用；删除与移档全量以 `git log --diff-filter=D -- docs/` 与 `git log --diff-filter=R -- docs/` 为准（本页不记流水数字）。
 
@@ -10,10 +10,11 @@
 - **受理回执 / 渠道回执**：前者是任务被受理时的回话（`architecture/tasks.md`），后者是文件到账时的「已收到 N 个文件」（`architecture/channels.md`）——两类不同事件，不要混用"回执"。
 - **会话转录 / 会话日志**：同一对象的两种叫法，统一指 Pi 的 `SessionManager` 落盘事实（`architecture/sessions.md`）。
 
-## architecture（现行架构与契约，9 篇）
+## architecture（现行架构与契约，10 篇）
 
 宿主与执行层的职责边界，以及任务 / 会话 / 渠道 / 文件四条运行生命周期——判断「该谁做、边界在哪」先读这一组。
 
+- `architecture/capability-boundary.md` — 能力边界判据档：Main（柜台）/Worker（后台）/用户/宿主四角色权界、单一来源能力目录、Worker→Main 结构化 outcome、结构化交办与三条禁令（多条机制标注未实现/待守卫）。
 - `architecture/contract.md` — 宿主↔执行层契约语义面、禁止面与现行变更安全不变量（§6 为该位置的唯一提炼面）。
 - `architecture/payload-arguments.md` — 执行层声明义务：结构化入参必须声明 `payload` + schema（宿主 lint → 物化文件 → 路径替换）；含 17dz 待改 4 个 operation。
 - `architecture/tasks.md` — 任务底账与状态机、取消三态、`dispatchKey` 两层身份、等待与续跑。

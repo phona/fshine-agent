@@ -120,6 +120,31 @@ describe('检查 1 · 入口覆盖：index 链接集合 == 现存 docs/**/*.md',
   });
 });
 
+// ---------- 检查 1b：索引里的篇数必须与实际一致 ----------
+// 头部「全部 N 篇」与各分组「，N 篇）」是手写散文数字，历史上已漂移过（写 45 实数 47）。
+// 这里把两处都钉到磁盘实数：加/删文档不改数字就红，改了数字但不自洽也红。
+
+describe('检查 1b · 索引篇数：头部总数与分组之和 == 实际文件数', () => {
+  it('散文里的篇数与磁盘一致', () => {
+    const indexText = read(INDEX_REL);
+    const onDisk = allDocsMd().filter((rel) => rel !== INDEX_REL).length;
+    const totalMatch = /全部\s*(\d+)\s*篇/.exec(indexText);
+    expect(totalMatch, 'docs/index.md 头部缺少「全部 N 篇」计数').not.toBeNull();
+    const total = Number(totalMatch![1]);
+    const groupCounts = [...indexText.matchAll(/^##\s.*?，(\d+)\s*篇）/gm)].map((m) => Number(m[1]));
+    expect(groupCounts.length, '未解析到任何分组篇数（## … ，N 篇））').toBeGreaterThan(0);
+    const sum = groupCounts.reduce((a, b) => a + b, 0);
+    console.log(JSON.stringify({
+      event: 'docs_guard_index_counts',
+      proseTotal: total,
+      groupSum: sum,
+      onDisk,
+    }));
+    expect(total, '头部「全部 N 篇」与实际文件数不一致（docs/index.md 自身不计）').toBe(onDisk);
+    expect(sum, '分组篇数之和与头部总数不一致').toBe(total);
+  });
+});
+
 // ---------- 检查 2：无死链 ----------
 
 /** 行内归档标记：带这些词的引用是「历史锚点」而非活链接，与 history 来源豁免同类。 */
