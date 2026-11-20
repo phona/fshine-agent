@@ -27,7 +27,7 @@
 | D-062 | `npm test` 在无凭据环境全红 | `package.json:9`（`vitest run`）；无结案记录 | 待核 |
 | D-168 | 门①「产品面」口径未定义 | 现行树**实测 4 处命中**（`packages/agent/src/user-facing-failure.ts:78`、`packages/agent/payload-oneof.test.ts:2`、`:23`、`scripts/eval/real/smoke.ts:4`，均注释/文案级；2026-11-20 核对，原文写「零命中」已不成立） | 待核 |
 | D-170 | exposure-lint 剩余核对与扩展 | `packages/agent/exposure-lint.test.ts` 已不存在（`ls` 实测）；无结案记录 | 待核 |
-| D-190 | 门①测试夹具豁免口径分歧 | `docs/history/architecture-laws-2026-11_undated.md` 仍在；**口径限定**：该条原判据是「产品面（packages/apps 非测试文件）零 17dz 字面量」——按此口径现行树非测试面 0 行、测试/夹具面 4 行（同 D-168 的实测清单）；无结案记录 | 待核（口径见 D-168） |
+| D-190 | 门①测试夹具豁免口径分歧 | `docs/history/architecture-laws-2026-11_undated.md` 仍在；**口径限定**：该条原判据是「产品面（packages/apps 非测试文件）零 17dz 字面量」——按此口径现行树**非测试面 1 行**（`packages/agent/src/user-facing-failure.ts:78`，注释级）、测试/夹具面 3 行（`packages/agent/payload-oneof.test.ts:2`、`:23`、`scripts/eval/real/smoke.ts:4`），合计即 D-168 的 4 行实测清单；无结案记录 | 待核（口径见 D-168） |
 | D-196 | 退役 `FSHINE_PLATFORM_ROOT` | `grep -rn 'FSHINE_PLATFORM_ROOT'` 零命中；无结案记录 | 待核 |
 
 ## 三、指针失效、无结案记录 → 待核（64 条）
@@ -67,7 +67,7 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 
 | 编号 | 事项 | 现行证据 | 为什么现在不做 |
 |---|---|---|---|
-| P-1 | ~~`principals.capabilities` / `principals.accountSetScope` 解析后**无任何消费点**（配置写了不生效）~~ **已解决（2026-11-19 RBAC 切片）** | 两字段已从 `PrincipalConfig` 删除；加载层忽略旧键（`packages/core/src/config.ts:339-340`）。角色表 `roles` + `principals.<id>.role` 取代：`packages/core/src/config.ts:296`（`parseRoles`）、`scripts/ask-runtime.ts:452`（求交口径）、`:533`（`resolveExecutionFace` 收口）、`apps/server/server.ts:686` | —（角色白名单已接线并拦截） |
+| P-1 | ~~`principals.capabilities` / `principals.accountSetScope` 解析后**无任何消费点**（配置写了不生效）~~ **已解决（2026-11-19 RBAC 切片）** | 两字段已从 `PrincipalConfig` 删除；加载层忽略旧键（`packages/core/src/config.ts:339-340`）。角色表 `roles` + `principals.<id>.role` 取代：`packages/core/src/config.ts:296`（`parseRoles`）、`scripts/ask-runtime.ts:452`（求交口径）、`:533`（`resolveExecutionFace` 收口）、`apps/server/server.ts:1135`（`allowedPermissions: permissionsOfRole(...)`；旧行号 `:686` 系 RBAC 切片后随文件增长漂移） | —（角色白名单已接线并拦截） |
 | P-2 | **细粒度（实体级）授权未实现**：谁能看哪些账套/哪些记录，未做任何透传或校验 | 无 acting-principal 透传；执行层调用只带 operation+args | 归执行层研判；真实 17dz 是否有"按主体授权"概念未验。仍挂债，等真实层冒烟与业务确认后再做 |
 | P-3 | ~~写面是**全局开关**（`runtime.allowWriteOperations`），非按人~~ **已解决（2026-11-19 RBAC 切片）** | 全局开关降级为**部署总闸**：角色含 `write` 且总闸打开才并入写集合（`scripts/ask-runtime.ts:533` 收口；`apps/server/server.ts:1133-1134` 按主体角色取权限）；viewer 即使总闸打开也写不了；总闸关闭时 operator 也写不了（`scripts/rbac-roles.test.ts` ⑥） | —（按人部分由角色白名单承接，总闸语义保留） |
 
