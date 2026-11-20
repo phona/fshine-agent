@@ -395,6 +395,36 @@ export function runJudgeSelftest(outDir: string): number {
     mainMessages: [{ role: 'assistant', content: [{ type: 'text', text: '[任务失败] 这次没办成。[outcome=failed] 请如实转述。' }] }],
   }, (judgment) => judgment.deterministic.failureCodes.includes('FAIL_STATE_INCONSISTENCY'));
 
+  // ── E14 回复锚点换形（2026-11-21：regexAny 措辞族 → 执行层已知字符串存在性）的正/负例 ──
+  // WHERE_INVALID 的真实执行事实（1 行 structured 失败 + T1 failed）：两次夹具共用。
+  const e14WhereInvalidRow = (): Record<string, unknown> => ({
+    ts: '2026-11-21T00:00:00.000Z', mode: 'query', via: 'structured', script: 'dummy.query',
+    args: ['--collection', 'finance-invoices', '--window', '2026-10'], serve: false, exitCode: 1,
+    result: { status: 'failed', error: { code: 'WHERE_INVALID', message: 'WHERE_INVALID: window is not a valid dimension for finance-invoices' } },
+  });
+  const e14Executions = [{ requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'failed' }];
+  // 正例：稳定性批次实测假红的回复原文（逐字）——旧措辞族判它锚点缺失；新判据（点出任一
+  // 可筛客户名「华远贸易/明达物流/新程科技」，执行层真实返回里就有的已知字符串）必须 PASS。
+  runPack('e14-real-refusal-reply', 'E14', 'PASS（点出可筛取值，不再判措辞）', {
+    caseId: 'E14',
+    reply: '这个集合里没有"2026-10"这个口径：finance-invoices 支持的取值只有「华远贸易」「明达物流」「新程科技」三项，它并未按月份时间窗口组织。你想查这三家中的哪一家？',
+    taskIds: ['task_selftest_e14_anchor'],
+    auditRows: [e14WhereInvalidRow()],
+    workerCalls: [],
+    executions: e14Executions,
+  }, (judgment) => judgment.deterministic.verdict === 'PASS');
+  // 负例：没点出任何维度取值的回复（如「查询失败，请稍后再试」）→ 必须红（FAIL_STATE_
+  // INCONSISTENCY，含 known-values 的 containsAny 锚点缺失）——已知字符串存在性不是橡皮图章。
+  runPack('e14-no-dimension-reply', 'E14', 'FAIL + FAIL_STATE_INCONSISTENCY（锚点缺失）', {
+    caseId: 'E14',
+    reply: '查询失败，请稍后再试。',
+    taskIds: ['task_selftest_e14_anchor'],
+    auditRows: [e14WhereInvalidRow()],
+    workerCalls: [],
+    executions: e14Executions,
+  }, (judgment) => judgment.deterministic.verdict === 'FAIL'
+    && judgment.deterministic.failureCodes.includes('FAIL_STATE_INCONSISTENCY'));
+
   // 负控 4：E12 纯聊天不委派 → PASS。
   runPack('e12-no-delegation', 'E12', 'PASS', {
     caseId: 'E12',

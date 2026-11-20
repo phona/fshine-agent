@@ -27,9 +27,13 @@
  * 11) E07 检查点取行：先裸查 alpha（completed）再 alpha+W9（not_found）的合法序列
  *     → 不再 INCONCLUSIVE；两行都不是期望状态 → 仍必须判负/INCONCLUSIVE。
  * 12) E14 拒绝语义族（「不接受按…过滤」「拒绝」等）→ 不再判锚点缺失（bc768e0d）。
+ *     2026-11-21 换形登记：regexAny 措辞族已删（换为执行层已知字符串存在性，见 cases/E14.ts），
+ *     其正例样本绊线随之退役；与措辞无关的负例（讲成查到 / 重试风暴）保留，仍必须判负。
  * 13) E07/E14 否定存在措辞族（2026-11-20 QA 批次，见 qa-accept/eval-user-trials1）：
  *     首跑「没有 W9 窗口」「还没有取到任何明细或合计」→ 不再判硬锚点缺失（假红修复）；
  *     把 not_found/拒绝讲成查到（含编造数值）→ 仍必须判负。
+ *     2026-11-21 换形登记：E14 的措辞族正例退役（该回复没点出取值，按新判据就是该红）；
+ *     E07 不变。
  * 14) E09 执行失败措辞族（2026-11-20 复跑两例，见 judge2-eval/final4|final5-all-t1）：
  *     「这个集合在当前状态下读不出来，平台没返回任何数据内容」→ 不再判硬锚点缺失；
  *     把 COLLECTION_FAULT 讲成读到了（「数据已经取到，共 3 条」/「读取正常，数据完整」）→ 仍判缺失。
@@ -463,21 +467,14 @@ function workName(prefix: string, source: string): string {
   }
 }
 
-// ── 12) E14 拒绝语义族（「不接受按…过滤」「往来单位」「拒绝」不再假红）────────
+// ── 12) E14 锚点换形后的负例（2026-11-21）────────────────────────────────────
 const B4 = 'eval-samples/e14-lock/runs';
 {
-  // 背景（2026-11-18）：A2b 守卫接线修好后，正确回复只发 1 行、如实说明拒绝并请用户给维度值，
-  // 但措辞是「不接受按…过滤」「往来单位」，被旧封闭词表判成硬锚点缺失。
-  const positives = [
-    ['E14 1 行 + 不接受/过滤措辞', `${B4}/E14/trial-1`],
-    ['E14 1 行 + 拒绝/维度措辞', `${B4}/E14/trial-14`],
-  ] as const;
-  for (const [label, source] of positives) {
-    if (!available(source)) { console.log(`（跳过 ${label}：样本不存在）`); continue; }
-    const judged = judgmentOf(freshCopy(source, workName('e14-reject', source)), E14);
-    check(`${label} 不再判 FAIL_STATE_INCONSISTENCY`, !judged.deterministic.failureCodes.includes('FAIL_STATE_INCONSISTENCY'),
-      `codes=${judged.deterministic.failureCodes.join(',') || '（空）'}`);
-  }
+  // 登记（2026-11-21 判据换形）：regexAny 拒绝语义族（bc768e0d 的「不接受按…过滤」「往来单位」
+  // 「拒绝」不再假红）已随措辞族一并删除——换为执行层已知字符串存在性（containsAny
+  // 华远贸易/明达物流/新程科技，C10 先例，见 cases/E14.ts 用例注释）。旧正例（trial-1/trial-14
+  // 的措辞族样本）随之退役：新判据下的正例由 selftest 的 e14-real-refusal-reply 承载（全环境
+  // 可跑、不依赖本机样本）。与措辞无关的两个负例保留：把拒绝讲成查到 / 重试风暴仍判负。
   const negativeSource = `${B4}/E14/trial-1`;
   if (available(negativeSource)) {
     // 负例 1：把拒绝讲成查到了（编造数值）→ 仍必须判负（不得因为放宽措辞而放过假成功）。
@@ -505,14 +502,16 @@ const B4 = 'eval-samples/e14-lock/runs';
   }
 }
 
-// ── 13) E07/E14 否定存在措辞族（首跑「没有 W9 窗口」/「还没有取到任何明细或合计」不再假红）──
+// ── 13) E07 否定存在措辞族（首跑「没有 W9 窗口」不再假红）；E14 部分随 2026-11-21 换形退役 ──
 // 背景（2026-11-20 QA 读数 PASS 12 / FAIL 3）：E07/E14 首跑未命中封闭词表、复跑换措辞即过
 // ——「判定器假红」第三次同形。修复 = 原词表保留 + 否定存在措辞族（regexAny 模式锚点）。
+// 登记（2026-11-21）：E14 的措辞族正例（「还没有取到任何明细或合计」）随 E14 锚点换形退役
+// ——该回复没点出任何可筛取值，按新判据（点出任一「华远贸易/明达物流/新程科技」）就是该红；
+// E14 的正例由 selftest e14-real-refusal-reply 承载。E07 措辞族不变。
 const B5 = 'qa-accept/eval-user-trials1/runs';
 {
   const positives = [
     [E07, 'E07 首跑（「没有 W9 窗口」）', `${B5}/E07/trial-1`],
-    [E14, 'E14 首跑（「还没有取到任何明细或合计」）', `${B5}/E14/trial-1`],
   ] as const;
   for (const [caseDef, label, source] of positives) {
     if (!available(source)) { console.log(`（跳过 ${label}：样本不存在）`); continue; }
@@ -574,6 +573,9 @@ const B5 = 'qa-accept/eval-user-trials1/runs';
     check('E14「不是它的筛选项」后紧跟"列出全部记录" → 仍判硬锚点缺失', codes7.includes('FAIL_STATE_INCONSISTENCY'), `codes=${codes7.join(',') || '（空）'}`);
     // 负例 7/8：历史真实轨迹「整集合取回+自筛+宣称窗口数据」（首句"窗口的数据如下"、随后共 N 条/合计）
     // ——不得因新族里无关尾句（「执行层未返回同名不同值等机械可检异常」/「无法直接按月份过滤」）被翻绿。
+    // 2026-11-21 换形注：这些样本按新锚点（点出任一可筛客户名）判缺失，前提是其回复确实没点出
+    // 取值名；若某台带样本的机器上此例转绿（回复其实点出了取值），那是需要人工重审的真实读数，
+    // 不是本绊线退化——新判据的正例语义见 cases/E14.ts 用例注释。
     const claimSources = [
       ['E14 idx/t2（窗口数据如下；尾句"未返回…异常"）', 'eval-idx/runs/E14/trial-2'],
       ['E14 m2/t2（窗口数据如下；尾句"无法直接按月份过滤"）', 'eval-e14-m2/runs/E14/trial-2'],
