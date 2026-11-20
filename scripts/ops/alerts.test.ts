@@ -93,6 +93,9 @@ describe('投递终局的上帝视角：既有 delivery_failed 规则看得见�
       lines.push(notificationTerminalLogLine(terminal));
     };
     // (a) live + skipped：读不到任务范围（路由不可知）= 配错。
+    // kind 用 timed_out（2026-11-21 live P1 机制变化：waiting_user 移出 chat sink 直发清单，
+    // 改走等待唤醒出口——waiting_user 行不再经本 sink 产生 skipped 终局；live+skipped 的
+    // 告警判据本身不变，timed_out 仍走 chat sink 且同路径带 deliveryMode 跳过回执）。
     const liveSkip = createNotificationOutbox({
       dbPath: tempDbPath(),
       sink: createChatNotificationSink({
@@ -104,7 +107,7 @@ describe('投递终局的上帝视角：既有 delivery_failed 规则看得见�
       onTerminal: logLine,
     });
     try {
-      liveSkip.record({ taskId: 'task-alert-live-skip', kind: 'waiting_user', at: NOW_ISO });
+      liveSkip.record({ taskId: 'task-alert-live-skip', kind: 'timed_out', at: NOW_ISO });
       await liveSkip.deliverPending();
       const alerts = alertsOf(lines);
       expect(alerts.map((alert) => alert.rule)).toEqual(['delivery_failed']);
