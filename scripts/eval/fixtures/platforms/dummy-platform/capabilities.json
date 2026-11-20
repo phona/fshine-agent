@@ -475,7 +475,7 @@
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "$id": "RecordBatchPayload",
                 "title": "RecordBatchPayload",
-                "description": "Record batch payload shape (host -> platform: the host lints by this schema, materializes the array to a file and passes that path as the records positional). additionalProperties is false; max 500 records per write (the execution layer's single-write limit).",
+                "description": "Record batch payload shape (host -> platform: the host lints by this schema, materializes the array to a file and passes that path as the records positional). additionalProperties is false; max 500 records per write (the execution layer's single-write limit). On commit, the submitted records must match the proposal exactly (the confirmation handle is bound to records too).",
                 "type": "array",
                 "maxItems": 500,
                 "items": {
@@ -559,7 +559,7 @@
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "$id": "RecordBatchPayload",
                 "title": "RecordBatchPayload",
-                "description": "Record batch payload shape (host -> platform: the host lints by this schema, materializes the array to a file and passes that path as the records positional). additionalProperties is false; max 500 records per write (the execution layer's single-write limit).",
+                "description": "Record batch payload shape (host -> platform: the host lints by this schema, materializes the array to a file and passes that path as the records positional). additionalProperties is false; max 500 records per write (the execution layer's single-write limit). On commit, the submitted records must match the proposal exactly (the confirmation handle is bound to records too).",
                 "type": "array",
                 "maxItems": 500,
                 "items": {
@@ -607,7 +607,7 @@
             "flag": "--confirmation",
             "required": false,
             "style": "code",
-            "desc": "confirmation handle returned by prepare; one-shot, bound to collection/window/count, expires in 15 minutes"
+            "desc": "confirmation handle returned by prepare; one-shot, bound to collection/window/count/records (commit must submit records identical to the proposal; commit without the proposal's records is refused), expires in 15 minutes"
           },
           {
             "flag": "--delay-ms",

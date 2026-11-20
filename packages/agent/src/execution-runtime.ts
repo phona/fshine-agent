@@ -1068,25 +1068,29 @@ const SETTLED_TASK_STATUSES: ReadonlySet<string> = new Set([
  * 自己重编参数——而摘要超过 10 条会被截断（执行层只列前 10 条），实测漏掉 `--records` →
  * 与执行层的绑定校验相撞（CONFIRMATION_BINDING_MISMATCH / CONFIRMATION_REQUIRED），写不进去。
  * 所以提案时的参数**原文**（opaque：宿主不解析业务字段）随事实一并交回，Worker 原样照抄提交。
- * handle 不进委派文本（Worker 永远看不到确认凭据）；operation 名与参数不是凭据——Worker
- * 的委派里本来就有全量 operation 清单，缺了它反而不知道这份参数属于哪次调用。缺省
- * （无提案/非续跑/旧记录没有参数）由调用方不传字段或渲染端保持不变。
+ * handle 不进委派文本（Worker 永远看不到确认凭据）。
+ *
+ * 2026-11-20（fix/visible-contract）动作指令明确化：真模型验收 13/14 个续跑回合先重跑 prepare
+ * 而不是 commit——根因是事实块把 `operation: dummy.prepare` 与参数一起交回、又只说「原样提交」，
+ * 模型照着那个 operation 名又准备了一次。修法：① 动作写成明确的「下一步是**提交**（用提交类
+ * operation，如 commit），不是重新准备」；② **不再把提案时的 operation 名写进 JSON**（只留
+ * `{"args":…}` 参数原文，并注明这是提案时的记录、不是要重跑的 operation），消除误导。
+ * 缺省（无提案/非续跑/旧记录没有参数）由调用方不传字段或渲染端保持不变。
  */
 export function renderConfirmationResumeFact(confirmation: {
   summary: string;
   operation?: string;
   args?: Record<string, unknown>;
 }): string {
-  const head = `用户已确认上一轮提案（摘要：${confirmation.summary}）。直接提交，不要重新生成提案。`;
+  const head = `用户已确认上一轮提案（摘要：${confirmation.summary}）。下一步是提交（用提交类 operation，如 commit），不是重新准备、也不是重新生成提案。`;
   if (confirmation.args === undefined) return head;
   // 参数按不透明数据处理：只序列化，不排序、不裁剪、不改写（逐字节照抄才是机械事实）。
-  const proposal = JSON.stringify({
-    ...(confirmation.operation === undefined ? {} : { operation: confirmation.operation }),
-    args: confirmation.args,
-  });
+  // 不带 operation 名——提案时的 prepare 名会误导模型重跑 prepare；提交用哪个 operation 由
+  // 委派清单（含带 --confirmation 的 commit）自己说清，这里只交参数原文。
+  const proposal = JSON.stringify({ args: confirmation.args });
   return [
     head,
-    '上一轮提案的调用原文（机械事实：按这份 operation 与 args 原样提交，不要重新生成、不要省略或改写任何参数）：',
+    '提案时的调用参数原文（机械事实；这是提案时的记录，不是要重跑的 operation 名）：提交时逐字复用这些参数，特别是 records，不要省略或改写任何参数。',
     proposal,
   ].join('\n');
 }
@@ -3362,14 +3366,48 @@ function pendingQuestionFrom(outcome: Extract<ExecutionOutcome, { status: 'needs
 }
 
 /**
+ * 携带「差什么」绑定诊断、需要如实转述给 Worker 的拒绝码（2026-11-20 fix/visible-contract）。
+ *
+ * 判据用**码表**（与 classifyFailure 同源风格），不嗅探消息文案语义——红线是不解析执行层消息
+ * 的语义。列进来的码 = 执行层明确给出了 prepared/got 对比、Worker 据此才能把参数改对的那类；
+ * 其余拒绝（GATE_REFUSE 等权限/口径类）继续走 failureMessageFor 的中文用户话术，保持
+ * 「如实转述没权限」这类用户级不变量（wecom-sim W-11）不被英文原文顶掉。
+ */
+const DIAGNOSTIC_REFUSAL_CODES: ReadonlySet<string> = new Set(['CONFIRMATION_BINDING_MISMATCH']);
+
+/**
+ * 执行层业务诊断的**机械清理**（2026-11-20 fix/visible-contract）：只做三件事——剥前置技术码
+ * token、剥服务器路径（与用户可见回复同一把尺 stripServerPaths）、去机构自称「执行层/执行端」。
+ * **不解析语义、不改业务字段**：参数结构名（records / collection / window / count / 确认句柄）、
+ * prepared/got 对比、错误原文一律原样保留——「差什么」的可诊断信息就在这段原文里，宿主
+ * 如实转述即「可执行下一步」（AGENTS 如实交付 / 失败归宿规则）。
+ *
+ * 为什么诊断进 Worker 可见面而码不进：码是内部技术形态；业务诊断原文
+ * （prepared collection=… got collection=…）是执行层给调用方的反馈，模型据此才能在下一轮
+ * 把参数改对——7 连红里 5 次沿用同一错形正是因为这段原文只进日志。适配器把整行 stderr
+ * （含前置码 token）塞进 error.message，这里把前置码 token 机械剥掉（技术码只进日志）。
+ */
+function cleanExecutorDiagnostic(message: string): string {
+  // 1) 前置技术码 token（`CONFIRMATION_BINDING_MISMATCH Confirmation binding…` 的首段）。
+  let text = message.replace(/^[A-Z][A-Z0-9_]*\s+/u, '');
+  // 2) 服务器路径剥离（可能与用户可见回复同源命中；命中为空时 stripServerPaths 原样返回）。
+  text = stripServerPaths(text).text.trim();
+  // 3) 机构自称不许出现在可见面：只做替换，不触碰任何业务/参数名。
+  text = text.replace(/执行层|执行端/gu, '对方');
+  return text;
+}
+
+/**
  * 模型可见的执行结果（单一实现：前台会话 execute_operation 与后台 TaskExecutor 共用）：
  * needs_confirmation 只给机械摘要（summary/expiresAt）与 data——句柄是宿主持有的确认凭据，
  * 不进模型转录/工具结果，模型无法伪造或转交；completed / needs_input / accepted 原样
  * （逐字节不变）；**failed / refused 不再逐字透传**（2026-11-19 模型可见面收口）——执行层
- * 原文与原始码是内部形态（用户不需要、也不该看到「确认凭据/令牌/参数名/协议」这类词），
- * 模型只见 `{status, kind, note}`：kind 来自 classifyFailure（码表归类），note 来自
- * failureMessageFor（用户话术 + 动作）。原始 code/原文只进日志（调用方经 onExecutionEvent
- * 落 `execution_failure_classified`，见 projectWorkerOutcome）。
+ * 原始码是内部形态（用户不需要、也不该看到技术码），模型只见 `{status, kind, note}`：
+ * kind 来自 classifyFailure（码表归类）。2026-11-20（fix/visible-contract）补：**refused 且
+ * 执行层给了业务可诊断消息时，note 改用清理后的业务诊断原文**（替代通用「没办成」），
+ * 让 Worker 下一轮能据「差什么」改对参数；failed 与「执行层没给有用消息」的拒绝仍走
+ * failureMessageFor 的通用话术。原始 code 只进日志（调用方经 onExecutionEvent 落
+ * `execution_failure_classified`，见 projectWorkerOutcome）。
  */
 function toModelVisibleOutcome(
   outcome: ExecutionOutcome,
@@ -3385,10 +3423,15 @@ function toModelVisibleOutcome(
     }
     const kind = classifyFailure({ code: outcome.error.code, status: outcome.status });
     input.onClassified?.({ code: outcome.error.code, kind });
+    // 仅「带差什么诊断的拒绝码」如实转述业务诊断原文；其余失败/拒绝沿用通用中文话术。
+    // 码表判定（不看文案语义）；诊断只做机械清理（前置码 token + 路径 + 机构名）。
+    const diagnostic = outcome.status === 'refused' && DIAGNOSTIC_REFUSAL_CODES.has(outcome.error.code)
+      ? cleanExecutorDiagnostic(outcome.error.message)
+      : '';
     return {
       status: outcome.status,
       kind,
-      note: failureMessageFor(kind).text,
+      note: diagnostic !== '' ? diagnostic : failureMessageFor(kind).text,
     };
   }
   return {

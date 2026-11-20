@@ -168,11 +168,11 @@ describe('用户可见失败话术', () => {
     for (const text of shouldMiss) expect(internalTermIn(text), text).toBeUndefined();
   });
 
-  it('⑥ failed/refused 的模型可见投影：不含执行层原文与技术码，含 kind+note', async () => {
+  it('⑥ failed 的模型可见投影：不含执行层原文与技术码，含 kind+note（通用话术）', async () => {
     // 2026-11-19 抽象泄露 fix：执行层 error.message/code 曾经逐字进模型可见投影——
     // 用户收到「执行层/执行端/确认凭据/令牌/能力清单/必填参数/异步」这类内部词。
     // 收口后模型（Worker 工具结果）只见 {status, kind, note}；原文与码只进日志
-    // （execution_failure_classified）。
+    // （execution_failure_classified）。failed 仍走通用话术（2026-11-20 只改 refused）。
     const failed = await workerVisibleOutcomeOf({
       status: 'failed',
       error: { code: 'COLLECTION_FAULT', message: 'gateway crashed with exit 2 (internal executor fault)', retryable: false },
@@ -186,17 +186,6 @@ describe('用户可见失败话术', () => {
     expect(projected).not.toContain('执行层');
     expect(projected).not.toContain('执行端');
     expect(projected).not.toContain('retryable');
-
-    // refused（门拒）同样归类成 denied 话术，不暴露原始码与「凭据/句柄」字样。
-    const refused = await workerVisibleOutcomeOf({
-      status: 'refused',
-      error: { code: 'GATE_REFUSE', message: 'missing confirmation credential --confirmation <handle>', retryable: false },
-    });
-    expect(refused).toEqual({ status: 'refused', kind: 'denied', note: '这件事没权限。换个对象，还是请管理员开通？' });
-    const refusedProjected = JSON.stringify(refused);
-    expect(refusedProjected).not.toContain('GATE_REFUSE');
-    expect(refusedProjected).not.toContain('confirmation');
-    expect(refusedProjected).not.toContain('handle');
 
     // 未知码收敛成 executor_failed，不把原文给模型。
     const unknown = await workerVisibleOutcomeOf({
@@ -215,6 +204,60 @@ describe('用户可见失败话术', () => {
     // completed 保持原样（逐字节不变）。
     const completed = await workerVisibleOutcomeOf({ status: 'completed', data: { count: 3 } });
     expect(completed).toEqual({ status: 'completed', data: { count: 3 } });
+  });
+
+  it('⑥b refused 可诊断（2026-11-20 行为变化，如实登记）：绑定诊断码的 note 带业务原文，只剥前置码+路径+机构名', async () => {
+    // 行为变化登记：2026-11-19 起 refused note 固定为通用 deny 话术（「不可诊断」）；
+    // 2026-11-20 起「带差什么诊断的拒绝码」（码表 = CONFIRMATION_BINDING_MISMATCH）note
+    // = 清理后的业务诊断原文（「可诊断」）；其余拒绝仍走中文用户话术。
+    // 这是**如实交付**而非话术补丁：码表判定 + 三件机械清理（前置码 token / 路径 / 机构名），
+    // 不解析消息语义、不改业务字段；结构名（records/确认句柄）允许出现。
+    const binding = await workerVisibleOutcomeOf({
+      status: 'refused',
+      error: {
+        code: 'CONFIRMATION_BINDING_MISMATCH',
+        // 真实形状：适配器把整行 stderr 塞进 message（含前置码 token）；再加机构自称/路径。
+        message: 'CONFIRMATION_BINDING_MISMATCH 执行层拒绝：prepared collection=alpha window=W1 count=3 records=3; got collection=alpha window=W1 count=3 records=0 (see /home/tao/.tmp/diag/x.json)',
+        retryable: false,
+      },
+    });
+    expect(binding).toMatchObject({ status: 'refused', kind: 'executor_failed' });
+    const note = binding['note'] as string;
+    // 差什么：prepared/got 对比、records 结构名如实转述（模型据此下一轮改对参数）。
+    expect(note).toContain('prepared collection=alpha');
+    expect(note).toContain('got collection=alpha');
+    expect(note).toContain('records=3');
+    expect(note).toContain('records=0');
+    // 三条机械清理：前置码 token 去掉、机构自称去掉、服务器路径剥掉。
+    expect(note).not.toMatch(/^CONFIRMATION_/);
+    expect(note).not.toContain('执行层');
+    expect(note).not.toContain('执行端');
+    expect(note).not.toContain('/home/tao/.tmp');
+    // 技术码不下放（码是内部形态，与业务诊断原文分开）。
+    expect(JSON.stringify(binding)).not.toContain('CONFIRMATION_BINDING_MISMATCH');
+
+    // 门拒（GATE_REFUSE）：不在诊断码表内 → 仍走中文用户话术（保住「如实转述没权限」这类
+    // 用户级不变量，wecom-sim W-11）；英文原文与结构名都不下放。
+    const denied = await workerVisibleOutcomeOf({
+      status: 'refused',
+      error: { code: 'GATE_REFUSE', message: 'GATE_REFUSE missing confirmation credential --confirmation <handle>', retryable: false },
+    });
+    expect(denied).toEqual({
+      status: 'refused',
+      kind: 'denied',
+      note: '这件事没权限。换个对象，还是请管理员开通？',
+    });
+    const deniedText = JSON.stringify(denied);
+    expect(deniedText).not.toContain('GATE_REFUSE');
+    expect(deniedText).not.toContain('confirmation');
+    expect(deniedText).not.toContain('<handle>');
+
+    // failed 永不携带诊断原文（即使带绑定码也走通用话术——诊断只给 refused）。
+    const failedBinding = await workerVisibleOutcomeOf({
+      status: 'failed',
+      error: { code: 'CONFIRMATION_BINDING_MISMATCH', message: 'CONFIRMATION_BINDING_MISMATCH prepared a got b' },
+    });
+    expect(failedBinding['note']).toBe('没办成。再试一次，还是先放着？');
   });
 
   it('⑦ Worker 委派文本不含内部度量（weight/est_seconds/估时字样）', () => {

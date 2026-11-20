@@ -25,7 +25,7 @@ operation 名**——flag（`--collection` 之类）不是 operation 名，它�
 |---|---|---|
 | prepare | `dummy.prepare`（生成待确认提案：返回 handle / summary / expiresAt，不落账） | `<gateway> prepare dummy.prepare --collection <name> [--window <code>] [--count <code>]` |
 | prepare | `dummy.proposal`（建提案，payload 是位置参数） | `<gateway> prepare dummy.proposal <payload-file>` |
-| commit | `dummy.commit`（凭 prepare 句柄提交；句柄一次性、绑定 collection/window/count、15 分钟过期） | `<gateway> commit dummy.commit --collection <name> [--window <code>] [--count <code>] --confirmation <handle>` |
+| commit | `dummy.commit`（凭 prepare 句柄提交；句柄一次性、绑定 collection/window/count/records（与提案完全一致）、15 分钟过期） | `<gateway> commit dummy.commit --collection <name> [--window <code>] [--count <code>] --confirmation <handle>`；提交必须携带与提案一致的 records |
 | commit | `dummy.proposal-commit`（按提案提交） | `<gateway> commit dummy.proposal-commit --proposal-id <id>` |
 
 `prepare` 带 `--apply` 会被门拒（写必须走 commit）。`dummy.prepare` 返回
