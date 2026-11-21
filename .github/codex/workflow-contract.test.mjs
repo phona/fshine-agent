@@ -15,9 +15,8 @@ import test from 'node:test'
 const workflow = fs.readFileSync('.github/workflows/pr-review.yml', 'utf8')
 
 test('workflow 在 self-hosted runner 上跑，且由 PR_REVIEW_ENABLED 显式开启', () => {
-  // runner 默认 self-hosted（局域网端点），可用 vars.PR_REVIEW_RUNNER 切到云端（如 ubuntu-latest）。
-  assert.match(workflow, /runs-on: \$\{\{ fromJSON\(vars\.PR_REVIEW_RUNNER \|\| '\["self-hosted","fshine"\]'\) \}\}/)
-  assert.doesNotMatch(workflow, /runs-on: ubuntu-latest/)
+  // runner 默认 ubuntu-latest（secrets 是云通道）；需要局域网端点时用 vars.PR_REVIEW_RUNNER 切 self-hosted。
+  assert.match(workflow, /runs-on: \$\{\{ fromJSON\(vars\.PR_REVIEW_RUNNER \|\| '\["ubuntu-latest"\]'\) \}\}/)
   assert.match(workflow, /if: vars\.PR_REVIEW_ENABLED == 'true'/)
   assert.match(workflow, /types: \[opened, synchronize, reopened\]/)
   assert.match(workflow, /branches: \[main\]/)
@@ -28,9 +27,9 @@ test('workflow 在 self-hosted runner 上跑，且由 PR_REVIEW_ENABLED 显式�
 })
 
 test('模型调用走本地端点（env 注入），密钥与 GitHub 令牌在审查前隔离', () => {
-  assert.match(workflow, /LLM_API_BASE_URL: \$\{\{ vars\.LLM_API_BASE_URL \}\}/)
+  assert.match(workflow, /LLM_API_BASE_URL: \$\{\{ secrets\.LLM_API_BASE_URL \}\}/)
   assert.match(workflow, /LLM_API_KEY: \$\{\{ secrets\.LLM_API_KEY \}\}/)
-  assert.match(workflow, /PR_REVIEW_MODEL: \$\{\{ vars\.PR_REVIEW_MODEL \}\}/)
+  assert.match(workflow, /PR_REVIEW_MODEL: \$\{\{ vars\.PR_REVIEW_MODEL \|\| secrets\.LLM_MODEL \}\}/)
   assert.match(workflow, /node \.github\/codex\/llm-review\.mjs/)
   // 审查步骤里先 unset 仓库令牌，再调模型（顺序断言，不只看是否出现）。
   const unsetAt = workflow.indexOf('unset GITHUB_TOKEN GH_TOKEN')

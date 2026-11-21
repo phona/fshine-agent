@@ -9,11 +9,12 @@
 ## 启用（两道开关）
 
 1. **仓库变量** `PR_REVIEW_ENABLED=true`。没设 = job 不运行，check 不出现（不会排队、不会永远红）。
-2. **模型通道**，二选一：
-   - **自托管 runner（局域网端点）**：默认 `runs-on` 是 `["self-hosted","fshine"]`；在能访问端点（如 `http://192.168.100.1:3425/v1`）的机器上装 GitHub self-hosted runner 并打 `fshine` 标签。安装步骤见 GitHub 文档「self-hosted runners」，本仓不代装。
-   - **云端端点**：把 `PR_REVIEW_RUNNER` 设为 `["ubuntu-latest"]`，`LLM_API_BASE_URL=https://api.x.ai/v1`，secret `LLM_API_KEY=<xAI API key>`。不需要 runner。
+2. **模型通道**：
+   - **默认（云端）**：复用仓库既有 secrets `LLM_API_BASE_URL` / `LLM_API_KEY`（`eval-real` 同一条通道），模型取 `vars.PR_REVIEW_MODEL`，没设就落到 `secrets.LLM_MODEL`。runner 默认 `ubuntu-latest`。
+   - **换成 grok（xAI 云端）**：把上面两个 secret 指向 `https://api.x.ai/v1` 与 xAI API key，并设 `vars.PR_REVIEW_MODEL=grok/grok-4.7`。仍不需要 runner。
+   - **局域网端点（本机 grok）**：`vars.PR_REVIEW_RUNNER=["self-hosted","fshine"]`，在能访问端点（如 `http://192.168.100.1:3425/v1`）的机器上装 self-hosted runner 并打 `fshine` 标签；`LLM_API_BASE_URL` 指向该端点、`LLM_API_KEY` 用该端点 key。
 
-其它变量：`PR_REVIEW_MODEL`（缺省 `grok/grok-4.7`）、`PR_REVIEW_EFFORT`（可选思考档，透传 `reasoning_effort`）。
+其它变量：`PR_REVIEW_EFFORT`（可选思考档，透传 `reasoning_effort`）。
 
 ## 密钥
 

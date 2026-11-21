@@ -1,11 +1,11 @@
 # 同一仓库 PR 的流水线审查（2026-11-21：Codex 订阅停用，改本地 OpenAI 兼容端点的 grok）。
 #
-# 为什么必须 self-hosted：审查模型在局域网端点（如 http://192.168.100.1:3425/v1），
-# GitHub 托管 runner 访问不到。runner 装在能访问该端点的机器上（安装/卸载件见
-# docs/ops/README.md §4「PR 审查流水线」）。
+# 模型通道：默认复用仓库既有 secrets LLM_API_BASE_URL / LLM_API_KEY（eval-real 同一条云通道），
+# 模型取 vars.PR_REVIEW_MODEL，缺省落到 secrets.LLM_MODEL。要换 grok（xAI 云端）就把这两个
+# secret 指向 xAI 并把 PR_REVIEW_MODEL 设为 grok/grok-4.7；要换局域网端点则把
+# PR_REVIEW_RUNNER 设为 ["self-hosted","fshine"] 并在能访问端点的机器上装 runner。
 #
-# 开关：仓库变量 PR_REVIEW_ENABLED=true 才跑（没装 runner 时保持关闭，避免 job 无限排队）。
-# 依赖：secret LLM_API_KEY；vars LLM_API_BASE_URL、PR_REVIEW_MODEL（缺省 grok/grok-4.7）。
+# 开关：仓库变量 PR_REVIEW_ENABLED=true 才跑。
 # 审查口径与输出 schema 复用 .github/prompts/pr-review.md 与 .github/codex/review-schema.json。
 # 本 workflow 不改分支保护；required check 由业主配置。
 name: PR review (grok)
@@ -33,9 +33,10 @@ jobs:
     name: pr-review
     # 未安装 self-hosted runner / 未启用时保持关闭：既不让 check 红，也不让 job 排队。
     if: vars.PR_REVIEW_ENABLED == 'true'
-    # runner 可切换：默认 self-hosted（模型在局域网端点）；若改用云端端点（如 api.x.ai + API key），
-    # 把仓库变量 PR_REVIEW_RUNNER 设为 ["ubuntu-latest"] 即可，无需自托管。
-    runs-on: ${{ fromJSON(vars.PR_REVIEW_RUNNER || '["self-hosted","fshine"]') }}
+    # runner 可切换：默认 ubuntu-latest（secrets 里的端点是云端可达的）；
+    # 若改用局域网端点（如本机 192.168.100.1 的 grok），把仓库变量 PR_REVIEW_RUNNER
+    # 设为 ["self-hosted","fshine"] 并在能访问该端点的机器上装 runner。
+    runs-on: ${{ fromJSON(vars.PR_REVIEW_RUNNER || '["ubuntu-latest"]') }}
     timeout-minutes: 25
     steps:
       - name: Reject fork pull requests
@@ -115,9 +116,11 @@ jobs:
           # 模型调用前 unset——审查代理本身永远拿不到 GitHub 凭证。
           GH_TOKEN: ${{ github.token }}
           THIS_REPO: ${{ github.repository }}
-          LLM_API_BASE_URL: ${{ vars.LLM_API_BASE_URL }}
+          # 复用仓库既有 secrets（eval-real 同一条云通道，2026-11-06 设置、2026-11-21 仍在跑）；
+          # 想吃 grok（xAI 云端）时把这两个 secret 换成 xAI 的，并把 PR_REVIEW_MODEL 设为 grok/grok-4.7。
+          LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          PR_REVIEW_MODEL: ${{ vars.PR_REVIEW_MODEL }}
+          PR_REVIEW_MODEL: ${{ vars.PR_REVIEW_MODEL || secrets.LLM_MODEL }}
           PR_REVIEW_EFFORT: ${{ vars.PR_REVIEW_EFFORT }}
         run: |
           set -euo pipefail
