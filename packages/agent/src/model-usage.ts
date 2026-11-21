@@ -72,3 +72,149 @@ export function createModelUsageSink(options: ModelUsageSinkOptions): (entry: Pi
     }
   };
 }
+
+// ── 报表聚合（scripts/ops/usage-report.ts 的纯函数面；单独导出便于单测）──
+
+/** 报表过滤（缺省全量）。 */
+export interface UsageReportFilter {
+  /** 只保留 `at >= sinceMs` 的行（epoch 毫秒；--since 7d / ISO 换算后传入）。 */
+  sinceMs?: number;
+  /** 只保留 principalId 精确相等的行（没有 principalId 的行被排除）。 */
+  principalId?: string;
+  /** 只保留该驱动角色的行。 */
+  agent?: 'main' | 'worker';
+}
+
+/** 按 (principalId, day) 聚合出的一组读数。缺 ttft / 无法算 tokens/s 的地方为 null → 报表渲染 n/a。 */
+export interface UsageDayGroup {
+  /** 行里没有 principalId 的归 ''（跨主体兜底 Worker 的行；报表渲染成占位）。 */
+  principalId: string;
+  /** UTC 日（ISO `at` 的前 10 字符）。 */
+  day: string;
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  /** 平均耗时（毫秒，四舍五入到整数）。 */
+  avgDurationMs: number;
+  p50DurationMs: number;
+  p95DurationMs: number;
+  p50TtftMs: number | null;
+  p95TtftMs: number | null;
+  /** 输出 tokens/s = Σoutput / (Σ(durationMs−ttftMs)/1000)，只统计有 ttft 且 duration>ttft 的行；无可算行 = null。 */
+  outputTokensPerSecond: number | null;
+}
+
+/**
+ * 宽容解析一行 usage.jsonl：JSON 可解析且最小形状齐全（at 可解析、agent 合法、计量字段为
+ * 有限数字）才返回行；坏行返回 undefined（调用方计数后跳过）。
+ */
+export function parseUsageLine(raw: string): ModelUsageLine | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined;
+  const record = parsed as Record<string, unknown>;
+  const at = record['at'];
+  if (typeof at !== 'string' || Number.isNaN(Date.parse(at))) return undefined;
+  const agent = record['agent'];
+  if (agent !== 'main' && agent !== 'worker') return undefined;
+  const modelId = record['modelId'];
+  const stopReason = record['stopReason'];
+  if (typeof modelId !== 'string' || modelId === '' || typeof stopReason !== 'string') return undefined;
+  const durationMs = record['durationMs'];
+  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 0) return undefined;
+  const usageRecord = record['usage'];
+  if (typeof usageRecord !== 'object' || usageRecord === null) return undefined;
+  const usage = usageRecord as Record<string, unknown>;
+  const usageKeys = ['input', 'output', 'cacheRead', 'cacheWrite', 'reasoning', 'totalTokens'] as const;
+  const usageOut: PiModelUsageEntry['usage'] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0 };
+  for (const key of usageKeys) {
+    const value = usage[key];
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
+    usageOut[key] = value;
+  }
+  const ttftMs = record['ttftMs'];
+  if (ttftMs !== undefined && (typeof ttftMs !== 'number' || !Number.isFinite(ttftMs) || ttftMs < 0)) return undefined;
+  const principalId = record['principalId'];
+  const sessionId = record['sessionId'];
+  return {
+    at,
+    agent,
+    ...(typeof principalId === 'string' && principalId !== '' ? { principalId } : {}),
+    ...(typeof sessionId === 'string' && sessionId !== '' ? { sessionId } : {}),
+    modelId,
+    stopReason,
+    durationMs,
+    ...(ttftMs !== undefined ? { ttftMs } : {}),
+    usage: usageOut,
+  };
+}
+
+/** 最近秩法（nearest-rank）百分位：升序第 ⌈p/100 × n⌉ 个（1 起）。空数组返回 0（调用方保证非空）。 */
+export function nearestRankPercentile(sortedAscending: readonly number[], percentile: number): number {
+  if (sortedAscending.length === 0) return 0;
+  const rank = Math.ceil((percentile / 100) * sortedAscending.length);
+  return sortedAscending[Math.min(sortedAscending.length, Math.max(1, rank)) - 1]!;
+}
+
+/** 行过滤（since/principal/agent），不复制不改行。 */
+function lineMatchesFilter(line: ModelUsageLine, filter: UsageReportFilter): boolean {
+  if (filter.sinceMs !== undefined && Date.parse(line.at) < filter.sinceMs) return false;
+  if (filter.principalId !== undefined && line.principalId !== filter.principalId) return false;
+  if (filter.agent !== undefined && line.agent !== filter.agent) return false;
+  return true;
+}
+
+/** 按 (principalId, day) 聚合；输出按 principalId 再按 day 升序（确定性渲染）。 */
+export function aggregateModelUsage(
+  lines: readonly ModelUsageLine[],
+  filter: UsageReportFilter = {},
+): UsageDayGroup[] {
+  const buckets = new Map<string, ModelUsageLine[]>();
+  for (const line of lines) {
+    if (!lineMatchesFilter(line, filter)) continue;
+    const key = `${line.principalId ?? ''}\u0000${line.at.slice(0, 10)}`;
+    const bucket = buckets.get(key);
+    if (bucket === undefined) buckets.set(key, [line]);
+    else bucket.push(line);
+  }
+  const groups: UsageDayGroup[] = [];
+  for (const key of [...buckets.keys()].sort()) {
+    const [principalId = '', day = ''] = key.split('\u0000');
+    const bucket = buckets.get(key)!;
+    const sum = (pick: (line: ModelUsageLine) => number): number => bucket.reduce((total, line) => total + pick(line), 0);
+    const durations = bucket.map((line) => line.durationMs).sort((a, b) => a - b);
+    const ttfts = bucket.flatMap((line) => line.ttftMs !== undefined ? [line.ttftMs] : []).sort((a, b) => a - b);
+    // tokens/s 只统计「有 ttft 且 duration > ttft」的行：duration == ttft 的行除数为 0，
+    // 计入只会虚高——排除（分子分母一起排除，不虚耗）。
+    const rateRows = bucket.flatMap((line) => (line.ttftMs !== undefined && line.durationMs > line.ttftMs
+      ? [line]
+      : []));
+    const rateWindowMs = rateRows.reduce((total, line) => total + (line.durationMs - (line.ttftMs ?? 0)), 0);
+    groups.push({
+      principalId,
+      day,
+      calls: bucket.length,
+      inputTokens: sum((line) => line.usage.input),
+      outputTokens: sum((line) => line.usage.output),
+      cacheReadTokens: sum((line) => line.usage.cacheRead),
+      reasoningTokens: sum((line) => line.usage.reasoning),
+      totalTokens: sum((line) => line.usage.totalTokens),
+      avgDurationMs: Math.round(sum((line) => line.durationMs) / bucket.length),
+      p50DurationMs: nearestRankPercentile(durations, 50),
+      p95DurationMs: nearestRankPercentile(durations, 95),
+      p50TtftMs: ttfts.length === 0 ? null : nearestRankPercentile(ttfts, 50),
+      p95TtftMs: ttfts.length === 0 ? null : nearestRankPercentile(ttfts, 95),
+      outputTokensPerSecond: rateRows.length === 0 || rateWindowMs === 0
+        ? null
+        : Math.round((rateRows.reduce((total, line) => total + line.usage.output, 0) / (rateWindowMs / 1000)) * 10) / 10,
+    });
+  }
+  return groups;
+}

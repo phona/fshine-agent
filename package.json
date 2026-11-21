@@ -12,6 +12,7 @@
     "tasks": "node --env-file-if-exists=.env --import tsx scripts/tasks.ts",
     "ops": "node --env-file-if-exists=.env --import tsx scripts/ops.ts",
     "alerts": "node --env-file-if-exists=.env --import tsx scripts/ops/alerts.ts",
+    "usage": "node --env-file-if-exists=.env --import tsx scripts/ops/usage-report.ts",
     "cleanup:runs": "node --env-file-if-exists=.env --import tsx scripts/cleanup-runs.ts",
     "eval:user": "node --env-file-if-exists=.env --import tsx scripts/eval/convergence-r1/runner.ts",
     "eval:write-loop": "node --env-file-if-exists=.env --import tsx scripts/eval/real/write-loop.ts",
