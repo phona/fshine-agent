@@ -155,7 +155,7 @@ describe('用户可见失败话术', () => {
       '能力清单里标记为长时间运行操作',
       '这个 operation 不在允许集合',
       '任务 task_71d08976-4b7e-4041-8976-6aeac6eeecef 失败',
-      '报错文件 /home/tao/projects/x/y.ts',
+      '报错文件 /home/dev/projects/x/y.ts',
     ];
     for (const text of shouldHit) expect(internalTermIn(text), text).toBeDefined();
 
@@ -217,7 +217,7 @@ describe('用户可见失败话术', () => {
       error: {
         code: 'CONFIRMATION_BINDING_MISMATCH',
         // 真实形状：适配器把整行 stderr 塞进 message（含前置码 token）；再加机构自称/路径。
-        message: 'CONFIRMATION_BINDING_MISMATCH 执行层拒绝：prepared collection=alpha window=W1 count=3 records=3; got collection=alpha window=W1 count=3 records=0 (see /home/tao/.tmp/diag/x.json)',
+        message: 'CONFIRMATION_BINDING_MISMATCH 执行层拒绝：prepared collection=alpha window=W1 count=3 records=3; got collection=alpha window=W1 count=3 records=0 (see /home/dev/.tmp/diag/x.json)',
         retryable: false,
       },
     });
@@ -232,7 +232,7 @@ describe('用户可见失败话术', () => {
     expect(note).not.toMatch(/^CONFIRMATION_/);
     expect(note).not.toContain('执行层');
     expect(note).not.toContain('执行端');
-    expect(note).not.toContain('/home/tao/.tmp');
+    expect(note).not.toContain('/home/dev/.tmp');
     // 技术码不下放（码是内部形态，与业务诊断原文分开）。
     expect(JSON.stringify(binding)).not.toContain('CONFIRMATION_BINDING_MISMATCH');
 

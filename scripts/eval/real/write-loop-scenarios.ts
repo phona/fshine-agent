@@ -14,7 +14,7 @@
  *                   同对象只被调一次（审计行数 == 1）、没有任何写入落地。
  *   · `idempotency` 同一消息重发（入站幂等）：同 messageId 在办理中并发再发一次 →
  *                   断言不新起工作（任务数 1、prepare 成功 1 次）、第二次拿到宿主
- *                   确定性回执（同一句回放或「还在办」话术）、最终只写入一次且读回 4 条。
+ *                   确定性回执（同一句回放或「上次没办完」如实兜底）、最终只写入一次且读回 4 条。
  *   · `reconfirm`   确认之后又确认一次（旧句柄复用）：走完一次完整写入后，用户再说一次
  *                   「确认」→ 断言没有第二次写入（成功 commit 仍 1、读回仍 4 条、句柄
  *                   未被再次消耗）、没有新任务/没有接续、用户收到一句话、且第三次回合
@@ -30,7 +30,7 @@
  *   · 宿主/办事通道的**成功通道原文**（`办好了：` / `办完了` / `Confirmed write
  *     applied`）在失败/取消/重复确认场景里的**不出现**——这些字符串只有真成功才会产生，
  *     出现即「假成功」事实；
- *   · 幂等回放与「还在办」话术（宿主常量，逐字）。
+ *   · 幂等回放与「上次没办完」如实兜底（宿主常量，逐字）。
  * 每条判据都有反向破坏用例（见 write-loop-scenarios.test.ts 的逐条变异）。
  *
  * 退出码（沿用兄弟入口约定）：0 = 全部场景判据全过；1 = 有判据红（含场景中断）；
@@ -138,8 +138,9 @@ export const SUCCESS_CHANNEL_MARKERS: readonly string[] = [
 /** 宿主取消事实模板（notification-render cancelled：`已按你说的停了：<name>。`）。 */
 export const CANCELLATION_FACT_MARKER = '已按你说的停了：';
 
-/** 宿主「还在办」常驻话术（server.ts 的 INBOUND_STILL_PROCESSING_NOTE，逐字同源）。 */
-export const STILL_PROCESSING_NOTE = '这条我还在办，办完会发你，不用再发一遍。';
+/** 宿主「上次没办完」如实兜底（server.ts 的 INBOUND_STILL_PROCESSING_NOTE，逐字同源；
+ *  2026-11-21 已撤回旧「还在办，办完会发你」承诺——上一进程已死，那句话永远兑现不了）。 */
+export const STILL_PROCESSING_NOTE = '这条消息上次没办完（我这边中途中断过），我不会重复执行它，结果未知——麻烦你重发一次。';
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'unexecuted']);
 
@@ -711,15 +712,15 @@ export function evaluateIdempotencyCriteria(evidence: IdempotencyEvidence): Crit
       + `task_run 委派=${evidence.taskRunCalls} 次；成功 prepare 审计行=${evidence.prepareSuccessCount}`,
   );
 
-  // S3-C2 第二次拿到宿主确定性回执：同一句回放或「还在办」话术；且落了幂等事件。
+  // S3-C2 第二次拿到宿主确定性回执：同一句回放或「上次没办完」如实兜底；且落了幂等事件。
   const replaySame = evidence.duplicate.sameText;
   const stillProcessing = evidence.duplicate.secondReply === STILL_PROCESSING_NOTE;
   const duplicateEventSeen = evidence.duplicate.events.some((event) =>
     event === 'message_duplicate_replayed' || event === 'message_still_processing');
   add(
-    'S3-C2', '第二次收到宿主确定性回执（同一句回放或「还在办」话术）且落了幂等事件', 'mechanical',
+    'S3-C2', '第二次收到宿主确定性回执（同一句回放或「上次没办完」兜底）且落了幂等事件', 'mechanical',
     (replaySame || stillProcessing) && duplicateEventSeen,
-    `同一句回放=${replaySame}；还在办话术=${stillProcessing}；幂等事件=[${evidence.duplicate.events.join('、')}]`
+    `同一句回放=${replaySame}；中断兜底话术=${stillProcessing}；幂等事件=[${evidence.duplicate.events.join('、')}]`
       + `；第二次回执=${digestValue(evidence.duplicate.secondReply, 200)}`,
   );
 
@@ -754,7 +755,7 @@ export function evaluateIdempotencyObservations(evidence: IdempotencyEvidence): 
   return [
     {
       id: 'O1',
-      title: '第二次回执的通道与耗时（in_flight 等待 vs 底账回放 vs 还在办）',
+      title: '第二次回执的通道与耗时（in_flight 等待 vs 底账回放 vs 中断兜底）',
       detail: `第二次耗时=${evidence.duplicate.secondDurationMs}ms（第一次=${evidence.duplicate.firstDurationMs}ms）；`
         + `事件=[${evidence.duplicate.events.join('、')}]`,
     },

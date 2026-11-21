@@ -92,8 +92,8 @@ const EVENT_DRIVEN_EVENTS: ReadonlySet<string> = new Set([
   'notification_delivery_terminal',
   'task_long_running_notice',
   'file_delivery',
-  // 消息卡住的账必须能被看到（2026-11-21）：上一进程认领后挂掉、本进程无在途——用户已被
-  // 告知「还在办，不用再发一遍」，这句话永远不兑现且没人会再来问。message_stuck 规则判据
+  // 消息卡住的账必须能被看到（2026-11-21）：上一进程认领后挂掉、本进程无在途——用户拿到的是
+  // 「上次没办完、结果未知」的如实兜底；那次执行的结果没人知道，且没人会再来问。message_stuck 规则判据
   // 在 alert-rules.ts（五条规则单源）；沿用既有阈值（≥1）/冷却/双出口，不新开机制。
   'message_still_processing',
 ]);

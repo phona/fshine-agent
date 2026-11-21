@@ -54,7 +54,7 @@
  * **不升 schema 版本**（旧库可写打开时由 SCHEMA_BASE 补建；只读旧库读出缺省，不崩溃）。
  * 两阶段：认领写 state='processing'（claimed_at）；处理完成 UPDATE state='done' +
  * reply_text + completed_at。命中原行时——done → 回放 reply_text（零新副作用）；processing
- * → 上一进程未落定，不重复执行（由上层回「还在办」并记事件）。处理失败删行（失败不缓存，
+ * → 上一进程未落定，不重复执行（由上层回「上次没办完、结果未知」并记事件）。处理失败删行（失败不缓存，
  * 渠道可重投）。claimed_at/completed_at 用 ISO TEXT（与本表读取比对口径一致；启动清扫按
  * COALESCE(completed_at, claimed_at) < 保留期）。本表不承载任务/执行事实，只做入站消息查重。
  *

@@ -9,7 +9,7 @@
  * 4) E08 否定存在语义的模式锚点 → 仍判负伪造"查到数据"。
  * 5) E12 能力自述语境门 → 仍判 PHANTOM「已完成，数据已验证」。
  *
- * 2026-11-18 六类假红（E01–E15 ×30 批次，见 /home/tao/.tmp/eval30-*）：
+ * 2026-11-18 六类假红（E01–E15 ×30 批次，见 ~/.tmp/eval30-*）：
  * 6) E15 来源语义族：t2「系统查询返回值」/t19「查询结果中直接给出的」/t25「逐条相加得出的」
  *    → 必须不再判来源锚点缺失；删掉整段出处（只留数字）→ 仍必须判缺失。
  * 7) 对象身份改由执行行约束：E13 t23（回复无 documents）/E15 t4、t10（回复无 alpha）/
@@ -44,7 +44,7 @@
  * 用法：node --import tsx scripts/eval/convergence-r1/judge-corrections.verify.ts
  * 依赖本机真实轨迹样本（不进 CI）；样本不在时打印跳过并退出 0。
  * 样本根：FSHINE_EVAL_SAMPLES（可用 `:` 分隔多个根；缺省 <repo>/.runtime）。
- * 例：FSHINE_EVAL_SAMPLES=/home/tao/projects/fshine-agent/.runtime:/home/tao/.tmp
+ * 例：FSHINE_EVAL_SAMPLES=<仓库>/.runtime:~/.tmp
  * 退出码 0 = 全部符合预期。
  */
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -214,8 +214,8 @@ try {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// 2026-11-18 六类假红（E01–E15 ×30 真实批次：/home/tao/.tmp/eval30-b1|b2|b3-*）
-// 样本根设为 /home/tao/.tmp 时下列相对路径可解析（`FSHINE_EVAL_SAMPLES=...:/home/tao/.tmp`）。
+// 2026-11-18 六类假红（E01–E15 ×30 真实批次：~/.tmp/eval30-b1|b2|b3-*）
+// 样本根设为 ~/.tmp 时下列相对路径可解析（`FSHINE_EVAL_SAMPLES=...:~/.tmp`）。
 // ══════════════════════════════════════════════════════════════════════════
 const B1 = 'eval30-b1-20261118-175651/runs';
 const B2 = 'eval30-b2-20261118-180747/runs';

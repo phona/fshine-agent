@@ -59,7 +59,7 @@ Pi Agent（Main）+ 最小宿主 + Execution Contract + Channel Adapter 的产�
 ## 七、接手第一小时
 
 ```
-export TMPDIR=/home/tao/.tmp          # 本机约定：不设会踩 /tmp 容量
+export TMPDIR=~/.tmp          # 本机约定：不设会踩 /tmp 容量
 npm run ci                            # = typecheck + unit 单 project
 npm start                             # 起渠道服务（单实例锁：apps/server/main.ts:53）
 node --import tsx scripts/eval/wecom-sim/run.ts   # 渠道级不变量，约 2 分钟

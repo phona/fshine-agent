@@ -112,7 +112,7 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 - 停服 `12:02:15Z` → 重连 `12:03:43Z`（Authenticated），期间用户发 **2 条**；
 - 重连后 `inbound_messages` 仍 **31 条（零新增）**、日志 `aibot_msg_callback` 帧 **0**、会话文件**零写入**；
 - 结论：平台不补投、产品无补拉——断连窗口的消息没有任何恢复路径。
-- 原始日志（机器本地 scratch，非仓内）：停服前 `/home/tao/.tmp/fshine-live.log`、重连后 `/home/tao/.tmp/fshine-live-2.log`（含 `WebSocket connection manually closed` → `Authenticated` → `server_started` 时间线）。
+- 原始日志（机器本地 scratch，非仓内）：停服前 `~/.tmp/fshine-live.log`、重连后 `~/.tmp/fshine-live-2.log`（含 `WebSocket connection manually closed` → `Authenticated` → `server_started` 时间线）。
 
 **官方口径**：`developer.work.weixin.qq.com/document/60904` 把「可靠性高（无状态）」判给 **Webhook**；长连接标注「需要心跳保活、断线重连」。官方社区另有「连接正常时也偶发丢」案例。
 

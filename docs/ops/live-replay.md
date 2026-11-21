@@ -23,11 +23,11 @@
 ## 怎么跑
 
 ```sh
-export TMPDIR=/home/tao/.tmp
-cd /home/tao/projects/fshine-agent-replay
-node --env-file-if-exists=/home/tao/projects/fshine-agent/.env.local \
+export TMPDIR=~/.tmp
+cd ~/projects/fshine-agent-replay
+node --env-file-if-exists=<仓库>/.env.local \
   --import tsx scripts/eval/real/live-replay.ts --mode a   # 模式 A
-node --env-file-if-exists=/home/tao/projects/fshine-agent/.env.local \
+node --env-file-if-exists=<仓库>/.env.local \
   --import tsx scripts/eval/real/live-replay.ts --mode b   # 模式 B
 ```
 
@@ -68,17 +68,17 @@ node --env-file-if-exists=/home/tao/projects/fshine-agent/.env.local \
 
 ```sh
 # 只读打开生产库；.backup 在线快照，不锁业务、不写生产库
-sqlite3 '<生产库路径>/state.db' ".backup '/home/tao/.tmp/fixtures/live-snap/state.db.new'"
+sqlite3 '<生产库路径>/state.db' ".backup '~/.tmp/fixtures/live-snap/state.db.new'"
 # 校验后原子替换
-sqlite3 /home/tao/.tmp/fixtures/live-snap/state.db.new "PRAGMA integrity_check;"
-mv /home/tao/.tmp/fixtures/live-snap/state.db.new /home/tao/.tmp/fixtures/live-snap/state.db
+sqlite3 ~/.tmp/fixtures/live-snap/state.db.new "PRAGMA integrity_check;"
+mv ~/.tmp/fixtures/live-snap/state.db.new ~/.tmp/fixtures/live-snap/state.db
 # 连同会话转录一起更新（模式 A 要用）
-cp -a '<生产库路径>/sessions/.' /home/tao/.tmp/fixtures/live-snap/sessions/
+cp -a '<生产库路径>/sessions/.' ~/.tmp/fixtures/live-snap/sessions/
 ```
 
 注意：
 
-- 快照落在 `/home/tao/.tmp`（gitignore 之外、不进仓），`<TMPDIR>/fixtures/live-snap` 是缺省读取点。
+- 快照落在 `~/.tmp`（gitignore 之外、不进仓），`<TMPDIR>/fixtures/live-snap` 是缺省读取点。
 - 快照 principal 必须在物化配置里 `enabled + operator`（脚本自动补写本次副本的 `principals`
   段，不改快照）。
 - 更新后先跑两种模式各一次，确认 raw 输出与断言对照再入库；**任何 FAIL 如实登记**。

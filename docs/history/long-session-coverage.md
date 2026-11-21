@@ -97,7 +97,7 @@
 
 ```bash
 # 确定性门（全量）：必须绿
-export TMPDIR=/home/tao/.tmp
+export TMPDIR=~/.tmp
 npx tsc --noEmit
 npx vitest run
 

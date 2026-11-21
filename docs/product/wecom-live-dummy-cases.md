@@ -39,7 +39,7 @@
 样例输入（文件面用例要它，金额已知，便于逐格核对）：
 
 ```bash
-TMPDIR=/home/tao/.tmp node scripts/eval/fixtures/make-sales-sample.mjs /home/tao/.tmp/wecom-sample
+TMPDIR=~/.tmp node scripts/eval/fixtures/make-sales-sample.mjs ~/.tmp/wecom-sample
 # → 销售明细.xlsx：12 行 / 2 个客户
 # 期望：华远贸易 = 21000；明达物流 = 18000；合计 = 39000
 ```

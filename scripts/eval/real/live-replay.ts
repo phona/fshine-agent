@@ -7,7 +7,7 @@
  * 然后把「用户可见面」（回合回复 + 主动推送）按证据分级判 N1–N4 / P1–P4。
  *
  * 快照是**只读素材**：只读复制，绝不写回；快照根目录缺省 `os.tmpdir()/fixtures/live-snap`
- * （TMPDIR=/home/tao/.tmp 时即 owner 快照位置），可用 --snapshot 覆盖。
+ * （TMPDIR=~/.tmp 时即 owner 快照位置），可用 --snapshot 覆盖。
  *
  * 两种模式：
  *   A（--mode a）：复用快照里的 principalId / sessionId + 会话转录 → 模拟「用户第二天继续用，

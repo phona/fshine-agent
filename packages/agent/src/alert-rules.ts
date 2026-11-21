@@ -23,8 +23,7 @@
  *     （`skipped` + `deliveryMode=live` = 渠道配置/路由配错，用户彻底收不到）；
  *     silent/unavailable 上的 skipped 是部署属性，不告警）；
  *   · message_stuck       —— 入站消息跨重启幂等的「上一进程认领后挂掉、本进程无在途」
- *     （`message_still_processing` 事件，2026-11-20）≥1：用户已被如实告知「还在办，办完会
- *     发你，不用再发一遍」，但上一进程已死——这句话永远兑现不了，且用户不会再来问
+ *     （`message_still_processing` 事件，2026-11-20）≥1：用户拿到的是「上次没办完、结果未知」的如实兜底，但上一进程已死——那次执行的结果没人知道，且用户不会再来问
  *     （最该死的静默丢交办，2026-11-21 接进进程内告警：这类卡住的账必须能被看到）。
  *
  * 去重：同一 `(rule, subject)` 在冷却窗口（缺省 30 分钟）内只出一次；冷却状态是可 JSON
@@ -49,7 +48,7 @@ export const ALERT_SEVERITY: Readonly<Record<AlertRule, AlertSeverity>> = {
   delivery_failed: 'critical',
   retry_storm: 'warning',
   task_stuck: 'warning',
-  // 用户被承诺「办完会发你」而上一进程已挂——不介入就永远不兑现的静默丢交办。
+  // 用户交办卡在「上次没办完」而上一进程已挂——不介入就没人知道那次执行成了没有。
   message_stuck: 'critical',
 };
 
