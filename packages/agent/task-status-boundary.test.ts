@@ -21,7 +21,8 @@
  *     反向绊线：用例见 `packages/agent/write-outcome-last-attempt.test.ts`。
  */
 import { describe, expect, it } from 'vitest';
-import { judgeReportedTask, type ExecutionRecord } from './src/task-registry';
+import { RUN_JS_TOOL } from './src/execution-runtime';
+import { judgeReportedTask, RUN_JS_OPERATION, type ExecutionRecord } from './src/task-registry';
 
 function execution(
   status: ExecutionRecord['status'],
@@ -82,5 +83,60 @@ describe('task.status 语义边界（R2 表征测试；2026-11-19 按末次决�
 
   it('needs_input 后恢复成功（[needs_input, completed]）→ completed（2026-11-19 修订：末条是成功即成功）', () => {
     expect(judgeReportedTask([execution('needs_input'), execution('completed')]).status).toBe('completed');
+  });
+
+  it('执行层失败后脚本成功（[failed, run_js completed]）→ failed（2026-11-21 修：宿主脚本不是业务决定，不得把没办成收成办成）', () => {
+    // Grok 审查 blocking 的同形缺口（inline 面）：run_js 是宿主脚本执行，不是执行层业务写。
+    // 末条是成功脚本时，旧实现把前面的执行层失败整体收成 completed（用户侧把没办成看成办成）。
+    const judged = judgeReportedTask([
+      execution('failed', '写失败原文。'),
+      execution('completed', undefined, 'run_js'),
+    ]);
+    expect(judged.status).toBe('failed');
+    expect(judged.failureReason).toContain('写失败原文');
+  });
+
+  it('needs_input 后脚本成功（[needs_input, run_js completed]）→ failed（reason 保留 needs_input 机械事实，不被脚本盖住）', () => {
+    const judged = judgeReportedTask([
+      execution('needs_input'),
+      execution('completed', undefined, 'run_js'),
+    ]);
+    expect(judged.status).toBe('failed');
+    expect(judged.failureReason).toContain('needs_input');
+  });
+
+  it('纯脚本重试（[run_js failed, run_js completed]）→ completed（脚本之间仍按末条决定，不误伤重试）', () => {
+    const judged = judgeReportedTask([
+      execution('failed', '第一次脚本报错。', 'run_js'),
+      execution('completed', undefined, 'run_js'),
+    ]);
+    expect(judged.status).toBe('completed');
+  });
+
+  it('脚本自我决定（[run_js completed]→completed、[run_js failed]→failed）：纯脚本回合语义不变', () => {
+    expect(judgeReportedTask([execution('completed', undefined, 'run_js')]).status).toBe('completed');
+    const failed = judgeReportedTask([execution('failed', '脚本非零退出。', 'run_js')]);
+    expect(failed.status).toBe('failed');
+    expect(failed.failureReason).toContain('脚本非零退出');
+  });
+
+  it('业务成功后脚本失败（[completed, run_js failed]）→ failed（inline 拿不到读写集合的已登记局限；与后台执行器的分类差不同，保持既有口径）', () => {
+    // inline 只有执行事实投影，无法区分「completed 是只读查询还是写」——查询成功 + 脚本失败
+    // 必须判 failed（runtime-worker-run-js 的「不再假绿」冻结用例）。因此本修复在 inline
+    // 只收「成功脚本盖住前面失败」这一个方向；「写成功 + 脚本失败」的收窄只在知道只读集合的
+    // 后台执行器里发生（同文件上方注释「局限（如实登记）」）。
+    const judged = judgeReportedTask([
+      execution('completed'),
+      execution('failed', '脚本非零退出。', 'run_js'),
+    ]);
+    expect(judged.status).toBe('failed');
+    expect(judged.failureReason).toContain('脚本非零退出');
+  });
+
+  it('run_js 操作名两个模块同值的机械钉子（下层模块不反向 import，靠此测试防漂移）', () => {
+    // task-registry 的 RUN_JS_OPERATION 与 execution-runtime 的 RUN_JS_TOOL 必须同值：
+    // 任一侧改名/换字面量而另一侧没跟 → 本用例必红（上面所有 run_js 判定都建立在这个同值上）。
+    expect(RUN_JS_OPERATION).toBe(RUN_JS_TOOL);
+    expect(RUN_JS_TOOL).toBe('run_js');
   });
 });

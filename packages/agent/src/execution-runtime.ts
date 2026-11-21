@@ -4465,7 +4465,17 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           },
         };
       };
-      const lastWritable = [...recorded].reverse().find((entry) => !readOnlyOperations.has(entry.operation));
+      /**
+       * 执行层业务写（2026-11-21 Grok 审查 blocking）：只有执行层声明的非只读操作才算
+       * 「业务写的决定性结果」。run_js 是宿主脚本工具，**不参与业务终局**：脚本成功不等于
+       * 用户的写落库（不得把失败的写/待补充收成 completed），脚本失败也不是「另一个写没成」
+       * （不得把已落库的写翻成 failed）。只有本回合没有任何业务写时（纯脚本回合、只读查询 +
+       * 脚本回合），脚本自己的末次结果才按执行事实参与判定——「查询成功 + 脚本失败 → failed」
+       * 的假绿锁不变（见 runtime-worker-run-js）。
+       */
+      const lastWritable = [...recorded].reverse().find(
+        (entry) => entry.operation !== RUN_JS_TOOL && !readOnlyOperations.has(entry.operation),
+      ) ?? [...recorded].reverse().find((entry) => !readOnlyOperations.has(entry.operation));
       if (lastWritable !== undefined && lastWritable.outcome.status === 'needs_confirmation') {
         return confirmationOutcomeOf(lastWritable);
       }
@@ -4502,9 +4512,10 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         if (proposal === undefined) return undefined;
         // 本条归类的前提是「同回合**没有句柄**」（模型自己 prepare 完又自己 commit，用户从没被问到
         // 确认）。而本回合若带用户确认句柄（pendingConfirmation 只在 runner.confirm 注入）且最后一条
-        // 非只读执行已经 **completed**，那说明用户确认后的写真的发生了（Worker 重新 prepare 后又带
-        // 句柄提交成功就是这一形状）——不得再报「等你确认」（用户会去确认一次已经做完的写，句柄已
-        // 消耗 → 会被执行层拒 → 永远停在等待）。结局交下方终局判定按 lastWritable 收尾。
+        // 执行层非只读执行（业务写；不含 run_js 宿主脚本）已经 **completed**，那说明用户确认后的写真的
+        // 发生了（Worker 重新 prepare 后又带句柄提交成功就是这一形状）——不得再报「等你确认」（用户会去
+        // 确认一次已经做完的写，句柄已消耗 → 会被执行层拒 → 永远停在等待）。结局交下方终局判定按
+        // lastWritable 收尾。
         // 非确认回合不进这条：那里 completed 的非只读执行也可能是「模型误用历史提案协议造了个提案
         // 对象」，不能据此宣称写成功（有提案 + 容忍码失败 → 仍 waiting_user，见
         // adversarial-worker / model-visible-operations 的冻结用例）。
@@ -4539,7 +4550,8 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       }
       /**
        * 终局 = **最后一次决定性结果**（2026-11-19 owner 修法；真模型写闭环实跑缺陷）。
-       * 写操作以**最后一条非只读执行**为准（纯只读回合以最后一条执行为准）——原先取「第一个
+       * 写操作以**最后一条非只读执行层执行**为准（纯只读回合以最后一条执行为准；宿主脚本
+       * run_js 不是业务写——见上方 lastWritable 注释，2026-11-21 Grok 审查 blocking）——原先取「第一个
        * 非 completed」会把「同回合里先参数错、后改对成功」的写整体判 failed：数据其实已经落库
        * （句柄被消耗），却告诉用户「没办成」并引导重试（重复写风险；实跑 5 次复现 2 次）。
        * 前序失败逐条留在 executions 里（审计可查、可追溯），只是不改写终局 status/failure_reason；
@@ -4552,9 +4564,12 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
        *   · **同对象**（A2b 对象抽取 `retryObjectOf`，--collection/--topic）的写失败 =
        *     重复提案/重复提交被安全挡下 → 不算失败；
        *   · 异对象 / 取不到对象（无法证明同一个）的写失败 = **另一个写没成** → 部分完成：
-       *     终态仍是既有 failed（不新增状态），failure_reason 逐项写「已完成什么、未成功什么」。
+       *     终态仍是既有 failed（不新增状态），failure_reason 逐项写「已完成什么、未成功什么」；
+       *   · run_js 失败 → 不算「另一个写没成」（宿主脚本的结局不改写业务终局，2026-11-21）。
        * 成功的**前面**有失败、之后再没成功 → 仍由下方 decisive 分支判 failed（语义不变）。
-       * 局限（如实登记）：inline `judgeReportedTask` 拿不到 args/只读集合，不做本层归类。
+       * 局限（如实登记）：inline `judgeReportedTask` 拿不到 args/只读集合，不做本层归类——
+       * 它在 run_js 上只做「成功脚本不盖前面失败」一个方向（无业务写时脚本结局仍决定回合，
+       * 见 task-registry 同版注释）。
        */
       const lastWriteSuccess = [...recorded].reverse().find(
         (entry) => entry.outcome.status === 'completed'
@@ -4566,9 +4581,13 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         const successIndex = recorded.lastIndexOf(lastWriteSuccess);
         const successObject = retryObjectOf(lastWriteSuccess.args ?? {});
         // 成功之后（按执行顺序）的写失败：只读失败直接排除；同对象的重复尝试不算新写。
+        // 2026-11-21 Grok 审查 blocking：run_js 失败同样排除——脚本失败是宿主脚本的结局，
+        // 不是「另一个写没成」；把它算进来会把已落库的写翻成 partial failed，用户按失败
+        // 重试就有再写一次的风险。
         const distinctWriteFailures = recorded
           .slice(successIndex + 1)
           .filter((entry) => (entry.outcome.status === 'failed' || entry.outcome.status === 'refused')
+            && entry.operation !== RUN_JS_TOOL
             && !readOnlyOperations.has(entry.operation))
           .filter((entry) => {
             const object = retryObjectOf(entry.args ?? {});

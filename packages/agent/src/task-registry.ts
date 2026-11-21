@@ -25,7 +25,8 @@
  *   · result_unknown ≠ failed ≠ success：重启后无法确认的 running 任务经
  *     markResultUnknown / expireLeases 落 failed + reason=result_unknown，禁止自动重放。
  *
- * inline 路径维持现冻结语义（judgeReportedTask 不改；complete/fail 仍按既有口径收尾，
+ * inline 路径维持现冻结语义（judgeReportedTask 的 P2a 口径不改——2026-11-21 只增补「成功脚本
+ * run_js 不盖前面执行层失败」一项；complete/fail 仍按既有口径收尾，
  * waiting_user 仅后台任务使用）。
  *
  * U3 稳定逻辑操作身份（2026-11-16，仅追加，不新建第二套 Registry）：
@@ -49,6 +50,13 @@
  * 一律 TaskOwnershipError；取不存在的任务与越权同一错误（不泄漏任务是否存在）。
  */
 import type { ExecutionFailure, ExecutionOutcome, ExecutionStatus } from '@fshine/contracts/execution-contract';
+
+/**
+ * 宿主脚本工具的操作名（与 execution-runtime 的 `RUN_JS_TOOL` 同值，2026-11-21）。
+ * task-registry 是下层模块，反向 import execution-runtime 会成环，故此处只存字面量；
+ * 同值由 task-status-boundary.test.ts 的机械钉子钉住（任一侧改名漂移必红）。
+ */
+export const RUN_JS_OPERATION = 'run_js';
 
 /** P2a：冻结状态集（顺序即契约登记顺序）。unexecuted = 已汇报零执行（保留）。 */
 export const TASK_STATUSES = [
@@ -164,7 +172,7 @@ export interface ExecutedFact {
 /**
  * 完成判定（内存 / SQLite 共用，两实现逐项一致）：只看已记录的执行事实，不嗅探汇报文本。
  *   · 零条执行 → unexecuted（Worker 汇报了但没向执行层发起任何调用）；
- *   · **末条执行** completed → completed；
+ *   · **末条执行** completed → completed（末条是成功脚本 run_js 的例外见下）；
  *   · 末条执行非 completed → failed，failureReason 机械合成（取**末条**的 operation/status/
  *     error.message 原样；无 error.message 时以状态收尾）。
  * 为什么是「末条」而不是「首个非 completed」（2026-11-19 owner 修法）：执行层的参数形态反馈
@@ -173,26 +181,42 @@ export interface ExecutedFact {
  * 前序失败逐条保留在 executions 里（审计可查、可追溯），只是不改写终局。末条仍是失败 → 照旧
  * failed（不放宽；「只要有一次成功过就算成功」的万金油不成立）。result_unknown 不是成功，
  * 也不属于本判定的收窄面。
+ * 2026-11-21 增补（Grok 审查 blocking 的 inline 面）：run_js 是宿主脚本执行，不是执行层业务
+ * 执行——末条是**成功的脚本**时，业务终局回到此前最后一条非脚本执行事实（执行层失败/needs_input
+ * 不得被脚本成功盖成 completed；脚本失败行本身仍如实保留）。只收窄这一个方向，见函数内注释。
  * 局限（如实登记）：inline 判定只拿到执行事实投影（无只读集合、无调用参数），无法区分读写、
  * 也无法做「成功后同对象重复尝试 / 另一个写没成」的归类，因此以**末条执行事实**为准；后台单回合
- * 执行器（execution-runtime）知道只读集合与参数，以「末次决定性结果 + 成功后按同对象分类」为准。
+ * 执行器（execution-runtime）知道只读集合与参数，以「末次决定性结果 + 成功后按同对象分类」为准，
+ * 并在 run_js 上双向收窄（成功脚本不盖失败的写、失败脚本不翻已落库的写）。
  * 为什么不是无条件 completed：Worker 以汇报结束不等于执行层成功——「执行层实际成功 /
  * 拒绝或失败 / 未发起执行」必须在顶层 status 上可区分（B 类如实交付）。
  *
- * P2a 不改本判定（E05/E06 冻结语义）；waiting_user 由后台路径的 waitForUser 单独进入，
+ * P2a 冻结语义（E05/E06）不变；waiting_user 由后台路径的 waitForUser 单独进入，
  * 本函数仅服务于 inline complete 的终态判定。
  */
 export function judgeReportedTask(executions: readonly ExecutedFact[]): {
   status: 'completed' | 'failed' | 'unexecuted';
   failureReason?: string;
 } {
-  const decisive = executions[executions.length - 1];
-  if (decisive === undefined) {
+  const last = executions[executions.length - 1];
+  if (last === undefined) {
     return {
       status: 'unexecuted',
       failureReason: '没有实际办理：助手已汇报，但这次交办没有发出任何办理动作。',
     };
   }
+  /**
+   * 2026-11-21（Grok 审查 blocking 的 inline 面）：run_js 是宿主脚本执行，不是执行层业务
+   * 执行。末条是**成功的脚本**时，业务终局回到此前最后一条非脚本执行事实——执行层失败
+   * （或 needs_input）不得被随后的脚本成功盖成 completed（同后台单回合执行器同口径）。
+   * 只收窄这一个方向：脚本之间（[run_js failed, run_js completed]）仍按末条决定；脚本失败
+   * 仍是真实失败事实（末条 failed run_js → failed 不变）——inline 拿不到只读集合，无法区分
+   * 前序 completed 是读还是写，而「查询成功 + 脚本失败 → failed」是冻结用例
+   * （runtime-worker-run-js），不得放宽。
+   */
+  const decisive = last.operation === RUN_JS_OPERATION && last.status === 'completed'
+    ? [...executions].reverse().find((entry) => entry.operation !== RUN_JS_OPERATION) ?? last
+    : last;
   if (decisive.status === 'completed') return { status: 'completed' };
   const message = decisive.error?.message ?? '';
   return {

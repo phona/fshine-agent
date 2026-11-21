@@ -27,6 +27,7 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver } from './src/driver-contract';
 import { createSession, createTaskExecutor, EXECUTE_OPERATION_TOOL } from './src/execution-runtime';
+import type { RunJsExecutor, RunJsOutput } from './src/run-js-executor';
 import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
 import type { TaskRecord, TaskRegistry } from './src/task-registry';
 import { createTaskRunner, type TaskExecutor, type TaskRunner } from './src/task-runner';
@@ -172,11 +173,65 @@ function scriptWorker(
   };
 }
 
+/** ⑨–⑫：一轮里混合调用 execute_operation 与 run_js 的脚本 Worker。 */
+function scriptWorkerMixed(
+  rounds: ReadonlyArray<ReadonlyArray<{ tool: string; args: Record<string, unknown> }>>,
+  capture: WorkerCapture,
+): TurnDriver {
+  const remaining = rounds.map((calls) => [...calls]);
+  return {
+    async run(input) {
+      const calls = remaining.shift() ?? [];
+      for (const call of calls) {
+        try {
+          capture.results.push(await input.exec(call.tool, call.args));
+        } catch {
+          // 工具错误不中断回合（与 scriptWorker 的 exec 同形；被拒的调用由执行事实定终局）。
+        }
+      }
+      return { text: '已按执行层回执汇报。', messages: [] as unknown as DriverMessage[] };
+    },
+  };
+}
+
+/** 幂等替身 run_js 执行器：只有机械结局（成功/非零退出），不 spawn、不写盘。 */
+function runJsStub(ok: boolean): RunJsExecutor {
+  let seq = 0;
+  return {
+    async runJs(): Promise<RunJsOutput> {
+      seq += 1;
+      return {
+        exitCode: ok ? 0 : 1,
+        exitSignal: null,
+        stdout: '',
+        stderr: ok ? '' : 'boom',
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        outputs: [],
+        audit: {
+          runId: `run_adv_${seq}`,
+          runDir: `test-run-${seq}`,
+          scriptSha256: 'test',
+          inputFileIds: [],
+          materializedInputs: [],
+          inputBytes: 0,
+          outputs: [],
+          skippedOutputs: [],
+          exitCode: ok ? 0 : 1,
+          exitSignal: null,
+          durationMs: 1,
+        },
+      };
+    },
+  };
+}
+
 async function makeExecutor(input: {
   client: ExecutionClient;
   registry: TaskRegistry;
   worker: TurnDriver;
   onExecutionEvent?: (event: unknown) => void;
+  runJs?: RunJsExecutor;
 }): Promise<TaskExecutor> {
   return createTaskExecutor({
     client: input.client,
@@ -186,6 +241,7 @@ async function makeExecutor(input: {
     registry: input.registry,
     workerTurnMs: 30_000,
     ...(input.onExecutionEvent === undefined ? {} : { onExecutionEvent: input.onExecutionEvent }),
+    ...(input.runJs === undefined ? {} : { runJsExecutor: input.runJs }),
   });
 }
 
@@ -535,5 +591,104 @@ describe('模型走岔路（确定性脚本模型）', () => {
     const task = registry.get('t_needsinput', SCOPE);
     expect(task.status).toBe('waiting_user');
     expect(task.pendingQuestion?.missing).toEqual(['合同编号']);
+  });
+
+  it('⑨ 业务写被拒后脚本成功：终局仍是 failed，脚本成功不得把失败的写收成办成', async () => {
+    // 2026-11-21 Grok 审查 blocking（方向一）：run_js 是宿主脚本执行，不是执行层业务写。
+    // 旧实现在「末次非只读」里把它算进决定性结果：写失败 + 随后脚本成功 → 任务 completed，
+    // 用户侧把没办成看成办成。
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new AdversarialClient();
+    const executor = await makeExecutor({
+      client,
+      registry,
+      runJs: runJsStub(true),
+      worker: scriptWorkerMixed([
+        [
+          { tool: EXECUTE_OPERATION_TOOL, args: DENIED('alpha') },
+          { tool: 'run_js', args: { code: 'console.log(1);' } },
+        ],
+      ], capture),
+    });
+    await runBackground(registry, executor, 't_failthenscript');
+    const task = registry.get('t_failthenscript', SCOPE);
+    expect(task.status).toBe('failed');
+    expect(task.failureReason ?? '').toContain('dummy.denied');
+    // 两条执行事实都保留（如实底账：拒绝在先、脚本成功在后）。
+    expect(task.executions.map((execution) => [execution.operation, execution.status]))
+      .toEqual([['dummy.denied', 'refused'], ['run_js', 'completed']]);
+  });
+
+  it('⑩ 业务要补充信息后脚本成功：仍然 waiting_user，脚本成功不得吞掉待补充问题', async () => {
+    // 同一条 blocking 的 needs_input 面：旧实现把「脚本成功」当末次决定性结果 →
+    // 任务 completed，待补充问题不再唤醒用户。
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new AdversarialClient();
+    const executor = await makeExecutor({
+      client,
+      registry,
+      runJs: runJsStub(true),
+      worker: scriptWorkerMixed([
+        [
+          { tool: EXECUTE_OPERATION_TOOL, args: ASK },
+          { tool: 'run_js', args: { code: 'console.log(1);' } },
+        ],
+      ], capture),
+    });
+    await runBackground(registry, executor, 't_askthenscript');
+    const task = registry.get('t_askthenscript', SCOPE);
+    expect(task.status).toBe('waiting_user');
+    expect(task.pendingQuestion?.missing).toEqual(['合同编号']);
+  });
+
+  it('⑪ 业务写已完成后脚本失败：终局仍是 completed，脚本失败不算「另一个写没成」', async () => {
+    // 同一条 blocking 的方向二：写已经落库，随后的脚本失败被旧实现当 distinctWriteFailure
+    // 收成 failed——用户按失败重试就有再写一次的风险。脚本失败行仍如实留在 executions 里。
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new AdversarialClient();
+    const executor = await makeExecutor({
+      client,
+      registry,
+      runJs: runJsStub(false),
+      worker: scriptWorkerMixed([
+        [
+          { tool: EXECUTE_OPERATION_TOOL, args: PROPOSAL },
+          { tool: 'run_js', args: { code: 'process.exit(3);' } },
+        ],
+      ], capture),
+    });
+    await runBackground(registry, executor, 't_writethenscript');
+    const task = registry.get('t_writethenscript', SCOPE);
+    expect(task.status).toBe('completed');
+    expect(task.failureReason).toBeUndefined();
+    // 审计保留：脚本失败是真实执行事实，只是不改写业务终局。
+    expect(task.executions.map((execution) => [execution.operation, execution.status]))
+      .toEqual([['dummy.proposal', 'completed'], ['run_js', 'failed']]);
+  });
+
+  it('⑫ 只读查询后脚本失败：仍判 failed（无业务写时脚本结局仍是本回合真实结局，不放宽假绿）', async () => {
+    // 反向绊线：修复不得把「脚本失败」在无业务写的回合里也一并放过——
+    // runtime-worker-run-js 的「查询成功但脚本失败 → failed（不再假绿）」同口径。
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new AdversarialClient();
+    const executor = await makeExecutor({
+      client,
+      registry,
+      runJs: runJsStub(false),
+      worker: scriptWorkerMixed([
+        [
+          { tool: EXECUTE_OPERATION_TOOL, args: QUERY },
+          { tool: 'run_js', args: { code: 'process.exit(3);' } },
+        ],
+      ], capture),
+    });
+    await runBackground(registry, executor, 't_querythenscript');
+    const task = registry.get('t_querythenscript', SCOPE);
+    expect(task.status).toBe('failed');
+    expect(task.failureReason ?? '').toContain('run_js');
   });
 });
