@@ -158,6 +158,30 @@ test('端点 4xx：退出非 0，stderr 带状态码，不产出 review', async 
   }
 })
 
+test('JSON 合法但缺 findings[].title：修复回合拿到校验原因后转绿', async () => {
+  // 2026-11-21 实测：模型给的 findings 项缺 title，publish 阶段才炸（"findings[0].title is invalid"）。
+  // 现在校验前移：llm-review 用同一套 parseReview 验收，失败带原因重问一次。
+  const bad = JSON.stringify({
+    summary: '有一处问题',
+    verdict: 'comment',
+    findings: [{ severity: 'major', path: 'apps/server/server.ts', body: '描述' }],
+  })
+  const stub = await startStub([
+    { status: 200, content: bad },
+    { status: 200, content: REVIEW_JSON },
+  ])
+  try {
+    const run = await runScript(stub.base)
+    assert.equal(run.code, 0)
+    assert.equal(JSON.parse(run.out).verdict, 'comment')
+    assert.equal(stub.seen.length, 2)
+    assert.match(stub.seen[1].body, /title/)
+    run.cleanup()
+  } finally {
+    await stub.close()
+  }
+})
+
 test('传输层秒断：自动重试一次后成功（云通道偶发 fetch failed）', async () => {
   let requests = 0
   const server = http.createServer((req, res) => {

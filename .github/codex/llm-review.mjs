@@ -2,8 +2,9 @@
  * 流水线审查的模型调用步（2026-11-21：Codex 订阅停用后改走本地 OpenAI 兼容端点，默认 grok）。
  *
  * 与旧 Codex CLI 的接缝完全一样：读 `.github/codex/build-prompt.mjs` 产出的 prompt 文件，
- * 把模型原始回答写到 stdout 文件、错误写 stderr 文件、以退出码表达成败；随后由
- * `.github/codex/render-review.mjs scrub` 做 JSON 校验与脱敏，再 publish 发 PR review。
+ * 把模型回答写到 review 文件、错误写 stderr 文件、以退出码表达成败。回答先按
+ * `render-review.mjs` 的 **parseReview 同一套严格校验**验收；不合 schema 时带原因走
+ * 一次修复回合，仍不合才判红。之后 scrub 脱敏、publish 发 PR review。
  *
  * 环境变量（workflow 注入；**密钥不进日志**）：
  *   LLM_API_BASE_URL   OpenAI 兼容端点根（如 http://192.168.100.1:3425/v1）
@@ -15,6 +16,7 @@
  * 用法：node .github/codex/llm-review.mjs <prompt-file> <stdout-file> <stderr-file>
  */
 import fs from 'node:fs'
+import { parseReview } from './render-review.mjs'
 
 const [, , promptFile, stdoutFile, stderrFile] = process.argv
 if (!promptFile || !stdoutFile || !stderrFile) {
@@ -149,35 +151,40 @@ async function callOnce() {
   }
 }
 
-/** 是否形如 review JSON（宽松判定；严格校验交给 render-review scrub）。 */
-function looksLikeReview(text) {
-  const trimmed = text.trim().replace(/^```(?:json)?\s*/i, '')
-  if (!trimmed.startsWith('{')) return false
+/** 用 render-review 的**同一套**严格校验判模型输出；返回 null 或失败原因。 */
+function validateReview(content) {
   try {
-    const parsed = JSON.parse(trimmed.replace(/\s*```$/, ''))
-    return parsed !== null && typeof parsed === 'object' && typeof parsed.summary === 'string'
-  } catch {
-    return false
+    parseReview(content)
+    return null
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
   }
 }
 
 let result = await callOnce()
-if (result.ok && !looksLikeReview(result.content)) {
-  // 一次性重试：把"只输出 JSON"再钉一遍（实测无工具模型第一次会给前言）。
-  body.messages.push({ role: 'assistant', content: result.content.slice(0, 2000) })
+let reviewError = result.ok ? validateReview(result.content) : null
+if (result.ok && reviewError !== null) {
+  // 一次性修复回合：把"只输出 schema JSON"再钉一遍，并带上具体校验失败原因
+  // （实测模型会给非 JSON 前言、或 findings 项缺 title/path/body）。
+  body.messages.push({ role: 'assistant', content: result.content.slice(0, 4000) })
   body.messages.push({
     role: 'user',
-    content: '上面那段不是 JSON。请**只输出**符合 schema 的 JSON 对象本身：不要围栏、不要前言、不要解释。',
+    content: [
+      `上面的输出没有通过 review schema 校验（${reviewError}）。`,
+      '请**只输出**修正后的 JSON 对象本身：不要围栏、不要前言、不要解释。',
+      '形状要求：{summary:string, verdict:"comment"|"request_changes", findings:[{severity:"blocking"|"major"|"minor"|"nit", title:string, path:string, body:string}]}。',
+    ].join(' '),
   })
   result = await callOnce()
+  if (result.ok) reviewError = validateReview(result.content)
 }
 
 if (!result.ok) {
   writeErr(result.error)
   process.exit(1)
 }
-if (!looksLikeReview(result.content)) {
-  writeErr('模型没有产出 review JSON（重试一次仍非 JSON）')
+if (reviewError !== null) {
+  writeErr(`模型没有产出 review JSON（修复回合后仍不合 schema：${reviewError}）`)
   process.exit(1)
 }
 
