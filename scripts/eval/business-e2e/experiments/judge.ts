@@ -3,7 +3,7 @@
  *
  * 机械面**复用冻结的** `../judge` 的 `judgeMechanical`（越界/写尝试/重复/虚假完成/越权），
  * 在其上叠加实验专属的确定性检查（工具调用真实发生、回复标记、取消如实、越权不可见、
- * 压缩触发计数记录）。判据口径见 `docs/product/business-e2e-prereg-addendum.md` §五。
+ * 压缩触发计数记录）。判据口径见 `docs/history/business-e2e-prereg-addendum.md` §五。
  *
  * 诚实边界：回复面「是否采纳口径」以中性标记（replyMustInclude）机械判定；「口径是否符合意图」
  * 由人读复核，不由本判定器冒充。
@@ -72,7 +72,7 @@ export interface ExpVerdict {
   };
 }
 
-const TASK_TOOLS: ReadonlySet<string> = new Set(['task_status', 'task_result', 'task_cancel', 'task_resume']);
+const TASK_TOOLS: ReadonlySet<string> = new Set(['task_status', 'task_result', 'task_cancel', 'task_resume', 'task_confirm']);
 const CANCEL_CLAIM_WORDS = ['已取消', '取消成功', '已为您取消', '已把它取消'];
 
 function lastReplyText(replies: readonly ReplyLine[]): string {

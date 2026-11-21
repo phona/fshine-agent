@@ -31,7 +31,7 @@ function defaultSkillRoot(): string {
  * is 128k tokens (`DEFAULT_CONTEXT_WINDOW`); 32 KiB bounds the worst case (dense
  * CJK text, ~3 bytes per character → ~11k characters → well under a tenth of that
  * window) while staying several times larger than a typical skill document
- * (the repo's own `docs/business-skill.md` is ~8.5 KB).
+ * (the repo's own former skill doc `docs/business-skill.md`（已删，git 历史可考）was ~8.5 KB).
  */
 export const SKILL_CONTENT_LIMIT_BYTES = 32 * 1024;
 

@@ -13,12 +13,14 @@
  *     **dispatchKey = 稳定逻辑操作身份**（U3，见字段注释）：它在宿主**首次创建这笔逻辑
  *     操作**时生成并持久化，重试/重新规划时只能读回同一条记录；toolCallId / requestId
  *     只是本次调用的追踪号，重试会换号。
- *   · ExecutionOutcome   —— 执行状态与失败结果。五态互斥：completed / needs_confirmation /
- *     needs_input / failed / refused。**refused = 执行层策略拒绝，failed =
+ *   · ExecutionOutcome   —— 执行状态与失败结果。六态互斥：completed / needs_confirmation /
+ *     needs_input / failed / refused / accepted。**refused = 执行层策略拒绝，failed =
  *     执行失败，两者语义不得混用**；needs_input 必须携带「缺什么」的结构化描述
  *     （missing 非空）；needs_confirmation 必须携带执行层发放的确认提示（handle 非空、
- *     summary 非空）。
- *   · ExecutionClient    —— 能力快照 / 执行两个操作。
+ *     summary 非空）；accepted 表示执行层已受理一笔**长任务**并立即返回（operationId 非空），
+ *     只有声明 `long_running: true` 的 operation 才可以返回它（未声明却返回 = 协议违约，
+ *     宿主 fail-closed）。
+ *   · ExecutionClient    —— 能力快照 / 执行 / 长轮询等待 / 中止四个操作。
  *
  * 刻意不在这里的东西（后续切片再定，不在这里预造执行面）：
  *   · readback（副作用验证状态）：写切片再定——不得把「执行完成」当「业务生效」；
@@ -34,7 +36,7 @@
  */
 
 /** 契约语义版本：跨宿主/执行层的结构化语义集合版本（非某实例的版本，也不是 A2A）。 */
-export const EXECUTION_CONTRACT_VERSION = 3;
+export const EXECUTION_CONTRACT_VERSION = 4;
 
 /**
  * 参数声明：name 是执行层接受的参数名（CLI 形态可带前缀，如 `--collection`），
@@ -45,6 +47,32 @@ export interface ExecutionArgDeclaration {
   required: boolean;
   /** 可选类型提示（执行层声明，如 'name' / 'code'）：只作展示与装配参考，不参与业务判断。 */
   type?: string;
+  /**
+   * 载荷型参数声明（owner 2026-11-19）：该参数要求一个**文件**，文件内容必须符合
+   * `schema`（执行层声明的窄结构：对象/shape/类型/additionalProperties/items/maxItems）。
+   * 模型只给结构化**值**（对象/数组）；宿主负责 lint → 序列化落盘 → 把路径翻译进该参数，
+   * 再提交执行层——模型不关心信封怎么装。
+   *
+   * **这是执行层的义务，不是可选项**：结构化入参（数组 / 对象 / 多字段契约文件，例如
+   * 批量记录、变更提案载荷）一律必须声明 `payload` + schema；只有标量参数
+   * （name / code / count 这类单值）不需要。违反的后果是确定的：宿主没有声明就无法 lint，
+   * 只能把模型给的值原样透传，模型只能自己手拼 JSON 字符串——实测一个回合 34 次工具调用、
+   * 大半是形状被拒（`--records` 传成 JSON 字符串）。
+   *
+   * 为什么不能由宿主兜底：宿主判断不出某个字符串参数「其实是结构化数据」——按名字/描述
+   * 关键词猜语义是判据红线（也不可靠），所以这条只能靠执行层在声明里自觉写明。
+   * 字段类型保持可选只为兼容既有声明；**新声明结构化参数时省略 `payload` 即违约**。
+   * schema 的具体语义归执行层（宿主只做窄实现的结构化校验，不引第三方 schema 库）。
+   * schema 支持 oneOf/anyOf 组合子（窄实现：逐分支跑既有校验，任一分支通过即放行）。
+   */
+  payload?: { schema?: unknown };
+  /**
+   * 调用方不可见（可选，缺省 = false）：该参数是机制参数（哨兵/凭据/派生的计数/测试旋钮），
+   * 不是给调用方填的——宿主补齐（如确认回合注入的哨兵）或执行层自己算（如从 records 条数
+   * 派生计数）。生成调用方工具面时，宿主据此把该参数从 schema 里剔除，并拒绝调用方值覆盖。
+   * 这是**通用机制声明**，不含任何业务语义；缺省 false = 与现状逐字节一致。
+   */
+  hostOnly?: boolean;
 }
 
 /** 单个可执行 operation 的声明。 */
@@ -53,7 +81,41 @@ export interface ExecutionOperationDeclaration {
   name: string;
   /** 人类可读标签：只作展示，不参与宿主的任何业务判断。 */
   label?: string;
+  /**
+   * 业务能力名（可选；缺省 = 未声明，能力目录退化为现状）。
+   *
+   * 同一件业务的多个阶段（`query` / `prepare` / `commit`）**共享同一个值**——它们是同一
+   * 能力的阶段，不是多件能力。宿主据此按值 group by 派生给 Main 的能力目录（只读/可写
+   * 仍由执行层 `access` 派生，不从本字段重造读写判据）。本字段只作分组键与展示名，不参与
+   * 任何业务裁决；未声明时目录为空、Main 提示与今天逐字节一致，并显式登记「能力边界未声明」。
+   */
+  capability?: string;
+  /**
+   * 读写属性声明（可选，执行层自述：'read' / 'write' / 'scratch'）：仅供宿主派生能力目录的
+   * 只读/可写标记，是既有 access 判据的投影，不在这里重造第二套读写语义。缺省 = 未声明。
+   */
+  access?: string;
   args: readonly ExecutionArgDeclaration[];
+  /**
+   * 执行层自述的成本提示：单次执行的重量（weight）与估时秒数（estimatedSeconds）。
+   * 宿主原样转述进能力快照，不解释、不裁决、不做阈值判定；执行层未声明时字段不出现。
+   */
+  weight?: number;
+  estimatedSeconds?: number;
+  /**
+   * 长任务声明（可选）：true = 该 operation 可能执行 30 分钟级任务，执行层可以返回
+   * `accepted` 并让调用方用 `wait` 长轮询、用 `abort` 中止。未声明（缺省）的 operation
+   * **不得**返回 accepted——宿主按协议违约 fail-closed，不把它当成功或进行中。
+   */
+  long_running?: boolean;
+  /**
+   * 模型可见性声明（可选）：`false` = 该 operation **不进模型可见的能力面**（不投影进
+   * Worker 委派清单），且宿主允许集合在发起执行前把它剔除（模型即使凭记忆/上下文拼出该
+   * operation 名，也被确定性拒绝）。执行层自己与宿主之外的调用方不受影响——它只是一条
+   * 「别告诉模型」的声明，不是访问控制。缺省（未声明）= true，逐字节不变（历史协议
+   * 中的替代路径因此可对模型隐身，同时保留给执行层与未来面使用）。
+   */
+  model_visible?: boolean;
 }
 
 /** 能力快照：单个会话开始时的执行面声明。 */
@@ -86,8 +148,8 @@ export interface ExecutionRequest {
   confirmation?: { handle: string; userText?: string };
 }
 
-/** 执行结果五态（互斥）。 */
-export type ExecutionStatus = 'completed' | 'needs_confirmation' | 'needs_input' | 'failed' | 'refused';
+/** 执行结果六态（互斥）。 */
+export type ExecutionStatus = 'completed' | 'needs_confirmation' | 'needs_input' | 'failed' | 'refused' | 'accepted';
 
 /**
  * 执行层返回的确认提示（needs_confirmation 必带）。
@@ -111,7 +173,14 @@ export interface MissingInput {
   description: string;
 }
 
-/** 失败/拒绝的结构化原因。code 与 message 由执行层给出，details 原样透传。 */
+/**
+ * 失败/拒绝的结构化原因。code 与 message 由执行层给出，details 原样透传。
+ *
+ * `retryable` 的**缺省语义是「不可重试」**（owner 2026-11-18）：只有执行层显式给 `true`
+ * （瞬时故障：超时、网关暂不可用、被中断）才允许同一对象在本回合继续尝试；`false` 与
+ * **未声明**一律按不可重试处理，宿主随即锁住该 (operation, 对象) 并把话交还用户。
+ * 宁可停下报错让人介入，也不在不确定时继续撞——打爆执行层就彻底没得用。
+ */
 export interface ExecutionFailure {
   code: string;
   message: string;
@@ -120,20 +189,42 @@ export interface ExecutionFailure {
 }
 
 /**
+ * 批量写入的逐条结果（completed 可选携带；owner 2026-11-19）：
+ * 「部分完成」是安全相关事实——用户必须知道哪几条真写进去了。
+ *   · index —— 输入记录在本次批次里的 0 基序号（执行层原样给出，宿主不改写）；
+ *   · status —— ok / failed / unknown（unknown = 执行层无法确认，不得当成功）；
+ *   · reason —— failed/unknown 的机械原因（执行层原话，宿主只转述）。
+ * 整批原子失败时执行层返回 failed（不写任何一条），此时不携带 items；
+ * 执行层若支持部分写，必须逐条给出真实状态——宿主/模型不得把 partial 说成成功。
+ */
+export interface ExecutionItemResult {
+  index: number;
+  status: 'ok' | 'failed' | 'unknown';
+  reason?: string;
+}
+
+/**
  * 执行结果。
  *   · completed——执行完成（不代表业务副作用已验证生效：readback 归写切片）。
+ *     `items`（可选）= 批量写的逐条真实结果；只要有一条 failed/unknown，模型必须如实
+ *     说明「完成 X、未完成 Y」，不得把整体说成单纯成功（任务结局仍是 completed）。
  *   · needs_confirmation——执行层已冻结一次待确认操作，confirmation 给出句柄与机械摘要；
  *     这不是「缺输入」，也不是宿主计划门：是否继续由用户在下一回合表态，执行层校验句柄。
  *   · needs_input——执行层要求补充输入，missing 非空。
  *   · failed——执行失败。
  *   · refused——执行层策略拒绝（含门拒、请求形状拒绝、确认句柄无效/过期/已用/绑定不符）。
+ *   · accepted——执行层已受理一笔长任务（仅 `long_running: true` 的 operation 可返回）：
+ *     operationId 是执行层发放的不透明任务句柄（宿主只存与转交 wait/abort，不解析）；
+ *     pollAfterMs 是执行层建议的轮询间隔（缺省由宿主决定）。本轮工作已经结束——
+ *     宿主不把它当失败，也不当成功：任务保持进行中，由 `wait` 长轮询取回终态。
  */
 export type ExecutionOutcome =
-  | { status: 'completed'; data?: unknown }
+  | { status: 'completed'; data?: unknown; items?: readonly ExecutionItemResult[] }
   | { status: 'needs_confirmation'; confirmation: ConfirmationPrompt; data?: unknown }
   | { status: 'needs_input'; missing: readonly MissingInput[]; data?: unknown; error?: ExecutionFailure }
   | { status: 'failed'; error: ExecutionFailure }
-  | { status: 'refused'; error: ExecutionFailure };
+  | { status: 'refused'; error: ExecutionFailure }
+  | { status: 'accepted'; operationId: string; pollAfterMs?: number };
 
 /**
  * 单次执行调用的可选取消面（契约只带「必要的取消信息」，不是第二套协议）：
@@ -150,4 +241,30 @@ export interface ExecutionClient {
   /** 能力快照：每个会话取一次，供装配使用。 */
   capabilities(): Promise<CapabilityManifest>;
   execute(request: ExecutionRequest, options?: ExecutionCallOptions): Promise<ExecutionOutcome>;
+  /**
+   * 长轮询等待一笔已受理（accepted）的长任务，最长阻塞 timeoutMs：
+   *   · 完成/失败/拒绝 → 返回对应终态；
+   *   · 窗口内仍未完成 → 返回 `{status:'accepted', ...}`（`running` 复用同一形状），
+   *     宿主按 pollAfterMs 重排；
+   *   · 宿主取消（signal 中止）→ 适配器应尽快以 AbortError 拒绝。
+   * 出站调用、不开入站端口——完成即返回，天然穿 NAT。
+   *
+   * 可选：不支持长任务的适配器可以不实现。**声明了 `long_running: true` 却实现不了
+   * wait 是装配错误**——宿主在收到 accepted 后无法等待，必须 fail-closed（不留下
+   * 无人推进的进行中任务）。
+   */
+  wait?(operationId: string, timeoutMs: number, signal?: AbortSignal): Promise<ExecutionOutcome>;
+  /**
+   * 请求执行层中止一笔长任务（用户取消）。
+   * 返回 `aborted: true` = 执行层已确认中止；`false` = 停不下来（执行层拒绝/未知句柄/
+   * 已经结束等），宿主必须如实转述，不得宣称已取消。
+   *
+   * 可选：缺省 = 适配器不支持中止（宿主按「停不下来」如实报，不宣称取消）。
+   */
+  abort?(operationId: string, options?: ExecutionCallOptions): Promise<ExecutionAbortResult>;
 }
+
+/** 中止请求的机械结果（只有 aborted=true 才算执行层确认停掉）。 */
+export type ExecutionAbortResult =
+  | { aborted: true }
+  | { aborted: false; reason: string };

@@ -100,7 +100,24 @@ function userVersion(dbPath: string): number {
 
 function taskRows(dbPath: string): unknown[] {
   const db = new Database(dbPath, { readonly: true });
-  const rows = db.prepare('SELECT * FROM tasks ORDER BY task_id').all();
+  // 只快照 V3 时代的旧列：预期契约切片只做**前向加法**（新列追加、历史值不改写），
+  // 旧列数据必须逐字节不变（新列为 NULL 由 longRunningColumnsOf 单独断言）。
+  const rows = db.prepare(`
+    SELECT task_id, principal_id, session_id, request, status, result_text, failure_reason,
+      created_at, updated_at, task_no, name, reply_text, reason, pending_question, waiting_since,
+      lease_owner, lease_until
+    FROM tasks ORDER BY task_id
+  `).all();
+  db.close();
+  return rows;
+}
+
+/** 预期契约新增列的历史行取值（迁移后历史行必须为 NULL，不伪造）。 */
+function longRunningColumnsOf(dbPath: string): unknown[] {
+  const db = new Database(dbPath, { readonly: true });
+  const rows = db.prepare(
+    'SELECT long_running_notified_at, long_running_stuck_notified_at, running_since, wait_contact_lost_notified_at FROM tasks ORDER BY task_id',
+  ).all();
   db.close();
   return rows;
 }
@@ -133,8 +150,27 @@ describe('U3 v4 迁移（v3 → v4）', () => {
     expect(TASK_STORE_SCHEMA_VERSION).toBe(4);
 
     // 既有数据安全：历史列与行逐字节不变；历史执行行 dispatch_key 读出缺省（不伪造）。
-    expect(tableColumns(dbPath, 'tasks')).toEqual(beforeTaskColumns);
+    // 预期契约（2026-11-18）：两列只做前向加法（追加在末尾），历史列顺序不变。
+    const afterTaskColumns = tableColumns(dbPath, 'tasks');
+    expect(afterTaskColumns.slice(0, beforeTaskColumns.length)).toEqual(beforeTaskColumns);
+    expect(afterTaskColumns.slice(beforeTaskColumns.length)).toEqual([
+      'long_running_notified_at',
+      'long_running_stuck_notified_at',
+      // 2026-11-19：本轮开始运行时刻（长任务受理后清租约，提醒扫描需要独立起点）。
+      'running_since',
+      // 2026-11-19：长任务等待「断联系」档的已告知时刻（同一「每档至多一次」口径）。
+      'wait_contact_lost_notified_at',
+    ]);
     expect(taskRows(dbPath)).toEqual(beforeTasks);
+    expect(longRunningColumnsOf(dbPath)).toEqual([
+      // 历史行不伪造：四列都是 NULL（running_since 与「断联系」档也一样）。
+      {
+        long_running_notified_at: null,
+        long_running_stuck_notified_at: null,
+        running_since: null,
+        wait_contact_lost_notified_at: null,
+      },
+    ]);
     const stored = store.getTask('task_old')!;
     expect(stored.task.request).toBe('历史任务');
     expect(stored.executions).toHaveLength(1);

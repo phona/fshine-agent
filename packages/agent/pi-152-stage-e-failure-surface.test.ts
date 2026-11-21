@@ -35,6 +35,7 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import { createPiTurnDriver, finalReplyText } from './src/pi-driver';
 import { createScriptedModelRuntime } from './testing/scripted-model-runtime';
+import { withInternalExecTool } from './testing/internal-exec-fixture';
 import { createSession } from './src/execution-runtime';
 import { createTaskRegistry } from './src/task-registry';
 
@@ -286,10 +287,8 @@ describe('③ 失败回合不得进入业务成功归档', () => {
     const workerRt = await createScriptedModelRuntime({
       contextWindow: 40_000,
       script: () => (workerCount++ === 0
-        ? toolCall('execute_operation', {
-          operation: 'dummy.query',
-          args: { '--collection': 'documents', '--window': 'W202611' },
-        }, 'call_worker_1')
+        // 夹具走内部 exec 路由（本清单未声明参数，op_* 工具面会确定性拒绝）。
+        ? toolCall('execute_operation', { operation: 'dummy.query', args: { 'collection': 'documents', 'window': 'W202611' } }, 'call_worker_1')
         : textReply('documents W202611：3 条。')),
     });
     const session = await createSession({
@@ -305,7 +304,7 @@ describe('③ 失败回合不得进入业务成功归档', () => {
         sessionDir: dir.sessions,
         workspaceDir: dir.cwd,
       }),
-      workerDriver: createPiTurnDriver({ env: { LLM_MODEL: 'test-model' }, modelRuntime: workerRt.runtime }),
+      workerDriver: withInternalExecTool(createPiTurnDriver({ env: { LLM_MODEL: 'test-model' }, modelRuntime: workerRt.runtime })),
       mainSystemPrompt: '你是测试主 Agent。',
       taskRegistry: registry,
     });

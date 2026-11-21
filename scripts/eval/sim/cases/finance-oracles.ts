@@ -34,7 +34,7 @@
 
 import { AS_OF_DATE, CUSTOMERS, FINANCE_DATASET } from '../../finance/dataset';
 import { asOfInvoice, includedWriteoffs } from '../../finance/truth';
-import { parseNumbers, stripCodeTokens } from '../../r6/oracle';
+import { parseNumbers, stripCodeTokens } from '../../long-session/oracle';
 import { normalizeForMatch } from '../contamination';
 import type { SimExecutionFact, SimOracle, SimOracleContext, SimOracleVerdict } from '../oracle';
 import { clean } from './oracles';

@@ -7,10 +7,11 @@
  *
  * 每回合链路：
  *   1) 用户文本进 Main 转录，mainDriver 跑一个回合；Main 工具面 = task_run（委派）+ 始终可见的
- *      task_status/task_result（只读查询，缺口 1）+（注入 runner 时）task_cancel/task_resume
- *      （取消/接续，缺口 1）+（注入 Main
+ *      task_status/task_result（只读查询，缺口 1）+（注入 runner 时）task_cancel/task_resume/
+ *      task_confirm（取消/接续/显式确认，缺口 1）+（注入 Main
  *      技能登记表时）read_skill（缺口 2 臂 B，按需读业务技能正文）+（注入 runJsExecutor 时）
- *      run_js（CAP-01 S1：受限代码执行，产物登记进文件区、回合末随 TurnResult.files 交投递面）；
+ *      run_js（CAP-01 S1：受限代码执行；片 2 起 Main 面写 out/ **不登记、不产交付物**——
+ *      交付物只从 Worker 出，需要交付文件请 task_run 交办）；
  *   2) task_run 触发委派：宿主生成 taskId（绑定 principal/session）→ Worker 回合
  *      （workerDriver + execute_operation +（注入 runJsExecutor 时）run_js——任务作用域，
  *      CAP-01 S2：输入只解析当前任务的绑定行、产物绑定当前任务并随回合交付）；
@@ -25,7 +26,8 @@
  * CAP-01 S1 出口纪律（v8 §7）：用户可见回复在返回前经 stripServerPaths 剥服务器路径（ask/
  * server 同链、task_result 转述同汇，一道尺盖两种来源）；剥完为空且有产出文件时以宿主话术
  * 兜底（FILES_GENERATED_NOTICE）。交付走主动投递（B）：runtime 只在 TurnResult.files 上交
- * 中性文件事实（不 import 渠道类型），发不发、怎么发归宿主装配面。
+ * 中性文件事实（不 import 渠道类型），发不发、怎么发归宿主装配面。片 2 起 TurnResult.files
+ * 的来源只有 Worker（inline 委派的任务产物；后台任务经 TaskExecutionOutcome.files 上交）。
  *
  * B 类不变量（最小可信边界，拒绝路径见测试）：
  *   · 读路径边界（本切片作用域）：execute_operation 只放行装配方声明的允许集合；
@@ -34,27 +36,45 @@
  *   · 任务归属：任务底账绑定 principal/session，越权读取被拒（task-registry.ts）。
  *
  * 本切片不做（不预造接口）：计划门、预算梯子、确认裁决；写确认回环的宿主侧只做三件事——
- * 允许集按装配开关（`runtime.allowWriteOperations`）派生、会话级小表记执行层发放的确认提示、
- * 下一回合把句柄与本回合用户原话原样透传（是否确认由用户表态、执行层校验句柄）。
- * 取消/接续经 task_cancel/task_resume 复用 runner 既有生命周期（不在此新建治理）；
+ * 允许集按装配开关（`runtime.allowWriteOperations`）派生、记执行层发放的确认提示、
+ * 把句柄与本回合用户原话原样透传（是否确认由用户表态、执行层校验句柄）。后台任务路径的
+ * 透传**只发生在用户显式确认**（`task_confirm` → `runner.confirm()`）；`task_resume`
+ *（补充/改口径）不带句柄（2026-11-19 显式确认切片）。
+ * 取消/接续/确认经 task_cancel/task_resume/task_confirm 复用 runner 既有生命周期（不在此新建治理）；
  * 上下文与压缩归 Pi 原生（mainDriver 自带）；这里不另建记忆、检索或投影。
  *
- * R4 集成（P5/P6）：注入 `policy` 时前台回合持许可、inline 委派派生后台许可（共享父预算、
- * 深度 +1、不占并发槽）；`dispatchMode='background'` 时委派改为提交注入的 TaskRunner
- * （受理即 queued，执行/恢复/取消归 runner）；缺省 'inline' = 上文现行为逐字不变。
+ * R4 集成（P5/P6）：注入 `policy` 时前台回合持许可、同步委派派生后台许可（共享父预算、
+ * 深度 +1、不占并发槽）；`taskDispatch='async'` 时委派改为提交注入的 TaskRunner
+ * （受理即 queued，执行/恢复/取消归 runner）；缺省 'sync' = 上文现行为逐字不变。
  */
 import { createHash, randomUUID } from 'node:crypto';
 import type { DiscoveredTool } from '@fshine/contracts';
 import type {
   CapabilityManifest,
+  ExecutionArgDeclaration,
   ExecutionClient,
   ExecutionOutcome,
 } from '@fshine/contracts/execution-contract';
-import type { DriverMessage, RuntimeTurnEvent, TurnDriver, TurnDriverResult } from './driver-contract';
+import type { DriverMessage, RuntimeTurnEvent, TurnDriver, TurnDriverResult, WakeResult } from './driver-contract';
 import { ToolUserError } from './driver-contract';
 import { FileRefUnavailableError, safeExtensionOf, type CopiedTaskInput, type TaskInputCopier } from './file-store';
 export type { TaskInputCopier } from './file-store';
+import { classifyFailure, confirmationExpiredMessage, failureMessageFor, type UserFacingFailureKind } from './user-facing-failure';
+import {
+  createDeterministicRetryLock,
+  retryObjectOf,
+  type RetryAllowed,
+  type RetryBlock,
+} from './deterministic-retry-lock';
 import type { RunJsExecutor, RunJsOutput } from './run-js-executor';
+import type { RecalcXlsxExecutor, RecalcCostEvent } from './recalc-xlsx-executor';
+export type {
+  RecalcXlsxExecutor,
+  RecalcXlsxResult,
+  RecalcXlsxInput,
+  RecalcErrorCode,
+  RecalcCostEvent,
+} from './recalc-xlsx-executor';
 // 布局收窄的确定性失败面：零 import 模块（runtime 不触 spawn——import 图守卫钉住）。
 import {
   RUN_JS_LAYOUT_UNSAFE_MESSAGE,
@@ -68,18 +88,21 @@ import { READ_SKILL_TOOL, type SkillRegistry } from './skills';
 import { stripServerPaths } from './server-paths';
 import { createTaskRegistry, deriveTaskName, DispatchConflictError, TaskTransitionError, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
 import {
+  DEFAULT_RUNTIME_CONFIG,
   taskFailureReasonFor,
   type Permit,
   type RejectionReason,
   type ResourcePolicy,
 } from './resource-policy';
-import type { TaskExecutionOutcome, TaskExecutor, TaskRunner } from './task-runner';
+import type { TaskExecutionOutcome, TaskExecutor, TaskRunner, ResumedOperation } from './task-runner';
+import type { CapabilityEntry } from './capability-catalog';
+import { OUTCOME_REASON_NOT_PERMITTED } from './task-outcome';
 
 /** Main 委派工具名（实例名可经部署声明替换的演进留在后续切片；当前用中性名）。 */
 export const TASK_RUN_TOOL = 'task_run';
 export const TASK_RUN_TOOL_DESCRIPTION =
-  '把一项平台任务交给执行层 Worker 执行：在 task 里写清要办什么（对象、范围、口径）。'
-  + '返回 Worker 的事实汇报与结构化的执行结果。涉及平台数据的请求一律经它办理。';
+  '把一项平台任务交办出去执行：在 task 里写清要办什么（对象、范围、口径）。'
+  + '返回办事的事实汇报与结构化的执行结果。涉及平台数据的请求一律经它办理。';
 /**
  * CAP-01 修复轮（R2-S2，接口事实声明）：注入交办复制面时 task_run 的工具描述——
  * 写清 inputFiles 参数的用法与不带的后果（交办复制零发生 → Worker 无文件 → 任务
@@ -91,7 +114,7 @@ export const TASK_RUN_TOOL_DESCRIPTION_WITH_INPUT_FILES =
   + '要处理的本会话文件，把文件清单里的 fileId 放进 inputFiles；不带 inputFiles 则 Worker 拿不到任何文件。';
 const TASK_RUN_TASK_PROPERTY = {
   type: 'string',
-  description: '要交给执行层 Worker 的任务：写清对象、范围与要回答的问题；用自然语言，不要写命令。',
+  description: '要交办出去的任务：写清对象、范围与要回答的问题；用自然语言，不要写命令。',
 };
 export const TASK_RUN_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -114,7 +137,7 @@ export const TASK_RUN_TOOL_SCHEMA_WITH_INPUT_FILES: Record<string, unknown> = {
     inputFiles: {
       type: 'array',
       items: { type: 'string' },
-      description: '随任务交给执行层处理的输入文件 fileId 列表（来自文件清单；宿主复制为任务私有副本，原件不动）。',
+      description: '随任务交给助手处理的输入文件 fileId 列表（来自文件清单；宿主复制为任务私有副本，原件不动）。',
     },
   },
   required: ['task'],
@@ -126,18 +149,20 @@ export const TASK_RUN_TOOL_SCHEMA_WITH_INPUT_FILES: Record<string, unknown> = {
  * 统一纪律：**参数量只收任务引用（`#编号` 或 taskId），绝不收 principalId/sessionId**——scope 由宿主
  * 在 send() 闭包用运行时 principal/session 构造，编号解析在 scope 内做（越权=找不到，不泄露存在性）。
  * 门控按能力拆开：**只读查询 task_status/task_result 只依赖 registry/scope，始终上 Main 工具面**
- * （无 runner 的 inline/ask 也能查已受理任务）；**task_cancel/task_resume 需要 runner 生命周期，
- * 只在注入 `options.taskRunner` 时上/下**（background 模式天然有 runner）。Worker 工具面不含这四个
- * 工具（Worker 不持有宿主任务治理面）。
+ * （无 runner 的 inline/ask 也能查已受理任务）；**task_cancel/task_resume/task_confirm 需要 runner
+ * 生命周期，只在注入 `options.taskRunner` 时上/下**（background 模式天然有 runner）。Worker 工具面
+ * 不含这些工具（Worker 不持有宿主任务治理面）。
  */
 export const TASK_STATUS_TOOL = 'task_status';
+/** 任务列表默认条数上限（新→旧）。会话历史越长越容易让模型抓错对象，默认只给最近的。 */
+const TASK_STATUS_LIST_LIMIT = 10;
 export const TASK_STATUS_TOOL_DESCRIPTION =
-  '查询本会话已有任务的状态：ref 给受理回执里的 #编号（如 "#3"）查单个任务，留空列本会话全部任务。'
+  '查询本会话已有任务的状态：ref 给任务列表里的任务引用（taskId）查单个任务，留空列本会话全部任务。'
   + '用户问「那个任务怎么样了 / 在等什么」时用它，不要为此新交办任务。';
 export const TASK_STATUS_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    ref: { type: 'string', description: '任务引用：受理回执里的 #编号（如 "#3"）；留空列本会话全部任务。' },
+    ref: { type: 'string', description: '任务引用：任务列表里的 taskId；留空列本会话全部任务。' },
   },
   additionalProperties: false,
 };
@@ -148,7 +173,7 @@ export const TASK_RESULT_TOOL_DESCRIPTION =
 export const TASK_RESULT_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    ref: { type: 'string', description: '任务引用：受理回执里的 #编号（如 "#3"）。' },
+    ref: { type: 'string', description: '任务引用：任务列表里的 taskId。' },
   },
   required: ['ref'],
   additionalProperties: false,
@@ -156,12 +181,12 @@ export const TASK_RESULT_TOOL_SCHEMA: Record<string, unknown> = {
 
 export const TASK_CANCEL_TOOL = 'task_cancel';
 export const TASK_CANCEL_TOOL_DESCRIPTION =
-  '请求取消本会话某个任务。返回机械结果：requested=已发出取消请求、待执行端确认；cancelled=已确认取消。'
+  '请求取消本会话某个任务。返回机械结果：requested=已发出取消请求、尚未确认停掉；cancelled=已确认取消。'
   + '确认前不得向用户宣称已取消，如实按返回结果转述。';
 export const TASK_CANCEL_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    ref: { type: 'string', description: '要取消的任务引用：#编号。' },
+    ref: { type: 'string', description: '要取消的任务引用：任务列表里的 taskId。' },
     reason: { type: 'string', description: '用户给出的取消原因，一句话（可选，原样回显）。' },
   },
   required: ['ref'],
@@ -170,16 +195,46 @@ export const TASK_CANCEL_TOOL_SCHEMA: Record<string, unknown> = {
 
 export const TASK_RESUME_TOOL = 'task_resume';
 export const TASK_RESUME_TOOL_DESCRIPTION =
-  '当已有任务在等待用户补齐信息时，用用户的答复把同一任务接续下去（编号不变）。非等待中的任务会被如实拒绝。';
+  '当已有任务在等待用户补齐信息、改口径或说别的（不是确认提交）时，用用户的答复把同一任务接续下去。'
+  + 'ref 可省略：本会话只有一个等待中的任务时直接接续它。'
+  + '**它不会提交待确认的写入**——用户是在确认（「确认」「对，就这版」「提交吧」）时改用 task_confirm。'
+  + '不确定用户是在确认还是在改口径时，先用一句话问清（给出版本摘要），不要自己选。';
 export const TASK_RESUME_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    ref: { type: 'string', description: '等待中的任务引用：#编号。' },
+    ref: { type: 'string', description: '等待中的任务引用：任务列表里的 taskId（可省略，本会话仅一个等待中的任务时）。' },
     answer: { type: 'string', description: '对任务待办问题的答复，用用户原话的意思写清。' },
   },
-  required: ['ref', 'answer'],
+  required: ['answer'],
   additionalProperties: false,
 };
+
+/**
+ * 显式确认工具（2026-11-19 owner 拍板）：确认是一个**显式动作**，不是「下一条消息的默认含义」。
+ * 只有用户明确表示「按这版提交」时才用它——宿主从底账取该任务的待确认提案，把任务接续下去，
+ * 并把确认凭据交给执行端。用户补充信息 / 改口径 / 说了别的用 task_resume（不带凭据）。
+ * 拿不准用什么时先问用户，不要替用户选。
+ */
+export const TASK_CONFIRM_TOOL = 'task_confirm';
+export const TASK_CONFIRM_TOOL_DESCRIPTION =
+  '用户明确表示「按这版提交」时，确认并提交该任务上一轮给出的待确认提案。'
+  + 'ref 可省略：本会话只有一个等待确认的提案时直接用它。'
+  + '只在用户明确确认时用；用户补充信息 / 改口径 / 说了别的用 task_resume。'
+  + '拿不准用户是在确认还是在改口径时，先用一句话问清（给出版本摘要），不要自己选。';
+export const TASK_CONFIRM_TOOL_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    ref: { type: 'string', description: '等待确认的任务引用：任务列表里的 taskId（可省略，本会话仅一个等待确认的提案时）。' },
+  },
+  additionalProperties: false,
+};
+
+/**
+ * 「没有可确认/接续对象」时给模型的机械事实（owner 2026-11-19：宿主不再替模型说话）。
+ * 只陈述事实，措辞归模型；不是给用户的成句话术，不进任何宿主替换路径。
+ */
+export const NO_WAITING_TARGET_FACT = '当前没有等待确认的任务。';
+export const NO_WAITING_RESUME_TARGET_FACT = '当前没有等待接续的任务。';
 
 /**
  * 缺口 2 臂 B（实验面）：Main 按需读取业务技能正文。工具名复用 skills.ts 的 READ_SKILL_TOOL（不另起名）；
@@ -196,36 +251,92 @@ export const READ_SKILL_TOOL_SCHEMA: Record<string, unknown> = {
 };
 
 /**
+ * Main 的只读能力目录工具（判据档 §2；本切片 A4）：按需查「可办什么」。
+ *
+ * 输出只含业务能力名 + 只读/可写，**不含 operation 名、不含参数名、不含 --**；读/写从执行层
+ * 既有 access 派生，不由本工具重判。Worker 面完全不动。仅当装配注入非空目录时才上工具面
+ * （缺省零变化：未声明能力 → 没有这个工具，工具面逐字节不变）。
+ */
+export const CAPABILITIES_TOOL = 'capabilities';
+export const CAPABILITIES_TOOL_DESCRIPTION = '列出你这边能办的业务能力（以及每一项是只读还是可写）。不带参数。';
+export const CAPABILITIES_TOOL_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {},
+  additionalProperties: false,
+};
+
+/**
  * CAP-01 S1（v8 §2）：Main 的受限代码执行工具。**只在装配方注入 `runJsExecutor` 时上工具面**
  * （缺省零变化：ask/eval 的工具面逐字节不变）；spawn 归执行器，runtime 不 spawn
  * （import 图守卫钉住），scope/物化/产物登记全归宿主，模型只给 code 与 fileId 引用。
- * 没有 deliver 参数、没有 timeoutMs——产物写 out/ 即本回合末交付，超时/上限是宿主常量。
+ * 没有 deliver 参数、没有 timeoutMs——超时/上限是宿主常量。
+ *
+ * 片 2（owner 2026-11-18：交付物只从 Worker 出）：**Main 面的 out/ 不可写、不登记、不交付**——
+ * 权限层收窄（执行器 `writableDirs:'scratch-only'`，写 out/ 得 ERR_ACCESS_DENIED）+ 结构性
+ * 禁止登记（`registerOutputs:false`），不是提示词请求。要交付文件 = task_run 交办
+ * 给 Worker；scratch/ 是 Main 的唯一可写工作区（中间文件，不产交付物）。
+ * **Worker 面用另一份描述**（WORKER_RUN_JS_TOOL_DESCRIPTION）：Worker 的 out/ 就是交付箱。
  */
 export const RUN_JS_TOOL = 'run_js';
 export const RUN_JS_TOOL_DESCRIPTION =
-  '运行一段受限的 CommonJS 脚本处理文件：输入文件用文件清单里的 fileId 引用（宿主物化到本次运行目录的 in/，按返回的 materializedName 读取），'
-  + '要交付的产物写到 out/ 目录（宿主登记后在本回合末作为附件发出），中间文件写 scratch/。'
-  + '超时与资源上限由宿主决定，只能通过把请求调小来适配。'
+  '运行一段受限的 CommonJS 脚本处理文件：输入文件用文件清单里的 fileId 引用（已放到本次运行目录的 in/，按返回的 materializedName 读取）。'
+  + 'scratch/ 是工作区（中间文件写这里），主会话只能写 scratch/——写 out/ 会被权限拒绝（不是静默丢弃）；需要交付文件请 task_run 交办。'
+  + '超时与资源上限有限，只能通过把请求调小来适配。'
   // CAP-01 修复轮（R2-S1，接口事实声明）：声明沙箱的模块面——模型此前首调 require("xlsx")
   // （未安装）失败后转去 task_run 兜底建 Task。只声明能力边界，不写业务流程话术。
   + '可用模块只有 exceljs（require("exceljs")，读写 xlsx）；没有 xlsx/xlsx-style/csv-parse 等包。'
   // CAP-01 修复轮（⑤，接口事实声明）：声明输入文件在脚本内的路径约定——清单每条已给出
-  // 「脚本内路径」（in/<fileId><安全扩展名>，与宿主物化的 materializedName 同一公式）；
+  // 「脚本内路径」（in/<fileId><安全扩展名>，与 materializedName 同一公式）；
   // 模型此前先写 in/<fileId>（无扩展名）失败一次才改对。路径只由 fileId + 安全扩展名派生，
   // 不由原始文件名拼出（机械事实，不是业务流程话术）。
+  + '输入文件在脚本内的路径固定为 in/<fileId><安全扩展名>（文件清单每条已给出「脚本内路径」，按它读取）；'
+  + '路径只由 fileId 和安全扩展名派生，不由原始文件名拼出。';
+/**
+ * Worker 面的 run_js 描述（片 2 拆出）：Worker 的 out/ 是本任务的交付箱（登记成任务文件、
+ * 随任务完成投递）；**不提 task_run**（Worker 不能再交办——不做跨工具流程诱导）。
+ */
+export const WORKER_RUN_JS_TOOL_DESCRIPTION =
+  '运行一段受限的 CommonJS 脚本处理文件：输入文件用文件清单里的 fileId 引用（已放到本次运行目录的 in/，按返回的 materializedName 读取），'
+  + '要交付的产物写到 out/ 目录（登记后随本任务完成投递），中间文件写 scratch/。'
+  + '超时与资源上限有限，只能通过把请求调小来适配。'
+  + '可用模块只有 exceljs（require("exceljs")，读写 xlsx）；没有 xlsx/xlsx-style/csv-parse 等包。'
   + '输入文件在脚本内的路径固定为 in/<fileId><安全扩展名>（文件清单每条已给出「脚本内路径」，按它读取）；'
   + '路径只由 fileId 和安全扩展名派生，不由原始文件名拼出。';
 export const RUN_JS_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    code: { type: 'string', description: 'CommonJS 脚本原文（宿主原样执行；产物写 out/，中间文件写 scratch/）。' },
+    code: { type: 'string', description: 'CommonJS 脚本原文（原样执行；中间文件写 scratch/）。' },
     inputs: {
       type: 'array',
       items: { type: 'string' },
-      description: '输入文件的 fileId 列表（来自文件清单；宿主物化后按 materializedName 读取）。',
+      description: '输入文件的 fileId 列表（来自文件清单；按 materializedName 读取）。',
     },
   },
   required: ['code'],
+  additionalProperties: false,
+};
+
+/**
+ * recalc_xlsx（docs/decisions/index.md §九十九；owner 裁定 R1–R7 / Q1–Q4）：Main 宿主面的
+ * 表格重算读回工具，与 run_js 并列。**Worker 面不上**（裁定 ②/⑥，Q1②）。只在装配方注入
+ * `recalcXlsxExecutor` 时上工具面（fail-closed，缺省零变化）；引擎不可用即不上工具面。
+ * 描述只声明已实现的参数与后果，不写业务流程话术（tool-description-facts 纪律）。
+ */
+export const RECALC_XLSX_TOOL = 'recalc_xlsx';
+export const RECALC_XLSX_TOOL_DESCRIPTION =
+  '对文件清单里的 xlsx 用 LibreOffice 强制重算后读回，报告公式缓存值与计算值不一致（valueDiffs）和错误格（errorCells），'
+  + '并可按 export=csv 导出纯数据 CSV。file 只接受本回合运行目录的规范相对路径 in/<fileId><安全扩展名>（文件清单每条已给出脚本内路径）；'
+  + '绝对路径、..、多级路径与非规范形式一律拒绝。export=csv 时产物为 out/<name>.values.csv（name 取自输入文件的用户可见名），'
+  + 'CSV 是宿主内部诊断产物，不投递给用户；实算报告在本回合运行目录根 .recalc-report.json（宿主独占，不写 out/）。'
+  + '引擎需部署期安装的 LibreOffice 26.8.3（PATH 可见才提供本工具，缺失则本工具不可用）。';
+export const RECALC_XLSX_TOOL_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    file: { type: 'string', description: '本回合运行目录的规范相对路径 in/<fileId><安全扩展名>（来自文件清单的脚本内路径）。' },
+    sheet: { type: 'string', description: '可选：只重算并导出指定工作表名；缺省处理全部工作表。' },
+    export: { type: 'string', enum: ['csv', 'none'], description: 'csv=导出纯数据 CSV（公式格取计算值）；none=只报告不导出 CSV。' },
+  },
+  required: ['file', 'export'],
   additionalProperties: false,
 };
 
@@ -279,16 +390,36 @@ export interface RunJsLayoutUnsafeReport extends RunJsLayoutUnsafeEvent {
   readonly taskId?: string;
 }
 
+/**
+ * 允许集合边界拒绝话术（宿主在**发起执行前**确定性拒绝，2026-11-19 RBAC 切片）。
+ *
+ * 不暴露内部 operation 名：用户不需要知道执行层的 operation 目录，只需知道「当前权限
+ * 不支持」。拒绝仍由宿主允许集合在发起前一次性判定（零执行、零执行事实），不依赖模型
+ * 遵守提示词；角色求交发生在装配层（allowedOperations 派生）。
+ */
+export const OPERATION_NOT_PERMITTED_MESSAGE = '当前权限不支持这个操作。';
+
+/**
+ * 工具参数结构校验的确定性拒绝话术（owner 2026-11-20「机制参数碰不到」）：模型给了一个
+ * 该工具没声明的字段（含猜到的机制参数裸名、任何 `--` 前缀键）时走既有工具错误面抛出。
+ * 不含 hostOnly 名、不含内部机制词（宿主/执行层/旋钮/flag 等），只说业务话——模型/用户
+ * 复述也不会泄密。字段名只经 `op_tool_args_rejected` 事件进日志，不进此话术。
+ */
+export const OP_TOOL_ARGS_REJECTED_MESSAGE = '这个操作的参数写法不对，请按这个操作声明的字段重新填写。';
+
 /** Worker 唯一工具名：结构化执行入口（宿主生成 requestId，模型只给 operation + args）。 */
 export const EXECUTE_OPERATION_TOOL = 'execute_operation';
 export const EXECUTE_OPERATION_TOOL_DESCRIPTION =
-  '发起一次结构化执行。operation 必须是本轮能力快照里登记的 operation 名；'
-  + 'args 按该 operation 声明的参数名填写（对宿主不透明，形状由执行层校验）。返回执行层的状态与数据。';
+  '把一步交出去办。operation 必须是这次给你的清单里列出的操作名；'
+  + 'args 按该操作声明的参数名填写（形状由对方校验）。返回办到哪一步与拿到的数据。';
 export const EXECUTE_OPERATION_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    operation: { type: 'string', description: '本轮能力快照里登记的 operation 名。' },
-    args: { type: 'object', description: '该 operation 声明的参数（参数名见快照的 args 声明）。' },
+    operation: { type: 'string', description: '这次给你的清单里列出的操作名。' },
+    args: {
+      type: 'object',
+      description: '该操作的参数（名字见清单里的参数声明）。数组/对象直接把值放进来，不用自己拼 JSON 字符串。',
+    },
   },
   required: ['operation'],
   additionalProperties: false,
@@ -298,11 +429,104 @@ export const EXECUTE_OPERATION_TOOL_SCHEMA: Record<string, unknown> = {
  * Main 的静态协议义务（本切片的中性措辞；不含执行层实例名与业务字段）。
  * 装配方把它接在角色文本之后（agent.md 负责角色，这里只负责本轮工具协议）。
  */
+
+/**
+ * 载荷型参数装信封（宿主侧；owner 2026-11-19）：模型给结构化**值** → 桥 lint+落盘 → 用文件
+ * 路径替换该参数，再提交执行层。未声明 payload 参数 = args 原样返回（零变化）。
+ *
+ * 失败处置（都在**发起执行之前**，零执行事实）：
+ *   · lint 未过：抛业务话术（`failureMessageFor('invalid_input')`）交模型一轮改对，并落
+ *     `payload_lint_rejected` 事件（missing/unknown 只进日志）；
+ *   · 同一 (回合, operation) 连续失败超过上限：`ToolUserError` 确定性停下（给「先停下来看看」）。
+ */
+const PAYLOAD_LINT_MAX_FAILURES = 2;
+
+const PAYLOAD_LINT_STOP_MESSAGE =
+  '这件事连续几次都因为内容不对被拦下了。先停下来看看：要写入的对象、范围和内容再核对一下，或者先别做这项操作。';
+
+/** 装配一个 operation 声明的载荷型参数清单（`payload` 声明）。 */
+function payloadArgsOf(manifest: CapabilityManifest, operation: string): ExecutionArgDeclaration[] {
+  const declaration = manifest.operations.find((entry) => entry.name === operation);
+  return (declaration?.args ?? []).filter((arg) => arg.payload !== undefined);
+}
+
+/** args 里该声明参数的命中形态（声明名或裸名）；返回实际键与值。 */
+function payloadArgOf(args: Record<string, unknown>, name: string): { key: string; value: unknown } | undefined {
+  if (Object.prototype.hasOwnProperty.call(args, name)) return { key: name, value: args[name] };
+  const bare = name.replace(/^--/, '');
+  if (bare !== name && Object.prototype.hasOwnProperty.call(args, bare)) return { key: bare, value: args[bare] };
+  return undefined;
+}
+
+function preparePayloadArgs(input: {
+  operation: string;
+  args: Record<string, unknown>;
+  manifest: CapabilityManifest;
+  taskId: string;
+  bridge: TaskExecutionBridge | undefined;
+  /** 同一回合的失败计数（键 = operation）；随回合丢弃。 */
+  failures: Map<string, number>;
+  onEvent: ((event: ExecutionEvent) => void) | undefined;
+}): Record<string, unknown> {
+  const payloadArgs = payloadArgsOf(input.manifest, input.operation);
+  if (payloadArgs.length === 0) return input.args;
+  let next = input.args;
+  for (const declaration of payloadArgs) {
+    const present = payloadArgOf(next, declaration.name);
+    if (present === undefined) continue;
+    const failed = input.failures.get(input.operation) ?? 0;
+    if (failed >= PAYLOAD_LINT_MAX_FAILURES) {
+      // 连续失败已达上限：不再 lint、不再发起执行——确定性停下并给「先停下来看看」。
+      throw new ToolUserError(PAYLOAD_LINT_STOP_MESSAGE);
+    }
+    const result = input.bridge === undefined
+      ? { ok: false as const, missing: [] as string[], unknown: [] as string[] }
+      : input.bridge.materializePayload({
+        param: declaration.name,
+        value: present.value,
+        ...(declaration.payload?.schema === undefined ? {} : { schema: declaration.payload.schema }),
+      });
+    if (!result.ok) {
+      input.failures.set(input.operation, failed + 1);
+      input.onEvent?.({
+        event: 'payload_lint_rejected',
+        taskId: input.taskId,
+        operation: input.operation,
+        missing: result.missing,
+        unknown: result.unknown,
+      });
+      throw new Error(failureMessageFor('invalid_input').text);
+    }
+    if (next === input.args) next = { ...next };
+    if (present.key !== declaration.name) delete next[present.key];
+    next[declaration.name] = result.path;
+  }
+  return next;
+}
+
+/** 参数规范化（判定「完全相同」用）：对象键排序后递归序列化；数组保序。 */
+function stableArgsKey(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableArgsKey(item)).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableArgsKey(item)}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
 export const MAIN_PROTOCOL_NOTE = [
   '【本轮工具协议】',
-  '- 涉及平台数据的请求，用 task_run 工具交给执行层 Worker；不得自行编造或猜测平台数据。',
-  '- 收到 Worker 汇报后，用用户能懂的话给出结论与数据；平台没有给出的内容不要补全，也不要声称已验证。',
-  '- 本轮执行面只开放查询（只读）操作；用户要求写入或变更时，如实说明该能力尚未开通。',
+  '- 涉及平台数据的请求，用 task_run 工具交办出去；不得自行编造或猜测平台数据。',
+  '- 收到办事结果后，用用户能懂的话给出结论与数据；平台没有给出的内容不要补全，也不要声称已验证。',
+  '- 合计、计数、差值、占比这类运算一律交给代码：优先用平台返回的聚合字段；'
+    + '平台没给聚合且本轮没有计算工具时，如实说明拿不到可靠合计，不要凭记忆心算。'
+    + '给出聚合数时说明来源（平台返回的字段 / 脚本计算）。',
+  '- 办事请求失败、且**没有说明可以重试**（`retryable` 为 false 或未声明）时：如实说明它接受'
+    + '什么、不接受什么，并问用户要不要换口径；同一对象本回合不要再换参数重试，也不要自行按维度'
+    + '取值批量查询——那是替用户扩大范围。',
+  // owner 2026-11-19：交办后不再由宿主固定受理回执——模型的话原样投递，无过程话时用户静默到结果。
+  '- 本轮只开放查询（只读）操作；用户要求写入或变更时，如实说明该能力尚未开通。',
 ].join('\n');
 
 /**
@@ -313,11 +537,18 @@ export const MAIN_PROTOCOL_NOTE = [
  */
 export const MAIN_PROTOCOL_NOTE_WITH_WRITES = [
   '【本轮工具协议】',
-  '- 涉及平台数据的请求，用 task_run 工具交给执行层 Worker；不得自行编造或猜测平台数据。',
-  '- 收到 Worker 汇报后，用用户能懂的话给出结论与数据；平台没有给出的内容不要补全，也不要声称已验证。',
-  '- 本轮执行面开放查询与写入操作。执行层返回待确认时，把执行层给出的确认摘要原样转给用户；'
+  '- 涉及平台数据的请求，用 task_run 工具交办出去；不得自行编造或猜测平台数据。',
+  '- 收到办事结果后，用用户能懂的话给出结论与数据；平台没有给出的内容不要补全，也不要声称已验证。',
+  '- 合计、计数、差值、占比这类运算一律交给代码：优先用平台返回的聚合字段；'
+    + '平台没给聚合且本轮没有计算工具时，如实说明拿不到可靠合计，不要凭记忆心算。'
+    + '给出聚合数时说明来源（平台返回的字段 / 脚本计算）。',
+  '- 办事请求失败、且**没有说明可以重试**（`retryable` 为 false 或未声明）时：如实说明它接受'
+    + '什么、不接受什么，并问用户要不要换口径；同一对象本回合不要再换参数重试，也不要自行按维度'
+    + '取值批量查询——那是替用户扩大范围。',
+  // owner 2026-11-19：交办后不再由宿主固定受理回执——模型的话原样投递。
+  '- 本轮可以查询和写入。平台返回待确认时，把平台给出的确认摘要原样转给用户；'
     + '用户表态后的下一回合再继续，不要替用户假定已确认。',
-  '- 写入是否生效以执行层返回的读回验证为准；执行层返回失败或读回不一致时，如实转述，不得说成成功。',
+  '- 写入是否生效以平台返回的读回验证为准；平台返回失败或读回不一致时，如实转述，不得说成成功。',
 ].join('\n');
 
 /** 按装配的写面开关选工具协议文本（缺省 = 只读原文，零行为变化）。 */
@@ -325,33 +556,55 @@ export function mainProtocolNoteFor(allowWriteOperations: boolean): string {
   return allowWriteOperations ? MAIN_PROTOCOL_NOTE_WITH_WRITES : MAIN_PROTOCOL_NOTE;
 }
 
-/** Worker 的静态系统提示：协议义务、机械边界与输出纪律；零执行层实例名。 */
+/**
+ * 答复五态的 Main 行为句（判据档 §3 / 本切片 B2）：outcome 作为结构化事实进唤醒/工具结果，
+ * Main 据此按值选措辞。三条句分别钉住 unsupported / blocked / partial 的措辞纪律。
+ *
+ *   · unsupported → 说「这件事我这边办不了」+ 给出目录里能办的，**绝不提「再试一次」**；
+ *   · blocked     → 说缺什么 + 补的方式；
+ *   · partial     → 逐项说，不得说成单纯成功。
+ *
+ * 本常量是给模型的行为约束，不是宿主拼的用户话术；不含 operation 名/参数/--。
+ */
+export const OUTCOME_BEHAVIOR_NOTE = [
+  '【答复纪律】',
+  '- 若这件事办不了（没有对应能力）：说「这件事我这边办不了」，并列出你能办的几项；'
+    + '绝不要说「再试一次」「重试」，因为根本没有可办的动作。',
+  '- 若事情卡住是因为缺条件（本次不允许、或缺你补充的信息）：说清缺什么、怎么补，'
+    + '不要说成「办不了」。',
+  '- 若一件事只办成了一部分：逐项说明哪些办成、哪些没办成，不要说成单纯成功。',
+].join('\n');
+
+/**
+ * Worker 的静态系统提示（2026-11-20 第二人称行为句收口）：只说「你收到一件活、按给你的
+ * 输入去做、用工具报事实」。去掉宿主/委派/能力快照/纵深防御/子进程/执行面这些内部角色与
+ * 机制词——它们不帮模型做对事，只让它把内部形态说给用户。机械边界（允许集合、结果真实性）
+ * 由宿主在工具面守住，不靠这些词做提示词补丁。
+ */
 export const WORKER_SYSTEM_PROMPT = [
-  '你是 fshine 的执行层 Worker：宿主把一项平台任务委派给你，你在一个受信工作区里工作。',
+  '你接到一件要办的事，按给你的输入去做。',
   '',
-  '执行纪律：',
-  '- 只能通过 execute_operation 工具发起执行；operation 名与参数写法必须取自本轮能力快照。',
-  '- 只能依据工具返回的 status/data/error 汇报事实，不得编造、不得补平台没给出的内容。',
-  '- 平台说缺信息或没有匹配时，把平台给的事实与候选原样写进汇报，不要自行猜测补全。',
-  '- 汇报用简体中文，一段话说清：执行了什么、返回了什么、还有什么平台没有给出。',
-  '- 不要在汇报里写内部编号、文件路径、协议原文或工具名；给宿主一段可直接向用户转述的事实。',
+  '怎么做：',
+  '- 用给你的工具把每一步交出去办；每个工具对应一项操作，参数用工具声明的业务字段名填写。',
+  '- 只根据工具回报的结果说话：办到哪一步、拿到了什么，都照实说；没拿到的不要自己补。',
+  '- 对方说缺信息或没找到对象时，把给出的说法和候选如实带回来，别替它猜一个。',
+  '- 用一段简体中文说清：你办了什么、对方回了什么、还有什么没拿到。',
+  '- 汇报里别写内部编号、文件路径或协议字样；写成一段能直接转给别人看的事实。',
 ].join('\n');
 
 /**
  * 渲染 Worker 系统提示：不传 workspaceRoot 时与 WORKER_SYSTEM_PROMPT 逐字节相同（缺省零变化）；
- * 传入可信绝对路径时追加工作目录约束块（纵深防御提醒，不是安全控制——执行环境的实际
- * 权限边界归执行层）。workspaceRoot 来源必须是装配层持有的可信路径（如 profile.root），
- * 不得取模型输出或用户消息。
+ * 传入可信绝对路径时追加一条工作目录纪律（不是安全控制——实际能访问到什么由执行环境决定）。
+ * workspaceRoot 来源必须是装配层持有的可信路径（如 profile.root），不得取模型输出或用户消息。
  */
 export function renderWorkerSystemPrompt(workspaceRoot?: string): string {
   if (workspaceRoot === undefined || workspaceRoot.trim() === '') return WORKER_SYSTEM_PROMPT;
   return [
     WORKER_SYSTEM_PROMPT,
     '',
-    '【可信工作目录】',
-    `你的可信工作目录是：${workspaceRoot}`,
-    '不要主动访问该目录之外的文件；不要读取宿主配置、凭据、其他项目或用户主目录；该约束同样适用于你启动的任何子进程。',
-    '（以上是纵深防御提醒，不构成操作系统级隔离；执行环境的实际权限边界由执行层负责。）',
+    '【工作目录】',
+    `你的工作目录是：${workspaceRoot}`,
+    '处理文件只在这个目录里进行；不要去翻别人的配置、账号信息或别的目录；这条对你调用的工具一样适用。',
   ].join('\n');
 }
 
@@ -359,21 +612,6 @@ export function renderWorkerSystemPrompt(workspaceRoot?: string): string {
 export interface WorkerSkill {
   name: string;
   content: string;
-}
-
-/**
- * 会话转录端口（依赖注入；runtime 只认接口，**不** import 任何具体存储实现）。
- *
- * 装配层提供实现（如基于 Pi `SessionManager` 的 `session-persistence.ts`）。语义：
- *   · `readTranscript()`：打开会话时**现读**该 `(principalId, sessionId)` 的完整转录
- *     （每次调用都从存储读，宿主不留第二份可变副本——Pi entry-log 是唯一转录所有者）；
- *   · `append(message)`：回合结束后向存储**追加一条**本条新增的转录消息（Pi 原生 message 形状）。
- *
- * 与 `PersistedSession`（session-persistence.ts:57）结构化相容——装配层直接注入后者。
- */
-export interface TranscriptStore {
-  readTranscript(): Promise<readonly DriverMessage[]>;
-  append(message: DriverMessage): Promise<void>;
 }
 
 /**
@@ -388,6 +626,110 @@ export interface TaskOutputSweepSkippedEvent {
   /** reason → 数量（同 reason 合并；reason 来自 file-store 的 SkippedOutput.reason）。 */
   reasons: Record<string, number>;
 }
+
+/**
+ * B 切片（工单回执收敛）：task_run 短等待窗口的时钟端口。只有 now + sleep 两个原语——
+ * 窗口轮询复用本端口，不引入定时器/调度框架。缺省 = 系统时钟；测试注入手动时钟保证确定性。
+ */
+export interface RuntimeClock {
+  now(): number;
+  /** 让出一次等待（窗口轮询步进）；缺省实现 = 真实 setTimeout。 */
+  sleep(ms: number): Promise<void>;
+}
+
+/** 缺省时钟（真实系统时钟 + setTimeout 让出）。 */
+const SYSTEM_RUNTIME_CLOCK: RuntimeClock = {
+  now: () => Date.now(),
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+/** 窗口轮询步长（机械轮询；25ms × 缺省 1500ms 窗口 ≤ 60 次 SQLite 读，开销可忽略）。 */
+const TASK_RUN_WAIT_POLL_MS = 25;
+
+/**
+ * 长任务异步（契约 v4）的结构化事件（**只进日志**，不进用户话术）：
+ *   · execution_accepted            —— 执行层受理一笔长任务（Worker 回合结束、槽位释放）；
+ *   · execution_accepted_undeclared —— 协议违约：未声明 long_running 的 operation 返回了
+ *     accepted（宿主已按 failed 落定）；
+ *   · execution_wait_resumed        —— wait 返回终态、Worker 续跑（waitedMs = 等待时长）；
+ *   · execution_wait_timeout        —— wait 窗口到期仍在执行（按 pollAfterMs 重排）；
+ *   · execution_aborted             —— 用户取消：result=cancelled（执行层确认）/failed（停不下来）；
+ *   · execution_wait_files_registered —— 长任务回程文件/大日志已登记为任务文件；
+ *   · execution_result_unknown      —— 一次真实发起的调用以「结果未知」收尾（无回执；只进日志）。
+ */
+export type ExecutionEvent =
+  | { event: 'execution_accepted'; taskId: string; operationId: string; operation?: string }
+  | { event: 'execution_accepted_undeclared'; taskId: string; operation: string; operationId: string }
+  | { event: 'execution_wait_resumed'; operationId: string; waitedMs: number }
+  | { event: 'execution_wait_timeout'; operationId: string }
+  | { event: 'execution_aborted'; operationId: string; result: 'cancelled' | 'failed'; reason?: string }
+  | { event: 'execution_wait_files_registered'; operationId: string; files: number; logsFileized: number }
+  /**
+   * 载荷型参数 lint 未过（2026-11-19）：宿主装信封失败——不发起执行，业务话术交回模型改。
+   * missing/unknown 是结构化机械事实（只进日志，不进用户话术）。
+   */
+  | { event: 'payload_lint_rejected'; taskId: string; operation: string; missing: readonly string[]; unknown: readonly string[] }
+  /**
+   * op_* 工具参数结构校验拒绝（owner 2026-11-20）：模型给了一个该工具没声明的字段
+   * （包含任何 `--` 前缀键 / hostOnly 裸名）。字段名/计数只进这条日志（取证面），
+   * 绝不进模型可见话术（见 OP_TOOL_ARGS_REJECTED_MESSAGE）。零执行、零执行事实。
+   */
+  | { event: 'op_tool_args_rejected'; tool: string; keys: readonly string[]; dashedKeys: number }
+  /**
+   * 失败归类（模型可见面收口，2026-11-19）：执行层失败/拒绝**不再逐字进模型投影**，
+   * 模型只见 kind + note（见 toModelVisibleOutcome）；原始 code 与原文只经这条事件进日志。
+   */
+  | { event: 'execution_failure_classified'; operation: string; code: string; status: 'failed' | 'refused'; kind: string }
+  /**
+   * A2b（2026-11-18；后台执行器）：同一 (operation, 对象) 本回合已被执行层判定确定性失败
+   * （retryable !== true）时**再次发起**的调用，在发起前被宿主拦下——对象/操作/执行层码与
+   * 它的 retryable 声明随本条进日志（与前台 `turn.retryBlocked` → server 的
+   * `execution_retry_blocked` 同一形状）。放行（显式 retryable:true）记 `execution_retry_allowed`。
+   */
+  | { event: 'execution_retry_blocked'; taskId: string; operation: string; object: string; code: string; declaredRetryable: boolean | 'unset' }
+  | { event: 'execution_retry_allowed'; taskId: string; operation: string; object: string; code: string }
+  /**
+   * 一次**真实发起**的执行调用以「结果未知」收尾（无回执：单次调用被传输超时截断、
+   * 连接中断、写操作取消在飞等——owner 2026-11-19 分工表第一格）：调用有界结束，但宿主
+   * **不能**断言它发生过没有——账行落 unknown、任务落 reason=result_unknown、不自动重试。
+   * 只进日志；超时原话留在账行的 outcome 里（`unknown` 行）。回放/未发起（executed=false）不记。
+   */
+  | { event: 'execution_result_unknown'; taskId: string; operation: string }
+  /**
+   * 能力边界未声明（判据档 §2 / A5）：本次执行层清单里没有任何 operation 声明 `capability`。
+   * 目录为空、摘要不出现、Main 提示与今天逐字节一致——但装配必须**显式登记**这件事，
+   * 不许假装知道、不许伪造目录。每个会话一次（装配时记，不按回合刷）。
+   */
+  | { event: 'capability_catalog_undeclared'; principalId: string; sessionId: string };
+
+/** 长任务结果渲染的日志内联上限（字节；超过走任务文件，不留绝对路径也不灌转录）。 */
+export const LONG_TASK_LOG_INLINE_MAX_BYTES = 4 * 1024;
+
+/**
+ * 长任务同步的装配错误话术（确定性失败）：声明了长任务却没有等待端口 = 不能留下
+ * 无人推进的进行中任务。
+ */
+export const LONG_TASK_UNSUPPORTED_MESSAGE =
+  '长任务需要后台派发并注入等待端口（wait/abort）才能推进；本次装配不支持，已停止该任务。';
+
+/**
+ * 一次待注入事实的**回执**（2026-11-19 注入核销切片）：`text` = 注入文本；`requeue` =
+ * 本回合**没有产出用户可见内容**时把事实原样退回队列的回退口。
+ *
+ * 为什么必须有它：注入器是「take 即出队」——取走就视为已说给用户听过；驱动失败/空回复/
+ * 模型一言不发时那句话并没有出现，事实却已经出队 = 永久丢失（用户永远看不到这件事）。
+ * 有了回退口，核销判据变成**机械事实**：本回合产出的用户可见文本非空才核销；否则退回，
+ * 下一次用户开口再注入一次（判据不看模型有没有提到事实——语义不可判，不猜）。
+ *
+ * 返回**纯字符串** = 没有回退口（等价旧行为，既有装配逐字节不变）。
+ */
+export interface InjectionReceipt {
+  text: string;
+  requeue?: () => void;
+}
+
+/** 注入器返回值：纯文本（无回退口）或带回退口的回执。 */
+export type InjectionValue = string | InjectionReceipt;
 
 export interface RuntimeOptions {
   /** 可信身份：来自装配/渠道事实，绝不来自模型输入。 */
@@ -409,6 +751,12 @@ export interface RuntimeOptions {
   /** Worker 需嵌入本轮提示的领域技能正文（可选）。 */
   workerSkills?: readonly WorkerSkill[];
   /**
+   * Main 可见的能力目录（可选；来自装配层按执行层 capability 声明派生，见 capability-catalog）。
+   * 非空 → Main 工具面多一个只读 `capabilities`，输出只含业务名 + 读/写；空/未注入 →
+   * 工具面零变化（缺省逐字节不变，Main 不承诺任何范围）。Worker 面恒不受影响。
+   */
+  capabilityCatalog?: readonly CapabilityEntry[];
+  /**
    * 任务底账（B 类持久化）：装配方可注入 SQLite 实现使归属跨重启成立；
    * 缺省 = 进程内内存实现（测试与纯内存嵌入用）。
    */
@@ -422,12 +770,29 @@ export interface RuntimeOptions {
    */
   policy?: ResourcePolicy;
   /**
-   * P6：派发模式（缺省 'inline' = 现行为：委派同步执行、Main 等待）。
-   * 'background' 需要同时注入 `taskRunner`（装配方构造，进程级共享）。
+   * P6：任务派发装配参数（**只由装配方显式传入，不是配置键**；缺省 'sync' = 现行为：
+   * 委派同步执行、Main 等待）。'async' 需要同时注入 `taskRunner`（装配方构造，进程级共享）。
    */
-  dispatchMode?: 'inline' | 'background';
-  /** P6：后台任务运行器（background 模式必需；submit→pump，执行/恢复/取消由它承担）。 */
+  taskDispatch?: 'sync' | 'async';
+  /** P6：后台任务运行器（async 模式必需；submit→pump，执行/恢复/取消由它承担）。 */
   taskRunner?: TaskRunner;
+  /**
+   * B 切片（工单回执收敛）：task_run 受理后的短等待窗口（ms）。缺省取 runtime 配置解析值；
+   * 0 = 不等直接后台。窗口内执行端确认完成 → 结果同回合交给模型（与 inline 同形状）；
+   * 超窗 → 只回机械受理事实（taskId/name/status/accepted:true，**无给用户的回执话术**），
+   * 任务留后台推进（交办不再固定回执；久到消耗耐心才由 10/30 分钟两档出声）。
+   */
+  taskRunWaitMs?: number;
+  /**
+   * B 切片：窗口轮询时钟（测试确定性注入；缺省系统时钟）。只有 now + sleep 两个原语，
+   * 不引入定时器/调度框架。注入实现的 sleep 必须推进时间（否则窗口永不超时——注入契约）。
+   */
+  taskRunClock?: RuntimeClock;
+  /**
+   * 前台排队超时的结构化事件（`resource_queue_timeout`；只进日志，不进用户话术）。
+   * 缺省静默（不影响回合的拒绝结果）。
+   */
+  onResourceQueueTimeout?: (event: ResourceQueueTimeoutEvent) => void;
   /**
    * Main 技能登记表（catalog 非空时由装配层注入）：Main 工具面多一个 read_skill，按登记表内的
    * 技能名读正文（32KiB 上限由 registry 既有钳制）。缺省不注入 = 无该工具（工具面逐字节不变）。
@@ -439,34 +804,26 @@ export interface RuntimeOptions {
    * 回合开始时调用一次；返回非空文本即以普通 user-role 消息注入主对话（不造 custom
    * message type、不改 Pi 消息流不变量）。注入器自身保证幂等与有界。
    */
-  taskFactProvider?: (principalId: string, sessionId: string) => string | undefined;
+  taskFactProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
   /**
    * 纯附件机械事实注入器（与 taskFactProvider 同一 injections 机制）：装配层在纯附件
    * 登记成功后按 (principal, session) 排队；回合开始时取走并以 Pi 原生 custom message
    * （display=false、不触发单独回合）注入主对话。注入器自身保证同 fileId 只出队一次。
    * 事实只含文件名/fileId/字节数/时间，不含路径与内容。缺省不注入 = 无附件事实。
    */
-  attachmentFactProvider?: (principalId: string, sessionId: string) => string | undefined;
+  attachmentFactProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
   /**
    * 宿主主动追问的系统注记注入器（同一 injections 机制）：追问真实送达后入队，下一次
    * 回合注入（模型可见/用户不可见/不触发回合），让模型能把用户的数字回复对应到选项。
    * 缺省不注入 = 无系统注记。
    */
-  systemNoteProvider?: (principalId: string, sessionId: string) => string | undefined;
+  systemNoteProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
   /**
    * Worker 可信工作目录（渲染进 Worker 系统提示的工作目录约束块）。
    * 来源必须是装配层持有的可信路径（如 profile.root）；不得取模型输出或用户消息。
    * 缺省不注入 = Worker 提示与现行常量逐字节相同。
    */
   workerWorkspaceRoot?: string;
-  /**
-   * B1 会话持久化端口（装配层注入具体实现；缺省 undefined = 逐字节现行为：转录仅内存、归 Pi 会话独占）。
-   * 注入后：打开会话时从存储载入转录作为首回合种子、回合结束后把**本回合新增**消息增量持久化。
-   * 写失败 fail-open（不回滚回合），读/写错误经 `onTranscriptError` 上报。
-   */
-  transcriptStore?: TranscriptStore;
-  /** B1：转录读/写失败的上报回调（fail-open 日志；缺省静默吞掉，不影响回合）。 */
-  onTranscriptError?: (error: unknown) => void;
   /**
    * U3：执行层声明为只读的 operation 集合（由装配方从执行层 `access=read` 显式派生，
    * **独立于** allowedOperations）。只有这些 operation 的重试可以安全重发；
@@ -478,6 +835,17 @@ export interface RuntimeOptions {
    * 缺省不注入 = Main 工具面没有 run_js（工具面逐字节不变，ask/eval 零变化）。
    */
   runJsExecutor?: RunJsExecutor;
+  /**
+   * recalc_xlsx 执行器端口（装配层构造注入；缺省不注入 = Main 工具面没有 recalc_xlsx）。
+   * 与 run_js 并列的宿主 agent 工具；**Worker 面永不注入**（裁定 R1–R7 / Q1②）。
+   * 引擎不可用时执行器 available=false，装配方据此不上工具面（fail-closed）。
+   */
+  recalcXlsxExecutor?: RecalcXlsxExecutor;
+  /**
+   * recalc_xlsx 单次重算开销的结构化事件（**只进日志/资源账**，不进用户话术）。
+   * engineMs = 引擎耗时；status = 结果状态。缺省静默（不影响回合）。
+   */
+  onRecalcCost?: (event: RecalcCostEvent & { principalId: string; sessionId: string }) => void;
   /**
    * CAP-01 ④：run_js 子进程撞内存墙的结构化事件（**只进日志**，不进用户话术）。
    * bytes = 输入总字节；exitCode/exitSignal/stderrTail = 退出形状；runId/side/taskId 定位
@@ -527,9 +895,35 @@ export interface RuntimeOptions {
    * 整轮扫描抛错仍走 taskExecutionBridge.onSkip('scan_failed:…')，两者不重复。
    */
   onTaskOutputSweepSkipped?: (event: TaskOutputSweepSkippedEvent) => void;
+  /**
+   * 大响应文件化成功（2026-11-19；**只进日志**，不进用户话术）：Worker 的 completed 结果
+   * 超过 `runtime.oversizeDataBytes` 时，完整 data 已落成任务作用域文件，模型只拿到摘要 +
+   * fileId。缺省静默（不影响回合）。
+   */
+  onExecutionResultFileized?: (event: ExecutionResultFileizedEvent) => void;
+  /**
+   * 大响应未能文件化（2026-11-19；**只进日志**）：未注入任务文件桥，或登记被拒/抛错时，
+   * 结果退化为原样返回（fail-open，不阻塞业务）。缺省静默。
+   */
+  onExecutionResultOversizeUnhandled?: (event: ExecutionResultOversizeUnhandledEvent) => void;
+  /**
+   * 长任务异步（契约 v4）的结构化事件出口（**只进日志**，不进用户话术）。
+   * 缺省静默；装配层按条落 `execution_*` 事件。
+   */
+  onExecutionEvent?: (event: ExecutionEvent) => void;
 }
 
-/** 前台回合被资源策略确定性拒绝（queued 排队等晋升后不适用；携带机械 reason）。 */
+/**
+ * 前台回合排队超时的结构化事件（2026-11-18）：`resource_queue_timeout{kind, principalId,
+ * waitedMs}`。只进日志/资源账，不进用户话术（用户见 ForegroundRejectionError 的统一说明）。
+ */
+export interface ResourceQueueTimeoutEvent {
+  readonly kind: 'foreground';
+  readonly principalId: string;
+  readonly waitedMs: number;
+}
+
+/** 前台回合被资源策略确定性拒绝（queued 排队等晋升超时/取消后不适用；携带机械 reason）。 */
 export class ForegroundRejectionError extends Error {
   readonly reason: RejectionReason;
 
@@ -548,6 +942,27 @@ export interface TurnFileRef {
   fileId: string;
   name: string;
   bytes: number;
+  /**
+   * **登记/真收到时刻**（epoch ms；清单「收到」时间取它）。刻意不用 activatedAt：
+   * 纯附件场景的激活时刻是后续**文字消息**到达时刻，可能比真正收到晚几天；登记时刻
+   * 才是渠道真收到（与 apps/server/attachment-facts 的 receivedAt 同口径）。
+   * 交付面（TurnResult.files）可缺省——渠道投递只用 fileId/name/bytes。
+   */
+  createdAt?: number;
+  /**
+   * 交付角色（方案 A）：false = 宿主内部诊断产物（如 recalc 的 .values.csv），不进交付面。
+   * 缺省/undefined = 可交付（Worker run_js 产物、任务回程、out/ 扫描都是用户产物；Main 的
+   * run_js 不产交付物，片 2）。投递面按它机械过滤，**不看文件名**。
+   */
+  deliverable?: boolean;
+}
+
+/** 清单里的收到时间格式（本地时区，`YYYY-MM-DD HH:mm`）：业务用户读得懂的机械事实。 */
+function receivedAtTextOf(epochMs: number): string {
+  const date = new Date(epochMs);
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+    + `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 /** 回合末只有文件、正文为空时的宿主话术（v8 §7 出口清理；空文本帧会让渠道一个终帧都不发）。 */
@@ -559,10 +974,15 @@ export const FILES_GENERATED_NOTICE = '文件已生成（见附件）';
  * file-store materializeInputs），只由 fileId + 安全扩展名派生，**不由原始文件名拼路径**。
  * 显示名做机械净化：name 里的路径分隔符与 `..` 序列不进清单文本（name 只用于识别文件；
  * 路径注入面在结构上封死——净化只影响显示，不碰 file_refs 原值）。
+ * 2026-11-18 owner：每行追加「（YYYY-MM-DD HH:mm 收到）」——时间取**登记/真收到时刻**
+ * （createdAt；不取 activatedAt：纯附件场景的激活时刻是文字消息到达时刻，可能晚几天），
+ * 业务用户靠它判断新旧；字段顺序与 fileId 形态不变（模型引用规则不变）。
  */
 function manifestLineOf(file: TurnFileRef): string {
   const displayName = file.name.replaceAll(/(\.\.[/\\]?|[/\\])/g, '_');
-  return `- ${displayName}（fileId: ${file.fileId}，${file.bytes} 字节；脚本内路径：in/${file.fileId}${safeExtensionOf(file.name)}）`;
+  // 收到时间追加在既有字段之后（字段顺序与 fileId 形态不变）；无时刻的交付面引用不渲染。
+  const received = file.createdAt === undefined ? '' : `；${receivedAtTextOf(file.createdAt)} 收到`;
+  return `- ${displayName}（fileId: ${file.fileId}，${file.bytes} 字节；脚本内路径：in/${file.fileId}${safeExtensionOf(file.name)}${received}）`;
 }
 
 /**
@@ -577,10 +997,61 @@ export function renderFileManifest(files: readonly TurnFileRef[]): string {
   ].join('\n');
 }
 
+/** A2b 放行/拦截事实（观测用）：类型单源于共享锁模块（前台与后台同一形状）。 */
+export type TurnRetryAllowed = RetryAllowed;
+export type TurnRetryBlock = RetryBlock;
+
+/**
+ * 本回合等待窗口观察到的任务终态（缺陷 A，2026-11-21 live）。
+ *
+ * 判据是机械的：只有回合**自己观察到**的落定才算——当前唯一写入点是 task_cancel
+ * 的落定窗口（见 taskCancel）；task_run 短等待窗口捕获的非完成终态走既有
+ * pushSuppressedTaskIds 路径，不进本列表。回合外落定
+ * （后台完成/重启对账/长任务结束）不进这个列表，状态变化唤醒照发。
+ * kind 只取有状态变化唤醒出口的三类（completed/failed/cancelled）；其余终态
+ * （timed_out/unexecuted）没有唤醒出口，不观察、不抑制。
+ */
+export type TurnTerminalKind = 'cancelled' | 'completed' | 'failed';
+
+export interface TurnTerminalObservation {
+  taskId: string;
+  kind: TurnTerminalKind;
+}
+
 export interface TurnResult {
   reply: string;
   taskIds: readonly string[];
   executions: readonly ExecutionRecord[];
+  /**
+   * B 切片（可观测）：本回合经 execute_operation 发起的执行次数（A2 同源计数；后台任务的
+   * 执行在后台回合计入任务底账，不计入本字段）。供 message_done 等观测面看「执行面扩散」。
+   */
+  operations: number;
+  /**
+   * B 切片（工单回执收敛）：本回合已把执行结果交给模型（模型将向用户转述）的任务。
+   * 完成投递面据此抑制——同一份结果不重复发两遍；受理回执路径的任务不在列，
+   * 完成后由宿主主动投递面送达原会话。
+   */
+  relayedTaskIds?: readonly string[];
+  /**
+   * 主动推送抑制（快活失败/等补充）：本回合已把失败原因或「还缺什么」交给模型的任务。
+   * 后台通知推送据此不重复发一条；受理回执路径的任务不在列（它们的结局仍靠推送送达）。
+   */
+  pushSuppressedTaskIds?: readonly string[];
+  /**
+   * 缺陷 A（2026-11-21 live）：本回合等待窗口**观察到落定**的任务终态（taskId + 终态类型）。
+   * 装配层对它们做一次性唤醒抑制：回合最终回复非空 = 这件事模型已说给用户 → 对应的状态
+   * 变化唤醒（completed/failed/cancelled）不再发送，记 `wake_suppressed_already_delivered`；
+   * 回复为空不抑制（不静默）。观察面只来自本回合的等待窗口——回合外落定不进列（照常唤醒）。
+   */
+  terminalObservedInTurn?: readonly TurnTerminalObservation[];
+  /**
+   * A2b 观测面：本回合**被拦下**的重试（执行层没有显式声明可重试 → * 该对象本回合不再发起）。
+   * 只作运维可见（装配层按条记 `execution_retry_blocked` 事件），不改变回合结果、不进用户文本。
+   */
+  retryBlocked?: readonly TurnRetryBlock[];
+  /** A2b 观测面：执行层声明可重试的失败（瞬时故障）——本回合放行继续尝试。 */
+  retryAllowed?: readonly TurnRetryAllowed[];
   /** 进度帧（本回合 onStep 产出；当前只收集，不在此投递渠道）。 */
   progress: readonly string[];
   /**
@@ -598,6 +1069,15 @@ export interface Session {
   /** 本回合后 Main 转录快照（Pi 原生转录即状态；当前只存内存）。 */
   transcript(): readonly DriverMessage[];
   send(text: string): Promise<TurnResult>;
+  /**
+   * 唤醒入口（会话状态变化 → 模型把话带给用户）：把一条宿主事实交给 Main 驱动——
+   * 会话空闲时触发一个模型回合并取回它产出的正文；会话忙时事实入队、由当前回合负责。
+   * 出口四态见 WakeResult；驱动不支持唤醒（测试替身/一次性驱动）= unavailable。
+   * 驱动可唤醒但实例级会话还没建（重启后的第一次状态变化）= 本层补一次**零工具单回合**
+   * （coldWake；不然「重启对账」这类冷会话永远说不出话）。
+   * 本层只透传事实与回合截止（WAKE_TURN_MS：单次调用量级），不解释事实内容、不投递。
+   */
+  wake(factText: string): Promise<WakeResult>;
   tasks(): readonly TaskRecord[];
   /** 按本会话 scope 取任务；越权抛 TaskOwnershipError。 */
   getTask(taskId: string): TaskRecord;
@@ -605,6 +1085,20 @@ export interface Session {
 
 const DEFAULT_MAIN_TURN_MS = 300_000;
 const DEFAULT_WORKER_TURN_MS = 180_000;
+/**
+ * 唤醒回合的界（2026-11-19 复核 F1）：唤醒 = **单次模型调用量级**（喂事实 → 模型说一句 →
+ * 取正文），不是含工具循环的业务回合——一审用 mainTurnMs（缺省 300s）当界，一次卡住的
+ * 唤醒会把会话链按住 5 分钟（用户消息同链等待，与「随时能接管」冲突）。
+ * 没有现成的 runtime 常量可复用（mainTurnMs 300s / workerTurnMs 180s 都是业务回合量级），
+ * 用模块内常量，不新增 runtime 配置键（导出只为守卫测试）。
+ */
+export const WAKE_TURN_MS = 60_000;
+/**
+ * A2（2026-11-18）：单回合执行 operation 上限的执行侧缺省（与 resource-policy 缺省 5
+ * 同值）。注入策略时读策略解析值（单一配置源：runtime 配置的缺省与解释归 resource-policy）；
+ * 未注入策略的纯内存会话（测试/嵌入）用本缺省——上界照常生效，不依赖策略注入。
+ */
+const DEFAULT_MAX_OPERATIONS_PER_TURN = 5;
 /** Worker 必须在 Main 截止前留出的收尾余量（Main 还要拿汇报生成用户回复）。 */
 const WORKER_DEADLINE_MARGIN_MS = 30_000;
 
@@ -618,10 +1112,16 @@ function userMessage(text: string): DriverMessage {
  * **清单没有行数据**（不含文件内容、不含宿主路径、不含 sha256，与 Main 清单同一硬
  * 边界，v8 §8）。Worker 只解析当前任务的绑定行（v8 §4），清单给出的是交办副本/任务文件
  * 面的引用面——Main 的源 fileId 不进 Worker 转录。
+ *
+ * `hint` = 引用方式（inline Worker 走 run_js.inputs；background 另见后台执行器的文件面
+ * 说明）。缺省保持 inline 原文逐字节不变。
  */
-export function renderWorkerFileManifest(files: readonly TurnFileRef[]): string {
+export function renderWorkerFileManifest(
+  files: readonly TurnFileRef[],
+  hint = '以下文件已随任务交付；处理文件时用 run_js 的 inputs 按 fileId 引用',
+): string {
   return [
-    '[本任务文件清单]（机械事实：以下文件已随任务交付；处理文件时用 run_js 的 inputs 按 fileId 引用）',
+    `[本任务文件清单]（机械事实：${hint}）`,
     ...files.map((file) => manifestLineOf(file)),
   ].join('\n');
 }
@@ -631,27 +1131,161 @@ export function renderWorkerFileManifest(files: readonly TurnFileRef[]): string 
  * `answer` = 用户对上一次待办问题的补答（waiting_user 续跑回合），原文交给 Worker——
  * 每个后台回合都是新 Worker（不带上一回合转录），补答不随委派交给执行端就等于丢失。
  */
+/**
+ * 能力快照标题下的事实（2026-11-19 模型可见面收口）：**不再承诺「每个 operation 标注
+ * 估时与重量」**——重量/估时是内部度量（用户听不懂、模型拿它只会错误估计），已从委派
+ * 清单里去掉；这里只陈述 N 次执行与 N 倍等待/失败面的机械关系（原 A1 语义保留）。
+ */
+export const WORKER_SNAPSHOT_COST_NOTE =
+  '一次任务发起 N 次执行，等待与失败面按 N 倍增长；控制执行次数。';
+
+/** 终态集合（窗口内落定判定）。waiting_user 不是终态——等待接续仍属后台推进。 */
+const SETTLED_TASK_STATUSES: ReadonlySet<string> = new Set([
+  'cancelled',
+  'completed',
+  'failed',
+  'timed_out',
+  'unexecuted',
+]);
+
+/**
+ * 确认续跑的「本次任务」正文（S3，2026-11-20）：用户明确确认后，宿主从底账提案组装这段文本，
+ * **直接顶替原始交办 prose 作为委派的本次任务**，原始交办 prose（含被用户改掉的旧值）让位。
+ *
+ * 根因（真模型 live 验收）：续跑回合 Worker 拿原始交办 prose 重跑 prepare（13/14 个回合），
+ * 且拿的是最早那份交办原文的旧值（原话 b=2，已确认写进提案的是 b=9）。把已确认提案的载荷
+ * 原文顶成本次任务后，Worker 直接对已确认提案提交，旧值没有机会覆盖已确认值。
+ * 只写正向动作「提交这份已确认提案」，以已确认值（提案 args）为唯一任务内容；非确认回合
+ * （首轮 / 改口径 resume / 句柄过期）不走本函数，仍用原始交办 prose。
+ *
+ * 载荷随行（2026-11-19 live 修复）：续跑 Worker 是新会话、没有转录，提案参数**原文**
+ * （opaque：宿主不解析业务字段）逐字交回，Worker 原样照抄提交——摘要超 10 条会截断，
+ * 只给人话摘要会让 Worker 重编参数（漏 --records）撞执行层绑定校验。handle 不进委派。
+ * 缺省（旧记录没有参数）：只给摘要 + 提交指令，不编造载荷。
+ */
+export function renderConfirmationResumeFact(confirmation: {
+  summary: string;
+  operation?: string;
+  args?: Record<string, unknown>;
+}): string {
+  // 2026-11-20（S3 确认提案）：这段文本**直接作为委派的「本次任务」正文**，不是补充说明。
+  // 原始交办 prose（含被用户改掉的旧值 b=2）不进这次委派；本次任务就是已确认提案的载荷原文。
+  // 只写正向指令「提交这份已确认提案」，不写「不是重新准备 / 不要重新生成提案」这类否定话术：
+  // 否定词本身就成了 prepare 线索（真模型 13/14 个续跑先重跑 prepare），且属于 A 类提示补丁。
+  const head = `提交上一轮已确认的提案（摘要：${confirmation.summary}）。`;
+  if (confirmation.args === undefined) {
+    return `${head}\n按已确认的提案直接提交。`;
+  }
+  // 参数按不透明数据处理：只序列化，不排序、不裁剪（值逐字节照抄才是机械事实）。
+  // 2026-11-21（独立审查 major）：原句「不要省略或改写任何参数」与 op_* 工具面**互斥**——
+  // 提案参数是执行层原名（`--collection` 等），工具面只收业务字段名（`collection`），
+  // 照字面不改写会被 assertOpToolArgs 确定性拒绝。改为：**值不改、字段名按工具声明转换**，
+  // 并明确「清单里没有的字段不要提交」（hostOnly 参数不在工具声明里）。
+  // 不带 operation 名——提交用哪个 operation 由委派清单（含带 --confirmation 的 commit）自己说清。
+  const proposal = JSON.stringify({ args: confirmation.args });
+  return [
+    head,
+    '下面是已确认提案的调用参数原文（宿主逐字持有，值不要改）：字段名按工具声明转换'
+      + '（工具面用业务字段名、不带 `--` 前缀）；工具声明里没有的字段不要提交。',
+    proposal,
+  ].join('\n');
+}
+
+/**
+ * 句柄过期的续跑事实块（2026-11-19 owner 口径修正）：用户确认时上一份提案已过期——**不判失败、
+ * 不结束任务**，接续一个回合让 Worker 重新生成同一提案（内容没变就照原样再提一次，不要擅自
+ * 改参数）。只含机械指令，不含句柄（Worker 永远看不到凭据）。
+ */
+export function renderConfirmationExpiredFact(): string {
+  return '上一份提案已过期；请重新生成同一提案（内容没变就照原样再提一次，不要擅自改参数）。';
+}
+
+/**
+ * 委派清单投影（模型可见面收口，2026-11-19；2026-11-20 再收口）：Worker 只拿**选对操作、
+ * 填对参数**所需——operation 名、参数名、required、payload.schema（输入形状）与 label
+ * （一句业务说明）。**去掉 weight / estimatedSeconds / effects / style 派生的 type /
+ * long_running 等实现细节**：这些字段既不帮模型选操作也不帮它填参数（long_running 的
+ * `accepted`/`wait` 机制由宿主按完整清单机械裁决，不靠模型读字样）。字段按白名单逐项
+ * 保留，未来契约新增字段不会自动漏进委派。
+ */
+export function workerDelegationManifest(manifest: CapabilityManifest): CapabilityManifest {
+  return {
+    contractVersion: manifest.contractVersion,
+    operations: manifest.operations.map((operation) => ({
+      name: operation.name,
+      ...(operation.label === undefined ? {} : { label: operation.label }),
+      // 参数白名单：去掉 hostOnly（机制参数不进调用方面）；payload 保留输入形状。
+      // 名字去掉执行层的 `--` 前缀——调用方只认业务字段名，宿主负责翻回执行层形态。
+      args: operation.args
+        .filter((arg) => arg.hostOnly !== true)
+        .map((arg) => ({
+          name: arg.name.replace(/^--/, ''),
+          required: arg.required,
+          ...(arg.payload === undefined ? {} : { payload: arg.payload }),
+        })),
+    })),
+  };
+}
+
 export function renderWorkerDelegation(input: {
   task: string;
   manifest: CapabilityManifest;
   skills?: readonly WorkerSkill[];
   files?: readonly TurnFileRef[];
+  /** 文件引用方式（缺省 = inline run_js 原文；background 传执行层文件参数口径）。 */
+  fileManifestHint?: string;
   answer?: string;
+  /**
+   * 长任务续跑（契约 v4）：把已受理 operation 的终态结果原样交给 Worker（形状只含
+   * status/summary/files/logs；文件只有 fileId，没有路径）。
+   */
+  resumedOperation?: { operationId: string; operation: string; outcome: unknown };
+  /**
+   * 续跑注记（契约 v4；owner 2026-11-19）：显式告诉 Worker「这是续跑、之前发生了什么」，
+   * 防止它重复发起同一个操作。缺省空串 = 拼接结果逐字节不变（普通首轮/接续）。
+   */
+  resumeNote?: string;
+  /**
+   * 句柄过期的续跑事实块（2026-11-19 owner 口径修正）：上一份提案已过期，宿主接续一个回合
+   * 让 Worker 重新生成同一提案（内容没变就照原样再提一次，不要擅自改参数）。只含机械指令，
+   * 不含句柄。缺省 undefined = 拼接逐字节不变。
+   */
+  confirmationExpiredFact?: string;
 }): string {
   const parts = [
-    '## 本次任务（宿主委派）',
+    '## 本次任务',
     input.task,
     '',
-    '## 能力快照（本轮唯一可执行面：只能调用这里登记的 operation）',
+    '## 可调用的操作（只能调用这里列出的操作名）',
+    WORKER_SNAPSHOT_COST_NOTE,
     '```json',
-    JSON.stringify(input.manifest, null, 2),
+    JSON.stringify(workerDelegationManifest(input.manifest), null, 2),
     '```',
   ];
   if (input.answer !== undefined && input.answer.trim() !== '') {
     parts.push('', '## 用户补充（对上一次待办问题的答复）', input.answer);
   }
+  if (input.confirmationExpiredFact !== undefined && input.confirmationExpiredFact.trim() !== '') {
+    parts.push('', '## 写确认续跑', input.confirmationExpiredFact);
+  }
   if (input.files !== undefined && input.files.length > 0) {
-    parts.push('', renderWorkerFileManifest(input.files));
+    parts.push('', input.fileManifestHint === undefined
+      ? renderWorkerFileManifest(input.files)
+      : renderWorkerFileManifest(input.files, input.fileManifestHint));
+  }
+  if (input.resumedOperation !== undefined) {
+    if (input.resumeNote !== undefined && input.resumeNote !== '') {
+      parts.push('', input.resumeNote);
+    }
+    parts.push(
+      '',
+      '## 长任务结果（原样事实）',
+      '此前交办的那件事已在后台办完；结果如下。文件只给 fileId——用 run_js 的 inputs 按 fileId 读取，不要猜路径。',
+      '```json',
+      JSON.stringify(input.resumedOperation, null, 2),
+      '```',
+      '据此核对并汇报最终事实。',
+    );
   }
   for (const skill of input.skills ?? []) {
     parts.push('', `## 域技能：${skill.name}`, '', skill.content);
@@ -721,6 +1355,100 @@ const RESULT_UNKNOWN_MESSAGE =
 const OPERATION_IN_PROGRESS_MESSAGE =
   '这次操作正在执行中，本次没有重复发起；请以已有执行记录为准，不要并发重试。';
 
+/**
+ * A2 同回合拒话术（2026-11-18）：存在本回合发放、尚未消费的待确认提案时，同一回合内
+ * 再发起非只读 operation 一律在**发起前**拒绝。旧纪律只挡句柄透传（同回合 commit 仍会
+ * 打到执行层的 CONFIRMATION_NOT_FOUND）；现在以工具错误如实告知模型等用户下一回合表态
+ * ——不发起执行、不落执行事实，宿主不判断用户是否在确认。
+ */
+export const SAME_TURN_CONFIRMATION_PENDING_MESSAGE =
+  '待确认提案已生成：需要用户在下一回合确认后才能提交；本回合不再发起新的执行。';
+
+/**
+ * 数字任务引用拒答（2026-11-20 live 缺陷 P1）：`#N`/裸数字是已退役的历史兼容写法，
+ * 任务编号不进模型可见面，模型只能凭空编数字 → 查到错任务；在 task_confirm/task_cancel
+ * 上就是**操作错对象**。确定性拒绝并给可行动下一步（不含内部机制词），不猜编号映射。
+ */
+export const NUMERIC_TASK_REF_MESSAGE =
+  '任务引用要填任务清单里的那串标识（taskId），不要用 #数字 或纯数字；'
+  + '先留空引用查一下本会话任务，再用清单里的 taskId 查。';
+
+/** 写操作提案落底账时的机械 missing 条目（waiting_user 形状要求 missing 非空；不编造业务原因）。 */
+const CONFIRMATION_PENDING_MISSING = '用户确认';
+
+/**
+ * 「不算真实失败」的失败码（owner 2026-11-19，判据兜底）：**同回合已存在提案（needs_confirmation）**
+ * 时，这些 failed/refused 只说明「同回合没法自己确认」或「模型误用了历史协议」，不应把整个
+ * 有提案的回合判死（那样用户既没拿到提案、也没法确认）：
+ *   · CONFIRMATION_REQUIRED —— 同回合 commit 没有句柄（预期：句柄下一回合才透传）；
+ *   · PROPOSAL_REFUSE / PROPOSAL_UNKNOWN_FIELD / PROPOSAL_TOKEN_UNTRUSTED —— 模型去用历史
+ *     提案协议（自己造载荷文件、凭记忆拼提交 token）被执行层拒；
+ *   · CALL_REFUSE —— 结构化调用形状被拒（同一「模型用错协议」面）。
+ * 出现任何**其它** failed/refused（GATE_REFUSE / COLLECTION_NOT_FOUND / …）仍是真实失败。
+ * 「仅当同回合已有提案」由调用点结构性保证（selfConfirmBlockedRoundOf 先找到提案才用本集合）。
+ */
+const SAME_TURN_TOLERATED_FAILURE_CODES: ReadonlySet<string> = new Set([
+  'CONFIRMATION_REQUIRED',
+  'PROPOSAL_REFUSE',
+  'PROPOSAL_UNKNOWN_FIELD',
+  'PROPOSAL_TOKEN_UNTRUSTED',
+  'CALL_REFUSE',
+]);
+
+/**
+ * A2 单回合 operation 上限话术：如实报数（已发起 N 次 / 上限 M），不是静默失败。
+ * 这是资源边界，不是计划门：不判断业务，只数本回合已发起的执行次数。
+ */
+export function turnOperationLimitMessage(limit: number, used: number): string {
+  return `本回合已发起 ${used} 次执行，达到单回合上限 ${limit}：本回合不再发起新的执行；如有需要，请等用户下一回合再继续。`;
+}
+
+/**
+ * 本回合的一条执行事实（判定与审计同源）。
+ * `args` 只用于**「同对象」判据**（成功后重复写尝试的归类，对象抽取复用 A2b 锁的
+ * `retryObjectOf`）——不进底账、不进模型/用户可见面。
+ */
+export interface RecordedExecution {
+  operation: string;
+  outcome: ExecutionOutcome;
+  dispatchKey?: string;
+  args?: Record<string, unknown>;
+  /**
+   * needs_confirmation 提案调用的参数原文（不透明数据；宿主不解析业务字段）。随
+   * 提案结局带进底账（PendingConfirmation.args）——确认续跑的新 Worker 没有上一轮
+   * 转录，只给摘要时只能重编参数（live 实测撞执行层绑定校验）。非提案条目不携带。
+   */
+  proposalArgs?: Record<string, unknown>;
+}
+
+/** 一条执行事实的机械描述（对象名复用 A2b 对象抽取；取不到对象时只给 operation）。 */
+function describeRecorded(entry: RecordedExecution): string {
+  const object = retryObjectOf(entry.args ?? {});
+  return object === undefined ? entry.operation : `${entry.operation}（${object}）`;
+}
+
+/**
+ * 部分完成的原因文本（2026-11-19 owner 第二轮；纯机械事实，不判语义、不新增状态）：
+ * 逐项写「哪件成了、哪件没成」——成功的写（operation + 对象）与成功后**另一个写**的失败
+ * （执行层 message 照录）。终态仍是既有 `failed`，该文本进 failure_reason（`npm run tasks`
+ * 详情/交付件可逐项核对）；用户可见通知仍按既有失败话术，不由本函数拼业务措辞。
+ */
+function partialCompletionReason(input: {
+  completed: readonly RecordedExecution[];
+  failed: readonly RecordedExecution[];
+}): string {
+  const done = [...new Set(input.completed.map(describeRecorded))].join('、');
+  const failed = input.failed.map((entry) => {
+    const outcome = entry.outcome;
+    // 执行层 message 原样照录；只去掉句末重复的句号（外层统一收尾一个「。」）。
+    const raw = outcome.status === 'failed' || outcome.status === 'refused' ? outcome.error.message ?? '' : '';
+    const message = raw.replace(/。+$/u, '');
+    const head = `${describeRecorded(entry)} 返回 ${outcome.status}`;
+    return message === '' ? head : `${head}：${message}`;
+  }).join('；');
+  return `没有全部办成：已完成 ${done}；未成功 ${failed}。`;
+}
+
 /** 认领结果的机械处置（runtime 内部；不对外暴露身份键细节）。 */
 interface OperationRunResult {
   outcome: ExecutionOutcome;
@@ -728,6 +1456,8 @@ interface OperationRunResult {
   executed: boolean;
   /** 必须是「待核对」：调用方不得当作成功，也不得自动重试。 */
   unresolved: boolean;
+  /** 本次绑定的稳定逻辑操作身份（长任务 accepted 的账行键；其它路径不消费）。 */
+  dispatchKey?: string;
 }
 
 /** 宿主取消（abort）引起的调用终止：不是「结果未知」的另一种写法。 */
@@ -895,9 +1625,334 @@ async function claimAndRunOperation(input: {
         outcome,
         executed: true,
         unresolved: outcome.status === 'failed' && outcome.error.code === 'result_unknown',
+        dispatchKey: claim.dispatchKey,
       };
     }
   }
+}
+
+/**
+ * 输入文件引用不可用的统一话术（run_js.inputs 与 task_run.inputFiles 同用）：
+ * 越权/不存在/pending/过期/字节缺失同码同话术——v8 §4 防存在性 oracle。
+ */
+const FILE_INPUT_UNAVAILABLE_MESSAGE =
+  '输入文件不可用：引用的文件不存在、未激活或已过期；请只用文件清单里给出的 fileId 引用输入文件。';
+
+/**
+ * fileId 数组参数解析（run_js.inputs 与 task_run.inputFiles 同形状同纪律）：
+ * 非数组 / 空 fileId 确定性拒绝；字符串逐个 trim（空串拒绝，不静默丢弃）。
+ */
+function parseFileIdList(raw: unknown, tool: string, field: string): string[] {
+  if (raw !== undefined && !Array.isArray(raw)) {
+    throw new Error(`${tool} 的 ${field} 必须是 fileId 数组。`);
+  }
+  return (raw ?? []).map((item) => {
+    const fileId = typeof item === 'string' ? item.trim() : '';
+    if (fileId === '') throw new Error(`${tool} 的 ${field} 含空 fileId（请用文件清单里给出的 fileId）。`);
+    return fileId;
+  });
+}
+
+/** run_js 的模型可见结果（v8 §2 形状；audit/runDir 等机械路径不进转录）。 */
+function runJsToolResult(output: RunJsOutput): Record<string, unknown> {
+  const result = {
+    exitCode: output.exitCode,
+    exitSignal: output.exitSignal,
+    stdout: output.stdout,
+    stderr: output.stderr,
+    stdoutTruncated: output.stdoutTruncated,
+    stderrTruncated: output.stderrTruncated,
+    inputs: output.audit.materializedInputs.map((item) => ({
+      fileId: item.fileId,
+      name: item.name,
+      materializedName: item.materializedName,
+    })),
+    outputs: output.outputs,
+  };
+  // CAP-01 ④：内存墙时工具结果也带同一句话术——模型不必猜 exit 134 的含义，且不会把
+  // 「处理完成」写进用户回复（用户可见层在 send() 出口同句覆盖，见 lastMemoryWall）。
+  return runJsMemoryExitOf(output) === null ? result : { ...result, error: RUN_JS_MEMORY_EXIT_MESSAGE };
+}
+
+/** 交付事实按 fileId 去重（回程登记 + 兜底扫描同池去重后，同一产物不重复进交付面）。 */
+function pushTurnFileOnce(list: TurnFileRef[], file: { fileId: string; name: string; bytes: number; deliverable?: boolean }): void {
+  if (list.some((existing) => existing.fileId === file.fileId)) return;
+  list.push({
+    fileId: file.fileId,
+    name: file.name,
+    bytes: file.bytes,
+    // 内部角色（如长任务大日志）显式标 false；用户产物缺省 = 可交付（字段不出现）。
+    ...(file.deliverable === false ? { deliverable: false } : {}),
+  });
+}
+
+/** 内存墙结构化事件（真实运行一次报一次；memo 命中不重复上报）。 */
+function noteRunJsMemoryExit(
+  output: RunJsOutput,
+  side: 'main' | 'worker',
+  onEvent: ((event: RunJsMemoryExitEvent) => void) | undefined,
+  taskId?: string,
+): void {
+  const exit = runJsMemoryExitOf(output);
+  if (exit === null) return;
+  onEvent?.({
+    runId: output.audit.runId,
+    side,
+    ...(taskId === undefined ? {} : { taskId }),
+    ...exit,
+  });
+}
+
+/** Worker 面 run_js 处理的依赖（inline 委派与 background 执行器同源装配）。 */
+export interface WorkerRunJsTurnDeps {
+  /** 未注入 = 工具面之外的调用（fail-closed；调用方负责工具面门控）。 */
+  executor?: RunJsExecutor;
+  /** 宿主持有的可信身份（模型参数里没有身份字段）。 */
+  scope: { principalId: string; sessionId: string };
+  /** 执行事实底账（Worker 的 run_js 是真实执行，必须进账）。 */
+  registry: Pick<TaskRegistry, 'noteExecution'>;
+  onFileRefUnavailable?: (reason: string) => void;
+  onRunJsLayoutUnsafe?: (event: RunJsLayoutUnsafeReport) => void;
+  onRunJsMemoryExit?: (event: RunJsMemoryExitEvent) => void;
+  /**
+   * 一次真实脚本执行结局（成功/失败/超时；abort 不报——取消由取消路径定性）。后台执行器
+   * 用它把 run_js 计入本回合执行事实（否则「只靠脚本完成」会被判未发起执行）。
+   */
+  onScriptOutcome?: (event: { runId: string; ok: boolean; timeout: boolean }) => void;
+}
+
+/**
+ * Worker 的 run_js 回合内执行（CAP-01 S2 ①；v8 §2/§4/§5）——**同一份实现**给 inline 委派
+ * （createSession）与后台单回合执行器（createTaskExecutor）共用：差异只在装配方传入的
+ * 任务作用域，任务作用域本身由调用方作为 taskId 传入。
+ *
+ *   · 输入只解析当前任务的绑定行（{side:'worker', taskId}）：Main 的源 fileId 不可读
+ *     （越权/不存在同码同话术，防存在性 oracle），Worker 只能读交办副本；
+ *   · 产物登记绑定当前任务（执行器侧 taskId → task_id 行），登记事实并入本任务交付收集；
+ *   · 幂等（v8 §5）用**委派级**进程内 Map（随委派创建、随委派丢弃；不用 attempt，
+ *     Pi 原生重试同键命中不重跑）。
+ */
+export function createWorkerRunJsTurn(
+  deps: WorkerRunJsTurnDeps,
+): (
+  taskId: string,
+  args: Record<string, unknown>,
+  memo: Map<string, RunJsOutput>,
+  taskFiles: TurnFileRef[],
+  signal?: AbortSignal,
+) => Promise<Record<string, unknown>> {
+  return async (taskId, args, memo, taskFiles, signal) => {
+    const executor = deps.executor;
+    if (executor === undefined) throw new Error(`Worker 工具面之外的调用：${RUN_JS_TOOL}`);
+    const code = typeof args.code === 'string' ? args.code : '';
+    if (code.trim() === '') throw new Error('run_js 缺少 code（CommonJS 脚本原文）。');
+    const inputs = parseFileIdList(args.inputs, 'run_js', 'inputs');
+    const memoKey = `${createHash('sha256').update(code, 'utf8').digest('hex')}:${[...inputs].sort().join('|')}`;
+    const hit = memo.get(memoKey);
+    if (hit !== undefined) return runJsToolResult(hit);
+    let output: RunJsOutput;
+    try {
+      output = await executor.runJs({
+        code,
+        ...(inputs.length > 0 ? { inputs } : {}),
+        scope: deps.scope,
+        taskId,
+        ...(signal === undefined ? {} : { signal }),
+      });
+    } catch (error) {
+      if (error instanceof FileRefUnavailableError) {
+        // 机械 reason 只进日志；模型与用户只见统一话术（防存在性 oracle，v8 §4）。
+        deps.onFileRefUnavailable?.(error.reason);
+        throw new Error(FILE_INPUT_UNAVAILABLE_MESSAGE);
+      }
+      if (error instanceof RunJsLayoutUnsafeError) {
+        // 布局收窄（symlink）：与 Main 同一确定性失败话术；Worker 面附任务归属进日志。
+        deps.onRunJsLayoutUnsafe?.({ ...error.event, side: 'worker', taskId });
+        throw new ToolUserError(RUN_JS_LAYOUT_UNSAFE_MESSAGE);
+      }
+      throw error;
+    }
+    memo.set(memoKey, output);
+    // 执行事实入账（2026-11-17 修）：Worker 的 run_js 是**真实执行**，必须进底账——完成判定
+    // （judgeReportedTask）只看执行事实，不进账会出现两种假象：①查询成功 + 脚本失败仍判
+    // completed；②只靠脚本完成的任务被判 unexecuted。
+    // 宿主超时杀进程组（killReason=timeout）同样是一次真实执行的失败结局（脚本没跑完）：
+    // 超时只杀脚本、Worker 仍有预算并正常汇报，不写失败事实会让「查询成功 + 脚本超时」判
+    // completed（假绿）。abort 不写——取消/宿主中止由取消路径定性，不能把取消说成失败。
+    const killReason = output.audit.killReason;
+    if (killReason !== 'abort') {
+      const scriptOk = killReason === undefined && output.exitCode === 0;
+      deps.onScriptOutcome?.({ runId: output.audit.runId, ok: scriptOk, timeout: killReason === 'timeout' });
+      deps.registry.noteExecution(taskId, {
+        requestId: `runjs_${output.audit.runId}`,
+        operation: RUN_JS_TOOL,
+        status: scriptOk ? 'completed' : 'failed',
+        dispatchKey: `runjs:${output.audit.runId}`,
+        ...(scriptOk
+          ? {}
+          : {
+              error: killReason === 'timeout'
+                ? {
+                    code: 'run_js_timeout',
+                    message: 'run_js 脚本超时被终止',
+                    retryable: false,
+                  }
+                : {
+                    code: 'run_js_failed',
+                    message: `run_js 脚本以非零退出码结束（exit=${String(output.exitCode)}）`,
+                    retryable: false,
+                  },
+            }),
+      });
+    }
+    // 内存墙事件：Worker 面没有用户可见回复（汇报经 Main 转述），但机械事实必须可查。
+    noteRunJsMemoryExit(output, 'worker', deps.onRunJsMemoryExit, taskId);
+    for (const file of output.outputs) {
+      pushTurnFileOnce(taskFiles, file);
+    }
+    return runJsToolResult(output);
+  };
+}
+
+/**
+ * 长任务续跑准备（契约 v4；owner 2026-11-19）：wait 返回的 completed 结果与普通 completed
+ * 走**同一套回程登记**——
+ *   · data.files（执行层产出的输出文件）→ 任务文件桥 registerReturnedFiles（任务作用域、
+ *     去重、剥离 path/base64）；Worker 只见 fileId/name/bytes；
+ *   · data.logs（可选）→ 小日志（≤4KB）内联进结果；大日志登记成**任务文件**
+ *     （deliverable:false，内部可读），Worker 只见 fileId；{name,fileId} 形状原样保留；
+ *   · 输出形状只保留 summary/files/logs —— 任何绝对路径/内联字节都不会进入 Worker 转录。
+ * 未注入文件桥时文件只按 unavailable 标记（不给 path、不伪造 fileId）。
+ * 事件 execution_wait_files_registered{operationId, files, logsFileized} 由本函数发。
+ */
+async function prepareResumedLongTask(
+  resumed: ResumedOperation,
+  bridge: TaskExecutionBridge | undefined,
+  onEvent: ((event: ExecutionEvent) => void) | undefined,
+  onSkip: ((reason: string) => void) | undefined,
+  taskFiles: TurnFileRef[],
+): Promise<ExecutionOutcome> {
+  const raw = resumed.outcome;
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    // 适配器违约（wait 没有返回执行契约形状）：如实落失败，不猜内容。
+    return {
+      status: 'failed',
+      error: { code: 'EXECUTION_BAD_RESULT', message: '等待返回的结果格式不对。' },
+    };
+  }
+  const outcome = raw as ExecutionOutcome;
+  if (outcome.status !== 'completed') return outcome;
+  // 批量写逐条结果（若执行层在长任务回执里也给了）原样随结果保留——不因文件重排丢失。
+  const items = outcome.items === undefined ? {} : { items: outcome.items };
+  const data = outcome.data;
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+    return { status: 'completed', data: { files: [], logs: [] }, ...items };
+  }
+  const record = data as Record<string, unknown>;
+  const fileEntries = Array.isArray(record.files) ? record.files : [];
+  const logs = Array.isArray(record.logs) ? record.logs : [];
+
+  const inlineLogs: Array<Record<string, unknown>> = [];
+  const largeLogEntries: Array<{ name: string; content: string }> = [];
+  const fileIdLogs: Array<Record<string, unknown>> = [];
+  for (let index = 0; index < logs.length; index += 1) {
+    const entry = logs[index];
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const log = entry as { name?: unknown; text?: unknown; fileId?: unknown };
+    const name = typeof log.name === 'string' && log.name.trim() !== '' ? log.name : `log-${index + 1}`;
+    if (typeof log.fileId === 'string' && log.fileId !== '') {
+      fileIdLogs.push({ name, fileId: log.fileId });
+      continue;
+    }
+    if (typeof log.text !== 'string') continue;
+    if (Buffer.byteLength(log.text, 'utf8') > LONG_TASK_LOG_INLINE_MAX_BYTES) {
+      // 大日志：登记成任务文件（内部角色），Worker 只拿 fileId。
+      largeLogEntries.push({
+        name: `${name.replace(/[/\\]/g, '_')}.log`,
+        content: Buffer.from(log.text, 'utf8').toString('base64'),
+      });
+    } else {
+      inlineLogs.push({ name, text: log.text });
+    }
+  }
+
+  let fileViews: unknown[];
+  let largeLogViews: unknown[];
+  if (bridge !== undefined && (fileEntries.length > 0 || largeLogEntries.length > 0)) {
+    // 日志条目显式标 internal（deliverable:false）——登记面按角色打标，不靠文件名判断。
+    const entries = [
+      ...fileEntries,
+      ...largeLogEntries.map((entry) => ({ ...entry, deliverable: false })),
+    ];
+    const registered = await bridge.registerReturnedFiles(entries);
+    fileViews = registered.entries.slice(0, fileEntries.length).map(sanitizedFileRef);
+    largeLogViews = registered.entries.slice(fileEntries.length).map(sanitizedFileRef);
+    const filesRegistered = fileViews.filter((view) => isRegisteredView(view)).length;
+    const logsFileized = largeLogViews.filter((view) => isRegisteredView(view)).length;
+    for (const file of registered.files) {
+      // 大日志是内部角色：交付面按 deliverable 过滤，不进用户附件。
+      pushTurnFileOnce(taskFiles, file);
+    }
+    onEvent?.({
+      event: 'execution_wait_files_registered',
+      operationId: resumed.operationId,
+      files: filesRegistered,
+      logsFileized,
+    });
+  } else {
+    // 没有文件桥：绝不把路径/字节交给 Worker（也绝不伪造 fileId）。
+    if (fileEntries.length > 0 || largeLogEntries.length > 0) onSkip?.('long_task_no_file_bridge');
+    fileViews = fileEntries.map(() => ({ unavailable: 'no_file_bridge' }));
+    largeLogViews = largeLogEntries.map((entry) => ({ name: entry.name, unavailable: 'no_file_bridge' }));
+  }
+
+  return {
+    status: 'completed',
+    data: {
+      ...(typeof record.summary === 'string' ? { summary: record.summary } : {}),
+      files: fileViews,
+      logs: [...inlineLogs, ...fileIdLogs, ...largeLogViews],
+    },
+    ...items,
+  };
+}
+
+/**
+ * 续跑注记（owner 2026-11-19）：三种机械情形分别说清——正常唤醒 / 宿主重启后唤醒 /
+ * 失败唤醒。目的只有一个：让 Worker 知道「上一回合已经发起过这个操作」，不要重复发起。
+ * 只陈述账本事实（operation/operationId/失败原因），不改写用户任务原文。
+ */
+export function longTaskResumeNote(resumed: ResumedOperation, outcome: ExecutionOutcome): string {
+  const operation = resumed.operation;
+  const operationId = resumed.operationId;
+  if (outcome.status === 'failed' || outcome.status === 'refused') {
+    const reason = outcome.error.message.trim() !== '' ? outcome.error.message.trim() : '对方没给出原因';
+    return `[续跑] 你发起的操作 ${operation}（id ${operationId}）失败了：${reason}。不要盲目重试；如实说明并向用户提出可选项。`;
+  }
+  if (resumed.restarted === true) {
+    return `[续跑·上下文重建] 你在本任务上一回合发起了操作 ${operation}（id ${operationId}），这一回合的上下文不在了，现有的只是重建后的记录。下面只有账本事实与文件；以它们为准，不要重复发起同一操作。`;
+  }
+  return `[续跑] 你在本任务上一回合发起了操作 ${operation}（id ${operationId}），它现在已完成；结果见下/见文件。不要重复发起同一操作，先核对结果。`;
+}
+
+function isRegisteredView(view: unknown): boolean {  return view !== null && typeof view === 'object' && typeof (view as { fileId?: unknown }).fileId === 'string';
+}
+
+/** 文件/日志引用只保留宿主登记事实（fileId/name/bytes）；其余字段（path/base64…）一律剥掉。 */
+function sanitizedFileRef(entry: unknown): Record<string, unknown> {
+  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+    return { unavailable: 'not_registered' };
+  }
+  const record = entry as { fileId?: unknown; name?: unknown; bytes?: unknown; unavailable?: unknown };
+  const fileId = typeof record.fileId === 'string' && record.fileId !== '' ? record.fileId : undefined;
+  return {
+    ...(fileId === undefined ? {} : { fileId }),
+    ...(typeof record.name === 'string' ? { name: record.name } : {}),
+    ...(typeof record.bytes === 'number' ? { bytes: record.bytes } : {}),
+    ...(fileId !== undefined
+      ? {}
+      : { unavailable: typeof record.unavailable === 'string' ? record.unavailable : 'not_registered' }),
+  };
 }
 
 export async function createSession(options: RuntimeOptions): Promise<Session> {
@@ -915,10 +1970,21 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     throw new Error(`允许集合不在能力快照里（fail-closed）：${missingAllowed.join('、')}`);
   }
   const allowed = new Set(options.allowedOperations);
+  // 模型可见面收口（2026-11-19，B 类最小边界）：执行层声明 model_visible:false 的
+  // operation（历史协议/内部替代路径）**不进模型可见面**——从允许集合里剔除：既不出现在
+  // Worker 委派清单，模型凭记忆硬调它也在发起执行前被确定性拒绝（走 OPERATION_NOT_PERMITTED_MESSAGE，
+  // 零执行事实、不提 operation 名）。只过滤清单不够：允许集合才是执行面边界。
+  for (const operation of manifest.operations) {
+    if (operation.model_visible === false) allowed.delete(operation.name);
+  }
   const workerManifest: CapabilityManifest = {
     contractVersion: manifest.contractVersion,
     operations: manifest.operations.filter((operation) => allowed.has(operation.name)),
   };
+  /** 契约 v4：只有声明 long_running 的 operation 可以返回 accepted（否则协议违约 fail-closed）。 */
+  const longRunningOperations = new Set(
+    workerManifest.operations.filter((operation) => operation.long_running === true).map((operation) => operation.name),
+  );
 
   const registry = options.taskRegistry ?? createTaskRegistry();
   /** U3：只读 operation 集合（装配方声明；缺省保守为空 = 一律按可能有副作用处理）。 */
@@ -933,6 +1999,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
    *   · **下一回合**的 execute_operation 才把句柄与本回合用户原话原样透传给执行层；
    *   · 执行层返回后清除（不判断回执是不是「接受」——那是执行层的语义）。
    * 键 = 会话自身身份 (principalId, sessionId)：一个 createSession 一张表，不跨会话共享。
+   * 注意（2026-11-19 载荷修法的边界）：inline 面**没有显式确认动作**（确认与否由执行层
+   * 校验句柄），这条最小状态里没有「提案调用原文」，因此也**不渲染**续跑事实块——给不出
+   * 「用户已确认」这种话（那是替用户表态）。载荷随行只落在**底账提案 + task_confirm** 那条
+   * 显式确认路径上（见 PendingConfirmation.args / renderConfirmationResumeFact）。
    */
   let pendingConfirmation:
     | { handle: string; summary: string; expiresAt?: string; issuedTurn: number }
@@ -940,41 +2010,127 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   const mainTurnMs = options.mainTurnMs ?? DEFAULT_MAIN_TURN_MS;
   const workerTurnMs = options.workerTurnMs ?? DEFAULT_WORKER_TURN_MS;
   const policy = options.policy;
-  const dispatchMode: 'inline' | 'background' = options.dispatchMode ?? 'inline';
+  /**
+   * A2：单回合执行 operation 上限。注入策略时读策略解析值（缺省与解释归 resource-policy，
+   * 不在运行时重读 runtime 配置）；未注入策略时用执行侧同值缺省——上界照常生效。
+   */
+  const maxOperationsPerTurn = policy !== undefined
+    ? policy.snapshot().config.maxOperationsPerTurn
+    : DEFAULT_MAX_OPERATIONS_PER_TURN;
+  /**
+   * 大响应文件化阈值（2026-11-19）：注入策略时读策略解析值（单一配置源 = resource-policy）；
+   * 未注入策略的纯内存会话用执行侧同值缺省——阈值照常生效，不依赖策略注入。
+   */
+  const oversizeDataBytes = policy !== undefined
+    ? policy.snapshot().config.oversizeDataBytes
+    : DEFAULT_OVERSIZE_DATA_BYTES;
+  /** A2：本回合已发起的执行次数（send 时清零；跨本回合全部委派合计）。 */
+  let operationsThisTurn = 0;
+  /**
+   * A2b：本回合内，执行层**没有明确说可重试**的失败对象，后续换参数再试一律不发起
+   * （E14 实测：同一集合窗口被拒后，模型换 `2026-10`/`W202610` 两种写法连撞、再换新任务
+   * 继续撞）。键 = operation + 对象参数（--collection/--topic）。
+   *
+   * **判据按 fail-safe 缺省**（owner 2026-11-18）：只有执行层**显式** `retryable === true`
+   * 才允许继续尝试；`false` 与**未声明**一律视为不可重试。理由是不确定场景下宁可停下来
+   * 报错、让人介入，也不能继续往下撞——打爆执行层就彻底没得用了。
+   * 宿主只执行执行层的声明，不判断业务——这不是计划门。
+   * 实现单源：`deterministic-retry-lock.ts`（与后台执行器同一份「键 + 记录 + 判定」）。
+   */
+  let retryLock = createDeterministicRetryLock();
+  /** 载荷型参数 lint 的本回合失败计数（键 = operation）；随回合清零（装信封失败不是执行事实）。 */
+  let payloadLintFailuresThisTurn = new Map<string, number>();
+  /** A2b 观测：本回合被拦下的重试（回合末随 TurnResult 交装配层落事件；不改回合结果）。 */
+  let retryBlockedThisTurn: TurnRetryBlock[] = [];
+  /** A2b 观测：本回合执行层声明可重试（瞬时故障）的失败。 */
+  let retryAllowedThisTurn: TurnRetryAllowed[] = [];
+  const taskDispatch: 'sync' | 'async' = options.taskDispatch ?? 'sync';
   const taskRunner = options.taskRunner;
-  if (dispatchMode === 'background' && taskRunner === undefined) {
-    throw new Error('background 派发需要注入 TaskRunner（装配方构造 runner；此处 fail-closed）。');
+  if (taskDispatch === 'async' && taskRunner === undefined) {
+    throw new Error('async 派发需要注入 TaskRunner（装配方构造 runner；此处 fail-closed）。');
   }
+  // B 切片：task_run 短等待窗口（单一配置源 = runtime 解析值；未走配置解析的纯内存会话同值缺省）。
+  const taskRunWaitMs = options.taskRunWaitMs ?? DEFAULT_RUNTIME_CONFIG.taskRunWaitMs;
+  const taskRunClock = options.taskRunClock ?? SYSTEM_RUNTIME_CLOCK;
 
   /** 可信 scope：来自装配层渠道事实，绝不来自模型输入（工具参数里也不收身份字段）。 */
   const scope: TaskScope = { principalId: options.principalId, sessionId: options.sessionId };
 
   /**
-   * 任务引用解析：只在**本会话 scope 化列表**内把 `#编号`/taskId 解析成 taskId——
-   * 跨会话/跨 principal 的编号自然表现为「找不到」（与不存在同一 TaskOwnershipError，不泄露存在性）。
+   * 任务引用解析：只接受 taskId（任务清单里的那串标识），**不再兼容历史 `#编号`/裸编号**
+   * （2026-11-20 live 缺陷 P1：编号不进模型可见面，模型只能凭空编数字 → 查到错任务，
+   * 在 task_confirm/task_cancel 上就是操作错对象）。数字引用确定性拒绝并给可行动下一步，
+   * 不做任何编号映射；跨会话/跨 principal 的 taskId 仍按「找不到」处理（不泄露存在性）。
    */
   function resolveTaskId(ref: string): string {
     const wanted = ref.trim();
-    const hit = registry.list(scope).find((task) => (task.taskNo !== undefined && (`#${task.taskNo}` === wanted || String(task.taskNo) === wanted)) || task.taskId === wanted);
+    if (/^#?\d+$/u.test(wanted)) throw new Error(NUMERIC_TASK_REF_MESSAGE);
+    const hit = registry.list(scope).find((task) => task.taskId === wanted);
     if (hit === undefined) throw new TaskOwnershipError();
     return hit.taskId;
   }
 
   function refFromArgs(args: Record<string, unknown>): string {
     const ref = typeof args.ref === 'string' ? args.ref.trim() : '';
-    if (ref === '') throw new Error('缺少任务引用 ref（受理回执里的 #编号）。');
+    if (ref === '') throw new Error('缺少任务引用 ref（任务列表里的 taskId）。');
     return ref;
   }
 
-  /** 任务行只读投影：白名单字段，不含内部路径/租约/身份字段。 */
+  /**
+   * 底账投影（2026-11-20 收口）：**封闭种类 + 结构化原因码 + 机械清理的业务摘要**。
+   *
+   * 口径 = 末次决定性结果（与 write-outcome 同一把尺）：task.status 已是回合结局，
+   * 已完成的末尾执行之后的前序失败只留在 executions 里审计，**不得**再冒出 failureKind /
+   * summary——「倒序找第一个 failed/refused」会让 completed 任务同时带失败视图（真 bug）。
+   *
+   * 三种形状：
+   *   · 完成 / 在跑 / 等待 / 取消 → 空视图（无 failureKind / outcomeKind / summary）；
+   *   · 失败且末条决定性执行是 failed/refused → 封闭 failureKind（码表归类）+ 业务摘要
+   *     （摘要只经 cleanExecutorDiagnostic 机械清理：剥技术码/路径/机构自称，不按词表替换）；
+   *   · 失败但没有决定性失败执行（空汇报：registry.fail 无 failed execution）→ 封闭
+   *     outcomeKind='no_report'，不恢复 failureReason 自由文本。
+   * result_unknown / timed_out 各给封闭 failureKind，同样不给摘要。
+   */
+  type ProjectedFailureView = {
+    failureKind?: UserFacingFailureKind;
+    outcomeKind?: 'no_report';
+    summary?: string;
+  };
+  function failureViewOfTask(task: TaskRecord): ProjectedFailureView {
+    // 末次决定性结果不是失败：不给任何失败字段（completed 任务不得带 failureKind/summary）。
+    if (task.status !== 'failed' && task.status !== 'timed_out') return {};
+    if (task.reason === 'result_unknown') return { failureKind: 'unknown_result' };
+    if (task.status === 'timed_out') return { failureKind: 'timed_out' };
+    // 只看末条决定性执行（倒序找失败会跳过成功的末条，把 completed 误报成失败）。
+    const decisive = task.executions[task.executions.length - 1];
+    if (decisive !== undefined
+      && (decisive.status === 'failed' || decisive.status === 'refused')
+      && decisive.error !== undefined) {
+      const summary = cleanExecutorDiagnostic(decisive.error.message).replace(/\s+/gu, ' ').trim();
+      return {
+        failureKind: classifyFailure({ code: decisive.error.code }),
+        ...(summary === '' ? {} : { summary }),
+      };
+    }
+    // 失败但没有决定性失败执行（空汇报/无执行行）：封闭原因码，替代被丢掉的自由文本原因。
+    return { failureKind: 'executor_failed', outcomeKind: 'no_report' };
+  }
+
+  /**
+   * 任务行只读投影：白名单字段，不含内部路径/租约/身份字段，也不含拼装的 failureReason 自由文本。
+   * 任务编号（taskNo）不进投影——它是内部形态；指代任务用业务名（name）与不透明任务引用
+   * （taskId），够用即可，不发明新形态。编号仍留在底账/通知 payload/日志里对账。
+   */
   function statusView(task: TaskRecord): Record<string, unknown> {
+    const failure = failureViewOfTask(task);
     return {
       taskId: task.taskId,
-      taskNo: task.taskNo ?? null,
       name: task.name ?? deriveTaskName(task.request),
       status: task.status,
       ...(task.reason === undefined ? {} : { reason: task.reason }),
-      ...(task.pendingQuestion === undefined ? {} : { pendingQuestion: task.pendingQuestion }),
+      ...(failure.failureKind === undefined ? {} : { failureKind: failure.failureKind }),
+      ...(failure.outcomeKind === undefined ? {} : { outcomeKind: failure.outcomeKind }),
+      ...(task.pendingQuestion === undefined ? {} : { pendingQuestion: pendingQuestionView(task.pendingQuestion) }),
       requestIds: task.executions.map((execution) => execution.requestId),
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
@@ -983,15 +2139,32 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
 
   function taskStatus(args: Record<string, unknown>): unknown {
     const ref = typeof args.ref === 'string' ? args.ref.trim() : '';
-    if (ref === '') return { tasks: registry.list(scope).map(statusView) };
+    if (ref === '') {
+      // 列表默认只给最近的 N 条（新→旧）：一个用了两天的会话会有几十条历史任务，全量倒给模型
+      // 只会让它抓错对象（2026-11-19 live 实测：问 alpha 却去取 #20 的 documents 结果）。
+      const all = [...registry.list(scope)].sort((left, right) => (
+        left.createdAt === right.createdAt
+          ? ((right.taskNo ?? 0) - (left.taskNo ?? 0))
+          : (left.createdAt < right.createdAt ? 1 : -1)
+      ));
+      return {
+        tasks: all.slice(0, TASK_STATUS_LIST_LIMIT).map(statusView),
+        ...(all.length > TASK_STATUS_LIST_LIMIT
+          ? { total: all.length, truncated: all.length - TASK_STATUS_LIST_LIMIT }
+          : {}),
+      };
+    }
     return statusView(registry.get(resolveTaskId(ref), scope));
   }
 
   function taskResult(args: Record<string, unknown>): unknown {
     const task = registry.get(resolveTaskId(refFromArgs(args)), scope);
+    const failure = failureViewOfTask(task);
     return {
       ...statusView(task),
-      ...(task.failureReason === undefined ? {} : { failureReason: task.failureReason }),
+      // 失败摘要：仅末条决定性执行的业务原话，机械清理（剥码/路径/机构自称），不按词表替换；
+      // 前序失败只留 executions，completed 任务不带 summary。空汇报走 outcomeKind，无摘要。
+      ...(failure.summary === undefined ? {} : { summary: failure.summary }),
       // 结果存档：completed 走 complete() 的 resultText；background 终态走 archiveReply 的 replyText。
       replyText: task.replyText ?? null,
       resultText: task.resultText ?? null,
@@ -999,82 +2172,169 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         operation: execution.operation,
         status: execution.status,
         requestId: execution.requestId,
-        ...(execution.error === undefined ? {} : { error: execution.error }),
+        // 每条执行失败只给封闭种类 + 机械清理摘要，不给 error.code 技术码。
+        ...(execution.error === undefined
+          ? {}
+          : {
+            failureKind: classifyFailure({ code: execution.error.code }),
+            ...(() => {
+              const cleaned = cleanExecutorDiagnostic(execution.error!.message).replace(/\s+/gu, ' ').trim();
+              return cleaned === '' ? {} : { summary: cleaned };
+            })(),
+          }),
       })),
     };
   }
 
-  /** 取消：复用 runner.cancel，原样转述 CancelOutcome（requested≠cancelled），不宣称已取消。 */
-  function taskCancel(args: Record<string, unknown>, runner: TaskRunner): unknown {
+  /**
+   * 取消：复用 runner.cancel，原样转述 CancelOutcome（requested≠cancelled），不宣称已取消。
+   *
+   * 缺陷 A（2026-11-21 live，回合内终态观察）：requested 不再干等回复——有在飞回合时在
+   * taskRunWaitMs 窗口内轮询落定（waitForTaskSettled）；窗口内确认 cancelled（或其他终态）
+   * → ① 回执按真实结局说（确认了才说「已停止」，没确认仍说「已请求停止」——不冒进）；
+   * ② 终态记入本回合 collector（TurnResult.terminalObservedInTurn），装配层据此对随后的
+   * 状态变化唤醒做一次性抑制（用户已在本回合听到这件事，不再说第二遍）。超窗 → requested
+   * 照旧、不观察（终态在回合外落定，唤醒照发——用户终会得到下文）。无在飞回合的 requested
+   * （没有可中止的执行，没人会去确认）不等待，不阻塞回合。
+   */
+  async function taskCancel(
+    args: Record<string, unknown>,
+    runner: TaskRunner,
+    terminalObserved: TurnTerminalObservation[],
+  ): Promise<unknown> {
     const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
-    const outcome = runner.cancel(resolveTaskId(refFromArgs(args)), scope);
-    return { ...outcome, ...(reason === '' ? {} : { reason }) };
+    const taskId = resolveTaskId(refFromArgs(args));
+    // 回执带任务身份（2026-11-18，LS6 实测缺陷）：多任务并存时模型会引用错任务，
+    // 旧的取消回执只有状态、看不出取消了谁，错误被掩盖。这里附上被取消任务的业务名与请求原文
+    // 片段——纯机械事实，供模型/用户当场核对；编号属内部形态不进回执（底账仍有，对账用）。
+    let identity: { taskName?: string; taskRequest?: string; taskCreatedAt?: string } = {};
+    try {
+      const row = registry.get(taskId, scope);
+      identity = {
+        ...(row.name === undefined ? {} : { taskName: row.name }),
+        taskRequest: row.request.length > 120 ? `${row.request.slice(0, 120)}…` : row.request,
+        taskCreatedAt: row.createdAt,
+      };
+    } catch {
+      // 不存在/越权：保持原行为（由 runner 给出确定性拒绝）。
+    }
+    const outcome = runner.cancel(taskId, scope);
+    // 缺陷 A：取消在本回合内落定的观察。queued/waiting_user 的取消由 runner 同步机械确认
+    // （outcome=cancelled）；running 的取消（requested）只在**有在飞回合**时等窗口——竞态
+    // 兜底先看一眼底账（请求与回合收尾几乎同时落定时 inFlight 已清、底账已终态）。
+    let observed: TurnTerminalKind | undefined;
+    let settledStatus: string | undefined;
+    if (outcome.outcome === 'cancelled') {
+      observed = 'cancelled';
+    } else if (outcome.outcome === 'requested' && taskRunWaitMs > 0) {
+      const settled = runner.inFlight().includes(taskId)
+        ? await waitForTaskSettled(taskId, taskRunWaitMs)
+        : undefined;
+      const statusNow = registry.get(taskId, scope).status;
+      settledStatus = settled?.status ?? (SETTLED_TASK_STATUSES.has(statusNow) ? statusNow : undefined);
+      observed = settledStatus === 'cancelled' || settledStatus === 'completed' || settledStatus === 'failed'
+        ? settledStatus
+        : undefined;
+    }
+    if (observed !== undefined) terminalObserved.push({ taskId, kind: observed });
+    // 观察到落定的取消 → 回执按真实结局说（确认了才说「已停止」；停成了别的结局（办完/失败）
+    // 也如实说「没停成」——不冒充已停）。未落定保持 requested 原样（不宣称已取消）。
+    const effective: Record<string, unknown> = observed === 'cancelled'
+      ? { outcome: 'cancelled', taskId }
+      : observed !== undefined
+        ? { outcome: 'terminal', taskId, status: settledStatus }
+        : { ...outcome };
+    // 给用户看的一句话：业务名 + 结果，按结果分三种说法。编号属内部工单腔，不进模型投影/
+    // 用户面；业务名足以让用户一眼确认"被停掉的是哪件事"（底账仍有编号，对账用）。
+    const label = identity.taskName ?? identity.taskRequest ?? '该任务';
+    const userMessage = effective['outcome'] === 'cancelled'
+      ? `已停止：${label}`
+      : effective['outcome'] === 'requested'
+        ? `已请求停止：${label}（还没确认停掉）`
+        : `没停成：${label} 已经办完了（当前状态：${effective['status']}）`;
+    return { ...effective, ...identity, userMessage, ...(reason === '' ? {} : { reason }) };
+  }
+
+  /**
+   * 「没有可确认/接续对象」时给模型的机械事实（措辞归模型）：kind 区分确认/接续，并附在跑
+   * 任务数——只看机械状态，不猜业务，也不生成用户话术（宿主不再替换模型文本）。
+   */
+  function noWaitingTargetFacts(kind: 'confirm' | 'resume'): Record<string, unknown> {
+    const runningTasks = registry.list(scope).filter(
+      (task) => task.status === 'running' || task.status === 'queued',
+    ).length;
+    return {
+      fact: kind === 'confirm' ? NO_WAITING_TARGET_FACT : NO_WAITING_RESUME_TARGET_FACT,
+      runningTasks,
+    };
   }
 
   /** 接续：复用 runner.resume，原样转述 ResumeOutcome（非 waiting_user 由 registry 状态机拒绝）。 */
   function taskResume(args: Record<string, unknown>, runner: TaskRunner): unknown {
     const answer = typeof args.answer === 'string' ? args.answer : '';
     if (answer.trim() === '') throw new Error('task_resume 缺少 answer：请写清对任务待办问题的答复。');
-    return runner.resume(resolveTaskId(refFromArgs(args)), { answer, scope });
+    const rawRef = typeof args.ref === 'string' ? args.ref.trim() : '';
+    // 引用可省略：本会话恰好一个等待中的任务时直接接续它（用户说「确认」时不该要求记编号）。
+    const waiting = registry.listWaiting(scope);
+    if (rawRef === '' && waiting.length === 0) {
+      // 没有可接续的对象：给模型机械事实，由它自己说（宿主不替换其文本）。
+      return { outcome: 'no_waiting_task', ...noWaitingTargetFacts('resume') };
+    }
+    const ref = rawRef !== ''
+      ? rawRef
+      : waiting.length === 1
+        ? waiting[0]!.taskId
+        : (() => {
+          throw new Error(`本会话有 ${waiting.length} 个等待中的任务，请用 ref 指明要接续哪一个（taskId）。`);
+        })();
+    const outcome = runner.resume(resolveTaskId(ref), { answer, scope });
+    // 指到了但不是等待中的任务：机械结局原样保留，另给同一份事实（措辞归模型）。
+    if (outcome.outcome === 'not_waiting') {
+      return { ...outcome, ...noWaitingTargetFacts('resume') };
+    }
+    return outcome;
   }
 
   /**
-   * 输入文件引用不可用的统一话术（run_js.inputs 与 task_run.inputFiles 同用）：
-   * 越权/不存在/pending/过期/字节缺失同码同话术——v8 §4 防存在性 oracle。
+   * 显式确认（2026-11-19 owner 拍板）：用户明确表示「按这版提交」时用它——宿主从底账取该任务
+   * 的待确认提案，把任务接续下去，并把确认凭据（句柄 + 用户原话）交给执行端。语义与「下一条
+   * 消息默认就是确认」完全不同：拿不准就问，宿主不做意图推断。机械结局原样转述（调用方业务化）。
    */
-  const FILE_INPUT_UNAVAILABLE_MESSAGE =
-    '输入文件不可用：引用的文件不存在、未激活或已过期；请只用文件清单里给出的 fileId 引用输入文件。';
+  function taskConfirm(args: Record<string, unknown>, runner: TaskRunner): unknown {
+    const rawRef = typeof args.ref === 'string' ? args.ref.trim() : '';
+    // 引用可省略：本会话恰好一个「等待确认的提案」时直接用它（用户说「确认」时不该要求记编号）。
+    // 只认带 confirmation 的等待行——等补充信息的任务不算「待确认提案」。
+    const waitingProposals = registry.listWaiting(scope).filter(
+      (task) => task.pendingQuestion?.confirmation !== undefined,
+    );
+    if (rawRef === '' && waitingProposals.length === 0) {
+      // 没有可确认的对象：给模型机械事实，由它自己说（宿主不替换其文本）。
+      return { outcome: 'no_waiting_task', ...noWaitingTargetFacts('confirm') };
+    }
+    const ref = rawRef !== ''
+      ? rawRef
+      : waitingProposals.length === 1
+        ? waitingProposals[0]!.taskId
+        : (() => {
+          throw new Error(`本会话有 ${waitingProposals.length} 个等待确认的提案，请用 ref 指明要提交哪一个（taskId）。`);
+        })();
+    // userText = 本回合用户原话（原样，不改写）；只在确认路径交给执行端。
+    const outcome = runner.confirm(resolveTaskId(ref), { userText: currentUserText, scope });
+    // 过期不是失败：宿主已接续一个回合重新生成提案（任务仍回 waiting_user）；给模型一句业务化
+    // 的机械事实（含新提案卡的下半句，见 confirmationExpiredMessage）。
+    if (outcome.outcome === 'expired') {
+      return { ...outcome, userMessage: confirmationExpiredMessage() };
+    }
+    // 指到了但不是在等确认（跑完了/在等补充）：机械结局原样保留，另给同一份事实。
+    if (outcome.outcome === 'not_waiting' || outcome.outcome === 'no_confirmation') {
+      return { ...outcome, ...noWaitingTargetFacts('confirm') };
+    }
+    return outcome;
+  }
 
   /** 文件工具的 scope（宿主持有的可信身份；模型参数里没有身份字段）。 */
   const fileScope = { principalId: options.principalId, sessionId: options.sessionId };
 
-  /**
-   * fileId 数组参数解析（run_js.inputs 与 task_run.inputFiles 同形状同纪律）：
-   * 非数组 / 空 fileId 确定性拒绝；字符串逐个 trim（空串拒绝，不静默丢弃）。
-   */
-  function parseFileIdList(raw: unknown, tool: string, field: string): string[] {
-    if (raw !== undefined && !Array.isArray(raw)) {
-      throw new Error(`${tool} 的 ${field} 必须是 fileId 数组。`);
-    }
-    return (raw ?? []).map((item) => {
-      const fileId = typeof item === 'string' ? item.trim() : '';
-      if (fileId === '') throw new Error(`${tool} 的 ${field} 含空 fileId（请用文件清单里给出的 fileId）。`);
-      return fileId;
-    });
-  }
-
-  /** run_js 的模型可见结果（v8 §2 形状；audit/runDir 等机械路径不进转录）。 */
-  function runJsToolResult(output: RunJsOutput): Record<string, unknown> {
-    const result = {
-      exitCode: output.exitCode,
-      exitSignal: output.exitSignal,
-      stdout: output.stdout,
-      stderr: output.stderr,
-      stdoutTruncated: output.stdoutTruncated,
-      stderrTruncated: output.stderrTruncated,
-      inputs: output.audit.materializedInputs.map((item) => ({
-        fileId: item.fileId,
-        name: item.name,
-        materializedName: item.materializedName,
-      })),
-      outputs: output.outputs,
-    };
-    // CAP-01 ④：内存墙时工具结果也带同一句话术——模型不必猜 exit 134 的含义，且不会把
-    // 「处理完成」写进用户回复（用户可见层在 send() 出口同句覆盖，见 lastMemoryWall）。
-    return runJsMemoryExitOf(output) === null ? result : { ...result, error: RUN_JS_MEMORY_EXIT_MESSAGE };
-  }
-
-  /** 内存墙结构化事件（真实运行一次报一次；memo 命中不重复上报）。 */
-  function noteRunJsMemoryExit(output: RunJsOutput, side: 'main' | 'worker', taskId?: string): void {
-    const exit = runJsMemoryExitOf(output);
-    if (exit === null) return;
-    options.onRunJsMemoryExit?.({
-      runId: output.audit.runId,
-      side,
-      ...(taskId === undefined ? {} : { taskId }),
-      ...exit,
-    });
-  }
 
   /**
    * CAP-01 S1 run_js 回合内执行（v8 §2/§5）：
@@ -1084,13 +2344,15 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
    *   · 输入引用（照 resolveTaskId 的写法）：参数面只收 fileId 数组；权威校验（scope/激活/TTL/
    *     字节）归执行器侧 fileStore.materializeInputs——这里把「越权/不存在/pending/过期/字节
    *     缺失」收成**同一句**话术抛回（不泄露存在性），机械 reason 经 onFileRefUnavailable 只进日志。
-   *   · 产物：executor 无论 exitCode 都扫 out/ 登记；登记事实收进 turnFiles（回合末 TurnResult.files，
-   *     交付去留归宿主投递面——工具返回时不可知）。
+   *   · 产物（片 2，owner 裁定「交付物只从 Worker 出」）：Main 面 out/ **不可写也不登记**——
+   *     执行器按 `writableDirs:'scratch-only'` + `registerOutputs=false` 运行：写 out/ 的脚本
+   *     由权限模型拒绝（ERR_ACCESS_DENIED，非零退出），写进 scratch/ 的文件不建行、不落
+   *     workspace 副本、不进 TurnResult.files。要交付文件 = task_run 交办（Worker 的 out/
+   *     才是交付箱）。
    */
   async function runJsInTurn(
     args: Record<string, unknown>,
     memo: Map<string, RunJsOutput>,
-    turnFiles: TurnFileRef[],
     setMemoryWall: (hit: boolean) => void,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
@@ -1112,6 +2374,11 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         code,
         ...(inputs.length > 0 ? { inputs } : {}),
         scope: fileScope,
+        // 片 2：Main 面不登记 out/（结构性禁止 Main 产交付物；不是提示词约束）。
+        registerOutputs: false,
+        // 2026-11-18 owner 裁定 A：Main 的 run_js 只写 scratch/——执行器收窄
+        // --allow-fs-write（去掉 out/），写 out/ 由权限模型拒绝，不是「写了不登记」。
+        writableDirs: 'scratch-only',
         // 取消信号必须贯穿到执行器：否则任务取消/宿主中止后脚本仍跑到自然结束或 120s 超时。
         ...(signal === undefined ? {} : { signal }),
       });
@@ -1130,17 +2397,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       throw error;
     }
     memo.set(memoKey, output);
-    noteRunJsMemoryExit(output, 'main');
+    noteRunJsMemoryExit(output, 'main', options.onRunJsMemoryExit);
     setMemoryWall(runJsMemoryExitOf(output) !== null);
-    turnFiles.push(...output.outputs.map((file) => ({ fileId: file.fileId, name: file.name, bytes: file.bytes })));
+    // 片 2：不往交付面推送（out/ 未登记，outputs 恒为空）。
     return runJsToolResult(output);
   }
 
-  /** 交付事实按 fileId 去重（回程登记 + 兜底扫描同池去重后，同一产物不重复进交付面）。 */
-  function pushTurnFileOnce(list: TurnFileRef[], file: { fileId: string; name: string; bytes: number }): void {
-    if (list.some((existing) => existing.fileId === file.fileId)) return;
-    list.push({ fileId: file.fileId, name: file.name, bytes: file.bytes });
-  }
 
   /**
    * 执行层返回里的 data.files 条目（CAP-01 S2 ③）：completed/needs_input 的 data 为
@@ -1185,117 +2447,39 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   }
 
   /**
-   * CAP-01 S2 ① Worker 的 run_js 回合内执行（v8 §2/§4/§5）：与 Main 的 runJsInTurn 同一
-   * 形状，差异只在任务作用域——输入只解析当前任务的绑定行（{side:'worker', taskId}），
-   * 产物登记绑定当前任务并并入本任务交付收集。幂等（v8 §5）用**委派级**进程内 Map
-   * （随 delegate 创建、随 delegate 丢弃；不用 attempt，Pi 原生重试同键命中不重跑）。
+   * CAP-01 S2 ① Worker 的 run_js 回合内执行（v8 §2/§4/§5）：实现与**后台单回合执行器
+   * 同源**（createWorkerRunJsTurn，顶层层级模块函数，不是两套实现）——差异只在调用方
+   * 传入的 taskId（任务作用域）。幂等用**委派级**进程内 Map（随 delegate 创建、随
+   * delegate 丢弃；不用 attempt，Pi 原生重试同键命中不重跑）。
    */
-  async function runJsInWorkerTurn(
-    taskId: string,
-    args: Record<string, unknown>,
-    memo: Map<string, RunJsOutput>,
-    taskFiles: TurnFileRef[],
-    signal?: AbortSignal,
-  ): Promise<Record<string, unknown>> {
-    const executor = options.runJsExecutor;
-    if (executor === undefined) throw new Error(`Worker 工具面之外的调用：${RUN_JS_TOOL}`);
-    const code = typeof args.code === 'string' ? args.code : '';
-    if (code.trim() === '') throw new Error('run_js 缺少 code（CommonJS 脚本原文）。');
-    const inputs = parseFileIdList(args.inputs, 'run_js', 'inputs');
-    const memoKey = `${createHash('sha256').update(code, 'utf8').digest('hex')}:${[...inputs].sort().join('|')}`;
-    const hit = memo.get(memoKey);
-    if (hit !== undefined) return runJsToolResult(hit);
-    let output: RunJsOutput;
-    try {
-      output = await executor.runJs({
-        code,
-        ...(inputs.length > 0 ? { inputs } : {}),
-        scope: fileScope,
-        taskId,
-        ...(signal === undefined ? {} : { signal }),
-      });
-    } catch (error) {
-      if (error instanceof FileRefUnavailableError) {
-        // 机械 reason 只进日志；模型与用户只见统一话术（防存在性 oracle，v8 §4）。
-        options.onFileRefUnavailable?.(error.reason);
-        throw new Error(FILE_INPUT_UNAVAILABLE_MESSAGE);
-      }
-      if (error instanceof RunJsLayoutUnsafeError) {
-        // 布局收窄（symlink）：与 Main 同一确定性失败话术；Worker 面附任务归属进日志。
-        options.onRunJsLayoutUnsafe?.({ ...error.event, side: 'worker', taskId });
-        throw new ToolUserError(RUN_JS_LAYOUT_UNSAFE_MESSAGE);
-      }
-      throw error;
-    }
-    memo.set(memoKey, output);
-    // 执行事实入账（2026-11-17 修）：Worker 的 run_js 是**真实执行**，必须进底账——完成判定
-    // （judgeReportedTask）只看执行事实，不进账会出现两种假象：①查询成功 + 脚本失败仍判
-    // completed；②只靠脚本完成的任务被判 unexecuted。
-    // 宿主超时杀进程组（killReason=timeout）同样是一次真实执行的失败结局（脚本没跑完）：
-    // 超时只杀脚本、Worker 仍有预算并正常汇报，不写失败事实会让「查询成功 + 脚本超时」判
-    // completed（假绿）。abort 不写——取消/宿主中止由取消路径定性，不能把取消说成失败。
-    const killReason = output.audit.killReason;
-    if (killReason !== 'abort') {
-      const scriptOk = killReason === undefined && output.exitCode === 0;
-      registry.noteExecution(taskId, {
-        requestId: `runjs_${output.audit.runId}`,
-        operation: RUN_JS_TOOL,
-        status: scriptOk ? 'completed' : 'failed',
-        dispatchKey: `runjs:${output.audit.runId}`,
-        ...(scriptOk
-          ? {}
-          : {
-              error: killReason === 'timeout'
-                ? {
-                    code: 'run_js_timeout',
-                    message: 'run_js 脚本超时被终止',
-                    retryable: false,
-                  }
-                : {
-                    code: 'run_js_failed',
-                    message: `run_js 脚本以非零退出码结束（exit=${String(output.exitCode)}）`,
-                    retryable: false,
-                  },
-            }),
-      });
-    }
-    // 内存墙事件：Worker 面没有用户可见回复（汇报经 Main 转述），但机械事实必须可查。
-    noteRunJsMemoryExit(output, 'worker', taskId);
-    for (const file of output.outputs) {
-      pushTurnFileOnce(taskFiles, file);
-    }
-    return runJsToolResult(output);
-  }
+  const runJsInWorkerTurn = createWorkerRunJsTurn({
+    ...(options.runJsExecutor === undefined ? {} : { executor: options.runJsExecutor }),
+    scope: fileScope,
+    registry,
+    ...(options.onFileRefUnavailable === undefined ? {} : { onFileRefUnavailable: options.onFileRefUnavailable }),
+    ...(options.onRunJsLayoutUnsafe === undefined ? {} : { onRunJsLayoutUnsafe: options.onRunJsLayoutUnsafe }),
+    ...(options.onRunJsMemoryExit === undefined ? {} : { onRunJsMemoryExit: options.onRunJsMemoryExit }),
+  });
 
-  const transcriptStore = options.transcriptStore;
   /**
    * 上一回合 Main 转录的**只读投影**（Pi 会话 → 宿主可读形状）。
    * 宿主不持有可变对话历史：当前转录由 `mainTranscript()` 直接向驱动索取
-   * （`TurnDriver.transcript()`）；本变量只在驱动尚无会话（首回合）或测试替身没有
-   * 该方法时作**种子/回落快照**，每回合整体覆盖、从不追加改写。
+   * （`TurnDriver.transcript()`）；本变量只在测试替身没有该方法时作**回落快照**，
+   * 每回合整体覆盖、从不追加改写。跨重启的历史归 Pi 会话文件（装配层给驱动
+   * sessionDir/resumeSessionFile），宿主不读不写转录。
    */
   let lastMainProjection: readonly DriverMessage[] = [];
   const mainTranscript = (): readonly DriverMessage[] =>
     options.mainDriver.transcript?.() ?? lastMainProjection;
-  let persistedCount = 0;
-  // B1 打开→载入：注入存储时现读完整转录，作为**首回合种子历史**（驱动尚无 Pi 会话时导入；
-  // 会话已存在时转录仍归 Pi 独占）。宿主不留第二份可变副本，Pi entry-log 是唯一所有者。
-  // 读失败 fail-open：不阻塞会话打开（退化为空转录），错误经 onTranscriptError 上报。
-  if (transcriptStore !== undefined) {
-    try {
-      lastMainProjection = await transcriptStore.readTranscript();
-      persistedCount = lastMainProjection.length;
-    } catch (error) {
-      options.onTranscriptError?.(error);
-    }
-  }
   /** 本回合 Main 的截止时刻：委派算出的 Worker 截止不能越过它（再留收尾余量）。 */
   let currentTurnDeadline = 0;
 
   /**
    * 前台回合许可（P5）：策略存在时回合开始 acquire、结束 release。
    *   · 拒绝 → 确定性 ForegroundRejectionError（错误面由入口归类；server 走既有 fallback）；
-   *   · 排队（queueCapacity>0）→ 受控等待晋升（release 触发 FIFO），等待不空转（10ms 让出）。
+   *   · 排队（queueCapacity>0）→ 受控等待晋升（release 触发 FIFO），等待不空转（让出）；
+   *   · 排队有上限（`runtime.queueWaitMs`，缺省 120s）：超时释放排队位（不留残留）后
+   *     确定性拒绝（「当前系统忙，请稍后再说」），并记录 `resource_queue_timeout` 事件。
    */
   async function acquireForegroundPermit(): Promise<Permit | undefined> {
     if (policy === undefined) return undefined;
@@ -1303,8 +2487,26 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     if (acquired.ok === false) {
       throw new ForegroundRejectionError(acquired.reason, acquired.message);
     }
-    while (acquired.state === 'queued') {
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    if (acquired.state === 'queued') {
+      const queueWaitMs = policy.snapshot().config.queueWaitMs;
+      const deadline = acquired.acquiredAt + queueWaitMs;
+      while (acquired.state === 'queued') {
+        if (taskRunClock.now() >= deadline) {
+          // 超时：先退队（队列唯一事实源里不留残留），再按既有拒绝形状确定性拒绝。
+          policy.release(acquired);
+          const waitedMs = Math.max(0, taskRunClock.now() - acquired.acquiredAt);
+          options.onResourceQueueTimeout?.({
+            kind: 'foreground',
+            principalId: options.principalId,
+            waitedMs,
+          });
+          throw new ForegroundRejectionError(
+            'queue_full',
+            `排队等待超过 ${Math.round(queueWaitMs / 1000)} 秒（当前系统忙，请稍后再说）`,
+          );
+        }
+        await taskRunClock.sleep(TASK_RUN_WAIT_POLL_MS);
+      }
     }
     if (acquired.state !== 'active') {
       throw new ForegroundRejectionError('queue_full', '前台许可在等待晋升中被取消');
@@ -1361,21 +2563,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     return { handle: pendingConfirmation.handle, userText: currentUserText };
   }
 
-  /**
-   * 模型可见的执行结果：needs_confirmation 只给机械摘要（summary/expiresAt）与 data——
-   * 句柄是宿主持有的确认凭据，不进模型转录；模型无法伪造/转交句柄，透传只发生在
-   * 下一回合的宿主请求里。其余状态原样交回模型。
-   */
-  function modelVisibleOutcome(outcome: ExecutionOutcome): Record<string, unknown> {
-    if (outcome.status !== 'needs_confirmation') return outcome as unknown as Record<string, unknown>;
-    return {
-      status: 'needs_confirmation',
-      summary: outcome.confirmation.summary,
-      ...(outcome.confirmation.expiresAt === undefined ? {} : { expiresAt: outcome.confirmation.expiresAt }),
-      ...(outcome.data === undefined ? {} : { data: outcome.data }),
-    };
-  }
-
   async function executeOperation(
     taskId: string,
     args: Record<string, unknown>,
@@ -1389,12 +2576,55 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     if (operation === '') throw new Error('execute_operation 缺少 operation。');
     if (!allowed.has(operation)) {
       // 允许集合边界：集合外的 operation 在发起执行前被拒——不依赖模型遵守提示词。
-      throw new Error(`「${operation}」不在本轮允许集合内，未发起执行。`);
+      throw new Error(OPERATION_NOT_PERMITTED_MESSAGE);
     }
+    // A2 同回合拒（2026-11-18）：存在**本回合**发放、尚未消费的待确认提案时，同一回合内
+    // 再发起非只读 operation 一律不执行——同回合 commit 不是用户表态（旧纪律只挡住了句柄
+    // 透传，模型仍会反复 commit 打到执行层的 CONFIRMATION_NOT_FOUND）。以工具错误如实
+    // 告知模型等用户下一回合表态；不发起执行、不落执行事实。只读 operation 不受影响。
+    if (
+      pendingConfirmation !== undefined
+      && pendingConfirmation.issuedTurn >= turnNo
+      && !readOnlyOperations.has(operation)
+    ) {
+      throw new Error(SAME_TURN_CONFIRMATION_PENDING_MESSAGE);
+    }
+    // A2 单回合上界（资源边界，不是计划门）：本回合已发起次数达到上限时，后续调用在
+    // 发起前被拒并如实告知；不判断业务。计数在发起前同步推进（含随后的每次真实发起，
+    // 被拒/回放的调用不计——它们没有走到这里）。
     const rawArgs = args.args;
-    const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
+    const baseCallArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
       ? (rawArgs as Record<string, unknown>)
       : {};
+    // 载荷型参数装信封（宿主侧；发起执行之前）：模型给结构化值 → 宿主 lint+落盘 → 路径替换。
+    // 失败（lint 未过/超上限）在此抛出——不发起执行、不落执行事实。
+    const callArgs = preparePayloadArgs({
+      operation,
+      args: baseCallArgs,
+      manifest: workerManifest,
+      taskId,
+      bridge: exchange,
+      failures: payloadLintFailuresThisTurn,
+      onEvent: options.onExecutionEvent,
+    });
+    // A2b 同参数重复守卫（发起前拒；不发起执行、不落执行事实）。
+    // 作用域 = (本回合, 该任务)：同一任务内的逐字重复才拒；两个不同任务各自查同一对象是合法的。
+    // 键 + 判定来自共享锁（与后台执行器同一份语义，见 deterministic-retry-lock.ts）。
+    const blockedRetry = retryLock.before(operation, callArgs);
+    if (blockedRetry !== undefined) {
+      retryBlockedThisTurn.push(blockedRetry.block);
+      const codeNote = blockedRetry.block.code === 'unclassified_failure' ? '且没有说明可以重试' : `（${blockedRetry.block.code}）`;
+      const original = blockedRetry.executorMessage === undefined ? '' : `对方的说法：${blockedRetry.executorMessage}`;
+      throw new Error(
+        `刚才办「${blockedRetry.block.object}」失败了${codeNote}；本回合不要再换参数重试——`
+        + `把对方给出的说法如实转告用户${original === '' ? '' : `（${original}）`}，`
+        + '需要换口径或换对象时先问用户。',
+      );
+    }
+    if (operationsThisTurn >= maxOperationsPerTurn) {
+      throw new Error(turnOperationLimitMessage(maxOperationsPerTurn, operationsThisTurn));
+    }
+    operationsThisTurn += 1;
     // CAP-01 S2 ②：注入文件桥时出站走装饰器（声明目录参数替换 + 任务文件物化在桥内）；
     // 未注入时零变化（原客户端直连）。
     const client = exchange !== undefined ? exchange.client : options.client;
@@ -1419,6 +2649,23 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           },
           signal === undefined ? undefined : { signal },
         );
+        // 契约 v4：accepted 只允许出现在声明 long_running 的 operation 上。未声明却返回 =
+        // 协议违约：落 failed（账行不落 accepted）并记事件，绝不把半截句柄交给宿主。
+        if (outcome.status === 'accepted' && !longRunningOperations.has(operation)) {
+          options.onExecutionEvent?.({
+            event: 'execution_accepted_undeclared',
+            taskId,
+            operation,
+            operationId: outcome.operationId,
+          });
+          outcome = {
+            status: 'failed',
+            error: {
+              code: 'EXECUTION_PROTOCOL_VIOLATION',
+              message: '平台尚未支持长任务却返回了受理（数据异常）。',
+            },
+          };
+        }
         // 执行层已返回：本次透传结束，宿主侧句柄清除（是否真的被接受由执行层回执说明；
         // 宿主不判断确认语义）。
         if (confirmation !== undefined) pendingConfirmation = undefined;
@@ -1441,8 +2688,47 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         return outcome;
       },
     });
+    // 契约 v4：长任务受理——回合正常结束（不是失败），把受理事实交给模型；任务保持
+    // running，等待端口由后台 runner 推进（inline 装配无 runner 时在 delegate 处 fail-closed）。
+    if (run.outcome.status === 'accepted') {
+      options.onExecutionEvent?.({
+        event: 'execution_accepted',
+        taskId,
+        operationId: run.outcome.operationId,
+        operation,
+      });
+      return toModelVisibleOutcome(run.outcome, {
+        operation,
+        onClassified: (classified) => options.onExecutionEvent?.({
+          event: 'execution_failure_classified',
+          operation,
+          code: classified.code,
+          status: run.outcome.status as 'failed' | 'refused',
+          kind: classified.kind,
+        }),
+      });
+    }
+    // 未声明 long_running 却返回 accepted：已在 execute 回调里机械落 failed，这里确定性
+    // 终结本回合（不许模型把它当可重试的普通失败继续撞）。
+    if (run.outcome.status === 'failed' && run.outcome.error.code === 'EXECUTION_PROTOCOL_VIOLATION') {
+      throw new ToolUserError(run.outcome.error.message);
+    }
+    // A2b：执行层**没有显式说可重试**（retryable !== true）时，本回合锁住该 (operation, 对象)。
+    // fail-safe 缺省（owner 2026-11-18）：不确定就不往下撞——宁可停下报错让人介入，
+    // 也不能把执行层打到不能用。只有显式 retryable:true（超时/网关不可用等瞬时故障）放行。
+    // 记录/放行判定来自共享锁（键 + 判定与后台执行器同源）。
+    const allowedRetry = retryLock.after(operation, callArgs, run.outcome);
+    if (allowedRetry !== undefined) {
+      // 瞬时故障：不锁，但要留下「为什么还在试」的可见事实（否则部署侧只看到停、看不到试）。
+      retryAllowedThisTurn.push(allowedRetry);
+    }
     if (run.unresolved) {
       onUnresolved();
+      // 一次真实发起的调用以「结果未知」收尾（无回执：传输超时截断/连接中断/写操作取消
+      // 在飞等）：如实记一条结构化事件（只进日志；超时原话在账行的 outcome 里）。
+      if (run.executed) {
+        options.onExecutionEvent?.({ event: 'execution_result_unknown', taskId, operation });
+      }
       // 确定性终结本回合：不把待核对当作可重试的普通失败，模型不得自动重办。
       throw new ToolUserError(
         run.outcome.status === 'failed' ? run.outcome.error.message : RESULT_UNKNOWN_MESSAGE,
@@ -1461,14 +2747,46 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         issuedTurn: turnNo,
       };
     }
-    return modelVisibleOutcome(run.outcome);
+    // 大响应文件化（2026-11-19）：completed 且超过阈值 → 完整 data 落任务文件，只回摘要 +
+    // fileId；needs_confirmation / needs_input 与未注入桥时保持既有投影（含脱敏）不变。
+    return projectWorkerOutcome(run.outcome, {
+      taskId,
+      operation,
+      thresholdBytes: oversizeDataBytes,
+      ...(exchange === undefined ? {} : { bridge: exchange }),
+      ...(options.onExecutionResultFileized === undefined
+        ? {}
+        : { onFileized: options.onExecutionResultFileized }),
+      ...(options.onExecutionResultOversizeUnhandled === undefined
+        ? {}
+        : { onUnhandled: options.onExecutionResultOversizeUnhandled }),
+      // 失败/拒绝归类只进日志（原始码与原文不进模型投影）。
+      ...(options.onExecutionEvent === undefined
+        ? {}
+        : {
+          onClassified: (classified) => options.onExecutionEvent?.({
+            event: 'execution_failure_classified',
+            operation,
+            code: classified.code,
+            status: run.outcome.status as 'failed' | 'refused',
+            kind: classified.kind,
+          }),
+        }),
+    });
   }
 
   /**
-   * Worker exec 面（CAP-01 S2 ①）：execute_operation +（注入 runJsExecutor 时）run_js。
+   * Worker exec 面（owner 2026-11-20 动态工具）：每个 operation 一个 `op_*` 工具（结构化参数），
+   * 不再给 Worker 通用 execute_operation。`execute_operation` 仅为**内部兼容路由**保留——
+   * 确定性脚本夹具用它不经工具面直调，真实模型拿不到该工具；两条路都归到同一执行语义。
    * run_js 只在工具面开启时受理（fail-closed：未注入执行器的直调被拒）；文件桥与任务交付
    * 收集随 delegate 传入（缺省装配两者皆缺省——零变化）。
    */
+  const workerToolManifest: CapabilityManifest = {
+    contractVersion: manifest.contractVersion,
+    operations: manifest.operations.filter((operation) => operation.model_visible !== false),
+  };
+  const sessionOpToolIndex = workerOpToolIndex(workerToolManifest);
   function workerExec(
     taskId: string,
     window: RuntimeAttemptWindow,
@@ -1482,9 +2800,41 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         }
         return runJsInWorkerTurn(taskId, args, files.runJsMemo, files.taskFiles, signal);
       }
+      // op_<operation>：结构化调用 → 结构化校验（未知键/机制参数裸名/`--` 前缀键确定性拒绝）
+      // → 翻回执行层 args。夹具机制旋钮走下面的 execute_operation 内部路由，不借本面透传。
+      const opDeclaration = sessionOpToolIndex.get(tool);
+      if (opDeclaration !== undefined) {
+        const opArgs = unwrapCompatOpArgs(args);
+        assertOpToolArgs({ tool, operation: opDeclaration, args: opArgs, onEvent: options.onExecutionEvent });
+        const mapped = mapWorkerOperationArgs({
+          operation: opDeclaration,
+          args: opArgs,
+          ...(() => {
+            const confirmation = confirmationForOperation(opDeclaration.name);
+            return confirmation === undefined ? {} : { confirmationHandle: confirmation.handle };
+          })(),
+        });
+        return executeOperation(taskId, { operation: opDeclaration.name, args: mapped }, window, onUnresolved, files?.exchange, files?.taskFiles, signal);
+      }
+      // 内部兼容路由（非模型可见工具面）：确定性脚本夹具兼容直调。
       if (tool !== EXECUTE_OPERATION_TOOL) throw new Error(`Worker 工具面之外的调用：${tool}`);
       return executeOperation(taskId, args, window, onUnresolved, files?.exchange, files?.taskFiles, signal);
     };
+  }
+
+  /**
+   * B 切片：短等待窗口内轮询任务终态（注入时钟让出；窗口内未落定返回 undefined）。
+   * waiting_user 不是终态（等待接续仍属后台推进）——窗口内进入等待也按超窗回执处理，
+   * 补问经既有通知事实注入与 task_resume 接续。轮询只读底账，不写任何状态。
+   */
+  async function waitForTaskSettled(taskId: string, waitMs: number): Promise<TaskRecord | undefined> {
+    const deadline = taskRunClock.now() + waitMs;
+    for (;;) {
+      const task = registry.get(taskId, scope);
+      if (SETTLED_TASK_STATUSES.has(task.status)) return task;
+      if (taskRunClock.now() >= deadline) return undefined;
+      await taskRunClock.sleep(TASK_RUN_WAIT_POLL_MS);
+    }
   }
 
   /**
@@ -1502,16 +2852,15 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     });
     registry.transition(taskId, 'failed', { reason: 'resource_limited' });
     const rejected = registry.get(taskId, { principalId: options.principalId, sessionId: options.sessionId });
-    const taskNo = rejected.taskNo ?? 0;
     const name = rejected.name ?? deriveTaskName(request);
     return {
       taskId,
-      taskNo,
       name,
       status: 'failed',
       accepted: false,
       reason: 'resource_limited',
-      notice: `未受理 #${taskNo} ${name}：${detail}`,
+      // B 切片回执去编号：受理/拒绝话术不含工单编号（编号只在 npm run tasks / 任务查询详情面）。
+      notice: `未受理「${name}」：${detail}`,
     };
   }
 
@@ -1520,17 +2869,35 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     rawInputFiles: unknown,
     foregroundPermit: Permit | undefined,
     turnFiles: TurnFileRef[],
+    /** 本回合交办的任务（taskIds）：落定的非完成终态也要记账（见下方窗口内落定分支）。 */
+    taskIds: string[],
+    /** 主动推送抑制收集器（快活失败/等补充：失败原因本回合已交给模型）。 */
+    pushSuppressedTaskIds: string[],
   ): Promise<unknown> {
     const request = taskText.trim();
     if (request === '') throw new Error('task_run 缺少 task：请写清要办什么。');
+    // 已有等待用户确认的提案时不许再新建任务（2026-11-19 live 实测缺陷：用户回「确认」，
+    // Main 新开了一个任务去提交 → 新任务拿不到上一任务的确认句柄 → 写入确定失败）。
+    // 这里给确定性拒绝 + 可执行下一步，不依赖模型自己想起来用 task_resume。
+    // 用 listWaiting(scope) 而不是 list(scope)：只取等待行且走 (principal, session, status)
+    // 索引——每次交办都全量映射会话任务会在浸泡里把 RSS 顶上去（实测 +13%）。
+    // 变量名避开会话级 pendingConfirmation（同名的会话小表在下方委派渲染里要用）。
+    const waitingProposal = registry.listWaiting(scope).find(
+      (task) => task.pendingQuestion?.confirmation !== undefined,
+    );
+    if (waitingProposal !== undefined) {
+      const summary = waitingProposal.pendingQuestion?.confirmation?.summary ?? '';
+      throw new Error(
+        `还有一件事等你确认：${summary}。回「确认」我就提交，回「不」我就不动；`
+        + '这件事确认或放弃之后再办新的。',
+      );
+    }
     const taskId = `task_${randomUUID()}`;
     // CAP-01 S2（v8 §4/§6）：inputFiles 的解析与交办复制全部发生在建任务行/进 Worker 之前——
-    // 任一 fileId 不可用 → 整次拒绝（不部分执行、不留任务行、零副本）。
+    // 任一 fileId 不可用 → 整次拒绝（不部分执行、不留任务行、零副本）。public（inline）与
+    // background 同一条前置路径：background 在 submit 之前就已完成复制，任务一受理即带副本
+    // 绑定（file_refs.task_id），Worker 侧只从任务副本物化（见 createTaskExecutor 文件桥）。
     const inputFiles = parseFileIdList(rawInputFiles, 'task_run', 'inputFiles');
-    // S2 边界（v8 §8）：交办复制只做 inline——background 派发不静默丢文件，确定性拒绝。
-    if (inputFiles.length > 0 && dispatchMode === 'background') {
-      throw new Error('task_run 的 inputFiles 暂不支持 background 派发（文件交办当前只做 inline）。');
-    }
     let copiedInputs: CopiedTaskInput[] = [];
     if (inputFiles.length > 0) {
       const copier = options.taskInputCopier;
@@ -1548,8 +2915,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       }
     }
 
-    // P6 background：受理即底账 queued（Main 不等待）；派发/执行/恢复/取消归 TaskRunner。
-    if (dispatchMode === 'background') {
+    // P6 async：受理即底账 queued（Main 不等待）；派发/执行/恢复/取消归 TaskRunner。
+    if (taskDispatch === 'async') {
       // P7-T06 池满拒绝落点（P6 §七 登记缺口）：受理前按 policy 事实判定——满员且策略
       // 拒绝准入（无队列位）→ 确定性拒绝：任务按 P2 状态机落终态 failed + resource_limited
       // （镜像 inline ⑮ 的拒绝形状），不进入执行；有排队位时受理为 queued（队列 = 底账
@@ -1584,21 +2951,47 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         request,
       });
       taskRunner!.pump();
-      const taskNo = accepted.taskNo ?? 0;
       const name = accepted.name ?? deriveTaskName(request);
+      // B 切片（工单回执收敛）：短等待窗口（runtime.taskRunWaitMs，缺省 8000ms；0 = 不等）。
+      // 窗口内执行端确认 completed → 与 inline 同形状把结果交给模型（同回合、零主动投递——
+      // 结果不重复发两遍）；超窗 → 只回机械受理事实（taskId/name/status/accepted:true，
+      // **不带任何给用户看的回执话术**——owner 2026-11-19：交办不再给固定回执，模型怎么说
+      // 由它自己决定并原样投递），任务留后台推进，完成后由宿主完成投递面把结果发回原会话。
+      if (taskRunWaitMs > 0) {
+        const settled = await waitForTaskSettled(taskId, taskRunWaitMs);
+        if (settled !== undefined) {
+          if (settled.status === 'completed') {
+            return {
+              taskId,
+              // 后台结果逐字存档在 replyText（runner settle 经 archiveReply 写）；inline 的
+              // resultText 由 complete() 写——两处兼容读取，与 inline 同形状交给模型。
+              summary: settled.replyText ?? settled.resultText ?? '',
+              executions: settled.executions,
+            };
+          }
+          // 窗口内落定的非完成终态：与 inline 失败同语义如实上抛（失败/取消不冒充进行中）。
+          // 这次失败的原因本回合就交给了模型（模型会向用户说明）——主动推送不重复发一条。
+          // 任务事实也要留下（2026-11-19 复核修复）：本分支抛错会绕过 exec 级的 taskIds 记账，
+          // 缺了它回合会被判「一无所有」（渠道回失败话术 = 假话 + 诱导重试），message_done
+          // 也看不到这笔任务；同回合一笔 taskId 只记一次。
+          if (!taskIds.includes(taskId)) taskIds.push(taskId);
+          pushSuppressedTaskIds.push(taskId);
+          throw new Error(settled.failureReason ?? `后台任务已落定（${settled.status}）。`);
+        }
+      }
+      const live = registry.get(taskId, scope);
       return {
         taskId,
-        taskNo,
         name,
-        status: 'queued',
+        status: live.status,
         accepted: true,
-        notice: `已受理 #${taskNo} ${name}，将在后台执行。`,
       };
     }
 
     // CAP-01 S2 ①③④：任务作用域的 Worker 工具面（run_js）、执行层文件桥与本任务交付收集。
-    // 全部随本委派创建、随本委派丢弃（未注入执行器/桥 = 零变化缺省）；background 派发
-    // 不经过这里（S2 文件面只做 inline——后台 Worker 工具面与回程登记归后续切片）。
+    // 全部随本委派创建、随本委派丢弃（未注入执行器/桥 = 零变化缺省）；background 派发的
+    // 文件面在 createTaskExecutor（后台单回合执行器）里按任务构造文件桥——本函数只负责
+    // 在受理前完成交办复制。
     const taskFiles: TurnFileRef[] = [];
     const taskExchange = options.taskExecutionBridge === undefined ? undefined : options.taskExecutionBridge(taskId);
     const workerRunJsMemo = new Map<string, RunJsOutput>();
@@ -1629,7 +3022,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const task = registry.get(taskId, { principalId: options.principalId, sessionId: options.sessionId });
       return {
         taskId,
-        taskNo: task.taskNo ?? null,
         name: task.name ?? deriveTaskName(task.request),
         summary: RESULT_UNKNOWN_MESSAGE,
         executions: task.executions,
@@ -1648,8 +3040,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     try {
       const workerResult = await options.workerDriver.run({
         systemPrompt: renderWorkerSystemPrompt(options.workerWorkspaceRoot),
-        // CAP-01 S2 ①：Worker 工具面 = execute_operation +（注入执行器时）run_js（任务作用域）。
-        tools: [executeOperationTool(), ...(options.runJsExecutor === undefined ? [] : [runJsTool()])],
+        // owner 2026-11-20：Worker 工具面 = 每个模型可见 operation 一个 op_* 工具（结构化参数），
+        // 不再给 Worker 通用 execute_operation；Main 工具面不动。允许集合在 exec 发起前裁决。
+        tools: [...workerOperationTools(workerToolManifest), ...(options.runJsExecutor === undefined ? [] : [runJsTool('worker')])],
         messages: [userMessage(renderWorkerDelegation({
           task: request,
           manifest: workerManifest,
@@ -1671,12 +3064,28 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       });
       // 出现过「无法证明绑定 / 结果未知」：不判成功、不判确认失败，交还待核对。
       if (taskUnresolved) return unresolvedReceipt();
+      // 契约 v4：本回合以长任务受理结束——任务保持 running（不 complete、不判失败），
+      // 由后台 runner 的等待端口推进；没有 runner 的后台推进能力 = 装配错误，如实失败。
+      const acceptedExecution = registry.get(taskId, scope).executions.find((execution) => execution.status === 'accepted');
+      if (acceptedExecution !== undefined) {
+        if (taskRunner === undefined) {
+          registry.fail(taskId, LONG_TASK_UNSUPPORTED_MESSAGE);
+          throw new ToolUserError(LONG_TASK_UNSUPPORTED_MESSAGE);
+        }
+        const current = registry.get(taskId, scope);
+        return {
+          taskId,
+          name: current.name ?? deriveTaskName(current.request),
+          status: 'running',
+          accepted: true,
+        };
+      }
       if (workerResult.text.trim() === '') {
-        throw new Error('执行层 Worker 未产出有效汇报，本次任务未完成。');
+        throw new Error('没产出有效的办理结果汇报，本次任务未完成。');
       }
       registry.complete(taskId, workerResult.text);
       const task = registry.get(taskId, { principalId: options.principalId, sessionId: options.sessionId });
-      return { taskId, taskNo: task.taskNo ?? null, summary: workerResult.text, executions: task.executions };
+      return { taskId, summary: workerResult.text, executions: task.executions };
     } catch (error) {
       // 待核对不是确认失败：不覆盖 result_unknown 事实，也不再自动重试。
       if (taskUnresolved) return unresolvedReceipt();
@@ -1714,11 +3123,39 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
 
   async function send(text: string): Promise<TurnResult> {
     const foregroundPermit = await acquireForegroundPermit();
+    /**
+     * 本回合取走的待注入事实（带回退口者）：注入器是 take 即出队，事实一旦取走就只剩这一份。
+     * **注入核销（2026-11-19）= 机械判据**：本回合产出的用户可见文本非空才算「说给用户听了」；
+     * 否则（驱动失败/空回复/回合失败）退回队列，下一次用户开口再注入——「取走」不再等于
+     * 「已说」（判据不看模型有没有提到事实：语义不可判）。
+     */
+    const injectionReceipts: InjectionReceipt[] = [];
+    /**
+     * 退回本回合取走、但没说出声的事实（核销的反面）：回退口由装配层按队列自己的入队语义
+     * 给出。best-effort——回退本身抛错不得改变本回合已定型的结局（异常留给驱动/回合失败那条
+     * 链），也绝不因此把事实当成已说；一次性（退过即清空，不重复退回）。
+     */
+    const requeueUncreditedInjections = (): void => {
+      for (const receipt of injectionReceipts.splice(0)) {
+        try {
+          receipt.requeue?.();
+        } catch {
+          // 回退失败：这一份事实丢在进程里（无第二落库面），但不冒充「已说给用户」。
+        }
+      }
+    };
     try {
       // 本回合用户原话：确认请求的 userText 原样取自这里（不改写、不解释）。
       currentUserText = text;
       const progress: string[] = [];
       const taskIds: string[] = [];
+      // B 切片：本回合已把执行结果交给模型（模型将向用户转述）的任务——完成投递面据此抑制。
+      const relayedTaskIds: string[] = [];
+      // 主动推送抑制（快活失败/等补充）：这些任务的失败原因本回合已交给模型，推送不重复发。
+      const pushSuppressedTaskIds: string[] = [];
+      // 缺陷 A：本回合等待窗口观察到的任务终态（task_cancel 落定窗口等）——装配层据此做
+      // 一次性唤醒抑制（回合回复非空 = 事实已说给用户）。回合外落定不进列（照常唤醒）。
+      const terminalObserved: TurnTerminalObservation[] = [];
       // CAP-01 S1：本回合产出文件（run_js 交付箱登记事实；回合末进 TurnResult.files）。
       const turnFiles: TurnFileRef[] = [];
       // run_js 幂等（v8 §5）：局部 Map 随本回合创建、随本回合丢弃（进程内、跨重启不保证）。
@@ -1729,29 +3166,42 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       currentTurnDeadline = Date.now() + mainTurnMs;
       // U3：本回合的 turn 作用域（task_run 逻辑操作身份的作用域）与重放窗口。
       turnNo += 1;
+      // A2：单回合执行计数随回合清零（上界按回合计，不跨回合累计）。
+      operationsThisTurn = 0;
+      retryLock = createDeterministicRetryLock();
+      payloadLintFailuresThisTurn = new Map();
+      retryBlockedThisTurn = [];
+      retryAllowedThisTurn = [];
       const turnScopeKey = `turn:${options.sessionId}:${turnNo}`;
       const mainWindow = newAttemptWindow();
+      /** 取走一条待注入事实（带回执者登记进 injectionReceipts，供核销/退回）。 */
+      const takeInjection = (value: InjectionValue | undefined): string | undefined => {
+        if (value === undefined) return undefined;
+        const receipt: InjectionReceipt = typeof value === 'string' ? { text: value } : value;
+        // 空白文本照旧不注入（既有行为）；它没有可说的内容，不回退也不核销。
+        if (receipt.text.trim() === '') return undefined;
+        injectionReceipts.push(receipt);
+        return receipt.text;
+      };
       // 宿主只交「本轮输入」：最后一条 user = 本轮文本；历史种子仅在驱动尚无会话时使用。
-      const factsMessage = options.taskFactProvider?.(options.principalId, options.sessionId);
+      const factsMessage = takeInjection(options.taskFactProvider?.(options.principalId, options.sessionId));
       // 纯附件机械事实（文件名/fileId/字节数/时间，不含路径）与主动追问的系统注记
       // （模型可见/用户不可见）走同一 injections 机制；take 即出队（同 fileId 只注入一次）。
-      const attachmentFactsMessage = options.attachmentFactProvider?.(options.principalId, options.sessionId);
-      const systemNoteMessage = options.systemNoteProvider?.(options.principalId, options.sessionId);
+      const attachmentFactsMessage = takeInjection(options.attachmentFactProvider?.(options.principalId, options.sessionId));
+      const systemNoteMessage = takeInjection(options.systemNoteProvider?.(options.principalId, options.sessionId));
       // CAP-01 S1 清单注入（机械事实）：本会话已激活文件，字段只有 fileId/name/bytes；
       // 字节数作为观察项随 TurnResult 带出（fileManifestBytes）。
       const manifestFiles = options.fileManifestProvider?.(options.principalId, options.sessionId) ?? [];
       const manifestMessage = manifestFiles.length > 0 ? renderFileManifest(manifestFiles) : undefined;
       const manifestBytes = manifestMessage === undefined ? undefined : Buffer.byteLength(manifestMessage, 'utf8');
-      // 历史：驱动已有 Pi 会话时直接读其转录（Pi 独占）；尚无会话（首回合）时回落到
-      // 打开时从 B1 存储载入的投影，作为本回合的种子历史（驱动在无会话时才会导入）。
-      const liveTranscript = mainTranscript();
-      const history = liveTranscript.length > 0 ? liveTranscript : lastMainProjection;
-      const turnMessages = [...history, userMessage(text)];
+      // 历史：直接向驱动索取当前转录（Pi 会话是唯一所有者；重启恢复由驱动从会话文件
+      // 自己读回，宿主不再 seed 任何东西）。
+      const turnMessages = [...mainTranscript(), userMessage(text)];
       const injections = [
-        ...(factsMessage !== undefined && factsMessage.trim() !== '' ? [factsMessage] : []),
-        ...(attachmentFactsMessage !== undefined && attachmentFactsMessage.trim() !== '' ? [attachmentFactsMessage] : []),
+        ...(factsMessage !== undefined ? [factsMessage] : []),
+        ...(attachmentFactsMessage !== undefined ? [attachmentFactsMessage] : []),
         ...(manifestMessage !== undefined ? [manifestMessage] : []),
-        ...(systemNoteMessage !== undefined && systemNoteMessage.trim() !== '' ? [systemNoteMessage] : []),
+        ...(systemNoteMessage !== undefined ? [systemNoteMessage] : []),
       ];
       const mainResult = await options.mainDriver.run({
         systemPrompt: options.mainSystemPrompt,
@@ -1761,11 +3211,19 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           // 只读查询只依赖 registry/scope——始终可见（无 runner 的 inline/ask 也能查任务）。
           taskStatusTool(),
           taskResultTool(),
-          // 取消/接续需要 runner 生命周期：无 runner 不上面（fail-closed）。
-          ...(taskRunner === undefined ? [] : [taskCancelTool(), taskResumeTool()]),
+          // 取消/接续/确认需要 runner 生命周期：无 runner 不上面（fail-closed）。
+          ...(taskRunner === undefined ? [] : [taskCancelTool(), taskResumeTool(), taskConfirmTool()]),
           ...(options.mainSkillRegistry === undefined ? [] : [readSkillTool()]),
+          // 能力目录（A4）：仅当装配注入非空目录时给 Main 一个只读 capabilities 工具。
+          ...(options.capabilityCatalog === undefined || options.capabilityCatalog.length === 0
+            ? []
+            : [capabilitiesTool()]),
           // CAP-01 S1：run_js 只在装配方注入执行器时上工具面（缺省零变化，fail-closed）。
-          ...(options.runJsExecutor === undefined ? [] : [runJsTool()]),
+          ...(options.runJsExecutor === undefined ? [] : [runJsTool('main')]),
+          // recalc_xlsx：仅 Main 宿主面、仅引擎可用时上工具面（Worker 面永不注入）。
+          ...(options.recalcXlsxExecutor === undefined || !options.recalcXlsxExecutor.available
+            ? []
+            : [recalcXlsxTool()]),
         ],
         messages: turnMessages,
         ...(injections.length > 0 ? { injections } : {}),
@@ -1780,7 +3238,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
               window: mainWindow,
               operation: TASK_RUN_TOOL,
               executeThrows: 'propagate',
-              execute: async () => ({ status: 'completed', data: await delegate(task, args.inputFiles, foregroundPermit, turnFiles) }),
+              execute: async () => ({ status: 'completed', data: await delegate(task, args.inputFiles, foregroundPermit, turnFiles, taskIds, pushSuppressedTaskIds) }),
             });
             if (run.unresolved) {
               return {
@@ -1792,7 +3250,21 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
             const answer = run.outcome.status === 'completed' ? run.outcome.data : run.outcome;
             const taskId = (answer as { taskId?: unknown }).taskId;
             // 回放同一回执时任务只算一次（同一 taskId 不重复记账）。
-            if (typeof taskId === 'string' && !taskIds.includes(taskId)) taskIds.push(taskId);
+            if (typeof taskId === 'string' && !taskIds.includes(taskId)) {
+              taskIds.push(taskId);
+              // B 切片：带 summary = 结果已在本回合交给模型（模型将向用户转述）——完成投递面
+              // 对这些任务抑制，同一份结果不重复发两遍；受理回执路径不在列（完成后主动投递）。
+              if (answer !== null && typeof answer === 'object' && 'summary' in answer) {
+                relayedTaskIds.push(taskId);
+              }
+              // 快活失败/等补充：失败原因或「还缺什么」也在本回合交给了模型（模型会向用户
+              // 如实说明）——主动推送据此抑制，同一件事不说两遍。受理回执（running）不在列：
+              // 那些任务的结果/失败仍要靠主动推送送达。
+              const inTurnStatus = (answer as { status?: unknown } | null)?.status;
+              if (inTurnStatus === 'failed' || inTurnStatus === 'needs_input') {
+                pushSuppressedTaskIds.push(taskId);
+              }
+            }
             return answer;
           }
           // 任务只读查询：不依赖 runner，始终受理（scope 仍取宿主闭包，越权=找不到）。
@@ -1800,8 +3272,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           if (tool === TASK_RESULT_TOOL) return taskResult(args);
           // 任务治理工具：与工具面同源门控（无 runner 时不暴露、也不受理），fail-closed。
           if (taskRunner !== undefined) {
-            if (tool === TASK_CANCEL_TOOL) return taskCancel(args, taskRunner);
+            if (tool === TASK_CANCEL_TOOL) return await taskCancel(args, taskRunner, terminalObserved);
             if (tool === TASK_RESUME_TOOL) return taskResume(args, taskRunner);
+            if (tool === TASK_CONFIRM_TOOL) return taskConfirm(args, taskRunner);
           }
           // 缺口 2 臂 B：read_skill 与工具面同源门控（未注入登记表则不受理）。
           if (tool === READ_SKILL_TOOL && options.mainSkillRegistry !== undefined) {
@@ -1809,11 +3282,68 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
             const skill = await options.mainSkillRegistry.read(name);
             return { name: skill.name, content: skill.content };
           }
+          // 能力目录（A4）：与工具面同源门控（注入了非空目录才受理）。输出只含业务名 + 读/写，
+          // 绝不带 operation 名、参数名或 --（字符串守卫见 packages/agent/main-capability-surface.test.ts:66）。
+          if (tool === CAPABILITIES_TOOL && options.capabilityCatalog !== undefined && options.capabilityCatalog.length > 0) {
+            return {
+              capabilities: options.capabilityCatalog.map((entry) => ({ name: entry.name, read: entry.read, write: entry.write })),
+            };
+          }
           // CAP-01 S1：run_js 与工具面同源门控（未注入执行器则不受理），fail-closed。
           if (tool === RUN_JS_TOOL && options.runJsExecutor !== undefined) {
-            return runJsInTurn(args, runJsMemo, turnFiles, (hit) => {
+            return runJsInTurn(args, runJsMemo, (hit) => {
               lastMemoryWall = hit;
             }, signal);
+          }
+          // recalc_xlsx 与工具面同源门控（未注入或引擎不可用则不受理），fail-closed。
+          if (tool === RECALC_XLSX_TOOL) {
+            const executor = options.recalcXlsxExecutor;
+            if (executor === undefined || !executor.available) {
+              throw new Error(`Main 工具面之外的调用：${tool}`);
+            }
+            const file = typeof args.file === 'string' ? args.file : '';
+            const sheet = typeof args.sheet === 'string' ? args.sheet : undefined;
+            const exportMode = args.export === 'csv' ? 'csv' : args.export === 'none' ? 'none' : undefined;
+            if (file === '' || exportMode === undefined) {
+              throw new Error('recalc_xlsx 需要 file 与 export（csv|none）。');
+            }
+            // Codex R11-P2：调用前预检共享预算——foregroundPermit 只取一次，consume 不拒绝，
+            // 不预检则同一回合可无限次重算、绕过 taskBudget。耗尽即拒跑（fail-closed）。
+            const exhausted = foregroundPermit?.budget.exhausted();
+            if (exhausted !== undefined && exhausted !== null) {
+              throw new Error(`超出本次任务资源预算（${exhausted.reason}），recalc_xlsx 未执行。`);
+            }
+            // 结果原样交回模型（status/errorCells/valueDiffs/artifacts）；CSV 等产物由
+            // 执行器登记进 fileStore 并随 result.outputs 交回（Codex P2-4，与 run_js 同一
+            // 交付纪律）——handler 在此把产物收进 turnFiles，交付去留归宿主投递面。
+            // R4 资源账（Gap1）：LO 重算耗时入前台预算 + 结构化事件，不静默消耗预算。
+            const recalcStartedAt = Date.now();
+            const result = await executor.recalc({
+              file,
+              ...(sheet === undefined ? {} : { sheet }),
+              export: exportMode,
+              scope: fileScope,
+              ...(signal === undefined ? {} : { signal }),
+            });
+            const engineMs = result.durationMs ?? (Date.now() - recalcStartedAt);
+            foregroundPermit?.budget.consume({ calls: 1, ms: engineMs });
+            options.onRecalcCost?.({
+              engineMs,
+              status: result.status,
+              principalId: options.principalId,
+              sessionId: options.sessionId,
+            });
+            // P2-4：CSV 产物收口进本回合交付清单（与 run_js:turnFiles.push 同纪律）。
+            // 方案 A：只收可交付项——recalc 的 .values.csv 是宿主内部诊断产物
+            // （deliverable:false），不进交付面（投递口另有同一判据的最后一道闸）。
+            if (result.outputs !== undefined) {
+              turnFiles.push(
+                ...result.outputs
+                  .filter((f) => f.deliverable !== false)
+                  .map((f) => ({ fileId: f.fileId, name: f.name, bytes: f.bytes })),
+              );
+            }
+            return result;
           }
           throw new Error(`Main 工具面之外的调用：${tool}`);
         },
@@ -1821,49 +3351,112 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         onRuntimeEvent: (event) => noteRuntimeEvent(mainWindow, event),
       });
       lastMainProjection = mainResult.messages;
-      // 回合后→持久化：把本回合**新增**消息逐条增量追加到存储（Pi 单条 entry 追加 = 线性，
-      // 不重写全文），每追加成功一条推进 persistedCount。写失败 fail-open：已成功的追加保留、
-      // 剩余不再尝试、**不回滚本回合**（回复照常返回），错误经 onTranscriptError 上报。
-      if (transcriptStore !== undefined) {
-        while (persistedCount < mainResult.messages.length) {
-          try {
-            await transcriptStore.append(mainResult.messages[persistedCount]!);
-          } catch (error) {
-            options.onTranscriptError?.(error);
-            break;
-          }
-          persistedCount += 1;
-        }
-      }
+      // 转录落盘归 Pi 会话（驱动自己的 SessionManager）：宿主回合结束后**不搬运任何消息**。
       // 出口清理（v8 §7）：用户可见回复在宿主出口剥服务器路径——ask/server 同走这一道链，
       // task_result 存档被 Main 转述后同样汇到这里，一道尺盖住两种来源（2026-10-19 事故形状）。
       // 剥完为空且有文件 → 宿主话术兜底（空文本帧会让渠道一个终帧都不发，用户什么都收不到）。
       const stripped = stripServerPaths(mainResult.text);
+      // 占位话术 ≠ 模型说了（2026-11-21 Grok 审查 blocking）：注入核销/退回的判据必须是
+      // **模型原文**是否为空。宿主补的「文件已生成」「内存墙」话术非空，但那些话不是模型
+      // 说给用户听的——拿替换后的 reply 判核销，会把本回合取走的事实静默吞掉。
+      const modelSaidNothing = stripped.text.trim() === '';
       let reply = stripped.text;
       // CAP-01 ④：内存墙是宿主可确定的失败事实——用户可见话术与工具返回同一句，不让模型
       // 的自由文本掩盖（其余出口清理与兜底逻辑不变）。
       if (lastMemoryWall) reply = RUN_JS_MEMORY_EXIT_MESSAGE;
-      else if (reply.trim() === '' && turnFiles.length > 0) reply = FILES_GENERATED_NOTICE;
+      else if (modelSaidNothing && turnFiles.length > 0) reply = FILES_GENERATED_NOTICE;
       // P1（S1）：本回合最终回复逐字存档——同回合各任务行同值；空白回复/回合失败不落
       // （缺省=无最终回复存档，显示层不用执行层汇报冒充）。存档用出口清理后的最终回复
       // （用户看到什么，task_result 就是什么）。
-      // background：受理话术不落任务行（结果由 runner 在确认 completed 后经 archiveReply
+      // async：受理话术不落任务行（结果由 runner 在确认 completed 后经 archiveReply
       // 逐字存档，避免受理话术覆盖结果）。
-      if (dispatchMode !== 'background' && taskIds.length > 0 && reply.trim() !== '') {
+      if (taskDispatch !== 'async' && taskIds.length > 0 && reply.trim() !== '') {
         registry.archiveReply(taskIds, reply);
       }
       const executions = taskIds.flatMap((taskId) => registry.get(taskId, scope).executions);
+      // 注入核销（机械判据）：判据看**模型原文**是否为空——宿主占位话术（文件已生成 /
+      // 内存墙）不是模型说的，本回合取走的事实仍然没人说，必须退回队列。
+      if (modelSaidNothing) requeueUncreditedInjections();
       return {
         reply,
         taskIds,
         executions,
+        // B 切片（可观测）：本回合经 execute_operation 发起的执行次数（A2 同源计数）。
+        operations: operationsThisTurn,
+        ...(relayedTaskIds.length > 0 ? { relayedTaskIds } : {}),
+        ...(pushSuppressedTaskIds.length > 0 ? { pushSuppressedTaskIds } : {}),
+        ...(terminalObserved.length > 0 ? { terminalObservedInTurn: terminalObserved } : {}),
+        ...(retryBlockedThisTurn.length > 0 ? { retryBlocked: retryBlockedThisTurn } : {}),
+        ...(retryAllowedThisTurn.length > 0 ? { retryAllowed: retryAllowedThisTurn } : {}),
         progress,
         ...(turnFiles.length > 0 ? { files: turnFiles } : {}),
         ...(manifestBytes === undefined ? {} : { fileManifestBytes: manifestBytes }),
       };
+    } catch (error) {
+      // 本回合以异常收尾（驱动失败/回合失败）：一个用户可见字都没产出，取走的事实不核销。
+      requeueUncreditedInjections();
+      throw error;
     } finally {
       releaseForegroundPermit(foregroundPermit);
     }
+  }
+
+  /**
+   * 冷唤醒（2026-11-19 唤醒切片）：驱动**可**唤醒但实例级会话还没建（进程刚起、或会话被
+   * 丢弃）——「重启对账」正是这个形状（用户以为在办的任务在启动时被如实落 result_unknown，
+   * 而本进程还没有任何回合）。这里按与 `send()` 同一份装配参数跑**一次零工具单回合**：
+   *   · 系统提示 = 本会话 Main 提示；工具 = **空**（唤醒回合不得碰执行层，与驱动侧 wake
+   *     同一条纪律——F1）；
+   *   · 本轮输入 = 事实（最后一条 user；历史由 Pi 自己从会话文件恢复，宿主不 seed）；
+   *   · 截止 = `WAKE_TURN_MS`（单次调用量级）。
+   * 产出正文非空 = woken；空 = failed（调用方按各自的降级处置，不冒充已说）。
+   */
+  async function coldWake(factText: string): Promise<WakeResult> {
+    const result = await options.mainDriver.run({
+      systemPrompt: options.mainSystemPrompt,
+      tools: [],
+      messages: [...mainTranscript(), userMessage(factText)],
+      onStep: () => {},
+      // 零工具声明下不可达；真被调到也只给一句安全话术（不把内部原因灌进上下文）。
+      exec: async () => {
+        throw new Error('唤醒回合不提供工具。');
+      },
+      deadline: Date.now() + WAKE_TURN_MS,
+    });
+    const text = result.text.trim();
+    return text === '' ? { outcome: 'failed' } : { outcome: 'woken', text };
+  }
+
+  /**
+   * 唤醒（宿主事实 → 模型说）：把事实与回合截止转给 Main 驱动；驱动没有唤醒能力
+   * （测试替身/一次性驱动）= unavailable（调用方兜底）。驱动**可**唤醒但实例级会话还没建
+   * 时（重启后的第一次状态变化），落到 {@link coldWake} 的零工具单回合——否则「重启对账」
+   * 这种冷会话场景永远说不出话。截止 = `WAKE_TURN_MS`（单次调用量级），不是业务回合的
+   * mainTurnMs（见其定义处）。
+   */
+  async function wake(factText: string): Promise<WakeResult> {
+    const driverWake = options.mainDriver.wake;
+    if (driverWake === undefined) return { outcome: 'unavailable' };
+    // 唤醒回合保留**只读任务工具**（task_status/task_result）：这两个闭包只读 registry/scope，
+    // 不触执行层（无 client.execute / 无 runner / 无预算消费）。修 live 实测的 DSML 泄漏——
+    // 模型想核实任务状态时无工具可调，就把原生工具标记当正文吐给用户。执行类工具不授予，
+    // 驱动侧按名字机械激活 + 只读闭包隔离（见 pi-driver.wake 的 toolFace）。
+    const result = await driverWake.call(options.mainDriver, factText, {
+      deadline: Date.now() + WAKE_TURN_MS,
+      toolFace: {
+        names: [TASK_STATUS_TOOL, TASK_RESULT_TOOL],
+        exec: async (tool, args, signal) => {
+          if (tool === TASK_STATUS_TOOL) return taskStatus(args);
+          if (tool === TASK_RESULT_TOOL) return taskResult(args);
+          // 集合外工具（含所有执行类）确定性拒绝，执行层零调用。
+          throw new Error(`唤醒回合不允许调用工具：${tool}`);
+        },
+      },
+    });
+    if (result.outcome !== 'unavailable') return result;
+    // 可唤醒但会话是冷的：补一次零工具单回合（不复用驱动侧 custom message 注入——那需要
+    // 已存在的实例级会话）。
+    return await coldWake(factText);
   }
 
   return {
@@ -1871,6 +3464,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     sessionId: options.sessionId,
     transcript: () => mainTranscript(),
     send,
+    wake,
     tasks: () => registry.list(scope),
     getTask: (taskId) => registry.get(taskId, scope),
   };
@@ -1903,21 +3497,254 @@ function taskResumeTool(): DiscoveredTool {
   return { name: TASK_RESUME_TOOL, description: TASK_RESUME_TOOL_DESCRIPTION, inputSchema: TASK_RESUME_TOOL_SCHEMA };
 }
 
+function taskConfirmTool(): DiscoveredTool {
+  return { name: TASK_CONFIRM_TOOL, description: TASK_CONFIRM_TOOL_DESCRIPTION, inputSchema: TASK_CONFIRM_TOOL_SCHEMA };
+}
+
 function readSkillTool(): DiscoveredTool {
   return { name: READ_SKILL_TOOL, description: READ_SKILL_TOOL_DESCRIPTION, inputSchema: READ_SKILL_TOOL_SCHEMA };
 }
 
-function runJsTool(): DiscoveredTool {
-  return { name: RUN_JS_TOOL, description: RUN_JS_TOOL_DESCRIPTION, inputSchema: RUN_JS_TOOL_SCHEMA };
+/** Main 只读能力目录工具工厂：只返回业务名 + 读/写，形状与目录条目同源。 */
+function capabilitiesTool(): DiscoveredTool {
+  return { name: CAPABILITIES_TOOL, description: CAPABILITIES_TOOL_DESCRIPTION, inputSchema: CAPABILITIES_TOOL_SCHEMA };
 }
 
-function executeOperationTool(): DiscoveredTool {
+/**
+ * run_js 工具面（role 决定描述，schema 共用）：Main 面 out/ 不产交付物（片 2）；
+ * Worker 面 out/ 是本任务交付箱。两面的机械纪律同源，差别只在「写进哪里算交付」。
+ */
+function runJsTool(role: 'main' | 'worker'): DiscoveredTool {
   return {
-    name: EXECUTE_OPERATION_TOOL,
-    description: EXECUTE_OPERATION_TOOL_DESCRIPTION,
-    inputSchema: EXECUTE_OPERATION_TOOL_SCHEMA,
+    name: RUN_JS_TOOL,
+    description: role === 'main' ? RUN_JS_TOOL_DESCRIPTION : WORKER_RUN_JS_TOOL_DESCRIPTION,
+    inputSchema: RUN_JS_TOOL_SCHEMA,
   };
 }
+
+function recalcXlsxTool(): DiscoveredTool {
+  return {
+    name: RECALC_XLSX_TOOL,
+    description: RECALC_XLSX_TOOL_DESCRIPTION,
+    inputSchema: RECALC_XLSX_TOOL_SCHEMA,
+  };
+}
+
+// executeOperationTool() 工厂已删（2026-11-20，M4 死代码清扫）：Worker 工具面改为每 operation
+// 一个 op_* 工具后该工厂零调用点；AGENTS.md 删除纪律禁止停用却长期保留两套实现。
+// EXECUTE_OPERATION_TOOL / _DESCRIPTION / _SCHEMA 常量仍保留——它们用作内部 exec 路由键，
+// 且夹具/测试的 internal-exec-fixture 依赖（非工具面注册）。
+
+/**
+ * 动态 Worker 工具面（owner 2026-11-20）：**每个 operation 一个工具**，参数用业务字段名 +
+ * 结构化 schema；宿主把结构化值翻回执行层要的形状。Worker 不再自己拼 `--flag`。
+ *
+ * 工具名 = `op_` + operation 名安全化（非字母数字压成 `_`）：`dummy.prepare` → `op_dummy_prepare`。
+ * schema 只收非 hostOnly 参数：名字去掉 `--` 前缀；有 payload.schema 的用该 schema；
+ * 其余按声明 type 给 string/number/array（type 是展示提示，缺省 string）。
+ * 描述 = 业务能力名（可选）+ label（缺省 operation 名）+ 一句「参数按声明填」——不含 `--` /
+ * style / weight / effects / long_running 这些实现字样（守卫钉死）。capability 来自执行层声明，
+ * 只作业务展示名：让模型从业务措辞（如「导出 / 慢活」）认出该工具；缺省/空白时逐字节退回
+ * 旧形状（只有 label + 一句），调用方无 capability 的工具面不变。
+ */
+export const WORKER_OP_TOOL_PREFIX = 'op_';
+
+export function workerOperationToolName(operation: string): string {
+  return `${WORKER_OP_TOOL_PREFIX}${operation.replace(/[^A-Za-z0-9_]/g, '_')}`;
+}
+
+/** 业务参数名（schema property）→ 执行层参数声明名（可带 `--`）。只含非 hostOnly 参数。 */
+export function workerVisibleArgs(operation: {
+  args: readonly ExecutionArgDeclaration[];
+}): Array<{ field: string; declaration: ExecutionArgDeclaration }> {
+  return operation.args
+    .filter((arg) => arg.hostOnly !== true)
+    .map((declaration) => ({ field: declaration.name.replace(/^--/, ''), declaration }));
+}
+
+/** schema 里单个参数的类型：payload.schema 优先，否则按声明 type 粗分。 */
+function argJsonSchema(arg: ExecutionArgDeclaration): Record<string, unknown> {
+  if (arg.payload?.schema !== undefined) return arg.payload.schema as Record<string, unknown>;
+  const schema: Record<string, unknown> = { type: arg.type === 'number' ? 'number' : arg.type === 'array' ? 'array' : 'string' };
+  return schema;
+}
+
+export function workerOperationTool(operation: {
+  name: string;
+  label?: string;
+  capability?: string;
+  args: readonly ExecutionArgDeclaration[];
+}): DiscoveredTool {
+  const visible = workerVisibleArgs(operation);
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+  for (const { field, declaration } of visible) {
+    properties[field] = argJsonSchema(declaration);
+    if (declaration.required) required.push(field);
+  }
+  const label = operation.label !== undefined && operation.label !== '' ? operation.label : operation.name;
+  // 业务能力名只作展示（来自执行层 capability 声明）：拼在 label 前，给模型一条业务线索，
+  // 让它从用户措辞（「导出 / 慢活」）认出工具。只含业务信息，不泄漏 operation 名/--/实现字样。
+  // 缺省或空白 capability 时逐字节退回旧形状「${label}。参数按声明填。」。
+  const capability = operation.capability !== undefined && operation.capability.trim() !== '' ? operation.capability.trim() : '';
+  const description = capability === '' ? `${label}。参数按声明填。` : `${capability}：${label}。参数按声明填。`;
+  return {
+    name: workerOperationToolName(operation.name),
+    description,
+    inputSchema: {
+      type: 'object',
+      properties,
+      ...(required.length === 0 ? {} : { required }),
+      // 模型面严格（owner 2026-11-20「机制参数碰不到」）：只收声明过的业务字段名，未知字段
+      // （含 hostOnly 裸名/执行层原样名、任何 `--` 前缀键）由 Pi schema 校验 + 宿主结构化
+      // 校验双闸确定性拒绝。夹具经内部 exec 路由（execute_operation）传机制旋钮，不走此面。
+      additionalProperties: false,
+    },
+  };
+}
+
+/** 为允许集内每个 operation 生成一个工具（数量与清单一致；不重复、不漏）。 */
+export function workerOperationTools(manifest: CapabilityManifest): DiscoveredTool[] {
+  return manifest.operations.map((operation) => workerOperationTool(operation));
+}
+
+/**
+ * 工具名 → operation 声明的反查表（exec 路由用）。工具名 collisions（两个 operation 安全化后
+ * 同名）在此 fail-closed 抛错，绝不把一次工具调用路由到错的 operation。
+ */
+export function workerOpToolIndex(manifest: CapabilityManifest): Map<string, CapabilityManifest['operations'][number]> {
+  const index = new Map<string, CapabilityManifest['operations'][number]>();
+  for (const operation of manifest.operations) {
+    const toolName = workerOperationToolName(operation.name);
+    if (index.has(toolName)) {
+      throw new Error(`Worker 工具名冲突（operation 安全化后同名）：${toolName}`);
+    }
+    index.set(toolName, operation);
+  }
+  return index;
+}
+
+/**
+ * 假驱动直调兼容：fake driver 用 `input.exec(tools[0].name, {operation, args})` 时，`op_*`
+ * 工具名收到的是 `{operation,args}` 包装——解包出业务参数后**照样过严格校验**（见
+ * assertOpToolArgs）。真模型按 op_* schema 只给业务字段，`operation`/`args` 两个键在
+ * additionalProperties:false 下根本到不了这里；这条只为 fake driver 的直调兼容保留，
+ * 不是机制参数的入口（任何 `--` 键在解包后仍被拒）。
+ */
+function unwrapCompatOpArgs(args: Record<string, unknown>): Record<string, unknown> {
+  if (typeof args.operation === 'string' && args.args !== null && typeof args.args === 'object' && !Array.isArray(args.args)) {
+    return args.args as Record<string, unknown>;
+  }
+  return args;
+}
+
+/**
+ * op_* 工具参数的**结构化校验**（owner 2026-11-20「机制参数碰不到」；宿主确定性责任 B 类）。
+ *
+ * Pi 的 schema 校验（additionalProperties:false）是第一道闸；本函数是第二道闸——fake driver
+ * 直接调 `input.exec` 时不经 Pi schema，仍必须挡住任何未声明字段/机制参数。规则只有一条：
+ * 每个键必须恰好是该工具声明过的业务字段名（去 `--` 前缀、非 hostOnly）。任何 `--` 前缀键、
+ * 任何 hostOnly 裸名、任何拼错字段 → 确定性拒绝（零执行、零执行事实），错误话术不含内部词，
+ * 字段名只经 `op_tool_args_rejected` 事件进日志（取证）。
+ *
+ * 夹具需要机制旋钮（--apply/--seconds/--delay-ms 等）时走内部 exec 路由
+ * （`execute_operation` 兼容入口，不经工具面）或在执行面显式注入——不借本面透传。
+ */
+export function assertOpToolArgs(input: {
+  tool: string;
+  operation: { args: readonly ExecutionArgDeclaration[] };
+  args: Record<string, unknown>;
+  onEvent?: (event: ExecutionEvent) => void;
+}): void {
+  const allowed = new Set(workerVisibleArgs(input.operation).map(({ field }) => field));
+  const bad = Object.keys(input.args).filter((key) => key.startsWith('--') || !allowed.has(key));
+  if (bad.length === 0) return;
+  input.onEvent?.({
+    event: 'op_tool_args_rejected',
+    tool: input.tool,
+    keys: bad,
+    dashedKeys: bad.filter((key) => key.startsWith('--')).length,
+  });
+  throw new Error(OP_TOOL_ARGS_REJECTED_MESSAGE);
+}
+
+/**
+ * 工具调用参数 → 执行层 args：业务字段名映射回执行层参数名（`collection` → `--collection`）。
+ * 只接受调用方给的**非 hostOnly 业务字段**（映射层已无 hostOnly 透传分支——owner 2026-11-20：
+ * 机制参数宿主补齐或内部 exec 路由注入，op_* 工具面永不传）。hostOnly 的宿主责任：
+ *   · `--confirmation`：确认回合由宿主注入句柄（调用方永远看不到句柄）；
+ *   · `--count`：从 records 条数自算（执行层口径）；
+ *   · 其余机制参数（哨兵/测试旋钮）在 op_* 路径缺省不填——要注入请走内部 exec 路由。
+ */
+export function mapWorkerOperationArgs(input: {
+  operation: { args: readonly ExecutionArgDeclaration[] };
+  args: Record<string, unknown>;
+  confirmationHandle?: string;
+}): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  const declarations = input.operation.args;
+  // 业务参数：字段名 → 执行层声明名（`collection` → `--collection`）。只认去前缀后的业务字段名；
+  // 执行层原样名（带 `--`）与未知键都不在这里透传（由 assertOpToolArgs 在工具面确定性拒绝）。
+  const byField = new Map<string, ExecutionArgDeclaration>();
+  for (const declaration of declarations) {
+    if (declaration.hostOnly === true) continue;
+    byField.set(declaration.name.replace(/^--/, ''), declaration);
+  }
+  for (const [key, value] of Object.entries(input.args)) {
+    const declaration = byField.get(key);
+    if (declaration !== undefined) result[declaration.name] = value;
+  }
+  // 机制参数：宿主补齐；--confirmation / --count 由宿主计算，忽略调用方给的任何值。
+  const records = input.args['records'];
+  const recordCount = Array.isArray(records) ? records.length : undefined;
+  for (const declaration of declarations) {
+    if (declaration.hostOnly !== true) continue;
+    const bare = declaration.name.replace(/^--/, '');
+    if (bare === 'confirmation') {
+      if (input.confirmationHandle !== undefined && input.confirmationHandle !== '') {
+        result[declaration.name] = input.confirmationHandle;
+      }
+    } else if (bare === 'count' && recordCount !== undefined) {
+      // records 在 → 从条数自算（宿主口径，忽略任何调用方值）。占位记录的旋钮走内部 exec 路由。
+      result[declaration.name] = recordCount;
+    }
+  }
+  return result;
+}
+
+/**
+ * 提案载荷落底账前的剥离（2026-11-21 Grok 审查 blocking）：宿主经 mapWorkerOperationArgs
+ * 注入的确认句柄（hostOnly `--confirmation`，上面「调用方永远看不到句柄」）只在宿主→执行层
+ * 通道流动；底账提案的 args 会经 renderConfirmationResumeFact **原样进下一轮 Worker 委派正文**，
+ * 句柄因此会进模型面。落底账前把裸名为 `confirmation` 的键剥掉（与注入端同一个裸名判据），
+ * 其余字段逐字保留（不透明数据，宿主不解析）。
+ */
+export function proposalPayloadOf(callArgs: Record<string, unknown>): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(callArgs)) {
+    if (key.replace(/^--/, '') === 'confirmation') continue;
+    payload[key] = value;
+  }
+  return payload;
+}
+
+/**
+ * 后台 Worker 任务文件清单的引用方式（与 inline 的 run_js.inputs 同源，另加执行层的声明
+ * 文件参数：后台 Worker 的 execute_operation 文件参数由宿主替换为任务目录内的物化路径）。
+ */
+export const BACKGROUND_FILE_MANIFEST_HINT =
+  '以下文件已随任务交付；处理文件时用 run_js 的 inputs 按 fileId 引用，或调用 execute_operation 时按清单里声明的文件参数引用（会替换为本任务目录内的实际路径）';
+
+/**
+ * 后台任务文件桥工厂（按任务身份构造）：装配层注入 fileStore/platformRoot/内层客户端，
+ * runtime 只认这个面。每回合按 (principalId, sessionId, taskId) 建桥——任务副本按
+ * file_refs.task_id 解析（Worker 侧只物化当前任务的副本，从不读 Main 侧原文件）。
+ */
+export type BackgroundTaskBridgeFactory = (input: {
+  principalId: string;
+  sessionId: string;
+  taskId: string;
+}) => TaskExecutionBridge;
 
 export interface TaskExecutorOptions {
   /** 执行层客户端（后台执行面的专属实例；能力快照在本工厂内取一次）。 */
@@ -1943,6 +3770,32 @@ export interface TaskExecutorOptions {
    * 只有只读 operation 的重试可以安全重发；写操作重试走回放/待核对。
    */
   readOnlyOperations?: readonly string[];
+  /**
+   * 片 1（owner 定：交付物只从 Worker 出）：run_js 执行器端口（装配层构造注入）。
+   * 注入后后台 Worker 工具面 = execute_operation + run_js（任务作用域：输入只解析本任务
+   * 副本、产物登记绑定本任务）；缺省不注入 = Worker 工具面与现行逐字节相同（零变化）。
+   */
+  runJsExecutor?: RunJsExecutor;
+  /**
+   * 后台任务文件桥（CAP-01 S2 后台面）：注入后本执行器的 Worker 委派带任务文件清单
+   * （任务副本 fileId/name/bytes），execute_operation 经桥把任务副本物化到
+   * `<platformRoot>/tmp/task_<id>/in` 并按执行层声明的文件参数替换值。
+   * 未注入 = 零变化缺省（后台 Worker 无文件面）。
+   */
+  backgroundTaskBridge?: BackgroundTaskBridgeFactory;
+  /** 文件引用被拒（桥物化失败）的机械 reason 观察点；只进日志，不进用户话术。 */
+  onFileRefUnavailable?: (reason: string) => void;
+  /**
+   * 大响应文件化阈值（字节；装配层注入 `resolveRuntimeConfig` 的解析值，单一配置源 =
+   * resource-policy）。缺省 65536（与策略缺省同值，纯内存嵌入/测试用）。
+   */
+  oversizeDataBytes?: number;
+  /** 大响应已落盘（只进日志）；缺省静默。 */
+  onExecutionResultFileized?: (event: ExecutionResultFileizedEvent) => void;
+  /** 大响应未文件化（无桥/登记失败，已 fail-open 原样返回；只进日志）；缺省静默。 */
+  onExecutionResultOversizeUnhandled?: (event: ExecutionResultOversizeUnhandledEvent) => void;
+  /** 长任务异步（契约 v4）的结构化事件出口（只进日志；缺省静默）。 */
+  onExecutionEvent?: (event: ExecutionEvent) => void;
 }
 
 function isAbortErrorLike(error: unknown): boolean {
@@ -1963,19 +3816,214 @@ function pendingQuestionFrom(outcome: Extract<ExecutionOutcome, { status: 'needs
 }
 
 /**
+ * 携带「差什么」绑定诊断、需要如实转述给 Worker 的拒绝码（2026-11-20 fix/visible-contract）。
+ *
+ * 判据用**码表**（与 classifyFailure 同源风格），不嗅探消息文案语义——红线是不解析执行层消息
+ * 的语义。列进来的码 = 执行层明确给出了 prepared/got 对比、Worker 据此才能把参数改对的那类；
+ * 其余拒绝（GATE_REFUSE 等权限/口径类）继续走 failureMessageFor 的中文用户话术，保持
+ * 「如实转述没权限」这类用户级不变量（wecom-sim W-11）不被英文原文顶掉。
+ */
+const DIAGNOSTIC_REFUSAL_CODES: ReadonlySet<string> = new Set(['CONFIRMATION_BINDING_MISMATCH']);
+
+/**
+ * 执行层业务诊断的**机械清理**（2026-11-20 fix/visible-contract）：只做三件事——剥前置技术码
+ * token、剥服务器路径（与用户可见回复同一把尺 stripServerPaths）、去机构自称「执行层/执行端」。
+ * **不解析语义、不改业务字段**：参数结构名（records / collection / window / count / 确认句柄）、
+ * prepared/got 对比、错误原文一律原样保留——「差什么」的可诊断信息就在这段原文里，宿主
+ * 如实转述即「可执行下一步」（AGENTS 如实交付 / 失败归宿规则）。
+ *
+ * 为什么诊断进 Worker 可见面而码不进：码是内部技术形态；业务诊断原文
+ * （prepared collection=… got collection=…）是执行层给调用方的反馈，模型据此才能在下一轮
+ * 把参数改对——7 连红里 5 次沿用同一错形正是因为这段原文只进日志。适配器把整行 stderr
+ * （含前置码 token）塞进 error.message，这里把前置码 token 机械剥掉（技术码只进日志）。
+ */
+function cleanExecutorDiagnostic(message: string): string {
+  // 1) 前置技术码 token（`CONFIRMATION_BINDING_MISMATCH Confirmation binding…` 的首段）。
+  let text = message.replace(/^[A-Z][A-Z0-9_]*\s+/u, '');
+  // 2) 服务器路径剥离（可能与用户可见回复同源命中；命中为空时 stripServerPaths 原样返回）。
+  text = stripServerPaths(text).text.trim();
+  // 3) 机构自称不许出现在可见面：只做替换，不触碰任何业务/参数名。
+  text = text.replace(/执行层|执行端/gu, '对方');
+  return text;
+}
+
+/**
+ * 模型可见的执行结果（单一实现：前台会话 execute_operation 与后台 TaskExecutor 共用）：
+ * needs_confirmation 只给机械摘要（summary/expiresAt）与 data——句柄是宿主持有的确认凭据，
+ * 不进模型转录/工具结果，模型无法伪造或转交；completed / needs_input / accepted 原样
+ * （逐字节不变）；**failed / refused 不再逐字透传**（2026-11-19 模型可见面收口）——执行层
+ * 原始码是内部形态（用户不需要、也不该看到技术码），模型只见 `{status, kind, note}`：
+ * kind 来自 classifyFailure（码表归类）。2026-11-20（fix/visible-contract）补：**refused 且
+ * 执行层给了业务可诊断消息时，note 改用清理后的业务诊断原文**（替代通用「没办成」），
+ * 让 Worker 下一轮能据「差什么」改对参数；failed 与「执行层没给有用消息」的拒绝仍走
+ * failureMessageFor 的通用话术。原始 code 只进日志（调用方经 onExecutionEvent 落
+ * `execution_failure_classified`，见 projectWorkerOutcome）。
+ */
+function toModelVisibleOutcome(
+  outcome: ExecutionOutcome,
+  input: {
+    operation: string;
+    /** 失败/拒绝的归类观察点（只进日志）；缺省静默 = 与改动前一致的纯投影路径。 */
+    onClassified?: (event: { code: string; kind: UserFacingFailureKind }) => void;
+  },
+): Record<string, unknown> {
+  if (outcome.status !== 'needs_confirmation') {
+    if (outcome.status !== 'failed' && outcome.status !== 'refused') {
+      return outcome as unknown as Record<string, unknown>;
+    }
+    const kind = classifyFailure({ code: outcome.error.code, status: outcome.status });
+    input.onClassified?.({ code: outcome.error.code, kind });
+    // 仅「带差什么诊断的拒绝码」如实转述业务诊断原文；其余失败/拒绝沿用通用中文话术。
+    // 码表判定（不看文案语义）；诊断只做机械清理（前置码 token + 路径 + 机构名）。
+    const diagnostic = outcome.status === 'refused' && DIAGNOSTIC_REFUSAL_CODES.has(outcome.error.code)
+      ? cleanExecutorDiagnostic(outcome.error.message)
+      : '';
+    return {
+      status: outcome.status,
+      kind,
+      note: diagnostic !== '' ? diagnostic : failureMessageFor(kind).text,
+    };
+  }
+  return {
+    status: 'needs_confirmation',
+    summary: outcome.confirmation.summary,
+    ...(outcome.confirmation.expiresAt === undefined ? {} : { expiresAt: outcome.confirmation.expiresAt }),
+    ...(outcome.data === undefined ? {} : { data: outcome.data }),
+  };
+}
+
+/** 执行结果内联上限的执行侧缺省（与 resource-policy 缺省同值；注入策略时读解析值）。 */
+const DEFAULT_OVERSIZE_DATA_BYTES = 64 * 1024;
+
+/** 大响应已落为任务文件（只进日志）：bytes = 触发阈值时的 outcome JSON 字节数。 */
+export interface ExecutionResultFileizedEvent {
+  readonly taskId: string;
+  readonly operation: string;
+  readonly bytes: number;
+  readonly fileId: string;
+}
+
+/** 大响应未文件化（无桥/登记失败，已 fail-open）：bytes = 触发阈值时的 outcome JSON 字节数。 */
+export interface ExecutionResultOversizeUnhandledEvent {
+  readonly taskId: string;
+  readonly operation: string;
+  readonly bytes: number;
+}
+
+/** 任务文件名（机械可读、不含内部路径）：只保留安全字符，长度有界。 */
+function oversizeDataFileNameOf(operation: string): string {
+  const safe = operation.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80);
+  return `result-${safe === '' ? 'operation' : safe}.json`;
+}
+
+/**
+ * Worker 结果投影（大响应文件化，2026-11-19）。
+ *
+ * 背景：执行层结果是 in-band 进模型上下文的（工具结果 = data 原样投影、无截断），一次查回
+ * 几千行明细就把上下文打满。判据刻意窄：
+ *   · 只对 `completed` 生效——needs_confirmation / needs_input 的既有语义与脱敏规则不变，
+ *     这两个态**不落盘**（它们是用户/执行层的交互事实，不是可延迟读取的明细）；
+ *   · 阈值 = `runtime.oversizeDataBytes`（单一配置源 = resource-policy 解析值）；
+ *   · 超过阈值 → 完整 `data` 写成**任务作用域**文件（现有回程登记通道，不新增第二套文件
+ *     通道），模型只拿 `{status, oversize, bytes, fileId, note}`；明细由 run_js 的 inputs
+ *     按 fileId 读取；
+ *   · 未注入文件桥 / 登记失败 → **fail-open**：原样返回并记 `oversize_unhandled`
+ *     （不因为省上下文而阻塞业务）。
+ *
+ * bytes 口径 = `JSON.stringify(outcome)` 的 UTF-8 字节数（触发阈值的那次测量）。
+ */
+async function projectWorkerOutcome(
+  outcome: ExecutionOutcome,
+  input: {
+    readonly taskId: string;
+    readonly operation: string;
+    readonly thresholdBytes: number;
+    readonly bridge?: TaskExecutionBridge;
+    readonly onFileized?: (event: ExecutionResultFileizedEvent) => void;
+    readonly onUnhandled?: (event: ExecutionResultOversizeUnhandledEvent) => void;
+    /** 失败/拒绝归类观察点（只进日志；缺省静默）。 */
+    readonly onClassified?: (event: { code: string; kind: UserFacingFailureKind }) => void;
+  },
+): Promise<Record<string, unknown>> {
+  if (outcome.status !== 'completed') return toModelVisibleOutcome(outcome, { operation: input.operation, onClassified: input.onClassified });
+  let bytes: number;
+  try {
+    bytes = Buffer.byteLength(JSON.stringify(outcome), 'utf8');
+  } catch {
+    // 契约外的不可序列化 data：不引入新行为，交回既有投影（与原路径一致）。
+    return toModelVisibleOutcome(outcome, { operation: input.operation, onClassified: input.onClassified });
+  }
+  if (bytes <= input.thresholdBytes) return toModelVisibleOutcome(outcome, { operation: input.operation, onClassified: input.onClassified });
+  const unhandled = (): Record<string, unknown> => {
+    input.onUnhandled?.({ taskId: input.taskId, operation: input.operation, bytes });
+    return toModelVisibleOutcome(outcome, { operation: input.operation, onClassified: input.onClassified });
+  };
+  if (input.bridge === undefined) return unhandled();
+  let dataJson: string | undefined;
+  try {
+    dataJson = JSON.stringify(outcome.data);
+  } catch {
+    return unhandled();
+  }
+  // completed 没有 data 时没有可落盘的明细（阈值只可能被其它字段推过）；不伪造空文件。
+  if (typeof dataJson !== 'string') return unhandled();
+  try {
+    const name = oversizeDataFileNameOf(input.operation);
+    const registration = await input.bridge.registerReturnedFiles([
+      { name, content: Buffer.from(dataJson, 'utf8').toString('base64') },
+    ]);
+    const file = registration.files[0];
+    if (file === undefined) return unhandled();
+    input.onFileized?.({ taskId: input.taskId, operation: input.operation, bytes, fileId: file.fileId });
+    return {
+      status: 'completed',
+      oversize: true,
+      bytes,
+      fileId: file.fileId,
+      note: `结果较大，已落为任务文件 ${file.name}；需要明细请用 run_js 的 inputs 按 fileId 读取`,
+    };
+  } catch {
+    // 登记被拒（size_limit 等）/桥抛错：不阻塞业务，退化为原样返回。
+    return unhandled();
+  }
+}
+
+/**
+ * pendingQuestion 的对外投影（task_status / task_result）：写操作提案只暴露机械摘要与有效期，
+ * **去掉 handle 与 operation**——句柄留底账（S3 透传用），不给模型/用户可见面。
+ */
+function pendingQuestionView(question: PendingQuestion): Record<string, unknown> {
+  const { confirmation, ...rest } = question;
+  if (confirmation === undefined) return rest;
+  return {
+    ...rest,
+    confirmation: {
+      summary: confirmation.summary,
+      ...(confirmation.expiresAt === undefined ? {} : { expiresAt: confirmation.expiresAt }),
+    },
+  };
+}
+
+/**
  * 后台单回合执行器（P6 TaskExecutor 的生产实现；每次派发新建 Worker 回合）：
  *   · 转录隔离结构性满足：只持有本次任务投影（request/answer），不接触 Main 会话转录；
- *   · 执行经 `execute_operation` 唯一工具 + 宿主生成 requestId，事实写 taskRegistry.noteExecution；
+ *   · 执行经 `execute_operation` +（注入 runJsExecutor 时）`run_js`（任务作用域，片 1）；
+ *     宿主生成 requestId，事实写 taskRegistry.noteExecution；
  *   · 逐回合机械判定（不替执行端做 task 级二次判定）：
  *       中止/abort → cancelled；截止未产出 → timed_out；空汇报 → failed；
  *       执行层 needs_input → needs_input（missing 原样转述）；
+ *       本轮最后一条非只读执行 needs_confirmation → needs_confirmation（句柄随问题落底账）；
+ *       同回合 prepare→commit 被挡（存在提案且所有 failed/refused 都是 CONFIRMATION_REQUIRED）
+ *       → needs_confirmation（owner 2026-11-19：不是 failed——见 execute 内 selfConfirmBlockedRoundOf）；
  *       零执行 → failed（不得报 completed）；任一非 completed → failed（原因机械合成）；
- *       全部 completed → completed{resultText}（结果存档由 runner settle 经 archiveReply 承接）。
+ *       全部 completed → completed{resultText, files?}（结果存档由 runner settle 经 archiveReply
+ *       承接；files = Worker 产出的任务作用域交付物，装配方按它投递）。
  *
- * 写确认边界：needs_confirmation 的会话级句柄表与下一回合原话透传只接在**前台会话**
- * （createSession 的 send 回合）上——后台单回合执行器没有「下一回合」概念，也不持有
- * 用户原话。后台模式打开写面时，需要确认的写操作会确定性落 failed（不谎报 completed）；
- * 写确认的产品链路当前由 inline 派发承接（登记见本切片说明，不在此预造后台确认状态机）。
+ * 写确认边界（S1 起）：后台单回合执行器把 needs_confirmation 识别为 needs_confirmation 结局
+ * （不是 failed），句柄/摘要随 runner 落 waiting_user 底账（复用既有等待形状，不新状态）；
+ * 回给 Worker 的工具结果与前台同一套脱敏投影（toModelVisibleOutcome），Worker 永远看不到
+ * 句柄。**句柄只经确认路径透传**（2026-11-19 显式确认切片）：只有 `runner.confirm()`（用户
+ * 明确确认）会把底账提案注入本执行器；`runner.resume()`（改口径/补信息）不带句柄。
  */
 export async function createTaskExecutor(options: TaskExecutorOptions): Promise<TaskExecutor> {
   const manifest = await options.client.capabilities();
@@ -1985,20 +4033,136 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
     throw new Error(`允许集合不在能力快照里（fail-closed）：${missingAllowed.join('、')}`);
   }
   const allowed = new Set(options.allowedOperations);
+  // 模型可见面收口（2026-11-19，B 类最小边界；与 createSession 同源）：执行层声明
+  // model_visible:false 的 operation 从允许集合剔除——不进后台 Worker 委派清单，模型凭
+  // 记忆硬调也在发起执行前被确定性拒绝（OPERATION_NOT_PERMITTED_MESSAGE，零执行事实）。
+  for (const operation of manifest.operations) {
+    if (operation.model_visible === false) allowed.delete(operation.name);
+  }
   const workerManifest: CapabilityManifest = {
     contractVersion: manifest.contractVersion,
     operations: manifest.operations.filter((operation) => allowed.has(operation.name)),
   };
+  // Worker 工具面 = 所有**模型可见** operation 的 op_* 工具（model_visible:false 的连工具都不给，
+  // 结构性不可调）。是否真正可执行仍由 exec 里的允许集合在发起前裁决——这与旧的通用
+  // execute_operation 语义一致：只读部署里写工具仍在面上、调用被宿主确定性拒绝（零执行事实）。
+  const workerToolManifest: CapabilityManifest = {
+    contractVersion: manifest.contractVersion,
+    operations: manifest.operations.filter((operation) => operation.model_visible !== false),
+  };
+  const opToolIndex = workerOpToolIndex(workerToolManifest);
   const workerTurnMs = options.workerTurnMs ?? DEFAULT_WORKER_TURN_MS;
+  // 大响应文件化阈值：装配层注入解析值；未注入（测试/嵌入）用执行侧同值缺省。
+  const oversizeDataBytes = options.oversizeDataBytes ?? DEFAULT_OVERSIZE_DATA_BYTES;
   const now = options.now ?? Date.now;
   const readOnlyOperations = new Set(options.readOnlyOperations ?? []);
+  /** 契约 v4：accepted 只允许出现在这些声明 long_running 的 operation 上。 */
+  const longRunningOperations = new Set(
+    workerManifest.operations.filter((operation) => operation.long_running === true).map((operation) => operation.name),
+  );
 
   return {
     async execute(task, context): Promise<TaskExecutionOutcome> {
-      const recorded: Array<{ operation: string; outcome: ExecutionOutcome }> = [];
+      /**
+       * 本回合的执行事实（判定与审计同源）。
+       * `args` 只用于**「同对象」判据**（成功后重复写尝试的归类，对象抽取复用 A2b 锁的
+       * `retryObjectOf`）——不进底账、不进模型/用户可见面。
+       */
+      const recorded: RecordedExecution[] = [];
+      /**
+       * 本回合被**宿主**在发起前拒绝的 operation（允许集合之外）。它不产生执行事实
+       * （没有到达执行层），但会改变零执行时的失败话术：权限问题不能说成「模型没干活」。
+       */
+      const hostRefusedOperations: string[] = [];
       // U3：本交办内的重放窗口（只由 Worker 驱动的原生事件推进）。
       const workerWindow = newAttemptWindow();
       let unresolved = false;
+      /** 载荷型参数 lint 的本回合失败计数（键 = operation）；随本次执行丢弃。 */
+      const payloadLintFailures = new Map<string, number>();
+      /**
+       * A2b 同对象确定性失败锁（与前台 inline 会话**同一份实现**，见 deterministic-retry-lock.ts）：
+       * 本回合（本次 execute）内，执行层没有显式说可重试的失败对象，后续换参数再试一律不发起。
+       * 每个后台回合独立新建、回合结束即丢弃——不跨回合记忆。
+       */
+      const retryLock = createDeterministicRetryLock();
+      // 片 1：本任务的交付收集（Worker run_js 产物登记事实）与委派级幂等 Map。
+      // 全部随本次执行创建、随本次执行丢弃（未注入执行器 = 不参会、零变化）。
+      const taskFiles: TurnFileRef[] = [];
+      // CAP-01 S2 后台文件面：按任务身份建桥（任务副本按 file_refs.task_id 解析）；未注入
+      // = 零变化（raw client、无文件清单）。清单可能在 waiting_user 续跑时含此前产物，
+      // 与任务文件面语义一致——Worker 只解析当前任务的绑定行。
+      const taskBridge = options.backgroundTaskBridge?.({
+        principalId: task.principalId,
+        sessionId: task.sessionId,
+        taskId: task.taskId,
+      });
+      const executionClient = taskBridge?.client ?? options.client;
+      // 契约 v4：续跑回合先把 wait 结果走同一套回程登记（任务作用域文件；大日志落文件），
+      // 再取任务文件清单——登记出来的 fileId 因此出现在本次委派清单里，Worker 直接引用。
+      const resumedOperation = task.resumedOperation;
+      const resumedOutcome = resumedOperation === undefined
+        ? undefined
+        : await prepareResumedLongTask(
+          resumedOperation,
+          taskBridge,
+          options.onExecutionEvent,
+          options.onFileRefUnavailable,
+          taskFiles,
+        );
+      if (resumedOperation !== undefined && resumedOutcome !== undefined) {
+        // 续跑回合的「本回合执行事实」= 执行层 wait 返回的终态（零 exec 也算执行过，
+        // 不判 unexecuted）；Worker 后续的 run_js/查询照常追加。
+        recorded.push({
+          operation: resumedOperation.operation,
+          outcome: resumedOutcome,
+          dispatchKey: resumedOperation.dispatchKey,
+        });
+      }
+      const delegationFiles: TurnFileRef[] = (taskBridge?.taskFiles() ?? []).map((file) => ({
+        fileId: file.fileId,
+        name: file.name,
+        bytes: file.bytes,
+      }));
+      const runJsMemo = new Map<string, RunJsOutput>();
+      /**
+       * 确认路径透传（写确认，2026-11-19 显式确认切片）：**只有 `runner.confirm()`** 会在
+       * answerResumes 之前从底账取出提案并注入 task.pendingConfirmation——`runner.resume()`
+       * （补充/改口径）永不带它。所以这里的 pendingConfirmation **只可能来自「用户明确确认」**：
+       *   · 本回合新造的提案不在其中，所以「同回合 prepare 后立刻 commit」结构性不会拿到句柄；
+       *   · resume（改口径）回合也不在其中——旧提案作废，Worker 重新提案是允许且期望的；
+       *   · 只读调用不携带（读调用不会产生待确认写操作；执行层也不为读发放确认）；
+       *   · 句柄随**每条非只读执行**原样交给执行层（去掉旧的「一轮只发一次」闸：
+       *     Worker 第一句常是 prepare、真正 commit 在后面，句柄被 prepare 消耗会让 commit
+       *     拿不到，必然 CONFIRMATION_REQUIRED）。**一次性/防重放由执行层自己保证**；
+       *   · 宿主不解释句柄、不判断用户是否在确认——语义归执行层（它校验句柄与提案绑定）。
+       */
+      const pendingConfirmation = task.pendingConfirmation;
+      // 确认路径·句柄已过期（owner 2026-11-19）：不判失败、不结束任务——接续一个回合让 Worker
+      // 重新生成同一提案；不带旧句柄（与 pendingConfirmation 互斥）。
+      const confirmationExpired = task.confirmationExpired === true;
+      const workerRunJsTurn = createWorkerRunJsTurn({
+        ...(options.runJsExecutor === undefined ? {} : { executor: options.runJsExecutor }),
+        // 可信身份取自任务行（底账持有），不取模型参数。
+        scope: { principalId: task.principalId, sessionId: task.sessionId },
+        registry: options.registry,
+        // 片 1：run_js 是真实执行——计入本回合执行事实（零执行判定/失败原因同源），
+        // 否则「只靠脚本完成」的任务会被判未发起执行、「脚本失败 + 汇报成功」会假绿。
+        onScriptOutcome: ({ ok, timeout }) => {
+          recorded.push({
+            operation: RUN_JS_TOOL,
+            outcome: ok
+              ? { status: 'completed', data: {} }
+              : {
+                status: 'failed',
+                error: {
+                  code: timeout ? 'run_js_timeout' : 'run_js_failed',
+                  message: timeout ? 'run_js 脚本超时被终止' : 'run_js 脚本以非零退出码结束',
+                  retryable: false,
+                },
+              },
+          });
+        },
+      });
       const exec = async (
         tool: string,
         args: Record<string, unknown>,
@@ -2006,16 +4170,73 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       ): Promise<unknown> => {
         // 取消信号：Pi 回合的 abort signal（父级取消 + 截止）优先；驱动未传时回落到任务信号。
         const signal = execSignal ?? context.signal;
-        if (tool !== EXECUTE_OPERATION_TOOL) throw new Error(`Worker 工具面之外的调用：${tool}`);
-        const operation = typeof args.operation === 'string' ? args.operation : '';
-        if (operation === '') throw new Error('execute_operation 缺少 operation。');
-        if (!allowed.has(operation)) {
-          throw new Error(`「${operation}」不在本轮允许集合内，未发起执行。`);
+        if (tool === RUN_JS_TOOL) {
+          // 与工具面同源门控（未注入执行器 = fail-closed；不进底账、不产生文件）。
+          if (options.runJsExecutor === undefined) throw new Error(`Worker 工具面之外的调用：${tool}`);
+          return workerRunJsTurn(task.taskId, args, runJsMemo, taskFiles, signal);
         }
-        const rawArgs = args.args;
-        const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
-          ? (rawArgs as Record<string, unknown>)
-          : {};
+        // owner 2026-11-20：op_<operation> 结构化调用 → 结构化校验（未知键/机制参数裸名/
+        // `--` 前缀键确定性拒绝）→ 翻回执行层 args。execute_operation 仅为内部兼容路由保留
+        // （确定性脚本夹具直调；真实模型工具面已无它）；机制旋钮走它、不经 op_* 工具面。
+        let operation: string;
+        let baseCallArgs: Record<string, unknown>;
+        const opDeclaration = opToolIndex.get(tool);
+        if (opDeclaration !== undefined) {
+          const opArgs = unwrapCompatOpArgs(args);
+          assertOpToolArgs({ tool, operation: opDeclaration, args: opArgs, onEvent: options.onExecutionEvent });
+          operation = opDeclaration.name;
+          const confirmation = pendingConfirmation === undefined || readOnlyOperations.has(operation)
+            ? undefined
+            : { handle: pendingConfirmation.handle };
+          baseCallArgs = mapWorkerOperationArgs({
+            operation: opDeclaration,
+            args: opArgs,
+            ...(confirmation === undefined ? {} : { confirmationHandle: confirmation.handle }),
+          });
+        } else {
+          if (tool !== EXECUTE_OPERATION_TOOL) throw new Error(`Worker 工具面之外的调用：${tool}`);
+          operation = typeof args.operation === 'string' ? args.operation : '';
+          if (operation === '') throw new Error('execute_operation 缺少 operation。');
+          const rawArgs = args.args;
+          baseCallArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
+            ? (rawArgs as Record<string, unknown>)
+            : {};
+        }
+        if (!allowed.has(operation)) {
+          // 发起前拒绝：零执行事实，但记下来——零执行时的失败话术要指向权限，不是「没干活」。
+          hostRefusedOperations.push(operation);
+          throw new Error(OPERATION_NOT_PERMITTED_MESSAGE);
+        }
+        // 载荷型参数装信封（宿主侧；发起执行之前）：模型给结构化值 → 宿主 lint+落盘 → 路径替换。
+        // 失败（lint 未过/超上限）在此抛出——不发起执行、不落执行事实。
+        const callArgs = preparePayloadArgs({
+          operation,
+          args: baseCallArgs,
+          manifest: workerManifest,
+          taskId: task.taskId,
+          bridge: taskBridge,
+          failures: payloadLintFailures,
+          onEvent: options.onExecutionEvent,
+        });
+        // A2b 同对象确定性失败锁（发起前拒；不发起执行、不落执行事实）——键 + 判定与前台
+        // inline 同一份（本次 execute 内该 (operation, 对象) 已被判确定性失败 → 不再打执行层）。
+        const blockedRetry = retryLock.before(operation, callArgs);
+        if (blockedRetry !== undefined) {
+          options.onExecutionEvent?.({
+            event: 'execution_retry_blocked',
+            taskId: task.taskId,
+            operation: blockedRetry.block.operation,
+            object: blockedRetry.block.object,
+            code: blockedRetry.block.code,
+            declaredRetryable: blockedRetry.block.declaredRetryable ?? 'unset',
+          });
+          // 模型可见面：业务话术（复用 failureMessageFor 的唯一话术来源；内部原因/原始码不进
+          // 模型文本），让 Worker 据此如实收尾，不再换参数撞执行层。宿主侧故障码归 host_fault，
+          // 其余按 executor_failed（用户侧只允许「没办成 / 我这边没弄好」这类业务语言）。
+          const classified = classifyFailure({ code: blockedRetry.block.code, status: 'failed' });
+          const kind: UserFacingFailureKind = classified === 'host_fault' ? 'host_fault' : 'executor_failed';
+          throw new Error(failureMessageFor(kind).text);
+        }
         const run = await claimAndRunOperation({
           registry: options.registry,
           readOnlyOperations,
@@ -2027,12 +4248,54 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           execute: async (dispatchKey) => {
             // requestId 由宿主生成、每次调用换号（只作追踪）；dispatchKey 是操作身份，不换。
             const requestId = `req_${randomUUID()}`;
-            const outcome = await options.client.execute(
-              { requestId, dispatchKey, operation, args: callArgs },
-              { signal },
-            );
+            // 确认路径（只有 task_confirm 才会注入 pendingConfirmation）：句柄随本回合每条非只读
+            // 执行透传（不再一轮只发一次——prepare 先消耗句柄会让后续 commit 拿不到；一次性/
+            // 防重放归执行层自己保证）。resume（改口径）回合 pendingConfirmation 恒为 undefined。
+            const confirmation = pendingConfirmation === undefined || readOnlyOperations.has(operation)
+              ? undefined
+              : { handle: pendingConfirmation.handle, userText: task.answer ?? '' };
+            let outcome: ExecutionOutcome;
+            try {
+              outcome = await executionClient.execute(
+                {
+                  requestId,
+                  dispatchKey,
+                  operation,
+                  args: callArgs,
+                  ...(confirmation === undefined ? {} : { confirmation }),
+                },
+                { signal },
+              );
+            } catch (error) {
+              // 桥物化失败（任务副本不可读）与 inline 同一话术：机械 reason 只进日志，
+              // Worker 与用户不见存在性/状态差异（v8 §4）。
+              if (error instanceof FileRefUnavailableError) {
+                options.onFileRefUnavailable?.(error.reason);
+                throw new Error(FILE_INPUT_UNAVAILABLE_MESSAGE);
+              }
+              throw error;
+            }
+            // 执行层已收到本次透传：句柄是否真的被接受由执行层回执说明（一次性/防重放
+            // 归执行层，宿主不拦截复用）；宿主不判断确认语义。
             // 取消后到达的回执不落执行事实：任务已按取消处置，迟到的成功不得冒充本回合结果。
             if (signal.aborted) throw abortError();
+            // 契约 v4：accepted 只允许出现在声明 long_running 的 operation 上。未声明却返回 =
+            // 协议违约：落 failed（账行不落 accepted）并记事件，绝不把半截句柄交给宿主。
+            if (outcome.status === 'accepted' && !longRunningOperations.has(operation)) {
+              options.onExecutionEvent?.({
+                event: 'execution_accepted_undeclared',
+                taskId: task.taskId,
+                operation,
+                operationId: outcome.operationId,
+              });
+              outcome = {
+                status: 'failed',
+                error: {
+                  code: 'EXECUTION_PROTOCOL_VIOLATION',
+                  message: '平台尚未支持长任务却返回了受理（数据异常）。',
+                },
+              };
+            }
             options.registry.noteExecution(task.taskId, {
               requestId,
               operation,
@@ -2043,8 +4306,25 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
             return outcome;
           },
         });
+        // A2b 记录（与前台 inline 同源）：执行层没有显式说可重试的失败 → 记入本回合锁；
+        // 显式 retryable:true（瞬时故障）→ 放行并留「为什么还在试」的可见事实。
+        const allowedRetry = retryLock.after(operation, callArgs, run.outcome);
+        if (allowedRetry !== undefined) {
+          options.onExecutionEvent?.({
+            event: 'execution_retry_allowed',
+            taskId: task.taskId,
+            operation: allowedRetry.operation,
+            object: allowedRetry.object,
+            code: allowedRetry.code,
+          });
+        }
         if (run.unresolved) {
           unresolved = true;
+          // 与前台 inline 同源：一次真实发起的调用以「结果未知」收尾 → 记一条结构化事件
+          // （只进日志；超时原话在账行的 outcome 里）。
+          if (run.executed) {
+            options.onExecutionEvent?.({ event: 'execution_result_unknown', taskId: task.taskId, operation });
+          }
           // 确定性终结本回合：待核对不得被模型当作可重试的普通失败。
           throw new ToolUserError(
             run.outcome.status === 'failed' ? run.outcome.error.message : RESULT_UNKNOWN_MESSAGE,
@@ -2052,8 +4332,70 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         }
         // 取消胜出：不再把（可能迟到的）执行结果交回 Worker；让回合按 abort 收尾。
         if (signal.aborted) throw abortError();
-        if (run.executed) recorded.push({ operation, outcome: run.outcome });
-        return run.outcome;
+        if (run.executed) {
+          recorded.push({
+            operation,
+            outcome: run.outcome,
+            dispatchKey: run.dispatchKey,
+            args: callArgs,
+            // 载荷随手柄落底账（提案接受的那一刻就在手里）：给的是**模型提交的原始结构化
+            // 参数**（装信封之前的值），确认续跑时原样交回 Worker 重提交——宿主不解析、
+            // 不改写；二次提交仍走同一套 lint+装信封（宿主继续是唯一的信封翻译者）。
+            // 2026-11-21 Grok 审查 blocking：落底账前剥掉宿主注入的 `--confirmation` 句柄
+            // （proposalPayloadOf）——底账提案 args 会原样进下一轮 Worker 委派正文，
+            // 句柄是凭据，不得进模型面。
+            ...(run.outcome.status === 'needs_confirmation' ? { proposalArgs: proposalPayloadOf(baseCallArgs) } : {}),
+          });
+        }
+        // 与前台同一套脱敏投影：Worker 永远看不到 confirmation.handle（后台也曾直回原始
+        // outcome，句柄会漏进模型上下文；S1 起两处共用 toModelVisibleOutcome）。
+        // 大响应文件化（2026-11-19）同源：completed 超阈值 → 落任务文件、只回摘要 + fileId。
+        return projectWorkerOutcome(run.outcome, {
+          taskId: task.taskId,
+          operation,
+          thresholdBytes: oversizeDataBytes,
+          ...(taskBridge === undefined ? {} : { bridge: taskBridge }),
+          ...(options.onExecutionResultFileized === undefined
+            ? {}
+            : { onFileized: options.onExecutionResultFileized }),
+          ...(options.onExecutionResultOversizeUnhandled === undefined
+            ? {}
+            : { onUnhandled: options.onExecutionResultOversizeUnhandled }),
+          // 失败/拒绝归类只进日志（原始码与原文不进 Worker 可见投影）。
+          ...(options.onExecutionEvent === undefined
+            ? {}
+            : {
+              onClassified: (classified) => options.onExecutionEvent?.({
+                event: 'execution_failure_classified',
+                operation,
+                code: classified.code,
+                status: run.outcome.status as 'failed' | 'refused',
+                kind: classified.kind,
+              }),
+            }),
+        });
+      };
+
+      // 契约 v4：本轮以长任务受理收尾——正常结束回合（不是完成、不是失败）；runner 的
+      // 等待端口随后驱动 wait。必须在「空汇报/未成功」判定之前，否则 accepted 会被误判失败。
+      const acceptedRoundOf = (): TaskExecutionOutcome | undefined => {
+        const entry = [...recorded].reverse().find((candidate) => candidate.outcome.status === 'accepted');
+        if (entry === undefined) return undefined;
+        const outcome = entry.outcome as Extract<ExecutionOutcome, { status: 'accepted' }>;
+        options.onExecutionEvent?.({
+          event: 'execution_accepted',
+          taskId: task.taskId,
+          operationId: outcome.operationId,
+          operation: entry.operation,
+        });
+        return {
+          kind: 'accepted',
+          operationId: outcome.operationId,
+          operation: entry.operation,
+          // 账行键由 claimAndRunOperation 返回；兜底只为形状完整（正常路径恒有值）。
+          dispatchKey: entry.dispatchKey ?? `task:${task.taskId}:accepted`,
+          ...(outcome.pollAfterMs === undefined ? {} : { pollAfterMs: outcome.pollAfterMs }),
+        };
       };
 
       const deadline = now() + workerTurnMs;
@@ -2061,13 +4403,39 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       try {
         workerResult = await options.workerDriver.run({
           systemPrompt: renderWorkerSystemPrompt(options.workerWorkspaceRoot),
-          tools: [executeOperationTool()],
+          // owner 2026-11-20：Worker 工具面 = 每个模型可见 operation 一个 op_* 工具（结构化参数），
+          // 不再给 Worker 通用 execute_operation；Main 工具面不动。允许集合在 exec 发起前裁决。
+          tools: [...workerOperationTools(workerToolManifest), ...(options.runJsExecutor === undefined ? [] : [runJsTool('worker')])],
           messages: [userMessage(renderWorkerDelegation({
-            task: task.request,
+            // 2026-11-20（S3 确认提案）：确认续跑的「本次任务」= 已确认提案的载荷原文（宿主机械
+            // 持有、逐字），原始交办 prose **让位、不进本次委派**。根因：真模型 13/14 个续跑回合
+            // 拿原始 prose（含被用户改掉的旧值 b=2）重跑 prepare；把载荷原文顶成任务正文后，
+            // Worker 直接对已确认提案提交，旧值没有机会覆盖已确认值（b=9）。
+            // 非确认回合（首轮 / 改口径 resume / 句柄过期）仍用原始交办 prose，语义零变化。
+            task: pendingConfirmation === undefined
+              ? task.request
+              : renderConfirmationResumeFact(pendingConfirmation),
             manifest: workerManifest,
             ...(options.workerSkills === undefined ? {} : { skills: options.workerSkills }),
+            // 后台文件面：清单只含当前任务的绑定行（交办副本/任务文件），Main 源 fileId 不进转录。
+            ...(delegationFiles.length === 0
+              ? {}
+              : { files: delegationFiles, fileManifestHint: BACKGROUND_FILE_MANIFEST_HINT }),
             // waiting_user 续跑回合：用户补答必须随委派交给执行端（新 Worker 没有上一回合转录）。
             ...(task.answer === undefined ? {} : { answer: task.answer }),
+            // 句柄过期（owner 2026-11-19）：不带旧句柄，改为机械事实让 Worker 重新生成同一提案。
+            ...(confirmationExpired ? { confirmationExpiredFact: renderConfirmationExpiredFact() } : {}),
+            // 长任务续跑：wait 终态（已登记文件只有 fileId）原样注入本次委派。
+            ...(resumedOperation === undefined || resumedOutcome === undefined
+              ? {}
+              : {
+                resumedOperation: {
+                  operationId: resumedOperation.operationId,
+                  operation: resumedOperation.operation,
+                  outcome: resumedOutcome,
+                },
+                resumeNote: longTaskResumeNote(resumedOperation, resumedOutcome),
+              }),
           }))],
           onStep: () => {},
           exec,
@@ -2080,45 +4448,222 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         // 同回合被取消，任务仍是「待核对」——取消只停止后续动作，不把未知改写成 cancelled。
         if (unresolved) return { kind: 'result_unknown', reason: RESULT_UNKNOWN_MESSAGE };
         if (context.signal.aborted) return { kind: 'cancelled' };
+        const accepted = acceptedRoundOf();
+        if (accepted !== undefined) return accepted;
         if (isAbortErrorLike(error) && now() >= deadline) return { kind: 'timed_out' };
         return { kind: 'failed', reason: error instanceof Error ? error.message : String(error) };
       }
       // 同上：正常返回路径也必须先判待核对，再判取消。
       if (unresolved) return { kind: 'result_unknown', reason: RESULT_UNKNOWN_MESSAGE };
       if (context.signal.aborted) return { kind: 'cancelled' };
+      {
+        const accepted = acceptedRoundOf();
+        if (accepted !== undefined) return accepted;
+      }
       if (workerResult.text.trim() === '') {
         return now() >= deadline
           ? { kind: 'timed_out' }
-          : { kind: 'failed', reason: '执行层 Worker 未产出有效汇报，本次任务未完成。' };
+          : { kind: 'failed', reason: '办事助手没能给出有效汇报，本次任务未完成。' };
       }
-      const needsInput = recorded.find(
-        (entry): entry is { operation: string; outcome: Extract<ExecutionOutcome, { status: 'needs_input' }> } =>
-          entry.outcome.status === 'needs_input',
-      );
-      if (needsInput !== undefined) {
-        const question = pendingQuestionFrom(needsInput.outcome);
+      // 写操作提案（S1）：本轮**最后一条非只读执行**是 needs_confirmation → 回合结局是
+      // 待确认（不是 failed）——执行层已冻结一次待确认操作，用户还什么都没表态。只读调用
+      // 不计（读调用不会产生待确认写操作）。提案句柄原样带走，由 runner 落底账待 S3 透传。
+      const confirmationOutcomeOf = (entry: { operation: string; outcome: ExecutionOutcome; proposalArgs?: Record<string, unknown> }): Extract<TaskExecutionOutcome, { kind: 'needs_confirmation' }> => {
+        const confirmation = (entry.outcome as Extract<ExecutionOutcome, { status: 'needs_confirmation' }>).confirmation;
+        return {
+          kind: 'needs_confirmation',
+          question: { missing: [CONFIRMATION_PENDING_MISSING] },
+          confirmation: {
+            handle: confirmation.handle,
+            summary: confirmation.summary,
+            operation: entry.operation,
+            ...(confirmation.expiresAt === undefined ? {} : { expiresAt: confirmation.expiresAt }),
+            // 提案调用的参数原文随手柄落底账（同一行；宿主不解释业务字段）。确认续跑时
+            // runner 把这条记录整条注入执行端，由 renderConfirmationResumeFact 原样交回 Worker。
+            ...(entry.proposalArgs === undefined ? {} : { args: entry.proposalArgs }),
+          },
+        };
+      };
+      /**
+       * 执行层业务写（2026-11-21 Grok 审查 blocking）：只有执行层声明的非只读操作才算
+       * 「业务写的决定性结果」。run_js 是宿主脚本工具，**不参与业务终局**：脚本成功不等于
+       * 用户的写落库（不得把失败的写/待补充收成 completed），脚本失败也不是「另一个写没成」
+       * （不得把已落库的写翻成 failed）。只有本回合没有任何业务写时（纯脚本回合、只读查询 +
+       * 脚本回合），脚本自己的末次结果才按执行事实参与判定——「查询成功 + 脚本失败 → failed」
+       * 的假绿锁不变（见 runtime-worker-run-js）。
+       */
+      const lastWritable = [...recorded].reverse().find(
+        (entry) => entry.operation !== RUN_JS_TOOL && !readOnlyOperations.has(entry.operation),
+      ) ?? [...recorded].reverse().find((entry) => !readOnlyOperations.has(entry.operation));
+      if (lastWritable !== undefined && lastWritable.outcome.status === 'needs_confirmation') {
+        return confirmationOutcomeOf(lastWritable);
+      }
+      // needs_input 与 needs_confirmation 同一把尺：只有**末次非只读**才算结局。旧实现取
+      // 「第一条 needs_input」提前返回，会把之后已落库的写收成等待补充（用户补答后续跑
+      // 可能再写一次，2026-11-21 Grok 审查 blocking）；反过来，末条是 needs_input 时也
+      // 不被前面某条成功的只读/写掩盖。
+      if (lastWritable !== undefined && lastWritable.outcome.status === 'needs_input') {
+        const question = pendingQuestionFrom(lastWritable.outcome);
         return question === undefined
-          ? { kind: 'failed', reason: '执行层要求补充输入但未说明缺什么（missing 为空）。' }
+          ? { kind: 'failed', reason: '对方要求补充信息但没说清缺什么。' }
           : { kind: 'needs_input', question };
       }
+      /**
+       * 同回合自我确认被挡（owner 2026-11-19 live 实测，后台路径）：模型在**同一回合**里
+       * prepare 出提案后紧接着 commit——同回合没有句柄，commit 被执行层以 CONFIRMATION_REQUIRED
+       * 拒。结局不能落 failed：那样①用户从没被问到确认；②下游「有待确认提案就拒绝新建」的守卫
+       * 不生效（任务不是 waiting_user）；③用户回「确认」时没有可接续的任务（owner live 三连症状）。
+       *
+       * 判据（结构化，不看文案）：本回合 recorded 里存在 needs_confirmation，且**所有** failed/refused
+       * 条目的码都落在「不算真实失败」集合（CONFIRMATION_REQUIRED = 同回合没有句柄；PROPOSAL_*
+       * / CALL_REFUSE = 模型误用了历史提案协议——见 SAME_TURN_TOLERATED_FAILURE_CODES）。满足则
+       * 返回该提案的 needs_confirmation（句柄/摘要来自底账提案）；出现任何其它真实失败
+       * （GATE_REFUSE / COLLECTION_NOT_FOUND / …）时返回 undefined，仍按现状判 failed。
+       */
+      const selfConfirmBlockedRoundOf = (): Extract<TaskExecutionOutcome, { kind: 'needs_confirmation' }> | undefined => {
+        // 提案取**最后一个**（与下方终局同一把尺：末次决定性结果说了算）——它之后有没有成功写，
+        // 决定这个提案还算不算本回合的结局。
+        let proposalIndex = -1;
+        for (let index = recorded.length - 1; index >= 0; index -= 1) {
+          if (recorded[index]?.outcome.status === 'needs_confirmation') { proposalIndex = index; break; }
+        }
+        const proposal = proposalIndex < 0 ? undefined : recorded[proposalIndex];
+        if (proposal === undefined) return undefined;
+        // 本条归类的前提是「同回合**没有句柄**」（模型自己 prepare 完又自己 commit，用户从没被问到
+        // 确认）。而本回合若带用户确认句柄（pendingConfirmation 只在 runner.confirm 注入）且最后一条
+        // 执行层非只读执行（业务写；不含 run_js 宿主脚本）已经 **completed**，那说明用户确认后的写真的
+        // 发生了（Worker 重新 prepare 后又带句柄提交成功就是这一形状）——不得再报「等你确认」（用户会去
+        // 确认一次已经做完的写，句柄已消耗 → 会被执行层拒 → 永远停在等待）。结局交下方终局判定按
+        // lastWritable 收尾。
+        // 非确认回合不进这条：那里 completed 的非只读执行也可能是「模型误用历史提案协议造了个提案
+        // 对象」，不能据此宣称写成功（有提案 + 容忍码失败 → 仍 waiting_user，见
+        // adversarial-worker / model-visible-operations 的冻结用例）。
+        if (pendingConfirmation !== undefined
+          && lastWritable !== undefined
+          && lastWritable.outcome.status === 'completed') {
+          return undefined;
+        }
+        // 「不算真实失败」的码见 SAME_TURN_TOLERATED_FAILURE_CODES：同回合被挡（CONFIRMATION_REQUIRED）
+        // 与模型误用历史提案协议（PROPOSAL_* / CALL_REFUSE）都不算真失败；其余失败仍按 failed。
+        const realFailure = recorded.find(
+          (entry) =>
+            (entry.outcome.status === 'failed' || entry.outcome.status === 'refused')
+            && !SAME_TURN_TOLERATED_FAILURE_CODES.has(entry.outcome.error.code),
+        );
+        if (realFailure !== undefined) return undefined;
+        return confirmationOutcomeOf(proposal);
+      };
+      const selfConfirmBlocked = selfConfirmBlockedRoundOf();
+      if (selfConfirmBlocked !== undefined) return selfConfirmBlocked;
       if (recorded.length === 0) {
-        return { kind: 'failed', reason: '未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。' };
-      }
-      const unsuccessful = recorded.find((entry) => entry.outcome.status !== 'completed');
-      if (unsuccessful !== undefined) {
-        const { operation, outcome } = unsuccessful;
-        if (outcome.status === 'failed' || outcome.status === 'refused') {
-          const message = outcome.error.message ?? '';
+        // 发起前被宿主拒绝（权限/允许集合）时，用户该看到「没权限」，不是「模型没干活」：
+        // 后者把权限问题说成模型问题，还会诱导用户让模型重试同一个动作。
+        if (hostRefusedOperations.length > 0) {
           return {
             kind: 'failed',
-            reason: message === ''
-              ? `执行层未成功：${operation} 返回 ${outcome.status}。`
-              : `执行层未成功：${operation} 返回 ${outcome.status}：${message}`,
+            reason: OPERATION_NOT_PERMITTED_MESSAGE,
+            reasonCode: OUTCOME_REASON_NOT_PERMITTED,
           };
         }
-        return { kind: 'failed', reason: `执行层未成功：${operation} 返回 ${outcome.status}。` };
+        return { kind: 'failed', reason: '没有实际办理：助手已汇报，但这次交办没有发出任何办理动作。' };
       }
-      return { kind: 'completed', resultText: workerResult.text };
+      /**
+       * 终局 = **最后一次决定性结果**（2026-11-19 owner 修法；真模型写闭环实跑缺陷）。
+       * 写操作以**最后一条非只读执行层执行**为准（纯只读回合以最后一条执行为准；宿主脚本
+       * run_js 不是业务写——见上方 lastWritable 注释，2026-11-21 Grok 审查 blocking）——原先取「第一个
+       * 非 completed」会把「同回合里先参数错、后改对成功」的写整体判 failed：数据其实已经落库
+       * （句柄被消耗），却告诉用户「没办成」并引导重试（重复写风险；实跑 5 次复现 2 次）。
+       * 前序失败逐条留在 executions 里（审计可查、可追溯），只是不改写终局 status/failure_reason；
+       * 末次仍是失败（此后没有成功的写——后面一条成功的**只读**不算）→ 照旧 failed（不放宽）。
+       * result_unknown 已在上方（unresolved）先行返回，不受本判定影响。
+       *
+       * 成功后出现的失败（2026-11-19 owner 第二轮，真跑 wl-after-34 证据）：写已经落库之后
+       * 的失败按**机械判据**分类，不再一律翻转终局——
+       *   · 只读失败（核对用的查询）→ 不算失败；
+       *   · **同对象**（A2b 对象抽取 `retryObjectOf`，--collection/--topic）的写失败 =
+       *     重复提案/重复提交被安全挡下 → 不算失败；
+       *   · 异对象 / 取不到对象（无法证明同一个）的写失败 = **另一个写没成** → 部分完成：
+       *     终态仍是既有 failed（不新增状态），failure_reason 逐项写「已完成什么、未成功什么」；
+       *   · run_js 失败 → 不算「另一个写没成」（宿主脚本的结局不改写业务终局，2026-11-21）。
+       * 成功的**前面**有失败、之后再没成功 → 仍由下方 decisive 分支判 failed（语义不变）。
+       * 局限（如实登记）：inline `judgeReportedTask` 拿不到 args/只读集合，不做本层归类——
+       * 它在 run_js 上只做「成功脚本不盖前面失败」一个方向（无业务写时脚本结局仍决定回合，
+       * 见 task-registry 同版注释）。
+       */
+      const lastWriteSuccess = [...recorded].reverse().find(
+        (entry) => entry.outcome.status === 'completed'
+          // run_js 不是执行层声明的写操作：脚本成功不等于用户的写落库，不能当「写成功」锚点。
+          && entry.operation !== RUN_JS_TOOL
+          && !readOnlyOperations.has(entry.operation),
+      );
+      if (lastWriteSuccess !== undefined) {
+        const successIndex = recorded.lastIndexOf(lastWriteSuccess);
+        const successObject = retryObjectOf(lastWriteSuccess.args ?? {});
+        // 成功之后（按执行顺序）的写失败：只读失败直接排除；同对象的重复尝试不算新写。
+        // 2026-11-21 Grok 审查 blocking：run_js 失败同样排除——脚本失败是宿主脚本的结局，
+        // 不是「另一个写没成」；把它算进来会把已落库的写翻成 partial failed，用户按失败
+        // 重试就有再写一次的风险。
+        const distinctWriteFailures = recorded
+          .slice(successIndex + 1)
+          .filter((entry) => (entry.outcome.status === 'failed' || entry.outcome.status === 'refused')
+            && entry.operation !== RUN_JS_TOOL
+            && !readOnlyOperations.has(entry.operation))
+          .filter((entry) => {
+            const object = retryObjectOf(entry.args ?? {});
+            return successObject === undefined || object === undefined || object !== successObject;
+          });
+        if (distinctWriteFailures.length > 0) {
+          return {
+            kind: 'failed',
+            reason: partialCompletionReason({
+              completed: recorded.filter((entry) => entry.outcome.status === 'completed'
+                && entry.operation !== RUN_JS_TOOL
+                && !readOnlyOperations.has(entry.operation)),
+              failed: distinctWriteFailures,
+            }),
+          };
+        }
+        // 成功之后的失败只有「只读核对」与「同对象重复尝试」→ 写已经落库：completed
+        // （结果正文仍取 Worker 本次汇报；全部失败事实逐条留在 executions 里）。
+      } else {
+        const decisive = lastWritable ?? recorded[recorded.length - 1];
+        if (decisive === undefined) {
+          // recorded 为空已在上方拦下；此处不可达（防御性兜底，话术与「未发起执行」同源）。
+          return { kind: 'failed', reason: '没有实际办理：助手已汇报，但这次交办没有发出任何办理动作。' };
+        }
+        if (decisive.outcome.status !== 'completed') {
+          const { operation, outcome } = decisive;
+          if (outcome.status === 'needs_input') {
+            const question = pendingQuestionFrom(outcome);
+            return question === undefined
+              ? { kind: 'failed', reason: '对方要求补充信息但没说清缺什么。' }
+              : { kind: 'needs_input', question };
+          }
+          if (outcome.status === 'failed' || outcome.status === 'refused') {
+            const message = outcome.error.message ?? '';
+            return {
+              kind: 'failed',
+              reason: message === ''
+                ? `没办成：${operation} 返回 ${outcome.status}。`
+                : `没办成：${operation} 返回 ${outcome.status}：${message}`,
+            };
+          }
+          return { kind: 'failed', reason: `没办成：${operation} 返回 ${outcome.status}。` };
+        }
+      }
+      // CAP-01 S2 ④ 兜底扫描（与同步委派同一纪律）：任务 out/ 全量登记——执行层按
+      // fileParams 写出的产物即使没走 run_js 也要回程；与回程登记同池去重。
+      // 未注入桥 = 无兜底面（零变化缺省）。
+      const swept = taskBridge?.sweepTaskOutputs();
+      for (const file of swept?.files ?? []) pushTurnFileOnce(taskFiles, file);
+      // 片 1 产物回程：Worker 的 run_js 产物已登记为**任务作用域**文件（task_id 绑定，
+      // 登记时已 copy 进 workspace）。完成时随结局上交——后台面对 TurnResult.files 的
+      // 同位面；装配方按它投递（投递去留与前台同一交付面/角色闸）。
+      return {
+        kind: 'completed',
+        resultText: workerResult.text,
+        ...(taskFiles.length === 0 ? {} : { files: taskFiles }),
+      };
     },
   };
 }

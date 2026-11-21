@@ -143,6 +143,8 @@ function summariseOutcome(operation: string, outcome: ExecutionOutcome): string 
       return `未能完成：${operation}（failed）。`;
     case 'refused':
       return `未能完成：${operation}（refused）。`;
+    case 'accepted':
+      return `已受理：${operation}（长任务进行中）。`;
   }
 }
 
@@ -196,7 +198,10 @@ export async function runChainOnSource(options: ChainRunOptions): Promise<Shadow
       await gate;
       const tool = input.tools[0];
       if (tool === undefined) throw new Error('（shadow harness）Worker 无工具面。');
-      const outcome = await input.exec(tool.name, { operation: scenario.operation, args: scenario.args });
+      // 动态 Worker 工具面：op_<operation> 工具直接收业务字段参数（宿主翻回执行层形态）。
+      const opFields: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(scenario.args)) opFields[key.replace(/^--/, '')] = value;
+      const outcome = await input.exec(tool.name, opFields);
       return {
         text: summariseOutcome(scenario.operation, outcome as ExecutionOutcome),
         messages: [...input.messages],
@@ -222,7 +227,10 @@ export async function runChainOnSource(options: ChainRunOptions): Promise<Shadow
     workerSkills: [],
     createDrivers: () => ({ mainDriver, workerDriver }),
     createExecutionFace: async () => ({ client: face.client, allowedOperations: face.allowedOperations, readOnlyOperations: face.readOnlyOperations }),
-    runtime: { dispatchMode: 'background' },
+    // B 切片：双源对照钉在异步受理语义（两源等价断言的机械形状）；短等待窗口的
+    // 默认行为由 runtime-task-wait-window / server-task-wait-window 专测覆盖。
+    taskDispatch: 'async',
+    runtime: { taskRunWaitMs: 0 },
     notificationSink: sink,
   });
   const runner = assembled.runner;

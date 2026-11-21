@@ -19,7 +19,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { runBatch, type BatchReport } from '../business-e2e/batch';
 import { sha256Hex } from '../convergence-r1/hash';
-import type { CallKind, CallTokens } from '../r6/accounting';
+import type { CallKind, CallTokens } from '../long-session/accounting';
 import {
   accountSimCalls, emptySimAccounting,
   type SimAccounting, type SimCallKind, type SimCallRecord,

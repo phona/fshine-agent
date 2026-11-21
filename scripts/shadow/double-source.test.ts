@@ -132,10 +132,12 @@ describe('Shadow 双源对照 ①：任务链语义等价（成功链路）', ()
     const a = await chainOn('dummy', SUCCESS_SCENARIO);
     const b = await chainOn('fake-real', SUCCESS_SCENARIO, B_SUCCESS);
 
-    // 受理：两源同一条委派 → 同一机械受理形状（数字编号 + 业务名 + queued）
+    // 受理：两源同一条委派 → 同一机械受理事实（owner 2026-11-19：交办不再给固定回执话术，
+    // 只回 taskId/name/status/accepted；无 notice、无编号——编号只在详情面/底账）
     for (const run of [a, b]) {
-      expect(run.acceptance).toMatchObject({ taskNo: 1, status: 'queued', accepted: true });
-      expect(run.acceptance.notice).toContain('#1');
+      expect(run.acceptance).toMatchObject({ status: 'running', accepted: true });
+      expect(run.acceptance.taskNo).toBe(0);
+      expect(run.acceptance.notice).toBe('');
       expect(run.acceptance.name.length).toBeGreaterThan(0);
       expect(run.afterAcceptStatus).toBe('running');
     }
@@ -182,7 +184,7 @@ describe('Shadow 双源对照 ②：四态语义等价（needs_input / failed / 
     const b = await chainOn('fake-real', FAILED_SCENARIO, B_FAILED);
     for (const run of [a, b]) {
       expect(run.terminal.status).toBe('failed');
-      expect(run.terminal.failureReason).toContain('执行层未成功：dummy.query 返回 failed');
+      expect(run.terminal.failureReason).toContain('没办成：dummy.query 返回 failed');
       expect(run.terminal.failureReason).toContain('Collection faulty-one cannot be read in its current state');
       expect(run.terminal.replyText).toBeUndefined();
       expect(run.executions.map((entry) => entry.status)).toEqual(['failed']);

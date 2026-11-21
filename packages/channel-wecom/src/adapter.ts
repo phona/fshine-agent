@@ -28,7 +28,7 @@ import type {
   ProgressFn,
   ReplyHandler,
 } from '@fshine/contracts';
-import { formatFileReceipt } from '@fshine/contracts';
+import { formatFileAck } from '@fshine/contracts';
 import { MAX_REPLY_BYTES, stripMentionPrefix, truncateReply } from './text';
 import { extractMessageReference } from './quote';
 import {
@@ -42,7 +42,6 @@ import {
   type SuppressedSend,
 } from './silent-shadow-gate';
 
-const ACK_TEXT = '收到,正在处理…';
 const FALLBACK_REPLY = '处理失败,请稍后再试';
 const IMAGE_FAIL_REPLY = '图片发送失败,请稍后再试';
 const START_TIMEOUT_MS = 30_000;
@@ -133,7 +132,12 @@ export class WecomChannelDeliveryError extends Error implements ChannelDeliveryE
     receipt: DeliveryReceipt,
     cause: unknown,
   ) {
-    const detail = cause instanceof Error ? cause.message : String(cause);
+    // detail 可读化（2026-11-21 live P1）：真实 SDK 的拒收原因是普通对象（{errcode,errmsg}），
+    // String() 会变成「[object Object]」——平台说了什么、哪个 chatid 被拒全被吞掉（live 实测
+    // 告警推送 93006 的日志只有这一句）。对象一律 JSON 化，普通值照原样。
+    const detail = cause instanceof Error
+      ? cause.message
+      : (cause !== undefined && cause !== null && typeof cause === 'object' ? JSON.stringify(cause) : String(cause));
     super(`企微主动交付失败（${failedPart.kind}[${failedPart.index}] ${failedPart.stage}）: ${detail}`);
     this.name = 'WecomChannelDeliveryError';
     this.route = { ...route };
@@ -179,6 +183,29 @@ export interface WecomBotChannelOptions {
 interface ReplyDegrade {
   chatId: string;
   once: { used: boolean };
+  /**
+   * 缺陷 B（2026-11-21 live）：本回合要回的**原用户消息**文本（入站 frame 的 message
+   * 文本）。只在降级路径用——回复上下文过期后终稿经 sendMessage 作为**新消息**发出，
+   * 客户端把它排到最新消息下面，读起来像答非所问；正文前加一行原话引用（前 40 字）
+   * 让这条推送自含话题。原话取不到（纯附件消息的收据等）= 缺省不加引用，不编造。
+   */
+  quoteText?: string;
+}
+
+/** 降级推送的原话引用片段上限（字符）：取原话前 40 字（live 实测口径）。 */
+export const DEGRADE_QUOTE_MAX_CHARS = 40;
+
+/**
+ * 缺陷 B：降级推送（sendMessage 全新消息）的正文加一行原话引用——
+ *   `回复「<原话片段>」：` + 空行 + 正文
+ * 原话片段 = 原文压成单行后取前 {@link DEGRADE_QUOTE_MAX_CHARS} 字。机械事实，不编造：
+ * 原话为空/全空白 = 原样返回正文（不加引用）。组合后仍过同一字节上限
+ * （truncateReply：恰顶格的终稿被看见地截掉尾巴，不无声超限）。
+ */
+export function withReplyQuote(originalText: string, content: string): string {
+  const fragment = originalText.replace(/\s+/gu, ' ').trim().slice(0, DEGRADE_QUOTE_MAX_CHARS);
+  if (fragment === '') return content;
+  return truncateReply(`回复「${fragment}」：\n\n${content}`).text;
 }
 
 /**
@@ -187,10 +214,12 @@ interface ReplyDegrade {
  * 为什么需要并窗（2026-10-19）：企微的流式回复按入站消息的 `req_id` 走——一条用户
  * 消息就是一个气泡，N 个文件必然是 N 条"已收到 X"，和随后指令回合的帧在会话里互相
  * 穿插。修法是**不为文件起气泡**：附件-only 消息连秒回 ack 都不发（"收到,正在处理…"
- * 对一条只暂存不处理的消息是假承诺，而且没有终帧来改写它），收据改由两处承载——
- * ① 带指令的回合首帧（宿主的规则二披露，与这里同一句措辞 formatFileReceipt）；
+ * 对一条只暂存不处理的消息是假承诺，而且没有终帧来改写它；2026-11-19 起**正文回合也不再
+ * 发受理帧**，见 dispatchMessage），收据改由两处承载——
+ * ① 带指令的回合首帧（宿主的规则二披露，`formatFileReceipt`，带文件名）；
  * ② 只发文件、迟迟没有指令时，本类在窗口到点后补一条，否则用户对着静默的会话
- *    不知道文件到底收没收到。
+ *    不知道文件到底收没收到。这一条只说"收了几份"（`formatFileAck`，不带文件名）：
+ *    文件名由随后的主动追问列，回执再列一遍就是两条几乎一样的清单（2026-11-17）。
  *
  * 通道挂在**最后到达**的那条附件消息上：时间上最接近用户所见，且窗内每条早到的消息
  * 都没有起过流——没有流就不会有转圈的 spinner。
@@ -567,9 +596,10 @@ export class WecomBotChannel implements ChannelAdapter {
     const attachmentOnly = typeof content !== 'string' || content.trim() === '';
     const reqId = typeof frame.headers?.req_id === 'string' ? frame.headers.req_id : randomUUID();
     const streamId = randomUUID();
-    // 正文先发受理帧，再等待同会话在途附件；这样等待期间用户有即时反馈，且终帧复用
-    // 同一 req_id/streamId。附件-only 仍不起流，收据由并窗承载。
-    if (!attachmentOnly) void this.reply(frame, reqId, streamId, ACK_TEXT, false);
+    // 不先发「收到,正在处理…」受理帧（owner 2026-11-19：这张卡片没用——用户要么马上拿到
+    // 结果，要么稍后由终帧/回执说话）。流从终帧开始；终帧被拒仍走 reply() 的降级
+    // （sendMessage 全新消息），所以「首帧即终帧」不会变成静默。附件-only 仍不起流，
+    // 收据由并窗承载。
     let attachments: { saved: IncomingAttachment[]; failed: string[] };
     let finishAttachmentProcessing: (() => void) | undefined;
     if (msgtype === 'file') {
@@ -629,7 +659,8 @@ export class WecomBotChannel implements ChannelAdapter {
           streamId,
           ATTACHMENT_WAIT_TIMEOUT_REPLY,
           true,
-          { chatId: conversationId, once: { used: false } },
+          // 缺陷 B：这条的降级推送同样带原话引用（要回的就是本条消息）。
+          { chatId: conversationId, once: { used: false }, quoteText: content },
         );
         return;
       }
@@ -797,8 +828,9 @@ export class WecomBotChannel implements ChannelAdapter {
       // 终帧失败可降级（degrade 参数）：流式更新被企微拒收（历史事故 errcode 846608——
       // 流式回复超过 10 分钟更新窗口，终帧被拒后用户端永远停在旧进度帧，整轮静默）时，
       // 改用 sendMessage 全新消息通道把终稿送达。中间进度帧不降级（降级是给"答案"的，
-      // 不是给中间帧的，否则每次拒收都是一条新消息）。
-      void this.reply(frame, reqId, streamId, bounded.text, true, { chatId: conversationId, once: degradeOnce });
+      // 不是给中间帧的，否则每次拒收都是一条新消息）。降级推送带原话引用（缺陷 B：
+      // 新消息丢话题归属——quoteText = 本回合用户原话，只在降级路径用）。
+      void this.reply(frame, reqId, streamId, bounded.text, true, { chatId: conversationId, once: degradeOnce, quoteText: message.text });
     } else if (message.attachmentOnly && message.attachments && message.attachments.length > 0) {
       // 宿主对这条附件-only 消息无话可说（正常路径）：文件名并进本会话的收据窗，到点合成
       // 一条。例外路径（暂存超限、指令跑完后才到的文件）宿主会返回文本，走上面的终帧分支，
@@ -838,7 +870,7 @@ export class WecomBotChannel implements ChannelAdapter {
           error: error instanceof Error ? error.message : String(error),
         }));
         if (!textSent) {
-          void this.reply(frame, reqId, streamId, IMAGE_FAIL_REPLY, true, { chatId: conversationId, once: degradeOnce });
+          void this.reply(frame, reqId, streamId, IMAGE_FAIL_REPLY, true, { chatId: conversationId, once: degradeOnce, quoteText: message.text });
         }
       }
     }
@@ -1044,7 +1076,7 @@ export class WecomBotChannel implements ChannelAdapter {
       pending.frame,
       pending.frame.headers?.req_id ?? '',
       pending.streamId,
-      formatFileReceipt(pending.filenames),
+      formatFileAck(pending.filenames),
       true,
       { chatId: pending.chatId, once: { used: false } },
     );
@@ -1078,13 +1110,20 @@ export class WecomBotChannel implements ChannelAdapter {
         // 降级再失败只记事件：两条通道都不可达时已无第三条路，日志是唯一的守夜人。
         if (finish && degrade && !degrade.once.used) {
           degrade.once.used = true;
+          // 缺陷 B（2026-11-21 live）：只在降级路径（新消息推送）加原话引用行——回复上下文
+          // 过期后这条会被客户端排到最新消息下面，读起来像答非所问；引用行让它自含话题。
+          // 正常 reply 路径（replyStream）逐字节不变。原话取不到 = 不加引用（不编造）。
+          const degradeContent = degrade.quoteText === undefined
+            ? content
+            : withReplyQuote(degrade.quoteText, content);
           try {
-            await client.sendMessage(degrade.chatId, { msgtype: 'markdown', markdown: { content } });
+            await client.sendMessage(degrade.chatId, { msgtype: 'markdown', markdown: { content: degradeContent } });
             console.info(JSON.stringify({
               event: 'wecom_reply_degraded',
               req_id: reqId,
               channel: 'send_message',
-              bytes: Buffer.byteLength(content, 'utf8'),
+              bytes: Buffer.byteLength(degradeContent, 'utf8'),
+              quoted: degrade.quoteText !== undefined,
               originError: error instanceof Error ? error.message.slice(0, 200) : String(error),
             }));
           } catch (degradeError: unknown) {
@@ -1092,7 +1131,7 @@ export class WecomBotChannel implements ChannelAdapter {
               event: 'wecom_reply_degrade_fail',
               req_id: reqId,
               error: degradeError instanceof Error ? degradeError.message : String(degradeError),
-              content,
+              content: degradeContent,
             }));
           }
         }
@@ -1127,10 +1166,12 @@ function normalizeWindowMs(value: number | undefined, fallback: number): number 
 function defaultClientFactory(env: Record<string, string | undefined>): () => SdkClientLike {
   return () => {
     // 长连接由官方 SDK 管理:认证、心跳、指数退避重连(不限次数,服务型进程要求常连)
+    // 心跳从默认 30s 缩到 15s:企微约 90s 无心跳即断开;官方社区对「连接看似正常仍偶发丢消息」的缓解手段就是把 30s 缩到 15s
     return new WSClient({
       botId: (env['WECOM_BOT_ID'] ?? '').trim(),
       secret: (env['WECOM_BOT_SECRET'] ?? '').trim(),
       maxReconnectAttempts: -1,
+      heartbeatInterval: 15000,
     }) as unknown as SdkClientLike;
   };
 }

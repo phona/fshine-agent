@@ -1,6 +1,6 @@
 # 真实只读接入准备档（设计与安全评审材料）
 
-> **硬声明（准备材料 ≠ 已授权接入）**：本档仅为设计与安全评审材料，不代表已授权接入，也不构成任何安全结论。owner（2026-11-14）只批准准备档：**不允许实际连接、读取凭据、触碰真实数据**；实际接入须 owner 另行授权（授权门见 `docs/product/r3-open-decisions.md`；裁定登记见 `docs/decision-log.md` §二十三）。
+> **硬声明（准备材料 ≠ 已授权接入）**：本档仅为设计与安全评审材料，不代表已授权接入，也不构成任何安全结论。owner（2026-11-14）只批准准备档：**不允许实际连接、读取凭据、触碰真实数据**；实际接入须 owner 另行授权（裁定登记见 `docs/decisions/index.md` §二十三；原待裁定登记文档 2026-11-18 已删，未决项转 issue）。
 >
 > 目标平台未定：本档不虚构平台细节；一切平台相关事项以 §6「未知项与待补清单」为准（平台名、只读面、凭据托管方、限流与审计要求）。
 >
@@ -28,17 +28,20 @@
 
 - `requestId` 由宿主生成（`execution-runtime.ts:207-209`；契约 L10-12）：模型不能提供可信身份；去重与副作用安全重试归执行层。
 - `args` 对宿主不透明，宿主不做业务校验（契约 L36-41、L58）。
-- 已知残余：参数名现携带 CLI flag 形态；非 CLI 传输需适配器内映射或参数名中性化（`docs/decision-log.md` §17.3）。
+- 已知残余：参数名现携带 CLI flag 形态；非 CLI 传输需适配器内映射或参数名中性化（`docs/decisions/index.md` §17.3）。
 
 ### 1.4 错误/拒绝映射（needs_input / refused / failed 语义面）
 
 - 四态互斥：`completed | needs_input | failed | refused`；refused=执行层策略拒绝，failed=执行失败，不得混用；`needs_input` 必须携带非空 `missing`（契约 L13-16、L66、L72-75、L92-96）。
-- 机械分流、不嗅探文案：适配器按退出码/信封映射（`dummy-cli-client.ts:268-326`）；宿主不解析 `error.message`（`docs/decision-log.md` §十二）。
+- 机械分流、不嗅探文案：适配器按退出码/信封映射（`dummy-cli-client.ts:268-326`）；宿主不解析 `error.message`（`docs/decisions/index.md` §十二）。
 - 准入要求：真实适配器须给出「传输错误 → 四态」机械映射表，并以失败注入/拒绝路径测试锁定（对照回归锁 `packages/agent/dummy-client.test.ts:154、211-220、240-260`）。
 
 ### 1.5 运行约束
 
-- 超时：Main 300s / Worker 180s（`execution-runtime.ts:138-141`）；单次适配器调用缺省 60s（`dummy-cli-client.ts:86`）。
+- 超时：Main 300s / Worker 180s（`execution-runtime.ts:138-141`）；单次适配器调用缺省 60s
+  （`dummy-cli-client.ts` 的 `EXECUTION_CALL_TIMEOUT_MS`，2026-11-19 起截断语义 = `result_unknown`
+  「没有回执、不知道对方做没做完」，不冒充已确认失败、不自动重试；用例见
+  `packages/agent/execution-call-timeout.test.ts`）。
 - 单一 profile；gateway 必须是相对调用形式、root 必须绝对（`scripts/ask-runtime.ts:93-97`、`apps/server/server.ts:56-63`、`packages/core/src/config.ts:259-261、274-283`）。
 
 ## 2. 凭据与鉴权边界
@@ -49,7 +52,7 @@
 - **执行子进程 env = 精确白名单** PATH/HOME/TMPDIR（`packages/agent/src/worker-env.ts:25-35`；唯一消费 `dummy-cli-client.ts:103`；回归锁 `packages/agent/worker-env.test.ts:15/45`）。真实适配器若走子进程必须复用该白名单；若走宿主内 SDK/网络通道，须给出等价「凭据不进入模型可见面与 worker 可读面」机制并评审。
 - **本地开发仅 .env**：本机秘密只住仓根 `.env`（gitignored；本地部署配置 `config/agent.yaml` 同样 gitignored）；提交物零密钥。运行入口 `--env-file-if-exists=.env` 只服务本机（`package.json:10-11`）。
 - **最小权限与轮换要求**：本阶段只读——凭据仅具备只读范围；可轮换、可吊销、失败可回滚；不得落入 worker 可读路径。
-- **前置硬条件**：`docs/decision-log.md` §七 登记的文件层可达缺口（`.env`/config 对 worker 同 OS 用户可读）闭环前，真实凭据不得落在 worker 可读路径。
+- **前置硬条件**：原 `decision-log` §七 登记的文件层可达缺口（`.env`/config 对 worker 同 OS 用户可读）闭环前，真实凭据不得落在 worker 可读路径（§七 属已退役 serve-gate / plan-runtime 机制的历史登记，现行 `docs/decisions/index.md` 无对应行；凭据隔离的现行约束见 `AGENTS.md`「宿主（最小保留）」段）。
 
 **待定**：凭据托管方（种类/位置/获取方式/轮换）——见 §6。
 
@@ -94,6 +97,6 @@
 ## 7. 指针
 
 - 契约与运行时：`packages/contracts/src/execution-contract.ts`、`packages/agent/src/execution-runtime.ts`、适配器对照 `packages/agent/src/dummy-cli-client.ts`。
-- 权威决定：`docs/decision-log.md` §十二（交付边界与清单）、§十七（§17.1 授权边界、§17.3 CLI flag 残余）、§二十三（真实只读 = 仅准备档）。
-- 授权门与切片：`docs/product/r3-open-decisions.md`、`docs/product/r4-slice-plan.md`。
-- 历史裁定：`docs/env-naming-ruling-20261110.md`（消费端边界）、`docs/environment-variables.md` §4a。
+- 权威决定：`docs/decisions/index.md` §十二（交付边界与清单）、§十七（§17.1 授权边界、§17.3 CLI flag 残余）、§二十三（真实只读 = 仅准备档）。
+- 授权门与切片：裁定登记见 `docs/decisions/index.md` §二十三；未决项在 GitHub issues（原 r3-open-decisions.md 2026-11-18 已删）。
+- 历史裁定：消费端边界（env-naming-ruling-20261110.md 已删，git 历史可考）、`docs/environment-variables.md` §4a。

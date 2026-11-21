@@ -10,7 +10,7 @@
  * 总数与 token 都要有：`accountSimCalls` 返回总计 + 分类别（含 input/output/total 与耗时）。
  */
 
-import { accountCalls, CALL_KINDS, type CallKind, type CallTokens, type KindAccounting, type ModelCallRecord } from '../r6/accounting';
+import { accountCalls, CALL_KINDS, type CallKind, type CallTokens, type KindAccounting, type ModelCallRecord } from '../long-session/accounting';
 
 /** 记账类别：模拟用户 / 判官 / 被测系统四类。 */
 export type SimCallKind = 'simulator' | 'judge' | CallKind;

@@ -13,14 +13,14 @@
 #      exit-code carrier for the real-model job.
 # 真实模型 eval（旧 probe / acceptance / score.ts / generic-model-eval.py 仪器）已随
 # Minimal Reset（0b97227）删除不再恢复；当前真实模型面 = 用户级黑盒入口
-# `npm run eval:user`，跑在 eval-real.yml（per-push 1 轮）与 eval-nightly.yml（12×3），
+# `npm run eval:user`，跑在 eval-real.yml（per-push 1 轮）与 eval-nightly.yml（全量用例 ×3，当前 15 例），
 # 不进这些确定性门。
-# 旧 e2e ownership 台账（tests/e2e 已随 Minimal Reset 删除）：docs/e2e-ownership.md
-# 只作历史参考；这里不再有 e2e 门。
+# 旧 e2e ownership 台账（tests/e2e 已随 Minimal Reset 删除；台账文档 2026-11-18 已删，git 历史可考）。
+# 这里不再有 e2e 门。
 # CI runs only the deterministic gates; consistency between this repo's generic
 # budget-protocol defaults and any execution layer's own policy is owned by the
 # execution layer's repository, not by this single-repo CI (the check moved there
-# in wave W4). Boundary registered as a known limit: docs/debt-ledger.md D-150.
+# in wave W4). Boundary registered as a known limit: D-150 (现行指针 docs/decisions/debt.md; 台账原文已归档 docs/history/debt-ledger-part03-2026-10_2026-11.md:284).
 set -eu
 cd "$(dirname "$0")/.."
 echo "== node =="

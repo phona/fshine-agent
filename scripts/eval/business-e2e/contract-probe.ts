@@ -3,7 +3,7 @@
  *
  * 目标：用确定性假件构造任务并推进到终态/挂起态，直接读执行层 `audit.jsonl` 与 registry 终态，
  * 产出「查询 / 取消 / 接续 / 结果找回」在**对话面**缺口的机械证据，并对照缺口 1 设计
- * （`docs/product/gap-task-surface.md`）。
+ * （gap-task-surface.md，2026-11-18 已删，git 历史可考）。
  *
  * 三条独立的机械事实（全部零真实模型；执行层为仓内 dummy 夹具或纯内存假 executor）：
  *   A. 对话面缺席：Main 回合工具面仅 `task_run`（execution-runtime.ts:426）；
@@ -67,8 +67,8 @@ async function probeConversationFace(): Promise<Record<string, unknown>> {
   };
   const workerDriver: TurnDriver = {
     async run(input) {
-      const tool = input.tools.find((t) => t.name === 'execute_operation') ?? input.tools[0]!;
-      await input.exec(tool.name, { operation: 'dummy.query', args: { collection: 'alpha', window: 'W1' } });
+      // 夹具走内部 exec 路由（execute_operation 兼容入口），不借 op_* 工具面透传参数包装。
+      await input.exec('execute_operation', { operation: 'dummy.query', args: { collection: 'alpha', window: 'W1' } });
       const reply = 'query 完成';
       return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
     },
@@ -173,7 +173,7 @@ async function probeCapabilityApi(): Promise<Record<string, unknown>> {
     emptyOperationsMessage: '（探针）执行层没有声明任何只读 operation',
     createDrivers: () => ({ mainDriver, workerDriver: mainDriver }),
     taskExecutor: executor,
-    runtime: { dispatchMode: 'background' },
+    taskDispatch: 'async',
   });
   const observations: Record<string, unknown> = {};
   try {
@@ -232,7 +232,7 @@ async function main(): Promise<void> {
   const summary = {
     generatedAt: new Date().toISOString(),
     modelBudget: 'zero model calls (deterministic fakes + in-repo dummy execution layer)',
-    design: 'docs/product/gap-task-surface.md（缺口 1 设计）',
+    design: 'gap-task-surface（缺口 1 设计；文档已删除，git 历史可考）',
     findings: {
       mainToolFace: mainTools,
       blockedConversationTools: blocked.map((b) => ({ tool: b.tool, blocked: b.blocked, error: b.error })),

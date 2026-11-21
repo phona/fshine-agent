@@ -1,18 +1,18 @@
 /**
  * P2 业务端到端验收 · 数据面类型（eval 胶水层；零产品码改动）。
  *
- * 口径来源：`docs/product/p2-business-e2e-prereg.md`（冻结预注册）。本文件只声明形状，
+ * 口径来源：`docs/history/business-e2e-batch2-prereg.md`（冻结预注册）。本文件只声明形状，
  * **不判定**（判定归 `./p2-oracle`）、**不装配**（装配归 `./p2-harness`）。
  *
  * 目标与真值分离（预注册 §一 要求 ①）：
  *   · `turns[]` 是用户话术（会进模型请求）；
  *   · `truth` 只进 Oracle 与证据的 expected 字段，**不进**任何模型提示/脚本。
  */
-import type { FactExpectation, TaskTurnFact, TaskView } from '../r6/oracle';
-import type { CompactionAttempt } from '../r6/compaction';
-import type { ModelCallRecord } from '../r6/accounting';
-import type { SessionEvidence, SessionJudgement } from '../r6/evidence';
-import type { MuDeliveryRecord } from '../r6/multiuser/mu-support';
+import type { FactExpectation, TaskTurnFact, TaskView } from '../long-session/oracle';
+import type { CompactionAttempt } from '../long-session/compaction';
+import type { ModelCallRecord } from '../long-session/accounting';
+import type { SessionEvidence, SessionJudgement } from '../long-session/evidence';
+import type { MuDeliveryRecord } from '../long-session/multiuser/mu-support';
 import type { DriverToolCallRecord } from '../business-e2e/shared-instance';
 import type { GrantedScope } from '../business-e2e/judge';
 

@@ -1,5 +1,5 @@
 /**
- * 文件区监管 fileStore（CAP-01 S0；docs/product/cap01-main-direct-execution.md §1/§2/§3/§4）。
+ * 文件区监管 fileStore（CAP-01 S0；docs/architecture/files.md §1/§2/§3/§4）。
  *
  * 职责：workspace 布局派生 + 文件字节与 file_refs 行的**唯一写侧**（putFile 落新文件 /
  * materializeInputs 物化输入 / registerOutputsFromOut 从交付箱 copy-on-register 登记产物 /
@@ -38,18 +38,21 @@ import {
   copyFileSync,
   existsSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readSync,
   readdirSync,
   readlinkSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
 import path from 'node:path';
 import type { FileRefResolution, FileRefRow, TaskStore } from '@fshine/core';
+import { DEFAULT_RUNTIME_CONFIG, fileRefTtlMsOf } from './resource-policy';
 
 /**
  * 文件事实归属（S0 形状）：principal + session。任务维度（CAP-01 S2）不走这里——
@@ -134,6 +137,11 @@ export interface RegisteredFile {
   name: string;
   bytes: number;
   sha256: string;
+  /**
+   * 是否可交付给用户（方案 A：登记面角色标记）。用户产物/任务回程/入站文件 = true；
+   * `putFile` 缺省 = false（宿主内部写出的字节默认不算交付物，只作诊断/中间产物）。
+   */
+  deliverable: boolean;
 }
 
 export interface PutFileInput {
@@ -142,6 +150,11 @@ export interface PutFileInput {
   bytes: Buffer;
   /** epoch ms；缺省 = pending（入站上传的缺省形状，v8 §4 激活语义归 S1 接线）。 */
   activatedAt?: number | null;
+  /**
+   * 是否可交付给用户；**缺省 false**（宿主内部写出的字节默认不算交付物）。
+   * 用户产物请走 register* 入口或显式传 true；投递面只按这个角色过滤，不看文件名。
+   */
+  deliverable?: boolean;
 }
 
 export interface MaterializedInput {
@@ -178,13 +191,22 @@ export interface SkippedOutput {
 }
 
 /**
- * 已激活文件清单项（CAP-01 S1 清单注入源；机械事实投影）：字段只有 fileId/name/bytes——
- * 不暴露 sha256、身份键、时间戳（清单没有行数据，v8 §8 S1）。
+ * 已激活文件清单项（CAP-01 S1 清单注入源；机械事实投影）：fileId/name/bytes +
+ * activatedAt（激活时刻，TTL 起点）+ createdAt（**登记/真收到时刻**）。不暴露 sha256
+ * 与身份键——清单仍不含行数据（v8 §8 S1）。
+ *
+ * 时间口径（2026-11-18 修）：清单渲染的「收到」时间取 **createdAt**（渠道真收到/登记
+ * 时刻），不取 activatedAt——纯附件场景的 activated_at 是**文字消息激活时刻**，可能比
+ * 真正收到晚几天（与 apps/server/attachment-facts 的 receivedAt 口径一致）。
  */
 export interface ActiveFileRef {
   fileId: string;
   name: string;
   bytes: number;
+  /** 激活时刻（epoch ms；可读性 TTL 起点，不是「收到」时间）。 */
+  activatedAt: number;
+  /** 登记/真收到时刻（epoch ms；清单按它渲染「收到」时间）。 */
+  createdAt: number;
 }
 
 export interface ScanLimits {
@@ -237,6 +259,11 @@ export interface FileStore {
     name: string;
     bytes: Buffer;
     maxFileBytes: number;
+    /**
+     * 登记角色（可选；缺省 true = 用户产物）。false = 宿主内部/执行层诊断产物
+     * （如长任务大日志）：任务作用域可读，但交付面按 deliverable 过滤，不进用户附件。
+     */
+    deliverable?: boolean;
   }): RegisteredFile;
   /**
    * 任务回程文件登记（CAP-01 S2 ③，路径源）：执行层返回的 path → 校验 sourcePath 是
@@ -275,6 +302,14 @@ export interface FileStore {
    * （activated_at = NULL，等带文字的消息激活）。字节从 sourcePath 流式读、算 sha256、
    * copy 进 workspace（…/files/<fileId><safeExt>）——不引用原路径，登记后渠道层可清理
    * 原文件。fileId 本侧生成；源 O_NOFOLLOW 打开 + 只收普通文件（与 out/ 同纪律）。
+   * **内容去重（2026-11-18 owner）**：同 (principal, session)、同 sha256、仍可读的 Main
+   * 侧行 → 复用该 fileId（不落盘、不新增行），name 更新为本次名、TTL 起点刷新；跨身份/
+   * 会话/任务一律不复用。
+   * **pending → pending 复用（2026-11-18 owner，F-1）**：既有 pending 行（activated_at
+   * NULL）未过期（now − created_at ≤ TTL，与回收器同口径）、派生字节文件存在且字节数
+   * 一致时同样复用——同 fileId、不新增行、不新增字节；name 更新为本次名、created_at
+   * 刷新为本次收到时刻（pending 窗口重新计时），**但仍不激活**（激活仍归带文字的消息）。
+   * 已过期 pending、任务副本、跨作用域、字节缺失/不符一律不复用。
    * 源不可读 / 非普通文件 / 超大小兜底 → 抛错（handler 转述为回执失败，不登记半份）。
    */
   registerInboundFile(input: { scope: FileScope; name: string; sourcePath: string }): RegisteredFile;
@@ -287,7 +322,8 @@ export interface FileStore {
   /**
    * 本会话已激活（activated_at IS NOT NULL 且 TTL 内，与 materializeInputs 同一 TTL 谓词；
    * 只含 Main 侧行——task_id IS NULL，任务副本不进 Main 清单）的文件清单（CAP-01 S1
-   * 清单注入源；机械事实投影，只有 fileId/name/bytes）。
+   * 清单注入源；机械事实投影，只有 fileId/name/bytes + activatedAt + createdAt——
+   * 清单时间取 **createdAt**（登记/真收到时刻），不是 activatedAt）。
    * 顺序 = 底账既有排序（created_at, file_id 升序）。
    */
   listActiveFiles(input: { scope: FileScope; now: number }): ActiveFileRef[];
@@ -303,11 +339,16 @@ export type TaskInputCopier = Pick<FileStore, 'copyInputsForTask'>;
 const REGISTER_COPY_CHUNK_BYTES = 64 * 1024;
 
 /**
- * 文件 TTL（v8 §4：activated_at 非 NULL 即可读，同时是可读性 TTL 起点；pending 的激活
- * 窗口（created_at → 被带文字的消息激活）沿用同一值——过期 pending 不再激活）。数值
- * 写死（24h，与既有会话 TTL 同量级）：不是配置键，机械事实不开放调节。
+ * 文件引用的**缺省**可读期（ms）：**唯一缺省值住 `resource-policy`**
+ * （`DEFAULT_RUNTIME_CONFIG.fileRefTtlDays = 7`），本模块只经 `fileRefTtlMsOf` 派生——
+ * 不再重定义第二份缺省（配置旋钮的缺省与解释只归 resource-policy）。
+ *
+ * 真正的 TTL 由装配层按 `runtime.fileRefTtlDays`（经 `resolveRuntimeConfig` +
+ * `fileRefTtlMsOf`）解析后以 `createFileStore({ ttlMs })` 注入；本常量只用于未注入的
+ * 构造（测试/嵌入）。语义不变（v8 §4）：activated_at 非 NULL 即可读、同时是可读性
+ * TTL 起点；pending 的激活窗口（created_at → 被带文字的消息激活）沿用同一值。
  */
-export const FILE_REF_TTL_MS = 24 * 60 * 60 * 1000;
+export const FILE_REF_TTL_MS = fileRefTtlMsOf(DEFAULT_RUNTIME_CONFIG);
 
 /**
  * 入站登记的大小上限（20MB，2026-11-17 CAP-01 owner 裁决：100MB 必 OOM——实测 1.1MB
@@ -337,8 +378,20 @@ function realpathOfOpenFd(fd: number, resolved: string): string | undefined {
   }
 }
 
-export function createFileStore(options: { store: TaskStore; workspaceRoot: string }): FileStore {
+export function createFileStore(options: {
+  store: TaskStore;
+  workspaceRoot: string;
+  /**
+   * 文件引用可读期（ms）：装配层按 `runtime.fileRefTtlDays` 解析后注入
+   * （`fileRefTtlMsOf`）；缺省 = 7 天。本模块不读配置、不重定义缺省。
+   */
+  ttlMs?: number;
+}): FileStore {
   const { store, workspaceRoot } = options;
+  const ttlMs = options.ttlMs ?? FILE_REF_TTL_MS;
+  if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
+    throw new Error(`文件引用 TTL 必须是正整数毫秒（当前: ${String(ttlMs)}）`);
+  }
 
   /** 严格包含判定（realpath 之后用；与 skills.ts 的 isInside 同语义）。 */
   function isInside(root: string, candidate: string): boolean {
@@ -455,8 +508,10 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
       // 产出即交付箱内容（登记时刻激活）；入站附件传 undefined = pending（NULL）。
       ...(input.activatedAt === undefined ? {} : { activatedAt: input.activatedAt }),
       createdAt: Date.now(),
+      // 用户产物入口（out/ 扫描 / 入站附件）：可交付角色。
+      deliverable: true,
     });
-    return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256 };
+    return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256, deliverable: true };
   }
 
   /**
@@ -473,7 +528,7 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
     const row = store.getFileRef(fileId, scope, resolution);
     if (row === undefined) throw new FileRefUnavailableError(`missing_or_foreign:${fileId}`);
     if (row.activatedAt === undefined) throw new FileRefUnavailableError(`pending:${fileId}`);
-    if (now - row.activatedAt > FILE_REF_TTL_MS) throw new FileRefUnavailableError(`expired:${fileId}`);
+    if (now - row.activatedAt > ttlMs) throw new FileRefUnavailableError(`expired:${fileId}`);
     return row;
   }
 
@@ -487,7 +542,105 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
     return store.listFileRefs(scope).find((row) => row.taskId === taskId && row.sha256 === sha256 && row.name === name);
   }
 
-  /** fd 单遍流式哈希（回程登记第一遍：先哈希查重，再决定是否落盘；同一 fd 上两遍读取）。 */
+  /**
+   * 入站内容去重（2026-11-18 owner，B 方案）：同 scope、同 sha256、未过期、字节文件存在
+   * 且字节数一致的 Main 侧行可复用。跨 principal/session 由 scope 查询隔离；task_id 绑定的
+   * 副本/产物不参与（它们只归对应任务解析，复用会让 Main 拿到不可读的 fileId）。顺序 =
+   * 底账既有排序（created_at, file_id），确定性取第一行。
+   *
+   * 两类可复用行（2026-11-18 F-1）：
+   *   · 已激活：激活行 TTL 内（now − activated_at ≤ TTL），复用刷新 activated_at；
+   *   · pending：激活窗口未关闭（now − created_at ≤ TTL，与 `file-ref-cleanup.ts` 的
+   *     pending 过期口径一致），复用只刷新 created_at/name，**保持 pending**——同一份纯
+   *     附件连发两次不再产生第二行/第二个 fileId/第二份字节。
+   */
+  function findReusableInboundRow(
+    scope: FileScope,
+    expected: { sha256: string; bytes: number },
+    now: number,
+  ): { row: FileRefRow; pending: boolean } | undefined {
+    for (const row of store.listFileRefs(scope)) {
+      if (row.taskId !== undefined) continue;
+      if (row.sha256 !== expected.sha256 || row.bytes !== expected.bytes) continue;
+      // 字节可能已被保留期回收 / 被截断：文件不是普通文件或字节数不配即视为不可读，
+      // 复用会把坏引用交出去（lstat 不跟随软链，比 existsSync 更严）。
+      if (!byteFileMatches(scope, row)) continue;
+      if (row.activatedAt !== undefined) {
+        if (now - row.activatedAt > ttlMs) continue;
+        return { row, pending: false };
+      }
+      // pending：过期口径 = now − created_at > TTL（过期的 pending 不复用，新登记）。
+      if (now - row.createdAt > ttlMs) continue;
+      return { row, pending: true };
+    }
+    return undefined;
+  }
+
+  /** 派生字节文件存在、是普通文件、字节数与行一致（复用前置条件）。 */
+  function byteFileMatches(scope: FileScope, row: FileRefRow): boolean {
+    try {
+      const stat = lstatSync(fileStoragePathOf(workspaceRoot, scope, row.fileId, row.name));
+      return stat.isFile() && stat.size === row.bytes;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 复用既有 fileId：name 更新为本次文件名（用户最后一次的名字代表意图）。已激活行把
+   * activated_at 刷新为本次收到时刻（避免「重发反而更快过期」），created_at 保留原始登记
+   * 时间做审计；pending 行只刷新 created_at（pending 窗口重新计时）并**保持 activated_at
+   * NULL**（复用不得替用户激活，激活仍归带文字的消息）。字节不重写、不新增行；若安全
+   * 扩展名变化导致派生存储路径变化，先把字节改名到新路径，再更新行——保证不变量「字节
+   * 位置 = fileId + 当前 name 的安全扩展名」始终成立。
+   * 改名/更新失败（竞态/IO）返回 undefined，调用方回落到新登记（零半成品）。
+   */
+  function reuseInboundRow(input: {
+    scope: FileScope;
+    name: string;
+    row: FileRefRow;
+    now: number;
+    pending: boolean;
+  }): RegisteredFile | undefined {
+    const { scope, name, row, now, pending } = input;
+    const oldPath = fileStoragePathOf(workspaceRoot, scope, row.fileId, row.name);
+    const newPath = fileStoragePathOf(workspaceRoot, scope, row.fileId, name);
+    let moved = false;
+    if (oldPath !== newPath) {
+      try {
+        const stat = lstatSync(oldPath);
+        if (!stat.isFile()) return undefined;
+        if (existsSync(newPath)) return undefined;
+        renameSync(oldPath, newPath);
+        moved = true;
+      } catch {
+        return undefined;
+      }
+    }
+    const updated = store.updateFileRef({
+      fileId: row.fileId,
+      principalId: scope.principalId,
+      sessionId: scope.sessionId,
+      name,
+      // pending 复用保持 pending（NULL）；已激活复用刷新激活时刻。
+      activatedAt: pending ? null : now,
+      // pending 窗口从本次收到重新计时；已激活行保留原始 created_at（审计）。
+      ...(pending ? { createdAt: now } : {}),
+    });
+    if (!updated) {
+      if (moved) {
+        try {
+          renameSync(newPath, oldPath);
+        } catch {
+          // 回滚失败：旧行按「字节缺失」处理（不可读），不制造半份新引用。
+        }
+      }
+      return undefined;
+    }
+    return { fileId: row.fileId, name, bytes: row.bytes, sha256: row.sha256, deliverable: true };
+  }
+
+  /** fd 单遍流式哈希（回程登记/入站去重第一遍：先哈希查重，再决定是否落盘）。 */
   function hashFd(fd: number, maxFileBytes: number): { sha256: string; bytes: number } {
     const hash = createHash('sha256');
     const buffer = Buffer.alloc(REGISTER_COPY_CHUNK_BYTES);
@@ -521,7 +674,7 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
       throw error;
     }
     const reused = findTaskRowBySha(input.scope, input.taskId, hashed.sha256, input.name);
-    if (reused !== undefined) return { fileId: reused.fileId, name: reused.name, bytes: reused.bytes, sha256: reused.sha256 };
+    if (reused !== undefined) return { fileId: reused.fileId, name: reused.name, bytes: reused.bytes, sha256: reused.sha256, deliverable: true };
     const fileId = newFileId();
     const destPath = fileStoragePathOf(workspaceRoot, input.scope, fileId, input.name);
     mkdirSync(path.dirname(destPath), { recursive: true });
@@ -550,8 +703,10 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
       bytes: copied.bytes,
       activatedAt: Date.now(),
       createdAt: Date.now(),
+      // 任务回程产物（内联/路径/out/ 兜底扫）：用户产物角色。
+      deliverable: true,
     });
-    return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256 };
+    return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256, deliverable: true };
   }
 
   return {
@@ -561,7 +716,7 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
       const storagePath = fileStoragePathOf(workspaceRoot, input.scope, fileId, input.name);
       mkdirSync(path.dirname(storagePath), { recursive: true });
       writeFileSync(storagePath, input.bytes, { flag: 'wx', mode: 0o600 });
-      return store.insertFileRef({
+      const row = store.insertFileRef({
         fileId,
         principalId: input.scope.principalId,
         sessionId: input.scope.sessionId,
@@ -570,7 +725,16 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
         bytes: input.bytes.length,
         activatedAt: input.activatedAt ?? undefined,
         createdAt: Date.now(),
+        // 方案 A：缺省 false——宿主内部写出的字节默认不算交付物（只有显式/register* 入口才是用户产物）。
+        deliverable: input.deliverable ?? false,
       });
+      return {
+        fileId: row.fileId,
+        name: row.name,
+        bytes: row.bytes,
+        sha256: row.sha256,
+        deliverable: row.deliverable ?? false,
+      };
     },
     materializeInputs({ runDir, scope, fileIds, resolution }) {
       const inDir = path.join(runDir, 'in');
@@ -629,6 +793,8 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
             bytes,
             activatedAt: Date.now(),
             createdAt: Date.now(),
+            // 交办副本继承源行的交付角色（用户输入文件复制品，不是宿主诊断产物）。
+            deliverable: row.deliverable ?? true,
           });
           return { sourceFileId: row.fileId, fileId, name: row.name, bytes, sha256 };
         } finally {
@@ -711,20 +877,36 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
       return store
         .listFileRefs(scope)
         .filter(
-          (row) => row.taskId === taskId && row.activatedAt !== undefined && now - row.activatedAt <= FILE_REF_TTL_MS,
+          (row) => row.taskId === taskId && row.activatedAt !== undefined && now - row.activatedAt <= ttlMs,
         )
-        .map((row) => ({ fileId: row.fileId, name: row.name, bytes: row.bytes }));
+        .map((row) => ({
+          fileId: row.fileId,
+          name: row.name,
+          bytes: row.bytes,
+          activatedAt: row.activatedAt!,
+          createdAt: row.createdAt,
+        }));
     },
-    registerTaskFile({ scope, taskId, name, bytes, maxFileBytes }) {
+    registerTaskFile({ scope, taskId, name, bytes, maxFileBytes, deliverable }) {
       // 内联字节面：超限拒收 → 任务池 sha256 去重（复用旧 fileId、不落盘）→ 新 file_id 落盘登记。
       if (bytes.length > maxFileBytes) throw new TaskFileRejectedError('size_limit');
       const sha256 = createHash('sha256').update(bytes).digest('hex');
       const reused = findTaskRowBySha(scope, taskId, sha256, name);
-      if (reused !== undefined) return { fileId: reused.fileId, name: reused.name, bytes: reused.bytes, sha256: reused.sha256 };
+      // 去重命中的行角色以已登记行为准（同一份字节不会因为本次声明而改变交付角色）。
+      if (reused !== undefined) {
+        return {
+          fileId: reused.fileId,
+          name: reused.name,
+          bytes: reused.bytes,
+          sha256: reused.sha256,
+          deliverable: reused.deliverable ?? true,
+        };
+      }
       const fileId = newFileId();
       const storagePath = fileStoragePathOf(workspaceRoot, scope, fileId, name);
       mkdirSync(path.dirname(storagePath), { recursive: true });
       writeFileSync(storagePath, bytes, { flag: 'wx', mode: 0o600 });
+      const role = deliverable ?? true;
       const row = store.insertFileRef({
         fileId,
         principalId: scope.principalId,
@@ -735,8 +917,10 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
         bytes: bytes.length,
         activatedAt: Date.now(),
         createdAt: Date.now(),
+        // 任务回程文件（内联字节）：缺省用户产物；日志等内部产物显式 false。
+        deliverable: role,
       });
-      return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256 };
+      return { fileId: row.fileId, name: row.name, bytes: row.bytes, sha256: row.sha256, deliverable: role };
     },
     registerTaskFileFromPath({ scope, taskId, sourcePath, allowedRoot, name, maxFileBytes }) {
       // 路径源：先包含性（任务暂存目录之外的任何路径不开口子），再 fd 纪律，再查重落盘。
@@ -783,7 +967,19 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
         const st = fstatSync(fd);
         if (!st.isFile()) throw new Error('入站附件不是普通文件，拒收');
         // 入站源头是渠道适配器落盘（受信写侧，见 contracts IncomingAttachment 义务），不做
-        // out/ 的 nlink/uid 走查；大小兜底见 INBOUND_MAX_FILE_BYTES。登记为 pending。
+        // out/ 的 nlink/uid 走查；大小兜底见 INBOUND_MAX_FILE_BYTES。
+        //
+        // 内容去重（2026-11-18 owner，B 方案 + F-1）：先流式哈希（侧效零），同 scope 内
+        // 已有同 sha256 且未过期、字节一致的行 → 复用该 fileId（不落盘、不新增行）：
+        // 已激活行刷新 name/activated_at；pending 行刷新 name/created_at 且保持 pending。
+        // 无命中才走既有 pending 登记（copy-on-register + 新 file_id）。
+        const hashed = hashFd(fd, INBOUND_MAX_FILE_BYTES);
+        const now = Date.now();
+        const reusable = findReusableInboundRow(scope, hashed, now);
+        if (reusable !== undefined) {
+          const reused = reuseInboundRow({ scope, name, row: reusable.row, now, pending: reusable.pending });
+          if (reused !== undefined) return reused;
+        }
         return registerFromFd(fd, { scope, name, maxFileBytes: INBOUND_MAX_FILE_BYTES, activatedAt: undefined });
       } catch (error) {
         if (error instanceof RangeError && error.message === 'size_limit') {
@@ -795,22 +991,29 @@ export function createFileStore(options: { store: TaskStore; workspaceRoot: stri
       }
     },
     activatePendingInputs({ scope, now }) {
-      // TTL 窗口（created_at >= now - FILE_REF_TTL_MS）内的全部 pending → activated_at = now；
+      // TTL 窗口（created_at >= now - ttlMs）内的全部 pending → activated_at = now；
       // 过期 pending 保持 pending（孤儿清理归后续 TTL 清扫）。机械事实一条 UPDATE，无状态机。
-      return store.activatePendingFileRefs(scope, { activatedAt: now, createdAfter: now - FILE_REF_TTL_MS });
+      return store.activatePendingFileRefs(scope, { activatedAt: now, createdAfter: now - ttlMs });
     },
     listActiveFiles({ scope, now }) {
       // 与 materializeInputs 的可读性谓词同源：activated_at 非 NULL 且 (now - activated_at) ≤ TTL。
       // 只含 Main 侧行（task_id IS NULL）：任务副本只归当前任务的 Worker 解析，不进 Main 清单
       // （清单是 Main 的 run_js/inputFiles 引用面——给了也解析不到，且是存在性 oracle，v8 §4）。
-      // 只投影三字段（fileId/name/bytes）——sha256/身份键/时间戳不进清单。
+      // 投影 fileId/name/bytes + activatedAt（TTL 起点）+ createdAt（登记/真收到时刻，
+      // 清单按它渲染「收到」）——sha256/身份键仍不进清单。
       return store
         .listFileRefs(scope)
         .filter(
           (row) =>
-            row.taskId === undefined && row.activatedAt !== undefined && now - row.activatedAt <= FILE_REF_TTL_MS,
+            row.taskId === undefined && row.activatedAt !== undefined && now - row.activatedAt <= ttlMs,
         )
-        .map((row) => ({ fileId: row.fileId, name: row.name, bytes: row.bytes }));
+        .map((row) => ({
+          fileId: row.fileId,
+          name: row.name,
+          bytes: row.bytes,
+          activatedAt: row.activatedAt!,
+          createdAt: row.createdAt,
+        }));
     },
   };
 }

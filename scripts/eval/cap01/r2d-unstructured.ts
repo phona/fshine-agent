@@ -21,7 +21,7 @@
  *   【模型能力：只读数，不判宿主】
  *     read（读到日期+金额）/ partial-read（只读到一项）/ honest-cannot（如实说读不出）/
  *     vague（含糊，记录）/ fabricated（编造，红）。仓内没有 PDF 解析库，所以「读不出」是
- *     预期内的诚实结果；这一栏把旧 r6 S5 的 UNDEFINED 变成有读数。
+ *     预期内的诚实结果；这一栏把旧长会话 S5 的 UNDEFINED 变成有读数。
  *
  * 反向绊线：judge 的宿主栏虚构检测可被 `detectReplyFabrication=false` 关掉（仅测试用）；
  * r2d-judge.test.ts 用编数假样本证明关掉后模型栏仍判 fabricated、整体仍红。
@@ -248,7 +248,16 @@ function scriptedMainDriver(): TurnDriver {
 
 function scriptedWorkerDriver(): TurnDriver {
   return {
-    async run() {
+    async run(input) {
+      // 真实执行调用（不是空汇报）：零执行汇报会被产品判为「未发起执行」（task-runner/
+      // task-registry 的如实交付判据），委派工具因此报错、宿主链路不成立——所以这里必须
+      // 落一次真实 run_js。脚本不引用输入文件：模型能力栏只该读到「读不出」，不该从
+      // run_js 结果的 inputs[].name（如 invoice-2026-10-18.pdf）里误读出一个日期。
+      await input.exec('run_js', {
+        code: [
+          "console.log('pdf_text_extractable=false: 当前执行环境没有 PDF 解析能力');",
+        ].join('\n'),
+      });
       const text = '无法读取 PDF 内容（当前执行环境没有 PDF 解析能力），未能提取金额和日期。';
       return { text, messages: [scriptedAssistant(text)] };
     },

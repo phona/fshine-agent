@@ -23,7 +23,8 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import { createPiTurnDriver } from './src/pi-driver';
 import { createScriptedModelRuntime } from './testing/scripted-model-runtime';
-import { createSession } from './src/execution-runtime';
+import { WAKE_TURN_MS, createSession } from './src/execution-runtime';
+import type { TurnDriver, WakeResult, WakeToolFace } from './src/driver-contract';
 import { TaskOwnershipError, createTaskRegistry, type TaskRegistry } from './src/task-registry';
 import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
 
@@ -155,15 +156,9 @@ describe('运行时链路（假客户端 + 假模型）', () => {
         textAssistant('documents 窗口 W202610 已查询。'),
       ],
       workerResponses: [
-        toolCallAssistant('execute_operation', {
-          operation: 'dummy.query',
-          args: { '--collection': 'documents', '--window': 'W202611' },
-        }, 'call_worker_1'),
+        toolCallAssistant('op_dummy_query', { 'collection': 'documents', 'window': 'W202611' }, 'call_worker_1'),
         textAssistant('已查询 documents W202611：3 条。'),
-        toolCallAssistant('execute_operation', {
-          operation: 'dummy.query',
-          args: { '--collection': 'documents', '--window': 'W202610' },
-        }, 'call_worker_2'),
+        toolCallAssistant('op_dummy_query', { 'collection': 'documents', 'window': 'W202610' }, 'call_worker_2'),
         textAssistant('已查询 documents W202610：2 条。'),
       ],
     });
@@ -204,7 +199,7 @@ describe('运行时链路（假客户端 + 假模型）', () => {
         textAssistant('本轮未执行写入。'),
       ],
       workerResponses: [
-        toolCallAssistant('execute_operation', { operation: 'dummy.commit', args: { '--collection': 'documents' } }, 'call_worker_1'),
+        toolCallAssistant('op_dummy_commit', { 'collection': 'documents' }, 'call_worker_1'),
         textAssistant('该操作未被执行。'),
       ],
     });
@@ -243,7 +238,7 @@ describe('运行时链路（假客户端 + 假模型）', () => {
         textAssistant('已查询。'),
       ],
       workerResponses: [
-        toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'documents' } }, 'call_worker_1'),
+        toolCallAssistant('op_dummy_query', { 'collection': 'documents' }, 'call_worker_1'),
         textAssistant('已查询 documents。'),
       ],
     });
@@ -272,7 +267,7 @@ describe('运行时链路（假客户端 + 假模型）', () => {
         textAssistant('documents 共 3 条。'),
       ],
       workerResponses: [
-        toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'documents' } }, 'call_worker_1'),
+        toolCallAssistant('op_dummy_query', { 'collection': 'documents' }, 'call_worker_1'),
         textAssistant('已查询 documents。'),
       ],
       taskRegistry: registry,
@@ -305,7 +300,7 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
     textAssistant(reply),
   ];
   const queryCall = (id = 'call_worker_1'): AgentMessage =>
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'documents' } }, id);
+    toolCallAssistant('op_dummy_query', { 'collection': 'documents' }, id);
 
   it('① 执行层 failed：任务记 failed（不是 completed）；汇报原文保留；failureReason 取执行层 message', async () => {
     const client = new ScenarioClient([{ status: 'failed', error: { code: 'EXECUTION_TIMEOUT', message: '执行层调用超时。' } }]);
@@ -435,5 +430,164 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
     registry.begin({ taskId: 'task_forged_2', ...scope, request: '查询 documents' });
     registry.complete('task_forged_2', '查询成功，共 3 条数据。');
     expect(registry.get('task_forged_2', scope).status).toBe('unexecuted');
+  });
+});
+
+describe('唤醒回合的界（2026-11-19 复核 F1）', () => {
+  it('wake 授予只读工具面（task_status/task_result）：exec 读真实底账，执行层零调用；执行类工具被拒', async () => {
+    const scope = { principalId: 'wecom:test-user', sessionId: 'sess_wake_face' };
+    const registry = createTaskRegistry();
+    registry.begin({ taskId: 'task_wake_face', ...scope, request: '汇总那件事' });
+    registry.complete('task_wake_face', '共 7 条，已确认无误。');
+
+    const client = new FakeClient();
+
+    let seenToolFace: WakeToolFace | undefined;
+    const capture: TurnDriver = {
+      async run() { throw new Error('（测试）唤醒用例不应起业务回合'); },
+      async wake(_factText: string, options?: { deadline?: number; toolFace?: WakeToolFace }): Promise<WakeResult> {
+        seenToolFace = options?.toolFace;
+        return { outcome: 'woken', text: '那件事办完了，共 7 条。' };
+      },
+    };
+    const session = await createSession({
+      ...scope,
+      client,
+      allowedOperations: ['dummy.query'],
+      mainDriver: capture,
+      workerDriver: capture,
+      mainSystemPrompt: '你是测试主 Agent。',
+      taskRegistry: registry,
+    });
+
+    const woke = await session.wake('[任务完成]「汇总那件事」办完了。');
+    expect(woke.outcome).toBe('woken');
+    // 请求面：只读工具集（名字集合恰好 task_status/task_result，且不含执行类）。
+    expect(seenToolFace).toBeDefined();
+    expect([...seenToolFace!.names].sort()).toEqual(['task_result', 'task_status']);
+    // 只读执行面：task_status 读真实底账（拿到刚建的任务），task_result 拿结果存档。
+    const status = await seenToolFace!.exec('task_status', {}) as { tasks: Array<{ name: string }> };
+    expect(status.tasks[0]!.name, 'task_status 读到真实底账').toBe('汇总那件事');
+    // 2026-11-20：数字 ref 退役，按真实 taskId 读结果（断言不变）。
+    const result = await seenToolFace!.exec('task_result', { ref: 'task_wake_face' }) as { resultText: string | null };
+    expect(result.resultText, 'task_result 读到真实结果存档').toBe('共 7 条，已确认无误。');
+    // 执行类工具（含集合外任何名字）被只读闭包确定性拒绝，执行层零调用。
+    await expect(seenToolFace!.exec('execute_operation', {})).rejects.toThrow('唤醒回合不允许调用工具');
+    await expect(seenToolFace!.exec('task_run', {})).rejects.toThrow('唤醒回合不允许调用工具');
+    expect(client.requests, '只读工具面不得触执行层').toHaveLength(0);
+  });
+
+  it('Session.wake 传给驱动的截止 = 单次调用量级（WAKE_TURN_MS），不是业务回合的 mainTurnMs(300s)', async () => {
+    let observedDeadline: number | undefined;
+    const fakeMain: TurnDriver = {
+      async run() {
+        throw new Error('（测试）唤醒用例不应起业务回合');
+      },
+      async wake(_factText: string, options?: { deadline?: number }): Promise<WakeResult> {
+        observedDeadline = options?.deadline;
+        return { outcome: 'woken', text: '好。' };
+      },
+    };
+    const session = await createSession({
+      principalId: 'wecom:test-user',
+      sessionId: 'sess_wake_bound',
+      client: new FakeClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver: fakeMain,
+      workerDriver: fakeMain,
+      mainSystemPrompt: '你是测试主 Agent。',
+      // 业务回合的界照旧是 300s：唤醒不能用它当界（一次卡住的唤醒按住会话链 5 分钟）。
+      mainTurnMs: 300_000,
+    });
+    const woke = await session.wake('[任务完成] 测试事实：已完成。');
+    expect(woke.outcome).toBe('woken');
+    expect(observedDeadline).toBeDefined();
+    const after = Date.now();
+    // deadline = 调用时刻 + WAKE_TURN_MS；用 after 收边（调用时刻 ≤ after）。
+    expect(observedDeadline! - after).toBeLessThanOrEqual(WAKE_TURN_MS);
+    expect(observedDeadline! - after).toBeGreaterThan(0);
+  });
+
+  it('冷会话（驱动可唤醒但实例级会话还没建）→ 补一次**零工具**单回合（重启对账的形状）', async () => {
+    // 2026-11-19 唤醒切片：重启后第一次状态变化（重启对账）时，驱动实例级会话还没建——
+    // 驱动侧 wake 只能回 unavailable。本层按与 send 同一份装配参数补一次零工具单回合，
+    // 否则「用户以为在办、实际说不清」这件事永远说不出话。
+    let observedTools: readonly unknown[] | undefined;
+    let observedMessages: readonly unknown[] | undefined;
+    let observedDeadline: number | undefined;
+    let observedExec: ((tool: string, args: Record<string, unknown>) => Promise<unknown>) | undefined;
+    const cold: TurnDriver = {
+      async run(input) {
+        observedTools = input.tools;
+        observedMessages = input.messages;
+        observedDeadline = input.deadline;
+        observedExec = input.exec;
+        return { text: '我这边重启过，这件事的状态说不清了。', messages: [...input.messages] };
+      },
+      async wake(): Promise<WakeResult> {
+        return { outcome: 'unavailable' };
+      },
+    };
+    const session = await createSession({
+      principalId: 'wecom:test-user',
+      sessionId: 'sess_wake_cold',
+      client: new FakeClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver: cold,
+      workerDriver: cold,
+      mainSystemPrompt: '你是测试主 Agent。',
+      mainTurnMs: 300_000,
+    });
+    const woke = await session.wake('[重启对账] 测试事实：状态说不清。');
+    expect(woke).toEqual({ outcome: 'woken', text: '我这边重启过，这件事的状态说不清了。' });
+    // 零工具（唤醒回合不得碰执行层——与驱动侧 wake 同一条纪律）。
+    expect(observedTools).toEqual([]);
+    // 本轮输入 = 事实（最后一条 user）。
+    expect(observedMessages?.at(-1)).toMatchObject({
+      role: 'user',
+      content: '[重启对账] 测试事实：状态说不清。',
+    });
+    expect(observedDeadline! - Date.now()).toBeLessThanOrEqual(WAKE_TURN_MS);
+    // 零工具下模型真去调工具也只拿到一句安全话术（不是执行面）。
+    await expect(observedExec!('task_run', {})).rejects.toThrow('唤醒回合不提供工具。');
+  });
+
+  it('冷唤醒说不出话（空正文）→ failed（不冒充已说）；驱动没有唤醒能力 → unavailable（语义不变）', async () => {
+    const silent: TurnDriver = {
+      async run(input) {
+        return { text: '', messages: [...input.messages] };
+      },
+      async wake(): Promise<WakeResult> {
+        return { outcome: 'unavailable' };
+      },
+    };
+    const session = await createSession({
+      principalId: 'wecom:test-user',
+      sessionId: 'sess_wake_cold_silent',
+      client: new FakeClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver: silent,
+      workerDriver: silent,
+      mainSystemPrompt: '你是测试主 Agent。',
+      mainTurnMs: 300_000,
+    });
+    await expect(session.wake('[重启对账] 测试事实。')).resolves.toEqual({ outcome: 'failed' });
+
+    const noWake: TurnDriver = {
+      async run() {
+        throw new Error('（测试）没有唤醒能力的驱动不应起回合');
+      },
+    };
+    const plain = await createSession({
+      principalId: 'wecom:test-user',
+      sessionId: 'sess_wake_nowake',
+      client: new FakeClient(),
+      allowedOperations: ['dummy.query'],
+      mainDriver: noWake,
+      workerDriver: noWake,
+      mainSystemPrompt: '你是测试主 Agent。',
+      mainTurnMs: 300_000,
+    });
+    await expect(plain.wake('[重启对账] 测试事实。')).resolves.toEqual({ outcome: 'unavailable' });
   });
 });

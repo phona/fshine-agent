@@ -361,7 +361,7 @@ async function selftest(out: string): Promise<number> {
     principalId: 'wecom:selftest-d2',
     sessionId: 'selftest-d2-session',
     scope: { principalId: 'wecom:selftest-d2', sessionId: 'selftest-d2-session' } satisfies TaskScope,
-    dispatchMode: 'inline',
+    taskDispatch: 'sync',
     withRunner: false,
     settings: arm.settings,
     driverFactory: () => {
@@ -515,7 +515,7 @@ async function runSample(input: { arm: Arm; sample: number; root: string; meter:
     principalId: scope.principalId,
     sessionId: scope.sessionId,
     scope,
-    dispatchMode: 'inline',
+    taskDispatch: 'sync',
     withRunner: false,
     settings: input.arm.settings,
     ...(resumeFile === undefined ? {} : { resumeFile }),

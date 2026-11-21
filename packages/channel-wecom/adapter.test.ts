@@ -118,14 +118,22 @@ class FakeSdkClient {
   /** 主动消息通道（终帧拒收降级用）：默认成功并记录；测试可用 failNextSend 注入失败。 */
   readonly sentMessages: Array<{ chatid: string; content: string }> = [];
   private sendFailNext = false;
+  private sendFailCause: unknown = new Error('send boom');
   sendMessage(chatid: string, body: { msgtype: 'markdown'; markdown: { content: string } }): Promise<unknown> {
     this.sentMessages.push({ chatid, content: body.markdown.content });
-    if (this.sendFailNext) return Promise.reject(new Error('send boom'));
+    if (this.sendFailNext) return Promise.reject(this.sendFailCause);
     return Promise.resolve({});
   }
 
   failNextSend(): void {
     this.sendFailNext = true;
+    this.sendFailCause = new Error('send boom');
+  }
+
+  /** 注入**任意形状**的拒收原因（真实 SDK 的 ack error 是普通对象 {errcode,errmsg}，不是 Error）。 */
+  failNextSendWith(cause: unknown): void {
+    this.sendFailNext = true;
+    this.sendFailCause = cause;
   }
 
   sendMediaMessage(chatid: string, mediaType: 'file', mediaId: string): Promise<unknown> {
@@ -286,11 +294,9 @@ describe('WecomBotChannel(官方 SDK 封装)', () => {
     expect(message.chatType).toBe('single');
     expect(message.text).toBe('查一下6月账套');
 
-    expect(fake.replies).toHaveLength(2);
-    expect(fake.replies[0]).toMatchObject({ reqId: 'cb-1', content: '收到,正在处理…', finish: false });
-    expect(fake.replies[1]).toMatchObject({ reqId: 'cb-1', content: '好的,已收到', finish: true });
-    // ack 与最终帧共用同一 streamId(最终整体替换过程)
-    expect(fake.replies[0]!.streamId).toBe(fake.replies[1]!.streamId);
+    // 2026-11-19：不再先发「收到,正在处理…」受理帧（那张卡片没用）——只有一条终帧。
+    expect(fake.replies).toHaveLength(1);
+    expect(fake.replies[0]).toMatchObject({ reqId: 'cb-1', content: '好的,已收到', finish: true });
   });
 
   it('群聊:剥离 @机器人 前缀,conversationId 取 chatid', async () => {
@@ -415,7 +421,8 @@ describe('WecomBotChannel(官方 SDK 封装)', () => {
     const progressTexts = fake.replies
       .filter((reply) => !reply.finish)
       .map((reply) => reply.content);
-    expect(progressTexts).toEqual(['收到,正在处理…', '步骤一:正在定位账套']);
+    // 2026-11-19：没有受理帧了，进度帧只有 handler 自己发的那一条。
+    expect(progressTexts).toEqual(['步骤一:正在定位账套']);
   });
 
   // 受理帧豁免（首帧提速，2026-10-16）：本流第一帧 progress 是宿主在回合真正开跑时发的
@@ -441,7 +448,7 @@ describe('WecomBotChannel(官方 SDK 封装)', () => {
 
     expect(fake.replies.filter((reply) => reply.finish)).toHaveLength(1);
     const progressTexts = fake.replies
-      .filter((reply) => !reply.finish && reply.content !== '收到,正在处理…')
+      .filter((reply) => !reply.finish)
       .map((reply) => reply.content);
     // 第 1 帧豁免 + 4 帧预算 = 5 帧；第 6 帧被硬顶丢（老行为：第 1 帧占预算，只送出 4 帧）
     expect(progressTexts).toEqual(['进度帧1', '进度帧2', '进度帧3', '进度帧4', '进度帧5']);
@@ -685,6 +692,28 @@ describe('WecomBotChannel 独立主动交付', () => {
     expect(fake.sentMessages).toHaveLength(1);
   });
 
+  it('主动文字发送失败且 SDK 拒收原因是普通对象（errcode/errmsg）→ 错误消息如实携带平台信息，不是 [object Object]', async () => {
+    // 2026-11-21 live P1：告警推送 93006 invalid chatid 时日志只见「[object Object]」——
+    // 平台说了什么、哪个 chatid 被拒都看不到。拒收原因是普通对象时必须 JSON 化进 detail。
+    const { channel, fake } = await startChannel(async () => 'ok');
+    const route: ChannelRoute = { channel: 'wecom', conversationId: 'e2e_user' };
+    fake.failNextSendWith({ errcode: 93006, errmsg: 'invalid chatid' });
+
+    const error = await sendToConversation(channel, route, { text: '告警' }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(error).toMatchObject({
+      code: 'CHANNEL_TRANSPORT_FAILED',
+      route,
+      failedPart: { kind: 'text', index: 0, stage: 'send' },
+    });
+    const message = (error as Error).message;
+    expect(message).toContain('93006');
+    expect(message).toContain('invalid chatid');
+    expect(message).not.toContain('[object Object]');
+  });
+
   it('主动素材上传失败时报告 upload 阶段及之前已 ACK 部分', async () => {
     const { channel, fake } = await startChannel(async () => 'ok');
     const route: ChannelRoute = { channel: 'wecom', conversationId: 'zhangsan' };
@@ -744,8 +773,8 @@ describe('WecomBotChannel 附件(file 消息)', () => {
     // 文件事件先到，但 downloadFile 还没完成；正文不能冷启动进入 handler，
     // 否则下游会在附件进入暂存池前开始执行。
     expect(handler).not.toHaveBeenCalled();
-    const ack = fake.replies.find((reply) => reply.reqId === 'req-text-after-file' && !reply.finish);
-    expect(ack).toMatchObject({ content: '收到,正在处理…', finish: false });
+    // 2026-11-19：不再发受理帧——「已收下但在等附件」用「无任何回复帧 + handler 未调用」证明。
+    expect(fake.replies.filter((reply) => reply.reqId === 'req-text-after-file')).toHaveLength(0);
 
     resolveDownload({ buffer: Buffer.from('xlsx'), filename: '工资.xlsx' });
     await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(2));
@@ -753,7 +782,7 @@ describe('WecomBotChannel 附件(file 消息)', () => {
       .toEqual(['msg-file-slow', 'msg-text-after-file']);
     expect((handler.mock.calls[1]![0] as IncomingChannelMessage).text).toBe('帮我做工资表');
     const final = fake.replies.find((reply) => reply.reqId === 'req-text-after-file' && reply.finish);
-    expect(final?.streamId).toBe(ack?.streamId);
+    expect(final?.content).toBeTruthy();
 
     rmSync(root, { recursive: true, force: true });
   });
@@ -808,11 +837,7 @@ describe('WecomBotChannel 附件(file 消息)', () => {
       await Promise.resolve();
       await Promise.resolve();
       expect(handler).not.toHaveBeenCalled();
-      expect(fake.replies).toContainEqual(expect.objectContaining({
-        reqId: 'req-text-timeout',
-        content: '收到,正在处理…',
-        finish: false,
-      }));
+      expect(fake.replies.filter((reply) => reply.reqId === 'req-text-timeout')).toHaveLength(0);
 
       await vi.advanceTimersByTimeAsync(ATTACHMENT_WAIT_TIMEOUT_MS);
       expect(handler).not.toHaveBeenCalled();
@@ -894,11 +919,7 @@ describe('WecomBotChannel 附件(file 消息)', () => {
       await channel.stop();
       await Promise.resolve();
       expect(handler).not.toHaveBeenCalled();
-      expect(fake.replies).toContainEqual(expect.objectContaining({
-        reqId: 'req-text-stop',
-        content: '收到,正在处理…',
-        finish: false,
-      }));
+      expect(fake.replies.filter((reply) => reply.reqId === 'req-text-stop')).toHaveLength(0);
       expect(fake.replies.some((reply) => reply.finish)).toBe(false);
 
       resolveDownload({ buffer: Buffer.from('xlsx'), filename: '工资.xlsx' });
@@ -1091,7 +1112,7 @@ describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)'
     expect(fake.replies).toEqual([]);                       // 窗口内不起流
     await vi.advanceTimersByTimeAsync(2_000);
     expect(fake.replies).toHaveLength(1);
-    expect(fake.replies[0]!.content).toBe('已收到 1 个文件：a.xlsx');
+    expect(fake.replies[0]!.content).toBe('已收到 1 个文件');
     expect(fake.replies[0]!.finish).toBe(true);
     expect(fake.replies[0]!.reqId).toBe('req-orphan');
   });
@@ -1103,14 +1124,15 @@ describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)'
     await sendFile(fake, 'req-f2', 'b.xls');
     await vi.advanceTimersByTimeAsync(2_000);
     expect(fake.replies).toHaveLength(1);
-    // 措辞与宿主回合披露同一句（contracts.formatFileReceipt）——2026-10-20 起不再带
-    // "等待你的指令"后缀：气泡本身就是回应，那句把"存个档"误设成待办
-    expect(fake.replies[0]!.content).toBe('已收到 2 个文件：a.xlsx、b.xls');
+    // 回执不带文件名（contracts.formatFileAck）——文件名由随后的主动追问列，回执再列
+    // 一遍就是两条几乎相同的清单；2026-10-20 起也不带"等待你的指令"后缀：气泡本身
+    // 就是回应，那句把"存个档"误设成待办
+    expect(fake.replies[0]!.content).toBe('已收到 2 个文件');
     // 通道挂在最后到达的那条上：时间上最接近用户所见
     expect(fake.replies[0]!.reqId).toBe('req-f2');
   });
 
-  it('带正文的消息到达即取消挂起的收据（那一回合的首帧会带同样的收据）', async () => {
+  it('带正文的消息到达即取消挂起的收据（那一回合只有终帧，不再有收据/受理帧）', async () => {
     const root = freshRoot();
     // 宿主正常路径对附件-only 无话可说；带正文的回合照常出终帧
     const handler = vi.fn(async (msg: IncomingChannelMessage): Promise<string> => (msg.attachmentOnly ? '' : '做完了'));
@@ -1120,8 +1142,8 @@ describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)'
     fake.emit('message.text', textFrame('req-t1'));
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(5_000);               // 窗口早过了
-    // 只有那一回合的两帧；没有第三条收据——同一句话说两遍才是冗余
-    expect(fake.replies.map((r) => r.content)).toEqual(['收到,正在处理…', '做完了']);
+    // 那一回合只有一条终帧；也没有收据——同一句话说两遍才是冗余
+    expect(fake.replies.map((r) => r.content)).toEqual(['做完了']);
   });
 
   it('例外路径（暂存超限等）宿主自己回文本：当即终帧，不进并窗', async () => {
@@ -1147,7 +1169,7 @@ describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)'
     await vi.advanceTimersByTimeAsync(2_000);
     expect(fake.replies).toHaveLength(1);                    // 流的尝试确实发生了
     // 降级通道把同一条收据作为全新消息送达：用户看得到，且没有开着的流
-    expect(fake.sentMessages).toEqual([{ chatid: 'zhangsan', content: '已收到 1 个文件：a.xlsx' }]);
+    expect(fake.sentMessages).toEqual([{ chatid: 'zhangsan', content: '已收到 1 个文件' }]);
   });
 
   // 并窗长度是个有上下界的调参，值得一根钉子：下界要盖住"最后一个文件 → 指令"的间隔

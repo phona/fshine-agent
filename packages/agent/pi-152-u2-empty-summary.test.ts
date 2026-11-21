@@ -13,7 +13,7 @@
  *      （session-manager.js:892，会话库写入前拒绝空摘要——即使上游漏判也不落无效检查点）。
  *
  * 反向绊线：把任一处判空删掉，本文件的对应用例立即变红（实测记录见
- * `docs/product/pi-152-dependency-patches.md` U2 节）。
+ * `patches/README.md` U2 节）。
  * 全部确定性：脚本化 provider，零网络、零真实模型。
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';

@@ -24,7 +24,8 @@ export function fakeManifest(): CapabilityManifest {
 export class FakeClient implements ExecutionClient {
   async capabilities(): Promise<CapabilityManifest> { return fakeManifest(); }
   async execute(request: ExecutionRequest): Promise<ExecutionOutcome> {
-    const collection = (request.args as { collection?: unknown } | undefined)?.collection;
+    const callArgs = request.args as { collection?: unknown; '--collection'?: unknown } | undefined;
+    const collection = callArgs?.collection ?? callArgs?.['--collection'];
     if (collection === 'contoso') {
       // 歧义集合 → needs_input（任务应落 waiting_user，可被确定性取消）。
       return {
@@ -62,14 +63,21 @@ export function createSmokeExecutor(caseDef: DsCase): DsExecutor {
       const target = workerQueries[Math.min(workerSeq, workerQueries.length - 1)]!;
       workerSeq += 1;
       const [collection, window] = target.includes(' ') ? target.split(' ') : [target, undefined];
-      const tool = input.tools.find((t) => t.name === 'execute_operation') ?? input.tools[0]!;
+      // 夹具走内部 exec 路由（execute_operation 兼容入口），不借 op_* 工具面透传参数包装。
       try {
-        await input.exec(tool.name, { operation: 'dummy.query', args: { collection, ...(window === undefined ? {} : { window }) } });
+        await input.exec('execute_operation', { operation: 'dummy.query', args: { collection, ...(window === undefined ? {} : { window }) } });
       } catch { /* smoke 假件：错误由 reply 面表达 */ }
       return { text: '查询完成', messages: [...input.messages, textMessage('查询完成')] };
     },
   };
   let turn = 0;
+  // 2026-11-20：数字 ref 退役——DS-3 分步用真实 taskId（从 task_run 回执里取）。
+  const ds3TaskIds: string[] = [];
+  const captureTaskId = (result: unknown): void => {
+    const taskId = (result as { taskId?: unknown } | undefined)?.taskId;
+    if (typeof taskId === 'string') ds3TaskIds.push(taskId);
+  };
+  const at = (index: number): Record<string, unknown> => ({ ref: ds3TaskIds[index] ?? '' });
   const mainDriver: TurnDriver = {
     async run(input) {
       turn += 1;
@@ -78,14 +86,14 @@ export function createSmokeExecutor(caseDef: DsCase): DsExecutor {
       };
       if (caseDef.id === 'DS-3') {
         if (turn === 1) {
-          await exec('task_run', { task: '核对 alpha W1' });
-          await exec('task_run', { task: '核对 beta W1' });
-          await exec('task_run', { task: '整理 contoso 的窗口' });
+          captureTaskId(await exec('task_run', { task: '核对 alpha W1' }));
+          captureTaskId(await exec('task_run', { task: '核对 beta W1' }));
+          captureTaskId(await exec('task_run', { task: '整理 contoso 的窗口' }));
         } else if (turn === 2) {
           await exec('task_status', {});
-          await exec('task_cancel', { ref: '#3' });
-          await exec('task_result', { ref: '#1' });
-          await exec('task_result', { ref: '#2' });
+          await exec('task_cancel', at(2)); // 第三个任务（contoso waiting）→ 取消
+          await exec('task_result', at(0));
+          await exec('task_result', at(1));
         } else {
           await exec('task_status', {});
         }

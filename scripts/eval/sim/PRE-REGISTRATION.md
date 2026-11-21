@@ -4,7 +4,7 @@
 > （不引框架、不建服务、不加数据库）。复用现有资产：`scripts/ask-runtime.ts`（生产同源装配）、
 > `scripts/eval/fixtures/dummy-platform`（仓内 dummy 执行层）、`scripts/eval/business-e2e/batch.ts`
 > （并发池 + 硬上限登记）、`scripts/eval/business-e2e/collect.ts`（证据/manifest sha256 纪律）、
-> `scripts/eval/r6/oracle.ts`（事实真值机械判定）、`scripts/eval/r6/accounting.ts`（分类记账语义）。
+> `scripts/eval/long-session/oracle.ts`（事实真值机械判定）、`scripts/eval/long-session/accounting.ts`（分类记账语义）。
 
 ## 冻结参数
 
@@ -106,3 +106,65 @@ TMPDIR=/tmp/sim-eval-tmp node --import tsx scripts/eval/sim/selftest.ts
 冻结批读数（`.runtime/sim6/run-2026-11-16T07-25-05-145Z/`）：12 条，`contaminated=0`、严重失败 0、
 `protocol_error=1`（SIM-05#1，夹具缺陷）；SIM-01/SIM-02/SIM-08 均 pass^3=1，SIM-05 pass^3=0
 （#1 协议失败、#2 改判后通过、#3 通过）。两条批次的样本全部保留，确认批不并入冻结批。
+
+
+## sim-int 轮（2026-11-19，先于任何真实模型请求写入）
+
+把「像不像一个真助理」里**脚本化模型判不了**的交互面扩进来（SimCase 只加场景与判据，不改产品码、
+不改既有场景判据）。新增 4 条：`SIM-INT-01`（模糊指代）、`SIM-INT-02`（失败之后的下一步）、
+`SIM-INT-03`（长活期间插话）、`SIM-INT-04`（群里的一句）。
+
+### 本轮改动
+
+| 项 | 改动 |
+| --- | --- |
+| 新增场景 | `./cases/interaction-cases.ts`：INT-01/02 进 `SIM_INTERACTION_CASES`（可跑）；INT-03/04 单列 `SIM_INTERACTION_BLOCKED_CASES`（harness 表达不了，逐条 blockedBy，**不并入跑批**，与 `SIM_WRITE_CASES` 同纪律） |
+| 新增判据 | `./cases/interaction-oracles.ts`：4 个 Oracle = **机械硬零**（可核对事实）+ **独立判官**（`SimJudgeTools.complete`，harness 记 `kind: judge`）。语义项一律走判官，**不用词表判语义**（仓内红线）；判官输出解析失败 → fail-closed（pass=false，原文留证） |
+| 跑批入口 | 复用 `run-real.ts`：新增 `SIM_INTERACTION=1`（切到交互用例池）与 `SIM_CONCURRENCY`（缺省 5，本轮固定 1）；跑批始终注入独立判官模型（确定性 Oracle 不产生 judge 调用，故既有用例零行为变化） |
+| 夹具声明 | `./cases/fixtures.ts` 新增 `dummy-platform:interaction`（缺省平台场景 `dummy-finance`）：documents 带窗口只读数据 + denied-one 确定性受限 |
+
+### 判据（覆盖式：缺一项即不通过）
+
+| 场景 | 机械硬零（可核对） | 判官项（语义，模型裁） |
+| --- | --- | --- |
+| INT-01 模糊指代 | 首轮结果正确（documents 3 条 + 合计 2900）；确有第二轮追加 | 追加范围被问清或**明确说明**窗口（scope_clarified_or_stated）；无静默按未说明窗口交付（no_silent_assumption）；不重复追问已给事实（no_answered_fact_reask） |
+| INT-02 失败下一步 | 确有失败读取（failure_observed）；失败读取 ≤1 次（no_repeat_failed_call，重复发起同一失败调用即判负） | 给出至少一个可执行选项（next_step_offered）；无重复道歉/长篇内部解释（no_apology_loop） |
+| INT-03 插话 | —（当前 harness 表达不了，判据先行登记） | 插话当场被回答；两答复不串；完成消息带身份 |
+| INT-04 群聊 | 群聊那一轮回复不得出现单聊批次的数值 | 只答被问的那批；不泄露单聊内容；不主动冒泡 |
+
+### 可达性（诚实登记，不冒充）
+
+- **可跑（2 条）**：`SIM-INT-01/02`。回合制单会话 harness + `scripts/ask-runtime.ts` 生产同源装配；
+  夹具事实（`dummy-finance` 场景，`npm run ask` 实测）：documents 两窗口返回同一批 items（3 条 / 2900）、
+  denied-one 查询确定性 `GATE_REFUSE`（exit 3，无载荷）。
+- **表达不了（2 条）**：`SIM-INT-03/04`。现有 harness 回合制、单会话、同步等答复（`send` 一次恰一条
+  可见回复、逐次 `await`）——表达不了「慢活未完成时插话/后台完成投递」与「单聊/群聊两路会话」。
+  生产面这两项在 `apps/server` 的 async 派发 + 通知 outbox 与群/私聊渠道映射里，不在 SIM 面；且
+  `dummy.longtask` 是**写操作**（ask 装配只开放只读集合，真实跑批到不了）。二者**不在跑批里**，
+  判据与 Oracle 已先行登记，等 harness 具备异步/跨会话表达力后再接。
+
+### 本轮跑批口径
+
+- 入口：`SIM_RUN_ROOT=sim-interaction SIM_INTERACTION=1 SIM_CONCURRENCY=1 \
+  node --env-file-if-exists=.env --import tsx scripts/eval/sim/run-real.ts`
+- 模型 `step-3.7-flash`（被测系统 + 模拟用户 + 判官同端点），**样本级并发固定 1**（本地端点并发上限），
+  每用例 `trials=3`（N=3，pass^3），一次采样、失败样本全留、不筛绿；样本硬停 12（`./selection`）。
+- 确定性门：`npx tsc -p tsconfig.json --noEmit` 0；`npx vitest run scripts/eval/sim` 0 失败。
+- 反向绊线（`./cases/interaction.test.ts`，零模型）：判官全绿但机械硬零红（失败读取 ≥2）→ 判负；
+  判官输出非 JSON → fail-closed；范围未说明（判官判 false）→ 判负。
+
+### sim-int 判定修正（2026-11-19 跑批后，同一批轨迹重判）
+
+第一批（`.runtime/sim-interaction/run-2026-11-19T04-08-39-114Z/`）读数：INT-01 pass^3=1，
+INT-02 pass=1/3。逐条复核 INT-02 的两条「失败」发现是**假阴性**：系统**首答即前置给出了可执行
+选项**（换集合 / 请管理员开通权限），模拟用户据此直接 finish(satisfied)——这是正确行为，不是
+缺陷（同 SIM-03：首答正确时不逼模拟用户制造追问）。
+
+| 项 | 改前 | 改后 | 证据（同一批轨迹） |
+| --- | --- | --- | --- |
+| INT-02 判据 | `followup_made`（用户是否追问「那怎么办」）当**通过项** | `followup_made` 降为**取证**，不进 checks；通过项 = 预注册冻结的 4 项（failure_observed / no_repeat_failed_call / next_step_offered / no_apology_loop） | 同批 3 条：`followup_made` 实测 1/3；判官 4 项全绿 3/3；改后 INT-02 pass^3=1，改前=0。反向绊线不变（失败读取 ≥2 仍判负） |
+
+注：预注册「判据」表 INT-02 行的冻结项本就未含 `followup_made`——改后**与冻结口径对齐**，
+不是放宽唯一硬零；`no_repeat_failed_call`（失败调用不得重复发起）仍是判负项，未动。
+
+

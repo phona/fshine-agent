@@ -19,6 +19,7 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import { WecomBotChannel, type SdkClientLike } from '@fshine/channel-wecom';
 import { createPiTurnDriver } from '../../packages/agent/src/pi-driver';
+import { withInternalExecTool } from '../../packages/agent/testing/internal-exec-fixture';
 import { createScriptedModelRuntime } from '../../packages/agent/testing/scripted-model-runtime';
 import { createServer } from './server';
 
@@ -38,7 +39,7 @@ function tempDir(): string {
 function testConfig(): AppConfig {
   return {
     principals: {
-      'wecom:test-user': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:test-user': { enabled: true },
     },
     contextProfiles: {
       dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },
@@ -174,13 +175,11 @@ describe('server（假渠道 + 假执行客户端 + 假模型）', () => {
           toolCallAssistant('task_run', { task: '查询 documents 窗口 W202611' }, 'call_main_1'),
           textAssistant('documents 窗口 W202611 共 3 条。'),
         ]),
-        workerDriver: await driverFor([
-          toolCallAssistant('execute_operation', {
-            operation: 'dummy.query',
-            args: { '--collection': 'documents', '--window': 'W202611' },
-          }, 'call_worker_1'),
+        // 夹具走内部 exec 路由：window 未在本测试清单声明，op_* 工具面会确定性拒绝。
+        workerDriver: withInternalExecTool(await driverFor([
+          toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { 'collection': 'documents', 'window': 'W202611' } }, 'call_worker_1'),
           textAssistant('已查询 documents W202611：3 条。'),
-        ]),
+        ])),
       }),
       createExecutionFace: async () => ({ client, allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       logger: (line) => logs.push(line),
@@ -239,13 +238,11 @@ describe('server（假渠道 + 假执行客户端 + 假模型）', () => {
           toolCallAssistant('task_run', { task: '查询 documents 窗口 W202611' }, 'call_main_1'),
           textAssistant('documents 窗口 W202611 共 3 条。'),
         ]),
-        workerDriver: await driverFor([
-          toolCallAssistant('execute_operation', {
-            operation: 'dummy.query',
-            args: { '--collection': 'documents', '--window': 'W202611' },
-          }, 'call_worker_1'),
+        // 夹具走内部 exec 路由：window 未在本测试清单声明，op_* 工具面会确定性拒绝。
+        workerDriver: withInternalExecTool(await driverFor([
+          toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { 'collection': 'documents', 'window': 'W202611' } }, 'call_worker_1'),
           textAssistant('已查询 documents W202611：3 条。'),
-        ]),
+        ])),
       }),
       createExecutionFace: async () => ({ client, allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
       logger: (line) => {

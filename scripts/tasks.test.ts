@@ -157,7 +157,9 @@ describe('tasks：状态词表与 judgeReportedTask 一致', () => {
       [[execution('failed', '执行层调用超时。')], '失败'],
       [[execution('refused', '执行层策略拒绝。')], '失败'],
       [[execution('needs_input')], '失败'],
-      [[execution('failed', '第一次参数错误。'), execution('completed')], '失败'],
+      // 2026-11-19 修订（末次决定性结果为准；见 task-status-boundary.test.ts 同批复评记录）：
+      // [failed, completed] 不再判失败——改对参数后的成功是末次决定性结果，写已经落库。
+      [[execution('failed', '第一次参数错误。'), execution('completed')], '已完成'],
       [[execution('completed'), execution('failed', '第二次超时。')], '失败'],
     ];
     for (const [executions, expected] of matrix) {
@@ -707,7 +709,7 @@ describe('tasks：CLI 端到端（真实子进程）', () => {
     const none = runTasks(['task_unexecuted'], { DB_PATH: dbPath });
     expect(none.status).toBe(0);
     expect(none.stdout).toContain('状态：未执行');
-    expect(none.stdout).toContain('未执行原因：未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。');
+    expect(none.stdout).toContain('未执行原因：没有实际办理：助手已汇报，但这次交办没有发出任何办理动作。');
     expect(none.stdout).toContain('（无：本次任务未向执行层发起任何调用）');
     expect(none.stdout).toContain('该任务无最终回复存档');
 
@@ -797,7 +799,7 @@ describe('tasks：CLI 端到端（真实子进程）', () => {
 
     const text = readFileSync(out1, 'utf8');
     expect(text.startsWith('# 任务交付件：#2 帮我查一下 faulty-one 集合的数据（失败）\n')).toBe(true);
-    expect(text).toContain('失败原因：执行层未成功：dummy.query 返回 failed：Collection faulty-one cannot be read in its current state');
+    expect(text).toContain('失败原因：没办成：dummy.query 返回 failed：Collection faulty-one cannot be read in its current state');
     const detailLines = detail.stdout.split('\n').filter((line) => line.trim() !== '' && !line.startsWith('任务底账：'));
     const textLines = text.split('\n');
     for (const line of detailLines) expect(textLines).toContain(line);

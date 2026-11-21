@@ -32,18 +32,19 @@ function tempDir(): string {
   return dir;
 }
 
-function testConfig(mode: 'inline' | 'background'): AppConfig {
+function testConfig(background: boolean = false): AppConfig {
   return {
     principals: {
-      'wecom:user-a': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
-      'wecom:user-b': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:user-a': { enabled: true },
+      'wecom:user-b': { enabled: true },
     },
     contextProfiles: {
       dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },
     },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
-    ...(mode === 'background' ? { runtime: { dispatchMode: 'background' as const, backgroundConcurrency: 1 } } : {}),
+    // server 恒 async（派发方式不是配置键）；B 切片用例钉 0 窗口做受理→后台→通知的机械断言。
+    ...(background ? { runtime: { backgroundConcurrency: 1, taskRunWaitMs: 0 } } : {}),
   };
 }
 
@@ -161,7 +162,7 @@ describe('R4 联合：server 同会话串行化（P5-T02）', () => {
     };
     const server = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig('inline'),
+      config: testConfig(),
       dbPath: path.join(dir, 'state.db'),
       createDrivers: () => ({ mainDriver, workerDriver: unreachableDriver() }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
@@ -201,7 +202,7 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
     ]);
     const server = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig('background'),
+      config: testConfig(true),
       dbPath,
       createDrivers: () => ({ mainDriver: plannedDriver(plans, records), workerDriver: unreachableDriver() }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
@@ -213,11 +214,13 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
     const reader = createNotificationReader(dbPath);
     try {
       const reply = await server.handler(incoming('user-a', 'conv-a', 'msg-1', '查 documents W202611'));
+      // owner 2026-11-19：用户看到的话永远是模型说的——交办回合的模型文本原样送达。
       expect(reply).toBe('已受理，稍后通知你。');
-      // 受理事实（task_run 返回）带数字编号/业务名/queued
+      // 受理事实（task_run 返回）：只给机械事实（accepted/status + name/taskId），无回执话术、无编号
       const accepted = records[0]!.execResults[0] as Record<string, unknown>;
-      expect(accepted).toMatchObject({ status: 'queued', accepted: true, taskNo: 1 });
-      expect(String(accepted['notice'])).toContain('#1');
+      expect(accepted).toMatchObject({ accepted: true, status: 'running' });
+      expect(accepted).not.toHaveProperty('notice');
+      expect(accepted).not.toHaveProperty('taskNo');
       const taskId = String(accepted['taskId']);
       const taskScope = { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' };
       // 后台完成 + 结果经 archiveReply 取回
@@ -265,7 +268,7 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
     ]);
     const server = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig('background'),
+      config: testConfig(true),
       dbPath,
       createDrivers: () => ({ mainDriver: plannedDriver(plans, records), workerDriver: unreachableDriver() }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
@@ -289,7 +292,15 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
     }
   });
 
-  it('⑭ B 通道：后台终态事实在下一次回合以普通 user 消息注入（幂等 + 有界）', async () => {
+  it('⑭ B 通道：completed 已移交唤醒（及其降级）路径，不再注入 [任务事实] 办完了；降级事实一次性注入不重复', async () => {
+    // 2026-11-19 唤醒切片 + 复核 F3：一审把 `completed` 留在 B_CHANNEL_KINDS，下一次用户
+    // 回合会再注入一条 `[任务事实] 办完了：<name>。`（旧宿主完成模板的残留——同一件事在同一
+    // 回合出现两条陈述：唤醒降级的 `[任务完成]` 事实 + 这条）。本用例钉住新形状：
+    //   · B 通道不再注入 completed（本夹具的假驱动没有唤醒能力 → 降级路径把完成**事实**
+    //     留在 systemNotes 待注入，形状 = `[任务完成]…`，不是旧的 `[任务事实] 办完了：…`）；
+    //   · 一次性：第三回合不再重复注入（take 即出队，幂等）。
+    // 超时/资源/等补充等 kind 仍留在 B 通道；failure 与 cancelled 也已随 2026-11-19 唤醒
+    // 切片移出（失败/取消各由自己的唤醒出口说，降级时事实进 systemNotes）——本用例不动它们。
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     const executor = new FakeExecutor([async () => ({ kind: 'completed', resultText: 'W202611：documents 共 3 条。' })]);
@@ -301,7 +312,7 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
     ]);
     const server = await createServer({
       env: { LLM_MODEL: 'test-model' },
-      config: testConfig('background'),
+      config: testConfig(true),
       dbPath,
       createDrivers: () => ({ mainDriver: plannedDriver(plans, records), workerDriver: unreachableDriver() }),
       createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
@@ -312,16 +323,21 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
     try {
       await server.handler(incoming('user-a', 'conv-a', 'msg-1', '查 documents W202611'));
       await server.handler(incoming('user-a', 'conv-a', 'msg-2', '下一步'));
-      // 第二回合的注入面：宿主事实经 `injections` 交给驱动（Pi 原生 custom message 投影成 user），
-      // `messages` 只是只读转录快照 + 本回合用户消息。
-      const injected = records[1]!.injections.filter((text) => text.startsWith('[任务事实]'));
-      expect(injected).toHaveLength(1);
-      expect(injected[0]).toContain('办完了');
-      expect(injected[0]).toContain('查 documents W202611');
-      expect(injected[0]).not.toContain('task_status');
+      // 第二回合的注入面：宿主事实经 `injections` 交给驱动（Pi 原生 custom message 投影成 user）。
+      const bChannel = records[1]!.injections.filter((text) => text.startsWith('[任务事实]'));
+      expect(bChannel, 'completed 不得再走 B 通道（旧「办完了」模板残留已删）').toHaveLength(0);
+      const completionFacts = records[1]!.injections.filter((text) => text.startsWith('[任务完成]'));
+      expect(completionFacts, '降级路径把完成事实留待注入').toHaveLength(1);
+      expect(completionFacts[0]).toContain('查 documents W202611');
+      // 旧宿主完成模板是 `[任务事实] 办完了：<name>。`（带冒号 + 业务名）——新完成事实用
+      // `[任务完成]…办完了。结果正文（逐字）…`，不含那个旧模板形态。
+      expect(completionFacts[0]).not.toContain('办完了：');
+      expect(completionFacts[0]).not.toContain('task_status');
       // 幂等：第三回合不再重复注入同一事实。
       await server.handler(incoming('user-a', 'conv-a', 'msg-3', '再一步'));
-      const third = records[2]!.injections.filter((text) => text.startsWith('[任务事实]'));
+      const third = records[2]!.injections.filter(
+        (text) => text.startsWith('[任务事实]') || text.startsWith('[任务完成]'),
+      );
       expect(third).toHaveLength(0);
     } finally {
       server.close();

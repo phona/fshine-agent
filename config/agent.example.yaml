@@ -12,16 +12,32 @@
 # 新部署不要再写它们。
 # ============================================================
 
+# ---- 角色表（可选；不写 = 内置三档 viewer/operator/admin） ----
+# 粗粒度权限只有两个通用值：read / write（不耦合任何业务实体字段；实体级授权归执行层）。
+# 实际可用集合 = 执行层声明能力(access=read/write) ∩ 角色白名单 ∩ runtime.allowWriteOperations。
+# 角色名未定义、permissions 含未知值 / 空数组 / 重复 → 启动失败（不静默降级）。
+# roles:
+#   viewer:   { permissions: [read] }           # 只读
+#   operator: { permissions: [read, write] }    # 读写
+#   admin:    { permissions: [read, write] }    # 全部（本切片与 operator 无额外能力）
+
 # ---- 授权名单:key = <渠道>:<用户ID>；只有 enabled: true 的用户可用 ----
 # UserID 来源:企微后台通讯录,或机器人收到的 from.userid(明文)。
-# 读写范围不由这里裁决:最小切片只开放「执行层自述为 read 的 operation」,
-# 实体授权归执行层(AGENTS.md:宿主不建实体门)。
+# 权限由 role 决定（未写 role 的 principal 按 viewer = 只读，启动日志记
+# principal_role_defaulted）；角色未定义 → 启动失败。业务实体级授权归执行层
+# (AGENTS.md:宿主不建实体门)。
+#
+# 群聊是**独立主体**(owner 2026-11-18):群里的 principalId = <渠道>:group:<群id>
+# (群id = 企微 chatid),同群所有人共用一个主体、一份会话。要用某个群必须为它单独
+# 开一条(与个人是两条互不继承的记录;个人开通 ≠ 群开通):
+#   "wecom:group:<群chatid>":
+#     enabled: true
+#     role: viewer
 principals:
   "wecom:<你的企微UserID>":
     enabled: true
-    # 以下两键是旧字段:加载层仍接受,最小切片不读。
-    # accountSetScope: all
-    # capabilities: ["read"]
+    # 角色名必须在上面的 roles 表里；不写 = viewer（只读）。
+    role: operator
 
 # ---- Worker 的受信执行层上下文(路径只能由管理员配置,模型不能传入) ----
 contextProfiles:
@@ -57,14 +73,12 @@ llm:
   apiKey:
   model: your-model
 
-# ---- 资源强制与派发模式(可选;P5 单一入口,yaml 键、无 env 覆盖口) ----
+# ---- 资源强制(可选;P5 单一入口,yaml 键、无 env 覆盖口) ----
 # 缺省(不写 runtime 段) = 现行为:前台并发 4、排队容量 16、无任务级预算、
-# 回合时限 300s/180s、委派深度 1、文件保留期 30 天(不在启动时清扫)、派发模式 inline。
+# 回合时限 300s/180s、委派深度 1、文件引用可读期 7 天、文件保留期 30 天(不在启动时清扫)。
+# 任务派发方式不是配置项:server(有渠道推送面)恒 async,ask/eval 恒同步等结果。
 # 非法值 fail-fast、未知键拒绝;详解见 docs/environment-variables.md。
 # runtime:
-#   # 派发模式:inline(缺省,委派同步执行) | background(受理即回执,后台 TaskRunner 执行)。
-#   # background 仅 server 渠道面支持(ask/redo 入口对 background 显式拒绝)。
-#   dispatchMode: inline
 #   mainConcurrency: 1        # 前台并发准入上限
 #   backgroundConcurrency: 1  # 后台并发上限(0=关闭后台准入)
 #   queueCapacity: 0          # 前台/后台各自等待队列容量(0=满即确定性拒绝)
@@ -72,8 +86,10 @@ llm:
 #   workerTurnMs: 180000      # Worker 回合墙钟上限
 #   maxDelegationDepth: 1     # 委派深度上限(0=禁止委派)
 #   waitUserTimeoutMs: 86400000  # waiting_user 等待上限(24h)
+#   fileRefTtlDays: 7         # 文件引用可读期(天;最小 1;缺省 7):入站附件激活后的可读 TTL,
+#                             # 也是 pending 行的激活窗口;过期字节由清扫入口回收(只删字节留行)
 #   fileRetentionDays: 30     # run 目录/任务产物保留期(天;0=不清理;缺省 30)
-#   fileRetentionSweepOnStart: false  # server 启动装配完成后扫一次到期 run 目录(缺省 false=零行为)
+#   fileRetentionSweepOnStart: false  # server 启动装配完成后扫一次到期 run 目录 + 过期文件引用字节(缺省 false=零行为)
 #   # 写面开关(缺省 false=只读):true 时把执行层自述 access=write 的 operation 放进允许集合;
 #   # 确认句柄/绑定/有效期/一次性/业务校验仍归执行层(宿主只透传,不做计划门)。
 #   allowWriteOperations: false
@@ -81,7 +97,23 @@ llm:
 #   # 新消息/回合时,发一句业务化选项的追问并把同一份选项作为系统注记注入下一回合。
 #   # 同一会话冷却 10 分钟;非 live 投递只记 suppressed,不冒充 sent。
 #   attachmentNudgeAfterMs: 30000
+#   # task_run 受理后的短等待窗口(缺省 1500ms;0=不等直接后台):窗口内完成 → 结果同回合
+#   # 回复(不打受理回执、不主动投递);超窗 → 机械事实受理回执(不含工单编号),任务留后台,
+#   # 完成后结果主动发回原会话(live 送达;非 live 只记 suppressed)。
+#   taskRunWaitMs: 1500
+#   # 大响应文件化(缺省 65536 = 64KiB):Worker 的 execute_operation 完成结果超过该字节数时,
+#   # 完整 data 落成任务作用域文件,模型只拿摘要 + fileId(明细用 run_js 的 inputs 按 fileId 读取);
+#   # 只对 completed 生效;未注入文件桥时 fail-open 原样返回。0/负数 = 配置错误。
+#   oversizeDataBytes: 65536
 #   # taskBudget: { ms: 600000, calls: 50 }  # 任务级共享预算(ms/calls 必填;tokens 可选)
+
+# ---- ops 告警推送(可选;2026-11-21 live P1) ----
+# owner 路由只认显式配置:必须指向 principals 里的**单聊企微主体**(wecom:<userid>)。
+# 缺省(不写 alerts 段) = 告警只落盘不推(ops/alerts 可查)——不按主体清单顺序猜
+# (live 实测:猜到评测夹具主体,告警推送恒 93006 invalid chatid,永远送不到人)。
+# 指向不存在/未启用/群主体/非企微 = 拒启(配置错误必须炸出来)。
+# alerts:
+#   ownerPrincipalId: wecom:<userid>
 
 # ---- 任务底账(可选):SQLite 路径;相对路径按进程 cwd 解析 ----
 # 缺省 = 仓根 .runtime/state.db(任务 + 执行记录两张最小表;重启后仍在)。

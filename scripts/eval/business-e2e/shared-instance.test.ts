@@ -37,6 +37,16 @@ function newFixture(): SharedInstanceFixture {
   return fixture;
 }
 
+/**
+ * 2026-11-20 机制变化：数字 ref（#N）退役，跨 principal 隔离的判据改由真实 taskId 承载。
+ * 从后台回合的真实入参里取 taskId；断言强度不放宽（越权仍必须拒绝、正向仍必须命中）。
+ */
+function taskIdOfRound(fx: SharedInstanceFixture, index: number): string {
+  const taskId = fx.executor.rounds[index]?.input.taskId;
+  if (typeof taskId !== 'string') throw new Error(`（测试）第 ${index} 个后台回合没有 taskId`);
+  return taskId;
+}
+
 /** S1：跨 principal 查询 / 结果取回 / 编号解析；正向对照（含身份绊线的原料）。 */
 describe('共享实例：跨 principal 查询与编号解析', () => {
   it('B 查/取 A 的任务 → 找不到（不泄露详情）；A 自己查 → 成功；同文本换身份结果不同', async () => {
@@ -51,30 +61,31 @@ describe('共享实例：跨 principal 查询与编号解析', () => {
     fx.executor.behaviors.push(outcomeBehavior({ kind: 'completed', resultText: `${secret} documents W202611 共 3 条` }));
     await fx.send('alice', '帮我查 documents 窗口 W202611');
     await fx.settleRounds();
+    const aTaskId = taskIdOfRound(fx, 0);
 
-    // 正向对照：A 取回 #1 结果（正反对照防「全拒绝也算绿」）。
+    // 正向对照：A 取回自己任务的结果（正反对照防「全拒绝也算绿」）。数字 ref 已退役，按 taskId。
     fx.scriptMain(
-      toolCallAssistant('task_result', { ref: '#1' }),
-      textAssistant('1 号任务已完成：documents W202611 共 3 条。'),
+      toolCallAssistant('task_result', { ref: aTaskId }),
+      textAssistant('那个任务已完成：documents W202611 共 3 条。'),
     );
-    const aliceResult = await fx.send('alice', '1 号任务的结果是什么');
+    const aliceResult = await fx.send('alice', '那个任务的结果是什么');
     expect(aliceResult.reply).toContain('3 条');
     assertFoundEvidence(aliceResult);
 
-    // 越权：B 用 A 的编号查状态 → scope 内找不到（与不存在同错，不泄露存在性）。
+    // 越权：B 用 A 的 taskId 查状态 → scope 内找不到（与不存在同错，不泄露存在性）。
     fx.scriptMain(
-      toolCallAssistant('task_status', { ref: '#1' }),
+      toolCallAssistant('task_status', { ref: aTaskId }),
       textAssistant('没找到这个任务，它不属于当前会话。'),
     );
-    const bobStatus = await fx.send('bob', '查一下 #1 的状态');
+    const bobStatus = await fx.send('bob', '查一下那个任务的状态');
     assertRefusalEvidence(bobStatus, [secret, 'documents', '3 条']);
 
-    // 越权：B 取结果（编号解析拒绝的另一动作面）。
+    // 越权：B 取结果（taskId 越权的另一动作面）。
     fx.scriptMain(
-      toolCallAssistant('task_result', { ref: '#1' }),
+      toolCallAssistant('task_result', { ref: aTaskId }),
       textAssistant('没有这个任务，取不了结果。'),
     );
-    const bobResult = await fx.send('bob', '#1 的结果发我');
+    const bobResult = await fx.send('bob', '把那个任务的结果发我');
     assertRefusalEvidence(bobResult, [secret, 'documents', '3 条']);
 
     // B 列自己的任务：空（A 的任务不在 B 的 scope 列表里）。
@@ -85,17 +96,19 @@ describe('共享实例：跨 principal 查询与编号解析', () => {
     const bobList = await fx.send('bob', '我有哪些任务');
     assertRefusalEvidence(bobList, [secret, 'documents']);
 
-    // 身份绊线原料：同一句文本（含 A 的编号）由 A 发出 → 找得到（隔离依赖身份而非文本）。
+    // 身份绊线原料：同一 taskId 由 A 发出 → 找得到（隔离依赖身份而非文本）。
     fx.scriptMain(
-      toolCallAssistant('task_status', { ref: '#1' }),
-      textAssistant('1 号任务已完成。'),
+      toolCallAssistant('task_status', { ref: aTaskId }),
+      textAssistant('那个任务已完成。'),
     );
-    const aliceStatus = await fx.send('alice', '查一下 #1 的状态');
-    expect(aliceStatus.reply).toContain('1 号');
+    const aliceStatus = await fx.send('alice', '查一下那个任务的状态');
+    expect(aliceStatus.reply).toContain('已完成');
     assertFoundEvidence(aliceStatus);
   });
 
-  it('编号全局唯一：B 建任务拿到下一编号，B 的编号对 A 同样拒绝', async () => {
+  it('taskId 全局唯一：B 建任务拿到自己的 taskId，B 的 taskId 对 A 同样拒绝', async () => {
+    // 2026-11-20 机制变化：数字 ref 退役，隔离判据改由 taskId（底账唯一）承载。
+    // 底账 taskNo 仍单调（账本事实），但不进模型引用面；断言强度不放宽。
     const fx = newFixture();
     fx.scriptMain(
       toolCallAssistant('task_run', { task: '查询 documents 窗口 W202611' }),
@@ -110,26 +123,28 @@ describe('共享实例：跨 principal 查询与编号解析', () => {
       textAssistant('已受理。'),
     );
     fx.executor.behaviors.push(outcomeBehavior({ kind: 'completed', resultText: 'SECRET-B-result meetings 5 条' }));
-    const bobCreate = await fx.send('bob', '帮我查 meetings 列表');
+    await fx.send('bob', '帮我查 meetings 列表');
     await fx.settleRounds();
-    // 共享底账计数器：B 的任务是 #2（不是 B 自己的 #1）。
+    // 共享底账计数器仍单调（账本事实，不进模型引用面）。
     expect(fx.executor.rounds.map((round) => round.input.taskNo)).toEqual([1, 2]);
+    const bTaskId = taskIdOfRound(fx, 1);
+    expect(bTaskId).not.toBe(taskIdOfRound(fx, 0));
 
-    // 正向对照：B 查自己的 #2 成功。
+    // 正向对照：B 查自己的 taskId 成功。
     fx.scriptMain(
-      toolCallAssistant('task_status', { ref: '#2' }),
-      textAssistant('2 号任务已完成。'),
+      toolCallAssistant('task_status', { ref: bTaskId }),
+      textAssistant('那个任务已完成。'),
     );
-    const bobOwn = await fx.send('bob', '2 号任务怎么样了');
-    expect(bobOwn.reply).toContain('2 号');
+    const bobOwn = await fx.send('bob', '那个任务怎么样了');
+    expect(bobOwn.reply).toContain('已完成');
     assertFoundEvidence(bobOwn);
 
-    // 反向越权：A 查 B 的 #2 → 拒绝。
+    // 反向越权：A 查 B 的 taskId → 拒绝。
     fx.scriptMain(
-      toolCallAssistant('task_status', { ref: '#2' }),
+      toolCallAssistant('task_status', { ref: bTaskId }),
       textAssistant('没找到这个任务。'),
     );
-    const aliceCross = await fx.send('alice', '查一下 #2 的状态');
+    const aliceCross = await fx.send('alice', '查一下那个任务的状态');
     assertRefusalEvidence(aliceCross, ['SECRET-B-result', 'meetings', '5 条']);
   });
 });
@@ -146,42 +161,43 @@ describe('共享实例：跨 principal 取消', () => {
     fx.executor.behaviors.push(pendingCancelableBehavior());
     await fx.send('alice', '帮我导出全量报表');
     await fx.settleRounds(0); // 长任务按设计挂起：只让出事件循环，不等待落定。
+    const aTaskId = taskIdOfRound(fx, 0); // 2026-11-20：数字 ref 退役，按真实 taskId。
 
-    // 越权：B 取消 #1 → 拒绝。
+    // 越权：B 取消 A 的 taskId → 拒绝。
     fx.scriptMain(
-      toolCallAssistant('task_cancel', { ref: '#1', reason: '不需要了' }),
+      toolCallAssistant('task_cancel', { ref: aTaskId, reason: '不需要了' }),
       textAssistant('没有这个任务，取消不了。'),
     );
-    const bobCancel = await fx.send('bob', '取消 #1');
+    const bobCancel = await fx.send('bob', '取消那个任务');
     assertRefusalEvidence(bobCancel, ['SECRET']);
-    // 模型无关的产品级证据：若编号解析越过 scope，runner.cancel 会 abort 在飞回合 →
-    // 挂起回合落定。B 的越权取消后落定数必须仍为 0。
+    // 若 taskId 解析越过 scope，runner.cancel 会 abort 在飞回合 → 挂起回合落定。
+    // B 的越权取消后落定数必须仍为 0。
     await fx.settleRounds(0);
     expect(fx.executor.settledCount()).toBe(0);
 
     // 底账证据：A 视角任务仍是 running（B 的越权取消零状态变化）。
     fx.scriptMain(
-      toolCallAssistant('task_status', { ref: '#1' }),
-      textAssistant('1 号任务正在执行。'),
+      toolCallAssistant('task_status', { ref: aTaskId }),
+      textAssistant('那个任务正在执行。'),
     );
-    const aliceCheck = await fx.send('alice', '1 号任务怎么样了');
+    const aliceCheck = await fx.send('alice', '那个任务怎么样了');
     expect(aliceCheck.reply).toContain('正在执行');
     assertFoundEvidence(aliceCheck);
 
-    // 正向对照：A 取消自己的 #1 → 成功确认。
+    // 正向对照：A 取消自己的 taskId → 成功确认。
     fx.scriptMain(
-      toolCallAssistant('task_cancel', { ref: '#1', reason: '不用了' }),
-      textAssistant('已取消 1 号任务。'),
+      toolCallAssistant('task_cancel', { ref: aTaskId, reason: '不用了' }),
+      textAssistant('已取消那个任务。'),
     );
-    const aliceCancel = await fx.send('alice', '取消 #1');
+    const aliceCancel = await fx.send('alice', '取消那个任务');
     expect(aliceCancel.reply).toContain('已取消');
     await fx.settleRounds(1); // abort 观察后 runner 确认 cancelled（底账写入）。
 
     fx.scriptMain(
-      toolCallAssistant('task_status', { ref: '#1' }),
-      textAssistant('1 号任务已取消。'),
+      toolCallAssistant('task_status', { ref: aTaskId }),
+      textAssistant('那个任务已取消。'),
     );
-    const aliceFinal = await fx.send('alice', '#1 现在什么状态');
+    const aliceFinal = await fx.send('alice', '那个任务现在什么状态');
     expect(aliceFinal.reply).toContain('已取消');
     assertFoundEvidence(aliceFinal);
   });
@@ -199,40 +215,41 @@ describe('共享实例：跨 principal 接续', () => {
     fx.executor.behaviors.push(outcomeBehavior({ kind: 'needs_input', question: { missing: ['窗口'] } }));
     await fx.send('alice', '帮我整理周报');
     await fx.settleRounds();
+    const aTaskId = taskIdOfRound(fx, 0); // 2026-11-20：数字 ref 退役，按真实 taskId。
 
     fx.scriptMain(
-      toolCallAssistant('task_status', { ref: '#1' }),
-      textAssistant('1 号任务在等你补充窗口。'),
+      toolCallAssistant('task_status', { ref: aTaskId }),
+      textAssistant('那个任务在等你补充窗口。'),
     );
-    const aliceWaiting = await fx.send('alice', '1 号任务怎么样了');
+    const aliceWaiting = await fx.send('alice', '那个任务怎么样了');
     expect(aliceWaiting.reply).toContain('等你补充');
     assertFoundEvidence(aliceWaiting);
 
-    // 越权：B 接续 #1 → 拒绝。
+    // 越权：B 接续 A 的 taskId → 拒绝。
     fx.scriptMain(
-      toolCallAssistant('task_resume', { ref: '#1', answer: 'W202611' }),
+      toolCallAssistant('task_resume', { ref: aTaskId, answer: 'W202611' }),
       textAssistant('没有这个任务，接续不了。'),
     );
-    const bobResume = await fx.send('bob', '接着办 #1，窗口是 W202611');
+    const bobResume = await fx.send('bob', '接着办那个任务，窗口是 W202611');
     assertRefusalEvidence(bobResume, ['SECRET']);
 
     // 底账证据：任务仍是 waiting_user，B 的答复没有进入执行（无新回合）。
     const roundsBefore = fx.executor.rounds.length;
     fx.scriptMain(
-      toolCallAssistant('task_status', { ref: '#1' }),
-      textAssistant('1 号任务仍在等你补充窗口。'),
+      toolCallAssistant('task_status', { ref: aTaskId }),
+      textAssistant('那个任务仍在等你补充窗口。'),
     );
-    const aliceStill = await fx.send('alice', '#1 现在什么状态');
+    const aliceStill = await fx.send('alice', '那个任务现在什么状态');
     expect(aliceStill.reply).toContain('仍在等你');
     expect(fx.executor.rounds.length).toBe(roundsBefore);
 
-    // 正向对照：A 自己接续 → 新执行回合带 answer，编号不变，完成。
+    // 正向对照：A 自己接续 → 新执行回合带 answer，同一个 taskId，完成。
     fx.scriptMain(
-      toolCallAssistant('task_resume', { ref: '#1', answer: 'W202611' }),
+      toolCallAssistant('task_resume', { ref: aTaskId, answer: 'W202611' }),
       textAssistant('已接上，窗口 W202611，继续执行。'),
     );
     fx.executor.behaviors.push(outcomeBehavior({ kind: 'completed', resultText: 'SECRET-A-result 周报 W202611 已整理' }));
-    const aliceResume = await fx.send('alice', '接着办 #1，窗口是 W202611');
+    const aliceResume = await fx.send('alice', '接着办那个任务，窗口是 W202611');
     expect(aliceResume.reply).toContain('继续执行');
     await fx.settleRounds();
 

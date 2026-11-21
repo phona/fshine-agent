@@ -11,8 +11,8 @@
  * 指定集合后，第二次必须带着补答执行并完成。
  *
  * 业务判据（对应用户交办 → 系统做成什么样）：
- *   ① 委派 → 执行层 needs_input → 用户可见的待办问题与受理时的 #编号对得上
- *      （task_status 同一 taskNo + pendingQuestion；通知同一条 taskNo/name/missing）；
+ *   ① 委派 → 执行层 needs_input → 受理回执去编号（无 notice/taskNo），按 taskId 查回同一
+ *      任务（task_status 同一 taskId + pendingQuestion，无 taskNo；通知带底账 taskNo/name/missing）；
  *   ② 用户补答 → **同一 taskId/taskNo** 继续执行（不新建任务）→ completed；底账能看到
  *      「原执行（needs_input）+ 补答后执行（completed）」两条事实；补答原文到达 Worker；
  *   ③ 用户不补答 → 任务停在 waiting_user（不是 failed/unexecuted），再次 pump 也不重复执行。
@@ -191,7 +191,9 @@ async function makeFixture(): Promise<Fixture> {
       allowedOperations: ['dummy.query'],
       readOnlyOperations: ['dummy.query'],
     }),
-    runtime: { dispatchMode: 'background', backgroundConcurrency: 1, queueCapacity: 0 },
+    // B 切片：钉 0 窗口（本套件测 needs_input/接续机制；窗口行为由专测覆盖）。
+    taskDispatch: 'async',
+    runtime: { backgroundConcurrency: 1, queueCapacity: 0, taskRunWaitMs: 0 },
     notificationSink: sink,
   });
   return {
@@ -222,26 +224,34 @@ async function delegateFirstTurn(fixture: Fixture): Promise<{ taskId: string; ta
   await fixture.assembled.session.send('把上个月的合同清单整理出来');
   await fixture.assembled.runner!.whenIdle();
   const receipt = receiptOf(fixture.records[0]!);
-  return { taskId: String(receipt['taskId']), taskNo: Number(receipt['taskNo']) };
+  const taskId = String(receipt['taskId']);
+  // B 切片回执去编号：受理回执不再携带工单编号，编号从底账事实读（与详情面同源）。
+  const taskNo = fixture.assembled.taskRegistry.get(taskId, SCOPE).taskNo ?? 0;
+  return { taskId, taskNo };
 }
 
 describe('业务：执行层 needs_input → 用户补答 → 同一任务完成', () => {
-  it('① 执行层要补输入：待办问题与受理时的 #编号对得上，任务停在 waiting_user', async () => {
+  it('① 执行层要补输入：受理回执去编号，按 taskId 查回同一任务的待办问题，任务停在 waiting_user', async () => {
     const fixture = await makeFixture();
     try {
       const { taskId, taskNo } = await delegateFirstTurn(fixture);
-      // 受理回执：Main 拿到编号与回执话术（用户看到的就是这个编号）。
+      // 受理事实（owner 2026-11-19：交办不再给固定回执话术）：只回机械事实（accepted/status +
+      // taskId/name），无 notice、无编号；编号只在详情面（task_status 查询结果）与底账。
       const receipt = receiptOf(fixture.records[0]!);
-      expect(receipt['notice']).toContain(`#${taskNo}`);
+      expect(receipt['accepted']).toBe(true);
+      expect(receipt).not.toHaveProperty('notice');
+      expect(receipt).not.toHaveProperty('taskNo');
 
-      // 用户问「那个任务怎么样了」：Main 用回执里的 #编号查，拿到同一编号 + 待办问题。
+      // 用户问「那个任务怎么样了」：Main 用回执里的 taskId 查，拿到同一任务 + 待办问题。
+      // 2026-11-20：任务编号不进投影，ref 与断言锚点从 #编号/taskNo 改成 taskId（原断言断的是可见面出现编号）。
       fixture.push({
-        calls: [{ tool: 'task_status', args: { ref: `#${taskNo}` } }],
-        reply: `任务 #${taskNo} 需要你补充信息。`,
+        calls: [{ tool: 'task_status', args: { ref: taskId } }],
+        reply: '刚才交办的那件事需要你补充信息。',
       });
       await fixture.assembled.session.send('刚才那个任务怎么样了？');
       const status = receiptOf(fixture.records[1]!);
-      expect(status['taskNo']).toBe(taskNo);
+      expect(status['taskId']).toBe(taskId);
+      expect(status).not.toHaveProperty('taskNo');
       expect(status['status']).toBe('waiting_user');
       expect(status['pendingQuestion']).toEqual({
         missing: ['collection "contoso" 有多个候选：contracts / documents'],
@@ -274,12 +284,13 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
     try {
       const { taskId, taskNo } = await delegateFirstTurn(fixture);
 
-      // 用户补一句 → Main 用同一 #编号 task_resume（不是新 task_run）。
+      // 用户补一句 → Main 用同一 taskId task_resume（不是新 task_run）。
+      // 2026-11-20 机制变化：数字 ref 退役，改按 taskId 引用（断言不变）。
       fixture.push({
         calls: [
           {
             tool: 'task_resume',
-            args: { ref: `#${taskNo}`, answer: '用 documents 这个集合' },
+            args: { ref: taskId, answer: '用 documents 这个集合' },
           },
         ],
         reply: '收到，继续办理。',
@@ -306,7 +317,7 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
 
       // 结果可见：task_result 的 replyText 是 Worker 最终汇报（逐字存档）。
       fixture.push({
-        calls: [{ tool: 'task_result', args: { ref: `#${taskNo}` } }],
+        calls: [{ tool: 'task_result', args: { ref: taskId } }],
         reply: '合同清单已经整理好。',
       });
       await fixture.assembled.session.send('结果发我一下');

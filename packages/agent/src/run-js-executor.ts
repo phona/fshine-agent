@@ -1,5 +1,5 @@
 /**
- * run_js 执行器（CAP-01 S0；docs/product/cap01-main-direct-execution.md §2/§3/§8）。
+ * run_js 执行器（CAP-01 S0；docs/architecture/files.md §2/§3/§8）。
  *
  * S0 面只到「跑完一次受限脚本并登记产物」：不接 Main、不接渠道、不进 Execution
  * Contract、不改 execution-runtime 的工具面（接线与端口注入归 S1）。
@@ -14,6 +14,10 @@
  *   ② 受限子进程（v8 §3 实测有效，不是沙箱）：
  *        node --permission --allow-fs-read=<runDir> --allow-fs-read=<node_modules>
  *             --allow-fs-write=<runDir>/out --allow-fs-write=<runDir>/scratch run.cjs
+ *      写权限面由调用方 `writableDirs` 决定（2026-11-18，AGENTS「Main 的 run_js 只写
+ *      scratch/」）：'out+scratch'（缺省）= 上一条 argv（Worker 的 out/ 是交付箱）；
+ *      'scratch-only' = **只**给 scratch/，out/ 在权限层不可写（写入 ERR_ACCESS_DENIED），
+ *      不是「写了不登记」——Main 面。
  *      env 按 worker-env 白名单重建（PATH），再加 NODE_PATH=<node_modules>；HOME/TMPDIR
  *      指向 run 目录下的空目录——宿主凭据结构上进不了子进程。
  *   ③ detached:true 建进程组；超时/宿主中止 → kill(-pid,'SIGKILL') 杀**整组**（SIGTERM
@@ -22,7 +26,9 @@
  *   ④ 收尾扫 out/ 登记产物（fileStore.registerOutputsFromOut：只收普通文件、拒 symlink/
  *      hardlink、uid/大小/份数上限；候选按 realpath 包含校验必须仍在 runDir 内；同一 fd
  *      流式 copy-on-register 成新 fileId + sha256，原件字节不动）。**无论 exitCode 都扫**——
- *      out/ 就是交付箱；交付去留归 S1。
+ *      out/ 就是交付箱；交付去留归 S1。片 2：`registerOutputs:false`（Main 面）**不扫不登记**
+ *      ——结构性禁止 Main 产交付物；Main 的 scratch/ 才是它的工作区（且是它唯一可写目录，
+ *      见 ② 的 `writableDirs`）。
  *   ⑤ 审计随返回值走（脚本 sha256、输入/输出 fileId、exitCode、耗时、kill 原因）。
  *      S0 不落审计表（v8 §9 不做 run_code_runs 第二张表）；持久化落点归 S1 接线裁定。
  *
@@ -72,6 +78,14 @@ export interface RunJsScope {
   sessionId: string;
 }
 
+/**
+ * 子进程可写目录集合（`--allow-fs-write` 的面；2026-11-18 owner 裁定 A）：
+ *   · 'out+scratch'：out/（交付箱）+ scratch/（工作区）——**缺省**，Worker 面；
+ *   · 'scratch-only'：只有 scratch/——Main 面（AGENTS「Main 的 run_js 只写 scratch/」）。
+ * 是权限层收窄，不是「写 out/ 不登记」：写 out/ 的脚本以 ERR_ACCESS_DENIED 非零退出。
+ */
+export type RunJsWritableDirs = 'out+scratch' | 'scratch-only';
+
 export interface RunJsInput {
   /** CommonJS 代码原样（写进 <runDir>/run.cjs 执行）。 */
   code: string;
@@ -84,6 +98,17 @@ export interface RunJsInput {
    * 绑定该任务（task_id）；缺省 = Main 面（只解析 task_id IS NULL 的行，产物不绑任务）。
    */
   taskId?: string;
+  /**
+   * 产物登记开关（片 2，owner 裁定「交付物只从 Worker 出」）：false = **不登记** out/ 产物
+   * （不建 file_refs 行、不落 workspace 副本、返回 outputs 为空）——Main 的 run_js 走这条路，
+   * 结构性禁止 Main 产交付物；缺省 true = 现行为（Worker 面 / 直接调用）。
+   */
+  registerOutputs?: boolean;
+  /**
+   * 子进程可写目录集合（缺省 'out+scratch' = 现行为，零变化）：Main 面传 'scratch-only'
+   * ——out/ 在权限层不可写（非零退出 + ERR_ACCESS_DENIED），scratch/ 仍可写。
+   */
+  writableDirs?: RunJsWritableDirs;
   /** 宿主中止信号（任务取消等）；触发即对进程组 SIGKILL。超时不是模型参数（宿主常量）。 */
   signal?: AbortSignal;
 }
@@ -351,15 +376,20 @@ export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecuto
         }
       }
 
-      // ③ 受限子进程（v8 §3 的命令形状 + 内存上限 argv）。
+      // ③ 受限子进程（v8 §3 的命令形状 + 内存上限 argv）。写权限面按 writableDirs：
+      // 缺省 out+scratch（现行为）；'scratch-only'（Main 面）只放行 scratch/——out/ 由
+      // 权限模型拒绝，不靠「写了不登记」。
+      const writableDirs = input.writableDirs ?? 'out+scratch';
+      const writableArgs = writableDirs === 'scratch-only'
+        ? [`--allow-fs-write=${scratchDir}`]
+        : [`--allow-fs-write=${outDir}`, `--allow-fs-write=${scratchDir}`];
       const child = spawn(
         nodePath,
         [
           '--permission',
           `--allow-fs-read=${runDir}`,
           `--allow-fs-read=${options.nodeModulesDir}`,
-          `--allow-fs-write=${outDir}`,
-          `--allow-fs-write=${scratchDir}`,
+          ...writableArgs,
           `--max-old-space-size=${RUN_JS_MAX_OLD_SPACE_MB}`,
           runCjsPath,
         ],
@@ -415,12 +445,16 @@ export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecuto
 
       // ④ 扫 out/ 登记产物（无论 exitCode——out/ 就是交付箱；交付去留归 S1）。
       // 产物绑定（CAP-01 S2 ①）：Worker 面（taskId 设置）的产物行绑定当前任务。
-      const { outputs, skipped } = options.fileStore.registerOutputsFromOut({
-        runDir,
-        scope,
-        limits: { maxFileBytes: maxOutputFileBytes, maxCount: maxOutputCount },
-        ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
-      });
+      // 片 2：registerOutputs=false（Main 面）时**根本不登记**——out/ 不是交付箱，
+      // Main 写 out/ 不产交付物（文件留在 run 目录，由既有 run 目录清理回收）。
+      const { outputs, skipped } = input.registerOutputs === false
+        ? { outputs: [] as RegisteredFile[], skipped: [] as SkippedOutput[] }
+        : options.fileStore.registerOutputsFromOut({
+          runDir,
+          scope,
+          limits: { maxFileBytes: maxOutputFileBytes, maxCount: maxOutputCount },
+          ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+        });
 
       const outputFiles = outputs.map(
         (file: RegisteredFile): RunJsOutputFile => ({ fileId: file.fileId, name: file.name, bytes: file.bytes }),

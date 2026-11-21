@@ -15,6 +15,8 @@ const { resolveCollection } = require('./resolve.cjs');
 const { faultFor } = require('./faults.cjs');
 const { renderTemplate, renderValue } = require('./template.cjs');
 const { makeError } = require('./errors.cjs');
+const { missingRequiredInputs } = require('./requires.cjs');
+const { sleepSync } = require('./timing.cjs');
 
 function isPresent(value) {
   return value !== undefined && value !== '';
@@ -32,11 +34,65 @@ function declaredValues(dimension) {
   return dimension.values.map((value) => `"${value}"`).join(', ');
 }
 
-function complete(read, items, values, catalog) {
+/**
+ * Sum of a numeric item field, or undefined when it cannot be summed honestly.
+ *
+ * Strict on purpose: every item must carry a finite number under `field`. An empty
+ * result, a missing field, or a string that merely looks numeric ("0012") yields
+ * undefined — the caller then omits the aggregate instead of returning 0 or NaN.
+ */
+function numericSum(items, field) {
+  if (items.length === 0) return undefined;
+  if (!items.every((item) => typeof item[field] === 'number' && Number.isFinite(item[field]))) return undefined;
+  return items.reduce((total, item) => total + item[field], 0);
+}
+
+/**
+ * Aggregates the platform itself returns (never left to model arithmetic):
+ *   · `sum`        — every item has a numeric `value`;
+ *   · `amountSum`  — every item has a numeric `amount`;
+ *   · `byDimension`— the collection declares a dimension: `{ <value>: { count, sum } }`,
+ *                    where the group `sum` is `value` when the group has it, else `amount`.
+ * Absent metrics are omitted entirely (no zero, no NaN). Empty result sets therefore
+ * carry no aggregate fields, which is the honest answer: there is nothing to total.
+ */
+function aggregatesOf(items, dimension) {
+  const aggregates = {};
+  const sum = numericSum(items, 'value');
+  if (sum !== undefined) aggregates.sum = sum;
+  const amountSum = numericSum(items, 'amount');
+  if (amountSum !== undefined) aggregates.amountSum = amountSum;
+  if (dimension !== null && typeof dimension?.name === 'string' && dimension.name !== '') {
+    const groups = new Map();
+    for (const item of items) {
+      const key = String(item[dimension.name]);
+      const group = groups.get(key);
+      if (group === undefined) groups.set(key, { count: 1, items: [item] });
+      else {
+        group.count += 1;
+        group.items.push(item);
+      }
+    }
+    const byDimension = {};
+    for (const [key, group] of groups) {
+      const entry = { count: group.count };
+      const groupSum = numericSum(group.items, 'value');
+      const groupAmount = numericSum(group.items, 'amount');
+      if (groupSum !== undefined) entry.sum = groupSum;
+      else if (groupAmount !== undefined) entry.sum = groupAmount;
+      byDimension[key] = entry;
+    }
+    aggregates.byDimension = byDimension;
+  }
+  return aggregates;
+}
+
+function complete(read, items, values, catalog, dimension = null) {
   values.items = items;
   values.count = items.length;
   values.fields = [...new Set(items.flatMap((item) => Object.keys(item)))];
-  return buildResponse(read, 'completed', values, catalog);
+  const aggregates = aggregatesOf(items, dimension);
+  return buildResponse(read, 'completed', values, catalog, { dataExtra: aggregates, resultExtra: aggregates });
 }
 
 /** CLI flags arrive bare (`collection`); the declaration names them `--collection`. */
@@ -63,18 +119,33 @@ function renderError(catalog, declaration, values) {
   return makeError(catalog, declaration.code, message);
 }
 
+/** Merge engine-computed fields into a declared object result (declarations stay pure data). */
+function withExtras(base, extra) {
+  if (extra === undefined || Object.keys(extra).length === 0) return base;
+  if (base === null || typeof base !== 'object' || Array.isArray(base)) return base;
+  return { ...base, ...extra };
+}
+
 function buildResponse(read, name, values, catalog, overrides = {}) {
   const declaration = read.responses[name];
   if (!declaration) throw new Error(`read contract has no "${name}" response`);
   const errorDeclaration = overrides.error ?? declaration.error;
-  const data = declaration.data === undefined ? null : renderValue(declaration.data, values);
-  const result = declaration.result === undefined ? undefined : renderValue(declaration.result, values);
+  const data = withExtras(
+    declaration.data === undefined ? null : renderValue(declaration.data, values),
+    overrides.dataExtra,
+  );
+  const result = declaration.result === undefined
+    ? undefined
+    : withExtras(renderValue(declaration.result, values), overrides.resultExtra);
   return {
     exitCode: overrides.exitCode ?? declaration.exitCode,
     envelope: {
       status: declaration.status,
       data,
       error: errorDeclaration === undefined ? null : renderError(catalog, errorDeclaration, values),
+      // Structured "what is missing" names travel at the envelope top level (needs_input
+      // only); the contract's adapter projects them, the host never re-derives them.
+      ...(overrides.missing === undefined ? {} : { missing: overrides.missing }),
     },
     ...(result === undefined ? {} : { result }),
     ...(overrides.refused === undefined ? {} : { refused: overrides.refused }),
@@ -106,6 +177,14 @@ function executeDeclaredRead(input) {
   const collection = resolved.collection;
   values['source.collection'] = canonical;
 
+  // Declared required inputs come first: an incomplete request is not answered (and
+  // never judged by a fault). The response carries the structured names, not prose.
+  const missing = missingRequiredInputs(collection, flags);
+  if (missing.length > 0) {
+    values['needs.missing'] = missing;
+    return buildResponse(read, 'missing_input', values, catalog, { missing });
+  }
+
   const fault = faultFor(faults, canonical);
   if (fault !== null && fault.kind === 'restricted') {
     return {
@@ -116,6 +195,11 @@ function executeDeclaredRead(input) {
     };
   }
   if (fault !== null && fault.kind === 'read_fault') {
+    return buildResponse(read, 'read_fault', values, catalog, { error: fault.error, exitCode: fault.exitCode });
+  }
+  if (fault !== null && fault.kind === 'slow_fault') {
+    // Really takes the declared time, then fails with the existing structured envelope.
+    sleepSync(fault.delayMs);
     return buildResponse(read, 'read_fault', values, catalog, { error: fault.error, exitCode: fault.exitCode });
   }
 
@@ -177,7 +261,7 @@ function executeDeclaredRead(input) {
   const items = filterValue === null
     ? collection.items
     : collection.items.filter((item) => item[dimension.name] === filterValue);
-  return complete(read, items, values, catalog);
+  return complete(read, items, values, catalog, dimension);
 }
 
 module.exports = { executeDeclaredRead };

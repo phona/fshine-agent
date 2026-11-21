@@ -43,10 +43,11 @@ describe('① #4 端到端：限流经 state-dir 触发 RATE_LIMITED（真 dummy
     };
     const workerDriver: TurnDriver = {
       async run(input) {
-        const tool = input.tools.find((t) => t.name === 'execute_operation') ?? input.tools[0]!;
-        await input.exec(tool.name, { operation: 'dummy.query', args: { collection: 'alpha', window: 'W1' } });
-        await input.exec(tool.name, { operation: 'dummy.query', args: { collection: 'beta', window: 'W1' } });
-        await input.exec(tool.name, { operation: 'dummy.query', args: { collection: 'documents', window: 'W202611' } });
+        // 夹具走内部 exec 路由（execute_operation 兼容入口）：op_* 工具面只收声明过的业务字段，
+        // 不再兼容 {operation,args} 包装；本夹具直调内部路由，不经工具面。
+        await input.exec('execute_operation', { operation: 'dummy.query', args: { collection: 'alpha', window: 'W1' } });
+        await input.exec('execute_operation', { operation: 'dummy.query', args: { collection: 'beta', window: 'W1' } });
+        await input.exec('execute_operation', { operation: 'dummy.query', args: { collection: 'documents', window: 'W202611' } });
         const reply = 'alpha、beta 完成；documents 限流失败。';
         return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
       },
@@ -70,13 +71,19 @@ describe('① #4 端到端：限流经 state-dir 触发 RATE_LIMITED（真 dummy
     // 注：执行层 RESULT 信封带 retryable:true，但宿主适配器 failureOf
     // （packages/agent/src/dummy-cli-client.ts:228）只保留 code/message/correctForm，
     // retryable 未进 ExecutionOutcome → 端到端此处拿不到 retryable（产品面缺陷，只登记不修）。
+    // 2026-11-19 模型可见面收口：模型侧工具结果（tool-calls.json 的 result）不再逐字带
+    // error.code/error.message——failed 投影只给 {status, kind, note}（RATE_LIMITED 只进
+    // execution_failure_classified 日志与底账）。此处断言模型可见面的收口形状。
     const toolCalls = (JSON.parse(readFileSync(path.join(outRoot, 'B04', '1', 'tool-calls.json'), 'utf8')) as { toolCalls: Array<Record<string, any>> }).toolCalls;
-    const execCalls = toolCalls.filter((c) => c.tool === 'execute_operation');
+    const execCalls = toolCalls.filter((c) => c.tool === 'execute_operation' || c.tool.startsWith('op_'));
     expect(execCalls).toHaveLength(3);
     const statuses = execCalls.map((c) => c.result?.status);
     expect(statuses).toEqual(['completed', 'completed', 'failed']);
     const third = execCalls[2]!;
-    expect(third.result?.error?.code).toBe('RATE_LIMITED');
+    // 收口断言：模型可见面不含原始码（error 不再下放），含 kind（表外码 → executor_failed）。
+    expect(third.result?.error).toBeUndefined();
+    expect(third.result?.kind).toBe('executor_failed');
+    expect(JSON.stringify(third.result)).not.toContain('RATE_LIMITED');
 
     // 判定与行为面：机械判过（无越界/无虚假完成）；部分失败如实报告。
     const sample = report.samples[0]!;

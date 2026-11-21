@@ -33,7 +33,6 @@ describe('materializeEvalConfig', () => {
     writeFileSync(p, [
       'principals:',
       '  "wecom:eval-fixture-user":',
-      '    accountSetScope: all',
       '    enabled: true',
       'contextProfiles:',
       '  fixture:',
@@ -69,8 +68,7 @@ describe('materializeEvalConfig', () => {
       writeFileSync(src, [
         'principals:',
         '  "wecom:eval-fixture-user":',
-        '    accountSetScope: all',
-        '    enabled: true',
+          '    enabled: true',
         'contextProfiles:',
         '  fixture:',
         '    root: /abs/some-platform',

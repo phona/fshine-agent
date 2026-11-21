@@ -1,7 +1,7 @@
 /**
  * PiTurnDriver：基于 `@earendil-works/pi-coding-agent@1.5.2` 公开 `AgentSession` 的回合驱动。
  *
- * 转录所有权（设计见 `docs/product/pi-152-adapter-design.md`）：
+ * 转录所有权（Pi 1.5.2 适配设计已实施；设计文档 2026-11-18 删除，git 历史可考）：
  *   · `AgentSession` + `SessionManager` 是会话转录、agent loop、压缩与原生重试的**唯一所有者**；
  *   · 宿主不再持有第二份可变转录：本驱动只把「本轮新增输入」交给 Pi，并把 Pi 会话
  *     投影成**只读** AgentMessage 快照交回（`TurnDriver.transcript()` 同样只读）；
@@ -31,7 +31,8 @@ import type { AgentMessage, AgentToolResult } from '@earendil-works/pi-agent-cor
 import type { Model } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import type { DiscoveredTool } from '@fshine/contracts';
-import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver-contract';
+import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult, type WakeResult, type WakeToolFace } from './driver-contract';
+import { archiveCompactedSessionFile } from './session-persistence';
 import { renderToolStepText } from './step-text';
 
 /** 主模型瞬时失败的有界重试策略（交给 Pi 原生 RetrySettings 执行；沿用旧 [1000,2000] 两次延迟）。 */
@@ -156,6 +157,27 @@ export function parseContextWindow(rawValue: string | number | undefined, envVar
   return value;
 }
 
+/**
+ * 单条 assistant 消息的模型用量记录（owner 2026-11-21 批准的最小方案：观测先于告警，
+ * 不建新表、不碰模型面）。**只携带机械计量字段**——消息正文、工具参数、prompt 一概不进记录。
+ */
+export interface PiModelUsageEntry {
+  modelId: string;
+  stopReason: string;
+  /** assistant message_start → message_end 的真实墙钟毫秒；无 message_start 事件时用本回合发起时刻兜底。 */
+  durationMs: number;
+  /** 首个流式文本 delta 到达时刻 − message_start；无 delta / 非流式 = 不填。 */
+  ttftMs?: number;
+  usage: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    reasoning: number;
+    totalTokens: number;
+  };
+}
+
 export interface PiTurnDriverOptions {
   env: Record<string, string | undefined>;
   /** 显式模型 id(分层模型接缝)。缺省(不传)回落 env.LLM_MODEL。 */
@@ -188,12 +210,25 @@ export interface PiTurnDriverOptions {
   /** 从已落盘的 Pi 会话文件继续同一 Session（只消费一次；缺省 = 新会话）。 */
   resumeSessionFile?: string;
   /**
+   * 新建落盘会话时使用的 Pi 会话 id（只与 `sessionDir` 同用；缺省 = Pi 随机生成）。
+   * 装配层从 `SessionPersistence.resolve()` 取——文件名与 header 用同一个 id，
+   * 进程重启后按该 id 解析回同一份文件（Pi 原生 resume）。
+   */
+  sessionId?: string;
+  /**
    * Pi 的 cwd（渲染进系统提示 <cwd> 段的工作目录）。必须是与宿主项目隔离的空目录；
    * 缺省 = 进程临时目录下的 `fshine-pi-<pid>`（不指向仓库根/用户主目录）。
    */
   workspaceDir?: string;
   /** Pi 的 agentDir（配置/凭据发现面）。缺省 = workspaceDir/.pi-agent，不读宿主 ~/.pi。 */
   agentDir?: string;
+  /**
+   * 模型用量观测出口（owner 2026-11-21 批准的最小方案）：本驱动会话里**每一条 assistant
+   * message_end**（正常结束与 error/aborted 都算；Pi 原生重试的每次尝试各算一条）经此回调
+   * 传出一条 `PiModelUsageEntry`。缺省不传 = 零行为变化（连计时状态都不建）。
+   * 记录只含计量字段；落盘由装配层决定（见 scripts/ask-runtime.ts 的 usage.jsonl 注入）。
+   */
+  onModelUsage?: (entry: PiModelUsageEntry) => void;
 }
 
 /**
@@ -343,6 +378,8 @@ export function toAgentTool(
 /** 本驱动实例持有的 Pi 会话（reuseConversation 时跨回合复用）。 */
 interface TurnSlot {
   retryScheduled: number;
+  /** 本回合发起时刻（run/wake 进入即记）：assistant message_start 缺失时用量计时用它兜底。 */
+  startedAt: number;
   /**
    * 本失败周期内**实际发生**的模型尝试数（1 起）。重试由 Pi 原生 AgentSession 执行，
    * 驱动只能从 assistant `message_end` 事件看到真实尝试；正常 assistant 收尾即周期结束、
@@ -364,6 +401,8 @@ interface Conversation {
   sessionManager: SessionManager;
   systemPrompt: string;
   toolNames: string;
+  /** 宿主工具名 → provider 工具名（唤醒回合按名字筛只读工具时用；不携带业务语义）。 */
+  providerNames: Map<string, string>;
   contextWindow: number;
   /** 回合归因槽：事件 listener 只随会话注册一次，每回合指向本回合的计数/失败。 */
   slot: { current: TurnSlot | undefined };
@@ -404,6 +443,11 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
   /** 已就绪的实例级会话（transcript 的同步读面；Promise 兑现时同步写入）。 */
   let resolvedConversation: Conversation | undefined;
   let pendingResumeFile = options.resumeSessionFile;
+  /**
+   * 本实例已分配（或已恢复）的 Pi 会话文件：会话重建（提示/工具集变化、异常丢弃）时
+   * 回到**同一份文件**，不为同一业务会话另建第二个文件（重启解析按 id 唯一）。
+   */
+  let ownSessionFile: string | undefined;
   let lastTurnProjection: readonly AgentMessage[] = [];
   /**
    * 实例级会话的工具执行面引用（跨回合同一个对象）：工具定义在会话创建时固定，
@@ -430,13 +474,20 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
       retry: { ...MAIN_MODEL_RETRY_SETTINGS },
     });
 
-    const resumeFile = pendingResumeFile;
+    const resumeFile = pendingResumeFile ?? ownSessionFile;
     pendingResumeFile = undefined;
     const sessionManager = resumeFile !== undefined
       ? SessionManager.open(resumeFile, options.sessionDir, workspaceDir)
       : options.sessionDir !== undefined
-        ? SessionManager.create(workspaceDir, options.sessionDir)
+        ? SessionManager.create(
+          workspaceDir,
+          options.sessionDir,
+          options.sessionId === undefined ? undefined : { id: options.sessionId },
+        )
         : SessionManager.inMemory(workspaceDir);
+    // 落盘会话的文件路径在会话建立时即确定（Pi 的 header 在首条 user/assistant 时落盘）；
+    // 记住它，会话重建时回到同一份文件（Pi 原生 resume）。
+    if (options.sessionDir !== undefined) ownSessionFile = sessionManager.getSessionFile();
     // 首回合/一次性回合的种子历史只进新会话；恢复会话不重灌（转录归 Pi）。
     if (resumeFile === undefined) {
       for (const message of input.seed) sessionManager.appendMessage(toSessionMessage(message));
@@ -445,8 +496,11 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
     const toolDefinitions = input.tools.map((tool) => toAgentTool(
       tool,
       {
+        // 无执行面的回合（唤醒回合已按 Pi 原生 API 清空工具声明，正常到不了这里）：拒绝话术
+        // 必须干净且直接指示不调工具——这句话会被写进模型上下文，内部词（执行面/执行层）会
+        // 被模型复述到用户面前。
         exec: (name, args, signal) => input.surfaceRef.current === undefined
-          ? Promise.reject(new Error('本回合工具执行面尚未就绪'))
+          ? Promise.reject(new Error('请直接回答用户，不必调用工具。'))
           : input.surfaceRef.current.exec(name, args, signal),
         onStep: (text) => input.surfaceRef.current?.onStep(text),
         get signal() { return input.surfaceRef.current?.signal; },
@@ -469,8 +523,53 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
     });
 
     const slot: Conversation['slot'] = { current: undefined };
+    /**
+     * 模型用量观测的逐条 assistant 消息计时状态（仅 onModelUsage 注入时维护）：
+     * message_start 记起点、首个 text_delta 记首字时刻，message_end 发记录后清空。
+     * 一回合多条 assistant 消息（工具轮次）时每条各自起算，不跨消息累计。
+     */
+    let usageTracking: { startedAt: number; firstTextDeltaAt: number | undefined } | undefined;
     session.subscribe((event: AgentSessionEvent) => {
       if (event.type === 'compaction_end') {
+        // issue #67：Pi 的压缩只压模型上下文，会话文件仍是线性 append；压缩完成后把
+        // firstKeptEntryId 之前的死历史移入 archive/（见 archiveCompactedSessionFile）。
+        // 同步执行：与 Pi 的 append 同一 tick，改写期间不会插入新条目。
+        if (!event.aborted && event.result !== undefined) {
+          const sessionFile = sessionManager.getSessionFile();
+          if (sessionFile !== undefined) {
+            try {
+              const archived = archiveCompactedSessionFile(sessionFile);
+              if (archived.archived) {
+                // 路径不变（同一文件原地重写）。ownSessionFile 必须继续指向它：本实例的
+                // 会话重建（提示/工具集变化、异常丢弃）都按 ownSessionFile 回到同一份文件；
+                // 若这里不钉住，重建时 Pi 可能另建文件，重启解析就分成两份。
+                ownSessionFile = sessionFile;
+                // Pi 的树还在内存里；按重写后的文件重载，后续读/追加都只看活跃条目。
+                let reloadError: string | undefined;
+                try {
+                  sessionManager.setSessionFile(sessionFile);
+                } catch (error) {
+                  reloadError = String(error instanceof Error ? error.message : error).slice(0, 500);
+                }
+                console.warn(JSON.stringify({
+                  event: 'session_archive_written',
+                  archivedEntries: archived.archivedEntries,
+                  archivedBytes: archived.archivedBytes,
+                  activeBytesBefore: archived.activeBytesBefore,
+                  activeBytesAfter: archived.activeBytesAfter,
+                  archivePath: archived.archivePath,
+                  ...(reloadError === undefined ? {} : { reloadError }),
+                }));
+              }
+            } catch (error) {
+              // 失败只记事件：archiveCompactedSessionFile 在替换活跃文件前抛出，原文件保持原样。
+              console.warn(JSON.stringify({
+                event: 'session_archive_failed',
+                reason: String(error instanceof Error ? error.message : error).slice(0, 500),
+              }));
+            }
+          }
+        }
         // U3：溢出/阈值压缩后将继续重试 = 上一次 assistant 尝试被丢弃（Pi 的 _omitRecoveryAttempt
         // 只隐藏该尝试及其 toolResult，不回滚已发生的副作用）。只转述事实，判定归宿主。
         if (event.willRetry) input.surfaceRef.current?.onRuntimeEvent?.({ kind: 'recovery', reason: 'compaction' });
@@ -489,6 +588,42 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
           errorMessage: String(event.errorMessage).slice(0, 500),
         }));
         return;
+      }
+      // 模型用量观测（owner 2026-11-21 批准的最小方案）：每条 assistant message_end 一条记录。
+      // 只携带 modelId/stopReason/durationMs/ttftMs/usage；正文、工具参数、prompt 一概不进记录。
+      if (options.onModelUsage !== undefined) {
+        if (event.type === 'message_start' && (event.message as { role?: string }).role === 'assistant') {
+          usageTracking = { startedAt: Date.now(), firstTextDeltaAt: undefined };
+        } else if (event.type === 'message_update'
+          && (event.message as { role?: string }).role === 'assistant'
+          && event.assistantMessageEvent.type === 'text_delta'
+          && usageTracking !== undefined
+          && usageTracking.firstTextDeltaAt === undefined) {
+          usageTracking.firstTextDeltaAt = Date.now();
+        } else if (event.type === 'message_end' && (event.message as { role?: string }).role === 'assistant') {
+          const endedAt = Date.now();
+          const message = event.message as {
+            model?: unknown; stopReason?: unknown;
+            usage?: Partial<PiModelUsageEntry['usage']>;
+          };
+          const startedAt = usageTracking?.startedAt ?? slot.current?.startedAt ?? endedAt;
+          const firstTextDeltaAt = usageTracking?.firstTextDeltaAt;
+          usageTracking = undefined;
+          options.onModelUsage({
+            modelId: typeof message.model === 'string' && message.model !== '' ? message.model : modelId,
+            stopReason: String(message.stopReason ?? ''),
+            durationMs: Math.max(0, endedAt - startedAt),
+            ...(firstTextDeltaAt !== undefined ? { ttftMs: Math.max(0, firstTextDeltaAt - startedAt) } : {}),
+            usage: {
+              input: message.usage?.input ?? 0,
+              output: message.usage?.output ?? 0,
+              cacheRead: message.usage?.cacheRead ?? 0,
+              cacheWrite: message.usage?.cacheWrite ?? 0,
+              reasoning: message.usage?.reasoning ?? 0,
+              totalTokens: message.usage?.totalTokens ?? 0,
+            },
+          });
+        }
       }
       if (event.type === 'message_end' && event.message.role === 'assistant' && slot.current) {
         const stopReason = event.message.stopReason;
@@ -521,6 +656,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
       sessionManager,
       systemPrompt: input.systemPrompt,
       toolNames: toolDefinitions.map((tool) => tool.name).join(','),
+      providerNames: input.providerNames,
       contextWindow: model.contextWindow,
       slot,
       lastProjection: projectSession(session),
@@ -612,7 +748,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         }
 
         const session = active.session;
-        active.slot.current = { retryScheduled: 0, attempt: 0 };
+        active.slot.current = { retryScheduled: 0, attempt: 0, startedAt: Date.now() };
         active.lastProjection = projectSession(session);
 
         // 宿主事实注入：Pi 原生 custom message（下次请求按 user 角色投影），不触发单独回合。
@@ -723,6 +859,150 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
       }
     },
 
+    /**
+     * 唤醒入口（会话状态变化 → 模型把话带给用户；形状见 driver-contract 的 WakeResult）。
+     * 事实经 Pi 原生 custom message 注入（display=false；projectSession 投影成 user）——
+     * 与既有 injections 同一形状，区别只在会话空闲时 `triggerTurn: true` 触发一个回合。
+     * 唤醒回合的工具面 = 调用方授予的**只读任务工具子集**（task_status/task_result 这类只读底账
+     * 查询），不是全量、也不是零；`options.toolFace` 缺省 = 零工具（旧行为）。只读工具经 Pi 原生
+     * `setActiveToolsByName` 按回合激活（回合收尾恢复），配一条**只读执行闭包**——只受理 names
+     * 内工具，其余（含所有执行类工具）确定性拒绝、执行层零接触。这条修法针对 live 实测：
+     * 模型在唤醒回合想核实任务状态却无工具可调，把原生 DSML 标记当正文吐给用户；给它真能跑的
+     * 只读工具后，查询走工具调用，最终正文仍是模型的话。60s 界由 deadline 兜底（反复调用不挂死）。
+     * 会话忙时事实按 `followUp` 入队、由当前回合负责说（本入口不取正文）。
+     */
+    async wake(factText: string, wakeOptions?: { deadline?: number; toolFace?: WakeToolFace }): Promise<WakeResult> {
+      if (factText.trim() === '') return { outcome: 'failed' };
+      // 可唤醒的前提 = 本驱动持有实例级「睡眠中」的会话；一次性回合驱动没有可唤醒对象。
+      if (!reuseConversation) return { outcome: 'unavailable' };
+      const pending = conversation;
+      if (pending === undefined) return { outcome: 'unavailable' };
+      let active: Conversation;
+      try {
+        active = await pending;
+      } catch {
+        return { outcome: 'unavailable' };
+      }
+      const deadline = wakeOptions?.deadline;
+      const remaining = deadline === undefined ? undefined : deadline - Date.now();
+      if (remaining !== undefined && remaining <= 0) {
+        console.warn(JSON.stringify({ event: 'pi_driver_wake_expired' }));
+        return { outcome: 'failed' };
+      }
+      const session = active.session;
+      // 截止到达 → 中止本回合（与 run() 同一套原生 abort；abort 后回合以 aborted 收尾 → failed）。
+      const abort = new AbortController();
+      const timer = remaining === undefined ? undefined : setTimeout(() => abort.abort(), Math.max(1, remaining));
+      const abortSession = () => {
+        if (abort.signal.aborted) void session.abort().catch(() => undefined);
+      };
+      abort.signal.addEventListener('abort', abortSession, { once: true });
+      /**
+       * 唤醒回合改过的工具集（回合收尾恢复；未改 = undefined）。
+       */
+      let clearedToolNames: string[] | undefined;
+      /** 调用方授予的只读工具面（缺省 = 零工具，旧行为逐字不变）。 */
+      const toolFace = wakeOptions?.toolFace;
+      try {
+        if (session.isStreaming) {
+          // 会话忙：事实入队（Pi 原生 followUp），由当前回合处理；不另起回合、不由本入口取正文。
+          await session.sendCustomMessage(
+            { customType: 'fshine_task_fact', content: factText, display: false },
+            { triggerTurn: true, deliverAs: 'followUp' },
+          );
+          return { outcome: 'busy' };
+        }
+        clearedToolNames = session.getActiveToolNames();
+        const activeToolNames = clearedToolNames;
+
+        // 唤醒回合的工具面 = 调用方授予的**只读工具子集**，不是全量、也不是零：
+        //   · 无 toolFace（缺省）= 零工具（旧行为逐字不变）；
+        //   · 有 toolFace = 只激活 names ∩ 本会话已声明工具，其余（含所有执行类工具）不激活。
+        // 为什么保留只读工具：live 实测——模型在唤醒回合想核实任务状态（task_status）却无工具
+        // 可调，把原生 DSML 标记当正文吐给用户。给它真能执行的只读任务工具，让查询走工具调用，
+        // 模型最终用自然语言作答（取正文口径不变）。
+        const wakeToolNames = toolFace === undefined
+          ? []
+          : [...active.providerNames.entries()]
+            // 只认本会话**已声明**的宿主工具名：调用方给集合外的名字也不激活（fail-closed）。
+            .filter(([hostName]) => toolFace.names.includes(hostName))
+            .map(([, providerName]) => providerName)
+            .filter((providerName) => activeToolNames.includes(providerName));
+        session.setActiveToolsByName(wakeToolNames);
+
+        // 执行面：有 toolFace 时接**只读闭包**（只允许 names 内的只读工具；其余确定性拒绝，
+        // 不触执行层），否则清空 surface（工具不得借用旧回合的执行闭包）。
+        if (sessionSurface !== undefined) {
+          sessionSurface.current = toolFace === undefined ? undefined : {
+            exec: (name, args, signal) => toolFace.names.includes(name)
+              ? toolFace.exec(name, args, signal)
+              : Promise.reject(new Error(`唤醒回合不允许调用工具：${name}`)),
+            onStep: () => {},
+            signal: abort.signal,
+          };
+        }
+        active.slot.current = { retryScheduled: 0, attempt: 0, startedAt: Date.now() };
+        await session.sendCustomMessage(
+          { customType: 'fshine_task_fact', content: factText, display: false },
+          { triggerTurn: true },
+        );
+        const messages = projectSession(session);
+        active.lastProjection = messages;
+        lastTurnProjection = messages;
+        const slot = active.slot.current;
+        // 失败判据与 run() 同一处：回合判失败（error/aborted）且其后没有正常 assistant 消息。
+        if (slot?.runFailure !== undefined && slot.recovered !== true) {
+          console.warn(JSON.stringify({
+            event: 'pi_driver_wake_failed',
+            errorCode: slot.runFailure.code,
+            errorMessage: slot.runFailure.message.slice(0, 300),
+            attempt: slot.runFailure.attempt,
+          }));
+          return { outcome: 'failed' };
+        }
+        const text = wakeReplyText(messages, factText);
+        if (text.trim() === '') {
+          const lastMessage = messages[messages.length - 1] as {
+            role?: string; stopReason?: string; content?: unknown;
+          } | undefined;
+          console.warn(JSON.stringify({
+            event: 'pi_driver_wake_empty_reply',
+            role: lastMessage?.role,
+            stopReason: lastMessage?.stopReason,
+            contentBlocks: Array.isArray(lastMessage?.content)
+              ? lastMessage.content.map((block) => (block as { type?: string }).type ?? 'unknown')
+              : typeof lastMessage?.content,
+          }));
+          return { outcome: 'failed' };
+        }
+        return { outcome: 'woken', text };
+      } catch (error) {
+        console.error(JSON.stringify({
+          event: 'pi_driver_wake_error',
+          errorType: error instanceof Error ? error.name : 'UnknownError',
+          message: error instanceof Error ? error.message.slice(0, 300) : String(error),
+        }));
+        // 异常后会话中可能有半程条目：与 run() 同一纪律——丢弃、下一回合重建（不硬续坏状态）。
+        await discardConversation();
+        return { outcome: 'failed' };
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        abort.signal.removeEventListener('abort', abortSession);
+        // 恢复唤醒回合的工具集（异常/失败路径同样恢复；失败只记观测事件——会话若已丢弃，
+        // 下一回合重建时会带着完整工具面）。
+        if (clearedToolNames !== undefined) {
+          try {
+            session.setActiveToolsByName(clearedToolNames);
+          } catch (error) {
+            console.warn(JSON.stringify({
+              event: 'pi_driver_wake_tool_restore_failed',
+              errorType: error instanceof Error ? error.name : 'UnknownError',
+            }));
+          }
+        }
+      }
+    },
+
     /** 只读派生：Pi 会话当前转录（宿主不得据此累积可变历史）。 */
     transcript(): readonly AgentMessage[] {
       // 同步读：实例级会话已就绪时直接读 Pi 的 session.messages（每次重新投影，不缓存历史）。
@@ -810,6 +1090,39 @@ function lastAssistantStop(messages: readonly AgentMessage[]): { stopReason?: st
     if (message?.role === 'assistant') return { stopReason: message.stopReason, errorMessage: message.errorMessage };
   }
   return undefined;
+}
+
+/**
+ * 取**唤醒回合**的正文：事实注入（custom message → user 投影）之后、模型自己产出的 assistant 正文。
+ *
+ * 与 `finalReplyText` 的两个差别（都是因为唤醒回合没有 promptText，也没有宿主执行面）：
+ *   · 归属判据 = **最后一条 user 消息就是这条事实**（字符相等）。唤醒回合的触发点只有它；
+ *     事实被压缩折进摘要 / 转录形状异常时取不到归属，宁空也不取旧回合的话——
+ *     "整段转录最后一条 assistant" 会取错（溢出恢复失败时那条是上一回合的答复）。
+ *   · **不认 toolResult**：工具结果的确定性话术只在有宿主提示词的回合里有语义；唤醒回合的
+ *     工具结果可能是执行面未就绪的内部错误形状，它不是模型的话，不许当正文投给用户。
+ *
+ * 导出只为确定性守卫测试（同 `finalReplyText` 的导出理由；不接线、不改变行为）。
+ */
+export function wakeReplyText(messages: readonly AgentMessage[], factText: string): string {
+  if (factText.trim() === '') return '';
+  let factIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] as { role?: string } | undefined;
+    if (message?.role === 'user') {
+      factIndex = i;
+      break;
+    }
+  }
+  if (factIndex === -1) return '';
+  const fact = messages[factIndex] as { content?: unknown } | undefined;
+  if (textFromContent(fact?.content).trim() !== factText.trim()) return '';
+  for (let i = messages.length - 1; i > factIndex; i -= 1) {
+    const message = messages[i] as { role?: string; content?: unknown; stopReason?: string } | undefined;
+    if (message?.role !== 'assistant') continue;
+    return message.stopReason === 'stop' ? textFromContent(message.content) : '';
+  }
+  return '';
 }
 
 /**

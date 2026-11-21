@@ -1,5 +1,5 @@
 /**
- * 执行层文件桥（CAP-01 S2 ②③④；docs/product/cap01-main-direct-execution.md §6/§10-3）。
+ * 执行层文件桥（CAP-01 S2 ②③④；docs/architecture/files.md §6/§10-3）。
  *
  * 位置与依赖方向：由**装配层**（ask-runtime 的装配核心）构造——它持有 `platformRoot`
  * （profile.root）与 fileStore（文件区监管，唯一写侧），并把装饰后的执行客户端按任务交给
@@ -31,11 +31,13 @@ import path from 'node:path';
 import type { ExecutionCallOptions, ExecutionClient, ExecutionRequest } from '@fshine/contracts/execution-contract';
 import {
   TaskFileRejectedError,
+  type ActiveFileRef,
   type FileScope,
   type FileStore,
   type RegisteredFile,
   type SkippedOutput,
 } from './file-store';
+import { materializePayload, type PayloadMaterializeResult } from './payload-materializer';
 
 /** 任务产物上限（缺省与 run_js 交付箱同值；生产装配不得放宽，v8 §11 数值 S0 写死）。 */
 export const TASK_FILE_MAX_OUTPUT_BYTES = 50 * 1024 * 1024;
@@ -90,10 +92,21 @@ export interface ReturnedFileRegistration {
 export interface TaskExecutionBridge {
   /** 出站装饰后的执行客户端（本任务的目录翻译；响应原样透传）。 */
   readonly client: ExecutionClient;
+  /**
+   * 当前任务的文件面（机械事实投影：fileId/name/bytes；与物化同源、同一可读性谓词）。
+   * Worker 委派的任务文件清单从这里取——后台单回合执行器不另建文件发现路径。
+   */
+  taskFiles(): ActiveFileRef[];
   /** 回程登记（runtime 出口调用）：data.files 原始条目 → 等长替换列表 + 登记事实。 */
   registerReturnedFiles(entries: readonly unknown[]): Promise<ReturnedFileRegistration>;
   /** 兜底扫描（v8 §10-3）：任务 out/ 全量登记（同池去重）；目录不存在 → 空结果。 */
   sweepTaskOutputs(): { files: RegisteredFile[]; skipped: SkippedOutput[] };
+  /**
+   * 载荷型参数的物化（2026-11-19）：把模型给的结构化**值**按 schema lint 后原子落盘到
+   * `<taskDir>/in/<param>.json`，返回绝对路径或结构化失败（missing/unknown）。
+   * 任务暂存目录是桥持有的可信路径（模型/用户看不到、填不进）。
+   */
+  materializePayload(input: { param: string; value: unknown; schema?: unknown; maxBytes?: number }): PayloadMaterializeResult;
 }
 
 /** 按任务构造桥的工厂（runtime 的 RuntimeOptions.taskExecutionBridge 端口形状）。 */
@@ -121,17 +134,23 @@ interface PayloadEntry {
   name: string | null;
   sourcePath?: string;
   contentBase64?: string;
+  /**
+   * 登记角色（契约 v4 长任务大日志）：条目显式 `deliverable:false` = 宿主内部产物
+   * （任务作用域可读，不进用户附件）。缺省/true = 用户产物（既有语义不变）。
+   */
+  deliverable?: boolean;
 }
 
 function classifyEntry(entry: unknown): PayloadEntry | { kind: 'unconsumed' } {
   if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return { kind: 'unconsumed' };
   const record = entry as Record<string, unknown>;
   const name = typeof record.name === 'string' && record.name.trim() !== '' ? record.name : null;
+  const deliverable = record.deliverable === false ? false : undefined;
   if (typeof record.path === 'string' && record.path.trim() !== '') {
-    return { kind: 'payload', name, sourcePath: record.path };
+    return { kind: 'payload', name, sourcePath: record.path, ...(deliverable === undefined ? {} : { deliverable }) };
   }
   if (typeof record.content === 'string' && record.content.trim() !== '') {
-    return { kind: 'payload', name, contentBase64: record.content };
+    return { kind: 'payload', name, contentBase64: record.content, ...(deliverable === undefined ? {} : { deliverable }) };
   }
   return { kind: 'unconsumed' };
 }
@@ -211,6 +230,20 @@ export function createTaskExecutionBridge(options: TaskExecutionBridgeOptions): 
 
     return {
       client,
+      taskFiles() {
+        // 与出站物化同一来源：任务副本 + 任务产物池（当前任务的绑定行、已激活且 TTL 内）。
+        return options.fileStore.listTaskFiles({ scope: options.scope, taskId, now: Date.now() });
+      },
+      materializePayload(input: { param: string; value: unknown; schema?: unknown; maxBytes?: number }): PayloadMaterializeResult {
+        // 装信封归宿主：值 → lint → 落盘到本任务 in/，返回路径。执行层只认路径参数。
+        return materializePayload({
+          taskDir,
+          label: input.param,
+          value: input.value,
+          ...(input.schema === undefined ? {} : { schema: input.schema }),
+          ...(input.maxBytes === undefined ? {} : { maxBytes: input.maxBytes }),
+        });
+      },
       async registerReturnedFiles(entries: readonly unknown[]): Promise<ReturnedFileRegistration> {
         const out: unknown[] = [];
         const files: RegisteredFile[] = [];
@@ -247,6 +280,7 @@ export function createTaskExecutionBridge(options: TaskExecutionBridgeOptions): 
                 name: classified.name!,
                 bytes: Buffer.from(classified.contentBase64!, 'base64'),
                 maxFileBytes: maxOutputFileBytes,
+                ...(classified.deliverable === undefined ? {} : { deliverable: classified.deliverable }),
               });
             files.push(file);
             // 登记事实整体替换原条目：path / base64 不进替换列表（runtime 回填后进转录与落定）。

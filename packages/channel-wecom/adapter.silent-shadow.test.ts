@@ -141,7 +141,8 @@ describe('Silent Shadow 闸门：逐路径抑制 + 尝试可观测 + 投递=0', 
     expect(sdk.userVisibleCalls).toBe(0);
     const evidence = channel.shadowEvidence();
     expect(evidence.mode).toBe('silent');
-    expect(evidence.userVisibleSuppressed).toBe(2); // ack + 终帧
+    // 2026-11-19：不再发受理帧（ack），只剩终帧一条
+    expect(evidence.userVisibleSuppressed).toBe(1); // 终帧
     expect(evidence.events.every((event) => event.kind === 'reply_stream')).toBe(true);
     await channel.stop();
   });
@@ -156,8 +157,8 @@ describe('Silent Shadow 闸门：逐路径抑制 + 尝试可观测 + 投递=0', 
     await settle();
 
     expect(sdk.userVisibleCalls).toBe(0);
-    // ack + 进度 + 终帧 = 3 条被抑制的流式帧
-    expect(channel.shadowEvidence().userVisibleSuppressed).toBe(3);
+    // 进度 + 终帧 = 2 条被抑制的流式帧（受理帧已取消）
+    expect(channel.shadowEvidence().userVisibleSuppressed).toBe(2);
     await channel.stop();
   });
 
@@ -176,8 +177,8 @@ describe('Silent Shadow 闸门：逐路径抑制 + 尝试可观测 + 投递=0', 
     expect(sdk.userVisibleCalls).toBe(0);
     expect(sdk.uploads).toHaveLength(0);
     const evidence = channel.shadowEvidence();
-    // ack + 终帧(2 userVisible stream) + 2×upload(non-visible) + 2×reply_media(userVisible)
-    expect(evidence.events.filter((event) => event.kind === 'reply_stream')).toHaveLength(2);
+    // 终帧(1 userVisible stream) + 2×upload(non-visible) + 2×reply_media(userVisible)
+    expect(evidence.events.filter((event) => event.kind === 'reply_stream')).toHaveLength(1);
     expect(evidence.events.filter((event) => event.kind === 'upload_media')).toHaveLength(2);
     expect(evidence.events.filter((event) => event.kind === 'reply_media')).toHaveLength(2);
     await channel.stop();
@@ -190,7 +191,7 @@ describe('Silent Shadow 闸门：逐路径抑制 + 尝试可观测 + 投递=0', 
     await settle();
 
     expect(sdk.userVisibleCalls).toBe(0);
-    expect(channel.shadowEvidence().userVisibleSuppressed).toBe(2); // ack + fallback
+    expect(channel.shadowEvidence().userVisibleSuppressed).toBe(1); // fallback 终帧（受理帧已取消）
     errorSpy.mockRestore();
     await channel.stop();
   });
@@ -203,7 +204,7 @@ describe('Silent Shadow 闸门：逐路径抑制 + 尝试可观测 + 投递=0', 
     await settle();
 
     expect(sdk.userVisibleCalls).toBe(0);
-    expect(channel.shadowEvidence().userVisibleSuppressed).toBe(2); // ack + 拒绝终帧
+    expect(channel.shadowEvidence().userVisibleSuppressed).toBe(1); // 拒绝终帧（受理帧已取消）
     await channel.stop();
   });
 
@@ -242,8 +243,8 @@ describe('Silent Shadow 闸门：逐路径抑制 + 尝试可观测 + 投递=0', 
     await settle();
 
     expect(sdk.userVisibleCalls).toBe(0);
-    // ack + notice + 终帧 = 3
-    expect(channel.shadowEvidence().userVisibleSuppressed).toBe(3);
+    // notice + 终帧 = 2（受理帧已取消）
+    expect(channel.shadowEvidence().userVisibleSuppressed).toBe(2);
     await channel.stop();
   });
 });
@@ -272,7 +273,7 @@ describe('Silent Shadow 反向绊线：缺省静默 / 显式开启 / 绕过即�
     sdk.emit('message.text', textFrame('cb-live'));
     await vi.waitFor(() => expect(sdk.replyStreams.some((reply) => reply.finish)).toBe(true));
 
-    expect(sdk.userVisibleCalls).toBeGreaterThanOrEqual(2); // ack + 终帧真切到达替身
+    expect(sdk.userVisibleCalls).toBeGreaterThanOrEqual(1); // 终帧（受理帧已取消）帧真切到达替身
     expect(channel.shadowEvidence().suppressed).toBe(0);
     await channel.stop();
   });
@@ -394,8 +395,8 @@ describe('B2 opt-in：显式 live / 显式 shadow / 缺失或非法 → fail-saf
     expect(sdk.userVisibleCalls).toBe(0);        // 实际用户可见投递 = 0
     expect(sdk.uploads).toHaveLength(0);          // upload 也不触达（前置同断）
     const evidence = channel.shadowEvidence();
-    // ack + 进度 + 终帧 = 3 条被抑制的用户可见流式帧
-    expect(evidence.userVisibleSuppressed).toBeGreaterThanOrEqual(3);
+    // 进度 + 终帧 = 至少 2 条被抑制的用户可见流式帧（受理帧已取消）
+    expect(evidence.userVisibleSuppressed).toBeGreaterThanOrEqual(2);
     expect(evidence.events.some((event) => event.kind === 'upload_media')).toBe(true);
     expect(evidence.events.some((event) => event.kind === 'reply_media')).toBe(true);
     expect(evidence.events.some((event) => event.kind === 'send_message')).toBe(true);

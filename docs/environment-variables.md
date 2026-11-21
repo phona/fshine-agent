@@ -1,14 +1,14 @@
 # 环境变量清单（两仓执行与宿主接口，v1）
 
-> 地位：本清单是 `docs/execution-layer-interface.md` 的附录，盘点口径见文末。
+> 地位：本清单原为 `docs/architecture/contract.md` 的附录（该文档 2026-11-18 已删，git 历史可考），盘点口径见文末。
 > 规则：新环境变量必须先登记在这里（生产者 / 消费者 / 默认值 / 缺失行为），
 > 再进代码；`.env.example` 与示例配置里出现的变量必须对应一个真实读取点，
-> 否则按孤儿引用删除。历史文档（change-safety、debt-ledger、rule-landing、
+> 否则按孤儿引用删除。历史文档（change-safety、debt-ledger、
 > architecture-laws、superpowers 规格）里的已退役名是 dated 记录，不计入现行接口，
 > 也不为清零而改写历史——现行接口的退役守卫见“已退役、测试负向断言保留”一节。
 >
 > 前缀规则：执行层治理接口与夹具 per-run 隔离路径统一用 `EXECUTION_*`（唯一规范族，
-> 2026-11-10 裁定见 `docs/env-naming-ruling-20261110.md`），宿主自用参数用 `FSHINE_*`；
+> 2026-11-10 裁定原文 `docs/ops/README.md` 已删，git 历史可考），宿主自用参数用 `FSHINE_*`；
 > `DUMMY_*` / `STOCK_*` 只是夹具**调试入口**（手工跑时可用；B 类隔离路径与令牌面在
 > 评测进程内不可见，见 §4；C 类按用例旋钮仍用夹具专名，见 §9）。上一轮的旧前缀已全量清零。
 >
@@ -38,11 +38,13 @@
 > step cap）**删除**——零生产读取点的「写着不生效」假配置；旧 YAML 里的残留键由加载层
 > 忽略。资源旋钮的唯一入口改为 `runtime` 段（yaml 键、**无 env 覆盖口**）：非法值
 > fail-fast、未知键拒绝，缺省由 `packages/agent/src/resource-policy.ts` 按「缺省=现行为」
-> 补齐；登记见 `docs/decision-log.md` §三十二，静态守卫见
+> 补齐；登记见 `docs/decisions/index.md` §三十二，静态守卫见
 > `packages/agent/resource-policy-single-source.test.ts`。
-> `runtime` 段另含 `dispatchMode: inline | background`（R4 集成接线，2026-11-14；缺省
-> `inline` = 现行为：委派同步执行；`background` = 受理即回执、后台 TaskRunner 执行——
-> 仅 server 渠道面承接，ask/redo 入口对 background 显式拒绝；模板见 `config/agent.example.yaml`）。
+> **任务派发不是配置项**（2026-11-18 owner 决定）：迁移期的 `runtime.dispatchMode`
+> 已删除——它不是产品概念。现在只有一个执行模型：**server 有渠道推送面，恒 async**
+> （受理即回执、后台 TaskRunner 执行、完成后主动投递）；**ask/eval 这类无渠道入口恒同步
+> 等结果**。两者由各入口的装配参数（`taskDispatch: 'sync' | 'async'`）显式传入，不从
+> config 读取；旧 YAML 里的 `dispatchMode` 按未知键拒绝（防「写着不生效」）。
 > `runtime.fileRetentionSweepOnStart`（2026-11-17；缺省 `false`）：server 启动装配完成后、
 > 渠道开始接消息之前，按 `fileRetentionDays` **扫一次**到期 run 目录（`dryRun=false`，
 > 结果进启动日志）；缺省关闭 = 零行为变化，只扫一次、无定时器（周期调度归部署侧）。

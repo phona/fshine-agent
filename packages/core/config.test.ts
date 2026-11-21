@@ -49,10 +49,19 @@ describe('loadConfig', () => {
     expect(config.sessionTtlMs).toBe(86_400_000); // 默认 24h:TTL 过期走软着陆,不再分钟级清零失忆
 
     const userA = config.principals['wecom:user_a'];
-    // accountSetIds 不再进契约（⑥）：YAML 里的旧键被加载层忽略
+    // accountSetIds / capabilities / accountSetScope 不再进契约：YAML 里的旧键被加载层忽略
     expect('accountSetIds' in (userA ?? {})).toBe(false);
+    expect('capabilities' in (userA ?? {})).toBe(false);
+    expect('accountSetScope' in (userA ?? {})).toBe(false);
     expect(userA?.enabled).toBe(true);
-    expect(userA?.capabilities).toEqual(['read']);
+    // 未写 role = 未配置（装配层按 viewer 处理，最小权限）。
+    expect(userA?.role).toBeUndefined();
+    // roles 未配置 = 内置三档默认（开箱可用）。
+    expect(config.roles).toEqual({
+      viewer: { permissions: ['read'] },
+      operator: { permissions: ['read', 'write'] },
+      admin: { permissions: ['read', 'write'] },
+    });
   });
 
   it('env 覆盖:APP_PORT / APP_CALLBACK_PATH', () => {
@@ -240,19 +249,47 @@ contextProfiles:
     expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV })).toThrowError(/workerTimeoutMs/);
   });
 
-  it('V1 capabilities:解析 read/validate/write 并默认旧 principal 为 read', () => {
-    const yaml = VALID_YAML.replace('enabled: true', 'enabled: true\n    capabilities: [read, validate, write]');
+  it('roles：解析自定义角色表；principal.role 命中已定义角色', () => {
+    const yaml = `${VALID_YAML}
+roles:
+  viewer: { permissions: [read] }
+  auditor: { permissions: [read, write] }
+`.replace('enabled: true', 'enabled: true\n    role: auditor');
     const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
-    expect(config.principals['wecom:user_a']?.capabilities).toEqual(['read', 'validate', 'write']);
-    expect(config.principals['wecom:user_b']?.capabilities).toEqual(['read']);
+    expect(config.roles).toEqual({
+      viewer: { permissions: ['read'] },
+      auditor: { permissions: ['read', 'write'] },
+    });
+    expect(config.principals['wecom:user_a']?.role).toBe('auditor');
   });
 
-  it('V1 capabilities:拒绝未知值、重复值和空数组', () => {
-    for (const capabilities of ['[admin]', '[read, read]', '[]']) {
-      const yaml = VALID_YAML.replace('enabled: true', `enabled: true\n    capabilities: ${capabilities}`);
+  it('roles：permissions 只允许 read/write;未知值/重复/空数组 fail-fast', () => {
+    for (const permissions of ['[admin]', '[read, read]', '[]']) {
+      const yaml = `${VALID_YAML}
+roles:
+  viewer: { permissions: ${permissions} }
+`;
       expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV }))
-        .toThrowError(/capabilities/);
+        .toThrowError(/roles\.viewer\.permissions/);
     }
+  });
+
+  it('role 未定义 → 启动失败（不静默降级）', () => {
+    const yaml = VALID_YAML.replace('enabled: true', 'enabled: true\n    role: ghost');
+    expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV }))
+      .toThrowError(/principals\.wecom:user_a\.role 未定义/);
+  });
+
+  it('旧 capabilities / accountSetScope 键被加载层忽略（不再进 PrincipalConfig）', () => {
+    const yaml = VALID_YAML.replace(
+      'enabled: true',
+      'enabled: true\n    capabilities: [read, validate, write]\n    accountSetScope: all',
+    );
+    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
+    const user = config.principals['wecom:user_a'];
+    expect('capabilities' in (user ?? {})).toBe(false);
+    expect('accountSetScope' in (user ?? {})).toBe(false);
+    expect(user?.role).toBeUndefined();
   });
 
   it('enabled 的 principal 无账套不再报错（⑥：宿主不持实体授权，账套校验随之退役）', () => {
@@ -451,6 +488,27 @@ runtime:
     expect(deploymentEnvOf(config)).toEqual({});
   });
 
+  it('alerts 段（2026-11-21 live P1）：ownerPrincipalId yaml 是源；缺段 = 未配置；非字符串 fail-fast', () => {
+    const withOwner = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}alerts:\n  ownerPrincipalId: wecom:real-user\n`),
+      env: {},
+    });
+    expect(withOwner.alerts).toEqual({ ownerPrincipalId: 'wecom:real-user' });
+
+    // 缺段 / 空段（只有注释 → null）= 未配置：告警只落盘不推（不猜 owner 路由）。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).alerts).toBeUndefined();
+    expect(loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}alerts:\n# 只有注释 → null\n`),
+      env: {},
+    }).alerts).toBeUndefined();
+
+    // 拼错的旋钮不允许被默认值吞掉（与 runtime 段同一口径）。
+    expect(() => loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}alerts:\n  ownerPrincipalId: 42\n`),
+      env: {},
+    })).toThrow(/alerts\.ownerPrincipalId/);
+  });
+
   it('已删 host.* 死键（分诊 #6）：旧 YAML 残留被忽略，不再进 AppConfig、不再派生覆盖口', () => {
     const staleHostYaml = `principals:
   "wecom:user_a":
@@ -496,6 +554,10 @@ host:
       ['maxDelegationDepth: -1', /runtime\.maxDelegationDepth/],
       ['waitUserTimeoutMs: 0', /runtime\.waitUserTimeoutMs/],
       ['mainTurnMs: nope', /runtime\.mainTurnMs/],
+      // 大响应文件化阈值：0/负数同样 fail-fast（阈值为 0 = 每次结果都落盘，不是「关闭」）。
+      ['oversizeDataBytes: 0', /runtime\.oversizeDataBytes/],
+      ['oversizeDataBytes: -1', /runtime\.oversizeDataBytes/],
+      ['oversizeDataBytes: 1.5', /runtime\.oversizeDataBytes/],
     ];
     for (const [line, expected] of cases) {
       const yaml = `${VALID_YAML}runtime:\n  ${line}\n`;
@@ -533,6 +595,24 @@ host:
     }
   });
 
+  it('runtime.maxOperationsPerTurn：正整数解析；非法值 fail-fast；缺省不造键', () => {
+    // 缺省 = 加载层不造键；缺省 5 由 resolveRuntimeConfig 补齐（A2 单回合执行上界）。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+
+    const explicit = loadConfig({
+      yamlPath: writeFixture(`${VALID_YAML}runtime:\n  maxOperationsPerTurn: 8\n`),
+      env: {},
+    });
+    expect(explicit.runtime).toEqual({ maxOperationsPerTurn: 8 });
+
+    for (const bad of ['0', '-1', '1.5', 'nope']) {
+      const yaml = `${VALID_YAML}runtime:\n  maxOperationsPerTurn: ${bad}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(
+        /runtime\.maxOperationsPerTurn/,
+      );
+    }
+  });
+
   it('runtime.attachmentNudgeAfterMs：正数 / 0 解析；非法值 fail-fast；缺省不造键', () => {
     // 缺省 = 加载层不造键；缺省 30000（30 秒）由 resolveRuntimeConfig 补齐。
     expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
@@ -555,6 +635,23 @@ host:
       expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(
         /runtime\.attachmentNudgeAfterMs/,
       );
+    }
+  });
+
+  it('runtime.taskRunWaitMs：0 / 正数解析；非法值 fail-fast；缺省不造键（缺省 1500 住策略层）', () => {
+    // 契约里有这个字段、之前漏在加载层白名单外：YAML 一写就 fail-fast「不是已知字段」，
+    // 配置文件与契约对不上（2026-11-19 在 cap01 里实测到）。
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+
+    const zero = loadConfig({ yamlPath: writeFixture(`${VALID_YAML}runtime:\n  taskRunWaitMs: 0\n`), env: {} });
+    expect(zero.runtime).toEqual({ taskRunWaitMs: 0 });
+
+    const positive = loadConfig({ yamlPath: writeFixture(`${VALID_YAML}runtime:\n  taskRunWaitMs: 1200\n`), env: {} });
+    expect(positive.runtime).toEqual({ taskRunWaitMs: 1200 });
+
+    for (const bad of ['-1', '1.5', 'nope']) {
+      const yaml = `${VALID_YAML}runtime:\n  taskRunWaitMs: ${bad}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), bad).toThrowError(/runtime\.taskRunWaitMs/);
     }
   });
 

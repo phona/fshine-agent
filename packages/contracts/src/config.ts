@@ -3,17 +3,40 @@
  * 秘密与本地参数从 .env / 环境变量并入,加载实现属 packages/core。
  */
 
-export interface PrincipalConfig {
-  /** 账套发现/授权范围（遗留数据位：实体授权归执行层，宿主不再读它裁决任何路径）。 */
-  accountSetScope?: AccountSetScope;
-  enabled: boolean;
-  /** V1 authority capabilities. Omitted values default to read for backwards compatibility. */
-  capabilities?: PrincipalCapability[];
+/**
+ * 通用权限（fshine 与执行层只耦合这两个值，不耦合任何业务实体字段）。
+ * 粗粒度由宿主在发起前求交拦截；细粒度（实体级）授权归执行层。
+ */
+export type Permission = 'read' | 'write';
+
+/** 角色定义：一份 permissions 白名单（顶层 `roles` 段的条目形状）。 */
+export interface RoleConfig {
+  permissions: Permission[];
 }
 
-export type AccountSetScope = 'all' | 'allowlist';
+/**
+ * 内置三档角色（`roles` 段未配置时的缺省，保证开箱可用）：
+ *   · viewer   —— 只读（外部人员、群主体；未写 role 的 principal 也按它处理）；
+ *   · operator —— 读写（内部人员）；
+ *   · admin    —— 全部（开发者；本切片与 operator 无额外能力差异）。
+ */
+export const DEFAULT_ROLES: Readonly<Record<string, RoleConfig>> = Object.freeze({
+  viewer: Object.freeze({ permissions: Object.freeze(['read']) as Permission[] }),
+  operator: Object.freeze({ permissions: Object.freeze(['read', 'write']) as Permission[] }),
+  admin: Object.freeze({ permissions: Object.freeze(['read', 'write']) as Permission[] }),
+});
 
-export type PrincipalCapability = 'read' | 'validate' | 'write';
+/** 未写 `role` 的 principal 使用的角色（最小权限，不静默给写）。 */
+export const DEFAULT_PRINCIPAL_ROLE = 'viewer';
+
+export interface PrincipalConfig {
+  enabled: boolean;
+  /**
+   * 角色名（对应顶层 `roles` 表的键）。缺省 = `viewer`（只读，最小权限）；
+   * 写了未定义的角色名 → 加载层 fail-fast（启动失败），不静默降级。
+   */
+  role?: string;
+}
 
 /** Trusted filesystem context mounted for the platform subagent. */
 export interface ContextProfileConfig {
@@ -163,12 +186,23 @@ export interface RuntimeConfig {
   mainTurnMs?: number;
   /** Worker 回合墙钟上限（ms）。缺省 180000（与执行侧现行缺省一致）。 */
   workerTurnMs?: number;
+  /**
+   * 单回合内允许发起的执行 operation 上限（同一回合全部委派合计计数；缺省 5）。
+   * 资源边界，不是计划门：超限在**发起前**确定性拒绝并如实告知，不判断业务。
+   */
+  maxOperationsPerTurn?: number;
   /** 委派深度上限；0 = 不允许委派。缺省 1（Main → Worker 一层）。 */
   maxDelegationDepth?: number;
   /** 任务级共享预算；缺省未配置 = 无任务级预算（现行为）。 */
   taskBudget?: TaskBudgetConfig;
   /** waiting_user 等待答复的上限（ms）。缺省 86400000（24h，与 sessionTtl 同量级）。 */
   waitUserTimeoutMs?: number;
+  /**
+   * 文件引用（file_refs）的可读期（天）：入站附件激活后的可读 TTL，也是 pending 行的
+   * 激活窗口。缺省 7（2026-11-18 owner 定）；最小 1（0/负数/小数 fail-fast）。过期后
+   * 清单不再列出、引用得 FILE_REF_UNAVAILABLE，字节由保留期清理入口回收（行保留做审计）。
+   */
+  fileRefTtlDays?: number;
   /**
    * run 目录 / 任务产物的保留期（天）。缺省 30（2026-11-17 owner 定）；0 = 不清理；
    * 正整数 = 超过该天数的目录/产物具备清理资格。本旋钮只提供判定（策略层），实际删除
@@ -183,13 +217,6 @@ export interface RuntimeConfig {
    */
   fileRetentionSweepOnStart?: boolean;
   /**
-   * 派发模式（R4 P6 接线；缺省 = 'inline' = 现行为）。
-   *   · 'inline'：委派同步执行、Main 等待 Worker 回合（现行路径，逐字不变）；
-   *   · 'background'：受理即底账 queued，执行交 TaskRunner 后台推进；Main 快速受理并
-   *     回「已受理 #编号 名称」。仅 server 渠道面支持 background；ask/redo 入口显式拒绝。
-   */
-  dispatchMode?: 'inline' | 'background';
-  /**
    * 写面开关（2026-11-17 写确认切片；缺省 false = 零行为变化）。
    * true 时装配层把执行层自述 `access=write` 的 operation 一并放进 allowedOperations；
    * 只读集合仍只由 `access=read` 派生（重试语义不随开关变化）。开关只决定「能不能发起」，
@@ -197,11 +224,40 @@ export interface RuntimeConfig {
    */
   allowWriteOperations?: boolean;
   /**
+   * task_run 受理后的短等待窗口（ms；2026-11-18 工单回执收敛切片）。缺省 8000（owner
+   * 2026-11-19 A 案：真模型 Worker 回合 5～10 秒，1.5s 窗口会让每件事都转后台、变成两条气泡）；
+   * 0 = 不等直接后台。窗口内执行端确认完成 → 结果同回合交给模型（与 inline 同形状）；超窗 →
+   * 工具结果返回机械事实（已受理、在后台办理中，不含工单编号），任务留后台推进，完成后
+   * 由宿主主动投递面把结果发回原会话。
+   */
+  taskRunWaitMs?: number;
+  /**
    * 纯附件登记后、用户迟迟没有给指令时的主动追问延迟（ms；2026-11-17 附件追问切片）。
    * 缺省 30000（30 秒）；0 = 关闭（零行为变化）。同一会话冷却 10 分钟。
    * 只影响宿主主动追问与系统注记，不改变附件登记/事实注入。
    */
   attachmentNudgeAfterMs?: number;
+  /**
+   * 后台任务「比预计久了」提醒阈值（ms；2026-11-18 预期契约切片）。缺省 600000（10 分钟）；
+   * 0 = 关闭。判据 = 任务 running 且从认领时刻起超过本阈值、尚未提醒过。只发一次
+   * （已发时刻持久化）；1:1 与群聊都发（群 = 独立主体，2026-11-19 owner 补；群主体的话术
+   * 不带业务名，隐私口径归宿主）。宿主只喂事实，用户看到的话由模型写（2026-11-19 唤醒
+   * 切片）。30 分钟「卡住」档已删，其配置键不再是合法 runtime 字段（未知字段拒绝）。
+   */
+  longRunningNoticeMs?: number;
+  /**
+   * 前台回合排队晋升的最长等待（ms；2026-11-18）。缺省 120000（2 分钟）；
+   * 超过即确定性拒绝（当前系统忙，请稍后再说），不留下排队残留。
+   */
+  queueWaitMs?: number;
+  /**
+   * Worker 执行结果内联进模型上下文的字节上限（2026-11-19 大响应文件化切片）。
+   * 缺省 65536（64KiB）；超过即把完整 `data` 落成任务作用域文件，只回摘要 + fileId。
+   * 只对 `completed` 的 `data` 生效（needs_confirmation / needs_input 不落盘）；
+   * 未注入文件桥时退化为原样返回并记 `execution_result_oversize_unhandled`。
+   * 0 / 负数 / 非整数 fail-fast——关掉阈值等于放弃上下文预算边界。
+   */
+  oversizeDataBytes?: number;
 }
 
 /**
@@ -240,8 +296,30 @@ export type ChannelMode = 'offline' | 'shadow' | 'live';
 /** 渠道装配缺省档位：offline（不连生产、不出站）。 */
 export const DEFAULT_CHANNEL_MODE: ChannelMode = 'offline';
 
+/**
+ * ops 告警推送配置（yaml `alerts` 段；缺段 = 只落盘不推）。
+ *
+ * 2026-11-21 live P1：owner 路由此前由装配层按 principals **配置顺序**猜第一个 enabled
+ * 单聊主体——本部署猜到评测夹具主体 `wecom:e2e_user`，告警推送（aibot_send_msg）恒
+ * 93006 invalid chatid。「告警发给谁」是部署事实，只认显式配置；缺省不推（告警照常
+ * 落盘，ops/alerts 可查），拼错主体在装配层 fail-fast。
+ */
+export interface AlertConfig {
+  /**
+   * 告警推送的 owner 主体：principals 里的**单聊企微主体**键（`wecom:<userid>`）。
+   * 未配置 = 不推送（只落盘）；指向不存在/未启用/群主体/非企微主体 = 装配时 fail-fast。
+   */
+  ownerPrincipalId?: string;
+}
+
 export interface AppConfig {
   principals: Record<string, PrincipalConfig>;
+  /**
+   * 角色表（yaml `roles` 段）：角色名 → { permissions: ['read'|'write'] }。
+   * 加载层始终给出（未配置 = 内置三档 DEFAULT_ROLES），保证开箱可用；
+   * principal 的 `role` 必须命中本表的键。
+   */
+  roles?: Record<string, RoleConfig>;
   /** Trusted platform subagent context profiles. */
   contextProfiles: Record<string, ContextProfileConfig>;
   channel: {
@@ -265,4 +343,6 @@ export interface AppConfig {
   store?: StoreConfig;
   /** 执行层交接配置（yaml `execution` 段；env 非空值覆盖）。 */
   execution?: ExecutionConfig;
+  /** ops 告警推送配置（yaml `alerts` 段；缺段 = 只落盘不推）。 */
+  alerts?: AlertConfig;
 }

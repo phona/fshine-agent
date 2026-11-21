@@ -104,7 +104,7 @@ describe('AttachmentNudge：活动令牌与发送', () => {
     expect(texts).toHaveLength(0);
     await clock.advance(1);
     expect(texts).toHaveLength(1);
-    expect(texts[0]).toContain('收到 1 个文件');
+    expect(texts[0]).toContain('刚才这 1 个文件');
     expect(notes).toHaveLength(1);
     expect(notes[0]).toContain('[系统主动提示]');
     nudge.close();

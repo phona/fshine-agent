@@ -104,7 +104,9 @@ function kindOf(name: string): FileKind {
 function fileListLine(files: readonly AttachmentFactInput[]): string {
   const names = [...new Set(files.map((file) => displayFileName(file.name)))];
   const listed = names.slice(0, FILE_NAME_LIST_LIMIT).join('、') || '（未命名）';
-  return `收到 ${files.length} 个文件：${listed}${names.length > FILE_NAME_LIST_LIMIT ? ' 等' : ''}`;
+  // 不重复"收到 N 个文件"：渠道在纯附件并窗到点时已经回过一条回执（`formatFileAck`），
+  // 这里只补"是哪几个"，避免同一份清单连着出现两次（2026-11-17 实测观感）。
+  return `刚才这 ${files.length} 个文件：${listed}${names.length > FILE_NAME_LIST_LIMIT ? ' 等' : ''}`;
 }
 
 /** 选项集合：单类型用它自己的一套；混合类型取前两个类型各一条 + 通用写类。2~4 个。 */

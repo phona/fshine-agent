@@ -220,7 +220,7 @@ export function createDsExecutor(options: DsExecutorOptions = {}): DsExecutor {
         mainDriver: recordingDriver(base.mainDriver, 'main', sink),
         workerDriver: recordingDriver(base.workerDriver, 'worker', sink),
       };
-      const useRunner = caseDef.dispatchMode === 'background' || caseDef.withTaskRunner === true;
+      const useRunner = caseDef.taskDispatch === 'async' || caseDef.withTaskRunner === true;
       const runner = useRunner
         ? (await createBackgroundDispatch({
           env,
@@ -254,7 +254,7 @@ export function createDsExecutor(options: DsExecutorOptions = {}): DsExecutor {
         createDrivers: () => ({ mainDriver: drivers.mainDriver, workerDriver: drivers.workerDriver }),
         createExecutionFace: async () => face,
         ...(runner === undefined ? {} : { taskRunner: runner }),
-        ...(caseDef.dispatchMode === undefined ? {} : { dispatchMode: caseDef.dispatchMode }),
+        ...(caseDef.taskDispatch === undefined ? {} : { taskDispatch: caseDef.taskDispatch }),
       });
 
       const replies: ReplyLine[] = [];

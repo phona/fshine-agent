@@ -21,6 +21,7 @@
   },
   "labels": {
     "dummy.query": "query records",
+    "dummy.longtask": "long running task",
     "dummy.scratch": "local computation",
     "dummy.prepare": "prepare records",
     "dummy.commit": "commit records",
@@ -53,7 +54,10 @@
     "PLAN_NOT_PENDING": "Plan is not pending activation.",
     "COLLECTION_FAULT": "That collection cannot be read in its current state. Report the failure as-is.",
     "INVALID_ARGUMENT": "Provide a string value for the named argument.",
-    "WHERE_INVALID": "Filter with a single --where <dimension>=<value> pair using one of the collection's declared dimension values."
+    "WHERE_INVALID": "Filter with a single --where <dimension>=<value> pair using one of the collection's declared dimension values.",
+    "MISSING_INPUT": "Provide the missing input for this collection and retry the same task.",
+    "DELAY_INVALID": "--delay-ms takes an integer number of milliseconds (0..60000).",
+    "DELAY_OUT_OF_RANGE": "--delay-ms must be an integer between 0 and 60000 milliseconds."
   },
   "reads": {
     "dummy.query": {
@@ -179,6 +183,23 @@
           "status": "failed",
           "exitCode": 2,
           "data": null
+        },
+        "missing_input": {
+          "status": "needs_input",
+          "exitCode": 0,
+          "data": {
+            "collection": "{{source.collection}}",
+            "missing": "{{needs.missing}}"
+          },
+          "error": {
+            "code": "MISSING_INPUT",
+            "message": "Collection {{source.collection}} needs {{needs.missing}}; provide it and retry the same task"
+          },
+          "result": {
+            "status": "needs_input",
+            "collection": "{{source.collection}}",
+            "missing": "{{needs.missing}}"
+          }
         },
         "invalid_where": {
           "status": "failed",
@@ -351,6 +372,13 @@
             "required": false,
             "style": "code",
             "desc": "window code, e.g. W1; must exist for the collection"
+          },
+          {
+            "flag": "--delay-ms",
+            "required": false,
+            "style": "code",
+            "desc": "test-only: real wall-clock delay before the read runs (integer ms, 0..60000; over the cap is refused deterministically)",
+            "hostOnly": true
           }
         ]
       },
@@ -359,7 +387,45 @@
         "prepare": true,
         "commit": true
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "记录办理"
+    },
+    {
+      "name": "dummy.longtask",
+      "domain": "dummy",
+      "command": "longtask",
+      "access": "write",
+      "script": "src/dummy/scripts/longtask.js",
+      "executor": "dummy-script",
+      "est_seconds": 1800,
+      "weight": 60,
+      "long_running": true,
+      "args": {
+        "positional": [],
+        "flags": [
+          {
+            "flag": "--seconds",
+            "required": true,
+            "style": "code",
+            "desc": "test-only: how long the job stays running before completing (integer seconds, >=0)",
+            "hostOnly": true
+          },
+          {
+            "flag": "--fail-after",
+            "required": false,
+            "style": "code",
+            "desc": "test-only: fail the job this many seconds after acceptance (integer seconds)",
+            "hostOnly": true
+          }
+        ]
+      },
+      "serve": {
+        "query": true,
+        "prepare": false,
+        "commit": false
+      },
+      "protocol": null,
+      "capability": "长时导出"
     },
     {
       "name": "dummy.scratch",
@@ -392,7 +458,8 @@
         "prepare": true,
         "commit": false
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "本地计算"
     },
     {
       "name": "dummy.prepare",
@@ -405,7 +472,40 @@
       "est_seconds": 10,
       "weight": 5,
       "args": {
-        "positional": [],
+        "positional": [
+          {
+            "name": "records",
+            "required": false,
+            "payload": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "$id": "RecordBatchPayload",
+                "title": "RecordBatchPayload",
+                "description": "Record batch payload shape: give the records as a structured array, checked against this schema and written as the operation's records. additionalProperties is false; max 500 records per write. On commit, the submitted records must match the proposal exactly (the proposal is bound to records too).",
+                "type": "array",
+                "maxItems": 500,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "value": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            },
+            "desc": "要新增的记录：结构化数组，每项 {name, value}；宿主会按此 schema lint 后物化成文件，并把路径交给执行层（模型不手拼 JSON 字符串）。单次最多 500 条（执行层单次写入上限），超过会被拒绝。省略则按 --count 由平台自动生成占位记录"
+          }
+        ],
         "flags": [
           {
             "flag": "--collection",
@@ -423,13 +523,22 @@
             "flag": "--count",
             "required": false,
             "style": "code",
-            "desc": "record count to prepare"
+            "desc": "record count to prepare",
+            "hostOnly": true
           },
           {
             "flag": "--apply",
             "required": false,
             "style": "code",
-            "desc": "write flag: present means this call WOULD write, prepare must refuse it"
+            "desc": "write flag: present means this call WOULD write, prepare must refuse it",
+            "hostOnly": true
+          },
+          {
+            "flag": "--delay-ms",
+            "required": false,
+            "style": "code",
+            "desc": "test-only: real wall-clock delay before the prepare runs (integer ms, 0..60000; over the cap is refused deterministically)",
+            "hostOnly": true
           }
         ]
       },
@@ -438,7 +547,8 @@
         "prepare": true,
         "commit": false
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "记录办理"
     },
     {
       "name": "dummy.commit",
@@ -450,7 +560,40 @@
       "est_seconds": 10,
       "weight": 20,
       "args": {
-        "positional": [],
+        "positional": [
+          {
+            "name": "records",
+            "required": false,
+            "payload": {
+              "schema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "$id": "RecordBatchPayload",
+                "title": "RecordBatchPayload",
+                "description": "Record batch payload shape: give the records as a structured array, checked against this schema and written as the operation's records. additionalProperties is false; max 500 records per write. On commit, the submitted records must match the proposal exactly (the proposal is bound to records too).",
+                "type": "array",
+                "maxItems": 500,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "value": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            },
+            "desc": "要新增的记录：结构化数组，每项 {name, value}；宿主会按此 schema lint 后物化成文件，并把路径交给执行层（模型不手拼 JSON 字符串）。单次最多 500 条（执行层单次写入上限），超过会被拒绝。省略则按 --count 由平台自动生成占位记录"
+          }
+        ],
         "flags": [
           {
             "flag": "--collection",
@@ -468,13 +611,29 @@
             "flag": "--count",
             "required": false,
             "style": "code",
-            "desc": "record count to add"
+            "desc": "record count to add",
+            "hostOnly": true
           },
           {
             "flag": "--confirmation",
             "required": false,
             "style": "code",
-            "desc": "confirmation handle returned by prepare; one-shot, bound to collection/window/count, expires in 15 minutes"
+            "desc": "confirmation handle returned by prepare; one-shot, bound to collection/window/count/records (commit must submit records identical to the proposal; commit without the proposal's records is refused), expires in 15 minutes",
+            "hostOnly": true
+          },
+          {
+            "flag": "--delay-ms",
+            "required": false,
+            "style": "code",
+            "desc": "test-only: real wall-clock delay before the commit runs (integer ms, 0..60000; over the cap is refused deterministically)",
+            "hostOnly": true
+          },
+          {
+            "flag": "--fail-index",
+            "required": false,
+            "style": "code",
+            "desc": "test-only: inject a write failure for the 1-based record index; the whole batch is refused atomically (nothing written)",
+            "hostOnly": true
           }
         ]
       },
@@ -483,10 +642,12 @@
         "prepare": false,
         "commit": true
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "记录办理"
     },
     {
       "name": "dummy.proposal",
+      "model_visible": false,
       "domain": "dummy",
       "command": "proposal",
       "access": "write",
@@ -499,6 +660,7 @@
           {
             "name": "payload",
             "required": true,
+            "payload": true,
             "desc": "proposal payload file (opaque to the host)"
           }
         ],
@@ -516,10 +678,12 @@
         "prepare": true,
         "commit": false
       },
-      "protocol": "proposal.create"
+      "protocol": "proposal.create",
+      "capability": "提案办理"
     },
     {
       "name": "dummy.proposal-commit",
+      "model_visible": false,
       "domain": "dummy",
       "command": "proposal-commit",
       "access": "write",
@@ -543,7 +707,8 @@
         "prepare": false,
         "commit": true
       },
-      "protocol": "proposal.commit"
+      "protocol": "proposal.commit",
+      "capability": "提案办理"
     },
     {
       "name": "ballot.query",
@@ -576,7 +741,8 @@
         "prepare": true,
         "commit": true
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "投票办理"
     },
     {
       "name": "ballot.scratch",
@@ -609,7 +775,8 @@
         "prepare": true,
         "commit": false
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "投票计算"
     },
     {
       "name": "ballot.prepare",
@@ -640,13 +807,15 @@
             "flag": "--count",
             "required": false,
             "style": "code",
-            "desc": "ballot count to prepare"
+            "desc": "ballot count to prepare",
+            "hostOnly": true
           },
           {
             "flag": "--apply",
             "required": false,
             "style": "code",
-            "desc": "write flag: present means this call WOULD write, prepare must refuse it"
+            "desc": "write flag: present means this call WOULD write, prepare must refuse it",
+            "hostOnly": true
           }
         ]
       },
@@ -655,7 +824,8 @@
         "prepare": true,
         "commit": false
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "投票办理"
     },
     {
       "name": "ballot.commit",
@@ -685,13 +855,15 @@
             "flag": "--count",
             "required": false,
             "style": "code",
-            "desc": "ballot count to add"
+            "desc": "ballot count to add",
+            "hostOnly": true
           },
           {
             "flag": "--confirmation",
             "required": false,
             "style": "code",
-            "desc": "confirmation handle returned by prepare; one-shot, bound to topic/round/count, expires in 15 minutes"
+            "desc": "confirmation handle returned by prepare; one-shot, bound to topic/round/count, expires in 15 minutes",
+            "hostOnly": true
           }
         ]
       },
@@ -700,10 +872,12 @@
         "prepare": false,
         "commit": true
       },
-      "protocol": null
+      "protocol": null,
+      "capability": "投票办理"
     },
     {
       "name": "ballot.proposal",
+      "model_visible": false,
       "domain": "ballot",
       "command": "proposal",
       "access": "write",
@@ -716,6 +890,7 @@
           {
             "name": "payload",
             "required": true,
+            "payload": true,
             "desc": "proposal payload file (opaque to the host)"
           }
         ],
@@ -733,10 +908,12 @@
         "prepare": true,
         "commit": false
       },
-      "protocol": "proposal.create"
+      "protocol": "proposal.create",
+      "capability": "投票提案"
     },
     {
       "name": "ballot.proposal-commit",
+      "model_visible": false,
       "domain": "ballot",
       "command": "proposal-commit",
       "access": "write",
@@ -760,7 +937,8 @@
         "prepare": false,
         "commit": true
       },
-      "protocol": "proposal.commit"
+      "protocol": "proposal.commit",
+      "capability": "投票提案"
     }
   ]
 }

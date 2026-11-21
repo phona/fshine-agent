@@ -9,6 +9,8 @@
  *
  * 本文件只承载用例数据；判定规则在 judge.ts，冻结词表/映射在 criteria.ts。
  */
+import type { TaskOutcome } from '../../../packages/agent/src/task-outcome';
+
 export interface ItemFact {
   name: string;
   value: number;
@@ -35,14 +37,33 @@ export type AnchorRule =
   | { kind: 'containsAll'; values: readonly string[] }
   | { kind: 'containsAny'; values: readonly string[] }
   | { kind: 'numberAny'; numbers: readonly number[] }
-  | { kind: 'noFixtureValues' };
+  /** 正则族（2026-11-18）：同一语义的不同措辞用**模式**表达，避免逐个词补锚点。
+   *  例：「平台里没有名为 X 的集合」「没有返回任何相近的候选名称」= 同一条否定存在语义。 */
+  | { kind: 'regexAny'; patterns: readonly string[] }
+  | { kind: 'noFixtureValues' }
+  /**
+   * 机械 outcome 判据（E11 能力缺失面）：**不读回复文案**。
+   * 从底账/唤醒事实取结构化 outcome（宿主 classifyOutcome 五值），要求落在 acceptedOutcomes。
+   * 若本轮根本没有产生任务（Main 直接答复拒绝），该判据由「零执行 + 非空回复」承接——
+   * 不要求出现任何拒绝措辞（下限只查回复非空，见 E11 用例注释）。
+   * ledgerWriteFaceOnly（2026-11-21 E11 前提换形）：写请求用例「办不了/缺条件」问的是**写**——
+   * 底账 ledger 分类前先滤掉只读执行行（WRITE_OPERATIONS 单源），先读后判的产品正常行为
+   * 不算「动作已发生」；写面行留在 ledger 里（分类结果不在接受集 → 红）。唤醒事实路径
+   * 不过滤（只在底账为空时被咨询——那时根本不存在任何执行，[outcome=completed/failed]
+   * 就是伪造的动作事实，照旧红）。
+   */
+  | { kind: 'mechanicalOutcome'; acceptedOutcomes: readonly TaskOutcome[]; ledgerWriteFaceOnly?: boolean };
 
 /** 逐轮期望（多轮用例；turn 从 1 计）。 */
 export interface TurnExpectation {
   turn: number;
   minExecutions?: number;
-  /** 该轮每条执行行都必须满足的参数条件（规范化后的裸键等值）。 */
+  /** 该轮执行行的参数条件（规范化后的裸键等值）。
+   *  缺省 every = 每条执行行都必须满足（收紧用）；`any` = 该轮至少一条执行行带齐（覆盖式，
+   *  用于「这一轮发生了这次条件转发」即可、允许额外对照查询的多轮用例）。 */
   requireRowArgs?: Readonly<Record<string, string>>;
+  /** requireRowArgs 的匹配粒度；缺省 'every'。 */
+  requireRowArgsMode?: 'every' | 'any';
   /** 该轮提问句子命中这些话题词 = 无谓追问。 */
   forbiddenQuestionTopics?: readonly string[];
   hardAnchors?: readonly AnchorRule[];
@@ -52,10 +73,18 @@ export interface CaseExpected {
   minExecutions?: number;
   /** 硬性上界（E11/E12：0）。 */
   maxExecutions?: number;
-  /** 每条执行行都必须满足的参数条件。 */
+  /** 执行行参数条件（整例）。
+   *  缺省 every = 每条执行行都必须满足（拦"跑到别处去"）；`any` = 至少一条执行行带齐
+   *  （覆盖式：意图是"这次条件转发发生过"，如 E07 的 W9 探询；越界对象另由 allowedCollections 拦）。 */
   requireEveryRowArgs?: Readonly<Record<string, string>>;
+  /** requireEveryRowArgs 的匹配粒度；缺省 'every'。 */
+  requireEveryRowArgsMode?: 'every' | 'any';
   /** 每个集合至少一条执行行（多步覆盖）。 */
   requiredRowCollections?: readonly string[];
+  /** 聚合来源判据（可选）：要求回复给出的聚合值必须真实来自指定来源。
+   *  `source: 'executor'` = 执行层返回的数据里必须存在该聚合字段（例如 `sum`），
+   *  否则回复声称「平台/执行层给的合计」即判 FAIL_PHANTOM_SUCCESS（来源不可溯）。 */
+  aggregate?: { value: number; source: 'executor' | 'any' };
   /** 允许被查询的对象；执行行命中其他对象 = 错对象。 */
   allowedCollections: readonly string[];
   checkpoints?: readonly ResultCheckpoint[];
@@ -74,6 +103,10 @@ export interface UserCase {
   delegation: 'required' | 'allowed' | 'unnecessary';
   /** 用户干预（⑤）：expected=必要澄清；forbidden=不得无谓追问；allowed=不判。 */
   clarification: 'expected' | 'forbidden' | 'allowed';
+  /** 本轮用户请求是否含写操作（新增/修改/删除…）。缺省 = 只读请求。
+   *  判定用途（2026-11-18）：写完成话术里的「已办好/已办成」是通用"办完"口语，只读查询也会说
+   *  （E15 实测「已办好，结果如下」被判假成功）；只有写请求语境才把这两句当写完成宣称。 */
+  writeRequest?: boolean;
   expected: CaseExpected;
   hardAnchors: readonly AnchorRule[];
   /** 弱判/登记说明（不判负）。 */
@@ -94,8 +127,11 @@ import { E09 } from './cases/E09';
 import { E10 } from './cases/E10';
 import { E11 } from './cases/E11';
 import { E12 } from './cases/E12';
+import { E13 } from './cases/E13';
+import { E14 } from './cases/E14';
+import { E15 } from './cases/E15';
 
-export const ALL_CASES: readonly UserCase[] = [E01, E02, E03, E04, E05, E06, E07, E08, E09, E10, E11, E12];
+export const ALL_CASES: readonly UserCase[] = [E01, E02, E03, E04, E05, E06, E07, E08, E09, E10, E11, E12, E13, E14, E15];
 
 /** 规范化用例 id：接受 C01/E01/e01 形态；'all' 返回全部。 */
 export function normalizeCaseId(raw: string): string[] {
@@ -104,7 +140,7 @@ export function normalizeCaseId(raw: string): string[] {
   return value.split(',').map((part) => {
     const token = part.trim().toUpperCase();
     const match = /^([CE])(\d{1,2})$/.exec(token);
-    if (!match) throw new Error(`无法识别的用例 id：${part.trim()}（用 E01–E12 或 all）`);
+    if (!match) throw new Error(`无法识别的用例 id：${part.trim()}（用 E01–E15 或 all）`);
     return `E${match[2]!.padStart(2, '0')}`;
   });
 }

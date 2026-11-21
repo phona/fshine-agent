@@ -125,7 +125,7 @@ describe('缺口 1 · 对话面任务工具', () => {
   it('工具面：有 runner 暴露 task_run + 四工具；无 runner 时只读查询仍注册、治理工具不注册', async () => {    const withRunner = await build([], { withRunner: true });
     await withRunner.session.send('随便说一句');
     const names = withRunner.turns[0]!.tools.map((tool) => tool.name);
-    expect(names).toEqual(['task_run', 'task_status', 'task_result', 'task_cancel', 'task_resume']);
+    expect(names).toEqual(['task_run', 'task_status', 'task_result', 'task_cancel', 'task_resume', 'task_confirm']);
 
     const withoutRunner = await build([], { withRunner: false });
     await withoutRunner.session.send('随便说一句');
@@ -148,7 +148,7 @@ describe('缺口 1 · 对话面任务工具', () => {
     const listed = value<{ tasks: unknown[] }>(b.turns[0]!.results[0]!);
     expect(listed.tasks).toEqual([]);  });
 
-  it('task_status：空 ref 列本会话任务；#编号 返回状态与 pendingQuestion', async () => {
+  it('task_status：空 ref 列本会话任务；taskId 返回状态与 pendingQuestion（投影不带任务编号）', async () => {
     const registry = createTaskRegistry();
     seed(registry, SCOPE_A, 't1', '查 documents 窗口 W202611');
     registry.waitForUser('t1', { missing: ['窗口编号'] });
@@ -157,35 +157,42 @@ describe('缺口 1 · 对话面任务工具', () => {
     const { session, turns } = await build([{ tool: 'task_status', args: {} }], { registry });
     await session.send('我那两个任务怎么样了');
     const listed = value<{ tasks: Array<Record<string, unknown>> }>(turns[0]!.results[0]!);
-    expect(listed.tasks.map((task) => task.taskNo)).toEqual([1, 2]);
+    // 2026-11-20：任务编号不进模型投影——列表用不透明 taskId 指代（新→旧）。
+    // 断言锚点从 taskNo 改成 taskId（原断言断的是"用户/模型可见面出现编号"，该行为已废）。
+    expect(listed.tasks.map((task) => task.taskId)).toEqual(['t2', 't1']);
+    for (const task of listed.tasks) expect(task).not.toHaveProperty('taskNo');
 
-    const one = await build([{ tool: 'task_status', args: { ref: '#1' } }], { registry });
+    const one = await build([{ tool: 'task_status', args: { ref: 't1' } }], { registry });
     await one.session.send('第一个任务在等什么');
     const hit = value<Record<string, unknown>>(one.turns[0]!.results[0]!);
     expect(hit.status).toBe('waiting_user');
     expect(hit.pendingQuestion).toEqual({ missing: ['窗口编号'] });
     expect(hit.name).toBe('查 documents 窗口 W202611');
+    expect(hit).not.toHaveProperty('taskNo');
   });
 
   it('越权=找不到：同一底账内跨会话同编号不可见（不泄露存在性）', async () => {
+    // 标题保留（docs/product/capability.md 锚点钉的是它）；2026-11-20 机制变化：数字/#编号
+    // 引用整体退役，越权判据改由 taskId 承载。断言强度不放宽——A 的 taskId 对 B 仍是
+    // TaskOwnershipError（同一个「找不到」形状）。
     const registry = createTaskRegistry();
-    seed(registry, SCOPE_A, 'task-a', 'A 的任务');          // A：#1
-    seed(registry, SCOPE_B, 'task-b', 'B 的任务');          // B：#2
+    seed(registry, SCOPE_A, 'task-a', 'A 的任务');
+    seed(registry, SCOPE_B, 'task-b', 'B 的任务');
 
-    const b = await build([{ tool: 'task_status', args: { ref: '#1' } }], { scope: SCOPE_B, registry });
-    await b.session.send('查 #1');
+    const b = await build([{ tool: 'task_status', args: { ref: 'task-a' } }], { scope: SCOPE_B, registry });
+    await b.session.send('查 A 那个任务');
     const result = b.turns[0]!.results[0]!;
-    expect(result.ok, 'A 的 #1 对 B 必须表现为找不到').toBe(false);
+    expect(result.ok, 'A 的 taskId 对 B 必须表现为找不到').toBe(false);
     if (!result.ok) expect(result.error).toBeInstanceOf(TaskOwnershipError);
   });
 
   it('身份注入绊线：参数里塞 principalId/sessionId 被忽略，scope 恒取宿主', async () => {
     const registry = createTaskRegistry();
-    seed(registry, SCOPE_A, 'task-a', 'A 的任务');          // A：#1
-    seed(registry, SCOPE_B, 'task-b', 'B 的任务');          // B：#2
+    seed(registry, SCOPE_A, 'task-a', 'A 的任务');
+    seed(registry, SCOPE_B, 'task-b', 'B 的任务');
 
     const b = await build(
-      [{ tool: 'task_status', args: { ref: '#2', principalId: SCOPE_A.principalId, sessionId: SCOPE_A.sessionId } }],
+      [{ tool: 'task_status', args: { ref: 'task-b', principalId: SCOPE_A.principalId, sessionId: SCOPE_A.sessionId } }],
       { scope: SCOPE_B, registry },
     );
     await b.session.send('伪造身份试试');
@@ -198,7 +205,7 @@ describe('缺口 1 · 对话面任务工具', () => {
     const { session, turns } = await build([]);
     await session.send('看看工具');
     const byName = new Map(turns[0]!.tools.map((tool) => [tool.name, tool.inputSchema as Record<string, unknown>]));
-    for (const name of ['task_status', 'task_result', 'task_cancel', 'task_resume']) {
+    for (const name of ['task_status', 'task_result', 'task_cancel', 'task_resume', 'task_confirm']) {
       const schema = byName.get(name);
       expect(schema, `${name} 必须暴露`).toBeDefined();
       expect(schema!.additionalProperties).toBe(false);
@@ -215,9 +222,10 @@ describe('缺口 1 · 对话面任务工具', () => {
     registry.complete('done', 'W202611：documents 共 3 条。');
     seed(registry, SCOPE_A, 'live', '进行中任务');
 
+    // 2026-11-20 机制变化：数字 ref 退役，按 taskId 引用（断言不变）。
     const { session, turns } = await build([
-      { tool: 'task_result', args: { ref: '#1' } },
-      { tool: 'task_result', args: { ref: '#2' } },
+      { tool: 'task_result', args: { ref: 'done' } },
+      { tool: 'task_result', args: { ref: 'live' } },
     ], { registry });
     await session.send('把结果再发我一遍');
 
@@ -236,9 +244,10 @@ describe('缺口 1 · 对话面任务工具', () => {
     seed(registry, SCOPE_A, 'run', '在飞任务', 'running');
     seed(registry, SCOPE_A, 'queued', '排队任务', 'queued');
 
+    // 2026-11-20 机制变化：数字 ref 退役，按 taskId 引用（断言不变）。
     const { session, turns, runner } = await build([
-      { tool: 'task_cancel', args: { ref: '#1' } },
-      { tool: 'task_cancel', args: { ref: '#2' } },
+      { tool: 'task_cancel', args: { ref: 'run' } },
+      { tool: 'task_cancel', args: { ref: 'queued' } },
     ], { registry });
     await session.send('取消这两个任务');
     await runner!.whenIdle();
@@ -260,9 +269,10 @@ describe('缺口 1 · 对话面任务工具', () => {
     registry.noteExecution('finished', { requestId: 'req_x', operation: 'dummy.query', status: 'completed' });
     registry.complete('finished', '结果');
 
+    // 2026-11-20 机制变化：数字 ref 退役，按 taskId 引用（断言不变）。
     const { session, turns, runner } = await build([
-      { tool: 'task_resume', args: { ref: '#1', answer: 'W202611' } },
-      { tool: 'task_resume', args: { ref: '#2', answer: '随便答一句' } },
+      { tool: 'task_resume', args: { ref: 'wait', answer: 'W202611' } },
+      { tool: 'task_resume', args: { ref: 'finished', answer: '随便答一句' } },
     ], { registry });
     await session.send('接着办');
     await runner!.whenIdle();
@@ -275,36 +285,52 @@ describe('缺口 1 · 对话面任务工具', () => {
     expect(rejected.status).toBe('completed');
   });
 
-  it('P0-A：裸数字 ref 命中本会话任务（与 #编号 / taskId 三形态一致）', async () => {
+  // 2026-11-20 live 缺陷 P1（机制变化）：数字 ref（#N / 裸数字）整体退役——编号不进模型
+  // 可见面，模型只能凭空编数字 → 旧实现把它映射到「另一任务」，在 task_confirm/task_cancel
+  // 上就是操作错对象。以下两例是**反向绊线**：数字引用必须被确定性拒绝并给可行动下一步，
+  // 旧实现（数字命中任务）会让它们红。断言强度不放宽（拒绝面同样要求 taskId 才能命中）。
+  it('数字 ref（#N / 裸数字）确定性拒绝并给可行动下一步，绝不映射到任何任务', async () => {
     const registry = createTaskRegistry();
     seed(registry, SCOPE_A, 't1', '查 documents 窗口 W202611');
 
-    const bare = await build([{ tool: 'task_status', args: { ref: '1' } }], { registry });
-    await bare.session.send('任务 1 怎么样了');
-    const hit = value<Record<string, unknown>>(bare.turns[0]!.results[0]!);
-    expect(hit.taskId).toBe('t1');
-
-    const invalid = await build([{ tool: 'task_status', args: { ref: '999' } }], { registry });
-    await invalid.session.send('查 999');
-    const miss = invalid.turns[0]!.results[0]!;
-    expect(miss.ok, '无效编号必须表现为找不到').toBe(false);
-    if (!miss.ok) expect(miss.error).toBeInstanceOf(TaskOwnershipError);
+    for (const ref of ['#1', '1', '999']) {
+      const probe = await build([{ tool: 'task_status', args: { ref } }], { registry });
+      await probe.session.send(`任务 ${ref} 怎么样了`);
+      const result = probe.turns[0]!.results[0]!;
+      expect(result.ok, `${ref} 必须被拒绝，不得映射到 t1`).toBe(false);
+      if (!result.ok) {
+        expect((result.error as Error).message).toContain('taskId');
+      }
+    }
+    // 同一会话用真 taskId 仍能命中（拒绝只针对数字写法，不损害 taskId 通道）。
+    const ok = await build([{ tool: 'task_status', args: { ref: 't1' } }], { registry });
+    await ok.session.send('查 t1');
+    expect(value<Record<string, unknown>>(ok.turns[0]!.results[0]!).taskId).toBe('t1');
   });
 
-  it('P0-A：裸数字跨 principal/跨会话同编号仍 TaskOwnershipError（不泄露存在性）', async () => {
+  it('写操作工具：数字 ref 被拒（零状态变更），不会误操作另一个任务', async () => {
     const registry = createTaskRegistry();
-    seed(registry, SCOPE_A, 'task-a', 'A 的任务');          // A：#1
-    seed(registry, SCOPE_B, 'task-b', 'B 的任务');          // B：#2
+    seed(registry, SCOPE_A, 'task-a', 'A 的任务');
+    seed(registry, SCOPE_B, 'task-b', 'B 的任务');
 
-    const b = await build([{ tool: 'task_status', args: { ref: '1' } }], { scope: SCOPE_B, registry });
-    await b.session.send('查 1');
-    const result = b.turns[0]!.results[0]!;
-    expect(result.ok, 'A 的 1 对 B 必须表现为找不到').toBe(false);
-    if (!result.ok) expect(result.error).toBeInstanceOf(TaskOwnershipError);
+    const b = await build([
+      { tool: 'task_status', args: { ref: '1' } },
+      { tool: 'task_cancel', args: { ref: '1' } },
+      { tool: 'task_confirm', args: { ref: '1' } },
+    ], { scope: SCOPE_B, registry });
+    await b.session.send('用数字引用操作');
+    for (const result of b.turns[0]!.results) {
+      expect(result.ok, '数字引用一律拒绝').toBe(false);
+      if (!result.ok) expect((result.error as Error).message).toContain('taskId');
+    }
+    // 两个任务都没被动过（尤其 B 的 task-b 没被误当作 #1 操作）。
+    expect(registry.get('task-a', SCOPE_A).status).toBe('running');
+    expect(registry.get('task-b', SCOPE_B).status).toBe('running');
   });
 
-  it('P0-A：inline 受理回执含可引用 taskNo（与 background 回执格式一致）', async () => {
-    // inline 模式（无 runner）下 task_run 直接走 delegate：回执必须带 taskNo，否则用户无编号可引用。
+  it('P0-A：inline 受理回执去编号：不含 taskNo，可引用指代是 taskId', async () => {
+    // inline 模式（无 runner）下 task_run 直接走 delegate：受理回执是模型可见投影，去编号
+    // （2026-11-20 起，编号不进投影）——回执不含 taskNo，taskId 是唯一无编号指代。
     const registry = createTaskRegistry();
     // 复用 toolingMain：调用 task_run，workerDriver 由宿主使用——用最简假件驱动 worker 汇报。
     // 这里只验证回执字段：让 workerDriver 返回一段非空文本即可（CompleteExecutor 不适用 inline）。
@@ -322,22 +348,24 @@ describe('缺口 1 · 对话面任务工具', () => {
       },
       mainSystemPrompt: '（测试）',
       taskRegistry: registry,
-      dispatchMode: 'inline',
+      taskDispatch: 'sync',
       workerTurnMs: 60_000,
     });
     await session.send('帮我查一下');
     const receipt = value<Record<string, unknown>>(turns[0]!.results[0]!);
-    expect(receipt.taskNo, 'inline 回执必须带 taskNo（当前会话首任务为 1）').toBe(1);
+    // 2026-11-20：回执是模型可见投影，不带 taskNo；taskId 是唯一的无编号指代。
+    expect(receipt).not.toHaveProperty('taskNo');
     expect(typeof receipt.taskId).toBe('string');
   });
 
-  it('P0-A：取消后查询同编号：状态如实为 cancelled（可查、不复活）', async () => {
+  it('P0-A：取消后查询同一 taskId：状态如实为 cancelled（可查、不复活）', async () => {
+    // 2026-11-20 机制变化：数字 ref 退役，按 taskId 取消与回查（断言不变）。
     const registry = createTaskRegistry();
     seed(registry, SCOPE_A, 'q', '排队任务', 'queued');
 
     const { session, turns, runner } = await build([
-      { tool: 'task_cancel', args: { ref: '1' } },
-      { tool: 'task_status', args: { ref: '1' } },
+      { tool: 'task_cancel', args: { ref: 'q' } },
+      { tool: 'task_status', args: { ref: 'q' } },
     ], { registry });
     await session.send('取消然后查一下');
     await runner!.whenIdle();
@@ -348,25 +376,26 @@ describe('缺口 1 · 对话面任务工具', () => {
     expect(hit.status).toBe('cancelled');
   });
 
-  it('未传 runner：task_cancel/task_resume 不上面，调用即 Main 工具面之外的调用（fail-closed）', async () => {
+  it('未传 runner：task_cancel/task_resume/task_confirm 不上面，调用即 Main 工具面之外的调用（fail-closed）', async () => {
     const registry = createTaskRegistry();
     seed(registry, SCOPE_A, 't1', '任务');
     const { session, turns } = await build([
-      { tool: 'task_cancel', args: { ref: '#1' } },
-      { tool: 'task_resume', args: { ref: '#1', answer: '答复' } },
+      { tool: 'task_cancel', args: { ref: 't1' } },
+      { tool: 'task_resume', args: { ref: 't1', answer: '答复' } },
+      { tool: 'task_confirm', args: { ref: 't1' } },
     ], { registry, withRunner: false });
     await session.send('取消并接续');
 
     // 工具面快照：治理工具（需要 runner）不注册；只读查询仍在。
     expect(turns[0]!.tools.map((tool) => tool.name)).toEqual(['task_run', 'task_status', 'task_result']);
-    for (const [index, name] of ['task_cancel', 'task_resume'].entries()) {
+    for (const [index, name] of ['task_cancel', 'task_resume', 'task_confirm'].entries()) {
       const result = turns[0]!.results[index]!;
       expect(result.ok, `${name} 无 runner 必须 fail-closed`).toBe(false);
       if (!result.ok) expect(String((result.error as Error).message)).toContain('Main 工具面之外的调用');
     }
   });
 
-  it('Worker 工具面快照：只有 execute_operation，不含 task_status/task_result/task_cancel/task_resume', async () => {
+  it('Worker 工具面快照：每个 operation 一个 op_* 工具，不含 task_status/task_result/task_cancel/task_resume', async () => {
     const registry = createTaskRegistry();
     const turns: RecordedTurn[] = [];
     const workerTools: string[][] = [];
@@ -384,12 +413,14 @@ describe('缺口 1 · 对话面任务工具', () => {
       },
       mainSystemPrompt: '（测试）',
       taskRegistry: registry,
-      dispatchMode: 'inline',
+      taskDispatch: 'sync',
       workerTurnMs: 60_000,
     });
     await session.send('帮我查一下');
 
-    expect(workerTools).toEqual([['execute_operation']]);
+    // FaceClient 只声明 dummy.query 一个 operation → 恰好一个 op_* 工具，无通用 execute_operation。
+    expect(workerTools).toEqual([['op_dummy_query']]);
+    expect(workerTools.flat()).not.toContain('execute_operation');
     for (const name of ['task_status', 'task_result', 'task_cancel', 'task_resume']) {
       expect(workerTools.flat()).not.toContain(name);
     }

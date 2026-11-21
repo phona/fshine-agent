@@ -2,7 +2,7 @@
  * 阶段 D 九项指标（机械、带分母、全样本保留；不做统计推断）。
  *
  * 每个指标都给出：分子/分母、逐条样本、判据说明与证据位置。判据不达只如实登记，
- * 不改口径、不筛绿。关键事实保留率与 0.85.1 基线（docs/decision-log.md §九十五）
+ * 不改口径、不筛绿。关键事实保留率与 0.85.1 基线（docs/decisions/index.md §九十五）
  * 按同名事实逐项对照；无同口径基线的探针明确标 null。
  */
 import type { GroupEvidence, RestartRecord, SessionSink, TurnRecord } from './harness';
@@ -379,7 +379,7 @@ export function computeMetrics(groups: readonly GroupEvidence[]): MetricsReport 
     denominator: modelCalls.length,
     rate: modelCalls.length === 0 ? 'n/a（无调用）' : `${tokens} tokens / ${modelCalls.length} calls`,
     verdict: 'PASS',
-    definition: '逐组给出模型调用数、input/output/total token、墙钟与每回合延迟。成本仅在 provider 返回非零 usage.cost 时报告；否则“不可得”，不编造。0.85.1 基线见 docs/decision-log.md §九十五 §5。',
+    definition: '逐组给出模型调用数、input/output/total token、墙钟与每回合延迟。成本仅在 provider 返回非零 usage.cost 时报告；否则“不可得”，不编造。0.85.1 基线见 docs/decisions/index.md（§九十五行，§5 小节）。',
     samples: groupUsage.map((entry) => ({
       id: entry.group,
       hit: false,

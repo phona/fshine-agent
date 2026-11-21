@@ -1,7 +1,7 @@
 /**
  * P5 资源许可与强制：契约矩阵测试（TDD：先红 → 最小实现转绿 → 反向绊线）。
  *
- * 冻结面：`docs/product/r4-joint-interfaces.md` §2（acquire/release/cancelQueued/
+ * 冻结面：`docs/history/r4-joint-interfaces.md` §2（acquire/release/cancelQueued/
  * snapshot/budgetFor；拒绝 reason ∈ queue_full/quota_exceeded/budget_exhausted/depth_exceeded；
  * 前台与后台配额独立；子 Worker 共享父任务预算，不复制/不放大；token 仅可验证时启用）。
  *
@@ -51,12 +51,44 @@ describe('resolveRuntimeConfig：缺省 = 前台并发 4 + 排队 16，非法 fa
       mainTurnMs: 300_000,
       workerTurnMs: 180_000,
       maxDelegationDepth: 1,
+      maxOperationsPerTurn: 5,
       taskBudget: null,
       waitUserTimeoutMs: 86_400_000,
+      fileRefTtlDays: 7,
       fileRetentionDays: 30,
       fileRetentionSweepOnStart: false,
       attachmentNudgeAfterMs: 30_000,
+      // B 切片：task_run 短等待窗口缺省 8000ms（owner 2026-11-19 A 案；0 = 不等直接后台）。
+      taskRunWaitMs: 8_000,
+      // 预期契约（2026-11-18；2026-11-19 唤醒切片只留一档）：10 分钟「比预计久了」提醒
+      // （30 分钟「卡住」档整档删除，不再出现在解析值里）。
+      longRunningNoticeMs: 600_000,
+      // 前台排队最长等待缺省 120s（超时确定性拒绝）。
+      queueWaitMs: 120_000,
+      // 大响应文件化（2026-11-19）：Worker 结果内联上限缺省 64KiB。
+      oversizeDataBytes: 65_536,
     });
+  });
+
+  it('oversizeDataBytes：缺省 65536；可配；0/负数/非整数 fail-fast', () => {
+    expect(resolveRuntimeConfig().oversizeDataBytes).toBe(65_536);
+    expect(resolveRuntimeConfig({ oversizeDataBytes: 1_024 }).oversizeDataBytes).toBe(1_024);
+    for (const bad of [0, -1, 1.5, '65536']) {
+      expect(
+        () => resolveRuntimeConfig({ oversizeDataBytes: bad } as unknown as RuntimeConfig),
+      ).toThrowError(/runtime.oversizeDataBytes/);
+    }
+  });
+
+  it('taskRunWaitMs：缺省 8000；0 = 不等直接后台；负数/非整数 fail-fast', () => {
+    expect(resolveRuntimeConfig().taskRunWaitMs).toBe(8_000);
+    expect(resolveRuntimeConfig({ taskRunWaitMs: 0 }).taskRunWaitMs).toBe(0);
+    expect(resolveRuntimeConfig({ taskRunWaitMs: 5_000 }).taskRunWaitMs).toBe(5_000);
+    for (const bad of [-1, 1.5, '1500']) {
+      expect(
+        () => resolveRuntimeConfig({ taskRunWaitMs: bad } as unknown as RuntimeConfig),
+      ).toThrowError(/runtime.taskRunWaitMs/);
+    }
   });
 
   it('attachmentNudgeAfterMs：缺省 30000；0 = 关闭；负数/非整数 fail-fast', () => {
@@ -69,6 +101,31 @@ describe('resolveRuntimeConfig：缺省 = 前台并发 4 + 排队 16，非法 fa
         () => resolveRuntimeConfig({ attachmentNudgeAfterMs: bad } as unknown as RuntimeConfig),
         `attachmentNudgeAfterMs=${String(bad)}`,
       ).toThrowError(/runtime\.attachmentNudgeAfterMs/);
+    }
+  });
+
+  it('fileRefTtlDays：缺省 7；显式值保留；0/负数/小数 fail-fast（最小 1）', () => {
+    expect(resolveRuntimeConfig().fileRefTtlDays).toBe(7);
+    expect(resolveRuntimeConfig({ fileRefTtlDays: 1 }).fileRefTtlDays).toBe(1);
+    expect(resolveRuntimeConfig({ fileRefTtlDays: 30 }).fileRefTtlDays).toBe(30);
+
+    for (const bad of [0, -1, 1.5, '7']) {
+      expect(
+        () => resolveRuntimeConfig({ fileRefTtlDays: bad } as unknown as RuntimeConfig),
+        `fileRefTtlDays=${String(bad)}`,
+      ).toThrowError(/runtime\.fileRefTtlDays/);
+    }
+  });
+
+  it('maxOperationsPerTurn：缺省 5；显式值保留；非正整数 fail-fast（A2 单回合执行上界）', () => {
+    expect(resolveRuntimeConfig().maxOperationsPerTurn).toBe(5);
+    expect(resolveRuntimeConfig({ maxOperationsPerTurn: 8 }).maxOperationsPerTurn).toBe(8);
+
+    for (const bad of [0, -1, 1.5, '5']) {
+      expect(
+        () => resolveRuntimeConfig({ maxOperationsPerTurn: bad } as unknown as RuntimeConfig),
+        `maxOperationsPerTurn=${String(bad)}`,
+      ).toThrowError(/runtime\.maxOperationsPerTurn/);
     }
   });
 

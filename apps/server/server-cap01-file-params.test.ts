@@ -17,7 +17,7 @@
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   AppConfig,
   ChannelRoute,
@@ -58,7 +58,7 @@ function copyFixtureRoot(dir: string): string {
 function testConfig(root: string): AppConfig {
   return {
     principals: {
-      'wecom:user-a': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:user-a': { enabled: true },
     },
     contextProfiles: {
       dummy: {
@@ -71,6 +71,8 @@ function testConfig(root: string): AppConfig {
     },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
+    // 有推送面 = 后台派发（async）；0 窗口让受理即返回，产物走后台完成投递（确定性）。
+    runtime: { taskRunWaitMs: 0 },
   };
 }
 
@@ -161,7 +163,9 @@ async function makeFixture(): Promise<Fixture> {
         env: process.env,
       }),
       allowedOperations: ['dummy.scratch'],
-      readOnlyOperations: [],
+      // 本用例只验证单文件参数翻译（scratch 是任务内本地写，不是对外写操作）：在**测试替身**
+      // 里把它登记为只读能力，使其对 viewer 也可用；生产默认面仍只从 access=read 派生只读集合。
+      readOnlyOperations: ['dummy.scratch'],
     }),
     fileDelivery: {
       deliveryMode: 'live',
@@ -204,10 +208,13 @@ describe('CAP-01 单文件参数：默认服务装配（createServer + 真 dummy
 
       // ② 文字消息激活 pending 并起回合：Main 交办（inputFiles）→ Worker 调 dummy.scratch。
       const reply = await server.handler(incoming('m-go', '统计这份名册'));
-      expect(reply).toContain('名册统计完成。');
+      // owner 2026-11-19：用户看到的话永远是模型说的——交办回合的模型文本原样送达。
+      expect(reply).toBe('名册统计完成。');
 
       // ③ 执行层真的读到了附件：--input 指向宿主物化的任务输入，内容 = 附件字节。
-      expect(outcomes).toHaveLength(1);
+      await vi.waitFor(() => {
+        expect(outcomes).toHaveLength(1);
+      }, { timeout: 30_000 });
       const outcome = outcomes[0]!;
       expect(outcome.status).toBe('completed');
       const data = (outcome as Extract<ExecutionOutcome, { status: 'completed' }>).data as {
@@ -225,7 +232,9 @@ describe('CAP-01 单文件参数：默认服务装配（createServer + 真 dummy
       expect(data.output).toMatch(/\/tmp\/task_[^/]+\/out\/exec-output\.json$/);
 
       // ④ 产物经兜底扫描登记后进入交付：渠道端口收到执行层写出的文件。
-      expect(delivered).toHaveLength(1);
+      await vi.waitFor(() => {
+        expect(delivered).toHaveLength(1);
+      }, { timeout: 30_000 });
       const files = delivered[0]!.files;
       expect(files.map((file) => file.filename)).toEqual(['exec-output.json']);
       expect(JSON.parse(files[0]!.data.toString('utf8'))).toEqual({ lines: 3, chars: 6 });

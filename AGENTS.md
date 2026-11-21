@@ -1,6 +1,6 @@
 # fshine-agent 项目约定
 
-> 本文件是**每个 Agent 进仓的第一约束**。2026-11-13 起按「Minimal Rewrite」重写：哲学、职责边界、新增机制准入与删除纪律都是硬约束；架构现状与历史台账以 `docs/decision-log.md` 为准（§九 V0 交付、§十 M2 波次 1 退役、§十一 产品面收口、§十三 M4 死代码清扫、§十四 eval 入口、§十五/§十六 R1 清理与冻结登记）。
+> 本文件是**每个 Agent 进仓的第一约束**。2026-11-13 起按「Minimal Rewrite」重写：哲学、职责边界、新增机制准入与删除纪律都是硬约束；架构现状与历史台账以 `docs/decisions/index.md` 为准（§九–§十二 Minimal Rewrite 收口、§十三 M4 死代码清扫、§十四 eval 入口、§十五 R1 清理、§十六 判据冻结；正文在 `docs/history/decision-log-part01-2026-11_undated.md` 与 `-part02-2026-11.md`）。
 
 ## 定位
 
@@ -28,6 +28,9 @@ fshine-agent 的定位（2026-11-12 第三版，2026-11-13 Minimal 细化）：*
 - **宿主（最小保留）**：可信身份与渠道映射、确认事件传递与用户交互、任务归属、凭据隔离、不可逆操作安全、如实交付（结果/失败按契约原样转述）。**不重复执行层执法**。
 - **写确认回环 ≠ 宿主计划门**：宿主只做「身份 + 确认事件传递 + 用户交互」；操作授权、操作绑定、有效期、防重放与业务校验归执行层。禁止把旧预算梯子、计划裁决或业务策略重新包装成确认回环。
 - **实体授权归执行层**：宿主不建实体门（旧 `validatePlanEntities` 类先例不得复活）；用户拥有某项业务权限 ≠ 本次任务已授权 Agent 使用全部权限；高风险操作必须由执行层把实际动作限制在可信授权范围内，不能靠模型文本或广义 RBAC 兜底。
+- **Main 与 Worker 的分工**：Main 只拆包、看清内容、意图判断与编排（不包圆也不甩包）；Worker 只做交办的那件事并产出交付物；**交付物只从 Worker 出**（Main 的 `run_js` 只写 `scratch/`，`recalc_xlsx` 例外）。判据与边界见 `docs/architecture/tasks.md`。
+- **写事务归执行层**：分批/幂等/原子或补偿（saga）与「部分完成」的事实都由执行层拥有；宿主不拆批、不补偿、不猜，结果未知一律停下交用户核对。见 `docs/architecture/contract.md`。
+- **权限**：只耦合通用 permissions（`read`/`write`）；粗粒度由宿主发起前拦截，细粒度实体授权归执行层（未实现，debt P-2）；角色三档 `viewer`/`operator`/`admin`。见 `docs/architecture/permissions.md`。
 
 ## 新增机制准入（缺一不新增）
 
@@ -59,13 +62,32 @@ fshine-agent 的定位（2026-11-12 第三版，2026-11-13 Minimal 细化）：*
 - 测试与 demo **不得依赖外部平台**：假渠道 + 假执行客户端或仓内 dummy 夹具；真实 SaaS/企微只作「未验证」登记，不作为前置条件。
 - 评测以用户级任务为准（完成率、无谓追问/人工介入、错误对象/虚假成功、耗时与 token、安全边界）；A 类看消融，B 类看失败注入/拒绝路径；样本全保留，不筛绿。
 - 旧测试中只验证已删机制的用例直接退役；用户级行为与安全不变量保留相应评测；无法比较的范围明确登记，不假称通过。
+- **新增机制必须有「模型走岔路」用例**（owner 2026-11-19）：除剧本内路径外，至少一条让脚本模型**故意**用错协议/错参数/重复提交/绕道历史入口的确定性用例，断言四件事——用户仍拿到可执行下一步、任务不被误判终态、执行层不被反复打、用户可见面无内部词。**没有这条视同未覆盖**：脚本模型太听话，绿只证明剧本内正确。（当日 live 写不进去、假确认卡，都是这么漏的。）
+
+## 文档约束纪律（2026-11-18）
+
+写进 AGENTS 或架构文档的每一条约束，**必须有一个能变红的守卫测试**；给不出守卫的只能写成「未实现 / 待办」。
+
+## 判据红线（2026-11-18，owner 定）
+
+- **禁止用关键词/正则表达语义判断**（判「有没有告知失败 / 有没有说明出处 / 是不是追问 / 有没有拒绝 / 有没有编造」）——那是拿确定性审计冒充行为评估；2026-11-18 E01–E15 各 30 轮里 ≥10 条假红全由此产生。
+- **判据优先级（自上而下，能上不用下）**：① 机械事实——执行行参数、任务状态、审计载荷、通知事件；② 结构化提取——数值、字段、条数的存在性与一致性；③ 文本匹配——只允许做**下限检查**，必须写明「可能漏判」，且不得作为唯一判负依据。
+- **正则/词表只允许用于格式与泄漏类确定性检查**：内部术语（uuid / `task_` / `dispatchKey`）、服务器绝对路径、协议字段形状、凭据与敏感信息。这类检查必须能说出具体形状依据；判「意思」不算。
+- 新增任何文本锚点必须在用例里写清四件事：它想拦的失败形态、为什么①/②判不了、会误伤哪些正确措辞、以及负例绊线。缺一条不许加。
+
+## 回应 Grok 审查的铁律（2026-11-21，owner 定）
+
+> 由来：PR #75 接上流水线审查后，一轮 grok 审查给出 1 `blocking` + 3 `major`——blocking（宿主把"卡住的入站消息"谎称"还在办"）与两个 major（确认续跑指令与 `op_*` 面互斥、失败码取第一条）都在修复提交里落地；第四个 major（判据换形的覆盖缺口）按登记处理。断环通常在修复端：为过审改锚点、把无关缺陷说成同一主题再打补丁、或悄悄放宽判据。审查端提示词 `.github/prompts/pr-review.md`，修复端 `.github/prompts/grok-fix.md`，审查机制 `.github/workflows/grok-pr-review.yml` + `.github/grok/`（Grok Build CLI，身份是 secret `GROK_AUTH_JSON` 的 OAuth 登录，不走 API key；2026-11-21 从 bontop-design-log 整机移植，Codex 订阅停用）。
+
+1. **只修 `blocking`（= 修复端 P0/P1）。** `major` / `minor` / `nit` 留在审查评论里给人看，不为此开自动修复提交；业主在对话里点名要修的非 blocking 项，按业主要求做，不算自动跟审。
+2. **同一主题不打补丁。** 异步交错、竞态、过期响应、丢失更新这类 `blocking`：要么把状态机重做一次（整套 loading→ready、写排队、单一合并规则，并覆盖旧响应晚到/ready 前写/重叠写），要么在 PR 上留短评升级给人。禁止再加版本号/seq/generation 类计数器。同一主题的 `REQUEST_CHANGES` 计满 3 轮后，该主题只由人处理。
+3. **审查保持原样。** 有 `blocking` 就 `REQUEST_CHANGES` 并把检查标红，没有就 `COMMENT`，**不自动 APPROVE**。不得为少刷审查去改触发器、concurrency、`render-review.mjs` 的 `decideEvent` 或 `review-schema.json` 的严重级别映射。
+4. **修复端不得放松判据**：不许改断言、删守卫、放宽集合凑绿；同一族锚点补到第 3～4 次仍漏判，按「换判据形状」处理（机械事实 > 结构化提取 > 文本下限），不许继续补词表。
 
 ## 现状（2026-11-13 Minimal Reset 产品面收口；不要读成已完成）
 
-## 现状（2026-11-13 Minimal Reset 产品面收口；不要读成已完成）
-
-**Minimal Rewrite 已收口**：旧 Runtime hub（runtime/context/pi-coding-driver/serve-gate/plan-runtime/task-manager 及旧 app 接线）与旧 demo/试跑脚手架已按可达性删除，`minimal` 过渡命名已收口。仓库只保留产品面——运行＝`npm run ask`（一条消息 → 回复 + 机械证据，缺省仓内 dummy 执行层）与 `npm start`（渠道消息 → 回复）；测试＝`npm test`（vitest）；评测＝`npm run eval:user`（用户级黑盒入口，真实模型 + 仓内 dummy 夹具，与 `ask` 同源装配；确定性门＝typecheck + unit）。写/确认/取消/产物是后续切片。防回潮守卫见 `packages/agent/transition-naming.test.ts`；收口记录见 `docs/decision-log.md` §十一、§十三、§十四、§十五。
+**Minimal Rewrite 已收口**：旧 Runtime hub（runtime/context/pi-coding-driver/serve-gate/plan-runtime/task-manager 及旧 app 接线）与旧 demo/试跑脚手架已按可达性删除，`minimal` 过渡命名已收口。仓库只保留产品面——运行＝`npm run ask`（一条消息 → 回复 + 机械证据，缺省仓内 dummy 执行层）与 `npm start`（渠道消息 → 回复）；测试＝`npm test`（vitest）；评测＝`npm run eval:user`（用户级黑盒入口，真实模型 + 仓内 dummy 夹具，与 `ask` 同源装配；确定性门＝typecheck + unit）。写/确认/取消/产物**已上产品面**：runner 存在时 Main 面注册 `task_cancel` / `task_resume` / `task_confirm`（`packages/agent/src/execution-runtime.ts:3133`）。**只有渠道入口（`npm start`）装配 runner**（`apps/server/server.ts:1149`）；`npm run ask` / `tasks --redo` 走 `assembleAskRuntime`，固定 `taskDispatch:'sync'` 且无 runner（`scripts/ask-runtime.ts:1092-1093`、`:1249-1250`），其 Main 面因此**不含**这三个工具（写确认回环的自动用例在 wecom-sim F 组 W-22～W-25，全绿）。防回潮守卫见 `packages/agent/transition-naming.test.ts`；收口记录见 `docs/decisions/index.md`（§十一、§十三、§十四、§十五 各一行，正文在 `docs/history/decision-log-part01-2026-11_undated.md`）。
 
 **现行协议**：Main 直接委派 Worker，Worker 经 Execution Contract 结构化调用执行层；不经过宿主计划门。
 
-**指针**：`docs/decision-log.md`（权威决定与状态）、`docs/product/r3-open-decisions.md`（R3 收官待裁定登记：14 项逐项建议 + 授权门 + 启动条件；未裁定项不自主推进）、`packages/contracts/src/execution-contract.ts`（现行执行契约语义面）、`docs/architecture-laws.md`（律法与历史判据档案；多数守卫引用已随 `0b97227`/M4 退役，见其文首 2026-11-13 M4 注）、`docs/methodology.md`（作业纪律）。`docs/a2a-protocol.md` 与 `docs/execution-layer-interface.md` 只作历史参考（A2A 为历史别名；旧 a2a 契约类型 `packages/contracts/src/a2a-protocol.ts` 已随 M4 死代码清扫删除且不恢复）。旧文档章节（三层分工、九类删除表、迁移期对账）只作历史参考，与 decision-log 冲突时以 decision-log 为准。
+**指针**：`docs/decisions/index.md`（权威决定与状态）、GitHub issues #67–#74（2026-11-18 结转的未决项：会话存储 retention/capacity、跨重启消息级幂等、executions 时间列、tasks CLI 增强、P8 ops 扩展、死代码重复实现、eval 候选池、B2 真实租户联调）、`packages/contracts/src/execution-contract.ts`（现行执行契约语义面）。`docs/decisions/debt.md` 为现行技术债登记（2026-11-20 重建，含「长连接断连窗口消息不可恢复」一条）；`docs/architecture/contract.md` 现行存在且被 `docs/index.md` 与本文件「写事务归执行层」一节引用，**未删除**。同轮删除的是 `docs/a2a-protocol.md` 与 `docs/execution-layer-interface.md`（A2A 为历史别名；旧 a2a 契约类型 `packages/contracts/src/a2a-protocol.ts` 已随 M4 死代码清扫删除且不恢复，内容经 git 历史可考）。旧文档章节（三层分工、九类删除表、迁移期对账）只作历史参考；与 `docs/decisions/index.md` 冲突时以该索引为准。

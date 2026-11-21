@@ -26,7 +26,11 @@ const SKIP_DIRS = new Set(['node_modules', '.runtime', '.git', 'dist', 'out', 't
 const CONTRACTS_CONFIG = 'packages/contracts/src/config.ts';
 const CORE_CONFIG = 'packages/core/src/config.ts';
 const RESOURCE_POLICY = 'packages/agent/src/resource-policy.ts';
+// 文件引用可读期（2026-11-18 owner）：字节回收执行器**只读**解析值（事件里报 ttlDays），
+// 不解析原始 `config.runtime.*`、不重定义缺省；ms 派生走 resource-policy 的 fileRefTtlMsOf。
+const FILE_REF_CLEANUP = 'packages/agent/src/file-ref-cleanup.ts';
 const EXECUTION_RUNTIME = 'packages/agent/src/execution-runtime.ts';
+const TASK_RUNNER = 'packages/agent/src/task-runner.ts';
 const ASK_RUNTIME = 'scripts/ask-runtime.ts';
 // R4 稳定性套件的假件 harness（2026-11-14 登记）：只**构造**测试场景的 RuntimeConfig 输入
 // （backgroundConcurrency/queueCapacity 逐场景参数），不解析/解释旋钮、不读原始
@@ -42,6 +46,14 @@ const P2_SCENARIOS = 'scripts/eval/p2/p2-scenarios.ts';
 // RuntimeConfig 输入（显式 `queueCapacity: 16` 压队列上限），不解析/解释旋钮、不读原始
 // `config.runtime.*`；缺省值那条走「不给 runtime 段」，不在此文件里重复定义缺省。
 const R8_CONCURRENCY = 'scripts/eval/cap01/r8-concurrency.ts';
+// CAP-01 R5 资源回收验评（2026-11-18 登记）：**只读** `resolveRuntimeConfig` 的解析值
+// `fileRefTtlDays`（装配时透传给回收探针做验评读数），不解析原始 `config.runtime.*`、
+// 不重定义缺省（缺省仍住 resource-policy）。
+const R5_RESOURCES = 'scripts/eval/cap01/r5-resources.ts';
+// 企微×dummy 联调自动用例 harness（2026-11-18 登记）：与上面三族同类——只**构造**测试场景
+// 的 RuntimeConfig 输入（把附件追问窗口压到 30ms，好让注入时钟推进），不解析/解释旋钮、
+// 不读原始 `config.runtime.*`；缺省仍住 resource-policy（30s）。
+const SIM_HARNESS = 'scripts/eval/wecom-sim/harness.ts';
 // server 启动保留期清扫（2026-11-17 登记）：**装配点开关的唯一读者**——只读
 // `resolveRuntimeConfig` 的解析值 `config.fileRetentionSweepOnStart`，不解析原始
 // `config.runtime.*`、不重定义缺省（单一配置源不破坏）。
@@ -81,22 +93,57 @@ const DELETED_ENV_KEYS = [
  *    2026-11-17 起另**只读** policy 快照的解析值（`snapshot().queueCapacity`）做后台
  *    受理上界判定（底账 queued 行 < 容量才受理）——不解析/不重定义缺省、不读原始
  *    `config.runtime.*`（单一配置源不破坏）；
+ *    2026-11-18 起同样**只读** policy 快照解析值 `snapshot().config.maxOperationsPerTurn`
+ *    做单回合执行上界（A2；未注入策略时用执行侧同值缺省 5，不读原始配置）；
  *  - scripts/ask-runtime.ts（R4 集成登记，2026-11-14）：**装配点的解析值透传**——把
  *    `resolveRuntimeConfig` 的 mainTurnMs/workerTurnMs 注入执行侧消费点与后台 runner
  *    leaseMs；不自行解释旋钮、不读原始 `config.runtime.*`（单一配置源不破坏）。
  */
+/**
+ * 已删的 runtime 配置键（2026-11-18 owner 决定）：`dispatchMode` 不是产品概念，是迁移期开关。
+ * 派发方式是各入口的**装配参数**（`taskDispatch: 'sync' | 'async'`，server 恒 async、
+ * ask/eval 恒 sync），不再有部署配置面。旧 YAML 里残留的键由解析层以「未知字段」拒绝——
+ * 这条守卫防它被重新加回类型/解析/装配，或作为「写着不生效」的死键复活。
+ *
+ * 2026-11-19 唤醒切片加入第二个已删键：`longRunningStuckNoticeMs`（30 分钟「卡住」档）
+ * ——那一档断言了我们不知道的事（「我卡住了」），还替用户下结论（「建议先停掉」），与
+ * 「>30 分钟不再报、只提示不停」冲突，整档删除（文案/阈值/扫描/领取/配置键一并删）；
+ * 旧 YAML 里的该键同样按未知字段拒绝。防它以任何形式回潮。
+ *
+ * 豁免：`*.test.ts`（本扫描已排除）里可以提到旧名做回归/历史说明；docs 与 git 历史不在扫描面。
+ */
+const DELETED_RUNTIME_CONFIG_KEYS = ['dispatchMode', 'longRunningStuckNoticeMs'] as const;
+
 const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   mainConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, P2_SCENARIOS, R8_CONCURRENCY],
   backgroundConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS, P2_SCENARIOS],
   queueCapacity: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS, P2_SCENARIOS, R8_CONCURRENCY, EXECUTION_RUNTIME],
   mainTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME],
   workerTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME, P2_SCENARIOS],
+  // A2（2026-11-18）：单回合执行 operation 上限——缺省与解释归策略；execution-runtime
+  // 只读策略解析值消费（未注入策略时用执行侧同值缺省 5），不读原始 runtime 配置。
+  maxOperationsPerTurn: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME],
   maxDelegationDepth: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   taskBudget: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
-  waitUserTimeoutMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
+  // W 切片（2026-11-18）：waiting_user 到期阈值由策略解析；ask-runtime 装配时取解析值，
+  // task-runner 只消费注入的已解析毫秒数（不读原始 runtime 配置）。
+  waitUserTimeoutMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, ASK_RUNTIME, TASK_RUNNER],
+  // 文件引用可读期（天）：缺省 7 与 ms 派生归策略；字节回收只读解析值（R5 验评透传）。
+  fileRefTtlDays: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, FILE_REF_CLEANUP, R5_RESOURCES],
   fileRetentionDays: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   fileRetentionSweepOnStart: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STARTUP_SWEEP],
-  attachmentNudgeAfterMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, SERVER],
+  attachmentNudgeAfterMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, SERVER, SIM_HARNESS],
+  // 预期契约（2026-11-18；2026-11-19 唤醒切片只留一档）：长时间无动静提醒阈值——缺省与
+  // 解释归策略；ask-runtime 装配时取解析值注入 runner，runner 只消费注入的毫秒数
+  // （不读原始 runtime 配置）。第二档（30 分钟「卡住」）已删除并入已删键守卫。
+  longRunningNoticeMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, ASK_RUNTIME, TASK_RUNNER, SIM_HARNESS],
+  // 前台排队最长等待（2026-11-18）：缺省与解释归策略；execution-runtime 只读策略解析值
+  // （`snapshot().config.queueWaitMs`）做排队上限，不读原始 runtime 配置。
+  queueWaitMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME],
+  // 大响应文件化（2026-11-19）：缺省与解释归策略；execution-runtime 只读策略解析值
+  // （`snapshot().config.oversizeDataBytes`）做 Worker 结果投影上限；ask-runtime 装配时把
+  // 解析值注入后台 TaskExecutor（与 workerTurnMs 同一透传形态），不读原始 runtime 配置。
+  oversizeDataBytes: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME],
 };
 
 interface SourceFacts {
@@ -167,6 +214,18 @@ describe('P5-T01 单一配置源守卫：host 死键零引用 + 资源旋钮唯�
     }
     console.log(JSON.stringify({ event: 'p5_deleted_host_keys', files: productionFiles().length, hits: hits.length }));
     expect(hits, `已删 host 键仍被生产代码引用（双源/假配置回潮）：\n${hits.join('\n')}`).toEqual([]);
+  });
+
+  it('已删配置键 runtime.dispatchMode 在生产代码零引用（防回潮）', () => {
+    const hits: string[] = [];
+    for (const file of productionFiles()) {
+      const source = readFileSync(path.join(REPO_ROOT, file), 'utf8');
+      for (const key of DELETED_RUNTIME_CONFIG_KEYS) {
+        if (source.includes(key)) hits.push(`${file} -> ${key}`);
+      }
+    }
+    console.log(JSON.stringify({ event: 'p5_deleted_runtime_config_keys', files: productionFiles().length, hits: hits.length }));
+    expect(hits, `已删配置键仍被生产代码引用（迁移期开关回潮）：\n${hits.join('\n')}`).toEqual([]);
   });
 
   it('资源旋钮只允许登记的所有者文件解释（所有者表双向闭合）', () => {

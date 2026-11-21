@@ -5,13 +5,16 @@
  * 通知失败或延迟不得改变任务结果。因此本模块把「通知事实」先落同库 outbox，再由
  * 渠道无关的 `NotificationSink` 投递；投递成功与否只改 outbox 的投递列。
  *
- * 最小形状（全部冻结项，见 docs/product/r4-joint-interfaces.md §4）：
+ * 最小形状（全部冻结项，见 docs/history/r4-joint-interfaces.md §4）：
  *   · 9 类通知意图枚举 + 状态转移→意图映射（阶段进展/里程碑由 state fact 生成）；
  *   · 同库最小表 notifications(id, task_id, kind, state_version, payload_json, created_at,
  *     delivered_at, attempts, last_error)，由本模块 `CREATE TABLE IF NOT EXISTS` 自建（幂等）；
  *     唯一 (task_id, kind, state_version) —— 重复触发不新增、不覆盖首次事实；
  *   · 同进程有界重试：退避（基数指数、上限封顶）到点才重试，attempts 达上限即停止；
  *     「下一次可尝试时间」由 created_at + 累计退避机械推出（不新增冻结列）；
+ *   · 终态跳过（2026-11-19 投递真相切片）：sink 明确报「没有东西可发 / 永不可能送达」
+ *     （`DeliveryReceipt.skipped`）时不写 delivered_at（**绝不假记送达**）、不再重试；
+ *     行留在未送达集合里可查，last_error 记 `SKIPPED:<reason>` 与真实失败区分；
  *   · payload 仅来自传入底账事实的白名单字段（taskNo/name/reason/requestIds/at），
  *     未知字段一律拒绝（拒绝编造百分比/内部路径/自由文本）；
  *   · 未送达（含超限停止）可查：listNotifications / undelivered 只读查询，供 tasks/ops
@@ -76,6 +79,12 @@ export interface NotificationPayload {
   requestIds?: readonly string[];
   /** R5 补字段：waiting_user 时缺什么的条目（底账 pendingQuestion.missing）。 */
   missing?: readonly string[];
+  /**
+   * 写确认提案的机械摘要（底账 pendingQuestion.confirmation.summary，执行层原话）。
+   * 只有 waiting_user 且待确认时才有：用户据此决定「确认」还是「不」。
+   * **句柄不进 payload**：handle 是宿主持有的凭据，用户不需要也不该看到。
+   */
+  summary?: string;
 }
 
 /**
@@ -95,6 +104,8 @@ export interface NotificationFact {
   requestIds?: readonly string[];
   /** R5 补字段：waiting_user 必带（底账 pendingQuestion.missing）。 */
   missing?: readonly string[];
+  /** 写确认提案摘要（底账 pendingQuestion.confirmation.summary）；只有待确认时才有。 */
+  summary?: string;
 }
 
 /** 白名单违规（编造/未知字段、非法枚举、缺必填）：拒绝写入，不污染 outbox。 */
@@ -125,6 +136,26 @@ export interface Notification {
 export interface DeliveryReceipt {
   delivered: boolean;
   error?: string;
+  /**
+   * **终态跳过**（2026-11-19 投递真相切片；与 error 互斥）：真的没有东西要发 / 永不可能送达
+   * （如「该档不由本 sink 推」「非 live 部署」「剥完为空」「路由拆不出」）——**不写
+   * delivered_at**（用户没收到就不算送达），也不再重试；值是机械 reason（落库时带
+   * `SKIPPED:` 前缀，与真实投递失败可区分）。缺省 undefined = 未声明（按失败/重试语义处理）。
+   */
+  skipped?: string;
+  /**
+   * **部署模式事实**（2026-11-19 owner 裁定；只随 skipped 回执带）：投递面的
+   * `deliveryMode`（`'live'` / `'silent'`；没有投递面 = `'unavailable'`）。
+   * 告警判据按它切：**live 上出现 skipped = 渠道配置/路由配错**（用户彻底收不到任何消息，
+   * 必须有人看见）；silent/unavailable 是部署属性，不告警。
+   */
+  deliveryMode?: string;
+  /**
+   * **本次不投递、也没尝试投递**（改期：会话此刻在跑回合，界面让路——2026-11-19 投递真相
+   * 切片）：不写 delivered_at、**不消耗 attempts**、不记 last_error（没有失败可记），下一
+   * 次投递驱动（装配侧在回合结束后补一次）再试。与 error 互斥：它不是失败尝试，也不是终态。
+   */
+  deferred?: true;
 }
 
 /** 渠道无关发送器（server 集成注入 WeCom sink；测试用假发送器）。 */
@@ -138,7 +169,7 @@ export interface RecordNotificationResult {
   created: boolean;
 }
 
-export type DeliveryOutcome = 'delivered' | 'retry_scheduled' | 'stopped' | 'skipped_not_due';
+export type DeliveryOutcome = 'delivered' | 'retry_scheduled' | 'stopped' | 'skipped_not_due' | 'skipped' | 'deferred';
 
 export interface DeliveryAttempt {
   notificationId: number;
@@ -146,6 +177,25 @@ export interface DeliveryAttempt {
   /** 本次尝试后（或跳过时当前）的 attempts。 */
   attempts: number;
   error?: string;
+}
+
+/**
+ * 一条通知的**投递终局**（2026-11-19 第 3 档接线）：进入终局且**未送达**时才报一次。
+ *   · `exhausted` —— 真实投递失败到 attempts 上限（用户最终没收到）；
+ *   · `skipped`   —— 终态跳过（真的没有东西要发 / 永不可能送达；重试也没用）。
+ * 只报终局转换（不是每次 deliverPending 都报），装配层接日志，运营告警（ops/alerts 的
+ * delivery_failed 规则）据此可见——「兜不住、用户也做不了什么」这一类不许没有归宿。
+ */
+export interface NotificationTerminalFact {
+  notificationId: number;
+  taskId: string;
+  kind: NotificationKind;
+  outcome: 'exhausted' | 'skipped';
+  attempts: number;
+  /** 终局原因：真实失败原因，或终态跳过的 `SKIPPED:<reason>`。 */
+  reason: string;
+  /** 部署模式事实（只有跳过终局带）：告警判据「live + skipped」用它。 */
+  deliveryMode?: string;
 }
 
 export interface NotificationOutboxOptions {
@@ -160,6 +210,11 @@ export interface NotificationOutboxOptions {
   maxBackoffMs?: number;
   /** 时钟注入（测试确定性用；缺省系统时钟）。 */
   now?: () => Date;
+  /**
+   * 投递终局观察口（缺省静默；不影响任何投递语义）：一条通知进入**未送达终局**时调用一次
+   * ——`exhausted`（失败到上限）或 `skipped`（终态跳过）。观察口自身抛错不改投递事实。
+   */
+  onTerminal?: (terminal: NotificationTerminalFact) => void;
 }
 
 export interface NotificationOutbox {
@@ -193,6 +248,8 @@ const DEFAULT_MAX_BACKOFF_MS = 60_000;
 
 /** sink 返回未送达但未给原因的机械占位（不编造业务原因）。 */
 const SINK_UNDELIVERED_ERROR = 'SINK_UNDELIVERED';
+/** 终态跳过在 last_error 里的前缀（与真实投递失败区分；本模块无独立跳过列，语义见 DeliveryReceipt.skipped）。 */
+const SKIPPED_MARKER = 'SKIPPED:';
 
 const FACT_KEYS: ReadonlySet<string> = new Set([
   'taskId',
@@ -204,6 +261,7 @@ const FACT_KEYS: ReadonlySet<string> = new Set([
   'reason',
   'requestIds',
   'missing',
+  'summary',
 ]);
 
 const SCHEMA = `
@@ -312,6 +370,9 @@ function validateFact(fact: NotificationFact): void {
   ) {
     throw new NotificationPayloadError('missing 必须是非空字符串数组（底账 pendingQuestion.missing 同口径）。');
   }
+  if (fact.summary !== undefined && (typeof fact.summary !== 'string' || fact.summary.trim() === '')) {
+    throw new NotificationPayloadError('summary 必须是非空字符串（底账 pendingQuestion.confirmation.summary 同口径）。');
+  }
 }
 
 function buildPayload(fact: NotificationFact): NotificationPayload {
@@ -322,6 +383,7 @@ function buildPayload(fact: NotificationFact): NotificationPayload {
     ...(fact.reason === undefined ? {} : { reason: fact.reason }),
     ...(fact.requestIds === undefined ? {} : { requestIds: [...fact.requestIds] }),
     ...(fact.missing === undefined ? {} : { missing: [...fact.missing] }),
+    ...(fact.summary === undefined ? {} : { summary: fact.summary }),
   };
 }
 
@@ -382,6 +444,30 @@ export function createNotificationOutbox(options: NotificationOutboxOptions): No
   const baseBackoffMs = requirePositiveInteger(options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS, 'baseBackoffMs');
   const maxBackoffMs = requirePositiveInteger(options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS, 'maxBackoffMs');
   const now = options.now ?? (() => new Date());
+  const onTerminal = options.onTerminal;
+  /** 终局观察口 best-effort：观察者故障不改投递事实（不抛进投递循环）。 */
+  const reportTerminal = (
+    row: NotificationRow,
+    outcome: NotificationTerminalFact['outcome'],
+    attempts: number,
+    reason: string,
+    deliveryMode?: string,
+  ): void => {
+    if (onTerminal === undefined) return;
+    try {
+      onTerminal({
+        notificationId: row.id,
+        taskId: row.task_id,
+        kind: row.kind as NotificationKind,
+        outcome,
+        attempts,
+        reason,
+        ...(deliveryMode === undefined ? {} : { deliveryMode }),
+      });
+    } catch {
+      // 观察面写失败：终局事实已落库（delivered_at 仍为空、last_error 可查），不翻转。
+    }
+  };
 
   if (dbPath !== ':memory:') mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
@@ -403,6 +489,11 @@ export function createNotificationOutbox(options: NotificationOutboxOptions): No
   );
   const updateFailed = db.prepare(
     'UPDATE notifications SET attempts = attempts + 1, last_error = @lastError WHERE id = @id',
+  );
+  // 终态跳过：attempts 记到上限以停止重试（「重试已停止」），**不写 delivered_at**，原因进
+  // last_error（前缀 SKIPPED:）。绝不复用 updateDelivered——跳过不是送达。
+  const updateSkipped = db.prepare(
+    'UPDATE notifications SET attempts = @attempts, last_error = @lastError WHERE id = @id',
   );
 
   /** 投递调用串行化：并发 deliverPending 不重复送达同一通知。 */
@@ -438,15 +529,31 @@ export function createNotificationOutbox(options: NotificationOutboxOptions): No
       if (receipt.delivered === true) {
         updateDelivered.run({ id: row.id, deliveredAt: nowIso });
         results.push({ notificationId: row.id, outcome: 'delivered', attempts: nextAttempts });
+      } else if (receipt.deferred === true) {
+        // 改期（会话在跑回合，本次没尝试投递）：不写 delivered_at、不消耗 attempts、不记
+        // last_error——它既不是送达也不是失败；下一次投递驱动（装配侧回合末补一次）再试。
+        results.push({ notificationId: row.id, outcome: 'deferred', attempts: row.attempts });
+      } else if (receipt.skipped !== undefined) {
+        // 终态跳过（真的没有东西要发 / 永不可能送达）：不写 delivered_at（用户没收到就不算
+        // 送达）、不再重试。attempts 记到上限 = 「重试已停止」这一事实；原因进 last_error
+        // （带 SKIPPED: 前缀，与真实投递失败可区分；未送达仍可查）。
+        const reason = receipt.skipped.trim() === '' ? 'unspecified' : receipt.skipped.trim();
+        const marker = `${SKIPPED_MARKER}${reason}`;
+        updateSkipped.run({ id: row.id, attempts: maxAttempts, lastError: marker });
+        results.push({ notificationId: row.id, outcome: 'skipped', attempts: maxAttempts, error: marker });
+        reportTerminal(row, 'skipped', maxAttempts, marker, receipt.deliveryMode);
       } else {
         const error = typeof receipt.error === 'string' && receipt.error !== '' ? receipt.error : SINK_UNDELIVERED_ERROR;
         updateFailed.run({ id: row.id, lastError: error });
+        const exhausted = nextAttempts >= maxAttempts;
         results.push({
           notificationId: row.id,
-          outcome: nextAttempts >= maxAttempts ? 'stopped' : 'retry_scheduled',
+          outcome: exhausted ? 'stopped' : 'retry_scheduled',
           attempts: nextAttempts,
           error,
         });
+        // 只有**本次**打到上限才报终局（后续 deliverPending 对已到限的行早退，不重复报）。
+        if (exhausted) reportTerminal(row, 'exhausted', nextAttempts, error);
       }
     }
     return results;

@@ -216,7 +216,7 @@ describe('附件-指令合并窗口', () => {
     // 与现行为一致：纯附件所有者无话可说时，由既有收据窗补一条（窗口本身零帧）。
     expect(fake.replies).toEqual([]);
     await vi.advanceTimersByTimeAsync(2_000);
-    expect(fake.replies.map((reply) => reply.content)).toEqual(['已收到 1 个文件：工资.xlsx']);
+    expect(fake.replies.map((reply) => reply.content)).toEqual(['已收到 1 个文件']);
   });
 
   it('③ 三个文件 + 一句文字：handler 一次、附件 3 个（保持到达序）', async () => {

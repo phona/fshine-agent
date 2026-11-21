@@ -587,7 +587,7 @@ describe('ops：CLI 端到端（真实子进程）', () => {
     expect(page).not.toContain('task_completed');
     expect(page).toContain('已完成');
     expect(page).toContain('Collection faulty-one cannot be read in its current state');
-    expect(page).toContain('未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。');
+    expect(page).toContain('没有实际办理：助手已汇报，但这次交办没有发出任何办理动作。');
     expect(page).not.toContain('<script');
     expect(rowCount(page, 'recent')).toBe(4);
     expect(rowCount(page, 'failures')).toBe(3);

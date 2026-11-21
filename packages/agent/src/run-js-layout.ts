@@ -1,5 +1,5 @@
 /**
- * run_js 运行目录布局的不安全判定（CAP-01 symlink 收窄；docs/product/cap01-main-direct-execution.md §3）。
+ * run_js 运行目录布局的不安全判定（CAP-01 symlink 收窄；docs/architecture/files.md §3）。
  *
  * 威胁：run 目录下的 `out`（或 `in`/`scratch` 等）可以是被预植的软链。`mkdirSync(..., {recursive:true})`
  * 对「软链 → 已存在目录」会静默通过，随后 `--allow-fs-read=<runDir>` 按路径放行、软链被跟随——

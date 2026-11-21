@@ -194,7 +194,8 @@ function faceClient(): ExecutionClient {
 }
 
 interface MainStep {
-  calls?: ReadonlyArray<{ tool: string; args: Record<string, unknown> }>;
+  /** args 可为函数：按上一回合收集到的结果动态解析（如用受理回执的 taskId 引用任务）。 */
+  calls?: ReadonlyArray<{ tool: string; args: Record<string, unknown> | ((results: readonly unknown[]) => Record<string, unknown>) }>;
   text: string;
 }
 
@@ -204,10 +205,23 @@ function scriptedMainDriver(steps: MainStep[], results: unknown[]): TurnDriver {
     async run(input) {
       const step = steps.shift();
       if (step === undefined) throw new Error('（测试）没有更多 Main 驱动步骤');
-      for (const call of step.calls ?? []) results.push(await input.exec(call.tool, call.args));
+      for (const call of step.calls ?? []) {
+        const args = typeof call.args === 'function' ? call.args(results) : call.args;
+        results.push(await input.exec(call.tool, args));
+      }
       return { text: step.text, messages: [...input.messages] };
     },
   };
+}
+
+/**
+ * 2026-11-20 机制变化：数字 ref（#1）退役，取消改用受理回执里的真实 taskId。
+ * 脚本按上一回合 results[0] 的 taskId 动态取引用，断言强度不变（仍取消同一任务）。
+ */
+function taskIdRefFrom(results: readonly unknown[]): Record<string, unknown> {
+  const receipt = results[0] as { taskId?: unknown } | undefined;
+  if (typeof receipt?.taskId !== 'string') throw new Error('（测试）受理回执没有 taskId，无法按 taskId 取消');
+  return { ref: receipt.taskId };
 }
 
 function submit(runner: ReturnType<typeof createTaskRunner>, taskId: string, request: string): void {
@@ -285,7 +299,8 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       readOnlyOperations: ['dummy.query'],
       mainDriver: scriptedMainDriver([
         { calls: [{ tool: TASK_RUN_TOOL, args: { task: '查一下 alpha 集合' } }], text: '已受理，后台跑着。' },
-        { calls: [{ tool: TASK_CANCEL_TOOL, args: { ref: '#1' } }], text: '好，已请求停止。' },
+        // 2026-11-20：数字 ref 退役，按受理回执的 taskId 取消。
+        { calls: [{ tool: TASK_CANCEL_TOOL, args: taskIdRefFrom }], text: '好，已请求停止。' },
       ], results),
       workerDriver: {
         async run() {
@@ -295,13 +310,17 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       mainSystemPrompt: '（测试）Main 系统提示',
       taskRegistry: registry,
       policy,
-      dispatchMode: 'background',
+      taskDispatch: 'async',
       taskRunner: runner,
+      // B 切片：钉 0 窗口（本套件测取消在飞机制；窗口行为由专测覆盖）。
+      taskRunWaitMs: 0,
     });
     try {
       await session.send('帮我查 alpha 集合，跑起来别等');
-      const receipt = results[0] as { taskId: string; taskNo: number; accepted: boolean };
-      expect(receipt).toMatchObject({ taskNo: 1, accepted: true });
+      const receipt = results[0] as { taskId: string; accepted: boolean };
+      // B 切片回执去编号：受理回执不带 taskNo（编号只在详情面）。
+      expect(receipt).toMatchObject({ accepted: true });
+      expect(receipt).not.toHaveProperty('taskNo');
 
       // 在飞：执行层调用已发起、gate 未回。
       await vi.waitFor(() => {
@@ -311,7 +330,19 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
 
       await session.send('算了别做了，取消掉');
       // 机械回执：请求 ≠ 已取消（先 requested，确认中止后才 cancelled）。
-      expect(results[1]).toEqual({ outcome: 'requested', taskId: receipt.taskId });
+      // 2026-11-18：取消回执新增 taskNo / taskRequest（供核对是否指错任务），改成子集断言 + 身份断言。
+      expect(results[1]).toMatchObject({ outcome: 'requested', taskId: receipt.taskId });
+      const cancelReceipt = results[1] as unknown as { taskRequest?: string; userMessage?: string };
+      // 2026-11-20：取消回执是模型可见投影，不带 taskNo（底账仍有）；以任务引用/业务名指代。
+      expect(cancelReceipt).not.toHaveProperty('taskNo');
+      expect(cancelReceipt.taskRequest).toContain('alpha');
+      // 用户可读的一句话：含业务对象 + 结果（2026-11-20：任务编号属工单腔，不进用户面）。
+      // 断言锚点从「编号 1」改成「不带编号」——原断言断的是用户可见面出现编号，该行为已废。
+      expect(cancelReceipt.userMessage).toContain('alpha');
+      expect(cancelReceipt.userMessage).not.toMatch(/#\d+|编号\s*#?\d+/);
+      expect(cancelReceipt.userMessage).toMatch(/已请求停止|已停止/);
+      // 创建时间随回执给出：历史结论转述时能说"11-18 开的"，不与"刚才"混淆。
+      expect((cancelReceipt as unknown as { taskCreatedAt?: string }).taskCreatedAt).toMatch(/T/);
 
       await vi.waitFor(() => {
         expect(registry.get(receipt.taskId, SCOPE).status).toBe('cancelled');
@@ -382,7 +413,8 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
     const results: unknown[] = [];
     const mainDriver: TurnDriver = {
       async run(input) {
-        results.push(await input.exec(TASK_CANCEL_TOOL, { ref: '#1' }));
+        // 2026-11-20：数字 ref 退役，按真实 taskId 取消。
+        results.push(await input.exec(TASK_CANCEL_TOOL, { ref: 'task_done' }));
         return { text: '该任务已经完成，不能取消。', messages: input.messages };
       },
     };
@@ -411,7 +443,12 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
     await session.send('把 #1 取消掉');
 
     // 机械回执：终态任务无操作，原样给出 completed（模型不得据此宣称已取消）。
-    expect(results[0]).toEqual({ outcome: 'terminal', taskId: 'task_done', status: 'completed' });
+    // 同上：回执带身份，断言改为子集 + 身份存在。
+    expect(results[0]).toMatchObject({ outcome: 'terminal', taskId: 'task_done', status: 'completed' });
+    expect(results[0]).not.toHaveProperty('taskNo');
+    // 终态：用户可见话术必须说"没停成 + 已完成"，不能只说"已取消"。
+    expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('没停成');
+    expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('completed');
     const task = registry.get('task_done', SCOPE);
     expect(task.status).toBe('completed');
     expect(task.reason).toBeUndefined();

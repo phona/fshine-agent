@@ -44,7 +44,8 @@ import {
   TASK_RUN_TOOL,
   type Session,
 } from '../packages/agent/src/execution-runtime';
-import { createTaskRegistry } from '../packages/agent/src/task-registry';
+import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
+import { createFileStore } from '../packages/agent/src/file-store';
 import {
   assembleSessionCore,
   resolveExecutionFace,
@@ -56,10 +57,11 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
 const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform');
 
-/** 宿主允许集合的确定性拒绝话术（execution-runtime.ts；不依赖模型自觉）。 */
-const WRITE_NOT_ALLOWED_MESSAGE = '不在本轮允许集合内';
+/** 宿主允许集合的确定性拒绝话术（execution-runtime.ts；不依赖模型自觉，且不含 operation 名）。 */
+const WRITE_NOT_ALLOWED_MESSAGE = '当前权限不支持这个操作';
 /** 夹具声明的写 operation（access=write；开关关闭时一个都不进允许集）。 */
 const WRITE_OPERATIONS = [
+  'dummy.longtask',
   'dummy.prepare',
   'dummy.commit',
   'dummy.proposal',
@@ -175,6 +177,9 @@ async function createHostFixture(options: HostFixtureOptions): Promise<HostFixtu
   const config = materializedConfig(options.dir);
   const profile = config.contextProfiles['dummy'];
   if (profile === undefined) throw new Error('fixture 配置缺少 dummy contextProfile');
+  // 载荷型参数（records）需要任务文件桥的 fileStore 与底账 store：与生产装配同一实例形状。
+  const taskRegistry = createSqliteTaskRegistry(path.join(options.dir, 'state.db'));
+  const fileStore = createFileStore({ store: taskRegistry.store, workspaceRoot: path.join(options.dir, 'workspace') });
 
   const main = new ScriptedDriver();
   const worker = new ScriptedDriver();
@@ -187,6 +192,7 @@ async function createHostFixture(options: HostFixtureOptions): Promise<HostFixtu
       stateDir,
       emptyOperationsMessage: '（测试）空允许集合',
       allowWriteOperations: options.allowWrite === true,
+      allowedPermissions: options.allowWrite === true ? ['read', 'write'] : ['read'],
     });
     const client: ExecutionClient = {
       capabilities: () => face.client.capabilities(),
@@ -210,9 +216,12 @@ async function createHostFixture(options: HostFixtureOptions): Promise<HostFixtu
     dbPath: path.join(options.dir, 'state.db'),
     stateDir,
     setAuditPath: true,
-    ...(options.allowWrite === true ? { runtime: { allowWriteOperations: true } } : {}),
+    ...(options.allowWrite === true ? { runtime: { allowWriteOperations: true }, allowedPermissions: ['read', 'write'] } : {}),
     emptyOperationsMessage: '执行层没有声明任何只读 operation——测试拒绝。',
-    taskRegistry: createTaskRegistry(),
+    taskRegistry,
+    // 载荷型参数（records）的宿主装信封需要任务文件桥：与生产装配同一条注入
+    // （不注入 = 宿主无法 lint/落盘，会按「内容不行」在发起执行前拒绝）。
+    taskExecutionBridge: { store: fileStore },
     mainSystemPrompt: '你是测试主 Agent。',
     workerSkills: [],
     createDrivers: async () => ({ mainDriver: main, workerDriver: worker }),
@@ -224,7 +233,10 @@ async function createHostFixture(options: HostFixtureOptions): Promise<HostFixtu
     main,
     worker,
     requests,
-    close: () => assembled.close(),
+    close: () => {
+      assembled.close();
+      taskRegistry.close();
+    },
   };
 }
 
@@ -353,6 +365,48 @@ async function runWriteTurn(
   return await fx.session.send(input.userText);
 }
 
+describe('写确认回环·带逐条内容（records 载荷：宿主 lint + 物化文件）', () => {
+  const records = [{ name: 'alpha-item-3', value: 100 }, { name: 'alpha-item-4', value: 200 }];
+  // 模型给的是结构化数组（不是 JSON 字符串）：宿主按声明 schema lint 后物化成文件，执行层逐项校验。
+  const prepareArgs = { collection: 'alpha', window: 'W1', records };
+  const commitArgs = { ...prepareArgs };
+
+  it('1b 摘要列出用户给的内容；commit 写入的正是这些 name/value；读回可见', async () => {
+    const fx = await createHostFixture({ dir: tempDir('host-wc-records-'), allowWrite: true, captureRequests: true });
+    try {
+      const turn1 = await runWriteTurn(fx, {
+        userText: '在 alpha 集合 W1 新增 alpha-item-3=100、alpha-item-4=200',
+        task: '在 alpha 集合新增两条指定内容',
+        operation: 'dummy.prepare',
+        args: prepareArgs,
+        report: '等你确认',
+      });
+      expect(turn1.executions.map((execution) => execution.status)).toEqual(['needs_confirmation']);
+      // 预演不写数据
+      expect((await queryData(fx.stateDir)).count).toBe(2);
+      // 摘要必须把「要写什么」说清（不能只说条数）
+      const prepared = fx.worker.toolResults[0] as { summary?: string };
+      expect(prepared.summary).toContain('alpha-item-3=100');
+      expect(prepared.summary).toContain('alpha-item-4=200');
+
+      const turn2 = await runWriteTurn(fx, {
+        userText: '确认',
+        task: '用户已确认，提交刚才的写入提案',
+        operation: 'dummy.commit',
+        args: commitArgs,
+        report: '已写入',
+      });
+      expect(turn2.executions.map((execution) => execution.status)).toEqual(['completed']);
+      // 写入的是用户给的内容，不是平台自动生成的占位记录
+      const after = await queryData(fx.stateDir);
+      expect(after.count).toBe(4);
+      expect(after.items.slice(2).map((item) => ({ name: item.name, value: item.value }))).toEqual(records);
+    } finally {
+      fx.close();
+    }
+  });
+});
+
 describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
   it('1 正常：prepare → 用户「确认」→ commit 成功 → query 读回看到新增记录', async () => {
     const fx = await createHostFixture({ dir: tempDir('host-wc-normal-'), allowWrite: true, captureRequests: true });
@@ -374,7 +428,11 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
       expect(prepared.summary).toContain('alpha');
       expect(prepared.summary).toContain('W1');
       expect(prepared.summary).toContain('2');
-      expect(prepared.summary).toMatch(/cannot be undone/i);
+      // 摘要必须是用户能直接读的中文 + 本地时间，不得是英文模板或原始 ISO（live 实测过）
+      expect(prepared.summary).toContain('不可撤销');
+      expect(prepared.summary).toContain('将向集合「alpha」');
+      expect(prepared.summary).not.toMatch(/cannot be undone/i);
+      expect(prepared.summary).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
       expect(JSON.stringify(prepared)).not.toContain('cf_');
       expect(fx.requests).toHaveLength(1);
       expect(fx.requests[0]!.confirmation).toBeUndefined();
@@ -477,12 +535,16 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
         report: commitReport,
       });
       expect(turn3.executions.map((execution) => execution.status)).toEqual(['refused']);
+      // 2026-11-19 模型可见面收口：refused 投影不带原始码（CONFIRMATION_USED 只进底账
+      // execution.error 与日志），模型只见 kind + note（表外码 → executor_failed）。
       const refused = fx.worker.toolResults[fx.worker.toolResults.length - 1] as {
         status?: string;
-        error?: { code?: string };
+        kind?: string;
+        error?: unknown;
       };
       expect(refused.status).toBe('refused');
-      expect(refused.error?.code).toBe('CONFIRMATION_USED');
+      expect(refused.error).toBeUndefined();
+      expect(refused.kind).toBe('executor_failed');
       expect((await queryData(fx.stateDir)).count).toBe(4);
     } finally {
       fx.close();
@@ -524,6 +586,8 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
       });
       const stolen = sessionB.worker.toolResults[sessionB.worker.toolResults.length - 1] as {
         status?: string;
+        kind?: string;
+        note?: string;
         error?: unknown;
       };
       // B 再拿一个不存在的句柄：话术必须与上一条完全一致（不泄漏该句柄在别处存在）。
@@ -536,12 +600,19 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
       });
       const unknown = sessionB.worker.toolResults[sessionB.worker.toolResults.length - 1] as {
         status?: string;
+        kind?: string;
+        note?: string;
         error?: unknown;
       };
       expect(stolen.status).toBe('refused');
       expect(unknown.status).toBe('refused');
-      expect(stolen.error).toEqual(unknown.error);
-      expect((stolen.error as { code?: string }).code).toBe('CONFIRMATION_NOT_FOUND');
+      // 2026-11-19 模型可见面收口：refused 投影不带原始码（error 不下放）；越权与不存在
+      // 在模型/用户可见面完全一致（kind/note 同值）——存在性不泄露的断言因此更强。
+      expect(stolen.error).toBeUndefined();
+      expect(unknown.error).toBeUndefined();
+      expect(stolen.kind).toBe(unknown.kind);
+      expect(stolen.note).toBe(unknown.note);
+      expect(stolen).toEqual(unknown);
       // 两个会话都没有被写；A 的提案也没有因越权尝试被消费。
       expect((await queryData(sessionA.stateDir)).count).toBe(2);
       expect((await queryData(sessionB.stateDir)).count).toBe(2);
@@ -578,15 +649,17 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
         report: commitReport,
       });
       expect(turn2.executions.map((execution) => execution.status)).toEqual(['refused']);
-      // 回复来自执行事实：明确带过期事实（执行层 message 原文，模型如实转述）。
-      expect(turn2.reply).toMatch(/expired|过期/i);
+      // 2026-11-19 模型可见面收口：refused 投影不带原始码/原文（CONFIRMATION_EXPIRED 与
+      // 'expired' 原文只进底账与日志）；模型只见 kind + note。底账执行事实仍是 refused。
+      expect(turn2.executions.map((execution) => execution.status)).toEqual(['refused']);
       const refused = fx.worker.toolResults[fx.worker.toolResults.length - 1] as {
         status?: string;
-        error?: { code?: string; message?: string };
+        kind?: string;
+        error?: unknown;
       };
       expect(refused.status).toBe('refused');
-      expect(refused.error?.code).toBe('CONFIRMATION_EXPIRED');
-      expect(refused.error?.message).toContain('expired');
+      expect(refused.error).toBeUndefined();
+      expect(refused.kind).toBe('executor_failed');
       expect((await queryData(fx.stateDir)).count).toBe(2);
     } finally {
       fx.close();
@@ -635,6 +708,7 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
         stateDir: fx.stateDir,
         emptyOperationsMessage: '（测试）空允许集合',
         allowWriteOperations: true,
+        allowedPermissions: ['read', 'write'],
       });
       expect(writeFace.allowedOperations).toEqual([...writeFace.readOnlyOperations, ...WRITE_OPERATIONS]);
     } finally {
@@ -664,12 +738,16 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
         report: commitReport,
       });
       // 执行层如实返回 failed（读回 1/2）；宿主不得把它变成 completed。
+      // 2026-11-19 模型可见面收口：failed 投影不带原始码（CONFIRMATION_READBACK_SHORT
+      // 只进底账 execution.error 与日志），模型只见 kind + note（表外码 → executor_failed）。
       const committed = fx.worker.toolResults[fx.worker.toolResults.length - 1] as {
         status?: string;
-        error?: { code?: string; message?: string };
+        kind?: string;
+        error?: unknown;
       };
       expect(committed.status).toBe('failed');
-      expect(committed.error?.code).toBe('CONFIRMATION_READBACK_SHORT');
+      expect(committed.error).toBeUndefined();
+      expect(committed.kind).toBe('executor_failed');
       expect(turn2.executions.map((execution) => execution.status)).toEqual(['failed']);
       // 用户可见回复来自执行事实：失败/待核对，不含成功话术。
       expect(turn2.reply).toContain('失败');
@@ -688,10 +766,13 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
     }
   });
 
-  it('边界：同一回合内 prepare 后立刻 commit 不算用户确认（句柄只在下一回合透传）', async () => {
+  it('边界：同一回合内 prepare 后立刻 commit 不执行（提案等用户下一回合表态；A2 同回合拒）', async () => {
     const fx = await createHostFixture({ dir: tempDir('host-wc-same-turn-'), allowWrite: true, captureRequests: true });
     try {
       // 一个回合里连续两次执行调用：prepare 发了句柄，紧接着 commit——宿主不得在同回合透传。
+      // 2026-11-18 A2 收紧：旧纪律只挡句柄透传（同回合 commit 仍打到执行层的
+      // CONFIRMATION_NOT_FOUND，live 实测单任务 15 次 operation）；现在同一回合内再发起
+      // 非只读 operation 一律在**发起前**拒绝——不发起执行、不落执行事实。
       fx.worker.push({
         calls: [
           { tool: EXECUTE_OPERATION_TOOL, args: { operation: 'dummy.prepare', args: PREPARE_ARGS } },
@@ -701,12 +782,15 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
       });
       fx.main.push({ calls: [{ tool: TASK_RUN_TOOL, args: { task: '在 alpha 集合新增两条记录' } }], text: mainRelay });
       const turn = await fx.session.send('帮我在 alpha 集合里新增两条记录');
-      // 两次调用都到了执行层；第二次没有确认引用 → 执行层确定性拒绝，零写入。
-      expect(fx.requests).toHaveLength(2);
+      // 只有 prepare 到达执行层；同回合 commit 被宿主在发起前拒收（零执行、零执行事实）。
+      expect(fx.requests).toHaveLength(1);
       expect(fx.requests[0]!.operation).toBe('dummy.prepare');
-      expect(fx.requests[1]!.operation).toBe('dummy.commit');
-      expect(fx.requests[1]!.confirmation).toBeUndefined();
-      expect(turn.executions.map((execution) => execution.status)).toEqual(['needs_confirmation', 'refused']);
+      expect(fx.requests[0]!.confirmation).toBeUndefined();
+      // 工具错误如实告知模型：提案已生成，等用户下一回合表态。
+      expect(fx.worker.toolErrors).toHaveLength(1);
+      expect(fx.worker.toolErrors[0]).toContain('提案');
+      expect(fx.worker.toolErrors[0]).toContain('下一回合');
+      expect(turn.executions.map((execution) => execution.status)).toEqual(['needs_confirmation']);
       expect((await queryData(fx.stateDir)).count).toBe(2);
     } finally {
       fx.close();

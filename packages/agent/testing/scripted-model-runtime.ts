@@ -9,11 +9,21 @@
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
-import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
+import { createAssistantMessageEventStream, type AssistantMessageEvent } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 
 export const SCRIPTED_PROVIDER_ID = 'llm';
 export const SCRIPTED_MODEL_ID = 'test-model';
+
+/**
+ * 流式夹具的一步：真实等待后推入一个中间事件（start / text_delta / ...）。
+ * `done` / `error` 收尾不在这里——夹具按 `script` 返回的最终 message 追加（与缺省路径同形状）。
+ */
+export interface ScriptedStreamStep {
+  /** 距上一步的真实等待毫秒（缺省 0）。测试用它造可测量的 ttft / duration。 */
+  delayMs?: number;
+  event: AssistantMessageEvent;
+}
 
 export interface ScriptedRequestContext {
   messages: ReadonlyArray<{ role?: string; content?: unknown }>;
@@ -24,16 +34,30 @@ export interface ScriptedModelRuntimeOptions {
   contextWindow?: number;
   maxTokens?: number;
   /**
+   * 模型能力声明：是否支持思考档（缺省 false = 既有夹具行为逐字节不变）。
+   * true 时 Pi 的档位钳制不再把非 off 档位压回 off——思考档接线用例需要它。
+   */
+  reasoning?: boolean;
+  /**
    * 第 `callIndex` 次模型请求（含压缩摘要请求）返回的 assistant 消息；
    * 返回 undefined = 队列耗尽（抛错，测试立刻可见）。
    */
   script: (callIndex: number, context: ScriptedRequestContext) => AgentMessage | undefined;
+  /**
+   * 流式中间事件脚本（缺省不传 = 既有夹具行为逐字节不变：只推 done/error）。
+   * 返回步骤数组时按序真实等待并推入事件（agent loop 会发 message_start/message_update），
+   * 再按 `script` 的最终 message 追加 done/error 收尾——观测类用例用它造
+   * 「message_start → text delta ×N → message_end」的事件序列。
+   */
+  streamScript?: (callIndex: number, context: ScriptedRequestContext) => readonly ScriptedStreamStep[] | undefined;
 }
 
 export interface ScriptedModelRuntime {
   runtime: ModelRuntime;
   calls(): number;
   requests(): readonly ScriptedRequestContext[];
+  /** 第 n 次请求 provider 实际收到的思考档（`options.reasoning`；未传 = undefined）。 */
+  reasoningLevels(): readonly (string | undefined)[];
   modelId: string;
   contextWindow: number;
 }
@@ -51,6 +75,7 @@ export async function createScriptedModelRuntime(options: ScriptedModelRuntimeOp
     refreshOnCreate: false,
   });
   const requests: ScriptedRequestContext[] = [];
+  const reasoningLevels: Array<string | undefined> = [];
   let calls = 0;
   runtime.registerProvider(SCRIPTED_PROVIDER_ID, {
     name: 'Scripted',
@@ -61,19 +86,39 @@ export async function createScriptedModelRuntime(options: ScriptedModelRuntimeOp
       name: modelId,
       api: 'openai-completions',
       baseUrl: 'http://127.0.0.1:9/v1',
-      reasoning: false,
+      reasoning: options.reasoning ?? false,
       input: ['text'],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow,
       maxTokens,
     }],
-    streamSimple: (_model, context) => {
+    streamSimple: (_model, context, streamOptions) => {
       const index = calls;
       calls += 1;
       const request = context as unknown as ScriptedRequestContext;
       requests.push(request);
+      reasoningLevels.push(typeof streamOptions?.reasoning === 'string' ? streamOptions.reasoning : undefined);
       const message = options.script(index, request);
       const stream = createAssistantMessageEventStream();
+      const steps = options.streamScript?.(index, request);
+      if (steps !== undefined && message !== undefined) {
+        // 流式夹具：按步真实等待后推中间事件，再按最终 message 收尾（done/error 与缺省同形状）。
+        void (async () => {
+          for (const step of steps) {
+            const delayMs = step.delayMs ?? 0;
+            if (delayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+            stream.push(step.event);
+          }
+          const stop = (message as { stopReason?: string }).stopReason;
+          if (stop === 'error' || stop === 'aborted') {
+            stream.push({ type: 'error', reason: stop, error: message as never });
+          } else {
+            stream.push({ type: 'done', reason: stop === 'length' ? 'length' : 'stop', message: message as never });
+          }
+          stream.end(message as never);
+        })().catch(() => undefined);
+        return stream;
+      }
       if (message === undefined) {
         const exhausted = {
           role: 'assistant',
@@ -104,5 +149,5 @@ export async function createScriptedModelRuntime(options: ScriptedModelRuntimeOp
       return stream;
     },
   });
-  return { runtime, calls: () => calls, requests: () => requests, modelId, contextWindow };
+  return { runtime, calls: () => calls, requests: () => requests, reasoningLevels: () => reasoningLevels, modelId, contextWindow };
 }

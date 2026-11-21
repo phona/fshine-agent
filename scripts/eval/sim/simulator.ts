@@ -13,7 +13,7 @@
  */
 
 import { SIM_ACTION_PROTOCOL, type SimActionKind, type SimCase } from './case';
-import type { CallTokens } from '../r6/accounting';
+import type { CallTokens } from '../long-session/accounting';
 
 /** 一次模型调用最小的 prompt 形状（判官调用也用它）。 */
 export interface ModelPrompt {

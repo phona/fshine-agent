@@ -10,10 +10,12 @@
  *       state.db（+wal/shm）/ workspace/runs / workspace/files / sessions（Pi 转录）。
  *   m2  runs/ 只增不减？每次 checkpoint 数 runs/ 条目数（应单调不减、100 次后 = 100）；
  *       并对单个 run 目录解剖（run.cjs/in/out/scratch/home/tmp 各占多少）。
- *       代码面补注：仓内**没有任何 runs/ 清扫实现**——「sweepScratchDirs」只活在
- *       packages/agent/src/server-paths.ts 的注释里；file-store.ts:382/492/571 的
- *       「留给 TTL 清孤儿」没有对应 sweeper；FILE_REF_TTL_MS（file-store.ts:304）只是
- *       可读性窗口，不删字节。此条是代码阅读注记，判据仍以 m1/m2 的实测为准。
+ *       代码面补注：run 目录与过期 file_refs 字节的清扫只在显式 ops 入口
+ *       （`npm run cleanup:runs`）或 server 启动开关 `fileRetentionSweepOnStart` 下发生，
+ *       无定时器；执行器分别在 packages/agent/src/run-dir-cleanup.ts 与
+ *       packages/agent/src/file-ref-cleanup.ts（TTL 来自
+ *       `runtime.fileRefTtlDays`，只删字节、保留行）。本脚本末尾实测一次该 sweeper
+ *       （fileRefCleanupProbe），m1/m2 曲线仍按「清扫未开启」的当前产品行为计量。
  *   m3  file_refs 行数与 SQLite 大小：每 20 次只读连接查 COUNT；SQLite 大小 = 主文件 +
  *       -wal + -shm。
  *   m4  同 sha256 重复登记行为：100 次产物字节**全同**（同内容 1KB）→ 统计 Main 交付箱
@@ -55,10 +57,13 @@ import { openTaskStore } from '@fshine/core';
 import type { AppConfig, ChannelReply, IncomingChannelMessage } from '@fshine/contracts';
 import {
   createFileStore,
+  fileStoragePathOf,
   sessionDirOf,
   type FileScope,
   type FileStore,
 } from '../../../packages/agent/src/file-store';
+import { cleanupExpiredFileRefBytes } from '../../../packages/agent/src/file-ref-cleanup';
+import { fileRefTtlMsOf, resolveRuntimeConfig } from '../../../packages/agent/src/resource-policy';
 import { createServer, workspaceRootOf } from '../../../apps/server/server';
 import type { DriverMessage, TurnDriver } from '../../../packages/agent/src/driver-contract';
 
@@ -225,7 +230,7 @@ async function makeServerHarness(): Promise<ServerHarness> {
   const dir = mkdtempSync(path.join(os.tmpdir(), `cap01-r5-resources-`));
   const dbPath = path.join(dir, 'state.db');
   const config: AppConfig = {
-    principals: { [`${CHANNEL}:${USER_A}`]: { enabled: true, accountSetScope: 'all', capabilities: ['read'] } },
+    principals: { [`${CHANNEL}:${USER_A}`]: { enabled: true } },
     contextProfiles: {
       dummy: { root: path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform'), gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },
     },
@@ -435,6 +440,85 @@ function runDedupProbes(dbPath: string, workspaceRoot: string): DedupProbeResult
   return results;
 }
 
+interface FileRefCleanupProbe {
+  ttlDays: number;
+  ttlMs: number;
+  rowsBefore: number;
+  keptAtNow: number;
+  deletedAtNow: number;
+  wouldDeleteAtExpiry: number;
+  deletedAtExpiry: number;
+  failedAtExpiry: number;
+  rowsAfter: number;
+  bytesRemainingForDeleted: number;
+  ok: boolean;
+  detail: string;
+}
+
+/**
+ * 过期 file_refs 字节回收实测（不是代码阅读注记）：
+ *   ① 现在时点跑一次：新鲜行不应被删；
+ *   ② 把时钟推到 TTL 之后 dryRun：统计应删数；
+ *   ③ 同一过期时点实跑：删除数与 dryRun 一致、行数不变、被删行字节不再存在。
+ * 任一不成立 → ok=false；调用方把它计入 harnessOk，避免「sweeper 存在且只删字节」退化成
+ * 永远通过的文字。
+ */
+function runFileRefCleanupProbe(dbPath: string, workspaceRoot: string): FileRefCleanupProbe {
+  const store = openTaskStore(dbPath, { readOnly: true });
+  try {
+    const config = resolveRuntimeConfig({});
+    const ttlMs = fileRefTtlMsOf(config);
+    const rowsBefore = store.listAllFileRefs().length;
+    const now = Date.now();
+    const atNow = cleanupExpiredFileRefBytes({ store, workspaceRoot, config, nowMs: now });
+    const future = now + ttlMs + 60_000;
+    const dry = cleanupExpiredFileRefBytes({ store, workspaceRoot, config, nowMs: future, dryRun: true });
+    const actual = cleanupExpiredFileRefBytes({ store, workspaceRoot, config, nowMs: future });
+    const allRows = store.listAllFileRefs();
+    const rowsById = new Map(allRows.map((row) => [row.fileId, row]));
+    const deletedRows = actual.events
+      .filter((event) => event.action === 'deleted_bytes')
+      .flatMap((event) => {
+        const row = rowsById.get(event.fileId);
+        return row === undefined ? [] : [row];
+      });
+    const bytesRemaining = deletedRows.filter((row) =>
+      existsSync(fileStoragePathOf(
+        workspaceRoot,
+        { principalId: row.principalId, sessionId: row.sessionId },
+        row.fileId,
+        row.name,
+      )),
+    ).length;
+    // 真空保护：若回收/过期判定整体退化成 no-op，wouldDelete 与 deleted 会同时为 0 而
+    // 「一致」——必须要求「确实有过期行该删」，否则这一项等于没测。
+    const ok = atNow.summary.deleted === 0
+      && dry.summary.wouldDelete > 0
+      && dry.summary.wouldDelete === actual.summary.deleted
+      && actual.summary.failed === 0
+      && allRows.length === rowsBefore
+      && bytesRemaining === 0;
+    return {
+      ttlDays: config.fileRefTtlDays,
+      ttlMs,
+      rowsBefore,
+      keptAtNow: atNow.summary.kept,
+      deletedAtNow: atNow.summary.deleted,
+      wouldDeleteAtExpiry: dry.summary.wouldDelete,
+      deletedAtExpiry: actual.summary.deleted,
+      failedAtExpiry: actual.summary.failed,
+      rowsAfter: allRows.length,
+      bytesRemainingForDeleted: bytesRemaining,
+      ok,
+      detail: `TTL 来自 runtime.fileRefTtlDays=${config.fileRefTtlDays}（${ttlMs}ms）：现在时点 deleted=${atNow.summary.deleted}、kept=${atNow.summary.kept}；`
+        + `时钟推过 TTL 后 dryRun wouldDelete=${dry.summary.wouldDelete}，实跑 deleted=${actual.summary.deleted}（failed=${actual.summary.failed}）；`
+        + `file_refs 行数 ${rowsBefore}→${allRows.length}；deleted 行残留字节=${bytesRemaining}`,
+    };
+  } finally {
+    store.close();
+  }
+}
+
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -524,7 +608,7 @@ async function main(): Promise<void> {
       reusedFileIds: mainFileIds.length - distinctMainFileIds.size,
       filesDirEntries: filesDirEntries.length,
       filesDirProbeShaCopies: diskCountOfSha(workspaceRoot, SCOPE, PROBE_SHA),
-      note: 'Main 交付箱（run_js 产物未绑 taskId）的登记去重行为——对照代码注释 file-store.ts:632「S1 语义不变：每次登记新 file_id」。',
+      note: 'Main 交付箱（run_js 产物未绑 taskId）的登记去重行为——对照代码注释 file-store.ts:790-793「S1 语义不变：每次登记新 file_id」。',
     };
 
     // m5 收尾：残留子进程扫描（run.cjs 路径 → workspaceRoot 下的受限子进程）。
@@ -603,12 +687,19 @@ async function main(): Promise<void> {
       runsUntil1GB: perRunBytesClosed === null || perRunBytesClosed === 0 ? null : Math.floor(1_000_000_000 / perRunBytesClosed),
     };
 
+    // 过期 file_refs 字节回收实测（sweeper 是否真的存在、是否只删字节留行）。
+    const fileRefCleanupProbe = runFileRefCleanupProbe(dbPath, workspaceRoot);
+    if (!fileRefCleanupProbe.ok) {
+      harnessOk = false;
+      notes.push(`file_refs 字节回收实测与断言不一致：${fileRefCleanupProbe.detail}`);
+    }
+
     // 缺环（代码阅读注记 + 实测对照；不判红，只写清「缺的是哪一环」）。
     const missingLink = [
-      'runs/ 与 files/ 没有任何清扫/保留期实现：file-store.ts:382/492/571 注释说「留给 TTL 清孤儿」，但仓内不存在对应 sweeper（grep 全仓只有注释引用；apps/server 无 setInterval/清扫路径）。',
-      'FILE_REF_TTL_MS（file-store.ts:304，24h）只是**可读性窗口**：过期后行不可解析，但 runs/ 原件、files/ 副本、file_refs 行、SQLite 字节全部原地保留。',
+      'runs/ 与 files/ 的回收只在显式 ops 入口（npm run cleanup:runs）或 server 启动时的一次性清扫下发生，无定时器：run 目录见 packages/agent/src/run-dir-cleanup.ts，过期 file_refs 字节见 packages/agent/src/file-ref-cleanup.ts。',
+      `文件引用可读期 TTL 来自 runtime.fileRefTtlDays（实测 ttlDays=${fileRefCleanupProbe.ttlDays}，${fileRefCleanupProbe.ttlMs}ms）：过期后行不可解析；把时钟推过 TTL 后 sweeper 实跑 deleted=${fileRefCleanupProbe.deletedAtExpiry}（dryRun wouldDelete=${fileRefCleanupProbe.wouldDeleteAtExpiry}，failed=${fileRefCleanupProbe.failedAtExpiry}），file_refs 行数 ${fileRefCleanupProbe.rowsBefore}→${fileRefCleanupProbe.rowsAfter}，deleted 行残留字节=${fileRefCleanupProbe.bytesRemainingForDeleted}。`,
       'server-paths.ts:15 提到的 sweepScratchDirs 只在注释/历史文档里，现产品面无实现。',
-      'SessionPersistence.delete 只删 Pi 转录文件（session-persistence.ts:357），不删 workspace 的 runs//files/。',
+      'SessionPersistence 只解析 Pi 会话文件位置 + 校验（session-persistence.ts），没有 delete/清理入口；Pi 转录文件不删 workspace 的 runs//files/。',
       'sessionTtlMs 过期后 workspace 会话目录是否被回收：未见任何调用面（本脚本未实测长周期过期，标 UNDEFINED）。',
     ];
 
@@ -630,6 +721,7 @@ async function main(): Promise<void> {
       mainDedupProbe: mainProbe,
       postCloseSample,
       taskPoolProbes: dedupProbes,
+      fileRefCleanupProbe,
       leftoverChildProcesses: leftoverChildren,
       runAnatomy,
       extrapolation,
@@ -645,6 +737,7 @@ async function main(): Promise<void> {
     console.log(`runs/ 条目：${baseline.runsDirCount} → ${final.runsDirCount}；files/ 条目：${baseline.filesDirCount} → ${final.filesDirCount}`);
     console.log(`file_refs 行：${baseline.fileRefCount} → ${final.fileRefCount}；Main 面同 sha 复用 fileId 数=${mainProbe.reusedFileIds}；files/ 同 sha 副本=${mainProbe.filesDirProbeShaCopies}`);
     for (const probe of dedupProbes) console.log(`m4 ${probe.probe} — ${probe.detail}`);
+    console.log(`file_refs 字节回收实测（ok=${fileRefCleanupProbe.ok}）：${fileRefCleanupProbe.detail}`);
     console.log(`RSS 拟合：vmRSS 斜率=${rssFit.slope}B/run r=${rssFit.r}；vmHWM 斜率=${hwmFit.slope}B/run；残留子进程=${leftoverChildren.length}`);
     console.log(`SQLite 收口：db=${postCloseSample.dbBytes}(+wal ${postCloseSample.dbWalBytes})；file_refs=${postCloseSample.fileRefCount}`)
     console.log(`推算（假设 100 次/天，收口后 ${extrapolation.perRunBytesClosed}B/run）：30 天=${extrapolation.table[0]!.bytesClosed === null ? '—' : ((extrapolation.table[0]!.bytesClosed as number) / 1024 / 1024).toFixed(1)}MiB；365 天=${extrapolation.table[2]!.bytesClosed === null ? '—' : ((extrapolation.table[2]!.bytesClosed as number) / 1024 / 1024).toFixed(1)}MiB；至 1GiB 需 ${extrapolation.runsUntil1GB} 次`);

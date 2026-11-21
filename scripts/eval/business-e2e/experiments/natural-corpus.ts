@@ -1,7 +1,7 @@
 /**
  * #7 会话压缩**重设计**（bizbatch3）——自然语料（真实感多轮对话）。
  *
- * 背景（落实 `business-e2e-prereg-addendum.md` §六）：bizbatch2（§12.3）用
+ * 背景（落实 `docs/history/business-e2e-prereg-addendum.md` §六）：bizbatch2（§12.3）用
  * `bulkFiller`（6 × 8000 字符中性填充）把转录推过小窗口，结果近窗口出现
  * thinking-only 空回复（`pi_driver_empty_reply, stopReason:length`）+ 反复紧急压缩
  * 不收敛（活锁），**0 个会话完成、未取得读数**。

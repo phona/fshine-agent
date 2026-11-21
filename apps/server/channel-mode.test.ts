@@ -255,12 +255,12 @@ describe('shadow：建立连接，六类出站路径全抑制、底层零投递�
     sdk.emit('authenticated');
     await starting;
     sdk.emit('message.text', textFrame('cb-env', '你好'));
-    await vi.waitFor(() => expect(channel.shadowEvidence().userVisibleSuppressed).toBe(2)); // ack+终帧
+    await vi.waitFor(() => expect(channel.shadowEvidence().userVisibleSuppressed).toBe(1)); // 终帧（受理帧已取消）
     expect(sdk.userVisibleCalls).toBe(0);
     await channel.stop();
   });
 
-  it('ACK/进度/终态/异常兜底/拒绝/主动消息 = 17 次抑制、0 次真实投递', async () => {
+  it('进度/终态/异常兜底/拒绝/主动消息 = 14 次抑制、0 次真实投递', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const root = tempDir();
     const sdk = new RecordingSdk();
@@ -283,13 +283,13 @@ describe('shadow：建立连接，六类出站路径全抑制、底层零投递�
     expect(outcome.started).toBe(true);
     expect(channel.deliveryMode).toBe('silent'); // shadow = 出站全抑制
 
-    // ① ACK ② 进度 ③ 终态（文字 + 文件 + 图片）⑥ 主动消息同一条通道
+    // ② 进度 ③ 终态（文字 + 文件 + 图片）⑥ 主动消息同一条通道（2026-11-19 起不再有受理帧 ACK）
     sdk.emit('message.text', textFrame('cb-main', '你好'));
-    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(8));
+    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(7));
     sdk.emit('message.text', textFrame('cb-throw', 'throw')); // ④ 异常兜底
-    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(10));
+    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(8));
     sdk.emit('message.text', textFrame('cb-refuse', 'refuse')); // ⑤ 宿主拒绝文案
-    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(12));
+    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(9));
 
     const route: ChannelRoute = { channel: 'wecom', conversationId: 'g-mode' };
     const receipt = await channel.sendToConversation(route, {
@@ -301,11 +301,11 @@ describe('shadow：建立连接，六类出站路径全抑制、底层零投递�
     });
 
     // 闸门证据：六类路径逐一计数，总数精确（多/少一条都会红）。
-    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(17));
+    await vi.waitFor(() => expect(channel.shadowEvidence().suppressed).toBe(14));
     const evidence = channel.shadowEvidence();
     expect(evidence.mode).toBe('silent');
-    expect(evidence.userVisibleSuppressed).toBe(13);
-    expect(evidence.events.filter((event) => event.kind === 'reply_stream')).toHaveLength(8);
+    expect(evidence.userVisibleSuppressed).toBe(10);
+    expect(evidence.events.filter((event) => event.kind === 'reply_stream')).toHaveLength(5);
     expect(evidence.events.filter((event) => event.kind === 'send_message')).toHaveLength(1);
     expect(evidence.events.filter((event) => event.kind === 'upload_media')).toHaveLength(4);
     expect(evidence.events.filter((event) => event.kind === 'send_media')).toHaveLength(2);
@@ -346,7 +346,9 @@ const workerNeverCalled = {
   },
 };
 
-const RUN_JS_CALL = {
+/** 片 2：交付物只从 Worker 出 —— Main 交办，Worker 的 run_js 写 out/汇总.txt。 */
+const TASK_RUN_CALL = { tool: 'task_run', args: { task: '帮我汇总成一份文件' } };
+const WORKER_RUN_JS_CALL = {
   tool: 'run_js',
   args: { code: "require('node:fs').writeFileSync('out/汇总.txt', 'summary-bytes');" },
 };
@@ -354,13 +356,15 @@ const RUN_JS_CALL = {
 function testConfig(): AppConfig {
   return {
     principals: {
-      'wecom:user-a': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:user-a': { enabled: true },
     },
     contextProfiles: {
       dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },
     },
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
+    // 有推送面 = 后台派发（async）；0 窗口让受理即返回，文件投递走后台完成回调。
+    runtime: { taskRunWaitMs: 0 },
   };
 }
 
@@ -384,7 +388,8 @@ interface FileTurnRun {
 }
 
 /**
- * 同一输入（一条消息 → run_js 产出 out/汇总.txt → 回合末主动投递）跑一遍 server。
+ * 同一输入（一条消息 → Main 交办 → Worker run_js 产出 out/汇总.txt → 回合末主动投递）
+ * 跑一遍 server。片 2 起 Main 自己不产交付物。
  * previousAssembly=true 复现"改动前"的装配：直接 `new WecomBotChannel({deliveryMode:'live'})`
  * + 直接 `channel.start(...)`，不经档位装配；用于 live 的逐字对比。
  */
@@ -405,7 +410,13 @@ async function runFileTurn(options: { mode: ChannelMode; previousAssembly?: bool
   const logs: Array<Record<string, unknown>> = [];
   const mainDriver = {
     async run(input: { exec: (tool: string, args: Record<string, unknown>) => Promise<unknown> }) {
-      await input.exec(RUN_JS_CALL.tool, RUN_JS_CALL.args);
+      await input.exec(TASK_RUN_CALL.tool, TASK_RUN_CALL.args);
+      return { text: '汇总完成。', messages: [] };
+    },
+  };
+  const workerDriver = {
+    async run(input: { exec: (tool: string, args: Record<string, unknown>) => Promise<unknown> }) {
+      await input.exec(WORKER_RUN_JS_CALL.tool, WORKER_RUN_JS_CALL.args);
       return { text: '汇总完成。', messages: [] };
     },
   };
@@ -413,7 +424,7 @@ async function runFileTurn(options: { mode: ChannelMode; previousAssembly?: bool
     env: { LLM_MODEL: 'test-model' },
     config: testConfig(),
     dbPath: path.join(root, 'state.db'),
-    createDrivers: () => ({ mainDriver, workerDriver: workerNeverCalled }),
+    createDrivers: () => ({ mainDriver, workerDriver }),
     createExecutionFace: async () => ({
       client: new FaceClient(),
       allowedOperations: ['dummy.query'],
@@ -433,6 +444,11 @@ async function runFileTurn(options: { mode: ChannelMode; previousAssembly?: bool
     sdk.emit('authenticated'); // offline 下无监听者（start 未调用），no-op
     await starting;
     const reply = await server.handler(incoming(options.previousAssembly === true ? 'm-beforeChange' : `m-${options.mode}`));
+    // 有推送面 = async：文件投递发生在后台完成回调里；关服务器前必须等它落账
+    // （否则 close 会先关库，后台收尾变成未处理异常）。
+    await vi.waitFor(() => {
+      expect(logs.some((line) => line['event'] === 'file_delivery')).toBe(true);
+    }, { timeout: 15_000 });
     return { logs, sdk, clientFactoryCalls, reply };
   } finally {
     await channel.stop();
@@ -444,9 +460,11 @@ describe('shadow / offline 的 file_delivery 事件：sent 数 = 0、suppressed 
   for (const mode of ['shadow', 'offline'] as const) {
     it(`${mode}：文件回合记 suppressed（sent=0、files=1、deliveryMode=silent）`, async () => {
       const run = await runFileTurn({ mode });
+      await vi.waitFor(() => {
+        expect(run.logs.filter((line) => line['event'] === 'file_delivery')).toHaveLength(1);
+      });
       const deliveryLogs = run.logs.filter((line) => line['event'] === 'file_delivery');
-      expect(deliveryLogs).toHaveLength(1);
-      expect(deliveryLogs[0]).toEqual({
+      expect(deliveryLogs[0]).toMatchObject({
         event: 'file_delivery',
         principalId: 'wecom:user-a',
         sessionId: 'wecom:conv-a',
@@ -455,9 +473,8 @@ describe('shadow / offline 的 file_delivery 事件：sent 数 = 0、suppressed 
         deliveryMode: 'silent',
       });
       expect(run.logs.filter((line) => line['event'] === 'file_delivery' && line['status'] === 'sent')).toHaveLength(0);
-      expect(run.logs.find((line) => line['event'] === 'message_done')?.['fileDelivery'])
-        .toEqual({ status: 'suppressed', files: 1 });
-      // 用户收到的正文不被「未送达」污染（静默部署本就无真实收件人）。
+      // owner 2026-11-19：用户看到的话永远是模型说的——交办回合的模型文本原样送达，
+      // 也就不会被「未送达」话术污染（静默部署本就无真实收件人）。
       expect(run.reply).toBe('汇总完成。');
       if (mode === 'offline') {
         expect(run.clientFactoryCalls).toBe(0); // 全程没有建立 WS 连接
@@ -537,7 +554,7 @@ describe('live：与改动前逐字节同序（同一输入同一事件序列）
       { method: 'on', detail: 'message.file' },
       { method: 'on', detail: 'message.mixed' },
       { method: 'connect', detail: '' },
-      { method: 'replyStream', detail: '收到,正在处理…:false' },
+      // 2026-11-19：受理帧「收到,正在处理…」已删（owner 判定无用），流从进度帧开始。
       { method: 'replyStream', detail: '步骤一:正在定位账套:false' },
       { method: 'replyStream', detail: '计划通知：本期口径已变更:false' },
       { method: 'replyStream', detail: '完成:true' },
@@ -551,18 +568,29 @@ describe('live：与改动前逐字节同序（同一输入同一事件序列）
     ]);
   });
 
-  it('server 侧同一输入：装配后的 live 与改动前硬编码 live 的 file_delivery/message_done 事实逐字相同', async () => {
+  it('server 侧同一输入：装配后的 live 与改动前硬编码 live 的 file_delivery 事实逐字相同', async () => {
     const assembled = await runFileTurn({ mode: 'live' });
     const beforeChange = await runFileTurn({ mode: 'live', previousAssembly: true });
 
-    const facts = (run: FileTurnRun) => ({
-      delivery: run.logs.filter((line) => line['event'] === 'file_delivery'),
-      doneDelivery: run.logs
-        .filter((line) => line['event'] === 'message_done')
-        .map((line) => line['fileDelivery']),
+    // 有推送面 = 后台派发（async）：文件投递在后台完成回调里落账（message_done 是受理回合，
+    // 不再承载 turn 级 fileDelivery——投递事实以 file_delivery/task_result_delivery_* 为准）。
+    await vi.waitFor(() => {
+      expect(assembled.logs.filter((line) => line['event'] === 'file_delivery')).toHaveLength(1);
+      expect(beforeChange.logs.filter((line) => line['event'] === 'file_delivery')).toHaveLength(1);
     });
-    expect(facts(assembled)).toEqual(facts(beforeChange));
-    expect(facts(assembled).delivery).toEqual([{
+    // 逐字比较时去掉每次任务不同的 taskId（投递事实的稳定字段逐字相同）。
+    const deliveryFacts = (run: FileTurnRun) => run.logs
+      .filter((line) => line['event'] === 'file_delivery')
+      .map((line) => ({
+        event: line['event'],
+        principalId: line['principalId'],
+        sessionId: line['sessionId'],
+        files: line['files'],
+        status: line['status'],
+        ...(line['parts'] === undefined ? {} : { parts: line['parts'] }),
+      }));
+    expect(deliveryFacts(assembled)).toEqual(deliveryFacts(beforeChange));
+    expect(deliveryFacts(assembled)).toEqual([{
       event: 'file_delivery',
       principalId: 'wecom:user-a',
       sessionId: 'wecom:conv-a',
@@ -570,7 +598,6 @@ describe('live：与改动前逐字节同序（同一输入同一事件序列）
       status: 'sent',
       parts: 1,
     }]);
-    expect(facts(assembled).doneDelivery).toEqual([{ status: 'sent', files: 1 }]);
     // live 的真实出站确实落到替身（证明 sent 来自闸门放行，而不是端口感官）。
     expect(assembled.sdk.uploads).toEqual(['汇总.txt']);
     expect(assembled.sdk.activeMedia).toHaveLength(1);

@@ -23,16 +23,16 @@ import type { CapabilityManifest, ExecutionOutcome } from '@fshine/contracts/exe
 
 const TRUSTED_ROOT = '/trusted/root';
 
-/** 约束语义关键句（钉死语义，防措辞漂移丢义）。 */
+/** 工作目录纪律关键句（钉死语义，防措辞漂移丢义；2026-11-20 改第二人称行为句）。 */
 const CONSTRAINT_PHRASES = [
-  `你的可信工作目录是：${TRUSTED_ROOT}`,
-  '不要主动访问该目录之外的文件',
-  '不要读取宿主配置、凭据、其他项目或用户主目录',
-  '该约束同样适用于你启动的任何子进程',
+  `你的工作目录是：${TRUSTED_ROOT}`,
+  '处理文件只在这个目录里进行',
+  '不要去翻别人的配置、账号信息或别的目录',
+  '这条对你调用的工具一样适用',
 ] as const;
 
 /** 现行 Worker 提示的内联锚（逐字节防漂移用，与 ② 的全量比对互补）。 */
-const BASE_PROMPT_ANCHOR = '你是 fshine 的执行层 Worker：宿主把一项平台任务委派给你，你在一个受信工作区里工作。';
+const BASE_PROMPT_ANCHOR = '你接到一件要办的事，按给你的输入去做。';
 
 /** 最小执行客户端假件：单只读 operation，execute 恒 completed。 */
 class FakeClient implements ExecutionClient {
@@ -124,7 +124,7 @@ describe('createSession：workerWorkspaceRoot 传到 Worker 提示', () => {
     expect(worker.prompts().length).toBeGreaterThan(0);
     for (const prompt of worker.prompts()) {
       expect(prompt).toContain(TRUSTED_ROOT);
-      expect(prompt).toContain('不要主动访问该目录之外的文件');
+      expect(prompt).toContain('处理文件只在这个目录里进行');
     }
   });
 

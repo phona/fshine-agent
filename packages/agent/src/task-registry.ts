@@ -11,7 +11,7 @@
  *     与迁移回填/显示回落同规则；#4-a 模型命名递延，不改 task_run 工具 schema）；
  *   · replyText：Main 本回合最终回复（send 收尾后 archiveReply 同值写本回合各任务行）。
  *
- * P2a 契约核心（2026-11-14；来源 docs/product/r4-joint-interfaces.md §1 v1 冻结）：
+ * P2a 契约核心（2026-11-14；来源 docs/history/r4-joint-interfaces.md §1 v1 冻结）：
  *   · 状态集 queued/running/waiting_user/cancelling/cancelled/completed/failed/timed_out
  *     + 保留 unexecuted（已汇报零执行）；
  *   · 合法转换矩阵见 LEGAL_TRANSITIONS（其余一律拒绝并留痕：TaskTransitionError，
@@ -25,7 +25,8 @@
  *   · result_unknown ≠ failed ≠ success：重启后无法确认的 running 任务经
  *     markResultUnknown / expireLeases 落 failed + reason=result_unknown，禁止自动重放。
  *
- * inline 路径维持现冻结语义（judgeReportedTask 不改；complete/fail 仍按既有口径收尾，
+ * inline 路径维持现冻结语义（judgeReportedTask 的 P2a 口径不改——2026-11-21 只增补「成功脚本
+ * run_js 不盖前面执行层失败」一项；complete/fail 仍按既有口径收尾，
  * waiting_user 仅后台任务使用）。
  *
  * U3 稳定逻辑操作身份（2026-11-16，仅追加，不新建第二套 Registry）：
@@ -49,6 +50,13 @@
  * 一律 TaskOwnershipError；取不存在的任务与越权同一错误（不泄漏任务是否存在）。
  */
 import type { ExecutionFailure, ExecutionOutcome, ExecutionStatus } from '@fshine/contracts/execution-contract';
+
+/**
+ * 宿主脚本工具的操作名（与 execution-runtime 的 `RUN_JS_TOOL` 同值，2026-11-21）。
+ * task-registry 是下层模块，反向 import execution-runtime 会成环，故此处只存字面量；
+ * 同值由 task-status-boundary.test.ts 的机械钉子钉住（任一侧改名漂移必红）。
+ */
+export const RUN_JS_OPERATION = 'run_js';
 
 /** P2a：冻结状态集（顺序即契约登记顺序）。unexecuted = 已汇报零执行（保留）。 */
 export const TASK_STATUSES = [
@@ -79,11 +87,36 @@ export type TaskReason = (typeof TASK_REASONS)[number];
 /** 超时种类（超时链：queued 排队等待 / execution 执行 / waiting_user 用户等待）。 */
 export type TimeoutKind = 'queued' | 'execution' | 'waiting_user';
 
+/**
+ * 写操作提案的机械形状（执行层 needs_confirmation 事实；原样承载，不解释、不裁决）。
+ * handle 是执行层发放的确认凭据：留底账供后续回合透传（S3），**不进模型/用户可见投影**
+ * （execution-runtime 的 toModelVisibleOutcome / pendingQuestionView 负责剥离）。
+ */
+export interface PendingConfirmation {
+  /** 执行层发放的确认句柄（非空；宿主持有）。 */
+  handle: string;
+  /** 机械摘要（可展示；非空）。 */
+  summary: string;
+  expiresAt?: string;
+  /** 提案所属 operation（执行事实原样；接续透传时用）。 */
+  operation: string;
+  /**
+   * 提案调用的参数**原文**（不透明数据：宿主不解析业务字段、不改写、不补——与句柄同一条
+   * 底账记录，不另建表）。2026-11-19 live 修复（确认后续跑 Worker 是新会话、没有转录）：
+   * 只给摘要时 Worker 只能从人话摘要重编参数，与执行层绑定校验相撞（摘要超 10 条被截断 →
+   * 漏 --records → CONFIRMATION_BINDING_MISMATCH）；确认续跑时这份参数原样交回 Worker。
+   * 缺省 = 旧记录（无参数可交回；渲染端不编造）。
+   */
+  args?: Record<string, unknown>;
+}
+
 /** waiting_user 的机械问题形状（执行层 needs_input 事实；不编造、不改写候选）。 */
 export interface PendingQuestion {
   missing: readonly string[];
   candidates?: readonly string[];
   raw?: string;
+  /** 写操作提案（可选）：needs_confirmation 与 needs_input 同走 waiting_user，不新状态。 */
+  confirmation?: PendingConfirmation;
 }
 
 /**
@@ -139,33 +172,58 @@ export interface ExecutedFact {
 /**
  * 完成判定（内存 / SQLite 共用，两实现逐项一致）：只看已记录的执行事实，不嗅探汇报文本。
  *   · 零条执行 → unexecuted（Worker 汇报了但没向执行层发起任何调用）；
- *   · 全部 completed → completed；
- *   · 任一非 completed → failed，failureReason 机械合成（取首个非 completed 的
- *     operation/status/error.message 原样；无 error.message 时以状态收尾）。
+ *   · **末条执行** completed → completed（末条是成功脚本 run_js 的例外见下）；
+ *   · 末条执行非 completed → failed，failureReason 机械合成（取**末条**的 operation/status/
+ *     error.message 原样；无 error.message 时以状态收尾）。
+ * 为什么是「末条」而不是「首个非 completed」（2026-11-19 owner 修法）：执行层的参数形态反馈
+ * 回路本就鼓励模型「改对参数再试一次」；改对后的成功是末次决定性结果，写已经落库，不得被前序
+ * 失败整体判 failed（真模型写闭环实跑 5 次复现 2 次：写落库却告知失败并引导重试 → 重复写风险）。
+ * 前序失败逐条保留在 executions 里（审计可查、可追溯），只是不改写终局。末条仍是失败 → 照旧
+ * failed（不放宽；「只要有一次成功过就算成功」的万金油不成立）。result_unknown 不是成功，
+ * 也不属于本判定的收窄面。
+ * 2026-11-21 增补（Grok 审查 blocking 的 inline 面）：run_js 是宿主脚本执行，不是执行层业务
+ * 执行——末条是**成功的脚本**时，业务终局回到此前最后一条非脚本执行事实（执行层失败/needs_input
+ * 不得被脚本成功盖成 completed；脚本失败行本身仍如实保留）。只收窄这一个方向，见函数内注释。
+ * 局限（如实登记）：inline 判定只拿到执行事实投影（无只读集合、无调用参数），无法区分读写、
+ * 也无法做「成功后同对象重复尝试 / 另一个写没成」的归类，因此以**末条执行事实**为准；后台单回合
+ * 执行器（execution-runtime）知道只读集合与参数，以「末次决定性结果 + 成功后按同对象分类」为准，
+ * 并在 run_js 上双向收窄（成功脚本不盖失败的写、失败脚本不翻已落库的写）。
  * 为什么不是无条件 completed：Worker 以汇报结束不等于执行层成功——「执行层实际成功 /
  * 拒绝或失败 / 未发起执行」必须在顶层 status 上可区分（B 类如实交付）。
  *
- * P2a 不改本判定（E05/E06 冻结语义）；waiting_user 由后台路径的 waitForUser 单独进入，
+ * P2a 冻结语义（E05/E06）不变；waiting_user 由后台路径的 waitForUser 单独进入，
  * 本函数仅服务于 inline complete 的终态判定。
  */
 export function judgeReportedTask(executions: readonly ExecutedFact[]): {
   status: 'completed' | 'failed' | 'unexecuted';
   failureReason?: string;
 } {
-  if (executions.length === 0) {
+  const last = executions[executions.length - 1];
+  if (last === undefined) {
     return {
       status: 'unexecuted',
-      failureReason: '未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。',
+      failureReason: '没有实际办理：助手已汇报，但这次交办没有发出任何办理动作。',
     };
   }
-  const unsuccessful = executions.find((execution) => execution.status !== 'completed');
-  if (unsuccessful === undefined) return { status: 'completed' };
-  const message = unsuccessful.error?.message ?? '';
+  /**
+   * 2026-11-21（Grok 审查 blocking 的 inline 面）：run_js 是宿主脚本执行，不是执行层业务
+   * 执行。末条是**成功的脚本**时，业务终局回到此前最后一条非脚本执行事实——执行层失败
+   * （或 needs_input）不得被随后的脚本成功盖成 completed（同后台单回合执行器同口径）。
+   * 只收窄这一个方向：脚本之间（[run_js failed, run_js completed]）仍按末条决定；脚本失败
+   * 仍是真实失败事实（末条 failed run_js → failed 不变）——inline 拿不到只读集合，无法区分
+   * 前序 completed 是读还是写，而「查询成功 + 脚本失败 → failed」是冻结用例
+   * （runtime-worker-run-js），不得放宽。
+   */
+  const decisive = last.operation === RUN_JS_OPERATION && last.status === 'completed'
+    ? [...executions].reverse().find((entry) => entry.operation !== RUN_JS_OPERATION) ?? last
+    : last;
+  if (decisive.status === 'completed') return { status: 'completed' };
+  const message = decisive.error?.message ?? '';
   return {
     status: 'failed',
     failureReason: message === ''
-      ? `执行层未成功：${unsuccessful.operation} 返回 ${unsuccessful.status}。`
-      : `执行层未成功：${unsuccessful.operation} 返回 ${unsuccessful.status}：${message}`,
+      ? `没办成：${decisive.operation} 返回 ${decisive.status}。`
+      : `没办成：${decisive.operation} 返回 ${decisive.status}：${message}`,
   };
 }
 
@@ -194,6 +252,21 @@ export interface TaskRecord {
   name?: string;
   /** P1：本回合 Main 最终回复全文（同回合各任务行同值；缺省=无最终回复存档）。 */
   replyText?: string;
+  /**
+   * 预期契约（2026-11-18）：宿主已发过对应档「长时间没动静」提醒的时刻（ISO）。
+   * 缺省 = 尚未提醒；每档写入一次后不再改（同一任务每档只提醒一次，重启不重发）。
+   *   · longRunningNotifiedAt = 「久无动静」档（10 分钟；唤醒切片起由唤醒模型说）；
+   *   · waitContactLostNotifiedAt = 长任务等待「与执行层断了联系（无回执）」档（2026-11-19）；
+   *   · 30 分钟「卡住」档已随 2026-11-19 唤醒切片删除（longRunningStuckNotifiedAt 不再写入）。
+   */
+  longRunningNotifiedAt?: string;
+  waitContactLostNotifiedAt?: string;
+  /**
+   * 本轮开始运行的时刻（ISO，单调写一次）。长任务受理后租约会被清掉，「跑了多久」不能
+   * 只从租约反推——否则最该主动汇报的长任务反而不在提醒扫描里（2026-11-19）。
+   * 缺省 = 未跑过（排队中 / 旧库只读未迁移）。
+   */
+  runningSince?: string;
   executions: readonly ExecutionRecord[];
   createdAt: string;
   updatedAt: string;
@@ -311,6 +384,21 @@ function assertPendingQuestion(question: PendingQuestion): void {
   if (question.raw !== undefined && typeof question.raw !== 'string') {
     throw new TypeError('pendingQuestion 形状非法：raw 必须是字符串。');
   }
+  if (question.confirmation !== undefined) {
+    const { handle, summary, expiresAt, operation } = question.confirmation;
+    if (typeof handle !== 'string' || handle.trim() === '') {
+      throw new TypeError('pendingQuestion 形状非法：confirmation.handle 必须是非空字符串。');
+    }
+    if (typeof summary !== 'string' || summary.trim() === '') {
+      throw new TypeError('pendingQuestion 形状非法：confirmation.summary 必须是非空字符串。');
+    }
+    if (expiresAt !== undefined && (typeof expiresAt !== 'string' || expiresAt.trim() === '')) {
+      throw new TypeError('pendingQuestion 形状非法：confirmation.expiresAt 必须是非空字符串。');
+    }
+    if (typeof operation !== 'string' || operation.trim() === '') {
+      throw new TypeError('pendingQuestion 形状非法：confirmation.operation 必须是非空字符串。');
+    }
+  }
 }
 
 /**
@@ -392,11 +480,12 @@ export interface TaskFactSeed {
 }
 
 /**
- * 逻辑操作账的状态集（U3）。completed/needs_confirmation/needs_input/failed/refused
- * 与执行结果五态同名；claimed = 已认领未落定；unknown = 结果未知（待核对，禁止自动重放）。
+ * 逻辑操作账的状态集（U3 + 长任务 v4）。completed/needs_confirmation/needs_input/failed/
+ * refused 与执行结果同态；accepted = 执行层已受理长任务（operationId 在 outcome 里），
+ * 等待宿主用 wait 推进；claimed = 已认领未落定；unknown = 结果未知（待核对，禁止自动重放）。
  * needs_confirmation 只是执行层返回的机械事实：宿主把它记进账行，不代表宿主裁决确认。
  */
-export const OPERATION_STATUSES = ['claimed', 'completed', 'needs_confirmation', 'needs_input', 'failed', 'refused', 'unknown'] as const;
+export const OPERATION_STATUSES = ['claimed', 'accepted', 'completed', 'needs_confirmation', 'needs_input', 'failed', 'refused', 'unknown'] as const;
 
 export type OperationStatus = (typeof OPERATION_STATUSES)[number];
 
@@ -479,7 +568,7 @@ export type OperationClaimDecision =
  * 重绑定决策（内存/SQLite 共用，只读输入、零 IO）：候选行由调用方按
  * 「显式 dispatchKey」或「(scope, operation, replayWindow)」读出；本函数不接收 args。
  *
- * 规则（R 系列，见 docs/product/pi-152-dispatch-key-design.md §5.3）：
+ * 规则（dispatchKey 设计 §5.3；设计文档 2026-11-18 删除，git 历史可考）：
  *   · 显式键：同 operation 且已落定 → 回放；进行中 → in_progress；未知 → 待核对；
  *     不同 operation → conflict；键不存在 → 待核对（不按该键铸造）；
  *   · 无窗口 → 铸造新行（两笔合法同参数操作 = 两行两 key）；
@@ -544,6 +633,24 @@ export interface TaskRegistry {
   get(taskId: string, scope: TaskScope): TaskRecord;
   /** scope 缺省 = 全部任务；给出时只返回该 principal + session 的任务（不跨会话泄漏）。 */
   list(scope?: TaskScope): readonly TaskRecord[];
+  /**
+   * 只读 waiting_user 行（到期扫描用：避免每趟 pump 全表分配）。
+   * 给出 scope 时只返回该 principal + session 的等待行（交办前的「有没有待确认提案」检查走索引）。
+   */
+  listWaiting(scope?: TaskScope): readonly TaskRecord[];
+  /**
+   * 只读 running 行（预期契约 2026-11-18：长时间提醒扫描用；避免每趟 pump 全表分配）。
+   * 只读状态事实，不做判定。
+   */
+  listRunning(): readonly TaskRecord[];
+  /**
+   * 预期契约（2026-11-18；2026-11-19 唤醒切片删除「卡住」档）：原子领取一档「长时间没动静」
+   * 提醒——只有该档尚未提醒过才写入并返回 true；已提醒过返回 false（零写入）。
+   * stage = 'overdue'（10 分钟「久无动静」档）|'contact_lost'（长任务等待与执行层断了联系、
+   * 无回执；只说明没拿到回执，不代表任务失败）。
+   * 并发/重启下同一任务每档至多一次；不改任务状态、不产状态事实。
+   */
+  claimLongRunningNotice(taskId: string, stage: 'overdue' | 'contact_lost', at: string): boolean;
   /** 通用状态转换（合法边见冻结矩阵；给出 scope 先校验归属）。 */
   transition(taskId: string, to: TaskStatus, options?: TransitionOptions): TaskRecord;
   /** running→waiting_user：持久化 pendingQuestion（missing/candidates?/raw?）与 waiting_since。 */
@@ -586,6 +693,23 @@ export interface TaskRegistry {
   markOperationUnknown(dispatchKey: string, reason: string, options?: { now?: string }): OperationRecord;
   /** U3：按身份键读回（审计/测试；不存在返回 undefined）。 */
   getOperation(dispatchKey: string): OperationRecord | undefined;
+  /**
+   * 长任务（契约 v4）：所有 accepted 行（按 claimed_at 升序）。宿主重启后据此重新 wait——
+   * operationId 在 outcome 里（`{status:'accepted', operationId, pollAfterMs?}`），
+   * taskId 绑定到任务行。只读；不推进任何状态。
+   */
+  listAcceptedOperations(): readonly OperationRecord[];
+  /**
+   * 长任务终态落定：accepted → completed/failed（别的状态不覆盖，幂等）。
+   * 结果由 wait 返回；这里只把账行从「进行中」推进到终态，不重放、不重铸身份。
+   */
+  settleAcceptedOperation(dispatchKey: string, outcome: ExecutionOutcome, options?: { now?: string }): OperationRecord;
+  /**
+   * 长任务让出槽位：清掉 running 行的租约（任务仍 running，等待宿主 wait 唤醒）。
+   * 不产状态转换事实（状态没变）；只清租约，避免 expireLeases 把等待中的任务判成
+   * result_unknown。
+   */
+  releaseTaskLease(taskId: string, options?: MutationOptions): TaskRecord;
 }
 
 /** 库内可变形状：对外只读视图由 TaskRecord 承担。 */
@@ -689,6 +813,8 @@ export function createTaskRegistry(): TaskRegistry {
       else task.failureReason = extras.failureReason;
     }
     task.updatedAt = at;
+    // 本轮开始运行时刻：第一次进入 running 写一次，之后不动（长任务受理会清租约，不清它）。
+    if (task.status === 'running' && task.runningSince === undefined) task.runningSince = at;
     const fact = factOf(task, {
       from,
       to: next.status,
@@ -713,6 +839,7 @@ export function createTaskRegistry(): TaskRegistry {
         taskNo: nextTaskNo,
         name: deriveTaskName(input.request),
         executions: [],
+        ...(status === 'running' ? { runningSince: now } : {}),
         createdAt: now,
         updatedAt: now,
       };
@@ -749,6 +876,23 @@ export function createTaskRegistry(): TaskRegistry {
     },
     get(taskId, scope) {
       return require(taskId, scope);
+    },
+    listWaiting(scope) {
+      return [...tasks.values()]
+        .filter((task) => task.status === 'waiting_user'
+          && (scope === undefined
+            || (task.principalId === scope.principalId && task.sessionId === scope.sessionId)))
+        .map((task) => ({ ...task }));
+    },
+    listRunning() {
+      return [...tasks.values()].filter((task) => task.status === 'running').map((task) => ({ ...task }));
+    },
+    claimLongRunningNotice(taskId, stage, at) {
+      const task = require(taskId);
+      const field = stage === 'overdue' ? 'longRunningNotifiedAt' : 'waitContactLostNotifiedAt';
+      if (task[field] !== undefined) return false;
+      task[field] = at;
+      return true;
     },
     list(scope) {
       const all = [...tasks.values()];
@@ -918,6 +1062,35 @@ export function createTaskRegistry(): TaskRegistry {
     },
     getOperation(dispatchKey) {
       return operations.get(dispatchKey);
+    },
+    listAcceptedOperations() {
+      return [...operations.values()]
+        .filter((row) => row.status === 'accepted')
+        .sort((left, right) => (left.claimedAt < right.claimedAt ? -1 : left.claimedAt > right.claimedAt ? 1 : left.opSeq - right.opSeq));
+    },
+    settleAcceptedOperation(dispatchKey, outcome, options = {}) {
+      const row = operations.get(dispatchKey);
+      if (row === undefined) {
+        throw new Error(`未知的逻辑操作身份：${dispatchKey}（只认已持久化的 key，不接受现造身份）。`);
+      }
+      // 只推进 accepted 行；重复落定/已终态不覆盖（幂等，未知不被洗白）。
+      if (row.status !== 'accepted') return row;
+      const now = options.now ?? new Date().toISOString();
+      row.status = operationStatusOf(outcome);
+      if (row.status === 'accepted') return row; // 仍进行中：不推进
+      if (row.status === 'unknown') row.reason = 'result_unknown';
+      else delete row.reason;
+      row.outcome = outcome;
+      row.settledAt = now;
+      row.deliveredAt = now;
+      return row;
+    },
+    releaseTaskLease(taskId, options = {}) {
+      const task = require(taskId, options.scope);
+      delete task.leaseOwner;
+      delete task.leaseUntil;
+      task.updatedAt = new Date().toISOString();
+      return task;
     },
   };
 }

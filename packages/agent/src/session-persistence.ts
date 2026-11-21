@@ -1,68 +1,63 @@
 /**
- * B1 会话持久化 —— 独立存储层。
- *
- * 目标：让 `(principalId, sessionId)` 的对话转录在进程重启后不丢，且**不引第二套任务
- * 事实源**、**不另建第二份可变 AgentMessage 转录状态**。
+ * 会话文件定位 —— Pi 原生会话的 `(principalId, sessionId)` 唯一文件解析 + 落盘校验。
  *
  * 架构前提（硬，来自 owner）：
- *   · **Pi Session 是唯一转录所有者**。本层不持有 `AgentMessage[]`，不缓存完整转录；
- *     每次读都从 Pi 的 entry-log 现读（见 PersistedSessionImpl.readTranscript）。
- *   · **只复用 Pi 正式公开的持久化能力**：`@earendil-works/pi-coding-agent` root 导出的
- *     `SessionManager`（`create` / `open`）。不自造存储/编解码，不 deep-import 未导出路径。
- *   · 本层只做三件 Pi 单用 `SessionManager` 做不到的事（阶段 C 已证）：
+ *   · **Pi Session 是唯一转录所有者**。本层不持有 `AgentMessage[]`、不缓存转录、不搬运
+ *     message：对话写入、压缩摘要、重启恢复全部由 Pi 的 `AgentSession` + `SessionManager`
+ *     完成（生产接线见 `apps/server/server.ts` 的 `sessionFor`，落在 Pi 驱动的
+ *     `sessionDir` / `sessionId` / `resumeSessionFile`）。
+ *   · 本层只做 Pi 单用 `SessionManager` 做不到的**确定性**事：
  *       ① 把 `principalId` 映射成**独立存储子树**（物理隔离，同名 sessionId 互不串读）；
  *       ② 把 `(principalId, sessionId)` 映射成**唯一**一份会话文件（重复/非法 id 显式报错）；
- *       ③ 打开前**校验落盘文件**（坏 header / 坏 JSON 行显式抛错，崩溃半行尾丢弃），
- *          并暴露「追加一条 Pi 原生 message / 顺序读回转录」的最小 API。
- *     没有规划、没有重放、没有任务状态。
+ *       ③ 打开前**校验落盘文件**（坏 header / 坏 JSON 行显式抛错，崩溃半行尾丢弃）；
+ *       ④ 压缩后把 `firstKeptEntryId` 之前的死历史归档出活跃文件（issue #67，
+ *          见 `archiveCompactedSessionFile`；不改写 Pi 的写入路径，只做文件级维护）。
+ *   · 交付物是一个位置 `MainSessionLocation`：文件存在 → 交给驱动 `resumeSessionFile`
+ *     （Pi 原生 resume，历史与压缩摘要都在）；不存在 → 驱动在同一目录以同一 Pi id 新建。
+ *     本层不 open/create `SessionManager`，也不 import 任何 message 类型。
  *
- * 为什么不是「第二份转录」：本层不拥有转录。写 = `SessionManager.appendMessage`（Pi 内部
- * 追加单条 entry），读 = `SessionManager.getBranch`（Pi entry-log 回放）。本层只在两处之间
- * 传 Pi 原生 `AgentMessage`，不落任何自有 message 副本。这与被否证的
- * `docs/product/r5-session-persistence-design.md`「每回合追加完整转录快照」完全不同
- * ——后者在 Pi 之外维护一份随回合数逐次重写的 `messages` 数组落盘（O(n²) 无界增长），
- * 本层复用 Pi 的**单条 entry 追加日志**（线性增长）。
- *
- * 生产接线（`execution-runtime` 内存转录 → 本层）见 `apps/server/server.ts` 的装配。
+ * 为什么不是「第二份转录」：本层没有任何 message 流转。旧设计（被否证的
+ * r5-session-persistence-design，2026-11-18 已删）在 Pi 之外维护一份随回合数重写的
+ * `messages` 数组；B1 曾经改进为「Pi 单条 entry 追加」，但仍然由宿主逐条搬运 message
+ * ——那是第二套驱动式的写入路径。现在写入归 Pi 自己，本层只解析位置。
  */
 import { createHash } from 'node:crypto';
 import {
   closeSync,
+  existsSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
   readSync,
   readdirSync,
-  rmSync,
+  renameSync,
   statSync,
   truncateSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
 } from 'node:fs';
 import path from 'node:path';
-
-import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { SessionManager } from '@earendil-works/pi-coding-agent';
-import type { SessionMessageEntry } from '@earendil-works/pi-coding-agent';
+import { gzipSync } from 'node:zlib';
 
 /** 会话持久化层构造参数。 */
 export interface SessionPersistenceOptions {
   /** 存储根目录（绝对路径或相对进程 cwd）。每个 principal 在其下获得独立子树。 */
   rootDir: string;
-  /** 写入 Pi Session header 的工作目录（跨重启须稳定，否则目录/身份对不上）。 */
-  cwd: string;
 }
 
-/** 单个已打开会话的最小句柄。只读写 Pi 原生 message，不暴露任何执行/任务入口。 */
-export interface PersistedSession {
-  readonly principalId: string;
-  readonly sessionId: string;
-  /** 该会话落盘文件的绝对路径（供隔离/崩溃核验；不被本层内部当作状态）。 */
-  readonly filePath: string;
-  /** 向 Pi Session 主路径追加**一条** Pi 原生 message（无本地转录副本）。 */
-  append(message: AgentMessage): Promise<void>;
-  /** 顺序读回当前 leaf 路径上的全部 message（每次现读 Pi entry-log）。 */
-  readTranscript(): Promise<AgentMessage[]>;
-  /** 关闭该会话（本层无外部资源；释放缓存句柄）。 */
-  close(): Promise<void>;
+/**
+ * 一份 `(principalId, sessionId)` 的 Pi 会话位置（装配层据此构造 Pi 驱动）。
+ *
+ *   · `sessionDir`：本 principal 的独立会话目录（Pi 的 sessionDir）；
+ *   · `piSessionId`：新建会话时交给 Pi 的会话 id（文件名与 header 同源，重启按它找回）；
+ *   · `resumeSessionFile`：已落盘会话文件的绝对路径（存在才有）；给出即 Pi 原生 resume。
+ */
+export interface MainSessionLocation {
+  readonly sessionDir: string;
+  readonly piSessionId: string;
+  readonly resumeSessionFile?: string;
 }
 
 /** 会话发现结果（`list` 用；不从 Pi 私有 metadata 类型透传）。 */
@@ -85,7 +80,7 @@ const HEADER_SCAN_BYTES = 64 * 1024;
 
 /**
  * Pi 1.5.2 的会话 id 只接受 `[A-Za-z0-9._-]`；业务 `sessionId`（如 `wecom:conv-1`）
- * 不能直接落成 Pi id。B1 用可逆 hex 映射把外部 id 编码成 Pi id（`b1` + UTF-8 hex）：
+ * 不能直接落成 Pi id。这里用可逆 hex 映射把外部 id 编码成 Pi id（`b1` + UTF-8 hex）：
  * 无碰撞、可解码回外部 id（`list` 用），且不同 sessionId 不可能映射到同一 Pi id。
  */
 const PI_SESSION_ID_PREFIX = 'b1';
@@ -116,27 +111,6 @@ function assertExternalSessionId(sessionId: string): void {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** `SessionManager.appendMessage` 接受的 message 形状（Pi 的 message entry）。 */
-type SessionMessage = Parameters<SessionManager['appendMessage']>[0];
-
-/**
- * Pi 的 appendMessage 拒绝以 message entry 写入压缩/分支摘要（它们必须走专用 entry）。
- * B1 只持久化驱动投影出的普通 message；摘要类消息显式拒绝，不静默改写。
- */
-function isAppendableMessage(message: AgentMessage): message is SessionMessage {
-  switch (message.role) {
-    case 'system':
-    case 'user':
-    case 'assistant':
-    case 'toolResult':
-    case 'custom':
-    case 'bashExecution':
-      return true;
-    default:
-      return false;
-  }
 }
 
 /** principal 名称映射为固定长度、无路径注入风险的子树名。 */
@@ -179,7 +153,7 @@ function readSessionHeader(filePath: string): SessionFileHeader | undefined {
 }
 
 /**
- * 打开前校验落盘文件（B1 的确定性责任：Pi 的加载器会静默跳过坏行/坏 header）。
+ * 打开前校验落盘文件（本层的确定性责任：Pi 的加载器会静默跳过坏行/坏 header）。
  *
  * 规则：
  *   · 空文件 / 非法 header → 抛错（不静默重建）；
@@ -236,47 +210,214 @@ function validateSessionFile(filePath: string): void {
   if (!headerSeen) throw new Error(`Session file has missing header: ${filePath}`);
 }
 
-class PersistedSessionImpl implements PersistedSession {
-  private closed = false;
+/**
+ * 会话归档结果（压缩后把**已死**的历史段移出活跃文件）。
+ *
+ * 触发口径（issue #67 / owner 2026-11-18）：Pi 的压缩只压模型上下文，`SessionManager`
+ * 仍以 `appendFileSync` 往同一文件追加；历史段在压缩后不可能再被回放，故把
+ * `firstKeptEntryId` **之前**的条目原样移入 `<sessionDir>/archive/<文件名>.<序号>.jsonl.gz`。
+ */
+export type SessionArchiveOutcome =
+  | {
+    readonly archived: true;
+    readonly archivePath: string;
+    readonly archivedEntries: number;
+    readonly archivedBytes: number;
+    readonly activeBytesBefore: number;
+    readonly activeBytesAfter: number;
+  }
+  | { readonly archived: false; readonly reason: 'no_compaction' | 'nothing_to_archive' };
 
-  constructor(
-    readonly principalId: string,
-    readonly sessionId: string,
-    readonly filePath: string,
-    private readonly manager: SessionManager,
-    private readonly onClose: () => void,
-  ) {}
+const LF = 0x0a;
 
-  async append(message: AgentMessage): Promise<void> {
-    if (this.closed) throw new Error(`Session ${this.sessionId} is closed`);
-    if (!isAppendableMessage(message)) {
-      throw new Error(
-        `Session ${this.sessionId} cannot append a ${message.role} as a message entry; `
-          + 'Pi stores it as a dedicated entry, which B1 does not persist.',
-      );
+/** 按 `\n` 切原始行（保留行尾换行；最后一行可以没有换行）。切点只在 ASCII 换行上，UTF-8 安全。 */
+function splitRawLines(raw: Buffer): Buffer[] {
+  const lines: Buffer[] = [];
+  let start = 0;
+  for (let index = 0; index < raw.length; index += 1) {
+    if (raw[index] === LF) {
+      lines.push(raw.subarray(start, index + 1));
+      start = index + 1;
     }
-    this.manager.appendMessage(message);
   }
+  if (start < raw.length) lines.push(raw.subarray(start));
+  return lines;
+}
 
-  async readTranscript(): Promise<AgentMessage[]> {
-    return this.manager
-      .getBranch()
-      .filter((entry): entry is SessionMessageEntry => entry.type === 'message')
-      .map((entry) => entry.message);
+/** 解析一行 entry（只用于定位切分点；原始字节不因解析而改变）。空行返回 undefined。 */
+function parseSessionLine(line: Buffer, filePath: string, lineNumber: number): Record<string, unknown> | undefined {
+  const text = line.toString('utf8').trim();
+  if (text.length === 0) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`Cannot archive ${filePath}: line ${lineNumber} is not valid JSON`);
   }
-
-  async close(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    this.onClose();
+  if (!isRecord(parsed)) {
+    throw new Error(`Cannot archive ${filePath}: line ${lineNumber} is not a session entry`);
   }
+  return parsed;
 }
 
 /**
- * 按 `(principalId, sessionId)` 持久化 Pi 原生对话转录。
+ * 压缩后归档：把活跃会话文件中 `firstKeptEntryId` 之前的条目逐字节移入 gzip 归档，
+ * 并原子重写活跃文件（header + 保留段 + 压缩摘要）。
+ *
+ * 边界（确定性）：
+ *   · 只信 Pi 的 `compaction.firstKeptEntryId`；找不到该 id 显式抛错，**不按行号猜**；
+ *   · 归档内容是原文件行（含换行）的逐字节拼接，不重排、不改写；
+ *   · 先成功写出归档，再临时文件 + rename 替换活跃文件；任何一步失败都保持原文件不变；
+ *   · 活跃文件保留 session header（Pi 的 `_loadEntries` 没有 header 会新建会话并换文件名/ id，
+ *     那会直接打断重启恢复）；保留段与压缩条目顺序维持 Pi 的原始追加顺序——压缩条目必须是
+ *     叶子（在保留段之后），否则它不在 leaf 路径上，回放拿不到摘要。
+ *   · 压缩条目 `parentId` 若指向被归档条目（无保留段的极端情形），置 null：Pi 的路径遍历从
+ *     叶子沿 parentId 上溯，遇到缺失父条目即停止，空 parentId 没有副作用；置 null 是为了让
+ *     重写后的文件在语义上不引用已不在文件里的条目。
+ *
+ * 同步实现：调用点（`compaction_end`）与 Pi 的追加处在同一事件循环 tick，同步文件操作
+ * 保证改写期间不会插入新的 append。
+ */
+export function archiveCompactedSessionFile(filePath: string): SessionArchiveOutcome {
+  const raw = readFileSync(filePath);
+  const lines = splitRawLines(raw);
+  if (lines.length === 0) throw new Error(`Cannot archive ${filePath}: file is empty`);
+  const parsed = lines.map((line, index) => parseSessionLine(line, filePath, index + 1));
+  const header = parsed[0];
+  if (header === undefined || header['type'] !== 'session') {
+    throw new Error(`Cannot archive ${filePath}: first line is not a session header`);
+  }
+
+  // 最靠后的压缩条目决定当前上下文；更早的压缩条目本身也属于可归档的死历史。
+  let compactionIndex = -1;
+  let compactionEntry: Record<string, unknown> | undefined;
+  for (let index = parsed.length - 1; index >= 1; index -= 1) {
+    const entry = parsed[index];
+    if (entry !== undefined && entry['type'] === 'compaction') {
+      compactionIndex = index;
+      compactionEntry = entry;
+      break;
+    }
+  }
+  if (compactionEntry === undefined) return { archived: false, reason: 'no_compaction' };
+
+  // 切分点 = firstKeptEntryId 那一行。Pi 在 firstKeptEntryId 为空时会写成压缩条目自己的 id，
+  // 此时没有保留段，压缩条目之前的全部条目都可归档。
+  const firstKeptEntryId = compactionEntry['firstKeptEntryId'];
+  let cutIndex = -1;
+  if (typeof firstKeptEntryId === 'string' && firstKeptEntryId.length > 0) {
+    for (let index = 1; index < compactionIndex; index += 1) {
+      if (parsed[index]?.['id'] === firstKeptEntryId) {
+        cutIndex = index;
+        break;
+      }
+    }
+    if (cutIndex < 0 && firstKeptEntryId === compactionEntry['id']) cutIndex = compactionIndex;
+  }
+  if (cutIndex < 0) {
+    throw new Error(
+      `Cannot archive ${filePath}: compaction.firstKeptEntryId ${String(firstKeptEntryId)} is not in the file; refusing to guess`,
+    );
+  }
+
+  const archivedLines = lines.slice(1, cutIndex);
+  if (archivedLines.length === 0) return { archived: false, reason: 'nothing_to_archive' };
+  for (const line of archivedLines) {
+    // 活跃文件中间的行必须带换行；缺少换行说明文件已损坏，宁可失败也不拼出错位归档。
+    if (line[line.length - 1] !== LF) {
+      throw new Error(`Cannot archive ${filePath}: archived entry is missing its trailing newline`);
+    }
+  }
+  const archivedBytes = Buffer.concat(archivedLines);
+
+  const sessionDir = path.dirname(filePath);
+  const baseName = path.basename(filePath);
+  const archiveDir = path.join(sessionDir, 'archive');
+  mkdirSync(archiveDir, { recursive: true });
+  let sequence = 1;
+  let archivePath = path.join(archiveDir, `${baseName}.${sequence}.jsonl.gz`);
+  while (existsSync(archivePath)) {
+    sequence += 1;
+    archivePath = path.join(archiveDir, `${baseName}.${sequence}.jsonl.gz`);
+  }
+  const tmpArchive = path.join(archiveDir, `.${baseName}.${sequence}.tmp-${process.pid}-${Date.now()}`);
+  try {
+    writeFileSync(tmpArchive, gzipSync(archivedBytes), { flag: 'wx' });
+    renameSync(tmpArchive, archivePath);
+  } catch (error) {
+    try {
+      unlinkSync(tmpArchive);
+    } catch {
+      // 临时文件清理失败不掩盖真实错误。
+    }
+    throw error;
+  }
+
+  const archivedIds = new Set<string>();
+  for (let index = 1; index < cutIndex; index += 1) {
+    const id = parsed[index]?.['id'];
+    if (typeof id === 'string') archivedIds.add(id);
+  }
+  const keptLines = lines.slice(cutIndex);
+  const compactionKeptIndex = compactionIndex - cutIndex;
+  if (keptLines[compactionKeptIndex] === undefined) {
+    throw new Error(`Cannot archive ${filePath}: compaction entry disappeared from the kept segment`);
+  }
+  const parentId = compactionEntry['parentId'];
+  if (typeof parentId === 'string' && archivedIds.has(parentId)) {
+    keptLines[compactionKeptIndex] = Buffer.from(
+      `${JSON.stringify({ ...compactionEntry, parentId: null })}\n`,
+      'utf8',
+    );
+  }
+  const nextActive = Buffer.concat([lines[0] as Buffer, ...keptLines]);
+
+  const mode = statSync(filePath).mode & 0o777;
+  const tmpActive = path.join(sessionDir, `.${baseName}.tmp-${process.pid}-${Date.now()}`);
+  let activeFd: number | undefined;
+  try {
+    activeFd = openSync(tmpActive, 'wx', mode);
+    let written = 0;
+    while (written < nextActive.length) {
+      const step = writeSync(activeFd, nextActive, written, nextActive.length - written);
+      if (step === 0) throw new Error(`Cannot archive ${filePath}: short write`);
+      written += step;
+    }
+    fsyncSync(activeFd);
+    closeSync(activeFd);
+    activeFd = undefined;
+    renameSync(tmpActive, filePath);
+  } catch (error) {
+    if (activeFd !== undefined) {
+      try {
+        closeSync(activeFd);
+      } catch {
+        // 已尽力关闭；不影响原文件。
+      }
+    }
+    try {
+      unlinkSync(tmpActive);
+    } catch {
+      // 临时文件清理失败不掩盖真实错误。
+    }
+    throw error;
+  }
+
+  return {
+    archived: true,
+    archivePath,
+    archivedEntries: archivedLines.length,
+    archivedBytes: archivedBytes.length,
+    activeBytesBefore: raw.length,
+    activeBytesAfter: nextActive.length,
+  };
+}
+
+/**
+ * 按 `(principalId, sessionId)` 解析 Pi 原生会话的唯一文件位置（并校验既有文件）。
  *
  * 隔离模型：每个 principal 拥有 `<rootDir>/principals/<sha256(principalId)>` 这个
- * **独立 Pi session 目录**。不同 principal 的 session 在文件系统上物理分离，跨 principal
+ * **独立 Pi session 目录**。不同 principal 的会话在文件系统上物理分离，跨 principal
  * 不可能读到彼此条目（同名 sessionId 也各归各的子树）。
  *
  * 唯一映射：每个 principal 子树内，同一个 `sessionId` 至多对应一个 `.jsonl` 文件；
@@ -285,39 +426,42 @@ class PersistedSessionImpl implements PersistedSession {
  */
 export class SessionPersistence {
   private readonly rootDir: string;
-  private readonly cwd: string;
-  private readonly sessions = new Map<string, Promise<PersistedSessionImpl>>();
-  private closed = false;
 
   constructor(options: SessionPersistenceOptions) {
     this.rootDir = path.resolve(options.rootDir);
-    this.cwd = options.cwd;
   }
 
-  /** 打开已存在会话，或在**本 principal 子树**内新建一个。同一对键返回同一句柄。 */
-  async openOrCreate(principalId: string, sessionId: string): Promise<PersistedSession> {
-    this.assertOpen();
-    const key = sessionKey(principalId, sessionId);
-    const existing = this.sessions.get(key);
-    if (existing !== undefined) return existing;
+  /**
+   * 解析会话位置：已有落盘文件即返回它（并先校验），否则只给目录 + 目标 Pi id
+   * （由 Pi 驱动在同一位置新建，文件名/header 用同一个 id，重启可再解析回来）。
+   */
+  resolve(principalId: string, sessionId: string): MainSessionLocation {
+    assertExternalSessionId(sessionId);
+    const sessionDir = this.principalDir(principalId);
+    mkdirSync(sessionDir, { recursive: true });
 
-    // 先登记在途 Promise：并发 openOrCreate 同一对键只落一个会话文件。
-    let pending: Promise<PersistedSessionImpl>;
-    pending = this.openOrCreateInner(principalId, sessionId, () => {
-      if (this.sessions.get(key) === pending) this.sessions.delete(key);
-    });
-    this.sessions.set(key, pending);
-    try {
-      return await pending;
-    } catch (error) {
-      if (this.sessions.get(key) === pending) this.sessions.delete(key);
-      throw error;
+    const targetId = piSessionId(sessionId);
+    const files = this.sessionFiles(principalId, targetId);
+    if (files.length > 1) {
+      throw new Error(
+        `Conflicting session files for (${principalId}, ${sessionId}): ${files.join(', ')}`,
+      );
     }
+
+    const existing = files[0];
+    if (existing === undefined) return { sessionDir, piSessionId: targetId };
+    validateSessionFile(existing);
+    const header = readSessionHeader(existing);
+    if (header?.id !== targetId) {
+      throw new Error(
+        `Session file ${existing} declares id ${String(header?.id)}, expected ${targetId}`,
+      );
+    }
+    return { sessionDir, piSessionId: targetId, resumeSessionFile: existing };
   }
 
   /** 列出**本 principal 子树**内的会话 metadata（不跨 principal）。 */
-  async list(principalId: string): Promise<SessionMetadata[]> {
-    this.assertOpen();
+  list(principalId: string): SessionMetadata[] {
     const sessionDir = this.principalDir(principalId);
     let names: string[];
     try {
@@ -330,7 +474,7 @@ export class SessionPersistence {
       if (!name.endsWith('.jsonl')) continue;
       const filePath = path.join(sessionDir, name);
       const header = readSessionHeader(filePath);
-      // 发现面：损坏/非本层文件不返回；打开该会话时由 validateSessionFile 显式抛错。
+      // 发现面：损坏/非本层文件不返回；解析该会话时由 validateSessionFile 显式抛错。
       if (header === undefined) continue;
       const id = externalSessionId(header.id);
       if (id === undefined) continue;
@@ -345,69 +489,6 @@ export class SessionPersistence {
       });
     }
     return found;
-  }
-
-  /** 删除会话文件（若已打开则先关闭）。 */
-  async delete(principalId: string, sessionId: string): Promise<void> {
-    this.assertOpen();
-    const key = sessionKey(principalId, sessionId);
-    const opened = this.sessions.get(key);
-    if (opened !== undefined) await (await opened).close();
-    for (const filePath of this.sessionFiles(principalId, piSessionId(sessionId))) {
-      rmSync(filePath, { force: true });
-    }
-  }
-
-  /** 关闭全部已打开会话。 */
-  async close(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    const opened = [...this.sessions.values()];
-    this.sessions.clear();
-    for (const pending of opened) {
-      try {
-        await (await pending).close();
-      } catch {
-        // 打开失败的条目没有句柄可关；打开失败已在上报给调用方。
-      }
-    }
-  }
-
-  private async openOrCreateInner(
-    principalId: string,
-    sessionId: string,
-    onClose: () => void,
-  ): Promise<PersistedSessionImpl> {
-    assertExternalSessionId(sessionId);
-    const sessionDir = this.principalDir(principalId);
-    mkdirSync(sessionDir, { recursive: true });
-
-    const targetId = piSessionId(sessionId);
-    const files = this.sessionFiles(principalId, targetId);
-    if (files.length > 1) {
-      throw new Error(
-        `Conflicting session files for (${principalId}, ${sessionId}): ${files.join(', ')}`,
-      );
-    }
-
-    const existing = files[0];
-    if (existing !== undefined) {
-      validateSessionFile(existing);
-      const manager = SessionManager.open(existing, sessionDir, this.cwd);
-      if (manager.getSessionId() !== targetId) {
-        throw new Error(
-          `Session file ${existing} declares id ${manager.getSessionId()}, expected ${targetId}`,
-        );
-      }
-      return new PersistedSessionImpl(principalId, sessionId, existing, manager, onClose);
-    }
-
-    const manager = SessionManager.create(this.cwd, sessionDir, { id: targetId });
-    const filePath = manager.getSessionFile();
-    if (filePath === undefined) {
-      throw new Error(`SessionManager did not allocate a session file for ${sessionId}`);
-    }
-    return new PersistedSessionImpl(principalId, sessionId, filePath, manager, onClose);
   }
 
   /** 在本 principal 子树内定位某 Pi 会话 id 的落盘文件（最多一个；冲突由调用方报错）。 */
@@ -439,12 +520,4 @@ export class SessionPersistence {
   private principalDir(principalId: string): string {
     return path.join(this.rootDir, 'principals', principalSegment(principalId));
   }
-
-  private assertOpen(): void {
-    if (this.closed) throw new Error('SessionPersistence is closed');
-  }
-}
-
-function sessionKey(principalId: string, sessionId: string): string {
-  return `${principalId}\u0000${sessionId}`;
 }

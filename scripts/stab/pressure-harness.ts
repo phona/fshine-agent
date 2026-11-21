@@ -20,6 +20,7 @@ import {
   removeStabTempDir,
   rssGrowth,
   sampleRssMedian,
+  sampleRssSettled,
   stabScope,
   summarizeTasks,
   unreachableWorkerDriver,
@@ -89,7 +90,6 @@ export async function runPressureScenario(scenario: PressureScenario): Promise<P
   const sessionId = 'stab-pressure-1';
   const scope = stabScope(principalId, sessionId);
   const runtime: StabRuntimeConfig = {
-    dispatchMode: 'background',
     backgroundConcurrency: scenario.concurrency,
     queueCapacity: scenario.queueCapacity,
   };
@@ -126,14 +126,14 @@ export async function runPressureScenario(scenario: PressureScenario): Promise<P
       }
       ledgerQueuedMax = registry.list(scope).filter((task) => task.status === 'queued').length;
       policyQueueMax = assembled.policy.snapshot().background.queued;
-      rssBase = sampleRssMedian();
+      rssBase = await sampleRssSettled();
       if (scenario.holdFirstTask === true) {
         const front = await assembled.session.send(FOREGROUND_TEXT);
         if (front.reply === FOREGROUND_REPLY) foregroundRoundTrips += 1;
       }
       gated.release();
       hung = !(await waitIdleWithTimeout(assembled));
-      rssEnd = sampleRssMedian();
+      rssEnd = await sampleRssSettled();
       await driveDeliveries(outbox, clock);
     } finally {
       assembled.close();

@@ -1,12 +1,12 @@
 /**
- * P2 业务端到端验收 · 七场景落成（预注册 `docs/product/p2-business-e2e-prereg.md` §一 逐项）。
+ * P2 业务端到端验收 · 七场景落成（预注册 `docs/history/business-e2e-batch2-prereg.md` §一 逐项）。
  *
  * 每个场景 = 一个 `P2CaseDefinition`（话术 / 装配旋钮 / 真值 / 硬零 / 覆盖 / 特判）
  * + 一个确定性跑法（假模型 + 仓内 dummy 执行层；零真实平台、零真实写）。
  *
  * 复用（不重建框架）：`./p2-harness`（生产同源 createServer + 脚本化 provider +
- * r6/harness 逐轮管线）、`r6/multiuser/mu-support`（MU 计划驱动/会合栅/快照）、
- * `business-e2e/shared-instance`（工具记录/消息构造）、`r6/oracle`（FACT_TRUTH 真值）。
+ * long-session/harness 逐轮管线）、`long-session/multiuser/mu-support`（MU 计划驱动/会合栅/快照）、
+ * `business-e2e/shared-instance`（工具记录/消息构造）、`long-session/oracle`（FACT_TRUTH 真值）。
  *
  * **真值只给 Oracle**：`truth.facts` 只用于判定；脚本回复由执行层真实返回派生
  * （`describeRecord` / 底账存档原文），不读 `FACT_TRUTH`。
@@ -16,16 +16,16 @@ import os from 'node:os';
 import path from 'node:path';
 import type { RuntimeConfig } from '@fshine/contracts';
 import type { ExecutionClient } from '@fshine/contracts/execution-contract';
-import { accountCalls } from '../r6/accounting';
-import { analyzeCompaction, judgeCompactionLifecycle } from '../r6/compaction';
-import { FACT_TRUTH, judgeTaskContinuity } from '../r6/oracle';
-import type { TaskTurnFact, TaskView } from '../r6/oracle';
+import { accountCalls } from '../long-session/accounting';
+import { analyzeCompaction, judgeCompactionLifecycle } from '../long-session/compaction';
+import { FACT_TRUTH, judgeTaskContinuity } from '../long-session/oracle';
+import type { TaskTurnFact, TaskView } from '../long-session/oracle';
 import {
   createMuServer, deliver, incoming, makeCtx, makeMainDriver, makeWorkerDriver, Rendezvous,
   MU_PRINCIPALS, MU_TAGS, MuPlans, MuRecordingSink,
   principalIdOf, readTasks, sessionIdOf, toTaskViews,
   type MuTaskSnapshot,
-} from '../r6/multiuser/mu-support';
+} from '../long-session/multiuser/mu-support';
 import {
   createDeadlineWorkerDriver, createDummyP2Client, createHangingClient,
   judgementOf, P2ScriptBook, runP2Sample, sessionEvidenceOf, startP2Server,
@@ -169,15 +169,16 @@ const S2: P2CaseDefinition = {
   granted: readGrant({ collection: 'alpha', window: 'W1' }, { collection: 'beta', window: 'W1' }),
   hardZeros: ['H4 虚假完成', 'E-G 编号混淆', 'false_completion', 'cross_principal_leak'],
   failureCriteria: [
-    'T1 回复谎报 alpha 结果（受理回执之外给出未取得的数值）',
+    'T1 回复谎报 alpha 结果（受理类文本之外给出未取得的数值）',
     'T2 被在飞任务阻塞（未返回或返回异常）',
     'alpha 任务终态非 completed 或 requestIds 为空（H4）',
   ],
   truth: { facts: [{ turn: 2, expectation: { kind: 'exact', collection: 'beta', count: 3, sum: 1000 } }] },
   preregConflict:
-    'S2 强制 dispatchMode=background（§一 S2），而 background 的 task_run 只返回受理回执（execution-runtime.ts:591），'
-    + 'Main 同回合无法取得 beta 数据；§一 S2 Oracle 却要求 T2 回复含 beta 条数/总额（count=3, sum=1000）。'
-    + '合规产品的 T2 回复只能是受理回执 → 该事实判据在强制装配下不可满足。待 owner 裁定：'
+    'S2 强制异步派发（§一 S2；旧派发配置键已删除，server 恒 async），而 async 的 task_run 只回机械受理事实，'
+    + '模型只能凭受理事实说一句过程话（owner 2026-11-19：模型文本原样投递，宿主不再静默/替换）；'
+    + '§一 S2 Oracle 却要求 T2 回复含 beta 条数/总额（count=3, sum=1000）。合规产品的 T2 回合只能回受理类文本'
+    + ' → 该事实判据在强制装配下不可满足。待 owner 裁定：'
     + '（a）把 beta 事实判据下移到结果取回轮，或（b）允许 beta 走 inline 子路径。本实现按预注册字面保留判据并登记冲突（不擅自改口径）。',
   coverage: (obs) => {
     const first = obs.taskTurns[0]?.tasks.find((task) => task.request.includes('alpha'));
@@ -202,14 +203,18 @@ const S2: P2CaseDefinition = {
     return [
       {
         name: 't1_is_receipt_not_fake_result',
-        pass: /已受理|受理/.test(t1) && !/\b2000\b|2 条|2条/.test(t1),
+        // owner 2026-11-19：用户看到模型说的话——只交办回合是受理类文本，不冒充结果。
+        // 核心不安全面仍是「谎报未取得的数值」：不得出现 alpha 真值数字。
+        pass: !/\b2000\b|2 条|2条/.test(t1) && /已受理|受理/.test(t1),
         detail: `T1 回复=${t1.slice(0, 80)}`,
         hardZero: true,
       },
       {
         name: 't2_not_blocked',
-        pass: t2.trim().length > 0,
-        detail: `T2 回复长度=${t2.length}`,
+        // 交办回合有用户可见回复（模型文本）且回合确实结束过（t2DoneSeq 有值）——二者合起来
+        // 判「没有被在飞 alpha 任务占住」。
+        pass: t2.trim() !== '' && Number(obs.extras['t2DoneSeq'] ?? -1) >= 0,
+        detail: `T2 回复长度=${t2.length}；t2DoneSeq=${String(obs.extras['t2DoneSeq'] ?? -1)}`,
       },
       {
         name: 'alpha_completed_real',
@@ -714,7 +719,7 @@ function applyTamper(observation: P2Observation, tamper: P2Tamper | undefined): 
 }
 
 function judgeTaskContinuityOf(turns: readonly TaskTurnFact[]) {
-  // 与 r6/oracle 同一判据（H3/H4/H5/E-G）。
+  // 与 long-session/oracle 同一判据（H3/H4/H5/E-G）。
   return judgeTaskContinuity(turns);
 }
 
@@ -758,7 +763,7 @@ async function runS1(dir: string, trial: number): Promise<P2Observation> {
     },
   ], 1);
   book.workerTask(text, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'alpha', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'alpha', 'window': 'W1' }),
     () => {
       const record = lastRecordOf(ref, 'alpha');
       return textAssistant(record === undefined ? 'alpha 读取完成。' : describeCompleted(record));
@@ -800,14 +805,14 @@ async function runS2(dir: string, trial: number): Promise<P2Observation> {
   book.mainTurn(t1, [toolCallAssistant('task_run', { task: t1 }), () => textAssistant(receipt())], 1);
   book.mainTurn(t2, [toolCallAssistant('task_run', { task: '查询 beta 集合 W1 的条数与总额' }), () => textAssistant(receipt())], 2);
   book.workerTask(t1, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'alpha', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'alpha', 'window': 'W1' }),
     () => {
       const record = lastRecordOf(ref, 'alpha');
       return textAssistant(record === undefined ? 'alpha 读取完成。' : describeCompleted(record));
     },
   ]);
   book.workerTask('查询 beta 集合 W1 的条数与总额', [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'beta', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'beta', 'window': 'W1' }),
     () => {
       const record = lastRecordOf(ref, 'beta');
       return textAssistant(record === undefined ? 'beta 读取完成。' : describeCompleted(record));
@@ -852,7 +857,7 @@ async function runS3(dir: string, trial: number): Promise<P2Observation> {
     () => textAssistant(taskOfAny(ref)?.replyText ?? '还没有结果。'),
   ], 2);
   book.workerTask(t1, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'alpha', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'alpha', 'window': 'W1' }),
     () => {
       const record = lastRecordOf(ref, 'alpha');
       return textAssistant(record === undefined ? 'alpha 读取完成。' : describeCompleted(record));
@@ -904,29 +909,30 @@ async function runS4(dir: string, trial: number): Promise<P2Observation> {
     () => textAssistant('两个核对都已受理：alpha 先跑，beta 排队。'),
   ], 1);
   book.mainTurn(t2, [
-    () => toolCallAssistant('task_cancel', { ref: `#${findTaskNo(ref, 'beta')}` }),
-    () => textAssistant(`已取消 #${findTaskNo(ref, 'beta')}，beta 那边不会再执行。`),
+    // 2026-11-20：数字 ref 退役，按真实 taskId 取消/回话（断言强度不变）。
+    () => toolCallAssistant('task_cancel', { ref: findTaskId(ref, 'beta') }),
+    () => textAssistant('已取消 beta 那边的核对，不会再执行。'),
   ], 2);
   book.mainTurn(t3, [
     toolCallAssistant('task_run', { task: betaOnly }),
-    () => textAssistant(`已按新要求重新交办 #${taskNoOf(ref)}（只查 beta）。`),
+    () => textAssistant('已按新要求重新交办（只查 beta）。'),
   ], 3);
   book.workerTask(alphaCheck, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'alpha', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'alpha', 'window': 'W1' }),
     () => {
       const record = lastRecordOf(ref, 'alpha');
       return textAssistant(record === undefined ? 'alpha 核对完成。' : describeCompleted(record));
     },
   ]);
   book.workerTask(betaCheck, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'beta', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'beta', 'window': 'W1' }),
     () => {
       const record = lastRecordOf(ref, 'beta');
       return textAssistant(record === undefined ? 'beta 核对完成。' : describeCompleted(record));
     },
   ]);
   book.workerTask(betaOnly, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'beta', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'beta', 'window': 'W1' }),
     () => {
       const record = lastRecordOf(ref, 'beta');
       return textAssistant(record === undefined ? 'beta 读取完成。' : describeCompleted(record));
@@ -954,6 +960,13 @@ function findTaskNo(ref: ExecRef, requestFragment: string): number {
   return tasksOf(ref).find((task) => task.request.includes(requestFragment))?.taskNo ?? 1;
 }
 
+/** 2026-11-20：数字 ref 退役——场景里的取消/查询改为按真实 taskId 引用。 */
+function findTaskId(ref: ExecRef, requestFragment: string): string {
+  const taskId = tasksOf(ref).find((task) => task.request.includes(requestFragment))?.taskId;
+  if (taskId === undefined) throw new Error(`（场景）找不到含「${requestFragment}」的任务 taskId`);
+  return taskId;
+}
+
 async function runS5(dir: string, trial: number): Promise<P2Observation> {
   const t1 = S5.turns[0]!;
   const t2 = S5.turns[1]!;
@@ -967,7 +980,7 @@ async function runS5(dir: string, trial: number): Promise<P2Observation> {
   const ref1: ExecRef = {};
   book1.mainTurn(t1, [toolCallAssistant('task_run', { task: t1 }), () => textAssistant(`已受理 #${taskNoOf(ref1)}，完成后把结果告诉你。`)], 1);
   book1.workerTask(t1, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'bankflow-oct', '--window': '2025-10' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'bankflow-oct', 'window': '2025-10' }),
     () => {
       const record = lastRecordOf(ref1, 'bankflow-oct');
       return textAssistant(record === undefined ? 'bankflow-oct 读取完成。' : describeCompleted(record));
@@ -1087,7 +1100,7 @@ async function runS6(dir: string, trial: number): Promise<P2Observation> {
   const sink = new MuRecordingSink();
   const handle = await createMuServer({
     dir, ctx, mode: 'background', runtime,
-    createDrivers: async () => ({ mainDriver: makeMainDriver(ctx), workerDriver: makeWorkerDriver(ctx) }),
+    createDrivers: async (_env, mainSession) => ({ mainDriver: makeMainDriver(ctx, mainSession), workerDriver: makeWorkerDriver(ctx) }),
     notificationSink: sink,
   });
   try {
@@ -1216,7 +1229,7 @@ async function runS7a(dir: string, trial: number): Promise<P2Observation> {
     },
   ], 1);
   book.workerTask(text, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'faulty-one', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'faulty-one', 'window': 'W1' }),
     () => {
       const record = recordsOf(ref).find((candidate) => candidate.collection === 'faulty-one');
       return textAssistant(record === undefined ? '读取失败，未取得记录。' : describeFailure(record));
@@ -1244,7 +1257,7 @@ async function runS7b(dir: string, trial: number): Promise<P2Observation> {
     () => textAssistant(`任务 #${findTaskNo(ref, 'alpha')} 已超时未完成：执行端在时限内没有返回结果，没有条数或金额可以给你。`),
   ], 2);
   book.workerTask(t1, [
-    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'alpha', '--window': 'W1' } }),
+    toolCallAssistant('op_dummy_query', { 'collection': 'alpha', 'window': 'W1' }),
     () => textAssistant('alpha 读取完成。'),
   ]);
   return await runP2Sample({
@@ -1282,10 +1295,7 @@ async function runS7c(dir: string, trial: number): Promise<P2Observation> {
     () => textAssistant(taskOfAny(ref)?.replyText ?? '还没有结果。'),
   ], 2);
   book.workerTask(t1, [
-    ...collections.map(([collection, window]) => toolCallAssistant('execute_operation', {
-      operation: 'dummy.query',
-      args: { '--collection': collection, '--window': window },
-    })),
+    ...collections.map(([collection, window]) => toolCallAssistant('op_dummy_query', { 'collection': collection, 'window': window })),
     () => textAssistant(summary()),
   ]);
   return await runP2Sample({

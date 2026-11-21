@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 import { p2Case, runP2Scenario } from './p2-scenarios';
 import { judgeP2Case, type P2Judgement } from './p2-oracle';
 import type { P2Observation } from './p2-types';
-import type { CompactionVerdict } from '../r6/compaction';
+import type { CompactionVerdict } from '../long-session/compaction';
 import type { P2RunOutput } from './p2-scenarios';
 
 function failedChecks(judgement: P2Judgement): string[] {
@@ -65,10 +65,14 @@ describe('P2 七场景 · 确定性跑通（假模型，一次样本）', () => 
     // 闸在 T2 处理时仍未释放：alpha 任务此刻非终态（真异步的证据，不是串行假异步）。
     expect(['queued', 'running']).toContain(out.observation.extras['alphaStatusBeforeRelease']);
     // 预注册事实判据（T2 回复须含 beta 3/1000）在强制 background 下**不可满足**：
-    // 合规产品 T2 只回受理回执。此样本登记为 preregBlocked（不作为产品通过/失败结论）。
+    // T1（alpha）在飞 → 交办回合模型只能凭受理事实说一句过程话；T2（beta 快活，窗口内落定）
+    // 本回合拿到结果但脚本按预注册字面仍回受理话术。此样本登记为 preregBlocked（不作为产品结论）。
     expect(out.judgement.preregBlocked).toBe(true);
     expect(out.judgement.pass).toBe(false);
     expect(out.judgement.factVerdicts[0]?.verdict.pass).toBe(false);
+    // T1（alpha 在飞）= 只交办回合 → 模型文本原样送达（受理类文本，不冒充结果）。
+    expect(out.observation.turns[0]?.reply).toContain('已受理');
+    // T2（beta 快活，窗口内落定）本回合拿到结果 → 照常送达（脚本按预注册回受理话术）。
     expect(out.observation.turns[1]?.reply).toContain('已受理');
   }, 30_000);
 
@@ -261,7 +265,7 @@ describe('P2 并发隔离与证据落盘（确定性）', () => {
     expect(replies[0].text).toContain('2000');
     const toolLines = readFileSync(path.join(dir, 'tool-calls.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     expect(toolLines.some((row) => row.tool === 'task_run')).toBe(true);
-    expect(toolLines.some((row) => row.tool === 'execute_operation')).toBe(true);
+    expect(toolLines.some((row) => row.tool === 'execute_operation' || row.tool.startsWith('op_'))).toBe(true);
     const modelCalls = readFileSync(path.join(dir, 'model-calls.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     expect(modelCalls.length).toBe(2);
     expect(modelCalls.every((row) => row.kind === 'main')).toBe(true);

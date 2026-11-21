@@ -83,7 +83,10 @@ class ManualClock implements NudgeClock {
 function testConfig(runtime: RuntimeConfig): AppConfig {
   return {
     principals: {
-      'wecom:user-a': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:user-a': { enabled: true },
+      // 群 = 独立主体（owner 2026-11-18）：群聊 principal = `wecom:group:<群id>`。用例 ④ 要
+      // 验证的是「群里不发追问」，所以群主体必须开通——否则拒绝路径会让断言因错的原因变绿。
+      'wecom:group:group-1': { enabled: true },
     },
     contextProfiles: {
       dummy: { root: FIXTURE_ROOT, gateway: 'bin/dummy', skillRoots: ['.agents/skills-serve'] },
@@ -363,7 +366,10 @@ describe('目标 B：30 秒主动追问', () => {
     const fx = await makeFixture();
     try {
       for (const [index, name] of ['名册.xlsx', '工资表.xlsx', '说明.docx'].entries()) {
-        await fx.server.handler(attachmentMessage({ dir: fx.dir, messageId: `m-file-${index + 1}`, filename: name }));
+        // 三份**不同**文件：同字节在同 scope 会按 sha256 去重成一个 fileId（F-1 语义），
+        // 本用例验证的是「连发 3 个文件」的追问面，字节必须互不相同。
+        const bytes = Buffer.alloc(6861, 0x61 + index);
+        await fx.server.handler(attachmentMessage({ dir: fx.dir, messageId: `m-file-${index + 1}`, filename: name, bytes }));
       }
       expect(fx.clock.pending()).toBe(1);
       await fx.clock.advance(NUDGE_AFTER_MS);
@@ -371,6 +377,9 @@ describe('目标 B：30 秒主动追问', () => {
       expect(fx.texts).toHaveLength(1);
       expect(fx.texts[0]).toContain('3 个文件');
       expect(fx.texts[0]).toContain('名册.xlsx');
+      // 不复述"收到 N 个文件"：渠道到点时已发过那条回执（formatFileAck），
+      // 追问只补"是哪几个" + 选项（2026-11-17：两条几乎相同的清单观感像结巴）。
+      expect(fx.texts[0]).not.toContain('收到 3 个文件');
       const options = optionsOf(fx.texts[0]!);
       expect(options.length).toBeGreaterThanOrEqual(2);
       expect(options.length).toBeLessThanOrEqual(4);

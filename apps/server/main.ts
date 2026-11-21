@@ -11,6 +11,7 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { ChannelRoute, OutgoingFileReply } from '@fshine/contracts';
 import { WecomBotChannel } from '@fshine/channel-wecom';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import { resolveRuntimeConfig } from '../../packages/agent/src/resource-policy';
@@ -23,7 +24,9 @@ import {
 } from './channel-mode';
 import { createServer, resolveSingleProfile, workspaceRootOf } from './server';
 import { createFileNotificationSink } from './notification-file-sink';
+import { guardSingleInstance } from './instance-guard';
 import { sweepExpiredRunDirsOnStart } from './startup-sweep';
+import { resolveAlertOwnerRoute } from './alert-owner-route';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -43,6 +46,13 @@ async function main(): Promise<void> {
     ? path.resolve(config.store.dbPath)
     : path.join(REPO_ROOT, '.runtime', 'state.db');
 
+  // 单实例守卫（连渠道**之前**）：同一 bot 只允许一条 WS 连接。取独占锁
+  // `<dbPath 所在目录>/server/instance.lock`（与 dbPath 同根；既有 dummy 状态目录
+  // `.runtime/server/state` 的平级邻居）；已有存活且命令行匹配的实例 → 打印可操作
+  // 话术并 exit(1)；陈旧锁（pid 不在 / 命令行不匹配）→ 覆盖。
+  // 释放：SIGINT/SIGTERM 与异常退出都走 guardSingleInstance 挂的 process.on('exit')。
+  guardSingleInstance({ stateDir: path.join(path.dirname(dbPath), 'server') });
+
   // 渠道装配档位（yaml `channel.mode`；缺省 offline）：
   //   offline = 不调用 channel.start（不建 WS 连接），出站视为 silent；
   //   shadow  = 建立连接（入站照收），出站模式显式 silent（六类路径全抑制）；
@@ -56,24 +66,48 @@ async function main(): Promise<void> {
   // CAP-01 S1 交付端口（v8 §7 主动投递 B）：装配层持有渠道的 sendToConversation 面并注入
   // server——handler 只返回 text，文件由这里发出（只传 files，不传正文）；deliveryMode 用
   // 渠道生效模式，非 live 的投递由 server 记 suppressed、不记 sent。
+  const fileDelivery = {
+    deliveryMode: channel.deliveryMode,
+    sendToConversation: (route: ChannelRoute, files: readonly OutgoingFileReply[]) =>
+      channel.sendToConversation(route, { files }),
+    // 纯附件后主动追问：文字走既有主动投递面（silent 由 server 先行抑制，不靠闸门假回执）。
+    sendText: (route: ChannelRoute, text: string) =>
+      channel.sendToConversation(route, { text }),
+  };
+  // 进程内告警引擎（owner 2026-11-20）：第 3 档（兜不住且用户做不了）的执行者。
+  // 投递端口**复用上面的 fileDelivery.sendText**（= 同一条 WS 上的渠道主动消息），不另开
+  // 企微 WS（单 WS 约束）。owner 路由**只认显式配置**（yaml `alerts.ownerPrincipalId`，
+  // 2026-11-21 live P1）：此前按 principals 配置顺序猜第一个 enabled 单聊主体——本部署
+  // 猜到评测夹具主体 wecom:e2e_user，告警推送恒 93006 invalid chatid，告警永远送不到人。
+  // 未配置 = 只落盘不推（alert-persistence 的确定性出口仍完整）；配置了不合法 = 拒启。
+  const alertOwnerRoute = resolveAlertOwnerRoute(config);
+  console.log(JSON.stringify({
+    event: 'alert_owner_route',
+    ...(alertOwnerRoute === undefined ? { configured: false } : { configured: true, ...alertOwnerRoute }),
+  }));
   const server = await createServer({
     env,
     config,
     dbPath,
     notificationSink: createFileNotificationSink(path.join(path.dirname(dbPath), 'notifications.jsonl')),
-    fileDelivery: {
-      deliveryMode: channel.deliveryMode,
-      sendToConversation: (route, files) => channel.sendToConversation(route, { files }),
-      // 纯附件后主动追问：文字走既有主动投递面（silent 由 server 先行抑制，不靠闸门假回执）。
-      sendText: (route, text) => channel.sendToConversation(route, { text }),
+    fileDelivery,
+    inprocessAlerts: {
+      enabled: true,
+      opsDir: path.join(path.dirname(dbPath), 'ops'),
+      ...(alertOwnerRoute === undefined ? {} : {
+        ownerRoute: alertOwnerRoute,
+        pushPort: { sendText: (route, text) => fileDelivery.sendText(route, text) },
+      }),
     },
   });
   // 保留期启动清扫（runtime.fileRetentionSweepOnStart；缺省 false = 零行为变化）：
-  // 装配完成、渠道真正开始接消息之前扫一次。只扫一次，不引入定时器（周期调度归部署侧）；
+  // 装配完成、渠道真正开始接消息之前扫一次——run 目录按保留期、过期 file_refs 按
+  // runtime.fileRefTtlDays 回收字节（同一开关、只扫一次，不引入定时器；周期调度归部署侧）。
   // 抛错已在 sweepExpiredRunDirsOnStart 内收口为观测事件，不阻断启动。
   sweepExpiredRunDirsOnStart({
     config: resolveRuntimeConfig(config.runtime),
     workspaceRoot: workspaceRootOf(dbPath),
+    dbPath,
   });
   // offline 下不 start：不建立 WS 连接、不认证，渠道出站保持 silent。
   await startChannelForMode(channelMode, channel, server.handler);

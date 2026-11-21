@@ -1,4 +1,11 @@
 /**
+ * 注入回执（形状与 execution-runtime 的 InjectionReceipt 同一份定义，结构化匹配）：
+ * text = 注入文本；requeue = 本回合**没有产出用户可见内容**（驱动失败/空回复）时把事实
+ * 原样退回队列——「取走」不再等于「已说给用户听」。
+ */
+import type { InjectionReceipt } from '../../packages/agent/src/execution-runtime';
+
+/**
  * 纯附件机械事实（目标 A）：按 (principalId, sessionId) 进程内排队，下一回合由
  * execution-runtime 以既有 `injections`（Pi 原生 custom message、display=false）注入。
  *
@@ -6,7 +13,8 @@
  * 不含 sha256。`fileId` 只进模型上下文，不进用户话术（渠道回执/追问文案由宿主另渲染）。
  *
  * 生命周期：登记成功即入队；注入（take）即出队；同 fileId 在未注入前重复登记只保留
- * 一行。进程重启不补发（in-process 事实，可接受，已登记）。
+ * 一行。进程重启不补发（in-process 事实，可接受，已登记）。**没说出声的事实退回队列**
+ * （take 的回执带 requeue；判据见 execution-runtime 的注入核销）。
  */
 
 /** 一条附件的机械事实输入（全部来自登记返回值 / 渠道消息，不含路径内容）。 */
@@ -22,7 +30,7 @@ export interface AttachmentFactInput {
 export interface AttachmentFactQueue {
   enqueue(input: { principalId: string; sessionId: string; files: readonly AttachmentFactInput[] }): void;
   /** 取走并出队本 (principal, session) 的全部待注入事实；无 pending 返回 undefined。 */
-  take(principalId: string, sessionId: string): string | undefined;
+  take(principalId: string, sessionId: string): InjectionReceipt | undefined;
   clear(): void;
 }
 
@@ -84,7 +92,21 @@ export function createAttachmentFactQueue(options: { now?: () => number } = {}):
       const mine = pending.get(key);
       if (mine === undefined || mine.size === 0) return undefined;
       pending.delete(key);
-      return [...mine.values()].map((file) => renderAttachmentFact(file, now)).join('\n');
+      const files = [...mine.values()];
+      return {
+        text: files.map((file) => renderAttachmentFact(file, now)).join('\n'),
+        // 没说出声时原样放回（同一批 fileId 重新入队、键不变）：下一次用户回合再注入一遍。
+        requeue: () => {
+          let target = pending.get(key);
+          if (target === undefined) {
+            target = new Map();
+            pending.set(key, target);
+          }
+          for (const file of files) {
+            if (!target.has(file.fileId)) target.set(file.fileId, file);
+          }
+        },
+      };
     },
     clear() {
       pending.clear();
@@ -95,11 +117,13 @@ export function createAttachmentFactQueue(options: { now?: () => number } = {}):
 /**
  * 按 (principal, session) 排队的系统注记（模型可见 / 用户不可见 / 不触发回合）。
  * 同一会话只保留**最新**一条：新的主动追问选项会取代旧的（用户看到的最后一份才是
- * 他可能回复的编号来源；旧注记留着只会让模型按过期编号理解）。
+ * 他可能回复的编号来源；旧注记留着只会让模型按过期编号理解）。take 的回执带 requeue：
+ * 本回合没产出用户可见内容时放回（放回即再写一次，单槽语义不变）。
  */
 export interface ScopedNoteQueue {
   enqueue(principalId: string, sessionId: string, text: string): void;
-  take(principalId: string, sessionId: string): string | undefined;
+  /** 取走并出队本 (principal, session) 的注记；无 pending 返回 undefined。 */
+  take(principalId: string, sessionId: string): InjectionReceipt | undefined;
   clear(): void;
 }
 
@@ -115,7 +139,8 @@ export function createScopedNoteQueue(): ScopedNoteQueue {
       const note = pending.get(key);
       if (note === undefined) return undefined;
       pending.delete(key);
-      return note;
+      // 没说出声时放回（本队列仍是「同一会话只保留最新一条」的单槽语义：放回 = 再写一次）。
+      return { text: note, requeue: () => pending.set(key, note) };
     },
     clear() {
       pending.clear();

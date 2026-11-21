@@ -109,7 +109,6 @@ function scopeOf(principalId: string, sessionId: string): TaskScope {
 
 function runtimeOf(scenario: ChaosScenario): StabRuntimeConfig {
   return {
-    dispatchMode: 'background',
     backgroundConcurrency: scenario.concurrency ?? 1,
     queueCapacity: scenario.queueCapacity ?? 32,
   };
@@ -306,7 +305,7 @@ async function runCancelScenario(scenario: ChaosScenario): Promise<ChaosReport> 
 function serverConfig(scenario: ChaosScenario): AppConfig {
   return {
     principals: {
-      'wecom:user-a': { enabled: true, accountSetScope: 'all', capabilities: ['read'] },
+      'wecom:user-a': { enabled: true },
     },
     contextProfiles: {
       dummy: { root: STAB_PROFILE.root, gateway: STAB_PROFILE.gateway, skillRoots: [...STAB_PROFILE.skillRoots] },
@@ -314,9 +313,10 @@ function serverConfig(scenario: ChaosScenario): AppConfig {
     channel: { port: 3000, publicUrl: '', callbackPath: '/wecom/callback' },
     sessionTtlMs: 86_400_000,
     runtime: {
-      dispatchMode: 'background',
       backgroundConcurrency: scenario.concurrency ?? 1,
       queueCapacity: scenario.queueCapacity ?? 32,
+      // B 切片：稳定性套件钉在异步受理语义（不测短等待窗口的默认行为）。
+      taskRunWaitMs: 0,
     },
   };
 }

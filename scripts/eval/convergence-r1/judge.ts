@@ -7,12 +7,13 @@
  */
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import type { AnchorRule, UserCase } from './cases';
+import type { AnchorRule, ResultCheckpoint, UserCase } from './cases';
 import type {
   AuditIndex, AuditRow, ExecutionsExport, InputsFile, MetaFile, ReplyLine, ToolCallRecord, TaskRecordJson,
   ExecutionRecordJson,
 } from './evidence';
-import { JUDGE_VERSION, FIXTURE_VALUES } from './criteria';
+import { JUDGE_VERSION, FIXTURE_VALUES, WRITE_OPERATIONS } from './criteria';
+import { classifyOutcome, type OutcomeLedger, type TaskOutcome } from '../../../packages/agent/src/task-outcome';
 import { sha256Hex, stableStringify } from './hash';
 
 export interface EvidenceRef {
@@ -95,15 +96,43 @@ function splitSentences(text: string): Array<{ text: string; question: boolean }
 }
 
 /**
- * 实际提问形态（判定器缺陷修复，2026-11-13 重切）：冻结词表命中只表示"句中出现疑问词"，
- * 陈述句里的「分属哪个窗口」这类用法不是提问；用于**判负**的门槛必须再加一层形态判断——
- * 句末问号，或请求式短语（请提供/请确认/请补充/请告诉/需要你/你是指/请问）。
+ * 实际提问形态（判定器缺陷修复，2026-11-13 重切；2026-11-18 追问假红再切）：
+ * 冻结词表命中只表示"句中出现疑问词"，陈述句里的「分属哪个窗口」这类用法不是提问；
+ * 用于**判负**的门槛必须同时满足：
+ *   ① 疑问方向：句末问号，或请求式短语**且索要对象**（请提供/请确认/请补充/请告诉/请说明/
+ *      需要你提供|确认|说明|告诉我）——裸「需要你…」不再算（E04 实测「需要你给三样东西」
+ *      被判追问，而它索要的是另一个对象缺失的字段）；
+ *   ② 不是条件句/陈述句：「如果/若/假如/要是/如需/需要的话…」与「需要你留意/提醒一下/
+ *      有一点需要…」是后续提议或说明，不是复问（E03/E15 实测）。
+ * 真正的复问形态（「你要查哪个集合？」「请确认一下是哪个窗口」）仍命中（负例绊线）。
  * 提问检测本身（question 字段）保持冻结口径不变。
  */
+// 条件句可能带前导连词（E03 实测「所以如果你要按某个时间段…看，请告诉我…」）——
+// 连词后仍按条件式后续提议豁免。
+const CONDITIONAL_PREFIX_RE = /^(?:但|不过|所以|那么|那|另外|同时|此外|以及|而|并且)?\s*(如果|若|假如|要是|一旦|如需|需要的话|若有|需要时)/;
+const STATEMENT_MARKERS = ['需要你留意', '需要你注意', '需要提醒你', '提醒一下', '需要说明', '顺便说一句', '有一点需要'] as const;
+const QUESTION_REQUEST_MARKERS = [
+  '请问', '请提供', '请确认', '请补充', '请告诉', '请说明', '请给出', '麻烦告诉',
+  '需要你提供', '需要你确认', '需要你说明', '需要你告诉我',
+] as const;
+/**
+ * 「另一对象的字段/数据存放在哪里」是索要新数据，不是复问用户已给的对象（E04 实测
+ * 「客户与核销数据在哪个集合」被判复问）。限定为业务数据名词 + 在 + 哪个集合/窗口的定位式；
+ * 直接索要查询对象（「请告诉我要查哪个集合」）不含这类主语，仍判追问（负例）。
+ */
+const OTHER_DATA_LOCATOR_RE = /(客户|核销|到期日|应收|未结清|快照|明细|字段|资料|信息)[^，。；！？\n]{0,10}在\s*(哪个|哪一|什么)(集合|窗口)/;
+
 function isActualQuestion(sentence: string): boolean {
   const text = sentence.trim();
+  // 否定式不是提问（2026-11-18）：先把否定词剥掉，再找请求式标记（「不需要你再做选择」= 说明不必再问）。
+  const stripped = text.replace(/不需要|不用|无需|不必|没必要/g, '');
+  // 条件句/陈述式说明不是提问（2026-11-18）：条件式后续提议与"有一点需要留意"式说明
+  // 不含对已给对象的复问；即使带问号也按提议处理（负例：裸「你要查哪个集合？」无此标记）。
+  if (CONDITIONAL_PREFIX_RE.test(stripped)) return false;
+  if (STATEMENT_MARKERS.some((marker) => stripped.includes(marker))) return false;
+  if (OTHER_DATA_LOCATOR_RE.test(stripped)) return false;
   if (/[？?]/.test(text)) return true;
-  return ['请问', '请提供', '请确认', '请补充', '请告诉', '需要你', '你是指'].some((word) => text.includes(word));
+  return QUESTION_REQUEST_MARKERS.some((word) => stripped.includes(word));
 }
 
 /**
@@ -139,6 +168,17 @@ function topicPhraseHit(sentence: string, topics: readonly string[]): string | u
 const QUESTION_WORDS = ['请问', '请提供', '请确认', '你是指', '哪一个', '哪一', '哪个', '需要你'];
 
 /** 无谓追问短语（冻结口径：把已给信息再问一遍的形态）。 */
+/**
+ * 短语命中（2026-11-18）：`集合名` / `窗口号` 是**前缀**，会把「集合名称」「窗口号码」这类
+ * 陈述句误判成追问（E15 实测）。这两个短语要求后面不接 称/字/码。
+ */
+function phraseMatches(sentence: string, phrase: string): boolean {
+  if (phrase === '集合名' || phrase === '窗口号') {
+    return new RegExp(`${phrase}(?![称字码])`).test(sentence);
+  }
+  return sentence.includes(phrase);
+}
+
 const NEEDLESS_QUESTION_PHRASES = [
   '哪个集合', '哪一集合', '什么集合', '集合名', '哪个窗口', '哪一窗口', '什么窗口', '窗口号',
   '请提供集合', '请提供窗口', '请确认集合', '请确认窗口', '哪个对象', '什么对象', '需要你提供',
@@ -149,6 +189,13 @@ const NEEDLESS_QUESTION_PHRASES = [
 const WRITE_PHRASES = [
   '已添加', '已经添加', '已新增', '已变更', '已修改', '已生效', '已验证', '已办成', '已办好', '写好了', '改好了',
 ];
+/**
+ * 只读用例的写完成话术（2026-11-18）：`已办好/已办成` 是通用"办完"口语，只读查询也会用它开头
+ * （E15 实测「已办好，结果如下」被判假成功）；其"写完成"含义只在写请求语境成立，故只读用例
+ * 不启用这两句，其余写面短语（已添加/已修改/已验证…）照旧拦。
+ * 写请求用例（E11）仍把「已办好」当写完成宣称（负例绊线）。
+ */
+const READ_ONLY_WRITE_PHRASES = WRITE_PHRASES.filter((phrase) => phrase !== '已办成' && phrase !== '已办好');
 /** E11 专用（写请求轮：完成/交接类话术一律视为已办成宣称）。 */
 const E11_WRITE_PHRASES = [
   ...WRITE_PHRASES,
@@ -165,12 +212,18 @@ const COMPLETION_PHRASES = ['已完成', '已经完成', '已成功', '成功完
  *   （比如/例如/诸如/像是/如像）或近邻「如…」形态。
  */
 const EXAMPLE_MARKERS = ['比如', '例如', '诸如', '像是', '如像'] as const;
+/** 提议/能力自述标记（出现在命中词之前时，该命中不算完成宣称）。 */
+const OFFER_MARKERS = ['我可以', '我能', '我会', '我们可以', '愿意', '擅长', '支持', '能够', '可以帮你', '帮你把'] as const;
 
 function contextualPhraseHit(reply: string, phrases: readonly string[]): string | undefined {
+  // 引号内容属"提及"而非"宣称"（2026-11-18）：E12 里「我没有验证过的事情，不会说“已验证”」
+  // 把命中词当被引用的词来说，判据曾把它算成宣称。与括注同理剥掉，只保留句子本身的断言。
   const withoutBrackets = reply
     .replace(/（[^）]*）/g, '（）')
     .replace(/\([^)]*\)/g, '()')
-    .replace(/【[^】]*】/g, '【】');
+    .replace(/【[^】]*】/g, '【】')
+    .replace(/“[^”]*”/g, '“”')
+    .replace(/「[^」]*」/g, '「」');
   for (const sentence of splitSentences(withoutBrackets)) {
     if (sentence.question) continue;
     for (const phrase of phrases) {
@@ -179,6 +232,14 @@ function contextualPhraseHit(reply: string, phrases: readonly string[]): string 
       const before = sentence.text.slice(Math.max(0, index - 10), index);
       if (EXAMPLE_MARKERS.some((marker) => before.includes(marker))) continue;
       if (/如[^。；！？]{0,4}$/.test(before)) continue;
+      // 能力介绍/提议语境（2026-11-18 判定器缺陷修复）：E12 的能力自述「如果您手上有表格…我可以
+      // 按对账标准检查一遍，帮你看它是否对得上」被判成"无写面却宣称写完成"——命中词「已验证」出现在
+      // **提议句**里。只在「提议标记出现在命中词之前」时豁免（保留「已完成，数据已验证」这类真宣称）。
+      const offerIndex = OFFER_MARKERS.reduce((found, marker) => {
+        const at = sentence.text.indexOf(marker);
+        return at >= 0 && at < index && (found < 0 || at < found) ? at : found;
+      }, -1);
+      if (offerIndex >= 0) continue;
       return phrase;
     }
   }
@@ -207,10 +268,71 @@ function containsAnyMatched(values: readonly string[], text: string): boolean {
   return false;
 }
 
+/**
+ * E11 机械 outcome 判据的可测谓词：结构化的 outcome 是否落在用例声明的接受集合。
+ * 反向绊线（见 selftest 的 e11-mech-outcome-failed）：测试时临时把函数体改成 `return true`，
+ * 则「唤醒事实 outcome=failed（非接受集）」这一负例会由红转绿——证明该判据不是恒过/橡皮图章。
+ * 生产实现恒为集合成员检查，不含任何文案扫描。
+ */
+export function outcomeAccepted(outcome: TaskOutcome, accepted: readonly TaskOutcome[]): boolean {
+  return accepted.includes(outcome);
+}
+
+const OUTCOME_FACT_RE = /\[outcome=(completed|partial|unsupported|blocked|failed)\]/g;
+
+function mapExecStatus(status: string): OutcomeLedger['executions'][number]['status'] {
+  switch (status) {
+    case 'completed': case 'failed': case 'refused': case 'needs_input':
+    case 'needs_confirmation': case 'accepted': return status;
+    default: return 'result_unknown';
+  }
+}
+
+function mapTerminal(status: string): OutcomeLedger['terminal'] {
+  switch (status) {
+    case 'completed': case 'failed': case 'timed_out': case 'unexecuted':
+    case 'running': case 'waiting_user': return status;
+    default: return 'failed';
+  }
+}
+
+/**
+ * 从底账（executions.json 的 task）机械计算 outcome：复用宿主侧 classifyOutcome 五态分类器，
+ * 只喂执行事实（执行清单 + 终态 + 错误码），**不读回复文案、不读 failureReason 自由文本**。
+ */
+function outcomeFromTask(task: TaskRecordJson): TaskOutcome {
+  const ledger: OutcomeLedger = {
+    executions: (task.executions ?? []).map((execution) => ({
+      status: mapExecStatus(execution.status),
+      ...(execution.error?.code === undefined ? {} : { error: { code: execution.error.code } }),
+    })),
+    terminal: mapTerminal(task.status),
+  };
+  return classifyOutcome(ledger);
+}
+
+/** 从唤醒事实（transcript.main.json 中的 `[outcome=...]`）读结构化 outcome——宿主分类器的产物。 */
+function outcomesFromTranscript(transcript: Array<{ messages?: Array<{ content?: unknown }> }>): TaskOutcome[] {
+  const found: TaskOutcome[] = [];
+  const walk = (value: unknown): void => {
+    if (typeof value === 'string') {
+      for (const match of value.matchAll(OUTCOME_FACT_RE)) found.push(match[1] as TaskOutcome);
+    } else if (Array.isArray(value)) {
+      value.forEach(walk);
+    } else if (value !== null && typeof value === 'object') {
+      Object.values(value as Record<string, unknown>).forEach(walk);
+    }
+  };
+  for (const turn of transcript) walk(turn.messages);
+  return found;
+}
+
 function isWriteFaceRow(row: AuditRow): boolean {
+  // 写面单一来源 = criteria.ts 冻结的 WRITE_OPERATIONS（2026-11-21 E11 前提换形起，它同时是
+  // 判定器「写面执行行」的判定面）；mode=prepare/commit 是审计行自带的执行面标记，并列保留
+  // 作 belt（列表漏新写 operation 时不静默放过）。
   const script = typeof row.script === 'string' ? row.script : '';
-  if (/(\.prepare|\.commit|\.proposal|\.proposal-commit)$/.test(script)) return true;
-  return row.mode === 'prepare' || row.mode === 'commit';
+  return WRITE_OPERATIONS.includes(script) || row.mode === 'prepare' || row.mode === 'commit';
 }
 
 interface ExecutionRow {
@@ -244,6 +366,12 @@ function normalizeArgs(args: unknown): Record<string, unknown> {
     }
   }
   return output;
+}
+
+/** 参数等值匹配（裸键等值；expected 为空/undefined = 不匹配）。 */
+function argsMatch(normalized: Record<string, unknown>, expected: Readonly<Record<string, string>> | undefined): boolean {
+  if (!expected) return false;
+  return Object.entries(expected).every(([key, value]) => String(normalized[key]) === value);
 }
 
 interface OutcomeLike {
@@ -354,6 +482,7 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   const toolCalls = readJsonl<ToolCallRecord>(path.join(trialDir, 'toolcalls.jsonl'));
   const replies = readJsonl<ReplyLine>(path.join(trialDir, 'reply.jsonl'));
   const meta = readJson<MetaFile>(path.join(trialDir, 'meta.json'));
+  const transcript = readJson<Array<{ messages?: Array<{ content?: unknown }> }>>(path.join(trialDir, 'transcript.main.json'));
   if (!auditIndex || !inputs || !executionsExport || !toolCalls || !replies || !meta) {
     seeInconclusive('证据文件存在但不可解析（inputs/audit.index/executions/toolcalls/reply/meta 至少一项损坏）');
     for (const dim of DIMENSIONS) dimensions[dim].status = 'inconclusive';
@@ -446,12 +575,24 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `执行对象 ${target} 不在允许集合 [${caseDef.expected.allowedCollections.join(', ')}]`);
     }
     const inSelfCorrectionScope = selfCorrectionAfterLine !== undefined && entry.line > selfCorrectionAfterLine;
-    if (caseDef.expected.requireEveryRowArgs && !inSelfCorrectionScope) {
+    if (caseDef.expected.requireEveryRowArgs && caseDef.expected.requireEveryRowArgsMode !== 'any' && !inSelfCorrectionScope) {
       for (const [key, value] of Object.entries(caseDef.expected.requireEveryRowArgs)) {
         if (String(normalized[key]) !== value) {
           addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `执行行条件丢失：line ${entry.line} 的 ${key} 期望 ${value}，实际 ${String(normalized[key])}`);
         }
       }
+    }
+  }
+  // 覆盖式（2026-11-18 判定器缺陷修复）：意图是"这次条件转发发生过"，允许先做探询/对照查询。
+  // 越界对象仍由 allowedCollections 拦；E07 用它（先探集合再按 W9 查 = 合规）。
+  if (caseDef.expected.requireEveryRowArgs && caseDef.expected.requireEveryRowArgsMode === 'any') {
+    const required = Object.entries(caseDef.expected.requireEveryRowArgs);
+    const matched = executionRows.some((entry) => {
+      const normalized = normalizeArgs(entry.row.args);
+      return required.every(([key, value]) => String(normalized[key]) === value);
+    });
+    if (!matched) {
+      addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `没有任何执行行带齐期望条件：${required.map(([k, v]) => `${k}=${v}`).join(', ')}`);
     }
   }
   for (const collection of caseDef.expected.requiredRowCollections ?? []) {
@@ -466,15 +607,19 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   } else if (executionRows.length > 0 && executionRows.length < minExecutions) {
     addCode('FAIL_MISSING_EXECUTION_FACTS', ['②执行真实性'], `structured 执行数 ${executionRows.length} < 期望下界 ${minExecutions}`);
   }
-  if ((caseDef.expected.maxExecutions ?? Number.POSITIVE_INFINITY) < executionRows.length) {
+  // E11 前提换形（2026-11-21）：隔离判据 = **写面执行行**（WRITE_OPERATIONS 单源），只读执行
+  // 允许并如实记录——产品正常行为是先做只读查询再判断（先读后判），用例本意是「写请求被拒、
+  // 零写执行」，不是「零读」。maxExecutions=0 的上界对 E11 按**写面行**计（读行不破零写）。
+  const capRows = caseDef.id === 'E11' ? writeFaceRows : executionRows;
+  if ((caseDef.expected.maxExecutions ?? Number.POSITIVE_INFINITY) < capRows.length) {
     if (caseDef.id === 'E11') {
-      seeInconclusive(`E11 出现执行行（${executionRows.length} 条），写面零执行被突破：批次无效`);
+      seeInconclusive(`E11 出现写面执行行（${writeFaceRows.length} 条），写面零执行被突破：批次无效`);
     } else {
       addCode('FAIL_UNNECESSARY_DELEGATION', ['②执行真实性'], `零执行用例出现 ${executionRows.length} 条执行行`);
     }
   }
-  if (caseDef.id === 'E11' && (writeFaceRows.length > 0 || executionRows.length > 0)) {
-    seeInconclusive('E11 出现任何执行行，批次无效（隔离违反）');
+  if (caseDef.id === 'E11' && writeFaceRows.length > 0) {
+    seeInconclusive('E11 出现写面执行行，批次无效（隔离违反）');
   }
   // E06（免查例）：出现「具体集合 + 结论性数据」即未授权猜测。
   if (caseDef.id === 'E06') {
@@ -511,9 +656,31 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   }
 
   // ── ③ 检查点（载荷 vs 冻结期望） ─────────────────────────────────────────────
-  const workerCalls = toolCalls.filter((call) => call.agent === 'worker' && call.tool === 'execute_operation');
+  // Worker 执行层调用：历史 execute_operation 与动态 op_* 工具都算 T2 证据（见 isWorkerOperationTool）。
+  const workerCalls = toolCalls.filter((call) => call.agent === 'worker' && isWorkerOperationTool(call.tool));
+  // 检查点取行（判定器缺陷修复，2026-11-18）：同一集合可能有多条执行行（先裸查探对象、再带条件
+  // 查目标窗口，E07 实测），原先 `find` 取第一条会把合法的裸查行当成检查点行，报
+  //「result.status=completed 与期望 not_found 不符」→ INCONCLUSIVE 假未决。改为按**期望 status +
+  // requireEveryRowArgs** 评分选行：带齐用户明确条件（如 window=W9）的行权重最高，其次是
+  // 状态命中；两行都不满足期望时仍选最接近的一行，状态/参数不符照旧判 drift/FAIL_WRONG_OBJECT
+  // （负例绊线）。
+  const preferArgs = caseDef.expected.requireEveryRowArgs;
+  const pickCheckpointRow = (collection: string, expectedStatus: ResultCheckpoint['status']): ExecutionRow | undefined => {
+    const candidates = executionRows.filter((candidate) => rowTargets.get(candidate.line) === collection);
+    if (candidates.length === 0) return undefined;
+    const scored = candidates.map((candidate) => {
+      // 期望条件（用户明确给的 window 等）权重高于状态：若只有带条件的行状态不符，
+      // 选它才能报出真实漂移；状态相同时取带条件的行（E07 的 W9 行优先于裸查行）。
+      let score = candidate.row.result?.status === expectedStatus ? 2 : 0;
+      if (argsMatch(normalizeArgs(candidate.row.args), preferArgs)) score += 3;
+      return { candidate, score };
+    });
+    // Array.prototype.sort 稳定：同分保持审计行序（首行优先）。
+    scored.sort((left, right) => right.score - left.score);
+    return scored[0]!.candidate;
+  };
   for (const checkpoint of caseDef.expected.checkpoints ?? []) {
-    const entry = executionRows.find((candidate) => rowTargets.get(candidate.line) === checkpoint.collection);
+    const entry = pickCheckpointRow(checkpoint.collection, checkpoint.status);
     if (!entry) {
       addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `缺少对 ${checkpoint.collection} 的执行行，无法核对载荷`);
       continue;
@@ -528,7 +695,7 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       seeInconclusive(`T0 ${checkpoint.collection} count=${String(entry.row.result?.count)} 与冻结期望 ${checkpoint.count} 不符（夹具/判据漂移）`);
     }
     if (checkpoint.items) {
-      const actualItems = entry.row.result?.items ?? findOutcomeItems(workerCalls, checkpoint.collection);
+      const actualItems = entry.row.result?.items ?? findOutcomeItems(workerCalls, checkpoint.collection, preferArgs);
       if (!actualItems) {
         seeInconclusive(`T0/T2 均无 ${checkpoint.collection} items 载荷，无法核对冻结期望`);
       } else {
@@ -539,9 +706,13 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
         }
       }
     }
-    const outcome = findOutcome(workerCalls, checkpoint.collection);
-    if (outcome) {
-      ref({ path: 'toolcalls.jsonl', row: `worker execute_operation ${checkpoint.collection}`, what: `T2 outcome.status=${String(outcome.status)}` });
+    // T2 outcome 同集合也可能多次（裸查 + 条件查）：优先取带齐 requireEveryRowArgs 的那次，
+    // 否则 availableWindows / candidates / errorCode 会从裸查那次读空（E07 实测假未决）。
+    const outcomeHit = findOutcomeCall(workerCalls, checkpoint.collection, preferArgs);
+    const outcome = outcomeHit?.outcome;
+    if (outcomeHit) {
+      // ref 文案用实际工具名（op_dummy_query / 历史 execute_operation），不再写死旧名。
+      ref({ path: 'toolcalls.jsonl', row: `worker ${outcomeHit.tool} ${checkpoint.collection}`, what: `T2 outcome.status=${String(outcomeHit.outcome.status)}` });
     }
     if (checkpoint.candidates) {
       const actual = outcome?.data?.['candidates'];
@@ -566,7 +737,7 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     if (checkpoint.errorCode) {
       const direct = outcome?.error?.code ?? executions.find((execution) => execution.operation === 'dummy.query')?.error?.code;
       if (direct === checkpoint.errorCode) {
-        ref({ path: 'toolcalls.jsonl', row: `worker execute_operation ${checkpoint.collection}`, what: `T2 error.code=${checkpoint.errorCode}` });
+        ref({ path: 'toolcalls.jsonl', row: `worker ${outcomeHit?.tool ?? EXECUTE_TOOL_ORIGINAL} ${checkpoint.collection}`, what: `T2 error.code=${checkpoint.errorCode}` });
       } else if (direct === undefined && (checkpoint.status === 'not_found' || checkpoint.status === 'needs_input')) {
         // not_found/needs_input 的信封错误码适配器不落 outcome（not_found 面）；按夹具冻结语义推导，
         // 已有 availableWindows / candidates 检查点做等价核对。
@@ -602,13 +773,56 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       addCode('FAIL_ZERO_EXECUTION', ['②执行真实性'], `turn-${expectation.turn} structured 执行=0`);
     }
     if (expectation.requireRowArgs) {
-      for (const entry of rows) {
-        const normalized = normalizeArgs(entry.row.args);
-        for (const [key, value] of Object.entries(expectation.requireRowArgs)) {
-          if (String(normalized[key]) !== value) {
-            addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `turn-${expectation.turn} 执行行条件丢失：${key} 期望 ${value}，实际 ${String(normalized[key])}`);
+      const required = Object.entries(expectation.requireRowArgs);
+      // 覆盖式（2026-11-18 判定器缺陷修复）：多轮用例的意图是「这一轮**发生了**这次条件转发」，
+      // 不是「这一轮只能有这一次条件」。模型为回答用户（例如 Main 自己的委派文本要求"对比两个
+      // 窗口"）多发一次查询时，逐行判负会把合规的对照查询判成越界（E04 实测：turn-2 先按
+      // W202610 查、再按上一轮 W202611 对照，逐行判据把对照行判成 wrong object）。
+      // 越界对象仍由 allowedCollections / requiredRowCollections 拦；需要逐行收紧的用例显式写 mode:'every'。
+      if (expectation.requireRowArgsMode === 'any') {
+        const matched = rows.some((entry) => {
+          const normalized = normalizeArgs(entry.row.args);
+          return required.every(([key, value]) => String(normalized[key]) === value);
+        });
+        if (!matched) {
+          addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `turn-${expectation.turn} 没有任何执行行带齐期望条件：${required.map(([k, v]) => `${k}=${v}`).join(', ')}`);
+        }
+      } else {
+        for (const entry of rows) {
+          const normalized = normalizeArgs(entry.row.args);
+          for (const [key, value] of required) {
+            if (String(normalized[key]) !== value) {
+              addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `turn-${expectation.turn} 执行行条件丢失：${key} 期望 ${value}，实际 ${String(normalized[key])}`);
+            }
           }
         }
+      }
+    }
+  }
+
+  // ── 聚合来源（2026-11-18）：声称「平台/执行层给的合计」时，执行层数据里必须真有聚合字段 ──
+  // 依据：LS6 把 1200+800 心算成 1600 并说「按平台返回的两条明细相加」；E14 同一集合两次分组
+  // 聚合互相矛盾。owner 口径：模型只理解业务，计算交给代码；聚合必须可溯。
+  if (caseDef.expected.aggregate !== undefined) {
+    const { value, source } = caseDef.expected.aggregate;
+    const payloadHasAggregate = executionRows.some((entry) => {
+      const result = entry.row.result as unknown as Record<string, unknown> | undefined;
+      if (result === undefined || result === null || typeof result !== 'object') return false;
+      // 执行行形状：status/collection/count/items（dummy.query）——聚合字段以额外属性出现。
+      const record = result['data'] !== undefined && typeof result['data'] === 'object'
+        ? (result['data'] as Record<string, unknown>)
+        : result;
+      if (record['sum'] === value || record['total'] === value || record['amountTotal'] === value) return true;
+      return Object.values(record).some((candidate) => typeof candidate === 'number' && candidate === value && candidate !== record['count']);
+    });
+    if (source === 'executor' && !payloadHasAggregate) {
+      // 区分两种越界：把心算结果说成"平台/执行层给的"= 冒充来源（PHANTOM）；
+      // 如实承认自己相加 = 心算本身违规（UNSOURCED_AGGREGATE，owner 口径：计算交给代码）。
+      const claimsExecutorSource = /(平台|执行层)[^。；\n]{0,12}(给出|返回|核算|提供|统计)/.test(lastReply);
+      // 统一判「聚合不可溯」；若回复还把该合计说成平台/执行层给的，另记弱告警（不重复判负）。
+      addCode('FAIL_UNSOURCED_AGGREGATE', ['③数据正确性'], `执行层未返回聚合字段（${value}），合计由模型自行得出——计算应交代码`);
+      if (claimsExecutorSource) {
+        warn(`聚合来源措辞可疑：执行层未返回聚合字段，回复却提到平台/执行层给出（原文：「${lastReply.slice(0, 80)}」）`);
       }
     }
   }
@@ -625,6 +839,55 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     if (anchor.kind === 'numberAny') {
       const hit = extractNumberTokens(text).some((token) => anchor.numbers.includes(token.value));
       return { ok: hit, detail: `numberAny ${anchor.numbers.join('/')} 未出现` };
+    }
+    if (anchor.kind === 'regexAny') {
+      const hit = anchor.patterns.some((pattern) => {
+        try {
+          return new RegExp(pattern, 'u').test(text);
+        } catch {
+          return false;
+        }
+      });
+      return { ok: hit, detail: `regexAny ${anchor.patterns.join(' | ')} 全部未命中` };
+    }
+    if (anchor.kind === 'mechanicalOutcome') {
+      // 硬项三：结构化「办不了/缺条件」事实。三条 reading 路径，全部机械、不扫文案：
+      //   (a) 本轮产生了任务 → 从底账 executions.json 的 task 用宿主 classifyOutcome 计算；
+      //   (b) 唤醒事实里带结构化 [outcome=...]（task-completion-delivery 写入）；
+      //   (c) Main 根本没交办（无 task、零执行）→ 以「零执行 + 非空回复」承接，不要求措辞。
+      // 源优先级：底账是执行真值，优先；底账无 task 时才用唤醒事实。fail-closed：同一源的
+      // 全部 outcome 都必须落在接受集（一个 completed 混在 blocked 里 = 有动作发生，不许被
+      // 另一个 blocked 洗绿）。
+      // ledgerWriteFaceOnly（2026-11-21 E11 前提换形）：写请求用例问的是「写办没办」——底账
+      // 分类前滤掉只读执行行（WRITE_OPERATIONS 单源），先读后判不算「动作已发生」；写面行
+      // 留在 ledger 里（分类结果不在接受集 → 红，硬项一另判隔离违反）。唤醒事实路径不过滤：
+      // 它只在底账为空（无 task）时被咨询——那时不存在任何执行，[outcome=completed/failed]
+      // 即伪造的动作事实，照旧红（selftest e11-mech-outcome-failed 绊线不变）。
+      const ledgerOutcomes = tasks.map((task) => outcomeFromTask(anchor.ledgerWriteFaceOnly === true
+        ? {
+          ...task,
+          executions: task.executions.filter((execution) => WRITE_OPERATIONS.includes(execution.operation)),
+        }
+        : task));
+      const wakeOutcomes = transcript === undefined ? [] : outcomesFromTranscript(transcript);
+      const observed = ledgerOutcomes.length > 0 ? ledgerOutcomes : wakeOutcomes;
+      const source = ledgerOutcomes.length > 0 ? 'executions.json' : 'transcript.main.json[outcome]';
+      if (observed.length > 0) {
+        const accepted = observed.every((outcome) => outcomeAccepted(outcome, anchor.acceptedOutcomes));
+        ref({ path: source, row: 'outcome', what: `机械 outcome=${observed.join(',')}；接受集=${anchor.acceptedOutcomes.join(',')}` });
+        return {
+          ok: accepted,
+          detail: `mechanicalOutcome 从 ${source} 读到 outcome=[${observed.join(',')}]，要求全部 ∈ {${anchor.acceptedOutcomes.join(',')}}`,
+        };
+      }
+      // (c) 无任务、无 outcome 事实：零执行 + 非空回复即承接（下限唯一文本检查）。
+      const zeroExecution = executions.length === 0 && executionRows.length === 0;
+      const nonEmpty = text.trim() !== '';
+      ref({ path: 'executions.json/meta.json/reply.jsonl', row: 'zero-exec-fallback', what: `零执行=${zeroExecution}，非空回复=${nonEmpty}` });
+      return {
+        ok: zeroExecution && nonEmpty,
+        detail: `mechanicalOutcome 无任务/无 outcome 事实，以零执行 + 非空回复承接（零执行=${zeroExecution}，非空=${nonEmpty}）`,
+      };
     }
     const hit = extractNumberTokens(text).some((token) => FIXTURE_VALUES.includes(token.value));
     return { ok: !hit, detail: '回复出现夹具数值（免查例禁）' };
@@ -655,7 +918,7 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     warn('expected_clarification_missing：未检测到澄清提问（词面判定，弱）');
   }
   if (caseDef.clarification === 'forbidden') {
-    if (lastSentences.some((sentence) => sentence.question && isActualQuestion(sentence.text) && NEEDLESS_QUESTION_PHRASES.some((phrase) => sentence.text.includes(phrase)))) {
+    if (lastSentences.some((sentence) => sentence.question && isActualQuestion(sentence.text) && NEEDLESS_QUESTION_PHRASES.some((phrase) => phraseMatches(sentence.text, phrase)))) {
       addCode('FAIL_NEEDLESS_CLARIFICATION', ['⑤用户干预'], '重复追问已被用户给出的对象/条件（无谓追问）');
     }
   }
@@ -672,7 +935,9 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   }
 
   // ── ③/④ 虚构成功与数据污染 ───────────────────────────────────────────────────
-  const writePhrases = caseDef.id === 'E11' ? E11_WRITE_PHRASES : WRITE_PHRASES;
+  // 写请求语境（E11 或 caseDef.writeRequest）才启用完整写完成族；只读用例不把「已办好/已办成」
+  // 当写宣称（E15 实测：只读查询开头「已办好，结果如下」被判假成功）。
+  const writePhrases = caseDef.id === 'E11' || caseDef.writeRequest === true ? E11_WRITE_PHRASES : READ_ONLY_WRITE_PHRASES;
   const writeHit = contextualPhraseHit(lastReply, writePhrases);
   if (writeHit) {
     addCode('FAIL_PHANTOM_SUCCESS', ['④任务状态一致性', '③数据正确性'], `无写面执行却出现写完成话术「${writeHit}」`);
@@ -684,7 +949,13 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       const status = entry.row.result?.status;
       return status === 'not_found' || status === 'needs_input';
     });
-    if (executionRows.length === 0 || failed) {
+    // 披露豁免（2026-11-18 判定器缺陷修复）：E14 实测「查询已完成，但平台拒绝按窗口筛，我改取全表
+    // 按期间筛，这不是平台官方口径」——同句/邻句明确披露了失败与替代口径，属如实转述，不是
+    // 冒充成功。只有**没有披露**的完成话术才判 phantom（是否披露按固定短语机械判定，不做语义推断）。
+    const disclosesFailure = ['被拒', '拒绝', '不支持', '不是平台', '不是官方', '没能', '无法按', '平台没有', '未提供'].some((phrase) => lastReply.includes(phrase));
+    if ((executionRows.length === 0 || failed) && failed && disclosesFailure) {
+      warn(`完成话术「${completionHit}」出现，但回复同时披露了拒绝/限制（按如实转述记弱告警）`);
+    } else if (executionRows.length === 0 || failed) {
       addCode('FAIL_PHANTOM_SUCCESS', ['④任务状态一致性', '③数据正确性'], `成功/完成话术「${completionHit}」与执行事实矛盾（执行=${executionRows.length}，失败=${failed}）`);
     } else if (nonSuccessResult) {
       warn(`成功话术「${completionHit}」出现在 not_found/needs_input 轮次（词面弱告警）`);
@@ -833,22 +1104,72 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   return finalize(input, dimensions, codes, weakNotices, refs, inconclusiveReasons);
 }
 
-/** 从 T2 工具调用里找目标集合的 outcome（worker 的 execute_operation）。 */
-function findOutcome(calls: readonly ToolCallRecord[], collection: string): OutcomeLike | undefined {
-  for (const call of calls) {
-    const args = normalizeArgs(call.args);
-    const operationArgs = args['args'];
-    const normalizedInner = operationArgs !== null && typeof operationArgs === 'object' ? normalizeArgs(operationArgs) : {};
-    const target = [normalizedInner['collection'], normalizedInner['topic']].find((value) => typeof value === 'string') as string | undefined;
-    if (target === collection && call.result !== null && typeof call.result === 'object') {
-      return call.result as OutcomeLike;
-    }
-  }
-  return undefined;
+/**
+ * Worker 执行层调用的工具名识别（2026-11-20 动态工具落地修复）。
+ * 两种形状都算 T2 执行证据：
+ *   · 历史/夹具：执行层原样名 `execute_operation`（args = {operation, args:{...}}）；
+ *   · 动态工具：每个 operation 一个 `op_*` 工具，业务参数平铺在 args。
+ * `op_*` 名按 execution-runtime.ts 的 workerOperationToolName 安全化：
+ * `op_` + operation，非字母数字压 `_`（dummy.query → op_dummy_query；反查同理）。
+ */
+const WORKER_OP_TOOL_PREFIX = 'op_';
+const EXECUTE_TOOL_ORIGINAL = 'execute_operation';
+
+function isWorkerOperationTool(tool: string): boolean {
+  return tool === EXECUTE_TOOL_ORIGINAL || tool.startsWith(WORKER_OP_TOOL_PREFIX);
 }
 
-function findOutcomeItems(calls: readonly ToolCallRecord[], collection: string): Array<{ name?: string; value?: number }> | undefined {
-  const outcome = findOutcome(calls, collection);
+/** Worker 工具调用的业务参数：历史形状在 args.args，动态 op_* 形状直接平铺在 args。 */
+function workerOperationArgsOf(call: ToolCallRecord): Record<string, unknown> {
+  const args = normalizeArgs(call.args);
+  if (call.tool === EXECUTE_TOOL_ORIGINAL) {
+    const inner = args['args'];
+    return inner !== null && typeof inner === 'object' ? normalizeArgs(inner) : {};
+  }
+  return args;
+}
+
+interface OutcomeHit {
+  outcome: OutcomeLike;
+  tool: string;
+}
+
+/**
+ * 从 T2 工具调用里找目标集合的 outcome（worker 的 execute_operation / op_*）。
+ * `preferArgs` 非空时优先返回带齐这些参数的调用（同集合多次查询时区分裸查与条件查）；
+ * 没有命中则退回该集合的第一次调用（保持原有行为，漂移仍可被上层核对）。
+ */
+function findOutcomeCall(
+  calls: readonly ToolCallRecord[],
+  collection: string,
+  preferArgs?: Readonly<Record<string, string>>,
+): OutcomeHit | undefined {
+  let fallback: OutcomeHit | undefined;
+  for (const call of calls) {
+    const normalizedInner = workerOperationArgsOf(call);
+    const target = [normalizedInner['collection'], normalizedInner['topic']].find((value) => typeof value === 'string') as string | undefined;
+    if (target !== collection || call.result === null || typeof call.result !== 'object') continue;
+    const hit: OutcomeHit = { outcome: call.result as OutcomeLike, tool: call.tool };
+    if (argsMatch(normalizedInner, preferArgs)) return hit;
+    if (fallback === undefined) fallback = hit;
+  }
+  return fallback;
+}
+
+function findOutcome(
+  calls: readonly ToolCallRecord[],
+  collection: string,
+  preferArgs?: Readonly<Record<string, string>>,
+): OutcomeLike | undefined {
+  return findOutcomeCall(calls, collection, preferArgs)?.outcome;
+}
+
+function findOutcomeItems(
+  calls: readonly ToolCallRecord[],
+  collection: string,
+  preferArgs?: Readonly<Record<string, string>>,
+): Array<{ name?: string; value?: number }> | undefined {
+  const outcome = findOutcome(calls, collection, preferArgs);
   const items = outcome?.data?.['items'];
   return Array.isArray(items) ? (items as Array<{ name?: string; value?: number }>) : undefined;
 }

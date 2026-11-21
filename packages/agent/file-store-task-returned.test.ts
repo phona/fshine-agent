@@ -1,5 +1,5 @@
 /**
- * 任务回程文件登记与任务产物去重（CAP-01 S2 ③⑤；docs/product/cap01-main-direct-execution.md §4/§6/§10-3）。
+ * 任务回程文件登记与任务产物去重（CAP-01 S2 ③⑤；docs/architecture/files.md §4/§6/§10-3）。
  *
  * 覆盖：
  *   · registerTaskFile（内联字节）：新 file_id + task_id 绑定 + 登记即激活；
@@ -319,7 +319,7 @@ describe('listTaskFiles：目录桥物化源（只含当前任务绑定、已激
     expect(taskFiles.map((file) => file.fileId)).not.toContain(mainFile.fileId);
     expect(taskFiles.map((file) => file.fileId)).not.toContain(otherTask.fileId);
     for (const file of taskFiles) {
-      expect(Object.keys(file).sort()).toEqual(['bytes', 'fileId', 'name']);
+      expect(Object.keys(file).sort()).toEqual(['activatedAt', 'bytes', 'createdAt', 'fileId', 'name']);
     }
     store.close();
   });

@@ -28,7 +28,7 @@
 | `config` | 部署模板（`agent.example.yaml`）与仓内 dummy 面配置（`agent.fixture.yaml`） |
 | `scripts` | `ask` 入口、eval 与仓库守卫脚本 |
 | `tests` | 测试装置（vitest setup） |
-| [`docs`](docs/index.md) | 文档索引（权威决定见 [decision-log](docs/decision-log.md)） |
+| [`docs`](docs/index.md) | 文档索引（权威决定见 [决定索引](docs/decisions/index.md)） |
 
 ## 命令
 
@@ -45,7 +45,7 @@ npm run tasks -- <taskId> --out <path>  # 导出任务交付件（Markdown；拒
 npm run tasks -- <taskId> --redo     # 以该任务存储的交办原文逐字重新交办一个新任务（仅终态）
 npm run ops                          # 生成运营快照（本地只读 HTML；缺省 .runtime/ops/index.html）
 npm start                            # 企微长连接 server（需 config/agent.yaml + 企微凭据）
-npm run eval:user -- --trials 1      # 用户级黑盒评测（12 用例，真实模型 + 仓内 dummy 夹具）
+npm run eval:user -- --trials 1      # 用户级黑盒评测（15 用例，真实模型 + 仓内 dummy 夹具）
 ```
 
 ## 运行（产品面）
@@ -90,8 +90,7 @@ npm run tasks -- <taskId> --redo         # 以该任务存储的交办原文逐�
   `原任务 <oldId> → 新任务 <newId>（状态：…）`；原任务记录零改动，新旧关联只由这条输出表达
   （schema 冻结，无关联列）。若原失败由请求文本本身引起，逐字重推会复现同一失败——这是
   「逐字」语义的预期，非缺陷。**语义边界（owner 裁定）**：`--redo` 是「重新交办」，不是
-  人工接管、也不是会话续跑；真续跑需 Pi 原生会话恢复（当前生产未落盘，已登记缺口，
-  见 `docs/product/r3-open-decisions.md`）。
+  人工接管、也不是会话续跑；真续跑需 Pi 原生会话恢复（当前生产未落盘，未决项见 GitHub issue #68）。
 - 缺省读 `.runtime/state.db`；`--config=<path>` / `AGENT_CONFIG_PATH` 与 `npm run ask` 同源，
   非空 `DB_PATH` 环境变量同 ask 一样覆盖底账路径。
 - 执行步骤按落账顺序列出（底账未存每步时间戳）；「任务结果」为底账持久化的执行层汇报原文
@@ -107,12 +106,12 @@ npm run tasks -- <taskId> --redo         # 以该任务存储的交办原文逐�
 
 - 测试入口：`npm run test`（vitest，unit project；含渠道假体、运行时拒绝路径、重启连续性、
   过渡命名收敛守卫）。
-- 评测入口：`npm run eval:user`（用户级黑盒评测，12 用例；真实模型 + 仓内 dummy 夹具，与
+- 评测入口：`npm run eval:user`（用户级黑盒评测，15 用例；真实模型 + 仓内 dummy 夹具，与
   `npm run ask` 同源装配；逐样本证据与判据见 `scripts/eval/convergence-r1/README.md`）。
-  真实模型 workflow 面：`eval-real.yml`（per-push 1 轮，advisory）与 `eval-nightly.yml`（12×3）——
+  真实模型 workflow 面：`eval-real.yml`（per-push 1 轮，advisory）与 `eval-nightly.yml`（全量用例 ×3，当前 15 例）——
   **配置就绪 ≠ 持续运行已启用**：两者分别触发于 `main` 的 push/PR 与每日 cron；当前工作线未合入
   `main`、远端 Secrets（`LLM_API_*`）未经本仓验证，故在合入并留档首次真实运行之前，不构成持续保障
-  （口径见 `docs/decision-log.md` §十七.4）。
+  （口径见 `docs/decisions/index.md`「R2：E05 边界与 task.status（§十七）」行与 `docs/history/decision-log-part02-2026-11.md:40` §十七.4）。
 - 测试与评测只依赖仓内 dummy/假件；真实 SaaS / 真实企微渠道未验证，不作前置条件。
 
 ## 上线前必填

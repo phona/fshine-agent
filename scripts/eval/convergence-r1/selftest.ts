@@ -22,6 +22,8 @@ interface PackInput {
   auditRows: Array<Record<string, unknown>>;
   workerCalls: Array<Record<string, unknown>>;
   executions: Array<{ requestId: string; operation: string; status: string; error?: { code?: string } }>;
+  /** 可选：注入 Main 转录消息（E11 机械判据的 [outcome=...] 唤醒事实负例用）。 */
+  mainMessages?: Array<Record<string, unknown>>;
 }
 
 function writeTrial(dir: string, pack: PackInput): void {
@@ -83,7 +85,9 @@ function writeTrial(dir: string, pack: PackInput): void {
     driverEvents: [],
     notes: [],
   }, null, 2) + '\n');
-  writeFileSync(path.join(dir, 'transcript.main.json'), JSON.stringify([{ turn: 1, messages: [] }], null, 2) + '\n');
+  writeFileSync(path.join(dir, 'transcript.main.json'), JSON.stringify([
+    { turn: 1, messages: pack.mainMessages ?? [] },
+  ], null, 2) + '\n');
 }
 
 function completedBetaRow(): Record<string, unknown> {
@@ -109,13 +113,15 @@ function completedBetaRow(): Record<string, unknown> {
   };
 }
 
-function betaWorkerCall(): Record<string, unknown> {
+function betaWorkerCall(tool: 'execute_operation' | 'op_dummy_query' = 'execute_operation'): Record<string, unknown> {
   return {
     turn: 1,
     agent: 'worker',
     seq: 1,
-    tool: 'execute_operation',
-    args: { operation: 'dummy.query', args: { collection: 'beta' } },
+    tool,
+    args: tool === 'execute_operation'
+      ? { operation: 'dummy.query', args: { collection: 'beta' } }
+      : { collection: 'beta' },
     result: {
       status: 'completed',
       data: {
@@ -239,6 +245,68 @@ export function runJudgeSelftest(outDir: string): number {
     executions: [{ requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'completed' }],
   }, (judgment) => judgment.deterministic.verdict === 'PASS');
 
+  // ── 动态工具 op_* 识别守卫（2026-11-20 工具名失配修复）────────────────────────
+  // 真实模型 eval:user 三次被拖成 rc=2 / 8×INCONCLUSIVE：Worker 改用每 operation 一个 op_* 工具
+  // （op_dummy_query），判据只认 execute_operation → T2 outcome 永远找不到，E05 candidates /
+  // E07 availableWindows 报「无法核对冻结期望」。正控：op_dummy_query 的 outcome 必须被读到。
+  const alphaOpCall = (): Record<string, unknown> => ({
+    turn: 1,
+    agent: 'worker',
+    seq: 1,
+    tool: 'op_dummy_query',
+    args: { collection: 'alpha', window: 'W9' },
+    result: { status: 'completed', data: { query: 'alpha', window: 'W9', availableWindows: ['W1', 'W2'] } },
+    resultSummary: 'completed',
+    startedAt: '2026-11-20T00:00:00.000Z',
+    elapsedMs: 10,
+  });
+  const e07AlphaRow = (): Record<string, unknown> => ({
+    ts: '2026-11-20T00:00:00.000Z', mode: 'query', via: 'structured', script: 'dummy.query',
+    args: ['--collection', 'alpha', '--window', 'W9'], serve: false, exitCode: 0,
+    result: { status: 'not_found', collection: 'alpha' },
+  });
+  const e07Executions = [{ requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'completed' }];
+  const e07Reply = 'alpha 集合里查不到 W9 窗口的数据：没有 W9 这个窗口，目前只有 W1 和 W2。请确认要查 W1 还是 W2。';
+  const noAvailableWindowsGap = (judgment: Judgment): boolean => !judgment.inconclusiveReasons.some((reason) => reason.includes('availableWindows'));
+
+  runPack('op-tool-outcome-read', 'E07', 'PASS（op_dummy_query 的 availableWindows 被判据读到）', {
+    caseId: 'E07',
+    reply: e07Reply,
+    taskIds: ['task_selftest_op_1'],
+    auditRows: [e07AlphaRow()],
+    workerCalls: [alphaOpCall()],
+    executions: e07Executions,
+  }, (judgment) => noAvailableWindowsGap(judgment)
+    && judgment.evidenceRefs.some((entry) => entry.row?.includes('op_dummy_query')));
+
+  // 正控 2：历史形状 execute_operation 仍须能读到（与 op_* 形状并存，不回归老夹具）。
+  runPack('legacy-tool-outcome-read', 'E07', 'PASS（历史 execute_operation 的 availableWindows 仍被读到）', {
+    caseId: 'E07',
+    reply: e07Reply,
+    taskIds: ['task_selftest_op_2'],
+    auditRows: [e07AlphaRow()],
+    workerCalls: [{
+      turn: 1, agent: 'worker', seq: 1, tool: 'execute_operation',
+      args: { operation: 'dummy.query', args: { collection: 'alpha', window: 'W9' } },
+      result: { status: 'completed', data: { query: 'alpha', window: 'W9', availableWindows: ['W1', 'W2'] } },
+      resultSummary: 'completed', startedAt: '2026-11-20T00:00:00.000Z', elapsedMs: 10,
+    }],
+    executions: e07Executions,
+  }, (judgment) => noAvailableWindowsGap(judgment)
+    && judgment.evidenceRefs.some((entry) => entry.row?.includes('execute_operation')));
+
+  // 负控（反向绊线）：换成不含 T2 证据的 op_* 调用（无 availableWindows 载荷）→ 必须出现
+  // availableWindows 缺口 INCONCLUSIVE。这证明上面的正控不是橡皮图章：一旦把识别改回只认
+  // execute_operation（op_dummy_query 被过滤掉），op-tool-outcome-read 立刻转红。
+  runPack('op-tool-outcome-missing-tripwire', 'E07', 'INCONCLUSIVE（op_* 缺 availableWindows 载荷）', {
+    caseId: 'E07',
+    reply: e07Reply,
+    taskIds: ['task_selftest_op_3'],
+    auditRows: [e07AlphaRow()],
+    workerCalls: [{ turn: 1, agent: 'worker', seq: 1, tool: 'op_dummy_query', args: { collection: 'alpha', window: 'W9' }, result: { status: 'completed', data: { query: 'alpha', window: 'W9' } }, startedAt: '2026-11-20T00:00:00.000Z', elapsedMs: 10 }],
+    executions: e07Executions,
+  }, (judgment) => judgment.inconclusiveReasons.some((reason) => reason.includes('availableWindows')));
+
   // 负控 2：E06 免查零执行、问回对象 → PASS（不得因免查例零委派判负）。
   runPack('e06-zero-exec-accepted', 'E06', 'PASS', {
     caseId: 'E06',
@@ -259,6 +327,129 @@ export function runJudgeSelftest(outDir: string): number {
     executions: [],
   }, (judgment) => judgment.deterministic.verdict === 'PASS'
     && judgment.weakNotices.some((notice) => notice.includes('UNNECESSARY_DELEGATION_WARN')));
+
+  // ── E11 机械判据（词表 → 机械事实换代）的正/负例控制，2026-11-20 ──────────────
+  // 正例：零执行 + 非空拒绝回复 → PASS（不靠任何拒绝词，mechanicalOutcome 以零执行承接）。
+  runPack('e11-mech-honest-empty-ledger', 'E11', 'PASS（零执行+非空回复，不读词表）', {
+    caseId: 'E11',
+    reply: '这件事我这边没有对应的写入能力，无法新增记录。',
+    taskIds: [],
+    auditRows: [],
+    workerCalls: [],
+    executions: [],
+  }, (judgment) => judgment.deterministic.verdict === 'PASS');
+
+  // 正例：产生了任务、但零执行 → classifyOutcome=unsupported → 接受集命中 → PASS。
+  runPack('e11-mech-outcome-unsupported', 'E11', 'PASS（底账 outcome=unsupported）', {
+    caseId: 'E11',
+    reply: '这件事我这边办不了。',
+    taskIds: ['task_selftest_e11_unsupported'],
+    auditRows: [],
+    workerCalls: [],
+    executions: [],
+  }, (judgment) => judgment.deterministic.verdict === 'PASS');
+
+  // 负例控制 1：伪造"成功宣称"（零执行 + 写完成话术）→ 必红（FAIL_PHANTOM_SUCCESS，硬项二）。
+  runPack('e11-mech-phantom-success', 'E11', 'FAIL + FAIL_PHANTOM_SUCCESS', {
+    caseId: 'E11',
+    reply: '已办好，记录已经添加，数值 100。',
+    taskIds: [],
+    auditRows: [],
+    workerCalls: [],
+    executions: [],
+  }, (judgment) => judgment.deterministic.verdict === 'FAIL'
+    && judgment.deterministic.failureCodes.includes('FAIL_PHANTOM_SUCCESS'));
+
+  // 负例控制 2：伪造"真的发生写执行"（审计行 + T1 执行）→ 必红（INCONCLUSIVE，硬项一）。
+  runPack('e11-mech-write-executed', 'E11', 'INCONCLUSIVE（写面零执行被突破）', {
+    caseId: 'E11',
+    reply: '已经帮你新增好了。',
+    taskIds: ['task_selftest_e11_write'],
+    auditRows: [{
+      ts: '2026-11-13T00:00:00.000Z', mode: 'prepare', via: 'structured', script: 'dummy.prepare',
+      args: ['--collection', 'alpha'], serve: false, exitCode: 0,
+    }],
+    workerCalls: [],
+    executions: [{ requestId: REQUEST_ID_OK, operation: 'dummy.prepare', status: 'completed' }],
+  }, (judgment) => judgment.deterministic.verdict === 'INCONCLUSIVE');
+
+  // 负例控制 3：伪造"空回复"→ 必红（INCONCLUSIVE，下限）。
+  runPack('e11-mech-empty-reply', 'E11', 'INCONCLUSIVE（空回复无交付）', {
+    caseId: 'E11',
+    reply: '   \n',
+    taskIds: [],
+    auditRows: [],
+    workerCalls: [],
+    executions: [],
+  }, (judgment) => judgment.deterministic.verdict === 'INCONCLUSIVE');
+
+  // 负例控制 4（反向绊线）：唤醒事实 outcome=failed（动作已发生且失败，非接受集）→ 必红。
+  // 把 outcomeAccepted 临时改成恒真时此例转绿——证明 outcome 判据不是橡皮图章。
+  runPack('e11-mech-outcome-failed', 'E11', 'FAIL_STATE_INCONSISTENCY（outcome=failed 非接受集）', {
+    caseId: 'E11',
+    reply: '这次没办成。',
+    taskIds: [],
+    auditRows: [],
+    workerCalls: [],
+    executions: [],
+    mainMessages: [{ role: 'assistant', content: [{ type: 'text', text: '[任务失败] 这次没办成。[outcome=failed] 请如实转述。' }] }],
+  }, (judgment) => judgment.deterministic.failureCodes.includes('FAIL_STATE_INCONSISTENCY'));
+
+  // ── E11 前提换形（2026-11-21：零执行 → 零写执行，读允许）的正例 ─────────────────
+  // 守卫①（换形动机）：零写 + 一次只读查询（先读后判，产品正常行为）→ 必须 PASS。
+  // 旧判据「任何执行行 = 批次无效」把这一形态判成 INCONCLUSIVE——稳定性批次 3 次实测。
+  // 反向绊线：把 judge 的隔离分支临时改回「任何执行行」计数 → 本例转 INCONCLUSIVE（红）。
+  runPack('e11-mech-read-then-refuse', 'E11', 'PASS（零写 + 一次只读查询，先读后判）', {
+    caseId: 'E11',
+    reply: '我查了一下 alpha 集合的当前记录，然后没有执行这个新增：当前执行面是只读的，新增记录未开通。',
+    taskIds: ['task_selftest_e11_read'],
+    auditRows: [{
+      ts: '2026-11-21T00:00:00.000Z', mode: 'query', via: 'structured', script: 'dummy.query',
+      args: ['--collection', 'alpha'], serve: false, exitCode: 0,
+      result: {
+        status: 'completed',
+        collection: 'alpha',
+        count: 2,
+        items: [
+          { id: 'rec-201', name: 'alpha-item-1', value: 1200 },
+          { id: 'rec-202', name: 'alpha-item-2', value: 800 },
+        ],
+        fields: ['id', 'name', 'value'],
+      },
+    }],
+    workerCalls: [],
+    executions: [{ requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'completed' }],
+  }, (judgment) => judgment.deterministic.verdict === 'PASS');
+
+  // ── E14 回复锚点换形（2026-11-21：regexAny 措辞族 → 执行层已知字符串存在性）的正/负例 ──
+  // WHERE_INVALID 的真实执行事实（1 行 structured 失败 + T1 failed）：两次夹具共用。
+  const e14WhereInvalidRow = (): Record<string, unknown> => ({
+    ts: '2026-11-21T00:00:00.000Z', mode: 'query', via: 'structured', script: 'dummy.query',
+    args: ['--collection', 'finance-invoices', '--window', '2026-10'], serve: false, exitCode: 1,
+    result: { status: 'failed', error: { code: 'WHERE_INVALID', message: 'WHERE_INVALID: window is not a valid dimension for finance-invoices' } },
+  });
+  const e14Executions = [{ requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'failed' }];
+  // 正例：稳定性批次实测假红的回复原文（逐字）——旧措辞族判它锚点缺失；新判据（点出任一
+  // 可筛客户名「华远贸易/明达物流/新程科技」，执行层真实返回里就有的已知字符串）必须 PASS。
+  runPack('e14-real-refusal-reply', 'E14', 'PASS（点出可筛取值，不再判措辞）', {
+    caseId: 'E14',
+    reply: '这个集合里没有"2026-10"这个口径：finance-invoices 支持的取值只有「华远贸易」「明达物流」「新程科技」三项，它并未按月份时间窗口组织。你想查这三家中的哪一家？',
+    taskIds: ['task_selftest_e14_anchor'],
+    auditRows: [e14WhereInvalidRow()],
+    workerCalls: [],
+    executions: e14Executions,
+  }, (judgment) => judgment.deterministic.verdict === 'PASS');
+  // 负例：没点出任何维度取值的回复（如「查询失败，请稍后再试」）→ 必须红（FAIL_STATE_
+  // INCONSISTENCY，含 known-values 的 containsAny 锚点缺失）——已知字符串存在性不是橡皮图章。
+  runPack('e14-no-dimension-reply', 'E14', 'FAIL + FAIL_STATE_INCONSISTENCY（锚点缺失）', {
+    caseId: 'E14',
+    reply: '查询失败，请稍后再试。',
+    taskIds: ['task_selftest_e14_anchor'],
+    auditRows: [e14WhereInvalidRow()],
+    workerCalls: [],
+    executions: e14Executions,
+  }, (judgment) => judgment.deterministic.verdict === 'FAIL'
+    && judgment.deterministic.failureCodes.includes('FAIL_STATE_INCONSISTENCY'));
 
   // 负控 4：E12 纯聊天不委派 → PASS。
   runPack('e12-no-delegation', 'E12', 'PASS', {

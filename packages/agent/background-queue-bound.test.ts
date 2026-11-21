@@ -1,7 +1,7 @@
 /**
  * 后台受理上界（复用 `runtime.queueCapacity`，不新增旋钮）。
  *
- * 缺口登记（docs/decision-log.md P0-C）：前台等待队列有 `queueCapacity` 上界，后台
+ * 缺口登记（原 decision-log P0-C；索引 docs/decisions/index.md）：前台等待队列有 `queueCapacity` 上界，后台
  * `task_run` 受理侧只按 policy 并发位探测——并发满时探测返回「排队许可」后立即释放，
  * 底账 queued 行因此没有上界，可持续堆积。本文件钉住与前台一致的行为：
  *   · 底账 queued 行数 < queueCapacity 才受理（队列唯事实源仍是底账 queued 行）；
@@ -144,8 +144,10 @@ async function sessionFor(
     mainSystemPrompt: '（测试）Main 系统提示',
     taskRegistry: stack.registry,
     policy: stack.policy,
-    dispatchMode: 'background',
+    taskDispatch: 'async',
     taskRunner: stack.runner,
+    // B 切片：钉 0 窗口（本套件测受理上界/背压的机械读数；窗口行为由专测覆盖）。
+    taskRunWaitMs: 0,
   });
 }
 
@@ -163,8 +165,12 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
     expect(receipts).toHaveLength(3);
     const rows = receipts.map(receiptOf);
     expect(rows.every((receipt) => receipt.accepted === true)).toBe(true);
-    expect(rows.every((receipt) => receipt.status === 'queued')).toBe(true);
-    expect(rows.every((receipt) => receipt.notice?.includes('已受理'))).toBe(true);
+    // B 切片：status = 受理后实时机械事实（首个已被认领 running，其余 2 个 queued 排队）；
+    // 受理仍是异步语义（任务留后台）。owner 2026-11-19：受理只回机械事实（taskId/name/status/
+    // accepted），**无回执话术**（notice）、无编号。
+    expect(rows.map((receipt) => receipt.status)).toEqual(['running', 'queued', 'queued']);
+    expect(rows.every((receipt) => !('notice' in receipt))).toBe(true);
+    expect(rows.every((receipt) => typeof receipt.taskId === 'string')).toBe(true);
     // 1 个进入执行（唯一并发位），其余 2 个 = queueCapacity 个排队位。
     expect(stack.executor.started).toHaveLength(1);
     expect(queuedRows(stack)).toBe(2);

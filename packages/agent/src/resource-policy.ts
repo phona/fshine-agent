@@ -1,5 +1,5 @@
 /**
- * 资源许可与强制（R4 P5；`docs/product/r4-joint-interfaces.md` §2 冻结面）。
+ * 资源许可与强制（R4 P5；`docs/history/r4-joint-interfaces.md` §2 冻结面）。
  *
  * 定位：把「并发准入 / 队列容量 / 委派深度 / 任务级共享预算 / 回合时限」收口为一个
  * **纯逻辑对象**——无 IO、无定时器、无持久化；时间由注入时钟提供（缺省 `Date.now`），
@@ -142,15 +142,58 @@ export interface ResolvedRuntimeConfig {
   readonly queueCapacity: number;
   readonly mainTurnMs: number;
   readonly workerTurnMs: number;
+  /**
+   * 单回合执行 operation 上限（A2，2026-11-18）：同一回合全部委派合计计数，超限在
+   * 发起前确定性拒绝。资源边界，不是计划门——不判断业务；消费点在 execution-runtime
+   * （每回合计数；策略缺省 5，执行侧无策略时用同值缺省）。
+   */
+  readonly maxOperationsPerTurn: number;
   readonly maxDelegationDepth: number;
   readonly taskBudget: TaskBudgetLimits | null;
   readonly waitUserTimeoutMs: number;
+  /**
+   * 文件引用（file_refs）可读期（天）：入站附件激活后的可读 TTL，也是 pending 行的
+   * 激活窗口。最小 1；缺省 7（2026-11-18 owner 定）。ms 派生一律走
+   * `fileRefTtlMsOf`（本模块是唯一解释点；file-store 只收注入的毫秒数）。
+   */
+  readonly fileRefTtlDays: number;
   /** run 目录/任务产物保留期（天）；0 = 不清理，缺省 30（2026-11-17 owner 定）。 */
   readonly fileRetentionDays: number;
   /** server 启动时是否扫一遍到期 run 目录；缺省 false（零行为变化）。 */
   readonly fileRetentionSweepOnStart: boolean;
   /** 纯附件后主动追问延迟（ms）；0 = 关闭，缺省 30000（同一会话冷却 10 分钟）。 */
   readonly attachmentNudgeAfterMs: number;
+  /**
+   * task_run 受理后的短等待窗口（ms；B 切片 2026-11-18）：窗口内执行端确认完成 → 结果
+   * 同回合交给模型；超窗 → 只回机械受理事实（无给用户的回执话术），任务留后台推进。
+   * 0 = 不等。消费点在 execution-runtime 的委派受理路径。
+   */
+  readonly taskRunWaitMs: number;
+  /**
+   * 后台任务「比预计久了」提醒阈值（ms，2026-11-18 预期契约）：任务 running 且从认领
+   * 时刻起超过本阈值、尚未提醒过 → 宿主主动发一条（只发一次）；0 = 关闭。缺省 10 分钟。
+   * 消费点在 TaskRunner（装配方注入解析值；runner 不读原始配置）。
+   *
+   * owner 2026-11-19：这一档就是「事情久到开始消耗用户耐心」的声音——交办本身不再给
+   * 固定受理回执（模型说的话原样投递，见 server handler），
+   * 只有真跑久了才由本档（10 分钟）主动出声。**缺省 10 分钟不动**。
+   */
+  readonly longRunningNoticeMs: number;
+  // 「卡住了」档（2026-11-18 起的第二档，缺省 30 分钟）已随 2026-11-19 唤醒切片删除：
+  // 它断言了我们不知道的事（「我卡住了」），还替用户下结论（「建议先停掉」）。字段与配置键
+  // 都不再存在——只留上面 10 分钟一档。
+  /**
+   * 前台回合排队晋升的最长等待（ms，2026-11-18）：超过即确定性拒绝（不留下排队残留）。
+   * 缺省 2 分钟。消费点在 execution-runtime 的排队等待循环。
+   */
+  readonly queueWaitMs: number;
+  /**
+   * Worker 执行结果内联进模型上下文的字节上限（2026-11-19 大响应文件化）。
+   * 缺省 65536（64KiB）；超过即把完整 `data` 落成任务作用域文件、只回摘要 + fileId。
+   * 消费点在 execution-runtime 的 Worker 结果投影（`completed` 才生效）；
+   * 0/负数/非整数 fail-fast（关掉阈值 = 放弃上下文预算边界）。
+   */
+  readonly oversizeDataBytes: number;
 }
 
 /**
@@ -166,9 +209,15 @@ export const DEFAULT_RUNTIME_CONFIG: ResolvedRuntimeConfig = Object.freeze({
   queueCapacity: 16,
   mainTurnMs: 300_000,
   workerTurnMs: 180_000,
+  // A2（2026-11-18 owner 定）：单回合执行 operation 上限缺省 5——live 实测单任务 15 次
+  // operation、用户转 90 秒的资源边界；不是计划门，超限只在发起前确定性拒绝。
+  maxOperationsPerTurn: 5,
   maxDelegationDepth: 1,
   taskBudget: null,
   waitUserTimeoutMs: 86_400_000,
+  // 文件引用可读期：缺省 7 天（2026-11-18 owner 定，原写死 24h 过短）；最小 1 天。
+  // 过期后清单不列、引用不可读；字节由保留期清理入口回收（行保留做审计）。
+  fileRefTtlDays: 7,
   // run 目录/任务产物：缺省 30 天（2026-11-17 owner 定）；显式 0 = 不清理。
   // 删除执行器只在显式 ops 入口或 server 启动开关下运行（下项缺省关闭）。
   fileRetentionDays: 30,
@@ -176,6 +225,19 @@ export const DEFAULT_RUNTIME_CONFIG: ResolvedRuntimeConfig = Object.freeze({
   fileRetentionSweepOnStart: false,
   // 纯附件后 30 秒无指令 → 宿主主动追问；0 = 关闭（显式值不被缺省吞掉）。
   attachmentNudgeAfterMs: 30_000,
+  // task_run 短等待窗口：窗口内落定 → 结果同回合交给模型（不打受理回执、不主动投递）；
+  // 超窗 → 机械事实回执（不含工单编号）+ 完成后主动投递。0 = 不等直接后台。
+  // 缺省 8 秒（owner 2026-11-19 定 A 案）：真模型下 Worker 回合实测 5～10 秒，1.5s 窗口等于
+  // 「每件事都转后台」，用户看到回执 + 结果两条气泡；8s 让短活在回合内一条气泡给结果。
+  taskRunWaitMs: 8_000,
+  // 预期契约（2026-11-18 owner 定）：交办 10 分钟后仍无动静 → 唤醒模型问用户「停下来还是
+  // 继续等」（30 分钟「卡住」档已随 2026-11-19 唤醒切片删除）。0 = 关闭这一档。
+  longRunningNoticeMs: 600_000,
+  // 前台排队最长等待（2026-11-18 owner 定）：缺省 2 分钟；超时确定性拒绝（系统忙）。
+  queueWaitMs: 120_000,
+  // 大响应文件化（2026-11-19 owner 定）：Worker 结果超过 64KiB 即落任务文件，只回摘要 +
+  // fileId（in-band 结果无截断，一次几千行明细会打满上下文）。最小 1 字节。
+  oversizeDataBytes: 64 * 1024,
 });
 
 function assertRuntimeInteger(value: unknown, label: string, min: number): number {
@@ -194,6 +256,14 @@ function assertRuntimeBoolean(value: unknown, label: string): boolean {
 
 /** 一天的毫秒数（保留期换算的唯一常量；旋钮本身是整数天）。 */
 export const FILE_RETENTION_DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 文件引用可读期的毫秒派生（`runtime.fileRefTtlDays` 的唯一解释点）：
+ * 消费方（file-store 装配、字节回收）只收这个解析结果，不自行换算/重定义缺省。
+ */
+export function fileRefTtlMsOf(config: Pick<ResolvedRuntimeConfig, 'fileRefTtlDays'>): number {
+  return assertRuntimeInteger(config.fileRefTtlDays, 'runtime.fileRefTtlDays', 1) * FILE_RETENTION_DAY_MS;
+}
 
 export type FileRetentionVerdict = 'keep' | 'eligible_for_cleanup';
 
@@ -282,6 +352,9 @@ export function resolveRuntimeConfig(config: RuntimeConfig = {}): ResolvedRuntim
     workerTurnMs: config.workerTurnMs === undefined
       ? DEFAULT_RUNTIME_CONFIG.workerTurnMs
       : assertRuntimeInteger(config.workerTurnMs, 'runtime.workerTurnMs', 1),
+    maxOperationsPerTurn: config.maxOperationsPerTurn === undefined
+      ? DEFAULT_RUNTIME_CONFIG.maxOperationsPerTurn
+      : assertRuntimeInteger(config.maxOperationsPerTurn, 'runtime.maxOperationsPerTurn', 1),
     maxDelegationDepth: config.maxDelegationDepth === undefined
       ? DEFAULT_RUNTIME_CONFIG.maxDelegationDepth
       : assertRuntimeInteger(config.maxDelegationDepth, 'runtime.maxDelegationDepth', 0),
@@ -289,6 +362,10 @@ export function resolveRuntimeConfig(config: RuntimeConfig = {}): ResolvedRuntim
     waitUserTimeoutMs: config.waitUserTimeoutMs === undefined
       ? DEFAULT_RUNTIME_CONFIG.waitUserTimeoutMs
       : assertRuntimeInteger(config.waitUserTimeoutMs, 'runtime.waitUserTimeoutMs', 1),
+    // 最小 1 天；0/负数/小数 fail-fast（不可读期不能被配成「立即过期」）。
+    fileRefTtlDays: config.fileRefTtlDays === undefined
+      ? DEFAULT_RUNTIME_CONFIG.fileRefTtlDays
+      : assertRuntimeInteger(config.fileRefTtlDays, 'runtime.fileRefTtlDays', 1),
     // 0 = 不清理（缺省）；负数/非整数 fail-fast，不静默回落成「不清理」。
     fileRetentionDays: config.fileRetentionDays === undefined
       ? DEFAULT_RUNTIME_CONFIG.fileRetentionDays
@@ -301,6 +378,22 @@ export function resolveRuntimeConfig(config: RuntimeConfig = {}): ResolvedRuntim
     attachmentNudgeAfterMs: config.attachmentNudgeAfterMs === undefined
       ? DEFAULT_RUNTIME_CONFIG.attachmentNudgeAfterMs
       : assertRuntimeInteger(config.attachmentNudgeAfterMs, 'runtime.attachmentNudgeAfterMs', 0),
+    // 0 = 不等直接后台（显式值合法）；负数/非整数 fail-fast。
+    taskRunWaitMs: config.taskRunWaitMs === undefined
+      ? DEFAULT_RUNTIME_CONFIG.taskRunWaitMs
+      : assertRuntimeInteger(config.taskRunWaitMs, 'runtime.taskRunWaitMs', 0),
+    // 0 = 关闭提醒（显式值合法）；负数/非整数 fail-fast。
+    longRunningNoticeMs: config.longRunningNoticeMs === undefined
+      ? DEFAULT_RUNTIME_CONFIG.longRunningNoticeMs
+      : assertRuntimeInteger(config.longRunningNoticeMs, 'runtime.longRunningNoticeMs', 0),
+    // 0 = 不排队（立即拒绝）；负数/非整数 fail-fast。
+    queueWaitMs: config.queueWaitMs === undefined
+      ? DEFAULT_RUNTIME_CONFIG.queueWaitMs
+      : assertRuntimeInteger(config.queueWaitMs, 'runtime.queueWaitMs', 0),
+    // 最小 1 字节；0/负数/非整数 fail-fast（阈值不能靠「关掉」表达）。
+    oversizeDataBytes: config.oversizeDataBytes === undefined
+      ? DEFAULT_RUNTIME_CONFIG.oversizeDataBytes
+      : assertRuntimeInteger(config.oversizeDataBytes, 'runtime.oversizeDataBytes', 1),
   });
 }
 

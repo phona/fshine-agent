@@ -32,24 +32,39 @@
 import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { ContextProfileConfig, RuntimeConfig } from '@fshine/contracts';
-import type { ExecutionClient } from '@fshine/contracts/execution-contract';
-import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
+import type { ContextProfileConfig, Permission, RuntimeConfig } from '@fshine/contracts';
+import type { ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
+import {
+  effectiveDeploymentEnv,
+  effectiveRoleOf,
+  loadConfig,
+  permissionsOfRole,
+} from '@fshine/core';
 import { applyExecutorLabel, loadAgentProfile } from '../packages/agent/src/agent-profile';
-import { createPiTurnDriver, parseContextWindow, type PiTurnDriverOptions } from '../packages/agent/src/pi-driver';
+import { createModelUsageSink, USAGE_FILENAME, usageFilePathOf } from '../packages/agent/src/model-usage';
+import { createPiTurnDriver, parseContextWindow, parsePiThinkingLevel, type PiThinkingLevel, type PiTurnDriverOptions } from '../packages/agent/src/pi-driver';
+import type { MainSessionLocation } from '../packages/agent/src/session-persistence';
 import { createDummyCliClient, readOnlyOperationNames, writeOperationNames } from '../packages/agent/src/dummy-cli-client';
+import { deriveCapabilityCatalog, renderCapabilitySummary, type CapabilityEntry } from '../packages/agent/src/capability-catalog';
 import type { TurnDriver } from '../packages/agent/src/driver-contract';
 import {
   createSession,
   createTaskExecutor,
   mainProtocolNoteFor,
+  OUTCOME_BEHAVIOR_NOTE,
   type Session,
-  type TranscriptStore,
   type TurnFileRef,
   type WorkerSkill,
   type RunJsMemoryExitEvent,
   type RunJsLayoutUnsafeReport,
+  type RecalcXlsxExecutor,
+  type RecalcCostEvent,
   type TaskOutputSweepSkippedEvent,
+  type ExecutionResultFileizedEvent,
+  type ExecutionResultOversizeUnhandledEvent,
+  type ExecutionEvent,
+  type InjectionReceipt,
+  type InjectionValue,
 } from '../packages/agent/src/execution-runtime';
 import {
   createNotificationOutbox,
@@ -65,7 +80,16 @@ import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/a
 import type { RunJsExecutor } from '../packages/agent/src/run-js-executor';
 import type { TaskInputCopier } from '../packages/agent/src/file-store';
 import { createTaskExecutionBridge, type TaskFileBridgeStore } from '../packages/agent/src/task-file-bridge';
-import { createTaskRunner, type TaskExecutor, type TaskRunner } from '../packages/agent/src/task-runner';
+import {
+  createTaskRunner,
+  type LongRunningNoticePort,
+  type LongTaskWaitPort,
+  type TaskExecutionOutcome,
+  type TaskExecutor,
+  type TaskRunner,
+  type WaitingUserNoticePort,
+} from '../packages/agent/src/task-runner';
+import { failureMessageFor } from '../packages/agent/src/user-facing-failure';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../packages/agent/src/worker-skills';
 import type { SkillRegistry } from '../packages/agent/src/skills';
 import { explicitConfigFrom, materializeEvalConfig } from './resolve-config-path';
@@ -145,8 +169,13 @@ export type ExecutionFaceFactory = (
 /**
  * 回合驱动工厂（runner 记录包装器 / server 测试替身注入用；缺省 = 真实 Pi 驱动 ×2）。
  * 允许返回 Promise：Pi 1.5.2 的 ModelRuntime 创建是异步的（测试替身按需 await）。
+ * `mainSession` = 装配层为本 (principal, session) 解析的 Pi 会话位置（缺省 = 不落盘）；
+ * 真实 Pi 驱动据此落盘/resume，测试替身可忽略。
  */
-export type DriverFactory = (env: NodeJS.ProcessEnv) =>
+export type DriverFactory = (
+  env: NodeJS.ProcessEnv,
+  mainSession?: MainSessionLocation,
+) =>
   | { mainDriver: TurnDriver; workerDriver: TurnDriver }
   | Promise<{ mainDriver: TurnDriver; workerDriver: TurnDriver }>;
 
@@ -172,8 +201,8 @@ export function contextWindowFrom(env: Record<string, string | undefined>): { co
  *   组合不可解释，静默补齐等于替调用方发明阈值）。
  * · 非正整数 → `parseContextWindow` 当场抛中文错误点名变量（不静默回落）。
  *
- * 安全值来源见 `scripts/eval/pi-native/safe-config.ts` 与
- * `docs/product/exp-pi-native-config-headroom.md`（余量不等式 + 摘要输出预算推导）。
+ * 安全值来源见 `scripts/eval/pi-native/safe-config.ts`（余量不等式 + 摘要输出预算推导的实现；
+ * 推导文档 2026-11-18 删除，git 历史可考）。
  */
 export function compactionSettingsFrom(
   env: Record<string, string | undefined>,
@@ -185,6 +214,58 @@ export function compactionSettingsFrom(
     throw new Error('LLM_COMPACTION_RESERVE_TOKENS 与 LLM_COMPACTION_KEEP_RECENT_TOKENS 必须同时设置（只设一个时无法解释 Pi 的压缩配置）');
   }
   return { compactionSettings: { enabled: true, reserveTokens, keepRecentTokens } };
+}
+
+/**
+ * Main 思考档装配接线（缺口 4：`llm.mainThinkingLevel` 此前在产品代码里零读取——Main 与
+ * Worker 共用 `llm.thinkingLevel` 一档）。owner 决定：Main 高、Worker 中。
+ *
+ *   · `LLM_MAIN_THINKING_LEVEL`（配置层写回自 llm.mainThinkingLevel）优先；
+ *   · 未设/空串回落 `LLM_THINKING_LEVEL`——Main 不出现"无档位"，向后兼容；
+ *   · 非法档位由 parsePiThinkingLevel 当场抛中文错误点名变量（fail-fast，不静默降级成
+ *     供应商/Pi 缺省）。
+ *
+ * Worker 侧不传参数：驱动的缺省解析（pi-driver.ts:392）就是 `llm.thinkingLevel`。
+ */
+export function mainThinkingLevelFrom(
+  env: Record<string, string | undefined>,
+): { thinkingLevel?: PiThinkingLevel } {
+  const level = parsePiThinkingLevel(env.LLM_MAIN_THINKING_LEVEL, 'LLM_MAIN_THINKING_LEVEL')
+    ?? parsePiThinkingLevel(env.LLM_THINKING_LEVEL, 'LLM_THINKING_LEVEL');
+  return level === undefined ? {} : { thinkingLevel: level };
+}
+
+/**
+ * 会话位置 → Pi 驱动参数（纯映射，无决策）：
+ *   · `sessionDir` = 本 principal 的独立会话目录；
+ *   · `sessionId` = 新建时交给 Pi 的会话 id（文件名/header 同源，重启按它解析回来）；
+ *   · `resumeSessionFile` = 已落盘会话文件（存在才有）→ Pi 原生 resume（含压缩摘要）。
+ * 缺省不传 = 进程内内存会话（`npm run ask` / eval / 无渠道入口逐字节不变）。
+ */
+export function mainSessionOptions(
+  mainSession: MainSessionLocation | undefined,
+): Pick<PiTurnDriverOptions, 'sessionDir' | 'sessionId' | 'resumeSessionFile'> {
+  if (mainSession === undefined) return {};
+  return {
+    sessionDir: mainSession.sessionDir,
+    sessionId: mainSession.piSessionId,
+    ...(mainSession.resumeSessionFile === undefined
+      ? {}
+      : { resumeSessionFile: mainSession.resumeSessionFile }),
+  };
+}
+
+/**
+ * CAP-01 S2：执行层文件桥装配参数（inline 会话面与 background 后台面同形）。
+ * store 必须是装配层唯一 fileStore 实例；platformRoot/scope/inner 由各自的构造点填。
+ */
+export interface TaskFileBridgeAssembly {
+  store: TaskFileBridgeStore;
+  dirParams?: { input?: string; output?: string };
+  /** 单文件参数（执行层吃一个文件 / 写一个文件）：宿主填物化路径，不猜。 */
+  fileParams?: { input?: string; output?: string };
+  limits?: { maxOutputFileBytes?: number; maxOutputCount?: number };
+  onSkip?: (reason: string) => void;
 }
 
 /**
@@ -215,9 +296,20 @@ export interface SessionAssemblyInput {
   emptyOperationsError?: (message: string) => Error;
   /**
    * 写面开关（`runtime.allowWriteOperations` 的装配投影；缺省 false = 只读）。
-   * true 时允许集合 = access=read + access=write；只读集合仍只含 access=read。
+   * true 时仍要看 `allowedPermissions` 是否含 write：两者同时满足写集合才进入允许集合；
+   * 只读集合仍只含 access=read。
    */
   allowWriteOperations?: boolean;
+  /**
+   * 当前主体角色的权限白名单（宿主求交的中间项）。缺省 / 未提供 = 只读（最小权限）。
+   * 实际允许集合 = 执行层声明能力 ∩ 本白名单 ∩ 部署总闸。
+   */
+  allowedPermissions?: readonly Permission[];
+  /**
+   * 长任务异步（契约 v4）的结构化事件出口（只进日志，不进用户话术）。
+   * 前台会话与后台执行器共用同一个出口；缺省静默。
+   */
+  onExecutionEvent?: (event: ExecutionEvent) => void;
   createDrivers?: DriverFactory;
   createExecutionFace?: ExecutionFaceFactory;
   /** 预装载底账（server 共享库）；缺省自建并由 close 关闭（注入的归调用方）。 */
@@ -237,8 +329,11 @@ export interface SessionAssemblyInput {
   runtime?: RuntimeConfig;
   /** P5：进程级共享策略（server 跨会话复用）；缺省由本核心按 runtime 建。 */
   policy?: ResourcePolicy;
-  /** P6：派发模式覆盖；缺省取 `runtime.dispatchMode ?? 'inline'`。 */
-  dispatchMode?: 'inline' | 'background';
+  /**
+   * P6：任务派发装配参数（**只由装配方显式传入，不是配置键**）。缺省 'sync' = 委派
+   * 同步执行；'async' 需要渠道/后台面（server 装配传 'async'，ask/eval 传 'sync'）。
+   */
+  taskDispatch?: 'sync' | 'async';
   /** P6：进程级共享 runner（server 预建）；background 且缺省时由本核心按本会话执行面构建。 */
   taskRunner?: TaskRunner;
   /** P6：后台执行回合注入（测试/特殊部署）；缺省 = 真实 Worker 回合执行器。 */
@@ -249,16 +344,22 @@ export interface SessionAssemblyInput {
   notificationMaxAttempts?: number;
   /** R5 B 通道：机械事实注入器（server 由 attachNotificationOutbox 返回值提供）。 */
   taskFactProvider?: NotificationAttachment['taskFactProvider'];
-  /** B1：会话转录持久化端口（装配方构造具体存储注入）；缺省 undefined = 不落盘会话（现行为）。 */
-  transcriptStore?: TranscriptStore;
-  /** B1：转录读/写失败上报（fail-open 日志；缺省静默）。 */
-  onTranscriptError?: (error: unknown) => void;
+  /**
+   * Main 会话的 Pi 原生落盘位置（装配层解析 `(principal, session)`；缺省 undefined =
+   * 内存会话，`npm run ask` / eval 逐字节现行为）。给出后由 Pi 自己写入/恢复：历史与
+   * 压缩摘要都在会话文件里，宿主不搬运任何消息。
+   */
+  mainSession?: MainSessionLocation;
   /** 纯附件机械事实注入器（与 taskFactProvider 同一 injections 机制；缺省不注入）。 */
-  attachmentFactProvider?: (principalId: string, sessionId: string) => string | undefined;
+  attachmentFactProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
   /** 主动追问系统注记注入器（模型可见/用户不可见；缺省不注入）。 */
-  systemNoteProvider?: (principalId: string, sessionId: string) => string | undefined;
+  systemNoteProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
   /** CAP-01 S1：run_js 执行器端口（装配层构造注入；缺省不注入 = Main 无 run_js 工具）。 */
   runJsExecutor?: RunJsExecutor;
+  /** recalc_xlsx 执行器端口（Main 宿主面；缺省不注入或引擎不可用 = 无该工具）。 */
+  recalcXlsxExecutor?: RecalcXlsxExecutor;
+  /** recalc 重算开销结构化事件（R4 资源账；缺省静默）。 */
+  onRecalcCost?: (event: RecalcCostEvent & { principalId: string; sessionId: string }) => void;
   /** CAP-01 ④：run_js 内存墙结构化事件上报（装配层接日志；缺省静默）。 */
   onRunJsMemoryExit?: (event: RunJsMemoryExitEvent) => void;
   /** CAP-01 symlink 收窄：run_js 运行目录布局不安全的结构化事件上报（装配层接日志；缺省静默）。 */
@@ -275,6 +376,13 @@ export interface SessionAssemblyInput {
    */
   onTaskOutputSweepSkipped?: (event: TaskOutputSweepSkippedEvent) => void;
   /**
+   * 大响应已文件化（2026-11-19；只进日志，缺省静默）：Worker completed 结果超过
+   * `runtime.oversizeDataBytes` → 完整 data 落任务文件，模型只拿摘要 + fileId。
+   */
+  onExecutionResultFileized?: (event: ExecutionResultFileizedEvent) => void;
+  /** 大响应未文件化（无桥/登记失败，已 fail-open；只进日志，缺省静默）。 */
+  onExecutionResultOversizeUnhandled?: (event: ExecutionResultOversizeUnhandledEvent) => void;
+  /**
    * CAP-01 S2：交办复制端口（task_run.inputFiles 的宿主侧执行；装配层注入 fileStore 本身）。
    * 缺省不注入 = task_run 工具面不带 inputFiles（逐字节不变），模型传了也 fail-closed 拒绝。
    */
@@ -284,15 +392,9 @@ export interface SessionAssemblyInput {
    * taskInputCopier **同一 fileStore 实例**（文件区监管唯一写侧）；dirParams 是部署对该执行
    * 层「声明目录参数」的认知（如 '--input-dir'），缺省无 = 桥只承担回程登记与任务 out/ 兜底。
    * 桥在装配核心构造（内层客户端只有这里拿得到：platformRoot=profile.root、scope=本会话身份）。
+   * 同一装配参数也供 background 面（按任务懒建桥）。
    */
-  taskExecutionBridge?: {
-    store: TaskFileBridgeStore;
-    dirParams?: { input?: string; output?: string };
-    /** 单文件参数（执行层吃一个文件 / 写一个文件）：宿主填物化路径，不猜。 */
-    fileParams?: { input?: string; output?: string };
-    limits?: { maxOutputFileBytes?: number; maxOutputCount?: number };
-    onSkip?: (reason: string) => void;
-  };
+  taskExecutionBridge?: TaskFileBridgeAssembly;
   /**
    * CAP-01 S1 清单注入（机械事实）：装配层提供本会话已激活（TTL 内）文件清单——
    * 字段只有 fileId/name/bytes。缺省不注入 = 无清单（回合输入逐字节不变）。
@@ -318,14 +420,14 @@ export interface AssembledSession {
   close(): void;
 }
 
-/** 缺省执行面：仓内 dummy CLI + 从执行层自述派生的允许集（空集合按注入话术拒绝）。 */
+/** 缺省执行面：仓内 dummy CLI + 执行层自述派生的**全集**（读 + 部署总闸允许时的写）。 */
 async function defaultExecutionFace(input: {
   profile: ContextProfileConfig;
   env: NodeJS.ProcessEnv;
   stateDir: string;
   emptyOperationsMessage: string;
   emptyOperationsError: (message: string) => Error;
-  /** true = 允许集合追加 access=write 的写面（缺省 false = 只读，零行为变化）。 */
+  /** true = 部署总闸允许写面（缺省 false = 只读）。角色求交在 resolveExecutionFace 收口。 */
   allowWriteOperations?: boolean;
 }): Promise<ExecutionFace> {
   const client = createDummyCliClient({
@@ -336,7 +438,7 @@ async function defaultExecutionFace(input: {
   });
   const operations = await client.listOperations();
   // 两条集合各自派生：只读集合只看 access=read；写集合只看 access=write。写操作进入
-  // 允许集合（开关打开）时，只读集合不会跟着变大——重试语义不随写面开关变化。
+  // 允许集合时，只读集合不会跟着变大——重试语义不随写面开关变化。
   const readOnlyOperations = readOnlyOperationNames(operations);
   const writeOperations = writeOperationNames(operations);
   const allowedOperations = input.allowWriteOperations === true
@@ -348,6 +450,74 @@ async function defaultExecutionFace(input: {
   return { client, allowedOperations, readOnlyOperations };
 }
 
+/**
+ * 宿主求交（唯一收口）：实际可用集合 = 执行层声明能力 ∩ 角色白名单 ∩ 部署总闸。
+ *   · read  → 只并入执行层自述 access=read 的只读集合；
+ *   · write → 角色含 write 且部署总闸打开时，才并入写集合（即基面里不在只读集合的那些）；
+ *   · 角色未提供 / 不含 write / 总闸关闭 → 一律只读（最小权限，不静默给写）。
+ *
+ * 同时作用于缺省执行面与注入的 `createExecutionFace`——角色过滤不因替身注入而失效。
+ */
+/**
+ * 权限集合的缓存键（内部；导出只为绊线测试）。必须是**集合本身**：只分 read/read+write
+ * 两档会让自定义角色（例如只有 write）与读写角色共用同一个执行器，后者的只读面被吞。
+ */
+export function permissionsKey(permissions: readonly Permission[]): string {
+  return permissions.length === 0 ? 'none' : [...permissions].sort().join('+');
+}
+
+function narrowFaceByPermissions(
+  face: ExecutionFace,
+  permissions: readonly Permission[],
+  allowWriteOperations: boolean,
+  emptyOperationsError: (message: string) => Error,
+  emptyOperationsMessage: string,
+): ExecutionFace {
+  const readOnly = [...face.readOnlyOperations];
+  const writeOnly = face.allowedOperations.filter((operation) => !face.readOnlyOperations.includes(operation));
+  const allowedOperations = [
+    ...(permissions.includes('read') ? readOnly : []),
+    ...(permissions.includes('write') && allowWriteOperations ? writeOnly : []),
+  ];
+  if (allowedOperations.length === 0) {
+    throw emptyOperationsError(emptyOperationsMessage);
+  }
+  return { client: face.client, allowedOperations, readOnlyOperations: readOnly };
+}
+
+/**
+ * 执行层 wait 回执 → runner 的机械等待结果（只做形状投影，不改语义）。
+ * accepted 带 pollAfterMs；failed/refused 带执行层原话；其余终态原样交给续跑回合。
+ */
+function longTaskWaitResultOf(outcome: ExecutionOutcome): {
+  status: 'accepted' | 'completed' | 'failed' | 'refused' | 'needs_input' | 'needs_confirmation';
+  pollAfterMs?: number;
+  message?: string;
+  outcome: ExecutionOutcome;
+} {
+  return {
+    status: outcome.status,
+    ...(outcome.status === 'accepted' ? { pollAfterMs: outcome.pollAfterMs } : {}),
+    ...(outcome.status === 'failed' || outcome.status === 'refused' ? { message: outcome.error.message } : {}),
+    outcome,
+  };
+}
+
+/**
+ * 长任务等待端口（契约 v4）：执行面客户端声明了 `wait` 才接。
+ * 未声明（或注入的假客户端没有该能力）→ 不接端口，runner 对 accepted 一律 fail-closed
+ * （任务落 failed 并落事件），不会留下无人推进的 running 任务。
+ */
+function longTaskPortOf(client: ExecutionClient): LongTaskWaitPort | undefined {
+  if (client.wait === undefined) return undefined;
+  return {
+    // 必须经 client 调用（不能解构后裸调）：适配器实现允许依赖 this。
+    wait: async (operationId, timeoutMs, signal) =>
+      longTaskWaitResultOf(await client.wait!(operationId, timeoutMs, signal)),
+    ...(client.abort === undefined ? {} : { abort: (operationId: string) => client.abort!(operationId) }),
+  };
+}
+
 /** 执行面解析（注入优先，缺省仓内 dummy；后台派发与装配核心共用同一链，不另建装配）。 */
 export interface ExecutionFaceResolverInput {
   profile: ContextProfileConfig;
@@ -355,23 +525,34 @@ export interface ExecutionFaceResolverInput {
   stateDir: string;
   emptyOperationsMessage: string;
   emptyOperationsError?: (message: string) => Error;
-  /** true = 允许集合追加执行层自述 access=write 的写面（缺省 false = 只读）。 */
+  /** true = 部署总闸允许写面（缺省 false = 只读）。仍需角色含 write。 */
   allowWriteOperations?: boolean;
+  /** 当前主体角色的权限（read/write）；缺省 = 只读。 */
+  allowedPermissions?: readonly Permission[];
   createExecutionFace?: ExecutionFaceFactory;
 }
 
 export async function resolveExecutionFace(input: ExecutionFaceResolverInput): Promise<ExecutionFace> {
-  if (input.createExecutionFace !== undefined) {
-    return await input.createExecutionFace(input.profile, input.env);
-  }
-  return await defaultExecutionFace({
-    profile: input.profile,
-    env: input.env,
-    stateDir: input.stateDir,
-    emptyOperationsMessage: input.emptyOperationsMessage,
-    emptyOperationsError: input.emptyOperationsError ?? ((message) => new Error(message)),
-    ...(input.allowWriteOperations === undefined ? {} : { allowWriteOperations: input.allowWriteOperations }),
-  });
+  const allowWriteOperations = input.allowWriteOperations === true;
+  const permissions = input.allowedPermissions ?? ['read'];
+  const emptyOperationsError = input.emptyOperationsError ?? ((message: string) => new Error(message));
+  const face = input.createExecutionFace !== undefined
+    ? await input.createExecutionFace(input.profile, input.env)
+    : await defaultExecutionFace({
+        profile: input.profile,
+        env: input.env,
+        stateDir: input.stateDir,
+        emptyOperationsMessage: input.emptyOperationsMessage,
+        emptyOperationsError,
+        ...(input.allowWriteOperations === undefined ? {} : { allowWriteOperations: input.allowWriteOperations }),
+      });
+  return narrowFaceByPermissions(
+    face,
+    permissions,
+    allowWriteOperations,
+    emptyOperationsError,
+    input.emptyOperationsMessage,
+  );
 }
 
 /** worker 回合上限之上的租约余量：覆盖最长回合 + 收尾，避免在飞回合被误判 result_unknown。 */
@@ -382,25 +563,130 @@ const LEASE_MARGIN_MS = 60_000;
  * （可注入假件）→ TaskRunner。runner 为**进程级**对象，由入口（server）或装配核心构建后
  * 注入会话；本函数不 pump（触发点由调用方掌握：受理后/落定后/启动恢复）。
  */
+/** 一次后台执行回合的机械结局里，宿主完成投递面需要的事实（B 切片完成回调接缝）。 */
+export interface BackgroundTaskCompletion {
+  taskId: string;
+  principalId: string;
+  sessionId: string;
+  request: string;
+  /** 执行端确认的结果原文（仅 completed 且非空时回调；逐字，未过出口清理）。 */
+  resultText: string;
+  /**
+   * 片 1 产物回程：本回合 Worker 产出的任务作用域交付物（登记事实；后台面对
+   * TurnResult.files 的同位面）。缺省 = 本回合无产物。
+   */
+  files?: readonly TurnFileRef[];
+}
+
+/**
+ * 一次后台执行回合的机械结局里，宿主**失败投递面**需要的事实（2026-11-19 收口）。
+ * 与 BackgroundTaskCompletion 对称的失败回调事实：任务终局 failed / result_unknown。
+ * **不含 Worker 失败汇报原文之外的任何内部形状**——原文只进日志与底账，不进用户文本
+ * （用户文本由投递面用 failureMessageFor 模板生成）。
+ */
+export interface BackgroundTaskFailure {
+  taskId: string;
+  principalId: string;
+  sessionId: string;
+  request: string;
+  /** 任务终局（failed / result_unknown——两者都不是成功，用户必须主动收到一句人话）。 */
+  status: 'failed' | 'result_unknown';
+  /** Worker 回合失败汇报原文（只进日志与底账；**不进用户文本**）。 */
+  reason: string;
+  /**
+   * 结构化拒绝原因码（如 `not_permitted`，来自执行端失败结局）；不是文案，不进用户文本。
+   * 供失败投递的 outcome 分类用结构化码判 blocked，不靠 reason 文本里是否出现「权限」。
+   */
+  reasonCode?: string;
+}
+
 export interface BackgroundDispatchInput {
   env: NodeJS.ProcessEnv;
   profile: ContextProfileConfig;
   stateDir: string;
+  /**
+   * 部署状态根下的任务底账 db 路径（缺省不传 = 用量落盘退回 stateDir）：兜底 Worker 驱动的
+   * usage.jsonl 按 `<dbPath 同目录>/usage.jsonl` 落，与前台 Main/inline Worker 同一文件。
+   */
+  dbPath?: string;
   registry: TaskRegistry;
   policy: ResourcePolicy;
   workerSkills?: readonly WorkerSkill[];
   runtime?: RuntimeConfig;
   /** `runtime.allowWriteOperations` 的显式投影（缺省取 runtime 值；false = 只读）。 */
   allowWriteOperations?: boolean;
+  /**
+   * 本装配默认主体的角色权限（构造单会话 runner 时用）；缺省 = 只读。
+   * 进程级 runner 跨主体复用时，改用 `permissionsForPrincipal` 按任务主体求交。
+   */
+  allowedPermissions?: readonly Permission[];
+  /**
+   * 按任务主体解析角色权限（进程级 runner 用：server 的共享 runner 跨 principal）。
+   * 提供时按 `task.principalId` 为每个权限档位建一个执行器（只读 / 读写各一份），
+   * 任务执行时按主体取对应允许集合——viewer 的后台写不会借用 operator 的允许集。
+   */
+  permissionsForPrincipal?: (principalId: string) => readonly Permission[];
   emptyOperationsMessage: string;
   emptyOperationsError?: (message: string) => Error;
   createDrivers?: DriverFactory;
   createExecutionFace?: ExecutionFaceFactory;
   /** 测试注入：假后台执行器（缺省 = 真实 Worker 回合执行器）。 */
   taskExecutor?: TaskExecutor;
+  /**
+   * B 切片（工单回执收敛）：后台任务完成回调——执行端确认 completed 的回合结局
+   * （每任务恰好一次；runner 不重跑终态）。回调在 runner 收尾前同步触发，回调自身负责
+   * 异步化（fire-and-forget：不得阻塞收尾、不得改变任务事实）。缺省不接 = 零行为变化。
+   */
+  onTaskCompleted?: (completion: BackgroundTaskCompletion) => void;
+  /**
+   * 失败回调（2026-11-19 收口，与 onTaskCompleted 对称）：任务终局 failed / result_unknown
+   * 时触发。**只带机械事实（status/reason）**；用户可见文本由投递面用 failureMessageFor
+   * 模板生成，不在这里拼话术。缺省不接 = 零行为变化。
+   */
+  onTaskFailed?: (failure: BackgroundTaskFailure) => void;
   /** 预构建执行面/worker 驱动（装配核心复用；已给 taskExecutor 时不需要）。 */
   face?: ExecutionFace;
   workerDriver?: TurnDriver;
+  /**
+
+   * 片 1：run_js 执行器端口（装配层构造注入，与前台同一实例/构造）。注入后后台 Worker
+   * 工具面含 run_js（任务作用域），产物经完成回调上交投递面。缺省不注入 = 零变化。
+   */
+  runJsExecutor?: RunJsExecutor;
+  /**
+   * CAP-01 S2 后台文件面：执行层文件桥装配（与 inline 会话面同一形状/同一 store 实例）。
+   * 有值 = 本 runner 的每个任务按 (principal, session, taskId) 懒建桥：Worker 委派带任务
+   * 文件清单，execute_operation 经桥把声明参数替换为任务目录内的物化路径。
+   * 缺省不注入 = 零变化（后台 Worker 无文件面）。
+   */
+  taskExecutionBridge?: TaskFileBridgeAssembly;
+  /**
+   * 文件引用被拒（桥物化失败：越权/不存在/pending/过期/字节缺失）的机械 reason 上报；
+   * 只进日志，用户/Worker 只见统一话术（与 inline 同一模块常量）。
+   */
+  onFileRefUnavailable?: (reason: string) => void;
+  /**
+   * 大响应文件化事件（2026-11-19；只进日志，缺省静默）：后台 Worker 的 completed 结果
+   * 超过 `runtime.oversizeDataBytes` → 完整 data 落任务文件 / 无桥时 fail-open 原样返回。
+   */
+  onExecutionResultFileized?: (event: ExecutionResultFileizedEvent) => void;
+  onExecutionResultOversizeUnhandled?: (event: ExecutionResultOversizeUnhandledEvent) => void;
+  /**
+   * 预期契约（2026-11-18）：长时间无动静提醒的投递端口（装配方接既有主动投递面 +
+   * 1:1 判据）。缺省不接 = 不提醒（无法投递就不打扰）。
+   */
+  longRunningNotice?: LongRunningNoticePort;
+  /**
+   * 等待用户提醒端口（2026-11-21 live P0）：后台任务由非等待态进入 waiting_user 时触发
+   * 恰好一次（形状见 task-runner 的 {@link WaitingUserNoticePort}）；装配方接统一状态变化
+   * 唤醒出口。缺省不接 = 零行为变化。
+   */
+  waitingUserNotice?: WaitingUserNoticePort;
+  /** 长任务异步（契约 v4）的结构化事件出口（只进日志；缺省静默）。 */
+  onExecutionEvent?: (event: ExecutionEvent) => void;
+  /** 结构化事件出口（提醒成功/失败；缺省静默）。 */
+  log?: (line: Record<string, unknown>) => void;
+
   /** runner 覆盖（测试确定性：leaseMs/时钟/属主；缺省 leaseMs=workerTurnMs+60s）。 */
   runnerOptions?: { leaseMs?: number; owner?: string; now?: () => Date };
 }
@@ -413,37 +699,191 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
   const resolved = resolveRuntimeConfig(input.runtime);
   const allowWriteOperations = input.allowWriteOperations ?? input.runtime?.allowWriteOperations === true;
   let executor = input.taskExecutor;
+  /** 长任务等待端口（契约 v4）：执行面客户端声明 wait 才接；缺省不接 = accepted fail-closed。 */
+  let longTasks: LongTaskWaitPort | undefined;
   if (executor === undefined) {
-    const face = input.face ?? await resolveExecutionFace({
-      profile: input.profile,
-      env: input.env,
-      stateDir: input.stateDir,
-      emptyOperationsMessage: input.emptyOperationsMessage,
-      allowWriteOperations,
-      ...(input.emptyOperationsError === undefined ? {} : { emptyOperationsError: input.emptyOperationsError }),
-      ...(input.createExecutionFace === undefined ? {} : { createExecutionFace: input.createExecutionFace }),
-    });
+    // 基面 = 执行层全集（读 + 部署总闸允许时的写），不做角色求交；求交在下面按主体收口。
+    const baseEmptyError = input.emptyOperationsError ?? ((message: string) => new Error(message));
+    const face = input.face ?? (input.createExecutionFace !== undefined
+      ? await input.createExecutionFace(input.profile, input.env)
+      : await defaultExecutionFace({
+        profile: input.profile,
+        env: input.env,
+        stateDir: input.stateDir,
+        emptyOperationsMessage: input.emptyOperationsMessage,
+        emptyOperationsError: baseEmptyError,
+        allowWriteOperations,
+      }));
     const workerDriver = input.workerDriver ?? (input.createDrivers !== undefined
       ? (await input.createDrivers(input.env)).workerDriver
-      : createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env) }));
-    executor = await createTaskExecutor({
-      client: face.client,
-      allowedOperations: face.allowedOperations,
-      // U3：只读集合是执行面显式派生的 `access=read` 集合，不是允许集合的影子。
+      : createPiTurnDriver({
+        env: input.env,
+        ...contextWindowFrom(input.env),
+        ...compactionSettingsFrom(input.env),
+        // 模型用量观测（owner 2026-11-21 最小方案）：兜底 Worker 也落 usage.jsonl，与前台同一
+        // 文件（给了 dbPath 时）；进程级 runner 跨主体，任务 principal 在任务执行时才定——
+        // 驱动层拿不到 principal/session，按纪律省略（不编）。
+        onModelUsage: createModelUsageSink({
+          filePath: input.dbPath !== undefined
+            ? usageFilePathOf(input.dbPath)
+            : path.join(input.stateDir, USAGE_FILENAME),
+          agent: 'worker',
+        }),
+      }));
+    // 长任务等待走同一个执行面客户端（CLI 适配器的长轮询）；未实现 wait 的客户端不接端口。
+    longTasks = longTaskPortOf(face.client);
+    // CAP-01 S2 后台文件面：与 inline 会话桥同一装配参数、同一 store，实例按任务懒建
+    // （不建进程级单例：scope 随任务身份，platformRoot/inner 是本次执行面的可信值）。
+    const bridgeAssembly = input.taskExecutionBridge;
+    const backgroundTaskBridge = bridgeAssembly === undefined
+      ? undefined
+      : ({ principalId, sessionId, taskId }: { principalId: string; sessionId: string; taskId: string }) =>
+        createTaskExecutionBridge({
+          platformRoot: input.profile.root,
+          fileStore: bridgeAssembly.store,
+          scope: { principalId, sessionId },
+          inner: face.client,
+          ...(bridgeAssembly.dirParams === undefined ? {} : { dirParams: bridgeAssembly.dirParams }),
+          ...(bridgeAssembly.fileParams === undefined ? {} : { fileParams: bridgeAssembly.fileParams }),
+          ...(bridgeAssembly.limits === undefined ? {} : {
+            maxOutputFileBytes: bridgeAssembly.limits.maxOutputFileBytes,
+            maxOutputCount: bridgeAssembly.limits.maxOutputCount,
+          }),
+          ...(bridgeAssembly.onSkip === undefined ? {} : { onSkip: bridgeAssembly.onSkip }),
+        })(taskId);
+    const buildExecutor = (narrowed: ExecutionFace): Promise<TaskExecutor> => createTaskExecutor({
+      client: narrowed.client,
+      allowedOperations: narrowed.allowedOperations,
+      // U3：只读集合是执行面显式派生的 `access=read` 集合，不是允许集合的影子
+      // （角色求交只收窄 allowedOperations，不改 readOnly 身份）。
       readOnlyOperations: face.readOnlyOperations,
       workerDriver,
       ...(input.workerSkills === undefined ? {} : { workerSkills: input.workerSkills }),
       registry: input.registry,
       workerTurnMs: resolved.workerTurnMs,
+      // 大响应文件化阈值：策略解析值（单一配置源），后台 Worker 与 inline 同源。
+      oversizeDataBytes: resolved.oversizeDataBytes,
       // 可信工作目录：装配层持有的 profile.root（绝不取模型输出/用户消息）。
       workerWorkspaceRoot: input.profile.root,
+      // 片 1：run_js 执行器端口（与前台同一构造；缺省不注入 = Worker 工具面零变化）。
+      ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
+      ...(backgroundTaskBridge === undefined ? {} : { backgroundTaskBridge }),
+      ...(input.onFileRefUnavailable === undefined ? {} : { onFileRefUnavailable: input.onFileRefUnavailable }),
+      ...(input.onExecutionResultFileized === undefined ? {} : { onExecutionResultFileized: input.onExecutionResultFileized }),
+      ...(input.onExecutionResultOversizeUnhandled === undefined
+        ? {}
+        : { onExecutionResultOversizeUnhandled: input.onExecutionResultOversizeUnhandled }),
+      // 长任务异步（契约 v4）事件：accepted / 协议违约 / 续跑回程登记，只进日志。
+      ...(input.onExecutionEvent === undefined ? {} : { onExecutionEvent: input.onExecutionEvent }),
     });
+    const emptyOperationsError = input.emptyOperationsError ?? ((message: string) => new Error(message));
+    const executorForPermissions = (permissions: readonly Permission[]): Promise<TaskExecutor> =>
+      buildExecutor(narrowFaceByPermissions(
+        face,
+        permissions,
+        allowWriteOperations,
+        emptyOperationsError,
+        input.emptyOperationsMessage,
+      ));
+    if (input.permissionsForPrincipal === undefined) {
+      // 单主体装配（ask/eval/会话局部 runner）：直接用本装配的权限档位。
+      executor = await executorForPermissions(input.allowedPermissions ?? ['read']);
+    } else {
+      // 进程级共享 runner 跨主体：按**权限集合本身**缓存执行器（键不能只分 ro/rw——
+      // 自定义角色可以只有 write，或 read+write 之外的组合；用布尔档位会让后来的
+      // 主体复用上一个主体的允许集）。任务执行时按主体求交：viewer 的后台写不会
+      // 借用 operator 的允许集。
+      const byPermissions = new Map<string, Promise<TaskExecutor>>();
+      const tieredExecutorFor = (principalId: string): Promise<TaskExecutor> => {
+        const permissions = input.permissionsForPrincipal!(principalId);
+        const key = permissionsKey(permissions);
+        let pending = byPermissions.get(key);
+        if (pending === undefined) {
+          pending = executorForPermissions(permissions);
+          byPermissions.set(key, pending);
+        }
+        return pending;
+      };
+      executor = {
+        async execute(task, context) {
+          return await (await tieredExecutorFor(task.principalId)).execute(task, context);
+        },
+      };
+    }
+  }
+  // B 切片：完成/失败回调接缝——包装实际使用的执行器（注入的或默认构建的同一道包装）。
+  // 回调在 runner 收尾前同步触发；快活（结果已同回合交给模型）的抑制由装配调用方处置。
+  if (input.onTaskCompleted !== undefined || input.onTaskFailed !== undefined) {
+    const inner = executor;
+    const onTaskCompleted = input.onTaskCompleted;
+    const onTaskFailed = input.onTaskFailed;
+    executor = {
+      async execute(task, context) {
+        let outcome: TaskExecutionOutcome;
+        try {
+          outcome = await inner.execute(task, context);
+        } catch (error) {
+          // 2026-11-19 唤醒切片：回合**抛错**（Worker 驱动/基础设施故障）也是任务失败终局
+          // （runner 收尾会 registry.fail）——此前不触发失败回调，用户只能等下次开口才从
+          // B 通道侧面知道。这里按同一条失败出口如实上报（reason = 错误文本，只进事实/日志），
+          // 然后原样抛出：任务事实仍由 runner 收尾决定，本层不改判。
+          onTaskFailed?.({
+            taskId: task.taskId,
+            principalId: task.principalId,
+            sessionId: task.sessionId,
+            request: task.request,
+            status: 'failed',
+            reason: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
+        }
+        if (outcome.kind === 'completed' && outcome.resultText.trim() !== '') {
+          onTaskCompleted?.({
+            taskId: task.taskId,
+            principalId: task.principalId,
+            sessionId: task.sessionId,
+            request: task.request,
+            resultText: outcome.resultText,
+            ...(outcome.files === undefined ? {} : { files: outcome.files }),
+          });
+        } else if (outcome.kind === 'failed' || outcome.kind === 'result_unknown') {
+          // 2026-11-19 失败投递收口：任务终局 failed/result_unknown 都触发失败回调
+          // （两者都不是成功）；result_unknown 落底账 failed + reason=result_unknown，
+          // 用户在话术层看到「不确定做没做完」，不是「没办成」。
+          onTaskFailed?.({
+            taskId: task.taskId,
+            principalId: task.principalId,
+            sessionId: task.sessionId,
+            request: task.request,
+            status: outcome.kind === 'result_unknown' ? 'result_unknown' : 'failed',
+            reason: outcome.reason,
+            ...('reasonCode' in outcome && outcome.reasonCode !== undefined
+              ? { reasonCode: outcome.reasonCode }
+              : {}),
+          });
+        }
+        return outcome;
+      },
+    };
   }
   const runner = createTaskRunner({
     registry: input.registry,
     policy: input.policy,
     executor,
     leaseMs: input.runnerOptions?.leaseMs ?? resolved.workerTurnMs + LEASE_MARGIN_MS,
+    // 等待用户到期消费者由装配方按配置启用（配置缺省 24h；runner 直用缺省关闭）。
+    waitUserTimeoutMs: resolved.waitUserTimeoutMs,
+    // 预期契约（2026-11-18）：10 分钟「比预计久了」提醒阈值取自同一配置源（30 分钟「卡住」
+    // 档已随 2026-11-19 唤醒切片删除）；投递端口由装配方接（缺省不接 = 不提醒）。
+    longRunningNoticeMs: resolved.longRunningNoticeMs,
+    ...(input.longRunningNotice === undefined ? {} : { longRunningNotice: input.longRunningNotice }),
+    ...(input.waitingUserNotice === undefined ? {} : { waitingUserNotice: input.waitingUserNotice }),
+    // 长任务等待「与执行层断了联系（无回执）」档的用户文案（2026-11-19）：装配层从**单一
+    // 话术来源**取（user-facing-failure 的 unknown_result 档），runner 不自己写文案。
+    contactLostNoticeText: failureMessageFor('unknown_result').text,
+    // 长任务异步（契约 v4）：等待端口由执行面客户端提供；缺省不接 = accepted fail-closed。
+    ...(longTasks === undefined ? {} : { longTasks }),
+    ...(input.log === undefined ? {} : { log: input.log }),
     ...(input.runnerOptions?.owner === undefined ? {} : { owner: input.runnerOptions.owner }),
     ...(input.runnerOptions?.now === undefined ? {} : { now: input.runnerOptions.now }),
   });
@@ -457,9 +897,11 @@ export interface NotificationHookOptions {
   factInjectionLimit?: number;
 }
 
-/** R5 B 通道注入器：用户下一次回合开始前取走本 (principal, session) 的待注入机械事实。 */
+/** R5 B 通道注入器：用户下一次回合开始前取走本 (principal, session) 的待注入机械事实。
+ *  取走带回退口（InjectionReceipt.requeue）：本回合没产出用户可见内容时把事实原样放回，
+ *  下一次回合再注入（「取走」不等于「已说」，见 execution-runtime 的注入核销）。 */
 export interface NotificationAttachment {
-  taskFactProvider(principalId: string, sessionId: string): string | undefined;
+  taskFactProvider(principalId: string, sessionId: string): InjectionReceipt | undefined;
 }
 
 /**
@@ -471,7 +913,18 @@ export interface NotificationAttachment {
  *     幂等 = 事实键去重（有界 FIFO），有界 = 单次注入条数上限），由
  *     `taskFactProvider` 在下一次回合开始时取走（普通 user-role 注入，见 execution-runtime）。
  */
-const B_CHANNEL_KINDS = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'resource_limited', 'waiting_user']);
+/**
+ * B 通道注入 kinds（非终态唤醒面之外的机械事实）：
+ *   · `completed` 不在其中（2026-11-19 复核 F3）：完成已由**唤醒路径**负责说——唤醒回合
+ *     由模型把话带给用户；唤醒降级（unavailable/failed）与非 live 不唤醒时，完成**事实**
+ *     经 server 的 systemNotes 待注入队列在下一次用户回合补说。若这里再注入一条
+ *     `[任务事实] 办完了：…`，同一回合会出现两条同一件事的陈述（旧宿主完成模板残留）。
+ *   · `failed` / `cancelled` 同理移出（2026-11-19 唤醒切片）：失败（含回合抛错）由失败唤醒
+ *     出口说、「用户说停」由取消唤醒出口说；唤醒降级/非 live 时两条**事实**同样进
+ *     systemNotes 待注入队列，宿主兜底屏也在同一出口。这里再注入就是同一件事说两遍。
+ *   · 超时/资源拒绝/等补充**保留**：这几类还没改成唤醒，主动推送与 B 通道照旧。
+ */
+const B_CHANNEL_KINDS = new Set(['timed_out', 'resource_limited', 'waiting_user']);
 const INJECTED_KEYS_LIMIT = 1024;
 
 export function attachNotificationOutbox(
@@ -485,12 +938,18 @@ export function attachNotificationOutbox(
   registry.onTaskFact((fact) => {
     const kind = notificationKindForTransition(fact.from, fact.to, fact.reason as NotificationReason | undefined);
     if (kind === undefined) return;
-    // R5 补字段：waiting_user 时从底账读回 pendingQuestion.missing（事实钩子无 scope，
-    // 底账自身即事实来源；读不到不编造）。
+    // R5 补字段：waiting_user 时从底账读回 pendingQuestion（事实钩子无 scope，底账自身即
+    // 事实来源；读不到不编造）。写确认时再取 confirmation.summary——用户要看到「将写入什么」
+    // 才能决定；**handle 永不进 payload**（宿主持有，用户不需要也不该看到）。
     const record = (registry as unknown as {
-      get(taskId: string): { principalId: string; sessionId: string; pendingQuestion?: { missing?: readonly string[] } };
+      get(taskId: string): {
+        principalId: string;
+        sessionId: string;
+        pendingQuestion?: { missing?: readonly string[]; confirmation?: { summary?: string } };
+      };
     }).get(fact.taskId);
     const missing = kind === 'waiting_user' ? record.pendingQuestion?.missing : undefined;
+    const summary = kind === 'waiting_user' ? record.pendingQuestion?.confirmation?.summary : undefined;
     outbox.record({
       taskId: fact.taskId,
       kind,
@@ -500,6 +959,7 @@ export function attachNotificationOutbox(
       name: fact.name,
       ...(fact.reason === undefined ? {} : { reason: fact.reason }),
       ...(missing === undefined ? {} : { missing }),
+      ...(summary === undefined ? {} : { summary }),
     });
     if (B_CHANNEL_KINDS.has(kind)) {
       const key = `${fact.taskId}:${kind}:${fact.stateVersion ?? fact.at}`;
@@ -518,6 +978,7 @@ export function attachNotificationOutbox(
               name: fact.name,
               ...(fact.reason === undefined ? {} : { reason: fact.reason }),
               ...(missing === undefined ? {} : { missing }),
+              ...(summary === undefined ? {} : { summary }),
             },
           }),
         });
@@ -538,10 +999,17 @@ export function attachNotificationOutbox(
         }
       }
       if (mine.length === 0) return undefined;
+      // 回退口：本回合没产出用户可见内容时原样放回（同一 scope、原顺序、原条目）。
+      const requeue = (): void => {
+        for (const line of mine) pendingFacts.push({ scopeKey, line });
+      };
       if (mine.length > injectionLimit) {
-        return `[任务事实] 自上次对话以来有 ${mine.length} 项任务状态变化（超出单次注入上限 ${injectionLimit} 条），请用任务查询工具查看。`;
+        return {
+          text: `[任务事实] 自上次对话以来有 ${mine.length} 项任务状态变化（超出单次注入上限 ${injectionLimit} 条），请用任务查询工具查看。`,
+          requeue,
+        };
       }
-      return `[任务事实] ${mine.join('\n')}`;
+      return { text: `[任务事实] ${mine.join('\n')}`, requeue };
     },
   };
 }
@@ -553,11 +1021,15 @@ export function attachNotificationOutbox(
  * 顺序与抽取前逐入口一致（门内不建库、不落盘：执行面失败时底账尚未创建）。
  */
 export async function assembleSessionCore(input: SessionAssemblyInput): Promise<AssembledSession> {
-  const dispatchMode: 'inline' | 'background' = input.dispatchMode ?? input.runtime?.dispatchMode ?? 'inline';
+  const taskDispatch: 'sync' | 'async' = input.taskDispatch ?? 'sync';
   const resolved = resolveRuntimeConfig(input.runtime);
   const policy = input.policy ?? createResourcePolicy(input.runtime);
   // 写面开关：显式投影优先，其次 runtime 段；缺省 false = 只读（零行为变化）。
   const allowWriteOperations = input.allowWriteOperations ?? input.runtime?.allowWriteOperations === true;
+  // 角色白名单（宿主求交的中间项）：未提供 = 只读（最小权限）。实际允许集合还要与
+  // 执行层声明能力和部署总闸求交（resolveExecutionFace 的唯一收口）。
+  const allowedPermissions: readonly Permission[] = input.allowedPermissions ?? ['read'];
+  const writePermitted = allowWriteOperations && allowedPermissions.includes('write');
 
   const auditPath = path.join(input.stateDir, 'audit.jsonl');
   if (input.setAuditPath === true) {
@@ -572,6 +1044,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
     stateDir: input.stateDir,
     emptyOperationsMessage: input.emptyOperationsMessage,
     allowWriteOperations,
+    allowedPermissions,
     ...(input.emptyOperationsError === undefined ? {} : { emptyOperationsError: input.emptyOperationsError }),
     ...(input.createExecutionFace === undefined ? {} : { createExecutionFace: input.createExecutionFace }),
   });
@@ -609,16 +1082,57 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       // 协议之前；目录为空/缺失时 promptBlock 为空串 → 提示逐字节不变；catalog 非空才交出
       // read_skill 登记表。目录来自装配参数或 `<repo>/.agents/skills`，不读配置键。
       const delivery = await loadMainSkillDelivery(input.mainSkillsDir ?? defaultMainSkillsDir());
-      mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, input.profile.executorLabel)}${delivery.promptBlock}\n\n${mainProtocolNoteFor(allowWriteOperations)}`;
+      mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, input.profile.executorLabel)}${delivery.promptBlock}\n\n${mainProtocolNoteFor(writePermitted)}`;
       mainSkillRegistry = delivery.registry;
     }
-    const drivers = input.createDrivers !== undefined
-      ? await input.createDrivers(input.env)
-      : { mainDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env), reuseConversation: true }), workerDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env) }) };
 
-    // P6：background = 受理/后台路径；runner 进程级共享（server 注入），缺省按本会话执行面构建。
+    // 能力目录（A4/A5）：单一来源 = 执行层 operation 声明的 capability/access。按 capability
+    // 分组派生，给 Main 一句极短摘要常驻 + 只读 capabilities() 工具（见 createSession）。
+    // 未声明任何 capability → 目录为空：摘要/行为句一律不追加（提示与今天逐字节一致），
+    // 并记一次性结构化事件 capability_catalog_undeclared（装配时记，不按回合刷）。
+    let capabilityCatalog: readonly CapabilityEntry[] = [];
+    const manifest = await face.client.capabilities();
+    capabilityCatalog = deriveCapabilityCatalog(manifest.operations);
+    if (capabilityCatalog.length === 0) {
+      input.onExecutionEvent?.({ event: 'capability_catalog_undeclared', principalId: input.principalId, sessionId: input.sessionId });
+    } else {
+      mainSystemPrompt += `\n\n${renderCapabilitySummary(capabilityCatalog)}\n\n${OUTCOME_BEHAVIOR_NOTE}`;
+    }
+    // 模型用量观测（owner 2026-11-21 最小方案）：本装配能拿到真实 principal/session 与 dbPath，
+    // 缺省驱动都注入同一个 usage.jsonl sink（`<dbPath 同目录>/usage.jsonl`）。写失败只记
+    // 结构化事件、不影响回合（见 model-usage.ts）。
+    const usageSink = (agent: 'main' | 'worker') => createModelUsageSink({
+      filePath: usageFilePathOf(input.dbPath),
+      agent,
+      principalId: input.principalId,
+      sessionId: input.sessionId,
+    });
+    const drivers = input.createDrivers !== undefined
+      ? await input.createDrivers(input.env, input.mainSession)
+      : {
+        mainDriver: createPiTurnDriver({
+          env: input.env,
+          ...contextWindowFrom(input.env),
+          ...compactionSettingsFrom(input.env),
+          // Main 思考档：llm.mainThinkingLevel 优先、未设回落 llm.thinkingLevel（见 helper 注释）。
+          ...mainThinkingLevelFrom(input.env),
+          reuseConversation: true,
+          ...mainSessionOptions(input.mainSession),
+          onModelUsage: usageSink('main'),
+        }),
+        // Worker 是一次性回合（每任务独立会话），不落业务会话文件；思考档 = 驱动缺省解析
+        // （llm.thinkingLevel，owner 决定 medium）。
+        workerDriver: createPiTurnDriver({
+          env: input.env,
+          ...contextWindowFrom(input.env),
+          ...compactionSettingsFrom(input.env),
+          onModelUsage: usageSink('worker'),
+        }),
+      };
+
+    // P6：async = 受理/后台路径；runner 进程级共享（server 注入），缺省按本会话执行面构建。
     let runner = input.taskRunner;
-    if (dispatchMode === 'background' && runner === undefined) {
+    if (taskDispatch === 'async' && runner === undefined) {
       runner = (await createBackgroundDispatch({
         env: input.env,
         profile: input.profile,
@@ -628,6 +1142,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
         workerSkills,
         ...(input.runtime === undefined ? {} : { runtime: input.runtime }),
         allowWriteOperations,
+        allowedPermissions,
         emptyOperationsMessage: input.emptyOperationsMessage,
         ...(input.emptyOperationsError === undefined ? {} : { emptyOperationsError: input.emptyOperationsError }),
         ...(input.createDrivers === undefined ? {} : { createDrivers: input.createDrivers }),
@@ -636,10 +1151,21 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
         ...(input.runnerOptions === undefined ? {} : { runnerOptions: input.runnerOptions }),
         face,
         workerDriver: drivers.workerDriver,
+        // 片 1：后台 Worker 的 run_js 与前台同一执行器端口（缺省不注入 = 工具面零变化）。
+        ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
+        // 后台文件面与 inline 同源注入：同一 bridge 参数与 fileStore 实例，按任务懒建。
+        ...(input.taskExecutionBridge === undefined ? {} : { taskExecutionBridge: input.taskExecutionBridge }),
+        ...(input.onFileRefUnavailable === undefined ? {} : { onFileRefUnavailable: input.onFileRefUnavailable }),
+        ...(input.onExecutionResultFileized === undefined ? {} : { onExecutionResultFileized: input.onExecutionResultFileized }),
+        ...(input.onExecutionResultOversizeUnhandled === undefined
+          ? {}
+          : { onExecutionResultOversizeUnhandled: input.onExecutionResultOversizeUnhandled }),
+        // 长任务异步（契约 v4）事件与前台同一出口。
+        ...(input.onExecutionEvent === undefined ? {} : { onExecutionEvent: input.onExecutionEvent }),
       })).runner;
     }
-    // P4：通知链仅 background 且提供 sink 时启用（inline 默认零新增路径；投递由调用方触发）。
-    if (dispatchMode === 'background' && input.notificationSink !== undefined) {
+    // P4：通知链仅 async 且提供 sink 时启用（sync 默认零新增路径；投递由调用方触发）。
+    if (taskDispatch === 'async' && input.notificationSink !== undefined) {
       notifications = createNotificationOutbox({
         dbPath: input.dbPath,
         sink: input.notificationSink,
@@ -659,26 +1185,35 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       workerDriver: drivers.workerDriver,
       mainSystemPrompt,
       workerSkills,
+      capabilityCatalog,
       taskRegistry,
       policy,
-      dispatchMode,
+      taskDispatch,
       ...(runner === undefined ? {} : { taskRunner: runner }),
       ...(mainSkillRegistry === undefined ? {} : { mainSkillRegistry }),
       ...(input.taskFactProvider === undefined ? {} : { taskFactProvider: input.taskFactProvider }),
       ...(input.attachmentFactProvider === undefined ? {} : { attachmentFactProvider: input.attachmentFactProvider }),
       ...(input.systemNoteProvider === undefined ? {} : { systemNoteProvider: input.systemNoteProvider }),
-      ...(input.transcriptStore === undefined ? {} : { transcriptStore: input.transcriptStore }),
-      ...(input.onTranscriptError === undefined ? {} : { onTranscriptError: input.onTranscriptError }),
       ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
+      ...(input.recalcXlsxExecutor === undefined ? {} : { recalcXlsxExecutor: input.recalcXlsxExecutor }),
+      ...(input.onRecalcCost === undefined ? {} : { onRecalcCost: input.onRecalcCost }),
       ...(input.onRunJsMemoryExit === undefined ? {} : { onRunJsMemoryExit: input.onRunJsMemoryExit }),
       ...(input.onRunJsLayoutUnsafe === undefined ? {} : { onRunJsLayoutUnsafe: input.onRunJsLayoutUnsafe }),
       ...(input.onFileRefUnavailable === undefined ? {} : { onFileRefUnavailable: input.onFileRefUnavailable }),
       ...(input.onTaskOutputSweepSkipped === undefined ? {} : { onTaskOutputSweepSkipped: input.onTaskOutputSweepSkipped }),
+      ...(input.onExecutionResultFileized === undefined ? {} : { onExecutionResultFileized: input.onExecutionResultFileized }),
+      ...(input.onExecutionResultOversizeUnhandled === undefined
+        ? {}
+        : { onExecutionResultOversizeUnhandled: input.onExecutionResultOversizeUnhandled }),
       ...(input.taskInputCopier === undefined ? {} : { taskInputCopier: input.taskInputCopier }),
       ...(taskBridge === undefined ? {} : { taskExecutionBridge: taskBridge }),
+      // 长任务异步（契约 v4）：inline 前台收到 accepted 也发同一条事件（只进日志）。
+      ...(input.onExecutionEvent === undefined ? {} : { onExecutionEvent: input.onExecutionEvent }),
       ...(input.fileManifestProvider === undefined ? {} : { fileManifestProvider: input.fileManifestProvider }),
       mainTurnMs: resolved.mainTurnMs,
       workerTurnMs: resolved.workerTurnMs,
+      // B 切片（工单回执收敛）：task_run 短等待窗口（单一配置源 = runtime 解析值）。
+      taskRunWaitMs: resolved.taskRunWaitMs,
       // 可信工作目录：装配层持有的 profile.root（绝不取模型输出/用户消息）。
       workerWorkspaceRoot: input.profile.root,
     });
@@ -724,15 +1259,13 @@ export async function assembleAskRuntime(input: AskRuntimeInput): Promise<AskRun
   if (principalId === undefined) {
     throw new AssemblyRefusedError('配置里没有 enabled principal——最小切片需要可信身份来源（fail-closed，不回落写死值）。');
   }
-  // R4 登记边界：ask/redo 是进程内单轮入口，不承接后台派发（受理后进程即退出会半程丢任务）。
-  // 显式拒绝而非静默忽略——需要 background 的部署走 server 渠道面。
-  if ((config.runtime?.dispatchMode ?? 'inline') === 'background') {
-    throw new AssemblyRefusedError(`${input.purpose} 入口不支持 runtime.dispatchMode=background——后台派发由 server 渠道面承接（本入口不静默忽略）。`);
-  }
-
   const stateDir = path.join(input.runtimeDir, 'state');
   const dbPath = input.dbPath
     ?? (config.store?.dbPath !== undefined ? path.resolve(config.store.dbPath) : DEFAULT_DB_PATH);
+  // 宿主求交：本主体的角色权限（未写 role = viewer = 只读）。实际允许集合还要与
+  // 执行层声明能力、runtime.allowWriteOperations 总闸求交（assembleSessionCore 内收口）。
+  const role = effectiveRoleOf(config, principalId);
+  const allowedPermissions = permissionsOfRole(config, role);
   const assembled = await assembleSessionCore({
     env,
     profile,
@@ -753,6 +1286,10 @@ export async function assembleAskRuntime(input: AskRuntimeInput): Promise<AskRun
     emptyOperationsError: (message) => new AssemblyRefusedError(message),
     // 写面开关：语义部署键 runtime.allowWriteOperations（缺省 false = 只读，ask 零行为变化）。
     allowWriteOperations: config.runtime?.allowWriteOperations === true,
+    // 角色白名单（宿主求交中间项）：未写 role = viewer = 只读。
+    allowedPermissions,
+    // 进程内单轮入口：没有渠道推送面承接后台完成投递，装配恒为同步等结果（不是配置键）。
+    taskDispatch: 'sync',
     ...(input.mainSkillsDir === undefined ? {} : { mainSkillsDir: input.mainSkillsDir }),
   });
   return {

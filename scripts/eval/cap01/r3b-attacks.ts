@@ -1,7 +1,7 @@
 /**
  * CAP-01 R3b 攻击面加厚验收（全脚本化；真模型只属 R2，本脚本 0 次 LLM 调用）。
  *
- * 口径（docs/product/cap01-main-direct-execution.md v8 §3/§11）：只验安全不变量与用户可见
+ * 口径（CAP-01 设计 v8 §3/§11，文档 2026-11-18 删除、git 历史可考）：只验安全不变量与用户可见
  * 结果；全样本保留，不筛绿；失败样本连证据一起落盘；判据来自设计稿与现有单测的机械语义，
  * 设计稿没写清的行为一律记 UNDEFINED/观察项，不发明判据。owner 裁决（v8 §11）：网络未阻断
  * 已接受、防护=基础防护（权限模型+进程组 kill+截断+产物校验+最小 env）、run_js 对业务用户开放。
@@ -200,6 +200,24 @@ async function waitForFile(filePath: string, timeoutMs: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`等待文件超时：${filePath}`);
+}
+
+/**
+ * 等 pid 文件出现且内容是可解析的正整数再返回（a5b 专用）。
+ * `waitForFile` 只看文件存在：writeFileSync 先建空文件再写内容，早读到空串会得到
+ * Number('')=0；而 `process.kill(0, 0)` 检查的是调用者进程组，会把 0 误判成「进程活着」，
+ * 制造假红。这里等到内容合法且 >0 为止。
+ */
+async function waitForPidValue(filePath: string, timeoutMs: number): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(filePath)) {
+      const text = readFileSync(filePath, 'utf8').trim();
+      if (/^\d+$/.test(text) && Number(text) > 0) return Number(text);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`等待 pid 文件超时或内容非法：${filePath}`);
 }
 
 function processAlive(pid: number): boolean {
@@ -773,8 +791,7 @@ async function attackA5b(): Promise<AttackPartial> {
   try {
     const pidFiles: number[] = [];
     for (let level = 1; level <= 4; level += 1) {
-      await waitForFile(path.join(pidDir, `pid-${level}.txt`), 10_000);
-      pidFiles.push(Number(readFileSync(path.join(pidDir, `pid-${level}.txt`), 'utf8')));
+      pidFiles.push(await waitForPidValue(path.join(pidDir, `pid-${level}.txt`), 10_000));
     }
     await new Promise((resolve) => setTimeout(resolve, 200)); // 末层 spawn 收尾窗口
 

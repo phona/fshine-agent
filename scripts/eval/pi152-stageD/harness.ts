@@ -541,8 +541,8 @@ export interface BuildSessionInput {
   faultWindow?: string;
   /** 自测注入：确定性假驱动（零模型）；resumeFile 用于重启自检。 */
   driverFactory?: (options: { resumeFile?: string }) => { mainDriver: TurnDriver; workerDriver: TurnDriver };
-  /** 派发模式：B/C 用 inline+注入 runner（同回合 Main 回复归档）；D 用 background；A 不需要 runner。 */
-  dispatchMode?: 'inline' | 'background';
+  /** 任务派发装配参数：B/C 用 sync+注入 runner（同回合 Main 回复归档）；D 用 async；A 不需要 runner。 */
+  taskDispatch?: 'sync' | 'async';
   /** false = 不注入 runner（Main 只有 task_run；A 的纯对话面）。 */
   withRunner?: boolean;
   /** 评测侧显式模型/压缩配置（与 prepareGroup 保持一致；缺省沿用 STAGE_D_CONFIG）。 */
@@ -636,11 +636,11 @@ export async function buildSession(input: BuildSessionInput): Promise<SessionHan
     };
   };
 
-  const dispatchMode = input.dispatchMode ?? 'background';
+  const taskDispatch = input.taskDispatch ?? 'async';
   const withRunner = input.withRunner ?? true;
   let preDrivers: { mainDriver: TurnDriver; workerDriver: TurnDriver } | undefined;
   let runner: Awaited<ReturnType<typeof createBackgroundDispatch>>['runner'] | undefined;
-  if (dispatchMode === 'inline' && withRunner) {
+  if (taskDispatch === 'sync' && withRunner) {
     preDrivers = await makeDrivers(prepared.env);
     runner = (await createBackgroundDispatch({
       env: prepared.env,
@@ -665,7 +665,7 @@ export async function buildSession(input: BuildSessionInput): Promise<SessionHan
     emptyOperationsMessage,
     taskRegistry: prepared.registry,
     policy,
-    dispatchMode,
+    taskDispatch,
     ...(runner === undefined ? {} : { taskRunner: runner }),
     createExecutionFace: async () => ({ client, allowedOperations, readOnlyOperations: assemblyFace.readOnlyOperations }),
     createDrivers: async (driverEnv) => preDrivers ?? makeDrivers(driverEnv),

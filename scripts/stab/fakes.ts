@@ -3,7 +3,7 @@
  *
  * 纯测试基建，零产品语义：全部假 executor / 假 sink / 假渠道（经 `server.handler`）/
  * 可注入时钟；装配走生产同一核心 `assembleSessionCore`（不 mock 产品逻辑）。
- * 预注册：`docs/product/r4-stability-prereg.md` §三/§四。
+ * 预注册：`docs/history/r4-stability-prereg.md` §三/§四。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -254,7 +254,10 @@ export async function assembleStabSession(options: AssembleStabOptions): Promise
     workerSkills: [],
     createDrivers: () => ({ mainDriver: options.mainDriver, workerDriver: options.workerDriver }),
     createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'], readOnlyOperations: ['dummy.query'] }),
-    runtime: options.runtime,
+    // B 切片：稳定性套件钉在异步受理语义（受理/背压/排空的机械读数）；短等待窗口的
+    // 默认行为由 runtime-task-wait-window / server-task-wait-window 专测覆盖。
+    taskDispatch: 'async',
+    runtime: { taskRunWaitMs: 0, ...options.runtime },
     taskExecutor: options.taskExecutor,
     taskRegistry: options.registry,
     ...(options.runnerOptions === undefined ? {} : { runnerOptions: options.runnerOptions }),
@@ -316,6 +319,22 @@ export function sampleRssMedian(): number {
   for (let i = 0; i < 3; i += 1) values.push(process.memoryUsage().rss);
   values.sort((a, b) => a - b);
   return values[1]!;
+}
+
+/**
+ * 稳定采样（2026-11-18）：连读 5 次、每次之间让出一个宏任务，再取中位数。
+ * 为什么不是 `sampleRssMedian` 的即时三次：实测同一提交上 I5 的比值在 8%→28% 之间跳，
+ * 差异来自"排空刚结束、GC 尚未回收"的瞬时堆，而不是泄漏。这里只降低测量噪声，
+ * **不改阈值**（仍是 <10%）。
+ */
+export async function sampleRssSettled(): Promise<number> {
+  const values: number[] = [];
+  for (let i = 0; i < 5; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    values.push(process.memoryUsage().rss);
+  }
+  values.sort((a, b) => a - b);
+  return values[Math.floor(values.length / 2)]!;
 }
 
 export function rssGrowth(base: number, end: number): number {

@@ -101,7 +101,10 @@ describe('写确认回环（真 dummy 夹具，业务级）', () => {
     expect(confirmation.summary).toContain('alpha');
     expect(confirmation.summary).toContain('W1');
     expect(confirmation.summary).toContain('2');
-    expect(confirmation.summary).toMatch(/cannot be undone/i);
+    // 摘要由执行层拥有、宿主原样转述；本仓 dummy 交付的是中文人话（不得是英文模板/原始 ISO）
+    expect(confirmation.summary).toContain('不可撤销');
+    expect(confirmation.summary).not.toMatch(/cannot be undone/i);
+    expect(confirmation.summary).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
     expect(confirmation.expiresAt).toBeDefined();
     const ttlMs = new Date(confirmation.expiresAt as string).getTime() - Date.now();
     expect(ttlMs).toBeGreaterThan(14 * 60 * 1000);

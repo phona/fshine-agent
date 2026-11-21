@@ -175,6 +175,7 @@ export const EXECUTION_STATUS_WORDS: Record<ExecutionStatus, string> = {
   failed: '失败',
   refused: '已拒绝',
   needs_input: '待补充信息',
+  accepted: '已受理（长任务进行中）',
 };
 
 export function taskStatusWord(status: TaskStatus): string {

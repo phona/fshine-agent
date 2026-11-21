@@ -14,11 +14,11 @@
  */
 import type { ExecutionFailure } from '@fshine/contracts/execution-contract';
 import { judgeMechanical, type ExecutionFact, type MechanicalVerdict, type SampleRecord } from '../business-e2e/judge';
-import { judgeFactAnswer, parseNumbers, stripCodeTokens, type FactVerdict } from '../r6/oracle';
-import type { TaskVerdict } from '../r6/oracle';
-import type { CompactionVerdict } from '../r6/compaction';
-import { classifySample, type SampleDisposition, type SessionEvidence, type SessionJudgement } from '../r6/evidence';
-import type { MuHardZero } from '../r6/multiuser/mu-support';
+import { judgeFactAnswer, parseNumbers, stripCodeTokens, type FactVerdict } from '../long-session/oracle';
+import type { TaskVerdict } from '../long-session/oracle';
+import type { CompactionVerdict } from '../long-session/compaction';
+import { classifySample, type SampleDisposition, type SessionEvidence, type SessionJudgement } from '../long-session/evidence';
+import type { MuHardZero } from '../long-session/multiuser/mu-support';
 import type { P2CaseDefinition, P2Check, P2Coverage, P2Observation } from './p2-types';
 
 /**
@@ -41,9 +41,9 @@ export function classifyP2Sample(input: {
   readonly judgement: SessionJudgement;
   readonly coverage: P2Coverage;
 }): SampleDisposition {
-  const r6 = classifySample(input.evidence, input.judgement);
-  if (r6 === 'product_fault') return 'product_fault';
-  if (r6 === 'environment_interrupted') return 'environment_interrupted';
+  const baseOutcome = classifySample(input.evidence, input.judgement);
+  if (baseOutcome === 'product_fault') return 'product_fault';
+  if (baseOutcome === 'environment_interrupted') return 'environment_interrupted';
   if (!input.coverage.satisfied) return 'insufficient_coverage';
   return 'valid';
 }
