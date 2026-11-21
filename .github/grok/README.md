@@ -45,7 +45,9 @@ gh secret set GROK_AUTH_JSON < ~/.grok/auth.json
 
 GitHub 托管 runner 每次都是新磁盘。job 从 secret 恢复 `auth.json`，Grok 如果在 job 里刷新了令牌，新文件会随 runner 一起丢掉，**不会写回 secret**。写回需要能改 secret 的高权限令牌，而这个 workflow 跑的是 PR 头上的文件，不适合再放一把这样的钥匙。
 
-实测：access token 有效期约 6 小时（`expires_at` = 创建时间 + 6 小时），CLI 会用 refresh token 在后台自己换。换过之后，secret 里的旧副本可能作废。出现下面任一情况就在可信机器上重新 `grok login`，再用上面的 `gh secret set` 覆盖 secret：
+实测：access token 有效期约 6 小时（`expires_at` = 创建时间 + 6 小时），CLI 会用 refresh token 在后台自己换。换过之后，secret 里的旧副本可能作废。
+
+2026-11-21 fshine-agent 实测补充：refresh token **可重复使用**——用同一个副本连续刷新两次都成功（两次各自返回新的令牌对，旧副本两次都可用）。即 CI 里 CLI 的自动刷新不会立即作废 secret 里的副本；「旧副本失效」更可能来自一次新的 `grok login`（换掉整套令牌）。下面的恢复步骤仍然保留：见到 401 或 refresh 失败就重新登录覆盖 secret。出现下面任一情况就在可信机器上重新 `grok login`，再用上面的 `gh secret set` 覆盖 secret：
 
 - 审查 job 开始返回 401，或日志写 refresh 失败
 - 距离上次登录已经很久、refresh token 也换过
