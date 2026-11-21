@@ -51,6 +51,14 @@ const MANIFEST: CapabilityManifest = {
     { name: 'dummy.proposal-commit', label: 'proposal-commit', args: [{ name: '--proposal-id', required: true }] },
     { name: 'dummy.denied', label: 'denied', args: [{ name: '--collection', required: true }] },
     { name: 'dummy.ask', label: 'ask', args: [] },
+    {
+      name: 'dummy.reconfirm',
+      label: 'reconfirm',
+      args: [
+        { name: '--collection', required: true },
+        { name: '--confirmation', required: false, type: 'code', hostOnly: true },
+      ],
+    },
   ],
 };
 
@@ -62,6 +70,7 @@ const ALLOWED = [
   'dummy.proposal-commit',
   'dummy.denied',
   'dummy.ask',
+  'dummy.reconfirm',
 ];
 const READ_ONLY = ['dummy.query'];
 
@@ -86,6 +95,7 @@ interface ClientCall {
 class AdversarialClient implements ExecutionClient {
   readonly calls: ClientCall[] = [];
   private prepareSeq = 0;
+  private reconfirmSeq = 0;
 
   constructor(private readonly handleFor: (seq: number) => string = (seq) => `cf_${seq}`) {}
 
@@ -122,6 +132,21 @@ class AdversarialClient implements ExecutionClient {
           : { status: 'completed', data: { added: 2 } };
       case 'dummy.ask':
         return { status: 'needs_input', missing: [{ name: '合同编号', description: '合同编号' }] };
+      case 'dummy.reconfirm': {
+        // ⑬：声明了 hostOnly `--confirmation` 的写操作在一次「确认回合」里再次返回待确认
+        // （真实执行层的同类形状：句柄过期/绑定变化后重新冻结提案）。
+        this.reconfirmSeq += 1;
+        const collection = typeof args['--collection'] === 'string' ? args['--collection'] : 'alpha';
+        return {
+          status: 'needs_confirmation',
+          confirmation: {
+            handle: this.handleFor(this.reconfirmSeq),
+            summary: `「${collection}」将被再次提交，不可撤销`,
+            expiresAt: EXPIRES_AT,
+          },
+          data: { collection },
+        };
+      }
       case 'dummy.proposal':
         return { status: 'completed', data: { proposalId: 'prop_1', status: 'pending' } };
       case 'dummy.proposal-commit':
@@ -156,6 +181,8 @@ function makeRegistry(): ReturnType<typeof createSqliteTaskRegistry> {
 interface WorkerCapture {
   /** Worker 收到的工具结果原文（每次 exec 返回一份）。 */
   results: unknown[];
+  /** ⑬：每次 Worker 回合收到的委派正文（断言模型可见面用）。 */
+  delegations?: string[];
 }
 
 /** 多轮脚本化 Worker：每轮消费一组工具调用（脚本模型故意作恶的载体）。 */
@@ -181,6 +208,10 @@ function scriptWorkerMixed(
   const remaining = rounds.map((calls) => [...calls]);
   return {
     async run(input) {
+      if (capture.delegations !== undefined) {
+        const last = input.messages.at(-1) as unknown as { content?: unknown } | undefined;
+        capture.delegations.push(typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content ?? ''));
+      }
       const calls = remaining.shift() ?? [];
       for (const call of calls) {
         try {
@@ -690,5 +721,48 @@ describe('模型走岔路（确定性脚本模型）', () => {
     const task = registry.get('t_querythenscript', SCOPE);
     expect(task.status).toBe('failed');
     expect(task.failureReason ?? '').toContain('run_js');
+  });
+
+  it('⑬ 确认回合重提：宿主注入的确认句柄不得落进底账提案载荷，也不得进下一轮委派正文', async () => {
+    // 2026-11-21 Grok 审查 blocking：确认回合同样走 op_* 面时，mapWorkerOperationArgs 把宿主
+    // 注入的 `--confirmation` 写进 baseCallArgs；needs_confirmation 时整包存进 proposalArgs →
+    // 底账提案 args → renderConfirmationResumeFact 原样进下一轮 Worker 委派正文（凭据进模型面，
+    // 且可能被写进汇报）。句柄是宿主持有的凭据：调用方（模型）永远看不到它。
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [], delegations: [] };
+    let seq = 0;
+    const client = new AdversarialClient(() => `cf_leak_${++seq}`);
+    const executor = await makeExecutor({
+      client,
+      registry,
+      worker: scriptWorkerMixed([
+        [{ tool: 'op_dummy_reconfirm', args: { collection: 'alpha' } }],
+        [{ tool: 'op_dummy_reconfirm', args: { collection: 'alpha' } }],
+        [{ tool: 'op_dummy_reconfirm', args: { collection: 'alpha' } }],
+      ], capture),
+    });
+    const runner = await runBackground(registry, executor, 't_handle_leak');
+
+    const first = registry.get('t_handle_leak', SCOPE);
+    expect(first.status).toBe('waiting_user');
+    expect(first.pendingQuestion?.confirmation?.handle).toBe('cf_leak_1');
+    // 首轮提案：宿主此时没有句柄可注入，载荷就是业务字段。
+    expect(first.pendingQuestion?.confirmation?.args).toEqual({ '--collection': 'alpha' });
+
+    // 用户确认 → 确认回合；Worker 重提（真模型 13/14 会重跑）拿到新提案。
+    const confirmed = runner.confirm('t_handle_leak', { userText: '确认', scope: SCOPE });
+    expect(confirmed.outcome).toBe('started');
+    await runner.whenIdle();
+    const second = registry.get('t_handle_leak', SCOPE);
+    expect(second.status).toBe('waiting_user');
+    expect(second.pendingQuestion?.confirmation?.handle).toBe('cf_leak_2');
+    // 本 blocking 的判据：确认回合的提案载荷不得含宿主注入的确认句柄（只留业务字段）。
+    expect(second.pendingQuestion?.confirmation?.args).toEqual({ '--collection': 'alpha' });
+
+    // 再确认一次：下一轮委派正文（renderConfirmationResumeFact 原样交回提案载荷）也不得出现任何句柄。
+    const confirmedAgain = runner.confirm('t_handle_leak', { userText: '确认', scope: SCOPE });
+    expect(confirmedAgain.outcome).toBe('started');
+    await runner.whenIdle();
+    expect((capture.delegations ?? []).join('\n')).not.toContain('cf_leak_');
   });
 });

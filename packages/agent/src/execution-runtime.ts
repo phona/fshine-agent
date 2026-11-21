@@ -3713,6 +3713,22 @@ export function mapWorkerOperationArgs(input: {
 }
 
 /**
+ * 提案载荷落底账前的剥离（2026-11-21 Grok 审查 blocking）：宿主经 mapWorkerOperationArgs
+ * 注入的确认句柄（hostOnly `--confirmation`，上面「调用方永远看不到句柄」）只在宿主→执行层
+ * 通道流动；底账提案的 args 会经 renderConfirmationResumeFact **原样进下一轮 Worker 委派正文**，
+ * 句柄因此会进模型面。落底账前把裸名为 `confirmation` 的键剥掉（与注入端同一个裸名判据），
+ * 其余字段逐字保留（不透明数据，宿主不解析）。
+ */
+export function proposalPayloadOf(callArgs: Record<string, unknown>): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(callArgs)) {
+    if (key.replace(/^--/, '') === 'confirmation') continue;
+    payload[key] = value;
+  }
+  return payload;
+}
+
+/**
  * 后台 Worker 任务文件清单的引用方式（与 inline 的 run_js.inputs 同源，另加执行层的声明
  * 文件参数：后台 Worker 的 execute_operation 文件参数由宿主替换为任务目录内的物化路径）。
  */
@@ -4325,7 +4341,10 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
             // 载荷随手柄落底账（提案接受的那一刻就在手里）：给的是**模型提交的原始结构化
             // 参数**（装信封之前的值），确认续跑时原样交回 Worker 重提交——宿主不解析、
             // 不改写；二次提交仍走同一套 lint+装信封（宿主继续是唯一的信封翻译者）。
-            ...(run.outcome.status === 'needs_confirmation' ? { proposalArgs: baseCallArgs } : {}),
+            // 2026-11-21 Grok 审查 blocking：落底账前剥掉宿主注入的 `--confirmation` 句柄
+            // （proposalPayloadOf）——底账提案 args 会原样进下一轮 Worker 委派正文，
+            // 句柄是凭据，不得进模型面。
+            ...(run.outcome.status === 'needs_confirmation' ? { proposalArgs: proposalPayloadOf(baseCallArgs) } : {}),
           });
         }
         // 与前台同一套脱敏投影：Worker 永远看不到 confirmation.handle（后台也曾直回原始
