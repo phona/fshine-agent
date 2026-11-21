@@ -47,7 +47,7 @@ Pi Agent（Main）+ 最小宿主 + Execution Contract + Channel Adapter 的产�
 
 ## 六、上线前建议（按收益排序）
 
-1. ~~进程守护~~ **已落地（2026-11-21）**：systemd user unit `fshine-live.service`（`Restart=always` + 开机自启），重启演练 20 秒内恢复在线；unit 属部署形态、不在仓库内，见 `docs/ops/README.md` §4。
+1. **进程守护（安装件已入仓；本机按 owner 决定不装）**：`scripts/ops/fshine-systemd.sh`（`print` / `install` / `uninstall`，幂等、用户级单元、`Restart=always`，开机自启需 `loginctl enable-linger`）。装到任意部署机上即可把停机窗口压到秒级；本机（`fshine-agent-int`）现状=未安装、手动 `npm start`。
 2. ~~心跳 30s → 15s~~ **已落地**（`52eaa0b2`，随 `fix/reliability-small` 并入）：适配器以 `heartbeatInterval=15000` 建 WSClient。
 3. ~~`message_still_processing` 接进行内告警~~ **已落地（2026-11-21）**：进程内告警新增规则 `message_stuck`（含 messageId 与 principal/session，不含消息正文；冷却去重与双出口沿用既有）。
 4. 若要「消息不丢」作为硬指标：评估 **Webhook 模式**（平台自带最多 3 次重试，我方幂等底账可接住重投），需公网回调地址 + 签名校验 + AES 解密。

@@ -35,10 +35,18 @@ kill <pid> 结束它再重试，或改端口 / 换部署点（不同 dbPath 状�
 
 ## 4. 进程守护与无人值守
 
-**本机 live 部署已由 systemd user unit 守护**（2026-11-21 落地；unit 在 `~/.config/systemd/user/fshine-live.service`，不在仓库内，因为它是部署形态不是产品代码）：`WorkingDirectory=/home/tao/projects/fshine-agent-int`、`Environment=TMPDIR=/home/tao/.tmp`、`ExecStart=bash -lc 'exec npm start'`、`Restart=always`、`RestartSec=3`、日志 append 到 `/home/tao/.tmp/fshine-live-systemd.log`、`systemctl --user enable --now fshine-live.service` 已开机自启。
+**进程守护＝可重复安装件，仓库提供、部署方决定是否装**（owner 2026-11-21：不要做到这台机器上，但安装/卸载必须可重复）：`scripts/ops/fshine-systemd.sh`。
 
-- **重启演练已验**：`systemctl --user restart fshine-live` → 20 秒内 `Authenticated` + `server_started`，单实例锁正确释放并重取（`instance_guard_acquired` 两条）。
-- **它解决的是「进程不在=消息丢」**：实测停服 `12:02:15Z` → 重连 `12:03:43Z` 期间用户发的 2 条消息，重连后底账零新增、`aibot_msg_callback` 帧 0（平台不补投）——见 `docs/decisions/debt.md` §十一。有了 `Restart=always`，崩溃/重启的窗口从「小时级」压到「秒级」；窗口内仍可能丢，这是长连接模式的固有代价（销账条件=切 Webhook）。
+```
+scripts/ops/fshine-systemd.sh print                    # 只打印单元正文（CI 用它验形；不写文件）
+scripts/ops/fshine-systemd.sh install [--name N] [--dir REPO] [--log PATH]   # 写 ~/.config/systemd/user/N.service 并 enable --now
+scripts/ops/fshine-systemd.sh uninstall [--name N]     # stop + disable + 删单元 + daemon-reload
+```
+- **用户级单元**（`systemctl --user`）：不写 `/etc`、不用 root；`Restart=always`、`RestartSec=3`、日志 append 到 `<dir>/.runtime/server/service.log`（缺省）；显式给 `PATH`（systemd 极简 PATH 找不到 npm 是常见事故）。
+- **开机自启**需要一次性机器级设置：`sudo loginctl enable-linger $USER`（安装脚本只提示、不代做）。
+- **幂等**：install 覆盖同内容、uninstall 对未安装状态静默通过；重复执行结果一致。单实例锁仍生效（`apps/server/main.ts:53`），重复 install 不会起两个实例。
+- **本机现状（2026-11-21）**：**未安装**（owner 决定不上这台机器）；live 服务按老办法手动 `npm start` 起。
+- **它解决的是「进程不在=消息丢」**：实测停服 `12:02:15Z` → 重连 `12:03:43Z` 期间用户发的 2 条消息，重连后底账零新增、`aibot_msg_callback` 帧 0（平台不补投）——见 `docs/decisions/debt.md` §十一。装上 `Restart=always` 后，崩溃/重启的窗口从「小时级」压到「秒级」；窗口内仍可能丢，这是长连接模式的固有代价（销账条件=切 Webhook）。安装件的重启行为此前已在 `fshine-agent-int` 上演练过（20 秒内 `Authenticated` + `server_started`、实例锁正确重取）后按 owner 决定拆除。
 - **心跳 15s（已落地 `52eaa0b2`）**：适配器把官方 SDK 的 `heartbeatInterval` 从 30s 收紧到 15s（社区对「连接看似正常也偶发丢」的缓解；企微约 90s 无心跳断开）。连接层仍由 SDK 管（认证/重连/退避），宿主不重试、不告警（既有纪律）。
 - **仓内无人值守动作**只有 run 目录保留期清扫，且缺省关闭：`runtime.fileRetentionSweepOnStart`（缺省 `false`）在启动装配完成、渠道接消息前扫一次、无定时器（`apps/server/startup-sweep.ts:1-14`、`apps/server/main.ts:74-77`）；周期清理要部署侧自己调度 `npm run cleanup:runs`（`--dry-run` 只报不删，`scripts/cleanup-runs.ts:1-20`）。通知落盘逐条 append、无轮询无清扫，写失败只记未送达（`apps/server/notification-file-sink.ts:1-6`）。其余常驻面都是请求驱动——「服务在跑却什么都不发生」通常不是守护问题，按 §5 查档位与连接。
 
