@@ -75,6 +75,15 @@ fshine-agent 的定位（2026-11-12 第三版，2026-11-13 Minimal 细化）：*
 - **正则/词表只允许用于格式与泄漏类确定性检查**：内部术语（uuid / `task_` / `dispatchKey`）、服务器绝对路径、协议字段形状、凭据与敏感信息。这类检查必须能说出具体形状依据；判「意思」不算。
 - 新增任何文本锚点必须在用例里写清四件事：它想拦的失败形态、为什么①/②判不了、会误伤哪些正确措辞、以及负例绊线。缺一条不许加。
 
+## 回应流水线审查的铁律（2026-11-21，owner 定）
+
+> 由来：PR #75 接上流水线审查后，一轮 grok 审查给出 1 `blocking` + 3 `major`——blocking（宿主把"卡住的入站消息"谎称"还在办"）与两个 major（确认续跑指令与 `op_*` 面互斥、失败码取第一条）都在修复提交里落地；第四个 major（判据换形的覆盖缺口）按登记处理。断环通常在修复端：为过审改锚点、把无关缺陷说成同一主题再打补丁、或悄悄放宽判据。审查端提示词 `.github/prompts/pr-review.md`，修复端 `.github/prompts/review-fix.md`，workflow `.github/workflows/pr-review.yml`。
+
+1. **只修 `blocking`（= 修复端 P0/P1）。** `major` / `minor` / `nit` 留在审查评论里给人看，不为此开自动修复提交；业主在对话里点名要修的非 blocking 项，按业主要求做，不算自动跟审。
+2. **同一主题不打补丁。** 异步交错、竞态、过期响应、丢失更新这类 `blocking`：要么把状态机重做一次（整套 loading→ready、写排队、单一合并规则，并覆盖旧响应晚到/ready 前写/重叠写），要么在 PR 上留短评升级给人。禁止再加版本号/seq/generation 类计数器。同一主题的 `REQUEST_CHANGES` 计满 3 轮后，该主题只由人处理。
+3. **审查保持原样。** 有 `blocking` 就 `REQUEST_CHANGES` 并把检查标红，没有就 `COMMENT`，**不自动 APPROVE**。不得为少刷审查去改触发器、concurrency、`render-review.mjs` 的 `decideEvent` 或 `review-schema.json` 的严重级别映射。
+4. **修复端不得放松判据**：不许改断言、删守卫、放宽集合凑绿；同一族锚点补到第 3～4 次仍漏判，按「换判据形状」处理（机械事实 > 结构化提取 > 文本下限），不许继续补词表。
+
 ## 现状（2026-11-13 Minimal Reset 产品面收口；不要读成已完成）
 
 **Minimal Rewrite 已收口**：旧 Runtime hub（runtime/context/pi-coding-driver/serve-gate/plan-runtime/task-manager 及旧 app 接线）与旧 demo/试跑脚手架已按可达性删除，`minimal` 过渡命名已收口。仓库只保留产品面——运行＝`npm run ask`（一条消息 → 回复 + 机械证据，缺省仓内 dummy 执行层）与 `npm start`（渠道消息 → 回复）；测试＝`npm test`（vitest）；评测＝`npm run eval:user`（用户级黑盒入口，真实模型 + 仓内 dummy 夹具，与 `ask` 同源装配；确定性门＝typecheck + unit）。写/确认/取消/产物**已上产品面**：runner 存在时 Main 面注册 `task_cancel` / `task_resume` / `task_confirm`（`packages/agent/src/execution-runtime.ts:3133`）。**只有渠道入口（`npm start`）装配 runner**（`apps/server/server.ts:1149`）；`npm run ask` / `tasks --redo` 走 `assembleAskRuntime`，固定 `taskDispatch:'sync'` 且无 runner（`scripts/ask-runtime.ts:1092-1093`、`:1249-1250`），其 Main 面因此**不含**这三个工具（写确认回环的自动用例在 wecom-sim F 组 W-22～W-25，全绿）。防回潮守卫见 `packages/agent/transition-naming.test.ts`；收口记录见 `docs/decisions/index.md`（§十一、§十三、§十四、§十五 各一行，正文在 `docs/history/decision-log-part01-2026-11_undated.md`）。

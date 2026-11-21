@@ -18,7 +18,7 @@
 - `minor`：局部问题，有具体后果。
 - `nit`：命名、措辞、无行为影响的风格。
 
-给修复代理的口径（审查职责不变）：`blocking` 等于修复端的 P0/P1，只有它可以驱动自动修复提交。`major`、`minor`、`nit` 仍写入 `findings`，并且仍不得单独把 `verdict` 设成 `request_changes`。四个级别都要报告。修复端怎么处理见 `.github/prompts/codex-fix.md`，不在这次只读审查里执行。
+给修复代理的口径（审查职责不变）：`blocking` 等于修复端的 P0/P1，只有它可以驱动自动修复提交。`major`、`minor`、`nit` 仍写入 `findings`，并且仍不得单独把 `verdict` 设成 `request_changes`。四个级别都要报告。修复端怎么处理见 `.github/prompts/review-fix.md`，不在这次只读审查里执行。
 
 每条 `body` 说明后果，并指向 diff 里的具体位置。不要复述整个 diff，不要编造没看到的测试结果。
 
