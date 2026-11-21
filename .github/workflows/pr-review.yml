@@ -122,6 +122,10 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           PR_REVIEW_MODEL: ${{ vars.PR_REVIEW_MODEL || secrets.LLM_MODEL }}
           PR_REVIEW_EFFORT: ${{ vars.PR_REVIEW_EFFORT }}
+          # 推理模型会把输出额度先花在 reasoning 上（实测 finish_reason=length 且 content 空）：
+          # 放大输出额度、同时把提示词预算压到 40KB，给正文留空间。
+          PR_REVIEW_MAX_TOKENS: ${{ vars.PR_REVIEW_MAX_TOKENS || '32000' }}
+          PR_REVIEW_MAX_PROMPT_BYTES: '40000'
         run: |
           set -euo pipefail
           # 本 PR 历次审查 findings（打地鼠检查的历史依据）。拉取失败不阻塞审查——降级为无历史。
