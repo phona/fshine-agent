@@ -50,14 +50,11 @@ scripts/ops/fshine-systemd.sh uninstall [--name N]     # stop + disable + 删单
 - **心跳 15s（已落地 `52eaa0b2`）**：适配器把官方 SDK 的 `heartbeatInterval` 从 30s 收紧到 15s（社区对「连接看似正常也偶发丢」的缓解；企微约 90s 无心跳断开）。连接层仍由 SDK 管（认证/重连/退避），宿主不重试、不告警（既有纪律）。
 - **仓内无人值守动作**只有 run 目录保留期清扫，且缺省关闭：`runtime.fileRetentionSweepOnStart`（缺省 `false`）在启动装配完成、渠道接消息前扫一次、无定时器（`apps/server/startup-sweep.ts:1-14`、`apps/server/main.ts:74-77`）；周期清理要部署侧自己调度 `npm run cleanup:runs`（`--dry-run` 只报不删，`scripts/cleanup-runs.ts:1-20`）。通知落盘逐条 append、无轮询无清扫，写失败只记未送达（`apps/server/notification-file-sink.ts:1-6`）。其余常驻面都是请求驱动——「服务在跑却什么都不发生」通常不是守护问题，按 §5 查档位与连接。
 
-**PR 审查流水线（grok，2026-11-21）**：`.github/workflows/pr-review.yml` 在 `pull_request` 上跑，审查器 = `.github/codex/llm-review.mjs`（OpenAI 兼容端点）+ 既有 `.github/prompts/pr-review.md` 与 `.github/codex/review-schema.json` + `render-review.mjs`（schema 校验 → 发 review）。有 `blocking` 才 `REQUEST_CHANGES`，否则 `COMMENT`，**永不 APPROVE**；fork PR 显式拒；审查步骤先 `unset GITHUB_TOKEN GH_TOKEN` 再调模型；密钥不进日志。Codex 路径已删除（订阅停用、`CODEX_AUTH_JSON` 过期，git 历史可考）。
+**PR 审查流水线（grok，2026-11-21）**：`.github/workflows/grok-pr-review.yml` 在 `pull_request` 上跑（Grok Build CLI 只读审查；机制与提示词从 bontop-design-log 整机移植）。链路 = `.github/grok/build-prompt.mjs`（含 Linked issues 上下文）→ `grok --prompt-file --json-schema --output-format plain --permission-mode plan` → `.github/grok/extract-review.mjs`（从 JSON 信封抽 `structuredOutput`；失败重试一次）→ `render-review.mjs`（schema 校验 → 发 review）。有 `blocking` 才 `REQUEST_CHANGES`，否则 `COMMENT`，**永不 APPROVE**；fork PR 显式拒；审查步骤先 `unset GITHUB_TOKEN GH_TOKEN` 再调模型；auth.json 不进日志。检查名 `Grok PR review / grok-pr-review`。
 
-- **开关**：仓库变量 `PR_REVIEW_ENABLED=true` 才跑。**当前未启用**（没装 runner、也没有云端 key）——check 不会出现，不会排队、不会永远红。
-- **依赖**：secret `LLM_API_KEY`；vars `LLM_API_BASE_URL`、`PR_REVIEW_MODEL`（缺省 `grok/grok-4.7`）、`PR_REVIEW_EFFORT`（可选）、`PR_REVIEW_RUNNER`（可选）。
-- **两种跑法**：
-  1. **自托管 runner**（模型在局域网端点）：`runs-on` 默认 `["self-hosted","fshine"]`；在能访问该端点的机器上装 GitHub self-hosted runner 并打 `fshine` 标签（安装步骤见 GitHub 文档「self-hosted runners」；本仓不代装）。
-  2. **云端端点**（如 xAI `https://api.x.ai/v1` + API key）：把 `PR_REVIEW_RUNNER` 设为 `["ubuntu-latest"]`，`LLM_API_BASE_URL=https://api.x.ai/v1`、`LLM_API_KEY=<API key>`——**不需要 runner**。
-- **纪律**：审查只读；不改分支保护（required check 由业主配）；`blocking` = 修复端 P0/P1，`major/minor/nit` 只报告。
+- **依赖**：secret `GROK_AUTH_JSON`（`grok login` 得到的 OAuth auth.json——**OAuth，不是 API key**；生成与更新步骤见 `.github/grok/README.md`）；可选 vars `GROK_MODEL`、`GROK_EFFORT`、`GROK_REVIEW_ISSUES`。
+- **无开关**：secret 就绪即每 push 跑；secret 未设置时 job loud-fail（不静默、不发假审查）。OAuth access token 约 6 小时、CLI 自动用 refresh token 续；被换过之后需重新 `grok login` 再覆盖 secret（README 同节）。同一份 auth.json 不要并行用——workflow 已用 concurrency 串行。
+- **纪律**：审查只读；不改分支保护（required check 由业主配）；`blocking` = 修复端 P0/P1，`major/minor/nit` 只报告；修复端政策见 `.github/prompts/grok-fix.md` 与 AGENTS.md「回应 Grok 审查的铁律」。
 
 ## 5. 排障 runbook
 

@@ -1,15 +1,15 @@
-# 回应流水线审查（修复端）
+# 回应 Grok 审查（修复端）
 
-编码代理在为流水线审查改代码之前先读完本文件。审查端提示词是 `.github/prompts/pr-review.md`；审查 workflow 是 `.github/workflows/pr-review.yml`（模型经 `.github/codex/llm-review.mjs` 调 OpenAI 兼容端点，默认 `grok/grok-4.7`）。本文件只约束修复端。
+编码代理在为 Grok 审查改代码之前先读完本文件。审查端提示词是 `.github/prompts/pr-review.md`。审查 workflow 是 `.github/workflows/grok-pr-review.yml`（Grok Build CLI，身份是 `GROK_AUTH_JSON` 里的 OAuth 登录）。本文件只约束修复端。
 
-审查继续跑。有 `blocking` 时它发 `REQUEST_CHANGES` 并把检查标红；没有 `blocking` 时它发 `COMMENT`，不自动 `APPROVE`。不要关闭、跳过、放软这个 job，也不要改 `.github/codex/render-review.mjs` 的 `decideEvent` 或 `review-schema.json` 的严重级别映射。eval 相关：先读 PR 上最新 eval-real 评论；用例 pass→fail 或通过数下降 = 机械回归 = `blocking`；LLM judge 不在入口内消费，无 advisory 分数面可引。
+Grok 继续跑。有 `blocking` 时它发 `REQUEST_CHANGES` 并把检查标红；没有 `blocking` 时它发 `COMMENT`，不自动 `APPROVE`。不要关闭、跳过、放软这个 job，也不要改 `.github/grok/render-review.mjs` 的 `decideEvent` 或 `review-schema.json` 的严重级别映射。eval 相关：先读 PR 上最新 eval-real 评论；用例 pass→fail 或通过数下降 = 机械回归 = `blocking`；LLM judge 不在入口内消费，无 advisory 分数面可引。
 
 ## 开工前
 
-1. 读最新一条审查正文，按 `severity` 拆开。
+1. 读最新一条 Grok review 正文，按 `severity` 拆开。
 2. 列出 `major` / `minor` / `nit` 的标题。这些留在评论里，不为此开修复提交。修复说明里写上「本次未改」和标题，避免看起来像漏看；若审查把某条标成"登记即可"，就按登记处理并把登记位置写进提交信息。
 3. 每条 `blocking` 写明主题：模块或状态机，加上失败类（正确性、安全、静默删证据、异步交错/竞态/过期响应，或其他）。
-4. 用 `gh pr view <N> --json reviews,commits` 数这个主题上已经有几次 `CHANGES_REQUESTED`。正在回应的这一次算进去。
+4. 用 `gh pr view <N> --json reviews,commits` 数这个主题上已经有几次 Grok `CHANGES_REQUESTED`。正在回应的这一次算进去。
 5. 先写下决定：修这个 `blocking`、重做一次状态机，或升级给人。决定写下来再改代码。
 
 业主在对话里点名要修的 `major` / `minor` / `nit`，按业主的要求做。那不是自动跟审。
@@ -36,6 +36,8 @@
 
 这类主题禁止再加计数器或局部补丁。反例是同一处草稿 load/save 状态机：一路加版本号字段（首版 `seq` → 按包复制的 `seqByPkg` → `version` → `editVersion` → `lastServer`），中间还有一次自称「结构性根治」的改动，八审到十六审仍是旧响应和合并缺口。换字段名、按调用方复制一份计数器、多一道「版本对不上就 return」，都是局部补丁。
 
+第一次遇到这类 `blocking` 就走重做或升级。计数器不是合格的开局修复。重做提交里的实现错误（队列没有刷出、ready 判错）可以在同一次回应里修完。下一轮审查若仍是同一主题的交错洞，改为升级，不再加门闩。
+
 只许二选一：
 
 1. **重做一次状态机。** 整个 PR 对这个主题只许一次。重做后的状态机要同时满足：
@@ -44,8 +46,30 @@
    - 服务端数据与本地编辑只有一条合并规则。
    - 修复本身不是新的版本号 / 序号 / generation 一类计数器。
    - 测试覆盖：更新的加载完成之后旧响应才到达、ready 之前发出的保存、同一条状态上重叠的保存。
-2. **升级给人。** 停止改这个主题的代码，在 PR 上留一条短评：接受的已知风险、如何验证、下一步建议；之后不再为该主题提交，即使轮次还没到 3。轮次预算是上限，不是要打满的配额。
+2. **升级给人。** 停止改这个主题的代码，在 PR 上留一条短评（模板见下）；之后不再为该主题提交，即使轮次还没到 3。轮次预算是上限，不是要打满的配额。
 
-## 同一主题的轮次上限
+## 轮次预算
 
-同一主题的 `REQUEST_CHANGES` 计满 3 轮之后，该主题只由人处理；代理不再为它提交。计数证据来自 PR review 列表（`CHANGES_REQUESTED` 的条数与主题归属），不需要另建台账。
+同一主题最多自动回应 **3** 次 Grok `REQUEST_CHANGES`（业主口径是大约 3 轮；本玩法按 3 执行）。正在回应的这一次计入。
+
+- 第 1–3 次：若还没有重做过，可以做那一次重做；否则升级。两条路都不加计数器，也不再提交局部补丁。
+- 第 4 次起：该主题只由人处理。只留升级评论，不推修复提交。
+
+轮次按 Grok review 事件计，不按代理提交计。一次审查里的多条同一主题 `blocking` 算一轮。
+
+## 升级评论
+
+用 PR 评论发出去（`gh pr comment <N> --body-file ...`），不要只写在对话里。
+
+```
+## Grok 同主题停止自动修复
+
+主题：<模块或状态机，例如验收草稿 load/save>
+轮次：本 PR 上该主题的 Grok REQUEST_CHANGES 已有 <N> 轮（含本次）。审查：<review id 或时间>
+决定：不再自动改这个主题。
+已知风险：<引用这次 blocking 的标题和后果>
+如何验证：<人可以执行的检查>
+请业主决定：重做状态机，或接受该风险后再合并。
+```
+
+评论里写明代理不会为这个主题再推修复提交。不要用空提交、不要改 workflow、不要把检查从失败改成通过，来结束这个循环。

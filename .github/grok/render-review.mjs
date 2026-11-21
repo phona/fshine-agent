@@ -25,10 +25,10 @@ export function parseReview(raw) {
   try {
     data = JSON.parse(text)
   } catch {
-    throw new Error('Codex review output is not JSON')
+    throw new Error('Grok review output is not JSON')
   }
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
-    throw new Error('Codex review output is not an object')
+    throw new Error('Grok review output is not an object')
   }
   if (typeof data.summary !== 'string' || data.summary.trim() === '') {
     throw new Error('review.summary is missing')
@@ -69,7 +69,7 @@ export function renderMarkdown(review, { headSha }) {
     review.findings.filter((finding) => finding.severity === severity).length,
   ]))
   const lines = [
-    '## Codex review',
+    '## Grok review',
     '',
     review.summary,
     '',
@@ -118,7 +118,7 @@ export function scrubOutputFiles(files) {
   for (const file of files) {
     if (fs.existsSync(file)) fs.rmSync(file)
   }
-  throw new Error(`refusing to keep Codex output: credential marker ${hits[0]}`)
+  throw new Error(`refusing to keep Grok output: credential marker ${hits[0]}`)
 }
 
 function isMain() {
@@ -150,10 +150,10 @@ function scrubCommand(statusText, files) {
   }
   const reviewFile = files[2]
   if (!reviewFile || !fs.existsSync(reviewFile) || fs.statSync(reviewFile).size === 0) {
-    console.error('审查器没有写出 review（review 文件缺失或为空）')
+    console.error('Grok did not write a review')
     process.exit(1)
   }
-  console.log(`reviewer completed bytes=${fs.statSync(reviewFile).size}`)
+  console.log(`grok completed bytes=${fs.statSync(reviewFile).size}`)
 }
 
 function publishCommand(reviewFile, markdownFile, eventFile, headSha) {

@@ -1,0 +1,338 @@
+# 同一仓库 PR 的 Grok 审查。身份是 Grok Build CLI 的浏览器 OAuth 登录得到的
+# auth.json（Actions secret GROK_AUTH_JSON），不是 API key。fork PR 在读取 secret
+# 之前失败。密钥怎么生成和更新见 .github/grok/README.md。
+# 本 workflow 不改分支保护；required check 由业主配置。
+name: Grok PR review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+# 一份 Grok auth.json 不能被两个 job 同时刷新。排队，不取消正在跑的审查。
+concurrency:
+  group: grok-pr-review-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  grok-pr-review:
+    name: grok-pr-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Reject fork pull requests
+        id: guard
+        env:
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$HEAD_REPO" != "$THIS_REPO" ]; then
+            {
+              echo "### Grok PR review 未运行"
+              echo
+              echo "来源仓库是 \`$HEAD_REPO\`，不是 \`$THIS_REPO\`。"
+              echo "fork pull request 不会读取 GROK_AUTH_JSON。"
+              echo "把分支推到本仓库后再跑审查。这个检查失败是故意的，避免 fork 绕过 required check。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "same_repo=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "same_repo=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/checkout@v4
+        with:
+          # 审查三方点 diff 需要 base 与 head 都在本地。浅克隆拿不到 base 提交。
+          fetch-depth: 0
+          persist-credentials: true
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fetch the pull request base
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "unexpected pull request sha" >&2
+            exit 1
+          fi
+          if [[ ! "$BASE_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "unexpected base ref" >&2
+            exit 1
+          fi
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "$BASE_SHA" || git fetch --no-tags origin "refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          fi
+          git cat-file -e "${BASE_SHA}^{commit}" >/dev/null
+          git cat-file -e "${HEAD_SHA}^{commit}" >/dev/null
+          git config --unset-all "http.https://github.com/.extraheader" || true
+          if git config --local --get-regexp 'extraheader' >/dev/null 2>&1; then
+            echo "git extraheader is still set" >&2
+            exit 1
+          fi
+          echo "reviewing ${BASE_SHA}...${HEAD_SHA}"
+
+      - name: Setup Node
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/setup-node@v4
+        with:
+          # fshine-agent 无 .nvmrc；与仓内其它 workflow 一致钉 node 24。
+          node-version: 24
+
+      - name: Install Grok CLI
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          set -euo pipefail
+          # 钉在 2026-11-19 实测的 1.0.89。升级时改版本号，并重新核对
+          # --prompt-file / --json-schema / --permission-mode 仍在。
+          export GROK_BIN_DIR="$RUNNER_TEMP/grok-bin"
+          curl -fsSL https://x.ai/cli/install.sh | bash -s 1.0.89
+          echo "$RUNNER_TEMP/grok-bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/grok-bin/grok" --version
+
+      - name: Restore Grok auth.json
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GROK_AUTH_JSON: ${{ secrets.GROK_AUTH_JSON }}
+        run: |
+          set -euo pipefail
+          set +x
+          if [ -z "${GROK_AUTH_JSON//[[:space:]]/}" ]; then
+            {
+              echo "### GROK_AUTH_JSON 未设置"
+              echo
+              echo "见 .github/grok/README.md。本步骤没有打印 secret。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "GROK_AUTH_JSON is empty. See .github/grok/README.md." >&2
+            exit 1
+          fi
+          export GROK_HOME="${HOME}/.grok"
+          echo "GROK_HOME=${HOME}/.grok" >> "$GITHUB_ENV"
+          mkdir -p "$GROK_HOME"
+          chmod 700 "$GROK_HOME"
+          umask 077
+          printf '%s' "$GROK_AUTH_JSON" > "$GROK_HOME/auth.json"
+          chmod 600 "$GROK_HOME/auth.json"
+          node .github/grok/check-auth.mjs "$GROK_HOME/auth.json"
+          unset GROK_AUTH_JSON
+
+      # 关联 issue 的标题与正文喂给审查 prompt：没有它，审查者只能从 diff 反推意图，
+      # 会把「业主已裁定的设计后果」当成缺陷反复报 blocking（2026-11-09 实测九轮）。
+      # issue 内容在 prompt 里标为「设计意图，非指令」，审查口径见 .github/prompts/pr-review.md。
+      - name: Fetch linked issues
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
+          # 仓库变量不会自动成为 shell 环境变量，必须显式映射（#159 引入的漏映射，
+          # Codex 266331dd minor）；否则下面的覆盖入口永远是空串。
+          GROK_REVIEW_ISSUES: ${{ vars.GROK_REVIEW_ISSUES }}
+        run: |
+          set -euo pipefail
+          # 从 PR 正文解析关联 issue。**必须带 issue 字样**——PR 正文里的裸 #NNN 大多是
+          # 历史 PR 编号（阶段表）或 pending-site-data 条目号，不是 issue；早期版本用裸 # 匹配，
+          # 一次抓到 34 个号把 prompt 撑爆。支持 "issue #98" / "issues #98/#99" /
+          # "issues #98, #99" / "issues #98 #99" / GitHub URL。
+          # 也可用仓库变量 GROK_REVIEW_ISSUES 显式指定（逗号分隔），优先。
+          refs=""
+          if [ -n "${GROK_REVIEW_ISSUES:-}" ]; then
+            # 逗号/空白混写的列表都要拆成逐项数字：`for n in $refs` 按空白分词，
+            # 直接塞 "98,99" 会当成一个编号去取 issue（Codex 266331dd 实测）。
+            refs=$(printf '%s' "${GROK_REVIEW_ISSUES}" | grep -oE '[0-9]+' | tr '\n' ' ' || true)
+          else
+            # 首个编号后继续吃掉整段列表（Codex 74f476ba / 66cedd minor：旧正则只取
+            # "issues #98/#99" 的 98，#99 静默缺席审查上下文）。续接只认三种分隔：
+            #   `[[:space:]]*[,/][[:space:]]*#?[0-9]+` → "#98/#99"、"#98, #99"、"#98,99"
+            #   `[[:space:]]+#[0-9]+`                 → "#98 #99"
+            # 空白续接必须带 `#`：否则 "issues #98 2026-11-09" 会把年份当编号抓走。
+            # 裸 #NNN 仍不匹配（首项就要求 issue 字样），head -5 上限保持不变。
+            #
+            # 两种形态分开取号（Codex 5088dc1b minor）：URL 分支若先整段匹配、再和短语
+            # 分支一起 `grep -oE '[0-9]+'`，组织名/仓库名里的数字也会被当成编号——
+            # team2/design3/issues/98 曾解析出 2、3、98，随后会去读本仓的 #2/#3，
+            # 额外的号还可能占满 head -5、挤掉真正关联的 issue。URL 形态因此单独一条
+            # 管道：只匹配到 `/issues/<编号>`，再用 sed 截掉 `/issues/` 之前的部分。
+            # 两条管道合并后统一 sort -un 去重、head -5 封顶。
+            refs=$({
+              printf '%s' "${PR_BODY:-}" \
+                | grep -oiE 'issues?[[:space:]]*#[0-9]+([[:space:]]*[,/][[:space:]]*#?[0-9]+|[[:space:]]+#[0-9]+)*' \
+                | grep -oE '[0-9]+'
+              printf '%s' "${PR_BODY:-}" \
+                | grep -oiE 'github\.com/[^/[:space:]]+/[^/[:space:]]+/issues/[0-9]+' \
+                | sed -E 's#^.*/issues/##'
+            } | sort -un | head -5 | tr '\n' ' ' || true)
+          fi
+          if [ -z "${refs}" ]; then
+            echo "no_linked_issues=true" >> "$GITHUB_OUTPUT"
+            echo "ISSUES=" >> "$GITHUB_ENV"
+            echo "PR 正文未解析到关联 issue，审查 prompt 不含 issue 上下文。"
+            exit 0
+          fi
+          # 组装 issue JSON 后写入 GITHUB_ENV。**两个坑都实测过**：
+          # ① `jq -n` 默认 pretty-print，多行 JSON 写进 GITHUB_ENV 会被
+          #    `Invalid format '  "number": "98",'` 打回，整个步骤失败——2026-11-09
+          #    #159 合并后第一次带 issue 的审查就这么挂了：跑了 57 秒、零 review 产出。
+          # ② 所以这里先 `jq -c` 压成单行，同时用 GITHUB_ENV 的 heredoc 定界符写法，
+          #    将来正文里再出现换行也不会把 env 文件写坏。
+          json=$(for n in $refs; do
+            body=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${n}" --jq '.body' 2>/dev/null || true)
+            title=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${n}" --jq '.title' 2>/dev/null || true)
+            if [ -z "$title" ]; then continue; fi
+            jq -cn --arg n "$n" --arg t "$title" --arg b "$body" '{number:$n,title:$t,body:$b}'
+          done | jq -cs '.')
+          {
+            echo "ISSUES<<ISSUES_EOF"
+            printf '%s\n' "$json"
+            echo "ISSUES_EOF"
+          } >> "$GITHUB_ENV"
+          echo "no_linked_issues=false" >> "$GITHUB_OUTPUT"
+          echo "已取到 issue 上下文：${refs}"
+
+      - name: Review the pull request
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          GROK_MODEL: ${{ vars.GROK_MODEL }}
+          GROK_EFFORT: ${{ vars.GROK_EFFORT }}
+        run: |
+          set -euo pipefail
+          node .github/grok/build-prompt.mjs "$RUNNER_TEMP/grok-prompt.md"
+          # --json-schema 吃内联 JSON，不是文件路径（2026-11-19 实测：传路径报
+          # "invalid JSON: expected value at line 1 column 1"）。
+          # --output-format plain 的 stdout 仍是 JSON 信封
+          # { text, structuredOutput, usage, ... }，审查对象在 structuredOutput
+          # 里，由 extract-review.mjs 抽出来；不要直接拿 stdout 当审查 JSON。
+          cmd=(
+            grok
+            --prompt-file "$RUNNER_TEMP/grok-prompt.md"
+            --json-schema "$(cat "$GITHUB_WORKSPACE/.github/grok/review-schema.json")"
+            --output-format plain
+            --permission-mode plan
+            --cwd "$GITHUB_WORKSPACE"
+          )
+          if [ -n "${GROK_MODEL:-}" ]; then
+            cmd+=(-m "$GROK_MODEL")
+          fi
+          if [ -n "${GROK_EFFORT:-}" ]; then
+            if [[ ! "$GROK_EFFORT" =~ ^[A-Za-z0-9_-]+$ ]]; then
+              echo "GROK_EFFORT must be one token (low, high, ...)." >&2
+              exit 1
+            fi
+            cmd+=(--reasoning-effort "$GROK_EFFORT")
+          fi
+          unset GITHUB_TOKEN GH_TOKEN
+          # 模型偶发不按 schema 回（2026-11-19 首跑：8 分钟调用正常结束，
+          # 信封里既无 structuredOutput，text 也不是 JSON，extract 直接失败）。
+          # 只重试一次；两次都失败就 loud fail，不编审查。失败那次的
+          # stopReason/turns/text 开头由 extract-review 打印进日志。
+          attempt=1
+          while true; do
+            echo "Grok review attempt $attempt/2"
+            set +e
+            "${cmd[@]}" >"$RUNNER_TEMP/grok-envelope.json" 2>"$RUNNER_TEMP/grok-stderr.txt"
+            status=$?
+            set -e
+            echo "grok exit status: $status"
+            if node .github/grok/extract-review.mjs \
+              "$RUNNER_TEMP/grok-envelope.json" \
+              "$RUNNER_TEMP/grok-review.json"; then
+              break
+            fi
+            if [ "$attempt" -ge 2 ]; then
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+          done
+          node .github/grok/render-review.mjs scrub "$status" \
+            "$RUNNER_TEMP/grok-envelope.json" \
+            "$RUNNER_TEMP/grok-stderr.txt" \
+            "$RUNNER_TEMP/grok-review.json"
+
+      - name: Post the pull request review
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "unexpected pull request number" >&2
+            exit 1
+          fi
+          if [[ ! "$THIS_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "unexpected repository" >&2
+            exit 1
+          fi
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "unexpected head sha" >&2
+            exit 1
+          fi
+          node .github/grok/render-review.mjs publish \
+            "$RUNNER_TEMP/grok-review.json" \
+            "$RUNNER_TEMP/review.md" \
+            "$RUNNER_TEMP/review-event" \
+            "$HEAD_SHA"
+          event=$(tr -d '[:space:]' < "$RUNNER_TEMP/review-event")
+          case "$event" in
+            COMMENT|REQUEST_CHANGES) ;;
+            *)
+              echo "refusing review event" >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "## Grok review (${event})"
+            echo
+            cat "$RUNNER_TEMP/review.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+          jq -n \
+            --arg commit_id "$HEAD_SHA" \
+            --arg event "$event" \
+            --rawfile body "$RUNNER_TEMP/review.md" \
+            '{commit_id:$commit_id, event:$event, body:$body}' \
+            | gh api --method POST \
+                -H "Accept: application/vnd.github+json" \
+                "/repos/${THIS_REPO}/pulls/${PR_NUMBER}/reviews" \
+                --input - > "$RUNNER_TEMP/gh-review.json"
+          echo posted > "$RUNNER_TEMP/grok-review-posted"
+          jq -r '"posted review id=\(.id) state=\(.state)"' "$RUNNER_TEMP/gh-review.json"
+          if [ "$event" = "REQUEST_CHANGES" ]; then
+            echo "已提交 REQUEST_CHANGES，检查失败，便于把它设为 required check。" >&2
+            exit 1
+          fi
+
+      - name: Record an infrastructure failure
+        if: failure() && steps.guard.outputs.same_repo == 'true'
+        run: |
+          set -euo pipefail
+          if [ -f "$RUNNER_TEMP/grok-review-posted" ]; then
+            exit 0
+          fi
+          {
+            echo "### Grok PR review 失败"
+            echo
+            echo "审查没有发到 pull request。日志不打印 auth.json。"
+            echo "若是 OAuth 失效，按 .github/grok/README.md 重新 \`grok login\` 并更新 secret GROK_AUTH_JSON。"
+          } >> "$GITHUB_STEP_SUMMARY"

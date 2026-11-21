@@ -75,9 +75,9 @@ fshine-agent 的定位（2026-11-12 第三版，2026-11-13 Minimal 细化）：*
 - **正则/词表只允许用于格式与泄漏类确定性检查**：内部术语（uuid / `task_` / `dispatchKey`）、服务器绝对路径、协议字段形状、凭据与敏感信息。这类检查必须能说出具体形状依据；判「意思」不算。
 - 新增任何文本锚点必须在用例里写清四件事：它想拦的失败形态、为什么①/②判不了、会误伤哪些正确措辞、以及负例绊线。缺一条不许加。
 
-## 回应流水线审查的铁律（2026-11-21，owner 定）
+## 回应 Grok 审查的铁律（2026-11-21，owner 定）
 
-> 由来：PR #75 接上流水线审查后，一轮 grok 审查给出 1 `blocking` + 3 `major`——blocking（宿主把"卡住的入站消息"谎称"还在办"）与两个 major（确认续跑指令与 `op_*` 面互斥、失败码取第一条）都在修复提交里落地；第四个 major（判据换形的覆盖缺口）按登记处理。断环通常在修复端：为过审改锚点、把无关缺陷说成同一主题再打补丁、或悄悄放宽判据。审查端提示词 `.github/prompts/pr-review.md`，修复端 `.github/prompts/review-fix.md`，workflow `.github/workflows/pr-review.yml`。
+> 由来：PR #75 接上流水线审查后，一轮 grok 审查给出 1 `blocking` + 3 `major`——blocking（宿主把"卡住的入站消息"谎称"还在办"）与两个 major（确认续跑指令与 `op_*` 面互斥、失败码取第一条）都在修复提交里落地；第四个 major（判据换形的覆盖缺口）按登记处理。断环通常在修复端：为过审改锚点、把无关缺陷说成同一主题再打补丁、或悄悄放宽判据。审查端提示词 `.github/prompts/pr-review.md`，修复端 `.github/prompts/grok-fix.md`，审查机制 `.github/workflows/grok-pr-review.yml` + `.github/grok/`（Grok Build CLI，身份是 secret `GROK_AUTH_JSON` 的 OAuth 登录，不走 API key；2026-11-21 从 bontop-design-log 整机移植，Codex 订阅停用）。
 
 1. **只修 `blocking`（= 修复端 P0/P1）。** `major` / `minor` / `nit` 留在审查评论里给人看，不为此开自动修复提交；业主在对话里点名要修的非 blocking 项，按业主要求做，不算自动跟审。
 2. **同一主题不打补丁。** 异步交错、竞态、过期响应、丢失更新这类 `blocking`：要么把状态机重做一次（整套 loading→ready、写排队、单一合并规则，并覆盖旧响应晚到/ready 前写/重叠写），要么在 PR 上留短评升级给人。禁止再加版本号/seq/generation 类计数器。同一主题的 `REQUEST_CHANGES` 计满 3 轮后，该主题只由人处理。

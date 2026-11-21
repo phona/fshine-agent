@@ -70,7 +70,7 @@ test('credential-shaped output is refused and deleted', () => {
   const jwt = `eyJ${'a'.repeat(24)}.${'b'.repeat(16)}`
   assert.equal(findCredentialMarker('讨论 refresh_token 这个字段名'), null)
   assert.equal(findCredentialMarker(jwt), 'jwt')
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-review-'))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grok-review-'))
   const file = path.join(dir, 'review.json')
   fs.writeFileSync(file, JSON.stringify({ summary: jwt }))
   assert.throws(() => scrubOutputFiles([file]), (error) => {
