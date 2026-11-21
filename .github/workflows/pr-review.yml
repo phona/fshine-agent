@@ -143,7 +143,7 @@ jobs:
           PRIOR_REVIEWS_FILE="$RUNNER_TEMP/prior-reviews.json" node .github/codex/build-prompt.mjs "$RUNNER_TEMP/review-prompt.md"
           unset GITHUB_TOKEN GH_TOKEN
           set +e
-          node .github/codex/llm-review.mjs "$RUNNER_TEMP/review-prompt.md" "$RUNNER_TEMP/review-stdout.txt" "$RUNNER_TEMP/review-stderr.txt"
+          node .github/codex/llm-review.mjs "$RUNNER_TEMP/review-prompt.md" "$RUNNER_TEMP/review.json" "$RUNNER_TEMP/review-stderr.txt"
           status=$?
           set -e
           # 失败原因必须显形（stderr 只有状态码/端点错误/空内容诊断，不含密钥）。
@@ -151,8 +151,10 @@ jobs:
             echo "llm-review exit=$status"
             sed -n '1,20p' "$RUNNER_TEMP/review-stderr.txt" || true
           fi
+          # 接线：llm-review 把模型回答写到 review.json（旧 Codex CLI 是它自己 -o 写这个文件），
+          # scrub 校验的就是它；失败路径的 stderr 由 scrub 转显。
           node .github/codex/render-review.mjs scrub "$status" \
-            "$RUNNER_TEMP/review-stdout.txt" \
+            "$RUNNER_TEMP/review.json" \
             "$RUNNER_TEMP/review-stderr.txt" \
             "$RUNNER_TEMP/review.json"
 

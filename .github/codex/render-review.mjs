@@ -150,10 +150,10 @@ function scrubCommand(statusText, files) {
   }
   const reviewFile = files[2]
   if (!reviewFile || !fs.existsSync(reviewFile) || fs.statSync(reviewFile).size === 0) {
-    console.error('Codex did not write a review')
+    console.error('审查器没有写出 review（review 文件缺失或为空）')
     process.exit(1)
   }
-  console.log(`codex exec completed bytes=${fs.statSync(reviewFile).size}`)
+  console.log(`reviewer completed bytes=${fs.statSync(reviewFile).size}`)
 }
 
 function publishCommand(reviewFile, markdownFile, eventFile, headSha) {
