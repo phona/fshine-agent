@@ -1,16 +1,23 @@
-# 同一仓库 PR 的 Codex 审查。身份是 ChatGPT OAuth 的 auth.json（Actions secret CODEX_AUTH_JSON），
-# 不是 API key。fork PR 在读取 secret 之前失败。密钥怎么生成和更新见 .github/codex/README.md。
+# 同一仓库 PR 的流水线审查（2026-11-21：Codex 订阅停用，改本地 OpenAI 兼容端点的 grok）。
+#
+# 为什么必须 self-hosted：审查模型在局域网端点（如 http://192.168.100.1:3425/v1），
+# GitHub 托管 runner 访问不到。runner 装在能访问该端点的机器上（安装/卸载件见
+# docs/ops/README.md §4「PR 审查流水线」）。
+#
+# 开关：仓库变量 PR_REVIEW_ENABLED=true 才跑（没装 runner 时保持关闭，避免 job 无限排队）。
+# 依赖：secret LLM_API_KEY；vars LLM_API_BASE_URL、PR_REVIEW_MODEL（缺省 grok/grok-4.7）。
+# 审查口径与输出 schema 复用 .github/prompts/pr-review.md 与 .github/codex/review-schema.json。
 # 本 workflow 不改分支保护；required check 由业主配置。
-name: Codex PR review
+name: PR review (grok)
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
     branches: [main]
 
-# 一份 ChatGPT auth.json 不能被两个 job 同时刷新。排队，不取消正在跑的审查。
+# 同一仓库的审查串行（幂等；不取消正在跑的审查）。
 concurrency:
-  group: codex-pr-review-${{ github.repository }}
+  group: pr-review-${{ github.repository }}
   cancel-in-progress: false
 
 permissions:
@@ -22,9 +29,13 @@ defaults:
     shell: bash
 
 jobs:
-  codex-pr-review:
-    name: codex-pr-review
-    runs-on: ubuntu-latest
+  pr-review:
+    name: pr-review
+    # 未安装 self-hosted runner / 未启用时保持关闭：既不让 check 红，也不让 job 排队。
+    if: vars.PR_REVIEW_ENABLED == 'true'
+    # runner 可切换：默认 self-hosted（模型在局域网端点）；若改用云端端点（如 api.x.ai + API key），
+    # 把仓库变量 PR_REVIEW_RUNNER 设为 ["ubuntu-latest"] 即可，无需自托管。
+    runs-on: ${{ fromJSON(vars.PR_REVIEW_RUNNER || '["self-hosted","fshine"]') }}
     timeout-minutes: 25
     steps:
       - name: Reject fork pull requests
@@ -36,11 +47,11 @@ jobs:
           set -euo pipefail
           if [ "$HEAD_REPO" != "$THIS_REPO" ]; then
             {
-              echo "### Codex PR review 未运行"
+              echo "### PR review 未运行"
               echo
               echo "来源仓库是 \`$HEAD_REPO\`，不是 \`$THIS_REPO\`。"
-              echo "fork pull request 不会读取 CODEX_AUTH_JSON。"
-              echo "把分支推到本仓库后再跑审查。这个检查失败是故意的，避免 fork 绕过 required check。"
+              echo "fork pull request 不读取仓库 secret。把分支推到本仓库后再跑审查。"
+              echo "这个检查失败是故意的，避免 fork 绕过 required check。"
             } >> "$GITHUB_STEP_SUMMARY"
             echo "same_repo=false" >> "$GITHUB_OUTPUT"
             exit 1
@@ -90,42 +101,6 @@ jobs:
         with:
           node-version: 24
 
-      - name: Install Codex CLI
-        if: success() && github.event.pull_request.head.repo.full_name == github.repository
-        run: |
-          set -euo pipefail
-          # 2026-11-03 npm latest。升级后确认 -a/-s 仍要写在 exec 前面。
-          npm install --global @openai/codex@0.166.0
-          codex --version
-
-      - name: Restore ChatGPT auth.json
-        if: success() && github.event.pull_request.head.repo.full_name == github.repository
-        env:
-          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
-        run: |
-          set -euo pipefail
-          set +x
-          if [ -z "${CODEX_AUTH_JSON//[[:space:]]/}" ]; then
-            {
-              echo "### CODEX_AUTH_JSON 未设置"
-              echo
-              echo "见 .github/codex/README.md。本步骤没有打印 secret。"
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "CODEX_AUTH_JSON is empty. See .github/codex/README.md." >&2
-            exit 1
-          fi
-          export CODEX_HOME="${HOME}/.codex"
-          echo "CODEX_HOME=${HOME}/.codex" >> "$GITHUB_ENV"
-          mkdir -p "$CODEX_HOME"
-          chmod 700 "$CODEX_HOME"
-          umask 077
-          printf '%s' "$CODEX_AUTH_JSON" > "$CODEX_HOME/auth.json"
-          chmod 600 "$CODEX_HOME/auth.json"
-          printf '%s\n' 'cli_auth_credentials_store = "file"' > "$CODEX_HOME/config.toml"
-          chmod 600 "$CODEX_HOME/config.toml"
-          node .github/codex/check-auth.mjs "$CODEX_HOME/auth.json"
-          unset CODEX_AUTH_JSON
-
       - name: Review the pull request
         if: success() && github.event.pull_request.head.repo.full_name == github.repository
         env:
@@ -137,17 +112,16 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           # 仅为拉取历史评审提供令牌（私有仓库匿名读会 401，降级分支会让历史恒空）。
-          # codex 启动前的 unset 隔离不动——审查代理本身永远拿不到 GitHub 凭证。
+          # 模型调用前 unset——审查代理本身永远拿不到 GitHub 凭证。
           GH_TOKEN: ${{ github.token }}
           THIS_REPO: ${{ github.repository }}
-          CODEX_MODEL: ${{ vars.CODEX_MODEL }}
-          CODEX_EFFORT: ${{ vars.CODEX_EFFORT }}
+          LLM_API_BASE_URL: ${{ vars.LLM_API_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          PR_REVIEW_MODEL: ${{ vars.PR_REVIEW_MODEL }}
+          PR_REVIEW_EFFORT: ${{ vars.PR_REVIEW_EFFORT }}
         run: |
           set -euo pipefail
-          # 本 PR 历次审查 findings（打地鼠检查的历史依据）：没有它，审查者无法识别"同一族
-          # 问题的第 N 个实例"。拉取失败不阻塞审查——降级为无历史，提示词段自然缺席。
-          # --slurp：--paginate 的多页合并成单个 JSON 数组（build-prompt 侧 flat 展开）——
-          # 固定一页会只拿到最旧的评审，最近修复轮次被漏掉（codex 2026-11-10 minor）。
+          # 本 PR 历次审查 findings（打地鼠检查的历史依据）。拉取失败不阻塞审查——降级为无历史。
           if ! gh api --paginate --slurp "repos/${THIS_REPO}/pulls/${PR_NUMBER}/reviews?per_page=100" > "$RUNNER_TEMP/prior-reviews.json" 2>"$RUNNER_TEMP/prior-reviews.err"; then
             {
               echo "### 历史评审拉取失败"
@@ -156,39 +130,16 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             printf '[]' > "$RUNNER_TEMP/prior-reviews.json"
           fi
-          PRIOR_REVIEWS_FILE="$RUNNER_TEMP/prior-reviews.json" node .github/codex/build-prompt.mjs "$RUNNER_TEMP/codex-prompt.md"
-          cmd=(
-            codex
-            -a never
-            -s read-only
-            exec
-            --ephemeral
-            --ignore-rules
-            --color never
-            --cd "$GITHUB_WORKSPACE"
-            --output-schema "$GITHUB_WORKSPACE/.github/codex/review-schema.json"
-            -o "$RUNNER_TEMP/codex-review.json"
-          )
-          if [ -n "${CODEX_MODEL:-}" ]; then
-            cmd+=(-m "$CODEX_MODEL")
-          fi
-          # 0.166.0 的 exec 不接受 effort 长选项。空变量不传，沿用账号或 CLI 默认思考力度。
-          if [ -n "${CODEX_EFFORT:-}" ]; then
-            if [[ ! "$CODEX_EFFORT" =~ ^[A-Za-z0-9_-]+$ ]]; then
-              echo "CODEX_EFFORT must be one token (none, minimal, low, medium, high, xhigh)." >&2
-              exit 1
-            fi
-            cmd+=(-c "model_reasoning_effort=\"${CODEX_EFFORT}\"")
-          fi
+          PRIOR_REVIEWS_FILE="$RUNNER_TEMP/prior-reviews.json" node .github/codex/build-prompt.mjs "$RUNNER_TEMP/review-prompt.md"
           unset GITHUB_TOKEN GH_TOKEN
           set +e
-          "${cmd[@]}" - < "$RUNNER_TEMP/codex-prompt.md" >"$RUNNER_TEMP/codex-stdout.txt" 2>"$RUNNER_TEMP/codex-stderr.txt"
+          node .github/codex/llm-review.mjs "$RUNNER_TEMP/review-prompt.md" "$RUNNER_TEMP/review-stdout.txt" "$RUNNER_TEMP/review-stderr.txt"
           status=$?
           set -e
           node .github/codex/render-review.mjs scrub "$status" \
-            "$RUNNER_TEMP/codex-stdout.txt" \
-            "$RUNNER_TEMP/codex-stderr.txt" \
-            "$RUNNER_TEMP/codex-review.json"
+            "$RUNNER_TEMP/review-stdout.txt" \
+            "$RUNNER_TEMP/review-stderr.txt" \
+            "$RUNNER_TEMP/review.json"
 
       - name: Post the pull request review
         if: success() && github.event.pull_request.head.repo.full_name == github.repository
@@ -212,7 +163,7 @@ jobs:
             exit 1
           fi
           node .github/codex/render-review.mjs publish \
-            "$RUNNER_TEMP/codex-review.json" \
+            "$RUNNER_TEMP/review.json" \
             "$RUNNER_TEMP/review.md" \
             "$RUNNER_TEMP/review-event" \
             "$HEAD_SHA"
@@ -225,7 +176,7 @@ jobs:
               ;;
           esac
           {
-            echo "## Codex review (${event})"
+            echo "## PR review (grok, ${event})"
             echo
             cat "$RUNNER_TEMP/review.md"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -238,7 +189,7 @@ jobs:
                 -H "Accept: application/vnd.github+json" \
                 "/repos/${THIS_REPO}/pulls/${PR_NUMBER}/reviews" \
                 --input - > "$RUNNER_TEMP/gh-review.json"
-          echo posted > "$RUNNER_TEMP/codex-review-posted"
+          echo posted > "$RUNNER_TEMP/review-posted"
           jq -r '"posted review id=\(.id) state=\(.state)"' "$RUNNER_TEMP/gh-review.json"
           if [ "$event" = "REQUEST_CHANGES" ]; then
             echo "已提交 REQUEST_CHANGES，检查失败，便于把它设为 required check。" >&2
@@ -249,12 +200,12 @@ jobs:
         if: failure() && steps.guard.outputs.same_repo == 'true'
         run: |
           set -euo pipefail
-          if [ -f "$RUNNER_TEMP/codex-review-posted" ]; then
+          if [ -f "$RUNNER_TEMP/review-posted" ]; then
             exit 0
           fi
           {
-            echo "### Codex PR review 失败"
+            echo "### PR review 失败"
             echo
-            echo "审查没有发到 pull request。日志不打印 auth.json。"
-            echo "若是 OAuth 失效，按 .github/codex/README.md 重新 \`codex login\` 并更新 secret CODEX_AUTH_JSON。"
+            echo "审查没有发到 pull request。日志不打印密钥。"
+            echo "检查 self-hosted runner 是否在线（vars.PR_REVIEW_ENABLED）、secrets.LLM_API_KEY 与 vars.LLM_API_BASE_URL。"
           } >> "$GITHUB_STEP_SUMMARY"

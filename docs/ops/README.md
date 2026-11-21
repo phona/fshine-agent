@@ -50,6 +50,15 @@ scripts/ops/fshine-systemd.sh uninstall [--name N]     # stop + disable + 删单
 - **心跳 15s（已落地 `52eaa0b2`）**：适配器把官方 SDK 的 `heartbeatInterval` 从 30s 收紧到 15s（社区对「连接看似正常也偶发丢」的缓解；企微约 90s 无心跳断开）。连接层仍由 SDK 管（认证/重连/退避），宿主不重试、不告警（既有纪律）。
 - **仓内无人值守动作**只有 run 目录保留期清扫，且缺省关闭：`runtime.fileRetentionSweepOnStart`（缺省 `false`）在启动装配完成、渠道接消息前扫一次、无定时器（`apps/server/startup-sweep.ts:1-14`、`apps/server/main.ts:74-77`）；周期清理要部署侧自己调度 `npm run cleanup:runs`（`--dry-run` 只报不删，`scripts/cleanup-runs.ts:1-20`）。通知落盘逐条 append、无轮询无清扫，写失败只记未送达（`apps/server/notification-file-sink.ts:1-6`）。其余常驻面都是请求驱动——「服务在跑却什么都不发生」通常不是守护问题，按 §5 查档位与连接。
 
+**PR 审查流水线（grok，2026-11-21）**：`.github/workflows/pr-review.yml` 在 `pull_request` 上跑，审查器 = `.github/codex/llm-review.mjs`（OpenAI 兼容端点）+ 既有 `.github/prompts/pr-review.md` 与 `.github/codex/review-schema.json` + `render-review.mjs`（schema 校验 → 发 review）。有 `blocking` 才 `REQUEST_CHANGES`，否则 `COMMENT`，**永不 APPROVE**；fork PR 显式拒；审查步骤先 `unset GITHUB_TOKEN GH_TOKEN` 再调模型；密钥不进日志。Codex 路径已删除（订阅停用、`CODEX_AUTH_JSON` 过期，git 历史可考）。
+
+- **开关**：仓库变量 `PR_REVIEW_ENABLED=true` 才跑。**当前未启用**（没装 runner、也没有云端 key）——check 不会出现，不会排队、不会永远红。
+- **依赖**：secret `LLM_API_KEY`；vars `LLM_API_BASE_URL`、`PR_REVIEW_MODEL`（缺省 `grok/grok-4.7`）、`PR_REVIEW_EFFORT`（可选）、`PR_REVIEW_RUNNER`（可选）。
+- **两种跑法**：
+  1. **自托管 runner**（模型在局域网端点）：`runs-on` 默认 `["self-hosted","fshine"]`；在能访问该端点的机器上装 GitHub self-hosted runner 并打 `fshine` 标签（安装步骤见 GitHub 文档「self-hosted runners」；本仓不代装）。
+  2. **云端端点**（如 xAI `https://api.x.ai/v1` + API key）：把 `PR_REVIEW_RUNNER` 设为 `["ubuntu-latest"]`，`LLM_API_BASE_URL=https://api.x.ai/v1`、`LLM_API_KEY=<API key>`——**不需要 runner**。
+- **纪律**：审查只读；不改分支保护（required check 由业主配）；`blocking` = 修复端 P0/P1，`major/minor/nit` 只报告。
+
 ## 5. 排障 runbook
 
 **5.1 静默连接**：先读 `server_started`（`apps/server/channel-mode.ts:66-81`）——`offline` = 压根没建连接（`:57`），用户发什么都石沉大海；`shadow` = 连上但出站全抑制；只有 `live` 真投递。别用 `FSHINE_WECOM_DELIVERY=live` 在 shadow 上放行：显式档位压过环境开关（`packages/channel-wecom/src/silent-shadow-gate.ts:49-57`）。连接（订阅/心跳/指数退避重连）由官方 SDK 管理，宿主只管认证与错误（`packages/channel-wecom/src/adapter.ts:3`）：启动期等 `authenticated` 最多 30 秒（`:315`、`:330`），错误即启动失败（`:331`），**连接层不重试、不告警**。只有某个人不回：看 `message_refused`（`apps/server/server.ts:616-620`）。查任务事实用 `npm run tasks -- "#<编号>"`（`package.json:12`）或 `npm run ops`（`:13`），不要靠对话复述。任务终态后可用 `npm run tasks -- <id> --redo` 重新交办（= 新任务、委派原文逐字、经与 `ask` 同源的生产装配；不是人工接管、也不是会话续跑）。
