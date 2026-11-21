@@ -37,10 +37,13 @@ import {
 } from './src/run-js-executor';
 import {
   createSession,
+  FILES_GENERATED_NOTICE,
+  type InjectionValue,
   type Session,
   type TurnFileRef,
   type RunJsLayoutUnsafeReport,
 } from './src/execution-runtime';
+import type { RecalcXlsxExecutor } from './src/recalc-xlsx-executor';
 import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
 import { ToolUserError, type DriverMessage, type TurnDriver } from './src/driver-contract';
 
@@ -134,6 +137,10 @@ async function makeFixture(input: {
   executor?: RunJsExecutor;
   onRunJsLayoutUnsafe?: (event: RunJsLayoutUnsafeReport) => void;
   fileManifestProvider?: (principalId: string, sessionId: string) => readonly TurnFileRef[];
+  /** 假 recalc 执行器：让本回合有可交付文件（占位话术形状的唯一端口）。 */
+  recalcXlsxExecutor?: RecalcXlsxExecutor;
+  /** 待注入事实注入器（注入核销/退回的守卫用）。 */
+  taskFactProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
 } = {}): Promise<Fixture> {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'runtime-run-js-'));
   tempDirs.push(dir);
@@ -166,6 +173,8 @@ async function makeFixture(input: {
     ...(input.withExecutor === false ? {} : { runJsExecutor }),
     ...(input.onRunJsLayoutUnsafe === undefined ? {} : { onRunJsLayoutUnsafe: input.onRunJsLayoutUnsafe }),
     ...(input.fileManifestProvider === undefined ? {} : { fileManifestProvider: input.fileManifestProvider }),
+    ...(input.recalcXlsxExecutor === undefined ? {} : { recalcXlsxExecutor: input.recalcXlsxExecutor }),
+    ...(input.taskFactProvider === undefined ? {} : { taskFactProvider: input.taskFactProvider }),
     onFileRefUnavailable: (reason) => reasons.push(reason),
   });
   return {
@@ -396,6 +405,62 @@ describe('CAP-01 S1 runtime 接线（run_js / 出口清理 / 清单注入）', (
       expect(withText.reply).toContain('已经生成');
       // 片 2：Main 没有交付物，TurnResult.files 缺省（「文件已生成（见附件）」兜底属 Worker 面）。
       expect(withText.files).toBeUndefined();
+    } finally {
+      fx.ro.close();
+      fx.close();
+    }
+  });
+
+  it('②b 占位话术 ≠ 已说：模型沉默 + 本回合有交付物时，取走的待注入事实退回队列（下次开口再注入）', async () => {
+    // 2026-11-21 Grok 审查 blocking：宿主先把空正文换成「文件已生成」占位句、再拿替换后的
+    // reply 判注入核销——占位句非空，本回合 take 走的事实（任务终态/附件/系统注记）不回退，
+    // 用户永远听不到降级唤醒与待确认事实。判据必须看**模型原文**是否为空。
+    const queue: InjectionValue[] = [];
+    let requeued = 0;
+    const fx = await makeFixture({
+      recalcXlsxExecutor: {
+        available: true,
+        engineFacts: null,
+        async recalc() {
+          return {
+            status: 'pass',
+            errorCells: [],
+            valueDiffs: [],
+            artifacts: { reportPath: null, csvPath: null } as never,
+            outputs: [{
+              fileId: 'file_00000000-0000-4000-8000-00000000000b',
+              name: '汇总.xlsx',
+              bytes: 8,
+              deliverable: true,
+            }],
+            durationMs: 1,
+          };
+        },
+      },
+      taskFactProvider: () => {
+        const next = queue.shift();
+        if (next === undefined) return undefined;
+        const text = typeof next === 'string' ? next : next.text;
+        return { text, requeue: () => { requeued += 1; queue.unshift(next); } };
+      },
+    });
+    try {
+      const fact = '【事实】任务 3 分钟前超时，结果未知——还没说给用户';
+      queue.push(fact);
+      // 回合：只调 recalc_xlsx 产出交付物、正文为空 → 宿主补占位句。
+      fx.push({
+        execCalls: [{ tool: 'recalc_xlsx', args: { file: 'file_00000000-0000-4000-8000-00000000000b', export: 'csv' } }],
+        text: '',
+      });
+      const first = await fx.session.send('重算这份表');
+      expect(first.reply).toBe(FILES_GENERATED_NOTICE);
+      // 占位句不算「模型说了」：事实回退一次。
+      expect(requeued).toBe(1);
+      // 下一次用户开口：事实重新进注入面（take 即出队的队列没有丢）。
+      fx.push({ text: '接着说' });
+      await fx.session.send('接着说');
+      expect(fx.capture.injections[0]).toEqual([fact]);
+      expect(fx.capture.injections[1]).toEqual([fact]);
     } finally {
       fx.ro.close();
       fx.close();

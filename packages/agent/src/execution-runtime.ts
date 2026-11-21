@@ -3356,11 +3356,15 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // task_result 存档被 Main 转述后同样汇到这里，一道尺盖住两种来源（2026-10-19 事故形状）。
       // 剥完为空且有文件 → 宿主话术兜底（空文本帧会让渠道一个终帧都不发，用户什么都收不到）。
       const stripped = stripServerPaths(mainResult.text);
+      // 占位话术 ≠ 模型说了（2026-11-21 Grok 审查 blocking）：注入核销/退回的判据必须是
+      // **模型原文**是否为空。宿主补的「文件已生成」「内存墙」话术非空，但那些话不是模型
+      // 说给用户听的——拿替换后的 reply 判核销，会把本回合取走的事实静默吞掉。
+      const modelSaidNothing = stripped.text.trim() === '';
       let reply = stripped.text;
       // CAP-01 ④：内存墙是宿主可确定的失败事实——用户可见话术与工具返回同一句，不让模型
       // 的自由文本掩盖（其余出口清理与兜底逻辑不变）。
       if (lastMemoryWall) reply = RUN_JS_MEMORY_EXIT_MESSAGE;
-      else if (reply.trim() === '' && turnFiles.length > 0) reply = FILES_GENERATED_NOTICE;
+      else if (modelSaidNothing && turnFiles.length > 0) reply = FILES_GENERATED_NOTICE;
       // P1（S1）：本回合最终回复逐字存档——同回合各任务行同值；空白回复/回合失败不落
       // （缺省=无最终回复存档，显示层不用执行层汇报冒充）。存档用出口清理后的最终回复
       // （用户看到什么，task_result 就是什么）。
@@ -3370,9 +3374,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         registry.archiveReply(taskIds, reply);
       }
       const executions = taskIds.flatMap((taskId) => registry.get(taskId, scope).executions);
-      // 注入核销（机械判据）：本回合产出的用户可见文本为空 = 那些事实没有说给用户听
-      // （模型一言不发/只调工具/被内存墙话术以外的空白收尾）→ 退回队列，不核销。
-      if (reply.trim() === '') requeueUncreditedInjections();
+      // 注入核销（机械判据）：判据看**模型原文**是否为空——宿主占位话术（文件已生成 /
+      // 内存墙）不是模型说的，本回合取走的事实仍然没人说，必须退回队列。
+      if (modelSaidNothing) requeueUncreditedInjections();
       return {
         reply,
         taskIds,
