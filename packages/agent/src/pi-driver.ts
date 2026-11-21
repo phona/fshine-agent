@@ -157,6 +157,27 @@ export function parseContextWindow(rawValue: string | number | undefined, envVar
   return value;
 }
 
+/**
+ * 单条 assistant 消息的模型用量记录（owner 2026-11-21 批准的最小方案：观测先于告警，
+ * 不建新表、不碰模型面）。**只携带机械计量字段**——消息正文、工具参数、prompt 一概不进记录。
+ */
+export interface PiModelUsageEntry {
+  modelId: string;
+  stopReason: string;
+  /** assistant message_start → message_end 的真实墙钟毫秒；无 message_start 事件时用本回合发起时刻兜底。 */
+  durationMs: number;
+  /** 首个流式文本 delta 到达时刻 − message_start；无 delta / 非流式 = 不填。 */
+  ttftMs?: number;
+  usage: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    reasoning: number;
+    totalTokens: number;
+  };
+}
+
 export interface PiTurnDriverOptions {
   env: Record<string, string | undefined>;
   /** 显式模型 id(分层模型接缝)。缺省(不传)回落 env.LLM_MODEL。 */
@@ -201,6 +222,13 @@ export interface PiTurnDriverOptions {
   workspaceDir?: string;
   /** Pi 的 agentDir（配置/凭据发现面）。缺省 = workspaceDir/.pi-agent，不读宿主 ~/.pi。 */
   agentDir?: string;
+  /**
+   * 模型用量观测出口（owner 2026-11-21 批准的最小方案）：本驱动会话里**每一条 assistant
+   * message_end**（正常结束与 error/aborted 都算；Pi 原生重试的每次尝试各算一条）经此回调
+   * 传出一条 `PiModelUsageEntry`。缺省不传 = 零行为变化（连计时状态都不建）。
+   * 记录只含计量字段；落盘由装配层决定（见 scripts/ask-runtime.ts 的 usage.jsonl 注入）。
+   */
+  onModelUsage?: (entry: PiModelUsageEntry) => void;
 }
 
 /**
@@ -350,6 +378,8 @@ export function toAgentTool(
 /** 本驱动实例持有的 Pi 会话（reuseConversation 时跨回合复用）。 */
 interface TurnSlot {
   retryScheduled: number;
+  /** 本回合发起时刻（run/wake 进入即记）：assistant message_start 缺失时用量计时用它兜底。 */
+  startedAt: number;
   /**
    * 本失败周期内**实际发生**的模型尝试数（1 起）。重试由 Pi 原生 AgentSession 执行，
    * 驱动只能从 assistant `message_end` 事件看到真实尝试；正常 assistant 收尾即周期结束、
@@ -493,6 +523,12 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
     });
 
     const slot: Conversation['slot'] = { current: undefined };
+    /**
+     * 模型用量观测的逐条 assistant 消息计时状态（仅 onModelUsage 注入时维护）：
+     * message_start 记起点、首个 text_delta 记首字时刻，message_end 发记录后清空。
+     * 一回合多条 assistant 消息（工具轮次）时每条各自起算，不跨消息累计。
+     */
+    let usageTracking: { startedAt: number; firstTextDeltaAt: number | undefined } | undefined;
     session.subscribe((event: AgentSessionEvent) => {
       if (event.type === 'compaction_end') {
         // issue #67：Pi 的压缩只压模型上下文，会话文件仍是线性 append；压缩完成后把
@@ -552,6 +588,42 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
           errorMessage: String(event.errorMessage).slice(0, 500),
         }));
         return;
+      }
+      // 模型用量观测（owner 2026-11-21 批准的最小方案）：每条 assistant message_end 一条记录。
+      // 只携带 modelId/stopReason/durationMs/ttftMs/usage；正文、工具参数、prompt 一概不进记录。
+      if (options.onModelUsage !== undefined) {
+        if (event.type === 'message_start' && (event.message as { role?: string }).role === 'assistant') {
+          usageTracking = { startedAt: Date.now(), firstTextDeltaAt: undefined };
+        } else if (event.type === 'message_update'
+          && (event.message as { role?: string }).role === 'assistant'
+          && event.assistantMessageEvent.type === 'text_delta'
+          && usageTracking !== undefined
+          && usageTracking.firstTextDeltaAt === undefined) {
+          usageTracking.firstTextDeltaAt = Date.now();
+        } else if (event.type === 'message_end' && (event.message as { role?: string }).role === 'assistant') {
+          const endedAt = Date.now();
+          const message = event.message as {
+            model?: unknown; stopReason?: unknown;
+            usage?: Partial<PiModelUsageEntry['usage']>;
+          };
+          const startedAt = usageTracking?.startedAt ?? slot.current?.startedAt ?? endedAt;
+          const firstTextDeltaAt = usageTracking?.firstTextDeltaAt;
+          usageTracking = undefined;
+          options.onModelUsage({
+            modelId: typeof message.model === 'string' && message.model !== '' ? message.model : modelId,
+            stopReason: String(message.stopReason ?? ''),
+            durationMs: Math.max(0, endedAt - startedAt),
+            ...(firstTextDeltaAt !== undefined ? { ttftMs: Math.max(0, firstTextDeltaAt - startedAt) } : {}),
+            usage: {
+              input: message.usage?.input ?? 0,
+              output: message.usage?.output ?? 0,
+              cacheRead: message.usage?.cacheRead ?? 0,
+              cacheWrite: message.usage?.cacheWrite ?? 0,
+              reasoning: message.usage?.reasoning ?? 0,
+              totalTokens: message.usage?.totalTokens ?? 0,
+            },
+          });
+        }
       }
       if (event.type === 'message_end' && event.message.role === 'assistant' && slot.current) {
         const stopReason = event.message.stopReason;
@@ -676,7 +748,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         }
 
         const session = active.session;
-        active.slot.current = { retryScheduled: 0, attempt: 0 };
+        active.slot.current = { retryScheduled: 0, attempt: 0, startedAt: Date.now() };
         active.lastProjection = projectSession(session);
 
         // 宿主事实注入：Pi 原生 custom message（下次请求按 user 角色投影），不触发单独回合。
@@ -869,7 +941,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
             signal: abort.signal,
           };
         }
-        active.slot.current = { retryScheduled: 0, attempt: 0 };
+        active.slot.current = { retryScheduled: 0, attempt: 0, startedAt: Date.now() };
         await session.sendCustomMessage(
           { customType: 'fshine_task_fact', content: factText, display: false },
           { triggerTurn: true },
