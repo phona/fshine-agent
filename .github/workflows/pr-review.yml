@@ -121,11 +121,10 @@ jobs:
           LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           PR_REVIEW_MODEL: ${{ vars.PR_REVIEW_MODEL || secrets.LLM_MODEL }}
-          # 推理模型会把输出额度先花在 reasoning 上（实测 finish_reason=length 且 content 空）。
-          # 先把思考档压到 low、输出额度回 8k（该端点的 step 模型输出上限未必接受 32k），
-          # 提示词预算压到 40KB。若仍被推理吃满，再换非思考模型或换通道。
+          # 该端点是推理模型（step-3.7-flash）：输出额度先花在 reasoning 上，8k 实测会
+          # finish_reason=length 且 content 空；32k 实测稳定产出（107s）。提示词预算 40KB。
           PR_REVIEW_EFFORT: ${{ vars.PR_REVIEW_EFFORT || 'low' }}
-          PR_REVIEW_MAX_TOKENS: '8000'
+          PR_REVIEW_MAX_TOKENS: '32000'
           PR_REVIEW_MAX_PROMPT_BYTES: '40000'
         run: |
           set -euo pipefail

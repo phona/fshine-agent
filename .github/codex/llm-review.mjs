@@ -138,7 +138,12 @@ async function callOnce() {
       const finish = choice?.finish_reason ?? 'unknown'
       const hasReasoning = typeof choice?.message?.reasoning_content === 'string'
         && choice.message.reasoning_content.trim() !== ''
-      return { ok: false, error: `模型返回空内容（finish_reason=${finish}，reasoning_content=${hasReasoning ? '有' : '无'}）` }
+      const usage = data?.usage ?? {}
+      const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens
+      const usageText = usage.completion_tokens !== undefined
+        ? `，completion_tokens=${usage.completion_tokens}${reasoningTokens !== undefined ? `（reasoning=${reasoningTokens}）` : ''}`
+        : ''
+      return { ok: false, error: `模型返回空内容（finish_reason=${finish}，reasoning_content=${hasReasoning ? '有' : '无'}${usageText}）` }
     }
     return { ok: true, content }
   }
