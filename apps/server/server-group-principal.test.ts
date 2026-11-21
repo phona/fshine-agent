@@ -256,8 +256,17 @@ describe('群 = 独立主体 · ③ 未开通的群沿用既有拒绝路径', ()
       const groupReply = await handle.server.handler(incoming('user-a', 'group-3', 'u-1', '未开通群里的请求', 'group'));
       const personReply = await handle.server.handler(incoming('user-c', 'user-c', 'u-2', '未开通个人的请求', 'single'));
 
-      expect(groupReply).toBe('该账号（wecom:group:group-3）未开通使用权限，请联系管理员开通。');
-      expect(personReply).toBe('该账号（wecom:user-c）未开通使用权限，请联系管理员开通。');
+      // 未开通语义保留：同一句拒绝话术，不区分主体形态（个人/群逐字相同）。
+      expect(groupReply).toBe('该账号未开通使用权限，请联系管理员开通。');
+      expect(personReply).toBe(groupReply);
+      // 反向绊线：话术不得回显内部主体形状——群形态 `wecom:group:<会话id>` 是内部身份，
+      // 1:1 的 `wecom:<userid>` 同样不进用户话术；未开通主体的具体身份只进 message_refused
+      // 事件（管理员排查用），不拼进回给用户的话术。
+      expect(groupReply).not.toContain('group-3');
+      expect(groupReply).not.toContain('wecom:group');
+      expect(groupReply).not.toContain('wecom:');
+      expect(personReply).not.toContain('user-c');
+      expect(personReply).not.toContain('wecom:');
       // 同一拒绝路径：refused 事件带群主体 + speakerId；零回合、零会话、零 message_done。
       const refused = logs.filter((line) => line['event'] === 'message_refused');
       expect(refused).toHaveLength(2);

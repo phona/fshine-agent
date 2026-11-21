@@ -17,6 +17,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
 import type { AppConfig, IncomingChannelMessage } from '@fshine/contracts';
 import type {
   CapabilityManifest,
@@ -26,7 +27,7 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import { openTaskStore } from '@fshine/core';
 import type { TurnDriver } from '../../packages/agent/src/driver-contract';
-import { createServer, type Server } from './server';
+import { createServer, MESSAGE_REPLY_LIMIT, type Server } from './server';
 
 const FIXTURE_ROOT = path.resolve(__dirname, '..', '..', 'scripts', 'eval', 'fixtures', 'dummy-platform');
 /** 「上一进程挂了」的如实兜底（与 server.ts 的 INBOUND_STILL_PROCESSING_NOTE 逐字一致）。 */
@@ -233,6 +234,102 @@ describe('入站消息跨重启幂等（底账事实）', () => {
       expect(b).toContain('3 条');
       expect(client.requests).toHaveLength(2); // 两条都真办了
       expect(countTasks(dbPath)).toBe(2);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('⑤ 回合成功但落定写失败：必须释放入站认领，同 messageId 重投不误报「请重发」', async () => {
+    const dir = tempDir();
+    const dbPath = path.join(dir, 'state.db');
+    const logs: Array<Record<string, unknown>> = [];
+    const client = new CountingClient();
+    const server = await startServer(dbPath, client, logs);
+    try {
+      // 只拦底账 UPDATE（落定），不拦 INSERT（认领）与 DELETE（释放）——精确模拟
+      // 「落定写失败、其余写正常」的真实形态（磁盘满 / 写锁类瞬时故障）。
+      const raw = new Database(dbPath);
+      raw.exec(`
+        CREATE TRIGGER block_inbound_complete BEFORE UPDATE ON inbound_messages
+        BEGIN SELECT RAISE(ABORT, 'simulated settle write failure'); END;
+      `);
+
+      const first = await server.handler(incoming('test-user', 'msg-settle-fail'));
+      // 回合本身成功：回复照常返回（落定失败不翻转本次结果），失败进观测事件。
+      expect(first).toContain('3 条');
+      expect(logs.some((line) => line['event'] === 'inbound_message_settle_failed')).toBe(true);
+
+      // 修复点：落定失败必须像失败分支一样删认领行——底账不留 processing 孤儿。
+      const audit = openTaskStore(dbPath);
+      const row = audit.getInboundMessage({
+        messageId: 'msg-settle-fail',
+        principalId: 'wecom:test-user',
+        sessionId: 'wecom:test-user',
+      });
+      audit.close();
+      expect(row).toBeUndefined();
+
+      // 同 messageId 重投：不得被误报成「上一进程挂了，请重发」（那会把用户推向新
+      // messageId 重发，必然重复执行写）——按新消息重办，回执仍是真回执。
+      const second = await server.handler(incoming('test-user', 'msg-settle-fail'));
+      expect(second).toBe(first);
+      expect(second).not.toContain('没办完');
+      expect(client.requests).toHaveLength(2); // 重投真重办了（两次执行）
+      raw.close();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('⑥ 在途表超限：不得驱逐仍在跑的 Promise（并发重投必须回放同一句，不误读底账）', async () => {
+    const dir = tempDir();
+    const dbPath = path.join(dir, 'state.db');
+    const logs: Array<Record<string, unknown>> = [];
+    const client = new CountingClient();
+    // 闸门驱动：首回合停在驱动里，整个超限灌入期间所有在途条目保持 pending。
+    let openGate: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const gatedDriver: TurnDriver = {
+      async run(input) {
+        await gate;
+        const reply = `回复：${input.messages.length} 条历史`;
+        return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
+      },
+    };
+    const server = await createServer({
+      env: { LLM_MODEL: 'test-model' },
+      config: testConfig(),
+      dbPath,
+      createDrivers: async () => ({ mainDriver: gatedDriver, workerDriver: gatedDriver }),
+      createExecutionFace: async () => ({
+        client,
+        allowedOperations: ['dummy.query'],
+        readOnlyOperations: ['dummy.query'],
+      }),
+      logger: (line) => logs.push(line),
+    });
+    try {
+      // 精确超限灌入（上限 +1 条），全部不 await：每个 messageId 同步认领 + 记在途。
+      // 全部同会话 → 首回合占住会话链，其余排队；在途表条目全部 pending。
+      const total = MESSAGE_REPLY_LIMIT + 1;
+      const flood: Array<Promise<unknown>> = [];
+      for (let i = 0; i < total; i += 1) {
+        flood.push(server.handler(incoming('test-user', `msg-flood-${i}`)));
+      }
+      // 最旧键（msg-flood-0）在灌满时最容易被错误驱逐：此刻重投它，必须等在途 Promise
+      // 拿到同一句真回执——而不是读到底账 processing 行、被误报「上一进程挂了，请重发」。
+      const duplicate = server.handler(incoming('test-user', 'msg-flood-0'));
+      openGate!();
+
+      const replies = await Promise.all([...flood, duplicate]);
+      const firstReply = replies[0]!;
+      expect(firstReply).toContain('回复：');
+      // 末位 = msg-flood-0 的重投：必须与首条同句（在途回放），且不是「没办完/请重发」兜底。
+      expect(replies[replies.length - 1]).toBe(firstReply);
+      expect(replies[replies.length - 1]).not.toContain('没办完');
+      expect(replies[replies.length - 1]).not.toContain('请重发');
     } finally {
       await server.close();
     }

@@ -112,8 +112,9 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 /**
  * 同进程在途重投表上限（有界兜底）：条目落定即删，天然有界；上限只防极端并发泄漏。
  * 跨重启判据不在这里——见底账 inbound_messages（task-store.ts）。
+ * 导出仅供测试精确超限（在途超限驱逐用例），不是配置面。
  */
-const MESSAGE_REPLY_LIMIT = 1024;
+export const MESSAGE_REPLY_LIMIT = 1024;
 
 /** 执行面：结构化执行客户端 + 本轮允许集合（从执行层自述的 access=read 派生）。 */
 export type { ExecutionFace };
@@ -1516,18 +1517,38 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
    * 渠道重投幂等（重复消息，2026-11-19 跨重启）：**底账事实为唯一判据**——同
    * (principal, session, messageId) 在 inbound_messages 表里留账（见 task-store.ts），
    * 进程重启后同一 messageId 不再被当成新消息。查重先于一切副作用（不新起 Main 回合、
-   * 不新建任务、不重复执行）；处理失败删行（渠道可重投，不伪造回执）。
+   * 不新建任务、不重复执行）；处理失败删行（渠道可重投，不伪造回执）；**落定写失败同样
+   * 删行**——回合已成功只是账没写成，留下的 processing 孤儿会把重投误报成「请重发」。
    *
    * 本进程在途表只解决**同进程并发重投**：两路相同 messageId 几乎同时到达时，第二条要在
    * 第一条落定后拿到同一句回执，而不是把第一条的 processing 行误读成「上一进程挂了」。
    * 它不承担跨重启判据——那归底账，且落定即删（天然有界，上限只作兜底）。
    */
-  const inboundInFlight = new Map<string, Promise<string>>();
+  /** 在途条目：Promise + 已决标记（已决标记只供超限驱逐判定，见 rememberInFlight）。 */
+  type InFlightEntry = { reply: Promise<string>; settled: boolean };
+  const inboundInFlight = new Map<string, InFlightEntry>();
   const rememberInFlight = (key: string, reply: Promise<string>): void => {
-    inboundInFlight.set(key, reply);
+    const entry: InFlightEntry = { reply, settled: false };
+    // 附加观察：Promise 落定即翻已决标记（多挂一个反应不改原 Promise 的任何消费行为）。
+    void reply.then(
+      () => {
+        entry.settled = true;
+      },
+      () => {
+        entry.settled = true;
+      },
+    );
+    inboundInFlight.set(key, entry);
     if (inboundInFlight.size > MESSAGE_REPLY_LIMIT) {
-      const oldest = inboundInFlight.keys().next().value;
-      if (oldest !== undefined && oldest !== key) inboundInFlight.delete(oldest);
+      // 超限只驱逐**已落定**的最旧条目；仍在跑的 Promise 一律不驱逐——误驱逐会让同
+      // messageId 的并发重投读不到在途、误读底账 processing 行，把「还在办」误报成
+      // 「上一进程挂了，请重发」。全部在跑时宁可不驱逐（落定即删天然有界，上限只是兜底）。
+      for (const [oldestKey, candidate] of inboundInFlight) {
+        if (oldestKey !== key && candidate.settled) {
+          inboundInFlight.delete(oldestKey);
+          break;
+        }
+      }
     }
   };
   /** 处理失败/落定后清在途条目（幂等，键可能已不在）。 */
@@ -1541,7 +1562,20 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     speakerId: string;
     messageId: string;
   };
-  /** 落定底账（置 done + 最终回执）；写失败只降级为观测事件（不翻转本次成功结果）。 */
+  /** 处理失败/落定写失败：删认领行（不缓存失败，渠道可重投、不留 processing 孤儿）；删失败只记观测事件。 */
+  const releaseInbound = (ids: InboundIds): void => {
+    try {
+      taskRegistry.store.releaseInboundMessage({ messageId: ids.messageId, principalId: ids.principalId, sessionId: ids.sessionId });
+    } catch (error) {
+      log({ event: 'inbound_message_release_failed', ...ids, reason: error instanceof Error ? error.message : String(error) });
+    }
+  };
+  /**
+   * 落定底账（置 done + 最终回执）。写失败 = 底账此刻不可写（磁盘满/锁类瞬时故障）：不翻转
+   * 本次成功回执，但必须**像失败分支一样删认领行**——否则这行 processing 孤儿会把后续重投
+   * 误报成「上一进程挂了，请重发」，而按那句话重发是新 messageId，必然重复执行写；删行后
+   * 同 messageId 重投按新消息重办（与处理失败同语义）。
+   */
   const settleInbound = (ids: InboundIds, replyText: string): void => {
     try {
       taskRegistry.store.completeInboundMessage({
@@ -1553,14 +1587,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       });
     } catch (error) {
       log({ event: 'inbound_message_settle_failed', ...ids, reason: error instanceof Error ? error.message : String(error) });
-    }
-  };
-  /** 处理失败：删认领行（失败不缓存，渠道可重投）；删失败只记观测事件。 */
-  const releaseInbound = (ids: InboundIds): void => {
-    try {
-      taskRegistry.store.releaseInboundMessage({ messageId: ids.messageId, principalId: ids.principalId, sessionId: ids.sessionId });
-    } catch (error) {
-      log({ event: 'inbound_message_release_failed', ...ids, reason: error instanceof Error ? error.message : String(error) });
+      releaseInbound(ids);
     }
   };
 
@@ -1607,8 +1634,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     const principal = deps.config.principals[principalId];
     if (principal === undefined || principal.enabled !== true) {
       log({ event: 'message_refused', principalId, sessionId, speakerId, messageId: message.messageId, reason: 'principal_not_enabled' });
-      // 群主体未开通：与未开通个人同一条拒绝路径、同一句话术（不区分主体形态）。
-      return `该账号（${principalId}）未开通使用权限，请联系管理员开通。`;
+      // 群主体未开通：与未开通个人同一条拒绝路径、同一句话术（不区分主体形态）。话术不拼
+      // principalId——群形态 `wecom:group:<会话id>` 是内部身份形状，不得回显给用户；具体
+      // 是哪个主体未开通只进 message_refused 事件（管理员排查用）。
+      return '该账号未开通使用权限，请联系管理员开通。';
     }
     // 渠道重投（同 messageId）命中：幂等回放既有回执（无任何新副作用）。
     // CAP-01 S1：查重必须先于附件分支——纯附件消息的重投才走缓存，不重复登记。
@@ -1620,7 +1649,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       const inFlight = inboundInFlight.get(dedupKey);
       if (inFlight !== undefined) {
         log({ event: 'message_duplicate_replayed', principalId, sessionId, speakerId, messageId: message.messageId, source: 'in_flight' });
-        return await inFlight;
+        return await inFlight.reply;
       }
       // ② 底账事实：已落定 → 回放存下的回执（零任务、零执行）；未落定 → 上一进程挂了。
       const prior = taskRegistry.store.getInboundMessage({ messageId: message.messageId, principalId, sessionId });
