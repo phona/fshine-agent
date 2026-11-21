@@ -133,6 +133,8 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             printf '[]' > "$RUNNER_TEMP/prior-reviews.json"
           fi
+          # 诊断：打印该端点可用模型 id（只打 id，不打 key），便于按上下文/输出上限选审查模型。
+          node -e 'const b=(process.env.LLM_API_BASE_URL||"").replace(/\/+$/,"");fetch(b+"/models",{headers:{authorization:"Bearer "+process.env.LLM_API_KEY}}).then(r=>r.json()).then(d=>console.log("models:",(d.data||d.models||[]).map(m=>m.id||m.name).slice(0,60).join(","))).catch(e=>console.log("models: unavailable",String(e).slice(0,200)))'
           PRIOR_REVIEWS_FILE="$RUNNER_TEMP/prior-reviews.json" node .github/codex/build-prompt.mjs "$RUNNER_TEMP/review-prompt.md"
           unset GITHUB_TOKEN GH_TOKEN
           set +e
