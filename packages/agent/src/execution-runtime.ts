@@ -4469,6 +4469,16 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       if (lastWritable !== undefined && lastWritable.outcome.status === 'needs_confirmation') {
         return confirmationOutcomeOf(lastWritable);
       }
+      // needs_input 与 needs_confirmation 同一把尺：只有**末次非只读**才算结局。旧实现取
+      // 「第一条 needs_input」提前返回，会把之后已落库的写收成等待补充（用户补答后续跑
+      // 可能再写一次，2026-11-21 Grok 审查 blocking）；反过来，末条是 needs_input 时也
+      // 不被前面某条成功的只读/写掩盖。
+      if (lastWritable !== undefined && lastWritable.outcome.status === 'needs_input') {
+        const question = pendingQuestionFrom(lastWritable.outcome);
+        return question === undefined
+          ? { kind: 'failed', reason: '对方要求补充信息但没说清缺什么。' }
+          : { kind: 'needs_input', question };
+      }
       /**
        * 同回合自我确认被挡（owner 2026-11-19 live 实测，后台路径）：模型在**同一回合**里
        * prepare 出提案后紧接着 commit——同回合没有句柄，commit 被执行层以 CONFIRMATION_REQUIRED
@@ -4515,16 +4525,6 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       };
       const selfConfirmBlocked = selfConfirmBlockedRoundOf();
       if (selfConfirmBlocked !== undefined) return selfConfirmBlocked;
-      const needsInput = recorded.find(
-        (entry): entry is { operation: string; outcome: Extract<ExecutionOutcome, { status: 'needs_input' }> } =>
-          entry.outcome.status === 'needs_input',
-      );
-      if (needsInput !== undefined) {
-        const question = pendingQuestionFrom(needsInput.outcome);
-        return question === undefined
-          ? { kind: 'failed', reason: '对方要求补充信息但没说清缺什么。' }
-          : { kind: 'needs_input', question };
-      }
       if (recorded.length === 0) {
         // 发起前被宿主拒绝（权限/允许集合）时，用户该看到「没权限」，不是「模型没干活」：
         // 后者把权限问题说成模型问题，还会诱导用户让模型重试同一个动作。
@@ -4595,6 +4595,12 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         }
         if (decisive.outcome.status !== 'completed') {
           const { operation, outcome } = decisive;
+          if (outcome.status === 'needs_input') {
+            const question = pendingQuestionFrom(outcome);
+            return question === undefined
+              ? { kind: 'failed', reason: '对方要求补充信息但没说清缺什么。' }
+              : { kind: 'needs_input', question };
+          }
           if (outcome.status === 'failed' || outcome.status === 'refused') {
             const message = outcome.error.message ?? '';
             return {

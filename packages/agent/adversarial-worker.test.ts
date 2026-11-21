@@ -49,6 +49,7 @@ const MANIFEST: CapabilityManifest = {
     { name: 'dummy.proposal', label: 'proposal', args: [] },
     { name: 'dummy.proposal-commit', label: 'proposal-commit', args: [{ name: '--proposal-id', required: true }] },
     { name: 'dummy.denied', label: 'denied', args: [{ name: '--collection', required: true }] },
+    { name: 'dummy.ask', label: 'ask', args: [] },
   ],
 };
 
@@ -59,6 +60,7 @@ const ALLOWED = [
   'dummy.proposal',
   'dummy.proposal-commit',
   'dummy.denied',
+  'dummy.ask',
 ];
 const READ_ONLY = ['dummy.query'];
 
@@ -117,6 +119,8 @@ class AdversarialClient implements ExecutionClient {
         return request.confirmation === undefined
           ? { status: 'refused', error: { code: 'CONFIRMATION_REQUIRED', message: 'commit requires a confirmation handle', retryable: false } }
           : { status: 'completed', data: { added: 2 } };
+      case 'dummy.ask':
+        return { status: 'needs_input', missing: [{ name: '合同编号', description: '合同编号' }] };
       case 'dummy.proposal':
         return { status: 'completed', data: { proposalId: 'prop_1', status: 'pending' } };
       case 'dummy.proposal-commit':
@@ -133,6 +137,7 @@ const QUERY = { operation: 'dummy.query', args: {} };
 const PREPARE = (collection = 'alpha'): Record<string, unknown> => ({ operation: 'dummy.prepare', args: { '--collection': collection } });
 const COMMIT = (collection = 'alpha'): Record<string, unknown> => ({ operation: 'dummy.commit', args: { '--collection': collection } });
 const PROPOSAL = { operation: 'dummy.proposal', args: {} };
+const ASK = { operation: 'dummy.ask', args: {} };
 const PROPOSAL_COMMIT = { operation: 'dummy.proposal-commit', args: { '--proposal-id': 'prop_1' } };
 const DENIED = (collection = 'alpha'): Record<string, unknown> => ({ operation: 'dummy.denied', args: { '--collection': collection } });
 
@@ -498,5 +503,37 @@ describe('模型走岔路（确定性脚本模型）', () => {
     for (const call of client.calls) {
       expect(JSON.stringify(call.confirmation ?? null)).not.toContain('cf_1');
     }
+  });
+
+  it('⑧ needs_input 之后又完成的写：终局按末次决定性结果收 completed，不再等补充', async () => {
+    // 2026-11-21 Grok 审查 blocking：旧实现取「第一条 needs_input」提前返回，会把之后
+    // 已落库的写收成 waiting_user（用户补答后续跑可能再写一次）。末次非只读执行为准。
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new AdversarialClient();
+    const executor = await makeExecutor({
+      client,
+      registry,
+      worker: scriptWorker([[ASK, PROPOSAL]], capture),
+    });
+    await runBackground(registry, executor, 't_needsthenwrite');
+    const task = registry.get('t_needsthenwrite', SCOPE);
+    expect(task.status).toBe('completed');
+    expect(task.pendingQuestion).toBeUndefined();
+  });
+
+  it('⑧b 只停在 needs_input：仍然等待用户补充（不因为修 ⑧ 把补答出口吞掉）', async () => {
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new AdversarialClient();
+    const executor = await makeExecutor({
+      client,
+      registry,
+      worker: scriptWorker([[ASK]], capture),
+    });
+    await runBackground(registry, executor, 't_needsinput');
+    const task = registry.get('t_needsinput', SCOPE);
+    expect(task.status).toBe('waiting_user');
+    expect(task.pendingQuestion?.missing).toEqual(['合同编号']);
   });
 });
