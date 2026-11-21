@@ -38,7 +38,7 @@ test('prompt rejects a non-hex sha before it can be interpolated', () => {
   assert.throws(() => assertSha('abc', 'head sha'), /unexpected head sha/)
 })
 
-test('long diffs are truncated and still name the git command', () => {
+test('long diffs are truncated and state the remainder is invisible (no tools in this channel)', () => {
   const text = prompt({ diff: 'x'.repeat(120_001) })
   assert.match(text, /truncated to 120000 characters/)
   assert.equal(text.includes('x'.repeat(120_001)), false)

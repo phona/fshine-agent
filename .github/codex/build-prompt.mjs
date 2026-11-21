@@ -109,7 +109,7 @@ export function buildPrompt({ instructions, nameOnly, stat, diff, pr, priorRevie
   if (shownStat.truncated) lines.push(`The stat is truncated to ${MAX_STAT} characters.`, '')
   lines.push(fence('', shownStat.text || '(empty)'), '', '### Diff', '')
   lines.push(shownDiff.truncated
-    ? `The diff is truncated to ${MAX_DIFF} characters. Read the remainder with git diff --find-renames ${spec}.`
+    ? `The diff is truncated to ${MAX_DIFF} characters. 本审查通道**没有工具**（看不到仓库文件与 git），截掉的部分你无法读到；请把确实没看到的范围如实写进 notReviewed。`
     : 'Full three-dot diff:')
   lines.push(fence('diff', shownDiff.text), '')
   return `${lines.join('\n')}\n`

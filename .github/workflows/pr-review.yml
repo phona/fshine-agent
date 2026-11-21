@@ -122,10 +122,13 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           PR_REVIEW_MODEL: ${{ vars.PR_REVIEW_MODEL || secrets.LLM_MODEL }}
           # 该端点是推理模型（step-3.7-flash）：输出额度先花在 reasoning 上，8k 实测会
-          # finish_reason=length 且 content 空；32k 实测稳定产出（107s）。提示词预算 40KB。
+          # finish_reason=length 且 content 空；32k 实测稳定产出（107s）。
+          # 预算按实测剖面定：本 PR 提示词 219KB，其中 diff 段从 58KB 处开始——
+          # 40KB 的旧预算意味着模型**一行 diff 都没看到**（只复述了历史 findings）。
+          # 现在预算覆盖全文（build-prompt 自身的 MAX_DIFF=120K 字符仍是 diff 段的上限）。
           PR_REVIEW_EFFORT: ${{ vars.PR_REVIEW_EFFORT || 'low' }}
           PR_REVIEW_MAX_TOKENS: '32000'
-          PR_REVIEW_MAX_PROMPT_BYTES: '40000'
+          PR_REVIEW_MAX_PROMPT_BYTES: '220000'
         run: |
           set -euo pipefail
           # 本 PR 历次审查 findings（打地鼠检查的历史依据）。拉取失败不阻塞审查——降级为无历史。
