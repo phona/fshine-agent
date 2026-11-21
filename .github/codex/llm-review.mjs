@@ -77,10 +77,37 @@ const body = {
   ...(effort === '' ? {} : { reasoning_effort: effort }),
 }
 
-/** 调一次模型；传输层失败重试一次（云通道偶发秒断；错误文本带 cause 便于定位）。 */
+/** 把 fetch 失败（可能套 AggregateError 深层 cause）摊平成可读文本；不打 URL/密钥。 */
+function describeFetchError(error) {
+  const parts = [error instanceof Error ? `${error.name}: ${error.message}` : String(error)]
+  const collect = (cause) => {
+    if (cause === undefined || cause === null) return
+    if (cause instanceof AggregateError) {
+      const subs = Array.from(cause.errors ?? [])
+      if (subs.length === 0) parts.push(`${cause.name}（无子错误）: ${cause.message}`)
+      for (const sub of subs) collect(sub)
+      return
+    }
+    if (cause instanceof Error) {
+      const code = cause.code ? `/${cause.code}` : ''
+      parts.push(`${cause.name}${code}: ${cause.message}`)
+      collect(cause.cause)
+      return
+    }
+    parts.push(String(cause))
+  }
+  collect(error?.cause)
+  return parts.join(' | ').slice(0, 600)
+}
+
+// 云通道跨网偶发连接被掐（实测 fetch failed 秒断；同 run 内 /models 却可达）。
+// 尝试 3 次、退避 5s/20s；每次失败都很快，累计等待有界。
+const TRANSPORT_RETRY_DELAYS_MS = [5000, 20000]
+
+/** 调一次模型；传输层失败按退避重试（错误文本带 cause 便于定位）。 */
 async function callOnce() {
   let lastError
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  for (let attempt = 0; ; attempt++) {
     let response
     try {
       response = await fetch(`${base}/chat/completions`, {
@@ -89,15 +116,11 @@ async function callOnce() {
         body: JSON.stringify(body),
       })
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      const cause = error?.cause
-      const causeText = cause instanceof Error ? `${cause.name}: ${cause.message}` : cause ? String(cause) : ''
-      lastError = `请求模型失败：${message}${causeText ? `（${causeText.slice(0, 300)}）` : ''}`
-      if (attempt === 1) {
-        await new Promise((resolve) => setTimeout(resolve, 2000))
-        continue
-      }
-      return { ok: false, error: lastError }
+      lastError = `请求模型失败：${describeFetchError(error)}`
+      const delay = TRANSPORT_RETRY_DELAYS_MS[attempt]
+      if (delay === undefined) return { ok: false, error: lastError }
+      await new Promise((resolve) => setTimeout(resolve, delay))
+      continue
     }
     if (!response.ok) {
       const text = await response.text().catch(() => '')
@@ -119,7 +142,6 @@ async function callOnce() {
     }
     return { ok: true, content }
   }
-  return { ok: false, error: lastError ?? '请求模型失败：未知原因' }
 }
 
 /** 是否形如 review JSON（宽松判定；严格校验交给 render-review scrub）。 */
