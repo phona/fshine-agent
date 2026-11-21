@@ -157,3 +157,31 @@ test('端点 4xx：退出非 0，stderr 带状态码，不产出 review', async 
     await stub.close()
   }
 })
+
+test('传输层秒断：自动重试一次后成功（云通道偶发 fetch failed）', async () => {
+  let requests = 0
+  const server = http.createServer((req, res) => {
+    requests += 1
+    if (requests === 1) {
+      res.destroy() // 模拟端点秒断：连接建立后立刻被掐。
+      return
+    }
+    let body = ''
+    req.on('data', (chunk) => { body += chunk })
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ message: { content: REVIEW_JSON } }] }))
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  try {
+    const run = await runScript(`http://127.0.0.1:${port}/v1`)
+    assert.equal(run.code, 0)
+    assert.equal(JSON.parse(run.out).verdict, 'comment')
+    assert.equal(requests, 2, 'first attempt must be retried exactly once')
+    run.cleanup()
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})

@@ -39,4 +39,4 @@ job 里审查步骤先 `unset GITHUB_TOKEN GH_TOKEN` 再调模型——审查者
 node --test .github/codex/*.test.mjs
 ```
 
-覆盖：schema/render 契约、工作流形态（self-hosted 默认与开关、fork 拒绝、密钥隔离、永不 APPROVE）、以及 `llm-review.mjs` 的 stub 端点行为（直给 JSON / 先前言后重试 / 两次非 JSON / 4xx），并断言密钥不进输出。
+覆盖：schema/render 契约、工作流形态（self-hosted 默认与开关、fork 拒绝、密钥隔离、永不 APPROVE、审查文件接线一致性）、以及 `llm-review.mjs` 的 stub 端点行为（直给 JSON / 先前言后重试 / 两次非 JSON / 4xx / 传输层秒断重试一次），并断言密钥不进输出。

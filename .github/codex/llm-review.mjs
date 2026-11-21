@@ -77,37 +77,49 @@ const body = {
   ...(effort === '' ? {} : { reasoning_effort: effort }),
 }
 
-/** 调一次模型；返回 { ok, content, error }。 */
+/** 调一次模型；传输层失败重试一次（云通道偶发秒断；错误文本带 cause 便于定位）。 */
 async function callOnce() {
-  let response
-  try {
-    response = await fetch(`${base}/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
-      body: JSON.stringify(body),
-    })
-  } catch (error) {
-    return { ok: false, error: `请求模型失败：${String(error instanceof Error ? error.message : error).slice(0, 500)}` }
+  let lastError
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    let response
+    try {
+      response = await fetch(`${base}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+        body: JSON.stringify(body),
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const cause = error?.cause
+      const causeText = cause instanceof Error ? `${cause.name}: ${cause.message}` : cause ? String(cause) : ''
+      lastError = `请求模型失败：${message}${causeText ? `（${causeText.slice(0, 300)}）` : ''}`
+      if (attempt === 1) {
+        await new Promise((resolve) => setTimeout(resolve, 2000))
+        continue
+      }
+      return { ok: false, error: lastError }
+    }
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      return { ok: false, error: `模型端点返回 HTTP ${response.status}：${text.slice(0, 2000)}` }
+    }
+    let data
+    try {
+      data = await response.json()
+    } catch (error) {
+      return { ok: false, error: `模型响应不是 JSON：${String(error instanceof Error ? error.message : error).slice(0, 500)}` }
+    }
+    const choice = data?.choices?.[0]
+    const content = choice?.message?.content
+    if (typeof content !== 'string' || content.trim() === '') {
+      const finish = choice?.finish_reason ?? 'unknown'
+      const hasReasoning = typeof choice?.message?.reasoning_content === 'string'
+        && choice.message.reasoning_content.trim() !== ''
+      return { ok: false, error: `模型返回空内容（finish_reason=${finish}，reasoning_content=${hasReasoning ? '有' : '无'}）` }
+    }
+    return { ok: true, content }
   }
-  if (!response.ok) {
-    const text = await response.text().catch(() => '')
-    return { ok: false, error: `模型端点返回 HTTP ${response.status}：${text.slice(0, 2000)}` }
-  }
-  let data
-  try {
-    data = await response.json()
-  } catch (error) {
-    return { ok: false, error: `模型响应不是 JSON：${String(error instanceof Error ? error.message : error).slice(0, 500)}` }
-  }
-  const choice = data?.choices?.[0]
-  const content = choice?.message?.content
-  if (typeof content !== 'string' || content.trim() === '') {
-    const finish = choice?.finish_reason ?? 'unknown'
-    const hasReasoning = typeof choice?.message?.reasoning_content === 'string'
-      && choice.message.reasoning_content.trim() !== ''
-    return { ok: false, error: `模型返回空内容（finish_reason=${finish}，reasoning_content=${hasReasoning ? '有' : '无'}）` }
-  }
-  return { ok: true, content }
+  return { ok: false, error: lastError ?? '请求模型失败：未知原因' }
 }
 
 /** 是否形如 review JSON（宽松判定；严格校验交给 render-review scrub）。 */
