@@ -28,6 +28,11 @@ const model = (process.env.PR_REVIEW_MODEL ?? '').trim() || 'grok/grok-4.7'
 const effort = (process.env.PR_REVIEW_EFFORT ?? '').trim()
 const maxTokensRaw = (process.env.PR_REVIEW_MAX_TOKENS ?? '').trim()
 const maxTokens = /^\d+$/.test(maxTokensRaw) ? Number(maxTokensRaw) : 8000
+// 提示词总预算（字节）：build-prompt 只按"字符"截断 diff，中文 + 统计 + 历史 review 之后
+// 总量可达 200KB+；云通道（step 等）上下文吃不下时会给 200 + 空 content（2026-11-21 实测）。
+// 超预算就从**尾部**（diff 段）截断并留标记——头部指令与 PR 上下文优先保留。
+const maxPromptRaw = (process.env.PR_REVIEW_MAX_PROMPT_BYTES ?? '').trim()
+const maxPromptBytes = /^\d+$/.test(maxPromptRaw) ? Number(maxPromptRaw) : 60000
 
 const writeErr = (text) => fs.writeFileSync(stderrFile, `${text}\n`)
 if (base === '' || key === '') {
@@ -41,6 +46,13 @@ try {
 } catch (error) {
   writeErr(`读取 prompt 失败：${String(error instanceof Error ? error.message : error).slice(0, 500)}`)
   process.exit(1)
+}
+const promptBytes = Buffer.byteLength(prompt)
+if (promptBytes > maxPromptBytes) {
+  // 按字节截断会切断多字节字符：退到字符边界（Buffer 截断后再解码，替换损坏的尾字符）。
+  const truncated = Buffer.from(prompt, 'utf8').subarray(0, maxPromptBytes).toString('utf8').replace(/\uFFFD$/, '')
+  prompt = `${truncated}\n\n（提示词超出预算：原始 ${promptBytes} 字节，已按 ${maxPromptBytes} 字节截断，diff 尾部缺失）`
+  process.stderr.write(`prompt truncated ${promptBytes} -> ~${maxPromptBytes} bytes\n`)
 }
 
 const body = {
@@ -87,8 +99,14 @@ async function callOnce() {
   } catch (error) {
     return { ok: false, error: `模型响应不是 JSON：${String(error instanceof Error ? error.message : error).slice(0, 500)}` }
   }
-  const content = data?.choices?.[0]?.message?.content
-  if (typeof content !== 'string' || content.trim() === '') return { ok: false, error: '模型返回空内容' }
+  const choice = data?.choices?.[0]
+  const content = choice?.message?.content
+  if (typeof content !== 'string' || content.trim() === '') {
+    const finish = choice?.finish_reason ?? 'unknown'
+    const hasReasoning = typeof choice?.message?.reasoning_content === 'string'
+      && choice.message.reasoning_content.trim() !== ''
+    return { ok: false, error: `模型返回空内容（finish_reason=${finish}，reasoning_content=${hasReasoning ? '有' : '无'}）` }
+  }
   return { ok: true, content }
 }
 

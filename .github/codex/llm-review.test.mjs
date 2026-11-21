@@ -119,6 +119,32 @@ test('两次都不是 JSON：退出非 0，stderr 有原因，不产出 review',
   }
 })
 
+test('提示词超预算：按字节截断并留标记（云通道上下文保护）', async () => {
+  const stub = await startStub([{ status: 200, content: REVIEW_JSON }])
+  try {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-review-big-'))
+    const promptFile = path.join(dir, 'prompt.md')
+    const outFile = path.join(dir, 'out.txt')
+    const errFile = path.join(dir, 'err.txt')
+    fs.writeFileSync(promptFile, 'x'.repeat(200_000))
+    const child = spawn(process.execPath, [SCRIPT, promptFile, outFile, errFile], {
+      env: { ...process.env, LLM_API_BASE_URL: stub.base, LLM_API_KEY: FAKE_KEY, PR_REVIEW_MODEL: 'stub-model' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stderr = ''
+    child.stderr.on('data', (c) => { stderr += c })
+    const code = await new Promise((resolve) => child.on('close', resolve))
+    assert.equal(code, 0)
+    const sent = stub.seen[0].body
+    assert.ok(Buffer.byteLength(sent) < 160_000, 'request body must be truncated')
+    assert.match(sent, /提示词超出预算/)
+    assert.match(stderr, /prompt truncated/)
+    fs.rmSync(dir, { recursive: true, force: true })
+  } finally {
+    await stub.close()
+  }
+})
+
 test('端点 4xx：退出非 0，stderr 带状态码，不产出 review', async () => {
   const stub = await startStub([{ status: 401, content: '' }])
   try {
