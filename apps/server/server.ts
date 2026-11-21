@@ -972,6 +972,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       env: deps.env,
       profile,
       stateDir,
+      // 模型用量观测：后台兜底 Worker 的 usage.jsonl 与前台同一文件（<dbPath 同目录>/usage.jsonl）。
+      dbPath: deps.dbPath,
       registry: taskRegistry,
       policy,
       workerSkills,

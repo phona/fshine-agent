@@ -41,6 +41,7 @@ import {
   permissionsOfRole,
 } from '@fshine/core';
 import { applyExecutorLabel, loadAgentProfile } from '../packages/agent/src/agent-profile';
+import { createModelUsageSink, USAGE_FILENAME, usageFilePathOf } from '../packages/agent/src/model-usage';
 import { createPiTurnDriver, parseContextWindow, parsePiThinkingLevel, type PiThinkingLevel, type PiTurnDriverOptions } from '../packages/agent/src/pi-driver';
 import type { MainSessionLocation } from '../packages/agent/src/session-persistence';
 import { createDummyCliClient, readOnlyOperationNames, writeOperationNames } from '../packages/agent/src/dummy-cli-client';
@@ -603,6 +604,11 @@ export interface BackgroundDispatchInput {
   env: NodeJS.ProcessEnv;
   profile: ContextProfileConfig;
   stateDir: string;
+  /**
+   * 部署状态根下的任务底账 db 路径（缺省不传 = 用量落盘退回 stateDir）：兜底 Worker 驱动的
+   * usage.jsonl 按 `<dbPath 同目录>/usage.jsonl` 落，与前台 Main/inline Worker 同一文件。
+   */
+  dbPath?: string;
   registry: TaskRegistry;
   policy: ResourcePolicy;
   workerSkills?: readonly WorkerSkill[];
@@ -710,7 +716,20 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
       }));
     const workerDriver = input.workerDriver ?? (input.createDrivers !== undefined
       ? (await input.createDrivers(input.env)).workerDriver
-      : createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env) }));
+      : createPiTurnDriver({
+        env: input.env,
+        ...contextWindowFrom(input.env),
+        ...compactionSettingsFrom(input.env),
+        // 模型用量观测（owner 2026-11-21 最小方案）：兜底 Worker 也落 usage.jsonl，与前台同一
+        // 文件（给了 dbPath 时）；进程级 runner 跨主体，任务 principal 在任务执行时才定——
+        // 驱动层拿不到 principal/session，按纪律省略（不编）。
+        onModelUsage: createModelUsageSink({
+          filePath: input.dbPath !== undefined
+            ? usageFilePathOf(input.dbPath)
+            : path.join(input.stateDir, USAGE_FILENAME),
+          agent: 'worker',
+        }),
+      }));
     // 长任务等待走同一个执行面客户端（CLI 适配器的长轮询）；未实现 wait 的客户端不接端口。
     longTasks = longTaskPortOf(face.client);
     // CAP-01 S2 后台文件面：与 inline 会话桥同一装配参数、同一 store，实例按任务懒建
@@ -1079,6 +1098,15 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
     } else {
       mainSystemPrompt += `\n\n${renderCapabilitySummary(capabilityCatalog)}\n\n${OUTCOME_BEHAVIOR_NOTE}`;
     }
+    // 模型用量观测（owner 2026-11-21 最小方案）：本装配能拿到真实 principal/session 与 dbPath，
+    // 缺省驱动都注入同一个 usage.jsonl sink（`<dbPath 同目录>/usage.jsonl`）。写失败只记
+    // 结构化事件、不影响回合（见 model-usage.ts）。
+    const usageSink = (agent: 'main' | 'worker') => createModelUsageSink({
+      filePath: usageFilePathOf(input.dbPath),
+      agent,
+      principalId: input.principalId,
+      sessionId: input.sessionId,
+    });
     const drivers = input.createDrivers !== undefined
       ? await input.createDrivers(input.env, input.mainSession)
       : {
@@ -1090,10 +1118,16 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
           ...mainThinkingLevelFrom(input.env),
           reuseConversation: true,
           ...mainSessionOptions(input.mainSession),
+          onModelUsage: usageSink('main'),
         }),
         // Worker 是一次性回合（每任务独立会话），不落业务会话文件；思考档 = 驱动缺省解析
         // （llm.thinkingLevel，owner 决定 medium）。
-        workerDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env) }),
+        workerDriver: createPiTurnDriver({
+          env: input.env,
+          ...contextWindowFrom(input.env),
+          ...compactionSettingsFrom(input.env),
+          onModelUsage: usageSink('worker'),
+        }),
       };
 
     // P6：async = 受理/后台路径；runner 进程级共享（server 注入），缺省按本会话执行面构建。
