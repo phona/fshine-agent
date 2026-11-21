@@ -1176,12 +1176,17 @@ export function renderConfirmationResumeFact(confirmation: {
   if (confirmation.args === undefined) {
     return `${head}\n按已确认的提案直接提交。`;
   }
-  // 参数按不透明数据处理：只序列化，不排序、不裁剪、不改写（逐字节照抄才是机械事实）。
+  // 参数按不透明数据处理：只序列化，不排序、不裁剪（值逐字节照抄才是机械事实）。
+  // 2026-11-21（独立审查 major）：原句「不要省略或改写任何参数」与 op_* 工具面**互斥**——
+  // 提案参数是执行层原名（`--collection` 等），工具面只收业务字段名（`collection`），
+  // 照字面不改写会被 assertOpToolArgs 确定性拒绝。改为：**值不改、字段名按工具声明转换**，
+  // 并明确「清单里没有的字段不要提交」（hostOnly 参数不在工具声明里）。
   // 不带 operation 名——提交用哪个 operation 由委派清单（含带 --confirmation 的 commit）自己说清。
   const proposal = JSON.stringify({ args: confirmation.args });
   return [
     head,
-    '下面是已确认提案的调用参数原文（宿主逐字持有）：按这些参数直接提交，不要省略或改写任何参数。',
+    '下面是已确认提案的调用参数原文（宿主逐字持有，值不要改）：字段名按工具声明转换'
+      + '（工具面用业务字段名、不带 `--` 前缀）；工具声明里没有的字段不要提交。',
     proposal,
   ].join('\n');
 }

@@ -10,7 +10,7 @@
  * 用例：
  *   ① 同 messageId 连发两次（同一实例）→ 第二次回放同一句回执、零新任务、零新执行；
  *   ② 关掉 server、同 dbPath 重建、再投同一条 messageId → 回放同一句回执、零新任务、零执行；
- *   ③ 底账留一條 processing（上一进程挂了）→ 再投不执行、回「还在办」、落事件；
+ *   ③ 底账留一条 processing（上一进程挂了）→ 再投不执行、回**如实兜底**（没办完/不重复执行/请重发）、落事件；
  *   ④ 不同会话的相同 messageId 不得互相吞（主键含 principal+session）。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -29,8 +29,9 @@ import type { TurnDriver } from '../../packages/agent/src/driver-contract';
 import { createServer, type Server } from './server';
 
 const FIXTURE_ROOT = path.resolve(__dirname, '..', '..', 'scripts', 'eval', 'fixtures', 'dummy-platform');
-/** 「上一进程挂了」话术（与 server.ts 的 INBOUND_STILL_PROCESSING_NOTE 逐字一致）。 */
-const STILL_PROCESSING_NOTE = '这条我还在办，办完会发你，不用再发一遍。';
+/** 「上一进程挂了」的如实兜底（与 server.ts 的 INBOUND_STILL_PROCESSING_NOTE 逐字一致）。 */
+const STILL_PROCESSING_NOTE =
+  '这条消息上次没办完（我这边中途中断过），我不会重复执行它，结果未知——麻烦你重发一次。';
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -180,7 +181,7 @@ describe('入站消息跨重启幂等（底账事实）', () => {
     }
   });
 
-  it('③ 底账留 processing（上一进程挂了）：再投不执行、回「还在办」、落事件', async () => {
+  it('③ 底账留 processing（上一进程挂了）：再投不执行、回如实兜底（不谎称还在办）、落事件', async () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
 
@@ -202,6 +203,11 @@ describe('入站消息跨重启幂等（底账事实）', () => {
       const reply = await server.handler(incoming('test-user', 'msg-stuck'));
 
       expect(reply).toBe(STILL_PROCESSING_NOTE);
+      // 如实兜底的三条硬要求：不谎称还在办、说明不重复执行、给出下一步（重发）。
+      expect(STILL_PROCESSING_NOTE).not.toContain('还在办');
+      expect(STILL_PROCESSING_NOTE).not.toContain('办完会发你');
+      expect(STILL_PROCESSING_NOTE).toContain('不会重复执行');
+      expect(STILL_PROCESSING_NOTE).toContain('重发');
       expect(client.requests).toHaveLength(0); // 不重复执行
       expect(countTasks(dbPath)).toBe(0); // 不重复办事
       const events = logs.filter((line) => line['event'] === 'message_still_processing');

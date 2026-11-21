@@ -540,7 +540,10 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     // 委派文本（renderWorkerDelegation 实际产出）：本次任务 = 已确认提案事实 + 摘要 + 正向提交指令。
     expect(delegationText).toContain('提交上一轮已确认的提案');
     expect(delegationText).toContain(SUMMARY);
-    expect(delegationText).toContain('按这些参数直接提交，不要省略或改写任何参数');
+    // 2026-11-21（独立审查 major）：值不改 + 字段名按工具声明转换（工具面只收业务字段名）。
+    expect(delegationText).toContain('值不要改');
+    expect(delegationText).toContain('字段名按工具声明转换');
+    expect(delegationText).not.toContain('不要省略或改写任何参数');
     // 2026-11-20（S3）：原交办 prose（含被用户改掉的旧值）不进委派，事实是本次任务正文。
     expect(delegationText.split('## 本次任务\n')[1]!).toContain('提交上一轮已确认的提案');
     // 机械事实是宿主的透传，不含句柄（Worker 永远看不到确认凭据）。

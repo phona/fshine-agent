@@ -216,11 +216,17 @@ const RECALC_DELIVERY_GATED_NOTE = '部分表格未通过公式实算校验，�
 const RECALC_DELIVERY_PARTIAL_NOTE = '部分表格未通过公式实算校验，未予发送；其余文件已发送';
 
 /**
- * 入站消息跨重启幂等的「上一进程未落定」话术（2026-11-19）：底账里这条 messageId 是
- * state='processing'（上一进程认领后挂了）且本进程无在途。不重复执行、不重复办事，如实
- * 告知用户；同时记事件 message_still_processing 供运维发现（这类卡住的账要能被看到）。
+ * 入站消息跨重启幂等的「上一进程未落定」如实告知（2026-11-21 独立审查 blocking 修复）：
+ * 底账里这条 messageId 是 state='processing'（上一进程认领后挂了）且本进程无在途。
+ *
+ * 纪律：**不重复执行、不重复办事**（processing 的语义是结果未知，重放可能双写）；但**绝不
+ * 能说成「还在办、办完会发你」**——上一进程已经死了，那句话永远兑现不了，且这是宿主直接
+ * 写给用户的话（推翻我们自己的「宿主不替用户编话」）。这里是**如实兜底**：模型从未收到这条
+ * 消息（它在上一个进程里被认领后中断），无从由模型转述，宿主只能如实说明「没办完 + 不重复
+ * 执行 + 结果未知 + 请重发」。同时记事件 `message_still_processing` 供运维发现。
  */
-const INBOUND_STILL_PROCESSING_NOTE = '这条我还在办，办完会发你，不用再发一遍。';
+const INBOUND_STILL_PROCESSING_NOTE =
+  '这条消息上次没办完（我这边中途中断过），我不会重复执行它，结果未知——麻烦你重发一次。';
 
 /**
  * 群主体判定（宿主自己的身份推导，见 handler：群聊 principalId = `<渠道>:group:<会话id>`；
@@ -552,6 +558,25 @@ export function turnProducedNothing(input: {
     && input.taskIds.length === 0;
 }
 
+/**
+ * 失败投递的末次决定性失败码（2026-11-21，独立审查 blocking 修复的配套）：
+ * 倒序取**最后一条** failed/refused 且带非空 error.code 的执行行。
+ * 不能取第一条——先被 CONFIRMATION_REQUIRED 拒、后才是真正失败码时，首条会把分类引到
+ * 「等确认」或「我方故障」，与任务实际终局相反（与 execution-runtime 的 P0 同口径）。
+ */
+export function lastDecisiveFailureCode(
+  executions: ReadonlyArray<{ status?: string; error?: { code?: string } }>,
+): string | undefined {
+  for (let index = executions.length - 1; index >= 0; index -= 1) {
+    const execution = executions[index];
+    if (execution === undefined) continue;
+    if (execution.status !== 'failed' && execution.status !== 'refused') continue;
+    const code = execution.error?.code;
+    if (typeof code === 'string' && code !== '') return code;
+  }
+  return undefined;
+}
+
 export async function createServer(deps: ServerDeps): Promise<Server> {
   const { id: profileId, profile } = resolveSingleProfile(deps.config);
   if (profile.gateway === undefined && deps.createExecutionFace === undefined) {
@@ -675,8 +700,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     }
   };
   /**
-   * 失败投递的分类输入（2026-11-19）：任务底账执行事实里第一条 failed/refused 行的
-   * error.code（执行层原始码，只用于 classifyFailure 归类；**不进用户文本**）。
+   * 失败投递的分类输入（2026-11-20 修正：末次决定性结果，不是第一条）：任务底账执行事实里
+   * **最后一条** failed/refused 行的 error.code（执行层原始码，只用于 classifyFailure 归类；
+   * **不进用户文本**）。与 execution-runtime 的 P0 修法同口径——先被 CONFIRMATION_REQUIRED
+   * 拒、后才是真正失败码时，必须按后者归类，否则用户被按「等确认」或「我方故障」引错方向。
    * 取不到（无执行行/异常）= undefined，由投递面落 executor_failed。
    */
   const failureCodeOf = (taskId: string): string | undefined => {
@@ -684,12 +711,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       const record = (taskRegistry as unknown as {
         get(id: string): { executions?: ReadonlyArray<{ status?: string; error?: { code?: string } }> };
       }).get(taskId);
-      const failed = (record.executions ?? []).find((execution) =>
-        (execution.status === 'failed' || execution.status === 'refused')
-        && typeof execution.error?.code === 'string'
-        && execution.error.code !== '',
-      );
-      return failed?.error?.code;
+      return lastDecisiveFailureCode(record.executions ?? []);
     } catch {
       return undefined;
     }

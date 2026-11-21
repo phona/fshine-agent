@@ -567,7 +567,10 @@ describe('写确认续跑·委派机械事实（纯函数面）', () => {
     });
     // 2026-11-20（S3）：这段文本直接作为委派「本次任务」正文——正向指令、不给 prepare 线索。
     expect(withArgs).toContain('提交上一轮已确认的提案（摘要：将向集合「alpha」新增 2 条）。');
-    expect(withArgs).toContain('按这些参数直接提交，不要省略或改写任何参数');
+    // 2026-11-21（独立审查 major）：值不改 + 字段名按工具声明转换（工具面只收业务字段名）。
+    expect(withArgs).toContain('值不要改');
+    expect(withArgs).toContain('字段名按工具声明转换');
+    expect(withArgs).not.toContain('不要省略或改写任何参数');
     // 正向指令：不再出现「不是重新准备 / 不要重新生成提案」这类否定话术（否定词本身是 prepare 线索）。
     expect(withArgs).not.toContain('不是重新准备');
     expect(withArgs).not.toContain('重新生成提案');
