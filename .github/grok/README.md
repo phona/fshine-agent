@@ -6,9 +6,9 @@
 
 检查名是 `Grok PR review / grok-pr-review`。本仓库不在这里改分支保护。
 
-## 大 PR 分块审查
+## agentic 文件审查
 
-核心 diff（排除 `*.test.ts`、`*.test.mjs`、`scripts/eval/**`）按**文件**切成 N 块，每块目标约 50KB、上限约 70KB（文件不拆开、跨块不重复），逐块串行调用 grok 后合并成一份 review 再 post。块数与清单由 `build-prompt.mjs --list-chunks` 算，逐块 prompt 由 `--chunk i/N` 生成，合并由 `merge-reviews.mjs` 完成。测试/eval 文件只给 stat + 清单，不进任何块的完整 diff。小 PR（核心 diff 装得下一块）仍是单块，行为不变。分块后 job 超时按块数放宽（见 workflow 的 `timeout-minutes`）。
+prompt 不再内联 diff：大 diff 塞不下一份 prompt，还会在读完之前撞 turn 上限被取消。`build-prompt.mjs` 只给「审查要求 + 改动文件清单 + 每个文件的 stat」，并在 prompt 里说明 PR head 已 checkout 到工作目录，让 grok 用只读文件工具（`read_file` / `grep` / `list_dir`）按需读文件，用 `git diff --find-renames <base>...<head> -- <path>`、`git show <head>:<path>` 看具体改动。workflow 用 `--permission-mode default`：只读工具与内置只读 shell 命令（`git status/diff/log/show` 等）无需批准即可运行；文件写入仍需批准，非交互运行里会被拒，审查因此保持只读。一次 grok 调用出一份 review，不再分块、不合并：`extract-review.mjs` 抽 `structuredOutput`，`render-review.mjs` 校验并发布。
 
 ## 修复端政策
 
