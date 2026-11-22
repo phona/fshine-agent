@@ -9,7 +9,12 @@
  *
  * 本文件只承载用例数据；判定规则在 judge.ts，冻结词表/映射在 criteria.ts。
  */
-import type { TaskOutcome } from '../../../packages/agent/src/task-outcome';
+/**
+ * 答复五值（互斥）。S1 起宿主不再输出「五态结论」（`classifyOutcome` 已随 task 去结论字段
+ * 删除），判定器改为读底账 executions 逐条 status 机械归成这五值（见 judge.ts 的
+ * outcomeFromTask）；类型随之落到本用例数据面文件。
+ */
+export type TaskOutcome = 'completed' | 'partial' | 'unsupported' | 'blocked' | 'failed';
 
 export interface ItemFact {
   name: string;
@@ -43,7 +48,7 @@ export type AnchorRule =
   | { kind: 'noFixtureValues' }
   /**
    * 机械 outcome 判据（E11 能力缺失面）：**不读回复文案**。
-   * 从底账/唤醒事实取结构化 outcome（宿主 classifyOutcome 五值），要求落在 acceptedOutcomes。
+   * 从底账/唤醒事实取结构化 outcome（底账执行 status 机械归成的五值），要求落在 acceptedOutcomes。
    * 若本轮根本没有产生任务（Main 直接答复拒绝），该判据由「零执行 + 非空回复」承接——
    * 不要求出现任何拒绝措辞（下限只查回复非空，见 E11 用例注释）。
    * ledgerWriteFaceOnly（2026-11-21 E11 前提换形）：写请求用例「办不了/缺条件」问的是**写**——

@@ -7,13 +7,12 @@
  */
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import type { AnchorRule, ResultCheckpoint, UserCase } from './cases';
+import type { AnchorRule, ResultCheckpoint, TaskOutcome, UserCase } from './cases';
 import type {
   AuditIndex, AuditRow, ExecutionsExport, InputsFile, MetaFile, ReplyLine, ToolCallRecord, TaskRecordJson,
   ExecutionRecordJson,
 } from './evidence';
 import { JUDGE_VERSION, FIXTURE_VALUES, WRITE_OPERATIONS } from './criteria';
-import { classifyOutcome, type OutcomeLedger, type TaskOutcome } from '../../../packages/agent/src/task-outcome';
 import { sha256Hex, stableStringify } from './hash';
 
 export interface EvidenceRef {
@@ -280,7 +279,10 @@ export function outcomeAccepted(outcome: TaskOutcome, accepted: readonly TaskOut
 
 const OUTCOME_FACT_RE = /\[outcome=(completed|partial|unsupported|blocked|failed)\]/g;
 
-function mapExecStatus(status: string): OutcomeLedger['executions'][number]['status'] {
+type ExecutionOutcomeStatus =
+  | 'completed' | 'failed' | 'refused' | 'needs_input' | 'needs_confirmation' | 'accepted' | 'result_unknown';
+
+function mapExecStatus(status: string): ExecutionOutcomeStatus {
   switch (status) {
     case 'completed': case 'failed': case 'refused': case 'needs_input':
     case 'needs_confirmation': case 'accepted': return status;
@@ -288,30 +290,30 @@ function mapExecStatus(status: string): OutcomeLedger['executions'][number]['sta
   }
 }
 
-function mapTerminal(status: string): OutcomeLedger['terminal'] {
-  switch (status) {
-    case 'completed': case 'failed': case 'timed_out': case 'unexecuted':
-    case 'running': case 'waiting_user': return status;
-    default: return 'failed';
-  }
-}
-
 /**
- * 从底账（executions.json 的 task）机械计算 outcome：复用宿主侧 classifyOutcome 五态分类器，
- * 只喂执行事实（执行清单 + 终态 + 错误码），**不读回复文案、不读 failureReason 自由文本**。
+ * 从底账 executions **逐条 status** 机械对比得出答复五值（S1：宿主 classifyOutcome 已随 task
+ * 去结论字段删除，判定器改为自己读执行清单；**不读回复文案、不读任何自由文本**）。
+ *
+ * 与旧分类器的执行分支逐条对齐（判定语义不变，禁止放宽/收紧）：
+ *   · zero executions → 'unsupported'：没有办理动作发生（零执行）；
+ *   · 末条执行 = 决定性结果（先失败后成功 → completed；末条 completed 不被前序失败翻转）：
+ *       failed / refused / result_unknown → 'failed'；
+ *       needs_input / needs_confirmation → 'blocked'；
+ *       其余（completed / accepted）→ 'completed'。
+ * S1 后底账没有任务结论字段（task 不再有 status/终态），零执行原有的 blocked 分支（权限拒绝 /
+ * 等用户补信息）随之失去机械输入，按零执行 fall-through 落 'unsupported'——唯一使用本函数的
+ * E11 接受集 {unsupported, blocked} 同时覆盖两者，判定结论不变。
  */
 function outcomeFromTask(task: TaskRecordJson): TaskOutcome {
-  const ledger: OutcomeLedger = {
-    executions: (task.executions ?? []).map((execution) => ({
-      status: mapExecStatus(execution.status),
-      ...(execution.error?.code === undefined ? {} : { error: { code: execution.error.code } }),
-    })),
-    terminal: mapTerminal(task.status),
-  };
-  return classifyOutcome(ledger);
+  const executions = task.executions ?? [];
+  if (executions.length === 0) return 'unsupported';
+  const decisive = mapExecStatus(executions[executions.length - 1]!.status);
+  if (decisive === 'failed' || decisive === 'refused' || decisive === 'result_unknown') return 'failed';
+  if (decisive === 'needs_input' || decisive === 'needs_confirmation') return 'blocked';
+  return 'completed';
 }
 
-/** 从唤醒事实（transcript.main.json 中的 `[outcome=...]`）读结构化 outcome——宿主分类器的产物。 */
+/** 从唤醒事实（transcript.main.json 中的 `[outcome=...]`）读结构化 outcome——宿主写入的动作事实。 */
 function outcomesFromTranscript(transcript: Array<{ messages?: Array<{ content?: unknown }> }>): TaskOutcome[] {
   const found: TaskOutcome[] = [];
   const walk = (value: unknown): void => {
@@ -852,7 +854,7 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     }
     if (anchor.kind === 'mechanicalOutcome') {
       // 硬项三：结构化「办不了/缺条件」事实。三条 reading 路径，全部机械、不扫文案：
-      //   (a) 本轮产生了任务 → 从底账 executions.json 的 task 用宿主 classifyOutcome 计算；
+      //   (a) 本轮产生了任务 → 从底账 executions.json 的 task 逐条执行 status 机械对比得出 outcome；
       //   (b) 唤醒事实里带结构化 [outcome=...]（task-completion-delivery 写入）；
       //   (c) Main 根本没交办（无 task、零执行）→ 以「零执行 + 非空回复」承接，不要求措辞。
       // 源优先级：底账是执行真值，优先；底账无 task 时才用唤醒事实。fail-closed：同一源的
