@@ -54,6 +54,11 @@ export interface TaskRecordJson {
   principalId: string;
   sessionId: string;
   request: string;
+  /**
+   * 旧状态**词投影**（taskStatusOf：机械事实 → 词），不是底账结论——S1 起底账没有 status
+   * 字段，runner 导出 T1 时按 executed 行/结束事实/租约投影写入。判 outcome 只读 executions
+   * 的逐条执行行（judge.outcomeFromTask），不读本字段。
+   */
   status: string;
   resultText?: string;
   failureReason?: string;

@@ -37,6 +37,7 @@ import { sha256Hex, stableStringify } from './hash';
 import { runJudgeSelftest } from './selftest';
 import { genericResolveCaseIds, loadSuite, type EvalSuite } from '../exploration/suite-contract';
 import { scanUserVisibleText } from '../shared/internal-terms';
+import { taskStatusOf } from '../../../packages/agent/testing/task-fact-view';
 import {
   checkTurnFaceShape,
   formatShapeViolations,
@@ -531,7 +532,11 @@ async function runTrial(options: TrialOptions): Promise<void> {
         break;
       }
     }
-    tasksSnapshot = [...assembled.taskRegistry.list()];
+    // S1：底账没有 status——T1 证据快照的 status 词按机械事实投影（与 business-e2e 的
+    // experiments/executor.ts、model-executor.ts 同口径）。不投影，报告 T1 行会渲染成
+    // undefined，证据快照也与 audit-schema 里 TaskRecordJson 的形状对不上。投影是词，不是
+    // 结论：judge 判 outcome 仍只读 executions.json 的逐条执行行。
+    tasksSnapshot = assembled.taskRegistry.list().map((task) => ({ ...task, status: taskStatusOf(task) }));
   } finally {
     assembled.close();
   }
