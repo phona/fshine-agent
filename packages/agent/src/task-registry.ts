@@ -127,21 +127,33 @@ export type TimeoutKind = 'queued' | 'execution' | 'waiting_user';
 /**
  * 存活事实的输入投影（内存 TaskRecord 与 SQLite 读回行共用；pendingQuestion 只判有无）。
  * executions 只读末条 status（判断「已受理、等回执」的长任务：末条 = accepted）；缺省 = 无执行行
- * （旧调用面不传也算合法）。
+ * （旧调用面不传也算合法）。resultText/replyText 只判有无汇报存档（长任务完成后汇报走
+ * archiveReply，续跑成功不追加执行行——末条仍是 accepted）。
  */
 export type TaskLivenessFacts = Pick<
   TaskRecord,
   'leaseOwner' | 'leaseUntil' | 'diedAt' | 'cancelledAt' | 'timedOutAt' | 'resourceLimitedAt'
-> & { pendingQuestion?: unknown; executions?: readonly { status: string }[] };
+> & {
+  pendingQuestion?: unknown;
+  executions?: readonly { status: string }[];
+  resultText?: string;
+  replyText?: string;
+};
 
 /**
- * 「已受理、等回执」的长任务（末条执行 = accepted）——租约随受理释放，但任务仍在跑。
+ * 「已受理、等回执」的长任务（末条执行 = accepted 且**无汇报存档**）——租约随受理释放，但任务仍在跑。
  * 纯机械读：末条执行行的 status（执行清单按追加序，accepted 是末条；续跑完成后会追加新行）。
+ * 已存档汇报（resultText/replyText）即已收尾：长任务完成后只汇报、不追加执行行，末条仍可能是
+ * accepted——不排除会把已完成的长任务投影成 running（tasks --redo 随之错误拒绝）。
+ * 口径与 testing/task-fact-view.ts 的 taskStatusOf（accepted + 汇报 → completed）对齐。
  */
-function acceptedInFlightOf(task: { executions?: readonly { status: string }[] }): boolean {
+function acceptedInFlightOf(
+  task: { executions?: readonly { status: string }[]; resultText?: string; replyText?: string },
+): boolean {
   const executions = task.executions;
   if (executions === undefined || executions.length === 0) return false;
-  return executions[executions.length - 1]!.status === 'accepted';
+  if (executions[executions.length - 1]!.status !== 'accepted') return false;
+  return !taskReportedOf(task);
 }
 
 /** 存活（守护事实）：waiting_user / running / died；undefined = 未启动或已收尾（读执行行与汇报分辨）。 */
@@ -153,7 +165,7 @@ export type TaskLiveness = 'running' | 'died' | 'waiting_user';
  *   · diedAt 或租约已过期 → died（结果未知；看门狗尚未跑到也按事实算 died）；
  *   · 等待形状 → waiting_user；
  *   · 有效租约 → running；
- *   · 末条执行 = accepted（长任务已受理、等回执；租约已释放）→ running；
+ *   · 末条执行 = accepted 且无汇报存档（长任务已受理、等回执；租约已释放）→ running；
  *   · 其余（未启动 / 已收尾）→ undefined。
  */
 export function taskLivenessOf(task: TaskLivenessFacts, now: string = new Date().toISOString()): TaskLiveness | undefined {
@@ -165,6 +177,7 @@ export function taskLivenessOf(task: TaskLivenessFacts, now: string = new Date()
   if (task.pendingQuestion !== undefined) return 'waiting_user';
   // 长任务「已受理、等回执」（2026-11-22 Grok 复审）：受理时租约被释放，末条执行 = accepted。
   // 任务是活的（等回执），不是「未启动/已收尾」——投影为 running（旧 status='running' 语义）。
+  // acceptedInFlightOf 已排除有汇报存档的行（完成后只汇报、不追加执行行）。
   if (acceptedInFlightOf(task)) return 'running';
   return undefined;
 }
@@ -208,6 +221,7 @@ export function taskStateWordOf(
   if (leaseUntil !== undefined && leaseUntil > now) return 'running';
   // 长任务「已受理、等回执」（2026-11-22 Grok 复审恢复）：受理时租约被释放，末条执行 = accepted
   // → 仍是 running（不是「已启动但无汇报收尾」的 failed）。旧 status='running' 的等价语义。
+  // acceptedInFlightOf 已排除有汇报存档的行：已完成的长任务落到下面的 reported。
   if (acceptedInFlightOf(task)) return 'running';
   // 汇报存档先于未启动判定（有汇报必然已跑过；running_since 缺省只见于旧库迁移行）。
   const report = (task.resultText ?? task.replyText ?? '').trim();
@@ -489,9 +503,9 @@ export interface TaskRegistry {
   /** 用户取消**请求**：cancel_requested_at 一次性写入（请求 ≠ 确认；不清租约、不改终局）。 */
   markCancelRequested(taskId: string, options?: MutationOptions): TaskRecord;
   /**
-   * 回合失败事实（不写任务结论）：回合以「没有汇报」收尾/抛错/结果未知时发一条事实事件——
-   * 失败通知与失败唤醒面的事实源。事实依据 = 底账现状（无汇报存档、执行行原样），
-   * 本方法只发事件，不改任务行。
+   * 回合失败事实（不写任务结论）：回合以「没有汇报」收尾/抛错/结果未知时，落一条一次性机械时刻
+   * （round_failed_at）并发一条事实事件——失败通知、失败唤醒与在跑扫描的事实源。事实依据 =
+   * 底账现状（无汇报存档、执行行原样）；不写业务结论、不改终局、不清租约（无汇报 ≠ 结果未知）。
    */
   noteRoundFailed(taskId: string): void;
   /**

@@ -2762,7 +2762,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     const deadline = taskRunClock.now() + waitMs;
     // 落定判定（S1 事实口径）：收尾事实或汇报存档在场 → 已落定；此外「**已启动**的回合
     // 已结束且没有 accepted 长任务在等」也算落定（无汇报收尾——runner 的 noteRoundFailed
-    // 只发事件不落行内事实，窗口轮询据此把无汇报收尾当落定，走如实上抛路径）。
+    // 已落 round_failed_at 一次性时刻；回合已结束的无汇报收尾据此当落定，走如实上抛路径）。
     // queued（未认领，runningSince 缺省）与 waiting_user（等用户接续）都不算落定：前者
     // runner 还没派发，后者窗口内进入等待按超窗回执处理（见上方注释）。
     const roundFinished = (task: TaskRecord): boolean => {

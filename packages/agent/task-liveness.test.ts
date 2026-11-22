@@ -7,7 +7,7 @@
  * 修复：末条执行 = accepted（无终局、无汇报）→ running（旧 status='running' 语义）。
  */
 import { describe, expect, it } from 'vitest';
-import { taskLivenessOf, taskStateWordOf } from './src/task-registry';
+import { createTaskRegistry, taskLivenessOf, taskStateWordOf } from './src/task-registry';
 
 const ACCEPTED = [{ status: 'accepted' }] as const;
 
@@ -20,7 +20,29 @@ describe('存活/状态词投影：长任务 accepted（受理中）', () => {
     expect(taskStateWordOf({ runningSince: '2026-11-22T00:00:00.000Z', executions: ACCEPTED })).toBe('running');
   });
 
-  it('已存档汇报的长任务（末条 completed + 汇报）→ reported（不被 accepted 分支误判）', () => {
+  it('已存档汇报的长任务（末条仍 accepted + resultText）→ reported，不是 running/failed', () => {
+    // 真实形状：长任务完成后汇报走 archiveReply，续跑成功不追加执行行——末条仍是 accepted。
+    // 旧 acceptedInFlightOf 只看末条 status，把已完成任务投影成 running（tasks --redo 随之误拒）。
+    const reported = {
+      runningSince: '2026-11-22T00:00:00.000Z',
+      resultText: '导出完成。',
+      executions: ACCEPTED,
+    } as const;
+    expect(taskStateWordOf(reported)).toBe('reported');
+    expect(taskLivenessOf(reported)).toBeUndefined();
+  });
+
+  it('已存档汇报的长任务（末条仍 accepted + replyText 存档面）→ 同样 reported', () => {
+    const reported = {
+      runningSince: '2026-11-22T00:00:00.000Z',
+      replyText: 'Main 回复：导出完成。',
+      executions: ACCEPTED,
+    } as const;
+    expect(taskStateWordOf(reported)).toBe('reported');
+    expect(taskLivenessOf(reported)).toBeUndefined();
+  });
+
+  it('已存档汇报的短任务（末条 completed + 汇报）→ reported（不被 accepted 分支误判）', () => {
     expect(taskStateWordOf({
       runningSince: '2026-11-22T00:00:00.000Z',
       resultText: '导出完成。',
@@ -41,5 +63,19 @@ describe('存活/状态词投影：长任务 accepted（受理中）', () => {
       diedAt: '2026-11-22T00:01:00.000Z',
       executions: ACCEPTED,
     })).toBe('died');
+  });
+});
+
+describe('createTaskRegistry().listRunning（内存实现与 SQLite 同口径）', () => {
+  it('汇报存档（resultText/replyText）或 round_failed_at 的行不再被算作「在跑」', () => {
+    const registry = createTaskRegistry();
+    const scope = { principalId: 'p', sessionId: 's' };
+    for (const taskId of ['live', 'done_result', 'done_reply', 'no_report']) {
+      registry.begin({ taskId, ...scope, request: `任务 ${taskId}` });
+    }
+    registry.setResultText('done_result', '完成汇报。');
+    registry.archiveReply(['done_reply'], 'Main 回复存档。');
+    registry.noteRoundFailed('no_report');
+    expect(registry.listRunning().map((task) => task.taskId)).toEqual(['live']);
   });
 });

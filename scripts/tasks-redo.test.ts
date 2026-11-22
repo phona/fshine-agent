@@ -230,6 +230,31 @@ describe('tasks --redo：重新推进判定与拒绝路径', () => {
     expect(assembleCalls).toBe(0);
   });
 
+  it('长任务已存档汇报（末条执行仍 accepted、汇报走 archiveReply）：不算进行中，允许重推', async () => {
+    // 真实完成形状：续跑成功不追加执行行，汇报经 archiveReply 落 reply_text——末条仍是 accepted。
+    // 旧判定只看末条 status，把已完成的长任务当「进行中」拒绝重推（越界回归绊线）。
+    const dir = tempDir();
+    const dbPath = path.join(dir, 'state.db');
+    const registry = createSqliteTaskRegistry(dbPath);
+    registry.begin({ taskId: 'task_lt_done', ...SCOPE, request: '导出全量明细（长任务）' });
+    registry.noteExecution('task_lt_done', { requestId: 'req_lt', operation: 'dummy.longtask', status: 'accepted' });
+    registry.archiveReply(['task_lt_done'], '导出完成：共 3 个文件。');
+    registry.close();
+
+    const task = readTask(dbPath, 'task_lt_done');
+    expect(task.executions[task.executions.length - 1]!.status).toBe('accepted');
+    expect(task.resultText ?? task.replyText).toBe('导出完成：共 3 个文件。');
+
+    const recorder: Recorder = { mainInputs: [] };
+    const built = await realSession(dbPath, recorder);
+    const outcome = await runRedo(redoInput(task, dbPath), {
+      assemble: async () => ({ session: built.session, close: built.close }),
+    });
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.stderr).toBe('');
+    expect(outcome.stdout).toContain('原任务 #1 → 新任务 #2');
+  });
+
   it('已停三态都进入装配，principal/session/dbPath/argv/env 原样下传', async () => {
     const seen: Array<Record<string, unknown>> = [];
     for (const status of ['completed', 'failed', 'unexecuted'] as const) {
