@@ -27,7 +27,9 @@ jobs:
   grok-pr-review:
     name: grok-pr-review
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 大 PR 的核心 diff 按文件分块、逐块串行调用 grok，总时长随块数增长。
+    # 单块 25 分钟够用；分块后（PR #76 约 7 块）按每块最多 ~12 分钟留余量。
+    timeout-minutes: 90
     steps:
       - name: Reject fork pull requests
         id: guard
@@ -216,15 +218,23 @@ jobs:
           GROK_EFFORT: ${{ vars.GROK_EFFORT }}
         run: |
           set -euo pipefail
-          node .github/grok/build-prompt.mjs "$RUNNER_TEMP/grok-prompt.md"
+          # 大 PR 的核心 diff 按文件切成 N 块，每块一次 grok 调用，最后合并成一份 review。
+          # 先拿块清单算出 N，再串行循环（同一份 auth.json 不能并行刷新，见 README）。
+          chunks_json=$(node .github/grok/build-prompt.mjs --list-chunks)
+          N=$(printf '%s' "$chunks_json" | jq -r '.total')
+          if [[ ! "$N" =~ ^[0-9]+$ ]] || [ "$N" -lt 1 ]; then
+            echo "unexpected chunk count" >&2
+            exit 1
+          fi
+          echo "core diff split into $N chunk(s)"
           # --json-schema 吃内联 JSON，不是文件路径（2026-11-19 实测：传路径报
           # "invalid JSON: expected value at line 1 column 1"）。
           # --output-format plain 的 stdout 仍是 JSON 信封
           # { text, structuredOutput, usage, ... }，审查对象在 structuredOutput
           # 里，由 extract-review.mjs 抽出来；不要直接拿 stdout 当审查 JSON。
+          # 每块 prompt 文件不同，--prompt-file 在循环里拼到命令最前面。
           cmd=(
             grok
-            --prompt-file "$RUNNER_TEMP/grok-prompt.md"
             --json-schema "$(cat "$GITHUB_WORKSPACE/.github/grok/review-schema.json")"
             --output-format plain
             --permission-mode plan
@@ -241,32 +251,39 @@ jobs:
             cmd+=(--reasoning-effort "$GROK_EFFORT")
           fi
           unset GITHUB_TOKEN GH_TOKEN
-          # 模型偶发不按 schema 回（2026-11-19 首跑：8 分钟调用正常结束，
-          # 信封里既无 structuredOutput，text 也不是 JSON，extract 直接失败）。
-          # 只重试一次；两次都失败就 loud fail，不编审查。失败那次的
-          # stopReason/turns/text 开头由 extract-review 打印进日志。
-          attempt=1
-          while true; do
-            echo "Grok review attempt $attempt/2"
-            set +e
-            "${cmd[@]}" >"$RUNNER_TEMP/grok-envelope.json" 2>"$RUNNER_TEMP/grok-stderr.txt"
-            status=$?
-            set -e
-            echo "grok exit status: $status"
-            if node .github/grok/extract-review.mjs \
-              "$RUNNER_TEMP/grok-envelope.json" \
-              "$RUNNER_TEMP/grok-review.json"; then
-              break
-            fi
-            if [ "$attempt" -ge 2 ]; then
-              exit 1
-            fi
-            attempt=$((attempt + 1))
+          for i in $(seq -w 1 "$N"); do
+            node .github/grok/build-prompt.mjs "$RUNNER_TEMP/grok-prompt-$i.md" --chunk "$i/$N"
+            run_cmd=(grok --prompt-file "$RUNNER_TEMP/grok-prompt-$i.md" "${cmd[@]:1}")
+            # 模型偶发不按 schema 回（2026-11-19 首跑：8 分钟调用正常结束，
+            # 信封里既无 structuredOutput，text 也不是 JSON，extract 直接失败）。
+            # 每块只重试一次；两次都失败就 loud fail，不编审查。失败那次的
+            # stopReason/turns/text 开头由 extract-review 打印进日志。
+            attempt=1
+            while true; do
+              echo "Grok review chunk $i/$N attempt $attempt/2"
+              set +e
+              "${run_cmd[@]}" >"$RUNNER_TEMP/grok-envelope-$i.json" 2>"$RUNNER_TEMP/grok-stderr-$i.txt"
+              status=$?
+              set -e
+              echo "grok exit status: $status"
+              if node .github/grok/extract-review.mjs \
+                "$RUNNER_TEMP/grok-envelope-$i.json" \
+                "$RUNNER_TEMP/grok-review-chunk-$i.json"; then
+                break
+              fi
+              if [ "$attempt" -ge 2 ]; then
+                exit 1
+              fi
+              attempt=$((attempt + 1))
+            done
+            node .github/grok/render-review.mjs scrub "$status" \
+              "$RUNNER_TEMP/grok-envelope-$i.json" \
+              "$RUNNER_TEMP/grok-stderr-$i.txt" \
+              "$RUNNER_TEMP/grok-review-chunk-$i.json"
           done
-          node .github/grok/render-review.mjs scrub "$status" \
-            "$RUNNER_TEMP/grok-envelope.json" \
-            "$RUNNER_TEMP/grok-stderr.txt" \
-            "$RUNNER_TEMP/grok-review.json"
+          # 合并成一份 review：verdict 取「任一块 request_changes 或有 blocking 就 request_changes」，
+          # findings 全部串联并按文件+主题去重；只有这一份会 post 到 PR 上。
+          node .github/grok/merge-reviews.mjs "$RUNNER_TEMP/grok-review.json" "$RUNNER_TEMP"/grok-review-chunk-*.json
 
       - name: Post the pull request review
         if: success() && github.event.pull_request.head.repo.full_name == github.repository

@@ -6,6 +6,10 @@
 
 检查名是 `Grok PR review / grok-pr-review`。本仓库不在这里改分支保护。
 
+## 大 PR 分块审查
+
+核心 diff（排除 `*.test.ts`、`*.test.mjs`、`scripts/eval/**`）按**文件**切成 N 块，每块目标约 50KB、上限约 70KB（文件不拆开、跨块不重复），逐块串行调用 grok 后合并成一份 review 再 post。块数与清单由 `build-prompt.mjs --list-chunks` 算，逐块 prompt 由 `--chunk i/N` 生成，合并由 `merge-reviews.mjs` 完成。测试/eval 文件只给 stat + 清单，不进任何块的完整 diff。小 PR（核心 diff 装得下一块）仍是单块，行为不变。分块后 job 超时按块数放宽（见 workflow 的 `timeout-minutes`）。
+
 ## 修复端政策
 
 上一节的行为保持不变：有 `blocking` 就 `REQUEST_CHANGES` 并把检查标红，没有 `blocking` 就 `COMMENT`，不自动 `APPROVE`。不要为了少刷审查去改触发器、concurrency、失败条件或 `render-review.mjs` 的严重级别映射。

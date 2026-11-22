@@ -156,3 +156,13 @@ test('linked issue extraction keeps the five-number cap', () => {
     ['90', '91', '92', '93', '94'],
   )
 })
+
+test('large core diffs are chunked per file and merged into one review', () => {
+  // 契约：先算块数 N，再逐块 build+审，最后 merge 成一份再 post。
+  assert.match(workflow, /build-prompt\.mjs --list-chunks/)
+  assert.match(workflow, /--chunk "\$i\/\$N"/)
+  assert.match(workflow, /grok-review-chunk-\$i\.json/)
+  assert.match(workflow, /merge-reviews\.mjs "\$RUNNER_TEMP\/grok-review\.json"/)
+  // 逐块串行（同一份 auth.json 不能并行刷新）。
+  assert.match(workflow, /for i in \$\(seq -w 1 "\$N"\)/)
+})
