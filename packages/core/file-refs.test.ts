@@ -123,12 +123,13 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
 
     const first = openTaskStore(dbPath);
     first.insertFileRef(rowOf({ fileId: 'file_after_migration' }));
-    expect(first.getTask('task_legacy')?.task.status).toBe('completed');
+    // 旧任务行事实原样保留（status 列已随 S1 删除：读业务字段证明行未丢/未改）。
+    expect(first.getTask('task_legacy')?.task.request).toBe('旧任务');
     first.close();
 
     const second = openTaskStore(dbPath);
     expect(second.getFileRef('file_after_migration', SCOPE_A, { side: 'main' })).toBeDefined();
-    expect(second.getTask('task_legacy')?.task.status).toBe('completed');
+    expect(second.getTask('task_legacy')?.task.request).toBe('旧任务');
     second.close();
   });
 

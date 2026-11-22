@@ -371,7 +371,7 @@ describe('T11 压缩后仍能经 Task Registry 找回真实任务结果', () => 
     const scope = { principalId: 'wecom:p1', sessionId: 'sess_t11' };
     const REAL_RESULT = '任务真实结果：W1 账套共 3 条记录。';
     registry.begin({ taskId: 'task_t11', ...scope, request: '查询 W1 账套' });
-    registry.complete('task_t11', REAL_RESULT);
+    registry.setResultText('task_t11', REAL_RESULT);
 
     // 跑一次会触发 Pi 压缩的长上下文回合；Task Registry 是唯一事实源，不受 Pi 会话影响。
     const { driver } = await makeRuntime({

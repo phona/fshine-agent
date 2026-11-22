@@ -249,8 +249,8 @@ describe('B. 判据兜底：有提案、且所有失败都是「同回合没法�
 
     const task = await runBackground(registry, executor, 't_live_seq', '给 alpha 集合 W1 追加 2 条记录');
 
-    // 有提案、且所有失败都是「历史协议用法错」→ 判提案（waiting_user），不是 failed。
-    expect(task.status).toBe('waiting_user');
+    // 有提案、且所有失败都是「历史协议用法错」→ 底账落等待事实（pendingQuestion），不判死。
+    expect(task.pendingQuestion).toBeDefined();
     expect(task.pendingQuestion?.confirmation?.summary).toBe(SUMMARY);
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_live');
     // 四次都真的打到执行层（宿主不预先拦，只是结局归类改了）。
@@ -264,7 +264,8 @@ describe('B. 判据兜底：有提案、且所有失败都是「同回合没法�
 
     const task = await runBackground(registry, executor, 't_real_fail', '给 alpha 集合 W1 追加 2 条记录');
 
-    expect(task.status).toBe('failed');
+    // 真失败不落等待事实：执行账留有执行层拒绝行（底账无 status，读执行行）。
+    expect(task.executions.map((execution) => execution.status)).toContain('refused');
     expect(task.pendingQuestion).toBeUndefined();
   });
 });

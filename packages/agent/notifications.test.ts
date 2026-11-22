@@ -25,14 +25,12 @@ import {
   NotificationPayloadError,
   createNotificationOutbox,
   createNotificationReader,
-  notificationKindForTransition,
   type DeliveryReceipt,
   type Notification,
   type NotificationFact,
   type NotificationReason,
   type NotificationSink,
   type NotificationTerminalFact,
-  type TaskState,
 } from './src/notifications';
 
 const dirs: string[] = [];
@@ -117,26 +115,9 @@ describe('P4 通知意图枚举与状态映射（契约 §4）', () => {
     ]);
   });
 
-  const cases: Array<{ from?: TaskState; to: TaskState; reason?: NotificationReason; kind?: string }> = [
-    { to: 'queued', kind: 'accepted' },
-    { from: 'queued', to: 'running', kind: 'started' },
-    { from: 'waiting_user', to: 'running', kind: 'resumed' },
-    { from: 'running', to: 'waiting_user', kind: 'waiting_user' },
-    { from: 'running', to: 'completed', kind: 'completed' },
-    { from: 'running', to: 'failed', reason: 'failed_confirmed', kind: 'failed' },
-    { from: 'running', to: 'failed', reason: 'result_unknown', kind: 'failed' },
-    { from: 'running', to: 'cancelled', reason: 'cancelled_by_user', kind: 'cancelled' },
-    { from: 'running', to: 'timed_out', reason: 'timeout', kind: 'timed_out' },
-    { from: 'running', to: 'failed', reason: 'resource_limited', kind: 'resource_limited' },
-    { from: 'queued', to: 'cancelling', kind: undefined },
-    { from: 'running', to: 'unexecuted', kind: undefined },
-  ];
-
-  for (const c of cases) {
-    it(`映射 ${c.from ?? '∅'}→${c.to}${c.reason === undefined ? '' : `（${c.reason}）`} = ${c.kind ?? '无意图'}`, () => {
-      expect(notificationKindForTransition(c.from, c.to, c.reason)).toBe(c.kind);
-    });
-  }
+  // 状态转移→意图映射（notificationKindForTransition / TaskState）已随 S1 事实模型删除：
+  // 底账不再有状态转移，通知意图改由机械事实事件映射（notificationKindForEvent）。
+  // 对应旧用例一并退役（被删机制的红由机械事实映射的消费者守卫取代）。
 });
 
 describe('P4 outbox 写点与去重（P4-T01）', () => {

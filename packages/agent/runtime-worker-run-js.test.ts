@@ -16,6 +16,7 @@
  *
  * 零网络：假客户端 + 脚本化双驱动；run_js 走真实受限执行器（Node 权限模型子进程）。
  */
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -269,7 +270,7 @@ describe('CAP-01 S2 ① Worker 接 run_js（任务作用域）', () => {
       const turn = await fx.session.send('交办核对任务');
 
       const task = fx.session.getTask(turn.taskIds[0]!);
-      expect(task.status).toBe('completed');
+      expect(taskStatusOf(task)).toBe('completed');
 
       // 产物事实：新 fileId、task_id 绑定本任务、登记即激活；随 TurnResult.files 带出（交付面）。
       const productRows = fx.ro.listFileRefs(SCOPE).filter((row) => row.taskId === task.taskId && row.name === '汇总.csv');
@@ -308,7 +309,7 @@ describe('CAP-01 S2 ① Worker 接 run_js（任务作用域）', () => {
       const turn = await fx.session.send('交办');
       const task = fx.session.getTask(turn.taskIds[0]!);
       // 修复前：底账里没有执行事实 → unexecuted；修复后脚本执行也算真实执行。
-      expect(task.status).toBe('completed');
+      expect(taskStatusOf(task)).toBe('completed');
     } finally {
       fx.ro.close();
       fx.close();
@@ -328,8 +329,8 @@ describe('CAP-01 S2 ① Worker 接 run_js（任务作用域）', () => {
       fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '查完再算' } }], text: '完成。' });
       const turn = await fx.session.send('交办');
       const task = fx.session.getTask(turn.taskIds[0]!);
-      expect(task.status).toBe('failed');
-      expect(task.reason ?? '').not.toBe('');
+      expect(taskStatusOf(task)).toBe('failed');
+      expect(taskReasonOf(task) ?? '').not.toBe('');
     } finally {
       fx.ro.close();
       fx.close();
@@ -352,10 +353,10 @@ describe('CAP-01 S2 ① Worker 接 run_js（任务作用域）', () => {
       fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '查完再算' } }], text: '完成。' });
       const turn = await fx.session.send('交办');
       const task = fx.session.getTask(turn.taskIds[0]!);
-      expect(task.status).toBe('failed');
+      expect(taskStatusOf(task)).toBe('failed');
       // 原因可读：机械合成里带 run_js 与超时事实，不是空话术。
-      expect(task.failureReason ?? '').toContain('run_js');
-      expect(task.failureReason ?? '').toContain('超时');
+      expect(taskFailureReasonOf(task) ?? '').toContain('run_js');
+      expect(taskFailureReasonOf(task) ?? '').toContain('超时');
     } finally {
       fx.ro.close();
       fx.close();
@@ -381,7 +382,7 @@ describe('CAP-01 S2 ① Worker 接 run_js（任务作用域）', () => {
       // abort 不进底账：只有查询这一条执行事实，不把取消伪装成 run_js 失败。
       expect(task.executions.map((execution) => [execution.operation, execution.status]))
         .toEqual([['dummy.query', 'completed']]);
-      expect(task.status).toBe('completed');
+      expect(taskStatusOf(task)).toBe('completed');
     } finally {
       fx.ro.close();
       fx.close();
@@ -537,7 +538,7 @@ describe('CAP-01 S2 ⑥ Worker 工具面门控', () => {
       probed.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '触发委派' } }], text: '完成。' });
       await probed.session.send('触发');
       expect(probed.worker.toolErrors[0]).toBe('Worker 工具面之外的调用：run_js');
-      expect(probed.session.tasks()[0]!.status).toBe('unexecuted');
+      expect(taskStatusOf(probed.session.tasks()[0]!)).toBe('unexecuted');
     } finally {
       probed.ro.close();
       probed.close();

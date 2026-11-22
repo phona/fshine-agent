@@ -9,6 +9,7 @@
  *   · 重启用例 = 同一临时 SQLite 文件：关库 → 重新打开 → 新 runner 从 bottom ledger
  *     的 accepted 行重建等待（不是复用上一进程的内存表）。
  */
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -252,7 +253,7 @@ describe('长任务异步（契约 v4）', () => {
     await flush();
     await flush();
     // accepted 不是失败：任务保持 running，租约与并发槽都已释放。
-    expect(h.registry.get('A', SCOPE).status).toBe('running');
+    expect(taskStatusOf(h.registry.get('A', SCOPE))).toBe('running');
     expect(h.registry.get('A', SCOPE).leaseUntil).toBeUndefined();
     expect(h.policy.active).toBe(0);
     expect(h.driver.rounds.filter((round) => !round.resumed)).toHaveLength(1);
@@ -263,8 +264,8 @@ describe('长任务异步（契约 v4）', () => {
     // 槽位确实空出来了：另一笔任务立刻跑完。
     submit(h.runner, 'B', 'SHORT 查询');
     await flush();
-    expect(h.registry.get('B', SCOPE).status).toBe('completed');
-    expect(h.registry.get('A', SCOPE).status).toBe('running');
+    expect(taskStatusOf(h.registry.get('B', SCOPE))).toBe('completed');
+    expect(taskStatusOf(h.registry.get('A', SCOPE))).toBe('running');
 
     // wait 完成 → 唤醒 Worker 续跑（同一任务、不重复发起 operation）。
     h.clock.advance(5_000);
@@ -275,7 +276,7 @@ describe('长任务异步（契约 v4）', () => {
     await flush();
     await h.runner.whenIdle();
 
-    expect(h.registry.get('A', SCOPE).status).toBe('completed');
+    expect(taskStatusOf(h.registry.get('A', SCOPE))).toBe('completed');
     expect(h.driver.rounds.some((round) => round.resumed)).toBe(true);
     expect(h.client.executeCalls.filter((call) => call.operation === 'dummy.longtask')).toHaveLength(1);
     expect(h.events).toEqual(expect.arrayContaining([
@@ -298,7 +299,7 @@ describe('长任务异步（契约 v4）', () => {
       outcome: { status: 'accepted', operationId: 'op-1', pollAfterMs: 250 },
     });
     await flush();
-    expect(h.registry.get('A', SCOPE).status).toBe('running');
+    expect(taskStatusOf(h.registry.get('A', SCOPE))).toBe('running');
     expect(h.longTasks.waits).toHaveLength(1); // 还没到点
 
     h.clock.advance(250);
@@ -315,7 +316,7 @@ describe('长任务异步（契约 v4）', () => {
     });
     await flush();
     await h.runner.whenIdle();
-    expect(h.registry.get('A', SCOPE).status).toBe('completed');
+    expect(taskStatusOf(h.registry.get('A', SCOPE))).toBe('completed');
   });
 
   it('③ abort → 任务 cancelled 且不再被 wait 唤醒；停不下来时如实回 running', async () => {
@@ -327,7 +328,7 @@ describe('长任务异步（契约 v4）', () => {
     expect(h.runner.cancel('A').outcome).toBe('requested');
     await h.runner.whenIdle();
     expect(h.longTasks.aborts).toEqual(['op-1']);
-    expect(h.registry.get('A', SCOPE).status).toBe('cancelled');
+    expect(taskStatusOf(h.registry.get('A', SCOPE))).toBe('cancelled');
     expect(h.events).toEqual(expect.arrayContaining([
       expect.objectContaining({ event: 'execution_aborted', operationId: 'op-1', result: 'cancelled' }),
     ]));
@@ -346,7 +347,7 @@ describe('长任务异步（契约 v4）', () => {
     await flush();
     expect(h2.runner.cancel('A').outcome).toBe('requested');
     await h2.runner.whenIdle();
-    expect(h2.registry.get('A', SCOPE).status).toBe('running');
+    expect(taskStatusOf(h2.registry.get('A', SCOPE))).toBe('running');
     expect(h2.events).toEqual(expect.arrayContaining([
       expect.objectContaining({ event: 'execution_aborted', operationId: 'op-1', result: 'failed' }),
     ]));
@@ -367,7 +368,7 @@ describe('长任务异步（契约 v4）', () => {
     submit(h1.runner, 'A', 'LONG 重启导出');
     await flush();
     await flush();
-    expect(registry1.get('A', SCOPE).status).toBe('running');
+    expect(taskStatusOf(registry1.get('A', SCOPE))).toBe('running');
     expect(registry1.listAcceptedOperations()).toHaveLength(1);
     expect(h1.longTasks.waits).toHaveLength(1);
     registry1.close(); // 模拟进程退出：wait 结果永远不会回来
@@ -387,7 +388,7 @@ describe('长任务异步（契约 v4）', () => {
     });
     await flush();
     await h2.runner.whenIdle();
-    expect(registry2.get('A', SCOPE).status).toBe('completed');
+    expect(taskStatusOf(registry2.get('A', SCOPE))).toBe('completed');
     const resumed = driver.rounds.filter((round) => round.resumed);
     expect(resumed).toHaveLength(1);
     expect(resumed[0]!.delegation).toContain('续跑·上下文重建');
@@ -424,7 +425,7 @@ describe('长任务异步（契约 v4）', () => {
     await flush();
     await runner.whenIdle();
 
-    expect(registry.get('A', SCOPE).status).toBe('failed');
+    expect(taskStatusOf(registry.get('A', SCOPE))).toBe('failed');
     expect(logs).toEqual(expect.arrayContaining([
       expect.objectContaining({ event: 'task_long_task_unsupported', taskId: 'A' }),
     ]));
@@ -463,8 +464,8 @@ describe('长任务异步（契约 v4）', () => {
     await flush();
     await runner.whenIdle();
 
-    expect(registry.get('A', SCOPE).status).toBe('failed');
-    expect(registry.get('A', SCOPE).failureReason).toContain('数据异常');
+    expect(taskStatusOf(registry.get('A', SCOPE))).toBe('failed');
+    expect(taskFailureReasonOf(registry.get('A', SCOPE))).toContain('数据异常');
     expect(events).toEqual(expect.arrayContaining([
       expect.objectContaining({ event: 'execution_accepted_undeclared', operation: 'dummy.query' }),
     ]));
@@ -483,8 +484,8 @@ describe('长任务异步（契约 v4）', () => {
     await flush();
     await h.runner.whenIdle();
 
-    expect(h.registry.get('A', SCOPE).status).toBe('failed');
-    expect(h.registry.get('A', SCOPE).failureReason).toContain('执行层失败说明');
+    expect(taskStatusOf(h.registry.get('A', SCOPE))).toBe('failed');
+    expect(taskFailureReasonOf(h.registry.get('A', SCOPE))).toContain('执行层失败说明');
     const resumed = h.driver.rounds.find((round) => round.resumed);
     expect(resumed?.delegation).toContain('失败了：执行层失败说明');
     expect(resumed?.delegation).toContain('不要盲目重试');
@@ -497,7 +498,7 @@ describe('长任务异步（契约 v4）', () => {
     await flush();
     await h.runner.whenIdle();
     const task = h.registry.get('B', SCOPE);
-    expect(task.status).toBe('completed');
+    expect(taskStatusOf(task)).toBe('completed');
     expect(task.resultText).toBeUndefined();
     expect(task.replyText).toBe('查询完成。');
     expect(task.executions.map((execution) => execution.status)).toEqual(['completed']);
@@ -531,7 +532,7 @@ describe('长任务异步（契约 v4）', () => {
       expect(seen).toHaveLength(attempt + 1);
       expect(seen[attempt]!.failures).toBe(attempt + 1);
       delays.push(seen[attempt]!.delayMs);
-      expect(h.registry.get('A', SCOPE).status).toBe('running');
+      expect(taskStatusOf(h.registry.get('A', SCOPE))).toBe('running');
       // 退避到期才重排下一次 wait（到期前 pump 不应再打执行层）。
       h.clock.advance(seen[attempt]!.delayMs - 1);
       h.runner.pump();
@@ -555,7 +556,7 @@ describe('长任务异步（契约 v4）', () => {
     });
     await flush();
     await h.runner.whenIdle();
-    expect(h.registry.get('A', SCOPE).status).toBe('completed');
+    expect(taskStatusOf(h.registry.get('A', SCOPE))).toBe('completed');
     expect(h.client.executeCalls).toHaveLength(1);
   });
 
@@ -598,7 +599,7 @@ describe('长任务异步（契约 v4）', () => {
     await flush();
     await flush();
     // 诊断：受理后任务应保持 running 且等待项已建（若这里失败，说明首轮执行没走到 accepted）。
-    expect(registry.get('A', SCOPE).status).toBe('running');
+    expect(taskStatusOf(registry.get('A', SCOPE))).toBe('running');
     expect(longTasks.waits).toHaveLength(1);
 
     const fileBytes = Buffer.from('name,value\nalpha,1\n', 'utf8');
@@ -620,7 +621,7 @@ describe('长任务异步（契约 v4）', () => {
     });
     await flush();
     await runner.whenIdle();
-    expect(registry.get('A', SCOPE).status).toBe('completed');
+    expect(taskStatusOf(registry.get('A', SCOPE))).toBe('completed');
 
     const resumed = driver.rounds.find((round) => round.resumed);
     expect(resumed).toBeDefined();

@@ -17,6 +17,7 @@
  *   · task_resume：waiting_user 带 answer → started；非 waiting_user → not_waiting（如实转述）；
  *   · 未传 runner：调用治理工具 → 「Main 工具面之外的调用」（fail-closed）。
  */
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
 import { describe, expect, it } from 'vitest';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { DiscoveredTool } from '@fshine/contracts';
@@ -56,7 +57,7 @@ function unreachableDriver(): TurnDriver {
 /** 假后台执行器：立即完成，零网络。 */
 class CompletedExecutor implements TaskExecutor {
   async execute(): Promise<TaskExecutionOutcome> {
-    return { kind: 'completed', resultText: '（测试执行结果）' };
+    return { kind: 'ended', report: '（测试执行结果）' };
   }
 }
 
@@ -219,7 +220,7 @@ describe('缺口 1 · 对话面任务工具', () => {
     const registry = createTaskRegistry();
     seed(registry, SCOPE_A, 'done', '已完成任务');
     registry.noteExecution('done', { requestId: 'req_1', operation: 'dummy.query', status: 'completed' });
-    registry.complete('done', 'W202611：documents 共 3 条。');
+    registry.setResultText('done', 'W202611：documents 共 3 条。');
     seed(registry, SCOPE_A, 'live', '进行中任务');
 
     // 2026-11-20 机制变化：数字 ref 退役，按 taskId 引用（断言不变）。
@@ -254,11 +255,11 @@ describe('缺口 1 · 对话面任务工具', () => {
 
     const requested = value<Record<string, unknown>>(turns[0]!.results[0]!);
     expect(requested.outcome, '在飞任务只发取消请求，不宣称已取消').toBe('requested');
-    expect(registry.get('run', SCOPE_A).status, '取消请求后是 cancelling 而非 cancelled').toBe('cancelling');
+    expect(taskStatusOf(registry.get('run', SCOPE_A)), '取消请求后是 cancelling 而非 cancelled').toBe('cancelling');
 
     const confirmed = value<Record<string, unknown>>(turns[0]!.results[1]!);
     expect(confirmed.outcome, '未启动的排队任务可机械确认取消').toBe('cancelled');
-    expect(registry.get('queued', SCOPE_A).status).toBe('cancelled');
+    expect(taskStatusOf(registry.get('queued', SCOPE_A))).toBe('cancelled');
   });
 
   it('task_resume：waiting_user 带 answer → started；非 waiting_user → not_waiting（如实转述）', async () => {
@@ -267,7 +268,7 @@ describe('缺口 1 · 对话面任务工具', () => {
     registry.waitForUser('wait', { missing: ['窗口编号'] });
     seed(registry, SCOPE_A, 'finished', '已完成任务');
     registry.noteExecution('finished', { requestId: 'req_x', operation: 'dummy.query', status: 'completed' });
-    registry.complete('finished', '结果');
+    registry.setResultText('finished', '结果');
 
     // 2026-11-20 机制变化：数字 ref 退役，按 taskId 引用（断言不变）。
     const { session, turns, runner } = await build([
@@ -324,8 +325,8 @@ describe('缺口 1 · 对话面任务工具', () => {
       if (!result.ok) expect((result.error as Error).message).toContain('taskId');
     }
     // 两个任务都没被动过（尤其 B 的 task-b 没被误当作 #1 操作）。
-    expect(registry.get('task-a', SCOPE_A).status).toBe('running');
-    expect(registry.get('task-b', SCOPE_B).status).toBe('running');
+    expect(taskStatusOf(registry.get('task-a', SCOPE_A))).toBe('running');
+    expect(taskStatusOf(registry.get('task-b', SCOPE_B))).toBe('running');
   });
 
   it('P0-A：inline 受理回执去编号：不含 taskNo，可引用指代是 taskId', async () => {

@@ -10,6 +10,7 @@
  *
  * 库路径用临时目录（mkdtemp）；不触网、不碰真实平台。
  */
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -35,12 +36,12 @@ describe('最小任务底账（SQLite，B 类）', () => {
     const first = createSqliteTaskRegistry(dbPath);
     first.begin({ taskId: 'task_1', principalId: 'wecom:u1', sessionId: 'wecom:c1', request: '查一下' });
     first.noteExecution('task_1', { requestId: 'req_1', operation: 'dummy.query', status: 'completed' });
-    first.complete('task_1', '查到 2 条。');
+    first.setResultText('task_1', '查到 2 条。');
     first.close();
 
     const second = createSqliteTaskRegistry(dbPath);
     const task = second.get('task_1', { principalId: 'wecom:u1', sessionId: 'wecom:c1' });
-    expect(task.status).toBe('completed');
+    expect(taskStatusOf(task)).toBe('completed');
     expect(task.resultText).toBe('查到 2 条。');
     expect(task.createdAt).not.toBe('');
     expect(task.executions).toHaveLength(1);
@@ -67,12 +68,11 @@ describe('最小任务底账（SQLite，B 类）', () => {
       status: 'failed',
       error: { code: 'EXECUTION_TIMEOUT', message: '执行层调用超时。' },
     });
-    registry.fail('task_a', '执行层调用超时。');
     registry.begin({ taskId: 'task_b', principalId: 'wecom:u1', sessionId: 'wecom:c2', request: '任务 B' });
 
     const scoped = registry.list({ principalId: 'wecom:u1', sessionId: 'wecom:c1' });
     expect(scoped.map((task) => task.taskId)).toEqual(['task_a']);
-    expect(scoped[0]!.failureReason).toBe('执行层调用超时。');
+    expect(taskFailureReasonOf(scoped[0]!)).toBe('执行层调用超时。');
     expect(scoped[0]!.executions[0]!.error).toMatchObject({ code: 'EXECUTION_TIMEOUT' });
 
     const other = registry.list({ principalId: 'wecom:u1', sessionId: 'wecom:c2' });
@@ -81,12 +81,12 @@ describe('最小任务底账（SQLite，B 类）', () => {
     registry.close();
   });
 
-  it('noteExecution / complete / fail 对不存在的任务抛 TaskOwnershipError', () => {
+  it('noteExecution / setResultText 对不存在的任务抛 TaskOwnershipError', () => {
     const registry = createSqliteTaskRegistry(tempDbPath());
     expect(() => registry.noteExecution('task_x', { requestId: 'req_x', operation: 'dummy.query', status: 'completed' }))
       .toThrow(TaskOwnershipError);
-    expect(() => registry.complete('task_x', '结果')).toThrow(TaskOwnershipError);
-    expect(() => registry.fail('task_x', '原因')).toThrow(TaskOwnershipError);
+    expect(() => registry.setResultText('task_x', '结果')).toThrow(TaskOwnershipError);
+    expect(() => registry.markCancelled('task_x')).toThrow(TaskOwnershipError);
     registry.close();
   });
 });
@@ -103,22 +103,22 @@ describe('任务完成判定：只看已记录执行事实（SQLite 底账，M4-
       status: 'failed',
       error: { code: 'EXECUTION_TIMEOUT', message: '执行层调用超时。' },
     });
-    registry.complete('task_failed', '任务圆满完成，共 3 条数据，已确认无误。');
+    registry.setResultText('task_failed', '任务圆满完成，共 3 条数据，已确认无误。');
     const task = registry.get('task_failed', scope);
-    expect(task.status).toBe('failed');
-    expect(task.status).not.toBe('completed');
+    expect(taskStatusOf(task)).toBe('failed');
+    expect(taskStatusOf(task)).not.toBe('completed');
     expect(task.resultText).toBe('任务圆满完成，共 3 条数据，已确认无误。');
-    expect(task.failureReason).toContain('执行层调用超时');
+    expect(taskFailureReasonOf(task)).toContain('执行层调用超时');
     registry.close();
   });
 
   it('② 零执行 → complete 记 unexecuted；汇报原文保留', () => {
     const registry = createSqliteTaskRegistry(tempDbPath());
     registry.begin({ taskId: 'task_none', ...scope, request: '查询 documents' });
-    registry.complete('task_none', '查询成功，共 3 条数据。');
+    registry.setResultText('task_none', '查询成功，共 3 条数据。');
     const task = registry.get('task_none', scope);
-    expect(task.status).toBe('unexecuted');
-    expect(task.status).not.toBe('completed');
+    expect(taskStatusOf(task)).toBe('unexecuted');
+    expect(taskStatusOf(task)).not.toBe('completed');
     expect(task.resultText).toBe('查询成功，共 3 条数据。');
     registry.close();
   });
@@ -133,8 +133,8 @@ describe('任务完成判定：只看已记录执行事实（SQLite 底账，M4-
       status: 'failed',
       error: { code: 'EXECUTION_TIMEOUT', message: '执行层调用超时。' },
     });
-    registry.complete('task_mixed', '第一次成功，第二次超时。');
-    expect(registry.get('task_mixed', scope).status).toBe('failed');
+    registry.setResultText('task_mixed', '第一次成功，第二次超时。');
+    expect(taskStatusOf(registry.get('task_mixed', scope))).toBe('failed');
     registry.close();
   });
 });

@@ -15,6 +15,7 @@
  *     inputFiles → 受理（复制先于 submit；完整后台文件面见 runtime-background-input-files）；
  *     Worker 的任务绑定 fileId 被 Main 引用 → 整次拒绝。
  */
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -240,7 +241,7 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
 
       expect(turn.taskIds).toHaveLength(1);
       const task = fx.session.getTask(turn.taskIds[0]!);
-      expect(task.status).toBe('completed');
+      expect(taskStatusOf(task)).toBe('completed');
 
       // 副本事实：task_id = 本任务、sha256/bytes 与原件一致、登记即激活。
       const rows = fx.ro.listFileRefs(SCOPE);
@@ -281,7 +282,7 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
         additionalProperties: false,
       });
       expect(turn.taskIds).toHaveLength(1);
-      expect(bare.session.getTask(turn.taskIds[0]!).status).toBe('completed');
+      expect(taskStatusOf(bare.session.getTask(turn.taskIds[0]!))).toBe('completed');
       expect(bare.ro.listFileRefs(SCOPE)).toHaveLength(0);
     } finally {
       bare.ro.close();
@@ -306,7 +307,7 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
       });
 
       expect(turn.taskIds).toHaveLength(1);
-      expect(withCopier.session.getTask(turn.taskIds[0]!).status).toBe('completed');
+      expect(taskStatusOf(withCopier.session.getTask(turn.taskIds[0]!))).toBe('completed');
       expect(withCopier.ro.listFileRefs(SCOPE)).toHaveLength(0);
     } finally {
       withCopier.ro.close();
@@ -345,7 +346,7 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
             principalId: task.principalId,
             sessionId: task.sessionId,
             request: task.request,
-            status: 'queued',
+            queued: true,
           });
         },
         pump: () => ({ recovered: [], started: [] }),

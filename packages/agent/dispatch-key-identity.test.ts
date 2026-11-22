@@ -8,6 +8,7 @@
  *   · 外部结果未知 → 停止自动重试，任务落 failed + reason=result_unknown（不是成功、不是确认失败）；
  *   · 每次执行层请求都带非空 dispatchKey，且与账行一致（回放不产生新执行行）。
  */
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
 import { afterEach, describe, expect, it } from 'vitest';
 import type {
   CapabilityManifest,
@@ -134,7 +135,7 @@ describe('U3 宿主绑定（恢复后重绑定 / 同参数不合并 / 只读重�
     expect(client.requests).toHaveLength(1);
     // 任务按真实执行事实判定（只有一行真实执行，回放不写执行行）。
     const task = session.tasks()[0]!;
-    expect(task.status).toBe('completed');
+    expect(taskStatusOf(task)).toBe('completed');
     expect(task.executions).toHaveLength(1);
     expect(task.executions[0]!.operation).toBe('dummy.query');
   });
@@ -187,8 +188,8 @@ describe('U3 宿主绑定（恢复后重绑定 / 同参数不合并 / 只读重�
     // 同一逻辑读：身份不变（只重新认领），不是新铸一个 key。
     expect(client.requests[0]!.dispatchKey).toBe(client.requests[1]!.dispatchKey);
     const task = session.tasks()[0]!;
-    expect(task.status).toBe('completed');
-    expect(task.reason).toBeUndefined();
+    expect(taskStatusOf(task)).toBe('completed');
+    expect(taskReasonOf(task)).toBeUndefined();
     expect(result.reply).not.toContain('待核对');
   });
 
@@ -214,8 +215,8 @@ describe('U3 宿主绑定（恢复后重绑定 / 同参数不合并 / 只读重�
     // 只尝试一次：结果未知不自动重试。
     expect(client.requests).toHaveLength(1);
     const task = session.tasks()[0]!;
-    expect(task.status).toBe('failed');
-    expect(task.reason).toBe('result_unknown');
+    expect(taskStatusOf(task)).toBe('failed');
+    expect(taskReasonOf(task)).toBe('result_unknown');
     expect(registry.getOperation(client.requests[0]!.dispatchKey)?.status).toBe('unknown');
     expect(registry.getOperation(client.requests[0]!.dispatchKey)?.reason).toBe('result_unknown');
   });

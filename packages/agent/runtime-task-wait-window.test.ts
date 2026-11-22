@@ -12,6 +12,7 @@
  * 反向绊线（新口径）：b/d 的 `not.toHaveProperty('notice')` 即绊线——把受理回执话术塞回工具结果必红。
  * 零网络、零真实模型：假执行器 + 脚本化 Main 驱动 + 注入时钟（now/sleep 两原语，非定时器框架）。
  */
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
 import { describe, expect, it } from 'vitest';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { TurnDriver } from './src/driver-contract';
@@ -129,7 +130,7 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
     const clock = manualClock();
     const stack = backgroundStack({
       async execute() {
-        return { kind: 'completed', resultText: '报销单汇总：共 12 单，合计 3456 元。' };
+        return { kind: 'ended', report: '报销单汇总：共 12 单，合计 3456 元。' };
       },
     });
     const results: unknown[] = [];
@@ -145,7 +146,7 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
       expect(answer).not.toHaveProperty('accepted');
       // 任务已确认完成、结果逐字存档
       const task = stack.registry.get(String(answer['taskId']), SCOPE);
-      expect(task.status).toBe('completed');
+      expect(taskStatusOf(task)).toBe('completed');
       expect(task.replyText).toBe('报销单汇总：共 12 单，合计 3456 元。');
       // 零等待窗口消耗：结果在窗口内到达（fake 时钟推进量 < 1500）
       expect(clock.time()).toBeLessThan(1500);
@@ -180,14 +181,14 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
       // 窗口走满才返回（fake 时钟推进量 ≥ 窗口）
       expect(clock.time()).toBeGreaterThanOrEqual(1500);
       // 任务继续在后台推进并最终完成（结果逐字存档）
-      gate.resolve({ kind: 'completed', resultText: '长任务结果：核对完成，共 3 条。' });
+      gate.resolve({ kind: 'ended', report: '长任务结果：核对完成，共 3 条。' });
       await stack.runner.whenIdle();
       const task = stack.registry.get(String(receipt['taskId']), SCOPE);
-      expect(task.status).toBe('completed');
+      expect(taskStatusOf(task)).toBe('completed');
       // 后台结果逐字存档（runner settle 经 archiveReply 写 replyText）
       expect(task.replyText).toBe('长任务结果：核对完成，共 3 条。');
     } finally {
-      gate.resolve({ kind: 'failed', reason: '（测试清理）' });
+      gate.resolve({ kind: 'ended' });
       await stack.runner.whenIdle();
     }
   });
@@ -196,7 +197,7 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
     const clock = manualClock();
     const stack = backgroundStack({
       async execute() {
-        return { kind: 'completed', resultText: '快活结果：已完成。' };
+        return { kind: 'ended', report: '快活结果：已完成。' };
       },
     });
     const results: unknown[] = [];
@@ -216,7 +217,7 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
       expect(clock.time()).toBe(0);
       // 任务照常在后台落定
       await stack.runner.whenIdle();
-      expect(stack.registry.get(String(receipt['taskId']), SCOPE).status).toBe('completed');
+      expect(taskStatusOf(stack.registry.get(String(receipt['taskId']), SCOPE))).toBe('completed');
     } finally {
       await stack.runner.whenIdle();
     }

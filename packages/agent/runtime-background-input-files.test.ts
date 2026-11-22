@@ -287,7 +287,8 @@ describe('background 派发 + inputFiles（第 1 片）', () => {
       expect(receipt['accepted']).toBe(true);
       const taskId = String(receipt['taskId']);
       const task = fx.session.getTask(taskId);
-      expect(task.status).toBe('completed');
+      // 底账无 status：完成事实读汇报存档（Worker 汇报 / Main 最终回复落行）。
+      expect((task.resultText ?? task.replyText ?? '').trim()).not.toBe('');
 
       // ①-1 复制先于 submit：submit 那一刻底账里已有绑定本任务的副本。
       expect(fx.submitSnapshots).toHaveLength(1);

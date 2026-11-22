@@ -252,13 +252,9 @@ describe('P1-T02 并发分配与不复用', () => {
     const store = openTaskStore(dbPath);
     store.insertTask(row({ taskId: 'task_1', createdAt: '2026-11-14T09:00:00.000Z' }));
     store.insertTask(row({ taskId: 'task_2', createdAt: '2026-11-14T09:00:01.000Z' }));
-    // complete/fail 在 store 层经唯一状态写入语句（applyTaskState）落终态。
-    store.applyTaskState('task_1', {
-      expectedStatus: 'running', status: 'completed', resultText: '汇报。', updatedAt: '2026-11-14T09:00:02.000Z',
-    });
-    store.applyTaskState('task_2', {
-      expectedStatus: 'running', status: 'failed', failureReason: '故障。', updatedAt: '2026-11-14T09:00:03.000Z',
-    });
+    // 事实写入（S1 无结论列）：汇报存档 / 一次性机械时刻；编号与这些写入无关。
+    store.setResultText('task_1', { resultText: '汇报。', updatedAt: '2026-11-14T09:00:02.000Z' });
+    store.markTaskFact('task_2', { fact: 'died', at: '2026-11-14T09:00:03.000Z', updatedAt: '2026-11-14T09:00:03.000Z' });
     store.setReplyForTasks(['task_1', 'task_2'], '本回合最终回复。', '2026-11-14T09:00:04.000Z');
 
     expect(store.getTask('task_1')!.task.taskNo).toBe(1);

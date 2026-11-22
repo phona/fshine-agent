@@ -23,6 +23,7 @@
  *
  * 零网络：spawn 的是本文件生成的最小 stub 网关（只认 `operation list` 与 `call`）。
  */
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -215,8 +216,8 @@ describe('单次执行层调用的传输超时（有界 + 结果未知）', () =
       const task = fx.session.tasks()[0]!;
       const scope = { principalId: 'wecom:call-timeout', sessionId: 'sess_call_timeout' };
       const record = fx.registry.get(task.taskId, scope);
-      expect(record.status).toBe('failed');
-      expect(record.reason).toBe('result_unknown');
+      expect(taskStatusOf(record)).toBe('failed');
+      expect(taskReasonOf(record)).toBe('result_unknown');
 
       // 逻辑操作账行：unknown（不冒充 failed），且 outcome 里留着超时原话。
       expect(fx.requests).toHaveLength(1);
@@ -263,7 +264,7 @@ describe('单次执行层调用的传输超时（有界 + 结果未知）', () =
         { status: 'completed', data: { ok: true } },
         { status: 'completed', data: { ok: true } },
       ]);
-      expect(fx.session.tasks()[0]!.status).toBe('completed');
+      expect(taskStatusOf(fx.session.tasks()[0]!)).toBe('completed');
     } finally {
       fx.close();
     }
@@ -339,7 +340,6 @@ describe('单次执行层调用的传输超时（有界 + 结果未知）', () =
       principalId: 'wecom:call-timeout',
       sessionId: 'sess_call_timeout',
       request: '把 docs 提交到生产',
-      status: 'running',
     });
     const outcome = await executor.execute({
       taskId: 't_timeout',

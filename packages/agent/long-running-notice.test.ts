@@ -161,10 +161,8 @@ function seedRunning(
   scope: { principalId: string; sessionId: string } = SCOPE,
 ): void {
   registry.begin({ taskId, ...scope, request: '查一下上季度报销明细' });
-  registry.store.applyTaskState(taskId, {
-    expectedStatus: 'running',
-    status: 'running',
-    leaseOwner: 'task-runner',
+  registry.store.armLease(taskId, {
+    owner: 'task-runner',
     leaseUntil: new Date(Date.parse(startedAt) + LEASE_MS).toISOString(),
     updatedAt: startedAt,
   });
@@ -275,8 +273,10 @@ describe('预期契约：长时间无动静的主动提醒（只一档）', () =
       expect.objectContaining({ event: 'task_long_running_notice', result: 'failed', attempt: 1 }),
       expect.objectContaining({ event: 'task_long_running_notice', result: 'failed', attempt: 2 }),
     ]);
-    // 任务事实不动（仍 running、未被误判 result_unknown），「已发」已落库（不刷屏）。
-    expect(h.registry.get('slow-1', SCOPE).status).toBe('running');
+    // 任务事实不动（仍持有租约、未写 died 事实），「已发」已落库（不刷屏）。
+    const stillRunning = h.registry.get('slow-1', SCOPE);
+    expect(stillRunning.diedAt).toBeUndefined();
+    expect(stillRunning.leaseUntil).toBeDefined();
     expect(h.registry.get('slow-1', SCOPE).longRunningNotifiedAt).toBeDefined();
     // 到限即止：再推进时间也不再交。
     h.timers.advance(10 * 60_000);

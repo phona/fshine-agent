@@ -157,15 +157,18 @@ describe('U3 待核对优先于取消（写操作 unknown 后同回合取消）'
     runner.pump();
     // 等写操作真实发起（执行层无回执 → unknown）后，再走用户取消。
     await vi.waitFor(() => {
-      expect(registry.get(TASK.taskId, scope).status).toBe('running');
+      expect(registry.get(TASK.taskId, scope).leaseUntil).toBeDefined();
       expect(client.requests).toHaveLength(1);
     });
     expect(runner.cancel(TASK.taskId, scope).outcome).toBe('requested');
     await runner.whenIdle();
 
     const task = registry.get(TASK.taskId, scope);
-    expect(task.status).toBe('failed');
-    expect(task.reason).toBe('result_unknown');
+    // 底账无 status/reason：待核对事实落在逻辑操作账（unknown 行），不因取消被改写成 cancelled。
+    const dispatchKey = client.requests[0]?.dispatchKey;
+    expect(dispatchKey).toMatch(/^dk_/);
+    expect(registry.getOperation(dispatchKey!)?.status).toBe('unknown');
+    expect(task.cancelledAt).toBeUndefined();
   });
 
   it('反向绊线：没有 unknown 的取消仍然是 cancelled（不把普通取消翻转为待核对）', async () => {

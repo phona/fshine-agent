@@ -14,6 +14,7 @@
  *
  * 反向绊线：把脱敏改回「原始 outcome 回给 Worker」→ ② 必须红。
  */
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -186,7 +187,7 @@ async function runBackground(registry: TaskRegistry, executor: TaskExecutor, tas
 }
 
 /** 用 Main 假驱动调一次 task_status（生产 statusView 投影）。 */
-async function taskStatusOf(registry: TaskRegistry, ref: string): Promise<Record<string, unknown>> {
+async function projectedStatusOf(registry: TaskRegistry, ref: string): Promise<Record<string, unknown>> {
   let captured: unknown;
   const mainDriver: TurnDriver = {
     async run(input) {
@@ -254,7 +255,7 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
       worker: callingWorker(WRITE_ARGS, capture),
     });
     await runBackground(registry, executor, 't_guard');
-    expect(registry.get('t_guard', SCOPE).status).toBe('waiting_user');
+    expect(taskStatusOf(registry.get('t_guard', SCOPE))).toBe('waiting_user');
     const before = registry.list(SCOPE).length;
 
     const result = await callMainTool({ registry, tool: 'task_run', args: { task: '再把 alpha 提交一次' } });
@@ -295,7 +296,7 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     for (let index = 1; index <= 12; index += 1) {
       const taskId = `t_list_${index}`;
       registry.begin({ taskId, principalId: SCOPE.principalId, sessionId: SCOPE.sessionId, request: `第 ${index} 件事` });
-      registry.transition(taskId, 'completed');
+      registry.setResultText(taskId, `第 ${index} 件完成。`);
     }
     const result = await callMainTool({ registry, tool: 'task_status', args: {} });
     expect(result.ok).toBe(true);
@@ -325,7 +326,7 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     await runBackground(registry, executor, 't_confirm');
 
     const task = registry.get('t_confirm', SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(taskStatusOf(task)).toBe('waiting_user');
     expect(task.waitingSince).toBeDefined();
     // 底账（SQLite JSON 列，零迁移）：提案摘要原样承载。
     const stored = registry.store.getTask('t_confirm');
@@ -334,8 +335,8 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     } | undefined;
     expect(pending?.confirmation?.summary).toBe(SUMMARY);
     // 可见投影不带句柄（句柄留底账供 S3 透传）。（2026-11-20：数字 ref 退役，按真实 taskId。）
-    const visible = await taskStatusOf(registry, 't_confirm');
-    expect(visible.status).toBe('waiting_user');
+    const visible = await projectedStatusOf(registry, 't_confirm');
+    expect(visible.liveness).toBe('waiting_user');
     const projected = JSON.stringify(visible);
     expect(projected).not.toContain('cf_');
     expect(projected).not.toContain('handle');
@@ -394,7 +395,7 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     expect(workerSaw).toContain(SUMMARY);
 
     // 2026-11-20：数字 ref 退役，按真实 taskId 投影（断言不变）。
-    const visible = await taskStatusOf(registry, 't_leak');
+    const visible = await projectedStatusOf(registry, 't_leak');
     const projected = JSON.stringify(visible);
     expect(projected).not.toContain('cf_');
     expect(projected).not.toContain('handle');
@@ -423,13 +424,13 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     await runner.whenIdle();
 
     const task = registry.get('t_replace', SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(taskStatusOf(task)).toBe('waiting_user');
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_s1_round_2');
     // 旧句柄不再可见（底账与投影都不带）。
     const ledger = JSON.stringify(task);
     expect(ledger).not.toContain('cf_s1_round_1');
     // 2026-11-20：数字 ref 退役，按真实 taskId 投影（断言不变）。
-    const projected = JSON.stringify(await taskStatusOf(registry, 't_replace'));
+    const projected = JSON.stringify(await projectedStatusOf(registry, 't_replace'));
     expect(projected).not.toContain('cf_s1_round_1');
     expect(projected).not.toContain('cf_s1_round_2');
     expect(projected).not.toContain('handle');
@@ -591,7 +592,7 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     expect(JSON.stringify(capture.results[0])).toBe('{"status":"completed","data":{"rows":2}}');
 
     const task = registry.get('t_read', SCOPE);
-    expect(task.status).toBe('completed');
+    expect(taskStatusOf(task)).toBe('completed');
     expect(task.pendingQuestion).toBeUndefined();
 
     // 执行器结局形状与改动前同形：completed + resultText（无 files 时不加字段）。
@@ -701,7 +702,7 @@ describe('同回合自我确认被挡：结局是 waiting_user（提案），不
 
     // 结局 = waiting_user（不是 failed）：底账带真实提案（句柄 + 摘要）。
     const task = registry.get('t_self_confirm', SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(taskStatusOf(task)).toBe('waiting_user');
     expect(task.pendingQuestion?.confirmation?.summary).toBe(SUMMARY);
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_blocked_1');
     // 两次非只读都真的打到执行层（同回合自我确认不是用户表态，但也不是宿主预先拦下）。
@@ -709,8 +710,8 @@ describe('同回合自我确认被挡：结局是 waiting_user（提案），不
 
     // 用户可见面 = 提案（含摘要），不是「没办成」；句柄不进可见投影。
     // 2026-11-20：数字 ref 退役，按真实 taskId 投影（断言不变）。
-    const visible = await taskStatusOf(registry, 't_self_confirm');
-    expect(visible.status).toBe('waiting_user');
+    const visible = await projectedStatusOf(registry, 't_self_confirm');
+    expect(visible.liveness).toBe('waiting_user');
     const projected = JSON.stringify(visible);
     expect(projected).toContain(SUMMARY);
     expect(projected).not.toContain('cf_');
@@ -725,7 +726,7 @@ describe('同回合自我确认被挡：结局是 waiting_user（提案），不
     const executor = await selfConfirmExecutor(client, registry, roundWorker([[PREPARE_ARGS, COMMIT_ARGS, QUERY_ARGS]], capture));
     await runBackground(registry, executor, 't_self_confirm_query');
 
-    expect(registry.get('t_self_confirm_query', SCOPE).status).toBe('waiting_user');
+    expect(taskStatusOf(registry.get('t_self_confirm_query', SCOPE))).toBe('waiting_user');
     expect(registry.get('t_self_confirm_query', SCOPE).pendingQuestion?.confirmation?.handle).toBe('cf_blocked_2');
     expect(client.requests.map((r) => r.operation)).toEqual(['dummy.prepare', 'dummy.commit', 'dummy.query']);
   });
@@ -738,7 +739,7 @@ describe('同回合自我确认被挡：结局是 waiting_user（提案），不
     await runBackground(registry, executor, 't_self_confirm_denied');
 
     const task = registry.get('t_self_confirm_denied', SCOPE);
-    expect(task.status).toBe('failed');
+    expect(taskStatusOf(task)).toBe('failed');
     expect(task.pendingQuestion).toBeUndefined();
   });
 });
@@ -844,7 +845,7 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
     expect(client.requests[1]!.confirmation).toBeUndefined();
     expect(client.requests[2]!.confirmation).toEqual({ handle: 'cf_flow_1', userText: '确认，就按这版提交' });
     expect(client.requests[3]!.confirmation).toEqual({ handle: 'cf_flow_1', userText: '确认，就按这版提交' });
-    expect(registry.get('t_confirm_ok', SCOPE).status).toBe('completed');
+    expect(taskStatusOf(registry.get('t_confirm_ok', SCOPE))).toBe('completed');
   });
 
   it('② 改口径路径：task_resume → 任何调用都不带旧句柄；Worker 重新提案 → 底账是新句柄、旧的不再出现', async () => {
@@ -863,7 +864,7 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
     // 任何调用都不带旧句柄（resume 永不透传）。
     for (const request of client.requests) expect(request.confirmation).toBeUndefined();
     const task = registry.get('t_resume_change', SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(taskStatusOf(task)).toBe('waiting_user');
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_flow_2');
     // 旧句柄不再出现在底账。
     expect(JSON.stringify(task)).not.toContain('cf_flow_1');
@@ -886,7 +887,7 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
     expect(client.requests.map((request) => request.operation)).toEqual(['dummy.prepare', 'dummy.prepare']);
     // 任务仍等待确认，底账是**新**句柄，旧的不再出现。
     const task = registry.get('t_expired', SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(taskStatusOf(task)).toBe('waiting_user');
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_flow_2');
     expect(JSON.stringify(task)).not.toContain('cf_flow_1');
     // 用户可见话术：含「过期」，过 internalTermIn（无内部术语）。
@@ -913,7 +914,7 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
     expect(internalTermIn(value.fact!)).toBeUndefined();
     // 没有新建任务、没有发起执行。
     expect(registry.list(SCOPE)).toHaveLength(before);
-    expect(registry.get('t_needs_input', SCOPE).status).toBe('waiting_user');
+    expect(taskStatusOf(registry.get('t_needs_input', SCOPE))).toBe('waiting_user');
   });
 
   it('⑤ 推断禁止：task_resume 的 answer 是「确认」这类话时也不带句柄（语义在 confirm，不在文案）', async () => {
@@ -1046,7 +1047,7 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
     expect(JSON.stringify(turn)).not.toContain('cf_flow_1');
     // 机械闸不受影响：任务仍等待确认、句柄仍在底账、执行层没被重复调用。
     const task = registry.get(turn.taskIds[0]!, SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(taskStatusOf(task)).toBe('waiting_user');
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_flow_1');
     expect(client.requests).toHaveLength(1);
     for (const request of client.requests) expect(request.confirmation).toBeUndefined();

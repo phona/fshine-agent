@@ -13,6 +13,7 @@
  * TDD：旧行为下第 capacity+1 个排队提交仍 accepted:true（底账 queued 行 > 容量）→ 先红；
  * 受理侧按「底账 queued 行 < queueCapacity」判定后转绿。
  */
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
 import { describe, expect, it } from 'vitest';
 import type {
   CapabilityManifest,
@@ -93,7 +94,7 @@ function makeStack(options: { queueCapacity?: number; backgroundConcurrency?: nu
     ...inner,
     begin(input) {
       const row = inner.begin(input);
-      depths.push(inner.list().filter((task) => task.status === 'queued').length);
+      depths.push(inner.list().filter((task) => taskStatusOf(task) === 'queued').length);
       return row;
     },
   };
@@ -152,7 +153,7 @@ async function sessionFor(
 }
 
 function queuedRows(stack: Stack): number {
-  return stack.registry.list().filter((task) => task.status === 'queued').length;
+  return stack.registry.list().filter((task) => taskStatusOf(task) === 'queued').length;
 }
 
 describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞排队）', () => {
@@ -201,12 +202,12 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
       expect(receipt.notice).toContain('后台排队已满（容量 2）');
       // 拒绝不留半截任务行：终态 failed（reason=resource_limited），不是 queued 幽灵行。
       const row = session.getTask(receipt.taskId);
-      expect(row.status).toBe('failed');
-      expect(row.reason).toBe('resource_limited');
+      expect(taskStatusOf(row)).toBe('failed');
+      expect(taskReasonOf(row)).toBe('resource_limited');
       // 结构化事件：failed/resource_limited 事实已发出（通知 outbox 的输入面）。
       expect(
         facts.some(
-          (fact) => fact.taskId === receipt.taskId && fact.to === 'failed' && fact.reason === 'resource_limited',
+          (fact) => fact.taskId === receipt.taskId && fact.event === 'resource_limited',
         ),
       ).toBe(true);
     }

@@ -10,6 +10,7 @@
  *   ④ 能力快照与允许集合不一致 / 允许集合为空 → 构造即失败（fail-closed）；
  *   ⑤ 任务归属：越权 scope 取任务被拒（TaskOwnershipError）。
  */
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -182,7 +183,7 @@ describe('运行时链路（假客户端 + 假模型）', () => {
     for (const task of tasks) {
       expect(task.principalId).toBe('wecom:test-user');
       expect(task.sessionId).toBe('sess_1');
-      expect(task.status).toBe('completed');
+      expect(taskStatusOf(task)).toBe('completed');
       expect(task.executions).toHaveLength(1);
       expect(task.executions[0]!.status).toBe('completed');
     }
@@ -209,7 +210,7 @@ describe('运行时链路（假客户端 + 假模型）', () => {
     const task = session.tasks()[0]!;
     expect(task.executions).toHaveLength(0);
     // M4-B：宿主在发起执行前拒收 = 零执行事实 → unexecuted，不得记 completed。
-    expect(task.status).toBe('unexecuted');
+    expect(taskStatusOf(task)).toBe('unexecuted');
   });
 
   it('允许集合不在能力快照里 → 构造即失败（fail-closed）', async () => {
@@ -279,7 +280,7 @@ describe('运行时链路（假客户端 + 假模型）', () => {
     // 重启连续性：新开同一库，任务与执行记录仍在。
     const reopened = createSqliteTaskRegistry(dbPath);
     const task = reopened.get(taskId, { principalId: 'wecom:test-user', sessionId: 'sess_1' });
-    expect(task.status).toBe('completed');
+    expect(taskStatusOf(task)).toBe('completed');
     expect(task.resultText).toContain('documents');
     expect(task.executions).toHaveLength(1);
     expect(task.executions[0]!.requestId).toBe(turn.executions[0]!.requestId);
@@ -313,10 +314,10 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
     expect(task.executions[0]!.status).toBe('failed');
     // 执行事实落账：error 原样记录（execution-runtime 的 failed/refused 分支）。
     expect(task.executions[0]!.error).toMatchObject({ code: 'EXECUTION_TIMEOUT', message: '执行层调用超时。' });
-    expect(task.status).toBe('failed');
-    expect(task.status).not.toBe('completed');
+    expect(taskStatusOf(task)).toBe('failed');
+    expect(taskStatusOf(task)).not.toBe('completed');
     expect(task.resultText).toContain('超时');
-    expect(task.failureReason).toContain('执行层调用超时');
+    expect(taskFailureReasonOf(task)).toContain('执行层调用超时');
   });
 
   it('② 执行层 refused：任务记 failed；failureReason 取执行层 message', async () => {
@@ -329,9 +330,9 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
     const task = session.getTask(turn.taskIds[0]!);
     expect(task.executions[0]!.status).toBe('refused');
     expect(task.executions[0]!.error).toMatchObject({ code: 'POLICY_REFUSED', message: '执行层策略拒绝。' });
-    expect(task.status).toBe('failed');
-    expect(task.status).not.toBe('completed');
-    expect(task.failureReason).toContain('执行层策略拒绝');
+    expect(taskStatusOf(task)).toBe('failed');
+    expect(taskStatusOf(task)).not.toBe('completed');
+    expect(taskFailureReasonOf(task)).toContain('执行层策略拒绝');
   });
 
   it('③ 零执行（Worker 未发起任何调用）：任务记 unexecuted；汇报原文保留', async () => {
@@ -344,8 +345,8 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
     const task = session.getTask(turn.taskIds[0]!);
     expect(client.requests).toHaveLength(0);
     expect(task.executions).toHaveLength(0);
-    expect(task.status).toBe('unexecuted');
-    expect(task.status).not.toBe('completed');
+    expect(taskStatusOf(task)).toBe('unexecuted');
+    expect(taskStatusOf(task)).not.toBe('completed');
     expect(task.resultText).toContain('未发起任何调用');
   });
 
@@ -365,8 +366,8 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
     const turn = await session.send('查一下 documents');
     const task = session.getTask(turn.taskIds[0]!);
     expect(task.executions.map((execution) => execution.status)).toEqual(['completed', 'failed']);
-    expect(task.status).toBe('failed');
-    expect(task.status).not.toBe('completed');
+    expect(taskStatusOf(task)).toBe('failed');
+    expect(taskStatusOf(task)).not.toBe('completed');
   });
 
   it('⑥ 成功孪生（与①同场景、仅执行结果不同）：全 completed 才记 completed', async () => {
@@ -378,7 +379,7 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
     const turn = await session.send('查一下 documents');
     const task = session.getTask(turn.taskIds[0]!);
     expect(task.executions[0]!.status).toBe('completed');
-    expect(task.status).toBe('completed');
+    expect(taskStatusOf(task)).toBe('completed');
   });
 
   it('⑦ SQLite 底账（生产缺省实现）同一 failed 场景：任务记 failed', async () => {
@@ -393,8 +394,8 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
     });
     const turn = await session.send('查一下 documents');
     const task = session.getTask(turn.taskIds[0]!);
-    expect(task.status).toBe('failed');
-    expect(task.status).not.toBe('completed');
+    expect(taskStatusOf(task)).toBe('failed');
+    expect(taskStatusOf(task)).not.toBe('completed');
     registry.close();
   });
 
@@ -420,16 +421,16 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
       status: 'failed',
       error: { code: 'EXECUTION_TIMEOUT', message: '执行层调用超时。' },
     });
-    registry.complete('task_forged', '任务圆满完成，共 3 条数据，已确认无误。');
-    expect(registry.get('task_forged', scope).status).toBe('failed');
+    registry.setResultText('task_forged', '任务圆满完成，共 3 条数据，已确认无误。');
+    expect(taskStatusOf(registry.get('task_forged', scope))).toBe('failed');
   });
 
   it('⑤b 反向绊线：零执行 + 声称成功的汇报文本 → 仍记 unexecuted（不嗅探文本）', () => {
     const registry = createTaskRegistry();
     const scope = { principalId: 'wecom:test-user', sessionId: 'sess_1' };
     registry.begin({ taskId: 'task_forged_2', ...scope, request: '查询 documents' });
-    registry.complete('task_forged_2', '查询成功，共 3 条数据。');
-    expect(registry.get('task_forged_2', scope).status).toBe('unexecuted');
+    registry.setResultText('task_forged_2', '查询成功，共 3 条数据。');
+    expect(taskStatusOf(registry.get('task_forged_2', scope))).toBe('unexecuted');
   });
 });
 
@@ -438,7 +439,7 @@ describe('唤醒回合的界（2026-11-19 复核 F1）', () => {
     const scope = { principalId: 'wecom:test-user', sessionId: 'sess_wake_face' };
     const registry = createTaskRegistry();
     registry.begin({ taskId: 'task_wake_face', ...scope, request: '汇总那件事' });
-    registry.complete('task_wake_face', '共 7 条，已确认无误。');
+    registry.setResultText('task_wake_face', '共 7 条，已确认无误。');
 
     const client = new FakeClient();
 

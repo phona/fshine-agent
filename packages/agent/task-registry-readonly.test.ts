@@ -10,6 +10,7 @@
  *
  * 库路径用临时目录（mkdtemp）；不触网、不碰真实平台。
  */
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -42,7 +43,7 @@ describe('任务底账只读打开（P1 任务查看）', () => {
     const writer = createSqliteTaskRegistry(dbPath);
     writer.begin({ taskId: 'task_a', ...scope, request: '查 beta' });
     writer.noteExecution('task_a', { requestId: 'req_1', operation: 'dummy.query', status: 'completed' });
-    writer.complete('task_a', '已查询 beta：3 条。');
+    writer.setResultText('task_a', '已查询 beta：3 条。');
     writer.begin({ taskId: 'task_b', principalId: 'wecom:other', sessionId: 'ask-x', request: '查 alpha' });
     writer.close();
 
@@ -50,7 +51,7 @@ describe('任务底账只读打开（P1 任务查看）', () => {
     expect(reader.list().map((task) => task.taskId)).toEqual(['task_a', 'task_b']);
 
     const task = reader.get('task_a', scope);
-    expect(task.status).toBe('completed');
+    expect(taskStatusOf(task)).toBe('completed');
     expect(task.resultText).toBe('已查询 beta：3 条。');
     expect(task.executions).toHaveLength(1);
     expect(task.executions[0]).toMatchObject({ operation: 'dummy.query', status: 'completed' });
@@ -65,8 +66,8 @@ describe('任务底账只读打开（P1 任务查看）', () => {
     const writer = createSqliteTaskRegistry(dbPath);
     writer.begin({ taskId: 'task_a', ...scope, request: '查 beta' });
     writer.noteExecution('task_a', { requestId: 'req_1', operation: 'dummy.query', status: 'completed' });
-    // P2a 状态机起效后终态不可再写（非法转换在存储前确定性拒绝），故这里保留 running
-    // 让 complete/fail 走合法边、由 SQLite 只读连接拒绝——本用例的判据仍是「写路径被拒 + 哈希不变」。
+    // S1 事实写入面（setResultText / markCancelled）在只读连接上被 SQLite 拒绝——
+    // 本用例的判据仍是「写路径被拒 + 哈希不变」。
     writer.close();
 
     const before = sha256(dbPath);
@@ -75,8 +76,8 @@ describe('任务底账只读打开（P1 任务查看）', () => {
     expect(() => reader.noteExecution('task_a', {
       requestId: 'req_x', operation: 'dummy.query', status: 'completed',
     })).toThrow(/readonly/i);
-    expect(() => reader.complete('task_a', '改')).toThrow(/readonly/i);
-    expect(() => reader.fail('task_a', '改')).toThrow(/readonly/i);
+    expect(() => reader.setResultText('task_a', '改')).toThrow(/readonly/i);
+    expect(() => reader.markCancelled('task_a')).toThrow(/readonly/i);
     reader.close();
 
     expect(sha256(dbPath)).toBe(before);
@@ -94,7 +95,7 @@ describe('任务底账只读打开（P1 任务查看）', () => {
     const dbPath = path.join(tempDir(), 'state.db');
     const setup = createSqliteTaskRegistry(dbPath);
     setup.begin({ taskId: 'task_a', ...scope, request: '查 beta' });
-    setup.complete('task_a', '已查询。');
+    setup.setResultText('task_a', '已查询。');
     setup.close();
 
     const reader = createSqliteTaskRegistry(dbPath, { readOnly: true });
@@ -102,7 +103,7 @@ describe('任务底账只读打开（P1 任务查看）', () => {
 
     const writer = createSqliteTaskRegistry(dbPath);
     writer.begin({ taskId: 'task_b', ...scope, request: '查 alpha' });
-    writer.complete('task_b', '已查询。');
+    writer.setResultText('task_b', '已查询。');
     writer.close();
 
     expect(reader.list().map((task) => task.taskId)).toEqual(['task_a', 'task_b']);

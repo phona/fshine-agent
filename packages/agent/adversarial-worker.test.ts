@@ -16,6 +16,7 @@
  * 纪律：只加用例，不改产品代码。若某条在当前代码上红，即为真缺陷——如实保留并逐条报告，
  * 不为凑绿修改判据或产品。
  */
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -305,7 +306,7 @@ class ReadClient implements ExecutionClient {
 }
 
 /** 生产 statusView 投影（Main 假驱动调一次 task_status）。 */
-async function taskStatusOf(registry: TaskRegistry, ref: string): Promise<Record<string, unknown>> {
+async function projectedStatusOf(registry: TaskRegistry, ref: string): Promise<Record<string, unknown>> {
   let captured: unknown;
   const mainDriver: TurnDriver = {
     async run(input) {
@@ -414,7 +415,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
 
     const task = registry.get('t_detour', SCOPE);
     // ② 任务不被误判终态：拿到过提案 → 必须 waiting_user（不是 failed）。
-    expect(task.status).toBe('waiting_user');
+    expect(taskStatusOf(task)).toBe('waiting_user');
     // ① 用户拿到可执行下一步：底账提案句柄 + 摘要都在。
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_live_handle');
     expect(task.pendingQuestion?.confirmation?.summary).toBe('「alpha」将被覆盖，不可撤销');
@@ -422,8 +423,8 @@ describe('模型走岔路（确定性脚本模型）', () => {
     // ④ 用户可见面无内部词。
     assertUserVisibleClean(proposalCardText(task));
     // 2026-11-20：数字 ref 退役，按真实 taskId 投影（断言不变）。
-    const projected = await taskStatusOf(registry, 't_detour');
-    expect(projected.status).toBe('waiting_user');
+    const projected = await projectedStatusOf(registry, 't_detour');
+    expect(projected.liveness).toBe('waiting_user');
     expect(JSON.stringify(projected)).toContain('「alpha」将被覆盖，不可撤销');
     expect(JSON.stringify(projected)).not.toContain('cf_');
     expect(JSON.stringify(projected)).not.toContain('handle');
@@ -450,7 +451,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
 
     const task = registry.get('t_noprop', SCOPE);
     // ② 没有提案可等 → 不落 waiting_user。
-    expect(task.status).toBe('failed');
+    expect(taskStatusOf(task)).toBe('failed');
     expect(task.pendingQuestion).toBeUndefined();
     // 执行层确被真实调用 1 次（不是宿主预拦）。
     expect(client.calls.map((call) => call.operation)).toEqual(['dummy.commit']);
@@ -475,13 +476,13 @@ describe('模型走岔路（确定性脚本模型）', () => {
     await runBackground(registry, executor, 't_dup');
 
     const task = registry.get('t_dup', SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(taskStatusOf(task)).toBe('waiting_user');
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_dup_2');
     // ③ 执行事实 2 条、无第三条。
     expect(client.calls).toHaveLength(2);
     expect(task.executions).toHaveLength(2);
     // 旧句柄不再可见。（2026-11-20：数字 ref 退役，按真实 taskId 投影。）
-    const projected = await taskStatusOf(registry, 't_dup');
+    const projected = await projectedStatusOf(registry, 't_dup');
     expect(JSON.stringify(projected)).not.toContain('cf_');
     expect(JSON.stringify(projected)).not.toContain('handle');
   });
@@ -499,14 +500,14 @@ describe('模型走岔路（确定性脚本模型）', () => {
     await runBackground(registry, executor, 't_reprep');
 
     const task = registry.get('t_reprep', SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(taskStatusOf(task)).toBe('waiting_user');
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_2');
     expect(task.pendingQuestion?.confirmation?.summary).toBe('「beta」将被覆盖，不可撤销');
     // 旧句柄 cf_1 不再出现在用户可见文本与投影里；新摘要来自 B。
     assertUserVisibleClean(proposalCardText(task));
     expect(proposalCardText(task)).toContain('beta');
     // 2026-11-20：数字 ref 退役，按真实 taskId 投影（断言不变）。
-    const projected = JSON.stringify(await taskStatusOf(registry, 't_reprep'));
+    const projected = JSON.stringify(await projectedStatusOf(registry, 't_reprep'));
     expect(projected).toContain('beta');
     expect(projected).not.toContain('cf_1');
     expect(projected).not.toContain('cf_');
@@ -521,7 +522,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     const client = new AdversarialClient(() => 'cf_guard');
     const executor = await makeExecutor({ client, registry, worker: scriptWorker([[PREPARE('alpha')]], capture) });
     await runBackground(registry, executor, 't_guard');
-    expect(registry.get('t_guard', SCOPE).status).toBe('waiting_user');
+    expect(taskStatusOf(registry.get('t_guard', SCOPE))).toBe('waiting_user');
     const before = registry.list(SCOPE).length;
 
     const result = await callMainTool({ registry, tool: 'task_run', args: { task: '再把 alpha 提交一次' } });
@@ -550,7 +551,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
 
     const task = registry.get('t_norehit', SCOPE);
     // ② 任务落终态 failed 是**正确**判定（执行层确已确定性拒绝）。
-    expect(task.status).toBe('failed');
+    expect(taskStatusOf(task)).toBe('failed');
     // ③ 执行层只被真正调用 1 次。
     expect(client.calls.filter((call) => call.operation === 'dummy.denied')).toHaveLength(1);
     // 宿主侧留下可见的拦截事实（运维面 execution_retry_blocked）。
@@ -581,7 +582,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     await runner.whenIdle();
 
     const task = registry.get('t_nonconfirm', SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(taskStatusOf(task)).toBe('waiting_user');
     // 新提案替换旧提案（句柄是新的）。
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_2');
     // 旧句柄不得出现在新回合的 execute 调用里（不当「已确认」复用）。
@@ -605,7 +606,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     });
     await runBackground(registry, executor, 't_needsthenwrite');
     const task = registry.get('t_needsthenwrite', SCOPE);
-    expect(task.status).toBe('completed');
+    expect(taskStatusOf(task)).toBe('completed');
     expect(task.pendingQuestion).toBeUndefined();
   });
 
@@ -620,7 +621,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     });
     await runBackground(registry, executor, 't_needsinput');
     const task = registry.get('t_needsinput', SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(taskStatusOf(task)).toBe('waiting_user');
     expect(task.pendingQuestion?.missing).toEqual(['合同编号']);
   });
 
@@ -644,8 +645,8 @@ describe('模型走岔路（确定性脚本模型）', () => {
     });
     await runBackground(registry, executor, 't_failthenscript');
     const task = registry.get('t_failthenscript', SCOPE);
-    expect(task.status).toBe('failed');
-    expect(task.failureReason ?? '').toContain('dummy.denied');
+    expect(taskStatusOf(task)).toBe('failed');
+    expect(taskFailureReasonOf(task) ?? '').toContain('dummy.denied');
     // 两条执行事实都保留（如实底账：拒绝在先、脚本成功在后）。
     expect(task.executions.map((execution) => [execution.operation, execution.status]))
       .toEqual([['dummy.denied', 'refused'], ['run_js', 'completed']]);
@@ -670,7 +671,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     });
     await runBackground(registry, executor, 't_askthenscript');
     const task = registry.get('t_askthenscript', SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(taskStatusOf(task)).toBe('waiting_user');
     expect(task.pendingQuestion?.missing).toEqual(['合同编号']);
   });
 
@@ -693,8 +694,8 @@ describe('模型走岔路（确定性脚本模型）', () => {
     });
     await runBackground(registry, executor, 't_writethenscript');
     const task = registry.get('t_writethenscript', SCOPE);
-    expect(task.status).toBe('completed');
-    expect(task.failureReason).toBeUndefined();
+    expect(taskStatusOf(task)).toBe('completed');
+    expect(taskFailureReasonOf(task)).toBeUndefined();
     // 审计保留：脚本失败是真实执行事实，只是不改写业务终局。
     expect(task.executions.map((execution) => [execution.operation, execution.status]))
       .toEqual([['dummy.proposal', 'completed'], ['run_js', 'failed']]);
@@ -719,8 +720,8 @@ describe('模型走岔路（确定性脚本模型）', () => {
     });
     await runBackground(registry, executor, 't_querythenscript');
     const task = registry.get('t_querythenscript', SCOPE);
-    expect(task.status).toBe('failed');
-    expect(task.failureReason ?? '').toContain('run_js');
+    expect(taskStatusOf(task)).toBe('failed');
+    expect(taskFailureReasonOf(task) ?? '').toContain('run_js');
   });
 
   it('⑬ 确认回合重提：宿主注入的确认句柄不得落进底账提案载荷，也不得进下一轮委派正文', async () => {
@@ -744,7 +745,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     const runner = await runBackground(registry, executor, 't_handle_leak');
 
     const first = registry.get('t_handle_leak', SCOPE);
-    expect(first.status).toBe('waiting_user');
+    expect(taskStatusOf(first)).toBe('waiting_user');
     expect(first.pendingQuestion?.confirmation?.handle).toBe('cf_leak_1');
     // 首轮提案：宿主此时没有句柄可注入，载荷就是业务字段。
     expect(first.pendingQuestion?.confirmation?.args).toEqual({ '--collection': 'alpha' });
@@ -754,7 +755,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     expect(confirmed.outcome).toBe('started');
     await runner.whenIdle();
     const second = registry.get('t_handle_leak', SCOPE);
-    expect(second.status).toBe('waiting_user');
+    expect(taskStatusOf(second)).toBe('waiting_user');
     expect(second.pendingQuestion?.confirmation?.handle).toBe('cf_leak_2');
     // 本 blocking 的判据：确认回合的提案载荷不得含宿主注入的确认句柄（只留业务字段）。
     expect(second.pendingQuestion?.confirmation?.args).toEqual({ '--collection': 'alpha' });
