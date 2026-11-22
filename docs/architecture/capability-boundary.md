@@ -37,9 +37,9 @@ owner 的类比（原文）：**「相当于 Main 的工作台里对客户罗列
 
 Worker 的汇报必须是**结构化事实**，Main 据此套用统一话术——这样「办不了」和「没办成」不会被说成同一句、也不会被加一句「再试一次」。
 
-> ⚠️ **S1 变更（2026-11-22，口径见 `docs/design/task-redefinition.md`）**：旧的五态机械分类器 `classifyOutcome` 及其出口 `renderOutcomeFact` 已随 task 去 `status` **整条删除**——宿主不再把机械事实归成「答复五态」结论，做没做成由 Main 读执行行/汇报自己判断；冻结判据改在 `scripts/eval/convergence-r1/judge.ts` 里读 `executions` 逐条 `status` 机械对比（函数 `outcomeFromTask`）。
+> ⚠️ **S1 变更（2026-11-22，口径见 `docs/design/task-redefinition.md`）**：旧的五态机械分类器 `classifyOutcome` 及其出口 `renderOutcomeFact` 已随 task 去 `status` **整条删除**——宿主不再把机械事实归成「答复五态」结论，做没做成由 Main 读执行行/汇报自己判断；冻结判据改在 `scripts/eval/convergence-r1/judge.ts` 的 `mechanicalOutcome` 分支里读 `executions` 逐条 `status` 机械对比。
 
-**仍在的机械事实（B3 结构化原因码）**：`packages/agent/src/task-outcome.ts:13`（`OUTCOME_REASON_NOT_PERMITTED`）、`:14`（`OUTCOME_REASON_UNSUPPORTED`）、`:17` / `:18`（两种情形各自可辨的机械原因文本）。`not_permitted` = 「能力存在但本次不允许」，由宿主在发起前拒绝时用（导入 `packages/agent/src/execution-runtime.ts:99`；消费 `apps/server/server.ts:98`、`:1150`），作为 `taskFailureFactText` 的结构化事实位喂给 Main（`apps/server/task-completion-delivery.ts:307`）。
+**仍在的机械事实（B3 结构化原因码）**：`packages/agent/src/task-outcome.ts:13`（`OUTCOME_REASON_NOT_PERMITTED`）、`:14`（`OUTCOME_REASON_UNSUPPORTED`）、`:17` / `:18`（两种情形各自可辨的机械原因文本）。`not_permitted` = 「能力存在但本次不允许」，由宿主在发起前拒绝时用（导入 `packages/agent/src/execution-runtime.ts:99`；消费 `apps/server/server.ts:98`、`:1150`），作为 `taskFailureSnapshotText` 的结构化事实位喂给 Main（`apps/server/task-completion-delivery.ts:284`）。
 
 **Main 行为句（提示词约束，不是宿主话术）**：`OUTCOME_BEHAVIOR_NOTE`（`packages/agent/src/execution-runtime.ts:569`）在目录非空时随摘要常驻（`scripts/ask-runtime.ts:1104`），钉住「办不了 / 缺什么 / 逐项说」三种措辞纪律；话由模型写，宿主只喂事实。
 

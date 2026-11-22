@@ -639,8 +639,8 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
   });
 
   it('①b 失败事实从底账取：执行事实的 error.code 决定话术种类（真实 Worker 路径）', async () => {
-    // Worker 替身在窗口内被执行层以 GATE_REFUSE 拒绝 → error.code 进任务底账执行事实 →
-    // 回合末按既有归类（denied）投递。与失败回调同源：同一条 failureCodeOf 链。
+    // Worker 替身在窗口内被执行层以 GATE_REFUSE 拒绝 → error.code 经 onTaskFailed 进 roundFailure →
+    // 回合末沉默兜底把 code 喂 classifyFailure → 按既有归类（denied）投递话术。
     const fx = await makeFixture({
       waitMs: 1_500,
       workerExecutionFailure: { code: 'GATE_REFUSE', message: '执行层拒绝了这次查询' },
@@ -649,7 +649,7 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       const reply = await fx.server.handler(incoming('m-1', ASK));
       expect(reply).toBe('');
       expect(fx.delivery.sentTexts).toHaveLength(1);
-      expect(fx.delivery.sentTexts[0]!.text).toBe(failureMessageFor('executor_failed').text);
+      expect(fx.delivery.sentTexts[0]!.text).toBe(failureMessageFor('denied').text);
       // 执行层原文/内部码不进用户文本。
       expect(fx.delivery.sentTexts[0]!.text).not.toContain('GATE_REFUSE');
       expect(fx.delivery.sentTexts[0]!.text).not.toContain('执行层');

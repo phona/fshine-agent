@@ -6,7 +6,7 @@
 
 任务是一行底账（归属 + 交付原文 + 汇报存档 + 守护事实 + 执行调用清单）。**S1 起 task 没有 `status`**（口径见 `docs/design/task-redefinition.md`）：做没做成读执行行与汇报；**身份分成「哪一次交办」与「哪一笔业务操作」两层**；**证明不了是同一笔就停副作用**。
 ## 1. 守护事实与存活推导（无状态字段）
-底账不再有 `status` / `reason` / `failure_reason`（S1 删除）。取代它的是**机械守护事实**：存活（`running` / `died` / `waiting_user`，纯函数 `taskLivenessOf`，`packages/agent/src/task-registry.ts:144`）+ 四个一次性结束时刻（`diedAt` / `cancelledAt` / `timedOutAt` / `resourceLimitedAt`，`packages/agent/src/task-registry.ts:222`）-（`:228`）+ 执行调用清单 `executions`。展示词由 `taskStateWordOf`（`packages/agent/src/task-registry.ts:180`）按机械事实**读时投影、不存结论**；等待形状是 `pendingQuestion`（只由执行层事实填写，见 §5）。
+底账不再有 `status` / `reason` / `failure_reason`（S1 删除）。取代它的是**机械守护事实**：存活（`running` / `died` / `waiting_user`，纯函数 `taskLivenessOf`）+ 四个一次性结束时刻（`diedAt` / `cancelledAt` / `timedOutAt` / `resourceLimitedAt`）+ 执行调用清单 `executions`。**唯一保留的投影是 liveness 三值**——不再有 `taskStateWordOf` 之类把账本事实投影成任务级状态词的中间层（S1 已删）；等待形状是 `pendingQuestion`（只由执行层事实填写，见 §5）。
 
 派发方式不是配置项（2026-11-18 起 `runtime.dispatchMode` 已删除）：server 恒 async（异步派发先落未启动行、由队列认领），进程内入口恒 sync。单写路径由守卫钉住：task-store 之外零 `UPDATE tasks`、registry 实现层无裸 SQL（`packages/agent/task-registry-write-path.test.ts:44`、`:57`）。
 

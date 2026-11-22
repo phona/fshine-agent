@@ -889,14 +889,12 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   /**
    * 回合失败种类的机械事实（S1：底账没有 failed 结论——onTaskFailed 回调带到的
    * 「无汇报 / 结果未知」种类 + 执行层原始码 + 失败原文记在这里，回合末兜底投递与唤醒取
-   * 同一口径）。code 用于按码归类话术（GATE_REFUSE → denied 等）；reason 用于事实文案的
-   * 机械原因（丢机械原因用户/模型都看不出真因，2026-11-22）。
+   * 同一口径）。code 用于按码归类话术（GATE_REFUSE → denied 等，喂 classifyFailure）；
    * 有界（会话长了不积累；一次性核销后即删）。
    */
   const roundFailure = new Map<string, {
     status: 'no_report' | 'result_unknown';
     code?: string;
-    reason?: string;
   }>();
   /**
    * B 切片（工单回执收敛）：本会话已在同一回合拿到结果的任务（快活）——完成投递对其抑制
@@ -1139,7 +1137,6 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         roundFailure.set(failure.taskId, {
           status: failure.status,
           ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }),
-          ...(failure.reason === undefined ? {} : { reason: failure.reason }),
         });
         const sessionKey = `${failure.principalId}\u0000${failure.sessionId}`;
         enqueueSessionTurn(sessionKey, async () => {
@@ -1179,10 +1176,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
               ...(fact?.resourceLimited === true ? { resourceLimited: true } : {}),
               ...(notPermitted ? { notPermitted: true } : {}),
             }),
-            // 降级兜底（模型说不出话）：只按机械事实给一句（资源拒绝 / 结果未知 / executor_failed）。
+            // 降级兜底（模型说不出话）：按机械事实给一句（资源拒绝 / 结果未知 / 按执行层码归类）。
             fallbackText: failureFallbackFactText({
               ...(resultUnknown ? { died: true } : {}),
               ...(fact?.resourceLimited === true ? { resourceLimited: true } : {}),
+              ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }),
               ...(name === undefined ? {} : { name }),
             }),
           });
@@ -1958,8 +1956,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             claimPushSuppressedInTurn(sessionKey, suppressedTaskId);
             continue;
           }
-          // 执行层原始码（本回合 onTaskFailed 带到的）：兜底话术按码归类（GATE_REFUSE → denied）。
-          // 底账执行事实里也有同一码；这里取回调带到的同一口径。
+          // 执行层原始码（本回合 onTaskFailed 带到的机械事实）：兜底话术按码归类（GATE_REFUSE → denied）。
           const failureFact = {
             ...(failureRecord?.diedAt !== undefined && failureRecord.diedAt !== null
               ? { status: 'result_unknown' as const }
@@ -1972,6 +1969,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
               && (failureRecord?.resourceLimitedAt === undefined || failureRecord.resourceLimitedAt === null)
               ? { status: 'result_unknown' as const }
               : {}),
+            ...(round?.code === undefined ? {} : { code: round.code }),
             ...(taskFailureFactOf(suppressedTaskId)?.name === undefined ? {} : { name: taskFailureFactOf(suppressedTaskId)!.name }),
           };
           await deliverTaskFailure({

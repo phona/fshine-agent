@@ -25,7 +25,7 @@
  */
 import type { ChannelRoute, DeliveryReceipt } from '@fshine/contracts';
 import { resourceLimitedText } from '../../packages/agent/src/notification-render';
-import { failureMessageFor } from '../../packages/agent/src/user-facing-failure';
+import { failureMessageFor, classifyFailure } from '../../packages/agent/src/user-facing-failure';
 import { stripServerPaths } from '../../packages/agent/src/server-paths';
 import { cleanExecutorDiagnostic } from '../../packages/agent/src/execution-runtime';
 
@@ -243,17 +243,25 @@ export function failureTextFor(status?: 'failed' | 'refused' | 'result_unknown')
 
 /**
  * 失败降级兜底（**模型回合挂掉时**；唯一入口，完成/失败投递与回合内沉默兜底共用）：
- * 只按机械事实选一句，**不做执行层码归类、不补 outcome**：
+ * 按机械事实选一句用户话术（B 类确定性责任：如实交付，不丢失败归类）：
  *   · 资源拒绝事实（池满/队列满的确定性拒绝，没进入执行）→ 复用通知渲染器的既有那句；
- *   · died 事实（结果未知）→ unknown_result；其余 = executor_failed。
+ *   · died 事实（结果未知）→ unknown_result；
+ *   · 其余按执行层码归类（机械事实，不是投影）：`classifyFailure({ code })`——GATE_REFUSE →
+ *     denied 等；无码 = executor_failed。needs_confirmation/needs_input 在失败收尾里说不通
+ *     （底账没有等待中的提案/可接续任务），一律 host_fault（2026-11-19 假承诺防线）。
  */
 export function failureFallbackFactText(input: {
   died?: boolean;
   resourceLimited?: boolean;
+  /** 执行层原始错误码（只用于归类，不进用户文本）。 */
+  code?: string;
   name?: string;
 }): string {
   if (input.resourceLimited === true) return resourceLimitedText(input.name);
-  return failureMessageFor(input.died === true ? 'unknown_result' : 'executor_failed').text;
+  const kind = input.died === true
+    ? 'unknown_result'
+    : classifyFailure({ code: input.code });
+  return failureMessageFor(kind === 'needs_confirmation' || kind === 'needs_input' ? 'host_fault' : kind).text;
 }
 
 /** 账本事实行的上限（条；超出截断——事实给模型读，防止把大账整段灌进去）。 */
@@ -402,13 +410,13 @@ export function waitingUserFallbackText(input: { summary: string; expiresAt?: st
 
 /**
  * 单次失败投递（调用方 fire-and-forget；内部吞错并如实记账）。
- * 用户文本 = 降级兜底一句（只按机械事实：资源拒绝 / 结果未知 / executor_failed），
- * **不做执行层码归类、不含任何执行层原文/内部词**。
+ * 用户文本 = 降级兜底一句（资源拒绝 / 结果未知 / 按执行层码归类），**不含任何执行层原文/内部词**。
  */
 export async function deliverTaskFailure(fact: TaskFailureFact, options: TaskResultDeliveryOptions): Promise<boolean> {
   return deliverText(fact, failureFallbackFactText({
     ...(fact.status === 'result_unknown' ? { died: true } : {}),
     ...(fact.resourceLimited === true ? { resourceLimited: true } : {}),
+    ...(fact.code === undefined ? {} : { code: fact.code }),
     ...(fact.name === undefined ? {} : { name: fact.name }),
   }), options);
 }

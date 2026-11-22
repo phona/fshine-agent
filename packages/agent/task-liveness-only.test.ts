@@ -9,9 +9,11 @@
  *   ① 名字族：一个函数名里同时出现 `task` 与 `status/state/outcome`，且自身 return 出任务
  *      生命周期词 → 命中（taskStatusOf / observedTaskStatusOf / muTaskStateOf / TaskStateWord …）；
  *   ② 形状族：一个函数读了 ≥3 个账本事实字段（cancelledAt/diedAt/timedOutAt/resourceLimitedAt/
- *      pendingQuestion/runningSince/leaseUntil/resultText/replyText/executions），又 return 出 ≥4 个
- *      互不相同的任务生命周期词（queued/running/waiting_user/died/cancelled/timed_out/
- *      resource_limited/failed/completed）→ 命中——这正是「账本事实 → 任务级状态词」投影的形状。
+ *      pendingQuestion/runningSince/leaseUntil/resultText/replyText/executions），又 return 出 ≥2 个
+ *      **生命周期独有词**（queued/running/waiting_user/died/cancelled/timed_out/resource_limited；
+ *      不含与执行行/答复集重叠的 completed/failed）→ 命中——这正是「账本事实 → 多态任务状态词」
+ *      投影的形状。唯一按 (file,name) 精确放行的是设计 §3 指定的 `taskLivenessOf`（liveness 三值）；
+ *      把只 return {completed,failed} 的**成败分类器**列为已登记局限（见 ④ 末段，不装没看见）。
  *   ③ task_status 投影只返回 liveness + 账本事实，键名不得出现 status/state/outcome。
  *   ④ 反向绊线：把同形投影重新放进源码，扫描器必须报红（证明守卫不是永绿）。
  */
@@ -55,8 +57,20 @@ const LEDGER_FACT_NAMES = new Set([
   'executions',
 ]);
 
-const SHAPE_WORD_THRESHOLD = 4;
+/** 生命周期**独有**词（去掉 completed/failed——它们与执行行/答复集的成败词重叠，合法分类器也会用）。 */
+const LIFECYCLE_ONLY_WORDS = new Set([...LIFECYCLE_WORDS].filter((word) => word !== 'completed' && word !== 'failed'));
+
+/** 形状族门槛：读 ≥3 账本事实字段，且 return ≥2 个生命周期独有词——「事实→多态状态词」投影形状。 */
+const SHAPE_LIFECYCLE_ONLY_THRESHOLD = 2;
 const SHAPE_FACT_THRESHOLD = 3;
+
+/**
+ * 唯一允许的投影：`packages/agent/src/task-registry.ts` 的 `taskLivenessOf`（设计 §3 指定的
+ * liveness 三值）。它同样读账本事实、return running/died/waiting_user，形状上和「被禁投影」同形，
+ * 所以按 (file, name) 精确放行；改名搬移它到别处或换名会重新落入形状族而被拦。
+ */
+const CANONICAL_LIVENESS_FILE = 'packages/agent/src/task-registry.ts';
+const CANONICAL_LIVENESS_NAME = 'taskLivenessOf';
 
 /** 名字族：函数名里 `task` 与 `status|state|outcome` 同现（大小写敏感的 CamelCase 段）。 */
 const TASK_WORD_NAME_RE = /[Tt]ask[A-Za-z_$]*(?:Status|State|Outcome)|(?:Status|State|Outcome)[A-Za-z_$]*?[Tt]ask/;
@@ -142,7 +156,9 @@ export function findForbiddenProjections(sources: ReadonlyMap<string, string>): 
         if (name !== undefined && TASK_WORD_NAME_RE.test(name) && words.size >= 1) {
           hits.push({ file, hit: `name:${name}(${[...words].sort().join(',')})` });
         }
-        if (words.size >= SHAPE_WORD_THRESHOLD && facts.size >= SHAPE_FACT_THRESHOLD) {
+        const lifecycleOnly = [...words].filter((word) => LIFECYCLE_ONLY_WORDS.has(word));
+        const isCanonicalLiveness = file.split(path.sep).join('/') === CANONICAL_LIVENESS_FILE && name === CANONICAL_LIVENESS_NAME;
+        if (!isCanonicalLiveness && lifecycleOnly.length >= SHAPE_LIFECYCLE_ONLY_THRESHOLD && facts.size >= SHAPE_FACT_THRESHOLD) {
           hits.push({ file, hit: `shape:${name ?? '<anonymous>'}(${[...words].sort().join(',')})` });
         }
       }
@@ -241,7 +257,20 @@ describe('删投影：只留 liveness + 账本事实', () => {
     ]));
     expect(byShape.some((hit) => hit.hit.startsWith('shape:'))).toBe(true);
 
-    // 负例对照一类：liveness 投影（只 running/died/waiting_user 三值）不得报红。
+    // 形状族·收紧后：只 return 2 个生命周期独有词（died/running）的换形投影也必须报红。
+    // （门槛降到「≥2 个独有词」，正是为拦这种「精简版」投影——名字族不含 family、词数也少。）
+    const shortProjection = findForbiddenProjections(new Map([
+      ['scripts/min.ts', `
+        export function peek(task: { cancelledAt?: string; diedAt?: string; timedOutAt?: string }): string {
+          if (task.cancelledAt !== undefined) return 'cancelled';
+          if (task.diedAt !== undefined) return 'died';
+          if (task.timedOutAt !== undefined) return 'timed_out';
+          return 'running';
+        }`],
+    ]));
+    expect(shortProjection.some((hit) => hit.hit.startsWith('shape:'))).toBe(true);
+
+    // 负例对照一类：liveness 投影（唯一允许的投影）不得报红——按 (file,name) 精确放行。
     const livenessOnly = findForbiddenProjections(new Map([
       ['packages/agent/src/task-registry.ts', `
         export type TaskLiveness = 'running' | 'died' | 'waiting_user';
@@ -261,5 +290,20 @@ describe('删投影：只留 liveness + 账本事实', () => {
         function taskStatusTool(): DiscoveredTool { return { name: 'task_status' } as DiscoveredTool; }`],
     ]));
     expect(product).toEqual([]);
+
+    // 已登记局限（显式，不装没看见）：只 return {completed, failed} 两词、读 ≥3 事实的**成败分类器**
+    // 不报红。它和 E11 判据（读 executions 判 completed/failed）同形，且不构成「多态任务状态」投影
+    // （无 running/queued/waiting_user/timed_out 等）；把它也拦掉会误伤合法成败归类。要拦它得另立
+    // 判据形状（例如按 export 名/调用点），本轮不做，登记为已知强度边界。
+    const successFailureClassifier = findForbiddenProjections(new Map([
+      ['scripts/verdict.ts', `
+        export function didSucceed(task: { diedAt?: string; timedOutAt?: string; resourceLimitedAt?: string }): string {
+          if (task.diedAt !== undefined) return 'failed';
+          if (task.timedOutAt !== undefined) return 'failed';
+          if (task.resourceLimitedAt !== undefined) return 'failed';
+          return 'completed';
+        }`],
+    ]));
+    expect(successFailureClassifier).toEqual([]);
   });
 });
