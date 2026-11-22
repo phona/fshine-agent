@@ -27,13 +27,17 @@ function cap(text, max) {
   return { text: value.slice(0, max), truncated: true }
 }
 
-export function buildPrompt({ instructions, nameOnly, stat, diff, pr, issues }) {
+export function buildPrompt({ instructions, nameOnly, stat, diff, pr, issues, testStat, testNames }) {
   assertSha(pr.baseSha, 'base sha')
   assertSha(pr.headSha, 'head sha')
   const body = cap(pr.body ?? '', MAX_BODY)
   const shownStat = cap(stat ?? '', MAX_STAT)
   const shownDiff = cap(diff ?? '', MAX_DIFF)
   const names = String(nameOnly ?? '').trim()
+  const testNamesText = String(testNames ?? '').trim()
+  const testFiles = testNamesText ? testNamesText.split('\n').map((line) => line.trim()).filter(Boolean) : []
+  const testCount = testFiles.length
+  const shownTestStat = cap(testStat ?? '', MAX_STAT)
   const spec = `${pr.baseSha}...${pr.headSha}`
   const issueLines = []
   for (const issue of issues ?? []) {
@@ -82,8 +86,27 @@ export function buildPrompt({ instructions, nameOnly, stat, diff, pr, issues }) 
   lines.push(fence('', shownStat.text || '(empty)'), '', '### Diff', '')
   lines.push(shownDiff.truncated
     ? `The diff is truncated to ${MAX_DIFF} characters. Read the remainder with git diff --find-renames ${spec}.`
-    : 'Full three-dot diff:')
+    : testCount > 0
+      ? 'Full three-dot diff of the core changes (test/eval files are summarized below):'
+      : 'Full three-dot diff:')
   lines.push(fence('diff', shownDiff.text), '')
+  if (testCount > 0) {
+    lines.push(
+      '### Test and eval changes (summary only)',
+      '',
+      `另有 ${testCount} 个测试/eval 文件改动（机械断言/判据迁移）。这些文件不内联完整 diff，`,
+      '只给 stat 与文件清单；如需核对某文件细节，用 `git diff --find-renames ' + spec + ' -- <path>` 只读查看。',
+      '',
+      '#### Test/eval changed files',
+      '',
+      fence('', testNamesText),
+      '',
+      '#### Test/eval diff stat',
+      '',
+    )
+    if (shownTestStat.truncated) lines.push(`The test/eval stat is truncated to ${MAX_STAT} characters.`, '')
+    lines.push(fence('', shownTestStat.text || '(empty)'), '')
+  }
   return `${lines.join('\n')}\n`
 }
 
@@ -128,11 +151,15 @@ if (isMain()) {
     }
   }
   const spec = `${pr.baseSha}...${pr.headSha}`
+  const coreExcludes = [':(exclude)*.test.ts', ':(exclude)*.test.mjs', ':(exclude)scripts/eval/**']
+  const testPaths = ['*.test.ts', '*.test.mjs', 'scripts/eval/**']
   const prompt = buildPrompt({
     instructions: fs.readFileSync(path.resolve('.github/prompts/pr-review.md'), 'utf8'),
     nameOnly: git(['diff', '--find-renames', '--name-only', spec]),
     stat: git(['diff', '--find-renames', '--stat', spec]),
-    diff: git(['diff', '--find-renames', spec]),
+    diff: git(['diff', '--find-renames', spec, '--', '.', ...coreExcludes]),
+    testStat: git(['diff', '--find-renames', '--stat', spec, '--', ...testPaths]),
+    testNames: git(['diff', '--find-renames', '--name-only', spec, '--', ...testPaths]),
     pr,
     issues,
   })
