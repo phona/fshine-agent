@@ -76,8 +76,9 @@ describe('② 执行器装配 + 分级 + d6（确定性假件）', () => {
     const workDir = path.join(freshRoot(), 'ds3');
     const evidence = await createSmokeExecutor(DS_3)(itemFor(DS_3), DS_3, workDir);
     expect(evidence.tasks).toHaveLength(3);
-    const statuses = evidence.tasks.map((t) => t.status).sort();
-    expect(statuses).toEqual(['cancelled', 'completed', 'completed']);
+    const cancelledCount = evidence.tasks.filter((t) => t.cancelledAt !== undefined).length;
+    const completedCount = evidence.tasks.filter((t) => t.cancelledAt === undefined && ['completed', 'failed', 'refused'].includes(t.executions[t.executions.length - 1]?.status ?? '')).length;
+    expect([cancelledCount, completedCount]).toEqual([1, 2]);
     const runDir = writeSampleRun(path.join(freshRoot(), 'out3'), {
       inputs: evidence.inputs, toolCalls: evidence.toolCalls, tasks: evidence.tasks, replies: evidence.replies,
       meta: evidence.meta, taskFacts: evidence.taskFacts, notifications: evidence.notifications, auditLines: evidence.auditLines, sample: evidence.sample,
@@ -87,7 +88,7 @@ describe('② 执行器装配 + 分级 + d6（确定性假件）', () => {
     expect(grade.mechanical.pass).toBe(true);
     expect(grade.d6?.postCancelResidue.available).toBe(true);
     expect(grade.d6?.postCancelResidue.value?.residue).toBe(false);
-    expect(grade.indicators.d3.taskStatuses['cancelled']).toBe(1);
+    expect(grade.indicators.d3.taskFacts.cancelled).toBe(1);
     // 逐轮对象观察：受理轮的三个对象与请求集合一致（无轮外执行）。
     expect(grade.turns[0]!.executionObjects).toEqual(['alpha@W1', 'beta@W1', 'contoso']);
     expect(grade.indicators.d1.executionsOutsideTurnRequest).toBe(0);

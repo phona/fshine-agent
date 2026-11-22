@@ -8,12 +8,16 @@
 import { describe, it, expect } from 'vitest';
 import {
   judgeFactAnswer, judgeSessionFacts, parseNumbers, stripCodeTokens,
-  judgeTaskContinuity, statesCovered, FACT_TRUTH,
+  judgeTaskContinuity, coveredTaskFacts, FACT_TRUTH,
   type TaskTurnFact, type TaskView,
 } from './oracle';
 
-function task(partial: Partial<TaskView> & { taskId: string; status: string }): TaskView {
-  return { request: '', requestIds: [], ...partial };
+const FACTS: Omit<TaskView, 'taskId' | 'request' | 'requestIds'> = {
+  liveness: null, ended: false, cancelled: false, died: false, timedOut: false, resourceLimited: false, reported: false,
+};
+
+function task(partial: Partial<TaskView> & { taskId: string }): TaskView {
+  return { request: '', requestIds: [], ...FACTS, ...partial };
 }
 
 describe('事实 Oracle · 数值解析', () => {
@@ -98,8 +102,8 @@ describe('事实 Oracle · session_value 与会话聚合', () => {
 describe('任务 Oracle · 硬零 H3/H4/H5 与 E-G', () => {
   it('干净底账 → 通过且无硬零', () => {
     const turns: TaskTurnFact[] = [
-      { turn: 1, tasks: [task({ taskId: 't1', taskNo: 1, status: 'completed', requestIds: ['r1'] })] },
-      { turn: 2, tasks: [task({ taskId: 't1', taskNo: 1, status: 'completed', requestIds: ['r1'] })] },
+      { turn: 1, tasks: [task({ taskId: 't1', taskNo: 1, reported: true, lastExecutionStatus: 'completed', requestIds: ['r1'] })] },
+      { turn: 2, tasks: [task({ taskId: 't1', taskNo: 1, reported: true, lastExecutionStatus: 'completed', requestIds: ['r1'] })] },
     ];
     const v = judgeTaskContinuity(turns);
     expect(v.pass).toBe(true);
@@ -108,8 +112,8 @@ describe('任务 Oracle · 硬零 H3/H4/H5 与 E-G', () => {
 
   it('H3：同 requestId 归属两个不同 taskId（重复派发）→ 硬零', () => {
     const turns: TaskTurnFact[] = [
-      { turn: 1, tasks: [task({ taskId: 't1', status: 'running', requestIds: ['req-A'] })] },
-      { turn: 2, tasks: [task({ taskId: 't2', status: 'running', requestIds: ['req-A'] })] },
+      { turn: 1, tasks: [task({ taskId: 't1', liveness: 'running', requestIds: ['req-A'] })] },
+      { turn: 2, tasks: [task({ taskId: 't2', liveness: 'running', requestIds: ['req-A'] })] },
     ];
     const v = judgeTaskContinuity(turns);
     expect(v.hardZeroHits).toContain('H3');
@@ -117,14 +121,14 @@ describe('任务 Oracle · 硬零 H3/H4/H5 与 E-G', () => {
 
   it('H3 不误伤：同一任务在多轮快照里重复出现不算重复执行', () => {
     const turns: TaskTurnFact[] = [
-      { turn: 1, tasks: [task({ taskId: 't1', status: 'running', requestIds: ['req-A'] })] },
-      { turn: 2, tasks: [task({ taskId: 't1', status: 'completed', requestIds: ['req-A'] })] },
+      { turn: 1, tasks: [task({ taskId: 't1', liveness: 'running', requestIds: ['req-A'] })] },
+      { turn: 2, tasks: [task({ taskId: 't1', reported: true, lastExecutionStatus: 'completed', requestIds: ['req-A'] })] },
     ];
     expect(judgeTaskContinuity(turns).hardZeroHits).toEqual([]);
   });
 
-  it('H4：completed 却零执行 → 虚假完成硬零', () => {
-    const turns: TaskTurnFact[] = [{ turn: 1, tasks: [task({ taskId: 't1', status: 'completed', requestIds: [] })] }];
+  it('H4：已汇报却零执行 → 虚假完成硬零', () => {
+    const turns: TaskTurnFact[] = [{ turn: 1, tasks: [task({ taskId: 't1', reported: true, requestIds: [] })] }];
     expect(judgeTaskContinuity(turns).hardZeroHits).toContain('H4');
   });
 
@@ -134,23 +138,23 @@ describe('任务 Oracle · 硬零 H3/H4/H5 与 E-G', () => {
   });
 
   it('H5 不误伤：确实调了取消 → 不判', () => {
-    const turns: TaskTurnFact[] = [{ turn: 1, tasks: [task({ taskId: 't1', status: 'cancelled' })], reply: '已取消。', cancelCalled: true }];
+    const turns: TaskTurnFact[] = [{ turn: 1, tasks: [task({ taskId: 't1', cancelled: true })], reply: '已取消。', cancelCalled: true }];
     expect(judgeTaskContinuity(turns).hardZeroHits).toEqual([]);
   });
 
   it('E-G：同 taskNo 映射不同 taskId → 编号混淆', () => {
     const turns: TaskTurnFact[] = [
-      { turn: 1, tasks: [task({ taskId: 't1', taskNo: 7, status: 'completed' })] },
-      { turn: 2, tasks: [task({ taskId: 't2', taskNo: 7, status: 'completed' })] },
+      { turn: 1, tasks: [task({ taskId: 't1', taskNo: 7, reported: true })] },
+      { turn: 2, tasks: [task({ taskId: 't2', taskNo: 7, reported: true })] },
     ];
     expect(judgeTaskContinuity(turns).codes).toContain('E-G');
   });
 
-  it('五态覆盖可断言', () => {
-    const covered = statesCovered([
-      { turn: 1, tasks: [task({ taskId: 'a', status: 'completed' }), task({ taskId: 'b', status: 'running' })] },
-      { turn: 2, tasks: [task({ taskId: 'c', status: 'cancelled' }), task({ taskId: 'd', status: 'failed' }), task({ taskId: 'e', status: 'waiting_user' })] },
+  it('任务事实覆盖可断言（liveness 三值 + 收尾/汇报/执行事实）', () => {
+    const covered = coveredTaskFacts([
+      { turn: 1, tasks: [task({ taskId: 'a', reported: true, lastExecutionStatus: 'completed' }), task({ taskId: 'b', liveness: 'running' })] },
+      { turn: 2, tasks: [task({ taskId: 'c', cancelled: true }), task({ taskId: 'd', died: true }), task({ taskId: 'e', liveness: 'waiting_user' })] },
     ]);
-    expect([...covered].sort()).toEqual(['cancelled', 'completed', 'failed', 'running', 'waiting_user']);
+    expect([...covered].sort()).toEqual(['cancelled', 'died', 'exec:completed', 'reported', 'running', 'waiting_user']);
   });
 });

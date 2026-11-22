@@ -399,9 +399,9 @@ export class LedgerWatcher {
     const seen: string[] = [];
     for (const snapshot of this.snapshots) {
       if (snapshot.taskId !== taskId) continue;
-      // 观测事实：取消时刻 / liveness 三值 / 末条执行行原值（无执行 = 未启动）。
+      // 机械事实标签：liveness 三值 + 取消/汇报事实 + 末条执行行原值（不合成任务级状态词）。
       const lastExecutionStatus = snapshot.executions[snapshot.executions.length - 1]?.status;
-      const fact = snapshot.cancelled ? 'cancelled' : snapshot.liveness ?? lastExecutionStatus ?? 'queued';
+      const fact = `liveness=${snapshot.liveness ?? 'null'} cancelled=${snapshot.cancelled} reported=${snapshot.reported} exec=${lastExecutionStatus ?? 'null'}`;
       if (seen[seen.length - 1] !== fact) seen.push(fact);
     }
     return seen;

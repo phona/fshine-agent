@@ -29,12 +29,16 @@ import type {
   ToolCallRecord,
 } from '../convergence-r1/evidence';
 
-/** TaskFact 流的一行（任务状态变化；中性名词，只为采集存档）。 */
+/** TaskFact 流的一行：任务账本**机械事实快照**（中性名词，只为采集存档；无任务级状态词）。 */
 export interface TaskFactLine {
   ts: string;
   taskId: string;
-  from: string;
-  to: string;
+  /** 存活三值（宿主守护事实；null=未启动或已收尾）。 */
+  liveness: 'running' | 'died' | 'waiting_user' | null;
+  /** 已收尾（四时刻任一 / 汇报存档 / 末条执行终态）。 */
+  ended: boolean;
+  /** 取消事实（cancelledAt 在场）。 */
+  cancelled: boolean;
   [key: string]: unknown;
 }
 

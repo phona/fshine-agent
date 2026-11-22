@@ -52,3 +52,44 @@ export function archivedReportOf(task: Pick<TaskRecord, 'resultText' | 'replyTex
   const report = (task.resultText ?? task.replyText ?? '').trim();
   return report === '' ? undefined : report;
 }
+
+/**
+ * 任务账本的**机械事实视图**（无任务级状态词）：存活三值 + 一次收尾/取消/汇报事实 + 末条执行行原值。
+ * 供评测证据快照与 R6 oracle 消费；不合成任何「任务状态词」。
+ */
+export interface TaskFactView {
+  liveness: TaskLiveness | null;
+  ended: boolean;
+  cancelled: boolean;
+  died: boolean;
+  timedOut: boolean;
+  resourceLimited: boolean;
+  reported: boolean;
+  lastExecutionStatus?: string;
+}
+
+/** 账本记录 → 机械事实视图（纯函数；liveness 由 {@link taskLivenessOf} 推导）。 */
+export function taskFactViewOf(task: {
+  leaseOwner?: string;
+  leaseUntil?: string;
+  diedAt?: string;
+  cancelledAt?: string;
+  timedOutAt?: string;
+  resourceLimitedAt?: string;
+  pendingQuestion?: unknown;
+  executions?: readonly { status: string }[];
+  resultText?: string;
+  replyText?: string;
+}): TaskFactView {
+  const last = lastExecutionOf(task)?.status;
+  return {
+    liveness: taskLivenessOf(task) ?? null,
+    ended: taskEndedOf(task) || taskReportedOf(task) || (last !== undefined && ['completed', 'failed', 'refused'].includes(last)),
+    cancelled: task.cancelledAt !== undefined,
+    died: task.diedAt !== undefined,
+    timedOut: task.timedOutAt !== undefined,
+    resourceLimited: task.resourceLimitedAt !== undefined,
+    reported: taskReportedOf(task),
+    ...(last === undefined ? {} : { lastExecutionStatus: last }),
+  };
+}

@@ -12,7 +12,7 @@
  * 标注待 Wave1 前冒烟）。本模块不 import 产品运行时、不读压缩阈值、不改触发/门控。
  */
 import {
-  judgeFactAnswer, judgeSessionFacts, judgeTaskContinuity, parseNumbers,
+  judgeFactAnswer, judgeSessionFacts, judgeTaskContinuity, parseNumbers, taskHasFact, taskFactSignature,
   type FactExpectation, type FactFailureCode, type FactVerdict, type TaskFailureCode, type TaskTurnFact, type TaskView, type TaskVerdict,
 } from './oracle';
 import {
@@ -98,7 +98,7 @@ export interface HarnessSession {
 
 export type TurnExpectationCheck =
   | 'no_new_task' | 'new_task' | 'no_execution' | 'execution_objects'
-  | 'prev_tasks_unchanged' | 'task_status_in' | 'reply_excludes' | 'cancel_honest'
+  | 'prev_tasks_unchanged' | 'task_fact_in' | 'reply_excludes' | 'cancel_honest'
   | 'inflight_cancel';
 
 /** 单条轮期望判负。`code` 只复用既有枚举（预注册 §2.3 E-A..E-K 与任务码 H3/H4/H5）。 */
@@ -255,21 +255,22 @@ export function judgeTurnExpectations(spec: TurnSpec, ctx: TurnExpectationContex
     for (const before of ctx.tasksBefore) {
       const after = afterById.get(before.taskId);
       if (after === undefined) { changed.push({ taskId: before.taskId, disappeared: true }); continue; }
-      if (after.status !== before.status) changed.push({ taskId: before.taskId, statusBefore: before.status, statusAfter: after.status });
+      if (taskFactSignature(after) !== taskFactSignature(before)) changed.push({ taskId: before.taskId, before: taskFactSignature(before), after: taskFactSignature(after) });
       if (after.requestIds.join(',') !== before.requestIds.join(',')) {
         changed.push({ taskId: before.taskId, requestIdsBefore: before.requestIds, requestIdsAfter: after.requestIds });
       }
     }
     if (changed.length > 0) push('prev_tasks_unchanged', 'E-G', { changed });
   }
-  if (spec.expectTaskStatusIn !== undefined) {
-    const picked = pickTask(ctx.tasksAfter, spec.expectTaskStatusIn.which);
+  if (spec.expectTaskFactIn !== undefined) {
+    const picked = pickTask(ctx.tasksAfter, spec.expectTaskFactIn.which);
     if (picked === undefined) {
-      push('task_status_in', 'E-G', { which: spec.expectTaskStatusIn.which, tasksAfter: 0 });
-    } else if (!spec.expectTaskStatusIn.values.includes(picked.status)) {
-      push('task_status_in', 'E-G', {
-        which: spec.expectTaskStatusIn.which, taskId: picked.taskId, status: picked.status,
-        expected: spec.expectTaskStatusIn.values,
+      push('task_fact_in', 'E-G', { which: spec.expectTaskFactIn.which, tasksAfter: 0 });
+    } else if (!spec.expectTaskFactIn.facts.some((fact) => taskHasFact(picked, fact))) {
+      push('task_fact_in', 'E-G', {
+        which: spec.expectTaskFactIn.which, taskId: picked.taskId,
+        facts: { liveness: picked.liveness, ended: picked.ended, cancelled: picked.cancelled, reported: picked.reported, lastExecutionStatus: picked.lastExecutionStatus ?? null },
+        expected: spec.expectTaskFactIn.facts,
       });
     }
   }
@@ -282,47 +283,48 @@ export function judgeTurnExpectations(spec: TurnSpec, ctx: TurnExpectationContex
     const latest = pickTask(ctx.tasksAfter, spec.cancelTarget ?? 'latest');
     if (latest === undefined) {
       push('cancel_honest', 'E-D', { reason: 'no_task_to_cancel' });
-    } else if (latest.status !== 'cancelled') {
-      // cancelled = 取消已生效；completed = 已完成，只有「未声称取消」或「明确说取消不了」
-      // 才算如实（诚实回执可能同时提到另一个任务已取消）。
-      const honest = latest.status === 'completed' && (!claims || statesCancelRefused(ctx.reply));
+    } else if (!latest.cancelled) {
+      // 任务已办完（有汇报存档 / 末条执行 completed）且未声称取消 = 如实（诚实回执可能同时提到别的任务已取消）。
+      const done = latest.reported || latest.lastExecutionStatus === 'completed';
+      const honest = done && (!claims || statesCancelRefused(ctx.reply));
       if (!honest) {
         push('cancel_honest', 'E-D', {
-          taskId: latest.taskId, which: spec.cancelTarget ?? 'latest', status: latest.status, claimsCancelled: claims,
+          taskId: latest.taskId, which: spec.cancelTarget ?? 'latest',
+          liveness: latest.liveness, ended: latest.ended, reported: latest.reported, claimsCancelled: claims,
         });
       }
     }
   }
   if (spec.expectInflightCancel === true) {
-    // 在飞取消：轮前最新任务必须真的还在飞，否则没有观测窗口（不冒充判定）。
+    // 在飞取消：轮前最新任务必须真的还在飞（running 或未启动排队），否则没有观测窗口（不冒充判定）。
     const before = pickTask(ctx.tasksBefore, 'latest');
-    const live = before !== undefined && ['queued', 'running', 'cancelling'].includes(before.status);
+    const live = before !== undefined && (before.liveness === 'running' || (before.liveness === null && !before.ended));
     if (!live) {
       push('inflight_cancel', 'E-INCONCLUSIVE', {
         reason: 'no_inflight_window',
-        statusBefore: before?.status ?? null,
+        before: before === undefined ? null : { liveness: before.liveness, ended: before.ended, reported: before.reported },
       });
     } else {
       const after = ctx.tasksAfter.find((task) => task.taskId === before.taskId);
       if (after === undefined) {
-        push('inflight_cancel', 'E-D', { taskId: before.taskId, statusBefore: before.status, statusAfter: null });
-      } else if (after.status !== 'cancelled') {
-        // 任务已 completed 还可能有两种：①取消到达时它已完成（如实迟到，pass）；
+        push('inflight_cancel', 'E-D', { taskId: before.taskId, before: { liveness: before.liveness, ended: before.ended }, after: null });
+      } else if (!after.cancelled) {
+        // 任务已办完还可能有两种：①取消到达时它已完成（如实迟到，pass）；
         // ②取消指错任务/未落到该任务（fail）。用 task_cancel 回执的目标与 outcome 区分。
         const facts = ctx.cancelFacts ?? null;
         if (facts === null) {
           push('inflight_cancel', 'E-INCONCLUSIVE', {
-            reason: 'cancel_surface_missing', taskId: before.taskId, statusAfter: after.status,
+            reason: 'cancel_surface_missing', taskId: before.taskId, liveness: after.liveness, reported: after.reported,
           });
         } else {
           const targeted = facts.find((fact) => fact.taskId === before.taskId);
           // 取消到达时目标已完成 = 如实迟到（回复不得声称已取消；明确说取消不了也算如实）。
-          const arrivedAfterCompletion = after.status === 'completed'
+          const arrivedAfterCompletion = (after.reported || after.lastExecutionStatus === 'completed')
             && targeted?.outcome === 'terminal'
             && (!claimsCancel(ctx.reply) || statesCancelRefused(ctx.reply));
           if (!arrivedAfterCompletion) {
             push('inflight_cancel', 'E-D', {
-              taskId: before.taskId, statusBefore: before.status, statusAfter: after.status,
+              taskId: before.taskId, liveness: after.liveness, reported: after.reported,
               reason: targeted === undefined ? 'cancel_target_mismatch' : 'cancel_not_effective',
               cancelFacts: facts, claimsCancelled: claimsCancel(ctx.reply),
             });
@@ -338,7 +340,7 @@ function countChecks(spec: TurnSpec): number {
   return [
     spec.expectNoNewTask === true, spec.expectNewTask === true, spec.expectNoExecution === true,
     spec.expectExecutionObjects !== undefined && spec.expectExecutionObjects.length > 0,
-    spec.expectPrevTasksUnchanged === true, spec.expectTaskStatusIn !== undefined,
+    spec.expectPrevTasksUnchanged === true, spec.expectTaskFactIn !== undefined,
     spec.replyExcludes !== undefined && spec.replyExcludes.length > 0, spec.expectCancelHonest === true,
     spec.expectInflightCancel === true,
   ].filter(Boolean).length;

@@ -67,8 +67,8 @@ export interface ExpCase {
   replyMustInclude?: readonly string[];
   /** 判据：最终回合回复不得包含的标记。 */
   replyMustExclude?: readonly string[];
-  /** 判据：会话中观察到的任务状态须命中其一的集合（空=不判）。 */
-  expectTaskStatuses?: readonly string[];
+  /** 判据：会话中观察到的任务存活（宿主守护事实三值）须命中其一的集合（空=不判）。 */
+  expectTaskLiveness?: readonly ('running' | 'died' | 'waiting_user')[];
   /** 判据说明（人读；机械面由 judge 落实）。 */
   criteria: readonly string[];
 }

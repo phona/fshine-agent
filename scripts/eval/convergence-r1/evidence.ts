@@ -55,14 +55,13 @@ export interface TaskRecordJson {
   sessionId: string;
   request: string;
   /**
-   * 评测观察词（由 {@link ../../../task-observation} 从账本事实读出；**不是**底账结论，
-   * 也不是产品状态）。判 outcome 只读 executions / 机械时刻 / 汇报存档，不读本字段。
+   * 存活（宿主守护事实，唯一保留的投影：running/died/waiting_user；null=未启动或已收尾）。
+   * 判据不读「任务级状态词」——只读本字段 + 账本事实列 + 逐笔执行行 status + 汇报存档。
    */
-  status: string;
+  liveness?: 'running' | 'died' | 'waiting_user' | null;
   /** worker 汇报存档（语义；判 outcome 以 executions 机械事实为准，不一致不补）。 */
   resultText?: string;
   replyText?: string;
-  failureReason?: string;
   /** 一次性机械时刻（判据只读事实，不经过任何 status 投影）。 */
   diedAt?: string;
   cancelledAt?: string;

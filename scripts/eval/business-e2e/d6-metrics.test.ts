@@ -65,10 +65,10 @@ function fixtureRoot(): { root: string; runDir: string } {
     tc(1, 'worker', 0, 'execute_operation', '2026-11-14T00:00:11Z', 2000, { result: { status: 'completed' } }),
   ];
   input.tasks = [
-    { taskId: 'task-1', principalId: 'p1', sessionId: 's1', request: 'r1', status: 'completed',
+    { taskId: 'task-1', principalId: 'p1', sessionId: 's1', request: 'r1', liveness: null,
       executions: [{ requestId: 'e1', operation: 'dummy.query', status: 'completed' }, { requestId: 'e2', operation: 'dummy.commit', status: 'completed' }],
       createdAt: '2026-11-14T00:00:00Z', updatedAt: '2026-11-14T00:00:05Z' },
-    { taskId: 'task-2', principalId: 'p1', sessionId: 's1', request: 'r2', status: 'completed',
+    { taskId: 'task-2', principalId: 'p1', sessionId: 's1', request: 'r2', liveness: null,
       executions: [{ requestId: 'e3', operation: 'dummy.query', status: 'completed' }],
       createdAt: '2026-11-14T00:00:10Z', updatedAt: '2026-11-14T00:00:12Z' },
   ];
@@ -77,10 +77,10 @@ function fixtureRoot(): { root: string; runDir: string } {
     { index: 1, durationMs: 2000, modelCalls: 1, taskIds: ['task-2'], tokens: { available: true, total: 500, source: 'driver' }, retries: 0, notes: [] },
   ];
   input.taskFacts = [
-    { ts: '2026-11-14T00:00:00Z', taskId: 'task-1', from: 'created', to: 'running' },
-    { ts: '2026-11-14T00:00:05Z', taskId: 'task-1', from: 'running', to: 'completed' },
-    { ts: '2026-11-14T00:00:10Z', taskId: 'task-2', from: 'created', to: 'running' },
-    { ts: '2026-11-14T00:00:12Z', taskId: 'task-2', from: 'running', to: 'completed' },
+    { ts: '2026-11-14T00:00:00Z', taskId: 'task-1', liveness: 'running', ended: false, cancelled: false },
+    { ts: '2026-11-14T00:00:05Z', taskId: 'task-1', liveness: null, ended: true, cancelled: false },
+    { ts: '2026-11-14T00:00:10Z', taskId: 'task-2', liveness: 'running', ended: false, cancelled: false },
+    { ts: '2026-11-14T00:00:12Z', taskId: 'task-2', liveness: null, ended: true, cancelled: false },
   ];
   const runDir = writeSampleRun(root, input);
   return { root, runDir };
@@ -99,10 +99,10 @@ describe('extractD6 D 轴指标抽取', () => {
     const root = freshRoot();
     const input = baseInput();
     input.taskFacts = [
-      { ts: '2026-11-14T00:00:00Z', taskId: 'a', from: 'created', to: 'running' },
-      { ts: '2026-11-14T00:00:01Z', taskId: 'b', from: 'created', to: 'running' },
-      { ts: '2026-11-14T00:00:02Z', taskId: 'a', from: 'running', to: 'completed' },
-      { ts: '2026-11-14T00:00:03Z', taskId: 'b', from: 'running', to: 'completed' },
+      { ts: '2026-11-14T00:00:00Z', taskId: 'a', liveness: 'running', ended: false, cancelled: false },
+      { ts: '2026-11-14T00:00:01Z', taskId: 'b', liveness: 'running', ended: false, cancelled: false },
+      { ts: '2026-11-14T00:00:02Z', taskId: 'a', liveness: null, ended: true, cancelled: false },
+      { ts: '2026-11-14T00:00:03Z', taskId: 'b', liveness: null, ended: true, cancelled: false },
     ];
     const runDir = writeSampleRun(root, input);
     const d6 = extractD6(runDir);
@@ -118,7 +118,7 @@ describe('extractD6 D 轴指标抽取', () => {
       { index: 1, durationMs: 100, modelCalls: 1, taskIds: ['a'], tokens: { available: false, source: 'driver' }, retries: 0, notes: [] },
     ];
     input.tasks = [
-      { taskId: 'a', principalId: 'p1', sessionId: 's1', request: 'r', status: 'completed', executions: [], createdAt: 't', updatedAt: 't' },
+      { taskId: 'a', principalId: 'p1', sessionId: 's1', request: 'r', liveness: null, resultText: '汇报存档', executions: [], createdAt: 't', updatedAt: 't' },
     ];
     const runDir = writeSampleRun(root, input);
     const d6 = extractD6(runDir);
@@ -156,7 +156,7 @@ describe('extractD6 D 轴指标抽取', () => {
     const input = baseInput();
     input.toolCalls = [tc(0, 'worker', 0, 'execute_operation', '2026-11-14T00:00:00Z', 10, { result: { status: 'completed' } })];
     input.tasks = [
-      { taskId: 't', principalId: 'p', sessionId: 's', request: 'r', status: 'completed',
+      { taskId: 't', principalId: 'p', sessionId: 's', request: 'r', liveness: null,
         executions: [{ requestId: 'x', operation: 'dummy.query', status: 'completed' }, { requestId: 'y', operation: 'dummy.query', status: 'completed' }],
         createdAt: 't0', updatedAt: 't1' },
     ];
@@ -207,8 +207,8 @@ describe('extractD6 D 轴指标抽取', () => {
       tc(0, 'worker', 1, 'execute_operation', '2026-11-14T00:00:09Z', 100, { result: { status: 'completed' } }), // 取消后
     ];
     input.taskFacts = [
-      { ts: '2026-11-14T00:00:00Z', taskId: 'a', from: 'created', to: 'running' },
-      { ts: '2026-11-14T00:00:05Z', taskId: 'a', from: 'running', to: 'cancelled' },
+      { ts: '2026-11-14T00:00:00Z', taskId: 'a', liveness: 'running', ended: false, cancelled: false },
+      { ts: '2026-11-14T00:00:05Z', taskId: 'a', liveness: null, ended: true, cancelled: true },
     ];
     input.auditLines = [
       '{"ts":"2026-11-14T00:00:01Z","script":"dummy.query","exitCode":0}',
@@ -232,12 +232,12 @@ describe('extractD6 D 轴指标抽取', () => {
       tc(2, 'main', 2, 'task_result', '2026-11-14T00:00:08Z', 5, { args: { ref: '#2' } }),
     ];
     input.tasks = [
-      { taskId: 'cancelled-task', principalId: 'p1', sessionId: 's1', request: 'r1', status: 'cancelled', executions: [], createdAt: '2026-11-14T00:00:00Z', updatedAt: '2026-11-14T00:00:05Z' },
-      { taskId: 'other-task', principalId: 'p1', sessionId: 's1', request: 'r2', status: 'completed', executions: [], createdAt: '2026-11-14T00:00:01Z', updatedAt: '2026-11-14T00:00:04Z' },
+      { taskId: 'cancelled-task', principalId: 'p1', sessionId: 's1', request: 'r1', cancelledAt: '2026-11-14T00:00:05Z', executions: [], createdAt: '2026-11-14T00:00:00Z', updatedAt: '2026-11-14T00:00:05Z' },
+      { taskId: 'other-task', principalId: 'p1', sessionId: 's1', request: 'r2', liveness: null, executions: [], createdAt: '2026-11-14T00:00:01Z', updatedAt: '2026-11-14T00:00:04Z' },
     ];
     input.taskFacts = [
-      { ts: '2026-11-14T00:00:00Z', taskId: 'cancelled-task', from: 'created', to: 'running' },
-      { ts: '2026-11-14T00:00:05Z', taskId: 'cancelled-task', from: 'running', to: 'cancelled' },
+      { ts: '2026-11-14T00:00:00Z', taskId: 'cancelled-task', liveness: 'running', ended: false, cancelled: false },
+      { ts: '2026-11-14T00:00:05Z', taskId: 'cancelled-task', liveness: null, ended: true, cancelled: true },
     ];
     const runDir = writeSampleRun(root, input);
     const d6 = extractD6(runDir);
@@ -255,12 +255,12 @@ describe('extractD6 D 轴指标抽取', () => {
       tc(2, 'worker', 1, 'execute_operation', '2026-11-14T00:00:08Z', 5, { args: { taskId: 'other-task' }, result: { status: 'completed' } }),
     ];
     input.tasks = [
-      { taskId: 'cancelled-task', principalId: 'p1', sessionId: 's1', request: 'r1', status: 'cancelled', executions: [], createdAt: '2026-11-14T00:00:00Z', updatedAt: '2026-11-14T00:00:05Z' },
-      { taskId: 'other-task', principalId: 'p1', sessionId: 's1', request: 'r2', status: 'completed', executions: [], createdAt: '2026-11-14T00:00:01Z', updatedAt: '2026-11-14T00:00:04Z' },
+      { taskId: 'cancelled-task', principalId: 'p1', sessionId: 's1', request: 'r1', cancelledAt: '2026-11-14T00:00:05Z', executions: [], createdAt: '2026-11-14T00:00:00Z', updatedAt: '2026-11-14T00:00:05Z' },
+      { taskId: 'other-task', principalId: 'p1', sessionId: 's1', request: 'r2', liveness: null, executions: [], createdAt: '2026-11-14T00:00:01Z', updatedAt: '2026-11-14T00:00:04Z' },
     ];
     input.taskFacts = [
-      { ts: '2026-11-14T00:00:00Z', taskId: 'cancelled-task', from: 'created', to: 'running' },
-      { ts: '2026-11-14T00:00:05Z', taskId: 'cancelled-task', from: 'running', to: 'cancelled' },
+      { ts: '2026-11-14T00:00:00Z', taskId: 'cancelled-task', liveness: 'running', ended: false, cancelled: false },
+      { ts: '2026-11-14T00:00:05Z', taskId: 'cancelled-task', liveness: null, ended: true, cancelled: true },
     ];
     const runDir = writeSampleRun(root, input);
     const d6 = extractD6(runDir);

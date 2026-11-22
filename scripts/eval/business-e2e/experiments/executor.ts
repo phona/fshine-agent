@@ -40,8 +40,6 @@ import type { ExpCase, ExpItem } from './model';
 import { effectiveTurns, EXP_HARD_LIMITS } from './model';
 import type { ExpEvidence } from './judge';
 import type { InputsFile, MetaFile, MetaTurn, ReplyLine, TaskRecordJson, ToolCallRecord } from '../../convergence-r1/evidence';
-import { observedTaskStatusOf } from '../../task-observation';
-
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
 
@@ -360,8 +358,8 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
       } finally {
         restoreCapture();
       }
-      // S1：底账没有 status——证据快照的 status 词按机械事实投影。
-      const tasks = jsonSafe(session.tasks().map((task) => ({ ...task, status: observedTaskStatusOf(task) }))) as TaskRecordJson[];
+      // S1：底账没有 status——证据快照只带账本事实 + 存活（唯一投影）。
+      const tasks = jsonSafe(session.tasks().map((task) => ({ ...task, liveness: taskLivenessOf(task) ?? null }))) as TaskRecordJson[];
       assembled.close();
 
       const toolCalls = sink.calls;

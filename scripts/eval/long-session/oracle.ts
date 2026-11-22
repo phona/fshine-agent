@@ -175,13 +175,68 @@ export interface TaskView {
   readonly taskId: string;
   readonly taskNo?: number;
   readonly request: string;
-  readonly status: string;
+  /** 存活（宿主守护事实三值；null=未启动或已收尾）——**唯一**保留的任务投影。 */
+  readonly liveness: 'running' | 'died' | 'waiting_user' | null;
+  /** 已收尾（四时刻任一 / 汇报存档 / 末条执行终态）。 */
+  readonly ended: boolean;
+  readonly cancelled: boolean;
+  readonly died: boolean;
+  readonly timedOut: boolean;
+  readonly resourceLimited: boolean;
+  /** worker 汇报已存档（语义事实；判「办没办成」读执行行）。 */
+  readonly reported: boolean;
+  /** 末条执行行 status 原值（如 completed/failed/refused/accepted）。 */
+  readonly lastExecutionStatus?: string;
   readonly reason?: string;
   /** 本任务的执行调用 requestId 清单（H3 重复执行检测）。 */
   readonly requestIds: readonly string[];
 }
 
-/** 单轮的任务事实：该轮结束后的 registry 快照 + 该轮机械上是否调用过取消。 */
+/** 任务机械事实标签（判据用；`exec:<status>` = 末条执行行 status 原值）。 */
+export type TaskFactLabel =
+  | 'running' | 'waiting_user' | 'died' | 'ended'
+  | 'cancelled' | 'timed_out' | 'resource_limited' | 'reported';
+
+/** 某任务是否具备给定机械事实（纯函数；不读/不造任务级状态词）。 */
+export function taskHasFact(task: TaskView, label: TaskFactLabel | string): boolean {
+  switch (label) {
+    case 'running': return task.liveness === 'running';
+    case 'waiting_user': return task.liveness === 'waiting_user';
+    case 'died': return task.died;
+    case 'ended': return task.ended;
+    case 'cancelled': return task.cancelled;
+    case 'timed_out': return task.timedOut;
+    case 'resource_limited': return task.resourceLimited;
+    case 'reported': return task.reported;
+    default:
+      return label.startsWith('exec:') && `exec:${task.lastExecutionStatus ?? ''}` === label;
+  }
+}
+
+/** 任务已办成（机械事实：汇报存档 或 末条执行 completed）。 */
+export function taskIsDone(task: TaskView): boolean {
+  return task.reported || task.lastExecutionStatus === 'completed';
+}
+
+/** 任务失败（机械事实：看门狗 died 或 末条执行 failed/refused）。 */
+export function taskIsFailed(task: TaskView): boolean {
+  return task.died || task.lastExecutionStatus === 'failed' || task.lastExecutionStatus === 'refused';
+}
+
+/** 任务未启动排队（无存活、未收尾、无汇报）。 */
+export function taskIsUnstarted(task: TaskView): boolean {
+  return task.liveness === null && !task.ended && !task.reported;
+}
+
+/** 任务事实的紧凑文本（证据 detail 用；只拼机械事实，不造任务级状态词）。 */
+export function taskFactBrief(task: TaskView): string {
+  return [task.liveness ?? 'nil', task.ended ? 'ended' : 'active', task.cancelled ? 'cancelled' : '-', task.reported ? 'reported' : '-', task.lastExecutionStatus ?? '-'].join('/');
+}
+
+/** 任务的机械事实签名（用于「旧任务未被改写」比对；只含事实，无状态词）。 */
+export function taskFactSignature(task: TaskView): string {
+  return JSON.stringify([task.liveness, task.ended, task.cancelled, task.died, task.timedOut, task.resourceLimited, task.reported, task.lastExecutionStatus ?? null]);
+}
 export interface TaskTurnFact {
   readonly turn: number;
   readonly tasks: readonly TaskView[];
@@ -228,11 +283,11 @@ export function judgeTaskContinuity(turns: readonly TaskTurnFact[]): TaskVerdict
   const dupRequest = [...requestOwners.entries()].filter(([, owners]) => owners.size > 1).map(([r]) => r);
   if (dupRequest.length > 0) { codes.push('H3'); evidence['dupRequestIds'] = dupRequest; }
 
-  // H4：completed 但零执行。
+  // H4：汇报存档却零执行（虚假完成）。
   const falseCompleted: string[] = [];
   for (const t of turns) {
     for (const task of t.tasks) {
-      if (task.status === 'completed' && task.requestIds.length === 0) falseCompleted.push(task.taskId);
+      if (task.reported && task.requestIds.length === 0) falseCompleted.push(task.taskId);
     }
   }
   if (falseCompleted.length > 0) { codes.push('H4'); evidence['falseCompleted'] = falseCompleted; }
@@ -241,7 +296,7 @@ export function judgeTaskContinuity(turns: readonly TaskTurnFact[]): TaskVerdict
   const falseCancel: number[] = [];
   for (const t of turns) {
     const claims = (t.reply ?? '').includes('已取消') || (t.reply ?? '').includes('已经取消');
-    const hasCancelled = t.tasks.some((task) => task.status === 'cancelled');
+    const hasCancelled = t.tasks.some((task) => task.cancelled);
     if (claims && t.cancelCalled !== true && !hasCancelled) falseCancel.push(t.turn);
   }
   if (falseCancel.length > 0) { codes.push('H5'); evidence['falseCancelTurns'] = falseCancel; }
@@ -263,9 +318,19 @@ export function judgeTaskContinuity(turns: readonly TaskTurnFact[]): TaskVerdict
   return { pass: codes.length === 0, codes, hardZeroHits, evidence };
 }
 
-/** 五态覆盖断言（LS2）：某会话内是否各态均出现（用于覆盖不足判定，不是产品失败）。 */
-export function statesCovered(turns: readonly TaskTurnFact[]): ReadonlySet<string> {
+/** 任务事实覆盖（LS2）：某会话内观测到的机械事实标签集合（liveness 三值 + 收尾/汇报/执行事实）。 */
+export function coveredTaskFacts(turns: readonly TaskTurnFact[]): ReadonlySet<string> {
   const seen = new Set<string>();
-  for (const t of turns) for (const task of t.tasks) seen.add(task.status);
+  for (const t of turns) {
+    for (const task of t.tasks) {
+      if (task.liveness !== null) seen.add(task.liveness);
+      if (task.cancelled) seen.add('cancelled');
+      if (task.died) seen.add('died');
+      if (task.timedOut) seen.add('timed_out');
+      if (task.resourceLimited) seen.add('resource_limited');
+      if (task.reported) seen.add('reported');
+      if (task.lastExecutionStatus !== undefined) seen.add(`exec:${task.lastExecutionStatus}`);
+    }
+  }
   return seen;
 }

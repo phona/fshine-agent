@@ -75,7 +75,7 @@ function greenStop(): StopEvidence {
       taskId: 't-1', taskNo: 1, name: '慢活', liveness: null, cancelled: true, reported: false,
       executions: [{ operation: 'dummy.longtask', status: 'accepted' }],
     }],
-    statusSequence: ['queued', 'running', 'cancelling', 'cancelled'],
+    factSequence: ['liveness=running cancelled=false reported=false exec=accepted', 'liveness=null cancelled=true reported=false exec=accepted'],
     visible: [
       { at: AT, source: 'turn', text: '受理了，在跑了。', turnIndex: 1 },
       { at: AT, source: 'turn', text: '已经按你说的停了。', turnIndex: 2 },
@@ -110,7 +110,7 @@ function greenFailure(): FailureEvidence {
       failureReason: '执行层未成功：dummy.prepare 返回 failed：Collection locked-one is locked',
       executions: [{ operation: 'dummy.prepare', status: 'failed', code: 'COLLECTION_LOCKED' }],
     }],
-    statusSequence: ['queued', 'running', 'failed'],
+    factSequence: ['liveness=running cancelled=false reported=false exec=pending', 'liveness=null cancelled=false reported=false exec=failed'],
     visible: [
       { at: AT, source: 'turn', text: '这件事没办成。', turnIndex: 1 },
       { at: AT, source: 'push', text: template },
@@ -148,7 +148,7 @@ function greenIdempotency(): IdempotencyEvidence {
       taskId: 't-1', taskNo: 1, liveness: null, cancelled: false, reported: true,
       executions: [{ operation: 'dummy.prepare', status: 'needs_confirmation' }, { operation: 'dummy.commit', status: 'completed' }],
     }],
-    statusSequence: ['queued', 'running', 'waiting_user', 'running', 'completed'],
+    factSequence: ['liveness=running cancelled=false reported=false exec=needs_confirmation', 'liveness=null cancelled=false reported=true exec=completed'],
     visible: [
       { at: AT, source: 'turn', text: reply, turnIndex: 1 },
       { at: AT, source: 'push', text: '要写入：…回「确认」我就提交。' },
@@ -192,7 +192,7 @@ function greenReconfirm(): ReconfirmEvidence {
       taskId: 't-1', taskNo: 1, liveness: null, cancelled: false, reported: true, resultText: '4 条已新增（读回 4 条）',
       executions: [{ operation: 'dummy.prepare', status: 'needs_confirmation' }, { operation: 'dummy.commit', status: 'completed' }],
     }],
-    statusSequence: ['queued', 'running', 'waiting_user', 'running', 'completed'],
+    factSequence: ['liveness=running cancelled=false reported=false exec=needs_confirmation', 'liveness=null cancelled=false reported=true exec=completed'],
     visible: [
       { at: '2026-11-19T09:00:00.000Z', source: 'push', text: '你交代的那件事办好了：4 条已新增。' },
       { at: '2026-11-19T10:00:01.000Z', source: 'turn', text: '这件事已经办完了，不用再确认。', turnIndex: 3 },
@@ -243,7 +243,7 @@ function greenTwoObjects(): TwoObjectsEvidence {
       taskId: 't-2', taskNo: 2, liveness: null, cancelled: false, reported: true,
       executions: [{ operation: 'dummy.prepare', status: 'completed' }, { operation: 'dummy.commit', status: 'completed' }],
     }],
-    statusSequence: ['queued', 'running', 'waiting_user', 'running', 'completed'],
+    factSequence: ['liveness=running cancelled=false reported=false exec=needs_confirmation', 'liveness=null cancelled=false reported=true exec=completed'],
     visible: [{ at: AT, source: 'turn', text: '两件都提交完了。', turnIndex: 3 }],
     deliveryEvents: [{ event: 'task_result_delivery_sent', taskId: 't-1' }],
     perCollection: [

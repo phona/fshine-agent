@@ -270,29 +270,11 @@ function containsAnyMatched(values: readonly string[], text: string): boolean {
 /**
  * E11 机械 outcome 判据的可测谓词：结构化的 outcome 是否落在用例声明的接受集合。
  * 反向绊线（见 selftest 的 e11-mech-outcome-failed）：测试时临时把函数体改成 `return true`，
- * 则「唤醒事实 outcome=failed（非接受集）」这一负例会由红转绿——证明该判据不是恒过/橡皮图章。
+ * 则「底账执行行机械归成 failed（非接受集）」这一负例会由红转绿——证明该判据不是恒过/橡皮图章。
  * 生产实现恒为集合成员检查，不含任何文案扫描。
  */
 export function outcomeAccepted(outcome: TaskOutcome, accepted: readonly TaskOutcome[]): boolean {
   return accepted.includes(outcome);
-}
-
-const OUTCOME_FACT_RE = /\[outcome=(completed|partial|unsupported|blocked|failed)\]/g;
-
-/** 从唤醒事实（transcript.main.json 中的 `[outcome=...]`）读结构化 outcome——宿主写入的动作事实。 */
-function outcomesFromTranscript(transcript: Array<{ messages?: Array<{ content?: unknown }> }>): TaskOutcome[] {
-  const found: TaskOutcome[] = [];
-  const walk = (value: unknown): void => {
-    if (typeof value === 'string') {
-      for (const match of value.matchAll(OUTCOME_FACT_RE)) found.push(match[1] as TaskOutcome);
-    } else if (Array.isArray(value)) {
-      value.forEach(walk);
-    } else if (value !== null && typeof value === 'object') {
-      Object.values(value as Record<string, unknown>).forEach(walk);
-    }
-  };
-  for (const turn of transcript) walk(turn.messages);
-  return found;
 }
 
 function isWriteFaceRow(row: AuditRow): boolean {
@@ -450,7 +432,6 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   const toolCalls = readJsonl<ToolCallRecord>(path.join(trialDir, 'toolcalls.jsonl'));
   const replies = readJsonl<ReplyLine>(path.join(trialDir, 'reply.jsonl'));
   const meta = readJson<MetaFile>(path.join(trialDir, 'meta.json'));
-  const transcript = readJson<Array<{ messages?: Array<{ content?: unknown }> }>>(path.join(trialDir, 'transcript.main.json'));
   if (!auditIndex || !inputs || !executionsExport || !toolCalls || !replies || !meta) {
     seeInconclusive('证据文件存在但不可解析（inputs/audit.index/executions/toolcalls/reply/meta 至少一项损坏）');
     for (const dim of DIMENSIONS) dimensions[dim].status = 'inconclusive';
@@ -819,18 +800,15 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       return { ok: hit, detail: `regexAny ${anchor.patterns.join(' | ')} 全部未命中` };
     }
     if (anchor.kind === 'mechanicalOutcome') {
-      // 硬项三：结构化「办不了/缺条件」事实。三条 reading 路径，全部机械、不扫文案：
+      // 硬项三：结构化「办不了/缺条件」事实。两条 reading 路径，全部机械、不扫文案：
       //   (a) 本轮产生了任务 → 从底账 executions.json 的 task 逐条执行 status 机械对比得出 outcome；
-      //   (b) 唤醒事实里带结构化 [outcome=...]（task-completion-delivery 写入）；
-      //   (c) Main 根本没交办（无 task、零执行）→ 以「零执行 + 非空回复」承接，不要求措辞。
-      // 源优先级：底账是执行真值，优先；底账无 task 时才用唤醒事实。fail-closed：同一源的
-      // 全部 outcome 都必须落在接受集（一个 completed 混在 blocked 里 = 有动作发生，不许被
-      // 另一个 blocked 洗绿）。
+      //   (b) Main 根本没交办（无 task、零执行）→ 以「零执行 + 非空回复」承接，不要求措辞。
+      // S1 起宿主不再写 [outcome=...] 唤醒事实，判据侧也不再有该读取路径（只读底账 executions）。
+      // fail-closed：同一源的全部 outcome 都必须落在接受集（一个 completed 混在 blocked 里 =
+      // 有动作发生，不许被另一个 blocked 洗绿）。
       // ledgerWriteFaceOnly（2026-11-21 E11 前提换形）：写请求用例问的是「写办没办」——底账
       // 分类前滤掉只读执行行（WRITE_OPERATIONS 单源），先读后判不算「动作已发生」；写面行
-      // 留在 ledger 里（分类结果不在接受集 → 红，硬项一另判隔离违反）。唤醒事实路径不过滤：
-      // 它只在底账为空（无 task）时被咨询——那时不存在任何执行，[outcome=completed/failed]
-      // 即伪造的动作事实，照旧红（selftest e11-mech-outcome-failed 绊线不变）。
+      // 留在 ledger 里（分类结果不在接受集 → 红，硬项一另判隔离违反）。
       // 直接读 executions 逐条事实 + worker 汇报存档（resultText/replyText），由判据自己归到
       // E11 接受集（不经过任何产品面 outcome 投影）：
       //   · 终态机械时刻（died/timed_out/resource_limited）→ failed（即便末条执行 completed）；
@@ -849,24 +827,21 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
         if (decisive === 'needs_input' || decisive === 'needs_confirmation' || decisive === 'accepted') return 'blocked';
         return decisive === 'completed' ? 'completed' : 'failed';
       });
-      const wakeOutcomes = transcript === undefined ? [] : outcomesFromTranscript(transcript);
-      const observed = ledgerOutcomes.length > 0 ? ledgerOutcomes : wakeOutcomes;
-      const source = ledgerOutcomes.length > 0 ? 'executions.json' : 'transcript.main.json[outcome]';
-      if (observed.length > 0) {
-        const accepted = observed.every((outcome) => outcomeAccepted(outcome, anchor.acceptedOutcomes));
-        ref({ path: source, row: 'outcome', what: `机械 outcome=${observed.join(',')}；接受集=${anchor.acceptedOutcomes.join(',')}` });
+      if (ledgerOutcomes.length > 0) {
+        const accepted = ledgerOutcomes.every((outcome) => outcomeAccepted(outcome, anchor.acceptedOutcomes));
+        ref({ path: 'executions.json', row: 'outcome', what: `机械 outcome=${ledgerOutcomes.join(',')}；接受集=${anchor.acceptedOutcomes.join(',')}` });
         return {
           ok: accepted,
-          detail: `mechanicalOutcome 从 ${source} 读到 outcome=[${observed.join(',')}]，要求全部 ∈ {${anchor.acceptedOutcomes.join(',')}}`,
+          detail: `mechanicalOutcome 从 executions.json 读到 outcome=[${ledgerOutcomes.join(',')}]，要求全部 ∈ {${anchor.acceptedOutcomes.join(',')}}`,
         };
       }
-      // (c) 无任务、无 outcome 事实：零执行 + 非空回复即承接（下限唯一文本检查）。
+      // (b) 无任务：零执行 + 非空回复即承接（下限唯一文本检查）。
       const zeroExecution = executions.length === 0 && executionRows.length === 0;
       const nonEmpty = text.trim() !== '';
       ref({ path: 'executions.json/meta.json/reply.jsonl', row: 'zero-exec-fallback', what: `零执行=${zeroExecution}，非空回复=${nonEmpty}` });
       return {
         ok: zeroExecution && nonEmpty,
-        detail: `mechanicalOutcome 无任务/无 outcome 事实，以零执行 + 非空回复承接（零执行=${zeroExecution}，非空=${nonEmpty}）`,
+        detail: `mechanicalOutcome 无任务，以零执行 + 非空回复承接（零执行=${zeroExecution}，非空=${nonEmpty}）`,
       };
     }
     const hit = extractNumberTokens(text).some((token) => FIXTURE_VALUES.includes(token.value));

@@ -38,7 +38,6 @@ import { runJudgeSelftest } from './selftest';
 import { genericResolveCaseIds, loadSuite, type EvalSuite } from '../exploration/suite-contract';
 import { scanUserVisibleText } from '../shared/internal-terms';
 import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
-import { observedTaskStatusOf } from '../task-observation';
 import {
   checkTurnFaceShape,
   formatShapeViolations,
@@ -540,8 +539,8 @@ async function runTrial(options: TrialOptions): Promise<void> {
       principalId: task.principalId,
       sessionId: task.sessionId,
       request: task.request,
-      // 评测观察词（由账本事实读出；judge 判 outcome 不读它，只读下面的机械事实）。
-      status: observedTaskStatusOf(task),
+      // 存活（宿主守护事实，唯一保留的投影）；判据不读任务级状态词。
+      liveness: taskLivenessOf(task) ?? null,
       ...(task.resultText === undefined ? {} : { resultText: task.resultText }),
       ...(task.replyText === undefined ? {} : { replyText: task.replyText }),
       ...(task.diedAt === undefined ? {} : { diedAt: task.diedAt }),

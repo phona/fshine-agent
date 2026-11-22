@@ -346,7 +346,7 @@ async function main(): Promise<void> {
 
       // Dump task registry facts after every turn.
       const tasks = assembled.session.tasks().map((t) => ({
-        taskId: t.taskId, taskNo: t.taskNo, name: t.name, status: taskLivenessOf(t) ?? null,
+        taskId: t.taskId, taskNo: t.taskNo, name: t.name, liveness: taskLivenessOf(t) ?? null,
         reason: lastFailureOf(t)?.error?.code, failureReason: lastFailureOf(t)?.error?.message, resultText: t.resultText, replyText: t.replyText,
         executions: t.executions,
       }));

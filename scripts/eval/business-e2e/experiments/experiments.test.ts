@@ -254,7 +254,7 @@ describe('④ 越权=找不到 与 挂起→接着办（预置任务）', () => 
     const ev = await exec(itemFor(T02), T02, path.join(root, 't02'));
     expect(ev.seedTaskNos.waiting, '预置的挂起任务应占 #1').toBe(1);
     expect(ev.toolCalls.some((c) => c.tool === 'task_resume' && c.isError !== true), 'resume 应被受理').toBe(true);
-    expect(ev.tasks.some((t) => t.status === 'completed'), 'resume 后应落终态 completed').toBe(true);
+    expect(ev.tasks.some((t) => (t.resultText ?? t.replyText ?? '').trim() !== '' || t.executions[t.executions.length - 1]?.status === 'completed'), 'resume 后应落终态（汇报存档 / 末条执行 completed）').toBe(true);
     expect(judgeExp(ev).pass, JSON.stringify(judgeExp(ev).checks)).toBe(true);
   });
 });

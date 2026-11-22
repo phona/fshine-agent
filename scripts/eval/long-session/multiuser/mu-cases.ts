@@ -394,7 +394,7 @@ export async function mu7(rt: RuntimeConfig): Promise<MuCaseResult> {
     await deliver(handle.server.handler, incoming('mu-alice', 'conv-a7', 'a-1', aSubmit));
     const aliceTask = readTasks(handle.dbPath).find((task) => task.principalId === principalIdOf('mu-alice'));
     const taskId = aliceTask?.taskId ?? '';
-    await waitUntil(() => readTasks(handle.dbPath).some((task) => task.taskId === taskId && task.status === 'completed'));
+    await waitUntil(() => readTasks(handle.dbPath).some((task) => task.taskId === taskId && task.reported));
     await handle.server.deliverPending();
     // bob 回合先来：不得拿到 alice 的事实。
     await deliver(handle.server.handler, incoming('mu-bob', 'conv-b7', 'b-1', `${MU_TAGS['mu-bob']} 日常对话`));
@@ -564,7 +564,7 @@ async function mu8SessionLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
       groupSecondCalls: groupSecondRec?.calls.map((call) => ({ tool: call.tool, args: call.args, error: call.error })),
       scopeViolations: scope, crossoverCodes: crossover.verdict,
       groupDelegateReply, groupQueryReply,
-      allTasks: tasks.map((task) => ({ taskId: task.taskId, taskNo: task.taskNo, sessionId: task.sessionId, status: task.status, request: task.request, requestIds: task.requestIds })),
+      allTasks: tasks.map((task) => ({ taskId: task.taskId, taskNo: task.taskNo, sessionId: task.sessionId, liveness: task.liveness, ended: task.ended, cancelled: task.cancelled, reported: task.reported, lastExecutionStatus: task.lastExecutionStatus ?? null, request: task.request, requestIds: task.requestIds })),
       groupTurnTexts: groupRecords.map((record) => record.userText),
       privTurnTexts: privRecords.map((record) => record.userText),
     };
@@ -719,8 +719,8 @@ export async function mu10(rt: RuntimeConfig): Promise<MuCaseResult> {
     const carol = tasks.find((task) => task.principalId === principalIdOf('mu-carol'));
     const scope = scopeViolations(plans.table(), tasks);
     const crossover = crossoverHits(tasks);
-    const aliceFailed = alice?.status === 'failed';
-    const othersOk = bob?.status === 'completed' && carol?.status === 'completed';
+    const aliceFailed = alice !== undefined && (alice.lastExecutionStatus === 'failed' || alice.lastExecutionStatus === 'refused' || alice.died);
+    const othersOk = bob?.reported === true && carol?.reported === true;
     const hardZeroHits: MuHardZero[] = [];
     if (!aliceFailed) hardZeroHits.push('unauthorized_execution');
     if (!othersOk) hardZeroHits.push('cross_principal_leak');
@@ -730,10 +730,10 @@ export async function mu10(rt: RuntimeConfig): Promise<MuCaseResult> {
       deliveredTo: task.sessionId, kind: 'reply' as const,
     })));
     return finalize(id, title, [...new Set(hardZeroHits)], records,
-      `alice 状态=${alice?.status}（应 failed）；bob=${bob?.status}、carol=${carol?.status}（应 completed）；隔离成立=${aliceFailed && othersOk}。`,
+      `alice 末条执行=${alice?.lastExecutionStatus ?? '（无）'}（应 failed）；bob.reported=${bob?.reported}、carol.reported=${carol?.reported}（应 true）；隔离成立=${aliceFailed && othersOk}。`,
       {
-        alice: alice === undefined ? null : { status: alice.status, reason: alice.reason, requestIds: alice.requestIds },
-        bob: bob === undefined ? null : { status: bob.status }, carol: carol === undefined ? null : { status: carol.status },
+        alice: alice === undefined ? null : { liveness: alice.liveness, ended: alice.ended, lastExecutionStatus: alice.lastExecutionStatus ?? null, reason: alice.reason, requestIds: alice.requestIds },
+        bob: bob === undefined ? null : { liveness: bob.liveness, reported: bob.reported }, carol: carol === undefined ? null : { liveness: carol.liveness, reported: carol.reported },
         scopeViolations: scope, crossoverCodes: crossover.verdict,
       });
   } finally { handle.close(); tmp.cleanup(); }

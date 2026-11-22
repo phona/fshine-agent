@@ -36,7 +36,6 @@ import { assessEvalIsolation, assertEvalIsolation } from '../../safety-gate';
 import type { SampleRecord } from '../judge';
 import type { NotificationLine, TaskFactLine } from '../collect';
 import type { InputsFile, MetaFile, MetaTurn, ReplyLine, TaskRecordJson, ToolCallRecord } from '../../convergence-r1/evidence';
-import { observedTaskStatusOf } from '../../task-observation';
 import { buildDsSample } from './grade';
 import { runtimeOverlayOf, type DsCase, type DsItem } from './cases';
 
@@ -203,14 +202,21 @@ export function createDsExecutor(options: DsExecutorOptions = {}): DsExecutor {
     const policy = createResourcePolicy(runtime);
     const taskFacts: TaskFactLine[] = [];
     const notifications: NotificationLine[] = [];
-    // S1 事实模型：底账只发机械事件（无 from/to/reason）。事件 → 旧「to」词映射，复用既有度量口径。
-    const FACT_TO: Readonly<Record<string, string>> = {
-      queued: 'queued', started: 'running', resumed: 'running', waiting_user: 'waiting_user',
-      result_archived: 'completed', cancelled: 'cancelled', timed_out: 'timed_out',
-      died: 'failed', resource_limited: 'refused', round_failed: 'failed',
+    // S1 事实模型：底账只发机械事件（无 from/to/reason）。事件 → 机械事实快照（liveness/ended/cancelled）。
+    const EVENT_FACTS: Readonly<Record<string, { liveness: 'running' | 'died' | 'waiting_user' | null; ended: boolean; cancelled: boolean }>> = {
+      queued: { liveness: null, ended: false, cancelled: false },
+      started: { liveness: 'running', ended: false, cancelled: false },
+      resumed: { liveness: 'running', ended: false, cancelled: false },
+      waiting_user: { liveness: 'waiting_user', ended: false, cancelled: false },
+      result_archived: { liveness: null, ended: true, cancelled: false },
+      cancelled: { liveness: null, ended: true, cancelled: true },
+      timed_out: { liveness: null, ended: true, cancelled: false },
+      died: { liveness: 'died', ended: true, cancelled: false },
+      resource_limited: { liveness: null, ended: true, cancelled: false },
+      round_failed: { liveness: null, ended: true, cancelled: false },
     };
     registry.onTaskFact((fact) => {
-      taskFacts.push({ ts: fact.at, taskId: fact.taskId, from: '', to: FACT_TO[fact.event] ?? fact.event });
+      taskFacts.push({ ts: fact.at, taskId: fact.taskId, ...(EVENT_FACTS[fact.event] ?? { liveness: null, ended: false, cancelled: false }) });
       const kind = notificationKindForEvent(fact.event);
       if (kind !== undefined) notifications.push({ ts: fact.at, taskId: fact.taskId, kind });
     });
@@ -289,7 +295,7 @@ export function createDsExecutor(options: DsExecutorOptions = {}): DsExecutor {
         metaTurns.push({ index: turn, durationMs, modelCalls: assistantMessages.length, taskIds: [...(result?.taskIds ?? [])], tokens, retries: 0, notes: [] });
         replies.push({ turn, text: result?.reply ?? '', sha256: '' });
       }
-      const tasks = jsonSafe(session.tasks().map((task) => ({ ...task, status: observedTaskStatusOf(task) }))) as TaskRecordJson[];
+      const tasks = jsonSafe(session.tasks().map((task) => ({ ...task, liveness: taskLivenessOf(task) ?? null }))) as TaskRecordJson[];
       const auditLines = existsSync(assembled.auditPath)
         ? readFileSync(assembled.auditPath, 'utf8').trimEnd().split('\n').filter((l) => l !== '')
         : [];

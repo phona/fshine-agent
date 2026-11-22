@@ -239,7 +239,7 @@ export interface BaseEvidence {
   audit: AuditFact[];
   jobs: JobFact[];
   tasks: TaskFact[];
-  statusSequence: string[];
+  factSequence: string[];
   visible: VisibleText[];
   deliveryEvents: Array<Record<string, unknown>>;
 }
@@ -1335,7 +1335,7 @@ function baseEvidence(harness: Harness): BaseEvidence {
     audit: harness.auditNow(),
     jobs: readJobFacts(harness.stateDir),
     tasks: harness.tasksNow(),
-    statusSequence: taskId === undefined ? [] : harness.watcher.sequenceOf(taskId),
+    factSequence: taskId === undefined ? [] : harness.watcher.sequenceOf(taskId),
     visible,
     deliveryEvents: deliveryEvents.map((line) => ({ ...line })),
   };
@@ -1949,7 +1949,7 @@ async function runScenario(
 
 function printEvidence(id: ScenarioId, evidence: BaseEvidence): void {
   log('\n== 机械证据 ==');
-  log(`[任务底账] 会话内任务数=${evidence.tasks.length} · 状态序列=${evidence.statusSequence.join(' → ') || '(未观测到)'}`);
+  log(`[任务底账] 会话内任务数=${evidence.tasks.length} · 事实序列=${evidence.factSequence.join(' → ') || '(未观测到)'}`);
   for (const task of evidence.tasks) {
     log(`  · 任务 #${String(task.taskNo ?? '-')}（${task.taskId}）终局=${task.liveness ?? (task.reported ? '已汇报' : '已收尾')}${task.reason === undefined ? '' : ` reason=${task.reason}`}`
       + `：${task.executions.map((execution) => `${execution.operation}:${execution.status}${execution.code === undefined ? '' : `(${execution.code})`}`).join(' → ') || '(无执行事实)'}`);

@@ -60,10 +60,10 @@ describe('P2 七场景 · 确定性跑通（假模型，一次样本）', () => 
     expect(out.judgement.hardZeroHits).toEqual([]);
     // 三观测点逐条：
     expect(out.judgement.coverage.facts['mode']).toBe('background');
-    expect(['queued', 'running']).toContain(out.judgement.coverage.facts['firstTurnAlphaStatus']);
+    expect(out.judgement.coverage.facts['firstTurnAlphaStatus']).toMatch(/^(nil|running)\//);
     expect(Number(out.judgement.coverage.facts['gateReleaseSeq'])).toBeGreaterThan(Number(out.judgement.coverage.facts['t2DoneSeq']));
     // 闸在 T2 处理时仍未释放：alpha 任务此刻非终态（真异步的证据，不是串行假异步）。
-    expect(['queued', 'running']).toContain(out.observation.extras['alphaStatusBeforeRelease']);
+    expect(out.observation.extras['alphaStatusBeforeRelease']).toMatch(/^(nil|running)\//);
     // 预注册事实判据（T2 回复须含 beta 3/1000）在强制 background 下**不可满足**：
     // T1（alpha）在飞 → 交办回合模型只能凭受理事实说一句过程话；T2（beta 快活，窗口内落定）
     // 本回合拿到结果但脚本按预注册字面仍回受理话术。此样本登记为 preregBlocked（不作为产品结论）。
@@ -85,7 +85,7 @@ describe('P2 七场景 · 确定性跑通（假模型，一次样本）', () => 
   it('S4 修改·取消·再交办：取消真实发生 + 新任务新 requestId + 只查 beta', async () => {
     const out = await runP2Scenario('S4');
     expect(out.observation.taskTurns[1]?.cancelCalled).toBe(true);
-    const cancelled = (out.observation.extras['taskSnapshots'] as { status: string; request: string }[]).filter((task) => task.status === 'cancelled');
+    const cancelled = (out.observation.extras['taskSnapshots'] as { cancelled: boolean; request: string }[]).filter((task) => task.cancelled);
     expect(cancelled.map((task) => task.request)).toEqual([expect.stringContaining('beta')]);
     expectValid(out);
   }, 30_000);
@@ -112,7 +112,7 @@ describe('P2 七场景 · 确定性跑通（假模型，一次样本）', () => 
 
   it('S7b 超时：workerTurnMs=5000 + 不返回 gate → timed_out 如实回报', async () => {
     const out = await runP2Scenario('S7b');
-    expect(out.observation.tasksFinal[0]?.status).toBe('timed_out');
+    expect(out.observation.tasksFinal[0]?.timedOut).toBe(true);
     expectValid(out);
   }, 30_000);
 
@@ -215,7 +215,7 @@ describe('P2 反向绊线（篡改即红；证明断言不是恒真）', () => {
     const out = await runP2Scenario('S7b');
     const poisoned: P2Observation = {
       ...out.observation,
-      tasksFinal: out.observation.tasksFinal.map((task) => ({ ...task, status: 'completed' })),
+      tasksFinal: out.observation.tasksFinal.map((task) => ({ ...task, reported: true, lastExecutionStatus: 'completed', timedOut: false, ended: true })),
     };
     const judgement = rejudge(poisoned, 'S7b');
     expect(judgement.coverage.satisfied).toBe(false);
@@ -269,8 +269,8 @@ describe('P2 并发隔离与证据落盘（确定性）', () => {
     const modelCalls = readFileSync(path.join(dir, 'model-calls.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     expect(modelCalls.length).toBe(2);
     expect(modelCalls.every((row) => row.kind === 'main')).toBe(true);
-    const tasks = JSON.parse(readFileSync(path.join(dir, 'tasks-final.json'), 'utf8')) as { status: string; requestIds: string[] }[];
-    expect(tasks[0]?.status).toBe('completed');
+    const tasks = JSON.parse(readFileSync(path.join(dir, 'tasks-final.json'), 'utf8')) as { reported: boolean; lastExecutionStatus?: string; requestIds: string[] }[];
+    expect(tasks[0]?.reported === true || tasks[0]?.lastExecutionStatus === 'completed').toBe(true);
     expect(tasks[0]?.requestIds.length).toBeGreaterThan(0);
     const p2 = JSON.parse(readFileSync(path.join(dir, 'p2', 'p2-evidence.json'), 'utf8'));
     // 全量记账：main 2 + worker 2（inline 场景 Worker 也在同一样本内）。

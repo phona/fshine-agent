@@ -146,12 +146,12 @@ describe('R6 MU · MU-10 单用户故障隔离', () => {
     const result = await mu10(MU_RUNTIME);
     expect(result.status).toBe('PASS');
     expect(result.hardZeroHits).toEqual([]);
-    const alice = result.evidence['alice'] as { status?: string } | null;
-    const bob = result.evidence['bob'] as { status?: string } | null;
-    const carol = result.evidence['carol'] as { status?: string } | null;
-    expect(alice?.status).toBe('failed');
-    expect(bob?.status).toBe('completed');
-    expect(carol?.status).toBe('completed');
+    const alice = result.evidence['alice'] as { lastExecutionStatus?: string | null } | null;
+    const bob = result.evidence['bob'] as { reported?: boolean } | null;
+    const carol = result.evidence['carol'] as { reported?: boolean } | null;
+    expect(alice?.lastExecutionStatus).toBe('failed');
+    expect(bob?.reported).toBe(true);
+    expect(carol?.reported).toBe(true);
   });
 });
 

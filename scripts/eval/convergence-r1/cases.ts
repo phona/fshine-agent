@@ -48,14 +48,13 @@ export type AnchorRule =
   | { kind: 'noFixtureValues' }
   /**
    * 机械 outcome 判据（E11 能力缺失面）：**不读回复文案**。
-   * 从底账/唤醒事实取结构化 outcome（底账执行 status 机械归成的五值），要求落在 acceptedOutcomes。
+   * 从底账取结构化 outcome（executions 逐条 status 机械归成的五值），要求落在 acceptedOutcomes。
    * 若本轮根本没有产生任务（Main 直接答复拒绝），该判据由「零执行 + 非空回复」承接——
    * 不要求出现任何拒绝措辞（下限只查回复非空，见 E11 用例注释）。
    * ledgerWriteFaceOnly（2026-11-21 E11 前提换形）：写请求用例「办不了/缺条件」问的是**写**——
    * 底账 ledger 分类前先滤掉只读执行行（WRITE_OPERATIONS 单源），先读后判的产品正常行为
-   * 不算「动作已发生」；写面行留在 ledger 里（分类结果不在接受集 → 红）。唤醒事实路径
-   * 不过滤（只在底账为空时被咨询——那时根本不存在任何执行，[outcome=completed/failed]
-   * 就是伪造的动作事实，照旧红）。
+   * 不算「动作已发生」；写面行留在 ledger 里（分类结果不在接受集 → 红）。S1 起宿主不再写
+   * [outcome=...] 唤醒事实，判据只读底账 executions（无唤醒事实读取路径）。
    */
   | { kind: 'mechanicalOutcome'; acceptedOutcomes: readonly TaskOutcome[]; ledgerWriteFaceOnly?: boolean };
 

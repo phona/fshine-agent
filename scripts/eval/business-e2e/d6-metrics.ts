@@ -20,7 +20,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { summarizeModelUsage, type TaskFactLine } from './collect';
-import type { ExecutionsExport, MetaFile, ToolCallRecord } from '../convergence-r1/evidence';
+import type { ExecutionsExport, MetaFile, TaskRecordJson, ToolCallRecord } from '../convergence-r1/evidence';
 
 export interface D6Metric<V> {
   available: boolean;
@@ -68,9 +68,6 @@ export interface D6Metrics {
   runDir: string;
 }
 
-const TERMINAL_TASK_STATES = new Set(['completed', 'failed', 'refused', 'cancelled', 'canceled', 'timed_out']);
-const CANCEL_STATES = new Set(['cancelled', 'canceled']);
-
 function readJson<T>(file: string): T | undefined {
   if (!existsSync(file)) return undefined;
   try {
@@ -110,18 +107,27 @@ function tsMs(ts: string): number {
   return Number.isNaN(t) ? NaN : t;
 }
 
-/** 活跃任务峰值：task-facts 时间戳扫描（进非终态 +1 / 进终态 -1）。 */
+/** 任务已收尾（机械事实）：四时刻任一 / 汇报存档 / 末条执行终态——不读任务级状态词。 */
+function settledOf(task: TaskRecordJson): boolean {
+  if (task.cancelledAt !== undefined || task.diedAt !== undefined || task.timedOutAt !== undefined || task.resourceLimitedAt !== undefined) return true;
+  if ((task.resultText ?? task.replyText ?? '').trim() !== '') return true;
+  const last = task.executions[task.executions.length - 1]?.status;
+  return last === 'completed' || last === 'failed' || last === 'refused';
+}
+
+/** 活跃任务峰值：task-facts 事实快照扫描（每个 taskId 进「非 ended」+1、进「ended」-1，取最大同时活跃）。 */
 function peakFromTaskFacts(facts: readonly TaskFactLine[]): number | undefined {
   const events = facts
-    .map((f) => ({ ts: tsMs(f.ts), delta: TERMINAL_TASK_STATES.has(f.to) ? -1 : 1 }))
+    .map((f) => ({ ts: tsMs(f.ts), taskId: f.taskId, ended: f.ended }))
     .filter((e) => !Number.isNaN(e.ts))
     .sort((a, b) => a.ts - b.ts);
   if (events.length === 0) return undefined;
-  let active = 0;
+  const active = new Set<string>();
   let peak = 0;
   for (const e of events) {
-    active += e.delta;
-    if (active > peak) peak = active;
+    if (e.ended) active.delete(e.taskId);
+    else active.add(e.taskId);
+    if (active.size > peak) peak = active.size;
   }
   return peak;
 }
@@ -164,14 +170,14 @@ export function extractD6(runDir: string): D6Metrics {
   let activeTasksPeak: D6Metric<ActiveTasksPeakValue>;
   const scanned = facts.length > 0 ? peakFromTaskFacts(facts) : undefined;
   if (scanned !== undefined) {
-    activeTasksPeak = { available: true, value: { peak: scanned }, source: 'task-facts.jsonl', note: '时间戳扫描：进非终态 +1、进终态（completed/failed/refused/cancelled）-1，取扫描中最大同时活跃数' };
+    activeTasksPeak = { available: true, value: { peak: scanned }, source: 'task-facts.jsonl', note: '时间戳扫描：每个 taskId 进「非 ended」+1、进「ended」-1，取扫描中最大同时活跃数（ended=四时刻/汇报存档/末条执行终态，不读任务级状态词）' };
   } else if ((meta?.turns?.length ?? 0) > 0) {
-    // 降级：taskIds 累积集 − 终态任务；无时间戳只能给上界。
+    // 降级：taskIds 累积集 − 已收尾任务（按账本事实判，不读任务级状态词）；无时间戳只能给上界。
     const seen = new Set<string>();
     for (const t of meta!.turns) for (const id of t.taskIds ?? []) seen.add(id);
-    const terminal = new Set((tasksExport?.tasks ?? []).filter((t) => TERMINAL_TASK_STATES.has(t.status)).map((t) => t.taskId));
+    const terminal = new Set((tasksExport?.tasks ?? []).filter((t) => settledOf(t)).map((t) => t.taskId));
     const upper = [...seen].filter((id) => !terminal.has(id)).length;
-    activeTasksPeak = { available: true, value: { peak: upper, isUpperBound: true }, source: 'meta.turns[].taskIds', note: '无 task-facts 时间戳，降级为 meta.turns[].taskIds 累积集减 tasks.json 终态任务的上界（无时间序列，不能给真实峰值）' };
+    activeTasksPeak = { available: true, value: { peak: upper, isUpperBound: true }, source: 'meta.turns[].taskIds', note: '无 task-facts 时间戳，降级为 meta.turns[].taskIds 累积集减 tasks.json 已收尾任务（四时刻/汇报存档/末条执行终态）的上界（无时间序列，不能给真实峰值）' };
   } else {
     activeTasksPeak = { available: false, source: 'task-facts.jsonl / meta.json', note: 'task-facts 与 meta.turns 均不可得或为空' };
   }
@@ -226,7 +232,7 @@ export function extractD6(runDir: string): D6Metrics {
   }
 
   // ── 6) 取消后残留执行 ──────────────────────────────────────────
-  const cancelFromFacts = facts.find((f) => CANCEL_STATES.has(f.to));
+  const cancelFromFacts = facts.find((f) => f.cancelled);
   const cancelFromNotes = readJsonl<{ ts: string; kind: string; taskId: string }>(path.join(runDir, 'notifications.jsonl'))
     .find((n) => n.kind === 'cancel' || n.kind === 'cancelled');
   const cancel = cancelFromFacts !== undefined

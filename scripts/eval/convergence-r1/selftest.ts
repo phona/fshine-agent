@@ -22,8 +22,6 @@ interface PackInput {
   auditRows: Array<Record<string, unknown>>;
   workerCalls: Array<Record<string, unknown>>;
   executions: Array<{ requestId: string; operation: string; status: string; error?: { code?: string } }>;
-  /** 可选：注入 Main 转录消息（E11 机械判据的 [outcome=...] 唤醒事实负例用）。 */
-  mainMessages?: Array<Record<string, unknown>>;
 }
 
 function writeTrial(dir: string, pack: PackInput): void {
@@ -85,9 +83,7 @@ function writeTrial(dir: string, pack: PackInput): void {
     driverEvents: [],
     notes: [],
   }, null, 2) + '\n');
-  writeFileSync(path.join(dir, 'transcript.main.json'), JSON.stringify([
-    { turn: 1, messages: pack.mainMessages ?? [] },
-  ], null, 2) + '\n');
+  writeFileSync(path.join(dir, 'transcript.main.json'), JSON.stringify([{ turn: 1, messages: [] }], null, 2) + '\n');
 }
 
 function completedBetaRow(): Record<string, unknown> {
@@ -383,16 +379,15 @@ export function runJudgeSelftest(outDir: string): number {
     executions: [],
   }, (judgment) => judgment.deterministic.verdict === 'INCONCLUSIVE');
 
-  // 负例控制 4（反向绊线）：唤醒事实 outcome=failed（动作已发生且失败，非接受集）→ 必红。
+  // 负例控制 4（反向绊线）：底账出现**写面**执行行且末条非接受集（completed）→ 必红。
   // 把 outcomeAccepted 临时改成恒真时此例转绿——证明 outcome 判据不是橡皮图章。
-  runPack('e11-mech-outcome-failed', 'E11', 'FAIL_STATE_INCONSISTENCY（outcome=failed 非接受集）', {
+  runPack('e11-mech-outcome-failed', 'E11', 'FAIL_STATE_INCONSISTENCY（写面执行行非接受集）', {
     caseId: 'E11',
     reply: '这次没办成。',
-    taskIds: [],
+    taskIds: ['task_selftest_e11_outcome_failed'],
     auditRows: [],
     workerCalls: [],
-    executions: [],
-    mainMessages: [{ role: 'assistant', content: [{ type: 'text', text: '[任务失败] 这次没办成。[outcome=failed] 请如实转述。' }] }],
+    executions: [{ requestId: REQUEST_ID_OK, operation: 'dummy.prepare', status: 'completed' }],
   }, (judgment) => judgment.deterministic.failureCodes.includes('FAIL_STATE_INCONSISTENCY'));
 
   // ── E11 前提换形（2026-11-21：零执行 → 零写执行，读允许）的正例 ─────────────────

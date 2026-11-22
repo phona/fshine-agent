@@ -25,6 +25,7 @@ import type { TurnDriver, TurnDriverInput } from '../../../packages/agent/src/dr
 import { createResourcePolicy } from '../../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
 import type { TaskScope } from '../../../packages/agent/src/task-registry';
+import { taskEndedOf, taskLivenessOf, taskReportedOf, lastExecutionOf } from '../../../packages/agent/testing/task-facts';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import {
   assembleSessionCore,
@@ -128,7 +129,22 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   });
 }
 
-interface TaskSnapshot { taskId: string; taskNo?: number; request: string; status: string }
+interface TaskSnapshot {
+  taskId: string;
+  taskNo?: number;
+  request: string;
+  cancelledAt?: string;
+  diedAt?: string;
+  timedOutAt?: string;
+  resourceLimitedAt?: string;
+  resultText?: string;
+  replyText?: string;
+  pendingQuestion?: unknown;
+  runningSince?: string;
+  leaseOwner?: string;
+  leaseUntil?: string;
+  executions: Array<{ status: string }>;
+}
 
 async function run(): Promise<void> {
   const workDir = process.argv[2]!;
@@ -160,7 +176,7 @@ async function run(): Promise<void> {
   const perTurnDriverEvents: Array<{ turn: number } & Record<string, unknown>> = [];
   const turnStats: Array<Record<string, unknown>> = [];
   const replies: Array<{ turn: number; text: string }> = [];
-  const taskFacts: Array<{ ts: string; taskId: string; taskNo?: number; to: string; turn: number }> = [];
+  const taskFacts: Array<{ ts: string; taskId: string; taskNo?: number; liveness: 'running' | 'died' | 'waiting_user' | null; ended: boolean; cancelled: boolean; turn: number }> = [];
   const ledger = createBudgetLedger(EFFECTIVE_LIMITS);
   let stopped: P3BudgetStop | null = null;
   const turnRef = { turn: 0 };
@@ -279,9 +295,14 @@ async function run(): Promise<void> {
         const ts = new Date().toISOString();
         const tasksNow = JSON.parse(JSON.stringify(session.tasks())) as TaskSnapshot[];
         for (const t of tasksNow) {
-          if (prevStatus.get(t.taskId) !== t.status) {
-            taskFacts.push({ ts, taskId: t.taskId, ...(t.taskNo !== undefined ? { taskNo: t.taskNo } : {}), to: t.status, turn: turnRef.turn });
-            prevStatus.set(t.taskId, t.status);
+          const liveness = taskLivenessOf(t) ?? null;
+          const ended = taskEndedOf(t) || taskReportedOf(t)
+            || ['completed', 'failed', 'refused'].includes(lastExecutionOf(t)?.status ?? '');
+          const cancelled = t.cancelledAt !== undefined;
+          const sig = JSON.stringify([liveness, ended, cancelled, t.executions.map((e) => e.status)]);
+          if (prevStatus.get(t.taskId) !== sig) {
+            taskFacts.push({ ts, taskId: t.taskId, ...(t.taskNo !== undefined ? { taskNo: t.taskNo } : {}), liveness, ended, cancelled, turn: turnRef.turn });
+            prevStatus.set(t.taskId, sig);
           }
         }
         const transcript = [...session.transcript()];

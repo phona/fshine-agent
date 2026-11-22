@@ -185,7 +185,7 @@ export function buildSampleRecord(input: SampleBuildInput): SampleRecord {
   };
 
   // UX：无谓澄清（场景禁止澄清却澄清）、用户介入（需用户输入的等待态 + 征求输入的回复轮）、通知条数。
-  const waitingUserFacts = (input.taskFacts ?? []).filter((f) => f.to === 'waiting_user' || f.to === 'needs_input').length;
+  const waitingUserFacts = (input.taskFacts ?? []).filter((f) => f.liveness === 'waiting_user').length;
   const ux = input.overrides?.ux ?? {
     needlessClarifications: forbidsClarification ? askedClarification : 0,
     userInterventions: askedClarification + waitingUserFacts,

@@ -150,7 +150,7 @@
 | 用户级黑盒查数（E01–E15）：真模型如实交付、编造 / 假成功 / 无谓追问判负 | `scripts/eval/user-eval-comment.test.ts:全部用例按 CASE_IDS 顺序出现在表里`<br>`scripts/eval/business-e2e/judge.test.ts:干净样本判过：请求范围内读取 + 如实回复`<br>`scripts/eval/business-e2e/judge.test.ts:部分失败 + 如实不称完成：机械面判过` | 真模型统计 | 已覆盖 | 运行在 CI（`.github/workflows/eval-real.yml`；检测到 eval:eval-real 用真模型 + 仓内 dummy）；本行引用的是报告生成与判定器守卫——用例删 / 判据改，守卫即红；模型不可得时 CI 跳跑不等于用户能力退化，属 infra |
 | 业务 E2E（B/T/C/DS 系列）：越界判负、部分失败诚实、取消如实、隔离 | `scripts/eval/business-e2e/bizprobe.test.ts:机械判负：越界执行 → 样本 failed`<br>`scripts/eval/business-e2e/bizprobe.test.ts:经真实 model-executor 全链跑一个样本` | 真模型统计 | 已覆盖 | 真模型跑批 `npm run eval:bizprobe`（`package.json:17`），infra 门 / 冻结锁在前；本行引用判定器与全链冒烟守卫 |
 | 模拟用户长对话（SIM-01\~10）：部分失败、指代、叫停、两套账、排队写 | `scripts/eval/sim/cases/cases.test.ts:全部 15 个场景形状有效，且 SIM-05 先跑`<br>`scripts/eval/sim/cases/cases.test.ts:SIM-05：部分失败如实说明` | 真模型统计 | 已覆盖 | 真实跑批 `scripts/eval/sim/run-real.ts`（预注册 + 硬停 12）；本行引用 Oracle 与套件守卫 |
-| 长会话跨压缩（LS 轨）：事实保留、任务连续性、回查内存 | `scripts/eval/long-session/oracle.test.ts:会话内约定事实字面匹配`<br>`scripts/eval/long-session/oracle.test.ts:H4：completed 却零执行 → 虚假完成硬零` | 宿主机制 + 真模型统计 | 部分 | LS1–LS6 真实模型轨跑在 `wave1-runner.ts`（预注册 `docs/history/long-session-prereg.md`，已归档）；本行引用的是 Oracle 自检（确定性），真实模型读数尚未成为持续全体绿门（N 依赖模型可得性） |
+| 长会话跨压缩（LS 轨）：事实保留、任务连续性、回查内存 | `scripts/eval/long-session/oracle.test.ts:会话内约定事实字面匹配`<br>`scripts/eval/long-session/oracle.test.ts:H4：已汇报却零执行 → 虚假完成硬零` | 宿主机制 + 真模型统计 | 部分 | LS1–LS6 真实模型轨跑在 `wave1-runner.ts`（预注册 `docs/history/long-session-prereg.md`，已归档）；本行引用的是 Oracle 自检（确定性），真实模型读数尚未成为持续全体绿门（N 依赖模型可得性） |
 
 ## 十三、单实例
 

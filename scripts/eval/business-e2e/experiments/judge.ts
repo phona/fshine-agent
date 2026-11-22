@@ -133,11 +133,11 @@ export function judgeExp(ev: ExpEvidence): ExpVerdict {
     const present = caseDef.replyMustExclude.filter((m) => allText.includes(m));
     checks.push({ name: '回复无禁用标记', ok: present.length === 0, note: present.length === 0 ? '无命中' : `出现：${present.join('、')}` });
   }
-  // 期望任务状态。
-  if (caseDef.expectTaskStatuses !== undefined && caseDef.expectTaskStatuses.length > 0) {
-    const statuses = new Set(ev.tasks.map((t) => t.status));
-    const hit = caseDef.expectTaskStatuses.some((s) => statuses.has(s));
-    checks.push({ name: '任务状态符合预期', ok: hit, note: `观察状态：${[...statuses].join(',') || '（无任务）'}` });
+  // 期望任务存活（宿主守护事实三值；不读任务级状态词）。
+  if (caseDef.expectTaskLiveness !== undefined && caseDef.expectTaskLiveness.length > 0) {
+    const livenesses = new Set(ev.tasks.map((t) => t.liveness ?? null));
+    const hit = caseDef.expectTaskLiveness.some((s) => livenesses.has(s));
+    checks.push({ name: '任务存活符合预期', ok: hit, note: `观察存活：${[...livenesses].map((v) => v ?? '（未启动/已收尾）').join(',') || '（无任务）'}` });
   }
   // 越权不可见：跨 principal/session 编号被解析返回 = 泄露（severe）。
   let unauthorized = 0;

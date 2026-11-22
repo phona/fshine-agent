@@ -10,7 +10,7 @@
  *   · `fact` —— 事实 Oracle（`judgeFactAnswer`），**任何 kind 都可携带**（interaction 轮同样判定）；
  *   · `expectNoNewTask` / `expectNewTask` —— 本轮前后任务账本（`tasks()`）行数差；
  *   · `expectNoExecution` / `expectExecutionObjects` —— 本轮 `execute_operation` 审计行；
- *   · `expectPrevTasksUnchanged` / `expectTaskStatusIn` —— 任务账本状态与执行清单；
+ *   · `expectPrevTasksUnchanged` / `expectTaskFactIn` —— 任务账本机械事实与执行清单；
  *   · `replyExcludes` —— 回复文本的负向机械检查；
  *   · `gapMs` —— 该轮 send 前的真实空档（真 `setTimeout`）；
  *   · `deferIdle` / `settleBeforeJudge` —— 只交办不等收尾（真交错/在飞取消）与落定后再判。
@@ -24,10 +24,11 @@ import { type FactExpectation, FACT_TRUTH } from './oracle';
 export type Track = 'LS1' | 'LS2' | 'LS3' | 'LS4' | 'LS5' | 'LS6';
 export type TurnKind = 'establish' | 'fact' | 'task' | 'interaction' | 'pump' | 'probe';
 
-/** 任务账本里「哪一个任务」的状态期望（oldest = 最早创建，latest = 最新创建）。 */
-export interface TaskStatusPick {
+/** 任务账本里「哪一个任务」的机械事实期望（oldest = 最早创建，latest = 最新创建）。 */
+export interface TaskFactPick {
   readonly which: 'oldest' | 'latest';
-  readonly values: readonly string[];
+  /** 机械事实标签（'reported'/'cancelled'/'running'/'exec:failed' …，见 oracle 的 taskHasFact）。 */
+  readonly facts: readonly string[];
 }
 
 export interface TurnSpec {
@@ -36,8 +37,8 @@ export interface TurnSpec {
   readonly kind: TurnKind;
   /** 事实期望（**任何 kind 都可携带**；interaction 轮也走同一套事实判定）。 */
   readonly fact?: FactExpectation;
-  /** 任务轮的期望状态（Oracle 对照用；可省，任务判定以 registry 快照为准）。 */
-  readonly expectTaskStatus?: string;
+  /** 任务轮的期望机械事实标签（Oracle 对照用；可省，任务判定以 registry 快照为准）。 */
+  readonly expectTaskFact?: string;
   /** 交互轮标签（LS3 的 NL1–NL10；LS6 的 N1-A…N6-C）。 */
   readonly label?: string;
   /** 本轮不得新建任务（该轮前后任务账本行数不变、且不出现新 taskId）。 */
@@ -50,8 +51,8 @@ export interface TurnSpec {
   readonly expectExecutionObjects?: readonly string[];
   /** 本轮之前已存在的任务：状态与执行清单不得改变（旧任务不被改写）。 */
   readonly expectPrevTasksUnchanged?: boolean;
-  /** 本轮结束时指定任务的状态必须落在集合内。 */
-  readonly expectTaskStatusIn?: TaskStatusPick;
+  /** 本轮结束时指定任务必须具备的机械事实之一（见 oracle 的 taskHasFact）。 */
+  readonly expectTaskFactIn?: TaskFactPick;
   /** 回复文本（去空白）不得包含这些字面片段；纯数字片段按「出现该数值」判。 */
   readonly replyExcludes?: readonly string[];
   /** 负向检查的作用域（2026-11-18）：只检查**提到该对象**的句子。
@@ -125,11 +126,11 @@ function ls1Facts(): Omit<TurnSpec, 'index'>[] {
 
 function ls2Turns(): Omit<TurnSpec, 'index'>[] {
   return [
-    { kind: 'task', text: '帮我开一个大任务：核对 alpha 和 beta 的记录，逐项说明。', expectTaskStatus: 'completed' },
-    { kind: 'task', text: '把刚才那个 alpha/beta 核对任务取消掉，不要做了。', expectTaskStatus: 'cancelled' },
-    { kind: 'task', text: '再开一个任务：查 empty-one W1 的记录。', expectTaskStatus: 'completed' },
-    { kind: 'task', text: '再开一个任务：查 faulty-one W1 的记录。', expectTaskStatus: 'failed' },
-    { kind: 'task', text: '把正在执行的任务再报一次状态，别重复建任务。', expectTaskStatus: 'running' },
+    { kind: 'task', text: '帮我开一个大任务：核对 alpha 和 beta 的记录，逐项说明。', expectTaskFact: 'reported' },
+    { kind: 'task', text: '把刚才那个 alpha/beta 核对任务取消掉，不要做了。', expectTaskFact: 'cancelled' },
+    { kind: 'task', text: '再开一个任务：查 empty-one W1 的记录。', expectTaskFact: 'reported' },
+    { kind: 'task', text: '再开一个任务：查 faulty-one W1 的记录。', expectTaskFact: 'exec:failed' },
+    { kind: 'task', text: '把正在执行的任务再报一次状态，别重复建任务。', expectTaskFact: 'running' },
     { kind: 'task', text: '第一个和第二个任务的编号分别是多少？结果对应哪个对象？' },
   ];
 }
@@ -153,7 +154,7 @@ function ls3Turns(): Omit<TurnSpec, 'index'>[] {
     { kind: 'interaction', text: '先不聊账务了，帮我看看 documents 的异常。', label: 'NL7', fact: { kind: 'exact', collection: 'documents', value: 800 } },
     { kind: 'interaction', text: '暂停一下，稍后继续。……继续刚才的。', label: 'NL8', expectNoNewTask: true },
     // NL9：任务未被取消（最早那个 alpha 查询任务最终已完成）——取消回执诚实性由 H5 兜底。
-    { kind: 'interaction', text: '刚才那个任务取消了吗？', label: 'NL9', expectTaskStatusIn: { which: 'oldest', values: ['completed'] } },
+    { kind: 'interaction', text: '刚才那个任务取消了吗？', label: 'NL9', expectTaskFactIn: { which: 'oldest', facts: ['reported'] } },
     { kind: 'interaction', text: '你刚才为什么把 alpha 判成 3 条？解释一下你的判断。', label: 'NL10', fact: { kind: 'exact', collection: 'alpha', count: alpha.count, sum: alpha.sum } },
   ];
 }
@@ -179,7 +180,7 @@ function ls6Turns(): Omit<TurnSpec, 'index'>[] {
     {
       kind: 'interaction', label: 'N1-C',
       text: '回到刚才第一个任务：alpha 集合 W1 的结果是什么？一共几条、总金额多少？',
-      expectNoNewTask: true, expectTaskStatusIn: { which: 'oldest', values: ['completed'] },
+      expectNoNewTask: true, expectTaskFactIn: { which: 'oldest', facts: ['reported'] },
       fact: { kind: 'exact', collection: 'alpha', count: alpha.count, sum: alpha.sum },
     },
     // ── N2 改口径后回头 ──────────────────────────────────────────────────────
@@ -225,7 +226,7 @@ function ls6Turns(): Omit<TurnSpec, 'index'>[] {
       kind: 'interaction', label: 'N6-C',
       text: '把最早那个 alpha 任务也取消掉，别要了。',
       expectPrevTasksUnchanged: true,
-      expectTaskStatusIn: { which: 'oldest', values: ['completed'] },
+      expectTaskFactIn: { which: 'oldest', facts: ['reported'] },
       cancelTarget: 'oldest',
       // 声称取消但状态没变 = 假取消；「没能取消成功 / 无法取消」这类如实拒绝不算声称。
       expectCancelHonest: true,

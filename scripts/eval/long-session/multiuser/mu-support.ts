@@ -22,7 +22,7 @@ import type { MainSessionLocation } from '../../../../packages/agent/src/session
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { Notification, NotificationSink } from '../../../../packages/agent/src/notifications';
 import { createSqliteTaskRegistry } from '../../../../packages/agent/src/task-registry-sqlite';
-import { lastFailureOf } from '../../../../packages/agent/testing/task-facts';
+import { lastFailureOf, taskFactViewOf } from '../../../../packages/agent/testing/task-facts';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../../../../packages/agent/src/task-runner';
 import { createServer, type Server } from '../../../../apps/server/server';
 import { WecomBotChannel, type SdkClientLike } from '../../../../packages/channel-wecom/src/index';
@@ -499,9 +499,18 @@ export interface MuTaskSnapshot {
   readonly principalId: string;
   readonly sessionId: string;
   readonly request: string;
-  readonly status: string;
-  readonly reason: string | undefined;
-  /** failed 的机械原因原文（P2 失败场景如实性核对用；只读投影）。 */
+  /** 存活（宿主守护事实三值；null=未启动或已收尾）——唯一保留的任务投影。 */
+  readonly liveness: 'running' | 'died' | 'waiting_user' | null;
+  readonly ended: boolean;
+  readonly cancelled: boolean;
+  readonly died: boolean;
+  readonly timedOut: boolean;
+  readonly resourceLimited: boolean;
+  /** worker 汇报已存档（语义事实；判「办没办成」读执行行）。 */
+  readonly reported: boolean;
+  /** 末条执行行 status 原值（可选；无执行行时缺省）。 */
+  readonly lastExecutionStatus?: string;  readonly reason: string | undefined;
+  /** failed 的机械原因原文（P2 失败场景如实性核对用；只读执行行事实）。 */
   readonly failureReason: string | undefined;
   /** 结果逐字存档（background 走 archiveReply；inline 走 complete 的 resultText）。 */
   readonly resultText: string | undefined;
@@ -509,40 +518,7 @@ export interface MuTaskSnapshot {
   readonly replyText: string | undefined;
 }
 
-/**
- * MU 判据词汇（评测本地词表，非产品状态）：把账本事实映射到 R6 oracle 既有离散词。
- * 读时投影、不写回底账；产品面没有这个投影（task_status/task_result 只读 liveness + 事实）。
- */
-function muTaskStateOf(task: {
-  pendingQuestion?: unknown;
-  cancelledAt?: string;
-  timedOutAt?: string;
-  resourceLimitedAt?: string;
-  diedAt?: string;
-  resultText?: string;
-  replyText?: string;
-  runningSince?: string;
-  leaseUntil?: string;
-  executions?: readonly { status: string }[];
-}): string {
-  if (task.cancelledAt !== undefined) return 'cancelled';
-  if (task.timedOutAt !== undefined) return 'timed_out';
-  if (task.resourceLimitedAt !== undefined) return 'resource_limited';
-  if (task.diedAt !== undefined) return 'failed';
-  if (task.pendingQuestion !== undefined) return 'waiting_user';
-  const last = task.executions?.[task.executions.length - 1];
-  if (last !== undefined) {
-    if (last.status === 'failed' || last.status === 'refused' || last.status === 'needs_input') return 'failed';
-    if (last.status === 'accepted') return (task.resultText ?? task.replyText ?? '').trim() !== '' ? 'completed' : 'running';
-    return 'completed';
-  }
-  if ((task.resultText ?? task.replyText ?? '').trim() !== '') return 'completed';
-  if (task.leaseUntil !== undefined) return 'running';
-  if (task.runningSince === undefined) return 'queued';
-  return 'failed';
-}
-
-/** 只读任务快照（Task Registry 即机械 Oracle 的事实源；只投影，不 import SQLite 实现做判定）。 */
+/** 只读任务快照（Task Registry 即机械 Oracle 的事实源；只读事实，不合成任务级状态词）。 */
 export function readTasks(dbPath: string): MuTaskSnapshot[] {
   const registry = createSqliteTaskRegistry(dbPath, { readOnly: true });
   try {
@@ -552,7 +528,7 @@ export function readTasks(dbPath: string): MuTaskSnapshot[] {
       principalId: task.principalId,
       sessionId: task.sessionId,
       request: task.request,
-      status: muTaskStateOf(task),
+      ...taskFactViewOf(task),
       reason: lastFailureOf(task)?.error?.code,
       failureReason: lastFailureOf(task)?.error?.message,
       resultText: task.resultText,
@@ -570,7 +546,14 @@ export function toTaskViews(tasks: readonly MuTaskSnapshot[]): TaskView[] {
     taskId: task.taskId,
     ...(task.taskNo === undefined ? {} : { taskNo: task.taskNo }),
     request: task.request,
-    status: task.status,
+    liveness: task.liveness,
+    ended: task.ended,
+    cancelled: task.cancelled,
+    died: task.died,
+    timedOut: task.timedOut,
+    resourceLimited: task.resourceLimited,
+    reported: task.reported,
+    ...(task.lastExecutionStatus === undefined ? {} : { lastExecutionStatus: task.lastExecutionStatus }),
     ...(task.reason === undefined ? {} : { reason: task.reason }),
     requestIds: task.requestIds,
   }));
