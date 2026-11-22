@@ -82,6 +82,7 @@ interface FakeTask {
   cancelledAt?: string;
   timedOutAt?: string;
   resourceLimitedAt?: string;
+  cancelRequestedAt?: string;
   taskNo: number;
   name: string;
   executions: ExecutionRecord[];
@@ -316,8 +317,21 @@ class FakeRegistry implements TaskRegistryPort {
     const task = this.require(taskId);
     if (!task.diedAt) {
       task.diedAt = this.clock().toISOString();
-      this.commit(task, 'failed', { reason: 'result_unknown' });
+      // 真实 markDied 幂等（WHERE died_at IS NULL，不抛）：已落 failed（如先 noteRoundFailed）
+      // 时只补 reason，不重走非法边。
+      if ((LEGAL_EDGES[task.status] ?? []).includes('failed')) {
+        this.commit(task, 'failed', { reason: 'result_unknown' });
+      } else {
+        task.reason = 'result_unknown';
+      }
     }
+    return task;
+  }
+
+  markCancelRequested(taskId: string, options?: { scope?: TaskScope }): TaskRecordView {
+    const task = this.require(taskId, options?.scope);
+    // 请求 ≠ 确认：只落请求时刻（一次性），不改终局、不清租约。
+    if (task.cancelRequestedAt === undefined) task.cancelRequestedAt = this.clock().toISOString();
     return task;
   }
 
@@ -340,6 +354,10 @@ class FakeRegistry implements TaskRegistryPort {
 
   diedAtOf(taskId: string): string | undefined {
     return this.require(taskId).diedAt;
+  }
+
+  cancelRequestedAtOf(taskId: string): string | undefined {
+    return this.require(taskId).cancelRequestedAt;
   }
 
   // --- 内部 ---
@@ -607,6 +625,19 @@ describe('排队 → 启动 → 收尾', () => {
     expect(h.registry.reasonOf('t1')).toBe('timeout');
     expect(h.policy.backgroundInUse).toBe(0);
   });
+
+  it('结果未知（result_unknown）：落 died_at（「结果未知」是 died 语义，不是「无汇报」）', async () => {
+    // Grok 复审 2026-11-22：S1 后 settle 只 noteRoundFailed 清租约、不 markDied → 底账无
+    // died_at，展示词退成「无汇报」，重启对账也认不出这条已死行。结果未知必须落 died_at。
+    const h = harness();
+    submit(h, 't1');
+    h.runner.pump();
+    h.executor.settle(0, { kind: 'result_unknown' });
+    await h.runner.whenIdle();
+
+    expect(h.registry.diedAtOf('t1')).toBeDefined();
+    expect(h.registry.reasonOf('t1')).toBe('result_unknown');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -801,6 +832,35 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
     expect(h.registry.statusOf('t1')).toBe('cancelled');
     expect(h.registry.reasonOf('t1')).toBe('cancelled_by_user');
     expect(h.policy.backgroundInUse).toBe(0);
+  });
+
+  it('running 取消：请求落持久列 cancel_requested_at（请求 ≠ 确认；确认后才 cancelled）', async () => {
+    // Grok 复审 2026-11-22：取消请求此前只进进程内 Set，无持久列——断电重启后底账看不出
+    // 「你要我停、没停完」。请求必须落 cancel_requested_at（一次性、不改终局、不清租约）。
+    const h = harness();
+    submit(h, 't1');
+    h.runner.pump();
+    const call = h.executor.calls[0]!;
+    call.context.signal.addEventListener('abort', () => {
+      h.executor.settle(0, { kind: 'cancelled' });
+    });
+
+    const outcome = h.runner.cancel('t1');
+    expect(outcome).toEqual({ outcome: 'requested', taskId: 't1' });
+    // 请求已持久化（重启对账可读）——但未确认：仍是 running，不是 cancelled。
+    expect(h.registry.cancelRequestedAtOf('t1')).toBeDefined();
+    expect(h.registry.statusOf('t1')).toBe('running');
+
+    await h.runner.whenIdle();
+    expect(h.registry.statusOf('t1')).toBe('cancelled');
+  });
+
+  it('queued 取消：机械确认直接 cancelled，不写取消请求列（未启动没有「没停完」）', () => {
+    const h = harness();
+    submit(h, 't1'); // 未启动（queued）
+    h.runner.cancel('t1');
+    expect(h.registry.statusOf('t1')).toBe('cancelled');
+    expect(h.registry.cancelRequestedAtOf('t1')).toBeUndefined();
   });
 
   it('running 取消未获确认（回合照常完成）→ 回 running 并如实落终态，不宣称取消', async () => {

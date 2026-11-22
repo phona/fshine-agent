@@ -255,6 +255,8 @@ async function makeFixture(mode: Mode, options: {
   runtimeOverrides?: Partial<NonNullable<AppConfig['runtime']>>;
   /** 预置一条「上一进程死在回合里、租约已过期」的 running 行（重启对账用例）。 */
   seedInterrupted?: boolean;
+  /** 预置一条「用户说了停、执行端没确认就断电」的取消请求行（取消孤儿；请求持久事实）。 */
+  seedCancelRequested?: boolean;
   /** 投递面模式（缺省 live；silent = 非 live 部署的抑制语义）。 */
   deliveryMode?: 'live' | 'silent';
   /** 执行器替身覆盖（缺省 = 受闸的 GatedExecutor；抛错回合用例用）。 */
@@ -277,6 +279,23 @@ async function makeFixture(mode: Mode, options: {
         owner: 'dead-process',
         leaseUntil: new Date(Date.now() - 1_000).toISOString(),
         updatedAt: new Date(Date.now() - 60_000).toISOString(),
+      });
+    } finally {
+      registry.close();
+    }
+  }
+  if (options.seedCancelRequested === true) {
+    const registry = createSqliteTaskRegistry(dbPath);
+    try {
+      // 用户说了停（落**持久**请求事实 cancel_requested_at），执行端没确认就断电：形状 = 取消
+      // 孤儿。重启后 pump 的 expireLeases 把它落 died（结果未知），重启对账据请求事实如实说
+      // 「你要我停、没停完」（此前请求只在本进程内存里，一重启就丢）。
+      registry.begin({ taskId: 'task_cancelling_orphan', ...SCOPE, request: TASK_TEXT, queued: true });
+      registry.markCancelRequested('task_cancelling_orphan');
+      registry.store.armLease('task_cancelling_orphan', {
+        owner: 'dead-process',
+        leaseUntil: new Date(Date.now() - 1_000).toISOString(),
+        updatedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
       });
     } finally {
       registry.close();
@@ -532,6 +551,33 @@ describe('状态变化唤醒（server 级）：失败', () => {
       expect(wake).toMatchObject({ outcome: 'woken' });
       expect(readTask(fx.dbPath, String(wake!['taskId']))).toMatchObject({ status: 'failed' });
       expect(calls).toBe(1);
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('①f 零执行失败（真实执行行 0 条、无结构化码）：事实带 [outcome=unsupported]（办不了），不是 failed', async () => {
+    // Grok 复审 2026-11-22：旧判据 ledgerFacts.length===0 永远到不了（零执行也推一条账本行），
+    // 零执行被误判 outcome=failed。改看真实执行行数 → unsupported。
+    const zeroExec: TaskExecutor = {
+      async execute(): Promise<TaskExecutionOutcome> {
+        return { kind: 'ended', executionOutcome: 'failed' };
+      },
+    };
+    const fx = await makeFixture('line', { executorOverride: zeroExec });
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
+      const transcript = fx.mainDriver!.transcript?.() ?? [];
+      const factText = transcript.map((message) => {
+        const content = (message as { content?: unknown }).content;
+        if (typeof content === 'string') return content;
+        if (Array.isArray(content)) return content.map((block) => String((block as { text?: unknown }).text ?? '')).join('');
+        return '';
+      }).find((entry) => entry.startsWith('[任务失败]'));
+      expect(factText).toBeDefined();
+      expect(factText).toContain('[outcome=unsupported]');
+      expect(factText).not.toContain('[outcome=failed]');
     } finally {
       await fx.close();
     }
@@ -825,6 +871,29 @@ describe('状态变化唤醒（server 级）：重启对账', () => {
       await fx.server.handler(incoming('m-2', '然后呢'));
       expect(requestHasUserText(fx.scripted!.requests(), '[重启对账]')).toBe(true);
       expect(readTask(fx.dbPath, 'task_interrupted')).toEqual({ status: 'died' });
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('④d 取消孤儿（用户说了停、重启前没确认）→ 回收成 result_unknown 并如实说清「你要我停，没停完」', async () => {
+    // Grok 复审 2026-11-22：取消请求此前只进进程内 Set，无持久列——断电重启后底账看不出
+    // 「你要我停、没停完」。请求落 cancel_requested_at 后，重启对账据此如实点明。
+    const fx = await makeFixture('line', { seedCancelRequested: true });
+    try {
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
+      expect(fx.delivery.sentTexts[0]!.text).toBe(`「${TASK_NAME}」我这边重启过，状态说不清了；你说一声我就重来。`);
+      const wake = wakeEventOf(fx.logs, 'task_restart_wake');
+      expect(wake).toMatchObject({ outcome: 'woken', taskId: 'task_cancelling_orphan' });
+      // 事实如实点明「你要我停、没停完」（别让用户以为停已生效）。
+      const fact = fx.scripted!.requests()
+        .flatMap((request) => request.messages.map((message) => userTextOf(message)))
+        .find((text) => text.startsWith('[重启对账]'));
+      expect(fact).toContain('你要我停');
+      expect(fact).toContain('没停完');
+      // 终态：result_unknown（不宣称已取消、不重放），执行器零调用。
+      expect(readTask(fx.dbPath, 'task_cancelling_orphan')).toEqual({ status: 'died' });
+      expect(fx.executor.calls).toBe(0);
     } finally {
       await fx.close();
     }

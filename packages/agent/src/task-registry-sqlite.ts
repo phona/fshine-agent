@@ -94,6 +94,7 @@ export function createSqliteTaskRegistry(
       ...(stored.task.cancelledAt === undefined ? {} : { cancelledAt: stored.task.cancelledAt }),
       ...(stored.task.timedOutAt === undefined ? {} : { timedOutAt: stored.task.timedOutAt }),
       ...(stored.task.resourceLimitedAt === undefined ? {} : { resourceLimitedAt: stored.task.resourceLimitedAt }),
+      ...(stored.task.cancelRequestedAt === undefined ? {} : { cancelRequestedAt: stored.task.cancelRequestedAt }),
       // P1：旧库只读（未迁移）时三列为缺省（undefined），读出缺省不伪造。
       ...(stored.task.taskNo === undefined ? {} : { taskNo: stored.task.taskNo }),
       ...(stored.task.name === undefined ? {} : { name: stored.task.name }),
@@ -262,6 +263,13 @@ export function createSqliteTaskRegistry(
       const at = new Date().toISOString();
       const written = store.markTaskFact(taskId, { fact: 'resource_limited', at, updatedAt: at });
       if (written) emit(factOf(store.getTask(taskId)!.task, 'resource_limited', at));
+      return toRecord(require(taskId));
+    },
+    markCancelRequested(taskId, options: MutationOptions = {}) {
+      require(taskId, options.scope);
+      const at = new Date().toISOString();
+      // 请求 ≠ 确认：一次性事实写入，不清租约、不发终局事件（重启对账据本列说「你要我停」）。
+      store.markCancelRequested(taskId, { at, updatedAt: at });
       return toRecord(require(taskId));
     },
     noteRoundFailed(taskId) {

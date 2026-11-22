@@ -139,6 +139,8 @@ export interface TaskRecordView {
   cancelledAt?: string;
   timedOutAt?: string;
   resourceLimitedAt?: string;
+  /** 用户取消**请求**的时刻（ISO；一次性；请求 ≠ 确认——确认才写 cancelledAt）。 */
+  cancelRequestedAt?: string;
   /** 本轮开始运行时刻（ISO，单调写一次）：长任务受理后租约被清，提醒扫描靠它算「跑了多久」。 */
   runningSince?: string;
   taskNo?: number;
@@ -178,6 +180,12 @@ export interface TaskRegistryPort {
   markCancelled(taskId: string, options?: MutationOptions): TaskRecordView;
   markTimedOut(taskId: string, kind: TimeoutKind, options?: MutationOptions): TaskRecordView;
   markDied(taskId: string): TaskRecordView;
+  /**
+   * 用户取消**请求**（2026-11-22，Grok 复审恢复）：请求 ≠ 确认——落一条持久事实
+   * （cancel_requested_at，一次性），表明「用户要我停，但还没确认停下」。取消确认/断电
+   * 重启后据此如实说清「你要我停、没停完」（不是已取消，也不重放）。不改任务终局、不清租约。
+   */
+  markCancelRequested(taskId: string, options?: MutationOptions): TaskRecordView;
   /**
    * 回合失败事实（无执行事实可判定时的机械事件）：不写任务结论，只发事实事件
    * （通知/唤醒面消费——失败通知与失败唤醒的事实源）。
@@ -1659,9 +1667,12 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       }
       case 'result_unknown':
         // U3：结果未知 ≠ 成功 ≠ 确认失败（账行 unknown 已禁止自动重试）；发回合失败事实事件。
+        // 2026-11-22（Grok 复审）：结果未知是 **died 语义**——必须落 died_at（一次性机械时刻），
+        // 否则底账看不出「结果未知」（展示词退成「无汇报」，重启对账也认不出这条已死行）。
         releaseLeaseQuietly(taskId);
         try {
           registry.noteRoundFailed(taskId);
+          registry.markDied(taskId);
         } catch (error) {
           if (!isSettledRace(error)) report(taskId, error);
         }
@@ -1750,7 +1761,15 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     // 在跑：请求 ≠ 取消。abort 本进程在飞回合；长任务没有在飞回合（槽位已释放），
     // 取消必须走执行层 abort；确认（回合以 cancelled 收尾/abort 成功）才写取消事实——
     // 进程死在请求与确认之间时，租约随后过期 → died（做没做完说不清，如实按结果未知）。
+    // 2026-11-22（Grok 复审恢复）：请求本身落**持久事实**（cancel_requested_at）——进程/本进程
+    // 内存都靠不住，重启对账要据此说清「你要我停、没停完」，不能只留进程内 Set。
     cancelRequested.add(taskId);
+    try {
+      registry.markCancelRequested(taskId, mutationOptions(scope));
+    } catch (error) {
+      // 取消请求写失败不阻断 abort（请求仍生效）；如实记观测，不吞。
+      if (!isSettledRace(error)) report(taskId, error);
+    }
     controllers.get(taskId)?.abort();
     const waiting = pendingWaiterOf(taskId);
     if (waiting !== undefined) {

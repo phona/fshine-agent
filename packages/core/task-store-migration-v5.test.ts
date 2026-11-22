@@ -80,13 +80,19 @@ interface SeedRow {
   taskNo: number;
   name: string;
   replyText: string | null;
+  /** 旧机械原因（result_unknown 等；缺省 null）。 */
+  reason: string | null;
 }
 
 const SEED_ROWS: readonly SeedRow[] = [
-  { taskId: 'task_done', status: 'completed', resultText: '历史汇报 A。', updatedAt: '2026-11-14T08:00:00.000Z', taskNo: 1, name: '历史 A', replyText: '历史最终回复 A。' },
-  { taskId: 'task_cancel', status: 'cancelled', resultText: null, updatedAt: '2026-11-14T08:30:00.000Z', taskNo: 2, name: '历史 B', replyText: null },
-  { taskId: 'task_timeout', status: 'timed_out', resultText: null, updatedAt: '2026-11-14T08:45:00.000Z', taskNo: 3, name: '历史 C', replyText: null },
-  { taskId: 'task_queued', status: 'queued', resultText: null, updatedAt: '2026-11-14T09:00:00.000Z', taskNo: 4, name: '历史 D', replyText: null },
+  { taskId: 'task_done', status: 'completed', resultText: '历史汇报 A。', updatedAt: '2026-11-14T08:00:00.000Z', taskNo: 1, name: '历史 A', replyText: '历史最终回复 A。', reason: null },
+  { taskId: 'task_cancel', status: 'cancelled', resultText: null, updatedAt: '2026-11-14T08:30:00.000Z', taskNo: 2, name: '历史 B', replyText: null, reason: null },
+  { taskId: 'task_timeout', status: 'timed_out', resultText: null, updatedAt: '2026-11-14T08:45:00.000Z', taskNo: 3, name: '历史 C', replyText: null, reason: null },
+  { taskId: 'task_queued', status: 'queued', resultText: null, updatedAt: '2026-11-14T09:00:00.000Z', taskNo: 4, name: '历史 D', replyText: null, reason: null },
+  // 结果未知（旧 failed + reason=result_unknown）→ 必须回填 died_at（否则退化成「无汇报」）。
+  { taskId: 'task_unknown', status: 'failed', resultText: null, updatedAt: '2026-11-14T09:15:00.000Z', taskNo: 5, name: '历史 E', replyText: null, reason: 'result_unknown' },
+  // 取消孤儿（旧 cancelling：用户说了停、没确认）→ 必须回填 cancel_requested_at（请求不丢）。
+  { taskId: 'task_cancelling', status: 'cancelling', resultText: null, updatedAt: '2026-11-14T09:30:00.000Z', taskNo: 6, name: '历史 F', replyText: null, reason: null },
 ];
 
 function seedV4Db(dbPath: string): void {
@@ -96,9 +102,9 @@ function seedV4Db(dbPath: string): void {
   db.exec(V4_SCHEMA);
   const insert = db.prepare(`
     INSERT INTO tasks (task_id, principal_id, session_id, request, status, result_text, failure_reason,
-      created_at, updated_at, task_no, name, reply_text)
+      created_at, updated_at, task_no, name, reply_text, reason)
     VALUES (@taskId, 'wecom:fixture-user', 'ask-v4', @request, @status, @resultText, NULL,
-      @updatedAt, @updatedAt, @taskNo, @name, @replyText)
+      @updatedAt, @updatedAt, @taskNo, @name, @replyText, @reason)
   `);
   for (const row of SEED_ROWS) {
     insert.run({
@@ -110,11 +116,12 @@ function seedV4Db(dbPath: string): void {
       taskNo: row.taskNo,
       name: row.name,
       replyText: row.replyText,
+      reason: row.reason,
     });
   }
   db.prepare("INSERT INTO executions (request_id, task_id, operation, status, error_json) VALUES (?, ?, ?, ?, ?)")
     .run('req_v4_a', 'task_done', 'dummy.query', 'completed', null);
-  db.prepare("INSERT INTO task_sequences (name, value) VALUES ('task_no', 4)").run();
+  db.prepare("INSERT INTO task_sequences (name, value) VALUES ('task_no', 6)").run();
   db.pragma('user_version = 4');
   db.close();
 }
@@ -192,6 +199,15 @@ describe('S1 v5 迁移（旧结论列 → 机械事实形状）', () => {
     expect(rawTask(dbPath, 'task_queued')['running_since']).toBeNull();
     // 曾离开 queued 的行回填 running_since（避免被当作未启动重新认领）。
     expect(rawTask(dbPath, 'task_done')['running_since']).toBe('2026-11-14T08:00:00.000Z');
+    // Grok 复审 2026-11-22：结果未知（旧 failed + reason=result_unknown）回填 died_at（不退化
+    // 成「无汇报」）；取消孤儿（旧 cancelling）回填 cancel_requested_at（请求不丢）。
+    expect(rawTask(dbPath, 'task_unknown')['died_at']).toBe('2026-11-14T09:15:00.000Z');
+    expect(rawTask(dbPath, 'task_unknown')['running_since']).toBe('2026-11-14T09:15:00.000Z');
+    expect(rawTask(dbPath, 'task_cancelling')['cancel_requested_at']).toBe('2026-11-14T09:30:00.000Z');
+    expect(rawTask(dbPath, 'task_cancelling')['running_since']).toBe('2026-11-14T09:30:00.000Z');
+    // 读出侧也带上了取消请求事实。
+    expect(store.getTask('task_cancelling')!.task.cancelRequestedAt).toBe('2026-11-14T09:30:00.000Z');
+    expect(store.getTask('task_unknown')!.task.diedAt).toBe('2026-11-14T09:15:00.000Z');
 
     // 新任务编号从历史最大值接续（不重号）。
     const inserted = store.insertTask({
@@ -202,13 +218,16 @@ describe('S1 v5 迁移（旧结论列 → 机械事实形状）', () => {
       createdAt: '2026-11-14T10:00:00.000Z',
       updatedAt: '2026-11-14T10:00:00.000Z',
     });
-    expect(inserted.taskNo).toBe(5);
+    expect(inserted.taskNo).toBe(7);
     store.close();
 
     // 幂等：第二次打开零差异、不新增备份。
     const second = openTaskStore(dbPath);
     expect(second.listTasks().map((stored) => [stored.task.taskId, stored.task.taskNo]))
-      .toEqual([['task_done', 1], ['task_cancel', 2], ['task_timeout', 3], ['task_queued', 4], ['task_new', 5]]);
+      .toEqual([
+        ['task_done', 1], ['task_cancel', 2], ['task_timeout', 3], ['task_queued', 4],
+        ['task_unknown', 5], ['task_cancelling', 6], ['task_new', 7],
+      ]);
     second.close();
     expect(columnNames(dbPath)).not.toContain('status');
     expect(backupFiles(dir)).toEqual(['state.db.backup-v5']);

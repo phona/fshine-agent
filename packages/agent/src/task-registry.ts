@@ -226,6 +226,8 @@ export interface TaskRecord {
   timedOutAt?: string;
   /** 资源拒绝（受理/派发被 policy 拒）的时刻（ISO；一次性）。 */
   resourceLimitedAt?: string;
+  /** 用户取消**请求**的时刻（ISO；一次性；请求 ≠ 确认——确认才写 cancelledAt）。 */
+  cancelRequestedAt?: string;
   /** P1：数字任务编号（底账分配，唯一、不复用；旧库只读/未迁移时缺省）。 */
   taskNo?: number;
   /** P1：业务名称（新行=机械回落写入；历史行缺省，显示层同规则回落）。 */
@@ -457,6 +459,8 @@ export interface TaskRegistry {
   markDied(taskId: string): TaskRecord;
   /** 资源拒绝：resource_limited_at 一次性写入（受理/派发被 policy 拒）。 */
   markResourceLimited(taskId: string, options?: MutationOptions): TaskRecord;
+  /** 用户取消**请求**：cancel_requested_at 一次性写入（请求 ≠ 确认；不清租约、不改终局）。 */
+  markCancelRequested(taskId: string, options?: MutationOptions): TaskRecord;
   /**
    * 回合失败事实（不写任务结论）：回合以「没有汇报」收尾/抛错/结果未知时发一条事实事件——
    * 失败通知与失败唤醒面的事实源。事实依据 = 底账现状（无汇报存档、执行行原样），
@@ -721,6 +725,15 @@ export function createTaskRegistry(options: MemoryTaskRegistryOptions = {}): Tas
       clearLease(task);
       touch(task, at);
       emit(task, 'resource_limited', at);
+      return task;
+    },
+    markCancelRequested(taskId, options = {}) {
+      const at = clock().toISOString();
+      const task = require(taskId, options.scope);
+      if (task.cancelRequestedAt !== undefined) return task; // 一次性事实：重复请求零写入
+      task.cancelRequestedAt = at;
+      // 请求 ≠ 确认：不清租约、不发终局事件（用户可见的「你要我停」由重启对账出口说）。
+      touch(task, at);
       return task;
     },
     noteRoundFailed(taskId) {

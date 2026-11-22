@@ -725,6 +725,36 @@ describe('模型走岔路（确定性脚本模型）', () => {
     expect(taskFailureReasonOf(task) ?? '').toContain('run_js');
   });
 
+  it('⑭ 先失败后成功（业务拒绝 → 后一个业务写完成）：本回合结局 = 成功，不判失败引导重试', async () => {
+    // Grok 复审 2026-11-22：S1 删 status 后 roundFailureOf 倒序找最后一条失败、不再豁免
+    // 「更早的业务失败」——commit(BAD) 失败(INVALID_RECORDS) → commit 成功 仍返回失败 →
+    // onTaskFailed → 引导重试 → 重复写。末次决定性结果 = 已落库的业务写成功（先失败后成功 = 成功）。
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new AdversarialClient();
+    const executor = await makeExecutor({
+      client,
+      registry,
+      worker: scriptWorkerMixed([
+        [
+          { tool: EXECUTE_OPERATION_TOOL, args: DENIED('alpha') },
+          { tool: EXECUTE_OPERATION_TOOL, args: PROPOSAL },
+        ],
+      ], capture),
+    });
+    const runner = await runBackground(registry, executor, 't_failthenok');
+    const task = registry.get('t_failthenok', SCOPE);
+    // 账本如实保留两条执行事实：业务拒绝在先、业务写成功在后。
+    expect(task.executions.map((execution) => [execution.operation, execution.status]))
+      .toEqual([['dummy.denied', 'refused'], ['dummy.proposal', 'completed']]);
+    // 末次决定性结果 = 成功：如实交付分流**不得**走失败回调（executionOutcome 非 failed/refused）。
+    const round = runner.roundOutcomeOf?.('t_failthenok');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    expect(round.executionOutcome).toBeUndefined();
+    expect(taskStatusOf(task)).toBe('completed');
+  });
+
   it('⑬ 确认回合重提：宿主注入的确认句柄不得落进底账提案载荷，也不得进下一轮委派正文', async () => {
     // 2026-11-21 Grok 审查 blocking：确认回合同样走 op_* 面时，mapWorkerOperationArgs 把宿主
     // 注入的 `--confirmation` 写进 baseCallArgs；needs_confirmation 时整包存进 proposalArgs →

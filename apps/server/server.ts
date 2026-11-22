@@ -558,6 +558,48 @@ export function turnProducedNothing(input: {
     && input.taskIds.length === 0;
 }
 
+/**
+ * 失败投递的末次决定性失败码（2026-11-21 独立审查 major 修复的守卫；2026-11-22 Grok 复审
+ * 恢复被 S1 误删的回溯语义）：倒序取**最后一条** failed/refused 且带非空 error.code 的执行行。
+ * 不能取第一条、也不能停在无码的末条——先被 CONFIRMATION_REQUIRED 挡、后才是真正失败码时，
+ * 首条/无码末条都会把分类引到「等确认」或「我方故障」，与任务实际终局相反（与 execution-runtime
+ * 的 P0 同口径）。
+ */
+export function lastDecisiveFailureCode(
+  executions: ReadonlyArray<{ status?: string; error?: { code?: string } }>,
+): string | undefined {
+  for (let index = executions.length - 1; index >= 0; index -= 1) {
+    const execution = executions[index];
+    if (execution === undefined) continue;
+    if (execution.status !== 'failed' && execution.status !== 'refused') continue;
+    const code = execution.error?.code;
+    if (typeof code === 'string' && code !== '') return code;
+  }
+  return undefined;
+}
+
+/**
+ * B4 结构化答复值（机械事实；Main 按值选措辞）：原因码优先，其次**零执行** = unsupported
+ * （没有发生任何办理动作），其余 = 执行发生过且失败。不扫文本。
+ *
+ * 2026-11-22（Grok 复审）：零执行判据**不是**账本事实行数——taskLedgerFactsOf 零执行也推
+ * 一条说明行，`ledgerFacts.length === 0` 永远为假，零执行被误判成 failed。改由调用方传真实
+ * 执行行是否存在（hasExecutions）。
+ */
+export function taskFailureOutcomeOf(input: {
+  /** 结构化原因码（BACKGROUND failure.reasonCode；not_permitted / unsupported）。 */
+  reasonCode?: string;
+  /** 结果未知（died）：结果未知不是 unsupported，也不因零执行降级。 */
+  resultUnknown: boolean;
+  /** 底账里是否有**真实执行行**（不是账本事实行数）。 */
+  hasExecutions: boolean;
+}): 'unsupported' | 'blocked' | 'failed' {
+  if (input.reasonCode === OUTCOME_REASON_NOT_PERMITTED) return 'blocked';
+  if (input.reasonCode === OUTCOME_REASON_UNSUPPORTED) return 'unsupported';
+  if (!input.resultUnknown && !input.hasExecutions) return 'unsupported';
+  return 'failed';
+}
+
 export async function createServer(deps: ServerDeps): Promise<Server> {
   const { id: profileId, profile } = resolveSingleProfile(deps.config);
   if (profile.gateway === undefined && deps.createExecutionFace === undefined) {
@@ -622,12 +664,20 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
    * 任务归属事实（重启对账出口用：把一条底账恢复事实还原到会话，好唤醒它说清）：
    * 底账行读不到（已清/异常形状）= undefined——不猜会话、不猜到哪个窗口。
    */
-  const taskScopeOf = (taskId: string): { principalId: string; sessionId: string; request: string } | undefined => {
+  const taskScopeOf = (
+    taskId: string,
+  ): { principalId: string; sessionId: string; request: string; pendingCancel: boolean } | undefined => {
     try {
       const record = (taskRegistry as unknown as {
-        get(id: string): { principalId: string; sessionId: string; request: string };
+        get(id: string): { principalId: string; sessionId: string; request: string; cancelRequestedAt?: string };
       }).get(taskId);
-      return { principalId: record.principalId, sessionId: record.sessionId, request: record.request };
+      return {
+        principalId: record.principalId,
+        sessionId: record.sessionId,
+        request: record.request,
+        // 取消请求事实（请求 ≠ 确认）：重启对账据此如实说「你要我停、没停完」。
+        pendingCancel: record.cancelRequestedAt !== undefined,
+      };
     } catch {
       return undefined;
     }
@@ -735,9 +785,26 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     }
   };
   /**
+   * 任务底账里有没有**真实执行行为**（逐笔执行行 > 0）。零执行判定不能看 taskLedgerFactsOf
+   * 的长度——它零执行也推一条说明行（长度恒 ≥1），据此判会永远得 false，把零执行误判成
+   * 「执行发生过且失败」。
+   */
+  const taskHasExecutions = (taskId: string): boolean => {
+    try {
+      const record = (taskRegistry as unknown as {
+        get(id: string): { executions?: ReadonlyArray<unknown> };
+      }).get(taskId);
+      return (record.executions ?? []).length > 0;
+    } catch {
+      return false;
+    }
+  };
+  /**
    * 任务底账里**末条**失败/拒绝执行行的执行层原始码（归类用；取不到 = undefined，不猜）。
    * 与 taskLedgerFactsOf 同源（逐笔执行事实）——沉默兜底话术据它按码归类（GATE_REFUSE →
    * denied），在失败回调未带码时兜底。码不进用户文本。
+   * 末条 failed/refused 没带码时**继续往前找**（lastDecisiveFailureCode 的回溯语义）：
+   * 先被 CONFIRMATION_REQUIRED 挡、后才是真正失败码时，停在无码末条会把分类引向错的一侧。
    */
   const failureCodeOf = (taskId: string): string | undefined => {
     try {
@@ -746,14 +813,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           executions?: ReadonlyArray<{ status?: string; error?: { code?: string } }>;
         };
       }).get(taskId);
-      const executions = record.executions ?? [];
-      for (let index = executions.length - 1; index >= 0; index -= 1) {
-        const execution = executions[index];
-        if (execution?.status === 'failed' || execution?.status === 'refused') {
-          return execution.error?.code;
-        }
-      }
-      return undefined;
+      return lastDecisiveFailureCode(record.executions ?? []);
     } catch {
       return undefined;
     }
@@ -1174,13 +1234,12 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           const resultUnknown = failure.status === 'result_unknown' || fact?.status === 'result_unknown';
           // B4 结构化答复值（机械事实，Main 按值选措辞）：原因码优先，其次零执行 = unsupported
           // （没有发生任何办理动作），其余 = 执行发生过且失败。不扫文本。
-          const failureOutcome = failure.reasonCode === OUTCOME_REASON_NOT_PERMITTED
-            ? 'blocked' as const
-            : failure.reasonCode === OUTCOME_REASON_UNSUPPORTED
-              ? 'unsupported' as const
-              : ledgerFacts.length === 0 && !resultUnknown
-                ? 'unsupported' as const
-                : 'failed' as const;
+          // 零执行看**真实执行行**（taskHasExecutions），不看账本事实行数——后者零执行也推一条。
+          const failureOutcome = taskFailureOutcomeOf({
+            ...(failure.reasonCode === undefined ? {} : { reasonCode: failure.reasonCode }),
+            resultUnknown,
+            hasExecutions: taskHasExecutions(failure.taskId),
+          });
           await wakeAndDeliverStateChange({
             taskId: failure.taskId,
             principalId: failure.principalId,
@@ -2106,8 +2165,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       }
       const name = taskNameOf(taskId, scope.request);
       // 重启对账事实（S1：died = 看门狗观察到的租约过期，结果未知不重放）。
+      // pendingCancel = 用户说过停、重启前没停完（cancel_requested_at 持久事实）：主语如实
+      // 点明「你要我停」，免得用户以为停已经生效。
       const factText = taskRestartFactText({
         ...(name === undefined ? {} : { name }),
+        ...(scope.pendingCancel ? { pendingCancel: true } : {}),
       });
       // 逐条 fire-and-forget（经会话链，与用户回合串行）：不阻塞启动、不改变任务事实。
       // 宿主侧**没有**这一条的文案（新增出口）：唤醒不可用/失败 = 只记事件（不静默猜）。

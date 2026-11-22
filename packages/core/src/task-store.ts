@@ -9,6 +9,8 @@
  *     wait_contact_lost_notified_at / running_since（提醒事实）+ **四个一次性机械时刻**：
  *     died_at（看门狗观察到租约过期）/ cancelled_at（用户取消确认）/ timed_out_at（机械超时）/
  *     resource_limited_at（资源拒绝）。每个时刻列至多写一次（一次性写入即并发去重）。
+ *     另有非终局的一次性事实 cancel_requested_at（用户取消**请求**；请求 ≠ 确认——确认才写
+ *     cancelled_at；重启对账据此说清「你要我停、没停完」）。
  *   · executions：request_id / task_id / operation / status / error_json（逐笔执行事实）。
  *   · operations：claimed→resulted 幂等账（U3，行就是身份）——存活与结果判定的事实源。
  *
@@ -21,9 +23,11 @@
  *     executions.dispatch_key；只读打开永不迁移；
  *   · 迁移前自动备份：<dbPath>.backup-v5（不覆盖、不自动删除）；
  *   · v5 = tasks 表重建：删 status/reason/failure_reason 三列（结论不迁移——执行行 executions
- *     就是事实），加四个时刻列（NULL 起步）；旧库曾离开过 queued 的行回填 running_since
- *     （updated_at），避免迁移后被当作未启动任务重新认领；旧 cancelled/timed_out 行按
- *     updated_at 机械回填对应时刻列（该列语义 = 那次机械写入发生的时刻）；
+ *     就是事实），加四个时刻列 + cancel_requested_at（NULL 起步）；旧库曾离开过 queued 的行
+ *     回填 running_since（updated_at），避免迁移后被当作未启动任务重新认领；旧 cancelled/
+ *     timed_out 行按 updated_at 机械回填对应时刻列（该列语义 = 那次机械写入发生的时刻）；
+ *     旧 status='failed' 且 reason='result_unknown' 行回填 died_at（结果未知不丢）；
+ *     旧 status='cancelling' 行回填 cancel_requested_at（取消请求不丢，重启对账靠它）；
  *   · 回填 task_no（仅缺该列时）：按 (created_at, task_id) 升序连续分配，只填 NULL 行；
  *   · U3/file_refs/inbound 面只做前向加法（不变）；
  *   · PRAGMA user_version 记录版本（新库直接建 v5）。
@@ -37,6 +41,7 @@
  * 事实写入（唯一写路径；本层单条语句 + WHERE 一次性条件做并发防护）：
  *   · markTaskFact：died/cancelled/timed_out/resource_limited 四个时刻列的一次性写入
  *     （WHERE 对应列 IS NULL——重复触发零写入），同时清租约（结束事实的任务不再持租约）；
+ *   · markCancelRequested：cancel_requested_at 的一次性写入（取消请求；不清租约、不改终局）；
  *   · setWaiting / armLease / setResultText / setReplyForTasks：等待形状、租约、报告存档；
  *   · claimNextUnstarted：BEGIN IMMEDIATE 内取最老未启动行，写 running_since + 租约
  *     （进程内/跨进程并发认领不重号）；
@@ -77,6 +82,8 @@ export interface TaskRow {
   timedOutAt?: string;
   /** 资源拒绝（受理/派发被 policy 拒）的时刻（ISO；一次性）。 */
   resourceLimitedAt?: string;
+  /** 用户取消**请求**的时刻（ISO；一次性；请求 ≠ 确认——确认才写 cancelledAt）。 */
+  cancelRequestedAt?: string;
   /** P1：数字任务编号（SQLite 原子分配，唯一、不复用；旧库只读读出为缺省）。 */
   taskNo?: number;
   /** P1：业务名称（v1=机械回落；历史行为缺省，显示层同规则回落）。 */
@@ -265,6 +272,12 @@ export interface TaskStore {
    * 不再持租约——存活推导不再看租约）。
    */
   markTaskFact(taskId: string, write: TaskEndFactWrite): boolean;
+  /**
+   * 取消**请求**一次性写入：cancel_requested_at 至多写一次（WHERE IS NULL；重复触发返回
+   * false，零写入）。请求 ≠ 确认——不清租约、不改终局；断电重启后据此如实说清
+   * 「你要我停、没停完」。
+   */
+  markCancelRequested(taskId: string, write: { at: string; updatedAt: string }): boolean;
   /**
    * 等待形状写入（waiting_user 事实）：pendingQuestion JSON + waiting_since；给出 null =
    * 清除（答复接续）。任务已有结束事实（cancelled/died/timed_out/resource_limited）时
@@ -456,6 +469,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   timed_out_at TEXT,
   -- resource_limited_at：资源拒绝（受理/派发被 policy 拒）。
   resource_limited_at TEXT,
+  -- cancel_requested_at：用户取消**请求**（请求 ≠ 确认；确认才写 cancelled_at）。
+  cancel_requested_at TEXT,
   -- 已发过「久无动静」提醒的时刻（ISO，NULL = 未提醒；每档至多一次）。
   long_running_notified_at TEXT,
   -- 「这一轮开始跑」的时刻（ISO，单调写一次；NULL = 未跑过=可认领）。
@@ -529,7 +544,7 @@ const SCHEMA_TASK_NO_INDEX = 'CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_no ON 
 const TASKS_V5_COLUMNS: readonly string[] = [
   'task_id', 'principal_id', 'session_id', 'request', 'result_text', 'created_at', 'updated_at',
   'task_no', 'name', 'reply_text', 'pending_question', 'waiting_since', 'lease_owner', 'lease_until',
-  'died_at', 'cancelled_at', 'timed_out_at', 'resource_limited_at',
+  'died_at', 'cancelled_at', 'timed_out_at', 'resource_limited_at', 'cancel_requested_at',
   'long_running_notified_at', 'running_since', 'wait_contact_lost_notified_at',
 ];
 
@@ -550,6 +565,7 @@ interface TaskDbRow {
   cancelled_at?: string | null;
   timed_out_at?: string | null;
   resource_limited_at?: string | null;
+  cancel_requested_at?: string | null;
   long_running_notified_at?: string | null;
   wait_contact_lost_notified_at?: string | null;
   running_since?: string | null;
@@ -644,7 +660,10 @@ function tasksTableNeedsRebuild(db: Database.Database): boolean {
  * v5 tasks 表重建：旧表（v4 及更早）→ 新事实形状。结论列（status/reason/failure_reason）
  * 不迁移（结论不是事实；逐笔执行事实在 executions 里）；机械时刻按旧库可用信息回填：
  *   · cancelled/timed_out：旧 status 即机械事实，updated_at = 那次写入的时刻；
- *   · died：旧 failed+result_unknown 的租约过期语义不回填（执行行与 running_since 足够）；
+ *   · died：旧 status='failed' 且 reason='result_unknown' 行回填 died_at（结果未知是机械事实，
+ *     不丢——否则旧库里的「结果未知」行迁移后退化成「无汇报」）；
+ *   · cancel_requested：旧 status='cancelling' 行回填 cancel_requested_at（取消请求——请求 ≠
+ *     确认——不丢，重启对账据此说清「你要我停、没停完」）；
  *   · 曾离开过 queued 的行回填 running_since（updated_at）——避免迁移后被当作未启动重新认领。
  * 逐列按旧表实际列存在性取源（极旧库缺列取 NULL），历史行其余事实原样搬运。
  */
@@ -659,6 +678,19 @@ function rebuildTasksTableToV5(db: Database.Database): void {
       return oldColumns.has('status')
         ? `CASE WHEN "status" = 'cancelled' THEN "updated_at" ELSE NULL END AS "cancelled_at"`
         : 'NULL AS "cancelled_at"';
+    }
+    if (column === 'died_at') {
+      // 旧 failed + result_unknown 行：结果未知是机械事实（看门狗/调用中断），回填 died_at。
+      // 极旧库无 reason 列：无 result_unknown 信号可取，NULL（不伪造）。
+      return oldColumns.has('status') && oldColumns.has('reason')
+        ? `CASE WHEN "status" = 'failed' AND "reason" = 'result_unknown' THEN "updated_at" ELSE NULL END AS "died_at"`
+        : 'NULL AS "died_at"';
+    }
+    if (column === 'cancel_requested_at') {
+      // 旧 cancelling 行：用户请求了停、没确认；更新时刻即请求时刻。
+      return oldColumns.has('status')
+        ? `CASE WHEN "status" = 'cancelling' THEN "updated_at" ELSE NULL END AS "cancel_requested_at"`
+        : 'NULL AS "cancel_requested_at"';
     }
     if (column === 'timed_out_at') {
       return oldColumns.has('status')
@@ -707,6 +739,7 @@ const TASKS_V5_BUILD_COLUMN_SHAPES: Readonly<Record<string, string>> = {
   cancelled_at: 'TEXT',
   timed_out_at: 'TEXT',
   resource_limited_at: 'TEXT',
+  cancel_requested_at: 'TEXT',
   long_running_notified_at: 'TEXT',
   running_since: 'TEXT',
   wait_contact_lost_notified_at: 'TEXT',
@@ -827,6 +860,8 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     && columns.has('timed_out_at')
     && columns.has('resource_limited_at')
     && columns.has('running_since');
+  // 取消请求列（非终局一次性事实）：独立存在性判定，不动 hasFactColumns 的口径。
+  const hasCancelRequestedColumn = columns.has('cancel_requested_at');
   const allocateTaskNo = hasTaskNoColumn
     ? db.prepare("UPDATE task_sequences SET value = value + 1 WHERE name = 'task_no' RETURNING value")
     : undefined;
@@ -895,6 +930,13 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         UPDATE tasks
         SET resource_limited_at = @at, lease_owner = NULL, lease_until = NULL, updated_at = @updatedAt
         WHERE task_id = @taskId AND resource_limited_at IS NULL
+      `)
+    : undefined;
+  // 取消请求：一次性写入，**不**清租约、**不**改终局（请求 ≠ 确认）。
+  const markCancelRequestedStmt = hasCancelRequestedColumn
+    ? db.prepare(`
+        UPDATE tasks SET cancel_requested_at = @at, updated_at = @updatedAt
+        WHERE task_id = @taskId AND cancel_requested_at IS NULL
       `)
     : undefined;
   const setWaitingStmt = hasFactColumns
@@ -1235,6 +1277,10 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     ...(row.resource_limited_at === null || row.resource_limited_at === undefined
       ? {}
       : { resourceLimitedAt: row.resource_limited_at }),
+    // 取消请求（非终局一次性事实；NULL = 未请求）。
+    ...(row.cancel_requested_at === null || row.cancel_requested_at === undefined
+      ? {}
+      : { cancelRequestedAt: row.cancel_requested_at }),
     // P1：旧库只读（未迁移）时列不存在 → row.task_no 为 undefined：读出缺省，不崩溃。
     ...(row.task_no === null || row.task_no === undefined ? {} : { taskNo: row.task_no }),
     ...(row.name === null || row.name === undefined ? {} : { name: row.name }),
@@ -1332,6 +1378,10 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
             : markResourceLimitedStmt;
       if (statement === undefined) throw new Error(missingFactColumnsError);
       return statement.run({ taskId, at: write.at, updatedAt: write.updatedAt }).changes > 0;
+    },
+    markCancelRequested(taskId, write) {
+      if (markCancelRequestedStmt === undefined) throw new Error(missingFactColumnsError);
+      return markCancelRequestedStmt.run({ taskId, at: write.at, updatedAt: write.updatedAt }).changes > 0;
     },
     setWaiting(taskId, write) {
       if (setWaitingStmt === undefined) throw new Error(missingFactColumnsError);

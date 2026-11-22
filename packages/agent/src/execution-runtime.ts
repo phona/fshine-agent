@@ -4535,11 +4535,14 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
        * 本回合执行事实的机械结局（如实交付分流；2026-11-22）：从**末条**「非容忍失败」的
        * 执行事实取 failed/refused + 原始码 + 原文；一条都没有 = success（含零执行收尾，
        * 零执行的 unsupported 见上方分支）。
-       * 口径与账本末次决定性执行一致：失败的 run_js 也算（成功脚本不掩盖此前的失败读；
-       * 循环找的是最后一条 failed/refused），但**已落库的业务写之后的脚本失败不算**
-       * ——脚本失败不是「另一个写没成」（adversarial-worker ⑪ 冻结用例），把它算成失败会
-       * 让用户按失败重试一次已经落库的写；无业务写时（只读查询 + 脚本失败）脚本结局仍是
-       * 本回合真实结局（⑫ 冻结用例，不放宽假绿）。
+       * 口径与账本末次决定性执行一致：失败的 run_js 也算（成功脚本不掩盖此前的失败读），
+       * 但**已落库的业务写之后的脚本失败不算**——脚本失败不是「另一个写没成」
+       * （adversarial-worker ⑪ 冻结用例），把它算成失败会让用户按失败重试一次已经落库的写；
+       * 无业务写时（只读查询 + 脚本失败）脚本结局仍是本回合真实结局（⑫ 冻结用例，不放宽假绿）。
+       * **末次决定性结果 = 已落库的业务写成功**（Grok 复审 2026-11-22 恢复被 S1 删掉的语义）：
+       * 倒序遇到最后一条 completed 的业务写即止——更早（index 更小）的失败不再决定结局
+       * （「先失败后成功 = 成功」）。参数形态反馈回路本就鼓励「改对参数再试一次」；改对后的
+       * 成功是末次决定性结果，判失败会引导用户按失败重试、重复写。
        * 容忍码（同回合提案被挡/模型误用历史协议）不算真失败——那类回合的结局由更上面的
        * 等待事实决定。
        */
@@ -4555,6 +4558,12 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           const entry = recorded[index];
           if (entry === undefined) continue;
           const status = entry.outcome.status;
+          // 末次决定性结果 = 已落库的业务写成功：更早的失败不再决定结局（先失败后成功 = 成功）。
+          if (entry.operation !== RUN_JS_TOOL
+            && !readOnlyOperations.has(entry.operation)
+            && status === 'completed') {
+            return undefined;
+          }
           if (status !== 'failed' && status !== 'refused') continue;
           // 业务写已落库：宿主脚本的失败不改写「办好了」的如实交付（审计行照旧保留）。
           if (completedBusinessWrite && entry.operation === RUN_JS_TOOL) continue;
