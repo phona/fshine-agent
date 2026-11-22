@@ -52,7 +52,7 @@ import {
   createSofficeRecalcEngine,
   type RecalcXlsxExecutor,
 } from '../../packages/agent/src/recalc-xlsx-executor';
-import { FILES_GENERATED_NOTICE, mainProtocolNoteFor, type Session, type TurnFileRef } from '../../packages/agent/src/execution-runtime';
+import { FILES_GENERATED_NOTICE, mainProtocolNoteFor, cleanExecutorDiagnostic, type Session, type TurnFileRef } from '../../packages/agent/src/execution-runtime';
 import {
   LONG_RUNNING_NOTICE_FALLBACK_TEXT,
   longRunningNoticeFactText,
@@ -67,6 +67,7 @@ import { createResourcePolicy, fileRefTtlMsOf, resolveRuntimeConfig } from '../.
 import { SessionPersistence } from '../../packages/agent/src/session-persistence';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import { deriveTaskName } from '../../packages/agent/src/task-registry';
+import { USER_FACING_FAILURE_KIND_LABEL } from '../../packages/agent/src/user-facing-failure';
 import type { TaskExecutor, TaskRunner, WaitingUserNoticePort } from '../../packages/agent/src/task-runner';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../../packages/agent/src/worker-skills';
 import {
@@ -81,8 +82,8 @@ import { AttachmentNudge, type NudgeClock } from './attachment-nudge';
 import {
   deliverTaskResult,
   deliverTaskFailure,
+  failureFallbackTextFor,
   failureKindFor,
-  failureTextFor,
   routeFromSessionId,
   taskCancelledFactText,
   taskCompletionFactText,
@@ -95,10 +96,7 @@ import {
 } from './task-completion-delivery';
 import {
   OUTCOME_REASON_NOT_PERMITTED,
-  type OutcomeLedger,
-  type TaskOutcome,
 } from '../../packages/agent/src/task-outcome';
-import { classifyFailureOutcome } from './task-outcome-reason';
 import { composeNotificationSinks, createChatNotificationSink, notificationTerminalLogLine } from './notification-chat-sink';
 import {
   createInprocessAlerts,
@@ -656,25 +654,36 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     }
   };
   /**
-   * 快活失败任务的失败事实（回合末兜底投递用；与失败回调同源）：终局 failed（含
-   * result_unknown；资源拒绝也是 failed 终局）→ 执行事实的 error.code（failureCodeOf）
-   * + result_unknown 状态 + 底账机械原因（reason=resource_limited 时话术必须走「系统太忙」
-   * ——2026-11-19 只读审计 #18），输入与失败回调逐字同源；非失败终局（取消/超时/未执行——
-   * 窗口内不可达，仅注入式执行器能造）与底账读不到 = undefined（不替它们说话，交回
-   * 既有终态推送面）。
+   * 快活失败任务的失败事实（回合末兜底投递用；与失败回调同源；S1 事实模型改形）：
+   * 回合以「没有产出结果汇报」收尾的任务 → 机械事实（result_unknown = died 事实；
+   * resource_limited = 资源拒绝事实；业务名），**不带任务结论**——做没做成由唤醒面的
+   * Main 读账本（taskLedgerFactsOf）自己判断。底账读不到/无失败事实（任务没有
+   * died/resource_limited 标记也没有在跑痕迹）= undefined（不替它说话，交回既有推送面）。
    */
-  const taskFailureFactOf = (taskId: string): { code?: string; status?: 'result_unknown'; reason?: string; name?: string } | undefined => {
+  const taskFailureFactOf = (taskId: string): {
+    status?: 'result_unknown';
+    resourceLimited?: boolean;
+    name?: string;
+  } | undefined => {
     try {
       const record = (taskRegistry as unknown as {
-        get(id: string): { status?: string; reason?: string | null; request?: string; name?: string | null };
+        get(id: string): {
+          diedAt?: string | null;
+          resourceLimitedAt?: string | null;
+          runningSince?: string | null;
+          request?: string;
+          name?: string | null;
+        };
       }).get(taskId);
-      if (record.status !== 'failed') return undefined;
-      const code = failureCodeOf(taskId);
+      if (record.diedAt === undefined && record.resourceLimitedAt === undefined && record.runningSince === undefined) {
+        return undefined;
+      }
       const name = taskNameOf(taskId, record.request ?? '');
       return {
-        ...(code === undefined ? {} : { code }),
-        ...(record.reason === 'result_unknown' ? { status: 'result_unknown' as const } : {}),
-        ...(record.reason === undefined || record.reason === null ? {} : { reason: record.reason }),
+        ...(record.diedAt !== undefined && record.diedAt !== null ? { status: 'result_unknown' as const } : {}),
+        ...(record.resourceLimitedAt !== undefined && record.resourceLimitedAt !== null
+          ? { resourceLimited: true }
+          : {}),
         ...(name === undefined ? {} : { name }),
       };
     } catch {
@@ -682,64 +691,46 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     }
   };
   /**
-   * 失败投递的分类输入（2026-11-20 修正：末次决定性结果，不是第一条）：任务底账执行事实里
-   * **最后一条** failed/refused 行的 error.code（执行层原始码，只用于 classifyFailure 归类；
-   * **不进用户文本**）。与 execution-runtime 的 P0 修法同口径——先被 CONFIRMATION_REQUIRED
-   * 拒、后才是真正失败码时，必须按后者归类，否则用户被按「等确认」或「我方故障」引错方向。
-   * 取不到（无执行行/异常）= undefined，由投递面落 executor_failed。
+   * 账本事实（S1：唤醒把账本喂给 Main，Main 自己看）：任务底账执行行逐条投影
+   * （operation + 结局状态 + 封闭失败种类 + 机械清理摘要）。只读事实，不做成败归类——
+   * 「做没做成」的判断归 Main（机械事实：执行行就是发生过什么）。
    */
-  const failureCodeOf = (taskId: string): string | undefined => {
-    try {
-      const record = (taskRegistry as unknown as {
-        get(id: string): { executions?: ReadonlyArray<{ status?: string; error?: { code?: string } }> };
-      }).get(taskId);
-      return lastDecisiveFailureCode(record.executions ?? []);
-    } catch {
-      return undefined;
-    }
-  };
-  /**
-   * 答复五态机械分类（B2/F3-1）：从任务底账取机械事实喂 classifyFailureOutcome，得到五值之一。
-   * 零执行 + 权限拒绝（**结构化原因码** not_permitted）→ blocked；零执行非拒绝 → unsupported。
-   * 判据只认 reasonCode，不扫 reason 文本里的「权限」字样（那是给模型读的转述，不是事实）。
-   * 只输出结构化值（不是话术），供 Main 按值选措辞。取不到底账时按失败原因码保守分类。
-   */
-  const outcomeOfTask = (
-    taskId: string,
-    status: 'failed' | 'result_unknown',
-    reasonCode?: string,
-  ): TaskOutcome => {
+  const taskLedgerFactsOf = (taskId: string): readonly string[] => {
     try {
       const record = (taskRegistry as unknown as {
         get(id: string): {
-          status?: string;
-          reason?: string;
-          executions?: ReadonlyArray<{
-            status?: string;
-            error?: { code?: string };
-            items?: readonly { status: 'ok' | 'failed' | 'unknown' }[];
-          }>;
+          diedAt?: string | null;
+          resourceLimitedAt?: string | null;
+          timedOutAt?: string | null;
+          cancelledAt?: string | null;
+          executions?: ReadonlyArray<{ status?: string; operation?: string; error?: { code?: string; message?: string } }>;
         };
       }).get(taskId);
-      const executions = (record.executions ?? []).map((execution) => ({
-        status: (execution.status === 'completed' || execution.status === 'failed'
-          || execution.status === 'refused' || execution.status === 'needs_input'
-          || execution.status === 'needs_confirmation' || execution.status === 'accepted'
-          ? execution.status : 'result_unknown') as OutcomeLedger['executions'][number]['status'],
-        ...(execution.error?.code === undefined ? {} : { error: { code: execution.error.code } }),
-        ...(execution.items === undefined ? {} : { items: execution.items }),
-      }));
-      const terminal = (record.status === 'completed' || record.status === 'failed'
-        || record.status === 'timed_out' || record.status === 'unexecuted'
-        || record.status === 'running' || record.status === 'waiting_user'
-        ? record.status : 'failed') as OutcomeLedger['terminal'];
-      return classifyFailureOutcome(executions, {
-        terminal,
-        ...(reasonCode === undefined ? {} : { reasonCode }),
-        ...(record.reason === undefined ? {} : { ledgerReasonCode: record.reason }),
+      const lines: string[] = [];
+      if (record.diedAt !== undefined && record.diedAt !== null) lines.push('看门狗观察到执行租约过期（结果未知，禁止自动重放）。');
+      if (record.resourceLimitedAt !== undefined && record.resourceLimitedAt !== null) lines.push('本次被资源策略拒绝（未进入执行）。');
+      const executions = record.executions ?? [];
+      if (executions.length === 0) {
+        lines.push('账本里没有执行事实（这次交办没有发出任何办理动作）。');
+        return lines;
+      }
+      executions.forEach((execution, index) => {
+        const error = execution.error;
+        const kind = error !== undefined && error.code !== undefined
+          ? failureKindFor(error.code, execution.status === 'refused' ? 'refused' : undefined)
+          : undefined;
+        const cleaned = error?.message === undefined || error.message === null
+          ? ''
+          : cleanExecutorDiagnostic(error.message).replace(/\s+/gu, ' ').trim().slice(0, 160);
+        lines.push(
+          `${index + 1}. ${execution.operation ?? '?'} — ${execution.status ?? '?'}`
+          + (kind === undefined ? '' : `（${USER_FACING_FAILURE_KIND_LABEL[kind]}）`)
+          + (cleaned === '' ? '' : `：${cleaned}`),
+        );
       });
+      return lines;
     } catch {
-      return 'failed';
+      return [];
     }
   };
   // 解析后配置只读一次：fileStore 的 TTL 由它派生（单一配置源；本文件不重解释 runtime 段）。
@@ -881,6 +872,12 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
    * （见文件末）。装配完成后才跑 pump，这里先留一个空集合。
    */
   let startupRecovered: readonly string[] = [];
+  /**
+   * 回合失败种类的机械事实（S1：底账没有 failed 结论——onTaskFailed 回调带到的
+   * 「无汇报 / 结果未知」种类记在这里，回合末兜底投递与唤醒取同一口径）。
+   * 有界（会话长了不积累；一次性核销后即删）。
+   */
+  const roundFailureStatus = new Map<string, 'no_report' | 'result_unknown'>();
   /**
    * B 切片（工单回执收敛）：本会话已在同一回合拿到结果的任务（快活）——完成投递对其抑制
    * （结果已由模型在本回合转述，不重复发两遍）。条目一次性消费（完成回调核销后即删），
@@ -1112,13 +1109,14 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           });
         });
       },
-      // 失败投递（2026-11-19 收口；唤醒切片改形）：任务终局 failed/result_unknown → **唤醒
-      // 模型、由它把失败说给用户**（宿主只喂事实：业务名 + 归类后的业务种类 + 机械原因）。
-      // 宿主不再直接投失败话术；唤醒 unavailable/failed（模型说不出话）时降级投**既有失败
-      // 话术**（failureMessageFor；这就是「模型回合挂了」的兜底，保留——绝不投 Worker 原文）。
-      // 快活失败（本回合已交给模型）经 pushSuppressedInTurn 抑制；非快活失败由这里主动发回
-      // 原会话（与完成投递同一主动投递面、同一四必守）。
+      // 失败投递（2026-11-19 收口；S1 改形）：回合无汇报收尾/结果未知 → **唤醒模型、由它把
+      // 事实说给用户**——宿主把**账本事实**喂给 Main（逐笔执行行 + 机械标记），Main 自己看、
+      // 自己说做没做成（S1：没有任务结论，宿主不归类成败）。唤醒 unavailable/failed（模型
+      // 说不出话）时降级投**既有失败话术**（failureFallbackTextFor；这就是「模型回合挂了」
+      // 的兜底，保留——绝不投 Worker 原文）。快活失败（本回合已交给模型）经 pushSuppressedInTurn
+      // 抑制；非快活失败由这里主动发回原会话（与完成投递同一主动投递面、同一四必守）。
       onTaskFailed: (failure) => {
+        roundFailureStatus.set(failure.taskId, failure.status);
         const sessionKey = `${failure.principalId}\u0000${failure.sessionId}`;
         enqueueSessionTurn(sessionKey, async () => {
           // 快活失败：原因本回合已交给模型（模型会转述），不重复唤醒/播报。
@@ -1133,30 +1131,32 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             });
             return;
           }
-          // 归类输入：底账执行事实的 error.code（failed/refused 行；取不到 = 落 executor_failed）。
-          // 归类出口与话术共用同一个 failureKindFor（安全口径：needs_* 一律改判 host_fault）。
-          const code = failureCodeOf(failure.taskId);
-          const kind = failureKindFor(code, failure.status);
+          // 机械事实（S1）：业务名 + 账本逐笔执行行 + 机械标记（died/资源拒绝）。
           const name = taskNameOf(failure.taskId, failure.request);
+          const ledgerFacts = taskLedgerFactsOf(failure.taskId);
+          const fact = taskFailureFactOf(failure.taskId);
+          const resultUnknown = failure.status === 'result_unknown' || fact?.status === 'result_unknown';
           await wakeAndDeliverStateChange({
             taskId: failure.taskId,
             principalId: failure.principalId,
             sessionId: failure.sessionId,
             event: 'task_failure_wake',
-            // 事实（给模型读；业务名 + 归类后的业务种类 + 机械原因），**不投 Worker 失败原文**。
-            // B2：追加结构化 outcome 五值（机械事实，不是话术），Main 据此按值选措辞。
-            // F3-1：blocked 判据与 missing 字段都只认结构化原因码，不扫 reason 文本「权限」字样。
+            // 事实（给模型读；业务名 + 账本逐笔事实），**不投 Worker 失败原文**。
+            // F3-1：本次不允许的结构化原因码（not_permitted）单独点明（不扫任何文本）。
             factText: taskFailureFactText({
               ...(name === undefined ? {} : { name }),
-              kind,
-              reason: failure.reason,
-              outcome: outcomeOfTask(failure.taskId, failure.status, failure.reasonCode),
+              kind: resultUnknown ? 'unknown_result' : 'executor_failed',
+              ledger: ledgerFacts,
               ...(failure.reasonCode === OUTCOME_REASON_NOT_PERMITTED
-                ? { missing: '本次允许范围' }
+                ? { notPermitted: true }
                 : {}),
             }),
-            // 降级兜底（模型说不出话）= 既有失败话术（与老路径逐字同源）。
-            fallbackText: failureTextFor(code, failure.status),
+            // 降级兜底（模型说不出话）= 既有失败话术（与老路径同源；资源拒绝走「系统太忙」）。
+            fallbackText: failureFallbackTextFor({
+              ...(resultUnknown ? { status: 'result_unknown' as const } : {}),
+              ...(fact?.resourceLimited === true ? { resourceLimited: true } : {}),
+              ...(name === undefined ? {} : { name }),
+            }),
           });
         });
       },
@@ -1916,11 +1916,34 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         // 照旧核销抑制（本分支已送达，不重复发）；非失败终局不替它说话：核销本回合抑制，
         // 交回既有终态推送面（各自既有话术）。
         for (const suppressedTaskId of new Set(turn.pushSuppressedTaskIds ?? [])) {
-          const failureFact = taskFailureFactOf(suppressedTaskId);
-          if (failureFact === undefined) {
+          // 失败兜底的收录面（S1 事实口径）：died（结果未知）/ 资源拒绝 / 本回合 onTaskFailed
+          // 带到的「无汇报」种类。取消/超时等有自己通知面的事实不在这里冒充失败。
+          const failureRecord = (taskRegistry as unknown as {
+            get(id: string): { diedAt?: string | null; resourceLimitedAt?: string | null };
+          }).get(suppressedTaskId);
+          const roundStatus = roundFailureStatus.get(suppressedTaskId);
+          roundFailureStatus.delete(suppressedTaskId);
+          const isFailureFact = failureRecord?.diedAt !== undefined && failureRecord.diedAt !== null
+            || failureRecord?.resourceLimitedAt !== undefined && failureRecord.resourceLimitedAt !== null
+            || roundStatus !== undefined;
+          if (!isFailureFact) {
             claimPushSuppressedInTurn(sessionKey, suppressedTaskId);
             continue;
           }
+          const failureFact = {
+            ...(failureRecord?.diedAt !== undefined && failureRecord.diedAt !== null
+              ? { status: 'result_unknown' as const }
+              : {}),
+            ...(failureRecord?.resourceLimitedAt !== undefined && failureRecord.resourceLimitedAt !== null
+              ? { resourceLimited: true }
+              : {}),
+            ...(roundStatus === 'result_unknown'
+              && (failureRecord?.diedAt === undefined || failureRecord.diedAt === null)
+              && (failureRecord?.resourceLimitedAt === undefined || failureRecord.resourceLimitedAt === null)
+              ? { status: 'result_unknown' as const }
+              : {}),
+            ...(taskFailureFactOf(suppressedTaskId)?.name === undefined ? {} : { name: taskFailureFactOf(suppressedTaskId)!.name }),
+          };
           await deliverTaskFailure({
             taskId: suppressedTaskId,
             principalId,
@@ -2021,8 +2044,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   if (runner !== undefined) {
     const pump = runner.pump();
     startupRecovered = pump.recovered;
-    const pendingCancel = new Set(pump.recoveredCancelling ?? []);
-    for (const taskId of [...startupRecovered, ...(pump.recoveredCancelling ?? [])]) {
+    for (const taskId of startupRecovered) {
       const scope = taskScopeOf(taskId);
       if (scope === undefined) {
         // 底账读不到（行已清/异常形状）：不猜会话，只记事件。
@@ -2030,10 +2052,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         continue;
       }
       const name = taskNameOf(taskId, scope.request);
-      // 取消孤儿（用户说过停）按「你要我停，我重启前没停完」如实说——别让用户以为停已生效。
+      // 重启对账事实（S1：died = 看门狗观察到的租约过期，结果未知不重放）。
       const factText = taskRestartFactText({
         ...(name === undefined ? {} : { name }),
-        ...(pendingCancel.has(taskId) ? { pendingCancel: true } : {}),
       });
       // 逐条 fire-and-forget（经会话链，与用户回合串行）：不阻塞启动、不改变任务事实。
       // 宿主侧**没有**这一条的文案（新增出口）：唤醒不可用/失败 = 只记事件（不静默猜）。

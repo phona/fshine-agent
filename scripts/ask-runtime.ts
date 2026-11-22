@@ -68,7 +68,7 @@ import {
 } from '../packages/agent/src/execution-runtime';
 import {
   createNotificationOutbox,
-  notificationKindForTransition,
+  notificationKindForEvent,
   type NotificationOutbox,
   type NotificationReason,
   type NotificationSink,
@@ -579,24 +579,20 @@ export interface BackgroundTaskCompletion {
 }
 
 /**
- * 一次后台执行回合的机械结局里，宿主**失败投递面**需要的事实（2026-11-19 收口）。
- * 与 BackgroundTaskCompletion 对称的失败回调事实：任务终局 failed / result_unknown。
- * **不含 Worker 失败汇报原文之外的任何内部形状**——原文只进日志与底账，不进用户文本
- * （用户文本由投递面用 failureMessageFor 模板生成）。
+ * 一次后台执行回合的机械结局里，宿主**失败投递面**需要的事实（2026-11-19 收口；S1 改形）。
+ * 与 BackgroundTaskCompletion 对称的失败回调事实：回合以「没有产出结果汇报」收尾或结果未知。
+ * **不携带任务结论**（S1 事实模型：做没做成由 Main 读账本事实自己判断）——回调只带机械事实：
+ * 失败的种类（无汇报 / 结果未知）与零执行的结构化原因码；做没做成的证据（逐笔执行行）由
+ * 唤醒面从底账读出喂给 Main。
  */
 export interface BackgroundTaskFailure {
   taskId: string;
   principalId: string;
   sessionId: string;
   request: string;
-  /** 任务终局（failed / result_unknown——两者都不是成功，用户必须主动收到一句人话）。 */
-  status: 'failed' | 'result_unknown';
-  /** Worker 回合失败汇报原文（只进日志与底账；**不进用户文本**）。 */
-  reason: string;
-  /**
-   * 结构化拒绝原因码（如 `not_permitted`，来自执行端失败结局）；不是文案，不进用户文本。
-   * 供失败投递的 outcome 分类用结构化码判 blocked，不靠 reason 文本里是否出现「权限」。
-   */
+  /** 回合失败事实的种类（no_report = 无汇报收尾；result_unknown = 结果未知）。 */
+  status: 'no_report' | 'result_unknown';
+  /** 零执行的机械原因码（如 `not_permitted` = 发起前被宿主拒绝）；不是文案，不进用户文本。 */
   reasonCode?: string;
 }
 
@@ -813,6 +809,8 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
   }
   // B 切片：完成/失败回调接缝——包装实际使用的执行器（注入的或默认构建的同一道包装）。
   // 回调在 runner 收尾前同步触发；快活（结果已同回合交给模型）的抑制由装配调用方处置。
+  // S1 事实模型：回合结局没有 completed/failed 结论——有汇报 = 完成回调；无汇报/结果未知 =
+  // 失败回调（做没做成由唤醒面的 Main 读账本事实自己判断）。
   if (input.onTaskCompleted !== undefined || input.onTaskFailed !== undefined) {
     const inner = executor;
     const onTaskCompleted = input.onTaskCompleted;
@@ -823,42 +821,39 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
         try {
           outcome = await inner.execute(task, context);
         } catch (error) {
-          // 2026-11-19 唤醒切片：回合**抛错**（Worker 驱动/基础设施故障）也是任务失败终局
-          // （runner 收尾会 registry.fail）——此前不触发失败回调，用户只能等下次开口才从
-          // B 通道侧面知道。这里按同一条失败出口如实上报（reason = 错误文本，只进事实/日志），
-          // 然后原样抛出：任务事实仍由 runner 收尾决定，本层不改判。
+          // 2026-11-19 唤醒切片：回合**抛错**（Worker 驱动/基础设施故障）也触发失败回调
+          // ——此前不触发失败回调，用户只能等下次开口才从 B 通道侧面知道。按同一条失败
+          // 出口如实上报（种类 = 无汇报收尾），然后原样抛出：任务事实仍由 runner 收尾决定，
+          // 本层不改判。
           onTaskFailed?.({
             taskId: task.taskId,
             principalId: task.principalId,
             sessionId: task.sessionId,
             request: task.request,
-            status: 'failed',
-            reason: error instanceof Error ? error.message : String(error),
+            status: 'no_report',
           });
           throw error;
         }
-        if (outcome.kind === 'completed' && outcome.resultText.trim() !== '') {
+        if (outcome.kind === 'ended' && (outcome.report ?? '').trim() !== '') {
           onTaskCompleted?.({
             taskId: task.taskId,
             principalId: task.principalId,
             sessionId: task.sessionId,
             request: task.request,
-            resultText: outcome.resultText,
+            resultText: outcome.report!,
             ...(outcome.files === undefined ? {} : { files: outcome.files }),
           });
-        } else if (outcome.kind === 'failed' || outcome.kind === 'result_unknown') {
-          // 2026-11-19 失败投递收口：任务终局 failed/result_unknown 都触发失败回调
-          // （两者都不是成功）；result_unknown 落底账 failed + reason=result_unknown，
-          // 用户在话术层看到「不确定做没做完」，不是「没办成」。
+        } else if (outcome.kind === 'ended' || outcome.kind === 'result_unknown') {
+          // 2026-11-19 失败投递收口（S1 改形）：无汇报收尾/结果未知都触发失败回调
+          //（两者都不是「有结果汇报」）；零执行被宿主拒绝时带 not_permitted 结构化码。
           onTaskFailed?.({
             taskId: task.taskId,
             principalId: task.principalId,
             sessionId: task.sessionId,
             request: task.request,
-            status: outcome.kind === 'result_unknown' ? 'result_unknown' : 'failed',
-            reason: outcome.reason,
-            ...('reasonCode' in outcome && outcome.reasonCode !== undefined
-              ? { reasonCode: outcome.reasonCode }
+            status: outcome.kind === 'result_unknown' ? 'result_unknown' : 'no_report',
+            ...(outcome.kind === 'ended' && outcome.zeroExecReason !== undefined
+              ? { reasonCode: outcome.zeroExecReason }
               : {}),
           });
         }
@@ -936,7 +931,7 @@ export function attachNotificationOutbox(
   const pendingFacts: Array<{ scopeKey: string; line: string }> = [];
   const injectedKeys = new Set<string>();
   registry.onTaskFact((fact) => {
-    const kind = notificationKindForTransition(fact.from, fact.to, fact.reason as NotificationReason | undefined);
+    const kind = notificationKindForEvent(fact.event);
     if (kind === undefined) return;
     // R5 补字段：waiting_user 时从底账读回 pendingQuestion（事实钩子无 scope，底账自身即
     // 事实来源；读不到不编造）。写确认时再取 confirmation.summary——用户要看到「将写入什么」
@@ -950,6 +945,16 @@ export function attachNotificationOutbox(
     }).get(fact.taskId);
     const missing = kind === 'waiting_user' ? record.pendingQuestion?.missing : undefined;
     const summary = kind === 'waiting_user' ? record.pendingQuestion?.confirmation?.summary : undefined;
+    // 机械原因（S1 事实模型）：died 事件 = 结果未知（不冒充确认失败）；资源拒绝/超时按事件带。
+    const reason: NotificationReason | undefined = fact.event === 'died'
+      ? 'result_unknown'
+      : fact.event === 'resource_limited'
+        ? 'resource_limited'
+        : fact.event === 'timed_out'
+          ? 'timeout'
+          : fact.event === 'cancelled'
+            ? 'cancelled_by_user'
+            : undefined;
     outbox.record({
       taskId: fact.taskId,
       kind,
@@ -957,7 +962,7 @@ export function attachNotificationOutbox(
       stateVersion: fact.stateVersion ?? fact.at,
       taskNo: fact.taskNo,
       name: fact.name,
-      ...(fact.reason === undefined ? {} : { reason: fact.reason }),
+      ...(reason === undefined ? {} : { reason }),
       ...(missing === undefined ? {} : { missing }),
       ...(summary === undefined ? {} : { summary }),
     });
@@ -976,7 +981,7 @@ export function attachNotificationOutbox(
               at: fact.at,
               taskNo: fact.taskNo,
               name: fact.name,
-              ...(fact.reason === undefined ? {} : { reason: fact.reason }),
+              ...(reason === undefined ? {} : { reason }),
               ...(missing === undefined ? {} : { missing }),
               ...(summary === undefined ? {} : { summary }),
             },

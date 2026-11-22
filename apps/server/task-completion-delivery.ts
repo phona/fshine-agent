@@ -32,7 +32,6 @@ import {
   type UserFacingFailureKind,
 } from '../../packages/agent/src/user-facing-failure';
 import { stripServerPaths } from '../../packages/agent/src/server-paths';
-import { renderOutcomeFact, type TaskOutcome } from '../../packages/agent/src/task-outcome';
 
 /** 宿主主动投递面（文字；与文件投递同一端口形状——FileDeliveryPort 的结构子集）。 */
 export interface TaskResultDeliveryPort {
@@ -66,19 +65,13 @@ export interface TaskFailureFact {
   taskId: string;
   principalId: string;
   sessionId: string;
+  /** result_unknown（died 事实：结果未知）单独带状态——降级话术走 unknown_result 档。 */
+  status?: 'result_unknown';
   /**
-   * 归类输入：底账执行事实的 error.code（执行层原始码，只用于 classifyFailure 归类）。
-   * 取不到 = 落 executor_failed。**码不进用户文本**，只决定 kind 与话术。
+   * 资源拒绝事实（池满/队列满的确定性拒绝，没进入执行）——那种失败不是「执行端没办成」，
+   * 话术必须走「系统太忙，这个没接」（2026-11-19 只读审计 #18）。
    */
-  code?: string;
-  /** result_unknown 单独带状态（classifyFailure 的状态分支；其余 = failed/refused）。 */
-  status?: 'failed' | 'refused' | 'result_unknown';
-  /**
-   * 底账机械原因（§1 枚举；只用于归类，不进文本）。`resource_limited` = 池满/队列满的
-   * 确定性拒绝——那种失败不是「执行端没办成」，话术必须走「系统太忙，这个没接」
-   * （2026-11-19 只读审计 #18）。
-   */
-  reason?: string;
+  resourceLimited?: boolean;
   /** 业务名（只给资源受限那句带上「是哪件事」；其余话术不带名字）。 */
   name?: string;
   /** 投递归属（进 task_result_delivery_* 记账行；缺省 = 不带，不猜）。 */
@@ -246,28 +239,23 @@ export async function deliverTaskResult(fact: TaskCompletionFact, options: TaskR
 }
 
 /**
- * 失败话术（2026-11-19 收口；单一来源，聊天推送与完成投递共用）：
- * kind 由执行层码 / result_unknown 状态归类，取不到 = executor_failed；返回 failureMessageFor
- * 的用户话术文本。**不含执行层原文、不含内部词**（执行层原始码只进分类，不进文本）。
+ * 失败话术（2026-11-19 收口；S1 改形）：降级兜底（模型回合挂掉时）的用户话术单一来源。
+ * kind 只由机械事实决定：result_unknown（died 事实）→ unknown_result；其余 = executor_failed
+ * （S1 没有任务结论，宿主不再按执行层码归类成败）。**不含执行层原文、不含内部词**。
  *
- * 失败路径不得输出「需要你确认/补充」类话术（2026-11-19）：任务已落 failed/终局，底账里
- * **没有等待中的提案、也没有有效句柄或可接续任务**。若归类落到 `needs_confirmation` /
- * `needs_input`（说明宿主没把提案/问题交给用户——例如把 CONFIRMATION_REQUIRED 这类被挡码
- * 误当业务码），说「点个头 / 补一句」就是**假承诺**（用户回「确认」什么都不会发生，比不说更糟）。
- * 这属于我方故障：一律改判 `host_fault`，话术不解释内部原因，只说「我这边没弄好，再试/记下来」。
+ * 失败路径不得输出「需要你确认/补充」类话术（2026-11-19）：失败收尾的底账里**没有等待中的
+ * 提案、也没有有效句柄或可接续任务**。说「点个头 / 补一句」就是**假承诺**（用户回「确认」
+ * 什么都不会发生，比不说更糟）。这属于我方故障：一律 `host_fault`。
  */
-export function failureTextFor(code: string | undefined, status?: 'failed' | 'refused' | 'result_unknown'): string {
-  return failureMessageFor(failureKindFor(code, status)).text;
+export function failureTextFor(status?: 'failed' | 'refused' | 'result_unknown'): string {
+  return failureMessageFor(failureKindFor(undefined, status)).text;
 }
 
 /**
- * 失败**归类**（安全口径的唯一实现；话术与喂模型的事实共用同一出口）：
- * result_unknown 状态优先；否则按执行层码归类，取不到 = executor_failed；
- * needs_confirmation / needs_input 一律改判 host_fault（理由见 {@link failureTextFor}）。
- *
- * 资源受限（底账 reason=resource_limited：池满/队列满的确定性拒绝，没进入执行）不属于
- * 上面任何一类——它有自己的既有句子（见 {@link failureFallbackTextFor}），因此这里只负责
- * 码/状态那一半；调用方按 reason 优先判资源受限。
+ * 失败**归类**（安全口径的唯一实现；话术与喂模型的事实共用同一出口；S1 改形）：
+ * result_unknown 状态优先；执行层码归类保留（逐笔执行行的封闭种类仍用于账本事实行），
+ * 取不到 = executor_failed；needs_confirmation / needs_input 一律改判 host_fault
+ *（理由见 {@link failureTextFor}）。
  */
 export function failureKindFor(
   code: string | undefined,
@@ -280,56 +268,57 @@ export function failureKindFor(
 }
 
 /**
- * 失败降级话术（**模型回合挂掉时的兜底**；唯一入口，完成/失败投递与回合内沉默兜底共用）：
- *   · 底账 reason=resource_limited（池满/队列满的确定性拒绝）→ 复用通知渲染器的既有那句
- *     「系统太忙，这个没接：<业务名>。」（2026-11-19 只读审计 #18：此前这类失败落到
- *     「没办成。再试一次，还是先放着？」——把「系统太忙」说成了「执行端没办成」，不实话）；
- *   · 其余按种类走 `failureMessageFor`（needs_* 已在 failureKindFor 里归 host_fault）。
+ * 失败降级话术（**模型回合挂掉时的兜底**；唯一入口，完成/失败投递与回合内沉默兜底共用；
+ * S1 改形——输入只有机械事实，没有任务结论）：
+ *   · 资源拒绝事实（池满/队列满的确定性拒绝，没进入执行）→ 复用通知渲染器的既有那句
+ *     「系统太忙，这个没接：<业务名>。」（2026-11-19 只读审计 #18）；
+ *   · 其余按种类走 `failureMessageFor`（result_unknown → unknown_result）。
  */
 export function failureFallbackTextFor(input: {
-  code?: string;
-  status?: 'failed' | 'refused' | 'result_unknown';
-  reason?: string;
+  status?: 'result_unknown';
+  resourceLimited?: boolean;
   name?: string;
 }): string {
-  if (input.reason === 'resource_limited') {
+  if (input.resourceLimited === true) {
     return resourceLimitedText(input.name);
   }
-  return failureTextFor(input.code, input.status);
+  return failureTextFor(input.status);
 }
 
-/** 失败事实里机械原因的上限（字符；超长截断——事实给模型读，防止把执行层原文整段灌进去）。 */
-const FAILURE_REASON_MAX = 200;
+/** 账本事实行的上限（条；超出截断——事实给模型读，防止把大账整段灌进去）。 */
+const FAILURE_LEDGER_MAX_LINES = 12;
 
 /**
- * 任务失败**事实**文本（宿主拼，给模型读；用户看到的话由模型写）：
- *   `[任务失败]「<业务名>」这次没办成，问题分类：<业务种类>。机械原因：<原因>。
- *    请把这件事如实告诉用户，并给他一个能做的下一步。`
+ * 任务失败**事实**文本（S1：宿主把账本喂给 Main，Main 自己看；用户看到的话由模型写）：
+ *   `[任务失败]「<业务名>」这个回合没有产出结果汇报，问题分类：<业务种类>。
+ *    账本事实（逐笔）：
+ *      1. dummy.commit — failed（执行层失败）：清理后摘要
+ *    请把这件事如实告诉用户（做没做成以账本执行事实为准），并给他一个能做的下一步。`
  *
  * 硬边界：不含 handle、不含 taskId、不含执行层原始码；种类用 `USER_FACING_FAILURE_KIND_LABEL`
- * 的业务语言名（即使被原样复述也不含内部形态）；原因只作判断依据（截断 + 去换行），模型
- * 不该原样丢给用户。name 缺省 = 主语用中性指代（不猜名）。
+ * 的业务语言名；账本行只作判断依据（逐条截断 + 上限），做没做成 Main 按事实自己判断。
+ * name 缺省 = 主语用中性指代（不猜名）。
  */
 export function taskFailureFactText(input: {
   name?: string;
   kind: UserFacingFailureKind;
-  reason?: string;
-  /** 结构化答复五态（B2 机械事实，不是话术）；缺省 = 不追加（既有路径逐字节不变）。 */
-  outcome?: TaskOutcome;
-  /** blocked 的缺失条件（非空）；只有 outcome=blocked 时写入事实。 */
-  missing?: string;
+  /** 账本事实行（逐笔执行行 + 机械标记；宿主装配，见 server 的 taskLedgerFactsOf）。 */
+  ledger?: readonly string[];
+  /** 结构化原因码事实：not_permitted = 发起前被宿主拒绝（本次不允许；不扫任何文本）。 */
+  notPermitted?: boolean;
 }): string {
   const subject = input.name !== undefined && input.name.trim() !== ''
     ? `「${truncatedName(input.name)}」`
     : '你交代的那件事';
-  const reason = input.reason === undefined
+  const ledgerLines = (input.ledger ?? []).slice(0, FAILURE_LEDGER_MAX_LINES);
+  const ledger = ledgerLines.length === 0
     ? ''
-    : input.reason.replace(/\s+/g, ' ').trim().slice(0, FAILURE_REASON_MAX);
-  const base = `[任务失败]${subject}这次没办成，问题分类：${USER_FACING_FAILURE_KIND_LABEL[input.kind]}。`
-    + `${reason === '' ? '' : `机械原因（供你判断，别原样丢给用户）：${reason}。`}`;
-  // B2：outcome 值作为结构化机械事实进唤醒事实，Main 据此按值选措辞（不是话术替换）。
-  const outcomeFact = input.outcome === undefined ? '' : ` ${renderOutcomeFact(input.outcome, { missing: input.missing })}`;
-  return `${base}${outcomeFact}请把这件事如实告诉用户，并给他一个能做的下一步。`;
+    : `账本事实（逐笔，供你判断做没做成）：\n${ledgerLines.map((line) => `  ${line}`).join('\n')}\n`;
+  const notPermitted = input.notPermitted === true
+    ? '账本里没有执行事实：这次交办在发起前被宿主拒绝（本次不允许，不是没有这件事）。\n'
+    : '';
+  return `[任务失败]${subject}这个回合没有产出结果汇报，问题分类：${USER_FACING_FAILURE_KIND_LABEL[input.kind]}。\n`
+    + `${notPermitted}${ledger}请把这件事如实告诉用户（做没做成以账本执行事实为准），并给他一个能做的下一步。`;
 }
 
 /**

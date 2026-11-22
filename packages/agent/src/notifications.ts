@@ -26,6 +26,7 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import type { TaskEventKind } from './task-registry';
 
 /** 9 类通知意图（冻结顺序；契约 §4）。 */
 export const NOTIFICATION_KINDS = [
@@ -52,18 +53,6 @@ export const NOTIFICATION_REASONS = [
 ] as const;
 
 export type NotificationReason = (typeof NOTIFICATION_REASONS)[number];
-
-/** 任务状态集（契约 §1 冻结；含保留的 unexecuted）。 */
-export type TaskState =
-  | 'queued'
-  | 'running'
-  | 'waiting_user'
-  | 'cancelling'
-  | 'cancelled'
-  | 'completed'
-  | 'failed'
-  | 'timed_out'
-  | 'unexecuted';
 
 /** payload 字段白名单（仅底账事实；不接受自由文本编造）。 */
 export interface NotificationPayload {
@@ -295,33 +284,34 @@ interface NotificationRow {
 }
 
 /**
- * 状态转移→通知意图（纯函数；契约 §4）。无法映射的过渡（cancelling/unexecuted 等
- * 过渡态与保留态）返回 undefined = 不产生通知；result_unknown 仍落 failed 状态，
- * 机械原因由 payload.reason 如实携带（不伪装成成功，也不额外造第十类意图）。
+ * 机械事实事件 → 通知意图（纯函数；契约 §4 九类不变）。S1 事实模型：底账事件只有
+ * 机械事实（受理/开始/接续/等待/汇报存档/取消/超时/死亡/资源拒绝/回合失败），没有
+ * 任务结论——result_unknown 与无汇报的回合失败都落 `failed` 通知，机械事实由
+ * payload 如实携带（不伪装成成功，也不额外造第十类意图）。无法映射的事件返回
+ * undefined = 不产生通知。
  */
-export function notificationKindForTransition(
-  from: TaskState | undefined,
-  to: TaskState,
-  reason?: NotificationReason,
-): NotificationKind | undefined {
-  if (reason === 'resource_limited') return 'resource_limited';
-  if (reason === 'cancelled_by_user') return 'cancelled';
-  if (reason === 'timeout') return 'timed_out';
-  switch (to) {
+export function notificationKindForEvent(event: TaskEventKind): NotificationKind | undefined {
+  switch (event) {
     case 'queued':
       return 'accepted';
-    case 'running':
-      return from === 'waiting_user' ? 'resumed' : 'started';
+    case 'started':
+      return 'started';
+    case 'resumed':
+      return 'resumed';
     case 'waiting_user':
       return 'waiting_user';
-    case 'completed':
+    case 'result_archived':
       return 'completed';
-    case 'failed':
-      return 'failed';
     case 'cancelled':
       return 'cancelled';
     case 'timed_out':
       return 'timed_out';
+    case 'died':
+      return 'failed';
+    case 'resource_limited':
+      return 'resource_limited';
+    case 'round_failed':
+      return 'failed';
     default:
       return undefined;
   }

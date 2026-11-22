@@ -18,6 +18,7 @@ import type { AppConfig, IncomingChannelMessage } from '@fshine/contracts';
 import type { NotificationOutbox } from '../../packages/agent/src/notifications';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import type { TaskRecordView, TaskScope } from '../../packages/agent/src/task-runner';
+import type { TaskRecord } from '../../packages/agent/src/task-registry';
 import { createServer } from '../../apps/server/server';
 import {
   ControllableClock,
@@ -118,8 +119,20 @@ function findTask(tasks: readonly TaskRecordView[], taskId: string): TaskRecordV
   return tasks.find((task) => task.taskId === taskId);
 }
 
+/** S1 事实模型：机械事实 → 判据词汇（读时推导；completed=汇报存档，failed=已启动无汇报）。 */
+function factStateOf(task: TaskRecordView | TaskRecord): string {
+  if (task.pendingQuestion !== undefined) return 'waiting_user';
+  if (task.diedAt !== undefined) return 'died';
+  if (task.cancelledAt !== undefined) return 'cancelled';
+  if (task.timedOutAt !== undefined) return 'timed_out';
+  if (task.resourceLimitedAt !== undefined) return 'resource_limited';
+  if (((task as TaskRecord).resultText ?? (task as TaskRecord).replyText ?? '').trim() !== '') return 'completed';
+  return task.runningSince === undefined ? 'queued' : 'failed';
+}
+
 function statusOf(tasks: readonly TaskRecordView[], taskId: string): string | undefined {
-  return findTask(tasks, taskId)?.status;
+  const task = findTask(tasks, taskId);
+  return task === undefined ? undefined : factStateOf(task);
 }
 
 // ---------------------------------------------------------------------------
@@ -168,13 +181,13 @@ async function runRestartNotificationScenario(scenario: ChaosScenario): Promise<
         const turn = await assembled1.session.send(REQUEST);
         report.submitted += turn.taskIds.length;
       }
-      await pollUntil(() => registry1!.list(scope).filter((task) => task.status === 'completed').length >= 5, 20_000);
+      await pollUntil(() => registry1!.list(scope).filter((task) => factStateOf(task) === 'completed').length >= 5, 20_000);
       await outbox1.deliverPending(); // 恒失败：attempts=1，全部未送达
     } finally {
       assembled1.close();
     }
     const tasks1 = registry1.list(scope);
-    const completedIds1 = tasks1.filter((task) => task.status === 'completed').map((task) => task.taskId);
+    const completedIds1 = tasks1.filter((task) => factStateOf(task) === 'completed').map((task) => task.taskId);
     outbox1.close();
     registry1.close();
 
@@ -215,7 +228,7 @@ async function runRestartNotificationScenario(scenario: ChaosScenario): Promise<
       .filter((taskId) => completedIds1.includes(taskId));
     report.leaseExpiredReplays = executor2.calls.filter((call) => {
       const task = findTask(tasks2, call.taskId);
-      return task?.status === 'failed' && task.reason === 'result_unknown';
+      return task?.diedAt !== undefined; // 结果未知（看门狗死亡事实）= result_unknown 的机械对应
     }).length;
     report.duplicateNotificationRows = notifications.duplicateRows;
     report.undeliveredNotifications = notifications.undelivered;
@@ -378,9 +391,9 @@ async function runCombinedWithDuplicate(scenario: ChaosScenario): Promise<ChaosR
       for (let i = 1; i < scenario.tasks; i += 1) {
         await server.handler(incoming(`msg-${i + 1}`, texts[i]!));
       }
-      await pollUntil(() => readerA.list(serverScope).filter((task) => task.status === 'completed').length >= gateAfter, 20_000);
+      await pollUntil(() => readerA.list(serverScope).filter((task) => factStateOf(task) === 'completed').length >= gateAfter, 20_000);
       phaseATasks = readerA.list(serverScope).map((task) => ({ ...task }));
-      completedIdsA = phaseATasks.filter((task) => task.status === 'completed').map((task) => task.taskId);
+      completedIdsA = phaseATasks.filter((task) => factStateOf(task) === 'completed').map((task) => task.taskId);
     } finally {
       readerA.close();
       server.close();
@@ -440,7 +453,7 @@ async function runCombinedWithDuplicate(scenario: ChaosScenario): Promise<ChaosR
       .filter((taskId) => completedIdsA.includes(taskId));
     report.leaseExpiredReplays = executorB.calls.filter((call) => {
       const task = findTask(tasksB, call.taskId);
-      return task?.status === 'failed' && task.reason === 'result_unknown';
+      return task?.diedAt !== undefined; // 结果未知（看门狗死亡事实）= result_unknown 的机械对应
     }).length;
     report.duplicateNotificationRows = notifications.duplicateRows;
     report.undeliveredNotifications = notifications.undelivered;

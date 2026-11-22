@@ -152,7 +152,7 @@ export function createGatedExecutor(options: { gateAfter?: number; resultText?: 
     async execute(input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
       calls.push({ ...input });
       if (calls.length > gateAfter && !released) await gate;
-      return { kind: 'completed', resultText: text(input) };
+      return { kind: 'ended', report: text(input) };
     },
   };
   return {
@@ -181,7 +181,7 @@ export function createCancelableExecutor(options: { cancelTaskId: string }): Can
   const executor: TaskExecutor = {
     async execute(input: TaskExecutionInput, context: TaskExecutionContext): Promise<TaskExecutionOutcome> {
       calls.push({ ...input });
-      if (input.taskId !== options.cancelTaskId) return { kind: 'completed', resultText: `（stab 结果）${input.request}` };
+      if (input.taskId !== options.cancelTaskId) return { kind: 'ended', report: `（stab 结果）${input.request}` };
       return await new Promise<TaskExecutionOutcome>((resolve) => {
         const confirm = (): void => {
           aborted = true;
@@ -345,7 +345,10 @@ export function rssGrowth(base: number, end: number): number {
 // 读数汇总
 // ---------------------------------------------------------------------------
 
-const OPEN_STATUSES: ReadonlySet<string> = new Set(['queued', 'running', 'waiting_user', 'cancelling']);
+// S1 事实模型：未收尾 = 未启动/在跑/等待（没有 cancelling 中间态——取消确认即写事实）。
+// S1 事实模型：未收尾 = 未启动/在跑/等待（没有 cancelling 中间态——取消确认即写事实）。
+const OPEN_STATES: ReadonlySet<string> = new Set(['queued', 'running', 'waiting_user']);
+
 
 export interface TaskSummary {
   terminalCounts: Record<string, number>;
@@ -357,13 +360,25 @@ export interface TaskSummary {
 }
 
 export function summarizeTasks(tasks: readonly TaskRecordView[], calls: readonly TaskExecutionInput[]): TaskSummary {
+  // S1 事实模型：没有 status/reason——按机械事实分桶（等待事实/机械时刻/汇报存档）。
+  const stateOf = (task: TaskRecordView): string => task.pendingQuestion !== undefined ? 'waiting_user'
+    : task.diedAt !== undefined ? 'died'
+      : task.cancelledAt !== undefined ? 'cancelled'
+        : task.timedOutAt !== undefined ? 'timed_out'
+          : task.resourceLimitedAt !== undefined ? 'resource_limited'
+            : (task.resultText ?? '').trim() !== '' ? 'reported'
+              : task.runningSince === undefined ? 'queued' : 'running';
   const terminalCounts: Record<string, number> = {};
   const terminalReasonCounts: Record<string, number> = {};
   let openOnDrain = 0;
   for (const task of tasks) {
-    terminalCounts[task.status] = (terminalCounts[task.status] ?? 0) + 1;
-    if (task.reason !== undefined) terminalReasonCounts[task.reason] = (terminalReasonCounts[task.reason] ?? 0) + 1;
-    if (OPEN_STATUSES.has(task.status)) openOnDrain += 1;
+    const state = stateOf(task);
+    terminalCounts[state] = (terminalCounts[state] ?? 0) + 1;
+    // TaskRecordView 不带执行行——按机械时刻计数（died/cancelled/timed_out/resource_limited）。
+    for (const fact of ['diedAt', 'cancelledAt', 'timedOutAt', 'resourceLimitedAt'] as const) {
+      if (task[fact] !== undefined) terminalReasonCounts[fact] = (terminalReasonCounts[fact] ?? 0) + 1;
+    }
+    if (OPEN_STATES.has(state)) openOnDrain += 1;
   }
   const callsByTask = new Map<string, number>();
   for (const call of calls) callsByTask.set(call.taskId, (callsByTask.get(call.taskId) ?? 0) + 1);

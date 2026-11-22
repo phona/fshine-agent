@@ -182,9 +182,13 @@ function normalizeTask(task: TaskRecord, aliases: IdentifierAliases): Record<str
     principalId: task.principalId,
     sessionId: task.sessionId,
     request: task.request,
-    status: task.status,
+    // S1 事实模型：底账没有 status/failureReason——转写机械事实（等待形状、机械时刻）。
+    ...(task.pendingQuestion !== undefined ? { pendingQuestion: task.pendingQuestion } : {}),
+    ...(task.diedAt !== undefined ? { diedAt: task.diedAt } : {}),
+    ...(task.cancelledAt !== undefined ? { cancelledAt: task.cancelledAt } : {}),
+    ...(task.timedOutAt !== undefined ? { timedOutAt: task.timedOutAt } : {}),
+    ...(task.resourceLimitedAt !== undefined ? { resourceLimitedAt: task.resourceLimitedAt } : {}),
     ...(task.resultText !== undefined ? { resultText: task.resultText } : {}),
-    ...(task.failureReason !== undefined ? { failureReason: task.failureReason } : {}),
     executions: task.executions.map((execution) => ({
       requestId: aliases.requestAlias.get(execution.requestId) ?? execution.requestId,
       operation: execution.operation,

@@ -87,22 +87,8 @@
  */
 
 // ---------------------------------------------------------------------------
-// 底账端口（§1 最小消费面）
+// 底账端口（§1 最小消费面；S1 事实模型——没有 status，只记事实）
 // ---------------------------------------------------------------------------
-
-export type TaskStatus =
-  | 'queued'
-  | 'running'
-  | 'waiting_user'
-  | 'cancelling'
-  | 'cancelled'
-  | 'completed'
-  | 'failed'
-  | 'timed_out'
-  | 'unexecuted';
-
-/** 机械终止原因（§1 冻结枚举）。 */
-export type TaskReason = 'cancelled_by_user' | 'timeout' | 'failed_confirmed' | 'result_unknown' | 'resource_limited';
 
 export type TimeoutKind = 'queued' | 'execution' | 'waiting_user';
 
@@ -135,20 +121,24 @@ export interface TaskScope {
   sessionId: string;
 }
 
-/** 任务行只读投影（runner 只读这些字段；其余字段与本模块无关）。 */
+/** 任务行只读投影（runner 只读这些事实字段；其余字段与本模块无关）。 */
 export interface TaskRecordView {
   taskId: string;
   principalId: string;
   sessionId: string;
   request: string;
-  status: TaskStatus;
-  reason?: TaskReason;
   resultText?: string;
-  failureReason?: string;
+  /** Main 最终回复存档（后台完成经 archiveReply 同义写本字段；与 resultText 同为汇报事实）。 */
+  replyText?: string;
   pendingQuestion?: PendingQuestion;
   waitingSince?: string;
   leaseOwner?: string;
   leaseUntil?: string;
+  /** 一次性机械事实（S1）：died（看门狗）/ cancelled（用户取消）/ timed_out（超时）/ resource_limited（资源拒绝）。 */
+  diedAt?: string;
+  cancelledAt?: string;
+  timedOutAt?: string;
+  resourceLimitedAt?: string;
   /** 本轮开始运行时刻（ISO，单调写一次）：长任务受理后租约被清，提醒扫描靠它算「跑了多久」。 */
   runningSince?: string;
   taskNo?: number;
@@ -162,53 +152,62 @@ export interface MutationOptions {
   scope?: TaskScope;
 }
 
-export interface TransitionOptions extends MutationOptions {
-  reason?: TaskReason;
+/** 任务已收尾（结束事实存在）：事实不翻案的确定性拒绝。 */
+export class TaskSettledError extends Error {
+  readonly taskId: string;
+
+  constructor(taskId: string) {
+    super(`任务已收尾，事实不翻案：${taskId}。`);
+    this.name = 'TaskSettledError';
+    this.taskId = taskId;
+  }
 }
 
 export interface TaskRegistryPort {
-  /** 受理：status 缺省 running（inline 语义）；'queued' = 后台受理（submit）。 */
+  /** 受理：缺省 inline（建行即开跑）；queued = 后台受理（submit，等 runner 认领）。 */
   begin(input: {
     taskId: string;
     principalId: string;
     sessionId: string;
     request: string;
-    status?: 'queued' | 'running';
+    queued?: boolean;
   }): TaskRecordView;
   get(taskId: string, scope?: TaskScope): TaskRecordView;
-  transition(taskId: string, to: TaskStatus, options?: TransitionOptions): TaskRecordView;
   waitForUser(taskId: string, pendingQuestion: PendingQuestion, options?: MutationOptions): TaskRecordView;
   answerResumes(taskId: string, options?: MutationOptions): TaskRecordView;
-  requestCancel(taskId: string, options?: MutationOptions): TaskRecordView;
-  confirmCancelled(taskId: string, options?: MutationOptions): TaskRecordView;
-  timeout(taskId: string, kind: TimeoutKind, options?: MutationOptions): TaskRecordView;
-  markResultUnknown(taskId: string, options?: MutationOptions): TaskRecordView;
-  /** 已确认失败（无执行事实可判定时的机械失败；原因文本原样落底账）。 */
-  fail(taskId: string, reason: string): void;
+  markCancelled(taskId: string, options?: MutationOptions): TaskRecordView;
+  markTimedOut(taskId: string, kind: TimeoutKind, options?: MutationOptions): TaskRecordView;
+  markDied(taskId: string): TaskRecordView;
+  /**
+   * 回合失败事实（无执行事实可判定时的机械事件）：不写任务结论，只发事实事件
+   * （通知/唤醒面消费——失败通知与失败唤醒的事实源）。
+   */
+  noteRoundFailed(taskId: string): void;
   /**
    * 后台成功结果的逐字存档（可选；集成接线后的底账实现提供）。
-   * 语义 = P2 的 `archiveReply`：settle 确认落 `completed` 终态后调用，逐字写任务行
-   * resultText（结果可找回；不经 inline `complete()`/judgeReportedTask）。
+   * 语义 = P2 的 `archiveReply`：回合以汇报收尾后调用，逐字写任务行（结果可找回）。
    */
   archiveReply?(taskIds: readonly string[], replyText: string): void;
-  /** 原子认领最老 queued（queued→running + lease）；无则 undefined。队列唯一入口。 */
+  /** 原子认领最老未启动任务（写 running_since + lease）；无则 undefined。队列唯一入口。 */
   claimNextQueued(input: { owner: string; leaseMs: number }): TaskRecordView | undefined;
-  /** 过期 running 租约 → result_unknown（返回受影响任务；不自动重放）。 */
+  /** 接续回合的在跑凭据（存活事实；可选；缺省 = 接续回合不持租约）。 */
+  armLease?(taskId: string, input: { owner: string; leaseMs: number }): TaskRecordView;
+  /** 过期租约 → died 事实（返回受影响任务；不自动重放）。 */
   expireLeases(now?: string): readonly TaskRecordView[];
   /**
    * 只读任务行（waiting_user 到期扫描用；可选）。缺省 = 不启用到期消费者（零行为变化）；
-   * 真底账实现提供；runner 只读状态与 waitingSince，不直接写状态。
+   * 真底账实现提供。
    */
   list?(scope?: TaskScope): readonly TaskRecordView[];
   /**
-   * 只读 **waiting_user 行**（到期扫描用；可选）。缺省时回落到 `list()` 再过滤——
+   * 只读 **等待行**（到期扫描用；可选）。缺省时回落到 `list()` 再过滤——
    * 大积压（实测 500 任务）下全表 list 每趟 pump 都分配一遍，把 RSS 顶到 10% 门槛以上；
    * 提供本方法后每趟只取等待行（通常 0 条）。
    */
   listWaiting?(): readonly TaskRecordView[];
   /**
-   * 只读 **running 行**（长时间无动静提醒扫描用；可选）。缺省时回落到 `list()` 再过滤
-   * （同一性能口径）。只读状态事实，不做判定。
+   * 只读 **在跑行**（长时间无动静提醒扫描用；可选）。缺省时回落到 `list()` 再过滤
+   * （同一性能口径）。只读事实，不做判定。
    */
   listRunning?(): readonly TaskRecordView[];
   /**
@@ -223,7 +222,7 @@ export interface TaskRegistryPort {
   listAcceptedOperations?(): readonly AcceptedOperationRecordView[];
   /** accepted → 终态（wait 返回的原始回执；非 accepted 行不覆盖）。 */
   settleAcceptedOperation?(dispatchKey: string, outcome: unknown): void;
-  /** 清 running 行的租约（任务保持 running，让出并发槽；不产状态转换事实）。 */
+  /** 清租约（长任务让出并发槽；任务事实不动）。 */
   releaseTaskLease?(taskId: string): void;
 }
 
@@ -335,42 +334,39 @@ export interface TaskOutcomeFile {
 }
 
 /**
- * 一次执行回合的机械结局（runner 据此走底账合法边；不替执行端二次判定）：
- *   · completed  → 回合正常收尾，**执行端已按本回合执行事实确认成功**（权威）；
- *   · failed     → 已确认失败（原因原文；无执行事实可判定时的机械失败）；
- *   · needs_input→ 执行层要求补充输入（running→waiting_user，同 Task 接续）；
- *   · needs_confirmation → 执行层冻结了一次待确认写操作（running→waiting_user 同一状态机；
- *     confirmation 原样进底账待后续回合透传，S1 不做推送/透传）；
- *   · timed_out  → 执行回合超时（P5 边界内的执行端判定）；
- *   · cancelled  → 执行端确认已中止（abort 观察）。
- *
- * 执行端义务（端口契约；runner 不做 task 级再判定）：completed 仅当本回合确有执行且全部成功；
- * 零执行不得报 completed（如实报 failed/needs_input）；执行层拒绝/失败 → failed（原因原文）。
- * 「执行层实际成功 / 拒绝或失败 / 未发起执行」的顶层可区分性由此在执行端回合判定中成立。
+ * 一次执行回合的机械结局（runner 据此落事实；S1：执行端**不产出结论**，只报回合事实）：
+ *   · ended        → 回合收尾。report = Worker 的汇报原文（事实存档面）；缺省/空 = 本回合
+ *     没有产出结果汇报（执行行就是事实，不判成败、不合成失败文案）。
+ *   · needs_input  → 执行层要求补充输入（等待事实 + 同 Task 接续）；
+ *   · needs_confirmation → 执行层冻结了一次待确认写操作（等待事实；confirmation 原样进
+ *     底账 pendingQuestion.confirmation 待后续回合透传）；
+ *   · timed_out    → 执行回合超时（P5 边界内的执行端判定）；
+ *   · cancelled    → 执行端确认已中止（abort 观察）；
+ *   · result_unknown → 结果未知（无法证明本次调用属于已有操作 / 外部无回执 / 调用中断）——
+ *     不是成功也不是确认失败；账行落 unknown，禁止自动重试。
+ *   · accepted     → 长任务已受理（契约 v4）：本轮工作结束——任务在跑，runner 释放槽位与
+ *     租约，并落账等待（重启后按账行重新 wait）。不是失败、不是完成。
  */
 export type TaskExecutionOutcome =
   /**
-   * 后台回合完成。files = 本回合 Worker 产出的**任务作用域**交付物（登记事实）；
-   * 这是后台面对 TurnResult.files 的同位面（后台没有前台回合）：装配方按它投递。
+   * 后台回合收尾。report = Worker 汇报原文（事实）；files = 本回合 Worker 产出的**任务
+   * 作用域**交付物（登记事实）；这是后台面对 TurnResult.files 的同位面：装配方按它投递。
+   * zeroExecReason = 零执行的机械原因（'not_permitted' = 发起前被宿主拒绝——唤醒面据此
+   * 按「本次不允许」说清）；缺省 = 无该事实。
    */
-  | { kind: 'completed'; resultText: string; files?: readonly TaskOutcomeFile[] }
-  /** `reasonCode` = 宿主/执行层的结构化拒绝原因码（如 `not_permitted`）；不是文案，不进用户文本。 */
-  | { kind: 'failed'; reason: string; reasonCode?: string }
+  | { kind: 'ended'; report?: string; files?: readonly TaskOutcomeFile[]; zeroExecReason?: 'not_permitted' }
   | { kind: 'needs_input'; question: PendingQuestion }
   /**
-   * 本回合以「写操作提案待用户确认」收尾：question 是 waiting_user 的问题形状，
-   * confirmation 是执行层发放的句柄/摘要（落底账 pendingQuestion.confirmation，同状态机）。
+   * 本回合以「写操作提案待用户确认」收尾：question 是等待事实的问题形状，
+   * confirmation 是执行层发放的句柄/摘要（落底账 pendingQuestion.confirmation）。
    */
   | { kind: 'needs_confirmation'; question: PendingQuestion; confirmation: PendingConfirmation }
   | { kind: 'timed_out' }
   | { kind: 'cancelled' }
+  /** U3：结果未知（账行 unknown；禁止自动重试）。 */
+  | { kind: 'result_unknown' }
   /**
-   * U3：结果未知（无法证明本次调用属于已有操作 / 外部无回执 / 调用中断）——
-   * 不是成功、也不是已确认失败；落 failed + reason=result_unknown，禁止自动重试。
-   */
-  | { kind: 'result_unknown'; reason: string }
-  /**
-   * 长任务已受理（契约 v4）：执行层返回 accepted，本轮工作结束——任务保持 running，
+   * 长任务已受理（契约 v4）：执行层返回 accepted，本轮工作结束——任务在跑，
    * runner 释放槽位与租约，并落账等待（重启后按账行重新 wait）。不是失败、不是完成。
    */
   | ({ kind: 'accepted' } & AcceptedOperation);
@@ -625,18 +621,11 @@ export interface SubmitInput {
 
 /** 单趟派发结果（错误面如实返回；不是通知系统）。 */
 export interface PumpSummary {
-  /** 本次 pump 判为 result_unknown 的过期租约任务。 */
+  /** 本次 pump 判为 died 的过期租约任务（结果未知，禁止自动重放）。 */
   recovered: readonly string[];
-  /**
-   * 本次启动恢复里「取消孤儿」的任务（`cancelling` 断电遗留 → 回 running → result_unknown；
-   * 2026-11-19 唤醒切片 / 只读审计 #14）。**只在启动后的第一趟 pump 出现**（进程内正常的
-   * cancelling 一定有在飞回合在推进，不是孤儿）；装配层据此按「你要停的那件事」如实说清。
-   * 缺省（测试替身/旧装配）= 无取消孤儿（与本接口既有的可选字段同形）。
-   */
-  recoveredCancelling?: readonly string[];
   /** 本次启动执行回合的任务（认领成功）。 */
   started: readonly string[];
-  /** 因许可拒绝而停止派发时的拒绝原因（任务留在 queued，等容量恢复/下次触发）。 */
+  /** 因许可拒绝而停止派发时的拒绝原因（任务保持未启动，等容量恢复/下次触发）。 */
   rejection?: ResourceRejectionReason;
   /**
    * 本次按 waiting_since + waitUserTimeoutMs 判为 timed_out 的任务。
@@ -646,17 +635,17 @@ export interface PumpSummary {
 }
 
 export type CancelOutcome =
-  /** 已确认取消（queued/waiting_user 无在飞回合，机械确认）。 */
+  /** 已确认取消（未启动/等待中的任务无在飞回合，机械确认）。 */
   | { outcome: 'cancelled'; taskId: string }
-  /** 已请求中止（running：等执行端确认，确认前不得宣称已取消）。 */
+  /** 已请求中止（在跑：等执行端确认，确认前不得宣称已取消）。 */
   | { outcome: 'requested'; taskId: string }
-  /** 终态任务无操作。 */
-  | { outcome: 'terminal'; taskId: string; status: TaskStatus };
+  /** 已收尾的任务无操作（事实已发生，不翻案）。 */
+  | { outcome: 'terminal'; taskId: string };
 
 export type ResumeOutcome =
   | { outcome: 'started'; taskId: string }
   | { outcome: 'rejection'; taskId: string; reason: ResourceRejectionReason }
-  | { outcome: 'not_waiting'; taskId: string; status: TaskStatus };
+  | { outcome: 'not_waiting'; taskId: string };
 
 /**
  * 显式确认的机械结局（2026-11-19 owner 拍板）：确认是一个**显式动作**（`task_confirm`），
@@ -671,7 +660,7 @@ export type ResumeOutcome =
 export type ConfirmOutcome =
   | { outcome: 'started'; taskId: string }
   | { outcome: 'rejection'; taskId: string; reason: ResourceRejectionReason }
-  | { outcome: 'not_waiting'; taskId: string; status: TaskStatus }
+  | { outcome: 'not_waiting'; taskId: string }
   | { outcome: 'no_confirmation'; taskId: string }
   | { outcome: 'expired'; taskId: string };
 
@@ -710,13 +699,14 @@ function isAbortError(error: unknown): boolean {
     && (error as { name?: unknown }).name === 'AbortError';
 }
 
-const TERMINAL_STATUSES: ReadonlySet<TaskStatus> = new Set([
-  'cancelled',
-  'completed',
-  'failed',
-  'timed_out',
-  'unexecuted',
-]);
+/** 任务已收尾（结束事实存在；含已存档汇报——收尾后不可再取消/接续）。 */
+function taskEndedOf(task: TaskRecordView): boolean {
+  return task.diedAt !== undefined
+    || task.cancelledAt !== undefined
+    || task.timedOutAt !== undefined
+    || task.resourceLimitedAt !== undefined
+    || (task.resultText ?? task.replyText ?? '').trim() !== '';
+}
 
 export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   const { registry, policy, executor } = options;
@@ -784,9 +774,11 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   /** 在飞的提醒投递（whenIdle 收尾等待；失败只记账，不改变任务事实）。 */
   const noticeSends = new Set<Promise<void>>();
 
-  /** 本进程在飞执行回合：taskId → abort 控制器 / 落定链。不是队列（队列=底账 queued 行）。 */
+  /** 本进程在飞执行回合：taskId → abort 控制器 / 落定链。不是队列（队列=底账未启动行）。 */
   const controllers = new Map<string, AbortController>();
   const inFlight = new Map<string, Promise<void>>();
+  /** 本进程已请求停止（abort）的在飞回合：确认取消的判定依据（取消请求不是底账事实）。 */
+  const cancelRequested = new Set<string>();
   let pumpQueued = false;
 
   /**
@@ -826,6 +818,15 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
    */
   const cancelCalls = new Set<Promise<void>>();
 
+  /** 回合收尾后清租约（存活事实：回合已结束的任务不再持租约；一次性事实写入也清，双保险）。 */
+  function releaseLeaseQuietly(taskId: string): void {
+    try {
+      registry.releaseTaskLease?.(taskId);
+    } catch (error) {
+      report(taskId, error);
+    }
+  }
+
   function report(taskId: string, error: unknown): void {
     if (onError === undefined) return;
     try {
@@ -854,21 +855,21 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     nextDue?: number;
   }
 
-  /** waiting_user 行的到期时刻（waiting_since + 阈值）；非等待行/坏时间戳不参与判定。 */
+  /** 等待行的到期时刻（waiting_since + 阈值）；非等待行/坏时间戳不参与判定。 */
   function waitingDeadlineOf(task: TaskRecordView): number | undefined {
-    if (task.status !== 'waiting_user' || task.waitingSince === undefined) return undefined;
+    if (task.pendingQuestion === undefined || task.waitingSince === undefined) return undefined;
     const since = Date.parse(task.waitingSince);
     return Number.isFinite(since) ? since + waitUserTimeoutMs : undefined;
   }
 
-  function isTransitionRace(error: unknown): boolean {
-    return error instanceof Error && error.name === 'TaskTransitionError';
+  function isSettledRace(error: unknown): boolean {
+    return error instanceof Error && error.name === 'TaskSettledError';
   }
 
   /**
-   * 单趟扫描持久化底账：到期行走既有 timeout(...,'waiting_user') 边，返回下一个到期时刻。
-   * 只读 list + 状态方法族（不直接写状态）；并发下任务已被答复/取消时吞掉非法边（不是本进程
-   * 的目标），不推翻已发生的事实。
+   * 单趟扫描持久化底账：到期等待行走 markTimedOut('waiting_user')（一次性机械事实），
+   * 返回下一个到期时刻。并发下任务已被答复/取消时吞掉事实竞争（不是本进程的目标），
+   * 不推翻已发生的事实。
    */
   function scanWaiting(nowMs: number): WaitingScan {
     const timedOut: string[] = [];
@@ -879,10 +880,10 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       if (due === undefined) continue;
       if (due <= nowMs) {
         try {
-          registry.timeout(task.taskId, 'waiting_user');
+          registry.markTimedOut(task.taskId, 'waiting_user');
           timedOut.push(task.taskId);
         } catch (error) {
-          if (isTransitionRace(error)) continue;
+          if (isSettledRace(error)) continue;
           throw error;
         }
       } else if (nextDue === undefined || due < nextDue) {
@@ -937,11 +938,9 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
    *   · 两者都没有（inline/未认领）→ 不猜开始时刻，不参与判定。
    */
   function runningStartedAt(task: TaskRecordView): number | undefined {
-    if (task.status !== 'running') return undefined;
-    if (task.runningSince !== undefined) {
-      const since = Date.parse(task.runningSince);
-      if (Number.isFinite(since)) return since;
-    }
+    if (task.runningSince === undefined) return undefined;
+    const since = Date.parse(task.runningSince);
+    if (Number.isFinite(since)) return since;
     if (task.leaseUntil === undefined) return undefined;
     const until = Date.parse(task.leaseUntil);
     return Number.isFinite(until) ? until - leaseMs : undefined;
@@ -1041,11 +1040,11 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     );
   }
 
-  /** 兜不住就暴露（按任务 ID 的唯一入口；只在任务仍 running 时发一次，读不到就如实上报）。 */
+  /** 兜不住就暴露（按任务 ID 的唯一入口；只在任务仍在跑时发一次，读不到就如实上报）。 */
   function exposeContactLost(taskId: string, nowMs: number): void {
     try {
       const task = registry.get(taskId);
-      if (task.status !== 'running') return;
+      if (task.runningSince === undefined || task.pendingQuestion !== undefined || taskEndedOf(task)) return;
       notifyWaitContactLost(task, nowMs);
     } catch (error) {
       report(taskId, error);
@@ -1063,7 +1062,9 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     const noticed: string[] = [];
     let nextDue: number | undefined;
     for (const task of longRunningRowsSource!()) {
-      if (task.status !== 'running') continue; // 回落 list() 时过滤
+      if (task.runningSince === undefined || task.pendingQuestion !== undefined || taskEndedOf(task)) {
+        continue; // 回落 list() 时按在跑事实过滤
+      }
       const startedAt = runningStartedAt(task);
       if (startedAt === undefined) continue;
       const elapsed = nowMs - startedAt;
@@ -1104,9 +1105,9 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     return { operationId: record.operationId, ...(poll === undefined ? {} : { pollAfterMs: poll }) };
   }
 
-  /** 从底账重建等待表（重启路径）：accepted 行 → 本进程等待项。任务已终态的行不进入
+  /** 从底账重建等待表（重启路径）：accepted 行 → 本进程等待项。已收尾/进入等待的行不进入
    * （不复活已结束的事实）；同时清一次租约（进程在 settle 后、清租约前崩溃时补上，
-   * 避免长任务等待期间被 expireLeases 判 result_unknown）。
+   * 避免长任务等待期间被 expireLeases 判 died）。
    */
   function syncWaiters(nowMs: number): void {
     if (!longTaskEnabled) return;
@@ -1119,7 +1120,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         report(row.taskId, error);
         continue;
       }
-      if (task.status !== 'running') continue;
+      if (task.pendingQuestion !== undefined || taskEndedOf(task)) continue;
       const accepted = acceptedOf(row.outcome);
       if (accepted === undefined) {
         report(row.taskId, new Error(`accepted 账行缺少 operationId（${row.dispatchKey}），无法等待。`));
@@ -1208,7 +1209,8 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       return;
     }
     const task = registry.get(entry.taskId);
-    if (task.status !== 'running') {
+    if (task.pendingQuestion !== undefined || taskEndedOf(task)) {
+      // 已收尾/进入等待：不再推进等待项（不复活已结束的事实）。
       waiters.delete(entry.dispatchKey);
       return;
     }
@@ -1313,8 +1315,8 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         }
       }
       try {
-        const status = registry.get(entry.taskId).status;
-        if (status !== 'cancelling' && status !== 'running') return;
+        const task = registry.get(entry.taskId);
+        if (taskEndedOf(task) || task.pendingQuestion !== undefined) return;
         if (aborted) {
           waiters.delete(entry.dispatchKey);
           // 账行如实关闭（长任务没有完成；错误码是宿主侧取消事实，不冒充执行层失败）。
@@ -1322,12 +1324,12 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
             status: 'failed',
             error: { code: 'cancelled_by_user', message: '长任务已按用户请求中止。' },
           });
-          registry.confirmCancelled(entry.taskId);
+          registry.markCancelled(entry.taskId);
           log?.({ event: 'execution_aborted', operationId: entry.operationId, result: 'cancelled' });
           return;
         }
         log?.({ event: 'execution_aborted', operationId: entry.operationId, result: 'failed', reason });
-        registry.transition(entry.taskId, 'running'); // 未获确认：不得宣称取消
+        // 未获确认：不得宣称取消（任务事实不动，等待项重排）。
         entry.nextDue = now().getTime();
         schedulePump();
       } catch (error) {
@@ -1338,42 +1340,11 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     void call.finally(() => cancelCalls.delete(call));
   }
 
-  /** 启动恢复是否已跑过（取消孤儿只在第一趟 pump 扫，见下）。 */
-  let startupRecoveryDone = false;
-
-  /**
-   * 重启恢复·取消孤儿（2026-11-19 唤醒切片；只读审计 #14）：进程死在 `cancelling`（用户
-   * 说了停、执行端还没确认就断电）时，行会永远停在 cancelling——既没有在飞回合去确认，
-   * 也没有任何东西告诉用户「停没停成」（再取消撞非法边）。**只在启动后的第一趟 pump** 扫
-   * 一次（进程内正常的 cancelling 一定有在飞回合在推进，不是孤儿），且只回收「请求时刻已
-   * 超过一个租约窗口」的行（跨进程并发时另一进程正在确认的行不动——与租约过期同一保守
-   * 口径）。恢复走既有合法边：cancelling → running（「中止未获确认不得宣称取消」的回滚边）
-   * → result_unknown（做没做完/停没停成都说不清，不重放）；受影响任务并进 pump 摘要的
-   * `recoveredCancelling`，由装配层对原会话如实说清。
-   */
-  function recoverCancellingOrphans(nowMs: number): string[] {
-    const rows = registry.list !== undefined ? registry.list() : [];
-    const recovered: string[] = [];
-    for (const task of rows) {
-      if (task.status !== 'cancelling') continue;
-      const requestedAt = Date.parse(task.updatedAt);
-      if (!Number.isFinite(requestedAt) || nowMs - requestedAt < leaseMs) continue;
-      try {
-        registry.transition(task.taskId, 'running');
-        registry.markResultUnknown(task.taskId);
-        recovered.push(task.taskId);
-      } catch (error) {
-        // 并发下状态已被别的进程改变：跳过（不是本进程的回收目标），不推翻已发生的事实。
-        report(task.taskId, error);
-      }
-    }
-    return recovered;
-  }
-
   function pump(): PumpSummary {
+    // 重启恢复：过期租约 → died 事实（结果未知，禁止自动重放）。取消请求只存在于本进程
+    //（abort 控制器）；进程死在「请求了停、还没确认」的窗口时，租约随后过期 → died——
+    // 做没做完说不清，如实按结果未知收尾（旧 cancelling 孤儿回收面已被事实模型覆盖）。
     const recovered = registry.expireLeases(now().toISOString()).map((task) => task.taskId);
-    const recoveredCancelling = startupRecoveryDone ? [] : recoverCancellingOrphans(now().getTime());
-    startupRecoveryDone = true;
     let waiting: WaitingScan | undefined;
     let nextDue: number | undefined;
     if (dueConsumerEnabled) {
@@ -1409,14 +1380,14 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     const started: string[] = [];
     let rejection: ResourceRejectionReason | undefined;
     for (;;) {
-      // 先取许可再认领：认领即 running，而 running 没有回 queued 的合法边——
-      // 许可不足的任务必须留在 queued，不得先认领再退回。
+      // 先取许可再认领：认领即写 running_since（已启动事实），而已启动的任务不会被二次认领——
+      // 许可不足的任务必须保持未启动，不得先认领再退回。
       const acquired = policy.acquire('background');
       if (isRejection(acquired)) {
         rejection = acquired.reason;
         break;
       }
-      // 排队许可（state='queued'）= 暂无槽位；后台队列是底账 queued 行，不是 policy 队列——
+      // 排队许可（state='queued'）= 暂无槽位；后台队列是底账未启动行，不是 policy 队列——
       // 据排队许可直派发会绕过并发上限（队列容量>0 时实测 maxActive > backgroundConcurrency）。
       // 释放排队许可并停止本轮派发；槽位释放后的 schedulePump 会重新认领。
       if (acquired.state === 'queued') {
@@ -1444,7 +1415,6 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     }
     return {
       recovered,
-      recoveredCancelling,
       started,
       ...(rejection === undefined ? {} : { rejection }),
       ...(waiting === undefined ? {} : { timedOutWaiting: waiting.timedOut }),
@@ -1470,6 +1440,15 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   ): void {
     const controller = new AbortController();
     controllers.set(task.taskId, controller);
+    // 接续回合的在跑凭据（存活事实）：认领路径已带租约，这里补齐接续/长任务续跑回合——
+    // 否则进程中断后的接续回合无法被看门狗回收（旧登记缺口，事实模型下由租约事实覆盖）。
+    if (task.leaseUntil === undefined && registry.armLease !== undefined) {
+      try {
+        registry.armLease(task.taskId, { owner, leaseMs });
+      } catch (error) {
+        if (!isSettledRace(error)) report(task.taskId, error);
+      }
+    }
     // P0-C①：后台回合按真实 taskId 计入任务预算（calls=1 + 实际时长）；
     // 预算不存在的任务（未准入/无该端口的假件）跳过计量，不影响任务事实。
     const roundStartedAt = now().getTime();
@@ -1525,48 +1504,46 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   }
 
   /**
-   * 收尾：读取最新状态（取消请求/外部终态可能先落），走底账合法边，绝不覆盖既有终态。
-   * cancelling + 回合照常结束 = 中止未获确认 → 先回 running 再如实落实际终态（留痕）。
+   * 收尾：按回合事实落底账（S1 事实模型：没有终态转换，只有机械事实写入）。
+   * 结束事实（cancelled/died/timed_out/resource_limited）不翻案——回合与取消/看门狗竞争时，
+   * 先落的事实留下，后到的写入被一次性语义拒绝（TaskSettledError 只上报不覆盖）。
    */
   function settle(taskId: string, result: RoundResult): void {
-    const status = registry.get(taskId).status;
-
     if (result.kind === 'threw') {
-      const message = result.error instanceof Error ? result.error.message : String(result.error);
-      if (status === 'cancelling' && isAbortError(result.error)) {
-        registry.confirmCancelled(taskId); // abort 观察：确认中止
+      if (isAbortError(result.error) && cancelRequested.delete(taskId)) {
+        // abort 观察 + 用户确曾请求停止：确认取消（一次性事实；重复写零写入）。
+        try {
+          registry.markCancelled(taskId);
+        } catch (error) {
+          if (!isSettledRace(error)) report(taskId, error);
+        }
         return;
       }
-      if (status === 'cancelling') registry.transition(taskId, 'running'); // 未获确认：不得宣称取消
-      if (status === 'cancelling' || status === 'running') {
-        registry.fail(taskId, message);
-        return;
+      // 回合失败：事实已在执行行里；这里只发回合失败事实事件（失败通知/唤醒面的事实源），
+      // 不写任务结论、不合成失败文案。
+      try {
+        registry.noteRoundFailed(taskId);
+      } catch (error) {
+        if (!isSettledRace(error)) report(taskId, error);
       }
-      report(taskId, new Error(`回合收尾时任务已处于终态（${status}），不覆盖既有事实。`));
       return;
     }
 
     const { outcome } = result;
-    const live = status === 'cancelling' || status === 'running';
-    if (status === 'cancelling' && outcome.kind !== 'cancelled') {
-      registry.transition(taskId, 'running'); // 同上：未获确认的中止请求回滚
-    }
-    if (!live) {
-      report(taskId, new Error(`回合收尾（${outcome.kind}）时任务已处于终态（${status}），不覆盖既有事实。`));
-      return;
-    }
     switch (outcome.kind) {
       case 'accepted': {
-        // 长任务受理（契约 v4）：回合正常结束、任务保持 running；释放租约（槽位在 finally
-        // 释放）后交给等待端口推进。未注入等待端口 = 装配错误：不能留下无人推进的 running
-        // 任务，确定性失败并如实说明。
+        // 长任务受理（契约 v4）：回合正常结束、任务在跑；释放租约（槽位在 finally
+        // 释放）后交给等待端口推进。未注入等待端口 = 装配错误：不能留下无人推进的
+        // 在跑任务，记装配面缺陷事件（owner 2026-11-19 失败归宿规则第 3 档）。
         if (!longTaskEnabled) {
-          // 归宿（owner 2026-11-19 失败归宿规则第 3 档「告警/开发介入」）：这是**装配面缺陷**
-          // ——部署声明了长任务却没给等待端口，用户做不了什么，所以**不给用户编话**；落终态
-          // 的同时记一条结构化事件（进部署侧告警面：`npm run alerts` 的 host_fault 规则
-          // 认这个事件名），运维可见、可查。
           log?.({ event: 'task_long_task_unsupported', taskId });
-          registry.fail(taskId, '长任务需要注入 LongTaskPort（wait/abort）与底账 accepted 能力才能推进。');
+          // 无等待端口 = 装配缺陷：回合已结束，释放租约并发回合失败事实（存活面不留活行）。
+          releaseLeaseQuietly(taskId);
+          try {
+            registry.noteRoundFailed(taskId);
+          } catch (error) {
+            if (!isSettledRace(error)) report(taskId, error);
+          }
           return;
         }
         try {
@@ -1588,41 +1565,81 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         schedulePump();
         return;
       }
-      case 'completed': {
-        // 后台终态 = 执行端确认的回合结局（P2 契约：后台不经 inline judgeReportedTask——
-        // 其「首个非 completed 判负」会把等待接续的历史行误判为 failed）。
-        registry.transition(taskId, 'completed');
-        // 结果逐字存档（集成裁定，P6 报告 §七.3）：确认终态后经 P2 archiveReply 写 resultText；
-        // 空白结果不落（缺省=无存档，显示层不以汇报冒充）。
-        const resultText = outcome.resultText.trim();
-        if (resultText !== '' && registry.archiveReply !== undefined) {
-          registry.archiveReply([taskId], outcome.resultText);
+      case 'ended': {
+        // 外部事实先行（超时边界/取消确认/看门狗）：已收尾的任务不再追加事实——迟到回合的
+        // 汇报不落存档（事实不翻案），并经 onError 观察点如实上报。
+        try {
+          const current = registry.get(taskId);
+          if (taskEndedOf(current)) {
+            report(taskId, new Error(`回合收尾时任务已收尾（事实不翻案）：${taskId}。`));
+            return;
+          }
+        } catch (error) {
+          if (!isSettledRace(error)) report(taskId, error);
+        }
+        // 汇报逐字存档（事实；空白结果不落——显示层不以汇报冒充）；无汇报 = 回合失败事实
+        //（执行行就是事实，不判成败、不合成失败文案）。
+        const reportText = (outcome.report ?? '').trim();
+        releaseLeaseQuietly(taskId);
+        if (reportText !== '') {
+          try {
+            if (registry.archiveReply !== undefined) registry.archiveReply([taskId], outcome.report!);
+            else registry.noteRoundFailed(taskId); // 无存档面 = 结果可找回机制缺失，按失败事实上报
+          } catch (error) {
+            if (!isSettledRace(error)) report(taskId, error);
+          }
+          return;
+        }
+        try {
+          registry.noteRoundFailed(taskId);
+        } catch (error) {
+          if (!isSettledRace(error)) report(taskId, error);
         }
         return;
       }
-      case 'failed':
-        registry.fail(taskId, outcome.reason);
-        return;
       case 'result_unknown':
-        // U3：结果未知 ≠ 已确认失败 ≠ 成功（既有原因枚举，不新增状态）。
-        registry.markResultUnknown(taskId);
+        // U3：结果未知 ≠ 成功 ≠ 确认失败（账行 unknown 已禁止自动重试）；发回合失败事实事件。
+        releaseLeaseQuietly(taskId);
+        try {
+          registry.noteRoundFailed(taskId);
+        } catch (error) {
+          if (!isSettledRace(error)) report(taskId, error);
+        }
         return;
       case 'needs_input':
-        registry.waitForUser(taskId, outcome.question);
+        try {
+          registry.waitForUser(taskId, outcome.question);
+        } catch (error) {
+          if (!isSettledRace(error)) report(taskId, error);
+          return;
+        }
         notifyWaitingUser(taskId);
         return;
       case 'needs_confirmation':
-        // 写操作提案：与 needs_input 同一 waiting_user 状态机（不新状态、不建确认门）；
-        // confirmation 随问题落底账，是否确认由后续回合的用户表态与执行层校验决定。
-        registry.waitForUser(taskId, { ...outcome.question, confirmation: outcome.confirmation });
+        // 写操作提案：与 needs_input 同一等待事实（confirmation 随问题落底账，是否确认由
+        // 后续回合的用户表态与执行层校验决定）。
+        try {
+          registry.waitForUser(taskId, { ...outcome.question, confirmation: outcome.confirmation });
+        } catch (error) {
+          if (!isSettledRace(error)) report(taskId, error);
+          return;
+        }
         notifyWaitingUser(taskId);
         return;
       case 'timed_out':
-        registry.timeout(taskId, 'execution');
+        try {
+          registry.markTimedOut(taskId, 'execution');
+        } catch (error) {
+          if (!isSettledRace(error)) report(taskId, error);
+        }
         return;
       case 'cancelled':
-        if (status === 'running') registry.requestCancel(taskId); // 无请求而执行端确认取消：补齐请求事实
-        registry.confirmCancelled(taskId);
+        // 执行端确认中止：写取消事实（一次性；未请求而确认的取消同样如实落 cancelled_at）。
+        try {
+          registry.markCancelled(taskId);
+        } catch (error) {
+          if (!isSettledRace(error)) report(taskId, error);
+        }
         return;
     }
   }
@@ -1640,7 +1657,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     try {
       const task = registry.get(taskId);
       const question = task.pendingQuestion;
-      if (task.status !== 'waiting_user' || question === undefined) return;
+      if (question === undefined || taskEndedOf(task)) return;
       const noticed = waitingUserNotice.sendNotice({
         taskId,
         principalId: task.principalId,
@@ -1656,44 +1673,38 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
 
   function cancel(taskId: string, scope?: TaskScope): CancelOutcome {
     const task = registry.get(taskId, scope);
-    if (TERMINAL_STATUSES.has(task.status)) {
-      return { outcome: 'terminal', taskId, status: task.status };
+    if (taskEndedOf(task)) {
+      return { outcome: 'terminal', taskId };
     }
-    switch (task.status) {
-      case 'queued': {
-        registry.requestCancel(taskId, mutationOptions(scope));
-        policy.cancelQueued(taskId);
-        registry.confirmCancelled(taskId, mutationOptions(scope)); // 尚未启动执行：无中止可等，机械确认
-        return { outcome: 'cancelled', taskId };
-      }
-      case 'waiting_user': {
-        registry.requestCancel(taskId, mutationOptions(scope));
-        registry.confirmCancelled(taskId, mutationOptions(scope)); // 回合已结束：无在飞执行可中止
-        return { outcome: 'cancelled', taskId };
-      }
-      case 'running':
-      case 'cancelling': {
-        registry.requestCancel(taskId, mutationOptions(scope));
-        controllers.get(taskId)?.abort(); // 本进程在飞才可 abort；否则只请求，不宣称取消
-        // 长任务没有在飞回合（槽位已释放）：取消必须走执行层 abort，确认后才落 cancelled。
-        const waiting = pendingWaiterOf(taskId);
-        if (waiting !== undefined) {
-          waiters.set(waiting.dispatchKey, waiting);
-          abortPendingWait(waiting);
-        }
-        return { outcome: 'requested', taskId };
-      }
-      default:
-        // 'cancelled' 等终态已在上方拦截；此处不可达（穷尽性由类型保证）。
-        return { outcome: 'terminal', taskId, status: task.status };
+    if (task.pendingQuestion !== undefined) {
+      // 等待中的任务：回合已结束，无在飞执行可中止——机械确认取消。
+      registry.markCancelled(taskId, mutationOptions(scope));
+      return { outcome: 'cancelled', taskId };
     }
+    if (task.runningSince === undefined) {
+      // 未启动：尚未开始执行，无中止可等——机械确认取消。
+      registry.markCancelled(taskId, mutationOptions(scope));
+      policy.cancelQueued(taskId);
+      return { outcome: 'cancelled', taskId };
+    }
+    // 在跑：请求 ≠ 取消。abort 本进程在飞回合；长任务没有在飞回合（槽位已释放），
+    // 取消必须走执行层 abort；确认（回合以 cancelled 收尾/abort 成功）才写取消事实——
+    // 进程死在请求与确认之间时，租约随后过期 → died（做没做完说不清，如实按结果未知）。
+    cancelRequested.add(taskId);
+    controllers.get(taskId)?.abort();
+    const waiting = pendingWaiterOf(taskId);
+    if (waiting !== undefined) {
+      waiters.set(waiting.dispatchKey, waiting);
+      abortPendingWait(waiting);
+    }
+    return { outcome: 'requested', taskId };
   }
 
   function resume(taskId: string, options?: { answer?: string; scope?: TaskScope }): ResumeOutcome {
     const scope = options?.scope;
     const task = registry.get(taskId, scope);
-    if (task.status !== 'waiting_user') {
-      return { outcome: 'not_waiting', taskId, status: task.status };
+    if (task.pendingQuestion === undefined || taskEndedOf(task)) {
+      return { outcome: 'not_waiting', taskId };
     }
     const acquired = policy.acquire('background', { taskId });
     if (isRejection(acquired)) {
@@ -1723,8 +1734,8 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   function confirm(taskId: string, options?: { userText?: string; scope?: TaskScope }): ConfirmOutcome {
     const scope = options?.scope;
     const task = registry.get(taskId, scope);
-    if (task.status !== 'waiting_user') {
-      return { outcome: 'not_waiting', taskId, status: task.status };
+    if (task.pendingQuestion === undefined || taskEndedOf(task)) {
+      return { outcome: 'not_waiting', taskId };
     }
     const confirmation = task.pendingQuestion?.confirmation;
     if (confirmation === undefined) {
@@ -1784,13 +1795,13 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       try {
         registry.get(input.taskId);
       } catch {
-        // 不存在（越权/不存在同错）：正常受理。
+        // 不存在（越权/不存在同错）：正常受理（后台受理 = 未启动事实，等 runner 认领）。
         return registry.begin({
           taskId: input.taskId,
           principalId: input.principalId,
           sessionId: input.sessionId,
           request: input.request,
-          status: 'queued',
+          queued: true,
         });
       }
       throw new Error(`重复受理（幂等拒绝）：任务 ${input.taskId} 已存在。`);

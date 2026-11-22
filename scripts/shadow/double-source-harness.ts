@@ -90,10 +90,12 @@ export interface ShadowExecutionFact {
 }
 
 export interface ShadowTerminalFact {
-  status: string;
-  reason?: string;
+  // S1 事实模型：机械事实投影（没有 status/reason/failureReason 结论字段）。
+  hasReport: boolean;
   pendingMissing?: readonly string[];
-  failureReason?: string;
+  diedAt?: string;
+  cancelledAt?: string;
+  timedOutAt?: string;
   replyText?: string;
 }
 
@@ -106,7 +108,7 @@ export interface ShadowSourceRun {
   source: ShadowSourceName;
   kind: ShadowSourceKind;
   acceptance: ShadowAcceptance;
-  afterAcceptStatus: string;
+  afterAcceptHasReport: boolean;
   executions: readonly ShadowExecutionFact[];
   terminal: ShadowTerminalFact;
   notifications: readonly ShadowNotificationFact[];
@@ -244,7 +246,7 @@ export async function runChainOnSource(options: ChainRunOptions): Promise<Shadow
     const turn = await assembled.session.send(scenario.request);
     const taskId = turn.taskIds[0];
     if (taskId === undefined) throw new Error('（shadow harness）回合未委派任何任务。');
-    const afterAcceptStatus = assembled.taskRegistry.get(taskId, scope).status;
+    const afterAcceptRecord = assembled.taskRegistry.get(taskId, scope);
     release();
     await runner.whenIdle();
     await notifications.deliverPending();
@@ -259,17 +261,19 @@ export async function runChainOnSource(options: ChainRunOptions): Promise<Shadow
         source: options.source,
         kind: source.kind,
         acceptance,
-        afterAcceptStatus,
+        afterAcceptHasReport: (afterAcceptRecord.resultText ?? afterAcceptRecord.replyText ?? '').trim() !== '',
         executions: task.executions.map((record) => ({
           operation: record.operation,
           status: record.status,
           errorCode: record.error === undefined ? null : record.error.code,
         })),
         terminal: {
-          status: task.status,
-          ...(task.reason === undefined ? {} : { reason: task.reason }),
+          // S1 事实模型：机械事实投影（等待形状/机械时刻/汇报存档），没有 status/reason。
+          hasReport: (task.resultText ?? task.replyText ?? '').trim() !== '',
           ...(task.pendingQuestion === undefined ? {} : { pendingMissing: task.pendingQuestion.missing.map(String) }),
-          ...(task.failureReason === undefined ? {} : { failureReason: task.failureReason }),
+          ...(task.diedAt === undefined ? {} : { diedAt: task.diedAt }),
+          ...(task.cancelledAt === undefined ? {} : { cancelledAt: task.cancelledAt }),
+          ...(task.timedOutAt === undefined ? {} : { timedOutAt: task.timedOutAt }),
           ...(task.replyText === undefined ? {} : { replyText: task.replyText }),
         },
         notifications: rows.map((notification) => ({
@@ -306,7 +310,7 @@ export async function runChainOnSource(options: ChainRunOptions): Promise<Shadow
 
 export interface ChainProjection {
   accepted: ShadowAcceptance;
-  afterAcceptStatus: string;
+  afterAcceptHasReport: boolean;
   executions: readonly ShadowExecutionFact[];
   terminal: ShadowTerminalFact;
   notifications: readonly ShadowNotificationFact[];
@@ -321,7 +325,7 @@ export interface ChainComparison {
 export function projectChain(run: ShadowSourceRun): ChainProjection {
   return {
     accepted: run.acceptance,
-    afterAcceptStatus: run.afterAcceptStatus,
+    afterAcceptHasReport: run.afterAcceptHasReport,
     executions: run.executions,
     terminal: run.terminal,
     notifications: run.notifications,

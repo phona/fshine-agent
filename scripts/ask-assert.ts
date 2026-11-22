@@ -19,7 +19,23 @@
  *     该回合执行层审计行、任务汇报文本）；本断言由脚本显式声明时启用。
  *   · 未知 kind 在 parse 阶段即拒绝（脚本级 fail-closed，exit 2）。
  */
-import type { TaskRecord } from '../packages/agent/src/task-registry';
+import { taskLivenessOf, type TaskRecord } from '../packages/agent/src/task-registry';
+
+/**
+ * task_state 断言的机械事实值（S1：底账没有 status——按事实推导，判据见 task_state 分支注）。
+ */
+function taskStateValueOf(task: TaskRecord): string | undefined {
+  if (task.pendingQuestion !== undefined) return 'waiting_user';
+  if (task.cancelledAt !== undefined) return 'cancelled';
+  if (task.timedOutAt !== undefined) return 'timed_out';
+  if (task.resourceLimitedAt !== undefined) return 'resource_limited';
+  if (task.diedAt !== undefined) return 'died';
+  const report = (task.resultText ?? task.replyText ?? '').trim();
+  if (report !== '') return 'completed';
+  const last = task.executions[task.executions.length - 1];
+  if (last !== undefined && (last.status === 'failed' || last.status === 'refused')) return 'failed';
+  return taskLivenessOf(task);
+}
 
 export type AssertionAfter = number | 'all';
 
@@ -171,9 +187,12 @@ export function evaluateAssertion(spec: AssertionSpec, facts: AssertionFacts, in
       const taskIndex = spec.task ?? 1;
       const task = facts.tasks[taskIndex - 1];
       if (task === undefined) return fail(`任务 #${taskIndex} 不存在（当前 ${facts.tasks.length} 个）`);
-      return task.status === spec.value
-        ? pass(`任务 #${taskIndex} 状态=${task.status}`)
-        : fail(`任务 #${taskIndex} 状态=${task.status}，期望 ${String(spec.value)}`);
+      // S1 事实模型：底账没有 status 字段——断言值按机械事实比对（判据逐项写明；failed 取
+      // 末条执行行，空汇报失败的失败面不在此列，可能漏判——机械下限检查）。
+      const actual = taskStateValueOf(task);
+      return actual === spec.value
+        ? pass(`任务 #${taskIndex} 事实=${actual}`)
+        : fail(`任务 #${taskIndex} 事实=${actual ?? '（未收尾）'}，期望 ${String(spec.value)}`);
     }
     case 'task_no': {
       if (facts.tasks.some((task) => task.taskId.trim() === '')) return fail('存在空任务标识');

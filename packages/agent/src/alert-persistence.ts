@@ -165,6 +165,7 @@ export function logLineToFact(line: string, logOffset: number, nowIso: string): 
   // isDeliveryFailure，不在这里猜（2026-11-19 delivery-truth 并集补）。
   if (typeof obj['deliveryMode'] === 'string') detail.deliveryMode = obj['deliveryMode'];
   if (typeof obj['taskStatus'] === 'string') detail.taskStatus = obj['taskStatus'];
+  if (typeof obj['taskState'] === 'string') detail.taskStatus = obj['taskState'];
   // 协议违约 / 确认句柄丢失的显式标记（执行层事件形状）。
   if (obj['protocolViolation'] === true) detail.protocolViolation = true;
   if (obj['confirmationLost'] === true) detail.confirmationLost = true;
@@ -200,8 +201,11 @@ export function ledgerFacts(dbPath: string): { facts: AlertFact[]; note?: string
     for (const stored of store.listTasks()) {
       const task = stored.task;
       const at = task.updatedAt;
-      if (task.status === 'running' || task.status === 'waiting_user') {
-        const since = task.status === 'waiting_user'
+      // 在跑/等待事实（S1 事实模型：没有 status 列——等待形状与 running_since 即事实）。
+      const waiting = task.pendingQuestion !== undefined;
+      const running = task.runningSince !== undefined && !waiting;
+      if (running || waiting) {
+        const since = waiting
           ? (task.waitingSince ?? task.updatedAt)
           : (task.runningSince ?? task.updatedAt);
         facts.push({
@@ -213,7 +217,7 @@ export function ledgerFacts(dbPath: string): { facts: AlertFact[]; note?: string
           principalId: task.principalId,
           sessionId: task.sessionId,
           evidenceRef: `task:${task.taskId}`,
-          detail: { taskStatus: task.status },
+          detail: { taskStatus: waiting ? 'waiting_user' : 'running' },
         });
       }
       for (const execution of stored.executions) {
