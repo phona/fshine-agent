@@ -22,6 +22,7 @@ import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import { assembleSessionCore } from './ask-runtime';
+import { taskStatusOf } from '../packages/agent/testing/task-fact-view';
 import { materializeEvalConfig } from './resolve-config-path';
 import type { TurnDriver } from '../packages/agent/src/driver-contract';
 import { assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
@@ -185,7 +186,7 @@ describe('P7a 交互式 ask：进程内多轮循环（共享装配 + 假 driver�
       expect(text).toContain('委派=否');
       // 同一会话、同一底账 scope：唯一任务来自回合 1，回合 2 不产生新任务。
       expect(assembled.session.tasks()).toHaveLength(1);
-      expect(assembled.session.tasks()[0]!.status).toBe('completed');
+      expect(taskStatusOf(assembled.session.tasks()[0]!)).toBe('completed');
     } finally {
       assembled.close();
     }

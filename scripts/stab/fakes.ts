@@ -362,12 +362,13 @@ export interface TaskSummary {
 export function summarizeTasks(tasks: readonly TaskRecordView[], calls: readonly TaskExecutionInput[]): TaskSummary {
   // S1 事实模型：没有 status/reason——按机械事实分桶（等待事实/机械时刻/汇报存档）。
   const stateOf = (task: TaskRecordView): string => task.pendingQuestion !== undefined ? 'waiting_user'
-    : task.diedAt !== undefined ? 'died'
-      : task.cancelledAt !== undefined ? 'cancelled'
-        : task.timedOutAt !== undefined ? 'timed_out'
-          : task.resourceLimitedAt !== undefined ? 'resource_limited'
-            : (task.resultText ?? '').trim() !== '' ? 'reported'
-              : task.runningSince === undefined ? 'queued' : 'running';
+    : task.cancelledAt !== undefined ? 'cancelled'
+      : task.timedOutAt !== undefined ? 'timed_out'
+        : task.resourceLimitedAt !== undefined ? 'failed'
+          : task.diedAt !== undefined ? 'failed'
+            : (task.replyText ?? task.resultText ?? '').trim() !== '' ? 'completed'
+              : task.leaseUntil !== undefined ? 'running'
+                : task.runningSince === undefined ? 'queued' : 'failed';
   const terminalCounts: Record<string, number> = {};
   const terminalReasonCounts: Record<string, number> = {};
   let openOnDrain = 0;
@@ -375,8 +376,12 @@ export function summarizeTasks(tasks: readonly TaskRecordView[], calls: readonly
     const state = stateOf(task);
     terminalCounts[state] = (terminalCounts[state] ?? 0) + 1;
     // TaskRecordView 不带执行行——按机械时刻计数（died/cancelled/timed_out/resource_limited）。
+    const reasonWordOf = { diedAt: 'result_unknown', cancelledAt: 'cancelled_by_user', timedOutAt: 'timeout', resourceLimitedAt: 'resource_limited' } as const;
     for (const fact of ['diedAt', 'cancelledAt', 'timedOutAt', 'resourceLimitedAt'] as const) {
-      if (task[fact] !== undefined) terminalReasonCounts[fact] = (terminalReasonCounts[fact] ?? 0) + 1;
+      if (task[fact] !== undefined) {
+        const word = reasonWordOf[fact];
+        terminalReasonCounts[word] = (terminalReasonCounts[word] ?? 0) + 1;
+      }
     }
     if (OPEN_STATES.has(state)) openOnDrain += 1;
   }

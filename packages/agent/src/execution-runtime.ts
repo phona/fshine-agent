@@ -4065,6 +4065,19 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           outcome: resumedOutcome,
           dispatchKey: resumedOperation.dispatchKey,
         });
+        // S1 如实交付（2026-11-22）：wait 终态是失败/拒绝时，这条机械事实必须落进执行事实账本
+        // ——否则任务只有先前的 accepted 行，存活面会把「长任务失败」读成仍在跑/已完成，收尾
+        // 汇报（对失败的说明）会被当成完成结果。requestId 用 wait 身份（原执行行 request_id 是
+        // 主键，不能复用）。
+        if (resumedOutcome.status === 'failed' || resumedOutcome.status === 'refused') {
+          options.registry.noteExecution(task.taskId, {
+            requestId: `wait:${resumedOperation.dispatchKey}`,
+            operation: resumedOperation.operation,
+            status: resumedOutcome.status,
+            dispatchKey: resumedOperation.dispatchKey,
+            error: resumedOutcome.error,
+          });
+        }
       }
       const delegationFiles: TurnFileRef[] = (taskBridge?.taskFiles() ?? []).map((file) => ({
         fileId: file.fileId,
@@ -4442,12 +4455,13 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       if (lastWritable !== undefined && lastWritable.outcome.status === 'needs_confirmation') {
         return confirmationOutcomeOf(lastWritable);
       }
-      // needs_input 与 needs_confirmation 同一把尺：只有**末次非只读**才算等待事实。旧实现取
-      // 「第一条 needs_input」提前返回，会把之后已落库的写收成等待补充（用户补答后续跑
-      // 可能再写一次，2026-11-21 Grok 审查 blocking）；反过来，末条是 needs_input 时也
-      // 不被前面某条成功的只读/写掩盖。
-      if (lastWritable !== undefined && lastWritable.outcome.status === 'needs_input') {
-        const question = pendingQuestionFrom(lastWritable.outcome);
+      // needs_input 与 needs_confirmation **不同一把尺**：needs_confirmation 只认非只读（写提案），
+      // 但 needs_input（缺什么）读写都可能出现（读查询也会因歧义要用户补口径，如「哪个集合」）——
+      // 以**末条非脚本**执行为准（不被 run_js 掩盖，也不被前面某条已成功的事实掩盖）。旧实现取
+      // 「第一条 needs_input」提前返回会把之后已落库的写收成等待补充（2026-11-21 Grok 审查 blocking）。
+      const lastExecuted = [...recorded].reverse().find((entry) => entry.operation !== RUN_JS_TOOL);
+      if (lastExecuted !== undefined && lastExecuted.outcome.status === 'needs_input') {
+        const question = pendingQuestionFrom(lastExecuted.outcome);
         // 执行层要求补充但没说清缺什么：等待事实形状不完整——回合按汇报收尾（执行行是事实），
         // 不编造问题形状。
         return question === undefined
@@ -4499,14 +4513,48 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       };
       const selfConfirmBlocked = selfConfirmBlockedRoundOf();
       if (selfConfirmBlocked !== undefined) return selfConfirmBlocked;
+      /**
+       * 本回合执行事实的机械结局（如实交付分流；2026-11-22）：从**末条**「非容忍失败」的
+       * 执行事实取 failed/refused + 原始码 + 原文；一条都没有 = success（含零执行收尾）。
+       * 口径与账本末次决定性执行一致：失败的 run_js 也算（成功脚本不掩盖此前的失败读；
+       * 循环找的是最后一条 failed/refused），容忍码（同回合提案被挡/模型误用历史协议）
+       * 不算真失败——那类回合的结局由更上面的等待事实决定。
+       */
+      const roundFailureOf = ():
+        | { outcome: 'failed' | 'refused'; code?: string; reason?: string }
+        | undefined => {
+        for (let index = recorded.length - 1; index >= 0; index -= 1) {
+          const entry = recorded[index];
+          if (entry === undefined) continue;
+          const status = entry.outcome.status;
+          if (status !== 'failed' && status !== 'refused') continue;
+          const code = entry.outcome.error.code;
+          if (SAME_TURN_TOLERATED_FAILURE_CODES.has(code)) continue;
+          const reason = entry.outcome.error.message;
+          return {
+            outcome: status,
+            ...(code === undefined || code === '' ? {} : { code }),
+            ...(reason === undefined || reason.trim() === '' ? {} : { reason }),
+          };
+        }
+        return undefined;
+      };
       if (recorded.length === 0) {
         // 发起前被宿主拒绝（权限/允许集合）时，机械事实 zeroExecReason 让唤醒面按「本次不允许」
         // 说清——用户该看到「没权限」，不是「模型没干活」：后者把权限问题说成模型问题，
         // 还会诱导用户让模型重试同一个动作。
+        // report 照样带上 Worker 汇报：零执行 ≠ 没有答复（模型可能已经说清「办不了/没权限」，
+        // 丢掉汇报会把本回合判成「一无所有」→ 假失败 + 用户收不到那句解释）。
         if (hostRefusedOperations.length > 0) {
-          return { kind: 'ended', zeroExecReason: 'not_permitted' };
+          return {
+            kind: 'ended',
+            report: workerResult.text,
+            zeroExecReason: 'not_permitted',
+            // 执行结局 = 发起前被宿主拒绝（本次不允许）；投递面据此走失败回调，不要说「办好了」。
+            executionOutcome: 'not_permitted',
+          };
         }
-        return { kind: 'ended' };
+        return { kind: 'ended', report: workerResult.text };
       }
       // CAP-01 S2 ④ 兜底扫描（与同步委派同一纪律）：任务 out/ 全量登记——执行层按
       // fileParams 写出的产物即使没走 run_js 也要回程；与回程登记同池去重。
@@ -4518,10 +4566,20 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       // 同位面；装配方按它投递（投递去留与前台同一交付面/角色闸）。
       // 回合收尾不判业务终局（S1：没有 completed/failed 结论）——做没做成由 Main 读
       // 执行事实（executions）自己判断；本回合只如实上交 worker 汇报与产物登记事实。
+      // executionOutcome 是**如实交付分流**（不是业务终局）：本回合执行事实里有没有
+      // failed/refused；有则投递面走失败回调，绝不把「对失败的说明」说成「办好了」。
+      const roundFailure = roundFailureOf();
       return {
         kind: 'ended',
         report: workerResult.text,
         ...(taskFiles.length === 0 ? {} : { files: taskFiles }),
+        ...(roundFailure === undefined
+          ? {}
+          : {
+            executionOutcome: roundFailure.outcome,
+            ...(roundFailure.code === undefined ? {} : { errorCode: roundFailure.code }),
+            ...(roundFailure.reason === undefined ? {} : { failureReason: roundFailure.reason }),
+          }),
       };
     },
   };

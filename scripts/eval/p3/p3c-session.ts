@@ -40,7 +40,8 @@ import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver, TurnDriverInput } from '../../../packages/agent/src/driver-contract';
 import { createResourcePolicy } from '../../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import type { TaskScope } from '../../../packages/agent/src/task-registry';
+import { taskStateWordOf, type TaskScope } from '../../../packages/agent/src/task-registry';
+import { taskReasonOf } from '../../../packages/agent/testing/task-fact-view';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import {
   assembleSessionCore,
@@ -419,12 +420,12 @@ async function run(): Promise<void> {
     const pumpAfter = dispatch.runner.pump();
     await dispatch.runner.whenIdle();
     partE['mechanical'] = {
-      submittedStatus: mechTask.status,
+      submittedStatus: taskStateWordOf(mechTask),
       cancelOutcome,
       pumpAfter,
       inFlightAfter: [...dispatch.runner.inFlight()],
-      taskStatusAfter: registry.get(mechTask.taskId, scope)?.status ?? null,
-      taskReasonAfter: registry.get(mechTask.taskId, scope)?.reason ?? null,
+      taskStatusAfter: taskStateWordOf(registry.get(mechTask.taskId, scope)),
+      taskReasonAfter: taskReasonOf(registry.get(mechTask.taskId, scope)) ?? null,
     };
     partE['sessionTasksFinal'] = JSON.parse(JSON.stringify(session.tasks()));
     // 取消后执行核查：E2 任务不得有任何 execute 记录。

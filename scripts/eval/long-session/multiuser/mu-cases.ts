@@ -301,7 +301,7 @@ export async function mu5(rt: RuntimeConfig): Promise<MuCaseResult> {
   const aSubmit = `${MU_TAGS['mu-alice']} 交办查账`;
   plans.delegate('mu-alice', aSubmit, { reply: '已受理，稍后通知你。', operation: 'dummy.query', args: { '--collection': 'TAG-ALICE' }, summary: '完成。' });
   const ctx = makeCtx(plans.table(), null);
-  const handle = await createMuServer({ dir: tmp.dir, ctx, mode: 'background', runtime: rt, taskExecutor: new MuFakeExecutor([async () => ({ kind: 'completed', resultText: '完成。' })]) });
+  const handle = await createMuServer({ dir: tmp.dir, ctx, mode: 'background', runtime: rt, taskExecutor: new MuFakeExecutor([async () => ({ kind: 'ended', report: '完成。' })]) });
   try {
     await deliver(handle.server.handler, incoming('mu-alice', 'conv-a5', 'a-1', aSubmit));
     const aliceTask = readTasks(handle.dbPath).find((task) => task.principalId === principalIdOf('mu-alice'));
@@ -384,7 +384,7 @@ export async function mu7(rt: RuntimeConfig): Promise<MuCaseResult> {
   plans.turn('mu-alice', `${MU_TAGS['mu-alice']} 下一步`, { reply: '收到。' });
   const ctx = makeCtx(plans.table(), null);
   const sink = new MuRecordingSink();
-  const executor = new MuFakeExecutor([async () => ({ kind: 'completed', resultText: '账已清点：3 条。' })]);
+  const executor = new MuFakeExecutor([async () => ({ kind: 'ended', report: '账已清点：3 条。' })]);
   // 2026-11-19 复核 F3 迁移：completed 从 B 通道移除后，完成事实只在**慢活**路径上由唤醒
   // （降级）注入——快活路径的结果已在同回合交给模型，不再重复注入。本用例要的正是慢活路径
   // 的两面性：owner 下一回合拿到自己的完成事实、非 owner 拿不到。故本用例关掉 task_run 短

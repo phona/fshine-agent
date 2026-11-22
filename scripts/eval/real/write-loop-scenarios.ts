@@ -46,6 +46,7 @@ import { effectiveDeploymentEnv, effectiveRoleOf, loadConfig, permissionsOfRole 
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TaskRecord, TaskScope } from '../../../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from '../../../packages/agent/testing/task-fact-view';
 import type { Notification, NotificationSink } from '../../../packages/agent/src/notifications';
 import { stripServerPaths } from '../../../packages/agent/src/server-paths';
 import { createServer, resolveSingleProfile, type FileDeliveryPort, type Server } from '../../../apps/server/server';
@@ -142,7 +143,7 @@ export const CANCELLATION_FACT_MARKER = '已按你说的停了：';
  *  2026-11-21 已撤回旧「还在办，办完会发你」承诺——上一进程已死，那句话永远兑现不了）。 */
 export const STILL_PROCESSING_NOTE = '这条消息上次没办完（我这边中途中断过），我不会重复执行它，结果未知——麻烦你重发一次。';
 
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'unexecuted']);
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'unexecuted', 'resource_limited']);
 
 // ---------------------------------------------------------------------------
 // 输出（脱敏：绝对路径先替换；密钥永不打印）
@@ -429,10 +430,10 @@ export function taskFactsOf(records: readonly TaskRecord[]): TaskFact[] {
     taskId: record.taskId,
     ...(record.taskNo === undefined ? {} : { taskNo: record.taskNo }),
     ...(record.name === undefined ? {} : { name: record.name }),
-    status: record.status,
-    ...(record.reason === undefined ? {} : { reason: record.reason }),
+    status: taskStatusOf(record),
+    ...(taskReasonOf(record) === undefined ? {} : { reason: taskReasonOf(record)! }),
     resultText: record.resultText ?? null,
-    ...(record.failureReason === undefined ? {} : { failureReason: record.failureReason }),
+    ...(taskFailureReasonOf(record) === undefined ? {} : { failureReason: taskFailureReasonOf(record)! }),
     executions: record.executions.map((execution) => ({
       operation: execution.operation,
       status: execution.status,
@@ -637,7 +638,7 @@ export function evaluateFailureCriteria(evidence: FailureEvidence): CriterionRes
   // 具体失败业务事实（执行层拒写、读回零落地、无假成功）另由 S2-C1/C4/C5 机械钉住。
   const visibleTexts = evidence.visible.map((entry) => entry.text);
   const failureNotice = visibleTexts.find((text) => text.trim() !== '');
-  const expectedFailureText = failureTextFor(evidence.failureCode, 'failed');
+  const expectedFailureText = failureTextFor('failed');
   const deliveredTemplate = evidence.pushTexts.some((text) => text.includes(expectedFailureText));
   const zeroWrites = evidence.readbackAfter.status === 'completed'
     && evidence.readbackAfter.count === evidence.readbackBefore.count
@@ -686,7 +687,7 @@ export function evaluateFailureObservations(evidence: FailureEvidence): Observat
     {
       id: 'O2',
       title: '失败话术归类（底账 code → 宿主模板）',
-      detail: `code=${evidence.failureCode ?? '(无)'} → ${digestValue(failureTextFor(evidence.failureCode, 'failed'), 200)}`,
+      detail: `code=${evidence.failureCode ?? '(无)'} → ${digestValue(failureTextFor('failed'), 200)}`,
     },
     {
       id: 'O3',
@@ -1766,12 +1767,12 @@ async function runTwoObjectsScenario(harness: Harness, options: ScenarioRunOptio
   await harness.sendTurn(1, TWO_OBJECTS_TURN_1, `wloop2-two-${nowSlug()}-1`);
   let confirmTurns = 0;
   for (let round = 0; round < 3; round += 1) {
-    const waiting = harness.taskRecords().filter((task) => task.status === 'waiting_user' && task.pendingQuestion?.confirmation !== undefined);
+    const waiting = harness.taskRecords().filter((task) => taskStatusOf(task) === 'waiting_user' && task.pendingQuestion?.confirmation !== undefined);
     if (waiting.length === 0) {
       // 还没有提案再等一次（Worker 回合可能仍在跑）。
       const sawProposal = await waitForProposal(harness, options);
       if (!sawProposal) break;
-      const waitingAfter = harness.taskRecords().filter((task) => task.status === 'waiting_user' && task.pendingQuestion?.confirmation !== undefined);
+      const waitingAfter = harness.taskRecords().filter((task) => taskStatusOf(task) === 'waiting_user' && task.pendingQuestion?.confirmation !== undefined);
       if (waitingAfter.length === 0) break;
     }
     confirmTurns += 1;

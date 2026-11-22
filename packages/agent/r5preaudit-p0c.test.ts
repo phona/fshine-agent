@@ -35,7 +35,7 @@ type TaskStatus =
 // ---------------------------------------------------------------------------
 
 class AuditRegistry implements TaskRegistryPort {
-  private readonly tasks = new Map<string, TaskRecordView & { status: TaskStatus; leaseOwner?: string; leaseUntil?: string }>();
+  private readonly tasks = new Map<string, TaskRecordView & { status: TaskStatus; runningSince?: string; leaseOwner?: string; leaseUntil?: string }>();
   private seq = 0;
 
   begin(input: { taskId: string; principalId: string; sessionId: string; request: string; queued?: boolean }): TaskRecordView {
@@ -46,6 +46,7 @@ class AuditRegistry implements TaskRegistryPort {
       sessionId: input.sessionId,
       request: input.request,
       status: input.queued === true ? 'queued' : 'running',
+      ...(input.queued === true ? {} : { runningSince: now }),
       createdAt: now,
       updatedAt: now,
     };
@@ -75,8 +76,20 @@ class AuditRegistry implements TaskRegistryPort {
     return this.snapshot(taskId);
   }
 
-  waitForUser(taskId: string, _q: PendingQuestion): TaskRecordView { return this.transition(taskId, 'waiting_user'); }
-  answerResumes(taskId: string): TaskRecordView { return this.transition(taskId, 'running'); }
+  waitForUser(taskId: string, q: PendingQuestion): TaskRecordView {
+    const task = this.tasks.get(taskId);
+    if (task === undefined) throw new Error(`不存在：`);
+    task.status = 'waiting_user';
+    task.pendingQuestion = q;
+    return this.snapshot(taskId);
+  }
+  answerResumes(taskId: string): TaskRecordView {
+    const task = this.tasks.get(taskId);
+    if (task === undefined) throw new Error(`不存在：`);
+    task.status = 'running';
+    delete task.pendingQuestion;
+    return this.snapshot(taskId);
+  }
   requestCancel(taskId: string): TaskRecordView { return this.transition(taskId, 'cancelling'); }
   confirmCancelled(taskId: string): TaskRecordView { return this.transition(taskId, 'cancelled'); }
   timeout(taskId: string): TaskRecordView { return this.transition(taskId, 'timed_out'); }
@@ -103,6 +116,7 @@ class AuditRegistry implements TaskRegistryPort {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
     if (next === undefined) return undefined;
     next.status = 'running';
+    if (next.runningSince === undefined) next.runningSince = new Date().toISOString();
     next.leaseOwner = input.owner;
     next.leaseUntil = new Date(Date.now() + input.leaseMs).toISOString();
     return this.snapshot(next.taskId);
@@ -316,7 +330,7 @@ describe('P0-C⑤ 取消/重复提交/幂等重放不重复执行不重复计量
     runner.pump();
     executor.at('t').finish({ kind: 'ended', report: 'ok' });
     await runner.whenIdle();
-    expect(runner.cancel('t')).toEqual({ outcome: 'terminal', taskId: 't', status: 'completed' });
+    expect(runner.cancel('t')).toEqual({ outcome: 'terminal', taskId: 't' });
     expect(policy.budgetFor('t').used.calls).toBe(1); // 无第二次计量
   });
 });

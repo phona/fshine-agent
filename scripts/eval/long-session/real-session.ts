@@ -27,6 +27,7 @@ import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
 import { createResourcePolicy } from '../../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
+import { taskStatusOf, taskReasonOf } from '../../../packages/agent/testing/task-fact-view';
 import { TASK_CANCEL_TOOL, EXECUTE_OPERATION_TOOL } from '../../../packages/agent/src/execution-runtime';
 import {
   assembleSessionCore, compactionSettingsFrom, contextWindowFrom, createBackgroundDispatch, resolveExecutionFace,
@@ -472,8 +473,8 @@ export async function openRealSession(input: RealSessionInput): Promise<RealSess
         taskId: task.taskId,
         ...(task.taskNo === undefined ? {} : { taskNo: task.taskNo }),
         request: task.request,
-        status: task.status,
-        ...(task.reason === undefined ? {} : { reason: task.reason }),
+        status: taskStatusOf(task),
+        ...(taskReasonOf(task) === undefined ? {} : { reason: taskReasonOf(task)! }),
         requestIds: task.executions.map((e) => e.requestId),
       }));
     },

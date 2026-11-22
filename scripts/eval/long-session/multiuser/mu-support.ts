@@ -22,6 +22,7 @@ import type { MainSessionLocation } from '../../../../packages/agent/src/session
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { Notification, NotificationSink } from '../../../../packages/agent/src/notifications';
 import { createSqliteTaskRegistry } from '../../../../packages/agent/src/task-registry-sqlite';
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from '../../../../packages/agent/testing/task-fact-view';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../../../../packages/agent/src/task-runner';
 import { createServer, type Server } from '../../../../apps/server/server';
 import { WecomBotChannel, type SdkClientLike } from '../../../../packages/channel-wecom/src/index';
@@ -372,7 +373,7 @@ export class MuFakeExecutor implements TaskExecutor {
   async execute(input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
     this.taskIds.push(input.taskId);
     const handler = this.handlers.shift();
-    if (handler === undefined) return { kind: 'completed', resultText: `（MU 假执行器）任务 ${input.taskId} 完成。` };
+    if (handler === undefined) return { kind: 'ended', report: `（MU 假执行器）任务 ${input.taskId} 完成。` };
     return await handler();
   }
 }
@@ -518,9 +519,9 @@ export function readTasks(dbPath: string): MuTaskSnapshot[] {
       principalId: task.principalId,
       sessionId: task.sessionId,
       request: task.request,
-      status: task.status,
-      reason: task.reason,
-      failureReason: task.failureReason,
+      status: taskStatusOf(task),
+      reason: taskReasonOf(task),
+      failureReason: taskFailureReasonOf(task),
       resultText: task.resultText,
       requestIds: task.executions.map((execution) => execution.requestId),
       replyText: task.replyText,

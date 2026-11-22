@@ -445,11 +445,11 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
 
     // 机械回执：终态任务无操作，原样给出 completed（模型不得据此宣称已取消）。
     // 同上：回执带身份，断言改为子集 + 身份存在。
-    expect(results[0]).toMatchObject({ outcome: 'terminal', taskId: 'task_done', status: 'completed' });
+    expect(results[0]).toMatchObject({ outcome: 'terminal', taskId: 'task_done' });
     expect(results[0]).not.toHaveProperty('taskNo');
     // 终态：用户可见话术必须说"没停成 + 已完成"，不能只说"已取消"。
     expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('没停成');
-    expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('completed');
+    expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('办完');
     const task = registry.get('task_done', SCOPE);
     expect(taskStatusOf(task)).toBe('completed');
     expect(taskReasonOf(task)).toBeUndefined();

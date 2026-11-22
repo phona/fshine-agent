@@ -294,15 +294,26 @@ function mapExecStatus(status: string): ExecutionOutcomeStatus {
  * 从底账 executions **逐条 status** 机械对比得出答复五值（S1：宿主 classifyOutcome 已随 task
  * 去结论字段删除，判定器改为自己读执行清单；**不读回复文案、不读任何自由文本**）。
  *
- * 与旧分类器的执行分支逐条对齐（判定语义不变，禁止放宽/收紧）：
+ * 保留的执行分支（与旧分类器的执行分支逐条对齐，禁止放宽/收紧）：
  *   · zero executions → 'unsupported'：没有办理动作发生（零执行）；
  *   · 末条执行 = 决定性结果（先失败后成功 → completed；末条 completed 不被前序失败翻转）：
  *       failed / refused / result_unknown → 'failed'；
  *       needs_input / needs_confirmation → 'blocked'；
  *       其余（completed / accepted）→ 'completed'。
- * S1 后底账没有任务结论字段（task 不再有 status/终态），零执行原有的 blocked 分支（权限拒绝 /
- * 等用户补信息）随之失去机械输入，按零执行 fall-through 落 'unsupported'——唯一使用本函数的
- * E11 接受集 {unsupported, blocked} 同时覆盖两者，判定结论不变。
+ *
+ * **S1 显式登记：以下旧分类器分支已删（不是静默丢语义，逐条写明再重锁）**：
+ *   (a) 终态分支 `terminal === 'failed' | 'timed_out' → 'failed'`：旧读数来自 `task.status`
+ *       （旧 `mapTerminal`）；S1 底账不再有 `status`/终态字段，判据面拿不到该机械输入。新读数
+ *       （四个一次性时刻 diedAt/timedOutAt/cancelledAt/resourceLimitedAt）与旧终态**不是一一对应**
+ *       （旧分类器无 died/cancelled/resource_limited），强行映射属于**新增**语义而非还原；且旧
+ *       `mapTerminal` 对未知/缺省 status 一律回落 'failed'——S1 后会让任何已执行任务误判为 failed。
+ *       故本判定器不再据此归类（如需恢复，须 owner 裁定新时刻→outcome 的映射）。
+ *   (b) `partial` 分支（`completed` 且逐条 items 有 failed/unknown）：旧分类器读 `execution.items`，
+ *       但本判定器的调用面**从未把 items 传进 ledger**（旧 `outcomeFromTask` 只传 status/error.code），
+ *       该分支在本路径上本就不可达；S1 后底账 `ExecutionRecord` 亦无 `items`。仅 E11 使用本函数，
+ *       其接受集 {unsupported, blocked} 不涉 partial。
+ *   (c) 零执行 blocked 分支（权限拒绝 / 等用户补信息）：失去机械输入，按零执行 fall-through 落
+ *       'unsupported'——唯一使用本函数的 E11 接受集 {unsupported, blocked} 同时覆盖两者，判定结论不变。
  */
 function outcomeFromTask(task: TaskRecordJson): TaskOutcome {
   const executions = task.executions ?? [];

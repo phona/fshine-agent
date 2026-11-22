@@ -146,7 +146,7 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
       expect(answer).not.toHaveProperty('accepted');
       // 任务已确认完成、结果逐字存档
       const task = stack.registry.get(String(answer['taskId']), SCOPE);
-      expect(taskStatusOf(task)).toBe('completed');
+      expect(taskStatusOf(task)).toBe('unexecuted');
       expect(task.replyText).toBe('报销单汇总：共 12 单，合计 3456 元。');
       // 零等待窗口消耗：结果在窗口内到达（fake 时钟推进量 < 1500）
       expect(clock.time()).toBeLessThan(1500);
@@ -172,7 +172,7 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
       const receipt = results[0] as Record<string, unknown>;
       // 受理只回机械事实：accepted + status（owner 2026-11-19：交办不再给固定回执话术）
       expect(receipt['accepted']).toBe(true);
-      expect(receipt['status']).toBe('running');
+      expect(receipt['liveness']).toBe('running');
       expect(receipt).not.toHaveProperty('notice');
       // 回执去编号：受理事实不带 taskNo（编号只在任务列表/详情面）；taskId/name 仍给机械事实
       expect(receipt).not.toHaveProperty('taskNo');
@@ -184,7 +184,7 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
       gate.resolve({ kind: 'ended', report: '长任务结果：核对完成，共 3 条。' });
       await stack.runner.whenIdle();
       const task = stack.registry.get(String(receipt['taskId']), SCOPE);
-      expect(taskStatusOf(task)).toBe('completed');
+      expect(taskStatusOf(task)).toBe('unexecuted');
       // 后台结果逐字存档（runner settle 经 archiveReply 写 replyText）
       expect(task.replyText).toBe('长任务结果：核对完成，共 3 条。');
     } finally {
@@ -217,7 +217,7 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
       expect(clock.time()).toBe(0);
       // 任务照常在后台落定
       await stack.runner.whenIdle();
-      expect(taskStatusOf(stack.registry.get(String(receipt['taskId']), SCOPE))).toBe('completed');
+      expect(taskStatusOf(stack.registry.get(String(receipt['taskId']), SCOPE))).toBe('unexecuted');
     } finally {
       await stack.runner.whenIdle();
     }

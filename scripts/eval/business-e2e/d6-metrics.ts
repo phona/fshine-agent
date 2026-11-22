@@ -68,7 +68,7 @@ export interface D6Metrics {
   runDir: string;
 }
 
-const TERMINAL_TASK_STATES = new Set(['completed', 'failed', 'refused', 'cancelled', 'canceled']);
+const TERMINAL_TASK_STATES = new Set(['completed', 'failed', 'refused', 'cancelled', 'canceled', 'timed_out']);
 const CANCEL_STATES = new Set(['cancelled', 'canceled']);
 
 function readJson<T>(file: string): T | undefined {

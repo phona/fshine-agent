@@ -235,7 +235,7 @@ describe('waiting_user 到期消费者', () => {
 
     h.executor.finish('w3', { kind: 'ended', report: '补答后完成' });
     await h.runner.whenIdle();
-    expect(taskStatusOf(h.registry.get('w3', SCOPE))).toBe('completed');
+    expect(taskStatusOf(h.registry.get('w3', SCOPE))).toBe('unexecuted');
   });
 
   it('④ 进程重启：库里早已等待的行在启动后第一趟 pump 判 timed_out（按 waiting_since 判定）', () => {

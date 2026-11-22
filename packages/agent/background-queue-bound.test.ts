@@ -23,7 +23,7 @@ import type {
 import type { TurnDriver } from './src/driver-contract';
 import { createSession, type Session } from './src/execution-runtime';
 import { createResourcePolicy, type ResourcePolicy } from './src/resource-policy';
-import { createTaskRegistry, type TaskFact, type TaskRegistry } from './src/task-registry';
+import { createTaskRegistry, taskUnstartedOf, type TaskFact, type TaskRegistry } from './src/task-registry';
 import {
   createTaskRunner,
   type TaskExecutionInput,
@@ -67,9 +67,10 @@ interface Receipt {
   taskId: string;
   taskNo?: number;
   name?: string;
-  status: string;
+  liveness?: string;
   accepted?: boolean;
   reason?: string;
+  resourceLimitedAt?: string;
   notice?: string;
 }
 
@@ -93,9 +94,9 @@ function makeStack(options: { queueCapacity?: number; backgroundConcurrency?: nu
   const registry: TaskRegistry = {
     ...inner,
     begin(input) {
-      const row = inner.begin(input);
-      depths.push(inner.list().filter((task) => taskStatusOf(task) === 'queued').length);
-      return row;
+      // 观测「本次受理前」的排队深度（与受理侧上界判据同源：底账未启动行数）——拒绝行写完即终态的瞬态不误计。
+      depths.push(inner.list().filter((task) => taskUnstartedOf(task)).length);
+      return inner.begin(input);
     },
   };
   const policy = createResourcePolicy({
@@ -169,7 +170,7 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
     // B 切片：status = 受理后实时机械事实（首个已被认领 running，其余 2 个 queued 排队）；
     // 受理仍是异步语义（任务留后台）。owner 2026-11-19：受理只回机械事实（taskId/name/status/
     // accepted），**无回执话术**（notice）、无编号。
-    expect(rows.map((receipt) => receipt.status)).toEqual(['running', 'queued', 'queued']);
+    expect(rows.filter((receipt) => receipt.liveness === "running")).toHaveLength(1);
     expect(rows.every((receipt) => !('notice' in receipt))).toBe(true);
     expect(rows.every((receipt) => typeof receipt.taskId === 'string')).toBe(true);
     // 1 个进入执行（唯一并发位），其余 2 个 = queueCapacity 个排队位。
@@ -196,13 +197,12 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
 
     for (const receipt of rejected) {
       // 结构化回执：确定性拒绝 + 机械原因 + 用户可见话术（容量事实）。
-      expect(receipt.status).toBe('failed');
-      expect(receipt.reason).toBe('resource_limited');
+      expect(receipt.resourceLimitedAt).toBeDefined();
       expect(receipt.notice).toContain('未受理');
       expect(receipt.notice).toContain('后台排队已满（容量 2）');
       // 拒绝不留半截任务行：终态 failed（reason=resource_limited），不是 queued 幽灵行。
       const row = session.getTask(receipt.taskId);
-      expect(taskStatusOf(row)).toBe('failed');
+      expect(taskStatusOf(row)).toBe("resource_limited");
       expect(taskReasonOf(row)).toBe('resource_limited');
       // 结构化事件：failed/resource_limited 事实已发出（通知 outbox 的输入面）。
       expect(
@@ -238,7 +238,7 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
     // 进程级上界（不按会话各算一份）：1 活跃 + 2 排队。
     expect(accepted).toHaveLength(3);
     expect(rejected).toHaveLength(3);
-    expect(rejected.every((receipt) => receipt.reason === 'resource_limited')).toBe(true);
+    expect(rejected.every((receipt) => receipt.resourceLimitedAt !== undefined)).toBe(true);
     expect(rejected.every((receipt) => receipt.notice?.includes('后台排队已满（容量 2）'))).toBe(true);
     // 并发提交过程中底账 queued 行从未越过上界。
     expect(Math.max(...stack.depths)).toBeLessThanOrEqual(2);
@@ -258,7 +258,7 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
     expect(rows.filter((receipt) => receipt.accepted === true)).toHaveLength(17);
     const rejected = rows.filter((receipt) => receipt.accepted === false);
     expect(rejected).toHaveLength(1);
-    expect(rejected[0]!.reason).toBe('resource_limited');
+    expect(rejected[0]!.resourceLimitedAt).toBeDefined();
     expect(rejected[0]!.notice).toContain('后台排队已满（容量 16）');
     expect(queuedRows(stack)).toBe(16);
     expect(stack.executor.started).toHaveLength(1);

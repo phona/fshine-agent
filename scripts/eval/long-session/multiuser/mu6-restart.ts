@@ -62,7 +62,7 @@ export class TagKeyedExecutor implements TaskExecutor {
   async execute(input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
     this.calls += 1;
     const tag = tagOf(input.request) ?? 'UNKNOWN';
-    return { kind: 'completed', resultText: `${this.prefix}${tag}` };
+    return { kind: 'ended', report: `${this.prefix}${tag}` };
   }
 }
 

@@ -90,7 +90,7 @@ function seedTerminalTask(dbPath: string): void {
       sessionId: 'p0-gates-session',
       request: '帮我查一下 beta 集合、窗口 W1 的数据',
     });
-    registry.complete(TASK_ID, '已完成。');
+    registry.setResultText(TASK_ID, '已完成。');
   } finally {
     registry.close();
   }

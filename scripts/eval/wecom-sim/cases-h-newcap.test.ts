@@ -17,6 +17,7 @@
 import { describe, expect, it } from 'vitest';
 import { deriveTaskName } from '../../../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
+import { taskStatusOf } from '../../../packages/agent/testing/task-fact-view';
 import { LONG_RUNNING_NOTICE_FALLBACK_TEXT } from '../../../packages/agent/src/task-runner';
 import {
   internalOperationCall,
@@ -104,7 +105,7 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
       // 受理后：任务 running 但租约已释放（长任务让出槽位/租约，不该被当过期的执行中回合）。
       await sim.waitFor('长任务 accepted（租约释放）', () => {
         const task = registry.get(taskId, TASK_SCOPE);
-        return task.status === 'running' && task.leaseUntil === undefined;
+        return taskStatusOf(task) === 'running' && task.leaseUntil === undefined;
       }, 10_000);
 
       // 期间用户还能聊别的：同一会话第二回合照常拿到回复（不被长任务占住）。
@@ -116,7 +117,7 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
       await sim.waitFor('长任务完成并主动投递', () => sim.sdk.proactiveTexts.length === 1, 30_000);
       expect(sim.sdk.proactiveTexts[0]!.content).toContain('42');
       const done = registry.get(taskId, TASK_SCOPE);
-      expect(done.status).toBe('completed');
+      expect(taskStatusOf(done)).toBe('completed');
       // 执行层只被发起一次（续跑不重复发起同一 operation）。
       expect(done.executions.filter((execution) => execution.operation === 'dummy.longtask')).toHaveLength(1);
     } finally {
@@ -179,7 +180,7 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
       const taskId = group.doneOf(messageId)!.taskIds[0]!;
       await group.waitFor('群里长任务 accepted', () => {
         const task = groupRegistry.get(taskId, GROUP_SCOPE);
-        return task.status === 'running';
+        return taskStatusOf(task) === 'running';
       }, 10_000);
       // 群里也发（owner 2026-11-19 #9 迁移；旧口径「群聊零主动提醒」已作废）：
       // 群 = 独立主体，群里的任务就是这个群的事；话术走隐私口径 = **不带业务名**。
@@ -203,7 +204,7 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
       expect(group.sdk.proactiveTexts.filter((entry) => entry.content.includes('比预计久'))).toHaveLength(1);
       expect(group.sdk.proactiveTexts.filter((entry) => entry.content === LONG_RUNNING_NOTICE_FALLBACK_TEXT)).toHaveLength(0);
       // 让群里的长任务跑完再收尾（不在库里跑着就关库）。
-      await group.waitFor('群里长任务终态', () => groupRegistry.get(taskId, GROUP_SCOPE).status === 'completed', 15_000);
+      await group.waitFor('群里长任务终态', () => taskStatusOf(groupRegistry.get(taskId, GROUP_SCOPE)) === 'completed', 15_000);
     } finally {
       groupRegistry.close();
       await group.close();
@@ -243,7 +244,7 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
       // 零执行事实：拒绝发生在发起之前（不是执行层拒绝）；底账里也没有跑起来/跑成功的任务。
       expect(done.executions).toHaveLength(0);
       const tasks = registry.list(TASK_SCOPE);
-      expect(tasks.some((task) => task.status === 'running' || task.status === 'completed')).toBe(false);
+      expect(tasks.some((task) => taskStatusOf(task) === 'running' || taskStatusOf(task) === 'completed')).toBe(false);
       // 用户可见话术：说明没有权限，且不暴露内部 operation 名。
       const visible = sim.finalBubbles().map((bubble) => bubble.content).join('\n');
       expect(visible).toContain('当前权限不支持这个操作');

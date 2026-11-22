@@ -218,7 +218,7 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
       expect(reply).toBe('已受理，稍后通知你。');
       // 受理事实（task_run 返回）：只给机械事实（accepted/status + name/taskId），无回执话术、无编号
       const accepted = records[0]!.execResults[0] as Record<string, unknown>;
-      expect(accepted).toMatchObject({ accepted: true, status: 'running' });
+      expect(accepted).toMatchObject({ accepted: true, liveness: 'running' });
       expect(accepted).not.toHaveProperty('notice');
       expect(accepted).not.toHaveProperty('taskNo');
       const taskId = String(accepted['taskId']);

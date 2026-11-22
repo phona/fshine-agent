@@ -18,6 +18,7 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { describe, expect, it } from 'vitest';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
+import { taskStatusOf } from '../../../packages/agent/testing/task-fact-view';
 import { LONG_RUNNING_NOTICE_FALLBACK_TEXT } from '../../../packages/agent/src/task-runner';
 import {
   classifyFailure,
@@ -177,7 +178,7 @@ describe('I 组·体验交互（I-1～I-6、I-8，自动；I-7 未立编号）',
       // 投递的就是该任务自己的结果（与底账存档一致），不是通用模板。
       const taskId = sim.doneOf(messageId)!.taskIds[0]!;
       const task = registry.get(taskId, TASK_SCOPE);
-      expect(task.status).toBe('completed');
+      expect(taskStatusOf(task)).toBe('completed');
       expect(task.replyText ?? task.resultText ?? '').toContain('W202611');
       // 恰一条：多等一拍仍是一条（不刷屏）。
       await new Promise((resolve) => setTimeout(resolve, 200));
@@ -248,16 +249,19 @@ describe('I 组·体验交互（I-1～I-6、I-8，自动；I-7 未立编号）',
       await sim.waitFor('I-5 交办回合结束', () => sim.doneOf(mA) !== undefined, 15_000);
       const taskId = sim.doneOf(mA)!.taskIds[0]!;
       // 任务确实在跑（不是「没跑所以答得上」的假绿）。
-      await sim.waitFor('I-5 任务在跑', () => registry.get(taskId, TASK_SCOPE).status === 'running', 10_000);
+      await sim.waitFor('I-5 任务在跑', () => taskStatusOf(registry.get(taskId, TASK_SCOPE)) === 'running', 10_000);
 
       const ask = '刚才那个事，到哪了？';
       sim.book.mainTurn(ask, [
         toolCallAssistant('task_status', {}),
         (call) => {
-          const listed = lastToolResultJsonOf(call.messages) as { tasks?: ReadonlyArray<{ status?: string }> } | undefined;
-          const status = listed?.tasks?.[0]?.status;
-          if (status === undefined) throw new Error('task_status 没有返回真实状态（拿不到就不许回）。');
-          return textAssistant(status === 'completed' ? '那件事已经办完了。' : '那件事还在办，还没出结果。');
+          const listed = lastToolResultJsonOf(call.messages) as {
+            tasks?: ReadonlyArray<{ liveness?: string; replyText?: string | null; resulted?: number }>;
+          } | undefined;
+          const task = listed?.tasks?.[0];
+          if (task === undefined) throw new Error('task_status 没有返回真实状态（拿不到就不许回）。');
+          const done = (task.replyText !== null && task.replyText !== undefined) || (task.resulted ?? 0) > 0;
+          return textAssistant(done ? '那件事已经办完了。' : '那件事还在办，还没出结果。');
         },
       ]);
       const mAsk = sim.sendText(ask);
@@ -272,7 +276,7 @@ describe('I 组·体验交互（I-1～I-6、I-8，自动；I-7 未立编号）',
       // 纯查询：本回合零执行事实（不发起新的执行）。
       expect(sim.doneOf(mAsk)!.executions).toHaveLength(0);
       // 收尾：等任务完成再关库。
-      await sim.waitFor('I-5 任务完成', () => registry.get(taskId, TASK_SCOPE).status === 'completed', 20_000);
+      await sim.waitFor('I-5 任务完成', () => taskStatusOf(registry.get(taskId, TASK_SCOPE)) === 'completed', 20_000);
     } finally {
       registry.close();
       await sim.close();
@@ -327,7 +331,7 @@ describe('I 组·体验交互（I-1～I-6、I-8，自动；I-7 未立编号）',
       const mt = group.sendText(t, { chatType: 'group', conversationId: 'group-w' });
       await group.waitFor('I-6 群长任务受理', () => group.doneOf(mt) !== undefined, 15_000);
       const taskId = group.doneOf(mt)!.taskIds[0]!;
-      await group.waitFor('I-6 群长任务在跑', () => groupRegistry.get(taskId, GROUP_SCOPE).status === 'running', 10_000);
+      await group.waitFor('I-6 群长任务在跑', () => taskStatusOf(groupRegistry.get(taskId, GROUP_SCOPE)) === 'running', 10_000);
       // 群里也发（owner 2026-11-19 #9 迁移；旧口径「群聊零主动提醒」已作废）：群 = 独立主体，
       // 群任务的久无动静提醒回到群会话，话术走隐私口径（不带业务名）。
       await group.waitFor('I-6 群聊也有久无动静提醒', () => group.sdk.proactiveTexts.length >= 1, 10_000);
@@ -337,7 +341,7 @@ describe('I 组·体验交互（I-1～I-6、I-8，自动；I-7 未立编号）',
       expect(groupNotice.content).not.toContain(t);
       expect(group.sdk.proactiveTexts.filter((entry) => entry.content === LONG_RUNNING_NOTICE_FALLBACK_TEXT)).toHaveLength(0);
       // 收尾：等群长任务跑完再关库。
-      await group.waitFor('I-6 群长任务完成', () => groupRegistry.get(taskId, GROUP_SCOPE).status === 'completed', 20_000);
+      await group.waitFor('I-6 群长任务完成', () => taskStatusOf(groupRegistry.get(taskId, GROUP_SCOPE)) === 'completed', 20_000);
     } finally {
       groupRegistry.close();
       await group.close();

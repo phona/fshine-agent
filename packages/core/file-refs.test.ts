@@ -304,7 +304,7 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
     store.close();
 
     expect(existsSync(`${dbPath}.backup-v${TASK_STORE_SCHEMA_VERSION}`)).toBe(true);
-    expect(TASK_STORE_SCHEMA_VERSION).toBe(4);
+    expect(TASK_STORE_SCHEMA_VERSION).toBe(5);
     const probe = new Database(dbPath);
     expect(probe.pragma('user_version', { simple: true })).toBe(TASK_STORE_SCHEMA_VERSION);
     probe.close();
@@ -374,7 +374,7 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
       expect(migrated.getFileRef('file_diag2', SCOPE_A, { side: 'main' })!.deliverable).toBe(false);
       migrated.close();
     }
-    expect(TASK_STORE_SCHEMA_VERSION).toBe(4);
+    expect(TASK_STORE_SCHEMA_VERSION).toBe(5);
     expect(existsSync(`${dbPath}.backup-v${TASK_STORE_SCHEMA_VERSION}`)).toBe(true);
     const probe = new Database(dbPath);
     expect(probe.pragma('user_version', { simple: true })).toBe(TASK_STORE_SCHEMA_VERSION);

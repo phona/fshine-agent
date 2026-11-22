@@ -24,8 +24,7 @@ import { materializeEvalConfig } from '../../resolve-config-path';
 import { assembleSessionCore } from '../../ask-runtime';
 import type { DriverFactory, ExecutionFaceFactory } from '../../ask-runtime';
 import { assessEvalIsolation, assertEvalIsolation } from '../safety-gate';
-import { notificationKindForTransition } from '../../../packages/agent/src/notifications';
-import type { NotificationReason } from '../../../packages/agent/src/notifications';
+import { notificationKindForEvent } from '../../../packages/agent/src/notifications';
 import type { CaseContext } from './batch';
 import type { BizCase, BizItem } from './scenarios';
 import type { BizExecutor, BizSampleEvidence } from './assembly';
@@ -204,9 +203,16 @@ export function createModelExecutor(options: ModelExecutorOptions = {}): BizExec
     // 只采集不判；inline 无 outbox 时这里仍能由状态迁移派生出通知意图行（各状态终态）。
     const taskFacts: TaskFactLine[] = [];
     const notifications: NotificationLine[] = [];
+    // S1 事实模型：底账只发机械事件（无 from/to/reason）。事件 → 旧「to」词映射，
+    // 复用既有度量口径（d6-metrics 的终态/取消集合按旧词读）。
+    const FACT_TO: Readonly<Record<string, string>> = {
+      queued: 'queued', started: 'running', resumed: 'running', waiting_user: 'waiting_user',
+      result_archived: 'completed', cancelled: 'cancelled', timed_out: 'timed_out',
+      died: 'failed', resource_limited: 'refused', round_failed: 'failed',
+    };
     assembled.taskRegistry.onTaskFact((fact) => {
-      taskFacts.push({ ts: fact.at, taskId: fact.taskId, from: fact.from ?? '', to: fact.to, ...(fact.reason === undefined ? {} : { reason: fact.reason }) });
-      const kind = notificationKindForTransition(fact.from, fact.to, fact.reason as NotificationReason | undefined);
+      taskFacts.push({ ts: fact.at, taskId: fact.taskId, from: '', to: FACT_TO[fact.event] ?? fact.event });
+      const kind = notificationKindForEvent(fact.event);
       if (kind !== undefined) notifications.push({ ts: fact.at, taskId: fact.taskId, kind });
     });
     try {

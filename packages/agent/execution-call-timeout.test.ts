@@ -207,8 +207,7 @@ describe('单次执行层调用的传输超时（有界 + 结果未知）', () =
 
       // 交办回执：不是成功、也不是「已确认失败」——结果待核对。
       const receipt = fx.taskReceipts[0] as Record<string, unknown>;
-      expect(receipt['status']).toBe('failed');
-      expect(receipt['reason']).toBe('result_unknown');
+      expect(receipt['resultUnknown']).toBe(true);
       expect(String(receipt['summary'])).toContain('待核对');
       expect(String(receipt['notice'])).toContain('核对');
 

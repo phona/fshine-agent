@@ -160,7 +160,8 @@ function seedRunning(
   startedAt: string,
   scope: { principalId: string; sessionId: string } = SCOPE,
 ): void {
-  registry.begin({ taskId, ...scope, request: '查一下上季度报销明细' });
+  // S1：queued begin 不写 running_since；armLease 的 COALESCE 才能把起点钉到 startedAt。
+  registry.begin({ taskId, ...scope, request: '查一下上季度报销明细', queued: true });
   registry.store.armLease(taskId, {
     owner: 'task-runner',
     leaseUntil: new Date(Date.parse(startedAt) + LEASE_MS).toISOString(),

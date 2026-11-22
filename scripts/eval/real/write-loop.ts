@@ -57,6 +57,7 @@ import {
 } from '../shared/conversation-shape';
 import { stripServerPaths } from '../../../packages/agent/src/server-paths';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
+import { taskStatusOf } from '../../../packages/agent/testing/task-fact-view';
 import type { TaskScope } from '../../../packages/agent/src/task-registry';
 import { createServer, resolveSingleProfile, type FileDeliveryPort } from '../../../apps/server/server';
 import { mainSessionOptions, mainThinkingLevelFrom, resolveExecutionFace } from '../../ask-runtime';
@@ -373,13 +374,13 @@ export class LedgerWatcher {
             handlePrefix: confirmation.handle.slice(0, 12),
             operation: confirmation.operation,
           };
-      const signature = JSON.stringify([record.status, executions, proposal?.summary ?? '']);
+      const signature = JSON.stringify([taskStatusOf(record), executions, proposal?.summary ?? '']);
       if (this.lastSignature.get(record.taskId) === signature) continue;
       this.lastSignature.set(record.taskId, signature);
       this.snapshots.push({
         at: new Date().toISOString(),
         taskId: record.taskId,
-        status: record.status,
+        status: taskStatusOf(record),
         executions,
         ...(proposal === undefined ? {} : { proposal }),
       });
@@ -1163,7 +1164,7 @@ async function main(): Promise<void> {
       finalTasks.push({
         taskId: id,
         ...(record.taskNo === undefined ? {} : { taskNo: record.taskNo }),
-        status: record.status,
+        status: taskStatusOf(record),
         executions: record.executions.map((execution) => ({ operation: execution.operation, status: execution.status })),
       });
       // 业务名（对话形态 ③ 的「任务名」判据用；机械回落已由底账解析）。

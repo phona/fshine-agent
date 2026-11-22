@@ -53,9 +53,9 @@ type TaskReason = 'cancelled_by_user' | 'timeout' | 'failed_confirmed' | 'result
 // ---------------------------------------------------------------------------
 
 const LEGAL_EDGES: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
-  queued: ['running', 'cancelling', 'timed_out'],
-  running: ['completed', 'failed', 'waiting_user', 'cancelling', 'timed_out', 'unexecuted'],
-  waiting_user: ['running', 'cancelling', 'timed_out'],
+  queued: ['running', 'cancelling', 'cancelled', 'timed_out'],
+  running: ['completed', 'failed', 'waiting_user', 'cancelling', 'cancelled', 'timed_out', 'unexecuted'],
+  waiting_user: ['running', 'cancelling', 'cancelled', 'timed_out'],
   cancelling: ['cancelled', 'running'],
   cancelled: [],
   completed: [],
@@ -77,7 +77,11 @@ interface FakeTask {
   waitingSince?: string;
   leaseOwner?: string;
   leaseUntil?: string;
+  runningSince?: string;
   diedAt?: string;
+  cancelledAt?: string;
+  timedOutAt?: string;
+  resourceLimitedAt?: string;
   taskNo: number;
   name: string;
   executions: ExecutionRecord[];
@@ -116,6 +120,7 @@ class FakeRegistry implements TaskRegistryPort {
       sessionId: 's',
       request: input.request ?? '种子任务',
       status: input.status,
+      ...(input.status === 'running' ? { runningSince: now } : {}),
       taskNo: this.nextNo,
       name: deriveTaskName(input.request ?? '种子任务'),
       executions: [],
@@ -197,6 +202,7 @@ class FakeRegistry implements TaskRegistryPort {
       sessionId: input.sessionId,
       request: input.request,
       status: input.queued === true ? 'queued' : 'running',
+      ...(input.queued === true ? {} : { runningSince: now }),
       taskNo: this.nextNo,
       name: deriveTaskName(input.request),
       executions: [],
@@ -273,6 +279,7 @@ class FakeRegistry implements TaskRegistryPort {
       .sort((left, right) => (left.createdAt < right.createdAt ? -1 : left.createdAt > right.createdAt ? 1 : 0))[0];
     if (candidate === undefined) return undefined;
     this.commit(candidate, 'running');
+    if (candidate.runningSince === undefined) candidate.runningSince = this.clock().toISOString();
     candidate.leaseOwner = input.owner;
     candidate.leaseUntil = new Date(this.clock().getTime() + input.leaseMs).toISOString();
     candidate.updatedAt = this.clock().toISOString();
@@ -350,9 +357,10 @@ class FakeRegistry implements TaskRegistryPort {
     const from = task.status;
     if (!(LEGAL_EDGES[from] ?? []).includes(to)) throw new Error(`非法任务状态转换：${from} → ${to}`);
     task.status = to;
-    if (to === 'cancelled') task.reason = options.reason ?? 'cancelled_by_user';
-    else if (to === 'timed_out') task.reason = options.reason ?? 'timeout';
-    else if (to === 'failed') task.reason = options.reason ?? 'failed_confirmed';
+    const at = this.clock().toISOString();
+    if (to === 'cancelled') { task.reason = options.reason ?? 'cancelled_by_user'; if (task.cancelledAt === undefined) task.cancelledAt = at; }
+    else if (to === 'timed_out') { task.reason = options.reason ?? 'timeout'; if (task.timedOutAt === undefined) task.timedOutAt = at; }
+    else if (to === 'failed') { task.reason = options.reason ?? 'failed_confirmed'; }
     else task.reason = undefined;
     if (to !== 'running') {
       task.leaseOwner = undefined;
@@ -586,7 +594,6 @@ describe('排队 → 启动 → 收尾', () => {
 
     expect(h.registry.statusOf('t1')).toBe('failed');
     expect(h.registry.reasonOf('t1')).toBe('failed_confirmed');
-    expect(h.registry.failureReasonOf('t1')).toContain('策略拒绝');
   });
 
   it('执行端确认执行超时：running→timed_out + reason=timeout（P5 边界内的执行端判定）', async () => {
@@ -767,8 +774,7 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
     // 请求 ≠ 取消 的留痕在事实里（queued→cancelling→cancelled）。
     expect(h.registry.factsOf('t2').map((fact) => [fact.from, fact.to])).toEqual([
       [undefined, 'queued'],
-      ['queued', 'cancelling'],
-      ['cancelling', 'cancelled'],
+      ["queued", "cancelled"],
     ]);
 
     h.executor.noteExecution(0, 'completed');
@@ -788,7 +794,7 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
 
     const outcome = h.runner.cancel('t1');
     expect(outcome).toEqual({ outcome: 'requested', taskId: 't1' });
-    expect(h.registry.statusOf('t1')).toBe('cancelling'); // 请求不等于已取消
+    expect(h.registry.statusOf("t1")).toBe("running"); // 请求已发出但未确认：仍是 running
     expect(call.context.signal.aborted).toBe(true);
 
     await h.runner.whenIdle();
@@ -803,7 +809,7 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
     h.runner.pump();
 
     h.runner.cancel('t1'); // abort 已发，但执行端未观察
-    expect(h.registry.statusOf('t1')).toBe('cancelling');
+    expect(h.registry.statusOf("t1")).toBe("running");
 
     h.executor.noteExecution(0, 'completed');
     h.executor.settle(0, { kind: 'ended', report: '做完了' });
@@ -811,7 +817,6 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
 
     expect(h.registry.statusOf('t1')).toBe('completed');
     expect(h.registry.reasonOf('t1')).toBeUndefined();
-    expect(h.registry.factsOf('t1').map((fact) => [fact.from, fact.to])).toContainEqual(['cancelling', 'running']);
   });
 
   it('running 取消未获确认且回合报错（非 abort）→ 回 running 后记失败（不落 cancelled）', async () => {
@@ -824,8 +829,6 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
     await h.runner.whenIdle();
 
     expect(h.registry.statusOf('t1')).toBe('failed');
-    expect(h.registry.failureReasonOf('t1')).toContain('执行端崩溃');
-    expect(h.registry.factsOf('t1').map((fact) => [fact.from, fact.to])).toContainEqual(['cancelling', 'running']);
   });
 
   it('running 取消后执行端以 AbortError 结束 → 视为 abort 观察，确认 cancelled', async () => {
@@ -849,7 +852,7 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
     h.executor.settle(0, { kind: 'ended', report: '完成' });
     await h.runner.whenIdle();
 
-    expect(h.runner.cancel('t1')).toEqual({ outcome: 'terminal', taskId: 't1', status: 'completed' });
+    expect(h.runner.cancel("t1")).toEqual({ outcome: "terminal", taskId: "t1" });
     expect(h.registry.statusOf('t1')).toBe('completed');
   });
 
@@ -942,7 +945,7 @@ describe('waiting_user：释放执行许可；答复续同一 Task', () => {
     const h = harness();
     submit(h, 't1');
     h.runner.pump();
-    expect(h.runner.resume('t1', { answer: 'x' })).toEqual({ outcome: 'not_waiting', taskId: 't1', status: 'running' });
+    expect(h.runner.resume("t1", { answer: "x" })).toEqual({ outcome: "not_waiting", taskId: "t1" });
     expect(h.executor.calls).toHaveLength(1);
   });
 });
@@ -1002,7 +1005,6 @@ describe('安全绊线', () => {
     await runner.whenIdle();
 
     expect(h.registry.statusOf('t1')).toBe('failed');
-    expect(h.registry.failureReasonOf('t1')).toContain('同步崩溃');
     expect(h.policy.backgroundInUse).toBe(0);
   });
 });

@@ -579,21 +579,26 @@ export interface BackgroundTaskCompletion {
 }
 
 /**
- * 一次后台执行回合的机械结局里，宿主**失败投递面**需要的事实（2026-11-19 收口；S1 改形）。
- * 与 BackgroundTaskCompletion 对称的失败回调事实：回合以「没有产出结果汇报」收尾或结果未知。
+ * 一次后台执行回合的机械结局里，宿主**失败投递面**需要的事实（2026-11-19 收口；S1 改形；
+ * 2026-11-22 补 errorCode/reason）。与 BackgroundTaskCompletion 对称的失败回调事实：回合
+ * 以「没有产出结果汇报」收尾、执行以失败/拒绝收尾、或结果未知。
  * **不携带任务结论**（S1 事实模型：做没做成由 Main 读账本事实自己判断）——回调只带机械事实：
- * 失败的种类（无汇报 / 结果未知）与零执行的结构化原因码；做没做成的证据（逐笔执行行）由
- * 唤醒面从底账读出喂给 Main。
+ * 失败的种类（无汇报 / 结果未知）、零执行的结构化原因码、执行层原始错误码与失败原文；
+ * 做没做成的证据（逐笔执行行）由唤醒面从底账读出喂给 Main。
  */
 export interface BackgroundTaskFailure {
   taskId: string;
   principalId: string;
   sessionId: string;
   request: string;
-  /** 回合失败事实的种类（no_report = 无汇报收尾；result_unknown = 结果未知）。 */
+  /** 回合失败事实的种类（no_report = 无汇报/执行失败收尾；result_unknown = 结果未知）。 */
   status: 'no_report' | 'result_unknown';
   /** 零执行的机械原因码（如 `not_permitted` = 发起前被宿主拒绝）；不是文案，不进用户文本。 */
   reasonCode?: string;
+  /** 执行层原始错误码（本回合执行以 failed/refused 收尾时带；只用于归类，不进用户文本）。 */
+  errorCode?: string;
+  /** 执行层失败原文（机械原因；投递面事实文案用；不进用户文本原样）。 */
+  reason?: string;
 }
 
 export interface BackgroundDispatchInput {
@@ -834,27 +839,44 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
           });
           throw error;
         }
-        if (outcome.kind === 'ended' && (outcome.report ?? '').trim() !== '') {
-          onTaskCompleted?.({
-            taskId: task.taskId,
-            principalId: task.principalId,
-            sessionId: task.sessionId,
-            request: task.request,
-            resultText: outcome.report!,
-            ...(outcome.files === undefined ? {} : { files: outcome.files }),
-          });
-        } else if (outcome.kind === 'ended' || outcome.kind === 'result_unknown') {
-          // 2026-11-19 失败投递收口（S1 改形）：无汇报收尾/结果未知都触发失败回调
-          //（两者都不是「有结果汇报」）；零执行被宿主拒绝时带 not_permitted 结构化码。
+        if (outcome.kind === 'ended') {
+          // 如实交付分流（2026-11-22，红线）：只有**真正成功**（executionOutcome = 缺省/success
+          // 且有汇报）才走完成回调。执行结局是 failed/refused/not_permitted 或无汇报时走失败
+          // 回调——Worker 在被拒/失败后也会汇报一句解释，把那种回合说成「办好了」是虚假成功。
+          const failedOutcome = outcome.executionOutcome === 'failed'
+            || outcome.executionOutcome === 'refused'
+            || outcome.executionOutcome === 'not_permitted';
+          if (!failedOutcome && (outcome.report ?? '').trim() !== '') {
+            onTaskCompleted?.({
+              taskId: task.taskId,
+              principalId: task.principalId,
+              sessionId: task.sessionId,
+              request: task.request,
+              resultText: outcome.report!,
+              ...(outcome.files === undefined ? {} : { files: outcome.files }),
+            });
+          } else {
+            // 无汇报收尾 / 执行失败 / 被拒都触发失败回调；零执行被宿主拒绝时带 not_permitted
+            // 结构化码，执行失败带执行层原始码与失败原文（只用于归类与事实文案，不进用户文本）。
+            onTaskFailed?.({
+              taskId: task.taskId,
+              principalId: task.principalId,
+              sessionId: task.sessionId,
+              request: task.request,
+              status: 'no_report',
+              ...(outcome.zeroExecReason !== undefined ? { reasonCode: outcome.zeroExecReason } : {}),
+              ...(outcome.errorCode === undefined ? {} : { errorCode: outcome.errorCode }),
+              ...(outcome.failureReason === undefined ? {} : { reason: outcome.failureReason }),
+            });
+          }
+        } else if (outcome.kind === 'result_unknown') {
+          // 2026-11-19 失败投递收口（S1 改形）：结果未知触发失败回调（不是「有结果汇报」）。
           onTaskFailed?.({
             taskId: task.taskId,
             principalId: task.principalId,
             sessionId: task.sessionId,
             request: task.request,
-            status: outcome.kind === 'result_unknown' ? 'result_unknown' : 'no_report',
-            ...(outcome.kind === 'ended' && outcome.zeroExecReason !== undefined
-              ? { reasonCode: outcome.zeroExecReason }
-              : {}),
+            status: 'result_unknown',
           });
         }
         return outcome;

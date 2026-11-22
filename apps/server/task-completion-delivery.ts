@@ -72,6 +72,8 @@ export interface TaskFailureFact {
    * 话术必须走「系统太忙，这个没接」（2026-11-19 只读审计 #18）。
    */
   resourceLimited?: boolean;
+  /** 执行层原始错误码（本回合执行以 failed/refused 收尾时带；只用于归类，不进用户文本）。 */
+  code?: string;
   /** 业务名（只给资源受限那句带上「是哪件事」；其余话术不带名字）。 */
   name?: string;
   /** 投递归属（进 task_result_delivery_* 记账行；缺省 = 不带，不猜）。 */
@@ -272,36 +274,46 @@ export function failureKindFor(
  * S1 改形——输入只有机械事实，没有任务结论）：
  *   · 资源拒绝事实（池满/队列满的确定性拒绝，没进入执行）→ 复用通知渲染器的既有那句
  *     「系统太忙，这个没接：<业务名>。」（2026-11-19 只读审计 #18）；
- *   · 其余按种类走 `failureMessageFor`（result_unknown → unknown_result）。
+ *   · 其余按种类走 `failureMessageFor`：有执行层原始码时按码归类（GATE_REFUSE → denied 等），
+ *     否则 result_unknown → unknown_result、其余 = executor_failed。
  */
 export function failureFallbackTextFor(input: {
   status?: 'result_unknown';
   resourceLimited?: boolean;
+  /** 执行层原始错误码（只用于归类，不进用户文本）。 */
+  code?: string;
   name?: string;
 }): string {
   if (input.resourceLimited === true) {
     return resourceLimitedText(input.name);
   }
-  return failureTextFor(input.status);
+  return failureMessageFor(failureKindFor(input.code, input.status)).text;
 }
 
 /** 账本事实行的上限（条；超出截断——事实给模型读，防止把大账整段灌进去）。 */
 const FAILURE_LEDGER_MAX_LINES = 12;
 
+/** 失败事实里机械原因的上限（字符；超长截断——事实给模型读，防止把执行层原文整段灌进去）。 */
+const FAILURE_REASON_MAX = 200;
+
 /**
  * 任务失败**事实**文本（S1：宿主把账本喂给 Main，Main 自己看；用户看到的话由模型写）：
  *   `[任务失败]「<业务名>」这个回合没有产出结果汇报，问题分类：<业务种类>。
+ *    机械原因（供你判断，别原样丢给用户）：<原因>。
  *    账本事实（逐笔）：
  *      1. dummy.commit — failed（执行层失败）：清理后摘要
  *    请把这件事如实告诉用户（做没做成以账本执行事实为准），并给他一个能做的下一步。`
  *
  * 硬边界：不含 handle、不含 taskId、不含执行层原始码；种类用 `USER_FACING_FAILURE_KIND_LABEL`
- * 的业务语言名；账本行只作判断依据（逐条截断 + 上限），做没做成 Main 按事实自己判断。
+ * 的业务语言名；原因/账本行只作判断依据（截断 + 去换行 + 上限），做没做成 Main 按事实自己判断。
  * name 缺省 = 主语用中性指代（不猜名）。
  */
 export function taskFailureFactText(input: {
   name?: string;
   kind: UserFacingFailureKind;
+  /** 机械原因（执行层失败原文；2026-11-22 补：丢机械原因就只剩「没有结果汇报」这一句， 
+   *  用户/模型都看不出真因）。只作判断依据，模型不该原样丢给用户。 */
+  reason?: string;
   /** 账本事实行（逐笔执行行 + 机械标记；宿主装配，见 server 的 taskLedgerFactsOf）。 */
   ledger?: readonly string[];
   /** 结构化原因码事实：not_permitted = 发起前被宿主拒绝（本次不允许；不扫任何文本）。 */
@@ -310,6 +322,12 @@ export function taskFailureFactText(input: {
   const subject = input.name !== undefined && input.name.trim() !== ''
     ? `「${truncatedName(input.name)}」`
     : '你交代的那件事';
+  const reason = input.reason === undefined
+    ? ''
+    : input.reason.replace(/\s+/gu, ' ').trim().slice(0, FAILURE_REASON_MAX);
+  const reasonLine = reason === ''
+    ? ''
+    : `机械原因（供你判断，别原样丢给用户）：${reason}。\n`;
   const ledgerLines = (input.ledger ?? []).slice(0, FAILURE_LEDGER_MAX_LINES);
   const ledger = ledgerLines.length === 0
     ? ''
@@ -318,7 +336,7 @@ export function taskFailureFactText(input: {
     ? '账本里没有执行事实：这次交办在发起前被宿主拒绝（本次不允许，不是没有这件事）。\n'
     : '';
   return `[任务失败]${subject}这个回合没有产出结果汇报，问题分类：${USER_FACING_FAILURE_KIND_LABEL[input.kind]}。\n`
-    + `${notPermitted}${ledger}请把这件事如实告诉用户（做没做成以账本执行事实为准），并给他一个能做的下一步。`;
+    + `${reasonLine}${notPermitted}${ledger}请把这件事如实告诉用户（做没做成以账本执行事实为准），并给他一个能做的下一步。`;
 }
 
 /**

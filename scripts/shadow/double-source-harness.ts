@@ -126,7 +126,7 @@ function toAcceptance(value: unknown): ShadowAcceptance {
   return {
     taskNo: typeof record['taskNo'] === 'number' ? record['taskNo'] : 0,
     name: typeof record['name'] === 'string' ? record['name'] : '',
-    status: typeof record['status'] === 'string' ? record['status'] : '',
+    status: typeof record['liveness'] === 'string' ? record['liveness'] : (typeof record['status'] === 'string' ? record['status'] : ''),
     accepted: record['accepted'] === true,
     notice: typeof record['notice'] === 'string' ? record['notice'] : '',
   };

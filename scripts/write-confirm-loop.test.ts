@@ -26,6 +26,7 @@ import { loadConfig } from '@fshine/core';
 import { createDummyCliClient } from '../packages/agent/src/dummy-cli-client';
 import { createPiTurnDriver } from '../packages/agent/src/pi-driver';
 import { createTaskRegistry } from '../packages/agent/src/task-registry';
+import { taskStatusOf } from '../packages/agent/testing/task-fact-view';
 import { createScriptedModelRuntime } from '../packages/agent/testing/scripted-model-runtime';
 import { withInternalExecTool } from '../packages/agent/testing/internal-exec-fixture';
 import { assembleSessionCore, resolveExecutionFace } from './ask-runtime';
@@ -185,7 +186,7 @@ async function runWriteAttempt(principalId: string, dir: string): Promise<WriteA
       : {};
 
     return {
-      taskStatus: task.status,
+      taskStatus: taskStatusOf(task),
       executionCount: turn.executions.length,
       workerSawRefusal: lastWorkerRequest.includes(WRITE_NOT_ALLOWED_MESSAGE),
       auditWriteLines: auditLines.filter((line) => WRITE_OPERATIONS.some((operation) => line.includes(`"${operation}"`))).length,

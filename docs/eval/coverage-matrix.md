@@ -53,7 +53,6 @@
 | 唤醒回合不得碰执行层：零工具声明、执行层零新增调用、任务不被误判终态 | `apps/server/server-state-wake.test.ts:①b 走岔路`<br>`packages/agent/runtime.test.ts:冷会话（驱动可唤醒但实例级会话还没建）→ 补一次**零工具**单回合`<br>`packages/agent/pi-driver-wake.test.ts:走岔路：脚本模型在唤醒回合硬发工具调用` | 宿主机制 | 已覆盖 | — |
 | 用户说停：唤醒模型说（不再由宿主渲染「已按你说的停了」）；模型说不出话才投渲染文案 | `apps/server/server-state-wake.test.ts:② 取消 → 唤醒模型说`<br>`apps/server/server-state-wake.test.ts:②b 走岔路`<br>`apps/server/notification-chat-sink.test.ts:① cancelled 不再由本 sink 渲染直发` | 宿主机制 | 已覆盖 | — |
 | 重启对账：启动时「用户以为在办、租约已过期」的任务如实落 result_unknown → 唤醒原会话说清；不重放 | `apps/server/server-state-wake.test.ts:④ 启动时租约已过期`<br>`apps/server/server-state-wake.test.ts:④b 走岔路：模型说不出话`<br>`apps/server/server-state-wake.test.ts:④c 非 live 部署不唤醒` | 宿主机制 | 已覆盖 | — |
-| 重启对账·取消孤儿：`cancelling` 断电遗留 → cancelling→running→result_unknown，按「你要我停、没停完」如实说清（审计 #14） | `apps/server/server-state-wake.test.ts:④d 取消孤儿` | 宿主机制 | 已覆盖 | — |
 | 快活失败 + 模型沉默：兜底判据只看模型沉默（**与有没有文件无关**），失败话术照样送达（审计 #8） | `apps/server/server-relay-silent-turn.test.ts:③c 快活失败 + 沉默` | 宿主机制 | 已覆盖 | — |
 | 等补信息：主动说清还缺什么，补答后同一任务续跑完成 | `apps/server/server-notification-push.test.ts:② 后台任务等你说一句话`<br>`scripts/needs-input-resume.test.ts:① 执行层要补输入`<br>`scripts/needs-input-resume.test.ts:② 用户补答 → 同一 taskId/taskNo 续跑到 completed`<br>`scripts/eval/smoke/slow-faults.test.ts:缺参 → waiting_user 且问题可见` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 不补答：停在 waiting_user、绝不重复执行 | `scripts/needs-input-resume.test.ts:③ 用户不补答`<br>`scripts/eval/smoke/slow-faults.test.ts:不补答：停在 waiting_user` | 宿主机制 + 执行层 | 已覆盖 | — |
@@ -103,7 +102,7 @@
 | --- | --- | --- | --- | --- |
 | 执行层失败 / 拒绝 / 超时：如实转述、不假装成功、不给数 | `scripts/eval/wecom-sim/cases-c-failure.test.ts:W-10 faulty-one`<br>`scripts/eval/wecom-sim/cases-c-failure.test.ts:W-11 denied-one`<br>`scripts/eval/p2/p2-scenarios.test.ts:S7a 失败：faulty-one COLLECTION_FAULT 如实失败`<br>`scripts/eval/p2/p2-scenarios.test.ts:S7b 超时` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 失败话术：每种失败带可执行动作、无内部术语 | `packages/agent/user-facing-failure.test.ts:③ 每种失败都带可执行动作`<br>`packages/agent/user-facing-failure.test.ts:⑤ 内部术语闸` | 宿主机制 | 已覆盖 | — |
-| 虚假完成 / 编造数值：判负、宿主防假成功（不嗅探文本） | `scripts/eval/business-e2e/judge.test.ts:虚假完成判负：回复称完成但执行记录为空`<br>`scripts/eval/cap01/r2d-judge.test.ts:回复编数：宿主红，模型红`<br>`packages/agent/task-status-boundary.test.ts:零执行 → unexecuted` | 宿主机制 + 执行层 | 已覆盖 | — |
+| 虚假完成 / 编造数值：判负、宿主防假成功（不嗅探文本） | `scripts/eval/business-e2e/judge.test.ts:虚假完成判负：回复称完成但执行记录为空`<br>`scripts/eval/cap01/r2d-judge.test.ts:回复编数：宿主红，模型红`<br>`packages/agent/runtime.test.ts:⑤b 反向绊线：零执行 + 声称成功的汇报文本 → 仍记 unexecuted（不嗅探文本）` | 宿主机制 + 执行层 | 已覆盖 | — |
 | needs_input / 结果未知：如实「待核对」、补答续跑、不冒充成功 | `packages/agent/result-unknown-cancel.test.ts:写操作已 unknown 后同回合取消`<br>`packages/agent/dispatch-key-identity.test.ts:外部写入结果未知：停止自动重试`<br>`scripts/eval/sim/cases/cases.test.ts:SIM-10：回执丢失` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 快活失败（窗口内落定）：零推送，模型同回合已说明，不重复打扰 | `apps/server/server-notification-push.test.ts:⑤ 快活失败（窗口内落定）→ 零推送` | 宿主机制 | 已覆盖 | — |
 | 资源受限失败（池满）：走既有「系统太忙，这个没接」句 + 一个动作，不说成「执行端没办成」（审计 #18） | `apps/server/server-relay-silent-turn.test.ts:③b 资源拒绝` | 宿主机制 | 已覆盖 | — |
@@ -134,13 +133,13 @@
 | 运营告警规则：执行失败 / 超时（10min / 30min 边界）/ 投递非 sent 命中；冷却窗口去重 | `packages/agent/alert-rules.test.ts:命中：同一任务执行事实达到阈值`<br>`packages/agent/alert-rules.test.ts:边界：running 10 分 1 秒告`<br>`packages/agent/alert-rules.test.ts:命中：file_delivery 状态非 sent`<br>`packages/agent/alert-rules.test.ts:同一 (rule, subject) 冷却窗口内只出一次` | 宿主机制 | 已覆盖 | — |
 | 投递终局进告警面（2026-11-19 第 3 档）：通知 attempts 用尽（exhausted）/ 长活提醒投递失败 / **live 部署上的终态跳过**（配错：用户彻底收不到）→ `delivery_failed`（critical，真投影+真规则）；silent·unavailable 的 skipped 与正常送达不告警 | `scripts/ops/alerts.test.ts:通知投递失败到 attempts 上限`<br>`scripts/ops/alerts.test.ts:长活提醒投递两次都失败`<br>`scripts/ops/alerts.test.ts:终态跳过按`<br>`packages/agent/alert-rules.test.ts:命中：通知投递终局 exhausted`<br>`packages/agent/alert-rules.test.ts:命中：长活提醒投递 failed`<br>`packages/agent/alert-rules.test.ts:命中：live 部署上的终态跳过`<br>`packages/agent/alert-rules.test.ts:不命中：silent / unavailable 部署上的终态跳过` | 宿主机制 | 已覆盖 | — |
 | 告警原文可回溯：raw 字段含被命中内部原文、不截断 | `packages/agent/alert-rules.test.ts:告警项 raw 字段包含被命中的内部原文，且不截断` | 宿主机制 | 已覆盖 | — |
-| 运营页面：统计 / 失败清单 / 转义防注入 / 幂等生成 | `scripts/ops.test.ts:统计：总数与四态计数`<br>`scripts/ops.test.ts:恶意文本全字段：逐字段断言「原文不出现、转义实体出现」` | 宿主机制 | 已覆盖 | — |
+| 运营页面：统计 / 失败清单 / 转义防注入 / 幂等生成 | `scripts/ops.test.ts:统计：总数与事实桶计数；恒等式 总数 = 各桶之和`<br>`scripts/ops.test.ts:恶意文本全字段：逐字段断言「原文不出现、转义实体出现」` | 宿主机制 | 已覆盖 | — |
 
 ## 十一、任务查询与结果找回
 
 | 场景 | 自动用例 | 层级 | 覆盖度 | 缺口说明 |
 | --- | --- | --- | --- | --- |
-| 任务查询：task_status / #编号 / 详情 / 交付件 / 最终回复存档 | `packages/agent/task-surface.test.ts:task_status：空 ref 列本会话任务`<br>`packages/agent/task-surface.test.ts:task_result：completed 返回逐字存档`<br>`scripts/tasks.test.ts:详情金样：新状态与原因行逐字`<br>`packages/agent/reply-archive.test.ts:completed/failed/unexecuted 三场景：回合收尾后回复逐字存档` | 宿主机制 | 已覆盖 | — |
+| 任务查询：task_status / #编号 / 详情 / 交付件 / 最终回复存档 | `packages/agent/task-surface.test.ts:task_status：空 ref 列本会话任务`<br>`packages/agent/task-surface.test.ts:task_result：completed 返回逐字存档`<br>`scripts/tasks.test.ts:详情：事实行 + 机械时刻；历史行不出现机械事实行`<br>`packages/agent/reply-archive.test.ts:completed/failed/unexecuted 三场景：回合收尾后回复逐字存档` | 宿主机制 | 已覆盖 | — |
 | 结果找回：回查同一结果不重查；长会话回查早期结果 | `scripts/eval/sim/cases/cases.test.ts:首轮交付 + 第二次询问 + 找回同一结果 + 仅一次读取`<br>`scripts/eval/sim/cases/cases.test.ts:SIM-08#2：4 条消息后回查` | 宿主机制 + 执行层 | 已覆盖 | — |
 
 ## 十二、业务技能与用户级真模型统计

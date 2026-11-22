@@ -36,7 +36,7 @@ describe('R5 attachNotificationOutbox：waiting_user 事实携带 missing', () =
     const sink = new RecordingSink();
     const outbox = createNotificationOutbox({ dbPath, sink });
     attachNotificationOutbox(registry, outbox);
-    registry.begin({ taskId: 'task_1', principalId: 'p', sessionId: 's', request: '查发票', status: 'running' });
+    registry.begin({ taskId: 'task_1', principalId: 'p', sessionId: 's', request: '查发票' });
     registry.waitForUser('task_1', { missing: ['开票日期'] });
     const waiting = outbox.listNotifications('task_1').find((n) => n.kind === 'waiting_user');
     expect(waiting?.payload.missing).toEqual(['开票日期']);

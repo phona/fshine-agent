@@ -50,6 +50,7 @@ import {
   type Session,
 } from '../packages/agent/src/execution-runtime';
 import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
+import { taskStatusOf } from '../packages/agent/testing/task-fact-view';
 import { createFileStore } from '../packages/agent/src/file-store';
 import { assembleSessionCore, resolveExecutionFace, type ExecutionFaceFactory } from './ask-runtime';
 import { materializeEvalConfig } from './resolve-config-path';
@@ -403,7 +404,7 @@ describe('写确认续跑：提案载荷随底账记录交回 Worker（后台派
       expect(after.count).toBe(14); // seed 2 + 新增 12
       expect(after.items.slice(2).map((item) => ({ name: item.name, value: item.value }))).toEqual(RECORDS_12);
       expect(confirmationsOf(fx.stateDir)[handle]!.usedAt).toBeTruthy();
-      expect(fx.taskRegistry.get(taskId, SCOPE).status).toBe('completed');
+      expect(taskStatusOf(fx.taskRegistry.get(taskId, SCOPE))).toBe('completed');
       expect(auditLines(fx.stateDir).some((line) => line.includes('CONFIRMATION_BINDING_MISMATCH'))).toBe(false);
     } finally {
       fx.close();
@@ -438,7 +439,7 @@ describe('写确认续跑：提案载荷随底账记录交回 Worker（后台派
       const after = await queryWindow(fx.stateDir, 'alpha', 'W1');
       expect(after.count).toBe(3);
       expect(after.items[2]).toMatchObject({ name: 'alpha-item-3', value: 100 });
-      expect(fx.taskRegistry.get(taskId, SCOPE).status).toBe('completed');
+      expect(taskStatusOf(fx.taskRegistry.get(taskId, SCOPE))).toBe('completed');
     } finally {
       fx.close();
     }
@@ -493,7 +494,7 @@ describe('写确认续跑：提案载荷随底账记录交回 Worker（后台派
       expect(after.items.slice(2).map((item) => ({ name: item.name, value: item.value }))).toEqual(newRecords);
       expect(confirmationsOf(fx.stateDir)[newProposal.handle]!.usedAt).toBeTruthy();
       expect(confirmationsOf(fx.stateDir)[oldHandle]!.usedAt ?? null).toBeNull();
-      expect(fx.taskRegistry.get(taskId, SCOPE).status).toBe('completed');
+      expect(taskStatusOf(fx.taskRegistry.get(taskId, SCOPE))).toBe('completed');
     } finally {
       fx.close();
     }
@@ -551,7 +552,7 @@ describe('写确认续跑：提案载荷随底账记录交回 Worker（后台派
       expect(confirmationsOf(fx.stateDir)[freshProposal.handle]!.usedAt).toBeTruthy();
       expect(confirmationsOf(fx.stateDir)[expiredHandle]!.usedAt ?? null).toBeNull();
       expect((await queryWindow(fx.stateDir, 'alpha', 'W1')).count).toBe(14);
-      expect(fx.taskRegistry.get(taskId, SCOPE).status).toBe('completed');
+      expect(taskStatusOf(fx.taskRegistry.get(taskId, SCOPE))).toBe('completed');
     } finally {
       fx.close();
     }

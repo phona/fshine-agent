@@ -646,7 +646,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     await runBackground(registry, executor, 't_failthenscript');
     const task = registry.get('t_failthenscript', SCOPE);
     expect(taskStatusOf(task)).toBe('failed');
-    expect(taskFailureReasonOf(task) ?? '').toContain('dummy.denied');
+    expect(taskFailureReasonOf(task)).toBe('denied');
     // 两条执行事实都保留（如实底账：拒绝在先、脚本成功在后）。
     expect(task.executions.map((execution) => [execution.operation, execution.status]))
       .toEqual([['dummy.denied', 'refused'], ['run_js', 'completed']]);

@@ -10,43 +10,63 @@
  */
 import type { TaskRecord } from '../src/task-registry';
 
+/**
+ * 决定性执行行（inline judgeReportedTask 口径）：以**末条**执行事实为准；末条是**成功的**
+ * run_js 宿主脚本时，回到此前最后一条非脚本执行事实（成功脚本不盖失败的写/待补充）；末条是
+ * 失败脚本仍按末条决定（「查询成功 + 脚本失败 → failed」是冻结用例）。无任何执行行返回 undefined。
+ */
+function decisiveExecutionOf(task: TaskRecord): TaskRecord['executions'][number] | undefined {
+  const executions = task.executions;
+  const last = executions[executions.length - 1];
+  if (last === undefined) return undefined;
+  if (last.operation === 'run_js' && last.status === 'completed') {
+    return [...executions].reverse().find((entry) => entry.operation !== 'run_js') ?? last;
+  }
+  return last;
+}
+
 /** 旧状态词投影（机械事实 → 词；只按键读事实，不做业务归类）。 */
 export function taskStatusOf(task: TaskRecord): string {
-  if (task.pendingQuestion !== undefined) return 'waiting_user';
+  // 一次性结束事实先于等待形状（超时/取消落定后 pendingQuestion 可能仍在底账：结束事实不翻案）。
   if (task.cancelledAt !== undefined) return 'cancelled';
   if (task.timedOutAt !== undefined) return 'timed_out';
   if (task.resourceLimitedAt !== undefined) return 'resource_limited';
   if (task.diedAt !== undefined) return 'failed';
-  const executions = task.executions;
-  if (executions.length > 0) {
-    const last = executions[executions.length - 1];
-    if (last !== undefined && (last.status === 'failed' || last.status === 'refused' || last.status === 'needs_input')) {
+  if (task.pendingQuestion !== undefined) return 'waiting_user';
+  const decisive = decisiveExecutionOf(task);
+  if (decisive !== undefined) {
+    if (decisive.status === 'failed' || decisive.status === 'refused' || decisive.status === 'needs_input') {
       return 'failed';
     }
-    if (last !== undefined && last.status === 'accepted') return 'running';
+    if (decisive.status === 'accepted') {
+      // 长任务：accepted 执行行 + 已存档汇报 = 已收尾（无新执行行，等待回执后 Worker 只汇报）；
+      // 仍在等回执（无汇报）→ running。
+      return (task.resultText ?? task.replyText ?? '').trim() !== '' ? 'completed' : 'running';
+    }
     return 'completed';
   }
-  // 零执行：有汇报存档 = 旧 unexecuted（零执行收尾）；否则按存活机械事实区分 queued/running。
+  // 零执行：有汇报存档 = 旧 unexecuted（零执行收尾）；有租约 = 仍在跑；否则「已启动但无汇报收尾」= failed
+  //（无汇报的空回合 / 抛错 / 崩溃；与产品 taskStateWordOf 的 failed 同口径）。
   if ((task.resultText ?? task.replyText ?? '').trim() !== '') return 'unexecuted';
+  if (task.leaseUntil !== undefined) return 'running';
   if (task.runningSince === undefined) return 'queued';
-  return 'running';
+  return 'failed';
 }
 
-/** 旧原因词投影（机械时刻 / 执行行机械码）。 */
+/** 旧原因词投影（机械时刻 / 决定性执行行机械码）。 */
 export function taskReasonOf(task: TaskRecord): string | undefined {
   if (task.cancelledAt !== undefined) return 'cancelled_by_user';
   if (task.timedOutAt !== undefined) return 'timeout';
   if (task.resourceLimitedAt !== undefined) return 'resource_limited';
   if (task.diedAt !== undefined) return 'result_unknown';
-  const last = task.executions[task.executions.length - 1];
-  if (last !== undefined && last.status === 'failed') {
-    return last.error?.code === 'result_unknown' ? 'result_unknown' : 'failed_confirmed';
+  const decisive = decisiveExecutionOf(task);
+  if (decisive !== undefined && decisive.status === 'failed') {
+    return decisive.error?.code === 'result_unknown' ? 'result_unknown' : 'failed_confirmed';
   }
   return undefined;
 }
 
-/** 旧失败原文投影（末条执行行的执行层 message；不存在即 undefined，不伪造）。 */
+/** 旧失败原文投影（决定性执行行的执行层 message；不存在即 undefined，不伪造）。 */
 export function taskFailureReasonOf(task: TaskRecord): string | undefined {
-  const last = task.executions[task.executions.length - 1];
-  return last?.error?.message;
+  return decisiveExecutionOf(task)?.error?.message;
 }

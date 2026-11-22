@@ -874,10 +874,16 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   let startupRecovered: readonly string[] = [];
   /**
    * 回合失败种类的机械事实（S1：底账没有 failed 结论——onTaskFailed 回调带到的
-   * 「无汇报 / 结果未知」种类记在这里，回合末兜底投递与唤醒取同一口径）。
+   * 「无汇报 / 结果未知」种类 + 执行层原始码 + 失败原文记在这里，回合末兜底投递与唤醒取
+   * 同一口径）。code 用于按码归类话术（GATE_REFUSE → denied 等）；reason 用于事实文案的
+   * 机械原因（丢机械原因用户/模型都看不出真因，2026-11-22）。
    * 有界（会话长了不积累；一次性核销后即删）。
    */
-  const roundFailureStatus = new Map<string, 'no_report' | 'result_unknown'>();
+  const roundFailure = new Map<string, {
+    status: 'no_report' | 'result_unknown';
+    code?: string;
+    reason?: string;
+  }>();
   /**
    * B 切片（工单回执收敛）：本会话已在同一回合拿到结果的任务（快活）——完成投递对其抑制
    * （结果已由模型在本回合转述，不重复发两遍）。条目一次性消费（完成回调核销后即删），

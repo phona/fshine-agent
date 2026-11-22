@@ -21,6 +21,7 @@ import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fsh
 import type { DriverMessage, TurnDriver } from '../../packages/agent/src/driver-contract';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import { taskLivenessOf } from '../../packages/agent/src/task-registry';
+import { taskStatusOf } from '../../packages/agent/testing/task-fact-view';
 import { LONG_RUNNING_NOTICE_FALLBACK_TEXT, longRunningNoticeFactText, type TaskExecutionInput, type TaskExecutionOutcome, type TaskExecutor } from '../../packages/agent/src/task-runner';
 import { createLongRunningNoticePort, createServer, isGroupPrincipal, type FileDeliveryPort } from './server';
 
@@ -330,8 +331,8 @@ describe('预期契约·主动提醒的生产接线', () => {
       const taskId = registry.list({ principalId: 'wecom:user-a', sessionId: 'wecom:conv-long' })[0]!.taskId;
       const running = registry.get(taskId, { principalId: 'wecom:user-a', sessionId: 'wecom:conv-long' });
       registry.close();
-      // S1 事实模型：底账没有 status——存活由租约/时刻事实推导（长任务受理后租约已清）。
-      expect(taskLivenessOf(running)).toBe('running');
+      // S1 事实模型：底账没有 status——长任务受理后租约已清；accepted 执行行 + 无汇报 = 仍在办。
+      expect(taskStatusOf(running)).toBe('running');
       expect(running.leaseUntil).toBeUndefined();
       expect(running.runningSince).toBeDefined();
 

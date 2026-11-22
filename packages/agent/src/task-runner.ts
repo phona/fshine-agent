@@ -353,8 +353,26 @@ export type TaskExecutionOutcome =
    * 作用域**交付物（登记事实）；这是后台面对 TurnResult.files 的同位面：装配方按它投递。
    * zeroExecReason = 零执行的机械原因（'not_permitted' = 发起前被宿主拒绝——唤醒面据此
    * 按「本次不允许」说清）；缺省 = 无该事实。
+   *
+   * executionOutcome（2026-11-22 补，如实交付红线）：本回合执行事实的**机械结局**——宿主
+   * 完成/失败投递面据此分流（不能只看「有没有汇报」：Worker 在被拒/失败后也会汇报一句
+   * 解释，把那种回合说成「办好了」就是虚假成功）。
+   *   · 缺省 / 'success'    = 有汇报即结果（含零执行收尾）；装配方走**完成**回调；
+   *   · 'failed' / 'refused' = 本回合有执行以失败/拒绝收尾；装配方走**失败**回调，
+   *     且 runner 不把汇报落成完成存档（做没做成由账本执行事实说）；
+   *   · 'not_permitted'      = 发起前被宿主拒绝（本次不允许）。
+   * errorCode / failureReason 只在 failed/refused 时有值：执行层原始码（只用于归类，不进
+   * 用户文本）与执行层失败原文（机械原因；投递面事实文案用）。
    */
-  | { kind: 'ended'; report?: string; files?: readonly TaskOutcomeFile[]; zeroExecReason?: 'not_permitted' }
+  | {
+    kind: 'ended';
+    report?: string;
+    files?: readonly TaskOutcomeFile[];
+    zeroExecReason?: 'not_permitted';
+    executionOutcome?: 'success' | 'failed' | 'refused' | 'not_permitted';
+    errorCode?: string;
+    failureReason?: string;
+  }
   | { kind: 'needs_input'; question: PendingQuestion }
   /**
    * 本回合以「写操作提案待用户确认」收尾：question 是等待事实的问题形状，
@@ -846,7 +864,13 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     pumpQueued = true;
     queueMicrotask(() => {
       pumpQueued = false;
-      pump();
+      try {
+        pump();
+      } catch (error) {
+        // 微任务里的异常不能变成进程级未捕获错误（如收尾阶段底账已关闭）：只如实上报
+        // 观察点，不改变任务事实（与 due 定时器回调同一口径）。
+        report('pump_tick', error);
+      }
     });
   }
 
@@ -1510,6 +1534,10 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
    */
   function settle(taskId: string, result: RoundResult): void {
     if (result.kind === 'threw') {
+      // 回合已结束（抛错）：先清在跑租约——否则任务行残留有效租约，存活面会一直报「running」
+      // （失败/唤醒面据此误判仍在下班）。结束事实不翻案：markCancelled/markTimedOut 已清租约，
+      // 这里对非 abort 分支兜底。
+      releaseLeaseQuietly(taskId);
       if (isAbortError(result.error) && cancelRequested.delete(taskId)) {
         // abort 观察 + 用户确曾请求停止：确认取消（一次性事实；重复写零写入）。
         try {
@@ -1541,6 +1569,9 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
           releaseLeaseQuietly(taskId);
           try {
             registry.noteRoundFailed(taskId);
+            // 装配缺陷导致受理的长任务无人推进：落「结果未知」结束事实（存活面不留活行，
+            // 做没做完说不清——不冒充完成，也不留 running 幽灵行）。
+            registry.markDied(taskId);
           } catch (error) {
             if (!isSettledRace(error)) report(taskId, error);
           }
@@ -1579,9 +1610,13 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         }
         // 汇报逐字存档（事实；空白结果不落——显示层不以汇报冒充）；无汇报 = 回合失败事实
         //（执行行就是事实，不判成败、不合成失败文案）。
+        // S1 如实交付（2026-11-22）：本回合执行结局是 failed/refused/not_permitted 时，
+        // Worker 那句汇报是**对失败的说明**，不是完成结果——不落完成存档（落下去就会让
+        // 投递面把被拒/失败说成「办好了」）。做没做成由账本执行事实说。
         const reportText = (outcome.report ?? '').trim();
+        const roundSucceeded = outcome.executionOutcome === undefined || outcome.executionOutcome === 'success';
         releaseLeaseQuietly(taskId);
-        if (reportText !== '') {
+        if (roundSucceeded && reportText !== '') {
           try {
             if (registry.archiveReply !== undefined) registry.archiveReply([taskId], outcome.report!);
             else registry.noteRoundFailed(taskId); // 无存档面 = 结果可找回机制缺失，按失败事实上报

@@ -22,8 +22,8 @@ import type { TurnDriver, TurnDriverInput } from '../../../../packages/agent/src
 import { createResourcePolicy } from '../../../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry } from '../../../../packages/agent/src/task-registry-sqlite';
 import { defaultMainSkillsDir, loadMainSkillDelivery } from '../../../../packages/agent/src/worker-skills';
-import { notificationKindForTransition } from '../../../../packages/agent/src/notifications';
-import type { NotificationReason } from '../../../../packages/agent/src/notifications';
+import { notificationKindForEvent } from '../../../../packages/agent/src/notifications';
+import { taskStatusOf } from '../../../../packages/agent/testing/task-fact-view';
 import { materializeEvalConfig } from '../../../resolve-config-path';
 import {
   assembleSessionCore,
@@ -202,9 +202,15 @@ export function createDsExecutor(options: DsExecutorOptions = {}): DsExecutor {
     const policy = createResourcePolicy(runtime);
     const taskFacts: TaskFactLine[] = [];
     const notifications: NotificationLine[] = [];
+    // S1 事实模型：底账只发机械事件（无 from/to/reason）。事件 → 旧「to」词映射，复用既有度量口径。
+    const FACT_TO: Readonly<Record<string, string>> = {
+      queued: 'queued', started: 'running', resumed: 'running', waiting_user: 'waiting_user',
+      result_archived: 'completed', cancelled: 'cancelled', timed_out: 'timed_out',
+      died: 'failed', resource_limited: 'refused', round_failed: 'failed',
+    };
     registry.onTaskFact((fact) => {
-      taskFacts.push({ ts: fact.at, taskId: fact.taskId, from: fact.from ?? '', to: fact.to, ...(fact.reason === undefined ? {} : { reason: fact.reason }) });
-      const kind = notificationKindForTransition(fact.from, fact.to, fact.reason as NotificationReason | undefined);
+      taskFacts.push({ ts: fact.at, taskId: fact.taskId, from: '', to: FACT_TO[fact.event] ?? fact.event });
+      const kind = notificationKindForEvent(fact.event);
       if (kind !== undefined) notifications.push({ ts: fact.at, taskId: fact.taskId, kind });
     });
     try {
@@ -282,7 +288,7 @@ export function createDsExecutor(options: DsExecutorOptions = {}): DsExecutor {
         metaTurns.push({ index: turn, durationMs, modelCalls: assistantMessages.length, taskIds: [...(result?.taskIds ?? [])], tokens, retries: 0, notes: [] });
         replies.push({ turn, text: result?.reply ?? '', sha256: '' });
       }
-      const tasks = jsonSafe(session.tasks()) as TaskRecordJson[];
+      const tasks = jsonSafe(session.tasks().map((task) => ({ ...task, status: taskStatusOf(task) }))) as TaskRecordJson[];
       const auditLines = existsSync(assembled.auditPath)
         ? readFileSync(assembled.auditPath, 'utf8').trimEnd().split('\n').filter((l) => l !== '')
         : [];

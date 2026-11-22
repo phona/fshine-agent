@@ -91,7 +91,7 @@ function greenStop(): StopEvidence {
 }
 
 function greenFailure(): FailureEvidence {
-  const template = failureTextFor('COLLECTION_LOCKED', 'failed');
+  const template = failureTextFor('failed');
   const prepareRow = {
     mode: 'prepare', script: 'dummy.prepare', via: 'structured', exitCode: 2,
     args: { '--collection': 'locked-one', '--window': 'W1' },
@@ -527,7 +527,7 @@ describe('failure：正例全绿 + 逐条反向破坏必红', () => {
   it('S2-C3：健康路径（模型说话，无宿主模板）与降级路径（宿主模板）都绿 —— 来源不限', () => {
     // 健康路径：唤醒设计下用户可见文本 = 模型/唤醒投递的话，宿主失败模板不出现。
     const healthy = greenFailure();
-    const template = failureTextFor('COLLECTION_LOCKED', 'failed');
+    const template = failureTextFor('failed');
     healthy.visible = [{ at: AT, source: 'turn', text: '这件事没办成，我再看下。', turnIndex: 1 }];
     healthy.pushTexts = [];
     healthy.failureRelayedInTurn = false;

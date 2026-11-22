@@ -72,7 +72,6 @@
 | 同回合自我确认结构性挡住：句柄只在用户表态后的回合透传 | `packages/agent/background-write-confirmation.test.ts:⑦ 同回合 prepare 后立刻 commit` | 已实现（有守卫） |
 | 只读装配下写请求：明确拒绝、零写入、不宣称成功 | `scripts/eval/wecom-sim/cases-f-write.test.ts:W-25 只读装配下同一写请求` | 已实现（有守卫） |
 | 批量写入逐条结果：一条坏不拖累整批汇报，partial 不得说成成功 | `packages/agent/batch-write-items.test.ts:② 注入一条写失败` | 已实现（有守卫） |
-| 写回合终局=末次决定性结果：先失败后成功不再误报失败、失败那次留痕 | `packages/agent/write-outcome-last-attempt.test.ts:① 主形状：确认回合 commit 失败（参数错）` | 已实现（有守卫） |
 
 ### 6. 文件交付
 
@@ -127,7 +126,7 @@ detail 在 `docs/product/interaction-contract.md`（五条尺子逐条现状）�
 
 - **用户看到的话全部由模型说**；宿主只做四件事：时机（状态变化才唤醒/投递）、事实（喂机械事实）、凭据（身份与句柄透传）、投递与记账。唯一例外 = 模型回合挂掉时的如实兜底句。状态：已实现（有守卫）。锚点：`apps/server/server-relay-silent-turn.test.ts:用户看到的话永远是模型说的`。
 - **受理静默**：宿主不发「收到，正在处理」受理帧、不静默派发——交办回合照发模型说的话。状态：已实现（有守卫）。锚点：`apps/server/server-task-wait-window.test.ts:b. 慢活：只交办回合照发模型说的话`。
-- **确认必回执**：确认/接续回合必有用户可见归宿（结果、失败话术或重新提案），不许静默终局。状态：已实现（有守卫）。锚点：`packages/agent/write-outcome-last-attempt.test.ts:① 主形状：确认回合 commit 失败（参数错）`、`apps/server/server-relay-silent-turn.test.ts:① 主形状：窗口内完成 + 模型全程空正文`。
+- **确认必回执**：确认/接续回合必有用户可见归宿（结果、失败话术或重新提案），不许静默终局。状态：已实现（有守卫）。锚点：`apps/server/server-relay-silent-turn.test.ts:① 主形状：窗口内完成 + 模型全程空正文`。
 - **失败三选一归宿**：Main 兜（既有兜路径的刹车不放宽：wait 退避封顶 60s / A2b 同对象锁 / 失败缺省不可重试 / retry_storm 告警）→ 告诉用户（业务话 + 一个动作）→ 告警/开发介入（不给用户编话）。状态：已实现（有守卫）。锚点：`packages/agent/long-task-wait-truncation.test.ts:退避单调翻倍到 60s 封顶`、`packages/agent/background-retry-lock.test.ts:① 同键确定性拒绝两次`、`packages/agent/deterministic-failure-guard.test.ts:失败但**未声明** retryable → 按不可重试处理`、`packages/agent/alert-rules.test.ts:命中：同一任务执行事实达到阈值`。
 - **消息自含**：完成/失败/等补信息的事实都带业务名，用户不用猜是哪件事；用户可见文本最终由模型转述——事实链有守卫，模型转述面无自动用例（真模型评测守）。状态：已实现（无守卫）。锚点：`apps/server/server-completion-wake.test.ts:⑤ 完成消息要让用户看出是哪件事`。
 - **久等只提示不停**：超阈值恰一条「要我停下来，还是继续等？」；任务不判死、不杀，处置权在用户。提醒 1:1 与群聊都发（owner 2026-11-19 #9：群 = 独立主体；群话术不带业务名——隐私口径归端口，重启判据只看底账任务事实 #10）。状态：已实现（有守卫）。锚点：`packages/agent/long-running-notice.test.ts:① 10 分钟内零发送`、`apps/server/server-long-running-notice.test.ts:② 群聊也发`。

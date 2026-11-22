@@ -155,7 +155,7 @@ describe('A. 模型可见面过滤：model_visible:false 的 operation 不进能
     // 零执行事实：执行层一次都没被调用。
     expect(client.requests).toEqual([]);
     // 回合结局指向权限，不是「模型没干活」。
-    expect(outcome).toMatchObject({ kind: 'failed', reason: OPERATION_NOT_PERMITTED_MESSAGE });
+    expect(outcome).toMatchObject({ kind: 'ended', zeroExecReason: 'not_permitted' });
   });
 
   it('③ 其它写操作（prepare/commit）仍在委派清单里（只藏历史协议，不误伤正常写面）', async () => {

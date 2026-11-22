@@ -1,11 +1,11 @@
 /**
- * tasks --redo（P3 人工接管 v1）：终态任务一键重新推进。
+ * tasks --redo（P3 人工接管 v1；S1 事实模型）：已停任务一键重新推进。
  *
  * 本文件钉住（用户视角可演示的机械事实）：
- *   · 终态判定矩阵：completed/failed/unexecuted 可；running 与未知态拒（exit 2）；
+ *   · 重新推进判定（S1 事实）：在跑 / 等待用户 / 尚未开始 / 缺交办原文 拒（exit 2）；
  *   · 输入=存储的交办原文逐字：经**真实 createSession** + 记录驱动断言唯一 user 消息逐字节相等；
- *   · 无历史注入：原任务的回复/失败原因/执行错误哨兵不出现在驱动器可见输入；
- *   · 原任务记录零改动；输出逐字含「原任务 #编号 → 新任务 #编号（状态：…）」；
+ *   · 无历史注入：原任务的回复/失败原文/执行错误哨兵不出现在驱动器可见输入；
+ *   · 原任务记录零改动；输出逐字含「原任务 #编号 → 新任务 #编号（事实：…）」；
  *   · redo 走生产同源装配：principal/session/dbPath/argv/env 原样传给装配函数；
  *   · 错误码：装配门拒绝 2 / 装配其它错误 1 / send 失败 1（如实报告已创建的新任务）/ 未达标 1。
  * e2e：真实子进程跑 CLI 的确定性拒绝路径（不含模型调用；LLM_API_KEY 显式置空）。
@@ -22,7 +22,7 @@ import {
 import { createSession, type Session } from '../packages/agent/src/execution-runtime';
 import type { TurnDriver, TurnDriverInput } from '../packages/agent/src/driver-contract';
 import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
-import type { TaskRecord, TaskStatus } from '../packages/agent/src/task-registry';
+import type { TaskRecord } from '../packages/agent/src/task-registry';
 import { AssemblyRefusedError } from './ask-runtime';
 import { parseTaskArgs, renderRedoPairLine, runRedo, type RedoDeps } from './tasks';
 
@@ -41,12 +41,13 @@ afterEach(() => {
 const SCOPE = { principalId: 'wecom:fixture-user', sessionId: 'ask-redo-session' };
 const REQUEST = '帮我查一下 beta 集合、窗口 W1 的数据';
 
+/** 已启动、无结束事实、无等待形状的机械事实行（可重新推进的基线）。 */
 function syntheticTask(overrides: Partial<TaskRecord> & { taskId: string }): TaskRecord {
   return {
     principalId: SCOPE.principalId,
     sessionId: SCOPE.sessionId,
     request: REQUEST,
-    status: 'failed',
+    runningSince: '2026-11-14T00:00:01.000Z',
     taskNo: 1,
     executions: [],
     createdAt: '2026-11-14T00:00:00.000Z',
@@ -55,7 +56,7 @@ function syntheticTask(overrides: Partial<TaskRecord> & { taskId: string }): Tas
   };
 }
 
-/** 走真实 SQLite 注册表造终态任务（与 P1 查看面消费同一份存储）。 */
+/** 走真实 SQLite 注册表造已停任务（与 P1 查看面消费同一份存储）。 */
 function seedTerminalTask(dbPath: string, input: {
   taskId: string;
   status: 'completed' | 'failed' | 'unexecuted';
@@ -67,9 +68,9 @@ function seedTerminalTask(dbPath: string, input: {
   registry.begin({ taskId: input.taskId, ...SCOPE, request: input.request ?? REQUEST });
   if (input.status === 'completed') {
     registry.noteExecution(input.taskId, { requestId: `req_${input.taskId}`, operation: 'dummy.query', status: 'completed' });
-    registry.complete(input.taskId, input.resultText ?? '已查询 beta：3 条。');
+    registry.setResultText(input.taskId, input.resultText ?? '已查询 beta：3 条。');
   } else if (input.status === 'unexecuted') {
-    registry.complete(input.taskId, input.resultText ?? '本轮未发起调用。');
+    registry.setResultText(input.taskId, input.resultText ?? '本轮未发起调用。');
   } else {
     registry.noteExecution(input.taskId, {
       requestId: `req_${input.taskId}`,
@@ -77,7 +78,7 @@ function seedTerminalTask(dbPath: string, input: {
       status: 'failed',
       ...(input.executionError === undefined ? {} : { error: { code: 'COLLECTION_FAULT', message: input.executionError } }),
     });
-    registry.complete(input.taskId, input.resultText ?? '执行层报告故障。');
+    registry.setResultText(input.taskId, input.resultText ?? '执行层报告故障。');
   }
   registry.close();
 }
@@ -174,8 +175,8 @@ describe('tasks --redo：参数解析', () => {
   });
 });
 
-describe('tasks --redo：终态判定与拒绝路径', () => {
-  it('completed/failed/unexecuted 可重新推进；running/未知态/空原文拒绝且不触发装配', async () => {
+describe('tasks --redo：重新推进判定与拒绝路径', () => {
+  it('在跑/等待用户/尚未开始/缺原文拒绝且不触发装配', async () => {
     let assembleCalls = 0;
     const deps: RedoDeps = {
       assemble: async () => {
@@ -184,23 +185,33 @@ describe('tasks --redo：终态判定与拒绝路径', () => {
       },
     };
 
-    const running = await runRedo(redoInput(syntheticTask({ taskId: 'task_r', status: 'running' }), '/nope.db'), deps);
+    const running = await runRedo(redoInput(syntheticTask({ taskId: 'task_r', leaseUntil: '2099-01-01T00:00:00.000Z' }), '/nope.db'), deps);
     expect(running.exitCode).toBe(2);
     expect(running.stdout).toBe('');
-    expect(running.stderr).toBe('任务正在进行中，不能重新推进：task_r（仅已完成、失败或未执行的任务可以重新推进）。\n');
+    expect(running.stderr).toBe('任务正在进行中，不能重新推进：task_r（仅在跑已停的任务可以重新推进）。\n');
 
-    const bogus = await runRedo(redoInput(syntheticTask({ taskId: 'task_b', status: 'bogus' as TaskStatus }), '/nope.db'), deps);
-    expect(bogus.exitCode).toBe(2);
-    expect(bogus.stderr).toBe('任务状态无法识别（bogus），拒绝重新推进：task_b。\n');
+    const waiting = await runRedo(
+      redoInput(syntheticTask({ taskId: 'task_w', pendingQuestion: { missing: ['时间范围'] } }), '/nope.db'),
+      deps,
+    );
+    expect(waiting.exitCode).toBe(2);
+    expect(waiting.stderr).toBe('任务在等待用户表态，不能重新推进：task_w（先答复或取消该任务）。\n');
 
-    const blank = await runRedo(redoInput(syntheticTask({ taskId: 'task_e', status: 'failed', request: '   ' }), '/nope.db'), deps);
+    const unstarted = await runRedo(
+      redoInput(syntheticTask({ taskId: 'task_u', runningSince: undefined }), '/nope.db'),
+      deps,
+    );
+    expect(unstarted.exitCode).toBe(2);
+    expect(unstarted.stderr).toBe('任务尚未开始执行，不能重新推进：task_u（等它开始或先取消）。\n');
+
+    const blank = await runRedo(redoInput(syntheticTask({ taskId: 'task_e', request: '   ' }), '/nope.db'), deps);
     expect(blank.exitCode).toBe(2);
     expect(blank.stderr).toBe('任务缺少交办原文，无法重新推进：task_e。\n');
 
     expect(assembleCalls).toBe(0);
   });
 
-  it('终态矩阵：三种终态都进入装配，principal/session/dbPath/argv/env 原样下传', async () => {
+  it('已停三态都进入装配，principal/session/dbPath/argv/env 原样下传', async () => {
     const seen: Array<Record<string, unknown>> = [];
     for (const status of ['completed', 'failed', 'unexecuted'] as const) {
       const dir = tempDir();
@@ -223,7 +234,7 @@ describe('tasks --redo：终态判定与拒绝路径', () => {
       expect(outcome.exitCode).toBe(0);
       expect(outcome.stderr).toBe('');
       expect(outcome.stdout).toContain('原任务 #1 → 新任务 #2');
-      expect(outcome.stdout).toContain('（状态：未执行）');
+      expect(outcome.stdout).toContain('（事实：已汇报）');
       expect(outcome.stdout).toContain(`任务底账：${dbPath}（新任务已写入）`);
       // 新任务确实落账；原任务不在 stdout 的详情渲染里被改写（另见零改动用例）。
       const ids = listTaskIds(dbPath);
@@ -260,10 +271,10 @@ describe('tasks --redo：原文逐字与无历史注入', () => {
     expect(messages).toHaveLength(1);
     expect((messages[0] as { role: string }).role).toBe('user');
     expect((messages[0] as { content: unknown }).content).toBe(request);
-    expect(outcome.stdout).toContain('（状态：未执行）');
+    expect(outcome.stdout).toContain('（事实：已汇报）');
   });
 
-  it('原任务的回复/失败原因/执行错误哨兵不出现在驱动器可见输入（禁历史注入绊线）', async () => {
+  it('原任务的回复/失败原文/执行错误哨兵不出现在驱动器可见输入（禁历史注入绊线）', async () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     const sentinelResult = 'SENTINEL_RESULT_9f2a';
@@ -277,7 +288,7 @@ describe('tasks --redo：原文逐字与无历史注入', () => {
     });
     const task = readTask(dbPath, 'task_sentinel');
     expect(task.resultText).toBe(sentinelResult);
-    expect(task.failureReason).toContain(sentinelError);
+    expect(task.executions[0]!.error?.message).toBe(sentinelError);
 
     const recorder: Recorder = { mainInputs: [] };
     const built = await realSession(dbPath, recorder);
@@ -325,7 +336,7 @@ describe('tasks --redo：输出与错误码', () => {
     const newId = listTaskIds(dbPath).find((id) => id !== 'task_ok')!;
     expect(outcome.exitCode).toBe(0);
     expect(outcome.stdout).toBe(
-      `已重新交办并收到汇报。\n\n原任务 #1 → 新任务 #2（状态：未执行）\n`
+      `已重新交办并收到汇报。\n\n原任务 #1 → 新任务 #2（事实：已汇报）\n`
       + `任务底账：${dbPath}（新任务已写入）\n`,
     );
     // 新任务确实落账（编号=2；原任务编号保持 1）。
@@ -352,7 +363,7 @@ describe('tasks --redo：输出与错误码', () => {
     expect(broken.exitCode).toBe(1);
     expect(broken.stderr).toBe('重新推进未完成：装配爆炸\n');
 
-    const created = syntheticTask({ taskId: 'task_new', taskNo: 2, status: 'running' });
+    const created = syntheticTask({ taskId: 'task_new', taskNo: 2, leaseUntil: '2099-01-01T00:00:00.000Z' });
     let taskCalls = 0;
     const session = {
       principalId: SCOPE.principalId,
@@ -369,7 +380,7 @@ describe('tasks --redo：输出与错误码', () => {
       assemble: async () => ({ session, close: () => {} }),
     });
     expect(half.exitCode).toBe(1);
-    expect(half.stdout).toContain('原任务 #1 → 新任务 #2（状态：进行中）');
+    expect(half.stdout).toContain('原任务 #1 → 新任务 #2（事实：进行中）');
     expect(half.stderr).toBe('重新推进未完成：回合爆炸\n');
 
     const chat = await runRedo(redoInput(base, '/nope.db'), {
@@ -390,8 +401,8 @@ describe('tasks --redo：输出与错误码', () => {
     expect(chat.stderr).toBe('未达标：本轮没有产生新任务（重新推进未生效）。\n');
     expect(renderRedoPairLine(
       syntheticTask({ taskId: 'task_a', taskNo: 1 }),
-      syntheticTask({ taskId: 'task_b', taskNo: 2, status: 'completed' }),
-    )).toBe('原任务 #1 → 新任务 #2（状态：已完成）');
+      syntheticTask({ taskId: 'task_b', taskNo: 2, resultText: '已查询。' }),
+    )).toBe('原任务 #1 → 新任务 #2（事实：已汇报）');
   });
 });
 
@@ -417,12 +428,14 @@ function runTasks(args: string[], env: Record<string, string | undefined> = {}):
 }
 
 describe('tasks --redo：CLI 端到端（确定性拒绝路径，无模型调用）', () => {
-  it('running 拒绝 exit 2；未知 id exit 2；无 key 装配门拒绝 exit 2；三者都不产生新任务', () => {
+  it('在跑拒绝 exit 2；未知 id exit 2；无 key 装配门拒绝 exit 2；三者都不产生新任务', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     seedTerminalTask(dbPath, { taskId: 'task_done', status: 'completed' });
     const registry = createSqliteTaskRegistry(dbPath);
     registry.begin({ taskId: 'task_running', ...SCOPE, request: '进行中的任务' });
+    // S1 事实模型：在跑 = 有效租约（begin 写 running_since，不写租约）。
+    registry.armLease('task_running', { owner: 'test', leaseMs: 86_400_000 });
     registry.close();
     const before = listTaskIds(dbPath);
 

@@ -621,8 +621,8 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
       { signal: new AbortController().signal },
     );
     expect(direct satisfies TaskExecutionOutcome).toEqual({
-      kind: 'completed',
-      resultText: '已按执行层回执汇报。',
+      kind: 'ended',
+      report: '已按执行层回执汇报。',
     });
   });
 });

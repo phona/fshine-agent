@@ -1,7 +1,7 @@
 # 能力边界：柜台（Main）／后台部门（Worker）／客户（用户）／宿主
 
-> 状态：现行判据档（owner 已定，作为后续所有切片的判据；**§2 能力目录派生、§3 答复五态分类器本切片已落地，逐条挂守卫；未接线处逐条明确标注**）。
-> 最后核对：2026-11-20（基线 `123c0b8b` `arch/integration`；Worker 工具面已切每-operation 一个 `op_*` 工具；一切以现行代码为准，冲突就地标 ⚠️）。
+> 状态：现行判据档（owner 已定，作为后续所有切片的判据；**§2 能力目录派生已落地；§3 答复五态机械分类器已随 S1 删除，余下只登记仍在的机械事实与 Main 行为句**）。
+> 最后核对：2026-11-22（基线 `123c0b8b` `arch/integration` + S1 task 去 `status` 收口；Worker 工具面已切每-operation 一个 `op_*` 工具；一切以现行代码为准，冲突就地标 ⚠️）。
 > 上游指针：`AGENTS.md`（定位/职责边界/新增机制准入）、`docs/architecture/contract.md`（执行契约语义面）、`docs/product/capability.md`（用户级能力台账与四档状态纪律）；`packages/contracts/src/execution-contract.ts`、`packages/agent/src/execution-runtime.ts`。
 
 owner 的类比（原文）：**「相当于 Main 的工作台里对客户罗列了业务范围，拿到用户提交的资料后给下游部门完成工作，然后再反馈结果给用户」**。本文把它拆成四件事：四个角色各自的权（§1）、单一来源的能力目录（§2）、Worker→Main 的结构化答复契约（§3）、结构化交办格式（§4），末尾三条禁令（§5）与现状/守卫登记（§6、§7）。
@@ -33,21 +33,25 @@ owner 的类比（原文）：**「相当于 Main 的工作台里对客户罗列
 - **Main 侧形态**：一句极短摘要常驻 + 一个只读工具 `capabilities()` 按需查；**不含 operation 名、不含参数**。摘要常驻沿用 catalog 模式（`renderSkillCatalog`：`packages/agent/src/skills.ts:153`）。**已实现**：`renderCapabilitySummary`（`packages/agent/src/capability-catalog.ts:67`）+ `CAPABILITIES_TOOL`（`packages/agent/src/execution-runtime.ts:260`，装配 `:3138`）；装配见 `scripts/ask-runtime.ts:1072`；守卫 `packages/agent/main-capability-surface.test.ts:59`、`:66`（工具面有 capabilities、输出不含 operation 名/--/参数名）、`packages/agent/capability-catalog.test.ts:60`（摘要无内部形态）。
 - **未声明即退化为现状**：执行层未声明 `capability` 时退化为现状（Main 不知道边界；交办后由 Worker 判定能否执行），且宿主/装配必须**显式登记为「能力边界未声明」**，不许假装知道、不许承诺范围。**已实现**：目录为空时不追加摘要/行为句（提示逐字节不变），记一次性事件 `capability_catalog_undeclared`（`scripts/ask-runtime.ts:1070`；事件定义 `packages/agent/src/execution-runtime.ts:703`）；守卫 `scripts/capability-catalog-assembly.test.ts:66`（未声明 → 事件 + 提示不变 + 无 capabilities 工具）、`:77`（已声明 → 派生 + 工具出现）。
 
-## 3. Worker → Main 的答复契约（结构化 outcome，分类器已实现）
+## 3. Worker → Main 的答复契约（结构化事实，宿主不再出结论）
 
-Worker 的汇报必须是**结构化 outcome**，Main 据此套用统一话术——这样「办不了」和「没办成」不会被说成同一句、也不会被加一句「再试一次」。**已实现（宿主侧机械分类器）**：`classifyOutcome`（`packages/agent/src/task-outcome.ts:71`）把任务底账的机械事实归成五值之一；`unsupported` / `blocked` 走零执行分支（`:75-85`），结构化原因码 `not_permitted` / `unsupported` 已接上（`:122-123`、`:77-78`）；出口 `renderOutcomeFact`（`:135`）经 `taskFailureFactText`（`apps/server/task-completion-delivery.ts:299`）作为事实喂给 Main。Main 行为句 `OUTCOME_BEHAVIOR_NOTE`（`packages/agent/src/execution-runtime.ts:569`）在目录非空时随摘要常驻（`scripts/ask-runtime.ts:1072`）。下表逐条标现状：
+Worker 的汇报必须是**结构化事实**，Main 据此套用统一话术——这样「办不了」和「没办成」不会被说成同一句、也不会被加一句「再试一次」。
 
-> ⚠️ **未接线（如实登记）**：outcome 的 `completed` / `partial` 目前**只写进失败唤醒出口**（`apps/server/server.ts` 的 `taskFailureFactText` 调用点）；底账 `ExecutionRecord`（`packages/agent/src/task-registry.ts:148-156`）**无 `items` 字段**——执行层信封里的 `completed.items`（`packages/contracts/src/execution-contract.ts:200`）没有落到底账，分类器拿不到逐项 ok/failed/unknown 事实，`partial` 无法从底账投影判出（`apps/server/server.ts:699` 的 `execution.items` 读取恒为空）。这条标「未实现/待接线」，不写成已实现。
+> ⚠️ **S1 变更（2026-11-22，口径见 `docs/design/task-redefinition.md`）**：旧的五态机械分类器 `classifyOutcome` 及其出口 `renderOutcomeFact` 已随 task 去 `status` **整条删除**——宿主不再把机械事实归成「答复五态」结论，做没做成由 Main 读执行行/汇报自己判断；冻结判据改在 `scripts/eval/convergence-r1/judge.ts` 里读 `executions` 逐条 `status` 机械对比（函数 `outcomeFromTask`）。
 
-| outcome | 机械判据 | Main 对用户说 | 现状 |
+**仍在的机械事实（B3 结构化原因码）**：`packages/agent/src/task-outcome.ts:13`（`OUTCOME_REASON_NOT_PERMITTED`）、`:14`（`OUTCOME_REASON_UNSUPPORTED`）、`:17` / `:18`（两种情形各自可辨的机械原因文本）。`not_permitted` = 「能力存在但本次不允许」，由宿主在发起前拒绝时用（导入 `packages/agent/src/execution-runtime.ts:99`；消费 `apps/server/server.ts:98`、`:1150`），作为 `taskFailureFactText` 的结构化事实位喂给 Main（`apps/server/task-completion-delivery.ts:307`）。
+
+**Main 行为句（提示词约束，不是宿主话术）**：`OUTCOME_BEHAVIOR_NOTE`（`packages/agent/src/execution-runtime.ts:569`）在目录非空时随摘要常驻（`scripts/ask-runtime.ts:1104`），钉住「办不了 / 缺什么 / 逐项说」三种措辞纪律；话由模型写，宿主只喂事实。
+
+| 语义 | 机械判据 | Main 对用户说 | 现状 |
 | --- | --- | --- | --- |
-| `completed` | 全部项成功 | 结论 + 数据 | 分类器五值之一（`packages/agent/src/task-outcome.ts:53`、`:107`）；出口见上「未接线」注 |
-| `partial` | 部分项成功 | 逐项说，**不得说成单纯成功** | 分类器已实现（`:102-109`：`completed` 且 items 有 failed/unknown → partial），但**底账 ExecutionRecord 无 items、未接线**（见上「未接线」注）；这条标「未实现/待接线」，不写成已实现 |
-| **`unsupported`** | 零执行 + 无对应能力 | 「这件事我这边办不了」+ 能办的（**来自 §2 派生目录**）。**绝不提「再试一次」** | **已实现**：零执行且非权限拒绝/非等待 → unsupported（`task-outcome.ts:75-85`）；结构化码 `unsupported` 接上（`:122-123`、`:78`）；守卫 `packages/agent/task-outcome.test.ts:48`、`:55`、`:177`；G4 不提「再试」守卫 `packages/agent/task-outcome.test.ts:156` |
-| **`blocked`** | 有能力但缺条件（权限/口径/字段） | 「缺 X」+ 补的方式 | **已实现**：零执行 + 权限拒绝码 `not_permitted` / `zeroReason=permission_denied` / 等待 → blocked（`task-outcome.ts:75-83`）；判据只用结构化码、不扫文案（`apps/server/task-outcome-reason.ts`；反向绊线 `apps/server/task-outcome-reason.test.ts:14`）；缺失条件非空守卫 `packages/agent/task-outcome.test.ts:162` |
-| `failed` | 有能力、执行失败 | 「没办成」+ **该重试才说重试**（执行层 `retryable:true`；缺省/未声明按不可重试，`packages/contracts/src/execution-contract.ts:156-166`） | 六态之一（已有，`:222`）；「该重试才说重试」已有守卫（`packages/agent/deterministic-failure-guard.test.ts:222`、`:179`；话术 `packages/agent/user-facing-failure.test.ts:117`） |
+| 办不了（`unsupported`） | 目录里没有对应能力 | 「这件事我这边办不了」+ 能办的（**来自 §2 派生目录**）。**绝不提「再试一次」** | 宿主分类器已删；结构化码 `unsupported` 仍在（`packages/agent/src/task-outcome.ts:14`）；行为句 `packages/agent/src/execution-runtime.ts:569` |
+| 缺条件（`blocked`） | 有能力但缺条件（权限/口径/字段） | 「缺 X」+ 补的方式 | 宿主分类器已删；结构化码 `not_permitted` 用于发起前拒绝的事实位（`packages/agent/src/task-outcome.ts:13`；消费 `apps/server/server.ts:1150`） |
+| 部分完成（`partial`） | 批量写里部分项失败 | 逐项说，**不得说成单纯成功** | 行为句仍在（`packages/agent/src/execution-runtime.ts:569`）；底账 `ExecutionRecord`（`packages/agent/src/task-registry.ts:115-122`）**无 `items` 字段**，宿主不再从底账投影判 partial（如实登记见 §7） |
+| 没办成（`failed`） | 执行行显示失败 | 「没办成」+ **该重试才说重试**（执行层 `retryable:true`；缺省/未声明按不可重试，`packages/contracts/src/execution-contract.ts:156-166`） | 宿主不判任务终局；Main 读执行行自己判断；「该重试才说重试」已有守卫（`packages/agent/deterministic-failure-guard.test.ts:222`、`:179`；话术 `packages/agent/user-facing-failure.test.ts:117`） |
 
-**收口说明**：`unsupported` / `blocked` 的分类器与结构化原因码（B2/B3）已随本切片落地（守卫见上表与 §7）；`partial` 的分类器逻辑虽在，但因底账无 `items` 字段仍待接线（见 §3「未接线」注）。§4 的结构化交办尚未实现，不影响 B2/B3 分类器对零执行/权限拒绝的判据。
+**收口说明**：B2 五态分类器与 `renderOutcomeFact` 已随 S1 删除；B3 的结构化原因码（`unsupported` / `not_permitted`）仍在守卫范围内，Main 的三种措辞纪律由 `OUTCOME_BEHAVIOR_NOTE` 提供（提示词约束——模型是否照做归黑盒评测，不冒充确定性通过）。
+
 
 ## 4. 交办格式：结构化意图，不是一段 prose
 
@@ -70,14 +74,14 @@ Worker 的汇报必须是**结构化 outcome**，Main 据此套用统一话术�
 
 1. **能力目录已派生、已接 Main 面**：`capability` 字段（`execution-contract.ts:92`）+ `deriveCapabilityCatalog`（`capability-catalog.ts:45`）+ `capabilities()` 工具（`execution-runtime.ts:260`）+ 装配（`ask-runtime.ts:1068`、`:1072`）；守卫 `capability-catalog.test.ts`、`main-capability-surface.test.ts`、`capability-catalog-assembly.test.ts`（§2）。
 2. **动态工具已合入（现行）**：Worker 工具面按模型可见 operation 生成每-operation `op_*` 工具（生成 `execution-runtime.ts:3466`、注册 `:2966` / `:4305`），hostOnly 参数不漏进 schema；守卫 `packages/agent/dynamic-worker-tools.test.ts`、`packages/agent/task-surface.test.ts:375`（面快照恰好 `op_dummy_query`、不含 `execute_operation`）。`execute_operation` 已从工具面退场，不再是 Worker 工具（旧叙述「Worker 仍持 execute_operation」已作废）。
-3. **答复五态分类器已实现**：`classifyOutcome`（`task-outcome.ts:71`）归五值；`unsupported`/`blocked` 零执行分支与结构化原因码 `not_permitted`/`unsupported` 已接（B2/B3）；出口 `renderOutcomeFact`（`:135`）。守卫 `packages/agent/task-outcome.test.ts`、`apps/server/task-outcome-reason.test.ts`。
-4. **outcome `partial` 待接线**：分类器逻辑在（`task-outcome.ts:102-109`），但底账 `ExecutionRecord` 无 `items`（`task-registry.ts:148-156`），无法从底账投影判 partial（§3「未接线」注）。
+3. **答复五态分类器已删（S1）**：`classifyOutcome` / `renderOutcomeFact` 与旧守卫用例（`packages/agent/task-outcome.test.ts`、`apps/server/task-outcome-reason.test.ts`）随 task 去 `status` 整条删除；做没做成由 Main 读执行行/汇报自己判断。余下 B3 结构化原因码 `unsupported` / `not_permitted`（`packages/agent/src/task-outcome.ts:13`、`:14`）仍在。
+4. **部分完成（`partial`）无机械投影（S1）**：宿主分类器已删；底账 `ExecutionRecord` 无 `items`（`packages/agent/src/task-registry.ts:115-122`），宿主不再从底账投影判 partial；Main 行为句仍要求「逐项说」（`packages/agent/src/execution-runtime.ts:569`）。
 5. **`execute_operation` 工具工厂已删，只剩内部路由键**：2026-11-20 按删除纪律删去零调用点的 `executeOperationTool()` 工厂（旧 `:3446`，现为删除注）；保留 `EXECUTE_OPERATION_TOOL` 常量仅作内部 exec 路由键（`:2741`、`:4097`）与夹具直调入口（`packages/agent/testing/internal-exec-fixture.ts`）——**不是任何模型可见工具**。Main 面不含它、硬调被拒（禁令 1；`packages/agent/main-skill.test.ts:332`、`packages/agent/main-capability-surface.test.ts:63`）；Worker 面只有 `op_*`（`packages/agent/task-surface.test.ts:375`）。
 6. **结构化交办未实现**：`task_run` 仍收自然语言 `task`（§4）；不影响 B2/B3 分类器对零执行/权限拒绝的判据。
 
 ## 7. 约束—守卫状态表
 
-四档：`已有守卫` / `部分守卫` / `待实现（守卫待补）` / `未实现（无守卫）`。「能红」= 故意破坏约束时该测试必失败。本轮逐条区分：结构化判据类守卫已就地核对断言形状；B3/F3-1 的 blocked 反向绊线（`apps/server/task-outcome-reason.test.ts`）亲自反向执行过（见该文件末注），其余未逐条反向执行，如实标「已有/待补」。
+四档：`已有守卫` / `部分守卫` / `待实现（守卫待补）` / `未实现（无守卫）`。「能红」= 故意破坏约束时该测试必失败。本轮逐条区分：结构化判据类守卫已就地核对断言形状；其余未逐条反向执行，如实标「已有/待补」。
 
 | 约束 | 状态 | 守卫/出处（文件 + 断言形状） |
 | --- | --- | --- |
@@ -90,10 +94,10 @@ Worker 的汇报必须是**结构化 outcome**，Main 据此套用统一话术�
 | 按 `capability` group by 派生、不手写第二套（禁令 3 重点） | 已有守卫 | `capability-catalog.test.ts:18`（空清单 → 空目录）、`:22`、`:37`（加声明即多一条，篡改/写死常量表 → 红） |
 | Main 侧摘要 + `capabilities()` 只读、无 operation 名/参数 | 已有守卫 | `main-capability-surface.test.ts:59`、`:66`、`capability-catalog.test.ts:60`；`capability-catalog-assembly.test.ts:66` |
 | 未声明 `capability` 退化为现状 + 显式登记 | 已有守卫 | `capability-catalog-assembly.test.ts:66`（undeclared 事件 + 提示不变 + 无工具）、`:77` |
-| outcome `completed` 逐项如实 | 部分守卫 | 分类器 `task-outcome.ts:107`、测试 `task-outcome.test.ts:24`、`:30`；出口接线见下行 |
-| outcome `partial` 逐项如实（底账 items 接线） | **未实现/待接线（无守卫）** | 分类器逻辑在（`task-outcome.ts:102-109`），但底账 `ExecutionRecord` 无 items（`task-registry.ts:148-156`），无法从底账投影判 partial（§3 注）。待补守卫：底账 items 落账 + partial 不说成成功 |
-| outcome `unsupported` 零执行、绝不提「再试一次」 | 已有守卫 | `task-outcome.test.ts:48`、`:55`、`:156`（G4 无「再试/重试/retry」）、`:177`（结构化码接上） |
-| outcome `blocked` 缺条件说「缺 X」+补法（只用结构化码，不扫文案） | 已有守卫（反向绊线亲自反向执行过） | `apps/server/task-outcome-reason.test.ts:14`（reason 含「权限」但码非 not_permitted → 不得 blocked）、`:25`、`:30`；缺失条件非空 `task-outcome.test.ts:162`；B3 码接上 `:177` |
+| 宿主不再输出「答复五态」结论——做没做成由 Main 读执行事实判断（S1 删分类器） | 未实现（无守卫） | 旧 `classifyOutcome` / `renderOutcomeFact` 与用例 `packages/agent/task-outcome.test.ts`、`apps/server/task-outcome-reason.test.ts` 已删；判据改读 `executions` 逐条（`scripts/eval/convergence-r1/judge.ts` 的 `outcomeFromTask`） |
+| 部分完成（`partial`）逐项如实 | 未实现（无守卫） | 宿主分类器已删；底账 `ExecutionRecord` 无 `items`（`packages/agent/src/task-registry.ts:115-122`），宿主不再从底账投影判 partial；行为句 `packages/agent/src/execution-runtime.ts:569`。待补守卫：底账 items 落账 + partial 不说成成功 |
+| 办不了（`unsupported`）零执行、绝不提「再试一次」 | 已有守卫（用户级脚本模型） | `scripts/eval/wecom-sim/cases-l-outcome.test.ts:L-1 目录里没有的事`（零执行、说办不了、无重试诱导词）；结构化码 `packages/agent/src/task-outcome.ts:14` |
+| 缺条件（`blocked`）说「缺 X」+补法（只用结构化码，不扫文案） | 已有守卫（用户级脚本模型） | `scripts/eval/wecom-sim/cases-l-outcome.test.ts:L-2 目录里有但本次不允许`（零执行、说清缺什么、不说成办不了）；结构化码 `packages/agent/src/task-outcome.ts:13` |
 | `failed` 该重试才说重试 | 已有守卫 | `packages/agent/deterministic-failure-guard.test.ts:222`、`:179`；`packages/agent/user-facing-failure.test.ts:117` |
 | 交办 = 结构化意图（能力 + 输入） | 未实现（无守卫） | 待办守卫（schema 含能力与结构化输入，不再仅 `task` 字符串） |
 | 确认回合以已确认提案为任务内容 | 已有守卫 | `packages/agent/background-write-confirmation.test.ts:505`；持久化 `packages/agent/src/execution-runtime.ts:1132-1160` |

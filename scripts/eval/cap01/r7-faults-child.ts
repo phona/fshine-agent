@@ -84,7 +84,6 @@ function runBurst(payload: BurstPayload): void {
         principalId: payload.scope.principalId,
         sessionId: payload.scope.sessionId,
         request: `burst ${key}`,
-        status: 'running',
         createdAt: now(),
         updatedAt: now(),
       });

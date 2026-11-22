@@ -307,7 +307,7 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
       }
       if (caseDef.seed?.waitingQuestion !== undefined) {
         const taskId = `seed_waiting_${randomUUID()}`;
-        const rec = registry.begin({ taskId, principalId, sessionId, request: caseDef.seed.waitingQuestion.request, status: 'running' });
+        const rec = registry.begin({ taskId, principalId, sessionId, request: caseDef.seed.waitingQuestion.request });
         registry.waitForUser(taskId, { missing: [...caseDef.seed.waitingQuestion.missing] });
         const after = registry.get(taskId, scope);
         if (after.taskNo !== undefined) seedTaskNos.waiting = after.taskNo;

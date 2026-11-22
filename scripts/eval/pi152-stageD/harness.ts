@@ -22,6 +22,7 @@ import type { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { createPiModelRuntime, createPiTurnDriver, piCompactionSettings } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver, TurnDriverInput, TurnDriverResult } from '../../../packages/agent/src/driver-contract';
 import type { TaskRegistry, TaskRecord, TaskScope } from '../../../packages/agent/src/task-registry';
+import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from '../../../packages/agent/testing/task-fact-view';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
 import { assembleSessionCore, createBackgroundDispatch, resolveExecutionFace, type AssembledSession } from '../../ask-runtime';
 import { createResourcePolicy } from '../../../packages/agent/src/resource-policy';
@@ -411,12 +412,12 @@ function taskSummary(task: TaskRecord): TaskSummary {
     taskId: task.taskId,
     taskNo: task.taskNo ?? null,
     name: task.name ?? '',
-    status: task.status,
-    reason: task.reason ?? null,
+    status: taskStatusOf(task),
+    reason: taskReasonOf(task) ?? null,
     request: task.request,
     resultText: task.resultText ?? null,
     replyText: task.replyText ?? null,
-    failureReason: task.failureReason ?? null,
+    failureReason: taskFailureReasonOf(task) ?? null,
     executions: task.executions.map((execution) => ({
       requestId: execution.requestId,
       operation: execution.operation,
@@ -824,10 +825,9 @@ export function seedCompletedTask(input: {
     principalId: input.scope.principalId,
     sessionId: input.scope.sessionId,
     request: input.request,
-    status: 'running',
   });
   input.registry.noteExecution(taskId, { requestId: `seed_${randomUUID()}`, operation: 'dummy.query', status: 'completed' });
-  input.registry.complete(taskId, input.resultText);
+  input.registry.setResultText(taskId, input.resultText);
   return input.registry.get(taskId, input.scope);
 }
 
@@ -844,7 +844,6 @@ export function seedWaitingTask(input: {
     principalId: input.scope.principalId,
     sessionId: input.scope.sessionId,
     request: input.request,
-    status: 'running',
   });
   input.registry.waitForUser(taskId, { missing: input.missing });
   return input.registry.get(taskId, input.scope);
