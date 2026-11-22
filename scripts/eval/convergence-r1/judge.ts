@@ -296,18 +296,17 @@ function mapExecStatus(status: string): ExecutionOutcomeStatus {
  *
  * 保留的执行分支（与旧分类器的执行分支逐条对齐，禁止放宽/收紧）：
  *   · zero executions → 'unsupported'：没有办理动作发生（零执行）；
+ *   · 终态机械事实优先（2026-11-22 Grok 复审恢复旧 `mapTerminal` 的终态分支）：底账 status 词
+ *     投影（evidence.TaskRecordJson.status）为 `failed`（含 died）/`timed_out`/`died` 时，
+ *     outcome = 'failed'——**即便末条执行是 completed/accepted 也翻回 failed**（终态失败覆盖）。
+ *     S1 起 status 不是结论字段而是机械事实词（taskStatusOf 投影：died_at → 'failed'），
+ *     该词是判据面可得的机械输入，故此处按它归类；未知/缺省词不回落到 failed。
  *   · 末条执行 = 决定性结果（先失败后成功 → completed；末条 completed 不被前序失败翻转）：
  *       failed / refused / result_unknown → 'failed'；
- *       needs_input / needs_confirmation → 'blocked'；
- *       其余（completed / accepted）→ 'completed'。
+ *       needs_input / needs_confirmation / accepted → 'blocked'；
+ *       其余（completed）→ 'completed'。
  *
  * **S1 显式登记：以下旧分类器分支已删（不是静默丢语义，逐条写明再重锁）**：
- *   (a) 终态分支 `terminal === 'failed' | 'timed_out' → 'failed'`：旧读数来自 `task.status`
- *       （旧 `mapTerminal`）；S1 底账不再有 `status`/终态字段，判据面拿不到该机械输入。新读数
- *       （四个一次性时刻 diedAt/timedOutAt/cancelledAt/resourceLimitedAt）与旧终态**不是一一对应**
- *       （旧分类器无 died/cancelled/resource_limited），强行映射属于**新增**语义而非还原；且旧
- *       `mapTerminal` 对未知/缺省 status 一律回落 'failed'——S1 后会让任何已执行任务误判为 failed。
- *       故本判定器不再据此归类（如需恢复，须 owner 裁定新时刻→outcome 的映射）。
  *   (b) `partial` 分支（`completed` 且逐条 items 有 failed/unknown）：旧分类器读 `execution.items`，
  *       但本判定器的调用面**从未把 items 传进 ledger**（旧 `outcomeFromTask` 只传 status/error.code），
  *       该分支在本路径上本就不可达；S1 后底账 `ExecutionRecord` 亦无 `items`。仅 E11 使用本函数，
@@ -315,12 +314,16 @@ function mapExecStatus(status: string): ExecutionOutcomeStatus {
  *   (c) 零执行 blocked 分支（权限拒绝 / 等用户补信息）：失去机械输入，按零执行 fall-through 落
  *       'unsupported'——唯一使用本函数的 E11 接受集 {unsupported, blocked} 同时覆盖两者，判定结论不变。
  */
-function outcomeFromTask(task: TaskRecordJson): TaskOutcome {
+export function outcomeFromTask(task: TaskRecordJson): TaskOutcome {
   const executions = task.executions ?? [];
   if (executions.length === 0) return 'unsupported';
+  // 终态机械事实优先：已收尾（failed/timeout/died）即便末条执行 completed 也判 failed。
+  const terminalWord = task.status;
+  if (terminalWord === 'failed' || terminalWord === 'timed_out' || terminalWord === 'died') return 'failed';
   const decisive = mapExecStatus(executions[executions.length - 1]!.status);
   if (decisive === 'failed' || decisive === 'refused' || decisive === 'result_unknown') return 'failed';
-  if (decisive === 'needs_input' || decisive === 'needs_confirmation') return 'blocked';
+  // accepted（长任务受理中）不是完成：卡在进行/等待 → 'blocked'。
+  if (decisive === 'needs_input' || decisive === 'needs_confirmation' || decisive === 'accepted') return 'blocked';
   return 'completed';
 }
 

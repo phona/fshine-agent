@@ -93,6 +93,8 @@ const SEED_ROWS: readonly SeedRow[] = [
   { taskId: 'task_unknown', status: 'failed', resultText: null, updatedAt: '2026-11-14T09:15:00.000Z', taskNo: 5, name: '历史 E', replyText: null, reason: 'result_unknown' },
   // 取消孤儿（旧 cancelling：用户说了停、没确认）→ 必须回填 cancel_requested_at（请求不丢）。
   { taskId: 'task_cancelling', status: 'cancelling', resultText: null, updatedAt: '2026-11-14T09:30:00.000Z', taskNo: 6, name: '历史 F', replyText: null, reason: null },
+  // 资源拒绝（旧 failed + reason=resource_limited）→ 必须回填 resource_limited_at（否则事实丢失）。
+  { taskId: 'task_resource', status: 'failed', resultText: null, updatedAt: '2026-11-14T09:45:00.000Z', taskNo: 7, name: '历史 G', replyText: null, reason: 'resource_limited' },
 ];
 
 function seedV4Db(dbPath: string): void {
@@ -121,7 +123,7 @@ function seedV4Db(dbPath: string): void {
   }
   db.prepare("INSERT INTO executions (request_id, task_id, operation, status, error_json) VALUES (?, ?, ?, ?, ?)")
     .run('req_v4_a', 'task_done', 'dummy.query', 'completed', null);
-  db.prepare("INSERT INTO task_sequences (name, value) VALUES ('task_no', 6)").run();
+  db.prepare("INSERT INTO task_sequences (name, value) VALUES ('task_no', 7)").run();
   db.pragma('user_version = 4');
   db.close();
 }
@@ -179,6 +181,8 @@ describe('S1 v5 迁移（旧结论列 → 机械事实形状）', () => {
     const columns = columnNames(dbPath);
     expect(columns).toEqual(expect.arrayContaining([
       ...V5_FACT_COLUMNS, 'pending_question', 'waiting_since', 'lease_owner', 'lease_until', 'running_since',
+      // 存活扫描用的一次性收尾事实（前向加法列/v5 重建带出）：回合失败落定不再被当「还在跑」。
+      'round_failed_at',
     ]));
     expect(columns).not.toContain('status');
     expect(columns).not.toContain('reason');
@@ -205,9 +209,13 @@ describe('S1 v5 迁移（旧结论列 → 机械事实形状）', () => {
     expect(rawTask(dbPath, 'task_unknown')['running_since']).toBe('2026-11-14T09:15:00.000Z');
     expect(rawTask(dbPath, 'task_cancelling')['cancel_requested_at']).toBe('2026-11-14T09:30:00.000Z');
     expect(rawTask(dbPath, 'task_cancelling')['running_since']).toBe('2026-11-14T09:30:00.000Z');
+    // 资源拒绝（旧 failed + reason=resource_limited）回填 resource_limited_at（事实不丢）。
+    expect(rawTask(dbPath, 'task_resource')['resource_limited_at']).toBe('2026-11-14T09:45:00.000Z');
+    expect(rawTask(dbPath, 'task_resource')['running_since']).toBe('2026-11-14T09:45:00.000Z');
     // 读出侧也带上了取消请求事实。
     expect(store.getTask('task_cancelling')!.task.cancelRequestedAt).toBe('2026-11-14T09:30:00.000Z');
     expect(store.getTask('task_unknown')!.task.diedAt).toBe('2026-11-14T09:15:00.000Z');
+    expect(store.getTask('task_resource')!.task.resourceLimitedAt).toBe('2026-11-14T09:45:00.000Z');
 
     // 新任务编号从历史最大值接续（不重号）。
     const inserted = store.insertTask({
@@ -218,7 +226,7 @@ describe('S1 v5 迁移（旧结论列 → 机械事实形状）', () => {
       createdAt: '2026-11-14T10:00:00.000Z',
       updatedAt: '2026-11-14T10:00:00.000Z',
     });
-    expect(inserted.taskNo).toBe(7);
+    expect(inserted.taskNo).toBe(8);
     store.close();
 
     // 幂等：第二次打开零差异、不新增备份。
@@ -226,7 +234,7 @@ describe('S1 v5 迁移（旧结论列 → 机械事实形状）', () => {
     expect(second.listTasks().map((stored) => [stored.task.taskId, stored.task.taskNo]))
       .toEqual([
         ['task_done', 1], ['task_cancel', 2], ['task_timeout', 3], ['task_queued', 4],
-        ['task_unknown', 5], ['task_cancelling', 6], ['task_new', 7],
+        ['task_unknown', 5], ['task_cancelling', 6], ['task_resource', 7], ['task_new', 8],
       ]);
     second.close();
     expect(columnNames(dbPath)).not.toContain('status');

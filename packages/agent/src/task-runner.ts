@@ -1658,6 +1658,11 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
           }
           return;
         }
+        // 回合以「无汇报/失败」收尾：任务已结束——noteRoundFailed 落一条一次性机械时刻
+        // （round_failed_at）。否则底账 running_since 仍在、无结束事实，`listRunning` 会把已
+        // 结束的任务当「还在跑」，几秒办完的任务 10 分钟后被叫醒「已经跑了 N 分钟还没有结果」
+        // （2026-11-22 Grok 复审）。**不是** died（无汇报 ≠ 结果未知；round_failed 只是「本轮
+        // 已停」，不改业务失败归类、不改唤醒话术）。
         try {
           registry.noteRoundFailed(taskId);
         } catch (error) {

@@ -305,6 +305,19 @@ class ReadClient implements ExecutionClient {
   }
 }
 
+/**
+ * ⑮ 用：needs_input「没说清缺什么」的执行层替身——missing 非空但描述为空
+ * （pendingQuestionFrom 过滤空描述后得不出问题形状）。
+ */
+class BareNeedsInputClient implements ExecutionClient {
+  async capabilities(): Promise<CapabilityManifest> {
+    return MANIFEST;
+  }
+  async execute(): Promise<ExecutionOutcome> {
+    return { status: 'needs_input', missing: [{ description: '' }] };
+  }
+}
+
 /** 生产 statusView 投影（Main 假驱动调一次 task_status）。 */
 async function projectedStatusOf(registry: TaskRegistry, ref: string): Promise<Record<string, unknown>> {
   let captured: unknown;
@@ -753,6 +766,30 @@ describe('模型走岔路（确定性脚本模型）', () => {
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
     expect(round.executionOutcome).toBeUndefined();
     expect(taskStatusOf(task)).toBe('completed');
+  });
+
+  it('⑮ needs_input 没说清缺什么：按失败收尾（不落完成存档），不冒充办好了', async () => {
+    // 2026-11-22 Grok 复审恢复：执行层要求补充但 pendingQuestionFrom 得不出 missing 时，
+    // 旧实现当 ended（executionOutcome 缺省 = 成功）→ runner archiveReply「办完了」= 虚假成功。
+    // 修法：executionOutcome=failed → noteRoundFailed（不落完成存档），reason 说明缺什么没说清。
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const executor = await makeExecutor({
+      client: new BareNeedsInputClient(),
+      registry,
+      worker: scriptWorker([[ASK]], capture),
+    });
+    const runner = await runBackground(registry, executor, 't_bareneeds');
+    const task = registry.get('t_bareneeds', SCOPE);
+    // 等待事实形状不完整 → 不落 pendingQuestion（不编造问题形状）。
+    expect(task.pendingQuestion).toBeUndefined();
+    // 不落完成存档（失败回合的汇报是对失败的说明，不是完成结果）。
+    expect((task.resultText ?? task.replyText ?? '').trim()).toBe('');
+    // 本回合机械结局 = 失败（投递面据此走失败回调，把「缺信息」如实说清）。
+    const round = runner.roundOutcomeOf?.('t_bareneeds');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    expect(round.executionOutcome).toBe('failed');
   });
 
   it('⑬ 确认回合重提：宿主注入的确认句柄不得落进底账提案载荷，也不得进下一轮委派正文', async () => {

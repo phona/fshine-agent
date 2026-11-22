@@ -10,7 +10,9 @@
  *     died_at（看门狗观察到租约过期）/ cancelled_at（用户取消确认）/ timed_out_at（机械超时）/
  *     resource_limited_at（资源拒绝）。每个时刻列至多写一次（一次性写入即并发去重）。
  *     另有非终局的一次性事实 cancel_requested_at（用户取消**请求**；请求 ≠ 确认——确认才写
- *     cancelled_at；重启对账据此说清「你要我停、没停完」）。
+ *     cancelled_at；重启对账据此说清「你要我停、没停完」）与 round_failed_at（**本轮以无结果
+ *     收尾**：回合失败/无汇报；不是业务结论、不改失败归类——只让长时间提醒扫描不再把已收尾的
+ *     任务当「在跑」）。
  *   · executions：request_id / task_id / operation / status / error_json（逐笔执行事实）。
  *   · operations：claimed→resulted 幂等账（U3，行就是身份）——存活与结果判定的事实源。
  *
@@ -29,7 +31,8 @@
  *     旧 status='failed' 且 reason='result_unknown' 行回填 died_at（结果未知不丢）；
  *     旧 status='cancelling' 行回填 cancel_requested_at（取消请求不丢，重启对账靠它）；
  *   · 回填 task_no（仅缺该列时）：按 (created_at, task_id) 升序连续分配，只填 NULL 行；
- *   · U3/file_refs/inbound 面只做前向加法（不变）；
+ *   · U3/file_refs/inbound 面只做前向加法（不变）；tasks.round_failed_at 亦为前向加法列
+ *     （v5 早期库缺列 → ADD COLUMN TEXT，不升 user_version）；
  *   · PRAGMA user_version 记录版本（新库直接建 v5）。
  *
  * file_refs（CAP-01 S0/S2）与 inbound_messages（2026-11-19）语义不变，见下方历史注释与
@@ -42,6 +45,7 @@
  *   · markTaskFact：died/cancelled/timed_out/resource_limited 四个时刻列的一次性写入
  *     （WHERE 对应列 IS NULL——重复触发零写入），同时清租约（结束事实的任务不再持租约）；
  *   · markCancelRequested：cancel_requested_at 的一次性写入（取消请求；不清租约、不改终局）；
+ *   · markRoundFailed：round_failed_at 的一次性写入（回合失败收尾；不清租约、不改终局）；
  *   · setWaiting / armLease / setResultText / setReplyForTasks：等待形状、租约、报告存档；
  *   · claimNextUnstarted：BEGIN IMMEDIATE 内取最老未启动行，写 running_since + 租约
  *     （进程内/跨进程并发认领不重号）；
@@ -106,6 +110,12 @@ export interface TaskRow {
    * 否则最该主动汇报的长任务不在提醒扫描里（2026-11-19）。
    */
   runningSince?: string;
+  /**
+   * 「本轮以无结果收尾（回合失败/无汇报）」的时刻（ISO，一次性）。不是业务结论、不改失败
+   * 归类（无汇报 ≠ 结果未知）；只表示这一轮已停——长时间提醒扫描据此不再把已结束的任务
+   * 当「还在跑」（2026-11-22 Grok 复审：completed 靠汇报存档排除，failed 靠这条）。
+   */
+  roundFailedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -279,6 +289,12 @@ export interface TaskStore {
    */
   markCancelRequested(taskId: string, write: { at: string; updatedAt: string }): boolean;
   /**
+   * 「本轮以无结果收尾（回合失败/无汇报）」一次性写入：round_failed_at 至多写一次
+   * （WHERE IS NULL）。不是业务结论、不清租约、不改终局；长时间提醒扫描据此不再把已收尾的
+   * 任务当「还在跑」。
+   */
+  markRoundFailed(taskId: string, write: { at: string; updatedAt: string }): boolean;
+  /**
    * 等待形状写入（waiting_user 事实）：pendingQuestion JSON + waiting_since；给出 null =
    * 清除（答复接续）。任务已有结束事实（cancelled/died/timed_out/resource_limited）时
    * 拒绝写入（返回 false，零写入）——结束事实不翻案。
@@ -310,7 +326,7 @@ export interface TaskStore {
   claimLongRunningNotice(taskId: string, stage: 'overdue' | 'contact_lost', at: string): boolean;
   /**
    * 只读「在跑」行（长时间提醒扫描用；避免每趟 pump 全表分配）：
-   * running_since 非空、无等待形状、四个时刻列全 NULL（含长任务等待回执的行）。
+   * running_since 非空、无等待形状、四个时刻列全 NULL、无汇报存档（含长任务等待回执的行）。
    */
   listRunningTasks(): TaskRow[];
   /** 租约已过期（lease_until 非空且 <= now）且未写 died 的任务行（看门狗扫描）。 */
@@ -475,6 +491,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   long_running_notified_at TEXT,
   -- 「这一轮开始跑」的时刻（ISO，单调写一次；NULL = 未跑过=可认领）。
   running_since TEXT,
+  -- 「本轮以无结果收尾（回合失败/无汇报）」的时刻（ISO，一次性；NULL = 本轮未以失败停）。
+  -- 不是业务结论、不改失败归类（无汇报 ≠ 结果未知）：只表示这一轮已停；长时间提醒扫描
+  -- 据此不再把已结束的任务当「还在跑」。
+  round_failed_at TEXT,
   -- 长任务等待「与执行层断了联系（无回执）」已告知过用户的时刻（ISO，NULL = 未告知）。
   wait_contact_lost_notified_at TEXT
 );
@@ -545,7 +565,7 @@ const TASKS_V5_COLUMNS: readonly string[] = [
   'task_id', 'principal_id', 'session_id', 'request', 'result_text', 'created_at', 'updated_at',
   'task_no', 'name', 'reply_text', 'pending_question', 'waiting_since', 'lease_owner', 'lease_until',
   'died_at', 'cancelled_at', 'timed_out_at', 'resource_limited_at', 'cancel_requested_at',
-  'long_running_notified_at', 'running_since', 'wait_contact_lost_notified_at',
+  'long_running_notified_at', 'running_since', 'round_failed_at', 'wait_contact_lost_notified_at',
 ];
 
 interface TaskDbRow {
@@ -569,6 +589,7 @@ interface TaskDbRow {
   long_running_notified_at?: string | null;
   wait_contact_lost_notified_at?: string | null;
   running_since?: string | null;
+  round_failed_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -662,6 +683,8 @@ function tasksTableNeedsRebuild(db: Database.Database): boolean {
  *   · cancelled/timed_out：旧 status 即机械事实，updated_at = 那次写入的时刻；
  *   · died：旧 status='failed' 且 reason='result_unknown' 行回填 died_at（结果未知是机械事实，
  *     不丢——否则旧库里的「结果未知」行迁移后退化成「无汇报」）；
+ *   · resource_limited：旧 status='failed' 且 reason='resource_limited' 行回填 resource_limited_at
+ *     （资源拒绝是机械事实，不丢——否则退化成「无汇报」）；
  *   · cancel_requested：旧 status='cancelling' 行回填 cancel_requested_at（取消请求——请求 ≠
  *     确认——不丢，重启对账据此说清「你要我停、没停完」）；
  *   · 曾离开过 queued 的行回填 running_since（updated_at）——避免迁移后被当作未启动重新认领。
@@ -685,6 +708,14 @@ function rebuildTasksTableToV5(db: Database.Database): void {
       return oldColumns.has('status') && oldColumns.has('reason')
         ? `CASE WHEN "status" = 'failed' AND "reason" = 'result_unknown' THEN "updated_at" ELSE NULL END AS "died_at"`
         : 'NULL AS "died_at"';
+    }
+    if (column === 'resource_limited_at') {
+      // 旧 failed + reason=resource_limited 行：资源拒绝是机械事实（受理/派发被 policy 拒），
+      // 回填 resource_limited_at（否则资源拒绝事实丢失，退化成「无汇报」的 failed）。
+      // 极旧库无 reason 列：无 resource_limited 信号可取，NULL（不伪造）。
+      return oldColumns.has('status') && oldColumns.has('reason')
+        ? `CASE WHEN "status" = 'failed' AND "reason" = 'resource_limited' THEN "updated_at" ELSE NULL END AS "resource_limited_at"`
+        : 'NULL AS "resource_limited_at"';
     }
     if (column === 'cancel_requested_at') {
       // 旧 cancelling 行：用户请求了停、没确认；更新时刻即请求时刻。
@@ -742,6 +773,7 @@ const TASKS_V5_BUILD_COLUMN_SHAPES: Readonly<Record<string, string>> = {
   cancel_requested_at: 'TEXT',
   long_running_notified_at: 'TEXT',
   running_since: 'TEXT',
+  round_failed_at: 'TEXT',
   wait_contact_lost_notified_at: 'TEXT',
 };
 
@@ -775,6 +807,16 @@ function fileRefDeliverableColumnMissing(db: Database.Database): boolean {
 }
 
 /**
+ * 存活扫描加法迁移谓词：tasks 表已存在（v5 事实形状）但缺 round_failed_at 列
+ * （「回合失败收尾」时刻上线前的 v5 旧库）。纯前向加法（TEXT NULL），不升 user_version；
+ * v4→v5 重建已按 TASKS_V5_COLUMNS 带出该列，故只在重建**不需要**时补列（避免重复 ADD COLUMN）。
+ */
+function roundFailedColumnMissing(db: Database.Database, needsV5Rebuild: boolean): boolean {
+  const taskColumns = taskTableColumns(db);
+  return taskColumns.size > 0 && !needsV5Rebuild && !taskColumns.has('round_failed_at');
+}
+
+/**
  * 迁移前自动备份（只做一次，不覆盖）：先 checkpoint 把 WAL 合入主文件，再整文件复制。
  * 命名 = <dbPath>.backup-v<迁移目标版本>（当前 v3）；`:memory:` 与库文件不存在不生成；
  * 已有同名备份时保留最早副本。
@@ -805,7 +847,9 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         const fileRefDeliverableMissing = tableExists && fileRefDeliverableColumnMissing(writable);
         // S1（v5）：旧形状 tasks（带 status 结论列）→ 重建为事实形状。
         const needsV5Rebuild = tasksTableNeedsRebuild(writable);
-        if (needsV5Rebuild || operationsMissing || fileRefTaskMissing || fileRefDeliverableMissing) {
+        // 存活扫描加法：v5 事实形状旧库缺 round_failed_at 列 → 前向 ADD COLUMN（不升版本）。
+        const roundFailedMissing = roundFailedColumnMissing(writable, needsV5Rebuild);
+        if (needsV5Rebuild || operationsMissing || fileRefTaskMissing || fileRefDeliverableMissing || roundFailedMissing) {
           // 旧库迁移：先备份（目标版本命名），再重建/加列，再（仅缺 task_no 时）回填编号，
           // 最后建唯一索引与版本号。共用同一次备份（同一目标版本 v5；已有备份保留最早副本）。
           backupBeforeMigration(writable, dbPath);
@@ -818,6 +862,7 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
           if (fileRefDeliverableMissing) {
             writable.exec('ALTER TABLE file_refs ADD COLUMN deliverable INTEGER NOT NULL DEFAULT 1');
           }
+          if (roundFailedMissing) writable.exec('ALTER TABLE tasks ADD COLUMN round_failed_at TEXT');
         }
         writable.exec(SCHEMA_BASE);
         if (needsV5Rebuild && !columns.has('task_no')) {
@@ -862,6 +907,8 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     && columns.has('running_since');
   // 取消请求列（非终局一次性事实）：独立存在性判定，不动 hasFactColumns 的口径。
   const hasCancelRequestedColumn = columns.has('cancel_requested_at');
+  // 回合失败收尾列（存活扫描用；非业务结论）：独立存在性判定。
+  const hasRoundFailedColumn = columns.has('round_failed_at');
   const allocateTaskNo = hasTaskNoColumn
     ? db.prepare("UPDATE task_sequences SET value = value + 1 WHERE name = 'task_no' RETURNING value")
     : undefined;
@@ -939,6 +986,13 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         WHERE task_id = @taskId AND cancel_requested_at IS NULL
       `)
     : undefined;
+  // 回合失败收尾：一次性写入，**不**改终局、**不**清租约（只是「本轮已停」事实；存活扫描用它排除）。
+  const markRoundFailedStmt = hasRoundFailedColumn
+    ? db.prepare(`
+        UPDATE tasks SET round_failed_at = @at, updated_at = @updatedAt
+        WHERE task_id = @taskId AND round_failed_at IS NULL
+      `)
+    : undefined;
   const setWaitingStmt = hasFactColumns
     ? db.prepare(`
         UPDATE tasks
@@ -988,13 +1042,17 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
       `)
     : undefined;
   // 预期契约（2026-11-18）：只读在跑行（长时间提醒扫描；含长任务等待回执的行）。
-  // 在跑事实 = running_since 非空、无等待形状、四个时刻列全 NULL。
-  const selectRunningTasks = hasFactColumns
+  // 在跑事实 = running_since 非空、无等待形状、无结束事实、**无汇报存档**、**无回合失败收尾**
+  //（2026-11-22 Grok 复审：completed 经 archiveReply/setResultText 落 reply_text/result_text、
+  // failed 经 noteRoundFailed 落 round_failed_at 后 running_since 仍在——两者都已收尾，不再算
+  // 「在跑」，否则几秒办完的任务 10 分钟后被叫醒「已经跑了 N 分钟还有结果」）。
+  const selectRunningTasks = hasFactColumns && hasRoundFailedColumn
     ? db.prepare(`
         SELECT * FROM tasks
         WHERE running_since IS NOT NULL AND pending_question IS NULL
+          AND (reply_text IS NULL OR reply_text = '') AND (result_text IS NULL OR result_text = '')
           AND died_at IS NULL AND cancelled_at IS NULL AND timed_out_at IS NULL
-          AND resource_limited_at IS NULL
+          AND resource_limited_at IS NULL AND round_failed_at IS NULL
         ORDER BY created_at, task_id
       `)
     : undefined;
@@ -1292,6 +1350,7 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
       ? {}
       : { waitContactLostNotifiedAt: row.wait_contact_lost_notified_at }),
     ...(row.running_since === null || row.running_since === undefined ? {} : { runningSince: row.running_since }),
+    ...(row.round_failed_at === null || row.round_failed_at === undefined ? {} : { roundFailedAt: row.round_failed_at }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
@@ -1382,6 +1441,10 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     markCancelRequested(taskId, write) {
       if (markCancelRequestedStmt === undefined) throw new Error(missingFactColumnsError);
       return markCancelRequestedStmt.run({ taskId, at: write.at, updatedAt: write.updatedAt }).changes > 0;
+    },
+    markRoundFailed(taskId, write) {
+      if (markRoundFailedStmt === undefined) throw new Error(missingFactColumnsError);
+      return markRoundFailedStmt.run({ taskId, at: write.at, updatedAt: write.updatedAt }).changes > 0;
     },
     setWaiting(taskId, write) {
       if (setWaitingStmt === undefined) throw new Error(missingFactColumnsError);

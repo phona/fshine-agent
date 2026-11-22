@@ -4480,10 +4480,17 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       const lastExecuted = [...recorded].reverse().find((entry) => entry.operation !== RUN_JS_TOOL);
       if (lastExecuted !== undefined && lastExecuted.outcome.status === 'needs_input') {
         const question = pendingQuestionFrom(lastExecuted.outcome);
-        // 执行层要求补充但没说清缺什么：等待事实形状不完整——回合按汇报收尾（执行行是事实），
-        // 不编造问题形状。
+        // 执行层要求补充但没说清缺什么：等待事实形状不完整——**按失败收尾**（旧实现语义，
+        // 2026-11-22 Grok 复审恢复）：不能编造问题形状，也**不能当完成**——否则投递面会把
+        // 「对方要我补一句但没说清缺什么」说成「办好了」（虚假成功）。executionOutcome=failed
+        // 让 runner 走 noteRoundFailed（不落完成存档），reason 说明缺什么没说清。
         return question === undefined
-          ? { kind: 'ended', report: workerResult.text }
+          ? {
+            kind: 'ended',
+            report: workerResult.text,
+            executionOutcome: 'failed',
+            failureReason: '执行层要求补充信息，但没有说清缺什么（等待事实形状不完整）。',
+          }
           : { kind: 'needs_input', question };
       }
       /**

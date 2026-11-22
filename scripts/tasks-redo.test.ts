@@ -211,6 +211,25 @@ describe('tasks --redo：重新推进判定与拒绝路径', () => {
     expect(assembleCalls).toBe(0);
   });
 
+  it('长任务受理中（末条执行 accepted、租约已释放）：也判「进行中」拒重推（2026-11-22 Grok 复审）', async () => {
+    let assembleCalls = 0;
+    const deps: RedoDeps = {
+      assemble: async () => {
+        assembleCalls += 1;
+        throw new Error('不应装配');
+      },
+    };
+    const accepted = syntheticTask({
+      taskId: 'task_lt',
+      executions: [{ requestId: 'req_lt', operation: 'dummy.longtask', status: 'accepted' }],
+    });
+    const outcome = await runRedo(redoInput(accepted, '/nope.db'), deps);
+    expect(outcome.exitCode).toBe(2);
+    expect(outcome.stdout).toBe('');
+    expect(outcome.stderr).toBe('任务正在进行中，不能重新推进：task_lt（仅在跑已停的任务可以重新推进）。\n');
+    expect(assembleCalls).toBe(0);
+  });
+
   it('已停三态都进入装配，principal/session/dbPath/argv/env 原样下传', async () => {
     const seen: Array<Record<string, unknown>> = [];
     for (const status of ['completed', 'failed', 'unexecuted'] as const) {

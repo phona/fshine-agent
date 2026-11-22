@@ -83,6 +83,7 @@ interface FakeTask {
   timedOutAt?: string;
   resourceLimitedAt?: string;
   cancelRequestedAt?: string;
+  roundFailedAt?: string;
   taskNo: number;
   name: string;
   executions: ExecutionRecord[];
@@ -335,11 +336,12 @@ class FakeRegistry implements TaskRegistryPort {
     return task;
   }
 
-  /** 回合失败事实：底账不写结论（真实实现只发事件）；测试替身落 failed 供本文件断言。 */
+  /** 回合失败事实：底账不写结论（真实实现落 round_failed_at 一次性收尾事实）；测试替身落 failed 供断言。 */
   noteRoundFailed(taskId: string): void {
     const task = this.require(taskId);
     const legal = (LEGAL_EDGES[task.status] ?? []).includes('failed');
     if (legal) this.commit(task, 'failed');
+    if (task.roundFailedAt === undefined) task.roundFailedAt = this.clock().toISOString();
   }
 
   /** 后台完成汇报存档（可选端口；runner 有它即走存档面）。 */
@@ -358,6 +360,10 @@ class FakeRegistry implements TaskRegistryPort {
 
   cancelRequestedAtOf(taskId: string): string | undefined {
     return this.require(taskId).cancelRequestedAt;
+  }
+
+  roundFailedAtOf(taskId: string): string | undefined {
+    return this.require(taskId).roundFailedAt;
   }
 
   // --- 内部 ---
@@ -612,6 +618,9 @@ describe('排队 → 启动 → 收尾', () => {
 
     expect(h.registry.statusOf('t1')).toBe('failed');
     expect(h.registry.reasonOf('t1')).toBe('failed_confirmed');
+    // 2026-11-22 Grok 复审：无汇报收尾还要落一条「本轮已停」事实（round_failed_at），
+    // 否则 running_since 仍在、无结束事实，「久无动静」扫描会把已结束的任务当「还在跑」。
+    expect(h.registry.roundFailedAtOf('t1')).toBeDefined();
   });
 
   it('执行端确认执行超时：running→timed_out + reason=timeout（P5 边界内的执行端判定）', async () => {

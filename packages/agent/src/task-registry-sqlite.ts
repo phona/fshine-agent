@@ -106,6 +106,7 @@ export function createSqliteTaskRegistry(
         ? {}
         : { waitContactLostNotifiedAt: stored.task.waitContactLostNotifiedAt }),
       ...(stored.task.runningSince === undefined ? {} : { runningSince: stored.task.runningSince }),
+      ...(stored.task.roundFailedAt === undefined ? {} : { roundFailedAt: stored.task.roundFailedAt }),
       executions: stored.executions.map((execution: ExecutionRow) => ({
         requestId: execution.requestId,
         operation: execution.operation,
@@ -274,7 +275,10 @@ export function createSqliteTaskRegistry(
     },
     noteRoundFailed(taskId) {
       const stored = require(taskId);
-      emit(factOf(stored.task, 'round_failed', new Date().toISOString()));
+      const at = new Date().toISOString();
+      // 一次性收尾事实：本轮已停（不写业务结论、不清租约）；存活扫描据此不再当「在跑」。
+      store.markRoundFailed(taskId, { at, updatedAt: at });
+      emit(factOf(store.getTask(taskId)?.task ?? stored.task, 'round_failed', at));
     },
     claimNextQueued({ owner, leaseMs }) {
       const at = new Date().toISOString();
