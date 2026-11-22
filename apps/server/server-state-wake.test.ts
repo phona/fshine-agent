@@ -450,7 +450,8 @@ describe('状态变化唤醒（server 级）：失败', () => {
     const fx = await makeFixture('line');
     try {
       await fx.server.handler(incoming('m-1', ASK));
-      fx.executor.settle({ kind: 'ended' });
+      // S1 如实交付：回合执行结局 = 失败 + 机械原因（执行层失败原文）；唤醒事实带上原因。
+      fx.executor.settle({ kind: 'ended', executionOutcome: 'failed', failureReason: FAIL_REASON });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
 
       const text = fx.delivery.sentTexts[0]!.text;

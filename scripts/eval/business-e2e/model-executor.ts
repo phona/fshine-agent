@@ -25,6 +25,7 @@ import { assembleSessionCore } from '../../ask-runtime';
 import type { DriverFactory, ExecutionFaceFactory } from '../../ask-runtime';
 import { assessEvalIsolation, assertEvalIsolation } from '../safety-gate';
 import { notificationKindForEvent } from '../../../packages/agent/src/notifications';
+import { taskStatusOf } from '../../../packages/agent/testing/task-fact-view';
 import type { CaseContext } from './batch';
 import type { BizCase, BizItem } from './scenarios';
 import type { BizExecutor, BizSampleEvidence } from './assembly';
@@ -234,7 +235,8 @@ export function createModelExecutor(options: ModelExecutorOptions = {}): BizExec
         metaTurns.push({ index: turn, durationMs, modelCalls: assistantMessages.length, taskIds: [...(result?.taskIds ?? [])], tokens, retries: 0, notes: [] });
         replies.push({ turn, text: result?.reply ?? '', sha256: '' });
       }
-      tasksSnapshot = jsonSafe(assembled.taskRegistry.list()) as TaskRecordJson[];
+      // S1：底账没有 status——证据快照的 status 词按机械事实投影（与 spread-axis/readTasks 同口径）。
+      tasksSnapshot = jsonSafe(assembled.taskRegistry.list().map((task) => ({ ...task, status: taskStatusOf(task) }))) as TaskRecordJson[];
       // #8 会话隔离断言：底账任务必须全归本样本 principal（不串台）。
       const foreign = tasksSnapshot.filter((t) => t.principalId !== principalId);
       if (foreign.length > 0) throw new Error(`会话隔离违反：底账出现非本样本 principal 的任务 ${foreign.map((t) => t.taskId).join(',')}`);

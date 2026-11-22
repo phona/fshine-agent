@@ -96,6 +96,7 @@ import {
 } from './task-completion-delivery';
 import {
   OUTCOME_REASON_NOT_PERMITTED,
+  OUTCOME_REASON_UNSUPPORTED,
 } from '../../packages/agent/src/task-outcome';
 import { composeNotificationSinks, createChatNotificationSink, notificationTerminalLogLine } from './notification-chat-sink';
 import {
@@ -733,6 +734,30 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       return [];
     }
   };
+  /**
+   * 任务底账里**末条**失败/拒绝执行行的执行层原始码（归类用；取不到 = undefined，不猜）。
+   * 与 taskLedgerFactsOf 同源（逐笔执行事实）——沉默兜底话术据它按码归类（GATE_REFUSE →
+   * denied），在失败回调未带码时兜底。码不进用户文本。
+   */
+  const failureCodeOf = (taskId: string): string | undefined => {
+    try {
+      const record = (taskRegistry as unknown as {
+        get(id: string): {
+          executions?: ReadonlyArray<{ status?: string; error?: { code?: string } }>;
+        };
+      }).get(taskId);
+      const executions = record.executions ?? [];
+      for (let index = executions.length - 1; index >= 0; index -= 1) {
+        const execution = executions[index];
+        if (execution?.status === 'failed' || execution?.status === 'refused') {
+          return execution.error?.code;
+        }
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  };
   // 解析后配置只读一次：fileStore 的 TTL 由它派生（单一配置源；本文件不重解释 runtime 段）。
   const resolvedRuntime = resolveRuntimeConfig(deps.config.runtime);
   // 入站消息幂等底账启动清扫（2026-11-19）：保留期 = runtime.fileRefTtlDays 派生的毫秒
@@ -1122,7 +1147,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // 的兜底，保留——绝不投 Worker 原文）。快活失败（本回合已交给模型）经 pushSuppressedInTurn
       // 抑制；非快活失败由这里主动发回原会话（与完成投递同一主动投递面、同一四必守）。
       onTaskFailed: (failure) => {
-        roundFailureStatus.set(failure.taskId, failure.status);
+        roundFailure.set(failure.taskId, {
+          status: failure.status,
+          ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }),
+          ...(failure.reason === undefined ? {} : { reason: failure.reason }),
+        });
         const sessionKey = `${failure.principalId}\u0000${failure.sessionId}`;
         enqueueSessionTurn(sessionKey, async () => {
           // 快活失败：原因本回合已交给模型（模型会转述），不重复唤醒/播报。
@@ -1137,30 +1166,44 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             });
             return;
           }
-          // 机械事实（S1）：业务名 + 账本逐笔执行行 + 机械标记（died/资源拒绝）。
+          // 机械事实（S1）：业务名 + 账本逐笔执行行 + 机械标记（died/资源拒绝）+ 执行层失败
+          // 原文（机械原因）。码/原因只作归类与事实文案，不进用户文本。
           const name = taskNameOf(failure.taskId, failure.request);
           const ledgerFacts = taskLedgerFactsOf(failure.taskId);
           const fact = taskFailureFactOf(failure.taskId);
           const resultUnknown = failure.status === 'result_unknown' || fact?.status === 'result_unknown';
+          // B4 结构化答复值（机械事实，Main 按值选措辞）：原因码优先，其次零执行 = unsupported
+          // （没有发生任何办理动作），其余 = 执行发生过且失败。不扫文本。
+          const failureOutcome = failure.reasonCode === OUTCOME_REASON_NOT_PERMITTED
+            ? 'blocked' as const
+            : failure.reasonCode === OUTCOME_REASON_UNSUPPORTED
+              ? 'unsupported' as const
+              : ledgerFacts.length === 0 && !resultUnknown
+                ? 'unsupported' as const
+                : 'failed' as const;
           await wakeAndDeliverStateChange({
             taskId: failure.taskId,
             principalId: failure.principalId,
             sessionId: failure.sessionId,
             event: 'task_failure_wake',
-            // 事实（给模型读；业务名 + 账本逐笔事实），**不投 Worker 失败原文**。
+            // 事实（给模型读；业务名 + 机械原因 + 账本逐笔事实），**不投 Worker 失败原文**。
             // F3-1：本次不允许的结构化原因码（not_permitted）单独点明（不扫任何文本）。
             factText: taskFailureFactText({
               ...(name === undefined ? {} : { name }),
-              kind: resultUnknown ? 'unknown_result' : 'executor_failed',
+              kind: failureKindFor(failure.errorCode, resultUnknown ? 'result_unknown' : undefined),
+              ...(failure.reason === undefined ? {} : { reason: failure.reason }),
               ledger: ledgerFacts,
               ...(failure.reasonCode === OUTCOME_REASON_NOT_PERMITTED
                 ? { notPermitted: true }
                 : {}),
+              outcome: failureOutcome,
+              ...(failureOutcome === 'blocked' ? { missing: '本次允许范围' } : {}),
             }),
-            // 降级兜底（模型说不出话）= 既有失败话术（与老路径同源；资源拒绝走「系统太忙」）。
+            // 降级兜底（模型说不出话）= 既有失败话术（与老路径同源；按码归类；资源拒绝走「系统太忙」）。
             fallbackText: failureFallbackTextFor({
               ...(resultUnknown ? { status: 'result_unknown' as const } : {}),
               ...(fact?.resourceLimited === true ? { resourceLimited: true } : {}),
+              ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }),
               ...(name === undefined ? {} : { name }),
             }),
           });
@@ -1927,15 +1970,18 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           const failureRecord = (taskRegistry as unknown as {
             get(id: string): { diedAt?: string | null; resourceLimitedAt?: string | null };
           }).get(suppressedTaskId);
-          const roundStatus = roundFailureStatus.get(suppressedTaskId);
-          roundFailureStatus.delete(suppressedTaskId);
+          const round = roundFailure.get(suppressedTaskId);
+          roundFailure.delete(suppressedTaskId);
           const isFailureFact = failureRecord?.diedAt !== undefined && failureRecord.diedAt !== null
             || failureRecord?.resourceLimitedAt !== undefined && failureRecord.resourceLimitedAt !== null
-            || roundStatus !== undefined;
+            || round !== undefined;
           if (!isFailureFact) {
             claimPushSuppressedInTurn(sessionKey, suppressedTaskId);
             continue;
           }
+          // 执行层原始码（本回合 onTaskFailed 带到的）：兜底话术按码归类（GATE_REFUSE → denied）。
+          // 底账执行事实里也有同一码；这里取回调带到的同一口径。
+          const failureCode = round?.code ?? failureCodeOf(suppressedTaskId);
           const failureFact = {
             ...(failureRecord?.diedAt !== undefined && failureRecord.diedAt !== null
               ? { status: 'result_unknown' as const }
@@ -1943,11 +1989,12 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             ...(failureRecord?.resourceLimitedAt !== undefined && failureRecord.resourceLimitedAt !== null
               ? { resourceLimited: true }
               : {}),
-            ...(roundStatus === 'result_unknown'
+            ...(round?.status === 'result_unknown'
               && (failureRecord?.diedAt === undefined || failureRecord.diedAt === null)
               && (failureRecord?.resourceLimitedAt === undefined || failureRecord.resourceLimitedAt === null)
               ? { status: 'result_unknown' as const }
               : {}),
+            ...(failureCode === undefined ? {} : { code: failureCode }),
             ...(taskFailureFactOf(suppressedTaskId)?.name === undefined ? {} : { name: taskFailureFactOf(suppressedTaskId)!.name }),
           };
           await deliverTaskFailure({

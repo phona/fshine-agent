@@ -86,7 +86,7 @@ import {
 import type { TaskExecutionBridge, TaskExecutionBridgeFactory } from './task-file-bridge';
 import { READ_SKILL_TOOL, type SkillRegistry } from './skills';
 import { stripServerPaths } from './server-paths';
-import { createTaskRegistry, deriveTaskName, DispatchConflictError, taskEndedOf, taskLivenessOf, taskUnstartedOf, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
+import { createTaskRegistry, deriveTaskName, DispatchConflictError, taskEndedOf, taskLivenessOf, taskStateWordOf, taskUnstartedOf, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
 import {
   DEFAULT_RUNTIME_CONFIG,
   taskFailureReasonFor,
@@ -2760,10 +2760,14 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
    */
   async function waitForTaskSettled(taskId: string, waitMs: number): Promise<TaskRecord | undefined> {
     const deadline = taskRunClock.now() + waitMs;
-    // 落定判定（S1 事实口径）：收尾事实或汇报存档在场 → 已落定；此外「回合已结束且没有
-    // accepted 长任务在等」也算落定（无汇报收尾——runner 的 noteRoundFailed 只发事件不落
-    // 行内事实，窗口轮询据此把无汇报收尾当落定，走「没有产出结果汇报」的如实上抛路径）。
-    const roundFinished = (): boolean => {
+    // 落定判定（S1 事实口径）：收尾事实或汇报存档在场 → 已落定；此外「**已启动**的回合
+    // 已结束且没有 accepted 长任务在等」也算落定（无汇报收尾——runner 的 noteRoundFailed
+    // 只发事件不落行内事实，窗口轮询据此把无汇报收尾当落定，走如实上抛路径）。
+    // queued（未认领，runningSince 缺省）与 waiting_user（等用户接续）都不算落定：前者
+    // runner 还没派发，后者窗口内进入等待按超窗回执处理（见上方注释）。
+    const roundFinished = (task: TaskRecord): boolean => {
+      if (task.runningSince === undefined) return false;
+      if (task.pendingQuestion !== undefined) return false;
       if (taskRunner !== undefined && taskRunner.inFlight().includes(taskId)) return false;
       const acceptedPending = registry.listAcceptedOperations?.().some(
         (row) => row.taskId === taskId && row.status === 'accepted',
@@ -2775,7 +2779,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       if (taskEndedOf(task)
         || (task.resultText ?? '').trim() !== ''
         || (task.replyText ?? '').trim() !== ''
-        || roundFinished()) {
+        || roundFinished(task)) {
         return task;
       }
       if (taskRunClock.now() >= deadline) return undefined;
@@ -2917,18 +2921,29 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           }
           // 窗口内落定但没有产出结果汇报：与 inline 失败同语义如实上抛（不冒充进行中）。
           // 做没做成由 Main 读执行事实自己判断（失败唤醒的事实面会带账本）——主动推送不重复发。
+          // 机械原因优先取本回合结局（runner 的进程内一次性事实）：被宿主拒绝/失败的具体原因
+          // （如「当前权限不支持这个操作」）只在 executor 返回值里，底账不存结论（S1）——
+          // 取不到才回落到通用那句，不猜。
           // 任务事实也要留下（2026-11-19 复核修复）：本分支抛错会绕过 exec 级的 taskIds 记账，
           // 缺了它回合会被判「一无所有」（渠道回失败话术 = 假话 + 诱导重试），message_done
           // 也看不到这笔任务；同回合一笔 taskId 只记一次。
           if (!taskIds.includes(taskId)) taskIds.push(taskId);
           pushSuppressedTaskIds.push(taskId);
-          throw new Error('后台任务已落定，但没有产出结果汇报；可用 task_result 查看执行事实。');
+          const round = taskRunner?.roundOutcomeOf?.(taskId);
+          const mechanicalReason = round?.kind === 'ended' && round.failureReason !== undefined
+            && round.failureReason.trim() !== ''
+            ? round.failureReason
+            : undefined;
+          throw new Error(mechanicalReason ?? '后台任务已落定，但没有产出结果汇报；可用 task_result 查看执行事实。');
         }
       }
       const live = registry.get(taskId, scope);
       return {
         taskId,
         name,
+        // 机械状态词（taskStateWordOf 的投影，不是结论字段）：受理回执的既有形状
+        // （taskId/name/status/accepted）——模型据此说「受理了/在跑」。
+        status: taskStateWordOf(live),
         ...(taskLivenessOf(live) === undefined ? {} : { liveness: taskLivenessOf(live) }),
         accepted: true,
       };
@@ -3208,7 +3223,10 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
               // 如实说明）——主动推送据此抑制，同一件事不说两遍。受理回执（running）不在列：
               // 那些任务的结果/失败仍要靠主动推送送达。
               const inTurnStatus = (answer as { status?: unknown } | null)?.status;
-              if (inTurnStatus === 'failed' || inTurnStatus === 'needs_input') {
+              // 受理侧被拒（resource_limited 等）：回执是机械失败事实（accepted:false），
+              // 失败话术与本回合模型可见面同源——同样抑制主动推送。
+              const rejectedInTurn = (answer as { accepted?: unknown } | null)?.accepted === false;
+              if (inTurnStatus === 'failed' || inTurnStatus === 'needs_input' || rejectedInTurn) {
                 pushSuppressedTaskIds.push(taskId);
               }
             }
@@ -4515,11 +4533,21 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       if (selfConfirmBlocked !== undefined) return selfConfirmBlocked;
       /**
        * 本回合执行事实的机械结局（如实交付分流；2026-11-22）：从**末条**「非容忍失败」的
-       * 执行事实取 failed/refused + 原始码 + 原文；一条都没有 = success（含零执行收尾）。
+       * 执行事实取 failed/refused + 原始码 + 原文；一条都没有 = success（含零执行收尾，
+       * 零执行的 unsupported 见上方分支）。
        * 口径与账本末次决定性执行一致：失败的 run_js 也算（成功脚本不掩盖此前的失败读；
-       * 循环找的是最后一条 failed/refused），容忍码（同回合提案被挡/模型误用历史协议）
-       * 不算真失败——那类回合的结局由更上面的等待事实决定。
+       * 循环找的是最后一条 failed/refused），但**已落库的业务写之后的脚本失败不算**
+       * ——脚本失败不是「另一个写没成」（adversarial-worker ⑪ 冻结用例），把它算成失败会
+       * 让用户按失败重试一次已经落库的写；无业务写时（只读查询 + 脚本失败）脚本结局仍是
+       * 本回合真实结局（⑫ 冻结用例，不放宽假绿）。
+       * 容忍码（同回合提案被挡/模型误用历史协议）不算真失败——那类回合的结局由更上面的
+       * 等待事实决定。
        */
+      const completedBusinessWrite = recorded.some(
+        (entry) => entry.operation !== RUN_JS_TOOL
+          && !readOnlyOperations.has(entry.operation)
+          && entry.outcome.status === 'completed',
+      );
       const roundFailureOf = ():
         | { outcome: 'failed' | 'refused'; code?: string; reason?: string }
         | undefined => {
@@ -4528,6 +4556,8 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           if (entry === undefined) continue;
           const status = entry.outcome.status;
           if (status !== 'failed' && status !== 'refused') continue;
+          // 业务写已落库：宿主脚本的失败不改写「办好了」的如实交付（审计行照旧保留）。
+          if (completedBusinessWrite && entry.operation === RUN_JS_TOOL) continue;
           const code = entry.outcome.error.code;
           if (SAME_TURN_TOLERATED_FAILURE_CODES.has(code)) continue;
           const reason = entry.outcome.error.message;
@@ -4552,9 +4582,20 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
             zeroExecReason: 'not_permitted',
             // 执行结局 = 发起前被宿主拒绝（本次不允许）；投递面据此走失败回调，不要说「办好了」。
             executionOutcome: 'not_permitted',
+            // 机械原因原样交给受理窗口/投递面：模型要转述的正是这句「没权限」，不是「没干活」。
+            failureReason: OPERATION_NOT_PERMITTED_MESSAGE,
           };
         }
-        return { kind: 'ended', report: workerResult.text };
+        // 零执行且不是权限拒绝 = 这件事没有发生任何办理动作（目录里没有 / 助手没动手）——
+        // 旧答复五态口径是 unsupported（B4 冻结：用户该听到「办不了」，绝不能当成功说
+        // 「办好了」）。report 仍原样带回（对失败的说明），但**不落完成存档**。
+        return {
+          kind: 'ended',
+          report: workerResult.text,
+          zeroExecReason: 'unsupported',
+          executionOutcome: 'failed',
+          failureReason: '没有实际办理：这次交办没有发出任何办理动作。',
+        };
       }
       // CAP-01 S2 ④ 兜底扫描（与同步委派同一纪律）：任务 out/ 全量登记——执行层按
       // fileParams 写出的产物即使没走 run_js 也要回程；与回程登记同池去重。

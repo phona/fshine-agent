@@ -198,6 +198,25 @@ describe('run_js 执行器（CAP-01 S0）', () => {
     expect(ws.getRow(2).getCell(2).value).toBe(12);
   });
 
+  it('①b-2 node_modules 是软链时按 realpath 授权（worktree/pnpm 布局：软链路径本身不是允许面）', async () => {
+    // 反向绊线：不做 realpath 时，--allow-fs-read=<软链> 与子进程解析模块命中的真实路径
+    // 不一致 → require('exceljs') ERR_ACCESS_DENIED（本机 Node v24 实测），脚本非零退出。
+    const { fixtureRoot, store } = makeFixture();
+    const linked = path.join(fixtureRoot, 'linked-node_modules');
+    symlinkSync(NODE_MODULES, linked, 'dir');
+    const workspaceRoot = path.join(fixtureRoot, 'workspace-link');
+    mkdirSync(workspaceRoot, { recursive: true });
+    const fileStore = createFileStore({ store, workspaceRoot });
+    const executor = createRunJsExecutor({ fileStore, nodeModulesDir: linked });
+    const result = await executor.runJs({
+      code: "const E = require('exceljs'); console.log(typeof E.Workbook);",
+      scope: SCOPE,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('function');
+    store.close();
+  });
+
   it('①c registerOutputs=false → out/ 不登记、outputs 为空、零 file_refs 行（Main 面另加 scratch-only 收窄，见 ①d）', async () => {
     const { executor, store, workspaceRoot } = makeFixture();
     const code = "require('node:fs').writeFileSync('out/不该交付.txt', 'bytes');";

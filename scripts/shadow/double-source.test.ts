@@ -176,13 +176,18 @@ describe('Shadow 双源对照 ②：四态语义等价（needs_input / failed / 
     expect(compareChains(a, b).equivalent).toBe(true);
   });
 
-  it('failed：执行事实 failed + 原文错误码；不得报 completed', async () => {
+  it('failed：执行事实 failed + 原文错误码；失败事实上报且不落完成存档', async () => {
     const a = await chainOn('dummy', FAILED_SCENARIO);
     const b = await chainOn('fake-real', FAILED_SCENARIO, B_FAILED);
     for (const run of [a, b]) {
       expect(run.executions.map((entry) => entry.status)).toEqual(['failed']);
       expect(run.executions[0]?.errorCode).toBe('COLLECTION_FAULT');
-      expect(run.terminal.replyText ?? '').toContain('未能完成');
+      // S1：Worker 的那句「未能完成」是对失败的说明，不是完成结果——不落完成存档；
+      // 用户可见的失败事实走 round_failed → failed 通知（两端同形）。
+      expect(run.terminal.replyText).toBeUndefined();
+      expect(run.terminal.hasReport).toBe(false);
+      expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started', 'failed']);
+      expect(run.notifications.every((entry) => entry.delivered)).toBe(true);
       expect(run.executions[0]?.status).not.toBe('completed');
     }
     expect(compareChains(a, b).equivalent).toBe(true);
@@ -194,7 +199,8 @@ describe('Shadow 双源对照 ②：四态语义等价（needs_input / failed / 
     for (const run of [a, b]) {
       expect(run.executions.map((entry) => entry.status)).toEqual(['refused']);
       expect(run.executions[0]?.errorCode).toBe('GATE_REFUSE');
-      expect(run.terminal.replyText ?? '').toContain('refused');
+      expect(run.terminal.replyText).toBeUndefined();
+      expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started', 'failed']);
     }
     expect(compareChains(a, b).equivalent).toBe(true);
   });

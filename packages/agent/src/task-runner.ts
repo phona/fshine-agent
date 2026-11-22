@@ -352,7 +352,8 @@ export type TaskExecutionOutcome =
    * 后台回合收尾。report = Worker 汇报原文（事实）；files = 本回合 Worker 产出的**任务
    * 作用域**交付物（登记事实）；这是后台面对 TurnResult.files 的同位面：装配方按它投递。
    * zeroExecReason = 零执行的机械原因（'not_permitted' = 发起前被宿主拒绝——唤醒面据此
-   * 按「本次不允许」说清）；缺省 = 无该事实。
+   * 按「本次不允许」说清；'unsupported' = 零执行且非权限拒绝——没有发生任何办理动作，
+   * 唤醒面按「办不了」说清）；缺省 = 无该事实。
    *
    * executionOutcome（2026-11-22 补，如实交付红线）：本回合执行事实的**机械结局**——宿主
    * 完成/失败投递面据此分流（不能只看「有没有汇报」：Worker 在被拒/失败后也会汇报一句
@@ -368,7 +369,7 @@ export type TaskExecutionOutcome =
     kind: 'ended';
     report?: string;
     files?: readonly TaskOutcomeFile[];
-    zeroExecReason?: 'not_permitted';
+    zeroExecReason?: 'not_permitted' | 'unsupported';
     executionOutcome?: 'success' | 'failed' | 'refused' | 'not_permitted';
     errorCode?: string;
     failureReason?: string;
@@ -704,6 +705,13 @@ export interface TaskRunner {
   confirm(taskId: string, options?: { userText?: string; scope?: TaskScope }): ConfirmOutcome;
   /** 本进程在飞执行回合的任务 id（只读快照）。 */
   inFlight(): readonly string[];
+  /**
+   * 本进程内某任务**最近一次已落定回合**的机械结局（如实交付分流用；一次性读取）。
+   * 受理窗口的调用方（Main 的 task_run 短等待）拿不到 executor 的返回值，只能从底账推断
+   * 落定——底账不存结局（S1：没有 status），失败/被拒的机械原因（如「当前权限不支持这个
+   * 操作」）与 zeroExecReason 就只剩这一处直接来源。缺省（未落定/已读/跨进程）= undefined，不猜。
+   */
+  roundOutcomeOf?(taskId: string): TaskExecutionOutcome | undefined;
 }
 
 type RoundResult =
@@ -794,6 +802,12 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
 
   /** 本进程在飞执行回合：taskId → abort 控制器 / 落定链。不是队列（队列=底账未启动行）。 */
   const controllers = new Map<string, AbortController>();
+  /**
+   * 已落定回合的执行结局（仅本进程；受理窗口一次读取后即删）。底账不存结论（S1），
+   * 但窗口内的 Main 需要知道「刚落定的是失败/被拒还是成功」才能如实转述。
+   */
+  const roundOutcomes = new Map<string, TaskExecutionOutcome>();
+  const ROUND_OUTCOMES_LIMIT = 64;
   const inFlight = new Map<string, Promise<void>>();
   /** 本进程已请求停止（abort）的在飞回合：确认取消的判定依据（取消请求不是底账事实）。 */
   const cancelRequested = new Set<string>();
@@ -1558,6 +1572,17 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     }
 
     const { outcome } = result;
+    // 受理窗口（Main 的短等待）拿不到 executor 返回值：把本回合机械结局留一份在进程内，
+    // 由 roundOutcomeOf 一次性读取（有界；落定即覆盖，不落底账——底账不存结论，S1）。
+    if (outcome.kind === 'ended') {
+      roundOutcomes.delete(taskId);
+      roundOutcomes.set(taskId, outcome);
+      while (roundOutcomes.size > ROUND_OUTCOMES_LIMIT) {
+        const oldest = roundOutcomes.keys().next().value;
+        if (oldest === undefined) break;
+        roundOutcomes.delete(oldest);
+      }
+    }
     switch (outcome.kind) {
       case 'accepted': {
         // 长任务受理（契约 v4）：回合正常结束、任务在跑；释放租约（槽位在 finally
@@ -1847,5 +1872,10 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     resume,
     confirm,
     inFlight: () => [...inFlight.keys()],
+    roundOutcomeOf: (taskId) => {
+      const outcome = roundOutcomes.get(taskId);
+      roundOutcomes.delete(taskId);
+      return outcome;
+    },
   };
 }

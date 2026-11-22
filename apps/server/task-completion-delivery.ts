@@ -318,6 +318,15 @@ export function taskFailureFactText(input: {
   ledger?: readonly string[];
   /** 结构化原因码事实：not_permitted = 发起前被宿主拒绝（本次不允许；不扫任何文本）。 */
   notPermitted?: boolean;
+  /**
+   * B4 结构化答复值（机械事实，不是话术；Main 按值选措辞）：unsupported = 零执行且没有
+   * 这个能力；blocked = 有能力但本次不允许/缺条件；failed = 执行发生过且失败。缺省 = 不追加
+   * （既有路径逐字节不变）。这是 cases-l（B4 冻结用例）的判据面：去掉它 Main 只能猜「办不了」
+   * 还是「缺什么」。
+   */
+  outcome?: 'unsupported' | 'blocked' | 'failed';
+  /** blocked 的缺失条件（非空；只在 outcome=blocked 时写入）。 */
+  missing?: string;
 }): string {
   const subject = input.name !== undefined && input.name.trim() !== ''
     ? `「${truncatedName(input.name)}」`
@@ -335,8 +344,14 @@ export function taskFailureFactText(input: {
   const notPermitted = input.notPermitted === true
     ? '账本里没有执行事实：这次交办在发起前被宿主拒绝（本次不允许，不是没有这件事）。\n'
     : '';
+  // 结构化答复值（B4）：与既有事实行并存——Main 读值选措辞，用户看到的话仍由模型写。
+  const outcomeFact = input.outcome === undefined
+    ? ''
+    : ` ${input.outcome === 'blocked'
+      ? `[outcome=blocked][缺=${(input.missing ?? '').trim() === '' ? '本次允许范围或需要补充的信息' : input.missing!.trim()}]`
+      : `[outcome=${input.outcome}]`}`;
   return `[任务失败]${subject}这个回合没有产出结果汇报，问题分类：${USER_FACING_FAILURE_KIND_LABEL[input.kind]}。\n`
-    + `${reasonLine}${notPermitted}${ledger}请把这件事如实告诉用户（做没做成以账本执行事实为准），并给他一个能做的下一步。`;
+    + `${reasonLine}${notPermitted}${ledger}请把这件事如实告诉用户（做没做成以账本执行事实为准），并给他一个能做的下一步。${outcomeFact}`;
 }
 
 /**

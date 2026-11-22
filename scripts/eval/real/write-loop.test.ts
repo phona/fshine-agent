@@ -467,18 +467,23 @@ describe('recordingDriver：透传不改 + 入账', () => {
 
 describe('LedgerWatcher：去重采样与状态序列', () => {
   it('同一签名不重复记；状态变化逐条入序列', async () => {
-    const statuses = ['queued', 'queued', 'running', 'running', 'completed'];
+    // S1 事实模型：底账没有 status，watcher 的状态词由机械事实投影（与 readTasks 同口径）：
+    // queued = 未启动；running = 有效租约；completed = 决定性执行行 completed。
+    const phases = ['queued', 'queued', 'running', 'running', 'completed'] as const;
     let index = 0;
+    const recordOf = (phase: (typeof phases)[number]): Record<string, unknown> => ({
+      taskId: 't-1',
+      executions: phase === 'completed'
+        ? [{ requestId: 'r1', operation: 'dummy.query', status: 'completed' }]
+        : [],
+      ...(phase === 'running' ? { runningSince: '2026-11-22T00:00:00.000Z', leaseUntil: '2999-01-01T00:00:00.000Z' } : {}),
+    });
     const fake = {
-      list: () => [{
-        taskId: 't-1',
-        status: statuses[Math.min(index, statuses.length - 1)]!,
-        executions: [],
-      }],
+      list: () => [recordOf(phases[Math.min(index, phases.length - 1)]!)],
     } as unknown as ConstructorParameters<typeof LedgerWatcher>[0];
     index = 0;
     const watcher = new LedgerWatcher(fake, { principalId: 'p', sessionId: 's' });
-    for (index = 0; index < statuses.length; index += 1) watcher.sample();
+    for (index = 0; index < phases.length; index += 1) watcher.sample();
     expect(watcher.snapshots.map((snapshot) => snapshot.status)).toEqual(['queued', 'running', 'completed']);
     expect(watcher.sequenceOf('t-1')).toEqual(['queued', 'running', 'completed']);
     expect(watcher.taskIds()).toEqual(['t-1']);

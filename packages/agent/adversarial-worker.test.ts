@@ -694,8 +694,9 @@ describe('模型走岔路（确定性脚本模型）', () => {
     });
     await runBackground(registry, executor, 't_writethenscript');
     const task = registry.get('t_writethenscript', SCOPE);
-    expect(taskStatusOf(task)).toBe('completed');
-    expect(taskFailureReasonOf(task)).toBeUndefined();
+    // 只读集合按本装配声明传入（旧后台 lastWritable 同一判据）：脚本失败不改写已落库的写。
+    expect(taskStatusOf(task, READ_ONLY)).toBe('completed');
+    expect(taskFailureReasonOf(task, READ_ONLY)).toBeUndefined();
     // 审计保留：脚本失败是真实执行事实，只是不改写业务终局。
     expect(task.executions.map((execution) => [execution.operation, execution.status]))
       .toEqual([['dummy.proposal', 'completed'], ['run_js', 'failed']]);

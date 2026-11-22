@@ -159,11 +159,16 @@ describe('冒烟·执行很久后异常（slow_fault）', () => {
         toolCallAssistant('task_result', { ref: taskId }),
         (call) => {
           const result = lastToolResultJsonOf(call.messages);
-          const status = result?.['status'];
-          // 底账投影收口（2026-11-20）：拼装的 failureReason 自由文本已移除，
-          // 改给清洗过的业务摘要（summary）——业务原话保留，内部词/技术码被剥掉。
-          const reason = typeof result?.['summary'] === 'string' ? result['summary'] : '';
-          if (status !== 'failed') throw new Error(`任务状态不是 failed：${String(status)}`);
+          // S1 事实口径：task_result 不再有 status 结论——失败事实读逐笔执行行（末条
+          // status=failed + 清洗后的机械摘要）。
+          const executions = Array.isArray(result?.['executions'])
+            ? result['executions'] as ReadonlyArray<Record<string, unknown>>
+            : [];
+          const lastExecution = executions[executions.length - 1];
+          const reason = typeof lastExecution?.['summary'] === 'string' ? lastExecution['summary'] : '';
+          if (lastExecution?.['status'] !== 'failed') {
+            throw new Error(`任务末条执行不是 failed：${JSON.stringify(lastExecution)}`);
+          }
           if (reason === '') throw new Error('task_result 没有返回失败摘要。');
           return textAssistant(`那个任务跑了很久，最后还是没办成：${reason}`);
         },
@@ -228,7 +233,8 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
         (call) => {
           const status = lastToolResultJsonOf(call.messages);
           const missing = (status?.['pendingQuestion'] as { missing?: readonly string[] } | undefined)?.missing ?? [];
-          if (status?.['status'] !== 'waiting_user') throw new Error(`任务不是 waiting_user：${String(status?.['status'])}`);
+          // S1：等待事实读存活词（liveness=waiting_user）+ 结构化 pendingQuestion。
+          if (status?.['liveness'] !== 'waiting_user') throw new Error(`任务不是 waiting_user：${String(status?.['liveness'])}`);
           return textAssistant(`任务还在等你补充：${missing.join('、')}`);
         },
       ]);
@@ -296,7 +302,7 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
         toolCallAssistant('task_status', { ref: taskId }),
         (call) => {
           const status = lastToolResultJsonOf(call.messages);
-          return textAssistant(`任务状态：${String(status?.['status'])}；还在等你补充。`);
+          return textAssistant(`任务状态：${String(status?.['liveness'])}；还在等你补充。`);
         },
       ]);
       sim.sendText('还没好吗？');

@@ -129,8 +129,10 @@ export async function mu6Restart(rt: RuntimeConfig): Promise<MuCaseResult> {
       ),
     );
     void replies1;
+    // S1 事实：零执行收尾（本假执行器只回报，不产生执行行）没有 completed 结论——落定事实 =
+    // 汇报逐字存档（replyText = RESULT:<tag>），等待面按同一机械事实判「办完了」。
     await waitUntil(() =>
-      readTasks(server1.dbPath).filter((task) => task.status === 'completed').length >= MU_PRINCIPALS.length,
+      readTasks(server1.dbPath).filter((task) => (task.replyText ?? '').startsWith(RESULT_PREFIX)).length >= MU_PRINCIPALS.length,
     );
     tasksBeforeRestart = readTasks(server1.dbPath);
   } finally {
@@ -207,7 +209,9 @@ export async function mu6Restart(rt: RuntimeConfig): Promise<MuCaseResult> {
         (candidate) => candidate.principalId === principalIdOf(userId) && candidate.sessionId === sessionIdOf(`conv-${userId}`),
       );
       const expected = `${RESULT_PREFIX}${ownTag(userId)}`;
-      const ok = task !== undefined && task.status === 'completed' && task.replyText === expected;
+      // 结果找回 = 重启后仍能取回逐字存档的结果（S1：status 词是投影，不是结论；零执行
+      // 收尾投影为 unexecuted，不影响「结果是否找回」这一判据）。
+      const ok = task !== undefined && task.replyText === expected;
       resultRetrieval[userId] = {
         taskId: task?.taskId ?? '',
         status: task?.status ?? 'missing',

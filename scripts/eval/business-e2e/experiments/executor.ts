@@ -34,6 +34,7 @@ import { assembleSessionCore, contextWindowFrom, createBackgroundDispatch, resol
 import type { DriverFactory, ExecutionFaceFactory } from '../../../ask-runtime';
 import { assessEvalIsolation, assertEvalIsolation } from '../../safety-gate';
 import { claimsCompletionHeuristic, executionFactsFromToolCalls } from '../sample-from-run';
+import { taskStatusOf } from '../../../../packages/agent/testing/task-fact-view';
 import type { SampleRecord } from '../judge';
 import type { ExpCase, ExpItem } from './model';
 import { effectiveTurns, EXP_HARD_LIMITS } from './model';
@@ -358,7 +359,8 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
       } finally {
         restoreCapture();
       }
-      const tasks = jsonSafe(session.tasks()) as TaskRecordJson[];
+      // S1：底账没有 status——证据快照的 status 词按机械事实投影。
+      const tasks = jsonSafe(session.tasks().map((task) => ({ ...task, status: taskStatusOf(task) }))) as TaskRecordJson[];
       assembled.close();
 
       const toolCalls = sink.calls;

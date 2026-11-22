@@ -45,7 +45,7 @@
  */
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { lstatSync, mkdirSync, readdirSync, statSync, writeFileSync, type Dirent } from 'node:fs';
+import { lstatSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync, type Dirent } from 'node:fs';
 import path from 'node:path';
 import { workerSubprocessEnv } from './worker-env';
 import type { FileStore, MaterializedInput, RegisteredFile, SkippedOutput } from './file-store';
@@ -288,6 +288,16 @@ export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecuto
   const maxOutputFileBytes = options.maxOutputFileBytes ?? RUN_JS_MAX_OUTPUT_FILE_BYTES;
   const maxOutputCount = options.maxOutputCount ?? RUN_JS_MAX_OUTPUT_COUNT;
   const nodePath = options.nodePath ?? process.execPath;
+  // Node 权限模型按 **realpath** 校验 --allow-fs-read：node_modules 本身是软链时（git
+  // worktree、pnpm 布局），授权的软链路径与子进程解析模块命中的真实路径不一致 →
+  // require('exceljs') 直接 ERR_ACCESS_DENIED。构造时解析一次真实路径（目录不存在则保留
+  // 原值，交给子进程如实报错，不在这里猜）。NODE_PATH 与 allow-fs-read 用同一值。
+  let nodeModulesDir = options.nodeModulesDir;
+  try {
+    nodeModulesDir = realpathSync(nodeModulesDir);
+  } catch {
+    // 不存在/不可解析：保持调用方给的值（失败面由子进程带回）。
+  }
 
   return {
     async runJs(input: RunJsInput): Promise<RunJsOutput> {
@@ -388,7 +398,7 @@ export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecuto
         [
           '--permission',
           `--allow-fs-read=${runDir}`,
-          `--allow-fs-read=${options.nodeModulesDir}`,
+          `--allow-fs-read=${nodeModulesDir}`,
           ...writableArgs,
           `--max-old-space-size=${RUN_JS_MAX_OLD_SPACE_MB}`,
           runCjsPath,
@@ -403,7 +413,7 @@ export function createRunJsExecutor(options: RunJsExecutorOptions): RunJsExecuto
             ...workerSubprocessEnv(process.env),
             HOME: homeDir,
             TMPDIR: tmpDir,
-            NODE_PATH: options.nodeModulesDir,
+            NODE_PATH: nodeModulesDir,
           },
         },
       );
