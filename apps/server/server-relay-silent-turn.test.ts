@@ -32,7 +32,7 @@ import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../
 import type { Notification, NotificationSink } from '../../packages/agent/src/notifications';
 import { failureMessageFor, internalTermIn } from '../../packages/agent/src/user-facing-failure';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
-import { taskStateWordOf } from '../../packages/agent/src/task-registry';
+import { archivedReportOf } from '../../packages/agent/testing/task-facts';
 import { fileStoragePathOf } from '../../packages/agent/src/file-store';
 import type { RecalcXlsxExecutor } from '../../packages/agent/src/recalc-xlsx-executor';
 import { mainSessionOptions } from '../../scripts/ask-runtime';
@@ -609,7 +609,7 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       const ro = createSqliteTaskRegistry(fx.dbPath, { readOnly: true });
       try {
         // S1 事实模型：底账没有 status——已启动但无汇报 = 机械事实词「failed」。
-        expect(taskStateWordOf(ro.get(taskId, SCOPE))).toBe('failed');
+        expect(archivedReportOf(ro.get(taskId, SCOPE))).toBeUndefined();
       } finally {
         ro.close();
       }
@@ -649,7 +649,7 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       const reply = await fx.server.handler(incoming('m-1', ASK));
       expect(reply).toBe('');
       expect(fx.delivery.sentTexts).toHaveLength(1);
-      expect(fx.delivery.sentTexts[0]!.text).toBe(failureMessageFor('denied').text);
+      expect(fx.delivery.sentTexts[0]!.text).toBe(failureMessageFor('executor_failed').text);
       // 执行层原文/内部码不进用户文本。
       expect(fx.delivery.sentTexts[0]!.text).not.toContain('GATE_REFUSE');
       expect(fx.delivery.sentTexts[0]!.text).not.toContain('执行层');

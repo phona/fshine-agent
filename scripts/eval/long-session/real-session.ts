@@ -27,7 +27,7 @@ import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
 import { createResourcePolicy } from '../../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { taskStatusOf, taskReasonOf } from '../../../packages/agent/testing/task-fact-view';
+import { lastFailureOf } from '../../../packages/agent/testing/task-facts';
 import { TASK_CANCEL_TOOL, EXECUTE_OPERATION_TOOL } from '../../../packages/agent/src/execution-runtime';
 import {
   assembleSessionCore, compactionSettingsFrom, contextWindowFrom, createBackgroundDispatch, resolveExecutionFace,
@@ -38,6 +38,36 @@ import type { CompactionAttempt } from './compaction';
 import type { TaskView } from './oracle';
 import type { BudgetUsage, ToolCallRecord } from './evidence';
 import type { CallKind, ModelCallRecord } from './accounting';
+
+/** 评测本地词表（R6 oracle 既有契约）：账本事实 → 离散词；只读投影，不写回底账、不进产品面。 */
+function evalTaskStateOf(task: {
+  pendingQuestion?: unknown;
+  cancelledAt?: string;
+  timedOutAt?: string;
+  resourceLimitedAt?: string;
+  diedAt?: string;
+  resultText?: string;
+  replyText?: string;
+  runningSince?: string;
+  leaseUntil?: string;
+  executions?: readonly { status: string }[];
+}): string {
+  if (task.cancelledAt !== undefined) return 'cancelled';
+  if (task.timedOutAt !== undefined) return 'timed_out';
+  if (task.resourceLimitedAt !== undefined) return 'resource_limited';
+  if (task.diedAt !== undefined) return 'failed';
+  if (task.pendingQuestion !== undefined) return 'waiting_user';
+  const last = task.executions?.[task.executions.length - 1];
+  if (last !== undefined) {
+    if (last.status === 'failed' || last.status === 'refused' || last.status === 'needs_input') return 'failed';
+    if (last.status === 'accepted') return (task.resultText ?? task.replyText ?? '').trim() !== '' ? 'completed' : 'running';
+    return 'completed';
+  }
+  if ((task.resultText ?? task.replyText ?? '').trim() !== '') return 'completed';
+  if (task.leaseUntil !== undefined) return 'running';
+  if (task.runningSince === undefined) return 'queued';
+  return 'failed';
+}
 
 /** 把参数里的字符串叶子全部收集（执行对象记号：集合名/窗口等）。 */
 function stringLeaves(value: unknown, out: string[] = []): string[] {
@@ -473,8 +503,9 @@ export async function openRealSession(input: RealSessionInput): Promise<RealSess
         taskId: task.taskId,
         ...(task.taskNo === undefined ? {} : { taskNo: task.taskNo }),
         request: task.request,
-        status: taskStatusOf(task),
-        ...(taskReasonOf(task) === undefined ? {} : { reason: taskReasonOf(task)! }),
+        // 评测本地词表（R6 oracle 既有契约；读时由账本事实推导，产品面无此投影）。
+        status: evalTaskStateOf(task),
+        ...(lastFailureOf(task)?.error?.code === undefined ? {} : { reason: lastFailureOf(task)?.error?.code! }),
         requestIds: task.executions.map((e) => e.requestId),
       }));
     },

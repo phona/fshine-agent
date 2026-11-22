@@ -34,12 +34,13 @@ import { assembleSessionCore, contextWindowFrom, createBackgroundDispatch, resol
 import type { DriverFactory, ExecutionFaceFactory } from '../../../ask-runtime';
 import { assessEvalIsolation, assertEvalIsolation } from '../../safety-gate';
 import { claimsCompletionHeuristic, executionFactsFromToolCalls } from '../sample-from-run';
-import { taskStatusOf } from '../../../../packages/agent/testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../../packages/agent/testing/task-facts';
 import type { SampleRecord } from '../judge';
 import type { ExpCase, ExpItem } from './model';
 import { effectiveTurns, EXP_HARD_LIMITS } from './model';
 import type { ExpEvidence } from './judge';
 import type { InputsFile, MetaFile, MetaTurn, ReplyLine, TaskRecordJson, ToolCallRecord } from '../../convergence-r1/evidence';
+import { observedTaskStatusOf } from '../../task-observation';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
@@ -360,7 +361,7 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
         restoreCapture();
       }
       // S1：底账没有 status——证据快照的 status 词按机械事实投影。
-      const tasks = jsonSafe(session.tasks().map((task) => ({ ...task, status: taskStatusOf(task) }))) as TaskRecordJson[];
+      const tasks = jsonSafe(session.tasks().map((task) => ({ ...task, status: observedTaskStatusOf(task) }))) as TaskRecordJson[];
       assembled.close();
 
       const toolCalls = sink.calls;

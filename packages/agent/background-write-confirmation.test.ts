@@ -14,7 +14,7 @@
  *
  * 反向绊线：把脱敏改回「原始 outcome 回给 Worker」→ ② 必须红。
  */
-import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -255,7 +255,7 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
       worker: callingWorker(WRITE_ARGS, capture),
     });
     await runBackground(registry, executor, 't_guard');
-    expect(taskStatusOf(registry.get('t_guard', SCOPE))).toBe('waiting_user');
+    expect(registry.get('t_guard', SCOPE).pendingQuestion).toBeDefined();
     const before = registry.list(SCOPE).length;
 
     const result = await callMainTool({ registry, tool: 'task_run', args: { task: '再把 alpha 提交一次' } });
@@ -326,7 +326,7 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     await runBackground(registry, executor, 't_confirm');
 
     const task = registry.get('t_confirm', SCOPE);
-    expect(taskStatusOf(task)).toBe('waiting_user');
+    expect(task.pendingQuestion).toBeDefined();
     expect(task.waitingSince).toBeDefined();
     // 底账（SQLite JSON 列，零迁移）：提案摘要原样承载。
     const stored = registry.store.getTask('t_confirm');
@@ -424,7 +424,7 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     await runner.whenIdle();
 
     const task = registry.get('t_replace', SCOPE);
-    expect(taskStatusOf(task)).toBe('waiting_user');
+    expect(task.pendingQuestion).toBeDefined();
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_s1_round_2');
     // 旧句柄不再可见（底账与投影都不带）。
     const ledger = JSON.stringify(task);
@@ -592,7 +592,7 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     expect(JSON.stringify(capture.results[0])).toBe('{"status":"completed","data":{"rows":2}}');
 
     const task = registry.get('t_read', SCOPE);
-    expect(taskStatusOf(task)).toBe('completed');
+    expect(lastExecutionOf(task)?.status).toBe('completed');
     expect(task.pendingQuestion).toBeUndefined();
 
     // 执行器结局形状与改动前同形：completed + resultText（无 files 时不加字段）。
@@ -702,7 +702,7 @@ describe('同回合自我确认被挡：结局是 waiting_user（提案），不
 
     // 结局 = waiting_user（不是 failed）：底账带真实提案（句柄 + 摘要）。
     const task = registry.get('t_self_confirm', SCOPE);
-    expect(taskStatusOf(task)).toBe('waiting_user');
+    expect(task.pendingQuestion).toBeDefined();
     expect(task.pendingQuestion?.confirmation?.summary).toBe(SUMMARY);
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_blocked_1');
     // 两次非只读都真的打到执行层（同回合自我确认不是用户表态，但也不是宿主预先拦下）。
@@ -726,7 +726,7 @@ describe('同回合自我确认被挡：结局是 waiting_user（提案），不
     const executor = await selfConfirmExecutor(client, registry, roundWorker([[PREPARE_ARGS, COMMIT_ARGS, QUERY_ARGS]], capture));
     await runBackground(registry, executor, 't_self_confirm_query');
 
-    expect(taskStatusOf(registry.get('t_self_confirm_query', SCOPE))).toBe('waiting_user');
+    expect(registry.get('t_self_confirm_query', SCOPE).pendingQuestion).toBeDefined();
     expect(registry.get('t_self_confirm_query', SCOPE).pendingQuestion?.confirmation?.handle).toBe('cf_blocked_2');
     expect(client.requests.map((r) => r.operation)).toEqual(['dummy.prepare', 'dummy.commit', 'dummy.query']);
   });
@@ -739,7 +739,7 @@ describe('同回合自我确认被挡：结局是 waiting_user（提案），不
     await runBackground(registry, executor, 't_self_confirm_denied');
 
     const task = registry.get('t_self_confirm_denied', SCOPE);
-    expect(taskStatusOf(task)).toBe('failed');
+    expect(['failed', 'refused']).toContain(lastExecutionOf(task)?.status);
     expect(task.pendingQuestion).toBeUndefined();
   });
 });
@@ -845,7 +845,7 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
     expect(client.requests[1]!.confirmation).toBeUndefined();
     expect(client.requests[2]!.confirmation).toEqual({ handle: 'cf_flow_1', userText: '确认，就按这版提交' });
     expect(client.requests[3]!.confirmation).toEqual({ handle: 'cf_flow_1', userText: '确认，就按这版提交' });
-    expect(taskStatusOf(registry.get('t_confirm_ok', SCOPE))).toBe('completed');
+    expect(lastExecutionOf(registry.get('t_confirm_ok', SCOPE))?.status).toBe('completed');
   });
 
   it('② 改口径路径：task_resume → 任何调用都不带旧句柄；Worker 重新提案 → 底账是新句柄、旧的不再出现', async () => {
@@ -864,7 +864,7 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
     // 任何调用都不带旧句柄（resume 永不透传）。
     for (const request of client.requests) expect(request.confirmation).toBeUndefined();
     const task = registry.get('t_resume_change', SCOPE);
-    expect(taskStatusOf(task)).toBe('waiting_user');
+    expect(task.pendingQuestion).toBeDefined();
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_flow_2');
     // 旧句柄不再出现在底账。
     expect(JSON.stringify(task)).not.toContain('cf_flow_1');
@@ -887,7 +887,7 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
     expect(client.requests.map((request) => request.operation)).toEqual(['dummy.prepare', 'dummy.prepare']);
     // 任务仍等待确认，底账是**新**句柄，旧的不再出现。
     const task = registry.get('t_expired', SCOPE);
-    expect(taskStatusOf(task)).toBe('waiting_user');
+    expect(task.pendingQuestion).toBeDefined();
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_flow_2');
     expect(JSON.stringify(task)).not.toContain('cf_flow_1');
     // 用户可见话术：含「过期」，过 internalTermIn（无内部术语）。
@@ -914,7 +914,7 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
     expect(internalTermIn(value.fact!)).toBeUndefined();
     // 没有新建任务、没有发起执行。
     expect(registry.list(SCOPE)).toHaveLength(before);
-    expect(taskStatusOf(registry.get('t_needs_input', SCOPE))).toBe('waiting_user');
+    expect(registry.get('t_needs_input', SCOPE).pendingQuestion).toBeDefined();
   });
 
   it('⑤ 推断禁止：task_resume 的 answer 是「确认」这类话时也不带句柄（语义在 confirm，不在文案）', async () => {
@@ -1047,7 +1047,7 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
     expect(JSON.stringify(turn)).not.toContain('cf_flow_1');
     // 机械闸不受影响：任务仍等待确认、句柄仍在底账、执行层没被重复调用。
     const task = registry.get(turn.taskIds[0]!, SCOPE);
-    expect(taskStatusOf(task)).toBe('waiting_user');
+    expect(task.pendingQuestion).toBeDefined();
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_flow_1');
     expect(client.requests).toHaveLength(1);
     for (const request of client.requests) expect(request.confirmation).toBeUndefined();

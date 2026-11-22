@@ -120,7 +120,7 @@ function findTask(tasks: readonly TaskRecordView[], taskId: string): TaskRecordV
 }
 
 /** S1 事实模型：机械事实 → 判据词汇（读时推导；completed=汇报存档，failed=已启动无汇报）。 */
-function factStateOf(task: TaskRecordView | TaskRecord): string {
+function observedFactOf(task: TaskRecordView | TaskRecord): string {
   if (task.pendingQuestion !== undefined) return 'waiting_user';
   if (task.diedAt !== undefined) return 'died';
   if (task.cancelledAt !== undefined) return 'cancelled';
@@ -132,7 +132,7 @@ function factStateOf(task: TaskRecordView | TaskRecord): string {
 
 function statusOf(tasks: readonly TaskRecordView[], taskId: string): string | undefined {
   const task = findTask(tasks, taskId);
-  return task === undefined ? undefined : factStateOf(task);
+  return task === undefined ? undefined : observedFactOf(task);
 }
 
 // ---------------------------------------------------------------------------
@@ -181,13 +181,13 @@ async function runRestartNotificationScenario(scenario: ChaosScenario): Promise<
         const turn = await assembled1.session.send(REQUEST);
         report.submitted += turn.taskIds.length;
       }
-      await pollUntil(() => registry1!.list(scope).filter((task) => factStateOf(task) === 'completed').length >= 5, 20_000);
+      await pollUntil(() => registry1!.list(scope).filter((task) => observedFactOf(task) === 'completed').length >= 5, 20_000);
       await outbox1.deliverPending(); // 恒失败：attempts=1，全部未送达
     } finally {
       assembled1.close();
     }
     const tasks1 = registry1.list(scope);
-    const completedIds1 = tasks1.filter((task) => factStateOf(task) === 'completed').map((task) => task.taskId);
+    const completedIds1 = tasks1.filter((task) => observedFactOf(task) === 'completed').map((task) => task.taskId);
     outbox1.close();
     registry1.close();
 
@@ -391,9 +391,9 @@ async function runCombinedWithDuplicate(scenario: ChaosScenario): Promise<ChaosR
       for (let i = 1; i < scenario.tasks; i += 1) {
         await server.handler(incoming(`msg-${i + 1}`, texts[i]!));
       }
-      await pollUntil(() => readerA.list(serverScope).filter((task) => factStateOf(task) === 'completed').length >= gateAfter, 20_000);
+      await pollUntil(() => readerA.list(serverScope).filter((task) => observedFactOf(task) === 'completed').length >= gateAfter, 20_000);
       phaseATasks = readerA.list(serverScope).map((task) => ({ ...task }));
-      completedIdsA = phaseATasks.filter((task) => factStateOf(task) === 'completed').map((task) => task.taskId);
+      completedIdsA = phaseATasks.filter((task) => observedFactOf(task) === 'completed').map((task) => task.taskId);
     } finally {
       readerA.close();
       server.close();

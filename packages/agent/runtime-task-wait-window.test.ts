@@ -12,7 +12,7 @@
  * 反向绊线（新口径）：b/d 的 `not.toHaveProperty('notice')` 即绊线——把受理回执话术塞回工具结果必红。
  * 零网络、零真实模型：假执行器 + 脚本化 Main 驱动 + 注入时钟（now/sleep 两原语，非定时器框架）。
  */
-import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
 import { describe, expect, it } from 'vitest';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { TurnDriver } from './src/driver-contract';
@@ -146,7 +146,7 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
       expect(answer).not.toHaveProperty('accepted');
       // 任务已确认完成、结果逐字存档
       const task = stack.registry.get(String(answer['taskId']), SCOPE);
-      expect(taskStatusOf(task)).toBe('unexecuted');
+      expect(executionsOf(task)).toEqual([]);
       expect(task.replyText).toBe('报销单汇总：共 12 单，合计 3456 元。');
       // 零等待窗口消耗：结果在窗口内到达（fake 时钟推进量 < 1500）
       expect(clock.time()).toBeLessThan(1500);
@@ -184,7 +184,7 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
       gate.resolve({ kind: 'ended', report: '长任务结果：核对完成，共 3 条。' });
       await stack.runner.whenIdle();
       const task = stack.registry.get(String(receipt['taskId']), SCOPE);
-      expect(taskStatusOf(task)).toBe('unexecuted');
+      expect(executionsOf(task)).toEqual([]);
       // 后台结果逐字存档（runner settle 经 archiveReply 写 replyText）
       expect(task.replyText).toBe('长任务结果：核对完成，共 3 条。');
     } finally {
@@ -217,7 +217,7 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
       expect(clock.time()).toBe(0);
       // 任务照常在后台落定
       await stack.runner.whenIdle();
-      expect(taskStatusOf(stack.registry.get(String(receipt['taskId']), SCOPE))).toBe('unexecuted');
+      expect(executionsOf(stack.registry.get(String(receipt['taskId']), SCOPE))).toEqual([]);
     } finally {
       await stack.runner.whenIdle();
     }

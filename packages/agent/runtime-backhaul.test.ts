@@ -16,7 +16,7 @@
  * 零网络：假客户端（脚本化执行层：写 out/ 产物、返回 data.files）+ 脚本化双驱动；
  * run_js 走真实受限执行器。
  */
-import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -281,7 +281,7 @@ describe('CAP-01 S2 ③ 回程登记（runtime 出口）', () => {
       const turn = await fx.session.send('交办聚合任务');
 
       const task = fx.session.getTask(turn.taskIds[0]!);
-      expect(taskStatusOf(task)).toBe('completed');
+      expect(lastExecutionOf(task)?.status).toBe('completed');
 
       // 两份产物都登记（+ 交办副本自身）：task 绑定、字节与执行层写出的一致。
       const taskRows = fx.ro.listFileRefs(SCOPE).filter((row) => row.taskId === task.taskId);
@@ -369,7 +369,7 @@ describe('CAP-01 S2 ④ 产物不丢（unexecuted / failed）', () => {
       const turn = await fx.session.send('交办本地汇总');
 
       // 2026-11-17 口径修正：run_js 是真实执行，进底账后任务判 completed（原先判 unexecuted）。
-      expect(taskStatusOf(fx.session.getTask(turn.taskIds[0]!))).toBe('completed');
+      expect(lastExecutionOf(fx.session.getTask(turn.taskIds[0]!))?.status).toBe('completed');
       const task = fx.session.getTask(turn.taskIds[0]!);
       const productRows = fx.ro.listFileRefs(SCOPE).filter((row) => row.taskId === task.taskId && row.name === '汇总.csv');
       expect(productRows).toHaveLength(1);
@@ -386,7 +386,7 @@ describe('CAP-01 S2 ④ 产物不丢（unexecuted / failed）', () => {
       fx.workerPush({ text: '我什么都没做。' });
       fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '什么都不做' } }], text: '好。' });
       const turn = await fx.session.send('交办');
-      expect(taskStatusOf(fx.session.getTask(turn.taskIds[0]!))).toBe('unexecuted');
+      expect(executionsOf(fx.session.getTask(turn.taskIds[0]!))).toEqual([]);
     } finally {
       fx.ro.close();
       fx.close();
@@ -407,7 +407,7 @@ describe('CAP-01 S2 ④ 产物不丢（unexecuted / failed）', () => {
       const turn = await fx.session.send('交办会失败的任务');
 
       const task = fx.session.getTask(turn.taskIds[0]!);
-      expect(taskStatusOf(task)).toBe('failed');
+      expect(['failed', 'refused']).toContain(lastExecutionOf(task)?.status);
       // 失败任务的 out/ 残留产物不丢：兜底扫描登记 + 进交付事实。
       const sweptRows = fx.ro.listFileRefs(SCOPE).filter((row) => row.taskId === task.taskId && row.name === '部分产物.csv');
       expect(sweptRows).toHaveLength(1);

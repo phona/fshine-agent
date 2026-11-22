@@ -58,7 +58,7 @@
  *
  * 「断联系」档（`contact_lost` = 长任务等待与执行层断了联系、无回执；只说明没拿到回执，
  * 不代表任务失败）：文案仍由**装配方注入**（`contactLostNoticeText`，既有失败话术种类
- * `unknown_result` 的同一句话）——本模块不自己写文案（保持零仓内 import）；交付同样经提醒
+ * `unknown_result` 的同一句话）——本模块不自己写文案（不 import 文案模板）；交付同样经提醒
  * 端口（该注入文案同时用作事实与兜底，模型说得出话时说自己的话）。
  *
  * 租约口径（集成要求）：leaseMs 必须覆盖最长执行回合（按 P5 workerTurnMs 取，且执行端以截止
@@ -82,9 +82,19 @@
  *     可选方法 `archiveReply` 逐字存档（P2 的 P1 存档面；不经 inline `complete()`/
  *     task 级 judge，避免误伤等待接续）——P6-E01「结果可取回」由此具备执行口径。
  *
- * 移植性：本文件零仓内 import（端口为对接冻结契约的最小结构类型，非新协议层）；集成时由
+ * 移植性：本文件除「收尾事实」纯函数外零仓内 import（端口为对接冻结契约的最小结构类型，
+ * 非新协议层；taskEndedOf 与底账 registry 共用同一份定义，避免两份口径漂移）；集成时由
  * 装配方把 P2 registry / P5 policy / 执行回合接到端口上（结构兼容，签名实现自定）。
  */
+import { taskEndedOf, taskReportedOf } from './task-registry';
+
+/**
+ * 本模块守卫的「不再推进」事实：四个结束时刻任一（{@link taskEndedOf} 单一实现），
+ * 或 worker 汇报已存档（完成事实 = 收尾后不可再取消/接续）。
+ */
+function runInactiveOf(task: TaskRecordView): boolean {
+  return taskEndedOf(task) || taskReportedOf(task);
+}
 
 // ---------------------------------------------------------------------------
 // 底账端口（§1 最小消费面；S1 事实模型——没有 status，只记事实）
@@ -92,7 +102,7 @@
 
 export type TimeoutKind = 'queued' | 'execution' | 'waiting_user';
 
-/** 写操作提案的机械形状（与 task-registry.PendingConfirmation 同形；本文件零仓内 import）。 */
+/** 写操作提案的机械形状（与 task-registry.PendingConfirmation 同形；不 import 其实现）。 */
 export interface PendingConfirmation {
   handle: string;
   summary: string;
@@ -447,7 +457,7 @@ export const LONG_RUNNING_NOTICE_ATTEMPTS = 2;
  * 文案归属：「久无动静」档的事实与兜底一句（模型回合挂掉）由 runner 生成（模块常量 /
  * {@link longRunningNoticeFactText}）；`contact_lost`（长任务等待与执行层断了联系、无回执）
  * 档的文案由**装配方注入**（`contactLostNoticeText`）——它是既有失败话术种类
- * `unknown_result` 的同一句话，runner 不自己写文案（保持零仓内 import），注入文案同时用作
+ * `unknown_result` 的同一句话，runner 不自己写文案（不 import 文案模板），注入文案同时用作
  * 事实与兜底。
  *
  * 判据（2026-11-19 owner 补：#9 群聊覆盖 / #10 重启后判据）：**只看任务事实**——发不发由
@@ -731,15 +741,6 @@ function isAbortError(error: unknown): boolean {
     && error !== null
     && 'name' in error
     && (error as { name?: unknown }).name === 'AbortError';
-}
-
-/** 任务已收尾（结束事实存在；含已存档汇报——收尾后不可再取消/接续）。 */
-function taskEndedOf(task: TaskRecordView): boolean {
-  return task.diedAt !== undefined
-    || task.cancelledAt !== undefined
-    || task.timedOutAt !== undefined
-    || task.resourceLimitedAt !== undefined
-    || (task.resultText ?? task.replyText ?? '').trim() !== '';
 }
 
 export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
@@ -1090,7 +1091,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   function exposeContactLost(taskId: string, nowMs: number): void {
     try {
       const task = registry.get(taskId);
-      if (task.runningSince === undefined || task.pendingQuestion !== undefined || taskEndedOf(task)) return;
+      if (task.runningSince === undefined || task.pendingQuestion !== undefined || runInactiveOf(task)) return;
       notifyWaitContactLost(task, nowMs);
     } catch (error) {
       report(taskId, error);
@@ -1108,7 +1109,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     const noticed: string[] = [];
     let nextDue: number | undefined;
     for (const task of longRunningRowsSource!()) {
-      if (task.runningSince === undefined || task.pendingQuestion !== undefined || taskEndedOf(task)) {
+      if (task.runningSince === undefined || task.pendingQuestion !== undefined || runInactiveOf(task)) {
         continue; // 回落 list() 时按在跑事实过滤
       }
       const startedAt = runningStartedAt(task);
@@ -1166,7 +1167,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         report(row.taskId, error);
         continue;
       }
-      if (task.pendingQuestion !== undefined || taskEndedOf(task)) continue;
+      if (task.pendingQuestion !== undefined || runInactiveOf(task)) continue;
       const accepted = acceptedOf(row.outcome);
       if (accepted === undefined) {
         report(row.taskId, new Error(`accepted 账行缺少 operationId（${row.dispatchKey}），无法等待。`));
@@ -1255,7 +1256,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       return;
     }
     const task = registry.get(entry.taskId);
-    if (task.pendingQuestion !== undefined || taskEndedOf(task)) {
+    if (task.pendingQuestion !== undefined || runInactiveOf(task)) {
       // 已收尾/进入等待：不再推进等待项（不复活已结束的事实）。
       waiters.delete(entry.dispatchKey);
       return;
@@ -1362,7 +1363,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       }
       try {
         const task = registry.get(entry.taskId);
-        if (taskEndedOf(task) || task.pendingQuestion !== undefined) return;
+        if (runInactiveOf(task) || task.pendingQuestion !== undefined) return;
         if (aborted) {
           waiters.delete(entry.dispatchKey);
           // 账行如实关闭（长任务没有完成；错误码是宿主侧取消事实，不冒充执行层失败）。
@@ -1634,7 +1635,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         // 汇报不落存档（事实不翻案），并经 onError 观察点如实上报。
         try {
           const current = registry.get(taskId);
-          if (taskEndedOf(current)) {
+          if (runInactiveOf(current)) {
             report(taskId, new Error(`回合收尾时任务已收尾（事实不翻案）：${taskId}。`));
             return;
           }
@@ -1733,7 +1734,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     try {
       const task = registry.get(taskId);
       const question = task.pendingQuestion;
-      if (question === undefined || taskEndedOf(task)) return;
+      if (question === undefined || runInactiveOf(task)) return;
       const noticed = waitingUserNotice.sendNotice({
         taskId,
         principalId: task.principalId,
@@ -1749,7 +1750,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
 
   function cancel(taskId: string, scope?: TaskScope): CancelOutcome {
     const task = registry.get(taskId, scope);
-    if (taskEndedOf(task)) {
+    if (runInactiveOf(task)) {
       return { outcome: 'terminal', taskId };
     }
     if (task.pendingQuestion !== undefined) {
@@ -1787,7 +1788,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   function resume(taskId: string, options?: { answer?: string; scope?: TaskScope }): ResumeOutcome {
     const scope = options?.scope;
     const task = registry.get(taskId, scope);
-    if (task.pendingQuestion === undefined || taskEndedOf(task)) {
+    if (task.pendingQuestion === undefined || runInactiveOf(task)) {
       return { outcome: 'not_waiting', taskId };
     }
     const acquired = policy.acquire('background', { taskId });
@@ -1818,7 +1819,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   function confirm(taskId: string, options?: { userText?: string; scope?: TaskScope }): ConfirmOutcome {
     const scope = options?.scope;
     const task = registry.get(taskId, scope);
-    if (task.pendingQuestion === undefined || taskEndedOf(task)) {
+    if (task.pendingQuestion === undefined || runInactiveOf(task)) {
       return { outcome: 'not_waiting', taskId };
     }
     const confirmation = task.pendingQuestion?.confirmation;

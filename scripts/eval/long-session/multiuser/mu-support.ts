@@ -22,7 +22,7 @@ import type { MainSessionLocation } from '../../../../packages/agent/src/session
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { Notification, NotificationSink } from '../../../../packages/agent/src/notifications';
 import { createSqliteTaskRegistry } from '../../../../packages/agent/src/task-registry-sqlite';
-import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from '../../../../packages/agent/testing/task-fact-view';
+import { lastFailureOf } from '../../../../packages/agent/testing/task-facts';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../../../../packages/agent/src/task-runner';
 import { createServer, type Server } from '../../../../apps/server/server';
 import { WecomBotChannel, type SdkClientLike } from '../../../../packages/channel-wecom/src/index';
@@ -509,6 +509,39 @@ export interface MuTaskSnapshot {
   readonly replyText: string | undefined;
 }
 
+/**
+ * MU 判据词汇（评测本地词表，非产品状态）：把账本事实映射到 R6 oracle 既有离散词。
+ * 读时投影、不写回底账；产品面没有这个投影（task_status/task_result 只读 liveness + 事实）。
+ */
+function muTaskStateOf(task: {
+  pendingQuestion?: unknown;
+  cancelledAt?: string;
+  timedOutAt?: string;
+  resourceLimitedAt?: string;
+  diedAt?: string;
+  resultText?: string;
+  replyText?: string;
+  runningSince?: string;
+  leaseUntil?: string;
+  executions?: readonly { status: string }[];
+}): string {
+  if (task.cancelledAt !== undefined) return 'cancelled';
+  if (task.timedOutAt !== undefined) return 'timed_out';
+  if (task.resourceLimitedAt !== undefined) return 'resource_limited';
+  if (task.diedAt !== undefined) return 'failed';
+  if (task.pendingQuestion !== undefined) return 'waiting_user';
+  const last = task.executions?.[task.executions.length - 1];
+  if (last !== undefined) {
+    if (last.status === 'failed' || last.status === 'refused' || last.status === 'needs_input') return 'failed';
+    if (last.status === 'accepted') return (task.resultText ?? task.replyText ?? '').trim() !== '' ? 'completed' : 'running';
+    return 'completed';
+  }
+  if ((task.resultText ?? task.replyText ?? '').trim() !== '') return 'completed';
+  if (task.leaseUntil !== undefined) return 'running';
+  if (task.runningSince === undefined) return 'queued';
+  return 'failed';
+}
+
 /** 只读任务快照（Task Registry 即机械 Oracle 的事实源；只投影，不 import SQLite 实现做判定）。 */
 export function readTasks(dbPath: string): MuTaskSnapshot[] {
   const registry = createSqliteTaskRegistry(dbPath, { readOnly: true });
@@ -519,9 +552,9 @@ export function readTasks(dbPath: string): MuTaskSnapshot[] {
       principalId: task.principalId,
       sessionId: task.sessionId,
       request: task.request,
-      status: taskStatusOf(task),
-      reason: taskReasonOf(task),
-      failureReason: taskFailureReasonOf(task),
+      status: muTaskStateOf(task),
+      reason: lastFailureOf(task)?.error?.code,
+      failureReason: lastFailureOf(task)?.error?.message,
       resultText: task.resultText,
       requestIds: task.executions.map((execution) => execution.requestId),
       replyText: task.replyText,

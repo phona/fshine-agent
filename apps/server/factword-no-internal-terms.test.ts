@@ -8,7 +8,7 @@
  *   ④ 超时回执事实（dummy-cli 适配器）不含内部词，且保留超时数值、没有回执、无法确认语义；
  *   ⑤ Main 系统提示正文（agent.md 经 applyExecutorLabel 渲染后的最终文本）无内部词；
  *   ⑥ Worker 系统提示的渲染形状（renderWorkerSystemPrompt 带工作目录块）无内部词；
- *   ⑦ 失败事实链（宿主喂账本事实 → taskFailureFactText）无内部词。
+ *   ⑦ 失败事实链（宿主喂账本事实 → taskFailureSnapshotText）无内部词。
  * 内部词含「执行层 / 执行端 / 确认凭据 / 宿主 / 委派 / 能力快照 / 执行面 / 凭据」——都是不该
  * 出现在给模型/用户文本里的宿主内部形态（2026-11-20 扩面：复核发现 run_js 描述/续跑注记/
  * 后台文件提示/技能正文里仍有漏网）。内部词是确定性事实，不是模型行为评估。
@@ -17,7 +17,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { taskCompletionFactText, taskFailureFactText } from './task-completion-delivery';
+import { taskCompletionFactText, taskFailureSnapshotText } from './task-completion-delivery';
 import { createDummyCliClient } from '../../packages/agent/src/dummy-cli-client';
 import {
   TASK_RUN_TOOL_DESCRIPTION,
@@ -216,18 +216,17 @@ describe('超时回执事实：无内部词，保留关键事实', () => {
 });
 
 /**
- * ⑦ 失败事实链：宿主把账本事实喂给 Main（taskFailureFactText 的「账本事实」段）→ 模型可见。
+ * ⑦ 失败事实链：宿主把账本事实喂给 Main（taskFailureSnapshotText 的「账本事实」段）→ 模型可见。
  *    S1 事实模型：底账没有结论字段，宿主不再合成失败原因文案——失败事实 = 业务名 + 问题分类 +
- *    逐笔账本事实行。这里直接喂一条账本事实行给 taskFailureFactText（钉合成出口本身无内部词）。
+ *    逐笔账本事实行。这里直接喂一条账本事实行给 taskFailureSnapshotText（钉合成出口本身无内部词）。
  */
 const EMPTY_REPORT_REASON = '没产出有效的办理结果汇报，本次任务未完成。';
 
 describe('失败事实文本：无内部词，保留「没办成」语义', () => {
-  it('⑦a taskFailureFactText（带账本事实行）：无内部词，保留问题分类与下一步', () => {
-    const fact = taskFailureFactText({ name: '汇总那件事', kind: 'executor_failed', ledger: [EMPTY_REPORT_REASON] });
+  it('⑦a taskFailureSnapshotText（带账本事实行）：无内部词，保留「没产出结果汇报」与下一步', () => {
+    const fact = taskFailureSnapshotText({ name: '汇总那件事', ledger: [EMPTY_REPORT_REASON] });
     expect(fact).not.toMatch(INTERNAL);
-    expect(fact).toContain('没办成');              // 问题分类仍在（没办成/没汇报）
-    expect(fact).toContain('账本事实');            // 账本段仍在
+        expect(fact).toContain('账本事实');            // 账本段仍在
     expect(fact).toContain('下一步');              // 可行动出口仍在
   });
 
@@ -237,10 +236,10 @@ describe('失败事实文本：无内部词，保留「没办成」语义', () =
    * 替换业务原文**——prepared/got 这类可诊断信息必须原样留下（模型要据此改参数）。
    * 反向绊线：reason 不清洗（回退成 `input.reason.replace(...)`）时本用例转红。
    */
-  it('⑦b taskFailureFactText（reason 带技术码/服务器路径/机构自称）：清干净且业务原文逐字保留', () => {
+  it('⑦b taskFailureSnapshotText（reason 带技术码/服务器路径/机构自称）：清干净且业务原文逐字保留', () => {
     const rawReason = 'CONFIRMATION_BINDING_MISMATCH 执行层返回：prepared collection=客户 got collection=客户台账'
       + '（日志在 /home/deploy/fshine-agent/tmp/task_d42fffce-1111-4222-8333-444455556666/run.log，供排查）';
-    const fact = taskFailureFactText({ name: '汇总那件事', kind: 'executor_failed', reason: rawReason });
+    const fact = taskFailureSnapshotText({ name: '汇总那件事', reason: rawReason });
     expect(fact).not.toMatch(INTERNAL);
     expect(fact).not.toContain('/home/');
     expect(fact).not.toContain('tmp/task_');

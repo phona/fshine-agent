@@ -25,6 +25,7 @@ import { existsSync, lstatSync, mkdirSync, statSync, writeFileSync } from 'node:
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TaskRecord } from '../packages/agent/src/task-registry';
+import { taskLivenessOf, taskReportedOf, taskUnstartedOf } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
 import {
   formatLocalTime,
@@ -33,9 +34,8 @@ import {
   resolveTaskDbPath,
   summarizeRequest,
   taskLabel,
-  taskFactKeyOf,
+  taskFactSummaryOf,
   taskMechanicalFactLine,
-  taskStatusWord,
 } from './tasks';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -109,24 +109,23 @@ export interface OpsStatusCounts {
   resourceLimited: number;
 }
 
-/** 统计：总数 + 各机械事实桶计数（词表口径与 tasks.ts 的 taskFactKeyOf 同源）。 */
+/** 统计：总数 + 各机械事实桶计数（直接读 liveness 与账本事实，每任务按事实优先级归一个桶）。 */
 export function countOpsStatuses(records: readonly TaskRecord[]): OpsStatusCounts {
   const counts: OpsStatusCounts = {
     total: records.length, reported: 0, noReport: 0, running: 0,
     queued: 0, waitingUser: 0, cancelled: 0, timedOut: 0, died: 0, resourceLimited: 0,
   };
   for (const task of records) {
-    switch (taskFactKeyOf(task)) {
-      case 'reported': counts.reported += 1; break;
-      case 'no_report': counts.noReport += 1; break;
-      case 'running': counts.running += 1; break;
-      case 'queued': counts.queued += 1; break;
-      case 'waiting_user': counts.waitingUser += 1; break;
-      case 'cancelled': counts.cancelled += 1; break;
-      case 'timed_out': counts.timedOut += 1; break;
-      case 'died': counts.died += 1; break;
-      case 'resource_limited': counts.resourceLimited += 1; break;
-    }
+    const liveness = taskLivenessOf(task);
+    if (task.cancelledAt !== undefined) counts.cancelled += 1;
+    else if (task.timedOutAt !== undefined) counts.timedOut += 1;
+    else if (task.resourceLimitedAt !== undefined) counts.resourceLimited += 1;
+    else if (task.diedAt !== undefined || liveness === 'died') counts.died += 1;
+    else if (task.pendingQuestion !== undefined) counts.waitingUser += 1;
+    else if (liveness === 'running') counts.running += 1;
+    else if (taskReportedOf(task)) counts.reported += 1;
+    else if (taskUnstartedOf(task)) counts.queued += 1;
+    else counts.noReport += 1;
   }
   return counts;
 }
@@ -162,16 +161,10 @@ export function displayPath(dbPath: string, repoRoot: string): string {
 
 /** 未成功收尾（S1 机械事实）：无汇报 / 已取消 / 已超时 / 结果未知 / 资源受限——清单收录范围见 renderOpsPage。 */
 const isTerminalNonSuccess = (task: TaskRecord): boolean => {
-  switch (taskFactKeyOf(task)) {
-    case 'no_report':
-    case 'cancelled':
-    case 'timed_out':
-    case 'died':
-    case 'resource_limited':
-      return true;
-    default:
-      return false;
-  }
+  if (task.cancelledAt !== undefined || task.timedOutAt !== undefined
+    || task.resourceLimitedAt !== undefined || task.diedAt !== undefined) return true;
+  if (taskUnstartedOf(task) || taskReportedOf(task)) return false;
+  return taskLivenessOf(task) === undefined;
 };
 
 /** 表格数据行（cells 必须已转义——调用点一律 escapeHtml）。 */
@@ -307,7 +300,7 @@ export function renderOpsPage(input: OpsPageInput): string {
       lines.push(dataRow([
         escapeHtml(taskLabel(task)),
         escapeHtml(formatLocalTime(task.createdAt)),
-        escapeHtml(taskStatusWord(task)),
+        escapeHtml(taskFactSummaryOf(task)),
         escapeHtml(summarizeRequest(task.request)),
       ]));
     }

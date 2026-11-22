@@ -12,7 +12,7 @@
 /**
  * 答复五值（互斥）。S1 起宿主不再输出「五态结论」（`classifyOutcome` 已随 task 去结论字段
  * 删除），判定器改为读底账 executions 逐条 status 机械归成这五值（见 judge.ts 的
- * outcomeFromTask）；类型随之落到本用例数据面文件。
+ * 判定器机械 outcome）；类型随之落到本用例数据面文件。
  */
 export type TaskOutcome = 'completed' | 'partial' | 'unsupported' | 'blocked' | 'failed';
 

@@ -145,7 +145,6 @@ export type TaskLivenessFacts = Pick<
  * 纯机械读：末条执行行的 status（执行清单按追加序，accepted 是末条；续跑完成后会追加新行）。
  * 已存档汇报（resultText/replyText）即已收尾：长任务完成后只汇报、不追加执行行，末条仍可能是
  * accepted——不排除会把已完成的长任务投影成 running（tasks --redo 随之错误拒绝）。
- * 口径与 testing/task-fact-view.ts 的 taskStatusOf（accepted + 汇报 → completed）对齐。
  */
 function acceptedInFlightOf(
   task: { executions?: readonly { status: string }[]; resultText?: string; replyText?: string },
@@ -193,41 +192,6 @@ export function taskEndedOf(task: TaskLivenessFacts): boolean {
 /** 任务未启动（可被队列认领）：没跑过且无任何结束事实。 */
 export function taskUnstartedOf(task: TaskLivenessFacts & { runningSince?: string }): boolean {
   return task.runningSince === undefined && !taskEndedOf(task);
-}
-
-/** 机械事实推导词（展示/断言/eval 判据共用；不做业务归类）。 */
-export type TaskStateWord =
-  | 'queued'          // 未启动（排队）
-  | 'running'         // 存活（租约有效）
-  | 'waiting_user'    // 等待事实
-  | 'cancelled'       // 用户取消确认
-  | 'timed_out'       // 机械超时
-  | 'died'            // 结果未知（看门狗）
-  | 'resource_limited' // 资源拒绝
-  | 'reported'        // 汇报已存档（做没做成读执行行，不在词上判）
-  | 'failed';         // 已启动但无汇报收尾（机械下限；含零执行收尾）
-
-/** 机械事实 → 推导词（读时投影，不存结论；判据逐项见内注）。 */
-export function taskStateWordOf(
-  task: TaskLivenessFacts & { runningSince?: string; resultText?: string; replyText?: string },
-  now: string = new Date().toISOString(),
-): TaskStateWord {
-  if (task.cancelledAt !== undefined) return 'cancelled';
-  if (task.timedOutAt !== undefined) return 'timed_out';
-  if (task.resourceLimitedAt !== undefined) return 'resource_limited';
-  if (task.diedAt !== undefined) return 'died';
-  if (task.pendingQuestion !== undefined) return 'waiting_user';
-  const leaseUntil = task.leaseUntil;
-  if (leaseUntil !== undefined && leaseUntil > now) return 'running';
-  // 长任务「已受理、等回执」（2026-11-22 Grok 复审恢复）：受理时租约被释放，末条执行 = accepted
-  // → 仍是 running（不是「已启动但无汇报收尾」的 failed）。旧 status='running' 的等价语义。
-  // acceptedInFlightOf 已排除有汇报存档的行：已完成的长任务落到下面的 reported。
-  if (acceptedInFlightOf(task)) return 'running';
-  // 汇报存档先于未启动判定（有汇报必然已跑过；running_since 缺省只见于旧库迁移行）。
-  const report = (task.resultText ?? task.replyText ?? '').trim();
-  if (report !== '') return 'reported';
-  if (task.runningSince === undefined) return 'queued';
-  return 'failed';
 }
 
 /** 汇报已存档（事实；做没做成读执行行）。 */

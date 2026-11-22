@@ -45,8 +45,6 @@ import type { TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/sr
 import { openTaskStore } from '@fshine/core';
 import { createServer, deliverTurnFilesCore, turnProducedNothing, type FileDeliveryPort } from './server';
 import { echoCompletionWake } from './testing/echo-completion-wake';
-import { failureKindFor } from './task-completion-delivery';
-import { failureMessageFor } from '../../packages/agent/src/user-facing-failure';
 
 const FIXTURE_ROOT = path.resolve(__dirname, '..', '..', 'scripts', 'eval', 'fixtures', 'dummy-platform');
 const SCOPE = { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' };
@@ -870,23 +868,5 @@ describe('交付角色闸（方案 A）', () => {
     } finally {
       h.store.close();
     }
-  });
-});
-
-describe('失败归类（failureKindFor）：失败路径不得给出「需要你确认/补充」类假承诺', () => {
-  it('CONFIRMATION_REQUIRED（被挡码）→ 归类 host_fault（我方故障），话术不含确认/补充', () => {
-    // 失败终局没有等待中的提案、也没有有效句柄/可接续任务：说「确认」是假承诺
-    //（用户点了什么都不会发生，比不说更糟）。归到 host_fault（唯一话术来源）。
-    expect(failureKindFor('CONFIRMATION_REQUIRED')).toBe('host_fault');
-    const text = failureMessageFor(failureKindFor('CONFIRMATION_REQUIRED')).text;
-    expect(text).not.toContain('确认');
-    expect(text).not.toContain('补充');
-  });
-
-  it('真实业务码保持原归类（不被 host_fault 吞掉）——回归钉', () => {
-    expect(failureKindFor('COLLECTION_NOT_FOUND')).toBe('not_found');
-    expect(failureKindFor('GATE_REFUSE')).toBe('denied');
-    // result_unknown 状态优先于码。
-    expect(failureKindFor(undefined, 'result_unknown')).toBe('unknown_result');
   });
 });

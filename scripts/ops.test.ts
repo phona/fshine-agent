@@ -25,7 +25,7 @@ import {
   summarizeRequest,
   taskLabel,
   taskMechanicalFactLine,
-  taskStatusWord,
+  taskFactSummaryOf,
 } from './tasks';
 import {
   FAILURE_LIMIT,
@@ -206,7 +206,7 @@ describe('ops：快照事实（统计 / 排序 / 上限）', () => {
     const newest = records[2]!;
     expect(page).toContain(
       `<tr><td>${escapeHtml(taskLabel(newest))}</td><td>${escapeHtml(formatLocalTime(newest.createdAt))}</td>`
-      + `<td>${escapeHtml(taskStatusWord(newest))}</td><td>${escapeHtml(summarizeRequest(newest.request))}</td></tr>`,
+      + `<td>${escapeHtml(taskFactSummaryOf(newest))}</td><td>${escapeHtml(summarizeRequest(newest.request))}</td></tr>`,
     );
   });
 

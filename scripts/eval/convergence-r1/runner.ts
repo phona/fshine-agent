@@ -37,7 +37,8 @@ import { sha256Hex, stableStringify } from './hash';
 import { runJudgeSelftest } from './selftest';
 import { genericResolveCaseIds, loadSuite, type EvalSuite } from '../exploration/suite-contract';
 import { scanUserVisibleText } from '../shared/internal-terms';
-import { taskStatusOf } from '../../../packages/agent/testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
+import { observedTaskStatusOf } from '../task-observation';
 import {
   checkTurnFaceShape,
   formatShapeViolations,
@@ -532,11 +533,30 @@ async function runTrial(options: TrialOptions): Promise<void> {
         break;
       }
     }
-    // S1：底账没有 status——T1 证据快照的 status 词按机械事实投影（与 business-e2e 的
-    // experiments/executor.ts、model-executor.ts 同口径）。不投影，报告 T1 行会渲染成
-    // undefined，证据快照也与 audit-schema 里 TaskRecordJson 的形状对不上。投影是词，不是
-    // 结论：judge 判 outcome 仍只读 executions.json 的逐条执行行。
-    tasksSnapshot = assembled.taskRegistry.list().map((task) => ({ ...task, status: taskStatusOf(task) }));
+    // S1 事实模型：证据快照只带账本事实（逐笔执行行 + 汇报存档 + 一次性机械时刻），
+    // 不写 status 词——judge 直接读这些事实判 E11。
+    tasksSnapshot = assembled.taskRegistry.list().map((task) => ({
+      taskId: task.taskId,
+      principalId: task.principalId,
+      sessionId: task.sessionId,
+      request: task.request,
+      // 评测观察词（由账本事实读出；judge 判 outcome 不读它，只读下面的机械事实）。
+      status: observedTaskStatusOf(task),
+      ...(task.resultText === undefined ? {} : { resultText: task.resultText }),
+      ...(task.replyText === undefined ? {} : { replyText: task.replyText }),
+      ...(task.diedAt === undefined ? {} : { diedAt: task.diedAt }),
+      ...(task.cancelledAt === undefined ? {} : { cancelledAt: task.cancelledAt }),
+      ...(task.timedOutAt === undefined ? {} : { timedOutAt: task.timedOutAt }),
+      ...(task.resourceLimitedAt === undefined ? {} : { resourceLimitedAt: task.resourceLimitedAt }),
+      executions: task.executions.map((execution) => ({
+        requestId: execution.requestId,
+        operation: execution.operation,
+        status: execution.status,
+        ...(execution.error === undefined ? {} : { error: execution.error }),
+      })),
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
+    }));
   } finally {
     assembled.close();
   }
@@ -987,7 +1007,7 @@ function writeSummaryAndReport(input: SummaryInput): number {
   for (const result of results) {
     const trialDir = trialDirOf(outDir, result.caseId, result.trial);
     const replies = readJsonlSafe(path.join(trialDir, 'reply.jsonl'));
-    const executions = readJsonSafe<{ tasks: Array<{ taskId: string; status: string; executions: Array<{ operation: string; status: string }> }> }>(
+    const executions = readJsonSafe<{ tasks: Array<{ taskId: string; diedAt?: string; timedOutAt?: string; cancelledAt?: string; resourceLimitedAt?: string; executions: Array<{ operation: string; status: string }> }> }>(
       path.join(trialDir, 'executions.json'),
     );
     lines.push(`### ${result.caseId} trial-${result.trial} — ${result.judgment.deterministic.verdict}`);
@@ -1005,7 +1025,10 @@ function writeSummaryAndReport(input: SummaryInput): number {
       lines.push(`  - ${dim}：${state.status}${state.notes.length > 0 ? `（${state.notes.join('；')}）` : ''}`);
     }
     if (executions) {
-      lines.push(`- T1：${executions.tasks.map((task) => `${task.status}[${task.executions.map((execution) => `${execution.operation}=${execution.status}`).join(' ')}]`).join('；') || '（无任务）'}`);
+      lines.push(`- T1：${executions.tasks.map((task) => {
+        const ends = [task.diedAt === undefined ? '' : 'diedAt', task.timedOutAt === undefined ? '' : 'timedOutAt', task.cancelledAt === undefined ? '' : 'cancelledAt', task.resourceLimitedAt === undefined ? '' : 'resourceLimitedAt'].filter((entry) => entry !== '');
+        return `${task.taskId}${ends.length === 0 ? '' : `(${ends.join('+')})`}[${task.executions.map((execution) => `${execution.operation}=${execution.status}`).join(' ')}]`;
+      }).join('；') || '（无任务）'}`);
     }
     for (const reply of replies) {
       lines.push(`- turn-${reply.turn} 回复原文：`);

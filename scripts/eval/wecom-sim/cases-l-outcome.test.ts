@@ -51,9 +51,9 @@ describe('L 组·答复五态用户可见行为（B4，自动）', () => {
 
       // 后台失败 → 唤醒事实带 [outcome=unsupported]；假模型据此说「办不了」（主动投递）。
       await sim.waitFor('L-1 办不了答复', () => sim.sdk.proactiveTexts.length >= 1, 20_000);
-      // 宿主机械事实确实带结构化 outcome（不是假模型硬编）。
+      // 宿主机械事实点明「零执行」（不再合成 outcome 判定；Main 读事实自己说）。
       const fact = wakeFactOf(sim);
-      expect(fact).toContain('[outcome=unsupported]');
+      expect(fact).toContain('账本里没有执行事实');
       const reply = sim.sdk.proactiveTexts.at(-1)!.content;
       expect(reply).toContain('办不了');
       expect(reply).toContain('记录办理');
@@ -85,12 +85,11 @@ describe('L 组·答复五态用户可见行为（B4，自动）', () => {
       await sim.waitFor('L-2 交办回合结束', () => sim.doneOf(messageId) !== undefined, 15_000);
       expect(sim.doneOf(messageId)!.executions).toHaveLength(0);
 
-      // 失败唤醒事实带 [outcome=blocked][缺=本次允许范围]。
+      // 宿主机械事实点明「发起前被拒 + 本次不允许」（不再合成 outcome 判定；Main 读事实自己说）。
       await sim.waitFor('L-2 缺条件答复', () => sim.sdk.proactiveTexts.length >= 1, 20_000);
-      // 宿主机械事实带 blocked + 非空缺失条件（B2/G4）。
       const fact = wakeFactOf(sim);
-      expect(fact).toContain('[outcome=blocked]');
-      expect(fact).toMatch(/\[缺=\S[^\]]*\]/);
+      expect(fact).toContain('账本里没有执行事实');
+      expect(fact).toContain('本次不允许');
       const reply = sim.sdk.proactiveTexts.at(-1)!.content;
       expect(reply).toContain('缺的是');
       expect(reply).toContain('本次允许范围');

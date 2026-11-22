@@ -279,54 +279,6 @@ export function outcomeAccepted(outcome: TaskOutcome, accepted: readonly TaskOut
 
 const OUTCOME_FACT_RE = /\[outcome=(completed|partial|unsupported|blocked|failed)\]/g;
 
-type ExecutionOutcomeStatus =
-  | 'completed' | 'failed' | 'refused' | 'needs_input' | 'needs_confirmation' | 'accepted' | 'result_unknown';
-
-function mapExecStatus(status: string): ExecutionOutcomeStatus {
-  switch (status) {
-    case 'completed': case 'failed': case 'refused': case 'needs_input':
-    case 'needs_confirmation': case 'accepted': return status;
-    default: return 'result_unknown';
-  }
-}
-
-/**
- * 从底账 executions **逐条 status** 机械对比得出答复五值（S1：宿主 classifyOutcome 已随 task
- * 去结论字段删除，判定器改为自己读执行清单；**不读回复文案、不读任何自由文本**）。
- *
- * 保留的执行分支（与旧分类器的执行分支逐条对齐，禁止放宽/收紧）：
- *   · zero executions → 'unsupported'：没有办理动作发生（零执行）；
- *   · 终态机械事实优先（2026-11-22 Grok 复审恢复旧 `mapTerminal` 的终态分支）：底账 status 词
- *     投影（evidence.TaskRecordJson.status）为 `failed`（含 died）/`timed_out`/`died` 时，
- *     outcome = 'failed'——**即便末条执行是 completed/accepted 也翻回 failed**（终态失败覆盖）。
- *     S1 起 status 不是结论字段而是机械事实词（taskStatusOf 投影：died_at → 'failed'），
- *     该词是判据面可得的机械输入，故此处按它归类；未知/缺省词不回落到 failed。
- *   · 末条执行 = 决定性结果（先失败后成功 → completed；末条 completed 不被前序失败翻转）：
- *       failed / refused / result_unknown → 'failed'；
- *       needs_input / needs_confirmation / accepted → 'blocked'；
- *       其余（completed）→ 'completed'。
- *
- * **S1 显式登记：以下旧分类器分支已删（不是静默丢语义，逐条写明再重锁）**：
- *   (b) `partial` 分支（`completed` 且逐条 items 有 failed/unknown）：旧分类器读 `execution.items`，
- *       但本判定器的调用面**从未把 items 传进 ledger**（旧 `outcomeFromTask` 只传 status/error.code），
- *       该分支在本路径上本就不可达；S1 后底账 `ExecutionRecord` 亦无 `items`。仅 E11 使用本函数，
- *       其接受集 {unsupported, blocked} 不涉 partial。
- *   (c) 零执行 blocked 分支（权限拒绝 / 等用户补信息）：失去机械输入，按零执行 fall-through 落
- *       'unsupported'——唯一使用本函数的 E11 接受集 {unsupported, blocked} 同时覆盖两者，判定结论不变。
- */
-export function outcomeFromTask(task: TaskRecordJson): TaskOutcome {
-  const executions = task.executions ?? [];
-  if (executions.length === 0) return 'unsupported';
-  // 终态机械事实优先：已收尾（failed/timeout/died）即便末条执行 completed 也判 failed。
-  const terminalWord = task.status;
-  if (terminalWord === 'failed' || terminalWord === 'timed_out' || terminalWord === 'died') return 'failed';
-  const decisive = mapExecStatus(executions[executions.length - 1]!.status);
-  if (decisive === 'failed' || decisive === 'refused' || decisive === 'result_unknown') return 'failed';
-  // accepted（长任务受理中）不是完成：卡在进行/等待 → 'blocked'。
-  if (decisive === 'needs_input' || decisive === 'needs_confirmation' || decisive === 'accepted') return 'blocked';
-  return 'completed';
-}
-
 /** 从唤醒事实（transcript.main.json 中的 `[outcome=...]`）读结构化 outcome——宿主写入的动作事实。 */
 function outcomesFromTranscript(transcript: Array<{ messages?: Array<{ content?: unknown }> }>): TaskOutcome[] {
   const found: TaskOutcome[] = [];
@@ -879,12 +831,24 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       // 留在 ledger 里（分类结果不在接受集 → 红，硬项一另判隔离违反）。唤醒事实路径不过滤：
       // 它只在底账为空（无 task）时被咨询——那时不存在任何执行，[outcome=completed/failed]
       // 即伪造的动作事实，照旧红（selftest e11-mech-outcome-failed 绊线不变）。
-      const ledgerOutcomes = tasks.map((task) => outcomeFromTask(anchor.ledgerWriteFaceOnly === true
-        ? {
-          ...task,
-          executions: task.executions.filter((execution) => WRITE_OPERATIONS.includes(execution.operation)),
-        }
-        : task));
+      // 直接读 executions 逐条事实 + worker 汇报存档（resultText/replyText），由判据自己归到
+      // E11 接受集（不经过任何产品面 outcome 投影）：
+      //   · 终态机械时刻（died/timed_out/resource_limited）→ failed（即便末条执行 completed）；
+      //   · 零执行 → unsupported（没有办理动作发生）；
+      //   · 末条执行 failed/refused → failed；needs_input/needs_confirmation/accepted → blocked；
+      //   · 末条 completed → completed；其他未知执行态 → failed（不洗白）。
+      // reported 只作判据上下文（与执行行不一致时以执行行为准，不补 outcome）。
+      const ledgerOutcomes = tasks.map((task): TaskOutcome => {
+        const executions = anchor.ledgerWriteFaceOnly === true
+          ? task.executions.filter((execution) => WRITE_OPERATIONS.includes(execution.operation))
+          : task.executions;
+        if (task.diedAt !== undefined || task.timedOutAt !== undefined || task.resourceLimitedAt !== undefined) return 'failed';
+        if (executions.length === 0) return 'unsupported';
+        const decisive = executions[executions.length - 1]!.status;
+        if (decisive === 'failed' || decisive === 'refused') return 'failed';
+        if (decisive === 'needs_input' || decisive === 'needs_confirmation' || decisive === 'accepted') return 'blocked';
+        return decisive === 'completed' ? 'completed' : 'failed';
+      });
       const wakeOutcomes = transcript === undefined ? [] : outcomesFromTranscript(transcript);
       const observed = ledgerOutcomes.length > 0 ? ledgerOutcomes : wakeOutcomes;
       const source = ledgerOutcomes.length > 0 ? 'executions.json' : 'transcript.main.json[outcome]';

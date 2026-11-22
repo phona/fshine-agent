@@ -46,7 +46,7 @@ import { effectiveDeploymentEnv, effectiveRoleOf, loadConfig, permissionsOfRole 
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TaskRecord, TaskScope } from '../../../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from '../../../packages/agent/testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
 import type { Notification, NotificationSink } from '../../../packages/agent/src/notifications';
 import { stripServerPaths } from '../../../packages/agent/src/server-paths';
 import { createServer, resolveSingleProfile, type FileDeliveryPort, type Server } from '../../../apps/server/server';
@@ -143,7 +143,6 @@ export const CANCELLATION_FACT_MARKER = '已按你说的停了：';
  *  2026-11-21 已撤回旧「还在办，办完会发你」承诺——上一进程已死，那句话永远兑现不了）。 */
 export const STILL_PROCESSING_NOTE = '这条消息上次没办完（我这边中途中断过），我不会重复执行它，结果未知——麻烦你重发一次。';
 
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'unexecuted', 'resource_limited']);
 
 // ---------------------------------------------------------------------------
 // 输出（脱敏：绝对路径先替换；密钥永不打印）
@@ -200,12 +199,16 @@ export interface JobFact {
   failAfter?: number;
 }
 
-/** 底账任务事实（本场景判据用的机械投影）。 */
+/** 底账任务事实（本场景判据用的机械读取：liveness + 逐笔执行行 + 汇报存档 + 一次性时刻）。 */
 export interface TaskFact {
   taskId: string;
   taskNo?: number;
   name?: string;
-  status: string;
+  liveness: string | null;
+  /** 用户取消事实（cancelled_at 在场）。 */
+  cancelled: boolean;
+  /** worker 汇报已存档（resultText ?? replyText 非空）。 */
+  reported: boolean;
   reason?: string;
   resultText?: string | null;
   failureReason?: string;
@@ -430,10 +433,12 @@ export function taskFactsOf(records: readonly TaskRecord[]): TaskFact[] {
     taskId: record.taskId,
     ...(record.taskNo === undefined ? {} : { taskNo: record.taskNo }),
     ...(record.name === undefined ? {} : { name: record.name }),
-    status: taskStatusOf(record),
-    ...(taskReasonOf(record) === undefined ? {} : { reason: taskReasonOf(record)! }),
+    liveness: taskLivenessOf(record) ?? null,
+    cancelled: record.cancelledAt !== undefined,
+    reported: archivedReportOf(record) !== undefined,
+    ...(lastFailureOf(record)?.error?.code === undefined ? {} : { reason: lastFailureOf(record)?.error?.code! }),
     resultText: record.resultText ?? null,
-    ...(taskFailureReasonOf(record) === undefined ? {} : { failureReason: taskFailureReasonOf(record)! }),
+    ...(lastFailureOf(record)?.error?.message === undefined ? {} : { failureReason: lastFailureOf(record)?.error?.message! }),
     executions: record.executions.map((execution) => ({
       operation: execution.operation,
       status: execution.status,
@@ -515,14 +520,14 @@ export function evaluateStopCriteria(evidence: StopEvidence): CriterionResult[] 
   );
 
   // S1-C2 「停」是一次实际动作，且任务真的停了：task_cancel 调用 + 底账终态 cancelled + 无残留非终局任务。
-  const cancelledTasks = evidence.tasks.filter((task) => task.status === 'cancelled');
-  const leftover = evidence.tasks.filter((task) => !TERMINAL_STATUSES.has(task.status));
+  const cancelledTasks = evidence.tasks.filter((task) => task.cancelled);
+  const leftover = evidence.tasks.filter((task) => !(task.cancelled || task.reported || task.liveness === 'died'));
   const cancelCall = evidence.cancelToolCall;
   add(
     'S1-C2', '「停」是实际动作：task_cancel 调用 + 底账终态 cancelled + 无非终局残留', 'structured',
     cancelCall !== undefined && cancelCall.ok && cancelledTasks.length >= 1 && leftover.length === 0,
     `task_cancel=${cancelCall === undefined ? '未调用' : `${cancelCall.ok ? 'ok' : '抛错'}(${cancelCall.summary})`}`
-      + `；任务终局=${evidence.tasks.map((task) => `#${String(task.taskNo ?? '-')}:${task.status}`).join(',') || '(无)'}`
+      + `；任务终局=${evidence.tasks.map((task) => `#${String(task.taskNo ?? '-')}:${task.liveness ?? (task.reported ? '已汇报' : '已收尾')}`).join(',') || '(无)'}`
       + `；非终局残留=${leftover.length} 条`,
   );
 
@@ -559,7 +564,7 @@ export function evaluateStopCriteria(evidence: StopEvidence): CriterionResult[] 
   // 停后审计冻结一起断言（这些机械事实另由 S1-C2/C3/C4 独立钉住，此处重复是为了净更严）；
   // 不再要求宿主模板必现（否则只有系统退化时才可能绿——旧判据的假红根因）。
   const stopNotice = texts.find((text) => text.trim() !== '');
-  const cancelledLedger = evidence.tasks.some((task) => task.status === 'cancelled');
+  const cancelledLedger = evidence.tasks.some((task) => task.cancelled);
   const frozenAfterStop = evidence.auditAfterFreeze === evidence.auditAtCancel;
   add(
     'S1-C6', '非空停止告知（来源不限）+ 底账终局 cancelled + 停后审计冻结', 'mechanical',
@@ -709,7 +714,7 @@ export function evaluateIdempotencyCriteria(evidence: IdempotencyEvidence): Crit
   add(
     'S3-C1', '同 messageId 重发不新起工作（任务数 1、task_run 委派 1 次）', 'mechanical',
     tasks.length === 1 && evidence.taskRunCalls === 1 && evidence.prepareSuccessCount >= 1,
-    `会话任务数=${tasks.length}（${tasks.map((task) => `#${String(task.taskNo ?? '-')}:${task.status}`).join(',')}）；`
+    `会话任务数=${tasks.length}（${tasks.map((task) => `#${String(task.taskNo ?? '-')}:${task.liveness ?? (task.reported ? '已汇报' : '已收尾')}`).join(',')}）；`
       + `task_run 委派=${evidence.taskRunCalls} 次；成功 prepare 审计行=${evidence.prepareSuccessCount}`,
   );
 
@@ -806,14 +811,14 @@ export function evaluateReconfirmCriteria(evidence: ReconfirmEvidence): Criterio
   );
 
   // S4-C2 没有新任务 / 没有接续：任务数不变、没有非终局残留、第三次回合没有 started 的 task_confirm。
-  const leftover = evidence.tasks.filter((task) => !TERMINAL_STATUSES.has(task.status));
+  const leftover = evidence.tasks.filter((task) => !(task.cancelled || task.reported || task.liveness === 'died'));
   add(
     'S4-C2', '第二次「确认」没有新起任务、没有接续（任务数不变、无非终局残留、无 started 确认）', 'structured',
     evidence.taskCountAfterReconfirm === evidence.taskCountAfterFirstWrite
       && leftover.length === 0
       && evidence.taskConfirmStartedCalls.length === 0,
     `任务数 第一次后=${evidence.taskCountAfterFirstWrite} 第三次后=${evidence.taskCountAfterReconfirm}；`
-      + `任务终局=${evidence.tasks.map((task) => `#${String(task.taskNo ?? '-')}:${task.status}`).join(',')}；`
+      + `任务终局=${evidence.tasks.map((task) => `#${String(task.taskNo ?? '-')}:${task.liveness ?? (task.reported ? '已汇报' : '已收尾')}`).join(',')}；`
       + `非终局残留=${leftover.length} 条；started 的 task_confirm=${evidence.taskConfirmStartedCalls.length} 次`,
   );
 
@@ -931,11 +936,11 @@ export function evaluateTwoObjectsCriteria(evidence: TwoObjectsEvidence): Criter
   );
 
   // S5-C3 两件事都落终局，没有失败/超时/未知，也没有非终局残留。
-  const bad = evidence.tasks.filter((task) => task.status !== 'completed');
+  const bad = evidence.tasks.filter((task) => !task.reported);
   add(
     'S5-C3', '两件事都落终局 completed（没有失败/超时/未知/残留）', 'mechanical',
     evidence.tasks.length >= 1 && bad.length === 0,
-    `任务终局=${evidence.tasks.map((task) => `#${String(task.taskNo ?? '-')}:${task.status}`).join(',') || '(无)'}`
+    `任务终局=${evidence.tasks.map((task) => `#${String(task.taskNo ?? '-')}:${task.liveness ?? (task.reported ? '已汇报' : '已收尾')}`).join(',') || '(无)'}`
       + `；非 completed=${bad.length} 条`,
   );
 
@@ -1428,7 +1433,7 @@ async function runStopScenario(harness: Harness, options: ScenarioRunOptions): P
   // 等任务真的落终局（cancelled）且没有非终局残留。
   const terminal = await waitFor(() => {
     const tasks = harness.tasksNow();
-    return tasks.some((task) => task.status === 'cancelled') && tasks.every((task) => TERMINAL_STATUSES.has(task.status));
+    return tasks.some((task) => task.cancelled) && tasks.every((task) => (task.cancelled || task.reported || task.liveness === 'died'));
   }, options.settleTimeoutMs);
   log(`  终局落定（cancelled）：${terminal}`);
   // 给宿主取消事实的主动推送一点落定时间（投递不改任务/审计事实）。
@@ -1473,7 +1478,7 @@ async function runFailureScenario(harness: Harness, options: ScenarioRunOptions)
 
   await harness.sendTurn(1, FAILURE_TURN_1, `wloop2-failure-${nowSlug()}`);
   const landed = await waitFor(
-    () => harness.tasksNow().some((task) => task.status === 'failed'),
+    () => harness.tasksNow().some((task) => lastExecutionOf(task)?.status === 'failed'),
     options.settleTimeoutMs,
   );
   log(`  底账出现 failed 终局：${landed}`);
@@ -1524,7 +1529,7 @@ async function runFailureScenario(harness: Harness, options: ScenarioRunOptions)
 
 async function waitForProposal(harness: Harness, options: ScenarioRunOptions): Promise<boolean> {
   return await waitFor(
-    () => harness.tasksNow().some((task) => task.status === 'waiting_user') || harness.watcher.snapshots.some((snapshot) => snapshot.proposal !== undefined),
+    () => harness.tasksNow().some((task) => task.liveness === 'waiting_user') || harness.watcher.snapshots.some((snapshot) => snapshot.proposal !== undefined),
     Math.min(options.turnTimeoutMs, 180_000),
   );
 }
@@ -1533,7 +1538,7 @@ async function waitForTerminal(harness: Harness, options: ScenarioRunOptions): P
   return await waitFor(
     () => {
       const tasks = harness.tasksNow();
-      return tasks.length > 0 && tasks.every((task) => TERMINAL_STATUSES.has(task.status));
+      return tasks.length > 0 && tasks.every((task) => (task.cancelled || task.reported || task.liveness === 'died'));
     },
     options.settleTimeoutMs,
   );
@@ -1767,12 +1772,12 @@ async function runTwoObjectsScenario(harness: Harness, options: ScenarioRunOptio
   await harness.sendTurn(1, TWO_OBJECTS_TURN_1, `wloop2-two-${nowSlug()}-1`);
   let confirmTurns = 0;
   for (let round = 0; round < 3; round += 1) {
-    const waiting = harness.taskRecords().filter((task) => taskStatusOf(task) === 'waiting_user' && task.pendingQuestion?.confirmation !== undefined);
+    const waiting = harness.taskRecords().filter((task) => task.pendingQuestion !== undefined && task.pendingQuestion?.confirmation !== undefined);
     if (waiting.length === 0) {
       // 还没有提案再等一次（Worker 回合可能仍在跑）。
       const sawProposal = await waitForProposal(harness, options);
       if (!sawProposal) break;
-      const waitingAfter = harness.taskRecords().filter((task) => taskStatusOf(task) === 'waiting_user' && task.pendingQuestion?.confirmation !== undefined);
+      const waitingAfter = harness.taskRecords().filter((task) => task.pendingQuestion !== undefined && task.pendingQuestion?.confirmation !== undefined);
       if (waitingAfter.length === 0) break;
     }
     confirmTurns += 1;
@@ -1804,7 +1809,7 @@ async function runTwoObjectsScenario(harness: Harness, options: ScenarioRunOptio
     line['event'] === 'task_result_delivery_sent'
     || line['event'] === 'task_completion_wake'
     || (line['event'] === 'task_result_delivery_suppressed' && line['reason'] === 'relayed_in_turn'))
-    || tasks.some((task) => task.status === 'completed');
+    || tasks.some((task) => task.reported);
   const base = baseEvidence(harness);
   return {
     ...base,
@@ -1946,7 +1951,7 @@ function printEvidence(id: ScenarioId, evidence: BaseEvidence): void {
   log('\n== 机械证据 ==');
   log(`[任务底账] 会话内任务数=${evidence.tasks.length} · 状态序列=${evidence.statusSequence.join(' → ') || '(未观测到)'}`);
   for (const task of evidence.tasks) {
-    log(`  · 任务 #${String(task.taskNo ?? '-')}（${task.taskId}）终局=${task.status}${task.reason === undefined ? '' : ` reason=${task.reason}`}`
+    log(`  · 任务 #${String(task.taskNo ?? '-')}（${task.taskId}）终局=${task.liveness ?? (task.reported ? '已汇报' : '已收尾')}${task.reason === undefined ? '' : ` reason=${task.reason}`}`
       + `：${task.executions.map((execution) => `${execution.operation}:${execution.status}${execution.code === undefined ? '' : `(${execution.code})`}`).join(' → ') || '(无执行事实)'}`);
   }
   log('[工具调用]（记录包装器透传采集）');
@@ -1973,7 +1978,7 @@ function printEvidence(id: ScenarioId, evidence: BaseEvidence): void {
   log('[读回]');
   log(`  · 见判据 detail 与 evidence.json（结构化读数）`);
   emit(`write_loop_scenarios_evidence_${id.replace(/-/g, '_')}`, {
-    tasks: evidence.tasks.map((task) => ({ taskNo: task.taskNo ?? null, status: task.status, executions: task.executions.length })),
+    tasks: evidence.tasks.map((task) => ({ taskNo: task.taskNo ?? null, liveness: task.liveness, reported: task.reported, executions: task.executions.length })),
     auditRows: evidence.audit.length,
     toolCalls: evidence.toolCalls.length,
   });

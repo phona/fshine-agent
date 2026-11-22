@@ -67,7 +67,6 @@ import { createResourcePolicy, fileRefTtlMsOf, resolveRuntimeConfig } from '../.
 import { SessionPersistence } from '../../packages/agent/src/session-persistence';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import { deriveTaskName } from '../../packages/agent/src/task-registry';
-import { USER_FACING_FAILURE_KIND_LABEL } from '../../packages/agent/src/user-facing-failure';
 import type { TaskExecutor, TaskRunner, WaitingUserNoticePort } from '../../packages/agent/src/task-runner';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../../packages/agent/src/worker-skills';
 import {
@@ -82,22 +81,17 @@ import { AttachmentNudge, type NudgeClock } from './attachment-nudge';
 import {
   deliverTaskResult,
   deliverTaskFailure,
-  failureFallbackTextFor,
-  failureKindFor,
+  failureFallbackFactText,
   routeFromSessionId,
   taskCancelledFactText,
   taskCompletionFactText,
   taskCompletionFallbackText,
-  taskFailureFactText,
+  taskFailureSnapshotText,
   taskRestartFactText,
   taskWaitingUserFactText,
   waitingUserFallbackText,
   type TaskResultFactKind,
 } from './task-completion-delivery';
-import {
-  OUTCOME_REASON_NOT_PERMITTED,
-  OUTCOME_REASON_UNSUPPORTED,
-} from '../../packages/agent/src/task-outcome';
 import { composeNotificationSinks, createChatNotificationSink, notificationTerminalLogLine } from './notification-chat-sink';
 import {
   createInprocessAlerts,
@@ -578,28 +572,6 @@ export function lastDecisiveFailureCode(
   return undefined;
 }
 
-/**
- * B4 结构化答复值（机械事实；Main 按值选措辞）：原因码优先，其次**零执行** = unsupported
- * （没有发生任何办理动作），其余 = 执行发生过且失败。不扫文本。
- *
- * 2026-11-22（Grok 复审）：零执行判据**不是**账本事实行数——taskLedgerFactsOf 零执行也推
- * 一条说明行，`ledgerFacts.length === 0` 永远为假，零执行被误判成 failed。改由调用方传真实
- * 执行行是否存在（hasExecutions）。
- */
-export function taskFailureOutcomeOf(input: {
-  /** 结构化原因码（BACKGROUND failure.reasonCode；not_permitted / unsupported）。 */
-  reasonCode?: string;
-  /** 结果未知（died）：结果未知不是 unsupported，也不因零执行降级。 */
-  resultUnknown: boolean;
-  /** 底账里是否有**真实执行行**（不是账本事实行数）。 */
-  hasExecutions: boolean;
-}): 'unsupported' | 'blocked' | 'failed' {
-  if (input.reasonCode === OUTCOME_REASON_NOT_PERMITTED) return 'blocked';
-  if (input.reasonCode === OUTCOME_REASON_UNSUPPORTED) return 'unsupported';
-  if (!input.resultUnknown && !input.hasExecutions) return 'unsupported';
-  return 'failed';
-}
-
 export async function createServer(deps: ServerDeps): Promise<Server> {
   const { id: profileId, profile } = resolveSingleProfile(deps.config);
   if (profile.gateway === undefined && deps.createExecutionFace === undefined) {
@@ -767,15 +739,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       }
       executions.forEach((execution, index) => {
         const error = execution.error;
-        const kind = error !== undefined && error.code !== undefined
-          ? failureKindFor(error.code, execution.status === 'refused' ? 'refused' : undefined)
-          : undefined;
         const cleaned = error?.message === undefined || error.message === null
           ? ''
           : cleanExecutorDiagnostic(error.message).replace(/\s+/gu, ' ').trim().slice(0, 160);
         lines.push(
           `${index + 1}. ${execution.operation ?? '?'} — ${execution.status ?? '?'}`
-          + (kind === undefined ? '' : `（${USER_FACING_FAILURE_KIND_LABEL[kind]}）`)
           + (cleaned === '' ? '' : `：${cleaned}`),
         );
       });
@@ -785,35 +753,16 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     }
   };
   /**
-   * 任务底账里有没有**真实执行行为**（逐笔执行行 > 0）。零执行判定不能看 taskLedgerFactsOf
-   * 的长度——它零执行也推一条说明行（长度恒 ≥1），据此判会永远得 false，把零执行误判成
-   * 「执行发生过且失败」。
+   * worker 汇报原文（replyText ?? resultText；空白 = undefined，不编造）。
+   * 失败唤醒把这份原文作为「worker 说的话」交给 Main；做没做成以执行事实为准。
    */
-  const taskHasExecutions = (taskId: string): boolean => {
+  const taskReportOf = (taskId: string): string | undefined => {
     try {
       const record = (taskRegistry as unknown as {
-        get(id: string): { executions?: ReadonlyArray<unknown> };
+        get(id: string): { replyText?: string; resultText?: string };
       }).get(taskId);
-      return (record.executions ?? []).length > 0;
-    } catch {
-      return false;
-    }
-  };
-  /**
-   * 任务底账里**末条**失败/拒绝执行行的执行层原始码（归类用；取不到 = undefined，不猜）。
-   * 与 taskLedgerFactsOf 同源（逐笔执行事实）——沉默兜底话术据它按码归类（GATE_REFUSE →
-   * denied），在失败回调未带码时兜底。码不进用户文本。
-   * 末条 failed/refused 没带码时**继续往前找**（lastDecisiveFailureCode 的回溯语义）：
-   * 先被 CONFIRMATION_REQUIRED 挡、后才是真正失败码时，停在无码末条会把分类引向错的一侧。
-   */
-  const failureCodeOf = (taskId: string): string | undefined => {
-    try {
-      const record = (taskRegistry as unknown as {
-        get(id: string): {
-          executions?: ReadonlyArray<{ status?: string; error?: { code?: string } }>;
-        };
-      }).get(taskId);
-      return lastDecisiveFailureCode(record.executions ?? []);
+      const report = (record.replyText ?? record.resultText ?? '').trim();
+      return report === '' ? undefined : report;
     } catch {
       return undefined;
     }
@@ -1203,7 +1152,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // 失败投递（2026-11-19 收口；S1 改形）：回合无汇报收尾/结果未知 → **唤醒模型、由它把
       // 事实说给用户**——宿主把**账本事实**喂给 Main（逐笔执行行 + 机械标记），Main 自己看、
       // 自己说做没做成（S1：没有任务结论，宿主不归类成败）。唤醒 unavailable/failed（模型
-      // 说不出话）时降级投**既有失败话术**（failureFallbackTextFor；这就是「模型回合挂了」
+      // 说不出话）时降级投**既有失败话术**（failureFallbackFactText；这就是「模型回合挂了」
       // 的兜底，保留——绝不投 Worker 原文）。快活失败（本回合已交给模型）经 pushSuppressedInTurn
       // 抑制；非快活失败由这里主动发回原会话（与完成投递同一主动投递面、同一四必守）。
       onTaskFailed: (failure) => {
@@ -1227,42 +1176,33 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             return;
           }
           // 机械事实（S1）：业务名 + 账本逐笔执行行 + 机械标记（died/资源拒绝）+ 执行层失败
-          // 原文（机械原因）。码/原因只作归类与事实文案，不进用户文本。
+          // 原文（机械原因）+ worker 汇报原文。宿主不补 outcome 判定——Main 读事实自己判断。
           const name = taskNameOf(failure.taskId, failure.request);
           const ledgerFacts = taskLedgerFactsOf(failure.taskId);
           const fact = taskFailureFactOf(failure.taskId);
           const resultUnknown = failure.status === 'result_unknown' || fact?.status === 'result_unknown';
-          // B4 结构化答复值（机械事实，Main 按值选措辞）：原因码优先，其次零执行 = unsupported
-          // （没有发生任何办理动作），其余 = 执行发生过且失败。不扫文本。
-          // 零执行看**真实执行行**（taskHasExecutions），不看账本事实行数——后者零执行也推一条。
-          const failureOutcome = taskFailureOutcomeOf({
-            ...(failure.reasonCode === undefined ? {} : { reasonCode: failure.reasonCode }),
-            resultUnknown,
-            hasExecutions: taskHasExecutions(failure.taskId),
-          });
+          const report = taskReportOf(failure.taskId);
+          const notPermitted = failure.reasonCode === 'not_permitted';
           await wakeAndDeliverStateChange({
             taskId: failure.taskId,
             principalId: failure.principalId,
             sessionId: failure.sessionId,
             event: 'task_failure_wake',
-            // 事实（给模型读；业务名 + 机械原因 + 账本逐笔事实），**不投 Worker 失败原文**。
-            // F3-1：本次不允许的结构化原因码（not_permitted）单独点明（不扫任何文本）。
-            factText: taskFailureFactText({
+            // 事实（给模型读；业务名 + 机械原因 + 账本逐笔事实 + worker 汇报原文）。
+            // 没有「问题分类」/outcome 判定（worker 说错就说错，以执行事实为准）。
+            factText: taskFailureSnapshotText({
               ...(name === undefined ? {} : { name }),
-              kind: failureKindFor(failure.errorCode, resultUnknown ? 'result_unknown' : undefined),
               ...(failure.reason === undefined ? {} : { reason: failure.reason }),
               ledger: ledgerFacts,
-              ...(failure.reasonCode === OUTCOME_REASON_NOT_PERMITTED
-                ? { notPermitted: true }
-                : {}),
-              outcome: failureOutcome,
-              ...(failureOutcome === 'blocked' ? { missing: '本次允许范围' } : {}),
-            }),
-            // 降级兜底（模型说不出话）= 既有失败话术（与老路径同源；按码归类；资源拒绝走「系统太忙」）。
-            fallbackText: failureFallbackTextFor({
-              ...(resultUnknown ? { status: 'result_unknown' as const } : {}),
+              ...(report === undefined ? {} : { report }),
+              ...(resultUnknown ? { died: true } : {}),
               ...(fact?.resourceLimited === true ? { resourceLimited: true } : {}),
-              ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }),
+              ...(notPermitted ? { notPermitted: true } : {}),
+            }),
+            // 降级兜底（模型说不出话）：只按机械事实给一句（资源拒绝 / 结果未知 / executor_failed）。
+            fallbackText: failureFallbackFactText({
+              ...(resultUnknown ? { died: true } : {}),
+              ...(fact?.resourceLimited === true ? { resourceLimited: true } : {}),
               ...(name === undefined ? {} : { name }),
             }),
           });
@@ -2040,7 +1980,6 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           }
           // 执行层原始码（本回合 onTaskFailed 带到的）：兜底话术按码归类（GATE_REFUSE → denied）。
           // 底账执行事实里也有同一码；这里取回调带到的同一口径。
-          const failureCode = round?.code ?? failureCodeOf(suppressedTaskId);
           const failureFact = {
             ...(failureRecord?.diedAt !== undefined && failureRecord.diedAt !== null
               ? { status: 'result_unknown' as const }
@@ -2053,7 +1992,6 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
               && (failureRecord?.resourceLimitedAt === undefined || failureRecord.resourceLimitedAt === null)
               ? { status: 'result_unknown' as const }
               : {}),
-            ...(failureCode === undefined ? {} : { code: failureCode }),
             ...(taskFailureFactOf(suppressedTaskId)?.name === undefined ? {} : { name: taskFailureFactOf(suppressedTaskId)!.name }),
           };
           await deliverTaskFailure({
@@ -2061,7 +1999,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             principalId,
             sessionId,
             ...failureFact,
-            // 投递归属：模型沉默时宿主兜底说的正是失败事实（failureFallbackTextFor）。
+            // 投递归属：模型沉默时宿主兜底说的正是失败事实（failureFallbackFactText）。
             factKind: 'failed',
           }, {
             ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),

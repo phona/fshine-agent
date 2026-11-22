@@ -40,7 +40,7 @@ import {
   type Session,
 } from '../packages/agent/src/execution-runtime';
 import { createTaskRegistry } from '../packages/agent/src/task-registry';
-import { taskStatusOf } from '../packages/agent/testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../packages/agent/testing/task-facts';
 import { assembleSessionCore, resolveExecutionFace } from './ask-runtime';
 import { createServer } from '../apps/server/server';
 
@@ -248,7 +248,7 @@ describe('RBAC·宿主求交（viewer/operator/admin）', () => {
       // 零执行请求：dummy 执行层一次都没被调。
       expect(fixture.requests).toHaveLength(0);
       // 零执行事实：任务停在 unexecuted，没有任何 execution 行。
-      expect(taskStatusOf(fixture.session.tasks()[0]!)).toBe('unexecuted');
+      expect(executionsOf(fixture.session.tasks()[0]!)).toEqual([]);
       expect(fixture.session.tasks()[0]!.executions).toHaveLength(0);
       // 话术：确定性拒绝，不暴露内部 operation 名。
       expect(fixture.worker.toolErrors).toHaveLength(1);
@@ -329,7 +329,7 @@ describe('RBAC·宿主求交（viewer/operator/admin）', () => {
     try {
       await runWriteTurn(fixture);
       expect(fixture.requests).toHaveLength(0);
-      expect(taskStatusOf(fixture.session.tasks()[0]!)).toBe('unexecuted');
+      expect(executionsOf(fixture.session.tasks()[0]!)).toEqual([]);
       expect(fixture.worker.toolErrors[0]).toContain(OPERATION_NOT_PERMITTED_MESSAGE);
     } finally {
       fixture.close();

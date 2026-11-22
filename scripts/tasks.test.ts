@@ -3,7 +3,7 @@
  *   · 用户视角：最近任务列表（时间/机械事实词/#编号+业务名称）、单任务详情（事实/机械时刻/执行步骤/
  *     任务结果/最终回复）、交付件导出（`--out`，Markdown）与 `#编号` 引用解析；
  *   · 展示只映射机械事实（S1：底账没有 status/reason/failureReason 结论字段），词表口径与
- *     scripts/tasks.ts 的 taskFactKeyOf 同源（测试逐键比对金样）；
+ *     scripts/tasks.ts 的事实标签同源（测试逐项比对）；
  *   · 交付件与详情逐行一致（同一组字段渲染函数）；导出拒绝覆盖、缺目录不自动创建、只读不写库；
  *   · 最终回复：有存档逐字呈现；无存档（历史行）标注「该任务无最终回复存档」，不用汇报冒充；
  *   · 只读：库文件哈希不变、缺库不创建；缺库空态、未知 id 错误态；
@@ -25,7 +25,6 @@ import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sq
 import { materializeEvalConfig } from './resolve-config-path';
 import {
   EXECUTION_STATUS_WORDS,
-  TASK_FACT_WORDS,
   findTaskRef,
   formatLocalTime,
   parseTaskArgs,
@@ -35,11 +34,11 @@ import {
   resolveOutPath,
   resolveTaskDbPath,
   summarizeRequest,
-  taskFactKeyOf,
   taskLabel,
   taskMechanicalFactLine,
   taskNoLabel,
-  taskStatusWord,
+  taskFactLabelsOf,
+  taskFactSummaryOf,
   writeDeliverable,
 } from './tasks';
 
@@ -147,20 +146,6 @@ describe('tasks：参数与库路径解析', () => {
 });
 
 describe('tasks：机械事实 → 展示词（S1）', () => {
-  it('事实键金样：9 键逐词（唯一判定口径）', () => {
-    expect(TASK_FACT_WORDS).toEqual({
-      queued: '排队中',
-      running: '进行中',
-      waiting_user: '等待用户',
-      cancelled: '已取消',
-      timed_out: '已超时',
-      died: '结果未知',
-      resource_limited: '资源受限',
-      reported: '已汇报',
-      no_report: '无汇报',
-    });
-  });
-
   it('执行步骤状态词表金样（契约状态原值呈现）', () => {
     expect(EXECUTION_STATUS_WORDS).toEqual({
       completed: '完成',
@@ -184,7 +169,7 @@ describe('tasks：机械事实 → 展示词（S1）', () => {
     registry.begin({ taskId: 't_died', ...scope, request: '查 faulty-one' });
     registry.markDied('t_died');
 
-    expect(registry.list().map((task) => taskStatusWord(task)))
+    expect(registry.list().map((task) => taskFactSummaryOf(task)))
       .toEqual(['已汇报', '无汇报', '已取消', '结果未知']);
   });
 });
@@ -411,7 +396,7 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
     expect(plain).toContain('任务结果：\n（无）');
 
     const cancelDoc = renderTaskDeliverable(cancelled);
-    expect(cancelDoc).toContain('事实：已取消\n机械事实：用户已取消（2026-11-13T16:10:00.000Z）');
+    expect(cancelDoc).toContain('事实：已取消、已汇报\n机械事实：用户已取消（2026-11-13T16:10:00.000Z）');
   });
 
   it('进行中：无机械时刻行，限制段追加未收尾提示', () => {

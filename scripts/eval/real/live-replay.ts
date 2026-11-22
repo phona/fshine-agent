@@ -36,7 +36,7 @@ import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
 import type { Notification, NotificationSink } from '../../../packages/agent/src/notifications';
 import { stripServerPaths } from '../../../packages/agent/src/server-paths';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { taskStatusOf } from '../../../packages/agent/testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
 import { createServer, resolveSingleProfile, type FileDeliveryPort } from '../../../apps/server/server';
 import { mainSessionOptions, mainThinkingLevelFrom } from '../../ask-runtime';
 import { materializeEvalConfig } from '../../resolve-config-path';
@@ -349,7 +349,7 @@ export interface AssertInput {
   /** 三张表的写前/写后读回（P4 用）。 */
   readbacks: CollectionReadback[];
   /** longtask 终态（观测到的 cancelled 任务，含执行事实）。 */
-  cancelledLongTasks: Array<{ taskId: string; status: string; operations: string[] }>;
+  cancelledLongTasks: Array<{ taskId: string; liveness: string | null; operations: string[] }>;
   /** 执行层 abort 审计行。 */
   abortAudit: Array<{ mode: string; script: string }>;
 }
@@ -727,17 +727,17 @@ async function main(): Promise<void> {
       if (index === 6) {
         await waitFor(() => {
           const reading = registry.list(scope);
-          return reading.some((task) => taskStatusOf(task) === 'completed' || taskStatusOf(task) === 'failed' || taskStatusOf(task) === 'cancelled');
+          return reading.some((task) => (archivedReportOf(task) !== undefined || lastExecutionOf(task)?.status === 'completed') || lastExecutionOf(task)?.status === 'failed' || task.cancelledAt !== undefined);
         }, 60_000, 500);
       }
       if (index === 10) {
         await waitFor(() => registry.list(scope).some((task) =>
-          taskStatusOf(task) === 'running' && task.executions.some((execution) => execution.operation === 'dummy.longtask')),
+          taskLivenessOf(task) === 'running' && task.executions.some((execution) => execution.operation === 'dummy.longtask')),
         30_000, 500);
       }
       if (index === 11) {
         await waitFor(() => registry.list(scope).some((task) =>
-          taskStatusOf(task) === 'cancelled' && task.executions.some((execution) => execution.operation === 'dummy.longtask')),
+          task.cancelledAt !== undefined && task.executions.some((execution) => execution.operation === 'dummy.longtask')),
         30_000, 500);
       }
       if (index < REPLAY_TURNS.length) await new Promise((resolve) => setTimeout(resolve, options.settleMs));
@@ -764,10 +764,10 @@ async function main(): Promise<void> {
     .filter((row) => row.mode === 'abort' && row.script.includes('longtask'))
     .map((row) => ({ mode: row.mode, script: row.script }));
   const cancelledLongTasks = registry.list(scope)
-    .filter((task) => taskStatusOf(task) === 'cancelled'
+    .filter((task) => task.cancelledAt !== undefined
       && (task.executions.some((execution) => execution.operation === 'dummy.longtask')
         || /longtask|慢活|600/u.test(task.request)))
-    .map((task) => ({ taskId: task.taskId, status: taskStatusOf(task), operations: task.executions.map((execution) => execution.operation) }));
+    .map((task) => ({ taskId: task.taskId, liveness: taskLivenessOf(task) ?? null, operations: task.executions.map((execution) => execution.operation) }));
 
   const results = evaluateAssertions({
     visible: visibleTexts,
@@ -822,7 +822,7 @@ async function main(): Promise<void> {
       pushes: sink.pushes.map((push) => ({ ...push, text: redact(push.text) })),
     },
     readbacks: { before, after },
-    ledger: { cancelledLongTasks, finalTasks: registry.list(scope).map((task) => ({ taskId: task.taskId, status: taskStatusOf(task), request: redact(task.request), executions: task.executions.map((execution) => execution.operation) })) },
+    ledger: { cancelledLongTasks, finalTasks: registry.list(scope).map((task) => ({ taskId: task.taskId, liveness: taskLivenessOf(task) ?? null, request: redact(task.request), executions: task.executions.map((execution) => execution.operation) })) },
     abortAudit,
     results,
   };

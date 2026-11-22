@@ -31,7 +31,8 @@ import type { TurnDriver, TurnDriverInput } from '../../packages/agent/src/drive
 import { createPiTurnDriver } from '../../packages/agent/src/pi-driver';
 import { createScriptedModelRuntime, type ScriptedModelRuntime } from '../../packages/agent/testing/scripted-model-runtime';
 import type { Notification, NotificationSink } from '../../packages/agent/src/notifications';
-import { deriveTaskName, taskLivenessOf, taskStateWordOf } from '../../packages/agent/src/task-registry';
+import { deriveTaskName, taskLivenessOf } from '../../packages/agent/src/task-registry';
+import { lastExecutionOf, taskReportedOf } from '../../packages/agent/testing/task-facts';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import {
   LONG_RUNNING_NOTICE_FALLBACK_TEXT,
@@ -418,11 +419,26 @@ async function makeFixture(mode: Mode, options: {
   return fixture;
 }
 
-/** 读一条任务的机械事实词（S1：底账没有 status——用 taskStateWordOf 从账本事实推导）。 */
-function readTask(dbPath: string, taskId: string): { status: ReturnType<typeof taskStateWordOf> } {
+/** 读一条任务的账本事实（S1：底账没有 status——liveness 三值 + 末条执行事实 + 一次性时刻）。 */
+function readTask(dbPath: string, taskId: string): {
+  liveness: string | null;
+  lastExecutionStatus: string | undefined;
+  reported: boolean;
+  cancelled: boolean;
+  died: boolean;
+  pendingQuestion: boolean;
+} {
   const registry = createSqliteTaskRegistry(dbPath, { readOnly: true });
   try {
-    return { status: taskStateWordOf(registry.get(taskId, SCOPE)) };
+    const task = registry.get(taskId, SCOPE);
+    return {
+      liveness: taskLivenessOf(task) ?? null,
+      lastExecutionStatus: lastExecutionOf(task)?.status,
+      reported: taskReportedOf(task),
+      cancelled: task.cancelledAt !== undefined,
+      died: task.diedAt !== undefined,
+      pendingQuestion: task.pendingQuestion !== undefined,
+    };
   } finally {
     registry.close();
   }
@@ -438,10 +454,6 @@ function runningTaskIdOf(dbPath: string): string {
   } finally {
     registry.close();
   }
-}
-
-function taskStatusIs(dbPath: string, taskId: string, status: string): boolean {
-  return readTask(dbPath, taskId).status === status;
 }
 
 function userTextOf(message: unknown): string {
@@ -491,7 +503,7 @@ describe('状态变化唤醒（server 级）：失败', () => {
       const fact = texts.find((entry) => entry.startsWith('[任务失败]'));
       expect(fact).toBeDefined();
       expect(fact).toContain(`「${TASK_NAME}」`);
-      expect(fact).toContain('问题分类：没办成（业务原因不明）');
+      expect(fact).toContain('这个回合没有产出结果汇报');
       expect(fact).toContain(FAIL_REASON);
       // 事实里带「给他一个能做的下一步」这条交代（语气与措辞归模型，可执行性不归它）。
       expect(fact).toContain('下一步');
@@ -501,7 +513,7 @@ describe('状态变化唤醒（server 级）：失败', () => {
       const sent = fx.logs.filter((line) => line['event'] === 'task_result_delivery_sent');
       expect(sent).toHaveLength(1);
       // 任务保持 failed（不被唤醒回合改判）、执行器只被调用一次。
-      expect(readTask(fx.dbPath, String(wake!['taskId'])).status).toBe('failed');
+      expect(readTask(fx.dbPath, String(wake!['taskId'])).reported).toBe(false);
       expect(fx.executor.calls).toBe(1);
     } finally {
       await fx.close();
@@ -520,7 +532,7 @@ describe('状态变化唤醒（server 级）：失败', () => {
       expect(internalTermIn(text)).toBeUndefined();
       const wake = wakeEventOf(fx.logs, 'task_failure_wake');
       expect(wake).toMatchObject({ outcome: 'failed' });
-      expect(readTask(fx.dbPath, String(wake!['taskId'])).status).toBe('failed');
+      expect(readTask(fx.dbPath, String(wake!['taskId'])).reported).toBe(false);
       expect(fx.executor.calls).toBe(1);
       expect(fx.face.calls).toBe(0);
     } finally {
@@ -549,14 +561,14 @@ describe('状态变化唤醒（server 级）：失败', () => {
       expect(internalTermIn(text)).toBeUndefined();
       const wake = wakeEventOf(fx.logs, 'task_failure_wake');
       expect(wake).toMatchObject({ outcome: 'woken' });
-      expect(readTask(fx.dbPath, String(wake!['taskId']))).toMatchObject({ status: 'failed' });
+      expect(readTask(fx.dbPath, String(wake!['taskId']))).toMatchObject({ reported: false });
       expect(calls).toBe(1);
     } finally {
       await fx.close();
     }
   });
 
-  it('①f 零执行失败（真实执行行 0 条、无结构化码）：事实带 [outcome=unsupported]（办不了），不是 failed', async () => {
+  it('①f 零执行失败（真实执行行 0 条、无结构化码）：事实带 账本里没有执行事实（办不了），不是 failed', async () => {
     // Grok 复审 2026-11-22：旧判据 ledgerFacts.length===0 永远到不了（零执行也推一条账本行），
     // 零执行被误判 outcome=failed。改看真实执行行数 → unsupported。
     const zeroExec: TaskExecutor = {
@@ -576,7 +588,7 @@ describe('状态变化唤醒（server 级）：失败', () => {
         return '';
       }).find((entry) => entry.startsWith('[任务失败]'));
       expect(factText).toBeDefined();
-      expect(factText).toContain('[outcome=unsupported]');
+      expect(factText).toContain('账本里没有执行事实');
       expect(factText).not.toContain('[outcome=failed]');
     } finally {
       await fx.close();
@@ -631,7 +643,7 @@ describe('状态变化唤醒（server 级）：用户说停', () => {
       expect(internalTermIn(text)).toBeUndefined();
       const wake = wakeEventOf(fx.logs, 'task_cancel_wake');
       expect(wake).toMatchObject({ outcome: 'woken' });
-      expect(readTask(fx.dbPath, String(wake!['taskId']))).toMatchObject({ status: 'cancelled' });
+      expect(readTask(fx.dbPath, String(wake!['taskId']))).toMatchObject({ cancelled: true });
       // 唤醒已说 → 下一回合 B 通道不再注入同一条事实（同一件事不说两遍）。
       await fx.server.handler(incoming('m-2', '然后呢'));
       const requests = fx.scripted!.requests();
@@ -654,7 +666,7 @@ describe('状态变化唤醒（server 级）：用户说停', () => {
       expect(internalTermIn(text)).toBeUndefined();
       const wake = wakeEventOf(fx.logs, 'task_cancel_wake');
       expect(wake).toMatchObject({ outcome: 'failed' });
-      expect(readTask(fx.dbPath, String(wake!['taskId'])).status).toBe('cancelled');
+      expect(readTask(fx.dbPath, String(wake!['taskId'])).cancelled).toBe(true);
       // 恰一条（不双发、不刷屏）。
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(fx.delivery.sentTexts).toHaveLength(1);
@@ -709,7 +721,7 @@ describe('状态变化唤醒（server 级）：回合内终态不重复唤醒（
         principalId: PRINCIPAL,
         sessionId: SESSION,
       });
-      expect(readTask(fx.dbPath, taskId)).toMatchObject({ status: 'cancelled' });
+      expect(readTask(fx.dbPath, taskId)).toMatchObject({ cancelled: true });
       expect(fx.executor.calls).toBe(1);
     } finally {
       await fx.close();
@@ -734,7 +746,7 @@ describe('状态变化唤醒（server 级）：回合内终态不重复唤醒（
       expect(fx.delivery.sentTexts[0]!.text).toBe(`「${TASK_NAME}」已经停了。`);
       expect(wakeEventOf(fx.logs, 'task_cancel_wake')).toMatchObject({ outcome: 'woken' });
       expect(fx.logs.some((line) => line['event'] === 'wake_suppressed_already_delivered')).toBe(false);
-      expect(readTask(fx.dbPath, taskId).status).toBe('cancelled');
+      expect(readTask(fx.dbPath, taskId).cancelled).toBe(true);
     } finally {
       await fx.close();
     }
@@ -758,7 +770,7 @@ describe('状态变化唤醒（server 级）：回合内终态不重复唤醒（
       expect(fx.delivery.sentTexts[0]!.text).toBe(`「${TASK_NAME}」已经停了。`);
       expect(wakeEventOf(fx.logs, 'task_cancel_wake')).toMatchObject({ outcome: 'woken' });
       expect(fx.logs.some((line) => line['event'] === 'wake_suppressed_already_delivered')).toBe(false);
-      expect(readTask(fx.dbPath, taskId).status).toBe('cancelled');
+      expect(readTask(fx.dbPath, taskId).cancelled).toBe(true);
     } finally {
       await fx.close();
     }
@@ -796,7 +808,7 @@ describe('状态变化唤醒（server 级）：久无动静', () => {
       expect(runnerNotice).toMatchObject({ result: 'sent' });
       // 任务还在跑（提醒不改任务事实、不判终态）。
       const task = readTask(fx.dbPath, String(wake!['taskId']));
-      expect(task.status).toBe('running');
+      expect(task.liveness).toBe('running');
       expect(fx.executor.calls).toBe(1);
     } finally {
       await fx.close();
@@ -811,7 +823,7 @@ describe('状态变化唤醒（server 级）：久无动静', () => {
       expect(fx.delivery.sentTexts[0]!.text).toBe(LONG_RUNNING_NOTICE_FALLBACK_TEXT);
       const wake = wakeEventOf(fx.logs, 'task_long_running_wake');
       expect(wake).toMatchObject({ outcome: 'failed' });
-      expect(readTask(fx.dbPath, String(wake!['taskId'])).status).toBe('running');
+      expect(readTask(fx.dbPath, String(wake!['taskId'])).liveness).toBe('running');
       expect(fx.executor.calls).toBe(1);
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(fx.delivery.sentTexts).toHaveLength(1);
@@ -836,7 +848,7 @@ describe('状态变化唤醒（server 级）：重启对账', () => {
       expect(requestHasUserText(fx.scripted!.requests(), '[重启对账]')
         && fx.scripted!.requests().some((request) => userTextOf(request.messages[request.messages.length - 1]).startsWith('[重启对账]'))).toBe(true);
       // 不重放：如实落 result_unknown（任务终局 failed），执行器一次都没被叫。
-      expect(readTask(fx.dbPath, 'task_interrupted')).toEqual({ status: 'died' });
+      expect(readTask(fx.dbPath, 'task_interrupted')).toMatchObject({ liveness: 'died' });
       expect(fx.executor.calls).toBe(0);
     } finally {
       await fx.close();
@@ -851,7 +863,7 @@ describe('状态变化唤醒（server 级）：重启对账', () => {
       }, { timeout: 10_000 });
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(fx.delivery.sentTexts).toHaveLength(0);
-      expect(readTask(fx.dbPath, 'task_interrupted')).toEqual({ status: 'died' });
+      expect(readTask(fx.dbPath, 'task_interrupted')).toMatchObject({ liveness: 'died' });
       expect(fx.executor.calls).toBe(0);
     } finally {
       await fx.close();
@@ -870,7 +882,7 @@ describe('状态变化唤醒（server 级）：重启对账', () => {
       // 事实不丢：下一次用户开口随 injections 进模型上下文（既有机制）。
       await fx.server.handler(incoming('m-2', '然后呢'));
       expect(requestHasUserText(fx.scripted!.requests(), '[重启对账]')).toBe(true);
-      expect(readTask(fx.dbPath, 'task_interrupted')).toEqual({ status: 'died' });
+      expect(readTask(fx.dbPath, 'task_interrupted')).toMatchObject({ liveness: 'died' });
     } finally {
       await fx.close();
     }
@@ -892,7 +904,7 @@ describe('状态变化唤醒（server 级）：重启对账', () => {
       expect(fact).toContain('你要我停');
       expect(fact).toContain('没停完');
       // 终态：result_unknown（不宣称已取消、不重放），执行器零调用。
-      expect(readTask(fx.dbPath, 'task_cancelling_orphan')).toEqual({ status: 'died' });
+      expect(readTask(fx.dbPath, 'task_cancelling_orphan')).toMatchObject({ liveness: 'died' });
       expect(fx.executor.calls).toBe(0);
     } finally {
       await fx.close();
@@ -965,7 +977,7 @@ describe('状态变化唤醒（server 级）：等待用户', () => {
       expect(wakes).toHaveLength(1);
       expect(wakes[0]).toMatchObject({ outcome: 'woken', principalId: PRINCIPAL, sessionId: SESSION });
       expect(fx.logs.filter((line) => line['event'] === 'task_result_delivery_sent')).toHaveLength(1);
-      expect(readTask(fx.dbPath, String(wakes[0]!['taskId'])).status).toBe('waiting_user');
+      expect(readTask(fx.dbPath, String(wakes[0]!['taskId'])).liveness).toBe('waiting_user');
       expect(fx.executor.calls).toBe(1);
     } finally {
       await fx.close();
@@ -985,7 +997,7 @@ describe('状态变化唤醒（server 级）：等待用户', () => {
       const wake = wakeEventOf(fx.logs, 'task_waiting_user_wake');
       // 驱动口径：唤醒回合无正文 = failed（与重启对账 ④b 同一判定）——兜底由此投出。
       expect(wake).toMatchObject({ outcome: 'failed' });
-      expect(readTask(fx.dbPath, String(wake!['taskId'])).status).toBe('waiting_user');
+      expect(readTask(fx.dbPath, String(wake!['taskId'])).liveness).toBe('waiting_user');
 
       // 事实不丢：下一次用户开口随 injections 进模型上下文（既有机制）。silent 模式连
       // 用户的下一回合也不出正文（回合按「模型侧失败」判）——注入先于回合判定，照常断言。
@@ -1037,7 +1049,7 @@ describe('状态变化唤醒（server 级）：等待用户', () => {
       const fact2 = factTextOf(fx, '[任务等待]');
       expect(fact2).toContain(summary2);
       expect(fact2).toContain(expires2);
-      expect(readTask(fx.dbPath, String(wakes[1]!['taskId'])).status).toBe('waiting_user');
+      expect(readTask(fx.dbPath, String(wakes[1]!['taskId'])).liveness).toBe('waiting_user');
     } finally {
       await fx.close();
     }
@@ -1057,7 +1069,7 @@ describe('状态变化唤醒（server 级）：等待用户', () => {
       expect(fx.delivery.sentTexts[0]!.text).toBe('还差一点：账套名、月份。请补充一下。');
       const wakes = fx.logs.filter((line) => line['event'] === 'task_waiting_user_wake');
       expect(wakes).toHaveLength(1);
-      expect(readTask(fx.dbPath, String(wakes[0]!['taskId'])).status).toBe('waiting_user');
+      expect(readTask(fx.dbPath, String(wakes[0]!['taskId'])).liveness).toBe('waiting_user');
     } finally {
       await fx.close();
     }
@@ -1078,7 +1090,7 @@ describe('状态变化唤醒（server 级）：等待用户', () => {
       expect(fx.logs.some((line) => line['event'] === 'task_result_delivery_sent')).toBe(false);
       await fx.server.handler(incoming('m-2', '然后呢')).catch(() => undefined);
       expect(requestHasUserText(fx.scripted!.requests(), '[任务等待]')).toBe(true);
-      expect(readTask(fx.dbPath, String(wakeEventOf(fx.logs, 'task_waiting_user_wake')!['taskId'])).status).toBe('waiting_user');
+      expect(readTask(fx.dbPath, String(wakeEventOf(fx.logs, 'task_waiting_user_wake')!['taskId'])).liveness).toBe('waiting_user');
     } finally {
       await fx.close();
     }

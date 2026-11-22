@@ -86,7 +86,7 @@ import {
 import type { TaskExecutionBridge, TaskExecutionBridgeFactory } from './task-file-bridge';
 import { READ_SKILL_TOOL, type SkillRegistry } from './skills';
 import { stripServerPaths } from './server-paths';
-import { createTaskRegistry, deriveTaskName, DispatchConflictError, taskEndedOf, taskLivenessOf, taskStateWordOf, taskUnstartedOf, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
+import { createTaskRegistry, deriveTaskName, DispatchConflictError, taskEndedOf, taskLivenessOf, taskUnstartedOf, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
 import {
   DEFAULT_RUNTIME_CONFIG,
   taskFailureReasonFor,
@@ -2941,9 +2941,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       return {
         taskId,
         name,
-        // 机械状态词（taskStateWordOf 的投影，不是结论字段）：受理回执的既有形状
-        // （taskId/name/status/accepted）——模型据此说「受理了/在跑」。
-        status: taskStateWordOf(live),
+        // 受理回执只给事实：accepted + 存活（running/died/waiting_user）；不投影状态词。
         ...(taskLivenessOf(live) === undefined ? {} : { liveness: taskLivenessOf(live) }),
         accepted: true,
       };

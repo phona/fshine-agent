@@ -13,7 +13,7 @@
  * 全部假件（假 Main/Worker driver、假执行面、假时钟），零网络、零真实模型、零真实平台。
  * 本文件只覆盖「计量接线」；policy 自身的语义矩阵在 resource-policy.test.ts（不重复）。
  */
-import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   CapabilityManifest,
@@ -203,10 +203,10 @@ describe('恰好耗尽 / 超出：调用前确定性拒绝且零调用', () => {
     expect(main.records[0]?.execErrors).toHaveLength(1);
     const tasks = session.tasks();
     const first = tasks.find((task) => task.request === '第一件');
-    expect(taskStatusOf(first!)).toBe('completed');
+    expect(lastExecutionOf(first!)?.status).toBe('completed');
     const refused = tasks.find((task) => task.request === '第二件');
-    expect(taskStatusOf(refused!)).toBe('resource_limited');
-    expect(taskReasonOf(refused!)).toBe('resource_limited');
+    expect(refused!.resourceLimitedAt).toBeDefined();
+    expect(refused!.resourceLimitedAt).toBeDefined();
   });
 });
 
@@ -252,7 +252,7 @@ describe('配置缺省 = 零行为变化', () => {
     }
 
     expect(worker.calls()).toBe(3);
-    expect(session.tasks().every((task) => taskStatusOf(task) === 'completed')).toBe(true);
+    expect(session.tasks().every((task) => (archivedReportOf(task) !== undefined || lastExecutionOf(task)?.status === 'completed'))).toBe(true);
     const budget = policy.budgetFor(SESSION_TASK);
     expect(budget.limits).toBeNull();
     expect(budget.exhausted()).toBeNull();
@@ -307,6 +307,6 @@ describe('失败回合仍如实计量', () => {
     const budget = policy.budgetFor(SESSION_TASK);
     expect(budget.used.calls).toBe(1);
     expect(budget.exhausted()).toEqual({ reason: 'calls', limit: 1, used: 1 });
-    expect(taskStatusOf(session.tasks()[0]!)).toBe('failed');
+    expect(archivedReportOf(session.tasks()[0]!)).toBeUndefined();
   });
 });

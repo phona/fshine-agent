@@ -17,7 +17,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { taskStatusOf } from '../../../packages/agent/testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
 import {
   lastToolResultJsonOf,
   startWecomSim,
@@ -62,7 +62,7 @@ describe('G 组·任务面 / 异步（W-26～W-28）', () => {
       expect(done.taskIds).toHaveLength(1);
       const taskId = done.taskIds[0]!;
       // 任务在后台真实推进到 completed（读取宿主底账，不猜日志）。
-      await sim.waitFor('任务后台 completed', () => taskStatusOf(registry.get(taskId, TASK_SCOPE)) === 'completed', 30_000);
+      await sim.waitFor('任务后台 completed', () => (archivedReportOf(registry.get(taskId, TASK_SCOPE)) !== undefined || lastExecutionOf(registry.get(taskId, TASK_SCOPE))?.status === 'completed'), 30_000);
       // 完成后宿主主动投递一次结果（用户可见）。
       await sim.waitFor('完成结果主动投递', () => sim.sdk.proactiveTexts.length === 1, 30_000);
       expect(sim.sdk.proactiveTexts[0]!.content).toContain('documents W202611 共 3 条');

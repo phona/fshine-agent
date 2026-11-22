@@ -31,7 +31,7 @@ import type { DriverMessage, TurnDriver } from '../packages/agent/src/driver-con
 import type { Notification, NotificationSink } from '../packages/agent/src/notifications';
 import { renderNotification } from '../packages/agent/src/notification-render';
 import { assembleSessionCore } from './ask-runtime';
-import { taskStatusOf, taskReasonOf } from '../packages/agent/testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../packages/agent/testing/task-facts';
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform');
@@ -260,8 +260,8 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
 
       // 底账：同一个 taskId、waiting_user（不是 failed/unexecuted）、无失败原因。
       const task = fixture.assembled.taskRegistry.get(taskId, SCOPE);
-      expect(taskStatusOf(task)).toBe('waiting_user');
-      expect(taskReasonOf(task)).toBeUndefined();
+      expect(task.pendingQuestion).toBeDefined();
+      expect(lastFailureOf(task)).toBeUndefined();
       expect(task.pendingQuestion).toEqual({
         missing: ['collection "contoso" 有多个候选：contracts / documents'],
       });
@@ -304,8 +304,8 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
       // 同一任务：taskId/taskNo 不变，任务列表里只有这一个（不是新建任务）。
       const task = fixture.assembled.taskRegistry.get(taskId, SCOPE);
       expect(task.taskNo).toBe(taskNo);
-      expect(taskStatusOf(task)).toBe('completed');
-      expect(taskReasonOf(task)).toBeUndefined();
+      expect(lastExecutionOf(task)?.status).toBe('completed');
+      expect(lastFailureOf(task)).toBeUndefined();
       expect(fixture.assembled.taskRegistry.list(SCOPE).map((row) => row.taskId)).toEqual([taskId]);
       expect(fixture.client.calls.map((call) => call.args['--collection'])).toEqual(['contoso', 'documents']);
 
@@ -337,8 +337,8 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
 
       // 没有补答：底账保持等待；执行层只被调用过一次，Worker 只跑过一个回合。
       const before = fixture.assembled.taskRegistry.get(taskId, SCOPE);
-      expect(taskStatusOf(before)).toBe('waiting_user');
-      expect(taskReasonOf(before)).toBeUndefined();
+      expect(before.pendingQuestion).toBeDefined();
+      expect(lastFailureOf(before)).toBeUndefined();
       expect(fixture.client.calls).toHaveLength(1);
       expect(fixture.worker.delegations).toHaveLength(1);
 
@@ -346,7 +346,7 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
       fixture.assembled.runner!.pump();
       await fixture.assembled.runner!.whenIdle();
       const after = fixture.assembled.taskRegistry.get(taskId, SCOPE);
-      expect(taskStatusOf(after)).toBe('waiting_user');
+      expect(after.pendingQuestion).toBeDefined();
       expect(after.pendingQuestion?.missing).toHaveLength(1);
       expect(fixture.client.calls).toHaveLength(1);
       expect(fixture.worker.delegations).toHaveLength(1);

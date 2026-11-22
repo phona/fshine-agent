@@ -26,7 +26,7 @@ import { loadConfig } from '@fshine/core';
 import { createDummyCliClient } from '../packages/agent/src/dummy-cli-client';
 import { createPiTurnDriver } from '../packages/agent/src/pi-driver';
 import { createTaskRegistry } from '../packages/agent/src/task-registry';
-import { taskStatusOf } from '../packages/agent/testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../packages/agent/testing/task-facts';
 import { createScriptedModelRuntime } from '../packages/agent/testing/scripted-model-runtime';
 import { withInternalExecTool } from '../packages/agent/testing/internal-exec-fixture';
 import { assembleSessionCore, resolveExecutionFace } from './ask-runtime';
@@ -107,7 +107,9 @@ async function driverFor(script: (index: number) => AgentMessage | undefined) {
 }
 
 interface WriteAttemptResult {
-  taskStatus: string;
+  liveness: string | null;
+  /** 底账执行行数（写请求必须为 0）。 */
+  taskExecutionCount: number;
   /** 本回合的结构化执行事实条数（写请求必须为 0）。 */
   executionCount: number;
   /** Worker 看到的宿主拒绝原文（证明拒绝在发起执行前，且不靠模型遵守提示词）。 */
@@ -186,7 +188,8 @@ async function runWriteAttempt(principalId: string, dir: string): Promise<WriteA
       : {};
 
     return {
-      taskStatus: taskStatusOf(task),
+      liveness: taskLivenessOf(task) ?? null,
+      taskExecutionCount: executionsOf(task).length,
       executionCount: turn.executions.length,
       workerSawRefusal: lastWorkerRequest.includes(WRITE_NOT_ALLOWED_MESSAGE),
       auditWriteLines: auditLines.filter((line) => WRITE_OPERATIONS.some((operation) => line.includes(`"${operation}"`))).length,
@@ -207,7 +210,8 @@ describe('场景 4：没有写权限的 principal → 确定性拒绝、零写�
 
     // 业务事实：用户要写，系统一条写调用都没发。
     expect(result.executionCount).toBe(0);
-    expect(result.taskStatus).toBe('unexecuted');
+    expect(result.liveness).toBeNull();
+    expect(result.taskExecutionCount).toBe(0);
     // 拒绝是宿主允许集合给的，不是模型自觉。
     expect(result.workerSawRefusal).toBe(true);
     // 审计里没有任何写 operation 行。
@@ -236,7 +240,8 @@ describe('场景 4：没有写权限的 principal → 确定性拒绝、零写�
     // 同样在发起执行前被拒。显式打开开关后的真实业务链路见
     // scripts/host-write-confirmation.test.ts。
     expect(result.executionCount).toBe(0);
-    expect(result.taskStatus).toBe('unexecuted');
+    expect(result.liveness).toBeNull();
+    expect(result.taskExecutionCount).toBe(0);
     expect(result.workerSawRefusal).toBe(true);
     expect(result.auditWriteLines).toBe(0);
     expect(result.readback.count).toBe(2);

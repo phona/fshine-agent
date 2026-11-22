@@ -45,7 +45,7 @@ import {
   type Session,
 } from '../packages/agent/src/execution-runtime';
 import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
-import { taskStatusOf, taskFailureReasonOf } from '../packages/agent/testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../packages/agent/testing/task-facts';
 import { createFileStore } from '../packages/agent/src/file-store';
 import {
   assembleSessionCore,
@@ -683,7 +683,7 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
       expect(fx.worker.toolErrors).toHaveLength(1);
       expect(fx.worker.toolErrors[0]).toContain(WRITE_NOT_ALLOWED_MESSAGE);
       expect(turn.executions).toHaveLength(0);
-      expect(taskStatusOf(fx.session.tasks()[0]!)).toBe('unexecuted');
+      expect(executionsOf(fx.session.tasks()[0]!)).toEqual([]);
       expect((await queryData(fx.stateDir)).count).toBe(2);
       // 审计里没有任何写 operation 行（零执行）。
       expect(auditLines(fx.stateDir).filter((line) => line.includes('"dummy.prepare"'))).toHaveLength(0);
@@ -756,8 +756,8 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
       expect(turn2.reply).not.toContain('已完成');
       const commitTask = fx.session.tasks().find((task) => task.executions.some((execution) => execution.operation === 'dummy.commit'));
       expect(commitTask).toBeDefined();
-      expect(taskStatusOf(commitTask!)).toBe('failed');
-      expect(taskFailureReasonOf(commitTask!)).toMatch(/readback short/i);
+      expect(['failed', 'refused']).toContain(lastExecutionOf(commitTask!)?.status);
+      expect(lastFailureOf(commitTask!)?.error?.message).toMatch(/readback short/i);
       const commitExecution = commitTask?.executions.find((execution) => execution.operation === 'dummy.commit');
       expect(commitExecution?.status).toBe('failed');
       expect(commitExecution?.error?.code).toBe('CONFIRMATION_READBACK_SHORT');

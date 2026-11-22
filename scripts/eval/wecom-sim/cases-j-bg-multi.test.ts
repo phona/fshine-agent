@@ -35,7 +35,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { taskStatusOf } from '../../../packages/agent/testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
 import { LONG_RUNNING_NOTICE_FALLBACK_TEXT } from '../../../packages/agent/src/task-runner';
 import {
   internalOperationCall,
@@ -125,7 +125,7 @@ describe('J 组·后台任务并存（J-1～J-3）', () => {
       // 慢任务已后台推进（running、租约已释放——长任务让出槽位/租约）。
       await sim.waitFor('J-1 慢任务 accepted（running 无租约）', () => {
         const task = registry.get(slowTaskId, TASK_SCOPE);
-        return taskStatusOf(task) === 'running' && task.leaseUntil === undefined;
+        return taskLivenessOf(task) === 'running' && task.leaseUntil === undefined;
       }, 10_000);
 
       const fastId = sim.sendText('顺便查一下 beta 集合 W1 的数据，尽快');
@@ -156,7 +156,7 @@ describe('J 组·后台任务并存（J-1～J-3）', () => {
       // ③ 底账事实：任务数 == 2、每任务执行事实各 1 条（长任务 accepted 一笔 + 查询 completed 一笔）。
       await sim.waitFor('J-1 两条任务都 completed', () => {
         const tasks = registry.list(TASK_SCOPE);
-        return tasks.length === 2 && tasks.every((task) => taskStatusOf(task) === 'completed');
+        return tasks.length === 2 && tasks.every((task) => (archivedReportOf(task) !== undefined || lastExecutionOf(task)?.status === 'completed'));
       }, 20_000);
       const tasks = registry.list(TASK_SCOPE);
       expect(tasks).toHaveLength(2);
@@ -217,7 +217,7 @@ describe('J 组·后台任务并存（J-1～J-3）', () => {
       expect(completion).toHaveLength(1);
       expect(completion[0]!.chatId).toBe('group-w');
       // 任务在群里真实跑完了（不是「没开通所以安静」冒充）。
-      await sim.waitFor('J-2 群任务 completed', () => taskStatusOf(registry.get(groupTaskId, GROUP_SCOPE)) === 'completed', 15_000);
+      await sim.waitFor('J-2 群任务 completed', () => (archivedReportOf(registry.get(groupTaskId, GROUP_SCOPE)) !== undefined || lastExecutionOf(registry.get(groupTaskId, GROUP_SCOPE))?.status === 'completed'), 15_000);
 
       // ② 群聊的久无动静提醒**指向这个群**（owner 2026-11-19 #9 迁移；旧口径「群聊零提醒」已
       // 作废）：本轮的提醒恰好落在交办回合还在跑的窗口内 → 唤醒出口按 busy 把事实交回当前
@@ -264,7 +264,7 @@ describe('J 组·后台任务并存（J-1～J-3）', () => {
       const slowTaskId = sim.doneOf(slowId)!.taskIds[0]!;
       await sim.waitFor('J-3 慢任务 running 无租约（真在后台飞）', () => {
         const task = registry.get(slowTaskId, TASK_SCOPE);
-        return taskStatusOf(task) === 'running' && task.leaseUntil === undefined;
+        return taskLivenessOf(task) === 'running' && task.leaseUntil === undefined;
       }, 10_000);
 
       // ① 任务在跑时，用户发一句无关查询 → **立即**得到答复（窗口内快活，同回合气泡）。
@@ -308,7 +308,7 @@ describe('J 组·后台任务并存（J-1～J-3）', () => {
       expect(askDone.executions).toHaveLength(0);
       expect(askDone.taskIds).toHaveLength(0);
       // 底账事实来自 task_status 的真实返回（不是模型编的）。
-      await sim.waitFor('J-3 慢任务最终 completed', () => taskStatusOf(registry.get(slowTaskId, TASK_SCOPE)) === 'completed', 15_000);
+      await sim.waitFor('J-3 慢任务最终 completed', () => (archivedReportOf(registry.get(slowTaskId, TASK_SCOPE)) !== undefined || lastExecutionOf(registry.get(slowTaskId, TASK_SCOPE))?.status === 'completed'), 15_000);
     } finally {
       registry.close();
       await sim.close();

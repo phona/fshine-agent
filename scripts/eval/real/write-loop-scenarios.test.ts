@@ -72,7 +72,7 @@ function greenStop(): StopEvidence {
     ],
     jobs: [{ operationId: 'op_1', status: 'cancelled', seconds: 600 }],
     tasks: [{
-      taskId: 't-1', taskNo: 1, name: '慢活', status: 'cancelled',
+      taskId: 't-1', taskNo: 1, name: '慢活', liveness: null, cancelled: true, reported: false,
       executions: [{ operation: 'dummy.longtask', status: 'accepted' }],
     }],
     statusSequence: ['queued', 'running', 'cancelling', 'cancelled'],
@@ -106,7 +106,7 @@ function greenFailure(): FailureEvidence {
     audit: [prepareRow],
     jobs: [],
     tasks: [{
-      taskId: 't-1', taskNo: 1, name: '写 locked-one', status: 'failed', reason: 'failed_confirmed',
+      taskId: 't-1', taskNo: 1, name: '写 locked-one', liveness: null, cancelled: false, reported: false, reason: 'failed_confirmed',
       failureReason: '执行层未成功：dummy.prepare 返回 failed：Collection locked-one is locked',
       executions: [{ operation: 'dummy.prepare', status: 'failed', code: 'COLLECTION_LOCKED' }],
     }],
@@ -145,7 +145,7 @@ function greenIdempotency(): IdempotencyEvidence {
     ],
     jobs: [],
     tasks: [{
-      taskId: 't-1', taskNo: 1, status: 'completed',
+      taskId: 't-1', taskNo: 1, liveness: null, cancelled: false, reported: true,
       executions: [{ operation: 'dummy.prepare', status: 'needs_confirmation' }, { operation: 'dummy.commit', status: 'completed' }],
     }],
     statusSequence: ['queued', 'running', 'waiting_user', 'running', 'completed'],
@@ -189,7 +189,7 @@ function greenReconfirm(): ReconfirmEvidence {
     ],
     jobs: [],
     tasks: [{
-      taskId: 't-1', taskNo: 1, status: 'completed', resultText: '4 条已新增（读回 4 条）',
+      taskId: 't-1', taskNo: 1, liveness: null, cancelled: false, reported: true, resultText: '4 条已新增（读回 4 条）',
       executions: [{ operation: 'dummy.prepare', status: 'needs_confirmation' }, { operation: 'dummy.commit', status: 'completed' }],
     }],
     statusSequence: ['queued', 'running', 'waiting_user', 'running', 'completed'],
@@ -237,10 +237,10 @@ function greenTwoObjects(): TwoObjectsEvidence {
     ],
     jobs: [],
     tasks: [{
-      taskId: 't-1', taskNo: 1, status: 'completed',
+      taskId: 't-1', taskNo: 1, liveness: null, cancelled: false, reported: true,
       executions: [{ operation: 'dummy.prepare', status: 'completed' }, { operation: 'dummy.commit', status: 'completed' }],
     }, {
-      taskId: 't-2', taskNo: 2, status: 'completed',
+      taskId: 't-2', taskNo: 2, liveness: null, cancelled: false, reported: true,
       executions: [{ operation: 'dummy.prepare', status: 'completed' }, { operation: 'dummy.commit', status: 'completed' }],
     }],
     statusSequence: ['queued', 'running', 'waiting_user', 'running', 'completed'],
@@ -404,10 +404,10 @@ describe('stop：正例全绿 + 逐条反向破坏必红', () => {
     delete noCall.cancelToolCall;
     expect(statusOf(evaluateStopCriteria(noCall), 'S1-C2')).toBe('fail');
     const notStopped = greenStop();
-    notStopped.tasks = [{ taskId: 't-1', taskNo: 1, status: 'running', executions: [] }];
+    notStopped.tasks = [{ taskId: 't-1', taskNo: 1, liveness: 'running', cancelled: false, reported: false, executions: [] }];
     expect(statusOf(evaluateStopCriteria(notStopped), 'S1-C2')).toBe('fail');
     const leftover = greenStop();
-    leftover.tasks = [...leftover.tasks, { taskId: 't-2', taskNo: 2, status: 'running', executions: [] }];
+    leftover.tasks = [...leftover.tasks, { taskId: 't-2', taskNo: 2, liveness: 'running', cancelled: false, reported: false, executions: [] }];
     expect(statusOf(evaluateStopCriteria(leftover), 'S1-C2')).toBe('fail');
   });
 
@@ -454,7 +454,7 @@ describe('stop：正例全绿 + 逐条反向破坏必红', () => {
     silent.pushes = [];
     expect(statusOf(evaluateStopCriteria(silent), 'S1-C6')).toBe('fail');
     const notCancelled = greenStop();
-    notCancelled.tasks = [{ taskId: 't-1', taskNo: 1, status: 'running', executions: [] }];
+    notCancelled.tasks = [{ taskId: 't-1', taskNo: 1, liveness: 'running', cancelled: false, reported: false, executions: [] }];
     expect(statusOf(evaluateStopCriteria(notCancelled), 'S1-C6')).toBe('fail');
     const notFrozen = greenStop();
     notFrozen.auditAfterFreeze = notFrozen.auditAtCancel + 1;
@@ -474,7 +474,7 @@ describe('failure：正例全绿 + 逐条反向破坏必红', () => {
     noFailedCall.writeCallsOnTarget = [{ mode: 'prepare', script: 'dummy.prepare', via: 'structured', exitCode: 0 }];
     expect(statusOf(evaluateFailureCriteria(noFailedCall), 'S2-C1')).toBe('fail');
     const noFacts = greenFailure();
-    noFacts.tasks = [{ taskId: 't-1', taskNo: 1, status: 'completed', executions: [{ operation: 'dummy.prepare', status: 'completed' }] }];
+    noFacts.tasks = [{ taskId: 't-1', taskNo: 1, liveness: null, cancelled: false, reported: true, executions: [{ operation: 'dummy.prepare', status: 'completed' }] }];
     expect(statusOf(evaluateFailureCriteria(noFacts), 'S2-C1')).toBe('fail');
   });
 
@@ -577,7 +577,7 @@ describe('idempotency：正例全绿 + 逐条反向破坏必红', () => {
 
   it('S3-C1：新起了第二份工作 / 第二次委派 → 红', () => {
     const doubled = greenIdempotency();
-    doubled.tasks = [...doubled.tasks, { taskId: 't-2', taskNo: 2, status: 'running', executions: [] }];
+    doubled.tasks = [...doubled.tasks, { taskId: 't-2', taskNo: 2, liveness: 'running', cancelled: false, reported: false, executions: [] }];
     expect(statusOf(evaluateIdempotencyCriteria(doubled), 'S3-C1')).toBe('fail');
     const twoRuns = greenIdempotency();
     twoRuns.taskRunCalls = 2;
@@ -689,10 +689,10 @@ describe('reconfirm：正例全绿 + 逐条反向破坏必红', () => {
   it('S4-C2：新任务 / 未终局 / 接续 started → 红', () => {
     const newTask = greenReconfirm();
     newTask.taskCountAfterReconfirm = 2;
-    newTask.tasks = [...newTask.tasks, { taskId: 't-2', taskNo: 2, status: 'completed', executions: [] }];
+    newTask.tasks = [...newTask.tasks, { taskId: 't-2', taskNo: 2, liveness: null, cancelled: false, reported: true, executions: [] }];
     expect(statusOf(evaluateReconfirmCriteria(newTask), 'S4-C2')).toBe('fail');
     const leftover = greenReconfirm();
-    leftover.tasks = [...leftover.tasks, { taskId: 't-2', taskNo: 2, status: 'running', executions: [] }];
+    leftover.tasks = [...leftover.tasks, { taskId: 't-2', taskNo: 2, liveness: 'running', cancelled: false, reported: false, executions: [] }];
     expect(statusOf(evaluateReconfirmCriteria(leftover), 'S4-C2')).toBe('fail');
     const resumed = greenReconfirm();
     resumed.taskConfirmStartedCalls = [{
@@ -799,7 +799,7 @@ describe('two-objects：正例全绿 + 逐条反向破坏必红', () => {
 
   it('S5-C3：有一件事失败了 → 红', () => {
     const failed = greenTwoObjects();
-    failed.tasks = [failed.tasks[0]!, { taskId: 't-2', taskNo: 2, status: 'failed', executions: [{ operation: 'dummy.commit', status: 'failed', code: 'X' }] }];
+    failed.tasks = [failed.tasks[0]!, { taskId: 't-2', taskNo: 2, liveness: null, cancelled: false, reported: false, executions: [{ operation: 'dummy.commit', status: 'failed', code: 'X' }] }];
     expect(statusOf(evaluateTwoObjectsCriteria(failed), 'S5-C3')).toBe('fail');
   });
 

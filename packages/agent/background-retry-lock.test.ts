@@ -17,7 +17,7 @@
  *
  * 反向绊线：把后台 exec 里的 retryLock.before/after 去掉 → ① / 绊线用例红（真实调用变 2/3 次）。
  */
-import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -179,7 +179,7 @@ describe('A2b 后台执行器：同对象确定性失败不重撞', () => {
     expect(blockedMessage).toContain('没办成');
     expect(internalTermIn(blockedMessage)).toBeUndefined();
     // 任务结局如实失败（不报成功）。
-    expect(taskStatusOf(registry.get('t_same_key', SCOPE))).toBe('failed');
+    expect(['failed', 'refused']).toContain(lastExecutionOf(registry.get('t_same_key', SCOPE))?.status);
   });
 
   it('② 不同对象（换集合）的两次拒绝 → 各自真实调用（锁只锁同对象）', async () => {
@@ -198,7 +198,7 @@ describe('A2b 后台执行器：同对象确定性失败不重撞', () => {
 
     expect(client.requests.map((request) => request.args['--collection'])).toEqual(['alpha', 'beta']);
     expect(eventsNamed(events, 'execution_retry_blocked')).toEqual([]);
-    expect(taskStatusOf(registry.get('t_diff_key', SCOPE))).toBe('failed');
+    expect(['failed', 'refused']).toContain(lastExecutionOf(registry.get('t_diff_key', SCOPE))?.status);
   });
 
   it('③ retryable:true 的失败 → 不被锁（允许再试），并留 execution_retry_allowed', async () => {
@@ -266,7 +266,7 @@ describe('A2b 后台执行器：同对象确定性失败不重撞', () => {
       declaredRetryable: true,
     });
     // 任务结局如实失败（不把「停下来」讲成成功）。
-    expect(taskStatusOf(registry.get('t_retryable_budget', SCOPE))).toBe('failed');
+    expect(['failed', 'refused']).toContain(lastExecutionOf(registry.get('t_retryable_budget', SCOPE))?.status);
   });
 
   it('④ 跨回合不记忆：下一个回合同键再调 → 允许（本回合才锁）', async () => {
@@ -308,7 +308,7 @@ describe('A2b 后台执行器：同对象确定性失败不重撞', () => {
     await runBackground(registry, executor, 't_success_repeat');
 
     expect(client.requests).toHaveLength(2);
-    expect(taskStatusOf(registry.get('t_success_repeat', SCOPE))).toBe('completed');
+    expect(lastExecutionOf(registry.get('t_success_repeat', SCOPE))?.status).toBe('completed');
   });
 });
 

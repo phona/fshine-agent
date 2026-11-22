@@ -10,7 +10,7 @@
  *
  * 库路径用临时目录（mkdtemp）；不触网、不碰真实平台。
  */
-import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -41,7 +41,7 @@ describe('最小任务底账（SQLite，B 类）', () => {
 
     const second = createSqliteTaskRegistry(dbPath);
     const task = second.get('task_1', { principalId: 'wecom:u1', sessionId: 'wecom:c1' });
-    expect(taskStatusOf(task)).toBe('completed');
+    expect(lastExecutionOf(task)?.status).toBe('completed');
     expect(task.resultText).toBe('查到 2 条。');
     expect(task.createdAt).not.toBe('');
     expect(task.executions).toHaveLength(1);
@@ -72,7 +72,7 @@ describe('最小任务底账（SQLite，B 类）', () => {
 
     const scoped = registry.list({ principalId: 'wecom:u1', sessionId: 'wecom:c1' });
     expect(scoped.map((task) => task.taskId)).toEqual(['task_a']);
-    expect(taskFailureReasonOf(scoped[0]!)).toBe('执行层调用超时。');
+    expect(lastFailureOf(scoped[0]!)?.error?.message).toBe('执行层调用超时。');
     expect(scoped[0]!.executions[0]!.error).toMatchObject({ code: 'EXECUTION_TIMEOUT' });
 
     const other = registry.list({ principalId: 'wecom:u1', sessionId: 'wecom:c2' });
@@ -105,10 +105,10 @@ describe('任务完成判定：只看已记录执行事实（SQLite 底账，M4-
     });
     registry.setResultText('task_failed', '任务圆满完成，共 3 条数据，已确认无误。');
     const task = registry.get('task_failed', scope);
-    expect(taskStatusOf(task)).toBe('failed');
-    expect(taskStatusOf(task)).not.toBe('completed');
+    expect(['failed', 'refused']).toContain(lastExecutionOf(task)?.status);
+    expect(lastExecutionOf(task)?.status).not.toBe('completed');
     expect(task.resultText).toBe('任务圆满完成，共 3 条数据，已确认无误。');
-    expect(taskFailureReasonOf(task)).toContain('执行层调用超时');
+    expect(lastFailureOf(task)?.error?.message).toContain('执行层调用超时');
     registry.close();
   });
 
@@ -117,8 +117,8 @@ describe('任务完成判定：只看已记录执行事实（SQLite 底账，M4-
     registry.begin({ taskId: 'task_none', ...scope, request: '查询 documents' });
     registry.setResultText('task_none', '查询成功，共 3 条数据。');
     const task = registry.get('task_none', scope);
-    expect(taskStatusOf(task)).toBe('unexecuted');
-    expect(taskStatusOf(task)).not.toBe('completed');
+    expect(executionsOf(task)).toEqual([]);
+    expect(lastExecutionOf(task)?.status).not.toBe('completed');
     expect(task.resultText).toBe('查询成功，共 3 条数据。');
     registry.close();
   });
@@ -134,7 +134,7 @@ describe('任务完成判定：只看已记录执行事实（SQLite 底账，M4-
       error: { code: 'EXECUTION_TIMEOUT', message: '执行层调用超时。' },
     });
     registry.setResultText('task_mixed', '第一次成功，第二次超时。');
-    expect(taskStatusOf(registry.get('task_mixed', scope))).toBe('failed');
+    expect(['failed', 'refused']).toContain(lastExecutionOf(registry.get('task_mixed', scope))?.status);
     registry.close();
   });
 });

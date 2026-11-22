@@ -52,9 +52,9 @@ function greenEvidence(): WriteLoopEvidence {
     ledger: {
       taskId: 'task-1',
       taskCount: 1,
-      statusSequence: ['queued', 'running', 'waiting_user', 'running', 'completed'],
+      factSequence: ['queued', 'running', 'waiting_user', 'running', 'completed'],
       snapshots: [],
-      finalStatus: 'completed',
+      finalReported: true,
       finalExecutions: [
         { operation: 'dummy.prepare', status: 'failed' },
         { operation: 'dummy.prepare', status: 'needs_confirmation' },
@@ -66,7 +66,9 @@ function greenEvidence(): WriteLoopEvidence {
         {
           taskId: 'task-1',
           taskNo: 1,
-          status: 'completed',
+          liveness: null,
+          cancelled: false,
+          reported: true,
           executions: [
             { operation: 'dummy.prepare', status: 'failed' },
             { operation: 'dummy.prepare', status: 'needs_confirmation' },
@@ -147,7 +149,7 @@ describe('evaluateCriteria：正例全绿 + 逐条反向破坏必红', () => {
 
   it('C3：没观测到 waiting_user 或摘要为空 → 红', () => {
     const missingStatus = greenEvidence();
-    missingStatus.ledger.statusSequence = ['queued', 'completed'];
+    missingStatus.ledger.factSequence = ['queued', 'completed'];
     expect(evaluateCriteria(missingStatus).find((result) => result.id === 'C3')?.status).toBe('fail');
     const emptySummary = greenEvidence();
     emptySummary.ledger.proposal = { summary: '  ', handlePrefix: '', operation: 'dummy.prepare' };
@@ -200,7 +202,7 @@ describe('evaluateCriteria：正例全绿 + 逐条反向破坏必红', () => {
 
   it('C7：终态不是 completed、无成功 commit、成功 commit 出现在提案之前、或成功两次 → 红', () => {
     const failed = greenEvidence();
-    failed.ledger.finalStatus = 'failed';
+    failed.ledger.finalReported = false;
     expect(evaluateCriteria(failed).find((result) => result.id === 'C7')?.status).toBe('fail');
     const commitBeforeProposal = greenEvidence();
     commitBeforeProposal.ledger.finalExecutions = [
@@ -222,7 +224,7 @@ describe('evaluateCriteria：正例全绿 + 逐条反向破坏必红', () => {
 
   it('C9：状态序列缺 waiting_user 后的重新执行 → 红', () => {
     const jumped = greenEvidence();
-    jumped.ledger.statusSequence = ['running', 'waiting_user', 'completed'];
+    jumped.ledger.factSequence = ['running', 'waiting_user', 'completed'];
     expect(evaluateCriteria(jumped).find((result) => result.id === 'C9')?.status).toBe('fail');
   });
 
@@ -484,7 +486,7 @@ describe('LedgerWatcher：去重采样与状态序列', () => {
     index = 0;
     const watcher = new LedgerWatcher(fake, { principalId: 'p', sessionId: 's' });
     for (index = 0; index < phases.length; index += 1) watcher.sample();
-    expect(watcher.snapshots.map((snapshot) => snapshot.status)).toEqual(['queued', 'running', 'completed']);
+    expect(watcher.snapshots.map((snapshot) => snapshot.liveness ?? snapshot.executions[snapshot.executions.length - 1]?.status ?? 'queued')).toEqual(['queued', 'running', 'completed']);
     expect(watcher.sequenceOf('t-1')).toEqual(['queued', 'running', 'completed']);
     expect(watcher.taskIds()).toEqual(['t-1']);
   });
@@ -501,7 +503,7 @@ describe('LedgerWatcher：去重采样与状态序列', () => {
     const watcher = new LedgerWatcher(fake, { principalId: 'p', sessionId: 's' });
     watcher.sample();
     const snapshot = watcher.snapshots[0]!;
-    expect(snapshot.status).toBe('waiting_user');
+    expect(snapshot.liveness).toBe('waiting_user');
     expect(snapshot.proposal).toEqual({ summary: '将向集合「empty-one」…', handlePrefix: 'cf_abcdefghi', operation: 'dummy.prepare' });
     expect(JSON.stringify(snapshot)).not.toContain('cf_abcdefghijklmnop');
   });

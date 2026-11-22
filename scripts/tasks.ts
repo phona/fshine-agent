@@ -33,6 +33,7 @@ import type { Session } from '../packages/agent/src/execution-runtime';
 import {
   deriveTaskName,
   taskLivenessOf,
+  taskReportedOf,
   taskUnstartedOf,
   type TaskRecord,
 } from '../packages/agent/src/task-registry';
@@ -138,43 +139,31 @@ export function resolveTaskDbPath(input: {
   return { dbPath: fallback, source: 'default' };
 }
 
-/** 机械事实 → 用户词（S1：没有任务结论——每个词对应一项可查的机械事实，P2b 词表口径不变）。 */
-export const TASK_FACT_WORDS = {
-  queued: '排队中',
-  running: '进行中',
-  waiting_user: '等待用户',
-  cancelled: '已取消',
-  timed_out: '已超时',
-  died: '结果未知',
-  resource_limited: '资源受限',
-  reported: '已汇报',
-  no_report: '无汇报',
-} as const;
-
-export type TaskFactWordKey = keyof typeof TASK_FACT_WORDS;
-
 /**
- * 任务行的机械事实键（展示唯一判定口径；纯函数、只读事实、不做业务归类）：
- *   · 用户取消 / 机械超时 / 资源受限 / 看门狗死亡（结果未知）→ 对应时刻事实；
- *   · 等待事实 → 等待用户；有效租约 → 进行中；未启动 → 排队中；
- *   · 汇报已存档 → 已汇报（做没做成读详情执行步骤，不在词上判）；其余 → 无汇报。
+ * 任务行的机械事实标签（可多项并存；S1：CLI 直接读 liveness + 账本事实，不合成单一状态词）：
+ *   · 结束事实（cancelled/timed_out/resource_limited/died）各成一词；
+ *   · liveness 三值（running/died/waiting_user）直读；
+ *   · worker 汇报存档 → 「已汇报」；未启动 → 「排队中」；已启动无汇报 → 「无汇报」。
+ * 做没做成读详情里的执行步骤与任务结果原文，CLI 不在词上判结论。
  */
-export function taskFactKeyOf(task: TaskRecord): TaskFactWordKey {
-  if (task.cancelledAt !== undefined) return 'cancelled';
-  if (task.timedOutAt !== undefined) return 'timed_out';
-  if (task.resourceLimitedAt !== undefined) return 'resource_limited';
-  if (task.diedAt !== undefined) return 'died';
-  if (task.pendingQuestion !== undefined) return 'waiting_user';
-  if (taskLivenessOf(task) === 'running') return 'running';
-  // 汇报存档先于未启动判定（有汇报必然已跑过）。
-  const report = (task.resultText ?? task.replyText ?? '').trim();
-  if (report !== '') return 'reported';
-  if (taskUnstartedOf(task)) return 'queued';
-  return 'no_report';
+export function taskFactLabelsOf(task: TaskRecord): string[] {
+  const labels: string[] = [];
+  if (task.cancelledAt !== undefined) labels.push('已取消');
+  if (task.timedOutAt !== undefined) labels.push('已超时');
+  if (task.resourceLimitedAt !== undefined) labels.push('资源受限');
+  if (task.diedAt !== undefined) labels.push('结果未知');
+  const liveness = taskLivenessOf(task);
+  if (liveness === 'running') labels.push('进行中');
+  else if (liveness === 'waiting_user') labels.push('等待用户');
+  else if (liveness === 'died' && task.diedAt === undefined) labels.push('结果未知');
+  if (taskReportedOf(task)) labels.push('已汇报');
+  if (labels.length === 0) labels.push(taskUnstartedOf(task) ? '排队中' : '无汇报');
+  return labels;
 }
 
-export function taskStatusWord(task: TaskRecord): string {
-  return TASK_FACT_WORDS[taskFactKeyOf(task)];
+/** 事实摘要（多项以「、」并列；不是单一结论词）。 */
+export function taskFactSummaryOf(task: TaskRecord): string {
+  return taskFactLabelsOf(task).join('、');
 }
 
 /** 执行步骤状态 → 用户词（契约状态，原值不动只做呈现）。 */
@@ -291,7 +280,7 @@ export function renderTaskList(records: readonly TaskRecord[], options: { limit?
   const lines = [header];
   for (const task of shown) {
     // 业务展示位只有 #编号+名称（UUID 只在底账/审计证据里，不出现在这里）。
-    lines.push(`${formatLocalTime(task.createdAt)}  ${taskStatusWord(task)}  ${taskLabel(task)}`);
+    lines.push(`${formatLocalTime(task.createdAt)}  ${taskFactSummaryOf(task)}  ${taskLabel(task)}`);
   }
   return lines.join('\n');
 }
@@ -309,7 +298,7 @@ export function taskIdentityLine(task: TaskRecord): string {
 }
 
 export function taskStatusLine(task: TaskRecord): string {
-  return `事实：${taskStatusWord(task)}`;
+  return `事实：${taskFactSummaryOf(task)}`;
 }
 
 export function taskTimeline(task: TaskRecord): string {
@@ -391,7 +380,7 @@ const DELIVERABLE_RUNNING_NOTE = '- 该任务尚未收尾（在跑）：交付�
  */
 export function renderTaskDeliverable(task: TaskRecord): string {
   const lines = [
-    `# 任务交付件：${taskLabel(task)}（${taskStatusWord(task)}）`,
+    `# 任务交付件：${taskLabel(task)}（${taskFactSummaryOf(task)}）`,
     '', '## 任务信息', '',
     taskIdentityLine(task),
     taskTimeline(task),
@@ -405,7 +394,7 @@ export function renderTaskDeliverable(task: TaskRecord): string {
   lines.push('', '## 任务结果', '', ...taskResultLines(task));
   lines.push('', '## 最终回复', '', ...taskReplyLines(task));
   lines.push('', '## 限制与说明', '', ...DELIVERABLE_LIMITS);
-  if (taskFactKeyOf(task) === 'running') lines.push(DELIVERABLE_RUNNING_NOTE);
+  if (taskLivenessOf(task) === 'running') lines.push(DELIVERABLE_RUNNING_NOTE);
   return `${lines.join('\n')}\n`;
 }
 
@@ -493,7 +482,7 @@ export interface RedoOutcome {
 
 /** 配对行（输出逐字形状）：`原任务 #<no> → 新任务 #<no>（事实：<词>）`（业务编号引用）。 */
 export function renderRedoPairLine(oldTask: TaskRecord, newTask: TaskRecord): string {
-  return `原任务 ${taskNoLabel(oldTask)} → 新任务 ${taskNoLabel(newTask)}（事实：${taskStatusWord(newTask)}）`;
+  return `原任务 ${taskNoLabel(oldTask)} → 新任务 ${taskNoLabel(newTask)}（事实：${taskFactSummaryOf(newTask)}）`;
 }
 
 async function defaultRedoAssembler(input: AskRuntimeInput): Promise<RedoAssembly> {

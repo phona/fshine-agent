@@ -448,7 +448,7 @@ export function completionResultBodyOf(factText: string): string | undefined {
 
 /**
  * 状态变化事实前缀（与宿主拼装同源；2026-11-19 唤醒切片四出口）：
- * 失败（task-completion-delivery 的 taskFailureFactText）/ 已停止（taskCancelledFactText）/
+ * 失败（task-completion-delivery 的 taskFailureSnapshotText）/ 已停止（taskCancelledFactText）/
  * 重启对账（taskRestartFactText）/ 久无动静（task-runner 的 longRunningNoticeFactText）。
  */
 export const FAILURE_FACT_PREFIX = '[任务失败]';
@@ -475,29 +475,21 @@ export function failureWakeLine(name?: string): string {
 }
 
 /**
- * B2：假模型按唤醒事实里的**结构化 outcome 值**选措辞（真模型按 OUTCOME_BEHAVIOR_NOTE 选）。
- * 没有 `[outcome=...]` 字段时逐字节回落到 failureWakeLine（既有用例不变）。
- *   · unsupported → 「办不了」+ 目录里能办的，**绝不含**再试/重试/retry；
- *   · blocked     → 说清缺什么（[缺=...]）+ 补的方式；
- *   · partial     → 逐项说，不说成单纯成功。
+ * 假模型按唤醒事实里的**机械事实**选措辞（宿主不再合成 outcome 判定，见 S1）：
+ *   · 「发起前被宿主拒绝 / 本次不允许」→ 说清缺什么（缺的是本次允许范围）；
+ *   · 「账本里没有执行事实」→ 「办不了」+ 目录里能办的（列事实，不说能办却不做）；
+ * 其余事实逐字节回落到 failureWakeLine（既有用例不变）。
  */
 export function outcomeWakeLine(factText: string): string | undefined {
-  const matched = /\[outcome=(completed|partial|unsupported|blocked|failed)\]/.exec(factText);
-  if (matched === null) return undefined;
-  const outcome = matched[1];
   const name = factSubjectOf(factText);
   const subject = lineSubjectOf(name);
-  if (outcome === 'unsupported') {
+  if (factText.includes('发起前被宿主拒绝') || factText.includes('本次不允许')) {
+    return `${subject}这次没办成，缺的是本次允许范围。补上这个条件我就能继续办。`;
+  }
+  if (factText.includes('账本里没有执行事实')) {
     return `${subject}这件事我这边办不了。我能办的是：记录办理、长时导出。没有可办的动作。`;
   }
-  if (outcome === 'blocked') {
-    const missing = /\[缺=([^\]]+)\]/.exec(factText)?.[1] ?? '本次允许范围';
-    return `${subject}这次没办成，缺的是${missing}。补上这个条件我就能继续办。`;
-  }
-  if (outcome === 'partial') {
-    return `${subject}这次只办成了一部分，我逐项说给你：有的成了，有的没成。`;
-  }
-  return failureWakeLine(name);
+  return undefined;
 }
 
 export function cancelledWakeLine(name?: string): string {

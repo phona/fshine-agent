@@ -176,7 +176,7 @@ function buildAliases(tasks: readonly TaskRecord[]): IdentifierAliases {
   return { taskAlias, requestAlias };
 }
 
-function normalizeTask(task: TaskRecord, aliases: IdentifierAliases): Record<string, unknown> {
+function traceTaskJson(task: TaskRecord, aliases: IdentifierAliases): Record<string, unknown> {
   return {
     taskId: aliases.taskAlias.get(task.taskId) ?? task.taskId,
     principalId: task.principalId,
@@ -331,7 +331,7 @@ export function createTraceRecorder(input: TraceRecorderInput): TraceRecorder {
 
       const tasks = finishInput.finalTasks ?? [];
       writeFileSync(path.join(input.dir, 'executions.json'), JSON.stringify({
-        tasks: scriptMode ? tasks.map((task) => normalizeTask(task, aliases!)) : tasks.map((task) => jsonSafe(task)),
+        tasks: scriptMode ? tasks.map((task) => traceTaskJson(task, aliases!)) : tasks.map((task) => jsonSafe(task)),
       }, null, 2) + '\n');
 
       const inputs = {

@@ -13,7 +13,7 @@
  * TDD：旧行为下第 capacity+1 个排队提交仍 accepted:true（底账 queued 行 > 容量）→ 先红；
  * 受理侧按「底账 queued 行 < queueCapacity」判定后转绿。
  */
-import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
 import { describe, expect, it } from 'vitest';
 import type {
   CapabilityManifest,
@@ -23,7 +23,7 @@ import type {
 import type { TurnDriver } from './src/driver-contract';
 import { createSession, type Session } from './src/execution-runtime';
 import { createResourcePolicy, type ResourcePolicy } from './src/resource-policy';
-import { createTaskRegistry, taskUnstartedOf, type TaskFact, type TaskRegistry } from './src/task-registry';
+import { createTaskRegistry, type TaskFact, type TaskRegistry } from './src/task-registry';
 import {
   createTaskRunner,
   type TaskExecutionInput,
@@ -154,7 +154,7 @@ async function sessionFor(
 }
 
 function queuedRows(stack: Stack): number {
-  return stack.registry.list().filter((task) => taskStatusOf(task) === 'queued').length;
+  return stack.registry.list().filter((task) => taskUnstartedOf(task)).length;
 }
 
 describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞排队）', () => {
@@ -202,8 +202,7 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
       expect(receipt.notice).toContain('后台排队已满（容量 2）');
       // 拒绝不留半截任务行：终态 failed（reason=resource_limited），不是 queued 幽灵行。
       const row = session.getTask(receipt.taskId);
-      expect(taskStatusOf(row)).toBe("resource_limited");
-      expect(taskReasonOf(row)).toBe('resource_limited');
+      expect(row.resourceLimitedAt).toBeDefined();
       // 结构化事件：failed/resource_limited 事实已发出（通知 outbox 的输入面）。
       expect(
         facts.some(

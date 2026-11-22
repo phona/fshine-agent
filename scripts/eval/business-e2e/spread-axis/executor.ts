@@ -23,7 +23,7 @@ import { createResourcePolicy } from '../../../../packages/agent/src/resource-po
 import { createSqliteTaskRegistry } from '../../../../packages/agent/src/task-registry-sqlite';
 import { defaultMainSkillsDir, loadMainSkillDelivery } from '../../../../packages/agent/src/worker-skills';
 import { notificationKindForEvent } from '../../../../packages/agent/src/notifications';
-import { taskStatusOf } from '../../../../packages/agent/testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../../packages/agent/testing/task-facts';
 import { materializeEvalConfig } from '../../../resolve-config-path';
 import {
   assembleSessionCore,
@@ -36,6 +36,7 @@ import { assessEvalIsolation, assertEvalIsolation } from '../../safety-gate';
 import type { SampleRecord } from '../judge';
 import type { NotificationLine, TaskFactLine } from '../collect';
 import type { InputsFile, MetaFile, MetaTurn, ReplyLine, TaskRecordJson, ToolCallRecord } from '../../convergence-r1/evidence';
+import { observedTaskStatusOf } from '../../task-observation';
 import { buildDsSample } from './grade';
 import { runtimeOverlayOf, type DsCase, type DsItem } from './cases';
 
@@ -288,7 +289,7 @@ export function createDsExecutor(options: DsExecutorOptions = {}): DsExecutor {
         metaTurns.push({ index: turn, durationMs, modelCalls: assistantMessages.length, taskIds: [...(result?.taskIds ?? [])], tokens, retries: 0, notes: [] });
         replies.push({ turn, text: result?.reply ?? '', sha256: '' });
       }
-      const tasks = jsonSafe(session.tasks().map((task) => ({ ...task, status: taskStatusOf(task) }))) as TaskRecordJson[];
+      const tasks = jsonSafe(session.tasks().map((task) => ({ ...task, status: observedTaskStatusOf(task) }))) as TaskRecordJson[];
       const auditLines = existsSync(assembled.auditPath)
         ? readFileSync(assembled.auditPath, 'utf8').trimEnd().split('\n').filter((l) => l !== '')
         : [];

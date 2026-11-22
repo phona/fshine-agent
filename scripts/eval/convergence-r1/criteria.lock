@@ -1,14 +1,14 @@
 {
   "generatedBy": "node --import tsx scripts/eval/convergence-r1/freeze.ts",
-  "frozenAt": "2026-11-22T10:26:41.183Z",
+  "frozenAt": "2026-11-22T17:54:48.908Z",
   "criteriaSha256": "9d4b0824a429658e7f633ff8af928fd3ad94b633f02c95f151866679bb8d6cd4",
   "casesSha256": "a5aa99e5a423a7958459152f02052cc0d8c2ab4d98c744524b01edcbb2462841",
   "files": {
     "scripts/eval/convergence-r1/criteria.ts": "f5daa2a2d8377d7250150b6d907126dea26e652dcb8493f32801a5ddf1d68025",
-    "scripts/eval/convergence-r1/cases.ts": "6d935cd21172ccf8e7371a4499ba90fd223bdc7b9844258af8e7db028d7b7453",
-    "scripts/eval/convergence-r1/judge.ts": "41262ca2886e7ccfe1a7180f94acec2b3516347b899a41941cf5f3f6e90caa77",
+    "scripts/eval/convergence-r1/cases.ts": "41cd72f5fa8ca290e8be33adb0d9fc23a84bb772a9d85d6909dedd0a967ad9f7",
+    "scripts/eval/convergence-r1/judge.ts": "ae04ff4db4477bd4a0c774d4f8387179b60e8ccc0aab09e656848453cb50d5e8",
     "scripts/eval/convergence-r1/hash.ts": "e03bdcacc362515796cf6d248f2244a2b31b3e19ceddaee32cd7ec6795376637",
-    "scripts/eval/convergence-r1/evidence.ts": "f9d32c5dea1aabe91dd92c6e619c79597b71ff30fd3fb7ee01c6ff5522e3e609",
+    "scripts/eval/convergence-r1/evidence.ts": "05fa85754ccb70c995c7d25673de18a046ca534cf3deebae3cf34d791d3b4832",
     "scripts/eval/convergence-r1/selftest.ts": "7e5d70dc5be578079ec04be12844c0f780a92f4ba238aa31f784bba8decbc97b",
     "scripts/eval/convergence-r1/cases/E01.ts": "411a33591d41daac652fd98c3249f2bb2020200bfdecc7fb973154eaa92651d5",
     "scripts/eval/convergence-r1/cases/E02.ts": "feb781db06529d69c2019697e904b2c65d2238187b4d516950577ae937842a61",

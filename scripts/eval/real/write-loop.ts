@@ -57,7 +57,7 @@ import {
 } from '../shared/conversation-shape';
 import { stripServerPaths } from '../../../packages/agent/src/server-paths';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { taskStatusOf } from '../../../packages/agent/testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
 import type { TaskScope } from '../../../packages/agent/src/task-registry';
 import { createServer, resolveSingleProfile, type FileDeliveryPort } from '../../../apps/server/server';
 import { mainSessionOptions, mainThinkingLevelFrom, resolveExecutionFace } from '../../ask-runtime';
@@ -157,7 +157,9 @@ export interface PushEvidence {
 export interface LedgerSnapshot {
   at: string;
   taskId: string;
-  status: string;
+  liveness: string | null;
+  cancelled: boolean;
+  reported: boolean;
   executions: Array<{ operation: string; status: string }>;
   proposal?: {
     summary: string;
@@ -194,12 +196,12 @@ export interface WriteLoopEvidence {
     taskId?: string;
     taskCount: number;
     /** 观测到的状态序列（250ms 轮询；观测粒度即事实边界）——主任务（首个）。 */
-    statusSequence: string[];
+    factSequence: string[];
     snapshots: LedgerSnapshot[];
-    finalStatus?: string;
+    finalReported?: boolean;
     finalExecutions: Array<{ operation: string; status: string }>;
     /** 会话内每个任务的终局（多任务如实列出，主任务排首）。 */
-    finalTasks: Array<{ taskId: string; taskNo?: number; status: string; executions: Array<{ operation: string; status: string }> }>;
+    finalTasks: Array<{ taskId: string; taskNo?: number; liveness: string | null; cancelled: boolean; reported: boolean; executions: Array<{ operation: string; status: string }> }>;
     proposal?: { summary: string; handlePrefix: string; operation: string };
   };
   audit: AuditRow[];
@@ -374,13 +376,15 @@ export class LedgerWatcher {
             handlePrefix: confirmation.handle.slice(0, 12),
             operation: confirmation.operation,
           };
-      const signature = JSON.stringify([taskStatusOf(record), executions, proposal?.summary ?? '']);
+      const signature = JSON.stringify([taskLivenessOf(record) ?? null, record.cancelledAt !== undefined, archivedReportOf(record) !== undefined, executions, proposal?.summary ?? '']);
       if (this.lastSignature.get(record.taskId) === signature) continue;
       this.lastSignature.set(record.taskId, signature);
       this.snapshots.push({
         at: new Date().toISOString(),
         taskId: record.taskId,
-        status: taskStatusOf(record),
+        liveness: taskLivenessOf(record) ?? null,
+        cancelled: record.cancelledAt !== undefined,
+        reported: archivedReportOf(record) !== undefined,
         executions,
         ...(proposal === undefined ? {} : { proposal }),
       });
@@ -395,7 +399,10 @@ export class LedgerWatcher {
     const seen: string[] = [];
     for (const snapshot of this.snapshots) {
       if (snapshot.taskId !== taskId) continue;
-      if (seen[seen.length - 1] !== snapshot.status) seen.push(snapshot.status);
+      // 观测事实：取消时刻 / liveness 三值 / 末条执行行原值（无执行 = 未启动）。
+      const lastExecutionStatus = snapshot.executions[snapshot.executions.length - 1]?.status;
+      const fact = snapshot.cancelled ? 'cancelled' : snapshot.liveness ?? lastExecutionStatus ?? 'queued';
+      if (seen[seen.length - 1] !== fact) seen.push(fact);
     }
     return seen;
   }
@@ -610,13 +617,13 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
   const proposal = evidence.ledger.proposal;
   add(
     'C3', '底账出现 waiting_user 与待确认提案（摘要非空）', 'mechanical',
-    evidence.ledger.statusSequence.includes('waiting_user')
+    evidence.ledger.factSequence.includes('waiting_user')
       && proposal !== undefined
       && proposal.summary.trim() !== ''
       && proposal.handlePrefix !== '',
     proposal === undefined
-      ? `状态序列=${evidence.ledger.statusSequence.join('→')}；未观测到 pendingQuestion.confirmation`
-      : `序列=${evidence.ledger.statusSequence.join('→')}；提案 operation=${proposal.operation} summary=${proposal.summary}`,
+      ? `状态序列=${evidence.ledger.factSequence.join('→')}；未观测到 pendingQuestion.confirmation`
+      : `序列=${evidence.ledger.factSequence.join('→')}；提案 operation=${proposal.operation} summary=${proposal.summary}`,
   );
 
   // C4 「确认」回合确实调用 task_confirm，且宿主接续（outcome=started）。
@@ -671,11 +678,11 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
     execution.operation === 'dummy.commit' && execution.status === 'completed');
   add(
     'C7', '底账终态 completed；成功的 prepare(needs_confirmation) 先于唯一一次成功 commit(completed)', 'mechanical',
-    evidence.ledger.finalStatus === 'completed'
+    evidence.ledger.finalReported === true
       && proposalIndex >= 0
       && completedCommitIndex > proposalIndex
       && completedCommits.length === 1,
-    `finalStatus=${String(evidence.ledger.finalStatus)} executions=${evidence.ledger.finalExecutions.map((execution) => `${execution.operation}:${execution.status}`).join(',') || '(空)'}`,
+    `finalReported=${String(evidence.ledger.finalReported)} executions=${evidence.ledger.finalExecutions.map((execution) => `${execution.operation}:${execution.status}`).join(',') || '(空)'}`,
   );
 
   // C8 完成消息出现在用户可见面（答对谁写的判在观察②）。
@@ -685,14 +692,14 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
   const replyWithText = evidence.turns.filter((turn) => turn.reply.trim() !== '');
   add(
     'C8', '完成消息出现在用户可见面（主动投递或本回合回复）', 'mechanical',
-    evidence.ledger.finalStatus === 'completed'
+    evidence.ledger.finalReported === true
       && (completionPushes.length >= 1 || (relayedInTurn && replyWithText.length >= 2)),
     `push_text ${completionPushes.length} 条；relayed_in_turn=${relayedInTurn}`,
   );
 
   // C9 底账状态序列（观测）：确认路径确实把任务从等待里带回执行（waiting_user 之后 wieder running），
   // 不是「等确认 → 直接终态」。序列按序包含（允许观测到额外中间态）。
-  const orderedSequence = evidence.ledger.statusSequence;
+  const orderedSequence = evidence.ledger.factSequence;
   const subsequence = ['running', 'waiting_user', 'running', 'completed'];
   let cursor = 0;
   for (const status of orderedSequence) {
@@ -1126,12 +1133,16 @@ async function main(): Promise<void> {
     // ---- S4 等写入落定 + 完成投递 ----
     const taskId = watcher.taskIds()[0];
     log('\n[S4] 等待后台写入落定与完成投递');
-    const terminal = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'unexecuted']);
+    const terminal = new Set(['completed', 'failed', 'refused']);
     const landed = await waitFor(() => {
       if (taskId === undefined) return false;
       for (let index = watcher.snapshots.length - 1; index >= 0; index -= 1) {
         const snapshot = watcher.snapshots[index]!;
-        if (snapshot.taskId === taskId) return terminal.has(snapshot.status);
+        if (snapshot.taskId === taskId) {
+          const lastExecutionStatus = snapshot.executions[snapshot.executions.length - 1]?.status;
+          if (snapshot.reported || snapshot.cancelled || snapshot.liveness === 'died'
+            || (lastExecutionStatus !== undefined && terminal.has(lastExecutionStatus))) return true;
+        }
       }
       return false;
     }, options.settleTimeoutMs);
@@ -1164,17 +1175,19 @@ async function main(): Promise<void> {
       finalTasks.push({
         taskId: id,
         ...(record.taskNo === undefined ? {} : { taskNo: record.taskNo }),
-        status: taskStatusOf(record),
+        liveness: taskLivenessOf(record) ?? null,
+        cancelled: record.cancelledAt !== undefined,
+        reported: archivedReportOf(record) !== undefined,
         executions: record.executions.map((execution) => ({ operation: execution.operation, status: execution.status })),
       });
       // 业务名（对话形态 ③ 的「任务名」判据用；机械回落已由底账解析）。
       if ((record.name ?? '').trim() !== '') taskNames.push(record.name!.trim());
     } catch {
-      finalTasks.push({ taskId: id, status: 'unreadable', executions: [] });
+      finalTasks.push({ taskId: id, liveness: null, cancelled: false, reported: false, executions: [] });
     }
   }
   const primary = finalTasks.find((task) => task.taskId === taskId);
-  const finalStatus = primary?.status;
+  const finalReported = primary?.reported;
   const finalExecutions = primary?.executions ?? [];
   const proposalSnapshot = watcher.snapshots.find((snapshot) => snapshot.proposal !== undefined);
   const proposal = proposalSnapshot?.proposal;
@@ -1191,9 +1204,9 @@ async function main(): Promise<void> {
     ledger: {
       ...(taskId === undefined ? {} : { taskId }),
       taskCount: taskIds.length,
-      statusSequence: taskId === undefined ? [] : watcher.sequenceOf(taskId),
+      factSequence: taskId === undefined ? [] : watcher.sequenceOf(taskId),
       snapshots: watcher.snapshots,
-      ...(finalStatus === undefined ? {} : { finalStatus }),
+      ...(finalReported === undefined ? {} : { finalReported }),
       finalExecutions,
       finalTasks,
       ...(proposal === undefined ? {} : { proposal }),
@@ -1208,9 +1221,9 @@ async function main(): Promise<void> {
 
   // ---- 打印证据 ----
   log('\n== 机械证据 ==');
-  log(`[任务底账] 会话内任务数=${evidence.ledger.taskCount} · 状态序列（250ms 轮询观测）=${evidence.ledger.statusSequence.join(' → ') || '(未观测到)'}`);
+  log(`[任务底账] 会话内任务数=${evidence.ledger.taskCount} · 状态序列（250ms 轮询观测）=${evidence.ledger.factSequence.join(' → ') || '(未观测到)'}`);
   for (const task of evidence.ledger.finalTasks) {
-    log(`  · 任务 ${task.taskId}（#${String(task.taskNo ?? '-')}）终局=${task.status}`
+    log(`  · 任务 ${task.taskId}（#${String(task.taskNo ?? '-')}）终局=${task.liveness ?? (task.reported ? '已汇报' : '已收尾')}`
       + `：${task.executions.map((execution) => `${execution.operation}:${execution.status}`).join(' → ') || '(无执行事实)'}`);
   }
   log('[工具调用]（记录包装器透传采集）');

@@ -17,7 +17,7 @@
  *   · task_resume：waiting_user 带 answer → started；非 waiting_user → not_waiting（如实转述）；
  *   · 未传 runner：调用治理工具 → 「Main 工具面之外的调用」（fail-closed）。
  */
-import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
 import { describe, expect, it } from 'vitest';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { DiscoveredTool } from '@fshine/contracts';
@@ -256,11 +256,11 @@ describe('缺口 1 · 对话面任务工具', () => {
 
     const requested = value<Record<string, unknown>>(turns[0]!.results[0]!);
     expect(requested.outcome, '在飞任务只发取消请求，不宣称已取消').toBe('requested');
-    expect(taskStatusOf(registry.get('run', SCOPE_A)), '取消请求后不得宣称已取消').not.toBe('cancelled');
+    expect(taskLivenessOf(registry.get('run', SCOPE_A)) ?? null, '取消请求后不得宣称已取消').not.toBe('cancelled');
 
     const confirmed = value<Record<string, unknown>>(turns[0]!.results[1]!);
     expect(confirmed.outcome, '未启动的排队任务可机械确认取消').toBe('cancelled');
-    expect(taskStatusOf(registry.get('queued', SCOPE_A))).toBe('cancelled');
+    expect(registry.get('queued', SCOPE_A).cancelledAt).toBeDefined();
   });
 
   it('task_resume：waiting_user 带 answer → started；非 waiting_user → not_waiting（如实转述）', async () => {
@@ -284,7 +284,7 @@ describe('缺口 1 · 对话面任务工具', () => {
 
     const rejected = value<Record<string, unknown>>(turns[0]!.results[1]!);
     expect(rejected.outcome).toBe('not_waiting');
-    expect(taskStatusOf(registry.get('finished', SCOPE_A))).toBe('completed');
+    expect(lastExecutionOf(registry.get('finished', SCOPE_A))?.status).toBe('completed');
   });
 
   // 2026-11-20 live 缺陷 P1（机制变化）：数字 ref（#N / 裸数字）整体退役——编号不进模型
@@ -326,8 +326,8 @@ describe('缺口 1 · 对话面任务工具', () => {
       if (!result.ok) expect((result.error as Error).message).toContain('taskId');
     }
     // 两个任务都没被动过（尤其 B 的 task-b 没被误当作 #1 操作）。
-    expect(taskStatusOf(registry.get('task-a', SCOPE_A))).not.toBe('cancelled');
-    expect(taskStatusOf(registry.get('task-b', SCOPE_B))).not.toBe('cancelled');
+    expect(registry.get('task-a', SCOPE_A).cancelledAt).toBeUndefined();
+    expect(registry.get('task-b', SCOPE_B).cancelledAt).toBeUndefined();
   });
 
   it('P0-A：inline 受理回执去编号：不含 taskNo，可引用指代是 taskId', async () => {

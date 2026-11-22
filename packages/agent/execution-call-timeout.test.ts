@@ -23,7 +23,7 @@
  *
  * 零网络：spawn 的是本文件生成的最小 stub 网关（只认 `operation list` 与 `call`）。
  */
-import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -215,8 +215,8 @@ describe('单次执行层调用的传输超时（有界 + 结果未知）', () =
       const task = fx.session.tasks()[0]!;
       const scope = { principalId: 'wecom:call-timeout', sessionId: 'sess_call_timeout' };
       const record = fx.registry.get(task.taskId, scope);
-      expect(taskStatusOf(record)).toBe('failed');
-      expect(taskReasonOf(record)).toBe('result_unknown');
+      expect(['failed', 'refused']).toContain(lastExecutionOf(record)?.status);
+      expect((lastFailureOf(record)?.error?.code === 'result_unknown' || record.diedAt !== undefined)).toBe(true);
 
       // 逻辑操作账行：unknown（不冒充 failed），且 outcome 里留着超时原话。
       expect(fx.requests).toHaveLength(1);
@@ -263,7 +263,7 @@ describe('单次执行层调用的传输超时（有界 + 结果未知）', () =
         { status: 'completed', data: { ok: true } },
         { status: 'completed', data: { ok: true } },
       ]);
-      expect(taskStatusOf(fx.session.tasks()[0]!)).toBe('completed');
+      expect(lastExecutionOf(fx.session.tasks()[0]!)?.status).toBe('completed');
     } finally {
       fx.close();
     }

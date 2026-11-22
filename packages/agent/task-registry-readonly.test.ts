@@ -10,7 +10,7 @@
  *
  * 库路径用临时目录（mkdtemp）；不触网、不碰真实平台。
  */
-import { taskStatusOf, taskReasonOf, taskFailureReasonOf } from './testing/task-fact-view';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -51,7 +51,7 @@ describe('任务底账只读打开（P1 任务查看）', () => {
     expect(reader.list().map((task) => task.taskId)).toEqual(['task_a', 'task_b']);
 
     const task = reader.get('task_a', scope);
-    expect(taskStatusOf(task)).toBe('completed');
+    expect(lastExecutionOf(task)?.status).toBe('completed');
     expect(task.resultText).toBe('已查询 beta：3 条。');
     expect(task.executions).toHaveLength(1);
     expect(task.executions[0]).toMatchObject({ operation: 'dummy.query', status: 'completed' });
