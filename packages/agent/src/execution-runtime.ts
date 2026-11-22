@@ -2076,67 +2076,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     return ref;
   }
 
-  /**
-   * 底账投影（2026-11-20 收口）：**封闭种类 + 结构化原因码 + 机械清理的业务摘要**。
-   *
-   * 口径 = 末次决定性结果（与 write-outcome 同一把尺）：task.status 已是回合结局，
-   * 已完成的末尾执行之后的前序失败只留在 executions 里审计，**不得**再冒出 failureKind /
-   * summary——「倒序找第一个 failed/refused」会让 completed 任务同时带失败视图（真 bug）。
-   *
-   * 三种形状：
-   *   · 完成 / 在跑 / 等待 / 取消 → 空视图（无 failureKind / outcomeKind / summary）；
-   *   · 失败且末条决定性执行是 failed/refused → 封闭 failureKind（码表归类）+ 业务摘要
-   *     （摘要只经 cleanExecutorDiagnostic 机械清理：剥技术码/路径/机构自称，不按词表替换）；
-   *   · 失败但没有决定性失败执行（空汇报：registry.fail 无 failed execution）→ 封闭
-   *     outcomeKind='no_report'，不恢复 failureReason 自由文本。
-   * result_unknown / timed_out 各给封闭 failureKind，同样不给摘要。
-   */
-  type ProjectedFailureView = {
-    failureKind?: UserFacingFailureKind;
-    outcomeKind?: 'no_report';
-    summary?: string;
-  };
-  function failureViewOfTask(task: TaskRecord): ProjectedFailureView {
-    // 末次决定性结果不是失败：不给任何失败字段（completed 任务不得带 failureKind/summary）。
-    if (task.status !== 'failed' && task.status !== 'timed_out') return {};
-    if (task.reason === 'result_unknown') return { failureKind: 'unknown_result' };
-    if (task.status === 'timed_out') return { failureKind: 'timed_out' };
-    // 只看末条决定性执行（倒序找失败会跳过成功的末条，把 completed 误报成失败）。
-    const decisive = task.executions[task.executions.length - 1];
-    if (decisive !== undefined
-      && (decisive.status === 'failed' || decisive.status === 'refused')
-      && decisive.error !== undefined) {
-      const summary = cleanExecutorDiagnostic(decisive.error.message).replace(/\s+/gu, ' ').trim();
-      return {
-        failureKind: classifyFailure({ code: decisive.error.code }),
-        ...(summary === '' ? {} : { summary }),
-      };
-    }
-    // 失败但没有决定性失败执行（空汇报/无执行行）：封闭原因码，替代被丢掉的自由文本原因。
-    return { failureKind: 'executor_failed', outcomeKind: 'no_report' };
-  }
-
-  /**
-   * 任务行只读投影：白名单字段，不含内部路径/租约/身份字段，也不含拼装的 failureReason 自由文本。
-   * 任务编号（taskNo）不进投影——它是内部形态；指代任务用业务名（name）与不透明任务引用
-   * （taskId），够用即可，不发明新形态。编号仍留在底账/通知 payload/日志里对账。
-   */
-  function statusView(task: TaskRecord): Record<string, unknown> {
-    const failure = failureViewOfTask(task);
-    return {
-      taskId: task.taskId,
-      name: task.name ?? deriveTaskName(task.request),
-      status: task.status,
-      ...(task.reason === undefined ? {} : { reason: task.reason }),
-      ...(failure.failureKind === undefined ? {} : { failureKind: failure.failureKind }),
-      ...(failure.outcomeKind === undefined ? {} : { outcomeKind: failure.outcomeKind }),
-      ...(task.pendingQuestion === undefined ? {} : { pendingQuestion: pendingQuestionView(task.pendingQuestion) }),
-      requestIds: task.executions.map((execution) => execution.requestId),
-      createdAt: task.createdAt,
-      updatedAt: task.updatedAt,
-    };
-  }
-
   function taskStatus(args: Record<string, unknown>): unknown {
     const ref = typeof args.ref === 'string' ? args.ref.trim() : '';
     if (ref === '') {
@@ -4484,17 +4423,6 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           },
         };
       };
-      /**
-       * 执行层业务写（2026-11-21 Grok 审查 blocking）：只有执行层声明的非只读操作才算
-       * 「业务写的决定性结果」。run_js 是宿主脚本工具，**不参与业务终局**：脚本成功不等于
-       * 用户的写落库（不得把失败的写/待补充收成 completed），脚本失败也不是「另一个写没成」
-       * （不得把已落库的写翻成 failed）。只有本回合没有任何业务写时（纯脚本回合、只读查询 +
-       * 脚本回合），脚本自己的末次结果才按执行事实参与判定——「查询成功 + 脚本失败 → failed」
-       * 的假绿锁不变（见 runtime-worker-run-js）。
-       */
-      const lastWritable = [...recorded].reverse().find(
-        (entry) => entry.operation !== RUN_JS_TOOL && !readOnlyOperations.has(entry.operation),
-      ) ?? [...recorded].reverse().find((entry) => !readOnlyOperations.has(entry.operation));
       if (lastWritable !== undefined && lastWritable.outcome.status === 'needs_confirmation') {
         return confirmationOutcomeOf(lastWritable);
       }

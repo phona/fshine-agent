@@ -169,64 +169,6 @@ export interface ExecutedFact {
   error?: ExecutionFailure;
 }
 
-/**
- * 完成判定（内存 / SQLite 共用，两实现逐项一致）：只看已记录的执行事实，不嗅探汇报文本。
- *   · 零条执行 → unexecuted（Worker 汇报了但没向执行层发起任何调用）；
- *   · **末条执行** completed → completed（末条是成功脚本 run_js 的例外见下）；
- *   · 末条执行非 completed → failed，failureReason 机械合成（取**末条**的 operation/status/
- *     error.message 原样；无 error.message 时以状态收尾）。
- * 为什么是「末条」而不是「首个非 completed」（2026-11-19 owner 修法）：执行层的参数形态反馈
- * 回路本就鼓励模型「改对参数再试一次」；改对后的成功是末次决定性结果，写已经落库，不得被前序
- * 失败整体判 failed（真模型写闭环实跑 5 次复现 2 次：写落库却告知失败并引导重试 → 重复写风险）。
- * 前序失败逐条保留在 executions 里（审计可查、可追溯），只是不改写终局。末条仍是失败 → 照旧
- * failed（不放宽；「只要有一次成功过就算成功」的万金油不成立）。result_unknown 不是成功，
- * 也不属于本判定的收窄面。
- * 2026-11-21 增补（Grok 审查 blocking 的 inline 面）：run_js 是宿主脚本执行，不是执行层业务
- * 执行——末条是**成功的脚本**时，业务终局回到此前最后一条非脚本执行事实（执行层失败/needs_input
- * 不得被脚本成功盖成 completed；脚本失败行本身仍如实保留）。只收窄这一个方向，见函数内注释。
- * 局限（如实登记）：inline 判定只拿到执行事实投影（无只读集合、无调用参数），无法区分读写、
- * 也无法做「成功后同对象重复尝试 / 另一个写没成」的归类，因此以**末条执行事实**为准；后台单回合
- * 执行器（execution-runtime）知道只读集合与参数，以「末次决定性结果 + 成功后按同对象分类」为准，
- * 并在 run_js 上双向收窄（成功脚本不盖失败的写、失败脚本不翻已落库的写）。
- * 为什么不是无条件 completed：Worker 以汇报结束不等于执行层成功——「执行层实际成功 /
- * 拒绝或失败 / 未发起执行」必须在顶层 status 上可区分（B 类如实交付）。
- *
- * P2a 冻结语义（E05/E06）不变；waiting_user 由后台路径的 waitForUser 单独进入，
- * 本函数仅服务于 inline complete 的终态判定。
- */
-export function judgeReportedTask(executions: readonly ExecutedFact[]): {
-  status: 'completed' | 'failed' | 'unexecuted';
-  failureReason?: string;
-} {
-  const last = executions[executions.length - 1];
-  if (last === undefined) {
-    return {
-      status: 'unexecuted',
-      failureReason: '没有实际办理：助手已汇报，但这次交办没有发出任何办理动作。',
-    };
-  }
-  /**
-   * 2026-11-21（Grok 审查 blocking 的 inline 面）：run_js 是宿主脚本执行，不是执行层业务
-   * 执行。末条是**成功的脚本**时，业务终局回到此前最后一条非脚本执行事实——执行层失败
-   * （或 needs_input）不得被随后的脚本成功盖成 completed（同后台单回合执行器同口径）。
-   * 只收窄这一个方向：脚本之间（[run_js failed, run_js completed]）仍按末条决定；脚本失败
-   * 仍是真实失败事实（末条 failed run_js → failed 不变）——inline 拿不到只读集合，无法区分
-   * 前序 completed 是读还是写，而「查询成功 + 脚本失败 → failed」是冻结用例
-   * （runtime-worker-run-js），不得放宽。
-   */
-  const decisive = last.operation === RUN_JS_OPERATION && last.status === 'completed'
-    ? [...executions].reverse().find((entry) => entry.operation !== RUN_JS_OPERATION) ?? last
-    : last;
-  if (decisive.status === 'completed') return { status: 'completed' };
-  const message = decisive.error?.message ?? '';
-  return {
-    status: 'failed',
-    failureReason: message === ''
-      ? `没办成：${decisive.operation} 返回 ${decisive.status}。`
-      : `没办成：${decisive.operation} 返回 ${decisive.status}：${message}`,
-  };
-}
-
 /** 一条最小任务底账：归属 + 状态 + 机械原因/等待形状/租约 + 结果文本 + 执行调用清单。 */
 export interface TaskRecord {
   taskId: string;
@@ -234,11 +176,7 @@ export interface TaskRecord {
   sessionId: string;
   /** 委派原文（任务请求；审计与结果解释用；业务名称的机械来源）。 */
   request: string;
-  status: TaskStatus;
-  /** 机械终止原因（cancelled_by_user/timeout/failed_confirmed/result_unknown/resource_limited）。 */
-  reason?: TaskReason;
   resultText?: string;
-  failureReason?: string;
   /** waiting_user：待用户补齐的问题（原样持久化；答复后清除，等待超时保留为历史）。 */
   pendingQuestion?: PendingQuestion;
   /** waiting_user：进入等待的时刻（ISO）。 */

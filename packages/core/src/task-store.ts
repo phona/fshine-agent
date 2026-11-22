@@ -96,12 +96,7 @@ export interface TaskRow {
   principalId: string;
   sessionId: string;
   request: string;
-  /** 'queued' | 'running' | 'waiting_user' | 'cancelling' | 'cancelled' | 'completed' | 'failed' | 'timed_out' | 'unexecuted'（registry 侧取值）。 */
-  status: string;
   resultText?: string;
-  failureReason?: string;
-  /** P2a：机械终止原因（TaskReason；与 failure_reason 分工）。 */
-  reason?: string;
   /** P2a：waiting_user 的问题形状（PendingQuestion，JSON 存读；缺省=非等待）。 */
   pendingQuestion?: unknown;
   /** P2a：进入等待的时刻（ISO）。 */
@@ -283,10 +278,7 @@ export type InboundClaimOutcome =
 export interface TaskStateWrite {
   /** 期望的当前状态：不匹配（并发已变化）则不写、返回 false。 */
   expectedStatus: string;
-  status: string;
-  reason?: string | null;
   resultText?: string | null;
-  failureReason?: string | null;
   /** PendingQuestion（本层 JSON 编码）；undefined/null = NULL（无等待形状）。 */
   pendingQuestion?: unknown;
   waitingSince?: string | null;
@@ -455,15 +447,12 @@ CREATE TABLE IF NOT EXISTS tasks (
   principal_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
   request TEXT NOT NULL,
-  status TEXT NOT NULL,
   result_text TEXT,
-  failure_reason TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   task_no INTEGER,
   name TEXT,
   reply_text TEXT,
-  reason TEXT,
   pending_question TEXT,
   waiting_since TEXT,
   lease_owner TEXT,
@@ -546,7 +535,6 @@ const TASK_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   ['task_no', 'INTEGER'],
   ['name', 'TEXT'],
   ['reply_text', 'TEXT'],
-  ['reason', 'TEXT'],
   ['pending_question', 'TEXT'],
   ['waiting_since', 'TEXT'],
   ['lease_owner', 'TEXT'],
@@ -565,13 +553,10 @@ interface TaskDbRow {
   principal_id: string;
   session_id: string;
   request: string;
-  status: string;
   result_text: string | null;
-  failure_reason: string | null;
   task_no?: number | null;
   name?: string | null;
   reply_text?: string | null;
-  reason?: string | null;
   pending_question?: string | null;
   waiting_since?: string | null;
   lease_owner?: string | null;
@@ -779,11 +764,11 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   const insertTaskStmt = hasTaskNoColumn
     ? db.prepare(`
         INSERT INTO tasks (
-          task_id, principal_id, session_id, request, status, result_text, failure_reason, created_at, updated_at,
+          task_id, principal_id, session_id, request, result_text, created_at, updated_at,
           task_no, name, reply_text
         )
         VALUES (
-          @taskId, @principalId, @sessionId, @request, @status, @resultText, @failureReason, @createdAt, @updatedAt,
+          @taskId, @principalId, @sessionId, @request, @resultText, @createdAt, @updatedAt,
           @taskNo, @name, @replyText
         )
       `)
@@ -798,9 +783,7 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
       principalId: string;
       sessionId: string;
       request: string;
-      status: string;
       resultText: string | null;
-      failureReason: string | null;
       createdAt: string;
       updatedAt: string;
       name: string | null;
@@ -818,10 +801,7 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   const applyState = hasLifecycleColumns
     ? db.prepare(`
         UPDATE tasks
-        SET status = @status,
-            reason = @reason,
-            result_text = @resultText,
-            failure_reason = @failureReason,
+        SET result_text = @resultText,
             pending_question = @pendingQuestionJson,
             waiting_since = @waitingSince,
             lease_owner = @leaseOwner,
@@ -1102,11 +1082,8 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     principalId: row.principal_id,
     sessionId: row.session_id,
     request: row.request,
-    status: row.status,
     ...(row.result_text === null ? {} : { resultText: row.result_text }),
-    ...(row.failure_reason === null ? {} : { failureReason: row.failure_reason }),
     // P2a 列（旧库只读未迁移时为 undefined：读出缺省，不崩溃）。
-    ...(row.reason === null || row.reason === undefined ? {} : { reason: row.reason }),
     // JSON 解析失败即抛出（存储损坏必须可见，不静默吞成 undefined）。
     ...(row.pending_question === null || row.pending_question === undefined
       ? {}
@@ -1189,9 +1166,7 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         principalId: row.principalId,
         sessionId: row.sessionId,
         request: row.request,
-        status: row.status,
         resultText: row.resultText ?? null,
-        failureReason: row.failureReason ?? null,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
         name: row.name ?? null,
@@ -1207,10 +1182,7 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
       return applyState.run({
         taskId,
         expectedStatus: state.expectedStatus,
-        status: state.status,
-        reason: state.reason ?? null,
         resultText: state.resultText ?? null,
-        failureReason: state.failureReason ?? null,
         pendingQuestionJson: state.pendingQuestion === undefined || state.pendingQuestion === null
           ? null
           : JSON.stringify(state.pendingQuestion),

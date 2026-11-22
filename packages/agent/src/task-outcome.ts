@@ -66,50 +66,6 @@ function isPermissionReject(execution: OutcomeExecution): boolean {
 }
 
 /**
- * 机械分类器：任务底账事实 → 五值之一。表驱动、无副作用、无话术。
- */
-export function classifyOutcome(ledger: OutcomeLedger): TaskOutcome {
-  const { executions, terminal } = ledger;
-
-  // ——零执行：先判「有能力但缺条件」，再判「根本没有这件事」——
-  if (executions.length === 0) {
-    // B3 结构化原因码优先：宿主/执行层传下来的码，不看任何文案（如「权限」字样）。
-    if (ledger.outcomeReasonCode === OUTCOME_REASON_NOT_PERMITTED) return 'blocked';
-    if (ledger.outcomeReasonCode === OUTCOME_REASON_UNSUPPORTED) return 'unsupported';
-    // 权限拒绝（本次不允许）或等用户补信息（用户没答）→ blocked，绝不是 unsupported。
-    if (ledger.zeroReason === 'permission_denied' || ledger.zeroReason === 'awaiting_user') return 'blocked';
-    if (terminal === 'waiting_user') return 'blocked';
-    if ((terminal === 'failed' || terminal === 'timed_out')
-      && ledger.reasonCode !== undefined && PERMISSION_REJECT_CODES.has(ledger.reasonCode)) return 'blocked';
-    // 零执行且不是权限拒绝/等待 → 目录里根本没有这件事（没有办理动作发生）。
-    return 'unsupported';
-  }
-
-  // ——有执行：终态失败优先（执行发生过且终态失败 → failed）——
-  // 末条执行 = 决定性结果（先失败后成功 → completed；末条 completed 不被前序失败翻转）。
-  const decisive = executions[executions.length - 1]!;
-  if (terminal === 'failed' || terminal === 'timed_out') return 'failed';
-  if (decisive.status === 'failed' || decisive.status === 'refused' || decisive.status === 'result_unknown') {
-    return 'failed';
-  }
-
-  // 等用户补信息（有执行，卡在 needs_input / needs_confirmation / waiting_user） → blocked。
-  if (decisive.status === 'needs_input' || decisive.status === 'needs_confirmation' || terminal === 'waiting_user') {
-    return 'blocked';
-  }
-
-  // partial：completed 且 items 里有失败/未知项（无 items = 正常完成）。
-  if (terminal === 'completed') {
-    const completedItems = executions
-      .filter((execution) => execution.status === 'completed')
-      .flatMap((execution) => execution.items ?? []);
-    if (completedItems.some((item) => item.status === 'failed' || item.status === 'unknown')) return 'partial';
-  }
-
-  return 'completed';
-}
-
-/**
  * B3：把「没有这个能力」与「这次不允许」拆成两个**可辨的事实 + 原因码**。
  *
  * 旧 `OPERATION_NOT_PERMITTED_MESSAGE` 同时用于两种情形，用户被混为一谈：

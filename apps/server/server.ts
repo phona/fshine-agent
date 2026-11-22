@@ -559,25 +559,6 @@ export function turnProducedNothing(input: {
     && input.taskIds.length === 0;
 }
 
-/**
- * 失败投递的末次决定性失败码（2026-11-21，独立审查 blocking 修复的配套）：
- * 倒序取**最后一条** failed/refused 且带非空 error.code 的执行行。
- * 不能取第一条——先被 CONFIRMATION_REQUIRED 拒、后才是真正失败码时，首条会把分类引到
- * 「等确认」或「我方故障」，与任务实际终局相反（与 execution-runtime 的 P0 同口径）。
- */
-export function lastDecisiveFailureCode(
-  executions: ReadonlyArray<{ status?: string; error?: { code?: string } }>,
-): string | undefined {
-  for (let index = executions.length - 1; index >= 0; index -= 1) {
-    const execution = executions[index];
-    if (execution === undefined) continue;
-    if (execution.status !== 'failed' && execution.status !== 'refused') continue;
-    const code = execution.error?.code;
-    if (typeof code === 'string' && code !== '') return code;
-  }
-  return undefined;
-}
-
 export async function createServer(deps: ServerDeps): Promise<Server> {
   const { id: profileId, profile } = resolveSingleProfile(deps.config);
   if (profile.gateway === undefined && deps.createExecutionFace === undefined) {
