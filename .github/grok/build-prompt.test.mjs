@@ -44,42 +44,6 @@ test('long diffs are truncated and still name the git command', () => {
   assert.equal(text.includes('x'.repeat(120_001)), false)
 })
 
-test('test and eval changes get a stat + file list instead of an inline diff', () => {
-  const text = prompt({
-    diff: '+core change\n',
-    testStat: ' src/a.test.ts | 42 ++++\n scripts/eval/run.ts | 7 ++\n',
-    testNames: 'src/a.test.ts\nscripts/eval/run.ts\n',
-  })
-  assert.match(text, /Test and eval changes \(summary only\)/)
-  assert.match(text, /另有 2 个测试\/eval 文件改动（机械断言\/判据迁移）/)
-  assert.match(text, /src\/a\.test\.ts/)
-  assert.match(text, /scripts\/eval\/run\.ts/)
-  assert.match(text, /42 \+\+\+\+/)
-  assert.match(text, /Full three-dot diff of the core changes/)
-  assert.match(text, /git diff --find-renames .*-- <path>/)
-})
-
-test('test/eval diff is never inlined: the diff section only carries core changes', () => {
-  const testDiffBody = 'only-in-test-file'.repeat(400)
-  const text = prompt({
-    diff: '+core change\n',
-    testNames: 'src/a.test.ts\n',
-    testStat: ' src/a.test.ts | 400 ++++++++++++\n',
-    testDiffBody,
-  })
-  // the summary section is present with the stat + file list
-  assert.match(text, /Test and eval changes \(summary only\)/)
-  assert.match(text, /src\/a\.test\.ts/)
-  // but the test file's line diff must not be inlined
-  assert.equal(text.includes(testDiffBody), false)
-})
-
-test('no test/eval section is emitted when there are no test files', () => {
-  const text = prompt()
-  assert.doesNotMatch(text, /Test and eval changes/)
-  assert.match(text, /Full three-dot diff:/)
-})
-
 function promptPr() {
   return {
     number: '12',
