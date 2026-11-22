@@ -234,7 +234,7 @@ async function makeFixture(mode: WakeMode): Promise<Fixture> {
     face,
     recorded,
     close: async () => {
-      executor.settle({ kind: 'failed', reason: '（测试清理）' });
+      executor.settle({ kind: 'ended' });
       await fixture.server.close();
     },
   };
@@ -329,7 +329,7 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
     const fx = await makeFixture('line');
     try {
       await fx.server.handler(incoming('m-1', ASK));
-      fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
+      fx.executor.settle({ kind: 'ended', report: '汇总完成，共 3 条。' });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
 
       const text = fx.delivery.sentTexts[0]!.text;
@@ -373,7 +373,7 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
     const fx = await makeFixture('echo');
     try {
       await fx.server.handler(incoming('m-1', ASK));
-      fx.executor.settle({ kind: 'completed', resultText: LONG_RESULT });
+      fx.executor.settle({ kind: 'ended', report: LONG_RESULT });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
       const text = fx.delivery.sentTexts[0]!.text;
       expect(text).toBe(LONG_RESULT);
@@ -389,7 +389,7 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
     const fx = await makeFixture('empty');
     try {
       await fx.server.handler(incoming('m-1', ASK));
-      fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
+      fx.executor.settle({ kind: 'ended', report: '汇总完成，共 3 条。' });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
       const text = fx.delivery.sentTexts[0]!.text;
       // 2026-11-19 复核 F2：任务**已经完成**——兜底不得说「我这边没弄好 / 再试一次」
@@ -411,7 +411,7 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
     const fx = await makeFixture('no-wake');
     try {
       await fx.server.handler(incoming('m-1', ASK));
-      fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
+      fx.executor.settle({ kind: 'ended', report: '汇总完成，共 3 条。' });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
       const text = fx.delivery.sentTexts[0]!.text;
       expect(text).toContain(TASK_NAME);
@@ -431,7 +431,7 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
     const fx = await makeFixture('tool-only');
     try {
       await fx.server.handler(incoming('m-1', ASK));
-      fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
+      fx.executor.settle({ kind: 'ended', report: '汇总完成，共 3 条。' });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
 
       const text = fx.delivery.sentTexts[0]!.text;
@@ -453,7 +453,8 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
       expect(fx.face.calls).toBe(0);
       const ro = createSqliteTaskRegistry(fx.dbPath, { readOnly: true });
       try {
-        expect(ro.get(taskId, SCOPE).status).toBe('completed');
+        // S1 事实模型：底账没有 status——汇报已存档即「办完」的账本事实（发给用户的完成消息）。
+        expect(ro.get(taskId, SCOPE).replyText).toBe('汇总完成，共 3 条。');
       } finally {
         ro.close();
       }
@@ -469,7 +470,7 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
     const fx = await makeFixture('named');
     try {
       await fx.server.handler(incoming('m-1', ASK));
-      fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
+      fx.executor.settle({ kind: 'ended', report: '汇总完成，共 3 条。' });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
       const text = fx.delivery.sentTexts[0]!.text;
       expect(text, '用户可见文本必须能看出是哪件事').toContain(TASK_NAME);
@@ -490,7 +491,7 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
       await fx.server.handler(incoming('m-1', ASK));
       const callsAfterAsk = fx.scripted!.calls();
       expect(callsAfterAsk).toBeGreaterThan(0);
-      fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
+      fx.executor.settle({ kind: 'ended', report: '汇总完成，共 3 条。' });
       // 既有抑制记账照旧（deliveryMode: silent），只是唤醒不再发生。
       await vi.waitFor(() => {
         expect(fx.logs.some((line) => line['event'] === 'task_result_delivery_suppressed' && line['deliveryMode'] === 'silent')).toBe(true);
@@ -526,7 +527,7 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
     const fx = await makeFixture('send-fail');
     try {
       await fx.server.handler(incoming('m-1', ASK));
-      fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
+      fx.executor.settle({ kind: 'ended', report: '汇总完成，共 3 条。' });
       await vi.waitFor(() => {
         expect(fx.logs.some((line) => line['event'] === 'task_result_delivery_failed')).toBe(true);
       }, { timeout: 10_000 });
@@ -551,7 +552,7 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
     const fx = await makeFixture('line');
     try {
       await fx.server.handler(incoming('m-1', ASK));
-      fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
+      fx.executor.settle({ kind: 'ended', report: '汇总完成，共 3 条。' });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
       expect(fx.logs.some((line) => line['event'] === 'task_result_delivery_requeued')).toBe(false);
 
@@ -574,7 +575,7 @@ describe('注入核销（机械判据）：本回合没有用户可见输出 →
     try {
       // 完成 → 唤醒不可用（驱动无唤醒能力）→ 完成事实进「待注入」队列。
       await fx.server.handler(incoming('m-1', ASK));
-      fx.executor.settle({ kind: 'completed', resultText: '汇总完成，共 3 条。' });
+      fx.executor.settle({ kind: 'ended', report: '汇总完成，共 3 条。' });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
 
       // 第二回合：事实已注入，但模型一个可见字都没产出（空回复）→ 回合失败，事实不核销。

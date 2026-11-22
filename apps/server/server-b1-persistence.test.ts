@@ -242,7 +242,7 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
     const scope = { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' };
 
     const rec1: DriverMessage[][] = [];
-    const executor1 = new CountingExecutor([async () => ({ kind: 'completed', resultText: 'W202611：documents 共 3 条。' })]);
+    const executor1 = new CountingExecutor([async () => ({ kind: 'ended', report: 'W202611：documents 共 3 条。' })]);
     const server1 = await createServer({
       env: { LLM_MODEL: 'test-model' },
       config: testConfig(),
@@ -267,7 +267,8 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
         await vi.waitFor(() => {
           const tasks = ro1.list(scope);
           expect(tasks).toHaveLength(1);
-          expect(tasks[0]!.status).toBe('completed');
+          // S1 事实模型：底账没有 status——汇报已存档即「完成」的账本事实。
+          expect((tasks[0]!.replyText ?? tasks[0]!.resultText ?? '').trim()).not.toBe('');
         });
         taskId = ro1.list(scope)[0]!.taskId;
         expect(ro1.list(scope)[0]!.replyText).toBe('W202611：documents 共 3 条。');
@@ -305,7 +306,7 @@ describe('B1 server 级：进程重启恢复与隔离（四类确定性验证）
       expect(replayExecutor.calls).toBe(0);
       // 结果找回：重启后经 Task Registry 取回首回合真实结果（逐字 archiveReply 存档）。
       const task = ro2.get(taskId, scope);
-      expect(task.status).toBe('completed');
+      expect((task.replyText ?? '').trim()).not.toBe('');
       expect(task.replyText).toBe('W202611：documents 共 3 条。');
     } finally {
       ro2.close();

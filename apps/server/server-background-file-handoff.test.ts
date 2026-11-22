@@ -199,7 +199,8 @@ describe('background 渠道 + 附件交办（createServer 默认装配 + 真 dum
 
       // ③ 后台任务落定（真 dummy 执行）。
       await vi.waitFor(() => expect(fx.outcomes).toHaveLength(1), { timeout: 20_000 });
-      await vi.waitFor(() => expect(registry.get(taskId, SCOPE).status).toBe('completed'), { timeout: 20_000 });
+      // S1 事实模型：底账没有 status——后台汇报已存档即「办完」的账本事实。
+      await vi.waitFor(() => expect(((registry.get(taskId, SCOPE).replyText ?? registry.get(taskId, SCOPE).resultText) ?? '').trim()).not.toBe(''), { timeout: 20_000 });
 
       // ④ Worker 委派带任务文件清单（副本 fileId），不含 Main 源 fileId。
       const rows = registry.store.listFileRefs(SCOPE);

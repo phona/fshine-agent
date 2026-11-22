@@ -45,7 +45,7 @@ import type { TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/sr
 import { openTaskStore } from '@fshine/core';
 import { createServer, deliverTurnFilesCore, turnProducedNothing, type FileDeliveryPort } from './server';
 import { echoCompletionWake } from './testing/echo-completion-wake';
-import { failureTextFor } from './task-completion-delivery';
+import { failureKindFor } from './task-completion-delivery';
 import { failureMessageFor } from '../../packages/agent/src/user-facing-failure';
 
 const FIXTURE_ROOT = path.resolve(__dirname, '..', '..', 'scripts', 'eval', 'fixtures', 'dummy-platform');
@@ -721,10 +721,11 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
         allowedOperations: ['dummy.query'],
         readOnlyOperations: ['dummy.query'],
       }),
-      // 假后台执行器：终局失败（Worker 失败汇报原文只进 reason，不进用户文本）。
+      // 假后台执行器：回合无汇报收尾（S1：执行行就是事实；回合失败事实由 runner 发，
+      // 用户文本走既有失败话术，不进 Worker 原文）。
       taskExecutor: {
         async execute(): Promise<TaskExecutionOutcome> {
-          return { kind: 'failed', reason: '执行层未成功：dummy.query 返回 failed：gateway crashed with exit 2（COLLECTION_FAULT）' };
+          return { kind: 'ended' };
         },
       },
       fileDelivery: port,
@@ -872,20 +873,20 @@ describe('交付角色闸（方案 A）', () => {
   });
 });
 
-describe('失败投递话术（failureTextFor）：失败路径不得给出「需要你确认/补充」类假承诺', () => {
-  it('CONFIRMATION_REQUIRED（被挡码）→ 不说「点个头」，改判 host_fault（我方故障）', () => {
+describe('失败归类（failureKindFor）：失败路径不得给出「需要你确认/补充」类假承诺', () => {
+  it('CONFIRMATION_REQUIRED（被挡码）→ 归类 host_fault（我方故障），话术不含确认/补充', () => {
     // 失败终局没有等待中的提案、也没有有效句柄/可接续任务：说「确认」是假承诺
     //（用户点了什么都不会发生，比不说更糟）。归到 host_fault（唯一话术来源）。
-    const text = failureTextFor('CONFIRMATION_REQUIRED');
+    expect(failureKindFor('CONFIRMATION_REQUIRED')).toBe('host_fault');
+    const text = failureMessageFor(failureKindFor('CONFIRMATION_REQUIRED')).text;
     expect(text).not.toContain('确认');
     expect(text).not.toContain('补充');
-    expect(text).toBe(failureMessageFor('host_fault').text);
   });
 
   it('真实业务码保持原归类（不被 host_fault 吞掉）——回归钉', () => {
-    expect(failureTextFor('COLLECTION_NOT_FOUND')).toBe(failureMessageFor('not_found').text);
-    expect(failureTextFor('GATE_REFUSE')).toBe(failureMessageFor('denied').text);
+    expect(failureKindFor('COLLECTION_NOT_FOUND')).toBe('not_found');
+    expect(failureKindFor('GATE_REFUSE')).toBe('denied');
     // result_unknown 状态优先于码。
-    expect(failureTextFor(undefined, 'result_unknown')).toBe(failureMessageFor('unknown_result').text);
+    expect(failureKindFor(undefined, 'result_unknown')).toBe('unknown_result');
   });
 });

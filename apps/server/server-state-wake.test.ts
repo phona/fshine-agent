@@ -31,10 +31,11 @@ import type { TurnDriver, TurnDriverInput } from '../../packages/agent/src/drive
 import { createPiTurnDriver } from '../../packages/agent/src/pi-driver';
 import { createScriptedModelRuntime, type ScriptedModelRuntime } from '../../packages/agent/testing/scripted-model-runtime';
 import type { Notification, NotificationSink } from '../../packages/agent/src/notifications';
-import { deriveTaskName } from '../../packages/agent/src/task-registry';
+import { deriveTaskName, taskLivenessOf, taskStateWordOf } from '../../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import {
   LONG_RUNNING_NOTICE_FALLBACK_TEXT,
+  type TaskExecutionContext,
   type TaskExecutionInput,
   type TaskExecutionOutcome,
   type TaskExecutor,
@@ -117,9 +118,14 @@ class NoopSink implements NotificationSink {
 /** 受闸执行器：结局由用例控制（settle）；`hanging` 模式永不落定（久无动静用例）。 */
 class GatedExecutor implements TaskExecutor {
   calls = 0;
+  /** 取消请求观察点：cancel() 会 abort 本回合的 controller——用例据此同步「取消已请求」。 */
+  aborted = false;
   private resolve?: (outcome: TaskExecutionOutcome) => void;
-  async execute(_input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
+  async execute(_input: TaskExecutionInput, context: TaskExecutionContext): Promise<TaskExecutionOutcome> {
     this.calls += 1;
+    context.signal.addEventListener('abort', () => {
+      this.aborted = true;
+    });
     return await new Promise<TaskExecutionOutcome>((resolve) => {
       this.resolve = resolve;
     });
@@ -249,8 +255,6 @@ async function makeFixture(mode: Mode, options: {
   runtimeOverrides?: Partial<NonNullable<AppConfig['runtime']>>;
   /** 预置一条「上一进程死在回合里、租约已过期」的 running 行（重启对账用例）。 */
   seedInterrupted?: boolean;
-  /** 预置一条「用户说了停、执行端没确认就断电」的 cancelling 行（取消孤儿；审计 #14）。 */
-  seedCancelling?: boolean;
   /** 投递面模式（缺省 live；silent = 非 live 部署的抑制语义）。 */
   deliveryMode?: 'live' | 'silent';
   /** 执行器替身覆盖（缺省 = 受闸的 GatedExecutor；抛错回合用例用）。 */
@@ -266,30 +270,13 @@ async function makeFixture(mode: Mode, options: {
   if (options.seedInterrupted === true) {
     const registry = createSqliteTaskRegistry(dbPath);
     try {
-      registry.begin({ taskId: 'task_interrupted', ...SCOPE, request: TASK_TEXT });
-      // 补一条**已经过期**的租约：形状 = 上一进程死在回合中（本进程重启后 pump 的
-      // expireLeases 如实把它落 result_unknown，不重放）。
-      registry.store.applyTaskState('task_interrupted', {
-        expectedStatus: 'running',
-        status: 'running',
-        leaseOwner: 'dead-process',
+      // 受理为 queued（无 running_since）后补一条**已经过期**的租约：形状 = 上一进程死在回合中
+      //（本进程重启后 pump 的 expireLeases 如实把它落 died，不重放）。
+      registry.begin({ taskId: 'task_interrupted', ...SCOPE, request: TASK_TEXT, queued: true });
+      registry.store.armLease('task_interrupted', {
+        owner: 'dead-process',
         leaseUntil: new Date(Date.now() - 1_000).toISOString(),
         updatedAt: new Date(Date.now() - 60_000).toISOString(),
-      });
-    } finally {
-      registry.close();
-    }
-  }
-  if (options.seedCancelling === true) {
-    const registry = createSqliteTaskRegistry(dbPath);
-    try {
-      registry.begin({ taskId: 'task_cancelling_orphan', ...SCOPE, request: TASK_TEXT });
-      registry.requestCancel('task_cancelling_orphan');
-      // 取消请求时刻推到一个租约窗口之前：形状 = 断电遗留（不是本进程正在确认的取消）。
-      registry.store.applyTaskState('task_cancelling_orphan', {
-        expectedStatus: 'cancelling',
-        status: 'cancelling',
-        updatedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
       });
     } finally {
       registry.close();
@@ -310,7 +297,7 @@ async function makeFixture(mode: Mode, options: {
     face,
     recorded,
     close: async () => {
-      executor.settle({ kind: 'failed', reason: '（测试清理）' });
+      executor.settle({ kind: 'ended' });
       // 让收尾回合链跑完再关库（否则挂起回合在已关的底账上收尾，吐噪声）。
       await new Promise((resolve) => setTimeout(resolve, 30));
       await fixture.server.close();
@@ -412,11 +399,11 @@ async function makeFixture(mode: Mode, options: {
   return fixture;
 }
 
-function readTask(dbPath: string, taskId: string): { status: string; reason?: string } {
+/** 读一条任务的机械事实词（S1：底账没有 status——用 taskStateWordOf 从账本事实推导）。 */
+function readTask(dbPath: string, taskId: string): { status: ReturnType<typeof taskStateWordOf> } {
   const registry = createSqliteTaskRegistry(dbPath, { readOnly: true });
   try {
-    const record = registry.get(taskId, SCOPE);
-    return { status: record.status, ...(record.reason === undefined ? {} : { reason: record.reason }) };
+    return { status: taskStateWordOf(registry.get(taskId, SCOPE)) };
   } finally {
     registry.close();
   }
@@ -426,8 +413,8 @@ function readTask(dbPath: string, taskId: string): { status: string; reason?: st
 function runningTaskIdOf(dbPath: string): string {
   const registry = createSqliteTaskRegistry(dbPath, { readOnly: true });
   try {
-    const running = registry.list(SCOPE).find((task) => task.status === 'running');
-    if (running === undefined) throw new Error('（测试）没有 running 状态的任务');
+    const running = registry.list(SCOPE).find((task) => taskLivenessOf(task) === 'running');
+    if (running === undefined) throw new Error('（测试）没有在跑的任务');
     return running.taskId;
   } finally {
     registry.close();
@@ -463,7 +450,7 @@ describe('状态变化唤醒（server 级）：失败', () => {
     const fx = await makeFixture('line');
     try {
       await fx.server.handler(incoming('m-1', ASK));
-      fx.executor.settle({ kind: 'failed', reason: FAIL_REASON });
+      fx.executor.settle({ kind: 'ended' });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
 
       const text = fx.delivery.sentTexts[0]!.text;
@@ -505,7 +492,7 @@ describe('状态变化唤醒（server 级）：失败', () => {
     const fx = await makeFixture('tool-only');
     try {
       await fx.server.handler(incoming('m-1', ASK));
-      fx.executor.settle({ kind: 'failed', reason: FAIL_REASON });
+      fx.executor.settle({ kind: 'ended' });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
 
       const text = fx.delivery.sentTexts[0]!.text;
@@ -553,7 +540,7 @@ describe('状态变化唤醒（server 级）：失败', () => {
     const fx = await makeFixture('line');
     try {
       await fx.server.handler(incoming('m-1', ASK));
-      fx.executor.settle({ kind: 'failed', reason: FAIL_REASON });
+      fx.executor.settle({ kind: 'ended' });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
       await fx.server.handler(incoming('m-2', '然后呢'));
       const requests = fx.scripted!.requests();
@@ -570,7 +557,7 @@ describe('状态变化唤醒（server 级）：失败', () => {
     const fx = await makeFixture('no-wake');
     try {
       await fx.server.handler(incoming('m-1', ASK));
-      fx.executor.settle({ kind: 'failed', reason: FAIL_REASON });
+      fx.executor.settle({ kind: 'ended' });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
       expect(fx.delivery.sentTexts[0]!.text).toBe(failureMessageFor('executor_failed').text);
       expect(wakeEventOf(fx.logs, 'task_failure_wake')).toMatchObject({ outcome: 'unavailable' });
@@ -597,7 +584,7 @@ describe('状态变化唤醒（server 级）：用户说停', () => {
       expect(internalTermIn(text)).toBeUndefined();
       const wake = wakeEventOf(fx.logs, 'task_cancel_wake');
       expect(wake).toMatchObject({ outcome: 'woken' });
-      expect(readTask(fx.dbPath, String(wake!['taskId']))).toMatchObject({ status: 'cancelled', reason: 'cancelled_by_user' });
+      expect(readTask(fx.dbPath, String(wake!['taskId']))).toMatchObject({ status: 'cancelled' });
       // 唤醒已说 → 下一回合 B 通道不再注入同一条事实（同一件事不说两遍）。
       await fx.server.handler(incoming('m-2', '然后呢'));
       const requests = fx.scripted!.requests();
@@ -655,7 +642,7 @@ describe('状态变化唤醒（server 级）：回合内终态不重复唤醒（
       const taskId = runningTaskIdOf(fx.dbPath);
       // 本回合取消：执行端确认落在 task_cancel 的等待窗口内（终态在回合内落定）。
       const stopTurn = fx.server.handler(incoming('m-2', STOP_MESSAGE));
-      await vi.waitFor(() => expect(taskStatusIs(fx.dbPath, taskId, 'cancelling')).toBe(true), { timeout: 5_000 });
+      await vi.waitFor(() => expect(fx.executor.aborted).toBe(true), { timeout: 5_000 });
       fx.executor.settle({ kind: 'cancelled' });
       const reply = await stopTurn;
       // 稳定：稍等片刻也不蹦出第二条（同一事实 ≤ 1 次；反向绊线——去掉抑制核销——这里
@@ -675,7 +662,7 @@ describe('状态变化唤醒（server 级）：回合内终态不重复唤醒（
         principalId: PRINCIPAL,
         sessionId: SESSION,
       });
-      expect(readTask(fx.dbPath, taskId)).toMatchObject({ status: 'cancelled', reason: 'cancelled_by_user' });
+      expect(readTask(fx.dbPath, taskId)).toMatchObject({ status: 'cancelled' });
       expect(fx.executor.calls).toBe(1);
     } finally {
       await fx.close();
@@ -691,7 +678,7 @@ describe('状态变化唤醒（server 级）：回合内终态不重复唤醒（
       await fx.server.handler(incoming('m-1', ASK));
       const taskId = runningTaskIdOf(fx.dbPath);
       const stopTurn = fx.server.handler(incoming('m-2', STOP_MESSAGE));
-      await vi.waitFor(() => expect(taskStatusIs(fx.dbPath, taskId, 'cancelling')).toBe(true), { timeout: 5_000 });
+      await vi.waitFor(() => expect(fx.executor.aborted).toBe(true), { timeout: 5_000 });
       fx.executor.settle({ kind: 'cancelled' });
       // 纯取消回合 + 模型沉默：无正文、无文件、无交办 → 回合按模型侧失败判（既有出口）。
       await expect(stopTurn).rejects.toThrow();
@@ -802,7 +789,7 @@ describe('状态变化唤醒（server 级）：重启对账', () => {
       expect(requestHasUserText(fx.scripted!.requests(), '[重启对账]')
         && fx.scripted!.requests().some((request) => userTextOf(request.messages[request.messages.length - 1]).startsWith('[重启对账]'))).toBe(true);
       // 不重放：如实落 result_unknown（任务终局 failed），执行器一次都没被叫。
-      expect(readTask(fx.dbPath, 'task_interrupted')).toEqual({ status: 'failed', reason: 'result_unknown' });
+      expect(readTask(fx.dbPath, 'task_interrupted')).toEqual({ status: 'died' });
       expect(fx.executor.calls).toBe(0);
     } finally {
       await fx.close();
@@ -817,40 +804,8 @@ describe('状态变化唤醒（server 级）：重启对账', () => {
       }, { timeout: 10_000 });
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(fx.delivery.sentTexts).toHaveLength(0);
-      expect(readTask(fx.dbPath, 'task_interrupted')).toEqual({ status: 'failed', reason: 'result_unknown' });
+      expect(readTask(fx.dbPath, 'task_interrupted')).toEqual({ status: 'died' });
       expect(fx.executor.calls).toBe(0);
-    } finally {
-      await fx.close();
-    }
-  });
-
-  it('④d 取消孤儿（用户说了停、重启前没确认）→ 回收成 result_unknown 并如实说清「你要我停，没停完」', async () => {
-    // 2026-11-19 只读审计 #14：cancelling 断电遗留此前没有任何出口（expireLeases 只收
-    // running；再取消撞非法边）——用户永远等不到下文。恢复走既有合法边
-    // cancelling→running→result_unknown，并唤醒原会话按「你要我停」如实说清 + 给动作。
-    const fx = await makeFixture('line', { seedCancelling: true });
-    try {
-      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
-      expect(fx.delivery.sentTexts[0]!.text).toBe(`「${TASK_NAME}」我这边重启过，状态说不清了；你说一声我就重来。`);
-      const wake = wakeEventOf(fx.logs, 'task_restart_wake');
-      expect(wake).toMatchObject({ outcome: 'woken', taskId: 'task_cancelling_orphan' });
-      // 事实如实点明「你要我停、没停完」（别让用户以为停已生效）。
-      expect(requestHasUserText(fx.scripted!.requests(), '[重启对账]')).toBe(true);
-      const fact = fx.scripted!.requests()
-        .flatMap((request) => request.messages.map((message) => userTextOf(message)))
-        .find((text) => text.startsWith('[重启对账]'));
-      expect(fact).toContain('你要我停');
-      expect(fact).toContain('没停完');
-      // 终态：result_unknown（不宣称已取消、不重放），执行器零调用。
-      expect(readTask(fx.dbPath, 'task_cancelling_orphan')).toEqual({ status: 'failed', reason: 'result_unknown' });
-      expect(fx.executor.calls).toBe(0);
-      // 再取消不再撞非法边（状态机已回到终态；终态即「没有可取消的」）。
-      const registry = createSqliteTaskRegistry(fx.dbPath, { readOnly: true });
-      try {
-        expect(registry.get('task_cancelling_orphan', SCOPE).status).toBe('failed');
-      } finally {
-        registry.close();
-      }
     } finally {
       await fx.close();
     }
@@ -868,7 +823,7 @@ describe('状态变化唤醒（server 级）：重启对账', () => {
       // 事实不丢：下一次用户开口随 injections 进模型上下文（既有机制）。
       await fx.server.handler(incoming('m-2', '然后呢'));
       expect(requestHasUserText(fx.scripted!.requests(), '[重启对账]')).toBe(true);
-      expect(readTask(fx.dbPath, 'task_interrupted')).toEqual({ status: 'failed', reason: 'result_unknown' });
+      expect(readTask(fx.dbPath, 'task_interrupted')).toEqual({ status: 'died' });
     } finally {
       await fx.close();
     }

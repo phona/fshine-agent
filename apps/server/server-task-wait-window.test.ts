@@ -178,7 +178,7 @@ class ImmediateExecutor implements TaskExecutor {
   readonly calls: Array<{ taskId: string }> = [];
   async execute(input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
     this.calls.push({ taskId: input.taskId });
-    return { kind: 'completed', resultText: this.resultText };
+    return { kind: 'ended', report: this.resultText };
   }
 }
 
@@ -284,16 +284,17 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
       expect(receipt).not.toHaveProperty('taskNo');
       // 文本照发不等于丢结果：任务后台完成 → 结果经主动投递面送达原会话。
       expect(delivery.sentTexts).toHaveLength(0);
-      executor.settle({ kind: 'completed', resultText: '长任务结果：核对完成，共 3 条。' });
+      executor.settle({ kind: 'ended', report: '长任务结果：核对完成，共 3 条。' });
       const taskId = String(receipt['taskId']);
       await vi.waitFor(() => {
-        expect(registry.get(taskId, { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' }).status).toBe('completed');
+        // S1 事实模型：底账没有 status——后台汇报已存档即「办完」的账本事实。
+        expect((registry.get(taskId, { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' }).replyText ?? '').trim()).not.toBe('');
       }, { timeout: 5000 });
       await vi.waitFor(() => expect(delivery.sentTexts).toHaveLength(1), { timeout: 5000 });
       expect(delivery.sentTexts[0]!.text).toContain('长任务结果：核对完成，共 3 条。');
       expect(delivery.sentTexts[0]!.route).toEqual({ channel: 'wecom', conversationId: 'conv-a' });
     } finally {
-      executor.settle({ kind: 'failed', reason: '（测试清理）' });
+      executor.settle({ kind: 'ended' });
       registry.close();
       await server.close();
     }
@@ -363,7 +364,7 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
     });
     try {
       await server.handler(incoming('user-a', 'conv-a', 'msg-1', '交办一件要跑一阵的事'));
-      executor.settle({ kind: 'completed', resultText: '长任务结果：核对完成，共 3 条。' });
+      executor.settle({ kind: 'ended', report: '长任务结果：核对完成，共 3 条。' });
       await vi.waitFor(() => expect(delivery.sentTexts).toHaveLength(1), { timeout: 5000 });
       // 恰好一次（多等一拍仍是一次）
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -375,7 +376,7 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
       const sent = logs.filter((line) => line['event'] === 'task_result_delivery_sent');
       expect(sent).toHaveLength(1);
     } finally {
-      executor.settle({ kind: 'failed', reason: '（测试清理）' });
+      executor.settle({ kind: 'ended' });
       await server.close();
     }
   });
@@ -401,7 +402,7 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
     });
     try {
       await server.handler(incoming('user-a', 'conv-a', 'msg-1', '交办一件要跑一阵的事'));
-      executor.settle({ kind: 'completed', resultText: '长任务结果：核对完成，共 3 条。' });
+      executor.settle({ kind: 'ended', report: '长任务结果：核对完成，共 3 条。' });
       // 零投递：silent 部署不发起真实投递，只记 suppressed（不记 sent）
       await vi.waitFor(() => {
         const suppressed = logs.filter((line) => line['event'] === 'task_result_delivery_suppressed');
@@ -412,7 +413,7 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
       expect(delivery.sentTexts).toHaveLength(0);
       expect(logs.some((line) => line['event'] === 'task_result_delivery_sent')).toBe(false);
     } finally {
-      executor.settle({ kind: 'failed', reason: '（测试清理）' });
+      executor.settle({ kind: 'ended' });
       await server.close();
     }
   });

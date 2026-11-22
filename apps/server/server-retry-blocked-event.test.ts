@@ -116,7 +116,7 @@ function mainDriver(): TurnDriver {
 
 class NoopExecutor implements TaskExecutor {
   async execute(_input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
-    return { kind: 'completed', resultText: '' };
+    return { kind: 'ended' };
   }
 }
 

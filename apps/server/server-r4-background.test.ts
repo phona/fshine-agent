@@ -195,7 +195,7 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     const sink = new FakeSink();
-    const executor = new FakeExecutor([async () => ({ kind: 'completed', resultText: 'W202611：documents 共 3 条。' })]);
+    const executor = new FakeExecutor([async () => ({ kind: 'ended', report: 'W202611：documents 共 3 条。' })]);
     const records: ServerDriverRecord[] = [];
     const plans = new Map<string, ServerPlan>([
       ['查 documents W202611', { delegates: ['查 documents W202611'], reply: '已受理，稍后通知你。' }],
@@ -223,9 +223,9 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
       expect(accepted).not.toHaveProperty('taskNo');
       const taskId = String(accepted['taskId']);
       const taskScope = { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' };
-      // 后台完成 + 结果经 archiveReply 取回
+      // 后台完成 + 结果经 archiveReply 取回（S1 事实：底账没有 status——汇报已存档即完成事实）
       await vi.waitFor(() => {
-        expect(registry.get(taskId, taskScope).status).toBe('completed');
+        expect((registry.get(taskId, taskScope).replyText ?? '').trim()).not.toBe('');
       });
       expect(registry.get(taskId, taskScope).replyText).toBe('W202611：documents 共 3 条。');
       // 通知投递（假 sink）：受理/开始/完成
@@ -260,7 +260,7 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
         return { delivered: true };
       },
     };
-    const executor = new FakeExecutor([async () => ({ kind: 'completed', resultText: 'W202611：documents 共 3 条。' })]);
+    const executor = new FakeExecutor([async () => ({ kind: 'ended', report: 'W202611：documents 共 3 条。' })]);
     const records: ServerDriverRecord[] = [];
     const plans = new Map<string, ServerPlan>([
       ['查 documents W202611', { delegates: ['查 documents W202611'], reply: '已受理，稍后通知你。' }],
@@ -303,7 +303,7 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
     // 切片移出（失败/取消各由自己的唤醒出口说，降级时事实进 systemNotes）——本用例不动它们。
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
-    const executor = new FakeExecutor([async () => ({ kind: 'completed', resultText: 'W202611：documents 共 3 条。' })]);
+    const executor = new FakeExecutor([async () => ({ kind: 'ended', report: 'W202611：documents 共 3 条。' })]);
     const records: ServerDriverRecord[] = [];
     const plans = new Map<string, ServerPlan>([
       ['查 documents W202611', { delegates: ['查 documents W202611'], reply: '已受理，稍后通知你。' }],

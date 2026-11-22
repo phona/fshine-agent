@@ -102,11 +102,11 @@ function plannedMainDriver(): TurnDriver {
   };
 }
 
-/** 假后台执行器：completed 带本任务产物登记事实（files 走任务作用域）。 */
+/** 假后台执行器：回合收尾带本任务产物登记事实（files 走任务作用域）。 */
 function completedWithFiles(files: ReadonlyArray<{ fileId: string; name: string; bytes: number }>): TaskExecutor {
   return {
     async execute(_input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
-      return { kind: 'completed', resultText: '汇总表已生成。', files };
+      return { kind: 'ended', report: '汇总表已生成。', files };
     },
   };
 }

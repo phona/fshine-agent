@@ -182,7 +182,7 @@ describe('主动推送：后台任务的失败与等待（用户不必下次开�
     // 口径变更（2026-11-19）：失败主动告知由失败投递分支直发，用户文本 = failureMessageFor
     // 模板（kind 归类自执行事实的 code；假执行器不落执行事实 → 取不到 → executor_failed）。
     // **不再拼接业务名**——模板话术是宿主契约，不把执行层原文/内部形态带给用户。
-    const { server, delivery } = await runCase({ outcome: () => ({ kind: 'failed', reason: '执行层拒绝' }) });
+    const { server, delivery } = await runCase({ outcome: () => ({ kind: 'ended' }) });
     try {
       await server.handler(incoming('查 documents W202611'));
       await vi.waitFor(() => expect(delivery.pushed).toHaveLength(1));
@@ -222,7 +222,7 @@ describe('主动推送：后台任务的失败与等待（用户不必下次开�
     // 由它把结果说给用户；这里脚本模型把事实里的结果正文复读。
     // 断言没有第二条：改期到回合后的 chatSink 推送（完成类本来就该零推）在这段安静期内落地。
     const resultText = 'W202611：documents 共 3 条。';
-    const { server, delivery } = await runCase({ outcome: () => ({ kind: 'completed', resultText }) });
+    const { server, delivery } = await runCase({ outcome: () => ({ kind: 'ended', report: resultText }) });
     try {
       await server.handler(incoming('查 documents W202611'));
       // 完成正文确实送达（证明链路是通的，不是整体没投）。
@@ -240,7 +240,7 @@ describe('主动推送：后台任务的失败与等待（用户不必下次开�
   it('④ silent 部署 → 零投递（suppressed），推送不会假报送达', async () => {
     const { server, delivery } = await runCase({
       deliveryMode: 'silent',
-      outcome: () => ({ kind: 'failed', reason: '执行层拒绝' }),
+      outcome: () => ({ kind: 'ended' }),
     });
     try {
       await server.handler(incoming('查 documents W202611'));
@@ -256,7 +256,7 @@ describe('主动推送：后台任务的失败与等待（用户不必下次开�
     const { server, delivery } = await runCase({
       taskRunWaitMs: 3_000,
       reply: '没办成：执行层拒绝了这次查询。',
-      outcome: () => ({ kind: 'failed', reason: '执行层拒绝' }),
+      outcome: () => ({ kind: 'ended' }),
     });
     try {
       const reply = await server.handler(incoming('查 documents W202611'));

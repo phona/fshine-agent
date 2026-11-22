@@ -32,6 +32,7 @@ import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../
 import type { Notification, NotificationSink } from '../../packages/agent/src/notifications';
 import { failureMessageFor, internalTermIn } from '../../packages/agent/src/user-facing-failure';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
+import { taskStateWordOf } from '../../packages/agent/src/task-registry';
 import { fileStoragePathOf } from '../../packages/agent/src/file-store';
 import type { RecalcXlsxExecutor } from '../../packages/agent/src/recalc-xlsx-executor';
 import { mainSessionOptions } from '../../scripts/ask-runtime';
@@ -125,7 +126,7 @@ class ImmediateExecutor implements TaskExecutor {
   calls = 0;
   async execute(_input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
     this.calls += 1;
-    return { kind: 'completed', resultText: RESULT_TEXT };
+    return { kind: 'ended', report: RESULT_TEXT };
   }
 }
 
@@ -135,7 +136,7 @@ class SequencedExecutor implements TaskExecutor {
   constructor(private readonly results: readonly string[]) {}
   async execute(_input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
     this.calls += 1;
-    return { kind: 'completed', resultText: this.results[this.calls - 1] ?? `第 ${this.calls} 条结果。` };
+    return { kind: 'ended', report: this.results[this.calls - 1] ?? `第 ${this.calls} 条结果。` };
   }
 }
 
@@ -163,7 +164,7 @@ class GatedExecutor implements TaskExecutor {
 /** 立即失败的执行器：窗口内落定 = 快活失败（注入式无执行事实 → code 取不到 = executor_failed）。 */
 class FailingExecutor implements TaskExecutor {
   calls = 0;
-  constructor(private readonly make: () => TaskExecutionOutcome = () => ({ kind: 'failed', reason: FAIL_REASON })) {}
+  constructor(private readonly make: () => TaskExecutionOutcome = () => ({ kind: 'ended' })) {}
   async execute(_input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
     this.calls += 1;
     return this.make();
@@ -175,7 +176,7 @@ class MixedExecutor implements TaskExecutor {
   calls = 0;
   async execute(_input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
     this.calls += 1;
-    return this.calls === 1 ? { kind: 'failed', reason: FAIL_REASON } : { kind: 'completed', resultText: RESULT_TEXT };
+    return this.calls === 1 ? { kind: 'ended' } : { kind: 'ended', report: RESULT_TEXT };
   }
 }
 
@@ -419,7 +420,7 @@ async function makeFixture(input: {
     ...(sink === undefined ? {} : { sink }),
     wakeCalls: () => wakeCalls,
     close: async () => {
-      if (executor instanceof GatedExecutor) executor.settle({ kind: 'failed', reason: '（测试清理）' });
+      if (executor instanceof GatedExecutor) executor.settle({ kind: 'ended' });
       // 让 settle 的收尾与由此触发的再派发（pump 走 microtask）落地后再停机——否则停机后
       // 触发的 pump 会撞上已关闭的底账连接（vitest 记未处理错误）。
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -471,7 +472,8 @@ describe('快活 + 模型沉默（server 级）：不许静默终局', () => {
       expect(fx.wakeCalls()).toBe(0);
       const ro = createSqliteTaskRegistry(fx.dbPath, { readOnly: true });
       try {
-        expect(ro.get(taskId, SCOPE).status).toBe('completed');
+        // S1 事实模型：底账没有 status——后台汇报已存档即「办完」的账本事实。
+        expect(ro.get(taskId, SCOPE).replyText).toBe(RESULT_TEXT);
       } finally {
         ro.close();
       }
@@ -500,7 +502,7 @@ describe('快活 + 模型沉默（server 级）：不许静默终局', () => {
       expect(fx.logs.some((line) => String(line['event']).startsWith('task_result_delivery_'))).toBe(false);
 
       // 落定后由既有唤醒/完成投递面送达（机制不变）——「欠他一条」不是「永远沉默」。
-      executor.settle({ kind: 'completed', resultText: RESULT_TEXT });
+      executor.settle({ kind: 'ended', report: RESULT_TEXT });
       await vi.waitFor(() => {
         expect(fx.delivery.sentTexts).toHaveLength(1);
       }, { timeout: 10_000 });
@@ -606,7 +608,8 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       const taskId = (done!['taskIds'] as string[])[0]!;
       const ro = createSqliteTaskRegistry(fx.dbPath, { readOnly: true });
       try {
-        expect(ro.get(taskId, SCOPE).status).toBe('failed');
+        // S1 事实模型：底账没有 status——已启动但无汇报 = 机械事实词「failed」。
+        expect(taskStateWordOf(ro.get(taskId, SCOPE))).toBe('failed');
       } finally {
         ro.close();
       }
@@ -656,7 +659,7 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       const ro = createSqliteTaskRegistry(fx.dbPath, { readOnly: true });
       try {
         const record = ro.get(taskId, SCOPE);
-        expect(record.status).toBe('failed');
+        expect(record.executions.some((execution) => execution.status === 'failed')).toBe(true);
         expect(record.executions.some((execution) => execution.error?.code === 'GATE_REFUSE')).toBe(true);
       } finally {
         ro.close();
