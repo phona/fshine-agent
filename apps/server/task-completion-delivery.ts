@@ -32,6 +32,7 @@ import {
   type UserFacingFailureKind,
 } from '../../packages/agent/src/user-facing-failure';
 import { stripServerPaths } from '../../packages/agent/src/server-paths';
+import { cleanExecutorDiagnostic } from '../../packages/agent/src/execution-runtime';
 
 /** 宿主主动投递面（文字；与文件投递同一端口形状——FileDeliveryPort 的结构子集）。 */
 export interface TaskResultDeliveryPort {
@@ -333,7 +334,10 @@ export function taskFailureFactText(input: {
     : '你交代的那件事';
   const reason = input.reason === undefined
     ? ''
-    : input.reason.replace(/\s+/gu, ' ').trim().slice(0, FAILURE_REASON_MAX);
+    // 执行层原始诊断进模型可见事实前过与用户可见回复同一把尺：剥前置技术码 token、
+    // 服务器路径与机构自称（cleanExecutorDiagnostic，单实现），再归空白/截断。只做机械
+    // 清理，业务原文（prepared/got/参数名）原样保留——那正是 Main 判下一步的依据。
+    : cleanExecutorDiagnostic(input.reason).replace(/\s+/gu, ' ').trim().slice(0, FAILURE_REASON_MAX);
   const reasonLine = reason === ''
     ? ''
     : `机械原因（供你判断，别原样丢给用户）：${reason}。\n`;

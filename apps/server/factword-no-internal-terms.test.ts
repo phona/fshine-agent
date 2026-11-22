@@ -230,6 +230,24 @@ describe('失败事实文本：无内部词，保留「没办成」语义', () =
     expect(fact).toContain('账本事实');            // 账本段仍在
     expect(fact).toContain('下一步');              // 可行动出口仍在
   });
+
+  /**
+   * ⑦b 机械原因（reason）进模型可见事实前与用户可见回复同一把尺：执行层原文里常带前置
+   * 技术码 token、服务器路径与「执行层/委派」这类机构自称。清洗只做机械剥离，**不按词表
+   * 替换业务原文**——prepared/got 这类可诊断信息必须原样留下（模型要据此改参数）。
+   * 反向绊线：reason 不清洗（回退成 `input.reason.replace(...)`）时本用例转红。
+   */
+  it('⑦b taskFailureFactText（reason 带技术码/服务器路径/机构自称）：清干净且业务原文逐字保留', () => {
+    const rawReason = 'CONFIRMATION_BINDING_MISMATCH 执行层返回：prepared collection=客户 got collection=客户台账'
+      + '（日志在 /home/deploy/fshine-agent/tmp/task_d42fffce-1111-4222-8333-444455556666/run.log，供排查）';
+    const fact = taskFailureFactText({ name: '汇总那件事', kind: 'executor_failed', reason: rawReason });
+    expect(fact).not.toMatch(INTERNAL);
+    expect(fact).not.toContain('/home/');
+    expect(fact).not.toContain('tmp/task_');
+    expect(fact).not.toContain('CONFIRMATION_BINDING_MISMATCH'); // 前置技术码 token 剥掉
+    expect(fact).toContain('prepared collection=客户 got collection=客户台账'); // 可诊断原文不动
+    expect(fact).toContain('机械原因');
+  });
 });
 
 /**
