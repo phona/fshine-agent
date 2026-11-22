@@ -51,7 +51,7 @@ const SCOPE = { principalId: PRINCIPAL, sessionId: SESSION };
 const ASK = '帮我汇总';
 const TASK_TEXT = '帮我把结果汇总成一份文件';
 const TASK_NAME = deriveTaskName(TASK_TEXT);
-const FAIL_REASON = '执行层拒绝';
+const FAIL_REASON = '对方拒绝';
 /** ⑤d 用：用户对等待中的任务表态（脚本模型据此调 task_resume 接续）。 */
 const RESUME_MESSAGE = '按这版提交';
 /** 缺陷 A 用：用户说停（脚本模型据此调 task_cancel——回合内取消）。 */
