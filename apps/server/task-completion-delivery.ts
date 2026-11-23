@@ -30,7 +30,7 @@ import { resourceLimitedText } from '../../packages/agent/src/notification-rende
 import { failureMessageFor, classifyFailure } from '../../packages/agent/src/user-facing-failure';
 import type { PartialCompletionFact } from '../../packages/agent/src/task-runner';
 import { stripServerPaths } from '../../packages/agent/src/server-paths';
-import { cleanExecutorDiagnostic } from '../../packages/agent/src/execution-runtime';
+import { cleanExecutorDiagnostic, UNSUPPORTED_OPERATION_TEXT } from '../../packages/agent/src/execution-runtime';
 
 /** 宿主主动投递面（文字；与文件投递同一端口形状——FileDeliveryPort 的结构子集）。 */
 export interface TaskResultDeliveryPort {
@@ -77,6 +77,11 @@ export interface TaskFailureFact {
   name?: string;
   /** 部分完成事实（已完成对象 + 未成功对象；只给兜底话术逐项说清，不是任务状态）。 */
   partial?: PartialCompletionFact;
+  /**
+   * 零执行的机械原因（not_permitted / unsupported）：没到达执行层，不是「执行端没办成」——
+   * 兜底话术按各自既有措辞说（没权限 / 办不了），不说「再试一次」。
+   */
+  zeroExecReason?: string;
   /** 投递归属（进 task_result_delivery_* 记账行；缺省 = 不带，不猜）。 */
   factKind?: TaskResultFactKind;
 }
@@ -326,12 +331,20 @@ export function failureFallbackFactText(input: {
   name?: string;
   /** 部分完成事实（只给这一句兜底话术；不是任务状态词）。 */
   partial?: PartialCompletionFact;
+  /**
+   * 零执行的机械原因（B1）：not_permitted = 发起前被宿主拒绝 → 既有 denied 话术（没权限）；
+   * unsupported = 没有对应能力 → 既有「办不了」措辞（与模型行为句同一常量）。
+   * 零执行没有到达执行层，不能按执行层码归类成 executor_failed（会说「再试一次」）。
+   */
+  zeroExecReason?: string;
 }): string {
   if (input.partial !== undefined) {
     const text = partialCompletionFailureText(input.partial);
     if (text !== undefined) return text;
   }
   if (input.resourceLimited === true) return resourceLimitedText(input.name);
+  if (input.zeroExecReason === 'not_permitted') return failureMessageFor('denied').text;
+  if (input.zeroExecReason === 'unsupported') return `${UNSUPPORTED_OPERATION_TEXT}。`;
   const kind = input.died === true
     ? 'unknown_result'
     : classifyFailure({ code: input.code });
@@ -448,5 +461,6 @@ export async function deliverTaskFailure(fact: TaskFailureFact, options: TaskRes
     ...(fact.code === undefined ? {} : { code: fact.code }),
     ...(fact.name === undefined ? {} : { name: fact.name }),
     ...(fact.partial === undefined ? {} : { partial: fact.partial }),
+    ...(fact.zeroExecReason === undefined ? {} : { zeroExecReason: fact.zeroExecReason }),
   }), options);
 }

@@ -172,6 +172,8 @@ const PROPOSAL = { operation: 'dummy.proposal', args: {} };
 const ASK = { operation: 'dummy.ask', args: {} };
 const PROPOSAL_COMMIT = { operation: 'dummy.proposal-commit', args: { '--proposal-id': 'prop_1' } };
 const DENIED = (collection = 'alpha'): Record<string, unknown> => ({ operation: 'dummy.denied', args: { '--collection': collection } });
+/** D1 封闭账本：取不到对象名的写失败（retryObjectOf = undefined，不得被「同对象」洗白）。 */
+const DENIED_UNLABELED = { operation: 'dummy.denied', args: {} };
 
 const tempDirs: string[] = [];
 afterAll(() => {
@@ -744,10 +746,12 @@ describe('模型走岔路（确定性脚本模型）', () => {
     expect(lastFailureOf(task)?.error?.message ?? '').toContain('run_js');
   });
 
-  it('⑭ 先失败后成功（业务拒绝 → 后一个业务写完成）：本回合结局 = 成功，不判失败引导重试', async () => {
-    // Grok 复审 2026-11-22：S1 删 status 后 roundFailureOf 倒序找最后一条失败、不再豁免
-    // 「更早的业务失败」——commit(BAD) 失败(INVALID_RECORDS) → commit 成功 仍返回失败 →
-    // onTaskFailed → 引导重试 → 重复写。末次决定性结果 = 已落库的业务写成功（先失败后成功 = 成功）。
+  it('⑭ 先拒 alpha、后完成一个取不到对象名的写：alpha 不被洗白（封闭账本，不按顺序兜底）', async () => {
+    // 旧顺序特例（2026-11-22 Grok 复审修法）：「倒序遇到最后一条 completed 业务写即止」——
+    // 它把更早的对象失败静默吞掉。2026-11-23 收尾改成与顺序无关的封闭账本后，这个例子
+    // 必须如实浮出 alpha 的拒绝：alpha 从没 completed → notDone；后面那笔 proposal 取不到
+    // 对象名 → 归不进 done（不编造标签），所以只带失败码、不带 partial。
+    // 「同对象先失败后成功 = 无失败」的合法回路由 ⑳ 钉住，不再靠这条顺序特例兜。
     const registry = makeRegistry();
     const capture: WorkerCapture = { results: [] };
     const client = new AdversarialClient();
@@ -773,8 +777,9 @@ describe('模型走岔路（确定性脚本模型）', () => {
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
     expect(Object.keys(round)).not.toContain('executionOutcome');
     expect((round.report ?? '').trim()).not.toBe('');
-    // 末次决定性执行 = 业务写 completed：不产出「失败执行事实」，兜底走汇报原文面。
-    expect(round.errorCode).toBeUndefined();
+    // alpha 的拒绝是 notDone：兜底不得说「办好了」；取不到对象名的成功不编造 partial。
+    expect(round.errorCode).toBe('GATE_REFUSE');
+    expect(round.partial).toBeUndefined();
     expect(lastExecutionOf(task)?.status).toBe('completed');
   });
 
@@ -848,14 +853,17 @@ describe('模型走岔路（确定性脚本模型）', () => {
 });
 
 /**
- * D1（2026-11-23 收尾）：已落库业务写之后的失败按**机械判据**分类——
- *   · 只读失败（核对查询）→ 不翻盘；
- *   · 同对象写失败（retryObjectOf 相等）= 重复尝试 → 不翻盘；
- *   · 异对象写失败 = 另一个写没成 → 返回 partial 事实（带已完成对象 + 未成功对象）。
+ * D1（2026-11-23 收尾）：业务写按**封闭账本**判定，与顺序无关——
+ *   · 只对业务写（非 run_js、非只读）按对象（retryObjectOf）分组；
+ *   · 每个对象：有任何一次 completed → done；从没 completed（且失败码不在容忍集合）→ notDone；
+ *   · 只读失败不翻盘；同对象先失败后成功 = done；同对象成功后的重复失败不翻盘；
+ *   · 异对象失败 = 另一个写没成 → 返回 partial（已完成对象 + 未成功对象）；
+ *   · 取不到对象名的失败归不进 done（失败不洗白），但 partial 不编造对象名。
  * partial 只供兜底话术逐项说「已完成 X，未成功 Y」，不是 status/outcome 枚举。
- * 反向绊线：去掉任一豁免 → ⑯/⑰ 必红；把异对象也当重复 → ⑱ 必红。
+ * 反向绊线：改回「只看最后一条成功写」→ ⑲（先拒 beta 再成功 alpha）必红；
+ * 去掉同对象/只读豁免 → ⑯/⑰/⑳ 必红；把无对象名失败当重复 → ㉑ 必红。
  */
-describe('D1 已落库写之后的失败：只读 / 同对象 / 异对象', () => {
+describe('D1 业务写封闭账本：与顺序无关的 done / notDone', () => {
   /** 确认回合：首回合提案 → 确认回合跑给定调用（返回回合事实与任务行）。 */
   async function confirmRound(input: {
     taskId: string;
@@ -928,5 +936,57 @@ describe('D1 已落库写之后的失败：只读 / 同对象 / 异对象', () =
     // 原始失败码仍在（兜底归类可用），但 partial 优先说明「哪件成了、哪件没成」。
     expect(round.errorCode).toBe('GATE_REFUSE');
     expect(round.partial).toEqual({ completed: ['alpha'], failed: ['beta'] });
+  });
+
+  it('⑲ 先拒 beta 再成功 alpha：与顺序无关——alpha 已完成、beta 未成功（旧「只看最后一条成功写」漏掉 beta）', async () => {
+    // grok major 反例：顺序特例会静默兜底说「办好了」，可 beta 没成。封闭账本先记账、
+    // 再按对象结算，β 从没 completed → notDone，不会因为 alpha 在后成功而被洗白。
+    const client = new AdversarialClient();
+    const { runner, task } = await confirmRound({
+      taskId: 't_d1_other_object_reversed',
+      client,
+      calls: [DENIED('beta'), COMMIT('alpha')],
+    });
+    expect(client.calls.map((call) => call.operation)).toEqual(['dummy.prepare', 'dummy.denied', 'dummy.commit']);
+    expect(task.executions.slice(-2).map((execution) => [execution.operation, execution.status]))
+      .toEqual([['dummy.denied', 'refused'], ['dummy.commit', 'completed']]);
+    const round = runner.roundOutcomeOf?.('t_d1_other_object_reversed');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    // 末次失败（beta/GATE_REFUSE）+ partial（done=alpha，notDone=beta）。
+    expect(round.errorCode).toBe('GATE_REFUSE');
+    expect(round.partial).toEqual({ completed: ['alpha'], failed: ['beta'] });
+  });
+
+  it('⑳ 同对象先失败后成功：该对象有 completed → done，不判失败（先失败后成功是正常回路）', async () => {
+    const client = new AdversarialClient();
+    const { runner } = await confirmRound({
+      taskId: 't_d1_same_object_retry',
+      client,
+      calls: [DENIED('alpha'), COMMIT('alpha')],
+    });
+    const round = runner.roundOutcomeOf?.('t_d1_same_object_retry');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    expect(round.errorCode).toBeUndefined();
+    expect(round.partial).toBeUndefined();
+  });
+
+  it('㉑ 取不到对象名的写失败 + 另一个对象写成功：失败不洗白，兜底绝不输出「办好了」', async () => {
+    const client = new AdversarialClient();
+    const { runner } = await confirmRound({
+      taskId: 't_d1_unlabeled_failure',
+      client,
+      calls: [DENIED_UNLABELED, COMMIT('alpha')],
+    });
+    const round = runner.roundOutcomeOf?.('t_d1_unlabeled_failure');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    // 归不进 done：不能证明它和 alpha 是同一个写；失败要浮出，但不编造对象名（无 partial）。
+    expect(round.errorCode).toBe('GATE_REFUSE');
+    expect(round.partial).toBeUndefined();
+    // 生产兜底按原始失败码归类（GATE_REFUSE → denied），用户看到的不是「办好了」。
+    const fallback = failureMessageFor(classifyFailure({ code: round.errorCode })).text;
+    expect(fallback).not.toContain('办好了');
   });
 });

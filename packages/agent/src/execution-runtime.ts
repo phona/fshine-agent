@@ -406,6 +406,13 @@ export interface RunJsLayoutUnsafeReport extends RunJsLayoutUnsafeEvent {
 export const OPERATION_NOT_PERMITTED_MESSAGE = '当前权限不支持这个操作。';
 
 /**
+ * 零执行且**没有对应能力**（unsupported）的既有措辞（单一来源）：`OUTCOME_BEHAVIOR_NOTE`
+ * 让模型说的就是这一句；模型说不出话时宿主兜底也用它（B1）——两边同源，不造第二套话术。
+ * 不含「再试一次」：没有可办的动作，重试建议是假话。
+ */
+export const UNSUPPORTED_OPERATION_TEXT = '这件事我这边办不了';
+
+/**
  * 工具参数结构校验的确定性拒绝话术（owner 2026-11-20「机制参数碰不到」）：模型给了一个
  * 该工具没声明的字段（含猜到的机制参数裸名、任何 `--` 前缀键）时走既有工具错误面抛出。
  * 不含 hostOnly 名、不含内部机制词（宿主/执行层/旋钮/flag 等），只说业务话——模型/用户
@@ -566,7 +573,7 @@ export function mainProtocolNoteFor(allowWriteOperations: boolean): string {
  * 答复五态的 Main 行为句（判据档 §3 / 本切片 B2）：outcome 作为结构化事实进唤醒/工具结果，
  * Main 据此按值选措辞。三条句分别钉住 unsupported / blocked / partial 的措辞纪律。
  *
- *   · unsupported → 说「这件事我这边办不了」+ 给出目录里能办的，**绝不提「再试一次」**；
+ *   · unsupported → 说「{@link UNSUPPORTED_OPERATION_TEXT}」+ 给出目录里能办的，**绝不提「再试一次」**；
  *   · blocked     → 说缺什么 + 补的方式；
  *   · partial     → 逐项说，不得说成单纯成功。
  *
@@ -574,7 +581,7 @@ export function mainProtocolNoteFor(allowWriteOperations: boolean): string {
  */
 export const OUTCOME_BEHAVIOR_NOTE = [
   '【答复纪律】',
-  '- 若这件事办不了（没有对应能力）：说「这件事我这边办不了」，并列出你能办的几项；'
+  `- 若这件事办不了（没有对应能力）：说「${UNSUPPORTED_OPERATION_TEXT}」，并列出你能办的几项；`
     + '绝不要说「再试一次」「重试」，因为根本没有可办的动作。',
   '- 若事情卡住是因为缺条件（本次不允许、或缺你补充的信息）：说清缺什么、怎么补，'
     + '不要说成「办不了」。',
@@ -4541,80 +4548,89 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       const selfConfirmBlocked = selfConfirmBlockedRoundOf();
       if (selfConfirmBlocked !== undefined) return selfConfirmBlocked;
       /**
-       * 末次决定性执行的**原始失败事实**（机械直读，**不聚合成回合级结局词**）。
+       * 末次失败执行的**原始失败事实**（机械直读，**不聚合成回合级结局词**）。
        * 唯一用途：模型说不出话时宿主的兜底话术归类（server 按它选一句既有失败话术）；
        * 它不决定投递面、不写任务级状态——做没做成由 Main 读执行事实自己判断。
        *
-       * 口径（与原如实交付分流的事实口径一致）：
-       *   · 倒序遇到最后一条 completed 的业务写即止——更早的失败不再取（先失败后成功：改对
-       *     参数再试一次是产品正常回路；按失败兜底会引导用户重复写）；
-       *   · 已落库业务写**之后**的失败按机械判据分类（D1，2026-11-23；grok blocking 1）：
-       *     - 只读失败（核对查询）→ 不取（只读失败不是「另一个写没成」）；
-       *     - 同对象写失败（`retryObjectOf` 与已落库写对象相等）→ 不取（重复尝试）；
-       *     - 异对象 / 取不到对象的写失败 = 另一个写没成 → 取，并带 `partial` 事实
-       *       （已完成对象 + 未成功对象；**只给兜底话术**，不是 status/outcome 枚举）；
-       *   · 已落库的业务写之后的脚本失败不取（脚本失败不是「另一个写没成」，⑪ 冻结用例）；
-       *     无业务写时（只读查询 + 脚本失败）脚本的原始失败仍取（⑫ 冻结用例，不放宽）；
-       *   · 容忍码（同回合提案被挡/模型误用历史协议）不取——那类回合的结局由更上面的
-       *     等待事实决定。
+       * 判据 = **封闭账本，与顺序无关**（D1 收尾，2026-11-23；grok major：顺序特例不收敛）：
+       *   · 只对业务写（非 run_js、非只读）按对象（`retryObjectOf`）分组；
+       *   · 每个对象：有任何一次 completed → done；从没 completed、且失败码不在容忍集合
+       *     （`SAME_TURN_TOLERATED_FAILURE_CODES`）→ notDone；容忍码跳过；
+       *   · 只读执行不是业务写（只读失败不翻案）；取不到对象名的业务写归不进 done——
+       *     它的失败照样算 notDone（失败不洗白），但对象标签不编造；
+       *   · notDone 非空 → 返回这些失败里**末次**的 code/reason；done 与 notDone 标签都非空
+       *     才带 `partial`（已完成对象 + 未成功对象；**只给兜底话术**，不是 status/outcome 词）；
+       *   · notDone 空且 done 非空 → undefined（写都成了，重复尝试/先失败后成功不翻盘）；
+       *   · 一笔业务写结论都没有时保留原口径：倒序末次非容忍失败（只读查询 + 脚本失败这类
+       *     非业务执行仍可能是本回合的真实失败，⑫ 冻结用例，不放宽）。
        */
       const isBusinessWrite = (entry: RecordedExecution): boolean =>
         entry.operation !== RUN_JS_TOOL && !readOnlyOperations.has(entry.operation);
       /** 对象名（A2b 唯一来源）；取不到对象 = undefined（无法证明「同对象」，不猜）。 */
       const objectLabelOf = (entry: RecordedExecution): string | undefined =>
         retryObjectOf(entry.args ?? {});
-      let lastCompletedBusinessWriteIndex = -1;
-      for (let index = recorded.length - 1; index >= 0; index -= 1) {
-        const entry = recorded[index];
-        if (entry !== undefined && isBusinessWrite(entry) && entry.outcome.status === 'completed') {
-          lastCompletedBusinessWriteIndex = index;
-          break;
-        }
-      }
-      // 已落库业务写的对象集合（同对象判据的锚点：任何已成功写过的对象再失败 = 重复尝试）。
-      const completedBusinessWriteObjects = new Set(recorded
-        .filter(isBusinessWrite)
-        .filter((entry) => entry.outcome.status === 'completed')
-        .map(objectLabelOf)
-        .filter((label): label is string => label !== undefined));
       const lastDecisiveExecutionFactOf = (): {
         code?: string;
         reason?: string;
         partial?: PartialCompletionFact;
       } | undefined => {
-        if (lastCompletedBusinessWriteIndex >= 0) {
-          // 已落库业务写之后的失败：只读 / 同对象重复不翻盘；其余是「另一个写没成」。
-          const distinctFailures: Array<{ entry: RecordedExecution; code?: string; reason?: string }> = [];
-          for (let index = lastCompletedBusinessWriteIndex + 1; index < recorded.length; index += 1) {
-            const entry = recorded[index];
-            if (entry === undefined) continue;
-            const status = entry.outcome.status;
-            if (status !== 'failed' && status !== 'refused') continue;
-            const code = entry.outcome.error.code;
-            if (SAME_TURN_TOLERATED_FAILURE_CODES.has(code)) continue;
-            // 宿主脚本失败不是另一个写没成（⑪）。
-            if (entry.operation === RUN_JS_TOOL) continue;
-            // 只读核对失败不翻盘（D1 豁免 1）。
-            if (readOnlyOperations.has(entry.operation)) continue;
-            const object = objectLabelOf(entry);
-            // 同对象 = 重复尝试（D1 豁免 2）；取不到对象 = 无法证明同一个（按异对象处理）。
-            if (object !== undefined && completedBusinessWriteObjects.has(object)) continue;
-            const reason = entry.outcome.error.message;
-            distinctFailures.push({
-              entry,
-              ...(code === undefined || code === '' ? {} : { code }),
-              ...(reason === undefined || reason.trim() === '' ? {} : { reason }),
-            });
+        interface LedgerFailure {
+          code?: string;
+          reason?: string;
+          /** recorded 下标：取 notDone 里**末次**失败的 code/reason（与顺序无关的结算在这里）。 */
+          index: number;
+        }
+        interface ObjectLedger {
+          object: string;
+          completed: boolean;
+          lastFailure?: LedgerFailure;
+        }
+        const ledgers = new Map<string, ObjectLedger>();
+        let lastUnlabeledFailure: LedgerFailure | undefined;
+        recorded.forEach((entry, index) => {
+          if (!isBusinessWrite(entry)) return;
+          const object = objectLabelOf(entry);
+          const status = entry.outcome.status;
+          if (status === 'completed') {
+            // 取不到对象名 → 归不进 done（不编造对象标签）。
+            if (object === undefined) return;
+            const ledger = ledgers.get(object) ?? { object, completed: false };
+            ledger.completed = true;
+            ledgers.set(object, ledger);
+            return;
           }
-          if (distinctFailures.length === 0) return undefined;
-          const lastFailure = distinctFailures[distinctFailures.length - 1]!;
-          const completed = [...completedBusinessWriteObjects];
-          const failed = [...new Set(distinctFailures
-            .map((failure) => objectLabelOf(failure.entry))
-            .filter((label): label is string => label !== undefined))];
-          // partial 只承载「哪件成了、哪件没成」的兜底话术内容；取不到对象名时不编造。
-          const partial = completed.length > 0 && failed.length > 0
-            ? { completed, failed } satisfies PartialCompletionFact
+          if (status !== 'failed' && status !== 'refused') return;
+          const code = entry.outcome.error.code;
+          // 容忍码（同回合提案被挡/模型误用历史协议）不算真实失败。
+          if (SAME_TURN_TOLERATED_FAILURE_CODES.has(code)) return;
+          const reason = entry.outcome.error.message;
+          const failure: LedgerFailure = {
+            ...(code === undefined || code === '' ? {} : { code }),
+            ...(reason === undefined || reason.trim() === '' ? {} : { reason }),
+            index,
+          };
+          if (object === undefined) {
+            // 无法证明「同对象」→ 失败不洗白，只记末次无标签失败（partial 不编造它）。
+            lastUnlabeledFailure = failure;
+            return;
+          }
+          const ledger = ledgers.get(object) ?? { object, completed: false };
+          ledger.lastFailure = failure;
+          ledgers.set(object, ledger);
+        });
+        const allLedgers = [...ledgers.values()];
+        const done = allLedgers.filter((ledger) => ledger.completed).map((ledger) => ledger.object);
+        const notDone = allLedgers.filter((ledger) => !ledger.completed);
+        const notDoneFailures = [
+          ...notDone.flatMap((ledger) => (ledger.lastFailure === undefined ? [] : [ledger.lastFailure])),
+          ...(lastUnlabeledFailure === undefined ? [] : [lastUnlabeledFailure]),
+        ].sort((left, right) => left.index - right.index);
+        if (notDoneFailures.length > 0) {
+          const lastFailure = notDoneFailures[notDoneFailures.length - 1]!;
+          const failed = notDone.map((ledger) => ledger.object);
+          // partial 只承载「哪件成了、哪件没成」的兜底话术内容；两边都有标签才带。
+          const partial = done.length > 0 && failed.length > 0
+            ? { completed: done, failed } satisfies PartialCompletionFact
             : undefined;
           const fact = {
             ...(lastFailure.code === undefined ? {} : { code: lastFailure.code }),
@@ -4625,7 +4641,9 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
             ? undefined
             : fact;
         }
-        // 没有已落库业务写：保持原口径（倒序末次失败；容忍码跳过）。
+        // 有业务写已落库且没有 notDone：写都成了（同对象先失败后成功/成功后重复失败不翻盘）。
+        if (done.length > 0) return undefined;
+        // 没有任何业务写结论：保持原口径（倒序末次失败；容忍码跳过）——只读/脚本失败仍取。
         for (let index = recorded.length - 1; index >= 0; index -= 1) {
           const entry = recorded[index];
           if (entry === undefined) continue;

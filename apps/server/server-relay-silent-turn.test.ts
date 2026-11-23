@@ -706,6 +706,50 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
     }
   });
 
+  it('①e 零执行 not_permitted：模型沉默时兜底说「没权限」，不是「没办成、再试一次」', async () => {
+    // B1（grok blocking）：零执行的权限拒绝没到达执行层，不是「执行端没办成」；兜底丢了
+    // reasonCode 就会说「再试一次」，诱导用户让模型重撞同一个权限墙。
+    const executor = new FailingExecutor(() => ({
+      kind: 'ended',
+      zeroExecReason: 'not_permitted',
+      failureReason: '当前权限不支持这个操作。',
+    }));
+    const fx = await makeFixture({ waitMs: 1_500, executor });
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      expect(fx.delivery.sentTexts).toHaveLength(1);
+      const text = fx.delivery.sentTexts[0]!.text;
+      expect(text).toBe(failureMessageFor('denied').text);
+      expect(text).toContain('没权限');
+      expect(text).not.toContain('再试一次');
+      expect(text).not.toContain('办好了');
+      expect(internalTermIn(text)).toBeUndefined();
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('①f 零执行 unsupported：模型沉默时兜底说「办不了」，绝不提「再试一次」', async () => {
+    // 同一条 blocking 的 unsupported 面：没有对应能力 = 没有可办的动作，重试建议是假话。
+    const executor = new FailingExecutor(() => ({
+      kind: 'ended',
+      zeroExecReason: 'unsupported',
+      failureReason: '没有实际办理：这次交办没有发出任何办理动作。',
+    }));
+    const fx = await makeFixture({ waitMs: 1_500, executor });
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      expect(fx.delivery.sentTexts).toHaveLength(1);
+      const text = fx.delivery.sentTexts[0]!.text;
+      expect(text).toBe('这件事我这边办不了。');
+      expect(text).not.toContain('再试一次');
+      expect(text).not.toContain('办好了');
+      expect(internalTermIn(text)).toBeUndefined();
+    } finally {
+      await fx.close();
+    }
+  });
+
   it('② 不回归：失败但模型说了话 → 宿主完全不介入（用户看到的话永远是模型说的）', async () => {
     const executor = new FailingExecutor();
     const fx = await makeFixture({ waitMs: 1_500, executor, afterToolText: MODEL_LINE });

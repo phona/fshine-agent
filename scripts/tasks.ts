@@ -32,6 +32,7 @@ import { loadConfig } from '@fshine/core';
 import type { Session } from '../packages/agent/src/execution-runtime';
 import {
   deriveTaskName,
+  stillProgressingOf,
   taskLivenessOf,
   taskReportedOf,
   taskUnstartedOf,
@@ -525,9 +526,25 @@ export async function runRedo(
   const { task } = input;
   const refuse = (message: string): RedoOutcome => ({ exitCode: 2, stdout: '', stderr: `${message}\n` });
 
-  // 可重新推进 = 任务已到停点（S1 事实：在跑/等待中不可重推；不读时重算结论）。
-  if (taskLivenessOf(task) === 'running') {
-    return refuse(`任务正在进行中，不能重新推进：${task.taskId}（仅在跑已停的任务可以重新推进）。`);
+  // 可重新推进 = 任务已到停点且没有终局否决事实（2026-11-23 B2：恢复基线「只允许已停的
+  // 已汇报 / 回合失败 / 未启动任务，其余 fail-closed」）：
+  //   · 已取消 / 已超时：终局事实不翻案，不重新交办；
+  //   · 仍在推进（唯一谓词 stillProgressingOf，含租约过期但回合未收尾）：没看到收尾事实就
+  //     重推可能双发写——旧判据只看 liveness==='running'，租约过期退成 died 就被放行了；
+  //   · 等待用户：先答复或取消。
+  if (task.cancelledAt !== undefined) {
+    return refuse(`任务已取消，不能重新推进：${task.taskId}。`);
+  }
+  if (task.timedOutAt !== undefined) {
+    return refuse(`任务已超时，不能重新推进：${task.taskId}。`);
+  }
+  if (stillProgressingOf(task)) {
+    if (taskLivenessOf(task) === 'running') {
+      return refuse(`任务正在进行中，不能重新推进：${task.taskId}（仅在跑已停的任务可以重新推进）。`);
+    }
+    // 租约过期但 round_failed_at/汇报存档都还没有：不能确定它是不是还在执行（结果未明），
+    // 按「未收尾」拒，等它收尾或先取消——不猜「已经停了」。
+    return refuse(`任务尚未收尾，不能重新推进：${task.taskId}（等它收尾或先取消）。`);
   }
   if (task.pendingQuestion !== undefined) {
     return refuse(`任务在等待用户表态，不能重新推进：${task.taskId}（先答复或取消该任务）。`);

@@ -103,7 +103,18 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 | R-1 | `wakeCancelled` 不在会话链上的 run/wake 竞态：任务取消时若该会话此刻没有在跑的回合（`turnActive=false`），`wakeCancelled` 直接起一次唤醒；若紧接着用户回合/另一状态变化又起 wake，两个 wake 可能并发。复核实测 **1 次可复现** driver 报错、用户回合空 | `apps/server/notification-chat-sink.ts:216-235`（`wakeCancelled` 出口）；`apps/server/server.ts:1303`（`wakeAndDeliverStateChange` 本体，出口逐步接它）；`turnActive` 判据见 `server.ts:1075` | 属竞态收口，不是本次去内部词切片；复现率与用户级影响待专门测。修法要给唤醒加会话级串行/去重（新机制，需过准入），本轮不引入 |
 | R-2 | `WAKE_TURN_MS = 60s` 与 Main `mainThinkingLevel=high` 的张力：high 档长思考的唤醒回合可能 60s 内出不来 → 超时 abort → 模型那句丢失、走兜底渲染文案（用户看到的是模板话而非模型话） | `packages/agent/src/execution-runtime.ts:1071`（`WAKE_TURN_MS = 60_000`）、`:3324-3358`（wake/coldWake 截止）；`packages/contracts/src/config.ts:121`、`packages/core/src/config.ts:96`（`mainThinkingLevel` 配置）；兜底见 `notification-chat-sink.ts:216-235` | 是否真发生取决于真模型在 high 档的唤醒耗时，**当前无真模型测量**。不擅自放宽截止或降档——等 `eval:user` 真模型读数再定，避免为假设问题改超时语义 |
 
-## 十一、长连接可靠性：离线/断连窗口的用户消息不可恢复（owner 2026-11-20 要求登记）
+## 十一、S1 收尾复核登记（2026-11-23，明确不修）
+
+> 来自「删 status 概念」收尾轮的独立复核。四条都已在现行代码核对；本轮只登记，不修——修法要么是新增机制（需过新增机制准入），要么是用户可见词面变更（需 owner 裁定），要么会把确定性判据换成语义判断（违反判据红线）。
+
+| 编号 | 是什么 | 后果 | 为何暂不修 | 现行证据 |
+|---|---|---|---|---|
+| M2 | 有机械失败事实（`errorCode` / `failureReason` / `partial`）的回合即使带 worker 汇报，`settle` 也不 `archiveReply`，只落 `round_failed_at` | 进程在唤醒/兜底投递执行完前退出，worker 的失败说明（两份信息之一）只剩执行行 + `round_failed_at`，底账再也读不到那句汇报 | 把失败说明写进 `reply_text` 会改变 `taskReportedOf` 的语义（已汇报 vs 无汇报），直接影响 redo 守卫、CLI 标签、唤醒/兜底分流；需要独立的「失败说明」列/语义与 schema 迁移，属新增机制，不在本轮收尾内 | `packages/agent/src/task-runner.ts:1696-1722`（`hasMechanicalFailureFact` 分支）；`packages/core/src/task-progress.ts:89-101`（`taskReportedOf` 口径） |
+| M3 | E11 的 `noWriteExecuted` 锚点只要求「写面执行行没有一条 completed」；有任务时零写命中，无任务时零执行 + 非空回复也命中 | 锚点接近恒过：不区分「零执行是权限拒绝/执行失败」还是「模型随便回了一句没办事」，E11 通过不能证明用户被告知了办不了 | 要区分拒绝/失败必须判断回复语义，而 AGENTS 判据红线禁止用关键词/正则表达语义判断；确定性事实层没有「模型是否说清办不了」的信号，只能交给用户级黑盒 eval。不为凑绿补词表/改判据 | `scripts/eval/convergence-r1/judge.ts:792-827`；已登记口径 `../ops/handover.md:31`、`scripts/eval/convergence-r1/cases/E11.ts:15-41` |
+| m1 | `noteRoundFailed` 即使 `roundFailedAt` 已存在仍无条件 `emit('round_failed')`；`result_unknown` 收尾先 `markDied`（emit `died`）再 `noteRoundFailed`（emit `round_failed`） | outbox 对同一任务落两条 kind=failed 的事实；用户不重复（第二条被抑制/去重），但统计/告警按事件计数会双记 | 改成条件发射会改变「每回合一条失败事实」的通知语义与 outbox 状态版本判据，牵动去重/重试；属统计面读数偏差，等通知面统一切片再收 | `packages/agent/src/task-registry.ts:741-747`（`emit(task,'round_failed')` 无守卫）；`packages/agent/src/task-runner.ts:1726-1739`（result_unknown：`markDied` → `noteRoundFailed`） |
+| m2 | CLI 的 `taskFactLabelsOf` 不读 `roundFailedAt`；已停但无汇报的任务落到兜底标签「无汇报」 | `tasks` 列表看不出这一轮已经停了，与「进程挂了/还没回」不可辨 | 加标签是用户可见词面变更，需要与 AGENTS「不新增状态词」的边界一起裁定（「本轮已停」算事实词还是状态词）；不影响 redo 守卫（守卫已直接读 `roundFailedAt`），本轮只登记 | `scripts/tasks.ts:143-162`（标签判据无 `roundFailedAt`）；`packages/agent/src/task-runner.ts` 的 settle 收尾口径 |
+
+## 十二、长连接可靠性：离线/断连窗口的用户消息不可恢复（owner 2026-11-20 要求登记）
 
 **事项**：企微 AI 机器人长连接（WebSocket）模式下，服务停服或断连期间用户发出的消息**平台不补投、产品无补拉**，窗口内消息永久丢失。
 

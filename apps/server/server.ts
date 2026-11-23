@@ -662,7 +662,12 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     if (input.died === true) return failureFallbackFactText({ died: true, ...namePart });
     if (input.resourceLimited === true) return failureFallbackFactText({ resourceLimited: true, ...namePart });
     if (input.code !== undefined) return failureFallbackFactText({ code: input.code, ...namePart });
-    if (input.reasonCode !== undefined) return failureFallbackFactText(namePart);
+    // 零执行的结构化原因不能当「执行端没办成」：not_permitted = 发起前被宿主拒绝 → 既有
+    // denied 话术（「没权限」+ 动作）；unsupported = 没有对应能力 → 既有「办不了」措辞。
+    // 两者都绝不落到「再试一次」（话术路由收在 failureFallbackFactText 单一出口）。
+    if (input.reasonCode !== undefined) {
+      return failureFallbackFactText({ zeroExecReason: input.reasonCode, ...namePart });
+    }
     if (input.reason !== undefined && input.reason.trim() !== '') return failureFallbackFactText(namePart);
     const report = (input.report ?? '').trim();
     // 没有失败执行事实、也没有汇报原文：说「这次没能办成」（executor_failed），绝不冒充成功。
@@ -2059,6 +2064,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
               ? { status: 'result_unknown' as const }
               : {}),
             ...(round?.code === undefined ? {} : { code: round.code }),
+            // B1：零执行原因码（not_permitted / unsupported）与执行层错误码同等对待——
+            // 丢了它，权限拒绝/没有能力会被兜底说成「没办成、再试一次」。
+            ...(round?.reasonCode === undefined ? {} : { zeroExecReason: round.reasonCode }),
             ...(round?.partial === undefined ? {} : { partial: round.partial }),
             ...(taskFailureFactOf(suppressedTaskId)?.name === undefined ? {} : { name: taskFailureFactOf(suppressedTaskId)!.name }),
           };

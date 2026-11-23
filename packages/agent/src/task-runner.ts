@@ -65,22 +65,29 @@
  * 时间强制中止）；§1 无租约续期方法，超出租约的在飞回合会被下一次 pump 判为 result_unknown
  * （保守口径：unknown ≠ failed ≠ success）。
  *
- * 取消状态机（§1/§5）：queued/waiting_user（无在飞回合）→ requestCancel→confirmCancelled
- * 机械确认；running → requestCancel（cancelling）+ abort 信号；执行端确认（返回
- * {kind:'cancelled'} 或 AbortError 结束）才 confirmCancelled；未获确认（回合照常完成/报错）
- * → 回 running 并如实落终态（cancelling→running 是「不得宣称取消」的回滚边）。
+ * 取消（S1 事实模型，**没有取消状态机**）：取消只写一次性事实，不进入任何中间态。
+ *   · queued / waiting_user（无在飞回合）→ markCancelled 机械确认；
+ *   · running → markCancelRequested（持久 cancel_requested_at）+ abort 信号；执行端确认
+ *     （回合 {kind:'cancelled'} 或 AbortError 收尾）才 markCancelled；
+ *   · 未获确认而回合先以别的事实收尾：取消请求留在 cancel_requested_at 供重启对账如实说
+ *     「你要我停、没停完」，任务事实不翻案（**没有 cancelling→running 回滚边**）。
  *
- * 登记缺口（不在本模块预造，归属集成/后续切片）：
- *   · 重启时停在 cancelling 的孤儿任务（expireLeases 只回收 running；回滚/确认边界由 P2/P5 定）；
- *   · waiting_user 答复接续回合无租约（answerResumes 不写租约），进程中断后的回收未覆盖；
- *   · 满员/队列满的「拒绝」落点（P7b 起）：由集成接线在受理侧落地——execution-runtime 委派前
- *     按 policy 事实拒绝（任务 failed + resource_limited，不进入执行）；runner 收到排队许可
- *     （state='queued'）时只停止派发（队列 = 底账 queued 行），不据此直派发（否则绕过并发上限）；
- *     queued 超时计时仍由 P5 边界触发底账 timeout（runner 不为排队做计时器）；
- *     waiting_user 到期由上面的单一有界定时器轮消费（W 切片）。
- *   · 后台任务结果文本（resultText）：集成裁定落点=settle 确认 `completed` 终态后经端口
- *     可选方法 `archiveReply` 逐字存档（P2 的 P1 存档面；不经 inline `complete()`/
- *     task 级 judge，避免误伤等待接续）——P6-E01「结果可取回」由此具备执行口径。
+ * 重启恢复（S1）：expireLeases 只对「仍在推进」（stillProgressingOf：已启动、无结束时刻、
+ * 无 round_failed_at、无汇报、无等待形状）且租约过期的行落 died_at（结果未知，不重放）；
+ * 已汇报/回合失败的行不会被过期租约改写。取消孤儿（cancel_requested_at 非空 + 仍在推进 +
+ * 无有效租约）由 server 的启动对账出口接回「你要我停、没停完」事实，不在本模块预造文案。
+ *
+ * 回合收尾（S1 事实，**没有 completed 终态**）：settle 只记事实——有汇报且本回合没有机械
+ * 失败事实（errorCode/failureReason/partial）→ archiveReply 逐字存档；否则 noteRoundFailed
+ * 落一次性 round_failed_at（「本轮已停」，不是业务结论）；result_unknown → markDied +
+ * noteRoundFailed（结果未知 ≠ 无汇报）。
+ *
+ * 其它登记口径（不是本模块预造的状态）：
+ *   · 满员/队列满的拒绝：受理侧按 policy 事实落一次性 resource_limited_at（不进入执行）；
+ *     runner 收到排队许可（queued）时只停止派发（队列 = 底账 queued 行），不据此直派发
+ *     （否则绕过并发上限）；queued 超时由既有边界触发底账 timeout，waiting_user 到期由
+ *     单一有界定时器轮消费。
+ *   · waiting_user 答复接续回合由 startRound 补租约（armLease），进程中断可被看门狗回收。
  *
  * 移植性：本文件除「收尾/推进事实」纯函数外零仓内 import（端口为对接冻结契约的最小结构类型，
  * 非新协议层；推进/收尾判定与底账 registry 共用 @fshine/core task-progress 的同一份定义，
