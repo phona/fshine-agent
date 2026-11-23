@@ -24,8 +24,8 @@ import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver, TurnDriverInput } from '../../../packages/agent/src/driver-contract';
 import { createResourcePolicy } from '../../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import type { TaskScope, TaskTermination } from '../../../packages/agent/src/task-registry';
-import { taskEndedOf, taskLivenessOf, taskReportedOf, lastExecutionOf } from '../../../packages/agent/testing/task-facts';
+import type { TaskScope } from '../../../packages/agent/src/task-registry';
+import { taskEndedOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskWaitingOf, lastExecutionOf } from '../../../packages/agent/testing/task-facts';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import {
   assembleSessionCore,
@@ -115,7 +115,7 @@ interface TaskSnapshot {
   taskId: string;
   taskNo?: number;
   request: string;
-  termination?: TaskTermination;
+  endedAt?: string;
   resultText?: string;
   replyText?: string;
   pendingQuestion?: unknown;
@@ -155,7 +155,7 @@ async function run(): Promise<void> {
   const perTurnDriverEvents: Array<{ turn: number } & Record<string, unknown>> = [];
   const turnStats: Array<Record<string, unknown>> = [];
   const replies: Array<{ turn: number; text: string }> = [];
-  const taskFacts: Array<{ ts: string; taskId: string; taskNo?: number; liveness: 'running' | 'died' | 'waiting_user' | null; ended: boolean; cancelled: boolean; turn: number }> = [];
+  const taskFacts: Array<{ ts: string; taskId: string; taskNo?: number; started: boolean; ended: boolean; reported: boolean; waiting: boolean; mayBeRunning: boolean; turn: number }> = [];
   const ledger = createBudgetLedger(LIMITS);
   let stopped: P3BudgetStop | null = null;
   const turnRef = { turn: 0 };
@@ -274,13 +274,17 @@ async function run(): Promise<void> {
         const ts = new Date().toISOString();
         const tasksNow = JSON.parse(JSON.stringify(session.tasks())) as TaskSnapshot[];
         for (const t of tasksNow) {
-          const liveness = taskLivenessOf(t) ?? null;
-          const ended = taskEndedOf(t) || taskReportedOf(t)
-            || ['completed', 'failed', 'refused'].includes(lastExecutionOf(t)?.status ?? '');
-          const cancelled = t.termination?.kind === 'cancelled';
-          const sig = JSON.stringify([liveness, ended, cancelled, t.executions.map((e) => e.status)]);
+          const facts = {
+            started: taskStartedOf(t),
+            ended: taskEndedOf(t) || taskReportedOf(t)
+              || ['completed', 'failed', 'refused'].includes(lastExecutionOf(t)?.status ?? ''),
+            reported: taskReportedOf(t),
+            waiting: taskWaitingOf(t),
+            mayBeRunning: taskMayBeRunningOf(t),
+          };
+          const sig = JSON.stringify([facts, t.endedAt ?? null, t.executions.map((e) => e.status)]);
           if (prevStatus.get(t.taskId) !== sig) {
-            taskFacts.push({ ts, taskId: t.taskId, ...(t.taskNo !== undefined ? { taskNo: t.taskNo } : {}), liveness, ended, cancelled, turn: turnRef.turn });
+            taskFacts.push({ ts, taskId: t.taskId, ...(t.taskNo !== undefined ? { taskNo: t.taskNo } : {}), ...facts, turn: turnRef.turn });
             prevStatus.set(t.taskId, sig);
           }
         }

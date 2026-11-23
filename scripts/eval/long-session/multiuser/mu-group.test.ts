@@ -36,13 +36,11 @@ const MU_RUNTIME: RuntimeConfig = { mainConcurrency: 4, backgroundConcurrency: 4
 function snapshot(partial: Partial<MuTaskSnapshot> & Pick<MuTaskSnapshot, 'taskId' | 'principalId' | 'sessionId' | 'request'>): MuTaskSnapshot {
   return {
     taskNo: 1,
-    liveness: null,
+    started: true,
     ended: true,
-    cancelled: false,
-    died: false,
-    timedOut: false,
-    resourceLimited: false,
     reported: true,
+    waiting: false,
+    mayBeRunning: false,
     lastExecutionStatus: undefined,
     reason: undefined,
     failureReason: undefined,

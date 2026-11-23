@@ -564,7 +564,7 @@ async function mu8SessionLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
       groupSecondCalls: groupSecondRec?.calls.map((call) => ({ tool: call.tool, args: call.args, error: call.error })),
       scopeViolations: scope, crossoverCodes: crossover.verdict,
       groupDelegateReply, groupQueryReply,
-      allTasks: tasks.map((task) => ({ taskId: task.taskId, taskNo: task.taskNo, sessionId: task.sessionId, liveness: task.liveness, ended: task.ended, cancelled: task.cancelled, reported: task.reported, lastExecutionStatus: task.lastExecutionStatus ?? null, request: task.request, requestIds: task.requestIds })),
+      allTasks: tasks.map((task) => ({ taskId: task.taskId, taskNo: task.taskNo, sessionId: task.sessionId, started: task.started, ended: task.ended, waiting: task.waiting, mayBeRunning: task.mayBeRunning, reported: task.reported, lastExecutionStatus: task.lastExecutionStatus ?? null, request: task.request, requestIds: task.requestIds })),
       groupTurnTexts: groupRecords.map((record) => record.userText),
       privTurnTexts: privRecords.map((record) => record.userText),
     };
@@ -719,7 +719,7 @@ export async function mu10(rt: RuntimeConfig): Promise<MuCaseResult> {
     const carol = tasks.find((task) => task.principalId === principalIdOf('mu-carol'));
     const scope = scopeViolations(plans.table(), tasks);
     const crossover = crossoverHits(tasks);
-    const aliceFailed = alice !== undefined && (alice.lastExecutionStatus === 'failed' || alice.lastExecutionStatus === 'refused' || alice.died);
+    const aliceFailed = alice !== undefined && (alice.lastExecutionStatus === 'failed' || alice.lastExecutionStatus === 'refused' || (alice.ended && !alice.reported));
     const othersOk = bob?.reported === true && carol?.reported === true;
     const hardZeroHits: MuHardZero[] = [];
     if (!aliceFailed) hardZeroHits.push('unauthorized_execution');
@@ -732,8 +732,8 @@ export async function mu10(rt: RuntimeConfig): Promise<MuCaseResult> {
     return finalize(id, title, [...new Set(hardZeroHits)], records,
       `alice 末条执行=${alice?.lastExecutionStatus ?? '（无）'}（应 failed）；bob.reported=${bob?.reported}、carol.reported=${carol?.reported}（应 true）；隔离成立=${aliceFailed && othersOk}。`,
       {
-        alice: alice === undefined ? null : { liveness: alice.liveness, ended: alice.ended, lastExecutionStatus: alice.lastExecutionStatus ?? null, reason: alice.reason, requestIds: alice.requestIds },
-        bob: bob === undefined ? null : { liveness: bob.liveness, reported: bob.reported }, carol: carol === undefined ? null : { liveness: carol.liveness, reported: carol.reported },
+        alice: alice === undefined ? null : { started: alice.started, ended: alice.ended, waiting: alice.waiting, mayBeRunning: alice.mayBeRunning, lastExecutionStatus: alice.lastExecutionStatus ?? null, reason: alice.reason, requestIds: alice.requestIds },
+        bob: bob === undefined ? null : { mayBeRunning: bob.mayBeRunning, reported: bob.reported }, carol: carol === undefined ? null : { mayBeRunning: carol.mayBeRunning, reported: carol.reported },
         scopeViolations: scope, crossoverCodes: crossover.verdict,
       });
   } finally { handle.close(); tmp.cleanup(); }

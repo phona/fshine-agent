@@ -1,14 +1,15 @@
 /**
- * 零状态 v6 迁移（可变状态列 → 只存事实 + 终止事件账）。
+ * 事实账迁移（v4/v5/v6 → 只存事实 + 无种类结束事实账）。
  *
  * 口径（task-store.ts 头注）：
- *   · 触发 = 可写打开且 tasks 仍是旧形状（带 status 结论列或六个终态列，v5 及更早）；
- *   · v6 重建 tasks 表：删 status/reason/failure_reason + died/cancelled/timed_out/
+ *   · 触发 = 可写打开且 tasks 仍是旧形状（带 status 结论列或六个终态列，v5 及更早）→ 重建
+ *     为只存事实的形状；
+ *   · v6 = tasks 表重建：删 status/reason/failure_reason + died/cancelled/timed_out/
  *     resource_limited/round_failed/cancel_requested 六列；**只留事实列**；
- *   · 旧任务**全部当已结束**：running_since 按 updated_at 回填（不再被认领），旧结论列的机械
- *     信息转成**一条终止事件**（task_events；cancelled/timed_out/resource_limited/died/
- *     round_failed/completed），历史汇报/执行事实原样保留；
- *   · 迁移前自动备份 <db>.backup-v6（内容 = 迁移前字节；不覆盖、不自动删除）；
+ *   · v7 = 旧 task_events（带终止种类 kind）→ task_ends：**只保留「停下时刻」，种类丢弃**；
+ *   · 旧任务**全部当已结束**：running_since 按 updated_at 回填（不再被认领），并写一条
+ *     无种类结束事实（at = 匹配到的旧终态列原时刻，NULL 才回退 updated_at）；
+ *   · 迁移前自动备份 <db>.backup-v<目标版本>（内容 = 迁移前字节；不覆盖、不自动删除）；
  *   · 回填 task_no / 计数器单调不减 / 幂等（二次打开零差异、不新增备份）；
  *   · 只读打开永不迁移：旧列仍在、不建备份、主库哈希不变。
  *
@@ -25,7 +26,7 @@ import { TASK_STORE_SCHEMA_VERSION, openTaskStore, storedTaskProgressOf } from '
 const dirs: string[] = [];
 
 function tempDir(): string {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'task-store-v6-'));
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'task-store-migration-'));
   dirs.push(dir);
   return dir;
 }
@@ -113,6 +114,19 @@ CREATE TABLE executions (
 CREATE INDEX idx_executions_task ON executions (task_id);
 `;
 
+/** v6-shape 结束事实账（带终止种类 kind —— v7 必须丢掉）。 */
+const V6_TASK_EVENTS_SCHEMA = `
+CREATE TABLE task_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  at TEXT NOT NULL,
+  state_version TEXT NOT NULL,
+  UNIQUE (task_id, kind, state_version)
+);
+CREATE INDEX idx_task_events_task ON task_events (task_id, seq);
+`;
+
 interface SeedRow {
   taskId: string;
   status: string;
@@ -136,7 +150,6 @@ const V4_SEED: readonly SeedRow[] = [
   { taskId: 'task_failed_confirmed', status: 'failed', resultText: null, updatedAt: '2026-11-14T10:00:00.000Z', taskNo: 8, name: '历史 H', replyText: null, reason: 'failed_confirmed' },
   { taskId: 'task_unexecuted', status: 'unexecuted', resultText: null, updatedAt: '2026-11-14T10:15:00.000Z', taskNo: 9, name: '历史 I', replyText: null, reason: null },
   { taskId: 'task_live', status: 'running', resultText: null, updatedAt: '2026-11-14T10:30:00.000Z', taskNo: 10, name: '历史 J', replyText: null, reason: null },
-  // 旧 unexecuted 但**有汇报存档**：按正常结束（completed），不是无结果收尾。
   { taskId: 'task_unexecuted_reported', status: 'unexecuted', resultText: '零执行，但有说明。', updatedAt: '2026-11-14T10:45:00.000Z', taskNo: 11, name: '历史 K', replyText: null, reason: null },
 ];
 
@@ -177,13 +190,14 @@ interface V5SeedRow {
   resultText: string | null;
   replyText: string | null;
   runningSince: string;
-  cancellation?: { kind: string; at: string };
+  /** 旧终态列（只用来验「时刻搬运」；种类不迁移）。 */
+  terminal?: { column: 'cancelled_at' | 'died_at'; at: string };
 }
 
 const V5_SEED: readonly V5SeedRow[] = [
   { taskId: 'task_v5_done', taskNo: 11, resultText: 'v5 汇报。', replyText: null, runningSince: '2026-11-20T08:00:00.000Z' },
-  { taskId: 'task_v5_cancelled', taskNo: 12, resultText: null, replyText: null, runningSince: '2026-11-20T08:10:00.000Z', cancellation: { kind: 'cancelled', at: '2026-11-20T08:11:00.000Z' } },
-  { taskId: 'task_v5_died', taskNo: 13, resultText: null, replyText: null, runningSince: '2026-11-20T08:20:00.000Z', cancellation: { kind: 'died', at: '2026-11-20T08:21:00.000Z' } },
+  { taskId: 'task_v5_cancelled', taskNo: 12, resultText: null, replyText: null, runningSince: '2026-11-20T08:10:00.000Z', terminal: { column: 'cancelled_at', at: '2026-11-20T08:11:00.000Z' } },
+  { taskId: 'task_v5_died', taskNo: 13, resultText: null, replyText: null, runningSince: '2026-11-20T08:20:00.000Z', terminal: { column: 'died_at', at: '2026-11-20T08:21:00.000Z' } },
   { taskId: 'task_v5_running', taskNo: 14, resultText: null, replyText: null, runningSince: '2026-11-20T08:30:00.000Z' },
 ];
 
@@ -208,8 +222,8 @@ function seedV5Db(dbPath: string): void {
       name: `v5 ${row.taskId}`,
       replyText: row.replyText,
       runningSince: row.runningSince,
-      cancelledAt: row.cancellation?.kind === 'cancelled' ? row.cancellation.at : null,
-      diedAt: row.cancellation?.kind === 'died' ? row.cancellation.at : null,
+      cancelledAt: row.terminal?.column === 'cancelled_at' ? row.terminal.at : null,
+      diedAt: row.terminal?.column === 'died_at' ? row.terminal.at : null,
     });
   }
   db.prepare("INSERT INTO task_sequences (name, value) VALUES ('task_no', 11)").run();
@@ -248,10 +262,10 @@ function rawTask(dbPath: string, taskId: string): Record<string, unknown> {
   }
 }
 
-function rawEvents(dbPath: string, taskId: string): Array<{ kind: string; at: string }> {
+function rawEnds(dbPath: string, taskId: string): Array<{ task_id: string; at: string }> {
   const db = new Database(dbPath, { readonly: true });
   try {
-    return db.prepare('SELECT kind, at FROM task_events WHERE task_id = ? ORDER BY seq').all(taskId) as Array<{ kind: string; at: string }>;
+    return db.prepare('SELECT task_id, at FROM task_ends WHERE task_id = ?').all(taskId) as Array<{ task_id: string; at: string }>;
   } finally {
     db.close();
   }
@@ -262,8 +276,8 @@ const FORBIDDEN_TERMINAL_COLUMNS = [
   'died_at', 'cancelled_at', 'timed_out_at', 'resource_limited_at', 'round_failed_at', 'cancel_requested_at',
 ] as const;
 
-describe('零状态 v6 迁移（v4 → 只存事实 + 终止事件账）', () => {
-  it('删结论列/终态列；旧任务全部当已结束（running_since 回填 + 一条终止事件）；备份 .backup-v6；幂等', () => {
+describe('事实账迁移 v4 → 只存事实 + 无种类结束事实', () => {
+  it('删结论列/终态列；旧任务全部当已结束（running_since 回填 + 一条结束事实）；备份；幂等', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     seedV4Db(dbPath);
@@ -273,21 +287,21 @@ describe('零状态 v6 迁移（v4 → 只存事实 + 终止事件账）', () =>
 
     // 版本推进 + 备份（内容 = 迁移前字节）。
     expect(userVersion(dbPath)).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(TASK_STORE_SCHEMA_VERSION).toBe(6);
-    const backupPath = `${dbPath}.backup-v6`;
+    expect(TASK_STORE_SCHEMA_VERSION).toBe(7);
+    const backupPath = `${dbPath}.backup-v7`;
     expect(existsSync(backupPath)).toBe(true);
     expect(sha256(backupPath)).toBe(preMigrationSha);
 
-    // 结论/终态列已删；事实列在；task_events 表已建。
+    // 结论/终态列已删；事实列在；task_ends 表已建（只有 task_id + at，**没有 kind**）。
     const columns = columnNames(dbPath, 'tasks');
     for (const forbidden of FORBIDDEN_TERMINAL_COLUMNS) expect(columns).not.toContain(forbidden);
     expect(columns).toEqual(expect.arrayContaining([
       'pending_question', 'waiting_since', 'lease_owner', 'lease_until', 'running_since',
       'reply_text', 'result_text', 'created_at', 'updated_at',
     ]));
-    expect(columnNames(dbPath, 'task_events')).toEqual(
-      expect.arrayContaining(['task_id', 'kind', 'at']),
-    );
+    expect(columnNames(dbPath, 'task_ends')).toEqual(expect.arrayContaining(['task_id', 'at']));
+    expect(columnNames(dbPath, 'task_ends')).not.toContain('kind');
+    expect(columnNames(dbPath, 'task_events')).toEqual([]);
 
     // 历史事实搬运：请求/汇报/回复/编号原样；执行行仍在（dispatch_key 缺省不伪造）。
     const storedDone = store.getTask('task_done')!;
@@ -304,23 +318,15 @@ describe('零状态 v6 迁移（v4 → 只存事实 + 终止事件账）', () =>
     }
     expect(rawTask(dbPath, 'task_queued')['running_since']).toBe('2026-11-14T09:00:00.000Z');
 
-    // 旧结论 → 终止事件（每个旧任务恰好一条；updated_at = 那次事实的时刻）。
-    expect(rawEvents(dbPath, 'task_done')).toEqual([{ kind: 'completed', at: '2026-11-14T08:00:00.000Z' }]);
-    expect(rawEvents(dbPath, 'task_cancel')).toEqual([{ kind: 'cancelled', at: '2026-11-14T08:30:00.000Z' }]);
-    expect(rawEvents(dbPath, 'task_timeout')).toEqual([{ kind: 'timed_out', at: '2026-11-14T08:45:00.000Z' }]);
-    expect(rawEvents(dbPath, 'task_queued')).toEqual([{ kind: 'round_failed', at: '2026-11-14T09:00:00.000Z' }]);
-    expect(rawEvents(dbPath, 'task_unknown')).toEqual([{ kind: 'died', at: '2026-11-14T09:15:00.000Z' }]);
-    expect(rawEvents(dbPath, 'task_cancelling')).toEqual([{ kind: 'round_failed', at: '2026-11-14T09:30:00.000Z' }]);
-    expect(rawEvents(dbPath, 'task_resource')).toEqual([{ kind: 'resource_limited', at: '2026-11-14T09:45:00.000Z' }]);
-    expect(rawEvents(dbPath, 'task_failed_confirmed')).toEqual([{ kind: 'round_failed', at: '2026-11-14T10:00:00.000Z' }]);
-    expect(rawEvents(dbPath, 'task_unexecuted')).toEqual([{ kind: 'round_failed', at: '2026-11-14T10:15:00.000Z' }]);
-    expect(rawEvents(dbPath, 'task_live')).toEqual([{ kind: 'round_failed', at: '2026-11-14T10:30:00.000Z' }]);
-    expect(rawEvents(dbPath, 'task_unexecuted_reported')).toEqual([{ kind: 'completed', at: '2026-11-14T10:45:00.000Z' }]);
+    // 每个旧任务恰好一条「停下时刻」（v4 没有独立终态时刻 → 回退 updated_at）；没有种类。
+    for (const row of V4_SEED) {
+      expect(rawEnds(dbPath, row.taskId), row.taskId).toEqual([{ task_id: row.taskId, at: row.updatedAt }]);
+    }
 
-    // 读出侧：终止事件原样可读。
-    expect(storedDone.terminations).toEqual([{ taskId: 'task_done', kind: 'completed', at: '2026-11-14T08:00:00.000Z' }]);
-    expect(store.getTask('task_unknown')!.terminations[0]!.kind).toBe('died');
-    expect(store.getTask('task_resource')!.terminations[0]!.kind).toBe('resource_limited');
+    // 读出侧：结束事实原样可读（无种类）。
+    expect(storedDone.ends).toEqual([{ taskId: 'task_done', at: '2026-11-14T08:00:00.000Z' }]);
+    expect(store.getTask('task_unknown')!.ends[0]!.at).toBe('2026-11-14T09:15:00.000Z');
+    expect(store.getTask('task_resource')!.ends[0]!.at).toBe('2026-11-14T09:45:00.000Z');
 
     // 在跑扫描：旧任务全部已结束，没有「在跑」候选；未启动认领也不捞旧行。
     expect(store.listRunningTasks()).toEqual([]);
@@ -351,13 +357,13 @@ describe('零状态 v6 迁移（v4 → 只存事实 + 终止事件账）', () =>
         ['task_unexecuted_reported', 11], ['task_new', 12],
       ]);
     second.close();
-    expect(backupFiles(dir)).toEqual(['state.db.backup-v6']);
+    expect(backupFiles(dir)).toEqual(['state.db.backup-v7']);
     expect(sha256(backupPath)).toBe(preMigrationSha);
   });
 });
 
-describe('零状态 v6 迁移（v5 六个终态列 → 追加事件）', () => {
-  it('v5 库可写打开：终态列转成事件、旧行全部当已结束、事件重启后仍在', () => {
+describe('事实账迁移 v5 六个终态列 → 无种类结束事实', () => {
+  it('v5 库可写打开：终态列的时刻转成结束事实、种类不迁移、旧行全部当已结束', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     seedV5Db(dbPath);
@@ -365,19 +371,13 @@ describe('零状态 v6 迁移（v5 六个终态列 → 追加事件）', () => {
     const store = openTaskStore(dbPath);
     const columns = columnNames(dbPath, 'tasks');
     for (const forbidden of FORBIDDEN_TERMINAL_COLUMNS) expect(columns).not.toContain(forbidden);
-    // 有汇报的旧行 = completed；已有终态列的按原 kind；无可读结论的旧行 = round_failed。
-    expect(store.getTask('task_v5_done')!.terminations.map((row) => row.kind)).toEqual(['completed']);
-    expect(store.getTask('task_v5_cancelled')!.terminations.map((row) => row.kind)).toEqual(['cancelled']);
-    expect(store.getTask('task_v5_died')!.terminations.map((row) => row.kind)).toEqual(['died']);
-    expect(store.getTask('task_v5_running')!.terminations.map((row) => row.kind)).toEqual(['round_failed']);
-    // 终止事件的时刻 = 匹配到的旧终态列原时刻（cancelled_at 08:11 / died_at 08:21），
-    // 不是 updated_at（两行都是 09:00）。反向绊线：at 改回固定 updated_at → 本断言红。
-    expect(store.getTask('task_v5_cancelled')!.terminations[0]!.at).toBe('2026-11-20T08:11:00.000Z');
-    expect(store.getTask('task_v5_died')!.terminations[0]!.at).toBe('2026-11-20T08:21:00.000Z');
-    expect(store.getTask('task_v5_cancelled')!.terminations[0]!.at).not.toBe('2026-11-20T09:00:00.000Z');
-    expect(store.getTask('task_v5_died')!.terminations[0]!.at).not.toBe('2026-11-20T09:00:00.000Z');
+    // 结束时刻 = 匹配到的旧终态列原时刻（cancelled_at 08:11 / died_at 08:21），不是 updated_at；
+    // 每种旧结局都只成为「停下时刻」，**没有 kind**。
+    expect(store.getTask('task_v5_cancelled')!.ends).toEqual([{ taskId: 'task_v5_cancelled', at: '2026-11-20T08:11:00.000Z' }]);
+    expect(store.getTask('task_v5_died')!.ends).toEqual([{ taskId: 'task_v5_died', at: '2026-11-20T08:21:00.000Z' }]);
     // 没有旧终态列可读的行才回退 updated_at。
-    expect(store.getTask('task_v5_running')!.terminations[0]!.at).toBe('2026-11-20T09:00:00.000Z');
+    expect(store.getTask('task_v5_done')!.ends).toEqual([{ taskId: 'task_v5_done', at: '2026-11-20T09:00:00.000Z' }]);
+    expect(store.getTask('task_v5_running')!.ends).toEqual([{ taskId: 'task_v5_running', at: '2026-11-20T09:00:00.000Z' }]);
     for (const row of V5_SEED) {
       expect(rawTask(dbPath, row.taskId)['running_since'], row.taskId).toBe(row.runningSince);
     }
@@ -385,12 +385,46 @@ describe('零状态 v6 迁移（v5 六个终态列 → 追加事件）', () => {
     store.close();
 
     const reopened = openTaskStore(dbPath);
-    expect(reopened.getTask('task_v5_cancelled')!.terminations.map((row) => row.kind)).toEqual(['cancelled']);
+    expect(reopened.getTask('task_v5_cancelled')!.ends).toEqual([{ taskId: 'task_v5_cancelled', at: '2026-11-20T08:11:00.000Z' }]);
     reopened.close();
   });
 });
 
-describe('零状态只读打开不迁移（向前兼容）', () => {
+describe('事实账迁移 v6 → v7（task_events 去种类）', () => {
+  it('v6 的既有终止事件只留下时刻：kind 列丢弃、task_events 表删除、同任务保留最早时刻', () => {
+    const dir = tempDir();
+    const dbPath = path.join(dir, 'state.db');
+    seedV5Db(dbPath);
+    // 先做 v6/v7 迁移，再人为造回 v6 形状（带 kind 的 task_events + 任务行仍在）。
+    const store = openTaskStore(dbPath);
+    store.close();
+    {
+      const db = new Database(dbPath);
+      db.exec(V6_TASK_EVENTS_SCHEMA);
+      db.prepare("INSERT INTO task_events (task_id, kind, at, state_version) VALUES (?, ?, ?, 'end')")
+        .run('task_v5_cancelled', 'cancelled', '2026-11-20T08:11:00.000Z');
+      db.prepare("INSERT INTO task_events (task_id, kind, at, state_version) VALUES (?, ?, ?, 'end2')")
+        .run('task_v5_cancelled', 'died', '2026-11-20T08:12:00.000Z');
+      db.prepare('DROP TABLE task_ends').run();
+      db.pragma('user_version = 6');
+      db.close();
+    }
+
+    const reopened = openTaskStore(dbPath);
+    expect(userVersion(dbPath)).toBe(7);
+    // kind 列丢弃；同任务只留最早一条时刻（不分类）。
+    expect(columnNames(dbPath, 'task_events')).toEqual([]);
+    expect(rawEnds(dbPath, 'task_v5_cancelled')).toEqual([
+      { task_id: 'task_v5_cancelled', at: '2026-11-20T08:11:00.000Z' },
+    ]);
+    expect(reopened.getTask('task_v5_cancelled')!.ends).toEqual([
+      { taskId: 'task_v5_cancelled', at: '2026-11-20T08:11:00.000Z' },
+    ]);
+    reopened.close();
+  });
+});
+
+describe('只读打开不迁移（向前兼容）', () => {
   it('v4 库只读：不加列（status 仍在）、不建备份、哈希不变', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
@@ -404,10 +438,10 @@ describe('零状态只读打开不迁移（向前兼容）', () => {
 
     expect(sha256(dbPath)).toBe(before);
     expect(columnNames(dbPath, 'tasks')).toContain('status');
-    expect(existsSync(`${dbPath}.backup-v6`)).toBe(false);
+    expect(existsSync(`${dbPath}.backup-v7`)).toBe(false);
   });
 
-  it('v5 库只读：旧终态列还原成终止事实（kind + 原时刻），不写库、不建事件账', () => {
+  it('v5 库只读：旧终态列还原成「停下时刻」（无种类），不写库、不建事实账', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     seedV5Db(dbPath);
@@ -417,54 +451,50 @@ describe('零状态只读打开不迁移（向前兼容）', () => {
     expect(store.getTask('task_v5_cancelled')!.task.request).toBe('v5 请求 task_v5_cancelled');
     expect(store.listRunningTasks()).toEqual([]);
     expect(store.listWaitingRows()).toEqual([]);
-    // 只读投影把仍在的旧终态列还原成终止事实：kind + 旧列原时刻（不是 updated_at）。
-    // 反向绊线：只读投影忽略旧列 → cancelled 读成「已启动无汇报」= died（结果未知），本断言红。
-    expect(store.getTask('task_v5_cancelled')!.terminations).toEqual([
-      { taskId: 'task_v5_cancelled', kind: 'cancelled', at: '2026-11-20T08:11:00.000Z' },
+    // 只读投影把仍在的旧终态列还原成时刻（旧列原时刻，不是 updated_at）；种类不还原。
+    expect(store.getTask('task_v5_cancelled')!.ends).toEqual([
+      { taskId: 'task_v5_cancelled', at: '2026-11-20T08:11:00.000Z' },
     ]);
-    expect(store.getTask('task_v5_died')!.terminations).toEqual([
-      { taskId: 'task_v5_died', kind: 'died', at: '2026-11-20T08:21:00.000Z' },
+    expect(store.getTask('task_v5_died')!.ends).toEqual([
+      { taskId: 'task_v5_died', at: '2026-11-20T08:21:00.000Z' },
     ]);
-    // 没有旧终态列的行不伪造终止事实（只读不按汇报/旧 status 推结论）。
-    expect(store.getTask('task_v5_done')!.terminations).toEqual([]);
-    expect(store.getTask('task_v5_running')!.terminations).toEqual([]);
-    // listTerminations 同源（不是只修 storedTask 一条路）。
-    expect(store.listTerminations('task_v5_cancelled')).toEqual([
-      { taskId: 'task_v5_cancelled', kind: 'cancelled', at: '2026-11-20T08:11:00.000Z' },
+    // 没有旧终态列的行不伪造结束事实（只读不按汇报/旧 status 推结论）。
+    expect(store.getTask('task_v5_done')!.ends).toEqual([]);
+    expect(store.getTask('task_v5_running')!.ends).toEqual([]);
+    // listEndFacts 同源（不是只修 storedTask 一条路）。
+    expect(store.listEndFacts('task_v5_cancelled')).toEqual([
+      { taskId: 'task_v5_cancelled', at: '2026-11-20T08:11:00.000Z' },
     ]);
-    expect(store.listTerminations('task_v5_running')).toEqual([]);
-    // 存活推导输入（唯一谓词）：cancelled 行已有终止事实，不再按「已启动无汇报」判 died。
-    expect(storedTaskProgressOf(store.getTask('task_v5_cancelled')!).termination).toEqual({
-      kind: 'cancelled',
-      at: '2026-11-20T08:11:00.000Z',
-    });
+    expect(store.listEndFacts('task_v5_running')).toEqual([]);
+    // 推进判定输入：cancelled 行已有结束事实 → endedAt 在场（不再是「已启动无汇报」）。
+    expect(storedTaskProgressOf(store.getTask('task_v5_cancelled')!).endedAt).toBe('2026-11-20T08:11:00.000Z');
     store.close();
 
-    // 不写库：哈希不变、旧列仍在、事件账仍未建。
+    // 不写库：哈希不变、旧列仍在、事实账仍未建。
     expect(sha256(dbPath)).toBe(before);
     expect(columnNames(dbPath, 'tasks')).toContain('cancelled_at');
-    expect(columnNames(dbPath, 'task_events')).toEqual([]);
+    expect(columnNames(dbPath, 'task_ends')).toEqual([]);
   });
 
-  it('迁移后的 v6 库只读打开：终止事实仍从 task_events 读（不是旧列合成）', () => {
+  it('迁移后的库只读打开：结束事实仍从 task_ends 读（不是旧列合成）', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     seedV5Db(dbPath);
-    // 可写打开完成迁移（旧列已删、事件账已建）。
+    // 可写打开完成迁移（旧列已删、事实账已建）。
     openTaskStore(dbPath).close();
 
     const store = openTaskStore(dbPath, { readOnly: true });
-    expect(store.getTask('task_v5_cancelled')!.terminations).toEqual([
-      { taskId: 'task_v5_cancelled', kind: 'cancelled', at: '2026-11-20T08:11:00.000Z' },
+    expect(store.getTask('task_v5_cancelled')!.ends).toEqual([
+      { taskId: 'task_v5_cancelled', at: '2026-11-20T08:11:00.000Z' },
     ]);
-    expect(store.getTask('task_v5_died')!.terminations).toEqual([
-      { taskId: 'task_v5_died', kind: 'died', at: '2026-11-20T08:21:00.000Z' },
+    expect(store.getTask('task_v5_died')!.ends).toEqual([
+      { taskId: 'task_v5_died', at: '2026-11-20T08:21:00.000Z' },
     ]);
     store.close();
   });
 });
 
-describe('零状态 v6 重建事务原子性（2026-11-23 review blocking 延续）', () => {
+describe('重建事务原子性（2026-11-23 review blocking 延续）', () => {
   it('重建中途失败整体回滚：旧 tasks 数据仍在、版本不升、旧结论列/终态列没被 DROP', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');

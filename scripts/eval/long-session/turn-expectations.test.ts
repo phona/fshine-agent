@@ -21,13 +21,11 @@ const LS6 = buildTrackPlan('LS6');
 
 const T = (taskId: string, taskNo: number, request: string, kind: 'done' | 'running' | 'cancelled' | 'failed'): TaskView => ({
   taskId, taskNo, request, requestIds: [`req-${taskId}`],
-  liveness: kind === 'running' ? 'running' : null,
+  started: true,
   ended: kind !== 'running',
-  cancelled: kind === 'cancelled',
-  died: false,
-  timedOut: false,
-  resourceLimited: false,
   reported: kind === 'done',
+  waiting: false,
+  mayBeRunning: kind === 'running',
   ...(kind === 'done' ? { lastExecutionStatus: 'completed' } : kind === 'failed' ? { lastExecutionStatus: 'failed' } : {}),
 });
 

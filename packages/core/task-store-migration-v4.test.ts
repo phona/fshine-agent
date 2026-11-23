@@ -146,9 +146,10 @@ describe('U3 v4 迁移（v3 → v4）', () => {
       'outcome_json', 'attempt', 'claimed_at', 'settled_at', 'delivered_at', 'replay_of',
     ]));
     expect(tableColumns(dbPath, 'executions')).toContain('dispatch_key');
-    expect(tableColumns(dbPath, 'task_events')).toEqual(expect.arrayContaining(['task_id', 'kind', 'at']));
+    expect(tableColumns(dbPath, 'task_ends')).toEqual(expect.arrayContaining(['task_id', 'at']));
+    expect(tableColumns(dbPath, 'task_ends')).not.toContain('kind');
     expect(userVersion(dbPath)).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(TASK_STORE_SCHEMA_VERSION).toBe(6);
+    expect(TASK_STORE_SCHEMA_VERSION).toBe(7);
 
     // 既有数据安全：历史列与行逐字节不变；历史执行行 dispatch_key 读出缺省（不伪造）。
     // 预期契约（2026-11-18）：两列只做前向加法（追加在末尾），历史列顺序不变。

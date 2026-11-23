@@ -37,7 +37,7 @@ import { sha256Hex, stableStringify } from './hash';
 import { runJudgeSelftest } from './selftest';
 import { genericResolveCaseIds, loadSuite, type EvalSuite } from '../exploration/suite-contract';
 import { scanUserVisibleText } from '../shared/internal-terms';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import {
   checkTurnFaceShape,
   formatShapeViolations,
@@ -532,18 +532,21 @@ async function runTrial(options: TrialOptions): Promise<void> {
         break;
       }
     }
-    // 零状态：证据快照只带账本事实（逐笔执行行 + 汇报存档 + 终止事件），
+    // 事实快照只带账本事实（逐笔执行行 + 汇报存档 + 启动/结束/汇报/等待/可能还在跑），
     // 不写 status 词——judge 直接读这些事实判 E11。
     tasksSnapshot = assembled.taskRegistry.list().map((task) => ({
       taskId: task.taskId,
       principalId: task.principalId,
       sessionId: task.sessionId,
       request: task.request,
-      // 存活（宿主守护事实，唯一保留的投影）；判据不读任务级状态词。
-      liveness: taskLivenessOf(task) ?? null,
+      // 原始事实（布尔）；判据不读任务级状态词。
+      started: taskStartedOf(task),
+      ...(task.endedAt === undefined ? {} : { endedAt: task.endedAt }),
+      reported: taskReportedOf(task),
+      waiting: taskWaitingOf(task),
+      mayBeRunning: taskMayBeRunningOf(task),
       ...(task.resultText === undefined ? {} : { resultText: task.resultText }),
       ...(task.replyText === undefined ? {} : { replyText: task.replyText }),
-      ...(task.termination === undefined ? {} : { termination: task.termination }),
       executions: task.executions.map((execution) => ({
         requestId: execution.requestId,
         operation: execution.operation,
@@ -1003,7 +1006,7 @@ function writeSummaryAndReport(input: SummaryInput): number {
   for (const result of results) {
     const trialDir = trialDirOf(outDir, result.caseId, result.trial);
     const replies = readJsonlSafe(path.join(trialDir, 'reply.jsonl'));
-    const executions = readJsonSafe<{ tasks: Array<{ taskId: string; termination?: { kind: string; at: string }; executions: Array<{ operation: string; status: string }> }> }>(
+    const executions = readJsonSafe<{ tasks: Array<{ taskId: string; endedAt?: string; executions: Array<{ operation: string; status: string }> }> }>(
       path.join(trialDir, 'executions.json'),
     );
     lines.push(`### ${result.caseId} trial-${result.trial} — ${result.judgment.deterministic.verdict}`);
@@ -1022,8 +1025,7 @@ function writeSummaryAndReport(input: SummaryInput): number {
     }
     if (executions) {
       lines.push(`- T1：${executions.tasks.map((task) => {
-        const ends = task.termination === undefined ? [] : [task.termination.kind];
-        return `${task.taskId}${ends.length === 0 ? '' : `(${ends.join('+')})`}[${task.executions.map((execution) => `${execution.operation}=${execution.status}`).join(' ')}]`;
+        return `${task.taskId}${task.endedAt === undefined ? '' : `(ended@${task.endedAt})`}[${task.executions.map((execution) => `${execution.operation}=${execution.status}`).join(' ')}]`;
       }).join('；') || '（无任务）'}`);
     }
     for (const reply of replies) {

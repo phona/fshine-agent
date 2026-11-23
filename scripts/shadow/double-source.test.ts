@@ -135,7 +135,7 @@ describe('Shadow 双源对照 ①：任务链语义等价（成功链路）', ()
     // 受理：两源同一条委派 → 同一机械受理事实（owner 2026-11-19：交办不再给固定回执话术，
     // 只回 taskId/name/status/accepted；无 notice、无编号——编号只在详情面/底账）
     for (const run of [a, b]) {
-      expect(run.acceptance).toMatchObject({ status: 'running', accepted: true });
+      expect(run.acceptance).toMatchObject({ started: true, accepted: true });
       expect(run.acceptance.taskNo).toBe(0);
       expect(run.acceptance.notice).toBe('');
       expect(run.acceptance.name.length).toBeGreaterThan(0);
@@ -153,9 +153,9 @@ describe('Shadow 双源对照 ①：任务链语义等价（成功链路）', ()
       expect(run.terminal.hasReport).toBe(true);
       expect(run.terminal.replyText ?? '').toContain('dummy.query');
       expect(run.executions.map((entry) => entry.status)).toEqual(['completed']);
-      expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started', 'completed']);
+      expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started']);
       expect(run.notifications.every((entry) => entry.delivered)).toBe(true);
-      expect(run.sinkKinds).toEqual(['accepted', 'started', 'completed']);
+      expect(run.sinkKinds).toEqual(['accepted', 'started']);
     }
     const comparison = compareChains(a, b);
     expect(comparison.equivalent).toBe(true);
@@ -187,7 +187,7 @@ describe('Shadow 双源对照 ②：四态语义等价（needs_input / failed / 
       // 失败事实走 failed 通知。汇报原文仍由唤醒面喂给 Main。
       expect(run.terminal.replyText).toBeUndefined();
       expect(run.terminal.hasReport).toBe(false);
-      expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started', 'failed']);
+      expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started']);
       expect(run.notifications.every((entry) => entry.delivered)).toBe(true);
       expect(run.executions[0]?.status).not.toBe('completed');
     }
@@ -203,7 +203,7 @@ describe('Shadow 双源对照 ②：四态语义等价（needs_input / failed / 
       // 有机械失败事实 → 汇报是对失败的说明，不作为结果存档；失败通知照旧。
       expect(run.terminal.replyText).toBeUndefined();
       expect(run.terminal.hasReport).toBe(false);
-      expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started', 'failed']);
+      expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started']);
     }
     expect(compareChains(a, b).equivalent).toBe(true);
   });

@@ -60,10 +60,13 @@ describe('P2 七场景 · 确定性跑通（假模型，一次样本）', () => 
     expect(out.judgement.hardZeroHits).toEqual([]);
     // 三观测点逐条：
     expect(out.judgement.coverage.facts['mode']).toBe('background');
-    expect(out.judgement.coverage.facts['firstTurnAlphaStatus']).toMatch(/^(nil|running)\//);
+    expect(out.judgement.coverage.facts['firstTurnAlphaStatus']).toMatch(/started/);
+    expect(out.judgement.coverage.facts['firstTurnAlphaStatus']).toMatch(/active/);
+    expect(out.judgement.coverage.facts['firstTurnAlphaStatus']).toMatch(/may-run/);
     expect(Number(out.judgement.coverage.facts['gateReleaseSeq'])).toBeGreaterThan(Number(out.judgement.coverage.facts['t2DoneSeq']));
     // 闸在 T2 处理时仍未释放：alpha 任务此刻非终态（真异步的证据，不是串行假异步）。
-    expect(out.observation.extras['alphaStatusBeforeRelease']).toMatch(/^(nil|running)\//);
+    expect(out.observation.extras['alphaStatusBeforeRelease']).toMatch(/started/);
+    expect(out.observation.extras['alphaStatusBeforeRelease']).toMatch(/may-run/);
     // 预注册事实判据（T2 回复须含 beta 3/1000）在强制 background 下**不可满足**：
     // T1（alpha）在飞 → 交办回合模型只能凭受理事实说一句过程话；T2（beta 快活，窗口内落定）
     // 本回合拿到结果但脚本按预注册字面仍回受理话术。此样本登记为 preregBlocked（不作为产品结论）。
@@ -85,7 +88,7 @@ describe('P2 七场景 · 确定性跑通（假模型，一次样本）', () => 
   it('S4 修改·取消·再交办：取消真实发生 + 新任务新 requestId + 只查 beta', async () => {
     const out = await runP2Scenario('S4');
     expect(out.observation.taskTurns[1]?.cancelCalled).toBe(true);
-    const cancelled = (out.observation.extras['taskSnapshots'] as { cancelled: boolean; request: string }[]).filter((task) => task.cancelled);
+    const cancelled = (out.observation.extras['taskSnapshots'] as { ended: boolean; reported: boolean; request: string }[]).filter((task) => task.ended && !task.reported);
     expect(cancelled.map((task) => task.request)).toEqual([expect.stringContaining('beta')]);
     expectValid(out);
   }, 30_000);
@@ -112,7 +115,8 @@ describe('P2 七场景 · 确定性跑通（假模型，一次样本）', () => 
 
   it('S7b 超时：workerTurnMs=5000 + 不返回 gate → timed_out 如实回报', async () => {
     const out = await runP2Scenario('S7b');
-    expect(out.observation.tasksFinal[0]?.timedOut).toBe(true);
+    expect(out.observation.tasksFinal[0]?.ended).toBe(true);
+    expect(out.observation.tasksFinal[0]?.reported).toBe(false);
     expectValid(out);
   }, 30_000);
 

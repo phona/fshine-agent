@@ -15,7 +15,7 @@
  *     inputFiles → 受理（复制先于 submit；完整后台文件面见 runtime-background-input-files）；
  *     Worker 的任务绑定 fileId 被 Main 引用 → 整次拒绝。
  */
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

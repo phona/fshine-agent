@@ -36,7 +36,7 @@ import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
 import type { Notification, NotificationSink } from '../../../packages/agent/src/notifications';
 import { stripServerPaths } from '../../../packages/agent/src/server-paths';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import { createServer, resolveSingleProfile, type FileDeliveryPort } from '../../../apps/server/server';
 import { mainSessionOptions, mainThinkingLevelFrom } from '../../ask-runtime';
 import { materializeEvalConfig } from '../../resolve-config-path';
@@ -349,7 +349,7 @@ export interface AssertInput {
   /** 三张表的写前/写后读回（P4 用）。 */
   readbacks: CollectionReadback[];
   /** longtask 终态（观测到的 cancelled 任务，含执行事实）。 */
-  cancelledLongTasks: Array<{ taskId: string; liveness: string | null; operations: string[] }>;
+  cancelledLongTasks: Array<{ taskId: string; started: boolean; endedAt: string | null; reported: boolean; waiting: boolean; mayBeRunning: boolean; operations: string[] }>;
   /** 执行层 abort 审计行。 */
   abortAudit: Array<{ mode: string; script: string }>;
 }
@@ -727,17 +727,17 @@ async function main(): Promise<void> {
       if (index === 6) {
         await waitFor(() => {
           const reading = registry.list(scope);
-          return reading.some((task) => (archivedReportOf(task) !== undefined || lastExecutionOf(task)?.status === 'completed') || lastExecutionOf(task)?.status === 'failed' || task.termination?.kind === 'cancelled');
+          return reading.some((task) => (archivedReportOf(task) !== undefined || lastExecutionOf(task)?.status === 'completed') || lastExecutionOf(task)?.status === 'failed' || (task.endedAt !== undefined && !taskReportedOf(task)));
         }, 60_000, 500);
       }
       if (index === 10) {
         await waitFor(() => registry.list(scope).some((task) =>
-          taskLivenessOf(task) === 'running' && task.executions.some((execution) => execution.operation === 'dummy.longtask')),
+          taskMayBeRunningOf(task) && task.executions.some((execution) => execution.operation === 'dummy.longtask')),
         30_000, 500);
       }
       if (index === 11) {
         await waitFor(() => registry.list(scope).some((task) =>
-          task.termination?.kind === 'cancelled' && task.executions.some((execution) => execution.operation === 'dummy.longtask')),
+          task.endedAt !== undefined && !taskReportedOf(task) && task.executions.some((execution) => execution.operation === 'dummy.longtask')),
         30_000, 500);
       }
       if (index < REPLAY_TURNS.length) await new Promise((resolve) => setTimeout(resolve, options.settleMs));
@@ -764,10 +764,10 @@ async function main(): Promise<void> {
     .filter((row) => row.mode === 'abort' && row.script.includes('longtask'))
     .map((row) => ({ mode: row.mode, script: row.script }));
   const cancelledLongTasks = registry.list(scope)
-    .filter((task) => task.termination?.kind === 'cancelled'
+    .filter((task) => task.endedAt !== undefined && !taskReportedOf(task)
       && (task.executions.some((execution) => execution.operation === 'dummy.longtask')
         || /longtask|慢活|600/u.test(task.request)))
-    .map((task) => ({ taskId: task.taskId, liveness: taskLivenessOf(task) ?? null, operations: task.executions.map((execution) => execution.operation) }));
+    .map((task) => ({ taskId: task.taskId, started: taskStartedOf(task), endedAt: task.endedAt ?? null, reported: taskReportedOf(task), waiting: taskWaitingOf(task), mayBeRunning: taskMayBeRunningOf(task), operations: task.executions.map((execution) => execution.operation) }));
 
   const results = evaluateAssertions({
     visible: visibleTexts,
@@ -822,7 +822,7 @@ async function main(): Promise<void> {
       pushes: sink.pushes.map((push) => ({ ...push, text: redact(push.text) })),
     },
     readbacks: { before, after },
-    ledger: { cancelledLongTasks, finalTasks: registry.list(scope).map((task) => ({ taskId: task.taskId, liveness: taskLivenessOf(task) ?? null, request: redact(task.request), executions: task.executions.map((execution) => execution.operation) })) },
+    ledger: { cancelledLongTasks, finalTasks: registry.list(scope).map((task) => ({ taskId: task.taskId, started: taskStartedOf(task), endedAt: task.endedAt ?? null, reported: taskReportedOf(task), waiting: taskWaitingOf(task), mayBeRunning: taskMayBeRunningOf(task), request: redact(task.request), executions: task.executions.map((execution) => execution.operation) })) },
     abortAudit,
     results,
   };

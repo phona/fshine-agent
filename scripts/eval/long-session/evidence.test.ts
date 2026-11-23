@@ -27,7 +27,7 @@ function mkJudgement(opts: { effective: number; hardZero?: boolean }): SessionJu
   const attempts = Array.from({ length: opts.effective }, (_, i) => ({ turn: i + 1, kind: 'threshold' as const, before: 100000, after: 20000 }));
   const compactionVerdict = judgeCompactionLifecycle(analyzeCompaction(attempts, []));
   const taskVerdict = opts.hardZero
-    ? judgeTaskContinuity([{ turn: 1, tasks: [{ taskId: 't1', request: 'r', liveness: null, ended: true, cancelled: false, died: false, timedOut: false, resourceLimited: false, reported: true, requestIds: [] }] }])
+    ? judgeTaskContinuity([{ turn: 1, tasks: [{ taskId: 't1', request: 'r', started: true, ended: true, reported: true, waiting: false, mayBeRunning: false, requestIds: [] }] }])
     : judgeTaskContinuity([]);
   return { factVerdicts: [], sessionFactsPass: true, factFailures: [], taskVerdict, compactionVerdict };
 }

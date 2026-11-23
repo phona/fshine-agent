@@ -74,7 +74,7 @@ import { contextWindowFrom, compactionSettingsFrom } from '../../ask-runtime';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import { createServer, type FileDeliveryPort } from '../../../apps/server/server';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import { rowDataLeakDetail, scanRowDataLeakage } from './row-data-scan';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -710,7 +710,7 @@ async function runScenarioS3(scripted: boolean): Promise<ScenarioOutcome> {
   let fileRows: Array<{ fileId: string; taskId?: string; name: string; sha256: string; bytes: number }> = [];
   try {
     const registry = createSqliteTaskRegistry(harness.paths.dbPath, { readOnly: true });
-    taskRows = registry.list().map((task) => ({ taskId: task.taskId, request: task.request, status: taskLivenessOf(task) ?? null }));
+    taskRows = registry.list().map((task) => ({ taskId: task.taskId, request: task.request, started: taskStartedOf(task), reported: taskReportedOf(task), waiting: taskWaitingOf(task), mayBeRunning: taskMayBeRunningOf(task) }));
     fileRows = registry.store.listFileRefs({ principalId: PRINCIPAL_ID, sessionId: `wecom:${CONVERSATION_ID}` }).map((row) => ({
       fileId: row.fileId,
       ...(row.taskId !== undefined ? { taskId: row.taskId } : {}),

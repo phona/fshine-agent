@@ -6,8 +6,8 @@
  *   · reply_text / result_text = worker/Main 汇报；
  *   · pending_question + waiting_since = 等待形状；
  *   · lease_* = 在跑凭据；long_running_notified_at 等 = 提醒一次性事实。
- * 「活/结束」由事实现推（启动 + 汇报 + 等待 + 进程内活 worker）；「怎么结束」= task_events
- * 追加事件账（不可变、重启后仍在）。
+ * 「活/结束」由事实现推（启动 + 汇报 + 等待 + 进程内活 worker）；结束后只留一条「这一轮
+ * 在 T 停下」的机械事实（task_ends，task_id + at）——**没有 kind**，怎么结束不存。
  *
  * 本文件是**结构性判据**（不是名列表）：tasks 表的任何列不得以 `_at` 结尾的终态形状出现
  * （died/cancelled/timed_out/resource_limited/round_failed/cancel_requested），也不得有
@@ -100,30 +100,34 @@ describe('零状态：tasks 表只存事实', () => {
     }
   });
 
-  it('终态走追加事件账：task_events 存在、一次性（同任务至多一条）、只读重开仍在', () => {
+  it('结束事实只留时刻：task_ends 存在（无 kind）、一次性（同任务至多一条）、只读重开仍在', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     const store = openTaskStore(dbPath);
     seedTask(store, 'task_a');
 
-    expect(store.appendTermination({
-      taskId: 'task_a', kind: 'cancelled', at: '2026-11-23T00:01:00.000Z', updatedAt: '2026-11-23T00:01:00.000Z',
+    expect(store.appendEndFact({
+      taskId: 'task_a', at: '2026-11-23T00:01:00.000Z', updatedAt: '2026-11-23T00:01:00.000Z',
     })).toBe(true);
-    // 一次性事实：第二个终止（无论什么 kind）不覆盖、不追加。
-    expect(store.appendTermination({
-      taskId: 'task_a', kind: 'died', at: '2026-11-23T00:02:00.000Z', updatedAt: '2026-11-23T00:02:00.000Z',
+    // 一次性事实：第二次结束不覆盖、不追加。
+    expect(store.appendEndFact({
+      taskId: 'task_a', at: '2026-11-23T00:02:00.000Z', updatedAt: '2026-11-23T00:02:00.000Z',
     })).toBe(false);
-    expect(store.listTerminations('task_a')).toEqual([
-      { taskId: 'task_a', kind: 'cancelled', at: '2026-11-23T00:01:00.000Z' },
+    expect(store.listEndFacts('task_a')).toEqual([
+      { taskId: 'task_a', at: '2026-11-23T00:01:00.000Z' },
     ]);
     store.close();
 
-    // 重启后仍在（追加事件不改写、不丢）。
+    // task_ends 只有 task_id + at（没有 kind/state_version）。
+    expect(columnNames(dbPath, 'task_ends').sort()).toEqual(['at', 'task_id']);
+    expect(columnNames(dbPath, 'task_events')).toEqual([]);
+
+    // 重启后仍在（追加事实不改写、不丢）。
     const reopened = openTaskStore(dbPath);
-    expect(reopened.listTerminations('task_a')).toEqual([
-      { taskId: 'task_a', kind: 'cancelled', at: '2026-11-23T00:01:00.000Z' },
+    expect(reopened.listEndFacts('task_a')).toEqual([
+      { taskId: 'task_a', at: '2026-11-23T00:01:00.000Z' },
     ]);
-    // 事件写入不再出现在 tasks 行上。
+    // 事实写入不出现在 tasks 行上。
     const row = reopened.getTask('task_a')!.task;
     assertZeroStateColumns(Object.keys(row));
     expect(Object.keys(row)).not.toContain('diedAt');

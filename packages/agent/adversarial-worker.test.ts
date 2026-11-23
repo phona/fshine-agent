@@ -16,7 +16,7 @@
  * 纪律：只加用例，不改产品代码。若某条在当前代码上红，即为真缺陷——如实保留并逐条报告，
  * 不为凑绿修改判据或产品。
  */
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -444,7 +444,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     assertUserVisibleClean(proposalCardText(task));
     // 2026-11-20：数字 ref 退役，按真实 taskId 投影（断言不变）。
     const projected = await projectedStatusOf(registry, 't_detour');
-    expect(projected.liveness).toBe('waiting_user');
+    expect(projected.waiting).toBe(true);
     expect(JSON.stringify(projected)).toContain('「alpha」将被覆盖，不可撤销');
     expect(JSON.stringify(projected)).not.toContain('cf_');
     expect(JSON.stringify(projected)).not.toContain('handle');

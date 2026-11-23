@@ -168,31 +168,28 @@ describe('tasks：机械事实 → 展示词（S1）', () => {
     registry.begin({ taskId: 't_cancelled', ...scope, request: '取消我' });
     registry.markCancelled('t_cancelled', { scope });
     registry.begin({ taskId: 't_died', ...scope, request: '查 faulty-one' });
-    registry.markDied('t_died');
+    registry.markLeaseExpired('t_died');
 
     expect(registry.list().map((task) => taskFactSummaryOf(task)))
-      .toEqual(['已汇报', '结果未知', '已取消', '结果未知']);
+      .toEqual(['已汇报', '结果未知', '无汇报收尾', '无汇报收尾']);
   });
 });
 
 describe('tasks：机械时刻行与详情渲染（S1）', () => {
-  it('机械时刻行：一次性事实逐词；无事实返回 undefined（不伪造）', () => {
-    expect(taskMechanicalFactLine(record({ taskId: 't_cancel', termination: { kind: 'cancelled', at: '2026-11-13T16:10:00.000Z' } })))
-      .toBe('机械事实：用户已取消（2026-11-13T16:10:00.000Z）');
-    expect(taskMechanicalFactLine(record({ taskId: 't_timeout', termination: { kind: 'timed_out', at: '2026-11-13T16:10:00.000Z' } })))
-      .toBe('机械事实：机械超时（2026-11-13T16:10:00.000Z）');
-    expect(taskMechanicalFactLine(record({ taskId: 't_limited', termination: { kind: 'resource_limited', at: '2026-11-13T16:10:00.000Z' } })))
-      .toBe('机械事实：资源拒绝（2026-11-13T16:10:00.000Z）');
-    expect(taskMechanicalFactLine(record({ taskId: 't_died', termination: { kind: 'died', at: '2026-11-13T16:10:00.000Z' } })))
-      .toBe('机械事实：租约过期/进程中断，结果未知（2026-11-13T16:10:00.000Z）');
+  it('机械时刻行：只给「这一轮停止于 T」（不分类）；无事实返回 undefined（不伪造）', () => {
+    const at = '2026-11-13T16:10:00.000Z';
+    for (const taskId of ['t_cancel', 't_timeout', 't_limited', 't_died']) {
+      expect(taskMechanicalFactLine(record({ taskId, endedAt: at })))
+        .toBe(`机械事实：这一轮停止于 ${formatLocalTime(at)}`);
+    }
     expect(taskMechanicalFactLine(record({ taskId: 't_none' }))).toBeUndefined();
   });
 
   it('详情：事实行 + 机械时刻；历史行不出现机械事实行', () => {
-    const cancelled = record({ taskId: 't_cancelled', taskNo: 7, termination: { kind: 'cancelled', at: '2026-11-13T16:10:00.000Z' }, resultText: '已按用户请求取消。' });
+    const cancelled = record({ taskId: 't_cancelled', taskNo: 7, endedAt: '2026-11-13T16:10:00.000Z', resultText: '已按用户请求取消。' });
     const detail = renderTaskDetail(cancelled);
-    expect(detail).toContain('事实：已取消');
-    expect(detail).toContain('机械事实：用户已取消（2026-11-13T16:10:00.000Z）');
+    expect(detail).toContain('事实：已汇报');
+    expect(detail).toContain(`机械事实：这一轮停止于 ${formatLocalTime('2026-11-13T16:10:00.000Z')}`);
     expect(renderTaskDetail(record({ taskId: 't_plain' }))).not.toContain('机械事实：');
   });
 
@@ -344,7 +341,7 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
   });
   const cancelled = record({
     taskId: 'task_cancelled',
-    termination: { kind: 'cancelled', at: '2026-11-13T16:10:00.000Z' },
+    endedAt: '2026-11-13T16:10:00.000Z',
     resultText: '已取消。',
   });
   const running = record({ taskId: 'task_running', leaseUntil: '2099-01-01T00:00:00.000Z' });
@@ -397,7 +394,7 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
     expect(plain).toContain('任务结果：\n（无）');
 
     const cancelDoc = renderTaskDeliverable(cancelled);
-    expect(cancelDoc).toContain('事实：已取消、已汇报\n机械事实：用户已取消（2026-11-13T16:10:00.000Z）');
+    expect(cancelDoc).toContain(`事实：已汇报\n机械事实：这一轮停止于 ${formatLocalTime('2026-11-13T16:10:00.000Z')}`);
   });
 
   it('进行中：无机械时刻行，限制段追加未收尾提示', () => {
@@ -523,7 +520,7 @@ function seedDb(dir: string): string {
   registry.setResultText('task_unexecuted', '本轮没有可执行的查询。');
 
   registry.begin({ taskId: 'task_no_report', ...scope, request: '帮我查一下 documents' });
-  registry.noteRoundFailed('task_no_report');
+  registry.noteRoundEnded('task_no_report');
   registry.close();
   return dbPath;
 }
@@ -703,25 +700,24 @@ describe('tasks：CLI 端到端（真实子进程）', () => {
     expect(sha256(dbPath)).toBe(before);
   });
 
-  it('只读打开升级前的 v5 库：已取消行按已取消显示（不标结果未知），旧列原时刻可读，不写库', () => {
+  it('只读打开升级前的 v5 库：旧终态列只留「停下时刻」，不分类、不写库', () => {
     const dir = tempDir();
     const dbPath = seedV5Db(dir);
     const before = sha256(dbPath);
 
-    // 反向绊线：只读投影忽略旧终态列 → cancelled 行按「已启动无汇报」判 died，列表/详情出现「结果未知」。
+    // 只读投影从旧终态列还原「停下时刻」（种类不还原）：已停无汇报。
     const list = runTasks([], { DB_PATH: dbPath });
     expect(list.status).toBe(0);
-    expect(list.stdout).toContain('已取消');
+    expect(list.stdout).toContain('无汇报收尾');
     const detail = runTasks(['task_v5_cancelled'], { DB_PATH: dbPath });
     expect(detail.status).toBe(0);
-    expect(detail.stdout).toContain('事实：已取消');
-    expect(detail.stdout).toContain('机械事实：用户已取消（2026-11-20T08:11:00.000Z）');
-    expect(detail.stdout).not.toContain('结果未知');
+    expect(detail.stdout).toContain('事实：无汇报收尾');
+    expect(detail.stdout).toContain(`机械事实：这一轮停止于 ${formatLocalTime('2026-11-20T08:11:00.000Z')}`);
 
-    // died 行仍按真实种类显示（不是把旧列一律当 cancelled）。
+    // 旧 died 行同样只剩「停下时刻」（不分类）。
     const died = runTasks(['task_v5_died'], { DB_PATH: dbPath });
     expect(died.status).toBe(0);
-    expect(died.stdout).toContain('结果未知');
+    expect(died.stdout).toContain('事实：无汇报收尾');
 
     // 只读：不迁移、不写库。
     expect(sha256(dbPath)).toBe(before);

@@ -28,7 +28,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import {
   describeOutcome,
   internalOperationCall,
@@ -235,8 +235,8 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
         (call) => {
           const status = lastToolResultJsonOf(call.messages);
           const missing = (status?.['pendingQuestion'] as { missing?: readonly string[] } | undefined)?.missing ?? [];
-          // S1：等待事实读存活词（liveness=waiting_user）+ 结构化 pendingQuestion。
-          if (status?.['liveness'] !== 'waiting_user') throw new Error(`任务不是 waiting_user：${String(status?.['liveness'])}`);
+          // 事实口径：等待事实只看布尔 waiting + 结构化 pendingQuestion。
+          if (status?.['waiting'] !== true) throw new Error(`任务不是等待态：${JSON.stringify(status)}`);
           return textAssistant(`任务还在等你补充：${missing.join('、')}`);
         },
       ]);

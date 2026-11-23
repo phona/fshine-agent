@@ -204,7 +204,7 @@ describe('P1-T01 迁移幂等与回填', () => {
       { task_no: 3, name: null, reply_text: null },
     ]);
     second.close();
-    expect(backupFiles(dir)).toEqual(['state.db.backup-v6']);
+    expect(backupFiles(dir)).toEqual(['state.db.backup-v7']);
     expect(sha256(`${dbPath}.backup-v${TASK_STORE_SCHEMA_VERSION}`)).toBe(preMigrationSha);
   });
 
@@ -254,8 +254,8 @@ describe('P1-T02 并发分配与不复用', () => {
     store.insertTask(row({ taskId: 'task_2', createdAt: '2026-11-14T09:00:01.000Z' }));
     // 事实写入（零状态：没有结论/终态列）：汇报存档 / 追加终止事件；编号与这些写入无关。
     store.setResultText('task_1', { resultText: '汇报。', updatedAt: '2026-11-14T09:00:02.000Z' });
-    store.appendTermination({
-      taskId: 'task_2', kind: 'died', at: '2026-11-14T09:00:03.000Z', updatedAt: '2026-11-14T09:00:03.000Z',
+    store.appendEndFact({
+      taskId: 'task_2', at: '2026-11-14T09:00:03.000Z', updatedAt: '2026-11-14T09:00:03.000Z',
     });
     store.setReplyForTasks(['task_1', 'task_2'], '本回合最终回复。', '2026-11-14T09:00:04.000Z');
 

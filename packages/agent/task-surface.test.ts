@@ -17,7 +17,7 @@
  *   · task_resume：waiting_user 带 answer → started；非 waiting_user → not_waiting（如实转述）；
  *   · 未传 runner：调用治理工具 → 「Main 工具面之外的调用」（fail-closed）。
  */
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { describe, expect, it } from 'vitest';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { DiscoveredTool } from '@fshine/contracts';
@@ -167,7 +167,7 @@ describe('缺口 1 · 对话面任务工具', () => {
     const one = await build([{ tool: 'task_status', args: { ref: 't1' } }], { registry });
     await one.session.send('第一个任务在等什么');
     const hit = value<Record<string, unknown>>(one.turns[0]!.results[0]!);
-    expect(hit.liveness).toBe('waiting_user');
+    expect(hit.waiting).toBe(true);
     expect(hit.pendingQuestion).toEqual({ missing: ['窗口编号'] });
     expect(hit.name).toBe('查 documents 窗口 W202611');
     expect(hit).not.toHaveProperty('taskNo');
@@ -256,11 +256,11 @@ describe('缺口 1 · 对话面任务工具', () => {
 
     const requested = value<Record<string, unknown>>(turns[0]!.results[0]!);
     expect(requested.outcome, '在飞任务只发取消请求，不宣称已取消').toBe('requested');
-    expect(taskLivenessOf(registry.get('run', SCOPE_A)) ?? null, '取消请求后不得宣称已取消').not.toBe('cancelled');
+    expect(registry.get('run', SCOPE_A).endedAt, '取消请求后不得宣称已取消（不得写结束事实）').toBeUndefined();
 
     const confirmed = value<Record<string, unknown>>(turns[0]!.results[1]!);
     expect(confirmed.outcome, '未启动的排队任务可机械确认取消').toBe('cancelled');
-    expect(registry.get('queued', SCOPE_A).termination?.kind).toBe('cancelled');
+    expect(registry.get('queued', SCOPE_A).endedAt).toBeTruthy();
   });
 
   it('task_resume：waiting_user 带 answer → started；非 waiting_user → not_waiting（如实转述）', async () => {
@@ -326,8 +326,8 @@ describe('缺口 1 · 对话面任务工具', () => {
       if (!result.ok) expect((result.error as Error).message).toContain('taskId');
     }
     // 两个任务都没被动过（尤其 B 的 task-b 没被误当作 #1 操作）。
-    expect(registry.get('task-a', SCOPE_A).termination).toBeUndefined();
-    expect(registry.get('task-b', SCOPE_B).termination).toBeUndefined();
+    expect(registry.get('task-a', SCOPE_A).endedAt).toBeUndefined();
+    expect(registry.get('task-b', SCOPE_B).endedAt).toBeUndefined();
   });
 
   it('P0-A：inline 受理回执去编号：不含 taskNo，可引用指代是 taskId', async () => {
@@ -375,7 +375,7 @@ describe('缺口 1 · 对话面任务工具', () => {
     const cancelled = value<Record<string, unknown>>(turns[0]!.results[0]!);
     expect(cancelled.outcome).toBe('cancelled');
     const hit = value<Record<string, unknown>>(turns[0]!.results[1]!);
-    expect(hit).toMatchObject({ termination: { kind: 'cancelled' } });
+    expect(hit.endedAt).toBeTruthy();
   });
 
   it('未传 runner：task_cancel/task_resume/task_confirm 不上面，调用即 Main 工具面之外的调用（fail-closed）', async () => {

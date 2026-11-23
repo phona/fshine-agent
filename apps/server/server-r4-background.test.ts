@@ -191,7 +191,7 @@ describe('R4 联合：server 同会话串行化（P5-T02）', () => {
 });
 
 describe('R4 联合：server background 渠道回合（假 executor/sink）', () => {
-  it('⑫ 受理返回 → 后台完成 → 结果可取回 → 通知投递（accepted/started/completed）', async () => {
+  it('⑫ 受理返回 → 后台完成 → 结果可取回 → 通知投递（accepted/started；完成由投递/唤醒面说）', async () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     const sink = new FakeSink();
@@ -218,7 +218,7 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
       expect(reply).toBe('已受理，稍后通知你。');
       // 受理事实（task_run 返回）：只给机械事实（accepted/status + name/taskId），无回执话术、无编号
       const accepted = records[0]!.execResults[0] as Record<string, unknown>;
-      expect(accepted).toMatchObject({ accepted: true, liveness: 'running' });
+      expect(accepted).toMatchObject({ accepted: true, started: true });
       expect(accepted).not.toHaveProperty('notice');
       expect(accepted).not.toHaveProperty('taskNo');
       const taskId = String(accepted['taskId']);
@@ -231,7 +231,7 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
       // 通知投递（假 sink）：受理/开始/完成
       await server.deliverPending();
       await vi.waitFor(() => {
-        expect(sink.sent.map((notification) => notification.kind)).toEqual(['accepted', 'started', 'completed']);
+        expect(sink.sent.map((notification) => notification.kind)).toEqual(['accepted', 'started']);
       });
       expect(reader.listNotifications(taskId).every((notification) => notification.deliveredAt !== undefined)).toBe(true);
       expect(reader.undelivered(taskId)).toEqual([]);
@@ -285,7 +285,7 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
       await new Promise((resolve) => setTimeout(resolve, 1100));
       await server.handler(incoming('user-a', 'conv-a', 'msg-2', '还在吗'));
       await vi.waitFor(() => expect(reader.undelivered()).toEqual([]));
-      expect(sentKinds.length).toBeGreaterThanOrEqual(4);
+      expect(sentKinds.length).toBeGreaterThanOrEqual(3);
     } finally {
       reader.close();
       server.close();

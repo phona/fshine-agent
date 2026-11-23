@@ -107,9 +107,9 @@ function tsMs(ts: string): number {
   return Number.isNaN(t) ? NaN : t;
 }
 
-/** 任务已收尾（机械事实）：终止事件 / 汇报存档 / 末条执行终态——不读任务级状态词。 */
+/** 任务已停（机械事实）：结束事实 / 汇报存档 / 末条执行终态——不读任务级状态词。 */
 function settledOf(task: TaskRecordJson): boolean {
-  if (task.termination !== undefined) return true;
+  if (task.endedAt !== undefined) return true;
   if ((task.resultText ?? task.replyText ?? '').trim() !== '') return true;
   const last = task.executions[task.executions.length - 1]?.status;
   return last === 'completed' || last === 'failed' || last === 'refused';
@@ -232,15 +232,13 @@ export function extractD6(runDir: string): D6Metrics {
   }
 
   // ── 6) 取消后残留执行 ──────────────────────────────────────────
-  const cancelFromFacts = facts.find((f) => f.cancelled);
+  // 取消事实只剩通知通道（cancelled 事件）：任务行不存「怎么结束」，task-facts 里没有 cancel 标记。
   const cancelFromNotes = readJsonl<{ ts: string; kind: string; taskId: string }>(path.join(runDir, 'notifications.jsonl'))
-    .find((n) => n.kind === 'cancel' || n.kind === 'cancelled');
-  const cancel = cancelFromFacts !== undefined
-    ? { taskId: cancelFromFacts.taskId, ts: cancelFromFacts.ts }
-    : cancelFromNotes === undefined ? undefined : { taskId: cancelFromNotes.taskId, ts: cancelFromNotes.ts };
+    .find((n) => n.kind === 'cancelled');
+  const cancel = cancelFromNotes === undefined ? undefined : { taskId: cancelFromNotes.taskId, ts: cancelFromNotes.ts };
   let postCancelResidue: D6Metric<PostCancelResidueValue>;
   if (cancel === undefined) {
-    postCancelResidue = { available: false, source: 'task-facts.jsonl / notifications.jsonl', note: 'not-applicable：本 run 无取消事实（无 to=cancelled 事实、无 cancel 通知），不按 0 计' };
+    postCancelResidue = { available: false, source: 'notifications.jsonl', note: 'not-applicable：本 run 无取消通知（任务行不存取消种类），不按 0 计' };
   } else {
     const cut = tsMs(cancel.ts);
     // 归属：调用 args 带 taskId 直接归属；带 ref（'#n'）按 tasks.json 创建序近似解析；

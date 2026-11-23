@@ -13,14 +13,15 @@
  *     导出只把交付件写到用户指定的那一个文件，不写库、不建目录；
  *   · 任务引用：`#编号` 或纯数字（业务展示位只出 #编号+名称，不出 UUID）；内部 taskId
  *     原样兼容（审计/脚本既有用法）；解析失败与不存在同一措辞；
- *   · 展示不做二次判定（S1 事实模型：底账没有 status/reason/failureReason 结论字段）——
- *     词表只映射机械事实（等待/租约/四个一次性时刻/汇报存档/执行行原值）；
+ *   · 展示不做二次判定（事实模型：底账没有 status/reason/failureReason 结论字段，也没有
+ *     任务级生命周期枚举）——标签由原始事实就地算（启动/结束时刻/汇报/提问/租约）；
  *     做没做成由用户读详情里的执行步骤与任务结果原文，CLI 不替它下结论；
  *   · 「最终回复」= 底账持久化的 Main 回合回复全文（P1/S1 存档）；历史行无存档时显示
  *     「该任务无最终回复存档」，不以「任务结果」（执行层汇报）冒充；
  *   · 交付件与详情消费同一组字段行渲染函数（见下方渲染构建函数），不维护第二套渲染；
- *   · --redo（唯一写路径）：只对终态任务生效；输入=存储的委派原文逐字（不拼接原任务的
- *     回复/执行台账/摘要），经 scripts/ask-runtime.ts 与 ask 同源的装配重新交办为新任务；
+ *   · --redo（唯一写路径）：只对已停（未在推进）的任务生效；输入=存储的委派原文逐字
+ *     （不拼接原任务的回复/执行台账/摘要），经 scripts/ask-runtime.ts 与 ask 同源的装配
+ *     重新交办为新任务；
  *     原任务记录零改动；关联只由 CLI 输出打印（schema 冻结，无关联列/表）；
  *   · 列表/详情/--out 不联网、不加载模型、不 spawn 执行层（--redo 按需动态加载装配）。
  */
@@ -33,9 +34,11 @@ import type { Session } from '../packages/agent/src/execution-runtime';
 import {
   deriveTaskName,
   stillProgressingOf,
-  taskLivenessOf,
+  taskMayBeRunningOf,
   taskReportedOf,
+  taskStartedOf,
   taskUnstartedOf,
+  taskWaitingOf,
   type TaskRecord,
 } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
@@ -141,27 +144,28 @@ export function resolveTaskDbPath(input: {
 }
 
 /**
- * 任务行的机械事实标签（可多项并存；零状态：CLI 直接读 liveness + 追加终止事件，不合成单一状态词）：
- *   · 终止事件（cancelled/timed_out/resource_limited/died/round_failed）各成一词；
- *   · liveness 三值（running/died/waiting_user）直读；
- *   · worker 汇报存档 → 「已汇报」；未启动 → 「排队中」；已启动无汇报 → 「无汇报」。
+ * 任务行的机械事实标签（可多项并存；消费方**就地读原始事实算**，不共享「怎么结束」类型）：
+ *   · 有汇报存档 → 「已汇报」；
+ *   · 等待形状 → 「等待用户」；
+ *   · 未启动 → 「排队中」/「未启动即已停」（有结束事实）；
+ *   · 已启动、无汇报 → 可能还在跑（跨进程代理）→ 「进行中」；已停 → 「无汇报收尾」；
+ *     都没有 → 「结果未知」（进程没了、也没写结束事实）。
  * 做没做成读详情里的执行步骤与任务结果原文，CLI 不在词上判结论。
  */
 export function taskFactLabelsOf(task: TaskRecord): string[] {
   const labels: string[] = [];
-  const termination = task.termination;
-  if (termination?.kind === 'cancelled') labels.push('已取消');
-  if (termination?.kind === 'timed_out') labels.push('已超时');
-  if (termination?.kind === 'resource_limited') labels.push('资源受限');
-  if (termination?.kind === 'died') labels.push('结果未知');
-  if (termination?.kind === 'round_failed') labels.push('无汇报收尾');
-  // 跨进程读（CLI 没有本进程 worker）：用租约/accepted 在途代理「可能活着」。
-  const liveness = taskLivenessOf(task);
-  if (liveness === 'running') labels.push('进行中');
-  else if (liveness === 'waiting_user') labels.push('等待用户');
-  else if (liveness === 'died' && termination === undefined) labels.push('结果未知');
-  if (taskReportedOf(task)) labels.push('已汇报');
-  if (labels.length === 0) labels.push(taskUnstartedOf(task) ? '排队中' : '无汇报');
+  const reported = taskReportedOf(task);
+  const waiting = taskWaitingOf(task);
+  const started = taskStartedOf(task);
+  if (reported) labels.push('已汇报');
+  if (waiting) labels.push('等待用户');
+  if (!reported && !waiting) {
+    if (!started) labels.push(task.endedAt === undefined ? '排队中' : '未启动即已停');
+    else if (task.endedAt !== undefined) labels.push('无汇报收尾');
+    else if (taskMayBeRunningOf(task)) labels.push('进行中');
+    else labels.push('结果未知');
+  }
+  if (labels.length === 0) labels.push('无汇报');
   return labels;
 }
 
@@ -180,14 +184,12 @@ export const EXECUTION_STATUS_WORDS: Record<ExecutionStatus, string> = {
   accepted: '已受理（长任务进行中）',
 };
 
-/** 通知意图（P4 九类）→ 用户词（展示层唯一词表；web 与 ops 复用）。 */
+/** 事件/通知意图（7 类）→ 用户词（展示层唯一词表；web 与 ops 复用；无完成/失败结论词）。 */
 export const NOTIFICATION_KIND_WORDS: Record<NotificationKind, string> = {
   accepted: '已受理',
   started: '已开始',
   waiting_user: '等待用户',
   resumed: '已恢复',
-  completed: '已完成',
-  failed: '失败',
   cancelled: '已取消',
   timed_out: '已超时',
   resource_limited: '资源受限',
@@ -313,25 +315,10 @@ export function taskRequestLine(task: TaskRecord): string {
   return `交办：${task.request}`;
 }
 
-/** 机械时刻行（零状态）：终止事件 → 「机械事实：<词>@<时刻>」；无终止事件返回 undefined。 */
+/** 机械时刻行：这一轮在 T 停下（事实；**不分类**）；没有结束事实返回 undefined。 */
 export function taskMechanicalFactLine(task: TaskRecord): string | undefined {
-  const termination = task.termination;
-  if (termination === undefined) return undefined;
-  switch (termination.kind) {
-    case 'cancelled':
-      return `机械事实：用户已取消（${termination.at}）`;
-    case 'timed_out':
-      return `机械事实：机械超时（${termination.at}）`;
-    case 'resource_limited':
-      return `机械事实：资源拒绝（${termination.at}）`;
-    case 'died':
-      return `机械事实：租约过期/进程中断，结果未知（${termination.at}）`;
-    case 'round_failed':
-      return `机械事实：本轮无汇报收尾（${termination.at}）`;
-    case 'completed':
-      // 正常结束（汇报存档）不需要额外的「机械时刻」行；详情里的「已汇报」已覆盖。
-      return undefined;
-  }
+  if (task.endedAt === undefined) return undefined;
+  return `机械事实：这一轮停止于 ${formatLocalTime(task.endedAt)}`;
 }
 
 /** 执行步骤段（含「执行步骤：」标题行；零执行给机械提示）。 */
@@ -410,7 +397,7 @@ export function renderTaskDeliverable(task: TaskRecord): string {
   lines.push('', '## 任务结果', '', ...taskResultLines(task));
   lines.push('', '## 最终回复', '', ...taskReplyLines(task));
   lines.push('', '## 限制与说明', '', ...DELIVERABLE_LIMITS);
-  if (taskLivenessOf(task) === 'running') lines.push(DELIVERABLE_RUNNING_NOTE);
+  if (taskMayBeRunningOf(task)) lines.push(DELIVERABLE_RUNNING_NOTE);
   return `${lines.join('\n')}\n`;
 }
 
@@ -541,22 +528,16 @@ export async function runRedo(
   const { task } = input;
   const refuse = (message: string): RedoOutcome => ({ exitCode: 2, stdout: '', stderr: `${message}\n` });
 
-  // 可重新推进 = 任务已到停点且没有终局否决事实（零状态：读追加终止事件 + 事实谓词）：
-  //   · 已取消 / 已超时：终止事件不翻案，不重新交办；
-  //   · 仍在推进（唯一谓词 stillProgressingOf，含租约过期但回合未收尾）：没看到收尾事实就
-  //     重推可能双发写——旧判据只看 liveness==='running'，租约过期退成 died 就被放行了；
+  // 可重新推进 = 任务已到停点（读原始事实，不读任何「怎么结束」种类）：
+  //   · 仍在推进（布尔谓词 stillProgressingOf，含租约过期但回合未收尾）：没看到收尾事实就
+  //     重推可能双发写；
+  //   · 可能还在跑（跨进程事实代理：租约未过期 / accepted 在途）：按「进行中」拒；
   //   · 等待用户：先答复或取消。
-  if (task.termination?.kind === 'cancelled') {
-    return refuse(`任务已取消，不能重新推进：${task.taskId}。`);
-  }
-  if (task.termination?.kind === 'timed_out') {
-    return refuse(`任务已超时，不能重新推进：${task.taskId}。`);
-  }
   if (stillProgressingOf(task)) {
-    if (taskLivenessOf(task) === 'running') {
+    if (taskMayBeRunningOf(task)) {
       return refuse(`任务正在进行中，不能重新推进：${task.taskId}（仅在跑已停的任务可以重新推进）。`);
     }
-    // 已启动但无终止事件/汇报：不能确定它是不是还在执行（结果未明），
+    // 已启动但无结束事实/汇报：不能确定它是不是还在执行（结果未明），
     // 按「未收尾」拒，等它收尾或先取消——不猜「已经停了」。
     return refuse(`任务尚未收尾，不能重新推进：${task.taskId}（等它收尾或先取消）。`);
   }

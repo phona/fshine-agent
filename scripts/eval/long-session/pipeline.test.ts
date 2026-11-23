@@ -71,8 +71,8 @@ describe('端到端管线（假会话）', () => {
 
   it('任务硬零 H3 → product_fault 且保留（不作废）', async () => {
     const plan: TrackPlan = { track: 'LS2', turns: [{ index: 1, text: '开任务', kind: 'task' }, { index: 2, text: '再查', kind: 'task' }] };
-    const t1 = [{ taskId: 't1', taskNo: 1, request: 'x', liveness: 'running' as const, ended: false, cancelled: false, died: false, timedOut: false, resourceLimited: false, reported: false, requestIds: ['req-A'] }];
-    const t2 = [{ taskId: 't2', taskNo: 2, request: 'y', liveness: 'running' as const, ended: false, cancelled: false, died: false, timedOut: false, resourceLimited: false, reported: false, requestIds: ['req-A'] }];
+    const t1 = [{ taskId: 't1', taskNo: 1, request: 'x', started: true, ended: false, reported: false, waiting: false, mayBeRunning: true, requestIds: ['req-A'] }];
+    const t2 = [{ taskId: 't2', taskNo: 2, request: 'y', started: true, ended: false, reported: false, waiting: false, mayBeRunning: true, requestIds: ['req-A'] }];
     const scenario: FakeScenario = {
       turns: [
         { reply: '已开任务。', tasks: t1, tokens: 1000, messages: 2, newAttempts: [asAttempt(1, 'threshold', 110000, 20000)] },

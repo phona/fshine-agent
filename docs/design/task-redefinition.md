@@ -20,7 +20,7 @@ task 没有 status。task = 身份（taskId）+ 归属（principal/session）+ �
 | 东西 | 是什么 | 谁消费 |
 |---|---|---|
 | worker 汇报（messages / replyText） | 语义：worker 说的话 + 工具结果 | 用户（进度条）、Main（带话） |
-| 宿主守护事实 | 机械：归属 + 存活（running/died/waiting_user）+ claimed→resulted（dispatchKey 幂等账） | 宿主（不重复写 + 知道死了 + 投递） |
+| 宿主事实 | 机械：归属 + 启动/结束时刻 + 汇报/提问 + 活 worker 事实（布尔谓词，不产状态词）+ claimed→resulted（dispatchKey 幂等账） | 宿主（不重复写 + 现推活/结束 + 投递） |
 
 守护事实两个用途：① 不重复写（宿主读幂等）；② 回答进度查询（用户一句「怎么样了」，Main 读守护事实现答，不惊动 worker）。
 
@@ -38,17 +38,21 @@ task 没有 status。task = 身份（taskId）+ 归属（principal/session）+ �
 
 S0 本文档；S1 删 status + 收敛六处；S2 P3 对象身份；S3 worker 汇报契约进 prompt；S4 P1 对齐 + P4 登记。
 
-## 7. 零状态定稿（owner 2026-11-23）
+## 7. 不维护任务状态机（owner 2026-11-23，定稿）
 
-没有任何「状态」需要存储。任务行只存事实：`running_since`（这一轮何时启动）、`result_text` / `reply_text`（worker/Main 汇报）、`pending_question + waiting_since`（提问）、租约与提醒时刻、`executions`（执行事实）。原来六个可变终态列（`died_at` / `cancelled_at` / `timed_out_at` / `resource_limited_at` / `round_failed_at` / `cancel_requested_at`）**全部删除**，也不再新增任何终态列（含 `completed_at`）。
+没有任何「状态」需要存储，也没有任何任务级生命周期枚举。任务行只存事实：`running_since`（这一轮何时启动）、`result_text` / `reply_text`（worker/Main 汇报）、`pending_question + waiting_since`（提问）、租约与提醒时刻、`executions`（每笔执行 status = 执行层契约事实）。原来六个可变终态列（`died_at` / `cancelled_at` / `timed_out_at` / `resource_limited_at` / `round_failed_at` / `cancel_requested_at`）**全部删除**，也不再新增任何终态列（含 `completed_at`）。
 
-**活/结束由事实现推**（`taskLivenessOf`，不落列）：
+**结束事实只留时刻、不分类**：这一轮停下时写一条 `task_ends` 事实（`task_id + at`；同任务至多一条、不可变、重启后仍在）。**没有 kind**——cancelled / timed_out / resource_limited / 租约过期 / 无汇报收尾都不再持久化种类；怎么结束由消费方读原始事实（汇报 / 执行行 / 活 worker）就地算。
+
+**活/结束由布尔事实现推**（`packages/core/src/task-progress.ts`，不落列、不返回状态词）：
 
 - 排队：`running_since` 空 + 无汇报 + 无提问；
-- 在跑：已启动 + 无汇报/提问/终止事件 + 本进程有活 worker（runner 的 inFlight / waiters / controllers）；
+- 仍在推进：已启动 + 无结束事实 + 无汇报/提问；
+- 可能还在跑（跨进程读者）：仍在推进 + 租约未过期或 accepted 在途；
+- 在跑（本进程）：仍在推进 + runner 的 inFlight / waiters / controllers 里有活 worker；
 - 等用户：`pending_question`；
-- 结束：已启动且无活 worker（进程没了 = 全不活）——有汇报=正常结束，无汇报=结果未知；或已有终止事件。
+- 结束：结束事实在场、或汇报存档在场、或已启动且不再可能还活着（无汇报 = 结果未知）。
 
-**「怎么结束」走追加事件**：终止时通过既有 emit / onTaskFact / outbox 链路追加一条 `task_events` 事实（`cancelled` / `timed_out` / `resource_limited` / `died` / `round_failed` / `completed`），同任务至多一条、不可变、重启后仍在。投递与 CLI 的「怎么结束」= 最新终止事件 + 原始执行事实；宿主不存结论词。
+**「标签」就地算**：CLI/ops/投递/唤醒各自读原始事实（开始/结束时刻、汇报、提问、租约/活 worker、执行行）算自己的词；**不共享任何「怎么结束」类型/函数/字段**。守卫按形状判：`packages/agent/task-lifecycle-enum-guard.test.ts`（代码：事实 → 多值任务级生命周期的函数/枚举；文档：不许把 task 描述成有状态机/存活三值的句子；反向绊线均实跑）。
 
-**迁移**：旧库可写打开时重建 tasks 表（丢 status/reason/failure_reason 与六个终态列），旧任务全部当已结束（`running_since` 按 `updated_at` 回填），旧结论列可用的机械信息转成一条终止事件；历史汇报与执行事实原样保留。迁移（含事件回填）包在单个事务里。
+**迁移**：旧库可写打开时重建 tasks 表（丢 status/reason/failure_reason 与六个终态列），旧任务全部当已结束（`running_since` 按 `updated_at` 回填），旧终态列只把**原时刻**搬成一条结束事实（种类丢弃）；v6 的 `task_events`（带 kind）迁到 `task_ends`（只留 at）。历史汇报与执行事实原样保留；迁移包在单个事务里。

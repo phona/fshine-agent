@@ -27,7 +27,7 @@ import type {
 } from '../packages/agent/src/driver-contract';
 import { EXECUTE_OPERATION_TOOL, TASK_RUN_TOOL } from '../packages/agent/src/execution-runtime';
 import { createTaskRegistry } from '../packages/agent/src/task-registry';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../packages/agent/testing/task-facts';
 import { assembleSessionCore, resolveExecutionFace } from './ask-runtime';
 
 const REPO_ROOT = path.resolve(__dirname, '..');

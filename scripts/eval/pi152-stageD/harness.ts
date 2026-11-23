@@ -22,7 +22,7 @@ import type { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { createPiModelRuntime, createPiTurnDriver, piCompactionSettings } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver, TurnDriverInput, TurnDriverResult } from '../../../packages/agent/src/driver-contract';
 import type { TaskRegistry, TaskRecord, TaskScope } from '../../../packages/agent/src/task-registry';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
 import { assembleSessionCore, createBackgroundDispatch, resolveExecutionFace, type AssembledSession } from '../../ask-runtime';
 import { createResourcePolicy } from '../../../packages/agent/src/resource-policy';
@@ -123,8 +123,11 @@ export interface TaskSummary {
   taskId: string;
   taskNo: number | null;
   name: string;
-  liveness: string | null;
-  cancelled: boolean;
+  started: boolean;
+  endedAt: string | null;
+  reported: boolean;
+  waiting: boolean;
+  mayBeRunning: boolean;
   reason: string | null;
   request: string;
   resultText: string | null;
@@ -413,8 +416,11 @@ function taskSummary(task: TaskRecord): TaskSummary {
     taskId: task.taskId,
     taskNo: task.taskNo ?? null,
     name: task.name ?? '',
-    liveness: taskLivenessOf(task) ?? null,
-    cancelled: task.termination?.kind === 'cancelled',
+    started: taskStartedOf(task),
+    endedAt: task.endedAt ?? null,
+    reported: taskReportedOf(task),
+    waiting: taskWaitingOf(task),
+    mayBeRunning: taskMayBeRunningOf(task),
     reason: lastFailureOf(task)?.error?.code ?? null,
     request: task.request,
     resultText: task.resultText ?? null,

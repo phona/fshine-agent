@@ -25,7 +25,7 @@
  *   ⑪ 带 taskId 行只在 Worker 解析（task_id = 当前任务）可见；无 taskId 行只在 Main 解析
  *      （task_id IS NULL）可见；越权与不存在在两侧同样 undefined（同码防 oracle）；
  *   ⑫ S1 时代旧库（file_refs 无 task_id 列）可写打开：ADD COLUMN 补齐（前向加法）、旧行
- *      全字段不动且归 Main 侧、迁移备份生成、user_version 推进到当前版本 v6、二次打开零差异；
+ *      全字段不动且归 Main 侧、迁移备份生成、user_version 推进到当前版本 v7、二次打开零差异；
  *   ⑬ 只读旧库（有 file_refs 无 task_id 列）：Main 解析退回旧查询（历史行都是 Main 侧）、
  *      Worker 解析读出 undefined（不崩溃）、写入确定性拒绝。
  *
@@ -304,7 +304,7 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
     store.close();
 
     expect(existsSync(`${dbPath}.backup-v${TASK_STORE_SCHEMA_VERSION}`)).toBe(true);
-    expect(TASK_STORE_SCHEMA_VERSION).toBe(6);
+    expect(TASK_STORE_SCHEMA_VERSION).toBe(7);
     const probe = new Database(dbPath);
     expect(probe.pragma('user_version', { simple: true })).toBe(TASK_STORE_SCHEMA_VERSION);
     probe.close();
@@ -374,7 +374,7 @@ describe('file_refs 行访问器（CAP-01 S0）', () => {
       expect(migrated.getFileRef('file_diag2', SCOPE_A, { side: 'main' })!.deliverable).toBe(false);
       migrated.close();
     }
-    expect(TASK_STORE_SCHEMA_VERSION).toBe(6);
+    expect(TASK_STORE_SCHEMA_VERSION).toBe(7);
     expect(existsSync(`${dbPath}.backup-v${TASK_STORE_SCHEMA_VERSION}`)).toBe(true);
     const probe = new Database(dbPath);
     expect(probe.pragma('user_version', { simple: true })).toBe(TASK_STORE_SCHEMA_VERSION);

@@ -35,7 +35,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import { LONG_RUNNING_NOTICE_FALLBACK_TEXT } from '../../../packages/agent/src/task-runner';
 import {
   internalOperationCall,
@@ -125,7 +125,7 @@ describe('J 组·后台任务并存（J-1～J-3）', () => {
       // 慢任务已后台推进（running、租约已释放——长任务让出槽位/租约）。
       await sim.waitFor('J-1 慢任务 accepted（running 无租约）', () => {
         const task = registry.get(slowTaskId, TASK_SCOPE);
-        return taskLivenessOf(task) === 'running' && task.leaseUntil === undefined;
+        return taskMayBeRunningOf(task) && task.leaseUntil === undefined;
       }, 10_000);
 
       const fastId = sim.sendText('顺便查一下 beta 集合 W1 的数据，尽快');
@@ -264,7 +264,7 @@ describe('J 组·后台任务并存（J-1～J-3）', () => {
       const slowTaskId = sim.doneOf(slowId)!.taskIds[0]!;
       await sim.waitFor('J-3 慢任务 running 无租约（真在后台飞）', () => {
         const task = registry.get(slowTaskId, TASK_SCOPE);
-        return taskLivenessOf(task) === 'running' && task.leaseUntil === undefined;
+        return taskMayBeRunningOf(task) && task.leaseUntil === undefined;
       }, 10_000);
 
       // ① 任务在跑时，用户发一句无关查询 → **立即**得到答复（窗口内快活，同回合气泡）。

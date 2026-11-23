@@ -8,7 +8,7 @@
  *   · 外部结果未知 → 停止自动重试，任务落 failed + reason=result_unknown（不是成功、不是确认失败）；
  *   · 每次执行层请求都带非空 dispatchKey，且与账行一致（回放不产生新执行行）。
  */
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { afterEach, describe, expect, it } from 'vitest';
 import type {
   CapabilityManifest,
@@ -216,7 +216,7 @@ describe('U3 宿主绑定（恢复后重绑定 / 同参数不合并 / 只读重�
     expect(client.requests).toHaveLength(1);
     const task = session.tasks()[0]!;
     expect(['failed', 'refused']).toContain(lastExecutionOf(task)?.status);
-    expect((lastFailureOf(task)?.error?.code === 'result_unknown' || task.termination?.kind === 'died')).toBe(true);
+    expect((lastFailureOf(task)?.error?.code === 'result_unknown' || task.endedAt === 'died')).toBe(true);
     expect(registry.getOperation(client.requests[0]!.dispatchKey)?.status).toBe('unknown');
     expect(registry.getOperation(client.requests[0]!.dispatchKey)?.reason).toBe('result_unknown');
   });

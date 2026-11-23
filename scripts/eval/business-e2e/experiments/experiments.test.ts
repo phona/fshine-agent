@@ -244,8 +244,8 @@ describe('④ 越权=找不到 与 挂起→接着办（预置任务）', () => 
     const exec = executorWith([
       async (e) => {
         // 2026-11-20：数字 ref 退役——从 task_status 列表里取预置挂起任务的真实 taskId。
-        const listed = await e('task_status', {}) as { tasks?: Array<{ taskId?: string; liveness?: string }> };
-        const waiting = listed?.tasks?.find((task) => task.liveness === 'waiting_user');
+        const listed = await e('task_status', {}) as { tasks?: Array<{ taskId?: string; waiting?: boolean }> };
+        const waiting = listed?.tasks?.find((task) => task.waiting === true);
         if (waiting?.taskId === undefined) throw new Error('（测试）task_status 列表里没有等待中的任务');
         slot.capture({ taskId: waiting.taskId });
       },

@@ -18,7 +18,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { ExecutionStatus } from '@fshine/contracts/execution-contract';
-import { deriveTaskName, type ExecutionRecord, type TaskTermination } from './src/task-registry';
+import { deriveTaskName, type ExecutionRecord } from './src/task-registry';
 import {
   createTaskRunner,
   type CancelOutcome,
@@ -83,8 +83,8 @@ interface FakeTask {
   timedOutAt?: string;
   resourceLimitedAt?: string;
   roundFailedAt?: string;
-  /** 追加终止事件（零状态：TaskRecordView 的事实面；测试替身与真实实现同形）。 */
-  termination?: TaskTermination;
+  /** 结束事实（只有时刻；测试替身与真实实现同形）。 */
+  endedAt?: string;
   taskNo: number;
   name: string;
   executions: ExecutionRecord[];
@@ -319,11 +319,11 @@ class FakeRegistry implements TaskRegistryPort {
     return task;
   }
 
-  markDied(taskId: string): TaskRecordView {
+  markLeaseExpired(taskId: string): TaskRecordView {
     const task = this.require(taskId);
     if (!task.diedAt) {
       task.diedAt = this.clock().toISOString();
-      // 真实 markDied 幂等（WHERE died_at IS NULL，不抛）：已落 failed（如先 noteRoundFailed）
+      // 真实 markLeaseExpired 幂等（同任务至多一条结束事实，不抛）：已结束的行不翻案
       // 时只补 reason，不重走非法边。
       if ((LEGAL_EDGES[task.status] ?? []).includes('failed')) {
         this.commit(task, 'failed', { reason: 'result_unknown' });
@@ -335,11 +335,11 @@ class FakeRegistry implements TaskRegistryPort {
   }
 
   /** 回合失败事实：底账不写结论（真实实现落 round_failed_at 一次性收尾事实）；测试替身落 failed 供断言。 */
-  noteRoundFailed(taskId: string): void {
+  noteRoundEnded(taskId: string): void {
     const task = this.require(taskId);
-    if (task.termination !== undefined) return; // 终止一次性/不翻案
+    if (task.endedAt !== undefined) return; // 终止一次性/不翻案
     task.roundFailedAt = this.clock().toISOString();
-    task.termination = { kind: 'round_failed', at: task.roundFailedAt };
+    task.endedAt = task.roundFailedAt;
     const legal = (LEGAL_EDGES[task.status] ?? []).includes('failed');
     if (legal) this.commit(task, 'failed');
   }
@@ -349,7 +349,7 @@ class FakeRegistry implements TaskRegistryPort {
     for (const taskId of taskIds) {
       const task = this.tasks.get(taskId);
       if (task === undefined) continue;
-      if (task.termination === undefined && (LEGAL_EDGES[task.status] ?? []).includes('completed')) {
+      if (task.endedAt === undefined && (LEGAL_EDGES[task.status] ?? []).includes('completed')) {
         this.commit(task, 'completed');
       }
       task.resultText = replyText;
@@ -360,8 +360,8 @@ class FakeRegistry implements TaskRegistryPort {
     return this.require(taskId).diedAt;
   }
 
-  terminationOf(taskId: string): TaskTermination | undefined {
-    return this.require(taskId).termination;
+  endedAtOf(taskId: string): string | undefined {
+    return this.require(taskId).endedAt;
   }
 
   roundFailedAtOf(taskId: string): string | undefined {
@@ -388,11 +388,8 @@ class FakeRegistry implements TaskRegistryPort {
     else if (to === 'timed_out') { task.reason = options.reason ?? 'timeout'; if (task.timedOutAt === undefined) task.timedOutAt = at; }
     else if (to === 'failed') { task.reason = options.reason ?? 'failed_confirmed'; }
     else task.reason = undefined;
-    if (task.termination === undefined) {
-      if (to === 'cancelled') task.termination = { kind: 'cancelled', at };
-      else if (to === 'timed_out') task.termination = { kind: 'timed_out', at };
-      else if (to === 'completed') task.termination = { kind: 'completed', at };
-      else if (to === 'failed') task.termination = { kind: options.reason === 'result_unknown' ? 'died' : 'round_failed', at };
+    if (to !== 'running' && to !== 'waiting_user' && to !== 'cancelling' && task.endedAt === undefined) {
+      task.endedAt = at;
     }
     if (to !== 'running') {
       task.leaseOwner = undefined;
@@ -644,7 +641,7 @@ describe('排队 → 启动 → 收尾', () => {
   });
 
   it('结果未知（result_unknown）：落 died_at（「结果未知」是 died 语义，不是「无汇报」）', async () => {
-    // Grok 复审 2026-11-22：S1 后 settle 只 noteRoundFailed 清租约、不 markDied → 底账无
+    // Grok 复审 2026-11-22：S1 后 settle 只 noteRoundEnded 清租约、不 markLeaseExpired → 底账无
     // died_at，展示词退成「无汇报」，重启对账也认不出这条已死行。结果未知必须落 died_at。
     const h = harness();
     submit(h, 't1');
@@ -865,7 +862,7 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
     const outcome = h.runner.cancel('t1');
     expect(outcome).toEqual({ outcome: 'requested', taskId: 't1' });
     // 请求不是终止事件——未确认：仍是 running、底账无终止事件。
-    expect(h.registry.terminationOf('t1')).toBeUndefined();
+    expect(h.registry.endedAtOf('t1')).toBeUndefined();
     expect(h.registry.statusOf('t1')).toBe('running');
 
     await h.runner.whenIdle();
@@ -892,7 +889,7 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
     submit(h, 't1'); // 未启动（queued）
     h.runner.cancel('t1');
     expect(h.registry.statusOf('t1')).toBe('cancelled');
-    expect(h.registry.terminationOf('t1')?.kind).toBe('cancelled');
+    expect(h.registry.endedAtOf('t1')).toBeTruthy();
   });
 
   it('running 取消未获确认（回合照常完成）→ 回 running 并如实落终态，不宣称取消', async () => {
@@ -956,7 +953,7 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
     h.runner.pump();
     h.executor.settle(0, { kind: 'ended' }); // 无汇报 = 回合失败收尾
     await h.runner.whenIdle();
-    expect(h.registry.terminationOf('t1')?.kind).toBe('round_failed');
+    expect(h.registry.endedAtOf('t1')).toBeTruthy();
 
     expect(h.runner.cancel('t1')).toEqual({ outcome: 'terminal', taskId: 't1' });
   });

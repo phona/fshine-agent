@@ -23,9 +23,14 @@ import { fileURLToPath } from 'node:url';
 import type { ContextProfileConfig } from '@fshine/contracts';
 import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
 import type { TaskExecutionInput, TaskExecutionContext, TaskExecutionOutcome, TaskExecutor } from '../../../packages/agent/src/task-runner';
-import { type TaskScope } from '../../../packages/agent/src/task-registry';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
+import { type TaskRecord, type TaskScope } from '../../../packages/agent/src/task-registry';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import { assembleSessionCore } from '../../ask-runtime';
+
+/** 任务事实读数（布尔；不投影任务级状态词）。 */
+function factsOf(task: TaskRecord): { started: boolean; reported: boolean; waiting: boolean; mayBeRunning: boolean } {
+  return { started: taskStartedOf(task), reported: taskReportedOf(task), waiting: taskWaitingOf(task), mayBeRunning: taskMayBeRunningOf(task) };
+}
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform');
@@ -91,11 +96,11 @@ async function probeConversationFace(): Promise<Record<string, unknown>> {
   let auditRows: unknown[] = [];
   try {
     await assembled.session.send('帮我核对 alpha 的 W1；顺便查一下我刚才那个任务办得怎么样了。');
-    tasks = assembled.taskRegistry.list(SCOPE).map((t) => ({ taskId: t.taskId, taskNo: t.taskNo, status: taskLivenessOf(t) ?? null, executions: t.executions.map((e) => ({ operation: e.operation, status: e.status, requestId: e.requestId })), resultText: t.resultText ?? null, replyText: t.replyText ?? null }));
+    tasks = assembled.taskRegistry.list(SCOPE).map((t) => ({ taskId: t.taskId, taskNo: t.taskNo, status: factsOf(t), executions: t.executions.map((e) => ({ operation: e.operation, status: e.status, requestId: e.requestId })), resultText: t.resultText ?? null, replyText: t.replyText ?? null }));
     const taskId = (tasks[0] as { taskId?: string } | undefined)?.taskId;
     if (taskId !== undefined) {
       const rec = assembled.taskRegistry.get(taskId, SCOPE);
-      resultRetrieval = { taskId, status: taskLivenessOf(rec) ?? null, hasArchivedText: (typeof rec.resultText === 'string' && rec.resultText.length > 0) || (typeof rec.replyText === 'string' && rec.replyText.length > 0), resultText: rec.resultText ?? null, replyText: rec.replyText ?? null };
+      resultRetrieval = { taskId, status: factsOf(rec), hasArchivedText: (typeof rec.resultText === 'string' && rec.resultText.length > 0) || (typeof rec.replyText === 'string' && rec.replyText.length > 0), resultText: rec.resultText ?? null, replyText: rec.replyText ?? null };
     }
     const auditPath = assembled.auditPath;
     if (existsSync(auditPath)) {
@@ -183,26 +188,26 @@ async function probeCapabilityApi(): Promise<Record<string, unknown>> {
     const t1 = await assembled.session.send('任务一');
     await runner.whenIdle();
     const task1Id = t1.taskIds[0]!;
-    observations['查询.registry.get(scope)'] = { status: taskLivenessOf(assembled.taskRegistry.get(task1Id, SCOPE)) ?? null, pendingQuestion: assembled.taskRegistry.get(task1Id, SCOPE).pendingQuestion ?? null };
+    observations['查询.registry.get(scope)'] = { status: factsOf(assembled.taskRegistry.get(task1Id, SCOPE)), pendingQuestion: assembled.taskRegistry.get(task1Id, SCOPE).pendingQuestion ?? null };
     // 接续：resume(waiting_user) → started → completed + 结果存档
     observations['接续.runner.resume'] = runner.resume(task1Id, { answer: '本月（W202611）', scope: SCOPE });
     await runner.whenIdle();
     const t1After = assembled.taskRegistry.get(task1Id, SCOPE);
-    observations['结果找回.registry.get 存档'] = { taskId: task1Id, taskNo: t1After.taskNo, status: taskLivenessOf(t1After) ?? null, resultText: t1After.resultText ?? null, replyText: t1After.replyText ?? null };
+    observations['结果找回.registry.get 存档'] = { taskId: task1Id, taskNo: t1After.taskNo, status: factsOf(t1After), resultText: t1After.resultText ?? null, replyText: t1After.replyText ?? null };
     // task2：running → cancel(requested≠cancelled) → 执行端确认 → cancelled
     const t2 = await assembled.session.send('任务二');
     await new Promise((r) => setTimeout(r, 20));
     const task2Id = t2.taskIds[0]!;
-    observations['取消前'] = { status: taskLivenessOf(assembled.taskRegistry.get(task2Id, SCOPE)) ?? null };
+    observations['取消前'] = { status: factsOf(assembled.taskRegistry.get(task2Id, SCOPE)) };
     observations['取消.runner.cancel'] = runner.cancel(task2Id, SCOPE);
-    observations['取消后(请求时)'] = { status: taskLivenessOf(assembled.taskRegistry.get(task2Id, SCOPE)) ?? null };
+    observations['取消后(请求时)'] = { status: factsOf(assembled.taskRegistry.get(task2Id, SCOPE)) };
     await runner.whenIdle();
-    observations['取消后(落定)'] = { status: taskLivenessOf(assembled.taskRegistry.get(task2Id, SCOPE)) ?? null, reason: lastFailureOf(assembled.taskRegistry.get(task2Id, SCOPE))?.error?.code ?? null };
+    observations['取消后(落定)'] = { status: factsOf(assembled.taskRegistry.get(task2Id, SCOPE)), reason: lastFailureOf(assembled.taskRegistry.get(task2Id, SCOPE))?.error?.code ?? null };
     // 取消幂等/终态：再次 cancel
     observations['取消幂等(重复 cancel)'] = runner.cancel(task2Id, SCOPE);
     // 查询列表 + scope 隔离
-    observations['查询.registry.list(本会话)'] = assembled.taskRegistry.list(SCOPE).map((t) => ({ taskNo: t.taskNo, status: taskLivenessOf(t) ?? null }));
-    observations['查询.registry.list(他会话)'] = assembled.taskRegistry.list(OTHER_SCOPE).map((t) => ({ taskNo: t.taskNo, status: taskLivenessOf(t) ?? null }));
+    observations['查询.registry.list(本会话)'] = assembled.taskRegistry.list(SCOPE).map((t) => ({ taskNo: t.taskNo, status: factsOf(t) }));
+    observations['查询.registry.list(他会话)'] = assembled.taskRegistry.list(OTHER_SCOPE).map((t) => ({ taskNo: t.taskNo, status: factsOf(t) }));
     try {
       assembled.taskRegistry.get(task1Id, OTHER_SCOPE);
       observations['越权.get(他会话)'] = '未抛错（预期应抛 TaskOwnershipError）';

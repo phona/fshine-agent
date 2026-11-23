@@ -365,30 +365,15 @@ export function summarizeTasks(tasks: readonly TaskRecordView[], calls: readonly
   const terminalReasonCounts: Record<string, number> = {};
   let openOnDrain = 0;
   for (const task of tasks) {
-    // 零状态：终止事件是「怎么结束」的唯一事实来源；其余按等待/汇报/启动事实分桶。
-    const termination = task.termination?.kind;
+    // 事实分桶（不读「怎么结束」种类）：等待 / 有汇报 / 可能还在跑 / 排队 / 已停无汇报。
+    const reported = (task.replyText ?? task.resultText ?? '').trim() !== '';
     const state = task.pendingQuestion !== undefined ? 'waiting_user'
-      : termination === 'cancelled' ? 'cancelled'
-        : termination === 'timed_out' ? 'timed_out'
-          : termination === 'resource_limited' ? 'failed'
-            : termination === 'died' ? 'failed'
-              : termination === 'round_failed' ? 'failed'
-                : termination === 'completed' ? 'completed'
-                  : (task.replyText ?? task.resultText ?? '').trim() !== '' ? 'completed'
-                    : task.leaseUntil !== undefined ? 'running'
-                      : task.runningSince === undefined ? 'queued' : 'failed';
+      : reported ? 'reported'
+        : task.endedAt !== undefined ? 'stopped_without_report'
+          : task.leaseUntil !== undefined ? 'running'
+            : task.runningSince === undefined ? 'queued'
+              : 'stopped_without_report';
     terminalCounts[state] = (terminalCounts[state] ?? 0) + 1;
-    // TaskRecordView 不带执行行——按终止事件计数机械原因词。
-    const reasonWordOf = {
-      died: 'result_unknown',
-      cancelled: 'cancelled_by_user',
-      timed_out: 'timeout',
-      resource_limited: 'resource_limited',
-    } as const;
-    if (termination !== undefined && termination in reasonWordOf) {
-      const word = reasonWordOf[termination as keyof typeof reasonWordOf];
-      terminalReasonCounts[word] = (terminalReasonCounts[word] ?? 0) + 1;
-    }
     if (OPEN_STATES.has(state)) openOnDrain += 1;
   }
   const callsByTask = new Map<string, number>();

@@ -8,7 +8,7 @@
  * 宿主**不产出回合级结论**（success/failed/refused/not_permitted 这类词已退役）：做没做成
  * 由 Main 读 executions 逐条 status + 死亡事实 + worker 汇报自己判。**唯一例外**是唤醒降级
  * （模型说不出话）与非 live 不唤醒时的宿主兜底一句（见 taskCompletionFallbackText /
- * failureTextFor）——它按**原始执行事实**（末条失败执行的 status/error.code、died/资源拒绝、
+ * failureTextFor）——它按**原始执行事实**（末条失败执行的 status/error.code、结果未知/资源拒绝、
  * 汇报原文）如实报事实，不是话术模板。
  *
  * 纪律（与文件投递 / 附件追问同一套，四必守同源）：
@@ -147,8 +147,8 @@ export function taskRoundFactsText(input: {
   ledger?: readonly string[];
   /** worker 汇报原文（语义；可能为空或说错，原样给 Main，不补 conclusion）。 */
   report?: string;
-  /** died 事实（看门狗观察到租约过期，结果未知）。 */
-  died?: boolean;
+  /** 结果未知事实（已启动、无汇报、本进程无活 worker）。 */
+  resultUnknown?: boolean;
   /** 资源拒绝事实（池满/队列满，未进入执行）。 */
   resourceLimited?: boolean;
   /** 发起前被宿主拒绝（本次不允许，不是没有这件事）。 */
@@ -166,7 +166,7 @@ export function taskRoundFactsText(input: {
     ? ''
     : `${ROUND_FACT_REASON_MARKER}（供你判断，别原样丢给用户）：${reason}。\n`;
   const marks: string[] = [];
-  if (input.died === true) marks.push(`${ROUND_FACT_WATCHDOG_MARKER}（结果未知，禁止自动重放）`);
+  if (input.resultUnknown === true) marks.push(`${ROUND_FACT_WATCHDOG_MARKER}（结果未知，禁止自动重放）`);
   if (input.resourceLimited === true) marks.push(`${ROUND_FACT_RESOURCE_LIMITED_MARKER}（未进入执行）`);
   const marksLine = marks.length === 0 ? '' : `机械事实：${marks.join('；')}。\n`;
   const report = input.report?.trim();
@@ -307,7 +307,7 @@ export async function deliverTaskResult(fact: TaskCompletionFact, options: TaskR
   return deliverText(fact, bodyStripped, options);
 }
 
-/** 失败降级兜底话术（模型回合挂掉时）：只区分结果未知（died）与其余，不做执行层码归类。 */
+/** 失败降级兜底话术（模型回合挂掉时）：只区分结果未知事实与其余，不做执行层码归类。 */
 export function failureTextFor(status?: 'failed' | 'refused' | 'result_unknown'): string {
   return failureMessageFor(status === 'result_unknown' ? 'unknown_result' : 'executor_failed').text;
 }
@@ -318,13 +318,13 @@ export function failureTextFor(status?: 'failed' | 'refused' | 'result_unknown')
  *   · 部分完成事实（写已落库 + 另一个对象的写没成）→ 逐项说「已完成 X，未成功 Y」——
  *     不把整回合说成「没办成」（会诱导用户重复写已经落库的那笔）；
  *   · 资源拒绝事实（池满/队列满的确定性拒绝，没进入执行）→ 复用通知渲染器的既有那句；
- *   · died 事实（结果未知）→ unknown_result；
+ *   · 结果未知事实（已启动无汇报、本进程无活 worker）→ unknown_result；
  *   · 其余按执行层码归类（机械事实，不是投影）：`classifyFailure({ code })`——GATE_REFUSE →
  *     denied 等；无码 = executor_failed。needs_confirmation/needs_input 在失败收尾里说不通
  *     （底账没有等待中的提案/可接续任务），一律 host_fault（2026-11-19 假承诺防线）。
  */
 export function failureFallbackFactText(input: {
-  died?: boolean;
+  resultUnknown?: boolean;
   resourceLimited?: boolean;
   /** 执行层原始错误码（只用于归类，不进用户文本）。 */
   code?: string;
@@ -345,7 +345,7 @@ export function failureFallbackFactText(input: {
   if (input.resourceLimited === true) return resourceLimitedText(input.name);
   if (input.zeroExecReason === 'not_permitted') return failureMessageFor('denied').text;
   if (input.zeroExecReason === 'unsupported') return `${UNSUPPORTED_OPERATION_TEXT}。`;
-  const kind = input.died === true
+  const kind = input.resultUnknown === true
     ? 'unknown_result'
     : classifyFailure({ code: input.code });
   return failureMessageFor(kind === 'needs_confirmation' || kind === 'needs_input' ? 'host_fault' : kind).text;
@@ -381,7 +381,7 @@ export function taskCancelledFactText(input: { name?: string }): string {
 
 /**
  * 重启对账**事实**文本（宿主拼，给模型读）：进程重启后，用户以为还在办的任务实际状态已变或
- * 说不清（已启动且无汇报的存量行在启动 pump 里按 died 收口 = 结果未知，不重放）——
+ * 说不清（已启动且无汇报的存量行在启动 pump 里写结束事实 = 结果未知，不重放）——
  *   `[重启对账]「<业务名>」这件事我这边重启过，现在状态说不清（做没做完无法确认）。
  *    请如实告诉用户，别让他一直等下去，并给出下一步能做什么。`
  *
@@ -449,7 +449,7 @@ export function waitingUserFallbackText(input: { summary: string; expiresAt?: st
  */
 export async function deliverTaskFailure(fact: TaskFailureFact, options: TaskResultDeliveryOptions): Promise<boolean> {
   return deliverText(fact, failureFallbackFactText({
-    ...(fact.status === 'result_unknown' ? { died: true } : {}),
+    ...(fact.status === 'result_unknown' ? { resultUnknown: true } : {}),
     ...(fact.resourceLimited === true ? { resourceLimited: true } : {}),
     ...(fact.code === undefined ? {} : { code: fact.code }),
     ...(fact.name === undefined ? {} : { name: fact.name }),

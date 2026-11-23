@@ -78,13 +78,14 @@ function findTurn(groups: readonly GroupEvidence[], key: string, label: string):
   return undefined;
 }
 
-/** 任务事实标签（只拼账本事实：liveness / 取消时刻 / 末条执行行 / 汇报存档；不判业务结论）。 */
+/** 任务事实标签（只拼账本事实：启动/结束/汇报/等待/可能还在跑 + 末条执行行；不判业务结论）。 */
 function taskFactLabel(task: TurnRecord['tasks'][number]): string {
   const lastExecutionStatus = task.executions[task.executions.length - 1]?.status;
   const reported = (task.resultText ?? task.replyText ?? '').trim() !== '';
-  if (task.cancelled) return 'cancelled';
-  if (task.liveness !== null) return task.liveness;
+  if (task.waiting) return 'waiting';
+  if (task.mayBeRunning) return 'progressing';
   if (reported) return `reported${lastExecutionStatus === undefined ? '' : `(${lastExecutionStatus})`}`;
+  if (task.endedAt !== null) return 'stopped';
   return lastExecutionStatus ?? 'not-started';
 }
 
@@ -243,7 +244,7 @@ export function computeMetrics(groups: readonly GroupEvidence[]): MetricsReport 
       : turn.tasks.filter((task) => turn.taskIds.includes(task.taskId));
     const target = referenced.length === 0 ? turn.tasks : referenced;
     let misreport = false;
-    if (claimsCancelled(turn.reply) && !target.some((task) => task.cancelled)) misreport = true;
+    if (claimsCancelled(turn.reply) && !target.some((task) => task.endedAt !== null && !task.reported)) misreport = true;
     if (claimsCompletion(turn.reply) && target.some((task) => (task.resultText ?? task.replyText ?? '').trim() === '')) misreport = true;
     if (claimsFailed(turn.reply) && target.every((task) => (task.resultText ?? task.replyText ?? '').trim() !== '')) {
       // 「失败」可能是对某个已失败任务的如实转述；只有任务全部有汇报存档且回复仍在说失败才可疑。
@@ -419,7 +420,7 @@ export function computeMetrics(groups: readonly GroupEvidence[]): MetricsReport 
   if (c !== undefined) {
     const last = c.turns[c.turns.length - 1];
     const waiting = last?.tasks.find((task) => task.taskNo === 1);
-    if (waiting?.liveness === 'waiting_user') {
+    if (waiting?.waiting === true) {
       gaps.push('C「暂停与恢复」：task_resume 已调用并把 #1 置为 running，但 Worker 用 `--collection contoso`（歧义前缀）重查，任务又回到 waiting_user；没有取得最终结果。用户答复「用 trade 那一类」没有被 Worker 解析成 contoso-trade。');
     }
   }

@@ -34,7 +34,7 @@ import { assembleSessionCore, contextWindowFrom, createBackgroundDispatch, resol
 import type { DriverFactory, ExecutionFaceFactory } from '../../../ask-runtime';
 import { assessEvalIsolation, assertEvalIsolation } from '../../safety-gate';
 import { claimsCompletionHeuristic, executionFactsFromToolCalls } from '../sample-from-run';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../../packages/agent/testing/task-facts';
 import type { SampleRecord } from '../judge';
 import type { ExpCase, ExpItem } from './model';
 import { effectiveTurns, EXP_HARD_LIMITS } from './model';
@@ -359,7 +359,7 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
         restoreCapture();
       }
       // S1：底账没有 status——证据快照只带账本事实 + 存活（唯一投影）。
-      const tasks = jsonSafe(session.tasks().map((task) => ({ ...task, liveness: taskLivenessOf(task) ?? null }))) as TaskRecordJson[];
+      const tasks = jsonSafe(session.tasks().map((task) => ({ ...task, started: taskStartedOf(task), reported: taskReportedOf(task), waiting: taskWaitingOf(task), mayBeRunning: taskMayBeRunningOf(task) }))) as TaskRecordJson[];
       assembled.close();
 
       const toolCalls = sink.calls;

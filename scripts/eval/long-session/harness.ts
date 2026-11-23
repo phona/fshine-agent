@@ -13,7 +13,7 @@
  */
 import {
   judgeFactAnswer, judgeSessionFacts, judgeTaskContinuity, parseNumbers, taskHasFact, taskFactSignature,
-  type FactExpectation, type FactFailureCode, type FactVerdict, type TaskFailureCode, type TaskTurnFact, type TaskView, type TaskVerdict,
+  type FactExpectation, type FactFailureCode, type FactVerdict, type TaskFailureCode, type TaskTurnFact, type TaskView, type TaskVerdict, taskFactBrief,
 } from './oracle';
 import {
   analyzeCompaction, judgeCompactionLifecycle, R6_COMPACTION_BOUNDS,
@@ -269,7 +269,7 @@ export function judgeTurnExpectations(spec: TurnSpec, ctx: TurnExpectationContex
     } else if (!spec.expectTaskFactIn.facts.some((fact) => taskHasFact(picked, fact))) {
       push('task_fact_in', 'E-G', {
         which: spec.expectTaskFactIn.which, taskId: picked.taskId,
-        facts: { liveness: picked.liveness, ended: picked.ended, cancelled: picked.cancelled, reported: picked.reported, lastExecutionStatus: picked.lastExecutionStatus ?? null },
+        facts: { started: picked.started, ended: picked.ended, waiting: picked.waiting, mayBeRunning: picked.mayBeRunning, reported: picked.reported, lastExecutionStatus: picked.lastExecutionStatus ?? null },
         expected: spec.expectTaskFactIn.facts,
       });
     }
@@ -283,14 +283,14 @@ export function judgeTurnExpectations(spec: TurnSpec, ctx: TurnExpectationContex
     const latest = pickTask(ctx.tasksAfter, spec.cancelTarget ?? 'latest');
     if (latest === undefined) {
       push('cancel_honest', 'E-D', { reason: 'no_task_to_cancel' });
-    } else if (!latest.cancelled) {
+    } else if (!(latest.ended && !latest.reported)) {
       // 任务已办完（有汇报存档 / 末条执行 completed）且未声称取消 = 如实（诚实回执可能同时提到别的任务已取消）。
       const done = latest.reported || latest.lastExecutionStatus === 'completed';
       const honest = done && (!claims || statesCancelRefused(ctx.reply));
       if (!honest) {
         push('cancel_honest', 'E-D', {
           taskId: latest.taskId, which: spec.cancelTarget ?? 'latest',
-          liveness: latest.liveness, ended: latest.ended, reported: latest.reported, claimsCancelled: claims,
+          facts: taskFactBrief(latest), ended: latest.ended, reported: latest.reported, claimsCancelled: claims,
         });
       }
     }
@@ -298,23 +298,23 @@ export function judgeTurnExpectations(spec: TurnSpec, ctx: TurnExpectationContex
   if (spec.expectInflightCancel === true) {
     // 在飞取消：轮前最新任务必须真的还在飞（running 或未启动排队），否则没有观测窗口（不冒充判定）。
     const before = pickTask(ctx.tasksBefore, 'latest');
-    const live = before !== undefined && (before.liveness === 'running' || (before.liveness === null && !before.ended));
+    const live = before !== undefined && (before.mayBeRunning || (!before.started && !before.ended));
     if (!live) {
       push('inflight_cancel', 'E-INCONCLUSIVE', {
         reason: 'no_inflight_window',
-        before: before === undefined ? null : { liveness: before.liveness, ended: before.ended, reported: before.reported },
+        before: before === undefined ? null : { facts: taskFactBrief(before), ended: before.ended, reported: before.reported },
       });
     } else {
       const after = ctx.tasksAfter.find((task) => task.taskId === before.taskId);
       if (after === undefined) {
-        push('inflight_cancel', 'E-D', { taskId: before.taskId, before: { liveness: before.liveness, ended: before.ended }, after: null });
-      } else if (!after.cancelled) {
+        push('inflight_cancel', 'E-D', { taskId: before.taskId, before: { facts: taskFactBrief(before), ended: before.ended }, after: null });
+      } else if (!(after.ended && !after.reported)) {
         // 任务已办完还可能有两种：①取消到达时它已完成（如实迟到，pass）；
         // ②取消指错任务/未落到该任务（fail）。用 task_cancel 回执的目标与 outcome 区分。
         const facts = ctx.cancelFacts ?? null;
         if (facts === null) {
           push('inflight_cancel', 'E-INCONCLUSIVE', {
-            reason: 'cancel_surface_missing', taskId: before.taskId, liveness: after.liveness, reported: after.reported,
+            reason: 'cancel_surface_missing', taskId: before.taskId, facts: taskFactBrief(after), reported: after.reported,
           });
         } else {
           const targeted = facts.find((fact) => fact.taskId === before.taskId);
@@ -324,7 +324,7 @@ export function judgeTurnExpectations(spec: TurnSpec, ctx: TurnExpectationContex
             && (!claimsCancel(ctx.reply) || statesCancelRefused(ctx.reply));
           if (!arrivedAfterCompletion) {
             push('inflight_cancel', 'E-D', {
-              taskId: before.taskId, liveness: after.liveness, reported: after.reported,
+              taskId: before.taskId, facts: taskFactBrief(after), reported: after.reported,
               reason: targeted === undefined ? 'cancel_target_mismatch' : 'cancel_not_effective',
               cancelFacts: facts, claimsCancelled: claimsCancel(ctx.reply),
             });

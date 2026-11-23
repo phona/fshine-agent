@@ -22,7 +22,7 @@ import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import { assembleSessionCore } from './ask-runtime';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../packages/agent/testing/task-facts';
 import { materializeEvalConfig } from './resolve-config-path';
 import type { TurnDriver } from '../packages/agent/src/driver-contract';
 import { assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';

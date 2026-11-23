@@ -17,7 +17,7 @@
  *
  * 零网络、零真实模型：执行层是 gate/脚本假件，脚本是仓内 Node 受限子进程。
  */
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
@@ -255,13 +255,13 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       // 取消：先「已请求」，确认中止后才 cancelled。
       expect(runner.cancel('task_runjs', SCOPE)).toEqual({ outcome: 'requested', taskId: 'task_runjs' });
       await vi.waitFor(() => {
-        expect(registry.get('task_runjs', SCOPE).termination?.kind).toBe('cancelled');
+        expect(registry.get('task_runjs', SCOPE).endedAt).toBeTruthy();
       }, { timeout: 5000 });
       await runner.whenIdle();
 
       const task = registry.get('task_runjs', SCOPE);
-      expect(task.termination?.kind).toBe('cancelled');
-      expect(task.termination?.kind).toBe('cancelled');
+      expect(task.endedAt).toBeTruthy();
+      expect(task.endedAt).toBeTruthy();
       // 执行真的停了：脚本进程已不存在，进程表里也没有本 run 的任何残留进程。
       expect(processAlive(started.pid)).toBe(false);
       const ps = execFileSync('ps', ['-ax', '-o', 'pid=,args='], { encoding: 'utf8' });
@@ -326,7 +326,7 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       // 在飞：执行层调用已发起、gate 未回。
       await vi.waitFor(() => {
         expect(client.calls).toBe(1);
-        expect(taskLivenessOf(registry.get(receipt.taskId, SCOPE))).toBe('running');
+        expect(taskMayBeRunningOf(registry.get(receipt.taskId, SCOPE))).toBe(true);
       }, { timeout: 5000 });
 
       await session.send('算了别做了，取消掉');
@@ -346,13 +346,13 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       expect((cancelReceipt as unknown as { taskCreatedAt?: string }).taskCreatedAt).toMatch(/T/);
 
       await vi.waitFor(() => {
-        expect(registry.get(receipt.taskId, SCOPE).termination?.kind).toBe('cancelled');
+        expect(registry.get(receipt.taskId, SCOPE).endedAt).toBeTruthy();
       }, { timeout: 5000 });
       await runner.whenIdle();
 
       const task = registry.get(receipt.taskId, SCOPE);
-      expect(task.termination?.kind).toBe('cancelled');
-      expect(task.termination?.kind).toBe('cancelled');
+      expect(task.endedAt).toBeTruthy();
+      expect(task.endedAt).toBeTruthy();
       // 中止信号真的到达执行层调用（不是宿主自己假想取消）。
       expect(client.aborted).toBe(true);
       expect(client.signals[0]?.aborted).toBe(true);
@@ -384,7 +384,7 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
 
       expect(runner.cancel('task_stubborn', SCOPE)).toEqual({ outcome: 'requested', taskId: 'task_stubborn' });
       await vi.waitFor(() => {
-        expect(registry.get('task_stubborn', SCOPE).termination?.kind).toBe('cancelled');
+        expect(registry.get('task_stubborn', SCOPE).endedAt).toBeTruthy();
       }, { timeout: 5000 });
       await runner.whenIdle();
 
@@ -392,8 +392,8 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       for (const release of client.releases) release({ status: 'completed', data: { rows: 2 } });
       await sleep(50);
       const task = registry.get('task_stubborn', SCOPE);
-      expect(task.termination?.kind).toBe('cancelled');
-      expect(task.termination?.kind).toBe('cancelled');
+      expect(task.endedAt).toBeTruthy();
+      expect(task.endedAt).toBeTruthy();
       expect(task.executions.filter((execution) => execution.status === 'completed')).toEqual([]);
       expect(runner.inFlight()).toEqual([]);
     } finally {
@@ -445,11 +445,11 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
 
     // 机械回执：终态任务无操作，原样给出真实终止种类（模型不得据此宣称已取消）。
     // 同上：回执带身份，断言改为子集 + 身份存在。
-    expect(results[0]).toMatchObject({ outcome: 'terminal', taskId: 'task_done', settled: 'completed' });
+    expect(results[0]).toMatchObject({ outcome: 'terminal', taskId: 'task_done', settled: 'reported' });
     expect(results[0]).not.toHaveProperty('taskNo');
     // 终态：用户可见话术必须说"没停成 + 已完成"（真实种类），不能只说"已取消"。
     expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('没停成');
-    expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('已完成');
+    expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('已有汇报');
     expect((results[0] as unknown as { userMessage?: string }).userMessage).not.toContain('已取消');
     const task = registry.get('task_done', SCOPE);
     expect(lastExecutionOf(task)?.status).toBe('completed');
@@ -457,35 +457,37 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
     expect(task.resultText).toBe('查到 2 条。');
   });
 
-  it('④ 已结束任务（各终止种类）再取消：回执按真实种类说，不统一「已经办完了」、不改写终止事件', async () => {
-    // 反向绊线：把回执改回统一 `没停成：… 已经办完了`（或把 settled 固定成 completed）→ 本用例红。
+  it('④ 已结束任务再取消：回执只按事实说（有汇报 / 已停无汇报），不改写结束事实', async () => {
+    // 事实口径（2026-11-23 删状态机轮）：怎么结束不存，回执只能区分「有汇报」与「已停无汇报」。
+    // 反向绊线：把回执改回统一「已经办完了」，或按已删的终止种类说话 → 本用例红。
     const cases: ReadonlyArray<{
-      kind: 'completed' | 'round_failed' | 'died' | 'timed_out' | 'resource_limited' | 'cancelled';
+      kind: 'reported' | 'ended';
       word: RegExp;
       seed: (registry: TaskRegistry, taskId: string) => void;
     }> = [
       {
-        kind: 'completed',
-        word: /已完成/,
+        kind: 'reported',
+        word: /已有汇报/,
         seed: (registry, taskId) => {
           registry.noteExecution(taskId, { requestId: 'req_done', operation: 'dummy.query', status: 'completed' });
           registry.setResultText(taskId, '查到 2 条。');
         },
       },
-      { kind: 'round_failed', word: /已失败/, seed: (registry, taskId) => registry.noteRoundFailed(taskId) },
-      { kind: 'died', word: /结果未知/, seed: (registry, taskId) => registry.markDied(taskId) },
-      { kind: 'timed_out', word: /已超时/, seed: (registry, taskId) => registry.markTimedOut(taskId, 'execution') },
-      { kind: 'resource_limited', word: /资源拒绝/, seed: (registry, taskId) => registry.markResourceLimited(taskId) },
-      { kind: 'cancelled', word: /已取消/, seed: (registry, taskId) => registry.markCancelled(taskId, { scope: SCOPE }) },
+      // 所有「停下但没有汇报」的路径都只剩同一条事实：结束时刻在场。
+      { kind: 'ended', word: /结果未知/, seed: (registry, taskId) => registry.noteRoundEnded(taskId) },
+      { kind: 'ended', word: /结果未知/, seed: (registry, taskId) => registry.markLeaseExpired(taskId) },
+      { kind: 'ended', word: /结果未知/, seed: (registry, taskId) => registry.markTimedOut(taskId, 'execution') },
+      { kind: 'ended', word: /结果未知/, seed: (registry, taskId) => registry.noteResourceRefused(taskId) },
+      { kind: 'ended', word: /结果未知/, seed: (registry, taskId) => registry.markCancelled(taskId, { scope: SCOPE }) },
     ];
-    for (const testCase of cases) {
+    for (const [index, testCase] of cases.entries()) {
       const registry = createTaskRegistry();
-      const taskId = `task_terminal_${testCase.kind}`;
+      const taskId = `task_terminal_${index}`;
       registry.begin({
         taskId,
         principalId: SCOPE.principalId,
         sessionId: SCOPE.sessionId,
-        request: `办 ${testCase.kind} 的事`,
+        request: `办第 ${index} 件已停的事`,
       });
       testCase.seed(registry, taskId);
       const results: unknown[] = [];
@@ -520,13 +522,12 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
 
       const receipt = results[0] as { outcome?: string; settled?: string; userMessage?: string };
       expect(receipt.outcome, testCase.kind).toBe('terminal');
-      // 真实终止种类原样交给模型；用户可见话术按种类说（不再统一「已经办完了」）。
+      // 事实原样交给模型；用户可见话术按事实说（不再按已删的终止种类分类）。
       expect(receipt.settled, testCase.kind).toBe(testCase.kind);
       expect(receipt.userMessage, testCase.kind).toMatch(testCase.word);
       expect(receipt.userMessage, testCase.kind).not.toContain('已经办完了');
-      if (testCase.kind !== 'completed') expect(receipt.userMessage, testCase.kind).not.toMatch(/办完/);
-      // 终止事实不被取消调用改写。
-      expect(registry.get(taskId, SCOPE).termination?.kind, testCase.kind).toBe(testCase.kind);
+      // 结束事实不被取消调用改写（时刻仍在）。
+      expect(registry.get(taskId, SCOPE).endedAt, testCase.kind).toBeTruthy();
     }
   });
 
@@ -571,11 +572,11 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
     const receipt = results[1] as { outcome?: string; settled?: string; userMessage?: string };
     // 回执按真实终止种类说（died = 结果未知），不冒充已停、不统一「已经办完了」。
     expect(receipt.outcome).toBe('terminal');
-    expect(receipt.settled).toBe('died');
+    expect(receipt.settled).toBe('ended');
     expect(receipt.userMessage).toContain('结果未知');
     expect(receipt.userMessage).not.toContain('已经办完了');
     // 反向绊线：把窗口内落定的失败终态记成 completed 观察 → 这里变成 [{kind:'completed'}]，必红。
     expect(turn.terminalObservedInTurn ?? []).toEqual([]);
-    expect(registry.get((results[0] as { taskId: string }).taskId, SCOPE).termination?.kind).toBe('died');
+    expect(registry.get((results[0] as { taskId: string }).taskId, SCOPE).endedAt).toBeTruthy();
   });
 });

@@ -13,7 +13,7 @@ import {
 } from './oracle';
 
 const FACTS: Omit<TaskView, 'taskId' | 'request' | 'requestIds'> = {
-  liveness: null, ended: false, cancelled: false, died: false, timedOut: false, resourceLimited: false, reported: false,
+  started: false, ended: false, reported: false, waiting: false, mayBeRunning: false,
 };
 
 function task(partial: Partial<TaskView> & { taskId: string }): TaskView {
@@ -112,8 +112,8 @@ describe('任务 Oracle · 硬零 H3/H4/H5 与 E-G', () => {
 
   it('H3：同 requestId 归属两个不同 taskId（重复派发）→ 硬零', () => {
     const turns: TaskTurnFact[] = [
-      { turn: 1, tasks: [task({ taskId: 't1', liveness: 'running', requestIds: ['req-A'] })] },
-      { turn: 2, tasks: [task({ taskId: 't2', liveness: 'running', requestIds: ['req-A'] })] },
+      { turn: 1, tasks: [task({ taskId: 't1', started: true, mayBeRunning: true, requestIds: ['req-A'] })] },
+      { turn: 2, tasks: [task({ taskId: 't2', started: true, mayBeRunning: true, requestIds: ['req-A'] })] },
     ];
     const v = judgeTaskContinuity(turns);
     expect(v.hardZeroHits).toContain('H3');
@@ -121,7 +121,7 @@ describe('任务 Oracle · 硬零 H3/H4/H5 与 E-G', () => {
 
   it('H3 不误伤：同一任务在多轮快照里重复出现不算重复执行', () => {
     const turns: TaskTurnFact[] = [
-      { turn: 1, tasks: [task({ taskId: 't1', liveness: 'running', requestIds: ['req-A'] })] },
+      { turn: 1, tasks: [task({ taskId: 't1', started: true, mayBeRunning: true, requestIds: ['req-A'] })] },
       { turn: 2, tasks: [task({ taskId: 't1', reported: true, lastExecutionStatus: 'completed', requestIds: ['req-A'] })] },
     ];
     expect(judgeTaskContinuity(turns).hardZeroHits).toEqual([]);
@@ -138,7 +138,7 @@ describe('任务 Oracle · 硬零 H3/H4/H5 与 E-G', () => {
   });
 
   it('H5 不误伤：确实调了取消 → 不判', () => {
-    const turns: TaskTurnFact[] = [{ turn: 1, tasks: [task({ taskId: 't1', cancelled: true })], reply: '已取消。', cancelCalled: true }];
+    const turns: TaskTurnFact[] = [{ turn: 1, tasks: [task({ taskId: 't1', ended: true, reported: false })], reply: '已取消。', cancelCalled: true }];
     expect(judgeTaskContinuity(turns).hardZeroHits).toEqual([]);
   });
 
@@ -150,11 +150,11 @@ describe('任务 Oracle · 硬零 H3/H4/H5 与 E-G', () => {
     expect(judgeTaskContinuity(turns).codes).toContain('E-G');
   });
 
-  it('任务事实覆盖可断言（liveness 三值 + 收尾/汇报/执行事实）', () => {
+  it('任务事实覆盖可断言（运行/等待/已停无汇报/已汇报/执行事实）', () => {
     const covered = coveredTaskFacts([
-      { turn: 1, tasks: [task({ taskId: 'a', reported: true, lastExecutionStatus: 'completed' }), task({ taskId: 'b', liveness: 'running' })] },
-      { turn: 2, tasks: [task({ taskId: 'c', cancelled: true }), task({ taskId: 'd', died: true }), task({ taskId: 'e', liveness: 'waiting_user' })] },
+      { turn: 1, tasks: [task({ taskId: 'a', reported: true, lastExecutionStatus: 'completed' }), task({ taskId: 'b', started: true, mayBeRunning: true })] },
+      { turn: 2, tasks: [task({ taskId: 'c', ended: true, reported: false }), task({ taskId: 'd', ended: true, reported: false, mayBeRunning: false }), task({ taskId: 'e', waiting: true })] },
     ]);
-    expect([...covered].sort()).toEqual(['cancelled', 'died', 'exec:completed', 'reported', 'running', 'waiting_user']);
+    expect([...covered].sort()).toEqual(['exec:completed', 'progressing', 'reported', 'stopped', 'waiting']);
   });
 });

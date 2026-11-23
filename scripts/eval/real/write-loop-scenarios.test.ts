@@ -74,11 +74,10 @@ function greenStop(): StopEvidence {
     ],
     jobs: [{ operationId: 'op_1', status: 'cancelled', seconds: 600 }],
     tasks: [{
-      taskId: 't-1', taskNo: 1, name: '慢活', liveness: null, cancelled: true, reported: false,
-      termination: { kind: 'cancelled', at: AT },
+      taskId: 't-1', taskNo: 1, name: '慢活', started: true, endedAt: AT, waiting: false, mayBeRunning: false, reported: false,
       executions: [{ operation: 'dummy.longtask', status: 'accepted' }],
     }],
-    factSequence: ['liveness=running cancelled=false reported=false exec=accepted', 'liveness=null cancelled=true reported=false exec=accepted'],
+    factSequence: ['progressing', 'ended'],
     visible: [
       { at: AT, source: 'turn', text: '受理了，在跑了。', turnIndex: 1 },
       { at: AT, source: 'turn', text: '已经按你说的停了。', turnIndex: 2 },
@@ -109,11 +108,11 @@ function greenFailure(): FailureEvidence {
     audit: [prepareRow],
     jobs: [],
     tasks: [{
-      taskId: 't-1', taskNo: 1, name: '写 locked-one', liveness: null, cancelled: false, reported: false, reason: 'failed_confirmed',
+      taskId: 't-1', taskNo: 1, name: '写 locked-one', started: true, endedAt: AT, waiting: false, mayBeRunning: false, reported: false, reason: 'failed_confirmed',
       failureReason: '执行层未成功：dummy.prepare 返回 failed：Collection locked-one is locked',
       executions: [{ operation: 'dummy.prepare', status: 'failed', code: 'COLLECTION_LOCKED' }],
     }],
-    factSequence: ['liveness=running cancelled=false reported=false exec=pending', 'liveness=null cancelled=false reported=false exec=failed'],
+    factSequence: ['progressing', 'ended'],
     visible: [
       { at: AT, source: 'turn', text: '这件事没办成。', turnIndex: 1 },
       { at: AT, source: 'push', text: template },
@@ -148,10 +147,10 @@ function greenIdempotency(): IdempotencyEvidence {
     ],
     jobs: [],
     tasks: [{
-      taskId: 't-1', taskNo: 1, liveness: null, cancelled: false, reported: true,
+      taskId: 't-1', taskNo: 1, started: true, endedAt: AT, waiting: false, mayBeRunning: false, reported: true,
       executions: [{ operation: 'dummy.prepare', status: 'needs_confirmation' }, { operation: 'dummy.commit', status: 'completed' }],
     }],
-    factSequence: ['liveness=running cancelled=false reported=false exec=needs_confirmation', 'liveness=null cancelled=false reported=true exec=completed'],
+    factSequence: ['progressing', 'reported'],
     visible: [
       { at: AT, source: 'turn', text: reply, turnIndex: 1 },
       { at: AT, source: 'push', text: '要写入：…回「确认」我就提交。' },
@@ -192,10 +191,10 @@ function greenReconfirm(): ReconfirmEvidence {
     ],
     jobs: [],
     tasks: [{
-      taskId: 't-1', taskNo: 1, liveness: null, cancelled: false, reported: true, resultText: '4 条已新增（读回 4 条）',
+      taskId: 't-1', taskNo: 1, started: true, endedAt: AT, waiting: false, mayBeRunning: false, reported: true, resultText: '4 条已新增（读回 4 条）',
       executions: [{ operation: 'dummy.prepare', status: 'needs_confirmation' }, { operation: 'dummy.commit', status: 'completed' }],
     }],
-    factSequence: ['liveness=running cancelled=false reported=false exec=needs_confirmation', 'liveness=null cancelled=false reported=true exec=completed'],
+    factSequence: ['progressing', 'reported'],
     visible: [
       { at: '2026-11-19T09:00:00.000Z', source: 'push', text: '你交代的那件事办好了：4 条已新增。' },
       { at: '2026-11-19T10:00:01.000Z', source: 'turn', text: '这件事已经办完了，不用再确认。', turnIndex: 3 },
@@ -240,13 +239,13 @@ function greenTwoObjects(): TwoObjectsEvidence {
     ],
     jobs: [],
     tasks: [{
-      taskId: 't-1', taskNo: 1, liveness: null, cancelled: false, reported: true,
+      taskId: 't-1', taskNo: 1, started: true, endedAt: AT, waiting: false, mayBeRunning: false, reported: true,
       executions: [{ operation: 'dummy.prepare', status: 'completed' }, { operation: 'dummy.commit', status: 'completed' }],
     }, {
-      taskId: 't-2', taskNo: 2, liveness: null, cancelled: false, reported: true,
+      taskId: 't-2', taskNo: 2, started: true, endedAt: AT, waiting: false, mayBeRunning: false, reported: true,
       executions: [{ operation: 'dummy.prepare', status: 'completed' }, { operation: 'dummy.commit', status: 'completed' }],
     }],
-    factSequence: ['liveness=running cancelled=false reported=false exec=needs_confirmation', 'liveness=null cancelled=false reported=true exec=completed'],
+    factSequence: ['progressing', 'reported'],
     visible: [{ at: AT, source: 'turn', text: '两件都提交完了。', turnIndex: 3 }],
     deliveryEvents: [{ event: 'task_result_delivery_sent', taskId: 't-1' }],
     perCollection: [
@@ -407,21 +406,21 @@ describe('stop：正例全绿 + 逐条反向破坏必红', () => {
     delete noCall.cancelToolCall;
     expect(statusOf(evaluateStopCriteria(noCall), 'S1-C2')).toBe('fail');
     const notStopped = greenStop();
-    notStopped.tasks = [{ taskId: 't-1', taskNo: 1, liveness: 'running', cancelled: false, reported: false, executions: [] }];
+    notStopped.tasks = [{ taskId: 't-1', taskNo: 1, started: true, endedAt: null, waiting: false, mayBeRunning: true, reported: false, executions: [] }];
     expect(statusOf(evaluateStopCriteria(notStopped), 'S1-C2')).toBe('fail');
     const leftover = greenStop();
-    leftover.tasks = [...leftover.tasks, { taskId: 't-2', taskNo: 2, liveness: 'running', cancelled: false, reported: false, executions: [] }];
+    leftover.tasks = [...leftover.tasks, { taskId: 't-2', taskNo: 2, started: true, endedAt: null, waiting: false, mayBeRunning: true, reported: false, executions: [] }];
     expect(statusOf(evaluateStopCriteria(leftover), 'S1-C2')).toBe('fail');
   });
 
   it('S1-C2：died 终止事件的任务（liveness=null）不算非终局残留 —— 零状态终局读 termination', () => {
-    // 判负回归（2026-11-23）：零状态后 taskLivenessOf 对任何终止事件返回 undefined，
+    // 判负回归（2026-11-23）：删除 liveness 投影后，「已停」只能读结束事实，
     // died 任务的 liveness 恒为 null；旧判据只认 liveness==='died' 会把已结束任务算残留。
     const evidence = greenStop();
     evidence.tasks = [
       evidence.tasks[0]!,
-      { taskId: 't-2', taskNo: 2, liveness: null, cancelled: false, reported: false, termination: { kind: 'died', at: AT }, executions: [] },
-      { taskId: 't-3', taskNo: 3, liveness: null, cancelled: false, reported: false, termination: { kind: 'round_failed', at: AT }, executions: [] },
+      { taskId: 't-2', taskNo: 2, started: true, waiting: false, mayBeRunning: false, reported: false, endedAt: AT, executions: [] },
+      { taskId: 't-3', taskNo: 3, started: true, waiting: false, mayBeRunning: false, reported: false, endedAt: AT, executions: [] },
     ];
     expect(statusOf(evaluateStopCriteria(evidence), 'S1-C2')).toBe('pass');
   });
@@ -469,7 +468,7 @@ describe('stop：正例全绿 + 逐条反向破坏必红', () => {
     silent.pushes = [];
     expect(statusOf(evaluateStopCriteria(silent), 'S1-C6')).toBe('fail');
     const notCancelled = greenStop();
-    notCancelled.tasks = [{ taskId: 't-1', taskNo: 1, liveness: 'running', cancelled: false, reported: false, executions: [] }];
+    notCancelled.tasks = [{ taskId: 't-1', taskNo: 1, started: true, endedAt: null, waiting: false, mayBeRunning: true, reported: false, executions: [] }];
     expect(statusOf(evaluateStopCriteria(notCancelled), 'S1-C6')).toBe('fail');
     const notFrozen = greenStop();
     notFrozen.auditAfterFreeze = notFrozen.auditAtCancel + 1;
@@ -489,7 +488,7 @@ describe('failure：正例全绿 + 逐条反向破坏必红', () => {
     noFailedCall.writeCallsOnTarget = [{ mode: 'prepare', script: 'dummy.prepare', via: 'structured', exitCode: 0 }];
     expect(statusOf(evaluateFailureCriteria(noFailedCall), 'S2-C1')).toBe('fail');
     const noFacts = greenFailure();
-    noFacts.tasks = [{ taskId: 't-1', taskNo: 1, liveness: null, cancelled: false, reported: true, executions: [{ operation: 'dummy.prepare', status: 'completed' }] }];
+    noFacts.tasks = [{ taskId: 't-1', taskNo: 1, started: true, endedAt: AT, waiting: false, mayBeRunning: false, reported: true, executions: [{ operation: 'dummy.prepare', status: 'completed' }] }];
     expect(statusOf(evaluateFailureCriteria(noFacts), 'S2-C1')).toBe('fail');
   });
 
@@ -592,7 +591,7 @@ describe('idempotency：正例全绿 + 逐条反向破坏必红', () => {
 
   it('S3-C1：新起了第二份工作 / 第二次委派 → 红', () => {
     const doubled = greenIdempotency();
-    doubled.tasks = [...doubled.tasks, { taskId: 't-2', taskNo: 2, liveness: 'running', cancelled: false, reported: false, executions: [] }];
+    doubled.tasks = [...doubled.tasks, { taskId: 't-2', taskNo: 2, started: true, endedAt: null, waiting: false, mayBeRunning: true, reported: false, executions: [] }];
     expect(statusOf(evaluateIdempotencyCriteria(doubled), 'S3-C1')).toBe('fail');
     const twoRuns = greenIdempotency();
     twoRuns.taskRunCalls = 2;
@@ -704,10 +703,10 @@ describe('reconfirm：正例全绿 + 逐条反向破坏必红', () => {
   it('S4-C2：新任务 / 未终局 / 接续 started → 红', () => {
     const newTask = greenReconfirm();
     newTask.taskCountAfterReconfirm = 2;
-    newTask.tasks = [...newTask.tasks, { taskId: 't-2', taskNo: 2, liveness: null, cancelled: false, reported: true, executions: [] }];
+    newTask.tasks = [...newTask.tasks, { taskId: 't-2', taskNo: 2, started: true, endedAt: AT, waiting: false, mayBeRunning: false, reported: true, executions: [] }];
     expect(statusOf(evaluateReconfirmCriteria(newTask), 'S4-C2')).toBe('fail');
     const leftover = greenReconfirm();
-    leftover.tasks = [...leftover.tasks, { taskId: 't-2', taskNo: 2, liveness: 'running', cancelled: false, reported: false, executions: [] }];
+    leftover.tasks = [...leftover.tasks, { taskId: 't-2', taskNo: 2, started: true, endedAt: null, waiting: false, mayBeRunning: true, reported: false, executions: [] }];
     expect(statusOf(evaluateReconfirmCriteria(leftover), 'S4-C2')).toBe('fail');
     const resumed = greenReconfirm();
     resumed.taskConfirmStartedCalls = [{
@@ -720,7 +719,7 @@ describe('reconfirm：正例全绿 + 逐条反向破坏必红', () => {
     const evidence = greenReconfirm();
     evidence.tasks = [
       ...evidence.tasks,
-      { taskId: 't-2', taskNo: 2, liveness: null, cancelled: false, reported: false, termination: { kind: 'died', at: AT }, executions: [] },
+      { taskId: 't-2', taskNo: 2, started: true, waiting: false, mayBeRunning: false, reported: false, endedAt: AT, executions: [] },
     ];
     expect(statusOf(evaluateReconfirmCriteria(evidence), 'S4-C2')).toBe('pass');
   });
@@ -823,7 +822,7 @@ describe('two-objects：正例全绿 + 逐条反向破坏必红', () => {
 
   it('S5-C3：有一件事失败了 → 红', () => {
     const failed = greenTwoObjects();
-    failed.tasks = [failed.tasks[0]!, { taskId: 't-2', taskNo: 2, liveness: null, cancelled: false, reported: false, executions: [{ operation: 'dummy.commit', status: 'failed', code: 'X' }] }];
+    failed.tasks = [failed.tasks[0]!, { taskId: 't-2', taskNo: 2, started: true, endedAt: AT, waiting: false, mayBeRunning: false, reported: false, executions: [{ operation: 'dummy.commit', status: 'failed', code: 'X' }] }];
     expect(statusOf(evaluateTwoObjectsCriteria(failed), 'S5-C3')).toBe('fail');
   });
 
@@ -835,25 +834,23 @@ describe('two-objects：正例全绿 + 逐条反向破坏必红', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 终局事实（零状态：读追加事件账，不靠 liveness）
+// 终局事实（事实口径：结束时刻 / 汇报 / 不再可能还活着）
 // ---------------------------------------------------------------------------
 
-describe('taskEndedInFacts：终局读终止事件/汇报事实', () => {
-  const base: TaskFact = { taskId: 't-1', liveness: null, cancelled: false, reported: false, executions: [] };
+describe('taskEndedInFacts：终局读结束事实/汇报/活 worker 事实', () => {
+  const base: TaskFact = { taskId: 't-1', started: true, endedAt: null, waiting: false, mayBeRunning: true, reported: false, executions: [] };
 
-  it('任何终止事件（含 died/round_failed）= 已收尾；liveness=null 不改变结论', () => {
-    for (const kind of ['died', 'round_failed', 'cancelled', 'timed_out', 'resource_limited', 'completed'] as const) {
-      expect(taskEndedInFacts({ ...base, termination: { kind, at: AT } }), kind).toBe(true);
-    }
+  it('结束事实（没有种类）/ 汇报 / 不再可能还活着 = 已收尾', () => {
+    expect(taskEndedInFacts({ ...base, endedAt: AT })).toBe(true);
     expect(taskEndedInFacts({ ...base, reported: true })).toBe(true);
-    // 跨进程读者：已启动、无汇报、租约失效 → liveness=died（结果未知）仍是终局事实。
-    expect(taskEndedInFacts({ ...base, liveness: 'died' })).toBe(true);
+    // 跨进程读者：已启动、无汇报、不再可能还活着（无租约/无在途）→ 已收尾。
+    expect(taskEndedInFacts({ ...base, mayBeRunning: false })).toBe(true);
   });
 
-  it('反向绊线：仍在跑 / 排队 / 只等待的任务不算收尾（不放松判据）', () => {
-    expect(taskEndedInFacts({ ...base, liveness: 'running' })).toBe(false);
-    expect(taskEndedInFacts({ ...base, liveness: null })).toBe(false);
-    expect(taskEndedInFacts({ ...base, liveness: 'waiting_user' })).toBe(false);
+  it('反向绊线：仍可能还活着 / 排队 / 只等待的任务不算收尾（不放松判据）', () => {
+    expect(taskEndedInFacts({ ...base })).toBe(false);
+    expect(taskEndedInFacts({ ...base, started: false, mayBeRunning: false })).toBe(false);
+    expect(taskEndedInFacts({ ...base, waiting: true, mayBeRunning: false })).toBe(false);
   });
 });
 

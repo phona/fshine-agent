@@ -17,7 +17,7 @@
 import { describe, expect, it } from 'vitest';
 import { deriveTaskName } from '../../../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import { LONG_RUNNING_NOTICE_FALLBACK_TEXT } from '../../../packages/agent/src/task-runner';
 import {
   internalOperationCall,
@@ -105,7 +105,7 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
       // 受理后：任务 running 但租约已释放（长任务让出槽位/租约，不该被当过期的执行中回合）。
       await sim.waitFor('长任务 accepted（租约释放）', () => {
         const task = registry.get(taskId, TASK_SCOPE);
-        return taskLivenessOf(task) === 'running' && task.leaseUntil === undefined;
+        return taskMayBeRunningOf(task) && task.leaseUntil === undefined;
       }, 10_000);
 
       // 期间用户还能聊别的：同一会话第二回合照常拿到回复（不被长任务占住）。
@@ -180,7 +180,7 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
       const taskId = group.doneOf(messageId)!.taskIds[0]!;
       await group.waitFor('群里长任务 accepted', () => {
         const task = groupRegistry.get(taskId, GROUP_SCOPE);
-        return taskLivenessOf(task) === 'running';
+        return taskMayBeRunningOf(task);
       }, 10_000);
       // 群里也发（owner 2026-11-19 #9 迁移；旧口径「群聊零主动提醒」已作废）：
       // 群 = 独立主体，群里的任务就是这个群的事；话术走隐私口径 = **不带业务名**。
@@ -246,7 +246,7 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
       const tasks = registry.list(TASK_SCOPE);
       // 零执行事实 + 没有幽灵 running 行；worker 的「没办成…」不作为结果存档（有机械失败
       // 事实的回合），成功宣假由下面的用户可见话术断言钉住。
-      expect(tasks.some((task) => taskLivenessOf(task) === 'running' || (archivedReportOf(task) !== undefined || lastExecutionOf(task)?.status === 'completed'))).toBe(false);
+      expect(tasks.some((task) => taskMayBeRunningOf(task) || (archivedReportOf(task) !== undefined || lastExecutionOf(task)?.status === 'completed'))).toBe(false);
       // 用户可见话术：说明没有权限，且不暴露内部 operation 名。
       const visible = sim.finalBubbles().map((bubble) => bubble.content).join('\n');
       expect(visible).toContain('当前权限不支持这个操作');

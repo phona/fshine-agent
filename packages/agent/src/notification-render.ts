@@ -2,9 +2,9 @@
  * R5 通知文案渲染（纯函数；零数据库/渠道依赖）。
  *
  * 规则（owner 授权文案层）：
- *   · 9 类 kind 折叠成 4 类用户语言：开始办了 / 需要你一句话 / 办完了·没办成 / 已按你说的停了；
- *     2026-11-19 唤醒切片起：**失败与「用户说停」由唤醒出口让模型说**，这里的对应文案只作
- *     「模型回合挂掉」的降级兜底（见 server 的 wakeStateChangeText 与 chat sink 的 wakeCancelled）；
+ *   · 7 类事件 kind 折叠成用户语言（开始办了 / 需要你一句话 / 已按你说的停了 / 超时 / 资源拒绝）；
+ *     **没有 completed/failed**（2026-11-23 删状态机轮）：完成由完成投递/唤醒面读汇报原文说，
+ *     失败由失败唤醒面读执行事实说——渲染器不再把事件说成「办完了/没办成」的任务级结论；
  *   · reason 人话映射且失败分级：result_unknown 必须说「不确定做没做完，需要再确认」（严禁读作成功）；
  *   · 内部术语黑名单机械断言：渲染器拼装的文本不得含 task_status/resource_limited/requestId/
  *     uuid/request_N/绝对路径/W 窗口码（name 与写确认 summary 都是执行层/用户原话，按规则原样
@@ -53,7 +53,6 @@ const REASON_TEXT: Record<NotificationReason, string> = {
   resource_limited: '系统太忙，这个没接',
   timeout: '跑太久先停了',
   cancelled_by_user: '已按你说的停了',
-  failed_confirmed: '没办成',
 };
 
 /** name 用户原话占位替换后的模板先行黑名单断言，再回填 name。 */
@@ -62,7 +61,7 @@ function assemble(template: string, name: string): string {
   return template.split(NAME_PLACEHOLDER).join(name);
 }
 
-/** 一条通知 → 用户语言字符串（kind 9→4 折叠；输入仅 payload 白名单字段）。 */
+/** 一条通知 → 用户语言字符串（输入仅 payload 白名单字段；不产出「完成/失败」结论）。 */
 export function renderNotification(input: { kind: NotificationKind; payload: NotificationPayload }): string {
   const name = input.payload.name !== undefined && input.payload.name.trim() !== ''
     ? input.payload.name
@@ -86,10 +85,6 @@ export function renderNotification(input: { kind: NotificationKind; payload: Not
         name,
       );
     }
-    case 'completed':
-      return assemble(`办完了：${NAME_PLACEHOLDER}。`, name);
-    case 'failed':
-      return assemble(`${REASON_TEXT[reason ?? 'failed_confirmed']}：${NAME_PLACEHOLDER}。`, name);
     case 'timed_out':
       return assemble(`${REASON_TEXT.timeout}：${NAME_PLACEHOLDER}。`, name);
     case 'resource_limited':

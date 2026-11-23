@@ -72,7 +72,7 @@ function record(overrides: Partial<TaskRecord> & { taskId: string; createdAt: st
 function reported(overrides: Partial<TaskRecord> & { taskId: string; createdAt: string }): TaskRecord {
   return record({
     resultText: '已查询。',
-    termination: { kind: 'completed', at: overrides.createdAt },
+    endedAt: overrides.createdAt,
     ...overrides,
   });
 }
@@ -81,7 +81,7 @@ function reported(overrides: Partial<TaskRecord> & { taskId: string; createdAt: 
 function noReport(overrides: Partial<TaskRecord> & { taskId: string; createdAt: string }): TaskRecord {
   return record({
     runningSince: overrides.createdAt,
-    termination: { kind: 'round_failed', at: overrides.createdAt },
+    endedAt: overrides.createdAt,
     ...overrides,
   });
 }
@@ -174,22 +174,20 @@ describe('ops：快照事实（统计 / 排序 / 上限）', () => {
     const records = [
       reported({ taskId: 'task_a', createdAt: '2026-11-13T10:00:00.000Z' }),
       noReport({ taskId: 'task_b', createdAt: '2026-11-13T10:01:00.000Z' }),
-      record({ taskId: 'task_c', createdAt: '2026-11-13T10:02:00.000Z', termination: { kind: 'cancelled', at: '2026-11-13T10:02:30.000Z' } }),
+      record({ taskId: 'task_c', createdAt: '2026-11-13T10:02:00.000Z', endedAt: '2026-11-13T10:02:30.000Z' }),
       running({ taskId: 'task_d', createdAt: '2026-11-13T10:03:00.000Z' }),
     ];
     const page = renderOpsPage({ records, generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
     expect(page).toContain('<tr><th>任务总数</th><td class="num">4</td></tr>');
     expect(page).toContain('<tr><th>已汇报（结果存档）</th><td class="num">1</td></tr>');
-    expect(page).toContain('<tr><th>无汇报收尾</th><td class="num">1</td></tr>');
+    expect(page).toContain('<tr><th>无汇报收尾</th><td class="num">2</td></tr>');
     expect(page).toContain('<tr><th>进行中</th><td class="num">1</td></tr>');
-    expect(page).toContain('<tr><th>已取消</th><td class="num">1</td></tr>');
     expect(page).not.toContain('未知状态');
 
     const counts = countOpsStatuses(records);
     expect(counts.total).toBe(records.length);
     expect(
-      counts.reported + counts.noReport + counts.running + counts.queued
-      + counts.waitingUser + counts.cancelled + counts.timedOut + counts.died + counts.resourceLimited,
+      counts.reported + counts.noReport + counts.running + counts.queued + counts.waitingUser,
     ).toBe(counts.total);
   });
 
@@ -236,14 +234,14 @@ describe('ops：快照事实（统计 / 排序 / 上限）', () => {
   });
 });
 
-describe('ops：未成功收尾清单', () => {
+describe('ops：无汇报收尾清单', () => {
   it('收录 无汇报/取消/超时/结果未知/资源受限；汇报已存档不在清单；最新在前', () => {
     const nr = noReport({ taskId: 'task_no_report', createdAt: '2026-11-13T09:00:00.000Z' });
-    const cancelled = record({ taskId: 'task_cancelled', createdAt: '2026-11-13T09:05:00.000Z', termination: { kind: 'cancelled', at: '2026-11-13T09:06:00.000Z' } });
+    const cancelled = record({ taskId: 'task_cancelled', createdAt: '2026-11-13T09:05:00.000Z', endedAt: '2026-11-13T09:06:00.000Z' });
     const done = reported({ taskId: 'task_done', createdAt: '2026-11-13T09:10:00.000Z' });
     const page = renderOpsPage({ records: [nr, cancelled, done], generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
 
-    expect(page).toContain('<h2>未成功收尾清单（共 2 条）</h2>');
+    expect(page).toContain('<h2>无汇报收尾清单（共 2 条）</h2>');
     expect(rowIds(page, 'failures')).toEqual([taskLabel(cancelled), taskLabel(nr)]);
     expect(page).toContain(`<td>${escapeHtml(taskMechanicalFactLine(cancelled)!)}</td>`);
     expect(page).toContain(`<td>${escapeHtml(taskMechanicalFactLine(nr)!)}</td>`);
@@ -259,7 +257,7 @@ describe('ops：未成功收尾清单', () => {
     expect(page).toContain('<p class="empty">（无）</p>');
   });
 
-  it(`未成功收尾清单上限 ${FAILURE_LIMIT} 条：超出时截断并标注`, () => {
+  it(`无汇报收尾清单上限 ${FAILURE_LIMIT} 条：超出时截断并标注`, () => {
     const records: TaskRecord[] = [];
     for (let i = 1; i <= 55; i += 1) {
       records.push(noReport({
@@ -268,7 +266,7 @@ describe('ops：未成功收尾清单', () => {
       }));
     }
     const page = renderOpsPage({ records, generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
-    expect(page).toContain(`<h2>未成功收尾清单（共 55 条，仅显示最近 ${FAILURE_LIMIT} 条）</h2>`);
+    expect(page).toContain(`<h2>无汇报收尾清单（共 55 条，仅显示最近 ${FAILURE_LIMIT} 条）</h2>`);
     expect(rowCount(page, 'failures')).toBe(FAILURE_LIMIT);
     expect(RECENT_LIMIT).toBe(20);
     expect(FAILURE_LIMIT).toBe(50);
@@ -280,13 +278,13 @@ describe('ops：机械事实词与计数行（S1）', () => {
     const records = [
       reported({ taskId: 'task_word_reported', createdAt: '2026-11-13T11:00:00.000Z' }),
       noReport({ taskId: 'task_word_no_report', createdAt: '2026-11-13T11:01:00.000Z' }),
-      record({ taskId: 'task_word_cancelled', createdAt: '2026-11-13T11:02:00.000Z', termination: { kind: 'cancelled', at: '2026-11-13T11:02:30.000Z' } }),
+      record({ taskId: 'task_word_cancelled', createdAt: '2026-11-13T11:02:00.000Z', endedAt: '2026-11-13T11:02:30.000Z' }),
       running({ taskId: 'task_word_running', createdAt: '2026-11-13T11:03:00.000Z' }),
       record({ taskId: 'task_word_waiting', createdAt: '2026-11-13T11:04:00.000Z', pendingQuestion: { missing: ['时间范围'] } }),
     ];
     const page = renderOpsPage({ records, generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
     const listText = renderTaskList(records);
-    for (const word of ['已汇报', '无汇报收尾', '已取消', '进行中', '等待用户']) {
+    for (const word of ['已汇报', '无汇报收尾', '未启动即已停', '进行中', '等待用户']) {
       expect(page, word).toContain(`<td>${escapeHtml(word)}</td>`);
       expect(listText, word).toContain(`  ${word}  `);
     }
@@ -296,13 +294,12 @@ describe('ops：机械事实词与计数行（S1）', () => {
     const records = [
       noReport({ taskId: 'task_nr', createdAt: '2026-11-13T10:00:00.000Z' }),
       record({ taskId: 'task_w', createdAt: '2026-11-13T10:01:00.000Z', pendingQuestion: { missing: ['x'] } }),
-      record({ taskId: 'task_cd', createdAt: '2026-11-13T10:03:00.000Z', termination: { kind: 'cancelled', at: '2026-11-13T10:03:30.000Z' } }),
-      record({ taskId: 'task_to', createdAt: '2026-11-13T10:04:00.000Z', termination: { kind: 'timed_out', at: '2026-11-13T10:04:30.000Z' } }),
+      record({ taskId: 'task_cd', createdAt: '2026-11-13T10:03:00.000Z', endedAt: '2026-11-13T10:03:30.000Z' }),
+      record({ taskId: 'task_to', createdAt: '2026-11-13T10:04:00.000Z', endedAt: '2026-11-13T10:04:30.000Z' }),
     ];
     const page = renderOpsPage({ records, generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
-    for (const label of ['无汇报收尾', '等待用户', '已取消', '已超时']) {
-      expect(page, label).toContain(`<tr><th>${label}</th><td class="num">1</td></tr>`);
-    }
+    expect(page).toContain('<tr><th>无汇报收尾</th><td class="num">3</td></tr>');
+    expect(page).toContain('<tr><th>等待用户</th><td class="num">1</td></tr>');
     expect(page).not.toContain('未知状态');
 
     const zeroPage = renderOpsPage({
@@ -316,34 +313,30 @@ describe('ops：机械事实词与计数行（S1）', () => {
 
   it('计数行金样：非零事实桶依次追加；零计数不追加', () => {
     expect(renderOpsCountsLine({
-      total: 12, reported: 3, noReport: 2, running: 1,
-      queued: 1, waitingUser: 1, cancelled: 1, timedOut: 1, died: 1, resourceLimited: 1,
-    })).toBe('任务：共 12 条：已汇报 3 / 无汇报 2 / 进行中 1 / 排队中 1 / 等待用户 1 / 已取消 1 / 已超时 1 / 结果未知 1 / 资源受限 1');
+      total: 7, reported: 3, noReport: 2, running: 1,
+      queued: 1, waitingUser: 1,
+    })).toBe('任务：共 7 条：已汇报 3 / 无汇报 2 / 进行中 1 / 排队中 1 / 等待用户 1');
     expect(renderOpsCountsLine({
-      total: 9, reported: 3, noReport: 2, running: 1,
-      queued: 0, waitingUser: 0, cancelled: 0, timedOut: 0, died: 0, resourceLimited: 0,
-    })).toBe('任务：共 9 条：已汇报 3 / 无汇报 2 / 进行中 1');
+      total: 6, reported: 3, noReport: 2, running: 1,
+      queued: 0, waitingUser: 0,
+    })).toBe('任务：共 6 条：已汇报 3 / 无汇报 2 / 进行中 1');
   });
 
-  it('未成功收尾清单：单元格取一次性机械时刻事实；无事实给机械兜底文案', () => {
-    const cancelled = record({ taskId: 'task_x_cancelled', createdAt: '2026-11-13T09:00:00.000Z', termination: { kind: 'cancelled', at: '2026-11-13T09:00:30.000Z' } });
-    const timedOut = record({ taskId: 'task_x_timeout', createdAt: '2026-11-13T09:01:00.000Z', termination: { kind: 'timed_out', at: '2026-11-13T09:01:30.000Z' } });
-    const died = record({ taskId: 'task_x_died', createdAt: '2026-11-13T09:02:00.000Z', termination: { kind: 'died', at: '2026-11-13T09:02:30.000Z' } });
-    const limited = record({ taskId: 'task_x_limited', createdAt: '2026-11-13T09:03:00.000Z', termination: { kind: 'resource_limited', at: '2026-11-13T09:03:30.000Z' } });
+  it('无汇报收尾清单：单元格给「这一轮停止于 T」的机械时刻', () => {
+    const cancelled = record({ taskId: 'task_x_cancelled', createdAt: '2026-11-13T09:00:00.000Z', endedAt: '2026-11-13T09:00:30.000Z' });
+    const timedOut = record({ taskId: 'task_x_timeout', createdAt: '2026-11-13T09:01:00.000Z', endedAt: '2026-11-13T09:01:30.000Z' });
+    const died = record({ taskId: 'task_x_died', createdAt: '2026-11-13T09:02:00.000Z', endedAt: '2026-11-13T09:02:30.000Z' });
+    const limited = record({ taskId: 'task_x_limited', createdAt: '2026-11-13T09:03:00.000Z', endedAt: '2026-11-13T09:03:30.000Z' });
     const nr = noReport({ taskId: 'task_x_nr', createdAt: '2026-11-13T09:04:00.000Z' });
     const page = renderOpsPage({
       records: [cancelled, timedOut, died, limited, nr],
       generatedAt: FIXED_TIME,
       dbPath: '/outside/state.db',
     });
-    expect(page).toContain('<h2>未成功收尾清单（共 5 条）</h2>');
-    for (const text of [
-      '机械事实：用户已取消（2026-11-13T09:00:30.000Z）',
-      '机械事实：机械超时（2026-11-13T09:01:30.000Z）',
-      '机械事实：租约过期/进程中断，结果未知（2026-11-13T09:02:30.000Z）',
-      '机械事实：资源拒绝（2026-11-13T09:03:30.000Z）',
-      '机械事实：本轮无汇报收尾（2026-11-13T09:04:00.000Z）',
-    ]) {
+    expect(page).toContain('<h2>无汇报收尾清单（共 5 条）</h2>');
+    for (const task of [cancelled, timedOut, died, limited, nr]) {
+      const text = taskMechanicalFactLine(task)!;
+      expect(text).toContain('这一轮停止于');
       expect(page, text).toContain(`<td>${escapeHtml(text)}</td>`);
     }
   });
@@ -537,7 +530,7 @@ function seedDb(dir: string): string {
   registry.setResultText('task_unexecuted', '本轮没有可执行的查询。');
 
   registry.begin({ taskId: 'task_worker_failed', ...scope, request: '帮我查一下 documents' });
-  registry.noteRoundFailed('task_worker_failed');
+  registry.noteRoundEnded('task_worker_failed');
   registry.close();
   return dbPath;
 }

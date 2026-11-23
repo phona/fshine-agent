@@ -35,7 +35,7 @@ import {
   type NotificationSink,
 } from '../packages/agent/src/notifications';
 import { type TaskRegistry, type TaskScope } from '../packages/agent/src/task-registry';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../packages/agent/testing/task-facts';
 import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../packages/agent/src/task-runner';
 import { assembleSessionCore } from './ask-runtime';
@@ -271,8 +271,8 @@ describe('P7-T06 故障注入 · ① 模型超时（假 driver）', () => {
       const taskId = turn.taskIds[0]!;
       await assembled.runner!.whenIdle(); // 「不挂死」：有限步内收尾
       const task = assembled.taskRegistry.get(taskId, SCOPE_A);
-      expect(task.termination?.kind).toBe('timed_out');
-      expect(task.termination?.kind).toBe('timed_out');
+      expect(task.endedAt).toBeTruthy();
+      expect(task.endedAt).toBeTruthy();
       expect(task.replyText).toBeUndefined(); // 超时不产生结果存档（不以汇报冒充）
       expect(driverCalls).toBe(1); // 不重放
       // 通知如实：timed_out 意图 + reason=timeout，投递可达
@@ -324,8 +324,8 @@ describe('P7-T06 故障注入 · ① 模型超时（假 driver）', () => {
       const taskId = turn.taskIds[0]!;
       await assembled.runner!.whenIdle();
       const task = assembled.taskRegistry.get(taskId, SCOPE_A);
-      expect(task.termination?.kind).toBe('timed_out');
-      expect(task.termination?.kind).toBe('timed_out');
+      expect(task.endedAt).toBeTruthy();
+      expect(task.endedAt).toBeTruthy();
       expect(driverCalls).toBe(1);
     } finally {
       await settleQuietly(assembled);
@@ -374,7 +374,7 @@ describe('P7-T06 故障注入 · ② Worker 崩溃（假 driver）', () => {
       const task = assembled.taskRegistry.get(taskId, SCOPE_A);
       // 已启动但无汇报收尾：账本没有 worker 汇报存档（crash 不冒充完成）。
       expect(archivedReportOf(task)).toBeUndefined();
-      expect(taskLivenessOf(task)).toBeUndefined();
+      expect(taskMayBeRunningOf(task)).toBe(false);
       expect(lastFailureOf(task)).toBeUndefined();
       expect(task.replyText).toBeUndefined(); // 崩溃不冒充完成
       // 已发生的执行事实保留（部分执行 ≠ 成功），且不重放
@@ -386,8 +386,9 @@ describe('P7-T06 故障注入 · ② Worker 崩溃（假 driver）', () => {
       const reader = createNotificationReader(dbPath);
       const rows = reader.listNotifications(taskId);
       reader.close();
-      expect(rows.map((row) => row.kind)).toEqual(['accepted', 'started', 'failed']);
-      expect(rows.find((row) => row.kind === 'failed')!.payload.reason).toBeUndefined();
+      // 无汇报收尾不再落 failed 通知（completed/failed 已从通知意图删除）。
+      expect(rows.map((row) => row.kind)).toEqual(['accepted', 'started']);
+
     } finally {
       await settleQuietly(assembled);
       assembled.close();
@@ -412,8 +413,8 @@ describe('P7-T06 故障注入 · ③ 通知失败（假 sink）', () => {
       const reader = createNotificationReader(dbPath);
       const rows = reader.listNotifications(taskId);
       reader.close();
-      expect(sink.sends).toBe(3);
-      expect(rows).toHaveLength(3);
+      expect(sink.sends).toBe(2);
+      expect(rows).toHaveLength(2);
       expect(rows.every((row) => row.deliveredAt === undefined)).toBe(true);
       expect(rows.every((row) => row.attempts >= 1)).toBe(true);
       expect(rows.every((row) => row.lastError === 'CHANNEL_DOWN')).toBe(true);
@@ -443,7 +444,7 @@ describe('P7-T06 故障注入 · ③ 通知失败（假 sink）', () => {
       now: () => new Date(clock),
     });
     try {
-      outbox.record({ taskId: 'task_n', kind: 'completed', at: new Date(clock).toISOString(), taskNo: 1, name: '任务' });
+      outbox.record({ taskId: 'task_n', kind: 'started', at: new Date(clock).toISOString(), taskNo: 1, name: '任务' });
       const first = await outbox.deliverPending();
       expect(first).toMatchObject([{ outcome: 'retry_scheduled', attempts: 1, error: 'SINK_CRASH' }]);
       clock += 1001; // 越过退避
@@ -476,7 +477,7 @@ describe('P7-T06 故障注入 · ③ 通知失败（假 sink）', () => {
       now: () => new Date(clock),
     });
     try {
-      outbox.record({ taskId: 'task_r', kind: 'completed', at: new Date(clock).toISOString(), taskNo: 1, name: '任务' });
+      outbox.record({ taskId: 'task_r', kind: 'started', at: new Date(clock).toISOString(), taskNo: 1, name: '任务' });
       const first = await outbox.deliverPending();
       expect(first).toMatchObject([{ outcome: 'retry_scheduled', attempts: 1 }]);
       clock += 1001;
@@ -636,7 +637,7 @@ describe('P7-T06 故障注入 · ⑤ 池满（backgroundConcurrency=1 + queueCap
     try {
       const first = await assembled.session.send('第一件慢事');
       const task1 = first.taskIds[0]!;
-      expect(taskLivenessOf(assembled.taskRegistry.get(task1, SCOPE_A))).toBe('running');
+      expect(taskMayBeRunningOf(assembled.taskRegistry.get(task1, SCOPE_A))).toBe(true);
       expect(executor.calls.map((call) => call.taskId)).toEqual([task1]);
 
       // 满员 → 确定性拒绝（机械面：受理工具结果 accepted=false + reason=resource_limited；
@@ -644,10 +645,10 @@ describe('P7-T06 故障注入 · ⑤ 池满（backgroundConcurrency=1 + queueCap
       const second = await assembled.session.send('第二件');
       const receipt2 = records[1]!.execResults[0] as Record<string, unknown>;
       expect(receipt2).toMatchObject({ accepted: false });
-      expect(receipt2['termination']).toMatchObject({ kind: 'resource_limited' });
+      expect(typeof receipt2['endedAt']).toBe('string');
       const task2 = String(receipt2['taskId']);
-      expect(assembled.taskRegistry.get(task2, SCOPE_A).termination?.kind).toBe('resource_limited');
-      expect(assembled.taskRegistry.get(task2, SCOPE_A).termination?.kind).toBe('resource_limited');
+      expect(assembled.taskRegistry.get(task2, SCOPE_A).endedAt).toBeTruthy();
+      expect(assembled.taskRegistry.get(task2, SCOPE_A).endedAt).toBeTruthy();
       // 无无限积压：没有 queued 行；拒绝任务不进入执行
       expect(assembled.taskRegistry.list(SCOPE_A).filter((task) => taskUnstartedOf(task))).toHaveLength(0);
       expect(executor.calls.map((call) => call.taskId)).toEqual([task1]);
@@ -655,7 +656,7 @@ describe('P7-T06 故障注入 · ⑤ 池满（backgroundConcurrency=1 + queueCap
       const third = await assembled.session.send('第三件');
       const receipt3 = records[2]!.execResults[0] as Record<string, unknown>;
       expect(receipt3).toMatchObject({ accepted: false });
-      expect(receipt3['termination']).toMatchObject({ kind: 'resource_limited' });
+      expect(typeof receipt3['endedAt']).toBe('string');
       expect(executor.calls.map((call) => call.taskId)).toEqual([task1]);
 
       // 前台配额独立：后台满载仍可确定性查询
@@ -667,8 +668,8 @@ describe('P7-T06 故障注入 · ⑤ 池满（backgroundConcurrency=1 + queueCap
       gate.resolve({ kind: 'ended', report: '第一件完成' });
       await assembled.runner!.whenIdle();
       expect(archivedReportOf(assembled.taskRegistry.get(task1, SCOPE_A))).toBeDefined();
-      expect(assembled.taskRegistry.get(task2, SCOPE_A).termination?.kind).toBe('resource_limited');
-      expect(assembled.taskRegistry.get(task2, SCOPE_A).termination?.kind).toBe('resource_limited');
+      expect(assembled.taskRegistry.get(task2, SCOPE_A).endedAt).toBeTruthy();
+      expect(assembled.taskRegistry.get(task2, SCOPE_A).endedAt).toBeTruthy();
       expect(executor.calls.map((call) => call.taskId)).toEqual([task1]);
 
       // 拒绝通知：resource_limited 意图如实落库（九类枚举之一）
@@ -770,8 +771,8 @@ describe('P7-T06 故障注入 · ⑥ 重启三态（queued 重领 / unknown 不�
       // unknown 不重放：执行端只收到 queued 任务
       expect(executor2.calls.map((call) => call.taskId)).toEqual(['task_queued']);
       const running = second.taskRegistry.get('task_running', SCOPE_A);
-      expect(running.termination?.kind).toBe('died');
-      expect((lastFailureOf(running)?.error?.code === 'result_unknown' || running.termination?.kind === 'died')).toBe(true);
+      expect(running.endedAt).toBeTruthy();
+      expect(running.endedAt).toBeTruthy();
       // completed 不重跑：审计执行行零新增（不重放副作用）
       const done = second.taskRegistry.get('task_done', SCOPE_A);
       expect(archivedReportOf(done)).toBeDefined();
@@ -787,10 +788,10 @@ describe('P7-T06 故障注入 · ⑥ 重启三态（queued 重领 / unknown 不�
       const runningRows = reader.listNotifications('task_running');
       const queuedRows = reader.listNotifications('task_queued');
       reader.close();
-      expect(doneRows.map((row) => row.kind)).toEqual(['accepted', 'started', 'completed']);
-      expect(runningRows.map((row) => row.kind)).toEqual(['accepted', 'started', 'failed']);
-      expect(runningRows.find((row) => row.kind === 'failed')!.payload.reason).toBe('result_unknown');
-      expect(queuedRows.map((row) => row.kind)).toEqual(['accepted', 'started', 'completed']);
+      expect(doneRows.map((row) => row.kind)).toEqual(['accepted', 'started']);
+      expect(runningRows.map((row) => row.kind)).toEqual(['accepted', 'started']);
+
+      expect(queuedRows.map((row) => row.kind)).toEqual(['accepted', 'started']);
     } finally {
       second.close();
     }

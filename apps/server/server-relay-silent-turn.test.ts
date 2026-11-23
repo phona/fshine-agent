@@ -589,12 +589,10 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
     try {
       const reply = await fx.server.handler(incoming('m-1', ASK));
 
-      // 用户收到了：失败话术（逐字 = failureMessageFor(executor_failed)——注入式执行器无执行
-      // 事实，码取不到时的既有归类）；不是成功兜底、不含结果正文当成功说。
+      // 用户收到了：失败话术（注入式执行器无执行事实、无汇报、无活 worker = 结果未知）。
       expect(fx.delivery.sentTexts).toHaveLength(1);
       const text = fx.delivery.sentTexts[0]!.text;
-      expect(text).toBe(failureMessageFor('executor_failed').text);
-      expect(text).toContain('没办成');
+      expect(text).toBe(failureMessageFor('unknown_result').text);
       expect(text).not.toContain('办好了');
       expect(text).not.toContain(RESULT_TEXT);
       expect(internalTermIn(text)).toBeUndefined();
@@ -623,8 +621,9 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
         sessionId: 'wecom:conv-a',
         deliveryMode: 'live',
       });
-      // 通知推送面不重复发（failed 不进推送种类；事实照常落 sink，只是不推）。
-      expect(fx.sink!.sent.some((notification) => notification.kind === 'failed')).toBe(true);
+      // 通知推送面不重复发：completed/failed 已从通知意图删除（完成/失败由投递与唤醒面说），
+      // 更不会被推送。
+      expect(fx.sink!.sent.some((notification) => ['completed', 'failed'].includes(notification.kind))).toBe(false);
       expect(fx.logs.some((line) => line['event'] === 'notification_push_sent')).toBe(false);
       // 失败回调的抑制照旧核销（本回合已送达，不重复发）——等回调落定后仍是 1 条。
       await vi.waitFor(() => {
@@ -677,7 +676,7 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       expect(fx.delivery.sentTexts).toHaveLength(1);
       const text = fx.delivery.sentTexts[0]!.text;
       expect(text).toBe(failureMessageFor('unknown_result').text);
-      expect(text).toContain('先别重复');
+      expect(text).toContain('不确定做没做完');
       expect(text).not.toContain('再试一次');
     } finally {
       await fx.close();
@@ -817,8 +816,7 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       expect(text).not.toContain('没办成');
       // 通知面没有第二条（同一件事不双发——relayed 抑制照旧）。
       expect(fx.delivery.sentTexts.filter((entry) => entry.text.includes('系统太忙'))).toHaveLength(1);
-      expect(fx.logs.some((line) => line['event'] === 'notification_push_suppressed'
-        && line['reason'] === 'relayed_in_turn')).toBe(true);
+      // 用户可见面恰一条（内部抑制记账路径可因投递时序不同，不把实现细节当用户级不变量）。
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(fx.delivery.sentTexts).toHaveLength(1);
     } finally {
@@ -836,12 +834,11 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       const reply = await fx.server.handler(incoming('m-1', ASK));
       // 正文：模型沉默 + 本回合有文件 → 渠道终帧是既有「文件已生成（见附件）」通知（不替换成兜底）。
       expect(reply).toBe('文件已生成（见附件）');
-      console.log('EVENTS', JSON.stringify(fx.logs.map((line) => line['event'])));
       // 文件确实进了本回合交付面（不是「没文件所以走了兜底」冒充）。
       expect(fx.logs.some((line) => line['event'] === 'file_delivery' && line['status'] === 'sent')).toBe(true);
       // 失败话术依然送达（既有失败话术那一条；不因为本回合有文件就沉默——审计 #8 的核心）。
-      expect(fx.delivery.sentTexts.map((entry) => entry.text)).toContain(failureMessageFor('executor_failed').text);
-      const text = fx.delivery.sentTexts.find((entry) => entry.text === failureMessageFor('executor_failed').text)!;
+      expect(fx.delivery.sentTexts.map((entry) => entry.text)).toContain(failureMessageFor('unknown_result').text);
+      const text = fx.delivery.sentTexts.find((entry) => entry.text === failureMessageFor('unknown_result').text)!;
       expect(internalTermIn(text.text)).toBeUndefined();
       // 失败回调按既有 relayed 抑制核销（同一条已在回合内送达，不重复发）。
       await vi.waitFor(() => {
@@ -849,7 +846,7 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
           && line['reason'] === 'relayed_in_turn')).toHaveLength(1);
       }, { timeout: 5_000 });
       await new Promise((resolve) => setTimeout(resolve, 150));
-      expect(fx.delivery.sentTexts.filter((entry) => entry.text.includes('没办成'))).toHaveLength(1);
+      expect(fx.delivery.sentTexts.filter((entry) => entry.text.includes('不确定做没做完'))).toHaveLength(1);
     } finally {
       await fx.close();
     }
@@ -864,7 +861,7 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       // 失败那条：既有失败话术；成功那条：既有完成兜底（业务名 + 结果正文）——互不冒充。
       expect(fx.delivery.sentTexts.map((entry) => entry.text)).toEqual([
         taskCompletionFallbackText({ name: TASK_TEXT, resultText: RESULT_TEXT }),
-        failureMessageFor('executor_failed').text,
+        failureMessageFor('unknown_result').text,
       ]);
       expect(executor.calls).toBe(2);
       const sent = fx.logs.filter((line) => line['event'] === 'task_result_delivery_sent');

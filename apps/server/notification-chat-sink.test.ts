@@ -19,7 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ChannelRoute, DeliveryReceipt } from '@fshine/contracts';
-import { createNotificationOutbox, type Notification, type NotificationKind } from '../../packages/agent/src/notifications';
+import { createNotificationOutbox, NOTIFICATION_KINDS, type Notification, type NotificationKind } from '../../packages/agent/src/notifications';
 import {
   composeNotificationSinks,
   createChatNotificationSink,
@@ -110,28 +110,29 @@ describe('主动推送 sink：种类与文案', () => {
     expect(events.filter((e) => e['reason'] === 'kind_not_pushed')).toHaveLength(1);
   });
 
-  it('① failed 不再由本 sink 推（2026-11-19 收口）；result_unknown 也不读作成功', async () => {
-    // 口径变更：后台任务失败的主动告知改由 task-completion-delivery 的失败投递分支直发
-    // （deliverTaskFailure + failureMessageFor 模板），本 sink 不推 failed——两套话术并存
-    // 会双发。这里钉住「failed → kind_not_pushed」；result_unknown 落底账 failed + reason，
-    // 用户话术同样走失败分支，本 sink 不再转发。
+  it('① completed/failed 已从通知意图删除（2026-11-23 删状态机轮）：不存在这两类推送', async () => {
+    // 完成由完成投递/唤醒面读汇报原文说，失败由失败唤醒面读执行事实说——通知意图里没有
+    // 「已完成/失败」的任务级结论。这里钉住意图集合本身。
+    expect(NOTIFICATION_KINDS).not.toContain('completed');
+    expect(NOTIFICATION_KINDS).not.toContain('failed');
     const delivery = fakeDelivery();
     const { sink, events } = sinkOf({ delivery: delivery.port });
-    await sink.send(notification('failed', { reason: 'failed_confirmed' }));
-    await sink.send(notification('failed', { reason: 'result_unknown' }));
+    for (const kind of ['accepted', 'started', 'resumed'] as const) {
+      await sink.send(notification(kind));
+    }
     expect(delivery.sent).toEqual([]);
-    expect(events.filter((e) => e['reason'] === 'kind_not_pushed')).toHaveLength(2);
+    expect(events.filter((e) => e['reason'] === 'kind_not_pushed')).toHaveLength(3);
   });
 
   it('① 噪音类与 completed 一律不推（后者由结果正文投递负责）', async () => {
     const delivery = fakeDelivery();
     const { sink, events } = sinkOf({ delivery: delivery.port });
-    for (const kind of ['accepted', 'started', 'resumed', 'completed'] as const) {
+    for (const kind of ['accepted', 'started', 'resumed'] as const) {
       const result = await sink.send(notification(kind));
       expect(result.delivered).toBe(true);
     }
     expect(delivery.sent).toEqual([]);
-    expect(events.map((e) => e['reason'])).toEqual(Array(4).fill('kind_not_pushed'));
+    expect(events.map((e) => e['reason'])).toEqual(Array(3).fill('kind_not_pushed'));
   });
 
   it('② 文案过用户可见出口清理（服务器路径不出现在用户文本里）', async () => {
@@ -376,7 +377,7 @@ describe('主动推送 sink：时序与失败', () => {
       { async send() { ok.push('file'); return { delivered: true }; } },
       { async send() { throw new Error('push down'); } },
     ]);
-    const result = await composed.send(notification('failed'));
+    const result = await composed.send(notification('timed_out'));
     expect(ok).toEqual(['file']);
     expect(result.delivered).toBe(false);
     expect(result.error).toContain('push down');
@@ -396,6 +397,6 @@ describe('主动推送 sink：时序与失败', () => {
       { async send() { return { delivered: true }; } },
       { async send() { return { delivered: true }; } },
     ]);
-    expect((await composed.send(notification('completed'))).delivered).toBe(true);
+    expect((await composed.send(notification('started'))).delivered).toBe(true);
   });
 });

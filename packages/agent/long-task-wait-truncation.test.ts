@@ -21,7 +21,7 @@
  *
  * 零网络：runner 面用脚本化假 wait 端口；适配器面 spawn 本文件生成的最小 stub 网关。
  */
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -297,7 +297,7 @@ describe('长任务等待的传输截断（无回执）：不判死、先兜再�
     h.longTasks.waits[0]!.resolve(noReceipt());
     await flush();
     expect(h.sends).toEqual([]);
-    expect(taskLivenessOf(h.task())).toBe('running');
+    expect(taskMayBeRunningOf(h.task())).toBe(true);
     expect(retries(h)).toHaveLength(1);
     expect(retries(h)[0]!.reason).toBe('no_receipt');
     expect(retries(h)[0]!.delayMs).toBe(250);
@@ -320,7 +320,7 @@ describe('长任务等待的传输截断（无回执）：不判死、先兜再�
     }));
 
     // 任务**不**被当终态失败、Worker **不**被唤醒去报「失败」、长任务**不**被重复执行。
-    expect(taskLivenessOf(h.task())).toBe('running');
+    expect(taskMayBeRunningOf(h.task())).toBe(true);
     expect(lastFailureOf(h.task())).toBeUndefined();
     expect(h.driver.rounds.filter((round) => round.resumed)).toEqual([]);
     expect(h.client.executeCalls).toHaveLength(1);
@@ -331,7 +331,7 @@ describe('长任务等待的传输截断（无回执）：不判死、先兜再�
     h.longTasks.waits[2]!.resolve(noReceipt());
     await flush();
     expect(h.sends).toHaveLength(1);
-    expect(taskLivenessOf(h.task())).toBe('running');
+    expect(taskMayBeRunningOf(h.task())).toBe(true);
   });
 
   it('② 先兜能兜住（截断后自查一次拿到完成）：用户收到的是**确定结果**，不确定性不当结论播出去', async () => {
@@ -404,7 +404,7 @@ describe('长任务等待的传输截断（无回执）：不判死、先兜再�
       expect(seen).toHaveLength(index + 1);
       expect(seen[index]!.failures).toBe(index + 1);
       delays.push(seen[index]!.delayMs);
-      expect(taskLivenessOf(h.task())).toBe('running');
+      expect(taskMayBeRunningOf(h.task())).toBe(true);
       // 只有退避到期才重排下一次（到期前 pump 不再打执行层）。
       expect(await advanceToNextWait(h, delay)).toBe(true);
     }
@@ -416,7 +416,7 @@ describe('长任务等待的传输截断（无回执）：不判死、先兜再�
     const tenMinutes = 10 * 60 * 1_000;
     expect(Math.ceil(tenMinutes / 60_000)).toBeLessThanOrEqual(11);
     // 一直在等（没有因为一次截断就放弃/判死），并已如实暴露过一次。
-    expect(taskLivenessOf(h.task())).toBe('running');
+    expect(taskMayBeRunningOf(h.task())).toBe(true);
     expect(h.sends).toHaveLength(1);
 
     // 恢复：真实回执即联系恢复，退避计数清零，任务照常完成。
@@ -443,7 +443,7 @@ describe('长任务等待的传输截断（无回执）：不判死、先兜再�
     h.longTasks.waits[1]!.reject(new Error('executor unreachable'));
     await flush();
     expect(h.sends).toEqual([{ stage: 'contact_lost', factText: CONTACT_LOST_TEXT, minutes: 0 }]);
-    expect(taskLivenessOf(h.task())).toBe('running');
+    expect(taskMayBeRunningOf(h.task())).toBe(true);
     expect(h.driver.rounds.filter((round) => round.resumed)).toEqual([]);
     expect(retries(h)).toHaveLength(2);
 

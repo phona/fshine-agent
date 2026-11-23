@@ -20,7 +20,7 @@ import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import { createScriptedModelRuntime } from '../../../packages/agent/testing/scripted-model-runtime';
 import type { TaskScope } from '../../../packages/agent/src/task-registry';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import {
   buildSession,
   createBudgetMeter,
@@ -628,8 +628,11 @@ async function main(): Promise<number> {
         taskId: task.taskId,
         taskNo: task.taskNo ?? null,
         name: task.name ?? '',
-        liveness: taskLivenessOf(task) ?? null,
-        cancelled: task.termination?.kind === 'cancelled',
+        started: taskStartedOf(task),
+        endedAt: task.endedAt ?? null,
+        reported: taskReportedOf(task),
+        waiting: taskWaitingOf(task),
+        mayBeRunning: taskMayBeRunningOf(task),
         reason: lastFailureOf(task)?.error?.code ?? null,
         request: task.request,
         resultText: task.resultText ?? null,

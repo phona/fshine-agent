@@ -279,7 +279,7 @@ describe('B 切片：task_run 短等待窗口（server 装配级）', () => {
       // 受理事实（task_run 返回）：只给机械事实，不带回执话术、不带编号
       const receipt = records[0]!.execResults[0] as Record<string, unknown>;
       expect(receipt['accepted']).toBe(true);
-      expect(receipt['liveness']).toBe('running');
+      expect(receipt['started']).toBe(true);
       expect(receipt).not.toHaveProperty('notice');
       expect(receipt).not.toHaveProperty('taskNo');
       // 文本照发不等于丢结果：任务后台完成 → 结果经主动投递面送达原会话。

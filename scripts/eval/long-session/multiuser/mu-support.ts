@@ -499,15 +499,12 @@ export interface MuTaskSnapshot {
   readonly principalId: string;
   readonly sessionId: string;
   readonly request: string;
-  /** 存活（宿主守护事实三值；null=未启动或已收尾）——唯一保留的任务投影。 */
-  readonly liveness: 'running' | 'died' | 'waiting_user' | null;
+  /** 原始事实（布尔）：启动 / 已停 / 汇报 / 等待 / 可能还在跑。 */
+  readonly started: boolean;
   readonly ended: boolean;
-  readonly cancelled: boolean;
-  readonly died: boolean;
-  readonly timedOut: boolean;
-  readonly resourceLimited: boolean;
-  /** worker 汇报已存档（语义事实；判「办没办成」读执行行）。 */
   readonly reported: boolean;
+  readonly waiting: boolean;
+  readonly mayBeRunning: boolean;
   /** 末条执行行 status 原值（可选；无执行行时缺省）。 */
   readonly lastExecutionStatus?: string;  readonly reason: string | undefined;
   /** failed 的机械原因原文（P2 失败场景如实性核对用；只读执行行事实）。 */
@@ -546,13 +543,11 @@ export function toTaskViews(tasks: readonly MuTaskSnapshot[]): TaskView[] {
     taskId: task.taskId,
     ...(task.taskNo === undefined ? {} : { taskNo: task.taskNo }),
     request: task.request,
-    liveness: task.liveness,
+    started: task.started,
     ended: task.ended,
-    cancelled: task.cancelled,
-    died: task.died,
-    timedOut: task.timedOut,
-    resourceLimited: task.resourceLimited,
     reported: task.reported,
+    waiting: task.waiting,
+    mayBeRunning: task.mayBeRunning,
     ...(task.lastExecutionStatus === undefined ? {} : { lastExecutionStatus: task.lastExecutionStatus }),
     ...(task.reason === undefined ? {} : { reason: task.reason }),
     requestIds: task.requestIds,

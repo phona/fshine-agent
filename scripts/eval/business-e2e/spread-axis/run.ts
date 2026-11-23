@@ -237,7 +237,7 @@ async function runSmoke(args: CliArgs): Promise<boolean> {
       }
       if (caseDef.id === 'DS-3') {
         if (g.indicators.d3.tasks < 3) failed = true;
-        if (g.indicators.d3.taskFacts.cancelled !== 1) failed = true;
+        if (g.indicators.d3.taskFacts.endedWithoutReport !== 1) failed = true;
         if (g.d6?.postCancelResidue.available !== true) failed = true; // 取消事实进入 d6（残留读数按工具口径另注）
       }
     }

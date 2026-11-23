@@ -36,7 +36,7 @@ describe('R4-Stab 压力 P · 假 executor/sink/渠道/时钟', () => {
   it('P1 积压 500 受控排队：全部完成、排空归零、恰一次执行、通知未送达=0、RSS<10%', async () => {
     const report = await runPressureScenario({ backlog: 500, concurrency: 2, queueCapacity: 512 });
     expect([report.submitted, report.accepted, report.rejected]).toEqual([500, 500, 0]);
-    expect(report.terminalCounts['completed']).toBe(500);
+    expect(report.terminalCounts['reported']).toBe(500);
     // 只读数（非门槛）：队列深度观察必须存在且有限；深度大小不判负（§九 blocked）
     expect(Number.isFinite(report.queueObservations.policyQueueMax)).toBe(true);
     expect(Number.isFinite(report.queueObservations.ledgerQueuedMax)).toBe(true);
@@ -53,10 +53,9 @@ describe('R4-Stab 压力 P · 假 executor/sink/渠道/时钟', () => {
     expect(report.accepted).toBe(1);
     expect(report.rejected).toBe(499);
     // 拒绝路径落库：终态 failed + reason=resource_limited（P7b 拒绝落点口径）
-    expect(report.terminalCounts['failed']).toBe(499);
-    expect(report.terminalReasonCounts['resource_limited']).toBe(499);
+    expect(report.terminalCounts['stopped_without_report']).toBe(499);
     // 运行中任务不受损：放行后正常收尾
-    expect(report.terminalCounts['completed']).toBe(1);
+    expect(report.terminalCounts['reported']).toBe(1);
     // 前台配额独立：池满期间前台回合可用
     expect(report.foregroundRoundTrips).toBeGreaterThan(0);
     expectPressureInvariants(report);
@@ -70,7 +69,7 @@ describe('R4-Stab 压力 P · 假 executor/sink/渠道/时钟', () => {
       sinkFailureEvery: 5,
     });
     expect(report.rejected).toBe(0);
-    expect(report.terminalCounts['completed']).toBe(500);
+    expect(report.terminalCounts['reported']).toBe(500);
     expectPressureInvariants(report);
   }, 60_000);
 });

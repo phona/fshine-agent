@@ -13,7 +13,7 @@
  * 全部假件（假 Main/Worker driver、假执行面、假时钟），零网络、零真实模型、零真实平台。
  * 本文件只覆盖「计量接线」；policy 自身的语义矩阵在 resource-policy.test.ts（不重复）。
  */
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   CapabilityManifest,
@@ -205,8 +205,8 @@ describe('恰好耗尽 / 超出：调用前确定性拒绝且零调用', () => {
     const first = tasks.find((task) => task.request === '第一件');
     expect(lastExecutionOf(first!)?.status).toBe('completed');
     const refused = tasks.find((task) => task.request === '第二件');
-    expect(refused!.termination?.kind).toBe('resource_limited');
-    expect(refused!.termination?.kind).toBe('resource_limited');
+    expect(refused!.endedAt).toBeTruthy();
+    expect(refused!.endedAt).toBeTruthy();
   });
 });
 

@@ -1,36 +1,21 @@
 /**
- * 「任务仍在推进」的唯一判定（B 类存活事实；宿主 runtime / runner / 底账扫描共用）。
+ * 任务事实的机械判定（B 类；宿主 runtime / runner / 底账扫描共用）。
  *
- * 零状态（owner 2026-11-23）：task 不存任何「状态」列——只有事实：
- *   · 启动事实（started_at / 租约 / accepted 在途）；
+ * 不维护任务状态机（owner 2026-11-23）：task 只存事实——
+ *   · 启动事实（running_since / 租约 / accepted 在途）；
  *   · 汇报存档（result_text / reply_text）；
- *   · 等待形状（pending_question）；
- *   · 终止事件（task_events 追加事件账：cancelled / timed_out / resource_limited / died /
- *     round_failed / completed）——「怎么结束」的唯一持久来源，不可变。
+ *   · 等待形状（pending_question + waiting_since）；
+ *   · 执行账本（executions 每笔的 status，执行层契约事实）；
+ *   · 一条「这一轮在 T 停下」的机械事实（task_ends，**不分类**：不存怎么结束）。
+ * 没有 status，没有终止种类（cancelled/timed_out/resource_limited/died/round_failed/
+ * completed），也没有 liveness 三值——「活/结束」由事实现推：
+ *   仍在推进 = 已启动 && 无结束事实 && 无汇报存档 && 无等待形状；
+ *   可能还活着（跨进程读者）= 仍在推进 && （租约未过期 || accepted 在途）；
+ *   在跑（本进程）= 仍在推进 && 本进程有活 worker。
+ * 本模块只回答这些**布尔事实**；任何「任务级生命周期枚举」都不在这里、也不在别处。
  *
- * 「活/结束」由事实现推（见 registry 的 taskLivenessOf）；本模块只回答「还在推进吗」：
- *   仍在推进 = 已启动 && 无终止事件 && 无汇报存档 && 无等待形状。
- * 这是布尔事实判定，不是任务级状态词。SQL 与 TS 由同一份列清单/事件清单派生，任何调用点
- * 只调这里，别处不得再手写 `running_since + 结束列` 的组合。
+ * 「怎么结束」不存：消费方读原始事实（汇报 / 执行行 / 活 worker / 等待形状）就地算。
  */
-
-/** 终止事件种类（「怎么结束」；追加事件账的唯一词表）。 */
-export const TASK_TERMINATION_KINDS = [
-  'cancelled',
-  'timed_out',
-  'resource_limited',
-  'died',
-  'round_failed',
-  'completed',
-] as const;
-
-export type TaskTerminationKind = (typeof TASK_TERMINATION_KINDS)[number];
-
-/** 一条终止事实（追加事件；不可变）。 */
-export interface TaskTermination {
-  kind: TaskTerminationKind;
-  at: string;
-}
 
 interface TaskStartFacts {
   runningSince?: string;
@@ -48,10 +33,10 @@ interface TaskReportFacts {
   replyText?: string;
 }
 
-/** 存活/推进判定的输入投影（内存 TaskRecord 与 SQLite 读回行同形）。 */
+/** 推进判定的输入投影（内存 TaskRecord 与 SQLite 读回行同形）。 */
 export interface TaskProgressFacts extends TaskStartFacts, TaskReportFacts {
-  /** 最近终止事件（追加事件账；不是列）。在场 = 这一轮已结束。 */
-  termination?: TaskTermination;
+  /** 这一轮停下的机械时刻（追加事实账；没有种类）。在场 = 这一轮已停。 */
+  endedAt?: string;
   /** 等待形状（只判有无；waiting_user ≠ 在跑）。 */
   pendingQuestion?: unknown;
 }
@@ -73,19 +58,18 @@ export const TASK_PROGRESS_REPORT_FIELDS = [
 /** 等待形状列（waiting_user）；在跑扫描必须排除。 */
 export const TASK_PROGRESS_WAITING_FIELD = { key: 'pendingQuestion', column: 'pending_question' } as const;
 
-/** 终止事件账的表名（SQL 判据引用；不是 tasks 的列）。 */
-export const TASK_TERMINATIONS_TABLE = 'task_events';
+/** 「这一轮停下」事实账的表名（SQL 判据引用；不是 tasks 的列，也没有 kind 列）。 */
+export const TASK_ENDS_TABLE = 'task_ends';
 
-/** 终止事件的 SQL 列清单（表名 + 列名唯一来源）。 */
-export const TASK_TERMINATION_COLUMNS = {
+/** 结束事实的 SQL 列清单（表名 + 列名唯一来源）。 */
+export const TASK_END_COLUMNS = {
   taskId: 'task_id',
-  kind: 'kind',
   at: 'at',
 } as const;
 
-/** 任务已结束（终止事件在场）。 */
-export function taskEndedOf(task: Pick<TaskProgressFacts, 'termination'>): boolean {
-  return task.termination !== undefined;
+/** 任务已结束（结束事实在场）。 */
+export function taskEndedOf(task: Pick<TaskProgressFacts, 'endedAt'>): boolean {
+  return task.endedAt !== undefined;
 }
 
 /** 汇报已存档（result_text / reply_text 任一非空 = 有汇报）。 */
@@ -93,17 +77,22 @@ export function taskReportedOf(task: TaskReportFacts): boolean {
   return TASK_PROGRESS_REPORT_FIELDS.some((field) => (task[field.key] ?? '').trim() !== '');
 }
 
+/** 等待形状在场（pendingQuestion；等待可被下一进程接续，不是在跑）。 */
+export function taskWaitingOf(task: Pick<TaskProgressFacts, 'pendingQuestion'>): boolean {
+  return task.pendingQuestion !== undefined;
+}
+
 /**
- * 本轮已停（仍在推进的反面，**不含「等待用户」**）：终止事件或汇报存档任一在场。
+ * 本轮已停（仍在推进的反面，**不含「等待用户」**）：结束事实或汇报存档任一在场。
  * 等待中的任务不算「已停」——它还能接续/取消。
  */
-export function taskProgressEndedOf(task: Pick<TaskProgressFacts, 'termination'> & TaskReportFacts): boolean {
+export function taskProgressEndedOf(task: Pick<TaskProgressFacts, 'endedAt'> & TaskReportFacts): boolean {
   return taskEndedOf(task) || taskReportedOf(task);
 }
 
 /**
  * 已启动：running_since 写入、持有在跑租约，或末条执行 = accepted 在途（后两者沿用既有
- * liveness / 长任务口径；真实写入路径租约会连带写 running_since）。
+ * 长任务口径；真实写入路径租约会连带写 running_since）。
  */
 export function taskStartedOf(task: TaskStartFacts & TaskReportFacts): boolean {
   return task.runningSince !== undefined
@@ -129,26 +118,36 @@ export function taskAcceptedInFlightOf(task: TaskStartFacts & TaskReportFacts): 
 export function stillProgressingOf(task: TaskProgressFacts): boolean {
   return taskStartedOf(task)
     && !taskProgressEndedOf(task)
-    && task.pendingQuestion === undefined;
+    && !taskWaitingOf(task);
 }
 
-/** 任务未启动（可被队列认领）：没跑过且无终止事件。 */
-export function taskUnstartedOf(task: TaskStartFacts & Pick<TaskProgressFacts, 'termination'>): boolean {
+/**
+ * 跨进程读者（CLI / ops）的「可能还活着」事实判定：仍在推进，且租约未过期或 accepted 在途。
+ * 只回答布尔事实——不返回 running/died 之类的状态词；消费者按自己的展示需要就地组合。
+ */
+export function taskMayBeRunningOf(task: TaskProgressFacts, now: string = new Date().toISOString()): boolean {
+  if (!stillProgressingOf(task)) return false;
+  if (task.leaseUntil !== undefined) return task.leaseUntil > now;
+  return taskAcceptedInFlightOf(task);
+}
+
+/** 任务未启动（可被队列认领）：没跑过且无结束事实。 */
+export function taskUnstartedOf(task: TaskStartFacts & Pick<TaskProgressFacts, 'endedAt'>): boolean {
   return task.runningSince === undefined && !taskEndedOf(task);
 }
 
 /**
- * SQL 片段（与 {@link stillProgressingOf} 同一份列清单/事件清单派生）：
+ * SQL 片段（与 {@link stillProgressingOf} 同一份列清单/事实账派生）：
  * `running_since IS NOT NULL AND 汇报列全空 AND pending_question IS NULL
- *  AND 无终止事件`。
- * 底账的「在跑」扫描（长时间提醒、过期租约、markDied 守卫）都拼这一段，不许手写。
- * 终止事件用 `NOT EXISTS` 子查询读 task_events（追加事件账），不是 tasks 的列。
+ *  AND 无结束事实`。
+ * 底账的「在跑」扫描（长时间提醒、过期租约、租约过期事实）都拼这一段，不许手写。
+ * 结束事实用 `NOT EXISTS` 子查询读 task_ends（追加事实账），不是 tasks 的列。
  */
 export function stillProgressingSqlWhere(): string {
   return [
     `${TASK_PROGRESS_STARTED_COLUMN.column} IS NOT NULL`,
     ...TASK_PROGRESS_REPORT_FIELDS.map((field) => `(${field.column} IS NULL OR ${field.column} = '')`),
     `${TASK_PROGRESS_WAITING_FIELD.column} IS NULL`,
-    `NOT EXISTS (SELECT 1 FROM ${TASK_TERMINATIONS_TABLE} e WHERE e.${TASK_TERMINATION_COLUMNS.taskId} = tasks.task_id)`,
+    `NOT EXISTS (SELECT 1 FROM ${TASK_ENDS_TABLE} e WHERE e.${TASK_END_COLUMNS.taskId} = tasks.task_id)`,
   ].join(' AND ');
 }

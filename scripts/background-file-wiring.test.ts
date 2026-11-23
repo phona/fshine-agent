@@ -28,7 +28,7 @@ import type {
 import type { DriverMessage, TurnDriver } from '../packages/agent/src/driver-contract';
 import { createFileStore, type FileStore } from '../packages/agent/src/file-store';
 import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../packages/agent/testing/task-facts';
 import { assembleSessionCore } from './ask-runtime';
 
 const SCOPE = { principalId: 'wecom:bg-files', sessionId: 'conv-bg-files' };

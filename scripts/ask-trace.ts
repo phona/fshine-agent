@@ -182,9 +182,9 @@ function traceTaskJson(task: TaskRecord, aliases: IdentifierAliases): Record<str
     principalId: task.principalId,
     sessionId: task.sessionId,
     request: task.request,
-    // 零状态：底账没有 status/failureReason/终态列——转写机械事实（等待形状、终止事件）。
+    // 事实口径：底账没有 status/failureReason/终态列/终止种类——转写机械事实（等待形状、停止时刻）。
     ...(task.pendingQuestion !== undefined ? { pendingQuestion: task.pendingQuestion } : {}),
-    ...(task.termination === undefined ? {} : { termination: { kind: task.termination.kind } }),
+    ...(task.endedAt === undefined ? {} : { endedAt: true }),
     ...(task.resultText !== undefined ? { resultText: task.resultText } : {}),
     executions: task.executions.map((execution) => ({
       requestId: aliases.requestAlias.get(execution.requestId) ?? execution.requestId,

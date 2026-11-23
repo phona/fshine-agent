@@ -131,7 +131,7 @@ describe('任务编号形态扫描（不扩词表，三批次共用同一入口�
           at: '2026-11-15T08:00:00.000Z',
           taskNo: 7,
           name: '查十一月的发票',
-          reason: 'failed_confirmed',
+          reason: 'result_unknown',
           missing: ['开票日期'],
         },
       }),

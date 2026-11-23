@@ -16,7 +16,7 @@
  *   ④ 进程重启：库里等待行按 waiting_since + timeout 在启动后第一趟 pump 判超时；
  *   ⑤ 缺省装配（未注入 waitUserTimeoutMs）→ 不建定时器、行为与改动前一致。
  */
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -195,8 +195,8 @@ describe('waiting_user 到期消费者', () => {
     h.timers.advance(2_000);
 
     const task = h.registry.get('w1', SCOPE);
-    expect(task.termination?.kind).toBe('timed_out');
-    expect(task.termination?.kind).toBe('timed_out');
+    expect(task.endedAt).toBeTruthy();
+    expect(task.endedAt).toBeTruthy();
     // 既有 reason 枚举 + 既有通知意图（不新造状态/事件名）。
     const timedOut = outbox.listNotifications('w1').filter((notification) => notification.kind === 'timed_out');
     expect(timedOut).toHaveLength(1);
@@ -216,7 +216,7 @@ describe('waiting_user 到期消费者', () => {
 
     clock.advance(1); // 恰好到期（边界闭合：>= timeout）
     h.runner.pump();
-    expect(h.registry.get('w2', SCOPE).termination?.kind).toBe('timed_out');
+    expect(h.registry.get('w2', SCOPE).endedAt).toBeTruthy();
   });
 
   it('③ 到期前 task_resume → running，之后不再被判超时', async () => {
@@ -227,11 +227,11 @@ describe('waiting_user 到期消费者', () => {
 
     h.timers.advance(999);
     expect(h.runner.resume('w3', { answer: 'WO-42', scope: SCOPE })).toEqual({ outcome: 'started', taskId: 'w3' });
-    expect(taskLivenessOf(h.registry.get('w3', SCOPE))).toBe('running');
+    expect(taskMayBeRunningOf(h.registry.get('w3', SCOPE))).toBe(true);
     expect(h.executor.inputs.map((input) => input.answer)).toEqual(['WO-42']);
 
     h.timers.advance(10_000); // 越过原到期点：已接续的回合不得被判等待超时
-    expect(taskLivenessOf(h.registry.get('w3', SCOPE))).toBe('running');
+    expect(taskMayBeRunningOf(h.registry.get('w3', SCOPE))).toBe(true);
 
     h.executor.finish('w3', { kind: 'ended', report: '补答后完成' });
     await h.runner.whenIdle();
@@ -261,8 +261,8 @@ describe('waiting_user 到期消费者', () => {
 
     const summary = runner.pump(); // 启动后的第一个推进周期（不依赖上一进程的内存定时器）
     expect(summary.timedOutWaiting).toEqual(['w4']);
-    expect(second.get('w4', SCOPE).termination?.kind).toBe('timed_out');
-    expect(second.get('w4', SCOPE).termination?.kind).toBe('timed_out');
+    expect(second.get('w4', SCOPE).endedAt).toBeTruthy();
+    expect(second.get('w4', SCOPE).endedAt).toBeTruthy();
     expect(outbox.listNotifications('w4').filter((notification) => notification.kind === 'timed_out')).toHaveLength(1);
     expect(executor.inputs).toHaveLength(0); // 等待超时不是执行回合，不重放
   });

@@ -55,15 +55,18 @@ export interface TaskRecordJson {
   sessionId: string;
   request: string;
   /**
-   * 存活（宿主守护事实，唯一保留的投影：running/died/waiting_user；null=未启动或已收尾）。
-   * 判据不读「任务级状态词」——只读本字段 + 账本事实列 + 逐笔执行行 status + 汇报存档。
+   * 原始事实（布尔；没有任务级状态投影）：启动 / 有汇报存档 / 等待形状 / 跨进程「可能还在跑」。
+   * 判据只读这些事实 + 逐笔执行行 status + 汇报存档，不读任务级状态词。
    */
-  liveness?: 'running' | 'died' | 'waiting_user' | null;
+  started?: boolean;
+  /** 这一轮停下的机械时刻（没有种类）；缺省 = 没有结束事实。 */
+  endedAt?: string;
+  reported?: boolean;
+  waiting?: boolean;
+  mayBeRunning?: boolean;
   /** worker 汇报存档（语义；判 outcome 以 executions 机械事实为准，不一致不补）。 */
   resultText?: string;
   replyText?: string;
-  /** 终止事件（追加事件账；判据只读事实，不经过任何 status 投影）。 */
-  termination?: { kind: string; at: string };
   executions: ExecutionRecordJson[];
   createdAt: string;
   updatedAt: string;

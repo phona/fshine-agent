@@ -208,7 +208,7 @@ describe('tasks --redo：重新推进判定与拒绝路径', () => {
     const blank = await runRedo(redoInput(syntheticTask({
       taskId: 'task_e',
       request: '   ',
-      termination: { kind: 'round_failed', at: '2026-11-14T00:00:02.000Z' },
+      endedAt: '2026-11-14T00:00:02.000Z',
     }), '/nope.db'), deps);
     expect(blank.exitCode).toBe(2);
     expect(blank.stderr).toBe('任务缺少交办原文，无法重新推进：task_e。\n');
@@ -235,7 +235,7 @@ describe('tasks --redo：重新推进判定与拒绝路径', () => {
     expect(assembleCalls).toBe(0);
   });
 
-  it('租约过期但回合未收尾（仍推进）→ 拒重推；已取消/已超时 fail-closed 拒重推，均不装配', async () => {
+  it('租约过期但回合未收尾（仍推进）→ 拒重推；已停无汇报任务可重推（不按种类拒绝）', async () => {
     // B2（grok blocking）：旧判据只看 liveness==='running'——租约过期未收尾的行 liveness
     // 退成 died，被当成「已停」放行，重推可能双发写；取消/超时同理。统一用「仍在推进」判。
     let assembleCalls = 0;
@@ -257,19 +257,19 @@ describe('tasks --redo：重新推进判定与拒绝路径', () => {
     expect(expiredOutcome.stdout).toBe('');
     expect(expiredOutcome.stderr).toBe('任务尚未收尾，不能重新推进：task_lease_expired（等它收尾或先取消）。\n');
 
-    const cancelled = syntheticTask({ taskId: 'task_cancelled', termination: { kind: 'cancelled', at: '2026-11-14T00:00:02.000Z' } });
+    // 已停任务（结束事实在场、无汇报）不再按已删的终止种类拒绝：读事实后可以重新交办
+    // （怎么结束不存；重推是新任务，原任务零改动）。装配失败属另一层，断言走到装配即可。
+    const cancelled = syntheticTask({ taskId: 'task_cancelled', endedAt: '2026-11-14T00:00:02.000Z' });
     const cancelledOutcome = await runRedo(redoInput(cancelled, '/nope.db'), deps);
-    expect(cancelledOutcome.exitCode).toBe(2);
-    expect(cancelledOutcome.stdout).toBe('');
-    expect(cancelledOutcome.stderr).toBe('任务已取消，不能重新推进：task_cancelled。\n');
+    expect(cancelledOutcome.exitCode).toBe(1);
+    expect(cancelledOutcome.stderr).toContain('不应装配');
 
-    const timedOut = syntheticTask({ taskId: 'task_timed_out', termination: { kind: 'timed_out', at: '2026-11-14T00:00:03.000Z' } });
+    const timedOut = syntheticTask({ taskId: 'task_timed_out', endedAt: '2026-11-14T00:00:03.000Z' });
     const timedOutOutcome = await runRedo(redoInput(timedOut, '/nope.db'), deps);
-    expect(timedOutOutcome.exitCode).toBe(2);
-    expect(timedOutOutcome.stdout).toBe('');
-    expect(timedOutOutcome.stderr).toBe('任务已超时，不能重新推进：task_timed_out。\n');
+    expect(timedOutOutcome.exitCode).toBe(1);
+    expect(timedOutOutcome.stderr).toContain('不应装配');
 
-    expect(assembleCalls).toBe(0);
+    expect(assembleCalls).toBe(2);
   });
 
   it('长任务已存档汇报（末条执行仍 accepted、汇报走 archiveReply）：不算进行中，允许重推', async () => {
@@ -434,7 +434,7 @@ describe('tasks --redo：输出与错误码', () => {
 
   it('装配门拒绝 → exit 2（话术原样）；装配其它错误 → exit 1；send 失败 → exit 1 且报告已创建的新任务', async () => {
     // 可重推的原任务 = 已停（round_failed_at）；未收尾的行归 B2 守卫，到不了装配面。
-    const base = syntheticTask({ taskId: 'task_x', termination: { kind: 'round_failed', at: '2026-11-14T00:00:02.000Z' } });
+    const base = syntheticTask({ taskId: 'task_x', endedAt: '2026-11-14T00:00:02.000Z' });
 
     const refused = await runRedo(redoInput(base, '/nope.db'), {
       assemble: async () => {

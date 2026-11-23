@@ -1,77 +1,79 @@
 /**
- * 零状态 liveness 守卫（owner 2026-11-23）：活/结束由事实现推，不读任何终态列。
+ * 事实谓词守卫（owner 2026-11-23）：活/结束由事实现推，不读任何终态列，也不返回状态词。
  *
- * 现推口径：
+ * 现推口径（布尔事实）：
  *   · 排队：started_at 空 + 无汇报 + 无提问；
- *   · 在跑：started_at 有 + 无汇报 + 无提问 + **本进程有活 worker**；
+ *   · 仍在推进：started_at 有 + 无结束事实 + 无汇报 + 无提问；
+ *   · 可能还在跑（跨进程读者）：仍在推进 + 租约未过期或 accepted 在途；
  *   · 等用户：pendingQuestion 有；
- *   · 结束：已启动且无活 worker（进程没了 = 全不活）——有汇报=正常结束，无汇报=结果未知；
- *   · 已有终止事件（追加事件账）= 已结束，不翻案。
+ *   · 结束：已有结束事实（task_ends，只有时刻、没有种类）或汇报存档；
+ *     已启动、无汇报、无结束事实、无租约/无在途 = 结果未知（消费方按事实现推）。
  *
- * 本测试同时是「liveness 不落列」的行为判据：不构造任何 diedAt/cancelledAt 字段，只看事实。
+ * 本测试是「不落状态列/不返回状态词」的行为判据：不构造任何 diedAt/cancelledAt 字段，
+ * 也不断言 running/died/waiting_user 这类枚举。
  */
 import { describe, expect, it } from 'vitest';
 import {
   createTaskRegistry,
   stillProgressingOf,
   taskEndedOf,
-  taskLivenessOf,
+  taskMayBeRunningOf,
   taskProgressEndedOf,
   taskStartedOf,
+  taskWaitingOf,
 } from './src/task-registry';
-import type { TaskTermination } from '@fshine/core';
 
 const STARTED = { runningSince: '2026-11-23T00:00:00.000Z' } as const;
-const ENDED: TaskTermination = { kind: 'cancelled', at: '2026-11-23T00:01:00.000Z' };
+const ENDED = { at: '2026-11-23T00:01:00.000Z' } as const;
+const FUTURE = '2999-01-01T00:00:00.000Z';
 
-describe('taskLivenessOf：事实现推', () => {
-  it('排队（未启动、无汇报、无提问）→ 无 liveness', () => {
-    expect(taskLivenessOf({})).toBeUndefined();
-    expect(taskLivenessOf({ leaseUntil: '2999-01-01T00:00:00.000Z' })).toBe('running');
+describe('事实谓词：跨进程「可能还在跑」', () => {
+  it('排队（未启动、无汇报、无提问）→ 不可能在跑', () => {
+    expect(taskMayBeRunningOf({})).toBe(false);
   });
 
-  it('已启动 + 无汇报 + 无提问：有活 worker → running；无活 worker → died（结果未知）', () => {
-    expect(taskLivenessOf(STARTED, { liveWorker: true })).toBe('running');
-    expect(taskLivenessOf(STARTED, { liveWorker: false })).toBe('died');
-  });
-
-  it('等待形状优先于「无活 worker」：持久等待可被下一进程接续 → waiting_user', () => {
-    expect(taskLivenessOf({ ...STARTED, pendingQuestion: { missing: ['窗口'] } }, { liveWorker: false }))
-      .toBe('waiting_user');
-  });
-
-  it('有汇报 = 正常结束（无论有没有活 worker）', () => {
-    expect(taskLivenessOf({ ...STARTED, resultText: '办完了。' }, { liveWorker: true })).toBeUndefined();
-    expect(taskLivenessOf({ ...STARTED, replyText: '办完了。' }, { liveWorker: false })).toBeUndefined();
-  });
-
-  it('已有终止事件 = 已结束，不翻案（等待形状/租约残留都不改写）', () => {
-    expect(taskLivenessOf({ ...STARTED, termination: ENDED }, { liveWorker: true })).toBeUndefined();
-    expect(taskLivenessOf({
+  it('已启动 + 无汇报 + 无提问 + 有效租约 → 可能还在跑；租约过期 → 不', () => {
+    expect(taskMayBeRunningOf({ ...STARTED, leaseUntil: FUTURE })).toBe(true);
+    expect(taskMayBeRunningOf({
       ...STARTED,
-      pendingQuestion: { missing: ['窗口'] },
-      termination: { kind: 'timed_out', at: '2026-11-23T00:02:00.000Z' },
-    }, { liveWorker: false })).toBeUndefined();
+      leaseUntil: '2026-11-23T00:30:00.000Z',
+    }, '2026-11-23T01:00:00.000Z')).toBe(false);
+  });
+
+  it('accepted 在途（无租约）→ 可能还在跑；末条 accepted 但有汇报 → 不', () => {
+    expect(taskMayBeRunningOf({ executions: [{ status: 'accepted' }] })).toBe(true);
+    expect(taskMayBeRunningOf({ executions: [{ status: 'accepted' }], resultText: '办完了。' })).toBe(false);
+  });
+
+  it('等待形状 → 可能还在跑为假（等待可接续，但不是活 worker）', () => {
+    expect(taskWaitingOf({ pendingQuestion: { missing: ['窗口'] } })).toBe(true);
+    expect(taskMayBeRunningOf({ ...STARTED, pendingQuestion: { missing: ['窗口'] } })).toBe(false);
+  });
+
+  it('有汇报 / 有结束事实 → 不可能在跑（即使租约残留）', () => {
+    expect(taskMayBeRunningOf({ ...STARTED, leaseUntil: FUTURE, resultText: '办完了。' })).toBe(false);
+    expect(taskMayBeRunningOf({ ...STARTED, leaseUntil: FUTURE, replyText: '办完了。' })).toBe(false);
+    expect(taskMayBeRunningOf({ ...STARTED, leaseUntil: FUTURE, endedAt: ENDED.at })).toBe(false);
   });
 });
 
 describe('唯一谓词：不依赖终态列', () => {
-  it('已启动且无汇报/提问/终止事件 = 仍在推进', () => {
+  it('已启动且无汇报/提问/结束事实 = 仍在推进', () => {
     expect(stillProgressingOf(STARTED)).toBe(true);
-    expect(stillProgressingOf({ leaseUntil: '2999-01-01T00:00:00.000Z' })).toBe(true);
+    expect(stillProgressingOf({ leaseUntil: FUTURE })).toBe(true);
   });
 
-  it('终止事件 / 汇报 / 等待 = 不在推进', () => {
-    expect(stillProgressingOf({ ...STARTED, termination: ENDED })).toBe(false);
+  it('结束事实 / 汇报 / 等待 = 不在推进', () => {
+    expect(stillProgressingOf({ ...STARTED, endedAt: ENDED.at })).toBe(false);
     expect(stillProgressingOf({ ...STARTED, resultText: '办完了。' })).toBe(false);
     expect(stillProgressingOf({ ...STARTED, replyText: '办完了。' })).toBe(false);
     expect(stillProgressingOf({ ...STARTED, pendingQuestion: { missing: ['窗口'] } })).toBe(false);
   });
 
-  it('taskEndedOf = 终止事件在场；taskProgressEndedOf = 终止事件或汇报', () => {
+  it('taskEndedOf = 结束事实在场；taskProgressEndedOf = 结束事实或汇报', () => {
     expect(taskEndedOf({})).toBe(false);
-    expect(taskEndedOf({ termination: ENDED })).toBe(true);
-    expect(taskProgressEndedOf({ termination: ENDED })).toBe(true);
+    expect(taskEndedOf({ endedAt: ENDED.at })).toBe(true);
+    expect(taskProgressEndedOf({ endedAt: ENDED.at })).toBe(true);
     expect(taskProgressEndedOf({ resultText: '办完了。' })).toBe(true);
     expect(taskProgressEndedOf({})).toBe(false);
   });
@@ -79,20 +81,21 @@ describe('唯一谓词：不依赖终态列', () => {
   it('taskStartedOf 仍认启动事实：running_since / 租约 / accepted 在途', () => {
     expect(taskStartedOf({})).toBe(false);
     expect(taskStartedOf(STARTED)).toBe(true);
-    expect(taskStartedOf({ leaseUntil: '2999-01-01T00:00:00.000Z' })).toBe(true);
+    expect(taskStartedOf({ leaseUntil: FUTURE })).toBe(true);
     expect(taskStartedOf({ executions: [{ status: 'accepted' }] })).toBe(true);
   });
 });
 
-describe('内存 registry：liveness 与终止事件一致', () => {
-  it('终止后 liveness = undefined；事件仍在（不可变）', () => {
+describe('内存 registry：结束事实只留时刻，不写种类', () => {
+  it('停法写入 endedAt；后到的停法不覆盖（不可变）', () => {
     const registry = createTaskRegistry();
     registry.begin({ taskId: 't1', principalId: 'p', sessionId: 's', request: '任务' });
-    expect(registry.get('t1').termination).toBeUndefined();
-    const cancelled = registry.markCancelled('t1');
-    expect(cancelled.termination?.kind).toBe('cancelled');
-    expect(taskLivenessOf(registry.get('t1'), { liveWorker: true })).toBeUndefined();
-    // 不翻案：再落别的终止不覆盖第一条。
-    expect(registry.markTimedOut('t1', 'execution').termination?.kind).toBe('cancelled');
+    expect(registry.get('t1').endedAt).toBeUndefined();
+    const stopped = registry.markCancelled('t1');
+    expect(stopped.endedAt).toBeTruthy();
+    expect(taskMayBeRunningOf(registry.get('t1'))).toBe(false);
+    const first = stopped.endedAt;
+    expect(registry.markTimedOut('t1', 'execution').endedAt).toBe(first);
+    expect(Object.keys(stopped)).not.toContain('termination');
   });
 });

@@ -19,7 +19,7 @@
  *     该回合执行层审计行、任务汇报文本）；本断言由脚本显式声明时启用。
  *   · 未知 kind 在 parse 阶段即拒绝（脚本级 fail-closed，exit 2）。
  */
-import { taskLivenessOf, taskReportedOf, taskUnstartedOf, type TaskRecord } from '../packages/agent/src/task-registry';
+import { taskEndedOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf, type TaskRecord } from '../packages/agent/src/task-registry';
 
 export type AssertionAfter = number | 'all';
 
@@ -171,24 +171,29 @@ export function evaluateAssertion(spec: AssertionSpec, facts: AssertionFacts, in
       const taskIndex = spec.task ?? 1;
       const task = facts.tasks[taskIndex - 1];
       if (task === undefined) return fail(`任务 #${taskIndex} 不存在（当前 ${facts.tasks.length} 个）`);
-      // S1 事实模型：底账没有 status 字段——断言值直接对应一项账本事实或 liveness（不做投影）。
+      // 事实模型：底账没有 status 字段——断言值直接对应一项账本事实（不做投影）。
       const expected = String(spec.value);
       const last = task.executions[task.executions.length - 1];
+      // 期望词表是**事实谓词**（评测脚本用法）：completed=有汇报；failed=末条失败/拒绝；
+      // cancelled/timed_out/resource_limited/died 都只剩「已停且无汇报」这一条事实（怎么结束不存）；
+      // queued=未启动；running=可能还在跑；waiting_user=有提问。
+      const stoppedWithoutReport = taskEndedOf(task) && !taskReportedOf(task);
       const matches = expected === 'completed'
         ? taskReportedOf(task)
         : expected === 'failed'
           ? last?.status === 'failed' || last?.status === 'refused'
           : expected === 'cancelled'
-            ? task.termination?.kind === 'cancelled'
-            : expected === 'timed_out'
-              ? task.termination?.kind === 'timed_out'
-              : expected === 'resource_limited'
-                ? task.termination?.kind === 'resource_limited'
-                : expected === 'died'
-                  ? task.termination?.kind === 'died'
-                  : expected === 'queued'
-                  ? taskUnstartedOf(task)
-                  : taskLivenessOf(task) === expected;
+            || expected === 'timed_out'
+            || expected === 'resource_limited'
+            || expected === 'died'
+            ? stoppedWithoutReport
+            : expected === 'queued'
+              ? taskUnstartedOf(task)
+              : expected === 'running'
+                ? taskMayBeRunningOf(task)
+                : expected === 'waiting_user'
+                  ? taskWaitingOf(task)
+                  : false;
       return matches
         ? pass(`任务 #${taskIndex} 事实匹配=${expected}`)
         : fail(`任务 #${taskIndex} 账本事实不匹配期望 ${expected}`);

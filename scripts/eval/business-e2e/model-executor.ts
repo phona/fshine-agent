@@ -24,8 +24,8 @@ import { materializeEvalConfig } from '../../resolve-config-path';
 import { assembleSessionCore } from '../../ask-runtime';
 import type { DriverFactory, ExecutionFaceFactory } from '../../ask-runtime';
 import { assessEvalIsolation, assertEvalIsolation } from '../safety-gate';
-import { notificationKindForEvent } from '../../../packages/agent/src/notifications';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
+import { NOTIFICATION_KINDS } from '../../../packages/agent/src/notifications';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import type { CaseContext } from './batch';
 import type { BizCase, BizItem } from './scenarios';
 import type { BizExecutor, BizSampleEvidence } from './assembly';
@@ -204,24 +204,25 @@ export function createModelExecutor(options: ModelExecutorOptions = {}): BizExec
     // 只采集不判；inline 无 outbox 时这里仍能由状态迁移派生出通知意图行（各状态终态）。
     const taskFacts: TaskFactLine[] = [];
     const notifications: NotificationLine[] = [];
-    // S1 事实模型：底账只发机械事件（无 from/to/reason）。事件 → 机械事实快照（liveness/ended/cancelled），
-    // 供 d6 度量按事实口径读（不合成任务级状态词）。
-    const EVENT_FACTS: Readonly<Record<string, { liveness: 'running' | 'died' | 'waiting_user' | null; ended: boolean; cancelled: boolean }>> = {
-      queued: { liveness: null, ended: false, cancelled: false },
-      started: { liveness: 'running', ended: false, cancelled: false },
-      resumed: { liveness: 'running', ended: false, cancelled: false },
-      waiting_user: { liveness: 'waiting_user', ended: false, cancelled: false },
-      result_archived: { liveness: null, ended: true, cancelled: false },
-      cancelled: { liveness: null, ended: true, cancelled: true },
-      timed_out: { liveness: null, ended: true, cancelled: false },
-      died: { liveness: 'died', ended: true, cancelled: false },
-      resource_limited: { liveness: null, ended: true, cancelled: false },
-      round_failed: { liveness: null, ended: true, cancelled: false },
+    // 事实模型：底账只发机械事实（无 from/to/reason）。事件 → **事实增量**（启动/结束/汇报/等待），
+    // 供 d6 度量按事实口径读（不合成任务级状态词；不再区分「怎么结束」）。
+    const EVENT_FACTS: Readonly<Record<string, Partial<TaskFactLine>>> = {
+      accepted: { started: false, ended: false, reported: false, waiting: false, mayBeRunning: false },
+      started: { started: true, ended: false, reported: false, waiting: false, mayBeRunning: true },
+      resumed: { started: true, waiting: false, mayBeRunning: true },
+      waiting_user: { waiting: true, mayBeRunning: false },
+      result_archived: { ended: true, reported: true, mayBeRunning: false },
+      cancelled: { ended: true, mayBeRunning: false },
+      timed_out: { ended: true, mayBeRunning: false },
+      resource_limited: { ended: true, mayBeRunning: false },
+      ended: { ended: true, mayBeRunning: false },
     };
     assembled.taskRegistry.onTaskFact((fact) => {
-      taskFacts.push({ ts: fact.at, taskId: fact.taskId, ...(EVENT_FACTS[fact.event] ?? { liveness: null, ended: false, cancelled: false }) });
-      const kind = notificationKindForEvent(fact.event);
-      if (kind !== undefined) notifications.push({ ts: fact.at, taskId: fact.taskId, kind });
+      const base: TaskFactLine = { ts: fact.at, taskId: fact.taskId, started: true, ended: false, reported: false, waiting: false, mayBeRunning: false };
+      taskFacts.push({ ...base, ...(EVENT_FACTS[fact.event] ?? {}) });
+      if ((NOTIFICATION_KINDS as readonly string[]).includes(fact.event)) {
+        notifications.push({ ts: fact.at, taskId: fact.taskId, kind: fact.event });
+      }
     });
     try {
       const session = assembled.session;
@@ -242,8 +243,8 @@ export function createModelExecutor(options: ModelExecutorOptions = {}): BizExec
         metaTurns.push({ index: turn, durationMs, modelCalls: assistantMessages.length, taskIds: [...(result?.taskIds ?? [])], tokens, retries: 0, notes: [] });
         replies.push({ turn, text: result?.reply ?? '', sha256: '' });
       }
-      // S1：底账没有 status——证据快照只带账本事实 + 存活（唯一投影，与 spread-axis 同口径）。
-      tasksSnapshot = jsonSafe(assembled.taskRegistry.list().map((task) => ({ ...task, liveness: taskLivenessOf(task) ?? null }))) as TaskRecordJson[];
+      // 事实口径：底账没有 status——证据快照只带账本事实 + 启动/结束/汇报/等待/可能还在跑。
+      tasksSnapshot = jsonSafe(assembled.taskRegistry.list().map((task) => ({ ...task, started: taskStartedOf(task), reported: taskReportedOf(task), waiting: taskWaitingOf(task), mayBeRunning: taskMayBeRunningOf(task) }))) as TaskRecordJson[];
       // #8 会话隔离断言：底账任务必须全归本样本 principal（不串台）。
       const foreign = tasksSnapshot.filter((t) => t.principalId !== principalId);
       if (foreign.length > 0) throw new Error(`会话隔离违反：底账出现非本样本 principal 的任务 ${foreign.map((t) => t.taskId).join(',')}`);

@@ -94,7 +94,7 @@ Worker 的汇报必须是**结构化事实**，Main 据此套用统一话术—�
 | 按 `capability` group by 派生、不手写第二套（禁令 3 重点） | 已有守卫 | `capability-catalog.test.ts:18`（空清单 → 空目录）、`:22`、`:37`（加声明即多一条，篡改/写死常量表 → 红） |
 | Main 侧摘要 + `capabilities()` 只读、无 operation 名/参数 | 已有守卫 | `main-capability-surface.test.ts:59`、`:66`、`capability-catalog.test.ts:60`；`capability-catalog-assembly.test.ts:66` |
 | 未声明 `capability` 退化为现状 + 显式登记 | 已有守卫 | `capability-catalog-assembly.test.ts:66`（undeclared 事件 + 提示不变 + 无工具）、`:77` |
-| 宿主不再输出「答复五态」结论——做没做成由 Main 读执行事实判断（S1 删分类器） | 已有守卫（源码结构） | 旧 `classifyOutcome` / `renderOutcomeFact` 与用例已删；判据改读 `executions` 逐条（`scripts/eval/convergence-r1/judge.ts` 的 `noWriteExecuted`：写面单源过滤 + 终态机械时刻 fail-closed）；同名投影/换名字段由 `packages/agent/task-liveness-only.test.ts` 的形状族与类型结构判据拦（⑤/⑦/⑧） |
+| 宿主不再输出「答复五态」结论——做没做成由 Main 读执行事实判断（S1 删分类器） | 已有守卫（源码结构） | 旧 `classifyOutcome` / `renderOutcomeFact` 与用例已删；判据改读 `executions` 逐条（`scripts/eval/convergence-r1/judge.ts` 的 `noWriteExecuted`：写面单源过滤 + 终态机械时刻 fail-closed）；同名投影/换名字段由 `packages/agent/task-liveness-only.test.ts` 的形状族与类型结构判据拦（⑤/⑦/⑧）；任务级生命周期枚举（不允许出现存活三值/终止种类）由 `packages/agent/task-lifecycle-enum-guard.test.ts` 按形状拦（2026-11-23 删状态机轮） |
 | 部分完成（`partial`）逐项如实 | 未实现（无守卫） | 宿主分类器已删；底账 `ExecutionRecord` 无 `items`（`packages/agent/src/task-registry.ts:115-122`），宿主不再从底账投影判 partial；行为句 `packages/agent/src/execution-runtime.ts:569`。待补守卫：底账 items 落账 + partial 不说成成功 |
 | 办不了（`unsupported`）零执行、绝不提「再试一次」 | 已有守卫（用户级脚本模型） | `scripts/eval/wecom-sim/cases-l-outcome.test.ts:L-1 目录里没有的事`（零执行、说办不了、无重试诱导词）；结构化码 `packages/agent/src/task-outcome.ts:14` |
 | 缺条件（`blocked`）说「缺 X」+补法（只用结构化码，不扫文案） | 已有守卫（用户级脚本模型） | `scripts/eval/wecom-sim/cases-l-outcome.test.ts:L-2 目录里有但本次不允许`（零执行、说清缺什么、不说成办不了）；结构化码 `packages/agent/src/task-outcome.ts:13` |

@@ -203,7 +203,7 @@ export async function mu6Restart(rt: RuntimeConfig): Promise<MuCaseResult> {
     if (!noReplay) hardZeroHits.push('task_crossover');
 
     // ④ 结果找回：重启后经 Task Registry 取回首回合任务的真实结果（逐字）。
-    const resultRetrieval: Record<string, { taskId: string; liveness: string | null; reported: boolean; lastExecutionStatus: string | null; replyText: string | null; ok: boolean }> = {};
+    const resultRetrieval: Record<string, { taskId: string; started: boolean; waiting: boolean; mayBeRunning: boolean; reported: boolean; lastExecutionStatus: string | null; replyText: string | null; ok: boolean }> = {};
     for (const userId of MU_PRINCIPALS) {
       const task = tasksAfterRestart.find(
         (candidate) => candidate.principalId === principalIdOf(userId) && candidate.sessionId === sessionIdOf(`conv-${userId}`),
@@ -213,7 +213,7 @@ export async function mu6Restart(rt: RuntimeConfig): Promise<MuCaseResult> {
       const ok = task !== undefined && task.replyText === expected;
       resultRetrieval[userId] = {
         taskId: task?.taskId ?? '',
-        liveness: task?.liveness ?? null,
+        started: task?.started ?? false, waiting: task?.waiting ?? false, mayBeRunning: task?.mayBeRunning ?? false,
         reported: task?.reported ?? false,
         lastExecutionStatus: task?.lastExecutionStatus ?? null,
         replyText: task?.replyText ?? null,
@@ -271,7 +271,7 @@ export async function mu6Restart(rt: RuntimeConfig): Promise<MuCaseResult> {
         replies2: Object.fromEntries(replies2),
         tasksAfterRestart: tasksAfterRestart.map((task) => ({
           taskId: task.taskId, principalId: task.principalId, sessionId: task.sessionId,
-          request: task.request, liveness: task.liveness, reported: task.reported, lastExecutionStatus: task.lastExecutionStatus ?? null, replyText: task.replyText,
+          request: task.request, started: task.started, ended: task.ended, waiting: task.waiting, mayBeRunning: task.mayBeRunning, reported: task.reported, lastExecutionStatus: task.lastExecutionStatus ?? null, replyText: task.replyText,
         })),
       },
     });

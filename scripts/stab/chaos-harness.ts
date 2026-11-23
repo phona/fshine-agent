@@ -19,7 +19,7 @@ import type { NotificationOutbox } from '../../packages/agent/src/notifications'
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import type { TaskRecordView, TaskScope } from '../../packages/agent/src/task-runner';
 import type { TaskRecord } from '../../packages/agent/src/task-registry';
-import { taskLivenessOf } from '../../packages/agent/testing/task-facts';
+import { taskEndedOf, taskMayBeRunningOf, taskReportedOf } from '../../packages/agent/testing/task-facts';
 import { createServer } from '../../apps/server/server';
 import {
   ControllableClock,
@@ -125,13 +125,14 @@ function reportedOf(task: TaskRecordView | TaskRecord): boolean {
   return ((task as TaskRecord).resultText ?? (task as TaskRecord).replyText ?? '').trim() !== '';
 }
 
-function livenessOf(tasks: readonly TaskRecordView[], taskId: string): string | null {
+function mayBeRunningOf(tasks: readonly TaskRecordView[], taskId: string): boolean {
   const task = findTask(tasks, taskId);
-  return task === undefined ? null : taskLivenessOf(task) ?? null;
+  return task === undefined ? false : taskMayBeRunningOf(task);
 }
 
-function cancelledOf(tasks: readonly TaskRecordView[], taskId: string): boolean {
-  return findTask(tasks, taskId)?.termination?.kind === 'cancelled';
+function stoppedWithoutReportOf(tasks: readonly TaskRecordView[], taskId: string): boolean {
+  const task = findTask(tasks, taskId);
+  return task !== undefined && taskEndedOf(task) && !taskReportedOf(task);
 }
 
 // ---------------------------------------------------------------------------
@@ -226,8 +227,11 @@ async function runRestartNotificationScenario(scenario: ChaosScenario): Promise<
       .map((call) => call.taskId)
       .filter((taskId) => completedIds1.includes(taskId));
     report.leaseExpiredReplays = executor2.calls.filter((call) => {
+      // 排除用户确认取消的任务（取消也写结束事实；它不是租约过期重放）。
+      if (call.taskId === CANCEL_TASK_ID) return false;
       const task = findTask(tasks2, call.taskId);
-      return task?.termination?.kind === 'died'; // 结果未知（看门狗死亡事实）= result_unknown 的机械对应
+      // 结果未知（看门狗写结束事实、无汇报）= result_unknown 的机械对应
+      return task !== undefined && taskEndedOf(task) && !taskReportedOf(task);
     }).length;
     report.duplicateNotificationRows = notifications.duplicateRows;
     report.undeliveredNotifications = notifications.undelivered;
@@ -284,10 +288,10 @@ async function runCancelScenario(scenario: ChaosScenario): Promise<ChaosReport> 
         report.submitted += 1;
       }
       runner.pump();
-      await pollUntil(() => livenessOf(registry.list(scope), CANCEL_TASK_ID) === 'running', 10_000);
+      await pollUntil(() => mayBeRunningOf(registry.list(scope), CANCEL_TASK_ID), 10_000);
       runner.cancel(CANCEL_TASK_ID, scope);
       report.hung = !(await waitIdleWithTimeout(assembled));
-      report.cancelledConfirmed = cancelledOf(registry.list(scope), CANCEL_TASK_ID);
+      report.cancelledConfirmed = stoppedWithoutReportOf(registry.list(scope), CANCEL_TASK_ID);
       await driveDeliveries(outbox, clock);
     } finally {
       assembled.close();
@@ -430,10 +434,10 @@ async function runCombinedWithDuplicate(scenario: ChaosScenario): Promise<ChaosR
         runner.submit({ taskId: CANCEL_TASK_ID, principalId: serverScope.principalId, sessionId: serverScope.sessionId, request: REQUEST });
         report.submitted += 1;
         runner.pump();
-        await pollUntil(() => livenessOf(registryB.list(serverScope), CANCEL_TASK_ID) === 'running', 10_000);
+        await pollUntil(() => mayBeRunningOf(registryB.list(serverScope), CANCEL_TASK_ID), 10_000);
         runner.cancel(CANCEL_TASK_ID, serverScope);
         idle2 = await waitIdleWithTimeout(assembledB);
-        report.cancelledConfirmed = cancelledOf(registryB.list(serverScope), CANCEL_TASK_ID);
+        report.cancelledConfirmed = stoppedWithoutReportOf(registryB.list(serverScope), CANCEL_TASK_ID);
       }
       report.hung = !(idle1 && idle2);
       await driveDeliveries(outboxB, clock);
@@ -451,8 +455,10 @@ async function runCombinedWithDuplicate(scenario: ChaosScenario): Promise<ChaosR
       .map((call) => call.taskId)
       .filter((taskId) => completedIdsA.includes(taskId));
     report.leaseExpiredReplays = executorB.calls.filter((call) => {
+      if (call.taskId === CANCEL_TASK_ID) return false;
       const task = findTask(tasksB, call.taskId);
-      return task?.termination?.kind === 'died'; // 结果未知（看门狗死亡事实）= result_unknown 的机械对应
+      // 结果未知（看门狗写结束事实、无汇报）= result_unknown 的机械对应
+      return task !== undefined && taskEndedOf(task) && !taskReportedOf(task);
     }).length;
     report.duplicateNotificationRows = notifications.duplicateRows;
     report.undeliveredNotifications = notifications.undelivered;

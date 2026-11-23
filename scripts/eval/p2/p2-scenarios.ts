@@ -182,7 +182,7 @@ const S2: P2CaseDefinition = {
     + '（a）把 beta 事实判据下移到结果取回轮，或（b）允许 beta 走 inline 子路径。本实现按预注册字面保留判据并登记冲突（不擅自改口径）。',
   coverage: (obs) => {
     const first = obs.taskTurns[0]?.tasks.find((task) => task.request.includes('alpha'));
-    const nonTerminal = first !== undefined && (taskIsUnstarted(first) || first.liveness === 'running');
+    const nonTerminal = first !== undefined && (taskIsUnstarted(first) || first.mayBeRunning);
     const releaseSeq = Number(obs.extras['gateReleaseSeq'] ?? -1);
     const t2DoneSeq = Number(obs.extras['t2DoneSeq'] ?? -1);
     const alphaFinal = obs.tasksFinal.find((task) => task.request.includes('alpha'));
@@ -307,14 +307,14 @@ const S4: P2CaseDefinition = {
   truth: { facts: [] },
   coverage: (obs) => {
     const cancelCalled = obs.taskTurns[1]?.cancelCalled === true;
-    const cancelled = obs.tasksFinal.some((task) => task.cancelled);
+    const cancelled = obs.tasksFinal.some((task) => task.ended && !task.reported);
     return coverageOf('S4', cancelCalled && cancelled, { cancelCalled, cancelled },
       cancelCalled && cancelled ? [] : ['取消路径须真实走通（task_cancel 且出现 cancelled 状态）']);
   },
   checks: (obs) => {
     const tasks = tasksOfRef(obs);
     const beta = tasks.find((task) => task.request.includes('beta') && taskIsDone(task));
-    const cancelled = tasks.find((task) => task.cancelled);
+    const cancelled = tasks.find((task) => task.ended && !task.reported);
     const betaOnlyOk = obs.execRecords
       .filter((record) => record.requestId === beta?.requestIds[0] || (beta?.requestIds.includes(record.requestId) ?? false))
       .every((record) => record.collection === 'beta');
@@ -542,7 +542,7 @@ const S7B: P2CaseDefinition = {
   ],
   truth: { facts: [] },
   coverage: (obs) => {
-    const timedOut = obs.tasksFinal.some((task) => task.timedOut);
+    const timedOut = obs.tasksFinal.some((task) => task.ended && !task.reported && !task.mayBeRunning);
     return coverageOf('S7b', obs.mode === 'background' && timedOut, {
       mode: obs.mode,
       tasksFinal: obs.tasksFinal.map((task) => taskFactBrief(task)),
@@ -555,7 +555,7 @@ const S7B: P2CaseDefinition = {
     return [
       {
         name: 'task_timed_out',
-        pass: task !== undefined && task.timedOut,
+        pass: task !== undefined && task.ended && !task.reported && !task.mayBeRunning,
         detail: `status=${task === undefined ? 'missing' : taskFactBrief(task)}`,
         hardZero: true,
       },
@@ -946,7 +946,7 @@ async function runS4(dir: string, trial: number): Promise<P2Observation> {
     onServerReady: (handle) => { ref.handle = handle; },
     afterSend: async (turn) => {
       if (turn !== 2) return;
-      await waitForTasks(ref.handle!.dbPath, (tasks) => tasks.some((task) => task.cancelled), 3000);
+      await waitForTasks(ref.handle!.dbPath, (tasks) => tasks.some((task) => task.ended && !task.reported), 3000);
     },
     afterRun: async (handle) => {
       release?.();
@@ -1272,7 +1272,7 @@ async function runS7b(dir: string, trial: number): Promise<P2Observation> {
     onServerReady: (handle) => { ref.handle = handle; },
     afterSend: async (turn) => {
       if (turn !== 1) return;
-      await waitForTasks(ref.handle!.dbPath, (tasks) => tasks.some((task) => task.timedOut), 10_000);
+      await waitForTasks(ref.handle!.dbPath, (tasks) => tasks.some((task) => task.ended && !task.reported && !task.mayBeRunning), 10_000);
     },
     extras: (handle) => ({ taskSnapshots: readTasks(handle.dbPath) }),
   });

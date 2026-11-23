@@ -1,19 +1,20 @@
 /**
- * 绊线：task 没有 status/outcome，只留 liveness（宿主守护状态）与账本事实。
+ * 绊线：task 没有 status/outcome，也没有任何任务级生命周期枚举（2026-11-23 删状态机轮）：
+ * 只留账本事实与布尔事实谓词（仍在推进 / 等待 / 可能还在跑）。
  *
- * 设计见 docs/design/task-redefinition.md：task = 账本事实 + liveness + worker 汇报。
- * §3 明确**唯一保留的投影是 liveness 三值**（running/died/waiting_user）；任何把账本事实
- * 投影成一个「任务级状态词」的中间层都必须删。
+ * 设计见 docs/design/task-redefinition.md：task = 账本事实 + 布尔事实谓词 + worker 汇报。
+ * 「liveness 三值」已删；任何把账本事实投影成一个「任务级状态词/多值生命周期枚举」的
+ * 中间层都必须删（新守卫：packages/agent/task-lifecycle-enum-guard.test.ts）。
  *
  * 本守卫是**结构性判据**（不是精确名列表——改名搬移的同形函数一律拦）：
  *   ① 名字族：一个函数名里同时出现 `task` 与 `status/state/outcome`，且自身 return 出任务
  *      生命周期词 → 命中（taskStatusOf / observedTaskStatusOf / muTaskStateOf / TaskStateWord …）；
- *   ② 形状族：一个函数读了 ≥3 个账本事实字段（cancelledAt/diedAt/timedOutAt/resourceLimitedAt/
- *      pendingQuestion/runningSince/leaseUntil/resultText/replyText/executions），又 return 出 ≥2 个
- *      **生命周期独有词**（queued/running/waiting_user/died/cancelled/timed_out/resource_limited；
- *      不含与执行行/答复集重叠的 completed/failed）→ 命中——这正是「账本事实 → 多态任务状态词」
- *      投影的形状。唯一按 (file,name) 精确放行的是设计 §3 指定的 `taskLivenessOf`（liveness 三值）；
- *      把只 return {completed,failed} 的**成败分类器**列为已登记局限（见 ④ 末段，不装没看见）。
+ *   ② 形状族：一个函数读了 ≥3 个账本事实字段（endedAt/executions/pendingQuestion/runningSince/
+ *      leaseUntil/resultText/replyText），又 return 出 ≥2 个**生命周期独有词**
+ *      （queued/running/waiting_user/died/cancelled/timed_out/resource_limited；不含与执行行/
+ *      答复集重叠的 completed/failed）→ 命中——这正是「账本事实 → 多态任务状态词」投影的形状。
+ *      已无任何按 (file,name) 放行的 liveness 投影；把只 return {completed,failed} 的
+ *      **成败分类器**列为已登记局限（见 ④ 末段，不装没看见）。
  *   ③ task_status 投影只返回 liveness + 账本事实，键名不得出现 status/state/outcome。
  *   ④ 反向绊线：把同形投影重新放进源码，扫描器必须报红（证明守卫不是永绿）。
  */
@@ -45,16 +46,19 @@ const LIFECYCLE_WORDS = new Set([
 
 /** 账本事实字段名（宿主守护事实 + 汇报存档 + 执行清单）。 */
 const LEDGER_FACT_NAMES = new Set([
-  'cancelledAt',
-  'timedOutAt',
-  'resourceLimitedAt',
-  'diedAt',
+  // 现行事实
+  'endedAt',
   'pendingQuestion',
   'runningSince',
   'leaseUntil',
   'resultText',
   'replyText',
   'executions',
+  // 已删的终态列名（旧投影换名/考古时仍要按「读事实」形状拦）
+  'cancelledAt',
+  'timedOutAt',
+  'resourceLimitedAt',
+  'diedAt',
 ]);
 
 /** 生命周期**独有**词（去掉 completed/failed——它们与执行行/答复集的成败词重叠，合法分类器也会用）。 */
@@ -64,13 +68,7 @@ const LIFECYCLE_ONLY_WORDS = new Set([...LIFECYCLE_WORDS].filter((word) => word 
 const SHAPE_LIFECYCLE_ONLY_THRESHOLD = 2;
 const SHAPE_FACT_THRESHOLD = 3;
 
-/**
- * 唯一允许的投影：`packages/agent/src/task-registry.ts` 的 `taskLivenessOf`（设计 §3 指定的
- * liveness 三值）。它同样读账本事实、return running/died/waiting_user，形状上和「被禁投影」同形，
- * 所以按 (file, name) 精确放行；改名搬移它到别处或换名会重新落入形状族而被拦。
- */
-const CANONICAL_LIVENESS_FILE = 'packages/agent/src/task-registry.ts';
-const CANONICAL_LIVENESS_NAME = 'taskLivenessOf';
+/** 已无可放行的 liveness 投影（2026-11-23 删状态机轮）：任何同形投影都落入形状族被拦。 */
 
 /** 名字族：函数名里 `task` 与 `status|state|outcome` 同现（大小写敏感的 CamelCase 段）。 */
 const TASK_WORD_NAME_RE = /[Tt]ask[A-Za-z_$]*(?:Status|State|Outcome)|(?:Status|State|Outcome)[A-Za-z_$]*?[Tt]ask/;
@@ -157,8 +155,7 @@ export function findForbiddenProjections(sources: ReadonlyMap<string, string>): 
           hits.push({ file, hit: `name:${name}(${[...words].sort().join(',')})` });
         }
         const lifecycleOnly = [...words].filter((word) => LIFECYCLE_ONLY_WORDS.has(word));
-        const isCanonicalLiveness = file.split(path.sep).join('/') === CANONICAL_LIVENESS_FILE && name === CANONICAL_LIVENESS_NAME;
-        if (!isCanonicalLiveness && lifecycleOnly.length >= SHAPE_LIFECYCLE_ONLY_THRESHOLD && facts.size >= SHAPE_FACT_THRESHOLD) {
+        if (lifecycleOnly.length >= SHAPE_LIFECYCLE_ONLY_THRESHOLD && facts.size >= SHAPE_FACT_THRESHOLD) {
           hits.push({ file, hit: `shape:${name ?? '<anonymous>'}(${[...words].sort().join(',')})` });
         }
       }
@@ -185,9 +182,10 @@ describe('删投影：只留 liveness + 账本事实', () => {
     expect(existsSync(path.join(ROOT, 'scripts/eval/task-observation.ts'))).toBe(false);
   });
 
-  it('② task-registry 只导出 liveness 三值，没有状态词/状态枚举', () => {
+  it('② task-registry 不再导出 liveness 三值/状态词/状态枚举', () => {
     const source = readFileSync(path.join(ROOT, 'packages/agent/src/task-registry.ts'), 'utf8');
-    expect(source).toContain("export type TaskLiveness = 'running' | 'died' | 'waiting_user';");
+    expect(source).not.toMatch(/export type TaskLiveness\b/u);
+    expect(source).not.toMatch(/taskLivenessOf/u);
     expect(source).not.toMatch(/export type TaskStateWord/u);
     expect(source).not.toMatch(/export (type|enum) Task(State|Status)\b/u);
   });
@@ -270,18 +268,18 @@ describe('删投影：只留 liveness + 账本事实', () => {
     ]));
     expect(shortProjection.some((hit) => hit.hit.startsWith('shape:'))).toBe(true);
 
-    // 负例对照一类：liveness 投影（唯一允许的投影）不得报红——按 (file,name) 精确放行。
+    // 反向绊线：被删的 liveness 三值投影放回来，扫描器必须报红（已无放行名单）。
     const livenessOnly = findForbiddenProjections(new Map([
       ['packages/agent/src/task-registry.ts', `
         export type TaskLiveness = 'running' | 'died' | 'waiting_user';
-        export function taskLivenessOf(task: { cancelledAt?: string; diedAt?: string; pendingQuestion?: unknown }): TaskLiveness | undefined {
-          if (task.cancelledAt !== undefined) return undefined;
-          if (task.diedAt !== undefined) return 'died';
+        export function taskLivenessOf(task: { endedAt?: string; pendingQuestion?: unknown; resultText?: string }): TaskLiveness | undefined {
+          if (task.endedAt !== undefined) return undefined;
+          if (task.resultText !== undefined) return undefined;
           if (task.pendingQuestion !== undefined) return 'waiting_user';
           return 'running';
         }`],
     ]));
-    expect(livenessOnly).toEqual([]);
+    expect(livenessOnly.some((hit) => hit.hit.startsWith('shape:'))).toBe(true);
 
     // 负例对照二类：产品工具 / 执行层类型（名字含 task+status/outcome，但不是账本投影）不得报红。
     const product = findForbiddenProjections(new Map([

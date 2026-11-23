@@ -1,14 +1,14 @@
 /**
  * 存活（liveness）反向绊线：长任务「已受理、等回执」不是已收尾。
  *
- * 零状态：task 没有状态列；长任务受理后租约被释放，底账只剩 running_since + 末条执行行
+ * 事实模型：task 没有状态列；长任务受理后租约被释放，底账只剩 running_since + 末条执行行
  * （status=accepted）。2026-11-22 Grok 复审：旧投影只看租约 → accepted 长任务被读成
  * 「已启动但无汇报收尾」的 failed，生产 task_run 短等待窗口把「failed」交给模型（诱导重交办）。
- * 修复：末条执行 = accepted（无终局、无汇报）→ liveness running。
- * 「做没做成」不再投影成状态词：测试只读 liveness 三值与账本事实（执行行 / 汇报存档 / 终止事件）。
+ * 修复：末条执行 = accepted（无终局、无汇报）→ 「可能还在跑」为真。
+ * 「做没做成」不投影成状态词：测试只读布尔事实（执行行 / 汇报存档 / 结束事实）。
  */
 import { describe, expect, it } from 'vitest';
-import { createTaskRegistry, stillProgressingOf, taskLivenessOf } from './src/task-registry';
+import { createTaskRegistry, stillProgressingOf, taskMayBeRunningOf, taskWaitingOf } from './src/task-registry';
 import { archivedReportOf, lastExecutionOf } from './testing/task-facts';
 
 const ACCEPTED = [{ status: 'accepted' }] as const;
@@ -21,10 +21,8 @@ describe('仍在推进的唯一谓词（stillProgressingOf）', () => {
     expect(stillProgressingOf({ leaseUntil: '2999-01-01T00:00:00.000Z' })).toBe(true);
   });
 
-  it('终止事件（任一 kind）在场 = 不在推进', () => {
-    for (const kind of ['died', 'cancelled', 'timed_out', 'resource_limited', 'round_failed', 'completed'] as const) {
-      expect(stillProgressingOf({ ...started, termination: { kind, at: '2026-11-22T00:01:00.000Z' } }), kind).toBe(false);
-    }
+  it('结束事实（没有种类）在场 = 不在推进', () => {
+    expect(stillProgressingOf({ ...started, endedAt: '2026-11-22T00:01:00.000Z' })).toBe(false);
   });
 
   it('汇报存档（resultText 或 replyText）/ 等待形状 = 不在推进', () => {
@@ -42,14 +40,14 @@ describe('仍在推进的唯一谓词（stillProgressingOf）', () => {
     expect(stillProgressingOf({ executions: ACCEPTED, resultText: '办完了。' })).toBe(false);
     expect(stillProgressingOf({
       executions: ACCEPTED,
-      termination: { kind: 'round_failed', at: '2026-11-22T00:01:00.000Z' },
+      endedAt: '2026-11-22T00:01:00.000Z',
     })).toBe(false);
   });
 });
 
 describe('存活（liveness）：长任务 accepted（受理中）', () => {
   it('末条执行 accepted、无租约 → running（不是 undefined）', () => {
-    expect(taskLivenessOf({ executions: ACCEPTED })).toBe('running');
+    expect(taskMayBeRunningOf({ executions: ACCEPTED })).toBe(true);
   });
 
   it('已存档汇报的长任务（末条仍 accepted + resultText）→ 不是存活（已收尾），汇报原文在', () => {
@@ -60,7 +58,7 @@ describe('存活（liveness）：长任务 accepted（受理中）', () => {
       executions: ACCEPTED,
     } as const;
     expect(archivedReportOf(reported)).toBeDefined();
-    expect(taskLivenessOf(reported)).toBeUndefined();
+    expect(taskMayBeRunningOf(reported)).toBe(false);
   });
 
   it('已存档汇报的长任务（末条仍 accepted + replyText 存档面）→ 同样不是存活', () => {
@@ -69,7 +67,7 @@ describe('存活（liveness）：长任务 accepted（受理中）', () => {
       executions: ACCEPTED,
     } as const;
     expect(archivedReportOf(reported)).toBeDefined();
-    expect(taskLivenessOf(reported)).toBeUndefined();
+    expect(taskMayBeRunningOf(reported)).toBe(false);
   });
 
   it('已存档汇报的短任务（末条 completed + 汇报）→ 汇报原文在（不被 accepted 分支误判）', () => {
@@ -83,24 +81,24 @@ describe('存活（liveness）：长任务 accepted（受理中）', () => {
     } as never)?.status).toBe('failed');
   });
 
-  it('终止事件（died）在场 → 已结束（不翻案）', () => {
-    expect(taskLivenessOf({
-      termination: { kind: 'died', at: '2026-11-22T00:01:00.000Z' },
+  it('结束事实在场 → 不可能还活着（不翻案）', () => {
+    expect(taskMayBeRunningOf({
+      endedAt: '2026-11-22T00:01:00.000Z',
       executions: ACCEPTED,
-    })).toBeUndefined();
+    })).toBe(false);
   });
 
-  it('终止事件 / 汇报存档在场时即使租约未过期也不算 running', () => {
+  it('结束事实 / 汇报存档在场时即使租约未过期也不算可能还活着', () => {
     const running = { runningSince: '2026-11-22T00:00:00.000Z', leaseUntil: '2999-01-01T00:00:00.000Z' } as const;
-    expect(taskLivenessOf(running)).toBe('running');
-    expect(taskLivenessOf({ ...running, termination: { kind: 'round_failed', at: '2026-11-22T00:01:00.000Z' } })).toBeUndefined();
-    expect(taskLivenessOf({ ...running, resultText: '办完了。' })).toBeUndefined();
-    expect(taskLivenessOf({ ...running, replyText: '办完了。' })).toBeUndefined();
+    expect(taskMayBeRunningOf(running)).toBe(true);
+    expect(taskMayBeRunningOf({ ...running, endedAt: '2026-11-22T00:01:00.000Z' })).toBe(false);
+    expect(taskMayBeRunningOf({ ...running, resultText: '办完了。' })).toBe(false);
+    expect(taskMayBeRunningOf({ ...running, replyText: '办完了。' })).toBe(false);
   });
 });
 
 describe('createTaskRegistry().listRunning（内存实现与 SQLite 同口径）', () => {
-  it('汇报存档（resultText/replyText）或 round_failed 终止事件的行不再被算作「在跑」', () => {
+  it('汇报存档（resultText/replyText）或结束事实的行不再被算作「在跑」', () => {
     const registry = createTaskRegistry();
     const scope = { principalId: 'p', sessionId: 's' };
     for (const taskId of ['live', 'done_result', 'done_reply', 'no_report']) {
@@ -108,7 +106,7 @@ describe('createTaskRegistry().listRunning（内存实现与 SQLite 同口径）
     }
     registry.setResultText('done_result', '完成汇报。');
     registry.archiveReply(['done_reply'], 'Main 回复存档。');
-    registry.noteRoundFailed('no_report');
+    registry.noteRoundEnded('no_report');
     expect(registry.listRunning().map((task) => task.taskId)).toEqual(['live']);
   });
 });

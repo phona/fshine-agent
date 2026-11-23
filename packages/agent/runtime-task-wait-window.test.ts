@@ -12,7 +12,7 @@
  * 反向绊线（新口径）：b/d 的 `not.toHaveProperty('notice')` 即绊线——把受理回执话术塞回工具结果必红。
  * 零网络、零真实模型：假执行器 + 脚本化 Main 驱动 + 注入时钟（now/sleep 两原语，非定时器框架）。
  */
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { describe, expect, it } from 'vitest';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { TurnDriver } from './src/driver-contract';
@@ -172,7 +172,7 @@ describe('B 切片：task_run 短等待窗口（工单回执收敛）', () => {
       const receipt = results[0] as Record<string, unknown>;
       // 受理只回机械事实：accepted + status（owner 2026-11-19：交办不再给固定回执话术）
       expect(receipt['accepted']).toBe(true);
-      expect(receipt['liveness']).toBe('running');
+      expect(receipt['started']).toBe(true);
       expect(receipt).not.toHaveProperty('notice');
       // 回执去编号：受理事实不带 taskNo（编号只在任务列表/详情面）；taskId/name 仍给机械事实
       expect(receipt).not.toHaveProperty('taskNo');

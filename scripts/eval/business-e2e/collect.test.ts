@@ -27,7 +27,7 @@ const TOOL_CALLS: ToolCallRecord[] = [
   { turn: 0, agent: 'worker', seq: 0, tool: 'execute_operation', args: { operation: 'dummy.query', args: { collection: 'alpha' } }, result: { status: 'completed' }, startedAt: '2026-11-14T00:00:01Z', elapsedMs: 50 },
 ];
 const TASK: TaskRecordJson = {
-  taskId: 'task-1', principalId: 'p1', sessionId: 's1', request: 'query alpha W1', liveness: null,
+  taskId: 'task-1', principalId: 'p1', sessionId: 's1', request: 'query alpha W1', started: true, endedAt: '2026-11-14T00:00:02Z',
   executions: [{ requestId: 'req-1', operation: 'dummy.query', status: 'completed' }],
   createdAt: '2026-11-14T00:00:00Z', updatedAt: '2026-11-14T00:00:02Z',
 };
@@ -44,8 +44,8 @@ const SAMPLE: SampleRecord = {
   observations: { taskSplitCount: 1, toolCallOrder: ['delegate', 'execute_operation'], planReportedFirst: true },
 };
 const TASK_FACTS = [
-  { ts: '2026-11-14T00:00:00Z', taskId: 'task-1', liveness: 'running' as const, ended: false, cancelled: false },
-  { ts: '2026-11-14T00:00:02Z', taskId: 'task-1', liveness: null, ended: true, cancelled: false },
+  { ts: '2026-11-14T00:00:00Z', taskId: 'task-1', started: true, ended: false, reported: false, waiting: false, mayBeRunning: true },
+  { ts: '2026-11-14T00:00:02Z', taskId: 'task-1', started: true, ended: true, reported: false, waiting: false, mayBeRunning: false },
 ];
 const NOTIFICATIONS = [{ ts: '2026-11-14T00:00:02Z', taskId: 'task-1', kind: 'task-completed' }];
 const AUDIT_LINES = ['{"mode":"query","script":"dummy.query","exitCode":0}'];

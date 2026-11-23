@@ -41,7 +41,7 @@ import type { TurnDriver, TurnDriverInput } from '../../../packages/agent/src/dr
 import { createResourcePolicy } from '../../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
 import { type TaskScope } from '../../../packages/agent/src/task-registry';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import {
   assembleSessionCore,
@@ -420,11 +420,11 @@ async function run(): Promise<void> {
     const pumpAfter = dispatch.runner.pump();
     await dispatch.runner.whenIdle();
     partE['mechanical'] = {
-      submittedStatus: taskLivenessOf(mechTask) ?? null,
+      submittedFacts: { started: taskStartedOf(mechTask), reported: taskReportedOf(mechTask), waiting: taskWaitingOf(mechTask), mayBeRunning: taskMayBeRunningOf(mechTask) },
       cancelOutcome,
       pumpAfter,
       inFlightAfter: [...dispatch.runner.inFlight()],
-      taskStatusAfter: taskLivenessOf(registry.get(mechTask.taskId, scope)) ?? null,
+      taskFactsAfter: (() => { const t = registry.get(mechTask.taskId, scope); return { started: taskStartedOf(t), reported: taskReportedOf(t), waiting: taskWaitingOf(t), mayBeRunning: taskMayBeRunningOf(t) }; })(),
       taskReasonAfter: lastFailureOf(registry.get(mechTask.taskId, scope))?.error?.code ?? null,
     };
     partE['sessionTasksFinal'] = JSON.parse(JSON.stringify(session.tasks()));

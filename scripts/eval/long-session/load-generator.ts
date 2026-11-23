@@ -27,7 +27,7 @@ export type TurnKind = 'establish' | 'fact' | 'task' | 'interaction' | 'pump' | 
 /** 任务账本里「哪一个任务」的机械事实期望（oldest = 最早创建，latest = 最新创建）。 */
 export interface TaskFactPick {
   readonly which: 'oldest' | 'latest';
-  /** 机械事实标签（'reported'/'cancelled'/'running'/'exec:failed' …，见 oracle 的 taskHasFact）。 */
+  /** 机械事实标签（'reported'/'stopped'/'progressing'/'exec:failed' …，见 oracle 的 taskHasFact）。 */
   readonly facts: readonly string[];
 }
 
@@ -127,10 +127,10 @@ function ls1Facts(): Omit<TurnSpec, 'index'>[] {
 function ls2Turns(): Omit<TurnSpec, 'index'>[] {
   return [
     { kind: 'task', text: '帮我开一个大任务：核对 alpha 和 beta 的记录，逐项说明。', expectTaskFact: 'reported' },
-    { kind: 'task', text: '把刚才那个 alpha/beta 核对任务取消掉，不要做了。', expectTaskFact: 'cancelled' },
+    { kind: 'task', text: '把刚才那个 alpha/beta 核对任务取消掉，不要做了。', expectTaskFact: 'stopped' },
     { kind: 'task', text: '再开一个任务：查 empty-one W1 的记录。', expectTaskFact: 'reported' },
     { kind: 'task', text: '再开一个任务：查 faulty-one W1 的记录。', expectTaskFact: 'exec:failed' },
-    { kind: 'task', text: '把正在执行的任务再报一次状态，别重复建任务。', expectTaskFact: 'running' },
+    { kind: 'task', text: '把正在执行的任务再报一次状态，别重复建任务。', expectTaskFact: 'progressing' },
     { kind: 'task', text: '第一个和第二个任务的编号分别是多少？结果对应哪个对象？' },
   ];
 }

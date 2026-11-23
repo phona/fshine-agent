@@ -31,7 +31,7 @@ import type { DriverMessage, TurnDriver } from '../packages/agent/src/driver-con
 import type { Notification, NotificationSink } from '../packages/agent/src/notifications';
 import { renderNotification } from '../packages/agent/src/notification-render';
 import { assembleSessionCore } from './ask-runtime';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../packages/agent/testing/task-facts';
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform');
@@ -253,7 +253,7 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
       const status = receiptOf(fixture.records[1]!);
       expect(status['taskId']).toBe(taskId);
       expect(status).not.toHaveProperty('taskNo');
-      expect(status['liveness']).toBe('waiting_user');
+      expect(status['waiting']).toBe(true);
       expect(status['pendingQuestion']).toEqual({
         missing: ['collection "contoso" 有多个候选：contracts / documents'],
       });

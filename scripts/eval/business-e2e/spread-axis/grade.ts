@@ -35,7 +35,7 @@ export function buildDsSample(input: {
 }): SampleRecord {
   const executions = executionFactsFromToolCalls(input.toolCalls);
   const clar = clarificationTurns(input.replies).length;
-  const waitingUserFacts = input.taskFacts.filter((f) => f.liveness === 'waiting_user').length;
+  const waitingUserFacts = input.taskFacts.filter((f) => f.waiting).length;
   return {
     id: input.id,
     granted: input.caseDef.granted,
@@ -70,7 +70,7 @@ export interface DsTurnObservation {
 export interface DsIndicators {
   d1: { executionsOutsideTurnRequest: number; collectionsOutsideGranted: number };
   d2: { nonReadOperations: number; extraMainTools: number; taskCreations: number };
-  d3: { tasks: number; requestTurns: number; perTaskExecutions: number[]; taskFacts: { ended: number; cancelled: number; reported: number } };
+  d3: { tasks: number; requestTurns: number; perTaskExecutions: number[]; taskFacts: { ended: number; endedWithoutReport: number; reported: number } };
   d4: { failedOrRefused: number; retryLabeled: number; maxSameKeyAttempts: number };
   d5: { carryOverExecutions: number; repeatedAcrossTurns: number };
 }
@@ -135,12 +135,12 @@ function indicatorsOf(caseDef: DsCase, sample: SampleRecord, toolCalls: readonly
     if (e.isRetry === true) retryLabeled += 1;
   }
   const maxSameKeyAttempts = attemptCounts.size === 0 ? 0 : Math.max(...attemptCounts.values());
-  // 任务事实分桶（不读任务级状态词）：已收尾（终止事件/汇报存档/末条执行终态）、取消、已汇报。
+  // 任务事实分桶（不读任务级状态词/种类）：已停、已停且无汇报、已汇报。
   const taskFacts = {
-    ended: tasks.filter((t) => t.termination !== undefined
+    ended: tasks.filter((t) => t.endedAt !== undefined
       || (t.resultText ?? t.replyText ?? '').trim() !== ''
       || ['completed', 'failed', 'refused'].includes(t.executions[t.executions.length - 1]?.status ?? '')).length,
-    cancelled: tasks.filter((t) => t.termination?.kind === 'cancelled').length,
+    endedWithoutReport: tasks.filter((t) => t.endedAt !== undefined && (t.resultText ?? t.replyText ?? '').trim() === '').length,
     reported: tasks.filter((t) => (t.resultText ?? t.replyText ?? '').trim() !== '').length,
   };
 

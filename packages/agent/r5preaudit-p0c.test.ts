@@ -99,8 +99,8 @@ class AuditRegistry implements TaskRegistryPort {
   // --- TaskRegistryPort（S1 事实写入面；测试替身仍以状态词建模供本文件断言） ---
   markCancelled(taskId: string): TaskRecordView { return this.transition(taskId, 'cancelled'); }
   markTimedOut(taskId: string, _kind?: unknown): TaskRecordView { return this.transition(taskId, 'timed_out'); }
-  markDied(taskId: string): TaskRecordView { return this.transition(taskId, 'failed'); }
-  noteRoundFailed(taskId: string): void { this.transition(taskId, 'failed'); }
+  markLeaseExpired(taskId: string): TaskRecordView { return this.transition(taskId, 'failed'); }
+  noteRoundEnded(taskId: string): void { this.transition(taskId, 'failed'); }
   archiveReply(taskIds: readonly string[], replyText: string): void {
     for (const taskId of taskIds) {
       const task = this.tasks.get(taskId);

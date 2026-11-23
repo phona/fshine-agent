@@ -24,7 +24,7 @@ import type {
 import type { DriverMessage, TurnDriver } from '../packages/agent/src/driver-contract';
 import type { ExecutionEvent } from '../packages/agent/src/execution-runtime';
 import { assembleSessionCore } from './ask-runtime';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../packages/agent/testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../packages/agent/testing/task-facts';
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform');
@@ -202,7 +202,7 @@ describe('长任务异步·装配接线', () => {
       const taskId = fx.assembled.taskRegistry.list({ principalId: SCOPE.principalId, sessionId: SCOPE.sessionId })[0]!.taskId;
       const accepted = fx.assembled.taskRegistry.get(taskId, SCOPE);
       // accepted 不是失败：任务仍在飞，但租约已清（等待期间不得被 expireLeases 判 result_unknown）。
-      expect(taskLivenessOf(accepted)).toBe('running');
+      expect(taskMayBeRunningOf(accepted)).toBe(true);
       expect(accepted.leaseUntil).toBeUndefined();
       expect(fx.client.executeCalls).toHaveLength(1);
       expect(fx.client.waitCalls).toEqual(['op-1']);

@@ -10,7 +10,7 @@
  *   ④ 能力快照与允许集合不一致 / 允许集合为空 → 构造即失败（fail-closed）；
  *   ⑤ 任务归属：越权 scope 取任务被拒（TaskOwnershipError）。
  */
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

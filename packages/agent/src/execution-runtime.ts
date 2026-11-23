@@ -86,7 +86,7 @@ import {
 import type { TaskExecutionBridge, TaskExecutionBridgeFactory } from './task-file-bridge';
 import { READ_SKILL_TOOL, type SkillRegistry } from './skills';
 import { stripServerPaths } from './server-paths';
-import { createTaskRegistry, deriveTaskName, DispatchConflictError, stillProgressingOf, taskEndedOf, taskLivenessOf, taskUnstartedOf, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope, type TaskTerminationKind } from './task-registry';
+import { createTaskRegistry, deriveTaskName, DispatchConflictError, stillProgressingOf, taskEndedOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
 import {
   DEFAULT_RUNTIME_CONFIG,
   taskFailureReasonFor,
@@ -1015,53 +1015,36 @@ export type TurnRetryAllowed = RetryAllowed;
 export type TurnRetryBlock = RetryBlock;
 
 /**
- * 本回合等待窗口观察到的任务终态（缺陷 A，2026-11-21 live）。
+ * 本回合等待窗口观察到的、**已在回执里如实说出**的落定事实（缺陷 A，2026-11-21 live）。
  *
- * 判据是机械的：只有回合**自己观察到**的落定才算——当前唯一写入点是 task_cancel
- * 的落定窗口（见 taskCancel）；task_run 短等待窗口捕获的非完成终态走既有
- * pushSuppressedTaskIds 路径，不进本列表。回合外落定
- * （后台完成/重启对账/长任务结束）不进这个列表，状态变化唤醒照发。
- * 只有本回合**如实说出**且值得一次性核销的终态进列：cancelled / completed。
- * 失败类终态（round_failed/died）即使在本回合落定也**不**写入——失败唤醒必须照发，
- * 不许被取消路径伪装成 completed 后核销；timed_out/resource_limited 没有唤醒出口，不观察。
+ * 观察项带的是**唤醒出口**，不是任务状态：本回合已经说过「停了/有结果了」，对应出口的
+ * 一次唤醒可以核销；失败/超时/资源拒绝没有可核销的等价出口（失败唤醒必须照发）。
+ * 判据是机械的：只有回合自己观察到的落定才算（当前唯一写入点是 task_cancel 的落定窗口）。
  */
-export type TurnTerminalKind = 'cancelled' | 'completed' | 'failed';
+export type TurnTerminalWake = 'task_cancel_wake' | 'task_completion_wake';
 
 export interface TurnTerminalObservation {
   taskId: string;
-  kind: TurnTerminalKind;
+  wake: TurnTerminalWake;
 }
 
 /**
- * 已结束任务的终止事实种类：终止事件优先（零状态唯一持久来源）；旧只读库没有事件账时，
- * 汇报存档在场按 completed 回落（事实是「有汇报」，不伪造其它种类）。找不到结束事实
- * 返回 undefined（调用方如实说「结果未知」，不猜成 completed）。
+ * 已结束任务的**事实**读数（不返回种类词）：
+ *   · 有汇报存档 → reported（做没做成读汇报与执行行，不由这里判）；
+ *   · 有结束事实、无汇报 → ended（没消息；结果未知）；
+ *   · 都没有 → undefined（调用方如实说「还没停/结果未知」，不猜）。
  */
-function terminationKindOf(task: TaskRecord): TaskTerminationKind | undefined {
-  if (task.termination !== undefined) return task.termination.kind;
-  if ((task.resultText ?? '').trim() !== '' || (task.replyText ?? '').trim() !== '') return 'completed';
+function endedFactsOf(task: TaskRecord): 'reported' | 'ended' | undefined {
+  if ((task.resultText ?? '').trim() !== '' || (task.replyText ?? '').trim() !== '') return 'reported';
+  if (task.endedAt !== undefined) return 'ended';
   return undefined;
 }
 
-/**
- * 取消回执的用户可读一句：按真实终止种类说（不再把所有非取消结局统一成「已经办完了」）。
- * 种类词与脚本/tasks 的机械事实词同口径：已取消 / 已完成 / 已超时 / 已失败 / 结果未知 / 资源拒绝。
- */
-function cancelSettledMessageOf(kind: TaskTerminationKind, label: string): string {
-  switch (kind) {
-    case 'cancelled':
-      return `已取消：${label}`;
-    case 'completed':
-      return `没停成：${label} 已完成`;
-    case 'timed_out':
-      return `没停成：${label} 已超时`;
-    case 'round_failed':
-      return `没停成：${label} 已失败`;
-    case 'died':
-      return `没停成：${label} 结果未知`;
-    case 'resource_limited':
-      return `没停成：${label} 资源拒绝`;
-  }
+/** 取消回执的用户可读一句：只按事实说（有汇报 / 已停无汇报），不分类结局。 */
+function cancelSettledMessageOf(facts: 'reported' | 'ended', label: string): string {
+  return facts === 'reported'
+    ? `没停成：${label} 已有汇报（结果已存档）`
+    : `没停成：${label} 已经停了（没有汇报，结果未知）`;
 }
 
 export interface TurnResult {
@@ -2085,14 +2068,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   }
 
   /**
-   * 守护事实投影（零状态，docs/design/task-redefinition.md §3）：task_status 返回
-   * **守护事实 + 汇报存档**，不返回「status」这个字——做没做成由 Main 读执行事实自己判断：
-   *   · liveness：存活事实（running/died/waiting_user；现推：启动 + 汇报 + 等待 + 本进程
-   *     是否还有活 worker）；
+   * 任务事实投影（docs/design/task-redefinition.md）：task_status 只返回**原始事实**，
+   * 不返回「status/state/outcome」这类词，也不合成任务级生命周期枚举——活/结束由 Main 读
+   * 事实现推：
+   *   · started/reported/waiting/liveWorker：布尔事实（启动 / 有汇报存档 / 有提问 / 本进程
+   *     有活 worker）；endedAt 是「这一轮停下」的机械时刻（没有种类）；
    *   · claimed/resulted：dispatchKey 幂等账计数（claimed = 已认领未落定；resulted = 已落定；
    *     accepted 行计入 claimed——在等回执）；claimed>resulted = 还有结果没回来；
-   *   · termination：最近一条终止事件（cancelled/timed_out/resource_limited/died/
-   *     round_failed/completed；追加事件账，不是状态列）——「怎么结束」的事实来源；
    *   · replyText：Main 最终回复存档。
    * 做成/没做成的事实 = executions（逐笔执行行）+ resultText（worker 汇报），经 task_result
    * 读取；本投影不重复它们，也不做任何业务归类。
@@ -2101,12 +2083,14 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     // claimed→resulted 计数（逐笔执行行 = 已认领的操作事实；accepted = 已受理未回执）。
     const claimed = task.executions.length;
     const resulted = task.executions.filter((execution) => execution.status !== 'accepted').length;
-    const liveness = taskLivenessOf(task, { liveWorker: taskRunner?.isLive(task.taskId) ?? false });
     return {
       taskId: task.taskId,
       name: task.name ?? deriveTaskName(task.request),
-      ...(liveness === undefined ? {} : { liveness }),
-      ...(task.termination === undefined ? {} : { termination: { kind: task.termination.kind, at: task.termination.at } }),
+      started: taskStartedOf(task),
+      reported: taskReportedOf(task),
+      waiting: taskWaitingOf(task),
+      liveWorker: taskRunner?.isLive(task.taskId) ?? false,
+      ...(task.endedAt === undefined ? {} : { endedAt: task.endedAt }),
       ...(task.pendingQuestion === undefined ? {} : { pendingQuestion: pendingQuestionView(task.pendingQuestion) }),
       claimed,
       resulted,
@@ -2202,45 +2186,42 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     // （outcome=cancelled）；在跑的取消（requested）只在**有在飞回合**时等窗口——竞态
     // 兜底先看一眼底账（请求与回合收尾几乎同时落定时 inFlight 已清、事实已落）。
     // 已结束任务（runner 回 terminal）也读终止事件：回执按真实种类说，不套「已经办完了」。
-    let observed: TurnTerminalKind | undefined;
-    let settledKind: TaskTerminationKind | undefined;
+    let observed: TurnTerminalWake | undefined;
+    let settled: 'reported' | 'ended' | undefined;
     if (outcome.outcome === 'cancelled') {
-      observed = 'cancelled';
-      settledKind = 'cancelled';
+      // runner 同步机械确认（排队/等待中的取消）：本回合回执会说「已停止」，核销取消唤醒。
+      observed = 'task_cancel_wake';
     } else if (outcome.outcome === 'requested' && taskRunWaitMs > 0) {
-      const settled = runner.inFlight().includes(taskId)
+      const waited = runner.inFlight().includes(taskId)
         ? await waitForTaskSettled(taskId, taskRunWaitMs)
         : undefined;
-      settledKind = terminationKindOf(settled ?? registry.get(taskId, scope));
-      // 观察只收「本回合回执如实说出、且唤醒可安全核销」的终态：取消 / 完成。
-      // 失败类（round_failed/died）**不写入**——它们有独立的失败唤醒出口，不能被取消
-      // 路径伪装成 completed 核销掉；timed_out/resource_limited 没有唤醒出口，不观察。
-      if (settledKind === 'cancelled') observed = 'cancelled';
-      else if (settledKind === 'completed') observed = 'completed';
+      settled = endedFactsOf(waited ?? registry.get(taskId, scope));
+      // 本回合回执如实说出的落定才核销：只有**取消被确认**（回合以 cancelled/AbortError
+      // 收尾，runner 调过 markCancelled）才核销取消唤醒；结果未知/无汇报收尾不核销——
+      // 失败唤醒必须照发。判据 = 回合实际收尾种类（roundOutcomeOf 一次性读走，不落底账）。
+      const roundKind = taskRunner?.roundOutcomeOf?.(taskId)?.kind;
+      if (settled === 'reported') observed = 'task_completion_wake';
+      else if (settled === 'ended' && roundKind === 'cancelled') observed = 'task_cancel_wake';
     } else if (outcome.outcome === 'terminal') {
-      // 已结束：读该任务的终止事件 kind（唯一持久事实来源）。不写入 observed——这一回合
-      // 没有新的落定要被核销，不能让取消动作压掉尚未送达的完成/失败唤醒。
-      settledKind = terminationKindOf(registry.get(taskId, scope));
+      // 已结束：读事实（有汇报/已停无汇报）。不写入 observed——这一回合没有新的落定要被核销，
+      // 不能让取消动作压掉尚未送达的完成/失败唤醒。
+      settled = endedFactsOf(registry.get(taskId, scope));
     }
-    if (observed !== undefined) terminalObserved.push({ taskId, kind: observed });
-    // 观察到落定的取消 → 回执按真实结局说（确认了才说「已停止」；停成了别的结局也按真实
-    // 终止种类说——已完成/已超时/已失败/结果未知/资源拒绝，不冒充已停、也不统一「办完了」）。
-    // 未落定保持 requested 原样（不宣称已取消）。
+    if (observed !== undefined) terminalObserved.push({ taskId, wake: observed });
+    // 回执只按事实说：同步确认的取消说「已停止」；落定后按有无汇报说；未落定保持原样。
     const effective: Record<string, unknown> = outcome.outcome === 'terminal'
-      // 已结束任务：runner 的判断是「无操作」（terminal），保留它；settled 附真实终止种类。
-      ? { outcome: 'terminal', taskId, ...(settledKind === undefined ? {} : { settled: settledKind }) }
-      : settledKind !== undefined
-        ? settledKind === 'cancelled'
-          ? { outcome: 'cancelled', taskId }
-          : { outcome: 'terminal', taskId, settled: settledKind }
+      // 已结束任务：runner 的判断是「无操作」（terminal），保留它；settled 附事实读数。
+      ? { outcome: 'terminal', taskId, ...(settled === undefined ? {} : { settled }) }
+      : settled !== undefined
+        ? { outcome: 'terminal', taskId, settled }
         : { ...outcome };
-    // 给用户看的一句话：业务名 + 真实结果。编号属内部工单腔，不进模型投影/用户面；
+    // 给用户看的一句话：业务名 + 事实。编号属内部工单腔，不进模型投影/用户面；
     // 业务名足以让用户一眼确认"被停掉的是哪件事"（底账仍有编号，对账用）。
     const label = identity.taskName ?? identity.taskRequest ?? '该任务';
     const userMessage = effective['outcome'] === 'cancelled'
       ? `已停止：${label}`
-      : settledKind !== undefined
-        ? cancelSettledMessageOf(settledKind, label)
+      : settled !== undefined
+        ? cancelSettledMessageOf(settled, label)
         : effective['outcome'] === 'requested'
           ? `已请求停止：${label}（还没确认停掉）`
           : `没停成：${label} 已经结束（结果未知）`;
@@ -2814,7 +2795,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   async function waitForTaskSettled(taskId: string, waitMs: number): Promise<TaskRecord | undefined> {
     const deadline = taskRunClock.now() + waitMs;
     // 落定判定（S1 事实口径）：收尾事实或汇报存档在场 → 已落定；此外「**已启动**的回合
-    // 已结束且没有 accepted 长任务在等」也算落定（无汇报收尾——runner 的 noteRoundFailed
+    // 已结束且没有 accepted 长任务在等」也算落定（无汇报收尾——runner 的 noteRoundEnded
     // 已追加 round_failed 终止事件；回合已结束的无汇报收尾据此当落定，走如实上抛路径）。
     // queued（未认领，runningSince 缺省）与 waiting_user（等用户接续）都不算落定：前者
     // runner 还没派发，后者窗口内进入等待按超窗回执处理（见上方注释）。
@@ -2853,14 +2834,14 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       request,
       queued: true,
     });
-    registry.markResourceLimited(taskId);
+    registry.noteResourceRefused(taskId);
     const rejected = registry.get(taskId, { principalId: options.principalId, sessionId: options.sessionId });
     const name = rejected.name ?? deriveTaskName(request);
     return {
       taskId,
       name,
       accepted: false,
-      ...(rejected.termination === undefined ? {} : { termination: rejected.termination }),
+      ...(rejected.endedAt === undefined ? {} : { endedAt: rejected.endedAt }),
       // B 切片回执去编号：受理/拒绝话术不含工单编号（编号只在 npm run tasks / 任务查询详情面）。
       notice: `未受理「${name}」：${detail}`,
     };
@@ -2991,13 +2972,16 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         }
       }
       const live = registry.get(taskId, scope);
-      const liveness = taskLivenessOf(live, { liveWorker: taskRunner?.isLive(taskId) ?? false });
       return {
         taskId,
         name,
-        // 受理回执只给事实：accepted + 存活（running/died/waiting_user）；不投影状态词。
-        ...(liveness === undefined ? {} : { liveness }),
+        // 受理回执只给事实：accepted + 启动/汇报/等待/活 worker；不投影状态词。
         accepted: true,
+        started: taskStartedOf(live),
+        reported: taskReportedOf(live),
+        waiting: taskWaitingOf(live),
+        liveWorker: taskRunner?.isLive(taskId) ?? false,
+        ...(live.endedAt === undefined ? {} : { endedAt: live.endedAt }),
       };
     }
 
@@ -3017,7 +3001,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const acquired = policy.acquire('background', { taskId, parentPermit: foregroundPermit });
       if (acquired.ok === false) {
         const reason = taskFailureReasonFor(acquired);
-        registry.markResourceLimited(taskId);
+        registry.noteResourceRefused(taskId);
         throw new Error(`委派被资源策略拒绝（${reason}）：${acquired.message}`);
       }
       delegationPermit = acquired;
@@ -3100,7 +3084,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       if (taskUnresolved) return unresolvedReceipt();
       // 回合失败：发回合失败事实事件（失败通知/唤醒面的事实源）；错误原样抛给 Main。
       try {
-        registry.noteRoundFailed(taskId);
+        registry.noteRoundEnded(taskId);
       } catch {
         // 事实事件失败不改变回合结局（错误原样上抛）。
       }

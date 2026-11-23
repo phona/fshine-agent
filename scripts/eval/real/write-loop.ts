@@ -57,8 +57,8 @@ import {
 } from '../shared/conversation-shape';
 import { stripServerPaths } from '../../../packages/agent/src/server-paths';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
-import type { TaskScope, TaskTermination } from '../../../packages/agent/src/task-registry';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
+import type { TaskScope } from '../../../packages/agent/src/task-registry';
 import { createServer, resolveSingleProfile, type FileDeliveryPort } from '../../../apps/server/server';
 import { mainSessionOptions, mainThinkingLevelFrom, resolveExecutionFace } from '../../ask-runtime';
 import { materializeEvalConfig } from '../../resolve-config-path';
@@ -157,14 +157,11 @@ export interface PushEvidence {
 export interface LedgerSnapshot {
   at: string;
   taskId: string;
-  liveness: string | null;
-  /**
-   * 终止事件（追加事件账；缺省 = 尚未终止）。「怎么结束」只读这里——零状态后
-   * taskLivenessOf 对任何终止事件返回 undefined，died 任务的 liveness 恒为 null。
-   */
-  termination?: TaskTermination;
-  cancelled: boolean;
+  started: boolean;
+  endedAt: string | null;
   reported: boolean;
+  waiting: boolean;
+  mayBeRunning: boolean;
   executions: Array<{ operation: string; status: string }>;
   proposal?: {
     summary: string;
@@ -175,13 +172,12 @@ export interface LedgerSnapshot {
 }
 
 /**
- * 快照是否已到终局（机械事实）：终止事件（追加事件账，含 died/round_failed/cancelled/...）
- * 或汇报存档在场；`liveness === 'died'` 仍算（跨进程读者：已启动、无汇报、租约失效 =
- * 结果未知）。零状态后不能用 `liveness === 'died'` 判 died 终止——任何终止事件都让 liveness
- * 变 null。
+ * 快照是否已到停点（机械事实）：结束事实 / 汇报存档在场，或已启动且不再可能还活着
+ * （跨进程事实代理：无真租约、无 accepted 在途、无等待）。不判「怎么结束」。
  */
 export function snapshotTerminalOf(snapshot: LedgerSnapshot): boolean {
-  return snapshot.termination !== undefined || snapshot.reported || snapshot.liveness === 'died';
+  return snapshot.endedAt !== null || snapshot.reported
+    || (snapshot.started && !snapshot.mayBeRunning && !snapshot.waiting);
 }
 
 export interface AuditRow {
@@ -216,7 +212,7 @@ export interface WriteLoopEvidence {
     finalReported?: boolean;
     finalExecutions: Array<{ operation: string; status: string }>;
     /** 会话内每个任务的终局（多任务如实列出，主任务排首）。 */
-    finalTasks: Array<{ taskId: string; taskNo?: number; liveness: string | null; cancelled: boolean; reported: boolean; executions: Array<{ operation: string; status: string }> }>;
+    finalTasks: Array<{ taskId: string; taskNo?: number; started: boolean; endedAt: string | null; reported: boolean; waiting: boolean; mayBeRunning: boolean; executions: Array<{ operation: string; status: string }> }>;
     proposal?: { summary: string; handlePrefix: string; operation: string };
   };
   audit: AuditRow[];
@@ -391,16 +387,14 @@ export class LedgerWatcher {
             handlePrefix: confirmation.handle.slice(0, 12),
             operation: confirmation.operation,
           };
-      const signature = JSON.stringify([taskLivenessOf(record) ?? null, record.termination?.kind ?? null, archivedReportOf(record) !== undefined, executions, proposal?.summary ?? '']);
+      const facts = { started: taskStartedOf(record), endedAt: record.endedAt ?? null, reported: archivedReportOf(record) !== undefined, waiting: taskWaitingOf(record), mayBeRunning: taskMayBeRunningOf(record) };
+      const signature = JSON.stringify([facts, executions, proposal?.summary ?? '']);
       if (this.lastSignature.get(record.taskId) === signature) continue;
       this.lastSignature.set(record.taskId, signature);
       this.snapshots.push({
         at: new Date().toISOString(),
         taskId: record.taskId,
-        liveness: taskLivenessOf(record) ?? null,
-        ...(record.termination === undefined ? {} : { termination: record.termination }),
-        cancelled: record.termination?.kind === 'cancelled',
-        reported: archivedReportOf(record) !== undefined,
+        ...facts,
         executions,
         ...(proposal === undefined ? {} : { proposal }),
       });
@@ -415,9 +409,12 @@ export class LedgerWatcher {
     const seen: string[] = [];
     for (const snapshot of this.snapshots) {
       if (snapshot.taskId !== taskId) continue;
-      // 机械事实标签：liveness 三值 + 取消/汇报事实 + 末条执行行原值（不合成任务级状态词）。
+      // 观测标签（消费方就地读事实算；不是共享任务状态枚举）：等待 / 可能还在跑 / 已汇报 / 已停。
       const lastExecutionStatus = snapshot.executions[snapshot.executions.length - 1]?.status;
-      const fact = `liveness=${snapshot.liveness ?? 'null'} cancelled=${snapshot.cancelled} reported=${snapshot.reported} exec=${lastExecutionStatus ?? 'null'}`;
+      const fact = snapshot.waiting ? 'waiting'
+        : snapshot.mayBeRunning ? 'progressing'
+          : snapshot.reported || lastExecutionStatus === 'completed' ? 'reported'
+            : snapshot.endedAt !== null ? 'ended' : lastExecutionStatus ?? 'unknown';
       if (seen[seen.length - 1] !== fact) seen.push(fact);
     }
     return seen;
@@ -633,7 +630,7 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
   const proposal = evidence.ledger.proposal;
   add(
     'C3', '底账出现 waiting_user 与待确认提案（摘要非空）', 'mechanical',
-    evidence.ledger.factSequence.includes('waiting_user')
+    evidence.ledger.factSequence.includes('waiting')
       && proposal !== undefined
       && proposal.summary.trim() !== ''
       && proposal.handlePrefix !== '',
@@ -716,13 +713,13 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
   // C9 底账状态序列（观测）：确认路径确实把任务从等待里带回执行（waiting_user 之后 wieder running），
   // 不是「等确认 → 直接终态」。序列按序包含（允许观测到额外中间态）。
   const orderedSequence = evidence.ledger.factSequence;
-  const subsequence = ['running', 'waiting_user', 'running', 'completed'];
+  const subsequence = ['progressing', 'waiting', 'progressing', 'reported'];
   let cursor = 0;
   for (const status of orderedSequence) {
     if (status === subsequence[cursor]) cursor += 1;
   }
   add(
-    'C9', '底账状态序列按序包含 running → waiting_user → running → completed', 'mechanical',
+    'C9', '底账事实序列按序包含 progressing → waiting → progressing → reported', 'mechanical',
     cursor === subsequence.length,
     `观测序列=${orderedSequence.join(' → ') || '(空)'}`,
   );
@@ -1191,15 +1188,17 @@ async function main(): Promise<void> {
       finalTasks.push({
         taskId: id,
         ...(record.taskNo === undefined ? {} : { taskNo: record.taskNo }),
-        liveness: taskLivenessOf(record) ?? null,
-        cancelled: record.termination?.kind === 'cancelled',
+        started: taskStartedOf(record),
+        endedAt: record.endedAt ?? null,
         reported: archivedReportOf(record) !== undefined,
+        waiting: taskWaitingOf(record),
+        mayBeRunning: taskMayBeRunningOf(record),
         executions: record.executions.map((execution) => ({ operation: execution.operation, status: execution.status })),
       });
       // 业务名（对话形态 ③ 的「任务名」判据用；机械回落已由底账解析）。
       if ((record.name ?? '').trim() !== '') taskNames.push(record.name!.trim());
     } catch {
-      finalTasks.push({ taskId: id, liveness: null, cancelled: false, reported: false, executions: [] });
+      finalTasks.push({ taskId: id, started: false, endedAt: null, reported: false, waiting: false, mayBeRunning: false, executions: [] });
     }
   }
   const primary = finalTasks.find((task) => task.taskId === taskId);
@@ -1239,7 +1238,7 @@ async function main(): Promise<void> {
   log('\n== 机械证据 ==');
   log(`[任务底账] 会话内任务数=${evidence.ledger.taskCount} · 状态序列（250ms 轮询观测）=${evidence.ledger.factSequence.join(' → ') || '(未观测到)'}`);
   for (const task of evidence.ledger.finalTasks) {
-    log(`  · 任务 ${task.taskId}（#${String(task.taskNo ?? '-')}）终局=${task.liveness ?? (task.reported ? '已汇报' : '已收尾')}`
+    log(`  · 任务 ${task.taskId}（#${String(task.taskNo ?? '-')}）事实=${task.reported ? '已汇报' : task.endedAt !== null ? '已停' : task.mayBeRunning ? '可能还在跑' : '结果未知'}`
       + `：${task.executions.map((execution) => `${execution.operation}:${execution.status}`).join(' → ') || '(无执行事实)'}`);
   }
   log('[工具调用]（记录包装器透传采集）');

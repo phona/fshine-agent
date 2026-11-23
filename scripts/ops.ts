@@ -10,7 +10,7 @@
  *   · 纯读：底账以只读打开（沿用 createSqliteTaskRegistry 的 readOnly 路径），不建库、不写库；
  *   · 静态生成：纯字符串模板 + inline CSS，无脚本、无外链、不联网，可离线用浏览器打开；
  *     HTML 动态文本一律经 escapeHtml 实体转义（安全不变式），动态值不进属性上下文；
- *   · 展示语义复用 scripts/tasks.ts 的既有导出（时间格式/摘要/状态词/原因行/底账行/
+ *   · 展示语义复用 scripts/tasks.ts 的既有导出（时间格式/摘要/事实标签/机械时刻行/底账行/
  *     #编号+名称标签），不复制第二套渲染；最近任务序与 `npm run tasks` 列表口径一致
  *     （对账测试钉住）；
  *   · 产物恒为且仅为 <out>/index.html：目录缺失时创建，同名普通文件幂等覆盖，
@@ -25,7 +25,7 @@ import { existsSync, lstatSync, mkdirSync, statSync, writeFileSync } from 'node:
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TaskRecord } from '../packages/agent/src/task-registry';
-import { taskLivenessOf, taskReportedOf, taskUnstartedOf } from '../packages/agent/src/task-registry';
+import { taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
 import {
   formatLocalTime,
@@ -96,37 +96,28 @@ export function escapeHtml(value: string): string {
 
 export interface OpsStatusCounts {
   total: number;
-  /** S1 事实桶（没有任务结论——每桶是一项机械事实）：汇报已存档 / 无汇报收尾。 */
+  /** 事实桶（没有任务结论——每桶是一项机械事实）：汇报已存档 / 无汇报收尾。 */
   reported: number;
   noReport: number;
   running: number;
   queued: number;
   waitingUser: number;
-  cancelled: number;
-  timedOut: number;
-  /** 结果未知（看门狗观察到租约过期）与资源拒绝。 */
-  died: number;
-  resourceLimited: number;
 }
 
-/** 统计：总数 + 各机械事实桶计数（直接读 liveness 与追加终止事件，每任务按事实优先级归一个桶）。 */
+/**
+ * 统计：总数 + 各机械事实桶计数（就地读原始事实；**不按「怎么结束」种类分桶**——
+ * 取消/超时/结果未知/资源拒绝不存种类，这里也不再假装能分辨）。
+ */
 export function countOpsStatuses(records: readonly TaskRecord[]): OpsStatusCounts {
   const counts: OpsStatusCounts = {
-    total: records.length, reported: 0, noReport: 0, running: 0,
-    queued: 0, waitingUser: 0, cancelled: 0, timedOut: 0, died: 0, resourceLimited: 0,
+    total: records.length, reported: 0, noReport: 0, running: 0, queued: 0, waitingUser: 0,
   };
   for (const task of records) {
     // 跨进程读（ops 没有本进程 worker）：用租约/accepted 在途代理「可能活着」。
-    const liveness = taskLivenessOf(task);
-    const termination = task.termination;
-    if (termination?.kind === 'cancelled') counts.cancelled += 1;
-    else if (termination?.kind === 'timed_out') counts.timedOut += 1;
-    else if (termination?.kind === 'resource_limited') counts.resourceLimited += 1;
-    else if (termination?.kind === 'died' || liveness === 'died') counts.died += 1;
-    else if (task.pendingQuestion !== undefined) counts.waitingUser += 1;
-    else if (liveness === 'running') counts.running += 1;
+    if (taskWaitingOf(task)) counts.waitingUser += 1;
     else if (taskReportedOf(task)) counts.reported += 1;
-    else if (taskUnstartedOf(task)) counts.queued += 1;
+    else if (!taskStartedOf(task) && task.endedAt === undefined) counts.queued += 1;
+    else if (taskMayBeRunningOf(task)) counts.running += 1;
     else counts.noReport += 1;
   }
   return counts;
@@ -140,10 +131,6 @@ export function renderOpsCountsLine(counts: OpsStatusCounts): string {
   if (counts.running > 0) parts.push(`进行中 ${counts.running}`);
   if (counts.queued > 0) parts.push(`排队中 ${counts.queued}`);
   if (counts.waitingUser > 0) parts.push(`等待用户 ${counts.waitingUser}`);
-  if (counts.cancelled > 0) parts.push(`已取消 ${counts.cancelled}`);
-  if (counts.timedOut > 0) parts.push(`已超时 ${counts.timedOut}`);
-  if (counts.died > 0) parts.push(`结果未知 ${counts.died}`);
-  if (counts.resourceLimited > 0) parts.push(`资源受限 ${counts.resourceLimited}`);
   const suffix = parts.length > 0 ? `：${parts.join(' / ')}` : '';
   return `任务：共 ${counts.total} 条${suffix}`;
 }
@@ -161,11 +148,13 @@ export function displayPath(dbPath: string, repoRoot: string): string {
   return relative !== '' && !relative.startsWith('..') ? relative : dbPath;
 }
 
-/** 未成功收尾（零状态机械事实）：终止事件（非 completed）/ 无汇报 / 结果未知——清单收录范围见 renderOpsPage。 */
-const isTerminalNonSuccess = (task: TaskRecord): boolean => {
-  if (task.termination !== undefined) return task.termination.kind !== 'completed';
-  if (taskUnstartedOf(task) || taskReportedOf(task)) return false;
-  return taskLivenessOf(task) === undefined;
+/**
+ * 无汇报收尾清单（事实口径；不按「怎么结束」分类）：已启动、没有汇报存档、不再可能还活着。
+ * 任务为什么停、停成了什么，不在这里判——看详情里的执行步骤与交办原文。
+ */
+const stoppedWithoutReportOf = (task: TaskRecord): boolean => {
+  if (taskUnstartedOf(task) || taskReportedOf(task) || taskWaitingOf(task)) return false;
+  return !taskMayBeRunningOf(task);
 };
 
 /** 表格数据行（cells 必须已转义——调用点一律 escapeHtml）。 */
@@ -217,7 +206,7 @@ const LIMIT_ITEMS: readonly string[] = [
   '只读打开 WAL 库可能出现 <code>-wal</code>/<code>-shm</code> 旁路文件（SQLite 固有；不删除以免干扰活跃写者）。',
   '单任务详情 / 交付件导出：<code>npm run tasks -- &lt;#编号&gt;</code>'
     + '（也接受内部 taskId；<code>--out &lt;path&gt;</code> 导出 Markdown）；重新交办：<code>npm run tasks -- &lt;#编号&gt; --redo</code>。',
-  '未成功收尾清单收录所有无汇报收尾/取消/超时/结果未知/资源受限的任务，单元格取一次性机械时刻事实（S1：没有任务结论），不重判。',
+  '无汇报收尾清单收录已停、没有汇报存档、且不再可能还活着的任务（事实口径，不按取消/超时/结果未知/资源受限分类——这些种类不存）；单元格只给「这一轮停止于 T」的机械时刻，不重判。',
   '质量与覆盖报告（文本指针，非链接）：<code>scripts/eval/exploration/quality-report-v1.md</code>；'
     + '复跑用户级评测：<code>npm run eval:user</code>（缺省输出 <code>.runtime/eval-r1/</code>）。',
   '本页无脚本、无外链、可离线打开；刷新 = 重新运行 <code>npm run ops</code>。',
@@ -233,7 +222,7 @@ export function renderOpsPage(input: OpsPageInput): string {
   const newestFirst = [...input.records].sort(compareNewestFirst);
   const counts = countOpsStatuses(input.records);
   const recent = newestFirst.slice(0, recentLimit);
-  const failures = newestFirst.filter(isTerminalNonSuccess);
+  const failures = newestFirst.filter(stoppedWithoutReportOf);
   const failuresShown = failures.slice(0, failureLimit);
   const ledgerLine = input.dbMissing === true
     ? `任务底账：${displayPath(input.dbPath, REPO_ROOT)}（不存在，未创建）`
@@ -243,8 +232,8 @@ export function renderOpsPage(input: OpsPageInput): string {
     ? `最近任务（共 ${counts.total} 条，仅显示最近 ${recentLimit} 条）`
     : `最近任务（共 ${counts.total} 条）`;
   const failureHeader = failures.length > failureLimit
-    ? `未成功收尾清单（共 ${failures.length} 条，仅显示最近 ${failureLimit} 条）`
-    : `未成功收尾清单（共 ${failures.length} 条）`;
+    ? `无汇报收尾清单（共 ${failures.length} 条，仅显示最近 ${failureLimit} 条）`
+    : `无汇报收尾清单（共 ${failures.length} 条）`;
 
   const lines: string[] = [];
   lines.push('<!DOCTYPE html>');
@@ -278,13 +267,9 @@ export function renderOpsPage(input: OpsPageInput): string {
   lines.push(statRow('已汇报（结果存档）', counts.reported));
   lines.push(statRow('无汇报收尾', counts.noReport));
   lines.push(statRow('进行中', counts.running));
-  // S1 事实桶行仅在非零时显示（存量页面不添恒零噪音）；恒等式仍覆盖全部计数。
+  // 事实桶行仅在非零时显示（存量页面不添恒零噪音）；恒等式仍覆盖全部计数。
   if (counts.queued > 0) lines.push(statRow('排队中', counts.queued));
   if (counts.waitingUser > 0) lines.push(statRow('等待用户', counts.waitingUser));
-  if (counts.cancelled > 0) lines.push(statRow('已取消', counts.cancelled));
-  if (counts.timedOut > 0) lines.push(statRow('已超时', counts.timedOut));
-  if (counts.died > 0) lines.push(statRow('结果未知', counts.died));
-  if (counts.resourceLimited > 0) lines.push(statRow('资源受限', counts.resourceLimited));
   lines.push('</tbody>');
   lines.push('</table>');
   lines.push('</section>');
@@ -322,7 +307,7 @@ export function renderOpsPage(input: OpsPageInput): string {
       lines.push(dataRow([
         escapeHtml(taskLabel(task)),
         escapeHtml(formatLocalTime(task.createdAt)),
-        escapeHtml(taskMechanicalFactLine(task) ?? '（底账未记录机械时刻）'),
+        escapeHtml(taskMechanicalFactLine(task) ?? '（底账未记录停止时刻）'),
       ]));
     }
     lines.push('</tbody>');

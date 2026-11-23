@@ -17,7 +17,7 @@
 - `architecture/capability-boundary.md` — 能力边界判据档：Main（柜台）/Worker（后台）/用户/宿主四角色权界、单一来源能力目录、Worker→Main 结构化 outcome、结构化交办与三条禁令（多条机制标注未实现/待守卫）。
 - `architecture/contract.md` — 宿主↔执行层契约语义面、禁止面与现行变更安全不变量（§6 为该位置的唯一提炼面）。
 - `architecture/payload-arguments.md` — 执行层声明义务：结构化入参必须声明 `payload` + schema（宿主 lint → 物化文件 → 路径替换）；含 17dz 待改 4 个 operation。
-- `architecture/tasks.md` — 任务底账与状态机、取消三态、`dispatchKey` 两层身份、等待与续跑。
+- `architecture/tasks.md` — 任务底账只存事实、活/结束现推（不维护状态机）、取消请求与确认、`dispatchKey` 两层身份、等待与续跑。
 - `architecture/sessions.md` — 会话转录与压缩：Pi 所有权、`.runtime/sessions`、压缩边界（retention 见 issue #67）。
 - `architecture/channels.md` — 渠道三档（offline/shadow/live）、入站附件时序、silent 三档、出站六路。
 - `architecture/files.md` — `fileId` 模型、`run_js`、per-run 目录、产物登记与保留期。

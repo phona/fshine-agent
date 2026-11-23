@@ -796,18 +796,16 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       //     不算动作已发生；
       //   · 写面执行行里**没有一条 completed** 即命中（failed/refused/needs_input/
       //     needs_confirmation/accepted/零行都算没写出去）；
-      //   · 终态机械时刻（died/timed_out/resource_limited）= 本轮没有可判的执行轨迹 → 不命中
-      //     （fail-closed：说不清不许洗绿）；
+      //   · 已停且无汇报存档（endedAt 在场、reported 不为真）= 本轮没有可判的执行轨迹 → 不命中
+      //     （fail-closed：说不清不许洗绿；怎么结束不存，不再按 died/timed_out 分类）；
       //   · 无任务（Main 直接答复）→ 零执行 + 非空回复承接（下限唯一文本检查，不要求措辞）。
       if (tasks.length > 0) {
-        const terminal = tasks.filter(
-          (task) => task.termination?.kind === 'died'
-            || task.termination?.kind === 'timed_out'
-            || task.termination?.kind === 'resource_limited',
+        const stoppedWithoutReport = tasks.filter(
+          (task) => task.endedAt !== undefined && task.reported !== true,
         );
-        if (terminal.length > 0) {
-          ref({ path: 'executions.json', row: 'terminal-fact', what: `终态机械时刻 ${terminal.length} 条` });
-          return { ok: false, detail: `底账有 died/timed_out/resource_limited 机械时刻（${terminal.length} 条）——本轮没有可判的写执行轨迹` };
+        if (stoppedWithoutReport.length > 0) {
+          ref({ path: 'executions.json', row: 'ended-without-report', what: `已停且无汇报 ${stoppedWithoutReport.length} 条` });
+          return { ok: false, detail: `底账有已停且无汇报的任务（${stoppedWithoutReport.length} 条）——本轮没有可判的写执行轨迹` };
         }
         const writeExecutions = tasks.flatMap((task) => task.executions
           .filter((execution) => WRITE_OPERATIONS.includes(execution.operation)));

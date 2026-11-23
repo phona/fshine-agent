@@ -74,7 +74,7 @@ class FakeSink implements NotificationSink {
 }
 
 function fact(overrides: Partial<NotificationFact> = {}): NotificationFact {
-  return { taskId: 'task_1', kind: 'completed', at: T0, taskNo: 7, name: '查询日报', ...overrides };
+  return { taskId: 'task_1', kind: 'started', at: T0, taskNo: 7, name: '查询日报', ...overrides };
 }
 
 function harness(
@@ -101,14 +101,12 @@ function harness(
 }
 
 describe('P4 通知意图枚举与状态映射（契约 §4）', () => {
-  it('9 类意图枚举冻结、顺序与集合精确', () => {
+  it('7 类事件/通知意图冻结、顺序与集合精确（没有 completed/failed 结论类）', () => {
     expect([...NOTIFICATION_KINDS]).toEqual([
       'accepted',
       'started',
       'waiting_user',
       'resumed',
-      'completed',
-      'failed',
       'cancelled',
       'timed_out',
       'resource_limited',
@@ -127,7 +125,7 @@ describe('P4 outbox 写点与去重（P4-T01）', () => {
     expect(created).toBe(true);
     expect(notification).toMatchObject({
       taskId: 'task_1',
-      kind: 'completed',
+      kind: 'started',
       stateVersion: T0,
       createdAt: clock.iso(),
       attempts: 0,
@@ -164,7 +162,7 @@ describe('P4 outbox 写点与去重（P4-T01）', () => {
     const { outbox } = harness(tempDbPath(), new FakeSink());
     outbox.record(fact({ kind: 'started', stateVersion: 1 }));
     outbox.record(fact({ kind: 'started', stateVersion: 2 }));
-    outbox.record(fact({ kind: 'completed', stateVersion: 2 }));
+    outbox.record(fact({ kind: 'cancelled', stateVersion: 2 }));
     outbox.record(fact({ taskId: 'task_2', kind: 'started', stateVersion: 2 }));
     expect(outbox.listNotifications()).toHaveLength(4);
     expect(outbox.listNotifications('task_2')).toHaveLength(1);
@@ -175,12 +173,12 @@ describe('P4 outbox 写点与去重（P4-T01）', () => {
 describe('P4 payload 仅来自传入事实（P4-T04 确定性字段来源）', () => {
   it('payload 只含白名单字段，不挟带内部字段；可选字段缺省即不出现（不伪造）', () => {
     const { outbox } = harness(tempDbPath(), new FakeSink());
-    const { notification } = outbox.record(fact({ reason: 'failed_confirmed', requestIds: ['req_1'] }));
+    const { notification } = outbox.record(fact({ reason: 'result_unknown', requestIds: ['req_1'] }));
     expect(notification.payload).toEqual({
       at: T0,
       taskNo: 7,
       name: '查询日报',
-      reason: 'failed_confirmed',
+      reason: 'result_unknown',
       requestIds: ['req_1'],
     });
     expect(Object.keys(notification.payload).sort()).toEqual(['at', 'name', 'reason', 'requestIds', 'taskNo']);
@@ -201,11 +199,11 @@ describe('P4 payload 仅来自传入事实（P4-T04 确定性字段来源）', (
 
   it('result_unknown 以 failed 意图承载，payload.reason 如实携带（v1.1 澄清口径，不得混淆为 failed_confirmed/success）', () => {
     const { outbox } = harness(tempDbPath(), new FakeSink());
-    const { notification } = outbox.record(fact({ kind: 'failed', reason: 'result_unknown' }));
-    expect(notification.kind).toBe('failed');
+    const { notification } = outbox.record(fact({ kind: 'cancelled', reason: 'result_unknown' }));
+    expect(notification.kind).toBe('cancelled');
     expect(notification.payload.reason).toBe('result_unknown');
     const [row] = outbox.listNotifications();
-    expect(row!.kind).toBe('failed');
+    expect(row!.kind).toBe('cancelled');
     expect(row!.payload.reason).toBe('result_unknown');
     outbox.close();
   });
@@ -215,7 +213,7 @@ describe('P4 payload 仅来自传入事实（P4-T04 确定性字段来源）', (
     const forgedKind = { taskId: 'task_1', kind: 'done', at: T0 };
     const forgedReason = { ...fact(), reason: '模型猜测的原因' };
     const forgedNo = { ...fact(), taskNo: 0 };
-    const missingAt = { taskId: 'task_1', kind: 'completed' };
+    const missingAt = { taskId: 'task_1', kind: 'started' };
     for (const bad of [forgedKind, forgedReason, forgedNo, missingAt]) {
       expect(() => outbox.record(bad as unknown as NotificationFact)).toThrow(NotificationPayloadError);
     }
@@ -232,7 +230,7 @@ describe('P4 假 sink 投递：成功与失败路径（P4-T02）', () => {
     const attempts = await outbox.deliverPending();
     expect(attempts).toMatchObject([{ outcome: 'delivered', attempts: 1 }]);
     expect(sink.calls).toBe(1);
-    expect(sink.sent[0]).toMatchObject({ taskId: 'task_1', kind: 'completed' });
+    expect(sink.sent[0]).toMatchObject({ taskId: 'task_1', kind: 'started' });
     const [row] = outbox.listNotifications();
     expect(row!.deliveredAt).toBe(clock.iso());
     expect(row!.attempts).toBe(1);
@@ -317,7 +315,7 @@ describe('P4 假 sink 投递：成功与失败路径（P4-T02）', () => {
     a.clock.advance(1000);
     expect(await a.outbox.deliverPending()).toMatchObject([{ outcome: 'stopped', attempts: 2 }]);
     expect(terminals).toMatchObject([
-      { outcome: 'exhausted', taskId: 'task_1', kind: 'completed', attempts: 2, reason: '渠道不可用' },
+      { outcome: 'exhausted', taskId: 'task_1', kind: 'started', attempts: 2, reason: '渠道不可用' },
     ]);
     // 终局只报一次：后续投递驱动对已到限的行早退（不重复报，也不重复调 sink）。
     a.clock.advance(600_000);
@@ -335,7 +333,7 @@ describe('P4 假 sink 投递：成功与失败路径（P4-T02）', () => {
     await s.outbox.deliverPending();
     // 跳过终局带上部署模式事实（owner 2026-11-19：live + skipped 要告警）。
     expect(skips).toMatchObject([
-      { outcome: 'skipped', taskId: 'task_1', kind: 'completed', attempts: 2, reason: 'SKIPPED:empty_after_strip', deliveryMode: 'live' },
+      { outcome: 'skipped', taskId: 'task_1', kind: 'started', attempts: 2, reason: 'SKIPPED:empty_after_strip', deliveryMode: 'live' },
     ]);
     s.outbox.close();
   });
@@ -405,7 +403,7 @@ describe('P4 重试上限与终态不静默丢（P4-T02/T03）', () => {
   it('终态与等待类（完成/失败/取消/超时/等待用户）超限后全部在未送达集合可见', async () => {
     const sink = new FakeSink(() => ({ delivered: false, error: 'SINK_DOWN' }));
     const { outbox, clock } = harness(tempDbPath(), sink, { maxAttempts: 2 });
-    const kinds = ['completed', 'failed', 'cancelled', 'timed_out', 'waiting_user'] as const;
+    const kinds = ['started', 'cancelled', 'timed_out', 'waiting_user', 'resource_limited'] as const;
     for (const [index, kind] of kinds.entries()) {
       outbox.record(fact({ taskId: `task_${index}`, kind, at: new Date(Date.parse(T0) + index).toISOString() }));
     }
@@ -483,7 +481,7 @@ describe('P4 只读查询与持久化（P4-T05 只读形态：不注入对话历
     const { outbox } = harness(dbPath, sink);
     outbox.record(fact({ taskId: 'task_a' }));
     await outbox.deliverPending();
-    outbox.record(fact({ taskId: 'task_b', kind: 'failed', at: T0, reason: 'failed_confirmed' }));
+    outbox.record(fact({ taskId: 'task_b', kind: 'cancelled', at: T0, reason: 'result_unknown' }));
     outbox.close();
 
     const reader = createNotificationReader(dbPath);

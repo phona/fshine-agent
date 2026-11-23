@@ -53,7 +53,7 @@ function greenEvidence(): WriteLoopEvidence {
     ledger: {
       taskId: 'task-1',
       taskCount: 1,
-      factSequence: ['queued', 'running', 'waiting_user', 'running', 'completed'],
+      factSequence: ['progressing', 'waiting', 'progressing', 'reported'],
       snapshots: [],
       finalReported: true,
       finalExecutions: [
@@ -67,9 +67,11 @@ function greenEvidence(): WriteLoopEvidence {
         {
           taskId: 'task-1',
           taskNo: 1,
-          liveness: null,
-          cancelled: false,
+          started: true,
+          endedAt: '2026-11-22T00:05:00.000Z',
           reported: true,
+          waiting: false,
+          mayBeRunning: false,
           executions: [
             { operation: 'dummy.prepare', status: 'failed' },
             { operation: 'dummy.prepare', status: 'needs_confirmation' },
@@ -148,9 +150,9 @@ describe('evaluateCriteria：正例全绿 + 逐条反向破坏必红', () => {
     expect(evaluateCriteria(evidence).find((result) => result.id === 'C2')?.status).toBe('fail');
   });
 
-  it('C3：没观测到 waiting_user 或摘要为空 → 红', () => {
+  it('C3：没观测到 waiting（等待）或摘要为空 → 红', () => {
     const missingStatus = greenEvidence();
-    missingStatus.ledger.factSequence = ['queued', 'completed'];
+    missingStatus.ledger.factSequence = ['progressing', 'reported'];
     expect(evaluateCriteria(missingStatus).find((result) => result.id === 'C3')?.status).toBe('fail');
     const emptySummary = greenEvidence();
     emptySummary.ledger.proposal = { summary: '  ', handlePrefix: '', operation: 'dummy.prepare' };
@@ -223,9 +225,9 @@ describe('evaluateCriteria：正例全绿 + 逐条反向破坏必红', () => {
     expect(evaluateCriteria(doubled).find((result) => result.id === 'C7')?.status).toBe('fail');
   });
 
-  it('C9：状态序列缺 waiting_user 后的重新执行 → 红', () => {
+  it('C9：事实序列缺 waiting 后的重新执行 → 红', () => {
     const jumped = greenEvidence();
-    jumped.ledger.factSequence = ['running', 'waiting_user', 'completed'];
+    jumped.ledger.factSequence = ['progressing', 'waiting', 'reported'];
     expect(evaluateCriteria(jumped).find((result) => result.id === 'C9')?.status).toBe('fail');
   });
 
@@ -487,36 +489,36 @@ describe('LedgerWatcher：去重采样与状态序列', () => {
     index = 0;
     const watcher = new LedgerWatcher(fake, { principalId: 'p', sessionId: 's' });
     for (index = 0; index < phases.length; index += 1) watcher.sample();
-    expect(watcher.snapshots.map((snapshot) => snapshot.liveness)).toEqual([null, 'running', null]);
+    expect(watcher.snapshots.map((snapshot) => snapshot.mayBeRunning)).toEqual([false, true, false]);
     expect(watcher.sequenceOf('t-1')).toEqual([
-      'liveness=null cancelled=false reported=false exec=null',
-      'liveness=running cancelled=false reported=false exec=null',
-      'liveness=null cancelled=false reported=false exec=completed',
+      'unknown',
+      'progressing',
+      'reported',
     ]);
     expect(watcher.taskIds()).toEqual(['t-1']);
   });
 
   it('died 终止事件：快照带 termination（liveness=null），终局事实不只靠 liveness', () => {
-    // 零状态判负回归（2026-11-23）：taskLivenessOf 对任何终止事件返回 undefined；
+    // 判负回归（2026-11-23）：删除 liveness 投影后，终局只能读结束事实；
     // died 任务的 liveness 恒为 null，终局判据必须读追加事件账。
     const fake = {
       list: () => [{
         taskId: 't-died',
         runningSince: '2026-11-22T00:00:00.000Z',
-        termination: { kind: 'died', at: '2026-11-22T00:05:00.000Z' },
+        endedAt: '2026-11-22T00:05:00.000Z',
         executions: [],
       }],
     } as unknown as ConstructorParameters<typeof LedgerWatcher>[0];
     const watcher = new LedgerWatcher(fake, { principalId: 'p', sessionId: 's' });
     watcher.sample();
     const snapshot = watcher.snapshots[0]!;
-    expect(snapshot.liveness).toBeNull();
-    expect(snapshot.termination).toEqual({ kind: 'died', at: '2026-11-22T00:05:00.000Z' });
+    expect(snapshot.mayBeRunning).toBe(false);
+    expect(snapshot.endedAt).toBe('2026-11-22T00:05:00.000Z');
     // 终局判据读终止事件：liveness=null 的 died 任务必须算终局。
     expect(snapshotTerminalOf(snapshot)).toBe(true);
     // 反向绊线：仍在跑 / 未启动的快照不得被当成终局（不放松判据）。
-    expect(snapshotTerminalOf({ ...snapshot, termination: undefined, liveness: 'running' })).toBe(false);
-    expect(snapshotTerminalOf({ ...snapshot, termination: undefined, liveness: null, reported: false })).toBe(false);
+    expect(snapshotTerminalOf({ ...snapshot, endedAt: null, reported: false, started: true, mayBeRunning: true })).toBe(false);
+    expect(snapshotTerminalOf({ ...snapshot, endedAt: null, reported: false, started: false, mayBeRunning: false })).toBe(false);
   });
 
   it('提案出现与句柄前缀入账（句柄不落全量）', () => {
@@ -531,7 +533,7 @@ describe('LedgerWatcher：去重采样与状态序列', () => {
     const watcher = new LedgerWatcher(fake, { principalId: 'p', sessionId: 's' });
     watcher.sample();
     const snapshot = watcher.snapshots[0]!;
-    expect(snapshot.liveness).toBe('waiting_user');
+    expect(snapshot.waiting).toBe(true);
     expect(snapshot.proposal).toEqual({ summary: '将向集合「empty-one」…', handlePrefix: 'cf_abcdefghi', operation: 'dummy.prepare' });
     expect(JSON.stringify(snapshot)).not.toContain('cf_abcdefghijklmnop');
   });

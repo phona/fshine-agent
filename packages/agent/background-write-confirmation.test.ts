@@ -14,7 +14,7 @@
  *
  * 反向绊线：把脱敏改回「原始 outcome 回给 Worker」→ ② 必须红。
  */
-import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from './testing/task-facts';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -336,7 +336,7 @@ describe('S1 后台写确认：底账承载与后台识别', () => {
     expect(pending?.confirmation?.summary).toBe(SUMMARY);
     // 可见投影不带句柄（句柄留底账供 S3 透传）。（2026-11-20：数字 ref 退役，按真实 taskId。）
     const visible = await projectedStatusOf(registry, 't_confirm');
-    expect(visible.liveness).toBe('waiting_user');
+    expect(visible.waiting).toBe(true);
     const projected = JSON.stringify(visible);
     expect(projected).not.toContain('cf_');
     expect(projected).not.toContain('handle');
@@ -711,7 +711,7 @@ describe('同回合自我确认被挡：结局是 waiting_user（提案），不
     // 用户可见面 = 提案（含摘要），不是「没办成」；句柄不进可见投影。
     // 2026-11-20：数字 ref 退役，按真实 taskId 投影（断言不变）。
     const visible = await projectedStatusOf(registry, 't_self_confirm');
-    expect(visible.liveness).toBe('waiting_user');
+    expect(visible.waiting).toBe(true);
     const projected = JSON.stringify(visible);
     expect(projected).toContain(SUMMARY);
     expect(projected).not.toContain('cf_');
@@ -1020,7 +1020,7 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
     registry.begin({ taskId: 't_reported', principalId: SCOPE.principalId, sessionId: SCOPE.sessionId, request: '已汇报的活' });
     registry.setResultText('t_reported', '办完了。');
     registry.begin({ taskId: 't_round_failed', principalId: SCOPE.principalId, sessionId: SCOPE.sessionId, request: '回合失败的活' });
-    registry.noteRoundFailed('t_round_failed');
+    registry.noteRoundEnded('t_round_failed');
     const runner = makeRunner(registry, await flowExecutor(new ConfirmFlowClient(), registry, roundWorker([], { results: [] })));
     const confirm = await scriptedConfirmTurn({
       registry, runner, tool: 'task_confirm', args: {}, modelText: '现在没有等你确认的事。',
