@@ -4478,15 +4478,14 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       const lastExecuted = [...recorded].reverse().find((entry) => entry.operation !== RUN_JS_TOOL);
       if (lastExecuted !== undefined && lastExecuted.outcome.status === 'needs_input') {
         const question = pendingQuestionFrom(lastExecuted.outcome);
-        // 执行层要求补充但没说清缺什么：等待事实形状不完整——**按失败收尾**（旧实现语义，
-        // 2026-11-22 Grok 复审恢复）：不能编造问题形状，也**不能当完成**——否则投递面会把
-        // 「对方要我补一句但没说清缺什么」说成「办好了」（虚假成功）。executionOutcome=failed
-        // 让 runner 走 noteRoundFailed（不落完成存档），reason 说明缺什么没说清。
+        // 执行层要求补充但没说清缺什么：等待事实形状不完整——不能编造问题形状，也**不能
+        // 当完成**——否则兜底面会把「对方要我补一句但没说清缺什么」说成「办好了」
+        // （虚假成功）。回合按 ended 收尾并带上机械原因（缺什么没说清）；没有回合级结论词，
+        // 做没做成由 Main 读执行事实（末条 needs_input）自己判断。
         return question === undefined
           ? {
             kind: 'ended',
             report: workerResult.text,
-            executionOutcome: 'failed',
             failureReason: '执行层要求补充信息，但没有说清缺什么（等待事实形状不完整）。',
           }
           : { kind: 'needs_input', question };
@@ -4537,49 +4536,44 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       const selfConfirmBlocked = selfConfirmBlockedRoundOf();
       if (selfConfirmBlocked !== undefined) return selfConfirmBlocked;
       /**
-       * 本回合执行事实的机械结局（如实交付分流；2026-11-22）：从**末条**「非容忍失败」的
-       * 执行事实取 failed/refused + 原始码 + 原文；一条都没有 = success（含零执行收尾，
-       * 零执行的 unsupported 见上方分支）。
-       * 口径与账本末次决定性执行一致：失败的 run_js 也算（成功脚本不掩盖此前的失败读），
-       * 但**已落库的业务写之后的脚本失败不算**——脚本失败不是「另一个写没成」
-       * （adversarial-worker ⑪ 冻结用例），把它算成失败会让用户按失败重试一次已经落库的写；
-       * 无业务写时（只读查询 + 脚本失败）脚本结局仍是本回合真实结局（⑫ 冻结用例，不放宽假绿）。
-       * **末次决定性结果 = 已落库的业务写成功**（Grok 复审 2026-11-22 恢复被 S1 删掉的语义）：
-       * 倒序遇到最后一条 completed 的业务写即止——更早（index 更小）的失败不再决定结局
-       * （「先失败后成功 = 成功」）。参数形态反馈回路本就鼓励「改对参数再试一次」；改对后的
-       * 成功是末次决定性结果，判失败会引导用户按失败重试、重复写。
-       * 容忍码（同回合提案被挡/模型误用历史协议）不算真失败——那类回合的结局由更上面的
-       * 等待事实决定。
+       * 末次决定性执行的**原始失败事实**（机械直读，**不聚合成回合级结局词**）。
+       * 唯一用途：模型说不出话时宿主的兜底话术归类（server 按它选一句既有失败话术）；
+       * 它不决定投递面、不写任务级状态——做没做成由 Main 读执行事实自己判断。
+       * 口径（与原如实交付分流的事实口径一致）：
+       *   · 倒序遇到最后一条 completed 的业务写即止——更早的失败不再取（先失败后成功：改对
+       *     参数再试一次是产品正常回路；按失败兜底会引导用户重复写）；
+       *   · 已落库的业务写之后的脚本失败不取（脚本失败不是「另一个写没成」，⑪ 冻结用例）；
+       *     无业务写时（只读查询 + 脚本失败）脚本的原始失败仍取（⑫ 冻结用例，不放宽）；
+       *   · 容忍码（同回合提案被挡/模型误用历史协议）不取——那类回合的结局由更上面的
+       *     等待事实决定。
        */
       const completedBusinessWrite = recorded.some(
         (entry) => entry.operation !== RUN_JS_TOOL
           && !readOnlyOperations.has(entry.operation)
           && entry.outcome.status === 'completed',
       );
-      const roundFailureOf = ():
-        | { outcome: 'failed' | 'refused'; code?: string; reason?: string }
-        | undefined => {
+      const lastDecisiveExecutionFactOf = (): { code?: string; reason?: string } | undefined => {
         for (let index = recorded.length - 1; index >= 0; index -= 1) {
           const entry = recorded[index];
           if (entry === undefined) continue;
           const status = entry.outcome.status;
-          // 末次决定性结果 = 已落库的业务写成功：更早的失败不再决定结局（先失败后成功 = 成功）。
+          // 末次决定性结果 = 已落库的业务写成功：更早的失败不再取。
           if (entry.operation !== RUN_JS_TOOL
             && !readOnlyOperations.has(entry.operation)
             && status === 'completed') {
             return undefined;
           }
           if (status !== 'failed' && status !== 'refused') continue;
-          // 业务写已落库：宿主脚本的失败不改写「办好了」的如实交付（审计行照旧保留）。
+          // 业务写已落库：宿主脚本的失败不改写兜底话术（审计行照旧保留）。
           if (completedBusinessWrite && entry.operation === RUN_JS_TOOL) continue;
           const code = entry.outcome.error.code;
           if (SAME_TURN_TOLERATED_FAILURE_CODES.has(code)) continue;
           const reason = entry.outcome.error.message;
-          return {
-            outcome: status,
+          const fact: { code?: string; reason?: string } = {
             ...(code === undefined || code === '' ? {} : { code }),
             ...(reason === undefined || reason.trim() === '' ? {} : { reason }),
           };
+          return fact.code === undefined && fact.reason === undefined ? undefined : fact;
         }
         return undefined;
       };
@@ -4588,26 +4582,23 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         // 说清——用户该看到「没权限」，不是「模型没干活」：后者把权限问题说成模型问题，
         // 还会诱导用户让模型重试同一个动作。
         // report 照样带上 Worker 汇报：零执行 ≠ 没有答复（模型可能已经说清「办不了/没权限」，
-        // 丢掉汇报会把本回合判成「一无所有」→ 假失败 + 用户收不到那句解释）。
+        // 丢掉汇报会让 Main 收不到那句解释）。
         if (hostRefusedOperations.length > 0) {
           return {
             kind: 'ended',
             report: workerResult.text,
             zeroExecReason: 'not_permitted',
-            // 执行结局 = 发起前被宿主拒绝（本次不允许）；投递面据此走失败回调，不要说「办好了」。
-            executionOutcome: 'not_permitted',
             // 机械原因原样交给受理窗口/投递面：模型要转述的正是这句「没权限」，不是「没干活」。
             failureReason: OPERATION_NOT_PERMITTED_MESSAGE,
           };
         }
         // 零执行且不是权限拒绝 = 这件事没有发生任何办理动作（目录里没有 / 助手没动手）——
-        // 旧答复五态口径是 unsupported（B4 冻结：用户该听到「办不了」，绝不能当成功说
-        // 「办好了」）。report 仍原样带回（对失败的说明），但**不落完成存档**。
+        // 机械原因码 unsupported（B4 冻结：用户该听到「办不了」，绝不能当成功说「办好了」）。
+        // report 仍原样带回（对没办的说明），做没做成由 Main 读事实判断。
         return {
           kind: 'ended',
           report: workerResult.text,
           zeroExecReason: 'unsupported',
-          executionOutcome: 'failed',
           failureReason: '没有实际办理：这次交办没有发出任何办理动作。',
         };
       }
@@ -4619,22 +4610,17 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       // 片 1 产物回程：Worker 的 run_js 产物已登记为**任务作用域**文件（task_id 绑定，
       // 登记时已 copy 进 workspace）。完成时随汇报上交——后台面对 TurnResult.files 的
       // 同位面；装配方按它投递（投递去留与前台同一交付面/角色闸）。
-      // 回合收尾不判业务终局（S1：没有 completed/failed 结论）——做没做成由 Main 读
-      // 执行事实（executions）自己判断；本回合只如实上交 worker 汇报与产物登记事实。
-      // executionOutcome 是**如实交付分流**（不是业务终局）：本回合执行事实里有没有
-      // failed/refused；有则投递面走失败回调，绝不把「对失败的说明」说成「办好了」。
-      const roundFailure = roundFailureOf();
+      //
+      // 回合收尾只记事实（**没有回合级结论词**）：execution 逐条 status 已在账本、report 是
+      // worker 汇报原文、死亡事实在账本列。做没做成 / 进度由 Main 读事实自己判断。
+      // errorCode / failureReason 是末次原始失败执行事实，只供「模型说不出话」的兜底归类。
+      const lastExecutionFact = lastDecisiveExecutionFactOf();
       return {
         kind: 'ended',
         report: workerResult.text,
         ...(taskFiles.length === 0 ? {} : { files: taskFiles }),
-        ...(roundFailure === undefined
-          ? {}
-          : {
-            executionOutcome: roundFailure.outcome,
-            ...(roundFailure.code === undefined ? {} : { errorCode: roundFailure.code }),
-            ...(roundFailure.reason === undefined ? {} : { failureReason: roundFailure.reason }),
-          }),
+        ...(lastExecutionFact?.code === undefined ? {} : { errorCode: lastExecutionFact.code }),
+        ...(lastExecutionFact?.reason === undefined ? {} : { failureReason: lastExecutionFact.reason }),
       };
     },
   };

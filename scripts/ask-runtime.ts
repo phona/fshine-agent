@@ -563,27 +563,36 @@ const LEASE_MARGIN_MS = 60_000;
  * （可注入假件）→ TaskRunner。runner 为**进程级**对象，由入口（server）或装配核心构建后
  * 注入会话；本函数不 pump（触发点由调用方掌握：受理后/落定后/启动恢复）。
  */
-/** 一次后台执行回合的机械结局里，宿主完成投递面需要的事实（B 切片完成回调接缝）。 */
+/**
+ * 一次后台执行回合收尾、宿主**投递面**需要的事实（B 切片完成回调接缝；2026-11-23 去 outcome：
+ * 触发条件是**有 worker 汇报原文**——这是事实，不是「成功」判定）。
+ * **不携带任务结论**：做没做成由 Main 读账本 executions + 死亡事实 + 汇报自己判断。
+ */
 export interface BackgroundTaskCompletion {
   taskId: string;
   principalId: string;
   sessionId: string;
   request: string;
-  /** 执行端确认的结果原文（仅 completed 且非空时回调；逐字，未过出口清理）。 */
+  /** worker 汇报原文（有汇报才回调；逐字，未过出口清理）。 */
   resultText: string;
   /**
    * 片 1 产物回程：本回合 Worker 产出的任务作用域交付物（登记事实；后台面对
    * TurnResult.files 的同位面）。缺省 = 本回合无产物。
    */
   files?: readonly TurnFileRef[];
+  /** 零执行的机械原因码（如 `not_permitted`）；只供兜底话术归类，不进用户文本。 */
+  reasonCode?: string;
+  /** 末次原始失败执行事实的错误码；只供兜底话术归类，不进用户文本。 */
+  errorCode?: string;
+  /** 机械原因原文（执行层失败原文 / 宿主零执行原因）；投递面事实文案用，不进用户文本原样。 */
+  reason?: string;
 }
 
 /**
- * 一次后台执行回合的机械结局里，宿主**失败投递面**需要的事实（2026-11-19 收口；S1 改形；
- * 2026-11-22 补 errorCode/reason）。与 BackgroundTaskCompletion 对称的失败回调事实：回合
- * 以「没有产出结果汇报」收尾、执行以失败/拒绝收尾、或结果未知。
- * **不携带任务结论**（S1 事实模型：做没做成由 Main 读账本事实自己判断）——回调只带机械事实：
- * 失败的种类（无汇报 / 结果未知）、零执行的结构化原因码、执行层原始错误码与失败原文；
+ * 一次后台执行回合收尾、宿主**失败投递面**需要的事实（2026-11-19 收口；S1 改形；
+ * 2026-11-22 补 errorCode/reason；2026-11-23 去 outcome）。触发条件是**没有 worker 汇报原文**
+ * 或**结果未知**——两者都是机械事实，不是「失败」判定（做没做成由 Main 读账本事实自己判断）。
+ * 回调只带机械事实：种类（无汇报 / 结果未知）、零执行的结构化原因码、原始错误码与失败原文；
  * 做没做成的证据（逐笔执行行）由唤醒面从底账读出喂给 Main。
  */
 export interface BackgroundTaskFailure {
@@ -591,13 +600,13 @@ export interface BackgroundTaskFailure {
   principalId: string;
   sessionId: string;
   request: string;
-  /** 回合失败事实的种类（no_report = 无汇报/执行失败收尾；result_unknown = 结果未知）。 */
+  /** 机械事实种类（no_report = 回合收尾但没有汇报原文；result_unknown = 结果未知）。 */
   status: 'no_report' | 'result_unknown';
   /** 零执行的机械原因码（如 `not_permitted` = 发起前被宿主拒绝）；不是文案，不进用户文本。 */
   reasonCode?: string;
-  /** 执行层原始错误码（本回合执行以 failed/refused 收尾时带；只用于归类，不进用户文本）。 */
+  /** 末次原始失败执行事实的错误码；只用于兜底归类，不进用户文本。 */
   errorCode?: string;
-  /** 执行层失败原文（机械原因；投递面事实文案用；不进用户文本原样）。 */
+  /** 机械原因原文（投递面事实文案用；不进用户文本原样）。 */
   reason?: string;
 }
 
@@ -634,15 +643,16 @@ export interface BackgroundDispatchInput {
   /** 测试注入：假后台执行器（缺省 = 真实 Worker 回合执行器）。 */
   taskExecutor?: TaskExecutor;
   /**
-   * B 切片（工单回执收敛）：后台任务完成回调——执行端确认 completed 的回合结局
-   * （每任务恰好一次；runner 不重跑终态）。回调在 runner 收尾前同步触发，回调自身负责
+   * B 切片（工单回执收敛）：后台回合**有汇报**时的投递回调——触发条件是事实（有 worker 汇报
+   * 原文），不是「成功」判定。每任务恰好一次；回调在 runner 收尾前同步触发，回调自身负责
    * 异步化（fire-and-forget：不得阻塞收尾、不得改变任务事实）。缺省不接 = 零行为变化。
    */
   onTaskCompleted?: (completion: BackgroundTaskCompletion) => void;
   /**
-   * 失败回调（2026-11-19 收口，与 onTaskCompleted 对称）：任务终局 failed / result_unknown
-   * 时触发。**只带机械事实（status/reason）**；用户可见文本由投递面用 failureMessageFor
-   * 模板生成，不在这里拼话术。缺省不接 = 零行为变化。
+   * 后台回合**没有汇报**时的投递回调（2026-11-19 收口，与 onTaskCompleted 对称；2026-11-23
+   * 去 outcome）：触发条件是事实（回合收尾但没有汇报原文 / 结果未知）。
+   * **只带机械事实（status/reason）**；用户可见文本由投递面按原始执行事实生成，不在这里拼话术。
+   * 缺省不接 = 零行为变化。
    */
   onTaskFailed?: (failure: BackgroundTaskFailure) => void;
   /** 预构建执行面/worker 驱动（装配核心复用；已给 taskExecutor 时不需要）。 */
@@ -812,10 +822,11 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
       };
     }
   }
-  // B 切片：完成/失败回调接缝——包装实际使用的执行器（注入的或默认构建的同一道包装）。
+  // B 切片：投递回调接缝——包装实际使用的执行器（注入的或默认构建的同一道包装）。
   // 回调在 runner 收尾前同步触发；快活（结果已同回合交给模型）的抑制由装配调用方处置。
-  // S1 事实模型：回合结局没有 completed/failed 结论——有汇报 = 完成回调；无汇报/结果未知 =
-  // 失败回调（做没做成由唤醒面的 Main 读账本事实自己判断）。
+  // S1 事实模型 + 2026-11-23 去 outcome：路由只认事实——**有 worker 汇报原文**走完成回调
+  // （把汇报交给唤醒面喂 Main），**没有汇报 / 结果未知**走失败回调。没有「成功/失败」判定，
+  // 做没做成由唤醒面的 Main 读账本 executions + 死亡事实自己判断。
   if (input.onTaskCompleted !== undefined || input.onTaskFailed !== undefined) {
     const inner = executor;
     const onTaskCompleted = input.onTaskCompleted;
@@ -827,9 +838,8 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
           outcome = await inner.execute(task, context);
         } catch (error) {
           // 2026-11-19 唤醒切片：回合**抛错**（Worker 驱动/基础设施故障）也触发失败回调
-          // ——此前不触发失败回调，用户只能等下次开口才从 B 通道侧面知道。按同一条失败
-          // 出口如实上报（种类 = 无汇报收尾），然后原样抛出：任务事实仍由 runner 收尾决定，
-          // 本层不改判。
+          // ——此前不触发失败回调，用户只能等下次开口才从 B 通道侧面知道。按同一条出口如实
+          // 上报（种类 = 无汇报收尾），然后原样抛出：任务事实仍由 runner 收尾决定，本层不改判。
           onTaskFailed?.({
             taskId: task.taskId,
             principalId: task.principalId,
@@ -840,13 +850,11 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
           throw error;
         }
         if (outcome.kind === 'ended') {
-          // 如实交付分流（2026-11-22，红线）：只有**真正成功**（executionOutcome = 缺省/success
-          // 且有汇报）才走完成回调。执行结局是 failed/refused/not_permitted 或无汇报时走失败
-          // 回调——Worker 在被拒/失败后也会汇报一句解释，把那种回合说成「办好了」是虚假成功。
-          const failedOutcome = outcome.executionOutcome === 'failed'
-            || outcome.executionOutcome === 'refused'
-            || outcome.executionOutcome === 'not_permitted';
-          if (!failedOutcome && (outcome.report ?? '').trim() !== '') {
+          // 路由 = 事实：有汇报原文走完成面（汇报逐字交给唤醒面），否则走失败面（无汇报）。
+          // 汇报是不是「在解释失败」不在宿主判——两个面都把账本事实喂给 Main，由 Main 看；
+          // 模型说不出话时的兜底话术由投递面按**原始执行事实**（errorCode/failureReason）选，
+          // 不把被拒/失败的说明说成「办好了」。
+          if ((outcome.report ?? '').trim() !== '') {
             onTaskCompleted?.({
               taskId: task.taskId,
               principalId: task.principalId,
@@ -854,10 +862,13 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
               request: task.request,
               resultText: outcome.report!,
               ...(outcome.files === undefined ? {} : { files: outcome.files }),
+              ...(outcome.zeroExecReason === undefined ? {} : { reasonCode: outcome.zeroExecReason }),
+              ...(outcome.errorCode === undefined ? {} : { errorCode: outcome.errorCode }),
+              ...(outcome.failureReason === undefined ? {} : { reason: outcome.failureReason }),
             });
           } else {
-            // 无汇报收尾 / 执行失败 / 被拒都触发失败回调；零执行被宿主拒绝时带 not_permitted
-            // 结构化码，执行失败带执行层原始码与失败原文（只用于归类与事实文案，不进用户文本）。
+            // 无汇报收尾：零执行被宿主拒绝时带 not_permitted 结构化码，末次原始失败执行事实
+            // 带错误码与失败原文（只用于兜底归类与事实文案，不进用户文本）。
             onTaskFailed?.({
               taskId: task.taskId,
               principalId: task.principalId,

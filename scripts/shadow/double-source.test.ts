@@ -182,8 +182,9 @@ describe('Shadow 双源对照 ②：四态语义等价（needs_input / failed / 
     for (const run of [a, b]) {
       expect(run.executions.map((entry) => entry.status)).toEqual(['failed']);
       expect(run.executions[0]?.errorCode).toBe('COLLECTION_FAULT');
-      // S1：Worker 的那句「未能完成」是对失败的说明，不是完成结果——不落完成存档；
-      // 用户可见的失败事实走 round_failed → failed 通知（两端同形）。
+      // 2026-11-23 去 outcome：有机械失败事实的回合，那句「未能完成」是对失败的说明，
+      // 不作为结果存档（存档事件会把这一轮记成完成事实）——做没做成读执行行，用户可见的
+      // 失败事实走 failed 通知。汇报原文仍由唤醒面喂给 Main。
       expect(run.terminal.replyText).toBeUndefined();
       expect(run.terminal.hasReport).toBe(false);
       expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started', 'failed']);
@@ -199,7 +200,9 @@ describe('Shadow 双源对照 ②：四态语义等价（needs_input / failed / 
     for (const run of [a, b]) {
       expect(run.executions.map((entry) => entry.status)).toEqual(['refused']);
       expect(run.executions[0]?.errorCode).toBe('GATE_REFUSE');
+      // 有机械失败事实 → 汇报是对失败的说明，不作为结果存档；失败通知照旧。
       expect(run.terminal.replyText).toBeUndefined();
+      expect(run.terminal.hasReport).toBe(false);
       expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started', 'failed']);
     }
     expect(compareChains(a, b).equivalent).toBe(true);

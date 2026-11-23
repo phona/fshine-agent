@@ -169,15 +169,14 @@ function lastUserTextOf(messages: readonly unknown[]): string {
   return '';
 }
 
-/** 从完成事实里取逐字结果正文（模型侧同一个解析：说给用户的必须是原文）。 */
+/** 从回合结束事实里取 worker 汇报原文（模型侧同一个解析：说给用户的必须是原文）。 */
 function resultBodyOf(fact: string): string {
-  const marker = '结果正文（逐字）：';
+  const marker = 'worker 汇报原文（语义，可能说错；做没做成以执行事实为准）：';
   const start = fact.indexOf(marker);
-  if (start === -1) throw new Error(`完成事实缺少结果正文段：${fact.slice(0, 120)}`);
+  if (start === -1) throw new Error(`回合结束事实缺少汇报原文段：${fact.slice(0, 120)}`);
   const rest = fact.slice(start + marker.length);
-  const end = rest.lastIndexOf('。请把这件事告诉用户。');
-  if (end === -1) throw new Error(`完成事实缺少收尾段：${fact.slice(-60)}`);
-  return rest.slice(0, end);
+  const end = rest.indexOf('\n');
+  return (end === -1 ? rest : rest.slice(0, end)).trim();
 }
 
 /**
@@ -194,7 +193,7 @@ function factMessageCount(messages: readonly unknown[]): number {
       : Array.isArray(content)
         ? content.map((part) => String((part as { text?: unknown }).text ?? '')).join('')
         : '';
-    if (text.includes('[任务完成]')) count += 1;
+    if (text.includes('[回合结束]')) count += 1;
   }
   return count;
 }
@@ -246,7 +245,7 @@ async function makeFixture(mode: WakeMode): Promise<Fixture> {
       contextWindow: 40_000,
       script: (_index, context) => {
         const last = lastUserTextOf(context.messages);
-        if (last.startsWith('[任务完成]')) {
+        if (last.startsWith('[回合结束]')) {
           wakeCalls += 1;
           if (mode === 'echo') return textAssistant(resultBodyOf(last));
           if (mode === 'empty') return textAssistant('');
@@ -350,7 +349,7 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
       });
       expect(transcriptTexts).toContain(WOKE_LINE);
       // 喂进去的是事实（不是话术），且事实不含内部标识：结果正文逐字在内。
-      expect(transcriptTexts.some((entry) => entry.startsWith('[任务完成]') && entry.includes('汇总完成，共 3 条。'))).toBe(true);
+      expect(transcriptTexts.some((entry) => entry.startsWith('[回合结束]') && entry.includes('汇总完成，共 3 条。'))).toBe(true);
 
       // 记账字段一个不少；live 送达才记 sent；无抑制。
       const sent = fx.logs.filter((line) => line['event'] === 'task_result_delivery_sent');
@@ -421,7 +420,7 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
       // 事实留在「待注入」（既有 injections 机制）：下一次用户开口时进模型上下文。
       await fx.server.handler(incoming('m-2', '然后呢'));
       const second = fx.recorded[1]!;
-      expect(second.injections?.some((text) => text.startsWith('[任务完成]') && text.includes('汇总完成，共 3 条。'))).toBe(true);
+      expect(second.injections?.some((text) => text.startsWith('[回合结束]') && text.includes('汇总完成，共 3 条。'))).toBe(true);
     } finally {
       await fx.close();
     }
@@ -478,7 +477,7 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
       // ① 的机械事实：唤醒回合（最后一条 user = 完成事实）里带着业务名——模型才能复读它。
       const wakeRequest = fx.scripted!.requests().at(-1)!;
       const fact = lastUserTextOf(wakeRequest.messages);
-      expect(fact.startsWith('[任务完成]')).toBe(true);
+      expect(fact.startsWith('[回合结束]')).toBe(true);
       expect(fact).toContain(`「${TASK_NAME}」`);
     } finally {
       await fx.close();
@@ -508,9 +507,9 @@ describe('完成唤醒（server 级）：宿主喂事实、模型说话、宿主
       const anyUserText = second.messages.some((message) => {
         const record = message as { role?: string; content?: unknown };
         if (record.role !== 'user') return false;
-        if (typeof record.content === 'string') return record.content.includes('[任务完成]');
+        if (typeof record.content === 'string') return record.content.includes('[回合结束]');
         if (Array.isArray(record.content)) {
-          return record.content.some((part) => String((part as { text?: unknown }).text ?? '').includes('[任务完成]'));
+          return record.content.some((part) => String((part as { text?: unknown }).text ?? '').includes('[回合结束]'));
         }
         return false;
       });
@@ -580,17 +579,17 @@ describe('注入核销（机械判据）：本回合没有用户可见输出 →
 
       // 第二回合：事实已注入，但模型一个可见字都没产出（空回复）→ 回合失败，事实不核销。
       await expect(fx.server.handler(incoming('m-2', '空回复'))).rejects.toThrow();
-      expect(fx.recorded[1]!.injections?.some((text) => text.startsWith('[任务完成]'))).toBe(true);
+      expect(fx.recorded[1]!.injections?.some((text) => text.startsWith('[回合结束]'))).toBe(true);
 
       // 第三回合：事实**仍在**待注入队列（旧实现这里就空了）——但本回合驱动抛错，同样不核销。
       await expect(fx.server.handler(incoming('m-3', '驱动失败'))).rejects.toThrow();
-      expect(fx.recorded[2]!.injections?.some((text) => text.startsWith('[任务完成]'))).toBe(true);
+      expect(fx.recorded[2]!.injections?.some((text) => text.startsWith('[回合结束]'))).toBe(true);
 
       // 第四回合：终于有用户可见文本 → 核销；此后的回合不再重复注入。
       await fx.server.handler(incoming('m-4', '然后呢'));
-      expect(fx.recorded[3]!.injections?.some((text) => text.startsWith('[任务完成]'))).toBe(true);
+      expect(fx.recorded[3]!.injections?.some((text) => text.startsWith('[回合结束]'))).toBe(true);
       await fx.server.handler(incoming('m-5', '还在吗'));
-      expect((fx.recorded[4]!.injections ?? []).some((text) => text.includes('[任务完成]'))).toBe(false);
+      expect((fx.recorded[4]!.injections ?? []).some((text) => text.includes('[回合结束]'))).toBe(false);
     } finally {
       await fx.close();
     }

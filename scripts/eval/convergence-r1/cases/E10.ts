@@ -18,7 +18,7 @@ export const E10: UserCase = {
   },
   hardAnchors: [
     // ── 同类词表扫描登记（2026-11-20）：本锚点是 9 值 containsAny 近义词族，形状同 E11 旧词表，
-    // 但**不改**为 E11 式 mechanicalOutcome，理由（如实登记，不放宽也不删）：
+    // 但**不改**为 E11 式 noWriteExecuted，理由（如实登记，不放宽也不删）：
     // ① E10 不是零执行用例：执行真实发生并被执行层拒绝——T0 审计行 exitCode=3 /
     //    refused=collection-restricted，T1 execution=refused + error.code=GATE_REFUSE；这些机械事实
     //    已由本用例的 expectedT1Status='refused' + expectedErrorCode='GATE_REFUSE' 机械钉死（judge.ts

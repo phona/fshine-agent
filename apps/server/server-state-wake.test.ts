@@ -222,7 +222,19 @@ function wakeLineFor(factText: string, mode: 'line' | 'silent' | 'tool-only', wa
   if (mode === 'tool-only') return wakeCalls === 1 ? toolCallAssistant('task_run', { task: TASK_TEXT }) : textAssistant('');
   const name = /「([^」]+)」/.exec(factText)?.[1];
   const subject = name === undefined ? '你交代的那件事' : `「${name}」`;
-  if (factText.startsWith('[任务失败]')) return textAssistant(`${subject}这次没办成。要我再试一次，还是先放着？`);
+  if (factText.startsWith('[回合结束]')) {
+    // 脚本模型按**原始事实**自己判（产品新模型：成败由 Main 判、话由 Main 说）：
+    // 无汇报 / 机械原因 / 结果未知 / 资源拒绝 / 发起前被拒 / 账本零执行 → 说清没办成。
+    const failedFact = factText.includes('worker 这一回合没有汇报原文')
+      || factText.includes('机械原因')
+      || factText.includes('看门狗观察到执行租约过期')
+      || factText.includes('本次被资源策略拒绝')
+      || factText.includes('发起前被宿主拒绝')
+      || factText.includes('账本里没有执行事实');
+    if (failedFact) return textAssistant(`${subject}这次没办成。要我再试一次，还是先放着？`);
+    const report = /worker 汇报原文（语义，可能说错；做没做成以执行事实为准）：(.+)/u.exec(factText)?.[1]?.trim();
+    return textAssistant(report === undefined ? `${subject}这次没办成。要我再试一次，还是先放着？` : `${subject}办好了：${report}`);
+  }
   if (factText.startsWith('[已停止]')) return textAssistant(`${subject}已经停了。`);
   if (factText.startsWith('[久无动静]')) return textAssistant(`${subject}比预计久了。要我停下来，还是继续等？`);
   if (factText.startsWith('[重启对账]')) return textAssistant(`${subject}我这边重启过，状态说不清了；你说一声我就重来。`);
@@ -334,7 +346,7 @@ async function makeFixture(mode: Mode, options: {
       contextWindow: 40_000,
       script: (_index, context) => {
         const last = lastUserTextOf(context.messages);
-        if (last.startsWith('[任务完成]') || last.startsWith('[任务失败]') || last.startsWith('[已停止]')
+        if (last.startsWith('[回合结束]') || last.startsWith('[已停止]')
           || last.startsWith('[久无动静]') || last.startsWith('[重启对账]') || last.startsWith('[任务等待]')) {
           wakeCalls += 1;
           return wakeLineFor(last, mode, wakeCalls);
@@ -481,8 +493,8 @@ describe('状态变化唤醒（server 级）：失败', () => {
     const fx = await makeFixture('line');
     try {
       await fx.server.handler(incoming('m-1', ASK));
-      // S1 如实交付：回合执行结局 = 失败 + 机械原因（执行层失败原文）；唤醒事实带上原因。
-      fx.executor.settle({ kind: 'ended', executionOutcome: 'failed', failureReason: FAIL_REASON });
+      // 去 outcome（2026-11-23）：回合只记事实——无汇报 + 机械原因（执行层失败原文）；事实带上原因。
+      fx.executor.settle({ kind: 'ended', failureReason: FAIL_REASON });
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
 
       const text = fx.delivery.sentTexts[0]!.text;
@@ -500,10 +512,10 @@ describe('状态变化唤醒（server 级）：失败', () => {
         if (Array.isArray(content)) return content.map((block) => String((block as { text?: unknown }).text ?? '')).join('');
         return '';
       });
-      const fact = texts.find((entry) => entry.startsWith('[任务失败]'));
+      const fact = texts.find((entry) => entry.startsWith('[回合结束]'));
       expect(fact).toBeDefined();
       expect(fact).toContain(`「${TASK_NAME}」`);
-      expect(fact).toContain('这个回合没有产出结果汇报');
+      expect(fact).toContain('worker 这一回合没有汇报原文');
       expect(fact).toContain(FAIL_REASON);
       // 事实里带「给他一个能做的下一步」这条交代（语气与措辞归模型，可执行性不归它）。
       expect(fact).toContain('下一步');
@@ -573,7 +585,7 @@ describe('状态变化唤醒（server 级）：失败', () => {
     // 零执行被误判 outcome=failed。改看真实执行行数 → unsupported。
     const zeroExec: TaskExecutor = {
       async execute(): Promise<TaskExecutionOutcome> {
-        return { kind: 'ended', executionOutcome: 'failed' };
+        return { kind: 'ended' };
       },
     };
     const fx = await makeFixture('line', { executorOverride: zeroExec });
@@ -586,7 +598,7 @@ describe('状态变化唤醒（server 级）：失败', () => {
         if (typeof content === 'string') return content;
         if (Array.isArray(content)) return content.map((block) => String((block as { text?: unknown }).text ?? '')).join('');
         return '';
-      }).find((entry) => entry.startsWith('[任务失败]'));
+      }).find((entry) => entry.startsWith('[回合结束]'));
       expect(factText).toBeDefined();
       expect(factText).toContain('账本里没有执行事实');
       expect(factText).not.toContain('[outcome=failed]');
@@ -604,7 +616,7 @@ describe('状态变化唤醒（server 级）：失败', () => {
       await fx.server.handler(incoming('m-2', '然后呢'));
       const requests = fx.scripted!.requests();
       const texts = requests[requests.length - 1]!.messages.map(userTextOf);
-      // B 通道的形状是 `[任务事实] …`（渲染器产出）；`[任务失败] …` 是唤醒事实（上一回合的
+      // B 通道的形状是 `[任务事实] …`（渲染器产出）；`[回合结束] …` 是唤醒事实（上一回合的
       // 转录历史里本来就该有它——模型已经看过、也已经说过，不算第二遍）。
       expect(texts.some((text) => text.startsWith('[任务事实]'))).toBe(false);
     } finally {
@@ -622,7 +634,7 @@ describe('状态变化唤醒（server 级）：失败', () => {
       expect(wakeEventOf(fx.logs, 'task_failure_wake')).toMatchObject({ outcome: 'unavailable' });
       // 事实不丢：下一次用户开口随 injections 进模型上下文（既有机制）。
       await fx.server.handler(incoming('m-2', '然后呢'));
-      expect(fx.recorded[1]!.injections?.some((entry) => entry.startsWith('[任务失败]'))).toBe(true);
+      expect(fx.recorded[1]!.injections?.some((entry) => entry.startsWith('[回合结束]'))).toBe(true);
     } finally {
       await fx.close();
     }

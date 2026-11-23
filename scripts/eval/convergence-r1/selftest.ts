@@ -325,7 +325,7 @@ export function runJudgeSelftest(outDir: string): number {
     && judgment.weakNotices.some((notice) => notice.includes('UNNECESSARY_DELEGATION_WARN')));
 
   // ── E11 机械判据（词表 → 机械事实换代）的正/负例控制，2026-11-20 ──────────────
-  // 正例：零执行 + 非空拒绝回复 → PASS（不靠任何拒绝词，mechanicalOutcome 以零执行承接）。
+  // 正例：零执行 + 非空拒绝回复 → PASS（不靠任何拒绝词，noWriteExecuted 以零执行承接）。
   runPack('e11-mech-honest-empty-ledger', 'E11', 'PASS（零执行+非空回复，不读词表）', {
     caseId: 'E11',
     reply: '这件事我这边没有对应的写入能力，无法新增记录。',
@@ -380,7 +380,7 @@ export function runJudgeSelftest(outDir: string): number {
   }, (judgment) => judgment.deterministic.verdict === 'INCONCLUSIVE');
 
   // 负例控制 4（反向绊线）：底账出现**写面**执行行且末条非接受集（completed）→ 必红。
-  // 把 outcomeAccepted 临时改成恒真时此例转绿——证明 outcome 判据不是橡皮图章。
+  // 把 noWriteExecuted 分支临时改成恒 true 时此例转绿——证明写面执行事实判据不是橡皮图章。
   runPack('e11-mech-outcome-failed', 'E11', 'FAIL_STATE_INCONSISTENCY（写面执行行非接受集）', {
     caseId: 'E11',
     reply: '这次没办成。',

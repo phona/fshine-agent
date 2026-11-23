@@ -152,6 +152,8 @@ describe('冒烟·执行很久后异常（slow_fault）', () => {
       expect(sim.sdk.proactiveTexts[0]!.content).not.toContain('cannot be read after a long run');
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(sim.sdk.proactiveTexts).toHaveLength(1); // 没有第二条（非快活场景恰一条失败话术）
+      // 2026-11-23 去 outcome：有机械失败事实的回合，worker 那句「没办成…」是对失败的说明，
+      // 不作为结果存档（用户可见面由上面两条断言钉住：没办成、绝无「办完了」）。
       expect(failed.replyText ?? failed.resultText ?? '').toBe('');
 
       // 用户追问：task_result 的真实失败原因被如实转述（不是「已完成」）。

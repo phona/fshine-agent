@@ -761,18 +761,22 @@ describe('模型走岔路（确定性脚本模型）', () => {
     // 账本如实保留两条执行事实：业务拒绝在先、业务写成功在后。
     expect(task.executions.map((execution) => [execution.operation, execution.status]))
       .toEqual([['dummy.denied', 'refused'], ['dummy.proposal', 'completed']]);
-    // 末次决定性结果 = 成功：如实交付分流**不得**走失败回调（executionOutcome 非 failed/refused）。
+    // 2026-11-23 去 outcome：回合收尾只记事实——有汇报就存档（交给唤醒面喂 Main），
+    // 宿主不再产出 success/failed/refused 这类回合级结局词（键不在；兜底话术按原始执行事实选）。
     const round = runner.roundOutcomeOf?.('t_failthenok');
     expect(round?.kind).toBe('ended');
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
-    expect(round.executionOutcome).toBeUndefined();
+    expect(Object.keys(round)).not.toContain('executionOutcome');
+    expect((round.report ?? '').trim()).not.toBe('');
+    // 末次决定性执行 = 业务写 completed：不产出「失败执行事实」，兜底走汇报原文面。
+    expect(round.errorCode).toBeUndefined();
     expect(lastExecutionOf(task)?.status).toBe('completed');
   });
 
-  it('⑮ needs_input 没说清缺什么：按失败收尾（不落完成存档），不冒充办好了', async () => {
-    // 2026-11-22 Grok 复审恢复：执行层要求补充但 pendingQuestionFrom 得不出 missing 时，
-    // 旧实现当 ended（executionOutcome 缺省 = 成功）→ runner archiveReply「办完了」= 虚假成功。
-    // 修法：executionOutcome=failed → noteRoundFailed（不落完成存档），reason 说明缺什么没说清。
+  it('⑮ needs_input 没说清缺什么：只落事实（不编造问题形状），不冒充办好了', async () => {
+    // 2026-11-22 Grok 复审恢复的问题（等待事实形状不完整时不能当完成/编造问题）在
+    // 2026-11-23 去 outcome 后由**事实面**承接：回合带机械原因（缺什么没说清），宿主兜底
+    // 话术按它走既有失败话术（server fallbackFactTextOf 的 reason 分支），不会说「办好了」。
     const registry = makeRegistry();
     const capture: WorkerCapture = { results: [] };
     const executor = await makeExecutor({
@@ -784,13 +788,14 @@ describe('模型走岔路（确定性脚本模型）', () => {
     const task = registry.get('t_bareneeds', SCOPE);
     // 等待事实形状不完整 → 不落 pendingQuestion（不编造问题形状）。
     expect(task.pendingQuestion).toBeUndefined();
-    // 不落完成存档（失败回合的汇报是对失败的说明，不是完成结果）。
+    // 有机械失败事实 → 汇报是对失败的说明，不作为结果存档（汇报原文仍由唤醒面喂 Main）。
     expect((task.resultText ?? task.replyText ?? '').trim()).toBe('');
-    // 本回合机械结局 = 失败（投递面据此走失败回调，把「缺信息」如实说清）。
     const round = runner.roundOutcomeOf?.('t_bareneeds');
     expect(round?.kind).toBe('ended');
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
-    expect(round.executionOutcome).toBe('failed');
+    // 只记事实：没有回合级结局词；机械原因说明缺什么没说清（兜底话术据此不冒充「办好了」）。
+    expect(Object.keys(round)).not.toContain('executionOutcome');
+    expect(round.failureReason).toContain('没有说清缺什么');
   });
 
   it('⑬ 确认回合重提：宿主注入的确认句柄不得落进底账提案载荷，也不得进下一轮委派正文', async () => {

@@ -307,3 +307,185 @@ describe('删投影：只留 liveness + 账本事实', () => {
     expect(successFailureClassifier).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 回合级结局词（executionOutcome）退役守卫（2026-11-23）
+//
+// 唯一任务级状态是 liveness 三值。宿主回合收尾只记机械事实（execution 逐条 status +
+// replyText + 死亡事实），**不再**把事实聚合成回合级结局词（success/failed/refused/
+// not_permitted）；唤醒把 executions/liveness/replyText 喂给 Main，由 Main 判成败。
+// 守卫按**形状**判（facts → 回合级词），不认名字：
+//   ① 「回合事实 → 结局词」：函数自身 return 出 success/refused/not_permitted（回合级
+//      枚举独有词），且读到了账本/执行事实字段 → 命中；
+//   ② 「问答五态分类器」（eval 旧 mechanicalOutcome）：函数自身 return ≥2 个
+//      completed/partial/unsupported/blocked/failed，且至少含一个 partial/unsupported/blocked
+//      （这三个不是执行行原始 status 词）→ 命中。
+// 执行层适配器直传 `{ status: 'refused', ... }`（原始执行 status）不读账本事实，不命中；
+// 只 return {completed, failed} 的成败分类器也不命中（已登记局限，见 ④ 末段）。
+// ---------------------------------------------------------------------------
+
+/** 回合级结局词（executionOutcome 的枚举值）；`refused`/`failed` 也是执行行原始 status，故需与「读事实」同形才判。 */
+const ROUND_VERDICT_WORDS = new Set(['success', 'refused', 'not_permitted']);
+/** eval 答复五态词（classifyOutcome 已删的旧枚举）。 */
+const ANSWER_OUTCOME_WORDS = new Set(['completed', 'partial', 'unsupported', 'blocked', 'failed']);
+/** 五态里**不是执行行原始 status** 的三个词——只有任务级分类器才会成组 return 它们。 */
+const ANSWER_OUTCOME_ONLY_WORDS = new Set(['partial', 'unsupported', 'blocked']);
+
+/**
+ * 「return 出来的词」：只认**直接返回位置**的字符串字面量（return 表达式本身 / 三元两支 /
+ * 对象属性值 / 数组元素）。比较表达式里的状态码（`status === 'refused'`）是被读的事实，
+ * 不是被产出的词——不收集（否则任何布尔判断都会被误判成投影）。
+ */
+function collectReturnedLiterals(node: ts.Node, words: Set<string>): void {
+  if (
+    ts.isParenthesizedExpression(node)
+    || ts.isAsExpression(node)
+    || ts.isNonNullExpression(node)
+  ) {
+    collectReturnedLiterals(node.expression, words);
+    return;
+  }
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+    words.add(node.text);
+    return;
+  }
+  if (ts.isConditionalExpression(node)) {
+    collectReturnedLiterals(node.whenTrue, words);
+    collectReturnedLiterals(node.whenFalse, words);
+    return;
+  }
+  if (ts.isObjectLiteralExpression(node)) {
+    for (const property of node.properties) {
+      if (ts.isPropertyAssignment(property)) collectReturnedLiterals(property.initializer, words);
+    }
+    return;
+  }
+  if (ts.isArrayLiteralExpression(node)) {
+    for (const element of node.elements) collectReturnedLiterals(element, words);
+  }
+}
+
+/** 函数**自身**（不下潜内层函数）return 出的词 + 读到的账本事实字段。 */
+function ownReturnedWordsAndFactReads(fn: ts.Node): { words: Set<string>; facts: Set<string> } {
+  const words = new Set<string>();
+  const facts = new Set<string>();
+  const walk = (node: ts.Node): void => {
+    if (ts.isReturnStatement(node) && node.expression !== undefined) collectReturnedLiterals(node.expression, words);
+    if (ts.isPropertyAccessExpression(node) && LEDGER_FACT_NAMES.has(node.name.text)) facts.add(node.name.text);
+    if (ts.isPropertyAssignment(node) && LEDGER_FACT_NAMES.has(node.name.getText())) facts.add(node.name.getText());
+    ts.forEachChild(node, (child) => { if (!isFunctionLike(child)) walk(child); });
+  };
+  const body = (fn as { body?: ts.Node }).body;
+  if (body !== undefined) walk(body);
+  return { words, facts };
+}
+
+/** 扫描器（纯函数，供反向绊线自证）：返回「事实 → 回合级词」投影的命中点。 */
+export function findForbiddenVerdictProjections(sources: ReadonlyMap<string, string>): Array<{ file: string; hit: string }> {
+  const hits: Array<{ file: string; hit: string }> = [];
+  for (const [file, text] of sources) {
+    const sf = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+    const visit = (node: ts.Node): void => {
+      if (isFunctionLike(node)) {
+        const name = functionName(node);
+        const { words, facts } = ownReturnedWordsAndFactReads(node);
+        // ① 回合事实 → 结局词（success/refused/not_permitted）。执行行 status 直传不读账本事实。
+        const roundWords = [...words].filter((word) => ROUND_VERDICT_WORDS.has(word));
+        if (roundWords.length >= 1 && facts.size >= 1) {
+          hits.push({ file, hit: `round:${name ?? '<anonymous>'}(${roundWords.sort().join(',')})` });
+        }
+        // ② 答复五态分类器：≥2 个五态词且含 partial/unsupported/blocked。
+        const answerWords = [...words].filter((word) => ANSWER_OUTCOME_WORDS.has(word));
+        if (answerWords.length >= 2 && answerWords.some((word) => ANSWER_OUTCOME_ONLY_WORDS.has(word))) {
+          hits.push({ file, hit: `answer:${name ?? '<anonymous>'}(${answerWords.sort().join(',')})` });
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    ts.forEachChild(sf, visit);
+  }
+  return hits;
+}
+
+/** 产品面源码（测试/退役校验脚本自身含被判词串与断言，不参与形状扫描）。 */
+function productSources(): Map<string, string> {
+  const sources = new Map<string, string>();
+  for (const dir of SCAN_DIRS) {
+    for (const file of listTs(path.join(ROOT, dir))) {
+      const rel = path.relative(ROOT, file);
+      if (rel.endsWith('.test.ts') || rel.endsWith('.test.tsx')) continue;
+      if (rel === 'packages/agent/task-liveness-only.test.ts') continue;
+      sources.set(rel, readFileSync(file, 'utf8'));
+    }
+  }
+  return sources;
+}
+
+describe('删回合级结局词：宿主/eval 只留事实 + liveness', () => {
+  it('⑤ 源码里不再有回合级 outcome 字段/投影（executionOutcome / roundFailureOf 双退役）', () => {
+    const sources = productSources();
+    expect(findForbiddenVerdictProjections(sources)).toEqual([]);
+    const offenders = [...sources]
+      .filter(([, text]) => text.includes('executionOutcome') || text.includes('roundFailureOf'))
+      .map(([file]) => file);
+    expect(offenders).toEqual([]);
+    // 类型声明里也不再有该字段（防止只删消费点、留下空字段）。
+    const runnerType = readFileSync(path.join(ROOT, 'packages/agent/src/task-runner.ts'), 'utf8');
+    expect(runnerType).not.toMatch(/executionOutcome/u);
+    expect(runnerType).not.toMatch(/roundSucceeded/u);
+  });
+
+  it('⑥ eval 不再有答复五态：TaskOutcome / acceptedOutcomes / mechanicalOutcome 退役', () => {
+    const sources = productSources();
+    const offenders = [...sources]
+      .filter(([file]) => file.includes('convergence-r1'))
+      .filter(([, text]) => /TaskOutcome|acceptedOutcomes|mechanicalOutcome|outcomeAccepted/u.test(text))
+      .map(([file]) => file);
+    expect(offenders).toEqual([]);
+    // 判据仍直读逐条 execution status（事实面没被一起删掉）。
+    const judge = readFileSync(path.join(ROOT, 'scripts/eval/convergence-r1/judge.ts'), 'utf8');
+    expect(judge).toMatch(/\.status\b/u);
+  });
+
+  it('⑦ 反向绊线：把「事实 → 回合级词」投影放回源码，扫描器必须报红', () => {
+    // ① 改名换形：读执行事实、return success/failed（回合级结局词）。
+    const roundVerdict = findForbiddenVerdictProjections(new Map([
+      ['packages/agent/src/x.ts', `
+        export function observeRound(task: { executions?: Array<{ status: string }>; replyText?: string }): string {
+          const rows = task.executions ?? [];
+          if (task.replyText !== undefined && rows.every((row) => row.status === 'completed')) return 'success';
+          return 'failed';
+        }`],
+    ]));
+    expect(roundVerdict.some((hit) => hit.hit.startsWith('round:'))).toBe(true);
+
+    // ② eval 五态分类器（旧 mechanicalOutcome 形状）：读 executions 归成 unsupported/blocked/completed。
+    const answerClassifier = findForbiddenVerdictProjections(new Map([
+      ['scripts/eval/convergence-r1/judge.ts', `
+        export function classify(executions: Array<{ status: string }>): string {
+          if (executions.length === 0) return 'unsupported';
+          const last = executions[executions.length - 1]!.status;
+          return last === 'completed' ? 'completed' : 'blocked';
+        }`],
+    ]));
+    expect(answerClassifier.some((hit) => hit.hit.startsWith('answer:'))).toBe(true);
+
+    // 负例对照一类：执行层适配器直传原始执行 status（不读账本事实）不得报红。
+    const adapter = findForbiddenVerdictProjections(new Map([
+      ['packages/agent/src/dummy-cli-client.ts', `
+        function refusalOf(code: string, stderr: string): ExecutionOutcome {
+          return { status: 'refused', error: { code, message: stderr !== '' ? stderr : '这次请求被拒绝了。' } };
+        }`],
+    ]));
+    expect(adapter).toEqual([]);
+
+    // 负例对照二类：只有单支（只 return completed/failed 之一）的事实归一化不得报红。
+    const single = findForbiddenVerdictProjections(new Map([
+      ['scripts/eval/x.ts', `
+        function rowPassed(execution: { status: string }): string {
+          return execution.status === 'failed' ? 'failed' : 'completed';
+        }`],
+    ]));
+    expect(single).toEqual([]);
+  });
+});

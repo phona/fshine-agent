@@ -1,13 +1,15 @@
 /**
  * 任务**状态变化**的主动投递（B 切片，工单回执收敛；2026-11-19 唤醒切片改形并扩到四条出口）：
- * 任务由执行端确认的终局/状态变化（完成 / 失败 / 用户说停 / 久无动静 / 重启后状态说不清）→
- * **唤醒原会话的模型、由它把这件事说给用户**，宿主只投递它说的话——走宿主既有主动投递面
- * （装配注入的 `fileDelivery.sendText`）。宿主不再有常规用户文案（身份行「<业务名>」办完了：
- * 与失败/取消模板都已随唤醒切片退出常规路径，只留「模型回合挂掉时」的兜底句）；喂给模型的
- * 是**事实**（见 taskCompletionFactText / taskFailureSnapshotText / taskCancelledFactText /
- * taskRestartFactText），不是话术。**唯一例外**是唤醒降级（模型说不出话）与非 live 不唤醒时
- * 的宿主兜底一句（见 taskCompletionFallbackText / failureTextFor）——它如实报事实，不是话术
- * 模板。
+ * 任务状态变化（回合结束 / 用户说停 / 久无动静 / 重启后状态说不清）→ **唤醒原会话的模型、
+ * 由它把这件事说给用户**，宿主只投递它说的话——走宿主既有主动投递面（装配注入的
+ * `fileDelivery.sendText`）。宿主不再有常规用户文案（身份行「<业务名>」办完了：与取消模板
+ * 都已随唤醒切片退出常规路径，只留「模型回合挂掉时」的兜底句）；喂给模型的是**事实**
+ * （见 taskRoundFactsText / taskCancelledFactText / taskRestartFactText），不是话术——
+ * 宿主**不产出回合级结论**（success/failed/refused/not_permitted 这类词已退役）：做没做成
+ * 由 Main 读 executions 逐条 status + 死亡事实 + worker 汇报自己判。**唯一例外**是唤醒降级
+ * （模型说不出话）与非 live 不唤醒时的宿主兜底一句（见 taskCompletionFallbackText /
+ * failureTextFor）——它按**原始执行事实**（末条失败执行的 status/error.code、died/资源拒绝、
+ * 汇报原文）如实报事实，不是话术模板。
  *
  * 纪律（与文件投递 / 附件追问同一套，四必守同源）：
  *   · 非 live 部署**不发起投递**，记 `task_result_delivery_suppressed`，**不许记 sent**
@@ -101,28 +103,75 @@ function truncatedName(name: string): string {
 }
 
 /**
- * 任务完成**事实**文本（宿主拼，给模型读；用户看到的话由模型写，宿主不再拼结果文案）：
- *   `[任务完成]「<业务名>」办完了。结果正文（逐字）：<resultText>。请把这件事告诉用户。`
+ * 回合结束**事实**文本（宿主拼，给模型读；用户看到的话由模型写）：宿主**不产出回合级结论**
+ * （没有 success/failed/refused/not_permitted 这种词），只把机械事实与 worker 汇报原文交给
+ * Main——做没做成由 Main 读执行事实自己判断、自己说：
+ *   `[回合结束]「<业务名>」这一回合停了。
+ *    [机械事实：…] [机械原因：…]
+ *    worker 汇报原文（语义，可能说错；做没做成以执行事实为准）：<report>
+ *    账本事实（逐笔，供你判断做没做成）：
+ *      1. dummy.commit — failed：清理后摘要
+ *    请判断做没做成（以账本执行事实为准；worker 汇报只是它说的话），如实告诉用户，并给他
+ *    一个能做的下一步。`
  *
- * 硬边界（与 handle 隔离同一纪律）：不含 handle、不含 taskId/内部码、不含任何内部称谓与原文
- * 标识——resultText 是确认过的结果正文，逐字进事实（模型要能原样转述）。
- * name 缺省 = 主语用中性指代（不猜名）；不加任何投递/记账话术。
+ * 硬边界：不含 handle、不含 taskId、不含执行层原始码；name 缺省 = 主语用中性指代。
+ * 机械原因（reason）进模型可见事实前过与用户可见回复同一把尺（cleanExecutorDiagnostic）。
  */
-export function taskCompletionFactText(input: { name?: string; resultText: string }): string {
+export function taskRoundFactsText(input: {
+  name?: string;
+  /** 机械原因（执行层失败原文 / 宿主零执行原因；只作判断依据，模型不该原样丢给用户）。 */
+  reason?: string;
+  /** 账本事实行（逐笔执行行 + 机械标记；宿主装配，见 server 的 taskLedgerFactsOf）。 */
+  ledger?: readonly string[];
+  /** worker 汇报原文（语义；可能为空或说错，原样给 Main，不补 conclusion）。 */
+  report?: string;
+  /** died 事实（看门狗观察到租约过期，结果未知）。 */
+  died?: boolean;
+  /** 资源拒绝事实（池满/队列满，未进入执行）。 */
+  resourceLimited?: boolean;
+  /** 发起前被宿主拒绝（本次不允许，不是没有这件事）。 */
+  notPermitted?: boolean;
+}): string {
   const subject = input.name !== undefined && input.name.trim() !== ''
     ? `「${truncatedName(input.name)}」`
     : '你交代的那件事';
-  return `[任务完成]${subject}办完了。结果正文（逐字）：${input.resultText}。请把这件事告诉用户。`;
+  const reason = input.reason === undefined
+    ? ''
+    // 执行层原始诊断进模型可见事实前过与用户可见回复同一把尺：剥前置技术码 token、
+    // 服务器路径与机构自称（cleanExecutorDiagnostic，单实现），再归空白/截断。
+    : cleanExecutorDiagnostic(input.reason).replace(/\s+/gu, ' ').trim().slice(0, FAILURE_REASON_MAX);
+  const reasonLine = reason === ''
+    ? ''
+    : `机械原因（供你判断，别原样丢给用户）：${reason}。\n`;
+  const marks: string[] = [];
+  if (input.died === true) marks.push('看门狗观察到执行租约过期（结果未知，禁止自动重放）');
+  if (input.resourceLimited === true) marks.push('本次被资源策略拒绝（未进入执行）');
+  const marksLine = marks.length === 0 ? '' : `机械事实：${marks.join('；')}。\n`;
+  const report = input.report?.trim();
+  const reportLine = report === undefined || report === ''
+    ? 'worker 这一回合没有汇报原文。\n'
+    : `worker 汇报原文（语义，可能说错；做没做成以执行事实为准）：${report}\n`;
+  const ledgerLines = (input.ledger ?? []).slice(0, FAILURE_LEDGER_MAX_LINES);
+  const ledger = ledgerLines.length === 0
+    ? ''
+    : `账本事实（逐笔，供你判断做没做成）：\n${ledgerLines.map((line) => `  ${line}`).join('\n')}\n`;
+  const notPermitted = input.notPermitted === true
+    ? '账本里没有执行事实：这次交办在发起前被宿主拒绝（本次不允许，不是没有这件事）。\n'
+    : '';
+  return `[回合结束]${subject}这一回合停了。\n`
+    + `${marksLine}${reasonLine}${reportLine}${notPermitted}${ledger}`
+    + '请判断做没做成（以账本执行事实为准；worker 汇报只是它说的话），如实告诉用户，并给他一个能做的下一步。';
 }
 
 /**
  * 唤醒降级兜底文本：**全方案唯一允许的宿主用户文案**，只走唤醒降级路径
  * （unavailable / failed / 非 live 不唤醒），模型说得出话（woken）时永远不用它。
  *
- * 为什么必须如实报事实（2026-11-19 复核 F2，最严重一条）：走到这里时任务**已经由执行端
- * 确认完成**——一审兜底投 `failureMessageFor('host_fault')`（「是我这边没弄好。再试一次，
- * 还是记下来让人看？」）是**假话**，对写操作还会诱导用户重复执行一次写。所以本句：
- *   · 只陈述已完成的事实 + 结果正文（逐字，与旧宿主完成模板同形）；业务名缺省用中性指代；
+ * 为什么必须如实报事实（2026-11-19 复核 F2，最严重一条）：走到这里时账本执行事实里**没有**
+ * 失败/拒绝行（有失败事实时调用方走失败兜底话术，见 server 的兜底选句）——一审兜底投
+ * `failureMessageFor('host_fault')`（「是我这边没弄好。再试一次，还是记下来让人看？」）是
+ * **假话**，对写操作还会诱导用户重复执行一次写。所以本句：
+ *   · 只陈述账本里的事实（worker 汇报原文逐字；业务名缺省用中性指代）；
  *   · **不得出现「再试一次」这类导向重试的话**；
  *   · 剥路径 / 空白不投 / sent·failed·suppressed 四必守记账全走 `deliverTaskResult`，
  *     不另开投递路径。
@@ -267,65 +316,8 @@ export function failureFallbackFactText(input: {
 /** 账本事实行的上限（条；超出截断——事实给模型读，防止把大账整段灌进去）。 */
 const FAILURE_LEDGER_MAX_LINES = 12;
 
-/** 失败事实里机械原因的上限（字符；超长截断——事实给模型读，防止把执行层原文整段灌进去）。 */
+/** 回合事实里机械原因的上限（字符；超长截断——事实给模型读，防止把执行层原文整段灌进去）。 */
 const FAILURE_REASON_MAX = 200;
-
-/**
- * 任务失败**事实**文本（宿主把账本事实 + worker 汇报原文喂给 Main，Main 自己判断再说给用户）：
- *   `[任务失败]「<业务名>」这个回合没有产出结果汇报。
- *    机械事实：<died / 资源拒绝 / 发起前被拒>。
- *    worker 汇报原文（语义，可能说错；做没做成以执行事实为准）：<report>。
- *    账本事实（逐笔）：1. dummy.commit — failed：清理后摘要
- *    请把这件事如实告诉用户，并给他一个能做的下一步。`
- *
- * 硬边界：**没有「问题分类」/outcome 判定**——宿主不替 worker 补结论；worker 说错就说错，
- * 以执行事实为准。不含 handle、不含 taskId、不含执行层原始码；原因/账本行只作判断依据。
- */
-export function taskFailureSnapshotText(input: {
-  name?: string;
-  /** 机械原因（执行层失败原文；只作判断依据，模型不该原样丢给用户）。 */
-  reason?: string;
-  /** 账本事实行（逐笔执行行 + 机械标记；宿主装配，见 server 的 taskLedgerFactsOf）。 */
-  ledger?: readonly string[];
-  /** worker 汇报原文（语义；可能为空或说错，原样给 Main，不补 outcome）。 */
-  report?: string;
-  /** died 事实（看门狗观察到租约过期，结果未知）。 */
-  died?: boolean;
-  /** 资源拒绝事实（池满/队列满，未进入执行）。 */
-  resourceLimited?: boolean;
-  /** 发起前被宿主拒绝（本次不允许，不是没有这件事）。 */
-  notPermitted?: boolean;
-}): string {
-  const subject = input.name !== undefined && input.name.trim() !== ''
-    ? `「${truncatedName(input.name)}」`
-    : '你交代的那件事';
-  const reason = input.reason === undefined
-    ? ''
-    // 执行层原始诊断进模型可见事实前过与用户可见回复同一把尺：剥前置技术码 token、
-    // 服务器路径与机构自称（cleanExecutorDiagnostic，单实现），再归空白/截断。
-    : cleanExecutorDiagnostic(input.reason).replace(/\s+/gu, ' ').trim().slice(0, FAILURE_REASON_MAX);
-  const reasonLine = reason === ''
-    ? ''
-    : `机械原因（供你判断，别原样丢给用户）：${reason}。\n`;
-  const marks: string[] = [];
-  if (input.died === true) marks.push('看门狗观察到执行租约过期（结果未知，禁止自动重放）');
-  if (input.resourceLimited === true) marks.push('本次被资源策略拒绝（未进入执行）');
-  const marksLine = marks.length === 0 ? '' : `机械事实：${marks.join('；')}。\n`;
-  const report = input.report?.trim();
-  const reportLine = report === undefined || report === ''
-    ? ''
-    : `worker 汇报原文（语义，可能说错；做没做成以执行事实为准）：${report}\n`;
-  const ledgerLines = (input.ledger ?? []).slice(0, FAILURE_LEDGER_MAX_LINES);
-  const ledger = ledgerLines.length === 0
-    ? ''
-    : `账本事实（逐笔，供你判断做没做成）：\n${ledgerLines.map((line) => `  ${line}`).join('\n')}\n`;
-  const notPermitted = input.notPermitted === true
-    ? '账本里没有执行事实：这次交办在发起前被宿主拒绝（本次不允许，不是没有这件事）。\n'
-    : '';
-  return `[任务失败]${subject}这个回合没有产出结果汇报。\n`
-    + `${marksLine}${reasonLine}${reportLine}${notPermitted}${ledger}`
-    + '请把这件事如实告诉用户（做没做成以账本执行事实为准；worker 汇报只是它说的话），并给他一个能做的下一步。';
-}
 
 /**
  * 任务被用户停掉**事实**文本（宿主拼，给模型读）：`[已停止]「<业务名>」已经按用户的要求停下了。

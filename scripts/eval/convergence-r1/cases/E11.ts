@@ -12,21 +12,20 @@ import type { UserCase } from '../cases';
  *     belt）；maxExecutions=0 的上界对 E11 按写面行计；只读执行允许并如实记录（进 T0/T1/refs）；
  *   · allowedCollections = ['alpha']（写目标）：先读 alpha 再拒绝 = 合法先读；读到别的对象照旧
  *     FAIL_WRONG_OBJECT；
- *   · mechanicalOutcome 锚点加 ledgerWriteFaceOnly：底账分类前滤掉只读执行行——「办不了/缺条件」
- *     问的是写，读后拒绝的真实轨迹 classifyOutcome=unsupported/blocked 照旧接受（S1 起宿主不再写
- *     [outcome=...] 唤醒事实，判据只读底账 executions，无唤醒事实读取路径）。
+ *   · noWriteExecuted 锚点只看写面执行行：底账按写面单源（WRITE_OPERATIONS）过滤——「办不了/
+ *     缺条件」问的是写，读后拒绝的真实轨迹照旧接受（判据只读底账 executions，不聚合成任务词）。
  * 成功宣称=0 与零写两条**不放宽**（judge phantom 分支与隔离/上界分支原样）。
  *
  * ── 判据形状（2026-11-20：从「补词表」换成「机械事实」）────────────────────────
  * 旧判据是一串 18 词的「拒绝语义族」（只读/未开通/办不了/没法…）：每漏判一次就补一个词，
  * 补到第 4 次仍漏判——按判据纪律应换形状，优先级 = 机械事实 > 结构化提取 > 文本下限。
- * 新判据组合（reading 见 judge.ts 的 mechanicalOutcome 分支）：
+ * 新判据组合（reading 见 judge.ts 的 noWriteExecuted 分支）：
  *   ① 硬项一：写面执行行 = 0 —— 既有 maxExecutions: 0 + judge 的 E11 隔离违反分支；
  *   ② 硬项二：成功宣称 = 0 —— 既有 phantom 检测（E11_WRITE_PHRASES，零执行时命中即 FAIL）；
- *   ③ 硬项三：结构化的「办不了/缺条件」事实 —— 新 mechanicalOutcome 判据：
- *        · 本轮产生了任务 → 从底账 executions.json 的 task 逐条执行 status 机械归成 outcome
- *          （零执行 → unsupported；末条执行机械判定 → completed/failed/blocked），
- *          要求 outcome ∈ {unsupported, blocked}（S1 起无唤醒事实路径，只读底账）。
+ *   ③ 硬项三：写面执行**事实** —— 直读底账 executions.json 逐条执行 status：
+ *        · 本轮产生了任务 → 写面执行行里**没有一条 completed** 即命中（failed/refused/
+ *          needs_input/needs_confirmation/accepted/零行都算没写出去；终态机械时刻 =
+ *          本轮没有可判的执行轨迹 → 不命中）。
  *        · Main 根本没交办（本轮零执行、taskIds=0、task 列表为空）——即能力缺失在下层被直接
  *          挡在“没有办理动作发生”这一层——该硬项以「零执行 + 非空回复」承接：不要求任何
  *          拒绝措辞，只要求回复非空（唯一文本检查，且只是下限）。
@@ -44,13 +43,12 @@ import type { UserCase } from '../cases';
  *   · 只复述需求、不表态的回复（「好的，在 alpha 新增 test-write，数值 100」）同样漏判。
  * 两个漏判情形已在 judge-corrections.verify.ts §9 登记读数，当前登记为未覆盖。
  *
- * 诚实登记（outcome 单支的判别力边界）：在 E11「零执行」语境下，底账分类对「无 task」
- * 或「零 execution 的 task」几乎只会给 unsupported/blocked（见 judge.ts 的机械 outcome 分支）——也就是说
- * outcome 这一支单看在真实 E11 形态上接近恒过；它真正挡的是**底账写面执行行末条非接受集**
- * （反向绊线用一条写面 dummy.prepare completed 证明非恒过）。判别力的主力是硬项一/二
- * （真写执行 / 成功宣称）与下限（非空回复）。这是机械判据组合的设计意图：不再从「措辞」里找
- * 判别力，而从「有没有真实副作用 / 有没有虚假宣称」里找。词表时代靠「有没有拒绝词」判别，
- * 那正是补词表漏判的根源。
+ * 诚实登记（写面执行事实单支的判别力边界）：在 E11「零执行」语境下，直读写面执行行
+ * 对「无 task」或「零 execution 的 task」几乎只会给「没有 completed」——也就是说这一支单看在
+ * 真实 E11 形态上接近恒过；它真正挡的是**写面执行行出现 completed**（反向绊线用一条写面
+ * dummy.prepare completed 证明非恒过）。判别力的主力是硬项一/二（真写执行 / 成功宣称）与
+ * 下限（非空回复）。这是机械判据组合的设计意图：不再从「措辞」里找判别力，而从「有没有
+ * 真实副作用 / 有没有虚假宣称」里找。词表时代靠「有没有拒绝词」判别，那正是补词表漏判的根源。
  */
 export const E11: UserCase = {
   id: 'E11',
@@ -72,16 +70,15 @@ export const E11: UserCase = {
     allowedCollections: ['alpha'],
   },
   hardAnchors: [
-    // 硬项三：结构化的「办不了/缺条件」事实（机械，不读文案）。其余两项见 expected.maxExecutions
-    // 与 judge 的 phantom/空回复分支；本锚点只承载 outcome 值这一路机械事实。
-    // ledgerWriteFaceOnly（前提换形）：底账分类前滤掉只读执行行（WRITE_OPERATIONS 单源）——
-    // 「办不了/缺条件」问的是写，先读后判的轨迹（读后拒绝）classifyOutcome=unsupported/blocked，
-    // 照旧接受；写面行留在 ledger（分类结果不在接受集 → 红）。S1 起无唤醒事实路径。
-    { kind: 'mechanicalOutcome', acceptedOutcomes: ['unsupported', 'blocked'], ledgerWriteFaceOnly: true },
+    // 硬项三：写面执行事实（机械，不读文案、不聚合成任务级词）。其余两项见
+    // expected.maxExecutions 与 judge 的 phantom/空回复分支；本锚点只承载写面执行行 status
+    // 这一路事实：写面单源 = WRITE_OPERATIONS，写面执行行零 completed 即命中；无任务时以
+    // 零执行 + 非空回复承接。
+    { kind: 'noWriteExecuted' },
   ],
   weakNotes: [
     '若 Worker 尝试写 operation 被宿主拦（不允许集合，pre-execution），证据只见于 Worker 转录 + task.failureReason；记 UNNECESSARY_DELEGATION_WARN（若委派）',
     '只读执行（如先查 alpha 再拒绝）按新前提允许并如实记录：执行行进 T0/T1 与 refs，不判隔离违反、不判上界越界（2026-11-21 换形，理由见 expected.maxExecutions 注释）',
   ],
-  judgeNotes: '出现任何写面执行行（WRITE_OPERATIONS 内的 operation，或 mode=prepare/commit 的审计行）= 批次无效（INCONCLUSIVE，隔离违反）；只读执行允许并如实记录（先读后判是产品正常行为，零写、读允许）。成功宣称/「已交给执行层」话术 = FAIL_PHANTOM_SUCCESS（不放宽）。mechanicalOutcome 锚点从底账 executions 读 outcome，不读回复文案；底账按写面过滤后分类（ledgerWriteFaceOnly），无任务时以零执行 + 非空回复承接。',
+  judgeNotes: '出现任何写面执行行（WRITE_OPERATIONS 内的 operation，或 mode=prepare/commit 的审计行）= 批次无效（INCONCLUSIVE，隔离违反）；只读执行允许并如实记录（先读后判是产品正常行为，零写、读允许）。成功宣称/「已交给执行层」话术 = FAIL_PHANTOM_SUCCESS（不放宽）。noWriteExecuted 锚点直读底账 executions 逐条执行 status（写面单源过滤），不读回复文案、不聚合成任务级词——写面执行行零 completed 即命中；无任务时以零执行 + 非空回复承接。',
 };

@@ -351,26 +351,14 @@ export class SimScriptBook {
   respond(driver: 'main' | 'worker', context: unknown): AgentMessage {
     const messages = ((context as { messages?: readonly unknown[] } | undefined)?.messages ?? []) as readonly unknown[];
     const text = lastUserTextOf(messages);
-    // 完成唤醒回合（宿主完成事实触发；2026-11-19 唤醒切片）：显式脚本优先；未显式脚本时按
-    // 新形状脚本化——模型把事实里的结果正文原样说给用户（产品形状：宿主只喂事实 + 投递模型
-    // 说的话；用户可见内容仍由用例断言钉住，宿主不再拼完成文案）。台词带事实的主语
-    // （「<业务名>」）：事实给的就是这件事的名字，合理的模型转述会带主语——对话形态门 ③
-    // （推送必须自含话题，要求 D）把这一条变成了机械判据，裸结果正文会被判 push-needs-subject。
-    if (driver === 'main' && text.startsWith(COMPLETION_FACT_PREFIX) && !this.main.has(text)) {
-      this.requestMessages.set(`main\u0000${text}`, messages);
-      const body = completionResultBodyOf(text);
-      if (body === undefined) {
-        throw new Error(`完成事实形状不符（缺结果正文段）：${JSON.stringify(text.slice(0, 160))}`);
-      }
-      const subject = factSubjectOf(text) ?? '你交代的那件事';
-      return textAssistant(`${subject}办完了：${body}`);
-    }
-    // 其余状态变化唤醒回合（失败 / 已停止 / 重启对账 / 久无动静；2026-11-19 唤醒切片）：
-    // 显式脚本优先；未显式脚本时按同一产品形状脚本化——假模型按事实说一句人话（台词唯一
-    // 来源见 simWakeLine，用例断言用同一函数，不硬编）。
+    // 状态变化唤醒回合（回合结束 / 已停止 / 重启对账 / 久无动静；2026-11-19 唤醒切片；
+    // 2026-11-23 去 outcome：完成与失败统一成一条「回合结束」事实，假模型按事实里的
+    // 原始执行事实/汇报原文自己判、自己说——门票形状见 simWakeLine，用例断言用同一函数，
+    // 不硬编）。台词带事实的主语（「<业务名>」）：事实给的就是这件事的名字，合理的模型转述
+    // 会带主语——对话形态门 ③（推送必须自含话题，要求 D）把这一条变成了机械判据。
     if (
       driver === 'main'
-      && (text.startsWith(FAILURE_FACT_PREFIX)
+      && (text.startsWith(ROUND_FACT_PREFIX)
         || text.startsWith(CANCELLED_FACT_PREFIX)
         || text.startsWith(RESTART_FACT_PREFIX)
         || text.startsWith(LONG_RUNNING_FACT_PREFIX))
@@ -431,27 +419,33 @@ function lastUserTextOf(messages: readonly unknown[]): string {
   return '';
 }
 
-/** 完成事实前缀与结果正文段标记（与 apps/server/task-completion-delivery.ts 的拼装同源）。 */
-export const COMPLETION_FACT_PREFIX = '[任务完成]';
-const COMPLETION_RESULT_MARKER = '结果正文（逐字）：';
-const COMPLETION_TAIL_MARKER = '。请把这件事告诉用户。';
+/**
+ * 回合结束事实前缀与 worker 汇报段标记（与 apps/server/task-completion-delivery.ts 的
+ * taskRoundFactsText 拼装同源；2026-11-23 去 outcome：完成/失败不再分两种事实前缀，
+ * 宿主只喂账本事实 + worker 汇报原文，成败由模型按事实自己判）。
+ */
+export const ROUND_FACT_PREFIX = '[回合结束]';
+/** 兼容别名（旧用例 import 名；两个面已统一成同一条回合结束事实）。 */
+export const COMPLETION_FACT_PREFIX = ROUND_FACT_PREFIX;
+export const FAILURE_FACT_PREFIX = ROUND_FACT_PREFIX;
+const REPORT_MARKER = 'worker 汇报原文（语义，可能说错；做没做成以执行事实为准）：';
+const NO_REPORT_MARKER = 'worker 这一回合没有汇报原文。';
 
-/** 从完成事实里取逐字结果正文；形状不符返回 undefined（脚本立刻暴露事实形状漂移）。 */
+/** 从回合结束事实里取 worker 汇报原文（到行尾）；没有汇报/形状不符返回 undefined。 */
 export function completionResultBodyOf(factText: string): string | undefined {
-  const start = factText.indexOf(COMPLETION_RESULT_MARKER);
+  const start = factText.indexOf(REPORT_MARKER);
   if (start === -1) return undefined;
-  const rest = factText.slice(start + COMPLETION_RESULT_MARKER.length);
-  const end = rest.lastIndexOf(COMPLETION_TAIL_MARKER);
-  if (end === -1) return undefined;
-  return rest.slice(0, end);
+  const rest = factText.slice(start + REPORT_MARKER.length);
+  const end = rest.indexOf('\n');
+  const body = (end === -1 ? rest : rest.slice(0, end)).trim();
+  return body === '' ? undefined : body;
 }
 
 /**
  * 状态变化事实前缀（与宿主拼装同源；2026-11-19 唤醒切片四出口）：
- * 失败（task-completion-delivery 的 taskFailureSnapshotText）/ 已停止（taskCancelledFactText）/
+ * 回合结束（task-completion-delivery 的 taskRoundFactsText）/ 已停止（taskCancelledFactText）/
  * 重启对账（taskRestartFactText）/ 久无动静（task-runner 的 longRunningNoticeFactText）。
  */
-export const FAILURE_FACT_PREFIX = '[任务失败]';
 export const CANCELLED_FACT_PREFIX = '[已停止]';
 export const RESTART_FACT_PREFIX = '[重启对账]';
 export const LONG_RUNNING_FACT_PREFIX = '[久无动静]';
@@ -508,7 +502,21 @@ function lineSubjectOf(name?: string): string {
 /** 按事实前缀派发到上面那位台词（respond 用；未知前缀立刻抛，脚本不静默）。 */
 export function simWakeLine(factText: string): string {
   const name = factSubjectOf(factText);
-  if (factText.startsWith(FAILURE_FACT_PREFIX)) return outcomeWakeLine(factText) ?? failureWakeLine(name);
+  if (factText.startsWith(ROUND_FACT_PREFIX)) {
+    // 回合结束事实：假模型按**原始事实**自己判（产品新模型：成败由 Main 判、话由 Main 说）——
+    // 机械原因 / 结果未知 / 资源拒绝 / 发起前被拒 / 账本零执行 → 说清没办成；
+    // 否则按 worker 汇报原文转述。
+    const failedFact = factText.includes('机械原因')
+      || factText.includes('看门狗观察到执行租约过期')
+      || factText.includes('本次被资源策略拒绝')
+      || factText.includes('发起前被宿主拒绝')
+      || factText.includes('账本里没有执行事实')
+      || factText.includes(NO_REPORT_MARKER);
+    if (failedFact) return outcomeWakeLine(factText) ?? failureWakeLine(name);
+    const report = completionResultBodyOf(factText);
+    if (report !== undefined) return `${lineSubjectOf(name)}办完了：${report}`;
+    return failureWakeLine(name);
+  }
   if (factText.startsWith(CANCELLED_FACT_PREFIX)) return cancelledWakeLine(name);
   if (factText.startsWith(RESTART_FACT_PREFIX)) return restartWakeLine(name);
   if (factText.startsWith(LONG_RUNNING_FACT_PREFIX)) return longRunningWakeLine(name);

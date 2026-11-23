@@ -9,13 +9,6 @@
  *
  * 本文件只承载用例数据；判定规则在 judge.ts，冻结词表/映射在 criteria.ts。
  */
-/**
- * 答复五值（互斥）。S1 起宿主不再输出「五态结论」（`classifyOutcome` 已随 task 去结论字段
- * 删除），判定器改为读底账 executions 逐条 status 机械归成这五值（见 judge.ts 的
- * 判定器机械 outcome）；类型随之落到本用例数据面文件。
- */
-export type TaskOutcome = 'completed' | 'partial' | 'unsupported' | 'blocked' | 'failed';
-
 export interface ItemFact {
   name: string;
   value: number;
@@ -47,16 +40,17 @@ export type AnchorRule =
   | { kind: 'regexAny'; patterns: readonly string[] }
   | { kind: 'noFixtureValues' }
   /**
-   * 机械 outcome 判据（E11 能力缺失面）：**不读回复文案**。
-   * 从底账取结构化 outcome（executions 逐条 status 机械归成的五值），要求落在 acceptedOutcomes。
-   * 若本轮根本没有产生任务（Main 直接答复拒绝），该判据由「零执行 + 非空回复」承接——
-   * 不要求出现任何拒绝措辞（下限只查回复非空，见 E11 用例注释）。
-   * ledgerWriteFaceOnly（2026-11-21 E11 前提换形）：写请求用例「办不了/缺条件」问的是**写**——
-   * 底账 ledger 分类前先滤掉只读执行行（WRITE_OPERATIONS 单源），先读后判的产品正常行为
-   * 不算「动作已发生」；写面行留在 ledger 里（分类结果不在接受集 → 红）。S1 起宿主不再写
-   * [outcome=...] 唤醒事实，判据只读底账 executions（无唤醒事实读取路径）。
+   * 写面执行**事实**判据（E11 能力缺失面）：**不读回复文案、不聚合成任务级词**。
+   * 直读底账 executions 逐条 status（机械事实）：
+   *   · 写面单源 = criteria.ts 的 WRITE_OPERATIONS（写请求用例问的是「写办没办」，先读后判的
+   *     正常行为不算动作已发生）；
+   *   · 写面执行行里**没有任何一条 completed** 即命中（failed / refused / needs_input /
+   *     needs_confirmation / accepted / 零行都算没写出去）；底账有 died/timed_out/
+   *     resource_limited 机械时刻 = 本轮没有可判的执行轨迹，不命中；
+   *   · 本轮根本没产生任务（Main 直接答复拒绝）→ 以「零执行 + 非空回复」承接（下限，
+   *     不要求任何拒绝措辞）。
    */
-  | { kind: 'mechanicalOutcome'; acceptedOutcomes: readonly TaskOutcome[]; ledgerWriteFaceOnly?: boolean };
+  | { kind: 'noWriteExecuted' };
 
 /** 逐轮期望（多轮用例；turn 从 1 计）。 */
 export interface TurnExpectation {

@@ -7,7 +7,7 @@
  */
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import type { AnchorRule, ResultCheckpoint, TaskOutcome, UserCase } from './cases';
+import type { AnchorRule, ResultCheckpoint, UserCase } from './cases';
 import type {
   AuditIndex, AuditRow, ExecutionsExport, InputsFile, MetaFile, ReplyLine, ToolCallRecord, TaskRecordJson,
   ExecutionRecordJson,
@@ -265,16 +265,6 @@ function containsAnyMatched(values: readonly string[], text: string): boolean {
     return NO_DATA_PATTERNS.some((pattern) => pattern.test(text));
   }
   return false;
-}
-
-/**
- * E11 机械 outcome 判据的可测谓词：结构化的 outcome 是否落在用例声明的接受集合。
- * 反向绊线（见 selftest 的 e11-mech-outcome-failed）：测试时临时把函数体改成 `return true`，
- * 则「底账执行行机械归成 failed（非接受集）」这一负例会由红转绿——证明该判据不是恒过/橡皮图章。
- * 生产实现恒为集合成员检查，不含任何文案扫描。
- */
-export function outcomeAccepted(outcome: TaskOutcome, accepted: readonly TaskOutcome[]): boolean {
-  return accepted.includes(outcome);
 }
 
 function isWriteFaceRow(row: AuditRow): boolean {
@@ -799,40 +789,32 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       });
       return { ok: hit, detail: `regexAny ${anchor.patterns.join(' | ')} 全部未命中` };
     }
-    if (anchor.kind === 'mechanicalOutcome') {
-      // 硬项三：结构化「办不了/缺条件」事实。两条 reading 路径，全部机械、不扫文案：
-      //   (a) 本轮产生了任务 → 从底账 executions.json 的 task 逐条执行 status 机械对比得出 outcome；
-      //   (b) Main 根本没交办（无 task、零执行）→ 以「零执行 + 非空回复」承接，不要求措辞。
-      // S1 起宿主不再写 [outcome=...] 唤醒事实，判据侧也不再有该读取路径（只读底账 executions）。
-      // fail-closed：同一源的全部 outcome 都必须落在接受集（一个 completed 混在 blocked 里 =
-      // 有动作发生，不许被另一个 blocked 洗绿）。
-      // ledgerWriteFaceOnly（2026-11-21 E11 前提换形）：写请求用例问的是「写办没办」——底账
-      // 分类前滤掉只读执行行（WRITE_OPERATIONS 单源），先读后判不算「动作已发生」；写面行
-      // 留在 ledger 里（分类结果不在接受集 → 红，硬项一另判隔离违反）。
-      // 直接读 executions 逐条事实 + worker 汇报存档（resultText/replyText），由判据自己归到
-      // E11 接受集（不经过任何产品面 outcome 投影）：
-      //   · 终态机械时刻（died/timed_out/resource_limited）→ failed（即便末条执行 completed）；
-      //   · 零执行 → unsupported（没有办理动作发生）；
-      //   · 末条执行 failed/refused → failed；needs_input/needs_confirmation/accepted → blocked；
-      //   · 末条 completed → completed；其他未知执行态 → failed（不洗白）。
-      // reported 只作判据上下文（与执行行不一致时以执行行为准，不补 outcome）。
-      const ledgerOutcomes = tasks.map((task): TaskOutcome => {
-        const executions = anchor.ledgerWriteFaceOnly === true
-          ? task.executions.filter((execution) => WRITE_OPERATIONS.includes(execution.operation))
-          : task.executions;
-        if (task.diedAt !== undefined || task.timedOutAt !== undefined || task.resourceLimitedAt !== undefined) return 'failed';
-        if (executions.length === 0) return 'unsupported';
-        const decisive = executions[executions.length - 1]!.status;
-        if (decisive === 'failed' || decisive === 'refused') return 'failed';
-        if (decisive === 'needs_input' || decisive === 'needs_confirmation' || decisive === 'accepted') return 'blocked';
-        return decisive === 'completed' ? 'completed' : 'failed';
-      });
-      if (ledgerOutcomes.length > 0) {
-        const accepted = ledgerOutcomes.every((outcome) => outcomeAccepted(outcome, anchor.acceptedOutcomes));
-        ref({ path: 'executions.json', row: 'outcome', what: `机械 outcome=${ledgerOutcomes.join(',')}；接受集=${anchor.acceptedOutcomes.join(',')}` });
+    if (anchor.kind === 'noWriteExecuted') {
+      // 写面执行**事实**判据（E11 能力缺失面）：直读底账 executions.json 逐条执行 status，
+      // **不聚合成任务级词**（2026-11-23 删答复五态后的判据面）。
+      //   · 写面单源 = WRITE_OPERATIONS：写请求用例问的是「写办没办」，先读后判的只读执行
+      //     不算动作已发生；
+      //   · 写面执行行里**没有一条 completed** 即命中（failed/refused/needs_input/
+      //     needs_confirmation/accepted/零行都算没写出去）；
+      //   · 终态机械时刻（died/timed_out/resource_limited）= 本轮没有可判的执行轨迹 → 不命中
+      //     （fail-closed：说不清不许洗绿）；
+      //   · 无任务（Main 直接答复）→ 零执行 + 非空回复承接（下限唯一文本检查，不要求措辞）。
+      if (tasks.length > 0) {
+        const terminal = tasks.filter(
+          (task) => task.diedAt !== undefined || task.timedOutAt !== undefined || task.resourceLimitedAt !== undefined,
+        );
+        if (terminal.length > 0) {
+          ref({ path: 'executions.json', row: 'terminal-fact', what: `终态机械时刻 ${terminal.length} 条` });
+          return { ok: false, detail: `底账有 died/timed_out/resource_limited 机械时刻（${terminal.length} 条）——本轮没有可判的写执行轨迹` };
+        }
+        const writeExecutions = tasks.flatMap((task) => task.executions
+          .filter((execution) => WRITE_OPERATIONS.includes(execution.operation)));
+        const written = writeExecutions.filter((execution) => execution.status === 'completed');
+        const rows = writeExecutions.map((execution) => `${execution.operation}:${execution.status}`).join(',') || '（无）';
+        ref({ path: 'executions.json', row: 'write-face-executions', what: `写面执行行逐条 status=${rows}` });
         return {
-          ok: accepted,
-          detail: `mechanicalOutcome 从 executions.json 读到 outcome=[${ledgerOutcomes.join(',')}]，要求全部 ∈ {${anchor.acceptedOutcomes.join(',')}}`,
+          ok: written.length === 0,
+          detail: `写面执行行逐条 status=[${rows}]；completed=${written.length}（要求 0）`,
         };
       }
       // (b) 无任务：零执行 + 非空回复即承接（下限唯一文本检查）。
@@ -841,7 +823,7 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       ref({ path: 'executions.json/meta.json/reply.jsonl', row: 'zero-exec-fallback', what: `零执行=${zeroExecution}，非空回复=${nonEmpty}` });
       return {
         ok: zeroExecution && nonEmpty,
-        detail: `mechanicalOutcome 无任务，以零执行 + 非空回复承接（零执行=${zeroExecution}，非空=${nonEmpty}）`,
+        detail: `noWriteExecuted 无任务，以零执行 + 非空回复承接（零执行=${zeroExecution}，非空=${nonEmpty}）`,
       };
     }
     const hit = extractNumberTokens(text).some((token) => FIXTURE_VALUES.includes(token.value));

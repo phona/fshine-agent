@@ -84,9 +84,8 @@ import {
   failureFallbackFactText,
   routeFromSessionId,
   taskCancelledFactText,
-  taskCompletionFactText,
   taskCompletionFallbackText,
-  taskFailureSnapshotText,
+  taskRoundFactsText,
   taskRestartFactText,
   taskWaitingUserFactText,
   waitingUserFallbackText,
@@ -635,22 +634,57 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     }
   };
   /**
-   * 快活任务（本回合已把结果交给模型）的降级兜底文本：底账业务名 + 结果原文。
-   * background 完成经 runner settle 写 replyText；inline 完成写 resultText——两处兼容读取
-   * （与交给模型的 summary 同源同式：settled.replyText ?? settled.resultText）。结果原文为空/
-   * 底账读不到 = undefined（不编事实、不投递）。
+   * 模型说不出话时的宿主兜底一句（B 类如实交付；2026-11-23 去 outcome）：只按**原始执行
+   * 事实**选档——died → 结果未知；资源拒绝 → 该句；末次失败执行的 error.code → classifyFailure
+   * 归类；零执行原因码 / 宿主机械原因（没实际办理）→ executor_failed；以上都没有才按 worker
+   * 汇报原文如实报（completion 兜底）。不读回合级结局词、不把事实聚合成成败布尔。
+   */
+  const fallbackFactTextOf = (input: {
+    name?: string;
+    code?: string;
+    reasonCode?: string;
+    reason?: string;
+    died?: boolean;
+    resourceLimited?: boolean;
+    report?: string;
+  }): string | undefined => {
+    const namePart = input.name === undefined ? {} : { name: input.name };
+    if (input.died === true) return failureFallbackFactText({ died: true, ...namePart });
+    if (input.resourceLimited === true) return failureFallbackFactText({ resourceLimited: true, ...namePart });
+    if (input.code !== undefined) return failureFallbackFactText({ code: input.code, ...namePart });
+    if (input.reasonCode !== undefined) return failureFallbackFactText(namePart);
+    if (input.reason !== undefined && input.reason.trim() !== '') return failureFallbackFactText(namePart);
+    const report = (input.report ?? '').trim();
+    // 没有失败执行事实、也没有汇报原文：说「这次没能办成」（executor_failed），绝不冒充成功。
+    if (report === '') return failureFallbackFactText(namePart);
+    return taskCompletionFallbackText({ ...namePart, resultText: report });
+  };
+  /**
+   * 快活任务（本回合已把结果交给模型）的降级兜底文本：底账业务名 + worker 汇报原文 + 本回合
+   * 原始执行事实（roundFacts / died / 资源拒绝）→ 兜底选句。background 完成经 runner settle 写
+   * replyText；inline 完成写 resultText——两处兼容读取。没有汇报也没有可归类的失败事实时按
+   * executor_failed 如实说「没能办成」（绝不说「办好了」）。
    */
   const taskCompletionFallbackOf = (taskId: string): string | undefined => {
     try {
       const record = (taskRegistry as unknown as {
-        get(id: string): { request: string; replyText?: string; resultText?: string };
+        get(id: string): {
+          request: string;
+          replyText?: string;
+          resultText?: string;
+          diedAt?: string | null;
+          resourceLimitedAt?: string | null;
+        };
       }).get(taskId);
-      const resultText = record.replyText ?? record.resultText ?? '';
-      if (resultText.trim() === '') return undefined;
+      const facts = roundFacts.get(taskId);
       const name = taskNameOf(taskId, record.request);
-      return taskCompletionFallbackText({
+      return fallbackFactTextOf({
         ...(name === undefined ? {} : { name }),
-        resultText,
+        ...(facts?.code === undefined ? {} : { code: facts.code }),
+        ...(facts?.reasonCode === undefined ? {} : { reasonCode: facts.reasonCode }),
+        ...(record.diedAt !== undefined && record.diedAt !== null ? { died: true } : {}),
+        ...(record.resourceLimitedAt !== undefined && record.resourceLimitedAt !== null ? { resourceLimited: true } : {}),
+        report: record.replyText ?? record.resultText ?? '',
       });
     } catch {
       return undefined;
@@ -887,14 +921,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
    */
   let startupRecovered: readonly string[] = [];
   /**
-   * 回合失败种类的机械事实（S1：底账没有 failed 结论——onTaskFailed 回调带到的
-   * 「无汇报 / 结果未知」种类 + 执行层原始码 + 失败原文记在这里，回合末兜底投递与唤醒取
-   * 同一口径）。code 用于按码归类话术（GATE_REFUSE → denied 等，喂 classifyFailure）；
-   * 有界（会话长了不积累；一次性核销后即删）。
+   * 回合收尾的**原始执行事实**（S1 事实模型 + 2026-11-23 去 outcome）：两个投递回调带到的
+   * 机械事实（零执行原因码 / 末次失败执行的原始 error.code / 结果未知种类）记在这里，
+   * 仅在「模型说不出话、宿主必须替它说最后一句」的兜底路径上用来选一句既有话术——
+   * 不决定投递面、不聚合成任务级结局词。有界（会话长了不积累；一次性核销后即删）。
    */
-  const roundFailure = new Map<string, {
-    status: 'no_report' | 'result_unknown';
+  const roundFacts = new Map<string, {
+    status?: 'result_unknown';
     code?: string;
+    reasonCode?: string;
   }>();
   /**
    * B 切片（工单回执收敛）：本会话已在同一回合拿到结果的任务（快活）——完成投递对其抑制
@@ -1021,7 +1056,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // 回调经会话链串行（快活抑制判定须在受理回合结束后做）；投递失败/抑制只记事件，不改任务事实。
       onTaskCompleted: (completion) => {
         const sessionKey = `${completion.principalId}\u0000${completion.sessionId}`;
+        // 原始执行事实**同步**记账（不能进会话链：回合末兜底分支在同一回合里就要按它选兜底话术）。
+        roundFacts.set(completion.taskId, {
+          ...(completion.errorCode === undefined ? {} : { code: completion.errorCode }),
+          ...(completion.reasonCode === undefined ? {} : { reasonCode: completion.reasonCode }),
+        });
         enqueueSessionTurn(sessionKey, async () => {
+          // 一次性事实：本回合兜底分支已读走（relayed/push-suppressed 路径先跑）；这里核销，
+          // 会话长了不积累（有界）。
+          roundFacts.delete(completion.taskId);
           // 快活（结果已在本回合交给模型）：不唤醒、不重复播报（模型已转述）。
           // 但**产物不因抑制丢失**——同回合交给模型的摘要里没有文件，产物只能由这里回程。
           const relayed = relayedInTurnTasks.get(sessionKey)?.delete(completion.taskId) === true;
@@ -1100,18 +1143,33 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             }
             return;
           }
-          // 完成事实（宿主拼，喂给模型读；不含 handle/内部码/执行层原文以外的内部标识）。
+          // 本回合已把失败原因交给模型（工具回执带到了机械失败事实）且任务随后落定：与既有
+          // 失败出口同一抑制口径——不重复唤醒/播报；模型沉默时由回合末兜底分支按原始执行
+          // 事实说一句（同一件事不说两遍）。
+          if (claimPushSuppressedInTurn(sessionKey, completion.taskId)) {
+            suppressText();
+            return;
+          }
+          // 回合结束事实（宿主拼，喂给模型读；不含 handle/内部码/执行层原文以外的内部标识）：
+          // 账本逐笔执行行 + worker 汇报原文 + 机械原因——**没有回合级结局词**，做没做成由
+          // Main 读事实自己判、自己说。
           const name = taskNameOf(completion.taskId, completion.request);
-          const factText = taskCompletionFactText({
+          const factText = taskRoundFactsText({
             ...(name === undefined ? {} : { name }),
-            resultText: completion.resultText,
+            ledger: taskLedgerFactsOf(completion.taskId),
+            report: completion.resultText,
+            ...(completion.reason === undefined ? {} : { reason: completion.reason }),
+            ...(completion.reasonCode === 'not_permitted' ? { notPermitted: true } : {}),
           });
           // 降级兜底文本（**全方案唯一允许的宿主用户文案**；只走 unavailable/failed 降级
-          // 路径与非 live 不唤醒路径）：任务已由执行端确认完成——如实报事实（业务名 + 结果
-          // 正文），不得说「没弄好/再试一次」（2026-11-19 复核 F2：那会诱导用户重复执行写）。
-          const fallbackText = taskCompletionFallbackText({
+          // 路径与非 live 不唤醒路径）：按原始执行事实选句——没有失败事实才按 worker 汇报原文
+          // 如实报（不得说「没弄好/再试一次」，2026-11-19 复核 F2：那会诱导用户重复执行写）。
+          const fallbackText = fallbackFactTextOf({
             ...(name === undefined ? {} : { name }),
-            resultText: completion.resultText,
+            ...(completion.errorCode === undefined ? {} : { code: completion.errorCode }),
+            ...(completion.reasonCode === undefined ? {} : { reasonCode: completion.reasonCode }),
+            ...(completion.reason === undefined ? {} : { reason: completion.reason }),
+            report: completion.resultText,
           });
           // 走统一的状态变化出口（见 wakeAndDeliverStateChange）：非 live 不唤醒（不白花模型
           // 调用）、事实进待注入、投递抑制记账照旧；文件未送达的如实话术附在正文后（不覆盖
@@ -1134,9 +1192,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // 的兜底，保留——绝不投 Worker 原文）。快活失败（本回合已交给模型）经 pushSuppressedInTurn
       // 抑制；非快活失败由这里主动发回原会话（与完成投递同一主动投递面、同一四必守）。
       onTaskFailed: (failure) => {
-        roundFailure.set(failure.taskId, {
-          status: failure.status,
+        roundFacts.set(failure.taskId, {
+          ...(failure.status === 'result_unknown' ? { status: 'result_unknown' as const } : {}),
           ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }),
+          ...(failure.reasonCode === undefined ? {} : { reasonCode: failure.reasonCode }),
         });
         const sessionKey = `${failure.principalId}\u0000${failure.sessionId}`;
         enqueueSessionTurn(sessionKey, async () => {
@@ -1167,7 +1226,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             event: 'task_failure_wake',
             // 事实（给模型读；业务名 + 机械原因 + 账本逐笔事实 + worker 汇报原文）。
             // 没有「问题分类」/outcome 判定（worker 说错就说错，以执行事实为准）。
-            factText: taskFailureSnapshotText({
+            factText: taskRoundFactsText({
               ...(name === undefined ? {} : { name }),
               ...(failure.reason === undefined ? {} : { reason: failure.reason }),
               ledger: ledgerFacts,
@@ -1176,11 +1235,14 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
               ...(fact?.resourceLimited === true ? { resourceLimited: true } : {}),
               ...(notPermitted ? { notPermitted: true } : {}),
             }),
-            // 降级兜底（模型说不出话）：按机械事实给一句（资源拒绝 / 结果未知 / 按执行层码归类）。
-            fallbackText: failureFallbackFactText({
+            // 降级兜底（模型说不出话）：按原始执行事实给一句（资源拒绝 / 结果未知 / 按码归类）。
+            fallbackText: fallbackFactTextOf({
               ...(resultUnknown ? { died: true } : {}),
               ...(fact?.resourceLimited === true ? { resourceLimited: true } : {}),
               ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }),
+              ...(failure.reasonCode === undefined ? {} : { reasonCode: failure.reasonCode }),
+              ...(failure.reason === undefined ? {} : { reason: failure.reason }),
+              ...(report === undefined ? {} : { report }),
               ...(name === undefined ? {} : { name }),
             }),
           });
@@ -1910,27 +1972,29 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       }
       // 豁免不能是静默（2026-11-19 复核缺陷的出口）：交办的任务在短等待窗口内完成（快活，
       // 结果已交给模型转述）而模型**全程没说话**——完成回调按 relayed 抑制播报的前提
-      // （模型已经说了）不成立，用户会什么都收不到。不得判回合失败（任务已由执行端确认完成：
-      // 「请稍后再试」是假话，对写操作还会诱导重做一次写），也不得沉默——按既有降级兜底
-      // **如实报完成事实**（taskCompletionFallbackText：「<业务名>」办好了：<结果>；全方案
-      // 唯一允许的宿主用户文案），走 deliverTaskResult 同一投递面与四必守记账。完成回调的
-      // relayed 抑制照旧（本分支已把事实送达，不重复播报）；宿主的话只走主动投递面，渠道
-      // 终帧（模型的话路）不被替换。
+      // （模型已经说了）不成立，用户会什么都收不到。不得沉默、也不得判回合失败（「请稍后再试」
+      // 是假话，对写操作还会诱导重做一次写）——按**原始执行事实**选一句宿主兜底
+      // （fallbackFactTextOf：无失败事实才按 worker 汇报原文如实报，有失败事实按既有话术），
+      // 走 deliverTaskResult 同一投递面与四必守记账。完成回调的 relayed 抑制照旧（本分支已把
+      // 事实送达，不重复播报）；宿主的话只走主动投递面，渠道终帧（模型的话路）不被替换。
       // 判据 = **模型沉默**（与有没有文件无关；2026-11-19 只读审计 #8：带文件时失败话术
       // 永不送达是静默终局的一种）。
       if (modelSilent) {
         for (const relayedTaskId of turn.relayedTaskIds ?? []) {
           const fallbackText = taskCompletionFallbackOf(relayedTaskId);
-          // 底账没有结果原文（生产装配不可达：relayed 的完成行必有非空汇报/归档；空汇报落
-          // failed 不归档）→ 不编事实、不投递；完成回调照旧按 relayed 记账。
+          const relayedFacts = roundFacts.get(relayedTaskId);
+          roundFacts.delete(relayedTaskId);
+          // 底账没有结果原文（生产装配不可达：relayed 的完成行必有非空汇报/归档）→ 不编事实、
+          // 不投递；完成回调照旧按 relayed 记账。
           if (fallbackText === undefined) continue;
+          // 投递归属按原始事实：有失败执行事实/零执行原因码 = failed 事实；否则按汇报原文。
+          const relayedFailedFact = relayedFacts?.code !== undefined || relayedFacts?.reasonCode !== undefined;
           await deliverTaskResult({
             taskId: relayedTaskId,
             principalId,
             sessionId,
             resultText: fallbackText,
-            // 投递归属：模型沉默时宿主兜底说的正是完成事实（taskCompletionFallbackText）。
-            factKind: 'completed',
+            factKind: relayedFailedFact ? 'failed' : 'completed',
           }, {
             ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
             log,
@@ -1947,8 +2011,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           const failureRecord = (taskRegistry as unknown as {
             get(id: string): { diedAt?: string | null; resourceLimitedAt?: string | null };
           }).get(suppressedTaskId);
-          const round = roundFailure.get(suppressedTaskId);
-          roundFailure.delete(suppressedTaskId);
+          const round = roundFacts.get(suppressedTaskId);
+          roundFacts.delete(suppressedTaskId);
           const isFailureFact = failureRecord?.diedAt !== undefined && failureRecord.diedAt !== null
             || failureRecord?.resourceLimitedAt !== undefined && failureRecord.resourceLimitedAt !== null
             || round !== undefined;

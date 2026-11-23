@@ -406,9 +406,9 @@ export async function mu7(rt: RuntimeConfig): Promise<MuCaseResult> {
     // 事实注入在 1.5.2 走 Pi 原生 custom message（`TurnDriverInput.injections`），
     // 与普通 messages 并列；两处任一命中都算该回合拿到了事实。
     // 2026-11-19 复核 F3：completed 从 B 通道（`[任务事实]`）移除——完成由唤醒路径负责；
-    // 本夹具的假主驱动没有唤醒能力 → 降级事实经既有 systemNotes 注入（`[任务完成]` 形状）。
+    // 本夹具的假主驱动没有唤醒能力 → 降级事实经既有 systemNotes 注入（`[回合结束]` 形状）。
     // 本用例判的是**事实只到 owner 会话**（跨 principal 不泄漏），两种事实形状任一命中都算。
-    const factShapes = ['[任务事实]', '[任务完成]'];
+    const factShapes = ['[任务事实]', '[回合结束]'];
     const turnCarriesFact = (turn: typeof aliceTurn): boolean => turn !== undefined
       && [
         ...turn.messages.map((message) => String((message as { content?: unknown }).content ?? '')),

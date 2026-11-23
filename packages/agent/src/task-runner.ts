@@ -367,28 +367,23 @@ export interface TaskOutcomeFile {
  */
 export type TaskExecutionOutcome =
   /**
-   * 后台回合收尾。report = Worker 汇报原文（事实）；files = 本回合 Worker 产出的**任务
-   * 作用域**交付物（登记事实）；这是后台面对 TurnResult.files 的同位面：装配方按它投递。
+   * 后台回合收尾（**只记事实，没有回合级结论词**）。report = Worker 汇报原文（事实）；
+   * files = 本回合 Worker 产出的**任务作用域**交付物（登记事实）；这是后台面对
+   * TurnResult.files 的同位面：装配方按它投递。
    * zeroExecReason = 零执行的机械原因（'not_permitted' = 发起前被宿主拒绝——唤醒面据此
    * 按「本次不允许」说清；'unsupported' = 零执行且非权限拒绝——没有发生任何办理动作，
    * 唤醒面按「办不了」说清）；缺省 = 无该事实。
    *
-   * executionOutcome（2026-11-22 补，如实交付红线）：本回合执行事实的**机械结局**——宿主
-   * 完成/失败投递面据此分流（不能只看「有没有汇报」：Worker 在被拒/失败后也会汇报一句
-   * 解释，把那种回合说成「办好了」就是虚假成功）。
-   *   · 缺省 / 'success'    = 有汇报即结果（含零执行收尾）；装配方走**完成**回调；
-   *   · 'failed' / 'refused' = 本回合有执行以失败/拒绝收尾；装配方走**失败**回调，
-   *     且 runner 不把汇报落成完成存档（做没做成由账本执行事实说）；
-   *   · 'not_permitted'      = 发起前被宿主拒绝（本次不允许）。
-   * errorCode / failureReason 只在 failed/refused 时有值：执行层原始码（只用于归类，不进
-   * 用户文本）与执行层失败原文（机械原因；投递面事实文案用）。
+   * 做没做成由 Main 读账本 executions 逐条 status + 死亡事实 + worker 汇报自己判；这里没有
+   * success/failed/refused/not_permitted 这类聚合词（2026-11-23 删 outcome 概念）。
+   * errorCode / failureReason 是**末次原始失败执行事实**（只供「模型说不出话」时的宿主兜底
+   * 话术归类，不进用户文本、不决定投递面）。
    */
   | {
     kind: 'ended';
     report?: string;
     files?: readonly TaskOutcomeFile[];
     zeroExecReason?: 'not_permitted' | 'unsupported';
-    executionOutcome?: 'success' | 'failed' | 'refused' | 'not_permitted';
     errorCode?: string;
     failureReason?: string;
   }
@@ -1642,15 +1637,16 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         } catch (error) {
           if (!isSettledRace(error)) report(taskId, error);
         }
-        // 汇报逐字存档（事实；空白结果不落——显示层不以汇报冒充）；无汇报 = 回合失败事实
-        //（执行行就是事实，不判成败、不合成失败文案）。
-        // S1 如实交付（2026-11-22）：本回合执行结局是 failed/refused/not_permitted 时，
-        // Worker 那句汇报是**对失败的说明**，不是完成结果——不落完成存档（落下去就会让
-        // 投递面把被拒/失败说成「办好了」）。做没做成由账本执行事实说。
+        // 汇报逐字存档（事实；空白结果不落——显示层不以汇报冒充）。有没有汇报是**事实**：
+        // 有汇报且本回合没有机械失败事实 → 汇报是结果（存档 + 交给唤醒面喂 Main）；本回合有
+        // 机械失败事实（末次原始失败执行 / 零执行机械原因）→ 那句汇报是对失败的**说明**，
+        // 不冒充结果存档（否则 result_archived 事件会把这一轮记成完成事实），事实仍由唤醒面
+        // 把汇报原文喂给 Main，由 Main 判。判据是**原始事实直读**（errorCode/failureReason），
+        // 不是回合级结局词（2026-11-23 删 outcome 概念）。
         const reportText = (outcome.report ?? '').trim();
-        const roundSucceeded = outcome.executionOutcome === undefined || outcome.executionOutcome === 'success';
+        const hasMechanicalFailureFact = outcome.errorCode !== undefined || outcome.failureReason !== undefined;
         releaseLeaseQuietly(taskId);
-        if (roundSucceeded && reportText !== '') {
+        if (!hasMechanicalFailureFact && reportText !== '') {
           try {
             if (registry.archiveReply !== undefined) registry.archiveReply([taskId], outcome.report!);
             else registry.noteRoundFailed(taskId); // 无存档面 = 结果可找回机制缺失，按失败事实上报
@@ -1659,11 +1655,11 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
           }
           return;
         }
-        // 回合以「无汇报/失败」收尾：任务已结束——noteRoundFailed 落一条一次性机械时刻
-        // （round_failed_at）。否则底账 running_since 仍在、无结束事实，`listRunning` 会把已
-        // 结束的任务当「还在跑」，几秒办完的任务 10 分钟后被叫醒「已经跑了 N 分钟还没有结果」
-        // （2026-11-22 Grok 复审）。**不是** died（无汇报 ≠ 结果未知；round_failed 只是「本轮
-        // 已停」，不改业务失败归类、不改唤醒话术）。
+        // 回合以「没有可存档的结果」（无汇报 / 有机械失败事实）收尾：任务已结束——
+        // noteRoundFailed 落一条一次性机械时刻（round_failed_at）。否则底账 running_since 仍在、
+        // 无结束事实，`listRunning` 会把已结束的任务当「还在跑」，几秒办完的任务 10 分钟后被
+        // 叫醒「已经跑了 N 分钟还没有结果」（2026-11-22 Grok 复审）。**不是** died（无汇报 ≠
+        // 结果未知；round_failed 只是「本轮已停」，不改业务归类、不改唤醒话术）。
         try {
           registry.noteRoundFailed(taskId);
         } catch (error) {

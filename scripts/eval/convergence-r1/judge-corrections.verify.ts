@@ -19,7 +19,7 @@
  * 9) E11 机械判据（2026-11-20 换代）：t21「做不了/没法」、t25「办不了/还没有开放」等历史
  *    拒绝措辞样本 → 零执行 + 非空回复判 PASS（新判据读底账 outcome，不读词表）；
  *    关键负例改为机械事实：伪造「真发生写执行」/「成功宣称」/「空回复」→ 必红；
- *    反向绊线：把 outcomeAccepted 临时改成恒真 → 底账 outcome=completed 的负例必须由红转绿。
+ *    反向绊线：把 noWriteExecuted 分支临时改成恒 true → 写面执行行 completed 的负例必须由红转绿。
  *    旧「模糊回复/只复述需求」两例已从判负改为**登记为未覆盖**（机械事实无法区分拒绝措辞），
  *    不再作为绊线——详见 cases/E11.ts 用例注释。
  * 10) 写完成话术语境门：E15 t24 只读查询开头「已办好，结果如下」→ 不再判 PHANTOM；
@@ -374,8 +374,8 @@ function workName(prefix: string, source: string): string {
     check('E11 负例·空回复 → INCONCLUSIVE', emptyJudged.deterministic.verdict === 'INCONCLUSIVE',
       `verdict=${emptyJudged.deterministic.verdict}，inconclusive=${emptyJudged.inconclusiveReasons.join(' / ')}`);
 
-    // 负例控制四（反向绊线）：底账写面执行行末条非接受集（completed）→ mechanicalOutcome 必须判负；
-    // 把 outcomeAccepted 临时改成恒真时此例由红转绿，证明非恒过。
+    // 负例控制四（反向绊线）：底账写面执行行出现 completed → noWriteExecuted 必须判负；
+    // 把该分支临时改成恒 true 时此例由红转绿，证明非恒过。
     // 构造：底账 task 带一条写面执行行（dummy.prepare）status=completed（不在接受集 unsupported/blocked）。
     const failedDir = freshCopy(e11Source, 'e11-mech-outcome-failed');
     rewriteFile(failedDir, 'executions.json', () => JSON.stringify({ tasks: [{

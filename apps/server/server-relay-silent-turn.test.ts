@@ -306,7 +306,7 @@ function createScripted(input: {
     script: (_index, context) => {
       if (input.emptyOnly === true) return textAssistant('');
       const last = lastUserTextOf(context.messages);
-      if (last.startsWith('[任务完成]')) {
+      if (last.startsWith('[回合结束]')) {
         input.onWake?.();
         return textAssistant(input.wakeLine ?? WAKE_LINE);
       }

@@ -2,13 +2,14 @@
  * P1 事实文本去内部词（PM/QA 真模型验收）：源头修复的回归锁。
  *
  * 判据（每条含反向绊线，实测读数见文件末）：
- *   ① 完成事实 taskCompletionFactText 不含「执行层/执行端」，且保留「办完了」+ 结果正文逐字；
+ *   ① 回合结束事实 taskRoundFactsText 不含「执行层/执行端」，且喂账本事实 + worker 汇报原文
+ *      （不喂回合级结局词：没有 `[任务完成]`/`[任务失败]`/「办完了」投影）；
  *   ③ 模型协议提示（工具描述/协议/Worker 提示/默认称谓）不含内部词——这些字符串进模型上下文，
  *      模型会照着说（真模型实跑证据里出现过「执行层给出的确认摘要」「执行端写入后已读回核对」）；
  *   ④ 超时回执事实（dummy-cli 适配器）不含内部词，且保留超时数值、没有回执、无法确认语义；
  *   ⑤ Main 系统提示正文（agent.md 经 applyExecutorLabel 渲染后的最终文本）无内部词；
  *   ⑥ Worker 系统提示的渲染形状（renderWorkerSystemPrompt 带工作目录块）无内部词；
- *   ⑦ 失败事实链（宿主喂账本事实 → taskFailureSnapshotText）无内部词。
+ *   ⑦ 回合结束事实链（宿主喂账本事实 → taskRoundFactsText）无内部词。
  * 内部词含「执行层 / 执行端 / 确认凭据 / 宿主 / 委派 / 能力快照 / 执行面 / 凭据」——都是不该
  * 出现在给模型/用户文本里的宿主内部形态（2026-11-20 扩面：复核发现 run_js 描述/续跑注记/
  * 后台文件提示/技能正文里仍有漏网）。内部词是确定性事实，不是模型行为评估。
@@ -17,7 +18,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { taskCompletionFactText, taskFailureSnapshotText } from './task-completion-delivery';
+import { taskRoundFactsText } from './task-completion-delivery';
 import { createDummyCliClient } from '../../packages/agent/src/dummy-cli-client';
 import {
   TASK_RUN_TOOL_DESCRIPTION,
@@ -43,11 +44,20 @@ import type { TurnDriver } from '../../packages/agent/src/driver-contract';
 const INTERNAL = /执行层|执行端|确认凭据|宿主|委派|能力快照|执行面|凭据/;
 
 describe('完成/失败事实文本：不含内部词，保留关键事实', () => {
-  it('① 完成事实：无「执行层/执行端」，保留「办完了」与结果正文逐字', () => {
-    const fact = taskCompletionFactText({ name: '汇总那件事', resultText: '共 7 条。' });
+  it('① 回合结束事实：喂 executions + replyText（不做成败结论），无内部词', () => {
+    const fact = taskRoundFactsText({
+      name: '汇总那件事',
+      report: '共 7 条。',
+      ledger: ['1. dummy.query — completed'],
+    });
     expect(fact).not.toMatch(INTERNAL);
-    expect(fact).toContain('办完了');
-    expect(fact).toContain('结果正文（逐字）：共 7 条。');
+    // 事实面：worker 汇报原文逐字 + 逐笔执行行都在（Main 自己判做没做成）。
+    expect(fact).toContain('共 7 条。');
+    expect(fact).toContain('dummy.query — completed');
+    // 不喂回合级结局词（'[任务完成]'/'[任务失败]'/'办完了' 都是投影，已退役）。
+    expect(fact.startsWith('[任务完成]')).toBe(false);
+    expect(fact.startsWith('[任务失败]')).toBe(false);
+    expect(fact).not.toContain('办完了');
   });
 });
 
@@ -216,17 +226,17 @@ describe('超时回执事实：无内部词，保留关键事实', () => {
 });
 
 /**
- * ⑦ 失败事实链：宿主把账本事实喂给 Main（taskFailureSnapshotText 的「账本事实」段）→ 模型可见。
- *    S1 事实模型：底账没有结论字段，宿主不再合成失败原因文案——失败事实 = 业务名 + 问题分类 +
- *    逐笔账本事实行。这里直接喂一条账本事实行给 taskFailureSnapshotText（钉合成出口本身无内部词）。
+ * ⑦ 回合结束事实链：宿主把账本事实喂给 Main（taskRoundFactsText 的「账本事实」段）→ 模型可见。
+ *    S1 事实模型：底账没有结论字段，宿主不合成成败结论——回合事实 = 业务名 + 机械标记 +
+ *    逐笔账本事实行 + worker 汇报原文（成与败同一形状，由 Main 自己判）。
  */
 const EMPTY_REPORT_REASON = '没产出有效的办理结果汇报，本次任务未完成。';
 
-describe('失败事实文本：无内部词，保留「没办成」语义', () => {
-  it('⑦a taskFailureSnapshotText（带账本事实行）：无内部词，保留「没产出结果汇报」与下一步', () => {
-    const fact = taskFailureSnapshotText({ name: '汇总那件事', ledger: [EMPTY_REPORT_REASON] });
+describe('回合结束事实文本：无内部词，保留账本事实与下一步', () => {
+  it('⑦a taskRoundFactsText（带账本事实行、无汇报）：无内部词，保留「账本事实」与下一步', () => {
+    const fact = taskRoundFactsText({ name: '汇总那件事', ledger: [EMPTY_REPORT_REASON] });
     expect(fact).not.toMatch(INTERNAL);
-        expect(fact).toContain('账本事实');            // 账本段仍在
+    expect(fact).toContain('账本事实');            // 账本段仍在
     expect(fact).toContain('下一步');              // 可行动出口仍在
   });
 
@@ -236,10 +246,10 @@ describe('失败事实文本：无内部词，保留「没办成」语义', () =
    * 替换业务原文**——prepared/got 这类可诊断信息必须原样留下（模型要据此改参数）。
    * 反向绊线：reason 不清洗（回退成 `input.reason.replace(...)`）时本用例转红。
    */
-  it('⑦b taskFailureSnapshotText（reason 带技术码/服务器路径/机构自称）：清干净且业务原文逐字保留', () => {
+  it('⑦b taskRoundFactsText（reason 带技术码/服务器路径/机构自称）：清干净且业务原文逐字保留', () => {
     const rawReason = 'CONFIRMATION_BINDING_MISMATCH 执行层返回：prepared collection=客户 got collection=客户台账'
       + '（日志在 /home/deploy/fshine-agent/tmp/task_d42fffce-1111-4222-8333-444455556666/run.log，供排查）';
-    const fact = taskFailureSnapshotText({ name: '汇总那件事', reason: rawReason });
+    const fact = taskRoundFactsText({ name: '汇总那件事', reason: rawReason });
     expect(fact).not.toMatch(INTERNAL);
     expect(fact).not.toContain('/home/');
     expect(fact).not.toContain('tmp/task_');

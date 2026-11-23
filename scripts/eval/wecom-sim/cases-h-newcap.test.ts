@@ -244,6 +244,8 @@ describe('H 组·本轮新增能力（W-42～W-44，自动）', () => {
       // 零执行事实：拒绝发生在发起之前（不是执行层拒绝）；底账里也没有跑起来/跑成功的任务。
       expect(done.executions).toHaveLength(0);
       const tasks = registry.list(TASK_SCOPE);
+      // 零执行事实 + 没有幽灵 running 行；worker 的「没办成…」不作为结果存档（有机械失败
+      // 事实的回合），成功宣假由下面的用户可见话术断言钉住。
       expect(tasks.some((task) => taskLivenessOf(task) === 'running' || (archivedReportOf(task) !== undefined || lastExecutionOf(task)?.status === 'completed'))).toBe(false);
       // 用户可见话术：说明没有权限，且不暴露内部 operation 名。
       const visible = sim.finalBubbles().map((bubble) => bubble.content).join('\n');
