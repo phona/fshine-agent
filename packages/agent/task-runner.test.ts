@@ -300,6 +300,14 @@ class FakeRegistry implements TaskRegistryPort {
     return affected;
   }
 
+  /** 重启恢复：取消请求 + 仍在推进 + 无有效租约（取消孤儿）= 够得着的「你要我停、没停完」。 */
+  listCancelRequested(now = this.clock().toISOString()): readonly TaskRecordView[] {
+    return [...this.tasks.values()].filter((task) =>
+      task.status === 'running'
+      && task.cancelRequestedAt !== undefined
+      && (task.leaseUntil === undefined || task.leaseUntil <= now));
+  }
+
   // --- TaskRegistryPort（S1 事实写入面；测试替身仍以状态词建模供本文件断言） ---
 
   markCancelled(taskId: string, options?: { scope?: TaskScope }): TaskRecordView {
@@ -860,6 +868,24 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
     expect(h.registry.cancelRequestedAtOf('t1')).toBeDefined();
     expect(h.registry.statusOf('t1')).toBe('running');
 
+    await h.runner.whenIdle();
+    expect(h.registry.statusOf('t1')).toBe('cancelled');
+  });
+
+  it('running 取消请求（租约仍有效）不并入恢复扫描：进程内在飞等确认，不当取消孤儿', async () => {
+    // blocking 2 的反向：恢复扫描只捞**无有效租约**的取消孤儿（进程/执行端已断）。
+    // 进程内新取消的租约还在（回合在飞），若把它并进 recovered，重启对账出口会误说
+    // 「我重启过/你让我停没停完」——行为必须不变。
+    const h = harness();
+    submit(h, 't1');
+    h.runner.pump();
+    expect(h.runner.cancel('t1')).toEqual({ outcome: 'requested', taskId: 't1' });
+    expect(h.registry.cancelRequestedAtOf('t1')).toBeDefined();
+    // 请求之后、确认之前再 pump：租约仍有效 → 不并入 recovered。
+    expect(h.runner.pump().recovered).toEqual([]);
+    expect(h.registry.statusOf('t1')).toBe('running');
+    // 收尾：执行端观察 abort 后确认取消。
+    h.executor.settle(0, { kind: 'cancelled' });
     await h.runner.whenIdle();
     expect(h.registry.statusOf('t1')).toBe('cancelled');
   });

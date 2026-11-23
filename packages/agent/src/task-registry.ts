@@ -434,6 +434,12 @@ export interface TaskRegistry {
    */
   listRunning(): readonly TaskRecord[];
   /**
+   * 只读取消孤儿（重启恢复扫描）：cancel_requested_at 非空 + 仍在推进 + **无有效租约**
+   *（lease_until 为空或已过期）。进程内刚请求的取消租约仍有效，不算孤儿（行为不变）。
+   * 接回既有重启对账出口说「你要我停、没停完」；不是回合失败（不写 round_failed_at）。
+   */
+  listCancelRequested(now?: string): readonly TaskRecord[];
+  /**
    * 原子领取一档「长时间没动静」提醒——只有该档尚未提醒过才写入并返回 true；已提醒过返回
    * false（零写入）。stage = 'overdue'（10 分钟档）| 'contact_lost'（断联系档）。
    * 并发/重启下同一任务每档至多一次；不改任务事实、不产事件。
@@ -771,6 +777,12 @@ export function createTaskRegistry(options: MemoryTaskRegistryOptions = {}): Tas
         affected.push(this.markDied(task.taskId));
       }
       return affected;
+    },
+    listCancelRequested(now = clock().toISOString()) {
+      return [...tasks.values()].filter((task) =>
+        task.cancelRequestedAt !== undefined
+        && stillProgressingOf(task)
+        && (task.leaseUntil === undefined || task.leaseUntil <= now));
     },
     onTaskFact(hook) {
       factHook = hook;

@@ -684,6 +684,28 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
     }
   });
 
+  it('①d 部分完成：执行事实带 partial → 模型沉默时兜底逐项说「已完成/未成功」，不笼统说全没办成', async () => {
+    // D1：写已落库 + 另一个对象的写失败 → partial 事实（只给兜底话术，不是状态词）。
+    // 用户该听到的是「哪件成了、哪件没成」，不是「没办成、再试一次」（后者会诱导重复写）。
+    const executor = new FailingExecutor(() => ({
+      kind: 'ended',
+      report: 'alpha 那笔写好了，beta 那笔没成。',
+      partial: { completed: ['alpha'], failed: ['beta'] },
+    }));
+    const fx = await makeFixture({ waitMs: 1_500, executor });
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      expect(fx.delivery.sentTexts).toHaveLength(1);
+      const text = fx.delivery.sentTexts[0]!.text;
+      expect(text).toContain('已完成 alpha');
+      expect(text).toContain('未成功 beta');
+      expect(text).not.toBe(failureMessageFor('executor_failed').text);
+      expect(internalTermIn(text)).toBeUndefined();
+    } finally {
+      await fx.close();
+    }
+  });
+
   it('② 不回归：失败但模型说了话 → 宿主完全不介入（用户看到的话永远是模型说的）', async () => {
     const executor = new FailingExecutor();
     const fx = await makeFixture({ waitMs: 1_500, executor, afterToolText: MODEL_LINE });

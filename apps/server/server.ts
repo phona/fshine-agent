@@ -67,7 +67,12 @@ import { createResourcePolicy, fileRefTtlMsOf, resolveRuntimeConfig } from '../.
 import { SessionPersistence } from '../../packages/agent/src/session-persistence';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import { deriveTaskName, taskStartedOf } from '../../packages/agent/src/task-registry';
-import type { TaskExecutor, TaskRunner, WaitingUserNoticePort } from '../../packages/agent/src/task-runner';
+import type {
+  PartialCompletionFact,
+  TaskExecutor,
+  TaskRunner,
+  WaitingUserNoticePort,
+} from '../../packages/agent/src/task-runner';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../../packages/agent/src/worker-skills';
 import {
   assembleSessionCore,
@@ -647,8 +652,13 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     died?: boolean;
     resourceLimited?: boolean;
     report?: string;
+    /** 部分完成事实（已完成对象 + 未成功对象）：只给兜底话术，不是任务状态。 */
+    partial?: PartialCompletionFact;
   }): string | undefined => {
     const namePart = input.name === undefined ? {} : { name: input.name };
+    if (input.partial !== undefined) {
+      return failureFallbackFactText({ ...namePart, partial: input.partial });
+    }
     if (input.died === true) return failureFallbackFactText({ died: true, ...namePart });
     if (input.resourceLimited === true) return failureFallbackFactText({ resourceLimited: true, ...namePart });
     if (input.code !== undefined) return failureFallbackFactText({ code: input.code, ...namePart });
@@ -682,6 +692,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         ...(name === undefined ? {} : { name }),
         ...(facts?.code === undefined ? {} : { code: facts.code }),
         ...(facts?.reasonCode === undefined ? {} : { reasonCode: facts.reasonCode }),
+        ...(facts?.partial === undefined ? {} : { partial: facts.partial }),
         ...(record.diedAt !== undefined && record.diedAt !== null ? { died: true } : {}),
         ...(record.resourceLimitedAt !== undefined && record.resourceLimitedAt !== null ? { resourceLimited: true } : {}),
         report: record.replyText ?? record.resultText ?? '',
@@ -933,6 +944,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     status?: 'result_unknown';
     code?: string;
     reasonCode?: string;
+    /** 部分完成事实（只给兜底话术逐项说清；不是任务状态）。 */
+    partial?: PartialCompletionFact;
   }>();
   /**
    * B 切片（工单回执收敛）：本会话已在同一回合拿到结果的任务（快活）——完成投递对其抑制
@@ -1063,6 +1076,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         roundFacts.set(completion.taskId, {
           ...(completion.errorCode === undefined ? {} : { code: completion.errorCode }),
           ...(completion.reasonCode === undefined ? {} : { reasonCode: completion.reasonCode }),
+          ...(completion.partial === undefined ? {} : { partial: completion.partial }),
         });
         enqueueSessionTurn(sessionKey, async () => {
           // 一次性事实：本回合兜底分支已读走（relayed/push-suppressed 路径先跑）；这里核销，
@@ -1172,6 +1186,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             ...(completion.errorCode === undefined ? {} : { code: completion.errorCode }),
             ...(completion.reasonCode === undefined ? {} : { reasonCode: completion.reasonCode }),
             ...(completion.reason === undefined ? {} : { reason: completion.reason }),
+            ...(completion.partial === undefined ? {} : { partial: completion.partial }),
             report: completion.resultText,
           });
           // 走统一的状态变化出口（见 wakeAndDeliverStateChange）：非 live 不唤醒（不白花模型
@@ -1199,6 +1214,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           ...(failure.status === 'result_unknown' ? { status: 'result_unknown' as const } : {}),
           ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }),
           ...(failure.reasonCode === undefined ? {} : { reasonCode: failure.reasonCode }),
+          ...(failure.partial === undefined ? {} : { partial: failure.partial }),
         });
         const sessionKey = `${failure.principalId}\u0000${failure.sessionId}`;
         enqueueSessionTurn(sessionKey, async () => {
@@ -1248,6 +1264,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
               ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }),
               ...(failure.reasonCode === undefined ? {} : { reasonCode: failure.reasonCode }),
               ...(failure.reason === undefined ? {} : { reason: failure.reason }),
+              ...(failure.partial === undefined ? {} : { partial: failure.partial }),
               ...(report === undefined ? {} : { report }),
               ...(name === undefined ? {} : { name }),
             }),
@@ -1994,7 +2011,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           // 不投递；完成回调照旧按 relayed 记账。
           if (fallbackText === undefined) continue;
           // 投递归属按原始事实：有失败执行事实/零执行原因码 = failed 事实；否则按汇报原文。
-          const relayedFailedFact = relayedFacts?.code !== undefined || relayedFacts?.reasonCode !== undefined;
+          const relayedFailedFact = relayedFacts?.code !== undefined
+            || relayedFacts?.reasonCode !== undefined
+            || relayedFacts?.partial !== undefined;
           await deliverTaskResult({
             taskId: relayedTaskId,
             principalId,
@@ -2040,6 +2059,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
               ? { status: 'result_unknown' as const }
               : {}),
             ...(round?.code === undefined ? {} : { code: round.code }),
+            ...(round?.partial === undefined ? {} : { partial: round.partial }),
             ...(taskFailureFactOf(suppressedTaskId)?.name === undefined ? {} : { name: taskFailureFactOf(suppressedTaskId)!.name }),
           };
           await deliverTaskFailure({

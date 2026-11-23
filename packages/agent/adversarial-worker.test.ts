@@ -113,7 +113,10 @@ class AdversarialClient implements ExecutionClient {
     const args = (request.args ?? {}) as Record<string, unknown>;
     switch (request.operation) {
       case 'dummy.query':
-        return { status: 'completed', data: { rows: 2 } };
+        // D1 只读失败面：已落库写之后的核对查询失败（readOnlyOperations 声明为只读）。
+        return args['--fail'] === true
+          ? { status: 'failed', error: { code: 'READ_FAILED', message: '核对查询失败。', retryable: false } }
+          : { status: 'completed', data: { rows: 2 } };
       case 'dummy.prepare': {
         this.prepareSeq += 1;
         const collection = typeof args['--collection'] === 'string' ? args['--collection'] : 'alpha';
@@ -161,6 +164,8 @@ class AdversarialClient implements ExecutionClient {
 }
 
 const QUERY = { operation: 'dummy.query', args: {} };
+/** D1：成功后只读核对失败（打另一个对象——只有「只读失败不翻盘」这条判据能救它）。 */
+const QUERY_FAILED = { operation: 'dummy.query', args: { '--collection': 'gamma', '--fail': true } };
 const PREPARE = (collection = 'alpha'): Record<string, unknown> => ({ operation: 'dummy.prepare', args: { '--collection': collection } });
 const COMMIT = (collection = 'alpha'): Record<string, unknown> => ({ operation: 'dummy.commit', args: { '--collection': collection } });
 const PROPOSAL = { operation: 'dummy.proposal', args: {} };
@@ -839,5 +844,89 @@ describe('模型走岔路（确定性脚本模型）', () => {
     expect(confirmedAgain.outcome).toBe('started');
     await runner.whenIdle();
     expect((capture.delegations ?? []).join('\n')).not.toContain('cf_leak_');
+  });
+});
+
+/**
+ * D1（2026-11-23 收尾）：已落库业务写之后的失败按**机械判据**分类——
+ *   · 只读失败（核对查询）→ 不翻盘；
+ *   · 同对象写失败（retryObjectOf 相等）= 重复尝试 → 不翻盘；
+ *   · 异对象写失败 = 另一个写没成 → 返回 partial 事实（带已完成对象 + 未成功对象）。
+ * partial 只供兜底话术逐项说「已完成 X，未成功 Y」，不是 status/outcome 枚举。
+ * 反向绊线：去掉任一豁免 → ⑯/⑰ 必红；把异对象也当重复 → ⑱ 必红。
+ */
+describe('D1 已落库写之后的失败：只读 / 同对象 / 异对象', () => {
+  /** 确认回合：首回合提案 → 确认回合跑给定调用（返回回合事实与任务行）。 */
+  async function confirmRound(input: {
+    taskId: string;
+    calls: ReadonlyArray<Record<string, unknown>>;
+    client?: AdversarialClient;
+  }): Promise<{ runner: TaskRunner; task: TaskRecord }> {
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = input.client ?? new AdversarialClient();
+    const executor = await makeExecutor({
+      client,
+      registry,
+      worker: scriptWorker([[PREPARE('alpha')], [...input.calls]], capture),
+    });
+    const runner = await runBackground(registry, executor, input.taskId);
+    expect(registry.get(input.taskId, SCOPE).pendingQuestion?.confirmation?.handle).toBeDefined();
+    const confirmed = runner.confirm(input.taskId, { userText: '确认', scope: SCOPE });
+    expect(confirmed.outcome).toBe('started');
+    await runner.whenIdle();
+    return { runner, task: registry.get(input.taskId, SCOPE) };
+  }
+
+  it('⑯ 已落库写之后同对象写失败（重复尝试）：不翻盘，失败行仍留在 executions', async () => {
+    const client = new AdversarialClient();
+    const { runner, task } = await confirmRound({
+      taskId: 't_d1_same_object',
+      client,
+      calls: [COMMIT('alpha'), DENIED('alpha')],
+    });
+    // 重复尝试真的打到执行层（不是宿主预先挡掉），逐条留账。
+    expect(client.calls.map((call) => call.operation)).toEqual(['dummy.prepare', 'dummy.commit', 'dummy.denied']);
+    expect(task.executions.slice(-2).map((execution) => [execution.operation, execution.status]))
+      .toEqual([['dummy.commit', 'completed'], ['dummy.denied', 'refused']]);
+    // 末次决定性结果仍是「写已落库」：不产出兜底失败事实、不给 partial。
+    const round = runner.roundOutcomeOf?.('t_d1_same_object');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    expect(round.errorCode).toBeUndefined();
+    expect(round.partial).toBeUndefined();
+  });
+
+  it('⑰ 已落库写之后只读核对失败：不翻盘（只读失败不是另一个写没成）', async () => {
+    const client = new AdversarialClient();
+    const { runner, task } = await confirmRound({
+      taskId: 't_d1_read_only',
+      client,
+      calls: [COMMIT('alpha'), QUERY_FAILED],
+    });
+    expect(task.executions.slice(-2).map((execution) => [execution.operation, execution.status]))
+      .toEqual([['dummy.commit', 'completed'], ['dummy.query', 'failed']]);
+    const round = runner.roundOutcomeOf?.('t_d1_read_only');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    expect(round.errorCode).toBeUndefined();
+    expect(round.partial).toBeUndefined();
+  });
+
+  it('⑱ 已落库写之后异对象写失败：partial 逐项带已完成/未成功对象（兜底话术说清哪件成、哪件没成）', async () => {
+    const client = new AdversarialClient();
+    const { runner, task } = await confirmRound({
+      taskId: 't_d1_other_object',
+      client,
+      calls: [COMMIT('alpha'), DENIED('beta')],
+    });
+    expect(task.executions.slice(-2).map((execution) => [execution.operation, execution.status]))
+      .toEqual([['dummy.commit', 'completed'], ['dummy.denied', 'refused']]);
+    const round = runner.roundOutcomeOf?.('t_d1_other_object');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    // 原始失败码仍在（兜底归类可用），但 partial 优先说明「哪件成了、哪件没成」。
+    expect(round.errorCode).toBe('GATE_REFUSE');
+    expect(round.partial).toEqual({ completed: ['alpha'], failed: ['beta'] });
   });
 });

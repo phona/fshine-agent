@@ -9,8 +9,11 @@
  *   · 历史事实搬运：result_text/reply_text/name/task_no 原样保留；旧 status='cancelled'
  *     /'timed_out' 行按 updated_at 机械回填对应时刻列；曾离开过 queued 的行回填
  *     running_since=updated_at（避免迁移后被当作未启动重新认领），queued 行保持 NULL；
- *   · 无汇报收尾的旧行（failed_confirmed / 无汇报 unexecuted / cancelling 孤儿）回填
+ *   · 无汇报收尾的旧行（failed_confirmed / 无汇报 unexecuted）回填
  *     round_failed_at=updated_at——迁移后不被「在跑」唯一谓词当作活行（2026-11-23）；
+ *   · 旧 cancelling 行**只**回填 cancel_requested_at，不写 round_failed_at（它不是「回合
+ *     失败无结果」，是「用户要停、没确认」）——重启扫描按「取消请求 + 仍在推进」捞它，
+ *     唤醒原会话说清「你要我停、没停完」；
  *   · 回填 task_no / 计数器单调不减 / 幂等（二次打开零差异、不新增备份）；
  *   · 只读打开永不迁移：旧列仍在、不建备份、主库哈希不变。
  *
@@ -223,10 +226,12 @@ describe('S1 v5 迁移（旧结论列 → 机械事实形状）', () => {
     expect(rawTask(dbPath, 'task_resource')['resource_limited_at']).toBe('2026-11-14T09:45:00.000Z');
     expect(rawTask(dbPath, 'task_resource')['running_since']).toBe('2026-11-14T09:45:00.000Z');
     // 2026-11-23：无汇报收尾的旧行回填 round_failed_at（= updated_at）——回合已停，不再算在跑。
-    // failed_confirmed / 无汇报的 unexecuted / cancelling 孤儿三类都认得。
+    // 只认 failed_confirmed / 无汇报 unexecuted；cancelling 不是「回合失败无结果」。
     expect(rawTask(dbPath, 'task_failed_confirmed')['round_failed_at']).toBe('2026-11-14T10:00:00.000Z');
     expect(rawTask(dbPath, 'task_unexecuted')['round_failed_at']).toBe('2026-11-14T10:15:00.000Z');
-    expect(rawTask(dbPath, 'task_cancelling')['round_failed_at']).toBe('2026-11-14T09:30:00.000Z');
+    // 取消孤儿（用户要停、没确认）只落 cancel_requested_at：不写 round_failed_at，否则
+    // 「取消请求 + 仍在推进」的重启扫描永远够不着它（blocking 2）。
+    expect(rawTask(dbPath, 'task_cancelling')['round_failed_at']).toBeNull();
     // 对照：真正在跑的旧行不回填（识别仍是活行）。
     expect(rawTask(dbPath, 'task_live')['round_failed_at']).toBeNull();
     expect(rawTask(dbPath, 'task_live')['running_since']).toBe('2026-11-14T10:30:00.000Z');
@@ -236,10 +241,13 @@ describe('S1 v5 迁移（旧结论列 → 机械事实形状）', () => {
     expect(store.getTask('task_resource')!.task.resourceLimitedAt).toBe('2026-11-14T09:45:00.000Z');
     expect(store.getTask('task_failed_confirmed')!.task.roundFailedAt).toBe('2026-11-14T10:00:00.000Z');
     expect(store.getTask('task_unexecuted')!.task.roundFailedAt).toBe('2026-11-14T10:15:00.000Z');
-    expect(store.getTask('task_cancelling')!.task.roundFailedAt).toBe('2026-11-14T09:30:00.000Z');
-    // 在跑扫描（唯一谓词）：迁移后只剩真正在跑的旧行；已汇报/已取消/超时/结果未知/资源拒绝/
-    // 回合失败/无汇报 unexecuted/cancelling 孤儿都不算「还在跑」。
-    expect(store.listRunningTasks().map((task) => task.taskId)).toEqual(['task_live']);
+    expect(store.getTask('task_cancelling')!.task.roundFailedAt).toBeUndefined();
+    // 在跑扫描（唯一谓词）：迁移后仍在推进的旧行 = 真正的 running + 取消孤儿（等重启对账）；
+    // 已汇报/已取消/超时/结果未知/资源拒绝/回合失败/无汇报 unexecuted 都不算「还在跑」。
+    expect(store.listRunningTasks().map((task) => task.taskId)).toEqual(['task_cancelling', 'task_live']);
+    // 重启恢复扫描：取消请求 + 仍在推进（无租约）的孤儿能被单独捞出（接回「你要我停」出口）。
+    expect(store.listCancelRequestedTasks('2026-11-14T11:00:00.000Z').map((task) => task.taskId))
+      .toEqual(['task_cancelling']);
 
     // 新任务编号从历史最大值接续（不重号）。
     const inserted = store.insertTask({

@@ -213,6 +213,10 @@ export function createSqliteTaskRegistry(
       // 在跑事实（长时间提醒扫描；不读全表）：running_since 非空、无等待形状、无结束事实。
       return store.listRunningTasks().map((row) => toRecord({ task: row, executions: [] }));
     },
+    listCancelRequested(now = new Date().toISOString()) {
+      // 重启恢复：取消请求 + 仍在推进 + 无有效租约（取消孤儿）；已断进程/执行端。
+      return store.listCancelRequestedTasks(now).map((row) => toRecord({ task: row, executions: [] }));
+    },
     claimLongRunningNotice(taskId, stage, at) {
       // 原子「每档仅一次」领取：已提醒过返回 false（零写入）；不改任务事实、不产事件。
       return store.claimLongRunningNotice(taskId, stage, at);

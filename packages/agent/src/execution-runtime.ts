@@ -94,7 +94,13 @@ import {
   type RejectionReason,
   type ResourcePolicy,
 } from './resource-policy';
-import type { TaskExecutionOutcome, TaskExecutor, TaskRunner, ResumedOperation } from './task-runner';
+import type {
+  PartialCompletionFact,
+  ResumedOperation,
+  TaskExecutionOutcome,
+  TaskExecutor,
+  TaskRunner,
+} from './task-runner';
 import type { CapabilityEntry } from './capability-catalog';
 import { OUTCOME_REASON_NOT_PERMITTED } from './task-outcome';
 
@@ -4538,33 +4544,93 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
        * 末次决定性执行的**原始失败事实**（机械直读，**不聚合成回合级结局词**）。
        * 唯一用途：模型说不出话时宿主的兜底话术归类（server 按它选一句既有失败话术）；
        * 它不决定投递面、不写任务级状态——做没做成由 Main 读执行事实自己判断。
+       *
        * 口径（与原如实交付分流的事实口径一致）：
        *   · 倒序遇到最后一条 completed 的业务写即止——更早的失败不再取（先失败后成功：改对
        *     参数再试一次是产品正常回路；按失败兜底会引导用户重复写）；
+       *   · 已落库业务写**之后**的失败按机械判据分类（D1，2026-11-23；grok blocking 1）：
+       *     - 只读失败（核对查询）→ 不取（只读失败不是「另一个写没成」）；
+       *     - 同对象写失败（`retryObjectOf` 与已落库写对象相等）→ 不取（重复尝试）；
+       *     - 异对象 / 取不到对象的写失败 = 另一个写没成 → 取，并带 `partial` 事实
+       *       （已完成对象 + 未成功对象；**只给兜底话术**，不是 status/outcome 枚举）；
        *   · 已落库的业务写之后的脚本失败不取（脚本失败不是「另一个写没成」，⑪ 冻结用例）；
        *     无业务写时（只读查询 + 脚本失败）脚本的原始失败仍取（⑫ 冻结用例，不放宽）；
        *   · 容忍码（同回合提案被挡/模型误用历史协议）不取——那类回合的结局由更上面的
        *     等待事实决定。
        */
-      const completedBusinessWrite = recorded.some(
-        (entry) => entry.operation !== RUN_JS_TOOL
-          && !readOnlyOperations.has(entry.operation)
-          && entry.outcome.status === 'completed',
-      );
-      const lastDecisiveExecutionFactOf = (): { code?: string; reason?: string } | undefined => {
+      const isBusinessWrite = (entry: RecordedExecution): boolean =>
+        entry.operation !== RUN_JS_TOOL && !readOnlyOperations.has(entry.operation);
+      /** 对象名（A2b 唯一来源）；取不到对象 = undefined（无法证明「同对象」，不猜）。 */
+      const objectLabelOf = (entry: RecordedExecution): string | undefined =>
+        retryObjectOf(entry.args ?? {});
+      let lastCompletedBusinessWriteIndex = -1;
+      for (let index = recorded.length - 1; index >= 0; index -= 1) {
+        const entry = recorded[index];
+        if (entry !== undefined && isBusinessWrite(entry) && entry.outcome.status === 'completed') {
+          lastCompletedBusinessWriteIndex = index;
+          break;
+        }
+      }
+      // 已落库业务写的对象集合（同对象判据的锚点：任何已成功写过的对象再失败 = 重复尝试）。
+      const completedBusinessWriteObjects = new Set(recorded
+        .filter(isBusinessWrite)
+        .filter((entry) => entry.outcome.status === 'completed')
+        .map(objectLabelOf)
+        .filter((label): label is string => label !== undefined));
+      const lastDecisiveExecutionFactOf = (): {
+        code?: string;
+        reason?: string;
+        partial?: PartialCompletionFact;
+      } | undefined => {
+        if (lastCompletedBusinessWriteIndex >= 0) {
+          // 已落库业务写之后的失败：只读 / 同对象重复不翻盘；其余是「另一个写没成」。
+          const distinctFailures: Array<{ entry: RecordedExecution; code?: string; reason?: string }> = [];
+          for (let index = lastCompletedBusinessWriteIndex + 1; index < recorded.length; index += 1) {
+            const entry = recorded[index];
+            if (entry === undefined) continue;
+            const status = entry.outcome.status;
+            if (status !== 'failed' && status !== 'refused') continue;
+            const code = entry.outcome.error.code;
+            if (SAME_TURN_TOLERATED_FAILURE_CODES.has(code)) continue;
+            // 宿主脚本失败不是另一个写没成（⑪）。
+            if (entry.operation === RUN_JS_TOOL) continue;
+            // 只读核对失败不翻盘（D1 豁免 1）。
+            if (readOnlyOperations.has(entry.operation)) continue;
+            const object = objectLabelOf(entry);
+            // 同对象 = 重复尝试（D1 豁免 2）；取不到对象 = 无法证明同一个（按异对象处理）。
+            if (object !== undefined && completedBusinessWriteObjects.has(object)) continue;
+            const reason = entry.outcome.error.message;
+            distinctFailures.push({
+              entry,
+              ...(code === undefined || code === '' ? {} : { code }),
+              ...(reason === undefined || reason.trim() === '' ? {} : { reason }),
+            });
+          }
+          if (distinctFailures.length === 0) return undefined;
+          const lastFailure = distinctFailures[distinctFailures.length - 1]!;
+          const completed = [...completedBusinessWriteObjects];
+          const failed = [...new Set(distinctFailures
+            .map((failure) => objectLabelOf(failure.entry))
+            .filter((label): label is string => label !== undefined))];
+          // partial 只承载「哪件成了、哪件没成」的兜底话术内容；取不到对象名时不编造。
+          const partial = completed.length > 0 && failed.length > 0
+            ? { completed, failed } satisfies PartialCompletionFact
+            : undefined;
+          const fact = {
+            ...(lastFailure.code === undefined ? {} : { code: lastFailure.code }),
+            ...(lastFailure.reason === undefined ? {} : { reason: lastFailure.reason }),
+            ...(partial === undefined ? {} : { partial }),
+          };
+          return fact.code === undefined && fact.reason === undefined && fact.partial === undefined
+            ? undefined
+            : fact;
+        }
+        // 没有已落库业务写：保持原口径（倒序末次失败；容忍码跳过）。
         for (let index = recorded.length - 1; index >= 0; index -= 1) {
           const entry = recorded[index];
           if (entry === undefined) continue;
           const status = entry.outcome.status;
-          // 末次决定性结果 = 已落库的业务写成功：更早的失败不再取。
-          if (entry.operation !== RUN_JS_TOOL
-            && !readOnlyOperations.has(entry.operation)
-            && status === 'completed') {
-            return undefined;
-          }
           if (status !== 'failed' && status !== 'refused') continue;
-          // 业务写已落库：宿主脚本的失败不改写兜底话术（审计行照旧保留）。
-          if (completedBusinessWrite && entry.operation === RUN_JS_TOOL) continue;
           const code = entry.outcome.error.code;
           if (SAME_TURN_TOLERATED_FAILURE_CODES.has(code)) continue;
           const reason = entry.outcome.error.message;
@@ -4620,6 +4686,7 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         ...(taskFiles.length === 0 ? {} : { files: taskFiles }),
         ...(lastExecutionFact?.code === undefined ? {} : { errorCode: lastExecutionFact.code }),
         ...(lastExecutionFact?.reason === undefined ? {} : { failureReason: lastExecutionFact.reason }),
+        ...(lastExecutionFact?.partial === undefined ? {} : { partial: lastExecutionFact.partial }),
       };
     },
   };

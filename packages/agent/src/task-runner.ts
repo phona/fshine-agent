@@ -233,6 +233,12 @@ export interface TaskRegistryPort {
    */
   listRunning?(): readonly TaskRecordView[];
   /**
+   * 只读 **取消孤儿**（重启恢复用；可选）：cancel_requested_at 非空 + 仍在推进 +
+   * 无有效租约。并进 pump().recovered，由既有重启对账出口说「你要我停、没停完」。
+   * 缺省 = 不扫（零行为变化）。
+   */
+  listCancelRequested?(now?: string): readonly TaskRecordView[];
+  /**
    * 预期契约：原子领取一档提醒（'overdue' = 10 分钟「久无动静」档 /
    * 'contact_lost' = 长任务等待与执行层断了联系、无回执）。
    * 返回 true = 本次由本进程发出（已落库，重启不重发）；false = 该档已提醒过（零写入）。
@@ -356,6 +362,16 @@ export interface TaskOutcomeFile {
 }
 
 /**
+ * 部分完成的**机械事实**（D1，2026-11-23）：已落库的业务写对象 + 未成功的另一个写对象。
+ * 只供宿主兜底话术说「已完成 X，未成功 Y」（模型说不出话时），**不是**任务状态/结局词；
+ * 做没做成仍由 Main 读账本执行事实自己判断。取不到对象名的条目不进本事实（不编造）。
+ */
+export interface PartialCompletionFact {
+  completed: readonly string[];
+  failed: readonly string[];
+}
+
+/**
  * 一次执行回合的机械结局（runner 据此落事实；S1：执行端**不产出结论**，只报回合事实）：
  *   · ended        → 回合收尾。report = Worker 的汇报原文（事实存档面）；缺省/空 = 本回合
  *     没有产出结果汇报（执行行就是事实，不判成败、不合成失败文案）。
@@ -382,6 +398,7 @@ export type TaskExecutionOutcome =
    * success/failed/refused/not_permitted 这类聚合词（2026-11-23 删 outcome 概念）。
    * errorCode / failureReason 是**末次原始失败执行事实**（只供「模型说不出话」时的宿主兜底
    * 话术归类，不进用户文本、不决定投递面）。
+   * partial = 部分完成事实（写已落库 + 另一个对象的写没成）：同上，只给兜底话术逐项说清。
    */
   | {
     kind: 'ended';
@@ -390,6 +407,7 @@ export type TaskExecutionOutcome =
     zeroExecReason?: 'not_permitted' | 'unsupported';
     errorCode?: string;
     failureReason?: string;
+    partial?: PartialCompletionFact;
   }
   | { kind: 'needs_input'; question: PendingQuestion }
   /**
@@ -657,7 +675,10 @@ export interface SubmitInput {
 
 /** 单趟派发结果（错误面如实返回；不是通知系统）。 */
 export interface PumpSummary {
-  /** 本次 pump 判为 died 的过期租约任务（结果未知，禁止自动重放）。 */
+  /**
+   * 本次 pump 需要重启对账的任务：过期租约判为 died（结果未知，禁止自动重放）+
+   * 取消孤儿（cancel_requested_at 已落、仍在推进、无有效租约——「你要我停、没停完」）。
+   */
   recovered: readonly string[];
   /** 本次启动执行回合的任务（认领成功）。 */
   started: readonly string[];
@@ -1387,10 +1408,16 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   }
 
   function pump(): PumpSummary {
-    // 重启恢复：过期租约 → died 事实（结果未知，禁止自动重放）。取消请求只存在于本进程
-    //（abort 控制器）；进程死在「请求了停、还没确认」的窗口时，租约随后过期 → died——
-    // 做没做完说不清，如实按结果未知收尾（旧 cancelling 孤儿回收面已被事实模型覆盖）。
-    const recovered = registry.expireLeases(now().toISOString()).map((task) => task.taskId);
+    // 重启恢复（两条独立事实，并进同一个既有出口）：
+    //   · 过期租约 → died 事实（结果未知，禁止自动重放）；
+    //   · 取消孤儿（cancel_requested_at 已落 + 仍在推进 + 无有效租约）→ 只并进 recovered，
+    //     由既有重启对账出口如实说「你要我停、没停完」（请求 ≠ 确认；不改终局、不重放）。
+    //     进程内刚请求的取消租约仍有效，不在此列（行为不变）。
+    const recoveredAt = now().toISOString();
+    const recovered = [...new Set([
+      ...registry.expireLeases(recoveredAt).map((task) => task.taskId),
+      ...(registry.listCancelRequested?.(recoveredAt) ?? []).map((task) => task.taskId),
+    ])];
     let waiting: WaitingScan | undefined;
     let nextDue: number | undefined;
     if (dueConsumerEnabled) {
@@ -1648,7 +1675,9 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         // 把汇报原文喂给 Main，由 Main 判。判据是**原始事实直读**（errorCode/failureReason），
         // 不是回合级结局词（2026-11-23 删 outcome 概念）。
         const reportText = (outcome.report ?? '').trim();
-        const hasMechanicalFailureFact = outcome.errorCode !== undefined || outcome.failureReason !== undefined;
+        const hasMechanicalFailureFact = outcome.errorCode !== undefined
+          || outcome.failureReason !== undefined
+          || outcome.partial !== undefined;
         releaseLeaseQuietly(taskId);
         if (!hasMechanicalFailureFact && reportText !== '') {
           try {

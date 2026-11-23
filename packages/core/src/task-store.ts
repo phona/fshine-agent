@@ -30,8 +30,10 @@
  *     timed_out 行按 updated_at 机械回填对应时刻列（该列语义 = 那次机械写入发生的时刻）；
  *     旧 status='failed' 且 reason='result_unknown' 行回填 died_at（结果未知不丢）；
  *     旧 status='cancelling' 行回填 cancel_requested_at（取消请求不丢，重启对账靠它）；
- *     旧 failed_confirmed / 无汇报的 unexecuted / cancelling 孤儿回填 round_failed_at
- *     （本轮已停——让「在跑」唯一谓词认得，2026-11-23）；
+ *     **不**回填 round_failed_at（不是回合失败无结果，是用户要停未确认——重启扫描按「取消
+ *     请求 + 仍在推进」捞它说「你要我停、没停完」）；
+ *     旧 failed_confirmed / 无汇报的 unexecuted 回填 round_failed_at（本轮已停——让「在跑」
+ *     唯一谓词认得，2026-11-23）；
  *   · 回填 task_no（仅缺该列时）：按 (created_at, task_id) 升序连续分配，只填 NULL 行；
  *   · U3/file_refs/inbound 面只做前向加法（不变）；tasks.round_failed_at 亦为前向加法列
  *     （v5 早期库缺列 → ADD COLUMN TEXT，不升 user_version）；
@@ -334,6 +336,12 @@ export interface TaskStore {
   listRunningTasks(): TaskRow[];
   /** 租约已过期（lease_until 非空且 <= now）且未写 died 的任务行（看门狗扫描）。 */
   listRunningExpiredLeases(now: string): TaskRow[];
+  /**
+   * 只读「取消孤儿」行（重启对账）：cancel_requested_at 非空 + 仍在推进 + 无有效租约
+   *（lease_until 为空或已过期）。用于把旧库/断电容错的 `cancelling` 行接回「你要我停、
+   * 没停完」出口——它不是回合失败（不写 round_failed_at）。
+   */
+  listCancelRequestedTasks(now: string): TaskRow[];
   /**
    * P1：把同一回合的最终回复写入各任务行（同值、单事务）。
    * 不存在的 taskId 不写（调用方保证 id 来自本回合 begin）。
@@ -689,11 +697,13 @@ function tasksTableNeedsRebuild(db: Database.Database): boolean {
  *   · resource_limited：旧 status='failed' 且 reason='resource_limited' 行回填 resource_limited_at
  *     （资源拒绝是机械事实，不丢——否则退化成「无汇报」）；
  *   · round_failed：旧 status='failed'（reason=failed_confirmed 或缺省；不是 result_unknown/
- *     resource_limited）、status='unexecuted' 且无汇报存档、status='cancelling'（取消请求未确认的
- *     重启孤儿）三类行回填 round_failed_at（updated_at）——本轮以无结果收尾，让「在跑」唯一谓词
- *     认得它们已结束（否则 running_since 仍在，迁移后被当成活行）；
+ *     resource_limited）、status='unexecuted' 且无汇报存档两类行回填 round_failed_at
+ *     （updated_at）——本轮以无结果收尾，让「在跑」唯一谓词认得它们已结束（否则 running_since
+ *     仍在，迁移后被当成活行）；
  *   · cancel_requested：旧 status='cancelling' 行回填 cancel_requested_at（取消请求——请求 ≠
- *     确认——不丢，重启对账据此说清「你要我停、没停完」）；
+ *     确认——不丢，重启对账据此说清「你要我停、没停完」）；**不写 round_failed_at**——它不是
+ *     「回合失败无结果」，是「用户要停、没确认」：重启扫描按「取消请求 + 仍在推进」捞它，
+ *     写了 round_failed_at 就永远够不着（blocking 2）；
  *   · 曾离开过 queued 的行回填 running_since（updated_at）——避免迁移后被当作未启动重新认领。
  * 逐列按旧表实际列存在性取源（极旧库缺列取 NULL），历史行其余事实原样搬运。
  * failure_reason 列仍不迁移：它是失败原文/结论字段（逐笔事实在 executions），round_failed_at
@@ -705,15 +715,15 @@ function rebuildTasksTableToV5(db: Database.Database): void {
     oldColumns.has(column) ? `"${column}"` : 'NULL';
   // 无汇报存档：两列按旧表存在性取源后 COALESCE（极旧库缺 reply_text 视为空）。
   const reportEmpty = (column: string): string => `COALESCE(${sourceOf(column)}, '') = ''`;
-  // 「本轮以无结果收尾」的旧行（失败确认 / 已汇报零执行但无存档 / 取消请求孤儿）——
+  // 「本轮以无结果收尾」的旧行（失败确认 / 已汇报零执行但无存档）——
   // 旧 reason 列存在时精确排除 result_unknown/resource_limited（那两类另有结束时刻）。
+  // cancelling 不在此列：它是取消请求未确认，只有 cancel_requested_at（重启扫描据此回收）。
   const roundFailedConditions: string[] = [];
   if (oldColumns.has('status')) {
     roundFailedConditions.push(oldColumns.has('reason')
       ? `("status" = 'failed' AND ("reason" IS NULL OR "reason" = 'failed_confirmed'))`
       : `"status" = 'failed'`);
     roundFailedConditions.push(`("status" = 'unexecuted' AND ${reportEmpty('result_text')} AND ${reportEmpty('reply_text')})`);
-    roundFailedConditions.push(`"status" = 'cancelling'`);
   }
   const roundFailedCondition = roundFailedConditions.length === 0 ? undefined : roundFailedConditions.join(' OR ');
   const columnList = TASKS_V5_COLUMNS.map((column) => `"${column}"`).join(', ');
@@ -740,8 +750,8 @@ function rebuildTasksTableToV5(db: Database.Database): void {
         : 'NULL AS "resource_limited_at"';
     }
     if (column === 'round_failed_at') {
-      // 旧 failed_confirmed / 无汇报 unexecuted / cancelling 孤儿：本轮以无结果收尾 =
-      // round_failed_at（不是 died：不冒充结果未知）；updated_at 即那次写入的时刻。
+      // 旧 failed_confirmed / 无汇报 unexecuted：本轮以无结果收尾 = round_failed_at
+      // （不是 died：不冒充结果未知）；updated_at 即那次写入的时刻。cancelling 不写本列。
       return roundFailedCondition === undefined
         ? 'NULL AS "round_failed_at"'
         : `CASE WHEN ${roundFailedCondition} THEN "updated_at" ELSE NULL END AS "round_failed_at"`;
@@ -1082,6 +1092,18 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     ? db.prepare(`
         SELECT * FROM tasks
         WHERE ${stillProgressingSqlWhere()}
+        ORDER BY created_at, task_id
+      `)
+    : undefined;
+  // 取消孤儿（重启对账）：取消请求已落 + 仍在推进 + **无有效租约**（进程/执行端已断）。
+  // 无有效租约这一条不可省：进程内刚请求的取消租约仍有效，不能当孤儿并进 recovered
+  //（否则重启对账出口会误说「你要我停、没停完」）。
+  const selectCancelRequestedTasks = hasFactColumns && hasRoundFailedColumn && hasCancelRequestedColumn
+    ? db.prepare(`
+        SELECT * FROM tasks
+        WHERE cancel_requested_at IS NOT NULL
+          AND (${stillProgressingSqlWhere()})
+          AND (lease_until IS NULL OR lease_until <= ?)
         ORDER BY created_at, task_id
       `)
     : undefined;
@@ -1510,6 +1532,10 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     listRunningExpiredLeases(now) {
       if (selectExpiredLeases === undefined) throw new Error(missingFactColumnsError);
       return (selectExpiredLeases.all(now) as TaskDbRow[]).map(toTask);
+    },
+    listCancelRequestedTasks(now) {
+      if (selectCancelRequestedTasks === undefined) return [];
+      return (selectCancelRequestedTasks.all(now) as TaskDbRow[]).map(toTask);
     },
     claimLongRunningNotice(taskId, stage, at) {
       const statement = claimLongRunningNoticeStatements[stage];

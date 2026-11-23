@@ -28,6 +28,7 @@
 import type { ChannelRoute, DeliveryReceipt } from '@fshine/contracts';
 import { resourceLimitedText } from '../../packages/agent/src/notification-render';
 import { failureMessageFor, classifyFailure } from '../../packages/agent/src/user-facing-failure';
+import type { PartialCompletionFact } from '../../packages/agent/src/task-runner';
 import { stripServerPaths } from '../../packages/agent/src/server-paths';
 import { cleanExecutorDiagnostic } from '../../packages/agent/src/execution-runtime';
 
@@ -74,6 +75,8 @@ export interface TaskFailureFact {
   code?: string;
   /** 业务名（只给资源受限那句带上「是哪件事」；其余话术不带名字）。 */
   name?: string;
+  /** 部分完成事实（已完成对象 + 未成功对象；只给兜底话术逐项说清，不是任务状态）。 */
+  partial?: PartialCompletionFact;
   /** 投递归属（进 task_result_delivery_* 记账行；缺省 = 不带，不猜）。 */
   factKind?: TaskResultFactKind;
 }
@@ -307,6 +310,8 @@ export function failureTextFor(status?: 'failed' | 'refused' | 'result_unknown')
 /**
  * 失败降级兜底（**模型回合挂掉时**；唯一入口，完成/失败投递与回合内沉默兜底共用）：
  * 按机械事实选一句用户话术（B 类确定性责任：如实交付，不丢失败归类）：
+ *   · 部分完成事实（写已落库 + 另一个对象的写没成）→ 逐项说「已完成 X，未成功 Y」——
+ *     不把整回合说成「没办成」（会诱导用户重复写已经落库的那笔）；
  *   · 资源拒绝事实（池满/队列满的确定性拒绝，没进入执行）→ 复用通知渲染器的既有那句；
  *   · died 事实（结果未知）→ unknown_result；
  *   · 其余按执行层码归类（机械事实，不是投影）：`classifyFailure({ code })`——GATE_REFUSE →
@@ -319,12 +324,29 @@ export function failureFallbackFactText(input: {
   /** 执行层原始错误码（只用于归类，不进用户文本）。 */
   code?: string;
   name?: string;
+  /** 部分完成事实（只给这一句兜底话术；不是任务状态词）。 */
+  partial?: PartialCompletionFact;
 }): string {
+  if (input.partial !== undefined) {
+    const text = partialCompletionFailureText(input.partial);
+    if (text !== undefined) return text;
+  }
   if (input.resourceLimited === true) return resourceLimitedText(input.name);
   const kind = input.died === true
     ? 'unknown_result'
     : classifyFailure({ code: input.code });
   return failureMessageFor(kind === 'needs_confirmation' || kind === 'needs_input' ? 'host_fault' : kind).text;
+}
+
+/**
+ * 部分完成的兜底一句（D1）：写已落库、另一个对象的写没成——说清「已完成 X，未成功 Y」，
+ * 并落到一个动作（只重试没成的那件）。对象名取不到时不用本句（不编造、不拿操作名当对象）。
+ */
+function partialCompletionFailureText(partial: PartialCompletionFact): string | undefined {
+  const completed = partial.completed.filter((label) => label.trim() !== '').join('、');
+  const failed = partial.failed.filter((label) => label.trim() !== '').join('、');
+  if (completed === '' || failed === '') return undefined;
+  return `已完成 ${completed}，未成功 ${failed}。没成的那件再试一次，还是先放着？`;
 }
 
 /** 账本事实行的上限（条；超出截断——事实给模型读，防止把大账整段灌进去）。 */
@@ -347,7 +369,8 @@ export function taskCancelledFactText(input: { name?: string }): string {
 /**
  * 重启对账**事实**文本（宿主拼，给模型读）：进程重启后，用户以为还在办的任务实际状态已变或
  * 说不清（`running` 且租约过期的行在启动 pump 里如实落 result_unknown，不重放；
- * `cancelling` 断电遗留的「取消孤儿」也一并回收）——
+ * 取消孤儿 = `cancel_requested_at` 已落、仍在推进、无有效租约的行，也在同一次恢复扫描里
+ * 并进 recovered）——
  *   `[重启对账]「<业务名>」这件事我这边重启过，现在状态说不清（做没做完无法确认）。
  *    请如实告诉用户，别让他一直等下去，并给出下一步能做什么。`
  * `pendingCancel` = 用户说过停、重启前没停完的那一类：主语如实点明「你要我停」，
@@ -424,5 +447,6 @@ export async function deliverTaskFailure(fact: TaskFailureFact, options: TaskRes
     ...(fact.resourceLimited === true ? { resourceLimited: true } : {}),
     ...(fact.code === undefined ? {} : { code: fact.code }),
     ...(fact.name === undefined ? {} : { name: fact.name }),
+    ...(fact.partial === undefined ? {} : { partial: fact.partial }),
   }), options);
 }
