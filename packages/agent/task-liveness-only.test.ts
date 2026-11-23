@@ -314,69 +314,144 @@ describe('删投影：只留 liveness + 账本事实', () => {
 // 唯一任务级状态是 liveness 三值。宿主回合收尾只记机械事实（execution 逐条 status +
 // replyText + 死亡事实），**不再**把事实聚合成回合级结局词（success/failed/refused/
 // not_permitted）；唤醒把 executions/liveness/replyText 喂给 Main，由 Main 判成败。
-// 守卫按**形状**判（facts → 回合级词），不认名字：
-//   ① 「回合事实 → 结局词」：函数自身 return 出 success/refused/not_permitted（回合级
-//      枚举独有词），且读到了账本/执行事实字段 → 命中；
+// 守卫按**形状**判（不认函数名/字段名）：
+//   ① 「返回的取值可能集」⊆ 结局词族：函数 return 出的词（直接字面量 + 被返回标识符在
+//      同函数内被比较到的字面量）落在执行状态词全集里的那部分，若 ≥2 个、全部属于
+//      {success,failed,refused,not_permitted,completed}、且含一个回合独有词
+//      （success/refused/not_permitted）→ 命中。`const status = entry.outcome.status;
+//      return { verdict: status }` 这种「读事实 → 把窄化标识符当结局词返回」正是被删
+//      roundFailureOf 的形状；把字段名换成 verdict 也一样拦。
+//   ①' 补充：读账本事实字段且 return 出回合独有词（单支也算）。
 //   ② 「问答五态分类器」（eval 旧 mechanicalOutcome）：函数自身 return ≥2 个
 //      completed/partial/unsupported/blocked/failed，且至少含一个 partial/unsupported/blocked
 //      （这三个不是执行行原始 status 词）→ 命中。
-// 执行层适配器直传 `{ status: 'refused', ... }`（原始执行 status）不读账本事实，不命中；
-// 只 return {completed, failed} 的成败分类器也不命中（已登记局限，见 ④ 末段）。
+// 执行层适配器直传 `{ status: 'refused', ... }`（单条执行结果原样透传，返回词混入
+// needs_input 等原词）不命中；只 return {completed, failed} 的成败分类器也不命中
+// （已登记局限，见 ⑦ 末段）。
+// ⑧ 再用 TS 类型结构兜底：{kind:'ended'} 对象的任何字段类型若是结局词并集，同样报红——
+//    与字段名无关，且能拦「只删消费点、留下空字段」。
 // ---------------------------------------------------------------------------
 
 /** 回合级结局词（executionOutcome 的枚举值）；`refused`/`failed` 也是执行行原始 status，故需与「读事实」同形才判。 */
 const ROUND_VERDICT_WORDS = new Set(['success', 'refused', 'not_permitted']);
+/**
+ * 结局词族（闭集）：任务/回合级结局投影可能产出的词。判定形状时看「函数 return 的词集合」是否
+ * **整体落在该族内**——collection 里混进 needs_input 等执行行原词即认定为事实透传，不是投影。
+ */
+const VERDICT_FAMILY_WORDS = new Set(['success', 'failed', 'refused', 'not_permitted', 'completed']);
+/** 只在结局投影里成组出现的词（completed/failed 同时也是执行行原词，合法透传/单行归一化会用）。 */
+const ROUND_SPECIFIC_WORDS = new Set(['success', 'refused', 'not_permitted']);
+/** 执行状态词全集（判断「返回词集合是否混入执行行原词」用）。 */
+const STATUS_UNIVERSE_WORDS = new Set([
+  'completed',
+  'needs_confirmation',
+  'needs_input',
+  'failed',
+  'refused',
+  'accepted',
+  'success',
+  'not_permitted',
+]);
 /** eval 答复五态词（classifyOutcome 已删的旧枚举）。 */
 const ANSWER_OUTCOME_WORDS = new Set(['completed', 'partial', 'unsupported', 'blocked', 'failed']);
 /** 五态里**不是执行行原始 status** 的三个词——只有任务级分类器才会成组 return 它们。 */
 const ANSWER_OUTCOME_ONLY_WORDS = new Set(['partial', 'unsupported', 'blocked']);
 
 /**
- * 「return 出来的词」：只认**直接返回位置**的字符串字面量（return 表达式本身 / 三元两支 /
- * 对象属性值 / 数组元素）。比较表达式里的状态码（`status === 'refused'`）是被读的事实，
- * 不是被产出的词——不收集（否则任何布尔判断都会被误判成投影）。
+ * 「return 出来的值」：**直接返回位置**的字符串字面量（return 表达式本身 / 三元两支 /
+ * 对象属性值 / 数组元素）与**标识符**。标识符本身不是词——它的可能取值要看同函数内对它的
+ * 比较（见 ownReturnedWordsAndFactReads）：`const status = entry.outcome.status; if (status !==
+ * 'failed' && status !== 'refused') continue; return { verdict: status }` 这种「读事实 → 把窄化
+ * 后的标识符当作结局词返回」正是被删 roundFailureOf 的形状，必须按**返回值的可能取值**判。
  */
-function collectReturnedLiterals(node: ts.Node, words: Set<string>): void {
+function collectReturnedValues(node: ts.Node, words: Set<string>, identifiers: Set<string>): void {
   if (
     ts.isParenthesizedExpression(node)
     || ts.isAsExpression(node)
     || ts.isNonNullExpression(node)
   ) {
-    collectReturnedLiterals(node.expression, words);
+    collectReturnedValues(node.expression, words, identifiers);
     return;
   }
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
     words.add(node.text);
     return;
   }
+  if (ts.isIdentifier(node)) {
+    identifiers.add(node.text);
+    return;
+  }
   if (ts.isConditionalExpression(node)) {
-    collectReturnedLiterals(node.whenTrue, words);
-    collectReturnedLiterals(node.whenFalse, words);
+    collectReturnedValues(node.whenTrue, words, identifiers);
+    collectReturnedValues(node.whenFalse, words, identifiers);
     return;
   }
   if (ts.isObjectLiteralExpression(node)) {
     for (const property of node.properties) {
-      if (ts.isPropertyAssignment(property)) collectReturnedLiterals(property.initializer, words);
+      if (ts.isPropertyAssignment(property)) collectReturnedValues(property.initializer, words, identifiers);
     }
     return;
   }
   if (ts.isArrayLiteralExpression(node)) {
-    for (const element of node.elements) collectReturnedLiterals(element, words);
+    for (const element of node.elements) collectReturnedValues(element, words, identifiers);
   }
 }
 
-/** 函数**自身**（不下潜内层函数）return 出的词 + 读到的账本事实字段。 */
+const EQUALITY_OPERATORS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.EqualsEqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsEqualsToken,
+  ts.SyntaxKind.EqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsToken,
+]);
+
+/** 同函数内 `identifier === 'literal'` / `'literal' !== identifier` 比较到的字面量（窄化证据）。 */
+function comparedLiteralsByIdentifier(body: ts.Node): Map<string, Set<string>> {
+  const compared = new Map<string, Set<string>>();
+  const add = (identifier: string, literal: string): void => {
+    let set = compared.get(identifier);
+    if (set === undefined) {
+      set = new Set();
+      compared.set(identifier, set);
+    }
+    set.add(literal);
+  };
+  const walk = (node: ts.Node): void => {
+    if (ts.isBinaryExpression(node) && EQUALITY_OPERATORS.has(node.operatorToken.kind)) {
+      const left = node.left;
+      const right = node.right;
+      if (ts.isIdentifier(left) && ts.isStringLiteral(right)) add(left.text, right.text);
+      else if (ts.isStringLiteral(left) && ts.isIdentifier(right)) add(right.text, left.text);
+    }
+    ts.forEachChild(node, (child) => { if (!isFunctionLike(child)) walk(child); });
+  };
+  walk(body);
+  return compared;
+}
+
+/**
+ * 函数**自身**（不下潜内层函数）return 出的可能取值 + 读到的账本事实字段。
+ * 返回词集合 = 直接返回的字面量 ∪ 被返回的标识符在同函数内比较到的字面量（窄化取值）。
+ */
 function ownReturnedWordsAndFactReads(fn: ts.Node): { words: Set<string>; facts: Set<string> } {
   const words = new Set<string>();
   const facts = new Set<string>();
+  const identifiers = new Set<string>();
   const walk = (node: ts.Node): void => {
-    if (ts.isReturnStatement(node) && node.expression !== undefined) collectReturnedLiterals(node.expression, words);
+    if (ts.isReturnStatement(node) && node.expression !== undefined) {
+      collectReturnedValues(node.expression, words, identifiers);
+    }
     if (ts.isPropertyAccessExpression(node) && LEDGER_FACT_NAMES.has(node.name.text)) facts.add(node.name.text);
     if (ts.isPropertyAssignment(node) && LEDGER_FACT_NAMES.has(node.name.getText())) facts.add(node.name.getText());
     ts.forEachChild(node, (child) => { if (!isFunctionLike(child)) walk(child); });
   };
   const body = (fn as { body?: ts.Node }).body;
-  if (body !== undefined) walk(body);
+  if (body !== undefined) {
+    walk(body);
+    const compared = comparedLiteralsByIdentifier(body);
+    for (const identifier of identifiers) {
+      for (const literal of compared.get(identifier) ?? []) words.add(literal);
+    }
+  }
   return { words, facts };
 }
 
@@ -389,10 +464,21 @@ export function findForbiddenVerdictProjections(sources: ReadonlyMap<string, str
       if (isFunctionLike(node)) {
         const name = functionName(node);
         const { words, facts } = ownReturnedWordsAndFactReads(node);
-        // ① 回合事实 → 结局词（success/refused/not_permitted）。执行行 status 直传不读账本事实。
-        const roundWords = [...words].filter((word) => ROUND_VERDICT_WORDS.has(word));
-        if (roundWords.length >= 1 && facts.size >= 1) {
-          hits.push({ file, hit: `round:${name ?? '<anonymous>'}(${roundWords.sort().join(',')})` });
+        // ① 回合级结局投影的**形状**（与函数名/字段名无关）：函数 return 出的可能取值在「执行状态
+        //    词全集」里的那部分，若**整体落在结局词族内**（≥2 个词、含一个回合独有词）——就是
+        //    「账本事实/执行行 → 回合级结局词」的投影。混入 needs_input 等执行行原词 = 事实透传，
+        //    不判（合法适配器/单行归一化）。
+        const statusWords = [...words].filter((word) => STATUS_UNIVERSE_WORDS.has(word));
+        const verdictShape = statusWords.length >= 2
+          && statusWords.every((word) => VERDICT_FAMILY_WORDS.has(word))
+          && statusWords.some((word) => ROUND_SPECIFIC_WORDS.has(word));
+        if (verdictShape) {
+          hits.push({ file, hit: `round:${name ?? '<anonymous>'}(${statusWords.sort().join(',')})` });
+        }
+        // ①' 补充：读账本事实字段且 return 出回合独有词（单支也算）——旧形状的窄分支。
+        const roundOnly = [...words].filter((word) => ROUND_VERDICT_WORDS.has(word));
+        if (!verdictShape && roundOnly.length >= 1 && facts.size >= 1) {
+          hits.push({ file, hit: `round:${name ?? '<anonymous>'}(${roundOnly.sort().join(',')})` });
         }
         // ② 答复五态分类器：≥2 个五态词且含 partial/unsupported/blocked。
         const answerWords = [...words].filter((word) => ANSWER_OUTCOME_WORDS.has(word));
@@ -421,10 +507,158 @@ function productSources(): Map<string, string> {
   return sources;
 }
 
+// ---------------------------------------------------------------------------
+// 类型结构判据（与字段名/函数名无关）：回合收尾对象 {kind:'ended'} 的任何字段，其类型若是
+// 「结局词并集」（success/failed/refused/not_permitted 的 ≥2 元并集，含至少一个回合独有词），
+// 就是被删的回合级 outcome 投影换了字段名——报红。TaskExecutionOutcome.ended 的成员同样检查，
+// 防止「只删消费点、留下空字段」。
+// ---------------------------------------------------------------------------
+
+interface VerdictProgram {
+  program: ts.Program;
+  checker: ts.TypeChecker;
+  /** 只扫描这些根文件（其 import 图可解析类型，但只有根文件的 return 参与判定）。 */
+  fileNames: ReadonlySet<string>;
+}
+
+/** 产品面类型扫描根：回合收尾对象的三个产地（runner 类型 + 两个装配面）。 */
+const VERDICT_PROGRAM_ROOTS = [
+  'packages/agent/src/task-runner.ts',
+  'packages/agent/src/execution-runtime.ts',
+  'scripts/ask-runtime.ts',
+] as const;
+
+function compilerOptions(): ts.CompilerOptions {
+  const config = ts.readConfigFile(path.join(ROOT, 'tsconfig.json'), ts.sys.readFile);
+  if (config.error !== undefined) throw new Error('读取 tsconfig.json 失败');
+  return ts.parseJsonConfigFileContent(config.config, ts.sys, ROOT).options;
+}
+
+/** 建编译器 program；overlay 用于反向绊线：用内存源码替换指定文件。 */
+function buildVerdictProgram(
+  rootFiles: readonly string[],
+  overlay: ReadonlyMap<string, string> = new Map(),
+): VerdictProgram {
+  const options = compilerOptions();
+  const host = ts.createCompilerHost(options);
+  const overlayByPath = new Map([...overlay].map(([file, text]) => [path.resolve(file), text]));
+  const originalGetSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (fileName, languageVersion, onError, shouldCreate) => {
+    const text = overlayByPath.get(path.resolve(fileName));
+    return text === undefined
+      ? originalGetSourceFile(fileName, languageVersion, onError, shouldCreate)
+      : ts.createSourceFile(fileName, text, languageVersion, true, ts.ScriptKind.TS);
+  };
+  const originalReadFile = host.readFile.bind(host);
+  host.readFile = (fileName) => overlayByPath.get(path.resolve(fileName)) ?? originalReadFile(fileName);
+  const originalFileExists = host.fileExists.bind(host);
+  host.fileExists = (fileName) => overlayByPath.has(path.resolve(fileName)) || originalFileExists(fileName);
+  const roots = rootFiles.map((file) => path.resolve(file));
+  const program = ts.createProgram(roots, options, host);
+  return { program, checker: program.getTypeChecker(), fileNames: new Set(roots) };
+}
+
+let productVerdictProgram: VerdictProgram | undefined;
+
+function buildProductVerdictProgram(): VerdictProgram {
+  productVerdictProgram ??= buildVerdictProgram(VERDICT_PROGRAM_ROOTS.map((file) => path.join(ROOT, file)));
+  return productVerdictProgram;
+}
+
+function buildVerdictProgramFromSources(sources: ReadonlyMap<string, string>): VerdictProgram {
+  return buildVerdictProgram([...sources.keys()], sources);
+}
+
+/**
+ * 类型的「结局词并集」读取：仅当类型是 ≥2 个字符串字面量的并集、全部落在 VERDICT_FAMILY_WORDS
+ * 内、且至少含一个回合独有词（success/refused/not_permitted）时返回成员词；否则 undefined。
+ * undefined/null/never/void 成员忽略（可选字段不改变判定）。
+ */
+function verdictUnionWords(type: ts.Type): string[] | undefined {
+  if (!type.isUnion()) return undefined;
+  const words: string[] = [];
+  for (const member of type.types) {
+    if ((member.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null | ts.TypeFlags.Never | ts.TypeFlags.Void)) !== 0) continue;
+    if (!member.isStringLiteral()) return undefined;
+    words.push(member.value);
+  }
+  if (words.length < 2) return undefined;
+  if (!words.every((word) => VERDICT_FAMILY_WORDS.has(word))) return undefined;
+  if (!words.some((word) => ROUND_SPECIFIC_WORDS.has(word))) return undefined;
+  return words;
+}
+
+/** {kind:'ended'} 对象字面量的 return 中，字段类型是结局词并集的字段名（与字段名无关）。 */
+function findEndedVerdictReturns(scope: VerdictProgram): Array<{ file: string; hit: string }> {
+  const hits: Array<{ file: string; hit: string }> = [];
+  for (const sourceFile of scope.program.getSourceFiles()) {
+    if (!scope.fileNames.has(path.resolve(sourceFile.fileName))) continue;
+    const visit = (node: ts.Node): void => {
+      if (ts.isReturnStatement(node) && node.expression !== undefined && isEndedObjectLiteral(node.expression, scope.checker)) {
+        const type = scope.checker.getTypeAtLocation(node.expression);
+        if ((type.flags & ts.TypeFlags.Object) !== 0) {
+          for (const property of scope.checker.getPropertiesOfType(type)) {
+            const words = verdictUnionWords(scope.checker.getTypeOfSymbol(property));
+            if (words !== undefined) {
+              const line = sourceFile.getLineAndCharacterOfPosition(node.getStart()).line + 1;
+              hits.push({ file: path.relative(ROOT, sourceFile.fileName), hit: `ended-field:${property.name}(${words.sort().join(',')})@${line}` });
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    ts.forEachChild(sourceFile, visit);
+  }
+  return hits;
+}
+
+/** 对象字面量是否带 `kind: 'ended'`（回合收尾形状）。 */
+function isEndedObjectLiteral(node: ts.Expression, checker: ts.TypeChecker): boolean {
+  if (!ts.isObjectLiteralExpression(node)) return false;
+  const kind = node.properties.find((property): property is ts.PropertyAssignment => (
+    ts.isPropertyAssignment(property) && ts.isIdentifier(property.name) && property.name.text === 'kind'
+  ));
+  if (kind === undefined) return false;
+  const type = checker.getTypeAtLocation(kind.initializer);
+  return type.isStringLiteral() && type.value === 'ended';
+}
+
+/** 取导出类型（按根文件名后缀 + 导出名）；找不到返回 undefined。 */
+function exportedTypeOf(scope: VerdictProgram, fileSuffix: string, typeName: string): ts.Type | undefined {
+  for (const sourceFile of scope.program.getSourceFiles()) {
+    if (!scope.fileNames.has(path.resolve(sourceFile.fileName))) continue;
+    if (!sourceFile.fileName.endsWith(fileSuffix)) continue;
+    const moduleSymbol = scope.checker.getSymbolAtLocation(sourceFile);
+    if (moduleSymbol === undefined) continue;
+    const symbol = scope.checker.getExportsOfModule(moduleSymbol).find((entry) => entry.name === typeName);
+    if (symbol !== undefined) return scope.checker.getDeclaredTypeOfSymbol(symbol);
+  }
+  return undefined;
+}
+
+/** 联合类型里 `kind:'ended'` 成员的字段中，类型是结局词并集的字段名列表。 */
+function endedVerdictFieldKeys(type: ts.Type, checker: ts.TypeChecker): string[] {
+  const members = type.isUnion() ? type.types : [type];
+  for (const member of members) {
+    const kind = checker.getPropertiesOfType(member).find((property) => property.name === 'kind');
+    if (kind === undefined) continue;
+    const kindType = checker.getTypeOfSymbol(kind);
+    if (!kindType.isStringLiteral() || kindType.value !== 'ended') continue;
+    return checker.getPropertiesOfType(member)
+      .filter((property) => verdictUnionWords(checker.getTypeOfSymbol(property)) !== undefined)
+      .map((property) => property.name);
+  }
+  return [];
+}
+
+
 describe('删回合级结局词：宿主/eval 只留事实 + liveness', () => {
   it('⑤ 源码里不再有回合级 outcome 字段/投影（executionOutcome / roundFailureOf 双退役）', () => {
     const sources = productSources();
+    // 形状族（与函数名/字段名无关）：见本文件「类型结构判据」段与 ⑦ 的换名绊线。
     expect(findForbiddenVerdictProjections(sources)).toEqual([]);
+    // 精确名兜底（附加检查，不是形状判据的替代）：被删实现的原名也不得复活。
     const offenders = [...sources]
       .filter(([, text]) => text.includes('executionOutcome') || text.includes('roundFailureOf'))
       .map(([file]) => file);
@@ -479,7 +713,7 @@ describe('删回合级结局词：宿主/eval 只留事实 + liveness', () => {
     ]));
     expect(adapter).toEqual([]);
 
-    // 负例对照二类：只有单支（只 return completed/failed 之一）的事实归一化不得报红。
+    // 负例对照二类：单条执行行的成败归一化（只有 failed/completed 两个原词）不得报红。
     const single = findForbiddenVerdictProjections(new Map([
       ['scripts/eval/x.ts', `
         function rowPassed(execution: { status: string }): string {
@@ -487,5 +721,60 @@ describe('删回合级结局词：宿主/eval 只留事实 + liveness', () => {
         }`],
     ]));
     expect(single).toEqual([]);
+
+    // ③ 换名搬移（复核探针）：被删 roundFailureOf 的等价重写——局部数组里读 entry.outcome.status，
+    //    return { verdict: status }；既没有账本事实字段名，也没有「直接返回位置的字符串字面量」
+    //    （'failed'/'refused' 只出现在比较式里）。按**返回值的形状**必须报红。
+    const renamedVerdict = findForbiddenVerdictProjections(new Map([
+      ['packages/agent/src/execution-runtime.ts', `
+        function lastDecisiveVerdictOf(recorded: Array<{ outcome: { status: 'completed' | 'failed' | 'refused'; error: { code: string } } }>): { verdict: 'failed' | 'refused'; code?: string } | undefined {
+          for (let index = recorded.length - 1; index >= 0; index -= 1) {
+            const entry = recorded[index];
+            if (entry === undefined) continue;
+            const status = entry.outcome.status;
+            if (status === 'completed') return undefined;
+            if (status !== 'failed' && status !== 'refused') continue;
+            const code = entry.outcome.error.code;
+            return { verdict: status, code };
+          }
+          return undefined;
+        }`],
+    ]));
+    expect(renamedVerdict.some((hit) => hit.hit.startsWith('round:'))).toBe(true);
+
+    // 负例对照三类：执行层「原样透传单条执行结果 status」不得报红——返回词集合混入
+    // needs_input 等执行行原词，就不是「任务级结局投影」。
+    const passthrough = findForbiddenVerdictProjections(new Map([
+      ['scripts/eval/x.ts', `
+        function statusOf(outcome: { status?: string } | undefined): string {
+          const status = outcome?.status;
+          if (status === 'completed' || status === 'needs_input' || status === 'failed' || status === 'refused') return status;
+          return 'failed';
+        }`],
+    ]));
+    expect(passthrough).toEqual([]);
+  });
+
+  it('⑧ 类型结构：{kind:"ended"} 回合收尾对象的字段类型不得是结局词并集（与字段名无关）', () => {
+    const product = buildProductVerdictProgram();
+    // 产品面：execution-runtime / ask-runtime 的 {kind:"ended"} 返回 + TaskExecutionOutcome.ended。
+    expect(findEndedVerdictReturns(product)).toEqual([]);
+    const endedType = exportedTypeOf(product, 'packages/agent/src/task-runner.ts', 'TaskExecutionOutcome');
+    expect(endedType).toBeDefined();
+    expect(endedVerdictFieldKeys(endedType!, product.checker)).toEqual([]);
+
+    // 反向绊线：把同一个形状换任意字段名放回，类型扫描必须报红（不认字段名/函数名）。
+    const synthetic = buildVerdictProgramFromSources(new Map([
+      [path.join(ROOT, 'guard-synthetic.ts'), `
+        export type TaskExecutionOutcome = { kind: 'ended'; report?: string; verdict?: 'failed' | 'refused' };
+        export function restoredRoundVerdict(recorded: Array<{ status: 'failed' | 'refused' }>): TaskExecutionOutcome {
+          const status = recorded[0]!.status;
+          return { kind: 'ended', verdict: status };
+        }`],
+    ]));
+    expect(findEndedVerdictReturns(synthetic).some((hit) => hit.hit.includes('verdict'))).toBe(true);
+    const badType = exportedTypeOf(synthetic, 'guard-synthetic.ts', 'TaskExecutionOutcome');
+    expect(badType).toBeDefined();
+    expect(endedVerdictFieldKeys(badType!, synthetic.checker)).toEqual(['verdict']);
   });
 });

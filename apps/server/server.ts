@@ -924,7 +924,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
    * 回合收尾的**原始执行事实**（S1 事实模型 + 2026-11-23 去 outcome）：两个投递回调带到的
    * 机械事实（零执行原因码 / 末次失败执行的原始 error.code / 结果未知种类）记在这里，
    * 仅在「模型说不出话、宿主必须替它说最后一句」的兜底路径上用来选一句既有话术——
-   * 不决定投递面、不聚合成任务级结局词。有界（会话长了不积累；一次性核销后即删）。
+   * 不决定投递面、不聚合成任务级结局词。有界：完成/失败两个回调都在各自会话链**入口核销**
+   * （modelSilent 兜底分支先读走，之后即删），不随失败任务数累积。
    */
   const roundFacts = new Map<string, {
     status?: 'result_unknown';
@@ -1199,6 +1200,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         });
         const sessionKey = `${failure.principalId}\u0000${failure.sessionId}`;
         enqueueSessionTurn(sessionKey, async () => {
+          // 一次性事实：本回合兜底分支（modelSilent 的 pushSuppressed 回收）先跑并读走；
+          // 这里核销，失败任务不会在内存里越积越多（与完成回调同一口径）。
+          roundFacts.delete(failure.taskId);
           // 快活失败：原因本回合已交给模型（模型会转述），不重复唤醒/播报。
           if (claimPushSuppressedInTurn(sessionKey, failure.taskId)) {
             log({

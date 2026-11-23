@@ -103,6 +103,20 @@ function truncatedName(name: string): string {
 }
 
 /**
+ * 回合结束事实的标记常量（**单一来源**）：宿主拼装（{@link taskRoundFactsText}）与
+ * 假模型/夹具按事实选措辞都用这里导出的常量——措辞改动时两边一起改，避免夹具静默漂移。
+ */
+export const ROUND_FACT_PREFIX = '[回合结束]';
+export const ROUND_FACT_REASON_MARKER = '机械原因';
+export const ROUND_FACT_REPORT_MARKER = 'worker 汇报原文（语义，可能说错；做没做成以执行事实为准）：';
+export const ROUND_FACT_NO_REPORT_MARKER = 'worker 这一回合没有汇报原文。';
+export const ROUND_FACT_WATCHDOG_MARKER = '看门狗观察到执行租约过期';
+export const ROUND_FACT_RESOURCE_LIMITED_MARKER = '本次被资源策略拒绝';
+export const ROUND_FACT_NOT_PERMITTED_MARKER = '发起前被宿主拒绝';
+export const ROUND_FACT_NOT_PERMITTED_CLAUSE = '本次不允许';
+export const ROUND_FACT_ZERO_EXEC_MARKER = '账本里没有执行事实';
+
+/**
  * 回合结束**事实**文本（宿主拼，给模型读；用户看到的话由模型写）：宿主**不产出回合级结论**
  * （没有 success/failed/refused/not_permitted 这种词），只把机械事实与 worker 汇报原文交给
  * Main——做没做成由 Main 读执行事实自己判断、自己说：
@@ -142,23 +156,23 @@ export function taskRoundFactsText(input: {
     : cleanExecutorDiagnostic(input.reason).replace(/\s+/gu, ' ').trim().slice(0, FAILURE_REASON_MAX);
   const reasonLine = reason === ''
     ? ''
-    : `机械原因（供你判断，别原样丢给用户）：${reason}。\n`;
+    : `${ROUND_FACT_REASON_MARKER}（供你判断，别原样丢给用户）：${reason}。\n`;
   const marks: string[] = [];
-  if (input.died === true) marks.push('看门狗观察到执行租约过期（结果未知，禁止自动重放）');
-  if (input.resourceLimited === true) marks.push('本次被资源策略拒绝（未进入执行）');
+  if (input.died === true) marks.push(`${ROUND_FACT_WATCHDOG_MARKER}（结果未知，禁止自动重放）`);
+  if (input.resourceLimited === true) marks.push(`${ROUND_FACT_RESOURCE_LIMITED_MARKER}（未进入执行）`);
   const marksLine = marks.length === 0 ? '' : `机械事实：${marks.join('；')}。\n`;
   const report = input.report?.trim();
   const reportLine = report === undefined || report === ''
-    ? 'worker 这一回合没有汇报原文。\n'
-    : `worker 汇报原文（语义，可能说错；做没做成以执行事实为准）：${report}\n`;
+    ? `${ROUND_FACT_NO_REPORT_MARKER}\n`
+    : `${ROUND_FACT_REPORT_MARKER}${report}\n`;
   const ledgerLines = (input.ledger ?? []).slice(0, FAILURE_LEDGER_MAX_LINES);
   const ledger = ledgerLines.length === 0
     ? ''
     : `账本事实（逐笔，供你判断做没做成）：\n${ledgerLines.map((line) => `  ${line}`).join('\n')}\n`;
   const notPermitted = input.notPermitted === true
-    ? '账本里没有执行事实：这次交办在发起前被宿主拒绝（本次不允许，不是没有这件事）。\n'
+    ? `${ROUND_FACT_ZERO_EXEC_MARKER}：这次交办在${ROUND_FACT_NOT_PERMITTED_MARKER}（${ROUND_FACT_NOT_PERMITTED_CLAUSE}，不是没有这件事）。\n`
     : '';
-  return `[回合结束]${subject}这一回合停了。\n`
+  return `${ROUND_FACT_PREFIX}${subject}这一回合停了。\n`
     + `${marksLine}${reasonLine}${reportLine}${notPermitted}${ledger}`
     + '请判断做没做成（以账本执行事实为准；worker 汇报只是它说的话），如实告诉用户，并给他一个能做的下一步。';
 }

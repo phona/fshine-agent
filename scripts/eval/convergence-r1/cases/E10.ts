@@ -23,10 +23,10 @@ export const E10: UserCase = {
     //    refused=collection-restricted，T1 execution=refused + error.code=GATE_REFUSE；这些机械事实
     //    已由本用例的 expectedT1Status='refused' + expectedErrorCode='GATE_REFUSE' 机械钉死（judge.ts
     //    的 T1 状态/错误码核对分支）。
-    // ② 宿主 classifyOutcome 对「有执行且末条 refused」给 `failed`（不是 blocked/unsupported）；
-    //    `failed` 同时覆盖系统故障（E09 COLLECTION_FAULT）——机械 outcome 无法区分「权限拒绝」与
-    //    「集合故障」。实测：classifyOutcome({executions:[{status:'refused',error:{code:'GATE_REFUSE'}}],
-    //    terminal:'failed'}) === 'failed'。换成 outcome∈{failed} 只比现有判据更弱（模糊回复也放行）。
+    // ② 宿主已不聚合任务级 outcome（2026-11-23 删回合级结局词）：只在「模型说不出话」的
+    //    兜底路径按原始 error.code 归类（GATE_REFUSE → denied）；做没做成由 Main 读逐条执行事实。
+    //    因此没有可替代本锚点的「任务级结局词」判据——回到执行行 status 只能判「末条是 refused」，
+    //    判不了「回复是否如实转述了拒绝」。
     // ③ 本锚点是唯一"回复是否如实转述了权限拒绝"的交付检查（B 类如实交付），没有结构化事实承载
     //    「回复已告知用户被拒」——那属回复文本/LLM Judge 面，本轮判据无 judge 面。
     // 结论：机械事实已覆盖执行面，回复转述面暂无机械替代；保留此词表并登记为「回复转述待机械替代」，

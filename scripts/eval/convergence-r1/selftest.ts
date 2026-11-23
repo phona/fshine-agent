@@ -335,8 +335,8 @@ export function runJudgeSelftest(outDir: string): number {
     executions: [],
   }, (judgment) => judgment.deterministic.verdict === 'PASS');
 
-  // 正例：产生了任务、但零执行 → classifyOutcome=unsupported → 接受集命中 → PASS。
-  runPack('e11-mech-outcome-unsupported', 'E11', 'PASS（底账 outcome=unsupported）', {
+  // 正例：产生了任务、但零执行 → noWriteExecuted（零执行承接，无权限拒绝事实）→ PASS。
+  runPack('e11-mech-outcome-unsupported', 'E11', 'PASS（零执行 + 非权限拒绝，noWriteExecuted 承接）', {
     caseId: 'E11',
     reply: '这件事我这边办不了。',
     taskIds: ['task_selftest_e11_unsupported'],

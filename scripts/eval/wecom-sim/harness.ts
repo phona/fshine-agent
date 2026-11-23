@@ -48,6 +48,17 @@ import { createScriptedModelRuntime } from '../../../packages/agent/testing/scri
 import { startChannelForMode } from '../../../apps/server/channel-mode';
 import { createServer, type FileDeliveryPort, type Server } from '../../../apps/server/server';
 import type { NudgeClock } from '../../../apps/server/attachment-nudge';
+import {
+  ROUND_FACT_PREFIX,
+  ROUND_FACT_REASON_MARKER,
+  ROUND_FACT_REPORT_MARKER,
+  ROUND_FACT_NO_REPORT_MARKER,
+  ROUND_FACT_WATCHDOG_MARKER,
+  ROUND_FACT_RESOURCE_LIMITED_MARKER,
+  ROUND_FACT_NOT_PERMITTED_MARKER,
+  ROUND_FACT_NOT_PERMITTED_CLAUSE,
+  ROUND_FACT_ZERO_EXEC_MARKER,
+} from '../../../apps/server/task-completion-delivery';
 import { textAssistant, toolCallAssistant } from '../business-e2e/shared-instance';
 
 /** 夹具复用的仓内 dummy 执行层根（与 apps/server 测试同一份真值来源）。 */
@@ -420,16 +431,15 @@ function lastUserTextOf(messages: readonly unknown[]): string {
 }
 
 /**
- * 回合结束事实前缀与 worker 汇报段标记（与 apps/server/task-completion-delivery.ts 的
- * taskRoundFactsText 拼装同源；2026-11-23 去 outcome：完成/失败不再分两种事实前缀，
- * 宿主只喂账本事实 + worker 汇报原文，成败由模型按事实自己判）。
+ * 回合结束事实前缀与各段标记（**与宿主拼装同源**：直接复用 apps/server/task-completion-delivery.ts
+ * 导出的常量，措辞改动时夹具自动跟随，不再静默漂移）。
  */
-export const ROUND_FACT_PREFIX = '[回合结束]';
+export { ROUND_FACT_PREFIX };
 /** 兼容别名（旧用例 import 名；两个面已统一成同一条回合结束事实）。 */
 export const COMPLETION_FACT_PREFIX = ROUND_FACT_PREFIX;
 export const FAILURE_FACT_PREFIX = ROUND_FACT_PREFIX;
-const REPORT_MARKER = 'worker 汇报原文（语义，可能说错；做没做成以执行事实为准）：';
-const NO_REPORT_MARKER = 'worker 这一回合没有汇报原文。';
+const REPORT_MARKER = ROUND_FACT_REPORT_MARKER;
+const NO_REPORT_MARKER = ROUND_FACT_NO_REPORT_MARKER;
 
 /** 从回合结束事实里取 worker 汇报原文（到行尾）；没有汇报/形状不符返回 undefined。 */
 export function completionResultBodyOf(factText: string): string | undefined {
@@ -477,10 +487,10 @@ export function failureWakeLine(name?: string): string {
 export function outcomeWakeLine(factText: string): string | undefined {
   const name = factSubjectOf(factText);
   const subject = lineSubjectOf(name);
-  if (factText.includes('发起前被宿主拒绝') || factText.includes('本次不允许')) {
+  if (factText.includes(ROUND_FACT_NOT_PERMITTED_MARKER) || factText.includes(ROUND_FACT_NOT_PERMITTED_CLAUSE)) {
     return `${subject}这次没办成，缺的是本次允许范围。补上这个条件我就能继续办。`;
   }
-  if (factText.includes('账本里没有执行事实')) {
+  if (factText.includes(ROUND_FACT_ZERO_EXEC_MARKER)) {
     return `${subject}这件事我这边办不了。我能办的是：记录办理、长时导出。没有可办的动作。`;
   }
   return undefined;
@@ -506,11 +516,11 @@ export function simWakeLine(factText: string): string {
     // 回合结束事实：假模型按**原始事实**自己判（产品新模型：成败由 Main 判、话由 Main 说）——
     // 机械原因 / 结果未知 / 资源拒绝 / 发起前被拒 / 账本零执行 → 说清没办成；
     // 否则按 worker 汇报原文转述。
-    const failedFact = factText.includes('机械原因')
-      || factText.includes('看门狗观察到执行租约过期')
-      || factText.includes('本次被资源策略拒绝')
-      || factText.includes('发起前被宿主拒绝')
-      || factText.includes('账本里没有执行事实')
+    const failedFact = factText.includes(ROUND_FACT_REASON_MARKER)
+      || factText.includes(ROUND_FACT_WATCHDOG_MARKER)
+      || factText.includes(ROUND_FACT_RESOURCE_LIMITED_MARKER)
+      || factText.includes(ROUND_FACT_NOT_PERMITTED_MARKER)
+      || factText.includes(ROUND_FACT_ZERO_EXEC_MARKER)
       || factText.includes(NO_REPORT_MARKER);
     if (failedFact) return outcomeWakeLine(factText) ?? failureWakeLine(name);
     const report = completionResultBodyOf(factText);
