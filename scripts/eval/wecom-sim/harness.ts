@@ -686,7 +686,7 @@ export interface WecomSimFixture {
   readonly book: SimScriptBook;
   /** dummy 执行层状态根（audit.jsonl 所在；写面零写入的机械读数）。 */
   readonly execStateDir: string;
-  /** 宿主底账（state.db；只读打开用于任务状态机械读数）。 */
+  /** 宿主底账（state.db；只读打开用于任务事实机械读数）。 */
   readonly dbPath: string;
   /** 单聊会话（conversationId；群聊另行传入）。 */
   readonly conversationId: string;

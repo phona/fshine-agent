@@ -54,7 +54,7 @@
 | 用户说停：唤醒模型说（不再由宿主渲染「已按你说的停了」）；模型说不出话才投渲染文案 | `apps/server/server-state-wake.test.ts:② 取消 → 唤醒模型说`<br>`apps/server/server-state-wake.test.ts:②b 走岔路`<br>`apps/server/notification-chat-sink.test.ts:① user_stop 不再由本 sink 渲染直发` | 宿主机制 | 已覆盖 | — |
 | 重启对账：启动时「用户以为在办、租约已过期」的任务如实写结束事实（结果未知）→ 唤醒原会话说清；不重放 | `apps/server/server-state-wake.test.ts:④ 启动时租约已过期`<br>`apps/server/server-state-wake.test.ts:④b 走岔路：模型说不出话`<br>`apps/server/server-state-wake.test.ts:④c 非 live 部署不唤醒` | 宿主机制 | 已覆盖 | — |
 | 快活失败 + 模型沉默：兜底判据只看模型沉默（**与有没有文件无关**），失败话术照样送达（审计 #8） | `apps/server/server-relay-silent-turn.test.ts:③c 快活失败 + 沉默` | 宿主机制 | 已覆盖 | — |
-| 等补信息：主动说清还缺什么，补答后同一任务续跑完成 | `apps/server/server-notification-push.test.ts:② 后台任务等你说一句话`<br>`scripts/needs-input-resume.test.ts:① 执行层要补输入`<br>`scripts/needs-input-resume.test.ts:② 用户补答 → 同一 taskId/taskNo 续跑到 completed`<br>`scripts/eval/smoke/slow-faults.test.ts:缺参 → waiting_user 且问题可见` | 宿主机制 + 执行层 | 已覆盖 | — |
+| 等补信息：主动说清还缺什么，补答后同一任务续跑完成 | `apps/server/server-notification-push.test.ts:② 后台任务等你说一句话`<br>`scripts/needs-input-resume.test.ts:① 执行层要补输入`<br>`scripts/needs-input-resume.test.ts:② 用户补答 → 同一 taskId/taskNo 续跑到有汇报`<br>`scripts/eval/smoke/slow-faults.test.ts:缺参 → waiting_user 且问题可见` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 不补答：停在 waiting_user、绝不重复执行 | `scripts/needs-input-resume.test.ts:③ 用户不补答`<br>`scripts/eval/smoke/slow-faults.test.ts:不补答：停在 waiting_user` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 取消在跑任务：进程内（在飞 run_js / 执行层调用中止）；请求 ≠ 已取消 | `packages/agent/task-cancel-inflight.test.ts:① 在飞 run_js`<br>`scripts/r4-integ-joint.test.ts:⑥ 取消请求不被报成已取消` | 宿主机制 | 已覆盖 | — |
 | 取消已完成任务：如实拒绝、不把 completed 改成 cancelled | `packages/agent/task-cancel-inflight.test.ts:③ 已完成任务再取消`<br>`scripts/eval/business-e2e/experiments/experiments.test.ts:T01：task_run/task_status/task_result/task_cancel 各发生一次` | 宿主机制 | 已覆盖 | — |
@@ -68,7 +68,7 @@
 | 场景 | 自动用例 | 层级 | 覆盖度 | 缺口说明 |
 | --- | --- | --- | --- | --- |
 | 长任务受理：交办回合照发模型的话、后台挂起不占会话、完成后主动投递一次 | `scripts/eval/wecom-sim/cases-h-newcap.test.ts:W-42 长任务`<br>`scripts/long-task-assembly.test.ts:accepted → 任务仍在推进且槽位/租约释放` | 宿主机制 + 执行层 | 已覆盖 | — |
-| accepted 后续跑 / abort 取消 / 停不下来如实回 running | `packages/agent/long-task-async.test.ts:① accepted → 回合结束、槽位释放`<br>`packages/agent/long-task-async.test.ts:③ abort → 任务写结束事实` | 宿主机制 | 已覆盖 | — |
+| accepted 后续跑 / abort 取消 / 停不下来如实说仍在推进（不编造已停） | `packages/agent/long-task-async.test.ts:① accepted → 回合结束、槽位释放`<br>`packages/agent/long-task-async.test.ts:③ abort → 任务写结束事实` | 宿主机制 | 已覆盖 | — |
 | 长任务跨重启：新 runner 从底账 accepted 行重新 wait 续跑、不重复发起 | `packages/agent/long-task-async.test.ts:④ 重启：关库重开，新 runner 从底账 accepted 行重新 wait` | 宿主机制 | 已覆盖 | — |
 | 未声明 long_running 却返回 accepted → fail-closed | `packages/agent/long-task-async.test.ts:⑤ 未声明 long_running 的 operation 返回 accepted` | 宿主机制 | 已覆盖 | — |
 | 预期式提醒：超阈值恰一条、长任务也要提醒、群聊覆盖（#9） | `scripts/eval/wecom-sim/cases-h-newcap.test.ts:W-43 预期式提醒`<br>`apps/server/server-long-running-notice.test.ts:① 1:1 会话：任务超阈值无事件`<br>`apps/server/server-long-running-notice.test.ts:② 群聊也发` | 宿主机制 + 执行层 | 已覆盖 | — |

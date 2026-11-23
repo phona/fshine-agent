@@ -280,7 +280,7 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
     }
   });
 
-  it('② 用户补答 → 同一 taskId/taskNo 续跑到 completed；底账两条执行事实、不新建任务', async () => {
+  it('② 用户补答 → 同一 taskId/taskNo 续跑到有汇报；底账两条执行事实、不新建任务', async () => {
     const fixture = await makeFixture();
     try {
       const { taskId, taskNo } = await delegateFirstTurn(fixture);
