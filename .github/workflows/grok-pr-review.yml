@@ -27,9 +27,9 @@ jobs:
   grok-pr-review:
     name: grok-pr-review
     runs-on: ubuntu-latest
-    # agentic 审查：单次 grok 调用，按需读取已 checkout 的工作树。90 分钟给大 PR
-    # 逐文件读取留余量（不再是按块串行累加）。
-    timeout-minutes: 90
+    # agentic 审查：单次 grok 调用，按需读取已 checkout 的工作树。turn 上限放大到
+    # 200 后，179 文件逐文件读 + 思考需要更久，给 150 分钟余量。
+    timeout-minutes: 150
     steps:
       - name: Reject fork pull requests
         id: guard
@@ -216,6 +216,7 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           GROK_MODEL: ${{ vars.GROK_MODEL }}
           GROK_EFFORT: ${{ vars.GROK_EFFORT }}
+          GROK_MAX_TURNS: ${{ vars.GROK_MAX_TURNS }}
         run: |
           set -euo pipefail
           # agentic 审查：prompt 只给「审查要求 + 改动文件清单 + 每个文件的 stat」，
@@ -230,6 +231,10 @@ jobs:
           # --output-format plain 的 stdout 仍是 JSON 信封
           # { text, structuredOutput, usage, ... }，审查对象在 structuredOutput
           # 里，由 extract-review.mjs 抽出来；不要直接拿 stdout 当审查 JSON。
+          # --max-turns：agentic 审查按需读文件，每读一个文件耗一个 turn，默认上限
+          # （~12）连大 PR 的文件清单都读不完就被 cancel（2026-11-23 179 文件撞 12
+          # turn 实测）。放大到 200，给按需探索留足轮次；可用仓库变量 GROK_MAX_TURNS
+          # 覆盖。
           cmd=(
             grok
             --prompt-file "$RUNNER_TEMP/grok-prompt.md"
@@ -237,6 +242,7 @@ jobs:
             --output-format plain
             --permission-mode default
             --cwd "$GITHUB_WORKSPACE"
+            --max-turns "${GROK_MAX_TURNS:-200}"
           )
           if [ -n "${GROK_MODEL:-}" ]; then
             cmd+=(-m "$GROK_MODEL")
@@ -267,6 +273,11 @@ jobs:
               break
             fi
             if [ "$attempt" -ge 2 ]; then
+              # 把 grok 真实报错亮出来（认证失效/网络/schema/未知 flag 一眼可辨），
+              # 别再只报 "text missing"（2026-11-23 认证失效那次就是被这行吞了报错，
+              # 害得要靠本地复现才定位到）。
+              echo "--- grok stderr (last 40 lines) ---" >&2
+              tail -n 40 "$RUNNER_TEMP/grok-stderr.txt" >&2 || true
               exit 1
             fi
             attempt=$((attempt + 1))
