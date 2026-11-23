@@ -89,7 +89,7 @@ detail，不当违约。写有没有重复由 C5（成功恰好一次）+ C6（�
 一次运行 stdout 三段，末尾落 `.runtime/real-write-loop/<时间戳>/evidence.json`（gitignored，
 不含密钥；路径经脱敏替换为 `<repo>`/`<run>`/`<state>`/`<fixture>`）：
 
-- `[任务底账]`：会话内任务数与终局（每个任务的执行事实序列，保序）；
+- `[任务底账]`：会话内任务数与停下事实（每个任务的执行事实序列，保序）；
 - `[工具调用]`：Main/Worker 每次工具调用（工具名、参数摘要、结果摘要、耗时）——
   记录包装器（`recordingDriver`）透传不改语义，与 convergence-r1 同一形状；
 - `[执行层收到的请求]`：执行层自己的 `audit.jsonl` 逐行（mode/script/via/exitCode/refused/args）；

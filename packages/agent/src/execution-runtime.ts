@@ -1067,9 +1067,9 @@ export interface TurnResult {
    */
   pushSuppressedTaskIds?: readonly string[];
   /**
-   * 缺陷 A（2026-11-21 live）：本回合等待窗口**观察到落定**的任务终态（taskId + 终态类型）。
-   * 装配层对它们做一次性唤醒抑制：回合最终回复非空 = 这件事模型已说给用户 → 对应的状态
-   * 变化唤醒（completed/failed/cancelled）不再发送，记 `wake_suppressed_already_delivered`；
+   * 缺陷 A（2026-11-21 live）：本回合等待窗口**观察到落定**的回合并发出唤醒（taskId + wake 出口名）。
+   * 装配层对它们做一次性唤醒抑制：回合最终回复非空 = 这件事模型已说给用户 → 对应的唤醒
+   * （`task_cancel_wake` / `task_completion_wake`）不再发送，记 `wake_suppressed_already_delivered`；
    * 回复为空不抑制（不静默）。观察面只来自本回合的等待窗口——回合外落定不进列（照常唤醒）。
    */
   terminalObservedInTurn?: readonly TurnTerminalObservation[];
@@ -2072,8 +2072,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
    * 事实现推：
    *   · started/reported/waiting/liveWorker：布尔事实（启动 / 有汇报存档 / 有提问 / 本进程
    *     有活 worker）；endedAt 是「这一轮停下」的机械时刻（没有种类）；
-   *   · claimed/resulted：dispatchKey 幂等账计数（claimed = 已认领未落定；resulted = 已落定；
-   *     accepted 行计入 claimed——在等回执）；claimed>resulted = 还有结果没回来；
+   *   · claimed/resulted：执行行计数（claimed = 执行行总数，含已落定；resulted = 已落定，
+   *     status≠accepted）；claimed-resulted = 在途 accepted 数（在等回执）；
    *   · replyText：Main 最终回复存档。
    * 做成/没做成的事实 = executions（逐笔执行行）+ resultText（worker 汇报），经 task_result
    * 读取；本投影不重复它们，也不做任何业务归类。
@@ -2184,7 +2184,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     // 缺陷 A：取消在本回合内落定的观察。未启动/等待中的取消由 runner 同步机械确认
     // （outcome=cancelled）；在跑的取消（requested）只在**有在飞回合**时等窗口——竞态
     // 兜底先看一眼底账（请求与回合收尾几乎同时落定时 inFlight 已清、事实已落）。
-    // 已结束任务（runner 回 terminal）也读终止事件：回执按真实种类说，不套「已经办完了」。
+    // 已结束任务（runner 回 terminal）也读结束事实：回执按真实事实说，不套「已经办完了」。
     let observed: TurnTerminalWake | undefined;
     let settled: 'reported' | 'ended' | undefined;
     if (outcome.outcome === 'cancelled') {
@@ -3150,7 +3150,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const relayedTaskIds: string[] = [];
       // 主动推送抑制（快活失败/等补充）：这些任务的失败原因本回合已交给模型，推送不重复发。
       const pushSuppressedTaskIds: string[] = [];
-      // 缺陷 A：本回合等待窗口观察到的任务终态（task_cancel 落定窗口等）——装配层据此做
+      // 缺陷 A：本回合等待窗口观察到的落定（task_cancel 落定窗口等）——装配层据此做
       // 一次性唤醒抑制（回合回复非空 = 事实已说给用户）。回合外落定不进列（照常唤醒）。
       const terminalObserved: TurnTerminalObservation[] = [];
       // CAP-01 S1：本回合产出文件（run_js 交付箱登记事实；回合末进 TurnResult.files）。
@@ -3403,7 +3403,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
 
   /**
    * 冷唤醒（2026-11-19 唤醒切片）：驱动**可**唤醒但实例级会话还没建（进程刚起、或会话被
-   * 丢弃）——「重启对账」正是这个形状（用户以为在办的任务在启动时被如实落 result_unknown，
+   * 丢弃）——「重启对账」正是这个形状（用户以为在办的任务在启动时被如实写结束事实（结果未知），
    * 而本进程还没有任何回合）。这里按与 `send()` 同一份装配参数跑**一次零工具单回合**：
    *   · 系统提示 = 本会话 Main 提示；工具 = **空**（唤醒回合不得碰执行层，与驱动侧 wake
    *     同一条纪律——F1）；
@@ -4021,7 +4021,7 @@ function pendingQuestionView(question: PendingQuestion): Record<string, unknown>
  *       承接；files = Worker 产出的任务作用域交付物，装配方按它投递）。
  *
  * 写确认边界（S1 起）：后台单回合执行器把 needs_confirmation 识别为 needs_confirmation 结局
- * （不是 failed），句柄/摘要随 runner 落 waiting_user 底账（复用既有等待形状，不新状态）；
+ * （不是 failed）；句柄/摘要随 runner 写等待形状底账（pendingQuestion；复用既有等待形状，不新状态）；
  * 回给 Worker 的工具结果与前台同一套脱敏投影（toModelVisibleOutcome），Worker 永远看不到
  * 句柄。**句柄只经确认路径透传**（2026-11-19 显式确认切片）：只有 `runner.confirm()`（用户
  * 明确确认）会把底账提案注入本执行器；`runner.resume()`（改口径/补信息）不带句柄。
@@ -4439,7 +4439,7 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
             ...(task.answer === undefined ? {} : { answer: task.answer }),
             // 句柄过期（owner 2026-11-19）：不带旧句柄，改为机械事实让 Worker 重新生成同一提案。
             ...(confirmationExpired ? { confirmationExpiredFact: renderConfirmationExpiredFact() } : {}),
-            // 长任务续跑：wait 终态（已登记文件只有 fileId）原样注入本次委派。
+            // 长任务续跑：wait 的落定结果（已登记文件只有 fileId）原样注入本次委派。
             ...(resumedOperation === undefined || resumedOutcome === undefined
               ? {}
               : {

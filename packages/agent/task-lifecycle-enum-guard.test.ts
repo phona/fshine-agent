@@ -496,6 +496,19 @@ const FORBIDDEN_DOC_PATTERNS: readonly RegExp[] = [
   new RegExp(`底账状态[^。；\\n]{0,12}[\\u0060'"*]*(?:${TASK_STATE_WORDS})`, 'iu'),
   new RegExp(`任务\\s*[\\u0060'"*]*(?:${TASK_STATE_WORDS})`, 'iu'),
   new RegExp(`任务[^。；\\n]{0,12}(?:保持|仍|依旧|处于|落|进入|回|最终|真的|被判|收尾|终局|终态)[^。；\\n]{0,12}[\\u0060'"*]*(?:${TASK_STATE_WORDS})`, 'iu'),
+  // 任务级「终态/终局」措辞（2026-11-23 第 3 轮审查的真实形状）。
+  /(?:任务|后台|底账)[^。；\n]{0,8}(?:终态|终局)/u,
+  new RegExp(`(?:终态|终局)\\s*(?:[=＝:：]\\s*)?[\\u0060'"*]*(?:${TASK_STATE_WORDS})`, 'iu'),
+  /终态类型/u,
+  // 「落/进入/处于 + 终态/终局」与「落/回/进入/处于 + 任务级状态词」
+  // （落终态、回 running、落终局 completed、底账落 result_unknown；「取回终态」这类执行层措辞不判）。
+  new RegExp(`(?:落|进入|处于|收尾为?)\\s*[\\u0060'"*]*(?:终态|终局)`, 'iu'),
+  new RegExp(`(?:落|回|进入|处于)\\s*[\\u0060'"*]*(?:result_unknown|unexecuted|running|waiting_user|cancelled|timed_out|died|resource_limited|round_failed)`, 'iu'),
+  // 把 task 当状态机的措辞。
+  /状态(?:唯一)?写路径/u,
+  /状态迁移/u,
+  // 旧 liveness 三值换形：存活面/存活谓词 + running。
+  /存活[^。；\n]{0,12}(?:running|died|waiting_user)/iu,
   // 旧 schema 的 status 列写法（现行底账没有 status/reason/failure_reason 列）。
   /底账[^。；\n]{0,12}\b(?:tasks\.)?status\s*=/iu,
 ];
@@ -505,6 +518,8 @@ const FORBIDDEN_SENTENCE_PATTERNS: readonly RegExp[] = [
   new RegExp(`任务收尾[^。；\\n]{0,30}(?:${TASK_STATE_WORDS}|unexecuted)`, 'iu'),
   new RegExp(`底账[^。；\\n]{0,20}(?:终态|状态序列)[^。；\\n]{0,40}(?:${TASK_STATE_WORDS})`, 'iu'),
   new RegExp(`状态序列[^。；\\n]{0,60}(?:${TASK_STATE_WORDS})`, 'iu'),
+  // 状态箭头序列（跨箭头才看得出的任务生命周期迁移；`accepted → completed` 属单笔操作账，不判）。
+  new RegExp(`(?:queued|running|waiting(?:_user)?|died|cancelled|timed_out|resource_limited|round_failed|终态)[^。；\\n]{0,12}(?:→|->)[^。；\\n]{0,12}(?:queued|running|waiting(?:_user)?|died|cancelled|timed_out|resource_limited|round_failed|终态)`, 'iu'),
 ];
 
 /**
@@ -917,6 +932,25 @@ describe('不维护任务状态机：代码里没有任务级生命周期枚举'
       ['scripts/eval/real/write-loop.ts', '// C9 底账状态序列按序包含 running → waiting_user → running → completed。'],
     ]));
     expect(bySequence.length).toBeGreaterThan(0);
+
+    // 第 3 轮审查的真实形状：终态/终局措辞、落/回 + 状态词、状态唯一写路径、存活面 running。
+    const byTerminalWording = findForbiddenStateComments(new Map([
+      ['packages/agent/src/t1.ts', '// 任务终态——(taskId, 终态类型) 一次性核销。'],
+      ['packages/agent/src/t2.ts', '// 确认才落 cancelled，否则回 running 并如实记失败事件。'],
+      ['packages/agent/src/t3.ts', '// 状态唯一写路径 = 注入的 TaskRegistryPort；后台终态 = 执行端确认的回合结局。'],
+      ['packages/agent/src/t4.ts', '// 残留有效租约，存活面会一直报「running」。'],
+      ['scripts/eval/real/w2.ts', '// 两件事都落终局 completed（没有失败/超时/未知/残留）。'],
+      ['packages/agent/src/t5.ts', '// 已启动且租约过期 → 底账落 result_unknown（禁止自动重放）。'],
+    ]));
+    expect(byTerminalWording.length).toBeGreaterThanOrEqual(6);
+
+    // 负例：单笔操作账、执行层失败码、投递终态与任务无关，不得误伤。
+    const inlineFacts = findForbiddenStateComments(new Map([
+      ['packages/agent/src/n1.ts', '// 操作账行落定：accepted → completed/failed（单笔操作状态，非任务级）。'],
+      ['packages/agent/src/n2.ts', '// 适配器如实回 `failed` + `code: result_unknown`，不代表长任务失败。'],
+      ['packages/agent/src/n3.ts', '// 通知投递终态跳过不重试（部署属性），不告警。'],
+    ]));
+    expect(inlineFacts).toEqual([]);
 
     const negation = findForbiddenStateComments(new Map([
       ['packages/agent/src/a.ts', '// 不维护任务状态机：task 只存事实，活/结束现推。'],

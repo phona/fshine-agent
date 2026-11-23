@@ -1011,7 +1011,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   };
   /**
    * 唤醒抑制（缺陷 A，2026-11-21 live）：本回合等待窗口观察到落定、且模型本回合已说话的
-   * 任务终态——(taskId, 终态类型) 一次性核销：对应的状态变化唤醒不再发送（用户已在本回合
+   * 回合——(taskId, wake 出口名) 一次性核销：对应的唤醒不再发送（用户已在本回合
    * 听到这件事，再说一遍就是同一事实两条）。条目只在「回合回复非空」时标记（回复为空 =
    * 不抑制，否则静默）；回合外落定不进这个表（照常唤醒）。有界（同 pushSuppressedInTurn）。
    */
@@ -1983,10 +1983,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
        * （`FILES_GENERATED_NOTICE`）顶上的情形（同一个常量、本文件下方投递话术替换也按它判）。
        */
       const modelSilent = turn.reply.trim() === '' || turn.reply === FILES_GENERATED_NOTICE;
-      // 缺陷 A：本回合等待窗口观察到的任务终态 + 模型本回合说了话 = 事实已交出 → 对应的
+      // 缺陷 A：本回合等待窗口观察到的落定 + 模型本回合说了话 = 事实已交出 → 对应的
       // 状态变化唤醒一次性抑制（判定与标记机械：看 TurnResult.terminalObservedInTurn 与
       // modelSilent，不猜模型有没有「提到」这件事）。回复为空不标记（唤醒照发，不静默）；
-      // 「见附件」占位顶替正文视为沉默（模型没说话，占位句不带终态事实）。
+      // 「见附件」占位顶替正文视为沉默（模型没说话，占位句不带这件事）。
       if (!modelSilent) {
         for (const observation of turn.terminalObservedInTurn ?? []) {
           markWakeSuppressedInTurn(sessionKey, observation.taskId, observation.wake);

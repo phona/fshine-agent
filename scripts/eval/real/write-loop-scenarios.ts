@@ -576,19 +576,19 @@ export function evaluateStopCriteria(evidence: StopEvidence): CriterionResult[] 
 
   // S1-C6 用户可见面出现**非空的停止告知**：唤醒设计下模型说话为主（停止回合的回复 /
   // 唤醒投递），宿主停止模板「已按你说的停了：」只在「唤醒说不出话」的降级路径出现——
-  // 来源不限，模型的话与降级模板都算。本条把「用户看到了非空告知」与底账终局 cancelled、
+  // 来源不限，模型的话与降级模板都算。本条把「用户看到了非空告知」与底账停止事实（无汇报）、
   // 停后审计冻结一起断言（这些机械事实另由 S1-C2/C3/C4 独立钉住，此处重复是为了净更严）；
   // 不再要求宿主模板必现（否则只有系统退化时才可能绿——旧判据的假红根因）。
   const stopNotice = texts.find((text) => text.trim() !== '');
-  const cancelledLedger = evidence.tasks.some((task) => (task.endedAt !== null && !task.reported));
+  const stoppedNoReport = evidence.tasks.some((task) => (task.endedAt !== null && !task.reported));
   const frozenAfterStop = evidence.auditAfterFreeze === evidence.auditAtCancel;
   add(
-    'S1-C6', '非空停止告知（来源不限）+ 底账终局 cancelled + 停后审计冻结', 'mechanical',
-    stopNotice !== undefined && cancelledLedger && frozenAfterStop,
+    'S1-C6', '非空停止告知（来源不限）+ 底账停止事实（无汇报）+ 停后审计冻结', 'mechanical',
+    stopNotice !== undefined && stoppedNoReport && frozenAfterStop,
     `停止告知=${stopNotice === undefined ? '(无非空文本)' : digestValue(stopNotice, 200)}`
       + `；非空用户可见文本 ${texts.filter((text) => text.trim() !== '').length} 条`
-      + `；底账 cancelled=${cancelledLedger}；停后审计冻结=${frozenAfterStop}`
-      + `（终态=${evidence.auditAtCancel}、冻结后=${evidence.auditAfterFreeze}）`,
+      + `；底账停止无汇报=${stoppedNoReport}；停后审计冻结=${frozenAfterStop}`
+      + `（审计冻结于=${evidence.auditAtCancel}、冻结后=${evidence.auditAfterFreeze}）`,
   );
 
   return add.results;
@@ -951,13 +951,13 @@ export function evaluateTwoObjectsCriteria(evidence: TwoObjectsEvidence): Criter
       : mismatches.join('；'),
   );
 
-  // S5-C3 两件事都落终局，没有失败/超时/未知，也没有非终局残留。
+  // S5-C3 两件事都有汇报，没有失败/超时/未知，也没有未汇报残留。
   const bad = evidence.tasks.filter((task) => !task.reported);
   add(
-    'S5-C3', '两件事都落终局 completed（没有失败/超时/未知/残留）', 'mechanical',
+    'S5-C3', '两件事都有汇报（没有失败/超时/未知/残留）', 'mechanical',
     evidence.tasks.length >= 1 && bad.length === 0,
     `账本事实=${evidence.tasks.map((task) => `#${String(task.taskNo ?? '-')}:${taskFactWord(task)}`).join(',') || '(无)'}`
-      + `；非 completed=${bad.length} 条`,
+      + `；无汇报=${bad.length} 条`,
   );
 
   // S5-C4 完成交付出现（完成唤醒/主动投递/本回合转述至少一条路径落事件）。
@@ -1497,7 +1497,7 @@ async function runFailureScenario(harness: Harness, options: ScenarioRunOptions)
     () => harness.tasksNow().some((task) => lastExecutionOf(task)?.status === 'failed'),
     options.settleTimeoutMs,
   );
-  log(`  底账出现 failed 终局：${landed}`);
+  log(`  底账末条执行失败：${landed}`);
   // 给失败投递一点落定时间（投递不改任务事实）：等失败交付事件或超时。
   await waitFor(
     () => harness.logs.some((line) =>

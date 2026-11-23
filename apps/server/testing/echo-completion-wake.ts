@@ -8,7 +8,7 @@
  * `apps/server/task-completion-delivery.ts` 的 taskRoundFactsText（2026-11-23 去 outcome：
  * 事实里没有「办完了」这类回合级结论词，只有账本事实 + worker 汇报原文）。
  *
- * 2026-11-21 live P0 补等待事实的脚本：`[任务等待]`（进入 waiting_user 的唤醒事实）——
+ * 2026-11-21 live P0 补等待事实的脚本：`[任务等待]`（等待形状 `pendingQuestion` 的唤醒事实）——
  * 待确认复读「将写入（逐字）」段（提案原文 + 有效期），待补复读 missing 条目。产品形状 =
  * 模型把待确认/待补内容**原样**告诉用户并等表态。
  */

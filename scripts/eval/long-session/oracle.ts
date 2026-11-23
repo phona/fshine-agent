@@ -252,7 +252,7 @@ const HARD_ZERO_TASK_CODES: ReadonlySet<TaskFailureCode> = new Set(['H3', 'H4', 
 /**
  * 判定任务连续性：跨全部轮次检查机械硬零 + 编号/结果不混淆。
  *   · H3 重复执行 —— 同一 requestId 在**全批**出现 >1 次；
- *   · H4 虚假完成 —— 终态 completed 却 requestIds 为空（未发起任何执行）；
+ *   · H4 虚假完成 —— 有汇报却 requestIds 为空（未发起任何执行）；
  *   · H5 取消虚假回执 —— 某轮回复声称「已取消」但该轮 cancelCalled=false（且无已取消任务底账）；
  *   · E-G 编号混淆 —— 同一 taskNo 映射到不同 taskId。
  */

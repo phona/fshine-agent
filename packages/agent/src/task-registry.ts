@@ -446,8 +446,8 @@ export interface TaskRegistry {
    */
   listAcceptedOperations(): readonly OperationRecord[];
   /**
-   * 长任务终态落定：accepted → completed/failed（别的状态不覆盖，幂等）。
-   * 结果由 wait 返回；这里只把账行从「进行中」推进到终态，不重放、不重铸身份。
+   * 操作账行落定：accepted → completed/failed（单笔操作状态；别的状态不覆盖，幂等）。
+   * 结果由 wait 返回；这里只把账行从「进行中」推进到落定，不重放、不重铸身份。
    */
   settleAcceptedOperation(dispatchKey: string, outcome: ExecutionOutcome, options?: { now?: string }): OperationRecord;
   /**

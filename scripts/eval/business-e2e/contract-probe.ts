@@ -1,7 +1,7 @@
 /**
  * 契约探针（§二#5，#5 对话面本体 blocked-by 缺口 1 之前先跑的**零模型额度**机械证据）。
  *
- * 目标：用确定性假件构造任务并推进到终态/挂起态，直接读执行层 `audit.jsonl` 与 registry 终态，
+ * 目标：用确定性假件构造任务并推进到停下/等待提问，直接读执行层 `audit.jsonl` 与底账事实，
  * 产出「查询 / 取消 / 接续 / 结果找回」在**对话面**缺口的机械证据，并对照缺口 1 设计
  * （gap-task-surface.md，2026-11-18 已删，git 历史可考）。
  *
@@ -9,7 +9,7 @@
  *   A. 对话面缺席：Main 回合工具面仅 `task_run`（execution-runtime.ts:426）；
  *      对 task_status/task_result/task_cancel/task_resume 的 Main 调用一律
  *      `Main 工具面之外的调用`（execution-runtime.ts:430）。
- *   B. 终态事实与执行层留痕：经 task_run 推进到终态的任务，registry 落终态、
+ *   B. 结束事实与执行层留痕：经 task_run 推进到停下的任务，底账写结束事实、
  *      执行层 <state-dir>/audit.jsonl 落实际执行行（含 result）。
  *   C. 能力已在宿主侧存在：registry.get/list（scope 化）、runner.cancel（requested≠cancelled）、
  *      runner.resume（waiting_user 接续）、resultText 逐字存档——能力齐全但**无对话入口**。
@@ -142,7 +142,7 @@ async function probeCapabilityApi(): Promise<Record<string, unknown>> {
   const dir = path.join(OUT, 'capability');
   mkdirSync(dir, { recursive: true });
   const executor = new FakeExecutor([
-    // task1 round1 → 要求补充输入（running→waiting_user）
+    // task1 round1 → 要求补充输入（started → waiting 事实）
     async () => ({ kind: 'needs_input', question: { missing: ['window'], raw: '请确认要核对的窗口（本月/上月？）' } }),
     // task1 round2（resume 后）→ completed（结果存档）
     async () => ({ kind: 'ended', report: '任务一（接力后）已完成：alpha W1 共 2 条。' }),
@@ -194,7 +194,7 @@ async function probeCapabilityApi(): Promise<Record<string, unknown>> {
     await runner.whenIdle();
     const t1After = assembled.taskRegistry.get(task1Id, SCOPE);
     observations['结果找回.registry.get 存档'] = { taskId: task1Id, taskNo: t1After.taskNo, status: factsOf(t1After), resultText: t1After.resultText ?? null, replyText: t1After.replyText ?? null };
-    // task2：running → cancel(requested≠cancelled) → 执行端确认 → cancelled
+    // task2：started → cancel(requested≠cancelled) → 执行端确认 → 结束事实（无汇报）
     const t2 = await assembled.session.send('任务二');
     await new Promise((r) => setTimeout(r, 20));
     const task2Id = t2.taskIds[0]!;

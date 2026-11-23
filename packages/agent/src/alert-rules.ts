@@ -83,7 +83,7 @@ export const HOST_FAULT_ERROR_CODES: readonly string[] = [
 export const HOST_FAULT_EVENTS: readonly string[] = [
   'execution_accepted_undeclared',
   // 2026-11-19 唤醒切片（只读审计 #3）：后台任务以 accepted 结束、但装配没给等待端口
-  // ——装配面缺陷（用户做不了什么，归宿第 3 档），落终态的同时记这条事件，进既有
+  // ——装配面缺陷（用户做不了什么，归宿第 3 档），写结束事实的同时记这条事件，进既有
   // host_fault 规则告警（不新建规则/机制）。
   'task_long_task_unsupported',
 ];

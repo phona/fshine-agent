@@ -1,15 +1,15 @@
 /**
- * 后台任务执行（P6）：受理 → 底账 queued → dispatcher 认领（lease）→ running → 终态；
+ * 后台任务执行（P6）：受理 → 底账排队行 → dispatcher 认领（lease）→ 在跑回合 → 停下；
  * 进程内调度与重启恢复、取消、资源许可消费。契约来源：docs/history/r4-joint-interfaces.md
  * §1（TaskRegistry）/§2（ResourcePolicy）/§3（TaskRunner）v1 冻结。
  *
  * 边界（硬约束，缺一不做）：
  *   · 队列 = 底账 queued 行 + claim/lease，**不引第二套队列**：本模块不持有待跑清单，
  *     内存 inFlight 只是「本进程在飞回合」的账（谁在跑），不是队列（谁要跑）；
- *   · 状态唯一写路径 = 注入的 TaskRegistryPort（§1 方法族）；本模块不做任何直接状态写入；
- *     后台终态 = **执行端确认的回合结局**（transition/fail 落底账），不做 task 级
- *     judgeReportedTask 二次判定——inline judge 的「首个非 completed 判负」会误伤等待接续
- *     （P2 契约测试同口径：后台路径由 runner 按执行层确认的结果落终态）；逐回合判定归执行端；
+ *   · 底账写路径唯一 = 注入的 TaskRegistryPort（§1 方法族）；本模块不做任何直接底账写入；
+ *     回合结局 = **执行端确认的事实**（transition/fail 只写机械事实），不做 task 级
+ *     judgeReportedTask 二次判定——inline judge 的「首个非成功执行判负」会误伤等待接续
+ *     （P2 契约测试同口径：后台路径由 runner 按执行层确认的结果写事实）；逐回合判定归执行端；
  *   · 资源 = 只消费注入的 ResourcePolicyPort 的**后台**许可（§2）；前后台配额独立由 P5 保证，
  *     本模块不申请/不占用前台许可；后台满载时前台路径不经过本模块（不被阻塞）；
  *   · 通知 = 不做（P4 从底账事实钩子取，§1 onTaskFact/§4）；本模块不建事件总线/订阅体系；
@@ -19,16 +19,16 @@
  *     回合落定后的内部再派发）；许可拒绝是错误面（如实返回 reason），不排队阻塞、不空转。
  *
  * 恢复策略（restart）：每次 pump 先 registry.expireLeases(now)——
- *   · queued → claimNextQueued 重新认领（lease 幂等 by taskId）；
- *   · running 且租约过期 → 底账落 result_unknown（禁止自动重放，尤其可能有副作用者）；
- *   · completed/failed 等终态不在认领范围（不重跑）；无租约的 running 属 inline 任务，
+ *   · 排队行 → claimNextQueued 重新认领（lease 幂等 by taskId）；
+ *   · 已启动且租约过期 → 底账写一条结束事实（禁止自动重放，尤其可能有副作用者）；
+ *   · 已有结束事实或汇报的任务不在认领范围（不重跑）；无租约的已启动行属 inline 任务，
  *     不在回收范围（expireLeases 语义）。
  *
  * waiting_user 到期消费者（2026-11-18，W 切片）：注入 `waitUserTimeoutMs` 后，runner 持有
  * **一个**有界定时器（同一时刻至多一个；每次 pump 重算最早到期点后重武装）。每个推进周期
  * （含启动后的第一次 pump）先按底账行的 `waiting_since + waitUserTimeoutMs <= now` 扫一遍：
- * 到期行走既有 `timeout(taskId,'waiting_user')` 合法边 → `timed_out` + reason=timeout，
- * 事实钩子照常产出既有 `timed_out` 通知。判定只看持久化底账，不依赖上一进程的内存定时器，
+ * 到期行走既有 `timeout(taskId,'waiting_user')` 合法边 → 写结束事实（无汇报）+ reason=timeout，
+ * 事实钩子照常产出 `deadline_reached` 通知。判定只看持久化底账，不依赖上一进程的内存定时器，
  * 因此重启后无需额外恢复路径。未注入 `waitUserTimeoutMs`（或底账没有 list 面）时完全不建
  * 定时器、不扫底账——直用 runner 的调用方行为零变化；装配方传 `resolveRuntimeConfig()`
  * 的值（配置缺省 24h）启用。
@@ -644,12 +644,12 @@ export interface TaskRunnerOptions {
    * 相对缺省 24h 的超时阈值可忽略。
    */
   waitingScanThrottleMs?: number;
-  /** 收尾错误的观察点（如外部先落终态、底账拒绝非法边）：不改变任务事实，只如实上报。 */
+  /** 收尾错误的观察点（如外部先写结束事实、底账拒绝非法边）：不改变任务事实，只如实上报。 */
   onError?: (failure: { taskId: string; error: unknown }) => void;
   /**
    * 长任务等待端口（契约 v4；装配方用 ExecutionClient 的 wait/abort 实现）。
    * 注入后并配合底账的 accepted 行能力：accepted 回合释放槽位后由 runner 的**同一个**
-   * 有界定时器驱动 wait；完成即续跑、超窗按 pollAfterMs 重排、失败如实落终态、
+   * 有界定时器驱动 wait；完成即续跑、超窗按 pollAfterMs 重排、失败如实写结束事实、
    * 用户取消走 abort。缺省 = 不支持长任务（accepted 会被当作装配错误确定性失败）。
    */
   longTasks?: LongTaskWaitPort;
@@ -1259,7 +1259,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     void call.catch(() => undefined);
   }
 
-  /** wait 返回后的推进：accepted=重排；完成=续跑 Worker；失败=如实落终态。 */
+  /** wait 返回后的推进：accepted=重排；完成=续跑 Worker；失败=如实写结束事实。 */
   async function handleWaitResult(entry: WaiterEntry, result: LongTaskWaitResult, startedAt: number): Promise<void> {
     const nowMs = now().getTime();
     const live = waiters.get(entry.dispatchKey);
@@ -1360,7 +1360,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     return undefined;
   }
 
-  /** 用户取消：请求执行层 abort；确认才落 cancelled，否则回 running 并如实记失败事件。 */
+  /** 用户取消：请求执行层 abort；确认后写结束事实（无汇报），未确认则继续等回执并如实记失败事件。 */
   function abortPendingWait(entry: WaiterEntry): void {
     entry.controller?.abort();
     const call = (async (): Promise<void> => {
@@ -1491,7 +1491,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     resumedOperation?: ResumedOperation,
     /**
      * 写确认透传（2026-11-19 显式确认切片）：**确认路径**（`confirm()`）在 answerResumes
-     * 之前取出的底账提案（waiting_user → running 会把 pendingQuestion 清掉，所以必须先取出
+     * 之前取出的底账提案（续跑会清掉 pendingQuestion，所以必须先取出
      * 再交给执行端）。`resume()` 永不传本参数——补充/改口径不带句柄。缺省 = 无待确认提案。
      */
     pendingConfirmation?: PendingConfirmation,
@@ -1573,7 +1573,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
    */
   function settle(taskId: string, result: RoundResult): void {
     if (result.kind === 'threw') {
-      // 回合已结束（抛错）：先清在跑租约——否则任务行残留有效租约，存活面会一直报「running」
+      // 回合已结束（抛错）：先清在跑租约——否则任务行残留有效租约，「仍在推进」谓词会一直为真
       // （失败/唤醒面据此误判仍在下班）。结束事实不翻案：markCancelled/markTimedOut 已清租约，
       // 这里对非 abort 分支兜底。
       releaseLeaseQuietly(taskId);

@@ -52,7 +52,7 @@
 | 后台失败·唤醒降级/走岔路：模型只调工具或说不出话 → 用户仍拿到既有失败话术；事实留待注入 | `apps/server/server-state-wake.test.ts:①b 走岔路`<br>`apps/server/server-state-wake.test.ts:①c 唤醒不可用` | 宿主机制 | 已覆盖 | — |
 | 唤醒回合不得碰执行层：零工具声明、执行层零新增调用、任务不被误判终态 | `apps/server/server-state-wake.test.ts:①b 走岔路`<br>`packages/agent/runtime.test.ts:冷会话（驱动可唤醒但实例级会话还没建）→ 补一次**零工具**单回合`<br>`packages/agent/pi-driver-wake.test.ts:走岔路：脚本模型在唤醒回合硬发工具调用` | 宿主机制 | 已覆盖 | — |
 | 用户说停：唤醒模型说（不再由宿主渲染「已按你说的停了」）；模型说不出话才投渲染文案 | `apps/server/server-state-wake.test.ts:② 取消 → 唤醒模型说`<br>`apps/server/server-state-wake.test.ts:②b 走岔路`<br>`apps/server/notification-chat-sink.test.ts:① user_stop 不再由本 sink 渲染直发` | 宿主机制 | 已覆盖 | — |
-| 重启对账：启动时「用户以为在办、租约已过期」的任务如实落 result_unknown → 唤醒原会话说清；不重放 | `apps/server/server-state-wake.test.ts:④ 启动时租约已过期`<br>`apps/server/server-state-wake.test.ts:④b 走岔路：模型说不出话`<br>`apps/server/server-state-wake.test.ts:④c 非 live 部署不唤醒` | 宿主机制 | 已覆盖 | — |
+| 重启对账：启动时「用户以为在办、租约已过期」的任务如实写结束事实（结果未知）→ 唤醒原会话说清；不重放 | `apps/server/server-state-wake.test.ts:④ 启动时租约已过期`<br>`apps/server/server-state-wake.test.ts:④b 走岔路：模型说不出话`<br>`apps/server/server-state-wake.test.ts:④c 非 live 部署不唤醒` | 宿主机制 | 已覆盖 | — |
 | 快活失败 + 模型沉默：兜底判据只看模型沉默（**与有没有文件无关**），失败话术照样送达（审计 #8） | `apps/server/server-relay-silent-turn.test.ts:③c 快活失败 + 沉默` | 宿主机制 | 已覆盖 | — |
 | 等补信息：主动说清还缺什么，补答后同一任务续跑完成 | `apps/server/server-notification-push.test.ts:② 后台任务等你说一句话`<br>`scripts/needs-input-resume.test.ts:① 执行层要补输入`<br>`scripts/needs-input-resume.test.ts:② 用户补答 → 同一 taskId/taskNo 续跑到 completed`<br>`scripts/eval/smoke/slow-faults.test.ts:缺参 → waiting_user 且问题可见` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 不补答：停在 waiting_user、绝不重复执行 | `scripts/needs-input-resume.test.ts:③ 用户不补答`<br>`scripts/eval/smoke/slow-faults.test.ts:不补答：停在 waiting_user` | 宿主机制 + 执行层 | 已覆盖 | — |
@@ -106,7 +106,7 @@
 | needs_input / 结果未知：如实「待核对」、补答续跑、不冒充成功 | `packages/agent/result-unknown-cancel.test.ts:写操作已 unknown 后同回合取消`<br>`packages/agent/dispatch-key-identity.test.ts:外部写入结果未知：停止自动重试`<br>`scripts/eval/sim/cases/cases.test.ts:SIM-10：回执丢失` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 快活失败（窗口内落定）：零推送，模型同回合已说明，不重复打扰 | `apps/server/server-notification-push.test.ts:⑤ 快活失败（窗口内落定）→ 零推送` | 宿主机制 | 已覆盖 | — |
 | 资源受限失败（池满）：走既有「系统太忙，这个没接」句 + 一个动作，不说成「执行端没办成」（审计 #18） | `apps/server/server-relay-silent-turn.test.ts:③b 资源拒绝` | 宿主机制 | 已覆盖 | — |
-| 装配面缺陷（accepted 但没有等待端口）：落终态 + 结构化事件进告警面，**不给用户编话**（审计 #3 · 归宿第 3 档） | `packages/agent/long-task-async.test.ts:⑤b 声明了长任务但装配没给等待端口`<br>`packages/agent/alert-rules.test.ts:命中：装配面缺陷` | 宿主机制 | 已覆盖 | 告警面 = 既有 `npm run alerts`（host_fault 规则认 `task_long_task_unsupported`；双出口 alerts.jsonl / 企微推送），未新建规则 |
+| 装配面缺陷（accepted 但没有等待端口）：写结束事实 + 结构化事件进告警面，**不给用户编话**（审计 #3 · 归宿第 3 档） | `packages/agent/long-task-async.test.ts:⑤b 声明了长任务但装配没给等待端口`<br>`packages/agent/alert-rules.test.ts:命中：装配面缺陷` | 宿主机制 | 已覆盖 | 告警面 = 既有 `npm run alerts`（host_fault 规则认 `task_long_task_unsupported`；双出口 alerts.jsonl / 企微推送），未新建规则 |
 
 ## 八、权限（viewer / operator / admin / 群主体）
 

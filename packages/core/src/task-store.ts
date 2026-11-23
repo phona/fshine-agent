@@ -673,7 +673,7 @@ function tasksTableNeedsRebuild(db: Database.Database): boolean {
  * 旧任务**全部当已结束**：
  *   · running_since 按 updated_at 回填（极旧库缺列时），避免迁移后被当作未启动重新认领；
  *   · 写**一条结束事实**（task_ends：task_id + at，**不带种类**）：at = 匹配到的旧终态列
- *     原时刻（cancelled_at → timed_out_at → resource_limited_at → died_at →
+ *     原时刻（旧 schema 列顺序：cancelled_at → timed_out_at → resource_limited_at → died_at →
  *     round_failed_at），该列为 NULL / 旧库无该列时回退 updated_at。
  *     怎么结束不迁移——旧结论词（cancelled/died/round_failed/completed…）不进入新库。
  * 逐列按旧表实际列存在性取源（极旧库缺列取 NULL），历史行其余事实原样搬运。
@@ -1062,7 +1062,7 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   /**
    * 只读打开**未迁移的旧库**（tasks 仍是旧形状、没有结束事实账）时，把仍在的旧终态列
    * 还原成「停下时刻」交给读取投影（只取 at，不还原任何种类），不写库、不建表。优先级
-   * cancelled_at → timed_out_at → resource_limited_at → died_at → round_failed_at。
+   * 旧 schema 列顺序：cancelled_at → timed_out_at → resource_limited_at → died_at → round_failed_at。
    * 有结束事实账（已是 v6/v7 / 可写打开已迁移）时事实账优先，本合成不生效。
    */
   const PRE_ZERO_STATE_END_SOURCES = [

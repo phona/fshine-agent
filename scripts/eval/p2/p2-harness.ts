@@ -740,7 +740,7 @@ function abortError(): Error {
  *   · 第 1 次脚本响应 = 一次 `execute_operation` 工具调用；
  *   · 执行面可以永不结算 —— 本驱动在 `input.deadline` 处中止并抛 `AbortError`
  *     （`driver-contract.ts:31`「超时 driver 应中止并返回空文本」的同义实现）；
- *   · `createTaskExecutor` 据此落 `timed_out`（产品既有机制，不新增超时机制）。
+ *   · `createTaskExecutor` 据此按超时收尾（写结束事实、无汇报；产品既有机制，不新增超时机制）。
  */
 export function createDeadlineWorkerDriver(book: P2ScriptBook): import('../../../packages/agent/src/driver-contract').TurnDriver {
   return {

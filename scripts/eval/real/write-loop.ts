@@ -210,7 +210,7 @@ export interface WriteLoopEvidence {
     snapshots: LedgerSnapshot[];
     finalReported?: boolean;
     finalExecutions: Array<{ operation: string; status: string }>;
-    /** 会话内每个任务的终局（多任务如实列出，主任务排首）。 */
+    /** 会话内每个任务的停下事实（多任务如实列出，主任务排首）。 */
     finalTasks: Array<{ taskId: string; taskNo?: number; started: boolean; endedAt: string | null; reported: boolean; waiting: boolean; mayBeRunning: boolean; executions: Array<{ operation: string; status: string }> }>;
     proposal?: { summary: string; handlePrefix: string; operation: string };
   };
