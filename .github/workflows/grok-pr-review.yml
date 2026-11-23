@@ -223,9 +223,10 @@ jobs:
           # 不内联 diff。工作树是 PR head，grok 用只读文件工具按需读文件。一次调用
           # 出结果，不再分块 / 合并。
           node .github/grok/build-prompt.mjs "$RUNNER_TEMP/grok-prompt.md"
-          # --permission-mode default：read_file / grep / list_dir 与内置只读 shell
-          # 命令（git status/diff/log/show 等）无需批准即可运行，grok 因此能读已
-          # checkout 的文件；文件写入仍需批准，非交互运行里会被拒，审查保持只读。
+          # --permission-mode auto：只读命令（含 `git show <sha>:<path> | sed` 这类
+          # 管道读）自动放行；写命令仍需批准、headless 下会被拒，审查保持只读。
+          # default 模式会把管道读也拒掉（2026-11-23 实测 grok 读源码用的正是
+          # `git show | sed -n`，被拒后 headless 无法批准 → 审查 cancel）。
           # --json-schema 吃内联 JSON，不是文件路径（2026-11-19 实测：传路径报
           # "invalid JSON: expected value at line 1 column 1"）。
           # --output-format plain 的 stdout 仍是 JSON 信封
@@ -240,7 +241,7 @@ jobs:
             --prompt-file "$RUNNER_TEMP/grok-prompt.md"
             --json-schema "$(cat "$GITHUB_WORKSPACE/.github/grok/review-schema.json")"
             --output-format plain
-            --permission-mode default
+            --permission-mode auto
             --cwd "$GITHUB_WORKSPACE"
             --max-turns "${GROK_MAX_TURNS:-200}"
           )
