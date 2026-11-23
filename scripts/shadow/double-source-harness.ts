@@ -90,12 +90,10 @@ export interface ShadowExecutionFact {
 }
 
 export interface ShadowTerminalFact {
-  // S1 事实模型：机械事实投影（没有 status/reason/failureReason 结论字段）。
+  // 零状态：机械事实投影（没有 status/reason/failureReason 结论字段/终态列）。
   hasReport: boolean;
   pendingMissing?: readonly string[];
-  diedAt?: string;
-  cancelledAt?: string;
-  timedOutAt?: string;
+  termination?: { kind: string };
   replyText?: string;
 }
 
@@ -268,12 +266,10 @@ export async function runChainOnSource(options: ChainRunOptions): Promise<Shadow
           errorCode: record.error === undefined ? null : record.error.code,
         })),
         terminal: {
-          // S1 事实模型：机械事实投影（等待形状/机械时刻/汇报存档），没有 status/reason。
+          // 零状态：机械事实投影（等待形状/终止事件/汇报存档），没有 status/reason/终态列。
           hasReport: (task.resultText ?? task.replyText ?? '').trim() !== '',
           ...(task.pendingQuestion === undefined ? {} : { pendingMissing: task.pendingQuestion.missing.map(String) }),
-          ...(task.diedAt === undefined ? {} : { diedAt: task.diedAt }),
-          ...(task.cancelledAt === undefined ? {} : { cancelledAt: task.cancelledAt }),
-          ...(task.timedOutAt === undefined ? {} : { timedOutAt: task.timedOutAt }),
+          ...(task.termination === undefined ? {} : { termination: { kind: task.termination.kind } }),
           ...(task.replyText === undefined ? {} : { replyText: task.replyText }),
         },
         notifications: rows.map((notification) => ({

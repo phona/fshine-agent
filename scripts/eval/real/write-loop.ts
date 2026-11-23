@@ -376,14 +376,14 @@ export class LedgerWatcher {
             handlePrefix: confirmation.handle.slice(0, 12),
             operation: confirmation.operation,
           };
-      const signature = JSON.stringify([taskLivenessOf(record) ?? null, record.cancelledAt !== undefined, archivedReportOf(record) !== undefined, executions, proposal?.summary ?? '']);
+      const signature = JSON.stringify([taskLivenessOf(record) ?? null, record.termination?.kind === 'cancelled', archivedReportOf(record) !== undefined, executions, proposal?.summary ?? '']);
       if (this.lastSignature.get(record.taskId) === signature) continue;
       this.lastSignature.set(record.taskId, signature);
       this.snapshots.push({
         at: new Date().toISOString(),
         taskId: record.taskId,
         liveness: taskLivenessOf(record) ?? null,
-        cancelled: record.cancelledAt !== undefined,
+        cancelled: record.termination?.kind === 'cancelled',
         reported: archivedReportOf(record) !== undefined,
         executions,
         ...(proposal === undefined ? {} : { proposal }),
@@ -1176,7 +1176,7 @@ async function main(): Promise<void> {
         taskId: id,
         ...(record.taskNo === undefined ? {} : { taskNo: record.taskNo }),
         liveness: taskLivenessOf(record) ?? null,
-        cancelled: record.cancelledAt !== undefined,
+        cancelled: record.termination?.kind === 'cancelled',
         reported: archivedReportOf(record) !== undefined,
         executions: record.executions.map((execution) => ({ operation: execution.operation, status: execution.status })),
       });

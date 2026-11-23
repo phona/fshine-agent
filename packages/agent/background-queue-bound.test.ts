@@ -70,7 +70,7 @@ interface Receipt {
   liveness?: string;
   accepted?: boolean;
   reason?: string;
-  resourceLimitedAt?: string;
+  termination?: { kind: string; at: string };
   notice?: string;
 }
 
@@ -197,12 +197,12 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
 
     for (const receipt of rejected) {
       // 结构化回执：确定性拒绝 + 机械原因 + 用户可见话术（容量事实）。
-      expect(receipt.resourceLimitedAt).toBeDefined();
+      expect(receipt.termination?.kind).toBe('resource_limited');
       expect(receipt.notice).toContain('未受理');
       expect(receipt.notice).toContain('后台排队已满（容量 2）');
       // 拒绝不留半截任务行：终态 failed（reason=resource_limited），不是 queued 幽灵行。
       const row = session.getTask(receipt.taskId);
-      expect(row.resourceLimitedAt).toBeDefined();
+      expect(row.termination?.kind).toBe('resource_limited');
       // 结构化事件：failed/resource_limited 事实已发出（通知 outbox 的输入面）。
       expect(
         facts.some(
@@ -237,7 +237,7 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
     // 进程级上界（不按会话各算一份）：1 活跃 + 2 排队。
     expect(accepted).toHaveLength(3);
     expect(rejected).toHaveLength(3);
-    expect(rejected.every((receipt) => receipt.resourceLimitedAt !== undefined)).toBe(true);
+    expect(rejected.every((receipt) => receipt.termination?.kind === 'resource_limited')).toBe(true);
     expect(rejected.every((receipt) => receipt.notice?.includes('后台排队已满（容量 2）'))).toBe(true);
     // 并发提交过程中底账 queued 行从未越过上界。
     expect(Math.max(...stack.depths)).toBeLessThanOrEqual(2);
@@ -257,7 +257,7 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
     expect(rows.filter((receipt) => receipt.accepted === true)).toHaveLength(17);
     const rejected = rows.filter((receipt) => receipt.accepted === false);
     expect(rejected).toHaveLength(1);
-    expect(rejected[0]!.resourceLimitedAt).toBeDefined();
+    expect(rejected[0]!.termination?.kind).toBe('resource_limited');
     expect(rejected[0]!.notice).toContain('后台排队已满（容量 16）');
     expect(queuedRows(stack)).toBe(16);
     expect(stack.executor.started).toHaveLength(1);

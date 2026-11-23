@@ -179,12 +179,14 @@ export function evaluateAssertion(spec: AssertionSpec, facts: AssertionFacts, in
         : expected === 'failed'
           ? last?.status === 'failed' || last?.status === 'refused'
           : expected === 'cancelled'
-            ? task.cancelledAt !== undefined
+            ? task.termination?.kind === 'cancelled'
             : expected === 'timed_out'
-              ? task.timedOutAt !== undefined
+              ? task.termination?.kind === 'timed_out'
               : expected === 'resource_limited'
-                ? task.resourceLimitedAt !== undefined
-                : expected === 'queued'
+                ? task.termination?.kind === 'resource_limited'
+                : expected === 'died'
+                  ? task.termination?.kind === 'died'
+                  : expected === 'queued'
                   ? taskUnstartedOf(task)
                   : taskLivenessOf(task) === expected;
       return matches

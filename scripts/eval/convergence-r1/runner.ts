@@ -532,7 +532,7 @@ async function runTrial(options: TrialOptions): Promise<void> {
         break;
       }
     }
-    // S1 事实模型：证据快照只带账本事实（逐笔执行行 + 汇报存档 + 一次性机械时刻），
+    // 零状态：证据快照只带账本事实（逐笔执行行 + 汇报存档 + 终止事件），
     // 不写 status 词——judge 直接读这些事实判 E11。
     tasksSnapshot = assembled.taskRegistry.list().map((task) => ({
       taskId: task.taskId,
@@ -543,10 +543,7 @@ async function runTrial(options: TrialOptions): Promise<void> {
       liveness: taskLivenessOf(task) ?? null,
       ...(task.resultText === undefined ? {} : { resultText: task.resultText }),
       ...(task.replyText === undefined ? {} : { replyText: task.replyText }),
-      ...(task.diedAt === undefined ? {} : { diedAt: task.diedAt }),
-      ...(task.cancelledAt === undefined ? {} : { cancelledAt: task.cancelledAt }),
-      ...(task.timedOutAt === undefined ? {} : { timedOutAt: task.timedOutAt }),
-      ...(task.resourceLimitedAt === undefined ? {} : { resourceLimitedAt: task.resourceLimitedAt }),
+      ...(task.termination === undefined ? {} : { termination: task.termination }),
       executions: task.executions.map((execution) => ({
         requestId: execution.requestId,
         operation: execution.operation,
@@ -1006,7 +1003,7 @@ function writeSummaryAndReport(input: SummaryInput): number {
   for (const result of results) {
     const trialDir = trialDirOf(outDir, result.caseId, result.trial);
     const replies = readJsonlSafe(path.join(trialDir, 'reply.jsonl'));
-    const executions = readJsonSafe<{ tasks: Array<{ taskId: string; diedAt?: string; timedOutAt?: string; cancelledAt?: string; resourceLimitedAt?: string; executions: Array<{ operation: string; status: string }> }> }>(
+    const executions = readJsonSafe<{ tasks: Array<{ taskId: string; termination?: { kind: string; at: string }; executions: Array<{ operation: string; status: string }> }> }>(
       path.join(trialDir, 'executions.json'),
     );
     lines.push(`### ${result.caseId} trial-${result.trial} — ${result.judgment.deterministic.verdict}`);
@@ -1025,7 +1022,7 @@ function writeSummaryAndReport(input: SummaryInput): number {
     }
     if (executions) {
       lines.push(`- T1：${executions.tasks.map((task) => {
-        const ends = [task.diedAt === undefined ? '' : 'diedAt', task.timedOutAt === undefined ? '' : 'timedOutAt', task.cancelledAt === undefined ? '' : 'cancelledAt', task.resourceLimitedAt === undefined ? '' : 'resourceLimitedAt'].filter((entry) => entry !== '');
+        const ends = task.termination === undefined ? [] : [task.termination.kind];
         return `${task.taskId}${ends.length === 0 ? '' : `(${ends.join('+')})`}[${task.executions.map((execution) => `${execution.operation}=${execution.status}`).join(' ')}]`;
       }).join('；') || '（无任务）'}`);
     }

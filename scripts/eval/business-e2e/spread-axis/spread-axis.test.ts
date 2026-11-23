@@ -76,8 +76,8 @@ describe('② 执行器装配 + 分级 + d6（确定性假件）', () => {
     const workDir = path.join(freshRoot(), 'ds3');
     const evidence = await createSmokeExecutor(DS_3)(itemFor(DS_3), DS_3, workDir);
     expect(evidence.tasks).toHaveLength(3);
-    const cancelledCount = evidence.tasks.filter((t) => t.cancelledAt !== undefined).length;
-    const completedCount = evidence.tasks.filter((t) => t.cancelledAt === undefined && ['completed', 'failed', 'refused'].includes(t.executions[t.executions.length - 1]?.status ?? '')).length;
+    const cancelledCount = evidence.tasks.filter((t) => t.termination?.kind === 'cancelled').length;
+    const completedCount = evidence.tasks.filter((t) => t.termination?.kind !== 'cancelled' && ['completed', 'failed', 'refused'].includes(t.executions[t.executions.length - 1]?.status ?? '')).length;
     expect([cancelledCount, completedCount]).toEqual([1, 2]);
     const runDir = writeSampleRun(path.join(freshRoot(), 'out3'), {
       inputs: evidence.inputs, toolCalls: evidence.toolCalls, tasks: evidence.tasks, replies: evidence.replies,

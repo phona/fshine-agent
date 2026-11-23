@@ -107,9 +107,9 @@ function tsMs(ts: string): number {
   return Number.isNaN(t) ? NaN : t;
 }
 
-/** 任务已收尾（机械事实）：四时刻任一 / 汇报存档 / 末条执行终态——不读任务级状态词。 */
+/** 任务已收尾（机械事实）：终止事件 / 汇报存档 / 末条执行终态——不读任务级状态词。 */
 function settledOf(task: TaskRecordJson): boolean {
-  if (task.cancelledAt !== undefined || task.diedAt !== undefined || task.timedOutAt !== undefined || task.resourceLimitedAt !== undefined) return true;
+  if (task.termination !== undefined) return true;
   if ((task.resultText ?? task.replyText ?? '').trim() !== '') return true;
   const last = task.executions[task.executions.length - 1]?.status;
   return last === 'completed' || last === 'failed' || last === 'refused';

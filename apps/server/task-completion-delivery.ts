@@ -381,25 +381,18 @@ export function taskCancelledFactText(input: { name?: string }): string {
 
 /**
  * 重启对账**事实**文本（宿主拼，给模型读）：进程重启后，用户以为还在办的任务实际状态已变或
- * 说不清（`running` 且租约过期的行在启动 pump 里如实落 result_unknown，不重放；
- * 取消孤儿 = `cancel_requested_at` 已落、仍在推进、无有效租约的行，也在同一次恢复扫描里
- * 按同口径落 died_at（结果未知）并并进 recovered）——
+ * 说不清（已启动且无汇报的存量行在启动 pump 里按 died 收口 = 结果未知，不重放）——
  *   `[重启对账]「<业务名>」这件事我这边重启过，现在状态说不清（做没做完无法确认）。
  *    请如实告诉用户，别让他一直等下去，并给出下一步能做什么。`
- * `pendingCancel` = 用户说过停、重启前没停完的那一类：主语如实点明「你要我停」，
- * 免得用户以为停已经生效。
  *
  * 这是新增出口（此前没有任何东西告诉用户），宿主没有对应文案——唤醒不可用时只记事件
  * （不猜、不替它说）。
  */
-export function taskRestartFactText(input: { name?: string; pendingCancel?: boolean }): string {
+export function taskRestartFactText(input: { name?: string }): string {
   const subject = input.name !== undefined && input.name.trim() !== ''
     ? `「${truncatedName(input.name)}」`
     : '你交代的那件事';
-  const subjectClause = input.pendingCancel === true
-    ? `${subject}这件事你要我停，我重启前没停完`
-    : `${subject}这件事我这边重启过`;
-  return `[重启对账]${subjectClause}，现在状态说不清（做没做完无法确认）。`
+  return `[重启对账]${subject}这件事我这边重启过，现在状态说不清（做没做完无法确认）。`
     + '请如实告诉用户，别让他一直等下去，并给出下一步能做什么。';
 }
 

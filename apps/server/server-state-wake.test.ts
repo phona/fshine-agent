@@ -268,14 +268,6 @@ async function makeFixture(mode: Mode, options: {
   runtimeOverrides?: Partial<NonNullable<AppConfig['runtime']>>;
   /** 预置一条「上一进程死在回合里、租约已过期」的 running 行（重启对账用例）。 */
   seedInterrupted?: boolean;
-  /** 预置一条「用户说了停、执行端没确认就断电」的取消请求行（取消孤儿；请求持久事实）。 */
-  seedCancelRequested?: boolean;
-  /**
-   * 预置一条 v5 迁移后的取消孤儿：cancel_requested_at 已落、仍在推进、**无租约**
-   * （旧 status='cancelling' 迁移形状）——重启扫描必须按「取消请求 + 仍在推进」捞到它，
-   * 不能因为没租约/没 round_failed 而永远够不着。
-   */
-  seedMigratedCancelOrphan?: boolean;
   /** 投递面模式（缺省 live；silent = 非 live 部署的抑制语义）。 */
   deliveryMode?: 'live' | 'silent';
   /** 执行器替身覆盖（缺省 = 受闸的 GatedExecutor；抛错回合用例用）。 */
@@ -299,38 +291,6 @@ async function makeFixture(mode: Mode, options: {
         leaseUntil: new Date(Date.now() - 1_000).toISOString(),
         updatedAt: new Date(Date.now() - 60_000).toISOString(),
       });
-    } finally {
-      registry.close();
-    }
-  }
-  if (options.seedCancelRequested === true) {
-    const registry = createSqliteTaskRegistry(dbPath);
-    try {
-      // 用户说了停（落**持久**请求事实 cancel_requested_at），执行端没确认就断电：形状 = 取消
-      // 孤儿。重启后 pump 的 expireLeases 把它落 died（结果未知），重启对账据请求事实如实说
-      // 「你要我停、没停完」（此前请求只在本进程内存里，一重启就丢）。
-      registry.begin({ taskId: 'task_cancelling_orphan', ...SCOPE, request: TASK_TEXT, queued: true });
-      registry.markCancelRequested('task_cancelling_orphan');
-      registry.store.armLease('task_cancelling_orphan', {
-        owner: 'dead-process',
-        leaseUntil: new Date(Date.now() - 1_000).toISOString(),
-        updatedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
-      });
-    } finally {
-      registry.close();
-    }
-  }
-  if (options.seedMigratedCancelOrphan === true) {
-    const registry = createSqliteTaskRegistry(dbPath);
-    try {
-      // v5 迁移形状：cancel_requested_at 已落、running_since 已回填、无租约、无 round_failed_at。
-      // 旧实现把 cancelling 也写 round_failed_at → 过期租约扫描（要租约）与「仍在推进」扫描
-      //（要 round_failed 为空）双双够不着，重启后永远收不到「你要我停、没停完」。
-      registry.begin({ taskId: 'task_cancel_orphan', ...SCOPE, request: TASK_TEXT, queued: true });
-      registry.markCancelRequested('task_cancel_orphan');
-      registry.armLease('task_cancel_orphan', { owner: 'dead-process', leaseMs: 60_000 });
-      // 清租约，只留 running_since（迁移行没有活租约）。
-      registry.releaseTaskLease('task_cancel_orphan');
     } finally {
       registry.close();
     }
@@ -468,8 +428,8 @@ function readTask(dbPath: string, taskId: string): {
       liveness: taskLivenessOf(task) ?? null,
       lastExecutionStatus: lastExecutionOf(task)?.status,
       reported: taskReportedOf(task),
-      cancelled: task.cancelledAt !== undefined,
-      died: task.diedAt !== undefined,
+      cancelled: task.termination?.kind === 'cancelled',
+      died: task.termination?.kind === 'died',
       pendingQuestion: task.pendingQuestion !== undefined,
     };
   } finally {
@@ -881,7 +841,7 @@ describe('状态变化唤醒（server 级）：重启对账', () => {
       expect(requestHasUserText(fx.scripted!.requests(), '[重启对账]')
         && fx.scripted!.requests().some((request) => userTextOf(request.messages[request.messages.length - 1]).startsWith('[重启对账]'))).toBe(true);
       // 不重放：如实落 result_unknown（任务终局 failed），执行器一次都没被叫。
-      expect(readTask(fx.dbPath, 'task_interrupted')).toMatchObject({ liveness: 'died' });
+      expect(readTask(fx.dbPath, 'task_interrupted')).toMatchObject({ liveness: null, died: true });
       expect(fx.executor.calls).toBe(0);
     } finally {
       await fx.close();
@@ -896,7 +856,7 @@ describe('状态变化唤醒（server 级）：重启对账', () => {
       }, { timeout: 10_000 });
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(fx.delivery.sentTexts).toHaveLength(0);
-      expect(readTask(fx.dbPath, 'task_interrupted')).toMatchObject({ liveness: 'died' });
+      expect(readTask(fx.dbPath, 'task_interrupted')).toMatchObject({ liveness: null, died: true });
       expect(fx.executor.calls).toBe(0);
     } finally {
       await fx.close();
@@ -915,68 +875,12 @@ describe('状态变化唤醒（server 级）：重启对账', () => {
       // 事实不丢：下一次用户开口随 injections 进模型上下文（既有机制）。
       await fx.server.handler(incoming('m-2', '然后呢'));
       expect(requestHasUserText(fx.scripted!.requests(), '[重启对账]')).toBe(true);
-      expect(readTask(fx.dbPath, 'task_interrupted')).toMatchObject({ liveness: 'died' });
+      expect(readTask(fx.dbPath, 'task_interrupted')).toMatchObject({ liveness: null, died: true });
     } finally {
       await fx.close();
     }
   });
 
-  it('④d 取消孤儿（用户说了停、重启前没确认）→ 回收成 result_unknown 并如实说清「你要我停，没停完」', async () => {
-    // Grok 复审 2026-11-22：取消请求此前只进进程内 Set，无持久列——断电重启后底账看不出
-    // 「你要我停、没停完」。请求落 cancel_requested_at 后，重启对账据此如实点明。
-    const fx = await makeFixture('line', { seedCancelRequested: true });
-    try {
-      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
-      expect(fx.delivery.sentTexts[0]!.text).toBe(`「${TASK_NAME}」我这边重启过，状态说不清了；你说一声我就重来。`);
-      const wake = wakeEventOf(fx.logs, 'task_restart_wake');
-      expect(wake).toMatchObject({ outcome: 'woken', taskId: 'task_cancelling_orphan' });
-      // 事实如实点明「你要我停、没停完」（别让用户以为停已生效）。
-      const fact = fx.scripted!.requests()
-        .flatMap((request) => request.messages.map((message) => userTextOf(message)))
-        .find((text) => text.startsWith('[重启对账]'));
-      expect(fact).toContain('你要我停');
-      expect(fact).toContain('没停完');
-      // 终态：result_unknown（不宣称已取消、不重放），执行器零调用。
-      expect(readTask(fx.dbPath, 'task_cancelling_orphan')).toMatchObject({ liveness: 'died' });
-      expect(fx.executor.calls).toBe(0);
-    } finally {
-      await fx.close();
-    }
-  });
-
-  it('④e 迁移后的取消孤儿（无租约、cancel_requested 已落）→ 恢复扫描捞到，唤醒说清「你要我停、没停完」', async () => {
-    // blocking 2：旧迁移把 cancelling 也写 round_failed_at——取消孤儿既无过期租约（过期扫描
-    // 够不着）又因 round_failed 非空不算「仍在推进」（恢复扫描够不着），重启后永远收不到这条。
-    // 迁移只落 cancel_requested_at 后，恢复扫描按「取消请求 + 仍在推进」把它并进 recovered。
-    const fx = await makeFixture('line', { seedMigratedCancelOrphan: true });
-    try {
-      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
-      expect(fx.delivery.sentTexts[0]!.text).toBe(`「${TASK_NAME}」我这边重启过，状态说不清了；你说一声我就重来。`);
-      const wake = wakeEventOf(fx.logs, 'task_restart_wake');
-      expect(wake).toMatchObject({ outcome: 'woken', taskId: 'task_cancel_orphan' });
-      // pendingCancel 读得到：事实如实点明「你要我停、没停完」。
-      const fact = fx.scripted!.requests()
-        .flatMap((request) => request.messages.map((message) => userTextOf(message)))
-        .find((text) => text.startsWith('[重启对账]'));
-      expect(fact).toContain('你要我停');
-      expect(fact).toContain('没停完');
-      // 不重放、不宣称已取消：执行器零调用；取消孤儿按过期租约同口径落 died_at（结果未知），
-      // 但不写 cancelled_at（请求 ≠ 确认）——唤醒一次即止，不再被在跑/久提醒扫描命中。
-      expect(fx.executor.calls).toBe(0);
-      expect(readTask(fx.dbPath, 'task_cancel_orphan')).toMatchObject({ liveness: 'died', died: true, cancelled: false });
-      const record = createSqliteTaskRegistry(fx.dbPath, { readOnly: true });
-      try {
-        const task = record.get('task_cancel_orphan', SCOPE);
-        expect(task.cancelRequestedAt).toBeDefined();
-        expect(task.diedAt).toBeDefined();
-        expect(task.cancelledAt).toBeUndefined();
-      } finally {
-        record.close();
-      }
-    } finally {
-      await fx.close();
-    }
-  });
 });
 
 // ---------------------------------------------------------------------------

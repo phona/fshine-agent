@@ -154,6 +154,7 @@ async function makeFixture(input: {
       throw new Error('（测试）');
     },
     inFlight: () => [],
+    isLive: () => false,
   };
   const runner = input.makeRunner?.(registry) ?? stubRunner;
   const session = await createSession({
@@ -355,6 +356,7 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
         confirm: () => ({ outcome: 'no_confirmation', taskId: 't' }),
         resume: (taskId) => ({ outcome: 'not_waiting', taskId, status: 'queued' }),
         inFlight: () => [],
+        isLive: () => false,
       }),
     });
     try {

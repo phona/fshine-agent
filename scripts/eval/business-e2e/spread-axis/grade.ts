@@ -135,12 +135,12 @@ function indicatorsOf(caseDef: DsCase, sample: SampleRecord, toolCalls: readonly
     if (e.isRetry === true) retryLabeled += 1;
   }
   const maxSameKeyAttempts = attemptCounts.size === 0 ? 0 : Math.max(...attemptCounts.values());
-  // 任务事实分桶（不读任务级状态词）：已收尾（四时刻/汇报存档/末条执行终态）、取消、已汇报。
+  // 任务事实分桶（不读任务级状态词）：已收尾（终止事件/汇报存档/末条执行终态）、取消、已汇报。
   const taskFacts = {
-    ended: tasks.filter((t) => t.cancelledAt !== undefined || t.diedAt !== undefined || t.timedOutAt !== undefined || t.resourceLimitedAt !== undefined
+    ended: tasks.filter((t) => t.termination !== undefined
       || (t.resultText ?? t.replyText ?? '').trim() !== ''
       || ['completed', 'failed', 'refused'].includes(t.executions[t.executions.length - 1]?.status ?? '')).length,
-    cancelled: tasks.filter((t) => t.cancelledAt !== undefined).length,
+    cancelled: tasks.filter((t) => t.termination?.kind === 'cancelled').length,
     reported: tasks.filter((t) => (t.resultText ?? t.replyText ?? '').trim() !== '').length,
   };
 

@@ -622,17 +622,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
    */
   const taskScopeOf = (
     taskId: string,
-  ): { principalId: string; sessionId: string; request: string; pendingCancel: boolean } | undefined => {
+  ): { principalId: string; sessionId: string; request: string } | undefined => {
     try {
       const record = (taskRegistry as unknown as {
-        get(id: string): { principalId: string; sessionId: string; request: string; cancelRequestedAt?: string };
+        get(id: string): { principalId: string; sessionId: string; request: string };
       }).get(taskId);
       return {
         principalId: record.principalId,
         sessionId: record.sessionId,
         request: record.request,
-        // 取消请求事实（请求 ≠ 确认）：重启对账据此如实说「你要我停、没停完」。
-        pendingCancel: record.cancelRequestedAt !== undefined,
       };
     } catch {
       return undefined;
@@ -687,8 +685,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           request: string;
           replyText?: string;
           resultText?: string;
-          diedAt?: string | null;
-          resourceLimitedAt?: string | null;
+          termination?: { kind: string; at: string };
         };
       }).get(taskId);
       const facts = roundFacts.get(taskId);
@@ -698,8 +695,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         ...(facts?.code === undefined ? {} : { code: facts.code }),
         ...(facts?.reasonCode === undefined ? {} : { reasonCode: facts.reasonCode }),
         ...(facts?.partial === undefined ? {} : { partial: facts.partial }),
-        ...(record.diedAt !== undefined && record.diedAt !== null ? { died: true } : {}),
-        ...(record.resourceLimitedAt !== undefined && record.resourceLimitedAt !== null ? { resourceLimited: true } : {}),
+        ...(record.termination?.kind === 'died' ? { died: true } : {}),
+        ...(record.termination?.kind === 'resource_limited' ? { resourceLimited: true } : {}),
         report: record.replyText ?? record.resultText ?? '',
       });
     } catch {
@@ -721,24 +718,27 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     try {
       const record = (taskRegistry as unknown as {
         get(id: string): {
-          diedAt?: string | null;
-          resourceLimitedAt?: string | null;
+          termination?: { kind: string; at: string };
           runningSince?: string;
+          leaseUntil?: string;
+          executions?: readonly { status: string }[];
+          resultText?: string;
+          replyText?: string;
           request?: string;
           name?: string | null;
         };
       }).get(taskId);
       // 已启动事实走共享判定（与「在跑」唯一谓词同源）：这里判的是「有没有跑过痕迹」，
-      // 不是「还在不在跑」，故只用 taskStartedOf + 两个失败结束事实。
-      if (!taskStartedOf(record) && record.diedAt === undefined && record.resourceLimitedAt === undefined) {
+      // 不是「还在不在跑」，故只用 taskStartedOf + 终止事件（died/资源拒绝）。
+      const died = record.termination?.kind === 'died';
+      const resourceLimited = record.termination?.kind === 'resource_limited';
+      if (!taskStartedOf(record) && !died && !resourceLimited) {
         return undefined;
       }
       const name = taskNameOf(taskId, record.request ?? '');
       return {
-        ...(record.diedAt !== undefined && record.diedAt !== null ? { status: 'result_unknown' as const } : {}),
-        ...(record.resourceLimitedAt !== undefined && record.resourceLimitedAt !== null
-          ? { resourceLimited: true }
-          : {}),
+        ...(died ? { status: 'result_unknown' as const } : {}),
+        ...(resourceLimited ? { resourceLimited: true } : {}),
         ...(name === undefined ? {} : { name }),
       };
     } catch {
@@ -754,16 +754,13 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     try {
       const record = (taskRegistry as unknown as {
         get(id: string): {
-          diedAt?: string | null;
-          resourceLimitedAt?: string | null;
-          timedOutAt?: string | null;
-          cancelledAt?: string | null;
+          termination?: { kind: string; at: string };
           executions?: ReadonlyArray<{ status?: string; operation?: string; error?: { code?: string; message?: string } }>;
         };
       }).get(taskId);
       const lines: string[] = [];
-      if (record.diedAt !== undefined && record.diedAt !== null) lines.push('看门狗观察到执行租约过期（结果未知，禁止自动重放）。');
-      if (record.resourceLimitedAt !== undefined && record.resourceLimitedAt !== null) lines.push('本次被资源策略拒绝（未进入执行）。');
+      if (record.termination?.kind === 'died') lines.push('看门狗观察到执行租约过期（结果未知，禁止自动重放）。');
+      if (record.termination?.kind === 'resource_limited') lines.push('本次被资源策略拒绝（未进入执行）。');
       const executions = record.executions ?? [];
       if (executions.length === 0) {
         lines.push('账本里没有执行事实（这次交办没有发出任何办理动作）。');
@@ -2036,15 +2033,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         // 照旧核销抑制（本分支已送达，不重复发）；非失败终局不替它说话：核销本回合抑制，
         // 交回既有终态推送面（各自既有话术）。
         for (const suppressedTaskId of new Set(turn.pushSuppressedTaskIds ?? [])) {
-          // 失败兜底的收录面（S1 事实口径）：died（结果未知）/ 资源拒绝 / 本回合 onTaskFailed
+          // 失败兜底的收录面（零状态事实口径）：died（结果未知）/ 资源拒绝 / 本回合 onTaskFailed
           // 带到的「无汇报」种类。取消/超时等有自己通知面的事实不在这里冒充失败。
           const failureRecord = (taskRegistry as unknown as {
-            get(id: string): { diedAt?: string | null; resourceLimitedAt?: string | null };
+            get(id: string): { termination?: { kind: string; at: string } };
           }).get(suppressedTaskId);
           const round = roundFacts.get(suppressedTaskId);
           roundFacts.delete(suppressedTaskId);
-          const isFailureFact = failureRecord?.diedAt !== undefined && failureRecord.diedAt !== null
-            || failureRecord?.resourceLimitedAt !== undefined && failureRecord.resourceLimitedAt !== null
+          const isFailureFact = failureRecord?.termination?.kind === 'died'
+            || failureRecord?.termination?.kind === 'resource_limited'
             || round !== undefined;
           if (!isFailureFact) {
             claimPushSuppressedInTurn(sessionKey, suppressedTaskId);
@@ -2052,15 +2049,15 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           }
           // 执行层原始码（本回合 onTaskFailed 带到的机械事实）：兜底话术按码归类（GATE_REFUSE → denied）。
           const failureFact = {
-            ...(failureRecord?.diedAt !== undefined && failureRecord.diedAt !== null
+            ...(failureRecord?.termination?.kind === 'died'
               ? { status: 'result_unknown' as const }
               : {}),
-            ...(failureRecord?.resourceLimitedAt !== undefined && failureRecord.resourceLimitedAt !== null
+            ...(failureRecord?.termination?.kind === 'resource_limited'
               ? { resourceLimited: true }
               : {}),
             ...(round?.status === 'result_unknown'
-              && (failureRecord?.diedAt === undefined || failureRecord.diedAt === null)
-              && (failureRecord?.resourceLimitedAt === undefined || failureRecord.resourceLimitedAt === null)
+              && failureRecord?.termination?.kind !== 'died'
+              && failureRecord?.termination?.kind !== 'resource_limited'
               ? { status: 'result_unknown' as const }
               : {}),
             ...(round?.code === undefined ? {} : { code: round.code }),
@@ -2178,12 +2175,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         continue;
       }
       const name = taskNameOf(taskId, scope.request);
-      // 重启对账事实（S1：died = 看门狗观察到的租约过期，结果未知不重放）。
-      // pendingCancel = 用户说过停、重启前没停完（cancel_requested_at 持久事实）：主语如实
-      // 点明「你要我停」，免得用户以为停已经生效。
+      // 重启对账事实（零状态：已启动且无汇报的存量行按 died 收口 = 结果未知不重放）。
+      // 取消请求不再持久化（请求不是结束事实）：重启后没有「你要我停、没停完」的单独出口，
+      // 与任何无汇报收尾同口径说「在我这边重启过，状态说不清」。
       const factText = taskRestartFactText({
         ...(name === undefined ? {} : { name }),
-        ...(scope.pendingCancel ? { pendingCancel: true } : {}),
       });
       // 逐条 fire-and-forget（经会话链，与用户回合串行）：不阻塞启动、不改变任务事实。
       // 宿主侧**没有**这一条的文案（新增出口）：唤醒不可用/失败 = 只记事件（不静默猜）。

@@ -195,8 +195,8 @@ describe('waiting_user 到期消费者', () => {
     h.timers.advance(2_000);
 
     const task = h.registry.get('w1', SCOPE);
-    expect(task.timedOutAt).toBeDefined();
-    expect(task.timedOutAt).toBeDefined();
+    expect(task.termination?.kind).toBe('timed_out');
+    expect(task.termination?.kind).toBe('timed_out');
     // 既有 reason 枚举 + 既有通知意图（不新造状态/事件名）。
     const timedOut = outbox.listNotifications('w1').filter((notification) => notification.kind === 'timed_out');
     expect(timedOut).toHaveLength(1);
@@ -216,7 +216,7 @@ describe('waiting_user 到期消费者', () => {
 
     clock.advance(1); // 恰好到期（边界闭合：>= timeout）
     h.runner.pump();
-    expect(h.registry.get('w2', SCOPE).timedOutAt).toBeDefined();
+    expect(h.registry.get('w2', SCOPE).termination?.kind).toBe('timed_out');
   });
 
   it('③ 到期前 task_resume → running，之后不再被判超时', async () => {
@@ -261,8 +261,8 @@ describe('waiting_user 到期消费者', () => {
 
     const summary = runner.pump(); // 启动后的第一个推进周期（不依赖上一进程的内存定时器）
     expect(summary.timedOutWaiting).toEqual(['w4']);
-    expect(second.get('w4', SCOPE).timedOutAt).toBeDefined();
-    expect(second.get('w4', SCOPE).timedOutAt).toBeDefined();
+    expect(second.get('w4', SCOPE).termination?.kind).toBe('timed_out');
+    expect(second.get('w4', SCOPE).termination?.kind).toBe('timed_out');
     expect(outbox.listNotifications('w4').filter((notification) => notification.kind === 'timed_out')).toHaveLength(1);
     expect(executor.inputs).toHaveLength(0); // 等待超时不是执行回合，不重放
   });

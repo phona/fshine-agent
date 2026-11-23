@@ -328,7 +328,7 @@ describe('长任务异步（契约 v4）', () => {
     expect(h.runner.cancel('A').outcome).toBe('requested');
     await h.runner.whenIdle();
     expect(h.longTasks.aborts).toEqual(['op-1']);
-    expect(h.registry.get('A', SCOPE).cancelledAt).toBeDefined();
+    expect(h.registry.get('A', SCOPE).termination?.kind).toBe('cancelled');
     expect(h.events).toEqual(expect.arrayContaining([
       expect.objectContaining({ event: 'execution_aborted', operationId: 'op-1', result: 'cancelled' }),
     ]));
@@ -425,8 +425,8 @@ describe('长任务异步（契约 v4）', () => {
     await flush();
     await runner.whenIdle();
 
-    // 装配缺陷：落「结果未知」结束事实（diedAt），末条执行仍是 accepted 不冒充完成。
-    expect(registry.get('A', SCOPE).diedAt).toBeDefined();
+    // 装配缺陷：追加「结果未知」终止事件（died），末条执行仍是 accepted 不冒充完成。
+    expect(registry.get('A', SCOPE).termination?.kind).toBe('died');
     expect(archivedReportOf(registry.get('A', SCOPE))).toBeUndefined();
     expect(logs).toEqual(expect.arrayContaining([
       expect.objectContaining({ event: 'task_long_task_unsupported', taskId: 'A' }),

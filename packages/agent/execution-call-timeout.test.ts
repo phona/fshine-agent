@@ -216,7 +216,7 @@ describe('单次执行层调用的传输超时（有界 + 结果未知）', () =
       const scope = { principalId: 'wecom:call-timeout', sessionId: 'sess_call_timeout' };
       const record = fx.registry.get(task.taskId, scope);
       expect(['failed', 'refused']).toContain(lastExecutionOf(record)?.status);
-      expect((lastFailureOf(record)?.error?.code === 'result_unknown' || record.diedAt !== undefined)).toBe(true);
+      expect((lastFailureOf(record)?.error?.code === 'result_unknown' || record.termination?.kind === 'died')).toBe(true);
 
       // 逻辑操作账行：unknown（不冒充 failed），且 outcome 里留着超时原话。
       expect(fx.requests).toHaveLength(1);

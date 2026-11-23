@@ -208,7 +208,7 @@ describe('tasks --redo：重新推进判定与拒绝路径', () => {
     const blank = await runRedo(redoInput(syntheticTask({
       taskId: 'task_e',
       request: '   ',
-      roundFailedAt: '2026-11-14T00:00:02.000Z',
+      termination: { kind: 'round_failed', at: '2026-11-14T00:00:02.000Z' },
     }), '/nope.db'), deps);
     expect(blank.exitCode).toBe(2);
     expect(blank.stderr).toBe('任务缺少交办原文，无法重新推进：task_e。\n');
@@ -257,13 +257,13 @@ describe('tasks --redo：重新推进判定与拒绝路径', () => {
     expect(expiredOutcome.stdout).toBe('');
     expect(expiredOutcome.stderr).toBe('任务尚未收尾，不能重新推进：task_lease_expired（等它收尾或先取消）。\n');
 
-    const cancelled = syntheticTask({ taskId: 'task_cancelled', cancelledAt: '2026-11-14T00:00:02.000Z' });
+    const cancelled = syntheticTask({ taskId: 'task_cancelled', termination: { kind: 'cancelled', at: '2026-11-14T00:00:02.000Z' } });
     const cancelledOutcome = await runRedo(redoInput(cancelled, '/nope.db'), deps);
     expect(cancelledOutcome.exitCode).toBe(2);
     expect(cancelledOutcome.stdout).toBe('');
     expect(cancelledOutcome.stderr).toBe('任务已取消，不能重新推进：task_cancelled。\n');
 
-    const timedOut = syntheticTask({ taskId: 'task_timed_out', timedOutAt: '2026-11-14T00:00:03.000Z' });
+    const timedOut = syntheticTask({ taskId: 'task_timed_out', termination: { kind: 'timed_out', at: '2026-11-14T00:00:03.000Z' } });
     const timedOutOutcome = await runRedo(redoInput(timedOut, '/nope.db'), deps);
     expect(timedOutOutcome.exitCode).toBe(2);
     expect(timedOutOutcome.stdout).toBe('');
@@ -434,7 +434,7 @@ describe('tasks --redo：输出与错误码', () => {
 
   it('装配门拒绝 → exit 2（话术原样）；装配其它错误 → exit 1；send 失败 → exit 1 且报告已创建的新任务', async () => {
     // 可重推的原任务 = 已停（round_failed_at）；未收尾的行归 B2 守卫，到不了装配面。
-    const base = syntheticTask({ taskId: 'task_x', roundFailedAt: '2026-11-14T00:00:02.000Z' });
+    const base = syntheticTask({ taskId: 'task_x', termination: { kind: 'round_failed', at: '2026-11-14T00:00:02.000Z' } });
 
     const refused = await runRedo(redoInput(base, '/nope.db'), {
       assemble: async () => {

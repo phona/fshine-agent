@@ -3,7 +3,7 @@
  *
  * 迁移纪律（与 P1/P2a 同款，只做前向加法）：
  *   · 可写打开 v3 库 → 一次迁移：建 operations（IF NOT EXISTS）+ ADD COLUMN executions.dispatch_key，
- *     迁移前自动备份 <db>.backup-v4（内容 = 迁移前字节）；user_version 推进到 4；
+ *     迁移前自动备份 <db>.backup-v${TASK_STORE_SCHEMA_VERSION}（内容 = 迁移前字节）；user_version 推进到当前版本；
  *   · 既有数据安全：tasks/executions 的历史列与行逐字节不变；历史执行行 dispatch_key = NULL
  *     （读出缺省，不伪造）；
  *   · 幂等：二次打开零差异、不新增备份；
@@ -131,7 +131,7 @@ function executionRows(dbPath: string): unknown[] {
 }
 
 describe('U3 v4 迁移（v3 → v4）', () => {
-  it('建 operations / 加 dispatch_key / user_version=4 / 历史零改动 / 备份 .backup-v4；二次打开幂等', () => {
+  it('建 operations / 加 dispatch_key / user_version 推进 / 历史零改动 / 备份生成为当前版本；二次打开幂等', () => {
     const dbPath = tempDb();
     seedV3Db(dbPath);
     const preMigrationSha = sha256(dbPath);
@@ -146,13 +146,14 @@ describe('U3 v4 迁移（v3 → v4）', () => {
       'outcome_json', 'attempt', 'claimed_at', 'settled_at', 'delivered_at', 'replay_of',
     ]));
     expect(tableColumns(dbPath, 'executions')).toContain('dispatch_key');
+    expect(tableColumns(dbPath, 'task_events')).toEqual(expect.arrayContaining(['task_id', 'kind', 'at']));
     expect(userVersion(dbPath)).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(TASK_STORE_SCHEMA_VERSION).toBe(5);
+    expect(TASK_STORE_SCHEMA_VERSION).toBe(6);
 
     // 既有数据安全：历史列与行逐字节不变；历史执行行 dispatch_key 读出缺省（不伪造）。
     // 预期契约（2026-11-18）：两列只做前向加法（追加在末尾），历史列顺序不变。
     const afterTaskColumns = tableColumns(dbPath, 'tasks');
-    // v5 重建：结论列（status/reason/failure_reason）已删；历史事实列保留。
+    // v6 重建：结论列（status/reason/failure_reason）与终态列已删；历史事实列保留。
     expect(afterTaskColumns).not.toContain('status');
     expect(afterTaskColumns).not.toContain('reason');
     expect(afterTaskColumns).not.toContain('failure_reason');
@@ -161,7 +162,7 @@ describe('U3 v4 迁移（v3 → v4）', () => {
     ));
     expect(taskRows(dbPath)).toEqual(beforeTasks);
     expect(longRunningColumnsOf(dbPath)).toEqual([
-      // v5 重建：曾离开 queued 的历史行（终局/取消）回填 running_since=updated_at（不再可被认领）；其余 NULL。
+      // v6 重建：旧任务全部当已结束，running_since 回填 updated_at（不再可被认领）。
       {
         long_running_notified_at: null,
         running_since: '2026-11-15T10:01:00.000Z',

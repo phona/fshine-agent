@@ -109,18 +109,20 @@ export interface OpsStatusCounts {
   resourceLimited: number;
 }
 
-/** 统计：总数 + 各机械事实桶计数（直接读 liveness 与账本事实，每任务按事实优先级归一个桶）。 */
+/** 统计：总数 + 各机械事实桶计数（直接读 liveness 与追加终止事件，每任务按事实优先级归一个桶）。 */
 export function countOpsStatuses(records: readonly TaskRecord[]): OpsStatusCounts {
   const counts: OpsStatusCounts = {
     total: records.length, reported: 0, noReport: 0, running: 0,
     queued: 0, waitingUser: 0, cancelled: 0, timedOut: 0, died: 0, resourceLimited: 0,
   };
   for (const task of records) {
+    // 跨进程读（ops 没有本进程 worker）：用租约/accepted 在途代理「可能活着」。
     const liveness = taskLivenessOf(task);
-    if (task.cancelledAt !== undefined) counts.cancelled += 1;
-    else if (task.timedOutAt !== undefined) counts.timedOut += 1;
-    else if (task.resourceLimitedAt !== undefined) counts.resourceLimited += 1;
-    else if (task.diedAt !== undefined || liveness === 'died') counts.died += 1;
+    const termination = task.termination;
+    if (termination?.kind === 'cancelled') counts.cancelled += 1;
+    else if (termination?.kind === 'timed_out') counts.timedOut += 1;
+    else if (termination?.kind === 'resource_limited') counts.resourceLimited += 1;
+    else if (termination?.kind === 'died' || liveness === 'died') counts.died += 1;
     else if (task.pendingQuestion !== undefined) counts.waitingUser += 1;
     else if (liveness === 'running') counts.running += 1;
     else if (taskReportedOf(task)) counts.reported += 1;
@@ -159,10 +161,9 @@ export function displayPath(dbPath: string, repoRoot: string): string {
   return relative !== '' && !relative.startsWith('..') ? relative : dbPath;
 }
 
-/** 未成功收尾（S1 机械事实）：无汇报 / 已取消 / 已超时 / 结果未知 / 资源受限——清单收录范围见 renderOpsPage。 */
+/** 未成功收尾（零状态机械事实）：终止事件（非 completed）/ 无汇报 / 结果未知——清单收录范围见 renderOpsPage。 */
 const isTerminalNonSuccess = (task: TaskRecord): boolean => {
-  if (task.cancelledAt !== undefined || task.timedOutAt !== undefined
-    || task.resourceLimitedAt !== undefined || task.diedAt !== undefined) return true;
+  if (task.termination !== undefined) return task.termination.kind !== 'completed';
   if (taskUnstartedOf(task) || taskReportedOf(task)) return false;
   return taskLivenessOf(task) === undefined;
 };

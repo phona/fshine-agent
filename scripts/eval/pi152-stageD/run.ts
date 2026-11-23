@@ -629,7 +629,7 @@ async function main(): Promise<number> {
         taskNo: task.taskNo ?? null,
         name: task.name ?? '',
         liveness: taskLivenessOf(task) ?? null,
-        cancelled: task.cancelledAt !== undefined,
+        cancelled: task.termination?.kind === 'cancelled',
         reason: lastFailureOf(task)?.error?.code ?? null,
         request: task.request,
         resultText: task.resultText ?? null,

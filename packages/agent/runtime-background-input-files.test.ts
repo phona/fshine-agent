@@ -224,6 +224,7 @@ async function makeFixture(input: {
     resume: (taskId, options) => realRunner.resume(taskId, options),
     confirm: (taskId, options) => realRunner.confirm(taskId, options),
     inFlight: () => realRunner.inFlight(),
+    isLive: (taskId) => realRunner.isLive(taskId),
   };
 
   const mainCapture: MainCapture = { results: [], toolErrors: [] };

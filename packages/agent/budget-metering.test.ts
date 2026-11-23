@@ -205,8 +205,8 @@ describe('恰好耗尽 / 超出：调用前确定性拒绝且零调用', () => {
     const first = tasks.find((task) => task.request === '第一件');
     expect(lastExecutionOf(first!)?.status).toBe('completed');
     const refused = tasks.find((task) => task.request === '第二件');
-    expect(refused!.resourceLimitedAt).toBeDefined();
-    expect(refused!.resourceLimitedAt).toBeDefined();
+    expect(refused!.termination?.kind).toBe('resource_limited');
+    expect(refused!.termination?.kind).toBe('resource_limited');
   });
 });
 

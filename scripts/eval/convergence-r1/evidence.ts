@@ -62,11 +62,8 @@ export interface TaskRecordJson {
   /** worker 汇报存档（语义；判 outcome 以 executions 机械事实为准，不一致不补）。 */
   resultText?: string;
   replyText?: string;
-  /** 一次性机械时刻（判据只读事实，不经过任何 status 投影）。 */
-  diedAt?: string;
-  cancelledAt?: string;
-  timedOutAt?: string;
-  resourceLimitedAt?: string;
+  /** 终止事件（追加事件账；判据只读事实，不经过任何 status 投影）。 */
+  termination?: { kind: string; at: string };
   executions: ExecutionRecordJson[];
   createdAt: string;
   updatedAt: string;

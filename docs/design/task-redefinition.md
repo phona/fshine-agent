@@ -37,3 +37,18 @@ task 没有 status。task = 身份（taskId）+ 归属（principal/session）+ �
 ## 6. 落地切片
 
 S0 本文档；S1 删 status + 收敛六处；S2 P3 对象身份；S3 worker 汇报契约进 prompt；S4 P1 对齐 + P4 登记。
+
+## 7. 零状态定稿（owner 2026-11-23）
+
+没有任何「状态」需要存储。任务行只存事实：`running_since`（这一轮何时启动）、`result_text` / `reply_text`（worker/Main 汇报）、`pending_question + waiting_since`（提问）、租约与提醒时刻、`executions`（执行事实）。原来六个可变终态列（`died_at` / `cancelled_at` / `timed_out_at` / `resource_limited_at` / `round_failed_at` / `cancel_requested_at`）**全部删除**，也不再新增任何终态列（含 `completed_at`）。
+
+**活/结束由事实现推**（`taskLivenessOf`，不落列）：
+
+- 排队：`running_since` 空 + 无汇报 + 无提问；
+- 在跑：已启动 + 无汇报/提问/终止事件 + 本进程有活 worker（runner 的 inFlight / waiters / controllers）；
+- 等用户：`pending_question`；
+- 结束：已启动且无活 worker（进程没了 = 全不活）——有汇报=正常结束，无汇报=结果未知；或已有终止事件。
+
+**「怎么结束」走追加事件**：终止时通过既有 emit / onTaskFact / outbox 链路追加一条 `task_events` 事实（`cancelled` / `timed_out` / `resource_limited` / `died` / `round_failed` / `completed`），同任务至多一条、不可变、重启后仍在。投递与 CLI 的「怎么结束」= 最新终止事件 + 原始执行事实；宿主不存结论词。
+
+**迁移**：旧库可写打开时重建 tasks 表（丢 status/reason/failure_reason 与六个终态列），旧任务全部当已结束（`running_since` 按 `updated_at` 回填），旧结论列可用的机械信息转成一条终止事件；历史汇报与执行事实原样保留。迁移（含事件回填）包在单个事务里。

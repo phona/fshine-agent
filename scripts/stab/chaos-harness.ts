@@ -131,7 +131,7 @@ function livenessOf(tasks: readonly TaskRecordView[], taskId: string): string | 
 }
 
 function cancelledOf(tasks: readonly TaskRecordView[], taskId: string): boolean {
-  return findTask(tasks, taskId)?.cancelledAt !== undefined;
+  return findTask(tasks, taskId)?.termination?.kind === 'cancelled';
 }
 
 // ---------------------------------------------------------------------------
@@ -227,7 +227,7 @@ async function runRestartNotificationScenario(scenario: ChaosScenario): Promise<
       .filter((taskId) => completedIds1.includes(taskId));
     report.leaseExpiredReplays = executor2.calls.filter((call) => {
       const task = findTask(tasks2, call.taskId);
-      return task?.diedAt !== undefined; // 结果未知（看门狗死亡事实）= result_unknown 的机械对应
+      return task?.termination?.kind === 'died'; // 结果未知（看门狗死亡事实）= result_unknown 的机械对应
     }).length;
     report.duplicateNotificationRows = notifications.duplicateRows;
     report.undeliveredNotifications = notifications.undelivered;
@@ -452,7 +452,7 @@ async function runCombinedWithDuplicate(scenario: ChaosScenario): Promise<ChaosR
       .filter((taskId) => completedIdsA.includes(taskId));
     report.leaseExpiredReplays = executorB.calls.filter((call) => {
       const task = findTask(tasksB, call.taskId);
-      return task?.diedAt !== undefined; // 结果未知（看门狗死亡事实）= result_unknown 的机械对应
+      return task?.termination?.kind === 'died'; // 结果未知（看门狗死亡事实）= result_unknown 的机械对应
     }).length;
     report.duplicateNotificationRows = notifications.duplicateRows;
     report.undeliveredNotifications = notifications.undelivered;

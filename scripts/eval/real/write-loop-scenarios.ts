@@ -434,7 +434,7 @@ export function taskFactsOf(records: readonly TaskRecord[]): TaskFact[] {
     ...(record.taskNo === undefined ? {} : { taskNo: record.taskNo }),
     ...(record.name === undefined ? {} : { name: record.name }),
     liveness: taskLivenessOf(record) ?? null,
-    cancelled: record.cancelledAt !== undefined,
+    cancelled: record.termination?.kind === 'cancelled',
     reported: archivedReportOf(record) !== undefined,
     ...(lastFailureOf(record)?.error?.code === undefined ? {} : { reason: lastFailureOf(record)?.error?.code! }),
     resultText: record.resultText ?? null,

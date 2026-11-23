@@ -18,7 +18,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { ExecutionStatus } from '@fshine/contracts/execution-contract';
-import { deriveTaskName, type ExecutionRecord } from './src/task-registry';
+import { deriveTaskName, type ExecutionRecord, type TaskTermination } from './src/task-registry';
 import {
   createTaskRunner,
   type CancelOutcome,
@@ -82,8 +82,9 @@ interface FakeTask {
   cancelledAt?: string;
   timedOutAt?: string;
   resourceLimitedAt?: string;
-  cancelRequestedAt?: string;
   roundFailedAt?: string;
+  /** 追加终止事件（零状态：TaskRecordView 的事实面；测试替身与真实实现同形）。 */
+  termination?: TaskTermination;
   taskNo: number;
   name: string;
   executions: ExecutionRecord[];
@@ -128,6 +129,10 @@ class FakeRegistry implements TaskRegistryPort {
       executions: [],
       createdAt: now,
       updatedAt: now,
+      ...(input.status === 'cancelled' ? { termination: { kind: 'cancelled' as const, at: now } } : {}),
+      ...(input.status === 'timed_out' ? { termination: { kind: 'timed_out' as const, at: now } } : {}),
+      ...(input.status === 'completed' ? { termination: { kind: 'completed' as const, at: now } } : {}),
+      ...(input.status === 'failed' ? { termination: { kind: 'round_failed' as const, at: now } } : {}),
       ...(input.leaseOwner === undefined ? {} : { leaseOwner: input.leaseOwner }),
       ...(input.leaseUntil === undefined ? {} : { leaseUntil: input.leaseUntil }),
     };
@@ -300,14 +305,6 @@ class FakeRegistry implements TaskRegistryPort {
     return affected;
   }
 
-  /** 重启恢复：取消请求 + 仍在推进 + 无有效租约（取消孤儿）= 够得着的「你要我停、没停完」。 */
-  listCancelRequested(now = this.clock().toISOString()): readonly TaskRecordView[] {
-    return [...this.tasks.values()].filter((task) =>
-      task.status === 'running'
-      && task.cancelRequestedAt !== undefined
-      && (task.leaseUntil === undefined || task.leaseUntil <= now));
-  }
-
   // --- TaskRegistryPort（S1 事实写入面；测试替身仍以状态词建模供本文件断言） ---
 
   markCancelled(taskId: string, options?: { scope?: TaskScope }): TaskRecordView {
@@ -337,19 +334,14 @@ class FakeRegistry implements TaskRegistryPort {
     return task;
   }
 
-  markCancelRequested(taskId: string, options?: { scope?: TaskScope }): TaskRecordView {
-    const task = this.require(taskId, options?.scope);
-    // 请求 ≠ 确认：只落请求时刻（一次性），不改终局、不清租约。
-    if (task.cancelRequestedAt === undefined) task.cancelRequestedAt = this.clock().toISOString();
-    return task;
-  }
-
   /** 回合失败事实：底账不写结论（真实实现落 round_failed_at 一次性收尾事实）；测试替身落 failed 供断言。 */
   noteRoundFailed(taskId: string): void {
     const task = this.require(taskId);
+    if (task.termination !== undefined) return; // 终止一次性/不翻案
+    task.roundFailedAt = this.clock().toISOString();
+    task.termination = { kind: 'round_failed', at: task.roundFailedAt };
     const legal = (LEGAL_EDGES[task.status] ?? []).includes('failed');
     if (legal) this.commit(task, 'failed');
-    if (task.roundFailedAt === undefined) task.roundFailedAt = this.clock().toISOString();
   }
 
   /** 后台完成汇报存档（可选端口；runner 有它即走存档面）。 */
@@ -357,7 +349,9 @@ class FakeRegistry implements TaskRegistryPort {
     for (const taskId of taskIds) {
       const task = this.tasks.get(taskId);
       if (task === undefined) continue;
-      if ((LEGAL_EDGES[task.status] ?? []).includes('completed')) this.commit(task, 'completed');
+      if (task.termination === undefined && (LEGAL_EDGES[task.status] ?? []).includes('completed')) {
+        this.commit(task, 'completed');
+      }
       task.resultText = replyText;
     }
   }
@@ -366,8 +360,8 @@ class FakeRegistry implements TaskRegistryPort {
     return this.require(taskId).diedAt;
   }
 
-  cancelRequestedAtOf(taskId: string): string | undefined {
-    return this.require(taskId).cancelRequestedAt;
+  terminationOf(taskId: string): TaskTermination | undefined {
+    return this.require(taskId).termination;
   }
 
   roundFailedAtOf(taskId: string): string | undefined {
@@ -394,6 +388,12 @@ class FakeRegistry implements TaskRegistryPort {
     else if (to === 'timed_out') { task.reason = options.reason ?? 'timeout'; if (task.timedOutAt === undefined) task.timedOutAt = at; }
     else if (to === 'failed') { task.reason = options.reason ?? 'failed_confirmed'; }
     else task.reason = undefined;
+    if (task.termination === undefined) {
+      if (to === 'cancelled') task.termination = { kind: 'cancelled', at };
+      else if (to === 'timed_out') task.termination = { kind: 'timed_out', at };
+      else if (to === 'completed') task.termination = { kind: 'completed', at };
+      else if (to === 'failed') task.termination = { kind: options.reason === 'result_unknown' ? 'died' : 'round_failed', at };
+    }
     if (to !== 'running') {
       task.leaseOwner = undefined;
       task.leaseUntil = undefined;
@@ -851,9 +851,9 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
     expect(h.policy.backgroundInUse).toBe(0);
   });
 
-  it('running 取消：请求落持久列 cancel_requested_at（请求 ≠ 确认；确认后才 cancelled）', async () => {
-    // Grok 复审 2026-11-22：取消请求此前只进进程内 Set，无持久列——断电重启后底账看不出
-    // 「你要我停、没停完」。请求必须落 cancel_requested_at（一次性、不改终局、不清租约）。
+  it('running 取消：请求只在本进程内存（零状态不落可变状态列）；确认后才 cancelled', async () => {
+    // 零状态（owner 2026-11-23）：取消**请求**不是结束事实，不落状态列/事件；重启后按
+    // 「已启动 + 无汇报 + 无活 worker = 结果未知」如实收口。
     const h = harness();
     submit(h, 't1');
     h.runner.pump();
@@ -864,8 +864,8 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
 
     const outcome = h.runner.cancel('t1');
     expect(outcome).toEqual({ outcome: 'requested', taskId: 't1' });
-    // 请求已持久化（重启对账可读）——但未确认：仍是 running，不是 cancelled。
-    expect(h.registry.cancelRequestedAtOf('t1')).toBeDefined();
+    // 请求不是终止事件——未确认：仍是 running、底账无终止事件。
+    expect(h.registry.terminationOf('t1')).toBeUndefined();
     expect(h.registry.statusOf('t1')).toBe('running');
 
     await h.runner.whenIdle();
@@ -873,14 +873,11 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
   });
 
   it('running 取消请求（租约仍有效）不并入恢复扫描：进程内在飞等确认，不当取消孤儿', async () => {
-    // blocking 2 的反向：恢复扫描只捞**无有效租约**的取消孤儿（进程/执行端已断）。
-    // 进程内新取消的租约还在（回合在飞），若把它并进 recovered，重启对账出口会误说
-    // 「我重启过/你让我停没停完」——行为必须不变。
+    // 零状态：恢复扫描只看过期租约；进程内刚请求取消的回合租约仍有效 → 不并入 recovered。
     const h = harness();
     submit(h, 't1');
     h.runner.pump();
     expect(h.runner.cancel('t1')).toEqual({ outcome: 'requested', taskId: 't1' });
-    expect(h.registry.cancelRequestedAtOf('t1')).toBeDefined();
     // 请求之后、确认之前再 pump：租约仍有效 → 不并入 recovered。
     expect(h.runner.pump().recovered).toEqual([]);
     expect(h.registry.statusOf('t1')).toBe('running');
@@ -890,32 +887,12 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
     expect(h.registry.statusOf('t1')).toBe('cancelled');
   });
 
-  it('取消孤儿被 recovery 捞到 → 落一次 died_at（结果未知）；下一次 pump 不再 recovered、不再算在推进', () => {
-    // 与过期租约同口径：取消孤儿 = 用户要停、进程已断、结果说不清 → died_at（结果未知）。
-    // 不落 cancelled_at（请求 ≠ 确认）；落 died_at 后唤醒一次即止，不会被在跑/久提醒反复命中。
-    const h = harness();
-    h.registry.seed({ taskId: 't_orphan', status: 'running', request: '取消孤儿' });
-    h.registry.markCancelRequested('t_orphan');
-    expect(h.registry.cancelRequestedAtOf('t_orphan')).toBeDefined();
-    expect(h.registry.diedAtOf('t_orphan')).toBeUndefined();
-
-    const restarted = h.start();
-    expect(restarted.runner.pump().recovered).toEqual(['t_orphan']);
-    expect(h.registry.diedAtOf('t_orphan')).toBeDefined();
-    // 结果未知（不是 cancelled）：请求 ≠ 确认，不冒充「已停」。
-    expect(h.registry.reasonOf('t_orphan')).toBe('result_unknown');
-    expect(h.registry.statusOf('t_orphan')).toBe('failed');
-
-    // 一次性：下一次 pump 不再捞它（已不是「仍在推进」）。
-    expect(restarted.runner.pump().recovered).toEqual([]);
-  });
-
   it('queued 取消：机械确认直接 cancelled，不写取消请求列（未启动没有「没停完」）', () => {
     const h = harness();
     submit(h, 't1'); // 未启动（queued）
     h.runner.cancel('t1');
     expect(h.registry.statusOf('t1')).toBe('cancelled');
-    expect(h.registry.cancelRequestedAtOf('t1')).toBeUndefined();
+    expect(h.registry.terminationOf('t1')?.kind).toBe('cancelled');
   });
 
   it('running 取消未获确认（回合照常完成）→ 回 running 并如实落终态，不宣称取消', async () => {
@@ -971,7 +948,7 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
     expect(h.registry.statusOf('t1')).toBe('completed');
   });
 
-  it('回合失败已停（无汇报，round_failed_at 在场）：取消按 terminal，不再写 cancel_requested_at', async () => {
+  it('回合失败已停（无汇报，round_failed 终止事件在场）：取消按 terminal，不翻案', async () => {
     // 2026-11-23：失败回合已停、租约已放；旧 runInactiveOf 只看结束时刻/汇报存档，
     // 把这条已停的行当成「在跑」→ 取消走请求分支写 cancel_requested_at（用户以为还在办）。
     const h = harness();
@@ -979,10 +956,9 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
     h.runner.pump();
     h.executor.settle(0, { kind: 'ended' }); // 无汇报 = 回合失败收尾
     await h.runner.whenIdle();
-    expect(h.registry.roundFailedAtOf('t1')).toBeDefined();
+    expect(h.registry.terminationOf('t1')?.kind).toBe('round_failed');
 
     expect(h.runner.cancel('t1')).toEqual({ outcome: 'terminal', taskId: 't1' });
-    expect(h.registry.cancelRequestedAtOf('t1')).toBeUndefined();
   });
 
   it('waiting_user 取消：无在飞回合可中止，请求后机械确认 cancelled', async () => {

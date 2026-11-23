@@ -15,11 +15,12 @@ export {
 export type { LoadConfigOptions } from './config';
 export { openTaskStore, operationKeyOf, TASK_STORE_SCHEMA_VERSION } from './task-store';
 export {
-  TASK_PROGRESS_END_FIELDS,
   TASK_PROGRESS_REPORT_FIELDS,
-  TASK_PROGRESS_ROUND_FAILED_FIELD,
   TASK_PROGRESS_STARTED_COLUMN,
   TASK_PROGRESS_WAITING_FIELD,
+  TASK_TERMINATION_COLUMNS,
+  TASK_TERMINATION_KINDS,
+  TASK_TERMINATIONS_TABLE,
   stillProgressingOf,
   stillProgressingSqlWhere,
   taskAcceptedInFlightOf,
@@ -29,12 +30,13 @@ export {
   taskStartedOf,
   taskUnstartedOf,
 } from './task-progress';
-export type { TaskProgressFacts } from './task-progress';
+export type { TaskProgressFacts, TaskTermination, TaskTerminationKind } from './task-progress';
 export type {
   OperationClaimRequest,
   OperationRow,
   OperationStateWrite,
   TaskRow,
+  TaskEventRow,
   ExecutionRow,
   StoredTask,
   TaskStore,

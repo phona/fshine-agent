@@ -168,7 +168,7 @@ describe('U3 待核对优先于取消（写操作 unknown 后同回合取消）'
     const dispatchKey = client.requests[0]?.dispatchKey;
     expect(dispatchKey).toMatch(/^dk_/);
     expect(registry.getOperation(dispatchKey!)?.status).toBe('unknown');
-    expect(task.cancelledAt).toBeUndefined();
+    expect(task.termination?.kind).not.toBe('cancelled');
   });
 
   it('反向绊线：没有 unknown 的取消仍然是 cancelled（不把普通取消翻转为待核对）', async () => {

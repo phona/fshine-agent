@@ -2052,12 +2052,14 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   }
 
   /**
-   * 守护事实投影（S1 事实模型，docs/design/task-redefinition.md §3）：task_status 返回
+   * 守护事实投影（零状态，docs/design/task-redefinition.md §3）：task_status 返回
    * **守护事实 + 汇报存档**，不返回「status」这个字——做没做成由 Main 读执行事实自己判断：
-   *   · liveness：存活事实（running/died/waiting_user；由等待形状/租约/看门狗推导）；
+   *   · liveness：存活事实（running/died/waiting_user；现推：启动 + 汇报 + 等待 + 本进程
+   *     是否还有活 worker）；
    *   · claimed/resulted：dispatchKey 幂等账计数（claimed = 已认领未落定；resulted = 已落定；
    *     accepted 行计入 claimed——在等回执）；claimed>resulted = 还有结果没回来；
-   *   · 一次性机械时刻（diedAt/cancelledAt/timedOutAt/resourceLimitedAt）：原样透出；
+   *   · termination：最近一条终止事件（cancelled/timed_out/resource_limited/died/
+   *     round_failed/completed；追加事件账，不是状态列）——「怎么结束」的事实来源；
    *   · replyText：Main 最终回复存档。
    * 做成/没做成的事实 = executions（逐笔执行行）+ resultText（worker 汇报），经 task_result
    * 读取；本投影不重复它们，也不做任何业务归类。
@@ -2066,15 +2068,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     // claimed→resulted 计数（逐笔执行行 = 已认领的操作事实；accepted = 已受理未回执）。
     const claimed = task.executions.length;
     const resulted = task.executions.filter((execution) => execution.status !== 'accepted').length;
-    const liveness = taskLivenessOf(task);
+    const liveness = taskLivenessOf(task, { liveWorker: taskRunner?.isLive(task.taskId) ?? false });
     return {
       taskId: task.taskId,
       name: task.name ?? deriveTaskName(task.request),
       ...(liveness === undefined ? {} : { liveness }),
-      ...(task.diedAt === undefined ? {} : { diedAt: task.diedAt }),
-      ...(task.cancelledAt === undefined ? {} : { cancelledAt: task.cancelledAt }),
-      ...(task.timedOutAt === undefined ? {} : { timedOutAt: task.timedOutAt }),
-      ...(task.resourceLimitedAt === undefined ? {} : { resourceLimitedAt: task.resourceLimitedAt }),
+      ...(task.termination === undefined ? {} : { termination: { kind: task.termination.kind, at: task.termination.at } }),
       ...(task.pendingQuestion === undefined ? {} : { pendingQuestion: pendingQuestionView(task.pendingQuestion) }),
       claimed,
       resulted,
@@ -2175,8 +2174,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         : undefined;
       const now_ = registry.get(taskId, scope);
       if (settled !== undefined) {
-        settledFact = settled.cancelledAt !== undefined ? 'cancelled' : 'ended';
-      } else if (now_.cancelledAt !== undefined) {
+        settledFact = settled.termination?.kind === 'cancelled' ? 'cancelled' : 'ended';
+      } else if (now_.termination?.kind === 'cancelled') {
         settledFact = 'cancelled';
       } else if (taskEndedOf(now_)) {
         settledFact = 'ended';
@@ -2774,7 +2773,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     const deadline = taskRunClock.now() + waitMs;
     // 落定判定（S1 事实口径）：收尾事实或汇报存档在场 → 已落定；此外「**已启动**的回合
     // 已结束且没有 accepted 长任务在等」也算落定（无汇报收尾——runner 的 noteRoundFailed
-    // 已落 round_failed_at 一次性时刻；回合已结束的无汇报收尾据此当落定，走如实上抛路径）。
+    // 已追加 round_failed 终止事件；回合已结束的无汇报收尾据此当落定，走如实上抛路径）。
     // queued（未认领，runningSince 缺省）与 waiting_user（等用户接续）都不算落定：前者
     // runner 还没派发，后者窗口内进入等待按超窗回执处理（见上方注释）。
     const roundFinished = (task: TaskRecord): boolean => {
@@ -2819,7 +2818,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       taskId,
       name,
       accepted: false,
-      resourceLimitedAt: rejected.resourceLimitedAt,
+      ...(rejected.termination === undefined ? {} : { termination: rejected.termination }),
       // B 切片回执去编号：受理/拒绝话术不含工单编号（编号只在 npm run tasks / 任务查询详情面）。
       notice: `未受理「${name}」：${detail}`,
     };
@@ -2950,11 +2949,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         }
       }
       const live = registry.get(taskId, scope);
+      const liveness = taskLivenessOf(live, { liveWorker: taskRunner?.isLive(taskId) ?? false });
       return {
         taskId,
         name,
         // 受理回执只给事实：accepted + 存活（running/died/waiting_user）；不投影状态词。
-        ...(taskLivenessOf(live) === undefined ? {} : { liveness: taskLivenessOf(live) }),
+        ...(liveness === undefined ? {} : { liveness }),
         accepted: true,
       };
     }

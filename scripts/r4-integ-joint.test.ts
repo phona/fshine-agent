@@ -377,8 +377,8 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
       await second.runner!.whenIdle();
       expect(summary.recovered).toEqual(['task_running']);
       const running = second.taskRegistry.get('task_running', SCOPE_A);
-      expect(running.diedAt).toBeDefined();
-      expect((lastFailureOf(running)?.error?.code === 'result_unknown' || running.diedAt !== undefined)).toBe(true);
+      expect(running.termination?.kind).toBe('died');
+      expect((lastFailureOf(running)?.error?.code === 'result_unknown' || running.termination?.kind === 'died')).toBe(true);
       // unknown 不重放：执行端零调用
       expect(executor2.calls.map((call) => call.taskId)).toEqual(['task_queued']);
       expect(executionsOf(second.taskRegistry.get('task_queued', SCOPE_A))).toEqual([]);
@@ -417,8 +417,8 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
       await vi.waitFor(() => expect(executor.calls).toHaveLength(1));
       expect(assembled.runner!.cancel(taskId1, SCOPE_A)).toEqual({ outcome: 'requested', taskId: taskId1 });
       // 取消请求：等执行端观察 abort 后确认，才落 cancelled（S1 无 cancelling 过渡态）
-      await vi.waitFor(() => expect(assembled.taskRegistry.get(taskId1, SCOPE_A).cancelledAt).toBeDefined());
-      expect(assembled.taskRegistry.get(taskId1, SCOPE_A).cancelledAt).toBeDefined();
+      await vi.waitFor(() => expect(assembled.taskRegistry.get(taskId1, SCOPE_A).termination?.kind).toBe('cancelled'));
+      expect(assembled.taskRegistry.get(taskId1, SCOPE_A).termination?.kind).toBe('cancelled');
 
       const second = await assembled.session.send('任务二');
       const taskId2 = second.taskIds[0]!;
@@ -555,8 +555,8 @@ describe('R4 联合：P5 前台许可（inline 模式）', () => {
       // 半成品不留：任务行落 failed + 机械原因 resource_limited；执行端零调用（unreachableDriver 未被触发）
       const tasks = assembled.taskRegistry.list(SCOPE_A);
       expect(tasks).toHaveLength(1);
-      expect(tasks[0]!.resourceLimitedAt).toBeDefined();
-      expect(tasks[0]!.resourceLimitedAt).toBeDefined();
+      expect(tasks[0]!.termination?.kind).toBe('resource_limited');
+      expect(tasks[0]!.termination?.kind).toBe('resource_limited');
       // 失败路径不泄漏许可
       expect(assembled.policy.snapshot().foreground.active).toBe(0);
       expect(assembled.policy.snapshot().background.active).toBe(0);

@@ -68,14 +68,22 @@ function record(overrides: Partial<TaskRecord> & { taskId: string; createdAt: st
   };
 }
 
-/** 汇报已存档（旧 completed）。 */
+/** 汇报已存档（正常结束 = completed 终止事件）。 */
 function reported(overrides: Partial<TaskRecord> & { taskId: string; createdAt: string }): TaskRecord {
-  return record({ resultText: '已查询。', ...overrides });
+  return record({
+    resultText: '已查询。',
+    termination: { kind: 'completed', at: overrides.createdAt },
+    ...overrides,
+  });
 }
 
-/** 已启动但无汇报收尾（旧 failed/unexecuted）。 */
+/** 已启动、本轮以无汇报收尾（round_failed 终止事件）。 */
 function noReport(overrides: Partial<TaskRecord> & { taskId: string; createdAt: string }): TaskRecord {
-  return record({ runningSince: overrides.createdAt, ...overrides });
+  return record({
+    runningSince: overrides.createdAt,
+    termination: { kind: 'round_failed', at: overrides.createdAt },
+    ...overrides,
+  });
 }
 
 /** running 事实（有效租约）。 */
@@ -166,7 +174,7 @@ describe('ops：快照事实（统计 / 排序 / 上限）', () => {
     const records = [
       reported({ taskId: 'task_a', createdAt: '2026-11-13T10:00:00.000Z' }),
       noReport({ taskId: 'task_b', createdAt: '2026-11-13T10:01:00.000Z' }),
-      record({ taskId: 'task_c', createdAt: '2026-11-13T10:02:00.000Z', cancelledAt: '2026-11-13T10:02:30.000Z' }),
+      record({ taskId: 'task_c', createdAt: '2026-11-13T10:02:00.000Z', termination: { kind: 'cancelled', at: '2026-11-13T10:02:30.000Z' } }),
       running({ taskId: 'task_d', createdAt: '2026-11-13T10:03:00.000Z' }),
     ];
     const page = renderOpsPage({ records, generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
@@ -231,14 +239,14 @@ describe('ops：快照事实（统计 / 排序 / 上限）', () => {
 describe('ops：未成功收尾清单', () => {
   it('收录 无汇报/取消/超时/结果未知/资源受限；汇报已存档不在清单；最新在前', () => {
     const nr = noReport({ taskId: 'task_no_report', createdAt: '2026-11-13T09:00:00.000Z' });
-    const cancelled = record({ taskId: 'task_cancelled', createdAt: '2026-11-13T09:05:00.000Z', cancelledAt: '2026-11-13T09:06:00.000Z' });
+    const cancelled = record({ taskId: 'task_cancelled', createdAt: '2026-11-13T09:05:00.000Z', termination: { kind: 'cancelled', at: '2026-11-13T09:06:00.000Z' } });
     const done = reported({ taskId: 'task_done', createdAt: '2026-11-13T09:10:00.000Z' });
     const page = renderOpsPage({ records: [nr, cancelled, done], generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
 
     expect(page).toContain('<h2>未成功收尾清单（共 2 条）</h2>');
     expect(rowIds(page, 'failures')).toEqual([taskLabel(cancelled), taskLabel(nr)]);
     expect(page).toContain(`<td>${escapeHtml(taskMechanicalFactLine(cancelled)!)}</td>`);
-    expect(page).toContain('<td>（底账未记录机械时刻）</td>');
+    expect(page).toContain(`<td>${escapeHtml(taskMechanicalFactLine(nr)!)}</td>`);
     expect(tableSlice(page, 'failures')).not.toContain(taskLabel(done));
   });
 
@@ -272,13 +280,13 @@ describe('ops：机械事实词与计数行（S1）', () => {
     const records = [
       reported({ taskId: 'task_word_reported', createdAt: '2026-11-13T11:00:00.000Z' }),
       noReport({ taskId: 'task_word_no_report', createdAt: '2026-11-13T11:01:00.000Z' }),
-      record({ taskId: 'task_word_cancelled', createdAt: '2026-11-13T11:02:00.000Z', cancelledAt: '2026-11-13T11:02:30.000Z' }),
+      record({ taskId: 'task_word_cancelled', createdAt: '2026-11-13T11:02:00.000Z', termination: { kind: 'cancelled', at: '2026-11-13T11:02:30.000Z' } }),
       running({ taskId: 'task_word_running', createdAt: '2026-11-13T11:03:00.000Z' }),
       record({ taskId: 'task_word_waiting', createdAt: '2026-11-13T11:04:00.000Z', pendingQuestion: { missing: ['时间范围'] } }),
     ];
     const page = renderOpsPage({ records, generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
     const listText = renderTaskList(records);
-    for (const word of ['已汇报', '无汇报', '已取消', '进行中', '等待用户']) {
+    for (const word of ['已汇报', '无汇报收尾', '已取消', '进行中', '等待用户']) {
       expect(page, word).toContain(`<td>${escapeHtml(word)}</td>`);
       expect(listText, word).toContain(`  ${word}  `);
     }
@@ -288,8 +296,8 @@ describe('ops：机械事实词与计数行（S1）', () => {
     const records = [
       noReport({ taskId: 'task_nr', createdAt: '2026-11-13T10:00:00.000Z' }),
       record({ taskId: 'task_w', createdAt: '2026-11-13T10:01:00.000Z', pendingQuestion: { missing: ['x'] } }),
-      record({ taskId: 'task_cd', createdAt: '2026-11-13T10:03:00.000Z', cancelledAt: '2026-11-13T10:03:30.000Z' }),
-      record({ taskId: 'task_to', createdAt: '2026-11-13T10:04:00.000Z', timedOutAt: '2026-11-13T10:04:30.000Z' }),
+      record({ taskId: 'task_cd', createdAt: '2026-11-13T10:03:00.000Z', termination: { kind: 'cancelled', at: '2026-11-13T10:03:30.000Z' } }),
+      record({ taskId: 'task_to', createdAt: '2026-11-13T10:04:00.000Z', termination: { kind: 'timed_out', at: '2026-11-13T10:04:30.000Z' } }),
     ];
     const page = renderOpsPage({ records, generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
     for (const label of ['无汇报收尾', '等待用户', '已取消', '已超时']) {
@@ -318,10 +326,10 @@ describe('ops：机械事实词与计数行（S1）', () => {
   });
 
   it('未成功收尾清单：单元格取一次性机械时刻事实；无事实给机械兜底文案', () => {
-    const cancelled = record({ taskId: 'task_x_cancelled', createdAt: '2026-11-13T09:00:00.000Z', cancelledAt: '2026-11-13T09:00:30.000Z' });
-    const timedOut = record({ taskId: 'task_x_timeout', createdAt: '2026-11-13T09:01:00.000Z', timedOutAt: '2026-11-13T09:01:30.000Z' });
-    const died = record({ taskId: 'task_x_died', createdAt: '2026-11-13T09:02:00.000Z', diedAt: '2026-11-13T09:02:30.000Z' });
-    const limited = record({ taskId: 'task_x_limited', createdAt: '2026-11-13T09:03:00.000Z', resourceLimitedAt: '2026-11-13T09:03:30.000Z' });
+    const cancelled = record({ taskId: 'task_x_cancelled', createdAt: '2026-11-13T09:00:00.000Z', termination: { kind: 'cancelled', at: '2026-11-13T09:00:30.000Z' } });
+    const timedOut = record({ taskId: 'task_x_timeout', createdAt: '2026-11-13T09:01:00.000Z', termination: { kind: 'timed_out', at: '2026-11-13T09:01:30.000Z' } });
+    const died = record({ taskId: 'task_x_died', createdAt: '2026-11-13T09:02:00.000Z', termination: { kind: 'died', at: '2026-11-13T09:02:30.000Z' } });
+    const limited = record({ taskId: 'task_x_limited', createdAt: '2026-11-13T09:03:00.000Z', termination: { kind: 'resource_limited', at: '2026-11-13T09:03:30.000Z' } });
     const nr = noReport({ taskId: 'task_x_nr', createdAt: '2026-11-13T09:04:00.000Z' });
     const page = renderOpsPage({
       records: [cancelled, timedOut, died, limited, nr],
@@ -332,9 +340,9 @@ describe('ops：机械事实词与计数行（S1）', () => {
     for (const text of [
       '机械事实：用户已取消（2026-11-13T09:00:30.000Z）',
       '机械事实：机械超时（2026-11-13T09:01:30.000Z）',
-      '机械事实：租约过期，结果未知（2026-11-13T09:02:30.000Z）',
+      '机械事实：租约过期/进程中断，结果未知（2026-11-13T09:02:30.000Z）',
       '机械事实：资源拒绝（2026-11-13T09:03:30.000Z）',
-      '（底账未记录机械时刻）',
+      '机械事实：本轮无汇报收尾（2026-11-13T09:04:00.000Z）',
     ]) {
       expect(page, text).toContain(`<td>${escapeHtml(text)}</td>`);
     }

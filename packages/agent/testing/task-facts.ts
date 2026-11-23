@@ -5,12 +5,12 @@
  *   · liveness（宿主守护状态，唯一保留的三值：running / died / waiting_user）；
  *   · 逐笔执行行原值（operation / status / error）——做没做成读执行行；
  *   · worker 汇报存档（resultText / replyText 原文）；
- *   · 四个一次性机械时刻（died/cancelled/timed_out/resource_limited）。
+ *   · 终止事件（cancelled/timed_out/resource_limited/died/round_failed/completed；追加事件账）。
  *
- * 判据用法：断言账本事实（执行行 status、时刻在场、汇报非空），或断言 liveness 三值；
+ * 判据用法：断言账本事实（执行行 status、终止事件 kind、汇报非空），或断言 liveness 三值；
  * 不再有「把事实投影成一个状态词」的中间层。
  */
-import type { TaskRecord } from '../src/task-registry';
+import type { TaskRecord, TaskTermination } from '../src/task-registry';
 import { taskEndedOf, taskLivenessOf, taskReportedOf, taskUnstartedOf } from '../src/task-registry';
 
 export { taskEndedOf, taskLivenessOf, taskReportedOf, taskUnstartedOf };
@@ -72,10 +72,8 @@ export interface TaskFactView {
 export function taskFactViewOf(task: {
   leaseOwner?: string;
   leaseUntil?: string;
-  diedAt?: string;
-  cancelledAt?: string;
-  timedOutAt?: string;
-  resourceLimitedAt?: string;
+  runningSince?: string;
+  termination?: TaskTermination;
   pendingQuestion?: unknown;
   executions?: readonly { status: string }[];
   resultText?: string;
@@ -85,10 +83,10 @@ export function taskFactViewOf(task: {
   return {
     liveness: taskLivenessOf(task) ?? null,
     ended: taskEndedOf(task) || taskReportedOf(task) || (last !== undefined && ['completed', 'failed', 'refused'].includes(last)),
-    cancelled: task.cancelledAt !== undefined,
-    died: task.diedAt !== undefined,
-    timedOut: task.timedOutAt !== undefined,
-    resourceLimited: task.resourceLimitedAt !== undefined,
+    cancelled: task.termination?.kind === 'cancelled',
+    died: task.termination?.kind === 'died',
+    timedOut: task.termination?.kind === 'timed_out',
+    resourceLimited: task.termination?.kind === 'resource_limited',
     reported: taskReportedOf(task),
     ...(last === undefined ? {} : { lastExecutionStatus: last }),
   };

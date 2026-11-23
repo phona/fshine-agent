@@ -260,7 +260,7 @@ describe('缺口 1 · 对话面任务工具', () => {
 
     const confirmed = value<Record<string, unknown>>(turns[0]!.results[1]!);
     expect(confirmed.outcome, '未启动的排队任务可机械确认取消').toBe('cancelled');
-    expect(registry.get('queued', SCOPE_A).cancelledAt).toBeDefined();
+    expect(registry.get('queued', SCOPE_A).termination?.kind).toBe('cancelled');
   });
 
   it('task_resume：waiting_user 带 answer → started；非 waiting_user → not_waiting（如实转述）', async () => {
@@ -326,8 +326,8 @@ describe('缺口 1 · 对话面任务工具', () => {
       if (!result.ok) expect((result.error as Error).message).toContain('taskId');
     }
     // 两个任务都没被动过（尤其 B 的 task-b 没被误当作 #1 操作）。
-    expect(registry.get('task-a', SCOPE_A).cancelledAt).toBeUndefined();
-    expect(registry.get('task-b', SCOPE_B).cancelledAt).toBeUndefined();
+    expect(registry.get('task-a', SCOPE_A).termination).toBeUndefined();
+    expect(registry.get('task-b', SCOPE_B).termination).toBeUndefined();
   });
 
   it('P0-A：inline 受理回执去编号：不含 taskNo，可引用指代是 taskId', async () => {
@@ -375,7 +375,7 @@ describe('缺口 1 · 对话面任务工具', () => {
     const cancelled = value<Record<string, unknown>>(turns[0]!.results[0]!);
     expect(cancelled.outcome).toBe('cancelled');
     const hit = value<Record<string, unknown>>(turns[0]!.results[1]!);
-    expect(hit.cancelledAt).toBeDefined();
+    expect(hit).toMatchObject({ termination: { kind: 'cancelled' } });
   });
 
   it('未传 runner：task_cancel/task_resume/task_confirm 不上面，调用即 Main 工具面之外的调用（fail-closed）', async () => {

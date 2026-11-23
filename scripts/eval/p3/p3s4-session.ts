@@ -24,7 +24,7 @@ import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver, TurnDriverInput } from '../../../packages/agent/src/driver-contract';
 import { createResourcePolicy } from '../../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import type { TaskScope } from '../../../packages/agent/src/task-registry';
+import type { TaskScope, TaskTermination } from '../../../packages/agent/src/task-registry';
 import { taskEndedOf, taskLivenessOf, taskReportedOf, lastExecutionOf } from '../../../packages/agent/testing/task-facts';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import {
@@ -136,10 +136,7 @@ interface TaskSnapshot {
   taskId: string;
   taskNo?: number;
   request: string;
-  cancelledAt?: string;
-  diedAt?: string;
-  timedOutAt?: string;
-  resourceLimitedAt?: string;
+  termination?: TaskTermination;
   resultText?: string;
   replyText?: string;
   pendingQuestion?: unknown;
@@ -301,7 +298,7 @@ async function run(): Promise<void> {
           const liveness = taskLivenessOf(t) ?? null;
           const ended = taskEndedOf(t) || taskReportedOf(t)
             || ['completed', 'failed', 'refused'].includes(lastExecutionOf(t)?.status ?? '');
-          const cancelled = t.cancelledAt !== undefined;
+          const cancelled = t.termination?.kind === 'cancelled';
           const sig = JSON.stringify([liveness, ended, cancelled, t.executions.map((e) => e.status)]);
           if (prevStatus.get(t.taskId) !== sig) {
             taskFacts.push({ ts, taskId: t.taskId, ...(t.taskNo !== undefined ? { taskNo: t.taskNo } : {}), liveness, ended, cancelled, turn: turnRef.turn });

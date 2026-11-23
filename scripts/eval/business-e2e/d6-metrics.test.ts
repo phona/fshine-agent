@@ -232,7 +232,7 @@ describe('extractD6 D 轴指标抽取', () => {
       tc(2, 'main', 2, 'task_result', '2026-11-14T00:00:08Z', 5, { args: { ref: '#2' } }),
     ];
     input.tasks = [
-      { taskId: 'cancelled-task', principalId: 'p1', sessionId: 's1', request: 'r1', cancelledAt: '2026-11-14T00:00:05Z', executions: [], createdAt: '2026-11-14T00:00:00Z', updatedAt: '2026-11-14T00:00:05Z' },
+      { taskId: 'cancelled-task', principalId: 'p1', sessionId: 's1', request: 'r1', termination: { kind: 'cancelled', at: '2026-11-14T00:00:05Z' }, executions: [], createdAt: '2026-11-14T00:00:00Z', updatedAt: '2026-11-14T00:00:05Z' },
       { taskId: 'other-task', principalId: 'p1', sessionId: 's1', request: 'r2', liveness: null, executions: [], createdAt: '2026-11-14T00:00:01Z', updatedAt: '2026-11-14T00:00:04Z' },
     ];
     input.taskFacts = [
@@ -255,7 +255,7 @@ describe('extractD6 D 轴指标抽取', () => {
       tc(2, 'worker', 1, 'execute_operation', '2026-11-14T00:00:08Z', 5, { args: { taskId: 'other-task' }, result: { status: 'completed' } }),
     ];
     input.tasks = [
-      { taskId: 'cancelled-task', principalId: 'p1', sessionId: 's1', request: 'r1', cancelledAt: '2026-11-14T00:00:05Z', executions: [], createdAt: '2026-11-14T00:00:00Z', updatedAt: '2026-11-14T00:00:05Z' },
+      { taskId: 'cancelled-task', principalId: 'p1', sessionId: 's1', request: 'r1', termination: { kind: 'cancelled', at: '2026-11-14T00:00:05Z' }, executions: [], createdAt: '2026-11-14T00:00:00Z', updatedAt: '2026-11-14T00:00:05Z' },
       { taskId: 'other-task', principalId: 'p1', sessionId: 's1', request: 'r2', liveness: null, executions: [], createdAt: '2026-11-14T00:00:01Z', updatedAt: '2026-11-14T00:00:04Z' },
     ];
     input.taskFacts = [

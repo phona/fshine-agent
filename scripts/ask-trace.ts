@@ -182,12 +182,9 @@ function traceTaskJson(task: TaskRecord, aliases: IdentifierAliases): Record<str
     principalId: task.principalId,
     sessionId: task.sessionId,
     request: task.request,
-    // S1 事实模型：底账没有 status/failureReason——转写机械事实（等待形状、机械时刻）。
+    // 零状态：底账没有 status/failureReason/终态列——转写机械事实（等待形状、终止事件）。
     ...(task.pendingQuestion !== undefined ? { pendingQuestion: task.pendingQuestion } : {}),
-    ...(task.diedAt !== undefined ? { diedAt: task.diedAt } : {}),
-    ...(task.cancelledAt !== undefined ? { cancelledAt: task.cancelledAt } : {}),
-    ...(task.timedOutAt !== undefined ? { timedOutAt: task.timedOutAt } : {}),
-    ...(task.resourceLimitedAt !== undefined ? { resourceLimitedAt: task.resourceLimitedAt } : {}),
+    ...(task.termination === undefined ? {} : { termination: { kind: task.termination.kind } }),
     ...(task.resultText !== undefined ? { resultText: task.resultText } : {}),
     executions: task.executions.map((execution) => ({
       requestId: aliases.requestAlias.get(execution.requestId) ?? execution.requestId,

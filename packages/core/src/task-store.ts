@@ -1,43 +1,37 @@
 /**
  * 最小任务底账的 SQLite 引擎（B 类：任务归属持久化，最小形状）。
  *
- * S1 事实模型（docs/design/task-redefinition.md，2026-11-22）：task 没有 status——
- * 表只记**机械事实**，不再存任何「结论」字段（旧 status/reason/failure_reason 三列已删）：
+ * 零状态（owner 2026-11-23）：task 不存任何「状态」——表只记**机械事实**：
  *   · tasks：task_id / principal_id / session_id / request / result_text / created_at /
  *     updated_at + task_no / name / reply_text（P1）+ pending_question / waiting_since /
  *     lease_owner / lease_until（等待形状与租约）+ long_running_notified_at /
- *     wait_contact_lost_notified_at / running_since（提醒事实）+ **四个一次性机械时刻**：
- *     died_at（看门狗观察到租约过期）/ cancelled_at（用户取消确认）/ timed_out_at（机械超时）/
- *     resource_limited_at（资源拒绝）。每个时刻列至多写一次（一次性写入即并发去重）。
- *     另有非终局的一次性事实 cancel_requested_at（用户取消**请求**；请求 ≠ 确认——确认才写
- *     cancelled_at；重启对账据此说清「你要我停、没停完」）与 round_failed_at（**本轮以无结果
- *     收尾**：回合失败/无汇报；不是业务结论、不改失败归类——只让长时间提醒扫描不再把已收尾的
- *     任务当「在跑」）。
+ *     wait_contact_lost_notified_at / running_since（提醒与启动事实）。
+ *     **没有** died/cancelled/timed_out/resource_limited/round_failed/cancel_requested 列，
+ *     也没有 status/reason/failure_reason：这些是「结论/状态」，不存。
+ *   · task_events：终止事实的**追加事件账**（cancelled / timed_out / resource_limited /
+ *     died / round_failed / completed；同任务至多一条，不可变）。这是「怎么结束」的唯一持久
+ *     来源，也是投递/CLI 的事实来源。
  *   · executions：request_id / task_id / operation / status / error_json（逐笔执行事实）。
  *   · operations：claimed→resulted 幂等账（U3，行就是身份）——存活与结果判定的事实源。
  *
- * 存活推导（registry 侧 taskLivenessOf）：等待形状 → waiting_user；有效租约 → running；
- * 租约过期或 died_at → died；其余（未启动/已收尾）→ undefined。 queued = running_since
- * IS NULL 且四个时刻列全 NULL（未启动任务可被认领）。
+ * 存活推导（registry 侧 taskLivenessOf，**不存**）：排队 = running_since 空 + 无汇报 + 无
+ * 提问；在跑 = 已启动 + 无汇报/提问/终止事件 + 本进程有活 worker；等用户 = pending_question；
+ * 结束 = 已启动且无活 worker（有汇报=正常结束，无汇报=结果未知）或已有终止事件。
+ * SQL 侧（重启扫描 listRunningTasks 等）只查「running_since 非空 + 无汇报 + 无提问 +
+ * 无终止事件」= 重启时未交接的行。
  *
  * 迁移口径（版本化迁移）：
- *   · 触发 = 可写打开且 tasks 表仍是旧形状（有 status 列，v4 及更早）或缺 operations 表 /
- *     executions.dispatch_key；只读打开永不迁移；
- *   · 迁移前自动备份：<dbPath>.backup-v5（不覆盖、不自动删除）；
- *   · v5 = tasks 表重建：删 status/reason/failure_reason 三列（结论不迁移——执行行 executions
- *     就是事实），加四个时刻列 + cancel_requested_at（NULL 起步）；旧库曾离开过 queued 的行
- *     回填 running_since（updated_at），避免迁移后被当作未启动任务重新认领；旧 cancelled/
- *     timed_out 行按 updated_at 机械回填对应时刻列（该列语义 = 那次机械写入发生的时刻）；
- *     旧 status='failed' 且 reason='result_unknown' 行回填 died_at（结果未知不丢）；
- *     旧 status='cancelling' 行回填 cancel_requested_at（取消请求不丢，重启对账靠它）；
- *     **不**回填 round_failed_at（不是回合失败无结果，是用户要停未确认——重启扫描按「取消
- *     请求 + 仍在推进」捞它说「你要我停、没停完」）；
- *     旧 failed_confirmed / 无汇报的 unexecuted 回填 round_failed_at（本轮已停——让「在跑」
- *     唯一谓词认得，2026-11-23）；
+ *   · 触发 = 可写打开且 tasks 表仍是旧形状（有 status 列/六个终态列，v5 及更早）——重建为
+ *     零状态形状；
+ *   · 迁移前自动备份：<dbPath>.backup-v6（不覆盖、不自动删除）；
+ *   · v6 = tasks 表重建：删 status/reason/failure_reason 与六个终态列；旧任务**全部当已结束**
+ *     （running_since 按 updated_at 回填，避免被当未启动重新认领），并把旧结论列的可用机械
+ *     信息转成一条终止事件（cancelled/timed_out/resource_limited/died/round_failed/
+ *     completed；有汇报存档当作 completed，其余无汇报当作 round_failed），历史汇报/执行事实
+ *     原样保留；
  *   · 回填 task_no（仅缺该列时）：按 (created_at, task_id) 升序连续分配，只填 NULL 行；
- *   · U3/file_refs/inbound 面只做前向加法（不变）；tasks.round_failed_at 亦为前向加法列
- *     （v5 早期库缺列 → ADD COLUMN TEXT，不升 user_version）；
- *   · PRAGMA user_version 记录版本（新库直接建 v5）。
+ *   · U3/file_refs/inbound 面只做前向加法（不变）；
+ *   · PRAGMA user_version 记录版本（新库直接建 v6）。
  *
  * file_refs（CAP-01 S0/S2）与 inbound_messages（2026-11-19）语义不变，见下方历史注释与
  * git 历史（本头注只保留现行口径，逐列说明见各表 SCHEMA_BASE 注释）。
@@ -46,28 +40,22 @@
  * 计数器单调不减（删除/修剪后不复用、不重排）；同回合各任务行写同一最终回复。
  *
  * 事实写入（唯一写路径；本层单条语句 + WHERE 一次性条件做并发防护）：
- *   · markTaskFact：died/cancelled/timed_out/resource_limited 四个时刻列的一次性写入
- *     （WHERE 对应列 IS NULL——重复触发零写入），同时清租约（结束事实的任务不再持租约）；
- *   · markCancelRequested：cancel_requested_at 的一次性写入（取消请求；不清租约、不改终局）；
- *   · markRoundFailed：round_failed_at 的一次性写入（回合失败收尾；不清租约、不改终局）；
+ *   · appendTermination：终止事件的**一次性追加**（同任务已有任一终止事件 → 零写入），
+ *     同一写事务内清租约（结束的任务不再持租约）；
  *   · setWaiting / armLease / setResultText / setReplyForTasks：等待形状、租约、报告存档；
  *   · claimNextUnstarted：BEGIN IMMEDIATE 内取最老未启动行，写 running_since + 租约
  *     （进程内/跨进程并发认领不重号）；
  *   · 其他模块禁止直接 UPDATE tasks（源码级守卫见 packages/agent/task-registry-write-path.test.ts）。
  *
  * better-sqlite3 是同步 API：本层不加 async 包装；调用方（task-registry-sqlite）本来就同步。
- * 读出的 status/error 是存储原值，由 registry 侧按领域类型收口。
  */
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { stillProgressingSqlWhere } from './task-progress';
+import { stillProgressingSqlWhere, type TaskTerminationKind } from './task-progress';
 
-/** 当前 schema 版本（PRAGMA user_version）。2 = P1；3 = P2a；4 = U3；5 = S1 事实模型（删结论列，加四个机械时刻列）。 */
-export const TASK_STORE_SCHEMA_VERSION = 5;
-
-/** 一次性机械事实（task 重定义 S1）：四个时刻列对应的机械事件。 */
-export type TaskEndFact = 'died' | 'cancelled' | 'timed_out' | 'resource_limited';
+/** 当前 schema 版本（PRAGMA user_version）。2 = P1；3 = P2a；4 = U3；5 = S1 事实模型；6 = 零状态（删终态列，终止走追加事件）。 */
+export const TASK_STORE_SCHEMA_VERSION = 6;
 
 /** 一条最小任务底账行（存储形状；领域收口在 task-registry-sqlite）。 */
 export interface TaskRow {
@@ -80,19 +68,9 @@ export interface TaskRow {
   pendingQuestion?: unknown;
   /** 进入等待的时刻（ISO）。 */
   waitingSince?: string;
-  /** 后台认领租约（在跑/接续回合持有；结束事实写入时清空）。 */
+  /** 后台认领租约（在跑/接续回合持有；终止事件写入时清空）。 */
   leaseOwner?: string;
   leaseUntil?: string;
-  /** 看门狗观察到租约过期的时刻（ISO；一次性）。结果未知，禁止自动重放。 */
-  diedAt?: string;
-  /** 用户取消确认的时刻（ISO；一次性）。 */
-  cancelledAt?: string;
-  /** 机械超时（等待到期/回合超时/排队超时）的时刻（ISO；一次性）。 */
-  timedOutAt?: string;
-  /** 资源拒绝（受理/派发被 policy 拒）的时刻（ISO；一次性）。 */
-  resourceLimitedAt?: string;
-  /** 用户取消**请求**的时刻（ISO；一次性；请求 ≠ 确认——确认才写 cancelledAt）。 */
-  cancelRequestedAt?: string;
   /** P1：数字任务编号（SQLite 原子分配，唯一、不复用；旧库只读读出为缺省）。 */
   taskNo?: number;
   /** P1：业务名称（v1=机械回落；历史行为缺省，显示层同规则回落）。 */
@@ -112,17 +90,18 @@ export interface TaskRow {
   waitContactLostNotifiedAt?: string;
   /**
    * 本轮开始运行时刻（ISO，单调写一次）：长任务受理后会清租约，「跑了多久」需要独立起点，
-   * 否则最该主动汇报的长任务不在提醒扫描里（2026-11-19）。
+   * 否则最该主动汇报的长任务不在提醒扫描里（2026-11-19）。NULL = 未启动（可被认领）。
    */
   runningSince?: string;
-  /**
-   * 「本轮以无结果收尾（回合失败/无汇报）」的时刻（ISO，一次性）。不是业务结论、不改失败
-   * 归类（无汇报 ≠ 结果未知）；只表示这一轮已停——长时间提醒扫描据此不再把已结束的任务
-   * 当「还在跑」（2026-11-22 Grok 复审：completed 靠汇报存档排除，failed 靠这条）。
-   */
-  roundFailedAt?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** 一条终止事实（追加事件账；存储形状）。 */
+export interface TaskEventRow {
+  taskId: string;
+  kind: TaskTerminationKind;
+  at: string;
 }
 
 /** 一条执行记录行（存储形状）。 */
@@ -234,10 +213,12 @@ export interface FileRefRow {
   deliverable?: boolean;
 }
 
-/** 任务 + 其执行记录（读取单位）。 */
+/** 任务 + 其执行记录与终止事件（读取单位）。 */
 export interface StoredTask {
   task: TaskRow;
   executions: ExecutionRow[];
+  /** 终止事件账（追加、不可变；同任务至多一条）。 */
+  terminations: TaskEventRow[];
 }
 
 /**
@@ -269,9 +250,10 @@ export type InboundClaimOutcome =
   | { outcome: 'done'; replyText: string }
   | { outcome: 'processing' };
 
-/** 一次性机械事实写入（唯一写路径之一）：fact 对应的时刻列至多写一次（重复触发零写入）。 */
-export interface TaskEndFactWrite {
-  fact: TaskEndFact;
+/** 一条终止事实的追加写入（唯一不可变写路径）。 */
+export interface TaskTerminationWrite {
+  taskId: string;
+  kind: TaskTerminationKind;
   at: string;
   updatedAt: string;
 }
@@ -282,27 +264,16 @@ export interface TaskStore {
   /** 触碰 updatedAt；任务不存在返回 false（调用方按拒绝路径处理）。 */
   touchTask(taskId: string, updatedAt: string): boolean;
   /**
-   * 一次性机械事实写入：died/cancelled/timed_out/resource_limited 的时刻列至多写一次
-   * （WHERE 对应列 IS NULL；重复触发返回 false，零写入）。同时清租约（结束事实的任务
-   * 不再持租约——存活推导不再看租约）。
+   * 追加一条终止事实（append-only）：同任务**已有任一终止事件**时零写入并返回 false
+   * （终止不翻案）；写入成功时同一写事务内清租约（结束的任务不再持租约）。
+   * 读 task_events（不是 tasks 的列）。
    */
-  markTaskFact(taskId: string, write: TaskEndFactWrite): boolean;
-  /**
-   * 取消**请求**一次性写入：cancel_requested_at 至多写一次（WHERE IS NULL；重复触发返回
-   * false，零写入）。请求 ≠ 确认——不清租约、不改终局；断电重启后据此如实说清
-   * 「你要我停、没停完」。
-   */
-  markCancelRequested(taskId: string, write: { at: string; updatedAt: string }): boolean;
-  /**
-   * 「本轮以无结果收尾（回合失败/无汇报）」一次性写入：round_failed_at 至多写一次
-   * （WHERE IS NULL）。不是业务结论、不清租约、不改终局；长时间提醒扫描据此不再把已收尾的
-   * 任务当「还在跑」。
-   */
-  markRoundFailed(taskId: string, write: { at: string; updatedAt: string }): boolean;
+  appendTermination(write: TaskTerminationWrite): boolean;
+  /** 读终止事件账（按追加序；通常 0/1 条）。 */
+  listTerminations(taskId: string): TaskEventRow[];
   /**
    * 等待形状写入（waiting_user 事实）：pendingQuestion JSON + waiting_since；给出 null =
-   * 清除（答复接续）。任务已有结束事实（cancelled/died/timed_out/resource_limited）时
-   * 拒绝写入（返回 false，零写入）——结束事实不翻案。
+   * 清除（答复接续）。任务已有终止事件时拒绝写入（返回 false，零写入）——终止事实不翻案。
    */
   setWaiting(taskId: string, write: {
     pendingQuestion?: unknown;
@@ -319,7 +290,7 @@ export interface TaskStore {
   setResultText(taskId: string, write: { resultText: string; updatedAt: string }): boolean;
   /**
    * 原子认领最老未启动任务（created_at, task_id 升序）：同一写事务内写 running_since + 租约；
-   * 无未启动任务返回 undefined。认领条件 = running_since IS NULL 且四个时刻列全 NULL。
+   * 无未启动任务返回 undefined。认领条件 = running_since IS NULL 且无终止事件。
    */
   claimNextUnstarted(input: { owner: string; leaseUntil: string; updatedAt: string }): TaskRow | undefined;
   /**
@@ -331,17 +302,11 @@ export interface TaskStore {
   claimLongRunningNotice(taskId: string, stage: 'overdue' | 'contact_lost', at: string): boolean;
   /**
    * 只读「在跑」行（长时间提醒扫描用；避免每趟 pump 全表分配）：
-   * running_since 非空、无等待形状、四个时刻列全 NULL、无汇报存档（含长任务等待回执的行）。
+   * running_since 非空、无等待形状、无汇报存档、无终止事件（含长任务等待回执的行）。
    */
   listRunningTasks(): TaskRow[];
-  /** 租约已过期（lease_until 非空且 <= now）且未写 died 的任务行（看门狗扫描）。 */
+  /** 租约已过期（lease_until 非空且 <= now）且仍在推进（无终止事件/汇报/等待）的任务行（看门狗扫描）。 */
   listRunningExpiredLeases(now: string): TaskRow[];
-  /**
-   * 只读「取消孤儿」行（重启对账）：cancel_requested_at 非空 + 仍在推进 + 无有效租约
-   *（lease_until 为空或已过期）。调用方按过期租约同口径落一次性 died_at（结果未知）
-   * 后接回「你要我停、没停完」出口——它不是回合失败（不写 round_failed_at/cancelled_at）。
-   */
-  listCancelRequestedTasks(now: string): TaskRow[];
   /**
    * P1：把同一回合的最终回复写入各任务行（同值、单事务）。
    * 不存在的 taskId 不写（调用方保证 id 来自本回合 begin）。
@@ -352,7 +317,7 @@ export interface TaskStore {
   getTask(taskId: string): StoredTask | undefined;
   /** scope 缺省 = 全部任务；给出时按 principal + session 过滤。 */
   listTasks(scope?: { principalId: string; sessionId: string }): StoredTask[];
-  /** 只读等待行（waiting_user 事实：pending_question 非空且无结束事实）；scope 过滤走索引。 */
+  /** 只读等待行（waiting_user 事实：pending_question 非空且无终止事件）；scope 过滤走索引。 */
   listWaitingRows(scope?: { principalId: string; sessionId: string }): StoredTask[];
   /**
    * U3：读重放窗口候选行（同 scope / 同 operation / 同 attempt，按 op_seq 升序）。
@@ -468,7 +433,7 @@ export interface TaskStore {
   close(): void;
 }
 
-/** 当前版本的表与索引（新建库直接落 v5；旧库先重建 tasks、再补建缺的表）。 */
+/** 当前版本的表与索引（新建库直接落 v6；旧库先重建 tasks、再补建缺的表）。 */
 const SCHEMA_BASE = `
 CREATE TABLE IF NOT EXISTS tasks (
   task_id TEXT PRIMARY KEY,
@@ -484,32 +449,28 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- waiting_user 事实（PendingQuestion JSON：missing[]/candidates?/raw? + ISO 时刻）。
   pending_question TEXT,
   waiting_since TEXT,
-  -- 存活事实：租约（在跑/接续回合持有；结束事实写入时清空）。
+  -- 存活事实：租约（在跑/接续回合持有；终止事件写入时清空）。
   lease_owner TEXT,
   lease_until TEXT,
-  -- 四个一次性机械时刻（S1 事实模型；NULL = 未发生；至多写一次）。
-  -- died_at：看门狗观察到租约过期（结果未知，禁止自动重放）。
-  died_at TEXT,
-  -- cancelled_at：用户取消确认。
-  cancelled_at TEXT,
-  -- timed_out_at：机械超时（等待到期/回合超时/排队超时）。
-  timed_out_at TEXT,
-  -- resource_limited_at：资源拒绝（受理/派发被 policy 拒）。
-  resource_limited_at TEXT,
-  -- cancel_requested_at：用户取消**请求**（请求 ≠ 确认；确认才写 cancelled_at）。
-  cancel_requested_at TEXT,
   -- 已发过「久无动静」提醒的时刻（ISO，NULL = 未提醒；每档至多一次）。
   long_running_notified_at TEXT,
   -- 「这一轮开始跑」的时刻（ISO，单调写一次；NULL = 未跑过=可认领）。
   running_since TEXT,
-  -- 「本轮以无结果收尾（回合失败/无汇报）」的时刻（ISO，一次性；NULL = 本轮未以失败停）。
-  -- 不是业务结论、不改失败归类（无汇报 ≠ 结果未知）：只表示这一轮已停；长时间提醒扫描
-  -- 据此不再把已结束的任务当「还在跑」。
-  round_failed_at TEXT,
   -- 长任务等待「与执行层断了联系（无回执）」已告知过用户的时刻（ISO，NULL = 未告知）。
   wait_contact_lost_notified_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_scope ON tasks (principal_id, session_id);
+CREATE TABLE IF NOT EXISTS task_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL,
+  -- cancelled | timed_out | resource_limited | died | round_failed | completed
+  kind TEXT NOT NULL,
+  at TEXT NOT NULL,
+  -- 一次性语义：同任务同 kind 至多一条（当前实现用固定 'end'，即同任务至多一条终止事件）。
+  state_version TEXT NOT NULL,
+  UNIQUE (task_id, kind, state_version)
+);
+CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events (task_id, seq);
 CREATE TABLE IF NOT EXISTS task_sequences (
   name TEXT PRIMARY KEY,
   value INTEGER NOT NULL
@@ -571,12 +532,16 @@ CREATE TABLE IF NOT EXISTS inbound_messages (
 /** 数字编号唯一索引：部分索引允许历史/缺省行多个 NULL，但已分配编号必须唯一。 */
 const SCHEMA_TASK_NO_INDEX = 'CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_no ON tasks (task_no) WHERE task_no IS NOT NULL';
 
-/** v5 tasks 表的列清单（迁移重建时按列存在性取源值；新库直接按此形状建）。 */
-const TASKS_V5_COLUMNS: readonly string[] = [
+/** v6 tasks 表的列清单（迁移重建时按列存在性取源值；新库直接按此形状建）。 */
+const TASKS_V6_COLUMNS: readonly string[] = [
   'task_id', 'principal_id', 'session_id', 'request', 'result_text', 'created_at', 'updated_at',
   'task_no', 'name', 'reply_text', 'pending_question', 'waiting_since', 'lease_owner', 'lease_until',
-  'died_at', 'cancelled_at', 'timed_out_at', 'resource_limited_at', 'cancel_requested_at',
-  'long_running_notified_at', 'running_since', 'round_failed_at', 'wait_contact_lost_notified_at',
+  'long_running_notified_at', 'running_since', 'wait_contact_lost_notified_at',
+];
+
+/** v5 及更早的终态列（v6 重建必须删掉；出现任一 = 需要迁移）。 */
+const PRE_ZERO_STATE_TERMINAL_COLUMNS: readonly string[] = [
+  'died_at', 'cancelled_at', 'timed_out_at', 'resource_limited_at', 'round_failed_at', 'cancel_requested_at',
 ];
 
 interface TaskDbRow {
@@ -592,17 +557,17 @@ interface TaskDbRow {
   waiting_since?: string | null;
   lease_owner?: string | null;
   lease_until?: string | null;
-  died_at?: string | null;
-  cancelled_at?: string | null;
-  timed_out_at?: string | null;
-  resource_limited_at?: string | null;
-  cancel_requested_at?: string | null;
   long_running_notified_at?: string | null;
   wait_contact_lost_notified_at?: string | null;
   running_since?: string | null;
-  round_failed_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface TaskEventDbRow {
+  task_id: string;
+  kind: string;
+  at: string;
 }
 
 interface ExecutionDbRow {
@@ -682,114 +647,85 @@ function taskTableColumns(db: Database.Database): Set<string> {
   return tableColumnsOf(db, 'tasks');
 }
 
-/** v5 迁移谓词：tasks 表已存在且仍带旧结论列（status）——需要重建为事实形状。 */
+/** v6 迁移谓词：tasks 表已存在且仍是旧形状（带结论列或六个终态列）——需要重建为零状态形状。 */
 function tasksTableNeedsRebuild(db: Database.Database): boolean {
   const columns = taskTableColumns(db);
-  return columns.size > 0 && columns.has('status');
+  return columns.size > 0
+    && (columns.has('status') || PRE_ZERO_STATE_TERMINAL_COLUMNS.some((column) => columns.has(column)));
 }
 
 /**
- * v5 tasks 表重建：旧表（v4 及更早）→ 新事实形状。结论列（status/reason/failure_reason）
- * 不迁移（结论不是事实；逐笔执行事实在 executions 里）；机械时刻按旧库可用信息回填：
- *   · cancelled/timed_out：旧 status 即机械事实，updated_at = 那次写入的时刻；
- *   · died：旧 status='failed' 且 reason='result_unknown' 行回填 died_at（结果未知是机械事实，
- *     不丢——否则旧库里的「结果未知」行迁移后退化成「无汇报」）；
- *   · resource_limited：旧 status='failed' 且 reason='resource_limited' 行回填 resource_limited_at
- *     （资源拒绝是机械事实，不丢——否则退化成「无汇报」）；
- *   · round_failed：旧 status='failed'（reason=failed_confirmed 或缺省；不是 result_unknown/
- *     resource_limited）、status='unexecuted' 且无汇报存档两类行回填 round_failed_at
- *     （updated_at）——本轮以无结果收尾，让「在跑」唯一谓词认得它们已结束（否则 running_since
- *     仍在，迁移后被当成活行）；
- *   · cancel_requested：旧 status='cancelling' 行回填 cancel_requested_at（取消请求——请求 ≠
- *     确认——不丢，重启对账据此说清「你要我停、没停完」）；**不写 round_failed_at**——它不是
- *     「回合失败无结果」，是「用户要停、没确认」：重启扫描按「取消请求 + 仍在推进」捞它，
- *     写了 round_failed_at 就永远够不着（blocking 2）；
- *   · 曾离开过 queued 的行回填 running_since（updated_at）——避免迁移后被当作未启动重新认领。
+ * v6 tasks 表重建：旧表（v5 及更早）→ 零状态形状。
+ *
+ * 「结论」列（status/reason/failure_reason）与六个终态列不迁移到任务行（不存状态）；
+ * 旧任务**全部当已结束**：
+ *   · running_since 按 updated_at 回填（极旧库缺列时），避免迁移后被当作未启动重新认领；
+ *   · 旧结论列里可用的机械信息转成**一条终止事件**（task_events，追加、不可变）：
+ *       - cancelled_at / status='cancelled' → cancelled；
+ *       - timed_out_at / status='timed_out' → timed_out；
+ *       - resource_limited_at / failed+reason='resource_limited' → resource_limited；
+ *       - died_at / failed+reason='result_unknown' → died；
+ *       - round_failed_at / failed_confirmed / unexecuted / cancelling → round_failed
+ *         （cancelling 的「用户要停、没停完」不再单独持久化：请求不是结束事实）；
+ *       - 有汇报存档（result_text/reply_text 非空）→ completed；
+ *       - 其余（无汇报）→ round_failed（旧任务已结束、结果未知/无汇报收尾）。
  * 逐列按旧表实际列存在性取源（极旧库缺列取 NULL），历史行其余事实原样搬运。
- * failure_reason 列仍不迁移：它是失败原文/结论字段（逐笔事实在 executions），round_failed_at
- * 回填不依赖它（旧 status 足够；登记在此，不阻塞）。
  */
-function rebuildTasksTableToV5(db: Database.Database): void {
+function rebuildTasksToZeroState(db: Database.Database): void {
   const oldColumns = taskTableColumns(db);
   const sourceOf = (column: string): string =>
     oldColumns.has(column) ? `"${column}"` : 'NULL';
-  // 无汇报存档：两列按旧表存在性取源后 COALESCE（极旧库缺 reply_text 视为空）。
-  const reportEmpty = (column: string): string => `COALESCE(${sourceOf(column)}, '') = ''`;
-  // 「本轮以无结果收尾」的旧行（失败确认 / 已汇报零执行但无存档）——
-  // 旧 reason 列存在时精确排除 result_unknown/resource_limited（那两类另有结束时刻）。
-  // cancelling 不在此列：它是取消请求未确认，只有 cancel_requested_at（重启扫描据此回收）。
-  const roundFailedConditions: string[] = [];
+  const reportNonEmpty = `(COALESCE(${sourceOf('result_text')}, '') <> '' OR COALESCE(${sourceOf('reply_text')}, '') <> '')`;
+  const reportEmpty = `(COALESCE(${sourceOf('result_text')}, '') = '' AND COALESCE(${sourceOf('reply_text')}, '') = '')`;
+
+  // 终止事件 kind：旧终态列优先（v5），其次旧 status/reason（v4 及更早），最后按汇报事实。
+  const branches: string[] = [];
+  if (oldColumns.has('cancelled_at')) branches.push(`"cancelled_at" IS NOT NULL THEN 'cancelled'`);
+  if (oldColumns.has('timed_out_at')) branches.push(`"timed_out_at" IS NOT NULL THEN 'timed_out'`);
+  if (oldColumns.has('resource_limited_at')) branches.push(`"resource_limited_at" IS NOT NULL THEN 'resource_limited'`);
+  if (oldColumns.has('died_at')) branches.push(`"died_at" IS NOT NULL THEN 'died'`);
+  if (oldColumns.has('round_failed_at')) branches.push(`"round_failed_at" IS NOT NULL THEN 'round_failed'`);
   if (oldColumns.has('status')) {
-    roundFailedConditions.push(oldColumns.has('reason')
-      ? `("status" = 'failed' AND ("reason" IS NULL OR "reason" = 'failed_confirmed'))`
-      : `"status" = 'failed'`);
-    roundFailedConditions.push(`("status" = 'unexecuted' AND ${reportEmpty('result_text')} AND ${reportEmpty('reply_text')})`);
+    branches.push(`"status" = 'cancelled' THEN 'cancelled'`);
+    branches.push(`"status" = 'timed_out' THEN 'timed_out'`);
+    if (oldColumns.has('reason')) {
+      branches.push(`"status" = 'failed' AND "reason" = 'result_unknown' THEN 'died'`);
+      branches.push(`"status" = 'failed' AND "reason" = 'resource_limited' THEN 'resource_limited'`);
+    }
+    branches.push(`"status" = 'failed' THEN 'round_failed'`);
+    // 旧 unexecuted 且**有汇报存档**的行按正常结束（completed）；无汇报才是无结果收尾。
+    branches.push(`"status" = 'unexecuted' AND ${reportEmpty} THEN 'round_failed'`);
+    branches.push(`"status" = 'cancelling' THEN 'round_failed'`);
   }
-  const roundFailedCondition = roundFailedConditions.length === 0 ? undefined : roundFailedConditions.join(' OR ');
-  const columnList = TASKS_V5_COLUMNS.map((column) => `"${column}"`).join(', ');
-  const selectList = TASKS_V5_COLUMNS.map((column) => {
-    if (column === 'cancelled_at') {
-      // 旧 cancelled 行：更新时刻即用户取消确认的时刻（机械事实）。
-      return oldColumns.has('status')
-        ? `CASE WHEN "status" = 'cancelled' THEN "updated_at" ELSE NULL END AS "cancelled_at"`
-        : 'NULL AS "cancelled_at"';
-    }
-    if (column === 'died_at') {
-      // 旧 failed + result_unknown 行：结果未知是机械事实（看门狗/调用中断），回填 died_at。
-      // 极旧库无 reason 列：无 result_unknown 信号可取，NULL（不伪造）。
-      return oldColumns.has('status') && oldColumns.has('reason')
-        ? `CASE WHEN "status" = 'failed' AND "reason" = 'result_unknown' THEN "updated_at" ELSE NULL END AS "died_at"`
-        : 'NULL AS "died_at"';
-    }
-    if (column === 'resource_limited_at') {
-      // 旧 failed + reason=resource_limited 行：资源拒绝是机械事实（受理/派发被 policy 拒），
-      // 回填 resource_limited_at（否则资源拒绝事实丢失，退化成「无汇报」的 failed）。
-      // 极旧库无 reason 列：无 resource_limited 信号可取，NULL（不伪造）。
-      return oldColumns.has('status') && oldColumns.has('reason')
-        ? `CASE WHEN "status" = 'failed' AND "reason" = 'resource_limited' THEN "updated_at" ELSE NULL END AS "resource_limited_at"`
-        : 'NULL AS "resource_limited_at"';
-    }
-    if (column === 'round_failed_at') {
-      // 旧 failed_confirmed / 无汇报 unexecuted：本轮以无结果收尾 = round_failed_at
-      // （不是 died：不冒充结果未知）；updated_at 即那次写入的时刻。cancelling 不写本列。
-      return roundFailedCondition === undefined
-        ? 'NULL AS "round_failed_at"'
-        : `CASE WHEN ${roundFailedCondition} THEN "updated_at" ELSE NULL END AS "round_failed_at"`;
-    }
-    if (column === 'cancel_requested_at') {
-      // 旧 cancelling 行：用户请求了停、没确认；更新时刻即请求时刻。
-      return oldColumns.has('status')
-        ? `CASE WHEN "status" = 'cancelling' THEN "updated_at" ELSE NULL END AS "cancel_requested_at"`
-        : 'NULL AS "cancel_requested_at"';
-    }
-    if (column === 'timed_out_at') {
-      return oldColumns.has('status')
-        ? `CASE WHEN "status" = 'timed_out' THEN "updated_at" ELSE NULL END AS "timed_out_at"`
-        : 'NULL AS "timed_out_at"';
-    }
+  branches.push(`${reportNonEmpty} THEN 'completed'`);
+  const kindExpr = `CASE ${branches.map((branch) => `WHEN ${branch}`).join(' ')} ELSE 'round_failed' END`;
+
+  const columnList = TASKS_V6_COLUMNS.map((column) => `"${column}"`).join(', ');
+  const selectList = TASKS_V6_COLUMNS.map((column) => {
     if (column === 'running_since') {
-      // 曾离开 queued 的旧行（任何非 queued 终局/等待/取消）不再可被认领：回填 updated_at。
-      // 极旧库（v2/v3）没有 running_since 列：sourceOf 按列存在性取源（NULL 兜底）。
-      return oldColumns.has('status')
-        ? `CASE WHEN "status" = 'queued' THEN ${sourceOf('running_since')} ELSE COALESCE(${sourceOf('running_since')}, "updated_at") END AS "running_since"`
-        : `COALESCE(${sourceOf('running_since')}, "updated_at") AS "running_since"`;
+      // 旧任务全部当已结束：未启动过的旧行也回填 updated_at，迁移后不再被认领。
+      return `COALESCE(${sourceOf('running_since')}, "updated_at") AS "running_since"`;
     }
     return `${sourceOf(column)} AS "${column}"`;
   }).join(', ');
   // 重建期间关外键（executions REFERENCES tasks(task_id)；DROP tasks 需要临时解除），
   // 结束后恢复。整段重建包在**一个事务**里（SQLite 的 DDL 是事务性的）：中途任一步失败
-  //（进程被杀 / 磁盘满 / 残留 tasks_v5 冲突）必须整体回滚——绝不能出现「DROP 已提交、
-  // RENAME 没跑」把旧账丢在无人读取的 tasks_v5、下次启动又建出空表的假迁移
+  //（进程被杀 / 磁盘满 / 残留 tasks_v6 冲突）必须整体回滚——绝不能出现「DROP 已提交、
+  // RENAME 没跑」把旧账丢在无人读取的 tasks_v6、下次启动又建出空表的假迁移
   //（2026-11-23 review blocking）。注：PRAGMA foreign_keys 在事务内是 no-op，故开关都在事务外。
   db.pragma('foreign_keys = OFF');
   try {
     db.transaction(() => {
+      // 先确保 task_events 存在（SCHEMA_BASE 的 CREATE IF NOT EXISTS；tasks 已存在时是 no-op）。
+      db.exec(SCHEMA_BASE);
       db.exec(`
-        CREATE TABLE tasks_v5 (${TASKS_V5_COLUMNS.map((column) =>
-          `"${column}" ${TASKS_V5_BUILD_COLUMN_SHAPES[column]}`).join(', ')});
-        INSERT INTO tasks_v5 (${columnList}) SELECT ${selectList} FROM "tasks";
+        INSERT OR IGNORE INTO task_events (task_id, kind, at, state_version)
+        SELECT "task_id", ${kindExpr}, "updated_at", 'end' FROM "tasks";
+        CREATE TABLE tasks_v6 (${TASKS_V6_COLUMNS.map((column) =>
+          `"${column}" ${TASKS_V6_BUILD_COLUMN_SHAPES[column]}`).join(', ')});
+        INSERT INTO tasks_v6 (${columnList}) SELECT ${selectList} FROM "tasks";
         DROP TABLE "tasks";
-        ALTER TABLE tasks_v5 RENAME TO "tasks";
+        ALTER TABLE tasks_v6 RENAME TO "tasks";
       `);
     })();
   } finally {
@@ -797,8 +733,8 @@ function rebuildTasksTableToV5(db: Database.Database): void {
   }
 }
 
-/** v5 tasks 表的列形状（重建用；与 SCHEMA_BASE 的 tasks 定义一致）。 */
-const TASKS_V5_BUILD_COLUMN_SHAPES: Readonly<Record<string, string>> = {
+/** v6 tasks 表的列形状（重建用；与 SCHEMA_BASE 的 tasks 定义一致）。 */
+const TASKS_V6_BUILD_COLUMN_SHAPES: Readonly<Record<string, string>> = {
   task_id: 'TEXT PRIMARY KEY',
   principal_id: 'TEXT NOT NULL',
   session_id: 'TEXT NOT NULL',
@@ -813,14 +749,8 @@ const TASKS_V5_BUILD_COLUMN_SHAPES: Readonly<Record<string, string>> = {
   waiting_since: 'TEXT',
   lease_owner: 'TEXT',
   lease_until: 'TEXT',
-  died_at: 'TEXT',
-  cancelled_at: 'TEXT',
-  timed_out_at: 'TEXT',
-  resource_limited_at: 'TEXT',
-  cancel_requested_at: 'TEXT',
   long_running_notified_at: 'TEXT',
   running_since: 'TEXT',
-  round_failed_at: 'TEXT',
   wait_contact_lost_notified_at: 'TEXT',
 };
 
@@ -854,18 +784,8 @@ function fileRefDeliverableColumnMissing(db: Database.Database): boolean {
 }
 
 /**
- * 存活扫描加法迁移谓词：tasks 表已存在（v5 事实形状）但缺 round_failed_at 列
- * （「回合失败收尾」时刻上线前的 v5 旧库）。纯前向加法（TEXT NULL），不升 user_version；
- * v4→v5 重建已按 TASKS_V5_COLUMNS 带出该列，故只在重建**不需要**时补列（避免重复 ADD COLUMN）。
- */
-function roundFailedColumnMissing(db: Database.Database, needsV5Rebuild: boolean): boolean {
-  const taskColumns = taskTableColumns(db);
-  return taskColumns.size > 0 && !needsV5Rebuild && !taskColumns.has('round_failed_at');
-}
-
-/**
  * 迁移前自动备份（只做一次，不覆盖）：先 checkpoint 把 WAL 合入主文件，再整文件复制。
- * 命名 = <dbPath>.backup-v<迁移目标版本>（当前 v3）；`:memory:` 与库文件不存在不生成；
+ * 命名 = <dbPath>.backup-v<迁移目标版本>（当前 v6）；`:memory:` 与库文件不存在不生成；
  * 已有同名备份时保留最早副本。
  */
 function backupBeforeMigration(db: Database.Database, dbPath: string): void {
@@ -892,15 +812,13 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         // CAP-01 S2：旧 file_refs（有表无 task_id 列）→ ADD COLUMN（前向加法，不升版本）。
         const fileRefTaskMissing = tableExists && fileRefTaskColumnMissing(writable);
         const fileRefDeliverableMissing = tableExists && fileRefDeliverableColumnMissing(writable);
-        // S1（v5）：旧形状 tasks（带 status 结论列）→ 重建为事实形状。
-        const needsV5Rebuild = tasksTableNeedsRebuild(writable);
-        // 存活扫描加法：v5 事实形状旧库缺 round_failed_at 列 → 前向 ADD COLUMN（不升版本）。
-        const roundFailedMissing = roundFailedColumnMissing(writable, needsV5Rebuild);
-        if (needsV5Rebuild || operationsMissing || fileRefTaskMissing || fileRefDeliverableMissing || roundFailedMissing) {
+        // 零状态（v6）：旧形状 tasks（带结论列/六个终态列）→ 重建为只存事实的形状。
+        const needsV6Rebuild = tasksTableNeedsRebuild(writable);
+        if (needsV6Rebuild || operationsMissing || fileRefTaskMissing || fileRefDeliverableMissing) {
           // 旧库迁移：先备份（目标版本命名），再重建/加列，再（仅缺 task_no 时）回填编号，
-          // 最后建唯一索引与版本号。共用同一次备份（同一目标版本 v5；已有备份保留最早副本）。
+          // 最后建唯一索引与版本号。共用同一次备份（同一目标版本 v6；已有备份保留最早副本）。
           backupBeforeMigration(writable, dbPath);
-          if (needsV5Rebuild) rebuildTasksTableToV5(writable);
+          if (needsV6Rebuild) rebuildTasksToZeroState(writable);
           const executionColumns = tableColumnsOf(writable, 'executions');
           if (executionColumns.size > 0 && !executionColumns.has('dispatch_key')) {
             writable.exec('ALTER TABLE executions ADD COLUMN dispatch_key TEXT');
@@ -909,10 +827,9 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
           if (fileRefDeliverableMissing) {
             writable.exec('ALTER TABLE file_refs ADD COLUMN deliverable INTEGER NOT NULL DEFAULT 1');
           }
-          if (roundFailedMissing) writable.exec('ALTER TABLE tasks ADD COLUMN round_failed_at TEXT');
         }
         writable.exec(SCHEMA_BASE);
-        if (needsV5Rebuild && !columns.has('task_no')) {
+        if (needsV6Rebuild && !columns.has('task_no')) {
           // 单条 SQL 回填：历史行按 (created_at, task_id) 升序从当前最大值之后连续分配
           //（仅极旧库缺 task_no 列时；重建已按源列搬运编号）。
           writable.prepare(`
@@ -943,25 +860,21 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   const columns = taskTableColumns(db);
   const hasTaskNoColumn = columns.has('task_no');
   const hasReplyColumn = columns.has('reply_text');
+  // 零状态事实列（旧库只读未迁移时缺失 → 对应写方法确定性拒绝、读扫描返回空）。
   const hasFactColumns = columns.has('pending_question')
     && columns.has('waiting_since')
     && columns.has('lease_owner')
     && columns.has('lease_until')
-    && columns.has('died_at')
-    && columns.has('cancelled_at')
-    && columns.has('timed_out_at')
-    && columns.has('resource_limited_at')
     && columns.has('running_since');
-  // 取消请求列（非终局一次性事实）：独立存在性判定，不动 hasFactColumns 的口径。
-  const hasCancelRequestedColumn = columns.has('cancel_requested_at');
-  // 回合失败收尾列（存活扫描用；非业务结论）：独立存在性判定。
-  const hasRoundFailedColumn = columns.has('round_failed_at');
+  // 终止事件账（追加事件；旧库只读缺表 = 没有终止事实可读）。
+  const hasTaskEvents = tableColumnsOf(db, 'task_events').size > 0;
+  const zeroStateReady = hasFactColumns && hasTaskEvents;
   const allocateTaskNo = hasTaskNoColumn
     ? db.prepare("UPDATE task_sequences SET value = value + 1 WHERE name = 'task_no' RETURNING value")
     : undefined;
   // 插入语句含 running_since 列——只在两列都存在（已迁移）的库上 prepare；
   // 旧形状只读打开时保持 undefined（写入给确定性拒绝，prepare 不崩）。
-  const insertTaskStmt = hasTaskNoColumn && hasFactColumns
+  const insertTaskStmt = hasTaskNoColumn && zeroStateReady
     ? db.prepare(`
         INSERT INTO tasks (
           task_id, principal_id, session_id, request, result_text, created_at, updated_at,
@@ -997,70 +910,60 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   const taskExists = db.prepare('SELECT 1 FROM tasks WHERE task_id = ?');
   const touch = db.prepare('UPDATE tasks SET updated_at = ? WHERE task_id = ?');
   // 事实写入语句族（唯一写路径；源码级守卫按此判据守住「单写路径」）。
-  // 一次性机械事实：WHERE 对应时刻列 IS NULL——重复触发零写入；写入同时清租约。
-  // died 的守卫用**唯一谓词**（@fshine/core 的 task-progress 同一份列清单）：已汇报 /
-  // round_failed（本轮已停）/ 等待中的行是已知事实，不得被看门狗或过期扫描改写成「结果未知」。
-  const markDiedStmt = hasFactColumns && hasRoundFailedColumn
+  // 终止事实 = **追加事件**（task_events；同任务至多一条），不是 tasks 的可变状态列。
+  // 写事务（BEGIN IMMEDIATE）：先看同任务有无终止事件 → 无则追加一条 + 清租约。
+  const hasTerminationStmt = hasTaskEvents
+    ? db.prepare('SELECT 1 AS present FROM task_events WHERE task_id = ? LIMIT 1')
+    : undefined;
+  const insertTerminationStmt = hasTaskEvents
     ? db.prepare(`
-        UPDATE tasks
-        SET died_at = @at, lease_owner = NULL, lease_until = NULL, updated_at = @updatedAt
-        WHERE task_id = @taskId AND (${stillProgressingSqlWhere()})
+        INSERT INTO task_events (task_id, kind, at, state_version)
+        VALUES (@taskId, @kind, @at, 'end')
+        ON CONFLICT(task_id, kind, state_version) DO NOTHING
       `)
     : undefined;
-  const markCancelledStmt = hasFactColumns
+  // died = 「仍在推进的行观察到租约过期/进程中断」：已汇报/等待/已终止的行不翻案
+  //（与 stillProgressingOf 同一份谓词，防止直调把已知事实改写成结果未知）。
+  const deathEligibleStmt = hasTaskEvents
+    ? db.prepare(`SELECT 1 AS present FROM tasks WHERE task_id = @taskId AND (${stillProgressingSqlWhere()})`)
+    : undefined;
+  const clearLeaseAfterTermination = hasFactColumns
     ? db.prepare(`
-        UPDATE tasks
-        SET cancelled_at = @at, lease_owner = NULL, lease_until = NULL, updated_at = @updatedAt
-        WHERE task_id = @taskId AND cancelled_at IS NULL
+        UPDATE tasks SET lease_owner = NULL, lease_until = NULL, updated_at = @updatedAt
+        WHERE task_id = @taskId
       `)
     : undefined;
-  const markTimedOutStmt = hasFactColumns
-    ? db.prepare(`
-        UPDATE tasks
-        SET timed_out_at = @at, lease_owner = NULL, lease_until = NULL, updated_at = @updatedAt
-        WHERE task_id = @taskId AND timed_out_at IS NULL
-      `)
+  const appendTerminationTx = hasTerminationStmt !== undefined
+    && insertTerminationStmt !== undefined
+    && deathEligibleStmt !== undefined
+    && clearLeaseAfterTermination !== undefined
+    ? db.transaction((input: TaskTerminationWrite): boolean => {
+        if (hasTerminationStmt.get(input.taskId) !== undefined) return false;
+        if (input.kind === 'died' && deathEligibleStmt.get(input) === undefined) return false;
+        if (insertTerminationStmt.run(input).changes === 0) return false;
+        clearLeaseAfterTermination.run({ taskId: input.taskId, updatedAt: input.updatedAt });
+        return true;
+      })
     : undefined;
-  const markResourceLimitedStmt = hasFactColumns
-    ? db.prepare(`
-        UPDATE tasks
-        SET resource_limited_at = @at, lease_owner = NULL, lease_until = NULL, updated_at = @updatedAt
-        WHERE task_id = @taskId AND resource_limited_at IS NULL
-      `)
-    : undefined;
-  // 取消请求：一次性写入，**不**清租约、**不**改终局（请求 ≠ 确认）。
-  const markCancelRequestedStmt = hasCancelRequestedColumn
-    ? db.prepare(`
-        UPDATE tasks SET cancel_requested_at = @at, updated_at = @updatedAt
-        WHERE task_id = @taskId AND cancel_requested_at IS NULL
-      `)
-    : undefined;
-  // 回合失败收尾：一次性写入，**不**改终局、**不**清租约（只是「本轮已停」事实；存活扫描用它排除）。
-  const markRoundFailedStmt = hasRoundFailedColumn
-    ? db.prepare(`
-        UPDATE tasks SET round_failed_at = @at, updated_at = @updatedAt
-        WHERE task_id = @taskId AND round_failed_at IS NULL
-      `)
-    : undefined;
-  const setWaitingStmt = hasFactColumns
+  const setWaitingStmt = zeroStateReady
     ? db.prepare(`
         UPDATE tasks
         SET pending_question = @pendingQuestionJson,
             waiting_since = @waitingSince,
             updated_at = @updatedAt
-        WHERE task_id = @taskId AND cancelled_at IS NULL AND died_at IS NULL
-          AND timed_out_at IS NULL AND resource_limited_at IS NULL
+        WHERE task_id = @taskId
+          AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = tasks.task_id)
       `)
     : undefined;
-  const armLeaseStmt = hasFactColumns
+  const armLeaseStmt = zeroStateReady
     ? db.prepare(`
         UPDATE tasks
         SET lease_owner = @owner,
             lease_until = @leaseUntil,
             running_since = COALESCE(running_since, @updatedAt),
             updated_at = @updatedAt
-        WHERE task_id = @taskId AND cancelled_at IS NULL AND died_at IS NULL
-          AND timed_out_at IS NULL AND resource_limited_at IS NULL
+        WHERE task_id = @taskId
+          AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = tasks.task_id)
       `)
     : undefined;
   // 清租约语句只在事实列齐备（已迁移）的库上 prepare；旧形状库上 releaseLease 给确定性拒绝。
@@ -1073,19 +976,17 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   const setResultTextStmt = db.prepare(`
     UPDATE tasks SET result_text = @resultText, updated_at = @updatedAt WHERE task_id = @taskId
   `);
-  // 认领条件 = 未启动（running_since NULL）且无任何结束事实（四个时刻列全 NULL）。
-  const selectOldestUnstarted = hasFactColumns
+  // 认领条件 = 未启动（running_since NULL）且无终止事件。
+  const selectOldestUnstarted = zeroStateReady
     ? db.prepare(`
         SELECT * FROM tasks
-        WHERE running_since IS NULL AND died_at IS NULL AND cancelled_at IS NULL
-          AND timed_out_at IS NULL AND resource_limited_at IS NULL
+        WHERE running_since IS NULL
+          AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = tasks.task_id)
         ORDER BY created_at, task_id LIMIT 1
       `)
     : undefined;
-  // 过期租约候选：只取「仍在推进」的行（唯一谓词；与 markDied 守卫同一份列清单）。
-  // 已汇报 / round_failed / 等待中的行没有「过期 → 结果未知」可写——旧口径只看 died/
-  // cancelled/timed_out 三列，会把已知失败的行改写成 died（2026-11-23）。
-  const selectExpiredLeases = hasFactColumns && hasRoundFailedColumn
+  // 过期租约候选：只取「仍在推进」的行（唯一谓词：无汇报/等待/终止事件）。
+  const selectExpiredLeases = zeroStateReady
     ? db.prepare(`
         SELECT * FROM tasks
         WHERE lease_until IS NOT NULL AND lease_until <= ?
@@ -1093,25 +994,12 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         ORDER BY created_at, task_id
       `)
     : undefined;
-  // 在跑行（长时间提醒扫描；含长任务等待回执的行）：唯一谓词（已启动 + 无结束/回合失败/
-  // 汇报存档/等待形状）。SQL 与 TS 判定由同一份列清单派生（@fshine/core task-progress），
-  // 不许在这里再手写 running_since + 结束列的组合。
-  const selectRunningTasks = hasFactColumns && hasRoundFailedColumn
+  // 在跑行（长时间提醒扫描；含长任务等待回执的行）：唯一谓词（已启动 + 无汇报/等待/终止事件）。
+  // SQL 与 TS 判定由同一份列清单/事件清单派生（@fshine/core task-progress），不许在这里手写。
+  const selectRunningTasks = zeroStateReady
     ? db.prepare(`
         SELECT * FROM tasks
         WHERE ${stillProgressingSqlWhere()}
-        ORDER BY created_at, task_id
-      `)
-    : undefined;
-  // 取消孤儿（重启对账）：取消请求已落 + 仍在推进 + **无有效租约**（进程/执行端已断）。
-  // 无有效租约这一条不可省：进程内刚请求的取消租约仍有效，不能当孤儿并进 recovered
-  //（否则重启对账出口会误说「你要我停、没停完」）。
-  const selectCancelRequestedTasks = hasFactColumns && hasRoundFailedColumn && hasCancelRequestedColumn
-    ? db.prepare(`
-        SELECT * FROM tasks
-        WHERE cancel_requested_at IS NOT NULL
-          AND (${stillProgressingSqlWhere()})
-          AND (lease_until IS NULL OR lease_until <= ?)
         ORDER BY created_at, task_id
       `)
     : undefined;
@@ -1152,25 +1040,27 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
       `);
   const selectTask = db.prepare('SELECT * FROM tasks WHERE task_id = ?');
   const selectExecutions = db.prepare('SELECT * FROM executions WHERE task_id = ? ORDER BY rowid');
+  const selectTerminations = hasTaskEvents
+    ? db.prepare('SELECT task_id, kind, at FROM task_events WHERE task_id = ? ORDER BY seq')
+    : undefined;
   const selectTasks = db.prepare('SELECT * FROM tasks ORDER BY created_at, task_id');
   const selectTasksScoped = db.prepare(
     'SELECT * FROM tasks WHERE principal_id = ? AND session_id = ? ORDER BY created_at, task_id',
   );
   /** 按 scope 取等待行（2026-11-19：交办前的「有没有待确认提案」检查必须走索引，不能全表）。 */
-  const selectWaitingScoped = hasFactColumns
+  const selectWaitingScoped = zeroStateReady
     ? db.prepare(`
         SELECT * FROM tasks
         WHERE principal_id = ? AND session_id = ? AND pending_question IS NOT NULL
-          AND cancelled_at IS NULL AND died_at IS NULL AND timed_out_at IS NULL
-          AND resource_limited_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = tasks.task_id)
         ORDER BY created_at, task_id
       `)
     : undefined;
-  const selectWaitingAll = hasFactColumns
+  const selectWaitingAll = zeroStateReady
     ? db.prepare(`
         SELECT * FROM tasks
-        WHERE pending_question IS NOT NULL AND cancelled_at IS NULL AND died_at IS NULL
-          AND timed_out_at IS NULL AND resource_limited_at IS NULL
+        WHERE pending_question IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = tasks.task_id)
         ORDER BY created_at, task_id
       `)
     : undefined;
@@ -1387,17 +1277,6 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     ...(row.waiting_since === null || row.waiting_since === undefined ? {} : { waitingSince: row.waiting_since }),
     ...(row.lease_owner === null || row.lease_owner === undefined ? {} : { leaseOwner: row.lease_owner }),
     ...(row.lease_until === null || row.lease_until === undefined ? {} : { leaseUntil: row.lease_until }),
-    // 四个一次性机械时刻（S1 事实模型；NULL = 未发生）。
-    ...(row.died_at === null || row.died_at === undefined ? {} : { diedAt: row.died_at }),
-    ...(row.cancelled_at === null || row.cancelled_at === undefined ? {} : { cancelledAt: row.cancelled_at }),
-    ...(row.timed_out_at === null || row.timed_out_at === undefined ? {} : { timedOutAt: row.timed_out_at }),
-    ...(row.resource_limited_at === null || row.resource_limited_at === undefined
-      ? {}
-      : { resourceLimitedAt: row.resource_limited_at }),
-    // 取消请求（非终局一次性事实；NULL = 未请求）。
-    ...(row.cancel_requested_at === null || row.cancel_requested_at === undefined
-      ? {}
-      : { cancelRequestedAt: row.cancel_requested_at }),
     // P1：旧库只读（未迁移）时列不存在 → row.task_no 为 undefined：读出缺省，不崩溃。
     ...(row.task_no === null || row.task_no === undefined ? {} : { taskNo: row.task_no }),
     ...(row.name === null || row.name === undefined ? {} : { name: row.name }),
@@ -1409,9 +1288,14 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
       ? {}
       : { waitContactLostNotifiedAt: row.wait_contact_lost_notified_at }),
     ...(row.running_since === null || row.running_since === undefined ? {} : { runningSince: row.running_since }),
-    ...(row.round_failed_at === null || row.round_failed_at === undefined ? {} : { roundFailedAt: row.round_failed_at }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  });
+
+  const toTermination = (row: TaskEventDbRow): TaskEventRow => ({
+    taskId: row.task_id,
+    kind: row.kind as TaskTerminationKind,
+    at: row.at,
   });
 
   const toExecution = (row: ExecutionDbRow): ExecutionRow => ({
@@ -1444,10 +1328,13 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   const storedTask = (row: TaskDbRow): StoredTask => ({
     task: toTask(row),
     executions: (selectExecutions.all(row.task_id) as ExecutionDbRow[]).map(toExecution),
+    terminations: selectTerminations === undefined
+      ? []
+      : (selectTerminations.all(row.task_id) as TaskEventDbRow[]).map(toTermination),
   });
 
   const missingFactColumnsError =
-    '任务底账是旧版 schema（缺事实模型列）且以只读打开：不能写任务事实（请先用可写入口完成迁移）。';
+    '任务底账是旧版 schema（缺零状态事实列/终止事件账）且以只读打开：不能写任务事实（请先用可写入口完成迁移）。';
   const missingOperationsError =
     '任务底账是旧版 schema（缺 U3 operations 表/executions.dispatch_key）且以只读打开：不能读写逻辑操作账（请先用可写入口完成迁移）。';
   const missingFileRefsError =
@@ -1486,24 +1373,14 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     touchTask(taskId, updatedAt) {
       return touch.run(updatedAt, taskId).changes > 0;
     },
-    markTaskFact(taskId, write) {
-      const statement = write.fact === 'died'
-        ? markDiedStmt
-        : write.fact === 'cancelled'
-          ? markCancelledStmt
-          : write.fact === 'timed_out'
-            ? markTimedOutStmt
-            : markResourceLimitedStmt;
-      if (statement === undefined) throw new Error(missingFactColumnsError);
-      return statement.run({ taskId, at: write.at, updatedAt: write.updatedAt }).changes > 0;
+    appendTermination(write) {
+      if (appendTerminationTx === undefined) throw new Error(missingFactColumnsError);
+      return (appendTerminationTx as unknown as { immediate: (input: TaskTerminationWrite) => boolean })
+        .immediate(write);
     },
-    markCancelRequested(taskId, write) {
-      if (markCancelRequestedStmt === undefined) throw new Error(missingFactColumnsError);
-      return markCancelRequestedStmt.run({ taskId, at: write.at, updatedAt: write.updatedAt }).changes > 0;
-    },
-    markRoundFailed(taskId, write) {
-      if (markRoundFailedStmt === undefined) throw new Error(missingFactColumnsError);
-      return markRoundFailedStmt.run({ taskId, at: write.at, updatedAt: write.updatedAt }).changes > 0;
+    listTerminations(taskId) {
+      if (selectTerminations === undefined) return [];
+      return (selectTerminations.all(taskId) as TaskEventDbRow[]).map(toTermination);
     },
     setWaiting(taskId, write) {
       if (setWaitingStmt === undefined) throw new Error(missingFactColumnsError);
@@ -1540,10 +1417,6 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     listRunningExpiredLeases(now) {
       if (selectExpiredLeases === undefined) throw new Error(missingFactColumnsError);
       return (selectExpiredLeases.all(now) as TaskDbRow[]).map(toTask);
-    },
-    listCancelRequestedTasks(now) {
-      if (selectCancelRequestedTasks === undefined) return [];
-      return (selectCancelRequestedTasks.all(now) as TaskDbRow[]).map(toTask);
     },
     claimLongRunningNotice(taskId, stage, at) {
       const statement = claimLongRunningNoticeStatements[stage];

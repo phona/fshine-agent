@@ -255,13 +255,13 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       // 取消：先「已请求」，确认中止后才 cancelled。
       expect(runner.cancel('task_runjs', SCOPE)).toEqual({ outcome: 'requested', taskId: 'task_runjs' });
       await vi.waitFor(() => {
-        expect(registry.get('task_runjs', SCOPE).cancelledAt).toBeDefined();
+        expect(registry.get('task_runjs', SCOPE).termination?.kind).toBe('cancelled');
       }, { timeout: 5000 });
       await runner.whenIdle();
 
       const task = registry.get('task_runjs', SCOPE);
-      expect(task.cancelledAt).toBeDefined();
-      expect(task.cancelledAt).toBeDefined();
+      expect(task.termination?.kind).toBe('cancelled');
+      expect(task.termination?.kind).toBe('cancelled');
       // 执行真的停了：脚本进程已不存在，进程表里也没有本 run 的任何残留进程。
       expect(processAlive(started.pid)).toBe(false);
       const ps = execFileSync('ps', ['-ax', '-o', 'pid=,args='], { encoding: 'utf8' });
@@ -346,13 +346,13 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       expect((cancelReceipt as unknown as { taskCreatedAt?: string }).taskCreatedAt).toMatch(/T/);
 
       await vi.waitFor(() => {
-        expect(registry.get(receipt.taskId, SCOPE).cancelledAt).toBeDefined();
+        expect(registry.get(receipt.taskId, SCOPE).termination?.kind).toBe('cancelled');
       }, { timeout: 5000 });
       await runner.whenIdle();
 
       const task = registry.get(receipt.taskId, SCOPE);
-      expect(task.cancelledAt).toBeDefined();
-      expect(task.cancelledAt).toBeDefined();
+      expect(task.termination?.kind).toBe('cancelled');
+      expect(task.termination?.kind).toBe('cancelled');
       // 中止信号真的到达执行层调用（不是宿主自己假想取消）。
       expect(client.aborted).toBe(true);
       expect(client.signals[0]?.aborted).toBe(true);
@@ -384,7 +384,7 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
 
       expect(runner.cancel('task_stubborn', SCOPE)).toEqual({ outcome: 'requested', taskId: 'task_stubborn' });
       await vi.waitFor(() => {
-        expect(registry.get('task_stubborn', SCOPE).cancelledAt).toBeDefined();
+        expect(registry.get('task_stubborn', SCOPE).termination?.kind).toBe('cancelled');
       }, { timeout: 5000 });
       await runner.whenIdle();
 
@@ -392,8 +392,8 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       for (const release of client.releases) release({ status: 'completed', data: { rows: 2 } });
       await sleep(50);
       const task = registry.get('task_stubborn', SCOPE);
-      expect(task.cancelledAt).toBeDefined();
-      expect(task.cancelledAt).toBeDefined();
+      expect(task.termination?.kind).toBe('cancelled');
+      expect(task.termination?.kind).toBe('cancelled');
       expect(task.executions.filter((execution) => execution.status === 'completed')).toEqual([]);
       expect(runner.inFlight()).toEqual([]);
     } finally {

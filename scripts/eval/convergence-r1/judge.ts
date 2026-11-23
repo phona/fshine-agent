@@ -801,7 +801,9 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       //   · 无任务（Main 直接答复）→ 零执行 + 非空回复承接（下限唯一文本检查，不要求措辞）。
       if (tasks.length > 0) {
         const terminal = tasks.filter(
-          (task) => task.diedAt !== undefined || task.timedOutAt !== undefined || task.resourceLimitedAt !== undefined,
+          (task) => task.termination?.kind === 'died'
+            || task.termination?.kind === 'timed_out'
+            || task.termination?.kind === 'resource_limited',
         );
         if (terminal.length > 0) {
           ref({ path: 'executions.json', row: 'terminal-fact', what: `终态机械时刻 ${terminal.length} 条` });

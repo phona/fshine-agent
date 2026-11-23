@@ -727,7 +727,7 @@ async function main(): Promise<void> {
       if (index === 6) {
         await waitFor(() => {
           const reading = registry.list(scope);
-          return reading.some((task) => (archivedReportOf(task) !== undefined || lastExecutionOf(task)?.status === 'completed') || lastExecutionOf(task)?.status === 'failed' || task.cancelledAt !== undefined);
+          return reading.some((task) => (archivedReportOf(task) !== undefined || lastExecutionOf(task)?.status === 'completed') || lastExecutionOf(task)?.status === 'failed' || task.termination?.kind === 'cancelled');
         }, 60_000, 500);
       }
       if (index === 10) {
@@ -737,7 +737,7 @@ async function main(): Promise<void> {
       }
       if (index === 11) {
         await waitFor(() => registry.list(scope).some((task) =>
-          task.cancelledAt !== undefined && task.executions.some((execution) => execution.operation === 'dummy.longtask')),
+          task.termination?.kind === 'cancelled' && task.executions.some((execution) => execution.operation === 'dummy.longtask')),
         30_000, 500);
       }
       if (index < REPLAY_TURNS.length) await new Promise((resolve) => setTimeout(resolve, options.settleMs));
@@ -764,7 +764,7 @@ async function main(): Promise<void> {
     .filter((row) => row.mode === 'abort' && row.script.includes('longtask'))
     .map((row) => ({ mode: row.mode, script: row.script }));
   const cancelledLongTasks = registry.list(scope)
-    .filter((task) => task.cancelledAt !== undefined
+    .filter((task) => task.termination?.kind === 'cancelled'
       && (task.executions.some((execution) => execution.operation === 'dummy.longtask')
         || /longtask|慢活|600/u.test(task.request)))
     .map((task) => ({ taskId: task.taskId, liveness: taskLivenessOf(task) ?? null, operations: task.executions.map((execution) => execution.operation) }));

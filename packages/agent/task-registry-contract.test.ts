@@ -156,7 +156,7 @@ for (const impl of IMPLS) {
       }
 
       // 拒绝不得改变事实。
-      expect(registry.get('own_task', SCOPE).cancelledAt).toBeUndefined();
+      expect(registry.get('own_task', SCOPE).termination).toBeUndefined();
     });
 
     it('onTaskFact：单回调注入；每次机械事实一条；重复注入替换', () => {
@@ -208,7 +208,7 @@ for (const impl of IMPLS) {
 
       // 有效租约不被 expireLeases 判 died；已认领任务不再参与认领。
       expect(registry.expireLeases(new Date().toISOString())).toHaveLength(0);
-      expect(registry.get('claim_a', SCOPE).diedAt).toBeUndefined();
+      expect(registry.get('claim_a', SCOPE).termination).toBeUndefined();
 
       registry.begin({ taskId: 'claim_inline', ...SCOPE, request: '内联运行中' });
       expect(registry.claimNextQueued({ owner: 'runner-1', leaseMs: 60_000 })).toBeUndefined();
@@ -224,7 +224,7 @@ for (const impl of IMPLS) {
       const expired = registry.expireLeases(new Date(Date.now() + 1_000).toISOString());
       expect(expired.map((task) => task.taskId)).toContain('died_claimed');
       const died = registry.get('died_claimed', SCOPE);
-      expect(died.diedAt).toBeTruthy();
+      expect(died.termination?.kind).toBe('died');
       // 一次性事实：不翻案、不被重新认领。
       expect(registry.claimNextQueued({ owner: 'runner-2', leaseMs: 1_000 })).toBeUndefined();
       expect(registry.expireLeases(new Date(Date.now() + 2_000).toISOString())).toHaveLength(0);
@@ -243,14 +243,14 @@ for (const impl of IMPLS) {
 
       const expired = registry.expireLeases(new Date(Date.now() + 1_000).toISOString());
       expect(expired.map((task) => task.taskId)).toEqual([]);
-      expect(registry.get('expired_reported', SCOPE).diedAt).toBeUndefined();
-      expect(registry.get('expired_round_failed', SCOPE).diedAt).toBeUndefined();
+      expect(registry.get('expired_reported', SCOPE).termination?.kind).not.toBe('died');
+      expect(registry.get('expired_round_failed', SCOPE).termination?.kind).not.toBe('died');
 
       // markDied 直调同样不翻案（不是只有扫描面挡住）。
       registry.markDied('expired_reported');
       registry.markDied('expired_round_failed');
-      expect(registry.get('expired_reported', SCOPE).diedAt).toBeUndefined();
-      expect(registry.get('expired_round_failed', SCOPE).diedAt).toBeUndefined();
+      expect(registry.get('expired_reported', SCOPE).termination?.kind).not.toBe('died');
+      expect(registry.get('expired_round_failed', SCOPE).termination?.kind).not.toBe('died');
     });
   });
 }
@@ -290,7 +290,7 @@ describe('Task Registry 契约核心（SQLite 持久化）', () => {
     const second = sqliteRegistry(dbPath);
     const expired = second.expireLeases(new Date(Date.now() + 1_000).toISOString());
     expect(expired.map((task) => task.taskId)).toEqual(['persist_died']);
-    expect(second.get('persist_died', SCOPE).diedAt).toBeTruthy();
+    expect(second.get('persist_died', SCOPE).termination?.kind).toBe('died');
     expect(second.claimNextQueued({ owner: 'runner-new', leaseMs: 60_000 })).toBeUndefined();
   });
 });

@@ -285,8 +285,7 @@ describe('预期契约：长时间无动静的主动提醒（只一档）', () =
     await runner.whenIdle();
     // 落定写「本轮已停」事实：已结束的任务不再算「在跑」（不是 died——无汇报 ≠ 结果未知）。
     const settled = registry.get('fail-1', SCOPE);
-    expect(settled.roundFailedAt).toBeDefined();
-    expect(settled.diedAt).toBeUndefined();
+    expect(settled.termination?.kind).toBe('round_failed');
     runner.pump();
     await runner.whenIdle();
     expect(sends).toHaveLength(0);
@@ -320,7 +319,7 @@ describe('预期契约：长时间无动静的主动提醒（只一档）', () =
     ]);
     // 任务事实不动（仍持有租约、未写 died 事实），「已发」已落库（不刷屏）。
     const stillRunning = h.registry.get('slow-1', SCOPE);
-    expect(stillRunning.diedAt).toBeUndefined();
+    expect(stillRunning.termination).toBeUndefined();
     expect(stillRunning.leaseUntil).toBeDefined();
     expect(h.registry.get('slow-1', SCOPE).longRunningNotifiedAt).toBeDefined();
     // 到限即止：再推进时间也不再交。

@@ -10,7 +10,7 @@
  * 差别只在写入落 packages/core 的最小 SQLite 引擎（见 task-store.ts），进程重启后底账仍在——
  * 归属校验与等待/租约形状因此也是跨重启的不变量。
  */
-import { openTaskStore, type ExecutionRow, type OperationRow, type StoredTask, type TaskRow, type TaskStore } from '@fshine/core';
+import { openTaskStore, type ExecutionRow, type OperationRow, type StoredTask, type TaskEventRow, type TaskRow, type TaskStore } from '@fshine/core';
 import type { ExecutionFailure, ExecutionOutcome, ExecutionStatus } from '@fshine/contracts/execution-contract';
 import {
   TaskOwnershipError,
@@ -32,6 +32,7 @@ import {
   type TaskRecord,
   type TaskRegistry,
   type TaskScope,
+  type TaskTermination,
   type TimeoutKind,
 } from './task-registry';
 
@@ -77,7 +78,13 @@ export function createSqliteTaskRegistry(
     };
   }
 
+  function terminationOf(stored: StoredTask): TaskTermination | undefined {
+    const last = stored.terminations[stored.terminations.length - 1];
+    return last === undefined ? undefined : { kind: last.kind, at: last.at };
+  }
+
   function toRecord(stored: StoredTask): TaskRecord {
+    const termination = terminationOf(stored);
     return {
       taskId: stored.task.taskId,
       principalId: stored.task.principalId,
@@ -90,11 +97,7 @@ export function createSqliteTaskRegistry(
       ...(stored.task.waitingSince === undefined ? {} : { waitingSince: stored.task.waitingSince }),
       ...(stored.task.leaseOwner === undefined ? {} : { leaseOwner: stored.task.leaseOwner }),
       ...(stored.task.leaseUntil === undefined ? {} : { leaseUntil: stored.task.leaseUntil }),
-      ...(stored.task.diedAt === undefined ? {} : { diedAt: stored.task.diedAt }),
-      ...(stored.task.cancelledAt === undefined ? {} : { cancelledAt: stored.task.cancelledAt }),
-      ...(stored.task.timedOutAt === undefined ? {} : { timedOutAt: stored.task.timedOutAt }),
-      ...(stored.task.resourceLimitedAt === undefined ? {} : { resourceLimitedAt: stored.task.resourceLimitedAt }),
-      ...(stored.task.cancelRequestedAt === undefined ? {} : { cancelRequestedAt: stored.task.cancelRequestedAt }),
+      ...(termination === undefined ? {} : { termination }),
       // P1：旧库只读（未迁移）时三列为缺省（undefined），读出缺省不伪造。
       ...(stored.task.taskNo === undefined ? {} : { taskNo: stored.task.taskNo }),
       ...(stored.task.name === undefined ? {} : { name: stored.task.name }),
@@ -106,12 +109,12 @@ export function createSqliteTaskRegistry(
         ? {}
         : { waitContactLostNotifiedAt: stored.task.waitContactLostNotifiedAt }),
       ...(stored.task.runningSince === undefined ? {} : { runningSince: stored.task.runningSince }),
-      ...(stored.task.roundFailedAt === undefined ? {} : { roundFailedAt: stored.task.roundFailedAt }),
       executions: stored.executions.map((execution: ExecutionRow) => ({
         requestId: execution.requestId,
         operation: execution.operation,
         status: execution.status as ExecutionStatus,
         ...(execution.error === undefined ? {} : { error: execution.error as ExecutionFailure }),
+        ...(execution.dispatchKey === undefined ? {} : { dispatchKey: execution.dispatchKey }),
       })),
       createdAt: stored.task.createdAt,
       updatedAt: stored.task.updatedAt,
@@ -191,15 +194,20 @@ export function createSqliteTaskRegistry(
       const at = new Date().toISOString();
       require(taskId);
       store.setResultText(taskId, { resultText, updatedAt: at });
-      emit(factOf(store.getTask(taskId)!.task, 'result_archived', at));
+      // 汇报 = 正常结束的事实；终止事件（completed）一次性追加，重复存档不重复打扰。
+      if (store.appendTermination({ taskId, kind: 'completed', at, updatedAt: at })) {
+        emit(factOf(store.getTask(taskId)!.task, 'result_archived', at));
+      }
     },
     archiveReply(taskIds, replyText) {
       // 同回合各任务行同值、单事务；不存在的 id 由 store 忽略（调用方保证 id 来自本回合）。
       const at = new Date().toISOString();
       store.setReplyForTasks(taskIds, replyText, at);
       for (const taskId of taskIds) {
-        const stored = store.getTask(taskId);
-        if (stored !== undefined) emit(factOf(stored.task, 'result_archived', at));
+        if (store.appendTermination({ taskId, kind: 'completed', at, updatedAt: at })) {
+          const stored = store.getTask(taskId);
+          if (stored !== undefined) emit(factOf(stored.task, 'result_archived', at));
+        }
       }
     },
     get(taskId, scope) {
@@ -210,12 +218,8 @@ export function createSqliteTaskRegistry(
       return store.listWaitingRows(scope).map(toRecord);
     },
     listRunning() {
-      // 在跑事实（长时间提醒扫描；不读全表）：running_since 非空、无等待形状、无结束事实。
-      return store.listRunningTasks().map((row) => toRecord({ task: row, executions: [] }));
-    },
-    listCancelRequested(now = new Date().toISOString()) {
-      // 重启恢复：取消请求 + 仍在推进 + 无有效租约（取消孤儿）；已断进程/执行端。
-      return store.listCancelRequestedTasks(now).map((row) => toRecord({ task: row, executions: [] }));
+      // 在跑事实（长时间提醒扫描；不读全表）：running_since 非空、无等待形状、无汇报/终止事件。
+      return store.listRunningTasks().map((row) => toRecord({ task: row, executions: [], terminations: [] }));
     },
     claimLongRunningNotice(taskId, stage, at) {
       // 原子「每档仅一次」领取：已提醒过返回 false（零写入）；不改任务事实、不产事件。
@@ -226,7 +230,7 @@ export function createSqliteTaskRegistry(
     },
     waitForUser(taskId, pendingQuestion, options: MutationOptions = {}) {
       const stored = require(taskId, options.scope);
-      if (taskEndedOf(stored.task)) throw new TaskSettledError(taskId);
+      if (taskEndedOf({ termination: terminationOf(stored) })) throw new TaskSettledError(taskId);
       const at = new Date().toISOString();
       store.setWaiting(taskId, { pendingQuestion, waitingSince: at, updatedAt: at });
       store.releaseLease(taskId, at);
@@ -235,7 +239,7 @@ export function createSqliteTaskRegistry(
     },
     answerResumes(taskId, options: MutationOptions = {}) {
       const stored = require(taskId, options.scope);
-      if (taskEndedOf(stored.task)) throw new TaskSettledError(taskId);
+      if (taskEndedOf({ termination: terminationOf(stored) })) throw new TaskSettledError(taskId);
       const at = new Date().toISOString();
       store.setWaiting(taskId, { waitingSince: null, updatedAt: at });
       emit(factOf(store.getTask(taskId)!.task, 'resumed', at));
@@ -244,7 +248,7 @@ export function createSqliteTaskRegistry(
     markCancelled(taskId, options: MutationOptions = {}) {
       require(taskId, options.scope);
       const at = new Date().toISOString();
-      const written = store.markTaskFact(taskId, { fact: 'cancelled', at, updatedAt: at });
+      const written = store.appendTermination({ taskId, kind: 'cancelled', at, updatedAt: at });
       if (written) emit(factOf(store.getTask(taskId)!.task, 'cancelled', at));
       return toRecord(require(taskId));
       // 一次性事实：重复取消零写入、零事件（written=false 时行原样读回）。
@@ -252,37 +256,33 @@ export function createSqliteTaskRegistry(
     markTimedOut(taskId, _kind: TimeoutKind, options: MutationOptions = {}) {
       require(taskId, options.scope);
       const at = new Date().toISOString();
-      const written = store.markTaskFact(taskId, { fact: 'timed_out', at, updatedAt: at });
+      const written = store.appendTermination({ taskId, kind: 'timed_out', at, updatedAt: at });
       if (written) emit(factOf(store.getTask(taskId)!.task, 'timed_out', at));
       return toRecord(require(taskId));
     },
     markDied(taskId) {
       require(taskId);
       const at = new Date().toISOString();
-      const written = store.markTaskFact(taskId, { fact: 'died', at, updatedAt: at });
+      const written = store.appendTermination({ taskId, kind: 'died', at, updatedAt: at });
       if (written) emit(factOf(store.getTask(taskId)!.task, 'died', at));
       return toRecord(require(taskId));
     },
     markResourceLimited(taskId, options: MutationOptions = {}) {
       require(taskId, options.scope);
       const at = new Date().toISOString();
-      const written = store.markTaskFact(taskId, { fact: 'resource_limited', at, updatedAt: at });
+      const written = store.appendTermination({ taskId, kind: 'resource_limited', at, updatedAt: at });
       if (written) emit(factOf(store.getTask(taskId)!.task, 'resource_limited', at));
       return toRecord(require(taskId));
     },
-    markCancelRequested(taskId, options: MutationOptions = {}) {
-      require(taskId, options.scope);
-      const at = new Date().toISOString();
-      // 请求 ≠ 确认：一次性事实写入，不清租约、不发终局事件（重启对账据本列说「你要我停」）。
-      store.markCancelRequested(taskId, { at, updatedAt: at });
-      return toRecord(require(taskId));
-    },
     noteRoundFailed(taskId) {
-      const stored = require(taskId);
+      require(taskId);
       const at = new Date().toISOString();
-      // 一次性收尾事实：本轮已停（不写业务结论、不清租约）；存活扫描据此不再当「在跑」。
-      store.markRoundFailed(taskId, { at, updatedAt: at });
-      emit(factOf(store.getTask(taskId)?.task ?? stored.task, 'round_failed', at));
+      // 一次性终止事实（round_failed）：本轮以无结果收尾；已结束的任务不翻案、不重复打扰。
+      // 存疑：round_failed 不清租约（调用方 settle 已先释放）；appendTermination 统一清租约，
+      // 与「结束的任务不再持租约」一致。
+      if (store.appendTermination({ taskId, kind: 'round_failed', at, updatedAt: at })) {
+        emit(factOf(store.getTask(taskId)!.task, 'round_failed', at));
+      }
     },
     claimNextQueued({ owner, leaseMs }) {
       const at = new Date().toISOString();
@@ -297,7 +297,7 @@ export function createSqliteTaskRegistry(
     },
     armLease(taskId, { owner, leaseMs }, options: MutationOptions = {}) {
       const stored = require(taskId, options.scope);
-      if (taskEndedOf(stored.task)) throw new TaskSettledError(taskId);
+      if (taskEndedOf({ termination: terminationOf(stored) })) throw new TaskSettledError(taskId);
       const at = new Date().toISOString();
       store.armLease(taskId, {
         owner,
@@ -309,16 +309,12 @@ export function createSqliteTaskRegistry(
     expireLeases(now = new Date().toISOString()) {
       const affected: TaskRecord[] = [];
       for (const row of store.listRunningExpiredLeases(now)) {
-        try {
-          const at = new Date().toISOString();
-          const written = store.markTaskFact(row.taskId, { fact: 'died', at, updatedAt: at });
-          if (written) emit(factOf(store.getTask(row.taskId)!.task, 'died', at));
-          affected.push(toRecord(require(row.taskId)));
-        } catch (error) {
-          // 并发下事实已被其他进程写入：跳过（不是本进程的过期目标），不推翻已发生的事实。
-          if (error instanceof TaskSettledError) continue;
-          throw error;
-        }
+        // 追加「结果未知」终止事件（一次性；已结束的行不会出现在扫描结果里，并发下写失败即跳过）。
+        const at = new Date().toISOString();
+        const written = store.appendTermination({ taskId: row.taskId, kind: 'died', at, updatedAt: at });
+        if (!written) continue;
+        emit(factOf(store.getTask(row.taskId)!.task, 'died', at));
+        affected.push(toRecord(require(row.taskId)));
       }
       return affected;
     },
