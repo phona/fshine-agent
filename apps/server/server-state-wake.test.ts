@@ -960,14 +960,16 @@ describe('状态变化唤醒（server 级）：重启对账', () => {
         .find((text) => text.startsWith('[重启对账]'));
       expect(fact).toContain('你要我停');
       expect(fact).toContain('没停完');
-      // 不重放、不宣称已取消：执行器零调用；任务没有 cancelled/died 事实（取消请求 ≠ 确认）。
+      // 不重放、不宣称已取消：执行器零调用；取消孤儿按过期租约同口径落 died_at（结果未知），
+      // 但不写 cancelled_at（请求 ≠ 确认）——唤醒一次即止，不再被在跑/久提醒扫描命中。
       expect(fx.executor.calls).toBe(0);
+      expect(readTask(fx.dbPath, 'task_cancel_orphan')).toMatchObject({ liveness: 'died', died: true, cancelled: false });
       const record = createSqliteTaskRegistry(fx.dbPath, { readOnly: true });
       try {
         const task = record.get('task_cancel_orphan', SCOPE);
         expect(task.cancelRequestedAt).toBeDefined();
+        expect(task.diedAt).toBeDefined();
         expect(task.cancelledAt).toBeUndefined();
-        expect(task.diedAt).toBeUndefined();
       } finally {
         record.close();
       }

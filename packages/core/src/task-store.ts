@@ -338,8 +338,8 @@ export interface TaskStore {
   listRunningExpiredLeases(now: string): TaskRow[];
   /**
    * 只读「取消孤儿」行（重启对账）：cancel_requested_at 非空 + 仍在推进 + 无有效租约
-   *（lease_until 为空或已过期）。用于把旧库/断电容错的 `cancelling` 行接回「你要我停、
-   * 没停完」出口——它不是回合失败（不写 round_failed_at）。
+   *（lease_until 为空或已过期）。调用方按过期租约同口径落一次性 died_at（结果未知）
+   * 后接回「你要我停、没停完」出口——它不是回合失败（不写 round_failed_at/cancelled_at）。
    */
   listCancelRequestedTasks(now: string): TaskRow[];
   /**

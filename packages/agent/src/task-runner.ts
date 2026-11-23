@@ -234,8 +234,9 @@ export interface TaskRegistryPort {
   listRunning?(): readonly TaskRecordView[];
   /**
    * 只读 **取消孤儿**（重启恢复用；可选）：cancel_requested_at 非空 + 仍在推进 +
-   * 无有效租约。并进 pump().recovered，由既有重启对账出口说「你要我停、没停完」。
-   * 缺省 = 不扫（零行为变化）。
+   * 无有效租约。pump 再排除本进程仍在跟踪的（在飞回合/长任务等待），按过期租约同口径
+   * 落一次性 died_at（结果未知）后并进 recovered，由既有重启对账出口说「你要我停、没停完」
+   * （不写 cancelled_at）。缺省 = 不扫（零行为变化）。
    */
   listCancelRequested?(now?: string): readonly TaskRecordView[];
   /**
@@ -677,7 +678,8 @@ export interface SubmitInput {
 export interface PumpSummary {
   /**
    * 本次 pump 需要重启对账的任务：过期租约判为 died（结果未知，禁止自动重放）+
-   * 取消孤儿（cancel_requested_at 已落、仍在推进、无有效租约——「你要我停、没停完」）。
+   * 取消孤儿（cancel_requested_at 已落、仍在推进、无有效租约——同样落 died_at，
+   * 唤醒说「你要我停、没停完」；不写 cancelled_at）。
    */
   recovered: readonly string[];
   /** 本次启动执行回合的任务（认领成功）。 */
@@ -1410,13 +1412,30 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   function pump(): PumpSummary {
     // 重启恢复（两条独立事实，并进同一个既有出口）：
     //   · 过期租约 → died 事实（结果未知，禁止自动重放）；
-    //   · 取消孤儿（cancel_requested_at 已落 + 仍在推进 + 无有效租约）→ 只并进 recovered，
-    //     由既有重启对账出口如实说「你要我停、没停完」（请求 ≠ 确认；不改终局、不重放）。
-    //     进程内刚请求的取消租约仍有效，不在此列（行为不变）。
+    //   · 取消孤儿（cancel_requested_at 已落 + 仍在推进 + 无有效租约 + **本进程未跟踪**）
+    //     → 与过期租约同口径**落一次性 died_at（结果未知）**，再并进 recovered，由既有重启
+    //     对账出口如实说「你要我停、没停完」。落 died_at 后它不再是「仍在推进」：唤醒一次
+    //     即止，不会被在跑/久无动静扫描反复命中。**不写 cancelled_at**（请求 ≠ 确认，
+    //     写 = 假称停了）。进程内刚请求的取消（租约仍有效，或长任务等待仍在本进程表里）
+    //     不在此列（行为不变）。
     const recoveredAt = now().toISOString();
+    const expired = registry.expireLeases(recoveredAt);
+    const cancelOrphans: TaskRecordView[] = [];
+    /** 本进程仍在跟踪的任务（在飞回合 / 长任务等待）——不是「进程已断」的孤儿。 */
+    const trackedInProcess = (taskId: string): boolean =>
+      inFlight.has(taskId)
+      || controllers.has(taskId)
+      || [...waiters.values()].some((entry) => entry.taskId === taskId);
+    for (const task of registry.listCancelRequested?.(recoveredAt) ?? []) {
+      // 长任务停不下来时如实回 running（long-task-async ③）：本进程还在等它，不能收成 died。
+      if (trackedInProcess(task.taskId)) continue;
+      const marked = registry.markDied(task.taskId);
+      // markDied 的唯一谓词/一次性写入保证：并发下已被别人收尾的行不再计入本次恢复。
+      if (marked.diedAt !== undefined) cancelOrphans.push(marked);
+    }
     const recovered = [...new Set([
-      ...registry.expireLeases(recoveredAt).map((task) => task.taskId),
-      ...(registry.listCancelRequested?.(recoveredAt) ?? []).map((task) => task.taskId),
+      ...expired.map((task) => task.taskId),
+      ...cancelOrphans.map((task) => task.taskId),
     ])];
     let waiting: WaitingScan | undefined;
     let nextDue: number | undefined;

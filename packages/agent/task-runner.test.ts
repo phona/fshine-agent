@@ -890,6 +890,26 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
     expect(h.registry.statusOf('t1')).toBe('cancelled');
   });
 
+  it('取消孤儿被 recovery 捞到 → 落一次 died_at（结果未知）；下一次 pump 不再 recovered、不再算在推进', () => {
+    // 与过期租约同口径：取消孤儿 = 用户要停、进程已断、结果说不清 → died_at（结果未知）。
+    // 不落 cancelled_at（请求 ≠ 确认）；落 died_at 后唤醒一次即止，不会被在跑/久提醒反复命中。
+    const h = harness();
+    h.registry.seed({ taskId: 't_orphan', status: 'running', request: '取消孤儿' });
+    h.registry.markCancelRequested('t_orphan');
+    expect(h.registry.cancelRequestedAtOf('t_orphan')).toBeDefined();
+    expect(h.registry.diedAtOf('t_orphan')).toBeUndefined();
+
+    const restarted = h.start();
+    expect(restarted.runner.pump().recovered).toEqual(['t_orphan']);
+    expect(h.registry.diedAtOf('t_orphan')).toBeDefined();
+    // 结果未知（不是 cancelled）：请求 ≠ 确认，不冒充「已停」。
+    expect(h.registry.reasonOf('t_orphan')).toBe('result_unknown');
+    expect(h.registry.statusOf('t_orphan')).toBe('failed');
+
+    // 一次性：下一次 pump 不再捞它（已不是「仍在推进」）。
+    expect(restarted.runner.pump().recovered).toEqual([]);
+  });
+
   it('queued 取消：机械确认直接 cancelled，不写取消请求列（未启动没有「没停完」）', () => {
     const h = harness();
     submit(h, 't1'); // 未启动（queued）

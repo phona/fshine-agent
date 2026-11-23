@@ -436,7 +436,9 @@ export interface TaskRegistry {
   /**
    * 只读取消孤儿（重启恢复扫描）：cancel_requested_at 非空 + 仍在推进 + **无有效租约**
    *（lease_until 为空或已过期）。进程内刚请求的取消租约仍有效，不算孤儿（行为不变）。
-   * 接回既有重启对账出口说「你要我停、没停完」；不是回合失败（不写 round_failed_at）。
+   * 调用方（runner.pump）再排除本进程仍在跟踪的行，按过期租约同口径落一次性 died_at
+   *（结果未知）后接回既有重启对账出口说「你要我停、没停完」；**不写 cancelled_at**
+   *（请求 ≠ 确认），也不写 round_failed_at。
    */
   listCancelRequested(now?: string): readonly TaskRecord[];
   /**
