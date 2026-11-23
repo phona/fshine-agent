@@ -229,6 +229,29 @@ for (const impl of IMPLS) {
       expect(registry.claimNextQueued({ owner: 'runner-2', leaseMs: 1_000 })).toBeUndefined();
       expect(registry.expireLeases(new Date(Date.now() + 2_000).toISOString())).toHaveLength(0);
     });
+
+    it('已收尾的行不被过期扫描改写成 died（汇报存档 / round_failed 都是已知事实）', () => {
+      const registry = impl.make();
+      // 已汇报：租约残留且过期，但完成事实已存档——不是「结果未知」。
+      registry.begin({ taskId: 'expired_reported', ...SCOPE, request: '已汇报的活', queued: true });
+      expect(registry.claimNextQueued({ owner: 'runner-1', leaseMs: 0 })?.taskId).toBe('expired_reported');
+      registry.setResultText('expired_reported', '完成汇报。');
+      // 回合失败收尾：租约不清（markRoundFailed 语义），过期扫描同样不得改写。
+      registry.begin({ taskId: 'expired_round_failed', ...SCOPE, request: '失败的活', queued: true });
+      expect(registry.claimNextQueued({ owner: 'runner-1', leaseMs: 0 })?.taskId).toBe('expired_round_failed');
+      registry.noteRoundFailed('expired_round_failed');
+
+      const expired = registry.expireLeases(new Date(Date.now() + 1_000).toISOString());
+      expect(expired.map((task) => task.taskId)).toEqual([]);
+      expect(registry.get('expired_reported', SCOPE).diedAt).toBeUndefined();
+      expect(registry.get('expired_round_failed', SCOPE).diedAt).toBeUndefined();
+
+      // markDied 直调同样不翻案（不是只有扫描面挡住）。
+      registry.markDied('expired_reported');
+      registry.markDied('expired_round_failed');
+      expect(registry.get('expired_reported', SCOPE).diedAt).toBeUndefined();
+      expect(registry.get('expired_round_failed', SCOPE).diedAt).toBeUndefined();
+    });
   });
 }
 

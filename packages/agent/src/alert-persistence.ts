@@ -17,7 +17,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { openTaskStore } from '@fshine/core';
+import { openTaskStore, stillProgressingOf } from '@fshine/core';
 import {
   evaluateAlerts,
   type AlertCooldownState,
@@ -201,9 +201,10 @@ export function ledgerFacts(dbPath: string): { facts: AlertFact[]; note?: string
     for (const stored of store.listTasks()) {
       const task = stored.task;
       const at = task.updatedAt;
-      // 在跑/等待事实（S1 事实模型：没有 status 列——等待形状与 running_since 即事实）。
+      // 在跑/等待事实（S1 事实模型：没有 status 列——等待形状与唯一谓词即事实）。
       const waiting = task.pendingQuestion !== undefined;
-      const running = task.runningSince !== undefined && !waiting;
+      // 已汇报 / round_failed 的行已收尾，不再投影成 running（唯一谓词，与扫描面同口径）。
+      const running = stillProgressingOf(task);
       if (running || waiting) {
         const since = waiting
           ? (task.waitingSince ?? task.updatedAt)

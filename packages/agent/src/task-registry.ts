@@ -35,6 +35,23 @@
  * 一律 TaskOwnershipError；取不存在的任务与越权同一错误（不泄漏任务是否存在）。
  */
 import type { ExecutionFailure, ExecutionOutcome, ExecutionStatus } from '@fshine/contracts/execution-contract';
+import {
+  stillProgressingOf,
+  taskAcceptedInFlightOf,
+  taskEndedOf,
+  taskUnstartedOf,
+} from '@fshine/core';
+
+/** 存活/推进判定与底账扫描共用的唯一谓词（实现在 @fshine/core 的 task-progress；此处只转出）。 */
+export {
+  stillProgressingOf,
+  taskEndedOf,
+  taskProgressEndedOf,
+  taskReportedOf,
+  taskStartedOf,
+  taskUnstartedOf,
+  taskAcceptedInFlightOf,
+} from '@fshine/core';
 
 /**（历史注记）宿主脚本工具的操作名常量与 inline 终局判定已随 S1 一并删除：执行端回合只记事实，不判业务终局。 */
 
@@ -133,6 +150,7 @@ export type TimeoutKind = 'queued' | 'execution' | 'waiting_user';
 export type TaskLivenessFacts = Pick<
   TaskRecord,
   'leaseOwner' | 'leaseUntil' | 'diedAt' | 'cancelledAt' | 'timedOutAt' | 'resourceLimitedAt'
+  | 'roundFailedAt' | 'runningSince'
 > & {
   pendingQuestion?: unknown;
   executions?: readonly { status: string }[];
@@ -140,63 +158,33 @@ export type TaskLivenessFacts = Pick<
   replyText?: string;
 };
 
-/**
- * 「已受理、等回执」的长任务（末条执行 = accepted 且**无汇报存档**）——租约随受理释放，但任务仍在跑。
- * 纯机械读：末条执行行的 status（执行清单按追加序，accepted 是末条；续跑完成后会追加新行）。
- * 已存档汇报（resultText/replyText）即已收尾：长任务完成后只汇报、不追加执行行，末条仍可能是
- * accepted——不排除会把已完成的长任务投影成 running（tasks --redo 随之错误拒绝）。
- */
-function acceptedInFlightOf(
-  task: { executions?: readonly { status: string }[]; resultText?: string; replyText?: string },
-): boolean {
-  const executions = task.executions;
-  if (executions === undefined || executions.length === 0) return false;
-  if (executions[executions.length - 1]!.status !== 'accepted') return false;
-  return !taskReportedOf(task);
-}
-
 /** 存活（守护事实）：waiting_user / running / died；undefined = 未启动或已收尾（读执行行与汇报分辨）。 */
 export type TaskLiveness = 'running' | 'died' | 'waiting_user';
 
 /**
  * 存活推导（纯函数；只看机械事实，不做任何业务判定）：
  *   · 已有结束事实（cancelled/timed_out/resource_limited）→ undefined（已收尾，不翻案）；
- *   · diedAt 或租约已过期 → died（结果未知；看门狗尚未跑到也按事实算 died）；
+ *   · diedAt → died（结果未知）；
  *   · 等待形状 → waiting_user；
- *   · 有效租约 → running；
- *   · 末条执行 = accepted 且无汇报存档（长任务已受理、等回执；租约已释放）→ running；
- *   · 其余（未启动 / 已收尾）→ undefined。
+ *   · 本轮已停（round_failed_at / 汇报存档）→ undefined——租约残留也不翻案；
+ *   · 仍在推进（唯一谓词 {@link stillProgressingOf}）时：有效租约 → running，租约已过期 → died；
+ *     末条执行 = accepted 且无汇报存档（长任务已受理、等回执）→ running；
+ *   · 其余（未启动）→ undefined。
  */
 export function taskLivenessOf(task: TaskLivenessFacts, now: string = new Date().toISOString()): TaskLiveness | undefined {
+  // 结束事实（取消/超时/资源拒绝）不翻案；结果未知（died）仍是 liveness 三值之一。
   if (task.cancelledAt !== undefined || task.timedOutAt !== undefined || task.resourceLimitedAt !== undefined) {
     return undefined;
   }
   if (task.diedAt !== undefined) return 'died';
-  if (task.leaseUntil !== undefined) return task.leaseUntil > now ? 'running' : 'died';
   if (task.pendingQuestion !== undefined) return 'waiting_user';
+  // 唯一谓词：已汇报 / round_failed（本轮已停）的行不是 running（租约残留也不翻案）。
+  if (!stillProgressingOf(task)) return undefined;
+  if (task.leaseUntil !== undefined) return task.leaseUntil > now ? 'running' : 'died';
   // 长任务「已受理、等回执」（2026-11-22 Grok 复审）：受理时租约被释放，末条执行 = accepted。
   // 任务是活的（等回执），不是「未启动/已收尾」——投影为 running（旧 status='running' 语义）。
-  // acceptedInFlightOf 已排除有汇报存档的行（完成后只汇报、不追加执行行）。
-  if (acceptedInFlightOf(task)) return 'running';
+  if (taskAcceptedInFlightOf(task)) return 'running';
   return undefined;
-}
-
-/** 任务已收尾（四个一次性机械时刻任一存在）——结束事实不翻案。 */
-export function taskEndedOf(task: TaskLivenessFacts): boolean {
-  return task.diedAt !== undefined
-    || task.cancelledAt !== undefined
-    || task.timedOutAt !== undefined
-    || task.resourceLimitedAt !== undefined;
-}
-
-/** 任务未启动（可被队列认领）：没跑过且无任何结束事实。 */
-export function taskUnstartedOf(task: TaskLivenessFacts & { runningSince?: string }): boolean {
-  return task.runningSince === undefined && !taskEndedOf(task);
-}
-
-/** 汇报已存档（事实；做没做成读执行行）。 */
-export function taskReportedOf(task: Pick<TaskRecord, 'resultText' | 'replyText'>): boolean {
-  return (task.resultText ?? task.replyText ?? '').trim() !== '';
 }
 
 /** 一条最小任务底账：归属 + 机械事实 + 汇报存档 + 执行调用清单（无结论字段）。 */
@@ -441,9 +429,8 @@ export interface TaskRegistry {
    */
   listWaiting(scope?: TaskScope): readonly TaskRecord[];
   /**
-   * 只读在跑行（长时间提醒扫描用；避免每趟 pump 全表分配）：
-   * running_since 非空、无等待形状、无结束事实、无汇报存档、无回合失败收尾（round_failed_at）
-   * （含长任务等待回执的行）。
+   * 只读在跑行（长时间提醒扫描用；避免每趟 pump 全表分配）：唯一谓词 {@link stillProgressingOf}
+   * （已启动、无结束事实、无 round_failed、无汇报存档、无等待形状；含长任务等待回执的行）。
    */
   listRunning(): readonly TaskRecord[];
   /**
@@ -653,14 +640,9 @@ export function createTaskRegistry(options: MemoryTaskRegistryOptions = {}): Tas
         .map((task) => ({ ...task }));
     },
     listRunning() {
+      // 在跑事实 = 唯一谓词（已启动 + 无结束/回合失败/汇报/等待）；与 SQLite 同口径。
       return [...tasks.values()]
-        .filter((task) => task.runningSince !== undefined
-          && task.pendingQuestion === undefined
-          // 汇报已存档（completed）或回合失败收尾（round_failed_at）= 已收尾，不再算「在跑」
-          //（与 SQLite 实现同口径）。
-          && (task.resultText ?? task.replyText ?? '').trim() === ''
-          && task.roundFailedAt === undefined
-          && !taskEndedOf(task))
+        .filter((task) => stillProgressingOf(task))
         .map((task) => ({ ...task }));
     },
     claimLongRunningNotice(taskId, stage, at) {
@@ -720,6 +702,9 @@ export function createTaskRegistry(options: MemoryTaskRegistryOptions = {}): Tas
       const at = clock().toISOString();
       const task = require(taskId);
       if (task.diedAt !== undefined) return task;
+      // 唯一谓词：已汇报 / round_failed / 等待 / 未启动的行 = 已知事实，不把「没停完」改写成
+      // died（结果未知）——过期扫描既有过滤，直调同样不翻案（与 SQLite 的 WHERE 守卫同口径）。
+      if (!stillProgressingOf(task)) return task;
       task.diedAt = at;
       clearLease(task);
       touch(task, at);
@@ -781,7 +766,8 @@ export function createTaskRegistry(options: MemoryTaskRegistryOptions = {}): Tas
       const affected: TaskRecord[] = [];
       for (const task of tasks.values()) {
         if (task.leaseUntil === undefined || task.leaseUntil > now) continue;
-        if (task.diedAt !== undefined || task.cancelledAt !== undefined || task.timedOutAt !== undefined) continue;
+        // 唯一谓词：已汇报 / round_failed / 等待 / 已收尾的行没有「过期租约 = 结果未知」可写。
+        if (!stillProgressingOf(task)) continue;
         affected.push(this.markDied(task.taskId));
       }
       return affected;

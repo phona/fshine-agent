@@ -82,18 +82,20 @@
  *     可选方法 `archiveReply` 逐字存档（P2 的 P1 存档面；不经 inline `complete()`/
  *     task 级 judge，避免误伤等待接续）——P6-E01「结果可取回」由此具备执行口径。
  *
- * 移植性：本文件除「收尾事实」纯函数外零仓内 import（端口为对接冻结契约的最小结构类型，
- * 非新协议层；taskEndedOf 与底账 registry 共用同一份定义，避免两份口径漂移）；集成时由
- * 装配方把 P2 registry / P5 policy / 执行回合接到端口上（结构兼容，签名实现自定）。
+ * 移植性：本文件除「收尾/推进事实」纯函数外零仓内 import（端口为对接冻结契约的最小结构类型，
+ * 非新协议层；推进/收尾判定与底账 registry 共用 @fshine/core task-progress 的同一份定义，
+ * 避免两份口径漂移）；集成时由装配方把 P2 registry / P5 policy / 执行回合接到端口上
+ * （结构兼容，签名实现自定）。
  */
-import { taskEndedOf, taskReportedOf } from './task-registry';
+import { stillProgressingOf, taskProgressEndedOf } from './task-registry';
 
 /**
- * 本模块守卫的「不再推进」事实：四个结束时刻任一（{@link taskEndedOf} 单一实现），
- * 或 worker 汇报已存档（完成事实 = 收尾后不可再取消/接续）。
+ * 本模块守卫的「不再推进」事实：四个结束时刻任一、回合失败收尾（round_failed_at）或
+ * worker 汇报已存档（完成事实 = 收尾后不可再取消/接续）。唯一实现见 @fshine/core 的
+ * task-progress（内存底账/SQL 扫描同源）；本模块不再手写组合判定。
  */
 function runInactiveOf(task: TaskRecordView): boolean {
-  return taskEndedOf(task) || taskReportedOf(task);
+  return taskProgressEndedOf(task);
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +153,8 @@ export interface TaskRecordView {
   resourceLimitedAt?: string;
   /** 用户取消**请求**的时刻（ISO；一次性；请求 ≠ 确认——确认才写 cancelledAt）。 */
   cancelRequestedAt?: string;
+  /** 本轮以无结果收尾（回合失败/无汇报）的一次性时刻：不是终局，只表示这一轮已停。 */
+  roundFailedAt?: string;
   /** 本轮开始运行时刻（ISO，单调写一次）：长任务受理后租约被清，提醒扫描靠它算「跑了多久」。 */
   runningSince?: string;
   taskNo?: number;
@@ -1082,11 +1086,12 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     );
   }
 
-  /** 兜不住就暴露（按任务 ID 的唯一入口；只在任务仍在跑时发一次，读不到就如实上报）。 */
+  /** 兜不住就暴露（按任务 ID 的唯一入口；只在任务仍在推进时发一次，读不到就如实上报）。 */
   function exposeContactLost(taskId: string, nowMs: number): void {
     try {
       const task = registry.get(taskId);
-      if (task.runningSince === undefined || task.pendingQuestion !== undefined || runInactiveOf(task)) return;
+      // 唯一谓词：已汇报 / 回合失败 / 等待中的行都不再算「还在跑」。
+      if (!stillProgressingOf(task)) return;
       notifyWaitContactLost(task, nowMs);
     } catch (error) {
       report(taskId, error);
@@ -1104,9 +1109,8 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     const noticed: string[] = [];
     let nextDue: number | undefined;
     for (const task of longRunningRowsSource!()) {
-      if (task.runningSince === undefined || task.pendingQuestion !== undefined || runInactiveOf(task)) {
-        continue; // 回落 list() 时按在跑事实过滤
-      }
+      // 唯一谓词：已汇报 / 回合失败 / 等待中的行都不再算「还在跑」（回落 list() 时同口径）。
+      if (!stillProgressingOf(task)) continue;
       const startedAt = runningStartedAt(task);
       if (startedAt === undefined) continue;
       const elapsed = nowMs - startedAt;
@@ -1597,10 +1601,10 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
           // 无等待端口 = 装配缺陷：回合已结束，释放租约并发回合失败事实（存活面不留活行）。
           releaseLeaseQuietly(taskId);
           try {
-            registry.noteRoundFailed(taskId);
-            // 装配缺陷导致受理的长任务无人推进：落「结果未知」结束事实（存活面不留活行，
-            // 做没做完说不清——不冒充完成，也不留 running 幽灵行）。
+            // 先落「结果未知」结束事实、再落回合失败收尾：markDied 有唯一谓词守卫（本轮已停的
+            // 行不再改写成 died），顺序反了会两笔都不落（2026-11-23）。
             registry.markDied(taskId);
+            registry.noteRoundFailed(taskId);
           } catch (error) {
             if (!isSettledRace(error)) report(taskId, error);
           }
@@ -1673,8 +1677,10 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         // 否则底账看不出「结果未知」（展示词退成「无汇报」，重启对账也认不出这条已死行）。
         releaseLeaseQuietly(taskId);
         try {
-          registry.noteRoundFailed(taskId);
+          // 先 died、再 round_failed：markDied 的唯一谓词守卫拒绝给「本轮已停」的行改写死亡
+          //（2026-11-23；顺序反了结果未知会退化成无汇报）。
           registry.markDied(taskId);
+          registry.noteRoundFailed(taskId);
         } catch (error) {
           if (!isSettledRace(error)) report(taskId, error);
         }
@@ -1754,7 +1760,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       registry.markCancelled(taskId, mutationOptions(scope));
       return { outcome: 'cancelled', taskId };
     }
-    if (task.runningSince === undefined) {
+    if (!stillProgressingOf(task)) {
       // 未启动：尚未开始执行，无中止可等——机械确认取消。
       registry.markCancelled(taskId, mutationOptions(scope));
       policy.cancelQueued(taskId);

@@ -102,7 +102,7 @@
 | --- | --- | --- | --- | --- |
 | 执行层失败 / 拒绝 / 超时：如实转述、不假装成功、不给数 | `scripts/eval/wecom-sim/cases-c-failure.test.ts:W-10 faulty-one`<br>`scripts/eval/wecom-sim/cases-c-failure.test.ts:W-11 denied-one`<br>`scripts/eval/p2/p2-scenarios.test.ts:S7a 失败：faulty-one COLLECTION_FAULT 如实失败`<br>`scripts/eval/p2/p2-scenarios.test.ts:S7b 超时` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 失败话术：每种失败带可执行动作、无内部术语 | `packages/agent/user-facing-failure.test.ts:③ 每种失败都带可执行动作`<br>`packages/agent/user-facing-failure.test.ts:⑤ 内部术语闸` | 宿主机制 | 已覆盖 | — |
-| 虚假完成 / 编造数值：判负、宿主防假成功（不嗅探文本） | `scripts/eval/business-e2e/judge.test.ts:虚假完成判负：回复称完成但执行记录为空`<br>`scripts/eval/cap01/r2d-judge.test.ts:回复编数：宿主红，模型红`<br>`packages/agent/runtime.test.ts:⑤b 反向绊线：零执行 + 声称成功的汇报文本 → 仍记 unexecuted（不嗅探文本）` | 宿主机制 + 执行层 | 已覆盖 | — |
+| 虚假完成 / 编造数值：判负、宿主防假成功（不嗅探文本） | `scripts/eval/business-e2e/judge.test.ts:虚假完成判负：回复称完成但执行记录为空`<br>`scripts/eval/cap01/r2d-judge.test.ts:回复编数：宿主红，模型红`<br>`packages/agent/runtime.test.ts:⑤b 反向绊线：零执行 + 声称成功的汇报文本 → 不产生任何执行行（只认执行事实，不嗅探文本）` | 宿主机制 + 执行层 | 已覆盖 | — |
 | needs_input / 结果未知：如实「待核对」、补答续跑、不冒充成功 | `packages/agent/result-unknown-cancel.test.ts:写操作已 unknown 后同回合取消`<br>`packages/agent/dispatch-key-identity.test.ts:外部写入结果未知：停止自动重试`<br>`scripts/eval/sim/cases/cases.test.ts:SIM-10：回执丢失` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 快活失败（窗口内落定）：零推送，模型同回合已说明，不重复打扰 | `apps/server/server-notification-push.test.ts:⑤ 快活失败（窗口内落定）→ 零推送` | 宿主机制 | 已覆盖 | — |
 | 资源受限失败（池满）：走既有「系统太忙，这个没接」句 + 一个动作，不说成「执行端没办成」（审计 #18） | `apps/server/server-relay-silent-turn.test.ts:③b 资源拒绝` | 宿主机制 | 已覆盖 | — |

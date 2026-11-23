@@ -925,6 +925,20 @@ describe('取消（请求 ≠ 取消；确认才 cancelled；未确认回 runnin
     expect(h.registry.statusOf('t1')).toBe('completed');
   });
 
+  it('回合失败已停（无汇报，round_failed_at 在场）：取消按 terminal，不再写 cancel_requested_at', async () => {
+    // 2026-11-23：失败回合已停、租约已放；旧 runInactiveOf 只看结束时刻/汇报存档，
+    // 把这条已停的行当成「在跑」→ 取消走请求分支写 cancel_requested_at（用户以为还在办）。
+    const h = harness();
+    submit(h, 't1');
+    h.runner.pump();
+    h.executor.settle(0, { kind: 'ended' }); // 无汇报 = 回合失败收尾
+    await h.runner.whenIdle();
+    expect(h.registry.roundFailedAtOf('t1')).toBeDefined();
+
+    expect(h.runner.cancel('t1')).toEqual({ outcome: 'terminal', taskId: 't1' });
+    expect(h.registry.cancelRequestedAtOf('t1')).toBeUndefined();
+  });
+
   it('waiting_user 取消：无在飞回合可中止，请求后机械确认 cancelled', async () => {
     const h = harness();
     submit(h, 't1');

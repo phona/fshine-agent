@@ -66,7 +66,7 @@ import {
 import { createResourcePolicy, fileRefTtlMsOf, resolveRuntimeConfig } from '../../packages/agent/src/resource-policy';
 import { SessionPersistence } from '../../packages/agent/src/session-persistence';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
-import { deriveTaskName } from '../../packages/agent/src/task-registry';
+import { deriveTaskName, taskStartedOf } from '../../packages/agent/src/task-registry';
 import type { TaskExecutor, TaskRunner, WaitingUserNoticePort } from '../../packages/agent/src/task-runner';
 import { defaultMainSkillsDir, loadMainSkillDelivery, loadWorkerSkills } from '../../packages/agent/src/worker-skills';
 import {
@@ -707,12 +707,14 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         get(id: string): {
           diedAt?: string | null;
           resourceLimitedAt?: string | null;
-          runningSince?: string | null;
+          runningSince?: string;
           request?: string;
           name?: string | null;
         };
       }).get(taskId);
-      if (record.diedAt === undefined && record.resourceLimitedAt === undefined && record.runningSince === undefined) {
+      // 已启动事实走共享判定（与「在跑」唯一谓词同源）：这里判的是「有没有跑过痕迹」，
+      // 不是「还在不在跑」，故只用 taskStartedOf + 两个失败结束事实。
+      if (!taskStartedOf(record) && record.diedAt === undefined && record.resourceLimitedAt === undefined) {
         return undefined;
       }
       const name = taskNameOf(taskId, record.request ?? '');

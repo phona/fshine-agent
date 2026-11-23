@@ -30,6 +30,8 @@
  *     timed_out 行按 updated_at 机械回填对应时刻列（该列语义 = 那次机械写入发生的时刻）；
  *     旧 status='failed' 且 reason='result_unknown' 行回填 died_at（结果未知不丢）；
  *     旧 status='cancelling' 行回填 cancel_requested_at（取消请求不丢，重启对账靠它）；
+ *     旧 failed_confirmed / 无汇报的 unexecuted / cancelling 孤儿回填 round_failed_at
+ *     （本轮已停——让「在跑」唯一谓词认得，2026-11-23）；
  *   · 回填 task_no（仅缺该列时）：按 (created_at, task_id) 升序连续分配，只填 NULL 行；
  *   · U3/file_refs/inbound 面只做前向加法（不变）；tasks.round_failed_at 亦为前向加法列
  *     （v5 早期库缺列 → ADD COLUMN TEXT，不升 user_version）；
@@ -57,6 +59,7 @@
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { stillProgressingSqlWhere } from './task-progress';
 
 /** 当前 schema 版本（PRAGMA user_version）。2 = P1；3 = P2a；4 = U3；5 = S1 事实模型（删结论列，加四个机械时刻列）。 */
 export const TASK_STORE_SCHEMA_VERSION = 5;
@@ -685,15 +688,34 @@ function tasksTableNeedsRebuild(db: Database.Database): boolean {
  *     不丢——否则旧库里的「结果未知」行迁移后退化成「无汇报」）；
  *   · resource_limited：旧 status='failed' 且 reason='resource_limited' 行回填 resource_limited_at
  *     （资源拒绝是机械事实，不丢——否则退化成「无汇报」）；
+ *   · round_failed：旧 status='failed'（reason=failed_confirmed 或缺省；不是 result_unknown/
+ *     resource_limited）、status='unexecuted' 且无汇报存档、status='cancelling'（取消请求未确认的
+ *     重启孤儿）三类行回填 round_failed_at（updated_at）——本轮以无结果收尾，让「在跑」唯一谓词
+ *     认得它们已结束（否则 running_since 仍在，迁移后被当成活行）；
  *   · cancel_requested：旧 status='cancelling' 行回填 cancel_requested_at（取消请求——请求 ≠
  *     确认——不丢，重启对账据此说清「你要我停、没停完」）；
  *   · 曾离开过 queued 的行回填 running_since（updated_at）——避免迁移后被当作未启动重新认领。
  * 逐列按旧表实际列存在性取源（极旧库缺列取 NULL），历史行其余事实原样搬运。
+ * failure_reason 列仍不迁移：它是失败原文/结论字段（逐笔事实在 executions），round_failed_at
+ * 回填不依赖它（旧 status 足够；登记在此，不阻塞）。
  */
 function rebuildTasksTableToV5(db: Database.Database): void {
   const oldColumns = taskTableColumns(db);
   const sourceOf = (column: string): string =>
     oldColumns.has(column) ? `"${column}"` : 'NULL';
+  // 无汇报存档：两列按旧表存在性取源后 COALESCE（极旧库缺 reply_text 视为空）。
+  const reportEmpty = (column: string): string => `COALESCE(${sourceOf(column)}, '') = ''`;
+  // 「本轮以无结果收尾」的旧行（失败确认 / 已汇报零执行但无存档 / 取消请求孤儿）——
+  // 旧 reason 列存在时精确排除 result_unknown/resource_limited（那两类另有结束时刻）。
+  const roundFailedConditions: string[] = [];
+  if (oldColumns.has('status')) {
+    roundFailedConditions.push(oldColumns.has('reason')
+      ? `("status" = 'failed' AND ("reason" IS NULL OR "reason" = 'failed_confirmed'))`
+      : `"status" = 'failed'`);
+    roundFailedConditions.push(`("status" = 'unexecuted' AND ${reportEmpty('result_text')} AND ${reportEmpty('reply_text')})`);
+    roundFailedConditions.push(`"status" = 'cancelling'`);
+  }
+  const roundFailedCondition = roundFailedConditions.length === 0 ? undefined : roundFailedConditions.join(' OR ');
   const columnList = TASKS_V5_COLUMNS.map((column) => `"${column}"`).join(', ');
   const selectList = TASKS_V5_COLUMNS.map((column) => {
     if (column === 'cancelled_at') {
@@ -716,6 +738,13 @@ function rebuildTasksTableToV5(db: Database.Database): void {
       return oldColumns.has('status') && oldColumns.has('reason')
         ? `CASE WHEN "status" = 'failed' AND "reason" = 'resource_limited' THEN "updated_at" ELSE NULL END AS "resource_limited_at"`
         : 'NULL AS "resource_limited_at"';
+    }
+    if (column === 'round_failed_at') {
+      // 旧 failed_confirmed / 无汇报 unexecuted / cancelling 孤儿：本轮以无结果收尾 =
+      // round_failed_at（不是 died：不冒充结果未知）；updated_at 即那次写入的时刻。
+      return roundFailedCondition === undefined
+        ? 'NULL AS "round_failed_at"'
+        : `CASE WHEN ${roundFailedCondition} THEN "updated_at" ELSE NULL END AS "round_failed_at"`;
     }
     if (column === 'cancel_requested_at') {
       // 旧 cancelling 行：用户请求了停、没确认；更新时刻即请求时刻。
@@ -951,11 +980,13 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   const touch = db.prepare('UPDATE tasks SET updated_at = ? WHERE task_id = ?');
   // 事实写入语句族（唯一写路径；源码级守卫按此判据守住「单写路径」）。
   // 一次性机械事实：WHERE 对应时刻列 IS NULL——重复触发零写入；写入同时清租约。
-  const markDiedStmt = hasFactColumns
+  // died 的守卫用**唯一谓词**（@fshine/core 的 task-progress 同一份列清单）：已汇报 /
+  // round_failed（本轮已停）/ 等待中的行是已知事实，不得被看门狗或过期扫描改写成「结果未知」。
+  const markDiedStmt = hasFactColumns && hasRoundFailedColumn
     ? db.prepare(`
         UPDATE tasks
         SET died_at = @at, lease_owner = NULL, lease_until = NULL, updated_at = @updatedAt
-        WHERE task_id = @taskId AND died_at IS NULL
+        WHERE task_id = @taskId AND (${stillProgressingSqlWhere()})
       `)
     : undefined;
   const markCancelledStmt = hasFactColumns
@@ -1033,26 +1064,24 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         ORDER BY created_at, task_id LIMIT 1
       `)
     : undefined;
-  const selectExpiredLeases = hasFactColumns
+  // 过期租约候选：只取「仍在推进」的行（唯一谓词；与 markDied 守卫同一份列清单）。
+  // 已汇报 / round_failed / 等待中的行没有「过期 → 结果未知」可写——旧口径只看 died/
+  // cancelled/timed_out 三列，会把已知失败的行改写成 died（2026-11-23）。
+  const selectExpiredLeases = hasFactColumns && hasRoundFailedColumn
     ? db.prepare(`
         SELECT * FROM tasks
         WHERE lease_until IS NOT NULL AND lease_until <= ?
-          AND died_at IS NULL AND cancelled_at IS NULL AND timed_out_at IS NULL
+          AND (${stillProgressingSqlWhere()})
         ORDER BY created_at, task_id
       `)
     : undefined;
-  // 预期契约（2026-11-18）：只读在跑行（长时间提醒扫描；含长任务等待回执的行）。
-  // 在跑事实 = running_since 非空、无等待形状、无结束事实、**无汇报存档**、**无回合失败收尾**
-  //（2026-11-22 Grok 复审：completed 经 archiveReply/setResultText 落 reply_text/result_text、
-  // failed 经 noteRoundFailed 落 round_failed_at 后 running_since 仍在——两者都已收尾，不再算
-  // 「在跑」，否则几秒办完的任务 10 分钟后被叫醒「已经跑了 N 分钟还有结果」）。
+  // 在跑行（长时间提醒扫描；含长任务等待回执的行）：唯一谓词（已启动 + 无结束/回合失败/
+  // 汇报存档/等待形状）。SQL 与 TS 判定由同一份列清单派生（@fshine/core task-progress），
+  // 不许在这里再手写 running_since + 结束列的组合。
   const selectRunningTasks = hasFactColumns && hasRoundFailedColumn
     ? db.prepare(`
         SELECT * FROM tasks
-        WHERE running_since IS NOT NULL AND pending_question IS NULL
-          AND (reply_text IS NULL OR reply_text = '') AND (result_text IS NULL OR result_text = '')
-          AND died_at IS NULL AND cancelled_at IS NULL AND timed_out_at IS NULL
-          AND resource_limited_at IS NULL AND round_failed_at IS NULL
+        WHERE ${stillProgressingSqlWhere()}
         ORDER BY created_at, task_id
       `)
     : undefined;

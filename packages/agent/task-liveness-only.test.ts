@@ -778,3 +778,168 @@ describe('删回合级结局词：宿主/eval 只留事实 + liveness', () => {
     expect(endedVerdictFieldKeys(badType!, synthetic.checker)).toEqual(['verdict']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 「任务是否仍在推进」唯一谓词守卫（2026-11-23）
+//
+// 背景：宿主里「任务还在跑」的判定复制过约 5 份、口径漂移（只看 running_since + 四个结束
+// 时刻），导致已汇报 / round_failed 已落的行仍被当「在办」；SQL 扫描面与 TS 判定各写各的。
+// 收敛口径：唯一实现 = `packages/core/src/task-progress.ts` 的 `stillProgressingOf` 与
+// `stillProgressingSqlWhere`（同一份「结束事实列清单」派生 TS 判定与 SQL WHERE）。
+//
+// 守卫按形状判（不认函数名）：
+//   ① TS：函数**自身**同时读「已启动」事实（runningSince）与任一结束事实
+//      （diedAt/cancelledAt/timedOutAt/resourceLimitedAt/roundFailedAt），或调结束判定
+//      helper（taskEndedOf / taskProgressEndedOf / runInactiveOf）→ 命中——这正是手写
+//      「running_since 非空 && 若干结束事实为空」的形状。唯一实现按 (file,name) 精确放行。
+//   ② SQL：字符串字面量里同时出现 `running_since` 与 `IS NOT NULL` → 命中（底账扫描必须
+//      走共享 SQL 片段；手写 WHERE 一律拦）。唯一实现文件放行。
+//   ③ 反向绊线：把旧口径（TS 组合判定 / SQL WHERE）放回合成源码，扫描器必须报红；
+//      只读 runningSince 的「已启动」判定与唯一实现不得报红（证明不是见词就杀）。
+// ---------------------------------------------------------------------------
+
+/** 「已启动」事实字段（TS camel）。 */
+const START_FACT_NAMES = new Set(['runningSince']);
+/** 收尾事实字段（TS camel；round_failed_at 是「本轮已停」，不是终局）。 */
+const END_FACT_NAMES = new Set(['diedAt', 'cancelledAt', 'timedOutAt', 'resourceLimitedAt', 'roundFailedAt']);
+/** 结束判定 helper（调用它们 = 读结束事实；再与 runningSince 组合就是手写在跑判定）。 */
+const END_HELPER_NAMES = new Set(['taskEndedOf', 'taskProgressEndedOf', 'runInactiveOf']);
+/** 唯一实现（TS 判定 + SQL 片段同源）。 */
+const CANONICAL_PROGRESS_FILE = 'packages/core/src/task-progress.ts';
+/** 唯一实现文件里允许的组合判定（「在跑」唯一谓词 + 其逆面「未启动」）。 */
+const CANONICAL_PROGRESS_NAMES = new Set(['stillProgressingOf', 'taskUnstartedOf']);
+
+/**
+ * 扫描器（纯函数，供反向绊线自证）：返回手写「在跑」判定的命中点。
+ * ① TS：同一个 &&/|| 表达式里同时出现「已启动」事实与结束事实/结束判定 helper
+ *    （armLease 这类「分别读 runningSince、分别调 taskEndedOf」的写路径不命中）；
+ * ② SQL：字符串字面量手写 `running_since ... IS NOT NULL`。
+ */
+export function findForbiddenRunningJudgments(sources: ReadonlyMap<string, string>): Array<{ file: string; hit: string }> {
+  const hits: Array<{ file: string; hit: string }> = [];
+  for (const [file, text] of sources) {
+    const rel = file.split(path.sep).join('/');
+    const sf = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+    const visit = (node: ts.Node): void => {
+      if (isFunctionLike(node)) {
+        const name = functionName(node);
+        const canonical = rel === CANONICAL_PROGRESS_FILE && name !== undefined && CANONICAL_PROGRESS_NAMES.has(name);
+        const body = (node as { body?: ts.Node }).body;
+        if (!canonical && body !== undefined && hasRunningCombo(body)) {
+          hits.push({ file, hit: `ts:${name ?? '<anonymous>'}` });
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    ts.forEachChild(sf, visit);
+    // ② SQL 手写 WHERE（唯一实现文件以外）：所有底账「在跑」扫描都必须走共享片段。
+    if (rel !== CANONICAL_PROGRESS_FILE) {
+      const walkStrings = (node: ts.Node): void => {
+        if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+          if (/\brunning_since\b/iu.test(node.text) && /\bIS\s+NOT\s+NULL\b/iu.test(node.text)) {
+            hits.push({ file, hit: 'sql:running_since IS NOT NULL' });
+          }
+        }
+        ts.forEachChild(node, walkStrings);
+      };
+      walkStrings(sf);
+    }
+  }
+  return hits;
+}
+
+/** 函数自身（不下潜内层函数）是否存在「已启动 && 结束事实」的同一逻辑表达式。 */
+function hasRunningCombo(body: ts.Node): boolean {
+  const isLogical = (node: ts.Node): node is ts.BinaryExpression =>
+    ts.isBinaryExpression(node)
+    && (node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+      || node.operatorToken.kind === ts.SyntaxKind.BarBarToken);
+  const containsCombo = (root: ts.Node): boolean => {
+    let readsStart = false;
+    let readsEnd = false;
+    let callsEndHelper = false;
+    const walk = (node: ts.Node): void => {
+      if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name)) {
+        if (START_FACT_NAMES.has(node.name.text)) readsStart = true;
+        if (END_FACT_NAMES.has(node.name.text)) readsEnd = true;
+      }
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && END_HELPER_NAMES.has(node.expression.text)) {
+        callsEndHelper = true;
+      }
+      ts.forEachChild(node, (child) => { if (!isFunctionLike(child)) walk(child); });
+    };
+    walk(root);
+    return readsStart && (readsEnd || callsEndHelper);
+  };
+  let hit = false;
+  const walk = (node: ts.Node): void => {
+    if (isLogical(node) && containsCombo(node)) hit = true;
+    if (!hit) ts.forEachChild(node, (child) => { if (!isFunctionLike(child)) walk(child); });
+  };
+  walk(body);
+  return hit;
+}
+
+describe('「仍在推进」判定唯一化：只允许一份实现', () => {
+  it('⑨ 产品源码里没有第二份手写的「在跑」判定（TS 组合 / SQL WHERE）', () => {
+    const sources = productSources();
+    expect(findForbiddenRunningJudgments(sources)).toEqual([]);
+    // 唯一实现存在且两侧派生自同一模块（防「删光所有调用点」的假绿）。
+    const progressSource = readFileSync(path.join(ROOT, CANONICAL_PROGRESS_FILE), 'utf8');
+    expect(progressSource).toContain('export function stillProgressingOf');
+    expect(progressSource).toContain('export function stillProgressingSqlWhere');
+    const storeSource = readFileSync(path.join(ROOT, 'packages/core/src/task-store.ts'), 'utf8');
+    expect(storeSource).toContain('stillProgressingSqlWhere()');
+    const registrySource = readFileSync(path.join(ROOT, 'packages/agent/src/task-registry.ts'), 'utf8');
+    expect(registrySource).toContain('stillProgressingOf');
+  });
+
+  it('⑩ 反向绊线：把旧口径放回源码，扫描器必须报红（TS 组合 / helper 组合 / SQL WHERE）', () => {
+    // ① 直接字段组合（旧内存 listRunning / noWaitingTargetFacts 的形状）。
+    const byFields = findForbiddenRunningJudgments(new Map([
+      ['packages/agent/src/legacy-running.ts', `
+        export function isRunning(task: { runningSince?: string; diedAt?: string; cancelledAt?: string }): boolean {
+          return task.runningSince !== undefined && task.diedAt === undefined && task.cancelledAt === undefined;
+        }`],
+    ]));
+    expect(byFields.some((hit) => hit.hit.startsWith('ts:'))).toBe(true);
+
+    // ② 与结束判定 helper 组合（旧实现常见写法）。
+    const byHelper = findForbiddenRunningJudgments(new Map([
+      ['packages/agent/src/legacy-running.ts', `
+        function listRunning(tasks: Array<{ runningSince?: string }>): unknown[] {
+          return tasks.filter((task) => task.runningSince !== undefined && !taskEndedOf(task));
+        }`],
+    ]));
+    expect(byHelper.some((hit) => hit.hit.startsWith('ts:'))).toBe(true);
+
+    // ③ SQL 手写 WHERE（旧 selectRunningTasks / selectExpiredLeases 的形状）。
+    const bySql = findForbiddenRunningJudgments(new Map([
+      ['packages/core/src/legacy-store.ts', `
+        const statement = db.prepare(\`
+          SELECT * FROM tasks
+          WHERE running_since IS NOT NULL AND died_at IS NULL AND cancelled_at IS NULL
+        \`);`],
+    ]));
+    expect(bySql.some((hit) => hit.hit.startsWith('sql:'))).toBe(true);
+
+    // 负例对照一：唯一实现（按 file,name 放行）与其逆面「未启动」不得报红。
+    const canonical = findForbiddenRunningJudgments(new Map([
+      [CANONICAL_PROGRESS_FILE, `
+        export function stillProgressingOf(task: { runningSince?: string; diedAt?: string }): boolean {
+          return task.runningSince !== undefined && task.diedAt === undefined;
+        }
+        export function taskUnstartedOf(task: { runningSince?: string; diedAt?: string }): boolean {
+          return task.runningSince === undefined && task.diedAt === undefined;
+        }`],
+    ]));
+    expect(canonical).toEqual([]);
+
+    // 负例对照二：只读 runningSince 的「已启动」判定（不看结束事实）不得报红。
+    const startedOnly = findForbiddenRunningJudgments(new Map([
+      ['packages/agent/src/started.ts', `
+        function startedOf(task: { runningSince?: string }): boolean { return task.runningSince !== undefined; }`],
+    ]));
+    expect(startedOnly).toEqual([]);
+  });
+});

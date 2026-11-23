@@ -9,6 +9,8 @@
  *   · 历史事实搬运：result_text/reply_text/name/task_no 原样保留；旧 status='cancelled'
  *     /'timed_out' 行按 updated_at 机械回填对应时刻列；曾离开过 queued 的行回填
  *     running_since=updated_at（避免迁移后被当作未启动重新认领），queued 行保持 NULL；
+ *   · 无汇报收尾的旧行（failed_confirmed / 无汇报 unexecuted / cancelling 孤儿）回填
+ *     round_failed_at=updated_at——迁移后不被「在跑」唯一谓词当作活行（2026-11-23）；
  *   · 回填 task_no / 计数器单调不减 / 幂等（二次打开零差异、不新增备份）；
  *   · 只读打开永不迁移：旧列仍在、不建备份、主库哈希不变。
  *
@@ -95,6 +97,14 @@ const SEED_ROWS: readonly SeedRow[] = [
   { taskId: 'task_cancelling', status: 'cancelling', resultText: null, updatedAt: '2026-11-14T09:30:00.000Z', taskNo: 6, name: '历史 F', replyText: null, reason: null },
   // 资源拒绝（旧 failed + reason=resource_limited）→ 必须回填 resource_limited_at（否则事实丢失）。
   { taskId: 'task_resource', status: 'failed', resultText: null, updatedAt: '2026-11-14T09:45:00.000Z', taskNo: 7, name: '历史 G', replyText: null, reason: 'resource_limited' },
+  // 回合失败（旧 failed + reason=failed_confirmed，无汇报）→ 必须回填 round_failed_at：
+  // 否则 running_since 仍在、无结束事实，迁移后被「还在跑」扫描当活行（2026-11-23）。
+  { taskId: 'task_failed_confirmed', status: 'failed', resultText: null, updatedAt: '2026-11-14T10:00:00.000Z', taskNo: 8, name: '历史 H', replyText: null, reason: 'failed_confirmed' },
+  // 已汇报零执行（旧 unexecuted）但**无汇报存档** → 本轮以无结果收尾，同样回填 round_failed_at。
+  { taskId: 'task_unexecuted', status: 'unexecuted', resultText: null, updatedAt: '2026-11-14T10:15:00.000Z', taskNo: 9, name: '历史 I', replyText: null, reason: null },
+  // 负例对照：旧 running 行（无汇报、无结束事实）迁移后仍应被「在跑」扫描看到——
+  // 断言不是「迁移后扫不到任何行」的空绿。
+  { taskId: 'task_live', status: 'running', resultText: null, updatedAt: '2026-11-14T10:30:00.000Z', taskNo: 10, name: '历史 J', replyText: null, reason: null },
 ];
 
 function seedV4Db(dbPath: string): void {
@@ -212,10 +222,24 @@ describe('S1 v5 迁移（旧结论列 → 机械事实形状）', () => {
     // 资源拒绝（旧 failed + reason=resource_limited）回填 resource_limited_at（事实不丢）。
     expect(rawTask(dbPath, 'task_resource')['resource_limited_at']).toBe('2026-11-14T09:45:00.000Z');
     expect(rawTask(dbPath, 'task_resource')['running_since']).toBe('2026-11-14T09:45:00.000Z');
+    // 2026-11-23：无汇报收尾的旧行回填 round_failed_at（= updated_at）——回合已停，不再算在跑。
+    // failed_confirmed / 无汇报的 unexecuted / cancelling 孤儿三类都认得。
+    expect(rawTask(dbPath, 'task_failed_confirmed')['round_failed_at']).toBe('2026-11-14T10:00:00.000Z');
+    expect(rawTask(dbPath, 'task_unexecuted')['round_failed_at']).toBe('2026-11-14T10:15:00.000Z');
+    expect(rawTask(dbPath, 'task_cancelling')['round_failed_at']).toBe('2026-11-14T09:30:00.000Z');
+    // 对照：真正在跑的旧行不回填（识别仍是活行）。
+    expect(rawTask(dbPath, 'task_live')['round_failed_at']).toBeNull();
+    expect(rawTask(dbPath, 'task_live')['running_since']).toBe('2026-11-14T10:30:00.000Z');
     // 读出侧也带上了取消请求事实。
     expect(store.getTask('task_cancelling')!.task.cancelRequestedAt).toBe('2026-11-14T09:30:00.000Z');
     expect(store.getTask('task_unknown')!.task.diedAt).toBe('2026-11-14T09:15:00.000Z');
     expect(store.getTask('task_resource')!.task.resourceLimitedAt).toBe('2026-11-14T09:45:00.000Z');
+    expect(store.getTask('task_failed_confirmed')!.task.roundFailedAt).toBe('2026-11-14T10:00:00.000Z');
+    expect(store.getTask('task_unexecuted')!.task.roundFailedAt).toBe('2026-11-14T10:15:00.000Z');
+    expect(store.getTask('task_cancelling')!.task.roundFailedAt).toBe('2026-11-14T09:30:00.000Z');
+    // 在跑扫描（唯一谓词）：迁移后只剩真正在跑的旧行；已汇报/已取消/超时/结果未知/资源拒绝/
+    // 回合失败/无汇报 unexecuted/cancelling 孤儿都不算「还在跑」。
+    expect(store.listRunningTasks().map((task) => task.taskId)).toEqual(['task_live']);
 
     // 新任务编号从历史最大值接续（不重号）。
     const inserted = store.insertTask({
@@ -223,10 +247,10 @@ describe('S1 v5 迁移（旧结论列 → 机械事实形状）', () => {
       principalId: 'wecom:fixture-user',
       sessionId: 'ask-v5',
       request: '新任务',
-      createdAt: '2026-11-14T10:00:00.000Z',
-      updatedAt: '2026-11-14T10:00:00.000Z',
+      createdAt: '2026-11-14T11:00:00.000Z',
+      updatedAt: '2026-11-14T11:00:00.000Z',
     });
-    expect(inserted.taskNo).toBe(8);
+    expect(inserted.taskNo).toBe(11);
     store.close();
 
     // 幂等：第二次打开零差异、不新增备份。
@@ -234,7 +258,8 @@ describe('S1 v5 迁移（旧结论列 → 机械事实形状）', () => {
     expect(second.listTasks().map((stored) => [stored.task.taskId, stored.task.taskNo]))
       .toEqual([
         ['task_done', 1], ['task_cancel', 2], ['task_timeout', 3], ['task_queued', 4],
-        ['task_unknown', 5], ['task_cancelling', 6], ['task_resource', 7], ['task_new', 8],
+        ['task_unknown', 5], ['task_cancelling', 6], ['task_resource', 7],
+        ['task_failed_confirmed', 8], ['task_unexecuted', 9], ['task_live', 10], ['task_new', 11],
       ]);
     second.close();
     expect(columnNames(dbPath)).not.toContain('status');

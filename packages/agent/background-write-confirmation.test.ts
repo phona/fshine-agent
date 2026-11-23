@@ -1012,6 +1012,26 @@ describe('显式确认切片：确认是显式动作，resume 永不带句柄', 
     expect(resume.reply).toBe('当前没有等待接续的任务。');
   });
 
+  it('⑦b runningTasks 只数仍在推进的行：已汇报 / round_failed 的不算「还有 N 件在办」', async () => {
+    // 2026-11-23：旧 noWaitingTargetFacts 只看 running_since + 四个结束时刻，把已汇报与
+    // 回合失败收尾的行也算成「在办」——模型被告知还有 N 件在跑，实际都已结束。
+    const registry = makeRegistry();
+    registry.begin({ taskId: 't_live', principalId: SCOPE.principalId, sessionId: SCOPE.sessionId, request: '还没结束的活' });
+    registry.begin({ taskId: 't_reported', principalId: SCOPE.principalId, sessionId: SCOPE.sessionId, request: '已汇报的活' });
+    registry.setResultText('t_reported', '办完了。');
+    registry.begin({ taskId: 't_round_failed', principalId: SCOPE.principalId, sessionId: SCOPE.sessionId, request: '回合失败的活' });
+    registry.noteRoundFailed('t_round_failed');
+    const runner = makeRunner(registry, await flowExecutor(new ConfirmFlowClient(), registry, roundWorker([], { results: [] })));
+    const confirm = await scriptedConfirmTurn({
+      registry, runner, tool: 'task_confirm', args: {}, modelText: '现在没有等你确认的事。',
+    });
+    expect(confirm.toolResults[0]).toMatchObject({
+      outcome: 'no_waiting_task',
+      fact: NO_WAITING_TARGET_FACT,
+      runningTasks: 1,
+    });
+  });
+
   it('⑧ 提案回合走岔路：脚本模型不带摘要乱说 → 用户逐字收到它的话；任务仍 waiting_user、句柄未消费、执行层只调一次', async () => {
     const registry = makeRegistry();
     const client = new ConfirmFlowClient();

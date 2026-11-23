@@ -425,7 +425,7 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
     expect(['failed', 'refused']).toContain(lastExecutionOf(registry.get('task_forged', scope))?.status);
   });
 
-  it('⑤b 反向绊线：零执行 + 声称成功的汇报文本 → 仍记 unexecuted（不嗅探文本）', () => {
+  it('⑤b 反向绊线：零执行 + 声称成功的汇报文本 → 不产生任何执行行（只认执行事实，不嗅探文本）', () => {
     const registry = createTaskRegistry();
     const scope = { principalId: 'wecom:test-user', sessionId: 'sess_1' };
     registry.begin({ taskId: 'task_forged_2', ...scope, request: '查询 documents' });

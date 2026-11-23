@@ -86,7 +86,7 @@ import {
 import type { TaskExecutionBridge, TaskExecutionBridgeFactory } from './task-file-bridge';
 import { READ_SKILL_TOOL, type SkillRegistry } from './skills';
 import { stripServerPaths } from './server-paths';
-import { createTaskRegistry, deriveTaskName, DispatchConflictError, taskEndedOf, taskLivenessOf, taskUnstartedOf, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
+import { createTaskRegistry, deriveTaskName, DispatchConflictError, stillProgressingOf, taskEndedOf, taskLivenessOf, taskUnstartedOf, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
 import {
   DEFAULT_RUNTIME_CONFIG,
   taskFailureReasonFor,
@@ -2194,14 +2194,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   }
 
   /**
-   * 「没有可确认/接续对象」时给模型的机械事实（措辞归模型）：kind 区分确认/接续，并附在跑
-   * 任务数——只看机械事实（存活=running 或未启动），不猜业务，也不生成用户话术。
+   * 「没有可确认/接续对象」时给模型的机械事实（措辞归模型）：kind 区分确认/接续，并附在办
+   * 任务数——只看机械事实（唯一谓词：仍在推进 / 未启动），不猜业务，也不生成用户话术。
    */
   function noWaitingTargetFacts(kind: 'confirm' | 'resume'): Record<string, unknown> {
-    // 在办事实（S1）：已启动（running_since）且未收尾、不在等待——inline 任务没有租约也算在办。
+    // 在办事实：仍在推进（已启动且无结束/回合失败/汇报/等待）或尚未启动；已汇报/已停的行不算。
     const runningTasks = registry.list(scope).filter(
-      (task) => task.runningSince !== undefined && task.pendingQuestion === undefined && !taskEndedOf(task)
-        || taskUnstartedOf(task),
+      (task) => stillProgressingOf(task) || taskUnstartedOf(task),
     ).length;
     return {
       fact: kind === 'confirm' ? NO_WAITING_TARGET_FACT : NO_WAITING_RESUME_TARGET_FACT,
