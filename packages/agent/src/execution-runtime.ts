@@ -2243,7 +2243,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     };
   }
 
-  /** 接续：复用 runner.resume，原样转述 ResumeOutcome（非 waiting_user 由 registry 状态机拒绝）。 */
+  /** 接续：复用 runner.resume，原样转述 ResumeOutcome（没有等待事实的行由 registry 拒绝）。 */
   function taskResume(args: Record<string, unknown>, runner: TaskRunner): unknown {
     const answer = typeof args.answer === 'string' ? args.answer : '';
     if (answer.trim() === '') throw new Error('task_resume 缺少 answer：请写清对任务待办问题的答复。');
@@ -2901,7 +2901,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     // P6 async：受理即底账 queued（Main 不等待）；派发/执行/恢复/取消归 TaskRunner。
     if (taskDispatch === 'async') {
       // P7-T06 池满拒绝落点（P6 §七 登记缺口）：受理前按 policy 事实判定——满员且策略
-      // 拒绝准入（无队列位）→ 确定性拒绝：任务按 P2 状态机落终态 failed + resource_limited
+      // 拒绝准入（无队列位）→ 确定性拒绝：写结束事实 + capacity_blocked 触发事件
       // （镜像 inline ⑮ 的拒绝形状），不进入执行；有排队位时受理为 queued（队列 = 底账
       // queued 行，runner 不据 policy 排队许可直派发）。旋钮解释归 policy（单一配置源）。
       if (policy !== undefined) {

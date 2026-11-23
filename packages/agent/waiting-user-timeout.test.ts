@@ -2,7 +2,7 @@
  * waiting_user 到期消费者（W 切片，2026-11-18；先红后绿）。
  *
  * 目标：任务进入 waiting_user 后超过 `waitUserTimeoutMs`，由 TaskRunner 的单一有界定时器轮
- * 自动落 `timed_out` + 既有 reason=timeout，并沿既有事实钩子写一条 timed_out 通知。
+ * 自动落 `deadline_reached` + 既有 reason=deadline_reached，并沿既有事实钩子写一条 deadline_reached 通知。
  *
  * 全部用真底账（SQLite 持久化）+ 假时钟/假定时器 + 假 sink：
  *   · 假时钟：不真 sleep 24 小时；`now` 注入 TaskRunner（等待到期的唯一判据）；
@@ -10,10 +10,10 @@
  *   · 假 sink：通知 outbox 的真实现 + 假发送器（零网络、零真实平台）。
  *
  * 覆盖：
- *   ① 到期 → timed_out + reason=timeout + 一条 timed_out 通知；
+ *   ① 到期 → deadline_reached + reason=deadline_reached + 一条 deadline_reached 通知；
  *   ② 差 1ms → 仍 waiting_user（反向绊线：真实时钟会提前判超时）；
  *   ③ 到期前 task_resume → running，之后不再判超时；
- *   ④ 进程重启：库里等待行按 waiting_since + timeout 在启动后第一趟 pump 判超时；
+ *   ④ 进程重启：库里等待行按 waiting_since + deadline_reached 在启动后第一趟 pump 判超时；
  *   ⑤ 缺省装配（未注入 waitUserTimeoutMs）→ 不建定时器、行为与改动前一致。
  */
 import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
@@ -182,7 +182,7 @@ function withOutbox(registry: SqliteTaskRegistry, dbPath: string): ReturnType<ty
 }
 
 describe('waiting_user 到期消费者', () => {
-  it('① 到期 → timed_out + reason=timeout，且只有一条 timed_out 通知', () => {
+  it('① 到期 → deadline_reached + reason=deadline_reached，且只有一条 deadline_reached 通知', () => {
     const start = '2026-11-01T00:00:00.000Z';
     const h = stack({ timeoutMs: 2_000, startIso: start });
     const outbox = withOutbox(h.registry, h.dbPath);
@@ -198,9 +198,9 @@ describe('waiting_user 到期消费者', () => {
     expect(task.endedAt).toBeTruthy();
     expect(task.endedAt).toBeTruthy();
     // 既有 reason 枚举 + 既有通知意图（不新造状态/事件名）。
-    const timedOut = outbox.listNotifications('w1').filter((notification) => notification.kind === 'timed_out');
+    const timedOut = outbox.listNotifications('w1').filter((notification) => notification.kind === 'deadline_reached');
     expect(timedOut).toHaveLength(1);
-    expect(JSON.parse(JSON.stringify(timedOut[0]!.payload)).reason).toBe('timeout');
+    expect(JSON.parse(JSON.stringify(timedOut[0]!.payload)).reason).toBe('deadline_reached');
   });
 
   it('② 差 1ms → 仍 waiting_user（真实时钟实现会提前判超时）', () => {
@@ -238,7 +238,7 @@ describe('waiting_user 到期消费者', () => {
     expect(executionsOf(h.registry.get('w3', SCOPE))).toEqual([]);
   });
 
-  it('④ 进程重启：库里早已等待的行在启动后第一趟 pump 判 timed_out（按 waiting_since 判定）', () => {
+  it('④ 进程重启：库里早已等待的行在启动后第一趟 pump 判 deadline_reached（按 waiting_since 判定）', () => {
     const dbPath = tempDbPath();
     const since = '2026-11-03T00:00:00.000Z';
     const first = openRegistry(dbPath);
@@ -263,7 +263,7 @@ describe('waiting_user 到期消费者', () => {
     expect(summary.timedOutWaiting).toEqual(['w4']);
     expect(second.get('w4', SCOPE).endedAt).toBeTruthy();
     expect(second.get('w4', SCOPE).endedAt).toBeTruthy();
-    expect(outbox.listNotifications('w4').filter((notification) => notification.kind === 'timed_out')).toHaveLength(1);
+    expect(outbox.listNotifications('w4').filter((notification) => notification.kind === 'deadline_reached')).toHaveLength(1);
     expect(executor.inputs).toHaveLength(0); // 等待超时不是执行回合，不重放
   });
 

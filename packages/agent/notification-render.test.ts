@@ -48,17 +48,17 @@ describe('R5 文案渲染：9 类折叠成 4 类用户语言', () => {
   });
 
   it('timed_out → 跑太久先停了', () => {
-    const text = renderNotification({ kind: 'timed_out', payload: payload({ reason: 'timeout' }) });
+    const text = renderNotification({ kind: 'deadline_reached', payload: payload({ reason: 'deadline_reached' }) });
     expect(text).toContain('跑太久先停了');
   });
 
   it('resource_limited → 系统太忙，这个没接', () => {
-    const text = renderNotification({ kind: 'resource_limited', payload: payload({ reason: 'resource_limited' }) });
+    const text = renderNotification({ kind: 'capacity_blocked', payload: payload({ reason: 'capacity_blocked' }) });
     expect(text).toContain('系统太忙，这个没接');
   });
 
   it('cancelled → 已按你说的停了', () => {
-    const text = renderNotification({ kind: 'cancelled', payload: payload({ reason: 'cancelled_by_user' }) });
+    const text = renderNotification({ kind: 'user_stop', payload: payload({ reason: 'user_stop' }) });
     expect(text).toContain('已按你说的停了');
   });
 

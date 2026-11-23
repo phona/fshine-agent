@@ -6,7 +6,7 @@ task 没有 status。task = 身份（taskId）+ 归属（principal/session）+ �
 
 ## 2. 要删的
 
-- `task.status` 字段（`TaskRecord.status`）——它其实是「做了啥的 summary mark」，不是「任务状态」，这名字误导人（诱导建状态机、写状态字段）。
+- `task.status` 字段（`TaskRecord.status`）——它其实是「做了啥的 summary mark」，不是「任务状态」，这名字会诱导把 task 写成有状态字段的形态。
 - 六处「算 status」的函数：
   - `lastWritable`（execution-runtime.ts:4495，后台终局）
   - `judgeReportedTask`（task-registry.ts:197，inline 终局）

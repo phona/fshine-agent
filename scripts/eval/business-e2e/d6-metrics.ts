@@ -232,9 +232,9 @@ export function extractD6(runDir: string): D6Metrics {
   }
 
   // ── 6) 取消后残留执行 ──────────────────────────────────────────
-  // 取消事实只剩通知通道（cancelled 事件）：任务行不存「怎么结束」，task-facts 里没有 cancel 标记。
+  // 取消事实只剩通知通道（user_stop 触发事件）：任务行不存「怎么结束」，task-facts 里没有 cancel 标记。
   const cancelFromNotes = readJsonl<{ ts: string; kind: string; taskId: string }>(path.join(runDir, 'notifications.jsonl'))
-    .find((n) => n.kind === 'cancelled');
+    .find((n) => n.kind === 'user_stop');
   const cancel = cancelFromNotes === undefined ? undefined : { taskId: cancelFromNotes.taskId, ts: cancelFromNotes.ts };
   let postCancelResidue: D6Metric<PostCancelResidueValue>;
   if (cancel === undefined) {

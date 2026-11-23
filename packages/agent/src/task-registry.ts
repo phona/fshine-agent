@@ -95,20 +95,20 @@ export interface PendingConfirmation {
 
 /**
  * 机械事实事件（通知/采集消费；每次机械事实写入一条）。
- * 这些是「发生了什么」的通道词汇（受理/开始/接续/等待/用户确认停止/等待窗口到期/
- * 资源拒绝/汇报存档/这一轮停下），**不是任务级状态**：没有 finished/died/round_failed
- * 之类「怎么结束」的结论词。
+ * 这些是「发生了什么」的**触发事实**（受理/开始/接续/等待/用户说停/等待窗口到期/
+ * 容量拒绝/汇报存档/这一轮停下），**不是任务级状态、也不是「怎么结束」的分类**：
+ * 没有 cancelled/timed_out/resource_limited 之类结束种类词；这一轮停下只有 `ended`。
  */
 export type TaskEventKind =
-  | 'accepted'         // 受理（后台排队）
-  | 'started'          // 开始跑（inline 建行 / 队列认领）
-  | 'resumed'          // 等待接续（答复/确认后新回合）
-  | 'waiting_user'     // 进入等待（needs_input / 待确认提案）
-  | 'cancelled'        // 用户取消确认（机械事实：用户说了停）
-  | 'timed_out'        // 机械超时（等待到期 / 回合超时 / 排队超时）
-  | 'resource_limited' // 资源拒绝（受理/派发被 policy 拒）
-  | 'result_archived'  // worker 汇报存档（事实：有汇报原文）
-  | 'ended';           // 这一轮停下（不分类：怎么结束不存）
+  | 'accepted'          // 受理（后台排队）
+  | 'started'           // 开始跑（inline 建行 / 队列认领）
+  | 'resumed'           // 等待接续（答复/确认后新回合）
+  | 'waiting_user'      // 进入等待（needs_input / 待确认提案）
+  | 'user_stop'         // 用户要求停下（机械事实：用户说了停）
+  | 'deadline_reached'  // 机械时限到点（等待到期 / 回合超时 / 排队超时）
+  | 'capacity_blocked'  // 容量拒绝（受理/派发被 policy 拒）
+  | 'result_archived'   // worker 汇报存档（事实：有汇报原文）
+  | 'ended';            // 这一轮停下（不分类：怎么结束不存）
 
 /** 一条机械事实（供通知/采集，非事件总线）。 */
 export interface TaskFact {
@@ -647,14 +647,14 @@ export function createTaskRegistry(options: MemoryTaskRegistryOptions = {}): Tas
       const at = clock().toISOString();
       const task = require(taskId, options.scope);
       if (!recordEnd(task, at)) return task; // 一次性/不翻案
-      emit(task, 'cancelled', at);
+      emit(task, 'user_stop', at);
       return task;
     },
     markTimedOut(taskId, _kind, options = {}) {
       const at = clock().toISOString();
       const task = require(taskId, options.scope);
       if (!recordEnd(task, at)) return task;
-      emit(task, 'timed_out', at);
+      emit(task, 'deadline_reached', at);
       return task;
     },
     markLeaseExpired(taskId) {
@@ -670,7 +670,7 @@ export function createTaskRegistry(options: MemoryTaskRegistryOptions = {}): Tas
       const at = clock().toISOString();
       const task = require(taskId, options.scope);
       if (!recordEnd(task, at)) return task;
-      emit(task, 'resource_limited', at);
+      emit(task, 'capacity_blocked', at);
       return task;
     },
     noteRoundEnded(taskId) {

@@ -107,9 +107,9 @@ describe('P4 通知意图枚举与状态映射（契约 §4）', () => {
       'started',
       'waiting_user',
       'resumed',
-      'cancelled',
-      'timed_out',
-      'resource_limited',
+      'user_stop',
+      'deadline_reached',
+      'capacity_blocked',
     ]);
   });
 
@@ -162,7 +162,7 @@ describe('P4 outbox 写点与去重（P4-T01）', () => {
     const { outbox } = harness(tempDbPath(), new FakeSink());
     outbox.record(fact({ kind: 'started', stateVersion: 1 }));
     outbox.record(fact({ kind: 'started', stateVersion: 2 }));
-    outbox.record(fact({ kind: 'cancelled', stateVersion: 2 }));
+    outbox.record(fact({ kind: 'user_stop', stateVersion: 2 }));
     outbox.record(fact({ taskId: 'task_2', kind: 'started', stateVersion: 2 }));
     expect(outbox.listNotifications()).toHaveLength(4);
     expect(outbox.listNotifications('task_2')).toHaveLength(1);
@@ -199,11 +199,11 @@ describe('P4 payload 仅来自传入事实（P4-T04 确定性字段来源）', (
 
   it('result_unknown 以 failed 意图承载，payload.reason 如实携带（v1.1 澄清口径，不得混淆为 failed_confirmed/success）', () => {
     const { outbox } = harness(tempDbPath(), new FakeSink());
-    const { notification } = outbox.record(fact({ kind: 'cancelled', reason: 'result_unknown' }));
-    expect(notification.kind).toBe('cancelled');
+    const { notification } = outbox.record(fact({ kind: 'user_stop', reason: 'result_unknown' }));
+    expect(notification.kind).toBe('user_stop');
     expect(notification.payload.reason).toBe('result_unknown');
     const [row] = outbox.listNotifications();
-    expect(row!.kind).toBe('cancelled');
+    expect(row!.kind).toBe('user_stop');
     expect(row!.payload.reason).toBe('result_unknown');
     outbox.close();
   });
@@ -403,7 +403,7 @@ describe('P4 重试上限与终态不静默丢（P4-T02/T03）', () => {
   it('终态与等待类（完成/失败/取消/超时/等待用户）超限后全部在未送达集合可见', async () => {
     const sink = new FakeSink(() => ({ delivered: false, error: 'SINK_DOWN' }));
     const { outbox, clock } = harness(tempDbPath(), sink, { maxAttempts: 2 });
-    const kinds = ['started', 'cancelled', 'timed_out', 'waiting_user', 'resource_limited'] as const;
+    const kinds = ['started', 'user_stop', 'deadline_reached', 'waiting_user', 'capacity_blocked'] as const;
     for (const [index, kind] of kinds.entries()) {
       outbox.record(fact({ taskId: `task_${index}`, kind, at: new Date(Date.parse(T0) + index).toISOString() }));
     }
@@ -481,7 +481,7 @@ describe('P4 只读查询与持久化（P4-T05 只读形态：不注入对话历
     const { outbox } = harness(dbPath, sink);
     outbox.record(fact({ taskId: 'task_a' }));
     await outbox.deliverPending();
-    outbox.record(fact({ taskId: 'task_b', kind: 'cancelled', at: T0, reason: 'result_unknown' }));
+    outbox.record(fact({ taskId: 'task_b', kind: 'user_stop', at: T0, reason: 'result_unknown' }));
     outbox.close();
 
     const reader = createNotificationReader(dbPath);

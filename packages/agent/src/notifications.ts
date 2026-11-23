@@ -28,28 +28,30 @@ import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 /**
- * 事件/通知意图（7 类；「发生了什么」，不是任务状态）。
- * completed/failed 已删（2026-11-23 删状态机轮）：汇报存档与无汇报收尾不再被分类成
- * 「已完成/失败」——完成由完成投递/唤醒面读汇报原文说，失败由失败唤醒面读执行事实说。
+ * 事件/通知意图（7 类；「发生了什么」的触发事实，不是任务状态，也不是「怎么结束」的分类）。
+ * completed/failed/cancelled/timed_out/resource_limited 这类结果/结束词已删
+ * （2026-11-23 收口轮 + 第 1 轮审查）：汇报存档与无汇报收尾不再被分类成「已完成/失败」；
+ * 用户说停 / 时限到点 / 容量拒绝只记**触发事实**（user_stop / deadline_reached /
+ * capacity_blocked），怎么结束由消费方读原始事实就地判断。
  */
 export const NOTIFICATION_KINDS = [
   'accepted',
   'started',
   'waiting_user',
   'resumed',
-  'cancelled',
-  'timed_out',
-  'resource_limited',
+  'user_stop',
+  'deadline_reached',
+  'capacity_blocked',
 ] as const;
 
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 
-/** 机械原因（payload.reason 仅允许此集合）。failed_confirmed 已删（不写「确认失败」的任务级结论）。 */
+/** 机械原因（payload.reason 仅允许此集合；触发事实，不是任务级结局分类）。 */
 export const NOTIFICATION_REASONS = [
-  'cancelled_by_user',
-  'timeout',
+  'user_stop',
+  'deadline_reached',
   'result_unknown',
-  'resource_limited',
+  'capacity_blocked',
 ] as const;
 
 export type NotificationReason = (typeof NOTIFICATION_REASONS)[number];

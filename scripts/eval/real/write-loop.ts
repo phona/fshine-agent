@@ -53,7 +53,6 @@ import {
   createDeliveryProvenanceAttributor,
   formatShapeViolations,
   type ShapeViolation,
-  type TaskFactKind,
 } from '../shared/conversation-shape';
 import { stripServerPaths } from '../../../packages/agent/src/server-paths';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
@@ -148,8 +147,8 @@ export interface PushEvidence {
   text: string;
   /** 投递记账归属的任务（采集端按 task_result_delivery_sent 记账补填；可选——迟到的完成投递靠它归属）。 */
   taskId?: string;
-  /** 投递归属的事实种类（与 taskId 同源补填；对话形态 ② 判「同一事实投递两次」用）。 */
-  factKind?: TaskFactKind;
+  /** 投递归属的原始事实出口（与 taskId 同源补填；对话形态 ② 判「同一事实投递两次」用）。 */
+  factEvent?: string;
   /** 非文字推送（file_push 占位）不进对话形态面。 */
   excluded?: boolean;
 }
@@ -1069,7 +1068,7 @@ async function main(): Promise<void> {
     }),
     logger: (line) => {
       logs.push(line);
-      // 宿主 sent 记账行 → 最近一条未归属文字推送补归属（taskId/factKind；对话形态 ② 的
+      // 宿主 sent 记账行 → 最近一条未归属文字推送补归属（taskId/factEvent；对话形态 ② 的
       // 前提，共享补填器单源——deliverText 先 await sendText 再写 sent 行，此刻 sink 末条
       // 就是这次投递的那条）。
       attributeDeliveryProvenance(line);

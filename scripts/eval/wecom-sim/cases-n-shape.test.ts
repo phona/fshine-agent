@@ -41,11 +41,11 @@ describe('N 组·对话形态守卫的活体性（要求 D）', () => {
       for (const result of results) {
         expect(result.violations, `会话 ${result.conversationId} 应零违规`).toEqual([]);
       }
-      // 投递归属确实补上了（② 的前提在真实链路里成立）：sent 记账行带 taskId/factKind。
+      // 投递归属确实补上了（② 的前提在真实链路里成立）：sent 记账行带 taskId/factEvent。
       const sent = sim.logs.find((line) => line['event'] === 'task_result_delivery_sent');
       expect(sent).toBeDefined();
       expect(sent!['taskId']).toEqual(expect.any(String));
-      expect(sent!['factKind']).toBe('completed');
+      expect(sent!['factEvent']).toBe('task_completion_wake');
     } finally {
       await sim.close();
     }
@@ -60,7 +60,7 @@ describe('N 组·对话形态守卫的活体性（要求 D）', () => {
       sim.injectDelivery({
         text: sim.sdk.proactiveTexts[0]!.content,
         taskId: String(sent!['taskId']),
-        factKind: 'completed',
+        factEvent: 'task_completion_wake',
       });
       const codes = sim.shapeViolations().flatMap((result) => result.violations.map((violation) => violation.code));
       expect(codes).toContain('fact-delivered-twice');
@@ -80,7 +80,7 @@ describe('N 组·对话形态守卫的活体性（要求 D）', () => {
       sim.injectDelivery({
         text: '已请求停止（任务号 task_db2b3ca3），任务不会继续跑。',
         taskId: 'task_db2b3ca3-0000-0000-0000-000000000000',
-        factKind: 'cancelled',
+        factEvent: 'task_cancel_wake',
       });
       const markers = sim.leakHits().map((hit) => hit.marker);
       expect(markers).toContain('task_db2b3ca3');

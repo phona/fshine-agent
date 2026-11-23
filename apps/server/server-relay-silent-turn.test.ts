@@ -782,7 +782,7 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       expect(text).toContain(TASK_TEXT);
       expect(text).not.toBe(failureMessageFor('executor_failed').text);
       // 既有通知面确实收到事实（不是宿主新造的话术）。
-      expect(fx.sink!.sent.some((notification) => notification.kind === 'cancelled')).toBe(true);
+      expect(fx.sink!.sent.some((notification) => notification.kind === 'user_stop')).toBe(true);
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(fx.delivery.sentTexts).toHaveLength(1);
     } finally {

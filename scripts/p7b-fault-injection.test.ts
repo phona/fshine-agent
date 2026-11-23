@@ -4,16 +4,16 @@
  * 范围（owner 2026-11-14 授权；6 类故障 + 重复消息幂等 + 重启三态）：
  *   ① 模型超时（假 driver 到截止无产出 / AbortError）；② Worker 崩溃（部分执行后崩溃）；
  *   ③ 通知失败（假 sink 拒绝/抛错/恢复）；④ 重复消息（假渠道同 messageId 重投 → 幂等）；
- *   ⑤ 池满（backgroundConcurrency=1 + queueCapacity=0 → 确定性拒绝 resource_limited）；
+ *   ⑤ 池满（backgroundConcurrency=1 + queueCapacity=0 → 确定性拒绝 capacity_blocked）；
  *   ⑥ 重启三态（queued 重领 / running 租约过期 → result_unknown 不重放 / completed 不重跑）。
  *
  * 确定性断言口径（本套件先行冻结；对应 r4-acceptance.md 的 P7-T06 / R-D / R-E 与
  * r4-joint-interfaces.md §1/§4/§5；不改冻结判据、不改历史证据）：
- *   · 预期状态：任务终态按 P2 状态机落库（timed_out/timeout、failed/failed_confirmed、
- *     failed/result_unknown、failed/resource_limited）；
+ *   · 预期事实：任务追加结束事实（只留时刻、不分类）+ 触发事件（deadline_reached /
+ *     capacity_blocked / result_unknown 等，怎么结束不存种类）；
  *   · 不挂死：受理与收尾在有限步内完成；后台满载不阻塞前台（前台配额独立）；
  *   · 不重复副作用：同一故障/重投下执行端调用次数不增（driver/client/executor 计数钉住）；
- *   · 通知不丢：timed_out/failed/resource_limited 意图如实落库且 payload.reason 原样；
+ *   · 通知不丢：deadline_reached / capacity_blocked 等触发事实如实落库且 payload.reason 原样；
  *   · 假件：假 Main/Worker driver、假 executor、假 sink、假渠道（server.handler 渠道事实）
  *     + 仓内 dummy 配置；零网络、零真实模型、零真实平台。
  *
@@ -231,7 +231,7 @@ async function settleQuietly(assembled: Awaited<ReturnType<typeof assembleSessio
 }
 
 describe('P7-T06 故障注入 · ① 模型超时（假 driver）', () => {
-  it('①-1 到截止无产出（真驱动契约：返回空文本）→ timed_out/timeout；不挂死；通知与前台正常', async () => {
+  it('①-1 到截止无产出（真驱动契约：返回空文本）→ deadline_reached；不挂死；通知与前台正常', async () => {
     const dbPath = path.join(tempDir(), 'state.db');
     const registry = createSqliteTaskRegistry(dbPath);
     let clock = 1_000_000;
@@ -275,13 +275,13 @@ describe('P7-T06 故障注入 · ① 模型超时（假 driver）', () => {
       expect(task.endedAt).toBeTruthy();
       expect(task.replyText).toBeUndefined(); // 超时不产生结果存档（不以汇报冒充）
       expect(driverCalls).toBe(1); // 不重放
-      // 通知如实：timed_out 意图 + reason=timeout，投递可达
+      // 通知如实：deadline_reached 意图 + reason=deadline_reached，投递可达
       await assembled.notifications!.deliverPending();
       const reader = createNotificationReader(dbPath);
       const rows = reader.listNotifications(taskId);
       reader.close();
-      expect(rows.map((row) => row.kind)).toEqual(['accepted', 'started', 'timed_out']);
-      expect(rows.find((row) => row.kind === 'timed_out')!.payload.reason).toBe('timeout');
+      expect(rows.map((row) => row.kind)).toEqual(['accepted', 'started', 'deadline_reached']);
+      expect(rows.find((row) => row.kind === 'deadline_reached')!.payload.reason).toBe('deadline_reached');
       expect(rows.every((row) => row.deliveredAt !== undefined)).toBe(true);
       // 超时不永久占用资源；前台仍可用
       expect(assembled.policy.snapshot().background.active).toBe(0);
@@ -295,7 +295,7 @@ describe('P7-T06 故障注入 · ① 模型超时（假 driver）', () => {
     }
   });
 
-  it('①-2 驱动以 AbortError 结束在截止之后 → 同样 timed_out（不误判 failed）', async () => {
+  it('①-2 驱动以 AbortError 结束在截止之后 → 同样 deadline_reached（不误判 failed）', async () => {
     const dbPath = path.join(tempDir(), 'state.db');
     const registry = createSqliteTaskRegistry(dbPath);
     let clock = 2_000_000;
@@ -610,7 +610,7 @@ describe('P7-T06 故障注入 · ④ 重复消息（假渠道同 messageId 重�
 });
 
 describe('P7-T06 故障注入 · ⑤ 池满（backgroundConcurrency=1 + queueCapacity=0）', () => {
-  it('⑤ 满员新交办确定性拒绝 resource_limited；运行中任务不受损；无积压；前台可用', async () => {
+  it('⑤ 满员新交办确定性拒绝 capacity_blocked；运行中任务不受损；无积压；前台可用', async () => {
     const dbPath = path.join(tempDir(), 'state.db');
     const gate = deferred<TaskExecutionOutcome>();
     const executor = new FakeExecutor([
@@ -672,11 +672,11 @@ describe('P7-T06 故障注入 · ⑤ 池满（backgroundConcurrency=1 + queueCap
       expect(assembled.taskRegistry.get(task2, SCOPE_A).endedAt).toBeTruthy();
       expect(executor.calls.map((call) => call.taskId)).toEqual([task1]);
 
-      // 拒绝通知：resource_limited 意图如实落库（九类枚举之一）
+      // 拒绝通知：capacity_blocked 意图如实落库（触发事实之一）
       const reader = createNotificationReader(dbPath);
       const rows = reader.listNotifications(task2);
       reader.close();
-      expect(rows.some((row) => row.kind === 'resource_limited')).toBe(true);
+      expect(rows.some((row) => row.kind === 'capacity_blocked')).toBe(true);
     } finally {
       gate.resolve({ kind: 'ended' });
       await settleQuietly(assembled);

@@ -473,7 +473,7 @@ export async function openRealSession(input: RealSessionInput): Promise<RealSess
         taskId: task.taskId,
         ...(task.taskNo === undefined ? {} : { taskNo: task.taskNo }),
         request: task.request,
-        // 账本机械事实（存活三值 + 收尾/汇报/执行事实）——R6 oracle 只读事实，不读任务级状态词。
+        // 账本机械事实（启动/结束/汇报/执行事实）——R6 oracle 只读事实，不读任务级状态词。
         ...taskFactViewOf(task),
         ...(lastFailureOf(task)?.error?.code === undefined ? {} : { reason: lastFailureOf(task)?.error?.code! }),
         requestIds: task.executions.map((e) => e.requestId),

@@ -499,7 +499,7 @@ export interface LongRunningNoticePort {
  * 「按这版提交」才拿到确认摘要。
  *
  * 恰一次语义（去重 = (taskId, 进入等待次数)）：runner 只在**非等待态**回合以 needs_*
- * 收尾落等待后触发本端口——状态机禁止 waiting→waiting，回到 running 再进等待 = 新的
+ * 收尾落等待后触发本端口——已在等待的行再落等待不重复触发，回到非等待再进等待 = 新的
  * 一次收尾 = 新的一次触发；端口自身不承担重试（投递失败由宿主侧退回待注入，与完成 /
  * 失败出口同一纪律）。`question` 直读底账提交后的 pendingQuestion（事实源 = 底账），
  * **句柄（confirmation.handle）不进本端口之外的任何用户面**——用户可见文本归宿主拼装
@@ -720,7 +720,7 @@ export interface TaskRunner {
   pump(): PumpSummary;
   /** 等待在飞回合全部落定（含落定触发的再派发），测试/收尾用。 */
   whenIdle(): Promise<void>;
-  /** 取消：请求 ≠ 取消；确认（abort 观察/执行层确认）后才 cancelled（见头部状态机）。 */
+  /** 取消：请求 ≠ 取消；确认（abort 观察/执行层确认）后才追加结束事实（见头部取消语义）。 */
   cancel(taskId: string, scope?: TaskScope): CancelOutcome;
   /** waiting_user 答复接续：同一 Task 新回合（编号不变、executions 追加）；许可不足不接续。 */
   resume(taskId: string, options?: { answer?: string; scope?: TaskScope }): ResumeOutcome;
@@ -1742,7 +1742,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
    * 不阻塞回合收尾、不占并发槽——唤醒回合的耗时与资源由宿主侧承担）。等待事实直读底账
    * 提交后的 pendingQuestion（不透传 outcome 引用：事实源 = 底账）；形状兜底 = 底账没有
    * 等待形状就不触发（不猜）。恰一次：本函数只在 needs_input / needs_confirmation 收尾
-   * 落等待后各调用一次（状态机禁止 waiting→waiting；回 running 再进 = 新收尾 = 新一次）。
+   * 落等待后各调用一次（已在等待的行再落等待不重复触发；回非等待再进 = 新收尾 = 新一次）。
    */
   function notifyWaitingUser(taskId: string): void {
     const waitingUserNotice = options.waitingUserNotice;

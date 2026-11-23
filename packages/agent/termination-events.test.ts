@@ -34,9 +34,9 @@ const SCOPE = { principalId: 'p', sessionId: 's' } as const;
 describe('结束事实（内存 registry）', () => {
   it('每种停法都只写一条「停下时刻」，不写种类', () => {
     const cases = [
-      ['cancelled', (r: ReturnType<typeof createTaskRegistry>, id: string) => r.markCancelled(id)],
-      ['timed_out', (r: ReturnType<typeof createTaskRegistry>, id: string) => r.markTimedOut(id, 'execution')],
-      ['resource_limited', (r: ReturnType<typeof createTaskRegistry>, id: string) => r.noteResourceRefused(id)],
+      ['user_stop', (r: ReturnType<typeof createTaskRegistry>, id: string) => r.markCancelled(id)],
+      ['deadline_reached', (r: ReturnType<typeof createTaskRegistry>, id: string) => r.markTimedOut(id, 'execution')],
+      ['capacity_blocked', (r: ReturnType<typeof createTaskRegistry>, id: string) => r.noteResourceRefused(id)],
       ['ended', (r: ReturnType<typeof createTaskRegistry>, id: string) => r.markLeaseExpired(id)],
       ['ended', (r: ReturnType<typeof createTaskRegistry>, id: string) => { r.noteRoundEnded(id); return r.get(id); }],
       ['result_archived', (r: ReturnType<typeof createTaskRegistry>, id: string) => { r.archiveReply([id], '办完了。'); return r.get(id); }],
@@ -67,8 +67,8 @@ describe('结束事实（内存 registry）', () => {
     registry.noteRoundEnded('t1');
     expect(registry.get('t1').endedAt).toBe(firstAt);
     // 只算结束事实事件（begin 的 accepted 也在，但结束事件至多一次）。
-    const terminal = facts.filter((event) => ['cancelled', 'ended', 'timed_out', 'resource_limited', 'result_archived'].includes(event));
-    expect(terminal).toEqual(['cancelled']);
+    const terminal = facts.filter((event) => ['user_stop', 'ended', 'deadline_reached', 'capacity_blocked', 'result_archived'].includes(event));
+    expect(terminal).toEqual(['user_stop']);
   });
 
   it('已汇报后再落停法：结束时刻不变，汇报事实保留（不翻案）', () => {

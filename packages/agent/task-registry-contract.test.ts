@@ -174,7 +174,7 @@ for (const impl of IMPLS) {
         'started',
         'waiting_user',
         'resumed',
-        'cancelled',
+        'user_stop',
       ]);
       for (const fact of firstFacts) {
         expect(fact.taskId).toBe('fact_task');

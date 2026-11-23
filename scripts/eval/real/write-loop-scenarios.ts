@@ -1225,7 +1225,7 @@ async function createHarness(
       return { delivered: true };
     },
   };
-  // 宿主 sent 记账行 → 推送归属补填（taskId/factKind；对话形态 ② 的前提；targets = sink.pushes）。
+  // 宿主 sent 记账行 → 推送归属补填（taskId/factEvent；对话形态 ② 的前提；targets = sink.pushes）。
   // 必须声明在 createServer 之前：logger 闭包在装配期就会同步被调用（无 role 主体的
   // principal_role_defaulted 行），const 在 TDZ 里会抛 ReferenceError。
   const attributeDeliveryProvenance = createDeliveryProvenanceAttributor(sink.pushes);
@@ -1249,7 +1249,7 @@ async function createHarness(
     }),
     logger: (line) => {
       logs.push(line);
-      // 完成/失败投递的记账行带 taskId/factKind；deliverText 先 await sendText（push 已是
+      // 完成/失败投递的记账行带 taskId/factEvent；deliverText 先 await sendText（push 已是
       // sink 末条）再写 sent 账。记 sent 时给最近一条未归属的 push_text 补归属——迟到的
       // 第一次完成推送靠它归属到任务（S4-C4 用）+ 对话形态 ② 判「同事实投两次」（要求 D）。
       // 补填器单源（conversation-shape 的 createDeliveryProvenanceAttributor）。

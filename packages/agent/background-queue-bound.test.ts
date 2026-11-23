@@ -210,7 +210,7 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
       // 结构化事件：failed/resource_limited 事实已发出（通知 outbox 的输入面）。
       expect(
         facts.some(
-          (fact) => fact.taskId === receipt.taskId && fact.event === 'resource_limited',
+          (fact) => fact.taskId === receipt.taskId && fact.event === 'capacity_blocked',
         ),
       ).toBe(true);
     }

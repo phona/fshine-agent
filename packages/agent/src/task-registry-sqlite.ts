@@ -249,7 +249,7 @@ export function createSqliteTaskRegistry(
       require(taskId, options.scope);
       const at = new Date().toISOString();
       const written = store.appendEndFact({ taskId, at, updatedAt: at });
-      if (written) emit(factOf(store.getTask(taskId)!.task, 'cancelled', at));
+      if (written) emit(factOf(store.getTask(taskId)!.task, 'user_stop', at));
       return toRecord(require(taskId));
       // 一次性事实：重复取消零写入、零事件（written=false 时行原样读回）。
     },
@@ -257,7 +257,7 @@ export function createSqliteTaskRegistry(
       require(taskId, options.scope);
       const at = new Date().toISOString();
       const written = store.appendEndFact({ taskId, at, updatedAt: at });
-      if (written) emit(factOf(store.getTask(taskId)!.task, 'timed_out', at));
+      if (written) emit(factOf(store.getTask(taskId)!.task, 'deadline_reached', at));
       return toRecord(require(taskId));
     },
     markLeaseExpired(taskId) {
@@ -271,7 +271,7 @@ export function createSqliteTaskRegistry(
       require(taskId, options.scope);
       const at = new Date().toISOString();
       const written = store.appendEndFact({ taskId, at, updatedAt: at });
-      if (written) emit(factOf(store.getTask(taskId)!.task, 'resource_limited', at));
+      if (written) emit(factOf(store.getTask(taskId)!.task, 'capacity_blocked', at));
       return toRecord(require(taskId));
     },
     noteRoundEnded(taskId) {

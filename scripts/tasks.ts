@@ -190,9 +190,9 @@ export const NOTIFICATION_KIND_WORDS: Record<NotificationKind, string> = {
   started: '已开始',
   waiting_user: '等待用户',
   resumed: '已恢复',
-  cancelled: '已取消',
-  timed_out: '已超时',
-  resource_limited: '资源受限',
+  user_stop: '已取消',
+  deadline_reached: '已超时',
+  capacity_blocked: '资源受限',
 };
 
 export function notificationKindWord(kind: NotificationKind): string {

@@ -749,12 +749,12 @@ describe('R4 联合：tasks 详情通知投递展示（只读最小）', () => {
         payload: { at: 't1' }, createdAt: 't1', deliveredAt: 't1', attempts: 1, exhausted: false,
       },
       {
-        id: 2, taskId: base.taskId, kind: 'cancelled', stateVersion: 't2',
+        id: 2, taskId: base.taskId, kind: 'user_stop', stateVersion: 't2',
         payload: { at: 't2' }, createdAt: 't2', attempts: 3, exhausted: false, lastError: 'boom',
       },
       {
-        id: 3, taskId: base.taskId, kind: 'timed_out', stateVersion: 't3',
-        payload: { at: 't3', reason: 'timeout' }, createdAt: 't3', attempts: 5, exhausted: true, lastError: 'boom',
+        id: 3, taskId: base.taskId, kind: 'deadline_reached', stateVersion: 't3',
+        payload: { at: 't3', reason: 'deadline_reached' }, createdAt: 't3', attempts: 5, exhausted: true, lastError: 'boom',
       },
     ];
     const text = renderTaskDetail(base, { notifications });

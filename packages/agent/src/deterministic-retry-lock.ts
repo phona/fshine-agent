@@ -115,7 +115,7 @@ export function createDeterministicRetryLock(): DeterministicRetryLock {
       const object = retryObjectOf(args);
       if (object === undefined) return undefined;
       // 只对 failed / refused 登记：completed / accepted / needs_confirmation / needs_input 都不参与
-      // 判定——成功过的重复照常放行；待确认/待补充是交互事实（归等待状态机），不是「失败重撞」。
+      // 判定——成功过的重复照常放行；待确认/待补充是交互事实（归等待事实），不是「失败重撞」。
       if (outcome.status !== 'failed' && outcome.status !== 'refused') return undefined;
       const error = outcome.error;
       if (error.retryable === true) {

@@ -94,7 +94,6 @@ import {
   taskRestartFactText,
   taskWaitingUserFactText,
   waitingUserFallbackText,
-  type TaskResultFactKind,
 } from './task-completion-delivery';
 import { composeNotificationSinks, createChatNotificationSink, notificationTerminalLogLine } from './notification-chat-sink';
 import {
@@ -249,18 +248,11 @@ const TERMINAL_WAKE_EVENTS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * 状态变化唤醒出口 → 投递归属事实种类（2026-11-21 对话形态断言层 ② 的前提）：每个出口
- * 的投递记账行（task_result_delivery_*）带上「这是哪类事实」，eval 侧据此判同一事实是否
- * 被投递两次。久无动静与重启对账都不是终局事实 → 归 warning；未登记的出口不带（不猜）。
+ * 投递归属 = **唤醒出口的原始事件名**（2026-11-21 对话形态断言层 ② 的前提）：每个出口的
+ * 投递记账行（task_result_delivery_*）带 `factEvent = <出口事件名>`，eval 侧据此判同一事实
+ * 是否被投递两次。不做「completed/failed/cancelled/warning」任务级归类——那是「怎么结束」
+ * 的聚合，底账不存、宿主不造。
  */
-const WAKE_FACT_KINDS: ReadonlyMap<string, TaskResultFactKind> = new Map([
-  ['task_cancel_wake', 'cancelled'],
-  ['task_completion_wake', 'completed'],
-  ['task_failure_wake', 'failed'],
-  ['task_waiting_user_wake', 'waiting_user'],
-  ['task_long_running_wake', 'warning'],
-  ['task_restart_wake', 'warning'],
-]);
 
 /**
  * 主动提醒投递端口（预期契约 2026-11-18；2026-11-19 owner 补 #9/#10 改形）：
@@ -920,8 +912,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   //   · 事实机械：missing 列表 + confirmation.summary 原文与 expiresAt；**句柄不进事实**；
   //   · 兜底（模型说不出话）= summary 原文 + expiresAt（执行端原话，不编新话术）；
   //     待补（无提案）没有兜底——只记事件 + 事实留待注入（不猜、不替它说）；
-  //   · 去重 = (taskId, 进入等待次数)：runner 只在非等待态落等待时触发端口（状态机禁止
-  //     waiting→waiting；回 running 再进 = 新的一次）；投递失败退回待注入，不重试唤醒。
+  //   · 去重 = (taskId, 进入等待次数)：runner 只在非等待态落等待时触发端口（已在等待的行
+  //     再落等待不重复触发；回非等待再进 = 新的一次）；投递失败退回待注入，不重试唤醒。
   const waitingUserNotice: WaitingUserNoticePort = {
     sendNotice: (notice) => {
       const confirmation = notice.question.confirmation;
@@ -1167,8 +1159,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
                 principalId: completion.principalId,
                 sessionId: completion.sessionId,
                 resultText: fileNote,
-                // 投递归属：文件未送达话术不是完成播报，是告警类事实（warning）。
-                factKind: 'warning',
+                // 投递归属：文件未送达话术是独立事实出口（不是完成播报，也不聚合成告警类）。
+                factEvent: 'file_delivery_note',
               }, {
                 ...(completionDelivery === undefined ? {} : { delivery: completionDelivery }),
                 log,
@@ -1582,14 +1574,13 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     if (resolved.outcome === 'busy') return true;
     if (resolved.text === undefined) return false;
     const resultText = input.appendText === undefined ? resolved.text : `${resolved.text}\n${input.appendText}`;
-    // 投递归属（对话形态断言层 ② 的前提）：出口事件名 → 事实种类；未登记出口不带（不猜）。
-    const factKind = WAKE_FACT_KINDS.get(input.event);
+    // 投递归属（对话形态断言层 ② 的前提）：原始事实键 = 出口事件名；不做任务级归类。
     const delivered = await deliverTaskResult({
       taskId: input.taskId,
       principalId: input.principalId,
       sessionId: input.sessionId,
       resultText,
-      ...(factKind === undefined ? {} : { factKind }),
+      factEvent: input.event,
     }, {
       ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
       log,
@@ -2047,7 +2038,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             principalId,
             sessionId,
             resultText: fallbackText,
-            factKind: relayedFailedFact ? 'failed' : 'completed',
+            // 投递归属：模型沉默兜底是独立事实出口（按原始事实分两条出口名，不聚合成成败词）。
+            factEvent: relayedFailedFact === true ? 'task_failure_fallback' : 'task_completion_fallback',
           }, {
             ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
             log,
@@ -2067,7 +2059,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           roundFacts.delete(suppressedTaskId);
           // 取消/超时/资源拒绝有各自的通知面（outbox 里的通知事实）——这里不冒充失败，避免同一件事说两遍。
           const ownNotificationFace = outbox !== undefined
-            && ['cancelled', 'timed_out', 'resource_limited'].some((kind) =>
+            && ['user_stop', 'deadline_reached', 'capacity_blocked'].some((kind) =>
               outbox!.listNotifications(suppressedTaskId).some((notification) => notification.kind === kind));
           const isFailureFact = !ownNotificationFace && (failure !== undefined || round !== undefined);
           if (!isFailureFact) {
@@ -2093,8 +2085,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             principalId,
             sessionId,
             ...failureFact,
-            // 投递归属：模型沉默时宿主兜底说的正是失败事实（failureFallbackFactText）。
-            factKind: 'failed',
+            // 投递归属：模型沉默时宿主兜底说的是失败事实（原始出口名，不聚合成任务级结局）。
+            factEvent: 'task_failure_fallback',
           }, {
             ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
             log,

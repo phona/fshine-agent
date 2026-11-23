@@ -14,7 +14,7 @@
 
 活/结束由**布尔事实**现推（`packages/core/src/task-progress.ts`，不落列、不返回状态词）：排队 = 未启动 + 无汇报 + 无提问；仍在推进 = 已启动 + 无结束事实 + 无汇报/提问；可能还在跑（跨进程读者）= 仍在推进 + 租约未过期或 accepted 在途；本进程在跑 = 仍在推进 + runner 的 inFlight/waiters/controllers 里有活 worker；等用户 = `pendingQuestion`；结束 = 结束事实在场、或汇报存档在场、或已启动且不再可能还活着（无汇报 = 结果未知）。消费方（CLI/ops/投递/唤醒）要标签就**就地读原始事实算**，不共享任何「怎么结束」类型。
 
-派发方式不是配置项（2026-11-18 起 `runtime.dispatchMode` 已删除）：server 恒 async（异步派发先落未启动行、由队列认领），进程内入口恒 sync。单写路径由守卫钉住：task-store 之外零 `UPDATE tasks`、registry 实现层无裸 SQL（`packages/agent/task-registry-write-path.test.ts:44`、`:57`）；`tasks` 表无终态列由 `packages/core/task-store-zero-state.test.ts` 钉住；**全仓不得再出现「读事实 → 返回多值任务级生命周期枚举」的共享类型/函数/字段**，由 `packages/agent/task-lifecycle-enum-guard.test.ts` 按形状判（反向绊线：加回终止种类函数/枚举或状态机文档句必红）。
+派发方式不是配置项（2026-11-18 起 `runtime.dispatchMode` 已删除）：server 恒 async（异步派发先落未启动行、由队列认领），进程内入口恒 sync。单写路径由守卫钉住：task-store 之外零 `UPDATE tasks`、registry 实现层无裸 SQL（`packages/agent/task-registry-write-path.test.ts:44`、`:57`）；`tasks` 表无终态列由 `packages/core/task-store-zero-state.test.ts` 钉住；**全仓不得再出现「读事实 → 返回多值任务级生命周期枚举」的共享类型/函数/字段**，由 `packages/agent/task-lifecycle-enum-guard.test.ts` 按形状判（反向绊线：把终止种类函数/枚举、任务状态字段、状态描述句或源码注释放回必红）。
 
 ## 2. 两层身份：交办意图 / 业务操作
 `taskId` 是**交办意图**的身份；`dispatchKey` 是**业务操作**的身份，两者不互换：重试不新造交办，交办重复不合并操作（决定见 `docs/decisions/index.md`「U3 稳定逻辑操作身份 `dispatchKey`」）。
@@ -60,7 +60,7 @@
 
 - **不是 Exactly Once**：只承诺「同一 `dispatchKey` 至多一次自动执行 + 结果未知可核对」（`packages/contracts/src/execution-contract.ts:80`）；业务效果是否只写一次归执行层幂等键/状态查询。
 - **跨重启入站幂等 / 任务不自动重跑**：渠道重投幂等的唯一判据是底账 `inbound_messages` 表，主键 `(principal_id, session_id, message_id)`（`packages/core/src/task-store.ts:528`，认领/落定/查询 `:1386`/`:1390`/`:1404`）；同一条先于一切副作用查重，命中即回放原回执、零新任务零执行，处理失败删行让渠道重投（不伪造回执）（`apps/server/server.ts:1233-1241`）。进程内存 Map（`inboundInFlight`，`apps/server/server.ts:1242`，上限 `MESSAGE_REPLY_LIMIT=1024` `:97`）只解决**同进程并发重投**两条同 `messageId` 几乎同时到达时第二条等第一条落定，不承担跨重启判据（落定即删）。底账留 processing（上一进程挂了）的重投：不执行、回「这条消息上次没办完（我这边中途中断过），我不会重复执行它，结果未知——麻烦你重发一次。」（`INBOUND_STILL_PROCESSING_NOTE` `apps/server/server.ts:228-229`）、落 `message_still_processing` 事件（`:1359`/`:1415`）。4/4 单测含关 server、同 dbPath 重建、再投同一 `messageId` 回放同一句（`apps/server/server-inbound-idempotency.test.ts:136`）。任务侧重跑另算：`queued` 重领（`claimNextQueued`），过期租约写下结束事实（结果未知）且零重放（`expireLeases`；`packages/agent/task-runner.test.ts:639`）。
-- **`--redo` 是重新交办，不是续跑**：输入=存储的 `task.request` 逐字、新任务、原任务零改动（`scripts/tasks.ts:522`）；在跑（`taskLivenessOf`='running'）/等待（`pendingQuestion`）/未启动的任务拒绝（`scripts/tasks.ts:540`、`:543`、`:546`）。
+- **`--redo` 是重新交办，不是续跑**：输入=存储的 `task.request` 逐字、新任务、原任务零改动（`scripts/tasks.ts:522`）；仍在推进（`stillProgressingOf`）/等待（`pendingQuestion`）/未启动的任务拒绝（`scripts/tasks.ts:540`、`:543`、`:546`）。
 - **模型把一笔意图拆成两次调用 → 两笔都执行**（两条独立身份，见 §2）；这是登记在案的失败形态，不写成「不会重复」，兜底在执行层。
 - **职责边界**：Main 只拆包（不亲自做长活、不甩包），Worker 只做交办给它的那件事，交付物只从 Worker 出（`AGENTS.md:31-33`）；Main 的 `run_js` 不产交付物。
 

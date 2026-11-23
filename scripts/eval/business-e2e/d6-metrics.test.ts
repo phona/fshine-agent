@@ -210,7 +210,7 @@ describe('extractD6 D 轴指标抽取', () => {
       { ts: '2026-11-14T00:00:00Z', taskId: 'a', started: true, ended: false, reported: false, waiting: false, mayBeRunning: true },
       { ts: '2026-11-14T00:00:05Z', taskId: 'a', started: true, ended: true, reported: false, waiting: false, mayBeRunning: false },
     ];
-    input.notifications = [{ ts: '2026-11-14T00:00:05Z', taskId: 'a', kind: 'cancelled' }];
+    input.notifications = [{ ts: '2026-11-14T00:00:05Z', taskId: 'a', kind: 'user_stop' }];
     input.auditLines = [
       '{"ts":"2026-11-14T00:00:01Z","script":"dummy.query","exitCode":0}',
       '{"ts":"2026-11-14T00:00:07Z","script":"dummy.query","exitCode":0}',
@@ -240,7 +240,7 @@ describe('extractD6 D 轴指标抽取', () => {
       { ts: '2026-11-14T00:00:00Z', taskId: 'cancelled-task', started: true, ended: false, reported: false, waiting: false, mayBeRunning: true },
       { ts: '2026-11-14T00:00:05Z', taskId: 'cancelled-task', started: true, ended: true, reported: false, waiting: false, mayBeRunning: false },
     ];
-    input.notifications = [{ ts: '2026-11-14T00:00:05Z', taskId: 'cancelled-task', kind: 'cancelled' }];
+    input.notifications = [{ ts: '2026-11-14T00:00:05Z', taskId: 'cancelled-task', kind: 'user_stop' }];
     const runDir = writeSampleRun(root, input);
     const d6 = extractD6(runDir);
     expect(d6.postCancelResidue.available).toBe(true);
@@ -264,7 +264,7 @@ describe('extractD6 D 轴指标抽取', () => {
       { ts: '2026-11-14T00:00:00Z', taskId: 'cancelled-task', started: true, ended: false, reported: false, waiting: false, mayBeRunning: true },
       { ts: '2026-11-14T00:00:05Z', taskId: 'cancelled-task', started: true, ended: true, reported: false, waiting: false, mayBeRunning: false },
     ];
-    input.notifications = [{ ts: '2026-11-14T00:00:05Z', taskId: 'cancelled-task', kind: 'cancelled' }];
+    input.notifications = [{ ts: '2026-11-14T00:00:05Z', taskId: 'cancelled-task', kind: 'user_stop' }];
     const runDir = writeSampleRun(root, input);
     const d6 = extractD6(runDir);
     expect(d6.postCancelResidue.value!.toolCallsAfter).toBe(1); // 仅归属被取消任务的回合

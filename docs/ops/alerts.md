@@ -52,8 +52,9 @@ state.db 一律只读打开（`openTaskStore(dbPath, { readOnly: true })`），�
   `task_result_delivery_failed` / `notification_delivery_terminal`(result=exhausted|skipped；live+skipped 才告警，deliveryMode 事实随跳过终局带) /
   `task_long_running_notice`(result=failed) / `file_delivery`(status 非 sent)（delivery_failed 规则）。
 - **聚合低频扫描**（进程内引擎的 `scanNow`，5 分钟一跳，单 `setTimeout` 链，`SCAN_INTERVAL_MS` 模块常量）：
-  只读底账投影出 `task_state`（running / waiting_user，带 `running_since` / `waiting_since`）与
-  `execution`（每次执行一行，带 `operation` / `error.code` / `status`）事实，判 `task_stuck` / `retry_storm`。
+  只读底账投影出 `task_ledger`（原始布尔/时刻事实：`progressing` / `waitingSince` / `lastAt`）与
+  `execution`（每次执行一行，带 `operation` / `error.code` / `status`）事实，判 `task_stuck` / `retry_storm`
+  （规则读原始事实就地算时长，不传任务级状态词）。
 - **进程外手动脚本**（`npm run alerts`）：读日志增量（同上事件名）+ 只读底账（同上 fact 形状），
   离线补判全部四类。投影函数单源在 `packages/agent/src/alert-persistence.ts` 的 `logLineToFact` / `ledgerFacts`。
 

@@ -960,9 +960,13 @@ export interface NotificationAttachment {
  *     systemNotes 待注入队列，宿主兜底屏也在同一出口。这里再注入就是同一件事说两遍。
  *   · 超时/资源拒绝/等补充**保留**：这几类还没改成唤醒，主动推送与 B 通道照旧。
  */
-const B_CHANNEL_KINDS = new Set<NotificationKind>(['timed_out', 'resource_limited', 'waiting_user']);
+const B_CHANNEL_KINDS = new Set<NotificationKind>(['deadline_reached', 'capacity_blocked', 'waiting_user']);
 /** 产生通知事件的机械事实（其余事实——汇报存档/这一轮停下——不落通知：完成/失败由唤醒面说）。 */
-const NOTIFIED_EVENTS = new Set<string>(NOTIFICATION_KINDS);
+const NOTIFIED_EVENTS: ReadonlySet<string> = new Set<string>(NOTIFICATION_KINDS);
+/** 事实事件 → 通知意图的类型守卫（值域同一；不靠 cast 把任意事件当通知 kind）。 */
+function isNotificationKind(event: string): event is NotificationKind {
+  return NOTIFIED_EVENTS.has(event);
+}
 const INJECTED_KEYS_LIMIT = 1024;
 
 export function attachNotificationOutbox(
@@ -976,8 +980,8 @@ export function attachNotificationOutbox(
   registry.onTaskFact((fact) => {
     // 事实事件与通知意图同名（accepted/started/…）；只有这些「发生了什么」落 outbox。
     // 汇报存档 / 这一轮停下不是通知意图：完成与失败由投递/唤醒面读原始事实说。
-    if (!NOTIFIED_EVENTS.has(fact.event)) return;
-    const kind = fact.event as NotificationKind;
+    if (!isNotificationKind(fact.event)) return;
+    const kind = fact.event;
     // R5 补字段：waiting_user 时从底账读回 pendingQuestion（事实钩子无 scope，底账自身即
     // 事实来源；读不到不编造）。写确认时再取 confirmation.summary——用户要看到「将写入什么」
     // 才能决定；**handle 永不进 payload**（宿主持有，用户不需要也不该看到）。
@@ -990,13 +994,13 @@ export function attachNotificationOutbox(
     }).get(fact.taskId);
     const missing = kind === 'waiting_user' ? record.pendingQuestion?.missing : undefined;
     const summary = kind === 'waiting_user' ? record.pendingQuestion?.confirmation?.summary : undefined;
-    // 机械原因（事实）：资源拒绝/超时/用户确认停止按事件带；不写任务级结论。
-    const reason: NotificationReason | undefined = fact.event === 'resource_limited'
-      ? 'resource_limited'
-      : fact.event === 'timed_out'
-        ? 'timeout'
-        : fact.event === 'cancelled'
-          ? 'cancelled_by_user'
+    // 机械原因（触发事实）：容量拒绝/时限到点/用户说停按事件带；不写任务级结局分类。
+    const reason: NotificationReason | undefined = fact.event === 'capacity_blocked'
+      ? 'capacity_blocked'
+      : fact.event === 'deadline_reached'
+        ? 'deadline_reached'
+        : fact.event === 'user_stop'
+          ? 'user_stop'
           : undefined;
     outbox.record({
       taskId: fact.taskId,

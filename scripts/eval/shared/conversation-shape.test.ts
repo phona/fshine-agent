@@ -18,7 +18,7 @@ const inbound = (messageId: string, text: string, at = 1000): ConversationEvent 
   ({ kind: 'inbound', messageId, at, text });
 const reply = (inReplyTo: string | undefined, text: string, at = 2000): ConversationEvent =>
   ({ kind: 'reply', inReplyTo, at, text });
-const delivery = (text: string, at = 3000, provenance?: { taskId: string; factKind: 'completed' | 'failed' | 'cancelled' | 'waiting_user' | 'warning' }): ConversationEvent =>
+const delivery = (text: string, at = 3000, provenance?: { taskId: string; factEvent: string }): ConversationEvent =>
   ({ kind: 'delivery', at, text, ...(provenance === undefined ? {} : { provenance}) });
 
 describe('conversation-shape：逐条负例（每条规则必须能红）', () => {
@@ -35,18 +35,18 @@ describe('conversation-shape：逐条负例（每条规则必须能红）', () =
     expect(violations[0]!.eventIndexes).toEqual([1, 2]);
   });
 
-  it('② fact-delivered-twice：同一 (taskId, factKind) 两次投递 → 恰此 code', () => {
+  it('② fact-delivered-twice：同一 (taskId, factEvent) 两次投递 → 恰此 code', () => {
     const violations = checkConversationShape({
       events: [
         inbound('m1', '把 empty-one W1 里的记录删掉两条'),
         reply('m1', '已提交，稍后告诉你结果。'),
-        delivery('「empty-one」办好了。', 3000, { taskId: 't1', factKind: 'completed' }),
-        delivery('「empty-one」办好了。', 4000, { taskId: 't1', factKind: 'completed' }),
+        delivery('「empty-one」办好了。', 3000, { taskId: 't1', factEvent: 'task_completion_wake' }),
+        delivery('「empty-one」办好了。', 4000, { taskId: 't1', factEvent: 'task_completion_wake' }),
       ],
     });
     expect(violations.map((violation) => violation.code)).toEqual(['fact-delivered-twice']);
     expect(violations[0]!.detail).toContain('t1');
-    expect(violations[0]!.detail).toContain('completed');
+    expect(violations[0]!.detail).toContain('task_completion_wake');
   });
 
   it('③ push-needs-subject：推送既无 ≥8 字原话片段也无任务名 → 恰此 code（线程回复不参与）', () => {
@@ -76,7 +76,7 @@ describe('conversation-shape：逐条负例（每条规则必须能红）', () =
       taskNames: ['导出去年（2025 年）全年的凭证，这是一个长时导出任务'],
       events: [
         inbound('m1', '帮我导出去年全年的凭证，这是个慢活，要跑一会儿'),
-        delivery(paraphrase, 6000, { taskId: 't1', factKind: 'cancelled' }),
+        delivery(paraphrase, 6000, { taskId: 't1', factEvent: 'task_cancel_wake' }),
       ],
     });
     expect(attributed).toEqual([]);
@@ -124,8 +124,8 @@ describe('conversation-shape：组合与正常流', () => {
         // ④ 挂到不存在的消息
         reply('m-ghost', '挂错的回复。', 1400),
         // ② 同一事实两次投递（正文自含原话片段，不另触 ③）
-        delivery('empty-one 集合 W1 窗口办完了。', 1500, { taskId: 't9', factKind: 'completed' }),
-        delivery('empty-one 集合 W1 窗口办完了。', 1600, { taskId: 't9', factKind: 'completed' }),
+        delivery('empty-one 集合 W1 窗口办完了。', 1500, { taskId: 't9', factEvent: 'task_completion_wake' }),
+        delivery('empty-one 集合 W1 窗口办完了。', 1600, { taskId: 't9', factEvent: 'task_completion_wake' }),
       ],
     });
     const codes = violations.map((violation) => violation.code);
@@ -142,10 +142,10 @@ describe('conversation-shape：组合与正常流', () => {
       events: [
         inbound('m1', '请帮我把 empty-one 集合 W1 窗口新增四条记录', 1000),
         reply('m1', '好的，等提案来了我发你确认。', 1100),
-        delivery('要写入：empty-one 新增 4 条记录。回「确认」我就提交。', 2000, { taskId: 't1', factKind: 'waiting_user' }),
+        delivery('要写入：empty-one 新增 4 条记录。回「确认」我就提交。', 2000, { taskId: 't1', factEvent: 'task_waiting_user_wake' }),
         inbound('m2', '确认', 3000),
         reply('m2', '已提交，办完告诉你。', 3100),
-        delivery('「empty-one 新增」办好了：4 条记录已写入。', 4000, { taskId: 't1', factKind: 'completed' }),
+        delivery('「empty-one 新增」办好了：4 条记录已写入。', 4000, { taskId: 't1', factEvent: 'task_completion_wake' }),
       ],
     });
     expect(violations).toEqual([]);
@@ -175,8 +175,8 @@ describe('conversation-shape：组合与正常流', () => {
 });
 
 describe('createDeliveryProvenanceAttributor：sent 行补填归属（② 的前提）', () => {
-  const sentLine = (taskId: string, factKind: string): Record<string, unknown> =>
-    ({ event: 'task_result_delivery_sent', taskId, factKind });
+  const sentLine = (taskId: string, factEvent: string): Record<string, unknown> =>
+    ({ event: 'task_result_delivery_sent', taskId, factEvent });
 
   it('sent 行补到最近一条未归属推送；failed/suppressed 不补；excluded 跳过', () => {
     const targets: Array<DeliveryProvenanceTarget & { text?: string }> = [
@@ -185,24 +185,24 @@ describe('createDeliveryProvenanceAttributor：sent 行补填归属（② 的前
       { text: '推送3（本次投递）' },
     ];
     const attribute = createDeliveryProvenanceAttributor(targets as Array<DeliveryProvenanceTarget>);
-    attribute({ event: 'task_result_delivery_failed', taskId: 't1', factKind: 'failed' });
+    attribute({ event: 'task_result_delivery_failed', taskId: 't1', factEvent: 'task_failure_wake' });
     expect(targets.every((target) => target.taskId === undefined)).toBe(true);
-    attribute(sentLine('t1', 'completed'));
+    attribute(sentLine('t1', 'task_completion_wake'));
     expect(targets[1]!.taskId).toBeUndefined();
-    expect(targets[2]).toMatchObject({ taskId: 't1', factKind: 'completed' });
-    attribute(sentLine('t2', 'failed'));
+    expect(targets[2]).toMatchObject({ taskId: 't1', factEvent: 'task_completion_wake' });
+    attribute(sentLine('t2', 'task_failure_wake'));
     // 第二条 sent 补到更早那条未归属推送。
-    expect(targets[1]).toMatchObject({ taskId: 't2', factKind: 'failed' });
+    expect(targets[1]).toMatchObject({ taskId: 't2', factEvent: 'task_failure_wake' });
     expect(targets[0]!.taskId).toBeUndefined();
   });
 
-  it('缺 factKind 或缺 taskId 的 sent 行不补（不猜）', () => {
+  it('缺 factEvent 或缺 taskId 的 sent 行不补（不猜）', () => {
     const targets: Array<DeliveryProvenanceTarget> = [{}];
     const attribute = createDeliveryProvenanceAttributor(targets);
     attribute({ event: 'task_result_delivery_sent', taskId: 't1' });
-    attribute({ event: 'task_result_delivery_sent', factKind: 'completed' });
+    attribute({ event: 'task_result_delivery_sent', factEvent: 'task_completion_wake' });
     expect(targets[0]!.taskId).toBeUndefined();
-    expect(targets[0]!.factKind).toBeUndefined();
+    expect(targets[0]!.factEvent).toBeUndefined();
   });
 });
 
@@ -215,7 +215,7 @@ describe('buildTurnPushStream：回合面事件流构造', () => {
       ],
       [
         { at: 2500, text: '三季度的报销单据里有两张待复核。' },
-        { at: 4000, text: '三季度的报销单据已核对完。', taskId: 't1', factKind: 'completed' },
+        { at: 4000, text: '三季度的报销单据已核对完。', taskId: 't1', factEvent: 'task_completion_wake' },
         { at: 4500, text: '文件占位', excluded: true },
       ],
     );
@@ -229,7 +229,7 @@ describe('buildTurnPushStream：回合面事件流构造', () => {
     expect(events[2]).toMatchObject({ kind: 'delivery', at: 2500, text: '三季度的报销单据里有两张待复核。' });
     expect(events[5]).toMatchObject({
       kind: 'delivery', at: 4000,
-      provenance: { taskId: 't1', factKind: 'completed' },
+      provenance: { taskId: 't1', factEvent: 'task_completion_wake' },
     });
     // 构造出的流自身零违规（回复挂本回合、推送含原话）。
     expect(checkConversationShape({ events })).toEqual([]);

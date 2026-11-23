@@ -39,20 +39,21 @@ export interface TaskResultDeliveryPort {
 }
 
 /**
- * 投递归属的事实种类（2026-11-21 对话形态断言层 ② 的前提）：投递记账行
- * （task_result_delivery_sent/failed/suppressed）带上「这是哪个任务的哪类事实」，
- * eval 侧据此判「同一事实投递两次」。缺省 = 调用方不知道（字段缺省，不猜）。
+ * 投递归属的**原始事实键**（2026-11-21 对话形态断言层 ② 的前提；2026-11-23 第 1 轮审查
+ * 去任务级分类）：投递记账行（task_result_delivery_sent/failed/suppressed）带上
+ * 「这是哪个任务的哪个事实出口」（wake 出口事件名 / 兜底出口名），eval 侧据此判
+ * 「同一事实投递两次」。**不聚合成 completed/failed/cancelled 这类任务级结果词**——
+ * 那是「怎么结束」的分类，底账与宿主都不持有。缺省 = 调用方不知道（字段缺省，不猜）。
  */
-export type TaskResultFactKind = 'completed' | 'failed' | 'cancelled' | 'waiting_user' | 'warning';
 
-/** 一次后台任务完成的事实（来自执行端确认的回合结局；resultText 逐字未清理）。 */
+/** 一次后台完成投递的事实（来自执行端确认的回合结局；resultText 逐字未清理）。 */
 export interface TaskCompletionFact {
   taskId: string;
   principalId: string;
   sessionId: string;
   resultText: string;
-  /** 投递归属（进 task_result_delivery_* 记账行；缺省 = 不带，不猜）。 */
-  factKind?: TaskResultFactKind;
+  /** 投递归属（原始事实键，进 task_result_delivery_* 记账行；缺省 = 不带，不猜）。 */
+  factEvent?: string;
 }
 
 /**
@@ -82,8 +83,8 @@ export interface TaskFailureFact {
    * 兜底话术按各自既有措辞说（没权限 / 办不了），不说「再试一次」。
    */
   zeroExecReason?: string;
-  /** 投递归属（进 task_result_delivery_* 记账行；缺省 = 不带，不猜）。 */
-  factKind?: TaskResultFactKind;
+  /** 投递归属（原始事实键，进 task_result_delivery_* 记账行；缺省 = 不带，不猜）。 */
+  factEvent?: string;
 }
 
 export interface TaskResultDeliveryOptions {
@@ -208,12 +209,12 @@ export function taskCompletionFallbackText(input: { name?: string; resultText: s
 /**
  * 单次文本投递的核心（完成/失败共用同一套四必守：live 才发、送达才记 sent、失败记
  * failed 不记 sent、剥空不投）。事件名统一 `task_result_delivery_*`（taskId 可区分场景）。
- * 投递归属（factKind）随已知带进三类记账行（sent/failed/suppressed 同字段；2026-11-21
- * 对话形态断言层 ② 的前提——只加字段，不改文案与投递语义）。
+ * 投递归属（factEvent = 原始事实键）随已知带进三类记账行（sent/failed/suppressed 同字段；
+ * 2026-11-21 对话形态断言层 ② 的前提——只加字段，不改文案与投递语义）。
  * 返回是否真的发起了投递（测试断言用；生产调用方不依赖返回值）。
  */
 async function deliverText(
-  fact: { taskId: string; principalId: string; sessionId: string; factKind?: TaskResultFactKind },
+  fact: { taskId: string; principalId: string; sessionId: string; factEvent?: string },
   text: string,
   options: TaskResultDeliveryOptions,
 ): Promise<boolean> {
@@ -221,7 +222,7 @@ async function deliverText(
     principalId: fact.principalId,
     sessionId: fact.sessionId,
     taskId: fact.taskId,
-    ...(fact.factKind === undefined ? {} : { factKind: fact.factKind }),
+    ...(fact.factEvent === undefined ? {} : { factEvent: fact.factEvent }),
   };
   const delivery = options.delivery;
   if (delivery === undefined || delivery.deliveryMode !== 'live' || typeof delivery.sendText !== 'function') {
@@ -398,7 +399,7 @@ export function taskRestartFactText(input: { name?: string }): string {
 
 /**
  * 等待用户**事实**文本（2026-11-21 live P0；宿主拼，给模型读；用户看到的话由模型写）：
- * 任务由非等待态进入 waiting_user（needs_input / needs_confirmation 同一状态机）——
+ * 任务由非等待态进入等待（needs_input / needs_confirmation 同一等待事实）——
  *   `[任务等待]「<业务名>」办到一半，需要用户表态才能继续。还缺：<missing 顿号连接>。
  *    将写入（逐字）：<confirmation.summary 执行端原话>（<expiresAt> 前有效）。
  *    请把待确认/待补内容原样告诉用户并等表态。`

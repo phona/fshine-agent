@@ -11,7 +11,7 @@
  * 任务名」——这是交接门原文要求的包含检查（「非线程推送必须自含话题」的机械下界），不是
  * 措辞评估：
  *   · inbound-reply-duplicate  ① 同一条用户消息 >1 条线程回复（回合回复重复播报）；
- *   · fact-delivered-twice     ② 同一 (taskId, factKind) 的用户可见投递 >1 次（同一件事
+ *   · fact-delivered-twice     ② 同一 (taskId, factEvent) 的用户可见投递 >1 次（同一件事
  *     说两遍；provenance 缺省的投递无法归属，不参与本条——宁可漏报不误报，见下）；
  *   · push-needs-subject       ③ 非线程推送（降级回复 / **无归属**投递）的正文既不含任何
  *     用户原话片段（≥8 字）也不含任何任务名（降级新消息/主动投递不自含话题 = 客户端把它
@@ -25,7 +25,8 @@
  *   · reply    { inReplyTo, at, text }  inReplyTo 有值=线程回复；空=主动推送（与 delivery
  *     一样参与 ③）；
  *   · delivery { at, text, provenance? } 宿主主动投递（非线程推送）；provenance =
- *     { taskId, factKind }，来自宿主记账（task_result_delivery_sent 事件的归属字段）。
+ *     { taskId, factEvent }，来自宿主记账（task_result_delivery_sent 事件的归属字段；
+ *     factEvent 是唤醒出口的原始事件名，不是 completed/failed 这类任务级结果词）。
  *
  * `at` 是可比的毫秒数（墙钟或单调逻辑时钟都行），只用于 ④ 的时序分支与流内排序；规则不
  * 依赖绝对时刻。流必须按发生顺序给出。
@@ -34,7 +35,7 @@
  *   · ② 只数 provenance 齐全的投递；归属补填（createDeliveryProvenanceAttributor）按
  *     「sent 记账行 ↔ 最近一条未归属推送」配对，与 write-loop-scenarios 既有的 taskId
  *     补填同式。并发跨会话投递极端交错时可能配错对——配错只影响违规上下文引用的文本，
- *     (taskId, factKind) 多重集不变（每条 sent 行恰补一条推送）。
+ *     (taskId, factEvent) 多重集不变（每条 sent 行恰补一条推送）。
  *   · ③ 的原话片段是 8 字滑窗包含检查：推文里出现原话中任意连续 8 字即算自含话题。这是
  *     机械下界（恒偏向放行），语义层面的「答非所问」归用户级 eval。
  *   · ③ **不判有归属的投递**（2026-11-21 实测假红后收紧）：模型会自然改写主语——stop 场景
@@ -42,9 +43,6 @@
  *     凭证…」；要求逐字包含任务名会误报。语义层面的「推送跑题」无法机械化，宁漏勿误：
  *     有归属投递的重复由 ② 守、降级回复的引用行由 L1 常跑用例守。
  */
-/** 任务事实种类（与宿主 task_result_delivery_* 记账行的 factKind 字段同值域）。 */
-export type TaskFactKind = 'completed' | 'failed' | 'cancelled' | 'waiting_user' | 'warning';
-
 /** 一条用户消息（线程锚点）。 */
 export interface InboundEvent {
   readonly kind: 'inbound';
@@ -70,7 +68,8 @@ export interface DeliveryEvent {
   readonly kind: 'delivery';
   readonly at: number;
   readonly text: string;
-  readonly provenance?: { readonly taskId: string; readonly factKind: TaskFactKind };
+  /** taskId + 原始事实出口（wake 事件名 / 兜底出口名），不是任务级结果分类。 */
+  readonly provenance?: { readonly taskId: string; readonly factEvent: string };
 }
 
 export type ConversationEvent = InboundEvent | ReplyEvent | DeliveryEvent;
@@ -102,9 +101,10 @@ export interface CheckConversationShapeInput {
   /**
    * 该会话按**群主体隐私口径**跑（owner 2026-11-18：群里的提醒不带业务名——业务名是任务
    * 原文，可能是个人数据；实现见 apps/server/server.ts 的 createLongRunningNoticePort，
-   * 只对久无动静（warning）出口剥名）。此口径与交接门 ③「推送必须自含话题」在群久无动静
+   * 只对久无动静出口剥名）。此口径与交接门 ③「推送必须自含话题」在群久无动静
    * 推送上结构性冲突（剥名后既无原话片段也无任务名，话题形态=宿主中性主语），隐私是
-   * B 类不变量、优先——本流内 factKind=warning 的投递豁免 ③（其余推送照判，不放水）。
+   * B 类不变量、优先——本流内 factEvent=task_long_running_wake 的投递豁免 ③
+   *（其余推送照判，不放水）。
    */
   readonly groupPrivacy?: boolean;
 }
@@ -171,21 +171,21 @@ export function checkConversationShape(input: CheckConversationShapeInput): Shap
     });
   }
 
-  // ② 同一 (taskId, factKind) 的用户可见投递 >1 次（provenance 缺省 = 无法归属，不参与）。
+  // ② 同一 (taskId, factEvent) 的用户可见投递 >1 次（provenance 缺省 = 无法归属，不参与）。
   const deliveriesByFact = new Map<string, number[]>();
   events.forEach((event, index) => {
     if (event.kind !== 'delivery' || event.provenance === undefined) return;
-    const key = `${event.provenance.taskId}\u0000${event.provenance.factKind}`;
+    const key = `${event.provenance.taskId}\u0000${event.provenance.factEvent}`;
     const bucket = deliveriesByFact.get(key);
     if (bucket === undefined) deliveriesByFact.set(key, [index]);
     else bucket.push(index);
   });
   for (const [key, deliveryIndexes] of deliveriesByFact) {
     if (deliveryIndexes.length <= 1) continue;
-    const [taskId, factKind] = key.split('\u0000');
+    const [taskId, factEvent] = key.split('\u0000');
     violations.push({
       code: 'fact-delivered-twice',
-      detail: `任务 ${taskId} 的 ${factKind} 事实投递了 ${deliveryIndexes.length} 次：`
+      detail: `任务 ${taskId} 的 ${factEvent} 事实投递了 ${deliveryIndexes.length} 次：`
         + deliveryIndexes.map((index) => `#${index}「${excerptOf((events[index] as DeliveryEvent).text)}」`).join('；'),
       eventIndexes: deliveryIndexes,
     });
@@ -206,12 +206,12 @@ export function checkConversationShape(input: CheckConversationShapeInput): Shap
     if (event.kind === 'delivery' && event.provenance !== undefined) return;
     if (input.groupPrivacy === true
       && event.kind === 'delivery'
-      && event.provenance?.factKind === 'warning') return;
+      && event.provenance?.factEvent === 'task_long_running_wake') return;
     if (containsInboundQuote(text, inboundEvents, minLen)) return;
     if (containsTaskName(text, taskNames)) return;
     const source = event.kind === 'reply' ? '主动回复（无线程锚点）' : '主动投递';
     const provenance = event.kind === 'delivery' && event.provenance !== undefined
-      ? `（${event.provenance.factKind} · 任务 ${event.provenance.taskId}）`
+      ? `（${event.provenance.factEvent} · 任务 ${event.provenance.taskId}）`
       : '';
     violations.push({
       code: 'push-needs-subject',
@@ -251,7 +251,7 @@ export function checkConversationShape(input: CheckConversationShapeInput): Shap
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 归属补填（② 的前提）：宿主记账行的 factKind → 推送记录
+// 归属补填（② 的前提）：宿主记账行的 factEvent → 推送记录
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -260,7 +260,8 @@ export function checkConversationShape(input: CheckConversationShapeInput): Shap
  */
 export interface DeliveryProvenanceTarget {
   taskId?: string;
-  factKind?: TaskFactKind;
+  /** 原始事实出口名（wake 事件名 / 兜底出口名）。 */
+  factEvent?: string;
   excluded?: boolean;
 }
 
@@ -268,7 +269,7 @@ export interface DeliveryProvenanceTarget {
  * 从宿主结构化日志给推送记录补填投递归属（live 逐条调用；write-loop-scenarios 既有
  * taskId 补填的共享化）：`task_result_delivery_sent` 行在 deliverText 里紧跟 sendText
  * resolve 之后写出——那一刻「最近一条未归属的文字推送」就是这次投递的那条。只补 sent 行
- * （failed/suppressed = 用户没看到，不进对话形态面；带 factKind 与否都不补）。
+ * （failed/suppressed = 用户没看到，不进对话形态面；带 factEvent 与否都不补）。
  *
  * 返回的闭包供各面 logger 逐行调用；targets 是**活数组**（各面的推送数组或其平行数组）。
  */
@@ -279,13 +280,13 @@ export function createDeliveryProvenanceAttributor(
   return (line) => {
     if (line['event'] !== 'task_result_delivery_sent') return;
     const taskId = line['taskId'];
-    const factKind = line['factKind'];
-    if (typeof taskId !== 'string' || typeof factKind !== 'string') return;
+    const factEvent = line['factEvent'];
+    if (typeof taskId !== 'string' || typeof factEvent !== 'string') return;
     for (let index = targets.length - 1; index >= 0; index -= 1) {
       if (stamped.has(index) || targets[index]!.excluded === true) continue;
       stamped.add(index);
       targets[index]!.taskId = taskId;
-      targets[index]!.factKind = factKind as TaskFactKind;
+      targets[index]!.factEvent = factEvent;
       return;
     }
   };
@@ -312,7 +313,8 @@ export interface TurnStreamPush {
   readonly text: string;
   readonly excluded?: boolean;
   readonly taskId?: string;
-  readonly factKind?: TaskFactKind;
+  /** 原始事实出口名（wake 事件名 / 兜底出口名）。 */
+  readonly factEvent?: string;
 }
 
 /**
@@ -336,8 +338,8 @@ export function buildTurnPushStream(
     if (push.excluded === true) return;
     const at = typeof push.at === 'number' ? push.at : Date.parse(push.at);
     const safeAt = Number.isFinite(at) ? at : 0;
-    const provenance = push.taskId !== undefined && push.factKind !== undefined
-      ? { taskId: push.taskId, factKind: push.factKind }
+    const provenance = push.taskId !== undefined && push.factEvent !== undefined
+      ? { taskId: push.taskId, factEvent: push.factEvent }
       : undefined;
     events.push({
       at: safeAt,

@@ -50,9 +50,9 @@ const NAME_PLACEHOLDER = '\u0000name\u0000';
 /** reason → 用户语言（失败分级；result_unknown 不读作成功）。 */
 const REASON_TEXT: Record<NotificationReason, string> = {
   result_unknown: '不确定做没做完，需要再确认',
-  resource_limited: '系统太忙，这个没接',
-  timeout: '跑太久先停了',
-  cancelled_by_user: '已按你说的停了',
+  capacity_blocked: '系统太忙，这个没接',
+  deadline_reached: '跑太久先停了',
+  user_stop: '已按你说的停了',
 };
 
 /** name 用户原话占位替换后的模板先行黑名单断言，再回填 name。 */
@@ -85,23 +85,23 @@ export function renderNotification(input: { kind: NotificationKind; payload: Not
         name,
       );
     }
-    case 'timed_out':
-      return assemble(`${REASON_TEXT.timeout}：${NAME_PLACEHOLDER}。`, name);
-    case 'resource_limited':
+    case 'deadline_reached':
+      return assemble(`${REASON_TEXT.deadline_reached}：${NAME_PLACEHOLDER}。`, name);
+    case 'capacity_blocked':
       return resourceLimitedText(name);
-    case 'cancelled':
-      return assemble(`${REASON_TEXT.cancelled_by_user}：${NAME_PLACEHOLDER}。`, name);
+    case 'user_stop':
+      return assemble(`${REASON_TEXT.user_stop}：${NAME_PLACEHOLDER}。`, name);
   }
 }
 
 /**
  * 资源受限（池满/队列满的确定性拒绝）的既有用户文案——渲染器是唯一来源；失败降级出口
- * 对「reason=resource_limited 的失败」复用同一句（2026-11-19 只读审计 #18：此前那类失败
+ * 对「reason=capacity_blocked 的失败」复用同一句（2026-11-19 只读审计 #18：此前那类失败
  * 在模型沉默时拿到的是「没办成。再试一次，还是先放着？」——不是这件事的实话）。
  * 尾句 = 既有动作句（「再试一次，还是先放着？」的等一会儿版：资源受限的实话是等一下，
  * 不是立刻重试）——owner 的归宿规则要求「一句话 + 一个动作」，资源类失败落在「告诉用户」档。
  */
 export function resourceLimitedText(name?: string): string {
   const subject = name !== undefined && name.trim() !== '' ? name : '未命名任务';
-  return assemble(`${REASON_TEXT.resource_limited}：${NAME_PLACEHOLDER}。等一会儿再试一次，还是先放着？`, subject);
+  return assemble(`${REASON_TEXT.capacity_blocked}：${NAME_PLACEHOLDER}。等一会儿再试一次，还是先放着？`, subject);
 }

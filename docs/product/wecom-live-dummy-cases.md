@@ -48,7 +48,7 @@ TMPDIR=~/.tmp node scripts/eval/fixtures/make-sales-sample.mjs ~/.tmp/wecom-samp
 
 | 面 | 命令 | 说明 |
 | --- | --- | --- |
-| 确定性全量门 | `TMPDIR=~/.tmp npm test` | 状态机、取消、故障注入、投递记账等 |
+| 确定性全量门 | `TMPDIR=~/.tmp npm test` | 任务底账事实、取消、故障注入、投递记账等 |
 | **企微 × dummy 自动联调（A～G 组）** | `TMPDIR=~/.tmp node --import tsx scripts/eval/wecom-sim/run.ts`（或 `vitest run scripts/eval/wecom-sim`） | 真 createServer 装配 + 仓内 dummy 执行层 + 假企微 SDK；26 条自动用例（见 §10） |
 | 文件面/能力面 | `TMPDIR=~/.tmp npm run eval:cap01` | 七个确定性面串行，约 60s；**不要并发跑** |
 | 用户级黑盒 | `TMPDIR=~/.tmp npm run eval:user -- --trials 1` | 真模型 + dummy；消耗 token |

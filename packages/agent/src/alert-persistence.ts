@@ -20,6 +20,7 @@ import path from 'node:path';
 import { openTaskStore, stillProgressingOf, storedTaskProgressOf, taskEndedOf } from '@fshine/core';
 import {
   evaluateAlerts,
+  TASK_LEDGER_FACT_EVENT,
   type AlertCooldownState,
   type AlertFact,
   type AlertItem,
@@ -164,8 +165,6 @@ export function logLineToFact(line: string, logOffset: number, nowIso: string): 
   // 部署模式事实（跳过终局随带）：live + skipped 要告警（渠道配错）——判据只在
   // isDeliveryFailure，不在这里猜（2026-11-19 delivery-truth 并集补）。
   if (typeof obj['deliveryMode'] === 'string') detail.deliveryMode = obj['deliveryMode'];
-  if (typeof obj['taskStatus'] === 'string') detail.taskStatus = obj['taskStatus'];
-  if (typeof obj['taskState'] === 'string') detail.taskStatus = obj['taskState'];
   // 协议违约 / 确认句柄丢失的显式标记（执行层事件形状）。
   if (obj['protocolViolation'] === true) detail.protocolViolation = true;
   if (obj['confirmationLost'] === true) detail.confirmationLost = true;
@@ -202,27 +201,31 @@ export function ledgerFacts(dbPath: string): { facts: AlertFact[]; note?: string
       const task = stored.task;
       const at = task.updatedAt;
       // 读取单位投影：结束事实在 task_ends 追加账（tasks 行没有终态列）——只取
-      // stored.task 会把已停的行仍当 running/waiting 投影，task_stuck 会对已结束任务发假告警。
+      // stored.task 会把已停的行仍判成仍在推进，task_stuck 会对已结束任务发假告警。
       const progress = storedTaskProgressOf(stored);
       const ended = taskEndedOf(progress);
-      // 在跑/等待事实（S1 事实模型：没有 status 列——等待形状与唯一谓词即事实）。
+      // 原始事实（S1 事实模型：没有 status 列——等待形状与唯一谓词即事实）。
       const waiting = !ended && task.pendingQuestion !== undefined;
-      // 已汇报 / 终止事件的行已收尾，不再投影成 running（唯一谓词，与扫描面同口径）。
-      const running = stillProgressingOf(progress);
-      if (running || waiting) {
-        const since = waiting
-          ? (task.waitingSince ?? task.updatedAt)
-          : (task.runningSince ?? task.updatedAt);
+      // 等待时刻缺省回落本行最后更新时刻（旧行没有 waiting_since 时的机械事实，不编造）。
+      const waitingSince = waiting ? (task.waitingSince ?? task.updatedAt) : undefined;
+      // 已汇报 / 结束事实的行已收尾，不再判成仍在推进（唯一谓词，与扫描面同口径）。
+      const progressing = stillProgressingOf(progress);
+      if (progressing || waiting) {
         facts.push({
           source: 'ledger',
-          event: 'task_state',
-          at: since,
+          event: TASK_LEDGER_FACT_EVENT,
+          at: task.updatedAt,
           raw: JSON.stringify(task),
           taskId: task.taskId,
           principalId: task.principalId,
           sessionId: task.sessionId,
           evidenceRef: `task:${task.taskId}`,
-          detail: { taskStatus: waiting ? 'waiting_user' : 'running' },
+          // 只传原始事实：布尔谓词 + 等待时刻 + 最后更新时刻；不把任务投影成状态词。
+          detail: {
+            progressing,
+            ...(waitingSince === undefined ? {} : { waitingSince }),
+            lastAt: task.updatedAt,
+          },
         });
       }
       for (const execution of stored.executions) {

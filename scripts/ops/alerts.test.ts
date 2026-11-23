@@ -107,7 +107,7 @@ describe('投递终局的上帝视角：既有 delivery_failed 规则看得见�
       onTerminal: logLine,
     });
     try {
-      liveSkip.record({ taskId: 'task-alert-live-skip', kind: 'timed_out', at: NOW_ISO });
+      liveSkip.record({ taskId: 'task-alert-live-skip', kind: 'deadline_reached', at: NOW_ISO });
       await liveSkip.deliverPending();
       const alerts = alertsOf(lines);
       expect(alerts.map((alert) => alert.rule)).toEqual(['delivery_failed']);
@@ -130,7 +130,7 @@ describe('投递终局的上帝视角：既有 delivery_failed 规则看得见�
       onTerminal: (terminal) => silentLines.push(notificationTerminalLogLine(terminal)),
     });
     try {
-      silentSkip.record({ taskId: 'task-alert-silent-skip', kind: 'timed_out', at: NOW_ISO });
+      silentSkip.record({ taskId: 'task-alert-silent-skip', kind: 'deadline_reached', at: NOW_ISO });
       await silentSkip.deliverPending();
       expect(silentLines).toHaveLength(1); // 事件照落
       expect(silentLines[0]).toMatchObject({ result: 'skipped', deliveryMode: 'silent' });
@@ -157,7 +157,7 @@ describe('投递终局的上帝视角：既有 delivery_failed 规则看得见�
       onTerminal: (terminal) => okLines.push(notificationTerminalLogLine(terminal)),
     });
     try {
-      okOutbox.record({ taskId: 'task-alert-delivered', kind: 'timed_out', at: NOW_ISO });
+      okOutbox.record({ taskId: 'task-alert-delivered', kind: 'deadline_reached', at: NOW_ISO });
       await okOutbox.deliverPending();
       expect(okLines).toEqual([]);
       expect(okOutbox.undelivered()).toEqual([]);

@@ -75,7 +75,7 @@ export const NUDGE_AFTER_MS = 30_000;
 //    不复制）。
 //   · inbound = 夹具的发帧记录（sendText/sendFile）；
 //   · reply   = adapter 的 replyStream 终帧（finish=true 且未被拒收；reqId → 消息锚点）；
-//   · delivery = 主动推送（proactiveTexts）+ 宿主 sent 记账行的归属补填（factKind）。
+//   · delivery = 主动推送（proactiveTexts）+ 宿主 sent 记账行的归属补填（factEvent）。
 // ② 内部词/内部标识泄漏（2026-11-21）：用户可见面（终帧气泡 + 主动推送，与形态守卫同口径）
 //    走 shared/internal-terms 的单一入口 scanUserVisibleText（内部词 + 任务编号形态 +
 //    taskId 形态）——与 write-loop / write-loop-scenarios / convergence-r1 三批同一来源。
@@ -723,9 +723,9 @@ export interface WecomSimFixture {
   disarmShapeGuard(): void;
   /**
    * 向推送面注入一条**带归属**的投递（负例控制专用，与宿主 sent 记账同形：一次真实
-   * 重复投递在夹具里看到的就是 proactiveTexts 多一条 + 该条带 taskId/factKind）。
+   * 重复投递在夹具里看到的就是 proactiveTexts 多一条 + 该条带 taskId/factEvent）。
    */
-  injectDelivery(record: { text: string; taskId: string; factKind: 'completed' | 'failed' | 'cancelled' | 'waiting_user' | 'warning'; chatId?: string }): void;
+  injectDelivery(record: { text: string; taskId: string; factEvent: string; chatId?: string }): void;
   close(): Promise<void>;
 }
 
@@ -928,8 +928,8 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
         kind: 'delivery',
         at: record.at,
         text: record.content,
-        ...(attributed?.taskId !== undefined && attributed.factKind !== undefined
-          ? { provenance: { taskId: attributed.taskId, factKind: attributed.factKind } }
+        ...(attributed?.taskId !== undefined && attributed.factEvent !== undefined
+          ? { provenance: { taskId: attributed.taskId, factEvent: attributed.factEvent } }
           : {}),
       });
     });
@@ -1019,7 +1019,7 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
     },
     injectDelivery(record) {
       // 先补齐归属槽位（logger 只在记账行到达时同步），再追加推送与归属——与宿主真投递
-      // 的最终状态逐字段同形（proactiveTexts 多一条、该条带 taskId/factKind）。
+      // 的最终状态逐字段同形（proactiveTexts 多一条、该条带 taskId/factEvent）。
       while (provenanceByPush.length < sdk.proactiveTexts.length) provenanceByPush.push({});
       sdk.proactiveTexts.push({
         kind: 'sendMessage',
@@ -1027,7 +1027,7 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
         content: record.text,
         at: Date.now(),
       });
-      provenanceByPush.push({ taskId: record.taskId, factKind: record.factKind });
+      provenanceByPush.push({ taskId: record.taskId, factEvent: record.factEvent });
     },
     async close() {
       // 快照在拆卸前装配（任务名要从底账读）；守卫未解除时挂给 afterEach 统一判（违规即该用例失败）。
