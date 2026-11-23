@@ -86,7 +86,7 @@ import {
 import type { TaskExecutionBridge, TaskExecutionBridgeFactory } from './task-file-bridge';
 import { READ_SKILL_TOOL, type SkillRegistry } from './skills';
 import { stripServerPaths } from './server-paths';
-import { createTaskRegistry, deriveTaskName, DispatchConflictError, stillProgressingOf, taskEndedOf, taskLivenessOf, taskUnstartedOf, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
+import { createTaskRegistry, deriveTaskName, DispatchConflictError, stillProgressingOf, taskEndedOf, taskLivenessOf, taskUnstartedOf, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope, type TaskTerminationKind } from './task-registry';
 import {
   DEFAULT_RUNTIME_CONFIG,
   taskFailureReasonFor,
@@ -1021,14 +1021,47 @@ export type TurnRetryBlock = RetryBlock;
  * 的落定窗口（见 taskCancel）；task_run 短等待窗口捕获的非完成终态走既有
  * pushSuppressedTaskIds 路径，不进本列表。回合外落定
  * （后台完成/重启对账/长任务结束）不进这个列表，状态变化唤醒照发。
- * kind 只取有状态变化唤醒出口的三类（completed/failed/cancelled）；其余终态
- * （timed_out/unexecuted）没有唤醒出口，不观察、不抑制。
+ * 只有本回合**如实说出**且值得一次性核销的终态进列：cancelled / completed。
+ * 失败类终态（round_failed/died）即使在本回合落定也**不**写入——失败唤醒必须照发，
+ * 不许被取消路径伪装成 completed 后核销；timed_out/resource_limited 没有唤醒出口，不观察。
  */
 export type TurnTerminalKind = 'cancelled' | 'completed' | 'failed';
 
 export interface TurnTerminalObservation {
   taskId: string;
   kind: TurnTerminalKind;
+}
+
+/**
+ * 已结束任务的终止事实种类：终止事件优先（零状态唯一持久来源）；旧只读库没有事件账时，
+ * 汇报存档在场按 completed 回落（事实是「有汇报」，不伪造其它种类）。找不到结束事实
+ * 返回 undefined（调用方如实说「结果未知」，不猜成 completed）。
+ */
+function terminationKindOf(task: TaskRecord): TaskTerminationKind | undefined {
+  if (task.termination !== undefined) return task.termination.kind;
+  if ((task.resultText ?? '').trim() !== '' || (task.replyText ?? '').trim() !== '') return 'completed';
+  return undefined;
+}
+
+/**
+ * 取消回执的用户可读一句：按真实终止种类说（不再把所有非取消结局统一成「已经办完了」）。
+ * 种类词与脚本/tasks 的机械事实词同口径：已取消 / 已完成 / 已超时 / 已失败 / 结果未知 / 资源拒绝。
+ */
+function cancelSettledMessageOf(kind: TaskTerminationKind, label: string): string {
+  switch (kind) {
+    case 'cancelled':
+      return `已取消：${label}`;
+    case 'completed':
+      return `没停成：${label} 已完成`;
+    case 'timed_out':
+      return `没停成：${label} 已超时`;
+    case 'round_failed':
+      return `没停成：${label} 已失败`;
+    case 'died':
+      return `没停成：${label} 结果未知`;
+    case 'resource_limited':
+      return `没停成：${label} 资源拒绝`;
+  }
 }
 
 export interface TurnResult {
@@ -2131,13 +2164,17 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   /**
    * 取消：复用 runner.cancel，原样转述 CancelOutcome（requested≠cancelled），不宣称已取消。
    *
+   * 已结束任务（runner 回 terminal）：读终止事件 kind，回执按真实种类说（已取消/已完成/
+   * 已超时/已失败/结果未知/资源拒绝），不再统一成「已经办完了」。
+   *
    * 缺陷 A（2026-11-21 live，回合内终态观察）：requested 不再干等回复——有在飞回合时在
-   * taskRunWaitMs 窗口内轮询落定（waitForTaskSettled）；窗口内确认 cancelled（或其他终态）
+   * taskRunWaitMs 窗口内轮询落定（waitForTaskSettled）；窗口内确认 cancelled / completed
    * → ① 回执按真实结局说（确认了才说「已停止」，没确认仍说「已请求停止」——不冒进）；
    * ② 终态记入本回合 collector（TurnResult.terminalObservedInTurn），装配层据此对随后的
-   * 状态变化唤醒做一次性抑制（用户已在本回合听到这件事，不再说第二遍）。超窗 → requested
-   * 照旧、不观察（终态在回合外落定，唤醒照发——用户终会得到下文）。无在飞回合的 requested
-   * （没有可中止的执行，没人会去确认）不等待，不阻塞回合。
+   * 状态变化唤醒做一次性抑制（用户已在本回合听到这件事，不再说第二遍）。窗口内落定成
+   * 失败类（round_failed/died）**不**进抑制列表——失败唤醒必须照发，不能被伪装成
+   * completed 核销。超窗 → requested 照旧、不观察（终态在回合外落定，唤醒照发）。无在飞
+   * 回合的 requested（没有可中止的执行，没人会去确认）不等待，不阻塞回合。
    */
   async function taskCancel(
     args: Record<string, unknown>,
@@ -2164,44 +2201,49 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     // 缺陷 A：取消在本回合内落定的观察。未启动/等待中的取消由 runner 同步机械确认
     // （outcome=cancelled）；在跑的取消（requested）只在**有在飞回合**时等窗口——竞态
     // 兜底先看一眼底账（请求与回合收尾几乎同时落定时 inFlight 已清、事实已落）。
+    // 已结束任务（runner 回 terminal）也读终止事件：回执按真实种类说，不套「已经办完了」。
     let observed: TurnTerminalKind | undefined;
-    let settledFact: 'cancelled' | 'archived' | 'ended' | undefined;
+    let settledKind: TaskTerminationKind | undefined;
     if (outcome.outcome === 'cancelled') {
       observed = 'cancelled';
+      settledKind = 'cancelled';
     } else if (outcome.outcome === 'requested' && taskRunWaitMs > 0) {
       const settled = runner.inFlight().includes(taskId)
         ? await waitForTaskSettled(taskId, taskRunWaitMs)
         : undefined;
-      const now_ = registry.get(taskId, scope);
-      if (settled !== undefined) {
-        settledFact = settled.termination?.kind === 'cancelled' ? 'cancelled' : 'ended';
-      } else if (now_.termination?.kind === 'cancelled') {
-        settledFact = 'cancelled';
-      } else if (taskEndedOf(now_)) {
-        settledFact = 'ended';
-      }
-      observed = settledFact === 'cancelled'
-        ? 'cancelled'
-        : settledFact !== undefined
-          ? 'completed'
-          : undefined;
+      settledKind = terminationKindOf(settled ?? registry.get(taskId, scope));
+      // 观察只收「本回合回执如实说出、且唤醒可安全核销」的终态：取消 / 完成。
+      // 失败类（round_failed/died）**不写入**——它们有独立的失败唤醒出口，不能被取消
+      // 路径伪装成 completed 核销掉；timed_out/resource_limited 没有唤醒出口，不观察。
+      if (settledKind === 'cancelled') observed = 'cancelled';
+      else if (settledKind === 'completed') observed = 'completed';
+    } else if (outcome.outcome === 'terminal') {
+      // 已结束：读该任务的终止事件 kind（唯一持久事实来源）。不写入 observed——这一回合
+      // 没有新的落定要被核销，不能让取消动作压掉尚未送达的完成/失败唤醒。
+      settledKind = terminationKindOf(registry.get(taskId, scope));
     }
     if (observed !== undefined) terminalObserved.push({ taskId, kind: observed });
-    // 观察到落定的取消 → 回执按真实结局说（确认了才说「已停止」；停成了别的结局（办完）
-    // 也如实说「没停成」——不冒充已停）。未落定保持 requested 原样（不宣称已取消）。
-    const effective: Record<string, unknown> = observed === 'cancelled'
-      ? { outcome: 'cancelled', taskId }
-      : settledFact !== undefined
-        ? { outcome: 'terminal', taskId, settled: settledFact }
+    // 观察到落定的取消 → 回执按真实结局说（确认了才说「已停止」；停成了别的结局也按真实
+    // 终止种类说——已完成/已超时/已失败/结果未知/资源拒绝，不冒充已停、也不统一「办完了」）。
+    // 未落定保持 requested 原样（不宣称已取消）。
+    const effective: Record<string, unknown> = outcome.outcome === 'terminal'
+      // 已结束任务：runner 的判断是「无操作」（terminal），保留它；settled 附真实终止种类。
+      ? { outcome: 'terminal', taskId, ...(settledKind === undefined ? {} : { settled: settledKind }) }
+      : settledKind !== undefined
+        ? settledKind === 'cancelled'
+          ? { outcome: 'cancelled', taskId }
+          : { outcome: 'terminal', taskId, settled: settledKind }
         : { ...outcome };
-    // 给用户看的一句话：业务名 + 结果，按结果分三种说法。编号属内部工单腔，不进模型投影/
-    // 用户面；业务名足以让用户一眼确认"被停掉的是哪件事"（底账仍有编号，对账用）。
+    // 给用户看的一句话：业务名 + 真实结果。编号属内部工单腔，不进模型投影/用户面；
+    // 业务名足以让用户一眼确认"被停掉的是哪件事"（底账仍有编号，对账用）。
     const label = identity.taskName ?? identity.taskRequest ?? '该任务';
     const userMessage = effective['outcome'] === 'cancelled'
       ? `已停止：${label}`
-      : effective['outcome'] === 'requested'
-        ? `已请求停止：${label}（还没确认停掉）`
-        : `没停成：${label} 已经办完了`;
+      : settledKind !== undefined
+        ? cancelSettledMessageOf(settledKind, label)
+        : effective['outcome'] === 'requested'
+          ? `已请求停止：${label}（还没确认停掉）`
+          : `没停成：${label} 已经结束（结果未知）`;
     return { ...effective, ...identity, userMessage, ...(reason === '' ? {} : { reason }) };
   }
 

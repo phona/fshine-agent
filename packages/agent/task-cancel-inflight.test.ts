@@ -443,16 +443,139 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
 
     await session.send('把 #1 取消掉');
 
-    // 机械回执：终态任务无操作，原样给出 completed（模型不得据此宣称已取消）。
+    // 机械回执：终态任务无操作，原样给出真实终止种类（模型不得据此宣称已取消）。
     // 同上：回执带身份，断言改为子集 + 身份存在。
-    expect(results[0]).toMatchObject({ outcome: 'terminal', taskId: 'task_done' });
+    expect(results[0]).toMatchObject({ outcome: 'terminal', taskId: 'task_done', settled: 'completed' });
     expect(results[0]).not.toHaveProperty('taskNo');
-    // 终态：用户可见话术必须说"没停成 + 已完成"，不能只说"已取消"。
+    // 终态：用户可见话术必须说"没停成 + 已完成"（真实种类），不能只说"已取消"。
     expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('没停成');
-    expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('办完');
+    expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('已完成');
+    expect((results[0] as unknown as { userMessage?: string }).userMessage).not.toContain('已取消');
     const task = registry.get('task_done', SCOPE);
     expect(lastExecutionOf(task)?.status).toBe('completed');
     expect(lastFailureOf(task)).toBeUndefined();
     expect(task.resultText).toBe('查到 2 条。');
+  });
+
+  it('④ 已结束任务（各终止种类）再取消：回执按真实种类说，不统一「已经办完了」、不改写终止事件', async () => {
+    // 反向绊线：把回执改回统一 `没停成：… 已经办完了`（或把 settled 固定成 completed）→ 本用例红。
+    const cases: ReadonlyArray<{
+      kind: 'completed' | 'round_failed' | 'died' | 'timed_out' | 'resource_limited' | 'cancelled';
+      word: RegExp;
+      seed: (registry: TaskRegistry, taskId: string) => void;
+    }> = [
+      {
+        kind: 'completed',
+        word: /已完成/,
+        seed: (registry, taskId) => {
+          registry.noteExecution(taskId, { requestId: 'req_done', operation: 'dummy.query', status: 'completed' });
+          registry.setResultText(taskId, '查到 2 条。');
+        },
+      },
+      { kind: 'round_failed', word: /已失败/, seed: (registry, taskId) => registry.noteRoundFailed(taskId) },
+      { kind: 'died', word: /结果未知/, seed: (registry, taskId) => registry.markDied(taskId) },
+      { kind: 'timed_out', word: /已超时/, seed: (registry, taskId) => registry.markTimedOut(taskId, 'execution') },
+      { kind: 'resource_limited', word: /资源拒绝/, seed: (registry, taskId) => registry.markResourceLimited(taskId) },
+      { kind: 'cancelled', word: /已取消/, seed: (registry, taskId) => registry.markCancelled(taskId, { scope: SCOPE }) },
+    ];
+    for (const testCase of cases) {
+      const registry = createTaskRegistry();
+      const taskId = `task_terminal_${testCase.kind}`;
+      registry.begin({
+        taskId,
+        principalId: SCOPE.principalId,
+        sessionId: SCOPE.sessionId,
+        request: `办 ${testCase.kind} 的事`,
+      });
+      testCase.seed(registry, taskId);
+      const results: unknown[] = [];
+      const mainDriver: TurnDriver = {
+        async run(input) {
+          results.push(await input.exec(TASK_CANCEL_TOOL, { ref: taskId }));
+          return { text: '查过了，按事实说。', messages: input.messages };
+        },
+      };
+      const runner = createTaskRunner({
+        registry,
+        policy: createResourcePolicy(),
+        executor: { async execute(): Promise<TaskExecutionOutcome> { return { kind: 'ended', report: 'x' }; } },
+      });
+      const session = await createSession({
+        principalId: SCOPE.principalId,
+        sessionId: SCOPE.sessionId,
+        client: faceClient(),
+        allowedOperations: ['dummy.query'],
+        readOnlyOperations: ['dummy.query'],
+        mainDriver,
+        workerDriver: {
+          async run() {
+            throw new Error('（测试）该 driver 不应被调用');
+          },
+        },
+        mainSystemPrompt: '（测试）Main 系统提示',
+        taskRegistry: registry,
+        taskRunner: runner,
+      });
+      await session.send(`把 ${taskId} 取消掉`);
+
+      const receipt = results[0] as { outcome?: string; settled?: string; userMessage?: string };
+      expect(receipt.outcome, testCase.kind).toBe('terminal');
+      // 真实终止种类原样交给模型；用户可见话术按种类说（不再统一「已经办完了」）。
+      expect(receipt.settled, testCase.kind).toBe(testCase.kind);
+      expect(receipt.userMessage, testCase.kind).toMatch(testCase.word);
+      expect(receipt.userMessage, testCase.kind).not.toContain('已经办完了');
+      if (testCase.kind !== 'completed') expect(receipt.userMessage, testCase.kind).not.toMatch(/办完/);
+      // 终止事实不被取消调用改写。
+      expect(registry.get(taskId, SCOPE).termination?.kind, testCase.kind).toBe(testCase.kind);
+    }
+  });
+
+  it('⑤ 在飞取消窗口内落定为失败（结果未知）：回执按 died 说，回合不把失败终态记成 completed 观察', async () => {
+    const registry = createTaskRegistry();
+    // 中止后不确认取消，而是以「结果未知」落定（执行端可能已发生副作用的真实形状）。
+    const executor: TaskExecutor = {
+      async execute(_task, context): Promise<TaskExecutionOutcome> {
+        return await new Promise<TaskExecutionOutcome>((resolve) => {
+          context.signal.addEventListener('abort', () => resolve({ kind: 'result_unknown' }));
+        });
+      },
+    };
+    const runner = createTaskRunner({ registry, policy: createResourcePolicy(), executor, leaseMs: 60_000 });
+    const results: unknown[] = [];
+    const session = await createSession({
+      principalId: SCOPE.principalId,
+      sessionId: SCOPE.sessionId,
+      client: faceClient(),
+      allowedOperations: ['dummy.query'],
+      readOnlyOperations: ['dummy.query'],
+      mainDriver: scriptedMainDriver([
+        { calls: [{ tool: TASK_RUN_TOOL, args: { task: '查一下 alpha 集合' } }], text: '已受理。' },
+        { calls: [{ tool: TASK_CANCEL_TOOL, args: taskIdRefFrom }], text: '好，我看看停没停。' },
+      ], results),
+      workerDriver: {
+        async run() {
+          throw new Error('（测试）background 派发不应调用 createSession 的 workerDriver');
+        },
+      },
+      mainSystemPrompt: '（测试）Main 系统提示',
+      taskRegistry: registry,
+      policy: createResourcePolicy(),
+      taskDispatch: 'async',
+      taskRunner: runner,
+      // 窗口 > 0：取消请求在回合内等到「结果未知」落定。
+      taskRunWaitMs: 1_500,
+    });
+    await session.send('帮我查 alpha 集合，跑起来别等');
+    const turn = await session.send('算了别做了，取消掉');
+
+    const receipt = results[1] as { outcome?: string; settled?: string; userMessage?: string };
+    // 回执按真实终止种类说（died = 结果未知），不冒充已停、不统一「已经办完了」。
+    expect(receipt.outcome).toBe('terminal');
+    expect(receipt.settled).toBe('died');
+    expect(receipt.userMessage).toContain('结果未知');
+    expect(receipt.userMessage).not.toContain('已经办完了');
+    // 反向绊线：把窗口内落定的失败终态记成 completed 观察 → 这里变成 [{kind:'completed'}]，必红。
+    expect(turn.terminalObservedInTurn ?? []).toEqual([]);
+    expect(registry.get((results[0] as { taskId: string }).taskId, SCOPE).termination?.kind).toBe('died');
   });
 });

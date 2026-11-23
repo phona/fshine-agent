@@ -14,6 +14,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '@fshine/core';
 import {
@@ -527,6 +528,81 @@ function seedDb(dir: string): string {
   return dbPath;
 }
 
+/**
+ * 升级前（v5）形状的任务库：tasks 仍带六个终态列、没有 task_events（零状态 v6 之前）。
+ * CLI 固定只读打开；数据写入用原始连接（只构造历史库，不经过现行写入面）。
+ */
+function seedV5Db(dir: string): string {
+  const dbPath = path.join(dir, 'state-v5.db');
+  const db = new Database(dbPath);
+  db.pragma('journal_mode = WAL');
+  db.exec(`
+    CREATE TABLE tasks (
+      task_id TEXT PRIMARY KEY,
+      principal_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      request TEXT NOT NULL,
+      result_text TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      task_no INTEGER,
+      name TEXT,
+      reply_text TEXT,
+      pending_question TEXT,
+      waiting_since TEXT,
+      lease_owner TEXT,
+      lease_until TEXT,
+      died_at TEXT,
+      cancelled_at TEXT,
+      timed_out_at TEXT,
+      resource_limited_at TEXT,
+      cancel_requested_at TEXT,
+      long_running_notified_at TEXT,
+      running_since TEXT,
+      round_failed_at TEXT,
+      wait_contact_lost_notified_at TEXT
+    );
+    CREATE TABLE task_sequences (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+    CREATE TABLE executions (
+      request_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(task_id),
+      operation TEXT NOT NULL,
+      status TEXT NOT NULL,
+      error_json TEXT,
+      dispatch_key TEXT
+    );
+  `);
+  const insert = db.prepare(`
+    INSERT INTO tasks (task_id, principal_id, session_id, request, result_text, created_at, updated_at,
+      task_no, name, reply_text, running_since, cancelled_at, died_at)
+    VALUES (@taskId, 'wecom:fixture-user', 'ask-legacy', @request, NULL, '2026-11-20T08:00:00.000Z',
+      '2026-11-20T09:00:00.000Z', @taskNo, @name, NULL, @runningSince, @cancelledAt, @diedAt)
+  `);
+  // updated_at 全是 09:00；真实终态时刻只在旧终态列上（08:11 / 08:21）——display 必须用后者。
+  insert.run({
+    taskId: 'task_v5_cancelled',
+    request: '帮我查一下 alpha 集合',
+    taskNo: 11,
+    name: '查 alpha 集合',
+    runningSince: '2026-11-20T08:10:00.000Z',
+    cancelledAt: '2026-11-20T08:11:00.000Z',
+    diedAt: null,
+  });
+  insert.run({
+    taskId: 'task_v5_died',
+    request: '帮我查一下 beta 集合',
+    taskNo: 12,
+    name: '查 beta 集合',
+    runningSince: '2026-11-20T08:20:00.000Z',
+    cancelledAt: null,
+    diedAt: '2026-11-20T08:21:00.000Z',
+  });
+  db.prepare("INSERT INTO task_sequences (name, value) VALUES ('task_no', 11)").run();
+  db.pragma('user_version = 5');
+  db.close();
+  return dbPath;
+}
+
 describe('tasks：CLI 端到端（真实子进程）', () => {
   it('列表：机械事实以中文呈现，含 #编号与业务名称（不出现内部 taskId）', () => {
     const dir = tempDir();
@@ -624,6 +700,30 @@ describe('tasks：CLI 端到端（真实子进程）', () => {
     const before = sha256(dbPath);
     expect(runTasks([], { DB_PATH: dbPath }).status).toBe(0);
     expect(runTasks(['task_failed'], { DB_PATH: dbPath }).status).toBe(0);
+    expect(sha256(dbPath)).toBe(before);
+  });
+
+  it('只读打开升级前的 v5 库：已取消行按已取消显示（不标结果未知），旧列原时刻可读，不写库', () => {
+    const dir = tempDir();
+    const dbPath = seedV5Db(dir);
+    const before = sha256(dbPath);
+
+    // 反向绊线：只读投影忽略旧终态列 → cancelled 行按「已启动无汇报」判 died，列表/详情出现「结果未知」。
+    const list = runTasks([], { DB_PATH: dbPath });
+    expect(list.status).toBe(0);
+    expect(list.stdout).toContain('已取消');
+    const detail = runTasks(['task_v5_cancelled'], { DB_PATH: dbPath });
+    expect(detail.status).toBe(0);
+    expect(detail.stdout).toContain('事实：已取消');
+    expect(detail.stdout).toContain('机械事实：用户已取消（2026-11-20T08:11:00.000Z）');
+    expect(detail.stdout).not.toContain('结果未知');
+
+    // died 行仍按真实种类显示（不是把旧列一律当 cancelled）。
+    const died = runTasks(['task_v5_died'], { DB_PATH: dbPath });
+    expect(died.status).toBe(0);
+    expect(died.stdout).toContain('结果未知');
+
+    // 只读：不迁移、不写库。
     expect(sha256(dbPath)).toBe(before);
   });
 

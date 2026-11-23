@@ -27,8 +27,10 @@
  *   · v6 = tasks 表重建：删 status/reason/failure_reason 与六个终态列；旧任务**全部当已结束**
  *     （running_since 按 updated_at 回填，避免被当未启动重新认领），并把旧结论列的可用机械
  *     信息转成一条终止事件（cancelled/timed_out/resource_limited/died/round_failed/
- *     completed；有汇报存档当作 completed，其余无汇报当作 round_failed），历史汇报/执行事实
- *     原样保留；
+ *     completed；有汇报存档当作 completed，其余无汇报当作 round_failed），**事件的 at =
+ *     匹配到的旧终态列原时刻**（NULL 才回退 updated_at），历史汇报/执行事实原样保留；
+ *   · 只读打开旧形状库不迁移：读取投影把仍在的旧终态列还原成终止事实（kind + 原时刻，
+ *     不写库、不建 task_events）；有事件账时以事件账为准；
  *   · 回填 task_no（仅缺该列时）：按 (created_at, task_id) 升序连续分配，只填 NULL 行；
  *   · U3/file_refs/inbound 面只做前向加法（不变）；
  *   · PRAGMA user_version 记录版本（新库直接建 v6）。
@@ -576,6 +578,15 @@ interface TaskDbRow {
   running_since?: string | null;
   created_at: string;
   updated_at: string;
+  /**
+   * 旧 v5 终态列（只读打开未迁移的旧库时仍在；可写打开会迁移掉）。只读读取投影据它们
+   * 还原终止事实——不写库、不建事件账。
+   */
+  cancelled_at?: string | null;
+  timed_out_at?: string | null;
+  resource_limited_at?: string | null;
+  died_at?: string | null;
+  round_failed_at?: string | null;
 }
 
 interface TaskEventDbRow {
@@ -714,6 +725,17 @@ function rebuildTasksToZeroState(db: Database.Database): void {
   branches.push(`${reportNonEmpty} THEN 'completed'`);
   const kindExpr = `CASE ${branches.map((branch) => `WHEN ${branch}`).join(' ')} ELSE 'round_failed' END`;
 
+  // 终止事件时刻 = 匹配到的旧终态列原时刻（与 kind 分支同一优先级：cancelled_at → timed_out_at
+  // → resource_limited_at → died_at → round_failed_at）；该列为 NULL / 旧库无该列时回退
+  // updated_at（v4 及更早只有 status，没有独立时刻可读）。
+  // 反向绊线：固定写 updated_at → 「旧列 08:11 / updated_at 09:00」的迁移用例红。
+  const terminalTimestampColumns = [
+    'cancelled_at', 'timed_out_at', 'resource_limited_at', 'died_at', 'round_failed_at',
+  ].filter((column) => oldColumns.has(column));
+  const atExpr = terminalTimestampColumns.length === 0
+    ? '"updated_at"'
+    : `CASE ${terminalTimestampColumns.map((column) => `WHEN "${column}" IS NOT NULL THEN "${column}"`).join(' ')} ELSE "updated_at" END`;
+
   const columnList = TASKS_V6_COLUMNS.map((column) => `"${column}"`).join(', ');
   const selectList = TASKS_V6_COLUMNS.map((column) => {
     if (column === 'running_since') {
@@ -734,7 +756,7 @@ function rebuildTasksToZeroState(db: Database.Database): void {
       db.exec(SCHEMA_BASE);
       db.exec(`
         INSERT OR IGNORE INTO task_events (task_id, kind, at, state_version)
-        SELECT "task_id", ${kindExpr}, "updated_at", 'end' FROM "tasks";
+        SELECT "task_id", ${kindExpr}, ${atExpr}, 'end' FROM "tasks";
         CREATE TABLE tasks_v6 (${TASKS_V6_COLUMNS.map((column) =>
           `"${column}" ${TASKS_V6_BUILD_COLUMN_SHAPES[column]}`).join(', ')});
         INSERT INTO tasks_v6 (${columnList}) SELECT ${selectList} FROM "tasks";
@@ -1057,6 +1079,42 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   const selectTerminations = hasTaskEvents
     ? db.prepare('SELECT task_id, kind, at FROM task_events WHERE task_id = ? ORDER BY seq')
     : undefined;
+  /**
+   * 只读打开**未迁移的旧库**（tasks 仍是旧形状、没有 task_events）时，把仍在的旧终态列
+   * 还原成终止事实交给读取投影：kind + 旧列原时刻，不写库、不建表。优先级与 v6 迁移的
+   * kind CASE 同源（cancelled_at → timed_out_at → resource_limited_at → died_at →
+   * round_failed_at）。有事件账（已是 v6 / 可写打开已迁移）时事件账优先，本合成不生效。
+   * 反向绊线：忽略旧列 → 升级前已取消的行被当作「已启动无汇报」判 died（CLI 标结果未知）。
+   */
+  const PRE_ZERO_STATE_TERMINATION_SOURCES: ReadonlyArray<{
+    column: 'cancelled_at' | 'timed_out_at' | 'resource_limited_at' | 'died_at' | 'round_failed_at';
+    kind: TaskTerminationKind;
+  }> = [
+    { column: 'cancelled_at', kind: 'cancelled' },
+    { column: 'timed_out_at', kind: 'timed_out' },
+    { column: 'resource_limited_at', kind: 'resource_limited' },
+    { column: 'died_at', kind: 'died' },
+    { column: 'round_failed_at', kind: 'round_failed' },
+  ];
+  const preZeroStateTerminationSources = selectTerminations === undefined
+    ? PRE_ZERO_STATE_TERMINATION_SOURCES.filter((source) => columns.has(source.column))
+    : [];
+  const preZeroStateTerminationOf = (row: TaskDbRow): TaskEventRow | undefined => {
+    for (const source of preZeroStateTerminationSources) {
+      const at = row[source.column];
+      if (typeof at === 'string' && at !== '') {
+        return { taskId: row.task_id, kind: source.kind, at };
+      }
+    }
+    return undefined;
+  };
+  const terminationsOf = (row: TaskDbRow): TaskEventRow[] => {
+    if (selectTerminations !== undefined) {
+      return (selectTerminations.all(row.task_id) as TaskEventDbRow[]).map(toTermination);
+    }
+    const termination = preZeroStateTerminationOf(row);
+    return termination === undefined ? [] : [termination];
+  };
   const selectTasks = db.prepare('SELECT * FROM tasks ORDER BY created_at, task_id');
   const selectTasksScoped = db.prepare(
     'SELECT * FROM tasks WHERE principal_id = ? AND session_id = ? ORDER BY created_at, task_id',
@@ -1342,9 +1400,8 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
   const storedTask = (row: TaskDbRow): StoredTask => ({
     task: toTask(row),
     executions: (selectExecutions.all(row.task_id) as ExecutionDbRow[]).map(toExecution),
-    terminations: selectTerminations === undefined
-      ? []
-      : (selectTerminations.all(row.task_id) as TaskEventDbRow[]).map(toTermination),
+    // 事件账优先；旧形状只读库由仍在的旧终态列合成（不写库）。
+    terminations: terminationsOf(row),
   });
 
   const missingFactColumnsError =
@@ -1393,8 +1450,14 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         .immediate(write);
     },
     listTerminations(taskId) {
-      if (selectTerminations === undefined) return [];
-      return (selectTerminations.all(taskId) as TaskEventDbRow[]).map(toTermination);
+      if (selectTerminations !== undefined) {
+        return (selectTerminations.all(taskId) as TaskEventDbRow[]).map(toTermination);
+      }
+      // 旧形状只读库没有事件账：与 storedTask 同源，从仍在的旧终态列还原（不写库）。
+      const row = selectTask.get(taskId) as TaskDbRow | undefined;
+      if (row === undefined) return [];
+      const termination = preZeroStateTerminationOf(row);
+      return termination === undefined ? [] : [termination];
     },
     setWaiting(taskId, write) {
       if (setWaitingStmt === undefined) throw new Error(missingFactColumnsError);

@@ -20,7 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
-import { TASK_STORE_SCHEMA_VERSION, openTaskStore } from './src/task-store';
+import { TASK_STORE_SCHEMA_VERSION, openTaskStore, storedTaskProgressOf } from './src/task-store';
 
 const dirs: string[] = [];
 
@@ -370,6 +370,14 @@ describe('零状态 v6 迁移（v5 六个终态列 → 追加事件）', () => {
     expect(store.getTask('task_v5_cancelled')!.terminations.map((row) => row.kind)).toEqual(['cancelled']);
     expect(store.getTask('task_v5_died')!.terminations.map((row) => row.kind)).toEqual(['died']);
     expect(store.getTask('task_v5_running')!.terminations.map((row) => row.kind)).toEqual(['round_failed']);
+    // 终止事件的时刻 = 匹配到的旧终态列原时刻（cancelled_at 08:11 / died_at 08:21），
+    // 不是 updated_at（两行都是 09:00）。反向绊线：at 改回固定 updated_at → 本断言红。
+    expect(store.getTask('task_v5_cancelled')!.terminations[0]!.at).toBe('2026-11-20T08:11:00.000Z');
+    expect(store.getTask('task_v5_died')!.terminations[0]!.at).toBe('2026-11-20T08:21:00.000Z');
+    expect(store.getTask('task_v5_cancelled')!.terminations[0]!.at).not.toBe('2026-11-20T09:00:00.000Z');
+    expect(store.getTask('task_v5_died')!.terminations[0]!.at).not.toBe('2026-11-20T09:00:00.000Z');
+    // 没有旧终态列可读的行才回退 updated_at。
+    expect(store.getTask('task_v5_running')!.terminations[0]!.at).toBe('2026-11-20T09:00:00.000Z');
     for (const row of V5_SEED) {
       expect(rawTask(dbPath, row.taskId)['running_since'], row.taskId).toBe(row.runningSince);
     }
@@ -399,20 +407,60 @@ describe('零状态只读打开不迁移（向前兼容）', () => {
     expect(existsSync(`${dbPath}.backup-v6`)).toBe(false);
   });
 
-  it('v5 库只读：终态列仍在、不建事件账、扫描面给空集（不因缺 task_events 崩溃）', () => {
+  it('v5 库只读：旧终态列还原成终止事实（kind + 原时刻），不写库、不建事件账', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     seedV5Db(dbPath);
+    const before = sha256(dbPath);
 
     const store = openTaskStore(dbPath, { readOnly: true });
     expect(store.getTask('task_v5_cancelled')!.task.request).toBe('v5 请求 task_v5_cancelled');
     expect(store.listRunningTasks()).toEqual([]);
     expect(store.listWaitingRows()).toEqual([]);
-    expect(store.getTask('task_v5_cancelled')!.terminations).toEqual([]);
+    // 只读投影把仍在的旧终态列还原成终止事实：kind + 旧列原时刻（不是 updated_at）。
+    // 反向绊线：只读投影忽略旧列 → cancelled 读成「已启动无汇报」= died（结果未知），本断言红。
+    expect(store.getTask('task_v5_cancelled')!.terminations).toEqual([
+      { taskId: 'task_v5_cancelled', kind: 'cancelled', at: '2026-11-20T08:11:00.000Z' },
+    ]);
+    expect(store.getTask('task_v5_died')!.terminations).toEqual([
+      { taskId: 'task_v5_died', kind: 'died', at: '2026-11-20T08:21:00.000Z' },
+    ]);
+    // 没有旧终态列的行不伪造终止事实（只读不按汇报/旧 status 推结论）。
+    expect(store.getTask('task_v5_done')!.terminations).toEqual([]);
+    expect(store.getTask('task_v5_running')!.terminations).toEqual([]);
+    // listTerminations 同源（不是只修 storedTask 一条路）。
+    expect(store.listTerminations('task_v5_cancelled')).toEqual([
+      { taskId: 'task_v5_cancelled', kind: 'cancelled', at: '2026-11-20T08:11:00.000Z' },
+    ]);
+    expect(store.listTerminations('task_v5_running')).toEqual([]);
+    // 存活推导输入（唯一谓词）：cancelled 行已有终止事实，不再按「已启动无汇报」判 died。
+    expect(storedTaskProgressOf(store.getTask('task_v5_cancelled')!).termination).toEqual({
+      kind: 'cancelled',
+      at: '2026-11-20T08:11:00.000Z',
+    });
     store.close();
 
+    // 不写库：哈希不变、旧列仍在、事件账仍未建。
+    expect(sha256(dbPath)).toBe(before);
     expect(columnNames(dbPath, 'tasks')).toContain('cancelled_at');
     expect(columnNames(dbPath, 'task_events')).toEqual([]);
+  });
+
+  it('迁移后的 v6 库只读打开：终止事实仍从 task_events 读（不是旧列合成）', () => {
+    const dir = tempDir();
+    const dbPath = path.join(dir, 'state.db');
+    seedV5Db(dbPath);
+    // 可写打开完成迁移（旧列已删、事件账已建）。
+    openTaskStore(dbPath).close();
+
+    const store = openTaskStore(dbPath, { readOnly: true });
+    expect(store.getTask('task_v5_cancelled')!.terminations).toEqual([
+      { taskId: 'task_v5_cancelled', kind: 'cancelled', at: '2026-11-20T08:11:00.000Z' },
+    ]);
+    expect(store.getTask('task_v5_died')!.terminations).toEqual([
+      { taskId: 'task_v5_died', kind: 'died', at: '2026-11-20T08:21:00.000Z' },
+    ]);
+    store.close();
   });
 });
 

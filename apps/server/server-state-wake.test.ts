@@ -768,6 +768,45 @@ describe('状态变化唤醒（server 级）：回合内终态不重复唤醒（
       await fx.close();
     }
   });
+
+  it('A④ 回合内取消请求、落定却是失败（结果未知）→ 回执按真实种类，失败唤醒照发（不被伪装成 completed 抑制）', async () => {
+    const fx = await makeFixture('line', {
+      runtimeOverrides: { taskRunWaitMs: 1_500 },
+      stopTurn: { reply: STOP_TURN_LINE },
+    });
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      const taskId = runningTaskIdOf(fx.dbPath);
+      const stopTurn = fx.server.handler(incoming('m-2', STOP_MESSAGE));
+      await vi.waitFor(() => expect(fx.executor.aborted).toBe(true), { timeout: 5_000 });
+      // 取消请求已发出，但执行端以「结果未知」落定（不是取消确认）。
+      fx.executor.settle({ kind: 'result_unknown' });
+      await stopTurn;
+
+      // 模型拿到的取消回执带真实终止种类（died），不是 completed。
+      const transcriptTexts = (fx.mainDriver!.transcript?.() ?? []).map((message) => {
+        const content = (message as { content?: unknown }).content;
+        if (typeof content === 'string') return content;
+        if (Array.isArray(content)) return content.map((block) => String((block as { text?: unknown }).text ?? '')).join('');
+        return '';
+      });
+      expect(transcriptTexts.some((text) => text.includes('"settled":"died"'))).toBe(true);
+
+      // 失败终态没有被「本回合已交出」核销：失败唤醒照发，用户听到结果未知那句。
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
+      expect(fx.delivery.sentTexts[0]!.text).toBe(`「${TASK_NAME}」这次没办成。要我再试一次，还是先放着？`);
+      expect(wakeEventOf(fx.logs, 'task_failure_wake')).toMatchObject({ outcome: 'woken' });
+      expect(fx.logs.some((line) => line['event'] === 'task_cancel_wake')).toBe(false);
+      // 反向绊线：把本回合观察写成 failed（拿失败唤醒去核销）→ 本断言红。
+      expect(fx.logs.some((line) => line['event'] === 'wake_suppressed_already_delivered')).toBe(false);
+      const task = readTask(fx.dbPath, taskId);
+      expect(task.died).toBe(true);
+      expect(task.cancelled).toBe(false);
+      expect(fx.executor.calls).toBe(1);
+    } finally {
+      await fx.close();
+    }
+  });
 });
 
 describe('状态变化唤醒（server 级）：久无动静', () => {
