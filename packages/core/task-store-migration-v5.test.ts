@@ -293,3 +293,31 @@ describe('S1 只读打开不迁移（向前兼容）', () => {
     expect(existsSync(`${dbPath}.backup-v5`)).toBe(false);
   });
 });
+
+describe('S1 v5 重建事务原子性（2026-11-23 review blocking）', () => {
+  it('重建中途失败整体回滚：旧 tasks 数据仍在、版本不升、旧结论列没被 DROP', () => {
+    const dir = tempDir();
+    const dbPath = path.join(dir, 'state.db');
+    seedV4Db(dbPath);
+    // 制造冲突：残留 tasks_v5 让重建第一步 CREATE 必失败（模拟迁移中途失败）。
+    {
+      const raw = new Database(dbPath);
+      raw.exec('CREATE TABLE tasks_v5 (junk TEXT)');
+      raw.close();
+    }
+    // 可写打开 → 迁移失败 → 抛错（不静默吞掉、不把半迁移当成功）。
+    expect(() => openTaskStore(dbPath)).toThrow();
+    // 事务回滚：旧 tasks 形状与数据原封不动，版本仍 4，旧结论列还在（没被 DROP）。
+    const columns = columnNames(dbPath);
+    expect(columns).toContain('status');
+    expect(columns).not.toContain('running_since');
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const rows = db.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number };
+      expect(rows.n).toBe(SEED_ROWS.length);
+    } finally {
+      db.close();
+    }
+    expect(userVersion(dbPath)).toBe(4);
+  });
+});

@@ -105,7 +105,7 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 
 ## 十一、S1 收尾复核登记（2026-11-23，明确不修）
 
-> 来自「删 status 概念」收尾轮的独立复核。四条都已在现行代码核对；本轮只登记，不修——修法要么是新增机制（需过新增机制准入），要么是用户可见词面变更（需 owner 裁定），要么会把确定性判据换成语义判断（违反判据红线）。
+> 来自「删 status 概念」收尾复核。以下条目都已在现行代码核对（M2/M3/m1/m2 来自独立复核；M4/M5/m3 来自 2026-11-23 grok 复审——与迁移事务 blocking 同轮，该 blocking 已修）；只登记、不修——修法要么是新增机制（需过新增机制准入），要么是用户可见词面变更（需 owner 裁定），要么会把确定性判据换成语义判断（违反判据红线）。
 
 | 编号 | 是什么 | 后果 | 为何暂不修 | 现行证据 |
 |---|---|---|---|---|
@@ -113,6 +113,9 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 | M3 | E11 的 `noWriteExecuted` 锚点只要求「写面执行行没有一条 completed」；有任务时零写命中，无任务时零执行 + 非空回复也命中 | 锚点接近恒过：不区分「零执行是权限拒绝/执行失败」还是「模型随便回了一句没办事」，E11 通过不能证明用户被告知了办不了 | 要区分拒绝/失败必须判断回复语义，而 AGENTS 判据红线禁止用关键词/正则表达语义判断；确定性事实层没有「模型是否说清办不了」的信号，只能交给用户级黑盒 eval。不为凑绿补词表/改判据 | `scripts/eval/convergence-r1/judge.ts:792-827`；已登记口径 `../ops/handover.md:31`、`scripts/eval/convergence-r1/cases/E11.ts:15-41` |
 | m1 | `noteRoundFailed` 即使 `roundFailedAt` 已存在仍无条件 `emit('round_failed')`；`result_unknown` 收尾先 `markDied`（emit `died`）再 `noteRoundFailed`（emit `round_failed`） | outbox 对同一任务落两条 kind=failed 的事实；用户不重复（第二条被抑制/去重），但统计/告警按事件计数会双记 | 改成条件发射会改变「每回合一条失败事实」的通知语义与 outbox 状态版本判据，牵动去重/重试；属统计面读数偏差，等通知面统一切片再收 | `packages/agent/src/task-registry.ts:741-747`（`emit(task,'round_failed')` 无守卫）；`packages/agent/src/task-runner.ts:1726-1739`（result_unknown：`markDied` → `noteRoundFailed`） |
 | m2 | CLI 的 `taskFactLabelsOf` 不读 `roundFailedAt`；已停但无汇报的任务落到兜底标签「无汇报」 | `tasks` 列表看不出这一轮已经停了，与「进程挂了/还没回」不可辨 | 加标签是用户可见词面变更，需要与 AGENTS「不新增状态词」的边界一起裁定（「本轮已停」算事实词还是状态词）；不影响 redo 守卫（守卫已直接读 `roundFailedAt`），本轮只登记 | `scripts/tasks.ts:143-162`（标签判据无 `roundFailedAt`）；`packages/agent/src/task-runner.ts` 的 settle 收尾口径 |
+| M4 | `statusView`（`task_status` 工具）透出 `diedAt/cancelledAt/timedOutAt/resourceLimitedAt`，但不带 `roundFailedAt` / `cancelRequestedAt` | 本轮已停、取消已请求未确认的任务，在「怎么样了」上分不出——和「没结束事实的静默行」同形 | 单一来源修法=由 `task-progress` 的机械时刻清单导出给 statusView（投影重构，需过新增机制准入）；本轮只修 blocking（迁移事务），不扩 | `packages/agent/src/execution-runtime.ts:2065-2085`（statusView 返回字段）；`packages/core/src/task-progress.ts`（机械时刻清单） |
+| M5 | `docs/architecture/tasks.md` 行号与已删符号对不上代码（`confirmCancelled` / `TASK_FACT_WORDS` / `taskFactKeyOf` 已无；§7 redo 口径过时，实际已拒取消/超时） | 按文档会以为取消/超时能重推、并去找不存在的函数；docs-guard 只查行号在文件内，全绿也指错 | 文档全面核对属独立文档任务（随代码漂移一并收）；本轮只修 blocking，不逐段重写 | `docs/architecture/tasks.md` §2/§3/§4/§5/§6/§7；现行标签函数 `scripts/tasks.ts:143-162`（`taskFactLabelsOf`） |
+| m3 | `statusView` 的 `claimed` 注释写「已认领未落定」，实际是 `executions.length`（含已落定） | 注释若被当实现，下次会误改把已落定行从 claimed 里减掉 | 纯注释；本轮已动迁移/账本，不再同文件混改 statusView | `packages/agent/src/execution-runtime.ts:2058-2059`、`:2067-2068` |
 
 ## 十二、长连接可靠性：离线/断连窗口的用户消息不可恢复（owner 2026-11-20 要求登记）
 

@@ -777,16 +777,24 @@ function rebuildTasksTableToV5(db: Database.Database): void {
     return `${sourceOf(column)} AS "${column}"`;
   }).join(', ');
   // 重建期间关外键（executions REFERENCES tasks(task_id)；DROP tasks 需要临时解除），
-  // 结束后恢复——迁移事务内数据完整性由同库迁移语义保证。
+  // 结束后恢复。整段重建包在**一个事务**里（SQLite 的 DDL 是事务性的）：中途任一步失败
+  //（进程被杀 / 磁盘满 / 残留 tasks_v5 冲突）必须整体回滚——绝不能出现「DROP 已提交、
+  // RENAME 没跑」把旧账丢在无人读取的 tasks_v5、下次启动又建出空表的假迁移
+  //（2026-11-23 review blocking）。注：PRAGMA foreign_keys 在事务内是 no-op，故开关都在事务外。
   db.pragma('foreign_keys = OFF');
-  db.exec(`
-    CREATE TABLE tasks_v5 (${TASKS_V5_COLUMNS.map((column) =>
-      `"${column}" ${TASKS_V5_BUILD_COLUMN_SHAPES[column]}`).join(', ')});
-    INSERT INTO tasks_v5 (${columnList}) SELECT ${selectList} FROM "tasks";
-    DROP TABLE "tasks";
-    ALTER TABLE tasks_v5 RENAME TO "tasks";
-  `);
-  db.pragma('foreign_keys = ON');
+  try {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE tasks_v5 (${TASKS_V5_COLUMNS.map((column) =>
+          `"${column}" ${TASKS_V5_BUILD_COLUMN_SHAPES[column]}`).join(', ')});
+        INSERT INTO tasks_v5 (${columnList}) SELECT ${selectList} FROM "tasks";
+        DROP TABLE "tasks";
+        ALTER TABLE tasks_v5 RENAME TO "tasks";
+      `);
+    })();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
 }
 
 /** v5 tasks 表的列形状（重建用；与 SCHEMA_BASE 的 tasks 定义一致）。 */
