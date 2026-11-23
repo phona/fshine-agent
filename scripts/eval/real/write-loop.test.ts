@@ -27,6 +27,7 @@ import {
   readAuditRows,
   readConfirmationFacts,
   recordingDriver,
+  snapshotTerminalOf,
   type WriteLoopEvidence,
 } from './write-loop';
 
@@ -493,6 +494,29 @@ describe('LedgerWatcher：去重采样与状态序列', () => {
       'liveness=null cancelled=false reported=false exec=completed',
     ]);
     expect(watcher.taskIds()).toEqual(['t-1']);
+  });
+
+  it('died 终止事件：快照带 termination（liveness=null），终局事实不只靠 liveness', () => {
+    // 零状态判负回归（2026-11-23）：taskLivenessOf 对任何终止事件返回 undefined；
+    // died 任务的 liveness 恒为 null，终局判据必须读追加事件账。
+    const fake = {
+      list: () => [{
+        taskId: 't-died',
+        runningSince: '2026-11-22T00:00:00.000Z',
+        termination: { kind: 'died', at: '2026-11-22T00:05:00.000Z' },
+        executions: [],
+      }],
+    } as unknown as ConstructorParameters<typeof LedgerWatcher>[0];
+    const watcher = new LedgerWatcher(fake, { principalId: 'p', sessionId: 's' });
+    watcher.sample();
+    const snapshot = watcher.snapshots[0]!;
+    expect(snapshot.liveness).toBeNull();
+    expect(snapshot.termination).toEqual({ kind: 'died', at: '2026-11-22T00:05:00.000Z' });
+    // 终局判据读终止事件：liveness=null 的 died 任务必须算终局。
+    expect(snapshotTerminalOf(snapshot)).toBe(true);
+    // 反向绊线：仍在跑 / 未启动的快照不得被当成终局（不放松判据）。
+    expect(snapshotTerminalOf({ ...snapshot, termination: undefined, liveness: 'running' })).toBe(false);
+    expect(snapshotTerminalOf({ ...snapshot, termination: undefined, liveness: null, reported: false })).toBe(false);
   });
 
   it('提案出现与句柄前缀入账（句柄不落全量）', () => {

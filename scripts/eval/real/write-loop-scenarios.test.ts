@@ -33,11 +33,13 @@ import {
   readJobFacts,
   scanScenarioLeaks,
   successMarkersIn,
+  taskEndedInFacts,
   writeCallsOn,
   type FailureEvidence,
   type IdempotencyEvidence,
   type ReconfirmEvidence,
   type StopEvidence,
+  type TaskFact,
   type TwoObjectsEvidence,
 } from './write-loop-scenarios';
 import { EXPECTED_RECORDS, WRITE_COLLECTION, WRITE_WINDOW, type CriterionResult } from './write-loop';
@@ -73,6 +75,7 @@ function greenStop(): StopEvidence {
     jobs: [{ operationId: 'op_1', status: 'cancelled', seconds: 600 }],
     tasks: [{
       taskId: 't-1', taskNo: 1, name: '慢活', liveness: null, cancelled: true, reported: false,
+      termination: { kind: 'cancelled', at: AT },
       executions: [{ operation: 'dummy.longtask', status: 'accepted' }],
     }],
     factSequence: ['liveness=running cancelled=false reported=false exec=accepted', 'liveness=null cancelled=true reported=false exec=accepted'],
@@ -411,6 +414,18 @@ describe('stop：正例全绿 + 逐条反向破坏必红', () => {
     expect(statusOf(evaluateStopCriteria(leftover), 'S1-C2')).toBe('fail');
   });
 
+  it('S1-C2：died 终止事件的任务（liveness=null）不算非终局残留 —— 零状态终局读 termination', () => {
+    // 判负回归（2026-11-23）：零状态后 taskLivenessOf 对任何终止事件返回 undefined，
+    // died 任务的 liveness 恒为 null；旧判据只认 liveness==='died' 会把已结束任务算残留。
+    const evidence = greenStop();
+    evidence.tasks = [
+      evidence.tasks[0]!,
+      { taskId: 't-2', taskNo: 2, liveness: null, cancelled: false, reported: false, termination: { kind: 'died', at: AT }, executions: [] },
+      { taskId: 't-3', taskNo: 3, liveness: null, cancelled: false, reported: false, termination: { kind: 'round_failed', at: AT }, executions: [] },
+    ];
+    expect(statusOf(evaluateStopCriteria(evidence), 'S1-C2')).toBe('pass');
+  });
+
   it('S1-C3：job 文件还在 running（只有嘴上的停）→ 红', () => {
     const evidence = greenStop();
     evidence.jobs = [{ operationId: 'op_1', status: 'running', seconds: 600 }];
@@ -701,6 +716,15 @@ describe('reconfirm：正例全绿 + 逐条反向破坏必红', () => {
     expect(statusOf(evaluateReconfirmCriteria(resumed), 'S4-C2')).toBe('fail');
   });
 
+  it('S4-C2：died 终止事件的任务（liveness=null）不算非终局残留 —— 零状态终局读 termination', () => {
+    const evidence = greenReconfirm();
+    evidence.tasks = [
+      ...evidence.tasks,
+      { taskId: 't-2', taskNo: 2, liveness: null, cancelled: false, reported: false, termination: { kind: 'died', at: AT }, executions: [] },
+    ];
+    expect(statusOf(evaluateReconfirmCriteria(evidence), 'S4-C2')).toBe('pass');
+  });
+
   it('S4-C3：用户没有收到任何话 → 红', () => {
     const silent = greenReconfirm();
     silent.textsAfterThirdTurn = [];
@@ -807,6 +831,29 @@ describe('two-objects：正例全绿 + 逐条反向破坏必红', () => {
     const noDelivery = greenTwoObjects();
     noDelivery.completionDeliverySeen = false;
     expect(statusOf(evaluateTwoObjectsCriteria(noDelivery), 'S5-C4')).toBe('fail');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 终局事实（零状态：读追加事件账，不靠 liveness）
+// ---------------------------------------------------------------------------
+
+describe('taskEndedInFacts：终局读终止事件/汇报事实', () => {
+  const base: TaskFact = { taskId: 't-1', liveness: null, cancelled: false, reported: false, executions: [] };
+
+  it('任何终止事件（含 died/round_failed）= 已收尾；liveness=null 不改变结论', () => {
+    for (const kind of ['died', 'round_failed', 'cancelled', 'timed_out', 'resource_limited', 'completed'] as const) {
+      expect(taskEndedInFacts({ ...base, termination: { kind, at: AT } }), kind).toBe(true);
+    }
+    expect(taskEndedInFacts({ ...base, reported: true })).toBe(true);
+    // 跨进程读者：已启动、无汇报、租约失效 → liveness=died（结果未知）仍是终局事实。
+    expect(taskEndedInFacts({ ...base, liveness: 'died' })).toBe(true);
+  });
+
+  it('反向绊线：仍在跑 / 排队 / 只等待的任务不算收尾（不放松判据）', () => {
+    expect(taskEndedInFacts({ ...base, liveness: 'running' })).toBe(false);
+    expect(taskEndedInFacts({ ...base, liveness: null })).toBe(false);
+    expect(taskEndedInFacts({ ...base, liveness: 'waiting_user' })).toBe(false);
   });
 });
 

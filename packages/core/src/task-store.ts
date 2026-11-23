@@ -52,7 +52,7 @@
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { stillProgressingSqlWhere, type TaskTerminationKind } from './task-progress';
+import { stillProgressingSqlWhere, type TaskProgressFacts, type TaskTerminationKind } from './task-progress';
 
 /** 当前 schema 版本（PRAGMA user_version）。2 = P1；3 = P2a；4 = U3；5 = S1 事实模型；6 = 零状态（删终态列，终止走追加事件）。 */
 export const TASK_STORE_SCHEMA_VERSION = 6;
@@ -219,6 +219,20 @@ export interface StoredTask {
   executions: ExecutionRow[];
   /** 终止事件账（追加、不可变；同任务至多一条）。 */
   terminations: TaskEventRow[];
+}
+
+/**
+ * 读取单位 → 「仍在推进」判定的输入投影：终止事件来自 task_events 追加账（tasks 行没有
+ * 终态列）。StoredTask 消费方（底账扫描 / 告警投影）必须经这里喂唯一谓词——只取
+ * `stored.task` 会让已终止任务仍被读成 running/waiting（2026-11-23 告警假「卡住」判负）。
+ */
+export function storedTaskProgressOf(stored: StoredTask): TaskProgressFacts {
+  const last = stored.terminations[stored.terminations.length - 1];
+  return {
+    ...stored.task,
+    ...(last === undefined ? {} : { termination: { kind: last.kind, at: last.at } }),
+    executions: stored.executions,
+  };
 }
 
 /**

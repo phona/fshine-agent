@@ -58,7 +58,7 @@ import {
 import { stripServerPaths } from '../../../packages/agent/src/server-paths';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
 import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
-import type { TaskScope } from '../../../packages/agent/src/task-registry';
+import type { TaskScope, TaskTermination } from '../../../packages/agent/src/task-registry';
 import { createServer, resolveSingleProfile, type FileDeliveryPort } from '../../../apps/server/server';
 import { mainSessionOptions, mainThinkingLevelFrom, resolveExecutionFace } from '../../ask-runtime';
 import { materializeEvalConfig } from '../../resolve-config-path';
@@ -158,6 +158,11 @@ export interface LedgerSnapshot {
   at: string;
   taskId: string;
   liveness: string | null;
+  /**
+   * 终止事件（追加事件账；缺省 = 尚未终止）。「怎么结束」只读这里——零状态后
+   * taskLivenessOf 对任何终止事件返回 undefined，died 任务的 liveness 恒为 null。
+   */
+  termination?: TaskTermination;
   cancelled: boolean;
   reported: boolean;
   executions: Array<{ operation: string; status: string }>;
@@ -167,6 +172,16 @@ export interface LedgerSnapshot {
     handlePrefix: string;
     operation: string;
   };
+}
+
+/**
+ * 快照是否已到终局（机械事实）：终止事件（追加事件账，含 died/round_failed/cancelled/...）
+ * 或汇报存档在场；`liveness === 'died'` 仍算（跨进程读者：已启动、无汇报、租约失效 =
+ * 结果未知）。零状态后不能用 `liveness === 'died'` 判 died 终止——任何终止事件都让 liveness
+ * 变 null。
+ */
+export function snapshotTerminalOf(snapshot: LedgerSnapshot): boolean {
+  return snapshot.termination !== undefined || snapshot.reported || snapshot.liveness === 'died';
 }
 
 export interface AuditRow {
@@ -376,13 +391,14 @@ export class LedgerWatcher {
             handlePrefix: confirmation.handle.slice(0, 12),
             operation: confirmation.operation,
           };
-      const signature = JSON.stringify([taskLivenessOf(record) ?? null, record.termination?.kind === 'cancelled', archivedReportOf(record) !== undefined, executions, proposal?.summary ?? '']);
+      const signature = JSON.stringify([taskLivenessOf(record) ?? null, record.termination?.kind ?? null, archivedReportOf(record) !== undefined, executions, proposal?.summary ?? '']);
       if (this.lastSignature.get(record.taskId) === signature) continue;
       this.lastSignature.set(record.taskId, signature);
       this.snapshots.push({
         at: new Date().toISOString(),
         taskId: record.taskId,
         liveness: taskLivenessOf(record) ?? null,
+        ...(record.termination === undefined ? {} : { termination: record.termination }),
         cancelled: record.termination?.kind === 'cancelled',
         reported: archivedReportOf(record) !== undefined,
         executions,
@@ -1140,7 +1156,7 @@ async function main(): Promise<void> {
         const snapshot = watcher.snapshots[index]!;
         if (snapshot.taskId === taskId) {
           const lastExecutionStatus = snapshot.executions[snapshot.executions.length - 1]?.status;
-          if (snapshot.reported || snapshot.cancelled || snapshot.liveness === 'died'
+          if (snapshotTerminalOf(snapshot)
             || (lastExecutionStatus !== undefined && terminal.has(lastExecutionStatus))) return true;
         }
       }

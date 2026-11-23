@@ -44,7 +44,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import type { AppConfig, ChannelReply, ChannelRoute, DeliveryReceipt, IncomingChannelMessage, Permission } from '@fshine/contracts';
 import { effectiveDeploymentEnv, effectiveRoleOf, loadConfig, permissionsOfRole } from '@fshine/core';
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
-import type { TaskRecord, TaskScope } from '../../../packages/agent/src/task-registry';
+import type { TaskRecord, TaskScope, TaskTermination } from '../../../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
 import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskLivenessOf, taskUnstartedOf, taskReportedOf } from '../../../packages/agent/testing/task-facts';
 import type { Notification, NotificationSink } from '../../../packages/agent/src/notifications';
@@ -199,13 +199,18 @@ export interface JobFact {
   failAfter?: number;
 }
 
-/** 底账任务事实（本场景判据用的机械读取：liveness + 逐笔执行行 + 汇报存档 + 一次性时刻）。 */
+/** 底账任务事实（本场景判据用的机械读取：liveness + 终止事件 + 逐笔执行行 + 汇报存档 + 一次性时刻）。 */
 export interface TaskFact {
   taskId: string;
   taskNo?: number;
   name?: string;
   liveness: string | null;
-  /** 用户取消事实（cancelled_at 在场）。 */
+  /**
+   * 终止事件（追加事件账；缺省 = 尚未终止）。「怎么结束」只读这里——零状态后
+   * taskLivenessOf 对任何终止事件返回 undefined，died 任务的 liveness 恒为 null。
+   */
+  termination?: TaskTermination;
+  /** 用户取消事实（终止事件 kind=cancelled）。 */
   cancelled: boolean;
   /** worker 汇报已存档（resultText ?? replyText 非空）。 */
   reported: boolean;
@@ -434,6 +439,7 @@ export function taskFactsOf(records: readonly TaskRecord[]): TaskFact[] {
     ...(record.taskNo === undefined ? {} : { taskNo: record.taskNo }),
     ...(record.name === undefined ? {} : { name: record.name }),
     liveness: taskLivenessOf(record) ?? null,
+    ...(record.termination === undefined ? {} : { termination: record.termination }),
     cancelled: record.termination?.kind === 'cancelled',
     reported: archivedReportOf(record) !== undefined,
     ...(lastFailureOf(record)?.error?.code === undefined ? {} : { reason: lastFailureOf(record)?.error?.code! }),
@@ -445,6 +451,16 @@ export function taskFactsOf(records: readonly TaskRecord[]): TaskFact[] {
       ...(execution.error?.code === undefined ? {} : { code: execution.error.code }),
     })),
   }));
+}
+
+/**
+ * 任务在事实面已收尾（判据用）：终止事件（追加事件账，含 died/round_failed/cancelled/...）
+ * 或汇报存档在场；`liveness === 'died'` 仍算（跨进程读者：已启动、无汇报、租约失效 =
+ * 结果未知）。零状态后**不能用** `liveness === 'died'` 判 died 终止——任何终止事件都让
+ * liveness 变 null。
+ */
+export function taskEndedInFacts(task: TaskFact): boolean {
+  return task.termination !== undefined || task.reported || task.liveness === 'died';
 }
 
 /** args（结构化对象或 argv 数组）里是否出现某个字符串（深扫；对象键与值都扫）。 */
@@ -521,7 +537,7 @@ export function evaluateStopCriteria(evidence: StopEvidence): CriterionResult[] 
 
   // S1-C2 「停」是一次实际动作，且任务真的停了：task_cancel 调用 + 底账终态 cancelled + 无残留非终局任务。
   const cancelledTasks = evidence.tasks.filter((task) => task.cancelled);
-  const leftover = evidence.tasks.filter((task) => !(task.cancelled || task.reported || task.liveness === 'died'));
+  const leftover = evidence.tasks.filter((task) => !taskEndedInFacts(task));
   const cancelCall = evidence.cancelToolCall;
   add(
     'S1-C2', '「停」是实际动作：task_cancel 调用 + 底账终态 cancelled + 无非终局残留', 'structured',
@@ -811,7 +827,7 @@ export function evaluateReconfirmCriteria(evidence: ReconfirmEvidence): Criterio
   );
 
   // S4-C2 没有新任务 / 没有接续：任务数不变、没有非终局残留、第三次回合没有 started 的 task_confirm。
-  const leftover = evidence.tasks.filter((task) => !(task.cancelled || task.reported || task.liveness === 'died'));
+  const leftover = evidence.tasks.filter((task) => !taskEndedInFacts(task));
   add(
     'S4-C2', '第二次「确认」没有新起任务、没有接续（任务数不变、无非终局残留、无 started 确认）', 'structured',
     evidence.taskCountAfterReconfirm === evidence.taskCountAfterFirstWrite
@@ -1433,7 +1449,7 @@ async function runStopScenario(harness: Harness, options: ScenarioRunOptions): P
   // 等任务真的落终局（cancelled）且没有非终局残留。
   const terminal = await waitFor(() => {
     const tasks = harness.tasksNow();
-    return tasks.some((task) => task.cancelled) && tasks.every((task) => (task.cancelled || task.reported || task.liveness === 'died'));
+    return tasks.some((task) => task.cancelled) && tasks.every((task) => taskEndedInFacts(task));
   }, options.settleTimeoutMs);
   log(`  终局落定（cancelled）：${terminal}`);
   // 给宿主取消事实的主动推送一点落定时间（投递不改任务/审计事实）。
@@ -1538,7 +1554,7 @@ async function waitForTerminal(harness: Harness, options: ScenarioRunOptions): P
   return await waitFor(
     () => {
       const tasks = harness.tasksNow();
-      return tasks.length > 0 && tasks.every((task) => (task.cancelled || task.reported || task.liveness === 'died'));
+      return tasks.length > 0 && tasks.every((task) => taskEndedInFacts(task));
     },
     options.settleTimeoutMs,
   );

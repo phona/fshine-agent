@@ -17,7 +17,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { openTaskStore, stillProgressingOf } from '@fshine/core';
+import { openTaskStore, stillProgressingOf, storedTaskProgressOf, taskEndedOf } from '@fshine/core';
 import {
   evaluateAlerts,
   type AlertCooldownState,
@@ -201,10 +201,14 @@ export function ledgerFacts(dbPath: string): { facts: AlertFact[]; note?: string
     for (const stored of store.listTasks()) {
       const task = stored.task;
       const at = task.updatedAt;
+      // 读取单位投影：终止事件在 task_events 追加账（tasks 行没有终态列）——只取
+      // stored.task 会把已终止的行仍当 running/waiting 投影，task_stuck 会对已结束任务发假告警。
+      const progress = storedTaskProgressOf(stored);
+      const ended = taskEndedOf(progress);
       // 在跑/等待事实（S1 事实模型：没有 status 列——等待形状与唯一谓词即事实）。
-      const waiting = task.pendingQuestion !== undefined;
-      // 已汇报 / round_failed 的行已收尾，不再投影成 running（唯一谓词，与扫描面同口径）。
-      const running = stillProgressingOf(task);
+      const waiting = !ended && task.pendingQuestion !== undefined;
+      // 已汇报 / 终止事件的行已收尾，不再投影成 running（唯一谓词，与扫描面同口径）。
+      const running = stillProgressingOf(progress);
       if (running || waiting) {
         const since = waiting
           ? (task.waitingSince ?? task.updatedAt)

@@ -13,7 +13,7 @@ export {
   permissionsOfRole,
 } from './config';
 export type { LoadConfigOptions } from './config';
-export { openTaskStore, operationKeyOf, TASK_STORE_SCHEMA_VERSION } from './task-store';
+export { openTaskStore, operationKeyOf, storedTaskProgressOf, TASK_STORE_SCHEMA_VERSION } from './task-store';
 export {
   TASK_PROGRESS_REPORT_FIELDS,
   TASK_PROGRESS_STARTED_COLUMN,
