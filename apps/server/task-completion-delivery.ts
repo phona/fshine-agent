@@ -57,7 +57,7 @@ export interface TaskCompletionFact {
 }
 
 /**
- * 一次后台任务失败的事实（任务终局 = failed，或结果未知 result_unknown——两者都不是
+ * 一次后台失败事实（回合以失败或结果未知 result_unknown 收尾——两者都不是
  * 「成功」，用户必须主动收到一句人话）。**不带 Worker 失败汇报原文**：原文只进
  * task_result_delivery_failed 等结构化事件与底账，不进用户文本（2026-11-19 收口）。
  */

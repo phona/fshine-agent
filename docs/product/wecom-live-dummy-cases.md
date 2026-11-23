@@ -150,7 +150,7 @@ TMPDIR=~/.tmp node scripts/eval/fixtures/make-sales-sample.mjs ~/.tmp/wecom-samp
 
 | # | 优先级 | 发 | 预期 | 观察 | 证据 |
 | --- | --- | --- | --- | --- | --- |
-| W-26〔自动〕| P1 | `帮我把销售明细按客户汇总，做成表，做完发我`（明显超窗） | 受理回执**不含 `#`、不含编号数字**；任务在后台推进并最终 completed；完成后结果主动投递一次 | 受理回执是否即时、是否像话 | `message_done` 的 `taskIds`；底账状态 `completed`；`task_result_delivery_sent` |
+| W-26〔自动〕| P1 | `帮我把销售明细按客户汇总，做成表，做完发我`（明显超窗） | 受理回执**不含 `#`、不含编号数字**；任务在后台推进、以汇报存档收尾；完成后结果主动投递一次 | 受理回执是否即时、是否像话 | `message_done` 的 `taskIds`；底账有汇报存档（reported）；`task_result_delivery_sent` |
 | W-27〔自动〕| P1 | 接 W-26：`刚才那个跑完了吗？` | 纯查询（task_status）按上文找回同一任务状态，**不发起新的 execution** | 是否需要用户重复编号 | 该回合 `executions: []` |
 | W-28〔自动〕| P1 | 窗口内能完成的任务（快活） | 同回合直接给结果、**零受理回执**、零主动投递（B 轨短等待窗口的回归钉子） | 结果是否当场给出 | 无 `task_result_delivery_sent`；回复无「已受理/后台办理」 |
 | W-39〔自动〕| P1 | 后台任务失败（超窗后执行层拒绝） | 用户**主动**收到一条「没办成：<业务名>」，不用等下次开口；不冒充成功 | 失败是否主动告知 | `notification_push_sent`；`task_result_delivery_sent` 为 0 |
@@ -322,9 +322,9 @@ commit」拿不到句柄（`packages/agent/background-write-confirmation.test.ts
 
 | # | 优先级 | 操作 | 预期（硬） | 观察 | 证据 |
 | --- | --- | --- | --- | --- | --- |
-| W-42〔自动〕| P0 | `让 dummy 跑一个要很久的导出`（`dummy.longtask`） | 受理即回执（「这个我来办…办完发你」）；期间同一会话发下一句**不被占住**；完成后结果主动投递一次；执行层只被发起一次 | 期间发一句别的会不会卡住 | `execution_accepted` → `execution_wait_resumed`（日志）；任务 running（无租约）直到 completed；`executions` 里 `dummy.longtask` 恰好 1 条 |
+| W-42〔自动〕| P0 | `让 dummy 跑一个要很久的导出`（`dummy.longtask`） | 受理即回执（「这个我来办…办完发你」）；期间同一会话发下一句**不被占住**；完成后结果主动投递一次；执行层只被发起一次 | 期间发一句别的会不会卡住 | `execution_accepted` → `execution_wait_resumed`（日志）；任务仍在推进（无租约）直到有汇报存档；`executions` 里 `dummy.longtask` 恰好 1 条 |
 | W-43〔自动〕| P1 | 首档阈值调到 200ms（装配注入，不改正产品缺省）后跑 W-42（任务约 3 秒） | **恰一条**「这件事比预计久了。要我停下来，还是继续等？（回「停」我就停）」；群聊同条件**零**主动提醒（但群里的任务真在跑） | 文案是否像同事、是否给得出动作 | `execution_wait_timeout` 后宿主 `sendText`；群聊 `proactiveTexts` 为空 |
-| W-44〔自动〕| P1 | 单聊主体 `role: viewer`（总闸打开）发 `给 alpha 集合 W1 追加 2 条记录`，再发一次查询 | 写被**发起前**拒绝（「当前权限不支持这个操作。」，不提内部 operation 名、零执行事实、任务不落 running/completed）；同一主体读查询照常 | 话术是否解释得清 | 该回合 `executions: []`；底账无 running/completed 任务；读回合有真实条数 |
+| W-44〔自动〕| P1 | 单聊主体 `role: viewer`（总闸打开）发 `给 alpha 集合 W1 追加 2 条记录`，再发一次查询 | 写被**发起前**拒绝（「当前权限不支持这个操作。」，不提内部 operation 名、零执行事实、任务不产生执行事实、底账无汇报存档）；同一主体读查询照常 | 话术是否解释得清 | 该回合 `executions: []`；底账无仍在推进或已汇报的任务；读回合有真实条数 |
 
 ## 10. 自动联调登记（2026-11-18，本轨产出的机械底座）
 

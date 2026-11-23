@@ -66,8 +66,25 @@ const EXECUTION_STATUS_WORDS = new Set([
   'accepted',
 ]);
 
+/**
+ * 任务级专属收尾词：只可能是「整个任务怎么结束」的结论词，不是单笔执行行 status
+ * （completed/failed/refused 是执行层契约事实，允许单值出现）。单值返回这些词 = 任务级
+ * 失败原因/终止种类分类器（2026-11-23 第 2 轮审查的真实形状）。
+ */
+const TASK_EXCLUSIVE_ENDING_WORDS = new Set([
+  'died',
+  'cancelled',
+  'canceled',
+  'timed_out',
+  'resource_limited',
+  'round_failed',
+]);
+
 /** 存活词（liveness 三值及其换形）。 */
 const LIVENESS_WORDS = new Set(['running', 'died', 'waiting_user']);
+
+/** 任务级生命周期**事件名**（`task_completed` / `task_failed` / …）：对象键表也不得出现。 */
+const TASK_LIFECYCLE_EVENT_NAME_RE = /^task_(?:completed|failed|cancelled|canceled|timed_out|timeout|died|round_failed|resource_limited)$/u;
 
 /**
  * 单笔执行/操作账的原始状态词：执行行 status + 账号行的 claimed/unknown。
@@ -162,7 +179,51 @@ function collectReturnedWords(node: ts.Node, words: Set<string>): void {
 interface FunctionShape {
   name?: string;
   words: Set<string>;
+  /** 顶层 return 的裸值（字面量 / 同文件 const 字符串），不含对象属性值。 */
+  bareWords: Set<string>;
   readsTaskFacts: boolean;
+}
+
+/** 同文件里 const 字符串字面量（含 `as const`）：用于解析 `return SOME_REASON` 的形状。 */
+function constStringLiterals(sf: ts.SourceFile): Map<string, string> {
+  const map = new Map<string, string>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
+      let initializer: ts.Expression = node.initializer;
+      while (ts.isAsExpression(initializer) || ts.isParenthesizedExpression(initializer)
+        || ts.isTypeAssertionExpression(initializer) || ts.isNonNullExpression(initializer)) {
+        initializer = initializer.expression;
+      }
+      if (ts.isStringLiteral(initializer) || ts.isNoSubstitutionTemplateLiteral(initializer)) {
+        map.set(node.name.text, initializer.text);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return map;
+}
+
+/** 解析表达式为字符串字面量（含同文件 const 引用）；解析不出返回 undefined。 */
+function resolveStringExpr(node: ts.Node, consts: ReadonlyMap<string, string>): string | undefined {
+  if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node)
+    || ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node)) {
+    return resolveStringExpr(node.expression, consts);
+  }
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+  if (ts.isIdentifier(node)) return consts.get(node.text);
+  return undefined;
+}
+
+/** 函数顶层 return 的裸值词（三元两支；不下潜对象/数组属性）。 */
+function collectBareReturnWords(node: ts.Node, consts: ReadonlyMap<string, string>, words: Set<string>): void {
+  if (ts.isConditionalExpression(node)) {
+    collectBareReturnWords(node.whenTrue, consts, words);
+    collectBareReturnWords(node.whenFalse, consts, words);
+    return;
+  }
+  const word = resolveStringExpr(node, consts);
+  if (word !== undefined) words.add(word);
 }
 
 /**
@@ -178,11 +239,15 @@ function producesFactCall(node: ts.Node): node is ts.CallExpression {
 }
 
 /** 函数自身（不下潜内层函数）的 return/push 词与任务事实读取。 */
-function functionShape(fn: ts.Node): FunctionShape {
+function functionShape(fn: ts.Node, consts: ReadonlyMap<string, string>): FunctionShape {
   const words = new Set<string>();
+  const bareWords = new Set<string>();
   let readsTaskFacts = false;
   const walk = (node: ts.Node): void => {
-    if (ts.isReturnStatement(node) && node.expression !== undefined) collectReturnedWords(node.expression, words);
+    if (ts.isReturnStatement(node) && node.expression !== undefined) {
+      collectReturnedWords(node.expression, words);
+      collectBareReturnWords(node.expression, consts, bareWords);
+    }
     if (producesFactCall(node)) {
       for (const argument of node.arguments) collectReturnedWords(argument, words);
     }
@@ -193,21 +258,25 @@ function functionShape(fn: ts.Node): FunctionShape {
   };
   const body = (fn as { body?: ts.Node }).body;
   if (body !== undefined) walk(body);
-  return { name: functionName(fn), words, readsTaskFacts };
+  return { name: functionName(fn), words, bareWords, readsTaskFacts };
 }
 
 /**
  * 扫描器（纯函数，供反向绊线自证）：返回「函数 return/push 出任务级生命周期词」的命中点。
  * ① 收尾词 ≥2（例外：只 {completed,failed} 且不读任务事实 = 执行行归一化）；
- * ② 存活词 ≥2。
+ * ② 存活词 ≥2；
+ * ③ 单值任务级失败原因/终止种类：顶层 return 裸出 ≥1 个任务级专属收尾词
+ *   （died/cancelled/timed_out/resource_limited/round_failed；含 `return SOME_REASON`
+ *   的同文件 const 解析）。对象属性里的 `{ kind: 'cancelled' }` 不在此列——那是单笔回合事实。
  */
 export function findForbiddenLifecycleFunctions(sources: ReadonlyMap<string, string>): Array<{ file: string; hit: string }> {
   const hits: Array<{ file: string; hit: string }> = [];
   for (const [file, text] of sources) {
     const sf = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+    const consts = constStringLiterals(sf);
     const visit = (node: ts.Node): void => {
       if (isFunctionLike(node)) {
-        const { name, words, readsTaskFacts } = functionShape(node);
+        const { name, words, bareWords, readsTaskFacts } = functionShape(node, consts);
         const endings = [...words].filter((word) => ENDING_WORDS.has(word));
         const liveness = [...words].filter((word) => LIVENESS_WORDS.has(word));
         const roundOutcome = [...words].some((word) => ROUND_OUTCOME_WORDS.has(word));
@@ -219,6 +288,10 @@ export function findForbiddenLifecycleFunctions(sources: ReadonlyMap<string, str
         }
         if (liveness.length >= 2) {
           hits.push({ file, hit: `liveness:${name ?? '<anonymous>'}(${liveness.sort().join(',')})` });
+        }
+        const exclusive = [...bareWords].filter((word) => TASK_EXCLUSIVE_ENDING_WORDS.has(word));
+        if (exclusive.length >= 1) {
+          hits.push({ file, hit: `single-ending:${name ?? '<anonymous>'}(${exclusive.sort().join(',')})` });
         }
       }
       ts.forEachChild(node, visit);
@@ -356,6 +429,32 @@ export function findForbiddenLifecycleFields(sources: ReadonlyMap<string, string
   return hits;
 }
 
+/**
+ * 扫描器（纯函数）：任务级生命周期**事件名**（`task_completed` / `task_failed` /
+ * `task_cancelled` / `task_timeout` …）作为字符串字面量或对象键出现 → 红。
+ * 这是「任务生命周期事件名表」（Record/对象键式）的形状：怎么结束不存，也不给它起事件名。
+ */
+export function findForbiddenTaskEventNames(sources: ReadonlyMap<string, string>): Array<{ file: string; hit: string }> {
+  const hits: Array<{ file: string; hit: string }> = [];
+  for (const [file, text] of sources) {
+    const sf = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+    const check = (value: string, line: number): void => {
+      if (TASK_LIFECYCLE_EVENT_NAME_RE.test(value)) hits.push({ file, hit: `event-name:line ${line}:${value}` });
+    };
+    const visit = (node: ts.Node): void => {
+      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+        check(node.text, sf.getLineAndCharacterOfPosition(node.getStart()).line + 1);
+      }
+      if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name)) {
+        check(node.name.text, sf.getLineAndCharacterOfPosition(node.name.getStart()).line + 1);
+      }
+      ts.forEachChild(node, visit);
+    };
+    ts.forEachChild(sf, visit);
+  }
+  return hits;
+}
+
 /** 语法侧读取字符串字面量并集成员（递归联合 + 括号），不建 program、不依赖类型检查器。 */
 function typeLiteralMembers(node: ts.TypeNode): string[] | undefined {
   const members: string[] = [];
@@ -377,7 +476,10 @@ function typeLiteralMembers(node: ts.TypeNode): string[] | undefined {
   return members.length >= 2 ? members : undefined;
 }
 
-/** 文档里被禁的「task 有状态」句子形状。 */
+/** 任务级 lifecycle 状态词（英文；文档/注释把它们当任务属性写才是禁句）。 */
+const TASK_STATE_WORDS = 'running|waiting_user|cancelled|canceled|timed_out|resource_limited|completed|failed|died';
+
+/** 文档里被禁的「task 有状态」句子形状（按子句判）。 */
 const FORBIDDEN_DOC_PATTERNS: readonly RegExp[] = [
   // 「状态机械读数」里的「状态机」不是状态机——排除这种中文子串误报。
   /状态机(?!械)/u,
@@ -387,10 +489,29 @@ const FORBIDDEN_DOC_PATTERNS: readonly RegExp[] = [
   /任务级状态/u,
   /running\s*\/\s*died\s*\/\s*waiting_user/u,
   /存活\s*[（(]\s*running/u,
+  // 任务级状态序列 / 终态 / 失败原因（2026-11-23 第 2 轮审查的真实形状）。
+  new RegExp(`状态序列[^。；\\n]{0,40}(?:${TASK_STATE_WORDS})`, 'iu'),
+  new RegExp(`任务终局\\s*(?:=|为|是|：|:)\\s*[\\u0060'"*]*(?:${TASK_STATE_WORDS})`, 'iu'),
+  new RegExp(`底账终态\\s*(?:=|为|是|：|:)?\\s*[\\u0060'"*]*(?:${TASK_STATE_WORDS})`, 'iu'),
+  new RegExp(`底账状态[^。；\\n]{0,12}[\\u0060'"*]*(?:${TASK_STATE_WORDS})`, 'iu'),
+  new RegExp(`任务\\s*[\\u0060'"*]*(?:${TASK_STATE_WORDS})`, 'iu'),
+  new RegExp(`任务[^。；\\n]{0,12}(?:保持|仍|依旧|处于|落|进入|回|最终|真的|被判|收尾|终局|终态)[^。；\\n]{0,12}[\\u0060'"*]*(?:${TASK_STATE_WORDS})`, 'iu'),
+  // 旧 schema 的 status 列写法（现行底账没有 status/reason/failure_reason 列）。
+  /底账[^。；\n]{0,12}\b(?:tasks\.)?status\s*=/iu,
 ];
 
-/** 否定词：子句内出现任一 = 描述「没有/不维护/已删除」，不是把状态写成现行属性。 */
-const NEGATION_RE = /不|没有|删|不再|无/u;
+/** 跨标点（括号/箭头）才看得出的句子形状：在整句上判（整句无否定词才判）。 */
+const FORBIDDEN_SENTENCE_PATTERNS: readonly RegExp[] = [
+  new RegExp(`任务收尾[^。；\\n]{0,30}(?:${TASK_STATE_WORDS}|unexecuted)`, 'iu'),
+  new RegExp(`底账[^。；\\n]{0,20}(?:终态|状态序列)[^。；\\n]{0,40}(?:${TASK_STATE_WORDS})`, 'iu'),
+  new RegExp(`状态序列[^。；\\n]{0,60}(?:${TASK_STATE_WORDS})`, 'iu'),
+];
+
+/**
+ * 否定/历史词：子句内出现任一 = 描述「没有/不维护/已删除/旧 schema」，不是现行属性。
+ * 历史只认明确标记（旧 schema / 历史 run / 当时 schema），避免「依旧」这类词误豁免。
+ */
+const NEGATION_RE = /不|没有|删|不再|无|旧\s*schema|历史\s*(?:run|记录|口径)|当时\s*schema/iu;
 
 /** 句子主语：task 本身。 */
 const TASK_SUBJECT_RE = /task|任务|底账/iu;
@@ -408,6 +529,12 @@ const LIFECYCLE_PROXIMITY_RE = /running|waiting(?:_user)?|cancelled|canceled|tim
  */
 function forbiddenStateSentence(sentence: string): RegExp | undefined {
   if (!TASK_SUBJECT_RE.test(sentence) && !LIFECYCLE_PROXIMITY_RE.test(sentence)) return undefined;
+  // 跨标点的形状（任务收尾（completed/failed…）、状态序列 A → B → completed）在整句上判；
+  // 整句否定/旧 schema 标注放行。
+  if (!NEGATION_RE.test(sentence)) {
+    const whole = FORBIDDEN_SENTENCE_PATTERNS.find((candidate) => candidate.test(sentence));
+    if (whole !== undefined) return whole;
+  }
   for (const clause of sentence.split(/[，,（）()→]|——/u)) {
     if (NEGATION_RE.test(clause)) continue;
     const pattern = FORBIDDEN_DOC_PATTERNS.find((candidate) => candidate.test(clause));
@@ -516,7 +643,11 @@ describe('不维护任务状态机：代码里没有任务级生命周期枚举'
     expect(findForbiddenLifecycleFields(productSources())).toEqual([]);
   });
 
-  it('④ 被删机制的原名不再存在（terminationKindOf / TaskTerminationKind / TaskLiveness / taskLivenessOf）', () => {
+  it('④ 产品源码里没有 task_completed/task_failed 之类的任务级生命周期事件名', () => {
+    expect(findForbiddenTaskEventNames(productSources())).toEqual([]);
+  });
+
+  it('⑤ 被删机制的原名不再存在（terminationKindOf / TaskTerminationKind / TaskLiveness / taskLivenessOf）', () => {
     const sources = productSources();
     const offenders = [...sources]
       .filter(([, text]) => /terminationKindOf|TaskTerminationKind|TaskLiveness\b|taskLivenessOf/u.test(text))
@@ -524,7 +655,7 @@ describe('不维护任务状态机：代码里没有任务级生命周期枚举'
     expect(offenders).toEqual([]);
   });
 
-  it('⑤ 反向绊线：把被删形状放回合成源码，扫描器必须报红；合法负例不得报红', () => {
+  it('⑥ 反向绊线：把被删形状放回合成源码，扫描器必须报红；合法负例不得报红', () => {
     // 收尾分类器（被删 terminationKindOf 的形状：读任务事实 → return 终止种类）。
     const classifier = findForbiddenLifecycleFunctions(new Map([
       ['packages/agent/src/x.ts', `
@@ -544,6 +675,35 @@ describe('不维护任务状态机：代码里没有任务级生命周期枚举'
         }`],
     ]));
     expect(renamed.some((hit) => hit.hit.startsWith('ending:'))).toBe(true);
+
+    // 单值任务级失败原因函数（第 2 轮审查真实形状：const 原因 + return CONST）。
+    const singleReason = findForbiddenLifecycleFunctions(new Map([
+      ['packages/agent/src/resource-policy.ts', `
+        export const RESOURCE_LIMITED_REASON = 'resource_limited' as const;
+        export function taskFailureReasonFor(_rejection: unknown): typeof RESOURCE_LIMITED_REASON {
+          return RESOURCE_LIMITED_REASON;
+        }`],
+    ]));
+    expect(singleReason.some((hit) => hit.hit.startsWith('single-ending:'))).toBe(true);
+
+    // 合法负例：单笔回合事实 `{ kind: 'cancelled' }` 是对象属性值，不是任务级单值分类器。
+    const roundOutcomeObject = findForbiddenLifecycleFunctions(new Map([
+      ['packages/agent/src/x.ts', `
+        function abortedOutcome(): { kind: 'cancelled' } {
+          return { kind: 'cancelled' };
+        }`],
+    ]));
+    expect(roundOutcomeObject).toEqual([]);
+
+    // 对象键式任务生命周期事件名表（第 2 轮审查真实形状：BLOCKED_EVENTS）。
+    const eventTable = findForbiddenTaskEventNames(new Map([
+      ['scripts/ask-replay.ts', `
+        const BLOCKED_EVENTS: Readonly<Record<string, string>> = {
+          task_completed: '依赖 P2（任务生命周期），未合入',
+          task_failed: '依赖 P2（任务生命周期），未合入',
+        };`],
+    ]));
+    expect(eventTable.some((hit) => hit.hit.startsWith('event-name:'))).toBe(true);
 
     // 底账投影的 push 形状：不是 return，而是把任务级状态词 push 进事实数组（判据 1 的真实形状）。
     const pushedProjection = findForbiddenLifecycleFunctions(new Map([
@@ -659,11 +819,11 @@ describe('不维护任务状态机：代码里没有任务级生命周期枚举'
     expect(rawFields).toEqual([]);
   });
 
-  it('⑥ 文档里没有把 task 描述成有状态机/存活三值/任务级状态的句子', () => {
+  it('⑦ 文档里没有把 task 描述成有状态机/存活三值/任务级状态的句子', () => {
     expect(findForbiddenStateDocs(docSources())).toEqual([]);
   });
 
-  it('⑦ 反向绊线：把状态机文档句放回合成文档，扫描器必须报红；否定句/无关句不得报红', () => {
+  it('⑧ 反向绊线：把状态机文档句放回合成文档，扫描器必须报红；否定句/无关句不得报红', () => {
     const byLiveness = findForbiddenStateDocs(new Map([
       ['docs/architecture/tasks.md', 'task 的「状态」只有存活三值（running/died/waiting_user）。'],
     ]));
@@ -680,6 +840,26 @@ describe('不维护任务状态机：代码里没有任务级生命周期枚举'
     ]));
     expect(tableCell.length).toBeGreaterThan(0);
 
+    // 状态序列 / 任务终局 / 底账终态（第 2 轮审查的真实文档形状）。
+    const stateSequence = findForbiddenStateDocs(new Map([
+      ['docs/ops/real-write-loop.md', '底账状态序列按序包含 `running → waiting_user → running → completed`。'],
+    ]));
+    expect(stateSequence.length).toBeGreaterThan(0);
+    const terminal = findForbiddenStateDocs(new Map([
+      ['apps/server/task-completion-delivery.ts', '一次后台任务失败的事实（任务终局 = failed）。'],
+      ['docs/ops/real-write-loop.md', '底账终态 completed；成功 prepare 先于唯一一次成功 commit。'],
+    ]));
+    expect(terminal.length).toBeGreaterThanOrEqual(2);
+    const taskStateWord = findForbiddenStateDocs(new Map([
+      ['docs/product/wecom-live-dummy-cases.md', '任务在后台推进并最终 completed。'],
+      ['docs/architecture/contract.md', 'wait 截断时任务保持 running，不杀任务。'],
+    ]));
+    expect(taskStateWord.length).toBeGreaterThanOrEqual(2);
+    const taskStatusColumn = findForbiddenStateDocs(new Map([
+      ['docs/ops/real-write-loop.md', '任务底账 `status=failed`，`reason=failed_confirmed`。'],
+    ]));
+    expect(taskStatusColumn.length).toBeGreaterThan(0);
+
     const negation = findForbiddenStateDocs(new Map([
       ['docs/architecture/tasks.md', '不维护任务状态机：task 只存事实，活/结束现推。'],
     ]));
@@ -694,13 +874,24 @@ describe('不维护任务状态机：代码里没有任务级生命周期枚举'
       ['AGENTS.md', '异步交错、竞态这类 blocking：要么把状态机重做一次，要么升级给人。'],
     ]));
     expect(unrelatedStateMachine).toEqual([]);
+
+    const oldSchemaMarked = findForbiddenStateDocs(new Map([
+      ['docs/ops/real-write-loop.md', '历史 run 的旧 schema 任务底账 `status=failed`，现行无该列。'],
+    ]));
+    expect(oldSchemaMarked).toEqual([]);
+
+    const executionRowFact = findForbiddenStateDocs(new Map([
+      ['docs/architecture/contract.md', '执行行 completed / failed 是执行层契约事实，原样转述。'],
+      ['docs/product/capability.md', '任务完成后通知用户，不给状态词。'],
+    ]));
+    expect(executionRowFact).toEqual([]);
   });
 
-  it('⑧ 产品源码注释里没有把 task 描述成有状态机/存活三值/任务级状态的句子', () => {
+  it('⑨ 产品源码注释里没有把 task 描述成有状态机/存活三值/任务级状态的句子', () => {
     expect(findForbiddenStateComments(productSources())).toEqual([]);
   });
 
-  it('⑨ 反向绊线：把状态机注释放回合成源码，扫描器必须报红；否定注释不得报红', () => {
+  it('⑩ 反向绊线：把状态机注释放回合成源码，扫描器必须报红；否定注释不得报红', () => {
     const byStateMachine = findForbiddenStateComments(new Map([
       ['packages/agent/src/x.ts', '// 任务按 P2 状态机落终态 failed + resource_limited'],
     ]));
@@ -715,6 +906,17 @@ describe('不维护任务状态机：代码里没有任务级生命周期枚举'
       ['packages/agent/src/z.ts', '// 账本机械事实（存活三值 + 收尾/汇报/执行事实）'],
     ]));
     expect(byLiveness.length).toBeGreaterThan(0);
+
+    // 任务级终态/状态序列注释（第 2 轮审查的真实注释形状）。
+    const byTaskTerminal = findForbiddenStateComments(new Map([
+      ['apps/server/task-completion-delivery.ts', '// 一次后台任务失败的事实（任务终局 = failed）。'],
+      ['apps/server/server.ts', '// 任务落 waiting_user → 唤醒原会话模型说。'],
+    ]));
+    expect(byTaskTerminal.length).toBeGreaterThanOrEqual(2);
+    const bySequence = findForbiddenStateComments(new Map([
+      ['scripts/eval/real/write-loop.ts', '// C9 底账状态序列按序包含 running → waiting_user → running → completed。'],
+    ]));
+    expect(bySequence.length).toBeGreaterThan(0);
 
     const negation = findForbiddenStateComments(new Map([
       ['packages/agent/src/a.ts', '// 不维护任务状态机：task 只存事实，活/结束现推。'],

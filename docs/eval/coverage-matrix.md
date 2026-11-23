@@ -67,8 +67,8 @@
 
 | 场景 | 自动用例 | 层级 | 覆盖度 | 缺口说明 |
 | --- | --- | --- | --- | --- |
-| 长任务受理：交办回合照发模型的话、后台挂起不占会话、完成后主动投递一次 | `scripts/eval/wecom-sim/cases-h-newcap.test.ts:W-42 长任务`<br>`scripts/long-task-assembly.test.ts:accepted → 任务 running 且槽位/租约释放` | 宿主机制 + 执行层 | 已覆盖 | — |
-| accepted 后续跑 / abort 取消 / 停不下来如实回 running | `packages/agent/long-task-async.test.ts:① accepted → 回合结束、槽位释放`<br>`packages/agent/long-task-async.test.ts:③ abort → 任务 cancelled` | 宿主机制 | 已覆盖 | — |
+| 长任务受理：交办回合照发模型的话、后台挂起不占会话、完成后主动投递一次 | `scripts/eval/wecom-sim/cases-h-newcap.test.ts:W-42 长任务`<br>`scripts/long-task-assembly.test.ts:accepted → 任务仍在推进且槽位/租约释放` | 宿主机制 + 执行层 | 已覆盖 | — |
+| accepted 后续跑 / abort 取消 / 停不下来如实回 running | `packages/agent/long-task-async.test.ts:① accepted → 回合结束、槽位释放`<br>`packages/agent/long-task-async.test.ts:③ abort → 任务写结束事实` | 宿主机制 | 已覆盖 | — |
 | 长任务跨重启：新 runner 从底账 accepted 行重新 wait 续跑、不重复发起 | `packages/agent/long-task-async.test.ts:④ 重启：关库重开，新 runner 从底账 accepted 行重新 wait` | 宿主机制 | 已覆盖 | — |
 | 未声明 long_running 却返回 accepted → fail-closed | `packages/agent/long-task-async.test.ts:⑤ 未声明 long_running 的 operation 返回 accepted` | 宿主机制 | 已覆盖 | — |
 | 预期式提醒：超阈值恰一条、长任务也要提醒、群聊覆盖（#9） | `scripts/eval/wecom-sim/cases-h-newcap.test.ts:W-43 预期式提醒`<br>`apps/server/server-long-running-notice.test.ts:① 1:1 会话：任务超阈值无事件`<br>`apps/server/server-long-running-notice.test.ts:② 群聊也发` | 宿主机制 + 执行层 | 已覆盖 | — |
@@ -90,7 +90,7 @@
 | 场景 | 自动用例 | 层级 | 覆盖度 | 缺口说明 |
 | --- | --- | --- | --- | --- |
 | 长任务提醒阈值 10min：**唤醒模型说**（事实 = 业务名 + 已跑多久）、每任务一次、第二次扫描不再发 | `packages/agent/long-running-notice.test.ts:① 10 分钟内零发送`<br>`apps/server/server-state-wake.test.ts:③ 任务超阈值无事件 → 唤醒模型说`<br>`apps/server/server-long-running-notice.test.ts:③ 长任务（accepted 后租约被清）也要提醒` | 宿主机制 | 已覆盖 | 30 分钟「卡住」档已整档删除（文案/阈值/扫描/领取/配置键）——**不覆盖**该档是设计，不是缺口；旧 YAML 里的该键按未知字段拒绝（`resource-policy-single-source.test.ts` 已删键守卫） |
-| 提醒降级：模型说不出话 → 宿主兜底句（停下来 / 继续等）、任务保持 running | `apps/server/server-state-wake.test.ts:③b 走岔路`<br>`apps/server/server-long-running-notice.test.ts:① 1:1 会话：任务超阈值无事件` | 宿主机制 | 已覆盖 | — |
+| 提醒降级：模型说不出话 → 宿主兜底句（停下来 / 继续等）、任务仍在推进（有活 worker） | `apps/server/server-state-wake.test.ts:③b 走岔路`<br>`apps/server/server-long-running-notice.test.ts:① 1:1 会话：任务超阈值无事件` | 宿主机制 | 已覆盖 | — |
 | 重启不重发：已发落库，重开扫描零次发送 | `packages/agent/long-running-notice.test.ts:② 重启不重发` | 宿主机制 | 已覆盖 | — |
 | 提醒投递失败要能重来：同一档内重试一次（首投失败 + 重试成功 = 用户收得到）；成功即止、一直失败止于两次（不无限重试、不重复打扰） | `packages/agent/long-running-notice.test.ts:⑥ 先领取后投递失败`<br>`packages/agent/long-running-notice.test.ts:⑦ 不该重试的仍然不重试` | 宿主机制 | 已覆盖 | — |
 | 群聊**也发**久无动静提醒（owner 2026-11-19 #9：群 = 独立主体，群里的任务就是这个群的事）；群主体话术**不带业务名**（隐私口径），1:1 照常带 | `packages/agent/long-running-notice.test.ts:③ 群聊也发`<br>`apps/server/server-long-running-notice.test.ts:② 群聊也发`<br>`apps/server/server-long-running-notice.test.ts:群主体：照样发`<br>`scripts/eval/wecom-sim/cases-h-newcap.test.ts:W-43 预期式提醒`<br>`scripts/eval/wecom-sim/cases-i-interaction.test.ts:I-6 群聊` | 宿主机制 | 已覆盖 | 旧口径「群聊零主动提醒」已作废（sim 的 W-43 群对照 / I-6 / J-2 按新口径迁移，非删除）；**附件追问**仍只在单聊（`apps/server/server-attachment-nudge.test.ts:④ 群聊 → 不发追问`，本轮未改） |

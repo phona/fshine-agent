@@ -18,7 +18,7 @@
  *   3) execute_operation：宿主生成 requestId → client.execute(结构化请求) → 结果回给 Worker；
  *      CAP-01 S2：注入文件桥时出站经桥替换声明的目录参数（物化任务文件），回程 data.files
  *      在 runtime 出口登记成新 file_id 并剥 path/base64（翻译在 assemble 持有的桥，登记在
- *      本出口——不在适配器）；任务收尾兜底扫任务 out/（unexecuted/failed 也在内）；
+ *      本出口——不在适配器）；任务收尾兜底扫任务 out/（无论有没有汇报/执行成败）；
  *   4) Worker 汇报作为工具结果回到 Main，Main 生成给用户的最终回复；
  *   5) 宿主把本回合最终回复逐字写入本回合各任务行（P1/S1：同回合同值；空白/回合失败不落，
  *      缺省=无最终回复存档，显示层不用执行层汇报冒充）。
@@ -89,7 +89,6 @@ import { stripServerPaths } from './server-paths';
 import { createTaskRegistry, deriveTaskName, DispatchConflictError, stillProgressingOf, taskEndedOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
 import {
   DEFAULT_RUNTIME_CONFIG,
-  taskFailureReasonFor,
   type Permit,
   type RejectionReason,
   type ResourcePolicy,
@@ -704,7 +703,7 @@ export type ExecutionEvent =
   /**
    * 一次**真实发起**的执行调用以「结果未知」收尾（无回执：单次调用被传输超时截断、
    * 连接中断、写操作取消在飞等——owner 2026-11-19 分工表第一格）：调用有界结束，但宿主
-   * **不能**断言它发生过没有——账行落 unknown、任务落 reason=result_unknown、不自动重试。
+   * **不能**断言它发生过没有——账行落 unknown、任务落结束事实（结果未知）、不自动重试。
    * 只进日志；超时原话留在账行的 outcome 里（`unknown` 行）。回放/未发起（executed=false）不记。
    */
   | { event: 'execution_result_unknown'; taskId: string; operation: string }
@@ -1764,9 +1763,9 @@ export function createWorkerRunJsTurn(
       throw error;
     }
     memo.set(memoKey, output);
-    // 执行事实入账（2026-11-17 修）：Worker 的 run_js 是**真实执行**，必须进底账——完成判定
-    // （judgeReportedTask）只看执行事实，不进账会出现两种假象：①查询成功 + 脚本失败仍判
-    // completed；②只靠脚本完成的任务被判 unexecuted。
+    // 执行事实入账（2026-11-17 修）：Worker 的 run_js 是**真实执行**，必须进底账——判断
+    // 做没做成只看执行事实，不进账会出现两种假象：①查询成功 + 脚本失败仍读成成功；
+    // ②只靠脚本完成的任务在账本里没有可交付汇报。
     // 宿主超时杀进程组（killReason=timeout）同样是一次真实执行的失败结局（脚本没跑完）：
     // 超时只杀脚本、Worker 仍有预算并正常汇报，不写失败事实会让「查询成功 + 脚本超时」判
     // completed（假绿）。abort 不写——取消/宿主中止由取消路径定性，不能把取消说成失败。
@@ -2294,7 +2293,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         })();
     // userText = 本回合用户原话（原样，不改写）；只在确认路径交给执行端。
     const outcome = runner.confirm(resolveTaskId(ref), { userText: currentUserText, scope });
-    // 过期不是失败：宿主已接续一个回合重新生成提案（任务仍回 waiting_user）；给模型一句业务化
+    // 过期不是失败：宿主已接续一个回合重新生成提案（任务仍回到等待事实）；给模型一句业务化
     // 的机械事实（含新提案卡的下半句，见 confirmationExpiredMessage）。
     if (outcome.outcome === 'expired') {
       return { ...outcome, userMessage: confirmationExpiredMessage() };
@@ -3000,7 +2999,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     if (policy !== undefined && foregroundPermit !== undefined) {
       const acquired = policy.acquire('background', { taskId, parentPermit: foregroundPermit });
       if (acquired.ok === false) {
-        const reason = taskFailureReasonFor(acquired);
+        const reason = acquired.reason;
         registry.noteResourceRefused(taskId);
         throw new Error(`委派被资源策略拒绝（${reason}）：${acquired.message}`);
       }
@@ -3027,7 +3026,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     };
     // P5 运行时计量（owner 授权 3a）：每次 Worker 调用完成后按任务累计调用数与时长。
     // 调用前检查在许可边界：派生 acquire 查共享预算 exhausted → budget_exhausted →
-    // 任务 reason=resource_limited（见上，未进入 Worker 即拒）；此处 finally 计量
+    // 任务写结束事实（容量拒绝，见上；未进入 Worker 即拒）；此处 finally 计量
     // 成功与失败回合（调用已发生、资源已消耗），被拒委派不计。子许可与前台回合许可
     // 共享同一 budget 对象（不复制/不放大），故每条调用只在此计一次；无 taskBudget
     // 时 limits=null → exhausted() 恒 null（零行为变化）；token 无可验证 Pi usage，不计量。
@@ -3090,7 +3089,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       }
       throw error;
     } finally {
-      // CAP-01 S2 ④ 产物不丢（v8 §10-3）：任务收尾（completed/failed/unexecuted/待核对
+      // CAP-01 S2 ④ 产物不丢（v8 §10-3）：任务收尾（无论有没有汇报/执行成败/待核对
       // 一律）兜底扫任务 out/ 登记剩余产物——执行层写了文件但 outcome 没带回 data.files
       // （失败/中止）时不丢；与回程登记同池去重。未注入桥 = 无兜底面（零变化缺省）。
       if (taskExchange !== undefined) {

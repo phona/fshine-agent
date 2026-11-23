@@ -319,7 +319,7 @@ describe('长任务异步（契约 v4）', () => {
     expect(archivedReportOf(h.registry.get('A', SCOPE)) !== undefined || (archivedReportOf(h.registry.get('A', SCOPE)) !== undefined || lastExecutionOf(h.registry.get('A', SCOPE))?.status === 'completed')).toBe(true);
   });
 
-  it('③ abort → 任务 cancelled 且不再被 wait 唤醒；停不下来时如实回 running', async () => {
+  it('③ abort → 任务写结束事实且不再被 wait 唤醒；停不下来时仍在推进（有活 worker）', async () => {
     const h = await makeHarness();
     submit(h.runner, 'A', 'LONG 导出');
     await flush();

@@ -54,7 +54,7 @@
 | 后台完成：唤醒会话模型、投递它说的话，恰一次 | `apps/server/server-completion-wake.test.ts:① 主路径` | 已实现（有守卫） |
 | 等补信息：主动说清还缺什么，补答后同一任务续跑完成 | `scripts/needs-input-resume.test.ts:① 执行层要补输入` | 已实现（有守卫） |
 | 取消：在飞中止（请求≠已取消）、已完成任务再取消如实拒绝 | `packages/agent/task-cancel-inflight.test.ts:① 在飞 run_js`<br>`packages/agent/task-cancel-inflight.test.ts:③ 已完成任务再取消` | 已实现（有守卫） |
-| 长任务 accepted→wait→abort；未声明 long_running 却返回 accepted 一律 fail-closed | `packages/agent/long-task-async.test.ts:③ abort → 任务 cancelled`<br>`packages/agent/long-task-async.test.ts:⑤ 未声明 long_running 的 operation 返回 accepted` | 已实现（有守卫） |
+| 长任务 accepted→wait→abort；未声明 long_running 却返回 accepted 一律 fail-closed | `packages/agent/long-task-async.test.ts:③ abort → 任务写结束事实`<br>`packages/agent/long-task-async.test.ts:⑤ 未声明 long_running 的 operation 返回 accepted` | 已实现（有守卫） |
 | 长任务跨重启：新 runner 从底账 accepted 行重新 wait，不重复发起 | `packages/agent/long-task-async.test.ts:④ 重启：关库重开` | 已实现（有守卫） |
 | 久等提醒一档（超阈值恰一条、每任务一次、重启不重发）；群聊也发（话术去业务名，owner 2026-11-19 #9 迁移） | `packages/agent/long-running-notice.test.ts:① 10 分钟内零发送`<br>`apps/server/server-long-running-notice.test.ts:② 群聊也发` | 已实现（有守卫） |
 | 长任务等待与执行层断联系：先自查一次，兜得住照常走；连续两次拿不到回执才如实说一次（任务不判死、退避封顶 60s 继续等） | `packages/agent/long-task-wait-truncation.test.ts:② 先兜能兜住`<br>`packages/agent/long-task-wait-truncation.test.ts:任务不判死` | 已实现（有守卫） |

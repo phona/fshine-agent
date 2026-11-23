@@ -79,7 +79,7 @@ export interface HarnessSession {
   executionsLastTurn?(): readonly ExecutionFact[];
   /**
    * 刚结束的一轮 `task_cancel` 调用结果（目标任务 + outcome/status）。
-   * 缺省 = 会话面未暴露；`expectInflightCancel` 在任务已 completed 时据此区分
+   * 缺省 = 会话面未暴露；`expectInflightCancel` 在任务已有汇报存档时据此区分
    * 「取消到达时目标已完成（如实迟到）」与「取消指错任务/未生效」。
    */
   cancelFactsLastTurn?(): readonly CancelFact[];
@@ -296,7 +296,7 @@ export function judgeTurnExpectations(spec: TurnSpec, ctx: TurnExpectationContex
     }
   }
   if (spec.expectInflightCancel === true) {
-    // 在飞取消：轮前最新任务必须真的还在飞（running 或未启动排队），否则没有观测窗口（不冒充判定）。
+    // 在飞取消：轮前最新任务必须真的还在飞（仍在推进且有活 worker，或未启动排队），否则没有观测窗口（不冒充判定）。
     const before = pickTask(ctx.tasksBefore, 'latest');
     const live = before !== undefined && (before.mayBeRunning || (!before.started && !before.ended));
     if (!live) {

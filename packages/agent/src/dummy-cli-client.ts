@@ -462,7 +462,7 @@ function outcomeOf(
     // 单次调用的传输超时（`timeoutMs`，缺省 EXECUTION_CALL_TIMEOUT_MS = 60s）：到点停掉本次
     // 传输，但**不冒充「已确认失败」**——截断后无法确认执行层那边做没做完（写操作可能已经
     // 生效），按宿主既有的「结果未知」语义如实落定（`execution-runtime` 的待核对收口）：
-    // 账行落 unknown、任务落 reason=result_unknown、不自动重试，把核对交给用户。
+    // 账行落 unknown、任务落结束事实（结果未知）、不自动重试，把核对交给用户。
     // retryable 显式 false：同一 (operation, 对象) 不因这次超时被重撞（fail-safe，
     // 与 2026-11-18「缺省不可重试」同一口径）。
     return {

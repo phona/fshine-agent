@@ -13,18 +13,18 @@
  *     → 执行层返回 needs_confirmation 提案（带摘要；句柄留在宿主持有的会话小表里）
  *     → 用户回「确认」→ 模型（Main）task_confirm → runner.confirm 接续任务
  *     → Worker 发 dummy.commit（句柄由宿主随请求透传）→ 执行层落盘 + 自己读回验证
- *     → 任务 completed → 宿主**唤醒原会话的模型**，由它把话带给用户（投递端口 sendText）
+ *     → 任务写结束事实（有汇报）→ 宿主**唤醒原会话的模型**，由它把话带给用户（投递端口 sendText）
  *     → 本脚本经结构化契约读回该集合（记录条数与逐条内容）
  *
  * 判据（全部机械；判据实现见 evaluateCriteria——纯函数，可单测）：
  *   C1 写前基线读回 count=0；C2 执行层确实收到 prepare 并成功返回提案（它自己的 audit.jsonl）；
- *   C3 底账出现过 waiting_user + 待确认提案（含摘要）；C4 「确认」回合确实调用了
+ *   C3 底账出现过等待事实 + 待确认提案（含摘要）；C4 「确认」回合确实调用了
  *   task_confirm 且 runner 接续（outcome=started）；C5 **写入恰好一次**（成功 commit 1 次，
  *   底账与执行层审计交叉核对；无句柄的 commit 被拒登记在 detail，不判红）且句柄被消耗；
- *   C6 写后读回 count 与逐条 name/value 与请求一致；C7 底账终态 completed 且成功
+ *   C6 写后读回 count 与逐条 name/value 与请求一致；C7 底账有汇报存档且成功
  *   prepare(needs_confirmation) 先于唯一一次成功 commit(completed)；
  *   C8 完成消息确实出现在用户可见面（主动投递的文字或本回合回复之一）；
- *   C9 底账状态序列按序包含 running → waiting_user → running → completed（确认把任务带回执行）；
+ *   C9 底账事实序列按序包含 progressing → waiting → progressing → reported（确认把任务带回执行）；
  *   C10 有执行层摘要时，用户可见文本里出现摘要关键字段（集合名、窗口码、记录条数——
  *   这些是执行层给的已知字符串，属"已知字符串存在性"，不违红线；无摘要时判 inconclusive，不判红）。
  * 不要求执行事实恰好两条：模型重试、无句柄 commit 被拒、Worker 事后读回都是合法事实，
@@ -205,7 +205,7 @@ export interface WriteLoopEvidence {
   ledger: {
     taskId?: string;
     taskCount: number;
-    /** 观测到的状态序列（250ms 轮询；观测粒度即事实边界）——主任务（首个）。 */
+    /** 观测到的事实序列（250ms 轮询；观测粒度即事实边界）——主任务（首个）。 */
     factSequence: string[];
     snapshots: LedgerSnapshot[];
     finalReported?: boolean;
@@ -340,7 +340,7 @@ export function recordingDriver(inner: TurnDriver, agent: 'main' | 'worker', sin
 }
 
 // ---------------------------------------------------------------------------
-// 任务底账观测（只读第二连接；250ms 轮询，记录观测到的状态序列与提案）
+// 任务底账观测（只读第二连接；250ms 轮询，记录观测到的事实序列与提案）
 // ---------------------------------------------------------------------------
 
 export class LedgerWatcher {
@@ -625,16 +625,16 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
     `structured prepare 行 ${prepareRows.length} 条：${prepareRows.map((row) => `exit=${String(row.exitCode)}${row.refused === undefined ? '' : ` refused=${row.refused}`}`).join('；')}`,
   );
 
-  // C3 底账出现过 waiting_user + 提案（含摘要）。
+  // C3 底账出现过等待事实 + 提案（含摘要）。
   const proposal = evidence.ledger.proposal;
   add(
-    'C3', '底账出现 waiting_user 与待确认提案（摘要非空）', 'mechanical',
+    'C3', '底账出现等待事实与待确认提案（摘要非空）', 'mechanical',
     evidence.ledger.factSequence.includes('waiting')
       && proposal !== undefined
       && proposal.summary.trim() !== ''
       && proposal.handlePrefix !== '',
     proposal === undefined
-      ? `状态序列=${evidence.ledger.factSequence.join('→')}；未观测到 pendingQuestion.confirmation`
+      ? `事实序列=${evidence.ledger.factSequence.join('→')}；未观测到 pendingQuestion.confirmation`
       : `序列=${evidence.ledger.factSequence.join('→')}；提案 operation=${proposal.operation} summary=${proposal.summary}`,
   );
 
@@ -681,7 +681,7 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
     `status=${after.status} count=${String(after.count)} items=${digestValue(after.items)}`,
   );
 
-  // C7 底账终态与执行事实形状：终态 completed；成功 prepare(needs_confirmation) 先于**唯一一次
+  // C7 底账汇报存档与执行事实形状：finalReported=true；成功 prepare(needs_confirmation) 先于**唯一一次
   // 成功 commit**（写发生在确认之后，顺序可查）。不要求执行事实恰好两条：模型的重试、
   // 无句柄 commit 被拒、Worker 事后读回都是合法事实，如实记录不当违约。
   const proposalIndex = evidence.ledger.finalExecutions.findIndex((execution) =>
@@ -689,7 +689,7 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
   const completedCommitIndex = evidence.ledger.finalExecutions.findIndex((execution) =>
     execution.operation === 'dummy.commit' && execution.status === 'completed');
   add(
-    'C7', '底账终态 completed；成功的 prepare(needs_confirmation) 先于唯一一次成功 commit(completed)', 'mechanical',
+    'C7', '底账有汇报存档（finalReported=true）；成功的 prepare(needs_confirmation) 先于唯一一次成功 commit(completed)', 'mechanical',
     evidence.ledger.finalReported === true
       && proposalIndex >= 0
       && completedCommitIndex > proposalIndex
@@ -709,7 +709,7 @@ export function evaluateCriteria(evidence: WriteLoopEvidence): CriterionResult[]
     `push_text ${completionPushes.length} 条；relayed_in_turn=${relayedInTurn}`,
   );
 
-  // C9 底账状态序列（观测）：确认路径确实把任务从等待里带回执行（waiting_user 之后 wieder running），
+  // C9 底账事实序列（观测）：确认路径确实把任务从等待里带回执行（等待之后 wieder progressing），
   // 不是「等确认 → 直接终态」。序列按序包含（允许观测到额外中间态）。
   const orderedSequence = evidence.ledger.factSequence;
   const subsequence = ['progressing', 'waiting', 'progressing', 'reported'];
@@ -1131,9 +1131,9 @@ async function main(): Promise<void> {
     };
 
     await sendTurn(1, USER_TURN_1, `write-loop-${nowSlug()}-1`);
-    // 等提案落到用户可见面（waiting_user 推送 / 回合回复）或超时——超时只影响后续步骤的时序，不伪造事实。
+    // 等提案落到用户可见面（等待事实 / 回合回复）或超时——超时只影响后续步骤的时序，不伪造事实。
     const sawProposal = await waitFor(
-      () => watcher.sequenceOf(watcher.taskIds()[0] ?? '').includes('waiting_user')
+      () => watcher.sequenceOf(watcher.taskIds()[0] ?? '').includes('waiting')
         || watcher.snapshots.some((snapshot) => snapshot.proposal !== undefined),
       Math.min(options.turnTimeoutMs, 30_000),
     );
@@ -1158,7 +1158,7 @@ async function main(): Promise<void> {
       }
       return false;
     }, options.settleTimeoutMs);
-    log(`  底账终态落定：${landed}（任务 ${taskId ?? '未观测到'}）`);
+    log(`  底账收尾事实落定：${landed}（任务 ${taskId ?? '未观测到'}）`);
     if (landed) {
       await waitFor(
         () => logs.some((line) => line['event'] === 'task_result_delivery_sent'
@@ -1235,7 +1235,7 @@ async function main(): Promise<void> {
 
   // ---- 打印证据 ----
   log('\n== 机械证据 ==');
-  log(`[任务底账] 会话内任务数=${evidence.ledger.taskCount} · 状态序列（250ms 轮询观测）=${evidence.ledger.factSequence.join(' → ') || '(未观测到)'}`);
+  log(`[任务底账] 会话内任务数=${evidence.ledger.taskCount} · 事实序列（250ms 轮询观测）=${evidence.ledger.factSequence.join(' → ') || '(未观测到)'}`);
   for (const task of evidence.ledger.finalTasks) {
     log(`  · 任务 ${task.taskId}（#${String(task.taskNo ?? '-')}）事实=${task.reported ? '已汇报' : task.endedAt !== null ? '已停' : task.mayBeRunning ? '可能还在跑' : '结果未知'}`
       + `：${task.executions.map((execution) => `${execution.operation}:${execution.status}`).join(' → ') || '(无执行事实)'}`);

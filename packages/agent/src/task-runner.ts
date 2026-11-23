@@ -35,7 +35,7 @@
  *
  * 长时间无动静提醒（2026-11-18，预期契约切片；2026-11-19 唤醒切片改形）：与 waiting_user
  * 到期消费者共用**同一个**有界定时器轮（不新增第二个循环）。判据只看持久化底账：
- *   · 任务 running、从认领时刻（无租约的长任务用 running_since）起超过 `longRunningNoticeMs`
+ *   · 任务仍在推进、从认领时刻（无租约的长任务用 running_since）起超过 `longRunningNoticeMs`
  *     （缺省 10 分钟）→ 交给提醒端口处置（**只此一档**，每任务一次）。
  * 「已发」时刻持久化在任务行（owner 列），原子领取保证并发/重启下至多一次。
  * **1:1 与群聊都发**（owner 2026-11-19 补 #9：群 = 独立主体，群里的任务就是这个群的事；
@@ -212,7 +212,7 @@ export interface TaskRegistryPort {
   /** 过期租约 → 结束事实（返回受影响任务；不自动重放）。 */
   expireLeases(now?: string): readonly TaskRecordView[];
   /**
-   * 只读任务行（waiting_user 到期扫描用；可选）。缺省 = 不启用到期消费者（零行为变化）；
+   * 只读任务行（等待到期扫描用；可选）。缺省 = 不启用到期消费者（零行为变化）；
    * 真底账实现提供。
    */
   list?(scope?: TaskScope): readonly TaskRecordView[];
@@ -492,7 +492,7 @@ export interface LongRunningNoticePort {
 }
 
 /**
- * 等待用户提醒端口（2026-11-21 live P0）：后台任务由非等待态进入 `waiting_user`
+ * 等待用户提醒端口（2026-11-21 live P0）：后台任务由非等待态进入等待事实
  * （needs_input / needs_confirmation 收尾）时触发**恰好一次**——宿主据此唤醒原会话的
  * 模型，把「还缺什么 / 待确认什么」说给用户并等表态。live 实测缺陷：进入等待此前只落
  * 底账（唯一用户面是 outbox 模板推送），模型不知道有人在等它说话，用户只能自己猜着发
@@ -547,7 +547,7 @@ export interface LongTaskWaitResult {
  * `failed` + `error.code = 'result_unknown'` 是**无回执**（这一次 wait 调用被传输超时截断）：
  * 它**不是**长任务失败的终态——结果未知优先于任何结论。runner 的处置（2026-11-19 owner
  * 裁定「能兜则兜、兜不住才暴露」）：
- *   · 任务保持 running、不杀任务、不唤醒 Worker 报失败（继续等结果）；
+ *   · 任务仍在推进、不杀任务、不唤醒 Worker 报失败（继续等结果）；
  *   · 退避重排再查一次（指数退避、封顶 60s：不撞执行层；也不会因为一次截断就放弃）；
  *   · 连续两次仍拿不到回执（自查也查不出来）才如实告知用户一次（既有失败话术种类
  *     `unknown_result` 的同一句话 + 一个动作；每任务一次，持久化领取）；
@@ -624,7 +624,7 @@ export interface TaskRunnerOptions {
    */
   longRunningNotice?: LongRunningNoticePort;
   /**
-   * 等待用户提醒端口（2026-11-21 live P0）：任务由非等待态进入 waiting_user 时触发恰好
+   * 等待用户提醒端口（2026-11-21 live P0）：任务由非等待态进入等待事实时触发恰好
    * 一次（needs_input / needs_confirmation 收尾；形状见 {@link WaitingUserNoticePort}）。
    * 缺省不接 = 零行为变化。
    */
@@ -696,10 +696,10 @@ export type ResumeOutcome =
 /**
  * 显式确认的机械结局（2026-11-19 owner 拍板）：确认是一个**显式动作**（`task_confirm`），
  * 不是「下一条消息的默认含义」。与 ResumeOutcome 同形的三种之外：
- *   · `not_waiting`     —— 任务不在 waiting_user（无待确认提案可提交）；
+ *   · `not_waiting`     —— 任务不在等待事实（无待确认提案可提交）；
  *   · `no_confirmation` —— waiting_user 但没有提案（是等补充信息，不是等确认）；
  *   · `expired`         —— 提案已过 `expiresAt`：**不判失败、不结束任务**，接续一个回合让
- *     Worker 重新生成同一提案（任务仍回 waiting_user，等用户再确认；零写执行）。业务话术
+ *     Worker 重新生成同一提案（任务仍回到等待事实，等用户再确认；零写执行）。业务话术
  *     （「那份提案过期了，我重新给你一份」）由调用方给出。
  * 前两种 = 确定性拒绝（零执行）；`expired` 是「重提」而非拒绝。
  */
@@ -1467,7 +1467,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     }
     if (dueConsumerEnabled) {
       // 扫描被节流时，「本趟没有到期项」不等于「以后也不会到期」：
-      //   · 本趟刚认领的任务在扫描之后才变 running（扫描时还看不到它们）；
+      //   · 本趟刚认领的任务在扫描之后才写 running_since（扫描时还看不到它们）；
       //   · 长任务在飞时 wait 挂起（inFlight 不算到期项），后续没有别的事件再 pump。
       // 两种情况都必须补一个扫描节拍，否则「跑到多久该提醒」永远等不到下一次扫描。
       const keepScanning = started.length > 0 || waiters.size > 0;
@@ -1823,7 +1823,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
    *   · waiting_user + 提案存在 + 未过期 → 取句柄 → answerResumes → startRound（answer =
    *     用户原话，pendingConfirmation = 底账提案）：句柄只在确认路径透传；
    *   · waiting_user + 提案已过期 → **不判失败、不结束任务**：接续一个回合让 Worker 重新生成
-   *     同一提案（confirmationExpired 事实），返回 `expired`（零写执行，任务仍回 waiting_user）；
+   *     同一提案（confirmationExpired 事实），返回 `expired`（零写执行，任务仍回到等待事实）；
    *   · 非 waiting_user / 无提案 → 确定性拒绝（零执行，不 acquire 许可、不接续）。
    */
   function confirm(taskId: string, options?: { userText?: string; scope?: TaskScope }): ConfirmOutcome {
@@ -1838,7 +1838,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       return { outcome: 'no_confirmation', taskId };
     }
     // 过期判定（owner 2026-11-19）：句柄过期就过期——不判失败、不结束任务，接续一个回合让
-    // Worker 重新生成同一提案（带 confirmationExpired 事实、不带旧句柄），任务仍回 waiting_user。
+    // Worker 重新生成同一提案（带 confirmationExpired 事实、不带旧句柄），任务仍回到等待事实。
     const expired = confirmation.expiresAt !== undefined
       && Number.isFinite(Date.parse(confirmation.expiresAt))
       && Date.parse(confirmation.expiresAt) <= now().getTime();

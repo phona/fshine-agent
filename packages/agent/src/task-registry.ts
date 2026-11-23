@@ -452,7 +452,7 @@ export interface TaskRegistry {
   settleAcceptedOperation(dispatchKey: string, outcome: ExecutionOutcome, options?: { now?: string }): OperationRecord;
   /**
    * 长任务让出槽位：清掉租约（任务事实不动，等待宿主 wait 唤醒）。
-   * 不产事件（存活仍由在跑事实承担）；只清租约，避免 expireLeases 把等待中的任务判成 died。
+   * 不产事件（存活仍由在跑事实承担）；只清租约，避免 expireLeases 把等待中的任务误写结束事实。
    */
   releaseTaskLease(taskId: string, options?: MutationOptions): TaskRecord;
 }

@@ -11,10 +11,8 @@ import { describe, expect, it } from 'vitest';
 import type { RuntimeConfig } from '@fshine/contracts';
 import {
   DEFAULT_RUNTIME_CONFIG,
-  RESOURCE_LIMITED_REASON,
   createResourcePolicy,
   resolveRuntimeConfig,
-  taskFailureReasonFor,
   type Permit,
   type Rejection,
   type ResourcePolicy,
@@ -594,10 +592,8 @@ describe('snapshot：资源快照（P8 ops / P6 调度读面）', () => {
   });
 });
 
-describe('拒绝 reason → 任务原因映射（联合接口约定 §5：resource_limited）', () => {
-  it('四类拒绝全部映射到 resource_limited（P5 不写任务状态；集成层据此落库原因）', () => {
-    expect(RESOURCE_LIMITED_REASON).toBe('resource_limited');
-
+describe('拒绝 reason：四类策略事实各有自己的机械原因（不映射任务失败分类）', () => {
+  it('四类拒绝的 reason 原样保留（P5 不写任务状态；怎么结束由消费方读原始事实）', () => {
     const quota = refused(makePolicy({ backgroundConcurrency: 0 }).acquire('background', { taskId: 'q' }));
 
     const depthPolicy = makePolicy({ maxDelegationDepth: 0 });
@@ -615,8 +611,5 @@ describe('拒绝 reason → 任务原因映射（联合接口约定 §5：resour
 
     expect([quota.reason, depth.reason, budget.reason, queue.reason].sort())
       .toEqual(['budget_exhausted', 'depth_exceeded', 'queue_full', 'quota_exceeded']);
-    for (const rejection of [quota, depth, budget, queue]) {
-      expect(taskFailureReasonFor(rejection)).toBe(RESOURCE_LIMITED_REASON);
-    }
   });
 });

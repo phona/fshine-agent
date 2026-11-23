@@ -904,7 +904,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     // 完成之后才跑）。
     wakeStateChange: (notice) => wakeLongRunningNotice(notice),
   });
-  // 等待用户出口（2026-11-21 live P0）：任务由非等待态进入 waiting_user（needs_input /
+  // 等待用户出口（2026-11-21 live P0）：任务由非等待态进入等待（needs_input /
   // needs_confirmation 收尾）→ **唤醒原会话的模型把待确认/待补说给用户并等表态**，与完成 /
   // 失败/取消/久无动静/重启对账共用同一条状态变化出口（不新建第二套唤醒与投递）。live 实测
   // 缺陷：进入等待此前只落底账，模型不知道有人在等它说话（15:25:55.992 落等待到 15:26:04
@@ -1079,7 +1079,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       // 预期契约（2026-11-18；2026-11-19 #9/#10 改形）：久无动静提醒端口（只一档；1:1 与群聊
       // 都发，判据只看底账任务事实，不看进程内集合；群主体话术不带业务名）。
       longRunningNotice,
-      // 等待用户出口（2026-11-21 live P0）：任务落 waiting_user → 唤醒原会话模型说
+      // 等待用户出口（2026-11-21 live P0）：任务落等待事实 → 唤醒原会话模型说
       // （见上方 waitingUserNotice 注释：事实机械、句柄不外泄、恰一次）。
       waitingUserNotice,
       // 长任务异步（契约 v4）：accepted / 协议违约 / 续跑回程登记与等待推进只进日志。

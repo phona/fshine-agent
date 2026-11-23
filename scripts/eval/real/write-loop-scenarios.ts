@@ -5,7 +5,7 @@
  *
  * 场景（每个都用真模型走真路径；判据全部机械事实）：
  *   · `stop`        用户说停：交办一件 10 分钟慢活（dummy.longtask）→ 受理后用户说「停」
- *                   → 断言任务真的停了（底账 cancelled）、执行层真被中止（abort 审计 +
+ *                   → 断言任务真的停了（底账结束事实、无汇报）、执行层真被中止（abort 审计 +
  *                   job 文件 cancelled）、停后审计行数冻结（不再被调用）、用户收到
  *                   「一句话（宿主停止事实模板）+ 一个动作（task_cancel 真的发生了）」。
  *   · `failure`     执行层业务失败：让用户在**锁定集合** locked-one 上新增记录
@@ -24,7 +24,7 @@
  *                   残留、完成交付出现。
  *
  * 判据纪律（仓规红线）：只用机械事实——执行层审计行（execution layer 自己的
- * audit.jsonl）、底账状态与执行事实、结构化读回、工具调用记录、投递端口收到的原文、
+ * audit.jsonl）、底账事实与执行事实、结构化读回、工具调用记录、投递端口收到的原文、
  * 执行层 job 文件。**不判模型措辞质量**；允许的文本判据只有「已知字符串存在性」：
  *   · 宿主话术模板（`failureTextFor` / 通知渲染器取消模板）——确定性文本；
  *   · 宿主/办事通道的**成功通道原文**（`办好了：` / `办完了` / `Confirmed write
@@ -251,7 +251,7 @@ export interface BaseEvidence {
 }
 
 export interface StopEvidence extends BaseEvidence {
-  /** 终态（cancelled）观测时刻的审计行数。 */
+  /** 停止事实（结束事实、无汇报）观测时刻的审计行数。 */
   auditAtCancel: number;
   /** 冻结窗口结束时的审计行数（两值必须相等 = 停后不再调用执行层）。 */
   auditAfterFreeze: number;
@@ -535,15 +535,15 @@ export function evaluateStopCriteria(evidence: StopEvidence): CriterionResult[] 
       + `（${evidence.jobs.map((job) => `${job.operationId}:${job.status}`).join('；') || '-'}）`,
   );
 
-  // S1-C2 「停」是一次实际动作，且任务真的停了：task_cancel 调用 + 底账终态 cancelled + 无残留非终局任务。
+  // S1-C2 「停」是一次实际动作，且任务真的停了：task_cancel 调用 + 底账结束事实（无汇报）+ 无残留未收尾任务。
   const cancelledTasks = evidence.tasks.filter((task) => (task.endedAt !== null && !task.reported));
   const leftover = evidence.tasks.filter((task) => !taskEndedInFacts(task));
   const cancelCall = evidence.cancelToolCall;
   add(
-    'S1-C2', '「停」是实际动作：task_cancel 调用 + 底账终态 cancelled + 无非终局残留', 'structured',
+    'S1-C2', '「停」是实际动作：task_cancel 调用 + 底账结束事实（无汇报）+ 无未收尾残留', 'structured',
     cancelCall !== undefined && cancelCall.ok && cancelledTasks.length >= 1 && leftover.length === 0,
     `task_cancel=${cancelCall === undefined ? '未调用' : `${cancelCall.ok ? 'ok' : '抛错'}(${cancelCall.summary})`}`
-      + `；任务终局=${evidence.tasks.map((task) => `#${String(task.taskNo ?? '-')}:${taskFactWord(task)}`).join(',') || '(无)'}`
+      + `；账本事实=${evidence.tasks.map((task) => `#${String(task.taskNo ?? '-')}:${taskFactWord(task)}`).join(',') || '(无)'}`
       + `；非终局残留=${leftover.length} 条`,
   );
 
@@ -834,7 +834,7 @@ export function evaluateReconfirmCriteria(evidence: ReconfirmEvidence): Criterio
       && leftover.length === 0
       && evidence.taskConfirmStartedCalls.length === 0,
     `任务数 第一次后=${evidence.taskCountAfterFirstWrite} 第三次后=${evidence.taskCountAfterReconfirm}；`
-      + `任务终局=${evidence.tasks.map((task) => `#${String(task.taskNo ?? '-')}:${task.reported ? '已汇报' : task.endedAt !== null ? '已停' : task.mayBeRunning ? '可能还在跑' : '结果未知'}`).join(',')}；`
+      + `账本事实=${evidence.tasks.map((task) => `#${String(task.taskNo ?? '-')}:${task.reported ? '已汇报' : task.endedAt !== null ? '已停' : task.mayBeRunning ? '可能还在跑' : '结果未知'}`).join(',')}；`
       + `非终局残留=${leftover.length} 条；started 的 task_confirm=${evidence.taskConfirmStartedCalls.length} 次`,
   );
 
@@ -956,7 +956,7 @@ export function evaluateTwoObjectsCriteria(evidence: TwoObjectsEvidence): Criter
   add(
     'S5-C3', '两件事都落终局 completed（没有失败/超时/未知/残留）', 'mechanical',
     evidence.tasks.length >= 1 && bad.length === 0,
-    `任务终局=${evidence.tasks.map((task) => `#${String(task.taskNo ?? '-')}:${taskFactWord(task)}`).join(',') || '(无)'}`
+    `账本事实=${evidence.tasks.map((task) => `#${String(task.taskNo ?? '-')}:${taskFactWord(task)}`).join(',') || '(无)'}`
       + `；非 completed=${bad.length} 条`,
   );
 
@@ -1446,12 +1446,12 @@ async function runStopScenario(harness: Harness, options: ScenarioRunOptions): P
   log(`  长任务受理观测：${acceptedBeforeStop}`);
   await harness.sendTurn(2, STOP_TURN_2, `wloop2-stop-${messageBase}-2`);
 
-  // 等任务真的落终局（cancelled）且没有非终局残留。
+  // 等任务写结束事实（无汇报）且没有未收尾残留。
   const terminal = await waitFor(() => {
     const tasks = harness.tasksNow();
     return tasks.some((task) => (task.endedAt !== null && !task.reported)) && tasks.every((task) => taskEndedInFacts(task));
   }, options.settleTimeoutMs);
-  log(`  终局落定（cancelled）：${terminal}`);
+  log(`  收尾事实落定：${terminal}`);
   // 给宿主取消事实的主动推送一点落定时间（投递不改任务/审计事实）。
   await waitFor(
     () => harness.logs.some((line) =>
@@ -1642,7 +1642,7 @@ async function runIdempotencyScenario(harness: Harness, options: ScenarioRunOpti
   log(`  提案已落底账：${sawProposal}`);
   await harness.sendTurn(2, USER_TURN_2, `wloop2-idempotency-${nowSlug()}-confirm`);
   const landed = await waitForTerminal(harness, options);
-  log(`  终局落定：${landed}`);
+  log(`  收尾事实落定：${landed}`);
   await waitForDeliverySettle(harness);
 
   const audit = harness.auditNow();
@@ -1801,7 +1801,7 @@ async function runTwoObjectsScenario(harness: Harness, options: ScenarioRunOptio
     await sleep(1_500);
   }
   const landed = await waitForTerminal(harness, options);
-  log(`  终局落定：${landed}（确认回合 ${confirmTurns} 次）`);
+  log(`  收尾事实落定：${landed}（确认回合 ${confirmTurns} 次）`);
   await waitForDeliverySettle(harness);
 
   const audit = harness.auditNow();

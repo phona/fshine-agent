@@ -59,20 +59,20 @@ export interface TurnSpec {
    *  实测：N5-B 里回复合法地报了 beta 的「3 条」，被裸词判负——负向检查必须限定对象。 */
   readonly replyExcludesScope?: string;
   /**
-   * 取消诚实性：回复声称「已取消」时账本最新任务必须真的 `cancelled`；若任务已
-   * `completed`，回复不得声称取消（如实说已完成即可）。用于「不许假取消」。
+   * 取消诚实性：回复声称「已取消」时账本最新任务必须有结束事实且无汇报；若任务已有汇报存档
+   * ，回复不得声称取消（如实说有汇报即可）。用于「不许假取消」。
    */
   readonly expectCancelHonest?: boolean;
   /**
    * `expectCancelHonest` 检查哪个任务：缺省 latest（取消「刚开的」那个）；
    * N6-C 要撤销最早那个已完成任务，必须显式 `'oldest'`，否则会拿最新任务
-   * （可能是已 cancelled 的另一个任务）造成空过。
+   * （可能是另一个已停且无汇报的任务）造成空过。
    */
   readonly cancelTarget?: 'oldest' | 'latest';
   /**
-   * 在飞取消：本轮之前最新任务必须仍在飞（queued/running/cancelling），本轮落定后
-   * 该任务必须真的 `cancelled`。轮前就已 completed → `E-INCONCLUSIVE`（没有在飞窗口，
-   * 不冒充判定）；落定后未 cancelled → E-D（取消未生效，含「指错任务」）。
+   * 在飞取消：本轮之前最新任务必须仍在飞（未启动排队 / 仍在推进 / 取消请求在飞），本轮落定后
+   * 该任务必须真的有结束事实且无汇报。轮前就已汇报存档 → `E-INCONCLUSIVE`（没有在飞窗口，
+   * 不冒充判定）；落定后未写结束事实 → E-D（取消未生效，含「指错任务」）。
    */
   readonly expectInflightCancel?: boolean;
   /** 本轮 send 之前的真实等待（毫秒；harness 用真 `setTimeout`，不用注入时钟假装）。 */

@@ -192,7 +192,7 @@ async function makeFixture(): Promise<Fixture> {
 }
 
 describe('长任务异步·装配接线', () => {
-  it('accepted → 任务 running 且槽位/租约释放；wait 完成 → Worker 续跑 → completed，执行层只调一次', async () => {
+  it('accepted → 任务仍在推进且槽位/租约释放；wait 完成 → Worker 续跑 → 汇报存档，执行层只调一次', async () => {
     const fx = await makeFixture();
     try {
       await fx.assembled.session.send('导出上个月全部凭证');

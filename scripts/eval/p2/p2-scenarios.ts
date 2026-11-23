@@ -554,9 +554,9 @@ const S7B: P2CaseDefinition = {
     const task = tasksOfRef(obs)[0];
     return [
       {
-        name: 'task_timed_out',
+        name: 'ended_without_report',
         pass: task !== undefined && task.ended && !task.reported && !task.mayBeRunning,
-        detail: `status=${task === undefined ? 'missing' : taskFactBrief(task)}`,
+        detail: `facts=${task === undefined ? 'missing' : taskFactBrief(task)}`,
         hardZero: true,
       },
       {

@@ -508,7 +508,7 @@ function longTaskWaitResultOf(outcome: ExecutionOutcome): {
 /**
  * 长任务等待端口（契约 v4）：执行面客户端声明了 `wait` 才接。
  * 未声明（或注入的假客户端没有该能力）→ 不接端口，runner 对 accepted 一律 fail-closed
- * （任务落 failed 并落事件），不会留下无人推进的 running 任务。
+ * （任务写失败事实并落事件），不会留下无人推进的任务。
  */
 function longTaskPortOf(client: ExecutionClient): LongTaskWaitPort | undefined {
   if (client.wait === undefined) return undefined;
@@ -694,7 +694,7 @@ export interface BackgroundDispatchInput {
    */
   longRunningNotice?: LongRunningNoticePort;
   /**
-   * 等待用户提醒端口（2026-11-21 live P0）：后台任务由非等待态进入 waiting_user 时触发
+   * 等待用户提醒端口（2026-11-21 live P0）：后台任务由非等待态进入等待事实时触发
    * 恰好一次（形状见 task-runner 的 {@link WaitingUserNoticePort}）；装配方接统一状态变化
    * 唤醒出口。缺省不接 = 零行为变化。
    */
