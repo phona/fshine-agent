@@ -29,6 +29,9 @@ import path from 'node:path';
 import type { FileRefRow, TaskStore } from '@fshine/core';
 import { fileStoragePathOf, type FileScope } from './file-store';
 import { fileRefTtlMsOf, type ResolvedRuntimeConfig } from './resource-policy';
+// 机械原因原文与 run 目录回收**同一份实现**（issue #72 合并）：两套清扫执行器的保守纪律
+// 同源，归属理由见 `run-dir-cleanup.ts` 的 `errorText` 注释。
+import { errorText } from './run-dir-cleanup';
 
 export type FileRefCleanupAction =
   | 'deleted_bytes'
@@ -87,10 +90,6 @@ export interface CleanupFileRefBytesInput {
   readonly dryRun?: boolean;
   /** 删除动作注入（测试用；缺省 `rmSync` 单文件，不递归、不跟随软链）。 */
   readonly remove?: (filePath: string) => void;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 interface Probe {

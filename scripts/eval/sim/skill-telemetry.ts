@@ -16,7 +16,7 @@
  */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { createSkillRegistry, renderSkillCatalog, type SkillMetadata, type SkillSummary } from '../../../packages/agent/src/skills';
+import { createSkillRegistry, isInside, renderSkillCatalog, type SkillMetadata, type SkillSummary } from '../../../packages/agent/src/skills';
 import { loadMainSkillDelivery } from '../../../packages/agent/src/worker-skills';
 import { estimateTokens } from '@earendil-works/pi-coding-agent';
 import { sha256Hex } from '../convergence-r1/hash';
@@ -84,7 +84,13 @@ function sameOrder(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((item, index) => item === b[index]);
 }
 
-/** 生产排序口径（`worker-skills.ts` 的 compareSkillNames：按 code unit，与 locale 无关）。 */
+/**
+ * 生产排序口径的**有意镜像**（issue #72 锁死「勿动」）：逐字复制
+ * `packages/agent/src/worker-skills.ts` 的 `compareSkillNames`（按 code unit，与 locale
+ * 无关）。刻意不 import 生产那份——遥测层要独立复核「生产 catalog 顺序是否等于规范排序」，
+ * 共用同一个比较器会让这个自检退化成恒真。镜像事实由
+ * `packages/agent/dead-code-merge.test.ts` 钉住（逐字相同 + 本注释必须在）。
+ */
 function compareSkillNames(a: { readonly name: string }, b: { readonly name: string }): number {
   if (a.name < b.name) return -1;
   if (a.name > b.name) return 1;
@@ -195,11 +201,6 @@ export function classifySkillFailure(text: string): SimSkillRejectionKind {
   if (text.includes('超出上限')) return 'oversize';
   if (text.includes('技能名称重复')) return 'duplicate';
   return 'failed';
-}
-
-function isInside(root: string, candidate: string): boolean {
-  const relative = path.relative(root, candidate);
-  return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 export interface SkillPathCheck {

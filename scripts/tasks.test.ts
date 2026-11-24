@@ -11,7 +11,7 @@
  */
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
@@ -26,6 +26,7 @@ import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sq
 import { materializeEvalConfig } from './resolve-config-path';
 import {
   EXECUTION_STATUS_WORDS,
+  deliverableFileName,
   findTaskRef,
   formatLocalTime,
   parseTaskArgs,
@@ -90,26 +91,53 @@ function record(overrides: Partial<TaskRecord> & { taskId: string }): TaskRecord
 }
 
 describe('tasks：参数与库路径解析', () => {
-  it('参数：空=列表；一个位置参数=详情；--config 透传；未知参数与多参数是用法错误', () => {
-    expect(parseTaskArgs([])).toEqual({});
-    expect(parseTaskArgs(['task_x'])).toEqual({ taskId: 'task_x' });
-    expect(parseTaskArgs(['--config=/tmp/x.yaml', 'task_x'])).toEqual({ taskId: 'task_x' });
+  it('参数：空=列表；一个位置参数=详情；--config 透传；未知参数是用法错误', () => {
+    expect(parseTaskArgs([])).toEqual({ taskIds: [] });
+    expect(parseTaskArgs(['task_x'])).toEqual({ taskIds: ['task_x'] });
+    expect(parseTaskArgs(['--config=/tmp/x.yaml', 'task_x'])).toEqual({ taskIds: ['task_x'] });
     expect(parseTaskArgs(['--bogus'])).toMatchObject({ usageError: expect.stringContaining('--bogus') });
-    expect(parseTaskArgs(['a', 'b'])).toMatchObject({ usageError: expect.any(String) });
+    expect(parseTaskArgs(['a', ''])).toMatchObject({ usageError: expect.stringContaining('taskId 不能为空') });
   });
 
   it('--out：两种形态、位置无关；缺值/空值/重复/无 taskId 是用法错误（P2）', () => {
-    expect(parseTaskArgs(['task_x', '--out', 'a.md'])).toEqual({ taskId: 'task_x', outPath: 'a.md' });
-    expect(parseTaskArgs(['--out=a.md', 'task_x'])).toEqual({ taskId: 'task_x', outPath: 'a.md' });
-    expect(parseTaskArgs(['--out', 'a.md', 'task_x'])).toEqual({ taskId: 'task_x', outPath: 'a.md' });
+    expect(parseTaskArgs(['task_x', '--out', 'a.md'])).toEqual({ taskIds: ['task_x'], outPath: 'a.md' });
+    expect(parseTaskArgs(['--out=a.md', 'task_x'])).toEqual({ taskIds: ['task_x'], outPath: 'a.md' });
+    expect(parseTaskArgs(['task_x', '--out', 'a.md', '--out', 'b.md']))
+      .toMatchObject({ usageError: expect.stringContaining('最多接受一个 --out') });
+    expect(parseTaskArgs(['--out', 'a.md'])).toMatchObject({ usageError: expect.stringContaining('taskId') });
+    // 缺值/空值/以 -- 开头：既有判定不动（路径以 -- 开头请用 --out=<path> 形态）。
     expect(parseTaskArgs(['task_x', '--out'])).toMatchObject({ usageError: expect.stringContaining('--out 缺少文件路径') });
     expect(parseTaskArgs(['task_x', '--out='])).toMatchObject({ usageError: expect.stringContaining('--out 缺少文件路径') });
     expect(parseTaskArgs(['task_x', '--out', '--config=/tmp/x.yaml']))
       .toMatchObject({ usageError: expect.stringContaining('--out 缺少文件路径') });
-    expect(parseTaskArgs(['task_x', '--out', 'a.md', '--out', 'b.md']))
-      .toMatchObject({ usageError: expect.stringContaining('最多接受一个 --out') });
-    expect(parseTaskArgs(['--out', 'a.md'])).toMatchObject({ usageError: expect.stringContaining('taskId') });
   });
+
+  it('--force：只与 --out 组合；缺 --out / 与 --redo 同用是用法错误', () => {
+    expect(parseTaskArgs(['task_x', '--out', 'a.md', '--force']))
+      .toEqual({ taskIds: ['task_x'], outPath: 'a.md', force: true });
+    expect(parseTaskArgs(['--force', '--out=a.md', 'task_x']))
+      .toEqual({ taskIds: ['task_x'], outPath: 'a.md', force: true });
+    // 无 --out 时 --force 没有可覆盖的对象（不引入「隐式覆盖」语义）。
+    expect(parseTaskArgs(['task_x', '--force'])).toMatchObject({ usageError: expect.stringContaining('--force') });
+    expect(parseTaskArgs(['--force'])).toMatchObject({ usageError: expect.stringContaining('--force') });
+    // 与 --redo 互斥（redo 不写文件，没有可覆盖的交付件）。
+    expect(parseTaskArgs(['task_x', '--redo', '--force'])).toMatchObject({ usageError: expect.stringContaining('--force') });
+    // 既有互斥不动：--redo 与 --out 仍互斥。
+    expect(parseTaskArgs(['task_x', '--redo', '--out', 'a.md']))
+      .toMatchObject({ usageError: expect.stringContaining('--redo 与 --out 不能同时使用') });
+  });
+
+  it('批量：多个位置参数原样保序；必须配 --out 目录；不与 --redo 同用', () => {
+    expect(parseTaskArgs(['#1', '#2', '--out', 'dir'])).toEqual({ taskIds: ['#1', '#2'], outPath: 'dir' });
+    expect(parseTaskArgs(['#2', '#1', '--out', 'dir'])).toEqual({ taskIds: ['#2', '#1'], outPath: 'dir' });
+    expect(parseTaskArgs(['#1', '#2', '--out', 'dir', '--force']))
+      .toEqual({ taskIds: ['#1', '#2'], outPath: 'dir', force: true });
+    // 多 id 不给 --out：没有导出目标（不做「批量详情」这种新展示面）。
+    expect(parseTaskArgs(['#1', '#2'])).toMatchObject({ usageError: expect.stringContaining('--out') });
+    // redo 仍只接受一个 taskId（重新推进一个任务）。
+    expect(parseTaskArgs(['#1', '#2', '--redo'])).toMatchObject({ usageError: expect.stringContaining('--redo') });
+  });
+
 
   it('库路径解析与 ask 链同解（fixture 无 store 段 + DB_PATH / --config 变体）', () => {
     const dir = tempDir();
@@ -351,7 +379,7 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
     const time = formatLocalTime(reported.createdAt);
     expect(text.startsWith('# 任务交付件：#1 帮我查一下 beta 集合、窗口 W1 的数据（已汇报）\n')).toBe(true);
     expect(text).toContain('## 任务信息\n\n任务 #1 帮我查一下 beta 集合、窗口 W1 的数据');
-    expect(text).toContain(`创建：${time}  更新：${formatLocalTime(reported.updatedAt)}\n交办：${reported.request}`);
+    expect(text).toContain(`创建：${time}  更新：${formatLocalTime(reported.updatedAt)}`);
     expect(text).toContain('## 状态\n\n事实：已汇报');
     expect(text).toContain('## 执行步骤\n\n执行步骤：\n  1. dummy.query  完成');
     expect(text).toContain('## 任务结果\n\n任务结果：\n已查询 beta：3 条。');
@@ -361,9 +389,154 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
     expect(text).toContain('- 「任务结果」是任务底账持久化的执行层汇报原文；「最终回复」是 Main 在回合收尾时实际发送给用户的回复全文（逐字存档）。');
     expect(text).toContain('- 历史任务没有最终回复存档（显示「该任务无最终回复存档」），交付件不以执行层汇报冒充 Main 回复。');
     expect(text).toContain('- 事实行只映射机械事实（等待/租约/机械时刻/汇报存档/执行行原值），不做任务结论；做没做成读执行步骤与任务结果原文。');
-    expect(text).toContain('- 时间以本机时区显示；执行步骤无时间戳。');
+    expect(text).toContain('- 时间以本机时区显示；执行步骤附起止时刻（底账未记录时刻的执行行显示「无时刻」）。');
     expect(text).not.toContain('机械事实：');
     expect(text).not.toContain('task_ok');
+  });
+
+  it('生成时间行：注入时钟可断言（任务信息段、创建/更新之后）；缺省取当前时刻', () => {
+    const now = new Date('2026-11-24T09:30:00.000Z');
+    const text = renderTaskDeliverable(failed, { now });
+    const expected = `生成时间：${formatLocalTime('2026-11-24T09:30:00.000Z')}`;
+    const time = formatLocalTime(failed.createdAt);
+    // 位置：任务信息段内，创建/更新行之后、交办行之前（与另两个时间字段同段）。
+    expect(text).toContain(`创建：${time}  更新：${time}\n${expected}\n交办：${failed.request}`);
+    expect(text.split('\n').filter((line) => line.startsWith('生成时间：'))).toHaveLength(1);
+
+    // 缺省（不注入）：仍是同一形状的一行，且落在当前时刻附近（本机时区）。
+    const before = Date.now();
+    const defaulted = renderTaskDeliverable(failed);
+    const line = defaulted.split('\n').find((item) => item.startsWith('生成时间：')) ?? '';
+    const match = /^生成时间：(\d{4}-\d{2}-\d{2} \d{2}:\d{2})$/.exec(line);
+    expect(match).not.toBeNull();
+    const stamped = new Date(match![1]!.replace(' ', 'T')).getTime();
+    expect(Number.isNaN(stamped)).toBe(false);
+    expect(stamped).toBeGreaterThanOrEqual(before - 60_000);
+    expect(stamped).toBeLessThanOrEqual(Date.now() + 60_000);
+  });
+
+  it('生成时间行：除此之外逐字节不变（加该行之前的完整金样）+ 详情不出现该行', () => {
+    // 金样 = 加「生成时间」行之前的交付件全文（8 个字段行/6 段结构不动）。
+    const time = formatLocalTime('2026-11-13T16:00:00.000Z');
+    const golden = [
+      '# 任务交付件：#1 帮我查一下 beta 集合、窗口 W1 的数据（已汇报）',
+      '',
+      '## 任务信息',
+      '',
+      '任务 #1 帮我查一下 beta 集合、窗口 W1 的数据',
+      `创建：${time}  更新：${time}`,
+      '交办：帮我查一下 beta 集合、窗口 W1 的数据',
+      '',
+      '## 状态',
+      '',
+      '事实：已汇报',
+      '',
+      '## 执行步骤',
+      '',
+      '执行步骤：',
+      '  1. dummy.query  失败  读取故障。  无时刻',
+      '',
+      '## 任务结果',
+      '',
+      '任务结果：',
+      '执行层报告读取故障。',
+      '',
+      '## 最终回复',
+      '',
+      '最终回复：',
+      '该任务无最终回复存档（历史任务，Main 最终回复未持久化；不以执行层汇报冒充）。',
+      '',
+      '## 限制与说明',
+      '',
+      '- 本交付件由 `npm run tasks` 的导出模式从本地任务底账机械导出（只读），内容未经模型润色或二次判定。',
+      '- 「任务结果」是任务底账持久化的执行层汇报原文；「最终回复」是 Main 在回合收尾时实际发送给用户的回复全文（逐字存档）。',
+      '- 历史任务没有最终回复存档（显示「该任务无最终回复存档」），交付件不以执行层汇报冒充 Main 回复。',
+      '- 事实行只映射机械事实（等待/租约/机械时刻/汇报存档/执行行原值），不做任务结论；做没做成读执行步骤与任务结果原文。',
+      '- 时间以本机时区显示；执行步骤附起止时刻（底账未记录时刻的执行行显示「无时刻」）。',
+    ].join('\n');
+    const text = renderTaskDeliverable(failed, { now: new Date('2026-11-24T09:30:00.000Z') });
+    // 恰好多出这一行（不多不少）：否则「结构不变」会被「整行消失」冒充。
+    expect(text.split('\n').filter((line) => line.startsWith('生成时间：'))).toHaveLength(1);
+    const withoutTimeLine = text.split('\n').filter((line) => !line.startsWith('生成时间：')).join('\n');
+    expect(withoutTimeLine).toBe(`${golden}\n`);
+    // 详情是「看一眼」的面，不出现导出时刻（渲染函数组不变：仍是那 8 个字段行）。
+    expect(renderTaskDetail(failed)).not.toContain('生成时间：');
+  });
+
+  it('批量导出文件名：业务编号优先；无编号（旧库）回退 taskId 且不含路径分隔', () => {
+    expect(deliverableFileName(reported)).toBe('task-1.md');
+    expect(deliverableFileName({ ...failed, taskNo: 42 })).toBe('task-42.md');
+    expect(deliverableFileName({ ...failed, taskNo: undefined, taskId: 'task_legacy-1' })).toBe('task-task_legacy-1.md');
+    // 回退值不含路径分隔符：写不出一级目录之外的文件。
+    expect(deliverableFileName({ ...failed, taskNo: undefined, taskId: 'a/b\\c' })).toBe('task-a_b_c.md');
+  });
+  it('执行步骤两态（issue #69）：有起止时刻 → 附本地时间区间；无时刻（旧行）→ 「无时刻」且不伪造', () => {
+    const withTimes = record({
+      taskId: 'task_times',
+      executions: [{
+        requestId: 'req_times',
+        operation: 'dummy.query',
+        status: 'completed',
+        startedAt: '2026-11-13T16:00:01.000Z',
+        finishedAt: '2026-11-13T16:02:05.000Z',
+      }],
+    });
+    // 旧行形状：执行行没有起止时刻（时间列上线前写入）——必须显示「无时刻」，不得编时间。
+    const withoutTimes = record({ taskId: 'task_legacy', executions: [execution('completed')] });
+
+    const range = `${formatLocalTime('2026-11-13T16:00:01.000Z')} → ${formatLocalTime('2026-11-13T16:02:05.000Z')}`;
+    for (const text of [renderTaskDetail(withTimes), renderTaskDeliverable(withTimes)]) {
+      expect(text).toContain(`执行步骤：\n  1. dummy.query  完成  ${range}`);
+      // 有时刻的行不得再显示「无时刻」。
+      const section = text.split('执行步骤：')[1]!.split('任务结果')[0]!;
+      expect(section).not.toContain('无时刻');
+    }
+    for (const text of [renderTaskDetail(withoutTimes), renderTaskDeliverable(withoutTimes)]) {
+      expect(text).toContain('执行步骤：\n  1. dummy.query  完成  无时刻');
+      // 不伪造：无时刻行的执行步骤段里不得出现任何时间区间。
+      const section = text.split('执行步骤：')[1]!.split('任务结果')[0]!;
+      expect(section).not.toContain('→');
+      expect(section).not.toContain('2026-11-13');
+    }
+  });
+
+  it('亚分钟执行：两端点渲染同分钟 → 显示单点，不伪装成一段时长', () => {
+    // 渲染只到分钟（owner 2026-11-24 裁：先不做秒级）。4 秒差的执行若显示「起 → 起」，
+    // 用户会读成坏了；这里显示单点（= 这一分钟内），不假装有一段时长。
+    const subMinute = record({
+      taskId: 'task_submin',
+      executions: [{
+        requestId: 'req_submin',
+        operation: 'dummy.query',
+        status: 'completed',
+        startedAt: '2026-11-13T16:00:01.000Z',
+        finishedAt: '2026-11-13T16:00:05.000Z',
+      }],
+    });
+    const point = formatLocalTime('2026-11-13T16:00:01.000Z');
+    for (const text of [renderTaskDetail(subMinute), renderTaskDeliverable(subMinute)]) {
+      expect(text).toContain(`执行步骤：\n  1. dummy.query  完成  ${point}`);
+      const section = text.split('执行步骤：')[1]!.split('任务结果')[0]!;
+      expect(section).not.toContain('→');
+    }
+  });
+
+  it('README 口径（issue #69）：执行步骤附起止时刻；不再声称「底账未存每步时间戳」', () => {
+    // 文本锚点四件事（AGENTS.md 判据红线）：
+    //   ① 想拦的失败形态：README 仍写「底账未存每步时间戳 / 最终回复当前不落库」，而实现已落
+    //      时刻与回复存档——用户照文档找不到时间，文档成为假陈述；
+    //   ② 为什么机械事实/结构化提取判不了：这是「文档句子与实现是否一致」的核对，唯一确定判据
+    //      就是逐字扫描该句（格式/泄漏类确定性检查，不涉及语义判断）；
+    //   ③ 会误伤哪些正确措辞：同义改写（如「逐步耗时」）都会红——有意如此：文档口径变更必须
+    //      显式同步守卫，不允许悄悄漂移；
+    //   ④ 负例绊线：把 README 改回旧两句 → 本用例红（反向绊线已实测）。
+    const flat = readFileSync(path.join(REPO_ROOT, 'README.md'), 'utf8').replace(/\s+/gu, '');
+    expect(flat).toContain(
+      '执行步骤按落账顺序列出，并附该次真实执行的起止时刻（底账未记录时刻的历史行显示「无时刻」）',
+    );
+    expect(flat).toContain('Main给用户的最终回复已逐字存档；历史任务无存档');
+    expect(flat).not.toContain('底账未存每步时间戳');
+    expect(flat).not.toContain('Main给用户的最终回复当前不落库');
   });
 
   it('最终回复存档在场：交付件含逐字回复全文与任务结果分列', () => {
@@ -405,9 +578,10 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
     expect(text).toContain('- 该任务尚未收尾（在跑）：交付件反映导出时的底账事实。');
   });
 
-  it('格式：LF、末尾恰一个换行；同输入两次渲染逐字节一致（无生成时间）', () => {
-    const first = renderTaskDeliverable(failed);
-    const second = renderTaskDeliverable(failed);
+  it('格式：LF、末尾恰一个换行；同输入同时钟两次渲染逐字节一致', () => {
+    const now = new Date('2026-11-24T09:30:00.000Z');
+    const first = renderTaskDeliverable(failed, { now });
+    const second = renderTaskDeliverable(failed, { now });
     expect(first).toBe(second);
     expect(first.includes('\r')).toBe(false);
     expect(first.endsWith('\n')).toBe(true);
@@ -437,7 +611,8 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
       '交办：帮我查一下 beta 集合、窗口 W1 的数据',
       '',
       '执行步骤：',
-      '  1. dummy.query  失败  读取故障。',
+      // issue #69：该执行行没有起止时刻（时间列上线前写入）→ 显示「无时刻」，不伪造。
+      '  1. dummy.query  失败  读取故障。  无时刻',
       '',
       '任务结果：',
       '执行层报告读取故障。',
@@ -462,9 +637,13 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
     expect(writeDeliverable({ filePath: target, text: 'A\n' })).toEqual({ ok: true });
     expect(readFileSync(target, 'utf8')).toBe('A\n');
 
+    // 默认拒绝覆盖：文案逐字不变（加 --force 之前的同一句）。
     const second = writeDeliverable({ filePath: target, text: 'B\n' });
-    expect(second).toMatchObject({ ok: false, exitCode: 2 });
-    if (!second.ok) expect(second.message).toContain('已存在');
+    expect(second).toEqual({
+      ok: false,
+      exitCode: 2,
+      message: `输出文件已存在：${target}（拒绝覆盖；请换一个路径，或先移走原文件）。`,
+    });
     expect(readFileSync(target, 'utf8')).toBe('A\n');
 
     const nested = path.join(dir, 'nested', 'deliverable.md');
@@ -472,6 +651,63 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
     expect(missing).toMatchObject({ ok: false, exitCode: 2 });
     if (!missing.ok) expect(missing.message).toContain('输出目录不存在');
     expect(existsSync(path.join(dir, 'nested'))).toBe(false);
+  });
+
+  it('--force：只覆盖本工具导出的交付件；非本工具产物/目录/缺目录仍拒绝', () => {
+    const dir = tempDir();
+    const target = path.join(dir, 'deliverable.md');
+    const exported = renderTaskDeliverable(failed, { now: new Date('2026-11-24T09:30:00.000Z') });
+    expect(writeDeliverable({ filePath: target, text: exported })).toEqual({ ok: true });
+
+    // --force：覆盖本工具自己导出的交付件（首行即交付件标题形状）。
+    const forced = writeDeliverable({ filePath: target, text: '新交付件\n', force: true });
+    expect(forced).toEqual({ ok: true });
+    expect(readFileSync(target, 'utf8')).toBe('新交付件\n');
+
+    // 非本工具产物：内容不是本工具导出的交付件 → 即便 --force 也不覆盖（原文不动）。
+    const foreign = path.join(dir, 'notes.md');
+    writeFileSync(foreign, '我的手写笔记，很重要。\n');
+    const refused = writeDeliverable({ filePath: foreign, text: '新交付件\n', force: true });
+    expect(refused).toMatchObject({ ok: false, exitCode: 2 });
+    if (!refused.ok) {
+      expect(refused.message).toBe(`输出文件已存在且不是本工具导出的交付件：${foreign}`
+        + '（--force 只覆盖本工具导出的交付件；请换一个路径，或先移走原文件）。');
+    }
+    expect(readFileSync(foreign, 'utf8')).toBe('我的手写笔记，很重要。\n');
+
+    // 形状近邻但不是交付件首行（无冒号/前缀不同/空文件）→ 一律按非本工具产物拒绝。
+    for (const [name, content] of [
+      ['near-miss-no-colon.md', '# 任务交付件 旧格式\n正文\n'],
+      ['near-miss-prefix.md', '# 交付件：查 beta\n正文\n'],
+      ['near-miss-blank.md', '\n# 任务交付件：查 beta\n'],
+      ['near-miss-empty.md', ''],
+    ] as const) {
+      const near = path.join(dir, name);
+      writeFileSync(near, content);
+      const result = writeDeliverable({ filePath: near, text: '新交付件\n', force: true });
+      expect(result).toMatchObject({ ok: false, exitCode: 2 });
+      expect(readFileSync(near, 'utf8')).toBe(content);
+    }
+
+    // 目录：--force 也不能把目录当文件覆盖。
+    const asDir = path.join(dir, 'as-dir');
+    mkdirSync(asDir);
+    const dirRefused = writeDeliverable({ filePath: asDir, text: '新交付件\n', force: true });
+    expect(dirRefused).toMatchObject({ ok: false, exitCode: 2 });
+    if (!dirRefused.ok) expect(dirRefused.message).toContain('输出目标是目录');
+    expect(existsSync(asDir)).toBe(true);
+
+    // 父目录缺失：--force 不改变「不自动建目录」。
+    const nested = path.join(dir, 'nested', 'out.md');
+    const missing = writeDeliverable({ filePath: nested, text: '新交付件\n', force: true });
+    expect(missing).toMatchObject({ ok: false, exitCode: 2 });
+    if (!missing.ok) expect(missing.message).toContain('输出目录不存在');
+    expect(existsSync(path.join(dir, 'nested'))).toBe(false);
+
+    // 目标不存在时 --force 与缺省同路径（正常独占写出）。
+    const fresh = path.join(dir, 'fresh.md');
+    expect(writeDeliverable({ filePath: fresh, text: '新交付件\n', force: true })).toEqual({ ok: true });
+    expect(readFileSync(fresh, 'utf8')).toBe('新交付件\n');
   });
 });
 
@@ -776,7 +1012,11 @@ describe('tasks：CLI 端到端（真实子进程）', () => {
 
     const again = runTasks(['task_failed', '--out', out2], { DB_PATH: dbPath });
     expect(again.status).toBe(0);
-    expect(readFileSync(out2, 'utf8')).toBe(text);
+    // 两次导出除「生成时间」一行外逐字节一致（该行按导出时刻走，跨分钟自然不同——
+    // 这正是加它的目的；要逐字节可复现的比对用注入时钟的单元测试）。
+    const withoutGeneratedAt = (value: string): string[] =>
+      value.split('\n').filter((line) => !line.startsWith('生成时间：'));
+    expect(withoutGeneratedAt(readFileSync(out2, 'utf8'))).toEqual(withoutGeneratedAt(text));
 
     expect(sha256(dbPath)).toBe(before);
   });
@@ -851,5 +1091,216 @@ describe('tasks：CLI 端到端（真实子进程）', () => {
     const exported = readFileSync(path.join(invocation, 'rel.md'), 'utf8');
     expect(exported).toContain('任务 #1 帮我查一下 beta 集合、窗口 W1 的数据');
     expect(exported).toContain('最终回复：\n已查到 beta 集合（窗口 W1）共 3 条记录，需要明细我再继续。');
+  });
+
+  it('--force：默认仍逐字拒绝覆盖；加 --force 只覆盖本工具交付件，非本工具产物不碰', () => {
+    const dir = tempDir();
+    const dbPath = seedDb(dir);
+
+    // 默认：文案与退出码逐字不变，原文件不动。
+    const existing = path.join(dir, 'existing.md');
+    writeFileSync(existing, '原有内容\n');
+    const refused = runTasks(['task_completed', '--out', existing, '--force'], { DB_PATH: dbPath });
+    expect(refused.status).toBe(2);
+    expect(refused.stderr).toContain(`输出文件已存在且不是本工具导出的交付件：${existing}`);
+    expect(refused.stderr).toContain('（--force 只覆盖本工具导出的交付件；请换一个路径，或先移走原文件）。');
+    expect(readFileSync(existing, 'utf8')).toBe('原有内容\n');
+
+    // --force + 本工具导出的交付件：覆盖。
+    const mine = path.join(dir, 'mine.md');
+    expect(runTasks(['task_completed', '--out', mine], { DB_PATH: dbPath }).status).toBe(0);
+    const first = readFileSync(mine, 'utf8');
+    const forced = runTasks(['task_failed', '--out', mine, '--force'], { DB_PATH: dbPath });
+    expect(forced.status).toBe(0);
+    expect(forced.stdout).toContain(`已导出任务交付件：${mine}`);
+    const second = readFileSync(mine, 'utf8');
+    expect(second).not.toBe(first);
+    expect(second).toContain('任务 #2 帮我查一下 faulty-one 集合的数据');
+
+    // 目录目标：--force 也不覆盖。
+    const asDir = path.join(dir, 'as-dir');
+    mkdirSync(asDir);
+    const dirRun = runTasks(['task_completed', '--out', asDir, '--force'], { DB_PATH: dbPath });
+    expect(dirRun.status).toBe(2);
+    expect(dirRun.stderr).toContain('输出目标是目录');
+    expect(existsSync(asDir)).toBe(true);
+  });
+
+  it('批量导出：多 id + --out 目录，一个任务一个文件；汇总行与退出码有金样', () => {
+    const dir = tempDir();
+    const dbPath = seedDb(dir);
+    const outDir = path.join(dir, 'out');
+    mkdirSync(outDir);
+
+    const run = runTasks(['#1', '#3', '--out', outDir], { DB_PATH: dbPath });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(`已导出任务交付件：${path.join(outDir, 'task-1.md')}`);
+    expect(run.stdout).toContain(`已导出任务交付件：${path.join(outDir, 'task-3.md')}`);
+    expect(run.stdout).toContain('批量导出：成功 2 个，失败 0 个。');
+    expect(run.stdout).toContain('任务底账：');
+    expect(readFileSync(path.join(outDir, 'task-1.md'), 'utf8'))
+      .toContain('任务 #1 帮我查一下 beta 集合、窗口 W1 的数据');
+    expect(readFileSync(path.join(outDir, 'task-3.md'), 'utf8'))
+      .toContain('任务 #3 帮我看看那边的情况');
+    // 没点名的任务不落文件（不顺手全导）。
+    expect(existsSync(path.join(outDir, 'task-2.md'))).toBe(false);
+    // 单 id 语义不变：--out 给目录仍是「输出文件已存在」exit 2。
+    const singleIntoDir = runTasks(['task_completed', '--out', outDir], { DB_PATH: dbPath });
+    expect(singleIntoDir.status).toBe(2);
+    expect(singleIntoDir.stderr).toContain('输出文件已存在');
+  });
+
+  it('批量导出：部分失败 exit 1（成功/失败计数 + 每个失败原因；已成功的文件与既有文件都不动）', () => {
+    const dir = tempDir();
+    const dbPath = seedDb(dir);
+    const outDir = path.join(dir, 'out');
+    mkdirSync(outDir);
+    const blocked = path.join(outDir, 'task-2.md');
+    writeFileSync(blocked, '原有内容\n');
+
+    const run = runTasks(['#1', '#2', '#3', '--out', outDir], { DB_PATH: dbPath });
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain(`已导出任务交付件：${path.join(outDir, 'task-1.md')}`);
+    expect(run.stdout).toContain(`已导出任务交付件：${path.join(outDir, 'task-3.md')}`);
+    expect(run.stdout).toContain('批量导出：成功 2 个，失败 1 个。');
+    expect(run.stderr).toContain(`输出文件已存在：${blocked}`);
+    expect(run.stderr).toContain('（拒绝覆盖；请换一个路径，或先移走原文件）。');
+    expect(readFileSync(blocked, 'utf8')).toBe('原有内容\n');
+
+    // 全部失败：仍是 exit 1，计数 0（与单导出的 2/1 语义区分开）。
+    const allBlocked = runTasks(['#1', '#2', '--out', outDir], { DB_PATH: dbPath });
+    expect(allBlocked.status).toBe(1);
+    expect(allBlocked.stdout).toContain('批量导出：成功 0 个，失败 2 个。');
+    expect(allBlocked.stderr).toContain('输出文件已存在');
+  });
+
+  it('批量导出：--force 覆盖目录里本工具导出的交付件，非本工具产物仍拒绝', () => {
+    const dir = tempDir();
+    const dbPath = seedDb(dir);
+    const outDir = path.join(dir, 'out');
+    mkdirSync(outDir);
+    const first = path.join(outDir, 'task-1.md');
+    expect(runTasks(['#1', '--out', first], { DB_PATH: dbPath }).status).toBe(0);
+    writeFileSync(path.join(outDir, 'task-3.md'), '我的手写笔记\n');
+
+    const run = runTasks(['#1', '#3', '--out', outDir, '--force'], { DB_PATH: dbPath });
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain(`已导出任务交付件：${path.join(outDir, 'task-1.md')}`);
+    expect(run.stdout).toContain('批量导出：成功 1 个，失败 1 个。');
+    expect(run.stderr).toContain(`输出文件已存在且不是本工具导出的交付件：${path.join(outDir, 'task-3.md')}`);
+    expect(readFileSync(path.join(outDir, 'task-3.md'), 'utf8')).toBe('我的手写笔记\n');
+    // --force 覆盖的是本工具交付件：内容被重写为该任务的交付件。
+    expect(readFileSync(first, 'utf8')).toContain('任务 #1 帮我查一下 beta 集合、窗口 W1 的数据');
+  });
+
+  it('批量导出：引用解析不到 → exit 2 且不写任何文件；--out 非目录/缺失同样 exit 2 不创建', () => {
+    const dir = tempDir();
+    const dbPath = seedDb(dir);
+    const outDir = path.join(dir, 'out');
+    mkdirSync(outDir);
+
+    const unknown = runTasks(['#1', '#99', '--out', outDir], { DB_PATH: dbPath });
+    expect(unknown.status).toBe(2);
+    expect(unknown.stderr).toContain('找不到任务：#99');
+    expect(readdirSync(outDir)).toEqual([]);
+
+    const asFile = path.join(dir, 'not-a-dir.md');
+    writeFileSync(asFile, 'x\n');
+    const fileTarget = runTasks(['#1', '#3', '--out', asFile], { DB_PATH: dbPath });
+    expect(fileTarget.status).toBe(2);
+    expect(fileTarget.stderr).toContain('输出路径不是目录');
+    expect(readFileSync(asFile, 'utf8')).toBe('x\n');
+
+    const missingDir = path.join(dir, 'no-such-dir');
+    const missing = runTasks(['#1', '#3', '--out', missingDir], { DB_PATH: dbPath });
+    expect(missing.status).toBe(2);
+    expect(missing.stderr).toContain('输出目录不存在');
+    expect(existsSync(missingDir)).toBe(false);
+  });
+
+  it('批量导出：多个 taskId 不给 --out 是用法错误（不新增批量详情展示面）', () => {
+    const dir = tempDir();
+    const dbPath = seedDb(dir);
+    const run = runTasks(['#1', '#2'], { DB_PATH: dbPath });
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain('--out');
+    const withRedo = runTasks(['#1', '#2', '--redo'], { DB_PATH: dbPath });
+    expect(withRedo.status).toBe(2);
+    expect(withRedo.stderr).toContain('--redo');
+  });
+
+  it('批量导出：交付件含生成时间行（本机时区），主库只读不变', () => {
+    const dir = tempDir();
+    const dbPath = seedDb(dir);
+    const before = sha256(dbPath);
+    const outDir = path.join(dir, 'out');
+    mkdirSync(outDir);
+
+    const run = runTasks(['task_failed', '--out', path.join(outDir, 'task-2.md')], { DB_PATH: dbPath });
+    expect(run.status).toBe(0);
+    const text = readFileSync(path.join(outDir, 'task-2.md'), 'utf8');
+    // 生成时间行：本机时区 YYYY-MM-DD HH:mm，与创建/更新行同在「任务信息」段。
+    expect(text).toMatch(/^生成时间：\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/m);
+    expect(text).toMatch(/创建：\d{4}-\d{2}-\d{2} \d{2}:\d{2}  更新：\d{4}-\d{2}-\d{2} \d{2}:\d{2}\n生成时间：\d{4}-\d{2}-\d{2} \d{2}:\d{2}\n交办：/);
+    expect(sha256(dbPath)).toBe(before);
+  });
+});
+
+/** README 的 tasks 用法段是「现状陈述」：与 CLI 实际面一致（改文档必配能变红的守卫）。 */
+describe('tasks：README 用法陈述与 CLI 现状一致', () => {
+  const readme = readFileSync(path.join(REPO_ROOT, 'README.md'), 'utf8');
+
+  it('符号链接一律拒绝：--force 也不穿过链接写目标（grok blocking）', () => {
+    // 2026-11-24 grok blocking：--force 走 flag:'w'（O_TRUNC|O_CREAT）会穿过链接。悬空链接时
+    // existsSync=false，形状检查被跳过；指向已有交付件的链接会通过形状检查后覆盖目标。
+    // 两种都把内容写到用户给出的路径之外。
+    const dir = tempDir();
+    const dbPath = seedDb(dir);
+    const outside = path.join(dir, 'outside.md');
+
+    // ① 悬空链接：existsSync 为 false，但不得创建链接目标。
+    const dangling = path.join(dir, 'dangling.md');
+    symlinkSync(outside, dangling);
+    const run1 = runTasks(['#1', '--out', dangling, '--force'], { DB_PATH: dbPath });
+    expect(run1.status).toBe(2);
+    expect(run1.stderr + run1.stdout).toContain('符号链接');
+    expect(existsSync(outside)).toBe(false);
+
+    // ② 指向真实交付件的链接：形状检查会通过（读到目标首行），但仍不得覆盖目标。
+    const real = path.join(dir, 'real.md');
+    writeFileSync(real, '# 任务交付件：#1 旧内容\n', 'utf8');
+    const linked = path.join(dir, 'linked.md');
+    symlinkSync(real, linked);
+    const run2 = runTasks(['#1', '--out', linked, '--force'], { DB_PATH: dbPath });
+    expect(run2.status).toBe(2);
+    expect(run2.stderr + run2.stdout).toContain('符号链接');
+    expect(readFileSync(real, 'utf8')).toContain('旧内容'); // 目标没被改
+  });
+
+  it('README 记录 --force / 批量导出 / 生成时间行，且文档提到的 flag 都被 parseTaskArgs 接受', () => {
+    const block = readme.split('### `npm run tasks`')[1]?.split('###')[0] ?? '';
+    expect(block).not.toBe('');
+    // 现状陈述逐条钉住：任一句回退成旧措辞（如「拒绝覆盖既有文件」）即红。
+    expect(readme).toContain('默认拒绝覆盖，--force 才覆盖本工具导出的交付件');
+    expect(block).toContain('`--force` 只覆盖本工具导出的交付件（按首行形状机械判定，目录与非本工具产物仍拒绝）');
+    expect(block).toContain('另有一行「生成时间」（导出时刻；详情没有）');
+    expect(block).toContain('批量导出：多个 taskId + `--out <目录>`（必须是已存在目录，不自动创建）');
+    expect(block).toContain('任一找不到即 exit 2 且不写任何文件');
+    expect(block).toContain('部分失败会导完');
+    expect(block).toContain('「批量导出：成功 X 个，失败 Y 个。」并 exit 1');
+    expect(block).toContain('单个 taskId 的行为与批量之前逐字节一致');
+    // 文档里出现的每个 flag 必须有一个合法组合（写一个 CLI 不接受的参数即红）。
+    const validArgvFor: Record<string, string[]> = {
+      '--out': ['task_x', '--out', 'a.md'],
+      '--force': ['task_x', '--out', 'a.md', '--force'],
+      '--redo': ['task_x', '--redo'],
+      '--config': ['--config=/tmp/x.yaml', 'task_x'],
+    };
+    const documented = [...block.matchAll(/--[A-Za-z][\w-]*/g)].map((match) => match[0]);
+    expect([...new Set(documented)].sort()).toEqual(Object.keys(validArgvFor).sort());
+    for (const flag of Object.keys(validArgvFor)) {
+      expect(parseTaskArgs(validArgvFor[flag]!), `README 记录了 CLI 不接受的参数：${flag}`)
+        .not.toHaveProperty('usageError');
+    }
   });
 });

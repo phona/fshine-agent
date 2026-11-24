@@ -23,7 +23,7 @@ import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { renderNotification } from '../../../packages/agent/src/notification-render';
 import { NOTIFICATION_KINDS, type NotificationKind } from '../../../packages/agent/src/notifications';
-import { findLiteralHits, INTERNAL_WORDS, scanUserVisibleText } from './internal-terms';
+import { findLiteralHits, INTERNAL_WORDS, scanUserVisibleText, TOOL_BLOCK_MARKERS } from './internal-terms';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
@@ -169,6 +169,81 @@ describe('taskId 形态扫描（task_ + ≥8 位标识段；不扩词表，同�
     // 与批次侧完全相同的调用形态即可拿到 taskId 命中，证明新形状在单一来源里生效。
     const { hits } = scanUserVisibleText([{ where: 'x', text: '任务号 task_ab12cd34 已停止。' }]);
     expect(hits.some((hit) => hit.marker === 'task_ab12cd34')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ①d 结构化块形状机械断言（2026-11-24 补 live P0 ①：DSML 工具块曾原样投给用户）
+//     判据 = 机械形状（格式/泄漏类），不判语义；与词表/编号/taskId 并列，同一入口。
+// ---------------------------------------------------------------------------
+
+describe('结构化块形状扫描（工具调用块标记 + JSON 字面量；同一 scanUserVisibleText 入口）', () => {
+  it('工具调用块标记：**live 实测冻结的原文**（N1 四条）逐条命中', () => {
+    // 判据扩张必须用实测原文做表征锁（change-safety F8）。这四条是 2026-11-20 live 首验
+    // 从真实泄漏里拿到的形状（原 live-replay TOOL_MARKERS，已冻结），不是假设形态。
+    const { hits } = scanUserVisibleText([
+      { where: 'a', text: '<｜｜DSML><｜tool call>' },
+      { where: 'b', text: '调用 <｜tool name="dummy.query"> 的参数' },
+      { where: 'c', text: '<invoke name="x">' },
+      { where: 'd', text: '<｜tool call> parameter name="x"' },
+    ]);
+    const markers = hits.map((hit) => hit.marker);
+    for (const marker of TOOL_BLOCK_MARKERS) {
+      expect(markers, `封闭表缺 ${marker}`).toContain(marker);
+    }
+  });
+
+  it('live-replay 的 N1 绊线原文过闸必红（grok 实测：旧词表对它是假绿）', () => {
+    // 这两句是 scripts/eval/real/live-replay.test.ts 的既有绊线原文；此前新闸对它们零命中
+    // （tool_call 匹配不上中间带空格的 <｜tool call>），正是这次修订要堵的假绿。
+    const { hits } = scanUserVisibleText([
+      { where: '主动推送#1', text: '<｜tool call> parameter name="x"' },
+      { where: '主动推送#2', text: '前缀 <invoke name="x"> 后缀' },
+    ]);
+    expect(hits.length).toBeGreaterThanOrEqual(2);
+    expect(hits.some((hit) => hit.excerpt.includes('parameter name='))).toBe(true);
+    expect(hits.some((hit) => hit.excerpt.includes('<invoke'))).toBe(true);
+  });
+
+  it('JSON 结构字面量（对象/数组以引号成员开头，不要求冒号）→ 命中', () => {
+    const { hits } = scanUserVisibleText([
+      { where: 'a', text: '结果是 {"collection":"documents","count":3}。' },
+      { where: 'b', text: '明细：\n[{"name":"document-1","value":1200}]' },
+      { where: 'c', text: '列表 ["a","b"] 原样出来了' },
+    ]);
+    expect(hits.length).toBeGreaterThanOrEqual(3);
+    expect(hits[0]!.excerpt).toContain('collection');
+  });
+
+  it('同一段结构字面量不双计（行首形状是字面量形状的子串时只记一次）', () => {
+    const { hits } = scanUserVisibleText([{ where: 'x', text: '{"a":1}' }]);
+    // 行首那条与字面量那条起点相同 → 只记一次；修复前这里会是 2。
+    expect(hits).toHaveLength(1);
+  });
+
+  it('正常业务行文零命中（中文+数字+括号/顿号/表格/代码围栏都不误报）', () => {
+    expect(scanUserVisibleText([
+      { where: 'a', text: '核对完成，共 3 条单据，合计 2900。' },
+      { where: 'b', text: '第 2 条和第 3 条同名（都是 document-2），金额一个 800、一个 900。' },
+      { where: 'c', text: '窗口 W202611 与 W202610 返回的记录逐条一致。' },
+      { where: 'd', text: '金额（元）：1200' },
+      { where: 'e', text: '把【备注】里的内容发我：客户名称+期间' },
+      { where: 'f', text: '```\nconsole.log(1)\n```' },
+      { where: 'g', text: '要不要按编号去查？' },
+      { where: 'h', text: '已收到 3 个文件：名册.xlsx、工资表.xlsx、说明.docx' },
+    ]).hits).toEqual([]);
+  });
+
+  it('走的是同一个 scanUserVisibleText 入口（四个批次 + wecom-sim 零改动即生效）', () => {
+    const { hits } = scanUserVisibleText([{ where: 'x', text: '工具块：<invoke name="x"> 泄漏' }]);
+    expect(hits.some((hit) => hit.marker === '<invoke')).toBe(true);
+  });
+
+  it('反向绊线：形状必须真的在 scanUserVisibleText 里（被摘掉本断言即红）', () => {
+    // 证明闸生效：同一调用形态能拿到结构化块命中；若有人把 findStructuredBlockHits
+    // 从 scanUserVisibleText 里摘掉，这条先红（提示闸被拆），而不是静默放过。
+    const { hits } = scanUserVisibleText([{ where: 'x', text: '<invoke name="x">' }]);
+    expect(hits.some((hit) => hit.marker === '<invoke')).toBe(true);
   });
 });
 

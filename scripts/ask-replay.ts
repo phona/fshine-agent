@@ -27,7 +27,7 @@ import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import type { ContextProfileConfig } from '@fshine/contracts';
 import { AssemblyRefusedError, assembleSessionCore, type AssembledSession } from './ask-runtime';
 import { evaluateAssertion, parseAssertionSpec, type AssertionFacts, type AssertionResult, type AssertionSpec } from './ask-assert';
-import { createTraceRecorder, type BlockedFact, type TraceTurnRecord } from './ask-trace';
+import { createTraceRecorder, jsonSafe, sha256Hex, type BlockedFact, type TraceTurnRecord } from './ask-trace';
 import type { TurnDriver, TurnDriverInput } from '../packages/agent/src/driver-contract';
 import type { Session } from '../packages/agent/src/execution-runtime';
 import type { ExecutionRecord, TaskRegistry } from '../packages/agent/src/task-registry';
@@ -122,20 +122,8 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function sha256Hex(text: string): string {
-  return createHash('sha256').update(text).digest('hex');
-}
-
 function sha256File(file: string): string {
   return createHash('sha256').update(readFileSync(file)).digest('hex');
-}
-
-function jsonSafe(value: unknown): unknown {
-  try {
-    return JSON.parse(JSON.stringify(value)) as unknown;
-  } catch {
-    return String(value);
-  }
 }
 
 function parseSessionSpec(raw: unknown): ReplaySessionSpec | undefined {

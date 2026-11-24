@@ -50,7 +50,7 @@
 | 事实 | 唯一来源 | 消费方 |
 | --- | --- | --- |
 | `taskNo`（数字编号，唯一不复用） | 底账单条 SQL 计数器（`packages/core/src/task-store.ts:652`，迁移回填 `:617-621`） | 任务行；展示层只读 |
-| `#<no> <name>` 标签 / 引用解析 | `taskNoLabel`/`taskLabel`（`scripts/tasks.ts:248`、`:256`）；`findTaskRef`（`:266`） | 证据行、`ops`/`tasks` 列表；CLI 详情 |
+| `#<no> <name>` 标签 / 引用解析 | `taskNoLabel`/`taskLabel`（`scripts/tasks.ts:288`、`:296`）；`findTaskRef`（`:306`） | 证据行、`ops`/`tasks` 列表；CLI 详情 |
 | 业务名称 / 机械事实标签 | `deriveTaskName`（`packages/agent/src/task-registry.ts`）；`taskFactLabelsOf`（`scripts/tasks.ts`）——就地读启动/结束/汇报/提问/租约事实算标签，未知值 fail-open 显示原值 | 展示层与模型可见投影 |
 
 对话面 `resolveTaskId` 只在**本会话 scope** 内解析，跨会话 = 找不到（`packages/agent/src/execution-runtime.ts:1429`）。对账测试钉住同源：`scripts/ops.test.ts:305`、`scripts/tasks.test.ts:211`。
@@ -59,8 +59,8 @@
 ## 7. 不承诺什么 / 相邻出口
 
 - **不是 Exactly Once**：只承诺「同一 `dispatchKey` 至多一次自动执行 + 结果未知可核对」（`packages/contracts/src/execution-contract.ts:80`）；业务效果是否只写一次归执行层幂等键/状态查询。
-- **跨重启入站幂等 / 任务不自动重跑**：渠道重投幂等的唯一判据是底账 `inbound_messages` 表，主键 `(principal_id, session_id, message_id)`（`packages/core/src/task-store.ts:528`，认领/落定/查询 `:1386`/`:1390`/`:1404`）；同一条先于一切副作用查重，命中即回放原回执、零新任务零执行，处理失败删行让渠道重投（不伪造回执）（`apps/server/server.ts:1233-1241`）。进程内存 Map（`inboundInFlight`，`apps/server/server.ts:1242`，上限 `MESSAGE_REPLY_LIMIT=1024` `:97`）只解决**同进程并发重投**两条同 `messageId` 几乎同时到达时第二条等第一条落定，不承担跨重启判据（落定即删）。底账留 processing（上一进程挂了）的重投：不执行、回「这条消息上次没办完（我这边中途中断过），我不会重复执行它，结果未知——麻烦你重发一次。」（`INBOUND_STILL_PROCESSING_NOTE` `apps/server/server.ts:228-229`）、落 `message_still_processing` 事件（`:1359`/`:1415`）。4/4 单测含关 server、同 dbPath 重建、再投同一 `messageId` 回放同一句（`apps/server/server-inbound-idempotency.test.ts:136`）。任务侧重跑另算：`queued` 重领（`claimNextQueued`），过期租约写下结束事实（结果未知）且零重放（`expireLeases`；`packages/agent/task-runner.test.ts:639`）。
-- **`--redo` 是重新交办，不是续跑**：输入=存储的 `task.request` 逐字、新任务、原任务零改动（`scripts/tasks.ts:522`）；仍在推进（`stillProgressingOf`）/等待（`pendingQuestion`）/未启动的任务拒绝（`scripts/tasks.ts:540`、`:543`、`:546`）。
+- **跨重启入站幂等 / 任务不自动重跑**：渠道重投幂等的唯一判据是底账 `inbound_messages` 表，主键 `(principal_id, session_id, message_id)`（`packages/core/src/task-store.ts:528`，认领/落定/查询 `:1386`/`:1390`/`:1404`）；同一条先于一切副作用查重，命中即回放原回执、零新任务零执行，处理失败删行让渠道重投（不伪造回执）（`apps/server/server.ts:1233-1241`）。进程内存 Map（`inboundInFlight`，`apps/server/server.ts:1242`，上限 `MESSAGE_REPLY_LIMIT=1024` `:97`）只解决**同进程并发重投**两条同 `messageId` 几乎同时到达时第二条等第一条落定，不承担跨重启判据（落定即删）。底账留 processing（上一进程挂了）的重投：不执行、回「这条消息上次没办完（我这边中途中断过），我不会重复执行它，结果未知——麻烦你重发一次。」（`INBOUND_STILL_PROCESSING_NOTE` `apps/server/server.ts:228-229`）、落 `message_still_processing` 事件（`:1359`/`:1415`）。单测含关 server、同 dbPath 重建、再投同一 `messageId` 回放同一句（`apps/server/server-inbound-idempotency.test.ts`，该文件 6 个用例）。任务侧重跑另算：`queued` 重领（`claimNextQueued`），过期租约写下结束事实（结果未知）且零重放（`expireLeases`；`packages/agent/task-runner.test.ts:639`）。
+- **`--redo` 是重新交办，不是续跑**：输入=存储的 `task.request` 逐字、新任务、原任务零改动（`scripts/tasks.ts:663`）；仍在推进（`stillProgressingOf`）/等待（`pendingQuestion`）/未启动的任务拒绝（`scripts/tasks.ts:685`、`:693`、`:696`）。
 - **模型把一笔意图拆成两次调用 → 两笔都执行**（两条独立身份，见 §2）；这是登记在案的失败形态，不写成「不会重复」，兜底在执行层。
 - **职责边界**：Main 只拆包（不亲自做长活、不甩包），Worker 只做交办给它的那件事，交付物只从 Worker 出（`AGENTS.md:31-33`）；Main 的 `run_js` 不产交付物。
 

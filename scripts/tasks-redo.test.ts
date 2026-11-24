@@ -162,16 +162,16 @@ function redoInput(task: TaskRecord, dbPath: string): Parameters<typeof runRedo>
 
 describe('tasks --redo：参数解析', () => {
   it('--redo 与 taskId 组合（位置无关、--config 透传）；缺 id/与 --out 冲突/重复是用法错误', () => {
-    expect(parseTaskArgs(['task_x', '--redo'])).toEqual({ taskId: 'task_x', redo: true });
-    expect(parseTaskArgs(['--redo', 'task_x'])).toEqual({ taskId: 'task_x', redo: true });
-    expect(parseTaskArgs(['task_x', '--redo', '--config=/tmp/x.yaml'])).toEqual({ taskId: 'task_x', redo: true });
+    expect(parseTaskArgs(['task_x', '--redo'])).toEqual({ taskIds: ['task_x'], redo: true });
+    expect(parseTaskArgs(['--redo', 'task_x'])).toEqual({ taskIds: ['task_x'], redo: true });
+    expect(parseTaskArgs(['task_x', '--redo', '--config=/tmp/x.yaml'])).toEqual({ taskIds: ['task_x'], redo: true });
     expect(parseTaskArgs(['--redo'])).toMatchObject({ usageError: expect.stringContaining('--redo 需要与 taskId 一起使用') });
     expect(parseTaskArgs(['task_x', '--redo', '--out', 'a.md']))
       .toMatchObject({ usageError: expect.stringContaining('--redo 与 --out 不能同时使用') });
     expect(parseTaskArgs(['task_x', '--redo', '--redo']))
       .toMatchObject({ usageError: expect.stringContaining('最多接受一个 --redo') });
     // 既有形态不动：无 --redo 时返回对象里没有 redo 键。
-    expect(parseTaskArgs(['task_x'])).toEqual({ taskId: 'task_x' });
+    expect(parseTaskArgs(['task_x'])).toEqual({ taskIds: ['task_x'] });
   });
 });
 

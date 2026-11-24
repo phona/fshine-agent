@@ -176,7 +176,13 @@ class LongTaskFace implements ExecutionClient {
   }
 }
 
-async function waitFor(assertion: () => void, timeoutMs = 1_000): Promise<void> {
+/**
+ * 轮询等一个条件成立。**默认 15s**：本套件等的是「消息进 runner → 起后台 pump → 阈值到点
+ * → 唤醒 → 投递」一整条异步链（阈值本身钉在 1ms，不是等 10 分钟），CI 整机负载高时 3s 走
+ * 不完——2026-11-24 PR #78 的 ci 就这样红过一次（`expected [] to have a length of 1`，
+ * 本地连跑 3 次都绿）。链路是确定性的，慢的是机器，所以抬墙钟而不是把断言改松。
+ */
+async function waitFor(assertion: () => void, timeoutMs = 15_000): Promise<void> {
   const startedAt = Date.now();
   for (;;) {
     try {
@@ -206,7 +212,7 @@ describe('预期契约·主动提醒的生产接线', () => {
     });
     try {
       await server.handler(incoming('user-a', 'conv-a', '跑一个很久的活'));
-      await waitFor(() => expect(delivery.texts).toHaveLength(1), 3_000);
+      await waitFor(() => expect(delivery.texts).toHaveLength(1));
       expect(delivery.texts[0]!.route).toEqual({ channel: 'wecom', conversationId: 'conv-a' });
       // 本夹具的假 driver 没有唤醒能力 → 走「模型回合挂掉」降级：如实投兜底句（不说进度、不诱导重试）。
       expect(delivery.texts[0]!.text).toBe(LONG_RUNNING_NOTICE_FALLBACK_TEXT);
@@ -240,7 +246,7 @@ describe('预期契约·主动提醒的生产接线', () => {
     });
     try {
       await server.handler(incoming('user-a', 'group-1', '跑一个很久的活', 'group'));
-      await waitFor(() => expect(delivery.texts).toHaveLength(1), 3_000);
+      await waitFor(() => expect(delivery.texts).toHaveLength(1));
       expect(delivery.texts[0]!.route).toEqual({ channel: 'wecom', conversationId: 'group-1' });
       // 话术不带业务名（事实里已去掉名字；假 driver 无唤醒 → 投的兜底句本身也不含名字）。
       expect(delivery.texts[0]!.text).toBe(LONG_RUNNING_NOTICE_FALLBACK_TEXT);
@@ -282,7 +288,7 @@ describe('预期契约·主动提醒的生产接线', () => {
     });
     try {
       // 一条 inbound 都没发过（进程内集合为空）。
-      await waitFor(() => expect(delivery.texts).toHaveLength(1), 3_000);
+      await waitFor(() => expect(delivery.texts).toHaveLength(1));
       expect(delivery.texts[0]!.route).toEqual({ channel: 'wecom', conversationId: 'conv-a' });
       expect(delivery.texts[0]!.text).toBe(LONG_RUNNING_NOTICE_FALLBACK_TEXT);
     } finally {
