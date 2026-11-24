@@ -469,6 +469,7 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
     expect(deliverableFileName({ ...failed, taskNo: undefined, taskId: 'task_legacy-1' })).toBe('task-task_legacy-1.md');
     // 回退值不含路径分隔符：写不出一级目录之外的文件。
     expect(deliverableFileName({ ...failed, taskNo: undefined, taskId: 'a/b\\c' })).toBe('task-a_b_c.md');
+  });
   it('执行步骤两态（issue #69）：有起止时刻 → 附本地时间区间；无时刻（旧行）→ 「无时刻」且不伪造', () => {
     const withTimes = record({
       taskId: 'task_times',
