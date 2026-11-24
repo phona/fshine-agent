@@ -89,6 +89,41 @@ describe('最小任务底账（SQLite，B 类）', () => {
     expect(() => registry.markCancelled('task_x')).toThrow(TaskOwnershipError);
     registry.close();
   });
+
+  it('执行时刻（issue #69）：noteExecution 带 startedAt/finishedAt → 读回原值；不带 → 缺省（不伪造）', () => {
+    const dbPath = tempDbPath();
+    const registry = createSqliteTaskRegistry(dbPath);
+    registry.begin({ taskId: 'task_times', principalId: 'wecom:u1', sessionId: 'wecom:c1', request: '查一下' });
+    registry.noteExecution('task_times', {
+      requestId: 'req_t1',
+      operation: 'dummy.query',
+      status: 'completed',
+      startedAt: '2026-11-24T10:00:01.000Z',
+      finishedAt: '2026-11-24T10:00:03.500Z',
+    });
+    // 旧行/未落时刻的写入：两字段缺省（存储 NULL，不伪造）。
+    registry.noteExecution('task_times', { requestId: 'req_t2', operation: 'dummy.query', status: 'completed' });
+
+    const task = registry.get('task_times', { principalId: 'wecom:u1', sessionId: 'wecom:c1' });
+    expect(task.executions[0]).toMatchObject({
+      requestId: 'req_t1',
+      startedAt: '2026-11-24T10:00:01.000Z',
+      finishedAt: '2026-11-24T10:00:03.500Z',
+    });
+    expect(task.executions[1]!.startedAt).toBeUndefined();
+    expect(task.executions[1]!.finishedAt).toBeUndefined();
+    registry.close();
+
+    // 跨重启仍读回原值（时刻是持久化事实，不是内存投影）。
+    const reopened = createSqliteTaskRegistry(dbPath);
+    const reread = reopened.get('task_times', { principalId: 'wecom:u1', sessionId: 'wecom:c1' });
+    expect(reread.executions[0]).toMatchObject({
+      startedAt: '2026-11-24T10:00:01.000Z',
+      finishedAt: '2026-11-24T10:00:03.500Z',
+    });
+    expect(reread.executions[1]!.startedAt).toBeUndefined();
+    reopened.close();
+  });
 });
 
 describe('任务完成判定：只看已记录执行事实（SQLite 底账，M4-B）', () => {

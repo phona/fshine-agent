@@ -10,7 +10,7 @@
 |---|---|---|---|
 | #67 | 会话存储 retention / capacity（线性无界增长） | `../architecture/sessions.md:35-37` | 未清 |
 | #68 | 跨重启消息级幂等 / 真续跑恢复 | `../../AGENTS.md:84`；`../../README.md:93` | 未清 |
-| #69 | `executions` 时间列 | `../../AGENTS.md:84` | 未清 |
+| #69 | `executions` 时间列 | `packages/core/src/task-store.ts`（`executionTimeColumnsMissing` 前向加法迁移 + SCHEMA_BASE 两列 + 写读映射）；守卫 `packages/core/task-store-migration-execution-times.test.ts`（迁移/只读/不伪造）、`packages/agent/execution-time-columns.test.ts` 与 `packages/agent/runtime.test.ts` 与 `packages/agent/runtime-worker-run-js.test.ts`（三处真实执行边界落时刻）、`scripts/tasks.test.ts` + `scripts/ops.test.ts`（有/无时刻两态） | 已清（2026-11-24） |
 | #70 | tasks CLI 增强 | `../../AGENTS.md:84` | 未清 |
 | #71 | P8 ops 扩展（原 R4 唯一未落地分片） | `../../AGENTS.md:84`；`index.md`（R4 行） | 未清 |
 | #72 | 死代码重复实现 | `../../AGENTS.md:84` | 未清 |

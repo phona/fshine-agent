@@ -361,9 +361,57 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
     expect(text).toContain('- 「任务结果」是任务底账持久化的执行层汇报原文；「最终回复」是 Main 在回合收尾时实际发送给用户的回复全文（逐字存档）。');
     expect(text).toContain('- 历史任务没有最终回复存档（显示「该任务无最终回复存档」），交付件不以执行层汇报冒充 Main 回复。');
     expect(text).toContain('- 事实行只映射机械事实（等待/租约/机械时刻/汇报存档/执行行原值），不做任务结论；做没做成读执行步骤与任务结果原文。');
-    expect(text).toContain('- 时间以本机时区显示；执行步骤无时间戳。');
+    expect(text).toContain('- 时间以本机时区显示；执行步骤附起止时刻（底账未记录时刻的执行行显示「无时刻」）。');
     expect(text).not.toContain('机械事实：');
     expect(text).not.toContain('task_ok');
+  });
+
+  it('执行步骤两态（issue #69）：有起止时刻 → 附本地时间区间；无时刻（旧行）→ 「无时刻」且不伪造', () => {
+    const withTimes = record({
+      taskId: 'task_times',
+      executions: [{
+        requestId: 'req_times',
+        operation: 'dummy.query',
+        status: 'completed',
+        startedAt: '2026-11-13T16:00:01.000Z',
+        finishedAt: '2026-11-13T16:00:05.000Z',
+      }],
+    });
+    // 旧行形状：执行行没有起止时刻（时间列上线前写入）——必须显示「无时刻」，不得编时间。
+    const withoutTimes = record({ taskId: 'task_legacy', executions: [execution('completed')] });
+
+    const range = `${formatLocalTime('2026-11-13T16:00:01.000Z')} → ${formatLocalTime('2026-11-13T16:00:05.000Z')}`;
+    for (const text of [renderTaskDetail(withTimes), renderTaskDeliverable(withTimes)]) {
+      expect(text).toContain(`执行步骤：\n  1. dummy.query  完成  ${range}`);
+      // 有时刻的行不得再显示「无时刻」。
+      const section = text.split('执行步骤：')[1]!.split('任务结果')[0]!;
+      expect(section).not.toContain('无时刻');
+    }
+    for (const text of [renderTaskDetail(withoutTimes), renderTaskDeliverable(withoutTimes)]) {
+      expect(text).toContain('执行步骤：\n  1. dummy.query  完成  无时刻');
+      // 不伪造：无时刻行的执行步骤段里不得出现任何时间区间。
+      const section = text.split('执行步骤：')[1]!.split('任务结果')[0]!;
+      expect(section).not.toContain('→');
+      expect(section).not.toContain('2026-11-13');
+    }
+  });
+
+  it('README 口径（issue #69）：执行步骤附起止时刻；不再声称「底账未存每步时间戳」', () => {
+    // 文本锚点四件事（AGENTS.md 判据红线）：
+    //   ① 想拦的失败形态：README 仍写「底账未存每步时间戳 / 最终回复当前不落库」，而实现已落
+    //      时刻与回复存档——用户照文档找不到时间，文档成为假陈述；
+    //   ② 为什么机械事实/结构化提取判不了：这是「文档句子与实现是否一致」的核对，唯一确定判据
+    //      就是逐字扫描该句（格式/泄漏类确定性检查，不涉及语义判断）；
+    //   ③ 会误伤哪些正确措辞：同义改写（如「逐步耗时」）都会红——有意如此：文档口径变更必须
+    //      显式同步守卫，不允许悄悄漂移；
+    //   ④ 负例绊线：把 README 改回旧两句 → 本用例红（反向绊线已实测）。
+    const flat = readFileSync(path.join(REPO_ROOT, 'README.md'), 'utf8').replace(/\s+/gu, '');
+    expect(flat).toContain(
+      '执行步骤按落账顺序列出，并附该次真实执行的起止时刻（底账未记录时刻的历史行显示「无时刻」）',
+    );
+    expect(flat).toContain('Main给用户的最终回复已逐字存档；历史任务无存档');
+    expect(flat).not.toContain('底账未存每步时间戳');
+    expect(flat).not.toContain('Main给用户的最终回复当前不落库');
   });
 
   it('最终回复存档在场：交付件含逐字回复全文与任务结果分列', () => {
@@ -437,7 +485,8 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
       '交办：帮我查一下 beta 集合、窗口 W1 的数据',
       '',
       '执行步骤：',
-      '  1. dummy.query  失败  读取故障。',
+      // issue #69：该执行行没有起止时刻（时间列上线前写入）→ 显示「无时刻」，不伪造。
+      '  1. dummy.query  失败  读取故障。  无时刻',
       '',
       '任务结果：',
       '执行层报告读取故障。',

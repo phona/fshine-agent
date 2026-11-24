@@ -14,7 +14,7 @@ import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMay
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type {
   CapabilityManifest,
@@ -85,6 +85,23 @@ class ScenarioClient implements ExecutionClient {
     const outcome = this.outcomes.shift();
     if (outcome === undefined) throw new Error('ScenarioClient 没有更多预设结果');
     return outcome;
+  }
+}
+
+/**
+ * 执行期前进系统时间的假客户端（issue #69：起止时刻确定性可分）。
+ * 只假 Date（budget-metering 同款），真实执行期间走 1500ms——started_at 应取调用前一刻、
+ * finished_at 应取回执到达一刻，两者不得相等、不得伪造。
+ */
+class ClockAdvancingClient implements ExecutionClient {
+  readonly requests: ExecutionRequest[] = [];
+  async capabilities(): Promise<CapabilityManifest> {
+    return MANIFEST;
+  }
+  async execute(request: ExecutionRequest): Promise<ExecutionOutcome> {
+    this.requests.push(request);
+    vi.setSystemTime(Date.now() + 1500);
+    return { status: 'completed', data: { collection: 'documents', count: 3 } };
   }
 }
 
@@ -431,6 +448,26 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
     registry.begin({ taskId: 'task_forged_2', ...scope, request: '查询 documents' });
     registry.setResultText('task_forged_2', '查询成功，共 3 条数据。');
     expect(executionsOf(registry.get('task_forged_2', scope))).toEqual([]);
+  });
+
+  it('⑧ 执行行落真实执行的起止时刻（issue #69）：起于调用前一刻、止于回执到达一刻（假时钟）', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-24T10:00:00.000Z'));
+    try {
+      const session = await sessionFor(new ClockAdvancingClient(), {
+        mainResponses: mainTurn('documents 共 3 条。'),
+        workerResponses: [queryCall(), textAssistant('已查询 documents：3 条。')],
+      });
+      const turn = await session.send('查一下 documents');
+      const task = session.getTask(turn.taskIds[0]!);
+      expect(task.executions).toHaveLength(1);
+      // 起止时刻夹住真实执行（执行中系统时间前进 1500ms）：调用前一刻 / 回执到达一刻。
+      expect(task.executions[0]!.startedAt).toBe('2026-11-24T10:00:00.000Z');
+      expect(task.executions[0]!.finishedAt).toBe('2026-11-24T10:00:01.500Z');
+      expect(task.executions[0]!.startedAt).not.toBe(task.executions[0]!.finishedAt);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
