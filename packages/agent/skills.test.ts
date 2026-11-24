@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { FileSkillRegistry, SKILL_CONTENT_LIMIT_BYTES, listSkills, parseFrontmatter } from './src/skills';
+import { FileSkillRegistry, isInside, SKILL_CONTENT_LIMIT_BYTES, listSkills, parseFrontmatter, stripQuotes } from './src/skills';
 
 async function fixture(): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-skills-'));
@@ -114,5 +114,66 @@ describe('FileSkillRegistry', () => {
     const registry = new FileSkillRegistry({ rootDir: root });
     await expect(registry.discover()).resolves.toHaveLength(1);
     await expect(registry.read('big')).rejects.toThrow('超出上限');
+  });
+});
+
+/**
+ * issue #72：`stripQuotes` / `isInside` 合并成 `./src/skills` 的唯一导出后的行为钉子。
+ *
+ * `stripQuotes` 合并前有两份私有副本：`agent-profile.ts`（正则）与本文件（首尾判断）。
+ * 两者在**可达输入域**上逐字一致；差异只在两类输入上，而两类都进不来（见下方用例注释）。
+ */
+describe('stripQuotes：合并后唯一实现的行为钉子', () => {
+  /** 合并前的「首尾判断」实现（issue #72 删掉的那份副本），仅用于证明可达域一致。 */
+  function manualStrip(value: string): string {
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
+      return value.slice(1, -1).trim();
+    }
+    return value;
+  }
+
+  it('可达输入域（无首尾空白的 frontmatter 值）上与旧实现逐字一致', () => {
+    // frontmatter 按行解析，两个调用点（parseFrontmatter / parseProfile）都先 trim 再调，
+    // 所以值不可能带首尾空白、也不可能含换行——这里把这类输入全列一遍。
+    const reachable = [
+      'plain', '"quoted"', "'quoted'", '""', "''", '"a', "a'", 'a"b',
+      '"', "'", '', '"  inner  "', '""""', "''''", '"a""', 'name:ish', '- dash',
+      '2000', 'true',
+    ];
+    for (const value of reachable) expect(stripQuotes(value)).toBe(manualStrip(value));
+  });
+
+  it('剥一对首尾引号后仍 trim 内层空白（与旧实现同一口径）', () => {
+    expect(stripQuotes('"  Finance  "')).toBe('Finance');
+    expect(stripQuotes("'  Finance  '")).toBe('Finance');
+  });
+
+  it('首尾不是同一对引号时原样返回（不解释任意 YAML）', () => {
+    expect(stripQuotes('"unclosed')).toBe('"unclosed');
+    expect(stripQuotes('"')).toBe('"');
+    expect(stripQuotes("mixed'\"")).toBe("mixed'\"");
+  });
+
+  it('两类进不来的输入被显式钉住：首尾空白与内含换行（合并后方差在此，勿当回归修）', () => {
+    // ① 值自带首尾空白：正则版无条件 trim，旧首尾判断版不 trim。
+    expect(stripQuotes('  "padded"  ')).toBe('"padded"');
+    expect(manualStrip('  "padded"  ')).toBe('  "padded"  ');
+    // ② 值内含换行：正则版 `.` 不匹配换行 → 原样返回；旧首尾判断版会剥掉引号。
+    expect(stripQuotes('"line1\nline2"')).toBe('"line1\nline2"');
+    expect(manualStrip('"line1\nline2"')).toBe('line1\nline2');
+    // 两个调用点都先 trim：frontmatter 侧这条差异不可观测。
+    expect(parseFrontmatter('---\nname:  "finance"  \ndescription: d\n---\n# b')).toEqual({ name: 'finance', description: 'd' });
+  });
+});
+
+describe('isInside：合并后唯一实现的行为钉子', () => {
+  it('严格包含：根自身、父目录逃逸、前缀碰撞都不算根内', () => {
+    const root = path.resolve('/workspace/root');
+    expect(isInside(root, path.resolve('/workspace/root/a/b'))).toBe(true);
+    expect(isInside(root, root)).toBe(false);
+    expect(isInside(root, path.resolve('/workspace'))).toBe(false);
+    // 前缀碰撞：`root-other` 与 `root` 只差后缀，不算根内。
+    expect(isInside(root, path.resolve('/workspace/root-other/x'))).toBe(false);
+    expect(isInside(path.resolve('/a/b'), path.resolve('/c/d'))).toBe(false);
   });
 });

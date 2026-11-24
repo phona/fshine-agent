@@ -53,6 +53,9 @@ import {
 import path from 'node:path';
 import type { FileRefResolution, FileRefRow, TaskStore } from '@fshine/core';
 import { DEFAULT_RUNTIME_CONFIG, fileRefTtlMsOf } from './resource-policy';
+// 严格包含判定取全仓唯一一份（issue #72 合并；本模块原有的嵌套副本注释自述
+// 「与 skills.ts 的 isInside 同语义」，归属理由见 skills.ts 的 isInside 注释）。
+import { isInside } from './skills';
 
 /**
  * 文件事实归属（S0 形状）：principal + session。任务维度（CAP-01 S2）不走这里——
@@ -391,12 +394,6 @@ export function createFileStore(options: {
   const ttlMs = options.ttlMs ?? FILE_REF_TTL_MS;
   if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
     throw new Error(`文件引用 TTL 必须是正整数毫秒（当前: ${String(ttlMs)}）`);
-  }
-
-  /** 严格包含判定（realpath 之后用；与 skills.ts 的 isInside 同语义）。 */
-  function isInside(root: string, candidate: string): boolean {
-    const relative = path.relative(root, candidate);
-    return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
   }
 
   /**

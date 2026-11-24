@@ -30,7 +30,8 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, openTaskStore } from '@fshine/core';
 import { workspaceRootOf } from '../apps/server/server';
 import { cleanupExpiredFileRefBytes } from '../packages/agent/src/file-ref-cleanup';
-import { cleanupExpiredRunDirs } from '../packages/agent/src/run-dir-cleanup';
+// 机械原因原文取全仓唯一一份（issue #72 合并；归属理由见 run-dir-cleanup.ts 的 errorText）。
+import { cleanupExpiredRunDirs, errorText } from '../packages/agent/src/run-dir-cleanup';
 import { resolveRuntimeConfig, type ResolvedRuntimeConfig } from '../packages/agent/src/resource-policy';
 import { explicitConfigFrom } from './resolve-config-path';
 import { resolveTaskDbPath } from './tasks';
@@ -98,10 +99,6 @@ export function resolveCleanupRunsContext(input: {
     config: resolveRuntimeConfig(appConfig?.runtime),
     configSource: appConfig === undefined ? 'defaults' : deploymentPath,
   };
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 async function main(): Promise<void> {

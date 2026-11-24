@@ -120,11 +120,24 @@ export interface TraceValidation {
   manifest?: TraceManifest;
 }
 
-function sha256Hex(text: string): string {
+/**
+ * 字符串 sha256 十六进制（**ask 面唯一一份**，issue #72 合并）。
+ *
+ * 原来是 `ask-replay.ts` 与本文件各一份逐字相同的私有副本。合并到本文件的理由：回放器
+ * 本来就值 import 本模块的 `createTraceRecorder`，多这两个符号不新增依赖边。**不并入**
+ * `scripts/eval/convergence-r1/hash.ts` 的那份——那是判据冻结件（`string | Buffer` 入参、
+ * eval 树唯一来源），按 eval 锁不动，见 `packages/agent/dead-code-merge.test.ts` 冻结组。
+ */
+export function sha256Hex(text: string): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
-function jsonSafe(value: unknown): unknown {
+/**
+ * JSON 往返投影（**ask 面唯一一份**，issue #72 合并；原 `ask-replay.ts` 副本）。
+ *
+ * 不可序列化的值退化成 `String(value)`——不抛、不补零伪造：回放/证据面要的是「原样可见」。
+ */
+export function jsonSafe(value: unknown): unknown {
   try {
     return JSON.parse(JSON.stringify(value)) as unknown;
   } catch {

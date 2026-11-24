@@ -100,7 +100,20 @@ export interface CleanupOneRunDirInput extends CleanupRunDirsInput {
   readonly runDir: string;
 }
 
-function errorText(error: unknown): string {
+/**
+ * 抛出值 → 机械原因原文（**全仓唯一一份**，issue #72 合并）。
+ *
+ * 原来是 6 份逐字相同的私有副本：本模块、`file-ref-cleanup.ts`（同一套保守纪律的姊妹
+ * 执行器）、`scripts/cleanup-runs.ts` 与 `apps/server/startup-sweep.ts`（这两个清扫入口
+ * 的驱动方）、`scripts/tasks.ts` 与 `scripts/ops.ts`（两个 CLI 面）。合并到这里的理由：
+ * 这六处都在 `packages/agent/src` 的值图内（脚本/服务层本来就单向依赖它），**就近归属**
+ * 到消费方最多的同层模块，不另建 utils 万能桶；定义点集合由
+ * `packages/agent/dead-code-merge.test.ts` 钉住，再抄一份即红。
+ *
+ * 语义边界：只做「`Error` 取 message，其余 `String()`」——不解释、不归类、不套用户
+ * 话术；产出的原文只进结构化事件的 `reason` 字段与 CLI stderr（机械事实面）。
+ */
+export function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 

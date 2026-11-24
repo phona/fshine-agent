@@ -29,6 +29,7 @@ import type { TaskRecord } from '../packages/agent/src/task-registry';
 import { taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
 import {
+  errorText,
   formatLocalTime,
   renderTaskLedgerLine,
   resolveOutPath,
@@ -338,10 +339,6 @@ function lstatOrUndefined(target: string): ReturnType<typeof lstatSync> | undefi
   } catch {
     return undefined;
   }
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 /**

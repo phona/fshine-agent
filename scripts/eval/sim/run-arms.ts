@@ -272,6 +272,8 @@ async function main(): Promise<void> {
       passed: runs[arm].result.summary.passed,
       effectiveSamples: runs[arm].result.summary.effectiveSamples,
       byTerminal: runs[arm].result.summary.byTerminal,
+      // 记账覆盖检查读数（issue #72）：必需类别一次都没记到在这里报出来，不抛、不洗。
+      missingKinds: runs[arm].result.summary.missingKinds,
       isolation: runs[arm].result.summary.isolation,
       observedMaxConcurrency: runs[arm].result.batch.observedMaxConcurrency,
       trials: runs[arm].result.trials.map((trial) => ({
