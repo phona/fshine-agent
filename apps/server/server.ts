@@ -82,7 +82,7 @@ import {
   type ExecutionFace,
 } from '../../scripts/ask-runtime';
 import { createAttachmentFactQueue, createScopedNoteQueue } from './attachment-facts';
-import { createPendingConfirmationProvider } from './pending-confirmation-facts';
+import { createPendingConfirmationProvider, executionLineText } from './pending-confirmation-facts';
 import { AttachmentNudge, type NudgeClock } from './attachment-nudge';
 import {
   deliverTaskResult,
@@ -887,19 +887,16 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   //   · 去重 = (taskId, 进入等待次数)：runner 只在非等待态落等待时触发端口（已在等待的行
   //     再落等待不重复触发；回非等待再进 = 新的一次）；投递失败退回待注入，不重试唤醒。
   /**
-   * 等待通知附带的执行行原话（有界；未作判断）。与 pending-confirmation-facts 的
-   * `executionLineText` 同一拼法——两处必须一致，否则「这一刻」和「下一轮」说的不是同一件事。
+   * 等待通知附带的执行行原话（有界；未作判断）。**直接调 pending-confirmation-facts 的
+   * executionLineText**——2026-11-24 grok blocking：这里曾手抄一份同样的拼法，注释写「同源
+   * 同函数」实际没有调用，于是 message 没过 cleanExecutorDiagnostic，服务器路径会进唤醒
+   * 事实。一个函数、一处定义，别再抄第二份。
    */
   const waitingLedgerOf = (taskId: string): readonly string[] => {
     const record = (taskRegistry as unknown as {
-      get(id: string): { executions?: readonly { status: string; error?: { code?: string; message?: string } }[] };
+      get(id: string): { executions?: readonly { status: string; operation?: string; error?: { code?: string; message?: string } }[] };
     }).get(taskId);
-    return (record.executions ?? []).slice(-WAITING_LEDGER_TAIL_LINES).map((entry) => {
-      const parts = [entry.status];
-      if (entry.error?.code !== undefined && entry.error.code.trim() !== '') parts.push(entry.error.code);
-      if (entry.error?.message !== undefined && entry.error.message.trim() !== '') parts.push(entry.error.message.trim());
-      return parts.join(' · ');
-    });
+    return (record.executions ?? []).slice(-WAITING_LEDGER_TAIL_LINES).map((entry) => executionLineText(entry));
   };
 
   const waitingUserNotice: WaitingUserNoticePort = {

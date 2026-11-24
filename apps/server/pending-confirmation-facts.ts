@@ -14,7 +14,7 @@
  * summary 是执行层提案原话，逐字进事实（模型要能原样转述）。缺信息类等待（无 confirmation）
  * 不在这里提示——它没有「将写入什么」，提示了用户也无从表态。
  */
-import type { InjectionValue } from '../../packages/agent/src/execution-runtime';
+import { cleanExecutorDiagnostic, type InjectionValue } from '../../packages/agent/src/execution-runtime';
 import type { TaskRegistry, TaskScope } from '../../packages/agent/src/task-registry';
 
 /** 一条待表态事实的文本（给模型读；用户听到的话由模型写）。 */
@@ -43,10 +43,26 @@ export function renderPendingConfirmationFact(input: {
 }
 
 /** 一条执行行的原话（status + code/message；都不缺才拼得出来）。 */
-export function executionLineText(entry: { status: string; error?: { code?: string; message?: string } }): string {
+/**
+ * 一条执行行的模型可见原话：`status · code · cleanedMessage`。
+ *
+ * **message 必须过 cleanExecutorDiagnostic**（2026-11-24 grok blocking）：适配器会把整行
+ * stderr（含服务器绝对路径）塞进 error.message，dummy 就有这种形状（`载荷文件读不到：
+ * <ENOENT 路径>`）；原样拼会把路径和「执行层」带进唤醒事实与之后每一轮的注入。
+ * **code 不清洗**——Main 要靠它区分「正常的同回合确认闸（CONFIRMATION_REQUIRED，提案仍
+ * 有效）」与「业务拒绝（GATE_REFUSE）」，这是它自己判断的材料，不是宿主的码表。
+ * 与 server 的 taskLedgerFactsOf 同一把尺（那边多带 operation、截 160）。
+ */
+export function executionLineText(entry: {
+  status: string;
+  operation?: string;
+  error?: { code?: string; message?: string };
+}): string {
   const parts = [entry.status];
   if (entry.error?.code !== undefined && entry.error.code.trim() !== '') parts.push(entry.error.code);
-  if (entry.error?.message !== undefined && entry.error.message.trim() !== '') parts.push(entry.error.message.trim());
+  if (entry.error?.message !== undefined && entry.error.message.trim() !== '') {
+    parts.push(cleanExecutorDiagnostic(entry.error.message).replace(/\s+/gu, ' ').trim());
+  }
   return parts.join(' · ');
 }
 

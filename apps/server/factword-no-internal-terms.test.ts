@@ -20,6 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { taskRoundFactsText } from './task-completion-delivery';
+import { executionLineText } from './pending-confirmation-facts';
 import { createDummyCliClient } from '../../packages/agent/src/dummy-cli-client';
 import {
   TASK_RUN_TOOL_DESCRIPTION,
@@ -322,6 +323,35 @@ describe('模型可见面收口：清单投影 / Worker 提示 / 底账投影', 
     expect(WORKER_SYSTEM_PROMPT).toContain('用给你的工具把每一步交出去办');
     expect(WORKER_SYSTEM_PROMPT).not.toContain('execute_operation');
   });
+
+  it('⑫d 执行行 message 过诊断清洗：服务器路径/机构自称不进模型事实（grok blocking）', () => {
+    // 2026-11-24 grok blocking：executionLineText 曾把 error.message 原样拼进模型事实，而同文件
+    // 的 taskLedgerFactsOf 对同一批行是先 cleanExecutorDiagnostic 的——两把尺。dummy 就有这种
+    // message：`载荷文件读不到：<ENOENT 绝对路径>`（dummy.cjs 的 records 载荷读失败）。
+    const line = executionLineText({
+      status: 'failed',
+      error: {
+        code: 'INPUT_NOT_FOUND',
+        message: '载荷文件读不到：/srv/fshine-agent/.runtime/eval-r1/state/records.json（ENOENT）——执行层无法读取',
+      },
+    });
+    expect(line).toContain('INPUT_NOT_FOUND');   // code 留给 Main 区分「正常确认闸」与「业务拒绝」
+    expect(line).not.toContain('/srv/');          // 服务器路径剥掉
+    expect(line).not.toContain('执行层');          // 机构自称替换
+    expect(line).toContain('载荷文件读不到');      // 业务原文保留
+  });
+
+  it('⑫e 正常同回合确认闸的 code 必须留在模型事实里（Main 要靠它判断提案是否仍有效）', () => {
+    // 收口的另一半：code 不清洗。CONFIRMATION_REQUIRED = 同回合没有句柄，是**正常**形状，
+    // 提案仍有效；GATE_REFUSE = 业务拒绝。两者 Main 必须能区分，所以 code 原样进事实。
+    const gate = executionLineText({
+      status: 'refused',
+      error: { code: 'CONFIRMATION_REQUIRED', message: 'commit requires a confirmation handle' },
+    });
+    expect(gate).toContain('CONFIRMATION_REQUIRED');
+    expect(gate).toContain('refused');
+  });
+
 });
 
 /**
