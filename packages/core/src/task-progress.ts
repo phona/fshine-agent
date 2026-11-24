@@ -77,7 +77,11 @@ export function taskReportedOf(task: TaskReportFacts): boolean {
   return TASK_PROGRESS_REPORT_FIELDS.some((field) => (task[field.key] ?? '').trim() !== '');
 }
 
-/** 等待形状在场且这一轮未停（写结束事实会同步清掉等待形状；结束后的提问不再可答复）。 */
+/**
+ * 等待形状在场且这一轮未停。**谓词判可答复性，不删数据**（2026-11-24 回退 + 文档对齐）：
+ * 结束事实只清租约，`pending_question` 原样留作历史——提案的句柄/摘要/写入参数只在它上面，
+ * 删了就失去「用户被要求批准的那一次写」的记录。可答复性由这里的 `endedAt === undefined` 决定。
+ */
 export function taskWaitingOf(task: Pick<TaskProgressFacts, 'pendingQuestion' | 'endedAt'>): boolean {
   return task.pendingQuestion !== undefined && task.endedAt === undefined;
 }

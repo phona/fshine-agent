@@ -687,10 +687,14 @@ function tasksTableNeedsRebuild(db: Database.Database): boolean {
  *   · 已停的行写**一条结束事实**（task_ends：task_id + at，**不带种类**）：at = 匹配到的旧
  *     终态列原时刻（旧 schema 列顺序：cancelled_at → timed_out_at → resource_limited_at →
  *     died_at → round_failed_at（旧 schema 列顺序），或旧 status 属于已停集合，或已有汇报；都没有才回退
- *     updated_at。怎么结束不迁移——旧结论词不进入新库；等待形状一并清掉。
+ *     updated_at。怎么结束不迁移——旧结论词不进入新库；**等待形状不清**（提案的句柄/摘要/
+ *     写入参数只在 pending_question 上，删了就没有「用户被要求批准的那一次写」的记录）。
  *   · 仍在等待（pending_question 非空、无旧终态、无汇报）或旧 status=running/cancelling 的行
  *     **不写**结束事实：提问保留、running_since 回填后进入既有续跑 / 重启对账 / 取消路径
  *     （写死会让它们既不能答也不能停，或在跑行被静默写成已停、用户收不到「结果未知」）。
+ *   · **升级前从未启动的排队行也不写**结束事实：它是已受理、还没开跑的工作，基线语义就是
+ *     重启后由 pump 认领（claimNextUnstarted 只收 running_since 为空的行）。写成已停会让这份
+ *     交办既不再执行、也没有「结果未知」出口，用户永远收不到告知；running_since 保持 NULL。
  * 逐列按旧表实际列存在性取源（极旧库缺列取 NULL），历史行其余事实原样搬运。
  */
 function rebuildTasksToZeroState(db: Database.Database): void {

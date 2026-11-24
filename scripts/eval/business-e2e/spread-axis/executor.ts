@@ -22,7 +22,6 @@ import type { TurnDriver, TurnDriverInput } from '../../../../packages/agent/src
 import { createResourcePolicy } from '../../../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry } from '../../../../packages/agent/src/task-registry-sqlite';
 import { defaultMainSkillsDir, loadMainSkillDelivery } from '../../../../packages/agent/src/worker-skills';
-import { NOTIFICATION_KINDS } from '../../../../packages/agent/src/notifications';
 import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../../packages/agent/testing/task-facts';
 import { materializeEvalConfig } from '../../../resolve-config-path';
 import {
@@ -34,6 +33,7 @@ import {
 import type { DriverFactory, ExecutionFaceFactory } from '../../../ask-runtime';
 import { assessEvalIsolation, assertEvalIsolation } from '../../safety-gate';
 import type { SampleRecord } from '../judge';
+import { isNotificationFact, notificationLineOf, taskFactLineOf } from '../task-facts-collect';
 import type { NotificationLine, TaskFactLine } from '../collect';
 import type { InputsFile, MetaFile, MetaTurn, ReplyLine, TaskRecordJson, ToolCallRecord } from '../../convergence-r1/evidence';
 import { buildDsSample } from './grade';
@@ -204,22 +204,12 @@ export function createDsExecutor(options: DsExecutorOptions = {}): DsExecutor {
     const notifications: NotificationLine[] = [];
     // 事实模型：底账只发机械事实（无 from/to/reason）。事件 → **事实增量**（启动/结束/汇报/等待），
     // 供 d6 度量按事实口径读（不合成任务级状态词；不再区分「怎么结束」）。
-    const EVENT_FACTS: Readonly<Record<string, Partial<TaskFactLine>>> = {
-      accepted: { started: false, ended: false, reported: false, waiting: false, mayBeRunning: false },
-      started: { started: true, ended: false, reported: false, waiting: false, mayBeRunning: true },
-      resumed: { started: true, waiting: false, mayBeRunning: true },
-      waiting_user: { waiting: true, mayBeRunning: false },
-      result_archived: { ended: true, reported: true, mayBeRunning: false },
-      cancelled: { ended: true, mayBeRunning: false },
-      timed_out: { ended: true, mayBeRunning: false },
-      resource_limited: { ended: true, mayBeRunning: false },
-      ended: { ended: true, mayBeRunning: false },
-    };
+    // 映射表与投影在 task-facts-collect.ts（按 TaskEventKind 穷尽；2026-11-24 grok blocking：
+    // 两份各自维护的副本在终局事件改名后都没跟上，取消/到点/容量拒绝被采集成「还没结束」）。
     registry.onTaskFact((fact) => {
-      const base: TaskFactLine = { ts: fact.at, taskId: fact.taskId, started: true, ended: false, reported: false, waiting: false, mayBeRunning: false };
-      taskFacts.push({ ...base, ...(EVENT_FACTS[fact.event] ?? {}) });
-      if ((NOTIFICATION_KINDS as readonly string[]).includes(fact.event)) {
-        notifications.push({ ts: fact.at, taskId: fact.taskId, kind: fact.event });
+      taskFacts.push(taskFactLineOf(fact));
+      if (isNotificationFact(fact.event)) {
+        notifications.push(notificationLineOf(fact));
       }
     });
     try {

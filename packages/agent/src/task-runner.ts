@@ -1706,7 +1706,8 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         }
         return;
       case 'cancelled':
-        // 执行端确认中止：追加 cancelled 终止事件（一次性；未请求而确认的取消同样如实记录）。
+        // 执行端确认中止：追加 user_stop 触发事实（一次性；未请求而确认的取消同样如实记录）。
+        // 「怎么结束」不存——消费方读原始事实自己判（2026-11-23 收口轮去种类）。
         try {
           registry.markCancelled(taskId);
         } catch (error) {
