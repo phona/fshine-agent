@@ -54,7 +54,7 @@
 | --- | --- |
 | 可信身份 / 任务归属越权读取被拒 | 子进程 env 白名单重建（`packages/agent/src/run-js-executor.ts:17-18`）；单写路径 + `onTaskFact`（`packages/agent/src/task-registry.ts:23`、`:569`）；`packages/agent/task-registry-sqlite.test.ts` |
 | 完成状态如实 / 允许集合外调用发起前拒绝 | `judgeReportedTask`（`docs/history/decision-log-part01-2026-11_undated.md:646-662`）；`scripts/ask-runtime.ts:344-354`；`packages/agent/src/execution-runtime.ts:1546-1549` |
-| 确认回环只透传、宿主不裁决（句柄只在显式确认路径透传） | `packages/agent/write-confirmation.test.ts:339`（inline）；`packages/agent/background-write-confirmation.test.ts` 的 ①（confirm 带句柄）②（resume 不带句柄）③（过期重提）；`scripts/host-write-confirmation.test.ts:357` |
+| 确认回环只透传、宿主不裁决（句柄只在显式确认路径透传） | `packages/agent/write-confirmation.test.ts:339`（inline）；`packages/agent/background-write-confirmation.test.ts` 的 ①（confirm 带句柄）②（resume 不带句柄）③（过期不预判：句柄原样透传，执行层拒了 Worker 重新提案）；`scripts/host-write-confirmation.test.ts:357` |
 | 结构性守卫：契约零 import / 旧治理不复活 / 命名不回流 | `packages/agent/import-boundary.test.ts:185-191`；`packages/agent/transition-naming.test.ts:40` |
 | 单一配置源 / 单一装配点 / 非沙箱风险如实登记 | `packages/agent/resource-policy-single-source.test.ts:161-204`；`scripts/p0-assembly-single-point.test.ts:170-201`；`packages/agent/src/run-js-executor.ts:36-38` |
 

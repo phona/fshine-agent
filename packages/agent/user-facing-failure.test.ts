@@ -17,7 +17,7 @@ import {
   type UserFacingFailureKind,
 } from './src/user-facing-failure';
 import type { ExecutionClient, ExecutionOutcome, CapabilityManifest } from '@fshine/contracts/execution-contract';
-import { createSession, EXECUTE_OPERATION_TOOL, TASK_RUN_TOOL, renderWorkerDelegation, WORKER_SNAPSHOT_COST_NOTE } from './src/execution-runtime';
+import { createSession, EXECUTE_OPERATION_TOOL, TASK_RUN_TOOL, renderWorkerDelegation } from './src/execution-runtime';
 import type { DriverMessage, TurnDriver } from './src/driver-contract';
 
 const ALL_KINDS: readonly UserFacingFailureKind[] = [
@@ -293,9 +293,10 @@ describe('用户可见失败话术', () => {
     expect(text).not.toContain('重量');
     expect(text).not.toContain('"long_running"');
     expect(text).not.toContain('"type"');
-    // 中性事实不再宣称「每个 operation 标注单次估时与重量」。
-    expect(WORKER_SNAPSHOT_COST_NOTE).not.toContain('估时');
-    expect(WORKER_SNAPSHOT_COST_NOTE).not.toContain('重量');
+    // 2026-11-24（O-6）：清单标题下那句成本陈述（「一次任务发起 N 次执行…控制执行次数」）
+    // 整句删除——模型只拿选操作/填参数所需，执行次数归宿主资源边界。复活即红。
+    expect(text).not.toContain('一次任务发起 N 次执行');
+    expect(text).not.toContain('控制执行次数');
     // 调用所需仍在：operation 名、业务参数名（去 `--` 前缀）、required、输入形状。
     expect(text).toContain('"dummy.commit"');
     expect(text).toContain('"collection"');

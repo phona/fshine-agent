@@ -17,12 +17,13 @@ Pi Agent（Main）+ 最小宿主 + Execution Contract + Channel Adapter 的产�
 5. **能力目录**：`capability?: string` 派生目录（禁止手写清单）、Main 一句摘要 + 只读 `capabilities()`；做没做成由 Main 读执行行与 worker 汇报判断并转述——宿主不产 outcome 词（旧 `classifyOutcome` 五态分类器已随 S1 删除，`task-outcome.ts` 仅剩失败话术）。
 6. **确认回合 = 已确认提案**：确认续跑的任务内容切成提案载荷原文，旧交办 prose 让位；执行层绑定校验保证旧值不可覆盖。
 7. **机制参数封死**：`op_*` 工具参数结构化校验，未知字段/`--` 前缀键确定性拒绝且执行层零调用；夹具改走内部 exec 路由。
-8. **E11 判据机械化**：删掉 20 词拒绝词表，换成「零执行 + 无成功宣称 + 结构化 outcome ∈ {unsupported, blocked}」+ 非空下限。
+8. **E11 判据机械化**：删掉 20 词拒绝词表，换成「**写面执行行零 completed** + 无成功宣称」+ 非空下限（2026-11-24 起口径；原「结构化 outcome ∈ {unsupported, blocked}」已随删 status 移除——outcome 分类器已删）。
 
 ## 三、冻结基线与门（怎么复核）
 
 - 分支 `arch/integration`，收尾提交 `1b230ef8`（2026-11-21；此前的 `e0f105e0` 是交接快照，其后为可靠性/对话面整备）。
-- 确定性门：`npm run typecheck` exit 0；`npm test` → 269 文件 / 2736 passed（1 skipped / 3 todo）；`node --import tsx scripts/eval/wecom-sim/run.ts` → 48/51、失败 0（3 条 SKIP 有登记理由）；文档守卫 30 passed（docs-guard / product-capability / coverage-matrix）。
+- 确定性门（S1 删 status 前的冻结基线）：`npm run typecheck` exit 0；`npm test` → 269 文件 / 2736 passed（1 skipped / 3 todo）；`node --import tsx scripts/eval/wecom-sim/run.ts` → 48/51、失败 0（3 条 SKIP 有登记理由）；文档守卫 30 passed（docs-guard / product-capability / coverage-matrix）。
+- **S1 删 status 后基线变动（2026-11-24，本 PR 对账）**：退役了一批只锁旧终局机的表征测试（`task-outcome.test.ts`、`task-status-boundary.test.ts`、`write-outcome-last-attempt.test.ts`、`task-store-migration-v3.test.ts`、`last-decisive-failure-code.test.ts`、`task-outcome-reason.ts` 及其用例），新增 `task-lifecycle-enum-guard` 等结构性守卫；`npm test` 读数以 PR 正文实跑为准（约 277 文件 / 2780+ passed）。**文件数下降是退役表征测试的预期结果，不是覆盖率倒退**——对应守卫见 `docs/architecture/tasks.md` §1。
 - 真模型稳定性读数（冻结 `5105b795`，独立复核逐份核过产物）：写闭环 **5/5 全绿**（C1–C10）；场景集 **24/24、24/24、22/24、24/24、20/24**；`eval:user` **14/15、15/15、13/15+1 INCONCLUSIVE**。9 处红经逐条拆解：模型旅程方差为主，另含 1 条 taskId 泄漏与 2 个判据形状问题（已修，见下）。
 - 判据换形后的确认批次（`1b230ef8`/`99af8382`，代码面零差异）：`eval:user` **15/15 ×2**（零 FAIL/INCONCLUSIVE，failureCodeHistogram 空）、场景集 **24/24 ×2**、写闭环 **C1–C10 ×1**；泄漏 0、对话形态 0。**E11** 两次均 PASS（只读 1 次 + 零写 + 如实拒绝；`UNNECESSARY_DELEGATION_WARN` 按用例定义为 WARN 不判负）、**E14** 两次均 PASS（回复点出执行层维度取值）。
 - 泄漏扫描（单一入口 `scripts/eval/shared/internal-terms.ts`）：内部词表 + `#N` 编号形态 + **taskId 形态 `task_[A-Za-z0-9-]{8,}`**（2026-11-21 加，源自 live 实测「任务号 task_db2b3ca3」）；接进四个用户级批次与 wecom-sim。

@@ -395,6 +395,8 @@ export function taskWaitingUserFactText(input: {
   missing: readonly string[];
   summary?: string;
   expiresAt?: string;
+  /** 本回合 Worker 汇报原文（提案被拒时用户要听见为什么；逐字不过滤）。 */
+  report?: string;
 }): string {
   const subject = input.name !== undefined && input.name.trim() !== ''
     ? `「${truncatedName(input.name)}」`
@@ -403,10 +405,14 @@ export function taskWaitingUserFactText(input: {
   const proposal = input.summary === undefined || input.summary.trim() === ''
     ? ''
     : `将写入（逐字）：${input.summary}${expiresAtClause(input.expiresAt)}。`;
+  const reportClause = input.report === undefined || input.report.trim() === ''
+    ? ''
+    : `\nworker 汇报（逐字）：${input.report.trim()}`;
   return `[任务等待]${subject}办到一半，需要用户表态才能继续。`
     + (missing === '' ? '' : `还缺：${missing}。`)
     + proposal
-    + '请把待确认/待补内容原样告诉用户并等表态。';
+    + reportClause
+    + '\n请把待确认/待补内容原样告诉用户并等表态。';
 }
 
 /** 有效期从句（机械；解析不出 = 不写，不猜）。 */

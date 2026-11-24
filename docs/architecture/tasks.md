@@ -34,7 +34,7 @@
 调用顺序是**先落库认领、再调执行层**（`claimAndRunOperation`，`packages/agent/src/execution-runtime.ts:1045`），`claimed` 行在进程死亡窗口里先于任何外部副作用存在。认领五态的决定后果（`packages/agent/src/task-registry.ts:458-464`）：`minted` → 唯一真正调用执行层的一支（`:1088`）；`replayed` → 直接返回已有 outcome，零调用（`:1070`）；`in_progress` → 同身份不并发（`:1076`）；`unresolved`（`ambiguous_replay`/`prior_unknown`）→ **不发起执行**，返回 `result_unknown`（`:1082`）；`conflict` → 同身份不同 operation，抛 `DispatchConflictError`（`:1068`）。
 调用抛错/无回执落 `unknown`（`operationStatusOf` 把 `failed` + `code: result_unknown` 映成账行 `unknown`：`packages/agent/src/task-registry.ts:401`）；写操作在飞被取消同样落 `unknown`（不能把「可能已发生」改写成「已取消」）。单次调用被**传输超时截断**（传输入口唯一的界：`dummy-cli-client.ts` 的 `EXECUTION_CALL_TIMEOUT_MS` = 60s）走同一条语义：适配器以 `failed` + `code: result_unknown`（无回执）返回 → `settleOperation` 按码落 `unknown`（`packages/agent/src/task-registry.ts:837`），并在一次真实发起的收尾处记一条 `execution_result_unknown` 事件（只进日志；用例 `packages/agent/execution-call-timeout.test.ts`）。已落定行不被覆盖，`unknown` 不被晚到的结果洗白（`packages/agent/src/task-registry.ts:842-846`）。上抛到任务层：前台抛 `ToolUserError` 确定性终结回合；后台 `{kind:'result_unknown'}` 由 `runner.settle` 追加**结束事实**（只留停下时刻；结果未知由消费方按事实现推，禁止自动重放；`packages/agent/src/task-runner.ts:1691`），测试 `packages/agent/dispatch-key-identity.test.ts:195`。
 
-**worker 不得自建或满足确认门**：后台单回合执行器没有「下一回合」概念、也不持有用户原话，需要确认的写操作确定性落 `failed`，不谎报 completed（`packages/agent/src/execution-runtime.ts:2571-2575`）。
+**worker 不得自建或满足确认门**：后台单回合执行器没有「下一回合」概念、也不持有用户原话——本回合已有未消费提案时再发起非只读 operation，在**发起前**被工具错误挡下（`SAME_TURN_CONFIRMATION_PENDING_MESSAGE`，`packages/agent/src/execution-runtime.ts:2464-2472`），不发起执行、不落执行事实；确认路径本身落**等待事实**（`needs_confirmation` + `waitForUser`，`execution-runtime.ts:4399-4410` 一带），不是失败。
 ## 4. 取消：请求 ≠ 取消（没有取消状态机）
 
 取消请求**不持久化**（`cancel_requested_at` 已删）——请求只留在本进程内存；机械确认时才写一条结束事实（只有时刻，没有「取消」种类）。分派在 `packages/agent/src/task-runner.ts:1765`：`queued`/`waiting_user`（无在飞回合）**机械确认**并出队（`:1771-1778`）；`running` 只记内存请求 + 本进程在飞才 `abort()`，**不宣称已取消**（`:1779-1788`）；已结束返回 `terminal`，不改写既有事实（`:1767-1769`）。进程死在请求与确认之间时，租约过期写下结束事实（结果未知、不重放）；重启后没有「你要我停、没停完」的单独出口（请求不是结束事实）。
@@ -42,9 +42,9 @@
 对话面 `task_cancel` 只原样转述 `CancelOutcome`（`packages/agent/src/execution-runtime.ts`）；回执只按事实说：同步确认 → 「已停止」；已停任务按**有没有汇报**说「已有汇报」或「已经停了（没有汇报，结果未知）」——不区分取消/超时/结果未知/资源拒绝（这些种类不存）。无 runner 时该工具不暴露、也不受理（fail-closed）。
 ## 5. waiting_user 与 needs_input 续跑
 
-等待形状是机械事实：`pendingQuestion.missing[]`（必填，非空串）/`candidates?`/`raw?` + `waitingSince`（`packages/agent/src/task-registry.ts:65`、`:220`），**只由执行层事实填写，不编造、不改写候选**。入边仅后台：执行器看到 `needs_input` → `pendingQuestionFrom` 原样转述 `missing`（`packages/agent/src/execution-runtime.ts:2758`、`:2754-2762`），为空则判 `failed`（`:2760`）；`runner.settle` 落 `waitForUser`（`packages/agent/src/task-runner.ts:1702`、`:1713`）。
+等待形状是机械事实：`pendingQuestion.missing[]`（必填，非空串）/`candidates?`/`raw?` + `waitingSince`（`packages/agent/src/task-registry.ts:65`、`:220`），**只由执行层事实填写，不编造、不改写候选**。入边仅后台：执行器看到 `needs_input` → `pendingQuestionFrom` 原样转述 `missing`（`packages/agent/src/execution-runtime.ts:2758`、`:2754-2762`），为空（没说清缺什么）则回合按 `ended` 收尾并带机械原因（不编造问题形状、也不当完成；`:4387-4397`）；`runner.settle` 落 `waitForUser`（`packages/agent/src/task-runner.ts:1702`、`:1713`）。
 > ⚠️ inline 路径不产生 `waiting_user`：等待形状 `pendingQuestion` 只由后台单回合执行器在 `needs_input` 时写入（见上行锚点），inline（同步）回合不落等待事实。
-续跑 = **同一个 Task**：`answerResumes` 清除等待形状（同一 Task 新回合），`taskNo`/`executions` 不重建（`packages/agent/src/task-registry.ts`）；`runner.resume` 要求当前有等待形状，否则 `not_waiting`（`packages/agent/src/task-runner.ts:1799-1802`）。等待超时可关闭活跃等待、写下结束事实，但**保留**等待形状作历史（`packages/agent/src/task-registry.ts`）；有结束事实即判已停（不翻案）。
+续跑 = **同一个 Task**：`answerResumes` 清除等待形状（同一 Task 新回合），`taskNo`/`executions` 不重建（`packages/agent/src/task-registry.ts`）；`runner.resume` 要求当前有等待形状，否则 `not_waiting`（`packages/agent/src/task-runner.ts:1799-1802`）。等待超时可关闭活跃等待、写下结束事实，**等待形状原样保留**（提案的句柄/摘要/写入参数只存在于 `pending_question` 上，执行行不带它——删了底账就失去「用户被要求批准的那次写」的记录，2026-11-24 grok blocking）；可执行性由谓词决定：`taskWaitingOf` 要求 `endedAt` 缺省才算等待，所以结束后的行不再显示「等待用户」、redo 放行、resume/confirm 被结束事实拒绝——**不靠删数据消除死角**。
 ## 6. 编号与展示词表：单一来源
 
 | 事实 | 唯一来源 | 消费方 |

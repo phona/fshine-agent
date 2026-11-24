@@ -925,6 +925,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             missing: notice.question.missing,
             ...(confirmation === undefined ? {} : { summary: confirmation.summary }),
             ...(confirmation?.expiresAt === undefined ? {} : { expiresAt: confirmation.expiresAt }),
+            ...(notice.report === undefined ? {} : { report: notice.report }),
           }),
           ...(confirmation === undefined ? {} : {
             fallbackText: waitingUserFallbackText({
@@ -1946,7 +1947,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           sessionId,
           speakerId,
           operation: allowed.operation,
-          object: allowed.object,
+          argsDigest: allowed.argsDigest,
           code: allowed.code,
         });
       }
@@ -1957,7 +1958,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           sessionId,
           speakerId,
           operation: blocked.operation,
-          object: blocked.object,
+          argsDigest: blocked.argsDigest,
           code: blocked.code,
           declaredRetryable: blocked.declaredRetryable ?? 'unset',
         });

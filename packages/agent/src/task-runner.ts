@@ -303,13 +303,6 @@ export interface TaskExecutionInput {
    */
   pendingConfirmation?: PendingConfirmation;
   /**
-   * 确认路径·句柄已过期（2026-11-19 owner 口径修正）：用户确认时底账提案已过 `expiresAt`——
-   * **不判失败、不结束任务**；接续一个回合让 Worker **重新生成同一提案**（内容没变就照原样
-   * 再提一次，不要擅自改参数）。执行端据此渲染机械事实。与 pendingConfirmation 互斥
-   *（过期即不带旧句柄）。缺省 = 非过期确认（零变化）。
-   */
-  confirmationExpired?: boolean;
-  /**
    * 长任务续跑（契约 v4）：上一轮委派以 accepted 结束时，runner 用 wait 取回结果后
    * 在这里把受理事实与执行层原始回执交回执行端；执行端据此渲染「长任务结果」并续跑
    * 同一任务。缺省 = 首轮执行/普通接续（零变化）。
@@ -394,8 +387,10 @@ export type TaskExecutionOutcome =
   /**
    * 本回合以「写操作提案待用户确认」收尾：question 是等待事实的问题形状，
    * confirmation 是执行层发放的句柄/摘要（落底账 pendingQuestion.confirmation）。
+   * report = 本回合 Worker 汇报原文（随等待通知一起喂给模型——提案被拒时用户要听见
+   * 「为什么」，2026-11-24 删容忍码后的连带缺口）。
    */
-  | { kind: 'needs_confirmation'; question: PendingQuestion; confirmation: PendingConfirmation }
+  | { kind: 'needs_confirmation'; question: PendingQuestion; confirmation: PendingConfirmation; report?: string }
   | { kind: 'timed_out' }
   | { kind: 'cancelled' }
   /** U3：结果未知（账行 unknown；禁止自动重试）。 */
@@ -508,6 +503,8 @@ export interface WaitingUserNoticePort {
     name?: string;
     /** 等待事实（底账 pendingQuestion 原样）：missing 必带；confirmation 仅待确认时有。 */
     question: PendingQuestion;
+    /** 本回合 Worker 汇报原文（随等待通知喂给模型；提案被拒时用户要听见为什么）。 */
+    report?: string;
   }): void | Promise<void>;
 }
 
@@ -689,18 +686,15 @@ export type ResumeOutcome =
  * 显式确认的机械结局（2026-11-19 owner 拍板）：确认是一个**显式动作**（`task_confirm`），
  * 不是「下一条消息的默认含义」。与 ResumeOutcome 同形的三种之外：
  *   · `not_waiting`     —— 任务不在等待事实（无待确认提案可提交）；
- *   · `no_confirmation` —— waiting_user 但没有提案（是等补充信息，不是等确认）；
- *   · `expired`         —— 提案已过 `expiresAt`：**不判失败、不结束任务**，接续一个回合让
- *     Worker 重新生成同一提案（任务仍回到等待事实，等用户再确认；零写执行）。业务话术
- *     （「那份提案过期了，我重新给你一份」）由调用方给出。
- * 前两种 = 确定性拒绝（零执行）；`expired` 是「重提」而非拒绝。
+ *   · `no_confirmation` —— waiting_user 但没有提案（是等补充信息，不是等确认）。
+ * 前两种 = 确定性拒绝（零执行）。宿主不做过期预判（2026-11-24 删）：句柄原样透传，
+ * 执行层拒了由 Worker 见原始拒绝自行重新提案。
  */
 export type ConfirmOutcome =
   | { outcome: 'started'; taskId: string }
   | { outcome: 'rejection'; taskId: string; reason: ResourceRejectionReason }
   | { outcome: 'not_waiting'; taskId: string }
-  | { outcome: 'no_confirmation'; taskId: string }
-  | { outcome: 'expired'; taskId: string };
+  | { outcome: 'no_confirmation'; taskId: string };
 
 export interface TaskRunner {
   /** 受理：底账 begin(status:'queued')，同步返回（Main 不等待）；派发由 pump 触发。 */
@@ -1491,8 +1485,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
      * 确认路径·句柄已过期（2026-11-19 owner 口径修正）：与 pendingConfirmation 互斥——过期
      * 即不带旧句柄，改为让执行端渲染「重新生成同一提案」的机械事实。缺省 = 非过期确认。
      */
-    confirmationExpired?: boolean,
-  ): void {
+    ): void {
     const controller = new AbortController();
     controllers.set(task.taskId, controller);
     // 接续回合的在跑凭据（存活事实）：认领路径已带租约，这里补齐接续/长任务续跑回合——
@@ -1517,7 +1510,6 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       ...(answer === undefined ? {} : { answer }),
       ...(resumedOperation === undefined ? {} : { resumedOperation }),
       ...(pendingConfirmation === undefined ? {} : { pendingConfirmation }),
-      ...(confirmationExpired === true ? { confirmationExpired: true } : {}),
     };
     // 同步发起（pump 返回前执行端已被调用）；经 Promise 化兜住执行端同步抛错。
     let round: Promise<TaskExecutionOutcome>;
@@ -1704,7 +1696,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
           if (!isSettledRace(error)) report(taskId, error);
           return;
         }
-        notifyWaitingUser(taskId);
+        notifyWaitingUser(taskId, outcome.report);
         return;
       case 'timed_out':
         try {
@@ -1731,7 +1723,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
    * 等待形状就不触发（不猜）。恰一次：本函数只在 needs_input / needs_confirmation 收尾
    * 落等待后各调用一次（已在等待的行再落等待不重复触发；回非等待再进 = 新收尾 = 新一次）。
    */
-  function notifyWaitingUser(taskId: string): void {
+  function notifyWaitingUser(taskId: string, workerReport?: string): void {
     const waitingUserNotice = options.waitingUserNotice;
     if (waitingUserNotice === undefined) return;
     try {
@@ -1744,6 +1736,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         sessionId: task.sessionId,
         ...(task.name === undefined ? {} : { name: task.name }),
         question,
+        ...(workerReport === undefined || workerReport.trim() === '' ? {} : { report: workerReport }),
       });
       if (noticed !== undefined) void Promise.resolve(noticed).catch(() => undefined);
     } catch (error) {
@@ -1810,7 +1803,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
    *   · waiting_user + 提案存在 + 未过期 → 取句柄 → answerResumes → startRound（answer =
    *     用户原话，pendingConfirmation = 底账提案）：句柄只在确认路径透传；
    *   · waiting_user + 提案已过期 → **不判失败、不结束任务**：接续一个回合让 Worker 重新生成
-   *     同一提案（confirmationExpired 事实），返回 `expired`（零写执行，任务仍回到等待事实）；
+
    *   · 非 waiting_user / 无提案 → 确定性拒绝（零执行，不 acquire 许可、不接续）。
    */
   function confirm(taskId: string, options?: { userText?: string; scope?: TaskScope }): ConfirmOutcome {
@@ -1824,11 +1817,8 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       // waiting_user 但没有提案 = 在等补充信息，不是等确认。
       return { outcome: 'no_confirmation', taskId };
     }
-    // 过期判定（owner 2026-11-19）：句柄过期就过期——不判失败、不结束任务，接续一个回合让
-    // Worker 重新生成同一提案（带 confirmationExpired 事实、不带旧句柄），任务仍回到等待事实。
-    const expired = confirmation.expiresAt !== undefined
-      && Number.isFinite(Date.parse(confirmation.expiresAt))
-      && Date.parse(confirmation.expiresAt) <= now().getTime();
+    // 不做过期预判（2026-11-24 删）：句柄原样透传，执行层拒了就拒了——Worker 看见原始拒绝
+    // 会自行重新提案（判断归 Worker），用户听到的是执行层的原话而不是柜台判的「已过期」。
     const acquired = policy.acquire('background', { taskId });
     if (isRejection(acquired)) {
       return { outcome: 'rejection', taskId, reason: acquired.reason };
@@ -1839,10 +1829,6 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
     } catch (error) {
       policy.release(acquired);
       throw error;
-    }
-    if (expired) {
-      startRound(resumed, acquired, options?.userText, undefined, undefined, true);
-      return { outcome: 'expired', taskId };
     }
     startRound(resumed, acquired, options?.userText, undefined, confirmation);
     return { outcome: 'started', taskId };

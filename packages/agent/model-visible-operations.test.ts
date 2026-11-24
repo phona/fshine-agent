@@ -10,11 +10,12 @@
  *   A. 能力面过滤（结构性根治）：执行层声明 `model_visible:false` 的 operation 不进模型
  *      可见面——workerManifest 过滤掉，**允许集合也剔除**（模型凭记忆硬调 → 发起前确定性
  *      拒绝，走 OPERATION_NOT_PERMITTED_MESSAGE、零执行事实、不提 operation 名）。
- *   B. 判据兜底（就算漏进来看错也不判死）：同回合存在提案时，「同回合没法自己确认」
- *      （CONFIRMATION_REQUIRED）与「历史协议用法错」（PROPOSAL_* / CALL_REFUSE）都不算真
- *      失败——有提案、且所有失败都是这两类 → 判 needs_confirmation（真句柄 + 摘要）。
+ *   B. 判据兜底（就算漏进来看错也不判死）：**本回合有提案（needs_confirmation）且没有已完成
+ *      的非只读业务写 → 落等待事实**。判据是纯机械事实、**不认失败码**（2026-11-24 删容忍
+ *      码表：哪种拒绝都算「这一笔没成」，为什么由 Worker 的汇报原文说，宿主不判「这算等待
+ *      还是算失败」）。句柄/摘要来自底账提案。
  *
- * 反向绊线：去掉 A 的过滤 → ① 红；去掉 B 的码集合 → ④ 红（详见各用例注释）。
+ * 反向绊线：去掉 A 的过滤 → ① 红；去掉 B 的等待事实归类 → ④ / ⑤ 红（详见各用例注释）。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -208,6 +209,8 @@ class LiveSequenceClient implements ExecutionClient {
 const PREPARE_ARGS = { operation: 'dummy.prepare', args: { '--collection': 'alpha' } };
 const B_PROPOSAL_ARGS = { operation: 'dummy.proposal', args: {} };
 const PROPOSAL_COMMIT_ARGS = { operation: 'dummy.proposal-commit', args: { '--proposal-id': 'prop_live' } };
+/** 第二次误用换个 proposal-id（同参数重复会被 A2b 拦，本用例要的是「误用仍落等待事实」）。 */
+const PROPOSAL_COMMIT_ARGS_2 = { operation: 'dummy.proposal-commit', args: { '--proposal-id': 'prop_live_2' } };
 const DENIED_ARGS = { operation: 'dummy.denied', args: {} };
 
 function bExecutor(client: ExecutionClient, registry: TaskRegistry, worker: TurnDriver): Promise<TaskExecutor> {
@@ -235,7 +238,7 @@ async function runBackground(
   return registry.get(taskId, SCOPE);
 }
 
-describe('B. 判据兜底：有提案、且所有失败都是「同回合没法确认/历史协议用法错」→ 不判死', () => {
+describe('B. 判据兜底：本回合有提案且没有已完成的非只读业务写 → 落等待事实（不认码）', () => {
   it('④ 同回合 prepare → proposal → proposal-commit 失败 ×2 → 任务 waiting_user 且有提案（去掉 B → 本用例红）', async () => {
     const registry = makeRegistry();
     const capture: Capture = { results: [], errors: [] };
@@ -243,13 +246,15 @@ describe('B. 判据兜底：有提案、且所有失败都是「同回合没法�
     const executor = await bExecutor(
       client,
       registry,
-      // 复刻 live：proposal 完成、proposal-commit 失败两次（模型误用历史协议）。
-      callingWorker([PREPARE_ARGS, B_PROPOSAL_ARGS, PROPOSAL_COMMIT_ARGS, PROPOSAL_COMMIT_ARGS], capture),
+      // 复刻 live：proposal 完成、proposal-commit 历史协议用法错两次（模型误用历史协议）。
+      // 第二次换个 --proposal-id：2026-11-24 起锁只认「完全相同参数」，逐字重复会被 A2b
+      // 拦在宿主侧（那条覆盖见 deterministic-failure-guard）；本用例要的是「误用仍落等待事实」。
+      callingWorker([PREPARE_ARGS, B_PROPOSAL_ARGS, PROPOSAL_COMMIT_ARGS, PROPOSAL_COMMIT_ARGS_2], capture),
     );
 
     const task = await runBackground(registry, executor, 't_live_seq', '给 alpha 集合 W1 追加 2 条记录');
 
-    // 有提案、且所有失败都是「历史协议用法错」→ 底账落等待事实（pendingQuestion），不判死。
+    // 有提案、且本回合没有已完成的业务写 → 底账落等待事实（pendingQuestion），不判死。
     expect(task.pendingQuestion).toBeDefined();
     expect(task.pendingQuestion?.confirmation?.summary).toBe(SUMMARY);
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_live');
@@ -257,15 +262,23 @@ describe('B. 判据兜底：有提案、且所有失败都是「同回合没法�
     expect(client.requests).toEqual(['dummy.prepare', 'dummy.proposal', 'dummy.proposal-commit', 'dummy.proposal-commit']);
   });
 
-  it('⑤ 同回合 prepare → GATE_REFUSE → 仍 failed（真失败不许被掩盖）', async () => {
+  it('⑤ 同回合 prepare → GATE_REFUSE → 落 waiting_user（owner 2026-11-24 行为变化：宿主不再判失败种类）', async () => {
     const registry = makeRegistry();
     const capture: Capture = { results: [], errors: [] };
-    const executor = await bExecutor(new LiveSequenceClient(), registry, callingWorker([PREPARE_ARGS, DENIED_ARGS], capture));
+    const client = new LiveSequenceClient();
+    const executor = await bExecutor(client, registry, callingWorker([PREPARE_ARGS, DENIED_ARGS], capture));
 
     const task = await runBackground(registry, executor, 't_real_fail', '给 alpha 集合 W1 追加 2 条记录');
 
-    // 真失败不落等待事实：执行账留有执行层拒绝行（底账无 status，读执行行）。
+    // **行为变化（owner 2026-11-24 批准）**：删容忍码表前，GATE_REFUSE 算「真失败」→ 回合判
+    // failed、用户既没拿到提案也没法确认（live 三连症状第一条）。现在判据是纯机械事实——本回合
+    // 有提案且没有已完成的业务写 → 落等待事实，**不认码**；用户听到的拒绝原因由 Worker 的汇报
+    // 原文承载（它亲眼看见了执行层的拒绝）。
+    expect(task.pendingQuestion).toBeDefined();
+    expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_live');
+    // 机械事实不丢：执行账仍留有执行层拒绝行（做没做成由 Main 读账本自己判）。
     expect(task.executions.map((execution) => execution.status)).toContain('refused');
-    expect(task.pendingQuestion).toBeUndefined();
+    // 两次都真的打到执行层（宿主不预先拦）。
+    expect(client.requests).toEqual(['dummy.prepare', 'dummy.denied']);
   });
 });

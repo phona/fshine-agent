@@ -1,5 +1,5 @@
 /**
- * A2b 后台执行器「同对象确定性失败不重撞」锁（2026-11-19）。
+ * A2b 后台执行器「同参数确定性失败不重撞」锁（2026-11-19；2026-11-24 键改形状）。
  *
  * 根因（本分支实测）：inline `createSession.send` 路径有 A2b 锁（deterministicFailuresThisTurn /
  * deterministicKey，见 deterministic-failure-guard.test.ts），但**后台**执行器 `createTaskExecutor`
@@ -8,7 +8,8 @@
  * 这正是 owner 的红线：宁可停，也绝不把执行层打爆。
  *
  * 判据（与前台 inline **同一份**「键 + 记录 + 判定」，见 src/deterministic-retry-lock.ts）：
- *   ① 键 = (operation, 对象参数)；对象取法与内联一致（--collection/--topic）。
+ *   ① 键 = (operation, 参数稳定摘要 `argsDigestOf`)；**不识别业务对象名**（2026-11-24 owner
+ *     裁定：换参数 = 另一笔调用，交给执行层自己的 retryable 声明与限流去接）；
  *   ② retryable !== true 的 failed/refused → 记入本回合；再次同键发起 → 宿主侧确定性拒绝
  *      （不发起执行），事件 execution_retry_blocked 走 options.onExecutionEvent；任务结局如实失败。
  *   ③ 回合边界：每个后台回合（每次 execute()；即一次 task_run 委派，见 background-write-confirmation
@@ -30,6 +31,7 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver } from './src/driver-contract';
 import { createTaskExecutor, EXECUTE_OPERATION_TOOL, type ExecutionEvent } from './src/execution-runtime';
+import { argsDigestOf } from './src/deterministic-retry-lock';
 import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
 import type { TaskRegistry } from './src/task-registry';
 import { createTaskRunner, type TaskExecutor, type TaskRunner } from './src/task-runner';
@@ -149,7 +151,7 @@ const REFUSED: (request: ExecutionRequest) => ExecutionOutcome = () => ({
   error: { code: 'GATE_REFUSE', message: 'alpha 集合被策略拒绝', retryable: false },
 });
 
-describe('A2b 后台执行器：同对象确定性失败不重撞', () => {
+describe('A2b 后台执行器：同参数确定性失败不重撞', () => {
   it('① 同键确定性拒绝两次 → 执行层真实调用 1 次；第二次落 execution_retry_blocked；任务如实失败', async () => {
     const registry = makeRegistry();
     const events: ExecutionEvent[] = [];
@@ -166,12 +168,13 @@ describe('A2b 后台执行器：同对象确定性失败不重撞', () => {
 
     // 执行层只被真实调用一次（第二次在发起前被宿主拦下）。
     expect(client.requests).toHaveLength(1);
-    // 落地一条 execution_retry_blocked（含 operation/object/code/declaredRetryable）。
+    // 落地一条 execution_retry_blocked（含 operation/argsDigest/code/declaredRetryable）。
     const blocked = eventsNamed(events, 'execution_retry_blocked');
     expect(blocked).toHaveLength(1);
     expect(blocked[0]!.taskId).toBe('t_same_key');
     expect(blocked[0]!.operation).toBe('dummy.query');
-    expect(blocked[0]!.object).toBe('alpha');
+    // 2026-11-24：`object`（业务对象名刮擦）改名 `argsDigest`（参数稳定摘要）——观测面内容仍可读。
+    expect(blocked[0]!.argsDigest).toBe(argsDigestOf({ '--collection': 'alpha' }));
     expect(blocked[0]!.code).toBe('GATE_REFUSE');
     expect(blocked[0]!.declaredRetryable).toBe(false);
     // 被挡话术是业务语言、不含内部词（模型据此如实收尾）。
@@ -182,7 +185,8 @@ describe('A2b 后台执行器：同对象确定性失败不重撞', () => {
     expect(['failed', 'refused']).toContain(lastExecutionOf(registry.get('t_same_key', SCOPE))?.status);
   });
 
-  it('② 不同对象（换集合）的两次拒绝 → 各自真实调用（锁只锁同对象）', async () => {
+  it('② 换参数（换集合）的两次拒绝 → 各自真实调用（锁只锁完全相同的参数）', async () => {
+    // 2026-11-24 owner 裁定：换参数 = 另一笔调用，能否重试由执行层自己的 retryable 声明与限流接。
     const registry = makeRegistry();
     const events: ExecutionEvent[] = [];
     const capture: WorkerCapture = { results: [], errors: [] };
@@ -222,15 +226,16 @@ describe('A2b 后台执行器：同对象确定性失败不重撞', () => {
     expect(eventsNamed(events, 'execution_retry_blocked')).toEqual([]);
     const allowed = eventsNamed(events, 'execution_retry_allowed');
     expect(allowed).toHaveLength(2);
-    expect(allowed[0]!.object).toBe('alpha');
+    expect(allowed[0]!.argsDigest).toBe(argsDigestOf({ '--collection': 'alpha' }));
     expect(allowed[0]!.code).toBe('TRANSIENT');
   });
 
   it('③-2 retryable:true 放行有次数上界（E14 口径：同一件事一个回合内兜/重试 ≤2 次）：第 3 次发起前被拦', async () => {
     // 根因（真模型验收实跑）：夹具对参数形状错误 INVALID_RECORDS 声明 retryable:true，A2b 放行，
-    // 实测 Worker 一个回合里用 5 种错误写法连撞 5 次——放行没有次数上限。修法：放行次数用尽后，
-    // 同一 (operation, 对象) 转入既有拦截路径（before 拦下 + 既有 execution_retry_blocked 事件），
+    // 实测 Worker 一个回合里连撞多次——放行没有次数上限。修法：放行次数用尽后，
+    // 同一 (operation, 参数摘要) 转入既有拦截路径（before 拦下 + 既有 execution_retry_blocked 事件），
     // 任务结局如实失败；回合边界不跨回合累计（与确定性失败锁同一作用域）。
+    // 2026-11-24：上界按**完全相同参数**计（换参数 = 另一笔调用，各自有各自的预算）。
     const registry = makeRegistry();
     const events: ExecutionEvent[] = [];
     const capture: WorkerCapture = { results: [], errors: [] };
@@ -238,14 +243,14 @@ describe('A2b 后台执行器：同对象确定性失败不重撞', () => {
       status: 'failed',
       error: { code: 'INVALID_RECORDS', message: '--records 必须是结构化数组（每项 {name, value}）', retryable: true },
     }));
-    const badShape = (marker: string): Record<string, unknown> => ({
+    const badShape: Record<string, unknown> = {
       operation: 'dummy.query',
-      args: { '--collection': 'alpha', '--records': marker },
-    });
+      args: { '--collection': 'alpha', '--records': 'bad-1' },
+    };
     const executor = await makeExecutor({
       client,
       registry,
-      worker: roundWorker([[badShape('bad-1'), badShape('bad-2'), badShape('bad-3')]], capture),
+      worker: roundWorker([[badShape, badShape, badShape]], capture),
       onEvent: (event) => events.push(event),
     });
 
@@ -260,7 +265,7 @@ describe('A2b 后台执行器：同对象确定性失败不重撞', () => {
     expect(blocked[0]!).toMatchObject({
       taskId: 't_retryable_budget',
       operation: 'dummy.query',
-      object: 'alpha',
+      argsDigest: argsDigestOf(badShape.args as Record<string, unknown>),
       code: 'INVALID_RECORDS',
       // 执行层当时确实说可重试——拦的是次数，不改写它的声明。
       declaredRetryable: true,
@@ -287,7 +292,7 @@ describe('A2b 后台执行器：同对象确定性失败不重撞', () => {
     expect(client.requests).toHaveLength(1);
     expect(eventsNamed(events, 'execution_retry_blocked')).toHaveLength(1);
 
-    // 回合 2（另一次 execute；锁不跨回合）→ 同对象 alpha 再调 → 放行（真实调用第 2 次）。
+    // 回合 2（另一次 execute；锁不跨回合）→ 同参数 alpha 再调 → 放行（真实调用第 2 次）。
     await runBackground(registry, executor, 't_turn2');
     expect(client.requests).toHaveLength(2);
     expect(client.requests[1]!.args['--collection']).toBe('alpha');

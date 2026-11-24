@@ -19,7 +19,7 @@
 | 缺对象 / 含糊指代：先澄清或正确沿用对象，零执行 / 不无谓追问 | `scripts/eval/wecom-sim/cases-a-access.test.ts:W-03 缺对象：先问集合与窗口，零执行`<br>`scripts/eval/wecom-sim/cases-a-access.test.ts:W-04 新会话含糊指代`<br>`scripts/eval/wecom-sim/cases-a-access.test.ts:W-04b 刚查过 documents` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 多轮指代：换窗口沿用集合（「那 W202610 呢」）、改口只看 beta | `scripts/eval/wecom-sim/cases-b-multi.test.ts:W-05 接 W-02`<br>`scripts/eval/wecom-sim/cases-b-multi.test.ts:W-07 接 W-06` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 语义范围扩散：只说当期，不自行扩到上月 / 整集合 | `scripts/eval/business-e2e/b03-scenario-reset.test.ts:② 未经请求自推扩到上月 W202610` | 宿主机制 | 已覆盖 | 真模型面在 eval:user E13（`scripts/eval/convergence-r1/cases/E13.ts`），CI 自动跑；本行自动化面=判据守卫 |
-| 确定性拒绝不重试：错参数 WHERE_INVALID，同类失败有界、随后如实说明 | `scripts/eval/wecom-sim/cases-c-failure.test.ts:W-12 finance-invoices 给窗口`<br>`apps/server/server-retry-blocked-event.test.ts:同对象第二次尝试被拦` | 宿主机制 + 执行层 | 已覆盖 | 真模型面在 eval:user E14（`scripts/eval/convergence-r1/cases/E14.ts`） |
+| 确定性拒绝不重试：错参数 WHERE_INVALID，同类失败有界、随后如实说明 | `scripts/eval/wecom-sim/cases-c-failure.test.ts:W-12 finance-invoices 给窗口`<br>`apps/server/server-retry-blocked-event.test.ts:同参数第二次尝试被拦` | 宿主机制 + 执行层 | 已覆盖 | 真模型面在 eval:user E14（`scripts/eval/convergence-r1/cases/E14.ts`） |
 | 无数据 / 对象不存在：如实说没有 / 不存在，不编行 | `scripts/eval/wecom-sim/cases-c-failure.test.ts:W-08 empty-one W1：如实「没有记录」`<br>`scripts/eval/wecom-sim/cases-c-failure.test.ts:W-09 contract-archive：如实「不存在」` | 宿主机制 + 执行层 | 已覆盖 | — |
 | 纯聊天不当成查询：零执行、不编数据 | `scripts/eval/wecom-sim/cases-a-access.test.ts:W-01 闲聊：零执行、不编造数据` | 宿主机制 + 执行层 | 已覆盖 | — |
 

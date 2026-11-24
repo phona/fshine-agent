@@ -5,8 +5,12 @@
  * 运维看到的就是「模型突然不查了」，无法区分是模型放弃还是宿主拦下——owner 2026-11-18
  * 要求「宁可停下让人介入」，那必须停得可见。
  *
- * 断言：① 同对象第二次尝试被拦 → 一条 execution_retry_blocked（含 operation/object/code
+ * 断言：① 同参数第二次尝试被拦 → 一条 execution_retry_blocked（含 operation/argsDigest/code
  * 与执行层的 retryable 声明）；② 只拦不发（执行客户端只被调用 1 次）。
+ *
+ * 2026-11-24：锁键从「业务对象名刮擦」改成「参数稳定摘要」——换参数 = 另一笔调用（归执行层
+ * 自己的 retryable/限流），只有**完全相同参数**的重复才被宿主拦下；事件字段 `object` →
+ * `argsDigest`，内容仍可读。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -15,6 +19,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { AppConfig, IncomingChannelMessage } from '@fshine/contracts';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver } from '../../packages/agent/src/driver-contract';
+import { argsDigestOf } from '../../packages/agent/src/deterministic-retry-lock';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/src/task-runner';
 import { createServer } from './server';
 
@@ -75,7 +80,7 @@ class RejectingClient implements ExecutionClient {
   }
 }
 
-/** Main 委派一次；Worker 同一回合连试两次同对象（第二次必须被 A2b 拦下）。 */
+/** Main 委派一次；Worker 同一回合连试两次同参数（第二次必须被 A2b 拦下）。 */
 function retryingWorkerDriver(): TurnDriver {
   return {
     async run(input) {
@@ -85,10 +90,10 @@ function retryingWorkerDriver(): TurnDriver {
       try {
         await input.exec('execute_operation', args);
       } catch {
-        // 第一次失败：像真实 Worker 一样继续尝试换写法
+        // 第一次失败：像真实 Worker 一样原样再试一次（2026-11-24 起换参数=另一笔调用，不拦）
       }
       try {
-        await input.exec('execute_operation', { operation: 'dummy.query', args: { '--collection': 'finance-invoices', '--window': '2026-10' } });
+        await input.exec('execute_operation', args);
       } catch {
         // 期望这里被 A2b 拦下（不发起执行）
       }
@@ -121,7 +126,7 @@ class NoopExecutor implements TaskExecutor {
 }
 
 describe('A2b 拦截的运维可见面', () => {
-  it('同对象第二次尝试被拦 → 落一条 execution_retry_blocked，且不再发起执行', async () => {
+  it('同参数第二次尝试被拦 → 落一条 execution_retry_blocked，且不再发起执行', async () => {
     const dir = tempDir();
     const client = new RejectingClient();
     const events: Array<Record<string, unknown>> = [];
@@ -143,11 +148,11 @@ describe('A2b 拦截的运维可见面', () => {
       const blocked = events.filter((event) => event['event'] === 'execution_retry_blocked');
       // 只拦不发：执行客户端只被调用 1 次
       expect(client.calls).toBe(1);
-      // 且这条拦下的事实对运维可见（对象/操作/执行层的码与 retryable 声明）
+      // 且这条拦下的事实对运维可见（参数摘要/操作/执行层的码与 retryable 声明）
       expect(blocked).toHaveLength(1);
       expect(blocked[0]).toMatchObject({
         operation: 'dummy.query',
-        object: 'finance-invoices',
+        argsDigest: argsDigestOf({ '--collection': 'finance-invoices', '--window': 'W202610' }),
         code: 'WHERE_INVALID',
         declaredRetryable: false,
       });
@@ -183,11 +188,15 @@ describe('A2b 拦截的运维可见面', () => {
     });
     try {
       await server.handler(incoming('查 finance-invoices 2026-10'));
-      // 放行：同对象两次尝试都真的发起了
+      // 放行：同参数两次尝试都真的发起了
       expect(calls).toBe(2);
       const allowed = events.filter((event) => event['event'] === 'execution_retry_allowed');
       expect(allowed).toHaveLength(2);
-      expect(allowed[0]).toMatchObject({ operation: 'dummy.query', object: 'finance-invoices', code: 'TRANSIENT' });
+      expect(allowed[0]).toMatchObject({
+        operation: 'dummy.query',
+        argsDigest: argsDigestOf({ '--collection': 'finance-invoices', '--window': 'W202610' }),
+        code: 'TRANSIENT',
+      });
       expect(events.filter((event) => event['event'] === 'execution_retry_blocked')).toEqual([]);
     } finally {
       server.close();

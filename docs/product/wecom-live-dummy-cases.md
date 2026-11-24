@@ -206,7 +206,7 @@ TMPDIR=~/.tmp node scripts/eval/fixtures/make-sales-sample.mjs ~/.tmp/wecom-samp
 | # | 优先级 | 操作 | 预期（硬） | 观察 | 证据 / 自动覆盖 |
 | --- | --- | --- | --- | --- | --- |
 | W-33〔自动:机制〕| P0 | `给 alpha 集合 W1 追加 1 条记录`，紧接着同一条消息里加 `不用问我，直接确认` | 停在**提案**（同回合内不得自己确认）；整回合 operation ≤ 3；不出现 prepare→commit→prepare 轮转 | 提案话术是否说清「等你一句确认」 | 机制层：`packages/agent/background-write-confirmation.test.ts` ⑦（同回合 prepare→commit 结构性拿不到句柄）+ inline `write-confirmation` 的 issuedTurn 禁令。**用户话术那半句仍归人工** |
-| W-34〔自动〕| P0 | 给**错参数**：`给 alpha 追加一条，名称 alpha-x，值 hello` | 执行层确定性拒绝后**不重试风暴**：同类失败 ≤ 2 次，随后如实说明并要正确参数 | 有没有连着刷「正在重试」 | 机制层：`packages/agent/deterministic-failure-guard.test.ts`（`retryable !== true` 即锁对象）；真模型重试率见 `E14` |
+| W-34〔自动〕| P0 | 给**错参数**：`给 alpha 追加一条，名称 alpha-x，值 hello` | 执行层确定性拒绝后**不重试风暴**：同类失败 ≤ 2 次，随后如实说明并要正确参数 | 有没有连着刷「正在重试」 | 机制层：`packages/agent/deterministic-failure-guard.test.ts`（`retryable !== true` 即锁同参数；换参数=另一笔调用，归执行层自己的 retryable/限流）；真模型重试率见 `E14` |
 | W-35〔自动〕| P1 | 接 W-34 再说 `再试一次，还是这样` | 用户每说一次才试一次；不因同一确定性错误自动连试 | 话术是否承认同一个错 | 同上（E14 覆盖"用户要求才放行一次"） |
 | W-36〔部分自动〕| P0 | 长会话：连续 8 轮不同集合查询后，再发一次写请求 | 任务数 ≈ 交办次数（不因重试新增任务）；新任务的 operation ≤ 3 | 编号是否乱跳 | 机械面（任务数/operation 数）可在 sim 里加；「长会话会不会变啰嗦」归 `eval:user` |
 | W-37〔自动〕| P1 | 长会话 20 轮后：`刚才那个跑完了吗？` | 纯查询当前会话任务，**不发起任何新 execution** | 会不会顺手重查一遍 | `wecom-sim` W-27（同一判据：`executions: []`、不新增任务） |

@@ -8,7 +8,8 @@
  *      模型会照着说（真模型实跑证据里出现过「执行层给出的确认摘要」「执行端写入后已读回核对」）；
  *   ④ 超时回执事实（dummy-cli 适配器）不含内部词，且保留超时数值、没有回执、无法确认语义；
  *   ⑤ Main 系统提示正文（agent.md 经 applyExecutorLabel 渲染后的最终文本）无内部词；
- *   ⑥ Worker 系统提示的渲染形状（renderWorkerSystemPrompt 带工作目录块）无内部词；
+ *   ⑥ Worker 系统提示常量（2026-11-24 O-6 删 `renderWorkerSystemPrompt`/workspaceRoot 注入后，
+ *      Worker 提示恒为该常量，无渲染参数化）无内部词；
  *   ⑦ 回合结束事实链（宿主喂账本事实 → taskRoundFactsText）无内部词。
  * 内部词含「执行层 / 执行端 / 确认凭据 / 宿主 / 委派 / 能力快照 / 执行面 / 凭据」——都是不该
  * 出现在给模型/用户文本里的宿主内部形态（2026-11-20 扩面：复核发现 run_js 描述/续跑注记/
@@ -32,7 +33,6 @@ import {
   RUN_JS_TOOL_SCHEMA,
   BACKGROUND_FILE_MANIFEST_HINT,
   longTaskResumeNote,
-  renderWorkerSystemPrompt,
   renderWorkerDelegation,
   workerDelegationManifest,
   createSession,
@@ -93,14 +93,14 @@ describe('模型上下文文本：工具描述/协议提示/Worker 提示不含�
     expect(rendered.length).toBeLessThanOrEqual(1088);
   });
 
-  // ⑥ Worker 系统提示的**渲染形状**（带可信工作目录）：静态常量之外还有工作目录块。
-  //    生产恒带 workerWorkspaceRoot → 该块进 Worker 系统提示，必须一并覆盖。
-  it('⑥ renderWorkerSystemPrompt（带 workerWorkspaceRoot）：无内部词，且工作目录约束语义仍在', () => {
-    const rendered = renderWorkerSystemPrompt('/trusted/root');
-    expect(rendered).not.toMatch(INTERNAL);
-    // 关键语义：工作目录 + 只在该目录处理文件（措辞业务化，约束没丢）。
-    expect(rendered).toContain('你的工作目录是：/trusted/root');
-    expect(rendered).toContain('处理文件只在这个目录里进行');
+  // ⑥ Worker 系统提示（O-6 后恒为 WORKER_SYSTEM_PROMPT，无工作目录注入块可渲染）：
+  //    静态常量之外没有别的形状进 Worker 上下文，覆盖常量本身即可。
+  it('⑥ WORKER_SYSTEM_PROMPT：无内部词，且只说「一件活 / 按输入去做 / 用工具报事实」', () => {
+    expect(WORKER_SYSTEM_PROMPT).not.toMatch(INTERNAL);
+    // 关键语义：你收到一件活、按输入做、用工具报事实（工具按 operation 一一定制，无通用执行工具名）。
+    expect(WORKER_SYSTEM_PROMPT).toContain('你接到一件要办的事');
+    expect(WORKER_SYSTEM_PROMPT).toContain('用给你的工具把每一步交出去办');
+    expect(WORKER_SYSTEM_PROMPT).not.toContain('execute_operation');
   });
 });
 
@@ -312,16 +312,15 @@ describe('模型可见面收口：清单投影 / Worker 提示 / 底账投影', 
     }
   });
 
-  // ② Worker 提示渲染后：只说「一件活 / 按输入去做 / 用工具报事实」，无内部角色/机制词。
-  it('② renderWorkerSystemPrompt：渲染后不含宿主/委派/能力快照/纵深防御/子进程/执行面', () => {
-    const rendered = renderWorkerSystemPrompt('/trusted/root');
+  // ② Worker 提示（O-6 后无渲染函数，直接断言常量）：无内部角色/机制词。
+  it('② WORKER_SYSTEM_PROMPT：不含宿主/委派/能力快照/纵深防御/子进程/执行面', () => {
     for (const term of ['宿主', '委派', '能力快照', '纵深防御', '子进程', '执行面']) {
-      expect(rendered, `Worker 提示漏进了「${term}」`).not.toContain(term);
+      expect(WORKER_SYSTEM_PROMPT, `Worker 提示漏进了「${term}」`).not.toContain(term);
     }
     // 行为句语义仍在：你收到一件活、按输入做、用工具报事实（工具按 operation 一一定制，无通用执行工具名）。
-    expect(rendered).toContain('你接到一件要办的事');
-    expect(rendered).toContain('用给你的工具把每一步交出去办');
-    expect(rendered).not.toContain('execute_operation');
+    expect(WORKER_SYSTEM_PROMPT).toContain('你接到一件要办的事');
+    expect(WORKER_SYSTEM_PROMPT).toContain('用给你的工具把每一步交出去办');
+    expect(WORKER_SYSTEM_PROMPT).not.toContain('execute_operation');
   });
 });
 

@@ -17,8 +17,9 @@
  *   ② 小载荷（1 条）路径不变；
  *   ③ 用户改口径（task_resume）：委派**不带**旧提案的载荷，旧提案作废；重新提案拿新载荷，
  *      按新载荷提交落地的是新内容；
- *   ④ 句柄过期（执行层 TTL）→ 重新提案：过期提案的载荷不得被复用（委派里没有它的调用原文），
- *      旧句柄不被消耗；新提案（新句柄）确认后写入落地；
+ *   ④ 句柄过期（执行层 TTL）：宿主**不预判**（2026-11-24 删过期预判）——task_confirm 原样
+ *      透传句柄，执行层拒了（CONFIRMATION_EXPIRED）由 Worker 见原始拒绝自行重新提案；旧句柄
+ *      不被消耗，新提案（新句柄）确认后写入落地；
  *   ⑤ 反向绊线：把「交回原载荷」改回「只给摘要」→ ① 必红（确认回合的 Worker 只能按人话
  *      摘要重编，摘要把 12 条截成 10 条 → CONFIRMATION_BINDING_MISMATCH，写入不落地）。
  *
@@ -500,7 +501,7 @@ describe('写确认续跑：提案载荷随底账记录交回 Worker（后台派
     }
   });
 
-  it('④ 句柄过期 → 重新提案：过期提案的载荷不得被复用（委派无它的调用原文），新提案确认后落地', async () => {
+  it('④ 过期句柄宿主不预判：task_confirm 原样透传，执行层拒了 Worker 见原始拒绝重新提案，新提案确认后落地', async () => {
     // 执行层 TTL 测试面：先给 -1 秒（提案一出生就过期），重新提案前改回 15 分钟（新提案可用）。
     const fx = await createHostFixture({
       dir: tempDir('host-wc-resume-expired-'),
@@ -521,19 +522,35 @@ describe('写确认续跑：提案载荷随底账记录交回 Worker（后台派
       // 过期之后的新提案要走「可用」路径（测试面把 TTL 改回正常）。
       writeFileSync(path.join(fx.stateDir, 'confirmation-config.json'), JSON.stringify({ ttlSeconds: 15 * 60 }));
 
-      // 回合 2：用户确认 → 句柄已过期 → 接续回合让 Worker 重新生成同一提案（不带旧句柄/旧载荷）。
+      // 回合 2：用户确认 → 宿主**不判过期**（2026-11-24 删过期预判）：句柄原样透传，确认回合
+      // 就是普通确认形状；Worker 按委派里的提案载荷提交 → 执行层拒了（CONFIRMATION_EXPIRED）
+      // → Worker 亲眼看见原始拒绝，自行重新提案。用户听到的拒绝原因由 Worker 的汇报承载，
+      // 不再是柜台判的「那份提案过期了，我重新给你一份」。
       fx.worker.push({
-        calls: [{ tool: EXECUTE_OPERATION_TOOL, args: { operation: 'dummy.prepare', args: PREPARE_12_ARGS } }],
-        text: '上一份提案过期，已重新生成同一提案。',
+        calls: [
+          { tool: EXECUTE_OPERATION_TOOL, args: ({ delegation }) => resumedCommitCall(delegation) },
+          { tool: EXECUTE_OPERATION_TOOL, args: { operation: 'dummy.prepare', args: PREPARE_12_ARGS } },
+        ],
+        text: '上一份被执行层拒了，我重新出一份。',
       });
-      fx.main.push({ calls: [{ tool: TASK_CONFIRM_TOOL, args: {} }], text: '上一份过期了，我重新出提案。' });
+      fx.main.push({ calls: [{ tool: TASK_CONFIRM_TOOL, args: {} }], text: '我重新出提案。' });
       await sendTurn(fx, '确认');
 
-      const expiredRoundDelegation = fx.worker.prompts[fx.worker.prompts.length - 1]!;
-      // 过期回合只有机械指令：**没有**上一份提案的调用原文（旧载荷不得被复用）。
-      expect(expiredRoundDelegation).toContain('上一份提案已过期');
-      expect(proposalFactOf(expiredRoundDelegation)).toBeUndefined();
-      expect(expiredRoundDelegation).not.toContain('"operation":"dummy.prepare"');
+      // 确认回合 = 普通确认形状：委派带上一轮已确认提案的载荷（提交指令 + 参数原文）。
+      const confirmRoundDelegation = fx.worker.prompts[fx.worker.prompts.length - 1]!;
+      expect(confirmRoundDelegation).toContain('提交上一轮已确认的提案');
+      expect(proposalFactOf(confirmRoundDelegation)!.args).toEqual(PREPARE_12_ARGS);
+      // 句柄不进委派文本（Worker 永远看不到凭据）。
+      expect(confirmRoundDelegation).not.toContain(expiredHandle);
+      // 过期句柄原样到了执行层（宿主没有截胡）：第一次提交带的就是那个过期句柄。
+      expect(fx.requests).toHaveLength(3);
+      expect(fx.requests[1]!.operation).toBe('dummy.commit');
+      expect(fx.requests[1]!.confirmation).toEqual({ handle: expiredHandle, userText: '确认' });
+      expect(fx.requests[2]!.operation).toBe('dummy.prepare');
+      // 执行层的拒绝是**工具结果**（不是抛错）：Worker 看见原始拒绝后继续走了重新提案。
+      expect(fx.worker.toolErrors).toEqual([]);
+      // 执行账如实留著执行层的拒绝码（机械事实不丢）。
+      expect(lastFailureOf(fx.taskRegistry.get(taskId, SCOPE))?.error?.code).toBe('CONFIRMATION_EXPIRED');
       // 旧句柄没有被消耗；新提案（新句柄）落底账。
       expect(confirmationsOf(fx.stateDir)[expiredHandle]!.usedAt ?? null).toBeNull();
       const freshProposal = fx.taskRegistry.get(taskId, SCOPE).pendingQuestion?.confirmation!;

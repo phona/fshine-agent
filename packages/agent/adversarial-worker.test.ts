@@ -171,8 +171,10 @@ const COMMIT = (collection = 'alpha'): Record<string, unknown> => ({ operation: 
 const PROPOSAL = { operation: 'dummy.proposal', args: {} };
 const ASK = { operation: 'dummy.ask', args: {} };
 const PROPOSAL_COMMIT = { operation: 'dummy.proposal-commit', args: { '--proposal-id': 'prop_1' } };
+/** 第二次误用历史协议换个 proposal-id：2026-11-24 起锁只认「完全相同参数」，逐字重复会被 A2b 拦。 */
+const PROPOSAL_COMMIT_2 = { operation: 'dummy.proposal-commit', args: { '--proposal-id': 'prop_2' } };
 const DENIED = (collection = 'alpha'): Record<string, unknown> => ({ operation: 'dummy.denied', args: { '--collection': collection } });
-/** D1 封闭账本：取不到对象名的写失败（retryObjectOf = undefined，不得被「同对象」洗白）。 */
+/** 无集合参数的写失败（锁键 = operation + 全量参数摘要，空参数同样有摘要）。 */
 const DENIED_UNLABELED = { operation: 'dummy.denied', args: {} };
 
 const tempDirs: string[] = [];
@@ -427,7 +429,9 @@ describe('模型走岔路（确定性脚本模型）', () => {
       client,
       registry,
       // live 真实序列：prepare → proposal(completed) → proposal-commit(refused ×2) → query(completed)
-      worker: scriptWorker([[PREPARE('alpha'), PROPOSAL, PROPOSAL_COMMIT, PROPOSAL_COMMIT, QUERY]], capture),
+      // 第二次 proposal-commit 换 proposal-id：逐字重复会被 A2b 同参数锁拦在宿主侧（那条覆盖见
+      // deterministic-failure-guard）；本用例钉的是「撞了历史协议，提案仍不丢」。
+      worker: scriptWorker([[PREPARE('alpha'), PROPOSAL, PROPOSAL_COMMIT, PROPOSAL_COMMIT_2, QUERY]], capture),
     });
     await runBackground(registry, executor, 't_detour');
 
@@ -748,12 +752,11 @@ describe('模型走岔路（确定性脚本模型）', () => {
     expect(lastFailureOf(task)?.error?.message ?? '').toContain('run_js');
   });
 
-  it('⑭ 先拒 alpha、后完成一个取不到对象名的写：alpha 不被洗白（封闭账本，不按顺序兜底）', async () => {
+  it('⑭ 先拒 alpha、后完成一个无集合参数的写：alpha 的拒绝码仍浮出（不按顺序洗白）', async () => {
     // 旧顺序特例（2026-11-22 Grok 复审修法）：「倒序遇到最后一条 completed 业务写即止」——
-    // 它把更早的对象失败静默吞掉。2026-11-23 收尾改成与顺序无关的封闭账本后，这个例子
-    // 必须如实浮出 alpha 的拒绝：alpha 从没 completed → notDone；后面那笔 proposal 取不到
-    // 对象名 → 归不进 done（不编造标签），所以只带失败码、不带 partial。
-    // 「同对象先失败后成功 = 无失败」的合法回路由 ⑳ 钉住，不再靠这条顺序特例兜。
+    // 它把更早的失败静默吞掉。现在只机械取末条失败业务写的码，与顺序无关：alpha 的拒绝照样
+    // 浮出，后面那笔 proposal 成功也不翻案。
+    // 「同参数先失败后成功」的回合事实由 ⑳ 钉住。
     const registry = makeRegistry();
     const capture: WorkerCapture = { results: [] };
     const client = new AdversarialClient();
@@ -854,17 +857,17 @@ describe('模型走岔路（确定性脚本模型）', () => {
 });
 
 /**
- * D1（2026-11-23 收尾）：业务写按**封闭账本**判定，与顺序无关——
- *   · 只对业务写（非 run_js、非只读）按对象（retryObjectOf）分组；
- *   · 每个对象：有任何一次 completed → done；从没 completed（且失败码不在容忍集合）→ notDone；
- *   · 只读失败不翻盘；同对象先失败后成功 = done；同对象成功后的重复失败不翻盘；
- *   · 异对象失败 = 另一个写没成 → 返回 partial（已完成对象 + 未成功对象）；
- *   · 取不到对象名的失败归不进 done（失败不洗白），但 partial 不编造对象名。
- * partial 只供兜底话术逐项说「已完成 X，未成功 Y」，不是 status/outcome 枚举。
+ * D1（2026-11-23 收尾；2026-11-24 「成败归模型」再收口）：回合只带**末条失败业务写的原始事实**
+ * （code/reason；只读失败与 run_js 不算），没有成败结论、没有 partial、**不按对象分组**
+ * （对象名刮擦已随 O-9 删除）：
+ *   · 有失败/拒绝的业务写 → 取末条那笔的 code/message（兜底据此不说「办好了」）；
+ *   · 失败的都只是只读/脚本而有业务写已落地 → 不带失败码（只读失败不翻盘，否则诱导双写）；
+ *   · 没有失败 → 照搬汇报原文。
+ * 做没做成由 Main 读账本逐条执行事实自己判。
  * 反向绊线：改回「只看最后一条成功写」→ ⑲（先拒 beta 再成功 alpha）必红；
- * 去掉同对象/只读豁免 → ⑯/⑰/⑳ 必红；把无对象名失败当重复 → ㉑ 必红。
+ * 把只读失败当业务写失败 → ⑰/㉒ 必红；按对象配对洗绿 → ⑯/⑳ 必红。
  */
-describe('D1 业务写封闭账本：与顺序无关的 done / notDone', () => {
+describe('D1 业务写失败事实：末条失败写的原始码浮出，只读失败不翻盘', () => {
   /** 确认回合：首回合提案 → 确认回合跑给定调用（返回回合事实与任务行）。 */
   async function confirmRound(input: {
     taskId: string;
@@ -887,7 +890,7 @@ describe('D1 业务写封闭账本：与顺序无关的 done / notDone', () => {
     return { runner, task: registry.get(input.taskId, SCOPE) };
   }
 
-  it('⑯ 已落库写之后同对象写失败（重复尝试）：失败码如实浮出，兜底不说「办好了」', async () => {
+  it('⑯ 已落库写之后写失败（重复尝试）：失败码如实浮出，兜底不说「办好了」', async () => {
     const client = new AdversarialClient();
     const { runner, task } = await confirmRound({
       taskId: 't_d1_same_object',
@@ -904,7 +907,7 @@ describe('D1 业务写封闭账本：与顺序无关的 done / notDone', () => {
     const round = runner.roundOutcomeOf?.('t_d1_same_object');
     expect(round?.kind).toBe('ended');
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
-    // 已知代价（owner 2026-11-24 接受）：同对象重试的拒绝现在也让兜底说「说不清，请核对」，
+    // 已知代价（owner 2026-11-24 接受）：重试的拒绝现在也让兜底说「说不清，请核对」，
     // 而不再靠「同一对象所以不翻盘」洗绿——身份判定整台删了，宁可啰嗦不可骗人。
     expect(round.errorCode).toBe('GATE_REFUSE');
   });
@@ -960,7 +963,7 @@ describe('D1 业务写封闭账本：与顺序无关的 done / notDone', () => {
     expect(round.errorCode).toBe('GATE_REFUSE');
   });
 
-  it('⑳ 同对象先失败后成功：失败码仍浮出（身份判定已删，兜底说「说不清」而不是洗绿）', async () => {
+  it('⑳ 先失败后成功：失败码仍浮出（身份判定已删，兜底说「说不清」而不是洗绿）', async () => {
     const client = new AdversarialClient();
     const { runner } = await confirmRound({
       taskId: 't_d1_same_object_retry',

@@ -1,37 +1,36 @@
 /**
  * R5 Worker 提示词装配测试（确定性，零真实模型调用）。
  *
- * 钉住的最小改动面：Worker 系统提示在装配层注入「可信工作目录」与工作目录约束——
- *   ① renderWorkerSystemPrompt('/trusted/root') 包含实际路径与全部约束语义关键句；
- *   ② 不传参时与现行 WORKER_SYSTEM_PROMPT 逐字节相等（缺省装配路径零回归）；
- *   ③ 经 createSession 装配后，workerDriver 收到的 systemPrompt 含注入路径（假驱动捕获）；
- *   ④ 生产装配链（scripts/ask-runtime.ts 两处消费点）把 profile.root 作为可信来源传入；
- *   ⑤ 反向绊线：去掉注入（undefined / 不传字段）时约束文本必须不存在——
- *     若有人删除注入实现，①③ 的存在性断言即红。
+ * 2026-11-24 owner 裁定「宿主持业务侵入行为全干掉」后（O-6）：`renderWorkerSystemPrompt` 与
+ * `workerWorkspaceRoot` 选项整份删除——Worker 系统提示**恒为** `WORKER_SYSTEM_PROMPT`，
+ * 装配层不再往里注入工作目录（能访问什么由执行环境决定，不靠提示词补丁）。
+ *
+ * 本文件改钉新形状：
+ *   ① Worker 系统提示常量本身：含内联锚、不含工作目录注入块（防整段被悄悄改写或注入复活）；
+ *   ② 经 createSession 装配后，workerDriver 收到的**每条** systemPrompt 逐字节等于该常量
+ *      （「恒为」= 无参数化注入；旧的「注入后含路径」断言随注入一起删除）；
+ *   ③ 生产装配链（scripts/ask-runtime.ts）不再传 workerWorkspaceRoot（复活即红）。
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   createSession,
-  renderWorkerSystemPrompt,
   WORKER_SYSTEM_PROMPT,
 } from './src/execution-runtime';
 import type { DriverMessage, TurnDriver, TurnDriverResult } from './src/driver-contract';
 import type { ExecutionClient } from '@fshine/contracts/execution-contract';
 import type { CapabilityManifest, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 
-const TRUSTED_ROOT = '/trusted/root';
-
-/** 工作目录纪律关键句（钉死语义，防措辞漂移丢义；2026-11-20 改第二人称行为句）。 */
-const CONSTRAINT_PHRASES = [
-  `你的工作目录是：${TRUSTED_ROOT}`,
+/** 工作目录注入块的关键句（O-6 已删；回来即红）。 */
+const INJECTION_PHRASES = [
+  '你的工作目录是：',
   '处理文件只在这个目录里进行',
   '不要去翻别人的配置、账号信息或别的目录',
   '这条对你调用的工具一样适用',
 ] as const;
 
-/** 现行 Worker 提示的内联锚（逐字节防漂移用，与 ② 的全量比对互补）。 */
+/** 现行 Worker 提示的内联锚（逐字节防漂移用）。 */
 const BASE_PROMPT_ANCHOR = '你接到一件要办的事，按给你的输入去做。';
 
 /** 最小执行客户端假件：单只读 operation，execute 恒 completed。 */
@@ -81,58 +80,20 @@ function delegatingMainDriver(): TurnDriver {
   };
 }
 
-describe('renderWorkerSystemPrompt：可信工作目录注入', () => {
-  it('传入可信路径时包含该路径与全部约束语义关键句', () => {
-    const rendered = renderWorkerSystemPrompt(TRUSTED_ROOT);
-    for (const phrase of CONSTRAINT_PHRASES) {
-      expect(rendered).toContain(phrase);
-    }
-  });
-
-  it('不传参时与现行 WORKER_SYSTEM_PROMPT 逐字节相等（缺省零回归）', () => {
-    expect(renderWorkerSystemPrompt()).toBe(WORKER_SYSTEM_PROMPT);
-    expect(renderWorkerSystemPrompt(undefined)).toBe(WORKER_SYSTEM_PROMPT);
-  });
-
-  it('现行基线提示含内联锚（防整段被悄悄改写）', () => {
+describe('Worker 系统提示：恒为 WORKER_SYSTEM_PROMPT（O-6 删注入后的形状）', () => {
+  it('现行基线提示含内联锚，且不含工作目录注入块（防整段被悄悄改写）', () => {
     expect(WORKER_SYSTEM_PROMPT).toContain(BASE_PROMPT_ANCHOR);
     expect(WORKER_SYSTEM_PROMPT).not.toContain('可信工作目录是');
-  });
-
-  it('反向绊线：去掉注入（undefined）时约束文本不存在', () => {
-    const rendered = renderWorkerSystemPrompt(undefined);
-    for (const phrase of CONSTRAINT_PHRASES) {
-      expect(rendered).not.toContain(phrase);
+    for (const phrase of INJECTION_PHRASES) {
+      expect(WORKER_SYSTEM_PROMPT).not.toContain(phrase);
     }
   });
-});
 
-describe('createSession：workerWorkspaceRoot 传到 Worker 提示', () => {
-  it('注入 workerWorkspaceRoot 后 workerDriver 收到含该路径的 systemPrompt', async () => {
+  it('createSession 装配后 workerDriver 收到的 systemPrompt 逐字节等于 WORKER_SYSTEM_PROMPT', async () => {
     const worker = capturingDriver();
     const session = await createSession({
       principalId: 'wecom:test-user',
       sessionId: 'sess_wp',
-      client: new FakeClient(),
-      allowedOperations: ['dummy.query'],
-      mainDriver: delegatingMainDriver(),
-      workerDriver: worker.driver,
-      mainSystemPrompt: '你是测试主 Agent。',
-      workerWorkspaceRoot: TRUSTED_ROOT,
-    });
-    await session.send('查一下');
-    expect(worker.prompts().length).toBeGreaterThan(0);
-    for (const prompt of worker.prompts()) {
-      expect(prompt).toContain(TRUSTED_ROOT);
-      expect(prompt).toContain('处理文件只在这个目录里进行');
-    }
-  });
-
-  it('不传 workerWorkspaceRoot 时提示与现行常量逐字节相等（既有路径不回归）', async () => {
-    const worker = capturingDriver();
-    const session = await createSession({
-      principalId: 'wecom:test-user',
-      sessionId: 'sess_wp2',
       client: new FakeClient(),
       allowedOperations: ['dummy.query'],
       mainDriver: delegatingMainDriver(),
@@ -148,11 +109,11 @@ describe('createSession：workerWorkspaceRoot 传到 Worker 提示', () => {
 });
 
 describe('生产装配链接线（结构断言，不跑装配）', () => {
-  it('scripts/ask-runtime.ts 的两个消费点均传 workerWorkspaceRoot: input.profile.root', () => {
+  it('scripts/ask-runtime.ts 不再注入 workerWorkspaceRoot（O-6 已删；复活即红）', () => {
     const source = readFileSync(
       fileURLToPath(new URL('../../scripts/ask-runtime.ts', import.meta.url)),
       'utf8',
     );
-    expect(source.match(/workerWorkspaceRoot: input\.profile\.root/g)?.length ?? 0).toBe(2);
+    expect(source.match(/workerWorkspaceRoot/g)?.length ?? 0).toBe(0);
   });
 });

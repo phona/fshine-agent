@@ -857,7 +857,7 @@ function fileRefDeliverableColumnMissing(db: Database.Database): boolean {
 
 /**
  * 迁移前自动备份（只做一次，不覆盖）：先 checkpoint 把 WAL 合入主文件，再整文件复制。
- * 命名 = <dbPath>.backup-v<迁移目标版本>（当前 v6）；`:memory:` 与库文件不存在不生成；
+ * 命名 = <dbPath>.backup-v<迁移目标版本>（当前 schema 版本（TASK_STORE_SCHEMA_VERSION））；`:memory:` 与库文件不存在不生成；
  * 已有同名备份时保留最早副本。
  */
 function backupBeforeMigration(db: Database.Database, dbPath: string): void {
@@ -1008,23 +1008,18 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         WHERE task_id = @taskId
       `)
     : undefined;
-  // 结束即等待形状失效：提问留在行上会让 CLI/ops 继续显示「等待用户」，
-  // 而 resume/confirm/cancel/redo 都因结束事实拒绝——两端都走不通的死角。
-  const clearWaitingAfterEnd = zeroStateReady
-    ? db.prepare(`
-        UPDATE tasks SET pending_question = NULL, waiting_since = NULL, updated_at = @updatedAt
-        WHERE task_id = @taskId
-      `)
-    : undefined;
+  // 结束事实**不删等待形状**（2026-11-24 grok blocking 回退）：提案（句柄/摘要/写入参数）
+  // 只存在于 pending_question 上，执行行不带它——等待超时/用户取消后清掉字段，底账就失去
+  // 「用户被要求批准的那次写」的完整记录。可执行性由谓词决定，不由删数据决定：
+  // `taskWaitingOf` 已要求 endedAt 缺省才算等待（结束的行不再显示「等待用户」、redo 放行、
+  // resume/confirm 被结束事实拒绝），所以不需要靠清字段来消除死角。
   const appendEndFactTx = hasEndFactStmt !== undefined
     && insertEndFactStmt !== undefined
     && clearLeaseAfterEnd !== undefined
-    && clearWaitingAfterEnd !== undefined
     ? db.transaction((input: TaskEndWrite): boolean => {
         if (hasEndFactStmt.get(input.taskId) !== undefined) return false;
         if (insertEndFactStmt.run(input).changes === 0) return false;
         clearLeaseAfterEnd.run({ taskId: input.taskId, updatedAt: input.updatedAt });
-        clearWaitingAfterEnd.run({ taskId: input.taskId, updatedAt: input.updatedAt });
         return true;
       })
     : undefined;

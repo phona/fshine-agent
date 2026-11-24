@@ -13,20 +13,16 @@
  * 可见面不同（前台要带执行层原话的逐字提醒，后台按用户话术收口），由调用点各自接线。
  * 锁的作用域 = 一次「回合」：调用点每回合新建一个锁，回合结束即丢弃（不跨回合记忆）。
  */
+import { createHash } from 'node:crypto';
 import type { ExecutionOutcome } from '@fshine/contracts/execution-contract';
 
-/**
- * 对象参数名（与内联路径逐字一致）：取对象参数里第一个存在的字符串值作为「对象标识」。
- * 一个都取不到时保守行为 = 不启用锁（没有对象名就无法判定「同对象」，宁可不挡也不误挡）。
- * 2026-11-19 起本函数同时是**「同对象」判据的唯一来源**：回合终局把「成功后同对象的重复写失败」
- * 归为多余尝试（见 execution-runtime 的终局判定），不要在别处另造一套对象识别。
- */
-const OBJECT_ARG_KEYS = ['--collection', '--topic', 'collection', 'topic'] as const;
+
 
 /** 被拦下的一次重试（观测用；对象/操作/执行层码与它的 retryable 声明）。 */
 export interface RetryBlock {
   operation: string;
-  object: string;
+  /** 调用标识（参数稳定摘要；不识别业务对象名）。 */
+  argsDigest: string;
   code: string;
   /** 执行层对该失败的 retryable 声明；undefined = 未声明（按不可重试处理）。 */
   declaredRetryable?: boolean;
@@ -35,7 +31,7 @@ export interface RetryBlock {
 /** 放行的一次重试（观测用）：执行层显式声明 retryable:true 的失败——本回合允许继续尝试。 */
 export interface RetryAllowed {
   operation: string;
-  object: string;
+  argsDigest: string;
   code: string;
 }
 
@@ -62,23 +58,25 @@ export interface DeterministicRetryLock {
   after(operation: string, args: Record<string, unknown>, outcome: ExecutionOutcome): RetryAllowed | undefined;
 }
 
-/** 对象标识的取法（逐字搬运内联路径）：args 里第一个存在的字符串对象参数。 */
-export function retryObjectOf(args: Record<string, unknown>): string | undefined {
-  for (const key of OBJECT_ARG_KEYS) {
-    const value = args[key];
-    if (typeof value === 'string' && value !== '') return value;
-  }
-  return undefined;
+/**
+ * 调用标识 = 参数的稳定摘要。**不识别业务对象名**（2026-11-24 owner 裁定：宿主不该懂执行层
+ * 的归档规则——原先刮 `--collection`/`--topic` 等四个业务字段名，换一个执行层就错判）。
+ * 同一 (operation, 参数摘要) 本回合被确定性失败后不再重发；参数不同 = 另一笔调用，交给执行层
+ * 自己的 `retryable` 声明与限流去接。
+ */
+export function argsDigestOf(args: Record<string, unknown>): string {
+  const stable = JSON.stringify(args, Object.keys(args).sort());
+  return createHash('sha256').update(stable).digest('hex').slice(0, 16);
 }
 
-/** 锁键 = (operation, 对象)。用 NUL 分隔避免两段拼接歧义。 */
-function retryLockKey(operation: string, object: string): string {
-  return `${operation}\u0000${object}`;
+/** 锁键 = (operation, 调用标识)。用 NUL 分隔避免两段拼接歧义。 */
+function retryLockKey(operation: string, callKey: string): string {
+  return `${operation}\u0000${callKey}`;
 }
 
 /**
  * 「显式 retryable 放行」的重复尝试上界（owner 2026-11-19，沿用仓内 E14 口径
- * 「同一件事一个回合内兜/重试 ≤2 次」）：同一 (operation, 对象) 一个回合里最多放行
+ * 「同一件事一个回合内兜/重试 ≤2 次」）：同一 (operation, 调用标识) 一个回合里最多放行
  * 2 次显式可重试的失败——第 3 次再发起在 `before` 被拦。
  *
  * 根因（真模型验收实跑）：执行层对参数形状错误（如 INVALID_RECORDS）声明 retryable:true，
@@ -97,14 +95,13 @@ export function createDeterministicRetryLock(): DeterministicRetryLock {
   const retryableAttempts = new Map<string, number>();
   return {
     before(operation, args) {
-      const object = retryObjectOf(args);
-      if (object === undefined) return undefined;
-      const failure = failures.get(retryLockKey(operation, object));
+      const callKey = argsDigestOf(args);
+      const failure = failures.get(retryLockKey(operation, callKey));
       if (failure === undefined) return undefined;
       return {
         block: {
           operation,
-          object,
+          argsDigest: callKey,
           code: failure.code,
           ...(failure.declaredRetryable === undefined ? {} : { declaredRetryable: failure.declaredRetryable }),
         },
@@ -112,8 +109,7 @@ export function createDeterministicRetryLock(): DeterministicRetryLock {
       };
     },
     after(operation, args, outcome) {
-      const object = retryObjectOf(args);
-      if (object === undefined) return undefined;
+      const callKey = argsDigestOf(args);
       // 只对 failed / refused 登记：completed / accepted / needs_confirmation / needs_input 都不参与
       // 判定——成功过的重复照常放行；待确认/待补充是交互事实（归等待事实），不是「失败重撞」。
       if (outcome.status !== 'failed' && outcome.status !== 'refused') return undefined;
@@ -121,10 +117,10 @@ export function createDeterministicRetryLock(): DeterministicRetryLock {
       if (error.retryable === true) {
         // 瞬时故障：放行（调用点可留「为什么还在试」的可见面），但**有次数上界**——
         // 放行次数用尽后，本键转入与确定性失败同一条拦截路径（before 拦下 + 既有事件）。
-        const key = retryLockKey(operation, object);
+        const key = retryLockKey(operation, callKey);
         const attempts = (retryableAttempts.get(key) ?? 0) + 1;
         retryableAttempts.set(key, attempts);
-        const allowed: RetryAllowed = { operation, object, code: error.code ?? 'retryable_failure' };
+        const allowed: RetryAllowed = { operation, argsDigest: callKey, code: error.code ?? 'retryable_failure' };
         if (attempts >= RETRYABLE_ATTEMPTS_PER_KEY) {
           failures.set(key, {
             code: error.code ?? 'retryable_failure',
@@ -134,7 +130,7 @@ export function createDeterministicRetryLock(): DeterministicRetryLock {
         }
         return allowed;
       }
-      failures.set(retryLockKey(operation, object), {
+      failures.set(retryLockKey(operation, callKey), {
         code: error.code ?? 'unclassified_failure',
         ...(error.retryable === undefined ? {} : { declaredRetryable: error.retryable }),
         // 原话要留住：被拦下时调用点仍要能如实转述「执行层说了什么」。

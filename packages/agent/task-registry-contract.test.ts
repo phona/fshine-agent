@@ -25,6 +25,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   TaskOwnershipError,
   createTaskRegistry,
+  taskWaitingOf,
   type PendingQuestion,
   type TaskFact,
   type TaskRegistry,
@@ -253,7 +254,7 @@ for (const impl of IMPLS) {
       expect(registry.get('expired_round_failed', SCOPE).endedAt).not.toBe('died');
     });
 
-    it('写结束事实同时清等待形状：取消/超时/无汇报收尾后不再显示等待，也不能再答复', () => {
+    it('写结束事实不删等待形状：不再可答复，但提案 payload 留作历史记录（2026-11-24 grok blocking 回退）', () => {
       const registry = impl.make();
       const startWaiting = (taskId: string): void => {
         registry.begin({ taskId, ...SCOPE, request: '等待中的活', queued: true });
@@ -262,25 +263,30 @@ for (const impl of IMPLS) {
         expect(registry.get(taskId, SCOPE).pendingQuestion).toBeDefined();
       };
 
+      // 提案 payload（句柄/摘要/写入参数）只存在于 pending_question 上，执行行不带它：
+      // 等待超时 / 用户取消后若清掉字段，底账就失去「用户被要求批准的那次写」的完整记录。
+      // 可执行性由谓词与结束事实的拒绝路径决定，不靠删数据。
       startWaiting('wait_cancel');
       registry.markCancelled('wait_cancel');
       const cancelled = registry.get('wait_cancel', SCOPE);
       expect(cancelled.endedAt).toBeTruthy();
-      expect(cancelled.pendingQuestion).toBeUndefined();
-      expect(cancelled.waitingSince).toBeUndefined();
+      expect(cancelled.pendingQuestion).toBeDefined();
+      expect(cancelled.waitingSince).toBeDefined();
+      expect(taskWaitingOf(cancelled)).toBe(false);
 
       startWaiting('wait_timeout');
       registry.markTimedOut('wait_timeout', 'waiting_user');
       const timedOut = registry.get('wait_timeout', SCOPE);
       expect(timedOut.endedAt).toBeTruthy();
-      expect(timedOut.pendingQuestion).toBeUndefined();
-      expect(timedOut.waitingSince).toBeUndefined();
+      expect(timedOut.pendingQuestion).toBeDefined();
+      expect(taskWaitingOf(timedOut)).toBe(false);
 
       startWaiting('wait_round_end');
       registry.noteRoundEnded('wait_round_end');
       const ended = registry.get('wait_round_end', SCOPE);
       expect(ended.endedAt).toBeTruthy();
-      expect(ended.pendingQuestion).toBeUndefined();
+      expect(ended.pendingQuestion).toBeDefined();
+      expect(taskWaitingOf(ended)).toBe(false);
 
       // 结束事实不翻案：结束后的答复被拒绝（提问不会被写回来）。
       expect(() => registry.answerResumes('wait_cancel')).toThrow();

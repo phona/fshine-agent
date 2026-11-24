@@ -777,8 +777,6 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
       workerTurnMs: resolved.workerTurnMs,
       // 大响应文件化阈值：策略解析值（单一配置源），后台 Worker 与 inline 同源。
       oversizeDataBytes: resolved.oversizeDataBytes,
-      // 可信工作目录：装配层持有的 profile.root（绝不取模型输出/用户消息）。
-      workerWorkspaceRoot: input.profile.root,
       // 片 1：run_js 执行器端口（与前台同一构造；缺省不注入 = Worker 工具面零变化）。
       ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
       ...(backgroundTaskBridge === undefined ? {} : { backgroundTaskBridge }),
@@ -1261,8 +1259,6 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       workerTurnMs: resolved.workerTurnMs,
       // B 切片（工单回执收敛）：task_run 短等待窗口（单一配置源 = runtime 解析值）。
       taskRunWaitMs: resolved.taskRunWaitMs,
-      // 可信工作目录：装配层持有的 profile.root（绝不取模型输出/用户消息）。
-      workerWorkspaceRoot: input.profile.root,
     });
     return {
       session,

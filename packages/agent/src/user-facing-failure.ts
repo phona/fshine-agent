@@ -119,22 +119,6 @@ export function failureMessageFor(
 }
 
 /**
- * 提案过期后重新提案的用户可见句子（2026-11-19 owner 口径修正）：句柄过期就过期，直接重提，
- * 不做恢复/续期机制。上半句宿主陈述，下半句复用 `failureMessageFor('needs_confirmation')`
- * 这条唯一提案卡来源（含真实摘要 + 两个动作）。
- */
-export const CONFIRMATION_EXPIRED_NOTICE = '那份提案过期了，我重新给你一份。';
-
-/** 拼接「过期了，重新给你一份」+ 既有提案卡（下半句唯一来源 = failureMessageFor）。 */
-export function confirmationExpiredMessage(summary?: string): string {
-  const card = failureMessageFor(
-    'needs_confirmation',
-    summary === undefined || summary.trim() === '' ? {} : { summary },
-  ).text;
-  return `${CONFIRMATION_EXPIRED_NOTICE}${card}`;
-}
-
-/**
  * 内部标识命中检测——**评测度量与告警用，不做运行时改写**。
  *
  * 为什么不是"运行时词表过滤"（owner 2026-11-19 质疑过，对的）：换个说法就漏、还会把正文
