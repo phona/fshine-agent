@@ -375,7 +375,11 @@ export function taskMechanicalFactLine(task: TaskRecord): string | undefined {
 function executionTimeText(execution: ExecutionRecord): string {
   const started = execution.startedAt === undefined ? undefined : formatLocalTime(execution.startedAt);
   const finished = execution.finishedAt === undefined ? undefined : formatLocalTime(execution.finishedAt);
-  if (started !== undefined && finished !== undefined) return `${started} → ${finished}`;
+  if (started !== undefined && finished !== undefined) {
+    // 渲染只到分钟：亚分钟执行的两端点会渲染成同一个值，`起 → 起` 读起来像坏了。
+    // 这种情况显示单点（「这一分钟」），不把零长度区间伪装成一段时长——要秒级得先裁粒度。
+    return started === finished ? started : `${started} → ${finished}`;
+  }
   return '无时刻';
 }
 

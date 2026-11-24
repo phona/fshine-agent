@@ -478,13 +478,13 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
         operation: 'dummy.query',
         status: 'completed',
         startedAt: '2026-11-13T16:00:01.000Z',
-        finishedAt: '2026-11-13T16:00:05.000Z',
+        finishedAt: '2026-11-13T16:02:05.000Z',
       }],
     });
     // 旧行形状：执行行没有起止时刻（时间列上线前写入）——必须显示「无时刻」，不得编时间。
     const withoutTimes = record({ taskId: 'task_legacy', executions: [execution('completed')] });
 
-    const range = `${formatLocalTime('2026-11-13T16:00:01.000Z')} → ${formatLocalTime('2026-11-13T16:00:05.000Z')}`;
+    const range = `${formatLocalTime('2026-11-13T16:00:01.000Z')} → ${formatLocalTime('2026-11-13T16:02:05.000Z')}`;
     for (const text of [renderTaskDetail(withTimes), renderTaskDeliverable(withTimes)]) {
       expect(text).toContain(`执行步骤：\n  1. dummy.query  完成  ${range}`);
       // 有时刻的行不得再显示「无时刻」。
@@ -497,6 +497,27 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
       const section = text.split('执行步骤：')[1]!.split('任务结果')[0]!;
       expect(section).not.toContain('→');
       expect(section).not.toContain('2026-11-13');
+    }
+  });
+
+  it('亚分钟执行：两端点渲染同分钟 → 显示单点，不伪装成一段时长', () => {
+    // 渲染只到分钟（owner 2026-11-24 裁：先不做秒级）。4 秒差的执行若显示「起 → 起」，
+    // 用户会读成坏了；这里显示单点（= 这一分钟内），不假装有一段时长。
+    const subMinute = record({
+      taskId: 'task_submin',
+      executions: [{
+        requestId: 'req_submin',
+        operation: 'dummy.query',
+        status: 'completed',
+        startedAt: '2026-11-13T16:00:01.000Z',
+        finishedAt: '2026-11-13T16:00:05.000Z',
+      }],
+    });
+    const point = formatLocalTime('2026-11-13T16:00:01.000Z');
+    for (const text of [renderTaskDetail(subMinute), renderTaskDeliverable(subMinute)]) {
+      expect(text).toContain(`执行步骤：\n  1. dummy.query  完成  ${point}`);
+      const section = text.split('执行步骤：')[1]!.split('任务结果')[0]!;
+      expect(section).not.toContain('→');
     }
   });
 
