@@ -80,6 +80,35 @@ describe('久未表态的写确认提示', () => {
     expect(provide(SCOPE.principalId, SCOPE.sessionId)).toBeUndefined();
   });
 
+  it('提案之后执行层拒绝（同回合自 commit 被 GATE_REFUSE）→ 下一轮提示带拒绝事实', () => {
+    // 2026-11-24 grok major：拒绝原因此前只活在一次性的 notice.report 里，不落底账，
+    // 下一轮用户开口时 Main 只看到「将写入」，会把已拒的写当成还在等确认。
+    // 修法不新增状态：拒绝本来就在执行行里（status=refused + error），这里读它。
+    const registry = registryIn();
+    waitingWithProposal(registry, 't1');
+    registry.noteExecution('t1', {
+      requestId: 'req_refused',
+      operation: 'dummy.commit',
+      status: 'refused',
+      error: { code: 'GATE_REFUSE', message: '当前权限不允许该写入' },
+    });
+    const fact = String(createPendingConfirmationProvider(registry)(SCOPE.principalId, SCOPE.sessionId));
+    expect(fact).toContain(SUMMARY);
+    expect(fact).toContain('已经被执行层拒绝');
+    expect(fact).toContain('GATE_REFUSE');
+    expect(fact).toContain('当前权限不允许该写入');
+    // 不得把句柄带进事实（宿主持有）。
+    expect(fact).not.toContain('cfm_t1');
+  });
+
+  it('提案没被拒过 → 提示不带拒绝子句（不制造不存在的失败）', () => {
+    const registry = registryIn();
+    waitingWithProposal(registry, 't1');
+    const fact = String(createPendingConfirmationProvider(registry)(SCOPE.principalId, SCOPE.sessionId));
+    expect(fact).toContain(SUMMARY);
+    expect(fact).not.toContain('已经被执行层拒绝');
+  });
+
   it('scope 隔离：别的会话的提案不串', () => {
     const registry = registryIn();
     waitingWithProposal(registry, 't1');

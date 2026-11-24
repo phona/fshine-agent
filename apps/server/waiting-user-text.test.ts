@@ -30,9 +30,9 @@ describe('等待用户两条文本', () => {
   it('旧形状调用方（JS 里多带一个 expiresAt）也渲染不出有效期', () => {
     // 编译期已禁止传 expiresAt（ excess property ）；这条守住运行期：万一有 JS 调用方或回退
     // 路径仍按旧形状多带一个字段，也不得把时刻念给用户听。
-    const legacy = { summary: SUMMARY, expiresAt: '2026-11-24T09:00:00Z' } as unknown as { summary: string };
-    expect(waitingUserFallbackText(legacy)).not.toContain('前有效');
-    expect(waitingUserFallbackText(legacy)).toBe(SUMMARY);
+    const staleCallerShape = { summary: SUMMARY, expiresAt: '2026-11-24T09:00:00Z' } as unknown as { summary: string };
+    expect(waitingUserFallbackText(staleCallerShape)).not.toContain('前有效');
+    expect(waitingUserFallbackText(staleCallerShape)).toBe(SUMMARY);
   });
 
   it('提案被拒 + 模型沉默：兜底文本带上汇报原文（拒绝原因不再丢）', () => {

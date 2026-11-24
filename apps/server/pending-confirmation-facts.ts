@@ -18,11 +18,20 @@ import type { InjectionValue } from '../../packages/agent/src/execution-runtime'
 import type { TaskRegistry, TaskScope } from '../../packages/agent/src/task-registry';
 
 /** 一条待表态事实的文本（给模型读；用户听到的话由模型写）。 */
-export function renderPendingConfirmationFact(input: { name?: string; summary: string }): string {
+export function renderPendingConfirmationFact(input: {
+  name?: string;
+  summary: string;
+  /** 末次失败/拒绝执行的原始事实（code/message 原话；提案被拒时用户要听见为什么）。 */
+  refusal?: { code?: string; reason?: string };
+}): string {
   const subject = input.name !== undefined && input.name.trim() !== ''
     ? `「${input.name.trim()}」`
     : '之前那件事';
-  return `[仍等你表态]${subject}有个写操作提案还没得到你答复：将写入（逐字）：${input.summary}。`
+  const refusal = input.refusal;
+  const refusalClause = refusal === undefined
+    ? ''
+    : ` 注意：这笔写**已经被执行层拒绝**（${[refusal.code, refusal.reason].filter((part) => part !== undefined && part.trim() !== '').join('：') || '未给出原因'}），别再当「等你确认」问——按这个拒绝事实回话。`;
+  return `[仍等你表态]${subject}有个写操作提案还没得到你答复：将写入（逐字）：${input.summary}。${refusalClause}`
     + '用户自己提起了就别重复；没提就按情况问一句。';
 }
 
@@ -37,7 +46,23 @@ export function createPendingConfirmationProvider(
       .map((task) => {
         const summary = task.pendingQuestion?.confirmation?.summary;
         if (summary === undefined || summary.trim() === '') return undefined;
-        return renderPendingConfirmationFact({ ...(task.name === undefined ? {} : { name: task.name }), summary });
+        // 拒绝原因**读底账已有的执行行**（不新增任何状态/字段）：末条执行是 failed/refused
+        // 时，这个提案已经被执行层拒过——同回合自 commit 被 GATE_REFUSE 正是这个形状
+        // （background-write-confirmation.test.ts ⑮ 已冻）。此前拒绝只活在一次性的
+        // notice.report 里，下一轮用户开口就丢了（2026-11-24 grok major）。
+        const lastFailure = [...(task.executions ?? [])]
+          .reverse()
+          .find((entry) => entry.status === 'failed' || entry.status === 'refused');
+        return renderPendingConfirmationFact({
+          ...(task.name === undefined ? {} : { name: task.name }),
+          summary,
+          ...(lastFailure === undefined ? {} : {
+            refusal: {
+              ...(lastFailure.error?.code === undefined ? {} : { code: lastFailure.error.code }),
+              ...(lastFailure.error?.message === undefined ? {} : { reason: lastFailure.error.message }),
+            },
+          }),
+        });
       })
       .filter((line): line is string => line !== undefined);
     if (lines.length === 0) return undefined;

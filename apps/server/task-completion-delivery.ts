@@ -433,11 +433,16 @@ export function taskWaitingUserFactText(input: {
  * （2026-11-24 grok major：此前只有提案摘要，用户可能对已被拒绝的写回「确认」）。
  */
 export function waitingUserFallbackText(input: { summary: string; report?: string }): string {
+  // 汇报原文过与用户可见回复同一道出口清理（剥服务器路径）+ 归空白 + 截断：它是 Worker 回合
+  // 正文，可能带执行层错误码/操作名/很长过程，不能原样进用户气泡（2026-11-24 grok major）。
   const report = input.report === undefined || input.report.trim() === ''
     ? ''
-    : `\n${input.report.trim()}`;
+    : `\n${stripServerPaths(input.report).text.replace(/\s+/gu, ' ').trim().slice(0, FALLBACK_REPORT_MAX)}`;
   return `${input.summary}${report}`;
 }
+
+/** 沉默兜底里 worker 汇报原文的上限（字符；与回合事实的机械原因同一量级）。 */
+const FALLBACK_REPORT_MAX = 200;
 
 /**
  * 单次失败投递（调用方 fire-and-forget；内部吞错并如实记账）。
