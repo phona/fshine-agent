@@ -127,6 +127,18 @@ describe('用户可见失败话术', () => {
     expect(internalTermIn(generic.text)).toBeUndefined();
   });
 
+  it('②b executor_failed 先核对、不打头重发（owner 2026-11-24）', () => {
+    // 部分落地时（先成一笔、后失败一笔）「要重发，还是先核对？」把重发放在前面 = 诱导双写。
+    // 核对可以 Main 主动复核，查询太重就问用户；用户自己说要重发时才重发。
+    const message = failureMessageFor('executor_failed');
+    expect(message.text).toContain('核对');
+    expect(message.text).not.toContain('重发');
+    expect(message.text).not.toContain('再试');
+    // 动作面同义：默认给「查状态/先放着」，不给 retry。
+    expect(message.actions).toContain('check_status');
+    expect(message.actions).not.toContain('retry');
+  });
+
   it('③ 每种失败都带可执行动作，且话术里没有任何内部术语（逐条过闸）', () => {
     for (const kind of ALL_KINDS) {
       const message = failureMessageFor(kind, {

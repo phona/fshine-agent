@@ -807,6 +807,14 @@ export interface RuntimeOptions {
    */
   systemNoteProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
   /**
+   * 久未表态的写确认注入器（同一 injections 机制；owner 2026-11-24）：每轮开头由装配层
+   * 读底账等待行，把「还有一件没表态」当事实喂给 Main——**说不说、怎么说归 Main**，
+   * 宿主不主动推送、不设提醒定时器。与 taskFactProvider 的区别：那条是「刚发生的事」，
+   * 这条是「一直没答复的事」；纯读底账、无队列状态，确认/取消/超时后自然不再注入。
+   * 缺省不注入 = 没有这回事。
+   */
+  pendingConfirmationProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
+  /**
    * Worker 可信工作目录（渲染进 Worker 系统提示的工作目录约束块）。
    * 来源必须是装配层持有的可信路径（如 profile.root）；不得取模型输出或用户消息。
    * 缺省不注入 = Worker 提示与现行常量逐字节相同。
@@ -3083,6 +3091,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       // （模型可见/用户不可见）走同一 injections 机制；take 即出队（同 fileId 只注入一次）。
       const attachmentFactsMessage = takeInjection(options.attachmentFactProvider?.(options.principalId, options.sessionId));
       const systemNoteMessage = takeInjection(options.systemNoteProvider?.(options.principalId, options.sessionId));
+      const pendingConfirmationMessage = takeInjection(options.pendingConfirmationProvider?.(options.principalId, options.sessionId));
       // CAP-01 S1 清单注入（机械事实）：本会话已激活文件，字段只有 fileId/name/bytes；
       // 字节数作为观察项随 TurnResult 带出（fileManifestBytes）。
       const manifestFiles = options.fileManifestProvider?.(options.principalId, options.sessionId) ?? [];
@@ -3096,6 +3105,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         ...(attachmentFactsMessage !== undefined ? [attachmentFactsMessage] : []),
         ...(manifestMessage !== undefined ? [manifestMessage] : []),
         ...(systemNoteMessage !== undefined ? [systemNoteMessage] : []),
+        ...(pendingConfirmationMessage !== undefined ? [pendingConfirmationMessage] : []),
       ];
       const mainResult = await options.mainDriver.run({
         systemPrompt: options.mainSystemPrompt,

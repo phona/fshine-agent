@@ -4,11 +4,11 @@
  * 机械判据（用户可见结果）：
  *   W-13  文件后 3 秒窗口内补指令 → 合并成一回合，只回一次终帧，且能读到文件内容；
  *   W-14  只发文件 → 一条回执 `已收到 1 个文件`（不带文件名）+ 30s 一条追问（`刚才这 N 个文件…`
- *         + 2~4 个选项）；两条不得都列文件名；写类选项不出现在只读部署；
+ *         + **一句开放提问，无编号选项**——5b owner 2026-11-24：不再替用户猜意图）；两条不得都列文件名；
  *   W-15  文件后补指令 → 不触发追问，直接干活给出真实合计；
  *   W-16  群聊只发文件 → 不发追问（仅单聊触发）；
  *   W-17  连发 3 个文件 → 一条回执（只报个数）+ 一条追问（列文件名），不刷屏；
- *   W-18  追问后回数字 → 按选项执行（真实文件汇总），系统注记接线可查。
+ *   W-18  追问后用户直接说要求（「汇总统计一下」）→ 照常执行（真实文件汇总），系统注记接线可查。
  *
  * 时钟纪律：30s 追问经 attachmentNudgeClock 注入 ManualClock（不真 sleep 30s）；
  * 渠道并窗（合并 3s / 回执 2s）是适配器真实定时器——适配器没有时钟注入缝（如实登记，
@@ -82,12 +82,11 @@ describe('D 组·附件时序（W-13～W-18）', () => {
       const nudge = nudges[0]!;
       expect(nudge).toContain('刚才这 1 个文件：销售明细.xlsx');
       expect(nudge).toContain('你想让我先做什么');
-      expect(nudge).toContain('回复数字即可');
-      const options = optionsOf(nudge);
-      expect(options.length).toBeGreaterThanOrEqual(2);
-      expect(options.length).toBeLessThanOrEqual(4);
-      expect(options).toContain('其他（直接说你的要求）');
-      // 只读部署不出现写类选项（默认 allowWriteOperations=false）。
+      expect(nudge).toContain('直接说就行');
+      // 5b：**没有编号选项**（不替用户猜意图，也不逼用户回数字）。
+      expect(optionsOf(nudge)).toHaveLength(0);
+      expect(nudge).not.toContain('回复数字');
+      // 与写面开关无关：只读部署同样不出现任何写类措辞（默认 allowWriteOperations=false）。
       expect(nudge).not.toContain('生成新的汇总表');
       // 两条气泡不得都列文件名：回执不带名（上面已断）+ 追问带名——组合判据成立。
       expect(sim.logs.filter((line) => line['event'] === 'attachment_nudge_sent')).toHaveLength(1);
@@ -156,15 +155,15 @@ describe('D 组·附件时序（W-13～W-18）', () => {
       for (const name of ['销售明细.xlsx', '客户往来.xlsx', '说明.docx']) {
         expect(receipts[0]!.content).not.toContain(name);
       }
-      // 一条追问，列 3 个文件名 + 选项。
+      // 一条追问，列 3 个文件名 + 一句开放提问（无编号选项）。
       await sim.clock.advance(NUDGE_AFTER_MS);
       const nudges = sim.nudgeTexts();
       expect(nudges).toHaveLength(1);
       for (const name of ['销售明细.xlsx', '客户往来.xlsx', '说明.docx']) {
         expect(nudges[0]).toContain(name);
       }
-      expect(optionsOf(nudges[0]!).length).toBeGreaterThanOrEqual(2);
-      expect(optionsOf(nudges[0]!).length).toBeLessThanOrEqual(4);
+      expect(optionsOf(nudges[0]!)).toHaveLength(0);
+      expect(nudges[0]).toContain('直接说就行');
       // 总共两条用户可见消息：1 回执（终帧）+ 1 追问（主动文字），没有第三条。
       expect(sim.finalBubbles()).toHaveLength(1);
       expect(sim.logs.filter((line) => line['event'] === 'attachment_nudge_sent')).toHaveLength(1);
@@ -173,30 +172,31 @@ describe('D 组·附件时序（W-13～W-18）', () => {
     }
   }, 60_000);
 
-  it('W-18 追问后回 1：按「1=汇总统计」执行（真实文件汇总 39000），注记接线可查', async () => {
+  it('W-18 追问后用户直接说要求：照常执行（真实文件汇总 39000），系统注记接线可查', async () => {
     const sample = await salesSampleXlsxAsync();
     const sim = await startWecomSim({ label: 'w18', taskDispatch: 'async' });
     try {
-      sim.book.mainTurn('1', mainAttachmentSummaryResponses(false));
+      // 5b 之后没有编号选项，用户按开放提问直接说要求（不再是「回 1」）。
+      sim.book.mainTurn('汇总统计一下', mainAttachmentSummaryResponses(false));
       sim.sendFile('销售明细.xlsx', sample);
       // 与 W-14 同一前半段：回执 → 注入时钟推进 → 追问（ManualClock 不自行走时）。
       await sim.waitFor('回执出现', () => sim.sdk.bubbles.some((bubble) => bubble.finish && bubble.content.startsWith('已收到')));
       await sim.clock.advance(NUDGE_AFTER_MS);
       const nudge = sim.nudgeTexts()[0]!;
-      const options = optionsOf(nudge);
-      expect(options.length).toBeGreaterThanOrEqual(2); // 追问必须真带选项（编号才有意义）
+      expect(optionsOf(nudge)).toHaveLength(0);
+      expect(nudge).toContain('直接说就行');
 
-      sim.sendText('1');
-      await sim.waitFor('数字回合终帧', () => sim.finalBubbles().length === 2);
+      sim.sendText('汇总统计一下');
+      await sim.waitFor('指令回合终帧', () => sim.finalBubbles().length === 2);
       const reply = sim.finalBubbles()[1]!.content;
-      // 按选项执行 = 真实读文件汇总（不是反问「1 是什么意思」，也不是编的数）。
+      // 照常执行 = 真实读文件汇总（不是反问「这是什么意思」，也不是编的数）。
       expect(reply).toContain('39000');
       expect(reply).toContain('华远贸易 21000 元');
       expect(reply).toContain('明达物流 18000 元');
-      // 追问的编号靠「系统注记」（doc §6-4）：`1` 回合的模型请求必须带同一份选项。
-      const requestText = messagesTextOf(sim.book.requestMessagesOf('main', '1'));
+      // 系统注记仍接线（doc §6-4）：指令回合的模型请求带着「宿主刚问过什么」。
+      const requestText = messagesTextOf(sim.book.requestMessagesOf('main', '汇总统计一下'));
       expect(requestText).toContain('[系统主动提示]');
-      for (const option of options) expect(requestText).toContain(option);
+      expect(requestText).toContain('销售明细.xlsx');
     } finally {
       await sim.close();
     }
@@ -208,6 +208,6 @@ describe('D 组·附件时序（W-13～W-18）', () => {
  *   ① 把 packages/channel-wecom/src/adapter.ts 的 ATTACHMENT_MERGE_WINDOW_MS 改成 0
  *      （或本夹具 mergeWindowMs: 0）→ W-13 的「只回一次终帧」必红（文件立即 flush 成
  *      纯附件回合 + 回执，指令自成第二回合）；复原后绿。
- *   ② 把 packages/agent/src/attachment-nudge.ts 的 renderAttachmentNudge 选项集合摘掉
- *      （只留首句）→ W-14/W-17 的选项数断言（2~4）与 W-18 的注记选项断言必红；复原后绿。
+ *   ② 把 apps/server/attachment-nudge.ts 的追问文案改回编号选项（`1. …\n2. …`）→ W-14/W-17 的
+ *      「无编号选项」断言（optionsOf 长度 0）必红；复原后绿。5b 之后这条绊线钉的是「不许退回复数选项」。
  */

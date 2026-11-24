@@ -7,8 +7,9 @@
  *   （同一会话 10 分钟）。
  *
  * 时间：`runtime.attachmentNudgeAfterMs`（缺省 30s；0 = 关闭，零行为变化）。
- * 文案：一句短问 + 2~4 个业务化选项（表格/文档/图片/未知各一套；写类选项只在
- * `allowWriteOperations=true` 时列出），可用数字回复。多个文件合并成一句。
+ * 文案：一句短问 + **一句开放提问**（owner 2026-11-24 5b 裁定：原先 2~4 个业务化数字选项
+ * ——表格/文档/图片各一套、写类按开关列——换成「直接说你的要求」。选项清单是宿主替用户猜
+ * 意图，还逼用户回数字；触发条件与投递纪律完全不动，只换文案）。多个文件合并成一句。
  *
  * 投递纪律：走宿主既有主动投递面。非 live 部署**不发起真实投递**，只记
  * `attachment_nudge_suppressed`；只有真实送达才记 `attachment_nudge_sent`。
@@ -40,8 +41,6 @@ export interface AttachmentNudgeOptions {
   /** 追问延迟（ms）；<= 0 = 关闭。由 `runtime.attachmentNudgeAfterMs` 解析而来。 */
   afterMs: number;
   cooldownMs?: number;
-  /** 写面开关：决定是否列出写类选项（只影响文案，不构成任何授权）。 */
-  allowWriteOperations: boolean;
   /** 注入时钟；缺省真实时钟（定时器 unref，不拖住进程退出）。 */
   clock?: NudgeClock;
   /** 主动投递面；缺省 = 无投递面（按 suppressed 记账，绝不记 sent）。 */
@@ -67,39 +66,8 @@ const SYSTEM_CLOCK: NudgeClock = {
   },
 };
 
-type FileKind = 'spreadsheet' | 'document' | 'image' | 'unknown';
-
-const KIND_OPTIONS: Readonly<Record<FileKind, { readonly read: readonly [string, string]; readonly write: string }>> = {
-  spreadsheet: {
-    read: ['汇总统计（求和/计数/分类）', '核对异常数据'],
-    write: '生成新的汇总表',
-  },
-  document: {
-    read: ['提取要点', '总结全文'],
-    write: '改写并生成新文档',
-  },
-  image: {
-    read: ['识别图片中的文字', '描述图片内容'],
-    write: '整理成新的文档',
-  },
-  unknown: {
-    read: ['查看并提取文件内容', '说明文件结构'],
-    write: '整理并生成新文件',
-  },
-};
-
-const GENERIC_WRITE_OPTION = '生成新的结果文件';
-const OTHER_OPTION = '其他（直接说你的要求）';
+/** 清单行：只补「是哪几个」（不重复"收到 N 个文件"——渠道到点时已回过一条回执）。 */
 const FILE_NAME_LIST_LIMIT = 3;
-
-function kindOf(name: string): FileKind {
-  const dot = name.lastIndexOf('.');
-  const extension = dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
-  if (['xlsx', 'xls', 'csv', 'tsv', 'xlsm'].includes(extension)) return 'spreadsheet';
-  if (['doc', 'docx', 'pdf', 'txt', 'md', 'rtf', 'ppt', 'pptx'].includes(extension)) return 'document';
-  if (['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'heic'].includes(extension)) return 'image';
-  return 'unknown';
-}
 
 function fileListLine(files: readonly AttachmentFactInput[]): string {
   const names = [...new Set(files.map((file) => displayFileName(file.name)))];
@@ -109,42 +77,18 @@ function fileListLine(files: readonly AttachmentFactInput[]): string {
   return `刚才这 ${files.length} 个文件：${listed}${names.length > FILE_NAME_LIST_LIMIT ? ' 等' : ''}`;
 }
 
-/** 选项集合：单类型用它自己的一套；混合类型取前两个类型各一条 + 通用写类。2~4 个。 */
-function optionsFor(files: readonly AttachmentFactInput[], allowWriteOperations: boolean): string[] {
-  const kinds: FileKind[] = [];
-  for (const file of files) {
-    const kind = kindOf(file.name);
-    if (!kinds.includes(kind)) kinds.push(kind);
-  }
-  const primary = kinds[0] ?? 'unknown';
-  const readOptions = kinds.length <= 1
-    ? [...KIND_OPTIONS[primary].read]
-    : kinds.slice(0, 2).map((kind) => KIND_OPTIONS[kind].read[0]);
-  const writeOption = allowWriteOperations
-    ? (kinds.length <= 1 ? KIND_OPTIONS[primary].write : GENERIC_WRITE_OPTION)
-    : undefined;
-  return [...readOptions, ...(writeOption === undefined ? [] : [writeOption]), OTHER_OPTION];
-}
-
 export interface RenderedAttachmentNudge {
-  /** 用户可见文案：一句短问 + 数字选项。 */
+  /** 用户可见文案：一句短问 + 一句开放提问（**无编号选项**——不替用户猜意图）。 */
   text: string;
-  /** 模型可见、用户不可见的系统注记（同一份选项，明确标注“系统主动提示”）。 */
+  /** 模型可见、用户不可见的系统注记（标明宿主刚问过什么，不期待数字回复）。 */
   note: string;
-  options: readonly string[];
 }
 
-export function renderAttachmentNudge(
-  files: readonly AttachmentFactInput[],
-  options: { allowWriteOperations: boolean },
-): RenderedAttachmentNudge {
+export function renderAttachmentNudge(files: readonly AttachmentFactInput[]): RenderedAttachmentNudge {
   const headline = fileListLine(files);
-  const choices = optionsFor(files, options.allowWriteOperations);
-  const numbered = choices.map((choice, index) => `${index + 1}. ${choice}`);
   return {
-    text: `${headline}。你想让我先做什么？回复数字即可：\n${numbered.join('\n')}`,
-    note: `[系统主动提示] 用户收到附件后没有立即给指令，宿主已向用户发出追问（${headline}）。用户可见选项：${numbered.join('；')}。若用户只回复数字，按上述编号理解。`,
-    options: choices,
+    text: `${headline}。你想让我先做什么？直接说就行。`,
+    note: `[系统主动提示] 用户收到附件后没有立即给指令，宿主已向用户发出开放式追问（${headline}）。用户下一条消息就是他的要求，不要期待数字编号。`,
   };
 }
 
@@ -166,7 +110,6 @@ function scopeKeyOf(principalId: string, sessionId: string): string {
 export class AttachmentNudge {
   private readonly afterMs: number;
   private readonly cooldownMs: number;
-  private readonly allowWriteOperations: boolean;
   private readonly clock: NudgeClock;
   private readonly delivery: AttachmentNudgeDelivery | undefined;
   private readonly enqueueSystemNote: AttachmentNudgeOptions['enqueueSystemNote'];
@@ -180,7 +123,6 @@ export class AttachmentNudge {
   constructor(options: AttachmentNudgeOptions) {
     this.afterMs = options.afterMs;
     this.cooldownMs = options.cooldownMs ?? ATTACHMENT_NUDGE_COOLDOWN_MS;
-    this.allowWriteOperations = options.allowWriteOperations;
     this.clock = options.clock ?? SYSTEM_CLOCK;
     this.delivery = options.delivery;
     this.enqueueSystemNote = options.enqueueSystemNote;
@@ -278,7 +220,7 @@ export class AttachmentNudge {
     // 不论送达还是抑制都记冷却：避免 silent 部署每个批次都刷一条抑制事件。
     this.cooldownUntil.set(key, now + this.cooldownMs);
 
-    const rendered = renderAttachmentNudge(files, { allowWriteOperations: this.allowWriteOperations });
+    const rendered = renderAttachmentNudge(files);
     const base = {
       principalId: state.principalId,
       sessionId: state.sessionId,

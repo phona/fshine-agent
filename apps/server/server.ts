@@ -82,6 +82,7 @@ import {
   type ExecutionFace,
 } from '../../scripts/ask-runtime';
 import { createAttachmentFactQueue, createScopedNoteQueue } from './attachment-facts';
+import { createPendingConfirmationProvider } from './pending-confirmation-facts';
 import { AttachmentNudge, type NudgeClock } from './attachment-nudge';
 import {
   deliverTaskResult,
@@ -851,7 +852,6 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   const systemNotes = createScopedNoteQueue();
   const attachmentNudge = new AttachmentNudge({
     afterMs: resolvedRuntime.attachmentNudgeAfterMs,
-    allowWriteOperations,
     ...(deps.attachmentNudgeClock === undefined ? {} : { clock: deps.attachmentNudgeClock }),
     ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
     enqueueSystemNote: (principalId, sessionId, note) => systemNotes.enqueue(principalId, sessionId, note),
@@ -875,8 +875,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   // 失败/取消/久无动静/重启对账共用同一条状态变化出口（不新建第二套唤醒与投递）。live 实测
   // 缺陷：进入等待此前只落底账，模型不知道有人在等它说话（15:25:55.992 落等待到 15:26:04
   // 零推送），用户只能自己猜着发「按这版提交」才拿到确认摘要。
-  //   · 事实机械：missing 列表 + confirmation.summary 原文与 expiresAt；**句柄不进事实**；
-  //   · 兜底（模型说不出话）= summary 原文 + expiresAt（执行端原话，不编新话术）；
+  //   · 事实机械：missing 列表 + confirmation.summary 原文 + 本回合 Worker 汇报原文；
+  //     **句柄不进事实**；**不写有效期**（owner 2026-11-24：念截止时刻「挺傻的」，超时走
+  //     sweep 的 deadline_reached 通知）；
+  //   · 兜底（模型说不出话）= summary 原文 + 汇报原文（逐字，不编新话术）——提案之后被
+  //     执行层拒绝时，拒绝原因只在汇报里，这里必须带上，否则用户对已被拒的写回「确认」；
   //     待补（无提案）没有兜底——只记事件 + 事实留待注入（不猜、不替它说）；
   //   · 去重 = (taskId, 进入等待次数)：runner 只在非等待态落等待时触发端口（已在等待的行
   //     再落等待不重复触发；回非等待再进 = 新的一次）；投递失败退回待注入，不重试唤醒。
@@ -893,13 +896,12 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             ...(notice.name === undefined ? {} : { name: notice.name }),
             missing: notice.question.missing,
             ...(confirmation === undefined ? {} : { summary: confirmation.summary }),
-            ...(confirmation?.expiresAt === undefined ? {} : { expiresAt: confirmation.expiresAt }),
             ...(notice.report === undefined ? {} : { report: notice.report }),
           }),
           ...(confirmation === undefined ? {} : {
             fallbackText: waitingUserFallbackText({
               summary: confirmation.summary,
-              ...(confirmation.expiresAt === undefined ? {} : { expiresAt: confirmation.expiresAt }),
+              ...(notice.report === undefined ? {} : { report: notice.report }),
             }),
           }),
         });
@@ -1359,6 +1361,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           // 目标 A/B：纯附件机械事实与主动追问的系统注记走同一 injections 机制（take 即出队）。
           attachmentFactProvider: attachmentFacts.take,
           systemNoteProvider: systemNotes.take,
+          // 久未表态的写确认（owner 2026-11-24）：每轮开头读底账，把「还有一件没表态」当
+          // 事实喂给 Main——说不说、怎么说归 Main；宿主不主动推送、不设提醒定时器。
+          pendingConfirmationProvider: createPendingConfirmationProvider(taskRegistry),
           // CAP-01 S1：run_js 执行器（装配构造）与文件清单注入器（机械事实）同源注入。
           // CAP-01 S2：交办复制端口与执行层文件桥同源注入（**同一 fileStore 实例**——文件区
           // 监管唯一写侧）。桥承担回程登记（data.files → 新 file_id、剥 path/base64）与任务
