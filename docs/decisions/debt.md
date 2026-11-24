@@ -116,7 +116,6 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 | M4 | （2026-11-23 已解决）`statusView` 透出四个终态时刻但不带 `roundFailedAt` | `statusView` 只透出原始事实（`started` / `reported` / `waiting` / `liveWorker` / `endedAt`，无种类）；`termination` 与结束种类已删除 | — | `packages/agent/src/execution-runtime.ts`（`statusView`） |
 | M5 | （2026-11-23 部分解决）`docs/architecture/tasks.md` 行号与已删符号对不上代码 | §1/§4/§5/§7 已按零状态重写（终态列 / `cancel_requested_at` / `round_failed_at` 口径替换为原始事实：结束事实只留时刻）；其余行号仍可能随代码漂移 | 文档全面逐行核对属独立文档任务；本轮只改零状态相关段 | `docs/architecture/tasks.md` §1/§4/§5/§7 |
 | m3 | （2026-11-23 已解决）`statusView` 的 `claimed` 注释写「已认领未落定」，实际是 `executions.length`（含已落定） | 注释按实际口径改写：`claimed` = 执行行总数（含已落定）、`resulted` = 已落定（status≠accepted）、`claimed-resulted` = 在途 accepted 数 | — | `packages/agent/src/execution-runtime.ts`（`statusView`） |
-| m3 | `statusView` 的 `claimed` 注释写「已认领未落定」，实际是 `executions.length`（含已落定） | 注释若被当实现，下次会误改把已落定行从 claimed 里减掉 | 纯注释；本轮已动迁移/账本，不再同文件混改 statusView | `packages/agent/src/execution-runtime.ts:2058-2059`、`:2067-2068` |
 
 ## 十二、长连接可靠性：离线/断连窗口的用户消息不可恢复（owner 2026-11-20 要求登记）
 

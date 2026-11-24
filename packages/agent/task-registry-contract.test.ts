@@ -252,6 +252,39 @@ for (const impl of IMPLS) {
       expect(registry.get('expired_reported', SCOPE).endedAt).not.toBe('died');
       expect(registry.get('expired_round_failed', SCOPE).endedAt).not.toBe('died');
     });
+
+    it('写结束事实同时清等待形状：取消/超时/无汇报收尾后不再显示等待，也不能再答复', () => {
+      const registry = impl.make();
+      const startWaiting = (taskId: string): void => {
+        registry.begin({ taskId, ...SCOPE, request: '等待中的活', queued: true });
+        expect(registry.claimNextQueued({ owner: 'runner-1', leaseMs: 60_000 })?.taskId).toBe(taskId);
+        registry.waitForUser(taskId, QUESTION);
+        expect(registry.get(taskId, SCOPE).pendingQuestion).toBeDefined();
+      };
+
+      startWaiting('wait_cancel');
+      registry.markCancelled('wait_cancel');
+      const cancelled = registry.get('wait_cancel', SCOPE);
+      expect(cancelled.endedAt).toBeTruthy();
+      expect(cancelled.pendingQuestion).toBeUndefined();
+      expect(cancelled.waitingSince).toBeUndefined();
+
+      startWaiting('wait_timeout');
+      registry.markTimedOut('wait_timeout', 'waiting_user');
+      const timedOut = registry.get('wait_timeout', SCOPE);
+      expect(timedOut.endedAt).toBeTruthy();
+      expect(timedOut.pendingQuestion).toBeUndefined();
+      expect(timedOut.waitingSince).toBeUndefined();
+
+      startWaiting('wait_round_end');
+      registry.noteRoundEnded('wait_round_end');
+      const ended = registry.get('wait_round_end', SCOPE);
+      expect(ended.endedAt).toBeTruthy();
+      expect(ended.pendingQuestion).toBeUndefined();
+
+      // 结束事实不翻案：结束后的答复被拒绝（提问不会被写回来）。
+      expect(() => registry.answerResumes('wait_cancel')).toThrow();
+    });
   });
 }
 

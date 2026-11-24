@@ -55,4 +55,4 @@ S0 本文档；S1 删 status + 收敛六处；S2 P3 对象身份；S3 worker 汇
 
 **「标签」就地算**：CLI/ops/投递/唤醒各自读原始事实（开始/结束时刻、汇报、提问、租约/活 worker、执行行）算自己的词；**不共享任何「怎么结束」类型/函数/字段**。守卫按形状判：`packages/agent/task-lifecycle-enum-guard.test.ts`（代码：事实 → 多值任务级生命周期的函数/枚举；文档：不许把 task 描述成有状态机/存活三值的句子；反向绊线均实跑）。
 
-**迁移**：旧库可写打开时重建 tasks 表（丢 status/reason/failure_reason 与六个终态列），旧任务全部当已结束（`running_since` 按 `updated_at` 回填），旧终态列只把**原时刻**搬成一条结束事实（种类丢弃）；v6 的 `task_events`（带 kind）迁到 `task_ends`（只留 at）。历史汇报与执行事实原样保留；迁移包在单个事务里。
+**迁移**：旧库可写打开时重建 tasks 表（丢 status/reason/failure_reason 与六个终态列）；只把**升级前已停下**的旧行当已结束（旧终态列 / 旧 status 非在跑 / 已有汇报 → 一条结束事实，`at` 取原时刻，种类丢弃，等待形状清掉）；仍在等待（`pending_question`）或旧 status=running/cancelling 的行**不写**结束事实——提问保留、`running_since` 回填防重认领，交给续跑 / 重启对账 / 取消路径。v6 的 `task_events`（带 kind）迁到 `task_ends`（只留 at）。历史汇报与执行事实原样保留；迁移包在单个事务里。

@@ -7,8 +7,9 @@
  *   · v6 = tasks 表重建：删 status/reason/failure_reason + died/cancelled/timed_out/
  *     resource_limited/round_failed/cancel_requested 六列；**只留事实列**；
  *   · v7 = 旧 task_events（带终止种类 kind）→ task_ends：**只保留「停下时刻」，种类丢弃**；
- *   · 旧任务**全部当已结束**：running_since 按 updated_at 回填（不再被认领），并写一条
- *     无种类结束事实（at = 匹配到的旧终态列原时刻，NULL 才回退 updated_at）；
+ *   · 只把**升级前已停下**的旧行当已结束：running_since 按 updated_at 回填（不再被认领），
+ *     已停行写一条无种类结束事实（at = 旧终态列原时刻 / 旧 status 非在跑 / 已有汇报，
+ *     否则回退 updated_at）；仍在等待或旧 status=running/cancelling 的行不写结束事实；
  *   · 迁移前自动备份 <db>.backup-v<目标版本>（内容 = 迁移前字节；不覆盖、不自动删除）；
  *   · 回填 task_no / 计数器单调不减 / 幂等（二次打开零差异、不新增备份）；
  *   · 只读打开永不迁移：旧列仍在、不建备份、主库哈希不变。
@@ -192,6 +193,9 @@ interface V5SeedRow {
   runningSince: string;
   /** 旧终态列（只用来验「时刻搬运」；种类不迁移）。 */
   terminal?: { column: 'cancelled_at' | 'died_at'; at: string };
+  /** 仍在等待的行（迁移后提问保留、不写结束事实）。 */
+  pendingQuestion?: string;
+  waitingSince?: string;
 }
 
 const V5_SEED: readonly V5SeedRow[] = [
@@ -199,6 +203,7 @@ const V5_SEED: readonly V5SeedRow[] = [
   { taskId: 'task_v5_cancelled', taskNo: 12, resultText: null, replyText: null, runningSince: '2026-11-20T08:10:00.000Z', terminal: { column: 'cancelled_at', at: '2026-11-20T08:11:00.000Z' } },
   { taskId: 'task_v5_died', taskNo: 13, resultText: null, replyText: null, runningSince: '2026-11-20T08:20:00.000Z', terminal: { column: 'died_at', at: '2026-11-20T08:21:00.000Z' } },
   { taskId: 'task_v5_running', taskNo: 14, resultText: null, replyText: null, runningSince: '2026-11-20T08:30:00.000Z' },
+  { taskId: 'task_v5_waiting', taskNo: 15, resultText: null, replyText: null, runningSince: '2026-11-20T08:40:00.000Z', pendingQuestion: '{"missing":["window"]}', waitingSince: '2026-11-20T08:41:00.000Z' },
 ];
 
 function seedV5Db(dbPath: string): void {
@@ -208,9 +213,9 @@ function seedV5Db(dbPath: string): void {
   db.exec(V5_SCHEMA);
   const insert = db.prepare(`
     INSERT INTO tasks (task_id, principal_id, session_id, request, result_text, created_at, updated_at,
-      task_no, name, reply_text, running_since, cancelled_at, died_at)
+      task_no, name, reply_text, running_since, cancelled_at, died_at, pending_question, waiting_since)
     VALUES (@taskId, 'wecom:fixture-user', 'ask-v5', @request, @resultText, @updatedAt, @updatedAt,
-      @taskNo, @name, @replyText, @runningSince, @cancelledAt, @diedAt)
+      @taskNo, @name, @replyText, @runningSince, @cancelledAt, @diedAt, @pendingQuestion, @waitingSince)
   `);
   for (const row of V5_SEED) {
     insert.run({
@@ -224,6 +229,8 @@ function seedV5Db(dbPath: string): void {
       runningSince: row.runningSince,
       cancelledAt: row.terminal?.column === 'cancelled_at' ? row.terminal.at : null,
       diedAt: row.terminal?.column === 'died_at' ? row.terminal.at : null,
+      pendingQuestion: row.pendingQuestion ?? null,
+      waitingSince: row.waitingSince ?? null,
     });
   }
   db.prepare("INSERT INTO task_sequences (name, value) VALUES ('task_no', 11)").run();
@@ -277,7 +284,7 @@ const FORBIDDEN_TERMINAL_COLUMNS = [
 ] as const;
 
 describe('事实账迁移 v4 → 只存事实 + 无种类结束事实', () => {
-  it('删结论列/终态列；旧任务全部当已结束（running_since 回填 + 一条结束事实）；备份；幂等', () => {
+  it('删结论列/终态列；已停旧行写结束事实、仍在跑的行保持未停（running_since 回填）；备份；幂等', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     seedV4Db(dbPath);
@@ -312,15 +319,19 @@ describe('事实账迁移 v4 → 只存事实 + 无种类结束事实', () => {
     expect(storedDone.executions).toHaveLength(1);
     expect(storedDone.executions[0]!.dispatchKey).toBeUndefined();
 
-    // 旧任务全部当已结束：running_since = updated_at（连旧 queued 行也不再被认领）。
+    // running_since = updated_at（连旧 queued 行也不再被认领）。
     for (const row of V4_SEED) {
       expect(rawTask(dbPath, row.taskId)['running_since'], row.taskId).toBe(row.updatedAt);
     }
     expect(rawTask(dbPath, 'task_queued')['running_since']).toBe('2026-11-14T09:00:00.000Z');
 
-    // 每个旧任务恰好一条「停下时刻」（v4 没有独立终态时刻 → 回退 updated_at）；没有种类。
+    // 升级前已停的行各一条「停下时刻」（v4 没有独立终态时刻 → 回退 updated_at）；没有种类。
+    // 旧 status=running/cancelling 的行不写结束事实（仍在推进，交给续跑/对账/取消路径）。
     for (const row of V4_SEED) {
-      expect(rawEnds(dbPath, row.taskId), row.taskId).toEqual([{ task_id: row.taskId, at: row.updatedAt }]);
+      const stillRunning = row.status === 'running' || row.status === 'cancelling';
+      expect(rawEnds(dbPath, row.taskId), row.taskId).toEqual(
+        stillRunning ? [] : [{ task_id: row.taskId, at: row.updatedAt }],
+      );
     }
 
     // 读出侧：结束事实原样可读（无种类）。
@@ -328,8 +339,13 @@ describe('事实账迁移 v4 → 只存事实 + 无种类结束事实', () => {
     expect(store.getTask('task_unknown')!.ends[0]!.at).toBe('2026-11-14T09:15:00.000Z');
     expect(store.getTask('task_resource')!.ends[0]!.at).toBe('2026-11-14T09:45:00.000Z');
 
-    // 在跑扫描：旧任务全部已结束，没有「在跑」候选；未启动认领也不捞旧行。
-    expect(store.listRunningTasks()).toEqual([]);
+    // 在跑扫描：只有升级前仍在跑/取消中的旧行进入（不再被静默写成已停）；未启动认领也不捞旧行。
+    expect(store.listRunningTasks().map((row) => row.taskId)).toEqual(['task_cancelling', 'task_live']);
+    // 无租约的在跑行给一条已过期的迁移租约：启动恢复走「租约过期 → 结束事实（结果未知）」并通知。
+    expect(rawTask(dbPath, 'task_live')['lease_owner']).toBe('migration');
+    expect(rawTask(dbPath, 'task_live')['lease_until']).toBe('2026-11-14T10:30:00.000Z');
+    expect(store.listRunningExpiredLeases('2026-11-15T00:00:00.000Z').map((row) => row.taskId))
+      .toEqual(['task_cancelling', 'task_live']);
     expect(store.listWaitingRows()).toEqual([]);
     expect(store.claimNextUnstarted({
       owner: 'test', leaseUntil: '2999-01-01T00:00:00.000Z', updatedAt: '2026-11-14T11:00:00.000Z',
@@ -363,7 +379,7 @@ describe('事实账迁移 v4 → 只存事实 + 无种类结束事实', () => {
 });
 
 describe('事实账迁移 v5 六个终态列 → 无种类结束事实', () => {
-  it('v5 库可写打开：终态列的时刻转成结束事实、种类不迁移、旧行全部当已结束', () => {
+  it('v5 库可写打开：终态列的时刻转成结束事实、种类不迁移；仍在等待/在跑的行保持未停', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     seedV5Db(dbPath);
@@ -375,13 +391,25 @@ describe('事实账迁移 v5 六个终态列 → 无种类结束事实', () => {
     // 每种旧结局都只成为「停下时刻」，**没有 kind**。
     expect(store.getTask('task_v5_cancelled')!.ends).toEqual([{ taskId: 'task_v5_cancelled', at: '2026-11-20T08:11:00.000Z' }]);
     expect(store.getTask('task_v5_died')!.ends).toEqual([{ taskId: 'task_v5_died', at: '2026-11-20T08:21:00.000Z' }]);
-    // 没有旧终态列可读的行才回退 updated_at。
+    // 没有旧终态列可读、但有汇报的行回退 updated_at。
     expect(store.getTask('task_v5_done')!.ends).toEqual([{ taskId: 'task_v5_done', at: '2026-11-20T09:00:00.000Z' }]);
-    expect(store.getTask('task_v5_running')!.ends).toEqual([{ taskId: 'task_v5_running', at: '2026-11-20T09:00:00.000Z' }]);
+    // 仍在跑的行不写结束事实（在跑行不得被静默写成已停）。
+    expect(store.getTask('task_v5_running')!.ends).toEqual([]);
+    // 仍在等待的行不写结束事实，提问/waiting_since 保留（还能接续）。
+    const waiting = store.getTask('task_v5_waiting')!;
+    expect(waiting.ends).toEqual([]);
+    expect(waiting.task.pendingQuestion).toBeDefined();
+    expect(waiting.task.waitingSince).toBe('2026-11-20T08:41:00.000Z');
     for (const row of V5_SEED) {
       expect(rawTask(dbPath, row.taskId)['running_since'], row.taskId).toBe(row.runningSince);
     }
-    expect(store.listRunningTasks()).toEqual([]);
+    expect(store.listRunningTasks().map((row) => row.taskId)).toEqual(['task_v5_running']);
+    expect(store.listWaitingRows().map((row) => row.task.taskId)).toEqual(['task_v5_waiting']);
+    // 在跑行被给了一条已过期的迁移租约：启动恢复按「租约过期 → 结束事实（结果未知）」收尾并通知。
+    expect(rawTask(dbPath, 'task_v5_running')['lease_owner']).toBe('migration');
+    expect(rawTask(dbPath, 'task_v5_running')['lease_until']).toBe('2026-11-20T09:00:00.000Z');
+    expect(store.listRunningExpiredLeases('2026-11-21T00:00:00.000Z').map((row) => row.taskId))
+      .toEqual(['task_v5_running']);
     store.close();
 
     const reopened = openTaskStore(dbPath);

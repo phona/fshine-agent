@@ -77,9 +77,9 @@ export function taskReportedOf(task: TaskReportFacts): boolean {
   return TASK_PROGRESS_REPORT_FIELDS.some((field) => (task[field.key] ?? '').trim() !== '');
 }
 
-/** 等待形状在场（pendingQuestion；等待可被下一进程接续，不是在跑）。 */
-export function taskWaitingOf(task: Pick<TaskProgressFacts, 'pendingQuestion'>): boolean {
-  return task.pendingQuestion !== undefined;
+/** 等待形状在场且这一轮未停（写结束事实会同步清掉等待形状；结束后的提问不再可答复）。 */
+export function taskWaitingOf(task: Pick<TaskProgressFacts, 'pendingQuestion' | 'endedAt'>): boolean {
+  return task.pendingQuestion !== undefined && task.endedAt === undefined;
 }
 
 /**

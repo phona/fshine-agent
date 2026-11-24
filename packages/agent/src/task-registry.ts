@@ -543,6 +543,10 @@ export function createTaskRegistry(options: MemoryTaskRegistryOptions = {}): Tas
   const recordEnd = (task: MutableTaskRecord, at: string): boolean => {
     if (task.endedAt !== undefined) return false;
     task.endedAt = at;
+    // 结束即等待形状失效：否则 get() 同时带 endedAt + pendingQuestion，
+    // CLI/ops 继续显示「等待用户」，而 resume/confirm/cancel/redo 都因结束事实拒绝（死角）。
+    delete task.pendingQuestion;
+    delete task.waitingSince;
     clearLease(task);
     touch(task, at);
     return true;

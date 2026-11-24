@@ -45,8 +45,9 @@ describe('事实谓词：跨进程「可能还在跑」', () => {
     expect(taskMayBeRunningOf({ executions: [{ status: 'accepted' }], resultText: '办完了。' })).toBe(false);
   });
 
-  it('等待形状 → 可能还在跑为假（等待可接续，但不是活 worker）', () => {
-    expect(taskWaitingOf({ pendingQuestion: { missing: ['窗口'] } })).toBe(true);
+  it('等待形状 → 可能还在跑为假（等待可接续，但不是活 worker）；结束事实在场时等待失效', () => {
+    expect(taskWaitingOf({ pendingQuestion: { missing: ['窗口'] }, endedAt: undefined })).toBe(true);
+    expect(taskWaitingOf({ pendingQuestion: { missing: ['窗口'] }, endedAt: ENDED.at })).toBe(false);
     expect(taskMayBeRunningOf({ ...STARTED, pendingQuestion: { missing: ['窗口'] } })).toBe(false);
   });
 

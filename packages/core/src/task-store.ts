@@ -21,9 +21,11 @@
  * 迁移口径（版本化迁移）：
  *   · 触发 = 可写打开且 tasks 表仍是旧形状（有 status 列/六个终态列，v5 及更早）——重建为
  *     事实形状；
- *   · v6 = tasks 表重建：删 status/reason/failure_reason 与六个终态列；旧任务**全部当已结束**
- *     （running_since 按 updated_at 回填，避免被当未启动重新认领），并写一条结束事实
- *     （at = 匹配到的旧终态列原时刻，NULL 才回退 updated_at），历史汇报/执行事实原样保留；
+ *   · v6 = tasks 表重建：删 status/reason/failure_reason 与六个终态列；**升级前已停下的旧行**
+ *     写一条结束事实（at = 旧终态列原时刻 / 旧 status 非在跑 / 已有汇报，回退 updated_at）；
+ *     仍在等待（pending_question）或旧 status=running/cancelling 的行**不写**结束事实——
+ *     保留等待形状与 running_since（回填防重认领），交给续跑 / 重启对账 / 取消路径；
+ *     历史汇报与执行事实原样保留；
  *   · v7 = task_events（带终止种类 kind 的旧事件账）→ task_ends：只保留「停下时刻」，
  *     丢掉种类；旧任务事实原样；
  *   · 只读打开旧形状库不迁移：读取投影把仍在的旧终态列还原成「停下时刻」（不写库）；
@@ -50,7 +52,7 @@
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { stillProgressingSqlWhere, type TaskProgressFacts } from './task-progress';
+import { stillProgressingSqlWhere, TASK_PROGRESS_REPORT_FIELDS, type TaskProgressFacts } from './task-progress';
 
 /** 当前 schema 版本（PRAGMA user_version）。2 = P1；3 = P2a；4 = U3；5 = S1 事实模型；6 = 零状态（删终态列）；7 = 结束事实去种类（task_events → task_ends）。 */
 export const TASK_STORE_SCHEMA_VERSION = 7;
@@ -670,12 +672,15 @@ function tasksTableNeedsRebuild(db: Database.Database): boolean {
  * v6 tasks 表重建：旧表（v5 及更早）→ 事实形状。
  *
  * 「结论」列（status/reason/failure_reason）与六个终态列不迁移到任务行（不存状态）；
- * 旧任务**全部当已结束**：
+ * 只把**升级前已停下**的旧行当已结束：
  *   · running_since 按 updated_at 回填（极旧库缺列时），避免迁移后被当作未启动重新认领；
- *   · 写**一条结束事实**（task_ends：task_id + at，**不带种类**）：at = 匹配到的旧终态列
- *     原时刻（旧 schema 列顺序：cancelled_at → timed_out_at → resource_limited_at → died_at →
- *     round_failed_at），该列为 NULL / 旧库无该列时回退 updated_at。
- *     怎么结束不迁移——旧结论词（cancelled/died/round_failed/completed…）不进入新库。
+ *   · 已停的行写**一条结束事实**（task_ends：task_id + at，**不带种类**）：at = 匹配到的旧
+ *     终态列原时刻（旧 schema 列顺序：cancelled_at → timed_out_at → resource_limited_at →
+ *     died_at → round_failed_at），或旧 status 不是在跑/取消中，或已有汇报；都没有才回退
+ *     updated_at。怎么结束不迁移——旧结论词不进入新库；等待形状一并清掉。
+ *   · 仍在等待（pending_question 非空、无旧终态、无汇报）或旧 status=running/cancelling 的行
+ *     **不写**结束事实：提问保留、running_since 回填后进入既有续跑 / 重启对账 / 取消路径
+ *     （写死会让它们既不能答也不能停，或在跑行被静默写成已停、用户收不到「结果未知」）。
  * 逐列按旧表实际列存在性取源（极旧库缺列取 NULL），历史行其余事实原样搬运。
  */
 function rebuildTasksToZeroState(db: Database.Database): void {
@@ -691,12 +696,27 @@ function rebuildTasksToZeroState(db: Database.Database): void {
   const atExpr = terminalTimestampColumns.length === 0
     ? '"updated_at"'
     : `CASE ${terminalTimestampColumns.map((column) => `WHEN "${column}" IS NOT NULL THEN "${column}"`).join(' ')} ELSE "updated_at" END`;
+  // 「升级前已停下」：旧终态列非空 / 旧 status 不是在跑或取消中 / 已有汇报存档。
+  // 只用于决定迁移时写不写结束事实与留不留等待形状，不持久化任何种类。
+  const endedBeforeExpr = [
+    ...terminalTimestampColumns.map((column) => `"${column}" IS NOT NULL`),
+    ...(oldColumns.has('status') ? ['COALESCE("status", \'\') NOT IN (\'running\', \'cancelling\')'] : []),
+  ].join(' OR ') || '0';
+  const reportedExpr = TASK_PROGRESS_REPORT_FIELDS
+    .filter((field) => oldColumns.has(field.column))
+    .map((field) => `TRIM(COALESCE("${field.column}", '')) <> ''`)
+    .join(' OR ') || '0';
+  const hadStoppedExpr = `(${endedBeforeExpr}) OR (${reportedExpr})`;
 
   const columnList = TASKS_V6_COLUMNS.map((column) => `"${column}"`).join(', ');
   const selectList = TASKS_V6_COLUMNS.map((column) => {
     if (column === 'running_since') {
-      // 旧任务全部当已结束：未启动过的旧行也回填 updated_at，迁移后不再被认领。
+      // 未启动过的旧行也回填 updated_at，迁移后不再被认领。
       return `COALESCE(${sourceOf('running_since')}, "updated_at") AS "running_since"`;
+    }
+    if (column === 'pending_question' || column === 'waiting_since') {
+      // 已停的旧行不留等待形状（与运行时写结束事实同口径）；仍在等待的行原样保留。
+      return `CASE WHEN ${hadStoppedExpr} THEN NULL ELSE ${sourceOf(column)} END AS "${column}"`;
     }
     return `${sourceOf(column)} AS "${column}"`;
   }).join(', ');
@@ -712,10 +732,21 @@ function rebuildTasksToZeroState(db: Database.Database): void {
       db.exec(SCHEMA_BASE);
       db.exec(`
         INSERT OR IGNORE INTO task_ends (task_id, at)
-        SELECT "task_id", ${atExpr} FROM "tasks";
+        SELECT "task_id", ${atExpr} FROM "tasks" WHERE ${hadStoppedExpr};
         CREATE TABLE tasks_v6 (${TASKS_V6_COLUMNS.map((column) =>
           `"${column}" ${TASKS_V6_BUILD_COLUMN_SHAPES[column]}`).join(', ')});
         INSERT INTO tasks_v6 (${columnList}) SELECT ${selectList} FROM "tasks";
+        -- 升级前仍在跑/取消中、且没有租约（inline 或已释放）的行：给一条**已过期**的迁移租约，
+        -- 让启动恢复（expireLeases）按既有「租约过期 → 结束事实（结果未知）」路径收尾并通知，
+        -- 而不是静默写成已停、也不是永远挂着。accepted 在途行除外（宿主的 wait 会接续它）。
+        UPDATE tasks_v6 SET lease_owner = 'migration', lease_until = updated_at
+        WHERE running_since IS NOT NULL
+          AND lease_until IS NULL
+          AND pending_question IS NULL
+          AND NOT EXISTS (SELECT 1 FROM task_ends e WHERE e.task_id = tasks_v6.task_id)
+          AND NOT EXISTS (
+            SELECT 1 FROM executions x WHERE x.task_id = tasks_v6.task_id AND x.status = 'accepted'
+          );
         DROP TABLE "tasks";
         ALTER TABLE tasks_v6 RENAME TO "tasks";
       `);
@@ -948,13 +979,23 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         WHERE task_id = @taskId
       `)
     : undefined;
+  // 结束即等待形状失效：提问留在行上会让 CLI/ops 继续显示「等待用户」，
+  // 而 resume/confirm/cancel/redo 都因结束事实拒绝——两端都走不通的死角。
+  const clearWaitingAfterEnd = zeroStateReady
+    ? db.prepare(`
+        UPDATE tasks SET pending_question = NULL, waiting_since = NULL, updated_at = @updatedAt
+        WHERE task_id = @taskId
+      `)
+    : undefined;
   const appendEndFactTx = hasEndFactStmt !== undefined
     && insertEndFactStmt !== undefined
     && clearLeaseAfterEnd !== undefined
+    && clearWaitingAfterEnd !== undefined
     ? db.transaction((input: TaskEndWrite): boolean => {
         if (hasEndFactStmt.get(input.taskId) !== undefined) return false;
         if (insertEndFactStmt.run(input).changes === 0) return false;
         clearLeaseAfterEnd.run({ taskId: input.taskId, updatedAt: input.updatedAt });
+        clearWaitingAfterEnd.run({ taskId: input.taskId, updatedAt: input.updatedAt });
         return true;
       })
     : undefined;

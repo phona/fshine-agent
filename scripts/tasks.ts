@@ -541,7 +541,7 @@ export async function runRedo(
     // 按「未收尾」拒，等它收尾或先取消——不猜「已经停了」。
     return refuse(`任务尚未收尾，不能重新推进：${task.taskId}（等它收尾或先取消）。`);
   }
-  if (task.pendingQuestion !== undefined) {
+  if (taskWaitingOf(task)) {
     return refuse(`任务在等待用户表态，不能重新推进：${task.taskId}（先答复或取消该任务）。`);
   }
   if (taskUnstartedOf(task)) {
