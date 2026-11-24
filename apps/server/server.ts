@@ -35,6 +35,7 @@ import type {
   ReplyHandler,
 } from '@fshine/contracts';
 import { effectiveRoleOf, permissionsOfRole } from '@fshine/core';
+import { taskFactReadingOf as readingOf, type TaskFactReading, type TaskFactRecord } from './task-fact-reading';
 import { applyExecutorLabel, loadAgentProfile } from '../../packages/agent/src/agent-profile';
 import {
   createFileStore,
@@ -659,45 +660,13 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     return taskCompletionFallbackText({ ...namePart, resultText: report });
   };
   /**
-   * 底账事实读数（交付面用；**不读任何「怎么结束」种类**）：
-   *   · started / reported / waiting / liveWorker：布尔事实；
-   *   · resultUnknown：已启动、无汇报、无提问、本进程没有活 worker —— 结果未知这一条事实
-   *     （不等同「失败」；用户话由 Main 读事实自己说）。
-   * 读不到底账行（已清/异常形状）= undefined（不猜）。
+   * 底账事实读数（交付面/兜底面用；**不读任何「怎么结束」种类**）。判据在
+   * `task-fact-reading.ts`（纯函数，有绊线）；读不到底账行 = undefined（不猜）。
    */
-  const taskFactReadingOf = (taskId: string): {
-    started: boolean;
-    reported: boolean;
-    waiting: boolean;
-    liveWorker: boolean;
-    resultUnknown: boolean;
-  } | undefined => {
+  const taskFactReadingOf = (taskId: string): TaskFactReading | undefined => {
     try {
-      const record = (taskRegistry as unknown as {
-        get(id: string): {
-          runningSince?: string;
-          leaseUntil?: string;
-          pendingQuestion?: unknown;
-          executions?: readonly { status: string }[];
-          resultText?: string;
-          replyText?: string;
-        };
-      }).get(taskId);
-      const started = taskStartedOf(record);
-      const reported = taskReportedOf(record);
-      const waiting = record.pendingQuestion !== undefined;
-      const liveWorker = runner?.isLive(taskId) ?? false;
-      // 「结果未知」事实（owner 2026-11-23）：已启动、无汇报、无提问、本进程没有活 worker，
-      // 且没有确定的执行事实（末条 failed/refused/completed 都是可读结果，按执行事实归类）。
-      const lastStatus = record.executions?.[record.executions.length - 1]?.status;
-      const definiteExecution = lastStatus === 'failed' || lastStatus === 'refused' || lastStatus === 'completed';
-      return {
-        started,
-        reported,
-        waiting,
-        liveWorker,
-        resultUnknown: started && !reported && !waiting && !liveWorker && !definiteExecution,
-      };
+      const record = (taskRegistry as unknown as { get(id: string): TaskFactRecord }).get(taskId);
+      return readingOf(record, runner?.isLive(taskId) ?? false);
     } catch {
       return undefined;
     }
