@@ -433,11 +433,13 @@ export function taskWaitingUserFactText(input: {
  * （2026-11-24 grok major：此前只有提案摘要，用户可能对已被拒绝的写回「确认」）。
  */
 export function waitingUserFallbackText(input: { summary: string; report?: string }): string {
-  // 汇报原文过与用户可见回复同一道出口清理（剥服务器路径）+ 归空白 + 截断：它是 Worker 回合
-  // 正文，可能带执行层错误码/操作名/很长过程，不能原样进用户气泡（2026-11-24 grok major）。
+  // 汇报原文与模型可见事实同一把尺：先 cleanExecutorDiagnostic（剥前置技术码 token、
+  // 服务器路径、机构自称），再归空白/截断。它是 Worker 回合正文，可能带执行层错误码/
+  // 操作名/很长过程，不能原样进用户气泡；只做 stripServerPaths 不够——协议码和「执行层」
+  // 仍会进渠道（2026-11-24 grok major）。
   const report = input.report === undefined || input.report.trim() === ''
     ? ''
-    : `\n${stripServerPaths(input.report).text.replace(/\s+/gu, ' ').trim().slice(0, FALLBACK_REPORT_MAX)}`;
+    : `\n${cleanExecutorDiagnostic(input.report).replace(/\s+/gu, ' ').trim().slice(0, FALLBACK_REPORT_MAX)}`;
   return `${input.summary}${report}`;
 }
 

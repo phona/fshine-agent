@@ -38,7 +38,20 @@ describe('等待用户两条文本', () => {
   it('提案被拒 + 模型沉默：兜底文本带上汇报原文（拒绝原因不再丢）', () => {
     const fallback = waitingUserFallbackText({ summary: SUMMARY, report: REFUSAL_REPORT });
     expect(fallback).toContain(SUMMARY);
-    expect(fallback).toContain(REFUSAL_REPORT);
+    expect(fallback).toContain('拒绝了这次写入');
+    expect(fallback).toContain('当前权限不允许往 alpha 写');
+  });
+
+  it('汇报里带协议码/机构自称 → 不进投递文本（同一把尺 cleanExecutorDiagnostic）', () => {
+    // 2026-11-24 grok major：此前只做 stripServerPaths + 截断，协议码和「执行层」会原样
+    // 进渠道。Worker 看到的失败结果带原始 code + 清洗后 message，它照实汇报；沉默路径是
+    // 用户唯一能看见的那句，必须过同一把尺。
+    const raw = 'GATE_REFUSE 执行层返回：当前权限不允许往 alpha 写（日志在 /srv/fshine/run.log）';
+    const fallback = waitingUserFallbackText({ summary: SUMMARY, report: raw });
+    expect(fallback).not.toContain('GATE_REFUSE');
+    expect(fallback).not.toContain('执行层');
+    expect(fallback).not.toContain('/srv/');
+    expect(fallback).toContain('当前权限不允许往 alpha 写'); // 业务原文保留
   });
 
   it('提案被拒：给模型的事实文本同样带上汇报原文', () => {

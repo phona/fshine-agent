@@ -80,10 +80,9 @@ describe('久未表态的写确认提示', () => {
     expect(provide(SCOPE.principalId, SCOPE.sessionId)).toBeUndefined();
   });
 
-  it('提案之后执行层拒绝（同回合自 commit 被 GATE_REFUSE）→ 下一轮提示带拒绝事实', () => {
+  it('执行行原话进事实（提案之后被拒过）——只给事实，不下结论', () => {
     // 2026-11-24 grok major：拒绝原因此前只活在一次性的 notice.report 里，不落底账，
-    // 下一轮用户开口时 Main 只看到「将写入」，会把已拒的写当成还在等确认。
-    // 修法不新增状态：拒绝本来就在执行行里（status=refused + error），这里读它。
+    // 下一轮用户开口时 Main 只看到「将写入」。修法 = 把执行行原话带上（不新增状态）。
     const registry = registryIn();
     waitingWithProposal(registry, 't1');
     registry.noteExecution('t1', {
@@ -94,19 +93,41 @@ describe('久未表态的写确认提示', () => {
     });
     const fact = String(createPendingConfirmationProvider(registry)(SCOPE.principalId, SCOPE.sessionId));
     expect(fact).toContain(SUMMARY);
-    expect(fact).toContain('已经被执行层拒绝');
+    expect(fact).toContain('refused');
     expect(fact).toContain('GATE_REFUSE');
     expect(fact).toContain('当前权限不允许该写入');
     // 不得把句柄带进事实（宿主持有）。
     expect(fact).not.toContain('cfm_t1');
   });
 
-  it('提案没被拒过 → 提示不带拒绝子句（不制造不存在的失败）', () => {
+  it('默认写确认形状（提案 + 同回合 commit 被 CONFIRMATION_REQUIRED 拒）→ 不得被说成「已拒，别再确认」', () => {
+    // 2026-11-24 grok blocking：这是**正常**的写确认流程（background-write-confirmation ⑬⑭
+    // 已冻：prepare → needs_confirmation → 同回合 commit 被 CONFIRMATION_REQUIRED → 仍落
+    // waiting_user、提案仍有效）。宿主若从执行行得出「这笔写已被拒绝，别再当确认问」，
+    // Main 会把用户的「确认」带偏。判据：执行行原话在，但**不含任何结论词**。
+    const registry = registryIn();
+    waitingWithProposal(registry, 't1');
+    registry.noteExecution('t1', {
+      requestId: 'req_gate',
+      operation: 'dummy.commit',
+      status: 'refused',
+      error: { code: 'CONFIRMATION_REQUIRED', message: '本回合没有确认句柄' },
+    });
+    const fact = String(createPendingConfirmationProvider(registry)(SCOPE.principalId, SCOPE.sessionId));
+    expect(fact).toContain('CONFIRMATION_REQUIRED'); // 原话在
+    for (const verdict of ['已经被执行层拒绝', '别再当', '不要再问', '已拒绝']) {
+      expect(fact, `宿主下了结论：${verdict}`).not.toContain(verdict);
+    }
+    // 提案本身仍被表述为「还没得到你答复」——没被宿主改写成「已拒」。
+    expect(fact).toContain('还没得到你答复');
+  });
+
+  it('提案没被拒过 → 事实只含提案，不制造不存在的失败', () => {
     const registry = registryIn();
     waitingWithProposal(registry, 't1');
     const fact = String(createPendingConfirmationProvider(registry)(SCOPE.principalId, SCOPE.sessionId));
     expect(fact).toContain(SUMMARY);
-    expect(fact).not.toContain('已经被执行层拒绝');
+    expect(fact).toContain('还没得到你答复');
   });
 
   it('scope 隔离：别的会话的提案不串', () => {
