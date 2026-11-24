@@ -514,6 +514,47 @@ describe('协议缺陷与用例卫生：不冒充终态', () => {
     expect(bad?.pass).toBe(false);
   });
 
+  it('记账覆盖检查：系统面照实上报 → missingKinds 为空', async () => {
+    const outRoot = tmpRoot();
+    const result = await runSimSuite({
+      cases: [makeCase({ id: 'C-ACC', limits: { maxUserTurns: 4, maxWaitTurns: 1, maxWallMs: 60_000, trials: 1 } })],
+      outRoot,
+      createSystem: () => new FakeSystem({ reply: 'alpha 合计 2000' }),
+      simulator: new ScriptedSimulator([FINISH('satisfied', '完成')]),
+      oracles: [OK_ORACLE],
+    });
+
+    expect(result.summary.accounting.byKind.simulator.calls).toBe(1);
+    expect(result.summary.accounting.byKind.main.calls).toBe(1);
+    expect(result.summary.missingKinds).toEqual([]);
+  });
+
+  it('记账覆盖检查：系统面不暴露逐次调用 → 报缺 main（不抛、不洗成通过）', async () => {
+    const outRoot = tmpRoot();
+    // 反向绊线：不上报 calls 的系统面让 main 记不到——覆盖检查必须把它报出来，
+    // 而不是静默当作「这一轮没有 main 调用」。缺的是**读数**，不是终态。
+    const silentSystem: SimSystemUnderTest = {
+      async send(): Promise<SimSystemTurn> {
+        return { visibleReply: 'alpha 合计 2000', toolCalls: 1 };
+      },
+    };
+    const result = await runSimSuite({
+      cases: [makeCase({ id: 'C-SILENT', limits: { maxUserTurns: 4, maxWaitTurns: 1, maxWallMs: 60_000, trials: 1 } })],
+      outRoot,
+      createSystem: () => silentSystem,
+      simulator: new ScriptedSimulator([FINISH('satisfied', '完成')]),
+      oracles: [OK_ORACLE],
+    });
+
+    expect(result.summary.missingKinds).toEqual(['main']);
+    expect(result.summary.accounting.byKind.simulator.calls).toBe(1);
+    expect(result.summary.accounting.byKind.main.calls).toBe(0);
+    // 「用量不可得」不得升级成事故：终态与 pass 仍只由 Oracle 决定。
+    expect(result.summary.byTerminal.satisfied).toBe(1);
+    expect(result.summary.passed).toBe(1);
+    expect(result.trials[0]?.systemAccountingAvailable).toBe(false);
+  });
+
   it('真值出现在 knowledge → 先验拒绝，不烧模型', async () => {
     const system = new FakeSystem({ reply: 'x' });
     const simulator = new ScriptedSimulator([]);

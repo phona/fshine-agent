@@ -27,6 +27,7 @@
 | 2026-11-17 | CAP-01 收口（§九十九） | S3 端到端 2/5 接受为模型能力包络；run 目录保留 30 天；并发 4；渠道三档；软链 fail-closed；跨会话能力不做 | `../history/decision-log-part06-2026-11_undated.md:255` |
 | 2026-11-17–18 | recalc_xlsx 集成（§一百） | `recalc_xlsx` 仅 Main 宿主工具；LibreOffice 26.8.3 仅 PATH 可见时上工具面、缺失 fail-closed；投递门报告驱动、只按 sha256 绑定；一条重编码残余登记 | `../history/decision-log-part06-2026-11_undated.md:305` |
 | 2026-11-18 | 文档清理与未决项转 issue | 未决项转 GitHub #67–#74；仓库不再保留待办/待裁定文档；删除/移档流水以 `git log --diff-filter=D -- docs/` 为准 | `../index.md`、`../../AGENTS.md` |
+| 2026-11-24 | 死代码重复实现收敛（issue #72） | 8 组每组择一：4 组合并到单一导出（`errorText`→`run-dir-cleanup.ts`、`isInside`/`stripQuotes`→`skills.ts`、`jsonSafe`+`sha256Hex`→`ask-trace.ts`）；3 组锁死为「有意镜像」并注明理由（`isRecord` agent↔core 跨包 barrel 重量、`isAbortErrorLike`/`isAbortError` 层次倒置、`compareSkillNames` 遥测自检需独立比较器）；`convergence-r1/hash.ts` 的 `sha256Hex` 按 eval 锁不动；`missingSimKinds` 接进 `runSimSuite` 的记账覆盖检查（只报不缺，不抛）。不建 utils 万能桶，helper 就近归属 | `packages/agent/dead-code-merge.test.ts` |
 
 ## 写作约束（三条，继承自台账纪律）
 

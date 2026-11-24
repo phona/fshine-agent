@@ -13,7 +13,7 @@
 | #69 | `executions` 时间列 | `../../AGENTS.md:84` | 未清 |
 | #70 | tasks CLI 增强 | `../../AGENTS.md:84` | 未清 |
 | #71 | P8 ops 扩展（原 R4 唯一未落地分片） | `../../AGENTS.md:84`；`index.md`（R4 行） | 未清 |
-| #72 | 死代码重复实现 | `../../AGENTS.md:84` | 未清 |
+| #72 | 死代码重复实现 | 收敛记录见 `index.md`（2026-11-24 行）；守卫 `packages/agent/dead-code-merge.test.ts` | 已清（2026-11-24：8 组全部择一；`scripts/eval/**` 下 6 份 `jsonSafe` 历史夹具副本与 `scripts/ask-replay.ts` 的异名同义 `messageOf` 另行登记，理由见守卫文件头） |
 | #73 | eval 候选池 | `../../AGENTS.md:84` | 未清 |
 | #74 | B2 Silent Shadow 真实租户联调 | `../architecture/channels.md:3` | 未清 |
 

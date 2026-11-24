@@ -20,6 +20,8 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// frontmatter 剥引号取全仓唯一一份（issue #72 合并；原正则实现的取舍理由见 skills.ts 的 stripQuotes）。
+import { stripQuotes } from './skills';
 
 export interface AgentProfile {
   /** agent.md 正文：frontmatter 已剥离、首尾空白已裁剪。 */
@@ -93,11 +95,6 @@ function parseProfile(content: string, sourcePath: string): { instructions: stri
   const instructions = body.trim();
   if (instructions === '') throw profileError(sourcePath, '内容为空（正文不含有效指令）');
   return { instructions, declaredName };
-}
-
-function stripQuotes(value: string): string {
-  // 只在首尾为同一对引号时剥一层（不解释任意 YAML）；用一次正则完成，避免针对引号字符的分支。
-  return value.replace(/^(['"])(.*)\1$/, '$2').trim();
 }
 
 function describeReadError(error: unknown): string {

@@ -42,9 +42,16 @@ import {
   type TaskRecord,
 } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
+// 机械原因原文取全仓唯一一份（issue #72 合并；归属理由见 run-dir-cleanup.ts 的 errorText）。
+import { errorText } from '../packages/agent/src/run-dir-cleanup';
 import { createNotificationReader, type Notification, type NotificationKind } from '../packages/agent/src/notifications';
 import type { AskRuntimeInput } from './ask-runtime';
 import { explicitConfigFrom } from './resolve-config-path';
+
+// 再转出口给 ops 等姊妹 CLI：本模块已是 CLI 面共享语义的既有出处（时间格式/摘要/事实标签…），
+// 从这里取可避免每个入口各抄一份，也不必让 ops 直接引用清理执行器模块
+// （`scripts/cleanup-runs.test.ts` 的接线边界：ops 不得直接引用 run-dir-cleanup）。
+export { errorText };
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REDO_ROOT = path.join(REPO_ROOT, '.runtime', 'redo');
@@ -496,10 +503,6 @@ async function defaultRedoAssembler(input: AskRuntimeInput): Promise<RedoAssembl
 async function defaultIsAssemblyRefusal(error: unknown): Promise<boolean> {
   const { isAssemblyRefusal } = await import('./ask-runtime');
   return isAssemblyRefusal(error);
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 async function capture<T>(run: () => Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {

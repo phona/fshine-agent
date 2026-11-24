@@ -210,11 +210,20 @@ export function parseFrontmatter(content: string): { name: string; description: 
   return { name, description };
 }
 
-function stripQuotes(value: string): string {
-  if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
-    return value.slice(1, -1).trim();
-  }
-  return value;
+/**
+ * frontmatter 值剥一对首尾引号（**全仓唯一一份**，issue #72 合并）。
+ *
+ * 原来是两份私有副本：`agent-profile.ts`（正则）与本文件（首尾判断）。两边在**可达输入域**
+ * 上逐字一致——frontmatter 按行解析、两个调用点（`parseFrontmatter` / `parseProfile`）都先
+ * `trim()` 再调，所以值既不可能含换行、也不可能带首尾空白。差异只在那两类进不来的输入上：
+ *   ① 值自带首尾空白：正则版无条件 trim，首尾判断版原样返回；
+ *   ② 值内含换行：正则版 `.` 不匹配换行 → 原样返回，首尾判断版会剥掉引号。
+ * 两类都由 `packages/agent/skills.test.ts` 的「两类进不来的输入被显式钉住」用例钉住，
+ * 别当回归修。合并后保留正则版（一次 replace 无分支，理由写在被合并方）。
+ */
+export function stripQuotes(value: string): string {
+  // 只在首尾为同一对引号时剥一层（不解释任意 YAML）；用一次正则完成，避免针对引号字符的分支。
+  return value.replace(/^(['"])(.*)\1$/, '$2').trim();
 }
 
 function isSkillName(value: string): boolean {
@@ -230,7 +239,17 @@ async function realPathOrNull(file: string): Promise<string | undefined> {
   }
 }
 
-function isInside(root: string, candidate: string): boolean {
+/**
+ * 严格包含判定（realpath 之后用；**全仓唯一一份**，issue #72 合并）。
+ *
+ * 原来是三份私有副本：本文件、`file-store.ts`（嵌套在 `createFileStore` 内，注释自述
+ * 「与 skills.ts 的 isInside 同语义」）、`scripts/eval/sim/skill-telemetry.ts`（遥测层的
+ * 机械核对）。三处判据完全相同（带分隔符前缀 + 拒绝 `..` 段 + 拒绝绝对路径），合并到
+ * 本文件的理由：它是三者中唯一不依赖任何仓内模块的一方（只有 node 内建），另外两方
+ * 反向依赖它都不会把新依赖拖进图里。定义点集合由
+ * `packages/agent/dead-code-merge.test.ts` 钉住。
+ */
+export function isInside(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }

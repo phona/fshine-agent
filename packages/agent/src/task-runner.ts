@@ -738,6 +738,9 @@ type RoundResult =
   | { kind: 'outcome'; outcome: TaskExecutionOutcome }
   | { kind: 'threw'; error: unknown };
 
+/** 中止判定。**有意镜像** `execution-runtime.ts` 的 `isAbortErrorLike`（issue #72 锁死，归一化后
+ * 逐字相同）：合并会把后台调度器接进通用运行时的值图（或反之），倒置依赖方向——见该处注释
+ * 与 `packages/agent/dead-code-merge.test.ts` 的锁死组。 */
 function isAbortError(error: unknown): boolean {
   return typeof error === 'object'
     && error !== null

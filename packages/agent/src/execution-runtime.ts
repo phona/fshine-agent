@@ -3694,6 +3694,10 @@ export interface TaskExecutorOptions {
   onExecutionEvent?: (event: ExecutionEvent) => void;
 }
 
+/** 中止判定。**有意镜像** `task-runner.ts` 的 `isAbortError`（issue #72 锁死，归一化后逐字
+ * 相同）：合并要么让通用运行时的值图包含后台调度器、要么反过来，把依赖方向倒过来——两者今天
+ * 只有 type-only 边。镜像事实与「两层之间没有值 import 边」由
+ * `packages/agent/dead-code-merge.test.ts` 钉住。 */
 function isAbortErrorLike(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'name' in error
     && (error as { name?: unknown }).name === 'AbortError';

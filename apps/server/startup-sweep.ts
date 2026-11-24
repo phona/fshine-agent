@@ -25,6 +25,8 @@ import {
   cleanupExpiredRunDirs,
   type CleanupRunDirsInput,
   type RunDirCleanupResult,
+  // 机械原因原文取全仓唯一一份（issue #72 合并；归属理由见 run-dir-cleanup.ts 的 errorText）。
+  errorText,
 } from '../../packages/agent/src/run-dir-cleanup';
 
 /** 跳过原因分布：只统计 `skipped_*`（删除失败另计 failed，不算跳过）。 */
@@ -53,10 +55,6 @@ export interface StartupSweepInput {
   readonly fileRefSweep?: (input: CleanupFileRefBytesInput) => FileRefCleanupResult;
   /** 日志注入（测试用；缺省 = 结构化 JSON 一行到 stdout）。 */
   readonly log?: (event: Record<string, unknown>) => void;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 /**
