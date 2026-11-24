@@ -22,9 +22,9 @@
  *   · 触发 = 可写打开且 tasks 表仍是旧形状（有 status 列/六个终态列，v5 及更早）——重建为
  *     事实形状；
  *   · v6 = tasks 表重建：删 status/reason/failure_reason 与六个终态列；**升级前已停下的旧行**
- *     写一条结束事实（at = 旧终态列原时刻 / 旧 status 属已停集合 / 已有汇报，回退 updated_at）；
- *     仍在等待（pending_question）、排队（queued）、在跑（running/cancelling）的行**不写**结束事实——
- *     保留等待形状与 running_since（回填防重认领），交给续跑 / 重启对账 / 取消路径；
+ *     写一条结束事实（旧终态列原时刻 / 旧 status 属已停集合 / 已有汇报 / 从未启动且无提问，
+ *     回退 updated_at）；仍在等待或在跑的行**不写**结束事实——在跑行给一条已过期的迁移租约，
+ *     交给启动恢复「租约过期 → 结束事实（结果未知）」并通知；历史汇报与执行事实原样保留；
  *     历史汇报与执行事实原样保留；
  *   · v7 = task_events（带终止种类 kind 的旧事件账）→ task_ends：只保留「停下时刻」，
  *     丢掉种类；旧任务事实原样；
@@ -52,7 +52,7 @@
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { stillProgressingSqlWhere, TASK_PROGRESS_REPORT_FIELDS, type TaskProgressFacts } from './task-progress';
+import { stillProgressingSqlWhere, TASK_PROGRESS_REPORT_FIELDS, TASK_PROGRESS_STARTED_COLUMN, type TaskProgressFacts } from './task-progress';
 
 /** 当前 schema 版本（PRAGMA user_version）。2 = P1；3 = P2a；4 = U3；5 = S1 事实模型；6 = 零状态（删终态列）；7 = 结束事实去种类（task_events → task_ends）。 */
 export const TASK_STORE_SCHEMA_VERSION = 7;
@@ -706,7 +706,7 @@ function rebuildTasksToZeroState(db: Database.Database): void {
   const atExpr = terminalTimestampColumns.length === 0
     ? '"updated_at"'
     : `CASE ${terminalTimestampColumns.map((column) => `WHEN "${column}" IS NOT NULL THEN "${column}"`).join(' ')} ELSE "updated_at" END`;
-  // 「升级前已停下」：旧终态列非空 / 旧 status 不是在跑或取消中 / 已有汇报存档。
+  // 「升级前已停下」：旧终态列非空 / 旧 status 属已停集合 / 已有汇报存档 / 从未启动且没有提问。
   // 只用于决定迁移时写不写结束事实与留不留等待形状，不持久化任何种类。
   const endedBeforeExpr = [
     ...terminalTimestampColumns.map((column) => `"${column}" IS NOT NULL`),
@@ -718,17 +718,45 @@ function rebuildTasksToZeroState(db: Database.Database): void {
     .filter((field) => oldColumns.has(field.column))
     .map((field) => `TRIM(COALESCE("${field.column}", '')) <> ''`)
     .join(' OR ') || '0';
-  const hadStoppedExpr = `(${endedBeforeExpr}) OR (${reportedExpr})`;
+  // 「升级前已启动」：旧 running_since 非空，或旧 status 是在跑/取消中（v4 没有 running_since 列，
+  // 只能靠 status 判断）。用来区分「在跑的行」与「从未启动的排队行」——后者零执行，
+  // 不能走「结果未知」的恢复告知（那是假话），只能当「未启动即已停」。
+  // 列名走 task-progress 的单一来源（本模块不另写列名）；这是**迁移期读旧表**的判据，
+  // 与运行期的「仍在推进」谓词不是一回事（后者只作用于当前 schema）。
+  const startedSignals = [
+    ...(oldColumns.has(TASK_PROGRESS_STARTED_COLUMN.column)
+      ? [`"${TASK_PROGRESS_STARTED_COLUMN.column}" IS NOT NULL`]
+      : []),
+    ...(oldColumns.has('status') ? [`COALESCE("status", '') IN ('running', 'cancelling')`] : []),
+  ];
+  const startedBeforeExpr = startedSignals.length > 0 ? `(${startedSignals.join(' OR ')})` : '0';
+  const questionPresentExpr = oldColumns.has('pending_question')
+    ? `COALESCE("pending_question", '') <> ''`
+    : '0';
+  const neverStartedExpr = `(NOT ${startedBeforeExpr} AND NOT (${questionPresentExpr}))`;
+  const hadStoppedExpr = `(${endedBeforeExpr}) OR (${reportedExpr}) OR (${neverStartedExpr})`;
+  // 升级前已启动、没有提问、没有结束事实、没有 accepted 在途的行：给一条**已过期**的迁移租约，
+  // 让启动恢复（expireLeases）按既有「租约过期 → 结束事实（结果未知）」路径收尾并通知用户，
+  // 而不是静默写成已停、也不是永远挂着。从未启动的排队行**不给**（零执行，说「结果未知」是假话）。
+  const syntheticLeaseExpr = `${startedBeforeExpr} AND NOT (${questionPresentExpr})`
+    + ' AND NOT EXISTS (SELECT 1 FROM task_ends e WHERE e.task_id = "tasks".task_id)'
+    + ' AND NOT EXISTS (SELECT 1 FROM executions x WHERE x.task_id = "tasks".task_id AND x.status = \'accepted\')';
 
   const columnList = TASKS_V6_COLUMNS.map((column) => `"${column}"`).join(', ');
   const selectList = TASKS_V6_COLUMNS.map((column) => {
     if (column === 'running_since') {
-      // 未启动过的旧行也回填 updated_at，迁移后不再被认领。
-      return `COALESCE(${sourceOf('running_since')}, "updated_at") AS "running_since"`;
+      // 仍在推进的行回填 updated_at（迁移后不再被当未启动认领）；升级前已停的行保持原值
+      // （NULL = 从未启动，CLI 据此显示「未启动即已停」，不冒充跑过）。
+      return `CASE WHEN ${hadStoppedExpr} THEN ${sourceOf('running_since')}`
+        + ` ELSE COALESCE(${sourceOf('running_since')}, "updated_at") END AS "running_since"`;
     }
     if (column === 'pending_question' || column === 'waiting_since') {
       // 已停的旧行不留等待形状（与运行时写结束事实同口径）；仍在等待的行原样保留。
       return `CASE WHEN ${hadStoppedExpr} THEN NULL ELSE ${sourceOf(column)} END AS "${column}"`;
+    }
+    if (column === 'lease_owner' || column === 'lease_until') {
+      const synthetic = column === 'lease_owner' ? `'migration'` : '"updated_at"';
+      return `CASE WHEN ${syntheticLeaseExpr} THEN ${synthetic} ELSE ${sourceOf(column)} END AS "${column}"`;
     }
     return `${sourceOf(column)} AS "${column}"`;
   }).join(', ');
@@ -748,17 +776,6 @@ function rebuildTasksToZeroState(db: Database.Database): void {
         CREATE TABLE tasks_v6 (${TASKS_V6_COLUMNS.map((column) =>
           `"${column}" ${TASKS_V6_BUILD_COLUMN_SHAPES[column]}`).join(', ')});
         INSERT INTO tasks_v6 (${columnList}) SELECT ${selectList} FROM "tasks";
-        -- 升级前仍在跑/取消中、且没有租约（inline 或已释放）的行：给一条**已过期**的迁移租约，
-        -- 让启动恢复（expireLeases）按既有「租约过期 → 结束事实（结果未知）」路径收尾并通知，
-        -- 而不是静默写成已停、也不是永远挂着。accepted 在途行除外（宿主的 wait 会接续它）。
-        UPDATE tasks_v6 SET lease_owner = 'migration', lease_until = updated_at
-        WHERE running_since IS NOT NULL
-          AND lease_until IS NULL
-          AND pending_question IS NULL
-          AND NOT EXISTS (SELECT 1 FROM task_ends e WHERE e.task_id = tasks_v6.task_id)
-          AND NOT EXISTS (
-            SELECT 1 FROM executions x WHERE x.task_id = tasks_v6.task_id AND x.status = 'accepted'
-          );
         DROP TABLE "tasks";
         ALTER TABLE tasks_v6 RENAME TO "tasks";
       `);

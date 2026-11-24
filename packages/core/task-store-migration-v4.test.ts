@@ -163,10 +163,11 @@ describe('U3 v4 迁移（v3 → v4）', () => {
     ));
     expect(taskRows(dbPath)).toEqual(beforeTasks);
     expect(longRunningColumnsOf(dbPath)).toEqual([
-      // v6 重建：旧任务全部当已结束，running_since 回填 updated_at（不再可被认领）。
+      // v6 重建：升级前已停的行（有汇报/已停 status）保持原值——v3 没有 running_since 列 → NULL；
+      // 结束事实已保证它不再被认领，不需要把「起点」回填成 updated_at 冒充跑过。
       {
         long_running_notified_at: null,
-        running_since: '2026-11-15T10:01:00.000Z',
+        running_since: null,
         wait_contact_lost_notified_at: null,
       },
     ]);

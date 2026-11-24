@@ -989,4 +989,35 @@ describe('D1 业务写封闭账本：与顺序无关的 done / notDone', () => {
     const fallback = failureMessageFor(classifyFailure({ code: round.errorCode })).text;
     expect(fallback).not.toContain('办好了');
   });
+
+  it('㉒ 无对象标签的写成功后只读失败：写已锚定回合，不报整单失败（否则用户重试 = 双写）', async () => {
+    const client = new AdversarialClient();
+    const { runner } = await confirmRound({
+      taskId: 't_d1_unlabeled_success',
+      client,
+      calls: [PROPOSAL, QUERY_FAILED],
+    });
+    const round = runner.roundOutcomeOf?.('t_d1_unlabeled_success');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    // 2026-11-19 基线：任意已完成的非只读业务写都锚定回合，不要求对象标签。对象键只用来把
+    // 失败配到同一次成功。少了这条，无标签写成功后紧跟的只读失败会被倒序扫描当成整回合
+    // 失败——写可能已落地，用户被告知「没办成」再重试就是双写。
+    expect(round.errorCode).toBeUndefined();
+    expect(round.partial).toBeUndefined();
+  });
+
+  it('㉓ 无对象标签的写先失败后成功：成功锚定回合（证不了同对象，也证不了不同对象）', async () => {
+    const client = new AdversarialClient();
+    const { runner } = await confirmRound({
+      taskId: 't_d1_unlabeled_retry',
+      client,
+      calls: [DENIED_UNLABELED, PROPOSAL],
+    });
+    const round = runner.roundOutcomeOf?.('t_d1_unlabeled_retry');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    expect(round.errorCode).toBeUndefined();
+    expect(round.partial).toBeUndefined();
+  });
 });

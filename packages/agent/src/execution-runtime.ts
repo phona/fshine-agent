@@ -4612,13 +4612,21 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         }
         const ledgers = new Map<string, ObjectLedger>();
         let lastUnlabeledFailure: LedgerFailure | undefined;
+        /** 无对象标签的业务写成功（2026-11-19 基线：任意已完成的非只读业务写都锚定回合）。 */
+        let unlabeledWriteCompleted = false;
         recorded.forEach((entry, index) => {
           if (!isBusinessWrite(entry)) return;
           const object = objectLabelOf(entry);
           const status = entry.outcome.status;
           if (status === 'completed') {
-            // 取不到对象名 → 归不进 done（不编造对象标签）。
-            if (object === undefined) return;
+            // 取不到对象名 → 归不进对象账（不编造对象标签），但**仍然算一次写成功**：
+            // 对象键只用来把失败配到同一次成功，不是「算不算写成功」的前提。少了这条，
+            // 无标签写成功后紧跟的只读失败会被倒序扫描当成整回合失败——写可能已落地，
+            // 用户被告诉「没办成」再重试就是双写。
+            if (object === undefined) {
+              unlabeledWriteCompleted = true;
+              return;
+            }
             const ledger = ledgers.get(object) ?? { object, completed: false };
             ledger.completed = true;
             ledgers.set(object, ledger);
@@ -4648,7 +4656,9 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         const notDone = allLedgers.filter((ledger) => !ledger.completed);
         const notDoneFailures = [
           ...notDone.flatMap((ledger) => (ledger.lastFailure === undefined ? [] : [ledger.lastFailure])),
-          ...(lastUnlabeledFailure === undefined ? [] : [lastUnlabeledFailure]),
+          // 有任意业务写成功在场时，无标签失败不翻案：证不了同对象，也证不了不同对象，
+          // 而基线是「已完成的业务写锚定回合」——报失败会诱导用户重试，写成双写。
+          ...(unlabeledWriteCompleted || lastUnlabeledFailure === undefined ? [] : [lastUnlabeledFailure]),
         ].sort((left, right) => left.index - right.index);
         if (notDoneFailures.length > 0) {
           const lastFailure = notDoneFailures[notDoneFailures.length - 1]!;
@@ -4666,8 +4676,9 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
             ? undefined
             : fact;
         }
-        // 有业务写已落库且没有 notDone：写都成了（同对象先失败后成功/成功后重复失败不翻盘）。
-        if (done.length > 0) return undefined;
+        // 有业务写已落库（含无对象标签的写）且没有 notDone：写都成了（同对象先失败后成功/
+        // 成功后重复失败不翻盘；无标签写成功同样锚定——后续只读失败不得把整回合报成失败）。
+        if (done.length > 0 || unlabeledWriteCompleted) return undefined;
         // 没有任何业务写结论：保持原口径（倒序末次失败；容忍码跳过）——只读/脚本失败仍取。
         for (let index = recorded.length - 1; index >= 0; index -= 1) {
           const entry = recorded[index];

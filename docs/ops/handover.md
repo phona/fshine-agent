@@ -45,7 +45,7 @@ Pi Agent（Main）+ 最小宿主 + Execution Contract + Channel Adapter 的产�
 
 ## 五、必须先知道的风险
 
-1. **长连接断连窗口的消息会丢**（已实测）：停服 `12:02:15Z` → 重连 `12:03:43Z` 期间用户发 2 条，重连后底账零新增、`aibot_msg_callback` 帧 0 → 平台不补投、产品无补拉。缓解已落地：`systemd Restart=always`（窗口秒级）、心跳 15s、`message_still_processing` 接进程内告警（规则 `message_stuck`）；销账条件=切 Webhook（平台最多 3 次重试）+ 既有 messageId 幂等底账接重投。详见 `docs/decisions/debt.md` §十一。
+1. **长连接断连窗口的消息会丢**（已实测）：停服 `12:02:15Z` → 重连 `12:03:43Z` 期间用户发 2 条，重连后底账零新增、`aibot_msg_callback` 帧 0 → 平台不补投、产品无补拉。缓解已落地：`systemd Restart=always`（窗口秒级）、心跳 15s、`message_still_processing` 接进程内告警（规则 `message_stuck`）；销账条件=切 Webhook（平台最多 3 次重试）+ 既有 messageId 幂等底账接重投。详见 `docs/decisions/debt.md` §十二。
 2. **回合有机械失败事实且有 worker 正文时，正文不入存档**（债 M2）：进程在失败说明投递前退出，那句 worker 原话会丢；用户侧仍会按执行事实收到「结果未知/没办成」的兜底，但少了原话。见 `docs/decisions/debt.md`。
 3. 其它未清债务见 `docs/decisions/debt.md`（含 §五「接受不修 / 登记不修」）。
 

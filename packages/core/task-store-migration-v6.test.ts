@@ -325,18 +325,21 @@ describe('事实账迁移 v4 → 只存事实 + 无种类结束事实', () => {
     expect(storedDone.executions).toHaveLength(1);
     expect(storedDone.executions[0]!.dispatchKey).toBeUndefined();
 
-    // running_since = updated_at（连旧 queued 行也不再被认领）。
+    // running_since：仍在推进的行回填 updated_at（不再被当未启动认领）；升级前已停的行
+    // 保持原值（v4 没有该列 → NULL，CLI 据此显示「未启动即已停」，不冒充跑过）。
+    const liveStatuses = new Set(['waiting_user', 'running', 'cancelling']);
     for (const row of V4_SEED) {
-      expect(rawTask(dbPath, row.taskId)['running_since'], row.taskId).toBe(row.updatedAt);
+      expect(rawTask(dbPath, row.taskId)['running_since'], row.taskId).toBe(
+        liveStatuses.has(row.status) ? row.updatedAt : null,
+      );
     }
-    expect(rawTask(dbPath, 'task_queued')['running_since']).toBe('2026-11-14T09:00:00.000Z');
 
     // 升级前已停的行各一条「停下时刻」（v4 没有独立终态时刻 → 回退 updated_at）；没有种类。
-    // 未停的行（queued / running / cancelling / waiting_user）不写结束事实：
-    // 在跑/排队行交给启动恢复，等待行保留提问还能接续。
+    // 未停的行（waiting_user / running / cancelling）不写结束事实：
+    // 等待行保留提问，在跑/取消行交给启动恢复。
     const stoppedStatuses = new Set([
       'completed', 'failed', 'cancelled', 'canceled', 'timed_out', 'resource_limited',
-      'died', 'round_failed', 'unexecuted', 'failed_confirmed',
+      'died', 'round_failed', 'unexecuted', 'failed_confirmed', 'queued',
     ]);
     for (const row of V4_SEED) {
       expect(rawEnds(dbPath, row.taskId), row.taskId).toEqual(
@@ -354,13 +357,16 @@ describe('事实账迁移 v4 → 只存事实 + 无种类结束事实', () => {
     expect(store.getTask('task_unknown')!.ends[0]!.at).toBe('2026-11-14T09:15:00.000Z');
     expect(store.getTask('task_resource')!.ends[0]!.at).toBe('2026-11-14T09:45:00.000Z');
 
-    // 在跑扫描：排队/取消中/在跑三类未停行进入（不再被静默写成已停）；等待行不进在跑扫描。
-    expect(store.listRunningTasks().map((row) => row.taskId)).toEqual(['task_queued', 'task_cancelling', 'task_live']);
-    // 无租约的未停行给一条已过期的迁移租约：启动恢复走「租约过期 → 结束事实（结果未知）」并通知。
+    // 在跑扫描：只有升级前在跑/取消中的行进入（排队行零执行，不当成在跑）；等待行不进。
+    expect(store.listRunningTasks().map((row) => row.taskId)).toEqual(['task_cancelling', 'task_live']);
+    // 在跑/取消行给一条已过期的迁移租约：启动恢复走「租约过期 → 结束事实（结果未知）」并通知。
+    // 排队行（task_queued）零执行：**不給**合成租约——它已被写成「未启动即已停」，
+    // 不能再被唤醒成「结果未知」（假话）。
     expect(rawTask(dbPath, 'task_live')['lease_owner']).toBe('migration');
     expect(rawTask(dbPath, 'task_live')['lease_until']).toBe('2026-11-14T10:30:00.000Z');
+    expect(rawTask(dbPath, 'task_queued')['lease_owner']).toBeNull();
     expect(store.listRunningExpiredLeases('2026-11-15T00:00:00.000Z').map((row) => row.taskId))
-      .toEqual(['task_queued', 'task_cancelling', 'task_live']);
+      .toEqual(['task_cancelling', 'task_live']);
     expect(store.listWaitingRows().map((row) => row.task.taskId)).toEqual(['task_waiting']);
     expect(store.claimNextUnstarted({
       owner: 'test', leaseUntil: '2999-01-01T00:00:00.000Z', updatedAt: '2026-11-14T11:00:00.000Z',
