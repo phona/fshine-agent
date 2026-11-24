@@ -173,6 +173,61 @@ describe('taskId 形态扫描（task_ + ≥8 位标识段；不扩词表，同�
 });
 
 // ---------------------------------------------------------------------------
+// ①d 结构化块形状机械断言（2026-11-24 补 live P0 ①：DSML 工具块曾原样投给用户）
+//     判据 = 机械形状（格式/泄漏类），不判语义；与词表/编号/taskId 并列，同一入口。
+// ---------------------------------------------------------------------------
+
+describe('结构化块形状扫描（工具调用块标记 + JSON 字面量；同一 scanUserVisibleText 入口）', () => {
+  it('工具调用块标记（裸词 / 带引号 / 带尖括号）→ 命中，marker=命中原文', () => {
+    const { hits } = scanUserVisibleText([
+      { where: 'a', text: '我调了 tool_use 去查。' },
+      { where: 'b', text: '返回里带 "function_call" 字段。' },
+      { where: 'c', text: 'antml:invoke name="x"' },
+      { where: 'd', text: '<tool_result>ok</tool_result>' },
+    ]);
+    const markers = hits.map((hit) => hit.marker);
+    expect(markers).toContain('tool_use');
+    expect(markers).toContain('function_call');
+    expect(markers).toContain('antml:');
+    expect(markers).toContain('tool_result');
+  });
+
+  it('JSON 结构字面量（对象/数组以引号成员开头）→ 命中', () => {
+    const { hits } = scanUserVisibleText([
+      { where: 'a', text: '结果是 {"collection":"documents","count":3}。' },
+      { where: 'b', text: '明细：\n[{"name":"document-1","value":1200}]' },
+    ]);
+    expect(hits.length).toBeGreaterThanOrEqual(2);
+    expect(hits[0]!.excerpt).toContain('collection');
+  });
+
+  it('正常业务行文零命中（中文+数字+括号/顿号/表格/代码围栏都不误报）', () => {
+    expect(scanUserVisibleText([
+      { where: 'a', text: '核对完成，共 3 条单据，合计 2900。' },
+      { where: 'b', text: '第 2 条和第 3 条同名（都是 document-2），金额一个 800、一个 900。' },
+      { where: 'c', text: '窗口 W202611 与 W202610 返回的记录逐条一致。' },
+      { where: 'd', text: '金额（元）：1200' },
+      { where: 'e', text: '把【备注】里的内容发我：客户名称+期间' },
+      { where: 'f', text: '```\nconsole.log(1)\n```' },
+      { where: 'g', text: '要不要按编号去查？' },
+      { where: 'h', text: '已收到 3 个文件：名册.xlsx、工资表.xlsx、说明.docx' },
+    ]).hits).toEqual([]);
+  });
+
+  it('走的是同一个 scanUserVisibleText 入口（四个批次 + wecom-sim 零改动即生效）', () => {
+    const { hits } = scanUserVisibleText([{ where: 'x', text: '工具块：tool_use 泄漏' }]);
+    expect(hits.some((hit) => hit.marker === 'tool_use')).toBe(true);
+  });
+
+  it('反向绊线：形状必须真的在 scanUserVisibleText 里（被摘掉本断言即红）', () => {
+    // 证明闸生效：同一调用形态能拿到结构化块命中；若有人把 findStructuredBlockHits
+    // 从 scanUserVisibleText 里摘掉，这条先红（提示闸被拆），而不是静默放过。
+    const { hits } = scanUserVisibleText([{ where: 'x', text: '{"a":1}' }]);
+    expect(hits.some((hit) => hit.marker.includes('"a"'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ② 静态守卫：显式清单 + glob 闭包（新增批次忘接入即红，删调用会红）
 // ---------------------------------------------------------------------------
 

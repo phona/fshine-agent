@@ -10,7 +10,9 @@
  *   ⑤ Main 系统提示正文（agent.md 经 applyExecutorLabel 渲染后的最终文本）无内部词；
  *   ⑥ Worker 系统提示常量（2026-11-24 O-6 删 `renderWorkerSystemPrompt`/workspaceRoot 注入后，
  *      Worker 提示恒为该常量，无渲染参数化）无内部词；
- *   ⑦ 回合结束事实链（宿主喂账本事实 → taskRoundFactsText）无内部词。
+ *   ⑦ 回合结束事实链（宿主喂账本事实 → taskRoundFactsText）无内部词；
+ *   ⑫ 宿主自己写的用户可见文本（兜底句/通知/回执/事实链）不含结构化块形状
+      （工具调用块标记 / JSON 字面量）——2026-11-24 补 live P0 ① 的闸。
  * 内部词含「执行层 / 执行端 / 确认凭据 / 宿主 / 委派 / 能力快照 / 执行面 / 凭据」——都是不该
  * 出现在给模型/用户文本里的宿主内部形态（2026-11-20 扩面：复核发现 run_js 描述/续跑注记/
  * 后台文件提示/技能正文里仍有漏网）。内部词是确定性事实，不是模型行为评估。
@@ -19,7 +21,19 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { taskRoundFactsText } from './task-completion-delivery';
+import {
+  failureFallbackFactText,
+  failureTextFor,
+  taskCancelledFactText,
+  taskCompletionFallbackText,
+  taskRoundFactsText,
+  taskRestartFactText,
+  taskWaitingUserFactText,
+  waitingUserFallbackText,
+} from './task-completion-delivery';
+import { findStructuredBlockHits } from '../../scripts/eval/shared/internal-terms';
+import { renderNotification } from '../../packages/agent/src/notification-render';
+import { formatFileAck } from '@fshine/contracts';
 import { createDummyCliClient } from '../../packages/agent/src/dummy-cli-client';
 import {
   TASK_RUN_TOOL_DESCRIPTION,
@@ -321,6 +335,54 @@ describe('模型可见面收口：清单投影 / Worker 提示 / 底账投影', 
     expect(WORKER_SYSTEM_PROMPT).toContain('你接到一件要办的事');
     expect(WORKER_SYSTEM_PROMPT).toContain('用给你的工具把每一步交出去办');
     expect(WORKER_SYSTEM_PROMPT).not.toContain('execute_operation');
+  });
+});
+
+/**
+ * ⑫ 宿主写的用户可见文本：不含结构化块形状（2026-11-24 补 live P0 ①「DSML 工具块原样投给用户」）。
+ *
+ * 为什么单开一条：上面 ①–⑪ 管的是「内部词/内部标识」，管不住「结构化块原样到用户」——
+ * 模型把 tool_use 块或 JSON 字面量当普通文本吐出来时，词表一条都不命中。判据是**机械形状**
+ * （格式/泄漏类，与 shared/internal-terms 的形状断言同一把尺），不判语义。
+ * 覆盖面 = 宿主**自己写**的那些用户可见文本；模型自己回复里的形状由 eval 批次的
+ * scanUserVisibleText 兜（同一形状，零改动生效）。
+ */
+describe('宿主用户可见文本：无结构化块形状（工具调用块 / JSON 字面量）', () => {
+  /** 宿主写的用户可见文本一样样过形状闸（where 只用于失败定位）。 */
+  const hostTexts = (): Array<{ where: string; text: string }> => [
+    { where: 'taskCompletionFallbackText', text: taskCompletionFallbackText({ name: '核对单据', resultText: '共 3 条。' }) },
+    { where: 'failureFallbackFactText(denied)', text: failureFallbackFactText({ code: 'GATE_REFUSE', name: '核对单据' }) },
+    { where: 'failureFallbackFactText(executor_failed)', text: failureFallbackFactText({ name: '核对单据' }) },
+    { where: 'failureFallbackFactText(unknown_result)', text: failureFallbackFactText({ resultUnknown: true, name: '核对单据' }) },
+    { where: 'failureFallbackFactText(resourceLimited)', text: failureFallbackFactText({ resourceLimited: true, name: '核对单据' }) },
+    { where: 'failureTextFor(failed)', text: failureTextFor('failed') },
+    { where: 'failureTextFor(result_unknown)', text: failureTextFor('result_unknown') },
+    { where: 'taskCancelledFactText', text: taskCancelledFactText({ name: '核对单据' }) },
+    { where: 'taskRestartFactText', text: taskRestartFactText({ name: '核对单据' }) },
+    { where: 'taskWaitingUserFactText', text: taskWaitingUserFactText({ name: '核对单据', missing: ['截止日'], summary: '给 alpha 集合追加 2 条记录' }) },
+    { where: 'waitingUserFallbackText', text: waitingUserFallbackText({ summary: '给 alpha 集合 W1 追加 2 条记录' }) },
+    { where: 'taskRoundFactsText', text: taskRoundFactsText({ name: '核对单据', ledger: [EMPTY_REPORT_REASON], reason: 'CONFIRMATION_BINDING_MISMATCH 执行层返回：prepared collection=客户' }) },
+    { where: 'formatFileAck', text: formatFileAck(['名册.xlsx', '工资表.xlsx']) },
+  ];
+
+  it('⑫ 每一样宿主文本都不含结构化块形状', () => {
+    const hits = findStructuredBlockHits(hostTexts());
+    expect(hits.map((hit) => `${hit.where}: ${hit.marker}`)).toEqual([]);
+  });
+
+  it('⑫b 通知渲染（7 类）同样不含结构化块形状', () => {
+    const kinds = ['accepted', 'started', 'waiting_user', 'resumed', 'user_stop', 'deadline_reached', 'capacity_blocked'] as const;
+    const texts = kinds.map((kind) => ({
+      where: `renderNotification(${kind})`,
+      text: renderNotification({ kind, payload: { at: '2026-11-24T00:00:00.000Z', taskNo: 1, name: '核对单据', missing: ['截止日'], summary: '给 alpha 集合追加 2 条记录' } }),
+    }));
+    expect(findStructuredBlockHits(texts).map((hit) => `${hit.where}: ${hit.marker}`)).toEqual([]);
+  });
+
+  it('⑫c 反向绊线：往宿主文本里塞一个 tool_use 块 → 形状闸必须红', () => {
+    // 证明闸真的在判：把工具块形状注入一条宿主文本，findStructuredBlockHits 必须命中。
+    const hits = findStructuredBlockHits([{ where: 'x', text: `${taskCompletionFallbackText({ resultText: '共 3 条。' })} tool_use` }]);
+    expect(hits.map((hit) => hit.marker)).toContain('tool_use');
   });
 });
 
