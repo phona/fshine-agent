@@ -60,6 +60,34 @@ describe('等待用户两条文本', () => {
     expect(fact).toContain(REFUSAL_REPORT);
   });
 
+  it('frozen 路径（汇报是固定句「已按执行层回执汇报。」）→ 执行行原话必须出现在唤醒事实里', () => {
+    // 2026-11-24 grok blocking：此前执行行只接进「下一轮注入」，用户被叫醒确认的这一刻
+    // 只有提案摘要；而 background-write-confirmation 的 frozen 汇报是固定句（不含原因），
+    // 用户拿不到拒绝依据。session.wake 不走 pendingConfirmationProvider 那条注入。
+    const frozen = taskWaitingUserFactText({
+      missing: [],
+      summary: SUMMARY,
+      report: '已按执行层回执汇报。',
+      ledger: ['needs_confirmation · dummy.prepare', 'refused · GATE_REFUSE · 当前权限不允许往 alpha 写'],
+    });
+    expect(frozen).toContain(SUMMARY);
+    expect(frozen).toContain('GATE_REFUSE');
+    expect(frozen).toContain('当前权限不允许往 alpha 写');
+    // 原话边界：执行行段落与后面的宿主指令之间必须有换行，不能粘成一行。
+    expect(frozen).toContain('当前权限不允许往 alpha 写\n请把待确认');
+  });
+
+  it('frozen 路径的沉默兜底同样带执行行原话（且过清洗）', () => {
+    const fallback = waitingUserFallbackText({
+      summary: SUMMARY,
+      report: '已按执行层回执汇报。',
+      ledger: ['refused · GATE_REFUSE · 当前权限不允许往 alpha 写'],
+    });
+    expect(fallback).toContain(SUMMARY);
+    expect(fallback).toContain('GATE_REFUSE');
+    expect(fallback).toContain('当前权限不允许往 alpha 写');
+  });
+
   it('缺信息类等待：没有「将写入」句，缺什么照实说', () => {
     const fact = taskWaitingUserFactText({ missing: MISSING, summary: undefined });
     expect(fact).toContain('还缺：截止日、往来单位。');

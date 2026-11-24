@@ -222,6 +222,9 @@ const RECALC_DELIVERY_PARTIAL_NOTE = '部分表格未通过公式实算校验，
  * 消息（它在上一个进程里被认领后中断），无从由模型转述，宿主只能如实说明「没办完 + 不重复
  * 执行 + 结果未知 + 请重发」。同时记事件 `message_still_processing` 供运维发现。
  */
+/** 等待通知里执行行原话最多带几条（有界；与下一轮注入同一量级）。 */
+const WAITING_LEDGER_TAIL_LINES = 6;
+
 const INBOUND_STILL_PROCESSING_NOTE =
   '这条消息上次没办完（我这边中途中断过），我不会重复执行它，结果未知——麻烦你重发一次。';
 
@@ -883,6 +886,22 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   //     待补（无提案）没有兜底——只记事件 + 事实留待注入（不猜、不替它说）；
   //   · 去重 = (taskId, 进入等待次数)：runner 只在非等待态落等待时触发端口（已在等待的行
   //     再落等待不重复触发；回非等待再进 = 新的一次）；投递失败退回待注入，不重试唤醒。
+  /**
+   * 等待通知附带的执行行原话（有界；未作判断）。与 pending-confirmation-facts 的
+   * `executionLineText` 同一拼法——两处必须一致，否则「这一刻」和「下一轮」说的不是同一件事。
+   */
+  const waitingLedgerOf = (taskId: string): readonly string[] => {
+    const record = (taskRegistry as unknown as {
+      get(id: string): { executions?: readonly { status: string; error?: { code?: string; message?: string } }[] };
+    }).get(taskId);
+    return (record.executions ?? []).slice(-WAITING_LEDGER_TAIL_LINES).map((entry) => {
+      const parts = [entry.status];
+      if (entry.error?.code !== undefined && entry.error.code.trim() !== '') parts.push(entry.error.code);
+      if (entry.error?.message !== undefined && entry.error.message.trim() !== '') parts.push(entry.error.message.trim());
+      return parts.join(' · ');
+    });
+  };
+
   const waitingUserNotice: WaitingUserNoticePort = {
     sendNotice: (notice) => {
       const confirmation = notice.question.confirmation;
@@ -892,16 +911,23 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           principalId: notice.principalId,
           sessionId: notice.sessionId,
           event: 'task_waiting_user_wake',
+          // 执行行原话与「下一轮注入」同源同函数（executionLineText，未作判断）：
+          // 2026-11-24 grok blocking——用户被叫醒确认的**这一刻**就要能看见这一笔发生过
+          // 什么。此前只有提案摘要，而 frozen 路径的 Worker 汇报是固定句「已按执行层回执
+          // 汇报。」，用户拿不到拒绝依据；`session.wake` 不走 pendingConfirmationProvider
+          // 那条下一轮注入。
           factText: taskWaitingUserFactText({
             ...(notice.name === undefined ? {} : { name: notice.name }),
             missing: notice.question.missing,
             ...(confirmation === undefined ? {} : { summary: confirmation.summary }),
             ...(notice.report === undefined ? {} : { report: notice.report }),
+            ...(waitingLedgerOf(notice.taskId).length === 0 ? {} : { ledger: waitingLedgerOf(notice.taskId) }),
           }),
           ...(confirmation === undefined ? {} : {
             fallbackText: waitingUserFallbackText({
               summary: confirmation.summary,
               ...(notice.report === undefined ? {} : { report: notice.report }),
+              ...(waitingLedgerOf(notice.taskId).length === 0 ? {} : { ledger: waitingLedgerOf(notice.taskId) }),
             }),
           }),
         });

@@ -34,7 +34,10 @@ export function renderPendingConfirmationFact(input: {
   // 容忍码表换个名字接回来。要做判断的是 Main，它自己会读这些行。
   const ledgerClause = input.ledger === undefined || input.ledger.length === 0
     ? ''
-    : `\n本任务执行行原话（未作判断，做没做成你看了算）：\n${input.ledger.map((line) => `  ${line}`).join('\n')}`;
+    : `\n本任务执行行原话（未作判断，做没做成你看了算）：\n${input.ledger.map((line) => `  ${line}`).join('\n')}\n`;
+  // 注意 ledgerClause 以换行收尾：否则最后一条执行行原话会和下句宿主指令粘成一行，
+  // Main 照原话转述时，用户看到的拒绝原因里夹着「用户自己提起了就别重复」（2026-11-24
+  // grok major——原话边界丢了。
   return `[仍等你表态]${subject}有个写操作提案还没得到你答复：将写入（逐字）：${input.summary}。${ledgerClause}`
     + '用户自己提起了就别重复；没提就按情况问一句。';
 }

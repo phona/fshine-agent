@@ -398,6 +398,13 @@ export function taskWaitingUserFactText(input: {
   summary?: string;
   /** 本回合 Worker 汇报原文（提案被拒时用户要听见为什么；逐字不过滤）。 */
   report?: string;
+  /**
+   * 本任务执行行原话（status + code/message，**未作判断**）。2026-11-24 grok blocking：
+   * 只把执行行接进「下一轮注入」不够——用户被叫醒确认的**这一刻**，唤醒事实与沉默兜底
+   * 此前只有提案摘要（frozen 路径的 Worker 汇报还是固定句「已按执行层回执汇报。」），
+   * 用户拿不到拒绝依据。`session.wake` 不走 pendingConfirmationProvider 那条注入。
+   */
+  ledger?: readonly string[];
 }): string {
   const subject = input.name !== undefined && input.name.trim() !== ''
     ? `「${truncatedName(input.name)}」`
@@ -409,10 +416,14 @@ export function taskWaitingUserFactText(input: {
   const reportClause = input.report === undefined || input.report.trim() === ''
     ? ''
     : `\nworker 汇报（逐字）：${input.report.trim()}`;
+  const ledgerClause = input.ledger === undefined || input.ledger.length === 0
+    ? ''
+    : `\n本任务执行行原话（未作判断，做没做成你读了算）：\n${input.ledger.map((line) => `  ${line}`).join('\n')}`;
   return `[任务等待]${subject}办到一半，需要用户表态才能继续。`
     + (missing === '' ? '' : `还缺：${missing}。`)
     + proposal
     + reportClause
+    + ledgerClause
     + '\n请把待确认/待补内容原样告诉用户并等表态。';
 }
 
@@ -432,7 +443,7 @@ export function taskWaitingUserFactText(input: {
  * Worker 的汇报里**。模型醒着会转述；模型沉默时这里就是用户唯一能看见「为什么」的地方
  * （2026-11-24 grok major：此前只有提案摘要，用户可能对已被拒绝的写回「确认」）。
  */
-export function waitingUserFallbackText(input: { summary: string; report?: string }): string {
+export function waitingUserFallbackText(input: { summary: string; report?: string; ledger?: readonly string[] }): string {
   // 汇报原文与模型可见事实同一把尺：先 cleanExecutorDiagnostic（剥前置技术码 token、
   // 服务器路径、机构自称），再归空白/截断。它是 Worker 回合正文，可能带执行层错误码/
   // 操作名/很长过程，不能原样进用户气泡；只做 stripServerPaths 不够——协议码和「执行层」
@@ -440,8 +451,20 @@ export function waitingUserFallbackText(input: { summary: string; report?: strin
   const report = input.report === undefined || input.report.trim() === ''
     ? ''
     : `\n${cleanExecutorDiagnostic(input.report).replace(/\s+/gu, ' ').trim().slice(0, FALLBACK_REPORT_MAX)}`;
-  return `${input.summary}${report}`;
+  // 执行行原话同样过清洗 + 截断：frozen 路径的 Worker 汇报是固定句（不含原因），
+  // 这半句是用户唯一能看见「为什么」的地方（2026-11-24 grok blocking）。
+  const ledger = input.ledger === undefined || input.ledger.length === 0
+    ? ''
+    : `\n${input.ledger
+      .map((line) => cleanExecutorDiagnostic(line).replace(/\s+/gu, ' ').trim())
+      .filter((line) => line !== '')
+      .slice(0, FALLBACK_LEDGER_MAX)
+      .join('\n')}`;
+  return `${input.summary}${report}${ledger}`;
 }
+
+/** 沉默兜底里执行行原话最多带几条。 */
+const FALLBACK_LEDGER_MAX = 3;
 
 /** 沉默兜底里 worker 汇报原文的上限（字符；与回合事实的机械原因同一量级）。 */
 const FALLBACK_REPORT_MAX = 200;
