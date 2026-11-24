@@ -5,14 +5,14 @@
  * → 用户侧只允许「业务语言说清发生了什么 + 一个他能做的动作」；执行层原文与内部术语进日志。
  *
  * 本套件钉三件事：
- *   ① 归类只看码/状态（不看文案语义），我方故障码必须落 `host_fault`（不解释内部）；
+ *   ① 兜底选档只认宿主自己的码（2026-11-24 删码表后）：执行层业务码一律通用档，不复制码义；
  *   ② 每种失败话术都带至少一个用户可执行的动作，且**全部话术都不含内部术语**；
  *   ③ 内部术语闸能命中内部形态、且不误伤业务句子。
  */
 import { describe, expect, it } from 'vitest';
 import {
-  classifyFailure,
   failureMessageFor,
+  fallbackFailureKindOf,
   internalTermIn,
   type UserFacingFailureKind,
 } from './src/user-facing-failure';
@@ -23,13 +23,11 @@ import type { DriverMessage, TurnDriver } from './src/driver-contract';
 const ALL_KINDS: readonly UserFacingFailureKind[] = [
   'needs_confirmation',
   'needs_input',
-  'not_found',
   'denied',
   'invalid_input',
   'executor_failed',
   'host_fault',
   'unknown_result',
-  'timed_out',
 ];
 
 /** 脚本化执行层：每次 execute 返回预设 outcome（连续调用可多步）。 */
@@ -90,28 +88,43 @@ async function workerVisibleOutcomeOf(outcome: ExecutionOutcome): Promise<Record
 }
 
 describe('用户可见失败话术', () => {
-  it('① 归类只看码/状态：权限、不存在、口径、补充、执行端失败各归各位', () => {
-    expect(classifyFailure({ code: 'GATE_REFUSE' })).toBe('denied');
-    expect(classifyFailure({ code: 'COLLECTION_NOT_FOUND' })).toBe('not_found');
-    expect(classifyFailure({ code: 'WHERE_INVALID' })).toBe('invalid_input');
-    expect(classifyFailure({ code: 'QUERY_REQUIRED' })).toBe('invalid_input');
-    expect(classifyFailure({ code: 'CONFIRMATION_REQUIRED' })).toBe('needs_confirmation');
-    expect(classifyFailure({ code: 'COLLECTION_FAULT' })).toBe('executor_failed');
-    expect(classifyFailure({ code: 'SOMETHING_NEW' })).toBe('executor_failed');
-    expect(classifyFailure({ status: 'result_unknown' })).toBe('unknown_result');
-    // 单次调用被传输超时截断（无回执）带的就是这个码：码分支同样归 unknown_result
-    // ——绝不能落 executor_failed（那会给出「再试一次」的暗示，而写操作可能已经生效）。
-    expect(classifyFailure({ code: 'result_unknown', status: 'failed' })).toBe('unknown_result');
+  it('① 兜底选档只认宿主自己的码：结果未知/协议违约/句柄丢失各归各位，执行层业务码一律通用档', () => {
+    // 2026-11-24 owner 裁定「宿主不判失败种类」：原 classifyFailure + CODE_KIND（20+ 执行层
+    // 错误码 → 业务种类的码表副本）整份删除——「这是权限问题/对象不存在/口径不对」是执行层
+    // 的语义，宿主复制一份码表就是越界。新口径：只认宿主自己的协议/传输事实码，其余一律
+    // 收敛通用档（executor_failed），由模型照着原始失败事实说人话。
+    // 单次调用被传输超时截断（无回执）带的就是 result_unknown：码分支必须归 unknown_result
+    // ——绝不能落 executor_failed（写操作可能已经生效，不能说「没办成」诱导用户重发）。
+    expect(fallbackFailureKindOf('result_unknown')).toBe('unknown_result');
+    expect(fallbackFailureKindOf('EXECUTION_PROTOCOL_VIOLATION')).toBe('host_fault');
+    expect(fallbackFailureKindOf('CONFIRMATION_NOT_FOUND')).toBe('host_fault');
+    // 曾经的 denied/not_found/invalid_input/needs_confirmation 分档依据（执行层业务码）一律通用档。
+    for (const code of ['GATE_REFUSE', 'COLLECTION_NOT_FOUND', 'WHERE_INVALID', 'QUERY_REQUIRED', 'CONFIRMATION_REQUIRED', 'COLLECTION_FAULT', 'SOMETHING_NEW']) {
+      expect(fallbackFailureKindOf(code), code).toBe('executor_failed');
+    }
+    // 无码（执行层没给码）同样通用档——不猜。
+    expect(fallbackFailureKindOf(undefined)).toBe('executor_failed');
+    expect(fallbackFailureKindOf('')).toBe('executor_failed');
   });
 
-  it('② 我方故障码一律 host_fault：协议违约、句柄丢失、令牌不匹配都不向用户解释', () => {
-    for (const code of ['EXECUTION_PROTOCOL_VIOLATION', 'CONFIRMATION_NOT_FOUND', 'PROPOSAL_TOKEN_UNTRUSTED', 'PROPOSAL_REFUSE']) {
-      expect(classifyFailure({ code }), code).toBe('host_fault');
+  it('② 我方故障码一律 host_fault：协议违约、句柄丢失都不向用户解释', () => {
+    for (const code of ['EXECUTION_PROTOCOL_VIOLATION', 'CONFIRMATION_NOT_FOUND']) {
+      expect(fallbackFailureKindOf(code), code).toBe('host_fault');
     }
     const message = failureMessageFor('host_fault');
     expect(message.text).toContain('没弄好');
     expect(message.text.length).toBeLessThanOrEqual(30);
     expect(message.actions.length).toBeGreaterThan(0);
+    // 2026-11-24 收窄（如实登记）：曾经的「我方故障码」PROPOSAL_TOKEN_UNTRUSTED /
+    // PROPOSAL_REFUSE 不再是宿主自认码（宿主不复制执行层码义）→ 落通用档；用户面同样
+    // 不解释内部原因（通用句也没有），且不得出现「再试一次」（结论机已删，宿主不知道
+    // 那笔是不是写、落没落）。
+    for (const code of ['PROPOSAL_TOKEN_UNTRUSTED', 'PROPOSAL_REFUSE']) {
+      expect(fallbackFailureKindOf(code), code).toBe('executor_failed');
+    }
+    const generic = failureMessageFor('executor_failed');
+    expect(generic.text).not.toContain('再试一次');
+    expect(internalTermIn(generic.text)).toBeUndefined();
   });
 
   it('③ 每种失败都带可执行动作，且话术里没有任何内部术语（逐条过闸）', () => {
@@ -138,7 +151,7 @@ describe('用户可见失败话术', () => {
   });
 
   it('④ 话术落到业务语言：给出对象/缺什么/摘要，不编内部细节', () => {
-    expect(failureMessageFor('not_found', { subject: 'contract-archive 集合' }).text).toContain('contract-archive 集合');
+    expect(failureMessageFor('denied', { subject: 'contract-archive 集合' }).text).toContain('contract-archive 集合');
     expect(failureMessageFor('needs_input', { missing: ['窗口编号', '客户名称'] }).text).toContain('窗口编号、客户名称');
     expect(failureMessageFor('needs_confirmation', { summary: '向 alpha 集合 W1 新增 2 条记录' }).text)
       .toContain('向 alpha 集合 W1 新增 2 条记录');
@@ -168,32 +181,37 @@ describe('用户可见失败话术', () => {
     for (const text of shouldMiss) expect(internalTermIn(text), text).toBeUndefined();
   });
 
-  it('⑥ failed 的模型可见投影：不含执行层原文与技术码，含 kind+note（通用话术）', async () => {
-    // 2026-11-19 抽象泄露 fix：执行层 error.message/code 曾经逐字进模型可见投影——
-    // 用户收到「执行层/执行端/确认凭据/令牌/能力清单/必填参数/异步」这类内部词。
-    // 收口后模型（Worker 工具结果）只见 {status, kind, note}；原文与码只进日志
-    // （execution_failure_classified）。failed 仍走通用话术（2026-11-20 只改 refused）。
+  it('⑥ failed 的模型可见投影：失败事实原样进模型面（code + 机械清洗后 message），needs_confirmation 仍不含句柄', async () => {
+    // 2026-11-24 owner 裁定（原形状的反转，如实登记）：failed/refused **原样进模型面**——
+    // `{status, error:{code, message, retryable?}}`，message 只过 cleanExecutorDiagnostic 机械
+    // 清洗（剥前置技术码 token / 服务器路径 / 机构自称「执行层→对方」，不判语义）。原「改写成
+    // {status, kind, note}」是设计错误（kind 来自 classifyFailure 的码表副本、note 是替模型
+    // 决定该知道什么），整份删除。人话归模型说；用户面的内部词泄漏由 internalTermIn 机械闸守
+    // （模型面的用户级不变量见 wecom-sim W-04/W-10/W-11/W-12 与 I-4）。
     const failed = await workerVisibleOutcomeOf({
       status: 'failed',
       error: { code: 'COLLECTION_FAULT', message: 'gateway crashed with exit 2 (internal executor fault)', retryable: false },
     });
-    expect(failed).toEqual({ status: 'failed', kind: 'executor_failed', note: '没办成。再试一次，还是先放着？' });
-    const projected = JSON.stringify(failed);
-    expect(projected).not.toContain('COLLECTION_FAULT');
-    expect(projected).not.toContain('gateway crashed');
-    // 「执行层/执行端」这类中文内部词不得出现（kind 的 executor_failed 是封闭枚举名，
-    // 不是执行层自由文本；断言钉的是原文泄露面）。
-    expect(projected).not.toContain('执行层');
-    expect(projected).not.toContain('执行端');
-    expect(projected).not.toContain('retryable');
-
-    // 未知码收敛成 executor_failed，不把原文给模型。
+    expect(failed).toEqual({
+      status: 'failed',
+      error: { code: 'COLLECTION_FAULT', message: 'gateway crashed with exit 2 (internal executor fault)', retryable: false },
+    });
+    // 未知码同样原样给模型（不再收敛成 kind；宿主不判「这是什么失败」）。
     const unknown = await workerVisibleOutcomeOf({
       status: 'failed',
       error: { code: 'SOMETHING_NEW_INTERNAL', message: 'internal stack overflow at adapter boundary' },
     });
-    expect(unknown).toEqual({ status: 'failed', kind: 'executor_failed', note: '没办成。再试一次，还是先放着？' });
-    // needs_confirmation 只给机械摘要与 data（sanity：写确认路径不受影响）。
+    expect(unknown).toEqual({
+      status: 'failed',
+      error: { code: 'SOMETHING_NEW_INTERNAL', message: 'internal stack overflow at adapter boundary' },
+    });
+    // 机械清洗仍然生效：机构自称（执行层/执行端）在进模型面前被换成「对方」——替换，不判语义。
+    const institutional = await workerVisibleOutcomeOf({
+      status: 'failed',
+      error: { code: 'GATEWAY_FAULT', message: '执行层内部错误：连接被重置' },
+    });
+    expect(institutional).toEqual({ status: 'failed', error: { code: 'GATEWAY_FAULT', message: '对方内部错误：连接被重置' } });
+    // needs_confirmation 只给机械摘要与 data（sanity：写确认路径不受影响；句柄仍不进模型面）。
     const needsConfirm = await workerVisibleOutcomeOf({
       status: 'needs_confirmation',
       confirmation: { handle: 'cf_secret', summary: '将向 alpha W1 新增 2 条；不可撤销', expiresAt: '2026-11-19T12:00:00Z' },
@@ -206,12 +224,11 @@ describe('用户可见失败话术', () => {
     expect(completed).toEqual({ status: 'completed', data: { count: 3 } });
   });
 
-  it('⑥b refused 可诊断（2026-11-20 行为变化，如实登记）：绑定诊断码的 note 带业务原文，只剥前置码+路径+机构名', async () => {
-    // 行为变化登记：2026-11-19 起 refused note 固定为通用 deny 话术（「不可诊断」）；
-    // 2026-11-20 起「带差什么诊断的拒绝码」（码表 = CONFIRMATION_BINDING_MISMATCH）note
-    // = 清理后的业务诊断原文（「可诊断」）；其余拒绝仍走中文用户话术。
-    // 这是**如实交付**而非话术补丁：码表判定 + 三件机械清理（前置码 token / 路径 / 机构名），
-    // 不解析消息语义、不改业务字段；结构名（records/确认句柄）允许出现。
+  it('⑥b refused 的模型可见投影：与 failed 同形（code + 清洗后 message），三条机械清理不变', async () => {
+    // 行为变化登记（如实）：2026-11-19 起 refused note 固定为通用 deny 话术；2026-11-20 起
+    // 「带差什么诊断的拒绝码」note = 清理后的业务诊断原文；2026-11-24 起整份 kind/note 形状
+    // 删除——refused 与 failed 同形给事实。**技术码现在随事实一起进模型面**（原「码不下放」
+    // 断言随之反转）；三条机械清理（前置码 token / 路径 / 机构自称）与诊断原文的如实转述不变。
     const binding = await workerVisibleOutcomeOf({
       status: 'refused',
       error: {
@@ -221,43 +238,39 @@ describe('用户可见失败话术', () => {
         retryable: false,
       },
     });
-    expect(binding).toMatchObject({ status: 'refused', kind: 'executor_failed' });
-    const note = binding['note'] as string;
-    // 差什么：prepared/got 对比、records 结构名如实转述（模型据此下一轮改对参数）。
-    expect(note).toContain('prepared collection=alpha');
-    expect(note).toContain('got collection=alpha');
-    expect(note).toContain('records=3');
-    expect(note).toContain('records=0');
-    // 三条机械清理：前置码 token 去掉、机构自称去掉、服务器路径剥掉。
-    expect(note).not.toMatch(/^CONFIRMATION_/);
-    expect(note).not.toContain('执行层');
-    expect(note).not.toContain('执行端');
-    expect(note).not.toContain('/home/dev/.tmp');
-    // 技术码不下放（码是内部形态，与业务诊断原文分开）。
-    expect(JSON.stringify(binding)).not.toContain('CONFIRMATION_BINDING_MISMATCH');
+    expect(binding).toMatchObject({ status: 'refused', error: { code: 'CONFIRMATION_BINDING_MISMATCH', retryable: false } });
+    const message = (binding['error'] as { message?: string }).message ?? '';
+    // 差什么：prepared/got 对比、records 结构名如实给模型（模型据此下一轮改对参数）。
+    expect(message).toContain('prepared collection=alpha');
+    expect(message).toContain('got collection=alpha');
+    expect(message).toContain('records=3');
+    expect(message).toContain('records=0');
+    // 三条机械清理：前置码 token 去掉、机构自称换成「对方」、服务器路径剥掉。
+    expect(message).not.toMatch(/^CONFIRMATION_/);
+    expect(message).not.toContain('执行层');
+    expect(message).not.toContain('执行端');
+    expect(message).not.toContain('/home/dev/.tmp');
 
-    // 门拒（GATE_REFUSE）：不在诊断码表内 → 仍走中文用户话术（保住「如实转述没权限」这类
-    // 用户级不变量，wecom-sim W-11）；英文原文与结构名都不下放。
+    // 门拒（GATE_REFUSE）：与 failed 同形给事实（code + 清洗后 message）——英文原文与结构名
+    // 随事实给模型、由模型说人话；用户面的不变量由 wecom-sim W-11 钉住（「没权限」且无内部码）。
     const denied = await workerVisibleOutcomeOf({
       status: 'refused',
       error: { code: 'GATE_REFUSE', message: 'GATE_REFUSE missing confirmation credential --confirmation <handle>', retryable: false },
     });
     expect(denied).toEqual({
       status: 'refused',
-      kind: 'denied',
-      note: '这件事没权限。换个对象，还是请管理员开通？',
+      error: { code: 'GATE_REFUSE', message: 'missing confirmation credential --confirmation <handle>', retryable: false },
     });
-    const deniedText = JSON.stringify(denied);
-    expect(deniedText).not.toContain('GATE_REFUSE');
-    expect(deniedText).not.toContain('confirmation');
-    expect(deniedText).not.toContain('<handle>');
 
-    // failed 永不携带诊断原文（即使带绑定码也走通用话术——诊断只给 refused）。
+    // failed 与 refused 同形（不再有「failed 永不携带诊断原文」的差别——宿主不挑事实）。
     const failedBinding = await workerVisibleOutcomeOf({
       status: 'failed',
       error: { code: 'CONFIRMATION_BINDING_MISMATCH', message: 'CONFIRMATION_BINDING_MISMATCH prepared a got b' },
     });
-    expect(failedBinding['note']).toBe('没办成。再试一次，还是先放着？');
+    expect(failedBinding).toEqual({
+      status: 'failed',
+      error: { code: 'CONFIRMATION_BINDING_MISMATCH', message: 'prepared a got b' },
+    });
   });
 
   it('⑦ Worker 委派文本不含内部度量与机制细节（weight/est_seconds/估时/long_running 字样）', () => {

@@ -59,7 +59,7 @@ import type { DriverMessage, RuntimeTurnEvent, TurnDriver, TurnDriverResult, Wak
 import { ToolUserError } from './driver-contract';
 import { FileRefUnavailableError, safeExtensionOf, type CopiedTaskInput, type TaskInputCopier } from './file-store';
 export type { TaskInputCopier } from './file-store';
-import { classifyFailure, confirmationExpiredMessage, failureMessageFor, type UserFacingFailureKind } from './user-facing-failure';
+import { confirmationExpiredMessage, failureMessageFor, fallbackFailureKindOf } from './user-facing-failure';
 import {
   createDeterministicRetryLock,
   type RetryAllowed,
@@ -684,11 +684,6 @@ export type ExecutionEvent =
    * 绝不进模型可见话术（见 OP_TOOL_ARGS_REJECTED_MESSAGE）。零执行、零执行事实。
    */
   | { event: 'op_tool_args_rejected'; tool: string; keys: readonly string[]; dashedKeys: number }
-  /**
-   * 失败归类（模型可见面收口，2026-11-19）：执行层失败/拒绝**不再逐字进模型投影**，
-   * 模型只见 kind + note（见 toModelVisibleOutcome）；原始 code 与原文只经这条事件进日志。
-   */
-  | { event: 'execution_failure_classified'; operation: string; code: string; status: 'failed' | 'refused'; kind: string }
   /**
    * A2b（2026-11-18；后台执行器）：同一 (operation, 对象) 本回合已被执行层判定确定性失败
    * （retryable !== true）时**再次发起**的调用，在发起前被宿主拦下——对象/操作/执行层码与
@@ -2131,7 +2126,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         ...(execution.error === undefined
           ? {}
           : {
-            failureKind: classifyFailure({ code: execution.error.code }),
             ...(() => {
               const cleaned = cleanExecutorDiagnostic(execution.error!.message).replace(/\s+/gu, ' ').trim();
               return cleaned === '' ? {} : { summary: cleaned };
@@ -2657,16 +2651,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         operationId: run.outcome.operationId,
         operation,
       });
-      return toModelVisibleOutcome(run.outcome, {
-        operation,
-        onClassified: (classified) => options.onExecutionEvent?.({
-          event: 'execution_failure_classified',
-          operation,
-          code: classified.code,
-          status: run.outcome.status as 'failed' | 'refused',
-          kind: classified.kind,
-        }),
-      });
+      return toModelVisibleOutcome(run.outcome);
     }
     // 未声明 long_running 却返回 accepted：已在 execute 回调里机械落 failed，这里确定性
     // 终结本回合（不许模型把它当可重试的普通失败继续撞）。
@@ -2720,18 +2705,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       ...(options.onExecutionResultOversizeUnhandled === undefined
         ? {}
         : { onUnhandled: options.onExecutionResultOversizeUnhandled }),
-      // 失败/拒绝归类只进日志（原始码与原文不进模型投影）。
-      ...(options.onExecutionEvent === undefined
-        ? {}
-        : {
-          onClassified: (classified) => options.onExecutionEvent?.({
-            event: 'execution_failure_classified',
-            operation,
-            code: classified.code,
-            status: run.outcome.status as 'failed' | 'refused',
-            kind: classified.kind,
-          }),
-        }),
     });
   }
 
@@ -3850,43 +3823,33 @@ export function cleanExecutorDiagnostic(message: string): string {
  * needs_confirmation 只给机械摘要（summary/expiresAt）与 data——句柄是宿主持有的确认凭据，
  * 不进模型转录/工具结果，模型无法伪造或转交；completed / needs_input / accepted 原样
  * （逐字节不变）；**failed / refused 不再逐字透传**（2026-11-19 模型可见面收口）——执行层
- * 原始码是内部形态（用户不需要、也不该看到技术码），模型只见 `{status, kind, note}`：
- * kind 来自 classifyFailure（码表归类）。2026-11-20（fix/visible-contract）补：**refused 且
- * 执行层给了业务可诊断消息时，note 改用清理后的业务诊断原文**（替代通用「没办成」），
- * 让 Worker 下一轮能据「差什么」改对参数；failed 与「执行层没给有用消息」的拒绝仍走
- * failureMessageFor 的通用话术。原始 code 只进日志（调用方经 onExecutionEvent 落
- * `execution_failure_classified`，见 projectWorkerOutcome）。
+ * 失败/拒绝**原样进模型面**（code + message + retryable）：message 只过 cleanExecutorDiagnostic
+ * 机械清洗（剥技术码/路径/机构自称，不判语义）。2026-11-24 owner 裁定：原「改写成
+ * {status, kind, note}」是设计错误——kind 来自 classifyFailure 的码表副本（宿主复制执行层
+ * 业务语义），note 是替模型决定该知道什么。现在：事实给全、人话归模型、用户面泄漏由
+ * internalTermIn 机械闸守。
  */
-function toModelVisibleOutcome(
-  outcome: ExecutionOutcome,
-  input: {
-    operation: string;
-    /** 失败/拒绝的归类观察点（只进日志）；缺省静默 = 与改动前一致的纯投影路径。 */
-    onClassified?: (event: { code: string; kind: UserFacingFailureKind }) => void;
-  },
-): Record<string, unknown> {
-  if (outcome.status !== 'needs_confirmation') {
-    if (outcome.status !== 'failed' && outcome.status !== 'refused') {
-      return outcome as unknown as Record<string, unknown>;
-    }
-    const kind = classifyFailure({ code: outcome.error.code, status: outcome.status });
-    input.onClassified?.({ code: outcome.error.code, kind });
-    // 仅「带差什么诊断的拒绝码」如实转述业务诊断原文；其余失败/拒绝沿用通用中文话术。
-    // 码表判定（不看文案语义）；诊断只做机械清理（前置码 token + 路径 + 机构名）。
-    const diagnostic = outcome.status === 'refused' && DIAGNOSTIC_REFUSAL_CODES.has(outcome.error.code)
-      ? cleanExecutorDiagnostic(outcome.error.message)
-      : '';
+function toModelVisibleOutcome(outcome: ExecutionOutcome): Record<string, unknown> {
+  // 待确认：只给摘要/有效期/data——**句柄不進模型面**（凭据隔离，B 类，删了会出事）。
+  if (outcome.status === 'needs_confirmation') {
     return {
-      status: outcome.status,
-      kind,
-      note: diagnostic !== '' ? diagnostic : failureMessageFor(kind).text,
+      status: 'needs_confirmation',
+      summary: outcome.confirmation.summary,
+      ...(outcome.confirmation.expiresAt === undefined ? {} : { expiresAt: outcome.confirmation.expiresAt }),
+      ...(outcome.data === undefined ? {} : { data: outcome.data }),
     };
   }
+  if (outcome.status !== 'failed' && outcome.status !== 'refused') {
+    return outcome as unknown as Record<string, unknown>;
+  }
+  // 失败/拒绝：**原样给模型**（code + message + retryable），message 只过机械清洗
+  // （剥前置技术码 token / 服务器路径 / 机构自称——不判语义）。宿主不判「这是什么失败」：
+  // 种类语义归执行层、人话归模型；用户面的内部词泄漏由 internalTermIn 机械闸守。
+  // 2026-11-24 owner 裁定：原来「失败改写成 {status, kind, note}」是设计错误（classifyFailure
+  // 的码表副本 + 替模型决定该知道什么），已整份删除。
   return {
-    status: 'needs_confirmation',
-    summary: outcome.confirmation.summary,
-    ...(outcome.confirmation.expiresAt === undefined ? {} : { expiresAt: outcome.confirmation.expiresAt }),
-    ...(outcome.data === undefined ? {} : { data: outcome.data }),
+    ...outcome,
+    error: { ...outcome.error, message: cleanExecutorDiagnostic(outcome.error.message) },
   };
 }
 
@@ -3939,22 +3902,20 @@ async function projectWorkerOutcome(
     readonly bridge?: TaskExecutionBridge;
     readonly onFileized?: (event: ExecutionResultFileizedEvent) => void;
     readonly onUnhandled?: (event: ExecutionResultOversizeUnhandledEvent) => void;
-    /** 失败/拒绝归类观察点（只进日志；缺省静默）。 */
-    readonly onClassified?: (event: { code: string; kind: UserFacingFailureKind }) => void;
   },
 ): Promise<Record<string, unknown>> {
-  if (outcome.status !== 'completed') return toModelVisibleOutcome(outcome, { operation: input.operation, onClassified: input.onClassified });
+  if (outcome.status !== 'completed') return toModelVisibleOutcome(outcome);
   let bytes: number;
   try {
     bytes = Buffer.byteLength(JSON.stringify(outcome), 'utf8');
   } catch {
     // 契约外的不可序列化 data：不引入新行为，交回既有投影（与原路径一致）。
-    return toModelVisibleOutcome(outcome, { operation: input.operation, onClassified: input.onClassified });
+    return toModelVisibleOutcome(outcome);
   }
-  if (bytes <= input.thresholdBytes) return toModelVisibleOutcome(outcome, { operation: input.operation, onClassified: input.onClassified });
+  if (bytes <= input.thresholdBytes) return toModelVisibleOutcome(outcome);
   const unhandled = (): Record<string, unknown> => {
     input.onUnhandled?.({ taskId: input.taskId, operation: input.operation, bytes });
-    return toModelVisibleOutcome(outcome, { operation: input.operation, onClassified: input.onClassified });
+    return toModelVisibleOutcome(outcome);
   };
   if (input.bridge === undefined) return unhandled();
   let dataJson: string | undefined;
@@ -4241,12 +4202,10 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
             code: blockedRetry.block.code,
             declaredRetryable: blockedRetry.block.declaredRetryable ?? 'unset',
           });
-          // 模型可见面：业务话术（复用 failureMessageFor 的唯一话术来源；内部原因/原始码不进
-          // 模型文本），让 Worker 据此如实收尾，不再换参数撞执行层。宿主侧故障码归 host_fault，
-          // 其余按 executor_failed（用户侧只允许「没办成 / 我这边没弄好」这类业务语言）。
-          const classified = classifyFailure({ code: blockedRetry.block.code, status: 'failed' });
-          const kind: UserFacingFailureKind = classified === 'host_fault' ? 'host_fault' : 'executor_failed';
-          throw new Error(failureMessageFor(kind).text);
+          // 模型可见面：执行业务失败的通用一句（复用 failureMessageFor 的唯一话术来源；内部原因/
+          // 原始码不进模型文本），让 Worker 据此如实收尾，不再换参数撞执行层。不按码归类——
+          // 码义归执行层（2026-11-24 删码表）。
+          throw new Error(failureMessageFor('executor_failed').text);
         }
         const run = await claimAndRunOperation({
           registry: options.registry,
@@ -4372,18 +4331,6 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
           ...(options.onExecutionResultOversizeUnhandled === undefined
             ? {}
             : { onUnhandled: options.onExecutionResultOversizeUnhandled }),
-          // 失败/拒绝归类只进日志（原始码与原文不进 Worker 可见投影）。
-          ...(options.onExecutionEvent === undefined
-            ? {}
-            : {
-              onClassified: (classified) => options.onExecutionEvent?.({
-                event: 'execution_failure_classified',
-                operation,
-                code: classified.code,
-                status: run.outcome.status as 'failed' | 'refused',
-                kind: classified.kind,
-              }),
-            }),
         });
       };
 

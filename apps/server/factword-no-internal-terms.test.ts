@@ -232,12 +232,15 @@ describe('超时回执事实：无内部词，保留关键事实', () => {
  */
 const EMPTY_REPORT_REASON = '没产出有效的办理结果汇报，本次任务未完成。';
 
-describe('回合结束事实文本：无内部词，保留账本事实与下一步', () => {
-  it('⑦a taskRoundFactsText（带账本事实行、无汇报）：无内部词，保留「账本事实」与下一步', () => {
+describe('回合结束事实文本：无内部词，保留账本事实与判断依据', () => {
+  it('⑦a taskRoundFactsText（带账本事实行、无汇报）：无内部词，保留「账本事实」与判断交代', () => {
     const fact = taskRoundFactsText({ name: '汇总那件事', ledger: [EMPTY_REPORT_REASON] });
     expect(fact).not.toMatch(INTERNAL);
     expect(fact).toContain('账本事实');            // 账本段仍在
-    expect(fact).toContain('下一步');              // 可行动出口仍在
+    // 2026-11-24 删提示词补丁：事实不再带「给他一个能做的下一步」这类交互指导（说什么、
+    // 给什么下一步归模型）；保留的是「以账本执行事实为准」的判断交代。
+    expect(fact).toContain('请判断做没做成');
+    expect(fact).not.toContain('下一步');
   });
 
   /**

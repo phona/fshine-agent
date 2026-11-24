@@ -149,7 +149,7 @@ export interface ExecutionRecord {
 }
 
 /** 机械超时种类（等待到期 / 回合超时 / 排队超时；只用于调用方分档，不落底账）。 */
-export type TimeoutKind = 'queued' | 'execution' | 'waiting_user';
+export type TimeoutKind = 'execution' | 'waiting_user';
 
 /** 一条最小任务底账：归属 + 机械事实 + 汇报存档 + 执行调用清单（无状态/结论字段）。 */
 export interface TaskRecord {

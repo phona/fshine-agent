@@ -261,7 +261,9 @@ class FakeRegistry implements TaskRegistryPort {
 
   timeout(taskId: string, kind: TimeoutKind, options?: { scope?: TaskScope }): TaskRecordView {
     const task = this.require(taskId, options?.scope);
-    const expected: TaskStatus = kind === 'queued' ? 'queued' : kind === 'execution' ? 'running' : 'waiting_user';
+    // 2026-11-24 TimeoutKind 收窄（产品删 'queued' 成员：零调用点，且宣称的排队超时边界
+    // 并不存在）：夹具的 'queued' 分支随之删除，只留 execution/waiting_user 两种。
+    const expected: TaskStatus = kind === 'execution' ? 'running' : 'waiting_user';
     if (task.status !== expected) throw new Error(`超时种类 ${kind} 只适用于 ${expected}，当前 ${task.status}`);
     this.commit(task, 'timed_out');
     return task;

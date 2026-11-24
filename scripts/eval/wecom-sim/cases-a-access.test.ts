@@ -15,7 +15,7 @@
  * 与企微 live 人工交互面（见 docs/product/wecom-live-dummy-cases.md 文首分工）。
  */
 import { describe, expect, it } from 'vitest';
-import { failureMessageFor, internalTermIn } from '../../../packages/agent/src/user-facing-failure';
+import { internalTermIn } from '../../../packages/agent/src/user-facing-failure';
 import {
   mainRelayResponses,
   startWecomSim,
@@ -103,10 +103,11 @@ describe('A 组·接入与基础（W-01～W-04b）', () => {
       await sim.waitFor('终帧出现', () => sim.finalBubbles().length === 1);
 
       const reply = sim.finalBubbles()[0]!.content;
-      // 口径变更（2026-11-19 模型可见面收口）：空参失败的原始原文（"Missing --collection
-      // or --topic"）不再逐字进模型投影——如实转述 + 请用户补充由 invalid_input 话术承载。
-      // 断言跟**话术常量**走（不硬编具体措辞）：以后改文案，用例自动跟随，不因措辞漂移误红。
-      expect(reply).toContain(failureMessageFor('invalid_input').text);
+      // 口径变更（2026-11-24 失败事实原样进模型面）：空参失败的原始原文（"Missing --collection
+      // or --topic"）与 correctForm 照实进脚本模型面，由它选措辞——业务语言请用户补集合/窗口。
+      // 断言跟着**用户级不变量**走（请补充 + 零编造 + 无内部术语）；宿主话术模板已不在模型面。
+      expect(reply).toContain('集合');
+      expect(reply).toContain('窗口');
       // 仍不含内部术语（执行层/参数名/句柄/路径…）：用户面收口的底线。
       expect(internalTermIn(reply)).toBeUndefined();
       // 零编造：全文没有具体数值（数字只会来自编造的行）。

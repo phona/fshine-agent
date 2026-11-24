@@ -84,8 +84,10 @@
  * 其它登记口径（不是本模块预造的状态）：
  *   · 满员/队列满的拒绝：受理侧按 policy 事实追加结束事实（不进入执行）；
  *     runner 收到排队许可（queued）时只停止派发（队列 = 底账 queued 行），不据此直派发
- *     （否则绕过并发上限）；queued 超时由既有边界触发底账 timeout，waiting_user 到期由
- *     单一有界定时器轮消费。
+ *     （否则绕过并发上限）；waiting_user 到期由单一有界定时器轮消费。**queued 行没有超时
+ *     边界**（`TimeoutKind` 无 'queued'）：永不认领的排队行会滞留，已登记为缺口——要补该边界
+ *     属于新增机制，须先过新增机制准入（2026-11-24 清点：原 'queued' 成员零调用点，且注释
+ *     宣称的边界并不存在）。
  *   · waiting_user 答复接续回合由 startRound 补租约（armLease），进程中断可被看门狗回收。
  *
  * 移植性：本文件除「收尾/推进事实」纯函数外零仓内 import（端口为对接冻结契约的最小结构类型，
@@ -108,7 +110,7 @@ function runInactiveOf(task: TaskRecordView): boolean {
 // 底账端口（§1 最小消费面；S1 事实模型——没有 status，只记事实）
 // ---------------------------------------------------------------------------
 
-export type TimeoutKind = 'queued' | 'execution' | 'waiting_user';
+export type TimeoutKind = 'execution' | 'waiting_user';
 
 /** 写操作提案的机械形状（与 task-registry.PendingConfirmation 同形；不 import 其实现）。 */
 export interface PendingConfirmation {
@@ -413,18 +415,18 @@ const NOTICE_NAME_MAX = 30;
 
 /**
  * 「长时间无动静」的**事实**（宿主拼，给模型读；用户看到的那句话由模型写）：
- *   `[久无动静]「<业务名>」已经跑了 N 分钟还没有结果，我这边也不知道进度。请如实告诉用户，
- *    并给他两个选择：停下来，还是继续等。`
+ *   `[久无动静]「<业务名>」已经跑了 N 分钟还没有结果，我这边也不知道进度。`
  *
- * 只放机械事实（业务名 + 已跑多久 + 「不知道进度」）与一条交代，不报进度、不编原因。name
- * 缺省 = 主语用中性指代（不猜名）；minutes 由调用方按底账时刻机械算出。
+ * 只放机械事实（业务名 + 已跑多久 + 「不知道进度」），不报进度、不编原因，也**不指导模型
+ * 怎么跟用户交互**（给几个选项、下一步做什么归模型——2026-11-24 删掉原尾句「请如实告诉用户，
+ * 并给他两个选择」，那属于提示词补丁）。name 缺省 = 主语用中性指代（不猜名）；minutes 由
+ * 调用方按底账时刻机械算出。
  */
 export function longRunningNoticeFactText(input: { name?: string; minutes: number }): string {
   const raw = input.name?.trim() ?? '';
   const trimmed = raw.length <= NOTICE_NAME_MAX ? raw : `${raw.slice(0, NOTICE_NAME_MAX)}…`;
   const subject = trimmed === '' ? '你交代的那件事' : `「${trimmed}」`;
-  return `[久无动静]${subject}已经跑了 ${input.minutes} 分钟还没有结果，我这边也不知道进度。`
-    + '请如实告诉用户，并给他两个选择：停下来，还是继续等。';
+  return `[久无动静]${subject}已经跑了 ${input.minutes} 分钟还没有结果，我这边也不知道进度。`;
 }
 
 /**

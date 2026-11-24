@@ -27,7 +27,7 @@
  */
 import type { ChannelRoute, DeliveryReceipt } from '@fshine/contracts';
 import { resourceLimitedText } from '../../packages/agent/src/notification-render';
-import { failureMessageFor, classifyFailure } from '../../packages/agent/src/user-facing-failure';
+import { failureMessageFor, fallbackFailureKindOf } from '../../packages/agent/src/user-facing-failure';
 import { stripServerPaths } from '../../packages/agent/src/server-paths';
 import { cleanExecutorDiagnostic, UNSUPPORTED_OPERATION_TEXT } from '../../packages/agent/src/execution-runtime';
 
@@ -180,7 +180,7 @@ export function taskRoundFactsText(input: {
     : '';
   return `${ROUND_FACT_PREFIX}${subject}这一回合停了。\n`
     + `${marksLine}${reasonLine}${reportLine}${notPermitted}${ledger}`
-    + '请判断做没做成（以账本执行事实为准；worker 汇报只是它说的话），如实告诉用户，并给他一个能做的下一步。';
+    + '请判断做没做成（以账本执行事实为准；worker 汇报只是它说的话）。';
 }
 
 /**
@@ -312,14 +312,13 @@ export function failureTextFor(status?: 'failed' | 'refused' | 'result_unknown')
 
 /**
  * 失败降级兜底（**模型回合挂掉时**；唯一入口，完成/失败投递与回合内沉默兜底共用）：
- * 按机械事实选一句用户话术（B 类确定性责任：如实交付，不丢失败归类）：
- *   · 部分完成事实（写已落库 + 另一个对象的写没成）→ 逐项说「已完成 X，未成功 Y」——
- *     不把整回合说成「没办成」（会诱导用户重复写已经落库的那笔）；
+ * 按**宿主自己能判定**的机械事实选一句用户话术（B 类确定性责任：如实交付）：
  *   · 资源拒绝事实（池满/队列满的确定性拒绝，没进入执行）→ 复用通知渲染器的既有那句；
  *   · 结果未知事实（已启动无汇报、本进程无活 worker）→ unknown_result；
- *   · 其余按执行层码归类（机械事实，不是投影）：`classifyFailure({ code })`——GATE_REFUSE →
- *     denied 等；无码 = executor_failed。needs_confirmation/needs_input 在失败收尾里说不通
- *     （底账没有等待中的提案/可接续任务），一律 host_fault（2026-11-19 假承诺防线）。
+ *   · 零执行机械原因（发起前被宿主拒 / 没有对应能力）→ denied / 「办不了」；
+ *   · 其余一律通用「没办成」——**不按执行层错误码分业务档位**（权限/对象不存在/口径不对是
+ *     执行层语义，2026-11-24 删码表）；只认宿主自己的码（result_unknown / 协议违约 /
+ *     句柄丢失 → host_fault / unknown_result）。执行层原始失败文案给模型说人话，不进用户文本。
  */
 export function failureFallbackFactText(input: {
   resultUnknown?: boolean;
@@ -340,7 +339,7 @@ export function failureFallbackFactText(input: {
   if (input.zeroExecReason === 'unsupported') return `${UNSUPPORTED_OPERATION_TEXT}。`;
   const kind = input.resultUnknown === true
     ? 'unknown_result'
-    : classifyFailure({ code: input.code });
+    : fallbackFailureKindOf(input.code);
   return failureMessageFor(kind === 'needs_confirmation' || kind === 'needs_input' ? 'host_fault' : kind).text;
 }
 

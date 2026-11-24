@@ -21,8 +21,6 @@ import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-regis
 import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import { LONG_RUNNING_NOTICE_FALLBACK_TEXT } from '../../../packages/agent/src/task-runner';
 import {
-  classifyFailure,
-  failureMessageFor,
   internalTermIn,
 } from '../../../packages/agent/src/user-facing-failure';
 import {
@@ -203,12 +201,14 @@ describe('I 组·体验交互（I-1～I-6、I-8，自动；I-7 未立编号）',
         (call) => {
           const outcome = lastToolResultJsonOf(call.messages);
           if (outcome === undefined) throw new Error('Worker 没有拿到执行层真实返回。');
+          // 2026-11-24 失败事实原样进模型面（跟随本次删除）：脚本模型从原始失败事实
+          // （error.code + 清洗后 message）自己选措辞——业务语言 + 一个可做动作，
+          // 不复制技术码（WHERE_INVALID）与英文原文/参数名。
           const error = (outcome['error'] ?? {}) as { code?: string };
-          const kind = classifyFailure({
-            status: outcome['status'] as 'failed' | 'refused' | 'result_unknown' | undefined,
-            code: error.code,
-          });
-          return textAssistant(failureMessageFor(kind).text);
+          if (error.code === 'WHERE_INVALID') {
+            return textAssistant('这个筛选用不了：换个写法再试？');
+          }
+          return textAssistant('这次没办成，没有取得任何数据。');
         },
       ]);
       const messageId = sim.sendText(taskText);

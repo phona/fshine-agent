@@ -42,6 +42,7 @@ import type { DriverMessage, TurnDriver } from '../../packages/agent/src/driver-
 import { createFileStore, type RegisteredFile } from '../../packages/agent/src/file-store';
 import type { TurnFileRef } from '../../packages/agent/src/execution-runtime';
 import type { TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/src/task-runner';
+import { failureMessageFor } from '../../packages/agent/src/user-facing-failure';
 import { openTaskStore } from '@fshine/core';
 import { createServer, deliverTurnFilesCore, turnProducedNothing, type FileDeliveryPort } from './server';
 import { echoCompletionWake } from './testing/echo-completion-wake';
@@ -733,7 +734,7 @@ describe('CAP-01 S1 交付（主动投递 B，server 级）', () => {
       await server.handler(incoming('m-failure-template', '帮我汇总'));
       // 失败主动投递恰一条：用户文本 = 话术模板（executor_failed），无内部词。
       await vi.waitFor(() => expect(texts).toHaveLength(1));
-      expect(texts[0]!.text).toBe('没办成。再试一次，还是先放着？');
+      expect(texts[0]!.text).toBe(failureMessageFor('executor_failed').text);
       expect(texts[0]!.text).not.toContain('COLLECTION_FAULT');
       expect(texts[0]!.text).not.toContain('gateway');
       expect(texts[0]!.text).not.toContain('执行层');

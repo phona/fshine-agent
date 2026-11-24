@@ -1096,21 +1096,16 @@ export function describeOutcome(outcome: Record<string, unknown>): string {
     }).filter((entry) => entry !== '');
     return `还需要补充一些信息才能继续：${missing.length > 0 ? missing.join('、') : (error.message ?? '未说明')}。`;
   }
-  if (status === 'refused') {
-    // 模型可见面收口（2026-11-19）：refused 投影只带 kind + note（无原始码/原文）。
-    // 脚本如实转述用户话术——用户不需要、也不该看到 GATE_REFUSE 这类内部码。
-    const note = typeof outcome['note'] === 'string' && outcome['note'] !== ''
-      ? outcome['note']
-      : '这件事没权限，这次没有取得任何数据。';
-    return note;
-  }
-  if (status === 'failed') {
-    // 同上：failed 投影只带 kind + note。kind 由执行层码归类（业务语义），note 是用户
-    // 话术；模型与用户都不再见原始码与原文（原文只进 execution_failure_classified 日志）。
-    const note = typeof outcome['note'] === 'string' && outcome['note'] !== ''
-      ? outcome['note']
-      : '这次没办成，没有取得任何数据。';
-    return note;
+  if (status === 'refused' || status === 'failed') {
+    // 2026-11-24 失败事实原样进模型面（跟随本次删除：宿主不再把失败改写成 {kind, note}）：
+    // 脚本模型从**原始失败事实**（error.code + 已过 cleanExecutorDiagnostic 机械清洗的
+    // message，correctForm/retryable 同事实一起给）自己选措辞——不复制技术码与英文原文
+    // （内部形态），只说业务语言 + 一个可做动作。用户面的不变量由各用例断言钉住。
+    const code = typeof error.code === 'string' ? error.code : '';
+    if (code === 'GATE_REFUSE') return '这件事没权限，这次没有取得任何数据。';
+    if (code === 'QUERY_REQUIRED') return '还没说清要查什么：告诉我集合名和窗口，我接着查。';
+    if (code === 'WHERE_INVALID') return '这个筛选用不了：换个写法再试？';
+    return '这次没办成，没有取得任何数据。';
   }
   return `执行层返回了未预期的形态：${JSON.stringify(outcome).slice(0, 200)}`;
 }

@@ -30,7 +30,7 @@ import { createPiTurnDriver } from '../../packages/agent/src/pi-driver';
 import { createScriptedModelRuntime } from '../../packages/agent/testing/scripted-model-runtime';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/src/task-runner';
 import type { Notification, NotificationSink } from '../../packages/agent/src/notifications';
-import { failureMessageFor, internalTermIn } from '../../packages/agent/src/user-facing-failure';
+import { failureMessageFor, fallbackFailureKindOf, internalTermIn } from '../../packages/agent/src/user-facing-failure';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import { archivedReportOf } from '../../packages/agent/testing/task-facts';
 import { fileStoragePathOf } from '../../packages/agent/src/file-store';
@@ -637,9 +637,10 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
     }
   });
 
-  it('①b 失败事实从底账取：执行事实的 error.code 决定话术种类（真实 Worker 路径）', async () => {
+  it('①b 失败事实从底账取：执行事实的 error.code 决定兜底选档（真实 Worker 路径）', async () => {
     // Worker 替身在窗口内被执行层以 GATE_REFUSE 拒绝 → error.code 经 onTaskFailed 进 roundFailure →
-    // 回合末沉默兜底把 code 喂 classifyFailure → 按既有归类（denied）投递话术。
+    // 回合末沉默兜底把 code 喂 fallbackFailureKindOf 选档。2026-11-24 删码表：GATE_REFUSE 不是
+    // 宿主自认码 → 通用「没办成」档（不再按执行层码分 denied/not_found/invalid_input）。
     const fx = await makeFixture({
       waitMs: 1_500,
       workerExecutionFailure: { code: 'GATE_REFUSE', message: '执行层拒绝了这次查询' },
@@ -648,10 +649,12 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       const reply = await fx.server.handler(incoming('m-1', ASK));
       expect(reply).toBe('');
       expect(fx.delivery.sentTexts).toHaveLength(1);
-      expect(fx.delivery.sentTexts[0]!.text).toBe(failureMessageFor('denied').text);
+      expect(fx.delivery.sentTexts[0]!.text).toBe(failureMessageFor(fallbackFailureKindOf('GATE_REFUSE')).text);
       // 执行层原文/内部码不进用户文本。
       expect(fx.delivery.sentTexts[0]!.text).not.toContain('GATE_REFUSE');
       expect(fx.delivery.sentTexts[0]!.text).not.toContain('执行层');
+      // 失败事实不是「办好了」：用户拿到的是没办成 + 可做动作。
+      expect(fx.delivery.sentTexts[0]!.text).not.toContain('办好了');
       // 底账执行事实里确实带着那个码（证明文本不是凭空来的）。
       const done = fx.logs.find((line) => line['event'] === 'message_done');
       const taskId = (done!['taskIds'] as string[])[0]!;
@@ -683,10 +686,11 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
     }
   });
 
-  it('①d 一成一败 + 沉默：兜底按末条失败业务写的码说话，不说「办好了」（逐项归 Main）', async () => {
+  it('①d 一成一败 + 沉默：兜底按末条失败业务写的码选档，不说「办好了」（逐项归 Main）', async () => {
     // 2026-11-24 删结论机：宿主不再产 partial「已完成 X / 未成功 Y」那句话术——一成一败时，
-    // 兜底只按**末条失败业务写的原始码**选既有话术（这里 GATE_REFUSE → denied），绝不说
-    // 「办好了」。「哪件成了、哪件没成」由 Main 醒着时读账本逐条执行事实自己说。
+    // 兜底只按**末条失败业务写的原始码**经 fallbackFailureKindOf 选既有话术（GATE_REFUSE 不是
+    // 宿主自认码 → 通用「没办成」），绝不说「办好了」。「哪件成了、哪件没成」由 Main 醒着时
+    // 读账本逐条执行事实自己说。
     const executor = new FailingExecutor(() => ({
       kind: 'ended',
       report: 'alpha 那笔写好了，beta 那笔没成。',
@@ -697,7 +701,7 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       await fx.server.handler(incoming('m-1', ASK));
       expect(fx.delivery.sentTexts).toHaveLength(1);
       const text = fx.delivery.sentTexts[0]!.text;
-      expect(text).toBe(failureMessageFor('denied').text);
+      expect(text).toBe(failureMessageFor(fallbackFailureKindOf('GATE_REFUSE')).text);
       expect(text).not.toContain('办好了');
       expect(text).not.toContain('再试一次');
       expect(internalTermIn(text)).toBeUndefined();

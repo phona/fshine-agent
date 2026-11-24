@@ -34,8 +34,8 @@ import type { TaskRecord, TaskRegistry } from './src/task-registry';
 import { createTaskRunner, type TaskExecutor, type TaskRunner } from './src/task-runner';
 import { createResourcePolicy } from './src/resource-policy';
 import {
-  classifyFailure,
   failureMessageFor,
+  fallbackFailureKindOf,
   internalTermIn,
   type UserFacingFailure,
 } from './src/user-facing-failure';
@@ -383,7 +383,7 @@ async function callMainTool(input: {
 
 /**
  * 生产失败分类输入：底账执行事实里**第一条** failed/refused 行的 error.code
- * （镜像 apps/server/server.ts#failureCodeOf；码只用于归类，不进用户文本）。
+ * （镜像 apps/server/server.ts#failureCodeOf；码只用于兜底选档，不进用户文本）。
  */
 function failureCodeOf(task: TaskRecord): string | undefined {
   const failed = task.executions.find(
@@ -396,14 +396,12 @@ function failureCodeOf(task: TaskRecord): string | undefined {
 }
 
 /**
- * 生产失败话术（单一来源 + 我方故障改判）：镜像 apps/server/task-completion-delivery.ts#failureTextFor。
- * 任务终局 failed 时**没有**等待中的提案/句柄——归类落到 needs_confirmation/needs_input 会被改判
- * host_fault（否则「回确认/补一句」是假承诺）。本函数不新造话术，只用 user-facing-failure 的两个函数。
+ * 生产失败话术（单一来源）：镜像 apps/server/task-completion-delivery.ts#failureFallbackFactText
+ * 的选档（2026-11-24 删码表后）——只认宿主自己的码（result_unknown → unknown_result、
+ * 协议违约/句柄丢失 → host_fault），其余一律通用「没办成」。本函数不新造话术。
  */
 function userFailureFor(task: TaskRecord): UserFacingFailure {
-  const kind = classifyFailure({ code: failureCodeOf(task), status: 'failed' });
-  const safeKind = kind === 'needs_confirmation' || kind === 'needs_input' ? 'host_fault' : kind;
-  return failureMessageFor(safeKind);
+  return failureMessageFor(fallbackFailureKindOf(failureCodeOf(task)));
 }
 
 /** 用户可见面（写确认提案卡）文案：唯一话术来源 = failureMessageFor('needs_confirmation', {summary})。 */
@@ -479,7 +477,11 @@ describe('模型走岔路（确定性脚本模型）', () => {
     // ① 失败话术带一个动作；④ 无内部词。
     const failure = userFailureFor(task);
     expect(failure.actions.length).toBeGreaterThan(0);
-    expect(failure.kind).toBe('host_fault');
+    // 2026-11-24 删码表：CONFIRMATION_REQUIRED 是执行层语义码，宿主不认 → 通用「没办成」档
+    // （不再有 needs_confirmation→host_fault 的改判）。用户级不变量不变：话术绝不是
+    // 「等你确认」——用户回「确认」什么都不会发生，那是假承诺。
+    expect(failure.kind).toBe('executor_failed');
+    expect(failure.text).not.toContain('确认');
     assertUserVisibleClean(failure.text);
   });
 
@@ -986,9 +988,10 @@ describe('D1 业务写封闭账本：与顺序无关的 done / notDone', () => {
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
     // 末条失败业务写的码（无标签也照样浮出；不再有对象账本，也没有 partial）。
     expect(round.errorCode).toBe('GATE_REFUSE');
-    // 生产兜底按原始失败码归类（GATE_REFUSE → denied），用户看到的不是「办好了」。
-    const fallback = failureMessageFor(classifyFailure({ code: round.errorCode })).text;
+    // 生产兜底按宿主自认码选档（GATE_REFUSE 不是宿主码 → 通用「没办成」），用户看到的不是「办好了」。
+    const fallback = failureMessageFor(fallbackFailureKindOf(round.errorCode)).text;
     expect(fallback).not.toContain('办好了');
+    expect(fallback).not.toContain('再试一次');
   });
 
   it('㉒ 无对象标签的写成功后只读失败：写已锚定回合，不报整单失败（否则用户重试 = 双写）', async () => {

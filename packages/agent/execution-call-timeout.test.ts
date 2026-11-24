@@ -39,7 +39,7 @@ import {
 } from './src/execution-runtime';
 import { createTaskRegistry, type TaskRegistry } from './src/task-registry';
 import type { DriverMessage, TurnDriver, TurnDriverResult } from './src/driver-contract';
-import { classifyFailure, failureMessageFor } from './src/user-facing-failure';
+import { failureMessageFor, fallbackFailureKindOf } from './src/user-facing-failure';
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -234,7 +234,8 @@ describe('单次执行层调用的传输超时（有界 + 结果未知）', () =
       });
 
       // 用户话术：既有 unknown_result 模板（不新写）+ 一个可做的动作；不得出现「再试一次」。
-      const kind = classifyFailure({ code: 'result_unknown', status: 'failed' });
+      // 2026-11-24 删码表：选档只认宿主自己的码——result_unknown 是宿主自己推导的那个。
+      const kind = fallbackFailureKindOf('result_unknown');
       expect(kind).toBe('unknown_result');
       const message = failureMessageFor(kind);
       expect(message.text).toContain('不确定做没做完');

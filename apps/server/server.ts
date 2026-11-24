@@ -148,7 +148,6 @@ export interface ServerDeps {
    */
   createRunJsExecutor?: (fileStore: FileStore) => RunJsExecutor;
   /**
-  /**
    * 测试注入：recalc_xlsx 执行器工厂（装配构造、按 fileStore 闭包）；缺省 = 真实 soffice
    * 引擎（PATH 可见且版本 26.8.3 才上工具面；缺失/版本不符 = fail-closed 不上工具）。
    */
@@ -717,15 +716,20 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       const facts = roundFacts.get(taskId);
       const reading = taskFactReadingOf(taskId);
       const name = taskNameOf(taskId, record.request);
-      // 本回合的确定执行事实优先于「底账看起来没有结果」：有失败码/零执行原因/部分完成时
-      // 按事实归类；只有本回合明确 result_unknown，或底账无任何确定执行事实时才算结果未知。
-      const definiteFailure = facts?.code !== undefined || facts?.reasonCode !== undefined;
+      // 本回合的确定执行事实优先于「底账看起来没有结果」：有失败码 / 零执行原因 / 机械失败
+      // 原因（无码失败，如「执行层要求补充但没说清缺什么」）时按失败事实选句——**绝不让
+      // 无码失败落进汇报分支说成「办好了」**（2026-11-24 grok blocking）。只有本回合明确
+      // result_unknown，或底账无任何确定执行事实时才算结果未知。
+      const definiteFailure = facts?.code !== undefined
+        || facts?.reasonCode !== undefined
+        || (facts?.reason !== undefined && facts.reason.trim() !== '');
       const resultUnknown = facts?.status === 'result_unknown'
         || (reading?.resultUnknown === true && !definiteFailure);
       return fallbackFactTextOf({
         ...(name === undefined ? {} : { name }),
         ...(facts?.code === undefined ? {} : { code: facts.code }),
         ...(facts?.reasonCode === undefined ? {} : { reasonCode: facts.reasonCode }),
+        ...(facts?.reason === undefined ? {} : { reason: facts.reason }),
         ...(resultUnknown ? { resultUnknown: true } : {}),
         report: record.replyText ?? record.resultText ?? '',
       });
@@ -960,7 +964,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     status?: 'result_unknown';
     code?: string;
     reasonCode?: string;
-    /** 部分完成事实（只给兜底话术逐项说清；不是任务状态）。 */
+    /** 末次失败的机械原因原文（无错误码时唯一的失败事实；缺码失败也绝不能被说成「办好了」）。 */
+    reason?: string;
   }>();
   /**
    * B 切片（工单回执收敛）：本会话已在同一回合拿到结果的任务（快活）——完成投递对其抑制
@@ -1091,6 +1096,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         roundFacts.set(completion.taskId, {
           ...(completion.errorCode === undefined ? {} : { code: completion.errorCode }),
           ...(completion.reasonCode === undefined ? {} : { reasonCode: completion.reasonCode }),
+          ...(completion.reason === undefined ? {} : { reason: completion.reason }),
           });
         enqueueSessionTurn(sessionKey, async () => {
           // 一次性事实：本回合兜底分支已读走（relayed/push-suppressed 路径先跑）；这里核销，
@@ -1227,6 +1233,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           ...(failure.status === 'result_unknown' ? { status: 'result_unknown' as const } : {}),
           ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }),
           ...(failure.reasonCode === undefined ? {} : { reasonCode: failure.reasonCode }),
+          ...(failure.reason === undefined ? {} : { reason: failure.reason }),
           });
         const sessionKey = `${failure.principalId}\u0000${failure.sessionId}`;
         enqueueSessionTurn(sessionKey, async () => {
@@ -2019,7 +2026,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           if (fallbackText === undefined) continue;
           // 投递归属按原始事实：有失败执行事实/零执行原因码 = failed 事实；否则按汇报原文。
           const relayedFailedFact = relayedFacts?.code !== undefined
-            || relayedFacts?.reasonCode !== undefined;
+            || relayedFacts?.reasonCode !== undefined
+            || (relayedFacts?.reason !== undefined && relayedFacts.reason.trim() !== '');
           await deliverTaskResult({
             taskId: relayedTaskId,
             principalId,

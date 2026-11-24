@@ -498,8 +498,10 @@ describe('状态变化唤醒（server 级）：失败', () => {
       expect(fact).toContain(`「${TASK_NAME}」`);
       expect(fact).toContain('worker 这一回合没有汇报原文');
       expect(fact).toContain(FAIL_REASON);
-      // 事实里带「给他一个能做的下一步」这条交代（语气与措辞归模型，可执行性不归它）。
-      expect(fact).toContain('下一步');
+      // 2026-11-24 删提示词补丁：事实不再带「给他一个能做的下一步」这类交互指导（说什么、
+      // 给什么下一步归模型）；保留「以账本执行事实为准」的判断交代。
+      expect(fact).toContain('请判断做没做成');
+      expect(fact).not.toContain('下一步');
 
       const wake = wakeEventOf(fx.logs, 'task_failure_wake');
       expect(wake).toMatchObject({ outcome: 'woken', principalId: PRINCIPAL, sessionId: SESSION });
