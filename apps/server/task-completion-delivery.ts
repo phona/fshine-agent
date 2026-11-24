@@ -443,7 +443,7 @@ export function taskWaitingUserFactText(input: {
  * Worker 的汇报里**。模型醒着会转述；模型沉默时这里就是用户唯一能看见「为什么」的地方
  * （2026-11-24 grok major：此前只有提案摘要，用户可能对已被拒绝的写回「确认」）。
  */
-export function waitingUserFallbackText(input: { summary: string; report?: string; ledger?: readonly string[] }): string {
+export function waitingUserFallbackText(input: { summary: string; report?: string }): string {
   // 汇报原文与模型可见事实同一把尺：先 cleanExecutorDiagnostic（剥前置技术码 token、
   // 服务器路径、机构自称），再归空白/截断。它是 Worker 回合正文，可能带执行层错误码/
   // 操作名/很长过程，不能原样进用户气泡；只做 stripServerPaths 不够——协议码和「执行层」
@@ -451,20 +451,14 @@ export function waitingUserFallbackText(input: { summary: string; report?: strin
   const report = input.report === undefined || input.report.trim() === ''
     ? ''
     : `\n${cleanExecutorDiagnostic(input.report).replace(/\s+/gu, ' ').trim().slice(0, FALLBACK_REPORT_MAX)}`;
-  // 执行行原话同样过清洗 + 截断：frozen 路径的 Worker 汇报是固定句（不含原因），
-  // 这半句是用户唯一能看见「为什么」的地方（2026-11-24 grok blocking）。
-  const ledger = input.ledger === undefined || input.ledger.length === 0
-    ? ''
-    : `\n${input.ledger
-      .map((line) => cleanExecutorDiagnostic(line).replace(/\s+/gu, ' ').trim())
-      .filter((line) => line !== '')
-      .slice(0, FALLBACK_LEDGER_MAX)
-      .join('\n')}`;
-  return `${input.summary}${report}${ledger}`;
+  // **不再把执行行原话塞进用户兜底**（2026-11-24 grok 结构性收口）：status/code 是协议面，
+  // `cleanExecutorDiagnostic` 只剥行首大写技术码，而执行行原话行首是小写 status
+  // （`refused · CONFIRMATION_REQUIRED · …`），协议码会原样进用户气泡——frozen 路径上用户
+  // 会读到「缺句柄」，真被 GATE_REFUSE 时又只看见码、不知道该不该再确认。
+  // 那半只进**模型可见事实**（taskWaitingUserFactText 的 ledger），让 Main 自己读了判；
+  // 用户兜底只留提案摘要 + 清洗后的汇报原文，或走既有通用失败句。
+  return `${input.summary}${report}`;
 }
-
-/** 沉默兜底里执行行原话最多带几条。 */
-const FALLBACK_LEDGER_MAX = 3;
 
 /** 沉默兜底里 worker 汇报原文的上限（字符；与回合事实的机械原因同一量级）。 */
 const FALLBACK_REPORT_MAX = 200;

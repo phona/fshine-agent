@@ -905,6 +905,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   const waitingUserNotice: WaitingUserNoticePort = {
     sendNotice: (notice) => {
       const confirmation = notice.question.confirmation;
+      const waitingLedger = waitingLedgerOf(notice.taskId);
       void (async () => {
         await wakeAndDeliverStateChange({
           taskId: notice.taskId,
@@ -921,13 +922,12 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             missing: notice.question.missing,
             ...(confirmation === undefined ? {} : { summary: confirmation.summary }),
             ...(notice.report === undefined ? {} : { report: notice.report }),
-            ...(waitingLedgerOf(notice.taskId).length === 0 ? {} : { ledger: waitingLedgerOf(notice.taskId) }),
+            ...(waitingLedger.length === 0 ? {} : { ledger: waitingLedger }),
           }),
           ...(confirmation === undefined ? {} : {
             fallbackText: waitingUserFallbackText({
               summary: confirmation.summary,
               ...(notice.report === undefined ? {} : { report: notice.report }),
-              ...(waitingLedgerOf(notice.taskId).length === 0 ? {} : { ledger: waitingLedgerOf(notice.taskId) }),
             }),
           }),
         });

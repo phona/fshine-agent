@@ -119,11 +119,14 @@ class NoopSink implements NotificationSink {
 /** 受闸执行器：结局由用例控制（settle）；`hanging` 模式永不落定（久无动静用例）。 */
 class GatedExecutor implements TaskExecutor {
   calls = 0;
+  /** 最近一次 execute 的 taskId（真实执行行装配断言用：落账要知道往哪条任务上记）。 */
+  lastTaskId?: string;
   /** 取消请求观察点：cancel() 会 abort 本回合的 controller——用例据此同步「取消已请求」。 */
   aborted = false;
   private resolve?: (outcome: TaskExecutionOutcome) => void;
-  async execute(_input: TaskExecutionInput, context: TaskExecutionContext): Promise<TaskExecutionOutcome> {
+  async execute(input: TaskExecutionInput, context: TaskExecutionContext): Promise<TaskExecutionOutcome> {
     this.calls += 1;
+    this.lastTaskId = input.taskId;
     context.signal.addEventListener('abort', () => {
       this.aborted = true;
     });
@@ -1022,6 +1025,58 @@ describe('状态变化唤醒（server 级）：等待用户', () => {
       await fx.server.handler(incoming('m-2', '然后呢')).catch(() => undefined);
       expect(requestHasUserText(fx.scripted!.requests(), '[任务等待]')).toBe(true);
     } finally {
+      await fx.close();
+    }
+  });
+
+  it('⑤g 真实执行行（prepare + 同回合 commit 被 CONFIRMATION_REQUIRED 拒）→ 沉默兜底不得带协议码', async () => {
+    // 2026-11-24 grok blocking：⑤b 的夹具 settle() 不落执行行，「兜底 == 纯 summary」在门禁
+    // 全绿时成立；而真实后台写确认**会** noteExecution（prepare → needs_confirmation，同回合
+    // 再 commit → refused · CONFIRMATION_REQUIRED，提案仍有效）。这里让执行器自己在 settle 前
+    // 把这两行落进底账（db 在它手里，不抢 server 的写锁），钉住收口：
+    // 用户兜底只留提案摘要 + 清洗后的汇报，status/code 只进模型可见事实。
+    let seededDbPath = '';
+    let resolveRound: ((outcome: TaskExecutionOutcome) => void) | undefined;
+    let calls = 0;
+    const ledgerWriter: TaskExecutor & { settle(outcome: TaskExecutionOutcome): void } = {
+      async execute(input, context) {
+        calls += 1;
+        context.signal.addEventListener('abort', () => {});
+        const registry = createSqliteTaskRegistry(seededDbPath);
+        try {
+          registry.noteExecution(input.taskId, { requestId: 'req_prepare', operation: 'dummy.prepare', status: 'needs_confirmation' });
+          registry.noteExecution(input.taskId, {
+            requestId: 'req_commit',
+            operation: 'dummy.commit',
+            status: 'refused',
+            error: { code: 'CONFIRMATION_REQUIRED', message: 'commit requires a confirmation handle' },
+          });
+        } finally {
+          registry.close();
+        }
+        return await new Promise<TaskExecutionOutcome>((resolve) => {
+          resolveRound = resolve;
+        });
+      },
+      settle(outcome) {
+        resolveRound?.(outcome);
+      },
+    };
+    const fx = await makeFixture('silent', { executorOverride: ledgerWriter });
+    seededDbPath = fx.dbPath; // 执行器在 handler 之后才跑，此时路径已可知
+    try {
+      await fx.server.handler(incoming('m-confirm-1', ASK));
+      await vi.waitFor(() => expect(calls).toBe(1), { timeout: 10_000 });
+      ledgerWriter.settle(confirmationOutcome(CONF_SUMMARY, CONF_EXPIRES, CONF_HANDLE));
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 15_000 });
+      const text = fx.delivery.sentTexts[0]!.text;
+      expect(text).toContain(CONF_SUMMARY);            // 提案摘要在
+      expect(text).not.toContain('CONFIRMATION_REQUIRED'); // 协议码不进用户气泡
+      expect(text).not.toContain('needs_confirmation');
+      expect(text).not.toContain('refused');
+      expect(text).not.toContain('句柄');
+    } finally {
+      await new Promise((resolve) => setTimeout(resolve, 30));
       await fx.close();
     }
   });

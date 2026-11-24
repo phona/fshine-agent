@@ -75,17 +75,26 @@ describe('等待用户两条文本', () => {
     expect(frozen).toContain('当前权限不允许往 alpha 写');
     // 原话边界：执行行段落与后面的宿主指令之间必须有换行，不能粘成一行。
     expect(frozen).toContain('当前权限不允许往 alpha 写\n请把待确认');
+    // 与①对照：同一份 ledger，进**模型事实**可以带原话，进**用户兜底**不可以。
+    expect(waitingUserFallbackText({ summary: SUMMARY, report: '已按执行层回执汇报。' }))
+      .not.toContain('GATE_REFUSE');
   });
 
-  it('frozen 路径的沉默兜底同样带执行行原话（且过清洗）', () => {
+  it('frozen 路径的沉默兜底：执行行原话**不进**用户气泡（grok 结构性收口）', () => {
+    // 2026-11-24 grok blocking：status/code 是协议面，cleanExecutorDiagnostic 只剥行首大写
+    // 技术码，而执行行原话行首是小写 status（`refused · CONFIRMATION_REQUIRED · …`）——协议码
+    // 会原样进用户气泡：frozen 路径上用户读到「缺句柄」，真被 GATE_REFUSE 时又只看见码。
+    // 收口：用户兜底只留提案摘要 + 清洗后的汇报；status/code 只进模型可见事实。
     const fallback = waitingUserFallbackText({
       summary: SUMMARY,
       report: '已按执行层回执汇报。',
-      ledger: ['refused · GATE_REFUSE · 当前权限不允许往 alpha 写'],
-    });
+      // 即便调用方仍按旧形状多带一个 ledger，也不得渲染出来。
+      ledger: ['refused · CONFIRMATION_REQUIRED · commit requires a confirmation handle'],
+    } as unknown as { summary: string; report?: string });
     expect(fallback).toContain(SUMMARY);
-    expect(fallback).toContain('GATE_REFUSE');
-    expect(fallback).toContain('当前权限不允许往 alpha 写');
+    expect(fallback).not.toContain('CONFIRMATION_REQUIRED');
+    expect(fallback).not.toContain('refused');
+    expect(fallback).not.toContain('句柄');
   });
 
   it('缺信息类等待：没有「将写入」句，缺什么照实说', () => {
