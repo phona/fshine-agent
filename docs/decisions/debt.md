@@ -10,13 +10,32 @@
 | 编号 | 事项 | 证据 / 指针 | 状态 |
 |---|---|---|---|
 | #67 | 会话存储 retention / capacity（线性无界增长） | `../architecture/sessions.md:35-37` | 未清 |
-| #68 | 真续跑恢复（跨重启消息级幂等那半已于 2026-11-24 结案） | `../../AGENTS.md:97`；`../../README.md:101` | 未清（仅剩「真续跑」）：Worker 会话跨重启续跑需 Pi 原生会话恢复，当前生产未落盘。已结案的那半：判重表（主键 `(principal_id, session_id, message_id)`）2026-11-19 落地于 `packages/core/src/task-store.ts`，同一条先于一切副作用查重、命中回放原回执、处理失败删行让渠道重投；`apps/server/server-inbound-idempotency.test.ts` 4/4 含关 server 重建后再投 |
+| #68 | 真续跑恢复（跨重启消息级幂等那半已于 2026-11-24 结案） | `../../AGENTS.md:97`；`../../README.md:101` | 未清（仅剩「真续跑」）：Worker 会话跨重启续跑需 Pi 原生会话恢复，当前生产未落盘。已结案的那半：判重表（主键 `(principal_id, session_id, message_id)`）2026-11-19 落地于 `packages/core/src/task-store.ts`，同一条先于一切副作用查重、命中回放原回执、处理失败删行让渠道重投；`apps/server/server-inbound-idempotency.test.ts` 6 个用例（含关 server、同 dbPath 重建、再投同一 `messageId` 回放同一句） |
 | #69 | `executions` 时间列 | `packages/core/src/task-store.ts`（`executionTimeColumnsMissing` 前向加法迁移 + SCHEMA_BASE 两列 + 写读映射）；守卫 `packages/core/task-store-migration-execution-times.test.ts`（迁移/只读/不伪造）、`packages/agent/execution-time-columns.test.ts` 与 `packages/agent/runtime.test.ts` 与 `packages/agent/runtime-worker-run-js.test.ts`（三处真实执行边界落时刻）、`scripts/tasks.test.ts` + `scripts/ops.test.ts`（有/无时刻两态） | 已清（2026-11-24） |
 | #70 | tasks CLI 增强（2026-11-24 已清） | `../../AGENTS.md:97`；`scripts/tasks.ts`（USAGE/`--force`/批量导出/交付件时间行） | 已清：`--force` 默认拒绝覆盖逐字不变、批量导出一个任务一个 `task-<编号>.md`、交付件多一行「生成时间」；判据见 `scripts/tasks.test.ts` |
 | #71 | P8 ops 扩展（原 R4 唯一未落地分片） | `../../AGENTS.md:97`；`index.md`（R4 行） | 未清 |
 | #72 | 死代码重复实现 | 收敛记录见 `index.md`（2026-11-24 行）；守卫 `packages/agent/dead-code-merge.test.ts` | 已清（2026-11-24：8 组全部择一；`scripts/eval/**` 下 6 份 `jsonSafe` 历史夹具副本与 `scripts/ask-replay.ts` 的异名同义 `messageOf` 另行登记，理由见守卫文件头） |
 | #73 | eval 候选池 | `../../AGENTS.md:97` | 未清 |
 | #74 | B2 Silent Shadow 真实租户联调 | `../architecture/channels.md:3` | 未清 |
+
+## 一之补二、grok 复审登记（2026-11-24，按铁律只修 blocking，其余登记不修）
+
+> 来源：PR #77 / #78 / #79 的 grok 复审（各轮 blocking 已修并推送）。以下按 AGENTS.md
+> 「只修 blocking；major/minor/nit 留在审查评论里给人看，不为此开自动修复提交」登记，
+> **不是待办清单**——每条都写了「为何暂不修」与触发条件。
+
+| 编号 | 是什么 | 后果 | 为何暂不修 | 现行证据 |
+|---|---|---|---|---|
+| R-1 | `accepted`（长任务受理）行把 `finishedAt` 记成**回执到达时刻**，渲染成区间后用户会把受理往返读成「任务跑了多久」 | 长任务的「起止时刻」不是执行时长 | 要分开「回执到达」与「执行结束」两种时刻，属**新增字段/语义**，须先过新增机制准入（owner 裁）；或改文案口径（用户可见词面变更，也须 owner 点头） | `packages/agent/src/execution-runtime.ts` 三处真实执行写点；`scripts/tasks.ts` 的 `executionTimeText`；`execution-time-columns.test.ts` 只钉同步 completed |
+| R-2 | 行号指针不收敛：`pointerProblem` 只判「文件存在 + 行号不越界」，不核对落点符号；本 PR 加时间列后 `tasks.md` 的 `task-store.ts:528` 又从 `inbound_messages` 漂到 `file_refs` | 读者按指针认错符号 | grok 建议改成**符号锚**或让守卫核对「指针所在行含声称的标识符」——这是判据形状变更，属评测/守卫侧结构性改动，单开一轮做，不在返工 PR 里骑销 | `scripts/debt-ledger-guard.test.ts` 的 `pointerProblem`；`docs/architecture/tasks.md` §6/§7 |
+| R-3 | `errorText` 注释称「全仓唯一一份」，但守卫只按**函数名**计数；`error instanceof Error ? … : String(error)` 全仓 143 处内联副本一个都看不见（`scripts/tasks.ts` 主流程 catch 就是） | 改 helper 改不到内联那份，注释误导下一次修改 | 真要唯一须先定 helper 归属层（`packages/core/src/config.ts` 也在副本列表里，core 不能反向 import agent）——**层归属是架构决策，待 owner 裁**；grok 明说「不要再按名字逐处补」 | `packages/agent/src/run-dir-cleanup.ts` 注释；`dead-code-merge.test.ts` 的 `expectSites`；debt #72 行 |
+| R-4 | `--force` 仍按路径打开：硬链接（`nlink>1`）能过首行检查后截断同一 inode；检查与写入之间换链接也能穿 | 可写到给定路径之外/改到同一 inode 的其它名字 | grok 说「同一洞的下一个边界，不宜再按类型逐个补」——正解是 `O_NOFOLLOW` + 对 fd `fstat` 验普通文件，那是**写路径实现变更**，单开一轮；已修的 symlink 一种先挡着 | `scripts/tasks.ts` 的 `writeDeliverable`；grok 原文「打开时应使用 O_NOFOLLOW，并对 fd 做 fstat」 |
+| R-5 | `isDeliverableFile` 注释写「只读首行」，实现 `readFileSync` 读完全文再 split | `--force` 碰大文件可能在截断前整块读入 | 改法明确（只读首行或设上限），但属本轮范围外的小优化；不阻塞合入 | `scripts/tasks.ts` 的 `isDeliverableFile` |
+| R-6 | JSON 形状闸没有实测原文：放宽冒号条件后「无冒号花括号引语」会被打红（`{"备注"}`），首键超 48 字的对象又会漏 | 泄漏报告可能假红/假绿各一半 | 判据扩张必须用实测原文做表征锁（change-safety F8）——JSON 这半**没有实测样本**，要么等真泄漏出现再定形状，要么明确只保工具块四条。继续调正则就是打地鼠 | `scripts/eval/shared/internal-terms.ts` 的 `JSON_LITERAL_START_RE`；grok 实测探测记录 |
+| R-7 | 宿主单测把「给模型读的事实链」算进用户可见面；久无动静兜底句不在清单里 | ⑫ 的覆盖面比宣称的窄 | 清单补全是机械活，但与 R-6 同属「闸的形状」议题，一起等 owner 裁 | `apps/server/factword-no-internal-terms.test.ts` ⑫ |
+| R-8 | 能力页把 ops 写成「也渲染了有/无时刻两态」，实际 ops 快照没有执行步骤行 | 运营以为每步起止就在 ops 页上 | 能力页是产品陈述，改它须与 #69 的展示范围一起裁（owner） | `docs/product/capability.md` 第三节第 12 行；`scripts/ops.ts` 限制列表脚注 |
+| R-9 | README 把单任务导出钉成「与批量之前逐字节一致」，但同一 diff 给单任务加了生成时间行与起止后缀，没有批量前的字节样本 | 守卫只锁措辞，单任务导出再改内容也不会红 | 要补「批量前字节样本」当金样，属测试补强；不阻塞合入 | `README.md` 批量导出段；`scripts/tasks.test.ts` 的措辞断言 |
+| R-10 | `--force` 用 `flag:'w'` 先截断再写，中途失败会毁掉旧交付件（缺省 `'wx'` 保持「写失败则原文件不动」） | 覆盖中途异常时旧内容丢失 | 本地 CLI 且调用方显式要求覆盖；要改成「写临时文件再 rename」属实现变更，单开一轮 | `scripts/tasks.ts` 的 `writeDeliverable` |
 
 ## 一之补、Eval 判据已知方差（2026-11-24 登记，不修）
 
