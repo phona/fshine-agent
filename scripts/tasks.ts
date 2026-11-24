@@ -47,6 +47,7 @@ import {
   taskStartedOf,
   taskUnstartedOf,
   taskWaitingOf,
+  type ExecutionRecord,
   type TaskRecord,
 } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
@@ -358,6 +359,19 @@ export function taskMechanicalFactLine(task: TaskRecord): string | undefined {
   return `机械事实：这一轮停止于 ${formatLocalTime(task.endedAt)}`;
 }
 
+/**
+ * 执行步骤的起止时刻文本（issue #69）：
+ *   · 两时刻都在（真实执行前后落了时刻）→ 本地时间区间 `起 → 止`；
+ *   · 否则（时间列上线前的旧行 / 未落时刻）→ 「无时刻」——不拿半边时刻冒充区间，
+ *     也不把未知行渲染成零耗时。
+ */
+function executionTimeText(execution: ExecutionRecord): string {
+  const started = execution.startedAt === undefined ? undefined : formatLocalTime(execution.startedAt);
+  const finished = execution.finishedAt === undefined ? undefined : formatLocalTime(execution.finishedAt);
+  if (started !== undefined && finished !== undefined) return `${started} → ${finished}`;
+  return '无时刻';
+}
+
 /** 执行步骤段（含「执行步骤：」标题行；零执行给机械提示）。 */
 export function taskExecutionLines(task: TaskRecord): string[] {
   const lines = ['执行步骤：'];
@@ -367,7 +381,8 @@ export function taskExecutionLines(task: TaskRecord): string[] {
     task.executions.forEach((execution, index) => {
       const message = executionErrorText(execution.error);
       lines.push(`  ${index + 1}. ${execution.operation}  ${EXECUTION_STATUS_WORDS[execution.status]}`
-        + (message === undefined ? '' : `  ${message}`));
+        + (message === undefined ? '' : `  ${message}`)
+        + `  ${executionTimeText(execution)}`);
     });
   }
   return lines;
@@ -408,7 +423,7 @@ const DELIVERABLE_LIMITS = [
   '- 「任务结果」是任务底账持久化的执行层汇报原文；「最终回复」是 Main 在回合收尾时实际发送给用户的回复全文（逐字存档）。',
   '- 历史任务没有最终回复存档（显示「该任务无最终回复存档」），交付件不以执行层汇报冒充 Main 回复。',
   '- 事实行只映射机械事实（等待/租约/机械时刻/汇报存档/执行行原值），不做任务结论；做没做成读执行步骤与任务结果原文。',
-  '- 时间以本机时区显示；执行步骤无时间戳。',
+  '- 时间以本机时区显示；执行步骤附起止时刻（底账未记录时刻的执行行显示「无时刻」）。',
 ];
 
 const DELIVERABLE_RUNNING_NOTE = '- 该任务尚未收尾（在跑）：交付件反映导出时的底账事实。';

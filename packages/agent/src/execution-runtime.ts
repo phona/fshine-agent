@@ -1665,6 +1665,9 @@ export function createWorkerRunJsTurn(
     const hit = memo.get(memoKey);
     if (hit !== undefined) return runJsToolResult(hit);
     let output: RunJsOutput;
+    // issue #69：真实执行的起止时刻——脚本发起前一刻 / 回执（或宿主杀进程）到达一刻。
+    // 执行器抛错（含 abort）不写执行行，两个时刻随整行一起不存在（不伪造半行）。
+    const startedAt = new Date().toISOString();
     try {
       output = await executor.runJs({
         code,
@@ -1687,6 +1690,7 @@ export function createWorkerRunJsTurn(
       throw error;
     }
     memo.set(memoKey, output);
+    const finishedAt = new Date().toISOString();
     // 执行事实入账（2026-11-17 修）：Worker 的 run_js 是**真实执行**，必须进底账——判断
     // 做没做成只看执行事实，不进账会出现两种假象：①查询成功 + 脚本失败仍读成成功；
     // ②只靠脚本完成的任务在账本里没有可交付汇报。
@@ -1702,6 +1706,8 @@ export function createWorkerRunJsTurn(
         operation: RUN_JS_TOOL,
         status: scriptOk ? 'completed' : 'failed',
         dispatchKey: `runjs:${output.audit.runId}`,
+        startedAt,
+        finishedAt,
         ...(scriptOk
           ? {}
           : {
@@ -2520,6 +2526,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         const requestId = `req_${randomUUID()}`;
         // 写确认回环：存在未消费的会话级句柄时，把它与本回合用户原话原样放进同一次 execute。
         const confirmation = confirmationForOperation(operation);
+        // issue #69：真实执行的起止时刻——透传发起前一刻 / 回执到达一刻。
+        const startedAt = new Date().toISOString();
         let outcome = await client.execute(
           {
             requestId,
@@ -2530,6 +2538,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           },
           signal === undefined ? undefined : { signal },
         );
+        const finishedAt = new Date().toISOString();
         // 契约 v4：accepted 只允许出现在声明 long_running 的 operation 上。未声明却返回 =
         // 协议违约：落 failed（账行不落 accepted）并记事件，绝不把半截句柄交给宿主。
         if (outcome.status === 'accepted' && !longRunningOperations.has(operation)) {
@@ -2562,6 +2571,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           operation,
           status: outcome.status,
           dispatchKey,
+          startedAt,
+          finishedAt,
           ...(outcome.status === 'failed' || outcome.status === 'refused' ? { error: outcome.error } : {}),
         };
         // 只有真实执行才写执行行（回放不写：一行 = 一次真实执行）。
@@ -4006,6 +4017,9 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
         // ——否则任务只有先前的 accepted 行，存活面会把「长任务失败」读成仍在跑/已完成，收尾
         // 汇报（对失败的说明）会被当成完成结果。requestId 用 wait 身份（原执行行 request_id 是
         // 主键，不能复用）。
+        // issue #69：**不落起止时刻**——本回合没有发起新的真实执行（wait 终态是此前 wait 调用
+        // 已产出、随操作账行带回的事实），此刻拿不到「那次执行」的起止；落「本回合时刻」会把
+        // 续跑读取伪装成一次新执行。未知就不写（NULL = 无记录，不伪造）。
         if (resumedOutcome.status === 'failed' || resumedOutcome.status === 'refused') {
           options.registry.noteExecution(task.taskId, {
             requestId: `wait:${resumedOperation.dispatchKey}`,
@@ -4148,6 +4162,8 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
               ? undefined
               : { handle: pendingConfirmation.handle, userText: task.answer ?? '' };
             let outcome: ExecutionOutcome;
+            // issue #69：真实执行的起止时刻——透传发起前一刻 / 回执到达一刻。
+            const startedAt = new Date().toISOString();
             try {
               outcome = await executionClient.execute(
                 {
@@ -4168,6 +4184,7 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
               }
               throw error;
             }
+            const finishedAt = new Date().toISOString();
             // 执行层已收到本次透传：句柄是否真的被接受由执行层回执说明（一次性/防重放
             // 归执行层，宿主不拦截复用）；宿主不判断确认语义。
             // 取消后到达的回执不落执行事实：任务已按取消处置，迟到的成功不得冒充本回合结果。
@@ -4194,6 +4211,8 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
               operation,
               status: outcome.status,
               dispatchKey,
+              startedAt,
+              finishedAt,
               ...(outcome.status === 'failed' || outcome.status === 'refused' ? { error: outcome.error } : {}),
             });
             return outcome;

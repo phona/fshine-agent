@@ -10,7 +10,9 @@
  *     也没有 status/reason/failure_reason：这些是「结论/状态」，不存。
  *   · task_ends：**一条「这一轮在 T 停下」的机械事实**（task_id + at，同任务至多一条，
  *     不可变）。**没有 kind**——怎么结束不存；消费方读原始事实（汇报/执行行/活 worker）就地算。
- *   · executions：request_id / task_id / operation / status / error_json（逐笔执行事实）。
+ *   · executions：request_id / task_id / operation / status / error_json + dispatch_key
+ *     + started_at / finished_at（逐笔执行事实；两列 ISO 可空，issue #69——真实执行的
+ *     起止时刻，NULL = 无记录，不伪造）。
  *   · operations：claimed→resulted 幂等账（U3，行就是身份）——存活与结果判定的事实源。
  *
  * 活/结束现推（task-progress 的布尔事实谓词，**不存状态词**）：排队 = running_since 空 +
@@ -32,6 +34,9 @@
  *   · 只读打开旧形状库不迁移：读取投影把仍在的旧终态列还原成「停下时刻」（不写库）；
  *   · 回填 task_no（仅缺该列时）：按 (created_at, task_id) 升序连续分配，只填 NULL 行；
  *   · U3/file_refs/inbound 面只做前向加法（不变）；
+ *   · executions 时间列（issue #69）：started_at / finished_at（TEXT 可空）只做前向加法
+ *     ——缺列旧库可写打开 ADD COLUMN 补齐（旧行 NULL、不升 user_version、迁移前备份），
+ *     只读旧库不加列（读出缺省，写入仍走 SQLite 只读拒绝）；
  *   · PRAGMA user_version 记录版本（新库直接建 v7）。
  *
  * file_refs（CAP-01 S0/S2）与 inbound_messages（2026-11-19）语义不变，见下方历史注释与
@@ -115,6 +120,12 @@ export interface ExecutionRow {
   error?: unknown;
   /** U3：本次真实执行所属的稳定逻辑操作身份（历史行缺省 = 无记录，不伪造）。 */
   dispatchKey?: string;
+  /**
+   * issue #69：本次真实执行的起止时刻（ISO；写侧在真实执行前后落时刻）。
+   * NULL = 无记录（时间列上线前的历史行 / 未落时刻）——读出缺省，不伪造。
+   */
+  startedAt?: string;
+  finishedAt?: string;
 }
 
 /**
@@ -488,7 +499,10 @@ CREATE TABLE IF NOT EXISTS executions (
   operation TEXT NOT NULL,
   status TEXT NOT NULL,
   error_json TEXT,
-  dispatch_key TEXT
+  dispatch_key TEXT,
+  -- issue #69：真实执行的起止时刻（ISO；NULL = 无记录，不伪造）。纯前向加法列。
+  started_at TEXT,
+  finished_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_executions_task ON executions (task_id);
 CREATE TABLE IF NOT EXISTS operations (
@@ -602,6 +616,9 @@ interface ExecutionDbRow {
   status: string;
   error_json: string | null;
   dispatch_key?: string | null;
+  /** 时间列上线前的旧库/旧行缺列或缺省 = undefined（读出缺省，不伪造）。 */
+  started_at?: string | null;
+  finished_at?: string | null;
 }
 
 interface OperationDbRow {
@@ -871,6 +888,18 @@ function fileRefDeliverableColumnMissing(db: Database.Database): boolean {
 }
 
 /**
+ * issue #69 加法迁移谓词：executions 表已存在但缺 started_at / finished_at 任一列
+ * （时间列上线前的旧库，或半迁移旧库）。与 file_refs 同款前向加法：ADD COLUMN（TEXT 可空），
+ * 旧行两列 NULL（读出缺省，不伪造），不升 user_version。表不存在（极旧库）= 由 SCHEMA_BASE
+ * 直接按新形状建，不需要 ALTER。
+ */
+function executionTimeColumnsMissing(db: Database.Database): boolean {
+  const executionColumns = tableColumnsOf(db, 'executions');
+  return executionColumns.size > 0
+    && (!executionColumns.has('started_at') || !executionColumns.has('finished_at'));
+}
+
+/**
  * 迁移前自动备份（只做一次，不覆盖）：先 checkpoint 把 WAL 合入主文件，再整文件复制。
  * 命名 = <dbPath>.backup-v<迁移目标版本>（当前 schema 版本（TASK_STORE_SCHEMA_VERSION））；`:memory:` 与库文件不存在不生成；
  * 已有同名备份时保留最早副本。
@@ -899,19 +928,30 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         // CAP-01 S2：旧 file_refs（有表无 task_id 列）→ ADD COLUMN（前向加法，不升版本）。
         const fileRefTaskMissing = tableExists && fileRefTaskColumnMissing(writable);
         const fileRefDeliverableMissing = tableExists && fileRefDeliverableColumnMissing(writable);
+        // issue #69：旧 executions（缺 started_at/finished_at）→ ADD COLUMN（前向加法，不升版本）。
+        const executionTimesMissing = tableExists && executionTimeColumnsMissing(writable);
         // 零状态（v6）：旧形状 tasks（带结论列/六个终态列）→ 重建为只存事实的形状。
         const needsV6Rebuild = tasksTableNeedsRebuild(writable);
         // v7：v6 的 task_events（带 kind）→ task_ends（只留停下时刻，丢掉种类）。
         const needsV7EndFacts = taskEventsTablePresent(writable);
-        if (needsV6Rebuild || needsV7EndFacts || operationsMissing || fileRefTaskMissing || fileRefDeliverableMissing) {
+        if (needsV6Rebuild || needsV7EndFacts || operationsMissing || fileRefTaskMissing || fileRefDeliverableMissing || executionTimesMissing) {
           // 旧库迁移：先备份（目标版本命名），再重建/加列，再（仅缺 task_no 时）回填编号，
           // 最后建唯一索引与版本号。共用同一次备份（同一目标版本 v7；已有备份保留最早副本）。
           backupBeforeMigration(writable, dbPath);
           if (needsV6Rebuild) rebuildTasksToZeroState(writable);
           if (needsV7EndFacts) migrateTaskEventsToEnds(writable);
           const executionColumns = tableColumnsOf(writable, 'executions');
-          if (executionColumns.size > 0 && !executionColumns.has('dispatch_key')) {
-            writable.exec('ALTER TABLE executions ADD COLUMN dispatch_key TEXT');
+          if (executionColumns.size > 0) {
+            // 逐列判缺：半迁移旧库（只缺一列）只补缺的那列，不重复 ALTER。
+            if (!executionColumns.has('dispatch_key')) {
+              writable.exec('ALTER TABLE executions ADD COLUMN dispatch_key TEXT');
+            }
+            if (!executionColumns.has('started_at')) {
+              writable.exec('ALTER TABLE executions ADD COLUMN started_at TEXT');
+            }
+            if (!executionColumns.has('finished_at')) {
+              writable.exec('ALTER TABLE executions ADD COLUMN finished_at TEXT');
+            }
           }
           if (fileRefTaskMissing) writable.exec('ALTER TABLE file_refs ADD COLUMN task_id TEXT');
           if (fileRefDeliverableMissing) {
@@ -1122,15 +1162,27 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     const cols = tableColumnsOf(db, 'executions');
     return cols.size > 0 && cols.has('dispatch_key');
   })();
-  const insertExecution = hasDispatchColumn
+  // issue #69：起止时刻列（缺列旧库只读打开时不 prepare 含新列的语句——否则 PRAGMA 阶段即报
+  // no such column；该库上的写入走 SQLite 只读拒绝，语义不变）。不变量：迁移先补 dispatch_key
+  // 再补时间列，因此「有时间列」的库必有 dispatch_key——八列语句以时间列为判据是安全的。
+  const hasExecutionTimeColumns = (() => {
+    const cols = tableColumnsOf(db, 'executions');
+    return cols.size > 0 && cols.has('started_at') && cols.has('finished_at');
+  })();
+  const insertExecution = hasExecutionTimeColumns
     ? db.prepare(`
-        INSERT INTO executions (request_id, task_id, operation, status, error_json, dispatch_key)
-        VALUES (@requestId, @taskId, @operation, @status, @errorJson, @dispatchKey)
+        INSERT INTO executions (request_id, task_id, operation, status, error_json, dispatch_key, started_at, finished_at)
+        VALUES (@requestId, @taskId, @operation, @status, @errorJson, @dispatchKey, @startedAt, @finishedAt)
       `)
-    : db.prepare(`
-        INSERT INTO executions (request_id, task_id, operation, status, error_json)
-        VALUES (@requestId, @taskId, @operation, @status, @errorJson)
-      `);
+    : hasDispatchColumn
+      ? db.prepare(`
+          INSERT INTO executions (request_id, task_id, operation, status, error_json, dispatch_key)
+          VALUES (@requestId, @taskId, @operation, @status, @errorJson, @dispatchKey)
+        `)
+      : db.prepare(`
+          INSERT INTO executions (request_id, task_id, operation, status, error_json)
+          VALUES (@requestId, @taskId, @operation, @status, @errorJson)
+        `);
   const selectTask = db.prepare('SELECT * FROM tasks WHERE task_id = ?');
   const selectExecutions = db.prepare('SELECT * FROM executions WHERE task_id = ? ORDER BY rowid');
   // 结束事实读取：新库读 task_ends；只读打开 v6 旧库（未迁移）读 task_events 的 at（kind 不参与）。
@@ -1436,6 +1488,9 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
     // JSON 解析失败即抛出（存储损坏必须可见，不静默吞成 undefined）。
     ...(row.error_json === null ? {} : { error: JSON.parse(row.error_json) as unknown }),
     ...(row.dispatch_key === null || row.dispatch_key === undefined ? {} : { dispatchKey: row.dispatch_key }),
+    // issue #69：起止时刻缺列/缺省 = 无记录（旧行不伪造）。
+    ...(row.started_at === null || row.started_at === undefined ? {} : { startedAt: row.started_at }),
+    ...(row.finished_at === null || row.finished_at === undefined ? {} : { finishedAt: row.finished_at }),
   });
 
   const toOperation = (row: OperationDbRow): OperationRow => ({
@@ -1583,7 +1638,15 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         status: row.status,
         errorJson: row.error === undefined ? null : JSON.stringify(row.error),
       };
-      if (hasDispatchColumn) insertExecution.run({ ...bound, dispatchKey: row.dispatchKey ?? null });
+      if (hasExecutionTimeColumns) {
+        insertExecution.run({
+          ...bound,
+          dispatchKey: row.dispatchKey ?? null,
+          // 未落时刻 = NULL（不伪造）；时刻由写侧在真实执行前后给。
+          startedAt: row.startedAt ?? null,
+          finishedAt: row.finishedAt ?? null,
+        });
+      } else if (hasDispatchColumn) insertExecution.run({ ...bound, dispatchKey: row.dispatchKey ?? null });
       else insertExecution.run(bound);
       return true;
     },

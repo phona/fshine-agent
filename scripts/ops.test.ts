@@ -385,6 +385,13 @@ describe('ops：空态与自包含', () => {
     expect(page).toContain('该任务无最终回复存档');
   });
 
+  it('限制与指针：执行步骤起止时刻口径（issue #69；不再声称「无时间戳」）', () => {
+    const page = renderOpsPage({ records: [], generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
+    expect(page).not.toContain('执行步骤无时间戳');
+    expect(page).toContain('执行步骤附起止时刻（底账未记录时刻的执行行显示「无时刻」；逐行时刻见');
+    expect(page).toContain('时间均为本机时区（YYYY-MM-DD HH:mm）');
+  });
+
   it('生成时间/底账行：时间经 tasks 同源格式；底账行逐字复用 renderTaskLedgerLine（防分叉）', () => {
     const inside = path.join(REPO_ROOT, '.runtime', 'state.db');
     const outside = path.join(os.tmpdir(), 'somewhere', 'state.db');
