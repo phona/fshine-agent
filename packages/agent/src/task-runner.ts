@@ -713,7 +713,8 @@ export interface TaskRunner {
   /**
    * 显式确认（2026-11-19 owner 拍板）：用户明确表示「按这版提交」时，从底账提案取出句柄并
    * 把任务接续下去——`userText` = 用户原话，随本回合确认路径交给执行端。**只有本方法透传
-   * 待确认句柄**（`resume()` 永不透传）；提案缺失/已过期一律确定性拒绝（零执行）。
+   * 待确认句柄**（`resume()` 永不透传）；提案缺失 → 确定性拒绝（零执行）。句柄**原样透传、
+   * 不做过期预判**（2026-11-24 删）：过期了就由执行层拒，Worker 看见原始拒绝自行重新提案。
    */
   confirm(taskId: string, options?: { userText?: string; scope?: TaskScope }): ConfirmOutcome;
   /** 本进程在飞执行回合的任务 id（只读快照）。 */
@@ -1481,10 +1482,6 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
      * 再交给执行端）。`resume()` 永不传本参数——补充/改口径不带句柄。缺省 = 无待确认提案。
      */
     pendingConfirmation?: PendingConfirmation,
-    /**
-     * 确认路径·句柄已过期（2026-11-19 owner 口径修正）：与 pendingConfirmation 互斥——过期
-     * 即不带旧句柄，改为让执行端渲染「重新生成同一提案」的机械事实。缺省 = 非过期确认。
-     */
     ): void {
     const controller = new AbortController();
     controllers.set(task.taskId, controller);

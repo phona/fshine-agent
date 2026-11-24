@@ -32,7 +32,7 @@ import { createPiTurnDriver } from '../../packages/agent/src/pi-driver';
 import { createScriptedModelRuntime, type ScriptedModelRuntime } from '../../packages/agent/testing/scripted-model-runtime';
 import type { Notification, NotificationSink } from '../../packages/agent/src/notifications';
 import { deriveTaskName, taskMayBeRunningOf, taskReportedOf } from '../../packages/agent/src/task-registry';
-import { lastExecutionOf } from '../../packages/agent/testing/task-facts';
+import { lastExecutionOf, taskWaitingOf } from '../../packages/agent/testing/task-facts';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import {
   LONG_RUNNING_NOTICE_FALLBACK_TEXT,
@@ -429,7 +429,9 @@ function readTask(dbPath: string, taskId: string): {
       lastExecutionStatus: lastExecutionOf(task)?.status,
       reported: taskReportedOf(task),
       ended: task.endedAt !== undefined,
-      waiting: task.pendingQuestion !== undefined,
+      // 与 apps/server/task-fact-reading.ts 同一谓词（提问在场且本轮未停）——结束事实
+      // 故意不清 pending_question，只问「有没有提问」会把已停的行也算成等待（2026-11-24 grok minor）。
+      waiting: taskWaitingOf(task),
       pendingQuestion: task.pendingQuestion !== undefined,
     };
   } finally {

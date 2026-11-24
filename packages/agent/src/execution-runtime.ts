@@ -4443,6 +4443,13 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
        * 只读失败不否定已落地的写（② 与 ③ 的分界）——否则把已落地的写报成「没办成」会诱导
        * 用户重试，写成双写。唯一用途：模型说不出话时，兜底面据此不说「办好了」，并由既有
        * classifyFailure 按原始码选一句既有话术。做没做成由 Main 读账本逐条执行事实自己判。
+       *
+       * **已知边界（2026-11-24 登记为 debt M7，owner 裁不修）**：契约要求 failed/refused 必带
+       * `error` 且 `code`/`message` 必填（`ExecutionFailure`），所以类型正确的执行层产不出空码；
+       * 但「类型合法、值是空串」在运行期仍可能（仓内 dummy 会补 `EXECUTION_UNKNOWN_ERROR`，
+       * 不走这层归一的执行层不会）。此时本函数返回 `{}`、上面两条都不带码，宿主兜底在汇报非空时
+       * 会走到 completion 话术。触发条件 = 真执行层实测吐空码；修法一行（判据从「码非空」换成
+       * 「status 属于 failed/refused 就算有失败事实」）。**别把这条读成已守住的不变量。**
        */
       const lastFailureFactOf = (): { code?: string; reason?: string } | undefined => {
         const failureOf = (entry: RecordedExecution): { code?: string; reason?: string } | undefined => {
