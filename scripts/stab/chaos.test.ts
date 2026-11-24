@@ -63,7 +63,7 @@ describe('R4-Stab 混沌 C · 重启/通知失败/重复消息/取消 组合', (
       queueCapacity: 32,
     });
     expect(report.cancelledConfirmed).toBe(true);
-    expect(report.terminalCounts['cancelled']).toBeGreaterThan(0);
+    expect(report.terminalCounts['stopped_without_report']).toBeGreaterThan(0);
     expectChaosInvariants(report);
   }, 60_000);
 

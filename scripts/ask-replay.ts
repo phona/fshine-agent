@@ -89,10 +89,6 @@ interface ReplayScript {
 
 /** 已知注入事件：一律 blocked（未就绪依赖，fail-closed）；未登记者按脚本错误拒绝。 */
 const BLOCKED_EVENTS: Readonly<Record<string, string>> = {
-  task_completed: '依赖 P4（通知 outbox）与 P2（任务生命周期），未合入',
-  task_failed: '依赖 P2（任务生命周期）与 P4（通知 outbox），未合入',
-  task_cancelled: '依赖 P2（任务生命周期），未合入',
-  task_timeout: '依赖 P2（任务生命周期），未合入',
   notification_delivered: '依赖 P4（通知 outbox），未合入',
   notification_failed: '依赖 P4（通知 outbox），未合入',
   restart: '依赖 P6（后台执行/重启恢复），未合入',

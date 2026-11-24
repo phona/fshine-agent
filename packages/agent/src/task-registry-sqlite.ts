@@ -1,27 +1,25 @@
 /**
  * 最小任务底账的 SQLite 实现（B 类：任务归属跨进程仍然成立）。
  *
- * 语义与内存版（task-registry.ts 的 createTaskRegistry）逐项一致：同一状态机归约核心
- * （reduceTaskState）+ 同一方法族（begin / noteExecution / complete / fail / archiveReply /
- * transition / waitForUser / answerResumes / requestCancel / confirmCancelled / timeout /
- * markResultUnknown / claimNextQueued / expireLeases / onTaskFact / get / list），
- * 越权与不存在同一 TaskOwnershipError。差别只在写入落 packages/core 的最小 SQLite 引擎
- * （见 task-store.ts；状态写入经单语句 applyTaskState），进程重启后底账仍在——
+ * 不维护任务状态机（docs/design/task-redefinition.md，owner 2026-11-23）：语义与内存版
+ * （task-registry.ts 的 createTaskRegistry）逐项一致：同一事实写入方法族（begin /
+ * noteExecution / setResultText / archiveReply / waitForUser / answerResumes /
+ * markCancelled / markTimedOut / markLeaseExpired / noteResourceRefused / noteRoundEnded /
+ * claimNextQueued / armLease / expireLeases / onTaskFact / get / list），越权与不存在同一
+ * TaskOwnershipError。没有状态机、没有转换矩阵、没有任务级生命周期枚举：事实一次性写入
+ * （结束事实同任务至多一条，不翻案），活/结束由 @fshine/core 的布尔事实谓词现推。
+ * 差别只在写入落 packages/core 的最小 SQLite 引擎（见 task-store.ts），进程重启后底账仍在——
  * 归属校验与等待/租约形状因此也是跨重启的不变量。
- *
- * 表内不含计划字段（planId / stepIndex / totalSteps / lastProgress / deadline /
- * originMessage 一概没有）：最小切片没有计划门，也不迁移旧 TaskRunRecord。
  */
 import { openTaskStore, type ExecutionRow, type OperationRow, type StoredTask, type TaskRow, type TaskStore } from '@fshine/core';
 import type { ExecutionFailure, ExecutionOutcome, ExecutionStatus } from '@fshine/contracts/execution-contract';
 import {
   TaskOwnershipError,
-  TaskTransitionError,
+  TaskSettledError,
   decideOperationClaim,
   deriveTaskName,
-  judgeReportedTask,
   operationStatusOf,
-  reduceTaskState,
+  taskEndedOf,
   type ExecutionRecord,
   type MutationOptions,
   type OperationClaim,
@@ -29,17 +27,13 @@ import {
   type OperationRecord,
   type OperationStatus,
   type PendingQuestion,
-  type TaskAction,
+  type TaskEventKind,
   type TaskFact,
   type TaskFactHook,
-  type TaskReason,
   type TaskRecord,
   type TaskRegistry,
   type TaskScope,
-  type TaskStateSnapshot,
-  type TaskStatus,
   type TimeoutKind,
-  type TransitionOptions,
 } from './task-registry';
 
 /** 带关闭口的底账：进程/入口负责关库（ask、server 的收尾路径）。 */
@@ -73,41 +67,54 @@ export function createSqliteTaskRegistry(
     }
   };
 
+  function factOf(row: TaskRow, event: TaskEventKind, at: string): TaskFact {
+    return {
+      taskId: row.taskId,
+      taskNo: row.taskNo ?? 0,
+      name: row.name ?? deriveTaskName(row.request),
+      event,
+      at,
+      stateVersion: at,
+    };
+  }
+
+  function endedAtOf(stored: StoredTask): string | undefined {
+    const last = stored.ends[stored.ends.length - 1];
+    return last?.at;
+  }
+
   function toRecord(stored: StoredTask): TaskRecord {
+    const endedAt = endedAtOf(stored);
     return {
       taskId: stored.task.taskId,
       principalId: stored.task.principalId,
       sessionId: stored.task.sessionId,
       request: stored.task.request,
-      status: stored.task.status as TaskStatus,
-      ...(stored.task.reason === undefined ? {} : { reason: stored.task.reason as TaskReason }),
       ...(stored.task.resultText === undefined ? {} : { resultText: stored.task.resultText }),
-      ...(stored.task.failureReason === undefined ? {} : { failureReason: stored.task.failureReason }),
       ...(stored.task.pendingQuestion === undefined
         ? {}
         : { pendingQuestion: stored.task.pendingQuestion as PendingQuestion }),
       ...(stored.task.waitingSince === undefined ? {} : { waitingSince: stored.task.waitingSince }),
       ...(stored.task.leaseOwner === undefined ? {} : { leaseOwner: stored.task.leaseOwner }),
       ...(stored.task.leaseUntil === undefined ? {} : { leaseUntil: stored.task.leaseUntil }),
+      ...(endedAt === undefined ? {} : { endedAt }),
       // P1：旧库只读（未迁移）时三列为缺省（undefined），读出缺省不伪造。
       ...(stored.task.taskNo === undefined ? {} : { taskNo: stored.task.taskNo }),
       ...(stored.task.name === undefined ? {} : { name: stored.task.name }),
       ...(stored.task.replyText === undefined ? {} : { replyText: stored.task.replyText }),
-      // 预期契约（2026-11-18）：旧库只读（未迁移）时该列为缺省，读出缺省不伪造。
       ...(stored.task.longRunningNotifiedAt === undefined
         ? {}
         : { longRunningNotifiedAt: stored.task.longRunningNotifiedAt }),
-      // 2026-11-19：长任务等待「断联系」档的已告知时刻（旧库未迁移 = 缺省，不伪造）。
       ...(stored.task.waitContactLostNotifiedAt === undefined
         ? {}
         : { waitContactLostNotifiedAt: stored.task.waitContactLostNotifiedAt }),
-      // 2026-11-19：本轮开始运行时刻（长任务受理后租约被清，提醒扫描用它算「跑了多久」）。
       ...(stored.task.runningSince === undefined ? {} : { runningSince: stored.task.runningSince }),
       executions: stored.executions.map((execution: ExecutionRow) => ({
         requestId: execution.requestId,
         operation: execution.operation,
         status: execution.status as ExecutionStatus,
         ...(execution.error === undefined ? {} : { error: execution.error as ExecutionFailure }),
+        ...(execution.dispatchKey === undefined ? {} : { dispatchKey: execution.dispatchKey }),
       })),
       createdAt: stored.task.createdAt,
       updatedAt: stored.task.updatedAt,
@@ -151,82 +158,24 @@ export function createSqliteTaskRegistry(
     return stored;
   }
 
-  function snapshotOf(row: TaskRow): TaskStateSnapshot {
-    return {
-      status: row.status as TaskStatus,
-      ...(row.reason === undefined ? {} : { reason: row.reason as TaskReason }),
-      ...(row.pendingQuestion === undefined ? {} : { pendingQuestion: row.pendingQuestion as PendingQuestion }),
-      ...(row.waitingSince === undefined ? {} : { waitingSince: row.waitingSince }),
-      ...(row.leaseOwner === undefined ? {} : { leaseOwner: row.leaseOwner }),
-      ...(row.leaseUntil === undefined ? {} : { leaseUntil: row.leaseUntil }),
-    };
-  }
-
-  /**
-   * 单一写路径：读当值行 → 状态机归约 → applyTaskState（单语句 + expectedStatus
-   * 乐观并发）→ 事实钩子 → 读回。非法转换在归约处抛 TaskTransitionError（零写入）。
-   */
-  function commit(
-    taskId: string,
-    scope: TaskScope | undefined,
-    action: TaskAction,
-    extras: { resultText?: string; failureReason?: string | null } = {},
-  ): TaskRecord {
-    const stored = require(taskId, scope);
-    const at = new Date().toISOString();
-    const from = stored.task.status as TaskStatus;
-    const next = reduceTaskState(snapshotOf(stored.task), action, at);
-    const applied = store.applyTaskState(taskId, {
-      expectedStatus: from,
-      status: next.status,
-      reason: next.reason ?? null,
-      resultText: 'resultText' in extras ? extras.resultText ?? null : stored.task.resultText ?? null,
-      failureReason: 'failureReason' in extras ? extras.failureReason ?? null : stored.task.failureReason ?? null,
-      pendingQuestion: next.pendingQuestion,
-      waitingSince: next.waitingSince ?? null,
-      leaseOwner: next.leaseOwner ?? null,
-      leaseUntil: next.leaseUntil ?? null,
-      updatedAt: at,
-    });
-    if (!applied) throw new TaskTransitionError(from, next.status, '状态已被并发修改');
-    emit({
-      taskId,
-      taskNo: stored.task.taskNo ?? 0,
-      name: stored.task.name ?? deriveTaskName(stored.task.request),
-      from,
-      to: next.status,
-      ...(next.reason === undefined ? {} : { reason: next.reason }),
-      at,
-      stateVersion: at,
-    });
-    return toRecord(require(taskId));
-  }
-
   return {
     begin(input) {
       const now = new Date().toISOString();
-      const status: TaskStatus = input.status ?? 'running';
       const row: TaskRow = {
         taskId: input.taskId,
         principalId: input.principalId,
         sessionId: input.sessionId,
         request: input.request,
-        status,
         // P1：名称 v1 = 机械回落（与迁移回填/显示回落同规则）；编号由 store 单条 SQL 原子分配。
         name: deriveTaskName(input.request),
+        // inline 建行即开跑（running_since 写入）；后台受理（queued）等 runner 认领。
+        ...(input.queued === true ? {} : { runningSince: now }),
         createdAt: now,
         updatedAt: now,
       };
       store.insertTask(row);
       const stored = require(input.taskId);
-      emit({
-        taskId: input.taskId,
-        taskNo: stored.task.taskNo ?? 0,
-        name: stored.task.name ?? deriveTaskName(stored.task.request),
-        to: status,
-        at: now,
-        stateVersion: now,
-      });
+      emit(factOf(stored.task, input.queued === true ? 'accepted' : 'started', now));
       return toRecord(stored);
     },
     noteExecution(taskId, record: ExecutionRecord) {
@@ -241,102 +190,130 @@ export function createSqliteTaskRegistry(
       if (!inserted) throw new TaskOwnershipError();
       store.touchTask(taskId, new Date().toISOString());
     },
-    complete(taskId, resultText) {
-      const stored = require(taskId);
-      // 终态 = 读回已记录执行事实后的同一判定（与内存版逐项一致；不嗅探汇报文本）。
-      const judgement = judgeReportedTask(stored.executions.map((execution: ExecutionRow) => ({
-        operation: execution.operation,
-        status: execution.status as ExecutionStatus,
-        ...(execution.error === undefined ? {} : { error: execution.error as ExecutionFailure }),
-      })));
-      commit(
-        taskId,
-        undefined,
-        { action: 'transition', to: judgement.status },
-        { resultText, failureReason: judgement.failureReason ?? null },
-      );
-    },
-    fail(taskId, reason) {
-      commit(taskId, undefined, { action: 'transition', to: 'failed' }, { failureReason: reason });
+    setResultText(taskId, resultText) {
+      const at = new Date().toISOString();
+      require(taskId);
+      store.setResultText(taskId, { resultText, updatedAt: at });
+      // 汇报存档 = 事实；追加结束事实（只记停下时刻，不记怎么结束），重复存档不重复打扰。
+      if (store.appendEndFact({ taskId, at, updatedAt: at })) {
+        emit(factOf(store.getTask(taskId)!.task, 'result_archived', at));
+      }
     },
     archiveReply(taskIds, replyText) {
       // 同回合各任务行同值、单事务；不存在的 id 由 store 忽略（调用方保证 id 来自本回合）。
-      store.setReplyForTasks(taskIds, replyText, new Date().toISOString());
+      const at = new Date().toISOString();
+      store.setReplyForTasks(taskIds, replyText, at);
+      for (const taskId of taskIds) {
+        if (store.appendEndFact({ taskId, at, updatedAt: at })) {
+          const stored = store.getTask(taskId);
+          if (stored !== undefined) emit(factOf(stored.task, 'result_archived', at));
+        }
+      }
     },
     get(taskId, scope) {
       return toRecord(require(taskId, scope));
     },
     listWaiting(scope) {
-      // 只返回等待行（给 scope 时走 (principal, session, status) 索引，不全表映射）。
-      return store.listTasks(scope, 'waiting_user')
-        .filter((stored) => stored.task.status === 'waiting_user')
-        .map(toRecord);
+      // 只返回等待行（给 scope 时走 (principal, session) 索引，不全表映射）。
+      return store.listWaitingRows(scope).map(toRecord);
     },
     listRunning() {
-      // 预期契约（2026-11-18）：只读 running 行（长时间提醒扫描；不读全表）。
-      return store.listRunningTasks().map((row) => toRecord({ task: row, executions: [] }));
+      // 在跑事实（长时间提醒扫描；不读全表）：running_since 非空、无等待形状、无汇报/终止事件。
+      return store.listRunningTasks().map((row) => toRecord({ task: row, executions: [], ends: [] }));
     },
     claimLongRunningNotice(taskId, stage, at) {
-      // 原子「每档仅一次」领取：已提醒过返回 false（零写入）；不改任务状态、不产状态事实。
+      // 原子「每档仅一次」领取：已提醒过返回 false（零写入）；不改任务事实、不产事件。
       return store.claimLongRunningNotice(taskId, stage, at);
     },
     list(scope) {
       return store.listTasks(scope).map(toRecord);
     },
-    transition(taskId, to, options: TransitionOptions = {}) {
-      return commit(taskId, options.scope, {
-        action: 'transition',
-        to,
-        ...(options.reason === undefined ? {} : { reason: options.reason }),
-      });
-    },
     waitForUser(taskId, pendingQuestion, options: MutationOptions = {}) {
-      return commit(taskId, options.scope, { action: 'waitForUser', pendingQuestion });
+      const stored = require(taskId, options.scope);
+      if (taskEndedOf({ endedAt: endedAtOf(stored) })) throw new TaskSettledError(taskId);
+      const at = new Date().toISOString();
+      store.setWaiting(taskId, { pendingQuestion, waitingSince: at, updatedAt: at });
+      store.releaseLease(taskId, at);
+      emit(factOf(store.getTask(taskId)!.task, 'waiting_user', at));
+      return toRecord(require(taskId));
     },
     answerResumes(taskId, options: MutationOptions = {}) {
-      return commit(taskId, options.scope, { action: 'answerResumes' });
+      const stored = require(taskId, options.scope);
+      if (taskEndedOf({ endedAt: endedAtOf(stored) })) throw new TaskSettledError(taskId);
+      const at = new Date().toISOString();
+      store.setWaiting(taskId, { waitingSince: null, updatedAt: at });
+      emit(factOf(store.getTask(taskId)!.task, 'resumed', at));
+      return toRecord(require(taskId));
     },
-    requestCancel(taskId, options: MutationOptions = {}) {
-      return commit(taskId, options.scope, { action: 'requestCancel' });
+    markCancelled(taskId, options: MutationOptions = {}) {
+      require(taskId, options.scope);
+      const at = new Date().toISOString();
+      const written = store.appendEndFact({ taskId, at, updatedAt: at });
+      if (written) emit(factOf(store.getTask(taskId)!.task, 'user_stop', at));
+      return toRecord(require(taskId));
+      // 一次性事实：重复取消零写入、零事件（written=false 时行原样读回）。
     },
-    confirmCancelled(taskId, options: MutationOptions = {}) {
-      return commit(taskId, options.scope, { action: 'confirmCancelled' });
+    markTimedOut(taskId, _kind: TimeoutKind, options: MutationOptions = {}) {
+      require(taskId, options.scope);
+      const at = new Date().toISOString();
+      const written = store.appendEndFact({ taskId, at, updatedAt: at });
+      if (written) emit(factOf(store.getTask(taskId)!.task, 'deadline_reached', at));
+      return toRecord(require(taskId));
     },
-    timeout(taskId, kind: TimeoutKind, options: MutationOptions = {}) {
-      return commit(taskId, options.scope, { action: 'timeout', kind });
+    markLeaseExpired(taskId) {
+      require(taskId);
+      const at = new Date().toISOString();
+      const written = store.appendEndFact({ taskId, at, updatedAt: at });
+      if (written) emit(factOf(store.getTask(taskId)!.task, 'ended', at));
+      return toRecord(require(taskId));
     },
-    markResultUnknown(taskId, options: MutationOptions = {}) {
-      return commit(taskId, options.scope, { action: 'markResultUnknown' });
+    noteResourceRefused(taskId, options: MutationOptions = {}) {
+      require(taskId, options.scope);
+      const at = new Date().toISOString();
+      const written = store.appendEndFact({ taskId, at, updatedAt: at });
+      if (written) emit(factOf(store.getTask(taskId)!.task, 'capacity_blocked', at));
+      return toRecord(require(taskId));
+    },
+    noteRoundEnded(taskId) {
+      require(taskId);
+      const at = new Date().toISOString();
+      // 一次性结束事实：本轮以无结果收尾；已结束的任务不翻案、不重复打扰。
+      // 写结束事实统一清租约（调用方 settle 已先释放；一致）。
+      if (store.appendEndFact({ taskId, at, updatedAt: at })) {
+        emit(factOf(store.getTask(taskId)!.task, 'ended', at));
+      }
     },
     claimNextQueued({ owner, leaseMs }) {
       const at = new Date().toISOString();
-      const row = store.claimQueued({
+      const row = store.claimNextUnstarted({
         owner,
         leaseUntil: new Date(Date.now() + leaseMs).toISOString(),
         updatedAt: at,
       });
       if (row === undefined) return undefined;
-      emit({
-        taskId: row.taskId,
-        taskNo: row.taskNo ?? 0,
-        name: row.name ?? deriveTaskName(row.request),
-        from: 'queued',
-        to: 'running',
-        at,
-        stateVersion: at,
-      });
+      emit(factOf(row, 'started', at));
       return toRecord(require(row.taskId));
+    },
+    armLease(taskId, { owner, leaseMs }, options: MutationOptions = {}) {
+      const stored = require(taskId, options.scope);
+      if (taskEndedOf({ endedAt: endedAtOf(stored) })) throw new TaskSettledError(taskId);
+      const at = new Date().toISOString();
+      store.armLease(taskId, {
+        owner,
+        leaseUntil: new Date(Date.now() + leaseMs).toISOString(),
+        updatedAt: at,
+      });
+      return toRecord(require(taskId));
     },
     expireLeases(now = new Date().toISOString()) {
       const affected: TaskRecord[] = [];
       for (const row of store.listRunningExpiredLeases(now)) {
-        try {
-          affected.push(commit(row.taskId, undefined, { action: 'markResultUnknown' }));
-        } catch (error) {
-          // 并发下状态已被其他进程改变：跳过（不是本进程的过期目标），不推翻已发生的事实。
-          if (error instanceof TaskTransitionError) continue;
-          throw error;
-        }
+        // 追加结束事实（一次性；已结束的行不会出现在扫描结果里，并发下写失败即跳过）。
+        const at = new Date().toISOString();
+        const written = store.appendEndFact({ taskId: row.taskId, at, updatedAt: at });
+        if (!written) continue;
+        emit(factOf(store.getTask(row.taskId)!.task, 'ended', at));
+        affected.push(toRecord(require(row.taskId)));
       }
       return affected;
     },
@@ -502,21 +479,8 @@ export function createSqliteTaskRegistry(
       });
     },
     releaseTaskLease(taskId, options: MutationOptions = {}) {
-      const stored = require(taskId, options.scope);
-      if (stored.task.status !== 'running') return toRecord(stored);
-      // 长任务让出槽位：状态仍是 running（没有合法自反边），只清单据租约——别的字段原样保留。
-      store.applyTaskState(taskId, {
-        expectedStatus: 'running',
-        status: 'running',
-        reason: stored.task.reason ?? null,
-        resultText: stored.task.resultText ?? null,
-        failureReason: stored.task.failureReason ?? null,
-        pendingQuestion: stored.task.pendingQuestion,
-        waitingSince: stored.task.waitingSince ?? null,
-        leaseOwner: null,
-        leaseUntil: null,
-        updatedAt: new Date().toISOString(),
-      });
+      require(taskId, options.scope);
+      store.releaseLease(taskId, new Date().toISOString());
       return toRecord(require(taskId));
     },
     store,

@@ -28,6 +28,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import {
   describeOutcome,
   internalOperationCall,
@@ -92,9 +93,9 @@ describe('冒烟·长时执行（--delay-ms）', () => {
       const taskId = done.taskIds[0]!;
 
       // 回合结束时任务确实还在跑（不是「等到完成才回一句已受理」的假异步）。
-      expect(registry.get(taskId, TASK_SCOPE).status).not.toBe('completed');
+      expect(lastExecutionOf(registry.get(taskId, TASK_SCOPE))?.status).not.toBe('completed');
 
-      await sim.waitFor('任务后台 completed', () => registry.get(taskId, TASK_SCOPE).status === 'completed', 30_000);
+      await sim.waitFor('任务后台 completed', () => (archivedReportOf(registry.get(taskId, TASK_SCOPE)) !== undefined || lastExecutionOf(registry.get(taskId, TASK_SCOPE))?.status === 'completed'), 30_000);
       // 延迟真实生效：整条任务至少跨越夹具声明的 1200ms（下界，负载只会更长）。
       expect(Date.now() - startedAt, '任务总耗时').toBeGreaterThanOrEqual(1_000);
 
@@ -133,14 +134,14 @@ describe('冒烟·执行很久后异常（slow_fault）', () => {
       expect(sim.finalBubbles()[0]!.content).toBe('好的，这件事我交给后台去办，办好就发给你。');
 
       const taskId = sim.doneOf(messageId)!.taskIds[0]!;
-      await sim.waitFor('任务落 failed', () => registry.get(taskId, TASK_SCOPE).status === 'failed', 30_000);
+      await sim.waitFor('任务落 failed', () => lastExecutionOf(registry.get(taskId, TASK_SCOPE))?.status === 'failed', 30_000);
       // 「执行了很久才失败」：耗时下界证明失败发生在 delayMs 之后（不是立即失败）。
       expect(Date.now() - startedAt, '失败总耗时').toBeGreaterThanOrEqual(2_000);
 
       const failed = registry.get(taskId, TASK_SCOPE);
-      expect(failed.status).toBe('failed');
-      expect(failed.failureReason).toContain('没办成：dummy.query 返回 failed');
-      expect(failed.failureReason).toContain('cannot be read after a long run');
+      expect(['failed', 'refused']).toContain(lastExecutionOf(failed)?.status);
+      
+      expect(lastFailureOf(failed)?.error?.message ?? '').toContain('cannot be read after a long run');
 
       // 不谎报成功：**零完成投递**（没有「办完了」正文）；失败走失败投递分支主动说一句人话
       // （2026-11-19 收口：failureMessageFor 模板，不含执行层原文；事件名与完成投递共用
@@ -151,18 +152,25 @@ describe('冒烟·执行很久后异常（slow_fault）', () => {
       expect(sim.sdk.proactiveTexts[0]!.content).not.toContain('cannot be read after a long run');
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(sim.sdk.proactiveTexts).toHaveLength(1); // 没有第二条（非快活场景恰一条失败话术）
-      expect(failed.replyText ?? failed.resultText ?? '').toBe('');
+      // 2026-11-24 去结论机：汇报**原样存档**（宿主不判它是不是「对失败的说明」）；用户可见面
+      // 仍由上面两条断言钉住（没办成、绝无「办好了」）——做没做成由 Main 读账本事实自己判。
+      expect(failed.replyText ?? failed.resultText ?? '').not.toBe('');
 
       // 用户追问：task_result 的真实失败原因被如实转述（不是「已完成」）。
       sim.book.mainTurn('刚才那个查 slow-fault-one 的任务怎么样了？', [
         toolCallAssistant('task_result', { ref: taskId }),
         (call) => {
           const result = lastToolResultJsonOf(call.messages);
-          const status = result?.['status'];
-          // 底账投影收口（2026-11-20）：拼装的 failureReason 自由文本已移除，
-          // 改给清洗过的业务摘要（summary）——业务原话保留，内部词/技术码被剥掉。
-          const reason = typeof result?.['summary'] === 'string' ? result['summary'] : '';
-          if (status !== 'failed') throw new Error(`任务状态不是 failed：${String(status)}`);
+          // S1 事实口径：task_result 不再有 status 结论——失败事实读逐笔执行行（末条
+          // status=failed + 清洗后的机械摘要）。
+          const executions = Array.isArray(result?.['executions'])
+            ? result['executions'] as ReadonlyArray<Record<string, unknown>>
+            : [];
+          const lastExecution = executions[executions.length - 1];
+          const reason = typeof lastExecution?.['summary'] === 'string' ? lastExecution['summary'] : '';
+          if (lastExecution?.['status'] !== 'failed') {
+            throw new Error(`任务末条执行不是 failed：${JSON.stringify(lastExecution)}`);
+          }
           if (reason === '') throw new Error('task_result 没有返回失败摘要。');
           return textAssistant(`那个任务跑了很久，最后还是没办成：${reason}`);
         },
@@ -216,7 +224,7 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
       const taskNo = registry.get(taskId, TASK_SCOPE).taskNo;
 
       // 第一次缺参：任务停在 waiting_user，缺什么机械可读（结构化字段名 window）。
-      await sim.waitFor('任务落 waiting_user', () => registry.get(taskId, TASK_SCOPE).status === 'waiting_user', 30_000);
+      await sim.waitFor('任务落 waiting_user', () => registry.get(taskId, TASK_SCOPE).pendingQuestion !== undefined, 30_000);
       const waiting = registry.get(taskId, TASK_SCOPE);
       expect(waiting.pendingQuestion?.missing.join(' ')).toContain('window');
       expect(waiting.executions.map((execution) => execution.status)).toEqual(['needs_input']);
@@ -227,7 +235,8 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
         (call) => {
           const status = lastToolResultJsonOf(call.messages);
           const missing = (status?.['pendingQuestion'] as { missing?: readonly string[] } | undefined)?.missing ?? [];
-          if (status?.['status'] !== 'waiting_user') throw new Error(`任务不是 waiting_user：${String(status?.['status'])}`);
+          // 事实口径：等待事实只看布尔 waiting + 结构化 pendingQuestion。
+          if (status?.['waiting'] !== true) throw new Error(`任务不是等待态：${JSON.stringify(status)}`);
           return textAssistant(`任务还在等你补充：${missing.join('、')}`);
         },
       ]);
@@ -247,7 +256,7 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
       sim.sendText('用 2026-10 这个窗口');
       await sim.waitFor('补答回合终帧', () => sim.finalBubbles().length === 3);
 
-      await sim.waitFor('接续后 completed', () => registry.get(taskId, TASK_SCOPE).status === 'completed', 30_000);
+      await sim.waitFor('接续后 completed', () => (archivedReportOf(registry.get(taskId, TASK_SCOPE)) !== undefined || lastExecutionOf(registry.get(taskId, TASK_SCOPE))?.status === 'completed'), 30_000);
       const completed = registry.get(taskId, TASK_SCOPE);
       // 同一任务（编号不变），不是新建任务。
       expect(completed.taskId).toBe(taskId);
@@ -285,7 +294,7 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
       await sim.waitFor('交办回合结束', () => sim.doneOf(messageId) !== undefined);
       expect(sim.finalBubbles()).toHaveLength(1);
       const taskId = sim.doneOf(messageId)!.taskIds[0]!;
-      await sim.waitFor('任务落 waiting_user', () => registry.get(taskId, TASK_SCOPE).status === 'waiting_user', 30_000);
+      await sim.waitFor('任务落 waiting_user', () => registry.get(taskId, TASK_SCOPE).pendingQuestion !== undefined, 30_000);
 
       const rowsBefore = auditRowsOf(sim.execStateDir).length;
       const executionsBefore = registry.get(taskId, TASK_SCOPE).executions.length;
@@ -295,14 +304,14 @@ describe('冒烟·needs_input → 用户补答 → 同一任务完成', () => {
         toolCallAssistant('task_status', { ref: taskId }),
         (call) => {
           const status = lastToolResultJsonOf(call.messages);
-          return textAssistant(`任务状态：${String(status?.['status'])}；还在等你补充。`);
+          return textAssistant(`任务状态：${String(status?.['liveness'])}；还在等你补充。`);
         },
       ]);
       sim.sendText('还没好吗？');
       await sim.waitFor('追问终帧', () => sim.finalBubbles().length === 2);
 
       const after = registry.get(taskId, TASK_SCOPE);
-      expect(after.status).toBe('waiting_user');
+      expect(after.pendingQuestion).toBeDefined();
       expect(after.pendingQuestion?.missing.join(' ')).toContain('window');
       expect(after.executions).toHaveLength(executionsBefore);
       expect(auditRowsOf(sim.execStateDir)).toHaveLength(rowsBefore);

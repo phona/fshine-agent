@@ -22,8 +22,12 @@ import {
   type TaskExecutor,
   type TaskRecordView,
   type TaskRegistryPort,
-  type TaskStatus,
 } from './src/task-runner';
+
+/** 假底账内部状态词（S1：真实底账无 status；本测试替身仅供本文件断言）。 */
+type TaskStatus =
+  | 'queued' | 'running' | 'waiting_user' | 'cancelling' | 'cancelled'
+  | 'completed' | 'failed' | 'timed_out' | 'unexecuted';
 
 // ---------------------------------------------------------------------------
 // 最小假底账：只实现 runner 消费面（状态存取 + 认领/过期），不做完整合法边矩阵
@@ -31,22 +35,29 @@ import {
 // ---------------------------------------------------------------------------
 
 class AuditRegistry implements TaskRegistryPort {
-  private readonly tasks = new Map<string, TaskRecordView & { leaseOwner?: string; leaseUntil?: string }>();
+  private readonly tasks = new Map<string, TaskRecordView & { status: TaskStatus; runningSince?: string; leaseOwner?: string; leaseUntil?: string }>();
   private seq = 0;
 
-  begin(input: { taskId: string; principalId: string; sessionId: string; request: string; status?: 'queued' | 'running' }): TaskRecordView {
+  begin(input: { taskId: string; principalId: string; sessionId: string; request: string; queued?: boolean }): TaskRecordView {
     const now = new Date().toISOString();
     const task = {
       taskId: input.taskId,
       principalId: input.principalId,
       sessionId: input.sessionId,
       request: input.request,
-      status: input.status ?? 'running',
+      status: input.queued === true ? 'queued' : 'running',
+      ...(input.queued === true ? {} : { runningSince: now }),
       createdAt: now,
       updatedAt: now,
     };
-    this.tasks.set(input.taskId, task);
+    this.tasks.set(input.taskId, task as TaskRecordView & { status: TaskStatus; leaseOwner?: string; leaseUntil?: string });
     return this.snapshot(input.taskId);
+  }
+
+  statusOf(taskId: string): TaskStatus {
+    const task = this.tasks.get(taskId);
+    if (task === undefined) throw new Error(`不存在：${taskId}`);
+    return task.status;
   }
 
   get(taskId: string): TaskRecordView {
@@ -65,13 +76,39 @@ class AuditRegistry implements TaskRegistryPort {
     return this.snapshot(taskId);
   }
 
-  waitForUser(taskId: string, _q: PendingQuestion): TaskRecordView { return this.transition(taskId, 'waiting_user'); }
-  answerResumes(taskId: string): TaskRecordView { return this.transition(taskId, 'running'); }
+  waitForUser(taskId: string, q: PendingQuestion): TaskRecordView {
+    const task = this.tasks.get(taskId);
+    if (task === undefined) throw new Error(`不存在：`);
+    task.status = 'waiting_user';
+    task.pendingQuestion = q;
+    return this.snapshot(taskId);
+  }
+  answerResumes(taskId: string): TaskRecordView {
+    const task = this.tasks.get(taskId);
+    if (task === undefined) throw new Error(`不存在：`);
+    task.status = 'running';
+    delete task.pendingQuestion;
+    return this.snapshot(taskId);
+  }
   requestCancel(taskId: string): TaskRecordView { return this.transition(taskId, 'cancelling'); }
   confirmCancelled(taskId: string): TaskRecordView { return this.transition(taskId, 'cancelled'); }
   timeout(taskId: string): TaskRecordView { return this.transition(taskId, 'timed_out'); }
   markResultUnknown(taskId: string): TaskRecordView { return this.transition(taskId, 'unexecuted'); }
   fail(taskId: string): void { this.transition(taskId, 'failed'); }
+
+  // --- TaskRegistryPort（S1 事实写入面；测试替身仍以状态词建模供本文件断言） ---
+  markCancelled(taskId: string): TaskRecordView { return this.transition(taskId, 'cancelled'); }
+  markTimedOut(taskId: string, _kind?: unknown): TaskRecordView { return this.transition(taskId, 'timed_out'); }
+  markLeaseExpired(taskId: string): TaskRecordView { return this.transition(taskId, 'failed'); }
+  noteRoundEnded(taskId: string): void { this.transition(taskId, 'failed'); }
+  archiveReply(taskIds: readonly string[], replyText: string): void {
+    for (const taskId of taskIds) {
+      const task = this.tasks.get(taskId);
+      if (task === undefined) continue;
+      if (!['cancelled', 'completed', 'failed', 'timed_out', 'unexecuted'].includes(task.status)) task.status = 'completed';
+      (task as { resultText?: string }).resultText = replyText;
+    }
+  }
 
   claimNextQueued(input: { owner: string; leaseMs: number }): TaskRecordView | undefined {
     const next = [...this.tasks.values()]
@@ -79,6 +116,7 @@ class AuditRegistry implements TaskRegistryPort {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
     if (next === undefined) return undefined;
     next.status = 'running';
+    if (next.runningSince === undefined) next.runningSince = new Date().toISOString();
     next.leaseOwner = input.owner;
     next.leaseUntil = new Date(Date.now() + input.leaseMs).toISOString();
     return this.snapshot(next.taskId);
@@ -155,7 +193,7 @@ describe('P0-C① 取消已请求但 Worker 未退出 → 许可不提前释放'
     // 关键断言：Worker 未退出（executor 挂起中），许可不得提前释放。
     expect(policy.snapshot().background.active).toBe(1); // 许可 taskId 为匿名（见 p0c.md 登记缺口）
     // t2 仍 queued，未被直派发。
-    expect(registry.get('t2').status).toBe('queued');
+    expect(registry.statusOf('t2')).toBe('queued');
     expect(executor.invocations).toHaveLength(1);
 
     executor.at('t1').finish({ kind: 'cancelled' });
@@ -163,11 +201,11 @@ describe('P0-C① 取消已请求但 Worker 未退出 → 许可不提前释放'
     for (let i = 0; i < 20 && executor.invocations.every((inv) => inv.taskId !== 't2'); i += 1) {
       await Promise.resolve();
     }
-    executor.at('t2').finish({ kind: 'completed', resultText: 'ok' });
+    executor.at('t2').finish({ kind: 'ended', report: 'ok' });
     await runner.whenIdle();
     expect(policy.snapshot().background.active).toBe(0);
-    expect(registry.get('t1').status).toBe('cancelled');
-    expect(registry.get('t2').status).toBe('completed');
+    expect(registry.statusOf('t1')).toBe('cancelled');
+    expect(registry.statusOf('t2')).toBe('completed');
     // 释放后 t2 经 schedulePump 接续启动（恰好一次，无重复执行）。
     expect(executor.invocations.map((i) => i.taskId)).toEqual(['t1', 't2']);
   });
@@ -191,7 +229,7 @@ describe('P0-C② Worker 取消后实际调用与消耗仍被计入', () => {
     // 预算 calls=1 已耗尽：同任务再次准入必须被拒（不因取消而豁免）。
     const again = policy.acquire('background', { taskId: 't1' });
     expect(again).toMatchObject({ ok: false, reason: 'budget_exhausted' });
-    expect(registry.get('t1').status).toBe('cancelled');
+    expect(registry.statusOf('t1')).toBe('cancelled');
   });
 });
 
@@ -207,7 +245,7 @@ describe('P0-C③ finally 覆盖异常/取消/超时，不漏计', () => {
     executor.at('e').reject(new Error('boom'));
     await runner.whenIdle();
     expect(policy.budgetFor('e').used.calls).toBe(1);
-    expect(registry.get('e').status).toBe('failed');
+    expect(registry.statusOf('e')).toBe('failed');
     expect(policy.snapshot().background.active).toBe(0);
     // 取消（abort 异常路径）
     tick();
@@ -219,7 +257,7 @@ describe('P0-C③ finally 覆盖异常/取消/超时，不漏计', () => {
     executor.at('c').reject(abortError);
     await runner.whenIdle();
     expect(policy.budgetFor('c').used.calls).toBe(1);
-    expect(registry.get('c').status).toBe('cancelled');
+    expect(registry.statusOf('c')).toBe('cancelled');
     // 超时
     tick();
     submit({ taskId: 'o', principalId: 'p', sessionId: 's', request: '超时' });
@@ -227,7 +265,7 @@ describe('P0-C③ finally 覆盖异常/取消/超时，不漏计', () => {
     executor.at('o').finish({ kind: 'timed_out' });
     await runner.whenIdle();
     expect(policy.budgetFor('o').used.calls).toBe(1);
-    expect(registry.get('o').status).toBe('timed_out');
+    expect(registry.statusOf('o')).toBe('timed_out');
     expect(policy.snapshot().background.active).toBe(0);
     // 总量：三回合各一次，无漏计无重复。
     expect(policy.budgetFor('e').used.calls + policy.budgetFor('c').used.calls + policy.budgetFor('o').used.calls).toBe(3);
@@ -258,7 +296,7 @@ describe('P0-C④ budgetFor 可选端口不得让正式后台执行绕过预算'
     const { policy, executor, runner, submit } = setup();
     submit({ taskId: 't1', principalId: 'p', sessionId: 's', request: '一' });
     runner.pump();
-    executor.at('t1').finish({ kind: 'completed', resultText: 'ok' });
+    executor.at('t1').finish({ kind: 'ended', report: 'ok' });
     await runner.whenIdle();
     expect(policy.budgetFor('t1').used.calls).toBe(1);
     expect(policy.budgetFor('t1').limits).toBeNull(); // 未配置=不强制，但用量照记
@@ -282,7 +320,7 @@ describe('P0-C⑤ 取消/重复提交/幂等重放不重复执行不重复计量
     runner.pump(); // 终态后不得被认领
     await runner.whenIdle();
     expect(executor.invocations).toHaveLength(0);
-    expect(registry.get('q').status).toBe('cancelled');
+    expect(registry.statusOf('q')).toBe('cancelled');
     expect(policy.budgetFor('q').used.calls).toBe(0); // 仅在 acquire 时建账，未 consume
   });
 
@@ -290,9 +328,9 @@ describe('P0-C⑤ 取消/重复提交/幂等重放不重复执行不重复计量
     const { policy, executor, runner, submit } = setup({ taskBudget: { ms: 1_000_000, calls: 5 } });
     submit({ taskId: 't', principalId: 'p', sessionId: 's', request: '一' });
     runner.pump();
-    executor.at('t').finish({ kind: 'completed', resultText: 'ok' });
+    executor.at('t').finish({ kind: 'ended', report: 'ok' });
     await runner.whenIdle();
-    expect(runner.cancel('t')).toEqual({ outcome: 'terminal', taskId: 't', status: 'completed' });
+    expect(runner.cancel('t')).toEqual({ outcome: 'terminal', taskId: 't' });
     expect(policy.budgetFor('t').used.calls).toBe(1); // 无第二次计量
   });
 });

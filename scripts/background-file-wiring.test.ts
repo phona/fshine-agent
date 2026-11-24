@@ -28,6 +28,7 @@ import type {
 import type { DriverMessage, TurnDriver } from '../packages/agent/src/driver-contract';
 import { createFileStore, type FileStore } from '../packages/agent/src/file-store';
 import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../packages/agent/testing/task-facts';
 import { assembleSessionCore } from './ask-runtime';
 
 const SCOPE = { principalId: 'wecom:bg-files', sessionId: 'conv-bg-files' };
@@ -214,7 +215,7 @@ describe('background 文件面生产装配接线', () => {
       const receipt = taskReceipt(fx);
       expect(receipt['accepted']).toBe(true);
       const taskId = String(receipt['taskId']);
-      expect(fx.assembled.taskRegistry.get(taskId, SCOPE).status).toBe('completed');
+      expect(lastExecutionOf(fx.assembled.taskRegistry.get(taskId, SCOPE))?.status).toBe('completed');
 
       // 交办副本：task_id 绑定、字节一致、fileId 与源不同。
       const rows = fx.registry.store.listFileRefs(SCOPE);

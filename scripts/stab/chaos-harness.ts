@@ -18,6 +18,8 @@ import type { AppConfig, IncomingChannelMessage } from '@fshine/contracts';
 import type { NotificationOutbox } from '../../packages/agent/src/notifications';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import type { TaskRecordView, TaskScope } from '../../packages/agent/src/task-runner';
+import type { TaskRecord } from '../../packages/agent/src/task-registry';
+import { taskEndedOf, taskMayBeRunningOf, taskReportedOf } from '../../packages/agent/testing/task-facts';
 import { createServer } from '../../apps/server/server';
 import {
   ControllableClock,
@@ -35,7 +37,7 @@ import {
   RecordedTurn,
   removeStabTempDir,
   rssGrowth,
-  sampleRssMedian,
+  sampleRssSettled,
   STAB_PROFILE,
   summarizeTasks,
   unreachableWorkerDriver,
@@ -118,8 +120,19 @@ function findTask(tasks: readonly TaskRecordView[], taskId: string): TaskRecordV
   return tasks.find((task) => task.taskId === taskId);
 }
 
-function statusOf(tasks: readonly TaskRecordView[], taskId: string): string | undefined {
-  return findTask(tasks, taskId)?.status;
+/** S1 事实模型：直接读机械事实（不投影任务级状态词）。 */
+function reportedOf(task: TaskRecordView | TaskRecord): boolean {
+  return ((task as TaskRecord).resultText ?? (task as TaskRecord).replyText ?? '').trim() !== '';
+}
+
+function mayBeRunningOf(tasks: readonly TaskRecordView[], taskId: string): boolean {
+  const task = findTask(tasks, taskId);
+  return task === undefined ? false : taskMayBeRunningOf(task);
+}
+
+function stoppedWithoutReportOf(tasks: readonly TaskRecordView[], taskId: string): boolean {
+  const task = findTask(tasks, taskId);
+  return task !== undefined && taskEndedOf(task) && !taskReportedOf(task);
 }
 
 // ---------------------------------------------------------------------------
@@ -137,7 +150,7 @@ async function runRestartNotificationScenario(scenario: ChaosScenario): Promise<
   const principalId = 'stab:chaos';
   const sessionId = 'stab-chaos-c1';
   const scope = scopeOf(principalId, sessionId);
-  const rssBase = sampleRssMedian();
+  const rssBase = await sampleRssSettled();
   let outbox1: NotificationOutbox | undefined;
   let outbox2: NotificationOutbox | undefined;
   let sink1: InjectingSink | undefined;
@@ -168,13 +181,13 @@ async function runRestartNotificationScenario(scenario: ChaosScenario): Promise<
         const turn = await assembled1.session.send(REQUEST);
         report.submitted += turn.taskIds.length;
       }
-      await pollUntil(() => registry1!.list(scope).filter((task) => task.status === 'completed').length >= 5, 20_000);
+      await pollUntil(() => registry1!.list(scope).filter((task) => reportedOf(task)).length >= 5, 20_000);
       await outbox1.deliverPending(); // 恒失败：attempts=1，全部未送达
     } finally {
       assembled1.close();
     }
     const tasks1 = registry1.list(scope);
-    const completedIds1 = tasks1.filter((task) => task.status === 'completed').map((task) => task.taskId);
+    const completedIds1 = tasks1.filter((task) => reportedOf(task)).map((task) => task.taskId);
     outbox1.close();
     registry1.close();
 
@@ -214,13 +227,16 @@ async function runRestartNotificationScenario(scenario: ChaosScenario): Promise<
       .map((call) => call.taskId)
       .filter((taskId) => completedIds1.includes(taskId));
     report.leaseExpiredReplays = executor2.calls.filter((call) => {
+      // 排除用户确认取消的任务（取消也写结束事实；它不是租约过期重放）。
+      if (call.taskId === CANCEL_TASK_ID) return false;
       const task = findTask(tasks2, call.taskId);
-      return task?.status === 'failed' && task.reason === 'result_unknown';
+      // 结果未知（看门狗写结束事实、无汇报）= result_unknown 的机械对应
+      return task !== undefined && taskEndedOf(task) && !taskReportedOf(task);
     }).length;
     report.duplicateNotificationRows = notifications.duplicateRows;
     report.undeliveredNotifications = notifications.undelivered;
     report.sinkDeliveredPerNotification = deliveredToObject(sink1.deliveredCounts, sink2.deliveredCounts);
-    report.rssGrowthRatio = rssGrowth(rssBase, sampleRssMedian());
+    report.rssGrowthRatio = rssGrowth(rssBase, await sampleRssSettled());
     return report;
   } finally {
     outbox1?.close();
@@ -246,7 +262,7 @@ async function runCancelScenario(scenario: ChaosScenario): Promise<ChaosReport> 
   const principalId = 'stab:chaos';
   const sessionId = 'stab-chaos-c3';
   const scope = scopeOf(principalId, sessionId);
-  const rssBase = sampleRssMedian();
+  const rssBase = await sampleRssSettled();
   const registry = createStabRegistry(dbPath);
   const sink = new InjectingSink({ failureEvery: 2 });
   const outbox = attachStabOutbox(registry, dbPath, sink, clock);
@@ -272,10 +288,10 @@ async function runCancelScenario(scenario: ChaosScenario): Promise<ChaosReport> 
         report.submitted += 1;
       }
       runner.pump();
-      await pollUntil(() => statusOf(registry.list(scope), CANCEL_TASK_ID) === 'running', 10_000);
+      await pollUntil(() => mayBeRunningOf(registry.list(scope), CANCEL_TASK_ID), 10_000);
       runner.cancel(CANCEL_TASK_ID, scope);
       report.hung = !(await waitIdleWithTimeout(assembled));
-      report.cancelledConfirmed = statusOf(registry.list(scope), CANCEL_TASK_ID) === 'cancelled';
+      report.cancelledConfirmed = stoppedWithoutReportOf(registry.list(scope), CANCEL_TASK_ID);
       await driveDeliveries(outbox, clock);
     } finally {
       assembled.close();
@@ -289,7 +305,7 @@ async function runCancelScenario(scenario: ChaosScenario): Promise<ChaosReport> 
     report.duplicateNotificationRows = notifications.duplicateRows;
     report.undeliveredNotifications = notifications.undelivered;
     report.sinkDeliveredPerNotification = deliveredToObject(sink.deliveredCounts);
-    report.rssGrowthRatio = rssGrowth(rssBase, sampleRssMedian());
+    report.rssGrowthRatio = rssGrowth(rssBase, await sampleRssSettled());
     return report;
   } finally {
     outbox.close();
@@ -344,7 +360,7 @@ async function runCombinedWithDuplicate(scenario: ChaosScenario): Promise<ChaosR
   const clock = new ControllableClock();
   clock.set(Date.now());
   const serverScope = scopeOf('wecom:user-a', 'wecom:conv-a');
-  const rssBase = sampleRssMedian();
+  const rssBase = await sampleRssSettled();
   const texts = Array.from({ length: scenario.tasks }, (_, index) => `（stab 混沌）请求-${index + 1}`);
   const duplicateText = texts[0]!;
   const gateAfter = Math.max(1, scenario.tasks - 5);
@@ -378,9 +394,9 @@ async function runCombinedWithDuplicate(scenario: ChaosScenario): Promise<ChaosR
       for (let i = 1; i < scenario.tasks; i += 1) {
         await server.handler(incoming(`msg-${i + 1}`, texts[i]!));
       }
-      await pollUntil(() => readerA.list(serverScope).filter((task) => task.status === 'completed').length >= gateAfter, 20_000);
+      await pollUntil(() => readerA.list(serverScope).filter((task) => reportedOf(task)).length >= gateAfter, 20_000);
       phaseATasks = readerA.list(serverScope).map((task) => ({ ...task }));
-      completedIdsA = phaseATasks.filter((task) => task.status === 'completed').map((task) => task.taskId);
+      completedIdsA = phaseATasks.filter((task) => reportedOf(task)).map((task) => task.taskId);
     } finally {
       readerA.close();
       server.close();
@@ -418,10 +434,10 @@ async function runCombinedWithDuplicate(scenario: ChaosScenario): Promise<ChaosR
         runner.submit({ taskId: CANCEL_TASK_ID, principalId: serverScope.principalId, sessionId: serverScope.sessionId, request: REQUEST });
         report.submitted += 1;
         runner.pump();
-        await pollUntil(() => statusOf(registryB.list(serverScope), CANCEL_TASK_ID) === 'running', 10_000);
+        await pollUntil(() => mayBeRunningOf(registryB.list(serverScope), CANCEL_TASK_ID), 10_000);
         runner.cancel(CANCEL_TASK_ID, serverScope);
         idle2 = await waitIdleWithTimeout(assembledB);
-        report.cancelledConfirmed = statusOf(registryB.list(serverScope), CANCEL_TASK_ID) === 'cancelled';
+        report.cancelledConfirmed = stoppedWithoutReportOf(registryB.list(serverScope), CANCEL_TASK_ID);
       }
       report.hung = !(idle1 && idle2);
       await driveDeliveries(outboxB, clock);
@@ -439,13 +455,15 @@ async function runCombinedWithDuplicate(scenario: ChaosScenario): Promise<ChaosR
       .map((call) => call.taskId)
       .filter((taskId) => completedIdsA.includes(taskId));
     report.leaseExpiredReplays = executorB.calls.filter((call) => {
+      if (call.taskId === CANCEL_TASK_ID) return false;
       const task = findTask(tasksB, call.taskId);
-      return task?.status === 'failed' && task.reason === 'result_unknown';
+      // 结果未知（看门狗写结束事实、无汇报）= result_unknown 的机械对应
+      return task !== undefined && taskEndedOf(task) && !taskReportedOf(task);
     }).length;
     report.duplicateNotificationRows = notifications.duplicateRows;
     report.undeliveredNotifications = notifications.undelivered;
     report.sinkDeliveredPerNotification = deliveredToObject(serverSink.deliveredCounts, sinkB.deliveredCounts);
-    report.rssGrowthRatio = rssGrowth(rssBase, sampleRssMedian());
+    report.rssGrowthRatio = rssGrowth(rssBase, await sampleRssSettled());
     outboxB.close();
     registryB.close();
     return report;

@@ -54,19 +54,6 @@ describe('任务状态单写路径守卫（源码级）', () => {
     expect(hits, `task-store 之外出现任务表直写：\n${hits.join('\n')}`).toEqual([]);
   });
 
-  it('task-store 内「UPDATE tasks … SET … status」恰一条（单一语句写状态）', () => {
-    const text = stripComments(read(WRITER_FILE));
-    // 语句体 = 关键字到 SQL 字面量结尾（反引号/单引号）；避免窗口式匹配吞掉后续语句。
-    const bodies = [...text.matchAll(/UPDATE\s+tasks\b([^`']*)/gi)].map((match) => match[1] ?? '');
-    const statusWriters = bodies.filter((body) => /status\s*=/i.test(body));
-    console.log(JSON.stringify({
-      event: 'task_write_path_statements',
-      total: bodies.length,
-      statusWriters: statusWriters.length,
-    }));
-    expect(statusWriters).toHaveLength(1);
-  });
-
   it('TaskRegistry 实现层不含裸 SQL（只经 store 方法写入）', () => {
     for (const file of REGISTRY_FILES) {
       const text = stripComments(read(file));

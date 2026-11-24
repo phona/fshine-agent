@@ -16,6 +16,7 @@
  * 纪律：只加用例，不改产品代码。若某条在当前代码上红，即为真缺陷——如实保留并逐条报告，
  * 不为凑绿修改判据或产品。
  */
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,8 +34,8 @@ import type { TaskRecord, TaskRegistry } from './src/task-registry';
 import { createTaskRunner, type TaskExecutor, type TaskRunner } from './src/task-runner';
 import { createResourcePolicy } from './src/resource-policy';
 import {
-  classifyFailure,
   failureMessageFor,
+  fallbackFailureKindOf,
   internalTermIn,
   type UserFacingFailure,
 } from './src/user-facing-failure';
@@ -112,7 +113,10 @@ class AdversarialClient implements ExecutionClient {
     const args = (request.args ?? {}) as Record<string, unknown>;
     switch (request.operation) {
       case 'dummy.query':
-        return { status: 'completed', data: { rows: 2 } };
+        // D1 只读失败面：已落库写之后的核对查询失败（readOnlyOperations 声明为只读）。
+        return args['--fail'] === true
+          ? { status: 'failed', error: { code: 'READ_FAILED', message: '核对查询失败。', retryable: false } }
+          : { status: 'completed', data: { rows: 2 } };
       case 'dummy.prepare': {
         this.prepareSeq += 1;
         const collection = typeof args['--collection'] === 'string' ? args['--collection'] : 'alpha';
@@ -160,12 +164,18 @@ class AdversarialClient implements ExecutionClient {
 }
 
 const QUERY = { operation: 'dummy.query', args: {} };
+/** D1：成功后只读核对失败（打另一个对象——只有「只读失败不翻盘」这条判据能救它）。 */
+const QUERY_FAILED = { operation: 'dummy.query', args: { '--collection': 'gamma', '--fail': true } };
 const PREPARE = (collection = 'alpha'): Record<string, unknown> => ({ operation: 'dummy.prepare', args: { '--collection': collection } });
 const COMMIT = (collection = 'alpha'): Record<string, unknown> => ({ operation: 'dummy.commit', args: { '--collection': collection } });
 const PROPOSAL = { operation: 'dummy.proposal', args: {} };
 const ASK = { operation: 'dummy.ask', args: {} };
 const PROPOSAL_COMMIT = { operation: 'dummy.proposal-commit', args: { '--proposal-id': 'prop_1' } };
+/** 第二次误用历史协议换个 proposal-id：2026-11-24 起锁只认「完全相同参数」，逐字重复会被 A2b 拦。 */
+const PROPOSAL_COMMIT_2 = { operation: 'dummy.proposal-commit', args: { '--proposal-id': 'prop_2' } };
 const DENIED = (collection = 'alpha'): Record<string, unknown> => ({ operation: 'dummy.denied', args: { '--collection': collection } });
+/** 无集合参数的写失败（锁键 = operation + 全量参数摘要，空参数同样有摘要）。 */
+const DENIED_UNLABELED = { operation: 'dummy.denied', args: {} };
 
 const tempDirs: string[] = [];
 afterAll(() => {
@@ -304,8 +314,21 @@ class ReadClient implements ExecutionClient {
   }
 }
 
+/**
+ * ⑮ 用：needs_input「没说清缺什么」的执行层替身——missing 非空但描述为空
+ * （pendingQuestionFrom 过滤空描述后得不出问题形状）。
+ */
+class BareNeedsInputClient implements ExecutionClient {
+  async capabilities(): Promise<CapabilityManifest> {
+    return MANIFEST;
+  }
+  async execute(): Promise<ExecutionOutcome> {
+    return { status: 'needs_input', missing: [{ description: '' }] };
+  }
+}
+
 /** 生产 statusView 投影（Main 假驱动调一次 task_status）。 */
-async function taskStatusOf(registry: TaskRegistry, ref: string): Promise<Record<string, unknown>> {
+async function projectedStatusOf(registry: TaskRegistry, ref: string): Promise<Record<string, unknown>> {
   let captured: unknown;
   const mainDriver: TurnDriver = {
     async run(input) {
@@ -362,7 +385,7 @@ async function callMainTool(input: {
 
 /**
  * 生产失败分类输入：底账执行事实里**第一条** failed/refused 行的 error.code
- * （镜像 apps/server/server.ts#failureCodeOf；码只用于归类，不进用户文本）。
+ * （镜像 apps/server/server.ts#failureCodeOf；码只用于兜底选档，不进用户文本）。
  */
 function failureCodeOf(task: TaskRecord): string | undefined {
   const failed = task.executions.find(
@@ -375,14 +398,12 @@ function failureCodeOf(task: TaskRecord): string | undefined {
 }
 
 /**
- * 生产失败话术（单一来源 + 我方故障改判）：镜像 apps/server/task-completion-delivery.ts#failureTextFor。
- * 任务终局 failed 时**没有**等待中的提案/句柄——归类落到 needs_confirmation/needs_input 会被改判
- * host_fault（否则「回确认/补一句」是假承诺）。本函数不新造话术，只用 user-facing-failure 的两个函数。
+ * 生产失败话术（单一来源）：镜像 apps/server/task-completion-delivery.ts#failureFallbackFactText
+ * 的选档（2026-11-24 删码表后）——只认宿主自己的码（result_unknown → unknown_result、
+ * 协议违约/句柄丢失 → host_fault），其余一律通用「没办成」。本函数不新造话术。
  */
 function userFailureFor(task: TaskRecord): UserFacingFailure {
-  const kind = classifyFailure({ code: failureCodeOf(task), status: 'failed' });
-  const safeKind = kind === 'needs_confirmation' || kind === 'needs_input' ? 'host_fault' : kind;
-  return failureMessageFor(safeKind);
+  return failureMessageFor(fallbackFailureKindOf(failureCodeOf(task)));
 }
 
 /** 用户可见面（写确认提案卡）文案：唯一话术来源 = failureMessageFor('needs_confirmation', {summary})。 */
@@ -408,13 +429,15 @@ describe('模型走岔路（确定性脚本模型）', () => {
       client,
       registry,
       // live 真实序列：prepare → proposal(completed) → proposal-commit(refused ×2) → query(completed)
-      worker: scriptWorker([[PREPARE('alpha'), PROPOSAL, PROPOSAL_COMMIT, PROPOSAL_COMMIT, QUERY]], capture),
+      // 第二次 proposal-commit 换 proposal-id：逐字重复会被 A2b 同参数锁拦在宿主侧（那条覆盖见
+      // deterministic-failure-guard）；本用例钉的是「撞了历史协议，提案仍不丢」。
+      worker: scriptWorker([[PREPARE('alpha'), PROPOSAL, PROPOSAL_COMMIT, PROPOSAL_COMMIT_2, QUERY]], capture),
     });
     await runBackground(registry, executor, 't_detour');
 
     const task = registry.get('t_detour', SCOPE);
     // ② 任务不被误判终态：拿到过提案 → 必须 waiting_user（不是 failed）。
-    expect(task.status).toBe('waiting_user');
+    expect(task.pendingQuestion).toBeDefined();
     // ① 用户拿到可执行下一步：底账提案句柄 + 摘要都在。
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_live_handle');
     expect(task.pendingQuestion?.confirmation?.summary).toBe('「alpha」将被覆盖，不可撤销');
@@ -422,8 +445,8 @@ describe('模型走岔路（确定性脚本模型）', () => {
     // ④ 用户可见面无内部词。
     assertUserVisibleClean(proposalCardText(task));
     // 2026-11-20：数字 ref 退役，按真实 taskId 投影（断言不变）。
-    const projected = await taskStatusOf(registry, 't_detour');
-    expect(projected.status).toBe('waiting_user');
+    const projected = await projectedStatusOf(registry, 't_detour');
+    expect(projected.waiting).toBe(true);
     expect(JSON.stringify(projected)).toContain('「alpha」将被覆盖，不可撤销');
     expect(JSON.stringify(projected)).not.toContain('cf_');
     expect(JSON.stringify(projected)).not.toContain('handle');
@@ -449,8 +472,8 @@ describe('模型走岔路（确定性脚本模型）', () => {
     await runBackground(registry, executor, 't_noprop');
 
     const task = registry.get('t_noprop', SCOPE);
-    // ② 没有提案可等 → 不落 waiting_user。
-    expect(task.status).toBe('failed');
+    // ② 没有提案可等 → 不落 waiting_user；执行行是 refused（机械事实）。
+    expect(['failed', 'refused']).toContain(lastExecutionOf(task)?.status);
     expect(task.pendingQuestion).toBeUndefined();
     // 执行层确被真实调用 1 次（不是宿主预拦）。
     expect(client.calls.map((call) => call.operation)).toEqual(['dummy.commit']);
@@ -458,7 +481,11 @@ describe('模型走岔路（确定性脚本模型）', () => {
     // ① 失败话术带一个动作；④ 无内部词。
     const failure = userFailureFor(task);
     expect(failure.actions.length).toBeGreaterThan(0);
-    expect(failure.kind).toBe('host_fault');
+    // 2026-11-24 删码表：CONFIRMATION_REQUIRED 是执行层语义码，宿主不认 → 通用「没办成」档
+    // （不再有 needs_confirmation→host_fault 的改判）。用户级不变量不变：话术绝不是
+    // 「等你确认」——用户回「确认」什么都不会发生，那是假承诺。
+    expect(failure.kind).toBe('executor_failed');
+    expect(failure.text).not.toContain('确认');
     assertUserVisibleClean(failure.text);
   });
 
@@ -475,13 +502,13 @@ describe('模型走岔路（确定性脚本模型）', () => {
     await runBackground(registry, executor, 't_dup');
 
     const task = registry.get('t_dup', SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(task.pendingQuestion).toBeDefined();
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_dup_2');
     // ③ 执行事实 2 条、无第三条。
     expect(client.calls).toHaveLength(2);
     expect(task.executions).toHaveLength(2);
     // 旧句柄不再可见。（2026-11-20：数字 ref 退役，按真实 taskId 投影。）
-    const projected = await taskStatusOf(registry, 't_dup');
+    const projected = await projectedStatusOf(registry, 't_dup');
     expect(JSON.stringify(projected)).not.toContain('cf_');
     expect(JSON.stringify(projected)).not.toContain('handle');
   });
@@ -499,14 +526,14 @@ describe('模型走岔路（确定性脚本模型）', () => {
     await runBackground(registry, executor, 't_reprep');
 
     const task = registry.get('t_reprep', SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(task.pendingQuestion).toBeDefined();
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_2');
     expect(task.pendingQuestion?.confirmation?.summary).toBe('「beta」将被覆盖，不可撤销');
     // 旧句柄 cf_1 不再出现在用户可见文本与投影里；新摘要来自 B。
     assertUserVisibleClean(proposalCardText(task));
     expect(proposalCardText(task)).toContain('beta');
     // 2026-11-20：数字 ref 退役，按真实 taskId 投影（断言不变）。
-    const projected = JSON.stringify(await taskStatusOf(registry, 't_reprep'));
+    const projected = JSON.stringify(await projectedStatusOf(registry, 't_reprep'));
     expect(projected).toContain('beta');
     expect(projected).not.toContain('cf_1');
     expect(projected).not.toContain('cf_');
@@ -521,7 +548,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     const client = new AdversarialClient(() => 'cf_guard');
     const executor = await makeExecutor({ client, registry, worker: scriptWorker([[PREPARE('alpha')]], capture) });
     await runBackground(registry, executor, 't_guard');
-    expect(registry.get('t_guard', SCOPE).status).toBe('waiting_user');
+    expect(registry.get('t_guard', SCOPE).pendingQuestion).toBeDefined();
     const before = registry.list(SCOPE).length;
 
     const result = await callMainTool({ registry, tool: 'task_run', args: { task: '再把 alpha 提交一次' } });
@@ -550,7 +577,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
 
     const task = registry.get('t_norehit', SCOPE);
     // ② 任务落终态 failed 是**正确**判定（执行层确已确定性拒绝）。
-    expect(task.status).toBe('failed');
+    expect(['failed', 'refused']).toContain(lastExecutionOf(task)?.status);
     // ③ 执行层只被真正调用 1 次。
     expect(client.calls.filter((call) => call.operation === 'dummy.denied')).toHaveLength(1);
     // 宿主侧留下可见的拦截事实（运维面 execution_retry_blocked）。
@@ -581,7 +608,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     await runner.whenIdle();
 
     const task = registry.get('t_nonconfirm', SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(task.pendingQuestion).toBeDefined();
     // 新提案替换旧提案（句柄是新的）。
     expect(task.pendingQuestion?.confirmation?.handle).toBe('cf_2');
     // 旧句柄不得出现在新回合的 execute 调用里（不当「已确认」复用）。
@@ -605,7 +632,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     });
     await runBackground(registry, executor, 't_needsthenwrite');
     const task = registry.get('t_needsthenwrite', SCOPE);
-    expect(task.status).toBe('completed');
+    expect(lastExecutionOf(task)?.status).toBe('completed');
     expect(task.pendingQuestion).toBeUndefined();
   });
 
@@ -620,7 +647,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     });
     await runBackground(registry, executor, 't_needsinput');
     const task = registry.get('t_needsinput', SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(task.pendingQuestion).toBeDefined();
     expect(task.pendingQuestion?.missing).toEqual(['合同编号']);
   });
 
@@ -644,8 +671,9 @@ describe('模型走岔路（确定性脚本模型）', () => {
     });
     await runBackground(registry, executor, 't_failthenscript');
     const task = registry.get('t_failthenscript', SCOPE);
-    expect(task.status).toBe('failed');
-    expect(task.failureReason ?? '').toContain('dummy.denied');
+    // 决定性业务行是 refused（行账后一条成功的 run_js 不翻案）。
+    expect(lastFailureOf(task)?.status).toBe('refused');
+    expect(lastFailureOf(task)?.error?.message).toBe('denied');
     // 两条执行事实都保留（如实底账：拒绝在先、脚本成功在后）。
     expect(task.executions.map((execution) => [execution.operation, execution.status]))
       .toEqual([['dummy.denied', 'refused'], ['run_js', 'completed']]);
@@ -670,7 +698,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     });
     await runBackground(registry, executor, 't_askthenscript');
     const task = registry.get('t_askthenscript', SCOPE);
-    expect(task.status).toBe('waiting_user');
+    expect(task.pendingQuestion).toBeDefined();
     expect(task.pendingQuestion?.missing).toEqual(['合同编号']);
   });
 
@@ -693,8 +721,9 @@ describe('模型走岔路（确定性脚本模型）', () => {
     });
     await runBackground(registry, executor, 't_writethenscript');
     const task = registry.get('t_writethenscript', SCOPE);
-    expect(task.status).toBe('completed');
-    expect(task.failureReason).toBeUndefined();
+    // 只读集合按本装配声明传入（旧后台 lastWritable 同一判据）：脚本失败不改写已落库的写。
+    expect(task.executions.find((execution) => execution.operation === 'dummy.proposal')?.status).toBe('completed');
+    expect(task.executions.find((execution) => execution.operation === 'dummy.proposal')?.error).toBeUndefined();
     // 审计保留：脚本失败是真实执行事实，只是不改写业务终局。
     expect(task.executions.map((execution) => [execution.operation, execution.status]))
       .toEqual([['dummy.proposal', 'completed'], ['run_js', 'failed']]);
@@ -719,8 +748,68 @@ describe('模型走岔路（确定性脚本模型）', () => {
     });
     await runBackground(registry, executor, 't_querythenscript');
     const task = registry.get('t_querythenscript', SCOPE);
-    expect(task.status).toBe('failed');
-    expect(task.failureReason ?? '').toContain('run_js');
+    expect(['failed', 'refused']).toContain(lastExecutionOf(task)?.status);
+    expect(lastFailureOf(task)?.error?.message ?? '').toContain('run_js');
+  });
+
+  it('⑭ 先拒 alpha、后完成一个无集合参数的写：alpha 的拒绝码仍浮出（不按顺序洗白）', async () => {
+    // 旧顺序特例（2026-11-22 Grok 复审修法）：「倒序遇到最后一条 completed 业务写即止」——
+    // 它把更早的失败静默吞掉。现在只机械取末条失败业务写的码，与顺序无关：alpha 的拒绝照样
+    // 浮出，后面那笔 proposal 成功也不翻案。
+    // 「同参数先失败后成功」的回合事实由 ⑳ 钉住。
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = new AdversarialClient();
+    const executor = await makeExecutor({
+      client,
+      registry,
+      worker: scriptWorkerMixed([
+        [
+          { tool: EXECUTE_OPERATION_TOOL, args: DENIED('alpha') },
+          { tool: EXECUTE_OPERATION_TOOL, args: PROPOSAL },
+        ],
+      ], capture),
+    });
+    const runner = await runBackground(registry, executor, 't_failthenok');
+    const task = registry.get('t_failthenok', SCOPE);
+    // 账本如实保留两条执行事实：业务拒绝在先、业务写成功在后。
+    expect(task.executions.map((execution) => [execution.operation, execution.status]))
+      .toEqual([['dummy.denied', 'refused'], ['dummy.proposal', 'completed']]);
+    // 2026-11-23 去 outcome：回合收尾只记事实——有汇报就存档（交给唤醒面喂 Main），
+    // 宿主不再产出 success/failed/refused 这类回合级结局词（键不在；兜底话术按原始执行事实选）。
+    const round = runner.roundOutcomeOf?.('t_failthenok');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    expect(Object.keys(round)).not.toContain('executionOutcome');
+    expect((round.report ?? '').trim()).not.toBe('');
+    // alpha 的拒绝是末条失败业务写：失败码如实浮出，兜底不得说「办好了」（无 partial 字段）。
+    expect(round.errorCode).toBe('GATE_REFUSE');
+    expect(lastExecutionOf(task)?.status).toBe('completed');
+  });
+
+  it('⑮ needs_input 没说清缺什么：只落事实（不编造问题形状），不冒充办好了', async () => {
+    // 2026-11-22 Grok 复审恢复的问题（等待事实形状不完整时不能当完成/编造问题）在
+    // 2026-11-23 去 outcome 后由**事实面**承接：回合带机械原因（缺什么没说清），宿主兜底
+    // 话术按它走既有失败话术（server fallbackFactTextOf 的 reason 分支），不会说「办好了」。
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const executor = await makeExecutor({
+      client: new BareNeedsInputClient(),
+      registry,
+      worker: scriptWorker([[ASK]], capture),
+    });
+    const runner = await runBackground(registry, executor, 't_bareneeds');
+    const task = registry.get('t_bareneeds', SCOPE);
+    // 等待事实形状不完整 → 不落 pendingQuestion（不编造问题形状）。
+    expect(task.pendingQuestion).toBeUndefined();
+    // 汇报**原样存档**（宿主不判它是不是「对失败的说明」；做没做成由 Main 读账本事实自己判）。
+    expect((task.resultText ?? task.replyText ?? '').trim()).not.toBe('');
+    const round = runner.roundOutcomeOf?.('t_bareneeds');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    // 只记事实：没有回合级结局词；机械原因说明缺什么没说清（兜底话术据此不冒充「办好了」）。
+    expect(Object.keys(round)).not.toContain('executionOutcome');
+    expect(round.failureReason).toContain('没有说清缺什么');
   });
 
   it('⑬ 确认回合重提：宿主注入的确认句柄不得落进底账提案载荷，也不得进下一轮委派正文', async () => {
@@ -744,7 +833,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     const runner = await runBackground(registry, executor, 't_handle_leak');
 
     const first = registry.get('t_handle_leak', SCOPE);
-    expect(first.status).toBe('waiting_user');
+    expect(first.pendingQuestion).toBeDefined();
     expect(first.pendingQuestion?.confirmation?.handle).toBe('cf_leak_1');
     // 首轮提案：宿主此时没有句柄可注入，载荷就是业务字段。
     expect(first.pendingQuestion?.confirmation?.args).toEqual({ '--collection': 'alpha' });
@@ -754,7 +843,7 @@ describe('模型走岔路（确定性脚本模型）', () => {
     expect(confirmed.outcome).toBe('started');
     await runner.whenIdle();
     const second = registry.get('t_handle_leak', SCOPE);
-    expect(second.status).toBe('waiting_user');
+    expect(second.pendingQuestion).toBeDefined();
     expect(second.pendingQuestion?.confirmation?.handle).toBe('cf_leak_2');
     // 本 blocking 的判据：确认回合的提案载荷不得含宿主注入的确认句柄（只留业务字段）。
     expect(second.pendingQuestion?.confirmation?.args).toEqual({ '--collection': 'alpha' });
@@ -764,5 +853,177 @@ describe('模型走岔路（确定性脚本模型）', () => {
     expect(confirmedAgain.outcome).toBe('started');
     await runner.whenIdle();
     expect((capture.delegations ?? []).join('\n')).not.toContain('cf_leak_');
+  });
+});
+
+/**
+ * D1（2026-11-23 收尾；2026-11-24 「成败归模型」再收口）：回合只带**末条失败业务写的原始事实**
+ * （code/reason；只读失败与 run_js 不算），没有成败结论、没有 partial、**不按对象分组**
+ * （对象名刮擦已随 O-9 删除）：
+ *   · 有失败/拒绝的业务写 → 取末条那笔的 code/message（兜底据此不说「办好了」）；
+ *   · 失败的都只是只读/脚本而有业务写已落地 → 不带失败码（只读失败不翻盘，否则诱导双写）；
+ *   · 没有失败 → 照搬汇报原文。
+ * 做没做成由 Main 读账本逐条执行事实自己判。
+ * 反向绊线：改回「只看最后一条成功写」→ ⑲（先拒 beta 再成功 alpha）必红；
+ * 把只读失败当业务写失败 → ⑰/㉒ 必红；按对象配对洗绿 → ⑯/⑳ 必红。
+ */
+describe('D1 业务写失败事实：末条失败写的原始码浮出，只读失败不翻盘', () => {
+  /** 确认回合：首回合提案 → 确认回合跑给定调用（返回回合事实与任务行）。 */
+  async function confirmRound(input: {
+    taskId: string;
+    calls: ReadonlyArray<Record<string, unknown>>;
+    client?: AdversarialClient;
+  }): Promise<{ runner: TaskRunner; task: TaskRecord }> {
+    const registry = makeRegistry();
+    const capture: WorkerCapture = { results: [] };
+    const client = input.client ?? new AdversarialClient();
+    const executor = await makeExecutor({
+      client,
+      registry,
+      worker: scriptWorker([[PREPARE('alpha')], [...input.calls]], capture),
+    });
+    const runner = await runBackground(registry, executor, input.taskId);
+    expect(registry.get(input.taskId, SCOPE).pendingQuestion?.confirmation?.handle).toBeDefined();
+    const confirmed = runner.confirm(input.taskId, { userText: '确认', scope: SCOPE });
+    expect(confirmed.outcome).toBe('started');
+    await runner.whenIdle();
+    return { runner, task: registry.get(input.taskId, SCOPE) };
+  }
+
+  it('⑯ 已落库写之后写失败（重复尝试）：失败码如实浮出，兜底不说「办好了」', async () => {
+    const client = new AdversarialClient();
+    const { runner, task } = await confirmRound({
+      taskId: 't_d1_same_object',
+      client,
+      calls: [COMMIT('alpha'), DENIED('alpha')],
+    });
+    // 重复尝试真的打到执行层（不是宿主预先挡掉），逐条留账。
+    expect(client.calls.map((call) => call.operation)).toEqual(['dummy.prepare', 'dummy.commit', 'dummy.denied']);
+    expect(task.executions.slice(-2).map((execution) => [execution.operation, execution.status]))
+      .toEqual([['dummy.commit', 'completed'], ['dummy.denied', 'refused']]);
+// 新口径（2026-11-24 owner 裁定「宿主不管成败」）：回合只带**末条失败业务写的原始事实**（code/reason；
+    // 只读失败与 run_js 不算），没有 partial、没有成败词。兜底面见到失败码就不说「办好了」；
+    // 没有失败码才照搬汇报原文。做没做成归 Main 读账本自己判。
+    const round = runner.roundOutcomeOf?.('t_d1_same_object');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    // 已知代价（owner 2026-11-24 接受）：重试的拒绝现在也让兜底说「说不清，请核对」，
+    // 而不再靠「同一对象所以不翻盘」洗绿——身份判定整台删了，宁可啰嗦不可骗人。
+    expect(round.errorCode).toBe('GATE_REFUSE');
+  });
+
+  it('⑰ 已落库写之后只读核对失败：不翻盘（只读失败不是另一个写没成）', async () => {
+    const client = new AdversarialClient();
+    const { runner, task } = await confirmRound({
+      taskId: 't_d1_read_only',
+      client,
+      calls: [COMMIT('alpha'), QUERY_FAILED],
+    });
+    expect(task.executions.slice(-2).map((execution) => [execution.operation, execution.status]))
+      .toEqual([['dummy.commit', 'completed'], ['dummy.query', 'failed']]);
+    const round = runner.roundOutcomeOf?.('t_d1_read_only');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    // 只读失败不是业务写失败：不浮出失败码（写已落地，不能说成「没办成」诱导重试双写）。
+    expect(round.errorCode).toBeUndefined();
+  });
+
+  it('⑱ 已落库写之后异对象写失败：末条失败写的码如实浮出（不再有 partial 字段）', async () => {
+    const client = new AdversarialClient();
+    const { runner, task } = await confirmRound({
+      taskId: 't_d1_other_object',
+      client,
+      calls: [COMMIT('alpha'), DENIED('beta')],
+    });
+    expect(task.executions.slice(-2).map((execution) => [execution.operation, execution.status]))
+      .toEqual([['dummy.commit', 'completed'], ['dummy.denied', 'refused']]);
+    const round = runner.roundOutcomeOf?.('t_d1_other_object');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    // 末条失败业务写的原始码（兜底归类用）；「哪件成了、哪件没成」由 Main 读账本逐条说。
+    expect(round.errorCode).toBe('GATE_REFUSE');
+  });
+
+  it('⑲ 先拒 beta 再成功 alpha：beta 的拒绝码仍浮出（不因 alpha 后来成功被洗白）', async () => {
+    // grok major 反例：顺序特例会静默兜底说「办好了」，可 beta 没成。现在不按对象结算，
+    // 只机械取末条失败业务写的码——beta 的拒绝照样浮出，与顺序无关。
+    const client = new AdversarialClient();
+    const { runner, task } = await confirmRound({
+      taskId: 't_d1_other_object_reversed',
+      client,
+      calls: [DENIED('beta'), COMMIT('alpha')],
+    });
+    expect(client.calls.map((call) => call.operation)).toEqual(['dummy.prepare', 'dummy.denied', 'dummy.commit']);
+    expect(task.executions.slice(-2).map((execution) => [execution.operation, execution.status]))
+      .toEqual([['dummy.denied', 'refused'], ['dummy.commit', 'completed']]);
+    const round = runner.roundOutcomeOf?.('t_d1_other_object_reversed');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    // 末条失败业务写（beta/GATE_REFUSE）如实浮出。
+    expect(round.errorCode).toBe('GATE_REFUSE');
+  });
+
+  it('⑳ 先失败后成功：失败码仍浮出（身份判定已删，兜底说「说不清」而不是洗绿）', async () => {
+    const client = new AdversarialClient();
+    const { runner } = await confirmRound({
+      taskId: 't_d1_same_object_retry',
+      client,
+      calls: [DENIED('alpha'), COMMIT('alpha')],
+    });
+// 新口径（2026-11-24 owner 裁定「宿主不管成败」）：回合只带**末条失败业务写的原始事实**（code/reason；
+    // 只读失败与 run_js 不算），没有 partial、没有成败词。兜底面见到失败码就不说「办好了」；
+    // 没有失败码才照搬汇报原文。做没做成归 Main 读账本自己判。
+    const round = runner.roundOutcomeOf?.('t_d1_same_object_retry');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    expect(round.errorCode).toBe('GATE_REFUSE');
+  });
+
+  it('㉑ 取不到对象名的写失败 + 另一个对象写成功：失败不洗白，兜底绝不输出「办好了」', async () => {
+    const client = new AdversarialClient();
+    const { runner } = await confirmRound({
+      taskId: 't_d1_unlabeled_failure',
+      client,
+      calls: [DENIED_UNLABELED, COMMIT('alpha')],
+    });
+    const round = runner.roundOutcomeOf?.('t_d1_unlabeled_failure');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    // 末条失败业务写的码（无标签也照样浮出；不再有对象账本，也没有 partial）。
+    expect(round.errorCode).toBe('GATE_REFUSE');
+    // 生产兜底按宿主自认码选档（GATE_REFUSE 不是宿主码 → 通用「没办成」），用户看到的不是「办好了」。
+    const fallback = failureMessageFor(fallbackFailureKindOf(round.errorCode)).text;
+    expect(fallback).not.toContain('办好了');
+    expect(fallback).not.toContain('再试一次');
+  });
+
+  it('㉒ 无对象标签的写成功后只读失败：写已锚定回合，不报整单失败（否则用户重试 = 双写）', async () => {
+    const client = new AdversarialClient();
+    const { runner } = await confirmRound({
+      taskId: 't_d1_unlabeled_success',
+      client,
+      calls: [PROPOSAL, QUERY_FAILED],
+    });
+    const round = runner.roundOutcomeOf?.('t_d1_unlabeled_success');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    // 只读失败不算业务写失败：写已落地，不能说成「没办成」诱导用户重试双写。
+    expect(round.errorCode).toBeUndefined();
+  });
+
+  it('㉓ 无对象标签的写先失败后成功：失败码照样浮出（不再按身份配对洗绿）', async () => {
+    const client = new AdversarialClient();
+    const { runner } = await confirmRound({
+      taskId: 't_d1_unlabeled_retry',
+      client,
+      calls: [DENIED_UNLABELED, PROPOSAL],
+    });
+// 新口径（2026-11-24 owner 裁定「宿主不管成败」）：回合只带**末条失败业务写的原始事实**（code/reason；
+    // 只读失败与 run_js 不算），没有 partial、没有成败词。兜底面见到失败码就不说「办好了」；
+    // 没有失败码才照搬汇报原文。做没做成归 Main 读账本自己判。
+    const round = runner.roundOutcomeOf?.('t_d1_unlabeled_retry');
+    expect(round?.kind).toBe('ended');
+    if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    expect(round.errorCode).toBe('GATE_REFUSE');
   });
 });

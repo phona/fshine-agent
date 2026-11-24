@@ -166,7 +166,7 @@ describe('批量写逐条结果（契约 v4）', () => {
     await runner.whenIdle();
 
     const task = registry.get('T', SCOPE);
-    expect(task.status).toBe('completed');
+    // 底账无 status：完成事实读汇报存档（replyText 落行即完成事实）。
     expect(task.replyText).toContain('未完成 1 条');
     // 逐条结果原样保留在 Worker 的工具结果里（模型据此如实说「完成 X、未完成 Y」）。
     const result = captured[0] as { items?: Array<{ index: number; status: string; reason?: string }> };

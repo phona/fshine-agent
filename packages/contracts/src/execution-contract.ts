@@ -207,7 +207,7 @@ export interface ExecutionItemResult {
  * 执行结果。
  *   · completed——执行完成（不代表业务副作用已验证生效：readback 归写切片）。
  *     `items`（可选）= 批量写的逐条真实结果；只要有一条 failed/unknown，模型必须如实
- *     说明「完成 X、未完成 Y」，不得把整体说成单纯成功（任务结局仍是 completed）。
+ *     说明「完成 X、未完成 Y」，不得把整体说成单纯成功（仍只是一批执行行的结果，不得把整体说成单纯成功（宿主不聚合任务级结局词））。
  *   · needs_confirmation——执行层已冻结一次待确认操作，confirmation 给出句柄与机械摘要；
  *     这不是「缺输入」，也不是宿主计划门：是否继续由用户在下一回合表态，执行层校验句柄。
  *   · needs_input——执行层要求补充输入，missing 非空。

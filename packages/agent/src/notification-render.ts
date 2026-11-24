@@ -2,9 +2,9 @@
  * R5 通知文案渲染（纯函数；零数据库/渠道依赖）。
  *
  * 规则（owner 授权文案层）：
- *   · 9 类 kind 折叠成 4 类用户语言：开始办了 / 需要你一句话 / 办完了·没办成 / 已按你说的停了；
- *     2026-11-19 唤醒切片起：**失败与「用户说停」由唤醒出口让模型说**，这里的对应文案只作
- *     「模型回合挂掉」的降级兜底（见 server 的 wakeStateChangeText 与 chat sink 的 wakeCancelled）；
+ *   · 7 类事件 kind 折叠成用户语言（开始办了 / 需要你一句话 / 已按你说的停了 / 超时 / 资源拒绝）；
+ *     **没有 completed/failed**（2026-11-23 删状态机轮）：完成由完成投递/唤醒面读汇报原文说，
+ *     失败由失败唤醒面读执行事实说——渲染器不再把事件说成「办完了/没办成」的任务级结论；
  *   · reason 人话映射且失败分级：result_unknown 必须说「不确定做没做完，需要再确认」（严禁读作成功）；
  *   · 内部术语黑名单机械断言：渲染器拼装的文本不得含 task_status/resource_limited/requestId/
  *     uuid/request_N/绝对路径/W 窗口码（name 与写确认 summary 都是执行层/用户原话，按规则原样
@@ -50,10 +50,9 @@ const NAME_PLACEHOLDER = '\u0000name\u0000';
 /** reason → 用户语言（失败分级；result_unknown 不读作成功）。 */
 const REASON_TEXT: Record<NotificationReason, string> = {
   result_unknown: '不确定做没做完，需要再确认',
-  resource_limited: '系统太忙，这个没接',
-  timeout: '跑太久先停了',
-  cancelled_by_user: '已按你说的停了',
-  failed_confirmed: '没办成',
+  capacity_blocked: '系统太忙，这个没接',
+  deadline_reached: '跑太久先停了',
+  user_stop: '已按你说的停了',
 };
 
 /** name 用户原话占位替换后的模板先行黑名单断言，再回填 name。 */
@@ -62,7 +61,7 @@ function assemble(template: string, name: string): string {
   return template.split(NAME_PLACEHOLDER).join(name);
 }
 
-/** 一条通知 → 用户语言字符串（kind 9→4 折叠；输入仅 payload 白名单字段）。 */
+/** 一条通知 → 用户语言字符串（输入仅 payload 白名单字段；不产出「完成/失败」结论）。 */
 export function renderNotification(input: { kind: NotificationKind; payload: NotificationPayload }): string {
   const name = input.payload.name !== undefined && input.payload.name.trim() !== ''
     ? input.payload.name
@@ -86,27 +85,23 @@ export function renderNotification(input: { kind: NotificationKind; payload: Not
         name,
       );
     }
-    case 'completed':
-      return assemble(`办完了：${NAME_PLACEHOLDER}。`, name);
-    case 'failed':
-      return assemble(`${REASON_TEXT[reason ?? 'failed_confirmed']}：${NAME_PLACEHOLDER}。`, name);
-    case 'timed_out':
-      return assemble(`${REASON_TEXT.timeout}：${NAME_PLACEHOLDER}。`, name);
-    case 'resource_limited':
+    case 'deadline_reached':
+      return assemble(`${REASON_TEXT.deadline_reached}：${NAME_PLACEHOLDER}。`, name);
+    case 'capacity_blocked':
       return resourceLimitedText(name);
-    case 'cancelled':
-      return assemble(`${REASON_TEXT.cancelled_by_user}：${NAME_PLACEHOLDER}。`, name);
+    case 'user_stop':
+      return assemble(`${REASON_TEXT.user_stop}：${NAME_PLACEHOLDER}。`, name);
   }
 }
 
 /**
  * 资源受限（池满/队列满的确定性拒绝）的既有用户文案——渲染器是唯一来源；失败降级出口
- * 对「reason=resource_limited 的失败」复用同一句（2026-11-19 只读审计 #18：此前那类失败
+ * 对「reason=capacity_blocked 的失败」复用同一句（2026-11-19 只读审计 #18：此前那类失败
  * 在模型沉默时拿到的是「没办成。再试一次，还是先放着？」——不是这件事的实话）。
  * 尾句 = 既有动作句（「再试一次，还是先放着？」的等一会儿版：资源受限的实话是等一下，
  * 不是立刻重试）——owner 的归宿规则要求「一句话 + 一个动作」，资源类失败落在「告诉用户」档。
  */
 export function resourceLimitedText(name?: string): string {
   const subject = name !== undefined && name.trim() !== '' ? name : '未命名任务';
-  return assemble(`${REASON_TEXT.resource_limited}：${NAME_PLACEHOLDER}。等一会儿再试一次，还是先放着？`, subject);
+  return assemble(`${REASON_TEXT.capacity_blocked}：${NAME_PLACEHOLDER}。等一会儿再试一次，还是先放着？`, subject);
 }

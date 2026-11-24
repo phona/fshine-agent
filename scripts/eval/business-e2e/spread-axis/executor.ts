@@ -22,8 +22,7 @@ import type { TurnDriver, TurnDriverInput } from '../../../../packages/agent/src
 import { createResourcePolicy } from '../../../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry } from '../../../../packages/agent/src/task-registry-sqlite';
 import { defaultMainSkillsDir, loadMainSkillDelivery } from '../../../../packages/agent/src/worker-skills';
-import { notificationKindForTransition } from '../../../../packages/agent/src/notifications';
-import type { NotificationReason } from '../../../../packages/agent/src/notifications';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../../packages/agent/testing/task-facts';
 import { materializeEvalConfig } from '../../../resolve-config-path';
 import {
   assembleSessionCore,
@@ -34,6 +33,7 @@ import {
 import type { DriverFactory, ExecutionFaceFactory } from '../../../ask-runtime';
 import { assessEvalIsolation, assertEvalIsolation } from '../../safety-gate';
 import type { SampleRecord } from '../judge';
+import { isNotificationFact, notificationLineOf, taskFactLineOf } from '../task-facts-collect';
 import type { NotificationLine, TaskFactLine } from '../collect';
 import type { InputsFile, MetaFile, MetaTurn, ReplyLine, TaskRecordJson, ToolCallRecord } from '../../convergence-r1/evidence';
 import { buildDsSample } from './grade';
@@ -202,10 +202,15 @@ export function createDsExecutor(options: DsExecutorOptions = {}): DsExecutor {
     const policy = createResourcePolicy(runtime);
     const taskFacts: TaskFactLine[] = [];
     const notifications: NotificationLine[] = [];
+    // 事实模型：底账只发机械事实（无 from/to/reason）。事件 → **事实增量**（启动/结束/汇报/等待），
+    // 供 d6 度量按事实口径读（不合成任务级状态词；不再区分「怎么结束」）。
+    // 映射表与投影在 task-facts-collect.ts（按 TaskEventKind 穷尽；2026-11-24 grok blocking：
+    // 两份各自维护的副本在终局事件改名后都没跟上，取消/到点/容量拒绝被采集成「还没结束」）。
     registry.onTaskFact((fact) => {
-      taskFacts.push({ ts: fact.at, taskId: fact.taskId, from: fact.from ?? '', to: fact.to, ...(fact.reason === undefined ? {} : { reason: fact.reason }) });
-      const kind = notificationKindForTransition(fact.from, fact.to, fact.reason as NotificationReason | undefined);
-      if (kind !== undefined) notifications.push({ ts: fact.at, taskId: fact.taskId, kind });
+      taskFacts.push(taskFactLineOf(fact));
+      if (isNotificationFact(fact.event)) {
+        notifications.push(notificationLineOf(fact));
+      }
     });
     try {
       const face = await resolveExecutionFace({
@@ -282,7 +287,7 @@ export function createDsExecutor(options: DsExecutorOptions = {}): DsExecutor {
         metaTurns.push({ index: turn, durationMs, modelCalls: assistantMessages.length, taskIds: [...(result?.taskIds ?? [])], tokens, retries: 0, notes: [] });
         replies.push({ turn, text: result?.reply ?? '', sha256: '' });
       }
-      const tasks = jsonSafe(session.tasks()) as TaskRecordJson[];
+      const tasks = jsonSafe(session.tasks().map((task) => ({ ...task, started: taskStartedOf(task), reported: taskReportedOf(task), waiting: taskWaitingOf(task), mayBeRunning: taskMayBeRunningOf(task) }))) as TaskRecordJson[];
       const auditLines = existsSync(assembled.auditPath)
         ? readFileSync(assembled.auditPath, 'utf8').trimEnd().split('\n').filter((l) => l !== '')
         : [];

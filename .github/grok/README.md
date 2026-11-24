@@ -6,6 +6,10 @@
 
 检查名是 `Grok PR review / grok-pr-review`。本仓库不在这里改分支保护。
 
+## agentic 文件审查
+
+prompt 不再内联 diff：大 diff 塞不下一份 prompt，还会在读完之前撞 turn 上限被取消。`build-prompt.mjs` 只给「审查要求 + 改动文件清单 + 每个文件的 stat」，并在 prompt 里说明 PR head 已 checkout 到工作目录，让 grok 用只读文件工具（`read_file` / `grep` / `list_dir`）按需读文件，用 `git diff --find-renames <base>...<head> -- <path>`、`git show <head>:<path>` 看具体改动。workflow 用 `--permission-mode auto`：只读命令（含 `git show <sha>:<path> | sed` 这类管道读）自动放行，写命令仍需批准、非交互运行里会被拒，审查因此保持只读（`default` 会把管道读也拒掉，headless 无法批准导致审查 cancel）。一次 grok 调用出一份 review，不再分块、不合并：`extract-review.mjs` 抽 `structuredOutput`，`render-review.mjs` 校验并发布。
+
 ## 修复端政策
 
 上一节的行为保持不变：有 `blocking` 就 `REQUEST_CHANGES` 并把检查标红，没有 `blocking` 就 `COMMENT`，不自动 `APPROVE`。不要为了少刷审查去改触发器、concurrency、失败条件或 `render-review.mjs` 的严重级别映射。

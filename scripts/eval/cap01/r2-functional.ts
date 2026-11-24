@@ -42,8 +42,9 @@
  * 无 LLM_API_KEY 或显式 --scripted 时降级脚本化驱动（同一段断言原样跑），报告写 model=scripted。
  * 真实回合中途失败一律如实记 FAIL，不静默降级、不重试换样本。
  *
- * 委派任务行的合法终态说明：inline 委派里 Worker 汇报但零执行落 `unexecuted`（task-registry.ts:53
- * 「已汇报零执行」）——R2 把「存在任务行」本身当断言对象（S3 必须交办），不判其终态。
+ * 委派任务行的机械事实说明：inline 委派里 Worker 汇报但零执行时，汇报不覆盖执行事实
+ * （`unexecuted` 这个结论词已删，底账只留汇报与执行行）——R2 把「存在任务行」本身当断言
+ * 对象（S3 必须交办），不判其成败。
  *
  * 运行：
  *   node --env-file=<含 LLM_API_KEY 的 env> --import tsx scripts/eval/cap01/r2-functional.ts \
@@ -74,6 +75,7 @@ import { contextWindowFrom, compactionSettingsFrom } from '../../ask-runtime';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import { createServer, type FileDeliveryPort } from '../../../apps/server/server';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import { rowDataLeakDetail, scanRowDataLeakage } from './row-data-scan';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -709,7 +711,7 @@ async function runScenarioS3(scripted: boolean): Promise<ScenarioOutcome> {
   let fileRows: Array<{ fileId: string; taskId?: string; name: string; sha256: string; bytes: number }> = [];
   try {
     const registry = createSqliteTaskRegistry(harness.paths.dbPath, { readOnly: true });
-    taskRows = registry.list().map((task) => ({ taskId: task.taskId, request: task.request, status: task.status }));
+    taskRows = registry.list().map((task) => ({ taskId: task.taskId, request: task.request, started: taskStartedOf(task), reported: taskReportedOf(task), waiting: taskWaitingOf(task), mayBeRunning: taskMayBeRunningOf(task) }));
     fileRows = registry.store.listFileRefs({ principalId: PRINCIPAL_ID, sessionId: `wecom:${CONVERSATION_ID}` }).map((row) => ({
       fileId: row.fileId,
       ...(row.taskId !== undefined ? { taskId: row.taskId } : {}),

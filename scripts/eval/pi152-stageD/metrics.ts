@@ -78,9 +78,20 @@ function findTurn(groups: readonly GroupEvidence[], key: string, label: string):
   return undefined;
 }
 
+/** 任务事实标签（只拼账本事实：启动/结束/汇报/等待/可能还在跑 + 末条执行行；不判业务结论）。 */
+function taskFactLabel(task: TurnRecord['tasks'][number]): string {
+  const lastExecutionStatus = task.executions[task.executions.length - 1]?.status;
+  const reported = (task.resultText ?? task.replyText ?? '').trim() !== '';
+  if (task.waiting) return 'waiting';
+  if (task.mayBeRunning) return 'progressing';
+  if (reported) return `reported${lastExecutionStatus === undefined ? '' : `(${lastExecutionStatus})`}`;
+  if (task.endedAt !== null) return 'stopped';
+  return lastExecutionStatus ?? 'not-started';
+}
+
 function statusGroundTruth(turn: TurnRecord): string {
   if (turn.tasks.length === 0) return '本会话无任务';
-  return turn.tasks.map((task) => `#${task.taskNo ?? '?'} ${task.status}${task.reason === null ? '' : `/${task.reason}`}`).join('；');
+  return turn.tasks.map((task) => `#${task.taskNo ?? '?'} ${taskFactLabel(task)}${task.reason === null ? '' : `/${task.reason}`}`).join('；');
 }
 
 /** 去否定：'尚未完成'/'没有失败'/'无法取消' 不是状态断言。 */
@@ -233,10 +244,10 @@ export function computeMetrics(groups: readonly GroupEvidence[]): MetricsReport 
       : turn.tasks.filter((task) => turn.taskIds.includes(task.taskId));
     const target = referenced.length === 0 ? turn.tasks : referenced;
     let misreport = false;
-    if (claimsCancelled(turn.reply) && !target.some((task) => task.status === 'cancelled' || task.status === 'cancelling')) misreport = true;
-    if (claimsCompletion(turn.reply) && target.some((task) => task.status !== 'completed')) misreport = true;
-    if (claimsFailed(turn.reply) && target.every((task) => task.status === 'completed')) {
-      // 「失败」可能是对某个已失败任务的如实转述；只有任务全 completed 且回复仍在说失败才可疑。
+    if (claimsCancelled(turn.reply) && !target.some((task) => task.endedAt !== null && !task.reported)) misreport = true;
+    if (claimsCompletion(turn.reply) && target.some((task) => (task.resultText ?? task.replyText ?? '').trim() === '')) misreport = true;
+    if (claimsFailed(turn.reply) && target.every((task) => (task.resultText ?? task.replyText ?? '').trim() !== '')) {
+      // 「失败」可能是对某个已失败任务的如实转述；只有任务全部有汇报存档且回复仍在说失败才可疑。
       misreport = turn.taskIds.length > 0;
     }
     statusClaims.push({
@@ -409,13 +420,13 @@ export function computeMetrics(groups: readonly GroupEvidence[]): MetricsReport 
   if (c !== undefined) {
     const last = c.turns[c.turns.length - 1];
     const waiting = last?.tasks.find((task) => task.taskNo === 1);
-    if (waiting?.status === 'waiting_user') {
+    if (waiting?.waiting === true) {
       gaps.push('C「暂停与恢复」：task_resume 已调用并把 #1 置为 running，但 Worker 用 `--collection contoso`（歧义前缀）重查，任务又回到 waiting_user；没有取得最终结果。用户答复「用 trade 那一类」没有被 Worker 解析成 contoso-trade。');
     }
   }
   const dSessions = sessions.filter((session) => session.group === 'D');
   const bob = dSessions.find((session) => session.key === 'bob');
-  if (bob !== undefined && !bob.turns.some((turn) => turn.tasks.some((task) => task.status === 'failed'))) {
+  if (bob !== undefined && !bob.turns.some((turn) => turn.tasks.some((task) => task.executions.some((execution) => execution.status === 'failed')))) {
     gaps.push('D 故障注入未触发：Bob 的 beta W2 任务被记为 completed（执行层返回 window 不存在，而非注入失败）。根因是记录器只认 `args.window`，而 Worker 传 `--window`；该夹具缺陷已在真实运行后修正，但按预注册不重采样。确定性的 selftest-d（含 dave/W2 注入）已证故障隔离机制成立。');
   }
   const carol = dSessions.find((session) => session.key === 'carol');
@@ -483,7 +494,7 @@ export function renderReport(input: {
     if (group.group === 'C') {
       const last = groupTurns[groupTurns.length - 1];
       const task = last?.tasks.find((entry) => entry.taskNo === 1);
-      lines.push(`- 最终 #1 状态：${task?.status ?? 'n/a'}${task?.reason === null || task?.reason === undefined ? '' : `/${task.reason}`}。`);
+      lines.push(`- 最终 #1 事实：${task === undefined ? 'n/a' : taskFactLabel(task)}${task?.reason === null || task?.reason === undefined ? '' : `/${task.reason}`}。`);
     }
     if (group.group === 'D') {
       lines.push(`- 用户：${groupSessions.map((session) => `${session.key}(${session.turns.length} 回合)`).join('、')}；重启：${group.restarts.map((entry) => `alice sameFile=${entry.sameFile}/marker=${entry.priorUserMarkerPresent}/reExec=${entry.reExecutedOnReopen}`).join('；')}。`);

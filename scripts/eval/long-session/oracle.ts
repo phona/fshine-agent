@@ -175,13 +175,59 @@ export interface TaskView {
   readonly taskId: string;
   readonly taskNo?: number;
   readonly request: string;
-  readonly status: string;
+  /** 原始事实（布尔）：启动 / 已停（结束事实或汇报/末条终态）/ 汇报 / 等待 / 可能还在跑。 */
+  readonly started: boolean;
+  readonly ended: boolean;
+  readonly reported: boolean;
+  readonly waiting: boolean;
+  readonly mayBeRunning: boolean;
+  /** 末条执行行 status 原值（如 completed/failed/refused/accepted）。 */
+  readonly lastExecutionStatus?: string;
   readonly reason?: string;
   /** 本任务的执行调用 requestId 清单（H3 重复执行检测）。 */
   readonly requestIds: readonly string[];
 }
 
-/** 单轮的任务事实：该轮结束后的 registry 快照 + 该轮机械上是否调用过取消。 */
+/** 任务事实标签（判据用；`exec:<status>` = 末条执行行 status 原值）。 */
+export type TaskFactLabel = 'progressing' | 'waiting' | 'stopped' | 'reported';
+
+/** 某任务是否具备给定事实（纯函数；不读/不造任务级状态词/种类）。 */
+export function taskHasFact(task: TaskView, label: TaskFactLabel | string): boolean {
+  switch (label) {
+    case 'progressing': return task.mayBeRunning;
+    case 'waiting': return task.waiting;
+    case 'stopped': return task.ended && !task.reported;
+    case 'reported': return task.reported;
+    default:
+      return label.startsWith('exec:') && `exec:${task.lastExecutionStatus ?? ''}` === label;
+  }
+}
+
+/** 任务已办成（机械事实：汇报存档 或 末条执行 completed）。 */
+export function taskIsDone(task: TaskView): boolean {
+  return task.reported || task.lastExecutionStatus === 'completed';
+}
+
+/** 任务失败（事实：已停且无汇报，或末条执行 failed/refused——不判「为什么停」）。 */
+export function taskIsFailed(task: TaskView): boolean {
+  if (task.lastExecutionStatus === 'failed' || task.lastExecutionStatus === 'refused') return true;
+  return task.ended && !task.reported && !task.mayBeRunning;
+}
+
+/** 任务未启动排队（未启动、未停、无汇报/提问）。 */
+export function taskIsUnstarted(task: TaskView): boolean {
+  return !task.started && !task.ended && !task.reported && !task.waiting;
+}
+
+/** 任务事实的紧凑文本（证据 detail 用；只拼机械事实，不造任务级状态词）。 */
+export function taskFactBrief(task: TaskView): string {
+  return [task.started ? 'started' : 'unstarted', task.ended ? 'ended' : 'active', task.reported ? 'reported' : '-', task.waiting ? 'waiting' : '-', task.mayBeRunning ? 'may-run' : '-', task.lastExecutionStatus ?? '-'].join('/');
+}
+
+/** 任务的机械事实签名（用于「旧任务未被改写」比对；只含事实，无状态词）。 */
+export function taskFactSignature(task: TaskView): string {
+  return JSON.stringify([task.started, task.ended, task.reported, task.waiting, task.mayBeRunning, task.lastExecutionStatus ?? null]);
+}
 export interface TaskTurnFact {
   readonly turn: number;
   readonly tasks: readonly TaskView[];
@@ -206,7 +252,7 @@ const HARD_ZERO_TASK_CODES: ReadonlySet<TaskFailureCode> = new Set(['H3', 'H4', 
 /**
  * 判定任务连续性：跨全部轮次检查机械硬零 + 编号/结果不混淆。
  *   · H3 重复执行 —— 同一 requestId 在**全批**出现 >1 次；
- *   · H4 虚假完成 —— 终态 completed 却 requestIds 为空（未发起任何执行）；
+ *   · H4 虚假完成 —— 有汇报却 requestIds 为空（未发起任何执行）；
  *   · H5 取消虚假回执 —— 某轮回复声称「已取消」但该轮 cancelCalled=false（且无已取消任务底账）；
  *   · E-G 编号混淆 —— 同一 taskNo 映射到不同 taskId。
  */
@@ -228,11 +274,11 @@ export function judgeTaskContinuity(turns: readonly TaskTurnFact[]): TaskVerdict
   const dupRequest = [...requestOwners.entries()].filter(([, owners]) => owners.size > 1).map(([r]) => r);
   if (dupRequest.length > 0) { codes.push('H3'); evidence['dupRequestIds'] = dupRequest; }
 
-  // H4：completed 但零执行。
+  // H4：汇报存档却零执行（虚假完成）。
   const falseCompleted: string[] = [];
   for (const t of turns) {
     for (const task of t.tasks) {
-      if (task.status === 'completed' && task.requestIds.length === 0) falseCompleted.push(task.taskId);
+      if (task.reported && task.requestIds.length === 0) falseCompleted.push(task.taskId);
     }
   }
   if (falseCompleted.length > 0) { codes.push('H4'); evidence['falseCompleted'] = falseCompleted; }
@@ -241,8 +287,9 @@ export function judgeTaskContinuity(turns: readonly TaskTurnFact[]): TaskVerdict
   const falseCancel: number[] = [];
   for (const t of turns) {
     const claims = (t.reply ?? '').includes('已取消') || (t.reply ?? '').includes('已经取消');
-    const hasCancelled = t.tasks.some((task) => task.status === 'cancelled');
-    if (claims && t.cancelCalled !== true && !hasCancelled) falseCancel.push(t.turn);
+    // 「已停且无汇报」是取消的可得事实代理（任务行不存取消种类）。
+    const hasStopped = t.tasks.some((task) => task.ended && !task.reported);
+    if (claims && t.cancelCalled !== true && !hasStopped) falseCancel.push(t.turn);
   }
   if (falseCancel.length > 0) { codes.push('H5'); evidence['falseCancelTurns'] = falseCancel; }
 
@@ -263,9 +310,17 @@ export function judgeTaskContinuity(turns: readonly TaskTurnFact[]): TaskVerdict
   return { pass: codes.length === 0, codes, hardZeroHits, evidence };
 }
 
-/** 五态覆盖断言（LS2）：某会话内是否各态均出现（用于覆盖不足判定，不是产品失败）。 */
-export function statesCovered(turns: readonly TaskTurnFact[]): ReadonlySet<string> {
+/** 任务事实覆盖（LS2）：某会话内观测到的机械事实标签集合（运行/等待/已停无汇报/已汇报/执行事实）。 */
+export function coveredTaskFacts(turns: readonly TaskTurnFact[]): ReadonlySet<string> {
   const seen = new Set<string>();
-  for (const t of turns) for (const task of t.tasks) seen.add(task.status);
+  for (const t of turns) {
+    for (const task of t.tasks) {
+      if (task.mayBeRunning) seen.add('progressing');
+      if (task.waiting) seen.add('waiting');
+      if (task.ended && !task.reported) seen.add('stopped');
+      if (task.reported) seen.add('reported');
+      if (task.lastExecutionStatus !== undefined) seen.add(`exec:${task.lastExecutionStatus}`);
+    }
+  }
   return seen;
 }

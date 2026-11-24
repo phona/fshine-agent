@@ -15,6 +15,7 @@
  *     inputFiles → 受理（复制先于 submit；完整后台文件面见 runtime-background-input-files）；
  *     Worker 的任务绑定 fileId 被 Main 引用 → 整次拒绝。
  */
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -153,6 +154,7 @@ async function makeFixture(input: {
       throw new Error('（测试）');
     },
     inFlight: () => [],
+    isLive: () => false,
   };
   const runner = input.makeRunner?.(registry) ?? stubRunner;
   const session = await createSession({
@@ -240,7 +242,7 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
 
       expect(turn.taskIds).toHaveLength(1);
       const task = fx.session.getTask(turn.taskIds[0]!);
-      expect(task.status).toBe('completed');
+      expect(lastExecutionOf(task)?.status).toBe('completed');
 
       // 副本事实：task_id = 本任务、sha256/bytes 与原件一致、登记即激活。
       const rows = fx.ro.listFileRefs(SCOPE);
@@ -281,7 +283,7 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
         additionalProperties: false,
       });
       expect(turn.taskIds).toHaveLength(1);
-      expect(bare.session.getTask(turn.taskIds[0]!).status).toBe('completed');
+      expect(lastExecutionOf(bare.session.getTask(turn.taskIds[0]!))?.status).toBe('completed');
       expect(bare.ro.listFileRefs(SCOPE)).toHaveLength(0);
     } finally {
       bare.ro.close();
@@ -306,7 +308,7 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
       });
 
       expect(turn.taskIds).toHaveLength(1);
-      expect(withCopier.session.getTask(turn.taskIds[0]!).status).toBe('completed');
+      expect(lastExecutionOf(withCopier.session.getTask(turn.taskIds[0]!))?.status).toBe('completed');
       expect(withCopier.ro.listFileRefs(SCOPE)).toHaveLength(0);
     } finally {
       withCopier.ro.close();
@@ -345,7 +347,7 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
             principalId: task.principalId,
             sessionId: task.sessionId,
             request: task.request,
-            status: 'queued',
+            queued: true,
           });
         },
         pump: () => ({ recovered: [], started: [] }),
@@ -354,6 +356,7 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
         confirm: () => ({ outcome: 'no_confirmation', taskId: 't' }),
         resume: (taskId) => ({ outcome: 'not_waiting', taskId, status: 'queued' }),
         inFlight: () => [],
+        isLive: () => false,
       }),
     });
     try {
@@ -364,11 +367,12 @@ describe('CAP-01 S2 runtime 接线（task_run.inputFiles / 交办复制）', () 
       });
       await fx.session.send('后台交办带文件的任务');
 
-      // 不再被 mode 拒绝：任务受理为 queued，回执带 accepted。
+      // 不再被 mode 拒绝：任务受理为 queued（未启动 = liveness 缺省），回执带 accepted、无状态词。
       expect(fx.capture.toolErrors).toHaveLength(0);
       const receipt = fx.capture.results[0] as Record<string, unknown>;
       expect(receipt['accepted']).toBe(true);
-      expect(receipt['status']).toBe('queued');
+      expect(receipt).not.toHaveProperty('status');
+      expect(receipt['liveness']).toBeUndefined();
       // 复制先于受理：submit 那一刻副本已绑定该 taskId。
       expect(submitCopies).toHaveLength(1);
       expect(submitCopies[0]).toHaveLength(1);

@@ -133,12 +133,6 @@ export function judgeExp(ev: ExpEvidence): ExpVerdict {
     const present = caseDef.replyMustExclude.filter((m) => allText.includes(m));
     checks.push({ name: '回复无禁用标记', ok: present.length === 0, note: present.length === 0 ? '无命中' : `出现：${present.join('、')}` });
   }
-  // 期望任务状态。
-  if (caseDef.expectTaskStatuses !== undefined && caseDef.expectTaskStatuses.length > 0) {
-    const statuses = new Set(ev.tasks.map((t) => t.status));
-    const hit = caseDef.expectTaskStatuses.some((s) => statuses.has(s));
-    checks.push({ name: '任务状态符合预期', ok: hit, note: `观察状态：${[...statuses].join(',') || '（无任务）'}` });
-  }
   // 越权不可见：跨 principal/session 编号被解析返回 = 泄露（severe）。
   let unauthorized = 0;
   const foreignNo = ev.seedTaskNos.foreign;

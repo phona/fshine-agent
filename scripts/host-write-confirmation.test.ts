@@ -45,6 +45,7 @@ import {
   type Session,
 } from '../packages/agent/src/execution-runtime';
 import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../packages/agent/testing/task-facts';
 import { createFileStore } from '../packages/agent/src/file-store';
 import {
   assembleSessionCore,
@@ -250,7 +251,11 @@ function prepareReport(results: readonly unknown[], toolError: string | undefine
   return `执行层要求确认：${summary}`;
 }
 
-/** Worker：按执行层状态如实汇报（completed/refused/failed 不混用）。 */
+/**
+ * Worker：按执行层状态如实汇报（completed/refused/failed 不混用）。
+ * 跟随 2026-11-24 失败事实原样进模型面：refused/failed 的工具结果带 {status, error:{code,
+ * message(已过机械清洗)}}——忠实转述脚本原样读这两个字段（旧形状只有 kind+note，读出来是空）。
+ */
 function commitReport(results: readonly unknown[], toolError: string | undefined): string {
   if (toolError !== undefined) return `提交失败：${toolError}`;
   const outcome = results[0] as {
@@ -535,16 +540,15 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
         report: commitReport,
       });
       expect(turn3.executions.map((execution) => execution.status)).toEqual(['refused']);
-      // 2026-11-19 模型可见面收口：refused 投影不带原始码（CONFIRMATION_USED 只进底账
-      // execution.error 与日志），模型只见 kind + note（表外码 → executor_failed）。
+      // 2026-11-24 失败事实原样进模型面（跟随本次删除）：refused 投影 = {status, error:{code,
+      // message(已过 cleanExecutorDiagnostic 机械清洗)}}——CONFIRMATION_USED 原文照实给模型，
+      // 由它说人话；句柄不在 message 里（凭据隔离不变量由 case 4 钉住）。
       const refused = fx.worker.toolResults[fx.worker.toolResults.length - 1] as {
         status?: string;
-        kind?: string;
-        error?: unknown;
+        error?: { code?: string; message?: string };
       };
       expect(refused.status).toBe('refused');
-      expect(refused.error).toBeUndefined();
-      expect(refused.kind).toBe('executor_failed');
+      expect(refused.error).toEqual({ code: 'CONFIRMATION_USED', message: 'Confirmation handle already used.' });
       expect((await queryData(fx.stateDir)).count).toBe(4);
     } finally {
       fx.close();
@@ -586,9 +590,7 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
       });
       const stolen = sessionB.worker.toolResults[sessionB.worker.toolResults.length - 1] as {
         status?: string;
-        kind?: string;
-        note?: string;
-        error?: unknown;
+        error?: { code?: string; message?: string };
       };
       // B 再拿一个不存在的句柄：话术必须与上一条完全一致（不泄漏该句柄在别处存在）。
       await runWriteTurn(sessionB, {
@@ -600,19 +602,18 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
       });
       const unknown = sessionB.worker.toolResults[sessionB.worker.toolResults.length - 1] as {
         status?: string;
-        kind?: string;
-        note?: string;
-        error?: unknown;
+        error?: { code?: string; message?: string };
       };
       expect(stolen.status).toBe('refused');
       expect(unknown.status).toBe('refused');
-      // 2026-11-19 模型可见面收口：refused 投影不带原始码（error 不下放）；越权与不存在
-      // 在模型/用户可见面完全一致（kind/note 同值）——存在性不泄露的断言因此更强。
-      expect(stolen.error).toBeUndefined();
-      expect(unknown.error).toBeUndefined();
-      expect(stolen.kind).toBe(unknown.kind);
-      expect(stolen.note).toBe(unknown.note);
+      // 2026-11-24 失败事实原样进模型面（跟随本次删除）：越权（句柄在别处）与不存在给模型的
+      // 是**同一条**原始失败事实（code + 清洗后 message）——两者完全一致，存在性不泄露。
+      expect(stolen.error).toEqual({ code: 'CONFIRMATION_NOT_FOUND', message: 'Confirmation handle not found.' });
+      expect(unknown.error).toEqual(stolen.error);
       expect(stolen).toEqual(unknown);
+      // 句柄本身不进模型可见面（凭据隔离）：被偷的句柄与不存在的句柄都不出现在投影里。
+      expect(JSON.stringify(stolen)).not.toContain(handleA);
+      expect(JSON.stringify(unknown)).not.toContain('cf_');
       // 两个会话都没有被写；A 的提案也没有因越权尝试被消费。
       expect((await queryData(sessionA.stateDir)).count).toBe(2);
       expect((await queryData(sessionB.stateDir)).count).toBe(2);
@@ -649,17 +650,16 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
         report: commitReport,
       });
       expect(turn2.executions.map((execution) => execution.status)).toEqual(['refused']);
-      // 2026-11-19 模型可见面收口：refused 投影不带原始码/原文（CONFIRMATION_EXPIRED 与
-      // 'expired' 原文只进底账与日志）；模型只见 kind + note。底账执行事实仍是 refused。
+      // 2026-11-24 失败事实原样进模型面（跟随本次删除）：CONFIRMATION_EXPIRED 与过期时间
+      // 原文照实给模型（message 只过机械清洗）；底账执行事实仍是 refused。
       expect(turn2.executions.map((execution) => execution.status)).toEqual(['refused']);
       const refused = fx.worker.toolResults[fx.worker.toolResults.length - 1] as {
         status?: string;
-        kind?: string;
-        error?: unknown;
+        error?: { code?: string; message?: string };
       };
       expect(refused.status).toBe('refused');
-      expect(refused.error).toBeUndefined();
-      expect(refused.kind).toBe('executor_failed');
+      expect(refused.error?.code).toBe('CONFIRMATION_EXPIRED');
+      expect(refused.error?.message).toContain('expired');
       expect((await queryData(fx.stateDir)).count).toBe(2);
     } finally {
       fx.close();
@@ -682,7 +682,7 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
       expect(fx.worker.toolErrors).toHaveLength(1);
       expect(fx.worker.toolErrors[0]).toContain(WRITE_NOT_ALLOWED_MESSAGE);
       expect(turn.executions).toHaveLength(0);
-      expect(fx.session.tasks()[0]!.status).toBe('unexecuted');
+      expect(executionsOf(fx.session.tasks()[0]!)).toEqual([]);
       expect((await queryData(fx.stateDir)).count).toBe(2);
       // 审计里没有任何写 operation 行（零执行）。
       expect(auditLines(fx.stateDir).filter((line) => line.includes('"dummy.prepare"'))).toHaveLength(0);
@@ -738,24 +738,25 @@ describe('写确认回环·宿主接线（真 dummy 夹具）', () => {
         report: commitReport,
       });
       // 执行层如实返回 failed（读回 1/2）；宿主不得把它变成 completed。
-      // 2026-11-19 模型可见面收口：failed 投影不带原始码（CONFIRMATION_READBACK_SHORT
-      // 只进底账 execution.error 与日志），模型只见 kind + note（表外码 → executor_failed）。
+      // 2026-11-24 失败事实原样进模型面（跟随本次删除）：failed 投影 = {status, error:{code,
+      // message(清洗后)}}；CONFIRMATION_READBACK_SHORT 原文照实给模型（readback short 的
+      // 事实模型据此如实汇报），底账 execution.error 与日志同源。
       const committed = fx.worker.toolResults[fx.worker.toolResults.length - 1] as {
         status?: string;
-        kind?: string;
-        error?: unknown;
+        error?: { code?: string; message?: string };
       };
       expect(committed.status).toBe('failed');
-      expect(committed.error).toBeUndefined();
-      expect(committed.kind).toBe('executor_failed');
+      expect(committed.error?.code).toBe('CONFIRMATION_READBACK_SHORT');
+      expect(committed.error?.message).toMatch(/readback short/i);
       expect(turn2.executions.map((execution) => execution.status)).toEqual(['failed']);
       // 用户可见回复来自执行事实：失败/待核对，不含成功话术。
       expect(turn2.reply).toContain('失败');
       expect(turn2.reply).not.toContain('成功');
       expect(turn2.reply).not.toContain('已完成');
       const commitTask = fx.session.tasks().find((task) => task.executions.some((execution) => execution.operation === 'dummy.commit'));
-      expect(commitTask?.status).toBe('failed');
-      expect(commitTask?.failureReason).toMatch(/readback short/i);
+      expect(commitTask).toBeDefined();
+      expect(['failed', 'refused']).toContain(lastExecutionOf(commitTask!)?.status);
+      expect(lastFailureOf(commitTask!)?.error?.message).toMatch(/readback short/i);
       const commitExecution = commitTask?.executions.find((execution) => execution.operation === 'dummy.commit');
       expect(commitExecution?.status).toBe('failed');
       expect(commitExecution?.error?.code).toBe('CONFIRMATION_READBACK_SHORT');

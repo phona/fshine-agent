@@ -31,6 +31,7 @@ import type { DriverMessage, TurnDriver } from '../packages/agent/src/driver-con
 import type { Notification, NotificationSink } from '../packages/agent/src/notifications';
 import { renderNotification } from '../packages/agent/src/notification-render';
 import { assembleSessionCore } from './ask-runtime';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../packages/agent/testing/task-facts';
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform');
@@ -252,15 +253,15 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
       const status = receiptOf(fixture.records[1]!);
       expect(status['taskId']).toBe(taskId);
       expect(status).not.toHaveProperty('taskNo');
-      expect(status['status']).toBe('waiting_user');
+      expect(status['waiting']).toBe(true);
       expect(status['pendingQuestion']).toEqual({
         missing: ['collection "contoso" 有多个候选：contracts / documents'],
       });
 
       // 底账：同一个 taskId、waiting_user（不是 failed/unexecuted）、无失败原因。
       const task = fixture.assembled.taskRegistry.get(taskId, SCOPE);
-      expect(task.status).toBe('waiting_user');
-      expect(task.failureReason).toBeUndefined();
+      expect(task.pendingQuestion).toBeDefined();
+      expect(lastFailureOf(task)).toBeUndefined();
       expect(task.pendingQuestion).toEqual({
         missing: ['collection "contoso" 有多个候选：contracts / documents'],
       });
@@ -279,7 +280,7 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
     }
   });
 
-  it('② 用户补答 → 同一 taskId/taskNo 续跑到 completed；底账两条执行事实、不新建任务', async () => {
+  it('② 用户补答 → 同一 taskId/taskNo 续跑到有汇报；底账两条执行事实、不新建任务', async () => {
     const fixture = await makeFixture();
     try {
       const { taskId, taskNo } = await delegateFirstTurn(fixture);
@@ -303,8 +304,8 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
       // 同一任务：taskId/taskNo 不变，任务列表里只有这一个（不是新建任务）。
       const task = fixture.assembled.taskRegistry.get(taskId, SCOPE);
       expect(task.taskNo).toBe(taskNo);
-      expect(task.status).toBe('completed');
-      expect(task.failureReason).toBeUndefined();
+      expect(lastExecutionOf(task)?.status).toBe('completed');
+      expect(lastFailureOf(task)).toBeUndefined();
       expect(fixture.assembled.taskRegistry.list(SCOPE).map((row) => row.taskId)).toEqual([taskId]);
       expect(fixture.client.calls.map((call) => call.args['--collection'])).toEqual(['contoso', 'documents']);
 
@@ -322,7 +323,7 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
       });
       await fixture.assembled.session.send('结果发我一下');
       const result = receiptOf(fixture.records[2]!);
-      expect(result['status']).toBe('completed');
+      expect(result['resulted']).toBe(2);
       expect(result['replyText']).toBe('合同清单已经整理好，共 12 份。');
     } finally {
       fixture.close();
@@ -336,8 +337,8 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
 
       // 没有补答：底账保持等待；执行层只被调用过一次，Worker 只跑过一个回合。
       const before = fixture.assembled.taskRegistry.get(taskId, SCOPE);
-      expect(before.status).toBe('waiting_user');
-      expect(before.failureReason).toBeUndefined();
+      expect(before.pendingQuestion).toBeDefined();
+      expect(lastFailureOf(before)).toBeUndefined();
       expect(fixture.client.calls).toHaveLength(1);
       expect(fixture.worker.delegations).toHaveLength(1);
 
@@ -345,7 +346,7 @@ describe('业务：执行层 needs_input → 用户补答 → 同一任务完成
       fixture.assembled.runner!.pump();
       await fixture.assembled.runner!.whenIdle();
       const after = fixture.assembled.taskRegistry.get(taskId, SCOPE);
-      expect(after.status).toBe('waiting_user');
+      expect(after.pendingQuestion).toBeDefined();
       expect(after.pendingQuestion?.missing).toHaveLength(1);
       expect(fixture.client.calls).toHaveLength(1);
       expect(fixture.worker.delegations).toHaveLength(1);

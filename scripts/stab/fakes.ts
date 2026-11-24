@@ -152,7 +152,7 @@ export function createGatedExecutor(options: { gateAfter?: number; resultText?: 
     async execute(input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
       calls.push({ ...input });
       if (calls.length > gateAfter && !released) await gate;
-      return { kind: 'completed', resultText: text(input) };
+      return { kind: 'ended', report: text(input) };
     },
   };
   return {
@@ -181,7 +181,7 @@ export function createCancelableExecutor(options: { cancelTaskId: string }): Can
   const executor: TaskExecutor = {
     async execute(input: TaskExecutionInput, context: TaskExecutionContext): Promise<TaskExecutionOutcome> {
       calls.push({ ...input });
-      if (input.taskId !== options.cancelTaskId) return { kind: 'completed', resultText: `（stab 结果）${input.request}` };
+      if (input.taskId !== options.cancelTaskId) return { kind: 'ended', report: `（stab 结果）${input.request}` };
       return await new Promise<TaskExecutionOutcome>((resolve) => {
         const confirm = (): void => {
           aborted = true;
@@ -345,7 +345,10 @@ export function rssGrowth(base: number, end: number): number {
 // 读数汇总
 // ---------------------------------------------------------------------------
 
-const OPEN_STATUSES: ReadonlySet<string> = new Set(['queued', 'running', 'waiting_user', 'cancelling']);
+// S1 事实模型：未收尾 = 未启动/在跑/等待（没有 cancelling 中间态——取消确认即写事实）。
+// S1 事实模型：未收尾 = 未启动/在跑/等待（没有 cancelling 中间态——取消确认即写事实）。
+const OPEN_STATES: ReadonlySet<string> = new Set(['queued', 'running', 'waiting_user']);
+
 
 export interface TaskSummary {
   terminalCounts: Record<string, number>;
@@ -357,13 +360,21 @@ export interface TaskSummary {
 }
 
 export function summarizeTasks(tasks: readonly TaskRecordView[], calls: readonly TaskExecutionInput[]): TaskSummary {
+  // S1 事实模型：没有 status/reason——按机械事实分桶（等待事实/机械时刻/汇报存档）。
   const terminalCounts: Record<string, number> = {};
   const terminalReasonCounts: Record<string, number> = {};
   let openOnDrain = 0;
   for (const task of tasks) {
-    terminalCounts[task.status] = (terminalCounts[task.status] ?? 0) + 1;
-    if (task.reason !== undefined) terminalReasonCounts[task.reason] = (terminalReasonCounts[task.reason] ?? 0) + 1;
-    if (OPEN_STATUSES.has(task.status)) openOnDrain += 1;
+    // 事实分桶（不读「怎么结束」种类）：等待 / 有汇报 / 可能还在跑 / 排队 / 已停无汇报。
+    const reported = (task.replyText ?? task.resultText ?? '').trim() !== '';
+    const state = task.pendingQuestion !== undefined ? 'waiting_user'
+      : reported ? 'reported'
+        : task.endedAt !== undefined ? 'stopped_without_report'
+          : task.leaseUntil !== undefined ? 'running'
+            : task.runningSince === undefined ? 'queued'
+              : 'stopped_without_report';
+    terminalCounts[state] = (terminalCounts[state] ?? 0) + 1;
+    if (OPEN_STATES.has(state)) openOnDrain += 1;
   }
   const callsByTask = new Map<string, number>();
   for (const call of calls) callsByTask.set(call.taskId, (callsByTask.get(call.taskId) ?? 0) + 1);

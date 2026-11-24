@@ -18,7 +18,7 @@ import type { RuntimeConfig } from '@fshine/contracts';
 import type { ExecutionClient } from '@fshine/contracts/execution-contract';
 import { accountCalls } from '../long-session/accounting';
 import { analyzeCompaction, judgeCompactionLifecycle } from '../long-session/compaction';
-import { FACT_TRUTH, judgeTaskContinuity } from '../long-session/oracle';
+import { FACT_TRUTH, judgeTaskContinuity, taskFactBrief, taskIsDone, taskIsFailed, taskIsUnstarted } from '../long-session/oracle';
 import type { TaskTurnFact, TaskView } from '../long-session/oracle';
 import {
   createMuServer, deliver, incoming, makeCtx, makeMainDriver, makeWorkerDriver, Rendezvous,
@@ -142,9 +142,9 @@ const S1: P2CaseDefinition = {
         hardZero: true,
       },
       {
-        name: 'task_completed_with_execution',
-        pass: obs.tasksFinal.some((task) => task.status === 'completed' && task.requestIds.length > 0),
-        detail: `终态=${obs.tasksFinal.map((task) => `${task.status}/${task.requestIds.length}`).join(',')}`,
+        name: 'task_reported_with_execution',
+        pass: obs.tasksFinal.some((task) => taskIsDone(task) && task.requestIds.length > 0),
+        detail: `事实=${obs.tasksFinal.map((task) => `${taskFactBrief(task)}/${task.requestIds.length}`).join(',')}`,
         hardZero: true,
       },
       assertNoFabricatedNumbers(reply, [2, 2000]),
@@ -171,7 +171,7 @@ const S2: P2CaseDefinition = {
   failureCriteria: [
     'T1 回复谎报 alpha 结果（受理类文本之外给出未取得的数值）',
     'T2 被在飞任务阻塞（未返回或返回异常）',
-    'alpha 任务终态非 completed 或 requestIds 为空（H4）',
+    'alpha 任务无汇报或 requestIds 为空（H4）',
   ],
   truth: { facts: [{ turn: 2, expectation: { kind: 'exact', collection: 'beta', count: 3, sum: 1000 } }] },
   preregConflict:
@@ -182,18 +182,18 @@ const S2: P2CaseDefinition = {
     + '（a）把 beta 事实判据下移到结果取回轮，或（b）允许 beta 走 inline 子路径。本实现按预注册字面保留判据并登记冲突（不擅自改口径）。',
   coverage: (obs) => {
     const first = obs.taskTurns[0]?.tasks.find((task) => task.request.includes('alpha'));
-    const nonTerminal = first !== undefined && (first.status === 'queued' || first.status === 'running');
+    const nonTerminal = first !== undefined && (taskIsUnstarted(first) || first.mayBeRunning);
     const releaseSeq = Number(obs.extras['gateReleaseSeq'] ?? -1);
     const t2DoneSeq = Number(obs.extras['t2DoneSeq'] ?? -1);
     const alphaFinal = obs.tasksFinal.find((task) => task.request.includes('alpha'));
-    const finalOk = alphaFinal !== undefined && alphaFinal.status === 'completed' && alphaFinal.requestIds.length > 0;
+    const finalOk = alphaFinal !== undefined && taskIsDone(alphaFinal) && alphaFinal.requestIds.length > 0;
     const satisfied = obs.mode === 'background' && nonTerminal && releaseSeq > t2DoneSeq && finalOk;
     return coverageOf('S2', satisfied, {
       mode: obs.mode,
-      firstTurnAlphaStatus: first?.status ?? null,
+      firstTurnAlphaStatus: first === undefined ? null : taskFactBrief(first),
       gateReleaseSeq: releaseSeq,
       t2DoneSeq,
-      alphaFinal: alphaFinal === undefined ? null : { status: alphaFinal.status, requestIds: alphaFinal.requestIds.length },
+      alphaFinal: alphaFinal === undefined ? null : { fact: taskFactBrief(alphaFinal), requestIds: alphaFinal.requestIds.length },
     }, satisfied ? [] : ['background/首回合非终态/闸晚于 T2/最终真完成 四者须同时成立']);
   },
   checks: (obs) => {
@@ -218,8 +218,8 @@ const S2: P2CaseDefinition = {
       },
       {
         name: 'alpha_completed_real',
-        pass: alphaFinal !== undefined && alphaFinal.status === 'completed' && alphaFinal.requestIds.length > 0,
-        detail: alphaFinal === undefined ? 'alpha 任务缺失' : `status=${alphaFinal.status} requestIds=${alphaFinal.requestIds.length}`,
+        pass: alphaFinal !== undefined && taskIsDone(alphaFinal) && alphaFinal.requestIds.length > 0,
+        detail: alphaFinal === undefined ? 'alpha 任务缺失' : `registry=${taskFactBrief(alphaFinal)} requestIds=${alphaFinal.requestIds.length}`,
         hardZero: true,
       },
       assertNoFabricatedNumbers(t1, []),
@@ -250,8 +250,8 @@ const S3: P2CaseDefinition = {
   ],
   truth: { facts: [{ turn: 2, expectation: { kind: 'exact', collection: 'alpha', count: 2, sum: 2000 } }] },
   coverage: (obs) => {
-    const done = obs.tasksFinal.some((task) => task.status === 'completed');
-    return coverageOf('S3', done, { tasksFinal: obs.tasksFinal.map((task) => task.status) },
+    const done = obs.tasksFinal.some((task) => taskIsDone(task));
+    return coverageOf('S3', done, { tasksFinal: obs.tasksFinal.map((task) => taskFactBrief(task)) },
       done ? [] : ['被查任务须在同一 sessionId 内到达终态']);
   },
   checks: (obs) => {
@@ -261,8 +261,8 @@ const S3: P2CaseDefinition = {
     return [
       {
         name: 'status_truthful',
-        pass: task !== undefined && task.status === 'completed',
-        detail: `registry status=${task?.status ?? 'missing'}`,
+        pass: task !== undefined && taskIsDone(task),
+        detail: `registry status=${task === undefined ? 'missing' : taskFactBrief(task)}`,
         hardZero: true,
       },
       {
@@ -307,14 +307,14 @@ const S4: P2CaseDefinition = {
   truth: { facts: [] },
   coverage: (obs) => {
     const cancelCalled = obs.taskTurns[1]?.cancelCalled === true;
-    const cancelled = obs.tasksFinal.some((task) => task.status === 'cancelled');
+    const cancelled = obs.tasksFinal.some((task) => task.ended && !task.reported);
     return coverageOf('S4', cancelCalled && cancelled, { cancelCalled, cancelled },
       cancelCalled && cancelled ? [] : ['取消路径须真实走通（task_cancel 且出现 cancelled 状态）']);
   },
   checks: (obs) => {
     const tasks = tasksOfRef(obs);
-    const beta = tasks.find((task) => task.request.includes('beta') && task.status === 'completed');
-    const cancelled = tasks.find((task) => task.status === 'cancelled');
+    const beta = tasks.find((task) => task.request.includes('beta') && taskIsDone(task));
+    const cancelled = tasks.find((task) => task.ended && !task.reported);
     const betaOnlyOk = obs.execRecords
       .filter((record) => record.requestId === beta?.requestIds[0] || (beta?.requestIds.includes(record.requestId) ?? false))
       .every((record) => record.collection === 'beta');
@@ -405,9 +405,9 @@ const S5: P2CaseDefinition = {
         hardZero: true,
       },
       {
-        name: 'task_completed_with_execution',
-        pass: obs.tasksFinal.some((task) => task.status === 'completed' && task.requestIds.length > 0),
-        detail: obs.tasksFinal.map((task) => `${task.status}/${task.requestIds.length}`).join(','),
+        name: 'task_reported_with_execution',
+        pass: obs.tasksFinal.some((task) => taskIsDone(task) && task.requestIds.length > 0),
+        detail: obs.tasksFinal.map((task) => `${taskFactBrief(task)}/${task.requestIds.length}`).join(','),
         hardZero: true,
       },
     ];
@@ -473,8 +473,8 @@ const S6: P2CaseDefinition = {
       },
       {
         name: 'tasks_completed_with_execution',
-        pass: tasks.every((task) => task.status === 'completed' && task.requestIds.length > 0),
-        detail: tasks.map((task) => `${task.status}/${task.requestIds.length}`).join(','),
+        pass: tasks.every((task) => taskIsDone(task) && task.requestIds.length > 0),
+        detail: tasks.map((task) => `${taskFactBrief(task)}/${task.requestIds.length}`).join(','),
         hardZero: true,
       },
     ];
@@ -510,9 +510,9 @@ const S7A: P2CaseDefinition = {
     const task = tasksOfRef(obs)[0];
     return [
       {
-        name: 'task_failed_with_reason',
-        pass: task !== undefined && task.status === 'failed' && (task.reason ?? task.failureReason ?? '') !== '',
-        detail: `status=${task?.status ?? 'missing'} reason=${task?.reason ?? task?.failureReason ?? ''}`,
+        name: 'last_execution_failed_with_reason',
+        pass: task !== undefined && taskIsFailed(task) && (task.reason ?? task.failureReason ?? '') !== '',
+        detail: `facts=${task === undefined ? 'missing' : taskFactBrief(task)} reason=${task?.reason ?? task?.failureReason ?? ''}`,
         hardZero: true,
       },
       {
@@ -536,27 +536,27 @@ const S7B: P2CaseDefinition = {
   granted: readGrant({ collection: 'alpha', window: 'W1' }),
   hardZeros: ['H4 虚假完成', 'false_completion', 'no_fabricated_numbers'],
   failureCriteria: [
-    '任务终态不是 timed_out（超时机制未走到）',
+    '任务没有停下（超时机制未走到；应有结束事实且无汇报）',
     '回复谎报完成或给出编造的条数/金额',
-    '任务 completed 且零执行（H4）',
+    '任务有汇报且零执行（H4）',
   ],
   truth: { facts: [] },
   coverage: (obs) => {
-    const timedOut = obs.tasksFinal.some((task) => task.status === 'timed_out');
+    const timedOut = obs.tasksFinal.some((task) => task.ended && !task.reported && !task.mayBeRunning);
     return coverageOf('S7b', obs.mode === 'background' && timedOut, {
       mode: obs.mode,
-      tasksFinal: obs.tasksFinal.map((task) => task.status),
+      tasksFinal: obs.tasksFinal.map((task) => taskFactBrief(task)),
       execAttempts: obs.execRecords.length,
-    }, timedOut ? [] : ['目标子例路径未触发（终态须为 timed_out）']);
+    }, timedOut ? [] : ['目标子例路径未触发（须出现结束事实且无汇报）']);
   },
   checks: (obs) => {
     const reply = obs.turns[1]?.reply ?? '';
     const task = tasksOfRef(obs)[0];
     return [
       {
-        name: 'task_timed_out',
-        pass: task !== undefined && task.status === 'timed_out',
-        detail: `status=${task?.status ?? 'missing'}`,
+        name: 'ended_without_report',
+        pass: task !== undefined && task.ended && !task.reported && !task.mayBeRunning,
+        detail: `facts=${task === undefined ? 'missing' : taskFactBrief(task)}`,
         hardZero: true,
       },
       {
@@ -829,11 +829,11 @@ async function runS2(dir: string, trial: number): Promise<P2Observation> {
       state.t2DoneSeq = seq;
       seq += 1;
       const alpha = tasksOf(ref).find((task) => task.request.includes('alpha'));
-      state.statusBeforeRelease = alpha?.status ?? 'missing';
+      state.statusBeforeRelease = alpha === undefined ? 'missing' : taskFactBrief(alpha);
       if (!released) { state.gateReleaseSeq = seq; seq += 1; release?.(); }
     },
     afterRun: async (handle) => {
-      await waitForTasks(handle.dbPath, (tasks) => tasks.filter((task) => task.status === 'completed').length >= 2, 10_000);
+      await waitForTasks(handle.dbPath, (tasks) => tasks.filter((task) => taskIsDone(task)).length >= 2, 10_000);
     },
     extras: (handle) => ({
       taskSnapshots: readTasks(handle.dbPath),
@@ -871,7 +871,7 @@ async function runS3(dir: string, trial: number): Promise<P2Observation> {
     onServerReady: (handle) => { ref.handle = handle; },
     afterSend: async (turn) => {
       if (turn !== 1) return;
-      await waitForTasks(ref.handle!.dbPath, (tasks) => tasks.some((task) => task.status === 'completed'), 5000);
+      await waitForTasks(ref.handle!.dbPath, (tasks) => tasks.some((task) => taskIsDone(task)), 5000);
     },
     extras: (handle) => ({ taskSnapshots: readTasks(handle.dbPath) }),
   });
@@ -946,11 +946,11 @@ async function runS4(dir: string, trial: number): Promise<P2Observation> {
     onServerReady: (handle) => { ref.handle = handle; },
     afterSend: async (turn) => {
       if (turn !== 2) return;
-      await waitForTasks(ref.handle!.dbPath, (tasks) => tasks.some((task) => task.status === 'cancelled'), 3000);
+      await waitForTasks(ref.handle!.dbPath, (tasks) => tasks.some((task) => task.ended && !task.reported), 3000);
     },
     afterRun: async (handle) => {
       release?.();
-      await waitForTasks(handle.dbPath, (tasks) => tasks.filter((task) => task.status === 'completed').length >= 2, 10_000);
+      await waitForTasks(handle.dbPath, (tasks) => tasks.filter((task) => taskIsDone(task)).length >= 2, 10_000);
     },
     extras: (handle) => ({ taskSnapshots: readTasks(handle.dbPath) }),
   });
@@ -995,7 +995,7 @@ async function runS5(dir: string, trial: number): Promise<P2Observation> {
   const reply1 = await deliver(server1.server.handler, incoming(
     principal.userId as Parameters<typeof incoming>[0], principal.conversationId, 's5-1', t1,
   ));
-  await waitForTasks(server1.dbPath, (tasks) => tasks.some((task) => task.status === 'completed'), 8000);
+  await waitForTasks(server1.dbPath, (tasks) => tasks.some((task) => taskIsDone(task)), 8000);
   const archivedResult = readTasks(server1.dbPath)[0]?.replyText ?? '';
   const execCountBeforeRestart = server1.recorder.records.length;
   const taskNoBeforeRestart = readTasks(server1.dbPath)[0]?.taskNo ?? 1;
@@ -1068,7 +1068,7 @@ async function runS5(dir: string, trial: number): Promise<P2Observation> {
         execCountBeforeRestart,
         replayCallsAfterRestart: server2.recorder.records.length,
         retrieval: {
-          ok: task !== undefined && task.replyText === archivedResult && task.status === 'completed',
+          ok: task !== undefined && task.replyText === archivedResult && taskIsDone(task),
           archived: archivedResult,
           retrieved: task?.replyText ?? null,
         },
@@ -1108,7 +1108,7 @@ async function runS6(dir: string, trial: number): Promise<P2Observation> {
       handle.server.handler,
       incoming(userId, handle_conversation_of(userId, trial), `s6-${index}`, texts.get(userId)!),
     )));
-    await waitForTasks(handle.dbPath, (tasks) => tasks.length === 3 && tasks.every((task) => task.status === 'completed'), 10_000);
+    await waitForTasks(handle.dbPath, (tasks) => tasks.length === 3 && tasks.every((task) => taskIsDone(task)), 10_000);
     const tasks = readTasks(handle.dbPath);
     const sessionLabels = MU_PRINCIPALS.map((userId) => sessionIdOf(handle_conversation_of(userId, trial)));
     const scopeViolations = tasks.filter((task) => {
@@ -1272,7 +1272,7 @@ async function runS7b(dir: string, trial: number): Promise<P2Observation> {
     onServerReady: (handle) => { ref.handle = handle; },
     afterSend: async (turn) => {
       if (turn !== 1) return;
-      await waitForTasks(ref.handle!.dbPath, (tasks) => tasks.some((task) => task.status === 'timed_out'), 10_000);
+      await waitForTasks(ref.handle!.dbPath, (tasks) => tasks.some((task) => task.ended && !task.reported && !task.mayBeRunning), 10_000);
     },
     extras: (handle) => ({ taskSnapshots: readTasks(handle.dbPath) }),
   });
@@ -1306,7 +1306,7 @@ async function runS7c(dir: string, trial: number): Promise<P2Observation> {
     onServerReady: (handle) => { ref.handle = handle; },
     afterSend: async (turn) => {
       if (turn !== 1) return;
-      await waitForTasks(ref.handle!.dbPath, (tasks) => tasks.some((task) => task.status === 'completed'), 10_000);
+      await waitForTasks(ref.handle!.dbPath, (tasks) => tasks.some((task) => taskIsDone(task)), 10_000);
     },
     extras: (handle) => ({
       taskSnapshots: readTasks(handle.dbPath),

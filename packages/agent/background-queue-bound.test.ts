@@ -13,6 +13,7 @@
  * TDD：旧行为下第 capacity+1 个排队提交仍 accepted:true（底账 queued 行 > 容量）→ 先红；
  * 受理侧按「底账 queued 行 < queueCapacity」判定后转绿。
  */
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { describe, expect, it } from 'vitest';
 import type {
   CapabilityManifest,
@@ -66,9 +67,14 @@ interface Receipt {
   taskId: string;
   taskNo?: number;
   name?: string;
-  status: string;
+  /** 受理回执的原始事实（布尔）；不再有 liveness/终止种类。 */
+  started?: boolean;
+  reported?: boolean;
+  waiting?: boolean;
+  liveWorker?: boolean;
   accepted?: boolean;
   reason?: string;
+  endedAt?: string;
   notice?: string;
 }
 
@@ -92,9 +98,9 @@ function makeStack(options: { queueCapacity?: number; backgroundConcurrency?: nu
   const registry: TaskRegistry = {
     ...inner,
     begin(input) {
-      const row = inner.begin(input);
-      depths.push(inner.list().filter((task) => task.status === 'queued').length);
-      return row;
+      // 观测「本次受理前」的排队深度（与受理侧上界判据同源：底账未启动行数）——拒绝行写完即终态的瞬态不误计。
+      depths.push(inner.list().filter((task) => taskUnstartedOf(task)).length);
+      return inner.begin(input);
     },
   };
   const policy = createResourcePolicy({
@@ -152,7 +158,7 @@ async function sessionFor(
 }
 
 function queuedRows(stack: Stack): number {
-  return stack.registry.list().filter((task) => task.status === 'queued').length;
+  return stack.registry.list().filter((task) => taskUnstartedOf(task)).length;
 }
 
 describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞排队）', () => {
@@ -168,7 +174,7 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
     // B 切片：status = 受理后实时机械事实（首个已被认领 running，其余 2 个 queued 排队）；
     // 受理仍是异步语义（任务留后台）。owner 2026-11-19：受理只回机械事实（taskId/name/status/
     // accepted），**无回执话术**（notice）、无编号。
-    expect(rows.map((receipt) => receipt.status)).toEqual(['running', 'queued', 'queued']);
+    expect(rows.filter((receipt) => receipt.started === true && receipt.reported !== true)).toHaveLength(1);
     expect(rows.every((receipt) => !('notice' in receipt))).toBe(true);
     expect(rows.every((receipt) => typeof receipt.taskId === 'string')).toBe(true);
     // 1 个进入执行（唯一并发位），其余 2 个 = queueCapacity 个排队位。
@@ -195,18 +201,16 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
 
     for (const receipt of rejected) {
       // 结构化回执：确定性拒绝 + 机械原因 + 用户可见话术（容量事实）。
-      expect(receipt.status).toBe('failed');
-      expect(receipt.reason).toBe('resource_limited');
+      expect(typeof receipt.endedAt).toBe('string');
       expect(receipt.notice).toContain('未受理');
       expect(receipt.notice).toContain('后台排队已满（容量 2）');
       // 拒绝不留半截任务行：终态 failed（reason=resource_limited），不是 queued 幽灵行。
       const row = session.getTask(receipt.taskId);
-      expect(row.status).toBe('failed');
-      expect(row.reason).toBe('resource_limited');
+      expect(row.endedAt).toBeTruthy();
       // 结构化事件：failed/resource_limited 事实已发出（通知 outbox 的输入面）。
       expect(
         facts.some(
-          (fact) => fact.taskId === receipt.taskId && fact.to === 'failed' && fact.reason === 'resource_limited',
+          (fact) => fact.taskId === receipt.taskId && fact.event === 'capacity_blocked',
         ),
       ).toBe(true);
     }
@@ -237,7 +241,7 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
     // 进程级上界（不按会话各算一份）：1 活跃 + 2 排队。
     expect(accepted).toHaveLength(3);
     expect(rejected).toHaveLength(3);
-    expect(rejected.every((receipt) => receipt.reason === 'resource_limited')).toBe(true);
+    expect(rejected.every((receipt) => typeof receipt.endedAt === 'string')).toBe(true);
     expect(rejected.every((receipt) => receipt.notice?.includes('后台排队已满（容量 2）'))).toBe(true);
     // 并发提交过程中底账 queued 行从未越过上界。
     expect(Math.max(...stack.depths)).toBeLessThanOrEqual(2);
@@ -257,7 +261,7 @@ describe('后台受理上界（复用 queueCapacity；满即拒绝，不阻塞�
     expect(rows.filter((receipt) => receipt.accepted === true)).toHaveLength(17);
     const rejected = rows.filter((receipt) => receipt.accepted === false);
     expect(rejected).toHaveLength(1);
-    expect(rejected[0]!.reason).toBe('resource_limited');
+    expect(typeof rejected[0]!.endedAt).toBe('string');
     expect(rejected[0]!.notice).toContain('后台排队已满（容量 16）');
     expect(queuedRows(stack)).toBe(16);
     expect(stack.executor.started).toHaveLength(1);

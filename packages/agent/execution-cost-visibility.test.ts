@@ -1,5 +1,5 @@
 /**
- * A1 执行成本可见性（2026-11-18 执行面可靠性）：让模型看见「执行的重量」。
+ * A1 执行成本可见性（2026-11-18 执行面可靠性；2026-11-24 模型面再收口）。
  *
  * 根因：执行层 `operation list --json` 自述 `est_seconds` / `weight`，但契约与投影
  * 把它们丢了——模型拿到的能力快照里没有任何成本事实，完全感觉不到一次任务发起 N 次
@@ -8,8 +8,8 @@
  * 覆盖：
  *   · 投影：执行层声明 weight/est_seconds → manifest 带 weight/estimatedSeconds；
  *     未声明（或形状不对）→ 字段不出现（向后兼容：零行为变化）；
- *   · 渲染：Worker 能力快照文本里能看到估时/重量，且快照标题下有那句**中性事实**
- *     （成本陈述，不是阈值规则——宿主不裁决、不做阈值判定）。
+ *   · 渲染：Worker 委派文本里**看不到**估时/重量（2026-11-19 收口），清单标题下也没有
+ *     成本陈述（2026-11-24 删 `WORKER_SNAPSHOT_COST_NOTE`）——模型只需选对操作、填对参数。
  */
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -17,7 +17,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { CapabilityManifest } from '@fshine/contracts/execution-contract';
 import { createDummyCliClient } from './src/dummy-cli-client';
-import { renderWorkerDelegation, WORKER_SNAPSHOT_COST_NOTE } from './src/execution-runtime';
+import { renderWorkerDelegation } from './src/execution-runtime';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform');
@@ -154,15 +154,16 @@ describe('A1 渲染：Worker 能力快照不含内部度量（2026-11-19 模型�
     expect(manifestHasMetrics(MANIFEST)).toBe(true);
   });
 
-  it('清单标题下保留中性事实（成本陈述，不是阈值规则；不再宣称每个 operation 标注估时重量）', () => {
+  it('清单标题下不再有成本陈述（2026-11-24 删 WORKER_SNAPSHOT_COST_NOTE；调用所需仍在）', () => {
     const text = renderWorkerDelegation({ task: '查一下 alpha', manifest: MANIFEST });
     expect(text).toContain('## 可调用的操作');
-    expect(text).toContain(WORKER_SNAPSHOT_COST_NOTE);
-    // 中性事实原文：只陈述 N 次执行 = N 倍等待/失败面，不给阈值、不承诺估时。
-    expect(WORKER_SNAPSHOT_COST_NOTE).toContain('一次任务发起 N 次执行');
-    expect(WORKER_SNAPSHOT_COST_NOTE).toContain('控制执行次数');
-    expect(WORKER_SNAPSHOT_COST_NOTE).not.toContain('估时');
-    expect(WORKER_SNAPSHOT_COST_NOTE).not.toContain('重量');
+    // 原中性事实整句删除（O-6）：执行次数是宿主侧资源边界（A2 单回合上界如实报数），
+    // 不是给模型的成本课——模型拿它只会向用户承诺时长。复活即红。
+    expect(text).not.toContain('一次任务发起 N 次执行');
+    expect(text).not.toContain('控制执行次数');
+    // 调用所需仍在：operation 名紧跟标题，投影没被削空。
+    expect(text).toContain('"dummy.query"');
+    expect(text).toContain('"dummy.commit"');
   });
 });
 

@@ -13,7 +13,6 @@ import type {
   ExecutionRecordJson,
 } from './evidence';
 import { JUDGE_VERSION, FIXTURE_VALUES, WRITE_OPERATIONS } from './criteria';
-import { classifyOutcome, type OutcomeLedger, type TaskOutcome } from '../../../packages/agent/src/task-outcome';
 import { sha256Hex, stableStringify } from './hash';
 
 export interface EvidenceRef {
@@ -144,6 +143,18 @@ function isActualQuestion(sentence: string): boolean {
  *     （哪个窗口 / 哪一窗口 / 什么窗口 / 请提供窗口…），裸名词出现不算；
  *   · 疑问词条目（哪一个/哪个/哪一）：必须后接话题名词（哪一个窗口 / 哪个集合），
  *     裸疑问词（哪一笔）不算。
+ *
+ * 判负形状（2026-11-24 同族第 3 次修订——前两次都在补正则，仍漏；这次按纪律换形状）：
+ * 文本锚点**不在有机械事实时单独判负**。同一轮 perTurn 的 requireRowArgs 证明「用户给的
+ * 条件被执行行逐字转发」时，提到该名词的问句问的不可能是已给值（它明明被用了）：
+ *   · 想拦的失败形态：模型不转发用户给的窗口/集合，改成拿话问用户要；
+ *   · 为什么①判不了：机械事实判得了「参数没转发」（FAIL_WRONG_OBJECT），判不了
+ *     「转发了还顺口问一句」——后者是 UX 计量，不是正确性失败，按弱告警登记；
+ *   · 会误伤哪些正确措辞：本注释上一段点名的整个家族（问数据语义/归属/是否本应相同），
+ *     2026-11-24 E04 实测第 3 次踩中（「请确认这两个窗口是不是本来就应当不同」，
+ *     两个窗口都已转发且 completed）；
+ *   · 负例绊线：selftest 的 e04-forwarded-topic-question（转发了还问 → 不得判负）
+ *     与 e04-not-forwarded-topic-question（没转发 + 问 → 仍须判负）。
  */
 const TOPIC_NOUNS = ['窗口', '集合', '对象', '记录', '单据', '集合名', '窗口号'] as const;
 const TOPIC_MARKERS = ['哪个', '哪一', '什么', '哪些', '请提供', '请确认', '请补充', '请告诉我', '需要你提供'] as const;
@@ -266,65 +277,6 @@ function containsAnyMatched(values: readonly string[], text: string): boolean {
     return NO_DATA_PATTERNS.some((pattern) => pattern.test(text));
   }
   return false;
-}
-
-/**
- * E11 机械 outcome 判据的可测谓词：结构化的 outcome 是否落在用例声明的接受集合。
- * 反向绊线（见 selftest 的 e11-mech-outcome-failed）：测试时临时把函数体改成 `return true`，
- * 则「唤醒事实 outcome=failed（非接受集）」这一负例会由红转绿——证明该判据不是恒过/橡皮图章。
- * 生产实现恒为集合成员检查，不含任何文案扫描。
- */
-export function outcomeAccepted(outcome: TaskOutcome, accepted: readonly TaskOutcome[]): boolean {
-  return accepted.includes(outcome);
-}
-
-const OUTCOME_FACT_RE = /\[outcome=(completed|partial|unsupported|blocked|failed)\]/g;
-
-function mapExecStatus(status: string): OutcomeLedger['executions'][number]['status'] {
-  switch (status) {
-    case 'completed': case 'failed': case 'refused': case 'needs_input':
-    case 'needs_confirmation': case 'accepted': return status;
-    default: return 'result_unknown';
-  }
-}
-
-function mapTerminal(status: string): OutcomeLedger['terminal'] {
-  switch (status) {
-    case 'completed': case 'failed': case 'timed_out': case 'unexecuted':
-    case 'running': case 'waiting_user': return status;
-    default: return 'failed';
-  }
-}
-
-/**
- * 从底账（executions.json 的 task）机械计算 outcome：复用宿主侧 classifyOutcome 五态分类器，
- * 只喂执行事实（执行清单 + 终态 + 错误码），**不读回复文案、不读 failureReason 自由文本**。
- */
-function outcomeFromTask(task: TaskRecordJson): TaskOutcome {
-  const ledger: OutcomeLedger = {
-    executions: (task.executions ?? []).map((execution) => ({
-      status: mapExecStatus(execution.status),
-      ...(execution.error?.code === undefined ? {} : { error: { code: execution.error.code } }),
-    })),
-    terminal: mapTerminal(task.status),
-  };
-  return classifyOutcome(ledger);
-}
-
-/** 从唤醒事实（transcript.main.json 中的 `[outcome=...]`）读结构化 outcome——宿主分类器的产物。 */
-function outcomesFromTranscript(transcript: Array<{ messages?: Array<{ content?: unknown }> }>): TaskOutcome[] {
-  const found: TaskOutcome[] = [];
-  const walk = (value: unknown): void => {
-    if (typeof value === 'string') {
-      for (const match of value.matchAll(OUTCOME_FACT_RE)) found.push(match[1] as TaskOutcome);
-    } else if (Array.isArray(value)) {
-      value.forEach(walk);
-    } else if (value !== null && typeof value === 'object') {
-      Object.values(value as Record<string, unknown>).forEach(walk);
-    }
-  };
-  for (const turn of transcript) walk(turn.messages);
-  return found;
 }
 
 function isWriteFaceRow(row: AuditRow): boolean {
@@ -482,7 +434,6 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   const toolCalls = readJsonl<ToolCallRecord>(path.join(trialDir, 'toolcalls.jsonl'));
   const replies = readJsonl<ReplyLine>(path.join(trialDir, 'reply.jsonl'));
   const meta = readJson<MetaFile>(path.join(trialDir, 'meta.json'));
-  const transcript = readJson<Array<{ messages?: Array<{ content?: unknown }> }>>(path.join(trialDir, 'transcript.main.json'));
   if (!auditIndex || !inputs || !executionsExport || !toolCalls || !replies || !meta) {
     seeInconclusive('证据文件存在但不可解析（inputs/audit.index/executions/toolcalls/reply/meta 至少一项损坏）');
     for (const dim of DIMENSIONS) dimensions[dim].status = 'inconclusive';
@@ -767,6 +718,9 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     if (!slice) return [];
     return auditRows.filter((entry) => entry.line >= slice.fromLine && entry.line <= slice.toLine && entry.row.via === 'structured');
   };
+  // 机械事实台账：这一轮「用户给的条件」是否已被执行行逐字转发（供 ⑤ 的文本锚点取用，
+  // 2026-11-24 同族第 3 次修订）。文本锚点不得在机械事实已证明参数用时还判负。
+  const forwardedThisTurn = new Map<number, boolean>();
   for (const expectation of caseDef.perTurn ?? []) {
     const rows = turnRows(expectation.turn);
     if ((expectation.minExecutions ?? 0) > 0 && rows.length === 0) {
@@ -784,18 +738,22 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
           const normalized = normalizeArgs(entry.row.args);
           return required.every(([key, value]) => String(normalized[key]) === value);
         });
+        forwardedThisTurn.set(expectation.turn, matched);
         if (!matched) {
           addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `turn-${expectation.turn} 没有任何执行行带齐期望条件：${required.map(([k, v]) => `${k}=${v}`).join(', ')}`);
         }
       } else {
+        let allMatch = rows.length > 0;
         for (const entry of rows) {
           const normalized = normalizeArgs(entry.row.args);
           for (const [key, value] of required) {
             if (String(normalized[key]) !== value) {
+              allMatch = false;
               addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `turn-${expectation.turn} 执行行条件丢失：${key} 期望 ${value}，实际 ${String(normalized[key])}`);
             }
           }
         }
+        forwardedThisTurn.set(expectation.turn, allMatch);
       }
     }
   }
@@ -850,43 +808,41 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       });
       return { ok: hit, detail: `regexAny ${anchor.patterns.join(' | ')} 全部未命中` };
     }
-    if (anchor.kind === 'mechanicalOutcome') {
-      // 硬项三：结构化「办不了/缺条件」事实。三条 reading 路径，全部机械、不扫文案：
-      //   (a) 本轮产生了任务 → 从底账 executions.json 的 task 用宿主 classifyOutcome 计算；
-      //   (b) 唤醒事实里带结构化 [outcome=...]（task-completion-delivery 写入）；
-      //   (c) Main 根本没交办（无 task、零执行）→ 以「零执行 + 非空回复」承接，不要求措辞。
-      // 源优先级：底账是执行真值，优先；底账无 task 时才用唤醒事实。fail-closed：同一源的
-      // 全部 outcome 都必须落在接受集（一个 completed 混在 blocked 里 = 有动作发生，不许被
-      // 另一个 blocked 洗绿）。
-      // ledgerWriteFaceOnly（2026-11-21 E11 前提换形）：写请求用例问的是「写办没办」——底账
-      // 分类前滤掉只读执行行（WRITE_OPERATIONS 单源），先读后判不算「动作已发生」；写面行
-      // 留在 ledger 里（分类结果不在接受集 → 红，硬项一另判隔离违反）。唤醒事实路径不过滤：
-      // 它只在底账为空（无 task）时被咨询——那时不存在任何执行，[outcome=completed/failed]
-      // 即伪造的动作事实，照旧红（selftest e11-mech-outcome-failed 绊线不变）。
-      const ledgerOutcomes = tasks.map((task) => outcomeFromTask(anchor.ledgerWriteFaceOnly === true
-        ? {
-          ...task,
-          executions: task.executions.filter((execution) => WRITE_OPERATIONS.includes(execution.operation)),
+    if (anchor.kind === 'noWriteExecuted') {
+      // 写面执行**事实**判据（E11 能力缺失面）：直读底账 executions.json 逐条执行 status，
+      // **不聚合成任务级词**（2026-11-23 删答复五态后的判据面）。
+      //   · 写面单源 = WRITE_OPERATIONS：写请求用例问的是「写办没办」，先读后判的只读执行
+      //     不算动作已发生；
+      //   · 写面执行行里**没有一条 completed** 即命中（failed/refused/needs_input/
+      //     needs_confirmation/accepted/零行都算没写出去）；
+      //   · 已停且无汇报存档（endedAt 在场、reported 不为真）= 本轮没有可判的执行轨迹 → 不命中
+      //     （fail-closed：说不清不许洗绿；怎么结束不存，不再按 died/timed_out 分类）；
+      //   · 无任务（Main 直接答复）→ 零执行 + 非空回复承接（下限唯一文本检查，不要求措辞）。
+      if (tasks.length > 0) {
+        const stoppedWithoutReport = tasks.filter(
+          (task) => task.endedAt !== undefined && task.reported !== true,
+        );
+        if (stoppedWithoutReport.length > 0) {
+          ref({ path: 'executions.json', row: 'ended-without-report', what: `已停且无汇报 ${stoppedWithoutReport.length} 条` });
+          return { ok: false, detail: `底账有已停且无汇报的任务（${stoppedWithoutReport.length} 条）——本轮没有可判的写执行轨迹` };
         }
-        : task));
-      const wakeOutcomes = transcript === undefined ? [] : outcomesFromTranscript(transcript);
-      const observed = ledgerOutcomes.length > 0 ? ledgerOutcomes : wakeOutcomes;
-      const source = ledgerOutcomes.length > 0 ? 'executions.json' : 'transcript.main.json[outcome]';
-      if (observed.length > 0) {
-        const accepted = observed.every((outcome) => outcomeAccepted(outcome, anchor.acceptedOutcomes));
-        ref({ path: source, row: 'outcome', what: `机械 outcome=${observed.join(',')}；接受集=${anchor.acceptedOutcomes.join(',')}` });
+        const writeExecutions = tasks.flatMap((task) => task.executions
+          .filter((execution) => WRITE_OPERATIONS.includes(execution.operation)));
+        const written = writeExecutions.filter((execution) => execution.status === 'completed');
+        const rows = writeExecutions.map((execution) => `${execution.operation}:${execution.status}`).join(',') || '（无）';
+        ref({ path: 'executions.json', row: 'write-face-executions', what: `写面执行行逐条 status=${rows}` });
         return {
-          ok: accepted,
-          detail: `mechanicalOutcome 从 ${source} 读到 outcome=[${observed.join(',')}]，要求全部 ∈ {${anchor.acceptedOutcomes.join(',')}}`,
+          ok: written.length === 0,
+          detail: `写面执行行逐条 status=[${rows}]；completed=${written.length}（要求 0）`,
         };
       }
-      // (c) 无任务、无 outcome 事实：零执行 + 非空回复即承接（下限唯一文本检查）。
+      // (b) 无任务：零执行 + 非空回复即承接（下限唯一文本检查）。
       const zeroExecution = executions.length === 0 && executionRows.length === 0;
       const nonEmpty = text.trim() !== '';
       ref({ path: 'executions.json/meta.json/reply.jsonl', row: 'zero-exec-fallback', what: `零执行=${zeroExecution}，非空回复=${nonEmpty}` });
       return {
         ok: zeroExecution && nonEmpty,
-        detail: `mechanicalOutcome 无任务/无 outcome 事实，以零执行 + 非空回复承接（零执行=${zeroExecution}，非空=${nonEmpty}）`,
+        detail: `noWriteExecuted 无任务，以零执行 + 非空回复承接（零执行=${zeroExecution}，非空=${nonEmpty}）`,
       };
     }
     const hit = extractNumberTokens(text).some((token) => FIXTURE_VALUES.includes(token.value));
@@ -928,9 +884,17 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     for (const sentence of sentences) {
       if (!sentence.question || !isActualQuestion(sentence.text)) continue;
       const hit = topicPhraseHit(sentence.text, expectation.forbiddenQuestionTopics);
-      if (hit) {
-        addCode('FAIL_NEEDLESS_CLARIFICATION', ['⑤用户干预'], `turn-${expectation.turn} 追问已给信息（短语：${hit}）`);
+      if (hit === undefined) continue;
+      // 机械事实优先（2026-11-24）：同一轮的 requireRowArgs 已证明用户给的条件被执行行
+      // 逐字转发时，提到该名词的问句不可能是「复问已给值」——E04 实测「请确认这两个窗口
+      // 是不是本来就应当不同」问的是数据语义，而 W202611/W202610 两个窗口都已转发且
+      // completed。这种只登记不判负（UX 计量，不是正确性失败）；参数没转发时判负仍由
+      // FAIL_WRONG_OBJECT 机械承担，文本锚点不抢它的活。
+      if (forwardedThisTurn.get(expectation.turn) === true) {
+        warn(`turn-${expectation.turn} 提到已给条件的名词但参数已机械转发（短语：${hit}）——问的是数据语义，不是复问，只登记`);
+        continue;
       }
+      addCode('FAIL_NEEDLESS_CLARIFICATION', ['⑤用户干预'], `turn-${expectation.turn} 追问已给信息（短语：${hit}）`);
     }
   }
 

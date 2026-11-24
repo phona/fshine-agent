@@ -17,6 +17,7 @@
  *
  * 零网络、零真实模型：执行层是 gate/脚本假件，脚本是仓内 Node 受限子进程。
  */
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
@@ -128,7 +129,7 @@ function runJsTaskExecutor(runJs: RunJsExecutor): TaskExecutor {
       });
       return output.audit.killReason === 'abort'
         ? { kind: 'cancelled' }
-        : { kind: 'completed', resultText: '脚本完成' };
+        : { kind: 'ended', report: '脚本完成' };
     },
   };
 }
@@ -254,13 +255,13 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       // 取消：先「已请求」，确认中止后才 cancelled。
       expect(runner.cancel('task_runjs', SCOPE)).toEqual({ outcome: 'requested', taskId: 'task_runjs' });
       await vi.waitFor(() => {
-        expect(registry.get('task_runjs', SCOPE).status).toBe('cancelled');
+        expect(registry.get('task_runjs', SCOPE).endedAt).toBeTruthy();
       }, { timeout: 5000 });
       await runner.whenIdle();
 
       const task = registry.get('task_runjs', SCOPE);
-      expect(task.status).toBe('cancelled');
-      expect(task.reason).toBe('cancelled_by_user');
+      expect(task.endedAt).toBeTruthy();
+      expect(task.endedAt).toBeTruthy();
       // 执行真的停了：脚本进程已不存在，进程表里也没有本 run 的任何残留进程。
       expect(processAlive(started.pid)).toBe(false);
       const ps = execFileSync('ps', ['-ax', '-o', 'pid=,args='], { encoding: 'utf8' });
@@ -325,7 +326,7 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       // 在飞：执行层调用已发起、gate 未回。
       await vi.waitFor(() => {
         expect(client.calls).toBe(1);
-        expect(registry.get(receipt.taskId, SCOPE).status).toBe('running');
+        expect(taskMayBeRunningOf(registry.get(receipt.taskId, SCOPE))).toBe(true);
       }, { timeout: 5000 });
 
       await session.send('算了别做了，取消掉');
@@ -345,13 +346,13 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       expect((cancelReceipt as unknown as { taskCreatedAt?: string }).taskCreatedAt).toMatch(/T/);
 
       await vi.waitFor(() => {
-        expect(registry.get(receipt.taskId, SCOPE).status).toBe('cancelled');
+        expect(registry.get(receipt.taskId, SCOPE).endedAt).toBeTruthy();
       }, { timeout: 5000 });
       await runner.whenIdle();
 
       const task = registry.get(receipt.taskId, SCOPE);
-      expect(task.status).toBe('cancelled');
-      expect(task.reason).toBe('cancelled_by_user');
+      expect(task.endedAt).toBeTruthy();
+      expect(task.endedAt).toBeTruthy();
       // 中止信号真的到达执行层调用（不是宿主自己假想取消）。
       expect(client.aborted).toBe(true);
       expect(client.signals[0]?.aborted).toBe(true);
@@ -383,7 +384,7 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
 
       expect(runner.cancel('task_stubborn', SCOPE)).toEqual({ outcome: 'requested', taskId: 'task_stubborn' });
       await vi.waitFor(() => {
-        expect(registry.get('task_stubborn', SCOPE).status).toBe('cancelled');
+        expect(registry.get('task_stubborn', SCOPE).endedAt).toBeTruthy();
       }, { timeout: 5000 });
       await runner.whenIdle();
 
@@ -391,8 +392,8 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       for (const release of client.releases) release({ status: 'completed', data: { rows: 2 } });
       await sleep(50);
       const task = registry.get('task_stubborn', SCOPE);
-      expect(task.status).toBe('cancelled');
-      expect(task.reason).toBe('cancelled_by_user');
+      expect(task.endedAt).toBeTruthy();
+      expect(task.endedAt).toBeTruthy();
       expect(task.executions.filter((execution) => execution.status === 'completed')).toEqual([]);
       expect(runner.inFlight()).toEqual([]);
     } finally {
@@ -408,7 +409,7 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
       operation: 'dummy.query',
       status: 'completed',
     });
-    registry.complete('task_done', '查到 2 条。');
+    registry.setResultText('task_done', '查到 2 条。');
 
     const results: unknown[] = [];
     const mainDriver: TurnDriver = {
@@ -421,7 +422,7 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
     const runner = createTaskRunner({
       registry,
       policy: createResourcePolicy(),
-      executor: { async execute(): Promise<TaskExecutionOutcome> { return { kind: 'completed', resultText: 'x' }; } },
+      executor: { async execute(): Promise<TaskExecutionOutcome> { return { kind: 'ended', report: 'x' }; } },
     });
     const session = await createSession({
       principalId: SCOPE.principalId,
@@ -442,16 +443,140 @@ describe('取消在飞任务（真的中止执行，不只改账本）', () => {
 
     await session.send('把 #1 取消掉');
 
-    // 机械回执：终态任务无操作，原样给出 completed（模型不得据此宣称已取消）。
+    // 机械回执：终态任务无操作，原样给出真实终止种类（模型不得据此宣称已取消）。
     // 同上：回执带身份，断言改为子集 + 身份存在。
-    expect(results[0]).toMatchObject({ outcome: 'terminal', taskId: 'task_done', status: 'completed' });
+    expect(results[0]).toMatchObject({ outcome: 'terminal', taskId: 'task_done', settled: 'reported' });
     expect(results[0]).not.toHaveProperty('taskNo');
-    // 终态：用户可见话术必须说"没停成 + 已完成"，不能只说"已取消"。
+    // 终态：用户可见话术必须说"没停成 + 已完成"（真实种类），不能只说"已取消"。
     expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('没停成');
-    expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('completed');
+    expect((results[0] as unknown as { userMessage?: string }).userMessage).toContain('已有汇报');
+    expect((results[0] as unknown as { userMessage?: string }).userMessage).not.toContain('已取消');
     const task = registry.get('task_done', SCOPE);
-    expect(task.status).toBe('completed');
-    expect(task.reason).toBeUndefined();
+    expect(lastExecutionOf(task)?.status).toBe('completed');
+    expect(lastFailureOf(task)).toBeUndefined();
     expect(task.resultText).toBe('查到 2 条。');
+  });
+
+  it('④ 已结束任务再取消：回执只按事实说（有汇报 / 已停无汇报），不改写结束事实', async () => {
+    // 事实口径（2026-11-23 删状态机轮）：怎么结束不存，回执只能区分「有汇报」与「已停无汇报」。
+    // 反向绊线：把回执改回统一「已经办完了」，或按已删的终止种类说话 → 本用例红。
+    const cases: ReadonlyArray<{
+      kind: 'reported' | 'ended';
+      word: RegExp;
+      seed: (registry: TaskRegistry, taskId: string) => void;
+    }> = [
+      {
+        kind: 'reported',
+        word: /已有汇报/,
+        seed: (registry, taskId) => {
+          registry.noteExecution(taskId, { requestId: 'req_done', operation: 'dummy.query', status: 'completed' });
+          registry.setResultText(taskId, '查到 2 条。');
+        },
+      },
+      // 所有「停下但没有汇报」的路径都只剩同一条事实：结束时刻在场。
+      { kind: 'ended', word: /结果未知/, seed: (registry, taskId) => registry.noteRoundEnded(taskId) },
+      { kind: 'ended', word: /结果未知/, seed: (registry, taskId) => registry.markLeaseExpired(taskId) },
+      { kind: 'ended', word: /结果未知/, seed: (registry, taskId) => registry.markTimedOut(taskId, 'execution') },
+      { kind: 'ended', word: /结果未知/, seed: (registry, taskId) => registry.noteResourceRefused(taskId) },
+      { kind: 'ended', word: /结果未知/, seed: (registry, taskId) => registry.markCancelled(taskId, { scope: SCOPE }) },
+    ];
+    for (const [index, testCase] of cases.entries()) {
+      const registry = createTaskRegistry();
+      const taskId = `task_terminal_${index}`;
+      registry.begin({
+        taskId,
+        principalId: SCOPE.principalId,
+        sessionId: SCOPE.sessionId,
+        request: `办第 ${index} 件已停的事`,
+      });
+      testCase.seed(registry, taskId);
+      const results: unknown[] = [];
+      const mainDriver: TurnDriver = {
+        async run(input) {
+          results.push(await input.exec(TASK_CANCEL_TOOL, { ref: taskId }));
+          return { text: '查过了，按事实说。', messages: input.messages };
+        },
+      };
+      const runner = createTaskRunner({
+        registry,
+        policy: createResourcePolicy(),
+        executor: { async execute(): Promise<TaskExecutionOutcome> { return { kind: 'ended', report: 'x' }; } },
+      });
+      const session = await createSession({
+        principalId: SCOPE.principalId,
+        sessionId: SCOPE.sessionId,
+        client: faceClient(),
+        allowedOperations: ['dummy.query'],
+        readOnlyOperations: ['dummy.query'],
+        mainDriver,
+        workerDriver: {
+          async run() {
+            throw new Error('（测试）该 driver 不应被调用');
+          },
+        },
+        mainSystemPrompt: '（测试）Main 系统提示',
+        taskRegistry: registry,
+        taskRunner: runner,
+      });
+      await session.send(`把 ${taskId} 取消掉`);
+
+      const receipt = results[0] as { outcome?: string; settled?: string; userMessage?: string };
+      expect(receipt.outcome, testCase.kind).toBe('terminal');
+      // 事实原样交给模型；用户可见话术按事实说（不再按已删的终止种类分类）。
+      expect(receipt.settled, testCase.kind).toBe(testCase.kind);
+      expect(receipt.userMessage, testCase.kind).toMatch(testCase.word);
+      expect(receipt.userMessage, testCase.kind).not.toContain('已经办完了');
+      // 结束事实不被取消调用改写（时刻仍在）。
+      expect(registry.get(taskId, SCOPE).endedAt, testCase.kind).toBeTruthy();
+    }
+  });
+
+  it('⑤ 在飞取消窗口内落定为失败（结果未知）：回执按 died 说，回合不把失败终态记成 completed 观察', async () => {
+    const registry = createTaskRegistry();
+    // 中止后不确认取消，而是以「结果未知」落定（执行端可能已发生副作用的真实形状）。
+    const executor: TaskExecutor = {
+      async execute(_task, context): Promise<TaskExecutionOutcome> {
+        return await new Promise<TaskExecutionOutcome>((resolve) => {
+          context.signal.addEventListener('abort', () => resolve({ kind: 'result_unknown' }));
+        });
+      },
+    };
+    const runner = createTaskRunner({ registry, policy: createResourcePolicy(), executor, leaseMs: 60_000 });
+    const results: unknown[] = [];
+    const session = await createSession({
+      principalId: SCOPE.principalId,
+      sessionId: SCOPE.sessionId,
+      client: faceClient(),
+      allowedOperations: ['dummy.query'],
+      readOnlyOperations: ['dummy.query'],
+      mainDriver: scriptedMainDriver([
+        { calls: [{ tool: TASK_RUN_TOOL, args: { task: '查一下 alpha 集合' } }], text: '已受理。' },
+        { calls: [{ tool: TASK_CANCEL_TOOL, args: taskIdRefFrom }], text: '好，我看看停没停。' },
+      ], results),
+      workerDriver: {
+        async run() {
+          throw new Error('（测试）background 派发不应调用 createSession 的 workerDriver');
+        },
+      },
+      mainSystemPrompt: '（测试）Main 系统提示',
+      taskRegistry: registry,
+      policy: createResourcePolicy(),
+      taskDispatch: 'async',
+      taskRunner: runner,
+      // 窗口 > 0：取消请求在回合内等到「结果未知」落定。
+      taskRunWaitMs: 1_500,
+    });
+    await session.send('帮我查 alpha 集合，跑起来别等');
+    const turn = await session.send('算了别做了，取消掉');
+
+    const receipt = results[1] as { outcome?: string; settled?: string; userMessage?: string };
+    // 回执按真实终止种类说（died = 结果未知），不冒充已停、不统一「已经办完了」。
+    expect(receipt.outcome).toBe('terminal');
+    expect(receipt.settled).toBe('ended');
+    expect(receipt.userMessage).toContain('结果未知');
+    expect(receipt.userMessage).not.toContain('已经办完了');
+    // 反向绊线：把窗口内落定的失败终态记成 completed 观察 → 这里变成 [{kind:'completed'}]，必红。
+    expect(turn.terminalObservedInTurn ?? []).toEqual([]);
+    expect(registry.get((results[0] as { taskId: string }).taskId, SCOPE).endedAt).toBeTruthy();
   });
 });

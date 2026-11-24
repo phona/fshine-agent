@@ -82,7 +82,7 @@ describe('三态处置接缝 classifyP2Sample（预注册 §5.1）', () => {
     const evidence = emptyEvidence();
     const judgement: SessionJudgement = {
       ...emptyJudgement(),
-      taskVerdict: judgeTaskContinuity([{ turn: 1, tasks: [{ taskId: 't', request: 'x', status: 'completed', requestIds: [] }] }]),
+      taskVerdict: judgeTaskContinuity([{ turn: 1, tasks: [{ taskId: 't', request: 'x', started: true, ended: true, reported: true, waiting: false, mayBeRunning: false, requestIds: [] }] }]),
     };
     expect(classifyP2Sample({ evidence, judgement, coverage: coverageOf('S1', false, {}) })).toBe('product_fault');
   });
@@ -202,8 +202,8 @@ describe('任务 Oracle 与 P2 判定组合', () => {
   const turn = (tasks: TaskTurnFact['tasks']): TaskTurnFact => ({ turn: 1, tasks });
   it('H3 重复 requestId 归属多任务 → 硬零（任务判据原样复用）', () => {
     const verdict = judgeTaskContinuity([turn([
-      { taskId: 'a', request: 'x', status: 'completed', requestIds: ['req_1'] },
-      { taskId: 'b', request: 'y', status: 'completed', requestIds: ['req_1'] },
+      { taskId: 'a', request: 'x', started: true, ended: true, reported: true, waiting: false, mayBeRunning: false, requestIds: ['req_1'] },
+      { taskId: 'b', request: 'y', started: true, ended: true, reported: true, waiting: false, mayBeRunning: false, requestIds: ['req_1'] },
     ])]);
     expect(verdict.hardZeroHits).toContain('H3');
   });
@@ -213,8 +213,8 @@ describe('任务 Oracle 与 P2 判定组合', () => {
   });
   it('E-G 同编号映射到多任务 → 判负（编号混淆）', () => {
     const verdict = judgeTaskContinuity([turn([
-      { taskId: 'a', taskNo: 1, request: 'x', status: 'running', requestIds: [] },
-      { taskId: 'b', taskNo: 1, request: 'y', status: 'running', requestIds: [] },
+      { taskId: 'a', taskNo: 1, request: 'x', started: true, ended: false, reported: false, waiting: false, mayBeRunning: true, requestIds: [] },
+      { taskId: 'b', taskNo: 1, request: 'y', started: true, ended: false, reported: false, waiting: false, mayBeRunning: true, requestIds: [] },
     ])]);
     expect(verdict.codes).toContain('E-G');
   });

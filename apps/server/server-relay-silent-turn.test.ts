@@ -30,8 +30,9 @@ import { createPiTurnDriver } from '../../packages/agent/src/pi-driver';
 import { createScriptedModelRuntime } from '../../packages/agent/testing/scripted-model-runtime';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../../packages/agent/src/task-runner';
 import type { Notification, NotificationSink } from '../../packages/agent/src/notifications';
-import { failureMessageFor, internalTermIn } from '../../packages/agent/src/user-facing-failure';
+import { failureMessageFor, fallbackFailureKindOf, internalTermIn } from '../../packages/agent/src/user-facing-failure';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
+import { archivedReportOf } from '../../packages/agent/testing/task-facts';
 import { fileStoragePathOf } from '../../packages/agent/src/file-store';
 import type { RecalcXlsxExecutor } from '../../packages/agent/src/recalc-xlsx-executor';
 import { mainSessionOptions } from '../../scripts/ask-runtime';
@@ -125,7 +126,7 @@ class ImmediateExecutor implements TaskExecutor {
   calls = 0;
   async execute(_input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
     this.calls += 1;
-    return { kind: 'completed', resultText: RESULT_TEXT };
+    return { kind: 'ended', report: RESULT_TEXT };
   }
 }
 
@@ -135,7 +136,7 @@ class SequencedExecutor implements TaskExecutor {
   constructor(private readonly results: readonly string[]) {}
   async execute(_input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
     this.calls += 1;
-    return { kind: 'completed', resultText: this.results[this.calls - 1] ?? `第 ${this.calls} 条结果。` };
+    return { kind: 'ended', report: this.results[this.calls - 1] ?? `第 ${this.calls} 条结果。` };
   }
 }
 
@@ -163,7 +164,7 @@ class GatedExecutor implements TaskExecutor {
 /** 立即失败的执行器：窗口内落定 = 快活失败（注入式无执行事实 → code 取不到 = executor_failed）。 */
 class FailingExecutor implements TaskExecutor {
   calls = 0;
-  constructor(private readonly make: () => TaskExecutionOutcome = () => ({ kind: 'failed', reason: FAIL_REASON })) {}
+  constructor(private readonly make: () => TaskExecutionOutcome = () => ({ kind: 'ended' })) {}
   async execute(_input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
     this.calls += 1;
     return this.make();
@@ -175,7 +176,7 @@ class MixedExecutor implements TaskExecutor {
   calls = 0;
   async execute(_input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
     this.calls += 1;
-    return this.calls === 1 ? { kind: 'failed', reason: FAIL_REASON } : { kind: 'completed', resultText: RESULT_TEXT };
+    return this.calls === 1 ? { kind: 'ended' } : { kind: 'ended', report: RESULT_TEXT };
   }
 }
 
@@ -305,7 +306,7 @@ function createScripted(input: {
     script: (_index, context) => {
       if (input.emptyOnly === true) return textAssistant('');
       const last = lastUserTextOf(context.messages);
-      if (last.startsWith('[任务完成]')) {
+      if (last.startsWith('[回合结束]')) {
         input.onWake?.();
         return textAssistant(input.wakeLine ?? WAKE_LINE);
       }
@@ -419,7 +420,7 @@ async function makeFixture(input: {
     ...(sink === undefined ? {} : { sink }),
     wakeCalls: () => wakeCalls,
     close: async () => {
-      if (executor instanceof GatedExecutor) executor.settle({ kind: 'failed', reason: '（测试清理）' });
+      if (executor instanceof GatedExecutor) executor.settle({ kind: 'ended' });
       // 让 settle 的收尾与由此触发的再派发（pump 走 microtask）落地后再停机——否则停机后
       // 触发的 pump 会撞上已关闭的底账连接（vitest 记未处理错误）。
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -471,7 +472,8 @@ describe('快活 + 模型沉默（server 级）：不许静默终局', () => {
       expect(fx.wakeCalls()).toBe(0);
       const ro = createSqliteTaskRegistry(fx.dbPath, { readOnly: true });
       try {
-        expect(ro.get(taskId, SCOPE).status).toBe('completed');
+        // S1 事实模型：底账没有 status——后台汇报已存档即「办完」的账本事实。
+        expect(ro.get(taskId, SCOPE).replyText).toBe(RESULT_TEXT);
       } finally {
         ro.close();
       }
@@ -500,7 +502,7 @@ describe('快活 + 模型沉默（server 级）：不许静默终局', () => {
       expect(fx.logs.some((line) => String(line['event']).startsWith('task_result_delivery_'))).toBe(false);
 
       // 落定后由既有唤醒/完成投递面送达（机制不变）——「欠他一条」不是「永远沉默」。
-      executor.settle({ kind: 'completed', resultText: RESULT_TEXT });
+      executor.settle({ kind: 'ended', report: RESULT_TEXT });
       await vi.waitFor(() => {
         expect(fx.delivery.sentTexts).toHaveLength(1);
       }, { timeout: 10_000 });
@@ -587,12 +589,10 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
     try {
       const reply = await fx.server.handler(incoming('m-1', ASK));
 
-      // 用户收到了：失败话术（逐字 = failureMessageFor(executor_failed)——注入式执行器无执行
-      // 事实，码取不到时的既有归类）；不是成功兜底、不含结果正文当成功说。
+      // 用户收到了：失败话术（注入式执行器无执行事实、无汇报、无活 worker = 结果未知）。
       expect(fx.delivery.sentTexts).toHaveLength(1);
       const text = fx.delivery.sentTexts[0]!.text;
-      expect(text).toBe(failureMessageFor('executor_failed').text);
-      expect(text).toContain('没办成');
+      expect(text).toBe(failureMessageFor('unknown_result').text);
       expect(text).not.toContain('办好了');
       expect(text).not.toContain(RESULT_TEXT);
       expect(internalTermIn(text)).toBeUndefined();
@@ -606,7 +606,8 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       const taskId = (done!['taskIds'] as string[])[0]!;
       const ro = createSqliteTaskRegistry(fx.dbPath, { readOnly: true });
       try {
-        expect(ro.get(taskId, SCOPE).status).toBe('failed');
+        // S1 事实模型：底账没有 status——已启动但无汇报 = 机械事实词「failed」。
+        expect(archivedReportOf(ro.get(taskId, SCOPE))).toBeUndefined();
       } finally {
         ro.close();
       }
@@ -620,8 +621,9 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
         sessionId: 'wecom:conv-a',
         deliveryMode: 'live',
       });
-      // 通知推送面不重复发（failed 不进推送种类；事实照常落 sink，只是不推）。
-      expect(fx.sink!.sent.some((notification) => notification.kind === 'failed')).toBe(true);
+      // 通知推送面不重复发：completed/failed 已从通知意图删除（完成/失败由投递与唤醒面说），
+      // 更不会被推送。
+      expect(fx.sink!.sent.some((notification) => ['completed', 'failed'].includes(notification.kind))).toBe(false);
       expect(fx.logs.some((line) => line['event'] === 'notification_push_sent')).toBe(false);
       // 失败回调的抑制照旧核销（本回合已送达，不重复发）——等回调落定后仍是 1 条。
       await vi.waitFor(() => {
@@ -635,9 +637,10 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
     }
   });
 
-  it('①b 失败事实从底账取：执行事实的 error.code 决定话术种类（真实 Worker 路径）', async () => {
-    // Worker 替身在窗口内被执行层以 GATE_REFUSE 拒绝 → error.code 进任务底账执行事实 →
-    // 回合末按既有归类（denied）投递。与失败回调同源：同一条 failureCodeOf 链。
+  it('①b 失败事实从底账取：执行事实的 error.code 决定兜底选档（真实 Worker 路径）', async () => {
+    // Worker 替身在窗口内被执行层以 GATE_REFUSE 拒绝 → error.code 经 onTaskFailed 进 roundFailure →
+    // 回合末沉默兜底把 code 喂 fallbackFailureKindOf 选档。2026-11-24 删码表：GATE_REFUSE 不是
+    // 宿主自认码 → 通用「没办成」档（不再按执行层码分 denied/not_found/invalid_input）。
     const fx = await makeFixture({
       waitMs: 1_500,
       workerExecutionFailure: { code: 'GATE_REFUSE', message: '执行层拒绝了这次查询' },
@@ -646,17 +649,19 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       const reply = await fx.server.handler(incoming('m-1', ASK));
       expect(reply).toBe('');
       expect(fx.delivery.sentTexts).toHaveLength(1);
-      expect(fx.delivery.sentTexts[0]!.text).toBe(failureMessageFor('denied').text);
+      expect(fx.delivery.sentTexts[0]!.text).toBe(failureMessageFor(fallbackFailureKindOf('GATE_REFUSE')).text);
       // 执行层原文/内部码不进用户文本。
       expect(fx.delivery.sentTexts[0]!.text).not.toContain('GATE_REFUSE');
       expect(fx.delivery.sentTexts[0]!.text).not.toContain('执行层');
+      // 失败事实不是「办好了」：用户拿到的是没办成 + 可做动作。
+      expect(fx.delivery.sentTexts[0]!.text).not.toContain('办好了');
       // 底账执行事实里确实带着那个码（证明文本不是凭空来的）。
       const done = fx.logs.find((line) => line['event'] === 'message_done');
       const taskId = (done!['taskIds'] as string[])[0]!;
       const ro = createSqliteTaskRegistry(fx.dbPath, { readOnly: true });
       try {
         const record = ro.get(taskId, SCOPE);
-        expect(record.status).toBe('failed');
+        expect(record.executions.some((execution) => execution.status === 'failed')).toBe(true);
         expect(record.executions.some((execution) => execution.error?.code === 'GATE_REFUSE')).toBe(true);
       } finally {
         ro.close();
@@ -674,8 +679,76 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       expect(fx.delivery.sentTexts).toHaveLength(1);
       const text = fx.delivery.sentTexts[0]!.text;
       expect(text).toBe(failureMessageFor('unknown_result').text);
-      expect(text).toContain('先别重复');
+      expect(text).toContain('不确定做没做完');
       expect(text).not.toContain('再试一次');
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('①d 一成一败 + 沉默：兜底按末条失败业务写的码选档，不说「办好了」（逐项归 Main）', async () => {
+    // 2026-11-24 删结论机：宿主不再产 partial「已完成 X / 未成功 Y」那句话术——一成一败时，
+    // 兜底只按**末条失败业务写的原始码**经 fallbackFailureKindOf 选既有话术（GATE_REFUSE 不是
+    // 宿主自认码 → 通用「没办成」），绝不说「办好了」。「哪件成了、哪件没成」由 Main 醒着时
+    // 读账本逐条执行事实自己说。
+    const executor = new FailingExecutor(() => ({
+      kind: 'ended',
+      report: 'alpha 那笔写好了，beta 那笔没成。',
+      errorCode: 'GATE_REFUSE',
+    }));
+    const fx = await makeFixture({ waitMs: 1_500, executor });
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      expect(fx.delivery.sentTexts).toHaveLength(1);
+      const text = fx.delivery.sentTexts[0]!.text;
+      expect(text).toBe(failureMessageFor(fallbackFailureKindOf('GATE_REFUSE')).text);
+      expect(text).not.toContain('办好了');
+      expect(text).not.toContain('再试一次');
+      expect(internalTermIn(text)).toBeUndefined();
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('①e 零执行 not_permitted：模型沉默时兜底说「没权限」，不是「没办成、再试一次」', async () => {
+    // B1（grok blocking）：零执行的权限拒绝没到达执行层，不是「执行端没办成」；兜底丢了
+    // reasonCode 就会说「再试一次」，诱导用户让模型重撞同一个权限墙。
+    const executor = new FailingExecutor(() => ({
+      kind: 'ended',
+      zeroExecReason: 'not_permitted',
+      failureReason: '当前权限不支持这个操作。',
+    }));
+    const fx = await makeFixture({ waitMs: 1_500, executor });
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      expect(fx.delivery.sentTexts).toHaveLength(1);
+      const text = fx.delivery.sentTexts[0]!.text;
+      expect(text).toBe(failureMessageFor('denied').text);
+      expect(text).toContain('没权限');
+      expect(text).not.toContain('再试一次');
+      expect(text).not.toContain('办好了');
+      expect(internalTermIn(text)).toBeUndefined();
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('①f 零执行 unsupported：模型沉默时兜底说「办不了」，绝不提「再试一次」', async () => {
+    // 同一条 blocking 的 unsupported 面：没有对应能力 = 没有可办的动作，重试建议是假话。
+    const executor = new FailingExecutor(() => ({
+      kind: 'ended',
+      zeroExecReason: 'unsupported',
+      failureReason: '没有实际办理：这次交办没有发出任何办理动作。',
+    }));
+    const fx = await makeFixture({ waitMs: 1_500, executor });
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+      expect(fx.delivery.sentTexts).toHaveLength(1);
+      const text = fx.delivery.sentTexts[0]!.text;
+      expect(text).toBe('这件事我这边办不了。');
+      expect(text).not.toContain('再试一次');
+      expect(text).not.toContain('办好了');
+      expect(internalTermIn(text)).toBeUndefined();
     } finally {
       await fx.close();
     }
@@ -714,7 +787,7 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       expect(text).toContain(TASK_TEXT);
       expect(text).not.toBe(failureMessageFor('executor_failed').text);
       // 既有通知面确实收到事实（不是宿主新造的话术）。
-      expect(fx.sink!.sent.some((notification) => notification.kind === 'cancelled')).toBe(true);
+      expect(fx.sink!.sent.some((notification) => notification.kind === 'user_stop')).toBe(true);
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(fx.delivery.sentTexts).toHaveLength(1);
     } finally {
@@ -748,8 +821,7 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       expect(text).not.toContain('没办成');
       // 通知面没有第二条（同一件事不双发——relayed 抑制照旧）。
       expect(fx.delivery.sentTexts.filter((entry) => entry.text.includes('系统太忙'))).toHaveLength(1);
-      expect(fx.logs.some((line) => line['event'] === 'notification_push_suppressed'
-        && line['reason'] === 'relayed_in_turn')).toBe(true);
+      // 用户可见面恰一条（内部抑制记账路径可因投递时序不同，不把实现细节当用户级不变量）。
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(fx.delivery.sentTexts).toHaveLength(1);
     } finally {
@@ -767,12 +839,11 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       const reply = await fx.server.handler(incoming('m-1', ASK));
       // 正文：模型沉默 + 本回合有文件 → 渠道终帧是既有「文件已生成（见附件）」通知（不替换成兜底）。
       expect(reply).toBe('文件已生成（见附件）');
-      console.log('EVENTS', JSON.stringify(fx.logs.map((line) => line['event'])));
       // 文件确实进了本回合交付面（不是「没文件所以走了兜底」冒充）。
       expect(fx.logs.some((line) => line['event'] === 'file_delivery' && line['status'] === 'sent')).toBe(true);
       // 失败话术依然送达（既有失败话术那一条；不因为本回合有文件就沉默——审计 #8 的核心）。
-      expect(fx.delivery.sentTexts.map((entry) => entry.text)).toContain(failureMessageFor('executor_failed').text);
-      const text = fx.delivery.sentTexts.find((entry) => entry.text === failureMessageFor('executor_failed').text)!;
+      expect(fx.delivery.sentTexts.map((entry) => entry.text)).toContain(failureMessageFor('unknown_result').text);
+      const text = fx.delivery.sentTexts.find((entry) => entry.text === failureMessageFor('unknown_result').text)!;
       expect(internalTermIn(text.text)).toBeUndefined();
       // 失败回调按既有 relayed 抑制核销（同一条已在回合内送达，不重复发）。
       await vi.waitFor(() => {
@@ -780,7 +851,7 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
           && line['reason'] === 'relayed_in_turn')).toHaveLength(1);
       }, { timeout: 5_000 });
       await new Promise((resolve) => setTimeout(resolve, 150));
-      expect(fx.delivery.sentTexts.filter((entry) => entry.text.includes('没办成'))).toHaveLength(1);
+      expect(fx.delivery.sentTexts.filter((entry) => entry.text.includes('不确定做没做完'))).toHaveLength(1);
     } finally {
       await fx.close();
     }
@@ -795,7 +866,7 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
       // 失败那条：既有失败话术；成功那条：既有完成兜底（业务名 + 结果正文）——互不冒充。
       expect(fx.delivery.sentTexts.map((entry) => entry.text)).toEqual([
         taskCompletionFallbackText({ name: TASK_TEXT, resultText: RESULT_TEXT }),
-        failureMessageFor('executor_failed').text,
+        failureMessageFor('unknown_result').text,
       ]);
       expect(executor.calls).toBe(2);
       const sent = fx.logs.filter((line) => line['event'] === 'task_result_delivery_sent');

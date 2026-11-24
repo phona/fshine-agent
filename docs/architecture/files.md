@@ -43,7 +43,7 @@ Worker 面无论 exitCode 都扫 `out/`（`packages/agent/src/run-js-executor.ts
 - **出站**：桥只替换装配方**声明**的目录参数（`--input-dir` 等）或单文件参数，把任务文件物化到 `<platformRoot>/tmp/task_<id>/in/`；未声明即零翻译、零物化（`packages/agent/src/task-file-bridge.ts:9-25`、`:165-209`）。不遍历 args 猜类型：不引入 `kind:"file"`、不新增契约字段；`type` 只作展示（`packages/contracts/src/execution-contract.ts:47`），桥只按声明的参数名替换（`packages/agent/src/task-file-bridge.ts:12-15`）。
 - 单文件输入必须**恰好 1 个**任务文件，多或少都 fail-closed（`:184-192`）；单文件输出由宿主分配 `out/exec-output.json`（`:199-203`）。
 - **回程**：`data.files[...]` 在 **runtime 出口**经 `registerReturnedFiles` 登记成新 fileId，`path`/内联 base64 替换掉后才进转录与落定（`packages/agent/src/task-file-bridge.ts:214-260`；调用点 `packages/agent/src/execution-runtime.ts:1326`），**不在适配器登记**（`:1307-1314`）。回程 path 必须是任务暂存目录内的绝对路径，父目录软链按实际打开 fd 判定（`packages/agent/src/file-store.ts:741-762`）。
-- **兜底扫描**：任务收尾（completed/failed/unexecuted 一律）扫 `<taskDir>/out/` 全量登记，与回程同池（sha256 + name）去重——执行层写了产物但没带回 `data.files` 时不丢（`packages/agent/src/task-file-bridge.ts:262-275`；`packages/agent/src/execution-runtime.ts:1898`）。
+- **兜底扫描**：任务收尾（无论有没有汇报/执行成败）扫 `<taskDir>/out/` 全量登记，与回程同池（sha256 + name）去重——执行层写了产物但没带回 `data.files` 时不丢（`packages/agent/src/task-file-bridge.ts:262-275`；`packages/agent/src/execution-runtime.ts:1898`）。
 - 守卫：`packages/agent/task-file-bridge.test.ts:155`、`:194`、`:227`、`:256`、`:312`。
 
 ## 7. 表格/公式验收归 Main（不是执行层）

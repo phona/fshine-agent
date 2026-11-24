@@ -107,7 +107,7 @@ describe('投递终局的上帝视角：既有 delivery_failed 规则看得见�
       onTerminal: logLine,
     });
     try {
-      liveSkip.record({ taskId: 'task-alert-live-skip', kind: 'timed_out', at: NOW_ISO });
+      liveSkip.record({ taskId: 'task-alert-live-skip', kind: 'deadline_reached', at: NOW_ISO });
       await liveSkip.deliverPending();
       const alerts = alertsOf(lines);
       expect(alerts.map((alert) => alert.rule)).toEqual(['delivery_failed']);
@@ -130,7 +130,7 @@ describe('投递终局的上帝视角：既有 delivery_failed 规则看得见�
       onTerminal: (terminal) => silentLines.push(notificationTerminalLogLine(terminal)),
     });
     try {
-      silentSkip.record({ taskId: 'task-alert-silent-skip', kind: 'timed_out', at: NOW_ISO });
+      silentSkip.record({ taskId: 'task-alert-silent-skip', kind: 'deadline_reached', at: NOW_ISO });
       await silentSkip.deliverPending();
       expect(silentLines).toHaveLength(1); // 事件照落
       expect(silentLines[0]).toMatchObject({ result: 'skipped', deliveryMode: 'silent' });
@@ -157,7 +157,7 @@ describe('投递终局的上帝视角：既有 delivery_failed 规则看得见�
       onTerminal: (terminal) => okLines.push(notificationTerminalLogLine(terminal)),
     });
     try {
-      okOutbox.record({ taskId: 'task-alert-delivered', kind: 'timed_out', at: NOW_ISO });
+      okOutbox.record({ taskId: 'task-alert-delivered', kind: 'deadline_reached', at: NOW_ISO });
       await okOutbox.deliverPending();
       expect(okLines).toEqual([]);
       expect(okOutbox.undelivered()).toEqual([]);
@@ -172,16 +172,8 @@ describe('投递终局的上帝视角：既有 delivery_failed 规则看得见�
     const dbPath = tempDbPath();
     const registry = createSqliteTaskRegistry(dbPath);
     try {
-      // 造一条 running 行（10 分钟前开始）——提醒扫描的唯一判据来源。
-      const startedAt = new Date(NOW.getTime() - 10 * 60_000).toISOString();
+      // 造一条 running 行（begin 写 running_since）——提醒扫描的唯一判据来源。
       registry.begin({ taskId: 'task-alert-notice', principalId: 'wecom:owner', sessionId: 'wecom:conv-owner', request: '查一下' });
-      registry.store.applyTaskState('task-alert-notice', {
-        expectedStatus: 'running',
-        status: 'running',
-        leaseOwner: 'task-runner',
-        leaseUntil: new Date(NOW.getTime() + 3_600_000).toISOString(),
-        updatedAt: startedAt,
-      });
       const failingPort: LongRunningNoticePort = {
         // 渠道故障：两次尝试都送不出去（runner 同一档内重试一次，见 deliverNotice）。
         async sendNotice() { return false; },
@@ -195,7 +187,8 @@ describe('投递终局的上帝视角：既有 delivery_failed 规则看得见�
         registry,
         policy: createResourcePolicy(),
         executor: idleExecutor,
-        now: () => NOW,
+        // 扫描 now 取真实时钟之后 1h：begin 写入的 running_since（真实即时）即超过 60s 提醒阈值。
+        now: () => new Date(Date.now() + 3_600_000),
         // 不真起定时器：本用例只手动 pump 一次。
         timers: { set: () => 0, clear: () => {} },
         leaseMs: 3_600_000,

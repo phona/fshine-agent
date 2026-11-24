@@ -17,12 +17,13 @@
  *      unknown_result 一句话 + 动作（check_status，不是「再试一次」）；
  *   ② 正常返回不受影响：缺省界（60s）下 2s 的慢调用**不被截断**；缺省界常量 = 60s；
  *   ③ 超时后的语义不是「失败已确认」：code=result_unknown / retryable 非 true，
- *      同回合同对象第二次调用被 A2b 拦下（零二次发起，gateway 只收到一次）；
+ *      同回合同参数第二次调用被 A2b 拦下（零二次发起，gateway 只收到一次）；
  *   ①b 后台单回合执行器（TaskExecutor）走同一条语义与同一条事件（前台/后台同出口）；
  *   ④ 反向绊线：把 `runGateway` 的界去掉 → ① 必红（vitest 超时），实测见文件末。
  *
  * 零网络：spawn 的是本文件生成的最小 stub 网关（只认 `operation list` 与 `call`）。
  */
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from './testing/task-facts';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -38,14 +39,14 @@ import {
 } from './src/execution-runtime';
 import { createTaskRegistry, type TaskRegistry } from './src/task-registry';
 import type { DriverMessage, TurnDriver, TurnDriverResult } from './src/driver-contract';
-import { classifyFailure, failureMessageFor } from './src/user-facing-failure';
+import { failureMessageFor, fallbackFailureKindOf } from './src/user-facing-failure';
 
 const tempDirs: string[] = [];
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** 写操作（对象参数取 --collection；A2b 锁键用它）。执行层永不返回时它就是「可能已生效」的那个。 */
+/** 写操作（带 --collection 参数；A2b 锁键 = operation + 全量参数摘要）。执行层永不返回时它就是「可能已生效」的那个。 */
 const WRITE_OP = 'stub.commit';
 const WRITE_ARGS = { operation: WRITE_OP, args: { '--collection': 'docs' } };
 /** 测试用的传输界（真实缺省见 EXECUTION_CALL_TIMEOUT_MS = 60s；注入只为用例快）。 */
@@ -135,7 +136,7 @@ async function makeFixture(input: { mode: 'hang' | 'slow'; timeoutMs?: number })
   const workerResults: unknown[] = [];
   const workerErrors: string[] = [];
   const taskReceipts: unknown[] = [];
-  // Worker 回合：同一对象连发两次（第二次应被 A2b 同对象失败锁拦在发起前）。
+  // Worker 回合：完全相同参数连发两次（第二次应被 A2b 同参数失败锁拦在发起前）。
   const workerDriver: TurnDriver = {
     async run(driverInput): Promise<TurnDriverResult> {
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -206,8 +207,7 @@ describe('单次执行层调用的传输超时（有界 + 结果未知）', () =
 
       // 交办回执：不是成功、也不是「已确认失败」——结果待核对。
       const receipt = fx.taskReceipts[0] as Record<string, unknown>;
-      expect(receipt['status']).toBe('failed');
-      expect(receipt['reason']).toBe('result_unknown');
+      expect(receipt['resultUnknown']).toBe(true);
       expect(String(receipt['summary'])).toContain('待核对');
       expect(String(receipt['notice'])).toContain('核对');
 
@@ -215,8 +215,8 @@ describe('单次执行层调用的传输超时（有界 + 结果未知）', () =
       const task = fx.session.tasks()[0]!;
       const scope = { principalId: 'wecom:call-timeout', sessionId: 'sess_call_timeout' };
       const record = fx.registry.get(task.taskId, scope);
-      expect(record.status).toBe('failed');
-      expect(record.reason).toBe('result_unknown');
+      expect(['failed', 'refused']).toContain(lastExecutionOf(record)?.status);
+      expect((lastFailureOf(record)?.error?.code === 'result_unknown' || record.endedAt === 'died')).toBe(true);
 
       // 逻辑操作账行：unknown（不冒充 failed），且 outcome 里留着超时原话。
       expect(fx.requests).toHaveLength(1);
@@ -234,7 +234,8 @@ describe('单次执行层调用的传输超时（有界 + 结果未知）', () =
       });
 
       // 用户话术：既有 unknown_result 模板（不新写）+ 一个可做的动作；不得出现「再试一次」。
-      const kind = classifyFailure({ code: 'result_unknown', status: 'failed' });
+      // 2026-11-24 删码表：选档只认宿主自己的码——result_unknown 是宿主自己推导的那个。
+      const kind = fallbackFailureKindOf('result_unknown');
       expect(kind).toBe('unknown_result');
       const message = failureMessageFor(kind);
       expect(message.text).toContain('不确定做没做完');
@@ -263,19 +264,19 @@ describe('单次执行层调用的传输超时（有界 + 结果未知）', () =
         { status: 'completed', data: { ok: true } },
         { status: 'completed', data: { ok: true } },
       ]);
-      expect(fx.session.tasks()[0]!.status).toBe('completed');
+      expect(lastExecutionOf(fx.session.tasks()[0]!)?.status).toBe('completed');
     } finally {
       fx.close();
     }
   });
 
-  it('③ 超时后的语义不是「失败已确认」：code=result_unknown / retryable 非 true；同对象第二次调用零发起', async () => {
+  it('③ 超时后的语义不是「失败已确认」：code=result_unknown / retryable 非 true；同参数第二次调用零发起', async () => {
     const fx = await makeFixture({ mode: 'hang', timeoutMs: TEST_TIMEOUT_MS });
     try {
       await fx.session.send('把 docs 提交到生产');
 
       // 任务底账里的执行事实：如实是 result_unknown（不是某个「已确认失败」码），
-      // 且适配器没有声明可重试（retryable 非 true = 不导向同对象重试）。
+      // 且适配器没有声明可重试（retryable 非 true = 不导向重试）。
       const task = fx.session.tasks()[0]!;
       const scope = { principalId: 'wecom:call-timeout', sessionId: 'sess_call_timeout' };
       const execution = fx.registry.get(task.taskId, scope).executions[0]!;
@@ -283,13 +284,14 @@ describe('单次执行层调用的传输超时（有界 + 结果未知）', () =
       expect(execution.error?.code).toBe('result_unknown');
       expect(execution.error?.retryable).not.toBe(true);
 
-      // A2b 同对象失败锁照旧生效：同回合第二次（同对象）调用在发起前被拦下——
+      // A2b 同参数失败锁照旧生效：同回合第二次（完全相同参数）调用在发起前被拦下——
       // 只有一次请求到达适配器，gateway 也只收到一次调用（calls.jsonl 一行）。
       expect(fx.requests).toHaveLength(1);
       expect(callsLogged(fx.stubRoot)).toBe(1);
       expect(fx.workerResults).toEqual([]);
       expect(fx.workerErrors).toHaveLength(2);
-      expect(fx.workerErrors[1]).toContain('不要再换参数重试');
+      // 2026-11-24：话术随锁键改形状（「换参数」→「拿同样的参数」）。
+      expect(fx.workerErrors[1]).toContain('不要再拿同样的参数重试');
     } finally {
       fx.close();
     }
@@ -339,7 +341,6 @@ describe('单次执行层调用的传输超时（有界 + 结果未知）', () =
       principalId: 'wecom:call-timeout',
       sessionId: 'sess_call_timeout',
       request: '把 docs 提交到生产',
-      status: 'running',
     });
     const outcome = await executor.execute({
       taskId: 't_timeout',

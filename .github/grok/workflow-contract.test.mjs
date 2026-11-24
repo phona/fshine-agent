@@ -156,3 +156,20 @@ test('linked issue extraction keeps the five-number cap', () => {
     ['90', '91', '92', '93', '94'],
   )
 })
+
+test('the review is agentic: one prompt lists files and grok reads the checked-out tree', () => {
+  // 契约：prompt 不再内联 diff、不再分块；单次 build-prompt + 单次 grok 调用。
+  assert.match(workflow, /build-prompt\.mjs "\$RUNNER_TEMP\/grok-prompt\.md"/)
+  assert.doesNotMatch(workflow, /--list-chunks/)
+  assert.doesNotMatch(workflow, /--chunk "\$i\/\$N"/)
+  assert.doesNotMatch(workflow, /merge-reviews\.mjs/)
+  assert.doesNotMatch(workflow, /grok-review-chunk-/)
+  // 文件读权限：--permission-mode 用 auto（放行只读命令含管道读；写仍被拒、审查保持只读），
+  // 而不是会把管道读也拒掉的 default / 只规划的 plan。
+  assert.match(workflow, /--permission-mode auto/)
+  assert.doesNotMatch(workflow, /--permission-mode default/)
+  assert.doesNotMatch(workflow, /--permission-mode plan/)
+  // 单次调用 + 一次重试。
+  assert.match(workflow, /Grok review attempt \$attempt\/2/)
+  assert.doesNotMatch(workflow, /for i in \$\(seq -w 1 "\$N"\)/)
+})

@@ -38,7 +38,7 @@ export type AcquireKind = 'foreground' | 'background';
 
 export type RejectionReason = 'queue_full' | 'quota_exceeded' | 'budget_exhausted' | 'depth_exceeded';
 
-/** 拒绝：确定性、可机械映射（集成层把 reason 映射为任务 resource_limited）。 */
+/** 拒绝：确定性、机械（reason 是策略自己的拒绝原因，不是任务失败分类）。 */
 export interface Rejection {
   readonly ok: false;
   readonly kind: AcquireKind;
@@ -49,16 +49,12 @@ export interface Rejection {
 }
 
 /**
- * 联合接口约定 §5：P5 四类拒绝统一映射任务失败原因 `resource_limited`（P2 的机械原因
- * 词表；取消/超时/结果未知各有自己的原因）。P5 不写任务状态——集成层用
- * `taskFailureReasonFor` 把拒绝落库为任务原因（Main 话术由展示层定，不在此约定）。
+ * P5 只给**策略拒绝的机械事实**（reason ∈ queue_full / quota_exceeded / budget_exhausted /
+ * depth_exceeded）；不映射任务失败原因、不写任务状态——拒绝之后写什么结束事实、怎么告诉
+ * 用户，由理解方读原始事实决定（Main 话术由展示层定，不在此约定）。
  */
-export const RESOURCE_LIMITED_REASON = 'resource_limited' as const;
 
-export function taskFailureReasonFor(_rejection: Rejection): typeof RESOURCE_LIMITED_REASON {
-  return RESOURCE_LIMITED_REASON;
-}
-
+/** 许可状态（单笔许可的生命周期，不是任务级状态）。 */
 export type PermitState = 'queued' | 'active' | 'released' | 'cancelled';
 
 export interface BudgetUsage {
@@ -170,7 +166,7 @@ export interface ResolvedRuntimeConfig {
    */
   readonly taskRunWaitMs: number;
   /**
-   * 后台任务「比预计久了」提醒阈值（ms，2026-11-18 预期契约）：任务 running 且从认领
+   * 后台任务「比预计久了」提醒阈值（ms，2026-11-18 预期契约）：任务仍在推进且从认领
    * 时刻起超过本阈值、尚未提醒过 → 宿主主动发一条（只发一次）；0 = 关闭。缺省 10 分钟。
    * 消费点在 TaskRunner（装配方注入解析值；runner 不读原始配置）。
    *

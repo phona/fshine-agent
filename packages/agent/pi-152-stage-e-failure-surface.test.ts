@@ -323,8 +323,8 @@ describe('③ 失败回合不得进入业务成功归档', () => {
       const tasks = session.tasks();
       expect(tasks).toHaveLength(1);
       const task = tasks[0]!;
-      // 任务自身的执行事实是成功的（这是任务层，不是回合层）。
-      expect(task.status).toBe('completed');
+      // 任务自身的执行事实是成功的（这是任务层，不是回合层）；底账无 status——读执行账（claimed/resulted）。
+      expect(task.executions.map((execution) => execution.status)).toEqual(['completed']);
       expect(task.resultText).toBe('documents W202611：3 条。');
       // 回合失败 → 不写最终回复存档；尤其不得写入上一回合答复/工具回执冒充本回合。
       expect(task.replyText).toBeUndefined();

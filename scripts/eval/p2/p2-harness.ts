@@ -42,7 +42,7 @@ import { judgeFactAnswer, judgeTaskContinuity } from '../long-session/oracle';
 import { analyzeCompaction, judgeCompactionLifecycle, type CompactionAttempt } from '../long-session/compaction';
 import type { TrackPlan } from '../long-session/load-generator';
 import {
-  MU_FIXTURE_ROOT, deliver, incoming, readTasks,
+  MU_FIXTURE_ROOT, deliver, incoming, readTasks, toTaskViews,
   type MuDeliveryRecord,
 } from '../long-session/multiuser/mu-support';
 import {
@@ -475,16 +475,8 @@ class P2HarnessSession {
   constructor(private readonly options: P2HarnessSessionOptions) {}
 
   private scopedTasks(): TaskView[] {
-    return readTasks(this.options.handle.dbPath)
-      .filter((task) => task.principalId === this.options.principalId && task.sessionId === this.options.sessionId)
-      .map((task) => ({
-        taskId: task.taskId,
-        ...(task.taskNo === undefined ? {} : { taskNo: task.taskNo }),
-        request: task.request,
-        status: task.status,
-        ...(task.reason === undefined ? {} : { reason: task.reason }),
-        requestIds: task.requestIds,
-      }));
+    return toTaskViews(readTasks(this.options.handle.dbPath)
+      .filter((task) => task.principalId === this.options.principalId && task.sessionId === this.options.sessionId));
   }
 
   async send(text: string): Promise<{ readonly reply: string; readonly taskIds: readonly string[] }> {
@@ -622,16 +614,8 @@ export async function runP2Sample(input: P2SampleRunInput): Promise<P2Observatio
     });
     await input.afterRun?.(handle);
     // 收尾后重读终态（后台任务可能在本回合之后才落定）。
-    const tasksFinal = readTasks(handle.dbPath)
-      .filter((task) => task.principalId === principalId && task.sessionId === sessionId)
-      .map((task) => ({
-        taskId: task.taskId,
-        ...(task.taskNo === undefined ? {} : { taskNo: task.taskNo }),
-        request: task.request,
-        status: task.status,
-        ...(task.reason === undefined ? {} : { reason: task.reason }),
-        requestIds: task.requestIds,
-      }));
+    const tasksFinal = toTaskViews(readTasks(handle.dbPath)
+      .filter((task) => task.principalId === principalId && task.sessionId === sessionId));
     const evidence: SessionEvidence = {
       ...run.evidence,
       tasksFinal,
@@ -756,7 +740,7 @@ function abortError(): Error {
  *   · 第 1 次脚本响应 = 一次 `execute_operation` 工具调用；
  *   · 执行面可以永不结算 —— 本驱动在 `input.deadline` 处中止并抛 `AbortError`
  *     （`driver-contract.ts:31`「超时 driver 应中止并返回空文本」的同义实现）；
- *   · `createTaskExecutor` 据此落 `timed_out`（产品既有机制，不新增超时机制）。
+ *   · `createTaskExecutor` 据此按超时收尾（写结束事实、无汇报；产品既有机制，不新增超时机制）。
  */
 export function createDeadlineWorkerDriver(book: P2ScriptBook): import('../../../packages/agent/src/driver-contract').TurnDriver {
   return {

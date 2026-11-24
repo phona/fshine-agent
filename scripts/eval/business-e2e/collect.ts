@@ -29,12 +29,16 @@ import type {
   ToolCallRecord,
 } from '../convergence-r1/evidence';
 
-/** TaskFact 流的一行（任务状态变化；中性名词，只为采集存档）。 */
+/** TaskFact 流的一行：任务账本**机械事实快照**（中性名词，只为采集存档；无任务级状态词/种类）。 */
 export interface TaskFactLine {
   ts: string;
   taskId: string;
-  from: string;
-  to: string;
+  /** 事实（布尔）：启动 / 已停（结束事实在场）/ 有汇报 / 等待 / 跨进程可能还在跑。 */
+  started: boolean;
+  ended: boolean;
+  reported: boolean;
+  waiting: boolean;
+  mayBeRunning: boolean;
   [key: string]: unknown;
 }
 

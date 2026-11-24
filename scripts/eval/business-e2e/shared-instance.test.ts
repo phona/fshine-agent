@@ -58,7 +58,7 @@ describe('共享实例：跨 principal 查询与编号解析', () => {
       toolCallAssistant('task_run', { task: '查询 documents 窗口 W202611' }),
       textAssistant('已受理，稍后给你结果。'),
     );
-    fx.executor.behaviors.push(outcomeBehavior({ kind: 'completed', resultText: `${secret} documents W202611 共 3 条` }));
+    fx.executor.behaviors.push(outcomeBehavior({ kind: 'ended', report: `${secret} documents W202611 共 3 条` }));
     await fx.send('alice', '帮我查 documents 窗口 W202611');
     await fx.settleRounds();
     const aTaskId = taskIdOfRound(fx, 0);
@@ -114,7 +114,7 @@ describe('共享实例：跨 principal 查询与编号解析', () => {
       toolCallAssistant('task_run', { task: '查询 documents 窗口 W202611' }),
       textAssistant('已受理。'),
     );
-    fx.executor.behaviors.push(outcomeBehavior({ kind: 'completed', resultText: 'SECRET-A-result' }));
+    fx.executor.behaviors.push(outcomeBehavior({ kind: 'ended', report: 'SECRET-A-result' }));
     await fx.send('alice', '帮我查 documents 窗口 W202611');
     await fx.settleRounds();
 
@@ -122,7 +122,7 @@ describe('共享实例：跨 principal 查询与编号解析', () => {
       toolCallAssistant('task_run', { task: '查询 meetings 列表' }),
       textAssistant('已受理。'),
     );
-    fx.executor.behaviors.push(outcomeBehavior({ kind: 'completed', resultText: 'SECRET-B-result meetings 5 条' }));
+    fx.executor.behaviors.push(outcomeBehavior({ kind: 'ended', report: 'SECRET-B-result meetings 5 条' }));
     await fx.send('bob', '帮我查 meetings 列表');
     await fx.settleRounds();
     // 共享底账计数器仍单调（账本事实，不进模型引用面）。
@@ -248,7 +248,7 @@ describe('共享实例：跨 principal 接续', () => {
       toolCallAssistant('task_resume', { ref: aTaskId, answer: 'W202611' }),
       textAssistant('已接上，窗口 W202611，继续执行。'),
     );
-    fx.executor.behaviors.push(outcomeBehavior({ kind: 'completed', resultText: 'SECRET-A-result 周报 W202611 已整理' }));
+    fx.executor.behaviors.push(outcomeBehavior({ kind: 'ended', report: 'SECRET-A-result 周报 W202611 已整理' }));
     const aliceResume = await fx.send('alice', '接着办那个任务，窗口是 W202611');
     expect(aliceResume.reply).toContain('继续执行');
     await fx.settleRounds();
@@ -264,7 +264,7 @@ describe('共享实例：真实模型接线面（零模型）', () => {
   it('defaultBehavior 兜底：脚本耗尽时后台回合仍落定，不 fail-fast', async () => {
     const fx = createSharedInstanceFixture({
       scenarioName: 'default-behavior',
-      defaultBehavior: async (input) => ({ kind: 'completed', resultText: `DEFAULT-${input.taskNo ?? '?'}` }),
+      defaultBehavior: async (input) => ({ kind: 'ended', report: `DEFAULT-${input.taskNo ?? '?'}` }),
     });
     fixtures.push(fx);
     fx.scriptMain(

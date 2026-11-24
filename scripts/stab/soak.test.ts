@@ -47,7 +47,7 @@ describe('R4-Stab 浸泡 S · 假 executor/sink/渠道/时钟', () => {
     expect(report.submitted).toBe(500);
     expect(report.accepted).toBe(500);
     expect(report.rejected).toBe(0);
-    expect(report.terminalCounts['completed']).toBe(500);
+    expect(report.terminalCounts['reported']).toBe(500);
     expectSoakInvariants(report);
   }, 60_000);
 
@@ -61,7 +61,7 @@ describe('R4-Stab 浸泡 S · 假 executor/sink/渠道/时钟', () => {
     });
     expect(report.submitted).toBe(500);
     // 投递失败不改变任务结果（P4 契约：通知事实与任务事实解耦）
-    expect(report.terminalCounts['completed']).toBe(500);
+    expect(report.terminalCounts['reported']).toBe(500);
     expectSoakInvariants(report);
   }, 60_000);
 });

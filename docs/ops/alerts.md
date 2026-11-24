@@ -37,7 +37,7 @@ state.db 一律只读打开（`openTaskStore(dbPath, { readOnly: true })`），�
 | --- | --- | --- | --- | --- |
 | `host_fault_reported` | 出现我方故障：执行失败分类 `host_fault`、协议违约（`execution_accepted_undeclared` / `EXECUTION_PROTOCOL_VIOLATION`）、确认句柄丢失（`CONFIRMATION_NOT_FOUND`）等 ≥1 | critical | `task:<id>` / `global` | `HOST_FAULT_EVENTS` / `HOST_FAULT_ERROR_CODES`（`alert-rules.ts:65`） |
 | `retry_storm` | 同一任务执行事实 ≥5 条，**或**同一 `(operation, 错误码)` 在同一任务 ≥3 次——**后者只计失败类结局**（`failed` / `refused` / `unknown` / `timed_out`；`completed` / `needs_confirmation` / `accepted` / `needs_input` 的合法重复不算，无错误码时也必须有失败状态） | warning | `task:<id>` | `RETRY_STORM_TASK_FACTS=5`、`RETRY_STORM_OP_ERROR=3`（`alert-rules.ts:53`）、`FAILURE_EXECUTION_STATUSES`（`alert-rules.ts:87`） |
-| `task_stuck` | 任务 `running` 超 10 分钟无事件；`waiting_user` 超 30 分钟 | warning | `task:<id>` | `TASK_RUNNING_STUCK_MS=10min`、`USER_WAITING_STUCK_MS=30min`（`alert-rules.ts:49`） |
+| `task_stuck` | 仍在推进超 10 分钟没有新事实；进入等待超 30 分钟用户未表态 | warning | `task:<id>` | `TASK_RUNNING_STUCK_MS=10min`、`USER_WAITING_STUCK_MS=30min`（`alert-rules.ts:49`） |
 | `delivery_failed` | 文件/结果投递失败 ≥1：`file_delivery` 状态非 `sent`、`task_result_delivery_failed`，**通知投递终局** `notification_delivery_terminal` 的 `exhausted`（失败到 attempts 上限：用户最终没收到），**长活提醒** `task_long_running_notice` 的 `failed`——终态跳过（`result=skipped`）**按部署模式切**（owner 2026-11-19）：`deliveryMode=live` 的 skipped **告警**（渠道配置/路由配错，用户彻底收不到任何消息）；`silent` / `unavailable` 的 skipped 是部署属性，**不告警** | critical | `session:<id>` / `task:<id>` / `global` | `isDeliveryFailure`（`alert-rules.ts:238`） |
 
 **边界口径**：`task_stuck` 用**严格大于**——**刚好 10 分钟不告、10 分 1 秒告**（`alert-rules.ts:358` 的 `elapsed > 阈值`）。
@@ -52,8 +52,9 @@ state.db 一律只读打开（`openTaskStore(dbPath, { readOnly: true })`），�
   `task_result_delivery_failed` / `notification_delivery_terminal`(result=exhausted|skipped；live+skipped 才告警，deliveryMode 事实随跳过终局带) /
   `task_long_running_notice`(result=failed) / `file_delivery`(status 非 sent)（delivery_failed 规则）。
 - **聚合低频扫描**（进程内引擎的 `scanNow`，5 分钟一跳，单 `setTimeout` 链，`SCAN_INTERVAL_MS` 模块常量）：
-  只读底账投影出 `task_state`（running / waiting_user，带 `running_since` / `waiting_since`）与
-  `execution`（每次执行一行，带 `operation` / `error.code` / `status`）事实，判 `task_stuck` / `retry_storm`。
+  只读底账投影出 `task_ledger`（原始布尔/时刻事实：`progressing` / `waitingSince` / `lastAt`）与
+  `execution`（每次执行一行，带 `operation` / `error.code` / `status`）事实，判 `task_stuck` / `retry_storm`
+  （规则读原始事实就地算时长，不传任务级状态词）。
 - **进程外手动脚本**（`npm run alerts`）：读日志增量（同上事件名）+ 只读底账（同上 fact 形状），
   离线补判全部四类。投影函数单源在 `packages/agent/src/alert-persistence.ts` 的 `logLineToFact` / `ledgerFacts`。
 

@@ -27,6 +27,7 @@ import type {
 } from '../packages/agent/src/driver-contract';
 import { EXECUTE_OPERATION_TOOL, TASK_RUN_TOOL } from '../packages/agent/src/execution-runtime';
 import { createTaskRegistry } from '../packages/agent/src/task-registry';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../packages/agent/testing/task-facts';
 import { assembleSessionCore, resolveExecutionFace } from './ask-runtime';
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -147,7 +148,7 @@ describe('P1 只读集合显式派生（不是 allowedOperations 的影子）', 
       expect(client.requests[0]!.operation).toBe('dummy.commit');
       expect(result.reply).not.toContain('待核对');
       expect(assembled.taskRegistry.list()).toHaveLength(1);
-      expect(assembled.taskRegistry.list()[0]!.status).toBe('completed');
+      expect(lastExecutionOf(assembled.taskRegistry.list()[0]!)?.status).toBe('completed');
     } finally {
       assembled.close();
     }

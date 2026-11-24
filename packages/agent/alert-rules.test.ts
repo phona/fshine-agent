@@ -164,42 +164,88 @@ describe('retry_storm', () => {
   });
 });
 
-describe('task_stuck', () => {
-  it('边界：running 刚好 10 分钟不告', () => {
+describe('task_stuck（读底账原始事实：progressing / waitingSince / lastAt）', () => {
+  it('边界：仍在推进、刚好 10 分钟没有新事实不告', () => {
     const result = evaluateAlerts(
-      [fact({ event: 'task_state', taskId: 't20', at: ago(TASK_RUNNING_STUCK_MS), raw: '{"status":"running"}}', detail: { taskStatus: 'running' } })],
+      [fact({
+        source: 'ledger',
+        event: 'task_ledger',
+        taskId: 't20',
+        at: ago(TASK_RUNNING_STUCK_MS),
+        raw: '{"event":"task_ledger","taskId":"t20"}',
+        detail: { progressing: true, lastAt: ago(TASK_RUNNING_STUCK_MS) },
+      })],
       { now: NOW },
     );
     expect(result.alerts).toEqual([]);
   });
 
-  it('边界：running 10 分 1 秒告', () => {
+  it('边界：仍在推进、10 分 1 秒没有新事实告', () => {
     const result = evaluateAlerts(
-      [fact({ event: 'task_state', taskId: 't21', at: ago(TASK_RUNNING_STUCK_MS + 1000), raw: '{"status":"running"}}', detail: { taskStatus: 'running' } })],
+      [fact({
+        source: 'ledger',
+        event: 'task_ledger',
+        taskId: 't21',
+        at: ago(TASK_RUNNING_STUCK_MS + 1000),
+        raw: '{"event":"task_ledger","taskId":"t21"}',
+        detail: { progressing: true, lastAt: ago(TASK_RUNNING_STUCK_MS + 1000) },
+      })],
       { now: NOW },
     );
     expect(result.alerts.some((a) => a.rule === 'task_stuck' && a.subject === 'task:t21')).toBe(true);
   });
 
-  it('边界：waiting_user 刚好 30 分钟不告，超过 1 秒告', () => {
+  it('边界：等待中刚好 30 分钟不告，超过 1 秒告', () => {
     const onEdge = evaluateAlerts(
-      [fact({ event: 'task_state', taskId: 't22', at: ago(USER_WAITING_STUCK_MS), raw: '{"status":"waiting_user"}}', detail: { taskStatus: 'waiting_user' } })],
+      [fact({
+        source: 'ledger',
+        event: 'task_ledger',
+        taskId: 't22',
+        at: ago(USER_WAITING_STUCK_MS),
+        raw: '{"event":"task_ledger","taskId":"t22"}',
+        detail: { progressing: false, waitingSince: ago(USER_WAITING_STUCK_MS) },
+      })],
       { now: NOW },
     );
     expect(onEdge.alerts).toEqual([]);
     const overEdge = evaluateAlerts(
-      [fact({ event: 'task_state', taskId: 't23', at: ago(USER_WAITING_STUCK_MS + 1000), raw: '{"status":"waiting_user"}}', detail: { taskStatus: 'waiting_user' } })],
+      [fact({
+        source: 'ledger',
+        event: 'task_ledger',
+        taskId: 't23',
+        at: ago(USER_WAITING_STUCK_MS + 1000),
+        raw: '{"event":"task_ledger","taskId":"t23"}',
+        detail: { progressing: false, waitingSince: ago(USER_WAITING_STUCK_MS + 1000) },
+      })],
       { now: NOW },
     );
     expect(overEdge.alerts.some((a) => a.rule === 'task_stuck' && a.subject === 'task:t23')).toBe(true);
   });
 
-  it('不命中：running 5 分钟', () => {
+  it('不命中：仍在推进 5 分钟', () => {
     const result = evaluateAlerts(
-      [fact({ event: 'task_state', taskId: 't24', at: ago(5 * 60 * 1000), raw: '{"status":"running"}}', detail: { taskStatus: 'running' } })],
+      [fact({
+        source: 'ledger',
+        event: 'task_ledger',
+        taskId: 't24',
+        at: ago(5 * 60 * 1000),
+        raw: '{"event":"task_ledger","taskId":"t24"}',
+        detail: { progressing: true, lastAt: ago(5 * 60 * 1000) },
+      })],
       { now: NOW },
     );
     expect(result.alerts).toEqual([]);
+  });
+
+  it('不命中：没有事实行（progressing 缺省 / 未在等待）不猜', () => {
+    const result = evaluateAlerts(
+      [
+        fact({ source: 'ledger', event: 'task_ledger', taskId: 't25', at: ago(TASK_RUNNING_STUCK_MS * 3), raw: '{}' }),
+        fact({ source: 'ledger', event: 'task_ledger', taskId: 't26', at: ago(USER_WAITING_STUCK_MS * 3), raw: '{}', detail: { progressing: false } }),
+      ],
+      { now: NOW },
+    );
+    expect(result.alerts.filter((alert) => alert.rule === 'task_stuck')).toEqual([]);
   });
 });
 

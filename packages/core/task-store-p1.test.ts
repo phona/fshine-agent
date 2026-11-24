@@ -107,7 +107,7 @@ function priorSchemaSnapshot(dbPath: string): unknown {
   try {
     return {
       tasks: db.prepare(`
-        SELECT task_id, principal_id, session_id, request, status, result_text, failure_reason, created_at, updated_at
+        SELECT task_id, principal_id, session_id, request, result_text, created_at, updated_at
         FROM tasks ORDER BY task_id
       `).all(),
       executions: db.prepare(`
@@ -189,7 +189,7 @@ describe('P1-T01 迁移幂等与回填', () => {
     expect(userVersion(dbPath)).toBe(TASK_STORE_SCHEMA_VERSION);
 
     // 迁移前自动备份副本：内容=迁移前字节；不覆盖、不删除。
-    const backupPath = `${dbPath}.backup-v4`;
+    const backupPath = `${dbPath}.backup-v${TASK_STORE_SCHEMA_VERSION}`;
     expect(existsSync(backupPath)).toBe(true);
     expect(sha256(backupPath)).toBe(preMigrationSha);
     store.close();
@@ -204,8 +204,8 @@ describe('P1-T01 迁移幂等与回填', () => {
       { task_no: 3, name: null, reply_text: null },
     ]);
     second.close();
-    expect(backupFiles(dir)).toEqual(['state.db.backup-v4']);
-    expect(sha256(`${dbPath}.backup-v4`)).toBe(preMigrationSha);
+    expect(backupFiles(dir)).toEqual(['state.db.backup-v7']);
+    expect(sha256(`${dbPath}.backup-v${TASK_STORE_SCHEMA_VERSION}`)).toBe(preMigrationSha);
   });
 
   it('新库：直接建新 schema（无备份），首行编号从 1 起；user_version 记录版本', () => {
@@ -218,7 +218,7 @@ describe('P1-T01 迁移幂等与回填', () => {
     expect(second.taskNo).toBe(2);
     store.close();
 
-    expect(existsSync(`${dbPath}.backup-v4`)).toBe(false);
+    expect(existsSync(`${dbPath}.backup-v${TASK_STORE_SCHEMA_VERSION}`)).toBe(false);
     expect(backupFiles(dir)).toEqual([]);
     expect(userVersion(dbPath)).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(columnNames(dbPath)).toEqual(expect.arrayContaining(['task_no', 'name', 'reply_text']));
@@ -252,12 +252,10 @@ describe('P1-T02 并发分配与不复用', () => {
     const store = openTaskStore(dbPath);
     store.insertTask(row({ taskId: 'task_1', createdAt: '2026-11-14T09:00:00.000Z' }));
     store.insertTask(row({ taskId: 'task_2', createdAt: '2026-11-14T09:00:01.000Z' }));
-    // complete/fail 在 store 层经唯一状态写入语句（applyTaskState）落终态。
-    store.applyTaskState('task_1', {
-      expectedStatus: 'running', status: 'completed', resultText: '汇报。', updatedAt: '2026-11-14T09:00:02.000Z',
-    });
-    store.applyTaskState('task_2', {
-      expectedStatus: 'running', status: 'failed', failureReason: '故障。', updatedAt: '2026-11-14T09:00:03.000Z',
+    // 事实写入（零状态：没有结论/终态列）：汇报存档 / 追加终止事件；编号与这些写入无关。
+    store.setResultText('task_1', { resultText: '汇报。', updatedAt: '2026-11-14T09:00:02.000Z' });
+    store.appendEndFact({
+      taskId: 'task_2', at: '2026-11-14T09:00:03.000Z', updatedAt: '2026-11-14T09:00:03.000Z',
     });
     store.setReplyForTasks(['task_1', 'task_2'], '本回合最终回复。', '2026-11-14T09:00:04.000Z');
 
@@ -350,7 +348,7 @@ describe('P1-T05 只读路径哈希不变（向前兼容）', () => {
 
     expect(sha256(dbPath)).toBe(before);
     expect(columnNames(dbPath)).not.toContain('task_no');
-    expect(existsSync(`${dbPath}.backup-v4`)).toBe(false);
+    expect(existsSync(`${dbPath}.backup-v${TASK_STORE_SCHEMA_VERSION}`)).toBe(false);
   });
 
   it('迁移后只读打开：新字段可读、主库哈希不变', () => {

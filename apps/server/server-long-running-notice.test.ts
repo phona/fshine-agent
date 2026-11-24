@@ -20,6 +20,7 @@ import type { AppConfig, ChannelRoute, DeliveryReceipt, IncomingChannelMessage }
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver } from '../../packages/agent/src/driver-contract';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../../packages/agent/testing/task-facts';
 import { LONG_RUNNING_NOTICE_FALLBACK_TEXT, longRunningNoticeFactText, type TaskExecutionInput, type TaskExecutionOutcome, type TaskExecutor } from '../../packages/agent/src/task-runner';
 import { createLongRunningNoticePort, createServer, isGroupPrincipal, type FileDeliveryPort } from './server';
 
@@ -122,7 +123,7 @@ function hangingExecutor(): { executor: TaskExecutor; release: () => void } {
   const executor: TaskExecutor = {
     async execute(): Promise<TaskExecutionOutcome> {
       await gate;
-      return { kind: 'completed', resultText: '（测试）完成' };
+      return { kind: 'ended', report: '（测试）完成' };
     },
   };
   return { executor, release };
@@ -143,7 +144,7 @@ function longTaskExecutor(): { executor: TaskExecutor; rounds: () => number } {
           pollAfterMs: 5,
         };
       }
-      return { kind: 'completed', resultText: '（测试）导出完成' };
+      return { kind: 'ended', report: '（测试）导出完成' };
     },
   };
   return { executor, rounds: () => calls };
@@ -259,12 +260,11 @@ describe('预期契约·主动提醒的生产接线', () => {
     const dbPath = path.join(tempDir(), 'state.db');
     const seeded = createSqliteTaskRegistry(dbPath);
     try {
-      seeded.begin({ taskId: 'task_restart_notice', principalId: 'wecom:user-a', sessionId: 'wecom:conv-a', request: '重启前交办的长活' });
-      // running + 已跑超过阈值（runningSince 早于阈值）+ 租约没过期（不会被回收成 result_unknown）。
-      seeded.store.applyTaskState('task_restart_notice', {
-        expectedStatus: 'running',
-        status: 'running',
-        leaseOwner: 'previous-process',
+      // 受理为 queued（无 running_since）后写一条「已跑一阵」的租约：armLease 首次把 running_since
+      // 落成 updatedAt（旧时刻）+ 租约不过期 → running 且已跑超过阈值（不会被回收成 died）。
+      seeded.begin({ taskId: 'task_restart_notice', principalId: 'wecom:user-a', sessionId: 'wecom:conv-a', request: '重启前交办的长活', queued: true });
+      seeded.store.armLease('task_restart_notice', {
+        owner: 'previous-process',
         leaseUntil: new Date(Date.now() + 600_000).toISOString(),
         updatedAt: new Date(Date.now() - 600_000).toISOString(),
       });
@@ -330,7 +330,8 @@ describe('预期契约·主动提醒的生产接线', () => {
       const taskId = registry.list({ principalId: 'wecom:user-a', sessionId: 'wecom:conv-long' })[0]!.taskId;
       const running = registry.get(taskId, { principalId: 'wecom:user-a', sessionId: 'wecom:conv-long' });
       registry.close();
-      expect(running.status).toBe('running');
+      // S1 事实模型：底账没有 status——长任务受理后租约已清；accepted 执行行 + 无汇报 = 仍在办。
+      expect(taskMayBeRunningOf(running)).toBe(true);
       expect(running.leaseUntil).toBeUndefined();
       expect(running.runningSince).toBeDefined();
 

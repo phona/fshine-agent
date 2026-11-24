@@ -54,9 +54,19 @@ export interface TaskRecordJson {
   principalId: string;
   sessionId: string;
   request: string;
-  status: string;
+  /**
+   * 原始事实（布尔；没有任务级状态投影）：启动 / 有汇报存档 / 等待形状 / 跨进程「可能还在跑」。
+   * 判据只读这些事实 + 逐笔执行行 status + 汇报存档，不读任务级状态词。
+   */
+  started?: boolean;
+  /** 这一轮停下的机械时刻（没有种类）；缺省 = 没有结束事实。 */
+  endedAt?: string;
+  reported?: boolean;
+  waiting?: boolean;
+  mayBeRunning?: boolean;
+  /** worker 汇报存档（语义；判 outcome 以 executions 机械事实为准，不一致不补）。 */
   resultText?: string;
-  failureReason?: string;
+  replyText?: string;
   executions: ExecutionRecordJson[];
   createdAt: string;
   updatedAt: string;

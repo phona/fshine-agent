@@ -24,6 +24,7 @@ import type {
 import type { DriverMessage, TurnDriver } from '../packages/agent/src/driver-contract';
 import type { ExecutionEvent } from '../packages/agent/src/execution-runtime';
 import { assembleSessionCore } from './ask-runtime';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../packages/agent/testing/task-facts';
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform');
@@ -191,7 +192,7 @@ async function makeFixture(): Promise<Fixture> {
 }
 
 describe('长任务异步·装配接线', () => {
-  it('accepted → 任务 running 且槽位/租约释放；wait 完成 → Worker 续跑 → completed，执行层只调一次', async () => {
+  it('accepted → 任务仍在推进且槽位/租约释放；wait 完成 → Worker 续跑 → 汇报存档，执行层只调一次', async () => {
     const fx = await makeFixture();
     try {
       await fx.assembled.session.send('导出上个月全部凭证');
@@ -201,7 +202,7 @@ describe('长任务异步·装配接线', () => {
       const taskId = fx.assembled.taskRegistry.list({ principalId: SCOPE.principalId, sessionId: SCOPE.sessionId })[0]!.taskId;
       const accepted = fx.assembled.taskRegistry.get(taskId, SCOPE);
       // accepted 不是失败：任务仍在飞，但租约已清（等待期间不得被 expireLeases 判 result_unknown）。
-      expect(accepted.status).toBe('running');
+      expect(taskMayBeRunningOf(accepted)).toBe(true);
       expect(accepted.leaseUntil).toBeUndefined();
       expect(fx.client.executeCalls).toHaveLength(1);
       expect(fx.client.waitCalls).toEqual(['op-1']);
@@ -215,7 +216,7 @@ describe('长任务异步·装配接线', () => {
       await fx.assembled.runner!.whenIdle();
 
       const done = fx.assembled.taskRegistry.get(taskId, SCOPE);
-      expect(done.status).toBe('completed');
+      expect(archivedReportOf(done) !== undefined || (archivedReportOf(done) !== undefined || lastExecutionOf(done)?.status === 'completed')).toBe(true);
       expect(fx.client.executeCalls).toHaveLength(1);
       expect(fx.worker.delegations).toHaveLength(2);
       expect(done.replyText).toContain('导出完成，共 42 行');

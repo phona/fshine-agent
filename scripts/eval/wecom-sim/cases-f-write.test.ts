@@ -81,10 +81,15 @@ function describeCommit(outcome: Record<string, unknown>): string {
     const data = (outcome['data'] ?? {}) as { collection?: string; window?: string; count?: number; total?: number };
     return `已写入 ${data.collection ?? ''} 集合 ${data.window ?? ''}：新增 ${String(data.count ?? '?')} 条，读回共 ${String(data.total ?? '?')} 条。`;
   }
-  const error = (outcome['error'] ?? {}) as { code?: string; message?: string };
-  // 「执行层」是内部词（2026-11-21 用户可见面泄漏守卫，与三批共用同一 scanUserVisibleText 入口）：
-  // 这句经 Main 转述成为用户气泡，用户面不出现内部词——「没有写入 + 确定性拒绝」事实原样保留。
-  return `这次没有写入：请求被确定性拒绝（${error.code ?? '拒绝'}），集合没有变化。`;
+  // 2026-11-24 失败事实原样进模型面（跟随本次删除）：脚本模型从原始失败事实（error.code +
+  // message）自己选措辞——技术码（CONFIRMATION_USED / CONFIRMATION_REQUIRED）不抄进用户
+  // 气泡，只说业务语言；「执行层」是内部词（2026-11-21 用户可见面泄漏守卫，与三批共用同一
+  // scanUserVisibleText 入口），「没有写入 + 确定性拒绝」事实原样保留。
+  const error = (outcome['error'] ?? {}) as { code?: string };
+  if (error.code === 'CONFIRMATION_USED') {
+    return '这次没有写入：这个提案已经用过了，不能重复提交，集合没有变化。';
+  }
+  return '这次没有写入：请求被确定性拒绝，集合没有变化。';
 }
 
 describe('F 组·写确认回环（W-22～W-25）', () => {

@@ -191,11 +191,11 @@ describe('R4 联合：server 同会话串行化（P5-T02）', () => {
 });
 
 describe('R4 联合：server background 渠道回合（假 executor/sink）', () => {
-  it('⑫ 受理返回 → 后台完成 → 结果可取回 → 通知投递（accepted/started/completed）', async () => {
+  it('⑫ 受理返回 → 后台完成 → 结果可取回 → 通知投递（accepted/started；完成由投递/唤醒面说）', async () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
     const sink = new FakeSink();
-    const executor = new FakeExecutor([async () => ({ kind: 'completed', resultText: 'W202611：documents 共 3 条。' })]);
+    const executor = new FakeExecutor([async () => ({ kind: 'ended', report: 'W202611：documents 共 3 条。' })]);
     const records: ServerDriverRecord[] = [];
     const plans = new Map<string, ServerPlan>([
       ['查 documents W202611', { delegates: ['查 documents W202611'], reply: '已受理，稍后通知你。' }],
@@ -218,20 +218,20 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
       expect(reply).toBe('已受理，稍后通知你。');
       // 受理事实（task_run 返回）：只给机械事实（accepted/status + name/taskId），无回执话术、无编号
       const accepted = records[0]!.execResults[0] as Record<string, unknown>;
-      expect(accepted).toMatchObject({ accepted: true, status: 'running' });
+      expect(accepted).toMatchObject({ accepted: true, started: true });
       expect(accepted).not.toHaveProperty('notice');
       expect(accepted).not.toHaveProperty('taskNo');
       const taskId = String(accepted['taskId']);
       const taskScope = { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' };
-      // 后台完成 + 结果经 archiveReply 取回
+      // 后台完成 + 结果经 archiveReply 取回（S1 事实：底账没有 status——汇报已存档即完成事实）
       await vi.waitFor(() => {
-        expect(registry.get(taskId, taskScope).status).toBe('completed');
+        expect((registry.get(taskId, taskScope).replyText ?? '').trim()).not.toBe('');
       });
       expect(registry.get(taskId, taskScope).replyText).toBe('W202611：documents 共 3 条。');
       // 通知投递（假 sink）：受理/开始/完成
       await server.deliverPending();
       await vi.waitFor(() => {
-        expect(sink.sent.map((notification) => notification.kind)).toEqual(['accepted', 'started', 'completed']);
+        expect(sink.sent.map((notification) => notification.kind)).toEqual(['accepted', 'started']);
       });
       expect(reader.listNotifications(taskId).every((notification) => notification.deliveredAt !== undefined)).toBe(true);
       expect(reader.undelivered(taskId)).toEqual([]);
@@ -260,7 +260,7 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
         return { delivered: true };
       },
     };
-    const executor = new FakeExecutor([async () => ({ kind: 'completed', resultText: 'W202611：documents 共 3 条。' })]);
+    const executor = new FakeExecutor([async () => ({ kind: 'ended', report: 'W202611：documents 共 3 条。' })]);
     const records: ServerDriverRecord[] = [];
     const plans = new Map<string, ServerPlan>([
       ['查 documents W202611', { delegates: ['查 documents W202611'], reply: '已受理，稍后通知你。' }],
@@ -285,7 +285,7 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
       await new Promise((resolve) => setTimeout(resolve, 1100));
       await server.handler(incoming('user-a', 'conv-a', 'msg-2', '还在吗'));
       await vi.waitFor(() => expect(reader.undelivered()).toEqual([]));
-      expect(sentKinds.length).toBeGreaterThanOrEqual(4);
+      expect(sentKinds.length).toBeGreaterThanOrEqual(3);
     } finally {
       reader.close();
       server.close();
@@ -293,17 +293,18 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
   });
 
   it('⑭ B 通道：completed 已移交唤醒（及其降级）路径，不再注入 [任务事实] 办完了；降级事实一次性注入不重复', async () => {
-    // 2026-11-19 唤醒切片 + 复核 F3：一审把 `completed` 留在 B_CHANNEL_KINDS，下一次用户
-    // 回合会再注入一条 `[任务事实] 办完了：<name>。`（旧宿主完成模板的残留——同一件事在同一
-    // 回合出现两条陈述：唤醒降级的 `[任务完成]` 事实 + 这条）。本用例钉住新形状：
-    //   · B 通道不再注入 completed（本夹具的假驱动没有唤醒能力 → 降级路径把完成**事实**
-    //     留在 systemNotes 待注入，形状 = `[任务完成]…`，不是旧的 `[任务事实] 办完了：…`）；
+    // 2026-11-19 唤醒切片 + 复核 F3 + 2026-11-23 去 outcome：一审把 `completed` 留在
+    // B_CHANNEL_KINDS，下一次用户回合会再注入一条 `[任务事实] 办完了：<name>。`（旧宿主完成
+    // 模板的残留——同一件事在同一回合出现两条陈述）。本用例钉住新形状：
+    //   · B 通道不再注入 completed（本夹具的假驱动没有唤醒能力 → 降级路径把**事实**
+    //     留在 systemNotes 待注入，形状 = `[回合结束]…`，不是旧的 `[任务事实] 办完了：…`，
+    //     也不是回合级结局词）；
     //   · 一次性：第三回合不再重复注入（take 即出队，幂等）。
     // 超时/资源/等补充等 kind 仍留在 B 通道；failure 与 cancelled 也已随 2026-11-19 唤醒
     // 切片移出（失败/取消各由自己的唤醒出口说，降级时事实进 systemNotes）——本用例不动它们。
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
-    const executor = new FakeExecutor([async () => ({ kind: 'completed', resultText: 'W202611：documents 共 3 条。' })]);
+    const executor = new FakeExecutor([async () => ({ kind: 'ended', report: 'W202611：documents 共 3 条。' })]);
     const records: ServerDriverRecord[] = [];
     const plans = new Map<string, ServerPlan>([
       ['查 documents W202611', { delegates: ['查 documents W202611'], reply: '已受理，稍后通知你。' }],
@@ -326,17 +327,19 @@ describe('R5 通知：投递驱动与 B 通道事实注入', () => {
       // 第二回合的注入面：宿主事实经 `injections` 交给驱动（Pi 原生 custom message 投影成 user）。
       const bChannel = records[1]!.injections.filter((text) => text.startsWith('[任务事实]'));
       expect(bChannel, 'completed 不得再走 B 通道（旧「办完了」模板残留已删）').toHaveLength(0);
-      const completionFacts = records[1]!.injections.filter((text) => text.startsWith('[任务完成]'));
-      expect(completionFacts, '降级路径把完成事实留待注入').toHaveLength(1);
-      expect(completionFacts[0]).toContain('查 documents W202611');
-      // 旧宿主完成模板是 `[任务事实] 办完了：<name>。`（带冒号 + 业务名）——新完成事实用
-      // `[任务完成]…办完了。结果正文（逐字）…`，不含那个旧模板形态。
-      expect(completionFacts[0]).not.toContain('办完了：');
-      expect(completionFacts[0]).not.toContain('task_status');
+      const roundFacts = records[1]!.injections.filter((text) => text.startsWith('[回合结束]'));
+      expect(roundFacts, '降级路径把回合事实留待注入').toHaveLength(1);
+      expect(roundFacts[0]).toContain('查 documents W202611');
+      // 旧宿主完成模板是 `[任务事实] 办完了：<name>。`，2026-11-23 前的完成事实是
+      // `[任务完成]…办完了。结果正文（逐字）…`——两种都不再有：回合事实只喂账本事实 + 汇报原文。
+      expect(roundFacts[0]).not.toContain('办完了：');
+      expect(roundFacts[0]).not.toContain('结果正文（逐字）');
+      expect(roundFacts[0]).toContain('W202611：documents 共 3 条。');
+      expect(roundFacts[0]).not.toContain('task_status');
       // 幂等：第三回合不再重复注入同一事实。
       await server.handler(incoming('user-a', 'conv-a', 'msg-3', '再一步'));
       const third = records[2]!.injections.filter(
-        (text) => text.startsWith('[任务事实]') || text.startsWith('[任务完成]'),
+        (text) => text.startsWith('[任务事实]') || text.startsWith('[回合结束]'),
       );
       expect(third).toHaveLength(0);
     } finally {

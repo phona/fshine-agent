@@ -1,7 +1,7 @@
 /**
  * 契约探针（§二#5，#5 对话面本体 blocked-by 缺口 1 之前先跑的**零模型额度**机械证据）。
  *
- * 目标：用确定性假件构造任务并推进到终态/挂起态，直接读执行层 `audit.jsonl` 与 registry 终态，
+ * 目标：用确定性假件构造任务并推进到停下/等待提问，直接读执行层 `audit.jsonl` 与底账事实，
  * 产出「查询 / 取消 / 接续 / 结果找回」在**对话面**缺口的机械证据，并对照缺口 1 设计
  * （gap-task-surface.md，2026-11-18 已删，git 历史可考）。
  *
@@ -9,7 +9,7 @@
  *   A. 对话面缺席：Main 回合工具面仅 `task_run`（execution-runtime.ts:426）；
  *      对 task_status/task_result/task_cancel/task_resume 的 Main 调用一律
  *      `Main 工具面之外的调用`（execution-runtime.ts:430）。
- *   B. 终态事实与执行层留痕：经 task_run 推进到终态的任务，registry 落终态、
+ *   B. 结束事实与执行层留痕：经 task_run 推进到停下的任务，底账写结束事实、
  *      执行层 <state-dir>/audit.jsonl 落实际执行行（含 result）。
  *   C. 能力已在宿主侧存在：registry.get/list（scope 化）、runner.cancel（requested≠cancelled）、
  *      runner.resume（waiting_user 接续）、resultText 逐字存档——能力齐全但**无对话入口**。
@@ -23,8 +23,14 @@ import { fileURLToPath } from 'node:url';
 import type { ContextProfileConfig } from '@fshine/contracts';
 import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
 import type { TaskExecutionInput, TaskExecutionContext, TaskExecutionOutcome, TaskExecutor } from '../../../packages/agent/src/task-runner';
-import type { TaskScope } from '../../../packages/agent/src/task-registry';
+import { type TaskRecord, type TaskScope } from '../../../packages/agent/src/task-registry';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import { assembleSessionCore } from '../../ask-runtime';
+
+/** 任务事实读数（布尔；不投影任务级状态词）。 */
+function factsOf(task: TaskRecord): { started: boolean; reported: boolean; waiting: boolean; mayBeRunning: boolean } {
+  return { started: taskStartedOf(task), reported: taskReportedOf(task), waiting: taskWaitingOf(task), mayBeRunning: taskMayBeRunningOf(task) };
+}
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform');
@@ -90,11 +96,11 @@ async function probeConversationFace(): Promise<Record<string, unknown>> {
   let auditRows: unknown[] = [];
   try {
     await assembled.session.send('帮我核对 alpha 的 W1；顺便查一下我刚才那个任务办得怎么样了。');
-    tasks = assembled.taskRegistry.list(SCOPE).map((t) => ({ taskId: t.taskId, taskNo: t.taskNo, status: t.status, executions: t.executions.map((e) => ({ operation: e.operation, status: e.status, requestId: e.requestId })), resultText: t.resultText ?? null, replyText: t.replyText ?? null }));
+    tasks = assembled.taskRegistry.list(SCOPE).map((t) => ({ taskId: t.taskId, taskNo: t.taskNo, status: factsOf(t), executions: t.executions.map((e) => ({ operation: e.operation, status: e.status, requestId: e.requestId })), resultText: t.resultText ?? null, replyText: t.replyText ?? null }));
     const taskId = (tasks[0] as { taskId?: string } | undefined)?.taskId;
     if (taskId !== undefined) {
       const rec = assembled.taskRegistry.get(taskId, SCOPE);
-      resultRetrieval = { taskId, status: rec.status, hasArchivedText: (typeof rec.resultText === 'string' && rec.resultText.length > 0) || (typeof rec.replyText === 'string' && rec.replyText.length > 0), resultText: rec.resultText ?? null, replyText: rec.replyText ?? null };
+      resultRetrieval = { taskId, status: factsOf(rec), hasArchivedText: (typeof rec.resultText === 'string' && rec.resultText.length > 0) || (typeof rec.replyText === 'string' && rec.replyText.length > 0), resultText: rec.resultText ?? null, replyText: rec.replyText ?? null };
     }
     const auditPath = assembled.auditPath;
     if (existsSync(auditPath)) {
@@ -136,10 +142,10 @@ async function probeCapabilityApi(): Promise<Record<string, unknown>> {
   const dir = path.join(OUT, 'capability');
   mkdirSync(dir, { recursive: true });
   const executor = new FakeExecutor([
-    // task1 round1 → 要求补充输入（running→waiting_user）
+    // task1 round1 → 要求补充输入（started → waiting 事实）
     async () => ({ kind: 'needs_input', question: { missing: ['window'], raw: '请确认要核对的窗口（本月/上月？）' } }),
     // task1 round2（resume 后）→ completed（结果存档）
-    async () => ({ kind: 'completed', resultText: '任务一（接力后）已完成：alpha W1 共 2 条。' }),
+    async () => ({ kind: 'ended', report: '任务一（接力后）已完成：alpha W1 共 2 条。' }),
     // task2 round1 → 挂起直至被取消（观察 abort 信号）
     async (_input, ctx) => await new Promise<TaskExecutionOutcome>((resolve) => {
       if (ctx.signal.aborted) { resolve({ kind: 'cancelled' }); return; }
@@ -182,26 +188,26 @@ async function probeCapabilityApi(): Promise<Record<string, unknown>> {
     const t1 = await assembled.session.send('任务一');
     await runner.whenIdle();
     const task1Id = t1.taskIds[0]!;
-    observations['查询.registry.get(scope)'] = { status: assembled.taskRegistry.get(task1Id, SCOPE).status, pendingQuestion: assembled.taskRegistry.get(task1Id, SCOPE).pendingQuestion ?? null };
+    observations['查询.registry.get(scope)'] = { status: factsOf(assembled.taskRegistry.get(task1Id, SCOPE)), pendingQuestion: assembled.taskRegistry.get(task1Id, SCOPE).pendingQuestion ?? null };
     // 接续：resume(waiting_user) → started → completed + 结果存档
     observations['接续.runner.resume'] = runner.resume(task1Id, { answer: '本月（W202611）', scope: SCOPE });
     await runner.whenIdle();
     const t1After = assembled.taskRegistry.get(task1Id, SCOPE);
-    observations['结果找回.registry.get 存档'] = { taskId: task1Id, taskNo: t1After.taskNo, status: t1After.status, resultText: t1After.resultText ?? null, replyText: t1After.replyText ?? null };
-    // task2：running → cancel(requested≠cancelled) → 执行端确认 → cancelled
+    observations['结果找回.registry.get 存档'] = { taskId: task1Id, taskNo: t1After.taskNo, status: factsOf(t1After), resultText: t1After.resultText ?? null, replyText: t1After.replyText ?? null };
+    // task2：started → cancel(requested≠cancelled) → 执行端确认 → 结束事实（无汇报）
     const t2 = await assembled.session.send('任务二');
     await new Promise((r) => setTimeout(r, 20));
     const task2Id = t2.taskIds[0]!;
-    observations['取消前'] = { status: assembled.taskRegistry.get(task2Id, SCOPE).status };
+    observations['取消前'] = { status: factsOf(assembled.taskRegistry.get(task2Id, SCOPE)) };
     observations['取消.runner.cancel'] = runner.cancel(task2Id, SCOPE);
-    observations['取消后(请求时)'] = { status: assembled.taskRegistry.get(task2Id, SCOPE).status };
+    observations['取消后(请求时)'] = { status: factsOf(assembled.taskRegistry.get(task2Id, SCOPE)) };
     await runner.whenIdle();
-    observations['取消后(落定)'] = { status: assembled.taskRegistry.get(task2Id, SCOPE).status, reason: assembled.taskRegistry.get(task2Id, SCOPE).reason ?? null };
+    observations['取消后(落定)'] = { status: factsOf(assembled.taskRegistry.get(task2Id, SCOPE)), reason: lastFailureOf(assembled.taskRegistry.get(task2Id, SCOPE))?.error?.code ?? null };
     // 取消幂等/终态：再次 cancel
     observations['取消幂等(重复 cancel)'] = runner.cancel(task2Id, SCOPE);
     // 查询列表 + scope 隔离
-    observations['查询.registry.list(本会话)'] = assembled.taskRegistry.list(SCOPE).map((t) => ({ taskNo: t.taskNo, status: t.status }));
-    observations['查询.registry.list(他会话)'] = assembled.taskRegistry.list(OTHER_SCOPE).map((t) => ({ taskNo: t.taskNo, status: t.status }));
+    observations['查询.registry.list(本会话)'] = assembled.taskRegistry.list(SCOPE).map((t) => ({ taskNo: t.taskNo, status: factsOf(t) }));
+    observations['查询.registry.list(他会话)'] = assembled.taskRegistry.list(OTHER_SCOPE).map((t) => ({ taskNo: t.taskNo, status: factsOf(t) }));
     try {
       assembled.taskRegistry.get(task1Id, OTHER_SCOPE);
       observations['越权.get(他会话)'] = '未抛错（预期应抛 TaskOwnershipError）';

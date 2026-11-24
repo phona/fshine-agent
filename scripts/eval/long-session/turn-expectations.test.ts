@@ -19,15 +19,21 @@ import type { TaskView } from './oracle';
 
 const LS6 = buildTrackPlan('LS6');
 
-const T = (taskId: string, taskNo: number, request: string, status: string): TaskView => ({
-  taskId, taskNo, request, status, requestIds: [`req-${taskId}`],
+const T = (taskId: string, taskNo: number, request: string, kind: 'done' | 'running' | 'cancelled' | 'failed'): TaskView => ({
+  taskId, taskNo, request, requestIds: [`req-${taskId}`],
+  started: true,
+  ended: kind !== 'running',
+  reported: kind === 'done',
+  waiting: false,
+  mayBeRunning: kind === 'running',
+  ...(kind === 'done' ? { lastExecutionStatus: 'completed' } : kind === 'failed' ? { lastExecutionStatus: 'failed' } : {}),
 });
 
-const A_DONE = T('task-A', 1, '查 alpha W1', 'completed');
-const B_DONE = T('task-B', 2, '查 documents W202611', 'completed');
-const C_DONE = T('task-C', 3, '查 beta W1', 'completed');
-const D_DONE = T('task-D', 4, '重做 beta W1', 'completed');
-const E_DONE = T('task-E', 5, '查 bulk-a W1', 'completed');
+const A_DONE = T('task-A', 1, '查 alpha W1', 'done');
+const B_DONE = T('task-B', 2, '查 documents W202611', 'done');
+const C_DONE = T('task-C', 3, '查 beta W1', 'done');
+const D_DONE = T('task-D', 4, '重做 beta W1', 'done');
+const E_DONE = T('task-E', 5, '查 bulk-a W1', 'done');
 const E_CANCELLED = T('task-E', 5, '查 bulk-a W1', 'cancelled');
 
 const RUNNING_A = T('task-A', 1, '查 alpha W1', 'running');
@@ -144,13 +150,13 @@ describe('轮期望纯函数判定', () => {
     expect(judgeTurnExpectations(spec({ expectPrevTasksUnchanged: true }), ctx({ tasksBefore: [A_DONE], tasksAfter: [A_DONE, D_DONE] }))).toEqual([]);
   });
 
-  it('expectTaskStatusIn：oldest/latest 选取与状态不符 → E-G', () => {
-    expect(judgeTurnExpectations(spec({ expectTaskStatusIn: { which: 'oldest', values: ['completed'] } }), ctx({
+  it('expectTaskFactIn：oldest/latest 选取与事实不符 → E-G', () => {
+    expect(judgeTurnExpectations(spec({ expectTaskFactIn: { which: 'oldest', facts: ['reported'] } }), ctx({
       tasksAfter: [A_DONE, RUNNING_E],
     }))).toEqual([]);
-    expect(judgeTurnExpectations(spec({ expectTaskStatusIn: { which: 'latest', values: ['completed'] } }), ctx({
+    expect(judgeTurnExpectations(spec({ expectTaskFactIn: { which: 'latest', facts: ['reported'] } }), ctx({
       tasksAfter: [A_DONE, RUNNING_E],
-    })).map((f) => [f.check, f.code])).toEqual([['task_status_in', 'E-G']]);
+    })).map((f) => [f.check, f.code])).toEqual([['task_fact_in', 'E-G']]);
   });
 
   it('replyExcludes：纯数字按数值判（2000 不误伤 20000），文本按去空白子串判', () => {
@@ -171,7 +177,7 @@ describe('轮期望纯函数判定', () => {
       cancelFacts: [{ taskId: 'task-A', outcome: 'terminal', status: 'completed' }],
     }));
     expect(wrongTarget.map((f) => [f.check, f.code])).toEqual([['inflight_cancel', 'E-D']]);
-    expect(wrongTarget[0]?.evidence).toMatchObject({ statusBefore: 'running', statusAfter: 'completed', reason: 'cancel_target_mismatch' });
+    expect(wrongTarget[0]?.evidence).toMatchObject({ reason: 'cancel_target_mismatch' });
     // 取消确实到达同一任务、但到达时已完成，且回复如实（未声称取消）→ 通过。
     expect(judgeTurnExpectations(spec({ expectInflightCancel: true }), ctx({
       tasksBefore: [RUNNING_E], tasksAfter: [E_DONE], reply: '它在我取消前就办完了，取消不了。',
@@ -204,7 +210,7 @@ describe('轮期望纯函数判定', () => {
       tasksAfter: [A_DONE, E_CANCELLED], reply: '已取消。',
     }));
     expect(falseClaim.map((f) => [f.check, f.code])).toEqual([['cancel_honest', 'E-D']]);
-    expect(falseClaim[0]?.evidence).toMatchObject({ taskId: 'task-A', which: 'oldest', status: 'completed', claimsCancelled: true });
+    expect(falseClaim[0]?.evidence).toMatchObject({ taskId: 'task-A', which: 'oldest', reported: true, claimsCancelled: true });
     // 真模型回执：同一个回复里既说「最早 alpha 取消不了」，又说另一个任务「已取消」——
     // 明确说取消不了的信号优先，不能被另一任务的合法「已取消」带成假红。
     const mixed = '最早那个 alpha 任务取消不了，因为它早就办完了。bulk-a 那个任务：已确认取消，状态是「已取消」。';
@@ -305,7 +311,7 @@ describe('LS6 端到端（假会话）', () => {
     expect(r.judgement.taskVerdict.hardZeroHits).toEqual([]);
     const hit = r.judgement.turnExpectations?.failures.find((f) => f.check === 'inflight_cancel');
     expect(hit).toMatchObject({ turn: 12, label: 'N6-Q2', code: 'E-D' });
-    expect(hit?.evidence).toMatchObject({ statusBefore: 'running', statusAfter: 'completed', claimsCancelled: true });
+    expect(hit?.evidence).toMatchObject({ claimsCancelled: true });
     expect(r.judgement.turnExpectations?.pass).toBe(false);
   });
 
@@ -313,7 +319,7 @@ describe('LS6 端到端（假会话）', () => {
     const r = await runLs6(ls6Script({ tasks: { 13: [T('task-A', 1, '查 alpha W1', 'cancelled'), B_DONE, C_DONE, D_DONE, E_CANCELLED] } }));
     const checks = r.judgement.turnExpectations?.failures
       .filter((f) => f.turn === 13).map((f) => f.check).sort();
-    expect(checks).toEqual(['prev_tasks_unchanged', 'task_status_in']);
+    expect(checks).toEqual(['prev_tasks_unchanged', 'task_fact_in']);
   });
 });
 

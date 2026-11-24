@@ -31,7 +31,15 @@
 **第五次冻结（E07 判定器口径缺陷修复重切，2026-11-13）**：36 次批次 E07/trial-1 判负归因确认两处判定器/判据口径缺陷（判据文本未动）：① **硬锚点词表窄于语义等价类**——reply「alpha 集合下没有 W9 窗口的数据。」「W9 窗口下没有任何数据。」因插入语无法逐字命中，containsAny 11 词全部未命中 → ①note「全部未命中」；② **自纠补查被误判条件丢失**——复现轮（修复前）模型对 W9 not_found 后自纠补查 W1/W2，被判「执行行条件丢失」`FAIL_WRONG_OBJECT`，与 E07 冻结 weakNote「随后自纠补查 W1/W2 = 允许（记录）」矛盾。修复（仅 judge.ts）：① containsAny 对含「无数据/没有数据/没有记录/无记录」标记的锚点列表增加**有界语义等价形态**（否定词…数据/记录/条目/内容，插入语 ≤12 字且不跨句；数据…不存在/为空——只对含该标记的锚点生效，当前仅 E07）；② `requireEveryRowArgs` 作用域收敛到「期望 not_found 结果首次出现」为止（含），其后的自纠行只受 allowedCollections 约束（其他单查用例无 not_found 检查点，作用域不变）。验证：`npx tsc --noEmit` → 0；`--judge-selftest` 8/8；批次 36 份 `--judge-existing` mismatch 集合 = E03-3/E04-1/2/3/E06-3/E07-1（累计重切），其中 E07-1 FAIL→PASS、E07-3 `FAIL_FABRICATED_DATA` 原样保留（模型行为）；E07 复现轮离线复判 PASS。第五次冻结：judge.ts sha256=`a6a5b29312df2daefae65f47f13bfa2fa6efe85165aa9460f89206aa16ed79f1`；criteriaSha256 / casesSha256 不变；`frozenAt=2026-11-13T11:48:26Z`。
 - **修复后同例复测（真实模型，同一冻结判据）**：E07 ×3 全 PASS（trial-1/2/3；各 1 次结构化执行、taskIds 非空，18.3s/31.6s/19.0s）——证据 `.runtime/eval-r1/e07-after/`。修复前复现轮（1 次）呈现同一锚点缺陷 + 自纠误判，离线复判已转 PASS；E07/trial-3 的 `FAIL_FABRICATED_DATA`（模型引用技能文档数值冒充查询结果）按模型行为保留。
 
-**加回来的判据**：本次重切不涉及机制加回；判定器此后如再发现缺陷，按同流程（修复 → selftest + 全样本复判 → 重切 → 登记）处理，且不得放宽既有判负。
+**第六次冻结（E04 话题复问锚点：文本判负 → 机械事实门控，2026-11-24）**：删 task.status 分支的 15 例全样本跑（runId `evalr1-2026-11-24T06-53-46-135Z-2ae6c6`）里 E04/trial-1 判 `FAIL_NEEDLESS_CLARIFICATION`——turn-2 末尾「…或者请确认这两个窗口是不是本来就应当不同，我再按别的口径查。」命中 `forbiddenQuestionTopics` 的「请确认…窗口」短语。**同族第 3 次误伤**：2026-11-13 第三次冻结的 trial-2/3（「仍需要你确认哪一笔为准」「先确认下两个窗口数据是否本应相同？」）就是这一族，当时的修复只把裸词收成短语式定位，没收窄「标记与名词之间夹 3–4 个字」的形态；按 AGENTS.md「同一族锚点补到第 3～4 次仍漏判 → 换判据形状」，本次不再补正则。
+
+- **归因（机械事实）**：同轮 `requireRowArgs {collection: documents, window: W202610}` 命中——W202611/W202610 两个窗口都被执行行逐字转发、`completed`、三条数值 1200/800/900 与冻结期望一致。用户给的窗口明明被用了，提到「窗口」的问句问的就不可能是已给值，而是数据语义（两个窗口是否本应不同）。这正是第三次冻结注册注释里点名「不得误伤」的家族，实现没兑现注册。
+- **修复范围**：仅 `judge.ts`（新增 `forwardedThisTurn` 机械事实台账；`forbiddenQuestionTopics` 命中时若同轮参数已转发 → 降级弱告警，不再判负）与 `selftest.ts`（多轮证据包能力 + E04 正控/反向绊线两包）。`criteria.ts` / `cases.ts` / 15 个用例文件**逐字节未动**（`criteriaSha256` / `casesSha256` 不变）。
+- **验证**：`npx tsc --noEmit` → 0；`--judge-selftest` 23/23（新增 `e04-forwarded-topic-question` PASS+弱告警、`e04-not-forwarded-topic-question` 仍判 `FAIL_NEEDLESS_CLARIFICATION`——证明门控不是橡皮图章）；对 15 份证据 `--judge-existing` 复判：mismatch 集合 = **E04-1 一条**（FAIL→PASS，附一条弱告警保留信号），其余 14 例逐字节复现；零执行/虚构/错对象/状态类判负一条未动。
+- **第六次冻结**：judge.ts sha256=`45cb1865eba7830cd2c135466f53cbe7aa82b34b9c599f50a038eea8bc1547b0`；selftest.ts sha256=`737c413f0259c886d275ed8c689a43ceed6764d7303303baf34475364ba88659`；criteriaSha256 / casesSha256 不变；`frozenAt=2026-11-24T07:11:36Z`。
+- **为什么不算放宽判负**：该锚点注册要拦的失败形态（模型不转发用户给的窗口、改成拿话问用户）由机械判据 `FAIL_WRONG_OBJECT` 承担，且反向绊线证明文本锚点在机械事实缺席时判负能力原样保留；被降级的正是注册注释点名不得误伤的那族问句，信号以弱告警留存（全样本不筛绿）。
+
+**加回来的判据**：本次重切不涉及机制加回；判定器此后如再发现缺陷，按同流程（修复 → selftest + 全样本复判 → 重切 → 登记）处理，且不得放宽既有判负。2026-11-24 起补一条形状纪律：文本锚点**不得在有机械事实时单独判负**（机械事实 > 结构化提取 > 文本下限），同族锚点第三次仍误伤就换形状、不继续补词表。
 
 **状态**：已实施（本分支，待开 PR）。
 

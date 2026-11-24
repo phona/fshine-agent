@@ -23,6 +23,7 @@ import {
   type NotificationSink,
 } from '../packages/agent/src/notifications';
 import { TaskOwnershipError, type TaskRecord, type TaskRegistry, type TaskScope } from '../packages/agent/src/task-registry';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../packages/agent/testing/task-facts';
 import type {
   TaskExecutionInput,
   TaskExecutionContext,
@@ -235,18 +236,18 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
       const taskId = turn.taskIds[0]!;
       const accepted = records[0]!.execResults[0] as Record<string, unknown>;
       // 受理事实（owner 2026-11-19：交办不再给固定回执话术）：只给机械事实，无 notice、无编号
-      expect(accepted).toMatchObject({ taskId, status: 'running', accepted: true });
+      expect(accepted).toMatchObject({ taskId, started: true, accepted: true });
       expect(accepted).not.toHaveProperty('taskNo');
       expect(accepted).not.toHaveProperty('notice');
       expect(String(accepted['name']).length).toBeGreaterThan(0);
       // 受理后已触发派发：行进入 running，尚未终态
-      expect(assembled.taskRegistry.get(taskId, SCOPE_A).status).toBe('running');
+      expect(taskMayBeRunningOf(assembled.taskRegistry.get(taskId, SCOPE_A))).toBe(true);
       // 放行后台回合 → 收尾 completed
-      gate.resolve({ kind: 'completed', resultText: 'documents W202611 共 3 条。' });
+      gate.resolve({ kind: 'ended', report: 'documents W202611 共 3 条。' });
       await assembled.runner!.whenIdle();
-      expect(assembled.taskRegistry.get(taskId, SCOPE_A).status).toBe('completed');
+      expect(executionsOf(assembled.taskRegistry.get(taskId, SCOPE_A))).toEqual([]);
     } finally {
-      gate.resolve({ kind: 'failed', reason: '（测试清理）' });
+      gate.resolve({ kind: 'ended' });
       await settleQuietly(assembled);
       assembled.close();
     }
@@ -280,20 +281,24 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
         await assembled.session.send('任务三'),
       ];
       const ids = turns.map((turn) => turn.taskIds[0]!);
-      const statusOf = (taskId: string): string => assembled.taskRegistry.get(taskId, SCOPE_A).status;
+      const taskOf = (taskId: string) => assembled.taskRegistry.get(taskId, SCOPE_A);
       expect(executor.calls).toHaveLength(1);
-      expect(ids.map(statusOf)).toEqual(['running', 'queued', 'queued']);
-      gates[0]!.resolve({ kind: 'completed', resultText: '一完成' });
+      // 事实断言：一个在跑（liveness），其余未启动（没跑过且无结束事实）。
+      expect(taskMayBeRunningOf(taskOf(ids[0]!))).toBe(true);
+      expect(ids.slice(1).every((id) => taskUnstartedOf(taskOf(id)))).toBe(true);
+      gates[0]!.resolve({ kind: 'ended', report: '一完成' });
       await vi.waitFor(() => expect(executor.calls).toHaveLength(2));
-      expect(statusOf(ids[0]!)).toBe('completed');
-      gates[1]!.resolve({ kind: 'completed', resultText: '二完成' });
+      // 一完成：汇报存档 + 零执行事实。
+      expect(executionsOf(taskOf(ids[0]!))).toEqual([]);
+      expect(archivedReportOf(taskOf(ids[0]!))).toBeDefined();
+      gates[1]!.resolve({ kind: 'ended', report: '二完成' });
       await vi.waitFor(() => expect(executor.calls).toHaveLength(3));
-      gates[2]!.resolve({ kind: 'completed', resultText: '三完成' });
+      gates[2]!.resolve({ kind: 'ended', report: '三完成' });
       await assembled.runner!.whenIdle();
       expect(executor.maxActive).toBe(1);
-      expect(ids.map(statusOf)).toEqual(['completed', 'completed', 'completed']);
+      expect(ids.every((id) => executionsOf(taskOf(id)).length === 0 && archivedReportOf(taskOf(id)) !== undefined)).toBe(true);
     } finally {
-      for (const gate of gates) gate.resolve({ kind: 'failed', reason: '（测试清理）' });
+      for (const gate of gates) gate.resolve({ kind: 'ended' });
       await settleQuietly(assembled);
       assembled.close();
     }
@@ -306,7 +311,7 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
       async () => await first.promise,
       async (input) => {
         expect(input.answer).toBe('W202611');
-        return { kind: 'completed', resultText: '结果：3 条。' };
+        return { kind: 'ended', report: '结果：3 条。' };
       },
     ]);
     const records: MainDriverRecord[] = [];
@@ -319,7 +324,7 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
       first.resolve({ kind: 'needs_input', question: { missing: ['窗口'] } });
       await assembled.runner!.whenIdle();
       let task = assembled.taskRegistry.get(taskId, SCOPE_A);
-      expect(task.status).toBe('waiting_user');
+      expect(task.pendingQuestion).toBeDefined();
       expect(task.pendingQuestion).toEqual({ missing: ['窗口'] });
       // 挂起期间执行资源归零（许可已释放；预算保留由 P5 单测覆盖）
       expect(assembled.policy.snapshot().background.active).toBe(0);
@@ -328,11 +333,11 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
       await vi.waitFor(() => expect(executor.calls).toHaveLength(2));
       await assembled.runner!.whenIdle();
       task = assembled.taskRegistry.get(taskId, SCOPE_A);
-      expect(task.status).toBe('completed');
+      expect(executionsOf(task)).toEqual([]);
       expect(task.taskNo).toBe(1);
       expect(task.replyText).toBe('结果：3 条。');
     } finally {
-      first.resolve({ kind: 'failed', reason: '（测试清理）' });
+      first.resolve({ kind: 'ended' });
       await settleQuietly(assembled);
       assembled.close();
     }
@@ -342,25 +347,25 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
     const dbPath = path.join(tempDir(), 'state.db');
     const pending = deferred<TaskExecutionOutcome>();
     const executor1 = new FakeExecutor([
-      async () => ({ kind: 'completed', resultText: '第一次结果' }),
+      async () => ({ kind: 'ended', report: '第一次结果' }),
       async () => await pending.promise,
     ]);
     const first = await assembleBackground({ dbPath, taskExecutor: executor1, mainPlans: new Map() });
     first.runner!.submit({ taskId: 'task_done', principalId: SCOPE_A.principalId, sessionId: SCOPE_A.sessionId, request: '已完成任务' });
     first.runner!.pump();
     await first.runner!.whenIdle();
-    expect(first.taskRegistry.get('task_done', SCOPE_A).status).toBe('completed');
+    expect(executionsOf(first.taskRegistry.get('task_done', SCOPE_A))).toEqual([]);
 
     first.runner!.submit({ taskId: 'task_running', principalId: SCOPE_A.principalId, sessionId: SCOPE_A.sessionId, request: '在飞任务' });
     first.runner!.pump();
     await vi.waitFor(() => expect(executor1.calls).toHaveLength(2));
     first.runner!.submit({ taskId: 'task_queued', principalId: SCOPE_A.principalId, sessionId: SCOPE_A.sessionId, request: '排队任务' });
     first.runner!.pump();
-    expect(first.taskRegistry.get('task_queued', SCOPE_A).status).toBe('queued');
+    expect(taskUnstartedOf(first.taskRegistry.get('task_queued', SCOPE_A))).toBe(true);
     first.close(); // 进程终止（在飞回合悬置）
 
     // 新进程：同一底账、新 runner，注入未来时钟使租约过期
-    const executor2 = new FakeExecutor([async () => ({ kind: 'completed', resultText: '重启后结果' })]);
+    const executor2 = new FakeExecutor([async () => ({ kind: 'ended', report: '重启后结果' })]);
     const second = await assembleBackground({
       dbPath,
       taskExecutor: executor2,
@@ -372,13 +377,13 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
       await second.runner!.whenIdle();
       expect(summary.recovered).toEqual(['task_running']);
       const running = second.taskRegistry.get('task_running', SCOPE_A);
-      expect(running.status).toBe('failed');
-      expect(running.reason).toBe('result_unknown');
+      expect(running.endedAt).toBeTruthy();
+      expect(running.endedAt).toBeTruthy();
       // unknown 不重放：执行端零调用
       expect(executor2.calls.map((call) => call.taskId)).toEqual(['task_queued']);
-      expect(second.taskRegistry.get('task_queued', SCOPE_A).status).toBe('completed');
+      expect(executionsOf(second.taskRegistry.get('task_queued', SCOPE_A))).toEqual([]);
       // completed 不重跑
-      expect(second.taskRegistry.get('task_done', SCOPE_A).status).toBe('completed');
+      expect(executionsOf(second.taskRegistry.get('task_done', SCOPE_A))).toEqual([]);
     } finally {
       // 在飞回合永久悬置（重启场景）；不 resolve、不在关库后收尾。
       second.close();
@@ -411,21 +416,20 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
       const taskId1 = first.taskIds[0]!;
       await vi.waitFor(() => expect(executor.calls).toHaveLength(1));
       expect(assembled.runner!.cancel(taskId1, SCOPE_A)).toEqual({ outcome: 'requested', taskId: taskId1 });
-      expect(assembled.taskRegistry.get(taskId1, SCOPE_A).status).toBe('cancelling');
-      await vi.waitFor(() => expect(assembled.taskRegistry.get(taskId1, SCOPE_A).status).toBe('cancelled'));
-      expect(assembled.taskRegistry.get(taskId1, SCOPE_A).reason).toBe('cancelled_by_user');
+      // 取消请求：等执行端观察 abort 后确认，才落 cancelled（S1 无 cancelling 过渡态）
+      await vi.waitFor(() => expect(assembled.taskRegistry.get(taskId1, SCOPE_A).endedAt).toBeTruthy());
+      expect(assembled.taskRegistry.get(taskId1, SCOPE_A).endedAt).toBeTruthy();
 
       const second = await assembled.session.send('任务二');
       const taskId2 = second.taskIds[0]!;
       await vi.waitFor(() => expect(executor.calls).toHaveLength(2));
       expect(assembled.runner!.cancel(taskId2, SCOPE_A)).toEqual({ outcome: 'requested', taskId: taskId2 });
-      expect(assembled.taskRegistry.get(taskId2, SCOPE_A).status).toBe('cancelling');
-      secondGate.resolve({ kind: 'completed', resultText: '照常完成' });
-      await vi.waitFor(() => expect(assembled.taskRegistry.get(taskId2, SCOPE_A).status).toBe('completed'));
+      secondGate.resolve({ kind: 'ended', report: '照常完成' });
+      await vi.waitFor(() => expect(executionsOf(assembled.taskRegistry.get(taskId2, SCOPE_A))).toEqual([]));
       // 未获确认：不得宣称取消
-      expect(assembled.taskRegistry.get(taskId2, SCOPE_A).reason).toBeUndefined();
+      expect(lastFailureOf(assembled.taskRegistry.get(taskId2, SCOPE_A))).toBeUndefined();
     } finally {
-      secondGate.resolve({ kind: 'failed', reason: '（测试清理）' });
+      secondGate.resolve({ kind: 'ended' });
       await settleQuietly(assembled);
       assembled.close();
     }
@@ -453,11 +457,11 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
       expect(b.session.tasks()).toHaveLength(0);
       expect(() => b.runner!.cancel(taskId, SCOPE_B)).toThrowError(TaskOwnershipError);
       expect(() => b.runner!.resume(taskId, { scope: SCOPE_B })).toThrowError(TaskOwnershipError);
-      expect(() => b.taskRegistry.transition(taskId, 'cancelling', { scope: SCOPE_B })).toThrowError(TaskOwnershipError);
+      expect(() => b.taskRegistry.markCancelled(taskId, { scope: SCOPE_B })).toThrowError(TaskOwnershipError);
       // 归属事实不回退：任务仍在 A 名下 running
-      expect(a.taskRegistry.get(taskId, SCOPE_A).status).toBe('running');
+      expect(taskMayBeRunningOf(a.taskRegistry.get(taskId, SCOPE_A))).toBe(true);
     } finally {
-      gate.resolve({ kind: 'failed', reason: '（测试清理）' });
+      gate.resolve({ kind: 'ended' });
       await settleQuietly(a);
       b.close();
       a.close();
@@ -466,7 +470,7 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
 
   it('⑧ resultText 经 archiveReply 逐字存档（结果可找回，不被受理话术覆盖）', async () => {
     const dbPath = path.join(tempDir(), 'state.db');
-    const executor = new FakeExecutor([async () => ({ kind: 'completed', resultText: 'W202611：documents 共 3 条。' })]);
+    const executor = new FakeExecutor([async () => ({ kind: 'ended', report: 'W202611：documents 共 3 条。' })]);
     const records: MainDriverRecord[] = [];
     const plans = new Map<string, MainPlan>([['查 documents W202611', { delegates: ['查 documents W202611'], reply: '已受理。' }]]);
     const assembled = await assembleBackground({ dbPath, taskExecutor: executor, mainPlans: plans, records });
@@ -475,7 +479,7 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
       const taskId = turn.taskIds[0]!;
       await assembled.runner!.whenIdle();
       const task = assembled.session.getTask(taskId);
-      expect(task.status).toBe('completed');
+      expect(executionsOf(task)).toEqual([]);
       expect(task.replyText).toBe('W202611：documents 共 3 条。');
     } finally {
       await settleQuietly(assembled);
@@ -551,8 +555,8 @@ describe('R4 联合：P5 前台许可（inline 模式）', () => {
       // 半成品不留：任务行落 failed + 机械原因 resource_limited；执行端零调用（unreachableDriver 未被触发）
       const tasks = assembled.taskRegistry.list(SCOPE_A);
       expect(tasks).toHaveLength(1);
-      expect(tasks[0]!.status).toBe('failed');
-      expect(tasks[0]!.reason).toBe('resource_limited');
+      expect(tasks[0]!.endedAt).toBeTruthy();
+      expect(tasks[0]!.endedAt).toBeTruthy();
       // 失败路径不泄漏许可
       expect(assembled.policy.snapshot().foreground.active).toBe(0);
       expect(assembled.policy.snapshot().background.active).toBe(0);
@@ -580,18 +584,18 @@ describe('R4 联合：P5 前台许可（inline 模式）', () => {
     try {
       const first = await assembled.session.send('交办一件慢事');
       expect(executor.calls).toHaveLength(1);
-      expect(assembled.taskRegistry.get(first.taskIds[0]!, SCOPE_A).status).toBe('running');
+      expect(taskMayBeRunningOf(assembled.taskRegistry.get(first.taskIds[0]!, SCOPE_A))).toBe(true);
       // 后台配额已满（1/1）：前台许可独立 → 回合立即完成（若被后台阻塞则拒绝/挂起，本断言红）
       const second = await assembled.session.send('顺便问一句');
       expect(second.reply).toBe('现在后台还有任务在跑。');
       expect(second.taskIds).toHaveLength(0);
       expect(assembled.policy.snapshot().foreground.active).toBe(0);
       // 放行后台后正常收尾（在飞回合不泄漏）
-      gate.resolve({ kind: 'completed', resultText: '慢事完成' });
+      gate.resolve({ kind: 'ended', report: '慢事完成' });
       await assembled.runner!.whenIdle();
       expect(assembled.policy.snapshot().background.active).toBe(0);
     } finally {
-      gate.resolve({ kind: 'failed', reason: '（测试清理）' });
+      gate.resolve({ kind: 'ended' });
       await settleQuietly(assembled);
       assembled.close();
     }
@@ -602,7 +606,7 @@ describe('R4 联合：P4 通知（假 sink，background 模式）', () => {
   it('④ 通知生成/去重/投递 + 只读可查（未送达 → 已送达）', async () => {
     const dbPath = path.join(tempDir(), 'state.db');
     const sink = new FakeSink();
-    const executor = new FakeExecutor([async () => ({ kind: 'completed', resultText: '完成结果' })]);
+    const executor = new FakeExecutor([async () => ({ kind: 'ended', report: '完成结果' })]);
     const records: MainDriverRecord[] = [];
     const plans = new Map<string, MainPlan>([['任务A', { delegates: ['任务A'] }]]);
     const assembled = await assembleBackground({
@@ -621,29 +625,27 @@ describe('R4 联合：P4 通知（假 sink，background 模式）', () => {
       expect(reader.listNotifications(taskId).map((notification) => notification.kind)).toEqual([
         'accepted',
         'started',
-        'completed',
       ]);
       // 去重：同一事实重复触发不新增
-      const completed = reader.listNotifications(taskId).find((notification) => notification.kind === 'completed')!;
+      const factRow = reader.listNotifications(taskId).find((notification) => notification.kind === 'started')!;
       const again = assembled.notifications!.record({
         taskId,
-        kind: 'completed',
-        at: completed.payload.at,
-        stateVersion: completed.stateVersion,
-        ...(completed.payload.taskNo === undefined ? {} : { taskNo: completed.payload.taskNo }),
-        ...(completed.payload.name === undefined ? {} : { name: completed.payload.name }),
+        kind: 'started',
+        at: factRow.payload.at,
+        stateVersion: factRow.stateVersion,
+        ...(factRow.payload.taskNo === undefined ? {} : { taskNo: factRow.payload.taskNo }),
+        ...(factRow.payload.name === undefined ? {} : { name: factRow.payload.name }),
       });
       expect(again.created).toBe(false);
-      expect(reader.listNotifications(taskId)).toHaveLength(3);
+      expect(reader.listNotifications(taskId)).toHaveLength(2);
       // 投递前：未送达只读可见
       expect(reader.undelivered(taskId).map((notification) => notification.kind)).toEqual([
         'accepted',
         'started',
-        'completed',
       ]);
       // 假 sink 投递
       await assembled.notifications!.deliverPending();
-      expect(sink.sent.map((notification) => notification.kind)).toEqual(['accepted', 'started', 'completed']);
+      expect(sink.sent.map((notification) => notification.kind)).toEqual(['accepted', 'started']);
       expect(reader.undelivered(taskId)).toEqual([]);
       expect(reader.listNotifications(taskId).every((notification) => notification.deliveredAt !== undefined)).toBe(true);
     } finally {
@@ -655,7 +657,7 @@ describe('R4 联合：P4 通知（假 sink，background 模式）', () => {
   it('⑯ 通知投递失败不改变任务结果：任务仍 completed、结果可取回；未送达可见（attempts/lastError）', async () => {
     const dbPath = path.join(tempDir(), 'state.db');
     const sink = new FailingSink();
-    const executor = new FakeExecutor([async () => ({ kind: 'completed', resultText: '结果全文' })]);
+    const executor = new FakeExecutor([async () => ({ kind: 'ended', report: '结果全文' })]);
     const records: MainDriverRecord[] = [];
     const plans = new Map<string, MainPlan>([['任务A', { delegates: ['任务A'] }]]);
     const assembled = await assembleBackground({
@@ -673,17 +675,16 @@ describe('R4 联合：P4 通知（假 sink，background 模式）', () => {
       // 投递连续失败：未送达可见、有 attempts 与 lastError（不静默）
       await assembled.notifications!.deliverPending();
       const rows = reader.listNotifications(taskId);
-      expect(rows).toHaveLength(3);
+      expect(rows).toHaveLength(2);
       expect(rows.every((notification) => notification.deliveredAt === undefined)).toBe(true);
       expect(rows.every((notification) => notification.attempts >= 1)).toBe(true);
       expect(rows.every((notification) => notification.lastError === 'CHANNEL_DOWN')).toBe(true);
-      expect(reader.undelivered(taskId)).toHaveLength(3);
+      expect(reader.undelivered(taskId)).toHaveLength(2);
       // 任务结果与投递解耦：completed + 结果可取回，无失败痕迹
       const task = assembled.taskRegistry.get(taskId, SCOPE_A);
-      expect(task.status).toBe('completed');
+      expect(executionsOf(task)).toEqual([]);
       expect(task.replyText).toBe('结果全文');
-      expect(task.failureReason).toBeUndefined();
-      expect(task.reason).toBeUndefined();
+      expect(lastFailureOf(task)).toBeUndefined();
     } finally {
       reader.close();
       assembled.close();
@@ -730,7 +731,6 @@ describe('R4 联合：tasks 详情通知投递展示（只读最小）', () => {
       principalId: SCOPE_A.principalId,
       sessionId: SCOPE_A.sessionId,
       request: '查一下',
-      status: 'completed',
       executions: [],
       createdAt: '2026-11-14T00:00:00.000Z',
       updatedAt: '2026-11-14T00:00:00.000Z',
@@ -749,18 +749,18 @@ describe('R4 联合：tasks 详情通知投递展示（只读最小）', () => {
         payload: { at: 't1' }, createdAt: 't1', deliveredAt: 't1', attempts: 1, exhausted: false,
       },
       {
-        id: 2, taskId: base.taskId, kind: 'completed', stateVersion: 't2',
+        id: 2, taskId: base.taskId, kind: 'user_stop', stateVersion: 't2',
         payload: { at: 't2' }, createdAt: 't2', attempts: 3, exhausted: false, lastError: 'boom',
       },
       {
-        id: 3, taskId: base.taskId, kind: 'failed', stateVersion: 't3',
-        payload: { at: 't3', reason: 'failed_confirmed' }, createdAt: 't3', attempts: 5, exhausted: true, lastError: 'boom',
+        id: 3, taskId: base.taskId, kind: 'deadline_reached', stateVersion: 't3',
+        payload: { at: 't3', reason: 'deadline_reached' }, createdAt: 't3', attempts: 5, exhausted: true, lastError: 'boom',
       },
     ];
     const text = renderTaskDetail(base, { notifications });
     expect(text).toContain('通知投递');
     expect(text).toContain('已受理：已送达');
-    expect(text).toContain('已完成：未送达（重试 3/5）');
-    expect(text).toContain('失败：未送达（已停止重试）');
+    expect(text).toContain('已取消：未送达（重试 3/5）');
+    expect(text).toContain('已超时：未送达（已停止重试）');
   });
 });

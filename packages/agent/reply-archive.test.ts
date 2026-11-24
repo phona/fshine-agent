@@ -226,7 +226,7 @@ describe('P1-T04 Main 回复存档（S1）', () => {
     const registry = createTaskRegistry();
     registry.begin({ taskId: 'task_history', ...scope, request: '历史任务：查 beta' });
     registry.noteExecution('task_history', { requestId: 'req_history', operation: 'dummy.query', status: 'completed' });
-    registry.complete('task_history', '执行层汇报：查到 beta 3 条。');
+    registry.setResultText('task_history', '执行层汇报：查到 beta 3 条。');
     const task = registry.get('task_history', scope);
     expect(task.replyText).toBeUndefined();
 

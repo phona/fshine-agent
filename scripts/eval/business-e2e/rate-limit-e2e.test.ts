@@ -68,22 +68,21 @@ describe('① #4 端到端：限流经 state-dir 触发 RATE_LIMITED（真 dummy
     expect(cfg).toMatchObject({ max: 2 });
 
     // 执行层证据：三次结构化查询，第 3 次 failed + RATE_LIMITED。
-    // 注：执行层 RESULT 信封带 retryable:true，但宿主适配器 failureOf
-    // （packages/agent/src/dummy-cli-client.ts:228）只保留 code/message/correctForm，
-    // retryable 未进 ExecutionOutcome → 端到端此处拿不到 retryable（产品面缺陷，只登记不修）。
-    // 2026-11-19 模型可见面收口：模型侧工具结果（tool-calls.json 的 result）不再逐字带
-    // error.code/error.message——failed 投影只给 {status, kind, note}（RATE_LIMITED 只进
-    // execution_failure_classified 日志与底账）。此处断言模型可见面的收口形状。
+    // 注：执行层 RESULT 信封带 retryable:true，宿主适配器 failureOf
+    // （packages/agent/src/dummy-cli-client.ts:228）透传 retryable——端到端此处拿得到。
+    // 2026-11-24 失败事实原样进模型面（跟随本次删除）：模型侧工具结果（tool-calls.json 的
+    // result）对 failed/refused 给 {status, error:{code, message(已过 cleanExecutorDiagnostic
+    // 机械清洗), retryable?}}——RATE_LIMITED 与原文照实给模型，由它说人话；kind/note 形状
+    // 已删（原「模型可见面不含原始码」的收口断言随之反转）。
     const toolCalls = (JSON.parse(readFileSync(path.join(outRoot, 'B04', '1', 'tool-calls.json'), 'utf8')) as { toolCalls: Array<Record<string, any>> }).toolCalls;
     const execCalls = toolCalls.filter((c) => c.tool === 'execute_operation' || c.tool.startsWith('op_'));
     expect(execCalls).toHaveLength(3);
     const statuses = execCalls.map((c) => c.result?.status);
     expect(statuses).toEqual(['completed', 'completed', 'failed']);
     const third = execCalls[2]!;
-    // 收口断言：模型可见面不含原始码（error 不再下放），含 kind（表外码 → executor_failed）。
-    expect(third.result?.error).toBeUndefined();
-    expect(third.result?.kind).toBe('executor_failed');
-    expect(JSON.stringify(third.result)).not.toContain('RATE_LIMITED');
+    expect(third.result?.error).toMatchObject({ code: 'RATE_LIMITED' });
+    expect((third.result?.error as { message?: string }).message).toContain('Rate limit');
+    expect(third.result?.kind).toBeUndefined();
 
     // 判定与行为面：机械判过（无越界/无虚假完成）；部分失败如实报告。
     const sample = report.samples[0]!;

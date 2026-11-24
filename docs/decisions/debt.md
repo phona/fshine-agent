@@ -103,7 +103,23 @@ D-005 附条（`scripts/` 144 处接受不修）、D-006（验收替身数据）
 | R-1 | `wakeCancelled` 不在会话链上的 run/wake 竞态：任务取消时若该会话此刻没有在跑的回合（`turnActive=false`），`wakeCancelled` 直接起一次唤醒；若紧接着用户回合/另一状态变化又起 wake，两个 wake 可能并发。复核实测 **1 次可复现** driver 报错、用户回合空 | `apps/server/notification-chat-sink.ts:216-235`（`wakeCancelled` 出口）；`apps/server/server.ts:1303`（`wakeAndDeliverStateChange` 本体，出口逐步接它）；`turnActive` 判据见 `server.ts:1075` | 属竞态收口，不是本次去内部词切片；复现率与用户级影响待专门测。修法要给唤醒加会话级串行/去重（新机制，需过准入），本轮不引入 |
 | R-2 | `WAKE_TURN_MS = 60s` 与 Main `mainThinkingLevel=high` 的张力：high 档长思考的唤醒回合可能 60s 内出不来 → 超时 abort → 模型那句丢失、走兜底渲染文案（用户看到的是模板话而非模型话） | `packages/agent/src/execution-runtime.ts:1071`（`WAKE_TURN_MS = 60_000`）、`:3324-3358`（wake/coldWake 截止）；`packages/contracts/src/config.ts:121`、`packages/core/src/config.ts:96`（`mainThinkingLevel` 配置）；兜底见 `notification-chat-sink.ts:216-235` | 是否真发生取决于真模型在 high 档的唤醒耗时，**当前无真模型测量**。不擅自放宽截止或降档——等 `eval:user` 真模型读数再定，避免为假设问题改超时语义 |
 
-## 十一、长连接可靠性：离线/断连窗口的用户消息不可恢复（owner 2026-11-20 要求登记）
+## 十一、S1 收尾复核登记（2026-11-23，明确不修）
+
+> 来自「删 status 概念」收尾复核。以下条目都已在现行代码核对（M2/M3/m1/m2 来自独立复核；M4/M5/m3 来自 2026-11-23 grok 复审——与迁移事务 blocking 同轮，该 blocking 已修）；只登记、不修——修法要么是新增机制（需过新增机制准入），要么是用户可见词面变更（需 owner 裁定），要么会把确定性判据换成语义判断（违反判据红线）。
+
+| 编号 | 是什么 | 后果 | 为何暂不修 | 现行证据 |
+|---|---|---|---|---|
+| M2 | （2026-11-24 已解决）有机械失败事实的回合即使带 worker 汇报，`settle` 也不 `archiveReply`，只写结束事实 | 结论机已删：汇报**原样存档**（宿主不判它是不是「对失败的说明」）。用户可见面由两条守着——① 模型醒着：Main 读账本执行事实自己判；② 模型沉默：兜底按末次失败事实不说「办好了」。若以后要区分「汇报=结果」与「汇报=失败说明」，需要独立的语义/列，属新增机制 | — | `packages/agent/src/task-runner.ts`（settle 原样存档）；`packages/agent/src/execution-runtime.ts`（`lastFailureFactOf` 三条机械规则） |
+| M7 | （2026-11-24 新登记，owner 裁「登记不修」）执行行 status 是 `failed`/`refused` 但 `error.code` 与 `error.message` 皆空时，`lastFailureFactOf` 剥成 `{}`，回合终局不带 `errorCode`/`failureReason`；宿主兜底三者皆无 + 汇报非空 → 走 completion 话术 | 契约层**已堵住**：`ExecutionFailure { code: string; message: string }` 双双必填，`failed`/`refused` 必须带 `error`（`packages/contracts/src/execution-contract.ts:184-189,225-226`）——类型正确的执行层产不出空码。只剩「适配器返回类型合法但值为空串」一种运行期可能；仓内 dummy 防御性补 `EXECUTION_UNKNOWN_ERROR`，17dz 真层返回真码（CW000043/GATE_REFUSE 类）。**今天无可复现路径**，按「给不出最小复现失败就不新增/不改」登记 | 修法一行（判据从「code/message 非空」换成「status 属于 failed/refused 就算有失败事实」），但 necessity 无法证明；触发条件 = 17dz 实测吐出空码，那天再修 | `packages/agent/src/execution-runtime.ts`（`lastFailureFactOf` 三条机械规则）；`packages/agent/src/dummy-cli-client.ts:396-399`（防御性补值） |
+| M6 | （2026-11-24 新登记）宿主「回合成败结论机」已整台删除，连带两处用户可见退化：① 同对象/异对象/无标签的成败配对判定没了；② 兜底失去「已完成 X，未成功 Y」那句 | 一成一败 + 模型沉默时，用户听到的是通用一句「没办成。要重发，还是先核对？」（不再逐项听「哪件成哪件没成」；句子刻意不给「再试一次」——结论机删了，宿主不知道那笔是不是写、落没落，诱导重试可能双写）；同对象先失败后成功同样走这句（owner 2026-11-24 明确接受：宁可啰嗦不可骗人，也不可为洗绿留身份判定） | 恢复逐项话术需要**执行层**声明 partial/items（契约 `ExecutionItemResult` 已有形状），宿主不重建对象账本；对象身份同理应由执行层声明（2026-11-24 O-9 已删 `OBJECT_ARG_KEYS` 字段名刮擦，锁键改为 (operation, 参数稳定摘要 `argsDigestOf`)——宿主不再懂业务对象名） | `packages/agent/adversarial-worker.test.ts` ⑯–㉓（新口径：末条失败业务写的原始码，无 partial 字段） |
+| M3 | E11 的 `noWriteExecuted` 锚点只要求「写面执行行没有一条 completed」；有任务时零写命中，无任务时零执行 + 非空回复也命中 | 锚点接近恒过：不区分「零执行是权限拒绝/执行失败」还是「模型随便回了一句没办事」，E11 通过不能证明用户被告知了办不了 | 要区分拒绝/失败必须判断回复语义，而 AGENTS 判据红线禁止用关键词/正则表达语义判断；确定性事实层没有「模型是否说清办不了」的信号，只能交给用户级黑盒 eval。不为凑绿补词表/改判据 | `scripts/eval/convergence-r1/judge.ts:792-827`；已登记口径 `../ops/handover.md:31`、`scripts/eval/convergence-r1/cases/E11.ts:15-41` |
+| m1 | （2026-11-23 已解决）`noteRoundFailed` 无条件 emit；`result_unknown` 先 `markDied` 再 `noteRoundFailed` 双发 | 零状态：同任务至多一条结束事实（`task_ends`，只有 `task_id + at`，无 kind）；`died`/`round_failed` 这两个结束种类已随「删光状态机」轮删除，双发问题不存在 | — | `packages/core/src/task-store.ts`（`task_ends` 一次性）/ `packages/agent/src/task-runner.ts`（result_unknown 收尾只写一条结束事实） |
+| m2 | （2026-11-23 已解决）CLI 的 `taskFactLabelsOf` 不读 `roundFailedAt`；已停但无汇报的任务落到兜底标签「无汇报」 | CLI 标签读原始事实（`endedAt` + 汇报 + 提问 + 租约）：已停无汇报显示「无汇报收尾」，未启动显示「排队中」，无结束事实且不再可能活着显示「结果未知」 | — | `scripts/tasks.ts`（`taskFactLabelsOf` 读 `endedAt`/汇报/提问原始事实） |
+| M4 | （2026-11-23 已解决）`statusView` 透出四个终态时刻但不带 `roundFailedAt` | `statusView` 只透出原始事实（`started` / `reported` / `waiting` / `liveWorker` / `endedAt`，无种类）；`termination` 与结束种类已删除 | — | `packages/agent/src/execution-runtime.ts`（`statusView`） |
+| M5 | （2026-11-23 部分解决）`docs/architecture/tasks.md` 行号与已删符号对不上代码 | §1/§4/§5/§7 已按零状态重写（终态列 / `cancel_requested_at` / `round_failed_at` 口径替换为原始事实：结束事实只留时刻）；其余行号仍可能随代码漂移 | 文档全面逐行核对属独立文档任务；本轮只改零状态相关段 | `docs/architecture/tasks.md` §1/§4/§5/§7 |
+| m3 | （2026-11-23 已解决）`statusView` 的 `claimed` 注释写「已认领未落定」，实际是 `executions.length`（含已落定） | 注释按实际口径改写：`claimed` = 执行行总数（含已落定）、`resulted` = 已落定（status≠accepted）、`claimed-resulted` = 在途 accepted 数 | — | `packages/agent/src/execution-runtime.ts`（`statusView`） |
+
+## 十二、长连接可靠性：离线/断连窗口的用户消息不可恢复（owner 2026-11-20 要求登记）
 
 **事项**：企微 AI 机器人长连接（WebSocket）模式下，服务停服或断连期间用户发出的消息**平台不补投、产品无补拉**，窗口内消息永久丢失。
 

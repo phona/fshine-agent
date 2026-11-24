@@ -68,7 +68,8 @@ import {
 } from '../packages/agent/src/execution-runtime';
 import {
   createNotificationOutbox,
-  notificationKindForTransition,
+  NOTIFICATION_KINDS,
+  type NotificationKind,
   type NotificationOutbox,
   type NotificationReason,
   type NotificationSink,
@@ -506,7 +507,7 @@ function longTaskWaitResultOf(outcome: ExecutionOutcome): {
 /**
  * 长任务等待端口（契约 v4）：执行面客户端声明了 `wait` 才接。
  * 未声明（或注入的假客户端没有该能力）→ 不接端口，runner 对 accepted 一律 fail-closed
- * （任务落 failed 并落事件），不会留下无人推进的 running 任务。
+ * （任务写失败事实并落事件），不会留下无人推进的任务。
  */
 function longTaskPortOf(client: ExecutionClient): LongTaskWaitPort | undefined {
   if (client.wait === undefined) return undefined;
@@ -563,41 +564,53 @@ const LEASE_MARGIN_MS = 60_000;
  * （可注入假件）→ TaskRunner。runner 为**进程级**对象，由入口（server）或装配核心构建后
  * 注入会话；本函数不 pump（触发点由调用方掌握：受理后/落定后/启动恢复）。
  */
-/** 一次后台执行回合的机械结局里，宿主完成投递面需要的事实（B 切片完成回调接缝）。 */
+/**
+ * 一次后台执行回合收尾、宿主**投递面**需要的事实（B 切片完成回调接缝；2026-11-23 去 outcome：
+ * 触发条件是**有 worker 汇报原文**——这是事实，不是「成功」判定）。
+ * **不携带任务结论**：做没做成由 Main 读账本 executions + 死亡事实 + 汇报自己判断。
+ */
 export interface BackgroundTaskCompletion {
   taskId: string;
   principalId: string;
   sessionId: string;
   request: string;
-  /** 执行端确认的结果原文（仅 completed 且非空时回调；逐字，未过出口清理）。 */
+  /** worker 汇报原文（有汇报才回调；逐字，未过出口清理）。 */
   resultText: string;
   /**
    * 片 1 产物回程：本回合 Worker 产出的任务作用域交付物（登记事实；后台面对
    * TurnResult.files 的同位面）。缺省 = 本回合无产物。
    */
   files?: readonly TurnFileRef[];
+  /** 零执行的机械原因码（如 `not_permitted`）；只供兜底话术归类，不进用户文本。 */
+  reasonCode?: string;
+  /** 末次原始失败执行事实的错误码；只供兜底话术归类，不进用户文本。 */
+  errorCode?: string;
+  /** 机械原因原文（执行层失败原文 / 宿主零执行原因）；投递面事实文案用，不进用户文本原样。 */
+  reason?: string;
+  /** 部分完成事实（已完成对象 + 未成功对象）：只供兜底话术逐项说清，不是任务状态。 */
 }
 
 /**
- * 一次后台执行回合的机械结局里，宿主**失败投递面**需要的事实（2026-11-19 收口）。
- * 与 BackgroundTaskCompletion 对称的失败回调事实：任务终局 failed / result_unknown。
- * **不含 Worker 失败汇报原文之外的任何内部形状**——原文只进日志与底账，不进用户文本
- * （用户文本由投递面用 failureMessageFor 模板生成）。
+ * 一次后台执行回合收尾、宿主**失败投递面**需要的事实（2026-11-19 收口；S1 改形；
+ * 2026-11-22 补 errorCode/reason；2026-11-23 去 outcome）。触发条件是**没有 worker 汇报原文**
+ * 或**结果未知**——两者都是机械事实，不是「失败」判定（做没做成由 Main 读账本事实自己判断）。
+ * 回调只带机械事实：种类（无汇报 / 结果未知）、零执行的结构化原因码、原始错误码与失败原文；
+ * 做没做成的证据（逐笔执行行）由唤醒面从底账读出喂给 Main。
  */
 export interface BackgroundTaskFailure {
   taskId: string;
   principalId: string;
   sessionId: string;
   request: string;
-  /** 任务终局（failed / result_unknown——两者都不是成功，用户必须主动收到一句人话）。 */
-  status: 'failed' | 'result_unknown';
-  /** Worker 回合失败汇报原文（只进日志与底账；**不进用户文本**）。 */
-  reason: string;
-  /**
-   * 结构化拒绝原因码（如 `not_permitted`，来自执行端失败结局）；不是文案，不进用户文本。
-   * 供失败投递的 outcome 分类用结构化码判 blocked，不靠 reason 文本里是否出现「权限」。
-   */
+  /** 机械事实种类（no_report = 回合收尾但没有汇报原文；result_unknown = 结果未知）。 */
+  status: 'no_report' | 'result_unknown';
+  /** 零执行的机械原因码（如 `not_permitted` = 发起前被宿主拒绝）；不是文案，不进用户文本。 */
   reasonCode?: string;
+  /** 末次原始失败执行事实的错误码；只用于兜底归类，不进用户文本。 */
+  errorCode?: string;
+  /** 机械原因原文（投递面事实文案用；不进用户文本原样）。 */
+  reason?: string;
+  /** 部分完成事实（已完成对象 + 未成功对象）：只供兜底话术逐项说清，不是任务状态。 */
 }
 
 export interface BackgroundDispatchInput {
@@ -633,15 +646,16 @@ export interface BackgroundDispatchInput {
   /** 测试注入：假后台执行器（缺省 = 真实 Worker 回合执行器）。 */
   taskExecutor?: TaskExecutor;
   /**
-   * B 切片（工单回执收敛）：后台任务完成回调——执行端确认 completed 的回合结局
-   * （每任务恰好一次；runner 不重跑终态）。回调在 runner 收尾前同步触发，回调自身负责
+   * B 切片（工单回执收敛）：后台回合**有汇报**时的投递回调——触发条件是事实（有 worker 汇报
+   * 原文），不是「成功」判定。每任务恰好一次；回调在 runner 收尾前同步触发，回调自身负责
    * 异步化（fire-and-forget：不得阻塞收尾、不得改变任务事实）。缺省不接 = 零行为变化。
    */
   onTaskCompleted?: (completion: BackgroundTaskCompletion) => void;
   /**
-   * 失败回调（2026-11-19 收口，与 onTaskCompleted 对称）：任务终局 failed / result_unknown
-   * 时触发。**只带机械事实（status/reason）**；用户可见文本由投递面用 failureMessageFor
-   * 模板生成，不在这里拼话术。缺省不接 = 零行为变化。
+   * 后台回合**没有汇报**时的投递回调（2026-11-19 收口，与 onTaskCompleted 对称；2026-11-23
+   * 去 outcome）：触发条件是事实（回合收尾但没有汇报原文 / 结果未知）。
+   * **只带机械事实（status/reason）**；用户可见文本由投递面按原始执行事实生成，不在这里拼话术。
+   * 缺省不接 = 零行为变化。
    */
   onTaskFailed?: (failure: BackgroundTaskFailure) => void;
   /** 预构建执行面/worker 驱动（装配核心复用；已给 taskExecutor 时不需要）。 */
@@ -677,7 +691,7 @@ export interface BackgroundDispatchInput {
    */
   longRunningNotice?: LongRunningNoticePort;
   /**
-   * 等待用户提醒端口（2026-11-21 live P0）：后台任务由非等待态进入 waiting_user 时触发
+   * 等待用户提醒端口（2026-11-21 live P0）：后台任务由非等待态进入等待事实时触发
    * 恰好一次（形状见 task-runner 的 {@link WaitingUserNoticePort}）；装配方接统一状态变化
    * 唤醒出口。缺省不接 = 零行为变化。
    */
@@ -763,8 +777,6 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
       workerTurnMs: resolved.workerTurnMs,
       // 大响应文件化阈值：策略解析值（单一配置源），后台 Worker 与 inline 同源。
       oversizeDataBytes: resolved.oversizeDataBytes,
-      // 可信工作目录：装配层持有的 profile.root（绝不取模型输出/用户消息）。
-      workerWorkspaceRoot: input.profile.root,
       // 片 1：run_js 执行器端口（与前台同一构造；缺省不注入 = Worker 工具面零变化）。
       ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
       ...(backgroundTaskBridge === undefined ? {} : { backgroundTaskBridge }),
@@ -811,8 +823,11 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
       };
     }
   }
-  // B 切片：完成/失败回调接缝——包装实际使用的执行器（注入的或默认构建的同一道包装）。
+  // B 切片：投递回调接缝——包装实际使用的执行器（注入的或默认构建的同一道包装）。
   // 回调在 runner 收尾前同步触发；快活（结果已同回合交给模型）的抑制由装配调用方处置。
+  // S1 事实模型 + 2026-11-23 去 outcome：路由只认事实——**有 worker 汇报原文**走完成回调
+  // （把汇报交给唤醒面喂 Main），**没有汇报 / 结果未知**走失败回调。没有「成功/失败」判定，
+  // 做没做成由唤醒面的 Main 读账本 executions + 死亡事实自己判断。
   if (input.onTaskCompleted !== undefined || input.onTaskFailed !== undefined) {
     const inner = executor;
     const onTaskCompleted = input.onTaskCompleted;
@@ -823,43 +838,57 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
         try {
           outcome = await inner.execute(task, context);
         } catch (error) {
-          // 2026-11-19 唤醒切片：回合**抛错**（Worker 驱动/基础设施故障）也是任务失败终局
-          // （runner 收尾会 registry.fail）——此前不触发失败回调，用户只能等下次开口才从
-          // B 通道侧面知道。这里按同一条失败出口如实上报（reason = 错误文本，只进事实/日志），
-          // 然后原样抛出：任务事实仍由 runner 收尾决定，本层不改判。
+          // 2026-11-19 唤醒切片：回合**抛错**（Worker 驱动/基础设施故障）也触发失败回调
+          // ——此前不触发失败回调，用户只能等下次开口才从 B 通道侧面知道。按同一条出口如实
+          // 上报（种类 = 无汇报收尾），然后原样抛出：任务事实仍由 runner 收尾决定，本层不改判。
           onTaskFailed?.({
             taskId: task.taskId,
             principalId: task.principalId,
             sessionId: task.sessionId,
             request: task.request,
-            status: 'failed',
-            reason: error instanceof Error ? error.message : String(error),
+            status: 'no_report',
           });
           throw error;
         }
-        if (outcome.kind === 'completed' && outcome.resultText.trim() !== '') {
-          onTaskCompleted?.({
-            taskId: task.taskId,
-            principalId: task.principalId,
-            sessionId: task.sessionId,
-            request: task.request,
-            resultText: outcome.resultText,
-            ...(outcome.files === undefined ? {} : { files: outcome.files }),
-          });
-        } else if (outcome.kind === 'failed' || outcome.kind === 'result_unknown') {
-          // 2026-11-19 失败投递收口：任务终局 failed/result_unknown 都触发失败回调
-          // （两者都不是成功）；result_unknown 落底账 failed + reason=result_unknown，
-          // 用户在话术层看到「不确定做没做完」，不是「没办成」。
+        if (outcome.kind === 'ended') {
+          // 路由 = 事实：有汇报原文走完成面（汇报逐字交给唤醒面），否则走失败面（无汇报）。
+          // 汇报是不是「在解释失败」不在宿主判——两个面都把账本事实喂给 Main，由 Main 看；
+          // 模型说不出话时的兜底话术由投递面按**原始执行事实**（errorCode/failureReason）选，
+          // 不把被拒/失败的说明说成「办好了」。
+          if ((outcome.report ?? '').trim() !== '') {
+            onTaskCompleted?.({
+              taskId: task.taskId,
+              principalId: task.principalId,
+              sessionId: task.sessionId,
+              request: task.request,
+              resultText: outcome.report!,
+              ...(outcome.files === undefined ? {} : { files: outcome.files }),
+              ...(outcome.zeroExecReason === undefined ? {} : { reasonCode: outcome.zeroExecReason }),
+              ...(outcome.errorCode === undefined ? {} : { errorCode: outcome.errorCode }),
+              ...(outcome.failureReason === undefined ? {} : { reason: outcome.failureReason }),
+            });
+          } else {
+            // 无汇报收尾：零执行被宿主拒绝时带 not_permitted 结构化码，末次原始失败执行事实
+            // 带错误码与失败原文（只用于兜底归类与事实文案，不进用户文本）。
+            onTaskFailed?.({
+              taskId: task.taskId,
+              principalId: task.principalId,
+              sessionId: task.sessionId,
+              request: task.request,
+              status: 'no_report',
+              ...(outcome.zeroExecReason !== undefined ? { reasonCode: outcome.zeroExecReason } : {}),
+              ...(outcome.errorCode === undefined ? {} : { errorCode: outcome.errorCode }),
+              ...(outcome.failureReason === undefined ? {} : { reason: outcome.failureReason }),
+            });
+          }
+        } else if (outcome.kind === 'result_unknown') {
+          // 2026-11-19 失败投递收口（S1 改形）：结果未知触发失败回调（不是「有结果汇报」）。
           onTaskFailed?.({
             taskId: task.taskId,
             principalId: task.principalId,
             sessionId: task.sessionId,
             request: task.request,
-            status: outcome.kind === 'result_unknown' ? 'result_unknown' : 'failed',
-            reason: outcome.reason,
-            ...('reasonCode' in outcome && outcome.reasonCode !== undefined
-              ? { reasonCode: outcome.reasonCode }
-              : {}),
+            status: 'result_unknown',
           });
         }
         return outcome;
@@ -924,7 +953,13 @@ export interface NotificationAttachment {
  *     systemNotes 待注入队列，宿主兜底屏也在同一出口。这里再注入就是同一件事说两遍。
  *   · 超时/资源拒绝/等补充**保留**：这几类还没改成唤醒，主动推送与 B 通道照旧。
  */
-const B_CHANNEL_KINDS = new Set(['timed_out', 'resource_limited', 'waiting_user']);
+const B_CHANNEL_KINDS = new Set<NotificationKind>(['deadline_reached', 'capacity_blocked', 'waiting_user']);
+/** 产生通知事件的机械事实（其余事实——汇报存档/这一轮停下——不落通知：完成/失败由唤醒面说）。 */
+const NOTIFIED_EVENTS: ReadonlySet<string> = new Set<string>(NOTIFICATION_KINDS);
+/** 事实事件 → 通知意图的类型守卫（值域同一；不靠 cast 把任意事件当通知 kind）。 */
+function isNotificationKind(event: string): event is NotificationKind {
+  return NOTIFIED_EVENTS.has(event);
+}
 const INJECTED_KEYS_LIMIT = 1024;
 
 export function attachNotificationOutbox(
@@ -936,8 +971,10 @@ export function attachNotificationOutbox(
   const pendingFacts: Array<{ scopeKey: string; line: string }> = [];
   const injectedKeys = new Set<string>();
   registry.onTaskFact((fact) => {
-    const kind = notificationKindForTransition(fact.from, fact.to, fact.reason as NotificationReason | undefined);
-    if (kind === undefined) return;
+    // 事实事件与通知意图同名（accepted/started/…）；只有这些「发生了什么」落 outbox。
+    // 汇报存档 / 这一轮停下不是通知意图：完成与失败由投递/唤醒面读原始事实说。
+    if (!isNotificationKind(fact.event)) return;
+    const kind = fact.event;
     // R5 补字段：waiting_user 时从底账读回 pendingQuestion（事实钩子无 scope，底账自身即
     // 事实来源；读不到不编造）。写确认时再取 confirmation.summary——用户要看到「将写入什么」
     // 才能决定；**handle 永不进 payload**（宿主持有，用户不需要也不该看到）。
@@ -950,6 +987,14 @@ export function attachNotificationOutbox(
     }).get(fact.taskId);
     const missing = kind === 'waiting_user' ? record.pendingQuestion?.missing : undefined;
     const summary = kind === 'waiting_user' ? record.pendingQuestion?.confirmation?.summary : undefined;
+    // 机械原因（触发事实）：容量拒绝/时限到点/用户说停按事件带；不写任务级结局分类。
+    const reason: NotificationReason | undefined = fact.event === 'capacity_blocked'
+      ? 'capacity_blocked'
+      : fact.event === 'deadline_reached'
+        ? 'deadline_reached'
+        : fact.event === 'user_stop'
+          ? 'user_stop'
+          : undefined;
     outbox.record({
       taskId: fact.taskId,
       kind,
@@ -957,7 +1002,7 @@ export function attachNotificationOutbox(
       stateVersion: fact.stateVersion ?? fact.at,
       taskNo: fact.taskNo,
       name: fact.name,
-      ...(fact.reason === undefined ? {} : { reason: fact.reason }),
+      ...(reason === undefined ? {} : { reason }),
       ...(missing === undefined ? {} : { missing }),
       ...(summary === undefined ? {} : { summary }),
     });
@@ -976,7 +1021,7 @@ export function attachNotificationOutbox(
               at: fact.at,
               taskNo: fact.taskNo,
               name: fact.name,
-              ...(fact.reason === undefined ? {} : { reason: fact.reason }),
+              ...(reason === undefined ? {} : { reason }),
               ...(missing === undefined ? {} : { missing }),
               ...(summary === undefined ? {} : { summary }),
             },
@@ -1214,8 +1259,6 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       workerTurnMs: resolved.workerTurnMs,
       // B 切片（工单回执收敛）：task_run 短等待窗口（单一配置源 = runtime 解析值）。
       taskRunWaitMs: resolved.taskRunWaitMs,
-      // 可信工作目录：装配层持有的 profile.root（绝不取模型输出/用户消息）。
-      workerWorkspaceRoot: input.profile.root,
     });
     return {
       session,

@@ -124,7 +124,7 @@ export async function runPressureScenario(scenario: PressureScenario): Promise<P
         if (receiptAccepted(records[records.length - 1])) accepted += 1;
         else rejected += 1;
       }
-      ledgerQueuedMax = registry.list(scope).filter((task) => task.status === 'queued').length;
+      ledgerQueuedMax = registry.list(scope).filter((task) => task.runningSince === undefined).length;
       policyQueueMax = assembled.policy.snapshot().background.queued;
       rssBase = await sampleRssSettled();
       if (scenario.holdFirstTask === true) {

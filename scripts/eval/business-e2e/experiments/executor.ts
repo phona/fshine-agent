@@ -34,12 +34,12 @@ import { assembleSessionCore, contextWindowFrom, createBackgroundDispatch, resol
 import type { DriverFactory, ExecutionFaceFactory } from '../../../ask-runtime';
 import { assessEvalIsolation, assertEvalIsolation } from '../../safety-gate';
 import { claimsCompletionHeuristic, executionFactsFromToolCalls } from '../sample-from-run';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../../packages/agent/testing/task-facts';
 import type { SampleRecord } from '../judge';
 import type { ExpCase, ExpItem } from './model';
 import { effectiveTurns, EXP_HARD_LIMITS } from './model';
 import type { ExpEvidence } from './judge';
 import type { InputsFile, MetaFile, MetaTurn, ReplyLine, TaskRecordJson, ToolCallRecord } from '../../convergence-r1/evidence';
-
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
 
@@ -307,7 +307,7 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
       }
       if (caseDef.seed?.waitingQuestion !== undefined) {
         const taskId = `seed_waiting_${randomUUID()}`;
-        const rec = registry.begin({ taskId, principalId, sessionId, request: caseDef.seed.waitingQuestion.request, status: 'running' });
+        const rec = registry.begin({ taskId, principalId, sessionId, request: caseDef.seed.waitingQuestion.request });
         registry.waitForUser(taskId, { missing: [...caseDef.seed.waitingQuestion.missing] });
         const after = registry.get(taskId, scope);
         if (after.taskNo !== undefined) seedTaskNos.waiting = after.taskNo;
@@ -358,7 +358,8 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
       } finally {
         restoreCapture();
       }
-      const tasks = jsonSafe(session.tasks()) as TaskRecordJson[];
+      // S1：底账没有 status——证据快照只带账本事实 + 存活（唯一投影）。
+      const tasks = jsonSafe(session.tasks().map((task) => ({ ...task, started: taskStartedOf(task), reported: taskReportedOf(task), waiting: taskWaitingOf(task), mayBeRunning: taskMayBeRunningOf(task) }))) as TaskRecordJson[];
       assembled.close();
 
       const toolCalls = sink.calls;

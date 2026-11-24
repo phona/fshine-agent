@@ -135,11 +135,11 @@ describe('Shadow 双源对照 ①：任务链语义等价（成功链路）', ()
     // 受理：两源同一条委派 → 同一机械受理事实（owner 2026-11-19：交办不再给固定回执话术，
     // 只回 taskId/name/status/accepted；无 notice、无编号——编号只在详情面/底账）
     for (const run of [a, b]) {
-      expect(run.acceptance).toMatchObject({ status: 'running', accepted: true });
+      expect(run.acceptance).toMatchObject({ started: true, accepted: true });
       expect(run.acceptance.taskNo).toBe(0);
       expect(run.acceptance.notice).toBe('');
       expect(run.acceptance.name.length).toBeGreaterThan(0);
-      expect(run.afterAcceptStatus).toBe('running');
+      expect(run.afterAcceptHasReport).toBe(false);
     }
 
     // 两源机械执行事实都真实存在（源 A=执行层审计行；源 B=进程内调用记录）
@@ -150,13 +150,12 @@ describe('Shadow 双源对照 ①：任务链语义等价（成功链路）', ()
 
     // 终态/存档/通知意图：逐源直接断言 + 跨源投影等价
     for (const run of [a, b]) {
-      expect(run.terminal.status).toBe('completed');
-      expect(run.terminal.replyText).toBeTruthy();
-      expect(run.terminal.replyText).toContain('dummy.query');
+      expect(run.terminal.hasReport).toBe(true);
+      expect(run.terminal.replyText ?? '').toContain('dummy.query');
       expect(run.executions.map((entry) => entry.status)).toEqual(['completed']);
-      expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started', 'completed']);
+      expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started']);
       expect(run.notifications.every((entry) => entry.delivered)).toBe(true);
-      expect(run.sinkKinds).toEqual(['accepted', 'started', 'completed']);
+      expect(run.sinkKinds).toEqual(['accepted', 'started']);
     }
     const comparison = compareChains(a, b);
     expect(comparison.equivalent).toBe(true);
@@ -169,40 +168,41 @@ describe('Shadow 双源对照 ②：四态语义等价（needs_input / failed / 
     const a = await chainOn('dummy', NEEDS_INPUT_SCENARIO);
     const b = await chainOn('fake-real', NEEDS_INPUT_SCENARIO, B_NEEDS_INPUT);
     for (const run of [a, b]) {
-      expect(run.terminal.status).toBe('waiting_user');
-      expect(run.terminal.status).not.toBe('completed');
+      expect(run.terminal.hasReport).toBe(false);
       expect(run.terminal.pendingMissing).toEqual(['More than one collection matches "contoso"']);
-      expect(run.terminal.replyText).toBeUndefined();
       expect(run.executions.map((entry) => entry.status)).toEqual(['needs_input']);
       expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started', 'waiting_user']);
     }
     expect(compareChains(a, b).equivalent).toBe(true);
   });
 
-  it('failed：终态 failed + 原文原因；通知 failed；不得 completed', async () => {
+  it('failed：执行事实 failed + 原文错误码；失败事实上报，汇报原样存档（宿主不判）', async () => {
     const a = await chainOn('dummy', FAILED_SCENARIO);
     const b = await chainOn('fake-real', FAILED_SCENARIO, B_FAILED);
     for (const run of [a, b]) {
-      expect(run.terminal.status).toBe('failed');
-      expect(run.terminal.failureReason).toContain('没办成：dummy.query 返回 failed');
-      expect(run.terminal.failureReason).toContain('Collection faulty-one cannot be read in its current state');
-      expect(run.terminal.replyText).toBeUndefined();
       expect(run.executions.map((entry) => entry.status)).toEqual(['failed']);
       expect(run.executions[0]?.errorCode).toBe('COLLECTION_FAULT');
-      expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started', 'failed']);
+      // 2026-11-24 去结论机：汇报**原样存档**（宿主不判它是不是「对失败的说明」）——做没做成
+      // 读执行行，用户可见的失败事实走 failed 通知。汇报原文仍由唤醒面喂给 Main。
+      expect(run.terminal.replyText).toContain('未能完成');
+      expect(run.terminal.hasReport).toBe(true);
+      expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started']);
+      expect(run.notifications.every((entry) => entry.delivered)).toBe(true);
+      expect(run.executions[0]?.status).not.toBe('completed');
     }
     expect(compareChains(a, b).equivalent).toBe(true);
   });
 
-  it('refused：执行层拒绝（非失败码面）如实转述；终态 failed 且 error code 保留', async () => {
+  it('refused：执行层拒绝（非失败码面）如实转述；error code 保留', async () => {
     const a = await chainOn('dummy', REFUSED_SCENARIO);
     const b = await chainOn('fake-real', REFUSED_SCENARIO, B_REFUSED);
     for (const run of [a, b]) {
-      expect(run.terminal.status).toBe('failed');
-      expect(run.terminal.failureReason).toContain('返回 refused');
       expect(run.executions.map((entry) => entry.status)).toEqual(['refused']);
       expect(run.executions[0]?.errorCode).toBe('GATE_REFUSE');
-      expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started', 'failed']);
+      // 汇报原样存档（宿主不判）；失败通知照旧。
+      expect(run.terminal.replyText).toContain('未能完成');
+      expect(run.terminal.hasReport).toBe(true);
+      expect(run.notifications.map((entry) => entry.kind)).toEqual(['accepted', 'started']);
     }
     expect(compareChains(a, b).equivalent).toBe(true);
   });
@@ -356,8 +356,8 @@ describe('Shadow 双源对照 ⑥：反向绊线（故意破坏必须红）', ()
     const failedA = await chainOn('dummy', FAILED_SCENARIO);
     const failedB = await chainOn('fake-real', FAILED_SCENARIO, B_FAILED);
     const successB = await chainOn('fake-real', SUCCESS_SCENARIO, B_SUCCESS);
-    // 失败两源同形（等价），但投影的终态必须是 failed
-    expect(projectChain(failedB).terminal.status).toBe('failed');
+    // 失败两源同形（等价），但投影的执行事实必须是 failed
+    expect(projectChain(failedB).executions[0]?.status).toBe('failed');
     expect(compareChains(failedA, failedB).equivalent).toBe(true);
     // 跨场景（失败 × 成功）不得判等——若失败被误投影成成功，这里会红
     const cross = compareChains(failedA, successB);

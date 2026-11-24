@@ -186,7 +186,7 @@ describe('ask --script：合法脚本回放（exit 0 + 逐回合输出 + 断言�
     expect(replies[0]!['text']).toBe('已查到：beta 集合在窗口 W1 有 3 条记录。');
     const executions = readJson(path.join(trace, 'executions.json')) as { tasks: Array<Record<string, unknown>> };
     expect(executions.tasks).toHaveLength(1);
-    expect(executions.tasks[0]!['status']).toBe('completed');
+    expect((executions.tasks[0]!['executions'] as Array<{ status: string }>)[0]!.status).toBe('completed');
     expect((executions.tasks[0]!['executions'] as unknown[])).toHaveLength(1);
     for (const name of ['inputs.json', 'model.json', 'toolcalls.jsonl', 'audit.jsonl', 'audit.index.json', 'meta.json', 'evidence.manifest.json']) {
       expect(readFileSync(path.join(trace, name)).byteLength, `${name} 缺失`).toBeGreaterThan(0);

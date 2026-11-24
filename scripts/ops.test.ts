@@ -1,8 +1,8 @@
 /**
- * ops 运营快照 CLI（P4；P1 底账演化后任务列改为 #编号+业务名称）：
- *   · 用户视角：一条命令生成自包含 HTML 快照（生成时间 / 统计 / 最近任务 / 未成功终态清单 / 限制与指针）；
+ * ops 运营快照 CLI（P4；S1 事实模型后统计/清单改为机械事实桶）：
+ *   · 用户视角：一条命令生成自包含 HTML 快照（生成时间 / 统计 / 最近任务 / 未成功收尾清单 / 限制与指针）；
  *   · 安全不变式：一切动态文本经 escapeHtml 实体转义；整页无脚本、无外链、可离线打开；
- *   · 口径不复制：最近任务序 / 状态词 / 摘要 / 失败原因 / 底账行复用 tasks.ts 既有导出，测试对账 renderTaskList；
+ *   · 口径不复制：最近任务序 / 机械事实词 / 摘要 / 底账行复用 tasks.ts 既有导出，测试对账 renderTaskList；
  *   · 业务展示位只有 #编号+名称（内部 taskId/UUID 不出现在页面）；
  *   · 只读：库哈希不变、缺库不创建；产物仅 <out>/index.html，重复生成幂等覆盖且不碰目录内其它文件；
  *   · e2e 用真实子进程跑 `scripts/ops.ts`（仓内 dummy 面，不触网、不碰真实平台）。
@@ -16,7 +16,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   createTaskRegistry,
   type TaskRecord,
-  type TaskStatus,
 } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
 import {
@@ -25,9 +24,8 @@ import {
   renderTaskList,
   summarizeRequest,
   taskLabel,
-  taskOutcomeReasonLine,
-  taskReasonLine,
-  taskStatusWord,
+  taskMechanicalFactLine,
+  taskFactSummaryOf,
 } from './tasks';
 import {
   FAILURE_LIMIT,
@@ -63,12 +61,34 @@ function record(overrides: Partial<TaskRecord> & { taskId: string; createdAt: st
     principalId: 'wecom:fixture-user',
     sessionId: 'ask-2026-11-14',
     request: `帮我查一下 beta 集合、窗口 W1 的数据（${recordSeq}）`,
-    status: 'completed',
     taskNo: recordSeq,
     executions: [],
     updatedAt: overrides.createdAt,
     ...overrides,
   };
+}
+
+/** 汇报已存档（正常结束 = completed 终止事件）。 */
+function reported(overrides: Partial<TaskRecord> & { taskId: string; createdAt: string }): TaskRecord {
+  return record({
+    resultText: '已查询。',
+    endedAt: overrides.createdAt,
+    ...overrides,
+  });
+}
+
+/** 已启动、本轮以无汇报收尾（round_failed 终止事件）。 */
+function noReport(overrides: Partial<TaskRecord> & { taskId: string; createdAt: string }): TaskRecord {
+  return record({
+    runningSince: overrides.createdAt,
+    endedAt: overrides.createdAt,
+    ...overrides,
+  });
+}
+
+/** running 事实（有效租约）。 */
+function running(overrides: Partial<TaskRecord> & { taskId: string; createdAt: string }): TaskRecord {
+  return record({ leaseUntil: '2099-01-01T00:00:00.000Z', ...overrides });
 }
 
 /** 截取某个 class 的 table 片段（页内两表靠 class 区分）。 */
@@ -119,19 +139,12 @@ describe('ops：HTML 转义（安全不变式）', () => {
 
   it('恶意文本全字段：逐字段断言「原文不出现、转义实体出现」，整页无注入标签', () => {
     const XSS_REQUEST = `"><script>alert(1)</script><img src=x onerror=alert(1)>&'`;
-    const XSS_REASON = `' onmouseover='alert(2)' & "quoted"`;
     const XSS_NAME = `</td></tr><svg onload=alert(3)>&"'`;
     const XSS_TIME = `not-a-date<b>bold</b>`;
-    const XSS_STATUS = `mystery<script>`;
     const XSS_DB = `/tmp/odb<script>.db`;
 
-    const evilFailed = record({
-      taskId: 'task_evil_1', name: XSS_NAME, taskNo: 3, createdAt: XSS_TIME, status: 'failed', failureReason: XSS_REASON, request: XSS_REQUEST,
-    });
-    const evilUnknown = record({
-      taskId: 'task_evil_2', taskNo: 4, createdAt: FIXED_TIME, status: XSS_STATUS as unknown as TaskStatus, request: '正常请求',
-    });
-    const page = renderOpsPage({ records: [evilFailed, evilUnknown], generatedAt: XSS_TIME, dbPath: XSS_DB });
+    const evil = record({ taskId: 'task_evil_1', name: XSS_NAME, taskNo: 3, createdAt: XSS_TIME, request: XSS_REQUEST, resultText: '正常汇报' });
+    const page = renderOpsPage({ records: [evil], generatedAt: XSS_TIME, dbPath: XSS_DB });
 
     // 页面级：不允许出现任何可执行的注入面（本页本就没有 script/img/svg）。
     expect(page).not.toContain('<script');
@@ -142,8 +155,6 @@ describe('ops：HTML 转义（安全不变式）', () => {
     // 逐字段：原文不出现 + 转义实体出现。
     expect(page).toContain(escapeHtml(XSS_REQUEST));
     expect(page).not.toContain(XSS_REQUEST);
-    expect(page).toContain(escapeHtml(XSS_REASON));
-    expect(page).not.toContain(XSS_REASON);
     expect(page).toContain(escapeHtml(XSS_NAME));
     expect(page).not.toContain(XSS_NAME);
     expect(page).toContain(escapeHtml(XSS_TIME));
@@ -152,47 +163,40 @@ describe('ops：HTML 转义（安全不变式）', () => {
     expect(page).not.toContain(XSS_DB);
     // 内部 taskId 不出现在业务展示位。
     expect(page).not.toContain('task_evil_1');
-    expect(page).not.toContain('task_evil_2');
 
-    // 未知存储状态：fail-open 显示为「未知状态（原值）」且同样被转义；统计进「其他」。
-    expect(page).toContain(escapeHtml(`未知状态（${XSS_STATUS}）`));
-    expect(page).toContain('<tr><th>其他（未知状态）</th><td class="num">1</td></tr>');
-
-    // 失败原因单元格按失败清单收录（failed 记录）。
-    expect(page).toContain(`<td>${escapeHtml(taskReasonLine(evilFailed)!)}</td>`);
+    // 事实桶口径：未知状态不是存储概念，页面不出现「未知状态」。
+    expect(page).not.toContain('未知状态');
   });
 });
 
 describe('ops：快照事实（统计 / 排序 / 上限）', () => {
-  it('统计：总数与四态计数；恒等式 总数 = 各态之和', () => {
+  it('统计：总数与事实桶计数；恒等式 总数 = 各桶之和', () => {
     const records = [
-      record({ taskId: 'task_a', createdAt: '2026-11-13T10:00:00.000Z' }),
-      record({ taskId: 'task_b', createdAt: '2026-11-13T10:01:00.000Z', status: 'failed', failureReason: '失败原因甲。' }),
-      record({ taskId: 'task_c', createdAt: '2026-11-13T10:02:00.000Z', status: 'unexecuted', failureReason: '未执行原因乙。' }),
-      record({ taskId: 'task_d', createdAt: '2026-11-13T10:03:00.000Z', status: 'running' }),
+      reported({ taskId: 'task_a', createdAt: '2026-11-13T10:00:00.000Z' }),
+      noReport({ taskId: 'task_b', createdAt: '2026-11-13T10:01:00.000Z' }),
+      record({ taskId: 'task_c', createdAt: '2026-11-13T10:02:00.000Z', endedAt: '2026-11-13T10:02:30.000Z' }),
+      running({ taskId: 'task_d', createdAt: '2026-11-13T10:03:00.000Z' }),
     ];
     const page = renderOpsPage({ records, generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
     expect(page).toContain('<tr><th>任务总数</th><td class="num">4</td></tr>');
-    expect(page).toContain('<tr><th>已完成</th><td class="num">1</td></tr>');
-    expect(page).toContain('<tr><th>失败</th><td class="num">1</td></tr>');
-    expect(page).toContain('<tr><th>未执行</th><td class="num">1</td></tr>');
+    expect(page).toContain('<tr><th>已汇报（结果存档）</th><td class="num">1</td></tr>');
+    expect(page).toContain('<tr><th>无汇报收尾</th><td class="num">2</td></tr>');
     expect(page).toContain('<tr><th>进行中</th><td class="num">1</td></tr>');
-    expect(page).not.toContain('其他（未知状态）');
+    expect(page).not.toContain('未知状态');
 
     const counts = countOpsStatuses(records);
     expect(counts.total).toBe(records.length);
     expect(
-      counts.completed + counts.failed + counts.unexecuted + counts.running
-      + counts.queued + counts.waitingUser + counts.cancelling + counts.cancelled + counts.timedOut + counts.other,
+      counts.reported + counts.noReport + counts.running + counts.queued + counts.waitingUser,
     ).toBe(counts.total);
   });
 
   it('最近任务：最新在前、同刻 taskId 降序，与 renderTaskList 的 #编号+名称序列逐条一致（口径对账）', () => {
     const records = [
-      record({ taskId: 'task_a', createdAt: '2026-11-13T10:00:00.000Z' }),
-      record({ taskId: 'task_b', createdAt: '2026-11-13T12:00:00.000Z' }),
-      record({ taskId: 'task_c', createdAt: '2026-11-13T12:00:00.000Z' }),
-      record({ taskId: 'task_d', createdAt: '2026-11-13T11:00:00.000Z' }),
+      noReport({ taskId: 'task_a', createdAt: '2026-11-13T10:00:00.000Z' }),
+      noReport({ taskId: 'task_b', createdAt: '2026-11-13T12:00:00.000Z' }),
+      noReport({ taskId: 'task_c', createdAt: '2026-11-13T12:00:00.000Z' }),
+      noReport({ taskId: 'task_d', createdAt: '2026-11-13T11:00:00.000Z' }),
     ];
     const byTaskId = new Map(records.map((task) => [task.taskId, task]));
     const page = renderOpsPage({ records, generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
@@ -208,14 +212,14 @@ describe('ops：快照事实（统计 / 排序 / 上限）', () => {
     const newest = records[2]!;
     expect(page).toContain(
       `<tr><td>${escapeHtml(taskLabel(newest))}</td><td>${escapeHtml(formatLocalTime(newest.createdAt))}</td>`
-      + `<td>${escapeHtml(taskStatusWord(newest.status))}</td><td>${escapeHtml(summarizeRequest(newest.request))}</td></tr>`,
+      + `<td>${escapeHtml(taskFactSummaryOf(newest))}</td><td>${escapeHtml(summarizeRequest(newest.request))}</td></tr>`,
     );
   });
 
   it(`最近任务上限 ${RECENT_LIMIT} 条：超出时截断并标注`, () => {
     const records: TaskRecord[] = [];
     for (let i = 1; i <= 25; i += 1) {
-      records.push(record({
+      records.push(noReport({
         taskId: `task_${String(i).padStart(2, '0')}`,
         taskNo: i,
         createdAt: `2026-11-13T10:${String(i).padStart(2, '0')}:00.000Z`,
@@ -230,108 +234,76 @@ describe('ops：快照事实（统计 / 排序 / 上限）', () => {
   });
 });
 
-describe('ops：未成功终态清单', () => {
-  it('收录 failed/unexecuted/cancelled/timed_out；原因=taskOutcomeReasonLine；最新在前；完成的任务不在清单', () => {
-    const failed = record({
-      taskId: 'task_failed',
-      createdAt: '2026-11-13T09:00:00.000Z',
-      status: 'failed',
-      failureReason: '执行层未成功：dummy.query 返回 failed：boom。',
-    });
-    const unexecuted = record({
-      taskId: 'task_unexecuted',
-      createdAt: '2026-11-13T09:05:00.000Z',
-      status: 'unexecuted',
-      failureReason: '未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。',
-    });
-    const done = record({ taskId: 'task_done', createdAt: '2026-11-13T09:10:00.000Z' });
-    const page = renderOpsPage({ records: [failed, unexecuted, done], generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
+describe('ops：无汇报收尾清单', () => {
+  it('收录 无汇报/取消/超时/结果未知/资源受限；汇报已存档不在清单；最新在前', () => {
+    const nr = noReport({ taskId: 'task_no_report', createdAt: '2026-11-13T09:00:00.000Z' });
+    const cancelled = record({ taskId: 'task_cancelled', createdAt: '2026-11-13T09:05:00.000Z', endedAt: '2026-11-13T09:06:00.000Z' });
+    const done = reported({ taskId: 'task_done', createdAt: '2026-11-13T09:10:00.000Z' });
+    const page = renderOpsPage({ records: [nr, cancelled, done], generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
 
-    expect(page).toContain('<h2>未成功终态清单（共 2 条）</h2>');
-    expect(rowIds(page, 'failures')).toEqual([taskLabel(unexecuted), taskLabel(failed)]);
-    expect(page).toContain(`<td>${escapeHtml(taskReasonLine(failed)!)}</td>`);
-    expect(page).toContain(`<td>${escapeHtml(taskReasonLine(unexecuted)!)}</td>`);
+    expect(page).toContain('<h2>无汇报收尾清单（共 2 条）</h2>');
+    expect(rowIds(page, 'failures')).toEqual([taskLabel(cancelled), taskLabel(nr)]);
+    expect(page).toContain(`<td>${escapeHtml(taskMechanicalFactLine(cancelled)!)}</td>`);
+    expect(page).toContain(`<td>${escapeHtml(taskMechanicalFactLine(nr)!)}</td>`);
     expect(tableSlice(page, 'failures')).not.toContain(taskLabel(done));
   });
 
-  it('无失败记录时给空态；failed 但底账缺原因时给机械兜底文案', () => {
+  it('无失败记录时给空态', () => {
     const page = renderOpsPage({
-      records: [record({ taskId: 'task_ok', createdAt: '2026-11-13T09:00:00.000Z' })],
+      records: [reported({ taskId: 'task_ok', createdAt: '2026-11-13T09:00:00.000Z' })],
       generatedAt: FIXED_TIME,
       dbPath: '/outside/state.db',
     });
     expect(page).toContain('<p class="empty">（无）</p>');
-
-    const page2 = renderOpsPage({
-      records: [record({ taskId: 'task_noreason', createdAt: '2026-11-13T09:00:00.000Z', status: 'failed' })],
-      generatedAt: FIXED_TIME,
-      dbPath: '/outside/state.db',
-    });
-    expect(page2).toContain('（底账未记录原因）');
   });
 
-  it(`失败清单上限 ${FAILURE_LIMIT} 条：超出时截断并标注`, () => {
+  it(`无汇报收尾清单上限 ${FAILURE_LIMIT} 条：超出时截断并标注`, () => {
     const records: TaskRecord[] = [];
     for (let i = 1; i <= 55; i += 1) {
-      records.push(record({
+      records.push(noReport({
         taskId: `task_f${String(i).padStart(2, '0')}`,
         createdAt: `2026-11-13T10:${String(i % 60).padStart(2, '0')}:${String(i).padStart(2, '0')}.000Z`,
-        status: 'failed',
-        failureReason: `机械原因 ${i}。`,
       }));
     }
     const page = renderOpsPage({ records, generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
-    expect(page).toContain(`<h2>未成功终态清单（共 55 条，仅显示最近 ${FAILURE_LIMIT} 条）</h2>`);
+    expect(page).toContain(`<h2>无汇报收尾清单（共 55 条，仅显示最近 ${FAILURE_LIMIT} 条）</h2>`);
     expect(rowCount(page, 'failures')).toBe(FAILURE_LIMIT);
     expect(RECENT_LIMIT).toBe(20);
     expect(FAILURE_LIMIT).toBe(50);
   });
 });
 
-describe('ops：P2 状态词与原因行金样（新状态/未知/历史行）', () => {
-  /** 与 tasks 同源的 9 态金样（ops 只做呈现，不另立词表）。 */
-  const STATUS_WORD_GOLDEN: ReadonlyArray<[TaskStatus, string]> = [
-    ['queued', '排队中'],
-    ['running', '进行中'],
-    ['waiting_user', '等待用户'],
-    ['cancelling', '取消中'],
-    ['cancelled', '已取消'],
-    ['completed', '已完成'],
-    ['failed', '失败'],
-    ['timed_out', '已超时'],
-    ['unexecuted', '未执行'],
-  ];
-
-  it('最近任务：9 态逐词（与 tasks 列表同源对账）', () => {
-    const records = STATUS_WORD_GOLDEN.map(([status], index) => record({
-      taskId: `task_word_${status}`,
-      createdAt: `2026-11-13T11:${String(index).padStart(2, '0')}:00.000Z`,
-      status,
-    }));
-    const page = renderOpsPage({ records, generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
-    for (const [status, word] of STATUS_WORD_GOLDEN) {
-      expect(page, status).toContain(`<td>${escapeHtml(word)}</td>`);
-    }
-    const listText = renderTaskList(records);
-    for (const [, word] of STATUS_WORD_GOLDEN) expect(listText).toContain(`  ${word}  `);
-  });
-
-  it('统计：新状态非零时各成一词；零计数不出现；未知存储值仍进「其他（未知状态）」', () => {
+describe('ops：机械事实词与计数行（S1）', () => {
+  it('最近任务：各机械事实逐词（与 tasks 列表同源对账）', () => {
     const records = [
-      record({ taskId: 'task_q', createdAt: '2026-11-13T10:00:00.000Z', status: 'queued' }),
-      record({ taskId: 'task_w', createdAt: '2026-11-13T10:01:00.000Z', status: 'waiting_user' }),
-      record({ taskId: 'task_cg', createdAt: '2026-11-13T10:02:00.000Z', status: 'cancelling' }),
-      record({ taskId: 'task_cd', createdAt: '2026-11-13T10:03:00.000Z', status: 'cancelled', reason: 'cancelled_by_user' }),
-      record({ taskId: 'task_to', createdAt: '2026-11-13T10:04:00.000Z', status: 'timed_out', reason: 'timeout' }),
+      reported({ taskId: 'task_word_reported', createdAt: '2026-11-13T11:00:00.000Z' }),
+      noReport({ taskId: 'task_word_no_report', createdAt: '2026-11-13T11:01:00.000Z' }),
+      record({ taskId: 'task_word_cancelled', createdAt: '2026-11-13T11:02:00.000Z', endedAt: '2026-11-13T11:02:30.000Z' }),
+      running({ taskId: 'task_word_running', createdAt: '2026-11-13T11:03:00.000Z' }),
+      record({ taskId: 'task_word_waiting', createdAt: '2026-11-13T11:04:00.000Z', pendingQuestion: { missing: ['时间范围'] } }),
     ];
     const page = renderOpsPage({ records, generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
-    for (const word of ['排队中', '等待用户', '取消中', '已取消', '已超时']) {
-      expect(page, word).toContain(`<tr><th>${word}</th><td class="num">1</td></tr>`);
+    const listText = renderTaskList(records);
+    for (const word of ['已汇报', '无汇报收尾', '未启动即已停', '进行中', '等待用户']) {
+      expect(page, word).toContain(`<td>${escapeHtml(word)}</td>`);
+      expect(listText, word).toContain(`  ${word}  `);
     }
-    expect(page).not.toContain('其他（未知状态）');
+  });
+
+  it('统计：事实桶非零时各成一词；零计数不出现', () => {
+    const records = [
+      noReport({ taskId: 'task_nr', createdAt: '2026-11-13T10:00:00.000Z' }),
+      record({ taskId: 'task_w', createdAt: '2026-11-13T10:01:00.000Z', pendingQuestion: { missing: ['x'] } }),
+      record({ taskId: 'task_cd', createdAt: '2026-11-13T10:03:00.000Z', endedAt: '2026-11-13T10:03:30.000Z' }),
+      record({ taskId: 'task_to', createdAt: '2026-11-13T10:04:00.000Z', endedAt: '2026-11-13T10:04:30.000Z' }),
+    ];
+    const page = renderOpsPage({ records, generatedAt: FIXED_TIME, dbPath: '/outside/state.db' });
+    expect(page).toContain('<tr><th>无汇报收尾</th><td class="num">3</td></tr>');
+    expect(page).toContain('<tr><th>等待用户</th><td class="num">1</td></tr>');
+    expect(page).not.toContain('未知状态');
 
     const zeroPage = renderOpsPage({
-      records: [record({ taskId: 'task_done', createdAt: '2026-11-13T10:00:00.000Z' })],
+      records: [reported({ taskId: 'task_done', createdAt: '2026-11-13T10:00:00.000Z' })],
       generatedAt: FIXED_TIME,
       dbPath: '/outside/state.db',
     });
@@ -339,35 +311,34 @@ describe('ops：P2 状态词与原因行金样（新状态/未知/历史行）',
     expect(zeroPage).not.toContain('<tr><th>已取消</th>');
   });
 
-  it('计数行金样：非零新状态追加；零计数不追加；「其他」照旧在末', () => {
+  it('计数行金样：非零事实桶依次追加；零计数不追加', () => {
     expect(renderOpsCountsLine({
-      total: 12, completed: 3, failed: 2, unexecuted: 1, running: 1,
-      queued: 1, waitingUser: 1, cancelling: 1, cancelled: 1, timedOut: 1, other: 0,
-    })).toBe('任务：共 12 条（已完成 3 / 失败 2 / 未执行 1 / 进行中 1 / 排队中 1 / 等待用户 1 / 取消中 1 / 已取消 1 / 已超时 1）');
+      total: 7, reported: 3, noReport: 2, running: 1,
+      queued: 1, waitingUser: 1,
+    })).toBe('任务：共 7 条：已汇报 3 / 无汇报 2 / 进行中 1 / 排队中 1 / 等待用户 1');
     expect(renderOpsCountsLine({
-      total: 9, completed: 3, failed: 2, unexecuted: 1, running: 1,
-      queued: 0, waitingUser: 0, cancelling: 0, cancelled: 0, timedOut: 0, other: 2,
-    })).toBe('任务：共 9 条（已完成 3 / 失败 2 / 未执行 1 / 进行中 1 / 其他 2）');
+      total: 6, reported: 3, noReport: 2, running: 1,
+      queued: 0, waitingUser: 0,
+    })).toBe('任务：共 6 条：已汇报 3 / 无汇报 2 / 进行中 1');
   });
 
-  it('未成功终态清单：取消/超时/结果未知取机械原因词；failed_confirmed 有原文用原文；历史行照旧', () => {
-    const cancelled = record({ taskId: 'task_x_cancelled', createdAt: '2026-11-13T09:00:00.000Z', status: 'cancelled', reason: 'cancelled_by_user' });
-    const timedOut = record({ taskId: 'task_x_timeout', createdAt: '2026-11-13T09:01:00.000Z', status: 'timed_out', reason: 'timeout' });
-    const unknown = record({ taskId: 'task_x_unknown', createdAt: '2026-11-13T09:02:00.000Z', status: 'failed', reason: 'result_unknown' });
-    const limited = record({ taskId: 'task_x_limited', createdAt: '2026-11-13T09:03:00.000Z', status: 'failed', reason: 'resource_limited' });
-    const confirmed = record({ taskId: 'task_x_confirmed', createdAt: '2026-11-13T09:04:00.000Z', status: 'failed', reason: 'failed_confirmed' });
-    const priorRow = record({ taskId: 'task_x_old', createdAt: '2026-11-13T09:05:00.000Z', status: 'failed', failureReason: '旧行失败原文。' });
+  it('无汇报收尾清单：单元格给「这一轮停止于 T」的机械时刻', () => {
+    const cancelled = record({ taskId: 'task_x_cancelled', createdAt: '2026-11-13T09:00:00.000Z', endedAt: '2026-11-13T09:00:30.000Z' });
+    const timedOut = record({ taskId: 'task_x_timeout', createdAt: '2026-11-13T09:01:00.000Z', endedAt: '2026-11-13T09:01:30.000Z' });
+    const died = record({ taskId: 'task_x_died', createdAt: '2026-11-13T09:02:00.000Z', endedAt: '2026-11-13T09:02:30.000Z' });
+    const limited = record({ taskId: 'task_x_limited', createdAt: '2026-11-13T09:03:00.000Z', endedAt: '2026-11-13T09:03:30.000Z' });
+    const nr = noReport({ taskId: 'task_x_nr', createdAt: '2026-11-13T09:04:00.000Z' });
     const page = renderOpsPage({
-      records: [cancelled, timedOut, unknown, limited, confirmed, priorRow],
+      records: [cancelled, timedOut, died, limited, nr],
       generatedAt: FIXED_TIME,
       dbPath: '/outside/state.db',
     });
-    expect(page).toContain('<h2>未成功终态清单（共 6 条）</h2>');
-    for (const text of ['终止原因：用户取消', '终止原因：超时', '终止原因：结果未知', '终止原因：资源受限', '终止原因：执行层失败', taskReasonLine(priorRow)!]) {
+    expect(page).toContain('<h2>无汇报收尾清单（共 5 条）</h2>');
+    for (const task of [cancelled, timedOut, died, limited, nr]) {
+      const text = taskMechanicalFactLine(task)!;
+      expect(text).toContain('这一轮停止于');
       expect(page, text).toContain(`<td>${escapeHtml(text)}</td>`);
     }
-    // 状态与机械原因字形一致：taskOutcomeReasonLine 是清单单元格的唯一口径。
-    expect(page).toContain(`<td>${escapeHtml(taskOutcomeReasonLine(unknown)!)}</td>`);
   });
 });
 
@@ -390,7 +361,7 @@ describe('ops：空态与自包含', () => {
 
   it('自包含：inline CSS、无脚本 / 无外链 / 无网络引用；以单个换行结尾', () => {
     const page = renderOpsPage({
-      records: [record({ taskId: 'task_a', createdAt: '2026-11-13T10:00:00.000Z' })],
+      records: [reported({ taskId: 'task_a', createdAt: '2026-11-13T10:00:00.000Z' })],
       generatedAt: FIXED_TIME,
       dbPath: '/outside/state.db',
     });
@@ -427,7 +398,7 @@ describe('ops：空态与自包含', () => {
   });
 
   it('确定性与隐私：同输入同字节；不渲染 principal/session', () => {
-    const records = [record({
+    const records = [reported({
       taskId: 'task_a',
       createdAt: '2026-11-13T10:00:00.000Z',
       principalId: 'wecom:secret-user',
@@ -537,14 +508,14 @@ function runOps(args: string[], env: Record<string, string | undefined> = {}): {
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
-/** 造 4 条覆盖三态（含 fail 路径）的任务，走真实 SQLite 注册表。 */
+/** 造 4 条覆盖汇报/无汇报的任务，走真实 SQLite 注册表。 */
 function seedDb(dir: string): string {
   const dbPath = path.join(dir, 'state.db');
   const scope = { principalId: 'wecom:fixture-user', sessionId: 'ask-2026-11-14' };
   const registry = createSqliteTaskRegistry(dbPath);
   registry.begin({ taskId: 'task_completed', ...scope, request: '帮我查一下 beta 集合、窗口 W1 的数据' });
   registry.noteExecution('task_completed', { requestId: 'req_ok', operation: 'dummy.query', status: 'completed' });
-  registry.complete('task_completed', '已查询 beta 集合（窗口 W1）：3 条记录。');
+  registry.setResultText('task_completed', '已查询 beta 集合（窗口 W1）：3 条记录。');
 
   registry.begin({ taskId: 'task_failed', ...scope, request: '帮我查一下 faulty-one 集合的数据' });
   registry.noteExecution('task_failed', {
@@ -553,13 +524,13 @@ function seedDb(dir: string): string {
     status: 'failed',
     error: { code: 'COLLECTION_FAULT', message: 'Collection faulty-one cannot be read in its current state' },
   });
-  registry.complete('task_failed', '执行层报告 faulty-one 读取故障，未能返回数据。');
+  registry.setResultText('task_failed', '执行层报告 faulty-one 读取故障，未能返回数据。');
 
   registry.begin({ taskId: 'task_unexecuted', ...scope, request: '帮我看看那边的情况' });
-  registry.complete('task_unexecuted', '本轮没有可执行的查询。');
+  registry.setResultText('task_unexecuted', '本轮没有可执行的查询。');
 
   registry.begin({ taskId: 'task_worker_failed', ...scope, request: '帮我查一下 documents' });
-  registry.fail('task_worker_failed', '执行层 Worker 未产出有效汇报，本次任务未完成。');
+  registry.noteRoundEnded('task_worker_failed');
   registry.close();
   return dbPath;
 }
@@ -569,7 +540,7 @@ function sha256(file: string): string {
 }
 
 describe('ops：CLI 端到端（真实子进程）', () => {
-  it('生成页面：统计/两清单/转义面/只读哈希不变；重复生成幂等且旁路文件不动', () => {
+  it('生成页面：统计/清单/转义面/只读哈希不变；重复生成幂等且旁路文件不动', () => {
     const dir = tempDir();
     const dbPath = seedDb(dir);
     const before = sha256(dbPath);
@@ -578,19 +549,18 @@ describe('ops：CLI 端到端（真实子进程）', () => {
     const run = runOps(['--out', outDir], { DB_PATH: dbPath });
     expect(run.status).toBe(0);
     expect(run.stdout).toContain(`已生成运营快照：${path.join(outDir, 'index.html')}`);
-    expect(run.stdout).toContain('任务：共 4 条（已完成 1 / 失败 2 / 未执行 1 / 进行中 0）');
+    expect(run.stdout).toContain('任务：共 4 条：已汇报 3 / 无汇报 1');
     expect(run.stdout).toContain('任务底账：');
 
     const page = readFileSync(path.join(outDir, 'index.html'), 'utf8');
     expect(page).toContain('#1 帮我查一下 beta 集合、窗口 W1 的数据');
     expect(page).toContain('#2 帮我查一下 faulty-one 集合的数据');
     expect(page).not.toContain('task_completed');
-    expect(page).toContain('已完成');
-    expect(page).toContain('Collection faulty-one cannot be read in its current state');
-    expect(page).toContain('没有实际办理：助手已汇报，但这次交办没有发出任何办理动作。');
+    expect(page).toContain('已汇报');
+    expect(page).toContain('无汇报');
     expect(page).not.toContain('<script');
     expect(rowCount(page, 'recent')).toBe(4);
-    expect(rowCount(page, 'failures')).toBe(3);
+    expect(rowCount(page, 'failures')).toBe(1);
 
     const keep = path.join(outDir, 'keep.txt');
     writeFileSync(keep, 'keep');
@@ -606,7 +576,7 @@ describe('ops：CLI 端到端（真实子进程）', () => {
     const outDir = path.join(dir, 'site');
     const run = runOps(['--out', outDir], { DB_PATH: missingDb });
     expect(run.status).toBe(0);
-    expect(run.stdout).toContain('任务：共 0 条（已完成 0 / 失败 0 / 未执行 0 / 进行中 0）');
+    expect(run.stdout).toContain('任务：共 0 条');
     expect(run.stdout).toContain('（不存在，未创建）');
     expect(existsSync(missingDb)).toBe(false);
     const page = readFileSync(path.join(outDir, 'index.html'), 'utf8');

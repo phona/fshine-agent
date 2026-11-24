@@ -6,36 +6,34 @@
  * 执行层原文、协议细节、内部术语（凭据/令牌/句柄/参数/能力清单/异步/接口/字段）只进日志与
  * 底账，**不进模型可见投影，更不进用户文本**。
  *
- * 分层：
- *   · `classifyFailure`：执行层错误码/状态 → 封闭的失败种类（业务语义，不看文案）；
- *   · `failureMessageFor`：种类 + 上下文（对象名等）→ 一句用户话术 + 一个动作 id；
- *   · 宿主侧故障（我们自己的 bug/传输问题）单独一类，话术**不解释内部原因**，只承认「我这边的问题」，
- *     并落一条给运维看的事件。
+ * 分层（2026-11-24 删码表后）：
+ *   · `failureMessageFor`：**宿主自己可判定**的档位 + 上下文 → 一句用户话术 + 一个动作 id；
+ *   · 宿主侧故障（我们自己的协议/传输问题）单独一类，话术**不解释内部原因**。
  *
- * 不做：不解析执行层文案判断语义（那是红线）；不在这里编造业务细节；未知码按「执行端这次没办成」
- * 收敛，原文留日志。
+ * 不做（2026-11-24 owner 裁定，原 `classifyFailure` + `CODE_KIND` 已删）：不把执行层错误码
+ * 归类成业务种类——「这是权限问题/对象不存在/口径不对」是执行层的语义，宿主复制一份码表就是
+ * 越界。执行层的失败事实（code + 清洗后 message）原样进模型面，由模型说人话；用户面兜底只留
+ * 通用一句 + 宿主自认的几个档位（结果未知 / 我方故障 / 零执行原因 / 提案卡 / 缺信息 / 参数形状）。
  */
 
-/** 封闭的失败种类（业务语义；新增一种必须同时在话术表里给出动作）。 */
+/**
+ * 兜底话术档位（2026-11-24 起只收**宿主自己能判定**的）：
+ *   · needs_confirmation / needs_input：提案卡与缺什么（内容来自执行层 needs_* 事实，宿主只套句）；
+ *   · invalid_input：宿主自己的 payload lint 拒绝（契约明文派给宿主）；
+ *   · denied / unsupported：零执行机械原因（发起前被宿主拒 / 没有对应能力）；
+ *   · unknown_result：宿主自己推导的「结果未知」状态；
+ *   · host_fault：宿主自己的协议/传输码；
+ *   · executor_failed：通用一句（执行层业务失败的兜底，不区分权限/对象/口径）。
+ * 「对象不存在 / 口径不对 / 等太久」这类**执行层业务语义档位已删**——要区分就得复制执行层码表。
+ */
 export type UserFacingFailureKind =
-  /** 等用户确认（提案已生成）。 */
   | 'needs_confirmation'
-  /** 缺用户提供的信息（集合名、窗口、字段等）。 */
   | 'needs_input'
-  /** 对象不存在（集合/记录/文件）。 */
-  | 'not_found'
-  /** 权限或对象限制（执行层拒绝）。 */
   | 'denied'
-  /** 条件/参数不符合业务口径（可换口径重试）。 */
   | 'invalid_input'
-  /** 执行端这次没办成（业务原因不明，但不是我方故障）。 */
   | 'executor_failed'
-  /** 我方（宿主/协议/传输）的问题；不向用户解释内部原因。 */
   | 'host_fault'
-  /** 结果未知：做过没做完无法确认。 */
-  | 'unknown_result'
-  /** 等太久被判超时/卡住。 */
-  | 'timed_out';
+  | 'unknown_result';
 
 /** 用户能做的动作（话术必须落到其中一个；`none` 只用于纯陈述，不允许出现在失败话术里）。 */
 export type UserFacingAction =
@@ -56,74 +54,23 @@ export interface UserFacingFailure {
 }
 
 /**
- * 失败种类的**业务语言名**（2026-11-19 唤醒切片）：宿主喂给模型的失败事实里要带
- * 「归类后的 business 种类」——种类本身是封闭枚举（`classifyFailure` 的出口），这里给它一个
- * 人话名，模型据此说人话；即使被原样复述也不会把内部形态带给用户（`failureMessageFor` 是
- * 完整话术，这里只是分类名——两者不重叠，不是第二套话术表）。
+ * 宿主**自认**的码（不是执行层业务语义表）：这三个码是宿主自己的协议/传输事实——
+ * `result_unknown` 由宿主推导，`EXECUTION_PROTOCOL_VIOLATION` 由宿主自己写，
+ * `CONFIRMATION_NOT_FOUND` 是执行层在说「你给的句柄我不认」（宿主侧协议问题）。
+ * 其余码（执行层的业务失败）一律收敛通用档——不复制执行层码义，2026-11-24 owner 裁定。
  */
-export const USER_FACING_FAILURE_KIND_LABEL: Readonly<Record<UserFacingFailureKind, string>> = {
-  needs_confirmation: '要用户点头才敢做（写操作）',
-  needs_input: '还差用户一句话',
-  not_found: '找不到要操作的对象',
-  denied: '权限或范围不允许',
-  invalid_input: '条件或写法不符合口径',
-  executor_failed: '没办成（业务原因不明）',
-  host_fault: '我这边出了故障',
-  unknown_result: '做没做完说不清（不要重复做）',
-  timed_out: '等太久先停了',
-};
-
-/**
- * 执行层错误码 → 失败种类。只做**码表**归类（不看文案语义）；表外码一律 `executor_failed`。
- * 码名取自执行层契约（dummy/17dz 已用的稳定码），未知码不猜语义。
- */
-const CODE_KIND: Readonly<Record<string, UserFacingFailureKind>> = {
-  // 权限 / 对象限制
-  GATE_REFUSE: 'denied',
-  FORBIDDEN: 'denied',
-  DENIED: 'denied',
-  // 对象不存在
-  COLLECTION_NOT_FOUND: 'not_found',
-  RECORD_NOT_FOUND: 'not_found',
-  FILE_NOT_FOUND: 'not_found',
-  NOT_FOUND: 'not_found',
-  // 条件/口径不对（可换口径）
-  WHERE_INVALID: 'invalid_input',
-  QUERY_REQUIRED: 'invalid_input',
-  INVALID_ARGUMENT: 'invalid_input',
-  INVALID_ARGS: 'invalid_input',
-  INVALID_RECORDS: 'invalid_input',
-  CALL_REFUSE: 'invalid_input',
-  // 需要用户补充 / 确认
-  NEEDS_INPUT: 'needs_input',
-  CONFIRMATION_REQUIRED: 'needs_confirmation',
-  // 执行端业务失败
-  COLLECTION_FAULT: 'executor_failed',
-  EXECUTOR_FAILED: 'executor_failed',
-  // 结果未知（宿主/传输侧事实：如单次调用被传输超时截断——没有回执，不知道对方做没做完）。
-  // 不得读作「已确认失败」，更不得引导重试（写操作可能已经生效）。
+const HOST_OWNED_FAILURE_CODES: Readonly<Record<string, UserFacingFailureKind>> = {
   result_unknown: 'unknown_result',
-  // 我方故障（协议/凭据传递/内部不变量）——绝不向用户解释细节
   EXECUTION_PROTOCOL_VIOLATION: 'host_fault',
   CONFIRMATION_NOT_FOUND: 'host_fault',
-  PROPOSAL_TOKEN_UNTRUSTED: 'host_fault',
-  PROPOSAL_UNKNOWN_FIELD: 'host_fault',
-  PROPOSAL_REFUSE: 'host_fault',
 };
 
-/**
- * 归类：优先看执行层码；没有码时看 outcome 状态（failed/refused/result_unknown）。
- * 已知的「我方故障码」优先于其它归类——用户侧不能出现「凭据/令牌」这类解释。
- */
-export function classifyFailure(input: {
-  code?: string | undefined;
-  status?: 'failed' | 'refused' | 'result_unknown' | undefined;
-}): UserFacingFailureKind {
-  if (input.code !== undefined && input.code !== '') {
-    const mapped = CODE_KIND[input.code];
-    if (mapped !== undefined) return mapped;
+/** 兜底选档：只认宿主自己的码；执行层业务失败一律通用「没办成」。 */
+export function fallbackFailureKindOf(code: string | undefined): UserFacingFailureKind {
+  if (code !== undefined && code !== '') {
+    const own = HOST_OWNED_FAILURE_CODES[code];
+    if (own !== undefined) return own;
   }
-  if (input.status === 'result_unknown') return 'unknown_result';
   return 'executor_failed';
 }
 
@@ -155,38 +102,20 @@ export function failureMessageFor(
         actions: ['provide_input'],
       };
     }
-    case 'not_found':
-      return { kind, text: `没找到${subject}。给我个准确的名字，或者我按别的范围再找？`, actions: ['retry', 'provide_input'] };
     case 'denied':
       return { kind, text: `${subject}没权限。换个对象，还是请管理员开通？`, actions: ['park', 'change_scope'] };
     case 'invalid_input':
       return { kind, text: '这个内容不行（名称或值的写法有问题）。我换个写法再试？', actions: ['retry', 'provide_input'] };
     case 'executor_failed':
-      return { kind, text: '没办成。再试一次，还是先放着？', actions: ['retry', 'park'] };
+      // 不写「再试一次」：结论机已删，宿主不知道这一笔是不是写、落没落——诱导重试可能双写。
+      // 动作给中性的「重发 / 先核对」，由用户定。
+      return { kind, text: '没办成。要重发，还是先核对？', actions: ['retry', 'park'] };
     case 'host_fault':
       // 内部原因（凭据/令牌/协议/字段）一律不在这里解释——用户帮不上忙，也不该读这些。
       return { kind, text: '是我这边没弄好。再试一次，还是记下来让人看？', actions: ['retry', 'park'] };
     case 'unknown_result':
       return { kind, text: '不确定做没做完，先别重复。我帮你查一下现在的状态？', actions: ['check_status', 'park'] };
-    case 'timed_out':
-      return { kind, text: '等太久了，我先停了。重新办一次，还是先放着？', actions: ['retry', 'park'] };
   }
-}
-
-/**
- * 提案过期后重新提案的用户可见句子（2026-11-19 owner 口径修正）：句柄过期就过期，直接重提，
- * 不做恢复/续期机制。上半句宿主陈述，下半句复用 `failureMessageFor('needs_confirmation')`
- * 这条唯一提案卡来源（含真实摘要 + 两个动作）。
- */
-export const CONFIRMATION_EXPIRED_NOTICE = '那份提案过期了，我重新给你一份。';
-
-/** 拼接「过期了，重新给你一份」+ 既有提案卡（下半句唯一来源 = failureMessageFor）。 */
-export function confirmationExpiredMessage(summary?: string): string {
-  const card = failureMessageFor(
-    'needs_confirmation',
-    summary === undefined || summary.trim() === '' ? {} : { summary },
-  ).text;
-  return `${CONFIRMATION_EXPIRED_NOTICE}${card}`;
 }
 
 /**

@@ -160,11 +160,10 @@ function seedRunning(
   startedAt: string,
   scope: { principalId: string; sessionId: string } = SCOPE,
 ): void {
-  registry.begin({ taskId, ...scope, request: '查一下上季度报销明细' });
-  registry.store.applyTaskState(taskId, {
-    expectedStatus: 'running',
-    status: 'running',
-    leaseOwner: 'task-runner',
+  // S1：queued begin 不写 running_since；armLease 的 COALESCE 才能把起点钉到 startedAt。
+  registry.begin({ taskId, ...scope, request: '查一下上季度报销明细', queued: true });
+  registry.store.armLease(taskId, {
+    owner: 'task-runner',
     leaseUntil: new Date(Date.parse(startedAt) + LEASE_MS).toISOString(),
     updatedAt: startedAt,
   });
@@ -257,6 +256,49 @@ describe('预期契约：长时间无动静的主动提醒（只一档）', () =
     expect(h.events.map((event) => event['result'])).toEqual(['sent']);
   });
 
+  it('①d 回合失败（无汇报）落定：写「本轮已停」事实（round_failed_at），不再被「久无动静」叫醒（2026-11-22 Grok 复审）', async () => {
+    // S1 后 noteRoundFailed 只发事件不写行内事实、settle 清租约；若再不写结束事实，
+    // running_since 仍在 → 旧过滤（running_since + 无结束时刻 + 无等待）会把已结束的任务
+    // 当「还在跑」，几秒办完的任务 10 分钟后被叫醒「已经跑了 N 分钟还没有结果」。
+    const dbPath = tempDbPath();
+    const registry = openRegistry(dbPath);
+    const { port, sends } = recordingNotice();
+    const executor: TaskExecutor = {
+      execute(): Promise<TaskExecutionOutcome> {
+        // 无汇报收尾 = 回合失败事实（S1：执行端不产出结论）。
+        return Promise.resolve({ kind: 'ended' });
+      },
+    };
+    const runner = createTaskRunner({
+      registry,
+      policy: createResourcePolicy(),
+      executor,
+      // 扫描时钟取真实之后 1h：认领写入的 running_since（真实即时）即超过 60s 提醒阈值。
+      now: () => new Date(Date.now() + 3_600_000),
+      timers: { set: () => 0, clear: () => {} },
+      leaseMs: LEASE_MS,
+      longRunningNoticeMs: 60_000,
+      longRunningNotice: port,
+    });
+    runner.submit({ taskId: 'fail-1', principalId: SCOPE.principalId, sessionId: SCOPE.sessionId, request: '查一下上季度报销明细' });
+    runner.pump();
+    await runner.whenIdle();
+    // 落定写「本轮已停」事实：已结束的任务不再算「在跑」（不是 died——无汇报 ≠ 结果未知）。
+    const settled = registry.get('fail-1', SCOPE);
+    expect(settled.endedAt).toBeTruthy();
+    runner.pump();
+    await runner.whenIdle();
+    expect(sends).toHaveLength(0);
+  });
+
+  it('①e 已存档汇报（completed）的行不在「在跑行」里（listRunning 不再扫到已结束任务）', () => {
+    const start = '2026-11-06T00:00:00.000Z';
+    const h = stack({ startIso: start });
+    seedRunning(h.registry, 'done-1', start);
+    h.registry.archiveReply(['done-1'], '办完了。');
+    expect(h.registry.listRunning().map((task) => task.taskId)).not.toContain('done-1');
+  });
+
   it('①b 走岔路：端口交不出话（模型说不出话且兜底失败）→ 逐次记 failed，任务不被改判终态、止于两次', async () => {
     // 2026-11-19 并集：投递真相切片把「交不出话」从「当场放弃」改成「同一档内再试一次」
     //（总尝试 ≤2，与仓内「同一件事一个回合内 ≤2 次」同口径）——本用例留下的断言是
@@ -275,8 +317,10 @@ describe('预期契约：长时间无动静的主动提醒（只一档）', () =
       expect.objectContaining({ event: 'task_long_running_notice', result: 'failed', attempt: 1 }),
       expect.objectContaining({ event: 'task_long_running_notice', result: 'failed', attempt: 2 }),
     ]);
-    // 任务事实不动（仍 running、未被误判 result_unknown），「已发」已落库（不刷屏）。
-    expect(h.registry.get('slow-1', SCOPE).status).toBe('running');
+    // 任务事实不动（仍持有租约、未写 died 事实），「已发」已落库（不刷屏）。
+    const stillRunning = h.registry.get('slow-1', SCOPE);
+    expect(stillRunning.endedAt).toBeUndefined();
+    expect(stillRunning.leaseUntil).toBeDefined();
     expect(h.registry.get('slow-1', SCOPE).longRunningNotifiedAt).toBeDefined();
     // 到限即止：再推进时间也不再交。
     h.timers.advance(10 * 60_000);

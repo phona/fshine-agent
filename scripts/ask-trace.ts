@@ -176,15 +176,16 @@ function buildAliases(tasks: readonly TaskRecord[]): IdentifierAliases {
   return { taskAlias, requestAlias };
 }
 
-function normalizeTask(task: TaskRecord, aliases: IdentifierAliases): Record<string, unknown> {
+function traceTaskJson(task: TaskRecord, aliases: IdentifierAliases): Record<string, unknown> {
   return {
     taskId: aliases.taskAlias.get(task.taskId) ?? task.taskId,
     principalId: task.principalId,
     sessionId: task.sessionId,
     request: task.request,
-    status: task.status,
+    // 事实口径：底账没有 status/failureReason/终态列/终止种类——转写机械事实（等待形状、停止时刻）。
+    ...(task.pendingQuestion !== undefined ? { pendingQuestion: task.pendingQuestion } : {}),
+    ...(task.endedAt === undefined ? {} : { endedAt: true }),
     ...(task.resultText !== undefined ? { resultText: task.resultText } : {}),
-    ...(task.failureReason !== undefined ? { failureReason: task.failureReason } : {}),
     executions: task.executions.map((execution) => ({
       requestId: aliases.requestAlias.get(execution.requestId) ?? execution.requestId,
       operation: execution.operation,
@@ -327,7 +328,7 @@ export function createTraceRecorder(input: TraceRecorderInput): TraceRecorder {
 
       const tasks = finishInput.finalTasks ?? [];
       writeFileSync(path.join(input.dir, 'executions.json'), JSON.stringify({
-        tasks: scriptMode ? tasks.map((task) => normalizeTask(task, aliases!)) : tasks.map((task) => jsonSafe(task)),
+        tasks: scriptMode ? tasks.map((task) => traceTaskJson(task, aliases!)) : tasks.map((task) => jsonSafe(task)),
       }, null, 2) + '\n');
 
       const inputs = {

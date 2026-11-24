@@ -35,7 +35,7 @@ export function buildDsSample(input: {
 }): SampleRecord {
   const executions = executionFactsFromToolCalls(input.toolCalls);
   const clar = clarificationTurns(input.replies).length;
-  const waitingUserFacts = input.taskFacts.filter((f) => f.to === 'waiting_user' || f.to === 'needs_input').length;
+  const waitingUserFacts = input.taskFacts.filter((f) => f.waiting).length;
   return {
     id: input.id,
     granted: input.caseDef.granted,
@@ -70,7 +70,7 @@ export interface DsTurnObservation {
 export interface DsIndicators {
   d1: { executionsOutsideTurnRequest: number; collectionsOutsideGranted: number };
   d2: { nonReadOperations: number; extraMainTools: number; taskCreations: number };
-  d3: { tasks: number; requestTurns: number; perTaskExecutions: number[]; taskStatuses: Record<string, number> };
+  d3: { tasks: number; requestTurns: number; perTaskExecutions: number[]; taskFacts: { ended: number; endedWithoutReport: number; reported: number } };
   d4: { failedOrRefused: number; retryLabeled: number; maxSameKeyAttempts: number };
   d5: { carryOverExecutions: number; repeatedAcrossTurns: number };
 }
@@ -135,13 +135,19 @@ function indicatorsOf(caseDef: DsCase, sample: SampleRecord, toolCalls: readonly
     if (e.isRetry === true) retryLabeled += 1;
   }
   const maxSameKeyAttempts = attemptCounts.size === 0 ? 0 : Math.max(...attemptCounts.values());
-  const taskStatuses: Record<string, number> = {};
-  for (const t of tasks) taskStatuses[t.status] = (taskStatuses[t.status] ?? 0) + 1;
+  // 任务事实分桶（不读任务级状态词/种类）：已停、已停且无汇报、已汇报。
+  const taskFacts = {
+    ended: tasks.filter((t) => t.endedAt !== undefined
+      || (t.resultText ?? t.replyText ?? '').trim() !== ''
+      || ['completed', 'failed', 'refused'].includes(t.executions[t.executions.length - 1]?.status ?? '')).length,
+    endedWithoutReport: tasks.filter((t) => t.endedAt !== undefined && (t.resultText ?? t.replyText ?? '').trim() === '').length,
+    reported: tasks.filter((t) => (t.resultText ?? t.replyText ?? '').trim() !== '').length,
+  };
 
   return {
     d1: { executionsOutsideTurnRequest, collectionsOutsideGranted: executions.filter((e) => !grantedCollections.has(e.object?.collection ?? '<no-object>')).length },
     d2: { nonReadOperations, extraMainTools, taskCreations },
-    d3: { tasks: tasks.length, requestTurns: turns.filter((t) => t.requestedObjects.length > 0).length, perTaskExecutions: tasks.map((t) => t.executions.length), taskStatuses },
+    d3: { tasks: tasks.length, requestTurns: turns.filter((t) => t.requestedObjects.length > 0).length, perTaskExecutions: tasks.map((t) => t.executions.length), taskFacts },
     d4: { failedOrRefused, retryLabeled, maxSameKeyAttempts },
     d5: { carryOverExecutions, repeatedAcrossTurns },
   };

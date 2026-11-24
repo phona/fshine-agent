@@ -30,7 +30,7 @@
 | 范围不自行扩散：只查用户说过的窗口 | `scripts/eval/business-e2e/b03-scenario-reset.test.ts:② 未经请求自推扩到上月 W202610` | 已实现（有守卫） |
 | 无数据 / 对象不存在：如实说，不编行 | `scripts/eval/wecom-sim/cases-c-failure.test.ts:W-08 empty-one W1：如实「没有记录」` | 已实现（有守卫） |
 | 纯聊天不当成查询：零执行 | `scripts/eval/wecom-sim/cases-a-access.test.ts:W-01 闲聊：零执行、不编造数据` | 已实现（有守卫） |
-| 确定性拒绝不重试：同类失败有界、随后如实说明 | `apps/server/server-retry-blocked-event.test.ts:同对象第二次尝试被拦` | 已实现（有守卫） |
+| 确定性拒绝不重试：同类失败有界、随后如实说明 | `apps/server/server-retry-blocked-event.test.ts:同参数第二次尝试被拦` | 已实现（有守卫） |
 
 ### 3. 附件
 
@@ -54,7 +54,7 @@
 | 后台完成：唤醒会话模型、投递它说的话，恰一次 | `apps/server/server-completion-wake.test.ts:① 主路径` | 已实现（有守卫） |
 | 等补信息：主动说清还缺什么，补答后同一任务续跑完成 | `scripts/needs-input-resume.test.ts:① 执行层要补输入` | 已实现（有守卫） |
 | 取消：在飞中止（请求≠已取消）、已完成任务再取消如实拒绝 | `packages/agent/task-cancel-inflight.test.ts:① 在飞 run_js`<br>`packages/agent/task-cancel-inflight.test.ts:③ 已完成任务再取消` | 已实现（有守卫） |
-| 长任务 accepted→wait→abort；未声明 long_running 却返回 accepted 一律 fail-closed | `packages/agent/long-task-async.test.ts:③ abort → 任务 cancelled`<br>`packages/agent/long-task-async.test.ts:⑤ 未声明 long_running 的 operation 返回 accepted` | 已实现（有守卫） |
+| 长任务 accepted→wait→abort；未声明 long_running 却返回 accepted 一律 fail-closed | `packages/agent/long-task-async.test.ts:③ abort → 任务写结束事实`<br>`packages/agent/long-task-async.test.ts:⑤ 未声明 long_running 的 operation 返回 accepted` | 已实现（有守卫） |
 | 长任务跨重启：新 runner 从底账 accepted 行重新 wait，不重复发起 | `packages/agent/long-task-async.test.ts:④ 重启：关库重开` | 已实现（有守卫） |
 | 久等提醒一档（超阈值恰一条、每任务一次、重启不重发）；群聊也发（话术去业务名，owner 2026-11-19 #9 迁移） | `packages/agent/long-running-notice.test.ts:① 10 分钟内零发送`<br>`apps/server/server-long-running-notice.test.ts:② 群聊也发` | 已实现（有守卫） |
 | 长任务等待与执行层断联系：先自查一次，兜得住照常走；连续两次拿不到回执才如实说一次（任务不判死、退避封顶 60s 继续等） | `packages/agent/long-task-wait-truncation.test.ts:② 先兜能兜住`<br>`packages/agent/long-task-wait-truncation.test.ts:任务不判死` | 已实现（有守卫） |
@@ -68,11 +68,10 @@
 | 显式确认动作 `task_confirm`（任务/后台路径）；没有等待中的提案时确认=确定性拒绝（零执行） | `packages/agent/background-write-confirmation.test.ts:① 确认路径：task_confirm`<br>`packages/agent/background-write-confirmation.test.ts:④ 无提案确认：没有等待中的提案时` | 已实现（有守卫） |
 | 句柄安全：越权/过期/缺句柄/绑定不一致 → 拒绝且零写入 | `packages/agent/write-confirmation.test.ts:越权：另一个会话`<br>`packages/agent/write-confirmation.test.ts:过期：构造过期提案` | 已实现（有守卫） |
 | 改口径（`task_resume`）永不透传句柄：旧提案作废，Worker 重新提案 | `packages/agent/background-write-confirmation.test.ts:② 改口径路径：task_resume` | 已实现（有守卫） |
-| 过期重提：不判失败、不结束任务，接续一轮重新生成同一提案，任务回等待 | `packages/agent/background-write-confirmation.test.ts:③ 过期确认：task_confirm 触发一轮重新提案` | 已实现（有守卫） |
+| 过期不预判（2026-11-24 删过期预判）：`task_confirm` 照常接续、句柄原样透传；执行层拒了由 Worker 见原始拒绝自行重新提案，任务不判失败、不结束 | `packages/agent/background-write-confirmation.test.ts:③ 过期确认：task_confirm 照常接续`<br>`scripts/host-write-confirmation-resume.test.ts:④ 过期句柄宿主不预判` | 已实现（有守卫） |
 | 同回合自我确认结构性挡住：句柄只在用户表态后的回合透传 | `packages/agent/background-write-confirmation.test.ts:⑦ 同回合 prepare 后立刻 commit` | 已实现（有守卫） |
 | 只读装配下写请求：明确拒绝、零写入、不宣称成功 | `scripts/eval/wecom-sim/cases-f-write.test.ts:W-25 只读装配下同一写请求` | 已实现（有守卫） |
 | 批量写入逐条结果：一条坏不拖累整批汇报，partial 不得说成成功 | `packages/agent/batch-write-items.test.ts:② 注入一条写失败` | 已实现（有守卫） |
-| 写回合终局=末次决定性结果：先失败后成功不再误报失败、失败那次留痕 | `packages/agent/write-outcome-last-attempt.test.ts:① 主形状：确认回合 commit 失败（参数错）` | 已实现（有守卫） |
 
 ### 6. 文件交付
 
@@ -92,7 +91,7 @@
 | 部署写总闸：关闭时角色含 write 也不放宽 | `scripts/rbac-roles.test.ts:⑥ 部署总闸关闭` | 已实现（有守卫） |
 | 群主体按配置授权；群里 viewer 写被拒、同一人员工 operator 个人可写 | `scripts/rbac-roles.test.ts:⑦ 群主体 role: viewer` | 已实现（有守卫） |
 | 凭据隔离：执行子进程 env 精确白名单，宿主机密不进 worker | `packages/agent/worker-env.test.ts:宿主机密族/内部指针/测试桥键/计划旋钮不进子进程` | 已实现（有守卫） |
-| A2b 同对象锁：确定性拒绝后同对象本回合不再发起（换对象/换回合不误伤） | `packages/agent/background-retry-lock.test.ts:① 同键确定性拒绝两次` | 已实现（有守卫） |
+| A2b 同参数锁：确定性拒绝后同一 (operation, 完全相同参数) 本回合不再发起（换参数=另一笔调用，换回合不误伤） | `packages/agent/background-retry-lock.test.ts:① 同键确定性拒绝两次` | 已实现（有守卫） |
 | `dispatchKey` 两层身份：同一业务操作至多一次自动执行、重试不另铸身份、重复交办回放回执 | `packages/agent/dispatch-key-identity.test.ts:每次执行层请求都携带非空 dispatchKey`<br>`packages/agent/dispatch-key-identity.test.ts:恢复后的同名操作：回放已有结果` | 已实现（有守卫） |
 | 多用户隔离：越权查/取消/接续被拒、事实只注入 owner 会话 | `scripts/eval/long-session/multiuser/mu.test.ts:B 经任务工具访问 A 的 #1` | 已实现（有守卫） |
 | 任务引用跨会话不可见：越权=找不到，不泄露存在性 | `packages/agent/task-surface.test.ts:越权=找不到：同一底账内跨会话同编号不可见` | 已实现（有守卫） |
@@ -127,8 +126,8 @@ detail 在 `docs/product/interaction-contract.md`（五条尺子逐条现状）�
 
 - **用户看到的话全部由模型说**；宿主只做四件事：时机（状态变化才唤醒/投递）、事实（喂机械事实）、凭据（身份与句柄透传）、投递与记账。唯一例外 = 模型回合挂掉时的如实兜底句。状态：已实现（有守卫）。锚点：`apps/server/server-relay-silent-turn.test.ts:用户看到的话永远是模型说的`。
 - **受理静默**：宿主不发「收到，正在处理」受理帧、不静默派发——交办回合照发模型说的话。状态：已实现（有守卫）。锚点：`apps/server/server-task-wait-window.test.ts:b. 慢活：只交办回合照发模型说的话`。
-- **确认必回执**：确认/接续回合必有用户可见归宿（结果、失败话术或重新提案），不许静默终局。状态：已实现（有守卫）。锚点：`packages/agent/write-outcome-last-attempt.test.ts:① 主形状：确认回合 commit 失败（参数错）`、`apps/server/server-relay-silent-turn.test.ts:① 主形状：窗口内完成 + 模型全程空正文`。
-- **失败三选一归宿**：Main 兜（既有兜路径的刹车不放宽：wait 退避封顶 60s / A2b 同对象锁 / 失败缺省不可重试 / retry_storm 告警）→ 告诉用户（业务话 + 一个动作）→ 告警/开发介入（不给用户编话）。状态：已实现（有守卫）。锚点：`packages/agent/long-task-wait-truncation.test.ts:退避单调翻倍到 60s 封顶`、`packages/agent/background-retry-lock.test.ts:① 同键确定性拒绝两次`、`packages/agent/deterministic-failure-guard.test.ts:失败但**未声明** retryable → 按不可重试处理`、`packages/agent/alert-rules.test.ts:命中：同一任务执行事实达到阈值`。
+- **确认必回执**：确认/接续回合必有用户可见归宿（结果、失败话术或重新提案），不许静默终局。状态：已实现（有守卫）。锚点：`apps/server/server-relay-silent-turn.test.ts:① 主形状：窗口内完成 + 模型全程空正文`。
+- **失败三选一归宿**：Main 兜（既有兜路径的刹车不放宽：wait 退避封顶 60s / A2b 同参数锁 / 失败缺省不可重试 / retry_storm 告警）→ 告诉用户（业务话 + 一个动作）→ 告警/开发介入（不给用户编话）。状态：已实现（有守卫）。锚点：`packages/agent/long-task-wait-truncation.test.ts:退避单调翻倍到 60s 封顶`、`packages/agent/background-retry-lock.test.ts:① 同键确定性拒绝两次`、`packages/agent/deterministic-failure-guard.test.ts:失败但**未声明** retryable → 按不可重试处理`、`packages/agent/alert-rules.test.ts:命中：同一任务执行事实达到阈值`。
 - **消息自含**：完成/失败/等补信息的事实都带业务名，用户不用猜是哪件事；用户可见文本最终由模型转述——事实链有守卫，模型转述面无自动用例（真模型评测守）。状态：已实现（无守卫）。锚点：`apps/server/server-completion-wake.test.ts:⑤ 完成消息要让用户看出是哪件事`。
 - **久等只提示不停**：超阈值恰一条「要我停下来，还是继续等？」；任务不判死、不杀，处置权在用户。提醒 1:1 与群聊都发（owner 2026-11-19 #9：群 = 独立主体；群话术不带业务名——隐私口径归端口，重启判据只看底账任务事实 #10）。状态：已实现（有守卫）。锚点：`packages/agent/long-running-notice.test.ts:① 10 分钟内零发送`、`apps/server/server-long-running-notice.test.ts:② 群聊也发`。
 - **失败话术 = 业务话 + 一个动作，无内部词**（operation 名、任务编号、执行层、uuid、绝对路径不出现）。状态：已实现（有守卫）。锚点：`packages/agent/user-facing-failure.test.ts:⑤ 内部术语闸`。

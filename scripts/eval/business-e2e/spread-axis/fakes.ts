@@ -27,7 +27,7 @@ export class FakeClient implements ExecutionClient {
     const callArgs = request.args as { collection?: unknown; '--collection'?: unknown } | undefined;
     const collection = callArgs?.collection ?? callArgs?.['--collection'];
     if (collection === 'contoso') {
-      // 歧义集合 → needs_input（任务应落 waiting_user，可被确定性取消）。
+      // 歧义集合 → needs_input（任务应落等待事实，可被确定性取消）。
       return {
         status: 'needs_input',
         missing: [{ name: 'collection', description: 'contoso 命中多个集合，需要选定一个' }],

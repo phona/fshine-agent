@@ -48,6 +48,17 @@ import { createScriptedModelRuntime } from '../../../packages/agent/testing/scri
 import { startChannelForMode } from '../../../apps/server/channel-mode';
 import { createServer, type FileDeliveryPort, type Server } from '../../../apps/server/server';
 import type { NudgeClock } from '../../../apps/server/attachment-nudge';
+import {
+  ROUND_FACT_PREFIX,
+  ROUND_FACT_REASON_MARKER,
+  ROUND_FACT_REPORT_MARKER,
+  ROUND_FACT_NO_REPORT_MARKER,
+  ROUND_FACT_WATCHDOG_MARKER,
+  ROUND_FACT_RESOURCE_LIMITED_MARKER,
+  ROUND_FACT_NOT_PERMITTED_MARKER,
+  ROUND_FACT_NOT_PERMITTED_CLAUSE,
+  ROUND_FACT_ZERO_EXEC_MARKER,
+} from '../../../apps/server/task-completion-delivery';
 import { textAssistant, toolCallAssistant } from '../business-e2e/shared-instance';
 
 /** 夹具复用的仓内 dummy 执行层根（与 apps/server 测试同一份真值来源）。 */
@@ -64,7 +75,7 @@ export const NUDGE_AFTER_MS = 30_000;
 //    不复制）。
 //   · inbound = 夹具的发帧记录（sendText/sendFile）；
 //   · reply   = adapter 的 replyStream 终帧（finish=true 且未被拒收；reqId → 消息锚点）；
-//   · delivery = 主动推送（proactiveTexts）+ 宿主 sent 记账行的归属补填（factKind）。
+//   · delivery = 主动推送（proactiveTexts）+ 宿主 sent 记账行的归属补填（factEvent）。
 // ② 内部词/内部标识泄漏（2026-11-21）：用户可见面（终帧气泡 + 主动推送，与形态守卫同口径）
 //    走 shared/internal-terms 的单一入口 scanUserVisibleText（内部词 + 任务编号形态 +
 //    taskId 形态）——与 write-loop / write-loop-scenarios / convergence-r1 三批同一来源。
@@ -351,26 +362,14 @@ export class SimScriptBook {
   respond(driver: 'main' | 'worker', context: unknown): AgentMessage {
     const messages = ((context as { messages?: readonly unknown[] } | undefined)?.messages ?? []) as readonly unknown[];
     const text = lastUserTextOf(messages);
-    // 完成唤醒回合（宿主完成事实触发；2026-11-19 唤醒切片）：显式脚本优先；未显式脚本时按
-    // 新形状脚本化——模型把事实里的结果正文原样说给用户（产品形状：宿主只喂事实 + 投递模型
-    // 说的话；用户可见内容仍由用例断言钉住，宿主不再拼完成文案）。台词带事实的主语
-    // （「<业务名>」）：事实给的就是这件事的名字，合理的模型转述会带主语——对话形态门 ③
-    // （推送必须自含话题，要求 D）把这一条变成了机械判据，裸结果正文会被判 push-needs-subject。
-    if (driver === 'main' && text.startsWith(COMPLETION_FACT_PREFIX) && !this.main.has(text)) {
-      this.requestMessages.set(`main\u0000${text}`, messages);
-      const body = completionResultBodyOf(text);
-      if (body === undefined) {
-        throw new Error(`完成事实形状不符（缺结果正文段）：${JSON.stringify(text.slice(0, 160))}`);
-      }
-      const subject = factSubjectOf(text) ?? '你交代的那件事';
-      return textAssistant(`${subject}办完了：${body}`);
-    }
-    // 其余状态变化唤醒回合（失败 / 已停止 / 重启对账 / 久无动静；2026-11-19 唤醒切片）：
-    // 显式脚本优先；未显式脚本时按同一产品形状脚本化——假模型按事实说一句人话（台词唯一
-    // 来源见 simWakeLine，用例断言用同一函数，不硬编）。
+    // 状态变化唤醒回合（回合结束 / 已停止 / 重启对账 / 久无动静；2026-11-19 唤醒切片；
+    // 2026-11-23 去 outcome：完成与失败统一成一条「回合结束」事实，假模型按事实里的
+    // 原始执行事实/汇报原文自己判、自己说——门票形状见 simWakeLine，用例断言用同一函数，
+    // 不硬编）。台词带事实的主语（「<业务名>」）：事实给的就是这件事的名字，合理的模型转述
+    // 会带主语——对话形态门 ③（推送必须自含话题，要求 D）把这一条变成了机械判据。
     if (
       driver === 'main'
-      && (text.startsWith(FAILURE_FACT_PREFIX)
+      && (text.startsWith(ROUND_FACT_PREFIX)
         || text.startsWith(CANCELLED_FACT_PREFIX)
         || text.startsWith(RESTART_FACT_PREFIX)
         || text.startsWith(LONG_RUNNING_FACT_PREFIX))
@@ -431,27 +430,32 @@ function lastUserTextOf(messages: readonly unknown[]): string {
   return '';
 }
 
-/** 完成事实前缀与结果正文段标记（与 apps/server/task-completion-delivery.ts 的拼装同源）。 */
-export const COMPLETION_FACT_PREFIX = '[任务完成]';
-const COMPLETION_RESULT_MARKER = '结果正文（逐字）：';
-const COMPLETION_TAIL_MARKER = '。请把这件事告诉用户。';
+/**
+ * 回合结束事实前缀与各段标记（**与宿主拼装同源**：直接复用 apps/server/task-completion-delivery.ts
+ * 导出的常量，措辞改动时夹具自动跟随，不再静默漂移）。
+ */
+export { ROUND_FACT_PREFIX };
+/** 兼容别名（旧用例 import 名；两个面已统一成同一条回合结束事实）。 */
+export const COMPLETION_FACT_PREFIX = ROUND_FACT_PREFIX;
+export const FAILURE_FACT_PREFIX = ROUND_FACT_PREFIX;
+const REPORT_MARKER = ROUND_FACT_REPORT_MARKER;
+const NO_REPORT_MARKER = ROUND_FACT_NO_REPORT_MARKER;
 
-/** 从完成事实里取逐字结果正文；形状不符返回 undefined（脚本立刻暴露事实形状漂移）。 */
+/** 从回合结束事实里取 worker 汇报原文（到行尾）；没有汇报/形状不符返回 undefined。 */
 export function completionResultBodyOf(factText: string): string | undefined {
-  const start = factText.indexOf(COMPLETION_RESULT_MARKER);
+  const start = factText.indexOf(REPORT_MARKER);
   if (start === -1) return undefined;
-  const rest = factText.slice(start + COMPLETION_RESULT_MARKER.length);
-  const end = rest.lastIndexOf(COMPLETION_TAIL_MARKER);
-  if (end === -1) return undefined;
-  return rest.slice(0, end);
+  const rest = factText.slice(start + REPORT_MARKER.length);
+  const end = rest.indexOf('\n');
+  const body = (end === -1 ? rest : rest.slice(0, end)).trim();
+  return body === '' ? undefined : body;
 }
 
 /**
  * 状态变化事实前缀（与宿主拼装同源；2026-11-19 唤醒切片四出口）：
- * 失败（task-completion-delivery 的 taskFailureFactText）/ 已停止（taskCancelledFactText）/
+ * 回合结束（task-completion-delivery 的 taskRoundFactsText）/ 已停止（taskCancelledFactText）/
  * 重启对账（taskRestartFactText）/ 久无动静（task-runner 的 longRunningNoticeFactText）。
  */
-export const FAILURE_FACT_PREFIX = '[任务失败]';
 export const CANCELLED_FACT_PREFIX = '[已停止]';
 export const RESTART_FACT_PREFIX = '[重启对账]';
 export const LONG_RUNNING_FACT_PREFIX = '[久无动静]';
@@ -475,29 +479,21 @@ export function failureWakeLine(name?: string): string {
 }
 
 /**
- * B2：假模型按唤醒事实里的**结构化 outcome 值**选措辞（真模型按 OUTCOME_BEHAVIOR_NOTE 选）。
- * 没有 `[outcome=...]` 字段时逐字节回落到 failureWakeLine（既有用例不变）。
- *   · unsupported → 「办不了」+ 目录里能办的，**绝不含**再试/重试/retry；
- *   · blocked     → 说清缺什么（[缺=...]）+ 补的方式；
- *   · partial     → 逐项说，不说成单纯成功。
+ * 假模型按唤醒事实里的**机械事实**选措辞（宿主不再合成 outcome 判定，见 S1）：
+ *   · 「发起前被宿主拒绝 / 本次不允许」→ 说清缺什么（缺的是本次允许范围）；
+ *   · 「账本里没有执行事实」→ 「办不了」+ 目录里能办的（列事实，不说能办却不做）；
+ * 其余事实逐字节回落到 failureWakeLine（既有用例不变）。
  */
 export function outcomeWakeLine(factText: string): string | undefined {
-  const matched = /\[outcome=(completed|partial|unsupported|blocked|failed)\]/.exec(factText);
-  if (matched === null) return undefined;
-  const outcome = matched[1];
   const name = factSubjectOf(factText);
   const subject = lineSubjectOf(name);
-  if (outcome === 'unsupported') {
+  if (factText.includes(ROUND_FACT_NOT_PERMITTED_MARKER) || factText.includes(ROUND_FACT_NOT_PERMITTED_CLAUSE)) {
+    return `${subject}这次没办成，缺的是本次允许范围。补上这个条件我就能继续办。`;
+  }
+  if (factText.includes(ROUND_FACT_ZERO_EXEC_MARKER)) {
     return `${subject}这件事我这边办不了。我能办的是：记录办理、长时导出。没有可办的动作。`;
   }
-  if (outcome === 'blocked') {
-    const missing = /\[缺=([^\]]+)\]/.exec(factText)?.[1] ?? '本次允许范围';
-    return `${subject}这次没办成，缺的是${missing}。补上这个条件我就能继续办。`;
-  }
-  if (outcome === 'partial') {
-    return `${subject}这次只办成了一部分，我逐项说给你：有的成了，有的没成。`;
-  }
-  return failureWakeLine(name);
+  return undefined;
 }
 
 export function cancelledWakeLine(name?: string): string {
@@ -516,7 +512,21 @@ function lineSubjectOf(name?: string): string {
 /** 按事实前缀派发到上面那位台词（respond 用；未知前缀立刻抛，脚本不静默）。 */
 export function simWakeLine(factText: string): string {
   const name = factSubjectOf(factText);
-  if (factText.startsWith(FAILURE_FACT_PREFIX)) return outcomeWakeLine(factText) ?? failureWakeLine(name);
+  if (factText.startsWith(ROUND_FACT_PREFIX)) {
+    // 回合结束事实：假模型按**原始事实**自己判（产品新模型：成败由 Main 判、话由 Main 说）——
+    // 机械原因 / 结果未知 / 资源拒绝 / 发起前被拒 / 账本零执行 → 说清没办成；
+    // 否则按 worker 汇报原文转述。
+    const failedFact = factText.includes(ROUND_FACT_REASON_MARKER)
+      || factText.includes(ROUND_FACT_WATCHDOG_MARKER)
+      || factText.includes(ROUND_FACT_RESOURCE_LIMITED_MARKER)
+      || factText.includes(ROUND_FACT_NOT_PERMITTED_MARKER)
+      || factText.includes(ROUND_FACT_ZERO_EXEC_MARKER)
+      || factText.includes(NO_REPORT_MARKER);
+    if (failedFact) return outcomeWakeLine(factText) ?? failureWakeLine(name);
+    const report = completionResultBodyOf(factText);
+    if (report !== undefined) return `${lineSubjectOf(name)}办完了：${report}`;
+    return failureWakeLine(name);
+  }
   if (factText.startsWith(CANCELLED_FACT_PREFIX)) return cancelledWakeLine(name);
   if (factText.startsWith(RESTART_FACT_PREFIX)) return restartWakeLine(name);
   if (factText.startsWith(LONG_RUNNING_FACT_PREFIX)) return longRunningWakeLine(name);
@@ -676,7 +686,7 @@ export interface WecomSimFixture {
   readonly book: SimScriptBook;
   /** dummy 执行层状态根（audit.jsonl 所在；写面零写入的机械读数）。 */
   readonly execStateDir: string;
-  /** 宿主底账（state.db；只读打开用于任务状态机械读数）。 */
+  /** 宿主底账（state.db；只读打开用于任务事实机械读数）。 */
   readonly dbPath: string;
   /** 单聊会话（conversationId；群聊另行传入）。 */
   readonly conversationId: string;
@@ -713,9 +723,9 @@ export interface WecomSimFixture {
   disarmShapeGuard(): void;
   /**
    * 向推送面注入一条**带归属**的投递（负例控制专用，与宿主 sent 记账同形：一次真实
-   * 重复投递在夹具里看到的就是 proactiveTexts 多一条 + 该条带 taskId/factKind）。
+   * 重复投递在夹具里看到的就是 proactiveTexts 多一条 + 该条带 taskId/factEvent）。
    */
-  injectDelivery(record: { text: string; taskId: string; factKind: 'completed' | 'failed' | 'cancelled' | 'waiting_user' | 'warning'; chatId?: string }): void;
+  injectDelivery(record: { text: string; taskId: string; factEvent: string; chatId?: string }): void;
   close(): Promise<void>;
 }
 
@@ -918,8 +928,8 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
         kind: 'delivery',
         at: record.at,
         text: record.content,
-        ...(attributed?.taskId !== undefined && attributed.factKind !== undefined
-          ? { provenance: { taskId: attributed.taskId, factKind: attributed.factKind } }
+        ...(attributed?.taskId !== undefined && attributed.factEvent !== undefined
+          ? { provenance: { taskId: attributed.taskId, factEvent: attributed.factEvent } }
           : {}),
       });
     });
@@ -1009,7 +1019,7 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
     },
     injectDelivery(record) {
       // 先补齐归属槽位（logger 只在记账行到达时同步），再追加推送与归属——与宿主真投递
-      // 的最终状态逐字段同形（proactiveTexts 多一条、该条带 taskId/factKind）。
+      // 的最终状态逐字段同形（proactiveTexts 多一条、该条带 taskId/factEvent）。
       while (provenanceByPush.length < sdk.proactiveTexts.length) provenanceByPush.push({});
       sdk.proactiveTexts.push({
         kind: 'sendMessage',
@@ -1017,7 +1027,7 @@ export async function startWecomSim(options: WecomSimOptions = {}): Promise<Weco
         content: record.text,
         at: Date.now(),
       });
-      provenanceByPush.push({ taskId: record.taskId, factKind: record.factKind });
+      provenanceByPush.push({ taskId: record.taskId, factEvent: record.factEvent });
     },
     async close() {
       // 快照在拆卸前装配（任务名要从底账读）；守卫未解除时挂给 afterEach 统一判（违规即该用例失败）。
@@ -1086,21 +1096,16 @@ export function describeOutcome(outcome: Record<string, unknown>): string {
     }).filter((entry) => entry !== '');
     return `还需要补充一些信息才能继续：${missing.length > 0 ? missing.join('、') : (error.message ?? '未说明')}。`;
   }
-  if (status === 'refused') {
-    // 模型可见面收口（2026-11-19）：refused 投影只带 kind + note（无原始码/原文）。
-    // 脚本如实转述用户话术——用户不需要、也不该看到 GATE_REFUSE 这类内部码。
-    const note = typeof outcome['note'] === 'string' && outcome['note'] !== ''
-      ? outcome['note']
-      : '这件事没权限，这次没有取得任何数据。';
-    return note;
-  }
-  if (status === 'failed') {
-    // 同上：failed 投影只带 kind + note。kind 由执行层码归类（业务语义），note 是用户
-    // 话术；模型与用户都不再见原始码与原文（原文只进 execution_failure_classified 日志）。
-    const note = typeof outcome['note'] === 'string' && outcome['note'] !== ''
-      ? outcome['note']
-      : '这次没办成，没有取得任何数据。';
-    return note;
+  if (status === 'refused' || status === 'failed') {
+    // 2026-11-24 失败事实原样进模型面（跟随本次删除：宿主不再把失败改写成 {kind, note}）：
+    // 脚本模型从**原始失败事实**（error.code + 已过 cleanExecutorDiagnostic 机械清洗的
+    // message，correctForm/retryable 同事实一起给）自己选措辞——不复制技术码与英文原文
+    // （内部形态），只说业务语言 + 一个可做动作。用户面的不变量由各用例断言钉住。
+    const code = typeof error.code === 'string' ? error.code : '';
+    if (code === 'GATE_REFUSE') return '这件事没权限，这次没有取得任何数据。';
+    if (code === 'QUERY_REQUIRED') return '还没说清要查什么：告诉我集合名和窗口，我接着查。';
+    if (code === 'WHERE_INVALID') return '这个筛选用不了：换个写法再试？';
+    return '这次没办成，没有取得任何数据。';
   }
   return `执行层返回了未预期的形态：${JSON.stringify(outcome).slice(0, 200)}`;
 }

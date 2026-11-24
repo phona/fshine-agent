@@ -42,45 +42,30 @@ describe('R5 文案渲染：9 类折叠成 4 类用户语言', () => {
     expect(text).toContain('查十一月的发票');
   });
 
-  it('completed → 办完了', () => {
-    const text = renderNotification({ kind: 'completed', payload: payload() });
-    expect(text).toContain('办完了');
-    expect(text).toContain('查十一月的发票');
-  });
-
-  it('failed（无 reason / failed_confirmed）→ 没办成', () => {
-    const text = renderNotification({ kind: 'failed', payload: payload({ reason: 'failed_confirmed' }) });
-    expect(text).toContain('没办成');
+  it('没有 completed/failed 结论类（2026-11-23 删状态机轮）：7 类只剩事件/通知意图', () => {
+    expect(NOTIFICATION_KINDS).not.toContain('completed');
+    expect(NOTIFICATION_KINDS).not.toContain('failed');
   });
 
   it('timed_out → 跑太久先停了', () => {
-    const text = renderNotification({ kind: 'timed_out', payload: payload({ reason: 'timeout' }) });
+    const text = renderNotification({ kind: 'deadline_reached', payload: payload({ reason: 'deadline_reached' }) });
     expect(text).toContain('跑太久先停了');
   });
 
   it('resource_limited → 系统太忙，这个没接', () => {
-    const text = renderNotification({ kind: 'resource_limited', payload: payload({ reason: 'resource_limited' }) });
+    const text = renderNotification({ kind: 'capacity_blocked', payload: payload({ reason: 'capacity_blocked' }) });
     expect(text).toContain('系统太忙，这个没接');
   });
 
   it('cancelled → 已按你说的停了', () => {
-    const text = renderNotification({ kind: 'cancelled', payload: payload({ reason: 'cancelled_by_user' }) });
+    const text = renderNotification({ kind: 'user_stop', payload: payload({ reason: 'user_stop' }) });
     expect(text).toContain('已按你说的停了');
   });
 
-  it('全部 9 类 kind 都可渲染（折叠无遗漏）', () => {
+  it('全部 7 类 kind 都可渲染（折叠无遗漏）', () => {
     for (const kind of NOTIFICATION_KINDS as readonly NotificationKind[]) {
       expect(renderNotification({ kind, payload: payload() }).trim()).not.toBe('');
     }
-  });
-});
-
-describe('R5 文案渲染：result_unknown 分级（严禁读作成功）', () => {
-  it('result_unknown → 不确定做没做完，需要再确认（不含办完了/成功）', () => {
-    const text = renderNotification({ kind: 'failed', payload: payload({ reason: 'result_unknown' }) });
-    expect(text).toContain('不确定做没做完，需要再确认');
-    expect(text).not.toContain('办完了');
-    expect(text).not.toContain('成功');
   });
 });
 
@@ -98,7 +83,7 @@ describe('R5 文案渲染：黑名单机械断言', () => {
     }
   });
 
-  it('渲染器自身产出的 9 类文案全部通过黑名单断言（name 是用户原话，断言只针对渲染器拼装部分）', () => {
+  it('渲染器自身产出的 7 类文案全部通过黑名单断言（name 是用户原话，断言只针对渲染器拼装部分）', () => {
     for (const kind of NOTIFICATION_KINDS as readonly NotificationKind[]) {
       const text = renderNotification({ kind, payload: payload({ reason: 'result_unknown', missing: ['开票日期'] }) });
       // 用户原话之外的拼接文本不得触发黑名单。
@@ -109,7 +94,7 @@ describe('R5 文案渲染：黑名单机械断言', () => {
 
 describe('R5 文案渲染：name 必含', () => {
   it('缺省机械回落「未命名任务」', () => {
-    const text = renderNotification({ kind: 'completed', payload: { at: '2026-11-15T08:00:00.000Z' } });
+    const text = renderNotification({ kind: 'started', payload: { at: '2026-11-15T08:00:00.000Z' } });
     expect(text).toContain('未命名任务');
   });
 });
@@ -122,11 +107,11 @@ describe('R5 文案渲染：name 必含', () => {
 describe('任务编号不进用户可见文本（taskNo=7）', () => {
   const TASK_NO_SHAPE = /#\d+|编号\s*#?\d+/;
 
-  it('9 类文案 × taskNo=7：输出既无 #7 也无「编号 7」模板产物', () => {
+  it('7 类文案 × taskNo=7：输出既无 #7 也无「编号 7」模板产物', () => {
     for (const kind of NOTIFICATION_KINDS as readonly NotificationKind[]) {
       const text = renderNotification({
         kind,
-        payload: payload({ taskNo: 7, reason: 'failed_confirmed', missing: ['窗口'] }),
+        payload: payload({ taskNo: 7, reason: 'result_unknown', missing: ['窗口'] }),
       });
       expect(text, `kind=${kind} 不得含工单编号：${text}`).not.toMatch(TASK_NO_SHAPE);
       expect(text).not.toContain('7'); // 精确断言：name/摘要里本就没有 7，模板也未拼入编号。

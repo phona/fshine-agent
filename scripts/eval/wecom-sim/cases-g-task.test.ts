@@ -17,6 +17,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import {
   lastToolResultJsonOf,
   startWecomSim,
@@ -61,7 +62,7 @@ describe('G 组·任务面 / 异步（W-26～W-28）', () => {
       expect(done.taskIds).toHaveLength(1);
       const taskId = done.taskIds[0]!;
       // 任务在后台真实推进到 completed（读取宿主底账，不猜日志）。
-      await sim.waitFor('任务后台 completed', () => registry.get(taskId, TASK_SCOPE).status === 'completed', 30_000);
+      await sim.waitFor('任务后台 completed', () => (archivedReportOf(registry.get(taskId, TASK_SCOPE)) !== undefined || lastExecutionOf(registry.get(taskId, TASK_SCOPE))?.status === 'completed'), 30_000);
       // 完成后宿主主动投递一次结果（用户可见）。
       await sim.waitFor('完成结果主动投递', () => sim.sdk.proactiveTexts.length === 1, 30_000);
       expect(sim.sdk.proactiveTexts[0]!.content).toContain('documents W202611 共 3 条');
@@ -70,10 +71,13 @@ describe('G 组·任务面 / 异步（W-26～W-28）', () => {
       sim.book.mainTurn('刚才那个跑完了吗？', [
         toolCallAssistant('task_status', {}),
         (call) => {
-          const listed = lastToolResultJsonOf(call.messages) as { tasks?: ReadonlyArray<{ status?: string }> } | undefined;
+          const listed = lastToolResultJsonOf(call.messages) as {
+            tasks?: ReadonlyArray<{ liveness?: string; replyText?: string | null; resulted?: number }>;
+          } | undefined;
           const task = listed?.tasks?.[0];
-          if (task?.status === undefined) throw new Error('task_status 没有返回任务状态。');
-          return textAssistant(task.status === 'completed' ? '刚才那个任务已经完成了。' : `刚才那个任务的状态是 ${task.status}。`);
+          if (task === undefined) throw new Error('task_status 没有返回任务事实。');
+          const done = (task.replyText !== null && task.replyText !== undefined) || (task.resulted ?? 0) > 0;
+          return textAssistant(done ? '刚才那个任务已经完成了。' : `刚才那个任务还在办（${task.liveness ?? 'queued'}）。`);
         },
       ]);
       const w27 = sim.sendText('刚才那个跑完了吗？');

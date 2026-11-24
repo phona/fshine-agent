@@ -91,8 +91,8 @@ const SESSIONS: SessionDef[] = [
 /** 确定性 canary 执行器：任何后台回合都返回含唯一标记的结果（不发网络）。 */
 function canaryBehavior(input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
   return Promise.resolve({
-    kind: 'completed',
-    resultText: `任务结果 [CANARY-TASK-${input.taskNo ?? '?'}]：${input.request.slice(0, 40)} 共 3 条`,
+    kind: 'ended',
+    report: `任务结果 [CANARY-TASK-${input.taskNo ?? '?'}]：${input.request.slice(0, 40)} 共 3 条`,
   });
 }
 

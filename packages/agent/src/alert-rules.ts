@@ -16,7 +16,8 @@
  *     丢失等）≥1；
  *   · retry_storm         —— 同一任务执行事实 ≥5 条，或同一 (operation, 错误码) 在同一任务
  *     ≥3 次；
- *   · task_stuck          —— 任务 `running` 超 10 分钟无事件；`waiting_user` 超 30 分钟；
+ *   · task_stuck          —— 底账事实：仍在推进但 10 分钟没有新事实；或进入等待后 30 分钟
+ *     用户还没表态（读 `progressing` / `waitingSince` / `lastAt` 原始事实就地算，不传状态词）；
  *   · delivery_failed     —— 文件/结果投递失败 ≥1（`file_delivery` 状态非 sent、
  *     `task_result_delivery_failed`、通知投递终局 `notification_delivery_terminal` 的
  *     `exhausted`、长活提醒 `task_long_running_notice` 的 `failed`、**live 部署上的终态跳过**
@@ -52,9 +53,9 @@ export const ALERT_SEVERITY: Readonly<Record<AlertRule, AlertSeverity>> = {
   message_stuck: 'critical',
 };
 
-/** 任务 `running` 超过该时长无事件即判卡住（缺省 10 分钟）。 */
+/** 仍在推进的任务超过该时长没有新事实即判卡住（缺省 10 分钟）。 */
 export const TASK_RUNNING_STUCK_MS = 10 * 60 * 1000;
-/** 任务 `waiting_user` 超过该时长即判卡住（缺省 30 分钟）。 */
+/** 进入等待后超过该时长用户仍未表态即判卡住（缺省 30 分钟）。 */
 export const USER_WAITING_STUCK_MS = 30 * 60 * 1000;
 /** 同一任务执行事实条数上限（达到即判重试风暴）。 */
 export const RETRY_STORM_TASK_FACTS = 5;
@@ -65,8 +66,11 @@ export const DEFAULT_COOLDOWN_MS = 30 * 60 * 1000;
 
 /** 判定任务条数/操作重复这类聚合规则时要计入的执行事实事件名。 */
 export const EXECUTION_FACT_EVENT = 'execution';
-/** task_stuck 依赖的任务状态投影事件名。 */
-export const TASK_STATE_EVENT = 'task_state';
+/**
+ * task_stuck 依赖的底账事实事件名：一行任务原始事实（progressing / waitingSince / lastAt），
+ * 不是任务状态投影。规则读这些原始字段就地算时长，不共享任务级状态词。
+ */
+export const TASK_LEDGER_FACT_EVENT = 'task_ledger';
 /** message_stuck 判据的事件名（server：上一进程认领后挂掉、本进程无在途的跨重投）。 */
 export const MESSAGE_STUCK_EVENT = 'message_still_processing';
 
@@ -79,7 +83,7 @@ export const HOST_FAULT_ERROR_CODES: readonly string[] = [
 export const HOST_FAULT_EVENTS: readonly string[] = [
   'execution_accepted_undeclared',
   // 2026-11-19 唤醒切片（只读审计 #3）：后台任务以 accepted 结束、但装配没给等待端口
-  // ——装配面缺陷（用户做不了什么，归宿第 3 档），落终态的同时记这条事件，进既有
+  // ——装配面缺陷（用户做不了什么，归宿第 3 档），写结束事实的同时记这条事件，进既有
   // host_fault 规则告警（不新建规则/机制）。
   'task_long_task_unsupported',
 ];
@@ -135,8 +139,12 @@ export interface AlertFactDetail {
    * `'unavailable'`。判据：live 上的终态跳过 = 配错，要告警（见 isDeliveryFailure）。
    */
   deliveryMode?: string;
-  /** 任务状态投影：'running' / 'waiting_user' / …。 */
-  taskStatus?: string;
+  /** 底账布尔事实：仍在推进（已启动、无结束事实、无汇报/提问；task-progress 同源谓词）。 */
+  progressing?: boolean;
+  /** 底账原始时刻：进入等待的时刻（ISO）；在场 = 正在等用户表态，不在场 = 没在等。 */
+  waitingSince?: string;
+  /** 底账原始时刻：这一行最后一次事实更新的时刻（ISO），task_stuck 的「无新事实」按它算。 */
+  lastAt?: string;
   /** 协议违约标记（执行层对未声明 long_running 的 operation 返回 accepted）。 */
   protocolViolation?: boolean;
   /** 确认句柄丢失标记。 */
@@ -150,7 +158,7 @@ export interface AlertFactDetail {
 export interface AlertFact {
   /** 事实来源：'log' = 结构化日志行；'ledger' = 底账行。 */
   source: 'log' | 'ledger';
-  /** 事件/行类型，如 'file_delivery' / 'task_result_delivery_failed' / 'execution' / 'task_state'。 */
+  /** 事件/行类型，如 'file_delivery' / 'task_result_delivery_failed' / 'execution' / 'task_ledger'。 */
   event: string;
   /** 事实时刻（ISO 字符串）。task_stuck 据它与 now 算时长。 */
   at: string;
@@ -388,27 +396,39 @@ function retryStormCandidates(facts: readonly AlertFact[]): Candidate[] {
 function taskStuckCandidates(facts: readonly AlertFact[], nowMs: number): Candidate[] {
   const out: Candidate[] = [];
   for (const fact of facts) {
-    if (fact.event !== TASK_STATE_EVENT) continue;
-    const status = fact.detail?.taskStatus;
-    const atMs = timeMsOf(fact);
-    if (status === undefined || atMs === undefined) continue;
+    if (fact.event !== TASK_LEDGER_FACT_EVENT) continue;
+    // 原始事实就地算：等待中的行看 waitingSince；仍在推进的行看最后一次事实更新时刻
+    // （lastAt 缺省回落 fact.at）。没有这两个事实的行不猜。
+    const waitingSince = fact.detail?.waitingSince;
+    const lastAt = fact.detail?.lastAt;
+    if (waitingSince !== undefined) {
+      const atMs = Date.parse(waitingSince);
+      if (Number.isNaN(atMs)) continue;
+      const elapsed = nowMs - atMs;
+      // 边界：刚好到阈值不告（严格大于才告）——「刚好 30 分钟不告、30 分 1 秒告」。
+      if (elapsed > USER_WAITING_STUCK_MS) {
+        out.push({
+          rule: 'task_stuck',
+          subject: subjectOf(fact, 'task'),
+          evidenceRef: evidenceRefOf(fact),
+          summary: `任务卡住：${fact.taskId ?? '未知任务'} 在等用户表态已 ${minutesOf(elapsed)} 分钟（阈值 ${minutesOf(USER_WAITING_STUCK_MS)} 分钟）`,
+          raw: fact.raw,
+          ...(fact.taskId === undefined ? {} : { taskId: fact.taskId }),
+        });
+      }
+      continue;
+    }
+    if (fact.detail?.progressing !== true) continue;
+    const atMs = lastAt === undefined ? timeMsOf(fact) : Date.parse(lastAt);
+    if (atMs === undefined || Number.isNaN(atMs)) continue;
     const elapsed = nowMs - atMs;
     // 边界：刚好到阈值不告（严格大于才告）——「刚好 10 分钟不告、10 分 1 秒告」。
-    if (status === 'running' && elapsed > TASK_RUNNING_STUCK_MS) {
+    if (elapsed > TASK_RUNNING_STUCK_MS) {
       out.push({
         rule: 'task_stuck',
         subject: subjectOf(fact, 'task'),
         evidenceRef: evidenceRefOf(fact),
-        summary: `任务卡住：${fact.taskId ?? '未知任务'} 处于 running 已 ${minutesOf(elapsed)} 分钟无事件（阈值 ${minutesOf(TASK_RUNNING_STUCK_MS)} 分钟）`,
-        raw: fact.raw,
-        ...(fact.taskId === undefined ? {} : { taskId: fact.taskId }),
-      });
-    } else if (status === 'waiting_user' && elapsed > USER_WAITING_STUCK_MS) {
-      out.push({
-        rule: 'task_stuck',
-        subject: subjectOf(fact, 'task'),
-        evidenceRef: evidenceRefOf(fact),
-        summary: `任务卡住：${fact.taskId ?? '未知任务'} 处于 waiting_user 已 ${minutesOf(elapsed)} 分钟（阈值 ${minutesOf(USER_WAITING_STUCK_MS)} 分钟）`,
+        summary: `任务卡住：${fact.taskId ?? '未知任务'} 已 ${minutesOf(elapsed)} 分钟没有新事实（阈值 ${minutesOf(TASK_RUNNING_STUCK_MS)} 分钟）`,
         raw: fact.raw,
         ...(fact.taskId === undefined ? {} : { taskId: fact.taskId }),
       });

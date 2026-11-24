@@ -13,7 +13,7 @@
  * 没有真的失败/拒绝，或者转述环节把失败说成成功，这里都会红。
  */
 import { describe, expect, it } from 'vitest';
-import { failureMessageFor, internalTermIn } from '../../../packages/agent/src/user-facing-failure';
+import { internalTermIn } from '../../../packages/agent/src/user-facing-failure';
 import {
   mainRelayResponses,
   startWecomSim,
@@ -88,9 +88,8 @@ describe('C 组·失败与边界（W-08～W-12）', () => {
       task: '查询 faulty-one 集合 W1 的记录',
       args: { '--collection': 'faulty-one', '--window': 'W1' },
       assert(reply, executions) {
-        // 口径变更（2026-11-19 模型可见面收口）：failed 投影只带 kind+note，模型/用户不再
-        // 见原始码（COLLECTION_FAULT 只进 execution_failure_classified 日志）。note 是
-        // executor_failed 的用户话术（没办成），如实、且不假装成功。
+        // 口径变更（2026-11-24 失败事实原样进模型面）：COLLECTION_FAULT 与原文照实给脚本
+        // 模型，由它选措辞——脚本说「没办成」（如实、不假装成功），技术码不进用户文本。
         expect(reply).toContain('没办成');
         expect(reply).not.toContain('COLLECTION_FAULT');
         // 不假装成功：没有「共 N 条」式结论，没有具体数值。
@@ -109,8 +108,8 @@ describe('C 组·失败与边界（W-08～W-12）', () => {
       task: '查询 denied-one 集合 W1 的记录',
       args: { '--collection': 'denied-one', '--window': 'W1' },
       assert(reply, executions) {
-        // 口径变更（2026-11-19 模型可见面收口）：refused 投影只带 kind+note；原始码
-        // GATE_REFUSE 不进用户文本（图「没有权限」语义由 denied 话术承载）。
+        // 口径变更（2026-11-24 失败事实原样进模型面）：GATE_REFUSE 与原文照实给脚本模型，
+        // 由它选措辞——脚本如实说「没权限」，原始码不进用户文本。
         expect(reply).toContain('没权限');
         expect(reply).not.toContain('GATE_REFUSE');
         expect(reply).not.toMatch(/\d{3,}/);
@@ -128,11 +127,10 @@ describe('C 组·失败与边界（W-08～W-12）', () => {
       task: '查询 finance-invoices 集合 2026-10 窗口的数据',
       args: { '--collection': 'finance-invoices', '--window': '2026-10' },
       assert(reply, executions) {
-        // 口径变更（2026-11-19 模型可见面收口）：可筛值（华远/明达/新程）此前来自执行层
-        // 原文（error.message 逐字透传 = 抽象泄露源头之一）；收口后 failed 投影只带
-        // invalid_input 的 note。断言跟**话术常量**走（不硬编措辞，措辞再改用例自动跟随），
-        // 并仍不含内部术语与硬编的候选值。
-        expect(reply).toContain(failureMessageFor('invalid_input').text);
+        // 口径变更（2026-11-24 失败事实原样进模型面）：可筛值（华远/明达/新程）与英文原文
+        // 现在随原始失败事实（code=WHERE_INVALID + 清洗后 message）一起进脚本模型面，由它
+        // 选措辞——业务语言说清「筛选条件用不了」；技术码/英文原文/可筛值都不进用户气泡。
+        expect(reply).toContain('筛');
         expect(internalTermIn(reply)).toBeUndefined();
         expect(reply).not.toContain('华远');
         expect(reply).not.toContain('明达');

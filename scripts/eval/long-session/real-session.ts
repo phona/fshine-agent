@@ -27,6 +27,7 @@ import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
 import { createResourcePolicy } from '../../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
+import { lastFailureOf, taskFactViewOf } from '../../../packages/agent/testing/task-facts';
 import { TASK_CANCEL_TOOL, EXECUTE_OPERATION_TOOL } from '../../../packages/agent/src/execution-runtime';
 import {
   assembleSessionCore, compactionSettingsFrom, contextWindowFrom, createBackgroundDispatch, resolveExecutionFace,
@@ -472,8 +473,9 @@ export async function openRealSession(input: RealSessionInput): Promise<RealSess
         taskId: task.taskId,
         ...(task.taskNo === undefined ? {} : { taskNo: task.taskNo }),
         request: task.request,
-        status: task.status,
-        ...(task.reason === undefined ? {} : { reason: task.reason }),
+        // 账本机械事实（启动/结束/汇报/执行事实）——R6 oracle 只读事实，不读任务级状态词。
+        ...taskFactViewOf(task),
+        ...(lastFailureOf(task)?.error?.code === undefined ? {} : { reason: lastFailureOf(task)?.error?.code! }),
         requestIds: task.executions.map((e) => e.requestId),
       }));
     },

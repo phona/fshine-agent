@@ -13,14 +13,15 @@
  *     导出只把交付件写到用户指定的那一个文件，不写库、不建目录；
  *   · 任务引用：`#编号` 或纯数字（业务展示位只出 #编号+名称，不出 UUID）；内部 taskId
  *     原样兼容（审计/脚本既有用法）；解析失败与不存在同一措辞；
- *   · 状态与原因不做二次判定——直接消费任务注册表里由 judgeReportedTask 写入的终态
- *     （completed/failed/unexecuted）与 failureReason；本文件只做中文词表映射，
- *     「读时重算」会把 fail() 路径（零执行 + failed）与 running 行错报，故不重算；
+ *   · 展示不做二次判定（事实模型：底账没有 status/reason/failureReason 结论字段，也没有
+ *     任务级生命周期枚举）——标签由原始事实就地算（启动/结束时刻/汇报/提问/租约）；
+ *     做没做成由用户读详情里的执行步骤与任务结果原文，CLI 不替它下结论；
  *   · 「最终回复」= 底账持久化的 Main 回合回复全文（P1/S1 存档）；历史行无存档时显示
  *     「该任务无最终回复存档」，不以「任务结果」（执行层汇报）冒充；
  *   · 交付件与详情消费同一组字段行渲染函数（见下方渲染构建函数），不维护第二套渲染；
- *   · --redo（唯一写路径）：只对终态任务生效；输入=存储的委派原文逐字（不拼接原任务的
- *     回复/执行台账/摘要），经 scripts/ask-runtime.ts 与 ask 同源的装配重新交办为新任务；
+ *   · --redo（唯一写路径）：只对已停（未在推进）的任务生效；输入=存储的委派原文逐字
+ *     （不拼接原任务的回复/执行台账/摘要），经 scripts/ask-runtime.ts 与 ask 同源的装配
+ *     重新交办为新任务；
  *     原任务记录零改动；关联只由 CLI 输出打印（schema 冻结，无关联列/表）；
  *   · 列表/详情/--out 不联网、不加载模型、不 spawn 执行层（--redo 按需动态加载装配）。
  */
@@ -32,10 +33,13 @@ import { loadConfig } from '@fshine/core';
 import type { Session } from '../packages/agent/src/execution-runtime';
 import {
   deriveTaskName,
-  judgeReportedTask,
-  type TaskReason,
+  stillProgressingOf,
+  taskMayBeRunningOf,
+  taskReportedOf,
+  taskStartedOf,
+  taskUnstartedOf,
+  taskWaitingOf,
   type TaskRecord,
-  type TaskStatus,
 } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
 import { createNotificationReader, type Notification, type NotificationKind } from '../packages/agent/src/notifications';
@@ -139,34 +143,36 @@ export function resolveTaskDbPath(input: {
   return { dbPath: fallback, source: 'default' };
 }
 
-type JudgedStatus = ReturnType<typeof judgeReportedTask>['status'];
+/**
+ * 任务行的机械事实标签（可多项并存；消费方**就地读原始事实算**，不共享「怎么结束」类型）：
+ *   · 有汇报存档 → 「已汇报」；
+ *   · 等待形状 → 「等待用户」；
+ *   · 未启动 → 「排队中」/「未启动即已停」（有结束事实）；
+ *   · 已启动、无汇报 → 可能还在跑（跨进程代理）→ 「进行中」；已停 → 「无汇报收尾」；
+ *     都没有 → 「结果未知」（进程没了、也没写结束事实）。
+ * 做没做成读详情里的执行步骤与任务结果原文，CLI 不在词上判结论。
+ */
+export function taskFactLabelsOf(task: TaskRecord): string[] {
+  const labels: string[] = [];
+  const reported = taskReportedOf(task);
+  const waiting = taskWaitingOf(task);
+  const started = taskStartedOf(task);
+  if (reported) labels.push('已汇报');
+  if (waiting) labels.push('等待用户');
+  if (!reported && !waiting) {
+    if (!started) labels.push(task.endedAt === undefined ? '排队中' : '未启动即已停');
+    else if (task.endedAt !== undefined) labels.push('无汇报收尾');
+    else if (taskMayBeRunningOf(task)) labels.push('进行中');
+    else labels.push('结果未知');
+  }
+  if (labels.length === 0) labels.push('无汇报');
+  return labels;
+}
 
-/** judgeReportedTask 的每个终态 → 用户词（键类型与同一实现的返回类型绑定）。 */
-export const JUDGED_STATUS_WORDS: Record<JudgedStatus, string> = {
-  completed: '已完成',
-  failed: '失败',
-  unexecuted: '未执行',
-};
-
-/** TaskStatus → 用户词；终态词来自 JUDGED_STATUS_WORDS，未收尾单独给词（P2b 金样冻结）。 */
-export const TASK_STATUS_WORDS: Record<TaskStatus, string> = {
-  queued: '排队中',
-  running: '进行中',
-  waiting_user: '等待用户',
-  cancelling: '取消中',
-  cancelled: '已取消',
-  timed_out: '已超时',
-  ...JUDGED_STATUS_WORDS,
-};
-
-/** 机械原因（TaskReason）→ 用户词（P2b；联合接口 §5：resource_limited 话术由展示层定）。 */
-export const TASK_REASON_WORDS: Record<TaskReason, string> = {
-  cancelled_by_user: '用户取消',
-  timeout: '超时',
-  failed_confirmed: '执行层失败',
-  result_unknown: '结果未知',
-  resource_limited: '资源受限',
-};
+/** 事实摘要（多项以「、」并列；不是单一结论词）。 */
+export function taskFactSummaryOf(task: TaskRecord): string {
+  return taskFactLabelsOf(task).join('、');
+}
 
 /** 执行步骤状态 → 用户词（契约状态，原值不动只做呈现）。 */
 export const EXECUTION_STATUS_WORDS: Record<ExecutionStatus, string> = {
@@ -178,27 +184,15 @@ export const EXECUTION_STATUS_WORDS: Record<ExecutionStatus, string> = {
   accepted: '已受理（长任务进行中）',
 };
 
-export function taskStatusWord(status: TaskStatus): string {
-  // 未知存储值 fail-open：显示原值（不崩、不落 undefined）。
-  return (TASK_STATUS_WORDS as Record<string, string | undefined>)[status] ?? `未知状态（${String(status)}）`;
-}
-
-export function taskReasonWord(reason: TaskReason): string {
-  // 未知存储值 fail-open：显示原值（词表演进的向前兼容）。
-  return (TASK_REASON_WORDS as Record<string, string | undefined>)[reason] ?? `未知原因（${String(reason)}）`;
-}
-
-/** 通知意图（P4 九类）→ 用户词（展示层唯一词表；web 与 ops 复用）。 */
+/** 事件/通知意图（7 类）→ 用户词（展示层唯一词表；web 与 ops 复用；无完成/失败结论词）。 */
 export const NOTIFICATION_KIND_WORDS: Record<NotificationKind, string> = {
   accepted: '已受理',
   started: '已开始',
   waiting_user: '等待用户',
   resumed: '已恢复',
-  completed: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
-  timed_out: '已超时',
-  resource_limited: '资源受限',
+  user_stop: '已取消',
+  deadline_reached: '已超时',
+  capacity_blocked: '资源受限',
 };
 
 export function notificationKindWord(kind: NotificationKind): string {
@@ -292,7 +286,7 @@ export function renderTaskList(records: readonly TaskRecord[], options: { limit?
   const lines = [header];
   for (const task of shown) {
     // 业务展示位只有 #编号+名称（UUID 只在底账/审计证据里，不出现在这里）。
-    lines.push(`${formatLocalTime(task.createdAt)}  ${taskStatusWord(task.status)}  ${taskLabel(task)}`);
+    lines.push(`${formatLocalTime(task.createdAt)}  ${taskFactSummaryOf(task)}  ${taskLabel(task)}`);
   }
   return lines.join('\n');
 }
@@ -310,7 +304,7 @@ export function taskIdentityLine(task: TaskRecord): string {
 }
 
 export function taskStatusLine(task: TaskRecord): string {
-  return `状态：${taskStatusWord(task.status)}`;
+  return `事实：${taskFactSummaryOf(task)}`;
 }
 
 export function taskTimeline(task: TaskRecord): string {
@@ -321,27 +315,10 @@ export function taskRequestLine(task: TaskRecord): string {
   return `交办：${task.request}`;
 }
 
-/** 失败/未执行原因行（标签按终态选词；无原因返回 undefined）——原样消费底账，不重判。 */
-export function taskReasonLine(task: TaskRecord): string | undefined {
-  if (task.failureReason === undefined) return undefined;
-  return `${task.status === 'unexecuted' ? '未执行原因' : '失败原因'}：${task.failureReason}`;
-}
-
-/**
- * 机械原因行（P2b）：reason → 「终止原因：<词>」。
- * failed_confirmed 且已有失败原文时返回 undefined（失败原文行已覆盖，不重复）；
- * 历史行（无 reason）不伪造。
- */
-export function taskMechanicalReasonLine(task: TaskRecord): string | undefined {
-  if (task.reason === undefined) return undefined;
-  if (task.reason === 'failed_confirmed' && task.failureReason !== undefined) return undefined;
-  return `终止原因：${taskReasonWord(task.reason)}`;
-}
-
-/** 未成功终态行的原因文本（ops 清单单元格口径）：机械原因优先，其次失败/未执行原文。 */
-export function taskOutcomeReasonLine(task: TaskRecord): string | undefined {
-  const mechanical = taskMechanicalReasonLine(task);
-  return mechanical !== undefined ? mechanical : taskReasonLine(task);
+/** 机械时刻行：这一轮在 T 停下（事实；**不分类**）；没有结束事实返回 undefined。 */
+export function taskMechanicalFactLine(task: TaskRecord): string | undefined {
+  if (task.endedAt === undefined) return undefined;
+  return `机械事实：这一轮停止于 ${formatLocalTime(task.endedAt)}`;
 }
 
 /** 执行步骤段（含「执行步骤：」标题行；零执行给机械提示）。 */
@@ -378,9 +355,8 @@ export function taskReplyLines(task: TaskRecord): string[] {
 /** 单任务详情：消费上面的同一组字段行（状态 → 机械原因 → 失败/未执行原文 → 执行 → 结果 → 回复）。 */
 export function renderTaskDetail(task: TaskRecord, options: { notifications?: readonly Notification[] } = {}): string {
   const lines = [taskIdentityLine(task), taskStatusLine(task), taskTimeline(task), taskRequestLine(task)];
-  const reasonLines = [taskMechanicalReasonLine(task), taskReasonLine(task)]
-    .filter((line): line is string => line !== undefined);
-  if (reasonLines.length > 0) lines.push('', ...reasonLines);
+  const factLine = taskMechanicalFactLine(task);
+  if (factLine !== undefined) lines.push('', factLine);
   lines.push('', ...taskExecutionLines(task));
   lines.push('', ...taskResultLines(task));
   lines.push('', ...taskReplyLines(task));
@@ -394,11 +370,11 @@ const DELIVERABLE_LIMITS = [
   '- 本交付件由 `npm run tasks` 的导出模式从本地任务底账机械导出（只读），内容未经模型润色或二次判定。',
   '- 「任务结果」是任务底账持久化的执行层汇报原文；「最终回复」是 Main 在回合收尾时实际发送给用户的回复全文（逐字存档）。',
   '- 历史任务没有最终回复存档（显示「该任务无最终回复存档」），交付件不以执行层汇报冒充 Main 回复。',
-  '- 状态与失败原因来自任务收尾时的机械判定（judgeReportedTask）；导出只读不重算。',
+  '- 事实行只映射机械事实（等待/租约/机械时刻/汇报存档/执行行原值），不做任务结论；做没做成读执行步骤与任务结果原文。',
   '- 时间以本机时区显示；执行步骤无时间戳。',
 ];
 
-const DELIVERABLE_RUNNING_NOTE = '- 该任务尚未收尾（当前状态「进行中」）：交付件反映导出时的底账状态。';
+const DELIVERABLE_RUNNING_NOTE = '- 该任务尚未收尾（在跑）：交付件反映导出时的底账事实。';
 
 /**
  * 任务交付件（Markdown）：标题 + 任务信息/状态/执行步骤/任务结果/最终回复/限制与说明。
@@ -407,7 +383,7 @@ const DELIVERABLE_RUNNING_NOTE = '- 该任务尚未收尾（当前状态「进�
  */
 export function renderTaskDeliverable(task: TaskRecord): string {
   const lines = [
-    `# 任务交付件：${taskLabel(task)}（${taskStatusWord(task.status)}）`,
+    `# 任务交付件：${taskLabel(task)}（${taskFactSummaryOf(task)}）`,
     '', '## 任务信息', '',
     taskIdentityLine(task),
     taskTimeline(task),
@@ -415,14 +391,13 @@ export function renderTaskDeliverable(task: TaskRecord): string {
     '', '## 状态', '',
     taskStatusLine(task),
   ];
-  const reasonLines = [taskMechanicalReasonLine(task), taskReasonLine(task)]
-    .filter((line): line is string => line !== undefined);
-  lines.push(...reasonLines);
+  const factLine = taskMechanicalFactLine(task);
+  if (factLine !== undefined) lines.push(factLine);
   lines.push('', '## 执行步骤', '', ...taskExecutionLines(task));
   lines.push('', '## 任务结果', '', ...taskResultLines(task));
   lines.push('', '## 最终回复', '', ...taskReplyLines(task));
   lines.push('', '## 限制与说明', '', ...DELIVERABLE_LIMITS);
-  if (task.status === 'running') lines.push(DELIVERABLE_RUNNING_NOTE);
+  if (taskMayBeRunningOf(task)) lines.push(DELIVERABLE_RUNNING_NOTE);
   return `${lines.join('\n')}\n`;
 }
 
@@ -508,12 +483,9 @@ export interface RedoOutcome {
   stderr: string;
 }
 
-/** 可重新推进的存储终态：只有这三态（running/未知态 fail-closed 拒绝；不读时重算）。 */
-const REDOABLE_TASK_STATUSES: ReadonlySet<TaskStatus> = new Set<TaskStatus>(['completed', 'failed', 'unexecuted']);
-
-/** 配对行（输出逐字形状）：`原任务 #<no> → 新任务 #<no>（状态：<词>）`（业务编号引用）。 */
+/** 配对行（输出逐字形状）：`原任务 #<no> → 新任务 #<no>（事实：<词>）`（业务编号引用）。 */
 export function renderRedoPairLine(oldTask: TaskRecord, newTask: TaskRecord): string {
-  return `原任务 ${taskNoLabel(oldTask)} → 新任务 ${taskNoLabel(newTask)}（状态：${taskStatusWord(newTask.status)}）`;
+  return `原任务 ${taskNoLabel(oldTask)} → 新任务 ${taskNoLabel(newTask)}（事实：${taskFactSummaryOf(newTask)}）`;
 }
 
 async function defaultRedoAssembler(input: AskRuntimeInput): Promise<RedoAssembly> {
@@ -556,12 +528,24 @@ export async function runRedo(
   const { task } = input;
   const refuse = (message: string): RedoOutcome => ({ exitCode: 2, stdout: '', stderr: `${message}\n` });
 
-  // 终态判定：直接消费存储值（与 P1 状态呈现同一口径，不读时重算）。
-  if (task.status === 'running') {
-    return refuse(`任务正在进行中，不能重新推进：${task.taskId}（仅已完成、失败或未执行的任务可以重新推进）。`);
+  // 可重新推进 = 任务已到停点（读原始事实，不读任何「怎么结束」种类）：
+  //   · 仍在推进（布尔谓词 stillProgressingOf，含租约过期但回合未收尾）：没看到收尾事实就
+  //     重推可能双发写；
+  //   · 可能还在跑（跨进程事实代理：租约未过期 / accepted 在途）：按「进行中」拒；
+  //   · 等待用户：先答复或取消。
+  if (stillProgressingOf(task)) {
+    if (taskMayBeRunningOf(task)) {
+      return refuse(`任务正在进行中，不能重新推进：${task.taskId}（仅在跑已停的任务可以重新推进）。`);
+    }
+    // 已启动但无结束事实/汇报：不能确定它是不是还在执行（结果未明），
+    // 按「未收尾」拒，等它收尾或先取消——不猜「已经停了」。
+    return refuse(`任务尚未收尾，不能重新推进：${task.taskId}（等它收尾或先取消）。`);
   }
-  if (!REDOABLE_TASK_STATUSES.has(task.status)) {
-    return refuse(`任务状态无法识别（${String(task.status)}），拒绝重新推进：${task.taskId}。`);
+  if (taskWaitingOf(task)) {
+    return refuse(`任务在等待用户表态，不能重新推进：${task.taskId}（先答复或取消该任务）。`);
+  }
+  if (taskUnstartedOf(task)) {
+    return refuse(`任务尚未开始执行，不能重新推进：${task.taskId}（等它开始或先取消）。`);
   }
   if (task.request.trim() === '') {
     return refuse(`任务缺少交办原文，无法重新推进：${task.taskId}。`);

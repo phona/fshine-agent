@@ -96,8 +96,6 @@ export interface P2CaseDefinition {
   /** 真值：只给 Oracle。 */
   readonly truth: {
     readonly facts: readonly { readonly turn: number; readonly expectation: FactExpectation }[];
-    /** 期望终态（任务编号从 registry 取；不在真值里硬编码）。 */
-    readonly taskStatus?: readonly { readonly turn: number; readonly status: string }[];
   };
   /** 覆盖维度（预注册 §5.1 逐类必要机械事实）。 */
   readonly coverage: (obs: P2Observation) => P2Coverage;

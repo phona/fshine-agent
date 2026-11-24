@@ -416,7 +416,7 @@ export async function mu11(rt: RuntimeConfig): Promise<MuCaseResult> {
         crossoverCodes: crossover.verdict,
         allTasks: tasks.map((task) => ({
           taskId: task.taskId, taskNo: task.taskNo, principalId: task.principalId,
-          sessionId: task.sessionId, status: task.status, request: task.request, requestIds: task.requestIds,
+          sessionId: task.sessionId, started: task.started, ended: task.ended, waiting: task.waiting, mayBeRunning: task.mayBeRunning, reported: task.reported, lastExecutionStatus: task.lastExecutionStatus ?? null, request: task.request, requestIds: task.requestIds,
         })),
       });
   } finally { handle.close(); tmp.cleanup(); }
@@ -560,7 +560,7 @@ export async function mu12(rt: RuntimeConfig): Promise<MuCaseResult> {
         crossoverCodes: crossover.verdict,
         allTasks: tasks.map((task) => ({
           taskId: task.taskId, taskNo: task.taskNo, principalId: task.principalId,
-          sessionId: task.sessionId, status: task.status, request: task.request, requestIds: task.requestIds,
+          sessionId: task.sessionId, started: task.started, ended: task.ended, waiting: task.waiting, mayBeRunning: task.mayBeRunning, reported: task.reported, lastExecutionStatus: task.lastExecutionStatus ?? null, request: task.request, requestIds: task.requestIds,
         })),
       });
   } finally { handle.close(); tmp.cleanup(); }
@@ -669,7 +669,7 @@ export async function mu13(rt: RuntimeConfig): Promise<MuCaseResult> {
         outbound,
         allTasks: readTasks(handle.dbPath).map((task) => ({
           taskId: task.taskId, taskNo: task.taskNo, principalId: task.principalId,
-          sessionId: task.sessionId, status: task.status, request: task.request, requestIds: task.requestIds,
+          sessionId: task.sessionId, started: task.started, ended: task.ended, waiting: task.waiting, mayBeRunning: task.mayBeRunning, reported: task.reported, lastExecutionStatus: task.lastExecutionStatus ?? null, request: task.request, requestIds: task.requestIds,
         })),
       });
   } finally { await started.stop(); handle.close(); tmp.cleanup(); }

@@ -20,6 +20,7 @@ import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import { createScriptedModelRuntime } from '../../../packages/agent/testing/scripted-model-runtime';
 import type { TaskScope } from '../../../packages/agent/src/task-registry';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import {
   buildSession,
   createBudgetMeter,
@@ -338,7 +339,7 @@ async function runSelftest(out: string): Promise<number> {
       ['execute_operation called', tools.includes('worker:execute_operation')],
       ['task_status called', tools.includes('main:task_status')],
       ['exactly 1 task', tasks.length === 1],
-      ['task completed', tasks[0]?.status === 'completed'],
+      ['task completed', tasks[0] !== undefined && (archivedReportOf(tasks[0]) !== undefined || lastExecutionOf(tasks[0])?.status === 'completed')],
       ['main reply archived', tasks[0]?.replyText !== undefined && tasks[0]?.replyText !== null],
       ['execute once', tasks[0]?.executions.length === 1],
     ] as const;
@@ -469,11 +470,11 @@ async function runDSelftest(out: string): Promise<number> {
     const daveTasks = dave.assembled.session.tasks();
     const bobStatus = bob.sink.toolCalls.find((call) => call.tool === 'task_status');
     const assertions = [
-      ['alice tasks completed', aliceTasks.length === 2 && aliceTasks.every((task) => task.status === 'completed')],
+      ['alice tasks completed', aliceTasks.length === 2 && aliceTasks.every((task) => (archivedReportOf(task) !== undefined || lastExecutionOf(task)?.status === 'completed'))],
       ['bob has no task', bobTasks.length === 0],
       ['bob #1 not found', bobStatus?.isError === true],
-      ['dave fault task failed', daveTasks.length === 1 && daveTasks[0]?.status === 'failed'],
-      ['alice unaffected by dave fault', aliceTasks.every((task) => task.status === 'completed')],
+      ['dave fault task failed', daveTasks.length === 1 && daveTasks[0] !== undefined && lastExecutionOf(daveTasks[0])?.status === 'failed'],
+      ['alice unaffected by dave fault', aliceTasks.every((task) => (archivedReportOf(task) !== undefined || lastExecutionOf(task)?.status === 'completed'))],
       ['registry has 3 tasks', prepared.registry.list().length === 3],
     ] as const;
     const failed = assertions.filter(([, ok]) => !ok);
@@ -627,12 +628,16 @@ async function main(): Promise<number> {
         taskId: task.taskId,
         taskNo: task.taskNo ?? null,
         name: task.name ?? '',
-        status: task.status,
-        reason: task.reason ?? null,
+        started: taskStartedOf(task),
+        endedAt: task.endedAt ?? null,
+        reported: taskReportedOf(task),
+        waiting: taskWaitingOf(task),
+        mayBeRunning: taskMayBeRunningOf(task),
+        reason: lastFailureOf(task)?.error?.code ?? null,
         request: task.request,
         resultText: task.resultText ?? null,
         replyText: task.replyText ?? null,
-        failureReason: task.failureReason ?? null,
+        failureReason: lastFailureOf(task)?.error?.message ?? null,
         executions: task.executions.map((execution) => ({ requestId: execution.requestId, operation: execution.operation, status: execution.status })),
       }));
       groups.push(evidence);

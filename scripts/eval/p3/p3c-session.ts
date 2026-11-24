@@ -4,7 +4,7 @@
  * 预注册（.runtime/r5phase3/prereg.md）：S3 maxModelCalls=40 / maxTokens=600k / 墙钟 30min；
  * 一次采样、不重采样、全样本保留（含失败样本）。
  *
- * 四类失败构造 + 双面举证（任务终态 vs 执行进程实际停止）：
+ * 四类失败构造 + 双面举证（任务停下事实 vs 执行进程实际停止）：
  *   A 上下文预算不足（装配期）：contextWindow=4000 < FLOOR → createPiTurnDriver fail-fast
  *     拒绝，零模型请求，进程继续（不重试）。确定性，零模型调用。
  *   B 上下文预算不足（回合前不变式无解）：真实模型驱动，转录=小前缀+超大末条业务消息
@@ -40,7 +40,8 @@ import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver, TurnDriverInput } from '../../../packages/agent/src/driver-contract';
 import { createResourcePolicy } from '../../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import type { TaskScope } from '../../../packages/agent/src/task-registry';
+import { type TaskScope } from '../../../packages/agent/src/task-registry';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import {
   assembleSessionCore,
@@ -419,12 +420,12 @@ async function run(): Promise<void> {
     const pumpAfter = dispatch.runner.pump();
     await dispatch.runner.whenIdle();
     partE['mechanical'] = {
-      submittedStatus: mechTask.status,
+      submittedFacts: { started: taskStartedOf(mechTask), reported: taskReportedOf(mechTask), waiting: taskWaitingOf(mechTask), mayBeRunning: taskMayBeRunningOf(mechTask) },
       cancelOutcome,
       pumpAfter,
       inFlightAfter: [...dispatch.runner.inFlight()],
-      taskStatusAfter: registry.get(mechTask.taskId, scope)?.status ?? null,
-      taskReasonAfter: registry.get(mechTask.taskId, scope)?.reason ?? null,
+      taskFactsAfter: (() => { const t = registry.get(mechTask.taskId, scope); return { started: taskStartedOf(t), reported: taskReportedOf(t), waiting: taskWaitingOf(t), mayBeRunning: taskMayBeRunningOf(t) }; })(),
+      taskReasonAfter: lastFailureOf(registry.get(mechTask.taskId, scope))?.error?.code ?? null,
     };
     partE['sessionTasksFinal'] = JSON.parse(JSON.stringify(session.tasks()));
     // 取消后执行核查：E2 任务不得有任何 execute 记录。

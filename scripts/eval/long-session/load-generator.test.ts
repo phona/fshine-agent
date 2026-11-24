@@ -12,7 +12,7 @@ function hasExpectation(turn: TurnSpec): boolean {
     || turn.expectNoExecution === true
     || (turn.expectExecutionObjects?.length ?? 0) > 0
     || turn.expectPrevTasksUnchanged === true
-    || turn.expectTaskStatusIn !== undefined
+    || turn.expectTaskFactIn !== undefined
     || (turn.replyExcludes?.length ?? 0) > 0
     || turn.expectCancelHonest === true
     || turn.expectInflightCancel === true;
@@ -32,10 +32,10 @@ describe('负载生成器', () => {
     expect(factTurns(buildTrackPlan('LS1'))).toHaveLength(8);
   });
 
-  it('LS2 的任务轮携带期望状态', () => {
+  it('LS2 的任务轮携带期望机械事实', () => {
     const taskTurns = buildTrackPlan('LS2').turns.filter((t) => t.kind === 'task');
     expect(taskTurns.length).toBeGreaterThanOrEqual(6);
-    expect(taskTurns.some((t) => t.expectTaskStatus === 'failed')).toBe(true);
+    expect(taskTurns.some((t) => t.expectTaskFact === 'exec:failed')).toBe(true);
   });
 
   it('LS3 覆盖 NL1–NL10 标签，且 NL2/NL3/NL4/NL5/NL7/NL9/NL10 有机械期望、NL8 不得新建任务', () => {
@@ -44,7 +44,7 @@ describe('负载生成器', () => {
     for (let i = 1; i <= 10; i += 1) expect(labels).toContain(`NL${i}`);
     const byLabel = new Map(turns.map((t) => [t.label, t]));
     for (const label of ['NL2', 'NL3', 'NL4', 'NL5', 'NL7', 'NL9', 'NL10']) {
-      expect(byLabel.get(label)?.fact ?? byLabel.get(label)?.expectTaskStatusIn).toBeDefined();
+      expect(byLabel.get(label)?.fact ?? byLabel.get(label)?.expectTaskFactIn).toBeDefined();
     }
     expect(byLabel.get('NL8')?.expectNoNewTask).toBe(true);
     // 事实期望的取值来自 FACT_TRUTH（alpha 2/2000、beta 3/1000、documents 第二条 800）。
@@ -72,7 +72,7 @@ describe('负载生成器', () => {
     expect(byLabel.get('N1-A')?.expectNewTask).toBe(true);
     expect(byLabel.get('N1-B')?.expectNewTask).toBe(true);
     expect(byLabel.get('N1-C')?.expectNoNewTask).toBe(true);
-    expect(byLabel.get('N1-C')?.expectTaskStatusIn).toEqual({ which: 'oldest', values: ['completed'] });
+    expect(byLabel.get('N1-C')?.expectTaskFactIn).toEqual({ which: 'oldest', facts: ['reported'] });
     expect(byLabel.get('N1-C')?.fact).toMatchObject({ collection: 'alpha', count: 2, sum: 2000 });
     // N2 改口径：落到 beta 执行行；回头只报 beta、不再报 alpha 数值。
     expect(byLabel.get('N2-A')?.expectExecutionObjects).toEqual(['beta']);
@@ -93,7 +93,7 @@ describe('负载生成器', () => {
     // N6 三档：在飞取消必须真落到 cancelled；已完成任务拒绝取消（状态不变）。
     expect(byLabel.get('N6-Q2')?.expectInflightCancel).toBe(true);
     expect(byLabel.get('N6-C')?.expectPrevTasksUnchanged).toBe(true);
-    expect(byLabel.get('N6-C')?.expectTaskStatusIn).toEqual({ which: 'oldest', values: ['completed'] });
+    expect(byLabel.get('N6-C')?.expectTaskFactIn).toEqual({ which: 'oldest', facts: ['reported'] });
     // 取消诚实性必须查「最早那个」任务，不能被最新任务（另一个已 cancelled）空过。
     expect(byLabel.get('N6-C')?.expectCancelHonest).toBe(true);
     expect(byLabel.get('N6-C')?.cancelTarget).toBe('oldest');

@@ -18,6 +18,7 @@ import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import { assembleSessionCore } from '../../ask-runtime';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import { createPiModelRuntime, createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
@@ -345,8 +346,8 @@ async function main(): Promise<void> {
 
       // Dump task registry facts after every turn.
       const tasks = assembled.session.tasks().map((t) => ({
-        taskId: t.taskId, taskNo: t.taskNo, name: t.name, status: t.status,
-        reason: t.reason, failureReason: t.failureReason, resultText: t.resultText, replyText: t.replyText,
+        taskId: t.taskId, taskNo: t.taskNo, name: t.name, started: taskStartedOf(t), reported: taskReportedOf(t), waiting: taskWaitingOf(t), mayBeRunning: taskMayBeRunningOf(t),
+        reason: lastFailureOf(t)?.error?.code, failureReason: lastFailureOf(t)?.error?.message, resultText: t.resultText, replyText: t.replyText,
         executions: t.executions,
       }));
       writeFileSync(path.join(outDir, 'tasks.json'), JSON.stringify(tasks, null, 2));

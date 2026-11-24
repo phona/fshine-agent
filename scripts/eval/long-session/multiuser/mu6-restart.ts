@@ -62,7 +62,7 @@ export class TagKeyedExecutor implements TaskExecutor {
   async execute(input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
     this.calls += 1;
     const tag = tagOf(input.request) ?? 'UNKNOWN';
-    return { kind: 'completed', resultText: `${this.prefix}${tag}` };
+    return { kind: 'ended', report: `${this.prefix}${tag}` };
   }
 }
 
@@ -129,8 +129,10 @@ export async function mu6Restart(rt: RuntimeConfig): Promise<MuCaseResult> {
       ),
     );
     void replies1;
+    // S1 事实：零执行收尾（本假执行器只回报，不产生执行行）没有 completed 结论——落定事实 =
+    // 汇报逐字存档（replyText = RESULT:<tag>），等待面按同一机械事实判「办完了」。
     await waitUntil(() =>
-      readTasks(server1.dbPath).filter((task) => task.status === 'completed').length >= MU_PRINCIPALS.length,
+      readTasks(server1.dbPath).filter((task) => (task.replyText ?? '').startsWith(RESULT_PREFIX)).length >= MU_PRINCIPALS.length,
     );
     tasksBeforeRestart = readTasks(server1.dbPath);
   } finally {
@@ -201,16 +203,19 @@ export async function mu6Restart(rt: RuntimeConfig): Promise<MuCaseResult> {
     if (!noReplay) hardZeroHits.push('task_crossover');
 
     // ④ 结果找回：重启后经 Task Registry 取回首回合任务的真实结果（逐字）。
-    const resultRetrieval: Record<string, { taskId: string; status: string; replyText: string | null; ok: boolean }> = {};
+    const resultRetrieval: Record<string, { taskId: string; started: boolean; waiting: boolean; mayBeRunning: boolean; reported: boolean; lastExecutionStatus: string | null; replyText: string | null; ok: boolean }> = {};
     for (const userId of MU_PRINCIPALS) {
       const task = tasksAfterRestart.find(
         (candidate) => candidate.principalId === principalIdOf(userId) && candidate.sessionId === sessionIdOf(`conv-${userId}`),
       );
       const expected = `${RESULT_PREFIX}${ownTag(userId)}`;
-      const ok = task !== undefined && task.status === 'completed' && task.replyText === expected;
+      // 结果找回 = 重启后仍能取回逐字存档的结果（S1：底账没有状态词，判据只读汇报存档事实）。
+      const ok = task !== undefined && task.replyText === expected;
       resultRetrieval[userId] = {
         taskId: task?.taskId ?? '',
-        status: task?.status ?? 'missing',
+        started: task?.started ?? false, waiting: task?.waiting ?? false, mayBeRunning: task?.mayBeRunning ?? false,
+        reported: task?.reported ?? false,
+        lastExecutionStatus: task?.lastExecutionStatus ?? null,
         replyText: task?.replyText ?? null,
         ok,
       };
@@ -266,7 +271,7 @@ export async function mu6Restart(rt: RuntimeConfig): Promise<MuCaseResult> {
         replies2: Object.fromEntries(replies2),
         tasksAfterRestart: tasksAfterRestart.map((task) => ({
           taskId: task.taskId, principalId: task.principalId, sessionId: task.sessionId,
-          request: task.request, status: task.status, replyText: task.replyText,
+          request: task.request, started: task.started, ended: task.ended, waiting: task.waiting, mayBeRunning: task.mayBeRunning, reported: task.reported, lastExecutionStatus: task.lastExecutionStatus ?? null, replyText: task.replyText,
         })),
       },
     });

@@ -24,8 +24,8 @@ import { materializeEvalConfig } from '../../resolve-config-path';
 import { assembleSessionCore } from '../../ask-runtime';
 import type { DriverFactory, ExecutionFaceFactory } from '../../ask-runtime';
 import { assessEvalIsolation, assertEvalIsolation } from '../safety-gate';
-import { notificationKindForTransition } from '../../../packages/agent/src/notifications';
-import type { NotificationReason } from '../../../packages/agent/src/notifications';
+import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
+import { isNotificationFact, notificationLineOf, taskFactLineOf } from './task-facts-collect';
 import type { CaseContext } from './batch';
 import type { BizCase, BizItem } from './scenarios';
 import type { BizExecutor, BizSampleEvidence } from './assembly';
@@ -204,10 +204,15 @@ export function createModelExecutor(options: ModelExecutorOptions = {}): BizExec
     // 只采集不判；inline 无 outbox 时这里仍能由状态迁移派生出通知意图行（各状态终态）。
     const taskFacts: TaskFactLine[] = [];
     const notifications: NotificationLine[] = [];
+    // 事实模型：底账只发机械事实（无 from/to/reason）。事件 → **事实增量**（启动/结束/汇报/等待），
+    // 供 d6 度量按事实口径读（不合成任务级状态词；不再区分「怎么结束」）。
+    // 映射表与投影在 task-facts-collect.ts（按 TaskEventKind 穷尽；2026-11-24 grok blocking：
+    // 两份各自维护的副本在终局事件改名后都没跟上，取消/到点/容量拒绝被采集成「还没结束」）。
     assembled.taskRegistry.onTaskFact((fact) => {
-      taskFacts.push({ ts: fact.at, taskId: fact.taskId, from: fact.from ?? '', to: fact.to, ...(fact.reason === undefined ? {} : { reason: fact.reason }) });
-      const kind = notificationKindForTransition(fact.from, fact.to, fact.reason as NotificationReason | undefined);
-      if (kind !== undefined) notifications.push({ ts: fact.at, taskId: fact.taskId, kind });
+      taskFacts.push(taskFactLineOf(fact));
+      if (isNotificationFact(fact.event)) {
+        notifications.push(notificationLineOf(fact));
+      }
     });
     try {
       const session = assembled.session;
@@ -228,7 +233,8 @@ export function createModelExecutor(options: ModelExecutorOptions = {}): BizExec
         metaTurns.push({ index: turn, durationMs, modelCalls: assistantMessages.length, taskIds: [...(result?.taskIds ?? [])], tokens, retries: 0, notes: [] });
         replies.push({ turn, text: result?.reply ?? '', sha256: '' });
       }
-      tasksSnapshot = jsonSafe(assembled.taskRegistry.list()) as TaskRecordJson[];
+      // 事实口径：底账没有 status——证据快照只带账本事实 + 启动/结束/汇报/等待/可能还在跑。
+      tasksSnapshot = jsonSafe(assembled.taskRegistry.list().map((task) => ({ ...task, started: taskStartedOf(task), reported: taskReportedOf(task), waiting: taskWaitingOf(task), mayBeRunning: taskMayBeRunningOf(task) }))) as TaskRecordJson[];
       // #8 会话隔离断言：底账任务必须全归本样本 principal（不串台）。
       const foreign = tasksSnapshot.filter((t) => t.principalId !== principalId);
       if (foreign.length > 0) throw new Error(`会话隔离违反：底账出现非本样本 principal 的任务 ${foreign.map((t) => t.taskId).join(',')}`);

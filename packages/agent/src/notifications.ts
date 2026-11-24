@@ -5,8 +5,9 @@
  * 通知失败或延迟不得改变任务结果。因此本模块把「通知事实」先落同库 outbox，再由
  * 渠道无关的 `NotificationSink` 投递；投递成功与否只改 outbox 的投递列。
  *
- * 最小形状（全部冻结项，见 docs/history/r4-joint-interfaces.md §4）：
- *   · 9 类通知意图枚举 + 状态转移→意图映射（阶段进展/里程碑由 state fact 生成）；
+ * 最小形状（见 docs/history/r4-joint-interfaces.md §4；2026-11-23 删状态机轮改形）：
+ *   · 7 类**事件/通知**意图（受理/开始/接续/等待/用户确认停止/等待窗口到期/资源拒绝）——
+ *     没有 completed/failed：不把「发生了什么」映成「已完成/失败」的任务级结论；
  *   · 同库最小表 notifications(id, task_id, kind, state_version, payload_json, created_at,
  *     delivered_at, attempts, last_error)，由本模块 `CREATE TABLE IF NOT EXISTS` 自建（幂等）；
  *     唯一 (task_id, kind, state_version) —— 重复触发不新增、不覆盖首次事实；
@@ -26,44 +27,34 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-
-/** 9 类通知意图（冻结顺序；契约 §4）。 */
+/**
+ * 事件/通知意图（7 类；「发生了什么」的触发事实，不是任务状态，也不是「怎么结束」的分类）。
+ * completed/failed/cancelled/timed_out/resource_limited 这类结果/结束词已删
+ * （2026-11-23 收口轮 + 第 1 轮审查）：汇报存档与无汇报收尾不再被分类成「已完成/失败」；
+ * 用户说停 / 时限到点 / 容量拒绝只记**触发事实**（user_stop / deadline_reached /
+ * capacity_blocked），怎么结束由消费方读原始事实就地判断。
+ */
 export const NOTIFICATION_KINDS = [
   'accepted',
   'started',
   'waiting_user',
   'resumed',
-  'completed',
-  'failed',
-  'cancelled',
-  'timed_out',
-  'resource_limited',
+  'user_stop',
+  'deadline_reached',
+  'capacity_blocked',
 ] as const;
 
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 
-/** 机械失败/终止原因（契约 §1 冻结集合；payload.reason 仅允许此集合）。 */
+/** 机械原因（payload.reason 仅允许此集合；触发事实，不是任务级结局分类）。 */
 export const NOTIFICATION_REASONS = [
-  'cancelled_by_user',
-  'timeout',
-  'failed_confirmed',
+  'user_stop',
+  'deadline_reached',
   'result_unknown',
-  'resource_limited',
+  'capacity_blocked',
 ] as const;
 
 export type NotificationReason = (typeof NOTIFICATION_REASONS)[number];
-
-/** 任务状态集（契约 §1 冻结；含保留的 unexecuted）。 */
-export type TaskState =
-  | 'queued'
-  | 'running'
-  | 'waiting_user'
-  | 'cancelling'
-  | 'cancelled'
-  | 'completed'
-  | 'failed'
-  | 'timed_out'
-  | 'unexecuted';
 
 /** payload 字段白名单（仅底账事实；不接受自由文本编造）。 */
 export interface NotificationPayload {
@@ -294,39 +285,6 @@ interface NotificationRow {
   last_error: string | null;
 }
 
-/**
- * 状态转移→通知意图（纯函数；契约 §4）。无法映射的过渡（cancelling/unexecuted 等
- * 过渡态与保留态）返回 undefined = 不产生通知；result_unknown 仍落 failed 状态，
- * 机械原因由 payload.reason 如实携带（不伪装成成功，也不额外造第十类意图）。
- */
-export function notificationKindForTransition(
-  from: TaskState | undefined,
-  to: TaskState,
-  reason?: NotificationReason,
-): NotificationKind | undefined {
-  if (reason === 'resource_limited') return 'resource_limited';
-  if (reason === 'cancelled_by_user') return 'cancelled';
-  if (reason === 'timeout') return 'timed_out';
-  switch (to) {
-    case 'queued':
-      return 'accepted';
-    case 'running':
-      return from === 'waiting_user' ? 'resumed' : 'started';
-    case 'waiting_user':
-      return 'waiting_user';
-    case 'completed':
-      return 'completed';
-    case 'failed':
-      return 'failed';
-    case 'cancelled':
-      return 'cancelled';
-    case 'timed_out':
-      return 'timed_out';
-    default:
-      return undefined;
-  }
-}
-
 function validateFact(fact: NotificationFact): void {
   for (const key of Object.keys(fact)) {
     if (!FACT_KEYS.has(key)) {
@@ -337,7 +295,7 @@ function validateFact(fact: NotificationFact): void {
     throw new NotificationPayloadError('通知事实缺少 taskId。');
   }
   if (!NOTIFICATION_KINDS.includes(fact.kind)) {
-    throw new NotificationPayloadError('通知意图不是冻结的九类之一。');
+    throw new NotificationPayloadError('通知意图不是冻结的事件类之一。');
   }
   if (typeof fact.at !== 'string' || fact.at === '') {
     throw new NotificationPayloadError('通知事实缺少时间 at（底账事实，不得缺省编造）。');

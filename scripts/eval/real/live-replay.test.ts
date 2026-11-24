@@ -61,7 +61,7 @@ function greenInput(): AssertInput {
       { collection: 'alpha', before: reading(2, []), after: reading(2, []) },
       { collection: 'finance-invoices', before: reading(0, []), after: reading(0, []) },
     ],
-    cancelledLongTasks: [{ taskId: 'task-x', status: 'cancelled', operations: ['dummy.longtask'] }],
+    cancelledLongTasks: [{ taskId: 'task-x', started: true, endedAt: '2026-11-15T00:00:00.000Z', reported: false, waiting: false, mayBeRunning: false, operations: ['dummy.longtask'] }],
     abortAudit: [{ mode: 'abort', script: 'dummy.longtask' }],
   };
 }

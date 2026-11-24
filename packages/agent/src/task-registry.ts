@@ -1,95 +1,78 @@
 /**
- * 任务归属底账 + 生命周期状态事实（B 类：任务归属与状态，最小形状）。
+ * 任务归属底账 + 事实（B 类：任务归属与存活，最小形状）。
  *
  * 为什么需要它：委派任务必须绑定发起它的可信身份与会话，事后按业务查询时，
  * 越权（换一个 principal/session）必须被确定性拒绝。可信身份来自装配层的
  * principalId/sessionId（配置与渠道事实），**不接受模型输入**。
  *
- * P1 底账演化（最小增量，豁免零新增机制——数字 ID/名称/回复存档是任务书点名的确定性责任）：
- *   · taskNo：数字任务编号（由 SQLite 底账单条 SQL 原子分配；内存实现同口径自增）；
- *   · name：业务名称 v1 = 机械回落 deriveTaskName(request)（零模型；来源=任务交办原文，
- *     与迁移回填/显示回落同规则；#4-a 模型命名递延，不改 task_run 工具 schema）；
- *   · replyText：Main 本回合最终回复（send 收尾后 archiveReply 同值写本回合各任务行）。
- *
- * P2a 契约核心（2026-11-14；来源 docs/history/r4-joint-interfaces.md §1 v1 冻结）：
- *   · 状态集 queued/running/waiting_user/cancelling/cancelled/completed/failed/timed_out
- *     + 保留 unexecuted（已汇报零执行）；
- *   · 合法转换矩阵见 LEGAL_TRANSITIONS（其余一律拒绝并留痕：TaskTransitionError，
- *     状态不变、零事实）；cancelling→running 是「中止未获确认不得宣称取消」的回滚边；
- *   · 取消语义：requestCancel 只落 cancelling（请求 ≠ 取消），confirmCancelled 才落
- *     cancelled；确认/超时写机械原因（TASK_REASONS）；
- *   · waiting_user 形状：pending_question（JSON：missing[]/candidates?[]/raw?）+ waiting_since；
- *     答复 answerResumes 续同一 Task（task_no 不变、executions 追加、不得新建任务）；
- *   · 唯一写路径：所有状态变化经本方法族（原子持久化 + onTaskFact 事实钩子）；
- *     任何模块禁止直接 UPDATE tasks.status（源码级守卫见 task-registry-write-path.test.ts）；
- *   · result_unknown ≠ failed ≠ success：重启后无法确认的 running 任务经
- *     markResultUnknown / expireLeases 落 failed + reason=result_unknown，禁止自动重放。
- *
- * inline 路径维持现冻结语义（judgeReportedTask 的 P2a 口径不改——2026-11-21 只增补「成功脚本
- * run_js 不盖前面执行层失败」一项；complete/fail 仍按既有口径收尾，
- * waiting_user 仅后台任务使用）。
+ * 不维护任务状态机（owner 2026-11-23；docs/design/task-redefinition.md）：task 没有 status，
+ * 也没有任何任务级状态/生命周期枚举。底账只记事实：
+ *   · worker 汇报（语义）：resultText（完成汇报）/ replyText（Main 最终回复存档）/ 逐笔执行行；
+ *   · 宿主事实（机械）：归属（taskId/principalId/sessionId）+ 启动时刻 + 等待形状 + 租约 +
+ *     claimed→resulted 幂等账（operations 表，行就是身份）+ 一条「这一轮在 T 停下」的事实
+ *     （endedAt；**不分类**，怎么结束不存）；
+ *   · 活/结束现推（布尔事实谓词，见 @fshine/core task-progress）：已启动 + 无结束事实 +
+ *     无汇报/提问 + 本进程有没有活 worker。做没做成读执行行与汇报，不在底账上写总结论。
  *
  * U3 稳定逻辑操作身份（2026-11-16，仅追加，不新建第二套 Registry）：
  *   · 在**现有**底账上增加一张 operations 账（内存实现用 Map，SQLite 实现用 operations 表），
  *     行就是身份：dispatch_key 主键 + UNIQUE(scope_key, op_seq)，**没有**任何以
  *     (operation, args) 为键的唯一约束——参数完全相同的两笔合法操作必须是两行、各执行一次；
- *   · 铸造点唯一：首次创建逻辑操作时分配 op_seq 并落库；重试/重规划只读回同一行
- *     （claimOperation 的结构不接受 args，因此「按参数文本去重」没有代码路径）；
- *   · 认领与写状态都是原子的：读候选 → 纯函数决策 → 写，在 registry 侧一次完成
+ *   · 铸造点唯一：首次创建逻辑操作时分配 op_seq 并落库；重试/重规划只读回同一行；
+ *   · 认领与写事实都是原子的：读候选 → 纯函数决策 → 写，在 registry 侧一次完成
  *     （SQLite 实现包在 BEGIN IMMEDIATE 写事务里）；进行中的重复请求返回 in_progress，
  *     不发起第二次执行；
- *   · 证明不了新调用属于已有操作 → unresolved（停止副作用，交由调用方落 result_unknown），
+ *   · 证明不了新调用属于已有操作 → unresolved（停止副作用，交由调用方如实告知），
  *     不猜绑定；读操作（装配方声明的只读集合）可安全重发，不被 key 逻辑误挡。
  *
  * 这里不做的（登记缺口，不在这里预造）：
  *   · 通用 Exactly Once：宿主只承诺「同一身份至多一次自动执行 + 结果未知可核对」，
  *     外部幂等键/状态查询/回读归执行层；
- *   · 事件流/订阅体系：事实钩子只做单回调注入（供 P4/P6），不持久化事件。
+ *   · 事件流/订阅体系：事实钩子只做单回调注入（供通知/采集），不持久化事件。
  *
  * 拒绝路径（回归锁，见 runtime.test.ts）：换 principal 或换 session 取任务
  * 一律 TaskOwnershipError；取不存在的任务与越权同一错误（不泄漏任务是否存在）。
  */
 import type { ExecutionFailure, ExecutionOutcome, ExecutionStatus } from '@fshine/contracts/execution-contract';
+import {
+  stillProgressingOf,
+  taskAcceptedInFlightOf,
+  taskEndedOf,
+  taskMayBeRunningOf,
+  taskProgressEndedOf,
+  taskReportedOf,
+  taskStartedOf,
+  taskUnstartedOf,
+  taskWaitingOf,
+} from '@fshine/core';
 
-/**
- * 宿主脚本工具的操作名（与 execution-runtime 的 `RUN_JS_TOOL` 同值，2026-11-21）。
- * task-registry 是下层模块，反向 import execution-runtime 会成环，故此处只存字面量；
- * 同值由 task-status-boundary.test.ts 的机械钉子钉住（任一侧改名漂移必红）。
- */
-export const RUN_JS_OPERATION = 'run_js';
+/** 推进判定与底账扫描共用的布尔事实谓词（实现在 @fshine/core 的 task-progress；此处只转出）。 */
+export {
+  stillProgressingOf,
+  taskEndedOf,
+  taskMayBeRunningOf,
+  taskProgressEndedOf,
+  taskReportedOf,
+  taskStartedOf,
+  taskUnstartedOf,
+  taskAcceptedInFlightOf,
+  taskWaitingOf,
+} from '@fshine/core';
 
-/** P2a：冻结状态集（顺序即契约登记顺序）。unexecuted = 已汇报零执行（保留）。 */
-export const TASK_STATUSES = [
-  'queued',
-  'running',
-  'waiting_user',
-  'cancelling',
-  'cancelled',
-  'completed',
-  'failed',
-  'timed_out',
-  'unexecuted',
-] as const;
+/**（历史注记）宿主脚本工具的操作名常量与 inline 终局判定已随 S1 一并删除：执行端回合只记事实，不判业务终局。 */
 
-export type TaskStatus = (typeof TASK_STATUSES)[number];
-
-/** 机械终止原因（冻结枚举）：result_unknown ≠ failed ≠ success，禁止自动重放。 */
-export const TASK_REASONS = [
-  'cancelled_by_user',
-  'timeout',
-  'failed_confirmed',
-  'result_unknown',
-  'resource_limited',
-] as const;
-
-export type TaskReason = (typeof TASK_REASONS)[number];
-
-/** 超时种类（超时链：queued 排队等待 / execution 执行 / waiting_user 用户等待）。 */
-export type TimeoutKind = 'queued' | 'execution' | 'waiting_user';
+/** waiting_user 的机械问题形状（执行层 needs_input 事实；不编造、不改写候选）。 */
+export interface PendingQuestion {
+  missing: readonly string[];
+  candidates?: readonly string[];
+  raw?: string;
+  /** 写操作提案（可选）：needs_confirmation 与 needs_input 同走等待事实，不另立状态。 */
+  confirmation?: PendingConfirmation;
+}
 
 /**
  * 写操作提案的机械形状（执行层 needs_confirmation 事实；原样承载，不解释、不裁决）。
- * handle 是执行层发放的确认凭据：留底账供后续回合透传（S3），**不进模型/用户可见投影**
+ * handle 是执行层发放的确认凭据：留底账供后续回合透传，**不进模型/用户可见投影**
  * （execution-runtime 的 toModelVisibleOutcome / pendingQuestionView 负责剥离）。
  */
 export interface PendingConfirmation {
@@ -110,28 +93,31 @@ export interface PendingConfirmation {
   args?: Record<string, unknown>;
 }
 
-/** waiting_user 的机械问题形状（执行层 needs_input 事实；不编造、不改写候选）。 */
-export interface PendingQuestion {
-  missing: readonly string[];
-  candidates?: readonly string[];
-  raw?: string;
-  /** 写操作提案（可选）：needs_confirmation 与 needs_input 同走 waiting_user，不新状态。 */
-  confirmation?: PendingConfirmation;
-}
-
 /**
- * 状态事实（供 P4/P6，非事件总线）：每次成功状态变化一条；begin 创建事实无 from
- * （不是状态转换）。v1.1：`stateVersion` 为稳定去重版本（P4 outbox 唯一键用），
- * 缺省 = `at`（集成若提供注册表计数器可显式传入更精确版本）。
+ * 机械事实事件（通知/采集消费；每次机械事实写入一条）。
+ * 这些是「发生了什么」的**触发事实**（受理/开始/接续/等待/用户说停/等待窗口到期/
+ * 容量拒绝/汇报存档/这一轮停下），**不是任务级状态、也不是「怎么结束」的分类**：
+ * 没有 cancelled/timed_out/resource_limited 之类结束种类词；这一轮停下只有 `ended`。
  */
+export type TaskEventKind =
+  | 'accepted'          // 受理（后台排队）
+  | 'started'           // 开始跑（inline 建行 / 队列认领）
+  | 'resumed'           // 等待接续（答复/确认后新回合）
+  | 'waiting_user'      // 进入等待（needs_input / 待确认提案）
+  | 'user_stop'         // 用户要求停下（机械事实：用户说了停）
+  | 'deadline_reached'  // 机械时限到点（等待到期 / 回合超时 / 排队超时）
+  | 'capacity_blocked'  // 容量拒绝（受理/派发被 policy 拒）
+  | 'result_archived'   // worker 汇报存档（事实：有汇报原文）
+  | 'ended';            // 这一轮停下（不分类：怎么结束不存）
+
+/** 一条机械事实（供通知/采集，非事件总线）。 */
 export interface TaskFact {
   taskId: string;
   taskNo: number;
   name: string;
-  from?: TaskStatus;
-  to: TaskStatus;
-  reason?: TaskReason;
+  event: TaskEventKind;
   at: string;
+  /** 稳定去重版本（通知 outbox 唯一键第三段）；缺省 = at。 */
   stateVersion?: string | number;
 }
 
@@ -162,111 +148,42 @@ export interface ExecutionRecord {
   dispatchKey?: string;
 }
 
-/** 判定只需要的执行事实投影（内存 ExecutionRecord 与 SQLite 读回行共用）。 */
-export interface ExecutedFact {
-  operation: string;
-  status: ExecutionStatus;
-  error?: ExecutionFailure;
-}
+/** 机械超时种类（等待到期 / 回合超时 / 排队超时；只用于调用方分档，不落底账）。 */
+export type TimeoutKind = 'execution' | 'waiting_user';
 
-/**
- * 完成判定（内存 / SQLite 共用，两实现逐项一致）：只看已记录的执行事实，不嗅探汇报文本。
- *   · 零条执行 → unexecuted（Worker 汇报了但没向执行层发起任何调用）；
- *   · **末条执行** completed → completed（末条是成功脚本 run_js 的例外见下）；
- *   · 末条执行非 completed → failed，failureReason 机械合成（取**末条**的 operation/status/
- *     error.message 原样；无 error.message 时以状态收尾）。
- * 为什么是「末条」而不是「首个非 completed」（2026-11-19 owner 修法）：执行层的参数形态反馈
- * 回路本就鼓励模型「改对参数再试一次」；改对后的成功是末次决定性结果，写已经落库，不得被前序
- * 失败整体判 failed（真模型写闭环实跑 5 次复现 2 次：写落库却告知失败并引导重试 → 重复写风险）。
- * 前序失败逐条保留在 executions 里（审计可查、可追溯），只是不改写终局。末条仍是失败 → 照旧
- * failed（不放宽；「只要有一次成功过就算成功」的万金油不成立）。result_unknown 不是成功，
- * 也不属于本判定的收窄面。
- * 2026-11-21 增补（Grok 审查 blocking 的 inline 面）：run_js 是宿主脚本执行，不是执行层业务
- * 执行——末条是**成功的脚本**时，业务终局回到此前最后一条非脚本执行事实（执行层失败/needs_input
- * 不得被脚本成功盖成 completed；脚本失败行本身仍如实保留）。只收窄这一个方向，见函数内注释。
- * 局限（如实登记）：inline 判定只拿到执行事实投影（无只读集合、无调用参数），无法区分读写、
- * 也无法做「成功后同对象重复尝试 / 另一个写没成」的归类，因此以**末条执行事实**为准；后台单回合
- * 执行器（execution-runtime）知道只读集合与参数，以「末次决定性结果 + 成功后按同对象分类」为准，
- * 并在 run_js 上双向收窄（成功脚本不盖失败的写、失败脚本不翻已落库的写）。
- * 为什么不是无条件 completed：Worker 以汇报结束不等于执行层成功——「执行层实际成功 /
- * 拒绝或失败 / 未发起执行」必须在顶层 status 上可区分（B 类如实交付）。
- *
- * P2a 冻结语义（E05/E06）不变；waiting_user 由后台路径的 waitForUser 单独进入，
- * 本函数仅服务于 inline complete 的终态判定。
- */
-export function judgeReportedTask(executions: readonly ExecutedFact[]): {
-  status: 'completed' | 'failed' | 'unexecuted';
-  failureReason?: string;
-} {
-  const last = executions[executions.length - 1];
-  if (last === undefined) {
-    return {
-      status: 'unexecuted',
-      failureReason: '没有实际办理：助手已汇报，但这次交办没有发出任何办理动作。',
-    };
-  }
-  /**
-   * 2026-11-21（Grok 审查 blocking 的 inline 面）：run_js 是宿主脚本执行，不是执行层业务
-   * 执行。末条是**成功的脚本**时，业务终局回到此前最后一条非脚本执行事实——执行层失败
-   * （或 needs_input）不得被随后的脚本成功盖成 completed（同后台单回合执行器同口径）。
-   * 只收窄这一个方向：脚本之间（[run_js failed, run_js completed]）仍按末条决定；脚本失败
-   * 仍是真实失败事实（末条 failed run_js → failed 不变）——inline 拿不到只读集合，无法区分
-   * 前序 completed 是读还是写，而「查询成功 + 脚本失败 → failed」是冻结用例
-   * （runtime-worker-run-js），不得放宽。
-   */
-  const decisive = last.operation === RUN_JS_OPERATION && last.status === 'completed'
-    ? [...executions].reverse().find((entry) => entry.operation !== RUN_JS_OPERATION) ?? last
-    : last;
-  if (decisive.status === 'completed') return { status: 'completed' };
-  const message = decisive.error?.message ?? '';
-  return {
-    status: 'failed',
-    failureReason: message === ''
-      ? `没办成：${decisive.operation} 返回 ${decisive.status}。`
-      : `没办成：${decisive.operation} 返回 ${decisive.status}：${message}`,
-  };
-}
-
-/** 一条最小任务底账：归属 + 状态 + 机械原因/等待形状/租约 + 结果文本 + 执行调用清单。 */
+/** 一条最小任务底账：归属 + 机械事实 + 汇报存档 + 执行调用清单（无状态/结论字段）。 */
 export interface TaskRecord {
   taskId: string;
   principalId: string;
   sessionId: string;
   /** 委派原文（任务请求；审计与结果解释用；业务名称的机械来源）。 */
   request: string;
-  status: TaskStatus;
-  /** 机械终止原因（cancelled_by_user/timeout/failed_confirmed/result_unknown/resource_limited）。 */
-  reason?: TaskReason;
+  /** worker 完成汇报（inline 收尾逐字存档；后台完成经 archiveReply 同义存档面）。 */
   resultText?: string;
-  failureReason?: string;
-  /** waiting_user：待用户补齐的问题（原样持久化；答复后清除，等待超时保留为历史）。 */
+  /** P1：本回合 Main 最终回复全文（同回合各任务行同值；缺省=无最终回复存档）。 */
+  replyText?: string;
+  /** 等待事实：待用户补齐的问题/待确认提案（原样持久化；答复后清除，收尾后保留为历史）。 */
   pendingQuestion?: PendingQuestion;
-  /** waiting_user：进入等待的时刻（ISO）。 */
+  /** 进入等待的时刻（ISO）。 */
   waitingSince?: string;
-  /** 后台认领租约（仅 running 且已认领时存在；离开 running 即清空）。 */
+  /** 在跑租约（认领/接续回合持有；写结束事实时清空）。 */
   leaseOwner?: string;
   leaseUntil?: string;
+  /**
+   * 这一轮停下的机械时刻（追加事实账；同任务至多一条、不可变）。缺省 = 尚未停下。
+   * **没有种类**——怎么结束不存；消费方读原始事实（汇报 / 执行行 / 活 worker）就地算。
+   */
+  endedAt?: string;
   /** P1：数字任务编号（底账分配，唯一、不复用；旧库只读/未迁移时缺省）。 */
   taskNo?: number;
   /** P1：业务名称（新行=机械回落写入；历史行缺省，显示层同规则回落）。 */
   name?: string;
-  /** P1：本回合 Main 最终回复全文（同回合各任务行同值；缺省=无最终回复存档）。 */
-  replyText?: string;
-  /**
-   * 预期契约（2026-11-18）：宿主已发过对应档「长时间没动静」提醒的时刻（ISO）。
-   * 缺省 = 尚未提醒；每档写入一次后不再改（同一任务每档只提醒一次，重启不重发）。
-   *   · longRunningNotifiedAt = 「久无动静」档（10 分钟；唤醒切片起由唤醒模型说）；
-   *   · waitContactLostNotifiedAt = 长任务等待「与执行层断了联系（无回执）」档（2026-11-19）；
-   *   · 30 分钟「卡住」档已随 2026-11-19 唤醒切片删除（longRunningStuckNotifiedAt 不再写入）。
-   */
-  longRunningNotifiedAt?: string;
-  waitContactLostNotifiedAt?: string;
-  /**
-   * 本轮开始运行的时刻（ISO，单调写一次）。长任务受理后租约会被清掉，「跑了多久」不能
-   * 只从租约反推——否则最该主动汇报的长任务反而不在提醒扫描里（2026-11-19）。
-   * 缺省 = 未跑过（排队中 / 旧库只读未迁移）。
-   */
+  /** 本轮开始运行的时刻（ISO，单调写一次）；NULL = 未跑过（未启动，可被认领）。 */
   runningSince?: string;
+  /** 已发过「久无动静」提醒的时刻（ISO；每档只写一次，重启不重发）。 */
+  longRunningNotifiedAt?: string;
+  /** 长任务等待「与执行层断了联系（无回执）」已告知过用户的时刻（ISO；每档只写一次）。 */
+  waitContactLostNotifiedAt?: string;
   executions: readonly ExecutionRecord[];
   createdAt: string;
   updatedAt: string;
@@ -280,16 +197,17 @@ export class TaskOwnershipError extends Error {
   }
 }
 
-/** 非法状态转换：确定性拒绝（状态不变、零事实）；携带 from/to 便于审计与测试断言。 */
-export class TaskTransitionError extends Error {
-  readonly from: TaskStatus;
-  readonly to: TaskStatus;
+/**
+ * 机械事实写入被拒：任务已有结束事实（不翻案）或并发下事实已被写入。
+ * 携带已有事实，供调用方如实收尾（不是错误恢复点——事实已经发生）。
+ */
+export class TaskSettledError extends Error {
+  readonly taskId: string;
 
-  constructor(from: TaskStatus, to: TaskStatus, detail = '') {
-    super(`非法任务状态转换：${from} → ${to}${detail === '' ? '' : `（${detail}）`}。`);
-    this.name = 'TaskTransitionError';
-    this.from = from;
-    this.to = to;
+  constructor(taskId: string) {
+    super(`任务已收尾，事实不翻案：${taskId}。`);
+    this.name = 'TaskSettledError';
+    this.taskId = taskId;
   }
 }
 
@@ -298,189 +216,12 @@ export interface TaskScope {
   sessionId: string;
 }
 
-/** 状态变更方法的公共选项：给出 scope 时先校验归属（越权与不存在同错）。 */
+/** 事实变更方法的公共选项：给出 scope 时先校验归属（越权与不存在同错）。 */
 export interface MutationOptions {
   scope?: TaskScope;
 }
 
-/** transition 额外允许机械原因（与目标状态不符一律拒绝，防编造）。 */
-export interface TransitionOptions extends MutationOptions {
-  reason?: TaskReason;
-}
-
-/**
- * 冻结的合法转换矩阵（r4-joint-interfaces.md §1；其余一律拒绝并留痕）。
- *   · queued→running（认领/启动）；queued→cancelling→cancelled；
- *   · running→{completed|failed|waiting_user|cancelling|timed_out}+unexecuted（保留的内联零执行终态）；
- *   · waiting_user→{running（答复接续）|cancelling|timed_out}；
- *   · cancelling→cancelled（确认）；cancelling→running（中止未获确认不得宣称取消，回滚并留痕）。
- * 登记：queued→timed_out 为 P2-T04「排队等待超时」所需（§1 列举边未含；最小处置见实施报告）。
- */
-const LEGAL_TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
-  queued: ['running', 'cancelling', 'timed_out'],
-  running: ['completed', 'failed', 'waiting_user', 'cancelling', 'timed_out', 'unexecuted'],
-  waiting_user: ['running', 'cancelling', 'timed_out'],
-  cancelling: ['cancelled', 'running'],
-  cancelled: [],
-  completed: [],
-  failed: [],
-  timed_out: [],
-  unexecuted: [],
-};
-
-/** 任务状态机的可持久化投影（内存与 SQLite 实现共用同一 reducer）。 */
-export interface TaskStateSnapshot {
-  status: TaskStatus;
-  reason?: TaskReason;
-  pendingQuestion?: PendingQuestion;
-  waitingSince?: string;
-  leaseOwner?: string;
-  leaseUntil?: string;
-}
-
-/** 状态机动作（语义冻结的方法族经动作归约到同一转换核心）。 */
-export type TaskAction =
-  | { action: 'transition'; to: TaskStatus; reason?: TaskReason }
-  | { action: 'waitForUser'; pendingQuestion: PendingQuestion }
-  | { action: 'answerResumes' }
-  | { action: 'requestCancel' }
-  | { action: 'confirmCancelled' }
-  | { action: 'timeout'; kind: TimeoutKind }
-  | { action: 'markResultUnknown' };
-
-function assertLegalEdge(from: TaskStatus, to: TaskStatus, detail = ''): void {
-  if (!LEGAL_TRANSITIONS[from].includes(to)) throw new TaskTransitionError(from, to, detail);
-}
-
-/** 机械原因由目标状态确定；显式 reason 与目标不符一律拒绝（防编造）。 */
-function mechanicalReason(from: TaskStatus, to: TaskStatus, reason?: TaskReason): TaskReason | undefined {
-  const allowed: readonly TaskReason[] =
-    to === 'cancelled'
-      ? ['cancelled_by_user']
-      : to === 'timed_out'
-        ? ['timeout']
-        : to === 'failed'
-          ? ['failed_confirmed', 'result_unknown', 'resource_limited']
-          : [];
-  if (reason === undefined) {
-    if (to === 'cancelled') return 'cancelled_by_user';
-    if (to === 'timed_out') return 'timeout';
-    if (to === 'failed') return 'failed_confirmed';
-    return undefined;
-  }
-  if (!allowed.includes(reason)) throw new TaskTransitionError(from, to, `原因 ${reason} 与目标状态不符`);
-  return reason;
-}
-
-/** waiting_user 形状校验：missing 必须是非空字符串数组；candidates/raw 可选（不编造）。 */
-function assertPendingQuestion(question: PendingQuestion): void {
-  if (!Array.isArray(question.missing) || question.missing.some((item) => typeof item !== 'string' || item.trim() === '')) {
-    throw new TypeError('pendingQuestion 形状非法：missing 必须是非空字符串数组。');
-  }
-  if (question.candidates !== undefined
-    && (!Array.isArray(question.candidates) || question.candidates.some((item) => typeof item !== 'string'))) {
-    throw new TypeError('pendingQuestion 形状非法：candidates 必须是字符串数组。');
-  }
-  if (question.raw !== undefined && typeof question.raw !== 'string') {
-    throw new TypeError('pendingQuestion 形状非法：raw 必须是字符串。');
-  }
-  if (question.confirmation !== undefined) {
-    const { handle, summary, expiresAt, operation } = question.confirmation;
-    if (typeof handle !== 'string' || handle.trim() === '') {
-      throw new TypeError('pendingQuestion 形状非法：confirmation.handle 必须是非空字符串。');
-    }
-    if (typeof summary !== 'string' || summary.trim() === '') {
-      throw new TypeError('pendingQuestion 形状非法：confirmation.summary 必须是非空字符串。');
-    }
-    if (expiresAt !== undefined && (typeof expiresAt !== 'string' || expiresAt.trim() === '')) {
-      throw new TypeError('pendingQuestion 形状非法：confirmation.expiresAt 必须是非空字符串。');
-    }
-    if (typeof operation !== 'string' || operation.trim() === '') {
-      throw new TypeError('pendingQuestion 形状非法：confirmation.operation 必须是非空字符串。');
-    }
-  }
-}
-
-/**
- * 状态机唯一归约核心（内存/SQLite 共用；不碰存储）：
- * 校验边与原因，计算下一状态投影。非法转换抛 TaskTransitionError（状态不变）。
- * 租约不变量：只有 running 可以持有租约（离开 running 即清空；认领方在归约后自行写入）。
- */
-export function reduceTaskState(current: TaskStateSnapshot, action: TaskAction, now: string): TaskStateSnapshot {
-  const next: TaskStateSnapshot = { ...current };
-  delete next.reason;
-
-  switch (action.action) {
-    case 'transition': {
-      assertLegalEdge(current.status, action.to);
-      next.status = action.to;
-      const reason = mechanicalReason(current.status, action.to, action.reason);
-      if (reason !== undefined) next.reason = reason;
-      break;
-    }
-    case 'waitForUser': {
-      assertLegalEdge(current.status, 'waiting_user');
-      assertPendingQuestion(action.pendingQuestion);
-      next.status = 'waiting_user';
-      next.pendingQuestion = action.pendingQuestion;
-      next.waitingSince = now;
-      break;
-    }
-    case 'answerResumes': {
-      assertLegalEdge(current.status, 'running');
-      next.status = 'running';
-      delete next.pendingQuestion;
-      delete next.waitingSince;
-      break;
-    }
-    case 'requestCancel': {
-      assertLegalEdge(current.status, 'cancelling');
-      next.status = 'cancelling';
-      break;
-    }
-    case 'confirmCancelled': {
-      assertLegalEdge(current.status, 'cancelled');
-      next.status = 'cancelled';
-      next.reason = 'cancelled_by_user';
-      break;
-    }
-    case 'timeout': {
-      const expected: TaskStatus = action.kind === 'queued' ? 'queued' : action.kind === 'execution' ? 'running' : 'waiting_user';
-      if (current.status !== expected) {
-        throw new TaskTransitionError(current.status, 'timed_out', `超时种类 ${action.kind} 只适用于 ${expected} 状态`);
-      }
-      assertLegalEdge(current.status, 'timed_out');
-      next.status = 'timed_out';
-      next.reason = 'timeout';
-      break;
-    }
-    case 'markResultUnknown': {
-      assertLegalEdge(current.status, 'failed');
-      next.status = 'failed';
-      next.reason = 'result_unknown';
-      break;
-    }
-  }
-
-  if (next.status !== 'running') {
-    delete next.leaseOwner;
-    delete next.leaseUntil;
-  }
-  return next;
-}
-
-/** 机械事实的种子（from 仅状态转换事实有；begin 创建事实无 from）。 */
-export interface TaskFactSeed {
-  from?: TaskStatus;
-  to: TaskStatus;
-  reason?: TaskReason;
-  at: string;
-  /** v1.1：稳定去重版本；缺省 = at。 */
-  stateVersion?: string | number;
-}
-
-/**
- * 逻辑操作账的状态集（U3 + 长任务 v4）。completed/needs_confirmation/needs_input/failed/
+/** 逻辑操作账的状态集（U3 + 长任务 v4）。completed/needs_confirmation/needs_input/failed/
  * refused 与执行结果同态；accepted = 执行层已受理长任务（operationId 在 outcome 里），
  * 等待宿主用 wait 推进；claimed = 已认领未落定；unknown = 结果未知（待核对，禁止自动重放）。
  * needs_confirmation 只是执行层返回的机械事实：宿主把它记进账行，不代表宿主裁决确认。
@@ -511,7 +252,6 @@ export interface OperationRecord {
   /**
    * 结果落定并交给 Pi 回合的时刻（settle 时与 settledAt 同刻写入）。
    * 它**不**证明模型已读取结果；NULL = 尚未落定/未交付（claimed 或 unknown 行）。
-   * 将来 resume 判据只把它当「已有结果可回放」，不把它当「模型已确认」。
    */
   deliveredAt?: string;
   replayOf?: string;
@@ -613,73 +353,80 @@ export function operationStatusOf(outcome: ExecutionOutcome): OperationStatus {
 }
 
 export interface TaskRegistry {
+  /**
+   * 受理：建一行事实。缺省 = inline（建行即开跑，running_since 写入）；queued = 后台受理
+   * （P6 submit：不写 running_since，等 runner 认领）。
+   */
   begin(input: {
     taskId: string;
     principalId: string;
     sessionId: string;
     request: string;
-    /** 初始状态：缺省 running（inline 现冻结语义）；queued = 后台受理（P6 submit）。 */
-    status?: 'queued' | 'running';
+    queued?: boolean;
   }): TaskRecord;
   noteExecution(taskId: string, record: ExecutionRecord): void;
-  complete(taskId: string, resultText: string): void;
-  fail(taskId: string, reason: string): void;
+  /** worker 完成汇报逐字存档（事实；不判结论、不嗅探文本）。 */
+  setResultText(taskId: string, resultText: string): void;
   /**
    * P1：把本回合 Main 最终回复逐字写入各任务行（同回合各任务行同值）。
    * 调用点唯一：execution-runtime.send 收尾后；不存在的 taskId 不写（调用方保证 id 来自本回合）。
+   * 后台完成也经本方法存档（runner settle：replyText 即完成汇报的事实存档面）。
    */
   archiveReply(taskIds: readonly string[], replyText: string): void;
   /** 按可信 scope 取任务：principalId 与 sessionId 都必须一致，否则 TaskOwnershipError。 */
-  get(taskId: string, scope: TaskScope): TaskRecord;
+  get(taskId: string, scope?: TaskScope): TaskRecord;
   /** scope 缺省 = 全部任务；给出时只返回该 principal + session 的任务（不跨会话泄漏）。 */
   list(scope?: TaskScope): readonly TaskRecord[];
   /**
-   * 只读 waiting_user 行（到期扫描用：避免每趟 pump 全表分配）。
+   * 只读等待行（waiting_user 事实：pendingQuestion 非空且无结束事实）。
    * 给出 scope 时只返回该 principal + session 的等待行（交办前的「有没有待确认提案」检查走索引）。
    */
   listWaiting(scope?: TaskScope): readonly TaskRecord[];
   /**
-   * 只读 running 行（预期契约 2026-11-18：长时间提醒扫描用；避免每趟 pump 全表分配）。
-   * 只读状态事实，不做判定。
+   * 只读在跑行（长时间提醒扫描用；避免每趟 pump 全表分配）：布尔事实谓词
+   * {@link stillProgressingOf}（已启动、无结束事实、无汇报存档、无等待形状；含长任务等待回执的行）。
    */
   listRunning(): readonly TaskRecord[];
   /**
-   * 预期契约（2026-11-18；2026-11-19 唤醒切片删除「卡住」档）：原子领取一档「长时间没动静」
-   * 提醒——只有该档尚未提醒过才写入并返回 true；已提醒过返回 false（零写入）。
-   * stage = 'overdue'（10 分钟「久无动静」档）|'contact_lost'（长任务等待与执行层断了联系、
-   * 无回执；只说明没拿到回执，不代表任务失败）。
-   * 并发/重启下同一任务每档至多一次；不改任务状态、不产状态事实。
+   * 原子领取一档「长时间没动静」提醒——只有该档尚未提醒过才写入并返回 true；已提醒过返回
+   * false（零写入）。stage = 'overdue'（10 分钟档）| 'contact_lost'（断联系档）。
+   * 并发/重启下同一任务每档至多一次；不改任务事实、不产事件。
    */
   claimLongRunningNotice(taskId: string, stage: 'overdue' | 'contact_lost', at: string): boolean;
-  /** 通用状态转换（合法边见冻结矩阵；给出 scope 先校验归属）。 */
-  transition(taskId: string, to: TaskStatus, options?: TransitionOptions): TaskRecord;
-  /** running→waiting_user：持久化 pendingQuestion（missing/candidates?/raw?）与 waiting_since。 */
+  /** 等待事实写入（pendingQuestion + waiting_since；清租约）。任务已结束（有结束事实）时拒绝（不翻案）。 */
   waitForUser(taskId: string, pendingQuestion: PendingQuestion, options?: MutationOptions): TaskRecord;
-  /** waiting_user→running：答复续同一 Task（清除等待形状；task_no/executions 不新建）。 */
+  /** 答复接续：清除等待事实（同一 Task 新回合；task_no/executions 不新建）。 */
   answerResumes(taskId: string, options?: MutationOptions): TaskRecord;
-  /** 取消请求（≠ 取消）：queued/running/waiting_user→cancelling。 */
-  requestCancel(taskId: string, options?: MutationOptions): TaskRecord;
-  /** 取消确认（abort 观察/执行层确认后）：cancelling→cancelled + reason=cancelled_by_user。 */
-  confirmCancelled(taskId: string, options?: MutationOptions): TaskRecord;
-  /** 超时：queued/running/waiting_user→timed_out + reason=timeout（等待超时保留历史形状）。 */
-  timeout(taskId: string, kind: TimeoutKind, options?: MutationOptions): TaskRecord;
-  /** 重启后无法确认结果：running→failed + reason=result_unknown（禁止自动重放）。 */
-  markResultUnknown(taskId: string, options?: MutationOptions): TaskRecord;
+  /** 用户取消确认：追加结束事实（一次性；不写「取消」种类——怎么结束不存）。 */
+  markCancelled(taskId: string, options?: MutationOptions): TaskRecord;
+  /** 机械超时：追加结束事实（一次性；等待到期/回合超时/排队超时同一事实）。 */
+  markTimedOut(taskId: string, kind: TimeoutKind, options?: MutationOptions): TaskRecord;
+  /** 看门狗：租约过期 → 追加结束事实（一次性；结果未知由消费方按事实现推，不自动重放）。 */
+  markLeaseExpired(taskId: string): TaskRecord;
+  /** 资源拒绝：追加结束事实（一次性；受理/派发被 policy 拒）。 */
+  noteResourceRefused(taskId: string, options?: MutationOptions): TaskRecord;
   /**
-   * 原子认领最老的 queued 任务：queued→running + 租约（owner/leaseMs）。
-   * 无 queued 返回 undefined；这是 P6 队列的唯一入口（不引第二套队列）。
+   * 回合以「没有汇报」收尾（抛错/结果未知）：追加结束事实（一次性）。
+   * 不写任务结论——怎么结束不存；失败唤醒/在跑扫描读原始事实。
+   */
+  noteRoundEnded(taskId: string): void;
+  /**
+   * 原子认领最老未启动任务：写 running_since + 租约；无未启动任务返回 undefined。
+   * 这是 P6 队列的唯一入口（不引第二套队列）。
    */
   claimNextQueued(input: { owner: string; leaseMs: number }): TaskRecord | undefined;
-  /** 过期的 running 租约 → result_unknown（返回受影响任务；不自动重放）。 */
+  /** 接续回合的在跑凭据（存活事实）：写租约；running_since 首次写入后单调不变。 */
+  armLease(taskId: string, input: { owner: string; leaseMs: number }, options?: MutationOptions): TaskRecord;
+  /** 过期的租约 → 追加结束事实（返回受影响任务；不自动重放）。 */
   expireLeases(now?: string): readonly TaskRecord[];
-  /** 单回调事实钩子（供 P4/P6）：注入替换旧回调；拒绝的转换不发事实；钩子异常不回滚事实。 */
+  /** 单回调事实钩子（供通知/采集）：注入替换旧回调；被拒的事实不发；钩子异常不回滚事实。 */
   onTaskFact(hook: TaskFactHook | undefined): void;
   /**
    * U3：认领一笔逻辑操作（原子；签名不含 args）。
    *   · minted → 调用方可用该 dispatchKey 发起（唯一铸造点，op_seq 只在此分配一次）；
    *   · replayed → 直接返回已有结果，**不**再调用执行层；
    *   · in_progress → 同一身份正在执行，本次不得并发执行；
-   *   · unresolved → 无法证明绑定，调用方必须停止副作用并交还待核对；
+   *   · unresolved → 无法证明绑定，调用方必须停止副作用并如实告知待核对；
    *   · conflict → 同身份不同 operation，确定性拒绝。
    */
   claimOperation(input: OperationClaimInput): OperationClaim;
@@ -695,19 +442,17 @@ export interface TaskRegistry {
   getOperation(dispatchKey: string): OperationRecord | undefined;
   /**
    * 长任务（契约 v4）：所有 accepted 行（按 claimed_at 升序）。宿主重启后据此重新 wait——
-   * operationId 在 outcome 里（`{status:'accepted', operationId, pollAfterMs?}`），
-   * taskId 绑定到任务行。只读；不推进任何状态。
+   * operationId 在 outcome 里，taskId 绑定到任务行。只读；不推进任何事实。
    */
   listAcceptedOperations(): readonly OperationRecord[];
   /**
-   * 长任务终态落定：accepted → completed/failed（别的状态不覆盖，幂等）。
-   * 结果由 wait 返回；这里只把账行从「进行中」推进到终态，不重放、不重铸身份。
+   * 操作账行落定：accepted → completed/failed（单笔操作状态；别的状态不覆盖，幂等）。
+   * 结果由 wait 返回；这里只把账行从「进行中」推进到落定，不重放、不重铸身份。
    */
   settleAcceptedOperation(dispatchKey: string, outcome: ExecutionOutcome, options?: { now?: string }): OperationRecord;
   /**
-   * 长任务让出槽位：清掉 running 行的租约（任务仍 running，等待宿主 wait 唤醒）。
-   * 不产状态转换事实（状态没变）；只清租约，避免 expireLeases 把等待中的任务判成
-   * result_unknown。
+   * 长任务让出槽位：清掉租约（任务事实不动，等待宿主 wait 唤醒）。
+   * 不产事件（存活仍由在跑事实承担）；只清租约，避免 expireLeases 把等待中的任务误写结束事实。
    */
   releaseTaskLease(taskId: string, options?: MutationOptions): TaskRecord;
 }
@@ -717,7 +462,13 @@ interface MutableTaskRecord extends Omit<TaskRecord, 'executions'> {
   executions: ExecutionRecord[];
 }
 
-export function createTaskRegistry(): TaskRegistry {
+/** 内存实现打开选项（测试/纯内存嵌入）：注入时钟供租约与时刻计算（缺省系统时钟）。 */
+export interface MemoryTaskRegistryOptions {
+  now?: () => Date;
+}
+
+export function createTaskRegistry(options: MemoryTaskRegistryOptions = {}): TaskRegistry {
+  const clock = options.now ?? ((): Date => new Date());
   const tasks = new Map<string, MutableTaskRecord>();
   /** U3 逻辑操作账：行就是身份（内存实现仅用于测试/纯内存嵌入；语义与 SQLite 逐项一致）。 */
   const operations = new Map<string, OperationRecord>();
@@ -759,119 +510,90 @@ export function createTaskRegistry(): TaskRegistry {
     return task;
   };
 
-  const snapshotOf = (task: MutableTaskRecord): TaskStateSnapshot => ({
-    status: task.status,
-    ...(task.reason === undefined ? {} : { reason: task.reason }),
-    ...(task.pendingQuestion === undefined ? {} : { pendingQuestion: task.pendingQuestion }),
-    ...(task.waitingSince === undefined ? {} : { waitingSince: task.waitingSince }),
-    ...(task.leaseOwner === undefined ? {} : { leaseOwner: task.leaseOwner }),
-    ...(task.leaseUntil === undefined ? {} : { leaseUntil: task.leaseUntil }),
-  });
-
-  const applySnapshot = (task: MutableTaskRecord, next: TaskStateSnapshot): void => {
-    task.status = next.status;
-    if (next.reason === undefined) delete task.reason; else task.reason = next.reason;
-    if (next.pendingQuestion === undefined) delete task.pendingQuestion; else task.pendingQuestion = next.pendingQuestion;
-    if (next.waitingSince === undefined) delete task.waitingSince; else task.waitingSince = next.waitingSince;
-    if (next.leaseOwner === undefined) delete task.leaseOwner; else task.leaseOwner = next.leaseOwner;
-    if (next.leaseUntil === undefined) delete task.leaseUntil; else task.leaseUntil = next.leaseUntil;
-  };
-
-  const factOf = (task: MutableTaskRecord, seed: TaskFactSeed): TaskFact => ({
-    taskId: task.taskId,
-    taskNo: task.taskNo ?? 0,
-    name: task.name ?? deriveTaskName(task.request),
-    ...(seed.from === undefined ? {} : { from: seed.from }),
-    to: seed.to,
-    ...(seed.reason === undefined ? {} : { reason: seed.reason }),
-    at: seed.at,
-    // v1.1：稳定去重版本，缺省 = at（本实现不建计数器；集成可显式传入更精确版本）。
-    stateVersion: seed.stateVersion ?? seed.at,
-  });
-
-  const emit = (fact: TaskFact): void => {
+  const emit = (task: MutableTaskRecord, event: TaskEventKind, at: string): void => {
     if (factHook === undefined) return;
     try {
-      factHook(fact);
+      factHook({
+        taskId: task.taskId,
+        taskNo: task.taskNo ?? 0,
+        name: task.name ?? deriveTaskName(task.request),
+        event,
+        at,
+        stateVersion: at,
+      });
     } catch {
       // 事实已机械落库；消费者故障不得回滚/改变任务事实（不重试、不落库）。
     }
   };
 
-  const commit = (
-    task: MutableTaskRecord,
-    action: TaskAction,
-    extras: { resultText?: string; failureReason?: string | null } = {},
-  ): TaskFact => {
-    const at = new Date().toISOString();
-    const from = task.status;
-    const next = reduceTaskState(snapshotOf(task), action, at);
-    applySnapshot(task, next);
-    if (extras.resultText !== undefined) task.resultText = extras.resultText;
-    if (extras.failureReason !== undefined) {
-      if (extras.failureReason === null) delete task.failureReason;
-      else task.failureReason = extras.failureReason;
-    }
+  const touch = (task: MutableTaskRecord, at: string): void => {
     task.updatedAt = at;
-    // 本轮开始运行时刻：第一次进入 running 写一次，之后不动（长任务受理会清租约，不清它）。
-    if (task.status === 'running' && task.runningSince === undefined) task.runningSince = at;
-    const fact = factOf(task, {
-      from,
-      to: next.status,
-      ...(next.reason === undefined ? {} : { reason: next.reason }),
-      at,
-    });
-    emit(fact);
-    return fact;
+  };
+
+  const clearLease = (task: MutableTaskRecord): void => {
+    delete task.leaseOwner;
+    delete task.leaseUntil;
+  };
+
+  /**
+   * 记一条结束事实（一次性、不可变）：同任务已有结束事实 → false，零写入。
+   * 只记「这一轮在 at 停下」，不记怎么结束。写入成功时清租约。
+   * 与 SQLite 实现的 appendEndFact 同口径。
+   */
+  const recordEnd = (task: MutableTaskRecord, at: string): boolean => {
+    if (task.endedAt !== undefined) return false;
+    task.endedAt = at;
+    // 不删等待形状（2026-11-24 grok blocking 回退）：提案 payload 只在这里，删了底账就
+    // 失去「用户被要求批准的那次写」的记录。可执行性由 taskWaitingOf（要求 endedAt 缺省）
+    // 与结束事实拒绝路径决定，不靠删数据。
+    clearLease(task);
+    touch(task, at);
+    return true;
   };
 
   return {
     begin(input) {
-      const now = new Date().toISOString();
+      const now = clock().toISOString();
       nextTaskNo += 1;
-      const status = input.status ?? 'running';
       const task: MutableTaskRecord = {
         taskId: input.taskId,
         principalId: input.principalId,
         sessionId: input.sessionId,
         request: input.request,
-        status,
         taskNo: nextTaskNo,
         name: deriveTaskName(input.request),
         executions: [],
-        ...(status === 'running' ? { runningSince: now } : {}),
+        // inline 建行即开跑（running_since 写入）；后台受理（queued）等 runner 认领。
+        ...(input.queued === true ? {} : { runningSince: now }),
         createdAt: now,
         updatedAt: now,
       };
       tasks.set(input.taskId, task);
-      emit(factOf(task, { to: status, at: now }));
+      emit(task, input.queued === true ? 'accepted' : 'started', now);
       return task;
     },
     noteExecution(taskId, record) {
       const task = require(taskId);
       task.executions.push(record);
-      task.updatedAt = new Date().toISOString();
+      task.updatedAt = clock().toISOString();
     },
-    complete(taskId, resultText) {
+    setResultText(taskId, resultText) {
+      const at = clock().toISOString();
       const task = require(taskId);
-      // 终态 = 已记录执行事实的判定；汇报原文恒存（非成功终态也保留 Worker 汇报）。
-      const judgement = judgeReportedTask(task.executions);
-      commit(
-        task,
-        { action: 'transition', to: judgement.status },
-        { resultText, failureReason: judgement.failureReason ?? null },
-      );
-    },
-    fail(taskId, reason) {
-      const task = require(taskId);
-      commit(task, { action: 'transition', to: 'failed' }, { failureReason: reason });
+      task.resultText = resultText;
+      touch(task, at);
+      // 汇报存档 = 事实（有没有汇报由消费方读）；追加结束事实（重复存档不重复打扰）。
+      if (recordEnd(task, at)) emit(task, 'result_archived', at);
     },
     archiveReply(taskIds, replyText) {
+      const at = clock().toISOString();
       for (const taskId of taskIds) {
         const task = tasks.get(taskId);
         if (task === undefined) continue;
         task.replyText = replyText;
-        task.updatedAt = new Date().toISOString();
+        touch(task, at);
+        // 后台完成的事实存档：同 result_archived 事件（同一事实来源，通知/采集同口径）。
+        if (recordEnd(task, at)) emit(task, 'result_archived', at);
       }
     },
     get(taskId, scope) {
@@ -879,13 +601,17 @@ export function createTaskRegistry(): TaskRegistry {
     },
     listWaiting(scope) {
       return [...tasks.values()]
-        .filter((task) => task.status === 'waiting_user'
+        .filter((task) => task.pendingQuestion !== undefined
+          && task.endedAt === undefined
           && (scope === undefined
             || (task.principalId === scope.principalId && task.sessionId === scope.sessionId)))
         .map((task) => ({ ...task }));
     },
     listRunning() {
-      return [...tasks.values()].filter((task) => task.status === 'running').map((task) => ({ ...task }));
+      // 在跑事实 = 布尔事实谓词（已启动 + 无结束事实/汇报/等待）；与 SQLite 同口径。
+      return [...tasks.values()]
+        .filter((task) => stillProgressingOf(task))
+        .map((task) => ({ ...task }));
     },
     claimLongRunningNotice(taskId, stage, at) {
       const task = require(taskId);
@@ -899,63 +625,97 @@ export function createTaskRegistry(): TaskRegistry {
       if (scope === undefined) return all;
       return all.filter((task) => task.principalId === scope.principalId && task.sessionId === scope.sessionId);
     },
-    transition(taskId, to, options = {}) {
-      const task = require(taskId, options.scope);
-      commit(task, { action: 'transition', to, ...(options.reason === undefined ? {} : { reason: options.reason }) });
-      return task;
-    },
     waitForUser(taskId, pendingQuestion, options = {}) {
+      const at = clock().toISOString();
       const task = require(taskId, options.scope);
-      commit(task, { action: 'waitForUser', pendingQuestion });
+      if (taskEndedOf(task)) throw new TaskSettledError(taskId);
+      task.pendingQuestion = pendingQuestion;
+      task.waitingSince = at;
+      clearLease(task);
+      touch(task, at);
+      emit(task, 'waiting_user', at);
       return task;
     },
     answerResumes(taskId, options = {}) {
+      const at = clock().toISOString();
       const task = require(taskId, options.scope);
-      commit(task, { action: 'answerResumes' });
+      if (taskEndedOf(task)) throw new TaskSettledError(taskId);
+      delete task.pendingQuestion;
+      delete task.waitingSince;
+      touch(task, at);
+      emit(task, 'resumed', at);
       return task;
     },
-    requestCancel(taskId, options = {}) {
+    markCancelled(taskId, options = {}) {
+      const at = clock().toISOString();
       const task = require(taskId, options.scope);
-      commit(task, { action: 'requestCancel' });
+      if (!recordEnd(task, at)) return task; // 一次性/不翻案
+      emit(task, 'user_stop', at);
       return task;
     },
-    confirmCancelled(taskId, options = {}) {
+    markTimedOut(taskId, _kind, options = {}) {
+      const at = clock().toISOString();
       const task = require(taskId, options.scope);
-      commit(task, { action: 'confirmCancelled' });
+      if (!recordEnd(task, at)) return task;
+      emit(task, 'deadline_reached', at);
       return task;
     },
-    timeout(taskId, kind, options = {}) {
-      const task = require(taskId, options.scope);
-      commit(task, { action: 'timeout', kind });
+    markLeaseExpired(taskId) {
+      const at = clock().toISOString();
+      const task = require(taskId);
+      // 布尔事实谓词：已汇报 / 等待 / 未启动 / 已结束的行没有「租约过期 → 停下」可写。
+      if (!stillProgressingOf(task)) return task;
+      if (!recordEnd(task, at)) return task;
+      emit(task, 'ended', at);
       return task;
     },
-    markResultUnknown(taskId, options = {}) {
+    noteResourceRefused(taskId, options = {}) {
+      const at = clock().toISOString();
       const task = require(taskId, options.scope);
-      commit(task, { action: 'markResultUnknown' });
+      if (!recordEnd(task, at)) return task;
+      emit(task, 'capacity_blocked', at);
       return task;
+    },
+    noteRoundEnded(taskId) {
+      const task = require(taskId);
+      const at = clock().toISOString();
+      // 一次性结束事实：本轮以无汇报收尾（不翻案；已汇报/已结束的行不再追加）。
+      if (taskProgressEndedOf(task)) return;
+      if (!recordEnd(task, at)) return;
+      emit(task, 'ended', at);
     },
     claimNextQueued({ owner, leaseMs }) {
-      const candidates = [...tasks.values()]
-        .filter((task) => task.status === 'queued')
+      const now = clock().toISOString();
+      const task = [...tasks.values()]
+        .filter((candidate) => taskUnstartedOf(candidate))
         .sort((left, right) => (left.createdAt === right.createdAt
           ? (left.taskId < right.taskId ? -1 : 1)
-          : (left.createdAt < right.createdAt ? -1 : 1)));
-      const task = candidates[0];
+          : (left.createdAt < right.createdAt ? -1 : 1)))[0];
       if (task === undefined) return undefined;
-      const at = new Date().toISOString();
-      commit(task, { action: 'transition', to: 'running' });
+      if (task.runningSince === undefined) task.runningSince = now;
       task.leaseOwner = owner;
-      task.leaseUntil = new Date(Date.now() + leaseMs).toISOString();
-      task.updatedAt = at;
+      task.leaseUntil = new Date(clock().getTime() + leaseMs).toISOString();
+      touch(task, now);
+      emit(task, 'started', now);
       return task;
     },
-    expireLeases(now = new Date().toISOString()) {
+    armLease(taskId, { owner, leaseMs }, options = {}) {
+      const at = clock().toISOString();
+      const task = require(taskId, options.scope);
+      if (taskEndedOf(task)) throw new TaskSettledError(taskId);
+      if (task.runningSince === undefined) task.runningSince = at;
+      task.leaseOwner = owner;
+      task.leaseUntil = new Date(clock().getTime() + leaseMs).toISOString();
+      touch(task, at);
+      return task;
+    },
+    expireLeases(now = clock().toISOString()) {
       const affected: TaskRecord[] = [];
       for (const task of tasks.values()) {
-        if (task.status !== 'running') continue;
         if (task.leaseUntil === undefined || task.leaseUntil > now) continue;
-        commit(task, { action: 'markResultUnknown' });
-        affected.push(task);
+        // 布尔事实谓词：已汇报 / 等待 / 已结束的行没有「过期租约 → 停下」可写。
+        if (!stillProgressingOf(task)) continue;
+        affected.push(this.markLeaseExpired(task.taskId));
       }
       return affected;
     },
@@ -963,7 +723,7 @@ export function createTaskRegistry(): TaskRegistry {
       factHook = hook;
     },
     claimOperation(input) {
-      const now = input.now ?? new Date().toISOString();
+      const now = input.now ?? clock().toISOString();
       let candidates: OperationRecord[] = [];
       if (input.dispatchKey !== undefined) {
         const row = operations.get(input.dispatchKey);
@@ -1086,10 +846,10 @@ export function createTaskRegistry(): TaskRegistry {
       return row;
     },
     releaseTaskLease(taskId, options = {}) {
+      const at = clock().toISOString();
       const task = require(taskId, options.scope);
-      delete task.leaseOwner;
-      delete task.leaseUntil;
-      task.updatedAt = new Date().toISOString();
+      clearLease(task);
+      touch(task, at);
       return task;
     },
   };

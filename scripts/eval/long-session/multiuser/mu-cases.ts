@@ -301,7 +301,7 @@ export async function mu5(rt: RuntimeConfig): Promise<MuCaseResult> {
   const aSubmit = `${MU_TAGS['mu-alice']} 交办查账`;
   plans.delegate('mu-alice', aSubmit, { reply: '已受理，稍后通知你。', operation: 'dummy.query', args: { '--collection': 'TAG-ALICE' }, summary: '完成。' });
   const ctx = makeCtx(plans.table(), null);
-  const handle = await createMuServer({ dir: tmp.dir, ctx, mode: 'background', runtime: rt, taskExecutor: new MuFakeExecutor([async () => ({ kind: 'completed', resultText: '完成。' })]) });
+  const handle = await createMuServer({ dir: tmp.dir, ctx, mode: 'background', runtime: rt, taskExecutor: new MuFakeExecutor([async () => ({ kind: 'ended', report: '完成。' })]) });
   try {
     await deliver(handle.server.handler, incoming('mu-alice', 'conv-a5', 'a-1', aSubmit));
     const aliceTask = readTasks(handle.dbPath).find((task) => task.principalId === principalIdOf('mu-alice'));
@@ -384,7 +384,7 @@ export async function mu7(rt: RuntimeConfig): Promise<MuCaseResult> {
   plans.turn('mu-alice', `${MU_TAGS['mu-alice']} 下一步`, { reply: '收到。' });
   const ctx = makeCtx(plans.table(), null);
   const sink = new MuRecordingSink();
-  const executor = new MuFakeExecutor([async () => ({ kind: 'completed', resultText: '账已清点：3 条。' })]);
+  const executor = new MuFakeExecutor([async () => ({ kind: 'ended', report: '账已清点：3 条。' })]);
   // 2026-11-19 复核 F3 迁移：completed 从 B 通道移除后，完成事实只在**慢活**路径上由唤醒
   // （降级）注入——快活路径的结果已在同回合交给模型，不再重复注入。本用例要的正是慢活路径
   // 的两面性：owner 下一回合拿到自己的完成事实、非 owner 拿不到。故本用例关掉 task_run 短
@@ -394,7 +394,7 @@ export async function mu7(rt: RuntimeConfig): Promise<MuCaseResult> {
     await deliver(handle.server.handler, incoming('mu-alice', 'conv-a7', 'a-1', aSubmit));
     const aliceTask = readTasks(handle.dbPath).find((task) => task.principalId === principalIdOf('mu-alice'));
     const taskId = aliceTask?.taskId ?? '';
-    await waitUntil(() => readTasks(handle.dbPath).some((task) => task.taskId === taskId && task.status === 'completed'));
+    await waitUntil(() => readTasks(handle.dbPath).some((task) => task.taskId === taskId && task.reported));
     await handle.server.deliverPending();
     // bob 回合先来：不得拿到 alice 的事实。
     await deliver(handle.server.handler, incoming('mu-bob', 'conv-b7', 'b-1', `${MU_TAGS['mu-bob']} 日常对话`));
@@ -406,9 +406,9 @@ export async function mu7(rt: RuntimeConfig): Promise<MuCaseResult> {
     // 事实注入在 1.5.2 走 Pi 原生 custom message（`TurnDriverInput.injections`），
     // 与普通 messages 并列；两处任一命中都算该回合拿到了事实。
     // 2026-11-19 复核 F3：completed 从 B 通道（`[任务事实]`）移除——完成由唤醒路径负责；
-    // 本夹具的假主驱动没有唤醒能力 → 降级事实经既有 systemNotes 注入（`[任务完成]` 形状）。
+    // 本夹具的假主驱动没有唤醒能力 → 降级事实经既有 systemNotes 注入（`[回合结束]` 形状）。
     // 本用例判的是**事实只到 owner 会话**（跨 principal 不泄漏），两种事实形状任一命中都算。
-    const factShapes = ['[任务事实]', '[任务完成]'];
+    const factShapes = ['[任务事实]', '[回合结束]'];
     const turnCarriesFact = (turn: typeof aliceTurn): boolean => turn !== undefined
       && [
         ...turn.messages.map((message) => String((message as { content?: unknown }).content ?? '')),
@@ -564,7 +564,7 @@ async function mu8SessionLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
       groupSecondCalls: groupSecondRec?.calls.map((call) => ({ tool: call.tool, args: call.args, error: call.error })),
       scopeViolations: scope, crossoverCodes: crossover.verdict,
       groupDelegateReply, groupQueryReply,
-      allTasks: tasks.map((task) => ({ taskId: task.taskId, taskNo: task.taskNo, sessionId: task.sessionId, status: task.status, request: task.request, requestIds: task.requestIds })),
+      allTasks: tasks.map((task) => ({ taskId: task.taskId, taskNo: task.taskNo, sessionId: task.sessionId, started: task.started, ended: task.ended, waiting: task.waiting, mayBeRunning: task.mayBeRunning, reported: task.reported, lastExecutionStatus: task.lastExecutionStatus ?? null, request: task.request, requestIds: task.requestIds })),
       groupTurnTexts: groupRecords.map((record) => record.userText),
       privTurnTexts: privRecords.map((record) => record.userText),
     };
@@ -719,8 +719,8 @@ export async function mu10(rt: RuntimeConfig): Promise<MuCaseResult> {
     const carol = tasks.find((task) => task.principalId === principalIdOf('mu-carol'));
     const scope = scopeViolations(plans.table(), tasks);
     const crossover = crossoverHits(tasks);
-    const aliceFailed = alice?.status === 'failed';
-    const othersOk = bob?.status === 'completed' && carol?.status === 'completed';
+    const aliceFailed = alice !== undefined && (alice.lastExecutionStatus === 'failed' || alice.lastExecutionStatus === 'refused' || (alice.ended && !alice.reported));
+    const othersOk = bob?.reported === true && carol?.reported === true;
     const hardZeroHits: MuHardZero[] = [];
     if (!aliceFailed) hardZeroHits.push('unauthorized_execution');
     if (!othersOk) hardZeroHits.push('cross_principal_leak');
@@ -730,10 +730,10 @@ export async function mu10(rt: RuntimeConfig): Promise<MuCaseResult> {
       deliveredTo: task.sessionId, kind: 'reply' as const,
     })));
     return finalize(id, title, [...new Set(hardZeroHits)], records,
-      `alice 状态=${alice?.status}（应 failed）；bob=${bob?.status}、carol=${carol?.status}（应 completed）；隔离成立=${aliceFailed && othersOk}。`,
+      `alice 末条执行=${alice?.lastExecutionStatus ?? '（无）'}（应 failed）；bob.reported=${bob?.reported}、carol.reported=${carol?.reported}（应 true）；隔离成立=${aliceFailed && othersOk}。`,
       {
-        alice: alice === undefined ? null : { status: alice.status, reason: alice.reason, requestIds: alice.requestIds },
-        bob: bob === undefined ? null : { status: bob.status }, carol: carol === undefined ? null : { status: carol.status },
+        alice: alice === undefined ? null : { started: alice.started, ended: alice.ended, waiting: alice.waiting, mayBeRunning: alice.mayBeRunning, lastExecutionStatus: alice.lastExecutionStatus ?? null, reason: alice.reason, requestIds: alice.requestIds },
+        bob: bob === undefined ? null : { mayBeRunning: bob.mayBeRunning, reported: bob.reported }, carol: carol === undefined ? null : { mayBeRunning: carol.mayBeRunning, reported: carol.reported },
         scopeViolations: scope, crossoverCodes: crossover.verdict,
       });
   } finally { handle.close(); tmp.cleanup(); }

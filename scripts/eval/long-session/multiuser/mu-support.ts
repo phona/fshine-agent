@@ -22,6 +22,7 @@ import type { MainSessionLocation } from '../../../../packages/agent/src/session
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { Notification, NotificationSink } from '../../../../packages/agent/src/notifications';
 import { createSqliteTaskRegistry } from '../../../../packages/agent/src/task-registry-sqlite';
+import { lastFailureOf, taskFactViewOf } from '../../../../packages/agent/testing/task-facts';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../../../../packages/agent/src/task-runner';
 import { createServer, type Server } from '../../../../apps/server/server';
 import { WecomBotChannel, type SdkClientLike } from '../../../../packages/channel-wecom/src/index';
@@ -372,7 +373,7 @@ export class MuFakeExecutor implements TaskExecutor {
   async execute(input: TaskExecutionInput): Promise<TaskExecutionOutcome> {
     this.taskIds.push(input.taskId);
     const handler = this.handlers.shift();
-    if (handler === undefined) return { kind: 'completed', resultText: `（MU 假执行器）任务 ${input.taskId} 完成。` };
+    if (handler === undefined) return { kind: 'ended', report: `（MU 假执行器）任务 ${input.taskId} 完成。` };
     return await handler();
   }
 }
@@ -498,9 +499,15 @@ export interface MuTaskSnapshot {
   readonly principalId: string;
   readonly sessionId: string;
   readonly request: string;
-  readonly status: string;
-  readonly reason: string | undefined;
-  /** failed 的机械原因原文（P2 失败场景如实性核对用；只读投影）。 */
+  /** 原始事实（布尔）：启动 / 已停 / 汇报 / 等待 / 可能还在跑。 */
+  readonly started: boolean;
+  readonly ended: boolean;
+  readonly reported: boolean;
+  readonly waiting: boolean;
+  readonly mayBeRunning: boolean;
+  /** 末条执行行 status 原值（可选；无执行行时缺省）。 */
+  readonly lastExecutionStatus?: string;  readonly reason: string | undefined;
+  /** failed 的机械原因原文（P2 失败场景如实性核对用；只读执行行事实）。 */
   readonly failureReason: string | undefined;
   /** 结果逐字存档（background 走 archiveReply；inline 走 complete 的 resultText）。 */
   readonly resultText: string | undefined;
@@ -508,7 +515,7 @@ export interface MuTaskSnapshot {
   readonly replyText: string | undefined;
 }
 
-/** 只读任务快照（Task Registry 即机械 Oracle 的事实源；只投影，不 import SQLite 实现做判定）。 */
+/** 只读任务快照（Task Registry 即机械 Oracle 的事实源；只读事实，不合成任务级状态词）。 */
 export function readTasks(dbPath: string): MuTaskSnapshot[] {
   const registry = createSqliteTaskRegistry(dbPath, { readOnly: true });
   try {
@@ -518,9 +525,9 @@ export function readTasks(dbPath: string): MuTaskSnapshot[] {
       principalId: task.principalId,
       sessionId: task.sessionId,
       request: task.request,
-      status: task.status,
-      reason: task.reason,
-      failureReason: task.failureReason,
+      ...taskFactViewOf(task),
+      reason: lastFailureOf(task)?.error?.code,
+      failureReason: lastFailureOf(task)?.error?.message,
       resultText: task.resultText,
       requestIds: task.executions.map((execution) => execution.requestId),
       replyText: task.replyText,
@@ -536,7 +543,12 @@ export function toTaskViews(tasks: readonly MuTaskSnapshot[]): TaskView[] {
     taskId: task.taskId,
     ...(task.taskNo === undefined ? {} : { taskNo: task.taskNo }),
     request: task.request,
-    status: task.status,
+    started: task.started,
+    ended: task.ended,
+    reported: task.reported,
+    waiting: task.waiting,
+    mayBeRunning: task.mayBeRunning,
+    ...(task.lastExecutionStatus === undefined ? {} : { lastExecutionStatus: task.lastExecutionStatus }),
     ...(task.reason === undefined ? {} : { reason: task.reason }),
     requestIds: task.requestIds,
   }));

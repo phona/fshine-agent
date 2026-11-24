@@ -355,7 +355,7 @@ function seedRetryStormLedger(dbPath: string): void {
       principalId: 'wecom:owner',
       sessionId: 'wecom:conv',
       request: '压测重试风暴',
-      status: 'running',
+      // S1 事实模型：底账没有 status——在跑事实由 running_since + 租约承担（这里只置 running_since）。
       runningSince: NOW_ISO,
       createdAt: NOW_ISO,
       updatedAt: NOW_ISO,
