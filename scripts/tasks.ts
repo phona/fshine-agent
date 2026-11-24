@@ -1,16 +1,18 @@
 /**
- * tasks：本地任务底账入口——查看（列表/详情）、交付件导出与终态任务重新推进。
+ * tasks：本地任务底账入口——查看（列表/详情）、交付件导出（单个/批量）与终态任务重新推进。
  *
  * 用法：
  *   npm run tasks                    # 最近任务列表（时间/状态/#编号 业务名称，最多 20 条）
  *   npm run tasks -- <#编号|taskId>  # 单任务详情（状态/原因/执行步骤/任务结果/最终回复）
  *   npm run tasks -- <#编号|taskId> --out <path>   # 导出任务交付件（Markdown；拒绝覆盖既有文件）
+ *   npm run tasks -- <#编号|taskId> --out <path> --force   # 同上，但允许覆盖本工具导出的交付件
+ *   npm run tasks -- <#编号|taskId> ... --out <目录>       # 批量导出：一个任务一个 task-<编号>.md
  *   npm run tasks -- <#编号|taskId> --redo         # 以存储的交办原文逐字重新交办一个新任务（仅终态）
  *   （--config=<path> / AGENT_CONFIG_PATH 与 ask 同义；缺省读 <仓根>/.runtime/state.db）
  *
  * 边界（P1 任务查看 + P2 结果交付 + P3 人工接管 + P1 底账演化）：
  *   · 只读（列表/详情/--out）：SQLite 以 readonly 打开（不写、不锁写；库不存在不创建）；
- *     导出只把交付件写到用户指定的那一个文件，不写库、不建目录；
+ *     导出只把交付件写到用户指定的文件/目录，不写库、不建目录；
  *   · 任务引用：`#编号` 或纯数字（业务展示位只出 #编号+名称，不出 UUID）；内部 taskId
  *     原样兼容（审计/脚本既有用法）；解析失败与不存在同一措辞；
  *   · 展示不做二次判定（事实模型：底账没有 status/reason/failureReason 结论字段，也没有
@@ -19,13 +21,19 @@
  *   · 「最终回复」= 底账持久化的 Main 回合回复全文（P1/S1 存档）；历史行无存档时显示
  *     「该任务无最终回复存档」，不以「任务结果」（执行层汇报）冒充；
  *   · 交付件与详情消费同一组字段行渲染函数（见下方渲染构建函数），不维护第二套渲染；
- *   · --redo（唯一写路径）：只对已停（未在推进）的任务生效；输入=存储的委派原文逐字
- *     （不拼接原任务的回复/执行台账/摘要），经 scripts/ask-runtime.ts 与 ask 同源的装配
- *     重新交办为新任务；
- *     原任务记录零改动；关联只由 CLI 输出打印（schema 冻结，无关联列/表）；
+ *     交付件另有一行「生成时间」（导出时刻；详情没有——详情不是被保存转发的产物）；
+ *   · 覆盖（--force）：缺省仍旧拒绝覆盖；--force 只覆盖「本工具导出的交付件」（按首行形状
+ *     机械判定），目录、非本工具产物、缺父目录一律仍拒绝；不引入第二套覆盖语义；
+ *   · 批量导出：多个 taskId + `--out <目录>`（必须是已存在目录，不自动创建）；一个任务写一个
+ *     `task-<编号>.md`；引用先全部解析，任一找不到即 exit 2 且不写任何文件；写阶段部分失败
+ *     继续写完其余的，最后打印「批量导出：成功 X 个，失败 Y 个。」并 exit 1；
+ *   · --redo（唯一写路径）：只对已停（未在推进）的任务生效，且只接受一个 taskId；输入=存储的
+ *     委派原文逐字（不拼接原任务的回复/执行台账/摘要），经 scripts/ask-runtime.ts 与 ask
+ *     同源的装配重新交办为新任务；原任务记录零改动；关联只由 CLI 输出打印（schema 冻结，
+ *     无关联列/表）；
  *   · 列表/详情/--out 不联网、不加载模型、不 spawn 执行层（--redo 按需动态加载装配）。
  */
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ExecutionStatus } from '@fshine/contracts/execution-contract';
@@ -51,24 +59,34 @@ const REDO_ROOT = path.join(REPO_ROOT, '.runtime', 'redo');
 const TASK_LIST_LIMIT = 20;
 const SUMMARY_MAX = 60;
 
-const USAGE = '用法：npm run tasks [-- <#编号|taskId>] [--out <path>] [--redo] [--config=<path>]\n'
-  + '  不带参数：最近任务列表；带 #编号（或 taskId）：该任务详情；带 --out：导出任务交付件（Markdown）；\n'
-  + '  带 --redo：以该任务存储的交办原文逐字重新交办一个新任务（仅终态任务）。';
+const USAGE = '用法：npm run tasks [-- <#编号|taskId> ...] [--out <path|目录>] [--force] [--redo] [--config=<path>]\n'
+  + '  不带参数：最近任务列表；带 #编号（或 taskId）：该任务详情；带 --out：导出任务交付件（Markdown，默认拒绝覆盖，--force 才覆盖）；\n'
+  + '  带多个 #编号 + --out <目录>：批量导出（一个任务一个文件；任一引用找不到不写文件，写阶段部分失败 exit 1）；\n'
+  + '  带 --redo：以该任务存储的交办原文逐字重新交办一个新任务（仅终态任务，且只接受一个 taskId）。';
 
 export const EMPTY_TASKS_MESSAGE = '还没有任务记录。用 npm run ask -- "…" 交办一项任务后，这里会列出最近的任务。';
 
 export interface TaskCliArgs {
-  taskId?: string;
+  /** 位置参数（0..n 个）：#编号 / 纯数字 / 内部 taskId；多个即批量导出（必须配 --out 目录）。 */
+  taskIds: string[];
   outPath?: string;
-  /** --redo：仅终态任务可重新推进（redo 输入=存储的交办原文逐字）。 */
+  /** --redo：仅终态任务可重新推进（redo 输入=存储的交办原文逐字）；只接受一个 taskId。 */
   redo?: boolean;
+  /** --force：允许覆盖「本工具导出的交付件」；不与 --redo 同用，也必须配 --out。 */
+  force?: boolean;
 }
 
-/** 参数：可选且仅一个位置参数（taskId）；--out / --out= 给出导出路径；--redo 开关；--config= 由 explicitConfigFrom 统一解析。 */
+/**
+ * 参数：位置参数 0..n 个（taskId；多个=批量导出）；--out / --out= 给出导出路径；
+ * --redo / --force 开关；--config= 由 explicitConfigFrom 统一解析。
+ * 互斥保持既有语义：--redo × --out、--redo × --force、--force 必须配 --out、
+ * 多个 taskId 必须配 --out（不做批量详情这种新展示面）、--redo 只接受一个 taskId。
+ */
 export function parseTaskArgs(argv: readonly string[]): TaskCliArgs | { usageError: string } {
-  let taskId: string | undefined;
+  const taskIds: string[] = [];
   let outPath: string | undefined;
   let redo = false;
+  let force = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
     if (arg.startsWith('--config=')) continue;
@@ -95,25 +113,44 @@ export function parseTaskArgs(argv: readonly string[]): TaskCliArgs | { usageErr
       redo = true;
       continue;
     }
+    if (arg === '--force') {
+      if (force) return { usageError: '最多接受一个 --force。' };
+      force = true;
+      continue;
+    }
     if (arg.startsWith('--')) return { usageError: `未知参数：${arg}` };
     const value = arg.trim();
     if (value === '') return { usageError: 'taskId 不能为空。' };
-    if (taskId !== undefined) return { usageError: '最多接受一个 taskId。' };
-    taskId = value;
+    taskIds.push(value);
   }
   if (redo && outPath !== undefined) {
     return { usageError: '--redo 与 --out 不能同时使用。' };
   }
-  if (outPath !== undefined && taskId === undefined) {
+  if (outPath !== undefined && taskIds.length === 0) {
     return { usageError: '--out 需要与 taskId 一起使用（导出单个任务的交付件）。' };
   }
-  if (redo && taskId === undefined) {
+  if (redo && taskIds.length === 0) {
     return { usageError: '--redo 需要与 taskId 一起使用（重新推进一个任务）。' };
   }
+  if (force && outPath === undefined) {
+    return { usageError: '--force 只能与 --out 一起使用（覆盖导出的交付件）。' };
+  }
+  if (force && redo) {
+    return { usageError: '--force 与 --redo 不能同时使用（--redo 不写交付件，没有可覆盖的文件）。' };
+  }
+  if (taskIds.length > 1) {
+    if (redo) {
+      return { usageError: '--redo 只接受一个 taskId（重新推进一个任务）。' };
+    }
+    if (outPath === undefined) {
+      return { usageError: '多个 taskId 需要与 --out <目录> 一起使用（批量导出任务交付件）。' };
+    }
+  }
   return {
-    ...(taskId === undefined ? {} : { taskId }),
+    taskIds,
     ...(outPath === undefined ? {} : { outPath }),
     ...(redo ? { redo: true } : {}),
+    ...(force ? { force: true } : {}),
   };
 }
 
@@ -378,15 +415,19 @@ const DELIVERABLE_RUNNING_NOTE = '- 该任务尚未收尾（在跑）：交付�
 
 /**
  * 任务交付件（Markdown）：标题 + 任务信息/状态/执行步骤/任务结果/最终回复/限制与说明。
- * 纯函数、无时钟依赖；段内字段行全部来自上面的共享构建函数——详情每一行都逐字在此出现。
+ * 段内字段行全部来自上面的共享构建函数——详情每一行都逐字在此出现（详情没有的只有
+ * 「生成时间」一行：交付件是被保存/转发的产物，需要标注导出时刻；详情是当场看一眼的面）。
  * 不含详情末行的运行时底账提示；末尾恰好一个换行；字段行不做 Markdown 转义（保真优先）。
+ * 时钟可注入（`options.now`）以便确定性断言；缺省取当前时刻。
  */
-export function renderTaskDeliverable(task: TaskRecord): string {
+export function renderTaskDeliverable(task: TaskRecord, options: { now?: Date } = {}): string {
+  const generatedAt = options.now ?? new Date();
   const lines = [
     `# 任务交付件：${taskLabel(task)}（${taskFactSummaryOf(task)}）`,
     '', '## 任务信息', '',
     taskIdentityLine(task),
     taskTimeline(task),
+    `生成时间：${formatLocalTime(generatedAt.toISOString())}`,
     taskRequestLine(task),
     '', '## 状态', '',
     taskStatusLine(task),
@@ -399,6 +440,15 @@ export function renderTaskDeliverable(task: TaskRecord): string {
   lines.push('', '## 限制与说明', '', ...DELIVERABLE_LIMITS);
   if (taskMayBeRunningOf(task)) lines.push(DELIVERABLE_RUNNING_NOTE);
   return `${lines.join('\n')}\n`;
+}
+
+/**
+ * 批量导出的文件名：`task-<业务编号>.md`；旧库无编号时回退 taskId 并剔除路径分隔符
+ * （同一个 --out 目录内稳定、且写不出一级目录之外）。
+ */
+export function deliverableFileName(task: TaskRecord): string {
+  const base = task.taskNo ?? task.taskId.replace(/[^A-Za-z0-9._-]+/g, '_');
+  return `task-${base}.md`;
 }
 
 function displayDbPath(dbPath: string): string {
@@ -426,28 +476,77 @@ export type DeliverableWriteResult =
   | { ok: false; exitCode: 2 | 1; message: string };
 
 /**
- * 写出交付件：不建目录、不覆盖——
+ * 本工具导出的交付件首行形状（renderTaskDeliverable 第 1 行）：
+ * `# 任务交付件：<#编号 名称>（<事实词>）`。--force 只按这个形状放行覆盖，
+ * 目的是「不覆盖非本工具产物」——形状依据就是上面那行渲染结果，不是语义判断。
+ */
+const DELIVERABLE_TITLE_PATTERN = /^# 任务交付件：/;
+
+/** 目标是否是本工具导出的交付件（只读首行，不加载整个文件）。 */
+function isDeliverableFile(filePath: string): boolean {
+  try {
+    const head = readFileSync(filePath, 'utf8').split('\n', 1)[0] ?? '';
+    return DELIVERABLE_TITLE_PATTERN.test(head);
+  } catch {
+    return false;
+  }
+}
+
+function isDirectoryPath(filePath: string): boolean {
+  try {
+    return statSync(filePath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** 拒绝覆盖的既有文案（加 --force 之前逐字如此）。 */
+const refuseOverwrite = (filePath: string): DeliverableWriteResult => ({
+  ok: false,
+  exitCode: 2,
+  message: `输出文件已存在：${filePath}（拒绝覆盖；请换一个路径，或先移走原文件）。`,
+});
+
+/**
+ * 写出交付件：不建目录；缺省不覆盖——
  *   · 目标已存在（文件/目录/符号链接）→ 拒绝覆盖 exit 2；
  *   · 父目录缺失 → 拒绝（不自动创建）exit 2；父路径非目录 → exit 2；
  *   · 实际写出用 flag: 'wx'（原子独占创建）兜底竞态，EEXIST/ENOENT/ENOTDIR 映射同一提示；
  *   · 其余写出失败（权限/磁盘等）→ exit 1。
+ * `--force`：只在上一条基础上放行「覆盖本工具导出的交付件」一种情况——
+ * 目录、非本工具产物、缺父目录与缺省完全一致（仍拒绝，文案另给，不说成同一件事）。
  */
-export function writeDeliverable(input: { filePath: string; text: string }): DeliverableWriteResult {
-  const { filePath, text } = input;
+export function writeDeliverable(input: { filePath: string; text: string; force?: boolean }): DeliverableWriteResult {
+  const { filePath, text, force = false } = input;
   if (existsSync(filePath)) {
-    return { ok: false, exitCode: 2, message: `输出文件已存在：${filePath}（拒绝覆盖；请换一个路径，或先移走原文件）。` };
+    if (!force) return refuseOverwrite(filePath);
+    if (isDirectoryPath(filePath)) {
+      return {
+        ok: false,
+        exitCode: 2,
+        message: `输出目标是目录：${filePath}（--force 也不能覆盖目录；请给出文件路径）。`,
+      };
+    }
+    if (!isDeliverableFile(filePath)) {
+      return {
+        ok: false,
+        exitCode: 2,
+        message: `输出文件已存在且不是本工具导出的交付件：${filePath}`
+          + '（--force 只覆盖本工具导出的交付件；请换一个路径，或先移走原文件）。',
+      };
+    }
   }
   const dir = path.dirname(filePath);
   if (!existsSync(dir)) {
     return { ok: false, exitCode: 2, message: `输出目录不存在：${dir}（不会自动创建；请先创建目录或换路径）。` };
   }
   try {
-    writeFileSync(filePath, text, { encoding: 'utf8', flag: 'wx' });
+    writeFileSync(filePath, text, { encoding: 'utf8', flag: force ? 'w' : 'wx' });
     return { ok: true };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'EEXIST') {
-      return { ok: false, exitCode: 2, message: `输出文件已存在：${filePath}（拒绝覆盖；请换一个路径，或先移走原文件）。` };
+      return refuseOverwrite(filePath);
     }
     if (code === 'ENOENT') {
       return { ok: false, exitCode: 2, message: `输出目录不存在：${dir}（不会自动创建；请先创建目录或换路径）。` };
@@ -621,8 +720,8 @@ async function main(): Promise<void> {
   }
 
   if (!existsSync(dbPath)) {
-    if (parsed.taskId !== undefined) {
-      console.error(`找不到任务：${parsed.taskId}（任务底账还没有记录）。`);
+    if (parsed.taskIds.length > 0) {
+      console.error(`找不到任务：${parsed.taskIds[0]}（任务底账还没有记录）。`);
       process.exitCode = 2;
       return;
     }
@@ -634,16 +733,66 @@ async function main(): Promise<void> {
   try {
     registry = createSqliteTaskRegistry(dbPath, { readOnly: true });
     const tasks = registry.list();
-    if (parsed.taskId === undefined) {
+    if (parsed.taskIds.length === 0) {
       console.log(`${renderTaskList(tasks)}\n${renderTaskLedgerLine(dbPath)}`);
       return;
     }
-    const task = findTaskRef(tasks, parsed.taskId);
+    if (parsed.taskIds.length > 1) {
+      // 批量导出：--out 必须是已存在目录（不自动创建；单 id 的老语义完全不变）。
+      const outDir = resolveOutPath(parsed.outPath!, { env: process.env, cwd: process.cwd() });
+      if (!existsSync(outDir)) {
+        console.error(`输出目录不存在：${outDir}（批量导出不会自动创建目录；请先创建目录或换路径）。`);
+        process.exitCode = 2;
+        return;
+      }
+      if (!isDirectoryPath(outDir)) {
+        console.error(`输出路径不是目录：${outDir}（批量导出的 --out 必须是目录）。`);
+        process.exitCode = 2;
+        return;
+      }
+      // 引用先全部解析：任一找不到就整体退出，不写任何文件（不做「导了一半」）。
+      const resolved: { ref: string; task: TaskRecord }[] = [];
+      const missing: string[] = [];
+      for (const ref of parsed.taskIds) {
+        const found = findTaskRef(tasks, ref);
+        if (found === undefined) missing.push(ref);
+        else resolved.push({ ref, task: found });
+      }
+      if (missing.length > 0) {
+        console.error(`找不到任务：${missing.join('、')}（任务底账中没有这条记录；未导出任何文件）。`);
+        process.exitCode = 2;
+        return;
+      }
+      // 写阶段逐个进行：部分失败不中断（把能导的导完），逐条给原因，最后计数 + exit 1。
+      let ok = 0;
+      const failed: string[] = [];
+      for (const item of resolved) {
+        const filePath = path.join(outDir, deliverableFileName(item.task));
+        const written = writeDeliverable({
+          filePath,
+          text: renderTaskDeliverable(item.task),
+          force: parsed.force,
+        });
+        if (written.ok) {
+          ok += 1;
+          console.log(`已导出任务交付件：${filePath}`);
+        } else {
+          failed.push(written.message);
+          console.error(written.message);
+        }
+      }
+      console.log(`批量导出：成功 ${ok} 个，失败 ${failed.length} 个。`);
+      console.log(renderTaskLedgerLine(dbPath));
+      process.exitCode = failed.length === 0 ? 0 : 1;
+      return;
+    }
+    const task = findTaskRef(tasks, parsed.taskIds[0]!);
     if (task === undefined) {
-      console.error(`找不到任务：${parsed.taskId}（任务底账中没有这条记录）。`);
+      console.error(`找不到任务：${parsed.taskIds[0]}（任务底账中没有这条记录）。`);
       process.exitCode = 2;
       return;
     }
+
     if (parsed.redo === true) {
       // redo 要写新任务：先关只读连接，再用 ask 同源装配读同一库重新交办（原任务零改动）。
       registry.close();
@@ -666,9 +815,10 @@ async function main(): Promise<void> {
       console.log(`${renderTaskDetail(task, { notifications })}\n${renderTaskLedgerLine(dbPath)}`);
       return;
     }
-    // 导出：先渲染（纯内存），再独占写出用户指定的那一个文件；底账只读，不写库、不建目录。
-    const filePath = resolveOutPath(parsed.outPath, { env: process.env, cwd: process.cwd() });
-    const written = writeDeliverable({ filePath, text: renderTaskDeliverable(task) });
+    // 导出：先渲染（纯内存），再写出用户指定的那一个文件；底账只读，不写库、不建目录。
+    const filePath = resolveOutPath(parsed.outPath!, { env: process.env, cwd: process.cwd() });
+    const written = writeDeliverable({ filePath, text: renderTaskDeliverable(task), force: parsed.force });
+
     if (!written.ok) {
       console.error(written.message);
       process.exitCode = written.exitCode;
