@@ -33,7 +33,7 @@
  *     无关联列/表）；
  *   · 列表/详情/--out 不联网、不加载模型、不 spawn 执行层（--redo 按需动态加载装配）。
  */
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ExecutionStatus } from '@fshine/contracts/execution-contract';
@@ -509,12 +509,29 @@ export type DeliverableWriteResult =
 const DELIVERABLE_TITLE_PATTERN = /^# 任务交付件：/;
 
 /** 目标是否是本工具导出的交付件（只读首行，不加载整个文件）。 */
+/**
+ * 是不是本工具导出的交付件（首行形状）。**符号链接一律算「不是」**：
+ * `--force` 走 `flag:'w'`（O_TRUNC|O_CREAT）会**穿过**链接把内容写到链接目标——
+ * 悬空链接时 `existsSync` 返回 false，连形状检查都被跳过；指向已有交付件的链接会让
+ * `readFileSync` 读到目标首行从而通过检查，然后覆盖那个未经本路径核验的目标。
+ * 两种都能把交付件写到用户给出的路径之外（2026-11-24 grok blocking）。
+ */
 function isDeliverableFile(filePath: string): boolean {
   try {
+    if (lstatSync(filePath).isSymbolicLink()) return false;
     const head = readFileSync(filePath, 'utf8').split('\n', 1)[0] ?? '';
     return DELIVERABLE_TITLE_PATTERN.test(head);
   } catch {
     return false;
+  }
+}
+
+/** 是不是符号链接（含悬空；lstat 不跟随链接）。 */
+function isSymbolicLink(filePath: string): boolean {
+  try {
+    return lstatSync(filePath).isSymbolicLink();
+  } catch {
+    return false; // 不存在 = 不是链接
   }
 }
 
@@ -544,6 +561,17 @@ const refuseOverwrite = (filePath: string): DeliverableWriteResult => ({
  */
 export function writeDeliverable(input: { filePath: string; text: string; force?: boolean }): DeliverableWriteResult {
   const { filePath, text, force = false } = input;
+  // 符号链接一律拒绝（在最前面，两种形态同一处理）：`--force` 走 flag:'w'（O_TRUNC|O_CREAT）
+  // 会**穿过**链接把内容写到链接目标——悬空链接时 existsSync 为 false（形状检查被跳过），
+  // 指向已有交付件的链接会通过形状检查后覆盖那个未经本路径核验的目标。两种都能把交付件
+  // 写到用户给出的路径之外（2026-11-24 grok blocking）。
+  if (isSymbolicLink(filePath)) {
+    return {
+      ok: false,
+      exitCode: 2,
+      message: `输出路径是符号链接：${filePath}（不会穿过链接写目标；请给出真实文件路径）。`,
+    };
+  }
   if (existsSync(filePath)) {
     if (!force) return refuseOverwrite(filePath);
     if (isDirectoryPath(filePath)) {

@@ -11,7 +11,7 @@
  */
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
@@ -1249,6 +1249,33 @@ describe('tasks：CLI 端到端（真实子进程）', () => {
 /** README 的 tasks 用法段是「现状陈述」：与 CLI 实际面一致（改文档必配能变红的守卫）。 */
 describe('tasks：README 用法陈述与 CLI 现状一致', () => {
   const readme = readFileSync(path.join(REPO_ROOT, 'README.md'), 'utf8');
+
+  it('符号链接一律拒绝：--force 也不穿过链接写目标（grok blocking）', () => {
+    // 2026-11-24 grok blocking：--force 走 flag:'w'（O_TRUNC|O_CREAT）会穿过链接。悬空链接时
+    // existsSync=false，形状检查被跳过；指向已有交付件的链接会通过形状检查后覆盖目标。
+    // 两种都把内容写到用户给出的路径之外。
+    const dir = tempDir();
+    const dbPath = seedDb(dir);
+    const outside = path.join(dir, 'outside.md');
+
+    // ① 悬空链接：existsSync 为 false，但不得创建链接目标。
+    const dangling = path.join(dir, 'dangling.md');
+    symlinkSync(outside, dangling);
+    const run1 = runTasks(['#1', '--out', dangling, '--force'], { DB_PATH: dbPath });
+    expect(run1.status).toBe(2);
+    expect(run1.stderr + run1.stdout).toContain('符号链接');
+    expect(existsSync(outside)).toBe(false);
+
+    // ② 指向真实交付件的链接：形状检查会通过（读到目标首行），但仍不得覆盖目标。
+    const real = path.join(dir, 'real.md');
+    writeFileSync(real, '# 任务交付件：#1 旧内容\n', 'utf8');
+    const linked = path.join(dir, 'linked.md');
+    symlinkSync(real, linked);
+    const run2 = runTasks(['#1', '--out', linked, '--force'], { DB_PATH: dbPath });
+    expect(run2.status).toBe(2);
+    expect(run2.stderr + run2.stdout).toContain('符号链接');
+    expect(readFileSync(real, 'utf8')).toContain('旧内容'); // 目标没被改
+  });
 
   it('README 记录 --force / 批量导出 / 生成时间行，且文档提到的 flag 都被 parseTaskArgs 接受', () => {
     const block = readme.split('### `npm run tasks`')[1]?.split('###')[0] ?? '';

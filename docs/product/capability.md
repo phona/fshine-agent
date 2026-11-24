@@ -174,7 +174,7 @@ detail 在 `docs/product/interaction-contract.md`（五条尺子逐条现状）�
 | 9 | 真实企微租户联调 | 真网络时序、真机气泡观感、真实文件上传下载需独立测试租户（debt #74；`docs/architecture/channels.md` §8） |
 | 10 | 真实执行层（17dz）只读冒烟与真实写 | 只读=仅准备档待 owner 授权；写未验（`docs/product/real-read-readiness.md`；`docs/ops/real-write-loop.md` §6） |
 | 11 | P8 ops 扩展 | 「数字 ID→执行树/资源/通知投递」未获授权、未实施（debt #71） |
-| 12 | tasks CLI 增强 | 未清（debt #70；`executions` 时间列已于 2026-11-24 清账：底账 `started_at`/`finished_at` 前向加法 + 三处真实执行边界落时刻 + tasks/ops 渲染有/无时刻两态，见 debt #69 与 `scripts/tasks.test.ts`/`scripts/ops.test.ts` 金样） |
+| 12 | tasks CLI 增强 | 已清（2026-11-24：`--force` / 批量导出 / 交付件时间行，debt #70；`executions` 时间列同轮清账：底账 `started_at`/`finished_at` 前向加法 + 三处真实执行边界落时刻 + tasks/ops 渲染有/无时刻两态，见 debt #69 与 `scripts/tasks.test.ts`/`scripts/ops.test.ts` 金样） |
 | 13 | 文件去重边界 F-2/F-3 | 入站复用无来源判据、同消息同名塌缩——登记不修，产品语义待裁（`docs/decisions/debt.md` §六；F-1 pending 复用已于 2026-11-18 清账） |
 | 14 | 双实例共享 `.runtime/state.db` 的并发写语义 | 启动锁把第二个实例挡在连接渠道之前（`apps/server/main.ts:53`），锁失效/被绕开时的并发写未定义、未测（登记 2026-11-20：文档面复核发现原「无进程锁/仅靠操作纪律」陈述已过期） |
 
