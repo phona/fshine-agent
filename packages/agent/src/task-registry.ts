@@ -146,6 +146,12 @@ export interface ExecutionRecord {
   error?: ExecutionFailure;
   /** U3：这次真实执行所属的稳定逻辑操作身份（回放不写执行行，故回放不产生新记录）。 */
   dispatchKey?: string;
+  /**
+   * issue #69：这次真实执行的起止时刻（ISO；写侧在真实执行前后落时刻）。
+   * 缺省 = 无记录（时间列上线前的历史行 / 未落时刻），不伪造。
+   */
+  startedAt?: string;
+  finishedAt?: string;
 }
 
 /** 机械超时种类（等待到期 / 回合超时 / 排队超时；只用于调用方分档，不落底账）。 */

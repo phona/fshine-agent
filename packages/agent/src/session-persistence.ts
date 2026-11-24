@@ -109,6 +109,13 @@ function assertExternalSessionId(sessionId: string): void {
   }
 }
 
+/**
+ * 形状判定：普通对象（非 null、非数组）。**有意镜像**，不与 `packages/core/src/config.ts`
+ * 的 isRecord 合并（issue #72 锁死）：合并要让本模块值 import `@fshine/core` 的 barrel，
+ * 而那个 barrel 拖着 `task-store` → `better-sqlite3`——本模块今天只依赖 node 内建，是 Pi
+ * 驱动侧的会话文件解析器，不该为一行类型守卫把原生模块拖进导入图。两侧逐字相同 +
+ * 本注释由 `packages/agent/dead-code-merge.test.ts` 钉住；谁想合并，先回来改那张表。
+ */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

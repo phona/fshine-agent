@@ -21,7 +21,7 @@ import { runBatch, type BatchReport } from '../business-e2e/batch';
 import { sha256Hex } from '../convergence-r1/hash';
 import type { CallKind, CallTokens } from '../long-session/accounting';
 import {
-  accountSimCalls, emptySimAccounting,
+  accountSimCalls, emptySimAccounting, missingSimKinds,
   type SimAccounting, type SimCallKind, type SimCallRecord,
 } from './accounting';
 import {
@@ -592,6 +592,15 @@ export interface SimSuiteSummary {
   readonly effectiveSamples: number;
   readonly byTerminal: Readonly<Record<SimTerminal, number>>;
   readonly accounting: SimAccounting;
+  /**
+   * 记账覆盖检查（issue #72 把零调用的 `missingSimKinds` 接到这里）：必需类别
+   * （缺省 simulator + main；判官只在模型 Oracle 时才产生，不计入必需）一次都没记到的名字。
+   *
+   * **只报不缺**：系统面不暴露逐次调用时 `main` 就是 0（`systemAccountingAvailable=false`
+   * 的诚实标注），此时把它当错误抛出去等于把「用量不可得」升级成事故。覆盖缺口是**读数**，
+   * 由读报告的人决定要不要重跑；判定仍只由 `./oracle` 做。
+   */
+  readonly missingKinds: readonly SimCallKind[];
   readonly isolation: SimIsolationReport;
 }
 
@@ -700,6 +709,7 @@ export async function runSimSuite(input: SimSuiteInput): Promise<SimSuiteResult>
   }
 
   const protocolErrors = byTerminal.protocol_error;
+  const accounting = accountSimCalls(merged);
   const summary: SimSuiteSummary = {
     n: trials.length,
     passed: trials.filter((trial) => trial.pass).length,
@@ -708,7 +718,9 @@ export async function runSimSuite(input: SimSuiteInput): Promise<SimSuiteResult>
     // 有效样本 = 总数 − protocol_error；协议失败不洗成 pass、也不计入其它终态。
     effectiveSamples: trials.length - protocolErrors,
     byTerminal,
-    accounting: accountSimCalls(merged),
+    accounting,
+    // 记账覆盖检查（reverse tripwire）：必需类别一次都没记到就在这里报出来。
+    missingKinds: missingSimKinds(accounting),
     isolation,
   };
   return { trials, summary, batch };

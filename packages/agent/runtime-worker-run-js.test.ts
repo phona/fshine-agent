@@ -20,7 +20,7 @@ import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMay
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   CapabilityManifest,
   ExecutionClient,
@@ -577,6 +577,61 @@ describe('CAP-01 S2 ⑥ Worker 工具面门控', () => {
     } finally {
       fx.ro.close();
       fx.close();
+    }
+  });
+
+  it('Worker run_js 执行行落真实执行的起止时刻（issue #69；假时钟 + 替身执行器）', async () => {
+    // 起止时刻夹住真实执行：替身执行器在「脚本在跑」期间把系统时间前进 800ms——
+    // started_at 必须取发起前一刻、finished_at 取回执到达一刻（都不许等于对方/不许伪造）。
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-24T09:00:00.000Z'));
+    try {
+      const slowExecutor: RunJsExecutor = {
+        async runJs() {
+          vi.setSystemTime(Date.now() + 800);
+          return {
+            exitCode: 0,
+            exitSignal: null,
+            stdout: '',
+            stderr: '',
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            outputs: [],
+            audit: {
+              runId: 'run_0123456789abcdef0123456789abcdef',
+              runDir: '/tmp/run',
+              scriptSha256: 'sha_test',
+              inputFileIds: [],
+              materializedInputs: [],
+              inputBytes: 12,
+              outputs: [],
+              skippedOutputs: [],
+              exitCode: 0,
+              exitSignal: null,
+              durationMs: 800,
+            },
+          };
+        },
+      };
+      const fx = await makeFixture({ executor: slowExecutor });
+      try {
+        fx.workerPush({ execCalls: [{ tool: 'run_js', args: { code: 'console.log(1)' } }], text: '跑完了。' });
+        fx.mainPush({ execCalls: [{ tool: 'task_run', args: { task: '跑一次代码' } }], text: '完成。' });
+        const turn = await fx.session.send('交办');
+        const task = fx.session.getTask(turn.taskIds[0]!);
+        expect(task.executions).toHaveLength(1);
+        expect(task.executions[0]).toMatchObject({
+          operation: 'run_js',
+          status: 'completed',
+          startedAt: '2026-11-24T09:00:00.000Z',
+          finishedAt: '2026-11-24T09:00:00.800Z',
+        });
+      } finally {
+        fx.ro.close();
+        fx.close();
+      }
+    } finally {
+      vi.useRealTimers();
     }
   });
 

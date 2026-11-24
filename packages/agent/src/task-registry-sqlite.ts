@@ -115,6 +115,9 @@ export function createSqliteTaskRegistry(
         status: execution.status as ExecutionStatus,
         ...(execution.error === undefined ? {} : { error: execution.error as ExecutionFailure }),
         ...(execution.dispatchKey === undefined ? {} : { dispatchKey: execution.dispatchKey }),
+        // issue #69：起止时刻原值透传（缺列/缺省的旧库读出缺省，不伪造）。
+        ...(execution.startedAt === undefined ? {} : { startedAt: execution.startedAt }),
+        ...(execution.finishedAt === undefined ? {} : { finishedAt: execution.finishedAt }),
       })),
       createdAt: stored.task.createdAt,
       updatedAt: stored.task.updatedAt,
@@ -186,6 +189,9 @@ export function createSqliteTaskRegistry(
         status: record.status,
         ...(record.error === undefined ? {} : { error: record.error }),
         ...(record.dispatchKey === undefined ? {} : { dispatchKey: record.dispatchKey }),
+        // issue #69：起止时刻由调用方在真实执行前后落（缺省 = 无记录，不伪造）。
+        ...(record.startedAt === undefined ? {} : { startedAt: record.startedAt }),
+        ...(record.finishedAt === undefined ? {} : { finishedAt: record.finishedAt }),
       });
       if (!inserted) throw new TaskOwnershipError();
       store.touchTask(taskId, new Date().toISOString());

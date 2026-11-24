@@ -39,6 +39,9 @@ const DEFAULT_CALLBACK_PATH = '/wecom/callback';
 // 过期本身不做清零(agent 层软着陆:压缩成摘要种子续会话),TTL 只决定"多久进入软着陆"。
 const DEFAULT_SESSION_TTL_MS = 86_400_000;
 
+/** 与 packages/agent/src/session-persistence.ts 的 isRecord 同形（有意镜像，issue #72 锁死：
+ * core 不能反向依赖 agent；合并方要在 agent 侧付出「把 core barrel 拖进 Pi 驱动导入图」的代价，
+ * 见该处注释）。两侧逐字相同由 `packages/agent/dead-code-merge.test.ts` 钉住。 */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

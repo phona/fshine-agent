@@ -403,6 +403,8 @@ async function main(): Promise<void> {
       effectiveSamples: suite.summary.effectiveSamples,
       byTerminal: suite.summary.byTerminal,
       accounting: suite.summary.accounting,
+      // 记账覆盖检查读数（issue #72）：必需类别一次都没记到就在这里报出来，不抛、不洗。
+      missingKinds: suite.summary.missingKinds,
       isolation: suite.summary.isolation,
       cases: buildCaseReports(suite.trials, selectedCases).map((report) => ({
         caseId: report.caseId,

@@ -3,32 +3,60 @@
 > 状态：现行。只列**未清**项；已关条目与 2026-09/10 波次关账记录在历史分片（`../history/debt-ledger*.md`）。
 > 核对口径（2026-11-18）：逐条读分片里状态为「待办 / 登记 / 部分落地」的条目，用当前树核对它引用的代码路径。**不自行判定已清**——无现行代码指针、无 issue 号、且无结案记录的，一律 `待核`。
 > 核对规模：分片共 72 条带编号未清项 + 4 条无编号登记；8 条仍有现行指针（§二），64 条指针已失效（§三）。
+> 2026-11-24 debt 切片（HEAD `2645e46f`）对 §二 8 条逐条对现行树核实：3 条结案（D-052 / D-062 / D-196，凭据见各行）、5 条改写登记（D-204 / D-156 / D-168 / D-170 / D-190）。§二 全部 `file:LINE` 指针与各行「现状陈述」由 `scripts/debt-ledger-guard.test.ts` 机械看守（现状一变即红，逼台账同步复核）。
 
 ## 一、issue 追踪（有 issue 号）
 
 | 编号 | 事项 | 证据 / 指针 | 状态 |
 |---|---|---|---|
 | #67 | 会话存储 retention / capacity（线性无界增长） | `../architecture/sessions.md:35-37` | 未清 |
-| #68 | 跨重启消息级幂等 / 真续跑恢复 | `../../AGENTS.md:84`；`../../README.md:93` | 未清 |
-| #69 | `executions` 时间列 | `../../AGENTS.md:84` | 未清 |
-| #70 | tasks CLI 增强 | `../../AGENTS.md:84` | 未清 |
-| #71 | P8 ops 扩展（原 R4 唯一未落地分片） | `../../AGENTS.md:84`；`index.md`（R4 行） | 未清 |
-| #72 | 死代码重复实现 | `../../AGENTS.md:84` | 未清 |
-| #73 | eval 候选池 | `../../AGENTS.md:84` | 未清 |
+| #68 | 真续跑恢复（跨重启消息级幂等那半已于 2026-11-24 结案） | `../../AGENTS.md:97`；`../../README.md:101` | 未清（仅剩「真续跑」）：Worker 会话跨重启续跑需 Pi 原生会话恢复，当前生产未落盘。已结案的那半：判重表（主键 `(principal_id, session_id, message_id)`）2026-11-19 落地于 `packages/core/src/task-store.ts`，同一条先于一切副作用查重、命中回放原回执、处理失败删行让渠道重投；`apps/server/server-inbound-idempotency.test.ts` 6 个用例（含关 server、同 dbPath 重建、再投同一 `messageId` 回放同一句） |
+| #69 | `executions` 时间列 | `packages/core/src/task-store.ts`（`executionTimeColumnsMissing` 前向加法迁移 + SCHEMA_BASE 两列 + 写读映射）；守卫 `packages/core/task-store-migration-execution-times.test.ts`（迁移/只读/不伪造）、`packages/agent/execution-time-columns.test.ts` 与 `packages/agent/runtime.test.ts` 与 `packages/agent/runtime-worker-run-js.test.ts`（三处真实执行边界落时刻）、`scripts/tasks.test.ts` + `scripts/ops.test.ts`（有/无时刻两态） | 已清（2026-11-24） |
+| #70 | tasks CLI 增强（2026-11-24 已清） | `../../AGENTS.md:97`；`scripts/tasks.ts`（USAGE/`--force`/批量导出/交付件时间行） | 已清：`--force` 默认拒绝覆盖逐字不变、批量导出一个任务一个 `task-<编号>.md`、交付件多一行「生成时间」；判据见 `scripts/tasks.test.ts` |
+| #71 | P8 ops 扩展（原 R4 唯一未落地分片） | `../../AGENTS.md:97`；`index.md`（R4 行） | 未清 |
+| #72 | 死代码重复实现 | 收敛记录见 `index.md`（2026-11-24 行）；守卫 `packages/agent/dead-code-merge.test.ts` | 已清（2026-11-24：8 组全部择一；`scripts/eval/**` 下 6 份 `jsonSafe` 历史夹具副本与 `scripts/ask-replay.ts` 的异名同义 `messageOf` 另行登记，理由见守卫文件头） |
+| #73 | eval 候选池 | `../../AGENTS.md:97` | 未清 |
 | #74 | B2 Silent Shadow 真实租户联调 | `../architecture/channels.md:3` | 未清 |
+
+## 一之补二、grok 复审登记（2026-11-24，按铁律只修 blocking，其余登记不修）
+
+> 来源：PR #77 / #78 / #79 的 grok 复审（各轮 blocking 已修并推送）。以下按 AGENTS.md
+> 「只修 blocking；major/minor/nit 留在审查评论里给人看，不为此开自动修复提交」登记，
+> **不是待办清单**——每条都写了「为何暂不修」与触发条件。
+
+| 编号 | 是什么 | 后果 | 为何暂不修 | 现行证据 |
+|---|---|---|---|---|
+| R-1 | `accepted`（长任务受理）行把 `finishedAt` 记成**回执到达时刻**，渲染成区间后用户会把受理往返读成「任务跑了多久」 | 长任务的「起止时刻」不是执行时长 | 要分开「回执到达」与「执行结束」两种时刻，属**新增字段/语义**，须先过新增机制准入（owner 裁）；或改文案口径（用户可见词面变更，也须 owner 点头） | `packages/agent/src/execution-runtime.ts` 三处真实执行写点；`scripts/tasks.ts` 的 `executionTimeText`；`execution-time-columns.test.ts` 只钉同步 completed |
+| R-2 | 行号指针不收敛：`pointerProblem` 只判「文件存在 + 行号不越界」，不核对落点符号；本 PR 加时间列后 `tasks.md` 的 `task-store.ts:528` 又从 `inbound_messages` 漂到 `file_refs` | 读者按指针认错符号 | grok 建议改成**符号锚**或让守卫核对「指针所在行含声称的标识符」——这是判据形状变更，属评测/守卫侧结构性改动，单开一轮做，不在返工 PR 里骑销 | `scripts/debt-ledger-guard.test.ts` 的 `pointerProblem`；`docs/architecture/tasks.md` §6/§7 |
+| R-3 | `errorText` 注释称「全仓唯一一份」，但守卫只按**函数名**计数；`error instanceof Error ? … : String(error)` 全仓 143 处内联副本一个都看不见（`scripts/tasks.ts` 主流程 catch 就是） | 改 helper 改不到内联那份，注释误导下一次修改 | 真要唯一须先定 helper 归属层（`packages/core/src/config.ts` 也在副本列表里，core 不能反向 import agent）——**层归属是架构决策，待 owner 裁**；grok 明说「不要再按名字逐处补」 | `packages/agent/src/run-dir-cleanup.ts` 注释；`dead-code-merge.test.ts` 的 `expectSites`；debt #72 行 |
+| R-4 | `--force` 仍按路径打开：硬链接（`nlink>1`）能过首行检查后截断同一 inode；检查与写入之间换链接也能穿 | 可写到给定路径之外/改到同一 inode 的其它名字 | grok 说「同一洞的下一个边界，不宜再按类型逐个补」——正解是 `O_NOFOLLOW` + 对 fd `fstat` 验普通文件，那是**写路径实现变更**，单开一轮；已修的 symlink 一种先挡着 | `scripts/tasks.ts` 的 `writeDeliverable`；grok 原文「打开时应使用 O_NOFOLLOW，并对 fd 做 fstat」 |
+| R-5 | `isDeliverableFile` 注释写「只读首行」，实现 `readFileSync` 读完全文再 split | `--force` 碰大文件可能在截断前整块读入 | 改法明确（只读首行或设上限），但属本轮范围外的小优化；不阻塞合入 | `scripts/tasks.ts` 的 `isDeliverableFile` |
+| R-6 | JSON 形状闸没有实测原文：放宽冒号条件后「无冒号花括号引语」会被打红（`{"备注"}`），首键超 48 字的对象又会漏 | 泄漏报告可能假红/假绿各一半 | 判据扩张必须用实测原文做表征锁（change-safety F8）——JSON 这半**没有实测样本**，要么等真泄漏出现再定形状，要么明确只保工具块四条。继续调正则就是打地鼠 | `scripts/eval/shared/internal-terms.ts` 的 `JSON_LITERAL_START_RE`；grok 实测探测记录 |
+| R-7 | 宿主单测把「给模型读的事实链」算进用户可见面；久无动静兜底句不在清单里 | ⑫ 的覆盖面比宣称的窄 | 清单补全是机械活，但与 R-6 同属「闸的形状」议题，一起等 owner 裁 | `apps/server/factword-no-internal-terms.test.ts` ⑫ |
+| R-8 | 能力页把 ops 写成「也渲染了有/无时刻两态」，实际 ops 快照没有执行步骤行 | 运营以为每步起止就在 ops 页上 | 能力页是产品陈述，改它须与 #69 的展示范围一起裁（owner） | `docs/product/capability.md` 第三节第 12 行；`scripts/ops.ts` 限制列表脚注 |
+| R-9 | README 把单任务导出钉成「与批量之前逐字节一致」，但同一 diff 给单任务加了生成时间行与起止后缀，没有批量前的字节样本 | 守卫只锁措辞，单任务导出再改内容也不会红 | 要补「批量前字节样本」当金样，属测试补强；不阻塞合入 | `README.md` 批量导出段；`scripts/tasks.test.ts` 的措辞断言 |
+| R-10 | `--force` 用 `flag:'w'` 先截断再写，中途失败会毁掉旧交付件（缺省 `'wx'` 保持「写失败则原文件不动」） | 覆盖中途异常时旧内容丢失 | 本地 CLI 且调用方显式要求覆盖；要改成「写临时文件再 rename」属实现变更，单开一轮 | `scripts/tasks.ts` 的 `writeDeliverable` |
+
+## 一之补、Eval 判据已知方差（2026-11-24 登记，不修）
+
+| 编号 | 是什么 | 后果 | 为何不修 | 现行证据 |
+|---|---|---|---|---|
+| V-1 | E15「运算必须给出处」的来源语义族锚点仍有漏判：集成分支 eval:user 14/15，唯一红是 E15 `FAIL_STATE_INCONSISTENCY`（①来源锚点全未命中）。模型答「共 2 条记录，金额合计 2000（明细：alpha-item-1 1200、alpha-item-2 800）」——数值对、执行层确实返回了 `sum: 2000`（`FAIL_UNSOURCED_AGGREGATE` 没判）、没心算也没冒充来源，只是**没写出处** | E15 会随模型措辞方差偶发红；不影响数据正确性判据 | 判据是 owner 2026-11-18 定口径的有意从严（「只给数字不给出处」即判负，宁可暴露缺口不接受心算）。把「明细：」算成出处 = 为凑绿放宽判据，AGENTS.md 判据红线禁止。已观察到信息丢失发生在 Main 转述层（Worker 汇报原文有「对方的返回是」，Main 的回复丢了），属模型行为，不是宿主缺陷 | `scripts/eval/convergence-r1/cases/E15.ts` 的 `hardAnchors[1]`（六族 regexAny）；eval 读数 `.runtime/eval-r1/` |
 
 ## 二、有现行指针、无 issue 号（逐条核对）
 
+> 2026-11-24 debt 切片（HEAD `2645e46f`）逐条对现行树核实：3 条结案（本行留档，下次清理删除）、5 条改写登记。结案的写清凭什么结；不能结的写清实测现状与为什么还不能结——口径存疑的写明存疑什么，不自行拍板。
+
 | 编号 | 事项 | 现行证据 | 状态 |
 |---|---|---|---|
-| D-204 | dummy 夹具两套 commit 令牌契约不一致 | `scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:789-792` 注释自述「两者不一致已登记」（`:791`）；`verifyProposalToken` 见 `:723`，script 绑定校验见 `:1201`/`:1295`（旧行号 `:542-545`/`:479`/`:927`/`:1014` 系 11-19/20 文件增长漂移） | 待办（未统一） |
-| D-156 | 两支真实读数（61,000 / 86,000）残留 | `docs/history/architecture-laws-2026-11_undated.md:242`「遗留待清」；**口径不明**：2026-11-20 核对按字面量实测（非 history 面 0 行、history 7 行、本表 1 行），复现不出原文「仅此一行命中」，原口径待考 | 待办（无 issue，口径存疑） |
-| D-052 | `step-text.ts` 六个退役工具名死分支 | `packages/agent/src/step-text.ts` 仍在，但六个工具名在该文件域内 grep 零命中（全仓另有 `packages/agent/pi-driver.test.ts:18/:24` 的合成工具名 `search_references`，与死分支无关）；无结案记录 | 待核 |
-| D-062 | `npm test` 在无凭据环境全红 | `package.json:9`（`vitest run`）；无结案记录 | 待核 |
-| D-168 | 门①「产品面」口径未定义 | 现行树**实测 4 处命中**（`packages/agent/src/user-facing-failure.ts:78`、`packages/agent/payload-oneof.test.ts:2`、`:23`、`scripts/eval/real/smoke.ts:4`，均注释/文案级；2026-11-20 核对，原文写「零命中」已不成立） | 待核 |
-| D-170 | exposure-lint 剩余核对与扩展 | `packages/agent/exposure-lint.test.ts` 已不存在（`ls` 实测）；无结案记录 | 待核 |
-| D-190 | 门①测试夹具豁免口径分歧 | `docs/history/architecture-laws-2026-11_undated.md` 仍在；**口径限定**：该条原判据是「产品面（packages/apps 非测试文件）零 17dz 字面量」——按此口径现行树**非测试面 1 行**（`packages/agent/src/user-facing-failure.ts:78`，注释级）、测试/夹具面 3 行（`packages/agent/payload-oneof.test.ts:2`、`:23`、`scripts/eval/real/smoke.ts:4`），合计即 D-168 的 4 行实测清单；无结案记录 | 待核（口径见 D-168） |
-| D-196 | 退役 `FSHINE_PLATFORM_ROOT` | 代码面（packages/apps/scripts/config/tests/.github/package.json）grep 零命中；docs 档案与本表自身有历史提及；无结案记录 | 待核 |
+| D-204 | dummy 夹具两套 commit 令牌契约不一致 | 2026-11-24 复核：两套契约仍在，与 2026-11-20 登记指针逐条对上——proposal-commit 路径 `verifyProposalToken`（`scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:723-735`）验 HMAC + `{proposalId, expiresAt}`、**不读 script**；其令牌门 fail-closed（`scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:789-792`），注释自述「两者不一致已登记 debt-ledger，本轮不合并」；`dummy.commit` 直提两处（结构化 call `scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:1191-1204`、bash 直提 `scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:1283-1297`）是 `if (secret)` 有门才验，且内联校验多一项 `p.script === op.name`（`scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:1201`/`scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:1295`）。同一 secret 签出的令牌两路径期望形状不同（script 绑定有无）+ 门控方向不同（fail-closed vs 有 secret 才验），维护者容易签错 | 待办（未统一；`scripts/debt-ledger-guard.test.ts` D-204 例钉住现状，任一侧被统一即红） |
+| D-156 | 两支真实读数（61,000 / 86,000）残留 | 2026-11-24 复核（pattern `61,000`/`86,000`/`61000`/`86000`，全树 grep）：**非档案面零命中**（packages/apps/scripts/config/tests/.github/patches/docs 现行文档/README/AGENTS/package.json）；档案面 9 行——`docs/history/architecture-laws-2026-11_undated.md:242`、`docs/history/change-safety-part02-2026-10_2026-11_undated.md:580`、`docs/history/change-safety-part02-2026-10_2026-11_undated.md:712`、`docs/history/debt-ledger-part02-2026-09_2026-10.md:154`、`docs/history/debt-ledger-part02-2026-09_2026-10.md:155`、`docs/history/debt-ledger-part02-2026-09_2026-10.md:256`、`docs/history/debt-ledger-part02-2026-09_2026-10.md:258`、`docs/history/debt-ledger-part03-2026-10_2026-11.md:354`、`docs/history/debt-ledger-part03-2026-10_2026-11.md:356`；本表自身 1 行（D-156 行）。**口径存疑（未拍板，不自行结案）**：原判据「全树机械替换为虚构值 + exposure-lint D 类收词后零命中」——收词对象 exposure-lint 已随 Reset 删除（见 D-170 行），判据形状失效；「全树」是否含 history 档案原文未定义（2026-11-20 登记即写「复现不出仅此一行命中，原口径待考」）；按「过程史不重写」惯例档案 9 行不动。防复发由后继守卫接管：`scripts/debt-ledger-guard.test.ts` D-156 例钉住「非档案面零命中 + 档案 9 行」 | 登记（现行面已清、档案面口径存疑；无 issue） |
+| D-052 | `packages/agent/src/step-text.ts` 六个退役工具名死分支 | 2026-11-24 结案核实：① 死分支已不在——该文件无 `switch (toolName)`，六个退役工具名（`search_account_sets`/`get_current_accounting_period`/`list_vouchers`/`inspect_account_set`/`search_references`/`get_login_status`）文件内 grep 零命中，`defaultStepText` 已退化为通用模板（`packages/agent/src/step-text.ts:51-53`）；② 测试改钉新行为——`packages/agent/step-text.test.ts:17-20`「非内部工具回退到通用工具名模板（直接平台工具已退役，不再有具名帧）」；③ 白名单 6 条随载体 `packages/agent/platform-leak-lint.test.ts` 一并不在树内（`ls` 实测），`rememberAccountSets` 全仓零命中；④ 关账记录早在 Wave 1（2026-11-20 重建写「无结案记录」系漏查）：`docs/history/debt-ledger-part01-2026-09_2026-10_2026-11_undated.md:898`「step-text 死簇连专属死代码（names/rememberAccountSets）整簇删，同步删 lint 白名单 6 条」 | 已清（2026-11-24 对现行树核实；守卫 = `scripts/debt-ledger-guard.test.ts` D-052 例 + 既有 `packages/agent/step-text.test.ts`；本行留档，下次清理删除） |
+| D-062 | `npm test` 在无凭据环境全红 | 2026-11-24 结案核实：① 原复现命令 `env -u WECOM_BOT_ID -u WECOM_BOT_SECRET npx vitest run`（原文口径）实测 exit 0——279 测试文件全过、2790 例过 / 2 跳 / 3 todo；原文「17 文件 52 例全红」的失败形态不存在；② 红的根因（e2e harness 启动真实 `WecomBotChannel`，硬性要求企微凭据）随旧 e2e 套件删除——`vitest.config.ts:5`、`scripts/ci.sh:18`，`tests/e2e/harness.ts` 已删除；③ 现行触及企微凭据的用例全部自供假值（`packages/channel-wecom/adapter.test.ts:20`、`apps/server/server.test.ts:190` 等），无用例从 `process.env` 读企微凭据（守卫）；④ Wave 1 关账记录：`docs/history/debt-ledger-part01-2026-09_2026-10_2026-11_undated.md:895`「正常/无凭据两环境均 60 文件 572 例全绿」（2026-11-20 重建写「无结案记录」系漏查）。附注（如实）：真实渠道联调不在确定性门内，登记在 issue #74；这是覆盖面的真实状态，非本次新造口径 | 已清（2026-11-24 实测；守卫 = `scripts/debt-ledger-guard.test.ts` D-062 例；本行留档，下次清理删除） |
+| D-168 | 门①「产品面」口径未定义 | 2026-11-24 复核：packages/apps 非测试文件 17dz **零命中**——2026-11-20 登记的最后一处（`packages/agent/src/user-facing-failure.ts` 注释级）已随当日两次重构（`f0fa7104` 宿主不再判失败种类、`5435604b` 业务侵入行为全删）移除；测试/夹具面 3 行：`packages/agent/payload-oneof.test.ts:2`、`packages/agent/payload-oneof.test.ts:23`（17dz voucher schema 形状夹具）、`scripts/eval/real/smoke.ts:4`（真实执行层只读冒烟准备档，owner 2026-11-19 只批准准备档）。**口径存疑（未拍板，不自行裁定）**：原判据要 owner 拍板「产品面」是否含测试夹具与 scripts/，并在 `change-safety.md` / `architecture-laws.md` 落地正式条目——两份文档已随 Minimal Reset 删除（现行树不存在），platform-leak-lint 的豁免惯例同批不在树内（见 D-170 行），拍板载体没了；`scripts/eval/real/smoke.ts` 这类 scripts/ 非测试文件按职责必须点名真实执行层，算不算「产品面」未见 owner 裁定 | 登记（口径存疑：scripts/ 非测试探针的归属未拍板；无 issue） |
+| D-170 | exposure-lint 剩余核对与扩展 | 2026-11-24 复核：核对对象已不在树内——`packages/agent/exposure-lint.test.ts` 不存在（`ls` 实测），同批不在树内的还有 `packages/agent/platform-leak-lint.test.ts`、身份面守卫 `packages/agent/execution-identity-surface.test.ts` 与 HG1 `packages/agent/history-hygiene.test.ts`：前三者删于 Reset 可达性删除 `0b972273`（HG1 更早不在树内，R1 审计把它列为已删对象），删除记录与「恢复最小闭集守卫或改 D-209 闭环判据属 owner 待裁定」在 `docs/history/decision-log-part01-2026-11_undated.md:716`；M4 复核轮清掉注释里对 exposure-lint 的陈旧指向（`docs/history/decision-log-part01-2026-11_undated.md:708`、R1 `docs/history/decision-log-part01-2026-11_undated.md:774`）。原残留两项因此失效：①「三道守卫逐一道具核对在 CI 内运行」的对象（exposure-lint / 身份面守卫 / HG1）四散俱删；门④所属迁移波次随 Minimal Rewrite 收口；②「波次 4 按需扩展类别」同批作废 | 登记（主体随 Reset 删除并有决策记录；残留 = D-209 的 owner 待裁定，见 §三） |
+| D-190 | 门①测试夹具豁免口径分歧 | 2026-11-24 复核（口径同 D-168）：产品面（packages/apps 非测试文件）17dz **零命中**（最后一处随 `f0fa7104`/`5435604b` 删除）；测试/夹具面 3 行即 D-168 清单（`packages/agent/payload-oneof.test.ts:2`、`packages/agent/payload-oneof.test.ts:23`、`scripts/eval/real/smoke.ts:4`）。原判据「owner 拍板后在 `change-safety.md` 或 `architecture-laws.md` 落地正式条目，且 `platform-leak-lint.test.ts` 的豁免范围与该条目一致」——两份文档与该测试文件均已不在树内（见 D-170 行），裁定载体不存在；未见到 owner 拍板记录 | 登记（口径存疑：拍板载体已删、裁定未见；无 issue） |
+| D-196 | 退役 `FSHINE_PLATFORM_ROOT` | 2026-11-24 结案核实：① `grep -rn FSHINE_PLATFORM_ROOT` 全树（除 git 历史）实测 9 命中，全在档案面——本表 D-196 行自身 1 行 + `docs/history/` 8 行（`docs/history/change-safety-part02-2026-10_2026-11_undated.md:339`、`docs/history/change-safety-part02-2026-10_2026-11_undated.md:495`、`docs/history/change-safety-part02-2026-10_2026-11_undated.md:708`、`docs/history/change-safety-part03-2026-11.md:206`、`docs/history/debt-ledger-part03-2026-10_2026-11.md:339`、`docs/history/debt-ledger-part03-2026-10_2026-11.md:762`、`docs/history/debt-ledger-part03-2026-10_2026-11.md:765`、`docs/history/debt-ledger-part03-2026-10_2026-11.md:767`）；代码面（packages/apps/scripts/config/tests/.github/patches/README/AGENTS/package.json 及任何非 docs 文件）零命中，符合原判据④「空或仅剩档案登记」；② 判据①③：全量 `vitest run` 与 `tsc --noEmit` 2026-11-24 全绿；③ 判据②⑤的对象 `tests/e2e/harness.ts` 已删除（随 Minimal Reset；`vitest.config.ts:5`、`scripts/ci.sh:18`），统一配置解析继任者在 `scripts/resolve-config-path.ts:25`（`explicitConfigFrom`：`--config` > `AGENT_CONFIG_PATH` > 各入口缺省；隐式回退链已随 M4 退役） | 已清（2026-11-24 对现行树核实；②⑤ 因对象删除而 moot，继任配置机制有指针；守卫 = `scripts/debt-ledger-guard.test.ts` D-196 例；本行留档，下次清理删除） |
 
 ## 三、指针失效、无结案记录 → 待核（64 条）
 
