@@ -47,7 +47,7 @@ import {
   recordingDriver,
   type QueryReading,
 } from './write-loop';
-import { INTERNAL_WORDS } from '../shared/internal-terms';
+import { INTERNAL_WORDS, TOOL_BLOCK_MARKERS } from '../shared/internal-terms';
 
 // 词表单一来源：本入口只转发共享模块的定义，现有 N2 断言与测试逐字不变。
 export { INTERNAL_WORDS };
@@ -82,7 +82,8 @@ export const REPLAY_TURNS: readonly string[] = [
 // ---- 负面判据的形状表（冻结样本，不是语义判据） -------------------------------------------
 
 /** N1：工具调用标记形状（逐字冻结）。 */
-export const TOOL_MARKERS: readonly string[] = ['<｜｜DSML', '<｜tool', '<invoke', 'parameter name='];
+/** N1 工具调用块标记：单一来源在 shared/internal-terms（2026-11-24 合并，不再各存一份）。 */
+export const TOOL_MARKERS: readonly string[] = TOOL_BLOCK_MARKERS;
 /** N4：已记录的真实坏话术原文（冻结样本，不是语义判据）。 */
 export const FROZEN_BAD_PHRASES: readonly string[] = [
   '已交办，正在办理中', '平台把新查询挡下了', '中间有过一次', '执行层确认摘要原文',

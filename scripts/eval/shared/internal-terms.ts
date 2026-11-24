@@ -106,13 +106,19 @@ export function findTaskIdShapeHits(texts: readonly VisibleText[]): Hit[] {
 }
 
 /**
- * 结构化块形状（2026-11-24 补闸：live P0 ①「DSML 工具块原样投给用户」）。
+ * 结构化块形状（2026-11-24 补 live P0 ①「DSML 工具块原样投给用户」；同日晚按 grok 实测
+ * 修订：**判定基础换成已冻结的封闭表，不再维持开放式词表**）。
  *
- * 判据是**机械形状**（格式/泄漏类），不判语义——两类：
- *   · 工具调用块标记：tool_use / tool_call / tool_result / function_call / antml:，
- *     裸词或带引号/尖括号都算（模型把它当普通文本吐出来时是裸词，包在块里时带引号或尖括号）；
- *   · JSON 结构字面量：以引号成员开头的 `{…}` / `[…}`，或行首的 `{`/`[` + 引号键 + 冒号。
- *     业务行文（中文 + 数字 + 顿号）不会长这样。
+ * 为什么是封闭表：工具块写法的输入空间是开的，逐词补不会收敛（grok major：`tool_use` /
+ * `antml:` / `function_call` 在仓内用户可见语料里零样本，属「假设形态进判据」，违反
+ * change-safety F8「判据扩张用实测原文做表征锁」）。2026-11-20 live 实测拿到的真形状是
+ * 封闭的四条（原 live-replay 的 `TOOL_MARKERS`，已冻结），本表就是那四条的唯一来源——
+ * live-replay 改为从这里 import，不再各存一份。
+ *
+ * 判据是**机械形状**（格式/泄漏类），不判语义：
+ *   · 工具调用块标记：上面那四条封闭表；
+ *   · JSON 结构字面量：以引号成员开头的 `{…}` / `[…`（**不要求冒号**——`["a","b"]` 也是
+ *     结构字面量）；两个正则只记一次，同一段不双计。
  *
  * 明确**不**判的：模型自己说「系统不支持 X」（编造限制）——那是语义行为，判据红线禁止用
  * 词/正则判语义；只能靠「不给它编造的机会」（卸载上下文，见 factword 那条链）+ 用户级 eval
@@ -121,15 +127,15 @@ export function findTaskIdShapeHits(texts: readonly VisibleText[]): Hit[] {
  * 取舍说明：这是**严闸**。若某天真实执行层的提案摘要里合法地含 JSON 字面量，这里会红——
  * 那是要浮出来裁决的（要么执行层改摘要文案，要么这里加白名单并注明理由），不是悄悄放宽。
  */
-export const TOOL_BLOCK_MARKERS: readonly string[] = [
-  'tool_use', 'tool_call', 'tool_result', 'function_call', 'antml:',
-];
 
-/** 以引号成员开头的对象/数组字面量（`{"a":1}` / `["a"` / `{'a'`）。 */
-export const JSON_LITERAL_START_RE = /[{\[]\s*['"][^'"\n]{1,48}['"]\s*:/gu;
+/** 工具调用块标记（2026-11-20 live 实测冻结的四条；原 live-replay TOOL_MARKERS）。 */
+export const TOOL_BLOCK_MARKERS: readonly string[] = ['<｜｜DSML', '<｜tool', '<invoke', 'parameter name='];
 
-/** 行首对象/数组 + 引号键 + 冒号（JSON 块的一行；不要求行首锚以外的上下文）。 */
-export const JSON_BLOCK_LINE_RE = /(?:^|\n)[ \t]*[{\[\]][ \t]*['"][^'"\n]{1,48}['"][ \t]*:/gu;
+/** 以引号成员开头的对象/数组字面量（`{"a":1}` / `["a"` / `['a']` / `["a","b"]`）。 */
+export const JSON_LITERAL_START_RE = /[{\[]\s*['"][^'"\n]{0,48}['"]/gu;
+
+/** 行首对象/数组 + 引号成员（JSON 块的一行）。与上行重叠时只记一次（见 findStructuredBlockHits）。 */
+export const JSON_BLOCK_LINE_RE = /(?:^|\n)[ \t]*[{\[]\s*['"][^'"\n]{0,48}['"]/gu;
 
 /** 在用户可见文本里找结构化块形状的命中（marker = 命中的那段文本）。 */
 export function findStructuredBlockHits(texts: readonly VisibleText[]): Hit[] {
@@ -144,11 +150,18 @@ export function findStructuredBlockHits(texts: readonly VisibleText[]): Hit[] {
         from = index + marker.length;
       }
     }
+    // 两个 JSON 形状按「起点」去重：行首那条常常是字面量那条的子串（同一段 `{"a":1` 在
+    // 行首会同时被两条正则命中），双计会让「命中数」变成噪声。先收字面量、再收行首，
+    // 起点已出现过就跳过。
+    const seenStarts = new Set<number>();
     for (const shape of [JSON_LITERAL_START_RE, JSON_BLOCK_LINE_RE]) {
       shape.lastIndex = 0; // global 正则先归零，避免跨文本状态泄漏。
       for (const match of text.matchAll(shape)) {
         const index = match.index ?? 0;
-        hits.push({ where, marker: match[0].trim(), excerpt: excerptAt(text, index, match[0].trim().length) });
+        if (seenStarts.has(index)) continue;
+        seenStarts.add(index);
+        const marker = match[0].trim();
+        hits.push({ where, marker, excerpt: excerptAt(text, index, marker.length) });
       }
     }
   }

@@ -32,6 +32,7 @@ import {
   waitingUserFallbackText,
 } from './task-completion-delivery';
 import { findStructuredBlockHits } from '../../scripts/eval/shared/internal-terms';
+import { failureMessageFor } from '../../packages/agent/src/user-facing-failure';
 import { renderNotification } from '../../packages/agent/src/notification-render';
 import { formatFileAck } from '@fshine/contracts';
 import { createDummyCliClient } from '../../packages/agent/src/dummy-cli-client';
@@ -351,7 +352,12 @@ describe('宿主用户可见文本：无结构化块形状（工具调用块 / J
   /** 宿主写的用户可见文本一样样过形状闸（where 只用于失败定位）。 */
   const hostTexts = (): Array<{ where: string; text: string }> => [
     { where: 'taskCompletionFallbackText', text: taskCompletionFallbackText({ name: '核对单据', resultText: '共 3 条。' }) },
-    { where: 'failureFallbackFactText(denied)', text: failureFallbackFactText({ code: 'GATE_REFUSE', name: '核对单据' }) },
+    { where: 'failureFallbackFactText(GATE_REFUSE)', text: failureFallbackFactText({ code: 'GATE_REFUSE', name: '核对单据' }) },
+    { where: 'failureMessageFor(denied)', text: failureMessageFor('denied', { subject: 'alpha 集合' }).text },
+    { where: 'failureMessageFor(host_fault)', text: failureMessageFor('host_fault').text },
+    { where: 'failureMessageFor(invalid_input)', text: failureMessageFor('invalid_input').text },
+    { where: 'failureMessageFor(needs_input)', text: failureMessageFor('needs_input', { missing: ['窗口'] }).text },
+    { where: 'failureFallbackFactText(zeroExec=unsupported)', text: failureFallbackFactText({ zeroExecReason: 'unsupported', name: '核对单据' }) },
     { where: 'failureFallbackFactText(executor_failed)', text: failureFallbackFactText({ name: '核对单据' }) },
     { where: 'failureFallbackFactText(unknown_result)', text: failureFallbackFactText({ resultUnknown: true, name: '核对单据' }) },
     { where: 'failureFallbackFactText(resourceLimited)', text: failureFallbackFactText({ resourceLimited: true, name: '核对单据' }) },
@@ -379,10 +385,16 @@ describe('宿主用户可见文本：无结构化块形状（工具调用块 / J
     expect(findStructuredBlockHits(texts).map((hit) => `${hit.where}: ${hit.marker}`)).toEqual([]);
   });
 
-  it('⑫c 反向绊线：往宿主文本里塞一个 tool_use 块 → 形状闸必须红', () => {
-    // 证明闸真的在判：把工具块形状注入一条宿主文本，findStructuredBlockHits 必须命中。
-    const hits = findStructuredBlockHits([{ where: 'x', text: `${taskCompletionFallbackText({ resultText: '共 3 条。' })} tool_use` }]);
-    expect(hits.map((hit) => hit.marker)).toContain('tool_use');
+  it('⑫c 反向绊线：用 live 实测的 N1 原文过闸必须红（证明闸对真泄漏形状有效）', () => {
+    // 2026-11-20 live 首验的真形状（封闭表四条），不是假设形态。逐条证明 findStructuredBlockHits
+    // 对它们有效——此前新闸对 `<｜tool call>`（中间带空格）零命中，是假绿。
+    for (const n1 of ['<｜｜DSML', '<｜tool', '<invoke', 'parameter name=']) {
+      const hits = findStructuredBlockHits([{ where: 'x', text: `前缀${n1}后缀` }]);
+      expect(hits.map((hit) => hit.marker), n1).toContain(n1);
+    }
+    // 并证明它接在宿主文本末尾也照样红（宿主文本本身干净，形状是外来物）。
+    const hits = findStructuredBlockHits([{ where: 'x', text: `${taskCompletionFallbackText({ resultText: '共 3 条。' })} <invoke name="x">` }]);
+    expect(hits.map((hit) => hit.marker)).toContain('<invoke');
   });
 });
 
