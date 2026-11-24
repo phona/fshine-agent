@@ -28,7 +28,6 @@
 import type { ChannelRoute, DeliveryReceipt } from '@fshine/contracts';
 import { resourceLimitedText } from '../../packages/agent/src/notification-render';
 import { failureMessageFor, classifyFailure } from '../../packages/agent/src/user-facing-failure';
-import type { PartialCompletionFact } from '../../packages/agent/src/task-runner';
 import { stripServerPaths } from '../../packages/agent/src/server-paths';
 import { cleanExecutorDiagnostic, UNSUPPORTED_OPERATION_TEXT } from '../../packages/agent/src/execution-runtime';
 
@@ -76,8 +75,6 @@ export interface TaskFailureFact {
   code?: string;
   /** 业务名（只给资源受限那句带上「是哪件事」；其余话术不带名字）。 */
   name?: string;
-  /** 部分完成事实（已完成对象 + 未成功对象；只给兜底话术逐项说清，不是任务状态）。 */
-  partial?: PartialCompletionFact;
   /**
    * 零执行的机械原因（not_permitted / unsupported）：没到达执行层，不是「执行端没办成」——
    * 兜底话术按各自既有措辞说（没权限 / 办不了），不说「再试一次」。
@@ -331,7 +328,6 @@ export function failureFallbackFactText(input: {
   code?: string;
   name?: string;
   /** 部分完成事实（只给这一句兜底话术；不是任务状态词）。 */
-  partial?: PartialCompletionFact;
   /**
    * 零执行的机械原因（B1）：not_permitted = 发起前被宿主拒绝 → 既有 denied 话术（没权限）；
    * unsupported = 没有对应能力 → 既有「办不了」措辞（与模型行为句同一常量）。
@@ -339,10 +335,6 @@ export function failureFallbackFactText(input: {
    */
   zeroExecReason?: string;
 }): string {
-  if (input.partial !== undefined) {
-    const text = partialCompletionFailureText(input.partial);
-    if (text !== undefined) return text;
-  }
   if (input.resourceLimited === true) return resourceLimitedText(input.name);
   if (input.zeroExecReason === 'not_permitted') return failureMessageFor('denied').text;
   if (input.zeroExecReason === 'unsupported') return `${UNSUPPORTED_OPERATION_TEXT}。`;
@@ -352,16 +344,6 @@ export function failureFallbackFactText(input: {
   return failureMessageFor(kind === 'needs_confirmation' || kind === 'needs_input' ? 'host_fault' : kind).text;
 }
 
-/**
- * 部分完成的兜底一句（D1）：写已落库、另一个对象的写没成——说清「已完成 X，未成功 Y」，
- * 并落到一个动作（只重试没成的那件）。对象名取不到时不用本句（不编造、不拿操作名当对象）。
- */
-function partialCompletionFailureText(partial: PartialCompletionFact): string | undefined {
-  const completed = partial.completed.filter((label) => label.trim() !== '').join('、');
-  const failed = partial.failed.filter((label) => label.trim() !== '').join('、');
-  if (completed === '' || failed === '') return undefined;
-  return `已完成 ${completed}，未成功 ${failed}。没成的那件再试一次，还是先放着？`;
-}
 
 /** 账本事实行的上限（条；超出截断——事实给模型读，防止把大账整段灌进去）。 */
 const FAILURE_LEDGER_MAX_LINES = 12;
@@ -454,7 +436,6 @@ export async function deliverTaskFailure(fact: TaskFailureFact, options: TaskRes
     ...(fact.resourceLimited === true ? { resourceLimited: true } : {}),
     ...(fact.code === undefined ? {} : { code: fact.code }),
     ...(fact.name === undefined ? {} : { name: fact.name }),
-    ...(fact.partial === undefined ? {} : { partial: fact.partial }),
     ...(fact.zeroExecReason === undefined ? {} : { zeroExecReason: fact.zeroExecReason }),
   }), options);
 }

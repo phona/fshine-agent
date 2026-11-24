@@ -68,7 +68,6 @@ import { SessionPersistence } from '../../packages/agent/src/session-persistence
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import { deriveTaskName, taskReportedOf, taskStartedOf } from '../../packages/agent/src/task-registry';
 import type {
-  PartialCompletionFact,
   TaskExecutor,
   TaskRunner,
   WaitingUserNoticePort,
@@ -643,13 +642,8 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     resultUnknown?: boolean;
     resourceLimited?: boolean;
     report?: string;
-    /** 部分完成事实（已完成对象 + 未成功对象）：只给兜底话术，不是任务状态。 */
-    partial?: PartialCompletionFact;
   }): string | undefined => {
     const namePart = input.name === undefined ? {} : { name: input.name };
-    if (input.partial !== undefined) {
-      return failureFallbackFactText({ ...namePart, partial: input.partial });
-    }
     if (input.resultUnknown === true) return failureFallbackFactText({ resultUnknown: true, ...namePart });
     if (input.resourceLimited === true) return failureFallbackFactText({ resourceLimited: true, ...namePart });
     if (input.code !== undefined) return failureFallbackFactText({ code: input.code, ...namePart });
@@ -725,14 +719,13 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       const name = taskNameOf(taskId, record.request);
       // 本回合的确定执行事实优先于「底账看起来没有结果」：有失败码/零执行原因/部分完成时
       // 按事实归类；只有本回合明确 result_unknown，或底账无任何确定执行事实时才算结果未知。
-      const definiteFailure = facts?.code !== undefined || facts?.reasonCode !== undefined || facts?.partial !== undefined;
+      const definiteFailure = facts?.code !== undefined || facts?.reasonCode !== undefined;
       const resultUnknown = facts?.status === 'result_unknown'
         || (reading?.resultUnknown === true && !definiteFailure);
       return fallbackFactTextOf({
         ...(name === undefined ? {} : { name }),
         ...(facts?.code === undefined ? {} : { code: facts.code }),
         ...(facts?.reasonCode === undefined ? {} : { reasonCode: facts.reasonCode }),
-        ...(facts?.partial === undefined ? {} : { partial: facts.partial }),
         ...(resultUnknown ? { resultUnknown: true } : {}),
         report: record.replyText ?? record.resultText ?? '',
       });
@@ -968,7 +961,6 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     code?: string;
     reasonCode?: string;
     /** 部分完成事实（只给兜底话术逐项说清；不是任务状态）。 */
-    partial?: PartialCompletionFact;
   }>();
   /**
    * B 切片（工单回执收敛）：本会话已在同一回合拿到结果的任务（快活）——完成投递对其抑制
@@ -1099,8 +1091,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
         roundFacts.set(completion.taskId, {
           ...(completion.errorCode === undefined ? {} : { code: completion.errorCode }),
           ...(completion.reasonCode === undefined ? {} : { reasonCode: completion.reasonCode }),
-          ...(completion.partial === undefined ? {} : { partial: completion.partial }),
-        });
+          });
         enqueueSessionTurn(sessionKey, async () => {
           // 一次性事实：本回合兜底分支已读走（relayed/push-suppressed 路径先跑）；这里核销，
           // 会话长了不积累（有界）。
@@ -1209,7 +1200,6 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             ...(completion.errorCode === undefined ? {} : { code: completion.errorCode }),
             ...(completion.reasonCode === undefined ? {} : { reasonCode: completion.reasonCode }),
             ...(completion.reason === undefined ? {} : { reason: completion.reason }),
-            ...(completion.partial === undefined ? {} : { partial: completion.partial }),
             report: completion.resultText,
           });
           // 走统一的状态变化出口（见 wakeAndDeliverStateChange）：非 live 不唤醒（不白花模型
@@ -1237,8 +1227,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           ...(failure.status === 'result_unknown' ? { status: 'result_unknown' as const } : {}),
           ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }),
           ...(failure.reasonCode === undefined ? {} : { reasonCode: failure.reasonCode }),
-          ...(failure.partial === undefined ? {} : { partial: failure.partial }),
-        });
+          });
         const sessionKey = `${failure.principalId}\u0000${failure.sessionId}`;
         enqueueSessionTurn(sessionKey, async () => {
           // 一次性事实：本回合兜底分支（modelSilent 的 pushSuppressed 回收）先跑并读走；
@@ -1285,7 +1274,6 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
               ...(failure.errorCode === undefined ? {} : { code: failure.errorCode }),
               ...(failure.reasonCode === undefined ? {} : { reasonCode: failure.reasonCode }),
               ...(failure.reason === undefined ? {} : { reason: failure.reason }),
-              ...(failure.partial === undefined ? {} : { partial: failure.partial }),
               ...(report === undefined ? {} : { report }),
               ...(name === undefined ? {} : { name }),
             }),
@@ -2031,8 +2019,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           if (fallbackText === undefined) continue;
           // 投递归属按原始事实：有失败执行事实/零执行原因码 = failed 事实；否则按汇报原文。
           const relayedFailedFact = relayedFacts?.code !== undefined
-            || relayedFacts?.reasonCode !== undefined
-            || relayedFacts?.partial !== undefined;
+            || relayedFacts?.reasonCode !== undefined;
           await deliverTaskResult({
             taskId: relayedTaskId,
             principalId,
@@ -2068,7 +2055,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           }
           // 结果未知 = 本回合明确 result_unknown，或底账「无汇报无活 worker 且无确定执行事实」；
           // 有确定执行码/零执行原因/部分完成时按事实归类（GATE_REFUSE → denied，零执行 → 各自措辞）。
-          const definiteRound = round?.code !== undefined || round?.reasonCode !== undefined || round?.partial !== undefined;
+          const definiteRound = round?.code !== undefined || round?.reasonCode !== undefined;
           const resultUnknownFact = round?.status === 'result_unknown'
             || (reading?.resultUnknown === true && !definiteRound);
           const failureFact = {
@@ -2077,7 +2064,6 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             // B1：零执行原因码（not_permitted / unsupported）与执行层错误码同等对待——
             // 丢了它，权限拒绝/没有能力会被兜底说成「没办成、再试一次」。
             ...(round?.reasonCode === undefined ? {} : { zeroExecReason: round.reasonCode }),
-            ...(round?.partial === undefined ? {} : { partial: round.partial }),
             ...(taskFailureFactOf(suppressedTaskId)?.name === undefined ? {} : { name: taskFailureFactOf(suppressedTaskId)!.name }),
           };
           await deliverTaskFailure({

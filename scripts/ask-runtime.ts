@@ -85,7 +85,6 @@ import {
   createTaskRunner,
   type LongRunningNoticePort,
   type LongTaskWaitPort,
-  type PartialCompletionFact,
   type TaskExecutionOutcome,
   type TaskExecutor,
   type TaskRunner,
@@ -589,7 +588,6 @@ export interface BackgroundTaskCompletion {
   /** 机械原因原文（执行层失败原文 / 宿主零执行原因）；投递面事实文案用，不进用户文本原样。 */
   reason?: string;
   /** 部分完成事实（已完成对象 + 未成功对象）：只供兜底话术逐项说清，不是任务状态。 */
-  partial?: PartialCompletionFact;
 }
 
 /**
@@ -613,7 +611,6 @@ export interface BackgroundTaskFailure {
   /** 机械原因原文（投递面事实文案用；不进用户文本原样）。 */
   reason?: string;
   /** 部分完成事实（已完成对象 + 未成功对象）：只供兜底话术逐项说清，不是任务状态。 */
-  partial?: PartialCompletionFact;
 }
 
 export interface BackgroundDispatchInput {
@@ -871,7 +868,6 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
               ...(outcome.zeroExecReason === undefined ? {} : { reasonCode: outcome.zeroExecReason }),
               ...(outcome.errorCode === undefined ? {} : { errorCode: outcome.errorCode }),
               ...(outcome.failureReason === undefined ? {} : { reason: outcome.failureReason }),
-              ...(outcome.partial === undefined ? {} : { partial: outcome.partial }),
             });
           } else {
             // 无汇报收尾：零执行被宿主拒绝时带 not_permitted 结构化码，末次原始失败执行事实
@@ -885,7 +881,6 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
               ...(outcome.zeroExecReason !== undefined ? { reasonCode: outcome.zeroExecReason } : {}),
               ...(outcome.errorCode === undefined ? {} : { errorCode: outcome.errorCode }),
               ...(outcome.failureReason === undefined ? {} : { reason: outcome.failureReason }),
-              ...(outcome.partial === undefined ? {} : { partial: outcome.partial }),
             });
           }
         } else if (outcome.kind === 'result_unknown') {

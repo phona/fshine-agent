@@ -683,22 +683,23 @@ describe('快活失败 + 模型沉默（server 级）：失败也必须送达', 
     }
   });
 
-  it('①d 部分完成：执行事实带 partial → 模型沉默时兜底逐项说「已完成/未成功」，不笼统说全没办成', async () => {
-    // D1：写已落库 + 另一个对象的写失败 → partial 事实（只给兜底话术，不是状态词）。
-    // 用户该听到的是「哪件成了、哪件没成」，不是「没办成、再试一次」（后者会诱导重复写）。
+  it('①d 一成一败 + 沉默：兜底按末条失败业务写的码说话，不说「办好了」（逐项归 Main）', async () => {
+    // 2026-11-24 删结论机：宿主不再产 partial「已完成 X / 未成功 Y」那句话术——一成一败时，
+    // 兜底只按**末条失败业务写的原始码**选既有话术（这里 GATE_REFUSE → denied），绝不说
+    // 「办好了」。「哪件成了、哪件没成」由 Main 醒着时读账本逐条执行事实自己说。
     const executor = new FailingExecutor(() => ({
       kind: 'ended',
       report: 'alpha 那笔写好了，beta 那笔没成。',
-      partial: { completed: ['alpha'], failed: ['beta'] },
+      errorCode: 'GATE_REFUSE',
     }));
     const fx = await makeFixture({ waitMs: 1_500, executor });
     try {
       await fx.server.handler(incoming('m-1', ASK));
       expect(fx.delivery.sentTexts).toHaveLength(1);
       const text = fx.delivery.sentTexts[0]!.text;
-      expect(text).toContain('已完成 alpha');
-      expect(text).toContain('未成功 beta');
-      expect(text).not.toBe(failureMessageFor('executor_failed').text);
+      expect(text).toBe(failureMessageFor('denied').text);
+      expect(text).not.toContain('办好了');
+      expect(text).not.toContain('再试一次');
       expect(internalTermIn(text)).toBeUndefined();
     } finally {
       await fx.close();

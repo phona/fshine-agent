@@ -75,10 +75,11 @@
  * 无等待形状）且租约过期的行追加结束事实（结果未知由消费方按事实现推，不重放）；已汇报/
  * 已结束的行不会被过期租约改写。
  *
- * 回合收尾（**没有 completed 终态，也没有任务级结局词**）：settle 只记事实——有汇报且本回合
- * 没有机械失败事实（errorCode/failureReason/partial）→ archiveReply 逐字存档（追加结束事实）；
- * 否则 noteRoundEnded 追加结束事实（本轮已停）；result_unknown → markLeaseExpired 追加结束
- * 事实（结果未知 ≠ 无汇报）。怎么结束不存：失败唤醒/CLI 读汇报与执行行就地判断。
+ * 回合收尾（**没有 completed 终态，也没有任务级结局词**）：settle 只记事实——有汇报就
+ * archiveReply 逐字存档（追加结束事实），宿主**不判**这句汇报能不能当结果（做没做成归 Main 读
+ * 执行事实自己判，2026-11-24 owner 裁定）；无汇报则 noteRoundEnded 追加结束事实（本轮已停）；
+ * result_unknown → markLeaseExpired 追加结束事实（结果未知 ≠ 无汇报）。怎么结束不存：失败
+ * 唤醒/CLI 读汇报与执行行就地判断。
  *
  * 其它登记口径（不是本模块预造的状态）：
  *   · 满员/队列满的拒绝：受理侧按 policy 事实追加结束事实（不进入执行）；
@@ -350,15 +351,6 @@ export interface TaskOutcomeFile {
   deliverable?: boolean;
 }
 
-/**
- * 部分完成的**机械事实**（D1，2026-11-23）：已落库的业务写对象 + 未成功的另一个写对象。
- * 只供宿主兜底话术说「已完成 X，未成功 Y」（模型说不出话时），**不是**任务状态/结局词；
- * 做没做成仍由 Main 读账本执行事实自己判断。取不到对象名的条目不进本事实（不编造）。
- */
-export interface PartialCompletionFact {
-  completed: readonly string[];
-  failed: readonly string[];
-}
 
 /**
  * 一次执行回合的机械结局（runner 据此落事实；S1：执行端**不产出结论**，只报回合事实）：
@@ -387,8 +379,7 @@ export type TaskExecutionOutcome =
    * success/failed/refused/not_permitted 这类聚合词（2026-11-23 删 outcome 概念）。
    * errorCode / failureReason 是**末次原始失败执行事实**（只供「模型说不出话」时的宿主兜底
    * 话术归类，不进用户文本、不决定投递面）。
-   * partial = 部分完成事实（写已落库 + 另一个对象的写没成）：同上，只给兜底话术逐项说清。
-   */
+     */
   | {
     kind: 'ended';
     report?: string;
@@ -396,7 +387,6 @@ export type TaskExecutionOutcome =
     zeroExecReason?: 'not_permitted' | 'unsupported';
     errorCode?: string;
     failureReason?: string;
-    partial?: PartialCompletionFact;
   }
   | { kind: 'needs_input'; question: PendingQuestion }
   /**
@@ -1657,18 +1647,13 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         } catch (error) {
           if (!isSettledRace(error)) report(taskId, error);
         }
-        // 汇报逐字存档（事实；空白结果不落——显示层不以汇报冒充）。有没有汇报是**事实**：
-        // 有汇报且本回合没有机械失败事实 → 汇报是结果（存档 + 交给唤醒面喂 Main）；本回合有
-        // 机械失败事实（末次原始失败执行 / 零执行机械原因）→ 那句汇报是对失败的**说明**，
-        // 不冒充结果存档（否则 result_archived 事件会把这一轮记成完成事实），事实仍由唤醒面
-        // 把汇报原文喂给 Main，由 Main 判。判据是**原始事实直读**（errorCode/failureReason），
-        // 不是回合级结局词（2026-11-23 删 outcome 概念）。
+        // 汇报逐字存档（事实；空白结果不落——显示层不以汇报冒充）。宿主**不判**这句汇报能不
+        // 能当结果：做没做成由 Main 读账本执行事实自己判（2026-11-24 owner 裁定——宿主不管
+        // 成败，也没法管，只能交给模型）。有失败业务写行时兜底面不说「办好了」，那是兜底面
+        // 的一条机械检查，不影响存档本身。
         const reportText = (outcome.report ?? '').trim();
-        const hasMechanicalFailureFact = outcome.errorCode !== undefined
-          || outcome.failureReason !== undefined
-          || outcome.partial !== undefined;
         releaseLeaseQuietly(taskId);
-        if (!hasMechanicalFailureFact && reportText !== '') {
+        if (reportText !== '') {
           try {
             if (registry.archiveReply !== undefined) registry.archiveReply([taskId], outcome.report!);
             else registry.noteRoundEnded(taskId); // 无存档面 = 结果可找回机制缺失，按失败事实上报
@@ -1677,7 +1662,7 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
           }
           return;
         }
-        // 回合以「没有可存档的结果」（无汇报 / 有机械失败事实）收尾：任务已结束——
+        // 回合以「没有可存档的结果」（无汇报）收尾：任务已结束——
         // noteRoundEnded 追加一条结束事实。否则底账 running_since 仍在、
         // 无结束事实，`listRunning` 会把已结束的任务当「还在跑」，几秒办完的任务 10 分钟后被
         // 叫醒「已经跑了 N 分钟还没有结果」（2026-11-22 Grok 复审）。**不是**结果未知（无汇报

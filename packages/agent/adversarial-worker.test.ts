@@ -777,9 +777,8 @@ describe('模型走岔路（确定性脚本模型）', () => {
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
     expect(Object.keys(round)).not.toContain('executionOutcome');
     expect((round.report ?? '').trim()).not.toBe('');
-    // alpha 的拒绝是 notDone：兜底不得说「办好了」；取不到对象名的成功不编造 partial。
+    // alpha 的拒绝是末条失败业务写：失败码如实浮出，兜底不得说「办好了」（无 partial 字段）。
     expect(round.errorCode).toBe('GATE_REFUSE');
-    expect(round.partial).toBeUndefined();
     expect(lastExecutionOf(task)?.status).toBe('completed');
   });
 
@@ -798,8 +797,8 @@ describe('模型走岔路（确定性脚本模型）', () => {
     const task = registry.get('t_bareneeds', SCOPE);
     // 等待事实形状不完整 → 不落 pendingQuestion（不编造问题形状）。
     expect(task.pendingQuestion).toBeUndefined();
-    // 有机械失败事实 → 汇报是对失败的说明，不作为结果存档（汇报原文仍由唤醒面喂 Main）。
-    expect((task.resultText ?? task.replyText ?? '').trim()).toBe('');
+    // 汇报**原样存档**（宿主不判它是不是「对失败的说明」；做没做成由 Main 读账本事实自己判）。
+    expect((task.resultText ?? task.replyText ?? '').trim()).not.toBe('');
     const round = runner.roundOutcomeOf?.('t_bareneeds');
     expect(round?.kind).toBe('ended');
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
@@ -886,7 +885,7 @@ describe('D1 业务写封闭账本：与顺序无关的 done / notDone', () => {
     return { runner, task: registry.get(input.taskId, SCOPE) };
   }
 
-  it('⑯ 已落库写之后同对象写失败（重复尝试）：不翻盘，失败行仍留在 executions', async () => {
+  it('⑯ 已落库写之后同对象写失败（重复尝试）：失败码如实浮出，兜底不说「办好了」', async () => {
     const client = new AdversarialClient();
     const { runner, task } = await confirmRound({
       taskId: 't_d1_same_object',
@@ -897,12 +896,15 @@ describe('D1 业务写封闭账本：与顺序无关的 done / notDone', () => {
     expect(client.calls.map((call) => call.operation)).toEqual(['dummy.prepare', 'dummy.commit', 'dummy.denied']);
     expect(task.executions.slice(-2).map((execution) => [execution.operation, execution.status]))
       .toEqual([['dummy.commit', 'completed'], ['dummy.denied', 'refused']]);
-    // 末次决定性结果仍是「写已落库」：不产出兜底失败事实、不给 partial。
+// 新口径（2026-11-24 owner 裁定「宿主不管成败」）：回合只带**末条失败业务写的原始事实**（code/reason；
+    // 只读失败与 run_js 不算），没有 partial、没有成败词。兜底面见到失败码就不说「办好了」；
+    // 没有失败码才照搬汇报原文。做没做成归 Main 读账本自己判。
     const round = runner.roundOutcomeOf?.('t_d1_same_object');
     expect(round?.kind).toBe('ended');
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
-    expect(round.errorCode).toBeUndefined();
-    expect(round.partial).toBeUndefined();
+    // 已知代价（owner 2026-11-24 接受）：同对象重试的拒绝现在也让兜底说「说不清，请核对」，
+    // 而不再靠「同一对象所以不翻盘」洗绿——身份判定整台删了，宁可啰嗦不可骗人。
+    expect(round.errorCode).toBe('GATE_REFUSE');
   });
 
   it('⑰ 已落库写之后只读核对失败：不翻盘（只读失败不是另一个写没成）', async () => {
@@ -917,11 +919,11 @@ describe('D1 业务写封闭账本：与顺序无关的 done / notDone', () => {
     const round = runner.roundOutcomeOf?.('t_d1_read_only');
     expect(round?.kind).toBe('ended');
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
+    // 只读失败不是业务写失败：不浮出失败码（写已落地，不能说成「没办成」诱导重试双写）。
     expect(round.errorCode).toBeUndefined();
-    expect(round.partial).toBeUndefined();
   });
 
-  it('⑱ 已落库写之后异对象写失败：partial 逐项带已完成/未成功对象（兜底话术说清哪件成、哪件没成）', async () => {
+  it('⑱ 已落库写之后异对象写失败：末条失败写的码如实浮出（不再有 partial 字段）', async () => {
     const client = new AdversarialClient();
     const { runner, task } = await confirmRound({
       taskId: 't_d1_other_object',
@@ -933,14 +935,13 @@ describe('D1 业务写封闭账本：与顺序无关的 done / notDone', () => {
     const round = runner.roundOutcomeOf?.('t_d1_other_object');
     expect(round?.kind).toBe('ended');
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
-    // 原始失败码仍在（兜底归类可用），但 partial 优先说明「哪件成了、哪件没成」。
+    // 末条失败业务写的原始码（兜底归类用）；「哪件成了、哪件没成」由 Main 读账本逐条说。
     expect(round.errorCode).toBe('GATE_REFUSE');
-    expect(round.partial).toEqual({ completed: ['alpha'], failed: ['beta'] });
   });
 
-  it('⑲ 先拒 beta 再成功 alpha：与顺序无关——alpha 已完成、beta 未成功（旧「只看最后一条成功写」漏掉 beta）', async () => {
-    // grok major 反例：顺序特例会静默兜底说「办好了」，可 beta 没成。封闭账本先记账、
-    // 再按对象结算，β 从没 completed → notDone，不会因为 alpha 在后成功而被洗白。
+  it('⑲ 先拒 beta 再成功 alpha：beta 的拒绝码仍浮出（不因 alpha 后来成功被洗白）', async () => {
+    // grok major 反例：顺序特例会静默兜底说「办好了」，可 beta 没成。现在不按对象结算，
+    // 只机械取末条失败业务写的码——beta 的拒绝照样浮出，与顺序无关。
     const client = new AdversarialClient();
     const { runner, task } = await confirmRound({
       taskId: 't_d1_other_object_reversed',
@@ -953,23 +954,24 @@ describe('D1 业务写封闭账本：与顺序无关的 done / notDone', () => {
     const round = runner.roundOutcomeOf?.('t_d1_other_object_reversed');
     expect(round?.kind).toBe('ended');
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
-    // 末次失败（beta/GATE_REFUSE）+ partial（done=alpha，notDone=beta）。
+    // 末条失败业务写（beta/GATE_REFUSE）如实浮出。
     expect(round.errorCode).toBe('GATE_REFUSE');
-    expect(round.partial).toEqual({ completed: ['alpha'], failed: ['beta'] });
   });
 
-  it('⑳ 同对象先失败后成功：该对象有 completed → done，不判失败（先失败后成功是正常回路）', async () => {
+  it('⑳ 同对象先失败后成功：失败码仍浮出（身份判定已删，兜底说「说不清」而不是洗绿）', async () => {
     const client = new AdversarialClient();
     const { runner } = await confirmRound({
       taskId: 't_d1_same_object_retry',
       client,
       calls: [DENIED('alpha'), COMMIT('alpha')],
     });
+// 新口径（2026-11-24 owner 裁定「宿主不管成败」）：回合只带**末条失败业务写的原始事实**（code/reason；
+    // 只读失败与 run_js 不算），没有 partial、没有成败词。兜底面见到失败码就不说「办好了」；
+    // 没有失败码才照搬汇报原文。做没做成归 Main 读账本自己判。
     const round = runner.roundOutcomeOf?.('t_d1_same_object_retry');
     expect(round?.kind).toBe('ended');
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
-    expect(round.errorCode).toBeUndefined();
-    expect(round.partial).toBeUndefined();
+    expect(round.errorCode).toBe('GATE_REFUSE');
   });
 
   it('㉑ 取不到对象名的写失败 + 另一个对象写成功：失败不洗白，兜底绝不输出「办好了」', async () => {
@@ -982,9 +984,8 @@ describe('D1 业务写封闭账本：与顺序无关的 done / notDone', () => {
     const round = runner.roundOutcomeOf?.('t_d1_unlabeled_failure');
     expect(round?.kind).toBe('ended');
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
-    // 归不进 done：不能证明它和 alpha 是同一个写；失败要浮出，但不编造对象名（无 partial）。
+    // 末条失败业务写的码（无标签也照样浮出；不再有对象账本，也没有 partial）。
     expect(round.errorCode).toBe('GATE_REFUSE');
-    expect(round.partial).toBeUndefined();
     // 生产兜底按原始失败码归类（GATE_REFUSE → denied），用户看到的不是「办好了」。
     const fallback = failureMessageFor(classifyFailure({ code: round.errorCode })).text;
     expect(fallback).not.toContain('办好了');
@@ -1000,24 +1001,23 @@ describe('D1 业务写封闭账本：与顺序无关的 done / notDone', () => {
     const round = runner.roundOutcomeOf?.('t_d1_unlabeled_success');
     expect(round?.kind).toBe('ended');
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
-    // 2026-11-19 基线：任意已完成的非只读业务写都锚定回合，不要求对象标签。对象键只用来把
-    // 失败配到同一次成功。少了这条，无标签写成功后紧跟的只读失败会被倒序扫描当成整回合
-    // 失败——写可能已落地，用户被告知「没办成」再重试就是双写。
+    // 只读失败不算业务写失败：写已落地，不能说成「没办成」诱导用户重试双写。
     expect(round.errorCode).toBeUndefined();
-    expect(round.partial).toBeUndefined();
   });
 
-  it('㉓ 无对象标签的写先失败后成功：成功锚定回合（证不了同对象，也证不了不同对象）', async () => {
+  it('㉓ 无对象标签的写先失败后成功：失败码照样浮出（不再按身份配对洗绿）', async () => {
     const client = new AdversarialClient();
     const { runner } = await confirmRound({
       taskId: 't_d1_unlabeled_retry',
       client,
       calls: [DENIED_UNLABELED, PROPOSAL],
     });
+// 新口径（2026-11-24 owner 裁定「宿主不管成败」）：回合只带**末条失败业务写的原始事实**（code/reason；
+    // 只读失败与 run_js 不算），没有 partial、没有成败词。兜底面见到失败码就不说「办好了」；
+    // 没有失败码才照搬汇报原文。做没做成归 Main 读账本自己判。
     const round = runner.roundOutcomeOf?.('t_d1_unlabeled_retry');
     expect(round?.kind).toBe('ended');
     if (round?.kind !== 'ended') throw new Error('（测试）回合未以 ended 落定');
-    expect(round.errorCode).toBeUndefined();
-    expect(round.partial).toBeUndefined();
+    expect(round.errorCode).toBe('GATE_REFUSE');
   });
 });
