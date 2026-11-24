@@ -138,6 +138,9 @@ interface SeedRow {
   replyText: string | null;
   /** 旧机械原因（result_unknown 等；缺省 null）。 */
   reason: string | null;
+  /** waiting_user 的提问（迁移后必须保留，用户还能接续）。 */
+  pendingQuestion?: string;
+  waitingSince?: string;
 }
 
 const V4_SEED: readonly SeedRow[] = [
@@ -152,6 +155,7 @@ const V4_SEED: readonly SeedRow[] = [
   { taskId: 'task_unexecuted', status: 'unexecuted', resultText: null, updatedAt: '2026-11-14T10:15:00.000Z', taskNo: 9, name: '历史 I', replyText: null, reason: null },
   { taskId: 'task_live', status: 'running', resultText: null, updatedAt: '2026-11-14T10:30:00.000Z', taskNo: 10, name: '历史 J', replyText: null, reason: null },
   { taskId: 'task_unexecuted_reported', status: 'unexecuted', resultText: '零执行，但有说明。', updatedAt: '2026-11-14T10:45:00.000Z', taskNo: 11, name: '历史 K', replyText: null, reason: null },
+  { taskId: 'task_waiting', status: 'waiting_user', resultText: null, updatedAt: '2026-11-14T11:00:00.000Z', taskNo: 12, name: '历史 L', replyText: null, reason: null, pendingQuestion: '{"missing":["window"]}', waitingSince: '2026-11-14T11:00:00.000Z' },
 ];
 
 function seedV4Db(dbPath: string): void {
@@ -161,9 +165,9 @@ function seedV4Db(dbPath: string): void {
   db.exec(V4_SCHEMA);
   const insert = db.prepare(`
     INSERT INTO tasks (task_id, principal_id, session_id, request, status, result_text, failure_reason,
-      created_at, updated_at, task_no, name, reply_text, reason)
+      created_at, updated_at, task_no, name, reply_text, reason, pending_question, waiting_since)
     VALUES (@taskId, 'wecom:fixture-user', 'ask-v4', @request, @status, @resultText, NULL,
-      @updatedAt, @updatedAt, @taskNo, @name, @replyText, @reason)
+      @updatedAt, @updatedAt, @taskNo, @name, @replyText, @reason, @pendingQuestion, @waitingSince)
   `);
   for (const row of V4_SEED) {
     insert.run({
@@ -176,6 +180,8 @@ function seedV4Db(dbPath: string): void {
       name: row.name,
       replyText: row.replyText,
       reason: row.reason,
+      pendingQuestion: row.pendingQuestion ?? null,
+      waitingSince: row.waitingSince ?? null,
     });
   }
   db.prepare("INSERT INTO executions (request_id, task_id, operation, status, error_json) VALUES (?, ?, ?, ?, ?)")
@@ -326,27 +332,36 @@ describe('事实账迁移 v4 → 只存事实 + 无种类结束事实', () => {
     expect(rawTask(dbPath, 'task_queued')['running_since']).toBe('2026-11-14T09:00:00.000Z');
 
     // 升级前已停的行各一条「停下时刻」（v4 没有独立终态时刻 → 回退 updated_at）；没有种类。
-    // 旧 status=running/cancelling 的行不写结束事实（仍在推进，交给续跑/对账/取消路径）。
+    // 未停的行（queued / running / cancelling / waiting_user）不写结束事实：
+    // 在跑/排队行交给启动恢复，等待行保留提问还能接续。
+    const stoppedStatuses = new Set([
+      'completed', 'failed', 'cancelled', 'canceled', 'timed_out', 'resource_limited',
+      'died', 'round_failed', 'unexecuted', 'failed_confirmed',
+    ]);
     for (const row of V4_SEED) {
-      const stillRunning = row.status === 'running' || row.status === 'cancelling';
       expect(rawEnds(dbPath, row.taskId), row.taskId).toEqual(
-        stillRunning ? [] : [{ task_id: row.taskId, at: row.updatedAt }],
+        stoppedStatuses.has(row.status) ? [{ task_id: row.taskId, at: row.updatedAt }] : [],
       );
     }
+    // 等待行：提问保留（确认/补问还能接续），不是「已停」。
+    const waitingRow = store.getTask('task_waiting')!;
+    expect(waitingRow.ends).toEqual([]);
+    expect(waitingRow.task.pendingQuestion).toBeDefined();
+    expect(waitingRow.task.waitingSince).toBe('2026-11-14T11:00:00.000Z');
 
     // 读出侧：结束事实原样可读（无种类）。
     expect(storedDone.ends).toEqual([{ taskId: 'task_done', at: '2026-11-14T08:00:00.000Z' }]);
     expect(store.getTask('task_unknown')!.ends[0]!.at).toBe('2026-11-14T09:15:00.000Z');
     expect(store.getTask('task_resource')!.ends[0]!.at).toBe('2026-11-14T09:45:00.000Z');
 
-    // 在跑扫描：只有升级前仍在跑/取消中的旧行进入（不再被静默写成已停）；未启动认领也不捞旧行。
-    expect(store.listRunningTasks().map((row) => row.taskId)).toEqual(['task_cancelling', 'task_live']);
-    // 无租约的在跑行给一条已过期的迁移租约：启动恢复走「租约过期 → 结束事实（结果未知）」并通知。
+    // 在跑扫描：排队/取消中/在跑三类未停行进入（不再被静默写成已停）；等待行不进在跑扫描。
+    expect(store.listRunningTasks().map((row) => row.taskId)).toEqual(['task_queued', 'task_cancelling', 'task_live']);
+    // 无租约的未停行给一条已过期的迁移租约：启动恢复走「租约过期 → 结束事实（结果未知）」并通知。
     expect(rawTask(dbPath, 'task_live')['lease_owner']).toBe('migration');
     expect(rawTask(dbPath, 'task_live')['lease_until']).toBe('2026-11-14T10:30:00.000Z');
     expect(store.listRunningExpiredLeases('2026-11-15T00:00:00.000Z').map((row) => row.taskId))
-      .toEqual(['task_cancelling', 'task_live']);
-    expect(store.listWaitingRows()).toEqual([]);
+      .toEqual(['task_queued', 'task_cancelling', 'task_live']);
+    expect(store.listWaitingRows().map((row) => row.task.taskId)).toEqual(['task_waiting']);
     expect(store.claimNextUnstarted({
       owner: 'test', leaseUntil: '2999-01-01T00:00:00.000Z', updatedAt: '2026-11-14T11:00:00.000Z',
     })).toBeUndefined();
@@ -360,7 +375,7 @@ describe('事实账迁移 v4 → 只存事实 + 无种类结束事实', () => {
       createdAt: '2026-11-14T11:00:00.000Z',
       updatedAt: '2026-11-14T11:00:00.000Z',
     });
-    expect(inserted.taskNo).toBe(12);
+    expect(inserted.taskNo).toBe(13);
     store.close();
 
     // 幂等：第二次打开零差异、不新增备份。
@@ -370,7 +385,7 @@ describe('事实账迁移 v4 → 只存事实 + 无种类结束事实', () => {
         ['task_done', 1], ['task_cancel', 2], ['task_timeout', 3], ['task_queued', 4],
         ['task_unknown', 5], ['task_cancelling', 6], ['task_resource', 7],
         ['task_failed_confirmed', 8], ['task_unexecuted', 9], ['task_live', 10],
-        ['task_unexecuted_reported', 11], ['task_new', 12],
+        ['task_unexecuted_reported', 11], ['task_new', 13], ['task_waiting', 12],
       ]);
     second.close();
     expect(backupFiles(dir)).toEqual(['state.db.backup-v7']);
@@ -462,6 +477,13 @@ describe('只读打开不迁移（向前兼容）', () => {
     const store = openTaskStore(dbPath, { readOnly: true });
     expect(store.getTask('task_done')!.task.request).toBe('历史请求 task_done');
     expect(store.getTask('task_done')!.task.resultText).toBe('历史汇报 A。');
+    // v4 没有终态时刻列：从旧 status 合成「停下时刻」（只取停了没，不还原种类）。
+    expect(store.getTask('task_cancel')!.ends).toEqual([{ taskId: 'task_cancel', at: '2026-11-14T08:30:00.000Z' }]);
+    expect(store.getTask('task_timeout')!.ends).toHaveLength(1);
+    expect(store.getTask('task_live')!.ends).toEqual([]);
+    // 等待行保留提问（只读投影也不把它当已停）。
+    expect(store.getTask('task_waiting')!.task.pendingQuestion).toBeDefined();
+    expect(store.getTask('task_waiting')!.ends).toEqual([]);
     store.close();
 
     expect(sha256(dbPath)).toBe(before);

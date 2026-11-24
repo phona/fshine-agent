@@ -22,8 +22,8 @@
  *   · 触发 = 可写打开且 tasks 表仍是旧形状（有 status 列/六个终态列，v5 及更早）——重建为
  *     事实形状；
  *   · v6 = tasks 表重建：删 status/reason/failure_reason 与六个终态列；**升级前已停下的旧行**
- *     写一条结束事实（at = 旧终态列原时刻 / 旧 status 非在跑 / 已有汇报，回退 updated_at）；
- *     仍在等待（pending_question）或旧 status=running/cancelling 的行**不写**结束事实——
+ *     写一条结束事实（at = 旧终态列原时刻 / 旧 status 属已停集合 / 已有汇报，回退 updated_at）；
+ *     仍在等待（pending_question）、排队（queued）、在跑（running/cancelling）的行**不写**结束事实——
  *     保留等待形状与 running_since（回填防重认领），交给续跑 / 重启对账 / 取消路径；
  *     历史汇报与执行事实原样保留；
  *   · v7 = task_events（带终止种类 kind 的旧事件账）→ task_ends：只保留「停下时刻」，
@@ -550,6 +550,16 @@ const PRE_ZERO_STATE_TERMINAL_COLUMNS: readonly string[] = [
   'died_at', 'cancelled_at', 'timed_out_at', 'resource_limited_at', 'round_failed_at', 'cancel_requested_at',
 ];
 
+/**
+ * v5 及更早的「已停」status 值（只用于**迁移 / 只读投影**判断旧行停没停：
+ * 不持久化种类、不写进新库）。不在此列 = 未停：queued / running / waiting_user /
+ * cancelling / accepted —— 它们要么还在跑、要么还能接续、要么要交给启动恢复。
+ */
+const PRE_ZERO_STOPPED_STATUSES: readonly string[] = [
+  'completed', 'failed', 'cancelled', 'canceled', 'timed_out', 'resource_limited',
+  'died', 'round_failed', 'unexecuted', 'failed_confirmed',
+];
+
 interface TaskDbRow {
   task_id: string;
   principal_id: string;
@@ -676,7 +686,7 @@ function tasksTableNeedsRebuild(db: Database.Database): boolean {
  *   · running_since 按 updated_at 回填（极旧库缺列时），避免迁移后被当作未启动重新认领；
  *   · 已停的行写**一条结束事实**（task_ends：task_id + at，**不带种类**）：at = 匹配到的旧
  *     终态列原时刻（旧 schema 列顺序：cancelled_at → timed_out_at → resource_limited_at →
- *     died_at → round_failed_at），或旧 status 不是在跑/取消中，或已有汇报；都没有才回退
+ *     died_at → round_failed_at（旧 schema 列顺序），或旧 status 属于已停集合，或已有汇报；都没有才回退
  *     updated_at。怎么结束不迁移——旧结论词不进入新库；等待形状一并清掉。
  *   · 仍在等待（pending_question 非空、无旧终态、无汇报）或旧 status=running/cancelling 的行
  *     **不写**结束事实：提问保留、running_since 回填后进入既有续跑 / 重启对账 / 取消路径
@@ -700,7 +710,9 @@ function rebuildTasksToZeroState(db: Database.Database): void {
   // 只用于决定迁移时写不写结束事实与留不留等待形状，不持久化任何种类。
   const endedBeforeExpr = [
     ...terminalTimestampColumns.map((column) => `"${column}" IS NOT NULL`),
-    ...(oldColumns.has('status') ? ['COALESCE("status", \'\') NOT IN (\'running\', \'cancelling\')'] : []),
+    ...(oldColumns.has('status')
+      ? [`"status" IN (${PRE_ZERO_STOPPED_STATUSES.map((status) => `'${status}'`).join(', ')})`]
+      : []),
   ].join(' OR ') || '0';
   const reportedExpr = TASK_PROGRESS_REPORT_FIELDS
     .filter((field) => oldColumns.has(field.column))
@@ -1117,6 +1129,13 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
       const at = row[column];
       if (typeof at === 'string' && at !== '') {
         return { taskId: row.task_id, at };
+      }
+    }
+    // v4 没有终态时刻列：停过的信号只在旧 status 里（只取「停了没」，不还原种类）。
+    if (selectEndFacts === undefined && columns.has('status')) {
+      const status = (row as unknown as Record<string, unknown>)['status'];
+      if (typeof status === 'string' && PRE_ZERO_STOPPED_STATUSES.includes(status)) {
+        return { taskId: row.task_id, at: row.updated_at };
       }
     }
     return undefined;

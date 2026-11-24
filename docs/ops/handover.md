@@ -11,10 +11,10 @@ Pi Agent（Main）+ 最小宿主 + Execution Contract + Channel Adapter 的产�
 ## 二、这一版交付了什么（八刀，均带守卫）
 
 1. **四项 P0 修复**：底账投影按末次决定性结果、提示词条款冲突、P4 守卫假绿洞、W-43 节拍竞态。
-2. **能力边界判据档**：`docs/architecture/capability-boundary.md`（四角色权界、单一来源能力目录、答复五态、结构化交办、三条禁令；未实现处逐条标注）。
+2. **能力边界判据档**：`docs/architecture/capability-boundary.md`（四角色权界、单一来源能力目录、结构化交办、三条禁令；未实现处逐条标注）。
 3. **泄漏扫描通用断言**：内部词/任务编号单一词表 + AST 静态守卫（注释/删除/改名即红），接入写闭环、场景集、eval:user 三个用户级批次，命中即机械失败。
 4. **Worker 动态工具**：每个 operation 一个 `op_*` 工具、参数用业务字段名；`hostOnly` 机制参数（`--apply`/`--confirmation`/`--count` 等）不进模型面；宿主负责句柄注入与计数自算。
-5. **能力目录 + 答复五态**：`capability?: string` 派生目录（禁止手写清单）、Main 一句摘要 + 只读 `capabilities()`、`classifyOutcome` 五态机械分类（`packages/agent/src/task-outcome.ts:71`）。
+5. **能力目录**：`capability?: string` 派生目录（禁止手写清单）、Main 一句摘要 + 只读 `capabilities()`；做没做成由 Main 读执行行与 worker 汇报判断并转述——宿主不产 outcome 词（旧 `classifyOutcome` 五态分类器已随 S1 删除，`task-outcome.ts` 仅剩失败话术）。
 6. **确认回合 = 已确认提案**：确认续跑的任务内容切成提案载荷原文，旧交办 prose 让位；执行层绑定校验保证旧值不可覆盖。
 7. **机制参数封死**：`op_*` 工具参数结构化校验，未知字段/`--` 前缀键确定性拒绝且执行层零调用；夹具改走内部 exec 路由。
 8. **E11 判据机械化**：删掉 20 词拒绝词表，换成「零执行 + 无成功宣称 + 结构化 outcome ∈ {unsupported, blocked}」+ 非空下限。
@@ -46,7 +46,7 @@ Pi Agent（Main）+ 最小宿主 + Execution Contract + Channel Adapter 的产�
 ## 五、必须先知道的风险
 
 1. **长连接断连窗口的消息会丢**（已实测）：停服 `12:02:15Z` → 重连 `12:03:43Z` 期间用户发 2 条，重连后底账零新增、`aibot_msg_callback` 帧 0 → 平台不补投、产品无补拉。缓解已落地：`systemd Restart=always`（窗口秒级）、心跳 15s、`message_still_processing` 接进程内告警（规则 `message_stuck`）；销账条件=切 Webhook（平台最多 3 次重试）+ 既有 messageId 幂等底账接重投。详见 `docs/decisions/debt.md` §十一。
-2. **答复五态只走了一半**：`completed`/`partial` 目前送不到 Main（outcome 只写进失败唤醒出口，底账 `ExecutionRecord` 无 `items`）——文档已如实标「未接线」。
+2. **回合有机械失败事实且有 worker 正文时，正文不入存档**（债 M2）：进程在失败说明投递前退出，那句 worker 原话会丢；用户侧仍会按执行事实收到「结果未知/没办成」的兜底，但少了原话。见 `docs/decisions/debt.md`。
 3. 其它未清债务见 `docs/decisions/debt.md`（含 §五「接受不修 / 登记不修」）。
 
 ## 六、上线前建议（按收益排序）
