@@ -189,7 +189,6 @@ async function makeFixture(input: {
     readOnlyOperations: ['dummy.query'],
     workerDriver: input.worker ?? backgroundWorker(workerCapture),
     registry,
-    workerWorkspaceRoot: platformRoot,
     ...(input.withoutBridge === true
       ? {}
       : {

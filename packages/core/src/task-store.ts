@@ -727,14 +727,20 @@ function rebuildTasksToZeroState(db: Database.Database): void {
     ...(oldColumns.has(TASK_PROGRESS_STARTED_COLUMN.column)
       ? [`"${TASK_PROGRESS_STARTED_COLUMN.column}" IS NOT NULL`]
       : []),
-    ...(oldColumns.has('status') ? [`COALESCE("status", '') IN ('running', 'cancelling')`] : []),
+    ...(oldColumns.has('status')
+      ? [`COALESCE("status", '') IN ('running', 'cancelling', 'waiting_user')`]
+      : []),
   ];
   const startedBeforeExpr = startedSignals.length > 0 ? `(${startedSignals.join(' OR ')})` : '0';
   const questionPresentExpr = oldColumns.has('pending_question')
     ? `COALESCE("pending_question", '') <> ''`
     : '0';
-  const neverStartedExpr = `(NOT ${startedBeforeExpr} AND NOT (${questionPresentExpr}))`;
-  const hadStoppedExpr = `(${endedBeforeExpr}) OR (${reportedExpr}) OR (${neverStartedExpr})`;
+  // 「升级前已停下」= 旧终态列 / 旧 status 属已停集合 / 已有汇报存档。
+  // **不含「未启动」**：未启动且无提问的 queued 行是已受理、还没开跑的工作——基线语义就是
+  // 重启后由 pump 认领（`claimQueued`）。把它写成结束事实，升级后这份交办既不会被执行、
+  // 也没有「结果未知」出口（listRunningExpiredLeases 不收 running_since 为空的行），
+  // 用户永远收不到告知（2026-11-24 grok blocking）。它继续排队即可。
+  const hadStoppedExpr = `(${endedBeforeExpr}) OR (${reportedExpr})`;
   // 升级前已启动、没有提问、没有结束事实、没有 accepted 在途的行：给一条**已过期**的迁移租约，
   // 让启动恢复（expireLeases）按既有「租约过期 → 结束事实（结果未知）」路径收尾并通知用户，
   // 而不是静默写成已停、也不是永远挂着。从未启动的排队行**不给**（零执行，说「结果未知」是假话）。
@@ -745,14 +751,18 @@ function rebuildTasksToZeroState(db: Database.Database): void {
   const columnList = TASKS_V6_COLUMNS.map((column) => `"${column}"`).join(', ');
   const selectList = TASKS_V6_COLUMNS.map((column) => {
     if (column === 'running_since') {
-      // 仍在推进的行回填 updated_at（迁移后不再被当未启动认领）；升级前已停的行保持原值
-      // （NULL = 从未启动，CLI 据此显示「未启动即已停」，不冒充跑过）。
-      return `CASE WHEN ${hadStoppedExpr} THEN ${sourceOf('running_since')}`
+      // 升级前**已启动且未停**的行回填 updated_at（迁移后不再被当未启动认领，交给恢复路径）；
+      // 升级前已停的行与从未启动的排队行保持原值——NULL = 还没开跑，迁移后继续排队
+      // （`claimNextUnstarted` 要求 running_since IS NULL 且无结束事实）。
+      return `CASE WHEN ${hadStoppedExpr} OR NOT (${startedBeforeExpr}) THEN ${sourceOf('running_since')}`
         + ` ELSE COALESCE(${sourceOf('running_since')}, "updated_at") END AS "running_since"`;
     }
     if (column === 'pending_question' || column === 'waiting_since') {
-      // 已停的旧行不留等待形状（与运行时写结束事实同口径）；仍在等待的行原样保留。
-      return `CASE WHEN ${hadStoppedExpr} THEN NULL ELSE ${sourceOf(column)} END AS "${column}"`;
+      // **不清等待形状**（2026-11-24 grok blocking，与运行时 appendEndFact 回退后同口径）：
+      // 提案（句柄/摘要/写入参数）只存在于 pending_question 上，执行行不带它——旧库里
+      // 「已停但仍有提案」的行（用户被问到确认、随后超时/取消）若被清字段，底账就失去
+      // 「用户被要求批准的那次写」的记录。可执行性由谓词决定，不由删数据决定。
+      return `${sourceOf(column)} AS "${column}"`;
     }
     if (column === 'lease_owner' || column === 'lease_until') {
       const synthetic = column === 'lease_owner' ? `'migration'` : '"updated_at"';
