@@ -7,17 +7,18 @@
  * 守卫：本文件把那些陈述钉成机械断言，代码或档案一动就红，逼使台账同步复核。
  *
  * 判据形状（全部是机械事实/结构化计数，不判语义；文本字面量只用于泄漏类确定性
- * 检查——两支真实读数与内部词 `17dz` / `FSHINE_PLATFORM_ROOT` 都属这一类）：
+ * 检查——两支真实读数与内部词（执行层实例名、退役环境变量名）都属这一类；两类 needle
+ * 在本文件里一律拼段构造，且扫描面**不排除本文件**，否则「零命中」断言会因守卫自身而失真）：
  *   · D-052：`step-text.ts` 无六个退役工具名、无 switch；whitelist 载体
- *     `platform-leak-lint.test.ts` 不在树内（死分支连同白名单整体删除）。
- *   · D-156：`61,000`/`86,000`/`61000`/`86000` 在非档案面零命中；history 档案 9 行。
+ *     泄漏 lint 载体（见 RETIRED_LINT_FILE_TEXT）不在树内（死分支连同白名单整体删除）。
+ *   · D-156：两支真实读数（带千分位与不带两种写法）在非档案面零命中；history 档案 9 行。
  *   · D-062：无用例从 `process.env` 读企微凭据；原红的根因 `tests/e2e/harness.ts`
  *     （启动真实渠道）不在树内。
- *   · D-168/D-190：17dz 按三张脸分别计数——packages/apps 非测试 0 行；`*.test.ts`
+ *   · D-168/D-190：执行层实例名按三张脸分别计数——packages/apps 非测试 0 行；`*.test.ts`
  *     2 行 1 文件；scripts/ 非测试 1 行 1 文件（这张脸就是口径存疑点，台账不自行裁定）。
- *   · D-170：`exposure-lint.test.ts` / `platform-leak-lint.test.ts` /
+ *   · D-170：`exposure-lint.test.ts` / 泄漏 lint 载体 /
  *     `history-hygiene.test.ts` 三个守卫文件均不在树内；删除记录在 decision-log 可考。
- *   · D-196：`FSHINE_PLATFORM_ROOT` 在 docs/ 之外零命中；history 档案 8 行。
+ *   · D-196：退役环境变量名在 docs/ 之外零命中；history 档案 8 行。
  *   · D-204：dummy.cjs 两套 commit 令牌契约仍不一致（任一侧被统一即红，逼台账结案）。
  *   · 指针：§二（含结案行）全部 `file:LINE` 反引号指针真实存在且行号不越界。
  *
@@ -34,8 +35,26 @@ const DEBT_MD = 'docs/decisions/debt.md';
 /** 机器状态/编辑器产物不入扫描面（gitignored，随机器变）。 */
 const SKIP_DIRS = new Set(['node_modules', '.git', '.runtime', '.zcode', '.zcode-out.txt']);
 
-/** 守卫自身含全部被判词串（词表/注释里必须出现它们），扫描面排除自己，否则恒红。 */
-const SELF = 'scripts/debt-ledger-guard.test.ts';
+/**
+ * 被判词串一律**拼段构造**（2026-11-24 grok blocking）：守卫自身不得含连续字面量，否则
+ * 「零命中」类断言在门禁全绿时是失真的——词就在档案豁免半径之外的守卫自己身上。
+ * 因此这里既不排除自己（SELF 取消），也不把 needle 写成一整串。
+ */
+/**
+ * needle 运行期生成：**源码里不出现连续字面量**（2026-11-24 grok blocking）。
+ *
+ * 为什么不能只拼段：`'FSHINE_' + 'PLATFORM_ROOT'` 在文本扫描面上仍然命中「拼起来就是全词」，
+ * 把词切成两段拼也一样——扫描器按行看，两段仍在同一行。
+ * 真正让「零命中」类断言不失真的唯一办法：needle 根本不以可 grep 的形态落在扫描面里。
+ * 这里用 charCode 生成，扫描面（含本文件）grep 不到完整词。
+ */
+const fromCharCodes = (...codes: number[]): string => codes.map((code) => String.fromCharCode(code)).join('');
+/** 源词本身也不以连续字面量落在扫描面里：切成多段再拼（拼出来的值 = 原词）。 */
+const joined = (...parts: string[]): string => parts.join('');
+const EXECUTOR_INSTANCE_TEXT = fromCharCodes(49, 55, 100, 122);
+const RETIRED_ENV_VAR_TEXT = fromCharCodes(70, 83, 72, 73, 78, 69, 95, 80, 76, 65, 84, 70, 79, 82, 77, 95, 82, 79, 79, 84);
+const RETIRED_LINT_FILE_TEXT = joined('platform-', 'leak-', 'lint', '.test.ts');
+const RETIRED_FN_NAME_TEXT = joined('remember', 'Account', 'Sets');
 
 /**
  * 收集扫描面文件。`skipDir` 只剪目录枝（如 docs/history），`skipFile` 只滤文件
@@ -53,7 +72,6 @@ function walk(roots: readonly string[], skipDir?: (rel: string) => boolean, skip
         if (!skipDir?.(rel)) rec(child);
         continue;
       }
-      if (rel === SELF) continue;
       if (!skipFile?.(rel)) out.push(rel);
     }
   };
@@ -61,7 +79,7 @@ function walk(roots: readonly string[], skipDir?: (rel: string) => boolean, skip
     const abs = path.join(ROOT, root);
     if (!existsSync(abs)) continue;
     if (statSync(abs).isDirectory()) rec(abs);
-    else if (root !== SELF && !skipFile?.(root)) out.push(root); // 根级单文件（README.md 等）
+    else if (!skipFile?.(root)) out.push(root); // 根级单文件（README.md 等）——**不排除守卫自身**
   }
   return out.sort();
 }
@@ -111,10 +129,10 @@ describe('D-052 · step-text.ts 退役工具死分支已清（结案守卫）', 
     expect(src).toContain('return `正在调用 ${toolName}…`;');
   });
 
-  it('白名单载体 platform-leak-lint.test.ts 与 rememberAccountSets 均不在树内', () => {
-    expect(exists('packages/agent/platform-leak-lint.test.ts')).toBe(false);
+  it('白名单载体（泄漏 lint 测试）与退役函数名均不在树内', () => {
+    expect(exists(`packages/agent/${RETIRED_LINT_FILE_TEXT}`)).toBe(false); // 路径也运行期拼
     const tsFiles = walk(['packages', 'apps', 'scripts'], undefined, (rel) => !rel.endsWith('.ts'));
-    expect(lineHits(tsFiles, /rememberAccountSets/)).toEqual([]);
+    expect(lineHits(tsFiles, new RegExp(RETIRED_FN_NAME_TEXT))).toEqual([]);
   });
 
   it('反向绊线：扫描器对现存对照词报红（不是恒过）', () => {
@@ -124,9 +142,12 @@ describe('D-052 · step-text.ts 退役工具死分支已清（结案守卫）', 
   });
 });
 
-// ---------- D-156：两支真实读数（61,000 / 86,000） ----------
+// ---------- D-156：两支真实读数 ----------
 
-const READING_PATTERN = /61,000|86,000|61000|86000/;
+const READING_PATTERN = new RegExp(
+  `${fromCharCodes(54, 49, 44, 48, 48, 48)}|${fromCharCodes(56, 54, 44, 48, 48, 48)}`
+  + `|${fromCharCodes(54, 49, 48, 48, 48)}|${fromCharCodes(56, 54, 48, 48, 48)}`,
+);
 
 describe('D-156 · 两支真实读数非档案面零命中（登记行守卫）', () => {
   /** 非档案面 = 全部代码/现行文档面；档案面 = docs/history/** 与台账自身（登记即提）。 */
@@ -169,14 +190,14 @@ describe('D-062 · 无凭据环境不再红（结案守卫）', () => {
   });
 });
 
-// ---------- D-168 / D-190：门①「产品面」17dz 口径 ----------
+// ---------- D-168 / D-190：门①「产品面」执行层实例名口径 ----------
 
-const PLATFORM_NAME = /17dz/;
+const PLATFORM_NAME = new RegExp(EXECUTOR_INSTANCE_TEXT);
 
-describe('D-168/D-190 · 17dz 三张脸分别计数（登记行守卫，不裁定口径）', () => {
+describe('D-168/D-190 · 执行层实例名三张脸分别计数（登记行守卫，不裁定口径）', () => {
   const codeRoots = ['packages', 'apps', 'scripts'] as const;
 
-  it('packages/apps 非测试文件：17dz 零命中', () => {
+  it('packages/apps 非测试文件：执行层实例名零命中', () => {
     const files = walk(codeRoots, undefined, (rel) => (!rel.startsWith('packages/') && !rel.startsWith('apps/')) || rel.endsWith('.test.ts'));
     expect(lineHits(files, PLATFORM_NAME)).toEqual([]);
   });
@@ -203,9 +224,9 @@ describe('D-168/D-190 · 17dz 三张脸分别计数（登记行守卫，不裁�
 // ---------- D-170：exposure-lint 剩余核对与扩展 ----------
 
 describe('D-170 · 三个旧守卫文件均不在树内（登记行守卫）', () => {
-  it('exposure-lint / platform-leak-lint / history-hygiene 测试文件不存在', () => {
+  it('exposure-lint / 泄漏 lint / history-hygiene 测试文件不存在', () => {
     expect(exists('packages/agent/exposure-lint.test.ts')).toBe(false);
-    expect(exists('packages/agent/platform-leak-lint.test.ts')).toBe(false);
+    expect(exists(`packages/agent/${RETIRED_LINT_FILE_TEXT}`)).toBe(false); // 路径也运行期拼
     expect(exists('packages/agent/history-hygiene.test.ts')).toBe(false);
   });
 
@@ -215,7 +236,7 @@ describe('D-170 · 三个旧守卫文件均不在树内（登记行守卫）', (
 
   it('删除记录在 decision-log 可考（Reset 提交 + owner 待裁定两句都在）', () => {
     const log = read('docs/history/decision-log-part01-2026-11_undated.md');
-    expect(log).toContain('platform-leak-lint.test.ts');
+    expect(log).toContain(RETIRED_LINT_FILE_TEXT);
     expect(log).toContain('0b97227');
     expect(log).toContain('恢复最小闭集守卫或改 D-209 闭环判据属 owner 待裁定');
   });
@@ -225,11 +246,11 @@ describe('D-170 · 三个旧守卫文件均不在树内（登记行守卫）', (
   });
 });
 
-// ---------- D-196：退役 FSHINE_PLATFORM_ROOT（2026-11-24 结案） ----------
+// ---------- D-196：退役环境变量（2026-11-24 结案） ----------
 
-const PLATFORM_ROOT = /FSHINE_PLATFORM_ROOT/;
+const PLATFORM_ROOT = new RegExp(RETIRED_ENV_VAR_TEXT);
 
-describe('D-196 · FSHINE_PLATFORM_ROOT 代码面零命中（结案守卫）', () => {
+describe('D-196 · 退役环境变量代码面零命中（结案守卫）', () => {
   it('docs/ 之外（代码/配置/CI/README/AGENTS）零命中', () => {
     const files = walk(['packages', 'apps', 'scripts', 'config', 'tests', '.github', 'patches', 'README.md', 'AGENTS.md', 'package.json']);
     expect(lineHits(files, PLATFORM_ROOT)).toEqual([]);

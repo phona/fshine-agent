@@ -10,9 +10,8 @@
 | 编号 | 事项 | 证据 / 指针 | 状态 |
 |---|---|---|---|
 | #67 | 会话存储 retention / capacity（线性无界增长） | `../architecture/sessions.md:35-37` | 未清 |
-| #68 | 跨重启消息级幂等 / 真续跑恢复 | `../../AGENTS.md:97`；`../../README.md:93` | 未清 |
+| #68 | 真续跑恢复（跨重启消息级幂等那半已于 2026-11-24 结案） | `../../AGENTS.md:97`；`../../README.md:101` | 未清（仅剩「真续跑」）：Worker 会话跨重启续跑需 Pi 原生会话恢复，当前生产未落盘。已结案的那半：判重表（主键 `(principal_id, session_id, message_id)`）2026-11-19 落地于 `packages/core/src/task-store.ts`，同一条先于一切副作用查重、命中回放原回执、处理失败删行让渠道重投；`apps/server/server-inbound-idempotency.test.ts` 4/4 含关 server 重建后再投 |
 | #69 | `executions` 时间列 | `packages/core/src/task-store.ts`（`executionTimeColumnsMissing` 前向加法迁移 + SCHEMA_BASE 两列 + 写读映射）；守卫 `packages/core/task-store-migration-execution-times.test.ts`（迁移/只读/不伪造）、`packages/agent/execution-time-columns.test.ts` 与 `packages/agent/runtime.test.ts` 与 `packages/agent/runtime-worker-run-js.test.ts`（三处真实执行边界落时刻）、`scripts/tasks.test.ts` + `scripts/ops.test.ts`（有/无时刻两态） | 已清（2026-11-24） |
-| #68 | 跨重启消息级幂等（2026-11-24 结案） | `../../AGENTS.md:97`；`packages/core/src/task-store.ts` 的 `inbound_messages` 表（主键 `(principal_id, session_id, message_id)`）；`apps/server/server.ts` 的入站判重 | 结案：issue 原文「未实现（渠道重投会重新执行）」的前提不成立——判重表 2026-11-19 即落地，同一条先于一切副作用查重、命中回放原回执、处理失败删行让渠道重投；`server-inbound-idempotency.test.ts` 4/4 含关 server 重建后再投 |
 | #70 | tasks CLI 增强（2026-11-24 已清） | `../../AGENTS.md:97`；`scripts/tasks.ts`（USAGE/`--force`/批量导出/交付件时间行） | 已清：`--force` 默认拒绝覆盖逐字不变、批量导出一个任务一个 `task-<编号>.md`、交付件多一行「生成时间」；判据见 `scripts/tasks.test.ts` |
 | #71 | P8 ops 扩展（原 R4 唯一未落地分片） | `../../AGENTS.md:97`；`index.md`（R4 行） | 未清 |
 | #72 | 死代码重复实现 | 收敛记录见 `index.md`（2026-11-24 行）；守卫 `packages/agent/dead-code-merge.test.ts` | 已清（2026-11-24：8 组全部择一；`scripts/eval/**` 下 6 份 `jsonSafe` 历史夹具副本与 `scripts/ask-replay.ts` 的异名同义 `messageOf` 另行登记，理由见守卫文件头） |
