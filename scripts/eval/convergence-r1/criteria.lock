@@ -1,15 +1,15 @@
 {
   "generatedBy": "node --import tsx scripts/eval/convergence-r1/freeze.ts",
-  "frozenAt": "2026-11-23T08:56:20.108Z",
+  "frozenAt": "2026-11-24T07:11:36.872Z",
   "criteriaSha256": "9d4b0824a429658e7f633ff8af928fd3ad94b633f02c95f151866679bb8d6cd4",
   "casesSha256": "fa239fff41d371667861393ab87ac1bedf01602508b7953f1c8afee8750f5227",
   "files": {
     "scripts/eval/convergence-r1/criteria.ts": "f5daa2a2d8377d7250150b6d907126dea26e652dcb8493f32801a5ddf1d68025",
     "scripts/eval/convergence-r1/cases.ts": "5bd3b249f44ae7efa9ac0ecc1547dd382d478d87ce065094228239c538adbc02",
-    "scripts/eval/convergence-r1/judge.ts": "cb83d5335f9de7c484967cef7b6bf3dfa8e53539a09aa23ae1c04c5c20b4ff29",
+    "scripts/eval/convergence-r1/judge.ts": "45cb1865eba7830cd2c135466f53cbe7aa82b34b9c599f50a038eea8bc1547b0",
     "scripts/eval/convergence-r1/hash.ts": "e03bdcacc362515796cf6d248f2244a2b31b3e19ceddaee32cd7ec6795376637",
     "scripts/eval/convergence-r1/evidence.ts": "3213c3913a00e4397a1d9c3fcf88db7902653bf544c17b5a0315918896f4cae7",
-    "scripts/eval/convergence-r1/selftest.ts": "ae641fc3bad1ca74a16ba26a8cdf7d93d122b782cfa18833aaedc94b885b4737",
+    "scripts/eval/convergence-r1/selftest.ts": "737c413f0259c886d275ed8c689a43ceed6764d7303303baf34475364ba88659",
     "scripts/eval/convergence-r1/cases/E01.ts": "411a33591d41daac652fd98c3249f2bb2020200bfdecc7fb973154eaa92651d5",
     "scripts/eval/convergence-r1/cases/E02.ts": "feb781db06529d69c2019697e904b2c65d2238187b4d516950577ae937842a61",
     "scripts/eval/convergence-r1/cases/E03.ts": "fca148ab9b107f8633c636577616e3a30d5388e30b061ce59f91da48549fc5da",

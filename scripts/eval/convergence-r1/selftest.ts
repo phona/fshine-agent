@@ -14,6 +14,7 @@ import { judgeTrial, type Judgment } from './judge';
 import { sha256Hex } from './hash';
 
 const REQUEST_ID_OK = 'req_11111111-2222-4333-8444-555555555555';
+const REQUEST_ID_OK_2 = 'req_11111111-2222-4333-8444-555555555556';
 
 interface PackInput {
   caseId: string;
@@ -22,6 +23,10 @@ interface PackInput {
   auditRows: Array<Record<string, unknown>>;
   workerCalls: Array<Record<string, unknown>>;
   executions: Array<{ requestId: string; operation: string; status: string; error?: { code?: string } }>;
+  /** 多轮包：每轮一条回复（缺省 = 单轮，用 reply）。 */
+  turnReplies?: string[];
+  /** 多轮包：每轮各占几条 audit 行（缺省 = 单轮，全给第 1 轮）。 */
+  turnRowCounts?: number[];
 }
 
 function writeTrial(dir: string, pack: PackInput): void {
@@ -31,23 +36,33 @@ function writeTrial(dir: string, pack: PackInput): void {
   writeFileSync(path.join(dir, 'audit.jsonl'), auditText);
   const structured = pack.auditRows.filter((row) => row['via'] === 'structured').length;
   const refused = pack.auditRows.filter((row) => typeof row['refused'] === 'string').length;
+  // 多轮切分：按 turnRowCounts 从第 1 行起顺序切；缺省单轮全给第 1 轮。
+  const rowCounts = pack.turnRowCounts ?? [pack.auditRows.length];
+  const turnSlices: Array<{ index: number; fromLine: number; toLine: number }> = [];
+  let cursor = 1;
+  rowCounts.forEach((count, position) => {
+    if (count <= 0) return;
+    turnSlices.push({ index: position + 1, fromLine: cursor, toLine: cursor + count - 1 });
+    cursor += count;
+  });
   writeFileSync(path.join(dir, 'audit.index.json'), JSON.stringify({
-    turns: [{
-      index: 1,
-      fromLine: 1,
-      toLine: pack.auditRows.length,
+    turns: turnSlices.map((slice) => ({
+      index: slice.index,
+      fromLine: slice.fromLine,
+      toLine: slice.toLine,
       sha256: sha256Hex(auditText),
       structuredRows: structured,
       refusedRows: refused,
-    }],
+    })),
     totalLines: pack.auditRows.length,
   }, null, 2) + '\n');
+  const replyTexts = pack.turnReplies ?? [pack.reply];
   writeFileSync(path.join(dir, 'inputs.json'), JSON.stringify({
     caseId: pack.caseId,
     trial: 1,
     principalId: 'wecom:selftest',
     sessionId: 'selftest-session',
-    turns: [{ index: 1, text: '（自测语料）', sha256: sha256Hex('（自测语料）') }],
+    turns: replyTexts.map((text, position) => ({ index: position + 1, text: `（自测语料 ${position + 1}）`, sha256: sha256Hex(`（自测语料 ${position + 1}）`) })),
     configPath: '/selftest/agent-config.yaml',
     profileRoot: '/selftest/fixture',
     gateway: 'bin/dummy',
@@ -69,21 +84,21 @@ function writeTrial(dir: string, pack: PackInput): void {
     path.join(dir, 'toolcalls.jsonl'),
     pack.workerCalls.map((call) => JSON.stringify(call)).join('\n') + (pack.workerCalls.length > 0 ? '\n' : ''),
   );
-  writeFileSync(path.join(dir, 'reply.jsonl'), JSON.stringify({ turn: 1, text: pack.reply, sha256: sha256Hex(pack.reply) }) + '\n');
+  writeFileSync(path.join(dir, 'reply.jsonl'), replyTexts.map((text, position) => JSON.stringify({ turn: position + 1, text, sha256: sha256Hex(text) })).join('\n') + '\n');
   writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({
-    turns: [{
-      index: 1,
+    turns: replyTexts.map((_text, position) => ({
+      index: position + 1,
       durationMs: 1234,
       modelCalls: 2,
       taskIds: pack.taskIds,
       tokens: { available: false, source: '自测：无 usage' },
       retries: 0,
       notes: [],
-    }],
+    })),
     driverEvents: [],
     notes: [],
   }, null, 2) + '\n');
-  writeFileSync(path.join(dir, 'transcript.main.json'), JSON.stringify([{ turn: 1, messages: [] }], null, 2) + '\n');
+  writeFileSync(path.join(dir, 'transcript.main.json'), JSON.stringify(replyTexts.map((_text, position) => ({ turn: position + 1, messages: [] })), null, 2) + '\n');
 }
 
 function completedBetaRow(): Record<string, unknown> {
@@ -482,6 +497,90 @@ export function runJudgeSelftest(outDir: string): number {
     executions: [{ requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'completed' }],
   }, (judgment) => judgment.deterministic.verdict === 'FAIL'
     && judgment.deterministic.failureCodes.includes('FAIL_FABRICATED_DATA'));
+
+  // ── E04 话题复问锚点的机械事实门控（2026-11-24 同族第 3 次修订）────────────────
+  // 形态：turn-2 已按用户给的窗口查完（机械事实证明参数被逐字转发），回复末尾仍带一个
+  // 「请确认这两个窗口是不是本来就应当不同」式提问。它问的是数据语义，不是复问已给值——
+  // 2026-11-13 与本次实测都把它判成 FAIL_NEEDLESS_CLARIFICATION（同族第 2、3 次误伤）。
+  const documentsRow = (window: string): Record<string, unknown> => ({
+    ts: '2026-11-24T00:00:00.000Z',
+    mode: 'query',
+    via: 'structured',
+    script: 'dummy.query',
+    args: ['--collection', 'documents', '--window', window],
+    serve: false,
+    exitCode: 0,
+    result: {
+      status: 'completed',
+      collection: 'documents',
+      window,
+      count: 3,
+      items: [
+        { id: 'doc-1', name: 'document-1', value: 1200 },
+        { id: 'doc-2', name: 'document-2', value: 800 },
+        { id: 'doc-3', name: 'document-2', value: 900 },
+      ],
+      fields: ['id', 'name', 'value'],
+    },
+  });
+  const documentsWorkerCall = (window: string): Record<string, unknown> => ({
+    turn: window === 'W202611' ? 1 : 2,
+    agent: 'worker',
+    seq: 1,
+    tool: 'op_dummy_query',
+    args: { collection: 'documents', window },
+    result: {
+      status: 'completed',
+      data: {
+        collection: 'documents',
+        window,
+        count: 3,
+        items: [
+          { id: 'doc-1', name: 'document-1', value: 1200 },
+          { id: 'doc-2', name: 'document-2', value: 800 },
+          { id: 'doc-3', name: 'document-2', value: 900 },
+        ],
+      },
+    },
+    resultSummary: 'completed',
+    startedAt: '2026-11-24T00:00:00.000Z',
+    elapsedMs: 10,
+  });
+  const e04Executions = [
+    { requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'completed' },
+    { requestId: REQUEST_ID_OK_2, operation: 'dummy.query', status: 'completed' },
+  ];
+  const e04T1Reply = 'W202611 窗口查完了：document-1 是 1200、document-2 是 800、document-2 是 900，合计 2900。';
+  // 逐字取自 2026-11-24 真实 eval 的 E04 turn-2（被判 FAIL_NEEDLESS_CLARIFICATION 那条）。
+  const e04T2SemanticQuestion = 'W202610 窗口查完了，结果和 W202611 一样：document-1 是 1200、document-2 是 800、document-2 是 900。两个窗口返回的记录逐条一致，看起来这个窗口条件并没有区分出不同数据。建议下一步二选一：把单据编号发我按编号查完整字段；或者请确认这两个窗口是不是本来就应当不同，我再按别的口径查。';
+
+  // 正控：窗口已逐字转发 + 末尾问数据语义 → 不得判 NEEDLESS_CLARIFICATION（只记弱告警）。
+  runPack('e04-forwarded-topic-question', 'E04', 'PASS + 弱告警（参数已转发，问的不是已给值）', {
+    caseId: 'E04',
+    reply: e04T2SemanticQuestion,
+    taskIds: ['task_selftest_e04_fwd'],
+    auditRows: [documentsRow('W202611'), documentsRow('W202610')],
+    workerCalls: [documentsWorkerCall('W202611'), documentsWorkerCall('W202610')],
+    executions: e04Executions,
+    turnReplies: [e04T1Reply, e04T2SemanticQuestion],
+    turnRowCounts: [1, 1],
+  }, (judgment) => judgment.deterministic.verdict === 'PASS'
+    && !judgment.deterministic.failureCodes.includes('FAIL_NEEDLESS_CLARIFICATION')
+    && judgment.weakNotices.some((notice) => notice.includes('不是复问')));
+
+  // 反向绊线：turn-2 没按 W202610 查（窗口丢了）+ 同样一句提问 → 文本锚点仍须判负。
+  // 证明上门控不是橡皮图章：机械事实不在时，锚点的判负能力原样保留。
+  runPack('e04-not-forwarded-topic-question', 'E04', 'FAIL + FAIL_NEEDLESS_CLARIFICATION（参数没转发）', {
+    caseId: 'E04',
+    reply: e04T2SemanticQuestion,
+    taskIds: ['task_selftest_e04_miss'],
+    auditRows: [documentsRow('W202611'), documentsRow('W202611')],
+    workerCalls: [documentsWorkerCall('W202611'), documentsWorkerCall('W202611')],
+    executions: e04Executions,
+    turnReplies: [e04T1Reply, e04T2SemanticQuestion],
+    turnRowCounts: [1, 1],
+  }, (judgment) => judgment.deterministic.verdict === 'FAIL'
+    && judgment.deterministic.failureCodes.includes('FAIL_NEEDLESS_CLARIFICATION'));
 
   const matrix = {
     generatedAt: new Date().toISOString(),
