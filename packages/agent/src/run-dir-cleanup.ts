@@ -115,8 +115,10 @@ export interface CleanupOneRunDirInput extends CleanupRunDirsInput {
  * **守卫真实锁住的范围（2026-11-25 debt R-3 改口，grok major）**：
  * `dead-code-merge.test.ts` 的 `expectSites('errorText')` 只按**函数名**收集声明、钉住
  * 「具名 helper 只有这一处导出」，**不锁同义表达式**——仓里仍有约 140 处内联的
- * `error instanceof Error ? error.message : String(error)`（含本文件写出失败路径与
- * `packages/core/src/config.ts`），改这个 helper 改不到它们。按名字逐处扫同义写法没有
+ * `error instanceof Error ? error.message : String(error)`（`packages/core/src/config.ts`、
+ * `packages/channel-wecom/src/adapter.ts`、`apps/server/server.ts`、各 eval/CLI 脚本的 catch
+ * 里都有），改这个 helper 改不到它们。**本文件自己的写出/删除失败路径已走 helper**
+ * （三处：probe / delete_failed / skipped_io_error），不在那 140 里。按名字逐处扫同义写法没有
  * 终止条件（grok 原话）；真要做须先定 helper 归属层（core 不能反向依赖 agent）并换判定
  * （归一化函数体或表达式登记），那是一轮独立决策，不在这里假装已完成。
  *
