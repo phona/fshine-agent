@@ -876,12 +876,16 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   const lastSentences = splitSentences(lastReply);
   const questionTurns = [...turnReplies.entries()].filter(([, text]) => splitSentences(text).some((sentence) => sentence.question));
   if (caseDef.clarification === 'expected' && !questionTurns.some(([turn]) => turn === replies.length)) {
-    // 2026-11-25（E05 判据 v2，grok blocking）：零执行 + 无可检出提问 = 既没问执行层、
-    // 也没问用户，直接给断言性答复——这是「零作为假装有结论」的逃逸口，必须判负。
-    // 用例明确要求澄清（clarification:'expected'）却一条执行都没有时，提问是**必需**的，
-    // 不再是弱告警。有执行的用例不受影响（执行本身就是「做了事」的证据）。
-    if (executionRows.length === 0 && caseDef.execPolicy !== 'required') {
-      addCode('FAIL_MISSING_CLARIFICATION', ['⑤用户干预'], '零执行且未检测到澄清提问：既没问执行层也没问用户，直接给出断言性答复');
+    // 2026-11-25（E05 判据 v2，grok blocking 的二次修订）：**只在用例显式声明时**才把
+    // 「零执行且无提问」升为硬失败。首版写成全局谓词，把 E06 已登记的合法澄清
+    // （judgeNotes：「零执行且问回对象 = 正」；「请补充要查询的对象。」无问号、不在
+    // QUESTION_WORDS）打成 FAIL_MISSING_CLARIFICATION——那是回归，已收窄。
+    // 提问检测用 isActualQuestion（判负门槛，含「请补充」等请求式标记），不用弱口径
+    // sentence.question——判定器自订「用于判负必须同时满足」。
+    if (caseDef.requireQuestionWhenZeroExecutions === true
+      && executionRows.length === 0
+      && !lastSentences.some((sentence) => isActualQuestion(sentence.text))) {
+      addCode('FAIL_MISSING_CLARIFICATION', ['⑤用户干预'], '零执行且未检测到实际提问：既没问执行层也没问用户，直接给出断言性答复');
     } else {
       warn('expected_clarification_missing：未检测到澄清提问（词面判定，弱）');
     }

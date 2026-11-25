@@ -357,6 +357,39 @@ export function runJudgeSelftest(outDir: string): number {
   }, (judgment) => judgment.deterministic.verdict === 'FAIL'
     && judgment.deterministic.failureCodes.includes('FAIL_WRONG_OBJECT'));
 
+  // 有执行行 + needs_input，但 T2 outcome 没有 candidates 载荷 → 不得判正（INCONCLUSIVE）。
+  // grok 二轮 blocking：「缺 candidates 时不得判正没有守卫」——删掉 judge.ts 的该 seeInconclusive
+  // 分支，前四包仍绿，唯此包转红。
+  runPack('e05-v2-candidates-missing', 'E05', 'INCONCLUSIVE（查了 contoso 但 T2 无 candidates 载荷：不得判正）', {
+    caseId: 'E05',
+    reply: '系统识别出 contoso 是一个前缀，但候选清单没有返回，请您补充更准确的名称。',
+    taskIds: ['task_selftest_e05_5'],
+    auditRows: [{
+      ts: '2026-11-25T00:00:00.000Z', mode: 'query', via: 'structured', script: 'dummy.query',
+      args: ['--collection', 'contoso'], serve: false, exitCode: 0,
+      result: { status: 'needs_input', collection: 'contoso' },
+    }],
+    workerCalls: [{
+      turn: 1, agent: 'worker', seq: 1, tool: 'op_dummy_query',
+      args: { collection: 'contoso' },
+      result: { status: 'needs_input', data: { query: 'contoso' } },
+      startedAt: '2026-11-25T00:00:00.000Z', elapsedMs: 10,
+    }],
+    executions: [{ requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'needs_input' }],
+  }, (judgment) => judgment.deterministic.verdict === 'INCONCLUSIVE');
+
+  // E06 回归包（grok 二轮 blocking 的直接绊线）：E06 的合法澄清「请补充要查询的对象。」
+  // **没有问号、也不在 QUESTION_WORDS 里**（「请补充」只在 isActualQuestion 的请求式标记中）。
+  // 首版把 FAIL_MISSING_CLARIFICATION 写成全局谓词时，这句会被打成硬失败——本包钉住不回退。
+  runPack('e06-zero-exec-ask-back-still-passes', 'E06', 'PASS（E06 零执行 + 问回对象：已登记的合法路径，不得被判负）', {
+    caseId: 'E06',
+    reply: '请补充要查询的对象。',
+    taskIds: [],
+    auditRows: [],
+    workerCalls: [],
+    executions: [],
+  }, (judgment) => judgment.deterministic.verdict === 'PASS');
+
   // 正控 2：历史形状 execute_operation 仍须能读到（与 op_* 形状并存，不回归老夹具）。
   runPack('legacy-tool-outcome-read', 'E07', 'PASS（历史 execute_operation 的 availableWindows 仍被读到）', {
     caseId: 'E07',

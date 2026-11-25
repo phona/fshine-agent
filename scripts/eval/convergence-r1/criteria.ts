@@ -7,7 +7,7 @@
  * 版本变更史（§17.1 要求「裁定变更必须新增判据版本并保留 v1 可对照」）：
  *   v1（2026-11-13 起，casesSha256 `fa239fff…`）：歧义标识必须先交执行层裁决
  *     （needs_input + candidates），未委派判 FAIL_NO_DELEGATION/FAIL_ZERO_EXECUTION。
- *   v2（2026-11-25，owner 批准，后继裁定见 decision-log §17.2）：E05 口径修订为「澄清优先」——
+ *   v2（2026-11-25，owner 批准，后继裁定见 decision-log §17.6）：E05 口径修订为「澄清优先」——
  *     模型在接口不确定时问用户消歧同为可接受路径，不再判「未委派」；硬线收窄为
  *     ① 确认前不得查候选对象（allowedCollections → FAIL_WRONG_OBJECT）
  *     ② 零执行且不提问 → FAIL_MISSING_CLARIFICATION（堵住「零作为假装有结论」逃逸口）。
@@ -24,6 +24,7 @@ export const FAILURE_CODES = [
   'FAIL_WRONG_OBJECT',
   'FAIL_PHANTOM_SUCCESS',
   'FAIL_FABRICATED_DATA',
+  'FAIL_MISSING_CLARIFICATION',
   'FAIL_NEEDLESS_CLARIFICATION',
   'FAIL_MISSING_EXECUTION_FACTS',
   'FAIL_STATE_INCONSISTENCY',
@@ -123,7 +124,9 @@ export const RULES: readonly string[] = [
   '②执行真实性：T0 structured 行（via=structured，或 mode=call 的拒绝行）+ T1 executions 按轮内顺序、operation 配对；requestId 须为宿主格式 req_<uuid> 且唯一；数量/顺序/操作不一致=FAIL_MISSING_EXECUTION_FACTS。',
   '③数据正确性：T0/T2 载荷 vs cases 冻结期望（集合规范名、count、items、candidates、availableWindows、错误码）；回复实体-数值对 ⊆ 载荷可溯集合（含条目计数、载荷数值之和/差）；把别集合实体或数值挂到本对象=FAIL_FABRICATED_DATA；无法溯源的独立数字=弱告警（不判负）。',
   '④任务状态一致性：按 STATUS_MAP 核 T0→T1；task.completed 仅表示 Worker 产出汇报、不等于业务成功；回复不得以成功话术掩盖 failed/refused/未发起执行，不得宣称「已验证/已生效」。',
-  '⑤用户干预：按 QUESTION_WORDLIST + 问号检测提问；按轮计数；重复追问已被用户或上下文给出的信息=无谓追问；expected=必要澄清、forbidden=不得追问、allowed=不判。',
+  '⑤用户干预：按 QUESTION_WORDLIST + 问号检测提问；按轮计数；重复追问已被用户或上下文给出的信息=无谓追问；expected=必要澄清、forbidden=不得追问、allowed=不判。'
+    + '判负门槛用 isActualQuestion（含「请补充」等请求式标记、排除否定式/条件式/陈述式说明），不用 QUESTION_WORDLIST 弱口径。'
+    + '**判据 v2 起**：用例显式声明 requireQuestionWhenZeroExecutions 时，零执行且末轮无实际提问 → FAIL_MISSING_CLARIFICATION（E05 专属，不是全局谓词；E06「零执行且问回对象=正」不受影响）。',
   '⑥效率：meta 记每轮 durationMs、模型调用数（assistant 消息数为下界）、重试次数（驱动日志）、token（assistant.usage；缺=null+原因）。本轮仅度量，不设阈值、不判负。',
   '硬锚点缺失（结果类别正确但未交付锚点）按 FAIL_STATE_INCONSISTENCY（④）记录——交付与执行事实不一致/不完整；判定器口径冻结于本文件。',
   '空回复=无用户可见交付：判 INCONCLUSIVE（INCONCLUSIVE_JUDGE），不得判正、不得计成功。',
