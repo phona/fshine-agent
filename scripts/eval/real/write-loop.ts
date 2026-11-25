@@ -47,7 +47,7 @@ import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver, TurnDriverInput, WakeResult } from '../../../packages/agent/src/driver-contract';
 import type { Notification, NotificationSink } from '../../../packages/agent/src/notifications';
 import { renderNotification } from '../../../packages/agent/src/notification-render';
-import { scanUserVisibleText } from '../shared/internal-terms';
+import { scanUserVisibleText } from '../../../packages/agent/src/user-visible-scan';
 import {
   checkTurnFaceShape,
   createDeliveryProvenanceAttributor,

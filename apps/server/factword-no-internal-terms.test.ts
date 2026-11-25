@@ -13,7 +13,7 @@
  *   ⑦ 回合结束事实链（宿主喂账本事实 → taskRoundFactsText）无内部词；
  *   ⑫ 宿主自己写的用户可见文本（兜底句/通知/回执/事实链）不含结构化块形状
       （工具调用块标记；JSON 字面量那半 2026-11-25 按 debt R-6 删了，见
-      shared/internal-terms 的 findStructuredBlockHits 注释）——2026-11-24 补 live P0 ① 的闸。
+      packages/agent/src/user-visible-scan 的 findStructuredBlockHits 注释）——2026-11-24 补 live P0 ① 的闸。
  * 内部词含「执行层 / 执行端 / 确认凭据 / 宿主 / 委派 / 能力快照 / 执行面 / 凭据」——都是不该
  * 出现在给模型/用户文本里的宿主内部形态（2026-11-20 扩面：复核发现 run_js 描述/续跑注记/
  * 后台文件提示/技能正文里仍有漏网）。内部词是确定性事实，不是模型行为评估。
@@ -33,7 +33,7 @@ import {
   waitingUserFallbackText,
 } from './task-completion-delivery';
 import { executionLineText } from './pending-confirmation-facts';
-import { findStructuredBlockHits } from '../../scripts/eval/shared/internal-terms';
+import { findStructuredBlockHits } from '../../packages/agent/src/user-visible-scan';
 import { failureMessageFor } from '../../packages/agent/src/user-facing-failure';
 import { renderNotification } from '../../packages/agent/src/notification-render';
 import { formatFileAck } from '@fshine/contracts';
@@ -375,7 +375,7 @@ describe('模型可见面收口：清单投影 / Worker 提示 / 底账投影', 
  *
  * 为什么单开一条：上面 ①–⑪ 管的是「内部词/内部标识」，管不住「结构化块原样到用户」——
  * 模型把工具调用块当普通文本吐出来时，词表一条都不命中。判据是**机械形状**（格式/泄漏类，
- * 与 shared/internal-terms 的形状断言同一把尺：实测冻结的四条工具块标记；JSON 字面量是
+ * 与 packages/agent/src/user-visible-scan 的形状断言同一把尺：实测冻结的四条工具块标记；JSON 字面量是
  * 假设形状，2026-11-25 按 debt R-6 已删），不判语义。
  * 覆盖面 = 宿主**自己写**的那些用户可见文本；模型自己回复里的形状由 eval 批次的
  * scanUserVisibleText 兜（同一形状，零改动生效）。

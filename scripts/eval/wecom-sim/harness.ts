@@ -40,7 +40,7 @@ import {
   type ConversationStreamResult,
   type DeliveryProvenanceTarget,
 } from '../shared/conversation-shape';
-import { scanUserVisibleText } from '../shared/internal-terms';
+import { scanUserVisibleText } from '../../../packages/agent/src/user-visible-scan';
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import { EXECUTE_OPERATION_TOOL } from '../../../packages/agent/src/execution-runtime';
 import { withInternalExecTool } from '../../../packages/agent/testing/internal-exec-fixture';
@@ -77,7 +77,7 @@ export const NUDGE_AFTER_MS = 30_000;
 //   · reply   = adapter 的 replyStream 终帧（finish=true 且未被拒收；reqId → 消息锚点）；
 //   · delivery = 主动推送（proactiveTexts）+ 宿主 sent 记账行的归属补填（factEvent）。
 // ② 内部词/内部标识泄漏（2026-11-21）：用户可见面（终帧气泡 + 主动推送，与形态守卫同口径）
-//    走 shared/internal-terms 的单一入口 scanUserVisibleText（内部词 + 任务编号形态 +
+//    走 packages/agent/src/user-visible-scan 的单一入口 scanUserVisibleText（内部词 + 任务编号形态 +
 //    taskId 形态）——与 write-loop / write-loop-scenarios / convergence-r1 三批同一来源。
 // 违规即该用例失败（afterEach 抛错，打印违规 code / marker 与上下文）。负例控制用例用
 // disarmShapeGuard() 解除自动守卫、在用例体内自行断言违规存在。
@@ -710,7 +710,7 @@ export interface WecomSimFixture {
   shapeViolations(): readonly ConversationStreamResult[];
   /**
    * 用户可见面泄漏扫描（2026-11-21）：对当前累计的终帧气泡 + 主动推送跑
-   * shared/internal-terms 的 scanUserVisibleText（内部词 + 任务编号形态 + taskId 形态），
+   * packages/agent/src/user-visible-scan 的 scanUserVisibleText（内部词 + 任务编号形态 + taskId 形态），
    * 返回命中。close() 时会自动再跑一遍（命中即该用例失败）；本方法供负例控制用例
    * 在用例体内直接取读数。
    */

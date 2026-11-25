@@ -16,7 +16,7 @@ owner 的类比（原文）：**「相当于 Main 的工作台里对客户罗列
 | --- | --- | --- | --- |
 | **Main（柜台）** | 只对用户 | **承诺权**（能不能办：来自派生目录，见 §2）、澄清（问对象/范围/口径）、汇报（结论+数据）、本地加工（`run_js` / `recalc_xlsx` 这类宿主确定性工具） | **无执行权**：不得调用任何平台 `operation`。现行 Main 工具面 = `task_run` + `task_status` / `task_result`（+ runner 时 `task_cancel` / `task_resume` / `task_confirm`，+ 注入时 `read_skill` / `run_js` / `recalc_xlsx`），**不含** `execute_operation`、也**不含**任何 `op_*`（装配见 `packages/agent/src/execution-runtime.ts:3126-3141`，缺省面断言见 `packages/agent/main-skill.test.ts:332`、Main 面排除 `execute_operation` 见 `packages/agent/main-capability-surface.test.ts:63`）。⚠️ `execute_operation` 只是**内部 exec 路由键**（常量 `packages/agent/src/execution-runtime.ts:411`，路由点 `:2741`、`:4097`），不是任何模型可见工具；原工具工厂 `executeOperationTool()` 已按删除纪律删除（旧 `:3446`，现为删除注）。见 §6 现状第 5 条 |
 | **Worker（后台部门）** | 只对宿主/委派方 | **执行权**：调**每 operation 一个 `op_*` 工具**（operation 名安全化：`dummy.query` → `op_dummy_query`，参数用业务字段名、照委派清单填；生成见 `packages/agent/src/execution-runtime.ts:3466`、注册点 `:2966`、`:4305`），取证（真实结果与「缺什么/办到哪一步」） | **无话语权**：不得直接对用户说话；只把事实汇报给 Main，由 Main 转述（`WORKER_SYSTEM_PROMPT` 要求「写成一段能直接转给别人看的事实」：`packages/agent/src/execution-runtime.ts:584`；Worker 工具面快照恰好一个 `op_dummy_query`、明确**不含** `execute_operation`：`packages/agent/task-surface.test.ts:375`） |
-| **用户（客户）** | —— | 交办、确认、叫停（`task_confirm` / `task_cancel` 的显式动作）；随时接管（查状态、查结果） | 不需要懂系统结构：看不到 operation 名、参数、句柄、任务编号等内部形态（用户可见面无内部词由 `apps/server/factword-no-internal-terms.test.ts` 与 `packages/agent/user-facing-failure.test.ts:150` 守卫） |
+| **用户（客户）** | —— | 交办、确认、叫停（`task_confirm` / `task_cancel` 的显式动作）；随时接管（查状态、查结果） | 不需要懂系统结构：看不到 operation 名、参数、句柄、任务编号等内部形态（用户可见面无内部词由 `apps/server/factword-no-internal-terms.test.ts`、`packages/agent/user-facing-failure.test.ts:150` 守卫；**投递出口**另有一道同尺闸 `apps/server/task-completion-delivery-leak.test.ts`——闸在端口之前，命中即不投递） |
 | **宿主** | —— | 身份/时机/事实/凭据/投递与记账（可信 principal、状态变化才唤醒、机械事实、句柄原样透传、用户可见文本投递、执行与投递记账） | 不替双方做决定（不判「用户是不是在确认」、不做业务裁决）、不复制执行层规则（实体授权、口径、有效期归执行层；`docs/architecture/contract.md` §2–§3） |
 
 **柜台类比的两处修正**（避免把类比读歪）：
@@ -88,7 +88,7 @@ Worker 的汇报必须是**结构化事实**，Main 据此套用统一话术—�
 | 四角色分工（Main 无执行权） | 部分守卫（见禁令 1） | 已有：`packages/agent/main-skill.test.ts:332`（缺省 Main 面）、`packages/agent/task-surface.test.ts:375`（Worker 面 `op_*`、无 `execute_operation`）、`packages/agent/main-capability-surface.test.ts:63`、`packages/agent/pi-driver-wake.test.ts:435`（唤醒面排除）；待补：Main 硬发执行工具零执行绊线 |
 | Main 对用户的承诺权来自派生目录 | 已有守卫 | `scripts/capability-catalog-assembly.test.ts:77`（声明 capability → Main 摘要 + capabilities 工具）；`packages/agent/main-capability-surface.test.ts:59` |
 | Worker 无话语权、不直接对用户说话 | 部分守卫 | 已有：`factword-no-internal-terms.test.ts`、`worker-prompt.test.ts:84`（输出不含内部形态）；结构性保证已有，模型行为归评测 |
-| 用户不需懂内部形态 | 已有守卫 | `factword-no-internal-terms.test.ts`、`packages/agent/user-facing-failure.test.ts:150`、`packages/agent/main-capability-surface.test.ts:66` |
+| 用户不需懂内部形态 | 已有守卫 | `factword-no-internal-terms.test.ts`、`packages/agent/user-facing-failure.test.ts:150`、`packages/agent/main-capability-surface.test.ts:66`；**出口闸** `task-completion-delivery-leak.test.ts`（单一尺在 `packages/agent/src/user-visible-scan.ts`，eval 与 live 共用） |
 | 宿主不替双方做决定/不复制执行层规则 | 已有守卫（既有责任面） | `packages/agent/import-boundary.test.ts`（旧治理模块不复活）、`docs/architecture/contract.md` §2–§3；本档未新增守卫 |
 | `capability` 单字段 + 多阶段共享值 | 已有守卫 | `packages/agent/capability-catalog.test.ts:28`（同 capability 的 query/prepare/commit 分组为一项、read/write 并集） |
 | 按 `capability` group by 派生、不手写第二套（禁令 3 重点） | 已有守卫 | `capability-catalog.test.ts:18`（空清单 → 空目录）、`:22`、`:37`（加声明即多一条，篡改/写死常量表 → 红） |

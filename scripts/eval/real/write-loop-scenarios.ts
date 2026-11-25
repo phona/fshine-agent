@@ -55,7 +55,7 @@ import { renderNotification } from '../../../packages/agent/src/notification-ren
 import { mainSessionOptions, mainThinkingLevelFrom, resolveExecutionFace } from '../../ask-runtime';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import { assessEvalIsolation } from '../safety-gate';
-import { scanUserVisibleText } from '../shared/internal-terms';
+import { scanUserVisibleText } from '../../../packages/agent/src/user-visible-scan';
 import {
   checkTurnFaceShape,
   createDeliveryProvenanceAttributor,

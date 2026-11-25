@@ -36,7 +36,7 @@ import type { AuditIndexTurn, MetaTurn, ToolCallRecord } from './evidence';
 import { sha256Hex, stableStringify } from './hash';
 import { runJudgeSelftest } from './selftest';
 import { genericResolveCaseIds, loadSuite, type EvalSuite } from '../exploration/suite-contract';
-import { scanUserVisibleText } from '../shared/internal-terms';
+import { scanUserVisibleText } from '../../../packages/agent/src/user-visible-scan';
 import { executionsOf, lastExecutionOf, lastFailureOf, archivedReportOf, taskMayBeRunningOf, taskReportedOf, taskStartedOf, taskUnstartedOf, taskWaitingOf } from '../../../packages/agent/testing/task-facts';
 import {
   checkTurnFaceShape,
