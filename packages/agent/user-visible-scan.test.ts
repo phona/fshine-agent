@@ -23,7 +23,7 @@ import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { renderNotification } from './src/notification-render';
 import { NOTIFICATION_KINDS, type NotificationKind } from './src/notifications';
-import { findLiteralHits, INTERNAL_WORDS, scanUserVisibleLeaks, scanUserVisibleText, TOOL_BLOCK_MARKERS } from './src/user-visible-scan';
+import { findLiteralHits, INTERNAL_WORDS, scanUserVisibleText, TOOL_BLOCK_MARKERS } from './src/user-visible-scan';
 
 // 本文件随闸从 scripts/eval/shared 搬进 packages/agent（2026-11-25），根少一级。
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -274,51 +274,9 @@ const WIRING: ReadonlyArray<{
   { file: 'scripts/eval/convergence-r1/runner.ts', fn: 'scanTrialLeaks', expectScan: true, why: 'convergence-r1 runner 用户级批次入口' },
   { file: 'scripts/eval/wecom-sim/harness.ts', fn: 'scanUserVisibleText', expectScan: true, why: 'wecom-sim 用户可见面每用例守卫（close 时扫描，afterEach 判）' },
   { file: 'scripts/eval/real/live-replay.ts', fn: 'findLiteralHits', requiredArg: 'INTERNAL_WORDS', expectScan: true, why: 'live-replay 既有内部词断言（词表单一来源）' },
-  { file: 'apps/server/task-completion-delivery.ts', fn: 'scanUserVisibleLeaks', expectScan: true, why: 'live 出站口：投递前扫用户可见文本的 **leak 档**（2026-11-25 生产接入；style 档/业务编号不拦，见「两档守卫」）' },
   { file: 'scripts/eval/real/write-loop.test.ts', fn: '', expectScan: false, why: 'write-loop 绊线测试（非批次入口，glob 命中）' },
   { file: 'scripts/eval/real/write-loop-scenarios.test.ts', fn: '', expectScan: false, why: 'write-loop-scenarios 绊线测试（非批次入口，glob 命中）' },
 ];
-
-describe('两档守卫：生产只拦 leak 档，style 档（业务编号）绝不进生产闸', () => {
-  it('任务编号形态是 style 档——eval 记，生产不拦', () => {
-    const full = scanUserVisibleText([{ where: 't', text: '凭证编号 1001 已核对。' }]);
-    expect(full.hits.length).toBeGreaterThan(0);
-    expect(full.hits.every((hit) => hit.tier === 'style')).toBe(true);
-    // 生产入口对它零命中（这就是 grok blocking 的根因：两档混一个入口时它会被整段丢掉）。
-    expect(scanUserVisibleLeaks([{ where: 't', text: '凭证编号 1001 已核对。' }]).hits).toHaveLength(0);
-  });
-
-  it('leak 档三族都在生产入口里（内部词 / taskId 原文 / 工具调用块标记）', () => {
-    const toolMarker = TOOL_BLOCK_MARKERS[0] ?? '';
-    const cases: readonly (readonly [string, string])[] = [
-      ['这事得问执行层。', '执行层'],
-      ['任务号 task_db2b3ca3 还在跑。', 'task_db2b3ca3'],
-      [toolMarker, toolMarker],
-    ];
-    for (const [text, marker] of cases) {
-      const hits = scanUserVisibleLeaks([{ where: 't', text }]).hits;
-      expect(hits, `leak 档漏了 ${marker}`).toHaveLength(1);
-      expect(hits[0]?.tier).toBe('leak');
-      expect(hits[0]?.marker).toBe(marker);
-    }
-  });
-
-  it('生产入口是全量入口的子集（同一实现，只过滤档位，不存在第二把尺）', () => {
-    const text = '执行层说凭证编号 1001 对应 task_db2b3ca3，详情见 #3。';
-    const full = scanUserVisibleText([{ where: 't', text }]).hits;
-    const leaks = scanUserVisibleLeaks([{ where: 't', text }]).hits;
-    expect(full.length).toBeGreaterThan(leaks.length);
-    for (const hit of leaks) {
-      expect(full.some((f) => f.where === hit.where && f.marker === hit.marker && f.excerpt === hit.excerpt)).toBe(true);
-    }
-  });
-
-  it('AST：生产出站口调的是 scanUserVisibleLeaks，不是全量入口', () => {
-    const source = readFileSync(repo('apps/server/task-completion-delivery.ts'), 'utf8');
-    const callsLeaks = hasScanCall('apps/server/task-completion-delivery.ts', source, 'scanUserVisibleLeaks');
-    expect(callsLeaks, '生产出站口未调 scanUserVisibleLeaks——style 档会重新混进生产闸').toBe(true);
-  });
-});
 
 describe('静态守卫：所有用户级批次都接入了扫描', () => {
   it('显式清单里的每个批次入口都真实调用了扫描函数（AST：注释/删行即红）', () => {
@@ -351,9 +309,10 @@ describe('静态守卫：所有用户级批次都接入了扫描', () => {
     for (const file of enumerated) {
       expect(listed, `新增/现存批次 ${file} 未登记进通用泄漏守卫清单（忘了接入）`).toContain(file);
     }
-    // 清单里恰六个 expectScan 的入口被登记（五个 eval 批次 + live 出站口；防止把入口
-    // 全标 false 绕过守卫）。glob 只管 eval 目录——live 出站口是 2026-11-25 手工加的
-    // 那条，不受 glob 保护，只受这条计数与上面 AST/导入两条断言保护。
-    expect(WIRING.filter((entry) => entry.expectScan)).toHaveLength(6);
+    // 清单里恰五个 expectScan 的入口被登记（全是 eval 批次；防止把入口全标 false 绕过
+    // 守卫）。**2026-11-25 晚拆闸后这里不再有生产条目**：曾经加过一条 live 出站口，随闸一起删
+    // （见 apps/server/task-completion-delivery.ts 文件头的三条理由）。glob 覆盖全部五项，
+    // 所以「忘了接入」由 glob 那条兜，计数这条兜「全标 false」。
+    expect(WIRING.filter((entry) => entry.expectScan)).toHaveLength(5);
   });
 });

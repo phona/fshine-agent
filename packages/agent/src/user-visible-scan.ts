@@ -1,5 +1,5 @@
 /**
- * 用户可见文本的「内部形态」扫描——**生产出站口与 eval 批次共用同一把尺**。
+ * 用户可见文本的「内部形态」扫描——**eval 侧判据的单一来源**（只判，不丢）。
  *
  * 从 `scripts/eval/real/live-replay.ts` 抽出（2026-11-20 泄漏守卫通用化切片）；
  * 2026-11-25 从 `scripts/eval/shared/` 搬进 `packages/agent/src`——**eval 和 live 是同一条
@@ -10,19 +10,10 @@
  * 这是**机械事实扫描**，不是措辞质量判断：只做已知字面子串与机械形态的存在性判定，命中即
  * 「用户可见面出现了内部词/内部标识」这一确定事实。词表单一来源，禁止在各处复制。
  *
- * ## 两档（2026-11-25 grok blocking 后加，别再把它们混成一个入口）
  *
- * 命中分两档，因为**生产拦不拦得起**取决于「这段话用户还能不能用」：
- *
- *   · `leak`——内部词 / taskId 原文 / 工具调用块标记。机器格式，用户拿到也没法用，
- *     生产出站口命中即**不投递**（`scanUserVisibleLeaks`）。
- *   · `style`——任务编号形态（`#N` / `编号 N`）。这是**工单腔的措辞偏好**，不是泄漏：
- *     业务原文里「凭证编号 1001」「编号12」是正常内容，用户要用它。生产**绝不**因为它
- *     丢整段话；只有 eval 拿它当违规记（`scanUserVisibleText`）。
- *
- * 为什么必须分开：2026-11-25 第一版把两档塞进同一个 `scanUserVisibleText` 就接上了生产，
- * 结果 worker 汇报里带业务编号 → 完成兜底那一句被整段丢掉 → 模型沉默时调用方又不看返回值，
- * 用户**永久收不到结果**（grok blocking）。分档后生产只对「用户用不了的机器格式」下手。
+ * 2026-11-25 晚（owner 裁）：**生产出站口不用它，这道尺只归 eval**。曾经把它接进生产
+ * 投递口（`task_result_delivery_leak_blocked`），两轮 blocking 后拆掉——见该文件头注的
+ * 三条理由。生产侧用户面的内部形态由系统提示词兜 + 请求侧给工具；这里留着做测量。
  */
 
 /** 内部词（逐字冻结；内容与抽离前 `live-replay.ts#INTERNAL_WORDS` 完全一致）。 */
@@ -36,20 +27,12 @@ export interface VisibleText {
   text: string;
 }
 
-/**
- * 命中档位：`leak` = 机器格式（生产可拦）；`style` = 措辞偏好（只许 eval 记，生产不拦）。
- * 新增形状必须先定档——定不了的形状不进判据（change-safety F8）。
- */
-export type HitTier = 'leak' | 'style';
-
 /** 一条字面命中。 */
 export interface Hit {
   where: string;
   marker: string;
   /** 命中位置前后各 40 字符（换行转义为 \n，便于单行打印/落盘）。 */
   excerpt: string;
-  /** 档位（2026-11-25 分档；老调用方不读它，行为不变）。 */
-  tier: HitTier;
 }
 
 /** 命中位置前后各 40 字符的原文片段。 */
@@ -65,11 +48,7 @@ function excerptAt(text: string, index: number, length: number): string {
  * 在用户可见文本里逐字找字面标记（marker 就是命中的词；同标记多次命中逐个记录）。
  * 语义与抽离前 `live-replay.ts#findLiteralHits` 完全一致。
  */
-export function findLiteralHits(
-  texts: readonly VisibleText[],
-  markers: readonly string[],
-  tier: HitTier = 'leak',
-): Hit[] {
+export function findLiteralHits(texts: readonly VisibleText[], markers: readonly string[]): Hit[] {
   const hits: Hit[] = [];
   for (const { where, text } of texts) {
     for (const marker of markers) {
@@ -77,7 +56,7 @@ export function findLiteralHits(
       for (;;) {
         const index = text.indexOf(marker, from);
         if (index < 0) break;
-        hits.push({ where, marker, excerpt: excerptAt(text, index, marker.length), tier });
+        hits.push({ where, marker, excerpt: excerptAt(text, index, marker.length) });
         from = index + marker.length;
       }
     }
@@ -92,10 +71,9 @@ export function findLiteralHits(
  * 和字面词表走同一个 `scanUserVisibleText` 入口，故三个用户级批次自动生效（不复制三份）。
  * 编号仍留在底账/日志/审计里对账，这里只拦用户可见文本。
  *
- * **档位是 `style` 不是 `leak`**（2026-11-25 grok blocking）：业务原文里「凭证编号 1001」
- * 「编号12」是用户要用的正常内容。生产出站口拦它会**把整段话丢掉**（模型沉默时用户永久收不到
- * 结果），所以只许 eval 拿它当违规记，见文件头「两档」。谁要把这档提到 leak，先给出「用户拿到
- * 编号也没法用」的实测原文。
+ * 这是**措辞偏好**不是泄漏（2026-11-25 grok blocking 后定性）：业务原文里「凭证编号 1001」
+ * 「编号12」是用户要用的正常内容。所以它只归 eval 当违规记，**不构成生产丢弃整段话的理由**——
+ * 曾经的生产闸正是把它和机器格式混进同一个「丢整句」桶才连出两轮 blocking。
  */
 export const TASK_NO_SHAPE_RE = /#\d+|编号\s*#?\d+/gu;
 
@@ -106,7 +84,7 @@ export function findTaskNumberHits(texts: readonly VisibleText[]): Hit[] {
     TASK_NO_SHAPE_RE.lastIndex = 0; // global 正则先归零，避免跨文本状态泄漏。
     for (const match of text.matchAll(TASK_NO_SHAPE_RE)) {
       const index = match.index ?? 0;
-      hits.push({ where, marker: match[0], excerpt: excerptAt(text, index, match[0].length), tier: 'style' });
+      hits.push({ where, marker: match[0], excerpt: excerptAt(text, index, match[0].length) });
     }
   }
   return hits;
@@ -129,7 +107,7 @@ export function findTaskIdShapeHits(texts: readonly VisibleText[]): Hit[] {
     TASK_ID_SHAPE_RE.lastIndex = 0; // global 正则先归零，避免跨文本状态泄漏。
     for (const match of text.matchAll(TASK_ID_SHAPE_RE)) {
       const index = match.index ?? 0;
-      hits.push({ where, marker: match[0], excerpt: excerptAt(text, index, match[0].length), tier: 'leak' });
+      hits.push({ where, marker: match[0], excerpt: excerptAt(text, index, match[0].length) });
     }
   }
   return hits;
@@ -184,7 +162,7 @@ export function findStructuredBlockHits(texts: readonly VisibleText[]): Hit[] {
       for (;;) {
         const index = text.indexOf(marker, from);
         if (index < 0) break;
-        hits.push({ where, marker, excerpt: excerptAt(text, index, marker.length), tier: 'leak' });
+        hits.push({ where, marker, excerpt: excerptAt(text, index, marker.length) });
         from = index + marker.length;
       }
     }
@@ -193,13 +171,13 @@ export function findStructuredBlockHits(texts: readonly VisibleText[]): Hit[] {
 }
 
 /**
- * 通用入口（**eval 侧**）：扫描一批用户可见文本里的**全部**命中——内部词、任务编号形态、
- * taskId 形态、结构化块形状。返回 { hits }，每项含 where、marker、excerpt、tier。
+ * 通用入口（**eval 侧**）：扫描一批用户可见文本里的全部命中——内部词、任务编号形态、
+ * taskId 形态、结构化块形状。返回 { hits }，每项含 where、marker、excerpt。
  * 三批（write-loop / write-loop-scenarios / convergence-r1）与 wecom-sim 用户可见面守卫
  * 共用这一个入口；新增形状断言只改这里，批次侧零改动。
  *
- * **生产出站口不要用这个**——它含 style 档，拦了会把带业务编号的正常内容整段丢掉。
- * 生产用 {@link scanUserVisibleLeaks}。
+ * **只判不丢**：eval 拿它判「模型有没有把内部形态说给用户」，不拦任何投递。生产出站口
+ * 不用它（2026-11-25 拆闸，理由见 `apps/server/task-completion-delivery.ts` 文件头）。
  */
 export function scanUserVisibleText(texts: readonly VisibleText[]): { hits: Hit[] } {
   return {
@@ -210,18 +188,4 @@ export function scanUserVisibleText(texts: readonly VisibleText[]): { hits: Hit[
       ...findStructuredBlockHits(texts),
     ],
   };
-}
-
-/**
- * 生产出站口入口：只返回 `leak` 档命中（内部词 / taskId 原文 / 工具调用块标记）。
- *
- * 与 {@link scanUserVisibleText} 同一实现、同一次扫描，只是**过滤档位**——不复制第二套
- * 形状，不存在两把尺漂移的可能。生产（`apps/server/task-completion-delivery.ts` 的
- * `deliverText`）命中即不投递：这些话是机器格式，用户拿到也没法用。
- *
- * style 档（任务编号）刻意不在这里：业务原文里「凭证编号 1001」「编号12」是用户要用的
- * 内容，拦它等于把整段话丢掉——2026-11-25 grok blocking 的根因就是两档混成一个入口。
- */
-export function scanUserVisibleLeaks(texts: readonly VisibleText[]): { hits: Hit[] } {
-  return { hits: scanUserVisibleText(texts).hits.filter((hit) => hit.tier === 'leak') };
 }
