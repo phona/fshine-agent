@@ -372,6 +372,19 @@ export function runJudgeSelftest(outDir: string): number {
     executions: [{ requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'needs_input' }],
   }, (judgment) => judgment.deterministic.verdict === 'INCONCLUSIVE');
 
+  // 零执行却在回复里点名冻结候选（contoso-trade / contoso-logistics），T2 无 candidates 载荷
+  // → FAIL_FABRICATED_DATA。grok 五轮 blocking：这是 2026-11-20 记录过的「自造澄清选项清单」，
+  // 判据放宽后一度检测不到。**封闭核对（冻结候选名 × T2 载荷），不加任何提问词表**。
+  runPack('e05-v2-fabricated-candidates', 'E05', 'FAIL + FAIL_FABRICATED_DATA（零执行却点名冻结候选：候选名无 T2 载荷背书）', {
+    caseId: 'E05',
+    reply: '请确认是 contoso-trade 还是 contoso-logistics？',
+    taskIds: [],
+    auditRows: [],
+    workerCalls: [],
+    executions: [],
+  }, (judgment) => judgment.deterministic.verdict === 'FAIL'
+    && judgment.deterministic.failureCodes.includes('FAIL_FABRICATED_DATA'));
+
   // E06 回归包（grok 二轮/三轮 blocking 的共同绊线）：E06 的合法澄清「请补充要查询的对象。」
   // **没有问号、也不在 QUESTION_WORDS 里**（「请补充」只在 isActualQuestion 的请求式标记中）。
   // 首版把零执行硬线写成全局谓词时，这句会被打成硬失败；二轮收窄为用例级、三轮整条拆除后，

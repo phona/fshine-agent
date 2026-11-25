@@ -636,9 +636,30 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       // 2026-11-25（E05 判据 v2）：零执行且用例允许零执行时（execPolicy !== 'required'），
       // 没有行可验 = 走了「不委派、直接问用户消歧」这条合法路径，**不判负**。
       // （曾打算让位给「零执行必须提问」判据，已随该硬线一并拆除，见债务 V-2。）
-      // 有执行行却没有一条
-      // 命中检查点对象时，仍是对象错（③ 形态：查了候选集合）——原判负不变。
-      if (executionRows.length === 0 && caseDef.execPolicy !== 'required') continue;
+      // 但**候选名必须有 T2 载荷背书**（grok 五轮 blocking）：零执行却在回复里点名冻结候选
+      // （contoso-trade / contoso-logistics）= 自造澄清选项清单——2026-11-20 记录过的失败形态，
+      // 判据放宽后一度检测不到。封闭核对，不加任何提问词表。
+      if (executionRows.length === 0 && caseDef.execPolicy !== 'required') {
+        const backed = new Set<string>();
+        for (const call of workerCalls) {
+          const data = (call as { result?: { data?: { candidates?: unknown } } }).result?.data;
+          const candidates = data?.['candidates'];
+          if (Array.isArray(candidates)) {
+            for (const candidate of candidates) {
+              backed.add(candidate !== null && typeof candidate === 'object'
+                ? String((candidate as { name?: unknown }).name ?? '')
+                : String(candidate));
+            }
+          }
+        }
+        for (const candidate of checkpoint.candidates ?? []) {
+          if (lastReply.includes(candidate) && !backed.has(candidate)) {
+            addCode('FAIL_FABRICATED_DATA', ['③数据正确性'],
+              `零执行却在回复中点名候选 ${candidate}，而 T2 无对应 candidates 载荷——候选名只能来自执行层返回，不得自行编造清单`);
+          }
+        }
+        continue;
+      }
       addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `缺少对 ${checkpoint.collection} 的执行行，无法核对载荷`);
       continue;
     }
