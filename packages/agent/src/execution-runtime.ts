@@ -1084,8 +1084,9 @@ export interface Session {
    * 唤醒入口（会话状态变化 → 模型把话带给用户）：把一条宿主事实交给 Main 驱动——
    * 会话空闲时触发一个模型回合并取回它产出的正文；会话忙时事实入队、由当前回合负责。
    * 出口四态见 WakeResult；驱动不支持唤醒（测试替身/一次性驱动）= unavailable。
-   * 驱动可唤醒但实例级会话还没建（重启后的第一次状态变化）= 本层补一次**零工具单回合**
-   * （coldWake；不然「重启对账」这类冷会话永远说不出话）。
+   * 驱动可唤醒但实例级会话还没建（重启后的第一次状态变化）= 本层补一次**只读任务工具单回合**
+   * （coldWake；不然「重启对账」这类冷会话永远说不出话）。2026-11-25 前冷路径是零工具，
+   * 与 `wake()` 的 toolFace 不一致——同一个 DSML 根因的另一份实现，已补齐。
    * 本层只透传事实与回合截止（WAKE_TURN_MS：单次调用量级），不解释事实内容、不投递。
    */
   wake(factText: string): Promise<WakeResult>;
@@ -3320,11 +3321,15 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   }
 
   /**
-   * 冷唤醒（2026-11-19 唤醒切片）：驱动**可**唤醒但实例级会话还没建（进程刚起、或会话被
-   * 丢弃）——「重启对账」正是这个形状（用户以为在办的任务在启动时被如实写结束事实（结果未知），
-   * 而本进程还没有任何回合）。这里按与 `send()` 同一份装配参数跑**一次零工具单回合**：
-   *   · 系统提示 = 本会话 Main 提示；工具 = **空**（唤醒回合不得碰执行层，与驱动侧 wake
-   *     同一条纪律——F1）；
+   * 冷唤醒（2026-11-19 唤醒切片；2026-11-25 补只读工具面）：驱动**可**唤醒但实例级会话还没建
+   * （进程刚起、或会话被丢弃）——「重启对账」正是这个形状（用户以为在办的任务在启动时被如实写
+   * 结束事实（结果未知），而本进程还没有任何回合）。这里按与 `send()` 同一份装配参数跑
+   * **一次单回合**：
+   *   · 系统提示 = 本会话 Main 提示；工具 = **只读任务工具**（`task_status` / `task_result`，
+   *     与驱动侧 wake 的 toolFace 同一套；执行类工具不授予——唤醒回合不得碰执行层，F1）。
+   *     2026-11-25 前这里是 `tools: []`，与 `wake()` 的 toolFace 不一致：同一份 factText 带着
+   *     「请判断做没做成（以账本执行事实为准）」的指令，却没有读账本的工具——那正是 2026-11-20
+   *     live 实测 DSML 泄漏的根因（`748671e3` 只修了热路径，冷路径这份实现漏了）；
    *   · 本轮输入 = 事实（最后一条 user；历史由 Pi 自己从会话文件恢复，宿主不 seed）；
    *   · 截止 = `WAKE_TURN_MS`（单次调用量级）。
    * 产出正文非空 = woken；空 = failed（调用方按各自的降级处置，不冒充已说）。
@@ -3359,8 +3364,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   /**
    * 唤醒（宿主事实 → 模型说）：把事实与回合截止转给 Main 驱动；驱动没有唤醒能力
    * （测试替身/一次性驱动）= unavailable（调用方兜底）。驱动**可**唤醒但实例级会话还没建
-   * 时（重启后的第一次状态变化），落到 {@link coldWake} 的零工具单回合——否则「重启对账」
-   * 这种冷会话场景永远说不出话。截止 = `WAKE_TURN_MS`（单次调用量级），不是业务回合的
+   * 时（重启后的第一次状态变化），落到 {@link coldWake} 的**只读任务工具**单回合——否则
+   * 「重启对账」这种冷会话场景永远说不出话（2026-11-25 前冷路径是零工具，与 toolFace 不一致，
+   * 是同一个 DSML 根因的另一份实现）。截止 = `WAKE_TURN_MS`（单次调用量级），不是业务回合的
    * mainTurnMs（见其定义处）。
    */
   async function wake(factText: string): Promise<WakeResult> {
@@ -3383,8 +3389,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       },
     });
     if (result.outcome !== 'unavailable') return result;
-    // 可唤醒但会话是冷的：补一次零工具单回合（不复用驱动侧 custom message 注入——那需要
-    // 已存在的实例级会话）。
+    // 可唤醒但会话是冷的：补一次**只读任务工具**单回合（coldWake；不复用驱动侧 custom message
+    // 注入——那需要已存在的实例级会话）。2026-11-25 前这里是零工具，见 coldWake 头注。
     return await coldWake(factText);
   }
 
