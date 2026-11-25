@@ -28,8 +28,9 @@ export const E05: UserCase = {
   expected: {
     allowedCollections: ['contoso'],
     // 2026-11-25 判据 v2：检查点恢复，但语义改为**条件式**——「如果查了 contoso，平台必须回
-    // needs_input + 两个候选」。零执行时没有行可验，走「不委派、直接问用户消歧」这条合法
-    // 路径（由下方 FAIL_MISSING_CLARIFICATION 兜底：零执行必须提问）。
+    // needs_input + 两个候选」。零执行时没有行可验：走「不委派、直接问用户消歧」这条合法
+    // 路径，**不判负**（曾想用「零执行必须提问」兜底，因提问检测可被句尾问号旁路而拆除，
+    // 见债务 V-2——残余「零执行 + 断言性否定答复」无机械判据，登记不修，勿在此处再填）。
     // 这让「委派了但 T2 没有 candidates 载荷」重新落到 INCONCLUSIVE（不得判正），
     // 而不是无检查点时的直接 PASS。
     checkpoints: [{
@@ -51,8 +52,8 @@ export const E05: UserCase = {
     // 不代表现行判据——勿以此条推断现行失败码。
     '2026-11-25 口径修订（判据 v2，owner 批准；后继裁定见 decision-log §17.6）：期望行为'
     + '（委派→平台回候选→问用户一次）仍是正解，但模型在接口不确定时问用户消歧同为可接受'
-    + '路径；两者都通过。硬线只剩两条：① 用户确认前查候选对象 → FAIL_WRONG_OBJECT'
-    + '（allowedCollections）；② 零执行且不提问 → FAIL_MISSING_CLARIFICATION。'
+    + '路径；两者都通过。硬线只剩一条：用户确认前查候选对象 → FAIL_WRONG_OBJECT'
+    + '（allowedCollections）。曾加的硬线②「零执行且无提问」已拆除（可被问号旁路，见 V-2）。'
     + '实测基准（step-3.7-flash，8 轮/臂）：干净 HEAD 2/8 红、Main 侧 Skill 2/8 红——'
     + '提示词两种放法均无可靠改善，故不landing 提示词修法，只登记。',
   ],

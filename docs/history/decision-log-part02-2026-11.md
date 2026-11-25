@@ -531,9 +531,9 @@
      红线（文本匹配不得作为唯一判负依据、同族第三次换形状）收手。残余「零执行 + 断言性否定答复」
      无机械判据，登记为债务 **V-2**（`../decisions/debt.md`）：要求执行 = 回归 v1「必须委派」
      （本条已裁定不判），文本检测 = 可旁路，两条路都堵死；要清须换判定基础。
-  4. **检查点改条件式**：`contoso → needs_input + candidates` 检查点恢复，但只在**有执行行**时校验（查了 contoso 就必须有候选载荷，缺载荷回落 `INCONCLUSIVE` 不得判正）；零执行时让位给硬线②。
+  4. **检查点改条件式**：`contoso → needs_input + candidates` 检查点恢复，但只在**有执行行**时校验（查了 contoso 就必须有候选载荷，缺载荷回落 `INCONCLUSIVE` 不得判正）；零执行时无行可验，**不判负**（硬线②已拆除，见第 3 条与债务 V-2）。
   5. **不 landing 提示词修法**：实验性 Main 侧 Skill 已删（实测无可靠改善，不 landing 无效果品的提示词）。
 - **v1 可对照**：v1 用例/判据经 git 父提交与各 run-dir 内冻结的 `criteria/cases` 副本留存（v1 `casesSha256 = fa239fff…`，记录于 `criteria.ts` 版本变更史）。
 - **守卫（固化，非声称，全部机械判据、无文本锚点）**：`scripts/eval/convergence-r1/selftest.ts` 五包——`e05-v2-happy`（正解 PASS）、`e05-v2-ask-user-first`（合法路径 PASS）、`e05-v2-candidates-missing`（查了 contoso 但 T2 无 candidates → INCONCLUSIVE，不得判正）、`e05-v2-query-candidate`（硬线 FAIL_WRONG_OBJECT）、`e06-zero-exec-ask-back-still-passes`（E06 合法零执行澄清 PASS，禁加全局零执行硬失败）。反向绊线即这几包本身。
-- **产品定义成文**：`docs/architecture/capability-boundary.md` §1.1（对象归执行层解析 / 接口归 Agent 选 / 硬线两条 / 可接受方差登记不判负），§7 约束—守卫表补两行（硬线=已有守卫且已固化；行为方差=不设守卫、登记项）。
+- **产品定义成文**：`docs/architecture/capability-boundary.md` §1.1（对象归执行层解析 / 接口归 Agent 选 / **硬线一条**：确认前不得查候选 / 可接受方差登记不判负 / 零执行断言性否定登记为债务 V-2），§7 约束—守卫表补相应行（硬线=已有守卫且已固化；行为方差与零执行残余=不设守卫、登记项）。
 - **触发本条的外部审查**：PR #82 grok 审查三轮 blocking——一轮「就地放宽后零执行且无提问的断言性答复判 PASS；委派了但缺 candidates 时 INCONCLUSIVE 变 PASS；§17.1 要求立新版本却就地改写；weakNotes 自相矛盾；§7 的反向验证声称无守卫」；二轮「零执行硬线写成全局谓词，打死 E06 已登记的合法澄清（『请补充要查询的对象。』无问号、不在 QUESTION_WORDS）」；三轮「硬线被弱提问检测短路，句尾加问号即旁路，文本锚点做唯一判负不收敛」。前两轮修法（立 v2 + 堵逃逸口 / 收窄为用例级 + 改走 isActualQuestion）已落地，第三轮的结论是**拆掉该硬线**并登记 V-2。

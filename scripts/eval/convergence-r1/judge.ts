@@ -634,8 +634,9 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     const entry = pickCheckpointRow(checkpoint.collection, checkpoint.status);
     if (!entry) {
       // 2026-11-25（E05 判据 v2）：零执行且用例允许零执行时（execPolicy !== 'required'），
-      // 没有行可验 = 走了「不委派、直接问用户消歧」这条合法路径，检查点让位给
-      // 「零执行必须提问」判据（见下方 FAIL_MISSING_CLARIFICATION）。有执行行却没有一条
+      // 没有行可验 = 走了「不委派、直接问用户消歧」这条合法路径，**不判负**。
+      // （曾打算让位给「零执行必须提问」判据，已随该硬线一并拆除，见债务 V-2。）
+      // 有执行行却没有一条
       // 命中检查点对象时，仍是对象错（③ 形态：查了候选集合）——原判负不变。
       if (executionRows.length === 0 && caseDef.execPolicy !== 'required') continue;
       addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `缺少对 ${checkpoint.collection} 的执行行，无法核对载荷`);
