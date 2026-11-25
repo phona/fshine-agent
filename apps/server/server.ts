@@ -2026,7 +2026,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           const relayedFailedFact = relayedFacts?.code !== undefined
             || relayedFacts?.reasonCode !== undefined
             || (relayedFacts?.reason !== undefined && relayedFacts.reason.trim() !== '');
-          await deliverTaskResult({
+          const fallbackDelivered = await deliverTaskResult({
             taskId: relayedTaskId,
             principalId,
             sessionId,
@@ -2037,6 +2037,21 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
             log,
           });
+          // 沉默兜底**没落地**必须可见（2026-11-25 grok blocking）：此前这里丢掉返回值，而本回合
+          // 稍早 `markRelayedInTurn` 已核销，完成回调会按「已转述」抑制后续唤醒——用户当轮终帧是
+          // 空的、之后也不会再推，而底账上任务已完成。这就是「没人知道」的静默终局。
+          // 四必守的 suppressed/failed 事件已带原因（非 live / 路由拆不出 / 剥空 / 发送失败 /
+          // leak_blocked），这里补一条「沉默兜底 specifically 没送达」，让按 taskId 能对上是哪一件。
+          // 更进一步的「把事实退回待注入队列、下次开口由模型补说」要先定事实文本怎么拼，见 debt R-13。
+          if (!fallbackDelivered) {
+            log({
+              event: 'task_completion_fallback_not_delivered',
+              taskId: relayedTaskId,
+              principalId,
+              sessionId,
+              factEvent: relayedFailedFact === true ? 'task_failure_fallback' : 'task_completion_fallback',
+            });
+          }
         }
         // 快活**失败**同理（2026-11-19 复核相邻形状）：失败原因本回合已交给模型，推送抑制
         // 的前提（模型会转述）在模型沉默时不成立——逐条按既有失败话术如实送达
@@ -2072,7 +2087,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             ...(round?.reasonCode === undefined ? {} : { zeroExecReason: round.reasonCode }),
             ...(taskFailureFactOf(suppressedTaskId)?.name === undefined ? {} : { name: taskFailureFactOf(suppressedTaskId)!.name }),
           };
-          await deliverTaskFailure({
+          const failureDelivered = await deliverTaskFailure({
             taskId: suppressedTaskId,
             principalId,
             sessionId,
@@ -2083,6 +2098,18 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
             log,
           });
+          // 同完成侧：沉默兜底没落地必须可见（2026-11-25 grok blocking）。失败兜底那句是宿主
+          // 固定话术、不含业务内容，被闸拦到的概率比完成侧低，但丢返回值这件事两侧一样——
+          // 一并补上，不留下「只修了一条」的半覆盖。
+          if (!failureDelivered) {
+            log({
+              event: 'task_completion_fallback_not_delivered',
+              taskId: suppressedTaskId,
+              principalId,
+              sessionId,
+              factEvent: 'task_failure_fallback',
+            });
+          }
         }
       }
       // 本回合**一无所有**才判回合失败：正文为空 **且** 无文件 **且** 没有交办任何任务

@@ -19,11 +19,12 @@
  *   · 待投递文本投递前过 stripServerPaths——与用户可见回复同一道出口清理（2026-10-19
  *     事故形状：服务器路径不进用户文本）；剥完为空不投递（空文本帧会让渠道无终帧）；
  *   · 投递是 fire-and-forget：失败/抑制只记事件，不改变任务事实（与通知 outbox 同语义）；
- *   · **内部形态闸**（2026-11-25 生产接入）：投递前扫用户可见文本（与 eval 批次同一把尺
- *     `scanUserVisibleText`，见 `packages/agent/src/user-visible-scan.ts`）——命中内部词 /
- *     任务编号 / taskId 形状 / 工具调用块标记即**不投递**，记
+ *   · **内部形态闸**（2026-11-25 生产接入）：投递前扫用户可见文本（与 eval 同一把尺的
+ *     **leak 档** `scanUserVisibleLeaks`，见 `packages/agent/src/user-visible-scan.ts`）——
+ *     命中内部词 / taskId 原文 / 工具调用块标记即**不投递**，记
  *     `task_result_delivery_leak_blocked`（带 where/marker，不带正文）。这是机械形状判定
- *     （格式/泄漏类），不判语义；模型自己编造「系统不支持 X」不归这里管。
+ *     （格式/泄漏类），不判语义；模型自己编造「系统不支持 X」不归这里管。style 档
+ *     （`#N` / `编号 N`）**不在生产拦**——业务编号是用户要用的内容，拦它等于丢整段话。
  *
  * 路由：宿主构造事实 sessionId = `${channel}:${conversationId}`（server.ts handler），
  * 机械拆分还原投递路由；拆不出来（异常形状）按 suppressed 记账，不猜。
@@ -33,7 +34,7 @@
 import type { ChannelRoute, DeliveryReceipt } from '@fshine/contracts';
 import { resourceLimitedText } from '../../packages/agent/src/notification-render';
 import { failureMessageFor, fallbackFailureKindOf } from '../../packages/agent/src/user-facing-failure';
-import { scanUserVisibleText } from '../../packages/agent/src/user-visible-scan';
+import { scanUserVisibleLeaks } from '../../packages/agent/src/user-visible-scan';
 import { stripServerPaths } from '../../packages/agent/src/server-paths';
 import { cleanExecutorDiagnostic, UNSUPPORTED_OPERATION_TEXT } from '../../packages/agent/src/execution-runtime';
 
@@ -257,13 +258,16 @@ async function deliverText(
     });
     return false;
   }
-  // 内部形态闸（2026-11-25 生产接入）：与 eval 批次**同一把尺**——`scanUserVisibleText`
-  // 原本只挂在四个 eval 批次（wecom-sim / write-loop / write-loop-scenarios /
-  // convergence-r1），live 出站口零接入；而 eval 和 live 是同一条链，只是出口一个是 Mock
-  // 一个是企微。命中 = 用户可见文本里出现内部词/任务编号/taskId/工具调用块标记——
-  // 与 2026-11-20 live 首验的 DSML 泄漏同族。命中不投递（把机器格式挡在渠道外），
-  // 记 `task_result_delivery_leak_blocked`（带 where/marker，不含正文）。
-  const leak = scanUserVisibleText([{ where: `delivery:${fact.factEvent ?? 'text'}`, text: stripped }]);
+  // 内部形态闸（2026-11-25 生产接入；同日晚按 grok blocking 分档）：与 eval 同一把尺的
+  // **leak 档**（`scanUserVisibleLeaks` = 内部词 / taskId 原文 / 工具调用块标记）——这些话是
+  // 机器格式，用户拿到也没法用，命中即不投递，记 `task_result_delivery_leak_blocked`
+  // （带 where/marker，不含正文）。
+  //
+  // 为什么不是全量 `scanUserVisibleText`：那里面还有 style 档（`#N` / `编号 N`，工单腔
+  // 措辞偏好）。业务原文里「凭证编号 1001」「编号12」是用户要用的内容——生产拦它会把整段
+  // 话丢掉，而 worker 汇报原文正是完成兜底那句的正文，模型沉默时用户就**永久收不到结果**。
+  // style 档归 eval 记违规，生产不拦。
+  const leak = scanUserVisibleLeaks([{ where: `delivery:${fact.factEvent ?? 'text'}`, text: stripped }]);
   if (leak.hits.length > 0) {
     options.log({
       event: 'task_result_delivery_leak_blocked',

@@ -1,6 +1,7 @@
 /**
- * live 出站口的**内部形态闸**（2026-11-25 生产接入）：用户可见文本投递前过与 eval 批次
- * 同一把尺（`scanUserVisibleText`，见 `packages/agent/src/user-visible-scan.ts`）。
+ * live 出站口的**内部形态闸**（2026-11-25 生产接入；同日晚按 grok blocking 分档）：
+ * 用户可见文本投递前过与 eval 同一把尺的 **leak 档**（`scanUserVisibleLeaks`，见
+ * `packages/agent/src/user-visible-scan.ts`）。
  *
  * 为什么接在生产：闸原本只挂在四个 eval 批次（wecom-sim / write-loop /
  * write-loop-scenarios / convergence-r1），`apps/server` 零接入；而 eval 和 live 是
@@ -104,6 +105,24 @@ describe('live 出站口内部形态闸：内部词 / taskId / 反向绊线 / �
     expect(delivered).toBe(false);
     expect(h.sent).toHaveLength(0);
     expect(eventsOf(h.logged, 'task_result_delivery_leak_blocked')).toHaveLength(1);
+  });
+
+  it('②b 业务编号不拦（grok blocking 的根因：style 档不进生产闸）', async () => {
+    // worker 汇报原文是完成兜底那句的正文；模型沉默时这是用户唯一能收到的那句。
+    // 「凭证编号 1001」「编号12」是业务内容，用户要用它——生产拦它 = 整段丢掉 = 永久收不到结果。
+    for (const businessText of [
+      '凭证编号 1001 已核对，金额 39000 元。',
+      '编号12 的明细已汇总，共 12 行。',
+      '发票 #3 与 #7 已匹配。',
+    ]) {
+      const h = harness();
+      const delivered = await deliverTaskResult({ ...SCOPE, resultText: businessText }, h.options);
+      expect(delivered, `业务编号被生产闸误拦：${businessText}`).toBe(true);
+      expect(h.sent).toHaveLength(1);
+      expect(h.sent[0]?.text).toBe(businessText);
+      expect(eventsOf(h.logged, 'task_result_delivery_leak_blocked')).toHaveLength(0);
+      expect(eventsOf(h.logged, 'task_result_delivery_sent')).toHaveLength(1);
+    }
   });
 
   it('③ 反向绊线：干净业务正文照常投递、记 sent', async () => {
