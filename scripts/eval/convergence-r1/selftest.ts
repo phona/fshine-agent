@@ -290,11 +290,15 @@ export function runJudgeSelftest(outDir: string): number {
   }, (judgment) => noAvailableWindowsGap(judgment)
     && judgment.evidenceRefs.some((entry) => entry.row?.includes('op_dummy_query')));
 
-  // ── E05 判据 v2 三形态守卫（2026-11-25，grok blocking 的固化答复）──────────────────
-  // grok 指出 §1.1/§7 声称「已用真实证据反向验证三种形态」但没有守卫，selftest 里没有这三包。
-  // 这里把三种形态固化成 selftest 包：① 正解（委派→平台回候选→问用户）PASS；
-  // ② 合法路径（不委派、问用户消歧接口）PASS；③ 逃逸口（零执行 + 无提问的断言性答复）FAIL。
-  // 三条断言同时钉住「不放开虚假完成」与「不强制必须委派」。
+  // ── E05 判据 v2 守卫（2026-11-25，grok 三轮 blocking 后的最终形状）──────────────────
+  // 硬线只剩一条：用户确认前不得查候选对象（FAIL_WRONG_OBJECT，机械判据）。固化的包：
+  //   ① e05-v2-happy            正解（委派→平台回候选→问用户）→ PASS
+  //   ② e05-v2-ask-user-first   合法路径（不委派、问用户消歧接口）→ PASS
+  //   ③ e05-v2-candidates-missing  查了 contoso 但 T2 无 candidates → INCONCLUSIVE（不得判正）
+  //   ④ e05-v2-query-candidate  确认前查候选集合 → FAIL_WRONG_OBJECT（硬线）
+  //   ⑤ e06-zero-exec-ask-back-still-passes  E06 合法零执行澄清 → PASS（禁加全局零执行硬失败）
+  // 曾有的「零执行且无提问 → FAIL_MISSING_CLARIFICATION」包已随硬线拆除（可被问号旁路，
+  // 见债务 V-2）；③④ 都是机械判据，不依赖任何文本锚点。
   const contosoCandidatesCall = (): Record<string, unknown> => ({
     turn: 1, agent: 'worker', seq: 1, tool: 'op_dummy_query',
     args: { collection: 'contoso' },
@@ -327,16 +331,6 @@ export function runJudgeSelftest(outDir: string): number {
     workerCalls: [],
     executions: [],
   }, (judgment) => judgment.deterministic.verdict === 'PASS');
-
-  runPack('e05-v2-zero-exec-no-question', 'E05', 'FAIL + FAIL_MISSING_CLARIFICATION（零执行且无提问：断言性答复逃逸口）', {
-    caseId: 'E05',
-    reply: 'contoso 目前没有可展示的记录。',
-    taskIds: [],
-    auditRows: [],
-    workerCalls: [],
-    executions: [],
-  }, (judgment) => judgment.deterministic.verdict === 'FAIL'
-    && judgment.deterministic.failureCodes.includes('FAIL_MISSING_CLARIFICATION'));
 
   runPack('e05-v2-query-candidate', 'E05', 'FAIL + FAIL_WRONG_OBJECT（用户确认前查候选集合：硬线保留）', {
     caseId: 'E05',
@@ -378,9 +372,10 @@ export function runJudgeSelftest(outDir: string): number {
     executions: [{ requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'needs_input' }],
   }, (judgment) => judgment.deterministic.verdict === 'INCONCLUSIVE');
 
-  // E06 回归包（grok 二轮 blocking 的直接绊线）：E06 的合法澄清「请补充要查询的对象。」
+  // E06 回归包（grok 二轮/三轮 blocking 的共同绊线）：E06 的合法澄清「请补充要查询的对象。」
   // **没有问号、也不在 QUESTION_WORDS 里**（「请补充」只在 isActualQuestion 的请求式标记中）。
-  // 首版把 FAIL_MISSING_CLARIFICATION 写成全局谓词时，这句会被打成硬失败——本包钉住不回退。
+  // 首版把零执行硬线写成全局谓词时，这句会被打成硬失败；二轮收窄为用例级、三轮整条拆除后，
+  // 本包仍钉住「不得为 E05 的逃逸口给所有 expected 用例加零执行硬失败」——谁再加全局谓词即红。
   runPack('e06-zero-exec-ask-back-still-passes', 'E06', 'PASS（E06 零执行 + 问回对象：已登记的合法路径，不得被判负）', {
     caseId: 'E06',
     reply: '请补充要查询的对象。',

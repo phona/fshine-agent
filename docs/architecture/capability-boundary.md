@@ -35,7 +35,7 @@ owner 的类比（原文）：**「相当于 Main 的工作台里对客户罗列
 
 **可接受的行为方差（登记，不判负）**：面对解析不出的标识，Agent 可能 (a) 先问执行层、拿候选回头问用户（正解），也可能 (b) 直接问用户消歧接口。两者都通过。实测提示词压不住这个选择（干净 HEAD 2/8、宿主协议文本 3/16、Main 侧 Skill 2/8，均噪声内；§17.6 另记 2026-11-13 agent.md ×9 = 5/9 的同类实验），且模型满足「先问执行层」就会违反「确认前别查候选」、反之亦然——是行为张力，非措辞问题。故不为它堆机制；守卫只守硬线。
 
-**硬线②（2026-11-25 补，判据 v2）**：零执行且回复里没有可检出的提问 → `FAIL_MISSING_CLARIFICATION`。没有这条，「contoso 目前没有可展示的记录」这类**既不问执行层也不问用户的断言性答复**会判通过——即「零作为假装有结论」。
+**已知残余（登记为债务 V-2，不修）**：「contoso 目前没有可展示的记录」这类**零执行 + 断言性否定答复**没有机械判据。曾加过硬线②（零执行且无提问 → 判负），因提问检测可被句尾问号/「需要你知悉」旁路而拆除——要求执行 = 回归 v1「必须委派」（owner 已裁定不判），文本检测 = 可旁路，两条路都堵死。要清须换判定基础（候选方向见 `../decisions/debt.md` V-2）。
 
 **别把执行层打爆不归我们兜**：限流/响应控制归执行层（仓内 dummy 有 `RATE_LIMITED`；真实层 17dz 有跨进程持久令牌桶，CW000043 后收紧）。宿主不重复执法——加了就是抽象泄露。
 
@@ -103,9 +103,9 @@ Worker 的汇报必须是**结构化事实**，Main 据此套用统一话术—�
 | --- | --- | --- |
 | 四角色分工（Main 无执行权） | 部分守卫（见禁令 1） | 已有：`packages/agent/main-skill.test.ts:332`（缺省 Main 面）、`packages/agent/task-surface.test.ts:375`（Worker 面 `op_*`、无 `execute_operation`）、`packages/agent/main-capability-surface.test.ts:63`、`packages/agent/pi-driver-wake.test.ts:435`（唤醒面排除）；待补：Main 硬发执行工具零执行绊线 |
 | **用户确认前不得查询候选对象**（§1.1 硬线①） | 已有守卫（用户级判据） | `scripts/eval/convergence-r1/cases/E05.ts` 的 `allowedCollections:['contoso']`（消费点 `judge.ts`）→ 查询 `contoso-trade`/`contoso-logistics` 即 `FAIL_WRONG_OBJECT`。守卫包：`selftest.ts` 的 `e05-v2-query-candidate` |
-| **零执行不得给出无可检出提问的断言性答复**（§1.1 硬线②） | 已有守卫（用户级判据） | `judge.ts` 的 `FAIL_MISSING_CLARIFICATION`（`clarification:'expected'` 且零执行且无提问）。守卫包：`selftest.ts` 的 `e05-v2-zero-exec-no-question`。**反向绊线**：删掉该分支 → 该包转红 |
 | 「是否先问执行层」不判负（§1.1 登记的行为方差） | **不设守卫（登记项，非约束）** | 提示词三种放法实测无可靠改善（干净 HEAD 2/8、宿主协议文本 3/16、Main 侧 Skill 2/8，均噪声内；§17.6 另记 2026-11-13 agent.md ×9 = 5/9 的同类实验）；模型满足「先问执行层」即违反「确认前别查候选」、反之亦然 = 行为张力。按「不为间歇性、低代价行为堆机制」登记于 E05 `weakNotes` 与 §17.6，无守卫也不冒充有 |
-| E05 三形态判据（正解 / 问用户消歧 / 逃逸口） | 已有守卫（判定器自测） | `selftest.ts` 四包：`e05-v2-happy`（PASS）、`e05-v2-ask-user-first`（PASS）、`e05-v2-zero-exec-no-question`（FAIL_MISSING_CLARIFICATION）、`e05-v2-query-candidate`（FAIL_WRONG_OBJECT）——把 2026-11-25 曾「手工跑 judgeTrial 对照」的做法固化为常驻守卫 |
+| E05 判据 v2 形态（正解 / 问用户消歧 / 缺 candidates / 查候选） | 已有守卫（判定器自测，全部机械判据、无文本锚点） | `selftest.ts` 五包：`e05-v2-happy`（PASS）、`e05-v2-ask-user-first`（PASS）、`e05-v2-candidates-missing`（INCONCLUSIVE，不得判正）、`e05-v2-query-candidate`（FAIL_WRONG_OBJECT）、`e06-zero-exec-ask-back-still-passes`（PASS，禁加全局零执行硬失败） |
+| 零执行 + 断言性否定答复 | **未实现（无守卫，登记为债务 V-2）** | 无机械判据：要求执行 = 回归 v1「必须委派」（owner 已裁定不判）；文本提问检测可被句尾问号/「需要你知悉」旁路（本 PR 两轮锚点仍不收敛，grok 三轮 blocking 后拆除）。要清须换判定基础，见 `../decisions/debt.md` V-2 |
 | Main 对用户的承诺权来自派生目录 | 已有守卫 | `scripts/capability-catalog-assembly.test.ts:77`（声明 capability → Main 摘要 + capabilities 工具）；`packages/agent/main-capability-surface.test.ts:59` |
 | Worker 无话语权、不直接对用户说话 | 部分守卫 | 已有：`factword-no-internal-terms.test.ts`、`worker-prompt.test.ts:84`（输出不含内部形态）；结构性保证已有，模型行为归评测 |
 | 用户不需懂内部形态 | 已有守卫 | `factword-no-internal-terms.test.ts`、`packages/agent/user-facing-failure.test.ts:150`、`packages/agent/main-capability-surface.test.ts:66`；**运行时闸已拆**（2026-11-25 晚 owner 裁）——提示词 + 请求侧给工具，判据尺只归 eval |

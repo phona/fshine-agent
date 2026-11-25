@@ -1,8 +1,8 @@
 {
   "generatedBy": "node --import tsx scripts/eval/exploration/freeze.ts <suite-dir>",
   "suiteId": "e05-adjacent",
-  "frozenAt": "2026-11-25T13:38:55.784Z",
-  "criteriaSha256": "c499d8bf949a80179f9c6169743cc5e8a6fa3db8bbf3ba39b5002230f74aebde",
+  "frozenAt": "2026-11-25T13:59:58.685Z",
+  "criteriaSha256": "8d7a00d7d3a5483909fe25d43323314288145ef53742c710c325163a4c842398",
   "casesSha256": "b011c46eb38d8ea5d2d7e26e2ef52332ffcfde7e72bcb485789cb39a7eae9939",
   "files": {
     "scripts/eval/exploration/e05-adjacent/suite.ts": "beae9099f06c85f3a97ec7f57462e2ffbb405738521e9eb23c9a69fdc25425d3",
@@ -15,9 +15,9 @@
     "scripts/eval/exploration/e05-adjacent/cases/X07.ts": "9a19d2d25faff2f5119cf67b3371eea78507c6c6b96bbb1b2e3c79273c46fff1",
     "scripts/eval/exploration/e05-adjacent/cases/X08.ts": "05f3a219794b8b520ba89161011aba032db8b0a6643a70f2c8629fc7c3f52434",
     "scripts/eval/exploration/suite-contract.ts": "a2313092924cb7f4a907f261eb75b64bb5a6efc66a7115b79380928d270cd430",
-    "scripts/eval/convergence-r1/judge.ts": "1d67114467b433fe94594b76bb4db2465c6a8600c5a5077aec24af3601690819",
-    "scripts/eval/convergence-r1/criteria.ts": "724f91cffb44bb18ac5fc6d11539de2e6917fe526c94a65d46bde87cc62d712a",
-    "scripts/eval/convergence-r1/cases.ts": "410eb7acc5316ef7d0e5491aef7618a329a3bc77158846bb8294efc7f5465155",
+    "scripts/eval/convergence-r1/judge.ts": "b2d4e3c350c9d38a700742cbd80a71207047a10fa14bdd9fc69b4b8210950c39",
+    "scripts/eval/convergence-r1/criteria.ts": "7ceb7a52bd7a9f2724bca0f74af615c25700761060cafee03d6e8e0916167fea",
+    "scripts/eval/convergence-r1/cases.ts": "5bd3b249f44ae7efa9ac0ecc1547dd382d478d87ce065094228239c538adbc02",
     "scripts/eval/convergence-r1/hash.ts": "e03bdcacc362515796cf6d248f2244a2b31b3e19ceddaee32cd7ec6795376637",
     "scripts/eval/convergence-r1/evidence.ts": "3213c3913a00e4397a1d9c3fcf88db7902653bf544c17b5a0315918896f4cae7",
     "scripts/eval/safety-gate.ts": "593602225bdd7c1d673a01139506be552065001908fdf509f14cb80c6295a6ca"

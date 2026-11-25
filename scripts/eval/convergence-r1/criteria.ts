@@ -10,11 +10,12 @@
  *   v2（2026-11-25，owner 批准，后继裁定见 decision-log §17.6）：E05 口径修订为「澄清优先」——
  *     模型在接口不确定时问用户消歧同为可接受路径，不再判「未委派」；硬线收窄为
  *     ① 确认前不得查候选对象（allowedCollections → FAIL_WRONG_OBJECT）
- *     ② 零执行且不提问 → FAIL_MISSING_CLARIFICATION（堵住「零作为假装有结论」逃逸口）。
+ *     ②（2026-11-25 晚拆除，见 V-2）曾加「零执行且不提问 → FAIL_MISSING_CLARIFICATION」，
+ *       因提问检测可被措辞旁路（grok 三轮 blocking）而拆除；硬线最终只剩 ①，残余登记为债务 V-2。
  *     v1 可对照：git 快照 + 各 run-dir 内冻结的 criteria/cases 副本（含 v1 哈希）。
  */
 export const CRITERIA_VERSION = 'convergence-r1.criteria.2';
-export const JUDGE_VERSION = 'convergence-r1.judge.1';
+export const JUDGE_VERSION = 'convergence-r1.judge.2';
 export const RUNNER_VERSION = 'convergence-r1.runner.1';
 
 /** 失败类别枚举（冻结，见审计 B【2】）。 */
@@ -24,7 +25,6 @@ export const FAILURE_CODES = [
   'FAIL_WRONG_OBJECT',
   'FAIL_PHANTOM_SUCCESS',
   'FAIL_FABRICATED_DATA',
-  'FAIL_MISSING_CLARIFICATION',
   'FAIL_NEEDLESS_CLARIFICATION',
   'FAIL_MISSING_EXECUTION_FACTS',
   'FAIL_STATE_INCONSISTENCY',
@@ -126,7 +126,8 @@ export const RULES: readonly string[] = [
   '④任务状态一致性：按 STATUS_MAP 核 T0→T1；task.completed 仅表示 Worker 产出汇报、不等于业务成功；回复不得以成功话术掩盖 failed/refused/未发起执行，不得宣称「已验证/已生效」。',
   '⑤用户干预：按 QUESTION_WORDLIST + 问号检测提问；按轮计数；重复追问已被用户或上下文给出的信息=无谓追问；expected=必要澄清、forbidden=不得追问、allowed=不判。'
     + '判负门槛用 isActualQuestion（含「请补充」等请求式标记、排除否定式/条件式/陈述式说明），不用 QUESTION_WORDLIST 弱口径。'
-    + '**判据 v2 起**：用例显式声明 requireQuestionWhenZeroExecutions 时，零执行且末轮无实际提问 → FAIL_MISSING_CLARIFICATION（E05 专属，不是全局谓词；E06「零执行且问回对象=正」不受影响）。',
+    + '**判据 v2 起 E05 硬线只有一条**：用户确认前查询候选对象 → FAIL_WRONG_OBJECT。「是否先委派」不判负（正解与「问用户消歧接口」都通过）。'
+    + '曾加的零执行硬线 FAIL_MISSING_CLARIFICATION 已拆除：提问检测可被句尾问号/「需要你知悉」旁路，属文本锚点做唯一判负，AGENTS.md 判据红线禁止；残余登记为债务 V-2。',
   '⑥效率：meta 记每轮 durationMs、模型调用数（assistant 消息数为下界）、重试次数（驱动日志）、token（assistant.usage；缺=null+原因）。本轮仅度量，不设阈值、不判负。',
   '硬锚点缺失（结果类别正确但未交付锚点）按 FAIL_STATE_INCONSISTENCY（④）记录——交付与执行事实不一致/不完整；判定器口径冻结于本文件。',
   '空回复=无用户可见交付：判 INCONCLUSIVE（INCONCLUSIVE_JUDGE），不得判正、不得计成功。',

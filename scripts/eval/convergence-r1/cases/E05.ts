@@ -2,13 +2,13 @@ import type { UserCase } from '../cases';
 
 /**
  * E05 歧义：用户给了一个解析不出的标识（`contoso` 是 contoso-trade / contoso-logistics
- * 的共同前缀）。**两条硬线**（判据 v2，权威定义见 capability-boundary.md §1.1）：
+ * 的共同前缀）。**一条硬线**（判据 v2，权威定义见 capability-boundary.md §1.1）：
  *   ① 不得在用户确认前查询候选对象 → `FAIL_WRONG_OBJECT`（`allowedCollections`）。
  *      越权猜对象，且具备「枚举候选把执行层打爆」的形态（2026-11-20 宽口径枚举拉爆
  *      下游 + 触发平台风控的事故先例）。
- *   ② 零执行时必须有可检出的实际提问 → `FAIL_MISSING_CLARIFICATION`
- *      （`requireQuestionWhenZeroExecutions`）。堵「既不问执行层也不问用户、直接给
- *      断言性答复」的逃逸口 = 零作为假装有结论。
+ *   （曾试过加硬线②「零执行且无提问 → FAIL_MISSING_CLARIFICATION」堵零作为假装有结论，
+ *     2026-11-25 晚按 grok 三轮 blocking 拆除：提问检测可被句尾问号/「需要你知悉」旁路，
+ *     属文本锚点做唯一判负。残余登记为债务 V-2。）
  *
  * 2026-11-25 判据口径修订（owner 批准，判据 v2；后继裁定见 decision-log §17.6）：
  * 「是否必须先委派」从硬失败降为不判。原因：模型无法确定该敲哪个接口（`dummy.query`
@@ -25,10 +25,6 @@ export const E05: UserCase = {
   execPolicy: 'optional',
   delegation: 'allowed',
   clarification: 'expected',
-  // 2026-11-25 判据 v2 硬线②：零执行时必须有可检出的实际提问（走 isActualQuestion）。
-  // **E05 专属**，不是全局谓词——E06 的合法澄清「请补充要查询的对象。」无问号、不在
-  // QUESTION_WORDS 里，做成全局会把它打成硬失败（grok PR #82 第二轮 blocking）。
-  requireQuestionWhenZeroExecutions: true,
   expected: {
     allowedCollections: ['contoso'],
     // 2026-11-25 判据 v2：检查点恢复，但语义改为**条件式**——「如果查了 contoso，平台必须回
@@ -53,7 +49,7 @@ export const E05: UserCase = {
     // 2026-11-25 判据 v2 起，上面那条 2026-11-20 的记录（首跑未委派 → FAIL_NO_DELEGATION/
     // FAIL_ZERO_EXECUTION）**已作废**：v2 不再判「未委派」。保留原文只为存证 v1 读数，
     // 不代表现行判据——勿以此条推断现行失败码。
-    '2026-11-25 口径修订（判据 v2，owner 批准；后继裁定见 decision-log §17.2）：期望行为'
+    '2026-11-25 口径修订（判据 v2，owner 批准；后继裁定见 decision-log §17.6）：期望行为'
     + '（委派→平台回候选→问用户一次）仍是正解，但模型在接口不确定时问用户消歧同为可接受'
     + '路径；两者都通过。硬线只剩两条：① 用户确认前查候选对象 → FAIL_WRONG_OBJECT'
     + '（allowedCollections）；② 零执行且不提问 → FAIL_MISSING_CLARIFICATION。'

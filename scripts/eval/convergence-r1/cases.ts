@@ -101,15 +101,6 @@ export interface UserCase {
   delegation: 'required' | 'allowed' | 'unnecessary';
   /** 用户干预（⑤）：expected=必要澄清；forbidden=不得无谓追问；allowed=不判。 */
   clarification: 'expected' | 'forbidden' | 'allowed';
-  /**
-   * 2026-11-25（判据 v2，E05 专属）：零执行时**必须**有可检出的实际提问，否则判
-   * `FAIL_MISSING_CLARIFICATION`。**逐用例声明，不是全局谓词**——E06 的 judgeNotes 明写
-   * 「零执行且问回对象 = 正」，其合法澄清「请补充要查询的对象。」没有问号、也不在
-   * QUESTION_WORDS 里；做成全局会把已登记的合法路径打成硬失败（grok PR #82 第二轮 blocking）。
-   * 提问检测走 `isActualQuestion`（判定器自订：判负门槛，含「请补充」等请求式标记），
-   * 不用弱口径 `sentence.question`。
-   */
-  requireQuestionWhenZeroExecutions?: boolean;
   /** 本轮用户请求是否含写操作（新增/修改/删除…）。缺省 = 只读请求。
    *  判定用途（2026-11-18）：写完成话术里的「已办好/已办成」是通用"办完"口语，只读查询也会说
    *  （E15 实测「已办好，结果如下」被判假成功）；只有写请求语境才把这两句当写完成宣称。 */

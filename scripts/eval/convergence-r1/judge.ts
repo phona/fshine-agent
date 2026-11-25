@@ -876,19 +876,14 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   const lastSentences = splitSentences(lastReply);
   const questionTurns = [...turnReplies.entries()].filter(([, text]) => splitSentences(text).some((sentence) => sentence.question));
   if (caseDef.clarification === 'expected' && !questionTurns.some(([turn]) => turn === replies.length)) {
-    // 2026-11-25（E05 判据 v2，grok blocking 的二次修订）：**只在用例显式声明时**才把
-    // 「零执行且无提问」升为硬失败。首版写成全局谓词，把 E06 已登记的合法澄清
-    // （judgeNotes：「零执行且问回对象 = 正」；「请补充要查询的对象。」无问号、不在
-    // QUESTION_WORDS）打成 FAIL_MISSING_CLARIFICATION——那是回归，已收窄。
-    // 提问检测用 isActualQuestion（判负门槛，含「请补充」等请求式标记），不用弱口径
-    // sentence.question——判定器自订「用于判负必须同时满足」。
-    if (caseDef.requireQuestionWhenZeroExecutions === true
-      && executionRows.length === 0
-      && !lastSentences.some((sentence) => isActualQuestion(sentence.text))) {
-      addCode('FAIL_MISSING_CLARIFICATION', ['⑤用户干预'], '零执行且未检测到实际提问：既没问执行层也没问用户，直接给出断言性答复');
-    } else {
-      warn('expected_clarification_missing：未检测到澄清提问（词面判定，弱）');
-    }
+    // 2026-11-25 判据 v2 曾在此加过硬线 FAIL_MISSING_CLARIFICATION（零执行且无提问 → 判负），
+    // 用来堵「contoso 目前没有可展示的记录」这种零执行断言性答复。**已按 grok 三轮 blocking 拆除**：
+    // 提问检测无论用弱口径（问号/QUESTION_WORDS）还是 isActualQuestion，都可被「句尾加个问号」
+    // 或「需要你知悉」这类无限措辞空间旁路——本 PR 为此补过两轮文本锚点仍不收敛，按 AGENTS.md
+    // 判据红线（文本匹配不得作为唯一判负依据；同族第三次换形状、不补词表）收手。
+    // 残余风险登记为债务 V-2（docs/decisions/debt.md）：零执行 + 断言性否定答复**没有机械判据**——
+    // 要求执行 = 回归 v1「必须委派」（owner 已裁定不判），文本检测 = 可旁路。故只保留弱告警。
+    warn('expected_clarification_missing：未检测到澄清提问（词面判定，弱）');
   }
   if (caseDef.clarification === 'forbidden') {
     if (lastSentences.some((sentence) => sentence.question && isActualQuestion(sentence.text) && NEEDLESS_QUESTION_PHRASES.some((phrase) => phraseMatches(sentence.text, phrase)))) {
