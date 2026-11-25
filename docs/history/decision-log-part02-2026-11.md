@@ -514,3 +514,21 @@
 - **回退**：本批仅测试基建 + 语料/夹具 + 文档 + `package.json` 一行脚本，产品代码零改动，回退安全。
 
 ---
+
+### 17.6 E05 判据 v2：澄清优先（owner 2026-11-25 批准；§17.1 第 5 条的后继裁定）
+
+- **触发**：§17.1 第 5 条明写「若未来裁定变更（如允许候选枚举或**澄清优先**），必须新增判据版本并保留 v1 可对照」。本次正是「澄清优先」，故按该条立 v2，**不是就地改写 v1**。
+- **背景证据**：
+  - §17.1 的 2026-11-13 复采样已记：agent.md 对齐后 E05 ×9 = **5/9 PASS**，4 次仍零执行先澄清——「模型方差」；且当时的根因诊断就是「技能仅作用于 Worker，管不到 Main 的决策点」。
+  - 2026-11-25 独立复测（step-3.7-flash，8 轮/臂）：干净 HEAD **2/8 红（25%）**；宿主协议文本（`MAIN_PROTOCOL_NOTE`）3/16 红（19%）；**Main 侧 Skill**（`.agents/skills/object-name-resolution`）2/8 红（25%）——三种放法均在噪声内，且失败形态在「不问执行层先问用户」与「问了执行层但把候选也查了」之间搬移，总数不减。结论：提示词压不住，是行为张力而非措辞问题。
+  - 架构事实：模型**无法避免猜接口**（`dummy.query` 收 collection / `ballot.query` 收 topic）；夹具用 `source.keys` + `anyOf` 把「集合还是主题」这类歧义吃掉，但「哪类业务操作」仍要模型选。接口不确定时问用户「你查哪方面数据」是正当的**接口消歧**，与「让用户背集合名」是两件不同的事。
+- **裁定（判据 v2，`CRITERIA_VERSION = convergence-r1.criteria.2`）**：
+  1. **不再判「未委派」**：E05 `execPolicy` / `delegation` 降为 `optional` / `allowed`，撤 `minExecutions` 与 `requiredRowCollections`。正解（委派 → 平台回 `needs_input` + candidates → 问用户一次）与合法路径（不委派、问用户消歧接口）**都算通过**。
+  2. **硬线①（保留）**：用户确认前查询候选对象仍判 `FAIL_WRONG_OBJECT`（`allowedCollections:['contoso']`）。那是越权猜对象，且具备「枚举候选把执行层打爆」的形态（2026-11-20 宽口径枚举拉爆下游 + 触发平台风控的事故先例）。
+  3. **硬线②（新增，堵逃逸口）**：零执行且未检测到澄清提问 → `FAIL_MISSING_CLARIFICATION`。没有这条，「contoso 目前没有可展示的记录」这类**既不问执行层也不问用户的断言性答复**会判 PASS——即「零作为假装有结论」。`clarification:'expected'` 在零执行时从弱告警升为硬失败；有执行的用例不受影响。
+  4. **检查点改条件式**：`contoso → needs_input + candidates` 检查点恢复，但只在**有执行行**时校验（查了 contoso 就必须有候选载荷，缺载荷回落 `INCONCLUSIVE` 不得判正）；零执行时让位给硬线②。
+  5. **不 landing 提示词修法**：实验性 Main 侧 Skill 已删（实测无可靠改善，不 landing 无效果品的提示词）。
+- **v1 可对照**：v1 用例/判据经 git 父提交与各 run-dir 内冻结的 `criteria/cases` 副本留存（v1 `casesSha256 = fa239fff…`，记录于 `criteria.ts` 版本变更史）。
+- **守卫（固化，非声称）**：`scripts/eval/convergence-r1/selftest.ts` 新增四包——`e05-v2-happy`（正解 PASS）、`e05-v2-ask-user-first`（合法路径 PASS）、`e05-v2-zero-exec-no-question`（逃逸口 FAIL_MISSING_CLARIFICATION）、`e05-v2-query-candidate`（硬线 FAIL_WRONG_OBJECT）。反向绊线即四包本身：任一判定分支被改坏，对应包转红。
+- **产品定义成文**：`docs/architecture/capability-boundary.md` §1.1（对象归执行层解析 / 接口归 Agent 选 / 硬线两条 / 可接受方差登记不判负），§7 约束—守卫表补两行（硬线=已有守卫且已固化；行为方差=不设守卫、登记项）。
+- **触发本条的外部审查**：PR #82 grok 审查 blocking——「就地放宽后零执行且无提问的断言性答复判 PASS；委派了但缺 candidates 时 INCONCLUSIVE 变 PASS；§17.1 要求立新版本却就地改写；weakNotes 自相矛盾；§7 的反向验证声称无守卫」。五条均已处置。

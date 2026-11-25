@@ -3,8 +3,17 @@
  *
  * 冻结纪律：本文件 + cases/*.ts + judge.ts 的 sha256 记入 criteria.lock（freeze.ts 生成）；
  * 冻结后不得修改——不为通过率放宽判据、不为覆盖率加用例。
+ *
+ * 版本变更史（§17.1 要求「裁定变更必须新增判据版本并保留 v1 可对照」）：
+ *   v1（2026-11-13 起，casesSha256 `fa239fff…`）：歧义标识必须先交执行层裁决
+ *     （needs_input + candidates），未委派判 FAIL_NO_DELEGATION/FAIL_ZERO_EXECUTION。
+ *   v2（2026-11-25，owner 批准，后继裁定见 decision-log §17.2）：E05 口径修订为「澄清优先」——
+ *     模型在接口不确定时问用户消歧同为可接受路径，不再判「未委派」；硬线收窄为
+ *     ① 确认前不得查候选对象（allowedCollections → FAIL_WRONG_OBJECT）
+ *     ② 零执行且不提问 → FAIL_MISSING_CLARIFICATION（堵住「零作为假装有结论」逃逸口）。
+ *     v1 可对照：git 快照 + 各 run-dir 内冻结的 criteria/cases 副本（含 v1 哈希）。
  */
-export const CRITERIA_VERSION = 'convergence-r1.criteria.1';
+export const CRITERIA_VERSION = 'convergence-r1.criteria.2';
 export const JUDGE_VERSION = 'convergence-r1.judge.1';
 export const RUNNER_VERSION = 'convergence-r1.runner.1';
 

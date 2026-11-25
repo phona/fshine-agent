@@ -633,6 +633,11 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   for (const checkpoint of caseDef.expected.checkpoints ?? []) {
     const entry = pickCheckpointRow(checkpoint.collection, checkpoint.status);
     if (!entry) {
+      // 2026-11-25（E05 判据 v2）：零执行且用例允许零执行时（execPolicy !== 'required'），
+      // 没有行可验 = 走了「不委派、直接问用户消歧」这条合法路径，检查点让位给
+      // 「零执行必须提问」判据（见下方 FAIL_MISSING_CLARIFICATION）。有执行行却没有一条
+      // 命中检查点对象时，仍是对象错（③ 形态：查了候选集合）——原判负不变。
+      if (executionRows.length === 0 && caseDef.execPolicy !== 'required') continue;
       addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `缺少对 ${checkpoint.collection} 的执行行，无法核对载荷`);
       continue;
     }
@@ -871,7 +876,15 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   const lastSentences = splitSentences(lastReply);
   const questionTurns = [...turnReplies.entries()].filter(([, text]) => splitSentences(text).some((sentence) => sentence.question));
   if (caseDef.clarification === 'expected' && !questionTurns.some(([turn]) => turn === replies.length)) {
-    warn('expected_clarification_missing：未检测到澄清提问（词面判定，弱）');
+    // 2026-11-25（E05 判据 v2，grok blocking）：零执行 + 无可检出提问 = 既没问执行层、
+    // 也没问用户，直接给断言性答复——这是「零作为假装有结论」的逃逸口，必须判负。
+    // 用例明确要求澄清（clarification:'expected'）却一条执行都没有时，提问是**必需**的，
+    // 不再是弱告警。有执行的用例不受影响（执行本身就是「做了事」的证据）。
+    if (executionRows.length === 0 && caseDef.execPolicy !== 'required') {
+      addCode('FAIL_MISSING_CLARIFICATION', ['⑤用户干预'], '零执行且未检测到澄清提问：既没问执行层也没问用户，直接给出断言性答复');
+    } else {
+      warn('expected_clarification_missing：未检测到澄清提问（词面判定，弱）');
+    }
   }
   if (caseDef.clarification === 'forbidden') {
     if (lastSentences.some((sentence) => sentence.question && isActualQuestion(sentence.text) && NEEDLESS_QUESTION_PHRASES.some((phrase) => phraseMatches(sentence.text, phrase)))) {

@@ -24,10 +24,17 @@ export const E05: UserCase = {
   clarification: 'expected',
   expected: {
     allowedCollections: ['contoso'],
-    // 不设 requiredRowCollections / checkpoints / minExecutions：本用例只守「确认前不得
-    // 查候选」这一条硬线（由 allowedCollections 承担）。委派了才该有的
-    // 「contoso → needs_input + 两个候选」是期望行为、不是硬线——未委派（问用户消歧）
-    // 与委派了都算通过，判据不再强制其中一条。
+    // 2026-11-25 判据 v2：检查点恢复，但语义改为**条件式**——「如果查了 contoso，平台必须回
+    // needs_input + 两个候选」。零执行时没有行可验，走「不委派、直接问用户消歧」这条合法
+    // 路径（由下方 FAIL_MISSING_CLARIFICATION 兜底：零执行必须提问）。
+    // 这让「委派了但 T2 没有 candidates 载荷」重新落到 INCONCLUSIVE（不得判正），
+    // 而不是无检查点时的直接 PASS。
+    checkpoints: [{
+      collection: 'contoso',
+      status: 'needs_input',
+      candidates: ['contoso-trade', 'contoso-logistics'],
+    }],
+    // 不设 requiredRowCollections / minExecutions：不强制「必须委派」。
     // 不设 expectedT1Status：本场景可能出现混合执行（模型先猜了候选集合），
     // 「needs_input 行 → T1 needs_input」由逐行 STATUS_MAP 配对检查承担；
     // 全域要求全部 execution=needs_input 会把「猜了候选」的多行运行误判为状态不一致。
@@ -36,9 +43,13 @@ export const E05: UserCase = {
   hardAnchors: [],
   weakNotes: [
     '候选名出现是词面判定（弱）；只给空泛「请补充信息」= 弱告警不判负；锚点=提及两个候选（名或区分词）并请用户选择',
-    '首跑波动已观察（2026-11-20 QA 批次：首跑未委派、自造澄清选项清单 → FAIL_NO_DELEGATION/FAIL_ZERO_EXECUTION；复跑 2 轮未复现）——模型行为波动，判定器不改；仓内无复跑豁免机制，全样本保留、FAIL 不筛绿',
-    '2026-11-25 口径修订后不再判「未委派」：期望行为（委派→平台回候选→问用户一次）仍是正解，'
-    + '但模型在接口不确定时问用户消歧同为可接受路径；两者都通过，只有「确认前查候选」判负。'
+    // 2026-11-25 判据 v2 起，上面那条 2026-11-20 的记录（首跑未委派 → FAIL_NO_DELEGATION/
+    // FAIL_ZERO_EXECUTION）**已作废**：v2 不再判「未委派」。保留原文只为存证 v1 读数，
+    // 不代表现行判据——勿以此条推断现行失败码。
+    '2026-11-25 口径修订（判据 v2，owner 批准；后继裁定见 decision-log §17.2）：期望行为'
+    + '（委派→平台回候选→问用户一次）仍是正解，但模型在接口不确定时问用户消歧同为可接受'
+    + '路径；两者都通过。硬线只剩两条：① 用户确认前查候选对象 → FAIL_WRONG_OBJECT'
+    + '（allowedCollections）；② 零执行且不提问 → FAIL_MISSING_CLARIFICATION。'
     + '实测基准（step-3.7-flash，8 轮/臂）：干净 HEAD 2/8 红、Main 侧 Skill 2/8 红——'
     + '提示词两种放法均无可靠改善，故不landing 提示词修法，只登记。',
   ],

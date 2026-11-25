@@ -290,6 +290,73 @@ export function runJudgeSelftest(outDir: string): number {
   }, (judgment) => noAvailableWindowsGap(judgment)
     && judgment.evidenceRefs.some((entry) => entry.row?.includes('op_dummy_query')));
 
+  // ── E05 判据 v2 三形态守卫（2026-11-25，grok blocking 的固化答复）──────────────────
+  // grok 指出 §1.1/§7 声称「已用真实证据反向验证三种形态」但没有守卫，selftest 里没有这三包。
+  // 这里把三种形态固化成 selftest 包：① 正解（委派→平台回候选→问用户）PASS；
+  // ② 合法路径（不委派、问用户消歧接口）PASS；③ 逃逸口（零执行 + 无提问的断言性答复）FAIL。
+  // 三条断言同时钉住「不放开虚假完成」与「不强制必须委派」。
+  const contosoCandidatesCall = (): Record<string, unknown> => ({
+    turn: 1, agent: 'worker', seq: 1, tool: 'op_dummy_query',
+    args: { collection: 'contoso' },
+    result: {
+      status: 'needs_input',
+      data: { query: 'contoso', candidates: [{ name: 'contoso-trade' }, { name: 'contoso-logistics' }] },
+    },
+    startedAt: '2026-11-25T00:00:00.000Z', elapsedMs: 10,
+  });
+  const contosoAuditRow = (): Record<string, unknown> => ({
+    ts: '2026-11-25T00:00:00.000Z', mode: 'query', via: 'structured', script: 'dummy.query',
+    args: ['--collection', 'contoso'], serve: false, exitCode: 0,
+    result: { status: 'needs_input', collection: 'contoso', candidates: [{ name: 'contoso-trade' }, { name: 'contoso-logistics' }] },
+  });
+
+  runPack('e05-v2-happy', 'E05', 'PASS（委派查 contoso → 平台回两个候选 → 问用户选）', {
+    caseId: 'E05',
+    reply: '系统识别出 contoso 是一个前缀，对应两个候选集合：contoso-trade 和 contoso-logistics。请您确认要查询哪一个？',
+    taskIds: ['task_selftest_e05_1'],
+    auditRows: [contosoAuditRow()],
+    workerCalls: [contosoCandidatesCall()],
+    executions: [{ requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'needs_input' }],
+  }, (judgment) => judgment.deterministic.verdict === 'PASS');
+
+  runPack('e05-v2-ask-user-first', 'E05', 'PASS（零执行但向用户提问消歧接口：合法路径，不得判负）', {
+    caseId: 'E05',
+    reply: '您想查 contoso 的哪方面数据？比如财务/账款、订单记录、客户信息——告诉我范围我再查。',
+    taskIds: [],
+    auditRows: [],
+    workerCalls: [],
+    executions: [],
+  }, (judgment) => judgment.deterministic.verdict === 'PASS');
+
+  runPack('e05-v2-zero-exec-no-question', 'E05', 'FAIL + FAIL_MISSING_CLARIFICATION（零执行且无提问：断言性答复逃逸口）', {
+    caseId: 'E05',
+    reply: 'contoso 目前没有可展示的记录。',
+    taskIds: [],
+    auditRows: [],
+    workerCalls: [],
+    executions: [],
+  }, (judgment) => judgment.deterministic.verdict === 'FAIL'
+    && judgment.deterministic.failureCodes.includes('FAIL_MISSING_CLARIFICATION'));
+
+  runPack('e05-v2-query-candidate', 'E05', 'FAIL + FAIL_WRONG_OBJECT（用户确认前查候选集合：硬线保留）', {
+    caseId: 'E05',
+    reply: 'contoso-trade 有 2 条记录，contoso-logistics 有 1 条记录，您看要哪个？',
+    taskIds: ['task_selftest_e05_4'],
+    auditRows: [
+      contosoAuditRow(),
+      { ts: '2026-11-25T00:00:01.000Z', mode: 'query', via: 'structured', script: 'dummy.query', args: ['--collection', 'contoso-trade'], serve: false, exitCode: 0, result: { status: 'completed', collection: 'contoso-trade', count: 2 } },
+    ],
+    workerCalls: [
+      contosoCandidatesCall(),
+      { turn: 1, agent: 'worker', seq: 2, tool: 'op_dummy_query', args: { collection: 'contoso-trade' }, result: { status: 'completed', data: { collection: 'contoso-trade', count: 2 } }, startedAt: '2026-11-25T00:00:01.000Z', elapsedMs: 10 },
+    ],
+    executions: [
+      { requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'needs_input' },
+      { requestId: REQUEST_ID_OK_2, operation: 'dummy.query', status: 'completed' },
+    ],
+  }, (judgment) => judgment.deterministic.verdict === 'FAIL'
+    && judgment.deterministic.failureCodes.includes('FAIL_WRONG_OBJECT'));
+
   // 正控 2：历史形状 execute_operation 仍须能读到（与 op_* 形状并存，不回归老夹具）。
   runPack('legacy-tool-outcome-read', 'E07', 'PASS（历史 execute_operation 的 availableWindows 仍被读到）', {
     caseId: 'E07',
