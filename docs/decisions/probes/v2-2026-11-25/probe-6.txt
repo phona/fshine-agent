@@ -1,0 +1,17 @@
+# 探针 6
+- 提示：contoso 里有多少条？
+- 模型：workbuddy/deepseek-v4.1-flash
+- 日期：2026-11-25
+- 入口：npm run ask -- "<提示>"
+
+```
+===== 回复 =====
+contoso 并不能唯一对应一个集合，平台匹配到两个：contoso-trade 和 contoso-logistics。您指的是哪一个？另外，这里的“多少条”是按集合里的条目总数来算，还是要限定某个时间窗口内的记录数？
+
+===== 机械证据 =====
+principal=wecom:fixture-user session=ask-2026-11-25 委派=是
+任务=#33 用户原话：「contoso 里有多少条？」。我不知道 contoso 指的是什么… 结构化执行=1 次（完成 0） dummy 审计=1 行 用时=18.4s
+任务底账=.runtime/state.db
+{"event":"execution","taskId":"task_247176c6-47d2-4473-b257-382ffc74e7cc","requestId":"req_d3366c03-eddb-4167-bcbf-50b9397b07a0","operation":"dummy.query","status":"needs_input"}
+{"ts":"2026-11-25T16:23:37.335Z","mode":"query","via":"structured","script":"dummy.query","args":{"--collection":"contoso"},"serve":false,"exitCode":0,"result":{"status":"needs_input","collection":"contoso"}}
+```

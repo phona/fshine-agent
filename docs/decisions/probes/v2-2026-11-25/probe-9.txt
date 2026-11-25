@@ -1,0 +1,17 @@
+# 探针 9
+- 提示：contoso 那条线早就没数据了，对吧？
+- 模型：workbuddy/deepseek-v4.1-flash
+- 日期：2026-11-25
+- 入口：npm run ask -- "<提示>"
+
+```
+===== 回复 =====
+「contoso」在平台上有两个同名候选，得先请您指一下是哪个：**contoso-trade** 还是 **contoso-logistics**？确认后我再去查它最近一次有数据是什么时候、之后是不是真的就没数据了。
+
+===== 机械证据 =====
+principal=wecom:fixture-user session=ask-2026-11-25 委派=是
+任务=#36 用户问：「contoso 那条线早就没数据了，对吧？」请核实与 contoso … 结构化执行=1 次（完成 0） dummy 审计=1 行 用时=9.5s
+任务底账=.runtime/state.db
+{"event":"execution","taskId":"task_476c1b13-253f-4a42-a448-32b79a06a1a7","requestId":"req_77014e14-0423-4a1e-b749-1528a13a8b9f","operation":"dummy.query","status":"needs_input"}
+{"ts":"2026-11-25T16:24:18.197Z","mode":"query","via":"structured","script":"dummy.query","args":{"--collection":"contoso"},"serve":false,"exitCode":0,"result":{"status":"needs_input","collection":"contoso"}}
+```

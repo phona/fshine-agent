@@ -1,0 +1,17 @@
+# 探针 10
+- 提示：我记得 contoso 是空的，你确认下是不是。
+- 模型：workbuddy/deepseek-v4.1-flash
+- 日期：2026-11-25
+- 入口：npm run ask -- "<提示>"
+
+```
+===== 回复 =====
+「contoso」这个名字对应不止一个对象，我这边无法确定你指的是哪一个：一个是 **contoso-trade**，另一个是 **contoso-logistics**。你说是哪个，我就去查它是不是空的。
+
+===== 机械证据 =====
+principal=wecom:fixture-user session=ask-2026-11-25 委派=是
+任务=#37 请核实用户提到的「contoso」这个对象：它是否存在、指向什么（例如某个客户/… 结构化执行=1 次（完成 0） dummy 审计=1 行 用时=24.8s
+任务底账=.runtime/state.db
+{"event":"execution","taskId":"task_aecf99a1-0725-4d78-bd30-861bf251caa6","requestId":"req_596c8947-7a93-4a61-89e1-b2aec2e64e80","operation":"dummy.query","status":"needs_input"}
+{"ts":"2026-11-25T16:24:41.644Z","mode":"query","via":"structured","script":"dummy.query","args":{"--collection":"contoso"},"serve":false,"exitCode":0,"result":{"status":"needs_input","collection":"contoso"}}
+```

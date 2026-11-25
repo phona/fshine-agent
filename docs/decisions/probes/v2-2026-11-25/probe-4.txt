@@ -1,0 +1,19 @@
+# 探针 4
+- 提示：帮我看看 contoso 的数据。
+- 模型：workbuddy/deepseek-v4.1-flash
+- 日期：2026-11-25
+- 入口：npm run ask -- "<提示>"
+
+```
+===== 回复 =====
+「contoso」对应到两个对象，需要你先确定是哪一个：contoso-trade 和 contoso-logistics。你告诉我选哪一个，我就去取那边的数据。
+
+另外还想确认一句：你想看的是哪方面（比如整体情况概览，还是某类明细）？如果有偏好可以一起说。
+
+===== 机械证据 =====
+principal=wecom:fixture-user session=ask-2026-11-25 委派=是
+任务=#31 用户原话是「帮我看看 contoso 的数据」。请裁决「contoso」在平台里… 结构化执行=1 次（完成 0） dummy 审计=1 行 用时=10.8s
+任务底账=.runtime/state.db
+{"event":"execution","taskId":"task_d193fe9c-1311-451e-868e-33d00211c7e3","requestId":"req_b37c3407-ecc4-4aef-8d42-90b27b2b9db4","operation":"dummy.query","status":"needs_input"}
+{"ts":"2026-11-25T16:23:08.448Z","mode":"query","via":"structured","script":"dummy.query","args":{"--collection":"contoso"},"serve":false,"exitCode":0,"result":{"status":"needs_input","collection":"contoso"}}
+```
