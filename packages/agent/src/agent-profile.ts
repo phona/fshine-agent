@@ -20,7 +20,8 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-// frontmatter 剥引号取全仓唯一一份（issue #72 合并；原正则实现的取舍理由见 skills.ts 的 stripQuotes）。
+// frontmatter 剥引号取具名 helper 的唯一导出（issue #72 合并；原正则实现的取舍理由见
+// skills.ts 的 stripQuotes）。
 import { stripQuotes } from './skills';
 
 export interface AgentProfile {

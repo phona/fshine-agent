@@ -521,6 +521,29 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
     }
   });
 
+  it('accepted（长任务受理）行只显示受理时刻，不渲染成区间', () => {
+    // 2026-11-25 debt R-1：受理行的 finishedAt 是**回执到达一刻**，不是执行结束。渲染成
+    // 「起 → 止」会被读成「这个长任务只跑了受理往返那一下」；状态词已是「已受理（长任务
+    // 进行中）」，时刻只回答「什么时候接的单」。
+    const accepted = record({
+      taskId: 'task_accepted',
+      executions: [{
+        requestId: 'req_accepted',
+        operation: 'dummy.prepare',
+        status: 'accepted',
+        startedAt: '2026-11-13T16:00:01.000Z',
+        finishedAt: '2026-11-13T16:00:03.000Z',
+      }],
+    });
+    const point = formatLocalTime('2026-11-13T16:00:01.000Z');
+    for (const text of [renderTaskDetail(accepted), renderTaskDeliverable(accepted)]) {
+      const section = text.split('执行步骤：')[1]!.split('任务结果')[0]!;
+      expect(section).toContain(point);
+      expect(section).not.toContain('→'); // 不渲染区间
+      expect(section).toContain('已受理');
+    }
+  });
+
   it('README 口径（issue #69）：执行步骤附起止时刻；不再声称「底账未存每步时间戳」', () => {
     // 文本锚点四件事（AGENTS.md 判据红线）：
     //   ① 想拦的失败形态：README 仍写「底账未存每步时间戳 / 最终回复当前不落库」，而实现已落

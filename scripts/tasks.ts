@@ -51,7 +51,8 @@ import {
   type TaskRecord,
 } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
-// 机械原因原文取全仓唯一一份（issue #72 合并；归属理由见 run-dir-cleanup.ts 的 errorText）。
+// 机械原因原文取具名 helper 的唯一导出（issue #72 合并；归属理由与守卫边界见
+// run-dir-cleanup.ts 的 errorText 注释）。
 import { errorText } from '../packages/agent/src/run-dir-cleanup';
 import { createNotificationReader, type Notification, type NotificationKind } from '../packages/agent/src/notifications';
 import type { AskRuntimeInput } from './ask-runtime';
@@ -368,6 +369,10 @@ export function taskMechanicalFactLine(task: TaskRecord): string | undefined {
 
 /**
  * 执行步骤的起止时刻文本（issue #69）：
+ *   · `accepted`（长任务受理）→ **只显示受理时刻**，不渲染区间：受理行的 `finishedAt`
+ *     是**回执到达一刻**，不是执行结束——渲染成区间会被读成「这个长任务只跑了受理往返
+ *     那一下」（2026-11-25 debt R-1）。状态词已经是「已受理（长任务进行中）」，时刻只回答
+ *     「什么时候接的单」。要分开两种时刻得加字段/语义，属新增机制，未过准入；
  *   · 两时刻都在（真实执行前后落了时刻）→ 本地时间区间 `起 → 止`；
  *   · 否则（时间列上线前的旧行 / 未落时刻）→ 「无时刻」——不拿半边时刻冒充区间，
  *     也不把未知行渲染成零耗时。
@@ -378,6 +383,7 @@ function executionTimeText(execution: ExecutionRecord): string {
   if (started !== undefined && finished !== undefined) {
     // 渲染只到分钟：亚分钟执行的两端点会渲染成同一个值，`起 → 起` 读起来像坏了。
     // 这种情况显示单点（「这一分钟」），不把零长度区间伪装成一段时长——要秒级得先裁粒度。
+    if (execution.status === 'accepted') return started;
     return started === finished ? started : `${started} → ${finished}`;
   }
   return '无时刻';
