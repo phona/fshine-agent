@@ -3330,14 +3330,25 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
    * 产出正文非空 = woken；空 = failed（调用方按各自的降级处置，不冒充已说）。
    */
   async function coldWake(factText: string): Promise<WakeResult> {
+    // 冷会话（重启后第一次状态变化）也授**同一套只读任务工具**，与热路径 wake() 的 toolFace
+    // 逐字同语义：只读 registry/scope，不触执行层（无 client.execute / 无 runner / 无预算消费）。
+    //
+    // 为什么冷路径也要授：2026-11-20 live 实测的 DSML 泄漏根因是「模型想核实任务状态却无工具
+    // 可调，把原生工具标记当正文吐给用户」。`748671e3` 只修了热路径（驱动侧 wake 的 toolFace），
+    // 冷路径这份 `run()` 实现仍是 `tools: []`——而它收的是**同一份 factText**，里面带着
+    // 「请判断做没做成（以账本执行事实为准）」这句指令。核实指令 + 零工具这个组合同样完整，
+    // 只是换了个入口。重启后第一次唤醒必然走这里（live 服务 Restart=always，每次重启一次）。
     const result = await options.mainDriver.run({
       systemPrompt: options.mainSystemPrompt,
-      tools: [],
+      tools: [taskStatusTool(), taskResultTool()],
       messages: [...mainTranscript(), userMessage(factText)],
       onStep: () => {},
-      // 零工具声明下不可达；真被调到也只给一句安全话术（不把内部原因灌进上下文）。
-      exec: async () => {
-        throw new Error('唤醒回合不提供工具。');
+      // 只受理这两个只读工具；集合外（含所有执行类）确定性拒绝、执行层零接触——与驱动侧 wake
+      // 的 toolFace.exec 同一套隔离，拒绝措辞也取同一句，便于两侧对照。
+      exec: async (tool, args, signal) => {
+        if (tool === TASK_STATUS_TOOL) return taskStatus(args);
+        if (tool === TASK_RESULT_TOOL) return taskResult(args);
+        throw new Error(`唤醒回合不允许调用工具：${tool}`);
       },
       deadline: Date.now() + WAKE_TURN_MS,
     });

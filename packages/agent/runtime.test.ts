@@ -546,10 +546,13 @@ describe('唤醒回合的界（2026-11-19 复核 F1）', () => {
     expect(observedDeadline! - after).toBeGreaterThan(0);
   });
 
-  it('冷会话（驱动可唤醒但实例级会话还没建）→ 补一次**零工具**单回合（重启对账的形状）', async () => {
+  it('冷会话（驱动可唤醒但实例级会话还没建）→ 补一次**只读任务工具**单回合（重启对账的形状）', async () => {
     // 2026-11-19 唤醒切片：重启后第一次状态变化（重启对账）时，驱动实例级会话还没建——
-    // 驱动侧 wake 只能回 unavailable。本层按与 send 同一份装配参数补一次零工具单回合，
+    // 驱动侧 wake 只能回 unavailable。本层按与 send 同一份装配参数补一次单回合，
     // 否则「用户以为在办、实际说不清」这件事永远说不出话。
+    // 2026-11-25：工具面从「零工具」改成「只读任务工具」——与热路径 wake() 的 toolFace 同语义。
+    // 根因同 748671e3：模型接到「照账本判断做没做成」的指令却没有读账本的工具，就把原生
+    // 工具标记当正文吐给用户；那条修法只覆盖了热路径，冷路径这份实现漏了。
     let observedTools: readonly unknown[] | undefined;
     let observedMessages: readonly unknown[] | undefined;
     let observedDeadline: number | undefined;
@@ -578,16 +581,29 @@ describe('唤醒回合的界（2026-11-19 复核 F1）', () => {
     });
     const woke = await session.wake('[重启对账] 测试事实：状态说不清。');
     expect(woke).toEqual({ outcome: 'woken', text: '我这边重启过，这件事的状态说不清了。' });
-    // 零工具（唤醒回合不得碰执行层——与驱动侧 wake 同一条纪律）。
-    expect(observedTools).toEqual([]);
+    // 只读任务工具（与驱动侧 wake 的 toolFace 同一套；不是零工具、也不是全量 Main 面）。
+    // 为什么必须非零：factText 里带着「请判断做没做成（以账本执行事实为准）」——模型要核实
+    // 账本就得有读账本的工具，否则它把工具调用写成正文（2026-11-20 live 实测的 DSML 泄漏）。
+    // 名字 + 形状都钉：光有名字没有 schema，模型仍然调不了（等于没授）。
+    expect(observedTools?.map((tool) => (tool as { name: string }).name)).toEqual(['task_status', 'task_result']);
+    for (const tool of observedTools ?? []) {
+      const t = tool as { name: string; description?: string; inputSchema?: unknown };
+      expect(t.description, `${t.name} 缺 description，模型不知道怎么用`).toBeTruthy();
+      expect(t.inputSchema, `${t.name} 缺 inputSchema，模型无法构造参数`).toBeTruthy();
+    }
+    // 只读隔离：集合外工具（含所有执行类）确定性拒绝，执行层零接触。
+    await expect(observedExec!('task_run', {})).rejects.toThrow('唤醒回合不允许调用工具：task_run');
+    // 集合内两个只读工具真被受理（不抛「不允许」）。task_result 缺 ref 会抛**业务参数**错误
+    // （「缺少任务引用 ref」）而不是「唤醒回合不允许调用工具」——这个区别正是「它通过了隔离门、
+    // 进了真处理器」的证据；若隔离没放行，抛的会是上面那句。
+    await expect(observedExec!('task_status', {})).resolves.toBeDefined();
+    await expect(observedExec!('task_result', {})).rejects.toThrow('缺少任务引用 ref');
     // 本轮输入 = 事实（最后一条 user）。
     expect(observedMessages?.at(-1)).toMatchObject({
       role: 'user',
       content: '[重启对账] 测试事实：状态说不清。',
     });
     expect(observedDeadline! - Date.now()).toBeLessThanOrEqual(WAKE_TURN_MS);
-    // 零工具下模型真去调工具也只拿到一句安全话术（不是执行面）。
-    await expect(observedExec!('task_run', {})).rejects.toThrow('唤醒回合不提供工具。');
   });
 
   it('冷唤醒说不出话（空正文）→ failed（不冒充已说）；驱动没有唤醒能力 → unavailable（语义不变）', async () => {
