@@ -48,7 +48,7 @@ Worker 的汇报必须是**结构化事实**，Main 据此套用统一话术—�
 | 办不了（`unsupported`） | 目录里没有对应能力 | 「这件事我这边办不了」+ 能办的（**来自 §2 派生目录**）。**绝不提「再试一次」** | 宿主分类器已删；结构化码 `unsupported` 仍在（`packages/agent/src/task-outcome.ts:14`）；行为句 `packages/agent/src/execution-runtime.ts:569` |
 | 缺条件（`blocked`） | 有能力但缺条件（权限/口径/字段） | 「缺 X」+ 补的方式 | 宿主分类器已删；结构化码 `not_permitted` 用于发起前拒绝的事实位（`packages/agent/src/task-outcome.ts:13`；消费 `apps/server/server.ts:1150`） |
 | 部分完成（`partial`） | 批量写里部分项失败 | 逐项说，**不得说成单纯成功** | 行为句仍在（`packages/agent/src/execution-runtime.ts:569`）；底账 `ExecutionRecord`（`packages/agent/src/task-registry.ts:115-122`）**无 `items` 字段**，宿主不再从底账投影判 partial（如实登记见 §7） |
-| 没办成（`failed`） | 执行行显示失败 | 「没办成」+ **该重试才说重试**（执行层 `retryable:true`；缺省/未声明按不可重试，`packages/contracts/src/execution-contract.ts:156-166`） | 宿主不判任务终局；Main 读执行行自己判断；「该重试才说重试」已有守卫（`packages/agent/deterministic-failure-guard.test.ts:187`、`:233`；话术 `packages/agent/user-facing-failure.test.ts:117`） |
+| 没办成（`failed`） | 执行行显示失败 | 「没办成。我先核对一下现在到哪了？」+ **该重试才说重试**（执行层 `retryable:true`；缺省/未声明按不可重试，`packages/contracts/src/execution-contract.ts:156-166`） | 宿主不判任务终局；Main 读执行行自己判断；「该重试才说重试」已有守卫（`packages/agent/deterministic-failure-guard.test.ts:187`、`:233`；话术 `packages/agent/user-facing-failure.test.ts:130-139`） |
 
 **收口说明**：B2 五态分类器与 `renderOutcomeFact` 已随 S1 删除；B3 的结构化原因码（`unsupported` / `not_permitted`）仍在守卫范围内，Main 的三种措辞纪律由 `OUTCOME_BEHAVIOR_NOTE` 提供（提示词约束——模型是否照做归黑盒评测，不冒充确定性通过）。
 
@@ -98,7 +98,7 @@ Worker 的汇报必须是**结构化事实**，Main 据此套用统一话术—�
 | 部分完成（`partial`）逐项如实 | 未实现（无守卫） | 宿主分类器已删；底账 `ExecutionRecord` 无 `items`（`packages/agent/src/task-registry.ts:115-122`），宿主不再从底账投影判 partial；行为句 `packages/agent/src/execution-runtime.ts:569`。待补守卫：底账 items 落账 + partial 不说成成功 |
 | 办不了（`unsupported`）零执行、绝不提「再试一次」 | 已有守卫（用户级脚本模型） | `scripts/eval/wecom-sim/cases-l-outcome.test.ts:L-1 目录里没有的事`（零执行、说办不了、无重试诱导词）；结构化码 `packages/agent/src/task-outcome.ts:14` |
 | 缺条件（`blocked`）说「缺 X」+补法（只用结构化码，不扫文案） | 已有守卫（用户级脚本模型） | `scripts/eval/wecom-sim/cases-l-outcome.test.ts:L-2 目录里有但本次不允许`（零执行、说清缺什么、不说成办不了）；结构化码 `packages/agent/src/task-outcome.ts:13` |
-| `failed` 该重试才说重试 | 已有守卫 | `packages/agent/deterministic-failure-guard.test.ts:187`、`:233`；`packages/agent/user-facing-failure.test.ts:117` |
+| `failed` 该重试才说重试 | 已有守卫 | `packages/agent/deterministic-failure-guard.test.ts:187`、`:233`；`packages/agent/user-facing-failure.test.ts:130-139` |
 | 交办 = 结构化意图（能力 + 输入） | 未实现（无守卫） | 待办守卫（schema 含能力与结构化输入，不再仅 `task` 字符串） |
 | 确认回合以已确认提案为任务内容 | 已有守卫 | `packages/agent/background-write-confirmation.test.ts:505`；持久化 `packages/agent/src/execution-runtime.ts:1132-1160` |
 

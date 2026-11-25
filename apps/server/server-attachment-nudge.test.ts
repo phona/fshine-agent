@@ -6,8 +6,8 @@
  * 覆盖（逐条对应 ask）：
  *   1. 纯附件登记 → 下一回合注入一次机械事实（含时间、不含路径）；同 fileId 不重复注入
  *      （单元级：attachment-facts.test.ts）；
- *   2. 30 秒无消息 → 发一次追问（文件名 + 2~4 个业务选项），并把同一份选项作为
- *      `[系统主动提示]` 系统注记注入下一回合（模型可见 / 用户不可见 / 不触发回合）；
+ *   2. 30 秒无消息 → 发一次追问（文件名 + 一句开放提问，**无编号选项**——5b owner 2026-11-24），
+ *      并把同一句作为 `[系统主动提示]` 系统注记注入下一回合（模型可见 / 用户不可见 / 不触发回合）；
  *   3. 5 秒后用户说话 → 不发；
  *   4. 群聊 → 不发；
  *   5. 连发 3 个文件 → 只发一条，提到 3 个文件；
@@ -293,7 +293,7 @@ describe('目标 A：纯附件机械事实进入下一回合（注入一次、�
 });
 
 describe('目标 B：30 秒主动追问', () => {
-  it('② 30 秒无消息 → 发一次追问（文件名 + 2~4 个选项），并把同一份选项注入下一回合系统注记', async () => {
+  it('② 30 秒无消息 → 发一次追问（文件名 + 一句开放提问），并把同一句注入下一回合系统注记', async () => {
     const fx = await makeFixture();
     try {
       await fx.server.handler(attachmentMessage({ dir: fx.dir, messageId: 'm-file-1', filename: '名册.xlsx' }));
@@ -306,18 +306,19 @@ describe('目标 B：30 秒主动追问', () => {
       expect(fx.texts).toHaveLength(1);
       const nudge = fx.texts[0]!;
       expect(nudge).toContain('名册.xlsx');
-      const options = optionsOf(nudge);
-      expect(options.length).toBeGreaterThanOrEqual(2);
-      expect(options.length).toBeLessThanOrEqual(4);
+      // 5b（owner 2026-11-24）：**没有编号选项**——不替用户猜意图，一句开放提问就够。
+      expect(optionsOf(nudge)).toHaveLength(0);
+      expect(nudge).toContain('直接说就行');
       expect(fx.logs.filter((line) => line['event'] === 'attachment_nudge_sent')).toHaveLength(1);
 
-      // 用户回数字：下一回合的系统注记必须带着同一份选项（模型可见、用户不可见、不触发回合）。
+      // 用户回「1」：下一回合的系统注记仍注入（模型可见、用户不可见、不触发回合），
+      // 内容是「宿主刚问过什么」，并明确不期待数字编号。
       const reply = await fx.server.handler(textMessage('m-text-1', '1'));
       expect(reply).toBe('好的，收到。'); // 注记不触发单独回合：仍只有用户消息这一个回合
       const note = fx.injections[0]!.find((text) => text.startsWith('[系统主动提示]'));
       expect(note).toBeDefined();
-      for (const option of options) expect(note).toContain(option);
       expect(note).toContain('系统主动提示');
+      expect(note).toContain('不要期待数字编号');
 
       // 注记只注入一次。
       await fx.server.handler(textMessage('m-text-2', '2'));
@@ -378,11 +379,10 @@ describe('目标 B：30 秒主动追问', () => {
       expect(fx.texts[0]).toContain('3 个文件');
       expect(fx.texts[0]).toContain('名册.xlsx');
       // 不复述"收到 N 个文件"：渠道到点时已发过那条回执（formatFileAck），
-      // 追问只补"是哪几个" + 选项（2026-11-17：两条几乎相同的清单观感像结巴）。
+      // 追问只补"是哪几个" + 一句开放提问（2026-11-17：两条几乎相同的清单观感像结巴）。
       expect(fx.texts[0]).not.toContain('收到 3 个文件');
-      const options = optionsOf(fx.texts[0]!);
-      expect(options.length).toBeGreaterThanOrEqual(2);
-      expect(options.length).toBeLessThanOrEqual(4);
+      expect(optionsOf(fx.texts[0]!)).toHaveLength(0);
+      expect(fx.texts[0]).toContain('直接说就行');
       expect(fx.logs.filter((line) => line['event'] === 'attachment_nudge_sent')).toHaveLength(1);
     } finally {
       await fx.server.close();
@@ -453,7 +453,10 @@ describe('目标 B：30 秒主动追问', () => {
     }
   });
 
-  it('⑨ 写类选项仅在 allowWriteOperations=true 时列出', async () => {
+  it('⑨ 追问文案与写面开关无关（5b：不再按 allowWriteOperations 列写类选项）', async () => {
+    // 5b（owner 2026-11-24）：选项清单整份删掉后，写面开关不再影响追问文案——只读与可写两种
+    // 部署发出**同一句**开放提问。这也顺带消掉一类风险：追问里出现「生成新表」曾被读成
+    // 「宿主承诺会写」，而它其实不构成任何授权。
     const readOnly = await makeFixture({ runtime: { attachmentNudgeAfterMs: NUDGE_AFTER_MS, allowWriteOperations: false } });
     try {
       await readOnly.server.handler(attachmentMessage({ dir: readOnly.dir, messageId: 'm-file-1', filename: '名册.xlsx' }));
@@ -469,7 +472,8 @@ describe('目标 B：30 秒主动追问', () => {
       await writable.server.handler(attachmentMessage({ dir: writable.dir, messageId: 'm-file-1', filename: '名册.xlsx' }));
       await writable.clock.advance(NUDGE_AFTER_MS);
       expect(writable.texts).toHaveLength(1);
-      expect(writable.texts[0]).toMatch(/生成/);
+      expect(writable.texts[0]).toBe(readOnly.texts[0]);
+      expect(optionsOf(writable.texts[0]!)).toHaveLength(0);
     } finally {
       await writable.server.close();
     }

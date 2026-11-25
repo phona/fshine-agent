@@ -355,6 +355,8 @@ export interface SessionAssemblyInput {
   attachmentFactProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
   /** 主动追问系统注记注入器（模型可见/用户不可见；缺省不注入）。 */
   systemNoteProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
+  /** 久未表态的写确认注入器（每轮读底账；缺省不注入 = 没有这回事）。 */
+  pendingConfirmationProvider?: (principalId: string, sessionId: string) => InjectionValue | undefined;
   /** CAP-01 S1：run_js 执行器端口（装配层构造注入；缺省不注入 = Main 无 run_js 工具）。 */
   runJsExecutor?: RunJsExecutor;
   /** recalc_xlsx 执行器端口（Main 宿主面；缺省不注入或引擎不可用 = 无该工具）。 */
@@ -1239,6 +1241,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       ...(input.taskFactProvider === undefined ? {} : { taskFactProvider: input.taskFactProvider }),
       ...(input.attachmentFactProvider === undefined ? {} : { attachmentFactProvider: input.attachmentFactProvider }),
       ...(input.systemNoteProvider === undefined ? {} : { systemNoteProvider: input.systemNoteProvider }),
+      ...(input.pendingConfirmationProvider === undefined ? {} : { pendingConfirmationProvider: input.pendingConfirmationProvider }),
       ...(input.runJsExecutor === undefined ? {} : { runJsExecutor: input.runJsExecutor }),
       ...(input.recalcXlsxExecutor === undefined ? {} : { recalcXlsxExecutor: input.recalcXlsxExecutor }),
       ...(input.onRecalcCost === undefined ? {} : { onRecalcCost: input.onRecalcCost }),

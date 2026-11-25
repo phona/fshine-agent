@@ -119,11 +119,14 @@ class NoopSink implements NotificationSink {
 /** 受闸执行器：结局由用例控制（settle）；`hanging` 模式永不落定（久无动静用例）。 */
 class GatedExecutor implements TaskExecutor {
   calls = 0;
+  /** 最近一次 execute 的 taskId（真实执行行装配断言用：落账要知道往哪条任务上记）。 */
+  lastTaskId?: string;
   /** 取消请求观察点：cancel() 会 abort 本回合的 controller——用例据此同步「取消已请求」。 */
   aborted = false;
   private resolve?: (outcome: TaskExecutionOutcome) => void;
-  async execute(_input: TaskExecutionInput, context: TaskExecutionContext): Promise<TaskExecutionOutcome> {
+  async execute(input: TaskExecutionInput, context: TaskExecutionContext): Promise<TaskExecutionOutcome> {
     this.calls += 1;
+    this.lastTaskId = input.taskId;
     context.signal.addEventListener('abort', () => {
       this.aborted = true;
     });
@@ -240,7 +243,8 @@ function wakeLineFor(factText: string, mode: 'line' | 'silent' | 'tool-only', wa
   if (factText.startsWith('[重启对账]')) return textAssistant(`${subject}我这边重启过，状态说不清了；你说一声我就重来。`);
   if (factText.startsWith('[任务等待]')) {
     // 待确认：模型按事实把提案原文原样转述给用户（模拟「原样告诉用户并等表态」）。
-    const summary = /将写入（逐字）：(.+?)（/u.exec(factText)?.[1];
+    // 提案句以「。」结尾（5b 之后不再跟「（…前有效）」从句），解析到句末为止。
+    const summary = /将写入（逐字）：(.+?)。(?=\n|$)/u.exec(factText)?.[1];
     if (summary !== undefined) return textAssistant(`待确认内容（原样）：${summary}。请回复确认或说不确认。`);
     // 待补：把缺的条目原样报给用户。
     const missing = /还缺：(.+?)。/u.exec(factText)?.[1] ?? '';
@@ -931,9 +935,10 @@ describe('状态变化唤醒（server 级）：重启对账', () => {
 // 模型把待确认/待补说给用户**。live 实测缺陷：进入等待只落在底账，模型不知道、用户只能
 // 自己猜着发「按这版提交」才拿到确认摘要。本组钉住：
 //   ⑤ 进入等待（needs_confirmation）→ 恰一次唤醒；事实 = missing 列表 + confirmation.summary
-//      原文 + expiresAt，句柄（handle）永不进事实；投递文本 == 模型那句；任务保持 waiting_user；
-//   ⑤b 走岔路：模型说不出话 → 投兜底 = summary 原文 + expiresAt（执行端原话，不编新话术），
-//      事实留待注入（下次开口补说）；
+//      原文（**不写有效期**，owner 2026-11-24：把截止时刻念给用户听「挺傻的」），句柄（handle）
+//      永不进事实；投递文本 == 模型那句；任务保持 waiting_user；
+//   ⑤b 走岔路：模型说不出话 → 投兜底 = summary 原文（逐字，不编新话术；提案之后被拒时还有
+//      本回合 worker 汇报原文，2026-11-24 grok major），事实留待注入（下次开口补说）；
 //   ⑤c 同一等待不重复唤醒（之后的状态查询不再触发）；
 //   ⑤d 回到 running 再进等待 → 第二次唤醒（按进入等待次数各唤醒一次）；
 //   ⑤e 待补（needs_input，无提案）→ 事实 = missing 列表、无 summary；模型照说；
@@ -966,7 +971,7 @@ describe('状态变化唤醒（server 级）：等待用户', () => {
     return matches[matches.length - 1] ?? '';
   }
 
-  it('⑤ 进入等待（needs_confirmation）→ 恰一次唤醒；事实含 missing+summary 原文+expiresAt、不含句柄；投递==模型那句', async () => {
+  it('⑤ 进入等待（needs_confirmation）→ 恰一次唤醒；事实含 missing+summary 原文、不含句柄；投递==模型那句', async () => {
     const fx = await makeFixture('line');
     try {
       await fx.server.handler(incoming('m-1', ASK));
@@ -978,11 +983,12 @@ describe('状态变化唤醒（server 级）：等待用户', () => {
       expect(text).toBe(`待确认内容（原样）：${CONF_SUMMARY}。请回复确认或说不确认。`);
       expect(text).not.toContain(CONF_HANDLE);
 
-      // 事实链：missing 列表 + summary 原文 + expiresAt；句柄永不进事实（宿主持有）。
+      // 事实链：missing 列表 + summary 原文；**不写有效期**（owner 2026-11-24）；句柄永不进事实。
       const fact = factTextOf(fx, '[任务等待]');
       expect(fact).toContain('用户确认');
       expect(fact).toContain(CONF_SUMMARY);
-      expect(fact).toContain(CONF_EXPIRES);
+      expect(fact).not.toContain(CONF_EXPIRES);
+      expect(fact).not.toContain('前有效');
       expect(fact).not.toContain(CONF_HANDLE);
       expect(fact).toContain('请把待确认/待补内容原样告诉用户并等表态');
 
@@ -998,15 +1004,16 @@ describe('状态变化唤醒（server 级）：等待用户', () => {
     }
   });
 
-  it('⑤b 走岔路：模型说不出话 → 投兜底（summary 原文+expiresAt，不编新话术）；事实留待注入', async () => {
+  it('⑤b 走岔路：模型说不出话 → 投兜底（summary 原文，不编新话术、不念有效期）；事实留待注入', async () => {
     const fx = await makeFixture('silent');
     try {
       await fx.server.handler(incoming('m-1', ASK));
       fx.executor.settle(confirmationOutcome(CONF_SUMMARY, CONF_EXPIRES, CONF_HANDLE));
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
 
-      // 兜底 = 执行端原话（summary）+ 有效期，逐字；不含句柄、不含编出来的新话术。
-      expect(fx.delivery.sentTexts[0]!.text).toBe(`${CONF_SUMMARY}（${CONF_EXPIRES} 前有效）`);
+      // 兜底 = 执行端原话（summary），逐字；不念有效期、不含句柄、不编新话术。
+      expect(fx.delivery.sentTexts[0]!.text).toBe(CONF_SUMMARY);
+      expect(fx.delivery.sentTexts[0]!.text).not.toContain(CONF_EXPIRES);
       expect(fx.delivery.sentTexts[0]!.text).not.toContain(CONF_HANDLE);
       const wake = wakeEventOf(fx.logs, 'task_waiting_user_wake');
       // 驱动口径：唤醒回合无正文 = failed（与重启对账 ④b 同一判定）——兜底由此投出。
@@ -1018,6 +1025,58 @@ describe('状态变化唤醒（server 级）：等待用户', () => {
       await fx.server.handler(incoming('m-2', '然后呢')).catch(() => undefined);
       expect(requestHasUserText(fx.scripted!.requests(), '[任务等待]')).toBe(true);
     } finally {
+      await fx.close();
+    }
+  });
+
+  it('⑤g 真实执行行（prepare + 同回合 commit 被 CONFIRMATION_REQUIRED 拒）→ 沉默兜底不得带协议码', async () => {
+    // 2026-11-24 grok blocking：⑤b 的夹具 settle() 不落执行行，「兜底 == 纯 summary」在门禁
+    // 全绿时成立；而真实后台写确认**会** noteExecution（prepare → needs_confirmation，同回合
+    // 再 commit → refused · CONFIRMATION_REQUIRED，提案仍有效）。这里让执行器自己在 settle 前
+    // 把这两行落进底账（db 在它手里，不抢 server 的写锁），钉住收口：
+    // 用户兜底只留提案摘要 + 清洗后的汇报，status/code 只进模型可见事实。
+    let seededDbPath = '';
+    let resolveRound: ((outcome: TaskExecutionOutcome) => void) | undefined;
+    let calls = 0;
+    const ledgerWriter: TaskExecutor & { settle(outcome: TaskExecutionOutcome): void } = {
+      async execute(input, context) {
+        calls += 1;
+        context.signal.addEventListener('abort', () => {});
+        const registry = createSqliteTaskRegistry(seededDbPath);
+        try {
+          registry.noteExecution(input.taskId, { requestId: 'req_prepare', operation: 'dummy.prepare', status: 'needs_confirmation' });
+          registry.noteExecution(input.taskId, {
+            requestId: 'req_commit',
+            operation: 'dummy.commit',
+            status: 'refused',
+            error: { code: 'CONFIRMATION_REQUIRED', message: 'commit requires a confirmation handle' },
+          });
+        } finally {
+          registry.close();
+        }
+        return await new Promise<TaskExecutionOutcome>((resolve) => {
+          resolveRound = resolve;
+        });
+      },
+      settle(outcome) {
+        resolveRound?.(outcome);
+      },
+    };
+    const fx = await makeFixture('silent', { executorOverride: ledgerWriter });
+    seededDbPath = fx.dbPath; // 执行器在 handler 之后才跑，此时路径已可知
+    try {
+      await fx.server.handler(incoming('m-confirm-1', ASK));
+      await vi.waitFor(() => expect(calls).toBe(1), { timeout: 10_000 });
+      ledgerWriter.settle(confirmationOutcome(CONF_SUMMARY, CONF_EXPIRES, CONF_HANDLE));
+      await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 15_000 });
+      const text = fx.delivery.sentTexts[0]!.text;
+      expect(text).toContain(CONF_SUMMARY);            // 提案摘要在
+      expect(text).not.toContain('CONFIRMATION_REQUIRED'); // 协议码不进用户气泡
+      expect(text).not.toContain('needs_confirmation');
+      expect(text).not.toContain('refused');
+      expect(text).not.toContain('句柄');
+    } finally {
+      await new Promise((resolve) => setTimeout(resolve, 30));
       await fx.close();
     }
   });
@@ -1047,7 +1106,8 @@ describe('状态变化唤醒（server 级）：等待用户', () => {
       fx.executor.settle(confirmationOutcome(CONF_SUMMARY, CONF_EXPIRES, CONF_HANDLE));
       await vi.waitFor(() => expect(fx.delivery.sentTexts).toHaveLength(1), { timeout: 10_000 });
 
-      // 用户表态 → 模型 task_resume → 任务回 running → 执行端再次提案（新摘要/新有效期）→
+      // 用户表态 → 模型 task_resume → 任务回 running → 执行端再次提案（新摘要；有效期不再进
+      // 事实/兜底）→
       // 再次落等待 → 第二次唤醒。
       await fx.server.handler(incoming('m-2', RESUME_MESSAGE));
       await vi.waitFor(() => expect(fx.executor.calls).toBe(2), { timeout: 10_000 });
@@ -1062,7 +1122,7 @@ describe('状态变化唤醒（server 级）：等待用户', () => {
       expect(text2).toBe(`待确认内容（原样）：${summary2}。请回复确认或说不确认。`);
       const fact2 = factTextOf(fx, '[任务等待]');
       expect(fact2).toContain(summary2);
-      expect(fact2).toContain(expires2);
+      expect(fact2).not.toContain(expires2);
       expect(readTask(fx.dbPath, String(wakes[1]!['taskId'])).waiting).toBe(true);
     } finally {
       await fx.close();

@@ -55,7 +55,6 @@ function makeNudge(clock: ManualClock): { nudge: AttachmentNudge; texts: string[
   const notes: string[] = [];
   const nudge = new AttachmentNudge({
     afterMs: 30_000,
-    allowWriteOperations: false,
     clock,
     delivery: {
       deliveryMode: 'live',

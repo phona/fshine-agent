@@ -82,6 +82,7 @@ import {
   type ExecutionFace,
 } from '../../scripts/ask-runtime';
 import { createAttachmentFactQueue, createScopedNoteQueue } from './attachment-facts';
+import { createPendingConfirmationProvider, executionLineText } from './pending-confirmation-facts';
 import { AttachmentNudge, type NudgeClock } from './attachment-nudge';
 import {
   deliverTaskResult,
@@ -221,6 +222,9 @@ const RECALC_DELIVERY_PARTIAL_NOTE = '部分表格未通过公式实算校验，
  * 消息（它在上一个进程里被认领后中断），无从由模型转述，宿主只能如实说明「没办完 + 不重复
  * 执行 + 结果未知 + 请重发」。同时记事件 `message_still_processing` 供运维发现。
  */
+/** 等待通知里执行行原话最多带几条（有界；与下一轮注入同一量级）。 */
+const WAITING_LEDGER_TAIL_LINES = 6;
+
 const INBOUND_STILL_PROCESSING_NOTE =
   '这条消息上次没办完（我这边中途中断过），我不会重复执行它，结果未知——麻烦你重发一次。';
 
@@ -851,7 +855,6 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   const systemNotes = createScopedNoteQueue();
   const attachmentNudge = new AttachmentNudge({
     afterMs: resolvedRuntime.attachmentNudgeAfterMs,
-    allowWriteOperations,
     ...(deps.attachmentNudgeClock === undefined ? {} : { clock: deps.attachmentNudgeClock }),
     ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
     enqueueSystemNote: (principalId, sessionId, note) => systemNotes.enqueue(principalId, sessionId, note),
@@ -875,31 +878,53 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   // 失败/取消/久无动静/重启对账共用同一条状态变化出口（不新建第二套唤醒与投递）。live 实测
   // 缺陷：进入等待此前只落底账，模型不知道有人在等它说话（15:25:55.992 落等待到 15:26:04
   // 零推送），用户只能自己猜着发「按这版提交」才拿到确认摘要。
-  //   · 事实机械：missing 列表 + confirmation.summary 原文与 expiresAt；**句柄不进事实**；
-  //   · 兜底（模型说不出话）= summary 原文 + expiresAt（执行端原话，不编新话术）；
+  //   · 事实机械：missing 列表 + confirmation.summary 原文 + 本回合 Worker 汇报原文；
+  //     **句柄不进事实**；**不写有效期**（owner 2026-11-24：念截止时刻「挺傻的」，超时走
+  //     sweep 的 deadline_reached 通知）；
+  //   · 兜底（模型说不出话）= summary 原文 + 汇报原文（逐字，不编新话术）——提案之后被
+  //     执行层拒绝时，拒绝原因只在汇报里，这里必须带上，否则用户对已被拒的写回「确认」；
   //     待补（无提案）没有兜底——只记事件 + 事实留待注入（不猜、不替它说）；
   //   · 去重 = (taskId, 进入等待次数)：runner 只在非等待态落等待时触发端口（已在等待的行
   //     再落等待不重复触发；回非等待再进 = 新的一次）；投递失败退回待注入，不重试唤醒。
+  /**
+   * 等待通知附带的执行行原话（有界；未作判断）。**直接调 pending-confirmation-facts 的
+   * executionLineText**——2026-11-24 grok blocking：这里曾手抄一份同样的拼法，注释写「同源
+   * 同函数」实际没有调用，于是 message 没过 cleanExecutorDiagnostic，服务器路径会进唤醒
+   * 事实。一个函数、一处定义，别再抄第二份。
+   */
+  const waitingLedgerOf = (taskId: string): readonly string[] => {
+    const record = (taskRegistry as unknown as {
+      get(id: string): { executions?: readonly { status: string; operation?: string; error?: { code?: string; message?: string } }[] };
+    }).get(taskId);
+    return (record.executions ?? []).slice(-WAITING_LEDGER_TAIL_LINES).map((entry) => executionLineText(entry));
+  };
+
   const waitingUserNotice: WaitingUserNoticePort = {
     sendNotice: (notice) => {
       const confirmation = notice.question.confirmation;
+      const waitingLedger = waitingLedgerOf(notice.taskId);
       void (async () => {
         await wakeAndDeliverStateChange({
           taskId: notice.taskId,
           principalId: notice.principalId,
           sessionId: notice.sessionId,
           event: 'task_waiting_user_wake',
+          // 执行行原话与「下一轮注入」同源同函数（executionLineText，未作判断）：
+          // 2026-11-24 grok blocking——用户被叫醒确认的**这一刻**就要能看见这一笔发生过
+          // 什么。此前只有提案摘要，而 frozen 路径的 Worker 汇报是固定句「已按执行层回执
+          // 汇报。」，用户拿不到拒绝依据；`session.wake` 不走 pendingConfirmationProvider
+          // 那条下一轮注入。
           factText: taskWaitingUserFactText({
             ...(notice.name === undefined ? {} : { name: notice.name }),
             missing: notice.question.missing,
             ...(confirmation === undefined ? {} : { summary: confirmation.summary }),
-            ...(confirmation?.expiresAt === undefined ? {} : { expiresAt: confirmation.expiresAt }),
             ...(notice.report === undefined ? {} : { report: notice.report }),
+            ...(waitingLedger.length === 0 ? {} : { ledger: waitingLedger }),
           }),
           ...(confirmation === undefined ? {} : {
             fallbackText: waitingUserFallbackText({
               summary: confirmation.summary,
-              ...(confirmation.expiresAt === undefined ? {} : { expiresAt: confirmation.expiresAt }),
+              ...(notice.report === undefined ? {} : { report: notice.report }),
             }),
           }),
         });
@@ -1359,6 +1384,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           // 目标 A/B：纯附件机械事实与主动追问的系统注记走同一 injections 机制（take 即出队）。
           attachmentFactProvider: attachmentFacts.take,
           systemNoteProvider: systemNotes.take,
+          // 久未表态的写确认（owner 2026-11-24）：每轮开头读底账，把「还有一件没表态」当
+          // 事实喂给 Main——说不说、怎么说归 Main；宿主不主动推送、不设提醒定时器。
+          pendingConfirmationProvider: createPendingConfirmationProvider(taskRegistry),
           // CAP-01 S1：run_js 执行器（装配构造）与文件清单注入器（机械事实）同源注入。
           // CAP-01 S2：交办复制端口与执行层文件桥同源注入（**同一 fileStore 实例**——文件区
           // 监管唯一写侧）。桥承担回程登记（data.files → 新 file_id、剥 path/base64）与任务

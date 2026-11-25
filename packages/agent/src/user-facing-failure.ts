@@ -107,9 +107,11 @@ export function failureMessageFor(
     case 'invalid_input':
       return { kind, text: '这个内容不行（名称或值的写法有问题）。我换个写法再试？', actions: ['retry', 'provide_input'] };
     case 'executor_failed':
-      // 不写「再试一次」：结论机已删，宿主不知道这一笔是不是写、落没落——诱导重试可能双写。
-      // 动作给中性的「重发 / 先核对」，由用户定。
-      return { kind, text: '没办成。要重发，还是先核对？', actions: ['retry', 'park'] };
+      // **先核对、不打头重发**（owner 2026-11-24）：结论机已删，宿主不知道这一笔是不是写、
+      // 落没落——「要重发，还是先核对？」把重发放在前面，部分落地时（先成一笔、后失败一笔）
+      // 会诱导用户把已落地的那笔再写一次。核对可以是 Main 主动复核（重读一次现状），查询太重
+      // 就问用户（owner：都可以）；用户自己说要重发时才重发。
+      return { kind, text: '没办成。我先核对一下现在到哪了？', actions: ['check_status', 'park'] };
     case 'host_fault':
       // 内部原因（凭据/令牌/协议/字段）一律不在这里解释——用户帮不上忙，也不该读这些。
       return { kind, text: '是我这边没弄好。再试一次，还是记下来让人看？', actions: ['retry', 'park'] };
