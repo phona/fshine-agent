@@ -1,15 +1,19 @@
 /**
- * 用户可见文本「内部词」扫描的单一来源（所有用户级批次共用）。
+ * 用户可见文本的「内部形态」扫描——**eval 侧判据的单一来源**（只判，不丢）。
  *
- * 从 `scripts/eval/real/live-replay.ts` 抽出（2026-11-20 泄漏守卫通用化切片）：
- *   · INTERNAL_WORDS —— 内部词表，逐字冻结，与抽离前完全一致（不加词、不减词）；
- *   · findLiteralHits —— 字面命中提取，语义与抽离前一致（marker 就是命中的词）；
- *   · scanUserVisibleText —— 新增的通用入口：给一批 {where,text}，返回命中列表
- *     （where / marker / excerpt=命中位置前后各 40 字符）。
+ * 从 `scripts/eval/real/live-replay.ts` 抽出（2026-11-20 泄漏守卫通用化切片）；
+ * 2026-11-25 从 `scripts/eval/shared/` 搬进 `packages/agent/src`——**eval 和 live 是同一条
+ * 链，只是出口一个是 Mock 一个是企微**；闸放在 eval 目录下导致生产（apps/server）零接入。
+ * 现在唯一一份在这里：生产出站口（`apps/server/task-completion-delivery.ts`）与四个 eval
+ * 批次都调它。
  *
- * 这是**机械事实扫描**，不是措辞质量判断：只做已知字面子串与机械形态（任务编号 / taskId /
- * 结构化块）的存在性判定，命中即「用户可见面出现了内部词/内部标识」这一确定事实。
- * 词表单一来源，禁止在各批次复制。
+ * 这是**机械事实扫描**，不是措辞质量判断：只做已知字面子串与机械形态的存在性判定，命中即
+ * 「用户可见面出现了内部词/内部标识」这一确定事实。词表单一来源，禁止在各处复制。
+ *
+ *
+ * 2026-11-25 晚（owner 裁）：**生产出站口不用它，这道尺只归 eval**。曾经把它接进生产
+ * 投递口（`task_result_delivery_leak_blocked`），两轮 blocking 后拆掉——见该文件头注的
+ * 三条理由。生产侧用户面的内部形态由系统提示词兜 + 请求侧给工具；这里留着做测量。
  */
 
 /** 内部词（逐字冻结；内容与抽离前 `live-replay.ts#INTERNAL_WORDS` 完全一致）。 */
@@ -66,10 +70,14 @@ export function findLiteralHits(texts: readonly VisibleText[], markers: readonly
  * 与 INTERNAL_WORDS 分开——词表逐字冻结、不扩词；这是独立的**形状断言**（正则），
  * 和字面词表走同一个 `scanUserVisibleText` 入口，故三个用户级批次自动生效（不复制三份）。
  * 编号仍留在底账/日志/审计里对账，这里只拦用户可见文本。
+ *
+ * 这是**措辞偏好**不是泄漏（2026-11-25 grok blocking 后定性）：业务原文里「凭证编号 1001」
+ * 「编号12」是用户要用的正常内容。所以它只归 eval 当违规记，**不构成生产丢弃整段话的理由**——
+ * 曾经的生产闸正是把它和机器格式混进同一个「丢整句」桶才连出两轮 blocking。
  */
 export const TASK_NO_SHAPE_RE = /#\d+|编号\s*#?\d+/gu;
 
-/** 在用户可见文本里找任务编号形态的命中（marker = 命中的那段文本）。 */
+/** 在用户可见文本里找任务编号形态的命中（marker = 命中的那段文本）。**style 档**。 */
 export function findTaskNumberHits(texts: readonly VisibleText[]): Hit[] {
   const hits: Hit[] = [];
   for (const { where, text } of texts) {
@@ -92,7 +100,7 @@ export function findTaskNumberHits(texts: readonly VisibleText[]): Hit[] {
  */
 export const TASK_ID_SHAPE_RE = /task_[A-Za-z0-9-]{8,}/gu;
 
-/** 在用户可见文本里找 taskId 形态的命中（marker = 命中的那段文本）。 */
+/** 在用户可见文本里找 taskId 形态的命中（marker = 命中的那段文本）。leak 档。 */
 export function findTaskIdShapeHits(texts: readonly VisibleText[]): Hit[] {
   const hits: Hit[] = [];
   for (const { where, text } of texts) {
@@ -163,10 +171,13 @@ export function findStructuredBlockHits(texts: readonly VisibleText[]): Hit[] {
 }
 
 /**
- * 通用入口：扫描一批用户可见文本里是否出现内部词、任务编号形态、taskId 形态或结构化块形状。
- * 返回 { hits }，hits 每项含 where、marker、excerpt（命中位置前后各 40 字符）。
+ * 通用入口（**eval 侧**）：扫描一批用户可见文本里的全部命中——内部词、任务编号形态、
+ * taskId 形态、结构化块形状。返回 { hits }，每项含 where、marker、excerpt。
  * 三批（write-loop / write-loop-scenarios / convergence-r1）与 wecom-sim 用户可见面守卫
  * 共用这一个入口；新增形状断言只改这里，批次侧零改动。
+ *
+ * **只判不丢**：eval 拿它判「模型有没有把内部形态说给用户」，不拦任何投递。生产出站口
+ * 不用它（2026-11-25 拆闸，理由见 `apps/server/task-completion-delivery.ts` 文件头）。
  */
 export function scanUserVisibleText(texts: readonly VisibleText[]): { hits: Hit[] } {
   return {

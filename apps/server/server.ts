@@ -1923,15 +1923,31 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       await drainNotifications();
       const session = await sessionFor(principalId, sessionId);
       const turn = await session.send(message.text);
+      /**
+       * 模型自己有没有说话（**在标记任何抑制之前**取——抑制的键只能是「有人已经告诉用户」）。
+       * 两种形状都算沉默：①正文空；②正文被会话出口清理成空、由会话用文件通知
+       * （`FILES_GENERATED_NOTICE`）顶上的情形（同一个常量、本文件下方投递话术替换也按它判）。
+       */
+      const modelSilent = turn.reply.trim() === '' || turn.reply === FILES_GENERATED_NOTICE;
       // B 切片：本回合已把结果交给模型的任务（快活，async 派发有完成投递）——完成投递
       // 对其抑制（一次性核销）。完成回调排在会话链上，读本集时本回合已结束（受理回合内
       // 不产生重复投递）。
-      for (const relayedTaskId of turn.relayedTaskIds ?? []) {
-        markRelayedInTurn(sessionKey, relayedTaskId);
-      }
-      // 快活失败/等补充：失败原因本回合已交给模型（模型会向用户说明）——主动推送不重复发。
-      for (const suppressedTaskId of turn.pushSuppressedTaskIds ?? []) {
-        markPushSuppressedInTurn(sessionKey, suppressedTaskId);
+      //
+      // **只有模型真的说了话才在这里标记**（2026-11-25 修 R-13 反黑箱）：此前无条件标记，
+      // 等于把「结果本回合交给模型了」当成「用户已经听说了」。模型沉默时事实确实交出过、
+      // 却没有任何人说出口，完成回调仍按 relayed 抑制 → 不唤醒、不投递、不进待注入队列，
+      // 用户永久收不到（叠加 turnProducedNothing 的 taskId 豁免与 settleInbound 记 done +
+      // 同 messageId 重投放映空终帧，彻底静默）。模型沉默时改由下方 modelSilent 分支在
+      // **兜底句确实送达后**补标记——送达失败就不标记，让完成回调照常唤醒 Main 把事实说给用户。
+      if (!modelSilent) {
+        for (const relayedTaskId of turn.relayedTaskIds ?? []) {
+          markRelayedInTurn(sessionKey, relayedTaskId);
+        }
+        // 快活失败/等补充：失败原因本回合已交给模型（模型会向用户说明）——主动推送不重复发。
+        // 同上：只在模型说了话时标记；沉默时由兜底分支按送达结果补。
+        for (const suppressedTaskId of turn.pushSuppressedTaskIds ?? []) {
+          markPushSuppressedInTurn(sessionKey, suppressedTaskId);
+        }
       }
       // A2b 观测：本回合被拦下的重试逐条落事件（对象/操作/执行层码/它的 retryable 声明）。
       // 告警归部署侧读这条事件；宿主不自建告警通道（也是「宁可停下让人介入」的可见面）。
@@ -1968,14 +1984,11 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       let reply = turn.reply;
       const files = turn.files ?? [];
       /**
-       * 模型自己有没有说话（**在看文件投递结果之前**取）——兜底判据只看这一条事实。
-       * 2026-11-19 只读审计 #8：此前兜底条件是「正文空 **且** 无文件」，于是「快活失败 +
-       * 模型沉默 + 本回合有文件」时失败话术永不送达（用户只看到文件，不知道失败了）。
-       * 沉默与有没有文件无关：有文件也照样要如实说一句。
-       * 两种形状都算沉默：①正文空；②正文被会话出口清理成空、由会话用文件通知
-       * （`FILES_GENERATED_NOTICE`）顶上的情形（同一个常量、本文件下方投递话术替换也按它判）。
+       * 兜底判据只看「模型这一回合有没有说话」这一条事实（2026-11-19 只读审计 #8：此前兜底
+       * 条件是「正文空 **且** 无文件」，于是「快活失败 + 模型沉默 + 本回合有文件」时失败话术
+       * 永不送达——用户只看到文件，不知道失败了）。沉默与有没有文件无关：有文件也照样要如实
+       * 说一句。定义已上移到 `session.send` 之后（抑制标记要用它）。
        */
-      const modelSilent = turn.reply.trim() === '' || turn.reply === FILES_GENERATED_NOTICE;
       // 缺陷 A：本回合等待窗口观察到的落定 + 模型本回合说了话 = 事实已交出 → 对应的
       // 状态变化唤醒一次性抑制（判定与标记机械：看 TurnResult.terminalObservedInTurn 与
       // modelSilent，不猜模型有没有「提到」这件事）。回复为空不标记（唤醒照发，不静默）；
@@ -2026,7 +2039,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           const relayedFailedFact = relayedFacts?.code !== undefined
             || relayedFacts?.reasonCode !== undefined
             || (relayedFacts?.reason !== undefined && relayedFacts.reason.trim() !== '');
-          await deliverTaskResult({
+          const fallbackDelivered = await deliverTaskResult({
             taskId: relayedTaskId,
             principalId,
             sessionId,
@@ -2037,6 +2050,27 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
             log,
           });
+          // 沉默兜底**没落地**必须可见（2026-11-25 grok blocking）：此前这里丢掉返回值，而本回合
+          // 稍早 `markRelayedInTurn` 已核销，完成回调会按「已转述」抑制后续唤醒——用户当轮终帧是
+          // 空的、之后也不会再推，而底账上任务已完成。这就是「没人知道」的静默终局。
+          // 四必守的 suppressed/failed 事件已带原因（非 live / 路由拆不出 / 剥空 / 发送失败），
+          // 这里补一条「沉默兜底 specifically 没送达」，让按 taskId 能对上是哪一件。
+          if (!fallbackDelivered) {
+            log({
+              event: 'task_completion_fallback_not_delivered',
+              taskId: relayedTaskId,
+              principalId,
+              sessionId,
+              factEvent: relayedFailedFact === true ? 'task_failure_fallback' : 'task_completion_fallback',
+            });
+            // **不补标记**（2026-11-25 修 R-13 反黑箱）：这句话没送到用户耳朵里，就没有任何人
+            // 告诉过他。此时若标记，完成回调会按 relayed 抑制 → 不唤醒、不投递、不进待注入队列，
+            // 用户永久收不到。不标记，完成回调就照常走 wakeAndDeliverStateChange，唤醒 Main 把
+            // 账本事实说给用户；模型仍说不出话时还有降级兜底那句（它自己也过四必守记账）。
+          } else {
+            // 送达成功 = 用户已经听说了 → 补标记，完成回调据此抑制，避免同一件事说两遍（缺陷 A）。
+            markRelayedInTurn(sessionKey, relayedTaskId);
+          }
         }
         // 快活**失败**同理（2026-11-19 复核相邻形状）：失败原因本回合已交给模型，推送抑制
         // 的前提（模型会转述）在模型沉默时不成立——逐条按既有失败话术如实送达
@@ -2072,7 +2106,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             ...(round?.reasonCode === undefined ? {} : { zeroExecReason: round.reasonCode }),
             ...(taskFailureFactOf(suppressedTaskId)?.name === undefined ? {} : { name: taskFailureFactOf(suppressedTaskId)!.name }),
           };
-          await deliverTaskFailure({
+          const failureDelivered = await deliverTaskFailure({
             taskId: suppressedTaskId,
             principalId,
             sessionId,
@@ -2083,6 +2117,24 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
             ...(deps.fileDelivery === undefined ? {} : { delivery: deps.fileDelivery }),
             log,
           });
+          // 同完成侧：沉默兜底没落地必须可见（2026-11-25 grok blocking）。失败兜底那句是宿主
+          // 固定话术、不含业务内容，被拦的概率比完成侧低，但丢返回值这件事两侧一样——
+          // 一并补上，不留下「只修了一条」的半覆盖。
+          if (!failureDelivered) {
+            log({
+              event: 'task_completion_fallback_not_delivered',
+              taskId: suppressedTaskId,
+              principalId,
+              sessionId,
+              factEvent: 'task_failure_fallback',
+            });
+            // **不补标记**（2026-11-25 修 R-13 反黑箱）：同完成侧——这句话没送到用户耳朵里，
+            // 就没有任何人告诉过他。不标记，失败回调就照常走唤醒出口，由 Main 把账本事实说给
+            // 用户；模型仍说不出话时还有降级兜底那句。
+          } else {
+            // 送达成功 = 用户已经听说了 → 补标记，失败回调据此抑制，避免同一件事说两遍。
+            markPushSuppressedInTurn(sessionKey, suppressedTaskId);
+          }
         }
       }
       // 本回合**一无所有**才判回合失败：正文为空 **且** 无文件 **且** 没有交办任何任务

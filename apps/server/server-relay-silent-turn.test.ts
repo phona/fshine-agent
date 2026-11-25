@@ -490,6 +490,68 @@ describe('快活 + 模型沉默（server 级）：不许静默终局', () => {
     }
   });
 
+  it('①b 沉默兜底**没落地**必须可见（2026-11-25 grok blocking）：投递面故障时不得静默终局', async () => {
+    const executor = new ImmediateExecutor();
+    const fx = await makeFixture({ waitMs: 1_500, executor });
+    // 让主动投递面在 sendText 上失败——沉默兜底那一句发不出去。
+    const original = fx.delivery.port.sendText!.bind(fx.delivery.port);
+    fx.delivery.port.sendText = async (route, text) => {
+      void original;
+      throw new Error('channel down');
+    };
+    try {
+      await fx.server.handler(incoming('m-1', ASK));
+
+      // 用户当轮什么都收不到（渠道故障，本来就发不出）——但不许「没人知道」。
+      expect(fx.delivery.sentTexts).toHaveLength(0);
+      // 沉默兜底没落地：一条可按 taskId 对账的事件（grok blocking 前这里是丢返回值、零事件）。
+      await vi.waitFor(() => {
+        const notDelivered = fx.logs.filter((line) => line['event'] === 'task_completion_fallback_not_delivered');
+        expect(notDelivered).toHaveLength(1);
+        expect(notDelivered[0]).toMatchObject({
+          principalId: 'wecom:user-a',
+          sessionId: 'wecom:conv-a',
+          factEvent: 'task_completion_fallback',
+        });
+        expect(notDelivered[0]!['taskId']).toBeTypeOf('string');
+      }, { timeout: 5_000 });
+      // 底层四必守照旧记 failed（不记 sent），两条事件一起构成「哪一件、为什么」。
+      expect(fx.logs.some((line) => line['event'] === 'task_result_delivery_failed')).toBe(true);
+      expect(fx.logs.some((line) => line['event'] === 'task_result_delivery_sent')).toBe(false);
+    } finally {
+      await fx.close();
+    }
+  });
+
+  it('①c 沉默兜底没送达 → 完成回调照常唤醒 Main（反黑箱：不许「没人告诉用户」）', async () => {
+    const executor = new ImmediateExecutor();
+    const fx = await makeFixture({ waitMs: 1_500, executor });
+    // 让主动投递面在 sendText 上失败——沉默兜底那一句发不出去。
+    fx.delivery.port.sendText = async () => { throw new Error('channel down'); };
+    let wakeFact = '';
+    const wakeFx = fx;
+    try {
+      await wakeFx.server.handler(incoming('m-1', ASK));
+      // 兜底没落地：事件在（按 taskId 可对账）。
+      await vi.waitFor(() => {
+        expect(wakeFx.logs.some((line) => line['event'] === 'task_completion_fallback_not_delivered')).toBe(true);
+      }, { timeout: 5_000 });
+      // **关键**：没有「已转述」抑制——完成回调必须照常唤醒 Main 把账本事实说给用户。
+      // 修前：markRelayedInTurn 无条件标记 → 完成回调按 relayed 抑制 → 不唤醒、不投递、
+      // 不进待注入队列 → 用户永久收不到（R-13 反黑箱）。
+      await vi.waitFor(() => {
+        const suppressed = wakeFx.logs.filter((line) => line['event'] === 'task_result_delivery_suppressed'
+          && line['reason'] === 'relayed_in_turn');
+        expect(suppressed, '沉默兜底没送达却仍按「已转述」抑制——用户永远收不到').toHaveLength(0);
+        const woken = wakeFx.logs.filter((line) => line['event'] === 'task_completion_wake');
+        expect(woken.length, '完成回调未唤醒 Main——静默终局').toBeGreaterThan(0);
+      }, { timeout: 8_000 });
+      wakeFact = '';
+    } finally {
+      await fx.close();
+    }
+  });
+
   it('② 不回归：受理未落定（accepted）+ 空正文 → 不判失败、零投递（欠他一条，落定后由唤醒送达）', async () => {
     const executor = new GatedExecutor();
     // 窗口 50ms：窗口内不落定 → 受理回执（无 summary，不是 relayed）。

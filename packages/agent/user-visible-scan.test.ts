@@ -1,5 +1,5 @@
 /**
- * 用户可见文本「内部词」通用守卫的绊线（scripts/eval/shared/internal-terms.test.ts）。
+ * 用户可见文本「内部词」通用守卫的绊线（原 scripts/eval/shared/internal-terms.test.ts，2026-11-25 随闸搬进 packages/agent）。
  *
  * 两部分：
  *   ① 匹配器单测：正常文本零命中；「执行层确认过了。」命中 marker 执行层；taskId 形态
@@ -7,7 +7,7 @@
  *      （改词表 / 改 findLiteralHits / 改 excerpt 半径 / 去掉 taskId 形态判据，本组用例即红）。
  *   ② 静态守卫：一份**显式文件清单**（write-loop / write-loop-scenarios / convergence-r1 runner
  *      + live-replay）逐个用 **TypeScript AST** 断言文件里确实存在对扫描函数的 CallExpression；
- *      并用 glob 枚举 `scripts/eval/real/write-loop*.ts` 与 `scripts/eval/convergence-r1/runner.ts`，
+ *      并用 glob 枚举 `scripts/eval/real/write-loop*.ts` 与 `scripts/eval/convergence-r1/runner.ts` 与生产出站口，
  *      断言这些文件都在清单里——新增批次忘了接入会红，删掉调用也会红。
  *
  * 「真解析」而非文本包含：用 typescript 自带 createSourceFile 解析源码（不落盘、不 emit），
@@ -21,11 +21,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-import { renderNotification } from '../../../packages/agent/src/notification-render';
-import { NOTIFICATION_KINDS, type NotificationKind } from '../../../packages/agent/src/notifications';
-import { findLiteralHits, INTERNAL_WORDS, scanUserVisibleText, TOOL_BLOCK_MARKERS } from './internal-terms';
+import { renderNotification } from './src/notification-render';
+import { NOTIFICATION_KINDS, type NotificationKind } from './src/notifications';
+import { findLiteralHits, INTERNAL_WORDS, scanUserVisibleText, TOOL_BLOCK_MARKERS } from './src/user-visible-scan';
 
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+// 本文件随闸从 scripts/eval/shared 搬进 packages/agent（2026-11-25），根少一级。
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 function repo(relative: string): string {
   return path.join(REPO_ROOT, relative);
@@ -289,9 +290,12 @@ describe('静态守卫：所有用户级批次都接入了扫描', () => {
   it('每个批次入口都从单一来源导入了 scanUserVisibleText / INTERNAL_WORDS', () => {
     for (const entry of WIRING.filter((entry) => entry.expectScan)) {
       const source = readFileSync(repo(entry.file), 'utf8');
-      const importsFromShared = /from ['"][^'"]*shared\/internal-terms['"]/u.test(source)
-        || /from ['"][^'"]*live-replay['"]/u.test(source); // live-replay 转发词表给旧测试
-      expect(importsFromShared, `${entry.file} 未从 shared/internal-terms 单一来源导入`).toBe(true);
+      // 只认搬后的唯一路径 `packages/agent/src/user-visible-scan`（2026-11-25 grok major：
+      // 曾放行 `shared/internal-terms`——那路径已随 git mv 离开仓库，断言却继续认它，
+      // eval 侧只要重新出现该 import 并仍有同名调用，词表就能再分出第二份而守卫全绿）。
+      // 不再接受 live-replay：那是抽离前的历史来源，今天的单一来源只有 user-visible-scan。
+      const importsFromGate = /from ['"][^'"]*user-visible-scan['"]/u.test(source);
+      expect(importsFromGate, `${entry.file} 未从 user-visible-scan 单一来源导入`).toBe(true);
     }
   });
 
@@ -305,7 +309,10 @@ describe('静态守卫：所有用户级批次都接入了扫描', () => {
     for (const file of enumerated) {
       expect(listed, `新增/现存批次 ${file} 未登记进通用泄漏守卫清单（忘了接入）`).toContain(file);
     }
-    // 清单里恰五个 expectScan 的批次入口被登记（防止把 batches 全标 false 绕过守卫）。
+    // 清单里恰五个 expectScan 的入口被登记（全是 eval 批次；防止把入口全标 false 绕过
+    // 守卫）。**2026-11-25 晚拆闸后这里不再有生产条目**：曾经加过一条 live 出站口，随闸一起删
+    // （见 apps/server/task-completion-delivery.ts 文件头的三条理由）。glob 覆盖全部五项，
+    // 所以「忘了接入」由 glob 那条兜，计数这条兜「全标 false」。
     expect(WIRING.filter((entry) => entry.expectScan)).toHaveLength(5);
   });
 });

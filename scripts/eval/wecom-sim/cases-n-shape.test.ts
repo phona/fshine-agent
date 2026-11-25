@@ -72,7 +72,7 @@ describe('N 组·对话形态守卫的活体性（要求 D）', () => {
   }, 60_000);
 
   it('N-3 注入带 taskId 原文的推送：泄漏扫描给出命中（守卫活体性；负例控制）', async () => {
-    // 2026-11-21 用户可见面泄漏守卫（与三批共用 shared/internal-terms 单一入口）的活体性：
+    // 2026-11-21 用户可见面泄漏守卫（与三批共用 packages/agent/src/user-visible-scan 单一入口）的活体性：
     // 人为把 taskId 原文（稳定性批次实测泄漏形态：task_ + ≥8 位标识段）送进用户可见面，
     // leakHits 必须给出命中；解除自动守卫后由本用例自行消费读数（afterEach 不再抛）。
     const sim = await runDeliveredCase('n3');
