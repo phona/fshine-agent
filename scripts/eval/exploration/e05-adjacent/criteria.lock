@@ -1,8 +1,8 @@
 {
   "generatedBy": "node --import tsx scripts/eval/exploration/freeze.ts <suite-dir>",
   "suiteId": "e05-adjacent",
-  "frozenAt": "2026-11-14T01:20:38.026Z",
-  "criteriaSha256": "9d4b0824a429658e7f633ff8af928fd3ad94b633f02c95f151866679bb8d6cd4",
+  "frozenAt": "2026-11-25T14:37:05.856Z",
+  "criteriaSha256": "8d7a00d7d3a5483909fe25d43323314288145ef53742c710c325163a4c842398",
   "casesSha256": "b011c46eb38d8ea5d2d7e26e2ef52332ffcfde7e72bcb485789cb39a7eae9939",
   "files": {
     "scripts/eval/exploration/e05-adjacent/suite.ts": "beae9099f06c85f3a97ec7f57462e2ffbb405738521e9eb23c9a69fdc25425d3",
@@ -15,11 +15,11 @@
     "scripts/eval/exploration/e05-adjacent/cases/X07.ts": "9a19d2d25faff2f5119cf67b3371eea78507c6c6b96bbb1b2e3c79273c46fff1",
     "scripts/eval/exploration/e05-adjacent/cases/X08.ts": "05f3a219794b8b520ba89161011aba032db8b0a6643a70f2c8629fc7c3f52434",
     "scripts/eval/exploration/suite-contract.ts": "a2313092924cb7f4a907f261eb75b64bb5a6efc66a7115b79380928d270cd430",
-    "scripts/eval/convergence-r1/judge.ts": "d16871e63a2d62eeb8d52aff6964fc7dbe4ad83abc90407dfe4ed9e38b5398c8",
-    "scripts/eval/convergence-r1/criteria.ts": "f5daa2a2d8377d7250150b6d907126dea26e652dcb8493f32801a5ddf1d68025",
-    "scripts/eval/convergence-r1/cases.ts": "e9bf5c79e07d2b5149eca3eb81741f7f105e5abcec0760fb7a6187c462a69a63",
+    "scripts/eval/convergence-r1/judge.ts": "fb7f4637763ca1c0c98dc91848260589e5b786520468293bfd5fb2f5336202f5",
+    "scripts/eval/convergence-r1/criteria.ts": "7ceb7a52bd7a9f2724bca0f74af615c25700761060cafee03d6e8e0916167fea",
+    "scripts/eval/convergence-r1/cases.ts": "5bd3b249f44ae7efa9ac0ecc1547dd382d478d87ce065094228239c538adbc02",
     "scripts/eval/convergence-r1/hash.ts": "e03bdcacc362515796cf6d248f2244a2b31b3e19ceddaee32cd7ec6795376637",
-    "scripts/eval/convergence-r1/evidence.ts": "4003a8b78ef15a46649a83232cf0db0506c1d932d497e369e06a8289a6689418",
+    "scripts/eval/convergence-r1/evidence.ts": "3213c3913a00e4397a1d9c3fcf88db7902653bf544c17b5a0315918896f4cae7",
     "scripts/eval/safety-gate.ts": "593602225bdd7c1d673a01139506be552065001908fdf509f14cb80c6295a6ca"
   },
   "note": "冻结后不得修改本套件的 cases 与共享判定面；runner 校验两聚合哈希，不一致即拒绝运行（fail-closed）。"

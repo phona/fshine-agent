@@ -12,7 +12,8 @@
 | 2026-11-13 | Eval 入口收口（§十四） | 真模型 workflow 改挂 `npm run eval:user`；eval-measure 退役；不重建评测平台 | `../history/decision-log-part01-2026-11_undated.md:736` |
 | 2026-11-13 | R1 旧协议与旧治理清理（§十五） | 删旧 a2a 协议、contracts 未用面、generic-mock 评测簇；覆盖面由用户级 eval 承接；桥键闭集守卫缺口如实登记 | `../history/decision-log-part01-2026-11_undated.md:762` |
 | 2026-11-13 | convergence-r1 判据冻结（§十六；2026-11-18 扩到 14 例） | 14 用例（E01–E14，2026-11-18 由 12 扩到 14）+ 六维判定器；`criteriaSha256`/`casesSha256` 冻结后不得改；判定器缺陷按「修复→全样本复判→重切」流程处理 | `../history/decision-log-part02-2026-11.md:5` |
-| 2026-11-13 | R2：E05 边界与 task.status（§十七） | 歧义标识先交执行层裁决（`needs_input` + candidates），不猜候选；判据 v1 不变；task.status 语义边界登记 | `../history/decision-log-part02-2026-11.md:40` |
+| 2026-11-13 | R2：E05 边界与 task.status（§十七） | 歧义标识先交执行层裁决（`needs_input` + candidates），不猜候选；~~判据 v1 不变~~ **E05 那半已被 2026-11-25 §17.6 取代（改立 criteria.2、澄清优先）**；task.status 语义边界登记 | `../history/decision-log-part02-2026-11.md:40` |
+| 2026-11-25 | **E05 判据 v2：澄清优先（§17.6；取代上一行 E05 那半）** | §17.1 第 5 条预见的「澄清优先」变更已发生：立 `criteria.2` 保留 v1 可对照；不再判「未委派」（正解与「问用户消歧接口」都通过）；**硬线最终只剩一条**——确认前查候选（`FAIL_WRONG_OBJECT`）；检查点改条件式（有执行行才验 candidates）；提示词三种放法实测无可靠改善故不 landing。曾加的「零执行且无提问」硬线经 grok 三轮 blocking 后拆除（提问检测可被问号旁路），残余登记为债务 V-2 | `../history/decision-log-part02-2026-11.md:518` |
 | 2026-11-14 | R3 收官裁定与只读准备档（§二十二–§二十四，多轮） | M01=a（复用同任务内有效事实）、E01=a（修判据形态）、真实只读仅准备档、holdout 封存；E01/M01 按裁定落实 | `../history/decision-log-part02-2026-11.md:120–150` |
 | 2026-11-14 | P1–P4 产品切片（§十八–§二十一，多轮） | 任务查看 / 结果交付 / `--redo` 重新交办 / 只读 ops 快照落地；`--redo` 是重新交办，不是人工接管或会话续跑 | `../history/decision-log-part02-2026-11.md:83–119` |
 | 2026-11-14 | R4 切片 P0–P7b（§二十七–§四十一，多轮） | 装配同源、S4 统计四态、Task Registry 契约冻结、后台任务、通知与完整验收全部落地；唯一未落地的 P8 转 issue #71 | `../history/decision-log-part02-2026-11.md:172–341` |

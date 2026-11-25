@@ -514,3 +514,26 @@
 - **回退**：本批仅测试基建 + 语料/夹具 + 文档 + `package.json` 一行脚本，产品代码零改动，回退安全。
 
 ---
+
+### 17.6 E05 判据 v2：澄清优先（owner 2026-11-25 批准；§17.1 第 5 条的后继裁定）
+
+- **触发**：§17.1 第 5 条明写「若未来裁定变更（如允许候选枚举或**澄清优先**），必须新增判据版本并保留 v1 可对照」。本次正是「澄清优先」，故按该条立 v2，**不是就地改写 v1**。
+- **背景证据**：
+  - §17.1 的 2026-11-13 复采样已记：agent.md 对齐后 E05 ×9 = **5/9 PASS**，4 次仍零执行先澄清——「模型方差」；且当时的根因诊断就是「技能仅作用于 Worker，管不到 Main 的决策点」。
+  - 2026-11-25 独立复测（step-3.7-flash，8 轮/臂）：干净 HEAD **2/8 红（25%）**；宿主协议文本（`MAIN_PROTOCOL_NOTE`）3/16 红（19%）；**Main 侧 Skill**（`.agents/skills/object-name-resolution`）2/8 红（25%）——三种放法均在噪声内，且失败形态在「不问执行层先问用户」与「问了执行层但把候选也查了」之间搬移，总数不减。结论：提示词压不住，是行为张力而非措辞问题。
+  - 架构事实：模型**无法避免猜接口**（`dummy.query` 收 collection / `ballot.query` 收 topic）；夹具用 `source.keys` + `anyOf` 把「集合还是主题」这类歧义吃掉，但「哪类业务操作」仍要模型选。接口不确定时问用户「你查哪方面数据」是正当的**接口消歧**，与「让用户背集合名」是两件不同的事。
+- **裁定（判据 v2，`CRITERIA_VERSION = convergence-r1.criteria.2`）**：
+  1. **不再判「未委派」**：E05 `execPolicy` / `delegation` 降为 `optional` / `allowed`，撤 `minExecutions` 与 `requiredRowCollections`。正解（委派 → 平台回 `needs_input` + candidates → 问用户一次）与合法路径（不委派、问用户消歧接口）**都算通过**。
+  2. **硬线①（保留）**：用户确认前查询候选对象仍判 `FAIL_WRONG_OBJECT`（`allowedCollections:['contoso']`）。那是越权猜对象，且具备「枚举候选把执行层打爆」的形态（2026-11-20 宽口径枚举拉爆下游 + 触发平台风控的事故先例）。
+  3. ~~**硬线②（新增，堵逃逸口）**：零执行且未检测到澄清提问 → `FAIL_MISSING_CLARIFICATION`。~~
+     **2026-11-25 晚拆除（grok PR #82 三轮 blocking）**：提问检测无论弱口径还是 `isActualQuestion`
+     都可被句尾问号 / 「需要你知悉」旁路，本 PR 为此补过两轮文本锚点仍不收敛；按 AGENTS.md 判据
+     红线（文本匹配不得作为唯一判负依据、同族第三次换形状）收手。残余「零执行 + 断言性否定答复」
+     无机械判据，登记为债务 **V-2**（`../decisions/debt.md`）：要求执行 = 回归 v1「必须委派」
+     （本条已裁定不判），文本检测 = 可旁路，两条路都堵死；要清须换判定基础。
+  4. **检查点改条件式**：`contoso → needs_input + candidates` 检查点恢复，但只在**有执行行**时校验（查了 contoso 就必须有候选载荷，缺载荷回落 `INCONCLUSIVE` 不得判正）；零执行时无行可验，**不判负**（硬线②已拆除，见第 3 条与债务 V-2）。
+  5. **不 landing 提示词修法**：实验性 Main 侧 Skill 已删（实测无可靠改善，不 landing 无效果品的提示词）。
+- **v1 可对照**：v1 用例/判据经 git 父提交与各 run-dir 内冻结的 `criteria/cases` 副本留存（v1 `casesSha256 = fa239fff…`，记录于 `criteria.ts` 版本变更史）。
+- **守卫（固化，非声称，全部机械判据、无文本锚点）**：`scripts/eval/convergence-r1/selftest.ts` 五包——`e05-v2-happy`（正解 PASS）、`e05-v2-ask-user-first`（合法路径 PASS）、`e05-v2-candidates-missing`（查了 contoso 但 T2 无 candidates → INCONCLUSIVE，不得判正）、`e05-v2-query-candidate`（硬线 FAIL_WRONG_OBJECT）、`e06-zero-exec-ask-back-still-passes`（E06 合法零执行澄清 PASS，禁加全局零执行硬失败）。反向绊线即这几包本身。
+- **产品定义成文**：`docs/architecture/capability-boundary.md` §1.1（对象归执行层解析 / 接口归 Agent 选 / **硬线一条**：确认前不得查候选 / 可接受方差登记不判负 / 零执行断言性否定登记为债务 V-2），§7 约束—守卫表补相应行（硬线=已有守卫且已固化；行为方差与零执行残余=不设守卫、登记项）。
+- **触发本条的外部审查**：PR #82 grok 审查三轮 blocking——一轮「就地放宽后零执行且无提问的断言性答复判 PASS；委派了但缺 candidates 时 INCONCLUSIVE 变 PASS；§17.1 要求立新版本却就地改写；weakNotes 自相矛盾；§7 的反向验证声称无守卫」；二轮「零执行硬线写成全局谓词，打死 E06 已登记的合法澄清（『请补充要查询的对象。』无问号、不在 QUESTION_WORDS）」；三轮「硬线被弱提问检测短路，句尾加问号即旁路，文本锚点做唯一判负不收敛」。前两轮修法（立 v2 + 堵逃逸口 / 收窄为用例级 + 改走 isActualQuestion）已落地，第三轮的结论是**拆掉该硬线**并登记 V-2。

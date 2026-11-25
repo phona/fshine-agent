@@ -633,6 +633,33 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   for (const checkpoint of caseDef.expected.checkpoints ?? []) {
     const entry = pickCheckpointRow(checkpoint.collection, checkpoint.status);
     if (!entry) {
+      // 2026-11-25（E05 判据 v2）：零执行且用例允许零执行时（execPolicy !== 'required'），
+      // 没有行可验 = 走了「不委派、直接问用户消歧」这条合法路径，**不判负**。
+      // （曾打算让位给「零执行必须提问」判据，已随该硬线一并拆除，见债务 V-2。）
+      // 但**候选名必须有 T2 载荷背书**（grok 五轮 blocking）：零执行却在回复里点名冻结候选
+      // （contoso-trade / contoso-logistics）= 自造澄清选项清单——2026-11-20 记录过的失败形态，
+      // 判据放宽后一度检测不到。封闭核对，不加任何提问词表。
+      if (executionRows.length === 0 && caseDef.execPolicy !== 'required') {
+        const backed = new Set<string>();
+        for (const call of workerCalls) {
+          const data = (call as { result?: { data?: { candidates?: unknown } } }).result?.data;
+          const candidates = data?.['candidates'];
+          if (Array.isArray(candidates)) {
+            for (const candidate of candidates) {
+              backed.add(candidate !== null && typeof candidate === 'object'
+                ? String((candidate as { name?: unknown }).name ?? '')
+                : String(candidate));
+            }
+          }
+        }
+        for (const candidate of checkpoint.candidates ?? []) {
+          if (lastReply.includes(candidate) && !backed.has(candidate)) {
+            addCode('FAIL_FABRICATED_DATA', ['③数据正确性'],
+              `零执行却在回复中点名候选 ${candidate}，而 T2 无对应 candidates 载荷——候选名只能来自执行层返回，不得自行编造清单`);
+          }
+        }
+        continue;
+      }
       addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `缺少对 ${checkpoint.collection} 的执行行，无法核对载荷`);
       continue;
     }
@@ -871,6 +898,13 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   const lastSentences = splitSentences(lastReply);
   const questionTurns = [...turnReplies.entries()].filter(([, text]) => splitSentences(text).some((sentence) => sentence.question));
   if (caseDef.clarification === 'expected' && !questionTurns.some(([turn]) => turn === replies.length)) {
+    // 2026-11-25 判据 v2 曾在此加过硬线 FAIL_MISSING_CLARIFICATION（零执行且无提问 → 判负），
+    // 用来堵「contoso 目前没有可展示的记录」这种零执行断言性答复。**已按 grok 三轮 blocking 拆除**：
+    // 提问检测无论用弱口径（问号/QUESTION_WORDS）还是 isActualQuestion，都可被「句尾加个问号」
+    // 或「需要你知悉」这类无限措辞空间旁路——本 PR 为此补过两轮文本锚点仍不收敛，按 AGENTS.md
+    // 判据红线（文本匹配不得作为唯一判负依据；同族第三次换形状、不补词表）收手。
+    // 残余风险登记为债务 V-2（docs/decisions/debt.md）：零执行 + 断言性否定答复**没有机械判据**——
+    // 要求执行 = 回归 v1「必须委派」（owner 已裁定不判），文本检测 = 可旁路。故只保留弱告警。
     warn('expected_clarification_missing：未检测到澄清提问（词面判定，弱）');
   }
   if (caseDef.clarification === 'forbidden') {
