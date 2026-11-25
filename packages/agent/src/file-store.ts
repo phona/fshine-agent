@@ -53,7 +53,7 @@ import {
 import path from 'node:path';
 import type { FileRefResolution, FileRefRow, TaskStore } from '@fshine/core';
 import { DEFAULT_RUNTIME_CONFIG, fileRefTtlMsOf } from './resource-policy';
-// 严格包含判定取全仓唯一一份（issue #72 合并；本模块原有的嵌套副本注释自述
+// 严格包含判定取具名 helper 的唯一导出（issue #72 合并；本模块原有的嵌套副本注释自述
 // 「与 skills.ts 的 isInside 同语义」，归属理由见 skills.ts 的 isInside 注释）。
 import { isInside } from './skills';
 

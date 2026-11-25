@@ -101,7 +101,8 @@ export interface CleanupOneRunDirInput extends CleanupRunDirsInput {
 }
 
 /**
- * 抛出值 → 机械原因原文（**全仓唯一一份**，issue #72 合并）。
+ * 抛出值 → 机械原因原文（issue #72 合并了 6 份逐字相同的私有副本；**「唯一」只对具名
+ * helper 成立**——守卫按函数名钉声明，不锁同义表达式，见下段）。
  *
  * 原来是 6 份逐字相同的私有副本：本模块、`file-ref-cleanup.ts`（同一套保守纪律的姊妹
  * 执行器）、`scripts/cleanup-runs.ts` 与 `apps/server/startup-sweep.ts`（这两个清扫入口
@@ -109,6 +110,17 @@ export interface CleanupOneRunDirInput extends CleanupRunDirsInput {
  * 这六处都在 `packages/agent/src` 的值图内（脚本/服务层本来就单向依赖它），**就近归属**
  * 到消费方最多的同层模块，不另建 utils 万能桶；定义点集合由
  * `packages/agent/dead-code-merge.test.ts` 钉住，再抄一份即红。
+ *
+ *
+ * **守卫真实锁住的范围（2026-11-25 debt R-3 改口，grok major）**：
+ * `dead-code-merge.test.ts` 的 `expectSites('errorText')` 只按**函数名**收集声明、钉住
+ * 「具名 helper 只有这一处导出」，**不锁同义表达式**——仓里仍有约 140 处内联的
+ * `error instanceof Error ? error.message : String(error)`（`packages/core/src/config.ts`、
+ * `packages/channel-wecom/src/adapter.ts`、`apps/server/server.ts`、各 eval/CLI 脚本的 catch
+ * 里都有），改这个 helper 改不到它们。**本文件自己的写出/删除失败路径已走 helper**
+ * （三处：probe / delete_failed / skipped_io_error），不在那 140 里。按名字逐处扫同义写法没有
+ * 终止条件（grok 原话）；真要做须先定 helper 归属层（core 不能反向依赖 agent）并换判定
+ * （归一化函数体或表达式登记），那是一轮独立决策，不在这里假装已完成。
  *
  * 语义边界：只做「`Error` 取 message，其余 `String()`」——不解释、不归类、不套用户
  * 话术；产出的原文只进结构化事件的 `reason` 字段与 CLI stderr（机械事实面）。

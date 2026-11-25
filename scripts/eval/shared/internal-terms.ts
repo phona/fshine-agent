@@ -117,27 +117,35 @@ export function findTaskIdShapeHits(texts: readonly VisibleText[]): Hit[] {
  *
  * 判据是**机械形状**（格式/泄漏类），不判语义：
  *   · 工具调用块标记：上面那四条封闭表；
- *   · JSON 结构字面量：以引号成员开头的 `{…}` / `[…`（**不要求冒号**——`["a","b"]` 也是
- *     结构字面量）；两个正则只记一次，同一段不双计。
+ *   · ~~JSON 结构字面量~~：2026-11-25 删（debt R-6）——假设形态、没有任何实测泄漏原文
+ *     佐证，见 findStructuredBlockHits 的注释。
  *
  * 明确**不**判的：模型自己说「系统不支持 X」（编造限制）——那是语义行为，判据红线禁止用
  * 词/正则判语义；只能靠「不给它编造的机会」（卸载上下文，见 factword 那条链）+ 用户级 eval
  * 间接反映。同理不判 ``` 代码围栏本身（用户让模型写代码时围栏是合规产物）。
  *
- * 取舍说明：这是**严闸**。若某天真实执行层的提案摘要里合法地含 JSON 字面量，这里会红——
- * 那是要浮出来裁决的（要么执行层改摘要文案，要么这里加白名单并注明理由），不是悄悄放宽。
+ * 取舍说明：这是**严闸**——只拦实测见过的形状，不拦假设形状（2026-11-25 debt R-6 删掉
+ * JSON 字面量那半后同步改口）。原「提案摘要合法含 JSON 会红」描述的是已删除的正则，不再成立。
  */
 
 /** 工具调用块标记（2026-11-20 live 实测冻结的四条；原 live-replay TOOL_MARKERS）。 */
 export const TOOL_BLOCK_MARKERS: readonly string[] = ['<｜｜DSML', '<｜tool', '<invoke', 'parameter name='];
 
-/** 以引号成员开头的对象/数组字面量（`{"a":1}` / `["a"` / `['a']` / `["a","b"]`）。 */
-export const JSON_LITERAL_START_RE = /[{\[]\s*['"][^'"\n]{0,48}['"]/gu;
-
-/** 行首对象/数组 + 引号成员（JSON 块的一行）。与上行重叠时只记一次（见 findStructuredBlockHits）。 */
-export const JSON_BLOCK_LINE_RE = /(?:^|\n)[ \t]*[{\[]\s*['"][^'"\n]{0,48}['"]/gu;
-
-/** 在用户可见文本里找结构化块形状的命中（marker = 命中的那段文本）。 */
+/**
+ * 在用户可见文本里找结构化块形状的命中（marker = 命中的那段文本）。
+ *
+ * **只有实测冻结的四条工具块标记**（2026-11-25 debt R-6 删掉 JSON 那半）。
+ *
+ * 为什么删：JSON 字面量（`{"a":1` / `["a","b"]`）是本轮**假设**的形状——没有任何一次实测
+ * 泄漏的原文佐证；而它的判据有两个已暴露的缺陷：放宽冒号条件会把业务文本里的无冒号引语
+ * （`{"备注"}`）打红，首键超 48 字的对象又漏。按 change-safety F8「判据扩张用实测原文做
+ * 表征锁，假设形态不进判据」删掉。
+ *
+ * **注意**：这里没有「实测零命中」的份数claim——`leak.json` 只在跑批目录里、不进检出，
+ * 无法在仓内复核。可复核的判据是**方向性**的：工具块四条有 2026-11-20 live 实测原文
+ * （`live-replay.test.ts` 的绊线），JSON 一条都没有。真出现 JSON 泄漏那天，用泄漏原文做
+ * 绊线再加回来。
+ */
 export function findStructuredBlockHits(texts: readonly VisibleText[]): Hit[] {
   const hits: Hit[] = [];
   for (const { where, text } of texts) {
@@ -148,20 +156,6 @@ export function findStructuredBlockHits(texts: readonly VisibleText[]): Hit[] {
         if (index < 0) break;
         hits.push({ where, marker, excerpt: excerptAt(text, index, marker.length) });
         from = index + marker.length;
-      }
-    }
-    // 两个 JSON 形状按「起点」去重：行首那条常常是字面量那条的子串（同一段 `{"a":1` 在
-    // 行首会同时被两条正则命中），双计会让「命中数」变成噪声。先收字面量、再收行首，
-    // 起点已出现过就跳过。
-    const seenStarts = new Set<number>();
-    for (const shape of [JSON_LITERAL_START_RE, JSON_BLOCK_LINE_RE]) {
-      shape.lastIndex = 0; // global 正则先归零，避免跨文本状态泄漏。
-      for (const match of text.matchAll(shape)) {
-        const index = match.index ?? 0;
-        if (seenStarts.has(index)) continue;
-        seenStarts.add(index);
-        const marker = match[0].trim();
-        hits.push({ where, marker, excerpt: excerptAt(text, index, marker.length) });
       }
     }
   }

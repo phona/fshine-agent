@@ -389,7 +389,7 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
     expect(text).toContain('- 「任务结果」是任务底账持久化的执行层汇报原文；「最终回复」是 Main 在回合收尾时实际发送给用户的回复全文（逐字存档）。');
     expect(text).toContain('- 历史任务没有最终回复存档（显示「该任务无最终回复存档」），交付件不以执行层汇报冒充 Main 回复。');
     expect(text).toContain('- 事实行只映射机械事实（等待/租约/机械时刻/汇报存档/执行行原值），不做任务结论；做没做成读执行步骤与任务结果原文。');
-    expect(text).toContain('- 时间以本机时区显示；执行步骤附起止时刻（底账未记录时刻的执行行显示「无时刻」）。');
+    expect(text).toContain('- 时间以本机时区显示；执行步骤附该次真实执行的起止时刻（底账未记录时刻的历史行显示「无时刻」；长任务受理行只显示受理时刻——它的结束时刻是回执到达、不是执行结束）。');
     expect(text).not.toContain('机械事实：');
     expect(text).not.toContain('task_ok');
   });
@@ -452,7 +452,7 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
       '- 「任务结果」是任务底账持久化的执行层汇报原文；「最终回复」是 Main 在回合收尾时实际发送给用户的回复全文（逐字存档）。',
       '- 历史任务没有最终回复存档（显示「该任务无最终回复存档」），交付件不以执行层汇报冒充 Main 回复。',
       '- 事实行只映射机械事实（等待/租约/机械时刻/汇报存档/执行行原值），不做任务结论；做没做成读执行步骤与任务结果原文。',
-      '- 时间以本机时区显示；执行步骤附起止时刻（底账未记录时刻的执行行显示「无时刻」）。',
+      '- 时间以本机时区显示；执行步骤附该次真实执行的起止时刻（底账未记录时刻的历史行显示「无时刻」；长任务受理行只显示受理时刻——它的结束时刻是回执到达、不是执行结束）。',
     ].join('\n');
     const text = renderTaskDeliverable(failed, { now: new Date('2026-11-24T09:30:00.000Z') });
     // 恰好多出这一行（不多不少）：否则「结构不变」会被「整行消失」冒充。
@@ -521,6 +521,33 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
     }
   });
 
+  it('accepted（长任务受理）行只显示受理时刻，不渲染成区间', () => {
+    // 2026-11-25 debt R-1：受理行的 finishedAt 是**回执到达一刻**，不是执行结束。渲染成
+    // 「起 → 止」会被读成「这个长任务只跑了受理往返那一下」；状态词已是「已受理（长任务
+    // 进行中）」，时刻只回答「什么时候接的单」。
+    // **跨分钟**的受理区间（2026-11-25 grok major）：同分钟的样本即使删掉 accepted 分支
+    // 也会被「亚分钟折叠」显示成单点，金样分不出是哪个分支起的作用。只有跨分钟时才可能画
+    // 出「起 → 止」——那正是会被读成「长任务只跑了一小段」的形状。
+    const accepted = record({
+      taskId: 'task_accepted',
+      executions: [{
+        requestId: 'req_accepted',
+        operation: 'dummy.prepare',
+        status: 'accepted',
+        startedAt: '2026-11-13T16:00:01.000Z',
+        finishedAt: '2026-11-13T16:07:03.000Z',
+      }],
+    });
+    const point = formatLocalTime('2026-11-13T16:00:01.000Z');
+    for (const text of [renderTaskDetail(accepted), renderTaskDeliverable(accepted)]) {
+      const section = text.split('执行步骤：')[1]!.split('任务结果')[0]!;
+      expect(section).toContain(point);
+      expect(section).not.toContain('→'); // 不渲染区间（跨分钟也不会）
+      expect(section).not.toContain(formatLocalTime('2026-11-13T16:07:03.000Z')); // 回执时刻不出现
+      expect(section).toContain('已受理');
+    }
+  });
+
   it('README 口径（issue #69）：执行步骤附起止时刻；不再声称「底账未存每步时间戳」', () => {
     // 文本锚点四件事（AGENTS.md 判据红线）：
     //   ① 想拦的失败形态：README 仍写「底账未存每步时间戳 / 最终回复当前不落库」，而实现已落
@@ -532,7 +559,8 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
     //   ④ 负例绊线：把 README 改回旧两句 → 本用例红（反向绊线已实测）。
     const flat = readFileSync(path.join(REPO_ROOT, 'README.md'), 'utf8').replace(/\s+/gu, '');
     expect(flat).toContain(
-      '执行步骤按落账顺序列出，并附该次真实执行的起止时刻（底账未记录时刻的历史行显示「无时刻」）',
+      '执行步骤按落账顺序列出，并附该次真实执行的起止时刻（底账未记录时刻的历史行显示「无时刻」；'
+      + '长任务受理行只显示受理时刻——它的结束时刻是回执到达、不是执行结束）',
     );
     expect(flat).toContain('Main给用户的最终回复已逐字存档；历史任务无存档');
     expect(flat).not.toContain('底账未存每步时间戳');

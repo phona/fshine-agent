@@ -177,7 +177,7 @@ describe('taskId 形态扫描（task_ + ≥8 位标识段；不扩词表，同�
 //     判据 = 机械形状（格式/泄漏类），不判语义；与词表/编号/taskId 并列，同一入口。
 // ---------------------------------------------------------------------------
 
-describe('结构化块形状扫描（工具调用块标记 + JSON 字面量；同一 scanUserVisibleText 入口）', () => {
+describe('结构化块形状扫描（工具调用块标记；JSON 假设形状已删，同一 scanUserVisibleText 入口）', () => {
   it('工具调用块标记：**live 实测冻结的原文**（N1 四条）逐条命中', () => {
     // 判据扩张必须用实测原文做表征锁（change-safety F8）。这四条是 2026-11-20 live 首验
     // 从真实泄漏里拿到的形状（原 live-replay TOOL_MARKERS，已冻结），不是假设形态。
@@ -205,20 +205,24 @@ describe('结构化块形状扫描（工具调用块标记 + JSON 字面量；�
     expect(hits.some((hit) => hit.excerpt.includes('<invoke'))).toBe(true);
   });
 
-  it('JSON 结构字面量（对象/数组以引号成员开头，不要求冒号）→ 命中', () => {
+  it('JSON 假设形状已删：业务文本里的对象/数组字面量不再判命中（debt R-6）', () => {
+    // 2026-11-25 debt R-6：JSON 形状是本轮**假设**的——没有任何实测泄漏原文佐证，而放宽冒号后
+    // 会把 `{"备注"}` 这类业务引语打红、首键超 48 字的对象又漏。按 change-safety F8
+    // 「假设形态不进判据」删掉。反向绊线：这些文本必须零命中（谁把 JSON 正则加回来，这条红）。
     const { hits } = scanUserVisibleText([
       { where: 'a', text: '结果是 {"collection":"documents","count":3}。' },
       { where: 'b', text: '明细：\n[{"name":"document-1","value":1200}]' },
       { where: 'c', text: '列表 ["a","b"] 原样出来了' },
+      { where: 'd', text: '请把【备注】里的内容发我：{"备注": "上月"} 这种也行' },
     ]);
-    expect(hits.length).toBeGreaterThanOrEqual(3);
-    expect(hits[0]!.excerpt).toContain('collection');
+    expect(hits).toEqual([]);
   });
 
-  it('同一段结构字面量不双计（行首形状是字面量形状的子串时只记一次）', () => {
-    const { hits } = scanUserVisibleText([{ where: 'x', text: '{"a":1}' }]);
-    // 行首那条与字面量那条起点相同 → 只记一次；修复前这里会是 2。
-    expect(hits).toHaveLength(1);
+  it('工具块标记仍命中（删 JSON 不连带删掉实测的那四条）', () => {
+    // 与上一条对照：收窄只收假设形状，实测冻结的四条一条不少。
+    const { hits } = scanUserVisibleText([{ where: 'x', text: '<｜tool call> parameter name="x"' }]);
+    expect(hits.length).toBeGreaterThanOrEqual(1);
+    expect(hits.some((hit) => hit.excerpt.includes('parameter name='))).toBe(true);
   });
 
   it('正常业务行文零命中（中文+数字+括号/顿号/表格/代码围栏都不误报）', () => {

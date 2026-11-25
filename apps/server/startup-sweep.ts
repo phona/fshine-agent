@@ -25,7 +25,8 @@ import {
   cleanupExpiredRunDirs,
   type CleanupRunDirsInput,
   type RunDirCleanupResult,
-  // 机械原因原文取全仓唯一一份（issue #72 合并；归属理由见 run-dir-cleanup.ts 的 errorText）。
+  // 机械原因原文取具名 helper 的唯一导出（issue #72 合并；归属理由与守卫边界见
+  // run-dir-cleanup.ts 的 errorText 注释）。
   errorText,
 } from '../../packages/agent/src/run-dir-cleanup';
 

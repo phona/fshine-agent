@@ -211,7 +211,7 @@ export function parseFrontmatter(content: string): { name: string; description: 
 }
 
 /**
- * frontmatter 值剥一对首尾引号（**全仓唯一一份**，issue #72 合并）。
+ * frontmatter 值剥一对首尾引号（具名 helper 的唯一导出，issue #72 合并）。
  *
  * 原来是两份私有副本：`agent-profile.ts`（正则）与本文件（首尾判断）。两边在**可达输入域**
  * 上逐字一致——frontmatter 按行解析、两个调用点（`parseFrontmatter` / `parseProfile`）都先
@@ -240,7 +240,7 @@ async function realPathOrNull(file: string): Promise<string | undefined> {
 }
 
 /**
- * 严格包含判定（realpath 之后用；**全仓唯一一份**，issue #72 合并）。
+ * 严格包含判定（realpath 之后用；具名 helper 的唯一导出，issue #72 合并）。
  *
  * 原来是三份私有副本：本文件、`file-store.ts`（嵌套在 `createFileStore` 内，注释自述
  * 「与 skills.ts 的 isInside 同语义」）、`scripts/eval/sim/skill-telemetry.ts`（遥测层的
