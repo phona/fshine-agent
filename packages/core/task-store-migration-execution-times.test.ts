@@ -4,7 +4,7 @@
  * 闭环判据（issue #69 原文）：
  *   1. 迁移加时间列（started_at / finished_at，nullable），旧库可读、纯前向加法、不升破坏性版本；
  *   2. 写入路径在真实执行前后落时刻；未知/旧行不伪造时刻；
- *   3. tasks / ops 渲染金样覆盖有/无时刻两态（scripts/tasks.test.ts、scripts/ops.test.ts）；
+ *   3. tasks / ops 渲染金样覆盖有/无时刻两态 + 受理行单点第三态（scripts/tasks.test.ts、scripts/ops.test.ts）；
  *   4. 只读旧库打开不崩溃、写入确定性拒绝的语义不变（本文件⑤）。
  *
  * 本文件覆盖①④与存储层②的前半（行形状/不伪造）；真实执行边界的落时刻见

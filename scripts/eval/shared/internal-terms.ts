@@ -117,8 +117,8 @@ export function findTaskIdShapeHits(texts: readonly VisibleText[]): Hit[] {
  *
  * 判据是**机械形状**（格式/泄漏类），不判语义：
  *   · 工具调用块标记：上面那四条封闭表；
- *   · ~~JSON 结构字面量~~：2026-11-25 删（debt R-6）——假设形态、真实跑批零命中，见
- *     findStructuredBlockHits 的注释。
+ *   · ~~JSON 结构字面量~~：2026-11-25 删（debt R-6）——假设形态、没有任何实测泄漏原文
+ *     佐证，见 findStructuredBlockHits 的注释。
  *
  * 明确**不**判的：模型自己说「系统不支持 X」（编造限制）——那是语义行为，判据红线禁止用
  * 词/正则判语义；只能靠「不给它编造的机会」（卸载上下文，见 factword 那条链）+ 用户级 eval
