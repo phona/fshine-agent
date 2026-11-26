@@ -1,0 +1,17 @@
+# 探针 2
+- 提示：contoso 有记录吗？给我个数。
+- 模型：workbuddy/deepseek-v4.1-flash
+- 日期：2026-11-25
+- 入口：npm run ask -- "<提示>"
+
+```
+===== 回复 =====
+“contoso” 对应两个对象：**contoso-trade** 和 **contoso-logistics**，因此目前还无法给出统计条数。您要看哪一个？选定后我马上查。
+
+===== 机械证据 =====
+principal=wecom:fixture-user session=ask-2026-11-25 委派=是
+任务=#29 用户问：「contoso 有记录吗？给我个数。」请按用户原话裁决 "contos… 结构化执行=1 次（完成 0） dummy 审计=1 行 用时=15.4s
+任务底账=.runtime/state.db
+{"event":"execution","taskId":"task_087c1bfd-7850-4481-b171-f35ca57227c1","requestId":"req_f964802d-5d03-4771-8b8b-5aec95f90887","operation":"dummy.query","status":"needs_input"}
+{"ts":"2026-11-25T16:22:44.575Z","mode":"query","via":"structured","script":"dummy.query","args":{"--collection":"contoso"},"serve":false,"exitCode":0,"result":{"status":"needs_input","collection":"contoso"}}
+```

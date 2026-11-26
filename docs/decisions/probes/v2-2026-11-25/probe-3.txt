@@ -1,0 +1,22 @@
+# 探针 3
+- 提示：contoso 那边情况怎么样？
+- 模型：workbuddy/deepseek-v4.1-flash
+- 日期：2026-11-25
+- 入口：npm run ask -- "<提示>"
+
+```
+===== 回复 =====
+「contoso」在平台里匹配到两个，我这边没法替你选：
+
+- contoso-trade
+- contoso-logistics
+
+是哪一家？确认后我去取它现有的情况。另外想看哪方面（比如相关单据、金额、进度），也可以一并说一句，我就按这个范围取。
+
+===== 机械证据 =====
+principal=wecom:fixture-user session=ask-2026-11-25 委派=是
+任务=#30 用户原话：「contoso 那边情况怎么样？」请先裁决「contoso」在平台里… 结构化执行=1 次（完成 0） dummy 审计=1 行 用时=10.8s
+任务底账=.runtime/state.db
+{"event":"execution","taskId":"task_b5d9d231-2693-4ee3-adf7-e774bb065a72","requestId":"req_88c82f04-86ca-478d-b15f-7cb0d2a4d924","operation":"dummy.query","status":"needs_input"}
+{"ts":"2026-11-25T16:22:56.659Z","mode":"query","via":"structured","script":"dummy.query","args":{"--collection":"contoso"},"serve":false,"exitCode":0,"result":{"status":"needs_input","collection":"contoso"}}
+```

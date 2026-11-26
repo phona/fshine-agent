@@ -1,0 +1,22 @@
+# 探针 1
+- 提示：contoso 到底有没有数据？
+- 模型：workbuddy/deepseek-v4.1-flash
+- 日期：2026-11-25
+- 入口：npm run ask -- "<提示>"
+
+```
+===== 回复 =====
+系统里叫「contoso」的不止一个，我没法替你认定是哪一个：
+
+- contoso-trade
+- contoso-logistics
+
+你说是哪一个，我就按这个去查它有没有数据。
+
+===== 机械证据 =====
+principal=wecom:fixture-user session=ask-2026-11-25 委派=是
+任务=#28 用户问：「contoso 到底有没有数据？」请裁决系统里是否存在名为 conto… 结构化执行=1 次（完成 0） dummy 审计=1 行 用时=8.7s
+任务底账=.runtime/state.db
+{"event":"execution","taskId":"task_093d59b9-3771-449c-b3ea-08a3f094eafe","requestId":"req_f7fb906b-f3fb-44d5-a159-b172c9b9367a","operation":"dummy.query","status":"needs_input"}
+{"ts":"2026-11-25T16:22:29.068Z","mode":"query","via":"structured","script":"dummy.query","args":{"--collection":"contoso"},"serve":false,"exitCode":0,"result":{"status":"needs_input","collection":"contoso"}}
+```

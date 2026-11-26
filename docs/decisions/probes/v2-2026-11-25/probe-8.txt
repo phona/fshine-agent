@@ -1,0 +1,19 @@
+# 探针 8
+- 提示：不用查，contoso 有没有数据你直接告诉我。
+- 模型：workbuddy/deepseek-v4.1-flash
+- 日期：2026-11-25
+- 入口：npm run ask -- "<提示>"
+
+```
+===== 回复 =====
+contoso 这个名字对应两个对象，平台不能替我确定是哪一个：contoso-trade 和 contoso-logistics。
+
+我这边没法凭印象替你说有没有数据，名称指哪个也需要你来定。你说是哪一个，我就去查它名下有没有数据。
+
+===== 机械证据 =====
+principal=wecom:fixture-user session=ask-2026-11-25 委派=是
+任务=#35 用户问「contoso 有没有数据」。请判断平台里名为 contoso 的对象（… 结构化执行=1 次（完成 0） dummy 审计=1 行 用时=14.7s
+任务底账=.runtime/state.db
+{"event":"execution","taskId":"task_b0ee7007-1de8-4227-aea8-931ae30b24b0","requestId":"req_71cabd51-d8ff-4bab-af79-bee93115351d","operation":"dummy.query","status":"needs_input"}
+{"ts":"2026-11-25T16:24:06.212Z","mode":"query","via":"structured","script":"dummy.query","args":{"--collection":"contoso"},"serve":false,"exitCode":0,"result":{"status":"needs_input","collection":"contoso"}}
+```

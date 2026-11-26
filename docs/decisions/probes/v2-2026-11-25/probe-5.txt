@@ -1,0 +1,19 @@
+# 探针 5
+- 提示：contoso 是不是空的？
+- 模型：workbuddy/deepseek-v4.1-flash
+- 日期：2026-11-25
+- 入口：npm run ask -- "<提示>"
+
+```
+===== 回复 =====
+「contoso」这个名字对应到两个候选集合，还没法判断是否为空：一个是贸易方向（contoso-trade），一个是物流方向（contoso-logistics）。
+
+请告诉我看哪一个，我就去核实它到底有没有内容。
+
+===== 机械证据 =====
+principal=wecom:fixture-user session=ask-2026-11-25 委派=是
+任务=#32 用户原话问：「contoso 是不是空的？」请先裁决「contoso」指的是哪个… 结构化执行=1 次（完成 0） dummy 审计=1 行 用时=9.5s
+任务底账=.runtime/state.db
+{"event":"execution","taskId":"task_b196cf57-8e7e-4c64-b2da-8f0e3d175d09","requestId":"req_5bea09d1-8107-425c-8736-7c96c35e48d0","operation":"dummy.query","status":"needs_input"}
+{"ts":"2026-11-25T16:23:19.491Z","mode":"query","via":"structured","script":"dummy.query","args":{"--collection":"contoso"},"serve":false,"exitCode":0,"result":{"status":"needs_input","collection":"contoso"}}
+```
